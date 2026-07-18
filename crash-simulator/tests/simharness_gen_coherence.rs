@@ -249,7 +249,7 @@ fn generated_plans_are_tx_coherent_400_seeds_all_profiles() {
         .filter(|p| p.extension().is_some_and(|x| x == "json"))
         .collect();
     profiles.sort();
-    assert_eq!(profiles.len(), 6, "expected 6 gen profiles");
+    assert_eq!(profiles.len(), 7, "expected 7 gen profiles");
     let mut plans = 0u64;
     for ppath in &profiles {
         let bytes = fs::read(ppath).unwrap();
@@ -268,7 +268,7 @@ fn generated_plans_are_tx_coherent_400_seeds_all_profiles() {
             plans += 1;
         }
     }
-    assert_eq!(plans, 2400);
+    assert_eq!(plans, 2800);
 }
 
 // ---------------------------------------------------------------------------

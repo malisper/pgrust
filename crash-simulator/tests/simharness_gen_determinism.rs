@@ -55,7 +55,7 @@ fn plan_determinism_x2_100_seeds_all_profiles() {
         .filter(|p| p.extension().is_some_and(|x| x == "json"))
         .collect();
     profiles.sort();
-    assert_eq!(profiles.len(), 6, "expected 6 gen profiles");
+    assert_eq!(profiles.len(), 7, "expected 7 gen profiles");
     let base = std::env::temp_dir().join(format!("simharness-det-{}", std::process::id()));
     for profile in &profiles {
         let stem = profile.file_stem().unwrap().to_string_lossy();

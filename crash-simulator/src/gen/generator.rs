@@ -104,6 +104,14 @@ pub struct Generator<'a> {
     schema: SchemaState,
     budgets: Budgets,
     session: SessionModel,
+    /// H6 planner-knob swarm: per-seed sampled GUC sets (see `gen::knobs`),
+    /// appended after `profile.arm_sets` in the arm-set pool. Sampled once
+    /// at construction from the SAME seeded stream (draws happen before the
+    /// first statement draw, so determinism law A3 is untouched: same seed +
+    /// profile => same knob sets => byte-identical plan). Empty when the
+    /// profile has no `planner_knobs` block — zero extra draws, so plans for
+    /// knob-less profiles are byte-identical to pre-H6 plans.
+    sampled_arm_sets: Vec<Vec<(String, String)>>,
     /// Queued items that must follow the current one (fault pairing, tail).
     pending: VecDeque<PlanItem>,
     next_seq: u32,
@@ -123,6 +131,10 @@ impl<'a> Generator<'a> {
         let total = range_incl(&mut rng, profile.plan_len.min, profile.plan_len.max);
         let budgets =
             Budgets::allocate(&profile.statement_weights, total, !registry.is_empty());
+        let sampled_arm_sets = match &profile.planner_knobs {
+            Some(cfg) => crate::gen::knobs::sample_knob_sets(&mut rng, cfg),
+            None => Vec::new(),
+        };
         Generator {
             rng,
             profile,
@@ -130,6 +142,7 @@ impl<'a> Generator<'a> {
             schema: SchemaState::default(),
             budgets,
             session: SessionModel::default(),
+            sampled_arm_sets,
             pending: VecDeque::new(),
             next_seq: 1,
             emitted_first: false,
@@ -176,7 +189,11 @@ impl<'a> Generator<'a> {
             if has_table { self.budgets.remaining(Kind::Dml) } else { 0 },
             if has_table { self.budgets.remaining(Kind::Query) } else { 0 },
             self.budgets.remaining(Kind::Tx),
-            if self.profile.arm_sets.is_empty() { 0 } else { self.budgets.remaining(Kind::Arm) },
+            if self.profile.arm_sets.is_empty() && self.sampled_arm_sets.is_empty() {
+                0
+            } else {
+                self.budgets.remaining(Kind::Arm)
+            },
             // Disconnect/Reconnect are emitted as a pair: need >= 2.
             if self.budgets.remaining(Kind::Fault) >= 2 {
                 self.budgets.remaining(Kind::Fault)
@@ -295,9 +312,18 @@ impl<'a> Generator<'a> {
             self.commit_path(pr::STMT_ARM, vec![pr::ARM_RESET_ALL.into()]);
             return Step::Arm(ArmCtl::ResetAll);
         }
-        let i = range_incl(&mut self.rng, 0, self.profile.arm_sets.len() as u64 - 1) as usize;
+        // Pool = profile arm sets ++ per-seed sampled planner-knob sets
+        // (H6). Trace indexes address the combined pool: indexes >=
+        // profile.arm_sets.len() are sampled sets (whose CONTENT varies per
+        // seed; the index SPACE is stable per profile).
+        let pool_len = self.profile.arm_sets.len() + self.sampled_arm_sets.len();
+        let i = range_incl(&mut self.rng, 0, pool_len as u64 - 1) as usize;
         self.trace.borrow_mut().arm_set_hits.push(i);
-        let set = self.profile.arm_sets[i].clone();
+        let set = if i < self.profile.arm_sets.len() {
+            self.profile.arm_sets[i].clone()
+        } else {
+            self.sampled_arm_sets[i - self.profile.arm_sets.len()].clone()
+        };
         let mut it = set.into_iter();
         let Some((k, v)) = it.next() else {
             // Empty set = the profile's base-clean control arm: defaults.
