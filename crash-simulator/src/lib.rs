@@ -9,10 +9,12 @@
 //!              checks, C-differential classifier pinned to
 //!              scripts/sqlsmith/triage.py @ ef070d066, wart allowlist,
 //!              R5 escalation)
-//!   runner/, main.rs — WS-RUNNER
+//!   runner/, main.rs — WS-RUNNER (session driver, run loop, bugbase,
+//!              shrinker v1, verdict emission)
 
 pub mod gen;
 pub mod oracle;
 pub mod plan;
 pub mod property;
+pub mod runner;
 pub mod vocab;
