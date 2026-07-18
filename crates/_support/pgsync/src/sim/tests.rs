@@ -548,3 +548,141 @@ fn instance_defaults_are_panicky_and_preemption_off() {
     assert_eq!(cfg.preempt_p, 0.0);
     assert_eq!(cfg.clock, ClockMode::Instance);
 }
+
+// --- BLOCKING-1: Condvar check-before-park under guard-drop preemption -------
+// Adversarial-review BLOCKING-1 (2026-07-18, WS-SYNC fixer f0ca1b5e7):
+// `Condvar::wait`'s guard drop embeds unlock hooks (pick/wake/touch — a
+// preemption point). A seeded preemption there lets the notifier run, PICK
+// the enqueued waiter out of the wait list, and fire a `wake` that targets a
+// RUNNABLE (pre-park) thread — which the scheduler DROPS by protocol
+// (`Wake … prev=runnable`). Pre-fix the waiter then parked forever on a
+// consumed wait entry (phantom deadlock); post-fix (check-before-park in
+// wait/wait_timeout) it returns without parking.
+//
+// Unlike the rest of this battery, these tests drive the REAL pgsync sim
+// wrappers (crate::Mutex / crate::Condvar) — hooks installed (ROUTER),
+// preempt_p = 1.0 so the guard-drop touch ALWAYS preempts. A seed sweep
+// covers both legs of the seeded handoff at that touch:
+//   - handoff -> notifier: the BLOCKING-1 interleaving (wake dropped on the
+//     pre-park waiter; the log shows `Wake … target=101 prev=runnable` and
+//     NO cond-wait park — the waiter was consumed before ever parking);
+//   - handoff -> waiter: the benign park-then-notify order.
+// EVERY seed must complete: a reintroduced lost wake becomes a deterministic
+// deadlock => FailAction::Panic => joined-thread panic => test failure (the
+// wait_timeout leg would instead be rescued by idle virtual-time advance, so
+// it additionally asserts the wait did NOT time out).
+
+use crate::{Condvar as PgCondvar, Mutex as PgMutex};
+
+fn install_router_once() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| super::hooks::install(&super::sched::ROUTER));
+}
+
+/// One seeded run of the two-thread wait/notify corpus over the real
+/// wrappers. Returns the SCHEDOP log.
+fn cond_blocking1_run(seed: u64, timed: bool) -> String {
+    install_router_once();
+    let mut cfg = test_cfg(seed);
+    cfg.preempt_p = 1.0; // every touch preempts — the guard-drop touch included
+    let sched = Scheduler::new(cfg);
+    // Waiter registered first => takes the first grant (battery convention).
+    let w = sched.register(101, "waiter");
+    let n = sched.register(102, "notifier");
+    let pair = Arc::new((PgMutex::new(false), PgCondvar::new()));
+    let (pw, pn) = (pair.clone(), pair.clone());
+    let (sw, sn) = (sched.clone(), sched.clone());
+    let tw = std::thread::spawn(move || {
+        sw.enter(w);
+        let (m, cv) = &*pw;
+        let mut g = m.lock().unwrap_or_else(|e| e.into_inner());
+        while !*g {
+            if timed {
+                // Far-future virtual deadline: expiry would mean the wake
+                // was lost and only idle-advance rescued us — the pre-fix
+                // failure shape for this leg. Assert against it.
+                let (g2, res) = cv
+                    .wait_timeout(g, Duration::from_secs(3600))
+                    .unwrap_or_else(|e| e.into_inner());
+                assert!(
+                    !res.timed_out(),
+                    "seed {seed}: wait_timeout expired — the notify was lost"
+                );
+                g = g2;
+            } else {
+                g = cv.wait(g).unwrap_or_else(|e| e.into_inner());
+            }
+        }
+        drop(g);
+        router().exit(101);
+    });
+    let tn = std::thread::spawn(move || {
+        sn.enter(n);
+        let (m, cv) = &*pn;
+        let mut g = m.lock().unwrap_or_else(|e| e.into_inner());
+        *g = true;
+        // Notify while HOLDING the mutex: when the waiter was preempted at
+        // its guard-drop touch, this pick consumes it PRE-PARK and the wake
+        // targets a runnable thread (the dropped-wake window).
+        cv.notify_one();
+        drop(g);
+        router().exit(102);
+    });
+    // Join the NOTIFIER first: a reintroduced lost wake deadlocks at the
+    // notifier's exit handoff (FailAction::Panic on ITS thread) while the
+    // waiter is parked forever — joining the waiter first would hang the
+    // harness instead of failing it.
+    tn.join().expect("notifier completed (a lost wake deadlock-panics here)");
+    tw.join().expect("waiter completed");
+    sched.dump_log()
+}
+
+/// The dropped-wake signature: a wake aimed at the pre-park waiter. Only the
+/// Condvar guard-drop window can produce it in this corpus (the mutex path
+/// has no hook between its wait-list enqueue and `block_on`).
+fn dropped_wake_on_waiter(log: &str) -> bool {
+    log.lines()
+        .any(|l| l.contains(" Wake ") && l.contains("target=101") && l.contains("prev=runnable"))
+}
+
+#[test]
+fn condvar_wait_survives_pre_park_notify_consumption() {
+    let mut blocking1_leg_seen = false;
+    for seed in 0..16 {
+        let log = cond_blocking1_run(seed, false);
+        if dropped_wake_on_waiter(&log) {
+            blocking1_leg_seen = true;
+            // The waiter was consumed before ever parking: no cond-wait
+            // park may appear (check-before-park returned immediately).
+            assert!(
+                !log.contains("kind=cond-wait"),
+                "seed {seed}: dropped wake yet the waiter parked on the condvar:\n{log}"
+            );
+        }
+    }
+    assert!(
+        blocking1_leg_seen,
+        "16-seed sweep never produced the BLOCKING-1 interleaving \
+         (guard-drop preempt -> pre-park notify): the corpus lost its teeth"
+    );
+}
+
+#[test]
+fn condvar_wait_timeout_survives_pre_park_notify_consumption() {
+    let mut blocking1_leg_seen = false;
+    for seed in 0..16 {
+        let log = cond_blocking1_run(seed, true);
+        if dropped_wake_on_waiter(&log) {
+            blocking1_leg_seen = true;
+            assert!(
+                !log.contains("kind=cond-wait"),
+                "seed {seed}: dropped wake yet the waiter timed-parked on the condvar:\n{log}"
+            );
+        }
+    }
+    assert!(
+        blocking1_leg_seen,
+        "16-seed sweep never produced the BLOCKING-1 interleaving on the \
+         wait_timeout leg: the corpus lost its teeth"
+    );
+}
