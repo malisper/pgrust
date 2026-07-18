@@ -11552,14 +11552,18 @@ mod cursors_wave9 {
         let _knob = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let name = crate::lanev2::cursor_admission_refusal_name;
 
-        // Admit: forward, no scroll demand, serial.
+        // Admit: forward, serial.
         assert_eq!(name(true, 0, false), None, "the forward-only shape admits");
 
-        // cursor-scroll: declared/free-upgraded SCROLL portals (PortalStart
-        // eflags), MARK folded in as the same rewind-capable demand.
-        assert_eq!(name(true, EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD, false), Some("cursor-scroll"));
-        assert_eq!(name(true, EXEC_FLAG_REWIND, false), Some("cursor-scroll"));
-        assert_eq!(name(true, EXEC_FLAG_MARK, false), Some("cursor-scroll"));
+        // SUNSET EXECUTED (se/seam-wiring, SE10-GATES item 1): the
+        // cursor-scroll eflags arm is REMOVED — scroll-capable eflags no
+        // longer refuse the budget (store-served portals are
+        // lane-ADMITTED; eligible row-chain fills carry these eflags and
+        // refuse per-scan via batch_allowed, rolling up as
+        // cursor-plan-refused). The classifier ADMITS these shapes now.
+        assert_eq!(name(true, EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD, false), None);
+        assert_eq!(name(true, EXEC_FLAG_REWIND, false), None);
+        assert_eq!(name(true, EXEC_FLAG_MARK, false), None);
 
         // cursor-backward: the direction demand outranks the portal
         // capability (the corpus's explicit-backward cell naming).
@@ -11572,8 +11576,12 @@ mod cursors_wave9 {
         // Serial-law fail-closed arm (NOT a cursor taxonomy row).
         assert_eq!(name(true, 0, true), Some("parallel-gate"));
 
-        // The install half refuses the WHOLE run on a named refusal: no
-        // budget ⇒ no cursor machinery ⇒ Volcano byte-identical (fail-open).
+        // The install half post-SUNSET: scroll-capable eflags no longer
+        // refuse — the budget INSTALLS (store-served portals are
+        // lane-admitted; eligible row-chain fills refuse per-scan via
+        // batch_allowed and nothing lane-stages). A named refusal
+        // (backward direction) still refuses the WHOLE run: no budget ⇒
+        // no cursor machinery ⇒ Volcano byte-identical (fail-open).
         crate::lanev2::cursors_set_for_tests(true);
         assert_eq!(
             crate::lanev2::cursor_run_budget_install(
@@ -11583,8 +11591,13 @@ mod cursors_wave9 {
                 false,
                 EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD
             ),
+            Some(92010),
+            "post-SUNSET: scroll-capable eflags install the budget"
+        );
+        assert_eq!(
+            crate::lanev2::cursor_run_budget_install(true, false, 92010, false, 0),
             None,
-            "a scroll portal's budgeted run refuses wholesale"
+            "a backward run still refuses wholesale (cursor-backward)"
         );
         assert_eq!(
             crate::lanev2::cursor_run_budget_install(true, true, 92010, false, 0),
