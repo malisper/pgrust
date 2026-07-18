@@ -230,6 +230,16 @@ struct BatchSoa<'mcx> {
     // the fingerprint+entry state; this flag gates the pagebatch drive's
     // lookup/store calls and the end-of-scan stats line.
     cond_armed: bool,
+    // K1 inc-2 late materialization (wave-9 WS-AH): when armed, the heap
+    // staging deform narrows its kind-0 column-major pass to exactly this
+    // set ({qual clause cols ∪ the grouped feed's key cols}, sorted); the
+    // deferred prefix columns fill for qual survivors only, through
+    // `seq_scan_batch_complete_deform` (the storage seam's
+    // `complete_deform`). Classification is UNCHANGED (kind-1 hasnulls rows
+    // still full-deform at classify; kind-2 rows keep the fallback bit).
+    // None = today's full staging bytes. Armed per BUILD by the grouped
+    // drains (`seq_scan_k1_latemat_arm`), heap kernel-qual stagings only.
+    stage_cols: Option<Vec<u16>>,
     sel: [u64; ::exectuples::SOA_BM_WORDS],
     nwords: u32,
     cur_word: u32,
@@ -783,6 +793,7 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
                 bits_only: false,
                 dict_group: None,
                 cond_armed: false,
+                stage_cols: None,
                 sel: [0; ::exectuples::SOA_BM_WORDS],
                 nwords: 0,
                 cur_word: 0,
@@ -916,6 +927,7 @@ pub fn seq_scan_cb_prewhere_arm<'mcx>(
                         bits_only: false,
                         dict_group: None,
                         cond_armed: false,
+                        stage_cols: None,
                         sel: [0; ::exectuples::SOA_BM_WORDS],
                         nwords: 0,
                         cur_word: 0,
@@ -1089,6 +1101,7 @@ pub fn seq_scan_cb_columnar_arm<'mcx>(
             bits_only: false,
             dict_group: dict_key,
             cond_armed: false,
+            stage_cols: None,
             sel: [0; ::exectuples::SOA_BM_WORDS],
             nwords: 0,
             cur_word: 0,
@@ -1305,6 +1318,98 @@ pub fn seq_scan_batch_dictgroup_col(node: &SeqScanState<'_>) -> Option<u16> {
     node.batch_soa.as_deref().and_then(|b| b.dict_group)
 }
 
+/// Arm K1 inc-2 late-materialization staging (wave-9 WS-AH) on this node's
+/// armed heap batch: narrow the staging deform's kind-0 column pass to
+/// {qual clause cols ∪ `key_cols`} and return the DEFERRED column set
+/// (`[0, prefix) \ staged` — the completion set the drain passes to
+/// `seq_scan_batch_complete_deform` per batch, over the qual-survivor
+/// bitmap). The deferred set is the FULL remaining prefix, not just the
+/// fold's needed columns: the per-row emit publishes every prefix cell of a
+/// selected row (`soa_store_prefix`), so anything less would publish stale
+/// cells on the arrival/fallback legs (rail B: value movement only).
+///
+/// Admission (each refusal NAMED for the M5-1 funnel, returned to the
+/// caller to tick):
+/// - `k1-latemat-no-qual` — no armed whole-qual kernel bitmap (rail J: the
+///   no-qual all-columns shapes keep today's single JIT full deform), a
+///   hybrid requal tail, or a qual-col-only staging (nothing to defer past
+///   the qual's own column selection);
+/// - `k1-latemat-shape` — the staging is not the plain heap kernel-qual
+///   prefix shape (varkey / contains / PREWHERE lane / key-col redirect /
+///   stitched projection / bits-only census / virtual plan / non-heap AM);
+/// - `k1-latemat-all-staged` — the staged set already covers the prefix
+///   (narrowing must defer something).
+///
+/// The narrowing is per-BUILD state: callers disarm + re-decide every build
+/// (`seq_scan_k1_latemat_disarm`); rescans rebuild through the same drains.
+pub fn seq_scan_k1_latemat_arm(
+    node: &mut SeqScanState<'_>,
+    key_cols: &[u16],
+) -> Result<Vec<u16>, &'static str> {
+    if !seq_scan_is_heap(node) {
+        return Err("k1-latemat-shape");
+    }
+    let Some(b) = node.batch_soa.as_deref_mut() else { return Err("k1-latemat-shape") };
+    if b.plan.is_virtual()
+        || b.key_col.is_some()
+        || b.varkey.is_some()
+        || b.contains.is_some()
+        || b.lane.is_some()
+        || b.proj.is_some()
+        || b.bits_only
+    {
+        return Err("k1-latemat-shape");
+    }
+    if !b.qual_armed || b.lane_requal || b.qual_only || b.nquals == 0 {
+        return Err("k1-latemat-no-qual");
+    }
+    let ncols = b.plan.ncols();
+    if key_cols.iter().any(|&c| c >= ncols) {
+        return Err("k1-latemat-shape");
+    }
+    let mut staged: Vec<u16> =
+        b.quals[..b.nquals as usize].iter().map(|&(c, _, _)| c).collect();
+    for &k in key_cols {
+        if !staged.contains(&k) {
+            staged.push(k);
+        }
+    }
+    let complete: Vec<u16> = (0..ncols).filter(|c| !staged.contains(c)).collect();
+    if complete.is_empty() {
+        return Err("k1-latemat-all-staged");
+    }
+    staged.sort_unstable();
+    b.stage_cols = Some(staged);
+    Ok(complete)
+}
+
+/// Drop the K1 late-materialization narrowing (per-build re-decision; also
+/// the unit levers' reset). The NEXT staged batch returns to the full
+/// staging deform; the CURRENT batch's cells are untouched.
+pub fn seq_scan_k1_latemat_disarm(node: &mut SeqScanState<'_>) {
+    if let Some(b) = node.batch_soa.as_deref_mut() {
+        b.stage_cols = None;
+    }
+}
+
+/// Whether the K1 late-materialization narrowing is armed (unit pins).
+pub fn seq_scan_k1_latemat_armed(node: &SeqScanState<'_>) -> bool {
+    node.batch_soa.as_deref().is_some_and(|b| b.stage_cols.is_some())
+}
+
+/// K1 inc-2 completion (pass B): fill `cols` for `sel`-selected kind-0 rows
+/// of the CURRENT staged batch off the still-pinned page (ownership ABI R3
+/// — valid until the next batch advance/reposition/settle). Word-skips
+/// all-zero 64-row selection words; kind-1 rows were deformed at classify
+/// and kind-2 fallback rows never fill (their bits, if OR'd into the qual
+/// bitmap, are harmless). Value movement only — idempotent per (col, row).
+pub fn seq_scan_batch_complete_deform(node: &mut SeqScanState<'_>, cols: &[u16], sel: &[u64]) {
+    let SeqScanState { ss, batch_soa, .. } = node;
+    let Some(b) = batch_soa.as_deref_mut() else { return };
+    let Some(sd) = ss.ss_currentScanDesc.as_mut() else { return };
+    ::tableam::table_scan_batch_complete_deform(sd, &b.plan, &mut b.soa, cols, sel);
+}
+
 /// Arm the fused-sort direct key feed: output column 0 must be exactly one
 /// scan Var (bare single-column scan or a lone `JustAssignVar` projection)
 /// the fixed-width SoA plan covers, no qual. False leaves the per-row path.
@@ -1399,6 +1504,7 @@ fn arm_key_soa<'mcx>(
             bits_only: false,
                 dict_group: None,
             cond_armed: false,
+            stage_cols: None,
             sel: [0; ::exectuples::SOA_BM_WORDS],
             nwords: 0,
             cur_word: 0,
@@ -1632,6 +1738,7 @@ pub fn seq_scan_batch_soa_prepare_varlane<'mcx>(
             bits_only: false,
             dict_group: None,
             cond_armed: false,
+            stage_cols: None,
             sel: [0; ::exectuples::SOA_BM_WORDS],
             nwords: 0,
             cur_word: 0,
@@ -1698,6 +1805,7 @@ pub fn seq_scan_batch_soa_prepare_contains<'mcx>(
             bits_only: false,
                 dict_group: None,
             cond_armed: false,
+            stage_cols: None,
             sel: [0; ::exectuples::SOA_BM_WORDS],
             nwords: 0,
             cur_word: 0,
@@ -2242,16 +2350,28 @@ pub fn seq_scan_next_pagebatch<'mcx>(
                 }
                 return Ok(n);
             }
-            // Single-clause qual-only staging deforms just the qual column;
-            // a multi-clause qual needs every clause column, so it stages
-            // the full (fixed-width) prefix. An armed stitched projection
-            // reads its tlist columns from the lanes too, so it also forces
-            // the full prefix.
-            let qual_col_only =
-                (b.qual_only && b.qual_armed && b.nquals == 1 && b.proj.is_none())
-                    .then_some(b.quals[0].0)
-                    .or(b.key_col);
-            ::tableam::table_scan_batch_deform(scandesc, &b.plan, &mut b.soa, qual_col_only);
+            // K1 inc-2 late-materialization staging (wave-9 WS-AH): an armed
+            // grouped heap feed narrows the kind-0 column pass to
+            // {qual clause cols ∪ key cols}; the deferred columns fill for
+            // qual survivors only, AFTER the bitmap below, through the
+            // drain's `seq_scan_batch_complete_deform` call. Arming
+            // (`seq_scan_k1_latemat_arm`) guarantees the shape this branch
+            // assumes: a heap kernel-qual staging that OWNS the whole qual
+            // (no requal tail), no varkey/proj/lane/key_col co-arm.
+            if let Some(sc) = b.stage_cols.as_deref() {
+                ::tableam::table_scan_batch_deform_cols(scandesc, &b.plan, &mut b.soa, sc);
+            } else {
+                // Single-clause qual-only staging deforms just the qual
+                // column; a multi-clause qual needs every clause column, so
+                // it stages the full (fixed-width) prefix. An armed stitched
+                // projection reads its tlist columns from the lanes too, so
+                // it also forces the full prefix.
+                let qual_col_only =
+                    (b.qual_only && b.qual_armed && b.nquals == 1 && b.proj.is_none())
+                        .then_some(b.quals[0].0)
+                        .or(b.key_col);
+                ::tableam::table_scan_batch_deform(scandesc, &b.plan, &mut b.soa, qual_col_only);
+            }
             if b.qual_armed {
                 let nwords = (n as usize).div_ceil(64);
                 // Tier ladder (design §3a): tier 2 = the stitched body over
@@ -3976,10 +4096,11 @@ mcx::forget_safe_struct!(
     },
     // stitch/proj exempt: the stitched programs (heap Vecs + the W^X code
     // blocks) are released in exec_end_seq_scan / skeleton_park via
-    // `batch_soa = None` (the deform-JIT kernel Rc precedent).
+    // `batch_soa = None` (the deform-JIT kernel Rc precedent); stage_cols
+    // (K1 late-mat narrowed column set, a heap Vec) releases the same way.
     BatchSoa<'_> {
         plan, soa, qual_armed, qual_only, key_col, varkey, key_read_col, publish, quals,
-        nquals, lane_requal, bits_only, dict_group, contains, cond_armed, sel, nwords, cur_word, cur_bits; stitch, proj, lane,
+        nquals, lane_requal, bits_only, dict_group, contains, cond_armed, sel, nwords, cur_word, cur_bits; stitch, proj, lane, stage_cols,
     },
     BloomScan<'_> { plan, soa, col, sel, nwords, cur_word, cur_bits, seen, kept; filter },
 );

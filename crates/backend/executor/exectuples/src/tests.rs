@@ -1134,3 +1134,138 @@ fn for_each_live_onebody_matches_two_arm() {
         }
     }
 }
+
+// --- WS-AH wave-9 sub-region (K1 late materialization, band 91001+) --------
+
+// K1 inc-2 deform split pins (`soa_deform_columns_set`): narrowed staging
+// (explicit column set, no sel) + survivor completion (sel words) compose to
+// exactly the full deform's cells for every selected row; word-skip does
+// ZERO work on all-zero 64-row selection words (proven off the fresh
+// batch's null-Datum cells); kind-1 hasnulls rows are live from classify
+// regardless; kind-2 narrow rows carry the fallback bit and never fill;
+// re-completion is idempotent per (column, row).
+#[test]
+fn k1_latemat_deform_split_matches_full_deform() {
+    use ::types_tuple::TYPALIGN_SHORT;
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    // int4, int2, int8 fixed prefix; text tail past the prefix.
+    let desc = make_desc(
+        mcx,
+        &[
+            col(1, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN),
+            col(2, 2, true, TYPALIGN_SHORT, TYPSTORAGE_PLAIN),
+            col(3, 8, true, TYPALIGN_DOUBLE, TYPSTORAGE_PLAIN),
+            col(4, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED),
+        ],
+    );
+    let ncols = 3usize;
+    let plan = SoaDeformPlan::try_new(mcx, &desc.compact_attrs, ncols).unwrap();
+    let txt = text_varlena("tail");
+    // 130 rows -> 3 selection words: word 0 partial, word 1 all-zero
+    // (word-skip), word 2 the 2-row tail (tail-mask edge).
+    let n = 130usize;
+    let null_row = 5usize; // kind-1 (hasnulls): full deform at classify
+    let narrow_row = 70usize; // kind-2: pre-ALTER image, fallback bit
+    let narrow = make_desc(mcx, &[col(1, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN)]);
+    let mut tuples = Vec::new();
+    for i in 0..n {
+        if i == narrow_row {
+            tuples.push(
+                heap_form_tuple(mcx, &narrow, &[Datum::from_i32(91001)], &[false]).unwrap(),
+            );
+            continue;
+        }
+        let values = [
+            Datum::from_i32(91001 + i as i32),
+            Datum::from_i16((i % 7) as i16 - 3),
+            Datum::from_i64(91001i64 * (i as i64 + 1)),
+            text_datum(&txt),
+        ];
+        let isnull = [false, i == null_row, false, false];
+        tuples.push(heap_form_tuple(mcx, &desc, &values, &isnull).unwrap());
+    }
+    // Reference: the full staging deform (today's bytes).
+    let mut full = SoaBatch::new_in(mcx, plan.ncols());
+    full.begin(n as u32);
+    for (i, t) in tuples.iter().enumerate() {
+        soa_classify_row(&mut full, &plan, &desc.compact_attrs, i as u32, t);
+    }
+    soa_deform_columns(&mut full, &plan, &desc.compact_attrs, None);
+    // Late-mat: identical classification, staging narrowed to col 0 only.
+    let mut lm = SoaBatch::new_in(mcx, plan.ncols());
+    lm.begin(n as u32);
+    for (i, t) in tuples.iter().enumerate() {
+        soa_classify_row(&mut lm, &plan, &desc.compact_attrs, i as u32, t);
+    }
+    soa_deform_columns_set(&mut lm, &plan, &desc.compact_attrs, &[0], None);
+    // Classification parity (kinds are staging-independent).
+    assert_eq!(lm.fallback_words(), full.fallback_words());
+    assert!(lm.is_fallback(narrow_row as u32));
+    // Pass A: the staged column matches the full deform everywhere.
+    for i in 0..n {
+        if lm.is_fallback(i as u32) {
+            continue;
+        }
+        assert_eq!(lm.col_isnull(0)[i], full.col_isnull(0)[i], "col0 isnull row {i}");
+        assert_eq!(
+            lm.col_values(0)[i].as_i64(),
+            full.col_values(0)[i].as_i64(),
+            "col0 row {i}"
+        );
+        // Kind-1 rows deformed fully at classify: live before completion.
+        if i == null_row {
+            assert!(lm.col_isnull(1)[i], "kind-1 null live at classify");
+            assert_eq!(lm.col_values(2)[i].as_i64(), full.col_values(2)[i].as_i64());
+        }
+    }
+    // Deferred kind-0 cells are untouched (the fresh batch's null Datum).
+    for i in [0usize, 64, 129] {
+        assert_eq!(lm.col_values(2)[i].as_i64(), 0, "deferred col2 stale row {i}");
+    }
+    // Pass B: complete cols {1,2} for a selection with a partial word, an
+    // all-zero word (word-skip), and the tail-masked full word.
+    let sel = [0xAAAA_AAAA_AAAA_AAAAu64, 0, u64::MAX];
+    for round in 0..2 {
+        soa_deform_columns_set(&mut lm, &plan, &desc.compact_attrs, &[1, 2], Some(&sel));
+        for i in 0..n {
+            if lm.is_fallback(i as u32) {
+                continue;
+            }
+            let selected = sel[i / 64] & (1u64 << (i % 64)) != 0;
+            if selected || i == null_row {
+                for c in [1usize, 2] {
+                    assert_eq!(
+                        lm.col_isnull(c)[i],
+                        full.col_isnull(c)[i],
+                        "round {round} col{c} isnull row {i}"
+                    );
+                    if !full.col_isnull(c)[i] {
+                        assert_eq!(
+                            lm.col_values(c)[i].as_i64(),
+                            full.col_values(c)[i].as_i64(),
+                            "round {round} col{c} row {i}"
+                        );
+                    }
+                }
+            } else {
+                // Word-skip / cleared-bit proof: unselected kind-0 rows'
+                // deferred cells were never written (col2 real values are
+                // all nonzero).
+                assert_eq!(
+                    lm.col_values(2)[i].as_i64(),
+                    0,
+                    "round {round} unselected col2 written row {i}"
+                );
+            }
+        }
+    }
+    // Kind-2 discipline unchanged: fallback rows never publish.
+    let mut slot = make_tuple_table_slot(mcx, TupleSlotKind::HeapTuple, Some(desc));
+    let nt = heap_form_tuple(mcx, &narrow, &[Datum::from_i32(91001)], &[false]).unwrap();
+    exec_store_heap_tuple_owned(&mut slot, mcx, nt);
+    assert!(!soa_store_prefix(&mut slot, &lm, narrow_row as u32));
+    exec_clear_tuple(&mut slot, mcx);
+}
+
+// --- end WS-AH wave-9 sub-region --------------------------------------------

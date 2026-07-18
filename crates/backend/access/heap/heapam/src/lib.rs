@@ -1160,6 +1160,74 @@ pub fn heap_batch_deform_soa<'mcx>(
     exectuples::soa_deform_columns(soa, plan, atts, qual_col_only);
 }
 
+/// `heap_batch_deform_soa` with the kind-0 column pass narrowed to an
+/// explicit column SET (K1 inc-2 late materialization, wave-9 WS-AH:
+/// {qual clause cols ∪ the grouped feed's key cols}). Classification is
+/// IDENTICAL — kind-1 hasnulls rows still deform fully at classify (a
+/// harmless superset), kind-2 narrow rows carry the fallback bit — only
+/// the column-major pass narrows. Survivors complete later through
+/// `heap_batch_complete_deform_soa` (value movement only: same rows,
+/// same survivor set/order, same errors as the full staging deform).
+pub fn heap_batch_deform_soa_cols<'mcx>(
+    scan: &mut HeapScanDescData<'mcx>,
+    plan: &exectuples::SoaDeformPlan<'_>,
+    soa: &mut exectuples::SoaBatch<'_>,
+    cols: &[u16],
+) {
+    let n = scan.rs_ntuples;
+    debug_assert!(!scan.rs_cpage.is_null() || n == 0);
+    soa.begin(n);
+    let relid = scan.rs_base.rs_rd.rd_id;
+    let atts: &[_] = &scan.rs_base.rs_rd.rd_att.compact_attrs;
+    if n == 0 {
+        return;
+    }
+    // SAFETY: as heap_batch_deform_soa — pinned page, offsets from
+    // page_collect_tuples under the per-page bound.
+    let page: PageRef<'_> = unsafe { PageRef::from_raw(NonNull::new_unchecked(scan.rs_cpage)) };
+    let mut i = n;
+    while i != 0 {
+        i -= 1;
+        let (ptr, len, lineoff) = unsafe {
+            let lineoff = *scan.rs_vistuples.get_unchecked(i as usize);
+            let lpp = page.item_id_unchecked(lineoff);
+            debug_assert!(lpp.is_normal());
+            let (ptr, len) = page.item_raw_unchecked(lpp);
+            (ptr, len, lineoff)
+        };
+        // SAFETY: image on the page pinned by rs_cbuf for the whole batch.
+        let tuple = unsafe {
+            HeapTupleData::from_raw_parts(
+                ptr,
+                len,
+                ItemPointerData::new(scan.rs_cblock, lineoff),
+                relid,
+            )
+        };
+        exectuples::soa_classify_row(soa, plan, atts, i, &tuple);
+    }
+    exectuples::soa_deform_columns_set(soa, plan, atts, cols, None);
+}
+
+/// Completion half of the K1 inc-2 deform split: fill `cols` for
+/// `sel`-selected kind-0 rows of the ALREADY-staged batch — no re-begin,
+/// no re-classify (the staged batch's kinds/fallback state is live and
+/// the page is still pinned by rs_cbuf, ownership ABI R3: valid from the
+/// staging `next_batch` until the next batch advance/reposition/settle).
+/// Idempotent per (column, row).
+pub fn heap_batch_complete_deform_soa<'mcx>(
+    scan: &HeapScanDescData<'mcx>,
+    plan: &exectuples::SoaDeformPlan<'_>,
+    soa: &mut exectuples::SoaBatch<'_>,
+    cols: &[u16],
+    sel: &[u64],
+) {
+    debug_assert!(!scan.rs_cpage.is_null() || soa.nrows() == 0);
+    debug_assert!(soa.nrows() <= scan.rs_ntuples, "completion outside the staged batch");
+    let atts: &[_] = &scan.rs_base.rs_rd.rd_att.compact_attrs;
+    exectuples::soa_deform_columns_set(soa, plan, atts, cols, Some(sel));
+}
+
 pub fn heap_batch_stage_varkey<'mcx>(
     scan: &mut HeapScanDescData<'mcx>,
     plan: &exectuples::SoaVarKeyPlan,

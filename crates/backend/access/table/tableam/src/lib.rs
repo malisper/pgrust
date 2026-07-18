@@ -1562,6 +1562,50 @@ pub fn table_scan_batch_deform_sel<'mcx>(
     }
 }
 
+/// K1 inc-2 late-materialization STAGING deform (wave-9 WS-AH): the staged
+/// page batch's kind-0 column pass narrowed to an explicit column set
+/// ({qual clause cols ∪ the grouped feed's key cols}); classification is
+/// the full deform's. Heap scans only — the pgrcolumnar staging narrows
+/// through PREWHERE's per-clause late materialization instead, so the
+/// columnar arm falls open to the full window deform (and debug-asserts:
+/// the arming seam refuses non-heap scans).
+pub fn table_scan_batch_deform_cols<'mcx>(
+    scan: &mut TableScanDesc<'mcx>,
+    plan: &::exectuples::SoaDeformPlan<'_>,
+    soa: &mut ::exectuples::SoaBatch<'_>,
+    cols: &[u16],
+) {
+    match scan {
+        TableScanDesc::Heap(h) => ::heapam::heap_batch_deform_soa_cols(h, plan, soa, cols),
+        TableScanDesc::Pgrcolumnar(c) => {
+            debug_assert!(false, "late-mat narrowed staging arms on heap scans only");
+            c.batch_deform(plan.ncols() as usize, soa, None, None)
+        }
+    }
+}
+
+/// K1 inc-2 COMPLETION deform (the sel-honoring heap arm of the staged
+/// batch deform dispatch): fill `cols` for `sel`-selected rows of the
+/// ALREADY-staged batch — all-zero 64-row selection words skip whole,
+/// full words take the dense fill. Heap = the deform split's completion
+/// half (page still pinned, ABI R3); pgrcolumnar staged everything at
+/// window fill — no-op (the storage seam default's "sources that staged
+/// everything" contract).
+pub fn table_scan_batch_complete_deform<'mcx>(
+    scan: &mut TableScanDesc<'mcx>,
+    plan: &::exectuples::SoaDeformPlan<'_>,
+    soa: &mut ::exectuples::SoaBatch<'_>,
+    cols: &[u16],
+    sel: &[u64],
+) {
+    match scan {
+        TableScanDesc::Heap(h) => {
+            ::heapam::heap_batch_complete_deform_soa(h, plan, soa, cols, sel)
+        }
+        TableScanDesc::Pgrcolumnar(_) => {}
+    }
+}
+
 /// Prewhere staged deform: fill (or dict-answer) one staged column of the
 /// pgrcolumnar window. Callable only on pgrcolumnar scans (the staged qual drive is
 /// pgrcolumnar-shaped); the caller owns soa.begin and the needed-set contract.
