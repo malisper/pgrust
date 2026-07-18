@@ -3703,6 +3703,23 @@ pub fn seq_scan_cursor_parked(node: &SeqScanState<'_>) -> bool {
     node.lane_park.is_some()
 }
 
+/// Settle PROBE (shared-borrow twin of [`seq_scan_cursor_settle`]'s gate):
+/// true iff a settle call would write a park record — a lane-staged batch
+/// (`lane_n > 0`) on an open scan with a park point. The settle walker
+/// calls this BEFORE the claim-release so it can run its slot hygiene
+/// (materialize — the emitted slots must survive the page pin going away)
+/// while the staged page is still pinned; the subsequent settle call then
+/// releases. Probe and settle read the same state and cannot disagree
+/// between the two calls (both run under the walker's exclusive borrow).
+pub fn seq_scan_cursor_park_pending(node: &SeqScanState<'_>) -> bool {
+    node.lane_n != 0
+        && node
+            .ss
+            .ss_currentScanDesc
+            .as_ref()
+            .is_some_and(|s| ::tableam::table_scan_cursor_park_point(s).is_some())
+}
+
 /// Cursor-suspension resume (the §2 "repossess on resume" half): reposition
 /// the scan on the parked remainder window (`heap_set_block_range`'s
 /// reset-half shape, through the AM dispatch), restage the suspended page
