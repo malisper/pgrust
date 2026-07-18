@@ -12067,3 +12067,435 @@ mod spi_inc1_aj_w9 {
     }
 }
 // --- end WS-AJ wave-9 sub-region --------------------------------------------
+// --- WS-CB wave-10 (cursors inc-2: batch store fill; contract §2.1, band 95001+) --
+// Unit pins for the TuplestoreBatchSink protocol + the run-seam dispatch:
+// per-accept budget decrement across BATCH boundaries, Full⇒Paused at
+// exhaustion with node-resident position, settle (R3 zero-pins) + resume-
+// reposition through the EXISTING inc-1b walkers, budget-None (count-0
+// drain) breaker posture, overfill hard error, the EPQ/dest/admission
+// dispatch gates, row-chain fallback parity at the seam (§2.3
+// fetch-invisibility at the unit level), and the §6 forward-only staging
+// faces. Same serialization discipline as cursors_wave9 (scanfix::TEST_LOCK
+// held for the fixture span; knob lever set explicitly per test).
+mod cursors_wave10_cb {
+    use super::*;
+
+    fn read_store_i32s(
+        h: ::types_portal::TuplestoreHandle,
+        desc: &std::rc::Rc<::types_tuple::TupleDescData<'static>>,
+    ) -> Vec<i32> {
+        let read_cx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("read")));
+        let mut slot = exectuples::make_tuple_table_slot(
+            read_cx.mcx(),
+            ::types_slot::TupleSlotKind::MinimalTuple,
+            Some(desc.clone()),
+        );
+        let mut rows: Vec<i32> = Vec::new();
+        loop {
+            let got = tuplestore::hold::with_store(h, |ts| {
+                ts.gettupleslot(true, true, &mut slot, read_cx.mcx())
+            })
+            .unwrap();
+            if !got {
+                break;
+            }
+            let mut isnull = false;
+            let v = exectuples::slot_getattr(&mut slot, 1, &mut isnull);
+            assert!(!isnull);
+            rows.push(v.as_i32());
+        }
+        rows
+    }
+
+    fn mk_store_dest() -> (::types_portal::TuplestoreHandle, DestReceiver<'static>) {
+        let store = tuplestore::Tuplestore::begin_heap(true, false, 1024);
+        let h = tuplestore::hold::register(store);
+        let mut dr = tstore_receiver::tstore_create_DR();
+        tstore_receiver::set_params(&mut dr, h, false);
+        (h, DestReceiver::Tuplestore(dr))
+    }
+
+    /// THE CB-1 protocol pin: a budget-4 batch fill over a 3+2-row two-page
+    /// table decrements ACROSS the batch boundary (3 accepts from batch 1,
+    /// 1 from batch 2), pauses at exhaustion with the consume position
+    /// node-resident, SETTLES through the inc-1b park walker (R3 zero pins
+    /// while suspended — `scanfix::quiesced()` is the teeth), resumes with
+    /// the position restored, drains the remainder on the next budgeted
+    /// drive, and the store bytes equal the ROW-CHAIN arm's over an
+    /// identical table (§2.3 fill-strategy invisibility, unit level).
+    #[test]
+    fn cursors_w10_sink_budget_across_batches_park_resume_and_rowchain_parity() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mcx = leaked_mcx();
+        crate::lanev2::cursors_set_for_tests(true);
+
+        let mut arm_rows: Vec<Vec<i32>> = Vec::new();
+
+        // Arm L: the batch fill (sink + fill_step below the admission
+        // verdict — the scanfix heap fixture refuses standalone admission
+        // by design, so the pipeline is entered through the test face).
+        {
+            let relid = 95001u32;
+            scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
+            let pstmt = mk_seqscan_pstmt(mcx, relid);
+            let snap_ctx: &'static MemoryContext =
+                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snapshot: snapmgr::Snapshot =
+                std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                    snap_ctx.mcx(),
+                    ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+                ));
+            let mut rows: Vec<i32> = Vec::new();
+            with_exec_data(pstmt, |data, pstmt| {
+                data.estate.es_snapshot = Some(snapshot);
+                let desc =
+                    crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+                let (h, mut dest) = mk_store_dest();
+                let ExecData { estate, planstate } = data;
+                let planstate = planstate.as_mut().unwrap();
+
+                // Budgeted drive 1: FETCH 4 (crosses the 3-row page batch).
+                estate.es_direction = ForwardScanDirection;
+                estate.es_processed = 0;
+                estate.es_cursor_run_budget =
+                    crate::lanev2::cursor_run_budget_install(true, true, 4, false, 0);
+                assert_eq!(estate.es_cursor_run_budget, Some(4));
+                {
+                    let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate else {
+                        panic!("bare seqscan plan");
+                    };
+                    let exhausted =
+                        crate::lanev2::cursor_fill_step_seqscan_for_tests(ss, &mut dest, estate)
+                            .unwrap();
+                    assert!(!exhausted, "budget exhaustion pauses, source not done");
+                    assert_eq!(estate.es_processed, 4, "the sink carries the loop accounting");
+                    assert_eq!(
+                        estate.es_cursor_run_budget,
+                        Some(0),
+                        "per-accept decrement across the batch boundary (3 + 1)"
+                    );
+                    assert_eq!(ss.lane_cursor(), (1, 2), "position node-resident mid-batch-2");
+                }
+                // Settle at the run seam's park point (the EXISTING inc-1b
+                // walker — no new machinery): R3 zero pins while suspended.
+                assert!(crate::lanev2::cursor_run_park(planstate, estate), "parks");
+                scanfix::quiesced();
+                // Resume-reposition.
+                crate::lanev2::cursor_park_resume(planstate, estate).unwrap();
+                {
+                    let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate else {
+                        unreachable!()
+                    };
+                    assert_eq!(ss.lane_cursor(), (1, 2), "consume cursor restored");
+                }
+                // Budgeted drive 2: the remainder exhausts the source.
+                estate.es_processed = 0;
+                estate.es_cursor_run_budget =
+                    crate::lanev2::cursor_run_budget_install(true, true, 99, false, 0);
+                {
+                    let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate else {
+                        unreachable!()
+                    };
+                    let exhausted =
+                        crate::lanev2::cursor_fill_step_seqscan_for_tests(ss, &mut dest, estate)
+                            .unwrap();
+                    assert!(exhausted, "source exhausted under a slack budget");
+                    assert_eq!(estate.es_processed, 1);
+                    assert_eq!(estate.es_cursor_run_budget, Some(98));
+                }
+                rows = read_store_i32s(h, &desc);
+                tuplestore::hold::end(h);
+                crate::exec_end_node(planstate, estate).unwrap();
+                estate.exec_reset_tuple_table(false);
+                estate.exec_close_range_table_relations().unwrap();
+            });
+            assert_eq!(rows, vec![1, 2, 3, 4, 5], "the whole table, in order");
+            arm_rows.push(rows);
+        }
+
+        // Arm R: the row-chain fill of an identical table through the REAL
+        // run seam (execute_plan; knob-ON — the dispatch refuses on heap
+        // standalone admission and the per-tuple loop serves the store).
+        {
+            let relid = 95002u32;
+            scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
+            let pstmt = mk_seqscan_pstmt(mcx, relid);
+            let snap_ctx: &'static MemoryContext =
+                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snapshot: snapmgr::Snapshot =
+                std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                    snap_ctx.mcx(),
+                    ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+                ));
+            let mut rows: Vec<i32> = Vec::new();
+            with_exec_data(pstmt, |data, pstmt| {
+                data.estate.es_snapshot = Some(snapshot);
+                let desc =
+                    crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+                let (h, mut dest) = mk_store_dest();
+                for (count, want) in [(4u64, 4u64), (0, 1)] {
+                    data.estate.es_processed = 0;
+                    crate::execmain::execute_plan(
+                        data,
+                        CmdType::CMD_SELECT,
+                        true,
+                        count,
+                        ForwardScanDirection,
+                        false,
+                        &mut dest,
+                    )
+                    .unwrap();
+                    assert_eq!(data.estate.es_processed, want);
+                }
+                rows = read_store_i32s(h, &desc);
+                tuplestore::hold::end(h);
+                let ExecData { estate, planstate } = data;
+                crate::exec_end_node(planstate.as_mut().unwrap(), estate).unwrap();
+                estate.exec_reset_tuple_table(false);
+                estate.exec_close_range_table_relations().unwrap();
+            });
+            arm_rows.push(rows);
+        }
+
+        assert_eq!(
+            arm_rows[0], arm_rows[1],
+            "batch fill and row-chain fill land byte-identical stores (§2.3)"
+        );
+        crate::lanev2::cursors_set_for_tests(false);
+        scanfix::quiesced();
+    }
+
+    /// Dispatch gates (§2.1 EPQ pin + the store-face gate) and the §2.3
+    /// Volcano-refusal fallback THROUGH the real run seam: a knob-ON
+    /// budgeted store-fill run over the heap fixture refuses standalone
+    /// admission inside `cursor_store_batch_fill` and the per-tuple loop
+    /// fills the same store — byte-identical to the knob-OFF oracle.
+    #[test]
+    fn cursors_w10_dispatch_gates_and_seam_fallback_parity() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mcx = leaked_mcx();
+
+        // Direct gate pins first (EPQ, dest kind) on a budgeted estate.
+        crate::lanev2::cursors_set_for_tests(true);
+        {
+            let relid = 95003u32;
+            scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
+            let pstmt = mk_seqscan_pstmt(mcx, relid);
+            let snap_ctx: &'static MemoryContext =
+                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snapshot: snapmgr::Snapshot =
+                std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                    snap_ctx.mcx(),
+                    ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+                ));
+            with_exec_data(pstmt, |data, pstmt| {
+                data.estate.es_snapshot = Some(snapshot);
+                crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+                let ExecData { estate, planstate } = data;
+                let planstate = planstate.as_mut().unwrap();
+                estate.es_direction = ForwardScanDirection;
+                estate.es_cursor_run_budget = Some(2);
+
+                // EPQ pin: the budget belongs to the outer run.
+                estate.es_epq_active = true;
+                let (h, mut dest) = mk_store_dest();
+                assert!(
+                    !crate::lanev2::cursor_store_batch_fill(planstate, estate, &mut dest)
+                        .unwrap(),
+                    "EPQ drive never batch-fills"
+                );
+                estate.es_epq_active = false;
+
+                // Store-face gate: a non-tuplestore receiver keeps the loop.
+                let mut nodest = DestReceiver::DoNothing;
+                assert!(
+                    !crate::lanev2::cursor_store_batch_fill(planstate, estate, &mut nodest)
+                        .unwrap(),
+                    "non-store receivers keep the row loop"
+                );
+
+                // Heap standalone refuses admission: dispatch falls through
+                // with NOTHING consumed (the row loop then owns the run).
+                assert!(
+                    !crate::lanev2::cursor_store_batch_fill(planstate, estate, &mut dest)
+                        .unwrap(),
+                    "Volcano-refused plan keeps the row loop"
+                );
+                assert_eq!(estate.es_processed, 0, "refused dispatch consumed nothing");
+                tuplestore::hold::end(h);
+
+                estate.es_cursor_run_budget = None;
+                crate::exec_end_node(planstate, estate).unwrap();
+                estate.exec_reset_tuple_table(false);
+                estate.exec_close_range_table_relations().unwrap();
+            });
+        }
+
+        // Seam fallback parity: knob arms over identical tables through
+        // execute_plan (the dispatch is live inside the seam knob-ON).
+        let mut arm_rows: Vec<Vec<i32>> = Vec::new();
+        for (arm_on, relid) in [(false, 95004u32), (true, 95005u32)] {
+            crate::lanev2::cursors_set_for_tests(arm_on);
+            scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
+            let pstmt = mk_seqscan_pstmt(mcx, relid);
+            let snap_ctx: &'static MemoryContext =
+                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snapshot: snapmgr::Snapshot =
+                std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                    snap_ctx.mcx(),
+                    ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+                ));
+            let mut rows: Vec<i32> = Vec::new();
+            with_exec_data(pstmt, |data, pstmt| {
+                data.estate.es_snapshot = Some(snapshot);
+                let desc =
+                    crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+                let (h, mut dest) = mk_store_dest();
+                for (count, want) in [(2u64, 2u64), (0, 3)] {
+                    data.estate.es_processed = 0;
+                    crate::execmain::execute_plan(
+                        data,
+                        CmdType::CMD_SELECT,
+                        true,
+                        count,
+                        ForwardScanDirection,
+                        false,
+                        &mut dest,
+                    )
+                    .unwrap();
+                    assert_eq!(data.estate.es_processed, want);
+                }
+                rows = read_store_i32s(h, &desc);
+                tuplestore::hold::end(h);
+                let ExecData { estate, planstate } = data;
+                crate::exec_end_node(planstate.as_mut().unwrap(), estate).unwrap();
+                estate.exec_reset_tuple_table(false);
+                estate.exec_close_range_table_relations().unwrap();
+            });
+            assert_eq!(rows, vec![1, 2, 3, 4, 5]);
+            arm_rows.push(rows);
+        }
+        assert_eq!(arm_rows[0], arm_rows[1], "knob arms byte-identical at the seam");
+        crate::lanev2::cursors_set_for_tests(false);
+        scanfix::quiesced();
+    }
+
+    /// Budget-None breaker posture (the §2.4 count-0 persist drain: never
+    /// Full, runs to exhaustion) and the overfill hard error (an operator
+    /// ignoring `SinkFeed::Full` must not silently lose rows).
+    #[test]
+    fn cursors_w10_sink_none_budget_drains_and_overfill_errors() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mcx = leaked_mcx();
+        crate::lanev2::cursors_set_for_tests(true);
+
+        // Budget None: whole-table drain in one drive.
+        {
+            let relid = 95006u32;
+            scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
+            let pstmt = mk_seqscan_pstmt(mcx, relid);
+            let snap_ctx: &'static MemoryContext =
+                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snapshot: snapmgr::Snapshot =
+                std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                    snap_ctx.mcx(),
+                    ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+                ));
+            with_exec_data(pstmt, |data, pstmt| {
+                data.estate.es_snapshot = Some(snapshot);
+                let desc =
+                    crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+                let (h, mut dest) = mk_store_dest();
+                let ExecData { estate, planstate } = data;
+                let planstate = planstate.as_mut().unwrap();
+                estate.es_direction = ForwardScanDirection;
+                estate.es_processed = 0;
+                estate.es_cursor_run_budget = None;
+                {
+                    let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate else {
+                        panic!("bare seqscan plan");
+                    };
+                    let exhausted =
+                        crate::lanev2::cursor_fill_step_seqscan_for_tests(ss, &mut dest, estate)
+                            .unwrap();
+                    assert!(exhausted, "no budget: the drain runs to exhaustion");
+                }
+                assert_eq!(estate.es_processed, 5);
+                assert_eq!(read_store_i32s(h, &desc), vec![1, 2, 3, 4, 5]);
+                tuplestore::hold::end(h);
+                crate::exec_end_node(planstate, estate).unwrap();
+                estate.exec_reset_tuple_table(false);
+                estate.exec_close_range_table_relations().unwrap();
+            });
+        }
+
+        // Overfill: accept on a zero budget is a hard protocol error.
+        {
+            let relid = 95007u32;
+            scanfix::register_table(relid, &[&[1, 2, 3]]);
+            let pstmt = mk_seqscan_pstmt(mcx, relid);
+            let snap_ctx: &'static MemoryContext =
+                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snapshot: snapmgr::Snapshot =
+                std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                    snap_ctx.mcx(),
+                    ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+                ));
+            with_exec_data(pstmt, |data, pstmt| {
+                data.estate.es_snapshot = Some(snapshot);
+                crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+                let (h, mut dest) = mk_store_dest();
+                let ExecData { estate, planstate } = data;
+                let planstate = planstate.as_mut().unwrap();
+                estate.es_direction = ForwardScanDirection;
+                estate.es_cursor_run_budget = Some(0);
+                {
+                    let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate else {
+                        panic!("bare seqscan plan");
+                    };
+                    let err =
+                        crate::lanev2::cursor_fill_step_seqscan_for_tests(ss, &mut dest, estate)
+                            .unwrap_err();
+                    assert!(err.to_string().contains("overfilled"), "got: {err}");
+                }
+                tuplestore::hold::end(h);
+                estate.es_cursor_run_budget = None;
+                crate::exec_end_node(planstate, estate).unwrap();
+                estate.exec_reset_tuple_table(false);
+                estate.exec_close_range_table_relations().unwrap();
+            });
+        }
+        crate::lanev2::cursors_set_for_tests(false);
+        scanfix::quiesced();
+    }
+
+    /// §6 staging faces: the run-seam backward evidence counter ticks (the
+    /// release-mode bake instrument) and the debug assert stays INERT until
+    /// WS-CA arms a store (`cursor_store_ever_armed` defaults false on this
+    /// branch — the assert-arming note is CA's store-creation call).
+    #[test]
+    fn cursors_w10_forward_only_staging_faces() {
+        // The knob lever is a process-global static: serialize with every
+        // other flipping test (the fixture lock is the module's knob lock).
+        let _knob = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let before = crate::lanev2::run_seam_backward_evidence_count();
+        assert!(
+            !crate::lanev2::cursor_store_ever_armed(),
+            "no store exists on this branch: the §6 assert must be inert"
+        );
+        crate::lanev2::run_seam_backward_evidence();
+        assert_eq!(crate::lanev2::run_seam_backward_evidence_count(), before + 1);
+        // The pub knob face (the CA-facing seam) mirrors the test lever.
+        crate::lanev2::cursors_set_for_tests(true);
+        assert!(crate::lanev2::cursor_store_fill_enabled());
+        crate::lanev2::cursors_set_for_tests(false);
+        assert!(!crate::lanev2::cursor_store_fill_enabled());
+    }
+}
+// --- end WS-CB wave-10 --------------------------------------------------------

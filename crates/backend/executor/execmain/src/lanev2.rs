@@ -14705,3 +14705,23 @@ pub(crate) use push::{cursor_park_resume, cursor_run_park};
 pub(crate) use push::cursor_admission_refusal_name;
 // --- end WS-AI wave-9 -----------------------------------------------------------
 // --- WS-AJ (wave-9): reserved ---
+// ============================================================================
+// ===== WAVE-10 SHARED EOF REGION (cursors inc-2 contract §8) — sub-regions
+// in CA, CB, CC order; each WS fills ONLY its own block; integration splices
+// verbatim.
+// ============================================================================
+// --- WS-CA (wave-10): reserved ---
+// --- WS-CB wave-10 (cursors inc-2: batch store fill; contract §2.1, band 95001+) ---
+// EOF append only (the WS-AI precedent above; zero code lines touched).
+// The pub faces are the CA-facing seam (knob gate for store arming, the §6
+// assert arming note, the §3.3 tick face), re-exported at the crate root —
+// worklog notes/se-wave10-cb.md EX-CB-1. The pub(crate) faces are the run
+// seam's (execute_plan wave-10 CB sub-region) and the band-95001 units'.
+pub use push::{cursor_fill_tid_capture_refused, cursor_store_armed_note, cursor_store_fill_enabled};
+pub(crate) use push::{
+    cursor_store_batch_fill, run_seam_backward_evidence, run_seam_backward_evidence_count,
+};
+#[cfg(test)]
+pub(crate) use push::{cursor_fill_step_seqscan_for_tests, cursor_store_ever_armed};
+// --- end WS-CB wave-10 ------------------------------------------------------------
+// --- WS-CC (wave-10): reserved ---
