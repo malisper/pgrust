@@ -388,7 +388,6 @@ env	crates/pl/plpgsql/src/handler.rs	1	DST-REVIEW(t27-train): spi-compile-residu
 # ==== blocking ====
 blocking	crates/backend/access/heap/vacuumlazy/src/lib.rs	1
 blocking	crates/backend/access/heap/vacuumlazy/src/morsels.rs	1
-blocking	crates/backend/access/index/relscan/src/parallel.rs	3	CONVERTED-to-pgsync (permit-s3): btree parallel-scan Condvar now hooked/SCHED-VISIBLE; the rg.rs::seize protocol conversion stays chartered (census s3 row 2; loom guard = ParkLot eventcount models, direct model owed at the seize API)
 blocking	crates/backend/access/pgrcolumnar/src/loadsort.rs	6	P3: readahead channels (s3.3)
 blocking	crates/backend/access/pgrcolumnar/src/scan.rs	2
 blocking	crates/backend/access/pgrcolumnar/src/writer.rs	3	P3: stitch-pool channels (s3.3)

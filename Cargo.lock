@@ -4304,6 +4304,7 @@ dependencies = [
  "parse_relation",
  "parser_small1",
  "pgrcolumnar",
+ "pgsync",
  "planner",
  "portalmem",
  "postgres",
