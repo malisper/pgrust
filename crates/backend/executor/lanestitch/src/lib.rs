@@ -74,10 +74,11 @@ use std::cell::Cell;
 
 use types_error::PgResult;
 
-pub use interp::{eval_project, eval_qual, eval_row};
+pub use interp::{eval_project, eval_qual, eval_row, eval_row_chain};
 pub use spec::{
-    ArithOp, Batch, BoolTestKind, CmpOp, Lane, NullTestKind, OutLane, Program, SelVec, Step,
-    MAX_COLS, MAX_OUTS, MAX_REGS, MAX_ROWS, SEL_WORDS,
+    ArithOp, Batch, BoolTestKind, ChainCursor, ChainOutcome, ChainVerdict, CmpOp, Lane,
+    NullTestKind, OutLane, Program, RowChainHost, SelVec, Step, MAX_COLS, MAX_OUTS, MAX_REGS,
+    MAX_ROWS, SEL_WORDS,
 };
 
 /// AIO-style availability gate + kill switch (PGRUST_LANESTITCH=0|off).
@@ -99,6 +100,28 @@ pub fn available() -> bool {
 /// Apple Silicon and non-SVE Graviton read false and keep the NEON tier.
 pub fn sve2_active() -> bool {
     matches!(stitch::simd_tier(), stitch::SimdTier::Sve2 { .. })
+}
+
+/// The RowOp chain-stitching gate (WS-AA wave-7 fusion inc-0): master
+/// availability (arch + PGRUST_LANESTITCH kill switch) AND the per-family
+/// knob `PGRUST_LANESTITCH_ROWCHAIN`, **default OFF** until the inc-1
+/// letters land (rowmode-endgame.md §2.2). Knob-OFF-zero-cost idiom: one
+/// cached bool read, no per-row env traffic; OFF leaves every chain on its
+/// portable host (interpreter twin / the DmlInsertOp TupleOp floor).
+pub fn rowchain_available() -> bool {
+    #[cfg(target_arch = "aarch64")]
+    {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| {
+            available()
+                && matches!(
+                    std::env::var("PGRUST_LANESTITCH_ROWCHAIN").as_deref(),
+                    Ok("1") | Ok("on")
+                )
+        })
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    false
 }
 
 // The per-batch params block the body reads. Lane binding: p0 = the Datum

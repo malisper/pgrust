@@ -149,6 +149,10 @@ fn step_io(s: &Step) -> ([Option<u8>; 2], Option<u8>) {
         | Step::SaopAny { a, out, .. } => ([Some(a), None], Some(out)),
         Step::Qual { a } => ([Some(a), None], None),
         Step::StoreOut { a, .. } => ([Some(a), None], None),
+        // WS-AA wave-7 RowOp steps: no register-file traffic (they never
+        // reach a qual/projection plan — refused below — but liveness must
+        // stay total over the vocabulary).
+        Step::NextRow | Step::ProtocolCall { .. } => ([None, None], None),
     }
 }
 
@@ -453,6 +457,10 @@ pub(crate) fn plan_clauses(prog: &Program, ncols: usize) -> Option<Plan> {
                         // output lanes (fail closed — the qual body has no
                         // outs in its params block).
                         Step::StoreOut { .. } => return None,
+                        // WS-AA wave-7: RowOp chain steps never stitch into a
+                        // qual body (fail closed — the row-chain tier is
+                        // rowchain.rs's own planner).
+                        Step::NextRow | Step::ProtocolCall { .. } => return None,
                     }
                 }
                 ClauseShape::Generic { lo, hi }
@@ -1300,6 +1308,12 @@ fn emit_step(e: &mut Emitter, ctx: &Ctx<'_>, prog: &Program, step: &Step) {
             e.ldrb(10, 31, rn(a));
             e.strb_idx(10, 8, ROW);
         }
+        // WS-AA wave-7: both planners refuse RowOp steps, so no qual or
+        // projection body ever reaches these arms (the row-chain tier emits
+        // its own body in rowchain.rs).
+        Step::NextRow | Step::ProtocolCall { .. } => {
+            unreachable!("RowOp step in a qual/projection body (planner refuses)")
+        }
     }
 }
 
@@ -2115,6 +2129,9 @@ pub(crate) fn plan_project(prog: &Program, ncols: usize, nouts: usize) -> Option
             }
             // Projection segments carry no filter clauses (fail closed).
             Step::Qual { .. } => return None,
+            // WS-AA wave-7: RowOp chain steps never stitch into a projection
+            // body (fail closed — the row-chain tier is rowchain.rs's own).
+            Step::NextRow | Step::ProtocolCall { .. } => return None,
         }
     }
     if !any_store || used_cols.is_empty() {
