@@ -435,8 +435,10 @@ fn indexsource_misuse(why: &str) -> Box<PgError> {
 // runs; per-TID heap fetch resolves visibility, so `storeless_ok` is FALSE,
 // the HOT-chain/dead-row law the fused `IndexScanBatchSource` states), now
 // routed through [`BatchGranuleSource`] with ownership ticks and traces at
-// this one chokepoint. Knob `PGRUST_LANE_V2_AGG_INDEXFEED`, default OFF;
-// OFF path = one cached-bool test (knob-OFF-zero-cost idiom, wave-8 law 4).
+// this one chokepoint. Knob `PGRUST_LANE_V2_AGG_INDEXFEED`, default ON
+// since the SE8-GATES AE2 flip (re-earn letter flat at +0.047%; explicit
+// `=0`/`off` = permanent kill switch restoring the fused arm); OFF path =
+// one cached-bool test (knob-OFF-zero-cost idiom, wave-8 law 4).
 //
 // Posture: identical to [`IndexOnlyScanSource`] — POSITIONAL (mode B),
 // dop-1, exactly one whole-range claim per scan (`validate_serial_claim`
@@ -463,25 +465,38 @@ fn indexsource_misuse(why: &str) -> Box<PgError> {
 // appear; adding the `plan_rows` mirror is a one-line init-site escalation
 // for that increment (notes/se-wave8-aggindex.md).
 
-/// `PGRUST_LANE_V2_AGG_INDEXFEED` (default OFF): the WS-AE agg-over-
-/// IndexScan feed gate, layered UNDER the master `pgrust.lane_executor`
-/// gate (the procnode hook is inside `crate::lanev2::enabled()`). Same
-/// AtomicU8 + `_set_for_tests` idiom as [`INDEXSOURCE`] above.
+/// `PGRUST_LANE_V2_AGG_INDEXFEED` (default ON since the SE8-GATES AE2
+/// flip; explicit `=0`/`off` is the permanent kill switch): the WS-AE
+/// agg-over-IndexScan feed gate, layered UNDER the master
+/// `pgrust.lane_executor` gate (the procnode hook is inside
+/// `crate::lanev2::enabled()`). Same AtomicU8 + `_set_for_tests` idiom as
+/// [`INDEXSOURCE`] above.
 static AGG_INDEXFEED: AtomicU8 = AtomicU8::new(0);
 
 fn agg_indexfeed_enabled() -> bool {
     match AGG_INDEXFEED.load(Relaxed) {
         1 => false,
         2 => true,
-        _ => {
-            let on = matches!(
-                std::env::var("PGRUST_LANE_V2_AGG_INDEXFEED").as_deref(),
-                Ok("1") | Ok("on")
-            );
-            AGG_INDEXFEED.store(if on { 2 } else { 1 }, Relaxed);
-            on
-        }
+        _ => agg_indexfeed_resolve(),
     }
+}
+
+#[cold]
+#[inline(never)]
+fn agg_indexfeed_resolve() -> bool {
+    // SE8-GATES AE2 FLIP (flip-ladder arm #2 board; notes/se-wave8-gates.md
+    // §AE2): default ON — the re-earn letter closed the +10.20%/+7.21% gap
+    // to +0.047% instr / -0.3% wall (pgrust-corpus-pairs-1784346407-6704,
+    // medians of 3 same-pod rounds; bar flat-or-better MET). Only this
+    // default read changes — the explicit `=0`/`off` spelling is the
+    // permanent kill switch and restores the fused-arm bytes AND ticks
+    // (rowmode FLIP-1/FLIP-2 idiom verbatim; flips never delete knobs).
+    let on = !matches!(
+        std::env::var("PGRUST_LANE_V2_AGG_INDEXFEED").as_deref(),
+        Ok("0") | Ok("off")
+    );
+    AGG_INDEXFEED.store(if on { 2 } else { 1 }, Relaxed);
+    on
 }
 
 /// Same-process A/B lever for the unit corpus (`crate::tests`).
