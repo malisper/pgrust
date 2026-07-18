@@ -84,6 +84,46 @@ pub fn pg_fdatasync(fd: RawFd) -> i32 {
     }
 }
 
+// Thin C-shaped raw-fd/path helpers for the fenced callers (DST P1 inc-3):
+// the xlog/SLRU/COPY clusters hold raw kernel fds from BasicOpenFile /
+// OpenTransientFile or do fire-and-forget namespace ops; these are their
+// fd-crate front onto the VFS. Errno stays visible, no retry policy added.
+
+/// unlink(2) shape: 0 or -1/errno. NOT durable_unlink — no parent fsync.
+#[inline]
+pub fn pg_unlink(path: &str) -> i32 {
+    vfs::unlink(&vfd::cpath(path))
+}
+
+/// close(2) shape for raw descriptors owned by the caller.
+#[inline]
+pub fn pg_close(fd: RawFd) -> i32 {
+    vfs::close(fd)
+}
+
+/// stat(2)/lstat(2) shape: 0 with `out` filled, or -1/errno.
+#[inline]
+pub fn pg_stat(path: &str, out: &mut vfs::FileInfo) -> i32 {
+    vfs::stat(&vfd::cpath(path), out)
+}
+
+#[inline]
+pub fn pg_lstat(path: &str, out: &mut vfs::FileInfo) -> i32 {
+    vfs::lstat(&vfd::cpath(path), out)
+}
+
+/// fstat(2) shape on a caller-owned raw descriptor.
+#[inline]
+pub fn pg_fstat(fd: RawFd, out: &mut vfs::FileInfo) -> i32 {
+    vfs::fstat(fd, out)
+}
+
+/// readlink(2) shape: bytes written (no NUL) or -1/errno.
+#[inline]
+pub fn pg_readlink(path: &str, buf: &mut [u8]) -> isize {
+    vfs::read_link(&vfd::cpath(path), buf)
+}
+
 pub fn pg_file_exists(name: &str) -> PgResult<bool> {
     let path = vfd::cpath(name);
     let mut st = vfs::FileInfo::zeroed();

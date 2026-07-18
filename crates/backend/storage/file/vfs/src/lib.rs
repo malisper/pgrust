@@ -105,10 +105,12 @@ const _: () = assert!(
 /// Stat result, plain-typed. `mode` is `st_mode` widened to u32 (mode_t is u16
 /// on macOS).
 ///
-/// Contract v1.1 (additive revision, WS-B request): `dev`/`ino` carry the
-/// (st_dev, st_ino) identity vocabulary the part-cache staleness rule and the
-/// SegMap::open_shared registry key speak. Construct via [`FileInfo::zeroed`]
-/// (or struct-update from it) so additive revisions stay non-breaking.
+/// Contract v1.1 (additive revisions): `dev`/`ino` carry the (st_dev, st_ino)
+/// identity vocabulary the part-cache staleness rule and the
+/// SegMap::open_shared registry key speak (WS-B request); `uid`/`gid` carry
+/// the ownership words basebackup's tar headers stamp (WS-A inc-3).
+/// Construct via [`FileInfo::zeroed`] (or struct-update from it) so additive
+/// revisions stay non-breaking. SimVfs fills synthetic stable values.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FileInfo {
     pub size: i64,
@@ -118,11 +120,23 @@ pub struct FileInfo {
     pub mtime_nsec: i64,
     pub dev: u64,
     pub ino: u64,
+    pub uid: u32,
+    pub gid: u32,
 }
 
 impl FileInfo {
     pub const fn zeroed() -> Self {
-        FileInfo { size: 0, mode: 0, nlink: 0, mtime_sec: 0, mtime_nsec: 0, dev: 0, ino: 0 }
+        FileInfo {
+            size: 0,
+            mode: 0,
+            nlink: 0,
+            mtime_sec: 0,
+            mtime_nsec: 0,
+            dev: 0,
+            ino: 0,
+            uid: 0,
+            gid: 0,
+        }
     }
 
     #[inline]

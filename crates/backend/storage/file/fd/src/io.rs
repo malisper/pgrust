@@ -37,6 +37,26 @@ fn pg_pwritev(fd: RawFd, iov: &[IoSlice<'_>], offset: i64) -> isize {
     vfs::pwritev(fd, iov_c, offset as libc::off_t)
 }
 
+/// pread(2) on a caller-owned raw descriptor (DST P1: the SLRU/xlog
+/// transient-fd data plane's fd-crate front). Single-shot; errno visible.
+#[inline]
+pub fn pg_pread(fd: RawFd, buf: &mut [u8], offset: i64) -> isize {
+    vfs::pread(fd, buf, offset as libc::off_t)
+}
+
+/// pwrite(2) on a caller-owned raw descriptor. Single-shot; errno visible.
+#[inline]
+pub fn pg_pwrite(fd: RawFd, buf: &[u8], offset: i64) -> isize {
+    vfs::pwrite(fd, buf, offset as libc::off_t)
+}
+
+/// lseek(fd, 0, SEEK_END) on a caller-owned raw descriptor: -1/errno on
+/// failure.
+#[inline]
+pub fn pg_file_size_raw(fd: RawFd) -> i64 {
+    vfs::file_size(fd) as i64
+}
+
 pub fn PathNameOpenFile(file_name: &str, file_flags: i32) -> PgResult<File> {
     PathNameOpenFilePerm(file_name, file_flags, vfd::pg_file_create_mode())
 }
