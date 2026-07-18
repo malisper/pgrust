@@ -32,6 +32,7 @@ fastpath = { path = "../fastpath" }
 init_small = { path = "../../utils/init/init_small" }
 lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
 latch = { path = "../../storage/ipc/latch" }
+auth_seams = { path = "../../libpq/auth_seams" }
 pmsignal = { path = "../../storage/ipc/pmsignal" }
 commands_async = { path = "../../commands/commands_async" }
 sinval = { path = "../../storage/ipc/sinval" }

@@ -233,57 +233,116 @@ impl SimWireClient {
 // The mode entry.
 // ---------------------------------------------------------------------------
 
-fn dump_artifacts() {
+/// Seed THIS thread's SimVfs universe from the host datadir image.
+/// Two addressing conventions coexist in the port: post-chdir RELATIVE
+/// paths (md.c-style "base/…", "pg_wal/…") and DataDir-joined ABSOLUTE
+/// paths (controldata's "<datadir>/global/pg_control"). Seed the image
+/// under BOTH keys; each module is internally consistent about which
+/// convention it uses, so reads always find the plane its writes land on.
+fn seed_universe(datadir: &str) {
+    mirror_into_simvfs(std::path::Path::new(datadir), "");
+    mirror_into_simvfs(std::path::Path::new(datadir), datadir.trim_end_matches('/'));
+    if let Ok(dirs) = std::env::var("PGRUST_SIMNET_SEED_DIRS") {
+        for d in dirs.split(':').filter(|d| !d.is_empty()) {
+            mirror_into_simvfs(std::path::Path::new(d), d);
+        }
+    }
+}
+
+fn read_script(env_name: &str) -> Vec<String> {
+    std::env::var(env_name)
+        .ok()
+        .map(|p| std::fs::read_to_string(p).unwrap_or_else(|e| panic!("read {env_name}: {e}")))
+        .unwrap_or_else(|| "SELECT 1".to_string())
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with("--"))
+        .map(String::from)
+        .collect()
+}
+
+fn install_pump_for(env_sql: &str) {
+    let mut client = SimWireClient::new(read_script(env_sql));
+    pqcomm_simnet::install_client_pump(move || client.pump());
+}
+
+/// Dump THIS thread's session artifacts (transcript + op log are provider
+/// thread-locals — one session per thread, one artifact pair per session).
+fn dump_artifacts_env(transcript_env: &str, oplog_env: &str) {
     let (_, received) = pqcomm_simnet::client_transcript();
-    if let Ok(path) = std::env::var("PGRUST_SIMNET_TRANSCRIPT") {
+    if let Ok(path) = std::env::var(transcript_env) {
         let _ = std::fs::write(path, &received);
     }
-    if let Ok(path) = std::env::var("PGRUST_SIMNET_OPLOG") {
+    if let Ok(path) = std::env::var(oplog_env) {
         let mut out = pqcomm_simnet::op_log().join("\n");
         out.push('\n');
         let _ = std::fs::write(path, out);
     }
 }
 
-#[allow(non_snake_case)]
-pub fn PostgresSimNetMain(argv: &[String], username: &str) -> ! {
-    // ---- Sim-harness plumbing BEFORE the transport-blind ladder runs.
-    // Datadir: the -D argument (the ladder re-parses it itself later).
-    let datadir = argv
-        .iter()
-        .position(|a| a == "-D")
-        .and_then(|i| argv.get(i + 1))
-        .cloned()
-        .expect("--sim-net requires -D <datadir>");
-    // Two addressing conventions coexist in the port: post-chdir RELATIVE
-    // paths (md.c-style "base/…", "pg_wal/…") and DataDir-joined ABSOLUTE
-    // paths (controldata's "<datadir>/global/pg_control"). Seed the image
-    // under BOTH keys; each module is internally consistent about which
-    // convention it uses, so reads always find the plane its writes land on.
-    mirror_into_simvfs(std::path::Path::new(&datadir), "");
-    mirror_into_simvfs(std::path::Path::new(&datadir), datadir.trim_end_matches('/'));
-    if let Ok(dirs) = std::env::var("PGRUST_SIMNET_SEED_DIRS") {
-        for d in dirs.split(':').filter(|d| !d.is_empty()) {
-            mirror_into_simvfs(std::path::Path::new(d), d);
+// Thread-local globals a spawned session thread inherits from the booted
+// thread — launch_backend's `Inherited` census (the fork-inheritance list),
+// scalar subset; the MAXPGPATH exec-path triple is omitted (nothing in a sim
+// wire session consults it; ledgered in notes/permit-s1-demo.md). The spawn
+// itself migrates to the launch_backend/pgsync spawn door when WS-CORE's
+// registration hook lands — this snapshot is the scaffold stand-in.
+macro_rules! sim_inherited {
+    ($($field:ident : $ty:ty = $get:ident / $set:ident;)+) => {
+        struct SimInherited {
+            data_dir: Option<&'static str>,
+            $($field: $ty,)+
         }
-    }
+        impl SimInherited {
+            fn capture() -> Self {
+                Self {
+                    data_dir: init_small::globals::DataDir(),
+                    $($field: init_small::globals::$get(),)+
+                }
+            }
+            fn apply(&self) {
+                if let Some(dd) = self.data_dir {
+                    init_small::globals::SetDataDir(dd);
+                }
+                $(init_small::globals::$set(self.$field);)+
+            }
+        }
+    };
+}
 
-    let stmts: Vec<String> = std::env::var("PGRUST_SIMNET_SQL")
-        .ok()
-        .map(|p| std::fs::read_to_string(p).expect("read PGRUST_SIMNET_SQL"))
-        .unwrap_or_else(|| "SELECT 1".to_string())
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with("--"))
-        .map(String::from)
-        .collect();
-    let mut client = SimWireClient::new(stmts);
-    pqcomm_simnet::install_client_pump(move || client.pump());
+sim_inherited! {
+    data_directory_mode: i32 = data_directory_mode / set_data_directory_mode;
+    date_style: i32 = DateStyle / SetDateStyle;
+    date_order: i32 = DateOrder / SetDateOrder;
+    interval_style: i32 = IntervalStyle / SetIntervalStyle;
+    enable_fsync: bool = enableFsync / set_enableFsync;
+    allow_system_table_mods: bool = allowSystemTableMods / set_allowSystemTableMods;
+    work_mem: i32 = work_mem / set_work_mem;
+    hash_mem_multiplier: f64 = hash_mem_multiplier / set_hash_mem_multiplier;
+    maintenance_work_mem: i32 = maintenance_work_mem / set_maintenance_work_mem;
+    max_parallel_maintenance_workers: i32 =
+        max_parallel_maintenance_workers / set_max_parallel_maintenance_workers;
+    n_buffers: i32 = NBuffers / SetNBuffers;
+    max_connections: i32 = MaxConnections / SetMaxConnections;
+    max_worker_processes: i32 = max_worker_processes / set_max_worker_processes;
+    max_parallel_workers: i32 = max_parallel_workers / set_max_parallel_workers;
+    max_backends: i32 = MaxBackends / SetMaxBackends;
+    vacuum_buffer_usage_limit: i32 = VacuumBufferUsageLimit / SetVacuumBufferUsageLimit;
+    commit_timestamp_buffers: i32 = commit_timestamp_buffers / set_commit_timestamp_buffers;
+    multixact_member_buffers: i32 = multixact_member_buffers / set_multixact_member_buffers;
+    multixact_offset_buffers: i32 = multixact_offset_buffers / set_multixact_offset_buffers;
+    notify_buffers: i32 = notify_buffers / set_notify_buffers;
+    serializable_buffers: i32 = serializable_buffers / set_serializable_buffers;
+    subtransaction_buffers: i32 = subtransaction_buffers / set_subtransaction_buffers;
+    transaction_buffers: i32 = transaction_buffers / set_transaction_buffers;
+}
 
-    // ---- The transport-blind wire session (stdio_wire's inner, verbatim).
+/// Run one wire session on the CURRENT thread (session half only; the boot
+/// half must have completed on the booting thread). Returns the session's
+/// exit code; dumps this thread's artifacts on a clean ProcExitThread.
+fn run_session_on_this_thread(transcript_env: &str, oplog_env: &str) -> i32 {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
         || -> core::convert::Infallible {
-            let err = match crate::stdio_wire::stdio_wire_main_inner(argv, username) {
+            let err = match crate::stdio_wire::stdio_wire_session_half() {
                 Ok(never) => match never {},
                 Err(err) => err,
             };
@@ -297,14 +356,234 @@ pub fn PostgresSimNetMain(argv: &[String], username: &str) -> ! {
     };
     match payload.downcast_ref::<ipc::ProcExitThread>() {
         Some(p) => {
-            // Exit callbacks (shutdown checkpoint among them) already ran
-            // inline during the unwind; the session is complete — dump the
-            // determinism artifacts, then take the exit.
-            dump_artifacts();
-            std::process::exit(p.code)
+            // Exit callbacks already ran inline during the unwind
+            // (!IsUnderPostmaster drains in place); the session is complete.
+            dump_artifacts_env(transcript_env, oplog_env);
+            p.code
         }
         None => std::panic::resume_unwind(payload),
     }
+}
+
+/// Session 2's session half: stdio_wire_session_half's shape for an
+/// under-postmaster-style thread — same connection-first order, two
+/// deliberate deltas: (1) wedge-ledger W6: the under-postmaster arm runs
+/// REAL hba auth, and the sim transport's zeroed raddr ("host \"???\"")
+/// matches no hba line — patch the port's peer to an AF_UNIX sockaddr so
+/// initdb's `local all all trust` row matches (the transport IS
+/// host-supplied, trust-by-construction, same argument as
+/// wire_session_initialize's); (2) no single-user signal bridge (native
+/// signal dispositions are process-wide; the boot thread owns them).
+fn run_second_session_inner() -> ::types_error::PgResult<core::convert::Infallible> {
+    // Wedge-ledger W7: the hba table is loaded by the POSTMASTER
+    // (PostmasterMain), which this mode does not run — an under-postmaster
+    // session thread must load it itself or every entry lookup fails with
+    // "no pg_hba.conf entry". Raw-plane read of the initdb-generated file
+    // (local/host trust rows), postmaster order: hba then ident.
+    assert!(auth_seams::load_hba::call(), "s2: could not load pg_hba.conf");
+    let _ = auth_seams::load_ident::call();
+    {
+        let startup = mcx::MemoryContext::new("WireStartup");
+        backend_startup::wire_session_initialize(startup.mcx())?;
+    }
+    init_small::globals::WithMyProcPort(|p| {
+        let mut un: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        un.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let n = std::mem::size_of::<libc::sockaddr_un>().min(p.raddr.addr.len());
+        let src = &un as *const libc::sockaddr_un as *const u8;
+        unsafe { std::ptr::copy_nonoverlapping(src, p.raddr.addr.as_mut_ptr(), n) };
+        p.raddr.salen = n as u32;
+    });
+    lmgr_proc::InitProcess(miscinit::GetMyBackendType())?;
+    let (dbname, username) = init_small::globals::WithMyProcPort(|p| {
+        (
+            p.database_name.clone().unwrap_or_default(),
+            p.user_name.clone().unwrap_or_default(),
+        )
+    });
+    crate::PostgresMain(&dbname, &username)
+}
+
+fn run_second_session() -> i32 {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+        || -> core::convert::Infallible {
+            let err = match run_second_session_inner() {
+                Ok(never) => match never {},
+                Err(err) => err,
+            };
+            elog::emit_error_report_for(&err);
+            ipc_seams::proc_exit::call(1, init_small::globals::MyProcPid())
+        },
+    ));
+    let payload = match outcome {
+        Ok(never) => match never {},
+        Err(payload) => payload,
+    };
+    match payload.downcast_ref::<ipc::ProcExitThread>() {
+        Some(p) => {
+            // Under-postmaster-style thread: the exit-callback drain is
+            // deferred to the thread top — run_child_task's shape.
+            let code = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ipc::run_deferred_exit_callbacks(p.code)
+            }))
+            .unwrap_or(101);
+            dump_artifacts_env("PGRUST_SIMNET_TRANSCRIPT2", "PGRUST_SIMNET_OPLOG2");
+            code
+        }
+        None => std::panic::resume_unwind(payload),
+    }
+}
+
+/// The second session thread's prelude: a fresh thread has NONE of the
+/// booted thread's thread-local state ("C per-process globals" are
+/// thread-locals in the port) and an EMPTY SimVfs universe. Re-derive the
+/// cheap config-shaped state the way an EXEC_BACKEND child would, seed the
+/// universe, then serve the session. KNOWN LIMIT (wedge-ledger row L1): the
+/// universe is PRIVATE — the two sessions do not share a database; the
+/// shared plane is process shmem only. Multi-backend sim over ONE shared
+/// universe is a substrate follow-on, not a demo-lane fix.
+fn second_session_thread(
+    argv: Vec<String>,
+    datadir: String,
+    snap: SimInherited,
+) -> std::thread::JoinHandle<i32> {
+    std::thread::Builder::new()
+        .name("sim-session-2".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            snap.apply();
+            // The child-init sequence, the launch_backend way: the second
+            // session is an UNDER-POSTMASTER-style backend thread (the boot
+            // thread played "postmaster + first backend"). Wedge-ledger W1:
+            // a bare thread dies at SwitchToSharedLatch's local-latch debug
+            // assert — InitPostmasterChild owns the latch trio. Wedge-ledger
+            // W2: a STANDALONE-arm session half re-runs StartupXLOG, which
+            // reads the booted thread's PROCESS-GLOBAL ControlFile image but
+            // looks for its checkpoint in THIS thread's PRIVATE SimVfs
+            // universe → "could not locate a valid checkpoint record" PANIC;
+            // IsUnderPostmaster=true is the product path that skips it.
+            // Distinct synthetic pid: the sim pid pin gives every thread the
+            // same ambient pid; sessions must differ.
+            // Wedge-ledger W4: seed THIS thread's universe before any GUC
+            // processing — timezone validation walks the tz database through
+            // the (thread-local) vfs plane.
+            seed_universe(&datadir);
+            // Thread-local GUC store: defaults, then argv -c options, then
+            // the config files — the EXEC_BACKEND-shaped restore. Wedge-
+            // ledger W3: this must run BEFORE InitPostmasterChild flips
+            // IsUnderPostmaster (guc_file asserts PGC_POSTMASTER-context
+            // reads happen only pre-postmaster).
+            guc_seams::initialize_guc_options::call().expect("s2 guc init");
+            let mut dbname_arg: Option<String> = None;
+            crate::switches::process_postgres_switches_dbname(
+                &argv,
+                ::types_guc::GucContext::PGC_POSTMASTER as i32 as u8,
+                &mut dbname_arg,
+            )
+            .expect("s2 switches");
+            if !guc_seams::select_config_files::call(
+                crate::switches::user_d_option().as_deref(),
+                PROGNAME,
+            )
+            .expect("s2 config files")
+            {
+                return 1;
+            }
+            miscinit::InitPostmasterChild(init_small::globals::process_id() as i32 + 1)
+                .expect("s2 InitPostmasterChild");
+            miscinit::SetMyBackendType(types_core::init::BackendType::Backend);
+            // Wedge-ledger W5: the postmaster launches backends only after
+            // recovery; here the boot thread runs StartupXLOG inside SESSION
+            // 1's InitPostgres, so an early second backend reads snapshots
+            // "in recovery" (unported KnownAssignedXids panic). Same gate,
+            // demo-shaped: wait for the shared recovery state to clear.
+            // (Under the permit scheduler this sleep is a TimedPark.)
+            let mut waited_ms = 0u32;
+            while transam_xlog::RecoveryInProgress() {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                waited_ms += 1;
+                assert!(waited_ms < 60_000, "s2: recovery never completed (W5 gate)");
+            }
+            install_pump_for("PGRUST_SIMNET_SQL2");
+            run_second_session()
+        })
+        .expect("spawn sim-session-2")
+}
+
+#[allow(non_snake_case)]
+pub fn PostgresSimNetMain(argv: &[String], username: &str) -> ! {
+    // ---- PERMIT-S1 demo corpora that need no server boot at all: the
+    // planted race (P2) and the watchdog red fixture (P4) divert here.
+    crate::sim_sched_demo::maybe_run_demo_corpus_from_env();
+
+    // ---- Sim-harness plumbing BEFORE the transport-blind ladder runs.
+    // Datadir: the -D argument (the ladder re-parses it itself later).
+    let datadir = argv
+        .iter()
+        .position(|a| a == "-D")
+        .and_then(|i| argv.get(i + 1))
+        .cloned()
+        .expect("--sim-net requires -D <datadir>");
+    seed_universe(&datadir);
+    install_pump_for("PGRUST_SIMNET_SQL");
+
+    let sessions: u32 = std::env::var("PGRUST_SIMNET_SESSIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+
+    if sessions <= 1 {
+        // ---- The single-session path (stdio_wire's inner, verbatim).
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || -> core::convert::Infallible {
+                let err = match crate::stdio_wire::stdio_wire_main_inner(argv, username) {
+                    Ok(never) => match never {},
+                    Err(err) => err,
+                };
+                elog::emit_error_report_for(&err);
+                ipc_seams::proc_exit::call(1, init_small::globals::MyProcPid())
+            },
+        ));
+        let payload = match outcome {
+            Ok(never) => match never {},
+            Err(payload) => payload,
+        };
+        match payload.downcast_ref::<ipc::ProcExitThread>() {
+            Some(p) => {
+                // Exit callbacks (shutdown checkpoint among them) already ran
+                // inline during the unwind; the session is complete — dump the
+                // determinism artifacts, then take the exit.
+                dump_artifacts_env("PGRUST_SIMNET_TRANSCRIPT", "PGRUST_SIMNET_OPLOG");
+                std::process::exit(p.code)
+            }
+            None => std::panic::resume_unwind(payload),
+        }
+    }
+
+    // ---- PERMIT-S1 P1: the two-backend corpus (the first multi-thread sim
+    // run). Boot half ONCE on this thread, then two wire sessions: this
+    // thread serves session 1 (whose InitPostgres runs StartupXLOG — the
+    // "postmaster + first backend" role), a spawned thread serves session 2
+    // once recovery clears (W5 gate) — CONCURRENT by default.
+    // PGRUST_SIMNET_DUO_SERIAL=1 is the serialized fallback rung for wedge
+    // localization: session 1 completes before session 2 spawns.
+    assert!(sessions == 2, "PGRUST_SIMNET_SESSIONS supports 1 or 2");
+    if let Err(err) = crate::stdio_wire::stdio_wire_boot_half(argv, username) {
+        elog::emit_error_report_for(&err);
+        std::process::exit(1);
+    }
+    let snap = SimInherited::capture();
+    let serial = std::env::var("PGRUST_SIMNET_DUO_SERIAL").is_ok_and(|v| v == "1");
+    let (code1, code2) = if serial {
+        let code1 = run_session_on_this_thread("PGRUST_SIMNET_TRANSCRIPT", "PGRUST_SIMNET_OPLOG");
+        let s2 = second_session_thread(argv.to_vec(), datadir.clone(), snap);
+        (code1, s2.join().unwrap_or(101))
+    } else {
+        let s2 = second_session_thread(argv.to_vec(), datadir.clone(), snap);
+        let code1 = run_session_on_this_thread("PGRUST_SIMNET_TRANSCRIPT", "PGRUST_SIMNET_OPLOG");
+        (code1, s2.join().unwrap_or(101))
+    };
+    std::process::exit(code1.max(code2))
 }
 
 #[allow(dead_code)]
