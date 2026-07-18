@@ -500,9 +500,10 @@ pub fn CheckPointReplicationOrigin() -> PgResult<()> {
     }
 
     // Make sure no old temp file is remaining.
+    // vfs-routed (DST reroute): raw libc on a vfs-domain path would bypass
+    // the sim namespace and touch the host fs.
     let tmp_c = std::ffi::CString::new(tmppath).expect("no NUL");
-    // SAFETY: NUL-terminated path.
-    if unsafe { libc::unlink(tmp_c.as_ptr()) } < 0 && errno::current_errno() != libc::ENOENT {
+    if vfs::unlink(&tmp_c) < 0 && errno::current_errno() != libc::ENOENT {
         ereport(PANIC)
             .with_saved_errno(errno::current_errno())
             .errcode_for_file_access()
@@ -522,9 +523,12 @@ pub fn CheckPointReplicationOrigin() -> PgResult<()> {
         unreachable!();
     }
 
-    let write_all = |fd_: i32, bytes: &[u8]| -> PgResult<()> {
-        // SAFETY: bytes is a live readable buffer.
-        if unsafe { libc::write(fd_, bytes.as_ptr().cast(), bytes.len()) } != bytes.len() as isize {
+    // vfs-routed (DST reroute): sequential write rendered as pwrite at an
+    // explicit running offset — the vfs contract is positioned single-shot
+    // ops, and raw libc::write on a sim fd is EBADF at the kernel.
+    let mut write_off: i64 = 0;
+    let mut write_all = |fd_: i32, bytes: &[u8]| -> PgResult<()> {
+        if fd::pg_pwrite(fd_, bytes, write_off) != bytes.len() as isize {
             let mut save_errno = errno::current_errno();
             if save_errno == 0 {
                 save_errno = libc::ENOSPC;
@@ -536,6 +540,7 @@ pub fn CheckPointReplicationOrigin() -> PgResult<()> {
                 .finish(loc("CheckPointReplicationOrigin"))?;
         unreachable!();
         }
+        write_off += bytes.len() as i64;
         Ok(())
     };
 
@@ -577,24 +582,10 @@ pub fn CheckPointReplicationOrigin() -> PgResult<()> {
         unreachable!();
     }
 
-    // durable_rename(tmppath, path, PANIC): fsync temp, rename, fsync file
-    // and containing directory.
-    fd::fsync_fname(tmppath, false)?;
-    let (tmp_c, path_c) = (
-        std::ffi::CString::new(tmppath).expect("no NUL"),
-        std::ffi::CString::new(path).expect("no NUL"),
-    );
-    // SAFETY: NUL-terminated paths.
-    if unsafe { libc::rename(tmp_c.as_ptr(), path_c.as_ptr()) } != 0 {
-        ereport(PANIC)
-            .with_saved_errno(errno::current_errno())
-            .errcode_for_file_access()
-            .errmsg(format!("could not rename file \"{tmppath}\" to \"{path}\": %m"))
-            .finish(loc("CheckPointReplicationOrigin"))?;
-        unreachable!();
-    }
-    fd::fsync_fname(path, false)?;
-    fd::fsync_fname("pg_logical", true)?;
+    // C calls durable_rename(tmppath, path, PANIC) here; route through fd's
+    // ported composite (DST reroute: the hand-rolled twin used a raw
+    // libc::rename, which bypasses the vfs and hits the host fs under sim).
+    fd::durable_rename(tmppath, path, PANIC)?;
     Ok(())
 }
 
@@ -624,9 +615,12 @@ pub fn StartupReplicationOrigin() -> PgResult<()> {
         }
     };
 
-    let read_exact = |fd_: i32, buf: &mut [u8]| -> PgResult<isize> {
-        // SAFETY: buf is a live writable buffer.
-        let n = unsafe { libc::read(fd_, buf.as_mut_ptr().cast(), buf.len()) };
+    // vfs-routed (DST reroute): sequential read rendered as pread at an
+    // explicit running offset — raw libc::read on a sim fd is EBADF at the
+    // kernel.
+    let mut read_off: i64 = 0;
+    let mut read_exact = |fd_: i32, buf: &mut [u8]| -> PgResult<isize> {
+        let n = fd::pg_pread(fd_, buf, read_off);
         if n < 0 {
             ereport(PANIC)
                 .with_saved_errno(errno::current_errno())
@@ -635,6 +629,7 @@ pub fn StartupReplicationOrigin() -> PgResult<()> {
                 .finish(loc("StartupReplicationOrigin"))?;
         unreachable!();
         }
+        read_off += n as i64;
         Ok(n)
     };
 

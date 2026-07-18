@@ -86,8 +86,12 @@ pub(crate) fn pgstat_write_statsfile() -> std::io::Result<()> {
     };
     let tmp = stat_path(PGSTAT_STAT_PERMANENT_TMPFILE);
     let dst = stat_path(PGSTAT_STAT_PERMANENT_FILENAME);
-    if let Some(dir) = tmp.parent() {
-        std::fs::create_dir_all(dir)?;
+    // vfs-routed (provider-seam reroute): pg_stat/ is datadir domain;
+    // std::fs would bypass the sim namespace. pg_stat is one level deep.
+    if let Some(dir) = tmp.parent().and_then(|d| d.to_str()) {
+        if fd::MakePGDirectory(dir) < 0 && fd::get_errno() != libc::EEXIST {
+            return Err(std::io::Error::from_raw_os_error(fd::get_errno()));
+        }
     }
     let mut out = Vec::with_capacity(8192);
     out.extend_from_slice(&PGSTAT_FILE_FORMAT_ID.to_ne_bytes());
@@ -131,11 +135,13 @@ pub(crate) fn pgstat_write_statsfile() -> std::io::Result<()> {
     });
     out.push(PGSTAT_FILE_ENTRY_END);
 
-    let mut f = std::fs::File::create(&tmp)?;
-    f.write_all(&out)?;
-    f.sync_all()?;
-    drop(f);
-    std::fs::rename(&tmp, &dst)?;
+    let tmp_s = tmp.to_str().expect("stat paths are UTF-8");
+    let dst_s = dst.to_str().expect("stat paths are UTF-8");
+    fd::write_whole_file(tmp_s, &out, /* do_sync = */ true)
+        .map_err(std::io::Error::from_raw_os_error)?;
+    if fd::pg_rename(tmp_s, dst_s) < 0 {
+        return Err(std::io::Error::from_raw_os_error(fd::get_errno()));
+    }
     Ok(())
 }
 
@@ -257,15 +263,13 @@ pub(crate) fn read_statsfile_body(buf: &[u8]) -> Option<()> {
 
 pub(crate) fn pgstat_read_statsfile() {
     let path = stat_path(PGSTAT_STAT_PERMANENT_FILENAME);
-    let mut buf = Vec::new();
-    match std::fs::File::open(&path) {
-        Ok(mut f) => {
-            if f.read_to_end(&mut buf).is_err() {
-                buf.clear();
-            }
-        }
-        Err(e) => {
-            if e.kind() != std::io::ErrorKind::NotFound {
+    let path_s = path.to_str().expect("stat paths are UTF-8");
+    // vfs-routed (provider-seam reroute).
+    let buf = match fd::read_whole_file(path_s) {
+        Ok(buf) => buf,
+        Err(en) => {
+            if en != libc::ENOENT {
+                let e = std::io::Error::from_raw_os_error(en);
                 let _ = elog(
                     LOG,
                     format!("could not open statistics file \"{}\": {e}", path.display()),
@@ -274,12 +278,12 @@ pub(crate) fn pgstat_read_statsfile() {
             pgstat_reset_after_failure();
             return;
         }
-    }
+    };
     if read_statsfile_body(&buf).is_none() {
         let _ = elog(LOG, format!("corrupted statistics file \"{}\"", path.display()));
         pgstat_reset_after_failure();
     }
-    let _ = std::fs::remove_file(&path);
+    let _ = fd::pg_unlink(path_s);
 }
 
 pub fn pgstat_restore_stats() -> PgResult<()> {
@@ -288,7 +292,8 @@ pub fn pgstat_restore_stats() -> PgResult<()> {
 }
 
 pub fn pgstat_discard_stats() -> PgResult<()> {
-    let _ = std::fs::remove_file(stat_path(PGSTAT_STAT_PERMANENT_FILENAME));
+    let path = stat_path(PGSTAT_STAT_PERMANENT_FILENAME);
+    let _ = fd::pg_unlink(path.to_str().expect("stat paths are UTF-8"));
     pgstat_reset_after_failure();
     Ok(())
 }

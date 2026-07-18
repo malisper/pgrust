@@ -26,6 +26,7 @@ condition_variable = { path = "../../storage/lmgr/condition_variable" }
 ipc = { path = "../../storage/ipc/ipc" }
 init_small = { path = "../../utils/init/init_small" }
 fd = { path = "../../storage/file/fd" }
+vfs = { path = "../../storage/file/vfs" }
 crc32c = { path = "../../../port/crc32c" }
 libc = "0.2"
 origin_seams = { path = "../origin_seams" }
