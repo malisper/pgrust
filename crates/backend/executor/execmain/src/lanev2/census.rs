@@ -582,6 +582,10 @@ pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
             RefuseReason::SrfSetExpansion,
         ],
     ),
+    // + wave-7 B1 per-shape flip 1/6: functionscan SOURCE form default-ON
+    // (tail_source.rs flip ledger). ONE-ROW-PER-CLASS law: B1 rides this
+    // merged row — its allowed list (epq,backward,instrumented,env-off) is
+    // already a subset of the FLIP-1 union here.
     (
         ShapeClass::FunctionScan,
         &[
