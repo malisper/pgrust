@@ -329,3 +329,35 @@ seam_core::seam!(
         perm_infos: &'p types_nodes::NodeList<'a>,
     ) -> PgResult<()>
 );
+
+// --- WS-CA wave-10 (cursors inc-2, contract §4; escalation EX-CA-1 in
+// notes/se-wave10-ca.md §3 — appended here because production pquery reaches
+// the executor only through this crate; the exec_current_of seam above is the
+// precedent shape). -----------------------------------------------------------
+
+seam_core::seam!(
+    // §4.1 eligibility shape test, run once per SCROLL portal at PortalStart
+    // (BEFORE ExecutorStart fixes the eflags): true iff search_plan_tree's
+    // spine can ever resolve a simply-updatable scan of this plan. Eligible
+    // armed portals keep C's REWIND|BACKWARD child flags so the fill drive
+    // stays on the row chain (the contract §3.3 carve-out; the batch engine's
+    // eflags refusal is the interim mechanism until WS-CB's named
+    // cursor-currentof-tidcapture reason supersedes it). false ⇒ the
+    // per-table walk can never succeed: no capture, error arms only.
+    pub fn cursor_plan_current_of_eligible<'p, 'a>(
+        pstmt: &'p PlannedStmt<'a>,
+    ) -> bool
+);
+
+seam_core::seam!(
+    // §4.2 per-row capture after each single-row forward fill drive of a
+    // CURRENT-OF-eligible plan: the (tableoid, block<<16|offset ctid)
+    // identity of the scan-state row that produced the plan's current output
+    // row — the SAME data C's execCurrentOf reads (execCurrent.c:155-232).
+    // None = no positioned scan (the caller stores an invalid-identity row to
+    // keep sidecar/store row alignment).
+    pub fn cursor_capture_current(
+        query_desc: QueryDescHandle,
+    ) -> PgResult<Option<(types_core::Oid, u64)>>
+);
+// --- end WS-CA wave-10 ---------------------------------------------------------
