@@ -1757,6 +1757,7 @@ pub fn mt_lane_shape_refusal(
     mt: &ModifyTableState<'_>,
     admit_ud: bool,
     admit_oc: bool,
+    admit_row_triggers: bool,
 ) -> Option<&'static str> {
     match mt.operation {
         CmdType::CMD_INSERT => {}
@@ -1785,9 +1786,23 @@ pub fn mt_lane_shape_refusal(
     if rel.relkind != RELKIND_RELATION {
         return Some("target-not-plain-table");
     }
-    // ANY triggers on the target (row or statement, before/after/instead):
-    // inc-1 is INSERT-without-triggers by charter.
-    if rel.trigdesc.is_some() {
+    // ANY triggers on the target: refused since inc-1 — EXCEPT the wave-7
+    // WS-AA fusion inc-1(a) chain shape (docs/design/rowmode-endgame.md
+    // §2.2: the ONE trigger-bearing chain): plain-heap INSERT (the
+    // structural gates above already passed) with ONCONFLICT_NONE, admitted
+    // only when the caller passes `admit_row_triggers` (the
+    // `PGRUST_LANESTITCH_ROWCHAIN` chain-family knob, read by the lane
+    // AFTER the host knob — never here). UD- and OC-widened operations
+    // keep refusing triggers unconditionally (S1/S10 interplay is not the
+    // chartered shape), as does MERGE above. `mt_rowchain_trigger_admission`
+    // is the pure verdict (unit-pinned truth table).
+    if rel.trigdesc.is_some()
+        && !mt_rowchain_trigger_admission(
+            admit_row_triggers,
+            mt.operation,
+            mt.plan.onConflictAction,
+        )
+    {
         return Some("triggers");
     }
     // RETURNING is admitted (contract §6-WS-N(1)); the OLD/NEW-alias form
@@ -1798,6 +1813,38 @@ pub fn mt_lane_shape_refusal(
         }
     }
     None
+}
+
+/// The wave-7 WS-AA fusion inc-1(a) trigger-arm verdict, factored PURE so
+/// the truth table is unit-pinnable without a ModifyTableState fixture:
+/// a trigdesc-bearing target is admitted iff the rowchain knob is armed,
+/// the operation is INSERT, and there is no ON CONFLICT clause (the ONE
+/// chartered chain shape — BR-row and/or AR-row INSERT triggers on a
+/// single plain-heap result relation; the structural gates live in
+/// `mt_lane_shape_refusal`). Everything else keeps the "triggers" refusal
+/// byte-for-byte.
+#[inline]
+pub fn mt_rowchain_trigger_admission(
+    admit_row_triggers: bool,
+    operation: CmdType,
+    on_conflict_action: u32,
+) -> bool {
+    admit_row_triggers
+        && operation == CmdType::CMD_INSERT
+        && on_conflict_action
+            == types_nodes::primnodes::OnConflictAction::ONCONFLICT_NONE as u32
+}
+
+/// Chain-family probe for the wave-7 WS-AA trigger-INSERT row chain
+/// (dml.rs dispatch): true = this ADMITTED statement is the trigger-bearing
+/// chain shape (trigdesc present on the single result relation). Reads
+/// private node state, so it lives here like `mt_lane_shape_refusal`;
+/// read-only, refusal falls through byte-safely.
+#[inline]
+pub fn mt_rowchain_shape(mt: &ModifyTableState<'_>) -> bool {
+    mt.operation == CmdType::CMD_INSERT
+        && mt.rels.len() == 1
+        && mt.rels[0].trigdesc.is_some()
 }
 
 // ExecGetAllUpdatedCols (execUtils.c): perminfo updatedCols unioned with the
