@@ -541,6 +541,15 @@ mod global {
 
     /// Ensure this thread's wake pipe exists; returns the READ end for the
     /// caller to register in its WaitEventSet. Errors are raw errno.
+    ///
+    /// wasm32: WASI p1 has no pipe(2); fd-park is native-only until the boot
+    /// increment lands the WASI waiteventset backend (poll_oneoff/latch-park).
+    #[cfg(target_family = "wasm")]
+    pub fn ensure_wake_pipe() -> Result<i32, i32> {
+        Err(libc::ENOSYS)
+    }
+
+    #[cfg(not(target_family = "wasm"))]
     pub fn ensure_wake_pipe() -> Result<i32, i32> {
         let idx = current_slot();
         let s = slot(idx);
@@ -588,6 +597,9 @@ mod global {
     pub fn begin_fd_park() -> bool {
         let idx = current_slot();
         let mut g = slot(idx).lock();
+        // wasm32: no wake pipe can exist (no pipe(2)); "parked" is pure mode
+        // bookkeeping — the wasm wait backend blocks on time alone.
+        #[cfg(not(target_family = "wasm"))]
         debug_assert!(g.wake_wfd >= 0, "fd-park without a wake pipe");
         match g.mode {
             Mode::Notified => {

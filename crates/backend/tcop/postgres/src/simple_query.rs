@@ -184,7 +184,7 @@ fn crash_backend_injection(args: &str) -> PgResult<()> {
     let mode = parts.next().unwrap_or("quit");
 
     let rc = match mode {
-        "quit" => procsignal::SendThreadSignal(pid, libc::SIGQUIT),
+        "quit" => procsignal::SendThreadSignal(pid, crate::SIGQUIT),
         "kill" => procsignal::SendThreadKill(pid),
         other => {
             return Err(ereport(ERROR)

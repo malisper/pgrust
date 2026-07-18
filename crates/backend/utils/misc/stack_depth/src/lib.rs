@@ -129,9 +129,10 @@ pub fn assign_max_stack_depth(newval: i32) {
 // Platform stack limit in bytes, -1 if unknown; cached after first call.
 pub fn get_stack_depth_rlimit() -> isize {
     // Miri has no getrlimit; -1 is C's "limit unknown" (accept any value).
-    #[cfg(miri)]
+    // wasm32: WASI has no rlimits either — the same C no-getrlimit arm.
+    #[cfg(any(miri, target_family = "wasm"))]
     return -1;
-    #[cfg(not(miri))]
+    #[cfg(not(any(miri, target_family = "wasm")))]
     {
         let cached = STACK_DEPTH_RLIMIT_CACHE.get();
         if cached != 0 {

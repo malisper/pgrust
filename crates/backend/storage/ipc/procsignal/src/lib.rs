@@ -20,6 +20,41 @@ use types_storage::storage::{
 // PG_WAIT_IPC | PROC_SIGNAL_BARRIER's index in wait_event_names.txt's IPC section.
 const WAIT_EVENT_PROC_SIGNAL_BARRIER: u32 = 0x0800_0000 | 0x2A;
 
+// Thread-signal numbers are pure indices/bits here (no kernel signals are
+// involved — this crate IS the signal emulation). wasm32: the wasi libc
+// crate exposes no SIG* names; Linux/wasi-libc values.
+//
+// `signums` is public: pqsignal_thread/SendThreadSignal callers (auxjobs,
+// tcop) name their dispositions through it so every target agrees on the
+// emulation's numbering without each crate re-deriving the wasm arm.
+pub mod signums {
+    #[cfg(not(target_family = "wasm"))]
+    pub use libc::{
+        SIGABRT, SIGALRM, SIGCHLD, SIGFPE, SIGHUP, SIGINT, SIGKILL, SIGPIPE, SIGQUIT, SIGSTOP,
+        SIGTERM, SIGUSR1, SIGUSR2,
+    };
+    // Linux-numbered thread-signal emulation space (matches wasi-libc).
+    #[cfg(target_family = "wasm")]
+    mod wasm_signums {
+        pub const SIGHUP: i32 = 1;
+        pub const SIGINT: i32 = 2;
+        pub const SIGQUIT: i32 = 3;
+        pub const SIGABRT: i32 = 6;
+        pub const SIGFPE: i32 = 8;
+        pub const SIGKILL: i32 = 9;
+        pub const SIGUSR1: i32 = 10;
+        pub const SIGUSR2: i32 = 12;
+        pub const SIGPIPE: i32 = 13;
+        pub const SIGALRM: i32 = 14;
+        pub const SIGTERM: i32 = 15;
+        pub const SIGCHLD: i32 = 17;
+        pub const SIGSTOP: i32 = 19;
+    }
+    #[cfg(target_family = "wasm")]
+    pub use wasm_signums::*;
+}
+use signums::{SIGINT, SIGKILL, SIGSTOP, SIGUSR1};
+
 pub struct ProcSignalSlot {
     pss_pid: AtomicI32,
     // [MUTEX] cancel-key fields are protected by pss_mutex.
@@ -215,8 +250,8 @@ fn proc_signal_init_internal(cancel_key: &[u8], register_cleanup: bool) -> PgRes
     // default here covers mains that predate pqsignal_thread registration.
     THREAD_SIGNAL_HANDLERS.with(|t| {
         let mut handlers = t.get();
-        if matches!(handlers[libc::SIGUSR1 as usize], ThreadSignalHandler::Unset) {
-            handlers[libc::SIGUSR1 as usize] =
+        if matches!(handlers[SIGUSR1 as usize], ThreadSignalHandler::Unset) {
+            handlers[SIGUSR1 as usize] =
                 ThreadSignalHandler::Simple(procsignal_sigusr1_handler);
             t.set(handlers);
         }
@@ -321,7 +356,7 @@ pub fn pqsignal_thread(signo: i32, handler: ThreadSignalHandler) {
 // wake its procLatch; the target's next drain point runs its registered
 // disposition. Contract kept: 0 on match, -1 + errno=ESRCH otherwise.
 pub fn SendThreadSignal(pid: i32, signo: i32) -> i32 {
-    if signo == libc::SIGKILL || signo == libc::SIGSTOP {
+    if signo == SIGKILL || signo == SIGSTOP {
         panic!(
             "SendThreadSignal: signal {signo} has no thread rendering \
              (postmaster SIGKILL-escalation redesign)"
@@ -335,7 +370,7 @@ pub fn SendThreadSignal(pid: i32, signo: i32) -> i32 {
 // SIGKILL disposition dies abruptly (ipc::exit_thread_killed), it is not a
 // no-handler process kill.
 pub fn SendThreadKill(pid: i32) -> i32 {
-    deliver_thread_signal(pid, thread_signal_bit(libc::SIGKILL))
+    deliver_thread_signal(pid, thread_signal_bit(SIGKILL))
 }
 
 fn deliver_thread_signal(pid: i32, bit: u32) -> i32 {
@@ -450,7 +485,7 @@ fn CleanupProcSignalState(_code: i32, _arg: usize) {
 fn deliver_sigusr1(slot_index: usize) {
     proc_signal().psh_slot[slot_index]
         .pss_pendingThreadSignals
-        .fetch_or(thread_signal_bit(libc::SIGUSR1), SeqCst);
+        .fetch_or(thread_signal_bit(SIGUSR1), SeqCst);
     latch::set_latch(&lmgr_proc::GetPGProcByNumber(slot_index as ProcNumber).procLatch);
 }
 
@@ -742,7 +777,7 @@ pub fn SendCancelRequest(backend_pid: i32, cancel_key: &[u8]) {
             );
             // C: kill(-backendPID, SIGINT); one thread per backend and no
             // parallel workers yet, so the leader is the whole group.
-            if SendThreadSignal(backend_pid, libc::SIGINT) < 0 {
+            if SendThreadSignal(backend_pid, SIGINT) < 0 {
                 log_never_raises(
                     ereport(LOG)
                         .errmsg(format!(

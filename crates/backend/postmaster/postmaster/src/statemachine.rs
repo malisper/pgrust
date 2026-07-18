@@ -28,15 +28,15 @@ pub fn UpdatePMState(new_state: PMState) {
 
 fn pm_signame(signal: i32) -> &'static str {
     match signal {
-        libc::SIGABRT => "SIGABRT",
-        libc::SIGCHLD => "SIGCHLD",
-        libc::SIGHUP => "SIGHUP",
-        libc::SIGINT => "SIGINT",
-        libc::SIGKILL => "SIGKILL",
-        libc::SIGQUIT => "SIGQUIT",
-        libc::SIGTERM => "SIGTERM",
-        libc::SIGUSR1 => "SIGUSR1",
-        libc::SIGUSR2 => "SIGUSR2",
+        procsignal::signums::SIGABRT => "SIGABRT",
+        procsignal::signums::SIGCHLD => "SIGCHLD",
+        procsignal::signums::SIGHUP => "SIGHUP",
+        procsignal::signums::SIGINT => "SIGINT",
+        procsignal::signums::SIGKILL => "SIGKILL",
+        procsignal::signums::SIGQUIT => "SIGQUIT",
+        procsignal::signums::SIGTERM => "SIGTERM",
+        procsignal::signums::SIGUSR1 => "SIGUSR1",
+        procsignal::signums::SIGUSR2 => "SIGUSR2",
         _ => "(unknown)",
     }
 }
@@ -67,7 +67,7 @@ pub fn SignalChildren(signal: i32, target_mask: BackendTypeMask) -> bool {
 pub fn TerminateChildren(signal: i32) {
     SignalChildren(signal, btmask_all_except(&[BackendType::Logger]));
     if with_pm(|pm| pm.startup.is_some())
-        && (signal == libc::SIGQUIT || signal == libc::SIGKILL || signal == libc::SIGABRT)
+        && (signal == procsignal::signums::SIGQUIT || signal == procsignal::signums::SIGKILL || signal == procsignal::signums::SIGABRT)
     {
         with_pm(|pm| pm.startup_status = StartupStatusEnum::Signaled);
     }
@@ -85,9 +85,9 @@ pub(crate) fn HandleFatalError(
     pmsignal::SetQuitSignalReason(reason);
 
     let sigtosend = if consider_sigabrt && guc_tables::vars::send_abort_for_crash.read() {
-        libc::SIGABRT
+        procsignal::signums::SIGABRT
     } else {
-        libc::SIGQUIT
+        procsignal::signums::SIGQUIT
     };
     TerminateChildren(sigtosend);
 
@@ -185,7 +185,7 @@ pub fn process_pm_shutdown_request() -> PgResult<()> {
             miscinit::AddToDataDirLockFile(LOCK_FILE_LINE_PM_STATUS, PM_STATUS_STOPPING)?;
 
             pmsignal::SetQuitSignalReason(pmsignal::QuitSignalReason::PMQUIT_FOR_STOP);
-            TerminateChildren(libc::SIGQUIT);
+            TerminateChildren(procsignal::signums::SIGQUIT);
             UpdatePMState(PMState::PM_WAIT_BACKENDS);
 
             with_pm(|pm| pm.abort_start_time = now_secs());
@@ -240,7 +240,7 @@ pub fn PostmasterStateMachine() -> PgResult<()> {
 
         if with_pm(|pm| pm.pm_state == PMState::PM_STOP_BACKENDS) {
             bgworker::ForgetUnstartedBackgroundWorkers();
-            SignalChildren(libc::SIGTERM, target_mask);
+            SignalChildren(procsignal::signums::SIGTERM, target_mask);
             UpdatePMState(PMState::PM_WAIT_BACKENDS);
         }
 
@@ -248,7 +248,7 @@ pub fn PostmasterStateMachine() -> PgResult<()> {
             if with_pm(|pm| pm.shutdown >= ImmediateShutdown || pm.fatal_error) {
                 UpdatePMState(PMState::PM_WAIT_DEAD_END);
                 ConfigurePostmasterWaitSet(false)?;
-                SignalChildren(libc::SIGQUIT, btmask(BackendType::DeadEndBackend));
+                SignalChildren(procsignal::signums::SIGQUIT, btmask(BackendType::DeadEndBackend));
             } else {
                 debug_assert!(with_pm(|pm| pm.shutdown > crate::NoShutdown));
                 if with_pm(|pm| pm.checkpointer.is_none()) {
@@ -258,7 +258,7 @@ pub fn PostmasterStateMachine() -> PgResult<()> {
                 let checkpointer = with_pm(|pm| pm.checkpointer);
                 match checkpointer {
                     Some(c) => {
-                        signal_child(&c, libc::SIGINT);
+                        signal_child(&c, procsignal::signums::SIGINT);
                         UpdatePMState(PMState::PM_WAIT_XLOG_SHUTDOWN);
                     }
                     None => {
@@ -281,14 +281,14 @@ pub fn PostmasterStateMachine() -> PgResult<()> {
         ])) == 0
     {
         UpdatePMState(PMState::PM_WAIT_IO_WORKERS);
-        SignalChildren(libc::SIGUSR2, btmask(BackendType::IoWorker));
+        SignalChildren(procsignal::signums::SIGUSR2, btmask(BackendType::IoWorker));
     }
 
     if with_pm(|pm| pm.pm_state == PMState::PM_WAIT_IO_WORKERS && pm.io_worker_count == 0) {
         UpdatePMState(PMState::PM_WAIT_CHECKPOINTER);
         let checkpointer = with_pm(|pm| pm.checkpointer);
         if let Some(c) = checkpointer {
-            signal_child(&c, libc::SIGUSR2);
+            signal_child(&c, procsignal::signums::SIGUSR2);
         }
     }
 
@@ -514,7 +514,7 @@ pub fn maybe_start_bgworkers() {
                 let notify_pid = bgworker::rw_notify_pid(idx);
                 bgworker::ForgetBackgroundWorker(idx);
                 if notify_pid != 0 {
-                    let _ = procsignal::SendThreadSignal(notify_pid, libc::SIGUSR1);
+                    let _ = procsignal::SendThreadSignal(notify_pid, procsignal::signums::SIGUSR1);
                 }
                 continue;
             }

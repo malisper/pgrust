@@ -994,7 +994,7 @@ fn write_relcache_init_file(shared: bool) -> PgResult<()> {
     let temp_path = final_path.with_file_name(format!(
         "{}.{}",
         RELCACHE_INIT_FILENAME,
-        std::process::id()
+        init_small::globals::process_id()
     ));
     let _ = fs::remove_file(&temp_path);
     let mut file = match fs::File::create(&temp_path) {

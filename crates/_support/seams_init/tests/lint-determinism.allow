@@ -121,7 +121,7 @@ fs	crates/backend/commands/extension/src/control.rs	5
 fs	crates/backend/commands/extension/src/create.rs	1
 fs	crates/backend/commands/extension/src/graph.rs	1
 # --- crates/backend/commands/tablespace (16 sites) ---
-fs	crates/backend/commands/tablespace/src/lib.rs	16
+fs	crates/backend/commands/tablespace/src/lib.rs	17	DST-REVIEW(p4-simnet): +1 = wasm/p5-boot cfg arm (wasm set_permissions/metadata twin for the unix symlink path); wasm-lane arms met the lint at this merge — routing rides the P1 Vfs backlog
 # --- crates/backend/executor/execmain (7 sites) ---
 fs	crates/backend/executor/execmain/src/lanev2/router.rs	3
 fs	crates/backend/executor/execmain/src/lanev2/runtime_agg.rs	1
@@ -136,8 +136,11 @@ fs	crates/backend/libpq/be_secure_common/src/lib.rs	2
 fs	crates/backend/libpq/be_secure_openssl/src/lib.rs	1
 # --- crates/backend/libpq/hba (1 sites) ---
 fs	crates/backend/libpq/hba/src/token.rs	1
-# --- crates/backend/libpq/pqcomm (14 sites) ---
-fs	crates/backend/libpq/pqcomm/src/socket.rs	14
+# --- crates/backend/libpq/pqcomm (13 sites) ---
+fs	crates/backend/libpq/pqcomm/src/socket.rs	13
+
+# --- crates/backend/libpq/pqcomm_stdio (2 sites) ---
+fs	crates/backend/libpq/pqcomm_stdio/src/lib.rs	2	DST-REVIEW(p4-simnet): transport PROVIDER raw byte surface (libc read/write over fds 0/1) — same status as be_secure's libc recv/send rows; sim-net is a sibling provider behind the same seam and never executes these (wasm-net-seam-lane.md s6 declared row)
 # --- crates/backend/postmaster/launch_backend (1 sites) ---
 fs	crates/backend/postmaster/launch_backend/src/lib.rs	1
 # --- crates/backend/postmaster/pgarch (4 sites) ---
@@ -185,7 +188,7 @@ fs	crates/backend/utils/adt/adt_misc/src/builtins.rs	5
 # --- crates/backend/utils/adt/dbsize (5 sites) ---
 fs	crates/backend/utils/adt/dbsize/src/builtins.rs	5
 # --- crates/backend/utils/adt/genfile (8 sites) ---
-fs	crates/backend/utils/adt/genfile/src/builtins.rs	7
+fs	crates/backend/utils/adt/genfile/src/builtins.rs	10	DST-REVIEW(p4-simnet): +3 = wasm/p5-boot stat_words cfg twins (wasi MetadataExt vs unix); wasm-lane arms met the lint at this merge — routing rides the P1 Vfs backlog
 fs	crates/backend/utils/adt/genfile/src/lib.rs	1
 # --- crates/backend/utils/cache/relcache (12 sites) ---
 fs	crates/backend/utils/cache/relcache/src/initfile.rs	12
@@ -195,7 +198,7 @@ fs	crates/backend/utils/cache/relmapper/src/lib.rs	2
 fs	crates/backend/utils/error/elog/src/report.rs	7
 # --- crates/backend/utils/init/miscinit (20 sites) ---
 fs	crates/backend/utils/init/miscinit/src/datadir.rs	3
-fs	crates/backend/utils/init/miscinit/src/lockfile.rs	16
+fs	crates/backend/utils/init/miscinit/src/lockfile.rs	17	DST-REVIEW(p4-simnet): +1 = wasm/p5-boot cfg arm (wasi FileExt/mode unavailability twin); wasm-lane arms met the lint at this merge — routing rides the P1 Vfs backlog
 fs	crates/backend/utils/init/miscinit/src/process.rs	1
 # --- crates/backend/utils/init/postinit (1 sites) ---
 fs	crates/backend/utils/init/postinit/src/lib.rs	1
@@ -324,7 +327,7 @@ env	crates/backend/executor/runtime/src/sched.rs	11
 env	crates/backend/executor/runtime/src/sizing.rs	1
 env	crates/backend/executor/tqueue/src/lib.rs	1
 env	crates/backend/libpq/auth_scram/src/lib.rs	1
-env	crates/backend/main/main_main/src/lib.rs	1
+env	crates/backend/main/main_main/src/lib.rs	2	DST-REVIEW(p4-simnet): +1 = wasm/p5-boot USER fallback probe (wasm has no uids); knobs-registry charter absorbs it (s2.5)
 env	crates/backend/optimizer/path/costsize/src/gucs.rs	3
 env	crates/backend/optimizer/plan/planner/src/m5_suppress.rs	3
 env	crates/backend/optimizer/plan/planner/src/selfuncs.rs	1
@@ -402,6 +405,7 @@ blocking	crates/backend/postmaster/walwriter/src/lib.rs	1
 blocking	crates/backend/storage/ipc/procarray/src/lib.rs	1
 blocking	crates/backend/storage/ipc/standby/src/recovery.rs	3
 blocking	crates/backend/storage/ipc/waiter/src/lib.rs	6	SANCTIONED hub: the parking hub (s3.3)
+blocking	crates/backend/storage/ipc/waiteventset/src/wasm_stub.rs	1	DST-REVIEW(p4-simnet): wasm/p5-boot time-only WES backend (thread::sleep = poll_oneoff clock; wasm32-wasip1 has no threads to wake it) — never compiled on native/sim targets; P3 scheduler owns the real conversion
 blocking	crates/backend/storage/lmgr/lmgr/src/lib.rs	2
 blocking	crates/backend/tcop/backend_startup/src/lib.rs	1
 blocking	crates/backend/test_regress/src/lib.rs	1
