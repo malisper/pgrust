@@ -296,8 +296,12 @@ impl<'mcx> BatchGranuleSource<'mcx> for EpqCapturedSource {
         _estate: &mut EStateData<'mcx>,
         seg: runtime::MorselRange,
     ) -> PgResult<()> {
-        if seg.start != 0 || seg.end > 1 {
-            return Err(epq_capture_misuse("claim outside the singleton granule"));
+        // EXACTLY the singleton window: empty claims (0..0) refuse too —
+        // an accepted empty window would still hand out the captured row
+        // from next_batch against a zero-width claim (wave-7 review
+        // finding 3; fail-closed like the constructor arms).
+        if seg != (0..1) {
+            return Err(epq_capture_misuse("claim != the singleton granule window"));
         }
         self.positioned = true;
         self.staged = None;
@@ -392,6 +396,9 @@ pub(crate) struct EpqCaptureProbe {
     pub done_latched: bool,
     /// emit after `end_claim` refused with a loud PgError (never a panic).
     pub reemit_refused: bool,
+    /// an EMPTY claim window (0..0) refused with a loud PgError (wave-7
+    /// review finding 3: only the exact singleton window positions).
+    pub empty_claim_refused: bool,
 }
 
 /// Drive the Y0 source through its whole ladder (construct -> granule_map ->
@@ -408,6 +415,7 @@ pub(crate) fn epq_captured_probe_for_tests<'mcx>(
         return Ok(None);
     };
     let map = src.granule_map(estate)?.expect("captured source has geometry");
+    let empty_claim_refused = src.position(estate, 0..0).is_err();
     src.position(estate, 0..1)?;
     let first_batch = src.next_batch(estate)?;
     let emitted = if first_batch > 0 { src.emit(estate, 0)? } else { None };
@@ -426,6 +434,7 @@ pub(crate) fn epq_captured_probe_for_tests<'mcx>(
         second_batch,
         done_latched,
         reemit_refused,
+        empty_claim_refused,
     }))
 }
 
