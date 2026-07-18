@@ -121,7 +121,7 @@ fs	crates/backend/commands/extension/src/control.rs	5
 fs	crates/backend/commands/extension/src/create.rs	1
 fs	crates/backend/commands/extension/src/graph.rs	1
 # --- crates/backend/commands/tablespace (16 sites) ---
-fs	crates/backend/commands/tablespace/src/lib.rs	16
+fs	crates/backend/commands/tablespace/src/lib.rs	17	DST-REVIEW(wasm-t28): budget 16->17 — one wasm-only cfg(target_family="wasm") arm (p5-boot lane); native codegen unchanged; text-scanner counts both arms
 # --- crates/backend/executor/execmain (7 sites) ---
 fs	crates/backend/executor/execmain/src/lanev2/router.rs	3
 fs	crates/backend/executor/execmain/src/lanev2/runtime_agg.rs	1
@@ -137,7 +137,8 @@ fs	crates/backend/libpq/be_secure_openssl/src/lib.rs	1
 # --- crates/backend/libpq/hba (1 sites) ---
 fs	crates/backend/libpq/hba/src/token.rs	1
 # --- crates/backend/libpq/pqcomm (14 sites) ---
-fs	crates/backend/libpq/pqcomm/src/socket.rs	14
+fs	crates/backend/libpq/pqcomm/src/socket.rs	13	DST-REVIEW(wasm-t28): budget 14->13 (shrink, ratchet law) — p5-net-seam init_socket_seams boot-installer split moved one raw site out
+fs	crates/backend/libpq/pqcomm_stdio/src/lib.rs	2	DST-REVIEW(wasm-t28, declared by p5-net-seam): the stdio transport PROVIDER's raw byte surface (libc::read + libc::write) — same status as be_secure's libc::recv/send rows; sim-net is a sibling provider behind the same seam and never executes them
 # --- crates/backend/postmaster/launch_backend (1 sites) ---
 fs	crates/backend/postmaster/launch_backend/src/lib.rs	1
 # --- crates/backend/postmaster/pgarch (4 sites) ---
@@ -185,7 +186,7 @@ fs	crates/backend/utils/adt/adt_misc/src/builtins.rs	5
 # --- crates/backend/utils/adt/dbsize (5 sites) ---
 fs	crates/backend/utils/adt/dbsize/src/builtins.rs	5
 # --- crates/backend/utils/adt/genfile (8 sites) ---
-fs	crates/backend/utils/adt/genfile/src/builtins.rs	7
+fs	crates/backend/utils/adt/genfile/src/builtins.rs	10	DST-REVIEW(wasm-t28): budget 7->10 — wasm-only stat_words arm (libc::stat st_*tim fields wasi std does not surface); cfg(target_family="wasm"), no native codegen
 fs	crates/backend/utils/adt/genfile/src/lib.rs	1
 # --- crates/backend/utils/cache/relcache (12 sites) ---
 fs	crates/backend/utils/cache/relcache/src/initfile.rs	12
@@ -195,7 +196,7 @@ fs	crates/backend/utils/cache/relmapper/src/lib.rs	2
 fs	crates/backend/utils/error/elog/src/report.rs	7
 # --- crates/backend/utils/init/miscinit (20 sites) ---
 fs	crates/backend/utils/init/miscinit/src/datadir.rs	3
-fs	crates/backend/utils/init/miscinit/src/lockfile.rs	17	DST-REVIEW(t27-train): budget 16->17 — one fs site added by the t26 recovery/metalfix re-board (post-census); shrink-back chartered to the DST program (t28)
+fs	crates/backend/utils/init/miscinit/src/lockfile.rs	18	DST-REVIEW(t27-train + wasm-t28): 16->17 t26 recovery/metalfix re-board (shrink-back chartered to DST t28); 17->18 one wasm-only cfg arm (p5-boot lane), no native codegen
 fs	crates/backend/utils/init/miscinit/src/process.rs	1
 # --- crates/backend/utils/init/postinit (1 sites) ---
 fs	crates/backend/utils/init/postinit/src/lib.rs	1
@@ -337,7 +338,7 @@ env	crates/backend/executor/runtime/src/sched.rs	11
 env	crates/backend/executor/runtime/src/sizing.rs	1
 env	crates/backend/executor/tqueue/src/lib.rs	1
 env	crates/backend/libpq/auth_scram/src/lib.rs	1
-env	crates/backend/main/main_main/src/lib.rs	1
+env	crates/backend/main/main_main/src/lib.rs	2	DST-REVIEW(wasm-t28): budget 1->2 — wasm-only get_user_name_or_exit env-identity arm (no uids/passwd on WASI; operator supplies USER, C exit(1) shape otherwise); boot-time only, cfg(target_family="wasm")
 env	crates/backend/optimizer/path/costsize/src/gucs.rs	3
 env	crates/backend/optimizer/plan/planner/src/m5_suppress.rs	3
 env	crates/backend/optimizer/plan/planner/src/selfuncs.rs	1
@@ -406,6 +407,7 @@ blocking	crates/backend/executor/runtime/src/lib.rs	1
 blocking	crates/backend/executor/runtime/src/lifecycle.rs	3	sanctioned as runtime plumbing; must register as a choke point (s3.3)
 blocking	crates/backend/executor/runtime/src/sync.rs	6	SANCTIONED hub (s3.3)
 blocking	crates/backend/libpq/pqcomm/src/socket.rs	1
+blocking	crates/backend/storage/ipc/waiteventset/src/wasm_stub.rs	1	DST-REVIEW(wasm-t28): wasm-only time-only WaitEventSet backend — std::thread::sleep renders poll_oneoff's clock (no threads on wasm32-wasip1, nothing to wake early); cfg(target_family="wasm"), no native codegen
 blocking	crates/backend/postmaster/autovacuum/src/launcher.rs	3
 blocking	crates/backend/postmaster/autovacuum/src/worker.rs	1
 blocking	crates/backend/postmaster/bgworker/src/lib.rs	1
