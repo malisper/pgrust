@@ -873,13 +873,13 @@ mod cursors_w10_ca {
     struct KnobGuard;
     impl KnobGuard {
         fn on() -> KnobGuard {
-            portalmem::cursor_store_set_for_tests(true);
+            execmain::cursor_store_fill_set_for_tests(true);
             KnobGuard
         }
     }
     impl Drop for KnobGuard {
         fn drop(&mut self) {
-            portalmem::cursor_store_set_for_tests(false);
+            execmain::cursor_store_fill_set_for_tests(false);
         }
     }
 
@@ -1105,7 +1105,7 @@ mod cursors_w10_ca {
     fn w10ca_94004_knob_off_arms_nothing() {
         install_fixtures();
         let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        portalmem::cursor_store_set_for_tests(false);
+        execmain::cursor_store_fill_set_for_tests(false);
         let mcx = leaked_mcx();
         let relid: u32 = 94004;
         scanfix::register_table(relid, &[&[1, 2]]);

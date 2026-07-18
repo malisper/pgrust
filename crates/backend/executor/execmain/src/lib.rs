@@ -41,6 +41,7 @@ pub use lanev2::coverage::{coverage_snapshot, LANEV2_BUILTINS, PGRUST_FOID_RANGE
 // and the §3.3 tick face; coverage-export precedent above.
 pub use lanev2::{
     cursor_fill_tid_capture_refused, cursor_store_armed_note, cursor_store_fill_enabled,
+    cursor_store_fill_set_for_tests,
 };
 pub use nodegather::GatherState;
 pub use nodegathermerge::GatherMergeState;
@@ -125,6 +126,13 @@ pub fn init_seams() {
     );
     execmain_seams::cursor_capture_current::set(execcurrent::cursor_capture_current_seam);
     // --- end WS-CA wave-10 ---
+    // --- SEAM-WIRING (SE10-GATES item 1): the EX-CB-1 faces, seam-installed
+    // for the portal layer (production pquery links execmain_seams, not
+    // execmain) — single knob cell, §6 assert arming, §3.3 tick face.
+    execmain_seams::cursor_store_fill_enabled::set(lanev2::cursor_store_fill_enabled);
+    execmain_seams::cursor_store_armed_note::set(lanev2::cursor_store_armed_note);
+    execmain_seams::cursor_fill_tid_capture_refused::set(lanev2::cursor_fill_tid_capture_refused);
+    // --- end SEAM-WIRING ---
     execparallel::register_parallel_query_main();
     {
         guc_tables::session_guc_bool!(PLP, parallel_leader_participation_stand_in, set_parallel_leader_participation_stand_in, true);

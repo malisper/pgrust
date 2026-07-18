@@ -361,3 +361,35 @@ seam_core::seam!(
     ) -> PgResult<Option<(types_core::Oid, u64)>>
 );
 // --- end WS-CA wave-10 ---------------------------------------------------------
+
+// --- SEAM-WIRING (SE10-GATES item 1, se/seam-wiring; notes/se-seam-wiring.md) ---
+// The CA-side consumption of WS-CB's EX-CB-1 faces. Production pquery reaches
+// the executor only through this crate (the EX-CA-1 precedent above), so the
+// three lanev2-hosted portal faces ride seams; execmain installs them in
+// init_seams onto the push.rs implementations. All three are cheap statics —
+// no PgResult ceremony needed.
+
+seam_core::seam!(
+    // §7.3 knob face — THE single knob cell (lanev2/push.rs `CURSORS`,
+    // env PGRUST_LANE_V2_CURSORS): the portal layer gates store arming on
+    // it. Replaces the retired portalmem duplicate cell (CB review F1(a)).
+    pub fn cursor_store_fill_enabled() -> bool
+);
+
+seam_core::seam!(
+    // §6 deletion-clock staging: called once per store ARMING decision at
+    // PortalStart (store_armed = true). Arms the run seam's forward-only
+    // debug assert (a store-armed knob-ON world never legally drives the
+    // executor backward) — CB review F1(b).
+    pub fn cursor_store_armed_note()
+);
+
+seam_core::seam!(
+    // §3.3 refusal accounting (`cursor cursor-currentof-tidcapture`,
+    // RefuseReason 41): ticked once per fill-engine decision that routes a
+    // CURRENT-OF-eligible plan's store fill onto the row chain (fill_to's
+    // eligible branch — where the eligibility answer lives). Arms the
+    // reason-41 vocabulary minted RESERVED by WS-CB — CB review F1(c).
+    pub fn cursor_fill_tid_capture_refused()
+);
+// --- end SEAM-WIRING -------------------------------------------------------------

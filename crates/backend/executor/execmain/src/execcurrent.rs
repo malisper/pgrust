@@ -125,8 +125,23 @@ pub fn exec_current_of(
             // (search + positioned) already byte-matched C.
             if store_armed {
                 // search succeeded ⇒ the eligibility probe was true ⇒ the
-                // sidecar exists (fill creates both together).
-                debug_assert!(!tid_store.is_null());
+                // sidecar exists (fill creates both together). SEAM-WIRING:
+                // ONE exception — the AM-narrowed probe answers FALSE for
+                // pgrcolumnar scans (scan-only AM, no tids) although C's
+                // search walk still finds them; those portals legitimately
+                // carry no sidecar and answer `not_simply_updatable`, the
+                // same surface the legacy invalid-`tts_tid` read produces.
+                debug_assert!(
+                    !tid_store.is_null()
+                        || match &scanstate {
+                            Found::Scan(ss) => ss.ss_currentRelation.as_ref().is_some_and(
+                                |rel| ::reloptions::relam_is_pgrcolumnar(rel.rd_rel.relam),
+                            ),
+                            Found::IndexOnly(_) => false,
+                        },
+                    "store-armed portal without a tid sidecar on a tid-capable scan \
+                     (§4.1 probe / search_plan_tree disagreement)"
+                );
                 if tid_store.is_null() {
                     return Err(not_simply_updatable(cursor_name, table_name));
                 }
@@ -352,19 +367,67 @@ fn capture_positioned<'mcx>(
     }
 }
 
+/// SEAM-WIRING (SE10-GATES item 1): is a scan of this range-table entry
+/// TID-capturable? pgrcolumnar (cbstore) is a scan-only AM — its slots are
+/// VIRTUAL (no `tts_tid`), TID scans/updates are unsupported — so §4.2
+/// capture over it is structurally useless: the un-narrowed probe forced
+/// exactly the lane batch-fill breadth (standalone SeqScan over
+/// pgrcolumnar) onto the row chain for nothing (the CB F1/F4 seam gap).
+/// Both the legacy scan-state read (virtual slot ⇒ invalid `tts_tid`) and
+/// the narrowed store-armed arm (no sidecar) answer `not_simply_updatable`
+/// for these scans — byte-identical error surface, pinned by the cb
+/// corpus. Lookup failure answers CAPTURABLE (conservative: keeps the
+/// row-chain fill + capture, never loses a CURRENT-OF answer).
+fn scan_rte_tid_capturable(
+    scanrelid: ::types_core::Index,
+    rtable: &::types_nodes::NodeList<'_>,
+) -> bool {
+    debug_assert!(scanrelid >= 1);
+    let Some(rte) = rtable
+        .iter()
+        .nth((scanrelid.saturating_sub(1)) as usize)
+        .and_then(|n| n.as_range_tbl_entry())
+    else {
+        return true;
+    };
+    // Seamless unit-fixture worlds (scanfix; no syscache installed) answer
+    // CAPTURABLE — the pre-narrowing behavior the band-94001 pins pin.
+    // Production processes always install syscache.
+    if !::syscache_seams::lookup_pg_class_ls_shape::is_installed() {
+        return true;
+    }
+    match ::lsyscache::get_rel_relam(rte.relid) {
+        Ok(relam) => !::reloptions::relam_is_pgrcolumnar(relam),
+        Err(_) => true,
+    }
+}
+
 /// The PLAN-tree twin of the wildcard walk: the §4.1 shape test as run at
 /// PortalStart, BEFORE ExecutorStart fixes the eflags. Same spine as
 /// `search_plan_tree` (and as `has_capturable_scan` above, which the capture
-/// seam debug_asserts against this probe's answer at fill time).
-fn plan_has_capturable_scan(node: Option<::types_nodes::node_tree::Node<'_>>) -> bool {
+/// seam debug_asserts against this probe's answer at fill time — the
+/// SEAM-WIRING AM narrowing only ever turns probe answers TRUE→FALSE, so
+/// the probe-TRUE ⇒ walk-TRUE direction is preserved). Only the T_SeqScan
+/// arm carries the narrowing: pgrcolumnar relations cannot appear under the
+/// other scan tags (the AM supports no indexes and refuses TID/sample/
+/// bitmap scans).
+fn plan_has_capturable_scan(
+    node: Option<::types_nodes::node_tree::Node<'_>>,
+    rtable: &::types_nodes::NodeList<'_>,
+) -> bool {
     use ::types_nodes::NodeTag;
     let Some(node) = node else {
         return false;
     };
     let plan = node.as_plan().expect("plan-tree node has a Plan prefix");
     match node.node_tag() {
-        NodeTag::T_SeqScan
-        | NodeTag::T_SampleScan
+        NodeTag::T_SeqScan => {
+            let ss = node
+                .as_variant::<::types_nodes::plannodes::SeqScan<'_>>()
+                .expect("T_SeqScan");
+            scan_rte_tid_capturable(ss.scan.scanrelid, rtable)
+        }
+        NodeTag::T_SampleScan
         | NodeTag::T_IndexScan
         | NodeTag::T_IndexOnlyScan
         | NodeTag::T_TidScan
@@ -372,12 +435,15 @@ fn plan_has_capturable_scan(node: Option<::types_nodes::node_tree::Node<'_>>) ->
         | NodeTag::T_BitmapHeapScan => true,
         NodeTag::T_Append => {
             let a = node.as_append().expect("T_Append");
-            a.appendplans.iter().any(|p| plan_has_capturable_scan(Some(p)))
+            a.appendplans.iter().any(|p| plan_has_capturable_scan(Some(p), rtable))
         }
-        NodeTag::T_Result | NodeTag::T_Limit => plan_has_capturable_scan(plan.lefttree),
-        NodeTag::T_SubqueryScan => {
-            plan_has_capturable_scan(node.as_subquery_scan().expect("T_SubqueryScan").subplan)
+        NodeTag::T_Result | NodeTag::T_Limit => {
+            plan_has_capturable_scan(plan.lefttree, rtable)
         }
+        NodeTag::T_SubqueryScan => plan_has_capturable_scan(
+            node.as_subquery_scan().expect("T_SubqueryScan").subplan,
+            rtable,
+        ),
         _ => false,
     }
 }
@@ -387,7 +453,7 @@ fn plan_has_capturable_scan(node: Option<::types_nodes::node_tree::Node<'_>>) ->
 pub(crate) fn cursor_plan_current_of_eligible_seam(
     pstmt: &::types_nodes::plannodes::PlannedStmt<'_>,
 ) -> bool {
-    plan_has_capturable_scan(pstmt.planTree)
+    plan_has_capturable_scan(pstmt.planTree, &pstmt.rtable)
 }
 
 /// Seam impl (execmain_seams::cursor_capture_current, escalation EX-CA-1).
