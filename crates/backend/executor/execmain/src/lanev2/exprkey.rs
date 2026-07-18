@@ -1805,6 +1805,18 @@ fn exprkey_fold_drain<'mcx, S: super::batch_source::BatchGranuleSource<'mcx>>(
         // completed here). Fallback bits OR'd into the bitmap are harmless
         // (kind-0 rows only fill).
         if let Some(cols) = &latemat_cols {
+            // WS-AH review F3 hardening: pin the arm invariant (an armed
+            // drive recomputes the whole-qual bitmap on every staged batch
+            // — qual_armed + nwords > 0) against future feed re-plumbing;
+            // a stale bitmap here would silently complete the wrong rows.
+            #[cfg(debug_assertions)]
+            {
+                let ss = super::batch_source::require_bridge(src)?;
+                debug_assert!(
+                    ::nodeseqscan::seq_scan_batch_qual_bitmap_ready(ss),
+                    "k1-latemat completion without THIS batch's whole-qual bitmap"
+                );
+            }
             let nwords = (n as usize).div_ceil(64);
             let mut sel = [0u64; ::exectuples::SOA_BM_WORDS];
             match src.qual_sel() {
