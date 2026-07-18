@@ -11413,3 +11413,108 @@ mod epq_capture_w7 {
     }
 }
 // --- end WS-Y wave-7 ------------------------------------------------------------
+
+// ============================================================================
+// --- WAVE-9 append region (wave-9 contract §7; marker minted by WS-AJ) ------
+// Fixed sub-region order AG → AH → AI → AJ; per-WS blocks are spliced
+// VERBATIM at integration; unmerged WSes keep reserved placeholders.
+// --- WS-AG wave-9 sub-region (se/wave9-fusion-d1d2): RESERVED ---------------
+// --- end WS-AG wave-9 sub-region --------------------------------------------
+// --- WS-AH wave-9 sub-region (se/wave9-k1-latemat): RESERVED ----------------
+// --- end WS-AH wave-9 sub-region --------------------------------------------
+// --- WS-AI wave-9 sub-region (se/wave9-cursors-inc1): RESERVED --------------
+// --- end WS-AI wave-9 sub-region --------------------------------------------
+// --- WS-AJ wave-9 sub-region (se/wave9-spi-inc1): Stage A count-seam pins ---
+// Fake-oid band 93001+ (wave-9 contract §5). Evidence/corpus-only increment
+// (contract §4 re-scope: WS-AI's budget sink absent at branch-open — no seam
+// code this increment). These pins freeze the VOLCANO-WORLD `executor_run`
+// count semantics that `_SPI_pquery` consumes (spi/src/execute.rs:562 —
+// executor_run(qd, Forward, tcount, dest); :563 — SPI_processed reads
+// es_processed), per docs/design/lane-spi.md §1. The future Stage A lane
+// seam (PGRUST_LANE_V2_SPI) must keep every assertion green byte-for-byte:
+//   * tcount=N stops after exactly N emitted rows; es_processed == N
+//     (SPI_processed correct BY CONSTRUCTION);
+//   * the SPI shape is STOP-ONLY: ExecutorFinish/End run directly after the
+//     single count-limited run — no park, no resume — and teardown returns
+//     the fixture to zero pins (the settle face, scanfix::quiesced());
+//   * tcount=0 runs to completion; tcount > available saturates.
+mod spi_inc1_aj_w9 {
+    use super::*;
+
+    /// `_SPI_pquery`'s exact seam cadence (spi/src/execute.rs:560-575):
+    /// start(eflags) → ONE run(Forward, tcount) → read es_processed →
+    /// finish → end. No second run, no park, no resume.
+    fn run_spi_shape(relid: u32, tcount: u64) -> u64 {
+        let mcx = leaked_mcx();
+        let pstmt = mk_seqscan_pstmt(mcx, relid);
+        let snap_ctx: &'static MemoryContext =
+            Box::leak(Box::new(MemoryContext::new("spi-inc1-snap")));
+        let snapshot: snapmgr::Snapshot =
+            std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                snap_ctx.mcx(),
+                ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+            ));
+        let qd = execmain_seams::create_query_desc::call(
+            pstmt,
+            "SELECT a FROM spi_inc1_fixture",
+            Some(snapshot),
+            None,
+            CommandDest::None,
+            ParamListHandle::NULL,
+            QueryEnvHandle::NULL,
+            0,
+        )
+        .unwrap();
+        execmain_seams::executor_start::call(qd, 0).unwrap();
+        let mut dest = DestReceiver::DoNothing;
+        execmain_seams::executor_run::call(qd, ForwardScanDirection, tcount, &mut dest)
+            .unwrap();
+        let n = execmain_seams::query_desc_es_processed::call(qd);
+        execmain_seams::executor_finish::call(qd).unwrap();
+        execmain_seams::executor_end::call(qd).unwrap();
+        execmain_seams::free_query_desc::call(qd);
+        n
+    }
+
+    /// tcount=N (N < rows): count-exact stop with es_processed == N, and the
+    /// STOP-ONLY teardown releases every pin mid-scan (early stop inside a
+    /// page and at a page boundary).
+    #[test]
+    fn spi_shape_tcount_stops_exactly_and_settles() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 93001; // WS-AJ band
+        scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
+        assert_eq!(run_spi_shape(relid, 2), 2, "tcount=2 must emit exactly 2");
+        scanfix::quiesced();
+        assert_eq!(run_spi_shape(relid, 4), 4, "tcount=4 crosses the page boundary");
+        scanfix::quiesced();
+    }
+
+    /// tcount=0: run to completion — the SPI no-limit arm.
+    #[test]
+    fn spi_shape_tcount_zero_runs_to_completion() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 93002; // WS-AJ band
+        scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
+        assert_eq!(run_spi_shape(relid, 0), 5);
+        scanfix::quiesced();
+    }
+
+    /// tcount > available: es_processed reports what was emitted, never the
+    /// request.
+    #[test]
+    fn spi_shape_tcount_saturates_at_available() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 93003; // WS-AJ band
+        scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
+        assert_eq!(run_spi_shape(relid, 99), 5);
+        scanfix::quiesced();
+    }
+}
+// --- end WS-AJ wave-9 sub-region --------------------------------------------
