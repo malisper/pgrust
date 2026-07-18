@@ -46,6 +46,8 @@ mod exec_ctx_pool {
     thread_local! {
         static SLOT: core::cell::Cell<*mut MemoryContext> =
             const { core::cell::Cell::new(core::ptr::null_mut()) };
+        static TEARDOWN_REGISTERED: core::cell::Cell<bool> =
+            const { core::cell::Cell::new(false) };
     }
 
     pub(crate) fn take() -> Option<Box<MemoryContext>> {
@@ -55,6 +57,11 @@ mod exec_ctx_pool {
     }
 
     pub(crate) fn park(ctx: Box<MemoryContext>) {
+        // Session-memory teardown (FPBUDGET-1): a parked skeleton context
+        // must not outlive its session thread.
+        if !TEARDOWN_REGISTERED.replace(true) {
+            ::mcx::register_session_cleanup(Box::new(|| drop(take())));
+        }
         let old = SLOT.with(|s| s.replace(Box::into_raw(ctx)));
         if !old.is_null() {
             // SAFETY: parked via Box::into_raw; displaced (nested executor) — delete.
@@ -119,6 +126,23 @@ mod exec_skeleton {
     }
 
     pub(crate) fn park(sk: Skeleton) {
+        // Session-memory teardown (FPBUDGET-1): the parked skeleton (whole
+        // executor bundle + plancache pin) must not outlive its session.
+        thread_local! {
+            static TEARDOWN_REGISTERED: core::cell::Cell<bool> =
+                const { core::cell::Cell::new(false) };
+        }
+        if !TEARDOWN_REGISTERED.replace(true) {
+            ::mcx::register_session_cleanup(Box::new(|| {
+                let p = SLOT.with(|s| s.replace(core::ptr::null_mut()));
+                if !p.is_null() {
+                    // SAFETY: parked via Box::into_raw; slot nulled (sole owner).
+                    let sk = unsafe { Box::from_raw(p) };
+                    plancache_portal_seams::release_cached_plan::call(sk.cplan);
+                    drop(sk);
+                }
+            }));
+        }
         plancache_portal_seams::incr_cached_plan::call(sk.cplan);
         let old = SLOT.with(|s| s.replace(Box::into_raw(Box::new(sk))));
         if !old.is_null() {
