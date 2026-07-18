@@ -133,6 +133,40 @@ pub(super) fn heapfeed_readahead_depth() -> u32 {
     })
 }
 
+// --- WS-AH wave-9 sub-region (K1 late materialization knob) ---------------
+
+/// `PGRUST_LANE_V2_K1_LATEMAT` (default OFF; R-KNOBS registry spelling): K1
+/// inc-2 late materialization (wave-9 WS-AH, contract §2). Engagement is
+/// HEAPFEED ∧ K1_LATEMAT ∧ `heap_gagg_admits` ∧ the per-build shape
+/// admission in the grouped drains (armed whole-qual kernel staging + a
+/// key-column set the feed can state); every refusal and the whole knob-OFF
+/// world keep today's full staging bytes. AtomicU8 + `_set_for_tests` idiom
+/// (rowmode.rs precedent) so units can A/B both worlds in one process.
+static K1_LATEMAT: AtomicU8 = AtomicU8::new(0);
+
+pub(super) fn k1_latemat_enabled() -> bool {
+    match K1_LATEMAT.load(Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let on = matches!(
+                std::env::var("PGRUST_LANE_V2_K1_LATEMAT").as_deref(),
+                Ok("1") | Ok("on")
+            );
+            K1_LATEMAT.store(if on { 2 } else { 1 }, Relaxed);
+            on
+        }
+    }
+}
+
+/// Same-process A/B lever for the unit corpus (`crate::tests`).
+#[cfg(test)]
+pub(crate) fn k1_latemat_set_for_tests(on: bool) {
+    K1_LATEMAT.store(if on { 2 } else { 1 }, Relaxed);
+}
+
+// --- end WS-AH wave-9 sub-region -------------------------------------------
+
 /// `PGRUST_LANE_V2_HEAP_GAGG_FLOOR` (default 1000; K1 inc-1 — the ONE new
 /// admission policy): the grouped small-N engagement floor. Heap GROUPED
 /// feeds construct [`HeapBatchSource`] only when the scan's plan-time row
@@ -307,6 +341,30 @@ pub(super) trait BatchGranuleSource<'mcx> {
     fn seq_scan_bridge(&mut self) -> Option<&mut ::nodeseqscan::SeqScanState<'mcx>> {
         None
     }
+
+    // --- WS-AH wave-9 sub-region (K1 late materialization; contract §2
+    // grant: ONE additive default-implemented method, no existing signature
+    // changes) ---------------------------------------------------------------
+
+    /// K1 inc-2 completion (pass B): fill `cols` for `sel`-selected rows of
+    /// the CURRENT staged batch (64-row selection words, all-zero words
+    /// skipped whole). Default NO-OP — sources that staged everything
+    /// (SeqScanSource, the columnar window fill) have nothing to complete;
+    /// only the heap implementor narrows its staging deform
+    /// (`seq_scan_k1_latemat_arm`). Callable only between `next_batch() > 0`
+    /// and the next `&mut` positional call (batch ownership ABI R1); value
+    /// movement only — completed cells read back byte-identical to the full
+    /// staging deform's.
+    fn complete_deform(
+        &mut self,
+        _estate: &mut EStateData<'mcx>,
+        _cols: &[u16],
+        _sel: &[u64],
+    ) -> PgResult<()> {
+        Ok(())
+    }
+
+    // --- end WS-AH wave-9 sub-region ----------------------------------------
 }
 
 /// The drains' loud caps-gated bridge accessor (§2a: expect-style PgError,
@@ -622,6 +680,28 @@ impl<'mcx> BatchGranuleSource<'mcx> for HeapBatchSource<'_, 'mcx> {
     fn seq_scan_bridge(&mut self) -> Option<&mut ::nodeseqscan::SeqScanState<'mcx>> {
         Some(self.ss)
     }
+
+    // --- WS-AH wave-9 sub-region (K1 late materialization) -----------------
+
+    /// The heap deform split's completion half: fill `cols` for
+    /// `sel`-selected kind-0 rows of the staged batch off the still-pinned
+    /// page (ownership ABI R3 — the pin holds until the next batch advance/
+    /// reposition/settle). The drains call this only when they armed the
+    /// per-build narrowing (`seq_scan_k1_latemat_arm`); the deferred set is
+    /// exactly what staging skipped, so completed cells read back
+    /// byte-identical to the full staging deform's.
+    #[inline]
+    fn complete_deform(
+        &mut self,
+        _estate: &mut EStateData<'mcx>,
+        cols: &[u16],
+        sel: &[u64],
+    ) -> PgResult<()> {
+        ::nodeseqscan::seq_scan_batch_complete_deform(self.ss, cols, sel);
+        Ok(())
+    }
+
+    // --- end WS-AH wave-9 sub-region ----------------------------------------
 }
 
 #[cold]
@@ -762,4 +842,35 @@ mod tests {
         let b = src.qual_sel();
         assert!(a.is_none() && b.is_none());
     }
+
+    // --- WS-AH wave-9 sub-region (K1 late materialization, band 91001+) ----
+
+    /// `PGRUST_LANE_V2_K1_LATEMAT` A/B lever (AtomicU8 idiom): both states
+    /// resolvable in one process; restored to OFF (the default the rest of
+    /// the suite assumes — knob-OFF = today's full staging bytes).
+    #[test]
+    fn k1_latemat_knob_ab() {
+        k1_latemat_set_for_tests(true);
+        assert!(k1_latemat_enabled());
+        k1_latemat_set_for_tests(false);
+        assert!(!k1_latemat_enabled());
+    }
+
+    /// The §2 grant's additive method defaults to a NO-OP: a source
+    /// implementing only the five positional methods (sources that staged
+    /// everything) accepts any completion ask and does nothing — never a
+    /// panic, never an error (fail-open, unlike the emit face whose default
+    /// is fail-closed: an un-completed batch is merely today's fully-staged
+    /// batch).
+    #[test]
+    fn complete_deform_default_is_noop() {
+        // The default body never touches estate/cols/sel; exercising it
+        // requires no EStateData — the body is `Ok(())` by construction
+        // (compile-checked here through the trait object surface).
+        fn assert_defaulted<'mcx, S: BatchGranuleSource<'mcx>>(_s: &S) {}
+        let src = StubSource(caps(false, false));
+        assert_defaulted(&src);
+    }
+
+    // --- end WS-AH wave-9 sub-region ----------------------------------------
 }
