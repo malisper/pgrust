@@ -47,6 +47,7 @@
 use std::sync::Arc;
 
 use loom::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use loom::sync::{Condvar, Mutex};
 use loom::thread;
 
 use runtime::{
@@ -975,5 +976,177 @@ fn parklot_wake_all_reaches_every_parker() {
         for w in workers {
             w.join().unwrap();
         }
+    });
+}
+
+// ===========================================================================
+// CURSOR PARK SHAPE — settle / claim-release / R3 (LOOM-BREADTH inc-2 item 2).
+// The WS-AI forward-pull cursor park protocol (notes/se-wave9-ai.md §2 / §8
+// Item 1): at a budget-N suspension the walker SETTLES every lane-staged scan
+// claim — drops its bufmgr pins to ZERO (R3), records the reposition window,
+// and RELEASES the claim + publishes it to the runtime idle-worker path
+// (ParkLot) — so an idle pool worker may legitimately absorb the freed
+// resource while the cursor is parked; the next FETCH REPOSSESSES (re-acquires
+// the claim, re-pins at the recorded window, delivers the remainder).
+//
+// The invariant this pins: while the cursor is parked (claim released), it
+// holds ZERO pins (R3), and the park-resume race against the runtime waiter is
+// clean — the claim is always eventually repossessable (no leaked claim, no
+// lost publish), and the reposition window is idempotent across the cycle.
+//
+// MIRROR-DIALECT (notes/loom-breadth-inc2.md §2): the SYNC primitives are the
+// REAL converted target — `pgsync::Semaphore` (the exclusive scan claim) and
+// `pgsync::ParkLot` (the runtime waiter path) driven directly under --cfg
+// loom. The executor node plumbing (SeqScanState.lane_park, heapam
+// reposition, the ParkWalk recursion) is ABSTRACTED: the production cursor
+// code (execmain lanev2) lives on the single-executor lineage, NOT this DST
+// base (grep on the tree: `cursor_run_park`/`es_cursor_run_budget` absent).
+// The model verifies the park/settle/claim-release SYNC CONTRACT; the direct
+// node-driving model is inc-3 work once the cursor lane composes onto the DST
+// substrate.
+// ===========================================================================
+
+/// One cursor fetcher racing one runtime idle worker over a single-permit
+/// scan claim. The fetcher stages (pin+claim), settles at suspension (pin→0,
+/// release+publish), then resumes (repossess). The idle worker parks on the
+/// runtime lot until it can seize the freed claim, and asserts R3 (zero pins)
+/// the instant it holds the claim. Every interleaving must complete with R3
+/// intact — a held pin at settle fails the assert, an unpublished release
+/// deadlocks the parked worker.
+#[test]
+fn cursor_park_settle_releases_claim_and_pins_r3() {
+    // The reposition window (b0,b1) stand-in: settle records it, resume
+    // asserts it survived idempotently.
+    const WINDOW: usize = 0xB0B1;
+
+    loom::model(|| {
+        let claim = Arc::new(pgsync::Semaphore::new(1)); // the exclusive scan claim
+        let pins = Arc::new(AtomicUsize::new(0)); // the fetcher's bufmgr pins (R3 subject)
+        let reposition = Arc::new(AtomicUsize::new(0)); // the recorded (b0,b1) window
+        let lot = Arc::new(pgsync::ParkLot::new()); // the runtime waiter path
+
+        // Releasing a scan resource ALWAYS publishes availability to idle
+        // workers (settle AND final release) — the lost-wakeup-free pairing.
+        let release_and_publish = {
+            let (claim, lot) = (Arc::clone(&claim), Arc::clone(&lot));
+            move || {
+                claim.release();
+                lot.wake_all();
+            }
+        };
+
+        // The runtime idle worker: park on the lot until it can seize the
+        // freed claim; when it holds the claim the cursor MUST hold zero pins.
+        let worker = {
+            let (claim, pins, lot) = (Arc::clone(&claim), Arc::clone(&pins), Arc::clone(&lot));
+            thread::spawn(move || loop {
+                let seen = lot.epoch();
+                if claim.try_acquire() {
+                    assert_eq!(
+                        pins.load(Ordering::SeqCst),
+                        0,
+                        "R3: cursor holds zero pins whenever its claim is repossessable"
+                    );
+                    claim.release();
+                    return;
+                }
+                lot.park(seen);
+            })
+        };
+
+        // The cursor fetcher.
+        // STAGE (first FETCH): own the claim, take a pin, stage a batch.
+        claim.acquire();
+        pins.fetch_add(1, Ordering::SeqCst);
+        // ... deliver budget-N tuples ...
+        // SETTLE at suspension: drop pins to zero (R3), record reposition,
+        // release + publish the claim.
+        pins.fetch_sub(1, Ordering::SeqCst);
+        reposition.store(WINDOW, Ordering::SeqCst);
+        release_and_publish();
+        // RESUME (next FETCH): repossess the claim (may wait behind the idle
+        // worker), verify the reposition window is idempotent, re-pin.
+        claim.acquire();
+        assert_eq!(
+            reposition.load(Ordering::SeqCst),
+            WINDOW,
+            "reposition window idempotent across settle/resume"
+        );
+        pins.fetch_add(1, Ordering::SeqCst);
+        // ... deliver the remainder ...
+        pins.fetch_sub(1, Ordering::SeqCst);
+        release_and_publish();
+
+        worker.join().unwrap();
+        assert_eq!(pins.load(Ordering::SeqCst), 0);
+    });
+}
+
+// ===========================================================================
+// STANDING GANG detach-count JOIN — census arm (a) row 1 / §3 row 1 (the
+// "gang Condvar → rg.rs shape" conversion target), LOOM-BREADTH inc-2 item 3.
+// Mirror of transam/parallel/standing.rs close_and_await: the leader waits for
+// detached == claimed before its executor arena may unwind (the SendConst
+// join replacing DestroyParallelContext's worker-exit wait), and every worker
+// detaches UNCONDITIONALLY through the DetachGuard drop.
+//
+// MODELS THE CONVERTED SHAPE, not the std one being deleted (inc-1 policy):
+// production's leader currently POLLS via wait_parallel_finish_quantum (a
+// row-13 timed sleep, lost-wake-tolerant by construction); the P3/rg.rs
+// conversion target is a lost-wake-FREE Condvar join, which is what this pins.
+// Mirror-dialect: standing.rs is not loom-buildable (latch/lmgr/PGPROC
+// globals) — the model drives loom `Mutex`/`Condvar` + atomics directly.
+// ===========================================================================
+
+/// N workers each claim a ticket then unconditionally detach (bump `detached`
+/// + a lock-mediated wake); the leader closes the board and joins on
+/// `detached == claimed`. In every interleaving the leader completes — the
+/// detach wake is never lost (loom's deadlock detector is the oracle).
+#[test]
+fn standing_gang_detach_count_join_no_lost_wake() {
+    const N: usize = 2;
+
+    loom::model(|| {
+        let claimed = Arc::new(AtomicUsize::new(0));
+        let detached = Arc::new(AtomicUsize::new(0));
+        let m = Arc::new(Mutex::new(())); // the gang cv mutex
+        let cv = Arc::new(Condvar::new()); // the gang Condvar
+
+        let workers: Vec<_> = (0..N)
+            .map(|_| {
+                let (claimed, detached, m, cv) =
+                    (Arc::clone(&claimed), Arc::clone(&detached), Arc::clone(&m), Arc::clone(&cv));
+                thread::spawn(move || {
+                    // try_claim: take a ticket.
+                    claimed.fetch_add(1, Ordering::SeqCst);
+                    // ... run the engagement driver ...
+                    // DetachGuard drop (UNCONDITIONAL): bump detached, then a
+                    // lock-mediated wake — the barrier that makes the notify
+                    // lost-wake-free (either the leader sees the new count at
+                    // its under-lock check, or it is already parked when the
+                    // notify fires).
+                    detached.fetch_add(1, Ordering::SeqCst);
+                    {
+                        let g = m.lock().unwrap();
+                        drop(g);
+                    }
+                    cv.notify_all();
+                })
+            })
+            .collect();
+
+        // Leader: close_and_await — wait until every claimed ticket detached.
+        {
+            let mut g = m.lock().unwrap();
+            while detached.load(Ordering::SeqCst) < N {
+                g = cv.wait(g).unwrap();
+            }
+        }
+
+        for w in workers {
+            w.join().unwrap();
+        }
+        assert_eq!(claimed.load(Ordering::SeqCst), N);
+        assert_eq!(detached.load(Ordering::SeqCst), N, "detached == claimed at join");
     });
 }
