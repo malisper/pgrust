@@ -33,6 +33,7 @@ fn test_profile(weights: StatementWeights, len: u64) -> GenProfile {
         property_weights: BTreeMap::new(),
         float_lenient: false,
         test_disable_productions: Vec::new(),
+        planner_knobs: None,
     }
 }
 

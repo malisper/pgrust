@@ -96,6 +96,7 @@ pub fn runner_profile_to_gen(p: &crate::runner::profile::Profile) -> GenProfile 
         property_weights,
         float_lenient: p.float_lenient,
         test_disable_productions: p.test_disable_productions.clone(),
+        planner_knobs: p.planner_knobs.clone(),
     }
 }
 
