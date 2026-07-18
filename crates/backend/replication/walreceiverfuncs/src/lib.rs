@@ -205,8 +205,9 @@ pub fn ShutdownWalRcv() -> PgResult<()> {
         wal_rcv_stopped_cv_broadcast();
     }
     if walrcvpid != 0 {
-        // kill(walrcvpid, SIGTERM), thread rendering.
-        let _ = procsignal::SendThreadSignal(walrcvpid, libc::SIGTERM);
+        // kill(walrcvpid, SIGTERM), thread rendering. procsignal::signums,
+        // not libc::SIG*: the wasi libc crate exposes no SIG* names.
+        let _ = procsignal::SendThreadSignal(walrcvpid, procsignal::signums::SIGTERM);
     }
 
     let cv = &shmem().walRcvStoppedCV;

@@ -1289,9 +1289,11 @@ fn InvalidatePossiblyObsoleteSlot(
                         types_core::INVALID_PROC_NUMBER,
                     );
                 } else {
+                    // procsignal::signums, not libc::SIG*: the wasi libc
+                    // crate exposes no SIG* names (signums law).
                     let _ = procsignal_seams::send_thread_signal::call(
                         active_pid,
-                        libc::SIGTERM,
+                        procsignal::signums::SIGTERM,
                     );
                 }
                 last_signaled_pid = active_pid;
