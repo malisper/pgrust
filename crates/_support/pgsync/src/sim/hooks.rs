@@ -135,7 +135,9 @@ pub trait SchedulerHooks: Sync {
     fn spawn(&self, vpid: Vpid, site: &'static Location<'static>);
 
     /// Thread deregistration; post-dates all shared TLS teardown (P3 §1.6
-    /// rule 3: joiners wake on this).
+    /// rule 3: joiners wake on this). `#[track_caller]` (F5 ledger row) so
+    /// the Exit / join-Wake SCHEDOP lines carry the wrapper's exit site.
+    #[track_caller]
     fn exit(&self, vpid: Vpid);
 
     /// Seeded choice over `n` waiters (SimEntropy): returns an index in
