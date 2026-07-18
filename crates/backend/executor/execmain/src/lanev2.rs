@@ -2583,14 +2583,29 @@ fn agg_hash_build_fold_drain<'mcx, S: batch_source::BatchGranuleSource<'mcx>>(
     let mut k2s = ScanK2Scratch::default();
     // K1 inc-2 late-materialization arm (wave-9 WS-AH), decided once per
     // build AFTER the K2/mk shape census: staging narrows to {qual clause
-    // cols ∪ the feed's key cols} and `latemat_cols` (the deferred prefix
-    // columns) complete per batch for qual survivors only. `None` = today's
-    // full staging bytes (the knob-OFF world takes the `!latemat` branch
-    // without touching the node). Guarded/vguard plans refuse NAMED
+    // cols ∪ the feed's key cols} and the deferred prefix columns complete
+    // per batch for qual survivors only. Inc-3 splits the deferred set:
+    // `now` (agg-needed columns — every whole-batch consumer's read set)
+    // completes right after staging; `publish` (columns ONLY the per-row
+    // emit's prefix publish reads) completes at the per-row fall-through
+    // sites below, so kernel-leg batches never deform them at all. `None` =
+    // today's full staging bytes (the knob-OFF world takes the `!latemat`
+    // branch without touching the node). Guarded/vguard plans refuse NAMED
     // (rail G, `k1-latemat-guard-cols`); shapes without a stated key set
     // (per-row arrival builds) keep today's staging silently.
-    let latemat_cols: Option<Vec<u16>> = if latemat {
-        scan_k1_latemat_arm(batch_source::require_bridge(src)?, agg, k2.as_ref(), mk.as_ref())
+    let latemat_cols: Option<LatematCols> = if latemat {
+        let ss = batch_source::require_bridge(src)?;
+        // The mk needed-census natts check (scan_k2_shape's identity-map
+        // precondition, computed here where estate is reachable); a missing
+        // descriptor fails open inside the arm (publish set stays empty).
+        let slot_id = ss.ss.ss_ScanTupleSlot;
+        let natts = estate
+            .slot(slot_id)
+            .base()
+            .tts_tupleDescriptor
+            .as_ref()
+            .map_or(usize::MAX, |d| d.attrs.len());
+        scan_k1_latemat_arm(ss, agg, k2.as_ref(), mk.as_ref(), natts)
     } else {
         None
     };
@@ -2608,40 +2623,20 @@ fn agg_hash_build_fold_drain<'mcx, S: batch_source::BatchGranuleSource<'mcx>>(
             break;
         }
         ::postgres_seams::check_for_interrupts::call()?;
-        // K1 inc-2 completion (pass B): fill the deferred prefix columns for
-        // this batch's qual survivors off the still-pinned page BEFORE any
-        // consumer — probes, folds, spill replays, and the emit's prefix
-        // publish all read completed cells (rail S holds by construction:
-        // completion precedes the in-order probe, so spill-mode replays read
-        // live cells; the compact backstop migration reads the compact
-        // table's own arena, never the SoA). The whole-qual kernel bitmap IS
+        // K1 inc-2 completion (pass B): fill the agg-needed deferred prefix
+        // columns for this batch's qual survivors off the still-pinned page
+        // BEFORE any whole-batch consumer — probes, folds, and spill replays
+        // read only agg-needed cells (`plan.cols ⊆ colnos_needed` is
+        // `agg_fold_staged`'s documented contract; the K2 spill-miss replay
+        // fills `shape.needed` cells only; the compact backstop migration
+        // reads the compact table's own arena, never the SoA — rail S holds
+        // by construction). Inc-3: the publish-only deferred columns (read
+        // by NOTHING on the kernel legs) complete at the per-row
+        // fall-through sites below instead. The whole-qual kernel bitmap IS
         // the survivor set on this admission (no requal tail); forced-
         // fallback bits OR'd into it are harmless (kind-0 rows only fill).
         if let Some(cols) = &latemat_cols {
-            // WS-AH review F3 hardening: this completion trusts the staged
-            // whole-qual bitmap as THIS batch's survivor set. Pin the arm
-            // invariant (an armed drive recomputes the bitmap on every
-            // staged batch — qual_armed + nwords > 0) against future feed
-            // re-plumbing: a batch staged without recomputing the bitmap
-            // would expose stale selection words here (silent stale cells,
-            // not a crash).
-            #[cfg(debug_assertions)]
-            {
-                let ss = batch_source::require_bridge(src)?;
-                debug_assert!(
-                    ::nodeseqscan::seq_scan_batch_qual_bitmap_ready(ss),
-                    "k1-latemat completion without THIS batch's whole-qual bitmap"
-                );
-            }
-            let nwords = (n as usize).div_ceil(64);
-            let mut sel = [0u64; ::exectuples::SOA_BM_WORDS];
-            match src.qual_sel() {
-                Some(s) => sel[..nwords].copy_from_slice(&s[..nwords]),
-                // Belt: an armed narrowing without a staged verdict fails
-                // open to completing every row (never a stale cell).
-                None => sel[..nwords].fill(u64::MAX),
-            }
-            src.complete_deform(estate, cols, &sel[..nwords])?;
+            k1_latemat_complete(src, estate, &cols.now, n)?;
         }
         // Guarded plans (int2-Var OpExpr admissions): prove the batch before
         // any fold. The proof runs over every staged non-fallback row — a
@@ -2708,6 +2703,15 @@ fn agg_hash_build_fold_drain<'mcx, S: batch_source::BatchGranuleSource<'mcx>>(
             }
         }
         if demote {
+            // K1 inc-3: this batch leaves the kernel legs for the per-row
+            // emit — complete the publish-only deferred columns first (the
+            // emit's `soa_store_prefix` publishes every prefix cell of each
+            // selected row; rail B: never a stale published cell). Demote is
+            // unreachable while rail G refuses guarded plans, but the leg
+            // stays safe on its own terms.
+            if let Some(cols) = &latemat_cols {
+                k1_latemat_complete(src, estate, &cols.publish, n)?;
+            }
             // The per-row program advances the admitted str transitions
             // behind the memo's back — drop every memo (StrMmScratch doc).
             // Emit-dead word skip (skip-sel: cleared bits are definitive
@@ -2792,6 +2796,15 @@ fn agg_hash_build_fold_drain<'mcx, S: batch_source::BatchGranuleSource<'mcx>>(
                     ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
                 }
             }
+        }
+        // K1 inc-3: every route from here is per-row — the batch left the
+        // kernel legs (fallback-bearing K2/mk batches, an mk backstop
+        // migration's fall-through, post-migration sticky batches). The
+        // emit's `soa_store_prefix` publishes every prefix cell of each
+        // selected row, so the publish-only deferred columns complete now
+        // (rail B); the `now` columns completed after staging above.
+        if let Some(cols) = &latemat_cols {
+            k1_latemat_complete(src, estate, &cols.publish, n)?;
         }
         idxs.clear();
         groups.clear();
@@ -4426,11 +4439,63 @@ fn scan_k2_shape<'mcx>(
     Some(ScanK2 { key_col, needed, natts })
 }
 
+/// K1 inc-3 completion sets for one armed grouped-heap build (WS-AH
+/// lineage): `now` = the agg-needed deferred columns (`deferred ∩
+/// colnos_needed`) — completed right after staging, before every
+/// whole-batch consumer; `publish` = the rest of the deferred prefix —
+/// columns ONLY the per-row emit's prefix publish (`soa_store_prefix`)
+/// reads, completed at the per-row fall-through sites. Split by
+/// `batch_source::k1_latemat_split`; an unavailable needed census fails
+/// open to `now` = the whole deferred set (the landed inc-2 bytes).
+struct LatematCols {
+    now: Vec<u16>,
+    publish: Vec<u16>,
+}
+
+/// One late-mat completion call over THIS batch's whole-qual survivor
+/// bitmap (kind-0 rows only fill; forced-fallback bits are harmless). The
+/// empty set never touches the node — kernel-leg batches with an empty
+/// `now` (needed ⊆ staged) and per-row batches with an empty `publish`
+/// (needed covers the prefix) pay nothing.
+fn k1_latemat_complete<'mcx, S: batch_source::BatchGranuleSource<'mcx>>(
+    src: &mut S,
+    estate: &mut EStateData<'mcx>,
+    cols: &[u16],
+    n: u32,
+) -> PgResult<()> {
+    if cols.is_empty() {
+        return Ok(());
+    }
+    // WS-AH review F3 hardening: this completion trusts the staged
+    // whole-qual bitmap as THIS batch's survivor set. Pin the arm invariant
+    // (an armed drive recomputes the bitmap on every staged batch —
+    // qual_armed + nwords > 0) against future feed re-plumbing: a batch
+    // staged without recomputing the bitmap would expose stale selection
+    // words here (silent stale cells, not a crash).
+    #[cfg(debug_assertions)]
+    {
+        let ss = batch_source::require_bridge(src)?;
+        debug_assert!(
+            ::nodeseqscan::seq_scan_batch_qual_bitmap_ready(ss),
+            "k1-latemat completion without THIS batch's whole-qual bitmap"
+        );
+    }
+    let nwords = (n as usize).div_ceil(64);
+    let mut sel = [0u64; ::exectuples::SOA_BM_WORDS];
+    match src.qual_sel() {
+        Some(s) => sel[..nwords].copy_from_slice(&s[..nwords]),
+        // Belt: an armed narrowing without a staged verdict fails open to
+        // completing every row (never a stale cell).
+        None => sel[..nwords].fill(u64::MAX),
+    }
+    src.complete_deform(estate, cols, &sel[..nwords])
+}
+
 /// K1 inc-2 late-materialization admission for the grouped heap drain
 /// (wave-9 WS-AH, contract §2), decided once per build after the K2/mk
-/// shape census. `Some(cols)` = the staging narrowed to {qual clause cols ∪
-/// key cols} and `cols` is the deferred completion set the drain passes to
-/// `complete_deform` per batch; `None` = today's full staging bytes.
+/// shape census. `Some` = the staging narrowed to {qual clause cols ∪
+/// key cols} and the deferred completion sets split per inc-3
+/// (`LatematCols`); `None` = today's full staging bytes.
 ///
 /// Rails (each refusal NAMED through the laneexec funnel):
 /// - G: guarded / vguard-bearing fold plans refuse (`k1-latemat-guard-cols`)
@@ -4448,7 +4513,8 @@ fn scan_k1_latemat_arm<'mcx>(
     agg: &::nodeagg::AggStateData<'mcx>,
     k2: Option<&ScanK2>,
     mk: Option<&ScanMk>,
-) -> Option<Vec<u16>> {
+    natts: usize,
+) -> Option<LatematCols> {
     // Per-build re-decision: never inherit a previous build's narrowing.
     ::nodeseqscan::seq_scan_k1_latemat_disarm(ss);
     let plan = ::nodeagg::agg_lanefold_plan(agg)?;
@@ -4468,6 +4534,9 @@ fn scan_k1_latemat_arm<'mcx>(
     // the plan-time qual-selectivity estimate sits in the letter's win
     // envelope; above the threshold the completion round-trip is pure cost
     // and full staging wins. One estimate per BUILD (never per-row).
+    // N1 (inc-3): parallel-aware builds refuse inside the gate — every
+    // admitted estimate is serial, so the per-worker numerator and the
+    // whole-scan denominator agree in denomination.
     if let Err(reason) = batch_source::k1_latemat_sel_admits(ss) {
         ::laneexec::log_refused(reason);
         return None;
@@ -4475,7 +4544,35 @@ fn scan_k1_latemat_arm<'mcx>(
     match ::nodeseqscan::seq_scan_k1_latemat_arm(ss, &keys) {
         Ok(cols) => {
             trace_feed("k1 late-mat staging engaged (deform narrowed to qual+key cols)");
-            Some(cols)
+            // Inc-3 needed-set split: the agg's colnos_needed census (the
+            // hashagg spill projection's set — every whole-batch consumer's
+            // read bound) decides which deferred columns complete after
+            // staging vs only at a per-row publish leg. K2 builds reuse the
+            // shape's natts-validated set; mk builds take the census here
+            // under the same identity-map precondition (len == scan natts);
+            // an unavailable census fails open (publish stays empty — the
+            // landed inc-2 completion bytes).
+            let mk_needed: Option<Vec<u16>> = if k2.is_none() {
+                let (nd, _max) = ::nodeagg::agg_hash_needed_cols(agg);
+                (nd.len() == natts).then(|| {
+                    nd.iter()
+                        .enumerate()
+                        .filter(|&(_, &b)| b)
+                        .map(|(c, _)| c as u16)
+                        .collect()
+                })
+            } else {
+                None
+            };
+            let needed: Option<&[u16]> = match k2 {
+                Some(s) => Some(&s.needed),
+                None => mk_needed.as_deref(),
+            };
+            let (now, publish) = batch_source::k1_latemat_split(cols, needed);
+            if !publish.is_empty() {
+                trace_feed("k1 late-mat needed-set split engaged (publish-only cols defer to per-row legs)");
+            }
+            Some(LatematCols { now, publish })
         }
         Err(reason) => {
             ::laneexec::log_refused(reason);
