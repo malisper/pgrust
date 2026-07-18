@@ -1,6 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::ffi::CString;
-use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+
+use ::vfs::VfsFd;
 
 use ::elog::ereport;
 use ::types_core::Oid;
@@ -22,12 +23,14 @@ pub(crate) const FD_TEMP_FILE_LIMIT: u16 = 1 << 2;
 pub use ::vfs::PG_O_DIRECT;
 
 pub(crate) struct Vfd {
-    // `fd` -- None is VFD_CLOSED; the OwnedFd is the RAII close guard.
-    pub fd: Option<OwnedFd>,
+    // `fd` -- None is VFD_CLOSED; the VfsFd is the RAII close guard (finding
+    // F1b: vfs-minted, so an unwind/thread-exit drop must release through the
+    // vfs that minted it, never posix-side).
+    pub fd: Option<VfsFd>,
     // Companion O_DIRECT descriptor, used ONLY by uring pool-read SQEs; every
     // other path (sync reads, writes, WAL, recovery) stays on the buffered fd
     // so kernel readahead/caching there is untouched.
-    pub fd_dio: Option<OwnedFd>,
+    pub fd_dio: Option<VfsFd>,
     pub dio_failed: bool,
     pub fdstate: u16,
     pub resowner: ResourceOwner,
@@ -181,6 +184,12 @@ pub(crate) fn CloseDioFd(fd: &mut FdState, file: i32) {
     if let Some(dio) = fd.vfd_cache[file as usize].fd_dio.take() {
         crate::pgaio_closing_fd_if_engine_present(dio.as_raw());
         set_num_external_fds(num_external_fds() - 1);
+        // Deliberate close path, made explicit (this used to be an implicit
+        // posix-side OwnedFd drop — an F1b instance on a NON-unwind path):
+        // disarm the guard and close through the vfs that minted the fd.
+        // Result ignored, exactly as the old drop ignored it.
+        let raw = dio.into_raw();
+        let _ = vfs::close(raw);
     }
 }
 
@@ -191,8 +200,9 @@ pub(crate) fn LruDelete(fd: &mut FdState, file: i32) -> PgResult<()> {
     let handle = fd.vfd_cache[file as usize].fd.take().expect("LruDelete on closed VFD");
     crate::pgaio_closing_fd_if_engine_present(handle.as_raw());
 
-    // Live descriptor just released from the guard; closed exactly once here.
-    let raw = handle.into_raw_fd();
+    // Live descriptor just released from the guard (disarmed); closed
+    // exactly once here.
+    let raw = handle.into_raw();
     let close_failed = vfs::close(raw) != 0;
     fd.nfile -= 1;
     Delete(fd, file);
@@ -235,8 +245,8 @@ pub(crate) fn LruInsert(fd: &mut FdState, file: i32) -> PgResult<i32> {
         if raw < 0 {
             return Ok(-1);
         }
-        // SAFETY: `raw` is a freshly opened descriptor now owned by the VFD.
-        fd.vfd_cache[file as usize].fd = Some(unsafe { OwnedFd::from_raw_fd(raw) });
+        // SAFETY: `raw` is a freshly vfs-opened descriptor now owned by the VFD.
+        fd.vfd_cache[file as usize].fd = Some(unsafe { VfsFd::from_raw(raw) });
         fd.nfile += 1;
     }
 
@@ -342,8 +352,8 @@ pub(crate) fn FileAccessDio(fd: &mut FdState, file: i32) -> PgResult<i32> {
         }
         return Ok(-1);
     }
-    // SAFETY: freshly opened descriptor, owned by the VFD's companion slot.
-    fd.vfd_cache[file as usize].fd_dio = Some(unsafe { OwnedFd::from_raw_fd(raw) });
+    // SAFETY: freshly vfs-opened descriptor, owned by the VFD's companion slot.
+    fd.vfd_cache[file as usize].fd_dio = Some(unsafe { VfsFd::from_raw(raw) });
     set_num_external_fds(num_external_fds() + 1);
     Ok(raw)
 }
@@ -361,7 +371,7 @@ pub(crate) fn FileIsValid(fd: &FdState, file: i32) -> bool {
 pub(crate) trait RawOf {
     fn as_raw(&self) -> i32;
 }
-impl RawOf for OwnedFd {
+impl RawOf for VfsFd {
     fn as_raw(&self) -> i32 {
         use std::os::fd::AsRawFd;
         self.as_raw_fd()
