@@ -411,9 +411,12 @@ pub fn try_own_modify_table<'mcx>(
     // per §2's preference; knob machinery in the wave-5 append region
     // below). The probe's detail string carries mechanism attribution
     // (contract §1).
-    if let Some(detail) =
-        ::nodemodifytable::mt_lane_shape_refusal(&node.mt, dml_ud_enabled(), dml_oc_enabled())
-    {
+    if let Some(detail) = ::nodemodifytable::mt_lane_shape_refusal(
+        &node.mt,
+        dml_ud_enabled(),
+        dml_oc_enabled(),
+        dml_rowchain_enabled(),
+    ) {
         stats::tick_refused(ShapeClass::ModifyTable, RefuseReason::DmlShape);
         if super::lane_trace_enabled() {
             super::lane_trace(&format!("dml: shape refused ({detail})"));
@@ -433,6 +436,19 @@ pub fn try_own_modify_table<'mcx>(
     if !::nodemodifytable::mt_begin(&mut node.mt, estate, None)? {
         // mt_done: end-of-set, exactly the fallback's early return.
         return Ok(Some(None));
+    }
+    // WAVE-7 WS-AA (fusion inc-1a): the ONE trigger-bearing INSERT chain
+    // shape — admitted above only under the rowchain knob — dispatches to
+    // the stitched row chain. ANY chain refusal (non-aarch64, master kill
+    // switch, arena) deopts the WHOLE statement to the DmlInsertOp host
+    // below, whose seam-call stream the chain replays exactly (the
+    // two-stage x86 law: no semantics exist only in stitched bodies).
+    // Knob-OFF zero cost: `dml_rowchain_enabled` is one relaxed byte load
+    // and trigger shapes never pass the probe, so this branch is dark.
+    if dml_rowchain_enabled() && ::nodemodifytable::mt_rowchain_shape(&node.mt) {
+        if let Some(result) = drive_insert_rowchain(node, estate)? {
+            return Ok(Some(result));
+        }
     }
     // The disjoint-borrow split (LaneProjectSet precedent): the op holds
     // mt + epq, the driver holds the subplan. No clear-on-finish:
@@ -652,3 +668,261 @@ pub(crate) fn dml_oc_set_for_tests(on: bool) {
     DML_OC.store(if on { 2 } else { 1 }, Relaxed);
 }
 // --- end WS-W (wave-5) ------------------------------------------------------
+
+// ===== WAVE-7 APPEND REGION (WS-AA fusion inc-1a) — do not edit above =======
+// The trigger-DML stitched row loop (docs/design/rowmode-endgame.md §2.2
+// inc-1(a); wave-7 contract §3). The ONE chartered shape: single-result-
+// relation plain-heap INSERT with row triggers, ONCONFLICT_NONE, no
+// partition routing, RETURNING absent or trivial — exactly the inc-1
+// admitted set MINUS the `triggers` refusal arm, which
+// `mt_lane_shape_refusal` now lifts ONLY under `admit_row_triggers` (the
+// `PGRUST_LANESTITCH_ROWCHAIN` chain-family knob, default OFF; every other
+// refusal arm is byte-identical).
+//
+// Chain form THIS increment (recorded deferral in notes/se-wave7-fusion.md):
+// the protocol targets are the mt_* SEAMS THEMSELVES — CALL_ROW_PROLOGUE =
+// `mt_row_prologue` (+ the MERGE-pending contract assert), CALL_ACCEPT_ROW
+// = `mt_accept_row` with THE pinned epq_eval closure — so the statement
+// stream is DmlInsertOp's arm for arm and byte-identity holds by
+// construction (the two-regime error law's own argument: the bl target IS
+// the node's helper). The §2.2 finer decomposition (separate
+// br_row_triggers / table_tuple_insert+index / ar_insert_triggers /
+// exec_process_returning targets + junk-filter/projection stencils) lands
+// when the pure-step scalar stencils join the stitched vocabulary; the
+// loop_top_owed LAW is already structural here (the prologue is the chain's
+// loop-top segment — lanestitch runs it before EVERY pull by construction).
+//
+// Statement-stream identity with DmlInsertOp, per pull:
+// * chain loop top = P (+ pending assert)  ≡  resume: P + mt_pending arm
+//   (pending is MERGE-only and MERGE never reaches here — loud, not silent).
+// * NextRow = the same feed split (lane-fed SeqScan statements verbatim /
+//   exec_proc_node)  ≡  MtLaneFedSeqScanSource / MtChildSource.
+// * CALL_ACCEPT_ROW: None -> SkipRow (loop top re-runs P — loop_top_owed
+//   re-armed)  ≡  accept -> NeedInput; Some -> EmitPause (capacity-one
+//   pause; next owned pull re-enters at the loop top)  ≡  push -> Paused.
+// * exhaustion: P already ran this round, then mt_source_exhausted under
+//   the mt_done latch  ≡  resume-P -> pull(None) -> source_exhausted.
+// Statement-tag identity (canSetTag / es_processed) lives INSIDE
+// mt_accept_row -> exec_insert, unchanged on every host.
+//
+// Rails: es_epq_active refused ALL ownership before the shape gate (EPQ
+// unreachable in this shape — no OC UPDATE — but the rail stands); the
+// mt_resume capacity-one-sink trap is NOT restructured — the chain never
+// composes a breaker sink and asserts the pending arm instead (class-37
+// law unchanged); push.rs untouched (the chain dispatches from here).
+
+/// `PGRUST_LANESTITCH_ROWCHAIN` read for ADMISSION (the same env knob that
+/// gates lanestitch's stitcher, cached separately because admission must
+/// work off-aarch64 too — x86 permanently runs the DmlInsertOp host on the
+/// admitted shape). Nested-knob law: read ONLY after `dml_enabled()` passed
+/// (the probe line + the dispatch line); at default config this byte is
+/// never loaded.
+static DML_ROWCHAIN: AtomicU8 = AtomicU8::new(0);
+
+#[inline]
+fn dml_rowchain_enabled() -> bool {
+    match DML_ROWCHAIN.load(Relaxed) {
+        1 => false,
+        2 => true,
+        _ => dml_rowchain_resolve(),
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn dml_rowchain_resolve() -> bool {
+    let on = matches!(
+        std::env::var("PGRUST_LANESTITCH_ROWCHAIN").as_deref(),
+        Ok("1") | Ok("on")
+    );
+    DML_ROWCHAIN.store(if on { 2 } else { 1 }, Relaxed);
+    on
+}
+
+/// Same-process A/B lever for the wave-7 rowchain admission units.
+#[cfg(test)]
+pub(crate) fn dml_rowchain_set_for_tests(on: bool) {
+    DML_ROWCHAIN.store(if on { 2 } else { 1 }, Relaxed);
+}
+
+/// Test-only engagement probe: stitched-chain drives (the mechanism-
+/// attributed counter; the ModifyTable CLASS counter ticks at the shared
+/// verdict chokepoint above regardless of host).
+#[cfg(test)]
+pub(crate) static DML_ROWCHAIN_DRIVES_FOR_TESTS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// The chain-family protocol call ids (chain-private vocabulary).
+const CALL_ROW_PROLOGUE: u16 = 1;
+const CALL_ACCEPT_ROW: u16 = 2;
+
+/// The trigger-INSERT chain program: loop-top prologue, pull, accept.
+/// Shape-static for the whole family — ONE compiled body serves every
+/// statement (hosts vary per drive, never the code).
+fn rowchain_insert_prog() -> ::lanestitch::Program {
+    let mut p = ::lanestitch::Program::new();
+    p.steps.push(::lanestitch::Step::ProtocolCall { call: CALL_ROW_PROLOGUE });
+    p.steps.push(::lanestitch::Step::NextRow);
+    p.steps.push(::lanestitch::Step::ProtocolCall { call: CALL_ACCEPT_ROW });
+    p
+}
+
+/// The process-global compiled chain body. SAFETY (Send/Sync): a
+/// `StitchedRowChain` is immutable after construction — an RX-mapped code
+/// block plus plain telemetry fields, no interior mutability; `run` takes
+/// `&self` and all mutable state lives in the per-drive host/params.
+struct ShareChain(Option<::lanestitch::StitchedRowChain>);
+// SAFETY: see ShareChain doc — immutable RX code + POD fields only.
+unsafe impl Send for ShareChain {}
+// SAFETY: see ShareChain doc.
+unsafe impl Sync for ShareChain {}
+
+/// Compile-once accessor. None = the stitched tier refused (non-aarch64,
+/// master kill switch, family knob, arena full at first use): every
+/// trigger-INSERT statement runs the DmlInsertOp portable host instead —
+/// permanently for this process (the refusal inputs are process-static;
+/// an arena-full first compile deopting forever is the documented
+/// fail-open posture).
+fn rowchain_body() -> Option<&'static ::lanestitch::StitchedRowChain> {
+    static BODY: std::sync::OnceLock<ShareChain> = std::sync::OnceLock::new();
+    BODY.get_or_init(|| {
+        // The production entry: the family kill knob stays live here
+        // (fault-injection acceptance leg), unlike the parity-only entry.
+        ShareChain(::lanestitch::StitchedRowChain::compile(&rowchain_insert_prog()))
+    })
+    .0
+    .as_ref()
+}
+
+/// The chain host: protocol targets are the mt seams, the feed is the
+/// inc-2 feed split verbatim. Holds the same disjoint borrows as the
+/// DmlInsertOp composition (op fields mt+epq; the subplan field feeds).
+struct MtInsertChainHost<'a, 'mcx> {
+    mt: &'a mut ::nodemodifytable::ModifyTableState<'mcx>,
+    epq: &'a mut crate::epq::EpqState<'mcx>,
+    subplan: &'a mut crate::procnode::PlanStateNode<'mcx>,
+    estate: &'a mut EStateData<'mcx>,
+    staged: Option<ExecSlotId>,
+    emitted: Option<ExecSlotId>,
+}
+
+impl<'mcx> ::lanestitch::RowChainHost for MtInsertChainHost<'_, 'mcx> {
+    fn next_row(&mut self) -> PgResult<bool> {
+        let Self { subplan, estate, .. } = self;
+        let r = match subplan {
+            // Lane-fed INSERT..SELECT: seq_scan_arm's exact statements
+            // (dispatch match hoisted) — MtLaneFedSeqScanSource verbatim.
+            crate::procnode::PlanStateNode::SeqScan(ss) => {
+                let mut fed = None;
+                if super::enabled() {
+                    fed = super::try_own_seq_scan(ss, estate)?;
+                }
+                match fed {
+                    Some(r) => r,
+                    None => ::nodeseqscan::exec_seq_scan(ss, estate)?,
+                }
+            }
+            // Every other child shape: the bare Volcano feed
+            // (MtChildSource verbatim).
+            other => crate::procnode::exec_proc_node(other, estate)?,
+        };
+        match r {
+            Some(slot) => {
+                self.staged = Some(slot);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    fn protocol_call(&mut self, call: u16) -> PgResult<::lanestitch::ChainVerdict> {
+        match call {
+            CALL_ROW_PROLOGUE => {
+                ::nodemodifytable::mt_row_prologue(self.mt, self.estate);
+                if ::nodemodifytable::mt_pending(self.mt) {
+                    // MERGE-only deferral arm: structurally unreachable in
+                    // the admitted INSERT set (no MERGE admission). Loud,
+                    // never silent divergence from mt_step.
+                    return Err(Box::new(PgError::error(
+                        "lane-v2 rowchain: deferred MERGE action in a trigger-INSERT \
+                         chain (admission contract violation)"
+                            .to_string(),
+                    )));
+                }
+                Ok(::lanestitch::ChainVerdict::Continue)
+            }
+            CALL_ACCEPT_ROW => {
+                let slot = self.staged.take().expect("accept with no staged row");
+                let Self { mt, epq, estate, .. } = self;
+                // THE pinned epq_eval closure, byte-identical to
+                // DmlInsertOp::accept (rechecks initiated by the delegated
+                // exec_insert drive through it — EPQ LAW distinction).
+                let rslot = ::nodemodifytable::mt_accept_row(
+                    mt,
+                    estate,
+                    slot,
+                    &mut |subs, e, inputslot, rti| {
+                        epq.result_rti = rti;
+                        crate::epq::eval_plan_qual(epq, subs, e, inputslot)
+                    },
+                )?;
+                match rslot {
+                    // Row consumed (BR suppression / no RETURNING): back to
+                    // the loop top — the prologue re-runs before the next
+                    // pull (loop_top_owed re-armed, structurally).
+                    None => Ok(::lanestitch::ChainVerdict::SkipRow),
+                    Some(r) => {
+                        self.emitted = Some(r);
+                        Ok(::lanestitch::ChainVerdict::EmitPause)
+                    }
+                }
+            }
+            other => Err(Box::new(PgError::error(format!(
+                "lane-v2 rowchain: unknown protocol call {other}"
+            )))),
+        }
+    }
+}
+
+/// One stitched chain drive (one owned pull's worth of work). `None` = the
+/// stitched tier refused; the caller falls through to the DmlInsertOp host
+/// for the WHOLE statement. `Some(Some(slot))` = an emitted RETURNING row
+/// (capacity-one pause); `Some(None)` = end of set (source exhausted +
+/// `mt_source_exhausted` under the latch).
+fn drive_insert_rowchain<'mcx>(
+    node: &mut crate::procnode::ModifyTablePlanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    let Some(chain) = rowchain_body() else {
+        return Ok(None);
+    };
+    if super::lane_trace_enabled() {
+        super::lane_trace("dml: modify drive owned (rowchain)");
+    }
+    #[cfg(test)]
+    DML_ROWCHAIN_DRIVES_FOR_TESTS.fetch_add(1, Relaxed);
+    let crate::procnode::ModifyTablePlanState { mt, subplan, epq } = node;
+    let mut host = MtInsertChainHost {
+        mt,
+        epq,
+        subplan,
+        estate,
+        staged: None,
+        emitted: None,
+    };
+    match chain.run(&mut host)? {
+        ::lanestitch::ChainOutcome::Paused => {
+            let r = host.emitted.take();
+            debug_assert!(r.is_some(), "chain paused without an emitted row");
+            Ok(Some(r))
+        }
+        ::lanestitch::ChainOutcome::Done => {
+            // Idempotence guard mirrors DmlInsertOp::source_exhausted.
+            if !host.mt.mt_done {
+                ::nodemodifytable::mt_source_exhausted(host.mt, host.estate)?;
+            }
+            Ok(Some(None))
+        }
+    }
+}
+// --- end WS-AA (wave-7) ------------------------------------------------------
