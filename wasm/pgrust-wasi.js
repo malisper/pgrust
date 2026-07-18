@@ -170,7 +170,7 @@ function nowSec() { return Math.floor(Date.now() / 1000); }
 const PREOPEN_FD = 3;
 const ALL_RIGHTS = 0xFFFFFFFFFFFFFFFFn;
 
-export function makeWasi({ image, manifest, vfs: existingVfs, stdinBytes, onStdout, onStderr, argv: argvOverride, env: envOverride }) {
+export function makeWasi({ image, manifest, vfs: existingVfs, stdinBytes, stdinStream, onStdout, onStderr, argv: argvOverride, env: envOverride }) {
   const vfs = existingVfs || new Vfs(image, manifest);
 
   const argv = argvOverride || [
@@ -411,6 +411,31 @@ export function makeWasi({ image, manifest, vfs: existingVfs, stdinBytes, onStdo
     fd_read(fd, iovsPtr, iovsLen, nreadPtr) {
       const h = fds.get(fd);
       if (!h) return E.BADF;
+      // Streaming stdin (protocol mode): the session's frontend bytes arrive
+      // incrementally. When nothing is queued and the stream is still open,
+      // return a Promise — under a JSPI Suspending wrapper this SUSPENDS the
+      // guest's blocking read until the host pushes the next pgwire frame
+      // (the browser-worker analog of the wasmtime host's blocking pipe).
+      // Without JSPI this arm is never taken (worker.js falls back to the
+      // --single engine); the fixed stdinBytes path below is unchanged.
+      if (h.kind === 'stdin' && stdinStream) {
+        const attempt = () => {
+          const view = dv(); const mem = u8();
+          let total = 0;
+          for (const { ptr, len } of iovs(iovsPtr, iovsLen)) {
+            if (len === 0) continue;
+            const chunk = stdinStream.take(len);
+            if (!chunk || chunk.length === 0) break;
+            mem.set(chunk, ptr);
+            total += chunk.length;
+            if (chunk.length < len) break;
+          }
+          view.setUint32(nreadPtr, total, true);
+          return E.SUCCESS;
+        };
+        if (stdinStream.ready() || stdinStream.isEof()) return attempt();
+        return stdinStream.wait().then(attempt);
+      }
       let total = 0;
       const mem = u8();
       for (const { ptr, len } of iovs(iovsPtr, iovsLen)) {
@@ -580,13 +605,27 @@ export function makeWasi({ image, manifest, vfs: existingVfs, stdinBytes, onStdo
       // SharedArrayBuffer to Atomics.wait on). Report every clock subscription
       // as already fired; fd subscriptions report the fd ready. --single never
       // waits on this path (see notes/wasm-boot-lane.md WaitEventSet arm).
+      //
+      // Protocol mode (stdinStream set): a FD_READ subscription on stdin
+      // reports fired ONLY when frontend bytes are queued (or the stream hit
+      // EOF) — this keeps the guest's emulated-noblock probe (fdnb::poll_ready
+      // over wasi-libc poll(2)) faithful: an empty stdin answers "not ready"
+      // (rc 0 after the zero-timeout clock fires) instead of luring a
+      // would-be-nonblocking read into a JSPI suspend. Fired events are
+      // written COMPACTLY per the WASI contract (nevents = fired count).
       const view = dv();
+      let fired = 0;
       for (let i = 0; i < nsubs; i++) {
         const sub = inPtr + i * 48;
         const userdataLo = view.getUint32(sub, true);
         const userdataHi = view.getUint32(sub + 4, true);
         const tag = view.getUint8(sub + 8);
-        const evt = outPtr + i * 32;
+        if (stdinStream && tag === 1 /* fd_read */) {
+          const subFd = view.getUint32(sub + 16, true);
+          if (subFd === 0 && !stdinStream.ready() && !stdinStream.isEof()) continue;
+        }
+        const evt = outPtr + fired * 32;
+        fired++;
         view.setUint32(evt, userdataLo, true);
         view.setUint32(evt + 4, userdataHi, true);
         view.setUint16(evt + 8, E.SUCCESS, true);
@@ -594,7 +633,7 @@ export function makeWasi({ image, manifest, vfs: existingVfs, stdinBytes, onStdo
         view.setBigUint64(evt + 16, 0n, true); // nbytes
         view.setUint16(evt + 24, 0, true);     // flags
       }
-      view.setUint32(neventsPtr, nsubs, true);
+      view.setUint32(neventsPtr, fired, true);
       return E.SUCCESS;
     },
     sock_recv() { return E.NOTSUP; },

@@ -8,7 +8,7 @@
 // EXCEPT the backend: queries run against OUR wasm engine (backend.js +
 // worker.js), not the design's mock.
 
-import { installBackend, bootBackend, resetBackend, setStatusListener, getBuildInfo } from './backend.js';
+import { installBackend, bootBackend, resetBackend, setStatusListener, getBuildInfo, getEngineMode, setPersist, getPersistState, setPersistListener } from './backend.js';
 
 // ---- example queries ---------------------------------------------------------
 // One build (wasm32-wasip1) with full float8 support — the old per-build
@@ -671,6 +671,41 @@ inputEl.addEventListener('keydown', (e) => {
 
 document.getElementById('btn-clear').addEventListener('click', () => { clearScreen(); maybeFocusInput(); });
 document.getElementById('btn-reset').addEventListener('click', () => { doReset(); maybeFocusInput(); });
+
+// ---- persist toggle (OPFS datadir snapshots — see worker.js/snapshot.js) -----
+const persistBtnEl = document.getElementById('btn-persist');
+
+function updatePersistUi() {
+  const st = getPersistState();
+  if (!st.available) {
+    persistBtnEl.textContent = 'persist: n/a';
+    persistBtnEl.disabled = true;
+    persistBtnEl.title = 'This browser/profile has no OPFS storage for the worker (e.g. private mode) — the datadir lives in memory only.';
+    return;
+  }
+  persistBtnEl.disabled = false;
+  persistBtnEl.textContent = st.persist ? 'persist: on' : 'persist: off';
+  persistBtnEl.style.color = st.persist ? '#ffd8c8' : '#8b93a1';
+}
+
+setPersistListener((st, note) => {
+  updatePersistUi();
+  if (note) pushLine('', note, '#7e8794');
+});
+
+persistBtnEl.addEventListener('click', async () => {
+  const st = getPersistState();
+  if (!st.available) return;
+  persistBtnEl.disabled = true;
+  try {
+    await setPersist(!st.persist);
+    captureAnalytics('wasm_demo_persist_toggled', { on: !st.persist });
+  } catch (e) {
+    pushLine('', 'persist toggle failed: ' + ((e && e.message) || e), '#e0594d');
+  }
+  updatePersistUi();
+  maybeFocusInput();
+});
 scrollEl.addEventListener('click', () => { if (!isMobileViewport()) focusInput(); });
 const updatesDialogEl = document.getElementById('updates-dialog');
 const updatesFormEl = document.getElementById('updates-form');
@@ -758,14 +793,22 @@ setStatusListener((text) => {
 bootBackend().then(() => {
   booted = true;
   updateBuildUi();
+  updatePersistUi();
   buildExamples();
   banner();
-  pushLine('', `engine ready — ${getBuildInfo().label}, single-user postgres over a persistent in-memory datadir.`, '#6f7785');
+  const engineNote = getEngineMode() === 'wire'
+    ? 'one live protocol session (temp tables, prepared statements, and transactions span statements)'
+    : 'single-user postgres over a persistent in-memory datadir';
+  pushLine('', `engine ready — ${getBuildInfo().label}, ${engineNote}.`, '#6f7785');
+  if (getPersistState().restored) {
+    pushLine('', 'restored your persisted datadir from this browser’s storage (persist is on; reset wipes it).', '#7e8794');
+  }
   pushLine('', '', '#6f7785');
   setBootStatus('Engine ready.');
   hideBootScreen();
   captureAnalytics('wasm_demo_loaded', {
     build: getBuildInfo().build,
+    engine: getEngineMode(),
   });
   maybeFocusInput();
 }).catch((e) => {
