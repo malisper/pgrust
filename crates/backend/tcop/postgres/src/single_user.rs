@@ -175,16 +175,28 @@ extern "C" fn bridge_signal_handler(signo: i32) {
     let saved = get_errno();
     // Pends this thread's disposition bit; drained at the next interrupt
     // point (ProcessClientReadInterrupt / CHECK_FOR_INTERRUPTS). Before
-    // ProcSignalInit registers the slot this is ESRCH — dropped, like a
-    // signal arriving pre-handler-install in C.
+    // ProcSignalInit registers the slot this is ESRCH — DROPPED. That is a
+    // known parity gap vs C, which pends via PostgresMain's pqsignal-installed
+    // handlers (just before the postgres.c:4276 unblock): our unhandled
+    // window spans InitPostgres
+    // (including StartupXLOG crash recovery), where C would honor SIGTERM at
+    // the next CFI. Ledgered in notes/wasm-p5-single-mode-worklog.md.
+    //
+    // NOT fully async-signal-safe: SendThreadSignal spin-acquires the slot's
+    // pss_mutex, and the SetLatch path can take the waiter slot's Mutex +
+    // Condvar. A signal landing while this (single) thread holds one of
+    // those locks (a latch park/unpark transition, ProcSignalInit/Release)
+    // would deadlock. Tolerated for now because the dominant delivery point
+    // — a blocked stdin read in interactive_getc — holds no locks; the
+    // proper fix is a sig_atomic staging flag drained at interrupt points.
     let _ = procsignal::SendThreadSignal(init_small::globals::MyProcPid(), signo);
     set_errno(saved);
 }
 
 fn install_single_user_signal_bridge() {
     for signo in [libc::SIGHUP, libc::SIGINT, libc::SIGTERM, libc::SIGQUIT] {
-        // SAFETY: standard sigaction install; the handler touches only
-        // atomics + the signal-safe SetLatch path, and restores errno.
+        // SAFETY: standard sigaction install; the handler restores errno.
+        // (It is not strictly async-signal-safe — see bridge_signal_handler.)
         unsafe {
             let mut sa: libc::sigaction = std::mem::zeroed();
             sa.sa_sigaction = bridge_signal_handler as *const () as usize;
