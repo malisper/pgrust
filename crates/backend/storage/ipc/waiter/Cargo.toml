@@ -9,10 +9,13 @@ name = "waiter"
 path = "src/lib.rs"
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(pgrust_sim)"] }
 
 [dependencies]
 libc = "0.2"
+# DST P2 (contract s1.1): the one monotonic authority. RealClock::now_ms
+# delegates here; pg_clock is a leaf crate (libc only), no cycle.
+pg_clock = { path = "../../../../port/pg_clock" }
 
 [target.'cfg(loom)'.dependencies]
 loom = "0.7"

@@ -12,6 +12,19 @@ use crate::{Slot, SlotInner};
 /// the reacquired guard and whether the provider considers the wait timed
 /// out. Spurious returns are fine — `Slot::park_core` re-evaluates deadlines
 /// with `now_ms`.
+///
+/// DST P2 INVARIANT (contract §1.1): the park hook stays HERE — the
+/// Slot/SlotInner types live in this crate and the dependency must not
+/// invert — but every non-loom `WaiterClock` provider's `now_ms` MUST
+/// delegate to `pg_clock::mono_ms()` (the one monotonic authority, law
+/// §0.2). Under `--cfg pgrust_sim` the harness-installed provider reads
+/// SimClock through the same `pg_clock` API, so waiter deadline math and
+/// `pg_clock` reads can never disagree. Parking is pre-block (dispatch cost
+/// irrelevant), so the `OnceLock<&'static dyn WaiterClock>` install hook
+/// survives for `wait` ONLY. Loom keeps its own `LoomClock` (`--cfg loom`
+/// compiles the slot core only; untouched). `VirtualClock` in plain test
+/// builds is the deliberate exception: it IS the deterministic test rig and
+/// drives its own counter; under `pgrust_sim` it re-homes onto SimClock.
 pub trait WaiterClock: Sync + Send {
     fn now_ms(&self) -> i64;
     fn wait<'a>(
@@ -31,11 +44,9 @@ mod real {
 
     impl WaiterClock for RealClock {
         fn now_ms(&self) -> i64 {
-            // SAFETY: clock_gettime(CLOCK_MONOTONIC) into a zeroed timespec.
-            let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
-            // SAFETY: valid pointer to ts.
-            unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
-            ts.tv_sec as i64 * 1000 + ts.tv_nsec as i64 / 1_000_000
+            // DST P2: the raw clock_gettime retired into pg_clock/src/posix.rs
+            // (one monotonic authority; provider invariant above).
+            pg_clock::mono_ms()
         }
 
         fn wait<'a>(
@@ -88,10 +99,19 @@ pub use real::install;
 #[cfg(not(loom))]
 pub mod virtual_time {
     use super::*;
+    #[cfg(not(pgrust_sim))]
     use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::Mutex;
 
     pub struct VirtualClock {
+        /// Plain test builds drive their own counter (the deterministic test
+        /// rig, contract §3.4: waiter suite green unmodified). Under
+        /// `--cfg pgrust_sim` this counter RETIRES onto `pg_clock`'s
+        /// SimClock — time reads come from `pg_clock::mono_ms()` and
+        /// `advance` moves the SimClock timeline, so there is exactly one
+        /// timeline (contract §1.1); only the sleeper registry + re-notify
+        /// machinery below survives.
+        #[cfg(not(pgrust_sim))]
         now: AtomicI64,
         /// Addresses of slots currently blocked in a timed virtual wait.
         /// SAFETY invariant: VirtualClock is only ever installed for parks
@@ -103,19 +123,30 @@ pub mod virtual_time {
     impl VirtualClock {
         pub const fn new() -> Self {
             VirtualClock {
+                #[cfg(not(pgrust_sim))]
                 now: AtomicI64::new(0),
                 sleepers: Mutex::new(Vec::new()),
             }
         }
 
         pub fn now(&self) -> i64 {
-            self.now.load(Ordering::SeqCst)
+            #[cfg(not(pgrust_sim))]
+            {
+                self.now.load(Ordering::SeqCst)
+            }
+            #[cfg(pgrust_sim)]
+            {
+                pg_clock::mono_ms()
+            }
         }
 
         /// Advance virtual time and wake every timed sleeper so it re-judges
         /// its deadline against the new now.
         pub fn advance(&self, ms: i64) {
+            #[cfg(not(pgrust_sim))]
             self.now.fetch_add(ms, Ordering::SeqCst);
+            #[cfg(pgrust_sim)]
+            pg_clock::sim::advance_ms(ms.max(0) as u64);
             // Snapshot then RELEASE the sleepers lock before touching slot
             // mutexes: a waking sleeper holds its slot mutex while removing
             // itself from sleepers — holding both here is a lock-order

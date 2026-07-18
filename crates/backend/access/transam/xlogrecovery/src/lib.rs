@@ -147,8 +147,14 @@ pub fn GetCurrentReplayRecPtr() -> (XLogRecPtr, TimeLineID) {
     (REPLAY_END_REC_PTR.load(Relaxed), REPLAY_END_TLI.load(Relaxed))
 }
 
+// stat(2)-succeeds existence probe over the fd-crate front (DST P1 inc-3).
+fn recovery_file_exists(rel: &str) -> bool {
+    let mut fi = fd::FileInfo::zeroed();
+    fd::pg_stat(&data_path(rel), &mut fi) == 0
+}
+
 pub fn RemovePromoteSignalFiles() {
-    let _ = std::fs::remove_file(data_path(PROMOTE_SIGNAL_FILE));
+    let _ = fd::pg_unlink(&data_path(PROMOTE_SIGNAL_FILE));
 }
 
 pub fn XLogRequestWalReceiverReply() {
@@ -267,8 +273,8 @@ impl PageSource {
 
     fn close_read_file(&mut self) {
         if self.read_file >= 0 {
-            // SAFETY: read_file is an fd this module opened.
-            unsafe { libc::close(self.read_file) };
+            // read_file is an fd this module opened.
+            fd::pg_close(self.read_file);
             self.read_file = -1;
         }
     }
@@ -323,9 +329,9 @@ impl PageSource {
                 path = data_path(&format!("{XLOGDIR}/{fname}"));
             }
         }
-        let cpath = std::ffi::CString::new(path.clone()).unwrap();
-        // SAFETY: NUL-terminated path; O_RDONLY open.
-        let fd = unsafe { libc::open(cpath.as_ptr(), libc::O_RDONLY) };
+        // BasicOpenFile: the fd-crate raw-open chokepoint (EMFILE-LRU aware),
+        // as C's XLogFileRead does.
+        let fd = fd::BasicOpenFile(&path, libc::O_RDONLY)?;
         if fd >= 0 {
             self.cur_file_tli = tli;
             if ps_status_seams::set_ps_display::is_installed() {
@@ -719,8 +725,8 @@ impl XLogSegmentRoutine for PageSource {
     }
     fn segment_close(&mut self, v: &mut ReaderView) {
         if v.seg.ws_file >= 0 {
-            // SAFETY: fd owned by the reader's segment slot.
-            unsafe { libc::close(v.seg.ws_file) };
+            // fd owned by the reader's segment slot.
+            fd::pg_close(v.seg.ws_file);
             v.seg.ws_file = -1;
         }
     }
@@ -793,15 +799,12 @@ impl XLogReaderRoutine for PageSource {
             self.read_off = target_page_off;
             let io_start =
                 pgstat::io::pgstat_prepare_io_time(guc_tables::vars::track_wal_io_timing.read());
-            // SAFETY: cur_page is the reader's XLOG_BLCKSZ read buffer.
-            let r = unsafe {
-                libc::pread(
-                    self.read_file,
-                    cur_page.as_mut_ptr() as *mut libc::c_void,
-                    XLOG_BLCKSZ,
-                    self.read_off as libc::off_t,
-                )
-            };
+            // cur_page is the reader's XLOG_BLCKSZ read buffer.
+            let r = fd::pg_pread(
+                self.read_file,
+                &mut cur_page[..XLOG_BLCKSZ],
+                self.read_off as i64,
+            );
             pgstat::io::pgstat_count_io_op_time(
                 pgstat::io::IOObject::Wal,
                 pgstat::io::IOContext::IOCONTEXT_NORMAL,
@@ -1019,14 +1022,14 @@ fn read_recovery_signal_file() -> PgResult<()> {
     if miscinit::IsBootstrapProcessingMode() {
         return Ok(());
     }
-    if std::path::Path::new(&data_path(RECOVERY_COMMAND_FILE)).exists() {
+    if recovery_file_exists(RECOVERY_COMMAND_FILE) {
         { ereport(FATAL)
             .errmsg(format!(
                 "using recovery command file \"{RECOVERY_COMMAND_FILE}\" is not supported"
             ))
             .finish(loc("readRecoverySignalFile"))?; unreachable!() }
     }
-    let _ = std::fs::remove_file(data_path(RECOVERY_COMMAND_DONE));
+    let _ = fd::pg_unlink(&data_path(RECOVERY_COMMAND_DONE));
 
     let fsync_signal = |rel: &str| {
         if let Ok(f) = std::fs::OpenOptions::new()

@@ -149,11 +149,9 @@ pub(crate) fn loc(line: i32, func: &'static str) -> ErrorLocation {
 }
 
 pub(crate) fn get_current_timestamp() -> types_core::TimestampTz {
-    const PG_EPOCH_OFFSET_US: i64 = 946_684_800_000_000; // 2000-01-01 - 1970-01-01
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock before 1970");
-    now.as_micros() as i64 - PG_EPOCH_OFFSET_US
+    // DST P2 (contract §1.2, census dedupe (c)): the private SystemTime
+    // duplicate deleted; the seam is the one GetCurrentTimestamp path.
+    timestamp_seams::get_current_timestamp::call()
 }
 
 
