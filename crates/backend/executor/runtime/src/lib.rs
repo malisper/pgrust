@@ -44,56 +44,37 @@ mod blocking;
 mod clock;
 mod ledger;
 
-/// PHASE3-CLOSE WS-WIDTH: which ledger face non-pool gangs
-/// (Gather/GatherMerge bgworker gangs now; index gangs / CREATE INDEX /
-/// vacuum's parallel index phase later, per morsel-runtime-v2 §4) charge
-/// their width through. Resolved by [`gang_width_face`] — ONE OnceLock
-/// read for BOTH gang knobs (§2.6 knob-OFF budget pin: the gather startup
-/// path costs ONE OnceLock bool read knob-OFF, and the unified knob adds
-/// ZERO reads beyond it).
+/// PHASE3-CLOSE WS-WIDTH: whether non-pool gangs (Gather/GatherMerge
+/// bgworker gangs now; index gangs / CREATE INDEX / vacuum's parallel
+/// index phase later, per morsel-runtime-v2 §4) lease width from the
+/// admission ledger's pool face. Resolved by [`gang_width_face`] — ONE
+/// OnceLock read (§2.6 knob-OFF budget pin: the gather startup path costs
+/// ONE OnceLock bool read knob-OFF). The WS-O external arm and its knob
+/// were retired by the W4 audited removal (the knob died with the body;
+/// see notes/se-p3close-width.md §6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GangWidthFace {
-    /// Both knobs off (the stock default): no lease, today's launch.
+    /// Knob off (the stock default): no lease, today's launch.
     Off,
-    /// `PGRUST_RUNTIME_LEDGER_GATHER` — the WS-O wave-2 external slab
-    /// (retired by the W4 audited removal once the flip letters ratify).
-    External,
-    /// `PGRUST_RUNTIME_WIDTH_UNIFIED` — unified pool-face gang entries.
-    /// Takes PRECEDENCE over the external knob when both are set (the
-    /// §2.4 mirror line names the shadowing).
+    /// `PGRUST_RUNTIME_WIDTH_UNIFIED` — unified pool-face gang entries
+    /// (requires `PGRUST_RUNTIME_LEDGER_V2` downstream; the fail-open
+    /// ladder: face off / no runtime / ledger off / capacity exhausted →
+    /// stock launch byte-exactly).
     Unified,
 }
 
 /// The one process-static gang-knob resolve (see [`GangWidthFace`]).
-/// Both envs require `PGRUST_RUNTIME_LEDGER_V2` downstream (the fail-open
-/// ladder: face off / no runtime / ledger off / capacity exhausted →
-/// stock launch byte-exactly).
 pub fn gang_width_face() -> GangWidthFace {
-    gang_width_knobs().0
-}
-
-/// Whether BOTH gang-width knobs were set (the §2.5 precedence case —
-/// unified wins; the mirror line reports the shadowing).
-pub fn gang_width_knobs_both_set() -> bool {
-    gang_width_knobs().1
-}
-
-fn gang_width_knobs() -> (GangWidthFace, bool) {
-    static KNOBS: std::sync::OnceLock<(GangWidthFace, bool)> = std::sync::OnceLock::new();
-    *KNOBS.get_or_init(|| {
-        let on = |v: std::result::Result<String, std::env::VarError>| {
-            matches!(v.as_deref(), Ok("1") | Ok("on"))
-        };
-        let unified = on(std::env::var("PGRUST_RUNTIME_WIDTH_UNIFIED"));
-        let external = on(std::env::var("PGRUST_RUNTIME_LEDGER_GATHER"));
-        let face = if unified {
+    static KNOB: std::sync::OnceLock<GangWidthFace> = std::sync::OnceLock::new();
+    *KNOB.get_or_init(|| {
+        if matches!(
+            std::env::var("PGRUST_RUNTIME_WIDTH_UNIFIED").as_deref(),
+            Ok("1") | Ok("on")
+        ) {
             GangWidthFace::Unified
-        } else if external {
-            GangWidthFace::External
         } else {
             GangWidthFace::Off
-        };
-        (face, unified && external)
+        }
     })
 }
 mod lifecycle;
@@ -362,15 +343,14 @@ impl Runtime {
     /// helpers) through the admission ledger. `requested` is denominated
     /// in WORKERS — the LEADER IS NOT COUNTED (C parity;
     /// parallel_leader_participation rides free). THE STABLE CALLER FACE
-    /// (PHASE3-CLOSE §2.1): the backing routes on the WS-WIDTH face —
-    /// `PGRUST_RUNTIME_WIDTH_UNIFIED` on ⇒ a unified pool-face gang entry
-    /// (frozen, non-shedding, charged by the ONE recompute); off ⇒ the
-    /// WS-O wave-2 external face, exactly as before.
+    /// (PHASE3-CLOSE §2.1): backed by a unified pool-face gang entry
+    /// (frozen, non-shedding, charged by the ONE recompute) — the ONLY
+    /// leased path since the W4 removal of the WS-O external face.
     ///
     /// None = FAIL-OPEN: the ledger is OFF (`PGRUST_RUNTIME_LEDGER_V2`
-    /// unset / per-instance toggle off) or the face's capacity is
-    /// exhausted (64 either way) — the caller keeps today's uncapped
-    /// launch path exactly (never block, never error).
+    /// unset / per-instance toggle off) or the gang capacity (64) is
+    /// exhausted — the caller keeps today's uncapped launch path exactly
+    /// (never block, never error).
     ///
     /// Some(lease): launch at most [`ParallelWidthLease::granted`] workers.
     /// **The grant MAY BE 0 — the caller MUST have a serial path** (e.g.
@@ -380,24 +360,8 @@ impl Runtime {
     /// gang width is released (granted counts ACTIVE width — the
     /// composition rule). Dropping the lease retires the entry.
     pub fn lease_parallel_width(self: &Arc<Self>, requested: u32) -> Option<ParallelWidthLease> {
-        let unified = self.sched.width_unified_enabled();
-        let (id, granted) = if unified {
-            self.sched.lease_gang_width(requested)?
-        } else {
-            self.sched.lease_external_width(requested)?
-        };
-        Some(ParallelWidthLease { rt: Arc::clone(self), id, granted, unified })
-    }
-
-    /// PHASE3-CLOSE WS-WIDTH face toggle (tests / A-B). Production default
-    /// is [`gang_width_face`] read once at construction — DEFAULT OFF
-    /// (= the WS-O external face). Toggle before leasing.
-    pub fn set_width_unified(&self, on: bool) {
-        self.sched.set_width_unified(on);
-    }
-
-    pub fn width_unified_enabled(&self) -> bool {
-        self.sched.width_unified_enabled()
+        let (id, granted) = self.sched.lease_gang_width(requested)?;
+        Some(ParallelWidthLease { rt: Arc::clone(self), id, granted })
     }
 
     /// WS-B test hook (the set_decay_quantum_ns precedent): per-instance
@@ -797,8 +761,7 @@ fn sched_park(sched: &sched::Scheduler, seen: u64) {
 
 /// RAII width lease for a non-pool parallel gang (WS-O wave 2, retargeted
 /// by PHASE3-CLOSE WS-WIDTH; see [`Runtime::lease_parallel_width`]).
-/// Holds one ledger entry — a unified pool-face gang row or a WS-O
-/// external-slab entry, fixed at acquisition: the grant is a frozen
+/// Holds one unified pool-face gang entry: the grant is a frozen
 /// headroom-only ceiling ([`ParallelWidthLease::granted`] may be 0 — the
 /// caller must have a serial path); [`ParallelWidthLease::settle`] tracks
 /// the ACTIVE width within it; drop retires the entry and returns the
@@ -807,9 +770,6 @@ pub struct ParallelWidthLease {
     rt: Arc<Runtime>,
     id: usize,
     granted: u32,
-    /// Which face backs this lease (fixed at acquisition; routes settle
-    /// and retire). W4 removes the external face and this flag with it.
-    unified: bool,
 }
 
 impl ParallelWidthLease {
@@ -819,13 +779,11 @@ impl ParallelWidthLease {
         self.granted
     }
 
-    /// Engine-of-record for the §2.4 width mirror.
+    /// Engine-of-record for the §2.4 width mirror (post-W4 there is one
+    /// leased engine; "fail-open" is the no-lease arm, printed by the
+    /// mirror itself).
     pub fn engine(&self) -> &'static str {
-        if self.unified {
-            "unified"
-        } else {
-            "external"
-        }
+        "unified"
     }
 
     /// Record the gang's ACTIVE width (launched/live workers ≤ granted;
@@ -837,22 +795,13 @@ impl ParallelWidthLease {
             "settling above the frozen grant ({active} > {})",
             self.granted
         );
-        let active = active.min(self.granted);
-        if self.unified {
-            self.rt.sched.settle_gang_width(self.id, active);
-        } else {
-            self.rt.sched.settle_external_width(self.id, active);
-        }
+        self.rt.sched.settle_gang_width(self.id, active.min(self.granted));
     }
 }
 
 impl Drop for ParallelWidthLease {
     fn drop(&mut self) {
-        if self.unified {
-            self.rt.sched.retire_gang_width(self.id);
-        } else {
-            self.rt.sched.retire_external_width(self.id);
-        }
+        self.rt.sched.retire_gang_width(self.id);
     }
 }
 
