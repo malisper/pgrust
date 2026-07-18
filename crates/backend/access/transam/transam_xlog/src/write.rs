@@ -189,12 +189,17 @@ fn XLogFileInitInternal(
     let open_flags = libc::O_RDWR | libc::O_CLOEXEC | get_sync_bit(wal_sync_method());
     match fd::BasicOpenFile(path, open_flags) {
         Ok(f) if f >= 0 => return Ok(f),
-        _ => {
-            // Existence probe (fd-mediated): missing segment -> create below;
-            // anything present (or oddly stat-able) -> report the open failure.
-            if fd::pg_file_exists(path)? {
+        res => {
+            let _ = res?;
+            // As in C: only ENOENT from the failed open falls through to
+            // segment creation; anything else (EACCES, a directory in the
+            // way, ...) reports the open failure.
+            let en = fd::get_errno();
+            if en != libc::ENOENT {
                 return ereport(ERROR)
-                    .errmsg(format!("could not open file \"{path}\""))
+                    .with_saved_errno(en)
+                    .errcode_for_file_access()
+                    .errmsg(format!("could not open file \"{path}\": %m"))
                     .finish(loc("XLogFileInitInternal"))
                     .map(|_| -1);
             }
