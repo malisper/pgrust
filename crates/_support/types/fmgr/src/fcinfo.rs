@@ -417,11 +417,14 @@ impl FunctionCallInfoBaseData {
     pub fn set_arg(&mut self, index: usize, value: Datum) {
         let slot = &mut self.args[index];
         // SAFETY: NullableDatum is a 16B/8-align POD; one 16B store (value +
-        // zeroed isnull/pad) where C pays a str+strb pair.
+        // zeroed isnull/pad) where C pays a str+strb pair. u64 words, NOT
+        // usize: the Datum word is 8 bytes on every target (ILP32 wasm32
+        // included), and a usize pair there would truncate the datum to its
+        // low 32 bits and leave isnull stale. Identical codegen on 64-bit.
         unsafe {
             core::ptr::from_mut(slot)
-                .cast::<[usize; 2]>()
-                .write([value.as_usize(), 0]);
+                .cast::<[u64; 2]>()
+                .write([value.as_u64(), 0]);
         }
     }
 
