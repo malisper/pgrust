@@ -67,6 +67,7 @@
 
 mod emit;
 mod interp;
+mod rowchain;
 mod spec;
 mod stitch;
 
@@ -75,6 +76,7 @@ use std::cell::Cell;
 use types_error::PgResult;
 
 pub use interp::{eval_project, eval_qual, eval_row, eval_row_chain};
+pub use rowchain::StitchedRowChain;
 pub use spec::{
     ArithOp, Batch, BoolTestKind, ChainCursor, ChainOutcome, ChainVerdict, CmpOp, Lane,
     NullTestKind, OutLane, Program, RowChainHost, SelVec, Step, MAX_COLS, MAX_OUTS, MAX_REGS,

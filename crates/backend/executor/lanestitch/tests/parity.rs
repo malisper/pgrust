@@ -2175,17 +2175,18 @@ fn sve2_match_admission_edges() {
 // ============================================================================
 // ===== WS-AA wave-7 append region — RowOp chain parity (fusion inc-0) ======
 // The mock protocol-call recorder standard: for every RowOp program and
-// every scripted host, the twin's host-call sequence must satisfy
+// every scripted host, the engine's host-call sequence must satisfy
 // CALL ORDER == ROW ORDER (loop-top calls before each pull, per-row calls
-// strictly between their row's pull and the next). Lands BEFORE the
-// stitched rowchain body (the inc-0 ordering gate): the stitched-vs-twin
-// legs extend this module in the stencil commit.
+// strictly between their row's pull and the next), and the stitched body
+// (tests skipped off-aarch64 / under the master kill switch) must replay
+// the interpreter twin's sequence byte-for-byte — same events, same pause
+// cadence, same outcome, same error.
 // ============================================================================
 mod rowchain_parity {
     use super::Lcg;
     use lanestitch::{
         eval_row, eval_row_chain, Batch, ChainCursor, ChainOutcome, ChainVerdict, CmpOp, Lane,
-        Program, RowChainHost, Step,
+        Program, RowChainHost, Step, StitchedRowChain,
     };
     use types_error::{PgError, PgResult};
 
@@ -2200,8 +2201,8 @@ mod rowchain_parity {
     }
 
     /// Deterministic scripted host + the recorder. Verdicts are a pure
-    /// function of (pulls, call id, seed) so every engine replays identical
-    /// scripts.
+    /// function of (pulls, call id, seed) so the twin and the stitched body
+    /// replay identical scripts.
     struct RecHost {
         nrows: u32,
         pulls: u32,
@@ -2322,7 +2323,7 @@ mod rowchain_parity {
         (p, top)
     }
 
-    /// Drive the twin to completion (re-entering across pauses), returning
+    /// Drive one engine to completion (re-entering across pauses), returning
     /// (events, pause count, error message if any).
     fn drive_twin(
         prog: &Program,
@@ -2340,27 +2341,115 @@ mod rowchain_parity {
         }
     }
 
-    /// The inc-0 recorder gate: fuzzed RowOp programs on the twin, the
-    /// recorder proving call order == row order across skip/pause/error
-    /// scripts. (The stitched-vs-twin comparison extends this in the
-    /// stencil commit — fuzzer first, stencil second: the ordering gate.)
+    fn drive_stitched(
+        chain: &StitchedRowChain,
+        host: &mut RecHost,
+    ) -> (Vec<Ev>, u32, Option<String>) {
+        let mut pauses = 0;
+        loop {
+            match chain.run(host) {
+                Ok(ChainOutcome::Paused) => pauses += 1,
+                Ok(ChainOutcome::Done) => return (host.events.clone(), pauses, None),
+                Err(e) => return (host.events.clone(), pauses, Some(e.message().to_string())),
+            }
+        }
+    }
+
+    /// The inc-0 gate: fuzzed RowOp programs, the recorder proving call
+    /// order == row order on the twin, and (aarch64) the stitched body
+    /// replaying the twin's event stream byte-for-byte — pauses, outcome,
+    /// and injected host errors included.
     #[test]
-    fn rowchain_fuzz_recorder_call_order_is_row_order() {
+    fn rowchain_fuzz_stitched_matches_twin_and_recorder() {
         let mut r = Lcg(0xA0_0007);
         for round in 0..400u32 {
             let (prog, top) = gen_chain_prog(&mut r);
             let nrows = r.below(40) as u32;
             let seed = r.next();
+            // Error injection on ~1/4 rounds.
             let err_on = if r.chance(25) { Some(r.below(60) as u32) } else { None };
 
             let mut th = RecHost::new(nrows, seed, top.clone());
             th.err_on_call = err_on;
-            let (tev, _tpause, terr) = drive_twin(&prog, &mut th);
+            let (tev, tpause, terr) = drive_twin(&prog, &mut th);
             assert_call_order_is_row_order(&tev, &top);
             if err_on.is_none() {
                 assert!(terr.is_none(), "round {round}: twin errored with no injection");
             }
+
+            let Some(chain) = StitchedRowChain::compile_for_parity(&prog) else {
+                assert!(
+                    !lanestitch::available(),
+                    "round {round}: chain refused on available hardware"
+                );
+                continue;
+            };
+            assert!(chain.code_bytes > 0 && chain.code_bytes < 4096);
+            let mut sh = RecHost::new(nrows, seed, top.clone());
+            sh.err_on_call = err_on;
+            let (sev, spause, serr) = drive_stitched(&chain, &mut sh);
+            assert_eq!(tev, sev, "round {round}: host-call sequences diverged");
+            assert_eq!(tpause, spause, "round {round}: pause cadence diverged");
+            assert_eq!(terr, serr, "round {round}: error identity diverged");
+            assert_call_order_is_row_order(&sev, &top);
         }
+    }
+
+    /// Kill-knob law: the production entry refuses under the default-OFF
+    /// `PGRUST_LANESTITCH_ROWCHAIN` (this test's environment must not arm
+    /// it — the suite runs knob-OFF by default; the armed arm rides the
+    /// parity entry above).
+    #[test]
+    fn rowchain_production_compile_respects_default_off_knob() {
+        let (prog, _) = gen_chain_prog(&mut Lcg(7));
+        if std::env::var("PGRUST_LANESTITCH_ROWCHAIN").as_deref() == Ok("1") {
+            // Armed environment: production compile == parity compile.
+            assert_eq!(
+                StitchedRowChain::compile(&prog).is_some(),
+                StitchedRowChain::compile_for_parity(&prog).is_some()
+            );
+        } else {
+            assert!(
+                StitchedRowChain::compile(&prog).is_none(),
+                "ROWCHAIN knob must default OFF"
+            );
+        }
+    }
+
+    /// Fail-closed classification pins: ill-formed chains refuse to stitch.
+    #[test]
+    fn rowchain_classification_fail_closed_pins() {
+        if !lanestitch::available() {
+            return;
+        }
+        // Zero NextRow.
+        let mut p = Program::new();
+        p.steps.push(Step::ProtocolCall { call: 1 });
+        assert!(StitchedRowChain::compile_for_parity(&p).is_none());
+        // Two NextRows.
+        let mut p = Program::new();
+        p.steps.push(Step::NextRow);
+        p.steps.push(Step::NextRow);
+        assert!(StitchedRowChain::compile_for_parity(&p).is_none());
+        // Pure step (v1 stitched vocabulary is RowOp-only; twin hosts it).
+        let mut p = Program::new();
+        p.steps.push(Step::NextRow);
+        p.steps.push(Step::LoadLane { col: 0, out: 0 });
+        assert!(StitchedRowChain::compile_for_parity(&p).is_none());
+        // Pure step at the loop top (chain_next_pos law).
+        let mut p = Program::new();
+        p.steps.push(Step::LoadLane { col: 0, out: 0 });
+        p.steps.push(Step::NextRow);
+        assert!(StitchedRowChain::compile_for_parity(&p).is_none());
+        // Volatile pin.
+        let mut p = Program::new();
+        p.steps.push(Step::NextRow);
+        p.steps.push(Step::ProtocolCall { call: 1 });
+        p.volatile = true;
+        assert!(StitchedRowChain::compile_for_parity(&p).is_none());
+        // Empty.
+        let p = Program::new();
+        assert!(StitchedRowChain::compile_for_parity(&p).is_none());
     }
 
     /// The spec-level fail-closed backstop: RowOp steps in a qual/projection
