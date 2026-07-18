@@ -674,7 +674,6 @@ mod fc_results {
         let mut flinfo = FmgrInfo::new(crate::split_text::fc_text_to_table, 6160, 2, false, true);
         let mut rsinfo = ReturnSetInfo::new(SFRM_ValuePerCall);
         let mut fci = LocalFcinfo::<2>::new(types_core::C_COLLATION_OID);
-        fci.resultinfo = rsinfo.as_fmnode_ptr();
         // SAFETY: ctx outlives the call loop.
         unsafe { fci.set_result_mcx(ctx.mcx()) };
         fci.set_arg(0, Datum::from_usize(input.as_ptr() as usize));
@@ -684,6 +683,9 @@ mod fc_results {
         loop {
             fci.isnull = false;
             rsinfo.isDone = ExprDoneCond::ExprSingleResult;
+            // Re-arm per invoke: the isDone write above invalidates a
+            // previously armed pointer's provenance (miri F6).
+            fci.resultinfo = rsinfo.as_fmnode_ptr();
             let d = flinfo.invoke(&mut fci).unwrap();
             if rsinfo.isDone == ExprDoneCond::ExprEndResult {
                 assert!(fci.isnull);
@@ -699,13 +701,14 @@ mod fc_results {
         // NULL input string: split_text's early-false return, zero rows.
         let mut flinfo2 = FmgrInfo::new(crate::split_text::fc_text_to_table, 6160, 2, false, true);
         let mut fci2 = LocalFcinfo::<2>::new(0);
-        fci2.resultinfo = rsinfo.as_fmnode_ptr();
         // SAFETY: ctx outlives this call.
         unsafe { fci2.set_result_mcx(ctx.mcx()) };
         fci2.set_arg_null(0);
         fci2.set_arg_null(1);
         rsinfo.isDone = ExprDoneCond::ExprSingleResult;
         fci2.isnull = false;
+        // Arm after the isDone write (miri F6).
+        fci2.resultinfo = rsinfo.as_fmnode_ptr();
         let _ = flinfo2.invoke(&mut fci2).unwrap();
         assert_eq!(rsinfo.isDone, ExprDoneCond::ExprEndResult);
     }
@@ -723,7 +726,6 @@ mod fc_results {
             FmgrInfo::new(crate::split_text::fc_text_to_table, 6161, 3, false, true);
         let mut rsinfo = ReturnSetInfo::new(SFRM_ValuePerCall);
         let mut fci = LocalFcinfo::<3>::new(types_core::C_COLLATION_OID);
-        fci.resultinfo = rsinfo.as_fmnode_ptr();
         // SAFETY: ctx outlives the call loop.
         unsafe { fci.set_result_mcx(ctx.mcx()) };
         fci.set_arg(0, Datum::from_usize(input.as_ptr() as usize));
@@ -734,6 +736,9 @@ mod fc_results {
         loop {
             fci.isnull = false;
             rsinfo.isDone = ExprDoneCond::ExprSingleResult;
+            // Re-arm per invoke: the isDone write above invalidates a
+            // previously armed pointer's provenance (miri F6).
+            fci.resultinfo = rsinfo.as_fmnode_ptr();
             let d = flinfo.invoke(&mut fci).unwrap();
             if rsinfo.isDone == ExprDoneCond::ExprEndResult {
                 break;

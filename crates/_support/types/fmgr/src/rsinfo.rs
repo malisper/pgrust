@@ -82,6 +82,13 @@ impl ReturnSetInfo {
 
     // The invariant that makes fcinfo.rsinfo_mut's cast sound: tag is private,
     // always RETURN_SET_INFO_TAG, and sits at offset 0 (repr(C)).
+    //
+    // Provenance contract (miri F6, notes/miri-pilot-lane.md): the returned
+    // pointer derives from this `&mut` borrow, so ANY later direct access to
+    // the ReturnSetInfo (even a safe field write like `rsinfo.isDone = ..`)
+    // invalidates it. Drivers must re-arm `fcinfo.resultinfo` with a fresh
+    // call immediately before EVERY invoke, after their last direct rsinfo
+    // access — the per-call shape C's execSRF.c has anyway.
     pub fn as_fmnode_ptr(&mut self) -> FmNodePtr {
         Some(NonNull::from(self).cast::<FmNode>())
     }
