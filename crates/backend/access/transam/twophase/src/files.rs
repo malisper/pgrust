@@ -99,16 +99,16 @@ pub(crate) fn read_twophase_file(
 }
 
 fn read_twophase_body(fd: i32, path: &str) -> PgResult<Vec<u8>> {
-    // SAFETY: fstat on a live fd owned by the transient-file table.
-    let mut stat: libc::stat = unsafe { core::mem::zeroed() };
-    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+    // fstat on a live fd owned by the transient-file table.
+    let mut stat = fd::FileInfo::zeroed();
+    if fd::pg_fstat(fd, &mut stat) != 0 {
         ereport(ERROR)
             .with_saved_errno(get_errno())
             .errcode_for_file_access()
             .errmsg(format!("could not stat file \"{path}\": %m"))
             .finish(here("ReadTwoPhaseFile"))?;
     }
-    let st_size = stat.st_size as i64;
+    let st_size = stat.size;
 
     let lower = (maxalign(SIZEOF_TWOPHASE_FILE_HEADER)
         + maxalign(SIZEOF_TWOPHASE_RECORD_ON_DISK)
@@ -130,8 +130,8 @@ fn read_twophase_body(fd: i32, path: &str) -> PgResult<Vec<u8>> {
     }
 
     let mut buf = vec![0u8; st_size as usize];
-    // SAFETY: buf spans st_size writable bytes.
-    let r = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), st_size as usize) };
+    // Freshly opened transient fd: whole-file positional read at offset 0.
+    let r = fd::pg_pread(fd, &mut buf, 0);
     if r != st_size as isize {
         if r < 0 {
             ereport(ERROR)
@@ -165,11 +165,14 @@ pub(crate) fn recreate_two_phase_file(xid: TransactionId, content: &[u8]) -> PgR
     }
 
     let result = (|| -> PgResult<()> {
+        let mut write_off: i64 = 0;
         for chunk in [content, &crc.to_ne_bytes()[..]] {
-            // SAFETY: chunk is a live readable slice.
-            if unsafe { libc::write(fd, chunk.as_ptr().cast(), chunk.len()) }
-                != chunk.len() as isize
-            {
+            // Positional write at the tracked append offset (O_TRUNC fd).
+            let w = fd::pg_pwrite(fd, chunk, write_off);
+            if w == chunk.len() as isize {
+                write_off += w as i64;
+            }
+            if w != chunk.len() as isize {
                 let mut en = get_errno();
                 if en == 0 {
                     en = libc::ENOSPC;
@@ -204,9 +207,7 @@ pub(crate) fn recreate_two_phase_file(xid: TransactionId, content: &[u8]) -> PgR
 /// `RemoveTwoPhaseFile(xid, giveWarning)`.
 pub(crate) fn remove_two_phase_file(xid: TransactionId, give_warning: bool) -> PgResult<()> {
     let path = two_phase_file_path(xid);
-    let cpath = std::ffi::CString::new(path.as_str()).expect("no NUL in 2PC path");
-    // SAFETY: NUL-terminated path.
-    if unsafe { libc::unlink(cpath.as_ptr()) } != 0 {
+    if fd::pg_unlink(&path) != 0 {
         let en = get_errno();
         if en != errno::ENOENT || give_warning {
             ereport(WARNING)
@@ -240,9 +241,10 @@ pub(crate) fn scan_twophase_dir() -> PgResult<Vec<u64>> {
 
 pub(crate) fn twophase_file_exists(xid: TransactionId) -> PgResult<bool> {
     let path = two_phase_file_path(xid);
-    let cpath = std::ffi::CString::new(path.as_str()).expect("no NUL in 2PC path");
-    // SAFETY: NUL-terminated path.
-    if unsafe { libc::access(cpath.as_ptr(), libc::F_OK) } == 0 {
+    // Existence probe (C: access(F_OK)); stat-succeeds is the fd-mediated
+    // equivalent for F_OK.
+    let mut fi = fd::FileInfo::zeroed();
+    if fd::pg_stat(&path, &mut fi) == 0 {
         return Ok(true);
     }
     let en = get_errno();
