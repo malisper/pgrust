@@ -477,10 +477,13 @@ fn end_claim_clear_slot<'mcx>(
 /// rs_nkeys == 0) — and only under `PGRUST_LANE_V2_HEAPFEED`. Constructing
 /// it elsewhere trips those AM debug asserts.
 ///
-/// NOT hosted by the m2 sink arms (hashjoin/distinct construct the legacy
-/// `PgrcolumnarGranuleSource`): a heap source for the join drives needs the
-/// staging state (`BatchSoa`) below the seam — WS-A inc-3's six-site
-/// consolidation, per the Phase-1 contract ruling (WS-K Q5).
+/// Sink-arm hosting (WS-K Q5, amended by K2 inc-1 / wave-8 WS-AC): the
+/// runtime HASHJOIN arm now hosts this source for its probe/build claim
+/// drives behind `PGRUST_LANE_V2_HEAPFEED` + `PGRUST_LANE_V2_K2_PROBE`
+/// (both default OFF; unbatched engagements only — the spill/batch-file
+/// routes never see a heap-fed row). The distinct sink arm still
+/// constructs the legacy `PgrcolumnarGranuleSource` only; consolidating
+/// the remaining sites onto the seam stays WS-A inc-3.
 pub(super) struct HeapBatchSource<'a, 'mcx> {
     ss: &'a mut ::nodeseqscan::SeqScanState<'mcx>,
     /// Advisory `prefetch_buffer` depth over each positioned claim window's

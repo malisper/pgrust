@@ -74,7 +74,7 @@
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use ::executils::{EStateData, ExecSlotId};
@@ -99,6 +99,9 @@ use ::types_nodes::plannodes::PlannedStmt;
 use ::types_nodes::NodeTag;
 use ::types_tuple::MinimalTupleData;
 
+use super::batch_source::{
+    heapfeed_v2_enabled, BatchGranuleSource, HeapBatchSource, SeqScanSource,
+};
 use super::router::{self, ArmClass, ArmCounter};
 use super::runtime_agg::ExitBump;
 use super::runtime_scan::{exprs_parallel_safe, PgrcolumnarGranuleSource};
@@ -181,6 +184,58 @@ fn hj_spill_force_batches() -> Option<u32> {
             .filter(|&n| n >= 2)
             .map(|n| n.next_power_of_two())
     })
+}
+
+// ---------------------------------------------------------------------------
+// K2 inc-1 (wave-8 WS-AC): the heap-fed probe/build feed over the
+// BatchGranuleSource seam (notes/se-wave8-k2.md).
+// ---------------------------------------------------------------------------
+
+/// `PGRUST_LANE_V2_K2_PROBE` (default OFF; K2 inc-1, R-KNOBS registry
+/// spelling): the hash-join heap-feed arm knob. Heap SeqScans admit into
+/// this arm only when BOTH this and `PGRUST_LANE_V2_HEAPFEED` are on —
+/// OFF (either knob) the admission gates refuse heap exactly where they
+/// always did (one cached-bool branch; today's bytes, today's refusal
+/// stream). AtomicU8 + `_set_for_tests` idiom (the HEAPFEED precedent) so
+/// units can A/B both states in one process.
+static K2_PROBE: AtomicU8 = AtomicU8::new(0);
+
+fn k2_probe_enabled() -> bool {
+    match K2_PROBE.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let on = matches!(
+                std::env::var("PGRUST_LANE_V2_K2_PROBE").as_deref(),
+                Ok("1") | Ok("on")
+            );
+            K2_PROBE.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+            on
+        }
+    }
+}
+
+/// Same-process A/B lever for the unit corpus.
+#[cfg(test)]
+pub(crate) fn k2_probe_set_for_tests(on: bool) {
+    K2_PROBE.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+}
+
+/// K2 inc-1 join-type envelope (hard): the heap feed takes only the four
+/// fill-free probe-side types. The right-fill family (RIGHT/FULL/
+/// RIGHT_ANTI — the FILL task sets), RIGHT_SEMI (the fail-closed
+/// no-otherqual gate in shared_exec.rs) and everything else ride the
+/// runtime/pgrcolumnar arm unchanged; heap-fed shapes outside the four
+/// refuse by name (`k2-heap-jointype`) and fall through to the serial
+/// arms byte-identically.
+fn k2_heap_jointype_admits(jt: ::types_nodes::JoinType) -> bool {
+    matches!(
+        jt,
+        ::types_nodes::JoinType::JOIN_INNER
+            | ::types_nodes::JoinType::JOIN_LEFT
+            | ::types_nodes::JoinType::JOIN_SEMI
+            | ::types_nodes::JoinType::JOIN_ANTI
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -877,6 +932,110 @@ fn with_worker_exec<R>(
     })
 }
 
+/// The K2 heap-fed BUILD-ACCEPT claim drive (seam branch of
+/// `build_morsel_body`): position through the seam, stage page batches,
+/// emit-dead word-skip, per-row emit → `shared_build_accept` (which
+/// MATERIALIZES the minimal-tuple bytes into the Local — copy at the
+/// consumer, so nothing in the build table aliases the pinned page).
+/// Unbatched by admission: no router, no batch-0 demotion. `Ok(true)` =
+/// envelope crossed (refusal, not error); the caller settles the claim
+/// (`end_claim`) on every path.
+fn build_claim_heap_seam<'mcx>(
+    src: &mut HeapBatchSource<'_, 'mcx>,
+    estate: &mut EStateData<'mcx>,
+    hstate: &mut ::nodehash::HashState<'mcx>,
+    local: &mut JoinBuildLocal,
+    range: &runtime::MorselRange,
+) -> PgResult<bool> {
+    src.position(estate, range.clone())?;
+    loop {
+        let n = src.next_batch(estate)?;
+        if n == 0 {
+            return Ok(false);
+        }
+        ::postgres_seams::check_for_interrupts::call()?;
+        // Emit-dead word skip (see the pgrcolumnar loop): snapshot the
+        // words — the emit below re-borrows the source mutably.
+        let skip = {
+            let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+            src.skip_sel().map(|s| {
+                w[..s.len()].copy_from_slice(s);
+                w
+            })
+        };
+        // Walk error carrier: `Some(e)` = a real error (rethrown); `None` =
+        // the local build crossed its envelope (the R5 refusal).
+        let walk = ::exectuples::for_each_live(
+            skip.as_ref().map(|w| &w[..]),
+            0,
+            n,
+            |i| -> Result<(), Option<Box<::types_error::PgError>>> {
+                let Some(slot_id) = src.emit(estate, i).map_err(Some)? else {
+                    return Ok(());
+                };
+                if shared_build_accept(hstate, estate, slot_id, local)
+                    .map_err(Some)?
+                    .is_err()
+                {
+                    return Err(None);
+                }
+                Ok(())
+            },
+        );
+        match walk {
+            Ok(()) => {}
+            Err(Some(e)) => return Err(e),
+            Err(None) => return Ok(true),
+        }
+    }
+}
+
+/// The K2 heap-fed PROBE claim drive (seam branch of `probe_morsel_body`):
+/// position through the seam, stage page batches, emit-dead word-skip,
+/// per-row emit → probe the batch-0 table → plain-agg partial absorb.
+/// Unbatched by admission (no frozen leaf map, no outer router). The only
+/// values that outlive a staged batch are the agg's transition copies in
+/// its own aggcontext (R3v: consumers copy at the consumer). The caller
+/// settles the claim (`end_claim`) on every path.
+fn probe_claim_heap_seam<'mcx>(
+    src: &mut HeapBatchSource<'_, 'mcx>,
+    estate: &mut EStateData<'mcx>,
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    hj: &mut ::nodehashjoin::HashJoinState<'mcx>,
+    hstate: &mut ::nodehash::HashState<'mcx>,
+    table: &FrozenJoinTable,
+    range: &runtime::MorselRange,
+) -> PgResult<()> {
+    src.position(estate, range.clone())?;
+    loop {
+        let n = src.next_batch(estate)?;
+        if n == 0 {
+            return Ok(());
+        }
+        ::postgres_seams::check_for_interrupts::call()?;
+        // Emit-dead word skip (see the pgrcolumnar loop): a cleared
+        // skip-sel bit is a row `emit` rejects with no observable effect,
+        // so the surviving probe stream is identical. Snapshot the words —
+        // the emit below re-borrows the source mutably.
+        let skip = {
+            let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+            src.skip_sel().map(|s| {
+                w[..s.len()].copy_from_slice(s);
+                w
+            })
+        };
+        let skip = skip.as_ref().map(|w| &w[..]);
+        ::exectuples::for_each_live(skip, 0, n, |i| -> PgResult<()> {
+            let Some(slot_id) = src.emit(estate, i)? else {
+                return Ok(());
+            };
+            shared_probe_outer(hj, hstate, estate, table, slot_id, &mut |_hj, estate, out| {
+                ::nodeagg::agg_plain_build_accept(agg, estate, out)
+            })
+        })?;
+    }
+}
+
 /// One BUILD-ACCEPT morsel: position the inner scan on the claimed granule
 /// range and materialize every surviving row into the Local — or, batched,
 /// route it (batch 0 → Local, others → the worker's inner batch file).
@@ -891,8 +1050,32 @@ fn build_morsel_body(
     let slot = shared.worker_slot(worker);
     with_worker_exec("runtime hash-join build morsel without a bound executor", |es, ps| {
         with_join_tree(es, ps, |estate, _agg, _hj, _outer_ss, hstate, inner_ss| {
+            // K2 inc-1 invariant: this arm admits pgrcolumnar scans and —
+            // behind PGRUST_LANE_V2_HEAPFEED + PGRUST_LANE_V2_K2_PROBE —
+            // heap scans. Heap claims ride the storage seam
+            // (HeapBatchSource, R3/R3v pin-holding rails); admission
+            // guarantees heap-fed engagements are UNBATCHED, so the spill
+            // routers never see a heap-fed row.
+            if ::nodeseqscan::seq_scan_is_heap(inner_ss) {
+                debug_assert!(
+                    spill.is_none(),
+                    "k2 heap feed admits only unbatched engagements"
+                );
+                local.begin_run(range.start);
+                let mut src = HeapBatchSource::new(inner_ss);
+                // WS-O claim-settle guard (the K1 scan-arm discipline):
+                // end_claim runs on the ERROR path too — a failed claim
+                // must not carry its page pin into the abort drain; the
+                // drive error wins the report.
+                let drove = build_claim_heap_seam(&mut src, estate, hstate, local, &range);
+                let settled = src.end_claim(estate);
+                let crossed = drove?;
+                settled?;
+                local.end_run();
+                return Ok(!crossed);
+            }
             // train-12 composition: AM-dispatched positioner (heap lane
-            // rename); this arm admits only pgrcolumnar scans by construction.
+            // rename); pgrcolumnar claims keep today's direct drive.
             ::nodeseqscan::seq_scan_set_morsel_range(
                 inner_ss,
                 estate,
@@ -1056,8 +1239,46 @@ fn probe_morsel_body(
     let slot = payload.worker_slot(worker);
     with_worker_exec("runtime hash-join probe morsel without a bound executor", |es, ps| {
         with_join_tree(es, ps, |estate, agg, hj, outer_ss, hstate, _inner_ss| {
+            // K2 inc-1 invariant: this arm admits pgrcolumnar scans and —
+            // behind PGRUST_LANE_V2_HEAPFEED + PGRUST_LANE_V2_K2_PROBE —
+            // heap scans. Heap claims ride the storage seam
+            // (HeapBatchSource, R3/R3v pin-holding rails); admission
+            // guarantees heap-fed engagements are UNBATCHED (no spill, no
+            // frozen leaf map, no batch-0 demotion), so the heap branch
+            // probes the batch-0 table directly and the only
+            // batch-outliving values are the plain agg's transition
+            // copies (aggcontext — consumers copy at the consumer).
+            if ::nodeseqscan::seq_scan_is_heap(outer_ss) {
+                debug_assert!(
+                    spill.is_none(),
+                    "k2 heap feed admits only unbatched engagements"
+                );
+                let table = table
+                    .as_deref()
+                    .expect("heap-fed probe requires the batch-0 table (no demotion without spill)");
+                let mut src = HeapBatchSource::new(outer_ss);
+                // WS-O claim-settle guard (the K1 scan-arm discipline):
+                // end_claim runs on the ERROR path too; the drive error
+                // wins the report.
+                let drove =
+                    probe_claim_heap_seam(&mut src, estate, agg, hj, hstate, table, &range);
+                let settled = src.end_claim(estate);
+                drove?;
+                settled?;
+                let pslot = worker - payload.pins_base;
+                {
+                    // Same export-into tail as the pgrcolumnar drive below
+                    // (overwrite discipline preserved).
+                    let mut g = lockm(&payload.partials[pslot]);
+                    agg_runtime_export_partial_into(
+                        agg,
+                        g.get_or_insert_with(Default::default),
+                    )?;
+                }
+                return Ok(());
+            }
             // train-12 composition: AM-dispatched positioner (heap lane
-            // rename); this arm admits only pgrcolumnar scans by construction.
+            // rename); pgrcolumnar claims keep today's direct drive.
             ::nodeseqscan::seq_scan_set_morsel_range(
                 outer_ss,
                 estate,
@@ -2115,6 +2336,53 @@ fn ensure_hooks_registered() {
 // Leader-side admission + engagement.
 // ---------------------------------------------------------------------------
 
+/// Leader-side task-set morsel-source construction, per AM (K2 inc-1).
+/// `None` = no geometry (empty part / empty relation / foreign AM) — the
+/// caller refuses engagement, fail-closed.
+///
+/// pgrcolumnar: today's `PgrcolumnarGranuleSource` over
+/// `seq_scan_cb_granule_geometry`, verbatim (the construction merely moved
+/// from `engage_ceremony` to admission — same object, same posture).
+/// heap: K1's seam geometry (`SeqScanSource::granule_map` →
+/// `GranuleMap::unbounded(nblocks, HEAP_STARTUP_C0)`) wrapped
+/// `GranuleMapSource::new(map, whole_boundary=false, coalesce=false)` —
+/// the scan arm's heap posture: boundary-free, sizer-truncated claims, and
+/// a boundary-free source must never claim whole boundaries (one claim
+/// would take the whole pipeline).
+fn k2_task_source<'mcx>(
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<(u64, Arc<dyn runtime::MorselSource>)>> {
+    if ::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
+        let Some((granules, starts)) =
+            ::nodeseqscan::seq_scan_cb_granule_geometry(ss, estate)?
+        else {
+            return Ok(None);
+        };
+        return Ok(Some((
+            granules,
+            Arc::new(PgrcolumnarGranuleSource {
+                starts: Arc::new(starts),
+                // This arm feeds claims straight into set_granule_range
+                // (single-epoch contract); it does not subdivide
+                // multi-epoch claims — never coalesce.
+                coalesce: false,
+            }) as Arc<dyn runtime::MorselSource>,
+        )));
+    }
+    // Heap (admission guarantees the K2 knobs gate this arm): reuse K1's
+    // block geometry through the storage seam — no new geometry policy.
+    let Some(map) = SeqScanSource::new(ss).granule_map(estate)? else {
+        return Ok(None);
+    };
+    let total = map.total();
+    Ok(Some((
+        total,
+        Arc::new(runtime::GranuleMapSource::new(Arc::new(map), false, false))
+            as Arc<dyn runtime::MorselSource>,
+    )))
+}
+
 /// The runtime hash-join arm. `None` = not engaged (caller falls through to
 /// the serial arms byte-identically — nothing was consumed). `Some(row)` =
 /// the plain agg's one finalized result row.
@@ -2167,12 +2435,35 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
         refuse("partials-not-order-insensitive-exact");
         return Ok(None);
     }
-    if !seq_scan_fusible(outer_ss, estate)? || !::nodeseqscan::seq_scan_is_pgrcolumnar(outer_ss) {
+    // K2 inc-1 (wave-8 WS-AC): the pgrcolumnar-only admission, widened onto
+    // the BatchGranuleSource seam — a heap SeqScan admits IFF BOTH
+    // PGRUST_LANE_V2_HEAPFEED and PGRUST_LANE_V2_K2_PROBE are on (cached
+    // bools, both default OFF: the knob-OFF world short-circuits to false
+    // and refuses every heap shape exactly where it always did).
+    let k2_heap = k2_probe_enabled() && heapfeed_v2_enabled();
+    if !seq_scan_fusible(outer_ss, estate)?
+        || !(::nodeseqscan::seq_scan_is_pgrcolumnar(outer_ss)
+            || (k2_heap && ::nodeseqscan::seq_scan_is_heap(outer_ss)))
+    {
         refuse("outer-scan-not-fusible");
         return Ok(None);
     }
-    if !seq_scan_fusible(inner_ss, estate)? || !::nodeseqscan::seq_scan_is_pgrcolumnar(inner_ss) {
+    if !seq_scan_fusible(inner_ss, estate)?
+        || !(::nodeseqscan::seq_scan_is_pgrcolumnar(inner_ss)
+            || (k2_heap && ::nodeseqscan::seq_scan_is_heap(inner_ss)))
+    {
         refuse("inner-scan-not-fusible");
+        return Ok(None);
+    }
+    // K2 heap-fed engagement marker (false = the pgrcolumnar arm verbatim).
+    let heap_fed = ::nodeseqscan::seq_scan_is_heap(outer_ss)
+        || ::nodeseqscan::seq_scan_is_heap(inner_ss);
+    if heap_fed && !k2_heap_jointype_admits(hj.state.plan.join.jointype) {
+        // Envelope (hard): INNER/LEFT/SEMI/ANTI only on the heap feed; the
+        // right-fill family + RIGHT_SEMI ride the runtime/pgrcolumnar arm
+        // unchanged, so a heap-fed shape there falls to the serial arms.
+        stats::tick_refused(ShapeClass::Join, RefuseReason::ParallelGate);
+        refuse("k2-heap-jointype");
         return Ok(None);
     }
     if estate.es_instrument != 0 || estate.es_epq_active {
@@ -2310,18 +2601,37 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
         }
         spill_batches = Some(want);
     }
+    // AC2 spill rung (K2 inc-1, the recorded choice — notes/se-wave8-k2.md
+    // §3): the heap feed refuses whenever the engagement would be BATCHED
+    // (nbatch>1 estimate under the spill arm, or the FORCE_BATCHES test
+    // knob), so HjSpill is never constructed for a heap-fed engagement and
+    // the batch-0 demotion crossing (seal dump / BatchRouter file appends)
+    // is unreachable by construction — no pinned-page byte can ride into a
+    // spill file. The statement rides the existing arms byte-for-byte.
+    if heap_fed && spill_batches.is_some() {
+        lane_trace(
+            "runtime-hashjoin: REFUSED (heap feed admits only unbatched engagements) — serial arm",
+        );
+        stats::tick_refused(ShapeClass::Join, RefuseReason::ParallelGate);
+        refuse("k2-heap-multibatch");
+        return Ok(None);
+    }
 
     // --- Geometry: the probe side pays the gang; the build side may be a
-    // small dimension table (any nonzero geometry admits).
-    let Some((outer_granules, outer_starts)) =
-        ::nodeseqscan::seq_scan_cb_granule_geometry(outer_ss, estate)?
-    else {
+    // small dimension table (any nonzero geometry admits). Per-AM through
+    // the storage seam (K2 inc-1): pgrcolumnar publishes its granule prefix
+    // sums and rides PgrcolumnarGranuleSource verbatim; heap REUSES K1's
+    // block geometry (`SeqScanSource::granule_map` →
+    // `GranuleMap::unbounded(nblocks, HEAP_STARTUP_C0)` — the scan arm's
+    // admission call, no new geometry policy) wrapped boundary-free,
+    // sizer-truncated, never coalesced. The tiny-input floor below applies
+    // to the heap arm identically (granule = one block there; floor knob
+    // semantics as proven by the SE6-GATES item-4b letters).
+    let Some((outer_granules, outer_source)) = k2_task_source(outer_ss, estate)? else {
         refuse("geometry");
         return Ok(None);
     };
-    let Some((_inner_granules, inner_starts)) =
-        ::nodeseqscan::seq_scan_cb_granule_geometry(inner_ss, estate)?
-    else {
+    let Some((_inner_granules, inner_source)) = k2_task_source(inner_ss, estate)? else {
         refuse("geometry");
         return Ok(None);
     };
@@ -2353,8 +2663,8 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
         rt,
         dop,
         outer_granules,
-        outer_starts,
-        inner_starts,
+        outer_source,
+        inner_source,
         envelope,
         fill_inner,
         spill_batches,
@@ -2373,8 +2683,11 @@ fn engage<'mcx>(
     rt: &'static Arc<runtime::Runtime>,
     dop: i32,
     outer_granules: u64,
-    outer_starts: Vec<u64>,
-    inner_starts: Vec<u64>,
+    // Task-set morsel sources, built per-AM at admission (K2 inc-1):
+    // pgrcolumnar = PgrcolumnarGranuleSource verbatim; heap = the seam's
+    // GranuleMap wrapped boundary-free/non-coalescing (`k2_task_source`).
+    outer_source: Arc<dyn runtime::MorselSource>,
+    inner_source: Arc<dyn runtime::MorselSource>,
     // Combined gang envelope per live table (admission's `envelope`; equals
     // exec_choose's space_allowed exactly when nbatch == 1).
     envelope: usize,
@@ -2451,8 +2764,8 @@ fn engage<'mcx>(
         rt,
         dop,
         outer_granules,
-        outer_starts,
-        inner_starts,
+        outer_source,
+        inner_source,
         &payload,
         sink,
         fill_inner,
@@ -2473,8 +2786,8 @@ fn engage_ceremony<'mcx>(
     rt: &'static Arc<runtime::Runtime>,
     dop: i32,
     outer_granules: u64,
-    outer_starts: Vec<u64>,
-    inner_starts: Vec<u64>,
+    outer_source: Arc<dyn runtime::MorselSource>,
+    inner_source: Arc<dyn runtime::MorselSource>,
     payload: &Arc<RuntimeHjShared>,
     sink: Arc<JoinBuildSink>,
     fill_inner: bool,
@@ -2495,17 +2808,16 @@ fn engage_ceremony<'mcx>(
             .unwrap_or_else(|_| unreachable!("pcxt shared set once"));
         parallel::set_private(pcxt, Arc::clone(payload) as _);
 
-        // Task sets [0]/[1]: the batch-0 build sink pair.
+        // Task sets [0]/[1]: the batch-0 build sink pair. The BUILD-ACCEPT
+        // source arrives per-AM from admission (K2 inc-1, `k2_task_source`):
+        // pgrcolumnar = PgrcolumnarGranuleSource{coalesce:false} verbatim
+        // (straight set_granule_range feed, single-epoch contract, never
+        // coalesce); heap = the seam's boundary-free GranuleMap, same
+        // never-coalesce posture.
         let runtime::SinkTaskSets { accept, combine, probe: _sink_probe } =
             runtime::sink_tasksets(
                 sink,
-                Arc::new(PgrcolumnarGranuleSource {
-                    starts: Arc::new(inner_starts),
-                    // This arm feeds claims straight into set_granule_range
-                    // (single-epoch contract); it does not subdivide
-                    // multi-epoch claims — never coalesce.
-                    coalesce: false,
-                }),
+                inner_source,
                 rt.nthreads() + runtime::MAX_EXTERNAL_LANES,
                 0,
             );
@@ -2533,11 +2845,8 @@ fn engage_ceremony<'mcx>(
         }
         let probe0_idx = tasksets.len();
         tasksets.push(runtime::TaskSetSpec {
-            source: Arc::new(PgrcolumnarGranuleSource {
-                starts: Arc::new(outer_starts),
-                // As above: straight set_granule_range feed, never coalesce.
-                coalesce: false,
-            }),
+            // PROBE source: per-AM from admission, as above.
+            source: outer_source,
             work: Arc::clone(payload) as Arc<dyn runtime::TaskSetWork>,
             deps: probe0_deps,
         });
@@ -2796,4 +3105,54 @@ fn drain_rg(rt: &'static Arc<runtime::Runtime>, rg: &runtime::RgHandle) -> bool 
         lane_trace("runtime-hashjoin: LEAKED pinned RG (drain gave up — dead participant?)");
     }
     drained
+}
+
+// ---------------------------------------------------------------------------
+// K2 inc-1 unit corpus (wave-8 WS-AC).
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod k2_tests {
+    use super::*;
+    use ::types_nodes::JoinType;
+
+    /// `PGRUST_LANE_V2_K2_PROBE` A/B lever (AtomicU8 idiom): both states
+    /// resolvable in one process; restored to OFF (the default the rest of
+    /// the suite assumes — knob-OFF = today's bytes and today's refusal
+    /// stream).
+    #[test]
+    fn k2_probe_knob_ab() {
+        k2_probe_set_for_tests(true);
+        assert!(k2_probe_enabled());
+        k2_probe_set_for_tests(false);
+        assert!(!k2_probe_enabled());
+    }
+
+    /// The K2 join-type envelope is EXACTLY the four fill-free probe-side
+    /// types — the right-fill family (RIGHT/FULL/RIGHT_ANTI), RIGHT_SEMI
+    /// and the planner-internal UNIQUE variants all refuse (they ride the
+    /// runtime/pgrcolumnar arm or the serial arms unchanged).
+    #[test]
+    fn k2_jointype_envelope_exact() {
+        let admitted = [
+            JoinType::JOIN_INNER,
+            JoinType::JOIN_LEFT,
+            JoinType::JOIN_SEMI,
+            JoinType::JOIN_ANTI,
+        ];
+        let refused = [
+            JoinType::JOIN_FULL,
+            JoinType::JOIN_RIGHT,
+            JoinType::JOIN_RIGHT_SEMI,
+            JoinType::JOIN_RIGHT_ANTI,
+            JoinType::JOIN_UNIQUE_OUTER,
+            JoinType::JOIN_UNIQUE_INNER,
+        ];
+        for jt in admitted {
+            assert!(k2_heap_jointype_admits(jt), "{jt:?} must admit");
+        }
+        for jt in refused {
+            assert!(!k2_heap_jointype_admits(jt), "{jt:?} must refuse");
+        }
+    }
 }
