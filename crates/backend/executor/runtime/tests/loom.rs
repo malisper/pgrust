@@ -896,3 +896,84 @@ fn stream_source_handshake() {
         assert_eq!(stats.rgs_completed, 1);
     });
 }
+
+// ===========================================================================
+// ParkLot (the idle-worker epoch eventcount) — DIRECT protocol models
+// (LOOM-BREADTH inc-1, absorbed at PERMIT-S2). Until now the eventcount was
+// only exercised through the whole-runtime models above; these pin ITS
+// invariant in isolation: with the capture-epoch -> check-work -> park(seen)
+// discipline, a wake_all issued at ANY point relative to the park is never
+// lost (the agg192-contention atomic-epoch rework's lost-wakeup argument,
+// verified exhaustively). 2-3 threads, single wake — inside the fast-tier
+// budget. ABSORB DELTA (compose §1.3): the models drive `pgsync::ParkLot`
+// DIRECTLY — the type runtime's sync facade re-exports — so the loom-world
+// pgsync types are what the models check; the branch-era cfg(loom)
+// `runtime::ParkLot` export is not needed and was not absorbed.
+// ===========================================================================
+
+/// One publisher, one idle worker: the worker runs the documented protocol
+/// (epoch() BEFORE the failed work pick; park(seen) only after the pick
+/// missed). The publisher stores work then wake_all()s. In EVERY
+/// interleaving the worker must terminate having seen the work — a lost
+/// wake parks it forever and loom's deadlock detector fails the model.
+#[test]
+fn parklot_publish_wake_never_lost() {
+    // UNBOUNDED (inc-1 review disposition, 2026-07-18): the space is
+    // exhaustible in seconds, so both tiers run the full space in-tree
+    // (the fast tier's env permutation/duration caps still apply there).
+    loom::model(|| {
+        let lot = Arc::new(pgsync::ParkLot::new());
+        let work = Arc::new(AtomicBool::new(false));
+
+        let publisher = {
+            let (lot, work) = (Arc::clone(&lot), Arc::clone(&work));
+            thread::spawn(move || {
+                // Publish order is the protocol: work visible BEFORE the
+                // epoch bump + notify.
+                work.store(true, Ordering::SeqCst);
+                lot.wake_all();
+            })
+        };
+
+        loop {
+            let seen = lot.epoch();
+            if work.load(Ordering::SeqCst) {
+                break;
+            }
+            lot.park(seen);
+        }
+        publisher.join().unwrap();
+        assert!(work.load(Ordering::SeqCst));
+    });
+}
+
+/// One publisher, TWO idle workers: a single wake_all must release both
+/// parkers (notify_all + epoch bump), in every interleaving of their
+/// capture/pick/park windows against the publish.
+#[test]
+fn parklot_wake_all_reaches_every_parker() {
+    // UNBOUNDED (inc-1 review disposition, 2026-07-18): see above.
+    loom::model(|| {
+        let lot = Arc::new(pgsync::ParkLot::new());
+        let work = Arc::new(AtomicBool::new(false));
+
+        let workers: Vec<_> = (0..2)
+            .map(|_| {
+                let (lot, work) = (Arc::clone(&lot), Arc::clone(&work));
+                thread::spawn(move || loop {
+                    let seen = lot.epoch();
+                    if work.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    lot.park(seen);
+                })
+            })
+            .collect();
+
+        work.store(true, Ordering::SeqCst);
+        lot.wake_all();
+        for w in workers {
+            w.join().unwrap();
+        }
+    });
+}

@@ -67,3 +67,25 @@ pub fn register_self(name: &str) -> Option<SlotGuard> {
     sched.register_self(name);
     Some(SlotGuard { _priv: () })
 }
+
+/// Parent side, when the OS spawn FAILED after [`register_child`] (the F3
+/// ledger shape): retire the never-entered slot so it cannot leak a
+/// Runnable ghost that wedges the schedule when granted. No-op when
+/// disabled or never registered.
+#[track_caller]
+pub fn cancel_child(slot: Option<SlotId>) {
+    if let (Some(sched), Some(slot)) = (sched::global(), slot) {
+        sched.cancel_never_entered(slot);
+    }
+}
+
+/// Rename the CALLING thread's slot to `new_vpid` — the wpool retention
+/// shape (F2): a retained standby serves every task under a fresh synthetic
+/// pid, and sim waiter-slot identity keys off `current_vpid`, so the model
+/// identity follows MyProcPid across a claim. Call it exactly where the
+/// product re-keys its own thread bookkeeping (`rekey_child_thread`).
+/// No-op when the scheduler is off or the thread is unregistered.
+#[track_caller]
+pub fn rekey_self(new_vpid: Vpid) {
+    sched::rekey_current(new_vpid);
+}
