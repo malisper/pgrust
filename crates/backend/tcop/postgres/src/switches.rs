@@ -1,5 +1,9 @@
-// Client-argv arm only; the secure arm (single-user/postmaster argv) has no
-// in-tree caller and stays a named panic.
+// process_postgres_switches (postgres.c:3790). The client-argv arm is the hot
+// caller (postinit startup options); the secure arm (ctx == PGC_POSTMASTER)
+// is the single-user command line, with the -E/-j/-r/-D/-b/-v specials and
+// the trailing DBNAME pickup.
+
+use std::cell::RefCell;
 
 use ::types_error::{PgResult, ERRCODE_SYNTAX_ERROR, ERROR, FATAL};
 use elog::ereport;
@@ -11,6 +15,16 @@ use crate::{
 };
 
 const ARG_TAKING_FLAGS: &[u8] = b"BCcDdfhkNprStvW-";
+
+thread_local! {
+    // userDoption (postgres.c:106): -D, consumed by SelectConfigFiles in
+    // PostgresSingleUserMain.
+    static USER_D_OPTION: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn user_d_option() -> Option<String> {
+    USER_D_OPTION.with_borrow(|v| v.clone())
+}
 
 fn c_atoi(s: &str) -> i32 {
     let t = s.trim_start();
@@ -33,24 +47,57 @@ fn is_dispatch_option(name: &str) -> bool {
 }
 
 pub fn process_postgres_switches(argv: &[String], gucctx: u8) -> PgResult<()> {
+    process_postgres_switches_inner(argv, gucctx, None)
+}
+
+/// The &dbname form (single-user): first bare argument becomes the database
+/// name instead of an error.
+pub fn process_postgres_switches_dbname(
+    argv: &[String],
+    gucctx: u8,
+    dbname: &mut Option<String>,
+) -> PgResult<()> {
+    process_postgres_switches_inner(argv, gucctx, Some(dbname))
+}
+
+fn process_postgres_switches_inner(
+    argv: &[String],
+    gucctx: u8,
+    mut dbname: Option<&mut Option<String>>,
+) -> PgResult<()> {
     let ctx = guc_context_from_u8(gucctx);
-    if ctx == GucContext::PGC_POSTMASTER {
-        panic!("process_postgres_switches: secure (single-user/postmaster) argv arm unported (postgres.c)");
-    }
-    let source = GucSource::PGC_S_CLIENT;
+    let secure = ctx == GucContext::PGC_POSTMASTER;
+    let source = if secure { GucSource::PGC_S_ARGV } else { GucSource::PGC_S_CLIENT };
     let fname = "process_postgres_switches";
 
-    let mut set = |name: &str, value: &str| guc::SetConfigOption(name, Some(value), ctx, source);
+    let set = |name: &str, value: &str| guc::SetConfigOption(name, Some(value), ctx, source);
 
     let mut errs = 0usize;
     let mut i = 1usize;
+    // Ignore the initial --single argument, if present.
+    if secure && argv.get(1).is_some_and(|a| a == "--single") {
+        i = 2;
+    }
     let mut bad: Option<&str> = None;
     'outer: while i < argv.len() && errs == 0 {
         let tok = argv[i].as_str();
         i += 1;
         let b = tok.as_bytes();
         if b.len() < 2 || b[0] != b'-' {
-            // C consumes a bare word as dbname only via the out param postinit never passes.
+            // Optional database name: only when the caller passed the out
+            // param (single-user) and it is still unset; getopt would have
+            // stopped at the first non-option, so trailing args past it are
+            // the argc != optind error below.
+            if let Some(dbname) = dbname.as_deref_mut() {
+                if dbname.is_none() {
+                    *dbname = Some(tok.to_string());
+                    if i < argv.len() {
+                        bad = Some(argv[i].as_str());
+                        break;
+                    }
+                    continue;
+                }
+            }
             bad = Some(tok);
             break;
         }
@@ -84,8 +131,43 @@ pub fn process_postgres_switches(argv: &[String], gucctx: u8) -> PgResult<()> {
 
             match flag {
                 b'B' => set("shared_buffers", optarg)?,
-                // secure-only or explicitly-ignored switches: C no-ops when !secure.
-                b'b' | b'C' | b'D' | b'E' | b'j' | b'n' | b'r' | b'T' | b'v' => {}
+                // 'C'/'n'/'T' are always ignored (consistency with the
+                // postmaster); the rest are secure-only.
+                b'C' | b'n' | b'T' => {}
+                b'b' => {
+                    /* Undocumented flag used for binary upgrades */
+                    if secure {
+                        init_small::globals::SetIsBinaryUpgrade(true);
+                    }
+                }
+                b'D' => {
+                    if secure {
+                        USER_D_OPTION.with_borrow_mut(|v| *v = Some(optarg.to_string()));
+                    }
+                }
+                b'E' => {
+                    if secure {
+                        crate::set_echo_query(true);
+                    }
+                }
+                b'j' => {
+                    if secure {
+                        crate::set_use_semi_newline_newline(true);
+                    }
+                }
+                b'r' => {
+                    /* send output (stdout and stderr) to the given file */
+                    if secure {
+                        let mut buf = [0u8; types_core::MAXPGPATH];
+                        let n = optarg.len().min(types_core::MAXPGPATH - 1);
+                        buf[..n].copy_from_slice(&optarg.as_bytes()[..n]);
+                        init_small::globals::SetOutputFileName(buf);
+                    }
+                }
+                // -v (FrontendProtocol override): kept by C only for a
+                // hypothetical FE/BE-protocol standalone mode; no storage
+                // consumer here, parsed and dropped.
+                b'v' => {}
                 b'-' | b'c' => {
                     if flag == b'-' && is_dispatch_option(optarg) {
                         return ereport(ERROR)
@@ -142,12 +224,15 @@ pub fn process_postgres_switches(argv: &[String], gucctx: u8) -> PgResult<()> {
     }
 
     if let Some(badarg) = bad {
-        // Under-postmaster spelling only: standalone is the secure panic above.
+        // Spelled differently depending on context, as in C (postgres.c:3999).
+        let msg = if init_small::globals::IsUnderPostmaster() {
+            format!("invalid command-line argument for server process: {badarg}")
+        } else {
+            format!("postgres: invalid command-line argument: {badarg}")
+        };
         return ereport(FATAL)
             .errcode(ERRCODE_SYNTAX_ERROR)
-            .errmsg(format!(
-                "invalid command-line argument for server process: {badarg}"
-            ))
+            .errmsg(msg)
             .errhint("Try \"postgres --help\" for more information.")
             .finish(loc(4165, fname));
     }

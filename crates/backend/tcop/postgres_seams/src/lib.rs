@@ -4,6 +4,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // PostgresSingleUserMain (tcop/postgres.c:4055) + the process-exit frame
+    // (main.c DISPATCH_SINGLE). argv is the FULL server argv (argv[1] ==
+    // "--single"); username per main.c's get_user_name_or_exit. Exits the
+    // process; never returns.
+    pub fn postgres_single_user_main(argv: &[String], username: &str) -> !
+);
+
+seam_core::seam!(
     // ProcessClientReadInterrupt(blocked) (tcop/postgres.c); Err is the
     // ereport(FATAL) "terminating connection" path.
     pub fn process_client_read_interrupt(blocked: bool) -> types_error::PgResult<()>
