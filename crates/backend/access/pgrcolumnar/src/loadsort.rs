@@ -545,9 +545,19 @@ struct FeedRun {
 }
 
 /// Pool of prefetch threads; joined (after `stop`) on drop.
+///
+/// permit-s5 row 16: pgsync::thread handles — the feeder spawns route
+/// through the pgsync::thread wrapper (the spawn door for identity-less
+/// utility threads; native arm = the std re-export, byte-identical), so
+/// WHEN the prefetch path becomes sim-reachable the feeders are
+/// door-registered and the drop-path join is a hooked Join park. NOTE the
+/// path is compile-fenced OUT of sim today (`open_prefetch` sim arm):
+/// feeder-side `vfs::pread` would EBADF in a pool thread's thread-local
+/// SimVfs universe — the remaining blocker is shared-universe SimVfs
+/// (s2 §6 item 1), NOT the spawn door; row 8 (this channel) defers with it.
 pub struct PrefetchPool {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    threads: Vec<std::thread::JoinHandle<()>>,
+    threads: Vec<pgsync::thread::JoinHandle<()>>,
 }
 
 impl Drop for PrefetchPool {
@@ -1011,7 +1021,9 @@ impl RunMergeV2 {
                 continue;
             }
             let stop2 = std::sync::Arc::clone(&stop);
-            let h = std::thread::Builder::new()
+            // permit-s5 row 16: door-routed via the pgsync::thread wrapper
+            // (sim-unreachable today — see the PrefetchPool doc).
+            let h = pgsync::thread::Builder::new()
                 .name("cb-run-prefetch".into())
                 .spawn(move || prefetch_feed(runs, stop2))
                 .map_err(|e| io_err("prefetch spawn", e))?;

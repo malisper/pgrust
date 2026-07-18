@@ -8,8 +8,15 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
+
+// pgsync by crate law (permit-s5, census row 16): the slots registry is
+// locked by the (now door-registered) timer thread AND by arming backends;
+// a raw std lock shared with a registered thread is the
+// permit-holder-blocks-raw watchdog wedge shape (s2 AVAILABLE precedent).
+// Native arm = identical std re-exports (zero cost).
+use pgsync::{Mutex, OnceLock};
 
 use pg_clock::Deadline;
 
@@ -110,13 +117,18 @@ fn timer() -> &'static TimerShared {
             slots: Mutex::new(HashMap::new()),
             timer_waker: AtomicU64::new(0),
         }));
-        // Timer-thread *spawn* seam = P3; untouched (contract §1.3).
+        // PERMIT-S5 (P3 census row 16): the timer thread spawns through the
+        // pgsync::thread child-registering wrapper — under the permit
+        // scheduler it registers a slot (synthetic vpid, spawn-fenced) and
+        // gates on its first grant, so its deadline parks drive virtual
+        // time and its fire-wakes are scheduled ops instead of External
+        // (OS-timed) wakes. Native arm = the std re-export, byte-identical.
         // wasm32: wasm32-wasip1 has no threads, so no timer can fire
         // asynchronously (and no SIGALRM exists either) — armed timeouts
         // are recorded but never fire. Known limitation of the boot
         // increment: statement_timeout/lock_timeout are inert on wasm.
         #[cfg(not(target_family = "wasm"))]
-        std::thread::Builder::new()
+        pgsync::thread::Builder::new()
             .name("pg-timeout-timer".into())
             .spawn(move || timer_thread(shared))
             .expect("could not spawn timeout timer thread");

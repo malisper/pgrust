@@ -280,13 +280,13 @@ rand	crates/port/pg_strong_random/src/os.rs	4	DST-REVIEW(ws-rng): SANCTIONED ent
 rand	crates/backend/replication/walreceiver/src/client.rs	1	DST-REVIEW(t27-train): t27-train merge reconciliation — site landed in the t26 recovery/metalfix re-board (post-dates the DST census seed @ 3fee87ff0); routing onto the pg_strong_random funnel (s2.3) chartered to the DST program (t28)
 
 # ==== spawn ====
-spawn	crates/backend/access/pgrcolumnar/src/loadsort.rs	1	P3 spawner-seam violator (s3.3)
-spawn	crates/backend/access/pgrcolumnar/src/writer.rs	1	P3 spawner-seam violator (s3.3)
+spawn	crates/backend/access/pgrcolumnar/src/loadsort.rs	1	DST-REVIEW(permit-s5): row 16 CONVERTED — door-routed via the pgsync::thread child-registering wrapper (scanner sees the textual thread::Builder, not the pgsync routing); sim-UNREACHABLE today (open_prefetch sim arm degrades: feeders would EBADF in thread-local SimVfs universes — shared-universe SimVfs, s2 #6 item 1, is the remaining blocker; row 8 defers with it)
+spawn	crates/backend/access/pgrcolumnar/src/writer.rs	1	DST-REVIEW(permit-s5): row 16 CONVERTED — stitch pool door-routed via the pgsync::thread wrapper (scanner sees the textual thread::Builder, not the pgsync routing); pure in-memory interning, schedulable once a corpus reaches install_stitch_pool
 spawn	crates/backend/executor/runtime/src/pool.rs	1	default-spawner arm; production uses spawn_with via launch_backend rtpool
 spawn	crates/backend/lib/dshash/bench/rig/src/main.rs	1	bench-rig crate, not server prod
 spawn	crates/backend/postmaster/bgjobs/src/lib.rs	1	dispatcher; already takes an injected spawner (s3.3)
 spawn	crates/backend/postmaster/launch_backend/src/lib.rs	5	SANCTIONED: the spawn door (s3.3) — ALL 5 sites parent-side registered: postmaster_child_launch + wpool spawn_standby (permit-s2) + rtpool spawn_worker/spawn_dispatcher + rtgang spawn_gang_worker (permit-s5)
-spawn	crates/backend/utils/misc/timeout/src/lib.rs	1	P3 spawner-seam violator: timer thread (s3.3)
+spawn	crates/backend/utils/misc/timeout/src/lib.rs	1	DST-REVIEW(permit-s5): row 16 CONVERTED — timer thread door-routed via the pgsync::thread wrapper (scanner sees the textual thread::Builder, not the pgsync routing); registered timer = deadline parks drive virtual time, fire-wakes are scheduled ops
 
 # ==== env ====
 env	crates/_support/jit_deform/src/lib.rs	1
@@ -432,8 +432,8 @@ blocking	crates/backend/replication/walsender/src/lib.rs	1	DST-REVIEW(t27-train)
 # 2026-07-17d @ dst/substrate e1a7e7b47 (P3-CENSUS). Zero-arg .join()
 # call shape. Exit criterion: every row converted, proof-ledgered, or
 # annotated as a non-thread name collision.
-join	crates/backend/access/pgrcolumnar/src/loadsort.rs	1	P3 row 14: prefetch-pool drop-path join L489 (design cited L462 pre-compose); bounded — joins after stop flag + channel drop
-join	crates/backend/access/pgrcolumnar/src/writer.rs	2	P3 row 14: stitch-pool joins — drop path L438 + finalize path L996; L996 is NEW vs the design row-14 list (same close-then-join shape)
+join	crates/backend/access/pgrcolumnar/src/loadsort.rs	1	P3 row 14: prefetch-pool drop-path join (bounded — after stop flag + channel drop); permit-s5: now a pgsync::thread hooked Join park under the scheduler (row 14 v2 shape)
+join	crates/backend/access/pgrcolumnar/src/writer.rs	2	P3 row 14: stitch-pool close-then-join pair (drop + finalize, census D1); permit-s5: both are pgsync::thread hooked Join parks under the scheduler (row 14 v2 shape)
 join	crates/backend/commands/copy/src/parallel.rs	1	P3 row 15: explicit scoped pump join L1506 inside the row-5 gang (design row 14 called scope-gang joins "implicit")
 join	crates/backend/executor/nodeagg/src/merge.rs	2	P3 rows 15/18: scoped claimer joins L2692/L2922, gang-bounded
 join	crates/backend/executor/nodeagg/src/pardistinct.rs	2	P3 row 15: scoped claimer joins L1832/L1977, gang-bounded
@@ -586,7 +586,6 @@ rawsync	crates/backend/access/common/tidstore/src/lib.rs	1
 rawsync	crates/backend/access/heap/vacuumlazy/src/morsels.rs	1
 rawsync	crates/backend/access/pgrcolumnar/src/condcache.rs	1
 rawsync	crates/backend/access/pgrcolumnar/src/loadsort.rs	5
-rawsync	crates/backend/access/pgrcolumnar/src/writer.rs	4
 rawsync	crates/backend/access/pgrcolumnar/src/part_cache.rs	1
 rawsync	crates/backend/access/pgrcolumnar/src/reader.rs	9
 rawsync	crates/backend/access/pgrcolumnar/src/scan.rs	4
@@ -714,7 +713,6 @@ rawsync	crates/backend/utils/misc/guc_tables/src/lane_pool.rs	5
 rawsync	crates/backend/utils/misc/guc_tables/src/parallel_engine.rs	3
 rawsync	crates/backend/utils/misc/guc_tables/src/runtime_pool.rs	8
 rawsync	crates/backend/utils/misc/guc_tables/src/slots.rs	1
-rawsync	crates/backend/utils/misc/timeout/src/lib.rs	1
 rawsync	crates/backend/utils/misc/tzparser/src/lib.rs	1
 rawsync	crates/backend/utils/sort/sharedtuplestore/src/lib.rs	1
 rawsync	crates/contrib/pg_stat_statements/src/lib.rs	1
@@ -748,7 +746,7 @@ time	crates/_support/pgsync/src/sim/watchdog.rs	3	DST-REVIEW(ws-core): heartbeat
 # pgsync when dst/permit-s1-sync lands (wiring point in the file header).
 blocking	crates/backend/tcop/postgres/src/sim_net.rs	1	DST-REVIEW(permit-s1-demo): W5 recovery-done gate in the two-backend corpus (1ms poll sleep until shared recovery state clears, the postmaster's backends-after-recovery law) — becomes a TimedPark under the WS-CORE scheduler
 join	crates/backend/tcop/postgres/src/sim_net.rs	2	DST-REVIEW(permit-s1-demo): session-2 JoinHandle joins (serial + concurrent arms); join-bounded-after-wake (session 2 exits on its own Terminate; no run token involved) — becomes a hooked join via pgsync
-spawn	crates/backend/tcop/postgres/src/sim_net.rs	1	DST-REVIEW(permit-s1-demo): the session-2 thread spawn (first multi-thread sim run); migrates to the launch_backend/pgsync spawn door when WS-CORE's registration hook lands (worklog hand-back row)
+spawn	crates/backend/tcop/postgres/src/sim_net.rs	1	DST-REVIEW(permit-s1-demo, hand-back DISCHARGED at compose): session-2 spawns via the pgsync::thread child-registering door (scanner sees the textual thread::Builder, not the pgsync routing) — annotation refreshed at permit-s5
 blocking	crates/backend/tcop/postgres/src/sim_sched_demo.rs	7	DST-REVIEW(permit-s1-demo): P4 red fixture cv-wait pair + fallback timer sleep — the INTENTIONALLY unshimmed watchdog-red corpus; red-battery discipline, never converts. +2 DST-REVIEW(permit-s2): the wpool demo's pgsync::thread::sleep rendezvous + drain poll — HOOKED TimedParks (scanner sees the textual sleep, not the pgsync routing). +2 DST-REVIEW(permit-s5): the rtpool demo's rendezvous + drain poll, same HOOKED TimedPark class
 rawsync	crates/backend/tcop/postgres/src/sim_sched_demo.rs	1	DST-REVIEW(permit-s1-compose): THE P4 red fixture's raw std::sync::Mutex — the rawness IS the fixture (watchdog must catch it); never migrates to pgsync. The PLANT/gate ops flipped to pgsync at compose (the file's designed wiring point)
 env	crates/backend/tcop/postgres/src/sim_sched_demo.rs	3	DST-REVIEW(permit-s1-demo): corpus knobs PGRUST_PERMIT_PLANT/RED/RED_FALLBACK_S, sim-harness domain (sim_net.rs knob precedent)
