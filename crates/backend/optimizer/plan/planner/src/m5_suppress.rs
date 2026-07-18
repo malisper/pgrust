@@ -133,6 +133,32 @@ pub enum CoverClass {
     /// grouped/distinct/sorted shapes, outer types in nested trees,
     /// disconnected graphs — classifies uncovered by construction.
     CbHashJoinMultiBuild,
+    /// SE-AGGJOIN row flip (band 87001): GROUPED (hashed) aggregation over
+    /// 2..=6 cbstore relations joined by a CONNECTED int-family equi graph —
+    /// the grouped-agg-over-join sink (per-worker hashed builds, grouped
+    /// partial export/combine, leader-table absorb + canonical retrieve).
+    /// FROM forms keyed: the flat N-RangeTblRef INNER forms and left-deep
+    /// nested INNER chains (INNER-ONLY: outer families can plan side-swapped
+    /// RIGHT shapes outside the walk's probe-local envelope). Group keys:
+    /// bare int2/4/8 Vars (the walk's byval word-equality whitelist is
+    /// wider — probe narrower). Aggregates: the PLAIN_FOLD_AGGS whitelist —
+    /// numeric-family int states (avg/sum int2/4/8, AvgAccum/Int128 inline)
+    /// INCLUDED, unlike the scan-grouped GROUPED_SINK_AGGS row (the grouped
+    /// sink exports them via the runtime-partial states). Planner-choice
+    /// guards: multibuild rel guards verbatim (distinct unindexed cbstore
+    /// rels, every rel nbatch==1 — the B1 discipline inherited),
+    /// enable_hashagg + enable_hashjoin required ON (either off costs a
+    /// sort/merge/NL serial shape the walk refuses — the suppress-then-
+    /// refuse direction), BARE-EQUI-ONLY quals (every top-level AND term an
+    /// int-family hashjoinable equi clause between distinct rels — residual
+    /// filter quals shifted the costing to a top-level Merge Join with full
+    /// statistics present, the e2e leg-X5 live finding), statistics on
+    /// every join/group key var (statistics-free keys default the join
+    /// selectivities into the same merge landing — leg X6), no ORDER BY/
+    /// LIMIT/OFFSET/DISTINCT (the Agg must be the plan ROOT), ngroups
+    /// floored under BOTH the groupby_high boundary and the export-cap
+    /// headroom.
+    CbHashJoinGroupedAgg,
     /// M5-5 Meta-over-Gather (the band-2a q30 handoff): plain (ungrouped)
     /// FOOTER-ANSWERABLE aggregation over one plain pgrcolumnar rel with NO
     /// quals — count(*)/count(col), min/max over bare int-family Vars,
@@ -218,6 +244,11 @@ pub const BOOTSTRAP_MATRIX: &[MatrixRow] = &[
         class: CoverClass::CbHashJoinMultiBuild,
         covered: true,
         qualifiers: "m5p1: 3-6 cbstore rels, flat/left-deep-INNER forms; connected int equi graph; unindexed; EVERY rel nbatch==1 (walk is unbatched-only); plain whitelisted aggs; floor reused from hashjoin-nbatch1 (provisional — GL-M5P1-1 letter owed)",
+    },
+    MatrixRow {
+        class: CoverClass::CbHashJoinGroupedAgg,
+        covered: true,
+        qualifiers: "se-aggjoin: 2-6 cbstore rels, flat/left-deep INNER-only forms; connected int equi graph; unindexed distinct rels; EVERY rel nbatch==1; int2/4/8 bare-Var group keys; PLAIN_FOLD_AGGS incl. avg/sum numeric-family int states; enable_hashagg+enable_hashjoin required; Agg-root only (no sort/limit/distinct); ngroups < min(groupby_high, 64k export headroom); floor reused from hashjoin-nbatch1 (provisional — GL-AGGJOIN-1 letter owed)",
     },
     MatrixRow {
         class: CoverClass::CbMetaFooterAgg,
@@ -317,6 +348,11 @@ fn class_guard(class: CoverClass) -> FloorGuard {
         // level; the largest side is the ladder's per-table N). The fleet
         // letter (GL-M5P1-1) owns un-provisionalizing or re-measuring it.
         CoverClass::CbHashJoinMultiBuild => FloorGuard { max_rows: 2_000_000.0, ..NO_GUARD },
+        // SE-AGGJOIN: PROVISIONAL reuse of the hashjoin-nbatch1 floor (same
+        // shared-build machinery per level; the grouped tail adds the
+        // export/absorb walk, floored separately by the ngroups guard in
+        // classify_aggjoin_grouped). GL-AGGJOIN-1 owns re-measuring.
+        CoverClass::CbHashJoinGroupedAgg => FloorGuard { max_rows: 2_000_000.0, ..NO_GUARD },
         // Footer answers are O(1) — never floored.
         CoverClass::CbMetaFooterAgg => NO_GUARD,
     }
@@ -522,6 +558,16 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         ) else {
             return Ok(false);
         };
+        // SE-AGGJOIN (band 87001): grouped 2-rel flat INNER forms key the
+        // grouped-sink row (the explicit outer-family JoinExpr forms stay
+        // unkeyed — side-swapped RIGHT plans sit outside the walk's
+        // probe-local envelope).
+        if parse.hasAggs && !parse.groupClause.is_nil() {
+            let rtis = [ra.rtindex as usize, rb.rtindex as usize];
+            let mut quals = Vec::new();
+            push_and_terms(top.quals, &mut quals);
+            return classify_aggjoin_grouped(run, parse, &rtis, &quals);
+        }
         return classify_join_sides(
             run,
             parse,
@@ -1055,12 +1101,18 @@ fn multibuild_enabled() -> bool {
     })
 }
 
-fn classify_multibuild(
-    run: &mut PlannerRun<'_>,
-    parse: &Query<'_>,
+fn classify_multibuild<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    parse: &Query<'mcx>,
     rtis: &[usize],
-    quals: &[Node<'_>],
+    quals: &[Node<'mcx>],
 ) -> PgResult<bool> {
+    // SE-AGGJOIN (band 87001): grouped shapes divert to the grouped-sink
+    // classifier (its own knobs + guards); everything below is the plain
+    // one-row multibuild row verbatim.
+    if parse.hasAggs && !parse.groupClause.is_nil() {
+        return classify_aggjoin_grouped(run, parse, rtis, quals);
+    }
     if !multibuild_enabled() {
         return refuse_join("multibuild disabled");
     }
@@ -1074,18 +1126,61 @@ fn classify_multibuild(
     {
         return refuse_join("not a plain one-row aggregation");
     }
+    let Some((relids, max_rows)) = multibuild_rel_guards(run, parse, rtis)? else {
+        return Ok(false);
+    };
+    if !equi_graph_connected(rtis, quals)? {
+        return refuse_join("equi graph does not connect all relations");
+    }
+    // EC discipline (SE-AGGJOIN fixer — the grouped row's hostile review
+    // proved the channel PRE-EXISTS here: at base 11fe9c48b the plain
+    // variant of H2 keys CbHashJoinMultiBuild and lands the identical
+    // serial merge plan). Distinct-relid dims off one shared fact key merge
+    // into one EC exactly like B1's aliases do; refuse shared-endpoint
+    // shapes. The plain row keeps its wider qual admission otherwise
+    // (filter-term X5-class discipline = GL-M5P1-1's handoff).
+    if ec_disjoint_equi_edges(rtis, quals)?.is_none() {
+        return refuse_join("equi terms share a join key (EC-derived clause hazard)");
+    }
+    // Emit discipline: every tlist entry a whitelisted plain aggregate
+    // whose args live on one of the joined rels (count(*) included).
+    let mut n = 0usize;
+    for tle_node in &parse.targetList {
+        let Some(tle) = tle_node.as_target_entry() else { return Ok(false) };
+        if !is_whitelisted_agg_nrti(tle.expr, rtis, PLAIN_FOLD_AGGS) {
+            return refuse_join("tlist entry not a whitelisted plain agg");
+        }
+        n += 1;
+    }
+    if n == 0 {
+        return refuse_join("empty tlist");
+    }
+    // Floor guard input: the largest rel's estimated rows (the nbatch1
+    // ladder's per-table N — provisional reuse, see class_guard).
+    finish(run, CoverClass::CbHashJoinMultiBuild, relids[0], 0.0, max_rows, 0.0)
+}
+
+/// The multibuild per-relation guards, shared by the plain and grouped rows
+/// (extracted verbatim at SE-AGGJOIN): plain DISTINCT unindexed cbstore
+/// rels (the B1 self-join discipline), EVERY rel's build estimate
+/// nbatch==1. `None` = refused (traced).
+fn multibuild_rel_guards(
+    run: &mut PlannerRun<'_>,
+    parse: &Query<'_>,
+    rtis: &[usize],
+) -> PgResult<Option<(Vec<u32>, f64)>> {
     let mut relids = Vec::with_capacity(rtis.len());
     let mut max_rows = 0.0f64;
     for &rti in rtis {
         let Some(rte) = parse.rtable.nth(rti - 1).as_range_tbl_entry() else {
-            return refuse_join("side not a plain RTE");
+            return refuse_join_none("side not a plain RTE");
         };
         if rte.rtekind != RTEKind::RTE_RELATION
             || rte.relkind != types_rel::RELKIND_RELATION
             || rte.inh
             || rte.tablesample.is_some()
         {
-            return refuse_join("side not a plain relation");
+            return refuse_join_none("side not a plain relation");
         }
         if relids.contains(&rte.relid) {
             // B1 guard: a relation joined twice (self-join via aliases)
@@ -1094,22 +1189,22 @@ fn classify_multibuild(
             // Merge Join + Materialize on it with NO indexes present — a
             // shape the multibuild walk refuses, which would land the
             // suppression on serial (probe-outruns-walk, risk P1).
-            return refuse_join("relation appears more than once (EC self-join clause)");
+            return refuse_join_none("relation appears more than once (EC self-join clause)");
         }
         relids.push(rte.relid);
         let Some(rel_id) = run.root.simple_rel_array.get(rti).copied().flatten() else {
-            return refuse_join("side has no RelOptInfo yet");
+            return refuse_join_none("side has no RelOptInfo yet");
         };
         let rel = run.root.rel(rel_id);
         if rel.amflags & AMFLAG_PGRCOLUMNAR == 0 {
-            return refuse_join("side not cbstore");
+            return refuse_join_none("side not cbstore");
         }
         max_rows = max_rows.max(rel.rows.max(0.0));
         if !rel.indexlist.is_empty() {
-            return refuse_join("side has indexes");
+            return refuse_join_none("side has indexes");
         }
         let Some(pt_id) = rel.pathtarget_id else {
-            return refuse_join("side has no pathtarget yet");
+            return refuse_join_none("side has no pathtarget yet");
         };
         let width = run.root.pathtarget(pt_id).width;
         let dop = guc_tables::runtime_pool::runtime_dop();
@@ -1121,9 +1216,23 @@ fn classify_multibuild(
             dop.max(1),
         );
         if nbatch > 1 {
-            return refuse_join("nbatch estimate > 1 (multibuild walk is unbatched-only)");
+            return refuse_join_none("nbatch estimate > 1 (multibuild walk is unbatched-only)");
         }
     }
+    Ok(Some((relids, max_rows)))
+}
+
+/// Traced refusal in `Option` position (the rel-guards helper's shape).
+fn refuse_join_none<T>(why: &str) -> PgResult<Option<T>> {
+    let _ = refuse_join(why)?;
+    Ok(None)
+}
+
+/// The multibuild connected-equi-graph check, shared by the plain and
+/// grouped rows (extracted verbatim at SE-AGGJOIN): union-find over the
+/// int-family hashjoinable equi terms; `false` = disconnected (a cartesian
+/// shape the walk refuses; the caller traces the refusal).
+fn equi_graph_connected(rtis: &[usize], quals: &[Node<'_>]) -> PgResult<bool> {
     // Connectivity (union-find with path halving).
     fn uf_find(uf: &mut [usize], mut x: usize) -> usize {
         while uf[x] != x {
@@ -1160,25 +1269,254 @@ fn classify_multibuild(
     let root0 = uf_find(&mut uf, 0);
     for i in 1..rtis.len() {
         if uf_find(&mut uf, i) != root0 {
-            return refuse_join("equi graph does not connect all relations");
+            return Ok(false);
         }
     }
-    // Emit discipline: every tlist entry a whitelisted plain aggregate
-    // whose args live on one of the joined rels (count(*) included).
-    let mut n = 0usize;
+    Ok(true)
+}
+
+/// SE-AGGJOIN fixer guard (hostile-review BLOCKING find, legs
+/// h1_ecdim/h2_trans): EquivalenceClass derivation evades PER-QUAL
+/// discipline. Two equi terms sharing a key var — H2 `f.k1 = d1.k AND
+/// f.k1 = db.k` (EC-derived dim-dim clause), H1 `f.k1 = d1.k AND
+/// d1.k = d2.k` (written dim-dim term through a shared var) — merge into
+/// ONE EquivalenceClass; the planner derives the dim-dim equality and can
+/// cost a serial Merge Join + Materialize on it with no indexes present —
+/// a shape the multibuild walk refuses (suppress-then-refuse, the B1
+/// defect class, EC flavor; B1's repeated-relid guard is the SAME
+/// mechanism through alias ECs). Guard: over the DISTINCT equi edges
+/// (exact-duplicate terms collapse first — the planner dedups them into
+/// one two-var EC with nothing left to derive, so `f.k1 = d1.k AND
+/// f.k1 = d1.k` stays owned), no (rel, attno) endpoint may appear in more
+/// than one edge — pairwise-DISJOINT two-var ECs leave the planner nothing
+/// to derive, so the join graph it costs is exactly the written tree.
+/// `None` = a shared endpoint (caller refuses); `Some(n)` = n distinct
+/// edges (the grouped row additionally requires n == rels-1: a TREE, no
+/// parallel edges — multi-clause hash joins are outside the proven
+/// envelope, fail closed).
+fn ec_disjoint_equi_edges(rtis: &[usize], quals: &[Node<'_>]) -> PgResult<Option<usize>> {
+    let mut edges: Vec<((usize, i32), (usize, i32))> = Vec::new();
+    for &qual in quals {
+        let Some(op) = qual.as_op_expr() else { continue };
+        if op.args.len() != 2 {
+            continue;
+        }
+        let (a, b) = (op.args.nth(0), op.args.nth(1));
+        let hit = |e: Node<'_>| rtis.iter().position(|&rti| key_var(e, rti).is_some());
+        let (Some(ia), Some(ib)) = (hit(a), hit(b)) else { continue };
+        if ia == ib {
+            continue;
+        }
+        let (Some(va), Some(vb)) = (key_var(a, rtis[ia]), key_var(b, rtis[ib])) else {
+            continue;
+        };
+        if !is_int_family(va.vartype)
+            || !is_int_family(vb.vartype)
+            || !lsyscache::op_hashjoinable(op.opno, va.vartype)?
+        {
+            continue;
+        }
+        let (ea, eb) = ((ia, va.varattno as i32), (ib, vb.varattno as i32));
+        let edge = if ea <= eb { (ea, eb) } else { (eb, ea) };
+        if !edges.contains(&edge) {
+            edges.push(edge);
+        }
+    }
+    for (i, e1) in edges.iter().enumerate() {
+        for e2 in edges.iter().skip(i + 1) {
+            if e1.0 == e2.0 || e1.0 == e2.1 || e1.1 == e2.0 || e1.1 == e2.1 {
+                return Ok(None);
+            }
+        }
+    }
+    Ok(Some(edges.len()))
+}
+
+/// SE-AGGJOIN (band 87001): the grouped-agg-over-join classifier — the
+/// CbHashJoinGroupedAgg row (see the CoverClass doc for the full guard
+/// list). Shared by every keyed FROM form (flat 2..=6-RangeTblRef INNER;
+/// left-deep INNER chains via classify_multibuild's divert). Strictly
+/// narrower than `agg_grouped_runtime_admissible` + the multibuild state
+/// walk, PLUS the planner-choice guards the walk cannot express. Every
+/// early `false` keeps Gather exactly as today.
+/// Knob coherence: `PGRUST_RUNTIME_HASHJOIN_GROUPSINK=0` (the grouped
+/// arm's kill) un-keys the class outright; `PGRUST_RUNTIME_HASHJOIN_
+/// MULTIBUILD=0` un-keys the 2+-join tree forms (the walk refuses them
+/// then) while the single-join form stays keyed (the walk still owns it).
+fn groupsink_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_HASHJOIN_GROUPSINK").map_or(true, |v| v.trim() != "0")
+    })
+}
+
+/// Probe-side headroom under the executor's grouped export cap
+/// (PGRUST_RUNTIME_HASHJOIN_GROUPSINK_MAX_GROUPS default 131072): estimates
+/// above HALF the cap keep Gather — an estimate that near-misses the cap
+/// would engage, cross it at runtime, and land the R5 serial rerun.
+const GROUPSINK_NGROUPS_FLOOR: f64 = 65_536.0;
+
+/// SE-AGGJOIN stats guard (the e2e leg-X6 LIVE finding): on STATISTICS-FREE
+/// relations the costing's default join selectivities explode the join-row
+/// estimates and elect serial MERGE shapes the walk refuses — the B1
+/// suppress-then-refuse defect class, costing flavor (reproduced: unanalyzed
+/// 3-rel fixture planned `HashAggregate -> Merge Join` post-suppression). A
+/// key var is ESTIMABLE when it carries pg_statistic rows or is provably
+/// unique — the signals `eqjoinsel` actually consults (the pgrcolumnar
+/// FOOTER NDV feeds only the GROUP estimation path, not join selectivity —
+/// footer-only rels reproduced the merge landing with a perfect ngroups
+/// estimate, so footers deliberately do NOT admit; a footer-backed ANALYZE
+/// harvests stadistinct and is the class's admission ticket — GL-AGGJOIN-1
+/// leg (c) verifies the fleet fixtures key). Any key without one keeps
+/// Gather.
+fn key_var_estimable<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    v_node: Node<'mcx>,
+) -> PgResult<bool> {
+    let id = run.intern_expr(v_node);
+    let vd = crate::selfuncs::examine_variable(run, id, v_node, 0)?;
+    Ok(vd.stats.is_some() || vd.isunique)
+}
+
+fn classify_aggjoin_grouped<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    parse: &Query<'mcx>,
+    rtis: &[usize],
+    quals: &[Node<'mcx>],
+) -> PgResult<bool> {
+    if !groupsink_enabled() {
+        return refuse_join("groupsink disabled");
+    }
+    if rtis.len() >= 3 && !multibuild_enabled() {
+        return refuse_join("multibuild disabled (grouped tree)");
+    }
+    // Bare grouped aggregation only: the Agg must be the plan ROOT (any
+    // sort/limit/distinct decoration plans a node above it — walk refusal).
+    if !parse.hasAggs
+        || parse.groupClause.is_nil()
+        || !parse.distinctClause.is_nil()
+        || !parse.sortClause.is_nil()
+        || parse.limitCount.is_some()
+        || parse.limitOffset.is_some()
+    {
+        return refuse_join("not a bare grouped aggregation");
+    }
+    // With either planner path off, the serial plan is a sort-grouped /
+    // merge / NL shape the walk refuses (the suppress-then-refuse
+    // direction, risk P1's false-positive arm) — keep Gather.
+    if !crate::gucs::enable_hashagg() || !crate::gucs::enable_hashjoin() {
+        return refuse_join("hashagg/hashjoin planner paths disabled");
+    }
+    let Some((relids, max_rows)) = multibuild_rel_guards(run, parse, rtis)? else {
+        return Ok(false);
+    };
+    if !equi_graph_connected(rtis, quals)? {
+        return refuse_join("equi graph does not connect all relations");
+    }
+    // Qual discipline (legs X5+X6, both reproduced LIVE by this lane's e2e):
+    // EVERY top-level AND term must be an int-family hashjoinable equi
+    // clause between two DISTINCT joined rels, with statistics on BOTH key
+    // vars. Residual filter quals shift the costing toward sort/merge
+    // shapes the walk refuses (a fact-side filter elected a top-level Merge
+    // Join with FULL statistics present — X5), and statistics-free keys give
+    // the costing default join selectivities with the same merge landing
+    // (X6). Bare equi-join grouped shapes over analyzed rels ONLY.
+    for &qual in quals {
+        let Some(op) = qual.as_op_expr() else {
+            return refuse_join("non-equi qual (costing can elect merge/sort shapes)");
+        };
+        if op.args.len() != 2 {
+            return refuse_join("non-equi qual (costing can elect merge/sort shapes)");
+        }
+        let (a, b) = (op.args.nth(0), op.args.nth(1));
+        let hit = |e: Node<'_>| rtis.iter().position(|&rti| key_var(e, rti).is_some());
+        let (Some(ia), Some(ib)) = (hit(a), hit(b)) else {
+            return refuse_join("non-equi qual (costing can elect merge/sort shapes)");
+        };
+        if ia == ib {
+            return refuse_join("non-equi qual (costing can elect merge/sort shapes)");
+        }
+        let (Some(va), Some(vb)) = (key_var(a, rtis[ia]), key_var(b, rtis[ib])) else {
+            return refuse_join("non-equi qual (costing can elect merge/sort shapes)");
+        };
+        if !is_int_family(va.vartype)
+            || !is_int_family(vb.vartype)
+            || !lsyscache::op_hashjoinable(op.opno, va.vartype)?
+        {
+            return refuse_join("non-hashjoinable qual term");
+        }
+        if !key_var_estimable(run, a)? || !key_var_estimable(run, b)? {
+            return refuse_join("join key without statistics (statistics-free rel)");
+        }
+    }
+    // EC discipline (hostile-review BLOCKING find — see ec_disjoint_equi_edges):
+    // pairwise-disjoint two-var ECs only, and exactly rels-1 distinct edges
+    // (a TREE — parallel edges plan multi-clause hash joins outside the
+    // proven envelope). Either violation keeps Gather.
+    let Some(nedges) = ec_disjoint_equi_edges(rtis, quals)? else {
+        return refuse_join("equi terms share a join key (EC-derived clause hazard)");
+    };
+    if nedges != rtis.len().saturating_sub(1) {
+        return refuse_join("equi terms exceed a join tree (parallel edges)");
+    }
+    // Key discipline: every group key a bare int2/4/8 Var on one joined rel
+    // (the walk's byval word-equality whitelist is wider — probe narrower).
+    let mut key_refs: Vec<u32> = Vec::new();
+    for gc_node in &parse.groupClause {
+        let Some(gc) = gc_node.as_sort_group_clause() else { return Ok(false) };
+        let Some(tle) = tle_by_sortgroupref(parse, gc.tleSortGroupRef) else {
+            return Ok(false);
+        };
+        let Some(v) = rtis.iter().find_map(|&rti| key_var(tle.expr, rti)) else {
+            return refuse_join("group key not a bare joined-rel Var");
+        };
+        if !is_int_family(v.vartype) {
+            return refuse_join("group key not int-family");
+        }
+        if !key_var_estimable(run, tle.expr)? {
+            return refuse_join("group key without estimable ndistinct (statistics-free rel)");
+        }
+        key_refs.push(gc.tleSortGroupRef);
+    }
+    // Emit discipline: bare group-key Vars or whitelisted plain aggregates
+    // (PLAIN_FOLD_AGGS — the grouped sink exports the numeric-family int
+    // states the scan-grouped GROUPED_SINK_AGGS row refuses).
+    let mut n_aggs = 0usize;
     for tle_node in &parse.targetList {
         let Some(tle) = tle_node.as_target_entry() else { return Ok(false) };
+        if tle.ressortgroupref != 0 && key_refs.contains(&tle.ressortgroupref) {
+            if rtis.iter().all(|&rti| key_var(tle.expr, rti).is_none()) {
+                return Ok(false);
+            }
+            continue;
+        }
         if !is_whitelisted_agg_nrti(tle.expr, rtis, PLAIN_FOLD_AGGS) {
             return refuse_join("tlist entry not a whitelisted plain agg");
         }
-        n += 1;
+        n_aggs += 1;
     }
-    if n == 0 {
-        return refuse_join("empty tlist");
+    if n_aggs == 0 {
+        // Zero aggregates = a DISTINCT-shaped emit (numtrans==0 tables have
+        // no pergroup space to export) — walk refusal, keep Gather.
+        return refuse_join("no aggregates");
     }
-    // Floor guard input: the largest rel's estimated rows (the nbatch1
-    // ladder's per-table N — provisional reuse, see class_guard).
-    finish(run, CoverClass::CbHashJoinMultiBuild, relids[0], 0.0, max_rows, 0.0)
+    // Group estimate under BOTH the groupby_high boundary and the export
+    // cap headroom (input rows ≈ the largest rel — conservative for the
+    // fixture shapes the class targets, and the runtime cap is the
+    // fail-closed backstop either way).
+    let ngroups = if run.root.processed_groupClause.is_empty() {
+        1.0
+    } else {
+        let clauses =
+            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.processed_groupClause);
+        let group_exprs =
+            types_pathnodes::run::sortgrouplist_exprs(run, &clauses, &parse.targetList);
+        crate::selfuncs::estimate_num_groups(run, &group_exprs, max_rows.max(1.0))?
+    };
+    if ngroups >= groupby_high_floor() || ngroups >= GROUPSINK_NGROUPS_FLOOR {
+        return refuse_join("group estimate above the grouped-sink floor");
+    }
+    finish(run, CoverClass::CbHashJoinGroupedAgg, relids[0], ngroups, max_rows, 0.0)
 }
 
 /// Matrix consult + optional trace, shared tail.
