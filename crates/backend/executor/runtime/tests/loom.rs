@@ -1358,6 +1358,13 @@ fn caller_c2_parked_drive_liveness() {
 /// wake (notify_source_progress) and the epoch capture-before-step are
 /// what close the window, exactly as the pre-ledger handshake model
 /// proved for the knob-OFF path.
+/// PRE-FIX TEETH (review-corrected record): at loom-fast bounds
+/// (LOOM_MAX_PERMUTATIONS=200000) this model passes pre-fix — the
+/// bounded exploration prefix never lets a starved worker spin long
+/// enough to matter. EXHAUSTIVE, it FAILS pre-fix (~40s): the
+/// unbounded self-wake spin's tracked atomic ops saturate loom's u16
+/// `VersionVec` counters — the same artifact class as model 7's
+/// tripwire, beyond the 200k prefix.
 /// LOOM-FAST SIZING (≤5min law): pb 2 as the knob-OFF twin; 2 workers,
 /// 2 granules, one producer.
 #[test]
@@ -1412,10 +1419,23 @@ fn ledger_starved_leave_wake_gate_no_lost_wakeup() {
 /// caller_parked_drive_pumps_idle_park_ledger_on / _park_error arm).
 /// Pre-fix this LIVELOCKS: the caller's own starved leave bumps the park
 /// epoch every step, the C2 epoch pre-check never admits the park, the
-/// publish never happens, and the model spins unboundedly (the gate's
-/// timeout is the tripwire). Post-fix the park must run under every
-/// ordering of the ledger words and the drive completes with drained
-/// accounting. LOOM-FAST SIZING: single caller thread, 2 granules.
+/// publish never happens, and the model spins unboundedly. The pre-fix
+/// ORACLE (review-corrected record): loom has no livelock detector for a
+/// non-switching spin — what trips, deterministically in ~0.01s, is
+/// loom's causality bookkeeping. The spin's unbounded tracked ops WRAP
+/// the caller thread's u16 `VersionVec` counter (`inc` is an unchecked
+/// `+= 1` in release), after which the caller's own `active_workers`
+/// fetch_add in `run_task` no longer appears causally-after the atomic's
+/// creation-time happens-after mark (`State::new` → `track_unsync_mut`),
+/// and loom panics "Causality violation: Concurrent load and mut
+/// accesses" (created = the taskset entry's `active_workers` init in
+/// sched.rs; load = the `run_task` fetch_add). Single user thread ⇒ a
+/// genuine race is impossible; the panic is an ARTIFACT of the removed
+/// busy-loop path — and precisely therefore a sound, fast tripwire: any
+/// reintroduced unbounded spin re-trips it. Post-fix the park must run
+/// under every ordering of the ledger words and the drive completes with
+/// drained accounting. LOOM-FAST SIZING: single caller thread, 2
+/// granules.
 #[test]
 fn caller_c2_ledger_starved_park_completes() {
     let mut b = loom::model::Builder::new();
