@@ -389,16 +389,13 @@ env	crates/pl/plpgsql/src/handler.rs	1	DST-REVIEW(t27-train): spi-compile-residu
 # ==== blocking ====
 blocking	crates/backend/access/heap/vacuumlazy/src/lib.rs	1
 blocking	crates/backend/access/heap/vacuumlazy/src/morsels.rs	1
-blocking	crates/backend/access/index/relscan/src/parallel.rs	3	CONVERTED-to-pgsync (permit-s3): btree parallel-scan Condvar now hooked/SCHED-VISIBLE; the rg.rs::seize protocol conversion stays chartered (census s3 row 2; loom guard = ParkLot eventcount models, direct model owed at the seize API)
 blocking	crates/backend/access/pgrcolumnar/src/loadsort.rs	6	P3: readahead channels (s3.3)
 blocking	crates/backend/access/pgrcolumnar/src/scan.rs	2
-blocking	crates/backend/access/pgrcolumnar/src/writer.rs	3	P3: stitch-pool channels (s3.3)
-blocking	crates/backend/access/transam/parallel/src/lib.rs	3	P3: parallel error-queue channels (s3.3)
 blocking	crates/backend/access/transam/parallel/src/standing.rs	4	CONVERTED (permit-s3): gang Condvar/Mutex/OnceLock = pgsync types; leader join = the modeled detach-count cv join (loom standing_gang_detach_count_join_no_lost_wake); SCHED-VISIBLE under sim
 blocking	crates/backend/access/transam/transam_xlog/src/startup.rs	1
 blocking	crates/backend/access/transam/transam_xlog/src/write.rs	1
 blocking	crates/backend/access/transam/xlogutils/src/lib.rs	1
-blocking	crates/backend/commands/copy/src/parallel.rs	3	P3: parallel-COPY work/result channels (s3.3)
+blocking	crates/backend/commands/copy/src/parallel.rs	1	CONVERTED-row-5 (permit-s4): work/done channels now pgsync::mailbox (recv-under-mutex KILLED structurally); remaining site = the row-6 drain_rg timed sleep L1574 (stays a sleep by design, retires with the sleep family)
 blocking	crates/backend/commands/vacuum/src/lib.rs	1
 blocking	crates/backend/executor/execmain/src/execparallel.rs	1
 blocking	crates/backend/executor/execmain/src/lanev2/runtime_agg.rs	1
@@ -408,7 +405,6 @@ blocking	crates/backend/executor/execmain/src/lanev2/runtime_hashjoin.rs	1
 blocking	crates/backend/executor/execmain/src/lanev2/runtime_plaindistinct.rs	1
 blocking	crates/backend/executor/execmain/src/lanev2/runtime_scan.rs	1
 blocking	crates/backend/executor/execmain/src/lanev2/runtime_sort.rs	1
-blocking	crates/backend/executor/nodebitmapheapscan/src/lib.rs	3	CONVERTED-to-pgsync (permit-s3): cv-poll now hooked (sim wait_timeout rides the wrapped Condvar); the pg_barrier phase-pattern conversion stays chartered (census s3 row 3; loom guard = pg_barrier phase models)
 blocking	crates/backend/executor/runtime/src/lib.rs	1
 blocking	crates/backend/executor/runtime/src/lifecycle.rs	3	sanctioned as runtime plumbing; must register as a choke point (s3.3)
 blocking	crates/backend/executor/runtime/src/sync.rs	1	SANCTIONED hub (s3.3); pgsync facade since permit-s1
@@ -595,11 +591,11 @@ rawsync	crates/backend/access/pgrcolumnar/src/part_cache.rs	1
 rawsync	crates/backend/access/pgrcolumnar/src/reader.rs	9
 rawsync	crates/backend/access/pgrcolumnar/src/scan.rs	4
 rawsync	crates/backend/access/pgrcolumnar/src/segfile.rs	3
-rawsync	crates/backend/access/pgrcolumnar/src/writer.rs	7
+rawsync	crates/backend/access/pgrcolumnar/src/writer.rs	4
 rawsync	crates/backend/access/transam/clog/src/lib.rs	1
 rawsync	crates/backend/access/transam/commit_ts/src/lib.rs	1
 rawsync	crates/backend/access/transam/multixact/src/lib.rs	1
-rawsync	crates/backend/access/transam/parallel/src/lib.rs	6
+rawsync	crates/backend/access/transam/parallel/src/lib.rs	2
 rawsync	crates/backend/access/transam/parallel/src/query_task_guard.rs	2
 rawsync	crates/backend/access/transam/subtrans/src/lib.rs	1
 rawsync	crates/backend/access/transam/transam_xlog/src/ctl.rs	1
@@ -610,7 +606,6 @@ rawsync	crates/backend/access/transam/xlogrecovery/src/lib.rs	1
 rawsync	crates/backend/catalog/pg_constraint/src/lib.rs	1
 rawsync	crates/backend/commands/analyze/src/lib.rs	2
 rawsync	crates/backend/commands/commands_async/src/queue.rs	1
-rawsync	crates/backend/commands/copy/src/parallel.rs	3
 rawsync	crates/backend/commands/seclabel/src/lib.rs	1
 rawsync	crates/backend/commands/vacuum/src/lib.rs	1
 rawsync	crates/backend/commands/vacuumparallel/src/lib.rs	1

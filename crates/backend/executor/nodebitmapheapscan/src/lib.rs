@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use pgsync::{Condvar, Mutex};
+use pgsync::Mutex;
 
 use ::execexpr::ExprState;
 use ::executils::exec_recheck_qual_and_reset;
@@ -35,21 +35,37 @@ enum SharedBitmapState {
 struct BmShared {
     state: SharedBitmapState,
     iterator: Option<Arc<TbmSharedIterState>>,
+    /// Packed waiter handles (waiter::WakerHandle words) of parked
+    /// build-waiters — the pg_barrier phase pattern (permit-s4 row 3).
+    wakers: Vec<u64>,
 }
 
 /// C ParallelBitmapHeapState (shm_toc entry -> Arc): the spinlock-guarded
 /// state machine plus the dsa_pointer to the shared iterator, folded into one
-/// mutex; the cv wakes waiters when the builder publishes.
+/// mutex.
+///
+/// permit-s4 row-3 conversion (dst-p3-scheduler §3): the raw Condvar 10ms
+/// poll is replaced by the pg_barrier PHASE PATTERN — a waker-word list in
+/// the shared state plus a 10ms `waiter::park_timeout` (the timed park IS
+/// C ConditionVariableSleep's per-wakeup InterruptPending cadence, kept);
+/// the builder's publish drains the list after releasing the lock and
+/// unparks every registrant, so a phase advance wakes waiters promptly and
+/// a lost wake costs at most one cadence period in production — and is a
+/// loom-caught deadlock in the model, where parks are untimed
+/// (`bitmapheap_phase_publish_unparks_registered_waiter`,
+/// runtime/tests/loom.rs).
 pub struct ParallelBitmapHeapState {
     shared: Mutex<BmShared>,
-    cv: Condvar,
 }
 
 impl Default for ParallelBitmapHeapState {
     fn default() -> Self {
         ParallelBitmapHeapState {
-            shared: Mutex::new(BmShared { state: SharedBitmapState::Initial, iterator: None }),
-            cv: Condvar::new(),
+            shared: Mutex::new(BmShared {
+                state: SharedBitmapState::Initial,
+                iterator: None,
+                wakers: Vec::new(),
+            }),
         }
     }
 }
@@ -229,8 +245,9 @@ impl BitmapHeapScanState<'_> {
 
 /// `BitmapShouldInitializeSharedState`: true = this participant won
 /// BM_INITIAL and must build the bitmap; false = the bitmap is BM_FINISHED.
-/// The CV sleep is a timed wait + interrupt check (C's ConditionVariableSleep
-/// checks interrupts per wakeup).
+/// The 10ms timed park is the interrupt-check cadence (C's
+/// ConditionVariableSleep checks interrupts per wakeup); the publish wake
+/// itself rides the waker-word list (see [`ParallelBitmapHeapState`]).
 pub fn bitmap_should_initialize_shared_state(
     pstate: &ParallelBitmapHeapState,
 ) -> PgResult<bool> {
@@ -243,16 +260,31 @@ pub fn bitmap_should_initialize_shared_state(
             }
             SharedBitmapState::Finished => return Ok(false),
             SharedBitmapState::InProgress => {
-                let (g, _) = pstate
-                    .cv
-                    .wait_timeout(guard, core::time::Duration::from_millis(10))
-                    .unwrap_or_else(|e| e.into_inner());
-                guard = g;
-                if init_small::globals::InterruptPending() {
-                    drop(guard);
-                    postgres_seams::check_for_interrupts::call()?;
-                    guard = pstate.shared.lock().unwrap_or_else(|e| e.into_inner());
+                // Register-under-lock, park OUTSIDE it: either the builder's
+                // publish drains our word (unpark reaches us — a pre-park
+                // unpark latches as Notified), or we re-observe InProgress
+                // and re-park. Registration is idempotent across cadence
+                // laps (contains-check).
+                let word = waiter::current_handle().as_u64();
+                if !guard.wakers.contains(&word) {
+                    guard.wakers.push(word);
                 }
+                drop(guard);
+                let _ = waiter::park_timeout(core::time::Duration::from_millis(10));
+                if init_small::globals::InterruptPending() {
+                    if let Err(e) = postgres_seams::check_for_interrupts::call() {
+                        // Unwind hygiene (the row-2/3 class rule): drop the
+                        // registration so the list never carries dead words
+                        // into the publisher's drain.
+                        let mut g =
+                            pstate.shared.lock().unwrap_or_else(|p| p.into_inner());
+                        if let Some(pos) = g.wakers.iter().position(|w| *w == word) {
+                            g.wakers.swap_remove(pos);
+                        }
+                        return Err(e);
+                    }
+                }
+                guard = pstate.shared.lock().unwrap_or_else(|e| e.into_inner());
             }
         }
     }
@@ -274,6 +306,10 @@ pub fn exec_bitmap_heap_reinitialize_dsm(node: &mut BitmapHeapScanState<'_>) {
     let mut guard = pstate.shared.lock().unwrap_or_else(|e| e.into_inner());
     guard.state = SharedBitmapState::Initial;
     guard.iterator = None;
+    // Rescan boundary: no participant waits across it (C parity — the DSM
+    // reinit runs with workers quiesced); a drained list is the invariant.
+    debug_assert!(guard.wakers.is_empty(), "bitmap rescan with parked waiters");
+    guard.wakers.clear();
 }
 
 /// `ExecBitmapHeapInitializeWorker`.
@@ -299,13 +335,19 @@ pub fn bitmap_table_scan_setup<'mcx>(
         }
         (Some(ps), Some(mut tbm)) => {
             let shared = tbm.prepare_shared_iterate()?;
-            {
+            // Publish (pg_barrier discipline): state + iterator stored and
+            // the waker list TAKEN under the lock, unparks issued after the
+            // lock is released.
+            let woken = {
                 let mut guard = ps.shared.lock().unwrap_or_else(|e| e.into_inner());
                 debug_assert!(guard.state == SharedBitmapState::InProgress);
                 guard.iterator = Some(Arc::clone(&shared));
                 guard.state = SharedBitmapState::Finished;
+                std::mem::take(&mut guard.wakers)
+            };
+            for w in woken {
+                let _ = waiter::unpark_word(w);
             }
-            ps.cv.notify_all();
             node.tbm = Some(tbm);
             node.tbmiterator = TbmIterator::shared(TbmSharedIterator::attach(shared));
         }

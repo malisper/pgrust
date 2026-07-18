@@ -9,6 +9,9 @@ name = "copy_cmd"
 path = "src/lib.rs"
 
 [dependencies]
+# permit-s4 row 5: work/done channels on pgsync::mailbox (+ the file's
+# Mutex/OnceLock import-swapped onto pgsync, THE single lock library).
+pgsync = { path = "../../../_support/pgsync" }
 datum = { path = "../../../_support/types/datum" }
 mcx = { path = "../../../_support/mcx" }
 stringinfo = { path = "../../../_support/types/stringinfo" }

@@ -3,8 +3,13 @@
 use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering::SeqCst};
-use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+// permit-s4 row 7: the per-worker error queues ride pgsync::mailbox
+// (bounded 64). Leader-detach turns worker sends into drop-and-continue
+// structurally: dropping the receiver closes the mailbox and send returns
+// Err — C's detached-mq send failure, with no bespoke flag to maintain.
+use pgsync::{Mutex, MailboxReceiver, MailboxSender, TryRecv};
 
 use elog::ereport;
 use init_small::globals as g;
@@ -159,7 +164,7 @@ pub struct ParallelShared {
     record_registry: typcache_seams::RecordRegistryHandle,
     library_name: String,
     function_name: String,
-    error_senders: Vec<Mutex<Option<SyncSender<WorkerMessage>>>>,
+    error_senders: Vec<Mutex<Option<MailboxSender<WorkerMessage>>>>,
     worker_attached: Vec<AtomicBool>,
     private: Mutex<Option<Arc<dyn Any + Send + Sync>>>,
     query_task_binding: AtomicU8,
@@ -178,7 +183,7 @@ impl ParallelShared {
 
 struct ParallelWorkerInfo {
     bgwhandle: Option<bgworker::BackgroundWorkerHandle>,
-    error_receiver: Option<Receiver<WorkerMessage>>,
+    error_receiver: Option<MailboxReceiver<WorkerMessage>>,
 }
 
 pub struct ParallelContext {
@@ -376,7 +381,7 @@ pub fn InitializeParallelDSM(id: ParallelContextId) -> PgResult<()> {
     let mut receivers = Vec::with_capacity(nworkers.max(0) as usize);
     let mut worker_attached = Vec::with_capacity(nworkers.max(0) as usize);
     for _ in 0..nworkers {
-        let (tx, rx) = std::sync::mpsc::sync_channel(PARALLEL_ERROR_QUEUE_MSGS);
+        let (tx, rx) = pgsync::mailbox(Some(PARALLEL_ERROR_QUEUE_MSGS));
         error_senders.push(Mutex::new(Some(tx)));
         receivers.push(rx);
         worker_attached.push(AtomicBool::new(false));
@@ -578,7 +583,7 @@ pub fn ReinitializeParallelDSM(id: ParallelContextId) -> PgResult<()> {
         p.known_attached_workers.clear();
         p.nknown_attached_workers = 0;
         for (i, w) in p.workers.iter_mut().enumerate() {
-            let (tx, rx) = std::sync::mpsc::sync_channel(PARALLEL_ERROR_QUEUE_MSGS);
+            let (tx, rx) = pgsync::mailbox(Some(PARALLEL_ERROR_QUEUE_MSGS));
             *shared.error_senders[i].lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
             shared.worker_attached[i].store(false, SeqCst);
             w.bgwhandle = None;
@@ -948,7 +953,7 @@ fn process_parallel_messages_guts() -> PgResult<()> {
                 });
                 match msg {
                     None => break,
-                    Some(Ok(m)) => {
+                    Some(TryRecv::Msg(m)) => {
                         mark_known_attached(id, i);
                         match m {
                             WorkerMessage::Error(mut e) => {
@@ -976,8 +981,8 @@ fn process_parallel_messages_guts() -> PgResult<()> {
                             }
                         }
                     }
-                    Some(Err(TryRecvError::Empty)) => break,
-                    Some(Err(TryRecvError::Disconnected)) => {
+                    Some(TryRecv::Empty) => break,
+                    Some(TryRecv::Disconnected) => {
                         return ereport(ERROR)
                             .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
                             .errmsg("lost connection to parallel worker")
@@ -1010,7 +1015,7 @@ pub fn ParallelWorkerReportLastRecEnd(last_rec_end: XLogRecPtr) -> PgResult<()> 
 }
 
 thread_local! {
-    static MY_PROGRESS_SENDER: RefCell<Option<SyncSender<WorkerMessage>>> =
+    static MY_PROGRESS_SENDER: RefCell<Option<MailboxSender<WorkerMessage>>> =
         const { RefCell::new(None) };
 }
 
@@ -1039,7 +1044,7 @@ pub fn parallel_worker_report_progress(index: i32, incr: i64) {
     );
 }
 
-fn take_my_error_sender(shared: &ParallelShared, worker_number: i32) -> SyncSender<WorkerMessage> {
+fn take_my_error_sender(shared: &ParallelShared, worker_number: i32) -> MailboxSender<WorkerMessage> {
     let mut slot = shared.error_senders[worker_number as usize]
         .lock()
         .unwrap_or_else(|e| e.into_inner());

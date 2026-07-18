@@ -1150,3 +1150,311 @@ fn standing_gang_detach_count_join_no_lost_wake() {
         assert_eq!(detached.load(Ordering::SeqCst), N, "detached == claimed at join");
     });
 }
+
+// ===========================================================================
+// PERMIT-S4 — the step-4 PROTOCOL-conversion models (notes/dst-permit-s4.md).
+// Three converted sites, three models. Dialect per model, disclosed:
+//
+//   * mailbox_* — FULLY DIRECT: they drive `pgsync::mailbox`, the REAL
+//     production utility the row-5 (copy/parallel work+done channels) and
+//     row-10 (pgrcolumnar writer stitch channel) conversions consume. The
+//     call-site glue (pump/encoder/leader topology) is production-only; the
+//     shared protocol is entirely this type.
+//   * relscan_seize_* — MIRROR over the REAL primitive: the converted
+//     `BTParallelScanShared` rides `pgsync::ParkLot`, driven here directly,
+//     but `types_relscan` itself is NOT loom-buildable on this base (its
+//     dep tree pulls `latch`, which fails under --cfg loom), so the
+//     page_status state machine is mirrored 1:1 from
+//     nbtree/src/parallel.rs. Discharged the moment the tree composes.
+//   * bitmapheap_phase_* — MIRROR over the REAL waiter Slot core (the
+//     waiter crate's loom surface): nodebitmapheapscan is not
+//     loom-buildable (executor dep tree); the BmShared waker-list phase
+//     machine is mirrored 1:1 from its converted
+//     bitmap_should_initialize_shared_state, with UNTIMED parks — the
+//     production 10ms cadence is the InterruptPending poll, and removing it
+//     in the model makes a lost publish-wake a deadlock loom must catch
+//     instead of something the cadence would paper over (the pg_barrier
+//     models' discipline).
+//
+// RED battery (house law: every model catches its bug): each section names
+// its red — the pre-conversion / weakened shape — and how it fails.
+// ===========================================================================
+
+/// Row 5/10 (DIRECT): a cap-1 mailbox pipeline delivers every message in
+/// order and terminates through the drop-close. The producer parks on FULL
+/// (message 2 cannot enter until the consumer pops message 1), the consumer
+/// parks on EMPTY, and the producer's drop-close ends the consumer's drain
+/// loop — every park is against the real ParkLot pair inside the mailbox.
+///
+/// RED (verified by transient weakening, not shipped — the model drives the
+/// production type, so the red is a production weakening):
+///   * `send` not waking not_empty ⇒ consumer parked forever — loom
+///     deadlock;
+///   * `recv` parking with the state guard HELD (the row-5 recv-under-mutex
+///     shape this conversion kills) ⇒ producer blocked on the state mutex,
+///     consumer parked — loom deadlock [Blocked, Blocked].
+#[test]
+fn mailbox_bounded_pipeline_delivers_and_closes() {
+    loom::model(|| {
+        let (tx, rx) = pgsync::mailbox::<u32>(Some(1));
+
+        let consumer = thread::spawn(move || {
+            let mut got = Vec::new();
+            while let Some(v) = rx.recv() {
+                got.push(v);
+            }
+            got
+        });
+
+        tx.send(1).unwrap();
+        tx.send(2).unwrap(); // parks while the queue is at cap
+        drop(tx); // close: consumer's drain observes None and exits
+
+        let got = consumer.join().unwrap();
+        assert_eq!(got, vec![1, 2], "every message delivered, in order");
+    });
+}
+
+/// Row 5 MPMC leg (DIRECT): two receivers share the mailbox BY CLONING (the
+/// converted encoder pool's shape — replacing the Mutex<Receiver> wrap), one
+/// message + close. Exactly one receiver gets the message; BOTH terminate
+/// (the close-wake reaches every parked receiver, not just one).
+#[test]
+fn mailbox_mpmc_close_wakes_every_receiver() {
+    loom::model(|| {
+        let (tx, rx) = pgsync::mailbox::<u32>(Some(1));
+        let rx2 = rx.clone();
+
+        let consumers: Vec<_> = [rx, rx2]
+            .into_iter()
+            .map(|rx| {
+                thread::spawn(move || {
+                    let mut got = Vec::new();
+                    while let Some(v) = rx.recv() {
+                        got.push(v);
+                    }
+                    got
+                })
+            })
+            .collect();
+
+        tx.send(7).unwrap();
+        drop(tx);
+
+        let mut all = Vec::new();
+        for c in consumers {
+            all.extend(c.join().unwrap());
+        }
+        assert_eq!(all, vec![7], "delivered exactly once, both consumers exited");
+    });
+}
+
+/// Row 2 (MIRROR over the real ParkLot): the converted _bt_parallel_seize
+/// wait. State machine mirrored from nbtree/src/parallel.rs: a seizer that
+/// observes `Advancing` captures the lot epoch UNDER the state lock, drops
+/// the lock, parks; release (`Advancing -> Idle`) and done
+/// (`* -> Done`) bump-then-notify via `wake_all`. One advancing winner, one
+/// waiting seizer: in every interleaving the waiter terminates, having
+/// seized the released page or observed Done.
+///
+/// RED: swap `release` for `release_naked` (state change WITHOUT the
+/// wake_all — the pre-conversion notify-dropped shape): the waiter parks
+/// forever — loom deadlock, CAUGHT.
+#[test]
+fn relscan_seize_release_wake_never_lost() {
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Ps {
+        Advancing,
+        Idle,
+        Done,
+    }
+
+    struct Shared {
+        state: Mutex<Ps>,
+        lot: pgsync::ParkLot,
+    }
+
+    // The converted release: state change under the lock, then bump+notify.
+    fn release(sh: &Shared) {
+        *sh.state.lock().unwrap() = Ps::Idle;
+        sh.lot.wake_all();
+    }
+
+    // RED helper (one-line swap in the winner thread): the naked state
+    // change the conversion outlaws.
+    #[allow(dead_code)]
+    fn release_naked(sh: &Shared) {
+        *sh.state.lock().unwrap() = Ps::Idle;
+    }
+
+    // The converted seize wait loop (nbtree bt_parallel_seize, Advancing
+    // arm): epoch captured UNDER the state lock, park OUTSIDE it.
+    fn seize_wait(sh: &Shared) -> Ps {
+        loop {
+            let (st, seen) = {
+                let g = sh.state.lock().unwrap();
+                (*g, sh.lot.epoch())
+            };
+            match st {
+                Ps::Advancing => {
+                    sh.lot.park(seen);
+                }
+                Ps::Idle => {
+                    // Seize it: Idle -> Advancing (the caller now owns the
+                    // scan advance).
+                    let mut g = sh.state.lock().unwrap();
+                    if *g == Ps::Idle {
+                        *g = Ps::Advancing;
+                        return Ps::Idle;
+                    }
+                }
+                Ps::Done => return Ps::Done,
+            }
+        }
+    }
+
+    loom::model(|| {
+        let sh = Arc::new(Shared {
+            state: Mutex::new(Ps::Advancing), // winner already advancing
+            lot: pgsync::ParkLot::new(),
+        });
+
+        let waiter_t = {
+            let sh = Arc::clone(&sh);
+            thread::spawn(move || {
+                let got = seize_wait(&sh);
+                if got == Ps::Idle {
+                    // The waiter seized the scan; finish it: -> Done + wake.
+                    *sh.state.lock().unwrap() = Ps::Done;
+                    sh.lot.wake_all();
+                }
+                got
+            })
+        };
+
+        // Winner: finishes its page read, releases the scan.
+        release(&sh); // RED: release_naked(&sh)
+
+        let got = waiter_t.join().unwrap();
+        assert!(
+            got == Ps::Idle || got == Ps::Done,
+            "waiter terminated through seize or done"
+        );
+        assert_eq!(*sh.state.lock().unwrap(), Ps::Done);
+    });
+}
+
+/// Row 3 (MIRROR over the real waiter Slot core): the converted bitmapheap
+/// build wait — `bitmap_should_initialize_shared_state`'s InProgress arm.
+/// The waiter REGISTERS its waker word in the shared state under the lock,
+/// releases, parks (untimed here — see the section header); the builder's
+/// publish (InProgress -> Finished) drains the waker list after dropping the
+/// lock and unparks every registrant. In every interleaving of
+/// register/park vs publish/unpark the waiter terminates with `false`.
+///
+/// RED: swap `publish` for `publish_naked` (state change without the
+/// drain+unpark — the shape the production 10ms cadence would paper over):
+/// waiter parked forever — loom deadlock, CAUGHT.
+#[test]
+fn bitmapheap_phase_publish_unparks_registered_waiter() {
+    use std::cell::Cell;
+
+    use waiter::clock::WaiterClock;
+    use waiter::{Slot, SlotInner};
+
+    struct ModelClock;
+    impl WaiterClock for ModelClock {
+        fn now_ms(&self) -> i64 {
+            0
+        }
+        fn wait<'a>(
+            &self,
+            slot: &'a Slot,
+            guard: pgsync::MutexGuard<'a, SlotInner>,
+            _timeout_ms: Option<i64>,
+        ) -> (pgsync::MutexGuard<'a, SlotInner>, bool) {
+            (slot.wait_for_model(guard), false)
+        }
+    }
+    static CLOCK: ModelClock = ModelClock;
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Phase {
+        InProgress,
+        Finished,
+    }
+
+    struct BmMirror {
+        state: Mutex<(Phase, Vec<u64>)>,
+    }
+
+    loom::thread_local! {
+        static MY_SLOT: Cell<Option<(usize, u32)>> = Cell::new(None);
+    }
+
+    // The converted publish: state -> Finished, TAKE the waker list, drop
+    // the lock, unpark every word (the pg_barrier discipline).
+    fn publish(sh: &BmMirror, slots: &[Arc<Slot>]) {
+        let woken = {
+            let mut g = sh.state.lock().unwrap();
+            g.0 = Phase::Finished;
+            std::mem::take(&mut g.1)
+        };
+        for w in woken {
+            let (idx, token) = ((w >> 32) as usize - 1, w as u32);
+            let _ = slots[idx].unpark_token(token);
+        }
+    }
+
+    // RED helper: the naked publish (no drain, no unpark).
+    #[allow(dead_code)]
+    fn publish_naked(sh: &BmMirror) {
+        sh.state.lock().unwrap().0 = Phase::Finished;
+    }
+
+    loom::model(|| {
+        let sh = Arc::new(BmMirror {
+            state: Mutex::new((Phase::InProgress, Vec::new())),
+        });
+        // Model-owned slot slab (the waiter global slab is production-only).
+        let slots: Arc<Vec<Arc<Slot>>> = Arc::new(vec![Arc::new(Slot::new_for_model())]);
+
+        let waiter_t = {
+            let (sh, slots) = (Arc::clone(&sh), Arc::clone(&slots));
+            thread::spawn(move || {
+                // bitmap_should_initialize_shared_state, InProgress arm.
+                loop {
+                    let word = MY_SLOT.with(|c| {
+                        if c.get().is_none() {
+                            let token = slots[0].issue_token();
+                            c.set(Some((0, token)));
+                        }
+                        let (idx, token) = c.get().unwrap();
+                        ((idx as u64 + 1) << 32) | token as u64
+                    });
+                    {
+                        let mut g = sh.state.lock().unwrap();
+                        match g.0 {
+                            Phase::Finished => return false,
+                            Phase::InProgress => {
+                                if !g.1.contains(&word) {
+                                    g.1.push(word);
+                                }
+                            }
+                        }
+                    }
+                    // Untimed park on the REAL slot core (production adds
+                    // the 10ms InterruptPending cadence).
+                    let _ = slots[0].park_core(None, None, &CLOCK);
+                }
+            })
+        };
+
+        // Builder: the bitmap is built; publish Finished.
+        publish(&sh, &slots); // RED: publish_naked(&sh)
+
+        let elected = waiter_t.join().unwrap();
+        assert!(!elected, "the waiter never becomes the builder");
+        assert_eq!(sh.state.lock().unwrap().0, Phase::Finished);
+    });
+}

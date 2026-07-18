@@ -1,7 +1,7 @@
 //! Parallel index scan shared descriptors, thread-native: C's shm_toc blob
 //! becomes typed Arc-shared state (std collections: cross-thread by design).
 
-use pgsync::{Condvar, Mutex};
+use pgsync::{Mutex, ParkLot};
 
 use ::datum::Datum;
 use ::types_core::{BlockNumber, InvalidBlockNumber};
@@ -34,9 +34,20 @@ pub struct BtParallelScanState {
     pub arr_elems: Vec<BtParallelArrayElem>,
 }
 
+/// permit-s4 row-2 conversion (dst-p3-scheduler §3): the seize wait rides
+/// the [`ParkLot`] eventcount, not a Condvar. Protocol (the loom-modeled
+/// shape — `relscan_seize_release_wake_never_lost`, runtime/tests/loom.rs):
+/// a seizer that observes `Advancing` captures `lot.epoch()` UNDER the
+/// state lock, releases it, and parks; EVERY transition out of `Advancing`
+/// (release → Idle, done → Done) bumps-then-notifies via `lot.wake_all()`.
+/// Wake-all is deliberate (design row 2 v1 forgoes the notify_one
+/// optimization): the herd is DOP-bounded, and the Condvar notify_one trap
+/// — a wake delivered to a waiter that unwound between queueing and
+/// waiting — cannot exist when every waiter is released on every advance.
+/// There is no registration list to clean on error unwind either.
 pub struct BTParallelScanShared {
     pub state: Mutex<BtParallelScanState>,
-    pub cv: Condvar,
+    pub lot: ParkLot,
 }
 
 impl BTParallelScanShared {
@@ -48,7 +59,7 @@ impl BTParallelScanShared {
                 page_status: BtPsState::NotInitialized,
                 arr_elems: Vec::new(),
             }),
-            cv: Condvar::new(),
+            lot: ParkLot::new(),
         }
     }
 }
