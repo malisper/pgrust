@@ -1,0 +1,351 @@
+//! The lazy plan generator (Turso mechanics per spec §1.1, contract §2.1.2).
+//!
+//! Determinism law (§0 A3, plan tier — unconditional): one ChaCha8 stream
+//! seeded from the one u64 seed; all draws in generation order; ordered
+//! containers only; integer weight arithmetic; no ambient entropy or clock
+//! anywhere in this module. `seed + profile + generator version` =>
+//! byte-identical plan.
+
+use std::collections::VecDeque;
+
+use rand::RngCore;
+use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
+
+use crate::gen::budget::{Budgets, Kind};
+use crate::gen::noise;
+use crate::gen::profile::GenProfile;
+use crate::gen::schema::SchemaState;
+use crate::gen::weights::{range_incl, weighted_index};
+use crate::plan::{
+    ArmCtl, FaultPoint, IsoLevel, Plan, PlanHeader, PlanItem, Sql, Step, TxCtl,
+};
+use crate::property::{NoiseSource, PropertyGen};
+
+/// Bounded retry for constrained placeholder noise (contract §2.1.2).
+const NOISE_RETRY_BUDGET: usize = 16;
+
+/// A property is offered only while its expected footprint fits the remaining
+/// per-kind budgets ("property weights are functions of remaining budgets" —
+/// this is what keeps the distribution exact across noise and
+/// property-embedded steps).
+fn footprint_fits(budgets: &Budgets, fp: &crate::property::Footprint) -> bool {
+    budgets.remaining(Kind::Property) >= 1
+        && budgets.remaining(Kind::Ddl) >= fp.ddl as u64
+        && budgets.remaining(Kind::Dml) >= fp.dml as u64
+        && budgets.remaining(Kind::Query) >= fp.query as u64
+        && budgets.remaining(Kind::Tx) >= fp.tx as u64
+        && budgets.remaining(Kind::Arm) >= fp.arm as u64
+        && budgets.remaining(Kind::Fault) >= fp.fault as u64
+}
+
+struct NoiseCtx<'a> {
+    schema: &'a SchemaState,
+    profile: &'a GenProfile,
+}
+
+impl NoiseSource for NoiseCtx<'_> {
+    fn noise_query(
+        &mut self,
+        rng: &mut dyn RngCore,
+        constraint: &dyn Fn(&Sql) -> bool,
+    ) -> Option<Sql> {
+        for _ in 0..NOISE_RETRY_BUDGET {
+            let q = noise::gen_query(self.schema, self.profile, rng)?;
+            if constraint(&q) {
+                return Some(q);
+            }
+        }
+        None
+    }
+}
+
+/// Session-visible state the generator must model to stay coherent
+/// (serial single-session — §0 A1).
+#[derive(Default)]
+struct SessionModel {
+    in_tx: bool,
+    savepoints: Vec<String>,
+    next_savepoint: u32,
+    gucs_set: bool,
+}
+
+pub struct Generator<'a> {
+    rng: ChaCha8Rng,
+    profile: &'a GenProfile,
+    registry: &'a [Box<dyn PropertyGen>],
+    schema: SchemaState,
+    budgets: Budgets,
+    session: SessionModel,
+    /// Queued items that must follow the current one (fault pairing, tail).
+    pending: VecDeque<PlanItem>,
+    next_seq: u32,
+    emitted_first: bool,
+    finished: bool,
+}
+
+impl<'a> Generator<'a> {
+    pub fn new(seed: u64, profile: &'a GenProfile, registry: &'a [Box<dyn PropertyGen>]) -> Self {
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let total = range_incl(&mut rng, profile.plan_len.min, profile.plan_len.max);
+        let budgets =
+            Budgets::allocate(&profile.statement_weights, total, !registry.is_empty());
+        Generator {
+            rng,
+            profile,
+            registry,
+            schema: SchemaState::default(),
+            budgets,
+            session: SessionModel::default(),
+            pending: VecDeque::new(),
+            next_seq: 1,
+            emitted_first: false,
+            finished: false,
+        }
+    }
+
+    fn cleanup_tail(&mut self) {
+        // Deterministic session cleanup: close any open tx, then RESET ALL if
+        // any GUC was set (the 1session GUC-leak law).
+        if self.session.in_tx {
+            self.pending.push_back(PlanItem::Step(Step::Tx(TxCtl::Rollback)));
+            self.session.in_tx = false;
+            self.session.savepoints.clear();
+        }
+        if self.session.gucs_set {
+            self.pending.push_back(PlanItem::Step(Step::Arm(ArmCtl::ResetAll)));
+            self.session.gucs_set = false;
+        }
+        self.finished = true;
+    }
+
+    /// Kind-choice weights for the current state: remaining budget per kind,
+    /// zeroed where the kind is not currently generatable.
+    fn kind_weights(&self) -> [u64; 7] {
+        let has_table = !self.schema.tables().is_empty();
+        let mut w = [
+            self.budgets.remaining(Kind::Ddl),
+            if has_table { self.budgets.remaining(Kind::Dml) } else { 0 },
+            if has_table { self.budgets.remaining(Kind::Query) } else { 0 },
+            self.budgets.remaining(Kind::Tx),
+            if self.profile.arm_sets.is_empty() { 0 } else { self.budgets.remaining(Kind::Arm) },
+            // Disconnect/Reconnect are emitted as a pair: need >= 2.
+            if self.budgets.remaining(Kind::Fault) >= 2 {
+                self.budgets.remaining(Kind::Fault)
+            } else {
+                0
+            },
+            0, // property, filled below
+        ];
+        if !self.registry.is_empty() && self.budgets.remaining(Kind::Property) > 0 {
+            let caps = self.schema.caps();
+            let eligible: u64 = self
+                .registry
+                .iter()
+                .filter(|p| {
+                    caps.contains(p.required_caps())
+                        && p.weight(self.profile) > 0
+                        && footprint_fits(&self.budgets, &p.footprint())
+                })
+                .count() as u64;
+            if eligible > 0 {
+                w[6] = self.budgets.remaining(Kind::Property);
+            }
+        }
+        w
+    }
+
+    fn gen_tx_step(&mut self) -> Step {
+        if !self.session.in_tx {
+            let iso = &self.profile.iso_mix;
+            let level = match weighted_index(&mut self.rng, &[iso.rc, iso.rr, iso.ser]) {
+                Some(0) => IsoLevel::ReadCommitted,
+                Some(1) => IsoLevel::RepeatableRead,
+                Some(2) => IsoLevel::Serializable,
+                _ => IsoLevel::ReadCommitted, // all-zero mix: degenerate profile
+            };
+            self.session.in_tx = true;
+            self.session.savepoints.clear();
+            return Step::Tx(TxCtl::Begin(level));
+        }
+        // In tx: commit 3 / rollback 1 / savepoint 2 / rollback-to 2.
+        let has_sp = !self.session.savepoints.is_empty();
+        let choice =
+            weighted_index(&mut self.rng, &[3, 1, 2, if has_sp { 2 } else { 0 }]).expect("nonzero");
+        match choice {
+            0 => {
+                self.session.in_tx = false;
+                self.session.savepoints.clear();
+                Step::Tx(TxCtl::Commit)
+            }
+            1 => {
+                self.session.in_tx = false;
+                self.session.savepoints.clear();
+                Step::Tx(TxCtl::Rollback)
+            }
+            2 => {
+                self.session.next_savepoint += 1;
+                let name = format!("sp{}", self.session.next_savepoint);
+                self.session.savepoints.push(name.clone());
+                Step::Tx(TxCtl::Savepoint(name))
+            }
+            3 => {
+                let i =
+                    range_incl(&mut self.rng, 0, self.session.savepoints.len() as u64 - 1) as usize;
+                let name = self.session.savepoints[i].clone();
+                // ROLLBACK TO keeps the savepoint itself but destroys later ones.
+                self.session.savepoints.truncate(i + 1);
+                Step::Tx(TxCtl::RollbackTo(name))
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn gen_arm_step(&mut self) -> Step {
+        // Occasionally reset if something is set; otherwise set a serial-safe
+        // arm from the profile's arm set.
+        if self.session.gucs_set && range_incl(&mut self.rng, 0, 3) == 0 {
+            self.session.gucs_set = false;
+            return Step::Arm(ArmCtl::ResetAll);
+        }
+        let i = range_incl(&mut self.rng, 0, self.profile.arm_sets.len() as u64 - 1) as usize;
+        let (k, v) = self.profile.arm_sets[i].clone();
+        self.session.gucs_set = true;
+        Step::Arm(ArmCtl::SetGuc(k, v))
+    }
+
+    fn gen_property_item(&mut self) -> Option<PlanItem> {
+        let caps = self.schema.caps();
+        let eligible: Vec<&Box<dyn PropertyGen>> = self
+            .registry
+            .iter()
+            .filter(|p| {
+                caps.contains(p.required_caps())
+                    && p.weight(self.profile) > 0
+                    && footprint_fits(&self.budgets, &p.footprint())
+            })
+            .collect();
+        let weights: Vec<u64> = eligible.iter().map(|p| p.weight(self.profile)).collect();
+        let i = weighted_index(&mut self.rng, &weights)?;
+        let prop = eligible[i];
+        let name = prop.name();
+        let fp = prop.footprint();
+        let mut noise_ctx = NoiseCtx { schema: &self.schema, profile: self.profile };
+        let generated = prop.generate(&mut self.rng, &self.schema, &mut noise_ctx, self.profile);
+        // Budget is consumed whether or not instantiation succeeded, so a
+        // permanently-unsatisfiable property cannot stall the plan.
+        self.budgets.consume_footprint(&fp);
+        let generated = generated?;
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        Some(PlanItem::Property {
+            name: name.to_string(),
+            seq,
+            tables: generated.tables,
+            steps: generated.steps,
+        })
+    }
+
+    /// Produce the next plan item (lazy generation: the plan is an iterator).
+    pub fn next_item(&mut self) -> Option<PlanItem> {
+        if let Some(item) = self.pending.pop_front() {
+            return Some(item);
+        }
+        if self.finished {
+            return None;
+        }
+        // First interaction is always CREATE TABLE (spec §1.1).
+        if !self.emitted_first {
+            self.emitted_first = true;
+            let sql = noise::gen_create_table(&mut self.schema, &mut self.rng, self.profile);
+            self.budgets.consume(Kind::Ddl, 1);
+            return Some(PlanItem::Step(Step::Ddl(sql)));
+        }
+        loop {
+            let weights = self.kind_weights();
+            let Some(kind_i) = weighted_index(&mut self.rng, &weights) else {
+                // Nothing choosable (budgets exhausted or only un-generatable
+                // kinds left): emit the cleanup tail and finish.
+                self.cleanup_tail();
+                return self.pending.pop_front();
+            };
+            match kind_i {
+                0 => {
+                    let sql = noise::gen_ddl(&mut self.schema, &mut self.rng, self.profile);
+                    self.budgets.consume(Kind::Ddl, 1);
+                    return Some(PlanItem::Step(Step::Ddl(sql)));
+                }
+                1 => {
+                    if let Some(sql) = noise::gen_dml(&mut self.schema, &mut self.rng) {
+                        self.budgets.consume(Kind::Dml, 1);
+                        return Some(PlanItem::Step(Step::Dml(sql)));
+                    }
+                    self.budgets.consume(Kind::Dml, 1);
+                }
+                2 => {
+                    if let Some(sql) =
+                        noise::gen_query(&self.schema, self.profile, &mut self.rng)
+                    {
+                        self.budgets.consume(Kind::Query, 1);
+                        return Some(PlanItem::Step(Step::Query(sql)));
+                    }
+                    self.budgets.consume(Kind::Query, 1);
+                }
+                3 => {
+                    self.budgets.consume(Kind::Tx, 1);
+                    let step = self.gen_tx_step();
+                    return Some(PlanItem::Step(step));
+                }
+                4 => {
+                    self.budgets.consume(Kind::Arm, 1);
+                    let step = self.gen_arm_step();
+                    return Some(PlanItem::Step(step));
+                }
+                5 => {
+                    // Disconnect + ReconnectServer as an adjacent pair (v1
+                    // policy — the runner reconnects immediately). Session
+                    // state does not survive the disconnect.
+                    self.budgets.consume(Kind::Fault, 2);
+                    self.session.in_tx = false;
+                    self.session.savepoints.clear();
+                    self.session.gucs_set = false;
+                    self.pending
+                        .push_back(PlanItem::Step(Step::Fault(FaultPoint::ReconnectServer)));
+                    return Some(PlanItem::Step(Step::Fault(FaultPoint::Disconnect)));
+                }
+                6 => {
+                    if let Some(item) = self.gen_property_item() {
+                        return Some(item);
+                    }
+                    // Instantiation failed; budget already consumed. Loop.
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
+/// Generate a full plan for `seed` under `profile`.
+///
+/// `profile_sha256` and `generator` go into the header verbatim; both are
+/// version pins, not entropy (timestamps never enter plan bytes).
+pub fn generate_plan(
+    seed: u64,
+    profile: &GenProfile,
+    profile_sha256: &str,
+    generator: &str,
+    registry: &[Box<dyn PropertyGen>],
+) -> Plan {
+    let header = PlanHeader {
+        seed,
+        profile: profile.name.clone(),
+        profile_sha256: profile_sha256.to_string(),
+        generator: generator.to_string(),
+    };
+    let mut g = Generator::new(seed, profile, registry);
+    let mut items = Vec::new();
+    while let Some(item) = g.next_item() {
+        items.push(item);
+    }
+    Plan { header, items }
+}
