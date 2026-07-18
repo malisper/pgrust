@@ -105,6 +105,7 @@ members = [
     "crates/backend/storage/ipc/shmem_seams",
     "crates/backend/storage/lmgr/lwlock",
     "crates/backend/storage/file/file_seams",
+    "crates/backend/storage/file/vfs",
     "crates/backend/storage/sync/sync_seams",
     "crates/backend/storage/sync/sync",
     "crates/backend/access/transam/transam_xlog_seams",

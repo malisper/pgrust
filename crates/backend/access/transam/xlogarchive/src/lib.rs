@@ -30,8 +30,11 @@ fn saved_errno() -> i32 {
     std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
 
-fn io_errno(e: &std::io::Error) -> i32 {
-    e.raw_os_error().unwrap_or(0)
+// stat(2)-succeeds existence probe over the fd-crate front (DST P1 inc-3);
+// the StatusFilePath metadata cluster is C's `stat(path, &buf) == 0` shape.
+fn file_exists(path: &str) -> bool {
+    let mut fi = fd::FileInfo::zeroed();
+    fd::pg_stat(path, &mut fi) == 0
 }
 
 pub use archive::BuildRestoreCommand;
@@ -58,24 +61,21 @@ pub fn RestoreArchivedFile(
 
     let xlogpath = format!("{XLOGDIR}/{recovername}");
 
-    match std::fs::metadata(&xlogpath) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
+    let mut fi = fd::FileInfo::zeroed();
+    if fd::pg_stat(&xlogpath, &mut fi) == 0 {
+        if fd::pg_unlink(&xlogpath) != 0 {
             ereport(FATAL)
-                .with_saved_errno(io_errno(&e))
+                .with_saved_errno(fd::get_errno())
                 .errcode_for_file_access()
-                .errmsg(format!("could not stat file \"{xlogpath}\": %m"))
+                .errmsg(format!("could not remove file \"{xlogpath}\": %m"))
                 .finish(loc("RestoreArchivedFile"))?;
         }
-        Ok(_) => {
-            if let Err(e) = std::fs::remove_file(&xlogpath) {
-                ereport(FATAL)
-                    .with_saved_errno(io_errno(&e))
-                    .errcode_for_file_access()
-                    .errmsg(format!("could not remove file \"{xlogpath}\": %m"))
-                    .finish(loc("RestoreArchivedFile"))?;
-            }
-        }
+    } else if fd::get_errno() != libc::ENOENT {
+        ereport(FATAL)
+            .with_saved_errno(fd::get_errno())
+            .errcode_for_file_access()
+            .errmsg(format!("could not stat file \"{xlogpath}\": %m"))
+            .finish(loc("RestoreArchivedFile"))?;
     }
 
     let wal_segsz = transam_xlog::wal_segment_size();
@@ -103,36 +103,34 @@ pub fn RestoreArchivedFile(
     waitevent_seams::pgstat_report_wait_end::call();
 
     if rc == 0 {
-        match std::fs::metadata(&xlogpath) {
-            Ok(st) => {
-                if expected_size > 0 && st.len() as i64 != expected_size {
-                    // StandbyMode is unported (always false): C's partial-file
-                    // DEBUG1 arm is unreachable, wrong size is FATAL.
-                    ereport(FATAL)
-                        .errmsg(format!(
-                            "archive file \"{xlogfname}\" has wrong size: {} instead of {expected_size}",
-                            st.len()
-                        ))
-                        .finish(loc("RestoreArchivedFile"))?;
-                    return Ok(None);
-                }
-                ereport(LOG)
-                    .errmsg(format!("restored log file \"{xlogfname}\" from archive"))
+        let mut st = fd::FileInfo::zeroed();
+        if fd::pg_stat(&xlogpath, &mut st) == 0 {
+            if expected_size > 0 && st.size != expected_size {
+                // StandbyMode is unported (always false): C's partial-file
+                // DEBUG1 arm is unreachable, wrong size is FATAL.
+                ereport(FATAL)
+                    .errmsg(format!(
+                        "archive file \"{xlogfname}\" has wrong size: {} instead of {expected_size}",
+                        st.size
+                    ))
                     .finish(loc("RestoreArchivedFile"))?;
-                return Ok(Some(xlogpath));
+                return Ok(None);
             }
-            Err(e) => {
-                let elevel =
-                    if e.kind() == std::io::ErrorKind::NotFound { LOG } else { FATAL };
-                ereport(elevel)
-                    .with_saved_errno(io_errno(&e))
-                    .errcode_for_file_access()
-                    .errmsg(format!("could not stat file \"{xlogpath}\": %m"))
-                    .errdetail(
-                        "\"restore_command\" returned a zero exit status, but stat() failed.",
-                    )
-                    .finish(loc("RestoreArchivedFile"))?;
-            }
+            ereport(LOG)
+                .errmsg(format!("restored log file \"{xlogfname}\" from archive"))
+                .finish(loc("RestoreArchivedFile"))?;
+            return Ok(Some(xlogpath));
+        } else {
+            let en = fd::get_errno();
+            let elevel = if en == libc::ENOENT { LOG } else { FATAL };
+            ereport(elevel)
+                .with_saved_errno(en)
+                .errcode_for_file_access()
+                .errmsg(format!("could not stat file \"{xlogpath}\": %m"))
+                .errdetail(
+                    "\"restore_command\" returned a zero exit status, but stat() failed.",
+                )
+                .finish(loc("RestoreArchivedFile"))?;
         }
     }
 
@@ -197,10 +195,10 @@ pub fn ExecuteRecoveryCommand(
 pub fn KeepFileRestoredFromArchive(path: &str, xlogfname: &str) -> PgResult<()> {
     let xlogfpath = format!("{XLOGDIR}/{xlogfname}");
 
-    if std::fs::metadata(&xlogfpath).is_ok() {
-        if let Err(e) = std::fs::remove_file(&xlogfpath) {
+    if file_exists(&xlogfpath) {
+        if fd::pg_unlink(&xlogfpath) != 0 {
             ereport(FATAL)
-                .with_saved_errno(io_errno(&e))
+                .with_saved_errno(fd::get_errno())
                 .errcode_for_file_access()
                 .errmsg(format!("could not remove file \"{xlogfpath}\": %m"))
                 .finish(loc("KeepFileRestoredFromArchive"))?;
@@ -256,12 +254,12 @@ pub fn XLogArchiveNotifySeg(segno: types_core::XLogSegNo, tli: types_core::TimeL
 
 pub fn XLogArchiveForceDone(xlog: &str) -> PgResult<()> {
     let archive_done = StatusFilePath(xlog, ".done");
-    if std::fs::metadata(&archive_done).is_ok() {
+    if file_exists(&archive_done) {
         return Ok(());
     }
 
     let archive_ready = StatusFilePath(xlog, ".ready");
-    if std::fs::metadata(&archive_ready).is_ok() {
+    if file_exists(&archive_ready) {
         fd::durable_rename(&archive_ready, &archive_done, WARNING)?;
         return Ok(());
     }
@@ -295,15 +293,15 @@ pub fn XLogArchiveCheckDone(xlog: &str) -> PgResult<bool> {
         return Ok(true);
     }
 
-    if std::fs::metadata(StatusFilePath(xlog, ".done")).is_ok() {
+    if file_exists(&StatusFilePath(xlog, ".done")) {
         return Ok(true);
     }
 
-    if std::fs::metadata(StatusFilePath(xlog, ".ready")).is_ok() {
+    if file_exists(&StatusFilePath(xlog, ".ready")) {
         return Ok(false);
     }
 
-    if std::fs::metadata(StatusFilePath(xlog, ".done")).is_ok() {
+    if file_exists(&StatusFilePath(xlog, ".done")) {
         return Ok(true);
     }
 
@@ -312,39 +310,40 @@ pub fn XLogArchiveCheckDone(xlog: &str) -> PgResult<bool> {
 }
 
 pub fn XLogArchiveIsBusy(xlog: &str) -> bool {
-    if std::fs::metadata(StatusFilePath(xlog, ".done")).is_ok() {
+    if file_exists(&StatusFilePath(xlog, ".done")) {
         return false;
     }
-    if std::fs::metadata(StatusFilePath(xlog, ".ready")).is_ok() {
+    if file_exists(&StatusFilePath(xlog, ".ready")) {
         return true;
     }
-    if std::fs::metadata(StatusFilePath(xlog, ".done")).is_ok() {
+    if file_exists(&StatusFilePath(xlog, ".done")) {
         return false;
     }
 
-    match std::fs::metadata(format!("{XLOGDIR}/{xlog}")) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-        _ => true,
+    let mut fi = fd::FileInfo::zeroed();
+    if fd::pg_stat(&format!("{XLOGDIR}/{xlog}"), &mut fi) != 0 && fd::get_errno() == libc::ENOENT {
+        return false;
     }
+    true
 }
 
 pub fn XLogArchiveIsReadyOrDone(xlog: &str) -> bool {
-    if std::fs::metadata(StatusFilePath(xlog, ".done")).is_ok() {
+    if file_exists(&StatusFilePath(xlog, ".done")) {
         return true;
     }
-    if std::fs::metadata(StatusFilePath(xlog, ".ready")).is_ok() {
+    if file_exists(&StatusFilePath(xlog, ".ready")) {
         return true;
     }
-    std::fs::metadata(StatusFilePath(xlog, ".done")).is_ok()
+    file_exists(&StatusFilePath(xlog, ".done"))
 }
 
 pub fn XLogArchiveIsReady(xlog: &str) -> bool {
-    std::fs::metadata(StatusFilePath(xlog, ".ready")).is_ok()
+    file_exists(&StatusFilePath(xlog, ".ready"))
 }
 
 pub fn XLogArchiveCleanup(xlog: &str) {
-    let _ = std::fs::remove_file(StatusFilePath(xlog, ".done"));
-    let _ = std::fs::remove_file(StatusFilePath(xlog, ".ready"));
+    let _ = fd::pg_unlink(&StatusFilePath(xlog, ".done"));
+    let _ = fd::pg_unlink(&StatusFilePath(xlog, ".ready"));
 }
 
 pub fn init_seams() {
