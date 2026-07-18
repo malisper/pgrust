@@ -5,7 +5,7 @@
 # crates/_support/seams_init/tests/lint-seam-installs.sh (the seam-install lint family).
 #
 # WHAT IT FENCES: every raw nondeterminism primitive the DST program must
-# eventually virtualize. Six categories, each a per-line grep over production
+# eventually virtualize. Ten categories, each a per-line grep over production
 # code, diffed against a budgeted allowlist:
 #   fs        raw std::fs / File:: / OpenOptions / read_dir / fsync-family IO,
 #             `use std::fs::{...}` / `use std::fs::*` import declarations, and
@@ -36,6 +36,49 @@
 #             invisible to a virtual clock), outside the waiter/pg_barrier/
 #             runtime hubs (§3.3 token invariant; conversion precedent:
 #             runtime/src/rg.rs onto the Waiter)
+#
+# WIDENED BLOCKING ARMS (2026-07-17d, the P3 §1.3 layer-2 widening —
+# docs/design/dst-p3-scheduler.md @ docs/dst-p3-design; census on
+# dst/substrate @ e1a7e7b47, the §7 Wave-1 entry gate). These close the
+# review-proven census blind spots: each is an OS-decided wake a token
+# holder can block on that matched NO pattern above. Kept as separate
+# categories (not folded into `blocking`) so the ladder's 84->43 blocking
+# arithmetic stays a stable, auditable series:
+#   join      zero-arg .join() — the JoinHandle::join / ScopedJoinHandle::
+#             join call shape (thread joins take no argument; separator
+#             joins do). Name-based like .metadata(: a same-named non-thread
+#             join (the lifecycle armed join, runtime/src/sched.rs) carries
+#             an annotated ledger row. (P3 §3 row 14: v1 = per-site
+#             join-bounded-after-wake proof; v2 = sched::join_scheduled)
+#   barrier   std::sync::Barrier — the direct path, `use std::sync::{..
+#             Barrier ..}` import groups, and bare Barrier::new (name-based:
+#             pg_barrier::Barrier constructions flag too and are ledgered —
+#             that type IS the sanctioned Waiter-backed barrier, riding the
+#             C1/C9 chokes). A raw std Barrier wait blocks in a futex with
+#             the holder still counted Running: the sim wedge is watchdog-
+#             invisible (P3 §3 row 18 — found by review, not census)
+#   once      get_or_init / get_or_try_init / call_once — racing lazy-init:
+#             losers block raw while the winner runs the init closure; an
+#             init closure that crosses a choke point wedges a token-holding
+#             loser (P3 §3 row 19; the once-ledger classifies every init
+#             closure — pure/env-read vs choke-crossing)
+#   scope     std::thread::scope gangs — scoped children are spawns outside
+#             the spawn door and scope end is an implicit raw join (P3 §3
+#             row 15). Own category rather than a spawn-pattern widening so
+#             the seeded spawn numbers stay stable; this makes row 15's
+#             "scope sites are enumerable by lint" claim actually true.
+#
+# WHAT IS DELIBERATELY NOT LINTED — LOCK WAITS. Contended Mutex::lock /
+# RwLock::read/write waits are blocking, but they are NOT statically
+# lintable: .lock() is ubiquitous (712 bare .lock() lines across 144 prod
+# files at the 2026-07-17d census) and nearly every one is a short,
+# uncontended critical section. Whether a lock wait blocks is a dynamic
+# property (contention + what the holder does while holding it), not a
+# lexical one — a lock arm would be 100% ledger, 0% ratchet. That class is
+# layer 1's job (dst-p3-scheduler.md §1.3): the sim_sync re-export shims +
+# the TLS RAW_LOCK_DEPTH counter asserted zero at every yield_point, which
+# turns the watchdog-invisible park-holding-a-raw-lock wedge into a
+# pinpointed abort.
 #
 # PRODUCTION CODE = crates/**/*.rs minus tests|test|benches|examples dirs,
 # tests.rs/test.rs/*_test(s).rs/build.rs basenames, brace-matched
@@ -220,6 +263,16 @@ FNR == 1 {
         print "env\t" rel
     if (line ~ /(^|[^A-Za-z0-9_])(Condvar|mpsc)($|[^A-Za-z0-9_])|crossbeam_channel|crossbeam::channel|thread::park|thread::sleep|libc::(nanosleep|usleep|sleep)($|[^A-Za-z0-9_])/)
         print "blocking\t" rel
+
+    # ---- widened blocking arms (P3 s1.3 layer 2; dst-p3-scheduler.md) ----
+    if (line ~ /\.join\(\)/)
+        print "join\t" rel
+    if (line ~ /(^|[^A-Za-z0-9_])std::sync::Barrier($|[^A-Za-z0-9_])|use[ \t]+std::sync::\{[^}]*Barrier|(^|[^A-Za-z0-9_])Barrier::new($|[^A-Za-z0-9_])/)
+        print "barrier\t" rel
+    if (line ~ /(^|[^A-Za-z0-9_])(get_or_init|get_or_try_init|call_once)($|[^A-Za-z0-9_])/)
+        print "once\t" rel
+    if (line ~ /thread::scope/)
+        print "scope\t" rel
 }
 END { if (rel != "" && (inblk || skip > 0)) print "poison\t" rel }
 AWK
@@ -236,7 +289,7 @@ if [ "$MODE" = "regen" ]; then
     echo "# only under explicit charter — the ratchet law says rows only die)."
     echo "# Row format (tab-separated): <category>\t<file>\t<max-sites>[\t<annotation>]"
     awk -F'\t' '$1 == "poison" { printf "# SCAN-POISON: %s — scanner state still open at EOF; counts below may be incomplete\n", $2 }' "$TMP/scan"
-    for cat in fs time rand spawn env blocking; do
+    for cat in fs time rand spawn env blocking join barrier once scope; do
         echo ""
         echo "# ==== $cat ===="
         if [ "$cat" = "fs" ]; then
@@ -274,7 +327,7 @@ awk -F'\t' -v out="$TMP/allow" '
     /^[ \t]*(#|$)/ { next }
     {
         cat = $1; path = $2; budget = $3; annot = (NF >= 4 ? $4 : "")
-        if (cat !~ /^(fs|time|rand|spawn|env|blocking)$/ || path == "" \
+        if (cat !~ /^(fs|time|rand|spawn|env|blocking|join|barrier|once|scope)$/ || path == "" \
             || budget !~ /^[0-9]+$/ || budget + 0 < 1) {
             printf "CONFIG-ERROR: malformed allowlist row (%s:%d): %s\n", FILENAME, FNR, $0
             err = 1; next
@@ -309,6 +362,10 @@ ALLOWBASE=$(basename "$ALLOWLIST")
         guide["spawn"]    = "route it through launch_backend'"'"'s spawner seam (dst-and-wasm.md #3.3)"
         guide["env"]      = "route it through the knobs registry (dst-and-wasm.md #2.5)"
         guide["blocking"] = "convert it onto Waiter/eventcount per the runtime/src/rg.rs precedent (dst-and-wasm.md #3.3)"
+        guide["join"]     = "prove it join-bounded-after-wake in the P3 row-14 ledger (the target cannot need the run token to reach exit), or convert to sched::join_scheduled when P3 wave 3 lands (dst-p3-scheduler.md #3 row 14)"
+        guide["barrier"]  = "use pg_barrier::Barrier (Waiter-backed, rides the C1/C9 chokes) — a raw std::sync::Barrier wait wedges the sim watchdog-invisibly (dst-p3-scheduler.md #3 row 18)"
+        guide["once"]     = "classify the init closure in the P3 row-19 once-ledger: pure/env-read closures get a proof row; choke-crossing closures hoist to boot or convert to a Waiter-backed once-guard (dst-p3-scheduler.md #3 row 19)"
+        guide["scope"]    = "register the gang: ScopeEnter/ScopeExit + route scoped children through sim_scope_spawn (dst-p3-scheduler.md #3 row 15)"
         viol = 0; warn = 0
     }
     $1 == "A" { budget[$2 "\t" $3] = $4 + 0; annot[$2 "\t" $3] = $5; next }
@@ -351,7 +408,7 @@ ALLOWBASE=$(basename "$ALLOWLIST")
             warn++
         }
         print viol "\t" warn > counts
-        norder = split("fs time rand spawn env blocking", ord, " ")
+        norder = split("fs time rand spawn env blocking join barrier once scope", ord, " ")
         for (i = 1; i <= norder; i++) {
             cat = ord[i]
             printf "%s: %d sites / %d files (allowlist %d/%d)\n", \
