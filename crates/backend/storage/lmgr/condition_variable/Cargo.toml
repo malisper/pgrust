@@ -9,6 +9,7 @@ name = "condition_variable"
 path = "src/lib.rs"
 
 [dependencies]
+pg_clock = { path = "../../../../port/pg_clock" }
 condition_variable_seams = { path = "../condition_variable_seams" }
 init_small = { path = "../../../utils/init/init_small" }
 latch = { path = "../../ipc/latch" }

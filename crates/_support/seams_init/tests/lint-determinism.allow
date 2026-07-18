@@ -244,7 +244,6 @@ time	crates/backend/executor/lanestitch/src/lib.rs	4
 time	crates/backend/executor/nodeagg/src/merge.rs	3
 time	crates/backend/executor/nodeagg/src/sink.rs	2
 time	crates/backend/executor/nodeagg/src/spankey.rs	4
-time	crates/backend/executor/runtime/src/clock.rs	3	runtime clock plumbing (s2.2)
 time	crates/backend/executor/runtime/src/lib.rs	4	telemetry; runtime is a sanctioned blocking hub (s2.2/s3.3)
 time	crates/backend/lib/dshash/bench/rig/src/main.rs	11	bench-rig crate, not server prod
 time	crates/backend/postmaster/bgjobs/src/lib.rs	8
@@ -255,9 +254,6 @@ time	crates/backend/postmaster/postmaster/src/serverloop.rs	2	doc-named P2 rerou
 time	crates/backend/postmaster/postmaster/src/statemachine.rs	2	doc-named P2 reroute: postmaster state machine (s2.2)
 time	crates/backend/postmaster/syslogger/src/lib.rs	1
 time	crates/backend/postmaster/walsummarizer/src/lib.rs	2
-time	crates/backend/storage/ipc/shm_mq/src/stall.rs	1
-time	crates/backend/storage/ipc/waiteventset/src/lib.rs	1
-time	crates/backend/storage/lmgr/condition_variable/src/lib.rs	3	clock-adjacent wait-deadline surface
 time	crates/backend/tcop/postgres/src/lib.rs	3
 time	crates/backend/tcop/postgres/src/stmt_trace.rs	3
 time	crates/backend/utils/activity/pgstat/src/lib.rs	4

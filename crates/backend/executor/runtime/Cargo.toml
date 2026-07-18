@@ -16,6 +16,7 @@ path = "src/lib.rs"
 # src/sync.rs; the heavy binder re-export (`parallel`) is cfg(not(loom)) so
 # the loom build cone stays small.
 [dependencies]
+pg_clock = { path = "../../../port/pg_clock" }
 types_error = { path = "../../../_support/types/types_error" }
 init_small = { path = "../../utils/init/init_small" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
