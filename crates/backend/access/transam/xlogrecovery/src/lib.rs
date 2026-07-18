@@ -1156,7 +1156,11 @@ pub fn InitWalRecovery() -> PgResult<InitWalRecoveryResult> {
     }
 
     let context: &'static mcx::MemoryContext =
-        Box::leak(Box::new(mcx::MemoryContext::new("wal recovery")));
+        mcx::session_root("wal recovery");
+    // LIFO: empty the droppy TLS slot before its context is freed.
+    mcx::register_session_cleanup(Box::new(|| {
+        RECOVERY.with(|r| drop(r.borrow_mut().take()));
+    }));
     let mut reader = XLogReaderState::allocate(context.mcx(), transam_xlog::wal_segment_size())?;
     reader.system_identifier = cf.system_identifier;
     reader.XLogReaderSetDecodeBuffer(guc_tables::vars::wal_decode_buffer_size.read() as usize);

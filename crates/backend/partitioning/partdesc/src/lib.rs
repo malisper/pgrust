@@ -48,7 +48,7 @@ fn with_state<R>(f: impl FnOnce(&mut PartDescState) -> R) -> R {
     STATE.with(|cell| {
         let mut slot = cell.borrow_mut();
         let st = slot.get_or_insert_with(|| {
-            let mcx = Box::leak(Box::new(MemoryContext::new("PartDescContext"))).mcx();
+            let mcx = ::mcx::session_root("PartDescContext").mcx();
             ManuallyDrop::new(PartDescState {
                 mcx,
                 descs: PgHashMap::with_capacity_in(8, mcx),

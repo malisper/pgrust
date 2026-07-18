@@ -331,7 +331,17 @@ pub(crate) fn with_state<R>(f: impl FnOnce(&mut TypCacheState) -> R) -> R {
     STATE.with(|cell| {
         let mut slot = cell.borrow_mut();
         let st = slot.get_or_insert_with(|| {
-            let mcx = Box::leak(Box::new(MemoryContext::new("TypCacheContext"))).mcx();
+            let mcx = ::mcx::session_root("TypCacheContext").mcx();
+            // LIFO: drop the state PROPERLY before the context free — cache
+            // entries are Rc's on the GLOBAL heap (the relcache-entry class);
+            // a context-only free skips the refcount decrements.
+            ::mcx::register_session_cleanup(Box::new(|| {
+                STATE.with(|cell| {
+                    if let Some(st) = cell.borrow_mut().take() {
+                        drop(ManuallyDrop::into_inner(st));
+                    }
+                });
+            }));
             ManuallyDrop::new(TypCacheState {
                 mcx,
                 type_cache: PgHashMap::with_capacity_in(64, mcx),

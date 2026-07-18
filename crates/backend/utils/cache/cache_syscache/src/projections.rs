@@ -162,7 +162,11 @@ fn with_memos<R>(f: impl FnOnce(&mut ShapeMemos) -> R) -> R {
     MEMOS.with(|cell| {
         let mut slot = cell.borrow_mut();
         let m = slot.get_or_insert_with(|| {
-            let mcx = Box::leak(Box::new(mcx::MemoryContext::new("SysCacheShapeMemos"))).mcx();
+            let mcx = mcx::session_root("SysCacheShapeMemos").mcx();
+            // LIFO: empty the droppy TLS memos before the context is freed.
+            mcx::register_session_cleanup(Box::new(|| {
+                MEMOS.with(|c| drop(c.borrow_mut().take()));
+            }));
             ShapeMemos {
                 mcx,
                 epoch: catcache::inval_epoch(),
@@ -1359,7 +1363,11 @@ mod io_shape_memo {
                 if registered.is_err() {
                     return; // out of callback slots: run unmemoized
                 }
-                let mcx = Box::leak(Box::new(MemoryContext::new("TypeIoShapeMemo"))).mcx();
+                let mcx = ::mcx::session_root("TypeIoShapeMemo").mcx();
+                // LIFO: empty the droppy TLS memo before the context is freed.
+                ::mcx::register_session_cleanup(Box::new(|| {
+                    MEMO.with(|c| drop(c.borrow_mut().take()));
+                }));
                 *slot = Some(PgHashMap::with_capacity_in(16, mcx));
             }
             slot.as_mut().unwrap().insert(typid, shape);
