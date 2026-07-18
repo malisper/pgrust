@@ -686,6 +686,7 @@ rawsync	crates/backend/replication/walreceiverfuncs/src/lib.rs	1	DST-REVIEW(t28-
 rawsync	crates/backend/replication/walsender/src/lib.rs	1
 rawsync	crates/backend/storage/aio/aio_uring/src/lib.rs	1
 rawsync	crates/backend/storage/buffer/bufmgr/src/freelist.rs	1
+rawsync	crates/backend/storage/file/vfs/src/sim.rs	1	DST-REVIEW(t28-train): t28 late-fold reconciliation — the provider-seam process-shared universe lock (SHARED: OnceLock<Mutex<SimState>>, sim cfg only) meets the permit rawsync census for the first time at this fold; the lane's own in-code ruling: "Mutex serialization here is beneath the DST model" (infrastructure beneath the deterministic schedule, not a modeled sync point); pgsync migration adjudication rides the permit step-3 shared-universe row (the two features compose there)
 rawsync	crates/backend/storage/ipc/dsm_core/src/dsm_impl.rs	1
 rawsync	crates/backend/storage/ipc/dsm_registry/src/lib.rs	1
 rawsync	crates/backend/storage/ipc/latch/src/lib.rs	1
