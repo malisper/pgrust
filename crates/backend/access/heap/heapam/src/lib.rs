@@ -441,6 +441,53 @@ pub fn heap_end_claim_release(scan: &mut HeapScanDescData<'_>) {
     scan.rs_cindex = 0;
 }
 
+/// Cursor-suspension park point (WS-AI wave-9.5, lane-cursors.md §2,
+/// append-only next to `heap_end_claim_release`, its record-then-release
+/// companion): the reposition window `(b0, b1)` of a mid-claim forward
+/// scan whose staged (pinned) page is `b0` and whose unvisited remainder
+/// is exactly `[b0, b1)` under a linear no-wrap walk — the shape
+/// `heap_set_block_range(b0, b1)` restores after the release. None = not
+/// settleable:
+/// * nothing staged/pinned (`!rs_inited` / no `rs_cbuf`) — a drained or
+///   never-started claim holds nothing;
+/// * parallel scans (block order owned by the shared DSM cursor);
+/// * non-forward walks (the lane drive is forward-only; belt for the
+///   probe's remainder arithmetic);
+/// * wrap-capable walks: `SO_ALLOW_SYNC` set, or an unlimited walk
+///   (`rs_numblocks == InvalidBlockNumber`) that started mid-relation —
+///   their remainder is not a contiguous `[b0, end)` range, and the
+///   C-parity pin-held posture stands for them.
+///
+/// Remainder arithmetic (heapgettup_advance_block): on a limited walk
+/// `rs_numblocks` counts the blocks left INCLUDING the currently-staged
+/// one, so `b1 = b0 + rs_numblocks`; on an unlimited 0-started walk,
+/// `b1 = rs_nblocks`. Idempotent across settle/resume cycles: resume sets
+/// `[b0, b1)` via `heap_set_block_range`, whose walk re-reports the same
+/// end at the next suspension.
+pub fn heap_cursor_park_point(scan: &HeapScanDescData<'_>) -> Option<(u64, u64)> {
+    if scan.rs_base.rs_parallel.is_some()
+        || !scan.rs_inited
+        || scan.rs_cbuf.is_none()
+        || !ScanDirectionIsForward(scan.rs_dir)
+        || (scan.rs_base.rs_flags & SO_ALLOW_SYNC) != 0
+    {
+        return None;
+    }
+    let b0 = scan.rs_cblock as u64;
+    let b1 = if scan.rs_numblocks == InvalidBlockNumber {
+        if scan.rs_startblock != 0 {
+            // Mid-relation start on an unlimited walk wraps past the end;
+            // [b0, rs_nblocks) is not the remainder. Not settleable.
+            return None;
+        }
+        scan.rs_nblocks as u64
+    } else {
+        b0 + scan.rs_numblocks as u64
+    };
+    debug_assert!(b0 < b1 && b1 <= scan.rs_nblocks as u64);
+    Some((b0, b1))
+}
+
 // Const generics stand in for C's four constant-folded call sites.
 //
 // # Safety

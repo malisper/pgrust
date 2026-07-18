@@ -11510,25 +11510,86 @@ mod cursors_wave9 {
     /// forces serial).
     #[test]
     fn cursors_w9_budget_gate_semantics() {
+        // The knob lever is a process-global static: serialize every test
+        // that flips it (inc-1b grew a second unlocked flipper — the
+        // fixture lock is the module's knob lock too).
+        let _knob = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let install = crate::lanev2::cursor_run_budget_install;
 
         // Knob OFF (default posture): nothing installs, any shape.
         crate::lanev2::cursors_set_for_tests(false);
-        assert_eq!(install(true, true, 92001, false), None, "knob-OFF installs nothing");
-        assert_eq!(install(true, true, 1, false), None);
+        assert_eq!(install(true, true, 92001, false, 0), None, "knob-OFF installs nothing");
+        assert_eq!(install(true, true, 1, false, 0), None);
 
         // Knob ON: exactly the count-limited forward serial SELECT shape.
         crate::lanev2::cursors_set_for_tests(true);
-        assert_eq!(install(true, true, 92001, false), Some(92001), "the §3.1 shape installs");
-        assert_eq!(install(true, true, 0, false), None, "count-0 (FETCH_ALL) never installs");
-        assert_eq!(install(false, true, 92001, false), None, "non-SELECT never installs");
-        assert_eq!(install(true, false, 92001, false), None, "non-forward never installs");
+        assert_eq!(install(true, true, 92001, false, 0), Some(92001), "the §3.1 shape installs");
+        assert_eq!(install(true, true, 0, false, 0), None, "count-0 (FETCH_ALL) never installs");
+        assert_eq!(install(false, true, 92001, false, 0), None, "non-SELECT never installs");
+        assert_eq!(install(true, false, 92001, false, 0), None, "non-forward never installs");
         assert_eq!(
-            install(true, true, 92001, true),
+            install(true, true, 92001, true, 0),
             None,
             "serial-law pin: a parallel run NEVER carries a budget (fail-closed)"
         );
 
+        crate::lanev2::cursors_set_for_tests(false);
+    }
+
+    /// inc-1b ADMISSION TAXONOMY (contract item 2): every non-admit at the
+    /// cursor seam is a NAMED refusal class — the R-VOCAB registry strings
+    /// pinned here are the corpus cells' labels and the allowlist rows'
+    /// spelling. SCROLL detection = the REWIND|BACKWARD|MARK top eflags
+    /// PortalStart writes for scrollable portals (declared AND
+    /// free-upgraded arrive identically — one class covers both corpus
+    /// shapes). The serial-law arm keeps the EXISTING `parallel-gate`
+    /// vocabulary (it is the §3 pin, not a taxonomy row).
+    #[test]
+    fn cursors_w95_admission_taxonomy_named_classes() {
+        use ::types_slot::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
+        // Serialize with every other knob-flipping test (process-global
+        // static; the fixture lock doubles as the module's knob lock).
+        let _knob = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let name = crate::lanev2::cursor_admission_refusal_name;
+
+        // Admit: forward, no scroll demand, serial.
+        assert_eq!(name(true, 0, false), None, "the forward-only shape admits");
+
+        // cursor-scroll: declared/free-upgraded SCROLL portals (PortalStart
+        // eflags), MARK folded in as the same rewind-capable demand.
+        assert_eq!(name(true, EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD, false), Some("cursor-scroll"));
+        assert_eq!(name(true, EXEC_FLAG_REWIND, false), Some("cursor-scroll"));
+        assert_eq!(name(true, EXEC_FLAG_MARK, false), Some("cursor-scroll"));
+
+        // cursor-backward: the direction demand outranks the portal
+        // capability (the corpus's explicit-backward cell naming).
+        assert_eq!(
+            name(false, EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD, false),
+            Some("cursor-backward")
+        );
+        assert_eq!(name(false, 0, false), Some("cursor-backward"));
+
+        // Serial-law fail-closed arm (NOT a cursor taxonomy row).
+        assert_eq!(name(true, 0, true), Some("parallel-gate"));
+
+        // The install half refuses the WHOLE run on a named refusal: no
+        // budget ⇒ no cursor machinery ⇒ Volcano byte-identical (fail-open).
+        crate::lanev2::cursors_set_for_tests(true);
+        assert_eq!(
+            crate::lanev2::cursor_run_budget_install(
+                true,
+                true,
+                92010,
+                false,
+                EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD
+            ),
+            None,
+            "a scroll portal's budgeted run refuses wholesale"
+        );
+        assert_eq!(
+            crate::lanev2::cursor_run_budget_install(true, true, 92010, false, 0),
+            Some(92010)
+        );
         crate::lanev2::cursors_set_for_tests(false);
     }
 
@@ -11647,6 +11708,264 @@ mod cursors_wave9 {
             arm_rows.push(rows);
         }
         assert_eq!(arm_rows[0], arm_rows[1], "knob arms byte-identical (fail-open law)");
+        crate::lanev2::cursors_set_for_tests(false);
+        scanfix::quiesced();
+    }
+
+    /// inc-1b PARK SHAPE (contract item 1; lane-cursors.md §2): a suspended
+    /// lane-staged page batch SETTLES — claim released through the chain
+    /// (R3 zero pins, `scanfix::quiesced()` is the teeth), reposition
+    /// recorded node-resident — and the next run's resume walk restages the
+    /// SAME visible set with the consume cursor restored, so the emitted
+    /// remainder is byte-identical to an unsuspended drive (the oracle
+    /// arm). Also pins: the pos==n boundary (fully-consumed staged batch
+    /// still parks — resume restages, then the walk advances normally),
+    /// settle/resume idempotence across TWO cycles (the remainder-window
+    /// arithmetic survives a resumed scan's re-park), and the EPQ law (a
+    /// budgeted estate inside an EPQ recheck settles NOTHING — the budget
+    /// belongs to the outer run, the inc-1a §5 note).
+    #[test]
+    fn cursors_w95_park_settle_releases_pin_and_resume_restages() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mcx = leaked_mcx();
+        crate::lanev2::cursors_set_for_tests(true);
+
+        // The lane consume face over a staged batch, as the standalone
+        // pipeline drives it (stage → per-row emit → cursor advance).
+        fn emit_rows<'m>(
+            ss: &mut ::nodeseqscan::SeqScanState<'m>,
+            estate: &mut EStateData<'m>,
+            upto: u32,
+            out: &mut Vec<i32>,
+        ) {
+            let (mut pos, n) = ss.lane_cursor();
+            while pos < upto.min(n) {
+                let slot_id = ::nodeseqscan::seq_scan_batch_emit(ss, estate, pos)
+                    .unwrap()
+                    .expect("staged row emits");
+                let mut isnull = false;
+                let v =
+                    exectuples::slot_getattr(estate.slot_mut(slot_id), 1, &mut isnull);
+                assert!(!isnull);
+                out.push(v.as_i32());
+                pos += 1;
+                ss.set_lane_cursor(pos, n);
+            }
+        }
+
+        // Two arms over identical two-page tables: oracle = straight lane
+        // drive, park arm = the same drive suspended twice mid-flight.
+        let mut arm_rows: Vec<Vec<i32>> = Vec::new();
+        for (parked_arm, relid) in [(false, 92003u32), (true, 92004u32)] {
+            scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
+            let pstmt = mk_seqscan_pstmt(mcx, relid);
+            let snap_ctx: &'static MemoryContext =
+                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snapshot: snapmgr::Snapshot =
+                std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                    snap_ctx.mcx(),
+                    ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+                ));
+            let mut rows: Vec<i32> = Vec::new();
+            with_exec_data(pstmt, |data, pstmt| {
+                data.estate.es_snapshot = Some(snapshot);
+                crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+                let ExecData { estate, planstate } = data;
+                let planstate = planstate.as_mut().unwrap();
+
+                // Stage page 0 and consume one row.
+                {
+                    let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate
+                    else {
+                        panic!("bare seqscan plan");
+                    };
+                    let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate).unwrap();
+                    assert_eq!(n, 3);
+                    ss.set_lane_cursor(0, n);
+                    emit_rows(ss, estate, 1, &mut rows);
+                }
+
+                if parked_arm {
+                    // EPQ law first: a budgeted estate inside an EPQ
+                    // recheck settles NOTHING.
+                    estate.es_epq_active = true;
+                    assert!(
+                        !crate::lanev2::cursor_run_park(planstate, estate),
+                        "EPQ drive must not park"
+                    );
+                    estate.es_epq_active = false;
+                    {
+                        let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate
+                        else {
+                            unreachable!()
+                        };
+                        assert_eq!(ss.lane_cursor(), (1, 3), "EPQ arm left state untouched");
+                        assert!(!::nodeseqscan::seq_scan_cursor_parked(ss));
+                    }
+
+                    // SUSPENSION 1 (mid-batch): settle releases the staged
+                    // claim's pin — R3 zero-pins-at-settle, asserted by the
+                    // fixture's pin census.
+                    assert!(crate::lanev2::cursor_run_park(planstate, estate), "parks");
+                    scanfix::quiesced(); // R3: ZERO pins while suspended
+                    {
+                        let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate
+                        else {
+                            unreachable!()
+                        };
+                        assert!(::nodeseqscan::seq_scan_cursor_parked(ss));
+                        assert_eq!(ss.lane_cursor(), (0, 0), "staged state settled");
+                    }
+                    // RESUME: restage + cursor restore, byte-identical set.
+                    crate::lanev2::cursor_park_resume(planstate, estate).unwrap();
+                    {
+                        let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate
+                        else {
+                            unreachable!()
+                        };
+                        assert!(!::nodeseqscan::seq_scan_cursor_parked(ss));
+                        assert_eq!(ss.lane_cursor(), (1, 3), "consume cursor restored");
+                    }
+                }
+
+                // Drain the rest of page 0.
+                {
+                    let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate
+                    else {
+                        unreachable!()
+                    };
+                    emit_rows(ss, estate, 3, &mut rows);
+                    assert_eq!(ss.lane_cursor(), (3, 3));
+                }
+
+                if parked_arm {
+                    // SUSPENSION 2 (pos == n boundary — the fully-consumed
+                    // staged batch still holds its pin, so it still parks;
+                    // the second cycle also pins the resumed-window
+                    // remainder arithmetic).
+                    assert!(crate::lanev2::cursor_run_park(planstate, estate), "re-parks");
+                    scanfix::quiesced();
+                    crate::lanev2::cursor_park_resume(planstate, estate).unwrap();
+                    {
+                        let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate
+                        else {
+                            unreachable!()
+                        };
+                        assert_eq!(ss.lane_cursor(), (3, 3), "boundary cursor restored");
+                    }
+                }
+
+                // Advance to page 1 and drain it (the walk continues from
+                // the restaged position on both arms).
+                {
+                    let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate
+                    else {
+                        unreachable!()
+                    };
+                    let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate).unwrap();
+                    assert_eq!(n, 2);
+                    ss.set_lane_cursor(0, n);
+                    emit_rows(ss, estate, 2, &mut rows);
+                    let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate).unwrap();
+                    assert_eq!(n, 0, "end of scan");
+                }
+
+                crate::exec_end_node(planstate, estate).unwrap();
+                estate.exec_reset_tuple_table(false);
+                estate.exec_close_range_table_relations().unwrap();
+            });
+            assert_eq!(rows, vec![1, 2, 3, 4, 5], "the whole table, in order");
+            arm_rows.push(rows);
+        }
+        assert_eq!(
+            arm_rows[0], arm_rows[1],
+            "suspended+resumed drive byte-identical to the straight drive"
+        );
+        crate::lanev2::cursors_set_for_tests(false);
+        scanfix::quiesced();
+    }
+
+    /// inc-1b run-seam pin: a knob-ON budgeted VOLCANO run (heap standalone
+    /// refuses lane ownership) settles nothing, never sets the estate
+    /// resume flag, and stays byte-identical across the FETCH cadence —
+    /// the settle walk is engagement-gated, and Volcano's own cross-FETCH
+    /// pin posture (C parity) is untouched.
+    #[test]
+    fn cursors_w95_budgeted_volcano_run_parks_nothing() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mcx = leaked_mcx();
+        crate::lanev2::cursors_set_for_tests(true);
+        scanfix::register_table(92005, &[&[1, 2, 3], &[4, 5]]);
+        let pstmt = mk_seqscan_pstmt(mcx, 92005);
+        let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+        let snapshot: snapmgr::Snapshot =
+            std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                snap_ctx.mcx(),
+                ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+            ));
+        with_exec_data(pstmt, |data, pstmt| {
+            data.estate.es_snapshot = Some(snapshot);
+            let desc = crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+
+            let store = tuplestore::Tuplestore::begin_heap(true, false, 1024);
+            let h = tuplestore::hold::register(store);
+            let mut dr = tstore_receiver::tstore_create_DR();
+            tstore_receiver::set_params(&mut dr, h, false);
+            let mut dest = DestReceiver::Tuplestore(dr);
+
+            // FETCH 2 then FETCH ALL — the inc-1a resume cadence, now over
+            // the settle/resume-bearing run seam.
+            for (count, want) in [(2u64, 2u64), (0, 3)] {
+                data.estate.es_processed = 0;
+                crate::execmain::execute_plan(
+                    data,
+                    CmdType::CMD_SELECT,
+                    true,
+                    count,
+                    ForwardScanDirection,
+                    false,
+                    &mut dest,
+                )
+                .unwrap();
+                assert_eq!(data.estate.es_processed, want);
+                assert!(
+                    !data.estate.es_lane_cursor_parked,
+                    "a Volcano-refused plan never parks (nothing lane-staged)"
+                );
+            }
+
+            let read_cx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("read")));
+            let mut slot = exectuples::make_tuple_table_slot(
+                read_cx.mcx(),
+                ::types_slot::TupleSlotKind::MinimalTuple,
+                Some(desc.clone()),
+            );
+            let mut rows: Vec<i32> = Vec::new();
+            loop {
+                let got = tuplestore::hold::with_store(h, |ts| {
+                    ts.gettupleslot(true, true, &mut slot, read_cx.mcx())
+                })
+                .unwrap();
+                if !got {
+                    break;
+                }
+                let mut isnull = false;
+                let v = exectuples::slot_getattr(&mut slot, 1, &mut isnull);
+                assert!(!isnull);
+                rows.push(v.as_i32());
+            }
+            tuplestore::hold::end(h);
+            assert_eq!(rows, vec![1, 2, 3, 4, 5]);
+
+            let ExecData { estate, planstate } = data;
+            crate::exec_end_node(planstate.as_mut().unwrap(), estate).unwrap();
+            estate.exec_reset_tuple_table(false);
+            estate.exec_close_range_table_relations().unwrap();
+        });
         crate::lanev2::cursors_set_for_tests(false);
         scanfix::quiesced();
     }

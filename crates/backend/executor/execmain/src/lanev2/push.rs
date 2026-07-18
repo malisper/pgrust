@@ -922,35 +922,85 @@ pub(crate) fn cursors_set_for_tests(on: bool) {
     CURSORS.store(if on { 2 } else { 1 }, Relaxed);
 }
 
+/// inc-1b ADMISSION CLASSIFIER (contract §3 "Admits/Refuses", the NAMED
+/// refusal taxonomy): given the run-seam-visible portal shape, `None` =
+/// this budgeted run may carry the cursor machinery (Forward direction,
+/// no SCROLL demand — declared or free-upgraded, both arrive as the
+/// REWIND|BACKWARD top eflags from PortalStart, pquery.rs:390-395; serial);
+/// `Some(reason)` = the WHOLE run refuses to Volcano exactly as today,
+/// under the named `ShapeClass::Cursor` class. Seam-visibility honesty
+/// (registry doc, stats.rs): `cursor-with-hold` / `cursor-persist-holdable`
+/// are RESERVED classes — holdability is portal-level state invisible below
+/// `executor_run`, and today's structural posture already satisfies design
+/// §5 (persist = count-0 run ⇒ never budgeted; pre-COMMIT FETCHes resume
+/// forward). `cursor-plan-refused` ticks at the settle seam (inc-1b park
+/// walker), not here — the plan's engagement is knowable only after pulls.
+pub(crate) fn cursor_admission_refusal(
+    forward: bool,
+    top_eflags: i32,
+    use_parallel_mode: bool,
+) -> Option<super::stats::RefuseReason> {
+    use ::types_slot::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
+    if !forward {
+        // The direction demand is the more specific class (backward runs
+        // reach the seam only through scroll-capable portals).
+        return Some(super::stats::RefuseReason::CursorBackward);
+    }
+    if top_eflags & (EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) != 0 {
+        return Some(super::stats::RefuseReason::CursorScroll);
+    }
+    if use_parallel_mode {
+        // FAIL-CLOSED serial-law arm: `use_parallel_mode` is false for
+        // every count-limited run by the ported execmain.rs:978 gate; if
+        // that gate ever regressed this refuses (no cursor machinery over
+        // a gang, ever) rather than asserting — the corpus batteries would
+        // read the missing engagement loudly instead of a debug-only
+        // crash. Deliberately NOT a named cursor class: it is the §3
+        // serial-law pin, not an admission taxonomy row.
+        return Some(super::stats::RefuseReason::ParallelGate);
+    }
+    None
+}
+
+/// Test/corpus face of the classifier: the NAMED refusal-class string
+/// (`RefuseReason::name()`, the registry vocabulary) or None on admit —
+/// `RefuseReason` itself is lanev2-private (pub(super)).
+#[cfg(test)]
+pub(crate) fn cursor_admission_refusal_name(
+    forward: bool,
+    top_eflags: i32,
+    use_parallel_mode: bool,
+) -> Option<&'static str> {
+    cursor_admission_refusal(forward, top_eflags, use_parallel_mode).map(|r| r.name())
+}
+
 /// The run seam's install half (`execute_plan`, once per ExecutorRun):
 /// computes the value of `es_cursor_run_budget` for this run —
-/// `Some(count)` iff this run is a knob-ON, count-limited, forward SELECT:
-/// the §3.1 count-exact suspension shape. The caller writes the result to
-/// the estate UNCONDITIONALLY (a None overwrites any stale value, so an
-/// estate re-run after an error can never inherit a budget). Gate order is
-/// the cost order: `count == 0` (every simple-protocol run) answers with
-/// one register test before the knob cell is ever loaded.
-///
-/// FAIL-CLOSED serial-law arm: `use_parallel_mode` is false for every
-/// count-limited run by the ported :978 gate; if that gate ever regressed,
-/// this returns None (no cursor machinery over a gang, ever) rather than
-/// asserting — the corpus batteries would then read the missing engagement
-/// loudly instead of a debug-only crash.
+/// `Some(count)` iff this run is a knob-ON, count-limited, cursor-ADMITTED
+/// (forward, non-scroll, serial) SELECT: the §3.1 count-exact suspension
+/// shape. The caller writes the result to the estate UNCONDITIONALLY (a
+/// None overwrites any stale value, so an estate re-run after an error can
+/// never inherit a budget). Gate order is the cost order: `count == 0`
+/// (every simple-protocol run) answers with one register test before the
+/// knob cell is ever loaded; the named-refusal classifier and its ticks run
+/// only knob-ON (knob-OFF accounting byte-identical by construction).
 pub(crate) fn cursor_run_budget_install(
     is_select: bool,
     forward: bool,
     count: u64,
     use_parallel_mode: bool,
+    top_eflags: i32,
 ) -> Option<u64> {
-    if count == 0 || !is_select || !forward {
+    if count == 0 || !is_select {
         return None;
     }
     if !cursors_v2_enabled() {
         return None;
     }
-    if use_parallel_mode {
-        // Unreachable by the :978 gate (count != 0 forces serial); the
-        // fail-closed refusal IS the §3 pin at this seam.
+    if let Some(reason) = cursor_admission_refusal(forward, top_eflags, use_parallel_mode) {
+        // Once per budgeted run (never per tuple); `tick_refused` is a
+        // no-op unless accounting is armed.
+        super::stats::tick_refused(super::stats::ShapeClass::Cursor, reason);
         return None;
     }
     Some(count)
@@ -958,9 +1008,300 @@ pub(crate) fn cursor_run_budget_install(
 
 /// The read half for lane-side consumers (the §2 park/settle glue, inc-1b):
 /// the emission budget of the current run, None outside a budgeted one.
-#[allow(dead_code)] // first non-test consumer = the inc-1b park walker
+/// STALENESS LAW (inc-1a fixer ledger item 8): meaningful only between
+/// `execute_plan` entry and return — post-run readers see the LAST run's
+/// budget (NoMovement runs never overwrite). EPQ LAW (inc-1a §5 note): a
+/// consumer must gate on `es_epq_active` — an EPQ recheck drive shares the
+/// estate and the budget belongs to the OUTER run.
+#[allow(dead_code)] // run-seam gates read the estate field directly; unit-pin face
 pub(crate) fn cursor_run_budget(estate: &::executils::EStateData<'_>) -> Option<u64> {
     estate.es_cursor_run_budget
+}
+
+// --- WS-AI wave-9.5 (cursors inc-1b): the §2 park shape -------------------------
+//
+// Design (lane-cursors.md §2, DECIDED): at suspension, SETTLE everything;
+// repossess on resume. The budget-N emit sink (inc-1a) is the settle POINT:
+// when a budgeted run returns to the protocol layer, `cursor_run_park`
+// (below the drive loop in `execute_plan`) walks the plan tree and settles
+// every lane-staged scan claim through the ledgered claim-release chain —
+// `seq_scan_cursor_settle` → `table_scan_end_claim_release` →
+// `heap_end_claim_release` — with the reposition point recorded
+// node-resident (`SeqScanState::lane_park`). R3 ZERO-PINS-AT-SETTLE is
+// debug-asserted at every settled claim. The next run's entry
+// (`cursor_park_resume`) restages the suspended page batch and restores the
+// consume cursor BEFORE the first pull touches staged state — re-entry costs
+// the emit-face hop + one buffer re-lookup, never translate/verdict/compile
+// (the §8 explicit-FETCH guard's bar).
+//
+// WHAT CAN ACTUALLY BE STAGED AT SUSPENSION (audited at inc-1b, recorded in
+// notes/se-wave9-ai.md): `HeapBatchSource` claims are DRAIN-SCOPED (both
+// construction sites settle via `end_claim` inside one exec_proc_node call
+// — they can never span a suspension); breaker pipelines (agg/sort/join
+// builds) consume their input whole at first pull, so post-build suspension
+// holds zero scan claims; the per-pull staged shapes are the standalone
+// scan pipeline's page batch (heap arm: ONE pinned page, rs_cbuf — the
+// claim this walker settles; production standalone admission is
+// pgrcolumnar-only today, whose staged windows are Arc/mmap-backed decode
+// scratch under R4 — no bufmgr pins, nothing to release, node-resident by
+// design §1). Ledger: a budgeted run is DOP-1 caller-as-worker (§3) —
+// pool-invisible, zero ledger width to retire.
+//
+// STATED DIVERGENCE carried (design §2): C keeps rs_cbuf pinned across
+// FETCHes; the settled lane claim does not. Pin-visible/pgstat only, never
+// output bytes; priced by the §8 cadence pairs. The VOLCANO scan's own
+// cross-FETCH pin is C parity and is deliberately NOT touched (the walker
+// settles only lane-STAGED batches, `lane_n > 0`).
+
+/// The run seam's settle half: walk + settle + the `cursor-plan-refused`
+/// roll-up tick. Returns true iff anything parked (the caller then sets
+/// `es_lane_cursor_parked`). Runs only on budgeted runs (caller gates on
+/// `es_cursor_run_budget.is_some()`); refuses under EPQ (the budget belongs
+/// to the outer run — inc-1a §5 EPQ law, pinned in units).
+pub(crate) fn cursor_run_park<'mcx>(
+    node: &mut crate::procnode::PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> bool {
+    if estate.es_epq_active {
+        return false;
+    }
+    let mut w = ParkWalk { engaged: false, parked: false };
+    w.settle(node, estate);
+    if !w.engaged {
+        // The budgeted run's top plan carried no (scan-class) lane
+        // engagement: the whole portal rides Volcano exactly as today.
+        // Once per budgeted run; no-op unless accounting armed. Detection
+        // breadth = scan classes this increment (see the registry doc).
+        super::stats::tick_refused(
+            super::stats::ShapeClass::Cursor,
+            super::stats::RefuseReason::CursorPlanRefused,
+        );
+    }
+    w.parked
+}
+
+/// Repossession (design §2 "on resume, the source repositions"): restage
+/// every parked scan's suspended page batch and restore its consume cursor.
+/// Called at `execute_plan` entry when the previous budgeted run parked
+/// (`es_lane_cursor_parked`); count-0 follow-ups (FETCH ALL) resume through
+/// the same walk — the flag, not the budget, carries the obligation.
+pub(crate) fn cursor_park_resume<'mcx>(
+    node: &mut crate::procnode::PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    debug_assert!(!estate.es_epq_active, "cursor resume inside an EPQ drive");
+    resume_walk(node, estate)
+}
+
+struct ParkWalk {
+    engaged: bool,
+    parked: bool,
+}
+
+impl ParkWalk {
+    /// Settle-walk over the plan tree (the `exec_shutdown_node` recursion
+    /// arms). Leaf behavior: a SeqScan with a lane-STAGED page batch
+    /// settles through the claim-release chain; everything else is a
+    /// no-op (their staged state is either drain-scoped or pin-free — the
+    /// module doc's audit). Infallible: settling is release-only.
+    fn settle<'mcx>(
+        &mut self,
+        node: &mut crate::procnode::PlanStateNode<'mcx>,
+        estate: &mut EStateData<'mcx>,
+    ) {
+        use crate::procnode::PlanStateNode as P;
+        match node {
+            P::SeqScan(ss) => {
+                if ss.lane_verdict() == Some(true) || ss.cb_standalone_verdict() == Some(true) {
+                    self.engaged = true;
+                }
+                if ::nodeseqscan::seq_scan_cursor_settle(ss) {
+                    self.parked = true;
+                    self.engaged = true;
+                    // Slot hygiene (the `end_claim_clear_slot` discipline):
+                    // the emitted-slot path aliases/pins the released page;
+                    // nothing above the seam reads a suspended run's last
+                    // slot (the receiver copied out during receive_slot).
+                    let mcx = estate.es_query_cxt;
+                    ::exectuples::exec_clear_tuple(
+                        estate.slot_mut(ss.ss.ss_ScanTupleSlot),
+                        mcx,
+                    );
+                    if let Some(p) = ss.ss.ps_ProjInfo.as_ref() {
+                        let result_slot = p.pi_result_slot;
+                        ::exectuples::exec_clear_tuple(estate.slot_mut(result_slot), mcx);
+                    }
+                }
+            }
+            P::Instrumented(w) => self.settle(&mut w.inner, estate),
+            P::Result(rs) => {
+                if let Some(outer) = rs.outer.as_deref_mut() {
+                    self.settle(outer, estate);
+                }
+            }
+            P::ProjectSet(ps) => self.settle(&mut ps.outer, estate),
+            P::RecursiveUnion(ru) => {
+                let ru = &mut **ru;
+                self.settle(&mut ru.outer, estate);
+                self.settle(&mut ru.inner, estate);
+            }
+            P::Agg(aps) => self.settle(&mut aps.outer, estate),
+            P::WindowAgg(w) => self.settle(&mut w.outer, estate),
+            P::Sort(s) => self.settle(&mut s.outer, estate),
+            P::IncrementalSort(s) => self.settle(&mut s.outer, estate),
+            P::Material(m) => self.settle(&mut m.outer, estate),
+            P::Memoize(m) => self.settle(&mut m.outer, estate),
+            P::Unique(u) => self.settle(&mut u.outer, estate),
+            P::Group(g) => self.settle(&mut g.outer, estate),
+            P::Limit(l) => self.settle(&mut l.outer, estate),
+            P::LockRows(l) => self.settle(&mut l.outer, estate),
+            P::ModifyTable(mps) => self.settle(&mut mps.subplan, estate),
+            P::Append(a) => {
+                for sub in a.substates.iter_mut() {
+                    self.settle(sub, estate);
+                }
+            }
+            P::MergeAppend(m) => {
+                for sub in m.substates.iter_mut() {
+                    self.settle(sub, estate);
+                }
+            }
+            P::SubqueryScan(s) => self.settle(&mut s.subplan, estate),
+            P::SetOp(s) => {
+                let s = &mut **s;
+                self.settle(&mut s.outer, estate);
+                self.settle(&mut s.inner, estate);
+            }
+            P::NestLoop(nl) => {
+                self.settle(&mut nl.outer, estate);
+                self.settle(&mut nl.inner, estate);
+            }
+            P::HashJoin(hj) => {
+                let hj = &mut **hj;
+                self.settle(&mut hj.outer, estate);
+                self.settle(&mut hj.hash.child, estate);
+            }
+            P::MergeJoin(mj) => {
+                let mj = &mut **mj;
+                self.settle(&mut mj.outer, estate);
+                self.settle(&mut mj.inner, estate);
+            }
+            P::Gather(g) => self.settle(&mut g.outer, estate),
+            P::GatherMerge(gm) => self.settle(&mut gm.outer, estate),
+            P::BitmapHeapScan(b) => self.settle(&mut b.bitmapqual, estate),
+            P::BitmapAnd(bc) | P::BitmapOr(bc) => {
+                for sub in bc.substates.iter_mut() {
+                    self.settle(sub, estate);
+                }
+            }
+            // Leaves with no lane-staged claim state (drain-scoped or
+            // pin-free; a shape this walk misses settles nothing — the
+            // C-parity pin-held posture, never a correctness change).
+            P::SampleScan(_)
+            | P::FunctionScan(_)
+            | P::TableFuncScan(_)
+            | P::ValuesScan(_)
+            | P::ForeignScan(_)
+            | P::CteScan(_)
+            | P::WorkTableScan(_)
+            | P::NamedTuplestoreScan(_)
+            | P::IndexScan(_)
+            | P::TidScan(_)
+            | P::TidRangeScan(_)
+            | P::IndexOnlyScan(_)
+            | P::BitmapIndexScan(_) => {}
+        }
+    }
+}
+
+/// Resume-walk twin (same arms; fallible — restaging reads pages).
+fn resume_walk<'mcx>(
+    node: &mut crate::procnode::PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    use crate::procnode::PlanStateNode as P;
+    match node {
+        P::SeqScan(ss) => {
+            ::nodeseqscan::seq_scan_cursor_resume(ss, estate)?;
+            Ok(())
+        }
+        P::Instrumented(w) => resume_walk(&mut w.inner, estate),
+        P::Result(rs) => match rs.outer.as_deref_mut() {
+            Some(outer) => resume_walk(outer, estate),
+            None => Ok(()),
+        },
+        P::ProjectSet(ps) => resume_walk(&mut ps.outer, estate),
+        P::RecursiveUnion(ru) => {
+            let ru = &mut **ru;
+            resume_walk(&mut ru.outer, estate)?;
+            resume_walk(&mut ru.inner, estate)
+        }
+        P::Agg(aps) => resume_walk(&mut aps.outer, estate),
+        P::WindowAgg(w) => resume_walk(&mut w.outer, estate),
+        P::Sort(s) => resume_walk(&mut s.outer, estate),
+        P::IncrementalSort(s) => resume_walk(&mut s.outer, estate),
+        P::Material(m) => resume_walk(&mut m.outer, estate),
+        P::Memoize(m) => resume_walk(&mut m.outer, estate),
+        P::Unique(u) => resume_walk(&mut u.outer, estate),
+        P::Group(g) => resume_walk(&mut g.outer, estate),
+        P::Limit(l) => resume_walk(&mut l.outer, estate),
+        P::LockRows(l) => resume_walk(&mut l.outer, estate),
+        P::ModifyTable(mps) => resume_walk(&mut mps.subplan, estate),
+        P::Append(a) => {
+            for sub in a.substates.iter_mut() {
+                resume_walk(sub, estate)?;
+            }
+            Ok(())
+        }
+        P::MergeAppend(m) => {
+            for sub in m.substates.iter_mut() {
+                resume_walk(sub, estate)?;
+            }
+            Ok(())
+        }
+        P::SubqueryScan(s) => resume_walk(&mut s.subplan, estate),
+        P::SetOp(s) => {
+            let s = &mut **s;
+            resume_walk(&mut s.outer, estate)?;
+            resume_walk(&mut s.inner, estate)
+        }
+        P::NestLoop(nl) => {
+            resume_walk(&mut nl.outer, estate)?;
+            resume_walk(&mut nl.inner, estate)
+        }
+        P::HashJoin(hj) => {
+            let hj = &mut **hj;
+            resume_walk(&mut hj.outer, estate)?;
+            resume_walk(&mut hj.hash.child, estate)
+        }
+        P::MergeJoin(mj) => {
+            let mj = &mut **mj;
+            resume_walk(&mut mj.outer, estate)?;
+            resume_walk(&mut mj.inner, estate)
+        }
+        P::Gather(g) => resume_walk(&mut g.outer, estate),
+        P::GatherMerge(gm) => resume_walk(&mut gm.outer, estate),
+        P::BitmapHeapScan(b) => resume_walk(&mut b.bitmapqual, estate),
+        P::BitmapAnd(bc) | P::BitmapOr(bc) => {
+            for sub in bc.substates.iter_mut() {
+                resume_walk(sub, estate)?;
+            }
+            Ok(())
+        }
+        P::SampleScan(_)
+        | P::FunctionScan(_)
+        | P::TableFuncScan(_)
+        | P::ValuesScan(_)
+        | P::ForeignScan(_)
+        | P::CteScan(_)
+        | P::WorkTableScan(_)
+        | P::NamedTuplestoreScan(_)
+        | P::IndexScan(_)
+        | P::TidScan(_)
+        | P::TidRangeScan(_)
+        | P::IndexOnlyScan(_)
+        | P::BitmapIndexScan(_) => Ok(()),
+    }
 }
 
 // --- end WS-AI wave-9 ----------------------------------------------------------
