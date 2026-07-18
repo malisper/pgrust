@@ -13,7 +13,7 @@ use ::types_scan::scankey::{
 };
 use ::types_tuple::varatt::varsize_any;
 
-fn lock(shared: &BTParallelScanShared) -> std::sync::MutexGuard<'_, BtParallelScanState> {
+fn lock(shared: &BTParallelScanShared) -> pgsync::MutexGuard<'_, BtParallelScanState> {
     shared.state.lock().unwrap_or_else(|e| e.into_inner())
 }
 

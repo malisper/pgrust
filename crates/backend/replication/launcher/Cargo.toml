@@ -9,6 +9,7 @@ name = "launcher"
 path = "src/lib.rs"
 
 [dependencies]
+pgsync = { path = "../../../_support/pgsync" }
 ipc = { path = "../../storage/ipc/ipc" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 init_small = { path = "../../utils/init/init_small" }

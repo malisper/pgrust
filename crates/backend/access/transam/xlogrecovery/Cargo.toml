@@ -9,6 +9,7 @@ name = "xlogrecovery"
 path = "src/lib.rs"
 
 [dependencies]
+pgsync = { path = "../../../../_support/pgsync" }
 pgstat = { path = "../../../utils/activity/pgstat" }
 timeline_seams = { path = "../timeline_seams" }
 mcx = { path = "../../../../_support/mcx" }
