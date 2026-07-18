@@ -69,18 +69,27 @@ use types_tuple::{
 
 use vfs::sim::{CrashImage, FaultRule, SeededFaultPlan, SimVfs};
 
-const SEG: i32 = 16 * 1024 * 1024;
+/// inc-3: 1 MB WAL segments (a valid wal_segment_size) so the scaled
+/// workload CROSSES segment boundaries — XLogFileInit (zero-fill + install
+/// rename) and checkpoint-time RemoveOldXlogFiles recycling become cut
+/// classes (the N4 path-at-op work classifies the recycled renames).
+const SEG: i32 = 1024 * 1024;
 const SYS_ID: u64 = 0x5EED_FA17_0002;
 const REL_OID: Oid = 61000;
 const RLOC: RelFileLocator = RelFileLocator::new(1663, 5, REL_OID);
 const CKPT_LOC: XLogRecPtr = SEG as u64 + 40;
 const CKPT_TOT_LEN: usize = SizeOfXLogRecord + 2 + controldata_utils::SIZEOF_CHECKPOINT;
 
-/// Transactions per workload run; txn t inserts int4 value t and commits.
-/// First real xid is 3 (the minted checkpoint's nextXid), so txn t <-> xid
-/// t+2. A product CreateCheckPoint runs after txn CKPT_AFTER.
-const TXNS: u32 = 6;
-const CKPT_AFTER: u32 = 3;
+/// Transactions per workload run; txn t inserts ROWS_PER_TXN int4 rows of
+/// value t and commits (inc-3 scale-up: the heap spans MANY pages — buffer
+/// eviction writes heap pages mid-run — and the WAL volume crosses 1 MB
+/// segments). First real xid is 3 (the minted checkpoint's nextXid), so
+/// txn t <-> xid t+2. A product CreateCheckPoint runs after each txn in
+/// CKPT_AFTER — the second one sits past the first segment crossing so
+/// RemoveOldXlogFiles gets recyclable segments.
+const TXNS: u32 = 10;
+const ROWS_PER_TXN: u32 = 2600;
+const CKPT_AFTER: [u32; 2] = [3, 8];
 
 const SEED: u64 = 0x5EED_FA17_0002;
 
@@ -671,8 +680,10 @@ fn mint_and_boot_writer() {
 // WRITER child: workload through product paths, cut, pack the crash image
 // ---------------------------------------------------------------------------
 
-/// One committed transaction through the product commit protocol. Any Err is
-/// the engine stopping (the PANIC-equivalent for a correct engine).
+/// One committed transaction through the product commit protocol: inc-3
+/// scale-up inserts ROWS_PER_TXN rows (multi-page heap; the WAL crosses
+/// segments). Any Err is the engine stopping (the PANIC-equivalent for a
+/// correct engine).
 fn run_one_txn<'m>(
     mcx: Mcx<'m>,
     rel: &RelationData<'m>,
@@ -680,13 +691,15 @@ fn run_one_txn<'m>(
     t: u32,
 ) -> PgResult<()> {
     xact::StartTransactionCommand()?;
-    let mut tup = heaptuple::heap_form_tuple(
-        mcx,
-        tupdesc,
-        &[datum::Datum::from_i32(t as i32)],
-        &[false],
-    )?;
-    heapam::heap_insert(rel, tup.as_tuple_mut(), 0, 0, None)?;
+    for _ in 0..ROWS_PER_TXN {
+        let mut tup = heaptuple::heap_form_tuple(
+            mcx,
+            tupdesc,
+            &[datum::Datum::from_i32(t as i32)],
+            &[false],
+        )?;
+        heapam::heap_insert(rel, tup.as_tuple_mut(), 0, 0, None)?;
+    }
     xact::CommitTransactionCommand()?;
     Ok(())
 }
@@ -704,6 +717,10 @@ fn sim_sweep_writer_child() {
     SimVfs::reset();
     mint_and_boot_writer();
 
+    // inc-3 WHOLE-NODE KILL: the cut kills the node — every post-cut vfs op
+    // the engine's error/unwind paths issue is refused without mutation, so
+    // the packed image is the PURE at-cut image (no unwind residue).
+    SimVfs::set_kill_on_cut(true);
     if red {
         // PRODUCT-SHAPED RED ARM: disable the product's fsync layer through
         // its own knob (fd::pg_fsync and issue_xlog_fsync both consult
@@ -712,6 +729,9 @@ fn sim_sweep_writer_child() {
         SimVfs::set_crash_image(CrashImage::DropAll);
     } else if k > 0 {
         SeededFaultPlan::install(per_point_seed(k), vec![FaultRule::crash_at_op(k)]);
+    } else {
+        // Baseline: record the op trace — the sweep stratifier reads it.
+        SimVfs::set_op_trace(true);
     }
 
     let ops_at_start = SimVfs::op_seq();
@@ -746,7 +766,7 @@ fn sim_sweep_writer_child() {
         if SimVfs::cut_count() > 0 {
             break; // power is gone; do not touch the image any further
         }
-        if t == CKPT_AFTER {
+        if CKPT_AFTER.contains(&t) {
             // The PRODUCT's checkpoint: CheckPointGuts (clog/subtrans/buffer
             // flushes + sync requests) and the in-place control update. The
             // checkpointer's buffer pins need a live owner (C: the aux
@@ -797,12 +817,30 @@ fn sim_sweep_writer_child() {
     meta.push_str(&format!("acked={acked}\n"));
     meta.push_str(&format!("ops={ops_used}\n"));
     meta.push_str(&format!("cuts={}\n", SimVfs::cut_count()));
+    meta.push_str(&format!("killed={}\n", SimVfs::killed()));
+    meta.push_str(&format!("frozen={}\n", SimVfs::frozen_op_count()));
     meta.push_str(&format!("stopped={}\n", stopped.as_deref().unwrap_or("-")));
     for l in SimVfs::fault_log() {
         meta.push_str(&format!("faultlog: {l}\n"));
     }
+    // Baseline op trace (k=0 only), rebased to plan-relative op numbers so
+    // the orchestrator's stratifier maps lines straight to sweep ks.
+    for l in SimVfs::op_trace() {
+        let seq: u64 = l
+            .split_whitespace()
+            .find_map(|w| w.strip_prefix("seq="))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if seq > ops_at_start {
+            meta.push_str(&format!("optrace: k={} {l}\n", seq - ops_at_start));
+        }
+    }
     std::fs::write(pack.join("meta.txt"), meta).unwrap();
-    println!("SIM_WRITER_DONE k={k} acked={acked} ops={ops_used} cuts={}", SimVfs::cut_count());
+    println!(
+        "SIM_WRITER_DONE k={k} acked={acked} ops={ops_used} cuts={} frozen={}",
+        SimVfs::cut_count(),
+        SimVfs::frozen_op_count()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -952,11 +990,25 @@ fn sim_sweep_recover_child() {
             bufmgr::ReleaseBuffer(buf).unwrap();
         }
         visible.sort_unstable();
-        let expected: Vec<i32> = (1..=h as i32).collect();
+        let expected: Vec<i32> = (1..=h as i32)
+            .flat_map(|t| std::iter::repeat(t).take(ROWS_PER_TXN as usize))
+            .collect();
         if visible != expected {
-            violations.push(format!(
-                "{tag}: visible heap fold diverges — got {visible:?}, want 1..={h}"
-            ));
+            let mut msg = format!(
+                "{tag}: visible heap fold diverges — {} visible rows vs {} expected \
+                 (h={h}, {ROWS_PER_TXN}/txn)",
+                visible.len(),
+                expected.len()
+            );
+            if let Some((i, (g, w))) = visible
+                .iter()
+                .zip(expected.iter())
+                .enumerate()
+                .find(|(_, (g, w))| g != w)
+            {
+                msg.push_str(&format!("; first divergence at row {i}: got {g} want {w}"));
+            }
+            violations.push(msg);
         }
 
         // Determinism digest (FNV over the visible fold + horizons).
@@ -972,8 +1024,8 @@ fn sim_sweep_recover_child() {
         }
         mix(cf.checkPoint);
         println!(
-            "SIM_RECOVER_STATE h={h} acked={acked} visible={:?} digest={digest:016x}",
-            visible
+            "SIM_RECOVER_STATE h={h} acked={acked} visible_rows={} nblocks={nblocks} digest={digest:016x}",
+            visible.len()
         );
     }
 
@@ -1040,9 +1092,98 @@ fn meta_field(meta: &str, key: &str) -> String {
         .unwrap()
 }
 
-/// THE PAYOFF (inc-2): cut at EVERY product-workload op; the PRODUCT's
-/// StartupXLOG must recover every image and the committed/uncommitted/
-/// consistency properties must hold at every point.
+/// Find a marker line in captured child output. GLUE TRAP: the child's
+/// libtest harness prints `test <name> ... ` WITHOUT a trailing newline, so
+/// the FIRST stdout line a child test prints arrives glued to it —
+/// `starts_with` misses exactly the first marker. Match the marker anywhere
+/// in the line and slice from it.
+fn marker_line(text: &str, marker: &str) -> Option<String> {
+    text.lines()
+        .find_map(|l| l.find(marker).map(|i| l[i..].to_string()))
+}
+
+/// Parse the baseline meta's op-trace lines into (k, kind, class).
+fn parse_trace(meta: &str) -> Vec<(u64, String, String)> {
+    meta.lines()
+        .filter_map(|l| l.strip_prefix("optrace: "))
+        .filter_map(|l| {
+            let mut k = None;
+            let mut kind = None;
+            let mut class = None;
+            for w in l.split_whitespace() {
+                if let Some(v) = w.strip_prefix("k=") {
+                    k = v.parse().ok();
+                } else if let Some(v) = w.strip_prefix("kind=") {
+                    kind = Some(v.to_string());
+                } else if let Some(v) = w.strip_prefix("class=") {
+                    class = Some(v.to_string());
+                }
+            }
+            Some((k?, kind?, class?))
+        })
+        .collect()
+}
+
+/// inc-3 stratified cut-point selection over the scaled workload's op span
+/// (the span is too wide to sweep every op as a routine gate). Picks, in
+/// order: (1) EVERY durability/namespace/metadata op — fsyncs, renames
+/// (segment install + recycle), opens, unlinks, truncates, mkdirs; (2) ±1
+/// neighbors of every rename (the install/recycle windows); (3) evenly
+/// thinned class-boundary writes (first write after the active path class
+/// changed — WAL<->heap<->clog transitions); (4) a uniform stride over the
+/// remaining span. Deterministic in the trace alone.
+fn stratify(trace: &[(u64, String, String)], n: u64, cap: usize) -> Vec<u64> {
+    use std::collections::BTreeSet;
+    let mut pick: BTreeSet<u64> = BTreeSet::new();
+    for (k, kind, _) in trace {
+        if matches!(
+            kind.as_str(),
+            "Fsync" | "Fdatasync" | "Rename" | "Unlink" | "Open" | "Ftruncate"
+                | "TruncatePath" | "Mkdir" | "Rmdir" | "Fallocate"
+        ) {
+            pick.insert(*k);
+        }
+    }
+    for (k, kind, _) in trace {
+        if kind == "Rename" {
+            if *k > 1 {
+                pick.insert(k - 1);
+            }
+            if *k < n {
+                pick.insert(k + 1);
+            }
+        }
+    }
+    let mut boundaries: Vec<u64> = Vec::new();
+    let mut prev_class = String::new();
+    for (k, kind, class) in trace {
+        if kind == "PWriteV" && *class != prev_class {
+            boundaries.push(*k);
+        }
+        prev_class = class.clone();
+    }
+    let room = cap.saturating_sub(pick.len()).max(20) / 2;
+    let step = (boundaries.len() / room.max(1)).max(1);
+    for k in boundaries.iter().step_by(step) {
+        pick.insert(*k);
+    }
+    if pick.len() < cap {
+        let stride = (n.max(1) / (cap - pick.len()).max(1) as u64).max(1);
+        let mut k = 1;
+        while k <= n && pick.len() < cap {
+            pick.insert(k);
+            k += stride;
+        }
+    }
+    pick.into_iter().filter(|&k| k >= 1 && k <= n).collect()
+}
+
+/// THE PAYOFF (inc-2, scaled up in inc-3): cut across a stratified set of
+/// product-workload ops — every durability/namespace op, the segment
+/// install/recycle windows, class-boundary writes, plus a uniform stride —
+/// under the WHOLE-NODE KILL (pure crash images). The PRODUCT's StartupXLOG
+/// must recover every image and the committed/uncommitted/consistency
+/// properties must hold at every point.
 #[test]
 fn product_shaped_crash_recovery_sweep() {
     if std::env::var(ROLE_ENV).is_ok() {
@@ -1061,31 +1202,71 @@ fn product_shaped_crash_recovery_sweep() {
         "baseline recovery must be clean:\n{rtext}"
     );
     let n: u64 = meta_field(&meta, "ops").parse().unwrap();
-    assert!(n > 20, "workload too small to sweep ({n} ops)");
+    assert!(n > 200, "scaled workload too small to stratify ({n} ops)");
+    let trace = parse_trace(&meta);
+    assert_eq!(trace.len() as u64, n, "trace must cover the whole workload span");
+    // The inc-3 scale-up must actually reach its new cut classes.
+    assert!(
+        trace.iter().any(|(_, kind, class)| kind == "Rename" && class == "Wal"),
+        "workload must cross a WAL segment (install/recycle renames)"
+    );
+    assert!(
+        trace.iter().any(|(_, kind, class)| kind == "PWriteV" && class == "Heap"),
+        "workload must write heap pages mid-run (multi-page + eviction)"
+    );
+    let baseline_rows = marker_line(&rtext, "SIM_RECOVER_STATE").unwrap_or_default();
+    assert!(
+        baseline_rows.contains(&format!("visible_rows={}", TXNS * ROWS_PER_TXN)),
+        "baseline fold must carry all rows: {baseline_rows}"
+    );
 
-    let mut failures: Vec<String> = Vec::new();
-    let mut cut_points = 0u64;
-    for k in 1..=n {
-        let (rtext, meta) = run_point(&base, k, false);
-        if meta_field(&meta, "cuts") == "0" {
-            failures.push(format!("k={k}: planned cut never fired ({})", meta_field(&meta, "ops")));
-            continue;
+    let points = stratify(&trace, n, 180);
+    eprintln!(
+        "PRODUCT-SHAPED SWEEP: stratified {} cut points over {n} product-workload ops",
+        points.len()
+    );
+
+    let failures = std::sync::Mutex::new(Vec::<String>::new());
+    let cut_points = std::sync::atomic::AtomicU64::new(0);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|s| {
+        for _ in 0..6 {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if i >= points.len() {
+                    break;
+                }
+                let k = points[i];
+                let (rtext, meta) = run_point(&base, k, false);
+                if meta_field(&meta, "cuts") == "0" {
+                    failures
+                        .lock()
+                        .unwrap()
+                        .push(format!("k={k}: planned cut never fired"));
+                    continue;
+                }
+                cut_points.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                for line in rtext.lines() {
+                    // marker_line glue trap: match anywhere in the line.
+                    if let Some(i) = line.find("VIOLATION: ") {
+                        failures.lock().unwrap().push(line[i + 11..].to_string());
+                    }
+                }
+            });
         }
-        cut_points += 1;
-        for line in rtext.lines() {
-            if let Some(v) = line.strip_prefix("VIOLATION: ") {
-                failures.push(v.to_string());
-            }
-        }
-    }
+    });
     let _ = std::fs::remove_dir_all(&base);
+    let failures = failures.into_inner().unwrap();
+    let cut_points = cut_points.into_inner();
 
     eprintln!(
         "PRODUCT-SHAPED SWEEP: {cut_points} cut points over {n} product-workload ops \
-         ({TXNS} txns + 1 product checkpoint), {} violations",
+         ({TXNS} txns x {ROWS_PER_TXN} rows + {} product checkpoints, whole-node kill), \
+         {} violations",
+        CKPT_AFTER.len(),
         failures.len()
     );
-    assert_eq!(cut_points, n, "every sweep point must cut");
+    assert_eq!(cut_points as usize, points.len(), "every sweep point must cut");
     assert!(
         failures.is_empty(),
         "PRODUCT-SHAPED CRASH-RECOVERY VIOLATIONS ({}):\n{}",
@@ -1094,8 +1275,32 @@ fn product_shaped_crash_recovery_sweep() {
     );
 }
 
+/// `xlogtemp.<pid>` carries the writer process's ambient pid in its NAME
+/// (C's XLogFileInitInternal shape) — harness ambience, not model entropy:
+/// the x3 gate runs three FRESH OS processes. Normalize just that token for
+/// the cross-process byte-compare; everything else must be byte-identical.
+fn normalize_pid(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(pos) = rest.find("xlogtemp.") {
+        let split = pos + "xlogtemp.".len();
+        out.push_str(&rest[..split]);
+        rest = &rest[split..];
+        let nd = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+        if nd > 0 {
+            out.push_str("PID");
+        }
+        rest = &rest[nd..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Same point, three fresh universes: byte-identical packs, metas (incl. the
 /// fault log) and recovered state (the replay-determinism gate, x3).
+/// inc-3 (review observation 2): the pinned points are ROTATED/WIDENED —
+/// three span fractions plus the first WAL-segment install/recycle rename,
+/// instead of inc-2's single k=N/2.
 #[test]
 fn sweep_point_replay_determinism_x3() {
     if std::env::var(ROLE_ENV).is_ok() {
@@ -1105,11 +1310,20 @@ fn sweep_point_replay_determinism_x3() {
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&base).unwrap();
 
-    // A mid-workload point (inside txn 2's commit): re-derive it from the
-    // baseline op count so the pin survives workload evolution.
+    // Re-derive the pins from the baseline op count/trace so they survive
+    // workload evolution.
     let (_, meta) = run_point(&base, 0, false);
     let n: u64 = meta_field(&meta, "ops").parse().unwrap();
-    let k = n / 2;
+    let trace = parse_trace(&meta);
+    let mut pins = vec![n / 4, n / 2, 3 * n / 4];
+    if let Some((k, _, _)) = trace
+        .iter()
+        .find(|(_, kind, class)| kind == "Rename" && class == "Wal")
+    {
+        pins.push(*k); // cut ON the segment install/recycle rename
+    }
+    pins.sort_unstable();
+    pins.dedup();
 
     fn tree_digest(dir: &std::path::Path, acc: &mut Vec<(String, Vec<u8>)>) {
         let mut entries: Vec<_> =
@@ -1120,54 +1334,65 @@ fn sweep_point_replay_determinism_x3() {
                 tree_digest(&e.path(), acc);
             } else {
                 acc.push((
-                    e.path().to_str().unwrap().rsplit('/').next().unwrap().to_string(),
+                    normalize_pid(e.path().to_str().unwrap().rsplit('/').next().unwrap()),
                     std::fs::read(e.path()).unwrap(),
                 ));
             }
         }
     }
 
-    let mut runs: Vec<(Vec<(String, Vec<u8>)>, String, String)> = Vec::new();
-    for rep in 0..3 {
-        let pack = base.join(format!("det_rep{rep}"));
-        let (ok, _) = spawn_child(
-            "sim_sweep_writer_child",
-            &[
-                (ROLE_ENV, "writer".into()),
-                (K_ENV, k.to_string()),
-                (PACK_ENV, pack.to_str().unwrap().into()),
-                (RED_ENV, "0".into()),
-            ],
+    for &k in &pins {
+        let mut runs: Vec<(Vec<(String, Vec<u8>)>, String, String)> = Vec::new();
+        for rep in 0..3 {
+            let pack = base.join(format!("det_k{k}_rep{rep}"));
+            let (ok, _) = spawn_child(
+                "sim_sweep_writer_child",
+                &[
+                    (ROLE_ENV, "writer".into()),
+                    (K_ENV, k.to_string()),
+                    (PACK_ENV, pack.to_str().unwrap().into()),
+                    (RED_ENV, "0".into()),
+                ],
+            );
+            assert!(ok);
+            let (ok, rtext) = spawn_child(
+                "sim_sweep_recover_child",
+                &[
+                    (ROLE_ENV, "recover".into()),
+                    (PACK_ENV, pack.to_str().unwrap().into()),
+                ],
+            );
+            assert!(ok, "recover k={k} rep {rep} failed:\n{rtext}");
+            let mut tree = Vec::new();
+            tree_digest(&pack.join("root"), &mut tree);
+            let meta =
+                normalize_pid(&std::fs::read_to_string(pack.join("meta.txt")).unwrap());
+            let state = marker_line(&rtext, "SIM_RECOVER_STATE")
+                .unwrap_or_else(|| "MISSING".to_string());
+            assert_ne!(state, "MISSING", "k={k} rep {rep}: recover state line absent");
+            runs.push((tree, meta, state));
+            let _ = std::fs::remove_dir_all(&pack);
+        }
+        assert!(!runs[0].1.is_empty());
+        assert!(
+            runs[0].1.contains("cuts=1"),
+            "determinism point k={k} must cut: {}",
+            runs[0].1
         );
-        assert!(ok);
-        let (ok, rtext) = spawn_child(
-            "sim_sweep_recover_child",
-            &[
-                (ROLE_ENV, "recover".into()),
-                (PACK_ENV, pack.to_str().unwrap().into()),
-            ],
-        );
-        assert!(ok, "recover rep {rep} failed:\n{rtext}");
-        let mut tree = Vec::new();
-        tree_digest(&pack.join("root"), &mut tree);
-        let meta = std::fs::read_to_string(pack.join("meta.txt")).unwrap();
-        let state = rtext
-            .lines()
-            .find(|l| l.starts_with("SIM_RECOVER_STATE"))
-            .unwrap_or("MISSING")
-            .to_string();
-        runs.push((tree, meta, state));
-        let _ = std::fs::remove_dir_all(&pack);
+        for rep in 1..3 {
+            assert_eq!(
+                runs[0].0, runs[rep].0,
+                "k={k}: post-crash image trees must be byte-identical"
+            );
+            assert_eq!(
+                runs[0].1, runs[rep].1,
+                "k={k}: meta (incl. fault log) must be byte-identical"
+            );
+            assert_eq!(runs[0].2, runs[rep].2, "k={k}: recovered state must be identical");
+        }
+        eprintln!("DETERMINISM x3 OK at k={k}: {}", runs[0].2);
     }
     let _ = std::fs::remove_dir_all(&base);
-
-    assert!(!runs[0].1.is_empty());
-    assert!(runs[0].1.contains("cuts=1"), "the determinism point must cut: {}", runs[0].1);
-    for rep in 1..3 {
-        assert_eq!(runs[0].0, runs[rep].0, "post-crash image trees must be byte-identical");
-        assert_eq!(runs[0].1, runs[rep].1, "meta (incl. fault log) must be byte-identical");
-        assert_eq!(runs[0].2, runs[rep].2, "recovered state must be identical");
-    }
 }
 
 /// PRODUCT-SHAPED RED: disable the product's fsync layer through its own
