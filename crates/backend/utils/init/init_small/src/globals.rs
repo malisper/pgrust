@@ -225,17 +225,6 @@ pub fn HaveMyProcPort() -> bool {
     MY_PROC_PORT.with(|p| p.borrow().is_some())
 }
 
-/// Session-memory teardown (FPBUDGET-1): free the Port copy at clean task
-/// end (C's TopMemoryContext copy dies with the backend process). Nothing
-/// reads MyProcPort after teardown; the thread is exiting.
-pub fn SessionMemTeardownPort() {
-    MY_PROC_PORT.with(|p| {
-        if let Some(port) = p.borrow_mut().take() {
-            drop(ManuallyDrop::into_inner(port));
-        }
-    });
-}
-
 pub fn SetMyProcPort(port: types_startup::Port) {
     MY_PROC_PORT.with(|p| *p.borrow_mut() = Some(ManuallyDrop::new(Box::new(port))));
 }

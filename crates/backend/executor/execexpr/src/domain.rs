@@ -48,9 +48,9 @@ fn with_state<R>(f: impl FnOnce(&mut EngineState) -> R) -> R {
     STATE.with(|cell| {
         let mut slot = cell.borrow_mut();
         let st = slot.get_or_insert_with(|| {
-            let mcx = ::mcx::session_root("DomainCheckEngine").mcx();
+            let mcx = Box::leak(Box::new(MemoryContext::new("DomainCheckEngine"))).mcx();
             let scratch =
-                NonNull::from(::mcx::session_root("DomainCheckScratch"));
+                NonNull::from(Box::leak(Box::new(MemoryContext::new("DomainCheckScratch"))));
             ManuallyDrop::new(EngineState {
                 mcx,
                 scratch,

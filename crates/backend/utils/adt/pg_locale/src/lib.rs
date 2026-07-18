@@ -296,11 +296,7 @@ pub fn pg_newlocale_from_collation(collid: Oid) -> PgResult<&'static PgLocale> {
         let mut slot = cell.borrow_mut();
         let cache = slot.get_or_insert_with(|| {
             // C: CollationCacheContext, created lazily, never reset.
-            let mcx = ::mcx::session_root("collation cache").mcx();
-            // LIFO: empty the droppy TLS cache before its context is freed.
-            ::mcx::register_session_cleanup(Box::new(|| {
-                COLLATION_CACHE.with(|c| drop(c.borrow_mut().take()));
-            }));
+            let mcx = Box::leak(Box::new(MemoryContext::new("collation cache"))).mcx();
             CollationCache {
                 mcx,
                 map: PgHashMap::with_capacity_in(16, mcx),
@@ -540,11 +536,7 @@ fn default_locale_mcx() -> Mcx<'static> {
     COLLATION_CACHE.with(|cell| {
         let mut slot = cell.borrow_mut();
         let cache = slot.get_or_insert_with(|| {
-            let mcx = ::mcx::session_root("collation cache").mcx();
-            // LIFO: empty the droppy TLS cache before its context is freed.
-            ::mcx::register_session_cleanup(Box::new(|| {
-                COLLATION_CACHE.with(|c| drop(c.borrow_mut().take()));
-            }));
+            let mcx = Box::leak(Box::new(MemoryContext::new("collation cache"))).mcx();
             CollationCache {
                 mcx,
                 map: PgHashMap::with_capacity_in(16, mcx),

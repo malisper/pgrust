@@ -37,7 +37,7 @@ pub(crate) fn loc(func: &'static str) -> ErrorLocation {
 
 thread_local! {
     static SB_CTX: &'static MemoryContext =
-        ::mcx::session_root("snapshot builder context");
+        Box::leak(Box::new(MemoryContext::new("snapshot builder context")));
     static EXPORT_IN_PROGRESS: Cell<bool> = const { Cell::new(false) };
 }
 

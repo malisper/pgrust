@@ -89,11 +89,7 @@ thread_local! {
 }
 
 fn new_lock_state() -> RecoveryLockState {
-    let cx: &'static MemoryContext = ::mcx::session_root("RecoveryLockHash");
-    // LIFO: empty the droppy TLS slot before its context is freed.
-    ::mcx::register_session_cleanup(Box::new(|| {
-        RECOVERY_LOCKS.with(|c| drop(c.borrow_mut().take()));
-    }));
+    let cx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("RecoveryLockHash")));
     let mcx = cx.mcx();
     RecoveryLockState {
         mcx,

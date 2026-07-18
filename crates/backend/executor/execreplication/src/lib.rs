@@ -58,7 +58,7 @@ fn with_state<R>(f: impl FnOnce(&mut PubDescState) -> R) -> R {
     STATE.with(|cell| {
         let mut slot = cell.borrow_mut();
         let st = slot.get_or_insert_with(|| {
-            let mcx = ::mcx::session_root("PubDescContext").mcx();
+            let mcx = Box::leak(Box::new(MemoryContext::new("PubDescContext"))).mcx();
             ManuallyDrop::new(PubDescState {
                 descs: PgHashMap::with_capacity_in(8, mcx),
                 callbacks_registered: false,

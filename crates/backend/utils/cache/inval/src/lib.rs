@@ -139,14 +139,6 @@ fn init_state(slot: &mut Option<ManuallyDrop<McxOwned<InvalStateTy>>>) {
         })
         .expect("CacheInvalidation context allocation");
     *slot = Some(ManuallyDrop::new(owned));
-    // Session-memory teardown (FPBUDGET-1): freed at clean task end.
-    ::mcx::register_session_cleanup(Box::new(|| {
-        STATE.with(|cell| {
-            if let Some(owned) = cell.borrow_mut().take() {
-                drop(ManuallyDrop::into_inner(owned));
-            }
-        });
-    }));
 }
 
 /// True when the current transaction holds registered invalidation messages

@@ -18,7 +18,7 @@ fn desc_mcx() -> Mcx<'static> {
         Some(m) => m.mcx(),
         None => {
             let m: &'static MemoryContext =
-                ::mcx::session_root("UtilityTupleDescs");
+                Box::leak(Box::new(MemoryContext::new("UtilityTupleDescs")));
             c.set(Some(m));
             m.mcx()
         }

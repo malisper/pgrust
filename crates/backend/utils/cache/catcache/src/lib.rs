@@ -162,17 +162,6 @@ fn state_init(slot: &mut Option<ManuallyDrop<McxOwned<CatCacheStateTy>>>) {
     )
     .expect("CacheMemoryContext allocation");
     *slot = Some(ManuallyDrop::new(owned));
-    // Session-memory teardown (FPBUDGET-1): C frees the whole catcache with
-    // the backend process; the thread model frees it here or every session
-    // leaks its catalog-cache estate into the shared process.
-    ::mcx::register_session_cleanup(Box::new(|| {
-        STATE.with(|cell| {
-            // SAFETY: task-end teardown, outside any catcache borrow.
-            if let Some(owned) = unsafe { &mut *cell.get() }.take() {
-                drop(ManuallyDrop::into_inner(owned));
-            }
-        });
-    }));
 }
 
 /// Run `f` with `&mut` state (C reaches `SysCache[]` through bare pointers).

@@ -7731,8 +7731,6 @@ dependencies = [
  "libc",
  "libpq_pqsignal",
  "lmgr_proc",
- "mcx",
- "mcxt_stats",
  "miscinit",
  "parallel",
  "pgarch",

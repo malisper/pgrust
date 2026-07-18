@@ -143,7 +143,7 @@ fn new_static_snapshot(mcx: Mcx<'static>) -> Snapshot {
 #[cold]
 #[inline(never)]
 fn init_state(slot: &mut Option<ManuallyDrop<SnapMgrState>>) {
-    let cx: &'static MemoryContext = ::mcx::session_root("SnapMgr");
+    let cx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("SnapMgr")));
     let mcx = cx.mcx();
     *slot = Some(ManuallyDrop::new(SnapMgrState {
         mcx,

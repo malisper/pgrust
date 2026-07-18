@@ -83,7 +83,7 @@ fn with_expr_cache<R>(f: impl FnOnce(&mut IdxExprCache) -> R) -> R {
     IDX_EXPR_CACHE.with(|cell| {
         let mut slot = cell.borrow_mut();
         let st = slot.get_or_insert_with(|| {
-            let mcx = mcx::session_root("IndexExprContext").mcx();
+            let mcx = Box::leak(Box::new(mcx::MemoryContext::new("IndexExprContext"))).mcx();
             core::mem::ManuallyDrop::new(IdxExprCache {
                 mcx,
                 exprs: mcx::PgHashMap::new_in(mcx),

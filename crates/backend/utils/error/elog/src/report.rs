@@ -693,18 +693,11 @@ fn write_fd2(chunk: &[u8]) {
 
 std::thread_local! {
     // C ErrorContext: backend-lifetime scratch for converting outgoing error
-    // fields to the client encoding; reset after every field. Built lazily on
-    // the first client-bound send; the builder registers an mcx session
-    // cleanup (FPBUDGET-1 class: a Droppy TLS holder outside the registry
-    // leaks one live context per session) that takes the slot back to None
-    // and frees the context at backend exit. A send AFTER teardown (nothing
-    // known does one) just falls into the documented raw-server-encoding
-    // fallback rather than touching freed memory. The payload stays
-    // ManuallyDrop so the TLS slot is !needs_drop (no TLS-dtor state
-    // machine / destructor-ordering hazard); the registry closure is the
-    // only thing that ever drops the context.
-    static ERR_CONVERT_CX: RefCell<Option<std::mem::ManuallyDrop<::mcx::MemoryContext>>> =
-        const { RefCell::new(None) };
+    // fields to the client encoding; reset after every field.
+    static ERR_CONVERT_CX: RefCell<std::mem::ManuallyDrop<::mcx::MemoryContext>> =
+        RefCell::new(std::mem::ManuallyDrop::new(::mcx::MemoryContext::new(
+            "error conversion",
+        )));
 }
 
 // C err_sendstring: pq_sendstring (client-encoding conversion) unless already
@@ -715,24 +708,9 @@ pub fn err_sendstring(buf: &mut Vec<u8>, s: &str) {
     let converted = !stack::in_error_recursion_trouble()
         && ::mbutils_seams::pg_server_to_client::is_installed()
         && ERR_CONVERT_CX.with(|cell| {
-            let Ok(mut slot) = cell.try_borrow_mut() else {
+            let Ok(mut cx) = cell.try_borrow_mut() else {
                 return false;
             };
-            let cx = slot.get_or_insert_with(|| {
-                // First client-bound send on this session: build the scratch
-                // context and schedule its teardown (runs at most once, on
-                // this thread, at clean backend exit).
-                ::mcx::register_session_cleanup(Box::new(|| {
-                    ERR_CONVERT_CX.with(|cell| {
-                        if let Ok(mut slot) = cell.try_borrow_mut() {
-                            if let Some(cx) = slot.take() {
-                                drop(std::mem::ManuallyDrop::into_inner(cx));
-                            }
-                        }
-                    });
-                }));
-                std::mem::ManuallyDrop::new(::mcx::MemoryContext::new("error conversion"))
-            });
             let done = {
                 match ::mbutils_seams::pg_server_to_client::call(cx.mcx(), s.as_bytes()) {
                     Ok(Some(conv)) => {
