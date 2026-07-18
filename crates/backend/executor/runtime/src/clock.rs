@@ -9,14 +9,16 @@ pub trait Clock: Send + Sync {
     fn now_ns(&self) -> u64;
 }
 
-/// Production clock: std monotonic.
+/// Production clock. DST P2 (contract §1.3): origin/elapsed delegate to
+/// `pg_clock` — the runtime's second clock_gettime hub is retired; only
+/// differences are meaningful, exactly as before.
 pub struct MonotonicClock {
-    origin: std::time::Instant,
+    origin_ns: u64,
 }
 
 impl MonotonicClock {
     pub fn new() -> Self {
-        MonotonicClock { origin: std::time::Instant::now() }
+        MonotonicClock { origin_ns: pg_clock::mono_ns() }
     }
 }
 
@@ -28,7 +30,7 @@ impl Default for MonotonicClock {
 
 impl Clock for MonotonicClock {
     fn now_ns(&self) -> u64 {
-        self.origin.elapsed().as_nanos() as u64
+        pg_clock::mono_ns().saturating_sub(self.origin_ns)
     }
 }
 
