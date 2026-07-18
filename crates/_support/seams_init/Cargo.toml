@@ -104,6 +104,7 @@ be_secure = { path = "../../backend/libpq/be_secure" }
 hba = { path = "../../backend/libpq/hba" }
 libpq_pqsignal = { path = "../../backend/libpq/libpq_pqsignal" }
 pqcomm = { path = "../../backend/libpq/pqcomm" }
+pqcomm_stdio = { path = "../../backend/libpq/pqcomm_stdio" }
 pqformat = { path = "../../backend/libpq/pqformat" }
 vars = { path = "../../backend/optimizer/util/vars" }
 parser_driver = { path = "../../backend/parser/parser_driver" }
