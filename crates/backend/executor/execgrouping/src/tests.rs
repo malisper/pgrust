@@ -394,3 +394,165 @@ fn probe_cost_insert_order() {
     keys.clear();
     run("ascending-x4", &serial_like);
 }
+
+// t26 merge-1 revert regression (staged-hash IV parity): tables built with
+// use_variable_hash_iv fold a per-participant IV into every kernel hash.
+// hash_staged is contractually bit-identical to hash_slot (nodeagg's staged
+// probe debug-asserts exactly that; a release-build mismatch means
+// find_staged misses live groups = silent duplicate groups). The uninstalled
+// parallel_worker_number seam makes the IV deterministic here: worker -1 =>
+// IV = murmurhash32(u32::MAX) != 0.
+#[test]
+fn staged_hash_matches_slot_under_variable_iv() {
+    install();
+    let ctx = MemoryContext::new("execgrouping-iv");
+    let mcx = ctx.mcx();
+    let desc = one_int4_desc(mcx);
+
+    let hash_both = |variable_iv: bool| -> (Vec<u32>, Vec<u32>) {
+        // hashint4 (450) / int4eq (65), as nodeAgg passes them.
+        let mut table = build_tuple_hash_table(
+            mcx,
+            &desc,
+            &[1],
+            &[65],
+            &[450],
+            &[0],
+            16,
+            16,
+            variable_iv,
+        )
+        .unwrap();
+        assert!(matches!(table.kernel, crate::ProbeKernel::Int4 { .. }));
+        let mut slot =
+            exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(desc.clone()));
+        let keys = [Datum::from_i32(0), Datum::from_i32(1), Datum::from_i32(-7), Datum::from_i32(i32::MAX)];
+        let isnull = [false, false, false, true];
+        let mut slot_hashes = Vec::new();
+        for (&k, &n) in keys.iter().zip(&isnull) {
+            exectuples::exec_clear_tuple(&mut slot, mcx);
+            slot.base_mut().tts_values[0] = k;
+            slot.base_mut().tts_isnull[0] = n;
+            exectuples::exec_store_virtual_tuple(&mut slot);
+            slot_hashes.push(table.hash_slot(&mut slot).unwrap());
+        }
+        let mut staged_hashes = Vec::new();
+        table.hash_staged(&keys, &isnull, &mut staged_hashes).unwrap();
+        (slot_hashes, staged_hashes)
+    };
+
+    let (slot0, staged0) = hash_both(false);
+    assert_eq!(slot0, staged0, "IV=0 staged/slot parity");
+    let (slot1, staged1) = hash_both(true);
+    assert_eq!(slot1, staged1, "variable-IV staged/slot parity (t26 merge-1 revert class)");
+    assert_ne!(slot0, slot1, "the variable IV must actually engage the kernels");
+}
+
+// q18fin r3 (t26 "q18fin-t26-r2 re-earn verdict" defect): the byref finalize
+// merge compares STORED hashes across participant tables and the finalize's
+// IV=0 table, so the handoff export rebases handed hashes onto the IV=0
+// mapping through `hash_to_iv0`. This unit pins the rebase algebra: for any
+// participant IV, hash_to_iv0(variable-IV hash) must equal the IV=0 twin's
+// hash for the same key — on the word kernels (rot(iv,1) pre-fmix), on the
+// staged kernels (bit-identical to hash_slot), and on the multi-column Expr
+// arm (the IV rides the hash chain as rot(iv, ncols) pre-fmix).
+#[test]
+fn hash_to_iv0_rebases_variable_iv_onto_leader_mapping() {
+    install();
+    let ctx = MemoryContext::new("execgrouping-iv0");
+    let mcx = ctx.mcx();
+
+    // Participant IVs as production derives them: leader -1, workers 0..
+    // (worker 0 is C's quirk — murmurhash32(0) == 0, an IV-0 participant).
+    let ivs: [u32; 4] = [
+        ::hashfn::murmurhash32(-1i32 as u32),
+        ::hashfn::murmurhash32(0),
+        ::hashfn::murmurhash32(1),
+        ::hashfn::murmurhash32(7),
+    ];
+
+    // Word kernel (single int4) + staged lane.
+    {
+        let desc = one_int4_desc(mcx);
+        let keys = [Datum::from_i32(6), Datum::from_i32(0), Datum::from_i32(-7)];
+        let isnull = [false, false, true];
+        let hash_all = |iv: u32| -> (Vec<u32>, Vec<u32>) {
+            let mut table = crate::build_tuple_hash_table_with_iv(
+                mcx, &desc, &[1], &[65], &[450], &[0], 16, 16, iv,
+            )
+            .unwrap();
+            let mut slot = exectuples::make_tuple_table_slot(
+                mcx,
+                TupleSlotKind::Virtual,
+                Some(desc.clone()),
+            );
+            let mut slot_hashes = Vec::new();
+            for (&k, &n) in keys.iter().zip(&isnull) {
+                exectuples::exec_clear_tuple(&mut slot, mcx);
+                slot.base_mut().tts_values[0] = k;
+                slot.base_mut().tts_isnull[0] = n;
+                exectuples::exec_store_virtual_tuple(&mut slot);
+                let h = table.hash_slot(&mut slot).unwrap();
+                slot_hashes.push(table.hash_to_iv0(h));
+            }
+            let mut staged = Vec::new();
+            table.hash_staged(&keys, &isnull, &mut staged).unwrap();
+            let staged_rebased = staged.iter().map(|&h| table.hash_to_iv0(h)).collect();
+            (slot_hashes, staged_rebased)
+        };
+        let (base, base_staged) = hash_all(0);
+        assert_eq!(base, base_staged);
+        for iv in ivs {
+            let (rebased, rebased_staged) = hash_all(iv);
+            assert_eq!(rebased, base, "word-kernel rebase (iv={iv:#x})");
+            assert_eq!(rebased_staged, base, "staged rebase (iv={iv:#x})");
+        }
+    }
+
+    // Expr arm (two int4 key columns — multi-col shapes ARE byref-admitted).
+    {
+        let desc = two_int4_desc(mcx);
+        let keyset: [((i32, bool), (i32, bool)); 4] = [
+            ((6, false), (42, false)),
+            ((0, false), (0, false)),
+            ((123, false), (0, true)),
+            ((0, true), (0, true)),
+        ];
+        let hash_all = |iv: u32| -> Vec<u32> {
+            let mut table = crate::build_tuple_hash_table_with_iv(
+                mcx,
+                &desc,
+                &[1, 2],
+                &[65, 65],
+                &[450, 450],
+                &[0, 0],
+                16,
+                16,
+                iv,
+            )
+            .unwrap();
+            assert!(matches!(table.kernel, crate::ProbeKernel::Expr));
+            let mut slot = exectuples::make_tuple_table_slot(
+                mcx,
+                TupleSlotKind::Virtual,
+                Some(desc.clone()),
+            );
+            let mut hashes = Vec::new();
+            for ((v1, n1), (v2, n2)) in keyset {
+                exectuples::exec_clear_tuple(&mut slot, mcx);
+                slot.base_mut().tts_values[0] = Datum::from_i32(v1);
+                slot.base_mut().tts_isnull[0] = n1;
+                slot.base_mut().tts_values[1] = Datum::from_i32(v2);
+                slot.base_mut().tts_isnull[1] = n2;
+                exectuples::exec_store_virtual_tuple(&mut slot);
+                let h = table.hash_slot(&mut slot).unwrap();
+                hashes.push(table.hash_to_iv0(h));
+            }
+            hashes
+        };
+        let base = hash_all(0);
+        for iv in ivs {
+            assert_eq!(hash_all(iv), base, "Expr-arm rebase (iv={iv:#x})");
+        }
+    }
+}
