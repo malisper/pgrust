@@ -34,12 +34,24 @@
 //! instruction letters byte-identical (the VALUES arm never reads the T3
 //! knob).
 //!
-//! Knobs (contract §2.1, all default OFF; registered in
-//! notes/se-phase0-integration.md):
-//!   * `PGRUST_LANE_V2_SCANS_T3` — the facility gate. OFF-first LAW: the
-//!     cached-bool check runs BEFORE any other work on every path into this
-//!     module; knob-OFF ticks NOTHING and adds one relaxed byte load +
-//!     branch to the six shapes' dispatch arms only.
+//! Knobs (contract §2.1; registered in notes/se-phase0-integration.md):
+//!   * `PGRUST_LANE_V2_SCANS_T3` — the facility gate. **Default resolves
+//!     PER SHAPE through the wave-7 flip ledger since the B1 board** (flip
+//!     manifest §2 B1; wave-7 contract §2 "per-shape revertable commits"):
+//!     unset resolves through the Tier-B hatch
+//!     (`PGRUST_LANE_V2_DEFAULTS=legacy` restores the pre-flip default OFF
+//!     wholesale) to ON-BY-DEFAULT, and a shape is then default-armed iff
+//!     its `T3Shape::flipped_default` ledger row is `true` — one flip
+//!     commit per shape, one ledger line per commit, so any single shape
+//!     reverts without disturbing the rest. The explicit `=1`/`on` and
+//!     `=0`/`off` spellings are permanent and win over the hatch in both
+//!     directions (flips never delete knobs); explicit `=1` arms ALL
+//!     shapes exactly as it did pre-flip (the ledger only drives the
+//!     default resolution). OFF-first LAW unchanged: the cached-bool check
+//!     runs BEFORE any other work on every path into this module;
+//!     facility-OFF ticks NOTHING, and a DEFAULT-UNFLIPPED shape under the
+//!     default-armed facility is byte-and-census-SILENT too (it is
+//!     pre-flip there — silence, not `env-off`).
 //!   * `PGRUST_LANE_V2_SCANS_T3_<SHAPE>=0` — per-shape force-off spellings
 //!     (`FUNCTIONSCAN`, `TABLEFUNCSCAN`, `SAMPLESCAN`, `TIDSCAN`,
 //!     `TIDRANGESCAN`, `NAMEDTUPLESTORESCAN`); the wave-2 P1-analog RULE:
@@ -85,39 +97,87 @@ use super::stats::{self, RefuseReason, ShapeClass};
 // Knobs.
 // ===========================================================================
 
-/// `PGRUST_LANE_V2_SCANS_T3` (default OFF): the wave-3 source-form facility
-/// gate. 0 = unresolved, 1 = OFF, 2 = ON — the rowmode.rs AtomicU8 idiom so
-/// the unit corpus can A/B both arms in one process; env var (not GUC) per
-/// the standing `pg_settings` byte-identity discipline (lanev2 module doc).
-/// OFF-first: one relaxed byte load + compare on the fast path; the env
-/// resolve is the `#[cold]` outlined tail (se2-cost lesson, LAW).
+/// `PGRUST_LANE_V2_SCANS_T3` (default per the wave-7 PER-SHAPE flip ledger;
+/// the module-doc knob paragraph has the full default-resolution story):
+/// the wave-3 source-form facility gate. 0 = unresolved, 1 = OFF,
+/// 2 = ON-EXPLICIT (`=1`/`on` spelling), 3 = ON-DEFAULT (unset resolved
+/// through the Tier-B hatch + a non-empty flip ledger) — the rowmode.rs
+/// AtomicU8 idiom so the unit corpus can A/B arms in one process; env var
+/// (not GUC) per the standing `pg_settings` byte-identity discipline
+/// (lanev2 module doc). The explicit/default distinction feeds
+/// `shapes_resolve` only (explicit `=1` arms every shape, the flipped
+/// default arms the ledger's shapes). OFF-first: one relaxed byte load +
+/// compare on the fast path; the env resolve is the `#[cold]` outlined
+/// tail (se2-cost lesson, LAW).
 static SCANS_T3: AtomicU8 = AtomicU8::new(0);
+const T3_ON_EXPLICIT: u8 = 2;
+const T3_ON_DEFAULT: u8 = 3;
 
 #[inline]
 pub(super) fn scans_t3_enabled() -> bool {
     match SCANS_T3.load(Relaxed) {
         1 => false,
-        2 => true,
+        T3_ON_EXPLICIT | T3_ON_DEFAULT => true,
         _ => scans_t3_resolve(),
     }
+}
+
+/// True iff the facility armed via the FLIPPED DEFAULT (unset env resolved
+/// through the Tier-B hatch), false when explicitly armed. Read only from
+/// the `#[cold]` `shapes_resolve` tail, behind `scans_t3_enabled()`.
+fn scans_t3_default_armed() -> bool {
+    SCANS_T3.load(Relaxed) == T3_ON_DEFAULT
 }
 
 #[cold]
 #[inline(never)]
 fn scans_t3_resolve() -> bool {
-    let on = matches!(
-        std::env::var("PGRUST_LANE_V2_SCANS_T3").as_deref(),
-        Ok("1") | Ok("on")
+    // Wave-7 TIER-B FLIP, PER-SHAPE LADDER (flip manifest §2 B1; wave-7
+    // contract §2): unset resolves through `tier_b_flip_default`
+    // (PGRUST_LANE_V2_DEFAULTS=legacy restores the pre-flip default OFF) to
+    // the flipped default ON — but only once at least one shape sits in the
+    // per-shape flip ledger (an EMPTY ledger keeps the pre-flip default OFF
+    // bit-for-bit, so the substrate commit is behavior-free). Explicit
+    // spellings are permanent and win in both directions (the
+    // `tier_b_precedence` unit table, lanev2.rs).
+    let explicit = std::env::var("PGRUST_LANE_V2_SCANS_T3").ok();
+    let any_flipped = T3Shape::ALL.iter().any(|s| s.flipped_default());
+    let state = facility_state_rule(
+        explicit.as_deref(),
+        super::tier_b_defaults_env().as_deref(),
+        any_flipped,
     );
-    SCANS_T3.store(if on { 2 } else { 1 }, Relaxed);
-    on
+    SCANS_T3.store(state, Relaxed);
+    state != 1
 }
 
-/// Same-process A/B lever for the unit corpus (`crate::tests::scans_t3_ab`).
+/// The pure facility-state rule (unit face: `flip_ledger_tests`): explicit
+/// spellings resolve through `tier_b_flip_default` exactly as every Tier-B
+/// knob does; unset additionally requires a NON-EMPTY flip ledger to arm
+/// (`any_flipped`), so the substrate commit — ledger all-`false` — leaves
+/// the unset default OFF bit-for-bit.
+fn facility_state_rule(explicit: Option<&str>, hatch: Option<&str>, any_flipped: bool) -> u8 {
+    let on =
+        super::tier_b_flip_default(explicit, hatch) && (explicit.is_some() || any_flipped);
+    if !on {
+        1
+    } else if matches!(explicit, Some("1") | Some("on")) {
+        T3_ON_EXPLICIT
+    } else {
+        T3_ON_DEFAULT
+    }
+}
+
+/// Same-process A/B lever for the unit corpus (`crate::tests::scans_t3_ab`):
+/// EXPLICIT-spelling semantics (`on` = the `=1` arm — every shape armed).
+/// Resets the shape masks so they re-resolve under the new facility mode.
 #[cfg(test)]
 pub(crate) fn scans_t3_set_for_tests(on: bool) {
-    SCANS_T3.store(if on { 2 } else { 1 }, Relaxed);
+    SCANS_T3.store(if on { T3_ON_EXPLICIT } else { 1 }, Relaxed);
+    SCANS_T3_SHAPES.store(0, Relaxed);
+    SCANS_T3_FORCED.store(0, Relaxed);
 }
+
 
 /// The six T3-hostable tail leaf shapes, in inc-0 population-rank order
 /// (worklog: regress+dualexec grep census; the fleet coverage-counter
@@ -167,13 +227,47 @@ impl T3Shape {
             T3Shape::TidRangeScan => "TIDRANGESCAN",
         }
     }
+
+    /// The wave-7 PER-SHAPE FLIP LEDGER (flip manifest §2 B1 boarded as one
+    /// commit per shape class, wave-7 contract §2; the six-class scope was
+    /// CONFIRMED by the wave-4 integrator, notes/se-wave4-flips.md). A
+    /// `true` row makes the shape DEFAULT-ARMED when the facility resolved
+    /// ON through the flipped default (`scans_t3_resolve`, unset env);
+    /// explicit spellings ignore this ledger (`=1` arms every shape,
+    /// `_<SHAPE>=0` force-off always wins). REVERT RULE: a shape reverts by
+    /// flipping its row back to `false` in a commit that also carries back
+    /// its floors/manifest riders — nothing else moves (the
+    /// `t3_flip_ledger_pin` unit below and the lane-scans-t3-e2e
+    /// `T3_DEFAULT_OWNED` list travel with each row, same commit).
+    fn flipped_default(self) -> bool {
+        match self {
+            T3Shape::FunctionScan => false, // B1 per-shape commit 1/6
+            T3Shape::TableFuncScan => false, // B1 per-shape commit 2/6
+            T3Shape::SampleScan => false,   // B1 per-shape commit 3/6
+            T3Shape::TidScan => false,      // B1 per-shape commit 4/6
+            T3Shape::NamedTuplestoreScan => false, // B1 per-shape commit 5/6
+            T3Shape::TidRangeScan => false, // B1 per-shape commit 6/6
+        }
+    }
 }
 
-/// Per-shape arm mask: bit `shape as u8` SET = the shape is armed (default;
-/// cleared only by the `=0` force-off spelling); bit 7 = resolved marker.
-/// One relaxed byte load on the armed path (the facility knob already
-/// admitted), resolve `#[cold]`-outlined.
+/// Per-shape arm mask: bit `shape as u8` SET = the shape is armed; bit 7 =
+/// resolved marker. Armed = "this shape's source form may own" — under the
+/// EXPLICIT `=1` spelling that is every shape minus the force-off spellings
+/// (the pre-flip semantics, unchanged); under the FLIPPED DEFAULT it is the
+/// flip ledger's shapes minus the force-off spellings (wave-7 per-shape
+/// ladder). One relaxed byte load on the armed path (the facility knob
+/// already admitted), resolve `#[cold]`-outlined.
 static SCANS_T3_SHAPES: AtomicU8 = AtomicU8::new(0);
+/// Companion FORCED mask: bit set = the shape carries the explicit
+/// `_<SHAPE>=0` force-off spelling. Read only on the NOT-armed fall-through
+/// (never on the armed fast path) to attribute the tick: forced-off ticks
+/// `env-off` (the metaagg precedent), while a merely DEFAULT-UNFLIPPED
+/// shape is silent — it is pre-flip there, and pre-flip default ticks
+/// NOTHING (wave-7 contract §2; keeps every unflipped shape's census
+/// byte-identical to the pre-flip tree, which is what makes the per-shape
+/// commits independently revertable).
+static SCANS_T3_FORCED: AtomicU8 = AtomicU8::new(0);
 const T3_RESOLVED: u8 = 0x80;
 
 #[inline]
@@ -186,24 +280,57 @@ fn shape_armed(shape: T3Shape) -> bool {
     }
 }
 
+/// Not-armed fall-through attribution (cold-side only): true = the shape is
+/// explicitly forced off (`_<SHAPE>=0`) and the refusal ticks `env-off`;
+/// false = the shape is default-unflipped and stays silent.
+fn shape_forced_off(shape: T3Shape) -> bool {
+    let f = SCANS_T3_FORCED.load(Relaxed);
+    let f = if f & T3_RESOLVED != 0 {
+        f
+    } else {
+        shapes_resolve();
+        SCANS_T3_FORCED.load(Relaxed)
+    };
+    f & (1 << shape as u8) != 0
+}
+
+/// The pure armed-mask rule (unit face: `flip_ledger_tests`):
+/// `default_mode` = the facility resolved ON through the flipped default.
+fn armed_mask_rule(default_mode: bool, forced: u8) -> u8 {
+    let mut armed = T3_RESOLVED;
+    for s in T3Shape::ALL {
+        if forced & (1 << s as u8) != 0 {
+            continue;
+        }
+        if !default_mode || s.flipped_default() {
+            armed |= 1 << s as u8;
+        }
+    }
+    armed
+}
+
 #[cold]
 #[inline(never)]
 fn shapes_resolve() -> u8 {
-    let mut m = T3_RESOLVED;
+    let default_mode = scans_t3_default_armed();
+    let mut forced = T3_RESOLVED;
     for s in T3Shape::ALL {
-        let forced_off = matches!(
+        if matches!(
             std::env::var(format!("PGRUST_LANE_V2_SCANS_T3_{}", s.env_suffix())).as_deref(),
             Ok("0") | Ok("off")
-        );
-        if !forced_off {
-            m |= 1 << s as u8;
+        ) {
+            forced |= 1 << s as u8;
         }
     }
-    SCANS_T3_SHAPES.store(m, Relaxed);
-    m
+    let armed = armed_mask_rule(default_mode, forced);
+    SCANS_T3_FORCED.store(forced, Relaxed);
+    SCANS_T3_SHAPES.store(armed, Relaxed);
+    armed
 }
 
-/// Same-process per-shape force-off lever for the unit corpus.
+/// Same-process per-shape force-off lever for the unit corpus: `armed =
+/// false` simulates the `_<SHAPE>=0` spelling (sets the FORCED bit too, so
+/// the fall-through keeps its env-off tick), `armed = true` clears both.
 #[cfg(test)]
 pub(crate) fn scans_t3_shape_set_for_tests(class_name: &str, armed: bool) {
     let shape = *T3Shape::ALL
@@ -214,11 +341,15 @@ pub(crate) fn scans_t3_shape_set_for_tests(class_name: &str, armed: bool) {
     if m & T3_RESOLVED == 0 {
         m = shapes_resolve();
     }
+    let mut f = SCANS_T3_FORCED.load(Relaxed) | T3_RESOLVED;
     if armed {
         m |= 1 << shape as u8;
+        f &= !(1 << shape as u8);
     } else {
         m &= !(1 << shape as u8);
+        f |= 1 << shape as u8;
     }
+    SCANS_T3_FORCED.store(f, Relaxed);
     SCANS_T3_SHAPES.store(m | T3_RESOLVED, Relaxed);
 }
 
@@ -408,10 +539,18 @@ fn t3_drive<'mcx, S: RowSource<'mcx>>(
     }
     let class = shape.class();
     if !shape_armed(shape) {
-        // Per-shape kill switch under an armed facility knob: the metaagg
-        // `=0`-disarm precedent — tick env-off (knob-ON-only accounting;
-        // per-offered-pull cadence) and fall through unchanged.
-        t3_refuse(class, RefuseReason::EnvOff);
+        if shape_forced_off(shape) {
+            // Per-shape kill switch under an armed facility knob: the
+            // metaagg `=0`-disarm precedent — tick env-off (knob-ON-only
+            // accounting; per-offered-pull cadence) and fall through
+            // unchanged.
+            t3_refuse(class, RefuseReason::EnvOff);
+        }
+        // else: the shape's default flip has not landed (or was reverted)
+        // and the facility armed via the flipped default — the shape is
+        // PRE-FLIP here and stays byte-and-census-SILENT (knob-OFF ticks
+        // NOTHING), exactly as if the facility were dark (wave-7 per-shape
+        // ladder, contract §2).
         return Ok(None);
     }
     if !t3_gates(class, estate) {
@@ -562,4 +701,105 @@ pub(super) fn t3_sort_feed<'mcx, S: RowSource<'mcx>>(
         None,
         super::TieMode::Off,
     )
+}
+
+// ===========================================================================
+// Wave-7 per-shape flip-ladder units (B1 board, wave-7 contract §2). The
+// drive-level A/B corpus stays in crate::tests::{scans_t3_ab,
+// scans_t3_am_ab}; these pin the PURE rules so every per-shape commit (and
+// every per-shape REVERT) moves exactly one expected-set line here.
+// ===========================================================================
+
+#[cfg(test)]
+mod flip_ledger_tests {
+    use super::*;
+
+    /// THE LEDGER PIN: one expected line per shape, updated in that shape's
+    /// own flip (or revert) commit — a ledger edit without its matching
+    /// line edit here is a loud unit failure, which is what makes the
+    /// per-shape commits independently revertable evidence-wise.
+    #[test]
+    fn t3_flip_ledger_pin() {
+        let expected: &[(T3Shape, bool)] = &[
+            (T3Shape::FunctionScan, false),
+            (T3Shape::TableFuncScan, false),
+            (T3Shape::SampleScan, false),
+            (T3Shape::TidScan, false),
+            (T3Shape::NamedTuplestoreScan, false),
+            (T3Shape::TidRangeScan, false),
+        ];
+        for (shape, flipped) in expected {
+            assert_eq!(
+                shape.flipped_default(),
+                *flipped,
+                "flip ledger drifted for {:?} — a per-shape flip/revert commit must move \
+                 its ledger row and this pin together",
+                shape
+            );
+        }
+    }
+
+    /// Facility-state rule table: the tier_b precedence (explicit > hatch >
+    /// flipped default) composed with the per-shape ladder's EMPTY-LEDGER
+    /// clause (unset arms only once at least one shape flipped).
+    #[test]
+    fn facility_state_rule_table() {
+        // Explicit spellings: permanent, hatch- and ledger-independent.
+        for any_flipped in [false, true] {
+            for hatch in [None, Some("legacy"), Some("new")] {
+                assert_eq!(facility_state_rule(Some("1"), hatch, any_flipped), T3_ON_EXPLICIT);
+                assert_eq!(facility_state_rule(Some("on"), hatch, any_flipped), T3_ON_EXPLICIT);
+                assert_eq!(facility_state_rule(Some("0"), hatch, any_flipped), 1);
+                assert_eq!(facility_state_rule(Some("off"), hatch, any_flipped), 1);
+                // A typo never silently arms a lane (tier_b_precedence 1c).
+                assert_eq!(facility_state_rule(Some("2"), hatch, any_flipped), 1);
+            }
+        }
+        // Unset + empty ledger: the pre-flip default OFF, hatch irrelevant
+        // (the substrate commit is behavior-free).
+        assert_eq!(facility_state_rule(None, None, false), 1);
+        assert_eq!(facility_state_rule(None, Some("legacy"), false), 1);
+        // Unset + non-empty ledger: the flipped default ON-DEFAULT, unless
+        // the Tier-B hatch says legacy (exact spelling only).
+        assert_eq!(facility_state_rule(None, None, true), T3_ON_DEFAULT);
+        assert_eq!(facility_state_rule(None, Some("new"), true), T3_ON_DEFAULT);
+        assert_eq!(facility_state_rule(None, Some("Legacy"), true), T3_ON_DEFAULT);
+        assert_eq!(facility_state_rule(None, Some("legacy"), true), 1);
+    }
+
+    /// Armed-mask rule table: explicit mode arms everything minus the
+    /// force-off spellings (pre-flip semantics, unchanged); default mode
+    /// arms the LEDGER minus the force-off spellings; a forced shape is
+    /// never armed in either mode.
+    #[test]
+    fn armed_mask_rule_table() {
+        let bit = |s: T3Shape| 1u8 << s as u8;
+        // Explicit mode, nothing forced: every shape armed.
+        let m = armed_mask_rule(false, T3_RESOLVED);
+        for s in T3Shape::ALL {
+            assert_ne!(m & bit(s), 0, "explicit mode must arm {s:?}");
+        }
+        // Explicit mode, one forced: exactly that shape disarmed.
+        let m = armed_mask_rule(false, T3_RESOLVED | bit(T3Shape::TidScan));
+        assert_eq!(m & bit(T3Shape::TidScan), 0);
+        for s in T3Shape::ALL {
+            if s != T3Shape::TidScan {
+                assert_ne!(m & bit(s), 0);
+            }
+        }
+        // Default mode: armed iff the ledger says flipped (minus forced).
+        let m = armed_mask_rule(true, T3_RESOLVED);
+        for s in T3Shape::ALL {
+            assert_eq!(
+                m & bit(s) != 0,
+                s.flipped_default(),
+                "default mode must arm exactly the flip ledger ({s:?})"
+            );
+        }
+        // Default mode + forced beats a flipped ledger row.
+        for s in T3Shape::ALL {
+            let m = armed_mask_rule(true, T3_RESOLVED | bit(s));
+            assert_eq!(m & bit(s), 0, "force-off must beat the ledger for {s:?}");
+        }
+    }
 }
