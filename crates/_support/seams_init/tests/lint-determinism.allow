@@ -341,7 +341,6 @@ env	crates/backend/executor/runtime/src/sched.rs	11
 env	crates/backend/executor/runtime/src/sizing.rs	1
 env	crates/backend/executor/tqueue/src/lib.rs	1
 env	crates/backend/libpq/auth_scram/src/lib.rs	1
-env	crates/backend/main/main_main/src/bin/postgres.rs	2	DST-REVIEW(t29-driver): FPBUDGET-1 debug-only alloc-track gates (PGRUST_MCXT_CENSUS / PGRUST_ALLOC_TRACK), debug_assertions-only default-OFF diagnostics; knobs-registry charter absorbs (s2.5)
 env	crates/backend/main/main_main/src/lib.rs	2	DST-REVIEW(p4-simnet): +1 = wasm/p5-boot USER fallback probe (wasm has no uids); knobs-registry charter absorbs it (s2.5)
 env	crates/backend/optimizer/path/costsize/src/gucs.rs	3
 env	crates/backend/optimizer/plan/planner/src/m5_suppress.rs	3
@@ -644,7 +643,6 @@ rawsync	crates/backend/lib/dshash/bench/rig/src/main.rs	1
 rawsync	crates/backend/lib/radixtree/src/lib.rs	1
 rawsync	crates/backend/libpq/be_secure_openssl/src/lib.rs	1
 rawsync	crates/backend/libpq/hba/src/lib.rs	2
-rawsync	crates/backend/main/main_main/src/bin/postgres.rs	1	DST-REVIEW(t29-driver): debug-only alloc-track LIVE-map std Mutex INSIDE the global allocator hook — allocator-reentrant, pgsync locks cannot be used here (they allocate); debug_assertions-only, compiled out of dist
 rawsync	crates/backend/nodes/tidbitmap/src/lib.rs	1
 rawsync	crates/backend/optimizer/path/costsize/src/gucs.rs	3
 rawsync	crates/backend/optimizer/plan/planner/src/fdwplan.rs	1
