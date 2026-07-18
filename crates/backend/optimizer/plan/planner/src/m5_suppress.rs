@@ -119,6 +119,20 @@ pub enum CoverClass {
     /// keeps its own future flip). Multi-build-side joins (2+ JoinExprs)
     /// classify uncovered — the m5p1-flagged SQL admission gap.
     CbHashJoinPlainAgg,
+    /// m5p1 row flip (band 88001): plain (ungrouped) whitelisted aggregation
+    /// over THREE-TO-SIX pgrcolumnar relations joined by a CONNECTED graph of
+    /// hashjoinable int-family equi clauses (the multibuild walk's 2+ build
+    /// sides in one engagement). FROM forms keyed: the flat N-RangeTblRef
+    /// FromExpr (comma/INNER form, quals in top.quals) and the left-deep
+    /// nested INNER JoinExpr chain (every rarg a plain rel). Planner-choice
+    /// guards, per rel: unindexed (no serial merge/NL-with-inner-index
+    /// shapes for the costing to prefer), nbatch==1 estimate (EVERY rel —
+    /// any of them may be a build side; the multibuild walk is unbatched
+    /// only), cbstore AM (heap sides ride the K2 knobs, DEFAULT-OFF — a
+    /// heap-keyed suppression would land on serial). Everything else —
+    /// grouped/distinct/sorted shapes, outer types in nested trees,
+    /// disconnected graphs — classifies uncovered by construction.
+    CbHashJoinMultiBuild,
     /// M5-5 Meta-over-Gather (the band-2a q30 handoff): plain (ungrouped)
     /// FOOTER-ANSWERABLE aggregation over one plain pgrcolumnar rel with NO
     /// quals — count(*)/count(col), min/max over bare int-family Vars,
@@ -198,7 +212,12 @@ pub const BOOTSTRAP_MATRIX: &[MatrixRow] = &[
     MatrixRow {
         class: CoverClass::CbHashJoinPlainAgg,
         covered: true,
-        qualifiers: "one JoinExpr, phase-1+right families; hashable int equi key; unindexed rels only; both sides nbatch==1 estimate (spill row unflipped); multi-build-side = uncovered (m5p1 gap)",
+        qualifiers: "one JoinExpr, phase-1+right families; hashable int equi key; unindexed rels only; both sides nbatch==1 estimate (spill row unflipped); multi-build-side = the m5p1 CbHashJoinMultiBuild row",
+    },
+    MatrixRow {
+        class: CoverClass::CbHashJoinMultiBuild,
+        covered: true,
+        qualifiers: "m5p1: 3-6 cbstore rels, flat/left-deep-INNER forms; connected int equi graph; unindexed; EVERY rel nbatch==1 (walk is unbatched-only); plain whitelisted aggs; floor reused from hashjoin-nbatch1 (provisional — GL-M5P1-1 letter owed)",
     },
     MatrixRow {
         class: CoverClass::CbMetaFooterAgg,
@@ -293,6 +312,11 @@ fn class_guard(class: CoverClass) -> FloorGuard {
         // (dop16@2.5M's 0.92 marginal win is deliberately forgone for the
         // clean single bound).
         CoverClass::CbHashJoinPlainAgg => FloorGuard { max_rows: 2_000_000.0, ..NO_GUARD },
+        // m5p1: PROVISIONAL reuse of the hashjoin-nbatch1 floor (the walk's
+        // build/probe economics are the same shared-build machinery per
+        // level; the largest side is the ladder's per-table N). The fleet
+        // letter (GL-M5P1-1) owns un-provisionalizing or re-measuring it.
+        CoverClass::CbHashJoinMultiBuild => FloorGuard { max_rows: 2_000_000.0, ..NO_GUARD },
         // Footer answers are O(1) — never floored.
         CoverClass::CbMetaFooterAgg => NO_GUARD,
     }
@@ -506,10 +530,38 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             top.quals,
         );
     }
+    // m5p1 (band 88001): the flat N-relation INNER form (`a, b, c WHERE q`
+    // == `a JOIN b JOIN c` by probe time — quals in top.quals). 3..=6 rels;
+    // the 2-rel form stays the CbHashJoinPlainAgg branch above.
+    if (3..=6).contains(&top.fromlist.len()) {
+        let mut rtis = Vec::with_capacity(top.fromlist.len());
+        for f in &top.fromlist {
+            let Some(rtr) = f.as_range_tbl_ref() else { return Ok(false) };
+            rtis.push(rtr.rtindex as usize);
+        }
+        let mut quals = Vec::new();
+        push_and_terms(top.quals, &mut quals);
+        return classify_multibuild(run, parse, &rtis, &quals);
+    }
     if top.fromlist.len() != 1 {
         return Ok(false);
     }
     if let Some(je) = top.fromlist.nth(0).as_join_expr() {
+        // m5p1: a nested left-deep INNER chain (`a JOIN b ON .. JOIN c ON ..`)
+        // keys CbHashJoinMultiBuild; every other nested tree stays uncovered
+        // by construction (classify_join_covered's refusal).
+        if je.larg.as_join_expr().is_some() {
+            let mut rtis = Vec::new();
+            let mut quals = Vec::new();
+            if !collect_inner_chain(je, &mut rtis, &mut quals) {
+                return refuse_join("nested join tree (not a left-deep INNER chain)");
+            }
+            if !(3..=6).contains(&rtis.len()) {
+                return refuse_join("multibuild chain size");
+            }
+            push_and_terms(top.quals, &mut quals);
+            return classify_multibuild(run, parse, &rtis, &quals);
+        }
         return classify_join_covered(run, parse, je);
     }
     let Some(rtr) = top.fromlist.nth(0).as_range_tbl_ref() else {
@@ -920,6 +972,198 @@ fn classify_join_sides(
     // Floor guard input: the larger side's estimated rows (the ladder's
     // per-table N; the probe fixture's dim side is negligible).
     finish(run, CoverClass::CbHashJoinPlainAgg, relids[0], 0.0, max_rows, 0.0)
+}
+
+/// Top-level AND terms of an optional qual tree into `out` (explicit
+/// BoolExpr AND, the planner's implicit-AND List — the canonicalized form
+/// the FromExpr carries at path generation — or one bare clause).
+fn push_and_terms<'mcx>(quals: Option<Node<'mcx>>, out: &mut Vec<Node<'mcx>>) {
+    let Some(q) = quals else { return };
+    if let Some(l) = q.as_list() {
+        out.extend(l.iter());
+        return;
+    }
+    match q.as_bool_expr() {
+        Some(be) if matches!(be.boolop, types_nodes::primnodes::BoolExprType::AND_EXPR) => {
+            out.extend(be.args.iter());
+        }
+        _ => out.push(q),
+    }
+}
+
+/// m5p1 (band 88001): left-deep INNER JoinExpr chain collector — every
+/// level INNER with a plain rarg RangeTblRef, the deepest larg a
+/// RangeTblRef; each level's ON-qual AND terms accumulate. Any other nested
+/// shape (outer types, right-deep/bushy args) returns false — uncovered by
+/// construction (probe narrower than the walk, which admits general trees).
+fn collect_inner_chain<'mcx>(
+    je: &types_nodes::primnodes::JoinExpr<'mcx>,
+    rtis: &mut Vec<usize>,
+    out_quals: &mut Vec<Node<'mcx>>,
+) -> bool {
+    if je.jointype != types_nodes::JoinType::JOIN_INNER {
+        return false;
+    }
+    let Some(rarg) = je.rarg.as_range_tbl_ref() else { return false };
+    push_and_terms(je.quals, out_quals);
+    let deep_ok = if let Some(inner) = je.larg.as_join_expr() {
+        collect_inner_chain(inner, rtis, out_quals)
+    } else if let Some(l) = je.larg.as_range_tbl_ref() {
+        rtis.push(l.rtindex as usize);
+        true
+    } else {
+        false
+    };
+    rtis.push(rarg.rtindex as usize);
+    deep_ok
+}
+
+/// `is_whitelisted_agg` over N candidate range-table indexes (the
+/// multibuild row): the aggregate's single Var arg may live on any joined
+/// rel.
+fn is_whitelisted_agg_nrti(expr: Node<'_>, rtis: &[usize], whitelist: &[u32]) -> bool {
+    let Some(agg) = expr.as_aggref() else { return false };
+    if !whitelist.contains(&agg.aggfnoid) {
+        return false;
+    }
+    rtis.iter().any(|&rti| aggref_plain(agg, rti))
+}
+
+/// m5p1 (band 88001): the N-relation multibuild classifier — the shared
+/// body of both keyed FROM forms (flat N-RangeTblRef; left-deep INNER
+/// chain). Strictly narrower than the multibuild walk (probe ⊂ walk, risk
+/// P1) PLUS the planner-choice guards the walk cannot express — unindexed
+/// rels (no serial merge/NL-with-inner-index plan for the costing to
+/// prefer), EVERY rel's build estimate nbatch==1 (any rel may be hashed;
+/// the walk is unbatched-only), and a CONNECTED int-family hashjoinable
+/// equi graph (a disconnected component would cost a cartesian shape the
+/// walk refuses). Every early `false` keeps Gather exactly as today.
+/// m5p1 knob coherence: the executor walk's multibuild kill switch
+/// (`PGRUST_RUNTIME_HASHJOIN_MULTIBUILD=0`) must also un-key the probe —
+/// a suppression the walk then refuses would land on serial (risk P1's
+/// false-positive direction). Same spelling, own cached read.
+fn multibuild_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_HASHJOIN_MULTIBUILD").map_or(true, |v| v.trim() != "0")
+    })
+}
+
+fn classify_multibuild(
+    run: &mut PlannerRun<'_>,
+    parse: &Query<'_>,
+    rtis: &[usize],
+    quals: &[Node<'_>],
+) -> PgResult<bool> {
+    if !multibuild_enabled() {
+        return refuse_join("multibuild disabled");
+    }
+    // Plain one-row aggregation only (the walk drives the plain-agg sink).
+    if !parse.hasAggs
+        || !parse.groupClause.is_nil()
+        || !parse.distinctClause.is_nil()
+        || !parse.sortClause.is_nil()
+        || parse.limitCount.is_some()
+        || parse.limitOffset.is_some()
+    {
+        return refuse_join("not a plain one-row aggregation");
+    }
+    let mut relids = Vec::with_capacity(rtis.len());
+    let mut max_rows = 0.0f64;
+    for &rti in rtis {
+        let Some(rte) = parse.rtable.nth(rti - 1).as_range_tbl_entry() else {
+            return refuse_join("side not a plain RTE");
+        };
+        if rte.rtekind != RTEKind::RTE_RELATION
+            || rte.relkind != types_rel::RELKIND_RELATION
+            || rte.inh
+            || rte.tablesample.is_some()
+        {
+            return refuse_join("side not a plain relation");
+        }
+        relids.push(rte.relid);
+        let Some(rel_id) = run.root.simple_rel_array.get(rti).copied().flatten() else {
+            return refuse_join("side has no RelOptInfo yet");
+        };
+        let rel = run.root.rel(rel_id);
+        if rel.amflags & AMFLAG_PGRCOLUMNAR == 0 {
+            return refuse_join("side not cbstore");
+        }
+        max_rows = max_rows.max(rel.rows.max(0.0));
+        if !rel.indexlist.is_empty() {
+            return refuse_join("side has indexes");
+        }
+        let Some(pt_id) = rel.pathtarget_id else {
+            return refuse_join("side has no pathtarget yet");
+        };
+        let width = run.root.pathtarget(pt_id).width;
+        let dop = guc_tables::runtime_pool::runtime_dop();
+        let (_, nbatch, _, _) = ::nodehash::exec_choose_hash_table_size_full(
+            rel.rows.max(1.0),
+            width,
+            false, // useskew: C PHJ parity
+            true,  // try_combined_hash_mem: pooled participant budget
+            dop.max(1),
+        );
+        if nbatch > 1 {
+            return refuse_join("nbatch estimate > 1 (multibuild walk is unbatched-only)");
+        }
+    }
+    // Connectivity (union-find with path halving).
+    fn uf_find(uf: &mut [usize], mut x: usize) -> usize {
+        while uf[x] != x {
+            uf[x] = uf[uf[x]];
+            x = uf[x];
+        }
+        x
+    }
+    let mut uf: Vec<usize> = (0..rtis.len()).collect();
+    for &qual in quals {
+        let Some(op) = qual.as_op_expr() else { continue };
+        if op.args.len() != 2 {
+            continue;
+        }
+        let (a, b) = (op.args.nth(0), op.args.nth(1));
+        let hit = |e: Node<'_>| rtis.iter().position(|&rti| key_var(e, rti).is_some());
+        let (Some(ia), Some(ib)) = (hit(a), hit(b)) else { continue };
+        if ia == ib {
+            continue;
+        }
+        let (Some(va), Some(vb)) = (key_var(a, rtis[ia]), key_var(b, rtis[ib])) else {
+            continue;
+        };
+        if is_int_family(va.vartype)
+            && is_int_family(vb.vartype)
+            && lsyscache::op_hashjoinable(op.opno, va.vartype)?
+        {
+            let (ra, rb) = (uf_find(&mut uf, ia), uf_find(&mut uf, ib));
+            if ra != rb {
+                uf[ra] = rb;
+            }
+        }
+    }
+    let root0 = uf_find(&mut uf, 0);
+    for i in 1..rtis.len() {
+        if uf_find(&mut uf, i) != root0 {
+            return refuse_join("equi graph does not connect all relations");
+        }
+    }
+    // Emit discipline: every tlist entry a whitelisted plain aggregate
+    // whose args live on one of the joined rels (count(*) included).
+    let mut n = 0usize;
+    for tle_node in &parse.targetList {
+        let Some(tle) = tle_node.as_target_entry() else { return Ok(false) };
+        if !is_whitelisted_agg_nrti(tle.expr, rtis, PLAIN_FOLD_AGGS) {
+            return refuse_join("tlist entry not a whitelisted plain agg");
+        }
+        n += 1;
+    }
+    if n == 0 {
+        return refuse_join("empty tlist");
+    }
+    // Floor guard input: the largest rel's estimated rows (the nbatch1
+    // ladder's per-table N — provisional reuse, see class_guard).
+    finish(run, CoverClass::CbHashJoinMultiBuild, relids[0], 0.0, max_rows, 0.0)
 }
 
 /// Matrix consult + optional trace, shared tail.
