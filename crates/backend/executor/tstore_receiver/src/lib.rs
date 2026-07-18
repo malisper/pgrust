@@ -19,16 +19,42 @@ pub struct DrTstore {
     detoast: bool,
     needtoast: bool,
     scratch: Option<MemoryContext>,
+    /// SE-R41 (notes/se-r41-retire.md §3.3): the §4.2 row-identity sidecar
+    /// of a capture-batchable eligible cursor-store fill. Set ONLY by
+    /// `fill_portal_store_to`'s capture-batch arm (knob-ON, store-armed
+    /// portals); every other producer leaves it NULL. Carried on the
+    /// receiver — its lifetime IS the fill call — so the run seam can arm
+    /// per-accept capture without estate/TLS state.
+    capture_sidecar: TuplestoreHandle,
 }
 
 pub fn tstore_create_DR() -> DrTstore {
-    DrTstore { tstore: TuplestoreHandle::NULL, detoast: false, needtoast: false, scratch: None }
+    DrTstore {
+        tstore: TuplestoreHandle::NULL,
+        detoast: false,
+        needtoast: false,
+        scratch: None,
+        capture_sidecar: TuplestoreHandle::NULL,
+    }
 }
 
 // C's tContext lives inside the store behind the handle.
 pub fn set_params(myState: &mut DrTstore, tstore: TuplestoreHandle, detoast: bool) {
     myState.tstore = tstore;
     myState.detoast = detoast;
+}
+
+/// SE-R41: arm/read the capture sidecar (see the field doc).
+pub fn set_capture_sidecar(myState: &mut DrTstore, sidecar: TuplestoreHandle) {
+    myState.capture_sidecar = sidecar;
+}
+
+pub fn capture_sidecar(myState: &DrTstore) -> Option<TuplestoreHandle> {
+    if myState.capture_sidecar.is_null() {
+        None
+    } else {
+        Some(myState.capture_sidecar)
+    }
 }
 
 impl DrTstore {

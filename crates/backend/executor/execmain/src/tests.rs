@@ -12597,7 +12597,7 @@ mod cursors_wave10_cb {
                 estate.es_epq_active = true;
                 let (h, mut dest) = mk_store_dest();
                 assert!(
-                    !crate::lanev2::cursor_store_batch_fill(planstate, estate, &mut dest)
+                    !crate::lanev2::cursor_store_batch_fill(planstate, estate, &mut dest, None)
                         .unwrap(),
                     "EPQ drive never batch-fills"
                 );
@@ -12606,7 +12606,7 @@ mod cursors_wave10_cb {
                 // Store-face gate: a non-tuplestore receiver keeps the loop.
                 let mut nodest = DestReceiver::DoNothing;
                 assert!(
-                    !crate::lanev2::cursor_store_batch_fill(planstate, estate, &mut nodest)
+                    !crate::lanev2::cursor_store_batch_fill(planstate, estate, &mut nodest, None)
                         .unwrap(),
                     "non-store receivers keep the row loop"
                 );
@@ -12614,7 +12614,7 @@ mod cursors_wave10_cb {
                 // Heap standalone refuses admission: dispatch falls through
                 // with NOTHING consumed (the row loop then owns the run).
                 assert!(
-                    !crate::lanev2::cursor_store_batch_fill(planstate, estate, &mut dest)
+                    !crate::lanev2::cursor_store_batch_fill(planstate, estate, &mut dest, None)
                         .unwrap(),
                     "Volcano-refused plan keeps the row loop"
                 );
@@ -12800,6 +12800,208 @@ mod cursors_wave10_cb {
     }
 }
 // --- end WS-CB wave-10 --------------------------------------------------------
+
+// --- SE-R41 (reason-41 retirement: the capture-batch heap fill; band 99201+) ---
+// Unit pins for the in-run §4.2 capture that retires the row-chain fallback
+// for heap cursor fills (notes/se-r41-retire.md §3): the capture-batchable
+// plan probe, the capture-armed batch fill through the REAL run seam
+// (sidecar/store row alignment with GENUINE (block, lineoff) tids off the
+// scanfix heap pages), and the capture ROW LOOP fallback when the dispatch
+// refuses at run time — whose sidecar must be byte-identical to the sink's
+// (the fallback-parity teeth: correctness never rides on the lane
+// admitting). Same serialization discipline as the WS-CB region.
+mod cursors_r41 {
+    use super::*;
+
+    fn mk_sidecar() -> ::types_portal::TuplestoreHandle {
+        tuplestore::hold::register(tuplestore::Tuplestore::begin_heap(true, false, 1024))
+    }
+
+    fn read_sidecar(h: ::types_portal::TuplestoreHandle) -> Vec<(u32, u64)> {
+        let mut rows = Vec::new();
+        loop {
+            match tuplestore::hold::tidstore_get(h, rows.len() as i64).unwrap() {
+                Some(row) => rows.push(row),
+                None => break,
+            }
+        }
+        rows
+    }
+
+    // Store dest + reader, the cursors_wave10_cb idiom (module-private
+    // there; duplicated rather than widened).
+    fn mk_store_dest() -> (::types_portal::TuplestoreHandle, DestReceiver<'static>) {
+        let store = tuplestore::Tuplestore::begin_heap(true, false, 1024);
+        let h = tuplestore::hold::register(store);
+        let mut dr = tstore_receiver::tstore_create_DR();
+        tstore_receiver::set_params(&mut dr, h, false);
+        (h, DestReceiver::Tuplestore(dr))
+    }
+
+    fn read_store_i32s(
+        h: ::types_portal::TuplestoreHandle,
+        desc: &std::rc::Rc<::types_tuple::TupleDescData<'static>>,
+    ) -> Vec<i32> {
+        let read_cx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("read")));
+        let mut slot = exectuples::make_tuple_table_slot(
+            read_cx.mcx(),
+            ::types_slot::TupleSlotKind::MinimalTuple,
+            Some(desc.clone()),
+        );
+        let mut rows: Vec<i32> = Vec::new();
+        loop {
+            let got = tuplestore::hold::with_store(h, |ts| {
+                ts.gettupleslot(true, true, &mut slot, read_cx.mcx())
+            })
+            .unwrap();
+            if !got {
+                break;
+            }
+            let mut isnull = false;
+            let v = exectuples::slot_getattr(&mut slot, 1, &mut isnull);
+            assert!(!isnull);
+            rows.push(v.as_i32());
+        }
+        rows
+    }
+
+    /// §3.1 probe shapes: a bare heap SeqScan top is capture-batchable; a
+    /// wrapped top (Limit/Sort over the same scan) is NOT — it keeps the
+    /// D-CA-2 fence and the row-chain capture loop verbatim.
+    #[test]
+    fn cursors_r41_capture_probe_admits_bare_seqscan_only() {
+        let mcx = leaked_mcx();
+        assert!(crate::execcurrent::cursor_plan_capture_batch_fill_seam(mk_seqscan_pstmt(
+            mcx, 99201
+        )));
+        assert!(!crate::execcurrent::cursor_plan_capture_batch_fill_seam(
+            mk_sort_limit_pstmt(mcx, 99201, true, None, Some(3))
+        ));
+    }
+
+    /// THE retirement pin: a capture-armed budgeted store fill over a
+    /// two-page heap table, driven through the REAL run seam twice
+    /// (budget 4 = pause mid-batch-2 + park, then a slack budget = resume
+    /// + drain). The batch fill ENGAGES (lane staging position is the
+    /// teeth), the store receives the whole table in order, and the
+    /// sidecar is row-aligned with the store carrying the GENUINE page
+    /// tids — (0,1)..(0,3), (1,1)..(1,2) — captured per accepted row
+    /// inside the run (settle-safe by ordering). Then the FALLBACK arm:
+    /// an identical table whose scan init carries the fence eflags
+    /// (`batch_allowed=false` — the unit-level stand-in for any run-time
+    /// dispatch refusal), so the capture ROW LOOP serves the same fills —
+    /// store AND sidecar must land byte-identical to the sink's.
+    #[test]
+    fn cursors_r41_capture_batch_fill_sidecar_alignment_and_rowloop_fallback_parity() {
+        use ::types_slot::EXEC_FLAG_BACKWARD;
+
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mcx = leaked_mcx();
+        crate::lanev2::cursors_set_for_tests(true);
+
+        // The genuine page tids of the 3+2-row fixture: block<<16 | lineoff.
+        let expect_packed: Vec<u64> = vec![1, 2, 3, (1 << 16) | 1, (1 << 16) | 2];
+        let mut arm_store: Vec<Vec<i32>> = Vec::new();
+        let mut arm_packed: Vec<Vec<u64>> = Vec::new();
+
+        for (relid, fence_eflags) in [(99202u32, 0), (99203u32, EXEC_FLAG_BACKWARD)] {
+            scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
+            let pstmt = mk_seqscan_pstmt(mcx, relid);
+            let snap_ctx: &'static MemoryContext =
+                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snapshot: snapmgr::Snapshot =
+                std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                    snap_ctx.mcx(),
+                    ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+                ));
+            let mut rows: Vec<i32> = Vec::new();
+            let mut sidecar_rows: Vec<(u32, u64)> = Vec::new();
+            with_exec_data(pstmt, |data, pstmt| {
+                data.estate.es_snapshot = Some(snapshot);
+                let desc =
+                    crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, fence_eflags)
+                        .unwrap();
+                let (h, mut dest) = mk_store_dest();
+                let sidecar = mk_sidecar();
+                tcop_dest::SetTuplestoreCaptureSidecar(&mut dest, sidecar);
+                // Budgeted drive 1: FETCH 4 (crosses the 3-row page batch;
+                // the engaged arm pauses mid-batch-2 and parks).
+                data.estate.es_processed = 0;
+                crate::execmain::execute_plan(
+                    data,
+                    CmdType::CMD_SELECT,
+                    true,
+                    4,
+                    ForwardScanDirection,
+                    false,
+                    &mut dest,
+                )
+                .unwrap();
+                assert_eq!(data.estate.es_processed, 4);
+                // Engagement teeth: only the lane batch fill can PARK (the
+                // pause left a staged page batch for the settle walker; the
+                // capture row loop stages nothing). Read between the drives
+                // — the resume walk at the next entry consumes the flag.
+                assert_eq!(
+                    data.estate.es_lane_cursor_parked,
+                    fence_eflags == 0,
+                    "batch fill engages exactly when unfenced (parked = staged pause)"
+                );
+                // Budgeted drive 2: slack budget drains the remainder
+                // (resume-repossession for the engaged arm).
+                data.estate.es_processed = 0;
+                crate::execmain::execute_plan(
+                    data,
+                    CmdType::CMD_SELECT,
+                    true,
+                    99,
+                    ForwardScanDirection,
+                    false,
+                    &mut dest,
+                )
+                .unwrap();
+                assert_eq!(data.estate.es_processed, 1);
+                rows = read_store_i32s(h, &desc);
+                sidecar_rows = read_sidecar(sidecar);
+                tuplestore::hold::end(sidecar);
+                tuplestore::hold::end(h);
+                let ExecData { estate, planstate } = data;
+                crate::exec_end_node(planstate.as_mut().unwrap(), estate).unwrap();
+                estate.exec_reset_tuple_table(false);
+                estate.exec_close_range_table_relations().unwrap();
+            });
+            assert_eq!(rows, vec![1, 2, 3, 4, 5], "the whole table, in order");
+            assert_eq!(
+                sidecar_rows.len(),
+                rows.len(),
+                "sidecar/store row alignment (one identity per accepted row)"
+            );
+            assert_eq!(
+                sidecar_rows.iter().map(|&(o, _)| o).collect::<Vec<_>>(),
+                vec![relid; 5],
+                "capture stamps the scan relation oid"
+            );
+            arm_store.push(rows);
+            arm_packed.push(sidecar_rows.into_iter().map(|(_, t)| t).collect());
+        }
+
+        assert_eq!(
+            arm_packed[0], expect_packed,
+            "sink capture reads the genuine (block, lineoff) page tids"
+        );
+        assert_eq!(arm_store[0], arm_store[1], "store parity across fill engines");
+        assert_eq!(
+            arm_packed[0], arm_packed[1],
+            "sidecar parity: sink capture == capture row loop (fallback-parity teeth)"
+        );
+
+        crate::lanev2::cursors_set_for_tests(false);
+        scanfix::quiesced();
+    }
+}
+// --- end SE-R41 -----------------------------------------------------------------
 
 // =============================================================================
 // WS-MJ1 (LANE-MERGEJOIN inc-1) lane-surface pins — band 99101+ (lane band

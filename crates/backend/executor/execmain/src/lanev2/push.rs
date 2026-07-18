@@ -1681,14 +1681,50 @@ pub(super) struct TuplestoreBatchSink<'d, 'm> {
     /// loop's `break` arm). Never produced by the tuplestore receiver
     /// today; carried for protocol completeness.
     stopped: bool,
+    /// SE-R41 (notes/se-r41-retire.md §3.6): the §4.2 in-run identity
+    /// capture of a capture-batchable eligible fill — one sidecar append
+    /// per ACCEPTED row, on the same condition as the store append
+    /// (sidecar/store row alignment by construction). Capture at the emit
+    /// surface is what makes the batch fill settle-safe: every row's
+    /// identity is read from the scan slot BEFORE `cursor_run_park`'s slot
+    /// hygiene can clear it.
+    capture: Option<SinkCapture>,
+}
+
+/// SE-R41: the capture identity source, pinned at dispatch (the plan top is
+/// the one SeqScan the §3.1 probe admitted): the scan's own tuple slot,
+/// which the heap batch emit path stores per emitted row
+/// (`heap_batch_store_slot` — a buffer heap tuple carrying its (block,
+/// lineoff) tid), and the scan relation's oid.
+pub(super) struct SinkCapture {
+    pub(super) sidecar: ::types_portal::TuplestoreHandle,
+    pub(super) rel_oid: ::types_core::Oid,
+    pub(super) scan_slot: ExecSlotId,
+}
+
+impl SinkCapture {
+    /// The per-row capture body: read the scan slot's identity (empty ⇒
+    /// the invalid-identity row, C's lisnull arm at resolution) and append
+    /// it sidecar-aligned. (The run seam's capture row loop fallback runs
+    /// the tree-walk twin, `execcurrent::capture_current_into_sidecar`.)
+    fn capture_row(&self, estate: &EStateData<'_>) -> PgResult<()> {
+        let slot = estate.slot(self.scan_slot);
+        let (oid, packed) = if slot.base().is_empty() {
+            (0, 0)
+        } else {
+            (self.rel_oid, crate::execcurrent::pack_tid(&slot.base().tts_tid))
+        };
+        ::tuplestore::hold::tidstore_put(self.sidecar, oid, packed)
+    }
 }
 
 impl<'d, 'm> TuplestoreBatchSink<'d, 'm> {
     pub(super) fn new(
         dest: &'d mut ::tcop_dest::DestReceiver<'m>,
         clear_on_finish: Option<ExecSlotId>,
+        capture: Option<SinkCapture>,
     ) -> Self {
-        TuplestoreBatchSink { dest, clear_on_finish, stopped: false }
+        TuplestoreBatchSink { dest, clear_on_finish, stopped: false, capture }
     }
 }
 
@@ -1723,6 +1759,12 @@ impl<'mcx> Sink<'mcx> for TuplestoreBatchSink<'_, '_> {
                 self.stopped = true;
                 return Ok(SinkFeed::Full);
             }
+        }
+        // SE-R41: sidecar capture rides every store append (and only store
+        // appends — a receiver stop above appends nothing and captures
+        // nothing).
+        if let Some(c) = &self.capture {
+            c.capture_row(estate)?;
         }
         // The drive loop's SELECT accounting, moved with the drive (budget
         // installs only on CMD_SELECT runs).
@@ -1813,6 +1855,7 @@ pub(crate) fn cursor_store_batch_fill<'m, 'mcx>(
     node: &mut crate::procnode::PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
     dest: &mut ::tcop_dest::DestReceiver<'m>,
+    capture: Option<::types_portal::TuplestoreHandle>,
 ) -> PgResult<bool> {
     debug_assert!(
         estate.es_cursor_run_budget.is_some(),
@@ -1833,8 +1876,58 @@ pub(crate) fn cursor_store_batch_fill<'m, 'mcx>(
         return Ok(false);
     }
     let crate::procnode::PlanStateNode::SeqScan(ss) = node else {
+        // A capture-armed run whose planstate top is not the bare SeqScan
+        // (the Instrumented wrapper is the reachable case — the §3.1 probe
+        // is plan-shape, instrumentation wraps at build): the caller's
+        // capture row loop serves the fill, sidecar-aligned.
         return Ok(false);
     };
+    // --- SE-R41 (notes/se-r41-retire.md §3.5): the heap capture arm -------
+    // A capture-armed fill is the retirement's target cell: a
+    // CURRENT-OF-ELIGIBLE bare heap SeqScan whose §4.2 capture rides the
+    // sink (per accepted row, settle-safe). Admission = the standard
+    // fusibility cascade (batch_allowed / instrumented / variant /
+    // page-batch AM; its own class accounting + memoized verdict, which
+    // also makes the settle walker's `engaged` detection see this fill) —
+    // deliberately NOT `try_own_seq_scan`: its heap standalone refuse
+    // prices the PER-PULL capacity-one adapter, which this push-sink drive
+    // never pays (the cb store leg measured the store-fill economics at
+    // −6.68% — the SE11 4a-store controlled experiment).
+    if let Some(sidecar) = capture {
+        debug_assert!(
+            !::nodeseqscan::seq_scan_is_pgrcolumnar(ss),
+            "capture-batchable probe admitted a pgrcolumnar scan (§3.1 AM narrowing)"
+        );
+        if !super::seq_scan_fusible(ss, estate)? {
+            // Run-time refusal (instrumented / no page batch / …): the
+            // caller's capture row loop serves this run — correctness
+            // never rides on the lane admitting.
+            return Ok(false);
+        }
+        debug_assert!(::types_scan::sdir::ScanDirectionIsForward(estate.es_direction));
+        super::stats::tick_owned(super::stats::ShapeClass::Cursor);
+        let cap = SinkCapture {
+            sidecar,
+            rel_oid: ss
+                .ss
+                .ss_currentRelation
+                .as_ref()
+                .expect("seqscan has a relation")
+                .rd_id,
+            scan_slot: ss.ss.ss_ScanTupleSlot,
+        };
+        let clear = ss.ss.ps_ProjInfo.as_ref().map(|p| p.pi_result_slot);
+        let mut sink = TuplestoreBatchSink::new(dest, clear, Some(cap));
+        fill_step(
+            ss,
+            &mut super::SeqScanSource,
+            &mut super::SeqScanFilterProject,
+            &mut sink,
+            estate,
+        )?;
+        return Ok(true);
+    }
+    // --- end SE-R41 -------------------------------------------------------
     // First row through the standard admission hook: the identical verdict
     // cascade, stats ticks and engine capture as a per-pull drive; a
     // refusal falls to the row-chain fill of the same store (§2.3).
@@ -1848,8 +1941,11 @@ pub(crate) fn cursor_store_batch_fill<'m, 'mcx>(
     // three-arm matrix's MATRIX_REQUIRE_LANE_FILL bar reads
     // (`owned\tcursor\tN>0`).
     super::stats::tick_owned(super::stats::ShapeClass::Cursor);
-    let mut sink =
-        TuplestoreBatchSink::new(dest, ss.ss.ps_ProjInfo.as_ref().map(|p| p.pi_result_slot));
+    let mut sink = TuplestoreBatchSink::new(
+        dest,
+        ss.ss.ps_ProjInfo.as_ref().map(|p| p.pi_result_slot),
+        None,
+    );
     if let Some(slot) = first {
         if let SinkFeed::Full = sink.accept(slot, estate)? {
             // Budget 1 (or receiver stop): the fill ran and paused with the
@@ -1878,7 +1974,7 @@ pub(crate) fn cursor_fill_step_seqscan_for_tests<'m, 'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     let clear = ss.ss.ps_ProjInfo.as_ref().map(|p| p.pi_result_slot);
-    let mut sink = TuplestoreBatchSink::new(dest, clear);
+    let mut sink = TuplestoreBatchSink::new(dest, clear, None);
     fill_step(ss, &mut super::SeqScanSource, &mut super::SeqScanFilterProject, &mut sink, estate)
 }
 
