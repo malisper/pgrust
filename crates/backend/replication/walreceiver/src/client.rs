@@ -681,8 +681,31 @@ pub fn connect_extended(
 
     let host = opt(&opts, "host").unwrap_or("").to_string();
     let hostaddr = opt(&opts, "hostaddr").unwrap_or("").to_string();
-    let port_s = opt(&opts, "port").unwrap_or("5432").to_string();
-    let port: u16 = port_s.trim().parse().unwrap_or(5432);
+    // PQconnectPoll's try-next-host arm (fe-connect.c): the port option is
+    // validated BEFORE address resolution or any socket attempt. Regress
+    // relies on this ordering — CREATE SUBSCRIPTION ... 'port=-1' must fail
+    // "invalid port number: \"-1\"" WITHOUT a connection ever being tried.
+    let port_s = opt(&opts, "port").unwrap_or("").to_string();
+    let port: u16 = if port_s.is_empty() {
+        5432 // DEF_PGPORT
+    } else if port_s.contains(',') {
+        // unported: multi-host conninfo port list (recorded divergence).
+        return Ok(Err("connecting to multiple hosts is not supported yet".to_string()));
+    } else {
+        // pqParseIntParam: strtol with surrounding whitespace allowed, no
+        // trailing garbage, overflow-checked into int.
+        match port_s.trim_matches(|c: char| c.is_ascii_whitespace()).parse::<i32>() {
+            Err(_) => {
+                return Ok(Err(format!(
+                    "invalid integer value \"{port_s}\" for connection option \"port\""
+                )));
+            }
+            Ok(n) if !(1..=65535).contains(&n) => {
+                return Ok(Err(format!("invalid port number: \"{port_s}\"")));
+            }
+            Ok(n) => n as u16,
+        }
+    };
     let user = opt(&opts, "user").map(|s| s.to_string()).unwrap_or_else(os_user_name);
     let password = opt(&opts, "password")
         .map(|s| s.to_string())
@@ -1294,6 +1317,36 @@ mod tests {
     fn conninfo_parse_errors() {
         assert!(parse_conninfo("hostonly").unwrap_err().contains("missing \"=\""));
         assert!(parse_conninfo("host='x").unwrap_err().contains("unterminated"));
+    }
+
+    // Ok(Err(msg)) is libpqrcv_connect's NULL-return-with-*err arm.
+    fn conn_err(conninfo: &str) -> String {
+        match connect_extended(conninfo, true, false, false, "t") {
+            Ok(Err(e)) => e,
+            Ok(Ok(_)) => panic!("unexpected successful connection for {conninfo:?}"),
+            Err(e) => panic!("unexpected ereport for {conninfo:?}: {e}"),
+        }
+    }
+
+    #[test]
+    fn connect_rejects_bad_port_without_connecting() {
+        // PQconnectPoll's try-next-host arm validates the port option before
+        // any socket is opened — these never touch the network (regress:
+        // CREATE SUBSCRIPTION ... 'port=-1' "does so without connecting").
+        assert_eq!(conn_err("port=-1"), "invalid port number: \"-1\"");
+        assert_eq!(conn_err("port=70000"), "invalid port number: \"70000\"");
+        assert_eq!(conn_err("port=0"), "invalid port number: \"0\"");
+        // pqParseIntParam arm: trailing garbage is an integer-value error.
+        assert_eq!(
+            conn_err("port=1foo"),
+            "invalid integer value \"1foo\" for connection option \"port\""
+        );
+        // must_use_password recheck still precedes everything (C checks it
+        // post-connect; recorded divergence — see connect_extended).
+        match connect_extended("port=-1", true, false, true, "t") {
+            Err(e) => assert!(e.message().contains("password is required")),
+            Ok(_) => panic!("expected password-required ereport"),
+        }
     }
 
     #[test]
