@@ -217,8 +217,10 @@ pub(super) enum ShapeClass {
     // landing).
     // -----------------------------------------------------------------------
     /// Count-limited SPI-statement admission (docs/design/lane-spi.md §1/§3
-    /// Stage A): the WHOLE-RUN refusal classes of `_SPI_pquery`'s budgeted
-    /// tcount-limited STOP-ONLY emit sink. Cadence = once per budgeted
+    /// Stage A): the WHOLE-RUN refusal classes of a budgeted tcount-limited
+    /// `CommandDest::Spi` run — `_SPI_pquery`'s STOP-then-END shape and the
+    /// portal-fetch (SPI cursor / plpgsql FOR loop) resumable shape alike
+    /// (notes/se-spi-stage-a.md §8). Cadence = once per budget-eligible
     /// `execute_plan` run (never per tuple); ticks fire only with
     /// `PGRUST_LANE_V2_SPI` ON (knob-OFF never reaches the classifier), so
     /// default-config accounting is byte-identical by construction. An SPI
@@ -546,18 +548,24 @@ pub(super) enum RefuseReason {
     // APPEND-ONLY chartered mint, recorded in notes/se-spi-stage-a.md). ONE
     // new variant: the classifier's shape arms REUSE the generic vocabulary
     // (`Backward` / `ScrollMark` / `ParallelGate` — the WS-AI ParallelGate
-    // precedent) because all three are FAIL-CLOSED arms structurally
-    // unreachable from `_SPI_pquery` (Forward hardcoded at
-    // spi/src/execute.rs:562; eflags ∈ {0, SKIP_TRIGGERS} at :560;
-    // count-limited runs serial by the ported execmain.rs use_parallel_mode
-    // gate). Ticks ONLY under `ShapeClass::Spi`, once per budgeted run,
-    // knob-ON only; a refusal lands the WHOLE statement on Volcano
-    // byte-identically (fail-open law) — observability, never semantics.
+    // precedent). REACHABILITY, corrected by the review re-baseline
+    // (notes/se-spi-stage-a.md §8; the original "all three structurally
+    // unreachable from `_SPI_pquery`" record was falsified live):
+    // `ScrollMark` ticks per fetch for every auto-SCROLL SPI portal (plain
+    // plpgsql FOR loops whose plan supports backward scan —
+    // SPI_cursor_open picks CURSOR_OPT_SCROLL, PortalStart passes
+    // REWIND|BACKWARD eflags); `Backward` ticks via SPI_scroll_cursor_fetch
+    // (plpgsql FETCH BACKWARD); both carry allowlist rows. `ParallelGate`
+    // stays the fail-closed serial-law pin (count-limited runs serial by
+    // the ported execmain.rs use_parallel_mode gate; no row). Ticks ONLY
+    // under `ShapeClass::Spi`, once per budgeted run, knob-ON only; a
+    // refusal lands the WHOLE statement on Volcano byte-identically
+    // (fail-open law) — observability, never semantics.
     // -----------------------------------------------------------------------
     /// The budgeted SPI run's plan carried no lane engagement — the whole
     /// statement rides Volcano (exactly as today). The plan's SPECIFIC
     /// refusal reasons tick under their own classes at the per-pull gates;
-    /// this is the SPI-level roll-up, ticked at the STOP-ONLY settle walk.
+    /// this is the SPI-level roll-up, ticked at the settle walk.
     /// Detection breadth = the WS-AI inc-1b scan-class detector (seqscan /
     /// cbscan memoized verdicts + settled claims); the same inc-1c breaker
     /// widening rides for both classes.

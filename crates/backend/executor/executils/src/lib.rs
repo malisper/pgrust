@@ -836,20 +836,22 @@ pub struct EStateData<'mcx> {
     /// wave-9.5 WS-AJ (SPI Stage-A seam, docs/design/lane-spi.md §1/§3;
     /// worklog notes/se-spi-stage-a.md): the per-run emission budget of a
     /// tcount-limited SPI-statement run — `Some(tcount)` iff
-    /// `PGRUST_LANE_V2_SPI` is ON and this ExecutorRun is `_SPI_pquery`'s
-    /// count-exact STOP shape (knob-ON, tcount != 0, forward, SELECT,
-    /// serial, `CommandDest::Spi` receiver). Written UNCONDITIONALLY at
-    /// every `execute_plan` entry (compute = `lanev2::spi_run_budget_
-    /// install`) — the `es_cursor_run_budget` idiom verbatim: per-run by
-    /// construction, nested-run-safe (a nested SPI statement owns its own
-    /// estate) and unwind-safe with no guard. STOP-ONLY consumer: the
-    /// settle walk below the drive loop retires lane-staged claims at the
-    /// count-limited stop, BEFORE ExecutorFinish/End reach the plancache
-    /// release points (lane-spi.md INVARIANT 5); there is NO park/resume
-    /// arm — `_SPI_pquery` proceeds straight to finish/end and never
-    /// re-enters a stopped run. Estate-resident by the same
-    /// TLS-census-zero argument as the two fields above. Knob-OFF and
-    /// tcount-0 runs always read None.
+    /// `PGRUST_LANE_V2_SPI` is ON and this ExecutorRun is a count-limited
+    /// `CommandDest::Spi` shape (knob-ON, tcount != 0, forward, SELECT,
+    /// serial): `_SPI_pquery`'s count-exact STOP or an SPI portal fetch
+    /// (the RESUMABLE producer — notes/se-spi-stage-a.md §8). Written
+    /// UNCONDITIONALLY at every `execute_plan` entry (compute =
+    /// `lanev2::spi_run_budget_install`) — the `es_cursor_run_budget`
+    /// idiom verbatim: per-run by construction, nested-run-safe (a nested
+    /// SPI statement owns its own estate) and unwind-safe with no guard.
+    /// Consumer: the settle walk below the drive loop retires lane-staged
+    /// claims at the count-limited stop, BEFORE ExecutorFinish/End reach
+    /// the plancache release points (lane-spi.md INVARIANT 5), and its
+    /// parked result arms `es_lane_cursor_parked` (the shared WS-AI
+    /// resume signal) so the portal-fetch producer's next run
+    /// repossesses. Estate-resident by the same TLS-census-zero argument
+    /// as the two fields above. Knob-OFF and tcount-0 runs always read
+    /// None.
     pub es_spi_run_budget: Option<u64>,
 }
 

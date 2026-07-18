@@ -14660,9 +14660,11 @@ pub(crate) use push::cursor_admission_refusal_name;
 // --- WS-AJ (wave-9): reserved ---
 // WS-AJ wave-9.5 (SPI Stage-A seam, `se/spi-stage-a`; lane-spi.md §1/§3 —
 // filling the reserved sub-region above, EOF-append only): the count-seam
-// halves consumed by the `execute_plan` run seam (install at entry, the
-// STOP-ONLY settle below the drive loop), plus the admission-classifier
-// and knob test faces. Substrate lives in push.rs (WS-AJ region).
+// halves consumed by the `execute_plan` run seam (install at entry; the
+// settle below the drive loop, whose parked result arms the shared WS-AI
+// resume signal — notes/se-spi-stage-a.md §8), plus the
+// admission-classifier and knob test faces. Substrate lives in push.rs
+// (WS-AJ region).
 pub(crate) use push::{spi_run_budget_install, spi_run_settle};
 #[cfg(test)]
 pub(crate) use push::{spi_admission_refusal_name, spi_set_for_tests};
