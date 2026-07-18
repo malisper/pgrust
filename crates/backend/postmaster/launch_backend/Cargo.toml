@@ -8,6 +8,11 @@ publish.workspace = true
 name = "launch_backend"
 path = "src/lib.rs"
 
+# PERMIT-S1: `pgrust_sim` selects the spawn-door scheduler registration; the
+# cfg comes from harness/CI RUSTFLAGS only (law §0.1 of sim-net-e2e).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)'] }
+
 [dependencies]
 guc = { path = "../../utils/misc/guc" }
 types_core = { path = "../../../_support/types/types_core" }
@@ -38,6 +43,10 @@ parallel = { path = "../../access/transam/parallel" }
 postinit = { path = "../../utils/init/postinit" }
 elog = { path = "../../utils/error/elog" }
 types_error = { path = "../../../_support/types/types_error" }
+# PERMIT-S1 (WS-CORE): the spawn-door registration surface. Native/loom
+# builds see an (effectively empty) support crate; only `--cfg pgrust_sim`
+# compiles the scheduler arm.
+pgsync = { path = "../../../_support/pgsync" }
 sinval = { path = "../../storage/ipc/sinval" }
 waiteventset = { path = "../../storage/ipc/waiteventset" }
 waiteventset_seams = { path = "../../storage/ipc/waiteventset_seams" }

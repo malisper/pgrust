@@ -14,5 +14,14 @@ publish.workspace = true
 [target.'cfg(loom)'.dependencies]
 loom = "0.7"
 
+# PERMIT-S1 WS-CORE (contract §5 shared-file exception, mechanical dep rows):
+# the scheduler's SimClock lever (pg_clock::sim::advance_ns, driven mode) and
+# the sanctioned SimEntropy funnel (picker seed = one pg_strong_random fill).
+# Both are leaf port crates — no cycle risk. Only the cfg(pgrust_sim) arm
+# references them; native/loom builds compile them away.
+[dependencies]
+pg_clock = { path = "../../port/pg_clock" }
+pg_strong_random = { path = "../../port/pg_strong_random" }
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(pgrust_sim)"] }
