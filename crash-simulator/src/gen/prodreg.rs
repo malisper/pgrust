@@ -64,6 +64,10 @@ pub const DML_INSERT: &str = "dml:insert";
 pub const DML_UPDATE: &str = "dml:update";
 pub const DML_DELETE: &str = "dml:delete";
 pub const DML_TRUNCATE: &str = "dml:truncate";
+/// H6: key-addressed MERGE (semantically a guarded UPDATE/DELETE — the
+/// ledger-understood subset is preserved; ModifyTable Merge species reaches
+/// the census through the DML explain gate).
+pub const DML_MERGE: &str = "dml:merge";
 
 // query variants (gen_query)
 pub const Q_FULL_ORDERED: &str = "q:full-ordered";
@@ -80,6 +84,70 @@ pub const Q_SCALAR_CALL: &str = "q:scalar-call";
 pub const Q_INNER_JOIN: &str = "q:inner-join";
 pub const Q_LEFT_JOIN_COALESCE: &str = "q:left-join-coalesce";
 pub const Q_OJ_NEST_COALESCE: &str = "q:oj-nest-coalesce";
+
+// H6 grammar-arm query variants. Each name is one gen_query alternative;
+// sub-variant nodes (children) follow each family below. All are plain
+// differential reads (compared DUT-vs-C like every noise query — the H4
+// join pattern: no ledger modeling, `ledger_op: None` when substituted
+// into property noise slots).
+pub const Q_EXISTS_SEMI: &str = "q:exists-semi";
+pub const Q_NOT_EXISTS_ANTI: &str = "q:not-exists-anti";
+pub const Q_IN_SUBQ: &str = "q:in-subq";
+pub const Q_SCALAR_SUBQ: &str = "q:scalar-subq";
+pub const Q_CTE_MATERIALIZED: &str = "q:cte-materialized";
+pub const Q_CTE_RECURSIVE: &str = "q:cte-recursive";
+pub const Q_SETOP: &str = "q:setop";
+pub const Q_UNION_ALL_TOPK: &str = "q:union-all-topk";
+pub const Q_HAVING: &str = "q:having";
+pub const Q_GROUP_NOAGG: &str = "q:group-noagg";
+pub const Q_DISTINCT: &str = "q:distinct";
+pub const Q_DISTINCT_ON: &str = "q:distinct-on";
+pub const Q_GROUPING_SETS: &str = "q:grouping-sets";
+pub const Q_WINDOW: &str = "q:window";
+pub const Q_VALUES_SCAN: &str = "q:values-scan";
+pub const Q_SUBQUERY_SCAN: &str = "q:subquery-scan";
+pub const Q_PROJECT_SET: &str = "q:project-set";
+pub const Q_RESULT: &str = "q:result";
+pub const Q_TID: &str = "q:tid";
+pub const Q_TABLESAMPLE: &str = "q:tablesample";
+pub const Q_JSON_TABLE: &str = "q:json-table";
+pub const Q_FULL_JOIN: &str = "q:full-join";
+pub const Q_OR_QUAL: &str = "q:or-qual";
+pub const Q_FOR_UPDATE: &str = "q:for-update";
+
+// scalar-subquery arms
+pub const SSQ_CORRELATED_COUNT: &str = "ssq:correlated-count";
+pub const SSQ_INITPLAN_MAX: &str = "ssq:initplan-max";
+
+// set-operation arms
+pub const SO_UNION: &str = "so:union";
+pub const SO_UNION_ALL: &str = "so:union-all";
+pub const SO_INTERSECT: &str = "so:intersect";
+pub const SO_EXCEPT: &str = "so:except";
+
+// grouping-sets arms
+pub const GS_ROLLUP: &str = "gs:rollup";
+pub const GS_CUBE: &str = "gs:cube";
+pub const GS_SETS: &str = "gs:sets";
+
+// window-function arms
+pub const W_ROW_NUMBER: &str = "w:row-number";
+pub const W_RANK: &str = "w:rank";
+pub const W_SUM_OVER: &str = "w:sum-over";
+pub const W_SUM_PARTITION: &str = "w:sum-partition";
+
+// result-plan arms
+pub const RES_NO_FROM: &str = "res:no-from";
+pub const RES_WHERE_FALSE: &str = "res:where-false";
+pub const RES_MINMAX: &str = "res:minmax";
+
+// tid arms
+pub const TID_POINT: &str = "tid:point";
+pub const TID_RANGE: &str = "tid:range";
+
+// tablesample arms
+pub const SMP_BERNOULLI: &str = "smp:bernoulli";
+pub const SMP_SYSTEM: &str = "smp:system";
 
 // srf-unnest element types
 pub const SRF_INT: &str = "srf:int";
@@ -211,6 +279,61 @@ pub fn registry(property_names: &[&str]) -> Vec<ProdDef> {
         def(Q_INNER_JOIN, Some(STMT_QUERY), WQuery, false),
         def(Q_LEFT_JOIN_COALESCE, Some(STMT_QUERY), WQuery, false),
         def(Q_OJ_NEST_COALESCE, Some(STMT_QUERY), WQuery, false),
+        // H6 grammar-arm variants (all plain differential reads)
+        def(Q_EXISTS_SEMI, Some(STMT_QUERY), WQuery, false),
+        def(Q_NOT_EXISTS_ANTI, Some(STMT_QUERY), WQuery, false),
+        def(Q_IN_SUBQ, Some(STMT_QUERY), WQuery, false),
+        def(Q_SCALAR_SUBQ, Some(STMT_QUERY), WQuery, false),
+        def(Q_CTE_MATERIALIZED, Some(STMT_QUERY), WQuery, false),
+        def(Q_CTE_RECURSIVE, Some(STMT_QUERY), WQuery, false),
+        def(Q_SETOP, Some(STMT_QUERY), WQuery, false),
+        def(Q_UNION_ALL_TOPK, Some(STMT_QUERY), WQuery, false),
+        def(Q_HAVING, Some(STMT_QUERY), WQuery, false),
+        def(Q_GROUP_NOAGG, Some(STMT_QUERY), WQuery, false),
+        def(Q_DISTINCT, Some(STMT_QUERY), WQuery, false),
+        def(Q_DISTINCT_ON, Some(STMT_QUERY), WQuery, false),
+        def(Q_GROUPING_SETS, Some(STMT_QUERY), WQuery, false),
+        def(Q_WINDOW, Some(STMT_QUERY), WQuery, false),
+        def(Q_VALUES_SCAN, Some(STMT_QUERY), WQuery, false),
+        def(Q_SUBQUERY_SCAN, Some(STMT_QUERY), WQuery, false),
+        def(Q_PROJECT_SET, Some(STMT_QUERY), WQuery, false),
+        def(Q_RESULT, Some(STMT_QUERY), WQuery, false),
+        def(Q_TID, Some(STMT_QUERY), WQuery, false),
+        def(Q_TABLESAMPLE, Some(STMT_QUERY), WQuery, false),
+        def(Q_JSON_TABLE, Some(STMT_QUERY), WQuery, false),
+        def(Q_FULL_JOIN, Some(STMT_QUERY), WQuery, false),
+        def(Q_OR_QUAL, Some(STMT_QUERY), WQuery, false),
+        def(Q_FOR_UPDATE, Some(STMT_QUERY), WQuery, false),
+        // scalar-subquery arms
+        def(SSQ_CORRELATED_COUNT, Some(Q_SCALAR_SUBQ), WQuery, false),
+        def(SSQ_INITPLAN_MAX, Some(Q_SCALAR_SUBQ), WQuery, false),
+        // set-operation arms
+        def(SO_UNION, Some(Q_SETOP), WQuery, false),
+        def(SO_UNION_ALL, Some(Q_SETOP), WQuery, false),
+        def(SO_INTERSECT, Some(Q_SETOP), WQuery, false),
+        def(SO_EXCEPT, Some(Q_SETOP), WQuery, false),
+        // grouping-sets arms
+        def(GS_ROLLUP, Some(Q_GROUPING_SETS), WQuery, false),
+        def(GS_CUBE, Some(Q_GROUPING_SETS), WQuery, false),
+        def(GS_SETS, Some(Q_GROUPING_SETS), WQuery, false),
+        // window-function arms
+        def(W_ROW_NUMBER, Some(Q_WINDOW), WQuery, false),
+        def(W_RANK, Some(Q_WINDOW), WQuery, false),
+        def(W_SUM_OVER, Some(Q_WINDOW), WQuery, false),
+        def(W_SUM_PARTITION, Some(Q_WINDOW), WQuery, false),
+        // result-plan arms
+        def(RES_NO_FROM, Some(Q_RESULT), WQuery, false),
+        def(RES_WHERE_FALSE, Some(Q_RESULT), WQuery, false),
+        def(RES_MINMAX, Some(Q_RESULT), WQuery, false),
+        // tid arms
+        def(TID_POINT, Some(Q_TID), WQuery, false),
+        def(TID_RANGE, Some(Q_TID), WQuery, false),
+        // tablesample arms
+        def(SMP_BERNOULLI, Some(Q_TABLESAMPLE), WQuery, false),
+        def(SMP_SYSTEM, Some(Q_TABLESAMPLE), WQuery, false),
+        // dml explain-census target (H6: EXPLAIN'd plan-only on the DUT;
+        // execution is the ordinary differential DML compare)
+        def(DML_MERGE, Some(STMT_DML), WDml, false),
         // srf element types
         def(SRF_INT, Some(Q_SRF_UNNEST), WQuery, false),
         def(SRF_TEXT, Some(Q_SRF_UNNEST), WQuery, false),

@@ -654,15 +654,34 @@ pub fn execute_plan<'a>(
                         }
                         // H5 rung B: plan-species fingerprint via EXPLAIN
                         // (COSTS OFF) on the DUT — sampled, DUT-only,
-                        // state-neutral. Blind-arms-only statistics ride on
-                        // these (see src/metrics.rs module doc). SELECT-only:
-                        // property noise emits Query-marked utility
-                        // statements (PREPARE/DEALLOCATE, X4) that EXPLAIN
-                        // rejects — those are not plan species.
-                        let explainable = matches!(step, Step::Query(_))
-                            && sql.text.trim_start().get(..7).is_some_and(|h| {
-                                h.eq_ignore_ascii_case("SELECT ")
-                            });
+                        // state-neutral. Head-word gate: property noise emits
+                        // Query-marked utility statements (PREPARE/
+                        // DEALLOCATE, X4) that EXPLAIN rejects — those are
+                        // not plan species. H6 widening: WITH-headed reads
+                        // (CTE grammar) and DML EXPLAINs (ModifyTable
+                        // species; EXPLAIN of DML plans without executing, so
+                        // it stays state-neutral — the statement itself was
+                        // already executed once via dispatch above, and this
+                        // extra plan-only look never re-runs it).
+                        let head_word = sql
+                            .text
+                            .trim_start()
+                            .split(|c: char| !c.is_ascii_alphabetic())
+                            .next()
+                            .unwrap_or("");
+                        let explainable = match step {
+                            Step::Query(_) => {
+                                head_word.eq_ignore_ascii_case("SELECT")
+                                    || head_word.eq_ignore_ascii_case("WITH")
+                            }
+                            Step::Dml(_) => {
+                                head_word.eq_ignore_ascii_case("INSERT")
+                                    || head_word.eq_ignore_ascii_case("UPDATE")
+                                    || head_word.eq_ignore_ascii_case("DELETE")
+                                    || head_word.eq_ignore_ascii_case("MERGE")
+                            }
+                            _ => false,
+                        };
                         if explainable && !dut_out.is_error() {
                             query_seen += 1;
                             if opts.explain_every > 0
