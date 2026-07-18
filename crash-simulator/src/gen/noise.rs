@@ -18,7 +18,7 @@ use rand::RngCore;
 
 use crate::gen::prodreg as pr;
 use crate::gen::profile::GenProfile;
-use crate::gen::schema::{Col, ColType, SchemaState, Table};
+use crate::gen::schema::{Col, ColType, IndexDef, SchemaState, Table};
 use crate::gen::weights::{range_incl, weighted_index};
 use crate::plan::{Mark, Sql, SqlFlags};
 
@@ -41,6 +41,20 @@ fn literal(rng: &mut dyn RngCore, ty: ColType) -> String {
     }
 }
 
+/// Small-domain literal (H6): values that land inside the modular value
+/// domains the bulk loader writes (`g % m`, m in 5..=30; text `'s0' || g%10`).
+/// Equality predicates drawn from here actually SELECT rows, which is what
+/// makes the planner's index/bitmap choices meaningful after ANALYZE.
+fn small_literal(rng: &mut dyn RngCore, ty: ColType) -> String {
+    match ty {
+        ColType::Int | ColType::Bigint | ColType::Numeric => {
+            format!("{}", range_incl(rng, 0, 9))
+        }
+        ColType::Text => format!("'s0{}'", range_incl(rng, 0, 9)),
+        ColType::Float8 => format!("{}.5", range_incl(rng, 0, 9)),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // DDL
 // ---------------------------------------------------------------------------
@@ -48,8 +62,25 @@ fn literal(rng: &mut dyn RngCore, ty: ColType) -> String {
 /// DDL variant nodes, index-aligned with the weight array in `gen_ddl`. The
 /// array length is the coupling that keeps the registry from going stale: a
 /// new DDL arm without a `prodreg` name is a compile error here (H5 rung A).
-const DDL_VARIANTS: [&str; 4] =
-    [pr::DDL_CREATE_TABLE, pr::DDL_CREATE_INDEX, pr::DDL_RENAME_TABLE, pr::DDL_DROP_TABLE];
+/// The fdw entry stands for the whole setup chain; its emitted statements are
+/// traced with their own per-statement nodes (see `gen_fdw_chain`).
+const DDL_VARIANTS: [&str; 12] = [
+    pr::DDL_CREATE_TABLE,
+    pr::DDL_CREATE_INDEX,
+    pr::DDL_CREATE_INDEX_MULTI,
+    pr::DDL_CREATE_INDEX_EXPR,
+    pr::DDL_CREATE_INDEX_PARTIAL,
+    pr::DDL_CREATE_INDEX_BRIN,
+    pr::DDL_DROP_INDEX,
+    pr::DDL_ANALYZE,
+    pr::DDL_FDW_TABLE,
+    pr::DDL_RENAME_TABLE,
+    pr::DDL_DROP_TABLE,
+    pr::DDL_INDEX_PAIR,
+];
+
+/// One emitted DDL statement: its production sub-path + the SQL.
+pub type DdlEmit = (ProdTrace, Sql);
 
 /// CREATE TABLE from the profile shape distribution; registers the table.
 /// (Production trace: the CALLER pushes `ddl:create-table` — this fn is also
@@ -72,58 +103,304 @@ pub fn gen_create_table(
     )
 }
 
+/// Column list for an index: prefer payload columns, fall back to `id`.
+fn pick_index_col(t: &Table, rng: &mut dyn RngCore) -> String {
+    if t.cols.is_empty() {
+        "id".to_string()
+    } else {
+        let ci = range_incl(rng, 0, t.cols.len() as u64 - 1) as usize;
+        t.cols[ci].name.clone()
+    }
+}
+
+/// The file_fdw setup chain (H6, Foreign Scan elicitation). One generator
+/// decision emits every statement still missing for a NEW foreign table:
+/// extension -> server -> deterministic CSV via `COPY ... TO` an absolute
+/// seed-tagged /tmp path (COPY requires absolute paths; both legs write the
+/// same deterministic bytes, so reads agree) -> `CREATE FOREIGN TABLE`.
+/// IF NOT EXISTS keeps extension/server idempotent across seeds (they are
+/// database-global and survive the per-seed schema reset).
+fn gen_fdw_chain(schema: &mut SchemaState, rng: &mut dyn RngCore) -> Vec<DdlEmit> {
+    let mut out: Vec<DdlEmit> = Vec::new();
+    if !schema.fdw_extension_created() {
+        schema.mark_fdw_extension();
+        out.push((
+            vec![pr::DDL_FDW_EXTENSION.to_string()],
+            sql(
+                "CREATE EXTENSION IF NOT EXISTS file_fdw;".to_string(),
+                Mark::Mutation,
+                SqlFlags::default(),
+            ),
+        ));
+    }
+    if !schema.fdw_server_created() {
+        schema.mark_fdw_server();
+        out.push((
+            vec![pr::DDL_FDW_SERVER.to_string()],
+            sql(
+                "CREATE SERVER IF NOT EXISTS simharness_fsrv FOREIGN DATA WRAPPER file_fdw;"
+                    .to_string(),
+                Mark::Mutation,
+                SqlFlags::default(),
+            ),
+        ));
+    }
+    let rows = range_incl(rng, 5, 60);
+    let m = range_incl(rng, 5, 25);
+    let ft = schema.create_foreign_table(rows);
+    let (name, csv) = (ft.name.clone(), ft.csv_name.clone());
+    out.push((
+        vec![pr::DDL_FDW_COPY.to_string()],
+        sql(
+            format!(
+                "COPY (SELECT g AS id, (g % {m}) AS a, 's0' || (g % 10) AS b \
+                 FROM generate_series(1, {rows}) AS g ORDER BY g) \
+                 TO '{csv}' WITH (FORMAT csv);"
+            ),
+            Mark::Mutation,
+            SqlFlags::default(),
+        ),
+    ));
+    out.push((
+        vec![pr::DDL_FDW_TABLE.to_string()],
+        sql(
+            format!(
+                "CREATE FOREIGN TABLE {name} (id bigint, a int, b text) \
+                 SERVER simharness_fsrv OPTIONS (filename '{csv}', format 'csv');"
+            ),
+            Mark::Mutation,
+            SqlFlags::default(),
+        ),
+    ));
+    out
+}
+
+/// Maximum foreign tables per plan (state-op bloat guard).
+const MAX_FOREIGN_TABLES: usize = 2;
+
 /// Weighted DDL choice. May mutate schema state. Never drops the last table.
+/// Returns one or more consecutive DDL statements (the fdw chain is the only
+/// multi-statement arm), each with its own production sub-path.
 pub fn gen_ddl(
     schema: &mut SchemaState,
     rng: &mut dyn RngCore,
     profile: &GenProfile,
-    trace: &mut ProdTrace,
-) -> Sql {
-    // create-table 4, create-index 3, rename 2, drop 1 (drop only if >1 table)
+) -> Vec<DdlEmit> {
     let can_drop = schema.tables().len() > 1;
     let has_table = !schema.tables().is_empty();
+    let fdw_ok = schema.foreign_tables().len() < MAX_FOREIGN_TABLES;
+    // NOTE: free (non-property) DDL draws are RARE — property footprints
+    // consume most of the DDL budget, leaving ~1 draw per plan besides the
+    // forced first CREATE TABLE. Arms that need a prior arm's state within
+    // the same plan are therefore structurally starved; drop-index emits its
+    // own create+drop chain when no index exists yet (measured: 0 drop-index
+    // emissions in 300 seeds under the two-draw design).
     let weights: [u64; DDL_VARIANTS.len()] = [
-        4u64,
-        if has_table { 3 } else { 0 },
-        if has_table { 2 } else { 0 },
-        if can_drop { 1 } else { 0 },
+        4u64,                             // create-table
+        if has_table { 3 } else { 0 },    // create-index (single-col btree)
+        if has_table { 2 } else { 0 },    // create-index-multi
+        if has_table { 1 } else { 0 },    // create-index-expr
+        if has_table { 1 } else { 0 },    // create-index-partial
+        if has_table { 1 } else { 0 },    // create-index-brin
+        if has_table { 2 } else { 0 },    // drop-index (chains create if needed)
+        if has_table { 3 } else { 0 },    // analyze
+        if fdw_ok { 2 } else { 0 },       // fdw chain
+        if has_table { 2 } else { 0 },    // rename
+        if has_table { 2 } else { 0 },    // drop-table (chains create if last)
+        // index-pair: the BitmapAnd substrate chain (two single-col indexes
+        // on one table + ANALYZE, one decision — the three-draw version
+        // never co-occurs, same starvation as drop-index).
+        if schema.tables().iter().any(|t| t.cols.len() >= 2) { 3 } else { 0 },
     ];
     let choice = weighted_index(rng, &weights).expect("create-table weight is nonzero");
-    trace.push(DDL_VARIANTS[choice].to_string());
+    if choice == 8 {
+        return gen_fdw_chain(schema, rng);
+    }
+    let trace = vec![DDL_VARIANTS[choice].to_string()];
+    let one = |sql_text: String| {
+        vec![(trace.clone(), sql(sql_text, Mark::Mutation, SqlFlags::default()))]
+    };
     match choice {
-        0 => gen_create_table(schema, rng, profile),
+        0 => {
+            let s = gen_create_table(schema, rng, profile);
+            vec![(trace.clone(), s)]
+        }
         1 => {
+            // Single-column btree — with two of these + ANALYZE the planner
+            // can pick BitmapAnd for two-column equality conjunctions.
             let idx = schema.pick_table_idx(rng).expect("gated on has_table");
             let iname = schema.next_index_name();
             let t = schema.table_mut(idx);
-            t.n_indexes += 1;
-            let col = if t.cols.is_empty() {
-                "id".to_string()
-            } else {
-                let ci = range_incl(rng, 0, t.cols.len() as u64 - 1) as usize;
-                t.cols[ci].name.clone()
-            };
-            let name = t.cur_name.clone();
-            sql(
-                format!("CREATE INDEX {iname} ON {name} ({col});"),
-                Mark::Mutation,
-                SqlFlags::default(),
-            )
+            let col = pick_index_col(t, rng);
+            t.indexes.push(IndexDef { name: iname.clone(), cols: vec![col.clone()] });
+            one(format!("CREATE INDEX {iname} ON {} ({col});", t.cur_name))
         }
         2 => {
+            // Multi-column btree — covers ORDER BY prefixes (Incremental
+            // Sort) and covered projections (Index Only Scan).
+            let idx = schema.pick_table_idx(rng).expect("gated on has_table");
+            let iname = schema.next_index_name();
+            let t = schema.table_mut(idx);
+            let cols = if t.cols.len() >= 2 {
+                let a = range_incl(rng, 0, t.cols.len() as u64 - 1) as usize;
+                let mut b = range_incl(rng, 0, t.cols.len() as u64 - 2) as usize;
+                if b >= a {
+                    b += 1;
+                }
+                format!("{}, {}", t.cols[a].name, t.cols[b].name)
+            } else if t.cols.len() == 1 {
+                format!("{}, id", t.cols[0].name)
+            } else {
+                "id".to_string()
+            };
+            let key_cols: Vec<String> =
+                cols.split(", ").map(|c| c.to_string()).collect();
+            t.indexes.push(IndexDef { name: iname.clone(), cols: key_cols });
+            one(format!("CREATE INDEX {iname} ON {} ({cols});", t.cur_name))
+        }
+        3 => {
+            // Expression index (typed: abs() for numbers, lower() for text).
+            let idx = schema.pick_table_idx(rng).expect("gated on has_table");
+            let iname = schema.next_index_name();
+            let t = schema.table_mut(idx);
+            let expr = match t.cols.first() {
+                None => "abs(id)".to_string(),
+                Some(c) => match c.ty {
+                    ColType::Text => format!("lower({})", c.name),
+                    _ => format!("abs({})", c.name),
+                },
+            };
+            t.indexes.push(IndexDef { name: iname.clone(), cols: Vec::new() });
+            one(format!("CREATE INDEX {iname} ON {} (({expr}));", t.cur_name))
+        }
+        4 => {
+            // Partial index: WHERE over the small-literal domain so the
+            // predicate actually divides the bulk-loaded data.
+            let idx = schema.pick_table_idx(rng).expect("gated on has_table");
+            let iname = schema.next_index_name();
+            let t = schema.table_mut(idx);
+            let (col, lit) = match t.cols.first() {
+                None => ("id".to_string(), "5".to_string()),
+                Some(c) => (c.name.clone(), small_literal(rng, c.ty)),
+            };
+            t.indexes.push(IndexDef { name: iname.clone(), cols: Vec::new() });
+            one(format!(
+                "CREATE INDEX {iname} ON {} ({col}) WHERE {col} > {lit};",
+                t.cur_name
+            ))
+        }
+        5 => {
+            // BRIN index (block-range summaries; always scanned via bitmap).
+            let idx = schema.pick_table_idx(rng).expect("gated on has_table");
+            let iname = schema.next_index_name();
+            let t = schema.table_mut(idx);
+            let col = pick_index_col(t, rng);
+            t.indexes.push(IndexDef { name: iname.clone(), cols: vec![col.clone()] });
+            one(format!("CREATE INDEX {iname} ON {} USING brin ({col});", t.cur_name))
+        }
+        6 => {
+            // Drop a random generator-created index (state churn: plans that
+            // were index-shaped must fall back after the drop). When no
+            // index exists yet, chain a CREATE INDEX first (free DDL draws
+            // are too rare for the create-then-drop pair to meet by chance;
+            // see the weights note above).
+            let with: Vec<usize> = schema
+                .tables()
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| !t.indexes.is_empty())
+                .map(|(i, _)| i)
+                .collect();
+            if with.is_empty() {
+                let idx = schema.pick_table_idx(rng).expect("gated on has_table");
+                let iname = schema.next_index_name();
+                let t = schema.table_mut(idx);
+                let col = pick_index_col(t, rng);
+                let create = (
+                    vec![pr::DDL_CREATE_INDEX.to_string()],
+                    sql(
+                        format!("CREATE INDEX {iname} ON {} ({col});", t.cur_name),
+                        Mark::Mutation,
+                        SqlFlags::default(),
+                    ),
+                );
+                // The index is created and immediately dropped: the model
+                // never registers it, so no later statement can address it.
+                let drop = (
+                    vec![pr::DDL_DROP_INDEX.to_string()],
+                    sql(format!("DROP INDEX {iname};"), Mark::Mutation, SqlFlags::default()),
+                );
+                return vec![create, drop];
+            }
+            let ti = with[range_incl(rng, 0, with.len() as u64 - 1) as usize];
+            let t = schema.table_mut(ti);
+            let ii = range_incl(rng, 0, t.indexes.len() as u64 - 1) as usize;
+            let iname = t.indexes.remove(ii).name;
+            one(format!("DROP INDEX {iname};"))
+        }
+        7 => {
+            // ANALYZE: real statistics — the planner's cost thresholds only
+            // move once it has seen the bulk-loaded distributions.
+            let idx = schema.pick_table_idx(rng).expect("gated on has_table");
+            let name = schema.tables()[idx].cur_name.clone();
+            one(format!("ANALYZE {name};"))
+        }
+        9 => {
             let idx = schema.pick_table_idx(rng).expect("gated on has_table");
             let old = schema.tables()[idx].cur_name.clone();
             let new = schema.rename_table(idx);
-            sql(
-                format!("ALTER TABLE {old} RENAME TO {new};"),
-                Mark::Mutation,
-                SqlFlags::default(),
-            )
+            one(format!("ALTER TABLE {old} RENAME TO {new};"))
         }
-        3 => {
-            let idx = schema.pick_table_idx(rng).expect("gated on can_drop");
-            let t = schema.drop_table(idx);
-            sql(format!("DROP TABLE {};", t.cur_name), Mark::Mutation, SqlFlags::default())
+        10 => {
+            // Drop a table. Dropping the LAST table would leave queries with
+            // nothing to address, and >1 live table is rare (one free DDL
+            // draw per plan — see the weights note), so the single-table
+            // case chains a fresh CREATE TABLE right behind the drop.
+            let idx = schema.pick_table_idx(rng).expect("gated on has_table");
+            let dropped = schema.drop_table(idx);
+            let drop_stmt = (
+                vec![DDL_VARIANTS[10].to_string()],
+                sql(format!("DROP TABLE {};", dropped.cur_name), Mark::Mutation, SqlFlags::default()),
+            );
+            if can_drop {
+                return vec![drop_stmt];
+            }
+            let create = gen_create_table(schema, rng, profile);
+            vec![drop_stmt, (vec![pr::DDL_CREATE_TABLE.to_string()], create)]
+        }
+        11 => {
+            // BitmapAnd substrate: two single-column indexes on the SAME
+            // table + ANALYZE, as one chained decision. q:two-col-eq biases
+            // toward single-col-indexed columns, so once a big bulk load has
+            // run the planner can AND the two bitmaps.
+            let with: Vec<usize> = schema
+                .tables()
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| t.cols.len() >= 2)
+                .map(|(i, _)| i)
+                .collect();
+            let ti = with[range_incl(rng, 0, with.len() as u64 - 1) as usize];
+            let ia = schema.next_index_name();
+            let ib = schema.next_index_name();
+            let t = schema.table_mut(ti);
+            let a = range_incl(rng, 0, t.cols.len() as u64 - 1) as usize;
+            let mut b = range_incl(rng, 0, t.cols.len() as u64 - 2) as usize;
+            if b >= a {
+                b += 1;
+            }
+            let (ca, cb) = (t.cols[a].name.clone(), t.cols[b].name.clone());
+            t.indexes.push(IndexDef { name: ia.clone(), cols: vec![ca.clone()] });
+            t.indexes.push(IndexDef { name: ib.clone(), cols: vec![cb.clone()] });
+            let name = t.cur_name.clone();
+            let step = |trace_node: &str, s: String| {
+                (vec![trace_node.to_string()], sql(s, Mark::Mutation, SqlFlags::default()))
+            };
+            vec![
+                step(pr::DDL_INDEX_PAIR, format!("CREATE INDEX {ia} ON {name} ({ca});")),
+                step(pr::DDL_CREATE_INDEX, format!("CREATE INDEX {ib} ON {name} ({cb});")),
+                step(pr::DDL_ANALYZE, format!("ANALYZE {name};")),
+            ]
         }
         _ => unreachable!(),
     }
@@ -134,20 +411,57 @@ pub fn gen_ddl(
 // ---------------------------------------------------------------------------
 
 /// DML variant nodes, index-aligned with the weight array in `gen_dml`.
-const DML_VARIANTS: [&str; 4] =
-    [pr::DML_INSERT, pr::DML_UPDATE, pr::DML_DELETE, pr::DML_TRUNCATE];
+const DML_VARIANTS: [&str; 5] =
+    [pr::DML_INSERT, pr::DML_UPDATE, pr::DML_DELETE, pr::DML_TRUNCATE, pr::DML_BULK_INSERT];
+
+/// Bulk-load size tiers (H6 cardinality lever): tiny keeps seq scans
+/// winning; medium pushes the planner across its index / bitmap cost
+/// thresholds; the top tier scales with the profile's `rows_max` — measured
+/// on this planner, BitmapAnd needs roughly >= 5000 rows with ~4%-selective
+/// equality columns, so scale-oriented profiles set rows_max accordingly.
+/// Every draw is capped by `rows_max`.
+fn bulk_rows(rng: &mut dyn RngCore, rows_max: u32) -> u64 {
+    let tier = weighted_index(rng, &[4u64, 3, 1]).expect("static weights");
+    let cap = rows_max.max(1) as u64;
+    let n = match tier {
+        0 => range_incl(rng, 8, 32),
+        1 => range_incl(rng, 100, 400),
+        _ => {
+            let lo = (cap / 2).max(500);
+            let hi = cap.max(lo);
+            range_incl(rng, lo, hi)
+        }
+    };
+    n.min(cap)
+}
+
+/// Per-type deterministic bulk value expression over the series variable `g`.
+/// Moduli in 5..=30 give each column a modest number of distinct values, so
+/// equality predicates over the small-literal domain select real row groups
+/// (~3-10% selectivity at the top — the BitmapAnd zone).
+fn bulk_expr(rng: &mut dyn RngCore, ty: ColType) -> String {
+    let m = range_incl(rng, 5, 30);
+    match ty {
+        ColType::Int | ColType::Bigint | ColType::Numeric => format!("(g % {m})"),
+        ColType::Text => "('s0' || (g % 10))".to_string(),
+        ColType::Float8 => format!("((g % {m}) + 0.5)"),
+    }
+}
 
 /// Weighted DML: insert 5 / key-addressed update 3 / key-addressed delete 2 /
-/// truncate 1 (the ledger-understood subset, contract §3.1.2).
+/// truncate 1 / bulk-insert 2 (the ledger-understood subset, contract
+/// §3.1.2; bulk-insert is a plain INSERT ... SELECT — H6 cardinality lever).
 pub fn gen_dml(
     schema: &mut SchemaState,
     rng: &mut dyn RngCore,
+    profile: &GenProfile,
     trace: &mut ProdTrace,
 ) -> Option<Sql> {
     let idx = schema.pick_table_idx(rng)?;
-    let weights: [u64; DML_VARIANTS.len()] = [5, 3, 2, 1];
+    let weights: [u64; DML_VARIANTS.len()] = [5, 3, 2, 1, 2];
     let choice = weighted_index(rng, &weights).expect("static weights");
     trace.push(DML_VARIANTS[choice].to_string());
+    let rows_max = profile.table_shape.rows_max;
     let t = schema.table_mut(idx);
     Some(match choice {
         0 => {
@@ -188,6 +502,26 @@ pub fn gen_dml(
             )
         }
         3 => sql(format!("TRUNCATE {};", t.cur_name), Mark::Mutation, SqlFlags::default()),
+        4 => {
+            let n = bulk_rows(rng, rows_max);
+            let start = t.next_key;
+            let end = start + n as i64 - 1;
+            t.next_key += n as i64;
+            let mut cols = String::from("id");
+            let mut exprs = String::from("g");
+            for c in &t.cols {
+                cols.push_str(&format!(", {}", c.name));
+                exprs.push_str(&format!(", {}", bulk_expr(rng, c.ty)));
+            }
+            sql(
+                format!(
+                    "INSERT INTO {} ({cols}) SELECT {exprs} FROM generate_series({start}, {end}) AS g;",
+                    t.cur_name
+                ),
+                Mark::Mutation,
+                SqlFlags::default(),
+            )
+        }
         _ => unreachable!(),
     })
 }
@@ -245,7 +579,7 @@ fn scalar_call(rng: &mut dyn RngCore, t: &Table, trace: &mut ProdTrace) -> Strin
 /// Query variant nodes, index-aligned with the weight array in `gen_query`.
 /// The `[&str; N]`-tied weight array is the anti-staleness coupling: adding a
 /// variant arm without registering its `prodreg` name is a compile error.
-const QUERY_VARIANTS: [&str; 14] = [
+const QUERY_VARIANTS: [&str; 18] = [
     pr::Q_FULL_ORDERED,
     pr::Q_COUNT_STAR,
     pr::Q_EXACT_AGG,
@@ -260,6 +594,10 @@ const QUERY_VARIANTS: [&str; 14] = [
     pr::Q_INNER_JOIN,
     pr::Q_LEFT_JOIN_COALESCE,
     pr::Q_OJ_NEST_COALESCE,
+    pr::Q_ORDER_PREFIX,
+    pr::Q_TWO_COL_EQ,
+    pr::Q_COVERED_SELECT,
+    pr::Q_FOREIGN_SCAN,
 ];
 
 /// Weighted read-query choice over one table (plus join/SRF classes drawing
@@ -274,9 +612,13 @@ pub fn gen_query(
     // Variants: 0 full-ordered / 1 count / 2 exact-agg / 3 filtered / 4 topk /
     // 5 offset / 6 group / 7 float-agg (float-lenient profiles only) /
     // 8 srf-unnest / 9 generate-series / 10 scalar-call /
-    // 11 inner-join / 12 left-join-coalesce / 13 oj-nest-coalesce (p8 shape)
+    // 11 inner-join / 12 left-join-coalesce / 13 oj-nest-coalesce (p8 shape) /
+    // 14 order-prefix / 15 two-col-eq / 16 covered-select /
+    // 17 foreign-scan (needs a live foreign table — H6 state shapes)
     let float_cols = t.cols_of_type(|ty| ty == ColType::Float8);
     let float_ok = profile.float_lenient && !float_cols.is_empty();
+    let two_cols_ok = t.cols.len() >= 2;
+    let foreign_ok = !schema.foreign_tables().is_empty();
     let mut weights: [u64; QUERY_VARIANTS.len()] = [
         4u64,
         3,
@@ -292,6 +634,10 @@ pub fn gen_query(
         2,
         2,
         2,
+        3,
+        if two_cols_ok { 2 } else { 0 },
+        2,
+        if foreign_ok { 2 } else { 0 },
     ];
     // H5 reach-gate teeth knob: suppress emission of named productions
     // (weights zeroed) while the reach gate still expects them (see
@@ -475,6 +821,113 @@ pub fn gen_query(
                 Mark::Read,
                 flags,
             )
+        }
+        14 => {
+            // Incremental Sort shape: ORDER BY <payload-col>, id. The suffix
+            // `id` (unique) makes the order total, so LIMIT is R2-safe. When
+            // an index on the payload column exists, it supplies the prefix
+            // order and the planner can finish with an Incremental Sort.
+            let Some(c) = pick_payload_col(t, rng) else {
+                return Some(sql(
+                    format!("SELECT id FROM {} ORDER BY id;", t.cur_name),
+                    Mark::Read,
+                    flags,
+                ));
+            };
+            let lim = if range_incl(rng, 0, 1) == 0 {
+                format!(" LIMIT {}", range_incl(rng, 1, 10))
+            } else {
+                String::new()
+            };
+            sql(
+                format!(
+                    "SELECT id, {} FROM {} ORDER BY {}, id{lim};",
+                    c.name, t.cur_name, c.name
+                ),
+                Mark::Read,
+                flags,
+            )
+        }
+        15 => {
+            // BitmapAnd shape: equality conjunction over two distinct
+            // columns, literals from the bulk-load value domain (so the
+            // predicate selects real row groups once stats exist). Bias:
+            // when >= 2 columns carry single-column indexes (the index-pair
+            // state op plants exactly that), query THOSE — a BitmapAnd can
+            // only form over indexed columns.
+            let indexed: Vec<&Col> = t
+                .cols
+                .iter()
+                .filter(|c| {
+                    t.indexes.iter().any(|ix| ix.cols.len() == 1 && ix.cols[0] == c.name)
+                })
+                .collect();
+            let (ca, cb) = if indexed.len() >= 2 {
+                let a = range_incl(rng, 0, indexed.len() as u64 - 1) as usize;
+                let mut b = range_incl(rng, 0, indexed.len() as u64 - 2) as usize;
+                if b >= a {
+                    b += 1;
+                }
+                (indexed[a], indexed[b])
+            } else {
+                let a = range_incl(rng, 0, t.cols.len() as u64 - 1) as usize;
+                let mut b = range_incl(rng, 0, t.cols.len() as u64 - 2) as usize;
+                if b >= a {
+                    b += 1;
+                }
+                (&t.cols[a], &t.cols[b])
+            };
+            let (la, lb) = (small_literal(rng, ca.ty), small_literal(rng, cb.ty));
+            sql(
+                format!(
+                    "SELECT id FROM {} WHERE {} = {la} AND {} = {lb} ORDER BY id;",
+                    t.cur_name, ca.name, cb.name
+                ),
+                Mark::Read,
+                flags,
+            )
+        }
+        16 => {
+            // Index Only Scan shape: projection covered by a single-column
+            // index (when one exists on this column).
+            let Some(c) = pick_payload_col(t, rng) else {
+                return Some(sql(
+                    format!("SELECT id FROM {} ORDER BY id;", t.cur_name),
+                    Mark::Read,
+                    flags,
+                ));
+            };
+            let op = ["=", "<", ">"][range_incl(rng, 0, 2) as usize];
+            let lit = small_literal(rng, c.ty);
+            sql(
+                format!(
+                    "SELECT {} FROM {} WHERE {} {op} {lit} ORDER BY {};",
+                    c.name, t.cur_name, c.name, c.name
+                ),
+                Mark::Read,
+                flags,
+            )
+        }
+        17 => {
+            // Foreign Scan shape: read a file_fdw foreign table.
+            let ft = schema.pick_foreign(rng).expect("gated on foreign_ok");
+            match range_incl(rng, 0, 2) {
+                0 => sql(format!("SELECT count(*) FROM {};", ft.name), Mark::Read, flags),
+                1 => sql(
+                    format!("SELECT id, a, b FROM {} ORDER BY id;", ft.name),
+                    Mark::Read,
+                    flags,
+                ),
+                _ => sql(
+                    format!(
+                        "SELECT id FROM {} WHERE a = {} ORDER BY id;",
+                        ft.name,
+                        range_incl(rng, 0, 9)
+                    ),
+                    Mark::Read,
+                    flags,
+                ),
+            }
         }
         _ => unreachable!(),
     })

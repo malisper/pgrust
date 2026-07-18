@@ -68,6 +68,32 @@ impl Budgets {
                 leftover -= 1;
             }
         }
+        // H6 fix (H5 find 1): the disconnect fault emits as a PAIR, so a
+        // fault budget of 0 or 1 means a profile that DECLARES faults never
+        // executes one. Battery-typical fault weights (1-2%) floor to 0/1 at
+        // every allowed plan length, which left 4 of 6 profiles — the whole
+        // smoke tier — with zero disconnect coverage since H1, silently.
+        // The pair floor: any profile with fault weight > 0 gets a fault
+        // budget of at least 2 (when the plan is long enough), taken
+        // deterministically from the largest other allocations.
+        let fi = Kind::Fault as usize;
+        if w[fi] > 0 && total >= 2 && remaining[fi] < 2 {
+            let mut need = 2 - remaining[fi];
+            while need > 0 {
+                // Largest non-fault allocation; ties broken by kind order.
+                let donor = (0..N_KINDS)
+                    .filter(|&i| i != fi && remaining[i] > 0)
+                    .max_by(|&a, &b| remaining[a].cmp(&remaining[b]).then(b.cmp(&a)));
+                match donor {
+                    Some(d) => {
+                        remaining[d] -= 1;
+                        remaining[fi] += 1;
+                        need -= 1;
+                    }
+                    None => break, // degenerate: nothing to take from
+                }
+            }
+        }
         Budgets { remaining }
     }
 

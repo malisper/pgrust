@@ -85,7 +85,26 @@ pub fn runner_profile_to_gen(p: &crate::runner::profile::Profile) -> GenProfile 
         table_shape: TableShape {
             min_cols: p.table_shape.cols_min.max(1),
             max_cols: p.table_shape.cols_max.max(1),
-            col_types: ColTypeWeights::default(),
+            // H6 (H5 find 2 fix): honor the profile's col_types. An empty
+            // map keeps the generator defaults; a non-empty map is a FULL
+            // specification (missing keys weigh 0). The old hardcoded
+            // default (float8=0) made q:float-agg unreachable from every
+            // runner profile — float_lenient profiles included.
+            col_types: if p.table_shape.col_types.is_empty() {
+                ColTypeWeights::default()
+            } else {
+                let ct = |k: &str| {
+                    p.table_shape.col_types.get(k).map(|v| *v as u64).unwrap_or(0)
+                };
+                ColTypeWeights {
+                    int: ct("int"),
+                    bigint: ct("bigint"),
+                    text: ct("text"),
+                    numeric: ct("numeric"),
+                    float8: ct("float8"),
+                }
+            },
+            rows_max: p.table_shape.rows_max,
         },
         iso_mix: IsoMix {
             rc: iso("read-committed"),
