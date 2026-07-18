@@ -69,6 +69,17 @@ fn get_number_from_pgproc(proc: &types_storage::storage::PGPROC) -> i32 {
         / core::mem::size_of::<types_storage::storage::PGPROC>()) as i32
 }
 
+// wasm32: the wasi libc crate exposes no SIG* names; 2/15 are SIGINT/SIGTERM
+// in the thread-signal emulation's Linux-numbered space (procsignal wasm arm).
+#[cfg(not(target_family = "wasm"))]
+const SIGINT: i32 = libc::SIGINT;
+#[cfg(not(target_family = "wasm"))]
+const SIGTERM: i32 = libc::SIGTERM;
+#[cfg(target_family = "wasm")]
+const SIGINT: i32 = 2;
+#[cfg(target_family = "wasm")]
+const SIGTERM: i32 = 15;
+
 #[cold]
 fn signal_denied(errmsg: &str, errdetail: &str) -> Box<types_error::PgError> {
     Box::new(
@@ -81,7 +92,7 @@ fn signal_denied(errmsg: &str, errdetail: &str) -> Box<types_error::PgError> {
 }
 
 pub fn fc_pg_cancel_backend(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    let r = pg_signal_backend(fcinfo.arg_i32(0), libc::SIGINT)?;
+    let r = pg_signal_backend(fcinfo.arg_i32(0), SIGINT)?;
     let detail = match r {
         SIGNAL_BACKEND_NOSUPERUSER => {
             "Only roles with the SUPERUSER attribute may cancel queries of roles with the \
@@ -149,7 +160,7 @@ pub fn fc_pg_terminate_backend(
             .into());
     }
 
-    let r = pg_signal_backend(pid, libc::SIGTERM)?;
+    let r = pg_signal_backend(pid, SIGTERM)?;
     let detail = match r {
         SIGNAL_BACKEND_NOSUPERUSER => Some(
             "Only roles with the SUPERUSER attribute may terminate processes of roles with \

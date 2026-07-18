@@ -77,18 +77,18 @@ pub fn pg_perm_setlocale<'mcx>(
         return Ok(None);
     };
 
-    if category == libc::LC_CTYPE {
+    if category == crate::lc::LC_CTYPE {
         // !ENABLE_NLS: message encoding equals the database encoding.
         mbutils::SetMessageEncoding(mbutils::GetDatabaseEncoding());
     }
 
     let envvar = match category {
-        libc::LC_COLLATE => "LC_COLLATE",
-        libc::LC_CTYPE => "LC_CTYPE",
-        libc::LC_MESSAGES => "LC_MESSAGES",
-        libc::LC_MONETARY => "LC_MONETARY",
-        libc::LC_NUMERIC => "LC_NUMERIC",
-        libc::LC_TIME => "LC_TIME",
+        crate::lc::LC_COLLATE => "LC_COLLATE",
+        crate::lc::LC_CTYPE => "LC_CTYPE",
+        crate::lc::LC_MESSAGES => "LC_MESSAGES",
+        crate::lc::LC_MONETARY => "LC_MONETARY",
+        crate::lc::LC_NUMERIC => "LC_NUMERIC",
+        crate::lc::LC_TIME => "LC_TIME",
         _ => {
             elog::ereport(FATAL)
                 .errmsg_internal(format!("unrecognized LC category: {category}"))
@@ -156,7 +156,7 @@ fn check_locale_inner(
 }
 
 pub fn check_locale_monetary(newval: &str) -> PgResult<bool> {
-    check_locale_validate(libc::LC_MONETARY, newval)
+    check_locale_validate(crate::lc::LC_MONETARY, newval)
 }
 
 // Assign hooks reset C's CurrentLocaleConvValid/CurrentLCTimeValid; the flags
@@ -166,7 +166,7 @@ pub fn assign_locale_monetary(newval: &str) {
 }
 
 pub fn check_locale_numeric(newval: &str) -> PgResult<bool> {
-    check_locale_validate(libc::LC_NUMERIC, newval)
+    check_locale_validate(crate::lc::LC_NUMERIC, newval)
 }
 
 pub fn assign_locale_numeric(newval: &str) {
@@ -174,7 +174,7 @@ pub fn assign_locale_numeric(newval: &str) {
 }
 
 pub fn check_locale_time(newval: &str) -> PgResult<bool> {
-    check_locale_validate(libc::LC_TIME, newval)
+    check_locale_validate(crate::lc::LC_TIME, newval)
 }
 
 pub fn assign_locale_time(newval: &str) {
@@ -193,14 +193,14 @@ pub fn check_locale_messages(newval: &str, is_default_source: bool) -> PgResult<
     if newval.is_empty() {
         return Ok(is_default_source);
     }
-    check_locale_validate(libc::LC_MESSAGES, newval)
+    check_locale_validate(crate::lc::LC_MESSAGES, newval)
 }
 
 pub fn assign_locale_messages(newval: &str) {
     LOCALE_MESSAGES.with(|s| *s.borrow_mut() = newval.to_owned());
     // C: (void) pg_perm_setlocale(LC_MESSAGES, newval) — failure ignored.
     let ctx = mcx::MemoryContext::new("assign_locale_messages");
-    let _ = pg_perm_setlocale(ctx.mcx(), libc::LC_MESSAGES, newval);
+    let _ = pg_perm_setlocale(ctx.mcx(), crate::lc::LC_MESSAGES, newval);
 }
 
 pub(crate) fn install_guc_hooks() {

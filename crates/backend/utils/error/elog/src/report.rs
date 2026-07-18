@@ -7,14 +7,18 @@ use std::cell::RefCell;
 use std::io::Write;
 
 use ::types_dest::CommandDest;
+#[cfg(not(target_family = "wasm"))]
+use ::types_error::LOG_DESTINATION_SYSLOG;
 use ::types_error::{
     unpack_sqlstate, ErrorLevel, PGErrorVerbosity, PgError, PgResult, SqlState, DEBUG1, DEBUG2,
     DEBUG3, DEBUG4, DEBUG5, ERROR, FATAL, INFO, LOG, LOG_DESTINATION_CSVLOG,
-    LOG_DESTINATION_JSONLOG, LOG_DESTINATION_STDERR, LOG_DESTINATION_SYSLOG, LOG_SERVER_ONLY,
-    NOTICE, PANIC, WARNING, WARNING_CLIENT_ONLY,
+    LOG_DESTINATION_JSONLOG, LOG_DESTINATION_STDERR, LOG_SERVER_ONLY, NOTICE, PANIC, WARNING,
+    WARNING_CLIENT_ONLY,
 };
 
-use crate::{config, errno, policy, sink, stack, syslog};
+#[cfg(not(target_family = "wasm"))]
+use crate::syslog;
+use crate::{config, errno, policy, sink, stack};
 
 #[derive(Default)]
 struct LogState {
@@ -556,6 +560,9 @@ pub fn send_message_to_server_log(edata: &PgError) {
         }
     }
 
+    // wasm32: !HAVE_SYSLOG shape — the destination doesn't exist (no
+    // syslogd, no LOG_* levels in the wasi libc crate); stderr remains.
+    #[cfg(not(target_family = "wasm"))]
     if config::log_destination() & LOG_DESTINATION_SYSLOG != 0 {
         let syslog_level = match edata.level {
             DEBUG5 | DEBUG4 | DEBUG3 | DEBUG2 | DEBUG1 => libc::LOG_DEBUG,
@@ -611,11 +618,16 @@ pub fn write_console(line: &[u8]) {
     let _ = std::io::stderr().write_all(line);
 }
 
+#[cfg(not(target_family = "wasm"))]
 const PIPE_CHUNK_SIZE: usize = if libc::PIPE_BUF > 65536 {
     65536
 } else {
     libc::PIPE_BUF
 };
+// wasm32: no pipes on WASI (the syslogger chunk protocol is never live);
+// POSIX's PIPE_BUF floor keeps the constants well-formed.
+#[cfg(target_family = "wasm")]
+const PIPE_CHUNK_SIZE: usize = 512;
 
 const PIPE_HEADER_SIZE: usize = 9;
 const PIPE_MAX_PAYLOAD: usize = PIPE_CHUNK_SIZE - PIPE_HEADER_SIZE;
@@ -844,6 +856,20 @@ pub fn vwrite_stderr(message: &str) {
     let _ = stderr.flush();
 }
 
+// wasm32: WASI p1 cannot re-plumb fd 1/2 (no dup2); an OutputFileName is
+// refused cleanly rather than silently ignored.
+#[cfg(target_family = "wasm")]
+pub fn DebugFileOpen() -> PgResult<()> {
+    match config::output_file_name().filter(|n| !n.is_empty()) {
+        None => Ok(()),
+        Some(name) => fatal_file_error(
+            &format!("could not reopen file \"{name}\" as stderr: unsupported on this platform"),
+            libc::ENOSYS,
+        ),
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
 pub fn DebugFileOpen() -> PgResult<()> {
     let Some(name) = config::output_file_name().filter(|n| !n.is_empty()) else {
         return Ok(());

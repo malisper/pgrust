@@ -95,7 +95,11 @@ fn vfs_open_file(
     flags: libc::c_int,
     what: &str,
 ) -> PgResult<RunFile> {
+    #[cfg(not(target_family = "wasm"))]
     use std::os::unix::ffi::OsStrExt;
+    // wasm32: wasi's OsStrExt twin (identical byte-slice conversion).
+    #[cfg(target_family = "wasm")]
+    use std::os::wasi::ffi::OsStrExt;
     let c = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
         io_err(
             what,
@@ -426,7 +430,8 @@ fn check_run_magic(r: &mut impl Read) -> std::io::Result<()> {
 /// through the Vfs boundary (DST P1); the platform split lives inside
 /// PosixVfs (posix_fadvise WILLNEED on Linux). Errors ignored, as before.
 fn fadvise_willneed(f: &RunFile, off: u64, len: u64) {
-    use std::os::unix::io::AsRawFd;
+    // std::os::fd::AsRawFd is the target-neutral spelling (unix + wasi).
+    use std::os::fd::AsRawFd;
     vfs::fadvise_willneed(f.as_raw_fd(), off as libc::off_t, len as libc::off_t);
 }
 

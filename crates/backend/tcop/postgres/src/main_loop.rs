@@ -121,8 +121,101 @@ fn ReadCommand(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
     if elog::config::where_to_send_output() == CommandDest::Remote {
         SocketBackend(in_buf)
     } else {
-        panic!("ReadCommand (postgres.c:487): InteractiveBackend (single-user mode) not ported");
+        InteractiveBackend(in_buf)
     }
+}
+
+// interactive_getc (postgres.c:318): one byte from stdin with the interrupt
+// drains around it. C's getc EINTR surface maps to ErrorKind::Interrupted:
+// run the read-interrupt drain and retry, as a signal-interrupted getc does.
+fn interactive_getc() -> PgResult<Option<u8>> {
+    use std::io::Read;
+    check_for_interrupts()?;
+    loop {
+        let mut byte = [0u8; 1];
+        let r = std::io::stdin().lock().read(&mut byte);
+        crate::ProcessClientReadInterrupt(false)?;
+        match r {
+            Ok(0) => return Ok(None), /* EOF */
+            Ok(_) => return Ok(Some(byte[0])),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => {
+                return Err(ereport(FATAL)
+                    .errcode(ERRCODE_CONNECTION_FAILURE)
+                    .errmsg(format!("could not read from standard input: {e}"))
+                    .into_error()
+                    .into());
+            }
+        }
+    }
+}
+
+// InteractiveBackend (postgres.c:236): stdin is the query source; the
+// interactive delimiter is newline (or ";\n\n" under -j).
+fn InteractiveBackend(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
+    use std::io::Write;
+
+    /* display a prompt and obtain input from the user */
+    print!("backend> ");
+    let _ = std::io::stdout().flush();
+
+    in_buf.reset();
+
+    /* Read characters until EOF or the appropriate delimiter is seen. */
+    let mut saw_eof = true;
+    while let Some(c) = interactive_getc()? {
+        if c == b'\n' {
+            if crate::use_semi_newline_newline() {
+                /*
+                 * In -j mode, semicolon followed by two newlines ends the
+                 * command; otherwise treat newline as regular character.
+                 */
+                if in_buf.len() > 1
+                    && in_buf.as_bytes()[in_buf.len() - 1] == b'\n'
+                    && in_buf.as_bytes()[in_buf.len() - 2] == b';'
+                {
+                    /* might as well drop the second newline */
+                    saw_eof = false;
+                    break;
+                }
+            } else {
+                /*
+                 * In plain mode, newline ends the command unless preceded by
+                 * backslash.
+                 */
+                if in_buf.len() > 0 && in_buf.as_bytes()[in_buf.len() - 1] == b'\\' {
+                    /* discard backslash from inBuf */
+                    in_buf.truncate(in_buf.len() - 1);
+                    /* discard newline too */
+                    continue;
+                }
+                /* keep the newline character, but end the command */
+                in_buf.append_byte(b'\n')?;
+                saw_eof = false;
+                break;
+            }
+        }
+
+        /* Not newline, or newline treated as regular character */
+        in_buf.append_byte(c)?;
+    }
+
+    /* No input before EOF signal means time to quit. */
+    if saw_eof && in_buf.is_empty() {
+        return Ok(EOF);
+    }
+
+    /* Add '\0' to make it look the same as message case. */
+    in_buf.append_byte(0)?;
+
+    /* if the query echo flag was given, print the query.. */
+    if crate::echo_query() {
+        let query = &in_buf.as_bytes()[..in_buf.len() - 1];
+        println!("statement: {}", String::from_utf8_lossy(query));
+    }
+    let _ = std::io::stdout().flush();
+
+    Ok(pqmsg::QUERY)
 }
 
 pub(crate) struct LoopState {
@@ -642,6 +735,11 @@ fn postgres_main_inner(dbname: &str, username: &str) -> PgResult<()> {
         pqformat::pq_sendint32(&mut buf, init_small::globals::MyProcPid() as u32)?;
         pqformat::pq_sendbytes(&mut buf, &key[..len])?;
         pqformat::pq_endmessage(buf)?;
+    }
+
+    /* Welcome banner for standalone case (postgres.c:4341) */
+    if elog::config::where_to_send_output() == CommandDest::Debug {
+        println!("\nPostgreSQL stand-alone backend 18.3");
     }
 
     let mut message_context = MemoryContext::new_bump("MessageContext");

@@ -65,6 +65,8 @@ unsafe impl<'mcx, F: ListFlavor> mcx::ArenaSafe for List<'mcx, F> {}
 unsafe impl<'mcx, F: ListFlavor> mcx::ForgetSafe for List<'mcx, F> {}
 
 const _: () = assert!(!core::mem::needs_drop::<NodeList<'static>>());
+// 64-bit layout pin (fat pointer); wasm32 (ILP32) shrinks it.
+#[cfg(not(target_family = "wasm"))]
 const _: () = assert!(core::mem::size_of::<NodeList<'static>>() == 16);
 
 // list.c LIST_HEADER_OVERHEAD: 24-byte header / 8-byte ListCell on 64-bit.

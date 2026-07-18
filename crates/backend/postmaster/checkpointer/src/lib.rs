@@ -242,13 +242,13 @@ pub fn CheckpointerMain(startup_data: &StartupData) -> ! {
 
     {
         use procsignal::ThreadSignalHandler::{Ignore, Simple};
-        procsignal::pqsignal_thread(libc::SIGHUP, Simple(interrupt::SignalHandlerForConfigReload));
-        procsignal::pqsignal_thread(libc::SIGINT, Simple(ReqShutdownXLOG));
-        procsignal::pqsignal_thread(libc::SIGTERM, Ignore);
-        procsignal::pqsignal_thread(libc::SIGALRM, Ignore);
-        procsignal::pqsignal_thread(libc::SIGPIPE, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGHUP, Simple(interrupt::SignalHandlerForConfigReload));
+        procsignal::pqsignal_thread(procsignal::signums::SIGINT, Simple(ReqShutdownXLOG));
+        procsignal::pqsignal_thread(procsignal::signums::SIGTERM, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGALRM, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGPIPE, Ignore);
         procsignal::pqsignal_thread(
-            libc::SIGUSR2,
+            procsignal::signums::SIGUSR2,
             Simple(interrupt::SignalHandlerForShutdownRequest),
         );
     }
