@@ -553,10 +553,8 @@ fn run_value_per_call<'mcx, const N: usize>(
     rsinfo.expectedDesc =
         Some(core::ptr::NonNull::from(expected_desc).cast::<core::ffi::c_void>());
     let mut fcinfo = LocalFcinfo::<N>::new(setexpr.collation);
-    fcinfo.resultinfo = rsinfo.as_fmnode_ptr();
-    // The row is copied into the tuplestore before the next call's reset.
-    // SAFETY: the ExprContext outlives this loop's stack frame.
-    unsafe { fcinfo.set_result_mcx(estate.ecxt(ecxt).per_tuple_mcx()) };
+    // fcinfo.resultinfo and the result mcx are armed inside the loop, before
+    // each invoke (miri F6/F9: per-invoke provenance re-arm).
 
     // ExecEvalFuncArgs; C evaluates the arguments in argContext — by-ref arg
     // datums must survive the loop's per-tuple resets below (execSRF.c:119).
@@ -611,6 +609,20 @@ fn run_value_per_call<'mcx, const N: usize>(
         };
         fcinfo.isnull = false;
         rsinfo.isDone = ExprDoneCond::ExprSingleResult;
+        // Re-arm resultinfo before EVERY invoke: the isDone reset above (and
+        // the driver's rsinfo reads/takes after the previous invoke) go
+        // through fresh `&mut rsinfo` borrows, which invalidate a previously
+        // armed pointer's provenance; the callee re-derives through it
+        // (rsinfo_mut). C arms once (execSRF.c ExecMakeTableFunctionResult),
+        // but C has no aliasing model to keep the armed pointer live across
+        // the safe field writes. (Miri F6, notes/miri-pilot-lane.md.)
+        fcinfo.resultinfo = rsinfo.as_fmnode_ptr();
+        // Re-arm the result mcx too: the per-tuple reset() at the loop top
+        // takes a fresh `&mut` on the ExprContext, invalidating a result-mcx
+        // pointer armed on an earlier iteration (miri F9, same class as F6).
+        // The row is copied into the tuplestore before the next call's reset.
+        // SAFETY: the ExprContext outlives this loop's stack frame.
+        unsafe { fcinfo.set_result_mcx(estate.ecxt(ecxt).per_tuple_mcx()) };
         let result = flinfo.invoke(&mut fcinfo)?;
         if let Some(fcu) = &fcu {
             ::pgstat::function::pgstat_end_function_usage(

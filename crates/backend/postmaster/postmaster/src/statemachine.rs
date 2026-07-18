@@ -197,10 +197,8 @@ pub fn process_pm_shutdown_request() -> PgResult<()> {
 }
 
 fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    // DST P2 (contract §1.2): crash-loop window stamps on pg_clock.
+    pg_clock::wall_secs()
 }
 
 pub fn PostmasterStateMachine() -> PgResult<()> {

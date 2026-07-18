@@ -178,8 +178,8 @@ pub(crate) fn xlog_archive_cleanup(xlog: &str) {
     if xlogarchive_seams::xlog_archive_cleanup::is_installed() {
         return xlogarchive_seams::xlog_archive_cleanup::call(xlog);
     }
-    let _ = std::fs::remove_file(format!("{XLOGDIR}/archive_status/{xlog}.done"));
-    let _ = std::fs::remove_file(format!("{XLOGDIR}/archive_status/{xlog}.ready"));
+    let _ = fd::pg_unlink(&format!("{XLOGDIR}/archive_status/{xlog}.done"));
+    let _ = fd::pg_unlink(&format!("{XLOGDIR}/archive_status/{xlog}.ready"));
 }
 
 // The keep test ignores names' TLI so a parent timeline's segments survive.
@@ -195,21 +195,22 @@ pub(crate) fn RemoveOldXlogFiles(
 
     let lastoff = XLogFileName(0, segno, wal_segsz);
 
-    let Ok(dir) = std::fs::read_dir(XLOGDIR) else {
+    let xldir = fd::AllocateDir(XLOGDIR)?;
+    if xldir.is_none() {
         return Ok(());
-    };
-    for de in dir.flatten() {
-        let fname_os = de.file_name();
-        let Some(fname) = fname_os.to_str() else { continue };
+    }
+    while let Some(de) = fd::ReadDirExtended(xldir, XLOGDIR, types_error::DEBUG1)? {
+        let fname = de.d_name.as_str();
         if !IsXLogFileName(fname) && !IsPartialXLogFileName(fname) {
             continue;
         }
         // Full-tail compare keeps an equal-segno ".partial" (C strcmp parity).
         if fname[8..] <= lastoff[8..] && xlog_archive_check_done(fname)? {
             UpdateLastRemovedPtr(fname);
-            RemoveXlogFile(&de, recycle_seg_no, &mut endlog_seg_no, insert_tli)?;
+            RemoveXlogFile(fname, recycle_seg_no, &mut endlog_seg_no, insert_tli)?;
         }
     }
+    fd::FreeDir(xldir)?;
     Ok(())
 }
 
@@ -229,36 +230,37 @@ pub fn RemoveNonParentXlogFiles(
         format!("attempting to remove WAL segments newer than log file {switchseg}"),
     );
 
-    let Ok(dir) = std::fs::read_dir(XLOGDIR) else {
+    let xldir = fd::AllocateDir(XLOGDIR)?;
+    if xldir.is_none() {
         return Ok(());
-    };
-    for de in dir.flatten() {
-        let fname_os = de.file_name();
-        let Some(fname) = fname_os.to_str() else { continue };
+    }
+    while let Some(de) = fd::ReadDirExtended(xldir, XLOGDIR, types_error::DEBUG1)? {
+        let fname = de.d_name.as_str();
         if !IsXLogFileName(fname) {
             continue;
         }
         if fname[..8] < switchseg[..8] && fname[8..] > switchseg[8..] {
             if !xlogarchive_seams::xlog_archive_is_ready::call(fname) {
-                RemoveXlogFile(&de, recycle_seg_no, &mut endlog_seg_no, new_tli)?;
+                RemoveXlogFile(fname, recycle_seg_no, &mut endlog_seg_no, new_tli)?;
             }
         }
     }
+    fd::FreeDir(xldir)?;
     Ok(())
 }
 
 // Only regular files recycle — never rename an archive symlink into pg_wal.
 fn RemoveXlogFile(
-    de: &std::fs::DirEntry,
+    segname: &str,
     recycle_seg_no: XLogSegNo,
     endlog_seg_no: &mut XLogSegNo,
     insert_tli: TimeLineID,
 ) -> PgResult<()> {
-    let fname_os = de.file_name();
-    let segname = fname_os.to_str().unwrap_or_default();
     let path = format!("{XLOGDIR}/{segname}");
 
-    let is_reg = de.file_type().map(|t| t.is_file()).unwrap_or(false);
+    // lstat: a symlink into pg_wal must never recycle (dirent d_type parity).
+    let mut fi = fd::FileInfo::zeroed();
+    let is_reg = fd::pg_lstat(&path, &mut fi) == 0 && fi.is_file();
     if guc_tables::vars::wal_recycle.read()
         && *endlog_seg_no <= recycle_seg_no
         && XLogCtl().InstallXLogFileSegmentActive.load(Relaxed)

@@ -243,7 +243,10 @@ fn WalSndKill(_code: i32, _arg: usize) {
 pub fn HandleWalSndInitStopping() {
     debug_assert!(walsender_seams::am_walsender());
     if !REPLICATION_ACTIVE.get() {
-        let _ = procsignal::SendThreadSignal(init_small::globals::MyProcPid(), libc::SIGTERM);
+        let _ = procsignal::SendThreadSignal(
+            init_small::globals::MyProcPid(),
+            procsignal::signums::SIGTERM,
+        );
     } else {
         GOT_STOPPING.set(true);
     }

@@ -111,10 +111,8 @@ thread_local! {
 }
 
 fn time_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    // DST P2 (contract §1.2): LAST_SIGTERM_TIME on pg_clock::wall_secs().
+    pg_clock::wall_secs()
 }
 
 fn archive_library() -> String {

@@ -105,9 +105,9 @@ fn ResetUnloggedRelationsInDbspaceDir(dbspacedirname: &str, op: i32) -> PgResult
             }
             if init_rels.contains(&relnumber) {
                 let rm_path = format!("{dbspacedirname}/{}", de.d_name);
-                if let Err(e) = std::fs::remove_file(&rm_path) {
+                if vfs::unlink(&crate::vfd::cpath(&rm_path)) != 0 {
                     return Err(ereport(ERROR)
-                        .with_saved_errno(e.raw_os_error().unwrap_or(0))
+                        .with_saved_errno(get_errno())
                         .errcode_for_file_access()
                         .errmsg(format!("could not remove file \"{rm_path}\": %m"))
                         .finish(loc("ResetUnloggedRelationsInDbspaceDir"))

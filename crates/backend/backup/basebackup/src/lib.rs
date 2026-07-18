@@ -111,15 +111,9 @@ struct LstatInfo {
 }
 
 fn lstat_file(path: &str) -> PgResult<Option<LstatInfo>> {
-    let c = std::ffi::CString::new(path).map_err(|_| {
-        ereport(ERROR).errmsg(format!("invalid path \"{path}\"")).into_error()
-    })?;
-    // SAFETY: zeroed stat is POD; c is a valid NUL-terminated path.
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    let rc = unsafe { libc::lstat(c.as_ptr(), &mut st) };
-    if rc != 0 {
-        let e = std::io::Error::last_os_error();
-        if e.raw_os_error() == Some(libc::ENOENT) {
+    let mut st = fd::FileInfo::zeroed();
+    if fd::pg_lstat(path, &mut st) != 0 {
+        if fd::get_errno() == libc::ENOENT {
             return Ok(None);
         }
         return ereport(ERROR)
@@ -129,42 +123,42 @@ fn lstat_file(path: &str) -> PgResult<Option<LstatInfo>> {
             .map(|()| None);
     }
     Ok(Some(LstatInfo {
-        size: st.st_size as i64,
-        mode: st.st_mode as u32,
-        uid: st.st_uid as u32,
-        gid: st.st_gid as u32,
-        mtime: st.st_mtime as i64,
+        size: st.size,
+        mode: st.mode,
+        uid: st.uid,
+        gid: st.gid,
+        mtime: st.mtime_sec,
     }))
 }
 
 fn read_link(path: &str) -> PgResult<String> {
-    match std::fs::read_link(path) {
-        Ok(p) => Ok(p.to_string_lossy().into_owned()),
-        Err(_) => {
-            ereport(ERROR)
-                .errcode_for_file_access()
-                .errmsg(format!("could not read symbolic link \"{path}\""))
-                .finish(loc("read_link"))?;
-            unreachable!()
-        }
+    // readlink(2) via the fd-crate front; MAXPGPATH-class buffer.
+    let mut buf = [0u8; 1024];
+    let n = fd::pg_readlink(path, &mut buf);
+    if n < 0 {
+        ereport(ERROR)
+            .errcode_for_file_access()
+            .errmsg(format!("could not read symbolic link \"{path}\""))
+            .finish(loc("read_link"))?;
+        unreachable!()
     }
+    // As in C's sendDir: a target that fills the whole buffer may have been
+    // truncated -- error out rather than emit a truncated link target.
+    if n as usize >= buf.len() {
+        ereport(ERROR)
+            .errmsg(format!("symbolic link \"{path}\" target is too long"))
+            .finish(loc("read_link"))?;
+        unreachable!()
+    }
+    Ok(String::from_utf8_lossy(&buf[..n as usize]).into_owned())
 }
 
 fn read_dir_names(path: &str) -> PgResult<Vec<String>> {
-    let rd = match std::fs::read_dir(path) {
-        Ok(rd) => rd,
-        Err(_) => {
-            ereport(ERROR)
-                .errcode_for_file_access()
-                .errmsg(format!("could not open directory \"{path}\""))
-                .finish(loc("read_dir_names"))?;
-            unreachable!()
-        }
-    };
     let mut names = Vec::new();
-    for ent in rd.flatten() {
-        names.push(ent.file_name().to_string_lossy().into_owned());
-    }
+    fd::with_allocated_dir(path, &mut |name| {
+        names.push(name.to_owned());
+        Ok(false)
+    })?;
     Ok(names)
 }
 
@@ -1109,7 +1103,12 @@ fn fstat_fd(fd: i32, path: &str) -> PgResult<LstatInfo> {
         mode: st.st_mode as u32,
         uid: st.st_uid,
         gid: st.st_gid,
+        #[cfg(not(target_family = "wasm"))]
         mtime: st.st_mtime,
+        // wasm32: wasi-libc's stat spells it st_mtim (timespec), no
+        // st_mtime alias in the libc crate.
+        #[cfg(target_family = "wasm")]
+        mtime: st.st_mtim.tv_sec as i64,
     })
 }
 
@@ -1393,10 +1392,10 @@ fn sendFile(
             break;
         }
         let want = sink.buffer_length().min((statbuf.size - bytes_done) as usize);
-        // SAFETY: buf is a live writable slice; fd is an open regular file.
+        // buf is a live writable slice; fd is an open regular file.
         let mut cnt = {
             let buf = sink.buffer_slice_mut(want);
-            unsafe { libc::pread(fd, buf.as_mut_ptr().cast(), buf.len(), bytes_done as libc::off_t) }
+            fd::pg_pread(fd, buf, bytes_done)
         };
         if cnt < 0 {
             fd::CloseTransientFile(fd);
@@ -1634,7 +1633,7 @@ fn getegid() -> u32 {
 }
 fn time_now() -> i64 {
     // SAFETY: time(NULL) returns the current unix time.
-    unsafe { libc::time(std::ptr::null_mut()) as i64 }
+    pg_clock::wall_secs()
 }
 
 // ===========================================================================

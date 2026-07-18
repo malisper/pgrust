@@ -1077,12 +1077,14 @@ fn repl_slot_sync_worker_inner() -> PgResult<()> {
     // Signal handling (C: SIGHUP config reload, SIGINT cancel, SIGTERM die,
     // SIGUSR1 procsignal).
     {
+        // procsignal::signums, not libc::SIG*: the wasi libc crate exposes
+        // no SIG* names (thread-signal emulation numbering, signums law).
         use procsignal::ThreadSignalHandler::{Fallible, Simple};
         procsignal::pqsignal_thread(
-            libc::SIGHUP,
+            procsignal::signums::SIGHUP,
             Simple(interrupt::SignalHandlerForConfigReload),
         );
-        procsignal::pqsignal_thread(libc::SIGTERM, Fallible(postgres_tcop::die));
+        procsignal::pqsignal_thread(procsignal::signums::SIGTERM, Fallible(postgres_tcop::die));
     }
 
     check_and_set_sync_info(init_small::globals::MyProcPid())?;
@@ -1182,7 +1184,7 @@ pub fn ShutDownSlotSync() -> PgResult<()> {
     }
 
     if worker_pid != InvalidPid {
-        procsignal::SendThreadSignal(worker_pid, libc::SIGUSR1);
+        procsignal::SendThreadSignal(worker_pid, procsignal::signums::SIGUSR1);
     }
 
     // Wait for slot sync to end.

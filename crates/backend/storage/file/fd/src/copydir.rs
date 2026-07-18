@@ -3,7 +3,7 @@ use ::types_error::{PgResult, ERROR, WARNING};
 
 use crate::desc::{CloseTransientFile, OpenTransientFile, TransientFileRawFd};
 use crate::sync::{fsync_fname, pg_flush_data};
-use crate::vfd::{get_errno, loc, set_errno, MakePGDirectory};
+use crate::vfd::{cpath, get_errno, loc, set_errno, MakePGDirectory};
 
 const FILE_COPY_METHOD_COPY: i32 = 0;
 
@@ -43,14 +43,15 @@ pub fn copydir(fromdir: &str, todir: &str, recurse: bool) -> PgResult<()> {
         let fromfile = format!("{fromdir}/{name}");
         let tofile = format!("{todir}/{name}");
         // get_dirent_type(look_through_symlinks=false): lstat.
-        let md = std::fs::symlink_metadata(&fromfile).map_err(|e| {
-            ereport(ERROR)
-                .with_saved_errno(e.raw_os_error().unwrap_or(0))
+        let mut md = vfs::FileInfo::zeroed();
+        if vfs::lstat(&cpath(&fromfile), &mut md) != 0 {
+            return Err(ereport(ERROR)
+                .with_saved_errno(get_errno())
                 .errcode_for_file_access()
                 .errmsg(format!("could not stat file \"{fromfile}\": %m"))
                 .finish(loc("copydir"))
-                .unwrap_err()
-        })?;
+                .unwrap_err());
+        }
         if md.is_dir() {
             if recurse {
                 copydir(&fromfile, &tofile, true)?;
@@ -67,14 +68,15 @@ pub fn copydir(fromdir: &str, todir: &str, recurse: bool) -> PgResult<()> {
     // Be paranoid here and fsync all files to ensure the copy is really done.
     for name in entry_names(todir)? {
         let tofile = format!("{todir}/{name}");
-        let md = std::fs::symlink_metadata(&tofile).map_err(|e| {
-            ereport(ERROR)
-                .with_saved_errno(e.raw_os_error().unwrap_or(0))
+        let mut md = vfs::FileInfo::zeroed();
+        if vfs::lstat(&cpath(&tofile), &mut md) != 0 {
+            return Err(ereport(ERROR)
+                .with_saved_errno(get_errno())
                 .errcode_for_file_access()
                 .errmsg(format!("could not stat file \"{tofile}\": %m"))
                 .finish(loc("copydir"))
-                .unwrap_err()
-        })?;
+                .unwrap_err());
+        }
         if md.is_file() {
             fsync_fname(&tofile, false)?;
         }
@@ -124,9 +126,10 @@ pub fn copy_file(fromfile: &str, tofile: &str) -> PgResult<()> {
             flush_offset = offset;
         }
 
-        // SAFETY: read(2) into the live buffer on a caller-owned descriptor.
-        let nbytes =
-            unsafe { libc::read(src_raw, buffer.as_mut_ptr().cast(), COPY_BUF_SIZE) };
+        // Positional IO at the tracked offset (`offset` already advances in
+        // lockstep with C's sequential read/write; both fds are regular files
+        // opened here, so pread/pwrite move the same bytes).
+        let nbytes = vfs::pread(src_raw, &mut buffer, offset as libc::off_t);
         if nbytes < 0 {
             return Err(ereport(ERROR)
                 .with_saved_errno(get_errno())
@@ -139,8 +142,7 @@ pub fn copy_file(fromfile: &str, tofile: &str) -> PgResult<()> {
             break;
         }
         set_errno(0);
-        // SAFETY: write(2) of the just-read prefix.
-        if unsafe { libc::write(dst_raw, buffer.as_ptr().cast(), nbytes as usize) } != nbytes {
+        if vfs::pwrite(dst_raw, &buffer[..nbytes as usize], offset as libc::off_t) != nbytes {
             if get_errno() == 0 {
                 set_errno(libc::ENOSPC);
             }
@@ -187,25 +189,25 @@ pub fn rmtree(path: &str, rmtopdir: bool) -> PgResult<bool> {
     let mut result = true;
     for name in names {
         let full = format!("{path}/{name}");
-        let md = match std::fs::symlink_metadata(&full) {
-            Ok(md) => md,
+        let cfull = cpath(&full);
+        let mut md = vfs::FileInfo::zeroed();
+        if vfs::lstat(&cfull, &mut md) != 0 {
             // PGFILETYPE_ERROR arm: log and press on, result stays true.
-            Err(e) => {
-                ereport(WARNING)
-                    .with_saved_errno(e.raw_os_error().unwrap_or(0))
-                    .errmsg(format!("could not stat file \"{full}\": %m"))
-                    .finish(loc("rmtree"))?;
-                continue;
-            }
-        };
+            ereport(WARNING)
+                .with_saved_errno(get_errno())
+                .errmsg(format!("could not stat file \"{full}\": %m"))
+                .finish(loc("rmtree"))?;
+            continue;
+        }
         if md.is_dir() {
             if !rmtree(&full, true)? {
                 result = false;
             }
-        } else if let Err(e) = std::fs::remove_file(&full) {
-            if e.kind() != std::io::ErrorKind::NotFound {
+        } else if vfs::unlink(&cfull) != 0 {
+            let en = get_errno();
+            if en != libc::ENOENT {
                 ereport(WARNING)
-                    .with_saved_errno(e.raw_os_error().unwrap_or(0))
+                    .with_saved_errno(en)
                     .errmsg(format!("could not remove file \"{full}\": %m"))
                     .finish(loc("rmtree"))?;
                 result = false;
@@ -213,9 +215,9 @@ pub fn rmtree(path: &str, rmtopdir: bool) -> PgResult<bool> {
         }
     }
     if rmtopdir {
-        if let Err(e) = std::fs::remove_dir(path) {
+        if vfs::rmdir(&cpath(path)) != 0 {
             ereport(WARNING)
-                .with_saved_errno(e.raw_os_error().unwrap_or(0))
+                .with_saved_errno(get_errno())
                 .errmsg(format!("could not remove directory \"{path}\": %m"))
                 .finish(loc("rmtree"))?;
             result = false;
@@ -239,19 +241,54 @@ pub fn directory_is_empty(path: &str) -> PgResult<bool> {
 }
 
 // pg_mkdir_p (port/path.c) shape: create path and missing parents with
-// pg_dir_create_mode.
+// pg_dir_create_mode (DirBuilder-recursive semantics: existing dirs at any
+// level are fine, existing non-dir surfaces the mkdir errno).
 pub fn pg_mkdir_p(path: &str) -> PgResult<()> {
-    use std::os::unix::fs::DirBuilderExt;
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(crate::vfd::pg_dir_create_mode())
-        .create(path)
-        .map_err(|e| {
-            ereport(ERROR)
-                .with_saved_errno(e.raw_os_error().unwrap_or(0))
-                .errcode_for_file_access()
-                .errmsg(format!("could not create directory \"{path}\": %m"))
-                .finish(loc("pg_mkdir_p"))
-                .unwrap_err()
-        })
+    fn mkdir_p_inner(path: &str, mode: u32) -> Result<(), i32> {
+        let cp = cpath(path);
+        if vfs::mkdir(&cp, mode as libc::mode_t) == 0 {
+            return Ok(());
+        }
+        let en = get_errno();
+        let exists_as_dir = |p: &std::ffi::CStr| {
+            let mut info = vfs::FileInfo::zeroed();
+            vfs::stat(p, &mut info) == 0 && info.is_dir()
+        };
+        match en {
+            libc::EEXIST | libc::EISDIR => {
+                if exists_as_dir(&cp) {
+                    Ok(())
+                } else {
+                    Err(en)
+                }
+            }
+            libc::ENOENT => {
+                let parent = std::path::Path::new(path)
+                    .parent()
+                    .and_then(std::path::Path::to_str)
+                    .filter(|p| !p.is_empty() && *p != path);
+                let Some(parent) = parent else { return Err(en) };
+                mkdir_p_inner(parent, mode)?;
+                if vfs::mkdir(&cp, mode as libc::mode_t) == 0 {
+                    return Ok(());
+                }
+                let en = get_errno();
+                if (en == libc::EEXIST || en == libc::EISDIR) && exists_as_dir(&cp) {
+                    Ok(())
+                } else {
+                    Err(en)
+                }
+            }
+            _ => Err(en),
+        }
+    }
+
+    mkdir_p_inner(path, crate::vfd::pg_dir_create_mode()).map_err(|en| {
+        ereport(ERROR)
+            .with_saved_errno(en)
+            .errcode_for_file_access()
+            .errmsg(format!("could not create directory \"{path}\": %m"))
+            .finish(loc("pg_mkdir_p"))
+            .unwrap_err()
+    })
 }

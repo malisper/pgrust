@@ -8,7 +8,6 @@
 #![allow(clippy::result_large_err)]
 
 use core::mem::{offset_of, size_of, size_of_val};
-use std::io::Read;
 
 use crc32c::{fin_crc32c, pg_comp_crc32c, CRC32C_INIT};
 use elog::ereport;
@@ -420,6 +419,10 @@ fn loc(func: &'static str) -> ErrorLocation {
     ErrorLocation::new("controldata_utils.c", 0, func)
 }
 
+fn c_path(path: &str) -> std::ffi::CString {
+    std::ffi::CString::new(path.as_bytes()).unwrap_or_else(|_| std::ffi::CString::new("").unwrap())
+}
+
 /// get_controlfile(DataDir, &crc_ok): the CRC verdict is returned, not raised.
 pub fn get_controlfile(datadir: &str) -> PgResult<(ControlFileData, bool)> {
     get_controlfile_by_exact_path(&format!("{datadir}/{XLOG_CONTROL_FILE}"))
@@ -428,33 +431,40 @@ pub fn get_controlfile(datadir: &str) -> PgResult<(ControlFileData, bool)> {
 pub fn get_controlfile_by_exact_path(path: &str) -> PgResult<(ControlFileData, bool)> {
     const F: &str = "get_controlfile_by_exact_path";
 
-    let mut file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(e) => {
-            ereport(ERROR)
-                .errcode_for_file_access()
-                .errmsg(format!("could not open file \"{path}\" for reading: {e}"))
-                .finish(loc(F))?;
-            unreachable!()
-        }
-    };
+    let cpath = c_path(path);
+    let fd = vfs::open(&cpath, libc::O_RDONLY, 0);
+    if fd < 0 {
+        let e = std::io::Error::from_raw_os_error(vfs::get_errno());
+        ereport(ERROR)
+            .errcode_for_file_access()
+            .errmsg(format!("could not open file \"{path}\" for reading: {e}"))
+            .finish(loc(F))?;
+        unreachable!()
+    }
 
     let mut image = [0u8; SIZEOF_CONTROL_FILE_DATA];
     let mut r = 0usize;
     while r < SIZEOF_CONTROL_FILE_DATA {
-        match file.read(&mut image[r..]) {
-            Ok(0) => break,
-            Ok(n) => r += n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => {
-                ereport(ERROR)
-                    .errcode_for_file_access()
-                    .errmsg(format!("could not read file \"{path}\": {e}"))
-                    .finish(loc(F))?;
-                unreachable!()
-            }
+        let n = vfs::pread(fd, &mut image[r..], r as libc::off_t);
+        if n == 0 {
+            break;
         }
+        if n < 0 {
+            let en = vfs::get_errno();
+            if en == libc::EINTR {
+                continue;
+            }
+            let e = std::io::Error::from_raw_os_error(en);
+            vfs::close(fd);
+            ereport(ERROR)
+                .errcode_for_file_access()
+                .errmsg(format!("could not read file \"{path}\": {e}"))
+                .finish(loc(F))?;
+            unreachable!()
+        }
+        r += n as usize;
     }
+    vfs::close(fd);
     if r != SIZEOF_CONTROL_FILE_DATA {
         ereport(ERROR)
             .errcode(ERRCODE_DATA_CORRUPTED)
@@ -464,7 +474,6 @@ pub fn get_controlfile_by_exact_path(path: &str) -> PgResult<(ControlFileData, b
             .finish(loc(F))?;
         unreachable!()
     }
-    drop(file);
 
     let control_file = ControlFileData::from_disk_bytes(&image);
     let crc_ok = crc_of_image(&image) == control_file.crc;
@@ -487,10 +496,8 @@ pub fn update_controlfile(
 ) -> PgResult<()> {
     const F: &str = "update_controlfile";
 
-    control_file.time = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as pg_time_t)
-        .unwrap_or(0);
+    // DST P2 (contract §1.2): control-file stamp on pg_clock::wall_secs().
+    control_file.time = pg_clock::wall_secs() as pg_time_t;
 
     let mut image = control_file.to_disk_bytes();
     let crc = crc_of_image(&image);
@@ -503,31 +510,46 @@ pub fn update_controlfile(
     buffer[..SIZEOF_CONTROL_FILE_DATA].copy_from_slice(&image);
 
     let path = format!("{datadir}/{XLOG_CONTROL_FILE}");
-    let mut file = match std::fs::OpenOptions::new().read(true).write(true).open(&path) {
-        Ok(f) => f,
-        Err(e) => {
-            return ereport(PANIC)
-                .errcode_for_file_access()
-                .errmsg(format!("could not open file \"{path}\": {e}"))
-                .finish(loc(F));
-        }
-    };
-
-    if let Err(e) = std::io::Write::write_all(&mut file, &buffer) {
+    let cpath = c_path(&path);
+    let fd = vfs::open(&cpath, libc::O_RDWR, 0);
+    if fd < 0 {
+        let e = std::io::Error::from_raw_os_error(vfs::get_errno());
         return ereport(PANIC)
             .errcode_for_file_access()
-            .errmsg(format!("could not write file \"{path}\": {e}"))
+            .errmsg(format!("could not open file \"{path}\": {e}"))
             .finish(loc(F));
     }
 
-    if do_sync {
-        if let Err(e) = file.sync_all() {
+    // Single pwrite of the whole PG_CONTROL_FILE_SIZE image at offset 0 —
+    // the 512 B sector-atomicity floor (PG_CONTROL_MAX_SAFE_SIZE) rides one
+    // syscall, as before.
+    let mut written = 0usize;
+    while written < buffer.len() {
+        let w = vfs::pwrite(fd, &buffer[written..], written as libc::off_t);
+        if w < 0 {
+            let en = vfs::get_errno();
+            if en == libc::EINTR {
+                continue;
+            }
+            let e = std::io::Error::from_raw_os_error(en);
+            vfs::close(fd);
             return ereport(PANIC)
                 .errcode_for_file_access()
-                .errmsg(format!("could not fsync file \"{path}\": {e}"))
+                .errmsg(format!("could not write file \"{path}\": {e}"))
                 .finish(loc(F));
         }
+        written += w as usize;
     }
+
+    if do_sync && vfs::fsync(fd) != 0 {
+        let e = std::io::Error::from_raw_os_error(vfs::get_errno());
+        vfs::close(fd);
+        return ereport(PANIC)
+            .errcode_for_file_access()
+            .errmsg(format!("could not fsync file \"{path}\": {e}"))
+            .finish(loc(F));
+    }
+    vfs::close(fd);
 
     Ok(())
 }

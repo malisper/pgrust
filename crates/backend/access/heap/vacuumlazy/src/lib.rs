@@ -1837,7 +1837,7 @@ fn apply_failsafe(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
 
 const VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL_MS: u64 = 50;
 const VACUUM_TRUNCATE_LOCK_TIMEOUT_MS: u64 = 5000;
-const VACUUM_TRUNCATE_LOCK_CHECK_INTERVAL_MS: u128 = 20;
+const VACUUM_TRUNCATE_LOCK_CHECK_INTERVAL_MS: i64 = 20;
 
 // lazy_truncate_heap (vacuumlazy.c). The "stopping/suspending truncate" and
 // "truncated N to M pages" messages are DEBUG2 without VERBOSE (loud
@@ -1930,14 +1930,15 @@ fn count_nondeletable_pages(
     vacrel: &mut LVRelState<'_, '_>,
     lock_waiter_detected: &mut bool,
 ) -> PgResult<BlockNumber> {
-    let mut starttime = std::time::Instant::now();
+    // DST P2 (contract §1.3): truncate lock-waiter recheck on pg_clock.
+    let mut starttime = pg_clock::MonoStamp::now();
     let mut blkno = vacrel.rel_pages;
     while blkno > vacrel.folds.counters.nonempty_pages {
         // Waiters queue behind our AccessExclusiveLock; probe at most every
         // VACUUM_TRUNCATE_LOCK_CHECK_INTERVAL, checked once per 32 blocks.
         if blkno % 32 == 0 {
-            let currenttime = std::time::Instant::now();
-            if currenttime.duration_since(starttime).as_millis()
+            let currenttime = pg_clock::MonoStamp::now();
+            if currenttime.since_ns(starttime) as i64 / 1_000_000
                 >= VACUUM_TRUNCATE_LOCK_CHECK_INTERVAL_MS
             {
                 if lmgr::LockHasWaitersRelation(

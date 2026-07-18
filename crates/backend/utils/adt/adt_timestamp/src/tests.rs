@@ -623,10 +623,10 @@ fn interval_typmod_rounds_and_truncates_like_c() {
     assert_eq!(iv_out(&iv), "00:00:00.79");
     // typmodout round trip
     let mut buf = [0u8; 64];
-    let n = intervaltypmodout(tmod, &mut buf);
+    let n = intervaltypmodout(tmod, &mut buf).unwrap();
     assert_eq!(core::str::from_utf8(&buf[..n]).unwrap(), "(2)");
     let tmod = intervaltypmodin(&[INTERVAL_MASK(MINUTE)]).unwrap();
-    let n = intervaltypmodout(tmod, &mut buf);
+    let n = intervaltypmodout(tmod, &mut buf).unwrap();
     assert_eq!(core::str::from_utf8(&buf[..n]).unwrap(), " minute");
     // negative precision
     let err = intervaltypmodin(&[adt_datetime::INTERVAL_FULL_RANGE, -3]).unwrap_err();
@@ -634,6 +634,18 @@ fn interval_typmod_rounds_and_truncates_like_c() {
     // bogus mask
     let err = intervaltypmodin(&[1000]).unwrap_err();
     assert!(err.message.contains("invalid INTERVAL type modifier"));
+}
+
+#[test]
+fn interval_typmod_invalid_range_is_clean_internal_error() {
+    use crate::interval::{intervaltypmodleastfield, intervaltypmodout};
+    let mut buf = [0u8; 64];
+    let err = intervaltypmodout(1, &mut buf).unwrap_err();
+    assert_eq!(err.message, "invalid INTERVAL typmod: 0x1");
+    assert_eq!(err.sqlstate, types_error::ERRCODE_INTERNAL_ERROR);
+    let err = intervaltypmodleastfield(0x10000).unwrap_err();
+    assert_eq!(err.message, "invalid INTERVAL typmod: 0x10000");
+    assert_eq!(err.sqlstate, types_error::ERRCODE_INTERNAL_ERROR);
 }
 
 #[test]
@@ -673,8 +685,9 @@ fn interval_agg_family_matches_c() {
 fn interval_typmod_least_field_matches_c() {
     use adt_datetime::{DAY, HOUR, INTERVAL_MASK, MINUTE, MONTH, SECOND, YEAR};
     use crate::interval::{intervaltypmodleastfield, INTERVAL_FULL_PRECISION, INTERVAL_TYPMOD};
-    let lf = |r: i32| intervaltypmodleastfield(INTERVAL_TYPMOD(INTERVAL_FULL_PRECISION, r));
-    assert_eq!(intervaltypmodleastfield(-1), 0);
+    let lf =
+        |r: i32| intervaltypmodleastfield(INTERVAL_TYPMOD(INTERVAL_FULL_PRECISION, r)).unwrap();
+    assert_eq!(intervaltypmodleastfield(-1).unwrap(), 0);
     assert_eq!(lf(INTERVAL_MASK(YEAR)), 5);
     assert_eq!(lf(INTERVAL_MASK(MONTH)), 4);
     assert_eq!(lf(INTERVAL_MASK(YEAR) | INTERVAL_MASK(MONTH)), 4);
