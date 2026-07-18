@@ -1,0 +1,48 @@
+# Known-wart allowlist (contract §3.1.5) — WS-ORACLE owned. Entries may be
+# PROPOSED by any WS, merged only by WS-ORACLE with evidence. Schema per
+# src/oracle/warts.rs: id / class (pinned vocab class the entry suppresses) /
+# matcher (sqlstate exact-or-class and/or stmt_pattern regex over the
+# whitespace-normalized statement — NEVER raw error text vs C) / evidence
+# (commit or note ref) / expires (train tag, or "standing").
+#
+# A wart hit is counted (`SIMHARNESS|wart:<id>|n`) — suppressed, never
+# invisible.
+
+# ---- to_date-era / BC-date fetch family (seed entry, contract §3.1.5) ----
+# Adjudicated @ 020d147b7: no real to_date divergence existed; the Python
+# fetch side refusing BC dates is `harness-fetch` (the t26-soak fake
+# rust-crash P1 lesson), and any residual era-formatting drift pins as
+# err-text-drift here — never P1.
+
+[[wart]]
+id = "todate-era-fetch"
+class = "harness-fetch"
+stmt_pattern = "(?i)to_date\\s*\\(|to_timestamp\\s*\\(|make_date\\s*\\(|\\bBC\\b"
+evidence = "adjudicated @ 020d147b7 (to_date-era family); triage ef070d066 adds the class"
+expires = "t30"
+
+[[wart]]
+id = "todate-era-text-drift"
+class = "err-text-drift"
+stmt_pattern = "(?i)to_date\\s*\\(|to_timestamp\\s*\\("
+evidence = "adjudicated @ 020d147b7: residual era-formatting message drift, same SQLSTATE"
+expires = "t30"
+
+# ---- documented non-judgments (contract §3.1.5) ----
+# These classes are already 'fine' in the vocabulary; the entries exist so
+# campaign reports carry the standing adjudication reference instead of
+# re-litigating them.
+
+[[wart]]
+id = "volatile-nonjudgment"
+class = "wrong-results-volatile"
+stmt_pattern = "."
+evidence = "notes/wrongresults-triage.md: volatile-call divergence is a non-judgment by design"
+expires = "standing"
+
+[[wart]]
+id = "big-result-nonjudgment"
+class = "big-result-skipped"
+stmt_pattern = "."
+evidence = "triage.py ROW_CAP posture: capped results are skipped, not compared"
+expires = "standing"
