@@ -618,6 +618,9 @@ pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
             RefuseReason::ScrollMark,
         ],
     ),
+    // + wave-7 B1 per-shape flip 3/6: samplescan SOURCE form default-ON
+    // (tail_source.rs flip ledger; ONE-ROW-PER-CLASS — B1 rides this
+    // merged row).
     (
         ShapeClass::SampleScan,
         &[
