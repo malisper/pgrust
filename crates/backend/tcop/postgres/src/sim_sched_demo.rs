@@ -138,6 +138,48 @@ pub(crate) fn run_wpool_demo() -> ! {
 }
 
 // ---------------------------------------------------------------------------
+// P6 (PERMIT-S5): the rtpool 2-worker demo.
+// ---------------------------------------------------------------------------
+
+/// Drive the REAL launch_backend rtpool (the PGRUST_RUNTIME=1 runtime worker
+/// pool) through its (now-doored) spawn sites — the runtime-mode analogue of
+/// [`run_wpool_demo`]. Requires `PGRUST_RUNTIME=1`; the harness pins
+/// `PGRUST_RUNTIME_WORKERS`/`PGRUST_RUNTIME_STANDBYS` so the pool size (and
+/// so the SCHEDOP stream) is box-independent. With `PGRUST_RUNTIME_BGJOBS=1`
+/// the bgjobs dispatcher rides the same start and registers at ITS door.
+///
+/// Sequence: `rtpool_start` spawns the pool (parent-side door registration
+/// per worker, child-side gate) → one virtual-time park is the rendezvous
+/// (every worker has run its prelude to the runtime eventcount park) →
+/// `rtpool_stop` (stop flag + wake_all, hooked wakes) → the drain loop rides
+/// TimedParks until every worker exit dropped its population charge. One
+/// grep-stable line: `RTPOOL start=N spawned_population=N drained=0`. The
+/// e2e (P6) asserts the worker/dispatcher door registrations + per-vpid
+/// grants in SCHEDOP and x3 same-seed byte-identity. The dispatcher (when
+/// armed) is process-lifetime and stays parked at exit — deterministic under
+/// the same seed. With the scheduler off this degrades to real sleeps over
+/// OS scheduling (scaffold mode) — same line, no SCHEDOP.
+pub(crate) fn run_rtpool_demo() -> ! {
+    // NO register_self: runs on the boot/driver thread, already registered
+    // as "simnet-main" (the W-S2-1 one-door law — now a symbolic assert).
+    let started = postmaster_seams::rtpool_start::call();
+    assert!(started >= 0, "rtpool demo requires PGRUST_RUNTIME=1 (start returned {started})");
+    // Rendezvous: when this park returns, every worker is at its eventcount
+    // park (virtual time advances only when nothing is runnable).
+    pgsync::thread::sleep(std::time::Duration::from_millis(10));
+    let spawned = postmaster_seams::rtpool_population::call();
+    postmaster_seams::rtpool_stop::call();
+    let mut polls = 0u32;
+    while postmaster_seams::rtpool_population::call() > 0 {
+        pgsync::thread::sleep(std::time::Duration::from_millis(1));
+        polls += 1;
+        assert!(polls < 60_000, "rtpool demo: workers never drained");
+    }
+    println!("RTPOOL start={started} spawned_population={spawned} drained=0");
+    std::process::exit(0)
+}
+
+// ---------------------------------------------------------------------------
 // P4: the watchdog red fixture (intentionally unshimmed blocking).
 // ---------------------------------------------------------------------------
 

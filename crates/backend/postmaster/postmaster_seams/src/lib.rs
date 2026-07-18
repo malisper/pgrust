@@ -66,3 +66,23 @@ seam_core::seam!(
     // drain probe).
     pub fn wpool_population() -> i32
 );
+
+seam_core::seam!(
+    // PERMIT-S5 (sim rtpool demo): start the runtime worker pool through
+    // launch_backend's (now-doored) rtpool spawn sites. Returns the live
+    // pool-thread count, or -1 when PGRUST_RUNTIME disables the runtime.
+    // Seam-routed for the same package-cycle reason as the wpool trio.
+    pub fn rtpool_start() -> i32
+);
+
+seam_core::seam!(
+    // PERMIT-S5 (sim rtpool demo): ask the pool's workers to exit their
+    // loops (stop flag + wake_all). Production never calls this — the pool
+    // is process-lifetime.
+    pub fn rtpool_stop()
+);
+
+seam_core::seam!(
+    // PERMIT-S5 (sim rtpool demo): live pool-thread count (the drain probe).
+    pub fn rtpool_population() -> i32
+);
