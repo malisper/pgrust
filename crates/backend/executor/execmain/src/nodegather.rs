@@ -121,6 +121,50 @@ pub(crate) fn settle_gather_width(
     }
 }
 
+/// The WIDTH MIRROR (PHASE3-CLOSE §2.4 = WS-O TODO item 5): one
+/// trace-channel detail line per gather startup — requested / granted /
+/// launched / engine-of-record (unified vs external vs fail-open) — per
+/// the WS-O adjudication ("a detail line to the trace channel rather than
+/// EXPLAIN"; the lease is not a lane verdict, EXPLAIN stays untouched —
+/// Workers Planned/Launched keeps coming from the existing machinery).
+/// This is the observability contract for FM-1/FM-3 (grant-0 serialization
+/// must be VISIBLE) and WS-COVER's census cross-checks. Gated on the
+/// face being armed FIRST (knob-OFF never reaches the trace OnceLock —
+/// the §2.6 budget pin) and on `PGRUST_LANE_V2_TRACE` (the standing
+/// engagement-trace env; stderr → server log, e2e-greppable). When BOTH
+/// gang knobs are set, `shadows=ledger-gather` names the §2.5 precedence.
+pub(crate) fn mirror_gather_width(
+    face: runtime::GangWidthFace,
+    requested: i32,
+    lease: &Option<runtime::ParallelWidthLease>,
+    launched: i32,
+) {
+    if face == runtime::GangWidthFace::Off || !width_mirror_enabled() {
+        return;
+    }
+    let engine = lease.as_ref().map_or("fail-open", |l| l.engine());
+    let granted = lease.as_ref().map_or(-1, |l| i64::from(l.granted()));
+    let shadows = if runtime::gang_width_knobs_both_set() {
+        " shadows=ledger-gather"
+    } else {
+        ""
+    };
+    eprintln!(
+        "[gather-width] engine={engine} requested={requested} granted={granted} \
+         launched={launched}{shadows}"
+    );
+}
+
+/// Trace arm for the width mirror (`PGRUST_LANE_V2_TRACE`, the lanev2
+/// engagement-trace env). Read once; consulted ONLY when a gang-width
+/// face is armed — the knob-OFF gather startup never reaches this.
+fn width_mirror_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_LANE_V2_TRACE").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
 pub(crate) fn leader_participation() -> bool {
     guc_tables::vars::parallel_leader_participation.read()
 }
@@ -222,11 +266,12 @@ fn gather_startup<'mcx>(
         // the launch untouched). Acquired per startup — a rescan relaunch
         // re-leases against the headroom of ITS moment.
         debug_assert!(node.width_lease.is_none(), "lease survived a shutdown");
-        let (lease, _face) = lease_gather_width(pei.pcxt, gather.num_workers);
+        let (lease, face) = lease_gather_width(pei.pcxt, gather.num_workers);
         node.width_lease = lease;
         parallel::LaunchParallelWorkers(pei.pcxt)?;
         node.nworkers_launched = parallel::nworkers_launched(pei.pcxt);
         settle_gather_width(&mut node.width_lease, node.nworkers_launched);
+        mirror_gather_width(face, gather.num_workers, &node.width_lease, node.nworkers_launched);
         execparallel::account_workers(estate, pei.pcxt);
 
         if node.nworkers_launched > 0 {
