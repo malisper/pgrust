@@ -35,7 +35,15 @@ pub fn pg_fsync(fd: RawFd) -> i32 {
             // OwnedFd drop aborted the process (Rust IO-safety EBADF check).
             // Posix-only until the Vfs grows an accmode probe; the sim domain
             // loses only this debug assert.
-            #[cfg(not(pgrust_sim))]
+            //
+            // t28-train recurrence of the SAME class on wasm32: F_GETFL is
+            // emulated from fd_fdstat_get RIGHTS, and a WASI shim may grant
+            // blanket rights (the web harness's pgrust-wasi.js returns
+            // ALL_RIGHTS for every fd) — a directory fd then reads O_RDWR and
+            // the dir arm panics in the shutdown checkpoint's dir fsyncs
+            // (wasmtime reports honest rights, which is why wasm-boot-e2e
+            // never tripped it). Kernel-posix fds only.
+            #[cfg(not(any(pgrust_sim, target_family = "wasm")))]
             {
                 // SAFETY: F_GETFL reads the descriptor flags. Debug-only
                 // fd-state introspection, not IO — stays raw (vfs carve-out,
@@ -47,7 +55,7 @@ pub fn pg_fsync(fd: RawFd) -> i32 {
                     debug_assert!(desc_flags != libc::O_RDONLY);
                 }
             }
-            #[cfg(pgrust_sim)]
+            #[cfg(any(pgrust_sim, target_family = "wasm"))]
             let _ = &st;
         }
         set_errno(0);
