@@ -51,6 +51,60 @@ fn timestamptz_to_time_t(t: i64) -> i64 {
     t.div_euclid(1_000_000) + PG_UNIX_EPOCH_OFFSET_SECS
 }
 
+// InitStandaloneProcess (miscinit.c:175): the --single / bootstrap process
+// environment. Mirrors InitPostmasterChild minus the SIGQUIT unblock ("we
+// don't unblock SIGQUIT or provide a default handler for it").
+pub fn InitStandaloneProcess(argv0: &str) -> PgResult<()> {
+    debug_assert!(!g::IsPostmasterEnvironment());
+
+    crate::SetMyBackendType(types_core::init::BackendType::StandaloneBackend);
+
+    // pgwin32_signal_initialize: WIN32-only, not this build.
+
+    InitProcessGlobals(std::process::id() as i32);
+
+    /* Initialize process-local latch support */
+    waiteventset::InitializeWaitEventSupport()?;
+    InitProcessLocalLatch();
+    latch::InitializeLatchWaitSet()?;
+
+    libpq_pqsignal::pqinitmask();
+    libpq_pqsignal::block_signals();
+
+    /* Compute paths, no postmaster to inherit from */
+    if g::my_exec_path()[0] == 0 {
+        let exe = pg_path::find_my_exec(argv0, |m| {
+            let _ = ereport(types_error::LOG)
+                .errmsg(m)
+                .finish(ErrorLocation::new("src/common/exec.c", 0, "find_my_exec"));
+        })
+        .map_err(|_| {
+            ereport(FATAL)
+                .errmsg(format!("{argv0}: could not locate my own executable path"))
+                .into_error()
+        })?;
+        let mut buf = [0u8; types_core::MAXPGPATH];
+        let n = exe.len().min(types_core::MAXPGPATH - 1);
+        buf[..n].copy_from_slice(&exe.as_bytes()[..n]);
+        g::set_my_exec_path(buf);
+    }
+
+    if g::pkglib_path()[0] == 0 {
+        let exec_path = c_str_of(&g::my_exec_path());
+        let pkglib = pg_path::get_pkglib_path(&exec_path);
+        let mut buf = [0u8; types_core::MAXPGPATH];
+        let n = pkglib.len().min(types_core::MAXPGPATH - 1);
+        buf[..n].copy_from_slice(&pkglib.as_bytes()[..n]);
+        g::set_pkglib_path(buf);
+    }
+    Ok(())
+}
+
+fn c_str_of(buf: &[u8]) -> String {
+    String::from_utf8_lossy(&buf.iter().copied().take_while(|b| *b != 0).collect::<Vec<u8>>())
+        .into_owned()
+}
+
 // C's child-init order; process-wide arms are postmaster-signal design.
 pub fn InitPostmasterChild(my_proc_pid: i32) -> PgResult<()> {
     g::SetIsUnderPostmaster(true);

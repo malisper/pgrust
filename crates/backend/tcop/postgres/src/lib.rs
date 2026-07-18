@@ -13,6 +13,7 @@ use ::types_storage::storage::ProcSignalReason;
 pub mod extended_query;
 pub mod main_loop;
 pub mod simple_query;
+pub mod single_user;
 pub mod stmt_trace;
 pub mod switches;
 #[cfg(test)]
@@ -26,6 +27,7 @@ pub use extended_query::{
     pg_analyze_and_rewrite_varparams,
 };
 pub use main_loop::PostgresMain;
+pub use single_user::PostgresSingleUserMain;
 pub use simple_query::{
     exec_simple_query, finish_xact_command, pg_analyze_and_rewrite_fixedparams, pg_parse_query,
     pg_plan_queries, pg_plan_query, pg_rewrite_query, start_xact_command,
@@ -33,6 +35,7 @@ pub use simple_query::{
 
 pub fn init_seams() {
     postgres_seams::postgres_main::set(postgres_main_seam);
+    postgres_seams::postgres_single_user_main::set(PostgresSingleUserMain);
     postgres_seams::check_for_interrupts::set(check_for_interrupts);
     postgres_seams::die::set(die);
     postgres_seams::statement_cancel_handler::set(StatementCancelHandler);
@@ -117,6 +120,23 @@ thread_local! {
     static DOING_EXTENDED_QUERY_MESSAGE: Cell<bool> = const { Cell::new(false) };
     static IGNORE_TILL_SYNC: Cell<bool> = const { Cell::new(false) };
     static DOING_COMMAND_READ: Cell<bool> = const { Cell::new(false) };
+    // EchoQuery / UseSemiNewlineNewline (postgres.c:154-155): the single-user
+    // -E and -j switches.
+    static ECHO_QUERY: Cell<bool> = const { Cell::new(false) };
+    static USE_SEMI_NEWLINE_NEWLINE: Cell<bool> = const { Cell::new(false) };
+}
+
+pub(crate) fn echo_query() -> bool {
+    ECHO_QUERY.with(Cell::get)
+}
+pub(crate) fn set_echo_query(v: bool) {
+    ECHO_QUERY.with(|c| c.set(v));
+}
+pub(crate) fn use_semi_newline_newline() -> bool {
+    USE_SEMI_NEWLINE_NEWLINE.with(Cell::get)
+}
+pub(crate) fn set_use_semi_newline_newline(v: bool) {
+    USE_SEMI_NEWLINE_NEWLINE.with(|c| c.set(v));
 }
 
 pub(crate) fn xact_started() -> bool {

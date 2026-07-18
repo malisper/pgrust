@@ -23,6 +23,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // PgStartTime's writer arm for the no-postmaster entries: C's standalone
+    // backend assigns the global directly (postgres.c:4155); the storage
+    // lives with the postmaster crate here.
+    pub fn set_pg_start_time(ts: i64)
+);
+
+seam_core::seam!(
     // §3.1 P-pool claim: hand a just-registered BGWORKER_CLASS_PARALLEL slot
     // to a parked standby thread, bypassing the postmaster round-trip and
     // thread spawn. Returns the standby's reserved MyProcPid, or 0 when no
