@@ -211,13 +211,7 @@ pub fn pg_tzset(tzname: &[u8]) -> Option<&'static PgTz> {
     Some(TIMEZONE_CACHE.with(|c| {
         let mut slot = c.borrow_mut();
         let cache = slot.get_or_insert_with(|| {
-            let mcx = ::mcx::session_root("Timezones").mcx();
-            // Registered after session_root, so this runs FIRST (LIFO): the
-            // droppy TLS cache must be emptied before its context is freed,
-            // or the thread-exit TLS destructor frees into a dead arena.
-            ::mcx::register_session_cleanup(Box::new(|| {
-                TIMEZONE_CACHE.with(|c| drop(c.borrow_mut().take()));
-            }));
+            let mcx = Box::leak(Box::new(MemoryContext::new("Timezones"))).mcx();
             TzCache {
                 mcx,
                 map: PgHashMap::with_capacity_in(4, mcx),

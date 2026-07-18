@@ -87,15 +87,8 @@ struct RiConstraintInfo {
 
 fn cache_mcx() -> &'static MemoryContext {
     thread_local! {
-        static CTX: &'static MemoryContext = {
-            let cx = ::mcx::session_root("RI cache context");
-            // LIFO: empty the droppy TLS caches before the context is freed.
-            ::mcx::register_session_cleanup(Box::new(|| {
-                RI_CONSTRAINT_CACHE.with(|c| drop(c.borrow_mut().take()));
-                RI_QUERY_CACHE.with(|c| drop(c.borrow_mut().take()));
-            }));
-            cx
-        };
+        static CTX: &'static MemoryContext =
+            Box::leak(Box::new(MemoryContext::new("RI cache context")));
     }
     CTX.with(|c| *c)
 }

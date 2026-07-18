@@ -16,7 +16,7 @@ fn with_exec_scratch<R>(f: impl FnOnce(::mcx::Mcx<'_>) -> R) -> R {
     EXEC_SCRATCH.with(|cell| {
         let mut slot = cell.borrow_mut();
         let ctx = slot.get_or_insert_with(|| {
-            ::mcx::session_root_mut(::mcx::MemoryContext::new_bump("RegexpExecScratch"))
+            Box::leak(Box::new(::mcx::MemoryContext::new_bump("RegexpExecScratch")))
         });
         ctx.reset();
         f(ctx.mcx())

@@ -219,21 +219,6 @@ thread_local! {
 // mutate owners, so every release path snapshots what it needs under one
 // entry and invokes callbacks with no arena reference held.
 #[inline(always)]
-/// Session-memory teardown (FPBUDGET-1): drop the whole owner arena at clean
-/// task end (C's owners die with the backend process). The TLS slot is left
-/// holding an empty arena; nothing creates or releases owners afterwards.
-pub fn session_mem_teardown() {
-    ARENA.with(|cell| {
-        // SAFETY: task-end teardown — no arena entry is live (single thread).
-        let arena = unsafe { &mut **cell.get() };
-        *arena = Arena {
-            slots: Vec::new(),
-            free: Vec::new(),
-            callbacks: Vec::new(),
-        };
-    });
-}
-
 fn with_arena<R>(f: impl FnOnce(&mut Arena) -> R) -> R {
     // Guard module Drop: ENTERED must clear on panic unwind or every later
     // call — including abort cleanup — re-panics and the backend spins (the

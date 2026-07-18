@@ -22,15 +22,6 @@ fn RecordTransactionCommit(xp: XsPtr) -> PgResult<TransactionId> {
         // SAFETY: single-threaded backend TLS; the &mut is confined to this
         // call, which cannot recurse (commit records nothing that commits).
         let scratch = unsafe { &mut *cell.get() }.get_or_insert_with(|| {
-            // Session-memory teardown (FPBUDGET-1): freed at clean task end.
-            ::mcx::register_session_cleanup(Box::new(|| {
-                RECORD_COMMIT_SCRATCH.with(|c| {
-                    // SAFETY: task-end teardown; no commit is in flight.
-                    if let Some(ctx) = unsafe { &mut *c.get() }.take() {
-                        drop(core::mem::ManuallyDrop::into_inner(ctx));
-                    }
-                });
-            }));
             core::mem::ManuallyDrop::new(MemoryContext::new("RecordTransactionCommit"))
         });
         let out = RecordTransactionCommitGuts(xp, scratch.mcx());

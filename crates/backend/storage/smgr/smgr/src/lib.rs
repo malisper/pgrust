@@ -106,11 +106,7 @@ fn with_cache<R>(f: impl FnOnce(&mut SmgrCache) -> R) -> R {
         let mut slot = c.borrow_mut();
         let cache = slot.get_or_insert_with(|| {
             let cx: &'static MemoryContext =
-                ::mcx::session_root("smgr relation table");
-            // LIFO: empty the droppy TLS cache before its context is freed.
-            ::mcx::register_session_cleanup(Box::new(|| {
-                CACHE.with(|c| drop(c.borrow_mut().take()));
-            }));
+                Box::leak(Box::new(MemoryContext::new("smgr relation table")));
             let mut relns = PgHashMap::new_in(cx.mcx());
             let _ = relns.try_reserve(400);
             SmgrCache { cx, relns, slab: Vec::new(), free: Vec::new(), unpinned: Cell::new(0) }
@@ -1058,7 +1054,7 @@ mod tests {
         use ::types_tuple::{NameData, TupleDescData};
         use core::cell::Cell;
         use std::rc::Rc;
-        let cx: &'static MemoryContext = ::mcx::session_root("test rel");
+        let cx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("test rel")));
         let mut relname = NameData::default();
         relname.namestrcpy("t");
         let mut form = FormData_pg_class {

@@ -94,19 +94,7 @@ pub(crate) fn with_state<R>(f: impl FnOnce(&mut RelcacheState) -> R) -> R {
     STATE.with(|cell| {
         let mut slot = cell.borrow_mut();
         let st = slot.get_or_insert_with(|| {
-            let mcx = ::mcx::session_root("CacheMemoryContext").mcx();
-            // LIFO: drop the state PROPERLY (running the hash maps' drop
-            // glue) before the context is freed wholesale. The rel entries
-            // are `Rc<RelationData>` on the GLOBAL heap — a context-only
-            // free skips the refcount decrements and leaks every entry
-            // (~0.6 MiB/session measured, the dominant FPBUDGET-1 tail).
-            ::mcx::register_session_cleanup(Box::new(|| {
-                STATE.with(|cell| {
-                    if let Some(st) = cell.borrow_mut().take() {
-                        drop(ManuallyDrop::into_inner(st));
-                    }
-                });
-            }));
+            let mcx = Box::leak(Box::new(MemoryContext::new("CacheMemoryContext"))).mcx();
             ManuallyDrop::new(RelcacheState {
                 mcx,
                 id_cache: PgHashMap::with_capacity_in(INITRELCACHESIZE, mcx),

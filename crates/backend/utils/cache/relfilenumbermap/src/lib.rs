@@ -61,7 +61,7 @@ fn InitializeRelfilenumberMap() -> PgResult<()> {
 
     // Installed only after skey resolution: an fmgr error must not leave a
     // partially initialized map.
-    let mcx = ::mcx::session_root("RelfilenumberMap cache").mcx();
+    let mcx = Box::leak(Box::new(MemoryContext::new("RelfilenumberMap cache"))).mcx();
     let map = RelfilenumberMap {
         skey,
         hash: PgFxHashMap::with_hasher_in(Default::default(), mcx),

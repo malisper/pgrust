@@ -83,7 +83,7 @@ fn unported(what: &str) -> ! {
 thread_local! {
     // Truncate relid arrays outlive the decode call inside ReorderBuffer changes.
     static DECODE_CTX: &'static MemoryContext =
-        ::mcx::session_root("LogicalDecode");
+        Box::leak(Box::new(MemoryContext::new("LogicalDecode")));
 }
 
 fn decode_mcx() -> Mcx<'static> {

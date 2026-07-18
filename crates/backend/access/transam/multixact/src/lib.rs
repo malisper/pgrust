@@ -344,11 +344,7 @@ fn with_cache<R>(f: impl FnOnce(&mut MXactCache) -> R) -> R {
         let mut slot = c.borrow_mut();
         let cache = slot.get_or_insert_with(|| {
             let cx: &'static MemoryContext =
-                ::mcx::session_root("MultiXact cache context");
-            // LIFO: empty the droppy TLS cache before its context is freed.
-            ::mcx::register_session_cleanup(Box::new(|| {
-                MXACT_CACHE.with(|c| drop(c.borrow_mut().take()));
-            }));
+                Box::leak(Box::new(MemoryContext::new("MultiXact cache context")));
             MXactCache {
                 cx,
                 entries: PgVec::new_in(cx.mcx()),
@@ -454,11 +450,7 @@ fn take_member_scratch() -> MemberScratch {
     if !MEMBER_SCRATCH_INIT.get() {
         MEMBER_SCRATCH_INIT.set(true);
         let cx: &'static MemoryContext =
-            ::mcx::session_root("MultiXact member scratch");
-        // LIFO: empty the droppy TLS slot before its context is freed.
-        ::mcx::register_session_cleanup(Box::new(|| {
-            MEMBER_SCRATCH.with(|s| drop(s.borrow_mut().take()));
-        }));
+            Box::leak(Box::new(MemoryContext::new("MultiXact member scratch")));
         return MemberScratch {
             buf: PgVec::new_in(cx.mcx()),
             _cx: cx,
@@ -688,11 +680,7 @@ fn write_create_wal(header: &[u8], members: &[MultiXactMember]) -> PgResult<()> 
         let mut slot = s.borrow_mut();
         let (_, buf) = slot.get_or_insert_with(|| {
             let cx: &'static MemoryContext =
-                ::mcx::session_root("MultiXact WAL scratch");
-            // LIFO: empty the droppy TLS slot before its context is freed.
-            ::mcx::register_session_cleanup(Box::new(|| {
-                WAL_SCRATCH.with(|s| drop(s.borrow_mut().take()));
-            }));
+                Box::leak(Box::new(MemoryContext::new("MultiXact WAL scratch")));
             (cx, PgVec::new_in(cx.mcx()))
         });
         buf.clear();

@@ -51,8 +51,6 @@ types_error = { path = "../../../_support/types/types_error" }
 # compiles the scheduler arm.
 pgsync = { path = "../../../_support/pgsync" }
 sinval = { path = "../../storage/ipc/sinval" }
-mcx = { path = "../../../_support/mcx" }
-mcxt_stats = { path = "../../utils/mmgr/mcxt_stats" }
 waiteventset = { path = "../../storage/ipc/waiteventset" }
 waiteventset_seams = { path = "../../storage/ipc/waiteventset_seams" }
 libc = "0.2"

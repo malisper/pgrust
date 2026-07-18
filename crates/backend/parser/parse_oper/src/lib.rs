@@ -51,7 +51,7 @@ fn with_opr_cache<R>(f: impl FnOnce(&mut PgHashMap<'static, OprCacheKey, Oid>) -
         if slot.is_none() {
             // The context is leaked (backend-lifetime table, C: hash_create in
             // TopMemoryContext); flush on pg_operator and pg_cast changes.
-            let mcx = ::mcx::session_root("Operator lookup cache").mcx();
+            let mcx = Box::leak(Box::new(MemoryContext::new("Operator lookup cache"))).mcx();
             inval::invalidate::CacheRegisterSyscacheCallback(
                 OPERNAMENSP,
                 InvalidateOprCacheCallBack,

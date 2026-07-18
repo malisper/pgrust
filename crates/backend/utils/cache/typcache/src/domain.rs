@@ -32,7 +32,7 @@ pub struct DomainConstraintCache {
 // DDL-rare and consumers borrow &'static into it — C's ref-list leak comment
 // is the precedent).
 fn leak_dcc_mcx() -> Mcx<'static> {
-    ::mcx::session_root("Domain constraints").mcx()
+    Box::leak(Box::new(MemoryContext::new("Domain constraints"))).mcx()
 }
 
 fn str_in(mcx: Mcx<'static>, s: &str) -> PgResult<&'static str> {

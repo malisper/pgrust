@@ -45,7 +45,7 @@ impl Uncommitted {
     fn mcx(&mut self) -> Mcx<'static> {
         *self
             .mcx
-            .get_or_insert_with(|| mcx::session_root("UncommittedEnums").mcx())
+            .get_or_insert_with(|| Box::leak(Box::new(mcx::MemoryContext::new("UncommittedEnums"))).mcx())
     }
 }
 

@@ -481,11 +481,7 @@ pub fn BufferSync(flags: i32) -> PgResult<()> {
         let mut slot = cell.borrow_mut();
         let scratch = slot.get_or_insert_with(|| {
             let cx: &'static mcx::MemoryContext =
-                mcx::session_root("checkpoint scratch");
-            // LIFO: empty the droppy TLS slot before its context is freed.
-            mcx::register_session_cleanup(Box::new(|| {
-                CKPT_SCRATCH.with(|c| drop(c.borrow_mut().take()));
-            }));
+                Box::leak(Box::new(mcx::MemoryContext::new("checkpoint scratch")));
             CkptScratch {
                 items: mcx::PgVec::new_in(cx.mcx()),
                 per_ts: mcx::PgVec::new_in(cx.mcx()),

@@ -100,16 +100,6 @@ fn with_state<R>(f: impl for<'mcx> FnOnce(&mut DsmState<'mcx>) -> R) -> R {
             })
             .expect("DsmSegments context allocation");
             *slot = Some(ManuallyDrop::new(owned));
-            // Session-memory teardown (FPBUDGET-1): freed at clean task end
-            // (segments themselves detach via the exit-callback stack, which
-            // runs before teardown).
-            ::mcx::register_session_cleanup(Box::new(|| {
-                STATE.with(|cell| {
-                    if let Some(owned) = cell.borrow_mut().take() {
-                        drop(ManuallyDrop::into_inner(owned));
-                    }
-                });
-            }));
         }
         slot.as_mut().unwrap().with_mut(f)
     })

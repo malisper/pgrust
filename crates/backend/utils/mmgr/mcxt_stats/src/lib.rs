@@ -106,43 +106,8 @@ fn log_tree(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Session-memory teardown (FPBUDGET-1): the thread-local LIFO behind
-// mcx::register_session_cleanup / mcx::session_root. The backend runner
-// (launch_backend) drains it once at clean task end — C's
-// process-exit-frees-TopMemoryContext, made explicit for the thread model.
-// ---------------------------------------------------------------------------
-
-thread_local! {
-    static SESSION_CLEANUPS: RefCell<Vec<Box<dyn FnOnce()>>> =
-        const { RefCell::new(Vec::new()) };
-}
-
-fn session_cleanup_push(f: Box<dyn FnOnce()>) {
-    SESSION_CLEANUPS.with(|c| c.borrow_mut().push(f));
-}
-
-/// Drain this thread's session cleanups, newest first (reverse init order,
-/// C's on_proc_exit LIFO discipline). Idempotent; a cleanup registering
-/// further cleanups extends the drain.
-pub fn run_session_teardown() {
-    loop {
-        let next = SESSION_CLEANUPS.with(|c| c.borrow_mut().pop());
-        match next {
-            Some(f) => f(),
-            None => break,
-        }
-    }
-}
-
-/// Registered-cleanup count (leak-guard probes).
-pub fn session_cleanup_count() -> usize {
-    SESSION_CLEANUPS.with(|c| c.borrow().len())
-}
-
 pub fn init_seams() {
     mcx::set_root_observer(observe_root);
-    mcx::set_session_cleanup_sink(session_cleanup_push);
     mcxt_seams::handle_log_memory_context_interrupt::set(handle_log_memory_context_interrupt);
     mcxt_seams::log_memory_context_pending::set(log_memory_context_pending);
     mcxt_seams::process_log_memory_context_interrupt::set(process_log_memory_context_interrupt);

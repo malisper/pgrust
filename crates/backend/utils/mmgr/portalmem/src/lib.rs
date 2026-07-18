@@ -141,21 +141,10 @@ pub fn EnablePortalManager() {
     PORTAL_MGR.with(|m| {
         let mut slot = m.borrow_mut();
         debug_assert!(slot.is_none(), "portal manager already enabled");
-        // Backend-lifetime context; freed at clean task end (session_root).
+        // Backend-lifetime leak: C never deletes TopPortalContext (bare Box is
+        // the leak vehicle, not an engine allocation).
         let top: &'static MemoryContext =
-            ::mcx::session_root("TopPortalContext");
-        // LIFO: drop the manager — live portals, parked shells (releasing
-        // their plancache pins), and pooled PortalContext values — BEFORE
-        // the TopPortalContext arena is freed wholesale. Without this every
-        // PortalContext value still parked in the arena leaks its own arena
-        // (the FunctionScan-argcontext class, 8c22b25a6).
-        ::mcx::register_session_cleanup(Box::new(|| {
-            PORTAL_MGR.with(|m| {
-                if let Some(mgr) = m.borrow_mut().take() {
-                    drop(ManuallyDrop::into_inner(mgr));
-                }
-            });
-        }));
+            Box::leak(Box::new(MemoryContext::new("TopPortalContext")));
         let mut entries: PgVec<'static, Portal<'static>> = PgVec::new_in(top.mcx());
         entries.reserve(PORTALS_PER_USER);
         *slot = Some(ManuallyDrop::new(PortalManager {

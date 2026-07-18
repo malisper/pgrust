@@ -159,7 +159,7 @@ pub(crate) fn with_state<R>(f: impl FnOnce(&mut PgStatState) -> R) -> R {
         let st = slot.get_or_insert_with(|| {
             // C's lazily-created pgStatPendingContext; leaked: backend-lifetime.
             let ctx: &'static MemoryContext =
-                ::mcx::session_root("PgStat Pending");
+                Box::leak(Box::new(MemoryContext::new("PgStat Pending")));
             let m = ctx.mcx();
             ManuallyDrop::new(PgStatState {
                 ctx,

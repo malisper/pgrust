@@ -85,7 +85,7 @@ pub(crate) fn with_path_state<R>(f: impl FnOnce(&mut PathState) -> R) -> R {
     PATH.with(|cell| {
         let mut slot = cell.borrow_mut();
         let st = slot.get_or_insert_with(|| {
-            let mcx = ::mcx::session_root("namespace base search path").mcx();
+            let mcx = Box::leak(Box::new(MemoryContext::new("namespace base search path"))).mcx();
             ManuallyDrop::new(PathState {
                 mcx,
                 base_search_path: PgVec::new_in(mcx),

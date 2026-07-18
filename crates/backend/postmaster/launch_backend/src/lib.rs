@@ -367,45 +367,11 @@ fn run_child_task(
     // Park in flight (wretain): the reaper must treat this announce as a
     // task end, not a thread end. Marked before the announce so the reaper
     // can never observe the announce without the marker.
-    let parks = exitstatus == 0
+    if exitstatus == 0
         && init_small::wretain::parking()
         && init_small::wretain::proc_retained()
-        && init_small::wretain::sinval_retained();
-    // Session-memory teardown (FPBUDGET-1): C's process model frees the
-    // backend's whole TopMemoryContext estate at process exit; the thread
-    // model must do it explicitly or every session leaks its cache estate
-    // into the shared process (~2.2 MiB/seed under DDL/session churn).
-    // Clean proc_exit unwinds only (crash payloads skip cleanup like C's
-    // _exit); parked standbys keep their retained caches by design.
-    if !parks && payload.downcast_ref::<ipc::ProcExitThread>().is_some() {
-        mcxt_stats::run_session_teardown();
-        // Hand freed-but-retained segments back before the thread dies
-        // (mi_collect(force) via the installed hook): without it the dead
-        // thread's heap pages sit abandoned-but-committed in RSS.
-        mcx::release_retained();
-    }
-    // FPBUDGET-1 debug instrument (PGRUST_MCXT_CENSUS): process-global live
-    // context census at task end. Growth across successive dumps = context
-    // nodes leaked by already-dead session threads.
-    if mcx::debug_census::on() {
-        let rows = mcx::debug_census::snapshot();
-        let mut line = String::from("MCXT-CENSUS");
-        for (name, n) in rows.iter().take(48) {
-            line.push_str(&format!(" [{}]={}", name, n));
-        }
-        eprintln!("{} (pid {})", line, child_pid);
-        // This thread's own live roots with sizes: anything still here after
-        // teardown is the ledgered tail (bytes attribution for the census).
-        let mut forest = String::from("MCXT-FOREST");
-        for t in mcxt_stats::backend_context_forest() {
-            forest.push_str(&format!(
-                " [{}]=used{}/fp{}",
-                t.name, t.subtree_used, t.arena_footprint
-            ));
-        }
-        eprintln!("{} (pid {})", forest, child_pid);
-    }
-    if parks {
+        && init_small::wretain::sinval_retained()
+    {
         wpool::mark_parked_announce(child_pid);
     }
     if postmaster_seams::announce_child_exit::is_installed() {

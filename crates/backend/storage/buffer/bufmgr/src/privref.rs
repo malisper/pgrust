@@ -48,7 +48,7 @@ fn with<R>(f: impl FnOnce(&mut PrivRef) -> R) -> R {
 
 #[cold]
 fn make_overflow_map() -> ManuallyDrop<PgHashMap<'static, Buffer, i32>> {
-    let cx: &'static MemoryContext = ::mcx::session_root("PrivateRefCount");
+    let cx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("PrivateRefCount")));
     ManuallyDrop::new(PgHashMap::with_hasher_in(Default::default(), cx.mcx()))
 }
 

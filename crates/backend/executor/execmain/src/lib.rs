@@ -138,7 +138,7 @@ pub(crate) fn desc_mcx() -> Mcx<'static> {
             Some(m) => m,
             None => {
                 let m: &'static MemoryContext =
-                    ::mcx::session_root("ExecutorResultTypes");
+                    Box::leak(Box::new(MemoryContext::new("ExecutorResultTypes")));
                 c.set(Some(m));
                 m
             }
