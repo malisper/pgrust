@@ -219,12 +219,13 @@ impl SimWireClient {
                 }
             }
         }
-        // Progress is honest here even when no bytes moved out: recv_all
-        // consulted the op log (fingerprint advances via op_seq), so a truly
-        // stuck session still trips the provider's stall detection only if
-        // NOTHING (including op consults) changes — and a server that parks
-        // again without emitting bytes after we sent nothing means a
-        // protocol hang, which the e2e watchdog owns.
+        // Progress claims byte movement. Since inc-2 the provider's stall
+        // fingerprint EXCLUDES op consults (review observation 2): if this
+        // step neither received nor sent a byte (nor closed), the pair is
+        // protocol-stalled and the provider panics deterministically at the
+        // block point — the charter behavior, not an e2e-watchdog timeout.
+        // Every healthy block point moves bytes (the server flushes before
+        // parking; a new flush always carries a frame we drain here).
         pqcomm_simnet::PumpStatus::Progress
     }
 }
@@ -279,6 +280,16 @@ pub fn PostgresSimNetMain(argv: &[String], username: &str) -> ! {
         .collect();
     let mut client = SimWireClient::new(stmts);
     pqcomm_simnet::install_client_pump(move || client.pump());
+
+    // Transport fault plan (inc-2): PGRUST_SIMNET_FAULTS carries a
+    // parse_fault_spec spec (e.g. "seed=0x5EED Read@12=drop:2"); rules are
+    // op-sequence-targeted and every firing is NETFAULT-logged into the same
+    // op log the determinism gate byte-compares — fault runs replay too.
+    if let Ok(spec) = std::env::var("PGRUST_SIMNET_FAULTS") {
+        if !spec.trim().is_empty() {
+            pqcomm_simnet::install_fault_plan_from_spec(&spec);
+        }
+    }
 
     // ---- The transport-blind wire session (stdio_wire's inner, verbatim).
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
