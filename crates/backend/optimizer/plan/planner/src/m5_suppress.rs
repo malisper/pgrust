@@ -69,7 +69,10 @@ use types_pathnodes::{AMFLAG_PGRCOLUMNAR, AMFLAG_PGRCOLUMNAR_ZEROCNT};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CoverClass {
     /// pgrcolumnar seq-scan folds / plain agg (scan arm + plain-agg sink):
-    /// whitelisted order-insensitive-exact aggregates, no GROUP BY.
+    /// whitelisted order-insensitive-exact aggregates, no GROUP BY. WS-COVER
+    /// (phase3-close §3.2) widened the keyed shape to min/max(date) — the
+    /// fold arm's classify_trans admits it at the I32 lane (date is int4-width
+    /// byval), so the same fold economics + floor apply (CB q7 flip).
     CbPlainAggFold,
     /// hashed GROUP BY over pgrcolumnar, int-family NOT-NULL-agnostic Var keys
     /// (walk enforces nullable-image refusal); spill-ELIGIBLE row.
@@ -155,7 +158,7 @@ pub const BOOTSTRAP_MATRIX: &[MatrixRow] = &[
     MatrixRow {
         class: CoverClass::CbPlainAggFold,
         covered: true,
-        qualifiers: "whitelist=count/sum/avg/min/max-int; order-insensitive-exact partials",
+        qualifiers: "whitelist=count/sum/avg/min/max-int + min/max(date) (I32 fold, WS-COVER §3.2); order-insensitive-exact partials",
     },
     MatrixRow {
         class: CoverClass::CbGroupedAggIntKeys,
@@ -322,6 +325,14 @@ const F_MAX_INT2: u32 = 2117;
 const F_MIN_INT8: u32 = 2131;
 const F_MIN_INT4: u32 = 2132;
 const F_MIN_INT2: u32 = 2133;
+// WS-COVER (phase3-close §3.2): min/max(date) aggregate OIDs. The scan-fold
+// arm's classify_trans admits F_DATE_LARGER(1138)/F_DATE_SMALLER(1139) at the
+// I32 lane width (lanefold::classify_trans) — date is int4-width byval, so the
+// fold kernel and the CbPlainAggFold engagement floor are byte-identical to
+// int4 min/max. Keyed apart from PLAIN_FOLD_AGGS because their arg type is
+// DATE, not int-family (see is_plain_fold_agg).
+const F_MAX_DATE: u32 = 2122;
+const F_MIN_DATE: u32 = 2138;
 
 /// Plain-fold (scan-arm) aggregate whitelist: the order-insensitive-exact
 /// partial kinds of §1.1 (CountStar/Any, Sum ring, AvgAccum/Int128Avg,
@@ -374,6 +385,7 @@ const HEAP_CMP_AGGS: &[u32] = &[
 const INT2OID: u32 = 21;
 const INT4OID: u32 = 23;
 const INT8OID: u32 = 20;
+const DATEOID: u32 = 1082;
 const TEXTOID: u32 = 25;
 const VARCHAROID: u32 = 1043;
 const DEFAULT_COLLATION_OID: u32 = 100;
@@ -567,7 +579,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     if parse.groupClause.is_nil() {
         // Plain aggregation, one output row.
         if is_cb {
-            if tlist_all_whitelisted_aggs(parse, rti, PLAIN_FOLD_AGGS) {
+            if tlist_all_plain_fold_aggs(parse, rti) {
                 // Qualed COUNT-ONLY census (q2box lane, 2026-07-15): the
                 // transition program reads no scan column, so the runtime
                 // scan arm never takes it (no fold plan; the serial lane's
@@ -1115,6 +1127,15 @@ fn is_whitelisted_agg_2rti(expr: Node<'_>, rti_l: usize, rti_r: usize, whitelist
 }
 
 fn aggref_plain(agg: &Aggref<'_>, rti: usize) -> bool {
+    aggref_plain_typed(agg, rti, is_int_family)
+}
+
+/// `aggref_plain` with a caller-supplied single-arg type predicate: a
+/// structurally plain Aggref (no ORDER BY/DISTINCT/FILTER/variadic/
+/// ordered-set/levelsup) whose arg is empty (count(*)) or a single Var of an
+/// `arg_type_ok` type on the scanned rel. `aggref_plain` = int-family arg;
+/// the date scan-fold recognizer (is_plain_fold_agg) passes t==DATEOID.
+fn aggref_plain_typed(agg: &Aggref<'_>, rti: usize, arg_type_ok: impl Fn(u32) -> bool) -> bool {
     if agg.agglevelsup != 0
         || agg.aggkind != AGGKIND_NORMAL
         || agg.aggvariadic
@@ -1129,10 +1150,40 @@ fn aggref_plain(agg: &Aggref<'_>, rti: usize) -> bool {
         0 => agg.aggstar || agg.aggfnoid == F_COUNT_STAR,
         1 => {
             let Some(arg_tle) = agg.args.nth(0).as_target_entry() else { return false };
-            is_covered_key_var(arg_tle.expr, rti, is_int_family)
+            is_covered_key_var(arg_tle.expr, rti, arg_type_ok)
         }
         _ => false,
     }
+}
+
+/// A plain scan-fold aggregate (CbPlainAggFold arm): the int-family
+/// PLAIN_FOLD_AGGS over int-family Vars (count(*) included), OR min/max(date)
+/// over a bare DATE Var. WS-COVER (phase3-close §3.2) widens the probe onto
+/// the date min/max shape the fold arm's classify_trans already admits at the
+/// I32 lane width — strictly narrower than the walk (probe ⊂ walk, risk P1),
+/// and reusing the CbPlainAggFold floor because date is int4-width byval so
+/// the fold economics are byte-identical to int4 min/max.
+fn is_plain_fold_agg(expr: Node<'_>, rti: usize) -> bool {
+    if is_whitelisted_agg(expr, rti, PLAIN_FOLD_AGGS) {
+        return true;
+    }
+    let Some(agg) = expr.as_aggref() else { return false };
+    matches!(agg.aggfnoid, F_MAX_DATE | F_MIN_DATE)
+        && aggref_plain_typed(agg, rti, |t| t == DATEOID)
+}
+
+/// Every tlist entry is a plain scan-fold aggregate (int-family or date
+/// min/max), and at least one entry exists — the CbPlainAggFold admission.
+fn tlist_all_plain_fold_aggs(parse: &Query<'_>, rti: usize) -> bool {
+    let mut n = 0usize;
+    for tle_node in &parse.targetList {
+        let Some(tle) = tle_node.as_target_entry() else { return false };
+        if !is_plain_fold_agg(tle.expr, rti) {
+            return false;
+        }
+        n += 1;
+    }
+    n > 0
 }
 
 /// Every non-junk tlist entry is a whitelisted Aggref (plain-agg tlists);
