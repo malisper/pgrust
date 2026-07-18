@@ -627,6 +627,12 @@ fn red_fsyncgate_retry_believer_is_caught() {
             FaultDecision::Errno(libc::EIO),
         )],
     );
+    // Pin the ADVERSARIAL disk. Under the inc-2 N2 model the doomed epoch
+    // routes through the CrashImage policy, so on a kind (seeded-lucky) disk
+    // the believer's record can genuinely survive — exactly why the bug
+    // class is insidious on real hardware. The red arm asserts the catch on
+    // the disk that loses it.
+    SimVfs::set_crash_image(CrashImage::DropAll);
     let out = run_workload(4, true /* the believer retries and trusts the OK */);
     assert!(out.completed, "the believer never notices anything wrong");
     assert!(

@@ -37,14 +37,19 @@
 //!    battery can prove the floor has teeth.
 //! 2. **fsync-failure state machine** (the fsyncgate semantics): writes
 //!    since the last SUCCESSFUL fsync form the unsynced journal. A FAILED
-//!    fsync moves that journal to may-be-lost **permanently** — a later
+//!    fsync moves that journal to may-be-lost **permanently** — and (inc-2,
+//!    review N2) "may be lost" is literal: the installed [`CrashImage`]
+//!    policy decides which SUBSET of the doomed epoch already reached the
+//!    platter before the error (kept ops fold into the durable image right
+//!    then, possibly sector-torn; dropped ops are gone for good). A later
 //!    successful fsync promotes only writes issued after the failure; the
-//!    doomed epoch never resurrects, and never survives a crash. This is
+//!    dropped part never resurrects, and never survives a crash. This is
 //!    what distinguishes "we PANIC'd and recovered from WAL" (correct) from
 //!    "we retried fsync, it said OK, and we believed it" (the fsyncgate
-//!    bug). Dir-fsync failure is currently modeled as promotion-simply-not-
-//!    happening (stale durable dirents) — softer than the file plane;
-//!    ledgered for inc-2.
+//!    bug) — and also catches protocols that assume "failed fsync ⇒ old
+//!    bytes intact" (in-place multi-sector overwrite shapes). Dir-fsync
+//!    failure is still modeled as promotion-simply-not-happening (stale
+//!    durable dirents) — softer than the file plane; ledgered (hard mode).
 //! 3. **Dirent durability requires the parent-dir fsync**: namespace ops
 //!    (create/rename/unlink/mkdir/rmdir) are volatile until the PARENT
 //!    directory is fsync'd; a crash reverts every directory to its last
@@ -124,9 +129,11 @@ pub enum OpKind {
 
 /// Description of the op the fault plan is consulted about. `pread`/`pwrite`
 /// present as single-iovec `PReadV`/`PWriteV` (they share the data plane).
-/// P4 addition: fd-addressed ops resolve `path` to the path the fd was
-/// opened under (rename does not retroactively rewrite it), so path-class
-/// rules apply to the data/durability plane too.
+/// P4 addition: fd-addressed ops resolve `path` to the fd's node's CURRENT
+/// primary name at op time (review N4: renames — the WAL-recycle shape —
+/// retarget class rules from the next op on; unlinked-but-open fds keep
+/// their open-time path), so path-class rules apply to the data/durability
+/// plane too.
 #[derive(Debug, Clone)]
 pub struct OpDesc<'a> {
     pub kind: OpKind,
@@ -166,6 +173,14 @@ pub enum FaultDecision {
 /// Consulted before every op. Mutable so plans can count/schedule.
 pub trait FaultPlan {
     fn before_op(&mut self, op: &OpDesc<'_>) -> FaultDecision;
+
+    /// Drain human-readable notes the plan wants appended to the fault log
+    /// after this op's decision (review N5: a losing rule whose nth firing
+    /// was consumed by a higher-priority rule logs a SUPPRESSED line so plan
+    /// authors see the silent consumption). Default: nothing.
+    fn drain_notes(&mut self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// The always-proceed plan (default).
@@ -294,11 +309,18 @@ impl FaultRule {
 pub struct SeededFaultPlan {
     seed: u64,
     rules: Vec<(FaultRule, u64 /* matches so far */)>,
+    /// Pending suppressed-decision notes (review N5), drained into the
+    /// central fault log by the op that produced them.
+    notes: Vec<String>,
 }
 
 impl SeededFaultPlan {
     pub fn new(seed: u64, rules: Vec<FaultRule>) -> Self {
-        SeededFaultPlan { seed, rules: rules.into_iter().map(|r| (r, 0)).collect() }
+        SeededFaultPlan {
+            seed,
+            rules: rules.into_iter().map(|r| (r, 0)).collect(),
+            notes: Vec::new(),
+        }
     }
 
     pub fn seed(&self) -> u64 {
@@ -316,24 +338,41 @@ impl SeededFaultPlan {
 impl FaultPlan for SeededFaultPlan {
     fn before_op(&mut self, op: &OpDesc<'_>) -> FaultDecision {
         let mut decision = FaultDecision::Proceed;
-        for (rule, matched) in &mut self.rules {
+        for (i, (rule, matched)) in self.rules.iter_mut().enumerate() {
             if !rule.matcher.matches(op) {
                 continue;
             }
             *matched += 1;
             let fire = *matched == rule.nth || (rule.sticky && *matched > rule.nth);
-            if fire && decision == FaultDecision::Proceed {
+            if !fire {
+                continue;
+            }
+            if decision == FaultDecision::Proceed {
                 decision = rule.action;
+            } else {
+                // Review N5: the losing rule's nth firing is consumed by a
+                // higher-priority rule — say so in the log instead of eating
+                // it silently (rule order is priority; counters always run).
+                self.notes.push(format!(
+                    "SUPPRESSED rule#{i} nth={} action={:?} (lost to an earlier rule)",
+                    rule.nth, rule.action
+                ));
             }
         }
         decision
     }
+
+    fn drain_notes(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.notes)
+    }
 }
 
-/// What survives of the unsynced journals at a cut. fsync is the only
-/// barrier: everything promoted by a successful fsync always survives;
-/// everything in a failed-fsync (doomed) epoch never survives; the policy
-/// only governs the in-between (the currently-unsynced set).
+/// What survives of the unsynced journals at a cut — and (review N2) what
+/// a DOOMED fsync epoch persisted before its fsync errored. fsync is the
+/// only barrier: everything promoted by a successful fsync always survives;
+/// the policy governs both the currently-unsynced set at a cut and the
+/// failed epoch's partial writeback at fsync-failure time (kept doomed ops
+/// fold into the durable image right then; dropped ones never resurrect).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CrashImage {
     /// Adversarial floor (default): nothing unsynced survives.
@@ -363,6 +402,13 @@ fn subset_coin(seed: u64, cut_no: u64, node: usize, idx: usize) -> u64 {
         ^ (node as u64).wrapping_mul(0xA076_1D64_78BD_642F)
         ^ (idx as u64).wrapping_mul(0xE703_7ED1_A0B4_28DB);
     splitmix64(&mut s)
+}
+
+/// Deterministic coin for a DOOMED fsync epoch (review N2) — domain-separated
+/// from the cut stream so epoch subsets and cut subsets are independent
+/// draws of the same seed.
+fn doomed_coin(seed: u64, epoch_no: u64, node: usize, idx: usize) -> u64 {
+    subset_coin(seed ^ 0xD003_ED00_5EED_C0DE, epoch_no, node, idx)
 }
 
 /// The 512 B atomicity floor: the surviving prefix of a torn write ends on
@@ -466,9 +512,9 @@ struct OpenFile {
     /// enforce access modes on the data plane).
     #[allow(dead_code)]
     flags: c_int,
-    /// The (normalized) path this fd was opened under — resolved into
-    /// OpDesc.path for fd-addressed ops so path-class fault rules see the
-    /// data plane. Rename does not retroactively rewrite it.
+    /// The (normalized) path this fd was opened under. OpDesc.path for
+    /// fd-addressed ops resolves the node's CURRENT name at op time (review
+    /// N4); this open-time record is the fallback for unlinked-but-open fds.
     path: PathBuf,
 }
 
@@ -493,6 +539,9 @@ struct SimState {
     atomic_writes: bool,
     /// Cuts so far (crash numbering for logs and harness detection).
     cuts: u64,
+    /// Doomed fsync epochs so far (review N2: numbers the doomed-epoch
+    /// subset draws, independently of cut numbering).
+    doomed_epochs: u64,
 }
 
 impl SimState {
@@ -519,6 +568,7 @@ impl SimState {
             crash_image: CrashImage::DropAll,
             atomic_writes: false,
             cuts: 0,
+            doomed_epochs: 0,
         }
     }
 }
@@ -917,9 +967,19 @@ impl SimState {
         }
     }
 
-    /// The fd-op path view for the fault plan (path-at-open).
+    /// The fd-op path view for the fault plan — resolved AT OP TIME (review
+    /// N4): the fd's node's current primary name, first in BTree order, so
+    /// path-class rules track renames (the WAL-recycle shape: a segment
+    /// renamed into pg_wal while open is Wal-class from that op on). Falls
+    /// back to the open-time path when the node is no longer reachable
+    /// (unlinked-but-open FD_DELETE_AT_CLOSE temp files keep their class).
     fn fd_path(&self, fd: c_int) -> Option<PathBuf> {
-        self.open.get(&fd).map(|of| of.path.clone())
+        let of = self.open.get(&fd)?;
+        self.namespace
+            .iter()
+            .find(|(_, &id)| id == of.node)
+            .map(|(p, _)| p.clone())
+            .or_else(|| Some(of.path.clone()))
     }
 
     fn consult(&mut self, op: &OpDesc<'_>) -> FaultDecision {
@@ -934,6 +994,9 @@ impl SimState {
                 "FAULT seq={} op={:?} path={} fd={:?} off={:?} len={:?} decision={:?}",
                 self.op_seq, op.kind, path, op.fd, op.offset, op.len, d
             ));
+        }
+        for note in self.plan.drain_notes() {
+            self.fault_log.push(format!("NOTE seq={} {note}", self.op_seq));
         }
         d
     }
@@ -990,25 +1053,76 @@ fn sync_locked(st: &mut SimState, fd: c_int, kind: OpKind) -> c_int {
         FaultDecision::Proceed => promote(st, fd),
         FaultDecision::Errno(e) => {
             // The fsyncgate state machine: a failed fsync means the dirty
-            // epoch is may-be-lost PERMANENTLY. Discard the journal without
-            // promoting — volatile keeps showing the data (page-cache view),
-            // but no later successful fsync resurrects it and no crash lets
-            // it survive. Retry-and-believe is thereby always caught.
+            // epoch is may-be-lost PERMANENTLY — and, per review N2, "may be
+            // lost" means an ARBITRARY SUBSET of the epoch may already have
+            // reached the platter before the error (real writeback persists
+            // pages in any order). The epoch's journal is routed through the
+            // installed CrashImage policy: kept ops fold into the durable
+            // image NOW (they made it to disk, possibly sector-torn);
+            // dropped ops are gone for good. Either way the journal empties:
+            // volatile keeps showing everything (page-cache view), no later
+            // successful fsync resurrects the dropped ops, and no crash
+            // brings them back. A protocol that assumes "failed fsync ⇒ old
+            // bytes intact" is now caught too; retry-and-believe remains
+            // caught under the DropAll/unlucky-seed arms.
             if let Some(of) = st.open.get(&fd).cloned() {
-                if let Node::File(f) = &mut st.nodes[of.node].node {
-                    let dropped = f.unsynced.len();
-                    if dropped > 0 {
-                        f.unsynced.clear();
+                let policy = st.crash_image;
+                let atomic = st.atomic_writes;
+                let node_id = of.node;
+                let resolved = st.fd_path(fd).unwrap_or_else(|| of.path.clone());
+                let mut line: Option<String> = None;
+                if let Node::File(f) = &mut st.nodes[node_id].node {
+                    if !f.unsynced.is_empty() {
+                        st.doomed_epochs += 1;
+                        let epoch = st.doomed_epochs;
+                        let entries = std::mem::take(&mut f.unsynced);
+                        let (mut kept, mut torn) = (0usize, 0usize);
+                        for (i, entry) in entries.iter().enumerate() {
+                            let (keep, cap) = match policy {
+                                CrashImage::DropAll => (false, 0),
+                                CrashImage::KeepAll => (true, usize::MAX),
+                                CrashImage::SeededSubset(seed) => {
+                                    let coin = doomed_coin(seed, epoch, node_id, i);
+                                    let keep = coin & 1 == 1;
+                                    let cap = match entry {
+                                        JournalOp::Write { off, data }
+                                            if keep && (coin >> 1) & 3 == 0 =>
+                                        {
+                                            sector_prefix(
+                                                *off,
+                                                data.len(),
+                                                ((coin >> 3) as usize) % (data.len() + 1),
+                                                atomic,
+                                            )
+                                        }
+                                        _ => usize::MAX,
+                                    };
+                                    (keep, cap)
+                                }
+                            };
+                            if keep {
+                                kept += 1;
+                                if cap != usize::MAX {
+                                    torn += 1;
+                                }
+                                apply_journal_op(&mut f.durable, entry, cap);
+                            }
+                        }
                         let seq = st.op_seq;
-                        st.fault_log.push(format!(
-                            "FSYNCGATE seq={seq} fd={fd} path={} dropped_ops={dropped}",
-                            of.path.display()
+                        line = Some(format!(
+                            "FSYNCGATE seq={seq} fd={fd} path={} epoch={epoch} \
+                             epoch_ops={} kept={kept} torn={torn} policy={policy:?}",
+                            resolved.display(),
+                            entries.len()
                         ));
                     }
                 }
+                if let Some(l) = line {
+                    st.fault_log.push(l);
+                }
                 // Dir-fsync failure: promotion simply does not happen (the
                 // durable entry image stays stale). Softer than the file
-                // plane; ledgered for inc-2.
+                // plane; still ledgered (dirent hard mode).
             }
             fail(e)
         }
@@ -2901,5 +3015,226 @@ mod tests {
         assert!(floored[100..512].iter().all(|&b| b == 0xEE));
         assert!(floored[512..].iter().all(|&b| b == 0xBB), "floor arm catches the tear");
         assert_ne!(floored, weakened, "if these agree the model has no teeth");
+    }
+
+    /// Review N2: a DOOMED fsync epoch routes through the CrashImage policy —
+    /// an arbitrary (seeded) subset of the failed epoch persisted before the
+    /// error; the rest is gone for good and no later fsync resurrects it.
+    #[test]
+    fn doomed_epoch_routes_through_crash_image_policy() {
+        // Base image: 4 sectors of 0xAA, durable; then a doomed epoch of 4
+        // sector-aligned writes 0xB0+i; fail the fsync; inspect durable via
+        // a cut under KeepAll of the (empty) post-failure set.
+        fn run(policy: CrashImage) -> (Vec<u8>, Vec<u8>) {
+            let v = fresh();
+            let fd = open_rw_create(&v, "/f");
+            dir_fsync(&v, "/");
+            assert_eq!(v.pwrite(fd, &[0xAAu8; 2048], 0), 2048);
+            assert_eq!(v.fsync(fd), 0);
+            SimVfs::set_crash_image(policy);
+            SimVfs::set_fault_plan(Box::new(SeededFaultPlan::new(
+                0,
+                vec![FaultRule::nth_matching(
+                    OpMatch { kinds: Some(vec![OpKind::Fsync]), ..OpMatch::default() },
+                    1,
+                    FaultDecision::Errno(libc::EIO),
+                )],
+            )));
+            for i in 0..4u8 {
+                assert_eq!(v.pwrite(fd, &vec![0xB0 + i; 512], (i as off_t) * 512), 512);
+            }
+            set_errno(0);
+            assert_eq!(v.fsync(fd), -1, "injected fsync failure");
+            assert_eq!(get_errno(), libc::EIO);
+            let volatile = read_file(&v, "/f").unwrap();
+            // Everything unsynced is now gone from the journal; a cut under
+            // ANY policy exposes exactly the durable image.
+            SimVfs::cut();
+            let durable = read_file(&v, "/f").unwrap();
+            (volatile, durable)
+        }
+
+        // DropAll (the adversarial floor, = inc-1 behavior): epoch fully lost.
+        let (vol, dur) = run(CrashImage::DropAll);
+        assert_eq!(vol.len(), 2048);
+        assert!(vol.iter().all(|&b| b >= 0xB0), "volatile hides the loss");
+        assert!(dur.iter().all(|&b| b == 0xAA), "DropAll: doomed epoch fully lost");
+
+        // KeepAll (kindest legal disk): the whole epoch made it out before
+        // the error — durable shows all of it.
+        let (_, dur) = run(CrashImage::KeepAll);
+        assert!(dur.iter().all(|&b| b >= 0xB0), "KeepAll: doomed epoch fully persisted");
+
+        // SeededSubset: deterministically scan for a seed whose doomed-epoch
+        // draw keeps a PROPER nonempty subset — the N2 semantics proper.
+        let mut found = None;
+        for seed in 0..64u64 {
+            let (_, dur) = run(CrashImage::SeededSubset(seed));
+            let kept_blocks: Vec<bool> = (0..4)
+                .map(|i| dur[i * 512..(i + 1) * 512].iter().all(|&b| b == 0xB0 + i as u8))
+                .collect();
+            let dropped_blocks: Vec<bool> = (0..4)
+                .map(|i| dur[i * 512..(i + 1) * 512].iter().all(|&b| b == 0xAA))
+                .collect();
+            // every sector is wholly kept or wholly dropped (aligned
+            // sector-sized writes cannot half-survive)
+            for i in 0..4 {
+                assert!(
+                    kept_blocks[i] || dropped_blocks[i],
+                    "seed {seed}: sector {i} neither kept nor dropped"
+                );
+            }
+            let kept = kept_blocks.iter().filter(|&&k| k).count();
+            if kept > 0 && kept < 4 {
+                found = Some(seed);
+                break;
+            }
+        }
+        let seed = found.expect("a proper-subset seed exists in the first 64");
+
+        // Same seed twice ⇒ identical durable images (determinism).
+        let (_, d1) = run(CrashImage::SeededSubset(seed));
+        let (_, d2) = run(CrashImage::SeededSubset(seed));
+        assert_eq!(d1, d2, "doomed-epoch subset must be deterministic in the seed");
+
+        // No resurrection: after the failure, a NEW write + successful fsync
+        // promotes only the new epoch; dropped doomed ops stay lost.
+        let v = fresh();
+        let fd = open_rw_create(&v, "/f");
+        dir_fsync(&v, "/");
+        assert_eq!(v.pwrite(fd, &[0xAAu8; 2048], 0), 2048);
+        assert_eq!(v.fsync(fd), 0);
+        SimVfs::set_crash_image(CrashImage::SeededSubset(seed));
+        SimVfs::set_fault_plan(Box::new(SeededFaultPlan::new(
+            0,
+            vec![FaultRule::nth_matching(
+                OpMatch { kinds: Some(vec![OpKind::Fsync]), ..OpMatch::default() },
+                1,
+                FaultDecision::Errno(libc::EIO),
+            )],
+        )));
+        for i in 0..4u8 {
+            assert_eq!(v.pwrite(fd, &vec![0xB0 + i; 512], (i as off_t) * 512), 512);
+        }
+        assert_eq!(v.fsync(fd), -1);
+        let after_fail = {
+            let mut probe = Vec::new();
+            for (p, img) in v.image_dump() {
+                if p == Path::new("/f") {
+                    probe = img.unwrap().1; // the durable image
+                }
+            }
+            probe
+        };
+        assert_eq!(v.pwrite(fd, &[0xCCu8; 512], 2048), 512);
+        assert_eq!(v.fsync(fd), 0, "post-failure epoch promotes fine");
+        let mut expected = after_fail.clone();
+        expected.resize(2560, 0);
+        expected[2048..2560].fill(0xCC);
+        for (p, img) in v.image_dump() {
+            if p == Path::new("/f") {
+                assert_eq!(
+                    img.unwrap().1,
+                    expected,
+                    "later fsync promotes ONLY the new epoch — no resurrection"
+                );
+            }
+        }
+        assert!(
+            SimVfs::fault_log().iter().any(|l| l.starts_with("FSYNCGATE ")
+                && l.contains("policy=SeededSubset")),
+            "the doomed-epoch draw is logged with its policy: {:?}",
+            SimVfs::fault_log()
+        );
+    }
+
+    /// Review N4: fd-addressed ops resolve their path AT OP TIME — a file
+    /// renamed into pg_wal while open (the WAL-recycle shape) is Wal-class
+    /// from the next op on; an unlinked-but-open fd keeps its open path.
+    #[test]
+    fn renamed_while_open_fd_reclassifies_at_op_time() {
+        let v = fresh();
+        assert_eq!(v.mkdir(&c("/data"), 0o700 as mode_t), 0);
+        assert_eq!(v.mkdir(&c("/data/pg_wal"), 0o700 as mode_t), 0);
+        let fd = open_rw_create(&v, "/data/recycle.tmp");
+
+        // Fail the FIRST Wal-class write.
+        SimVfs::set_fault_plan(Box::new(SeededFaultPlan::new(
+            0,
+            vec![FaultRule::nth_matching(
+                OpMatch {
+                    kinds: Some(vec![OpKind::PWriteV]),
+                    class: Some(PathClass::Wal),
+                    path_contains: None,
+                },
+                1,
+                FaultDecision::Errno(libc::EIO),
+            )],
+        )));
+
+        // Pre-rename the fd is Temp-class: the Wal rule must not match.
+        assert_eq!(v.pwrite(fd, b"tmp", 0), 3, "Temp-class write proceeds");
+        // The recycle: rename INTO pg_wal while the fd stays open.
+        assert_eq!(
+            v.rename(&c("/data/recycle.tmp"), &c("/data/pg_wal/000000010000000000000042")),
+            0
+        );
+        set_errno(0);
+        assert_eq!(v.pwrite(fd, b"wal", 0), -1, "post-rename the SAME fd is Wal-class");
+        assert_eq!(get_errno(), libc::EIO);
+        let log = SimVfs::fault_log();
+        assert!(
+            log.iter().any(|l| l.contains("pg_wal/000000010000000000000042")),
+            "the log carries the CURRENT (renamed) path: {log:?}"
+        );
+
+        // Unlinked-but-open: falls back to the open-time path (class keeps).
+        let v = fresh();
+        let fd = open_rw_create(&v, "/data.tmp");
+        SimVfs::set_fault_plan(Box::new(SeededFaultPlan::new(
+            0,
+            vec![FaultRule::nth_matching(
+                OpMatch {
+                    kinds: Some(vec![OpKind::PWriteV]),
+                    class: Some(PathClass::Temp),
+                    path_contains: None,
+                },
+                1,
+                FaultDecision::Errno(libc::ENOSPC),
+            )],
+        )));
+        assert_eq!(v.unlink(&c("/data.tmp")), 0);
+        set_errno(0);
+        assert_eq!(v.pwrite(fd, b"x", 0), -1, "unlinked fd keeps its open-time class");
+        assert_eq!(get_errno(), libc::ENOSPC);
+        assert_eq!(v.close(fd), 0);
+    }
+
+    /// Review N5: when two rules fire on one op, the loser's consumed nth is
+    /// LOGGED (a SUPPRESSED note), not silently eaten.
+    #[test]
+    fn suppressed_rule_firing_is_logged() {
+        let v = fresh();
+        SimVfs::set_fault_plan(Box::new(SeededFaultPlan::new(
+            0,
+            vec![
+                FaultRule::nth_matching(OpMatch::any(), 2, FaultDecision::Errno(libc::EIO)),
+                FaultRule::nth_matching(OpMatch::any(), 2, FaultDecision::Errno(libc::ENOSPC)),
+            ],
+        )));
+        let fd = open_rw_create(&v, "/f"); // op 1: both count, neither fires
+        set_errno(0);
+        assert_eq!(v.pwrite(fd, b"x", 0), -1, "op 2: rule#0 wins");
+        assert_eq!(get_errno(), libc::EIO, "first rule in order wins");
+        // rule#1's nth firing was consumed on op 2 — it must NOT fire later.
+        assert_eq!(v.pwrite(fd, b"y", 0), 1, "op 3 proceeds: loser's nth was consumed");
+        let log = SimVfs::fault_log();
+        assert!(
+            log.iter()
+                .any(|l| l.contains("SUPPRESSED rule#1")
+                    && l.contains(&format!("Errno({})", libc::ENOSPC))),
+            "the consumed firing must be visible in the log: {log:?}"
+        );
+        assert_eq!(v.close(fd), 0);
     }
 }
