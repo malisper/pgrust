@@ -1823,6 +1823,106 @@ fn limit_pushes_bound_into_sort_state() {
     scanfix::quiesced();
 }
 
+// SORTFEED-RA policy pin (the AD2 letter's documented shave): once a
+// randomAccess sort is DONE, `try_own_sort`'s refused-memo branch must exit
+// on the `sort_Done` load BEFORE the RA knob OnceLock + the
+// `sort_randomaccess_memo` probe. Two arms over identical Sort-over-SeqScan
+// plans inited with EXEC_FLAG_REWIND|EXEC_FLAG_BACKWARD (randomAccess):
+//   * control (forward-first): the first pull reaches the RA branch
+//     pre-done and computes the RA side memo — proves the RA admission
+//     path is live in this test world, so the pin arm cannot pass
+//     vacuously (e.g. under a knob-OFF environment).
+//   * pin (backward-first): the first pull refuses at the direction gate
+//     (before any memo) and the row-path `exec_sort` feeds the tuplesort,
+//     so the node reaches sort_Done with the RA side memo still unset.
+//     Every later FORWARD pull is post-done and must leave the side memo
+//     UNSET while rows flow from the bare drain leg. If the policy
+//     regresses (the sort_Done check moves back below the memo probe),
+//     those pulls compute the memo and the final assert fails.
+#[test]
+fn sortfeed_ra_postdone_pull_exits_before_ra_memo() {
+    use ::types_scan::sdir::BackwardScanDirection;
+    use ::types_slot::{EXEC_FLAG_BACKWARD, EXEC_FLAG_REWIND};
+    install_seams();
+    scanfix::install();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mcx = leaked_mcx();
+
+    let ra_memo_of = |ps: &crate::procnode::PlanStateNode| -> (bool, Option<bool>) {
+        match ps {
+            crate::procnode::PlanStateNode::Sort(s) => {
+                (s.state.sort_done(), ::nodesort::sort_lane_ra_fusible(&s.state))
+            }
+            _ => panic!("expected Sort root"),
+        }
+    };
+
+    let drive = |relid: u32, backward_first: bool| {
+        scanfix::register_table(relid, &[&[3, 1, 2], &[5, 4]]);
+        let pstmt = mk_sort_limit_pstmt(mcx, relid, true, None, None);
+        let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+        let snapshot: snapmgr::Snapshot =
+            std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                snap_ctx.mcx(),
+                ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+            ));
+        with_exec_data(pstmt, |data, pstmt| {
+            data.estate.es_snapshot = Some(snapshot);
+            crate::execmain::init_plan(
+                data,
+                pstmt,
+                CmdType::CMD_SELECT,
+                EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD,
+            )
+            .unwrap();
+            let ExecData { estate, planstate } = data;
+            let ps = planstate.as_mut().unwrap();
+
+            if backward_first {
+                // Row-path feed: the direction gate refuses before any
+                // memo; exec_sort builds + finalizes the tuplesort and a
+                // backward read from the start position yields no row.
+                estate.es_direction = BackwardScanDirection;
+                assert!(exec_proc_node(ps, estate).unwrap().is_none());
+                let (done, memo) = ra_memo_of(ps);
+                assert!(done, "backward-first pull must feed the sort");
+                assert_eq!(memo, None, "row-path feed must not touch the RA side memo");
+                estate.es_direction = ForwardScanDirection;
+            }
+
+            let mut vals = Vec::new();
+            while let Some(slot_id) = exec_proc_node(ps, estate).unwrap() {
+                let mut isnull = false;
+                let v = exectuples::slot_getattr(estate.slot_mut(slot_id), 1, &mut isnull);
+                assert!(!isnull);
+                vals.push(v.as_i32());
+            }
+            assert_eq!(vals, vec![1, 2, 3, 4, 5]);
+
+            let (done, memo) = ra_memo_of(ps);
+            assert!(done);
+            crate::exec_end_node(ps, estate).unwrap();
+            estate.exec_reset_tuple_table(false);
+            estate.exec_close_range_table_relations().unwrap();
+            memo
+        })
+    };
+
+    // Control arm: pre-done forward pull computes the RA side memo.
+    let control = drive(70061, false);
+    assert!(
+        control.is_some(),
+        "control arm: the RA admission path must be live (side memo computed pre-done)"
+    );
+    // Pin arm: every lane pull was post-done — the memo must still be unset.
+    let pinned = drive(70062, true);
+    assert_eq!(
+        pinned, None,
+        "post-done pulls must exit before the RA memo probe (SORTFEED-RA shave)"
+    );
+    scanfix::quiesced();
+}
+
 // SELECT a FROM t ORDER BY b LIMIT 2: Limit->Sort->SeqScan with a resjunk sort
 // column, through the REAL InitPlan junk-filter arm and ExecutePlan filter.
 fn mk_junk_sort_limit_pstmt<'mcx>(mcx: ::mcx::Mcx<'mcx>, relid: u32) -> &'mcx PlannedStmt<'mcx> {
