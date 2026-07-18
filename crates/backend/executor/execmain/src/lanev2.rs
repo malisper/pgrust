@@ -14736,3 +14736,102 @@ pub(crate) use push::{
 pub(crate) use push::{cursor_fill_step_seqscan_for_tests, cursor_store_ever_armed};
 // --- end WS-CB wave-10 ------------------------------------------------------------
 // --- WS-CC (wave-10): reserved ---
+// ============================================================================
+// ===== WS-MJ (LANE-MERGEJOIN inc-1) shared EOF sub-region — contract §6.1:
+// the WS-MJ named dispatch region (mergejoin arm surface + module mount +
+// unit-corpus re-exports). Append-only; other workstreams splice below.
+// ============================================================================
+// The lane-native MergeJoin engine composition (knob, feed adapters, drive)
+// is lane_mergejoin.rs-local; this region holds the census-counted surface
+// (`fn try_own_merge_join` must live in lanev2.rs proper — the wave-7 census
+// derivation greps `fn try_own` rows HERE; contract §1.1/§3.1) and the
+// module-scope re-exports (the WS-AA/WS-AE EOF-append precedent).
+mod lane_mergejoin;
+
+/// Try to let the lane own one pull of a MergeJoin node — the lane-native
+/// merge join over sorted inputs (LANE-MERGEJOIN contract §1; K4 option-a,
+/// notes/se-wave8-epq.md §4). inc-1 envelope: JOIN_INNER only, Sort inner
+/// only; the mergejoin family is SEVEN join types (nodeMergejoin.c
+/// ExecInitMergeJoin's jointype switch — JOIN_RIGHT_SEMI has no case and
+/// falls to its `elog(ERROR)` default; the "8 join types" framing is the
+/// hashjoin lane's envelope), covered by inc-2/inc-3. Refusals are NAMED
+/// and ride existing carriers (mint zero, contract §4.1):
+///   * `epq`            — es_epq_active HARD LAW (§1.4): refuse inside every
+///                        driven recheck, fall through byte-identically; the
+///                        lift is Y3's, one step, census-gated — NOT here.
+///   * `backward`       — mergejoin-backward: C asserts !(BACKWARD|MARK) at
+///                        ExecInitMergeJoin; the node never supports either.
+///   * `instrumented`   — EXPLAIN ANALYZE keeps the Volcano drive + counters
+///                        (the mj_verdict_slow cadence).
+///   * `join-shape`     — mergejoin-jointype: non-INNER face at inc-1.
+///   * `child-not-lane-owned` — mergejoin-inner-feed: non-Sort inner at
+///                        inc-1 (Material = inc-2, index scans = inc-3; C's
+///                        admissible inner set is ExecSupportsMarkRestore,
+///                        execAmi.c:411).
+/// `None` = refused: the caller falls through to the SH-E hosting verdict +
+/// the Volcano `exec_merge_join`, byte-identically. Knob-OFF (the default)
+/// is one relaxed cached-bool load + compare and ticks NOTHING (§4.1
+/// knob-OFF-zero: base ticks no refusal from this surface, so OFF must not
+/// either). Mixed-drive coherence: lane and Volcano share one
+/// `MergeJoinState` (lane_mergejoin.rs module doc), so per-pull handover is
+/// byte-safe in both directions.
+#[inline]
+pub fn try_own_merge_join<'mcx>(
+    mj: &mut crate::procnode::MergeJoinNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    // The §4.1 OFF-arm byte: knob FIRST, before any other read or tick.
+    if !lane_mergejoin::mergejoin_native_enabled() {
+        return Ok(None);
+    }
+    // Master facility switch: checked before lane logic, never ticks (the
+    // EnvOff doc-contract in stats.rs; the mj_verdict_slow head cadence).
+    if !enabled() {
+        return Ok(None);
+    }
+    // Dynamic per-call gates, the mj_verdict_slow priority order
+    // (EPQ -> backward -> instrumented), each a NAMED refusal per pull.
+    if estate.es_epq_active {
+        stats::tick_refused(ShapeClass::MergeJoin, RefuseReason::Epq);
+        #[cfg(test)]
+        lane_mergejoin::mj_native_refusal_probe(0);
+        return Ok(None);
+    }
+    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
+        stats::tick_refused(ShapeClass::MergeJoin, RefuseReason::Backward);
+        #[cfg(test)]
+        lane_mergejoin::mj_native_refusal_probe(1);
+        return Ok(None);
+    }
+    if !estate.es_instrumentation.is_empty() {
+        stats::tick_refused(ShapeClass::MergeJoin, RefuseReason::Instrumented);
+        #[cfg(test)]
+        lane_mergejoin::mj_native_refusal_probe(2);
+        return Ok(None);
+    }
+    // inc-1 envelope: INNER only (mergejoin-jointype; inc-2/inc-3 widen).
+    if mj.state.plan.join.jointype != ::types_nodes::JoinType::JOIN_INNER {
+        stats::tick_refused(ShapeClass::MergeJoin, RefuseReason::JoinShape);
+        #[cfg(test)]
+        lane_mergejoin::mj_native_refusal_probe(3);
+        return Ok(None);
+    }
+    // inc-1 inner feed: Sort only (mergejoin-inner-feed) — the exact RA
+    // Tuplesort read-back family AD0 admits, byte-proven by the sortra-e2e
+    // "mergejoin mark/restore Sort inner" cell (contract §0/§1.3).
+    if !matches!(&*mj.inner, crate::procnode::PlanStateNode::Sort(_)) {
+        stats::tick_refused(ShapeClass::MergeJoin, RefuseReason::ChildNotLaneOwned);
+        #[cfg(test)]
+        lane_mergejoin::mj_native_refusal_probe(4);
+        return Ok(None);
+    }
+    stats::tick_owned(ShapeClass::MergeJoin);
+    lane_mergejoin::lane_merge_join_drive(mj, estate).map(Some)
+}
+
+#[cfg(test)]
+pub(crate) use lane_mergejoin::{
+    mergejoin_native_set_for_tests, MJ_NATIVE_MARKS_FOR_TESTS, MJ_NATIVE_OWNED_FOR_TESTS,
+    MJ_NATIVE_REFUSED_FOR_TESTS, MJ_NATIVE_RESTORES_FOR_TESTS,
+};
+// --- end WS-MJ (LANE-MERGEJOIN inc-1) -------------------------------------------

@@ -3123,6 +3123,14 @@ fn merge_join_arm<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
     let mj = &mut **mj;
+    // WS-MJ1 lane-NATIVE dispatch hook (LANE-MERGEJOIN inc-1, contract §4.1:
+    // "one relaxed cached-bool load + compare at the head of the mergejoin
+    // dispatch arm" — PGRUST_LANE_V2_MERGEJOIN_NATIVE, default OFF): on
+    // refuse this falls through byte-identically to the verdict + Volcano
+    // body below (worklog notes/mergejoin-ws-mj1.md §1.5).
+    if let Some(r) = crate::lanev2::try_own_merge_join(mj, estate)? {
+        return Ok(r);
+    }
     // Lane-executor-v2 dispatch hook (Phase-1 row-mode LEAF hosting behind
     // PGRUST_LANE_V2_ROWMODE; both children stay Volcano inside the ported
     // FSM): falls through to the UNCHANGED exec_merge_join on refuse. Lane
