@@ -119,6 +119,9 @@ fn opt<'a>(opts: &'a [(String, String)], key: &str) -> Option<&'a str> {
 
 enum Stream {
     Tcp(std::net::TcpStream),
+    // wasm32: std::os::unix is absent on wasi (no AF_UNIX on WASI p1); the
+    // unix-socket conninfo arm refuses at connect instead.
+    #[cfg(not(target_family = "wasm"))]
     Unix(std::os::unix::net::UnixStream),
 }
 
@@ -277,6 +280,21 @@ impl PgConn {
         (self.display_host.clone(), self.display_port)
     }
 
+    // wasm32: the wasi libc crate exposes no send/recv (WASI p1 has no
+    // socket-open surface, so connect() can never have succeeded and these
+    // are unreachable); the stubs keep the crate compiling and fail like a
+    // dead connection if ever reached (the ip::sys stub convention).
+    #[cfg(target_family = "wasm")]
+    fn send_all(&mut self, _buf: &[u8]) -> Result<(), String> {
+        self.conn_ok = false;
+        self.err = format!(
+            "could not send data to server: {}",
+            std::io::Error::from_raw_os_error(52) // WASI ENOSYS
+        );
+        Err(self.err.clone())
+    }
+
+    #[cfg(not(target_family = "wasm"))]
     fn send_all(&mut self, buf: &[u8]) -> Result<(), String> {
         let mut off = 0;
         while off < buf.len() {
@@ -315,6 +333,18 @@ impl PgConn {
 
     // PQconsumeInput: drain whatever is readable right now. false == the
     // connection died (self.err set).
+    // wasm32: no recv in the wasi libc crate; unreachable stub (see send_all).
+    #[cfg(target_family = "wasm")]
+    pub fn consume_input(&mut self) -> bool {
+        self.conn_ok = false;
+        self.err = format!(
+            "could not receive data from server: {}",
+            std::io::Error::from_raw_os_error(52) // WASI ENOSYS
+        );
+        false
+    }
+
+    #[cfg(not(target_family = "wasm"))]
     pub fn consume_input(&mut self) -> bool {
         if !self.conn_ok {
             return false;
@@ -628,6 +658,7 @@ fn parse_data_row(body: &[u8]) -> Vec<Option<Vec<u8>>> {
 // Connect + authentication.
 // ---------------------------------------------------------------------------
 
+#[cfg(not(target_family = "wasm"))]
 fn os_user_name() -> String {
     if let Ok(u) = std::env::var("PGUSER") {
         if !u.is_empty() {
@@ -642,6 +673,41 @@ fn os_user_name() -> String {
         }
     }
     std::env::var("USER").unwrap_or_default()
+}
+
+// wasm32: no uids and no passwd db on WASI; identity comes through the
+// environment (wasmtime --env USER=<name>), the main_main synthetic-identity
+// arm's convention.
+#[cfg(target_family = "wasm")]
+fn os_user_name() -> String {
+    if let Ok(u) = std::env::var("PGUSER") {
+        if !u.is_empty() {
+            return u;
+        }
+    }
+    std::env::var("USER").unwrap_or_default()
+}
+
+// libpq's unix-socket connect leg.
+#[cfg(not(target_family = "wasm"))]
+fn unix_connect(path: &str, display_host: &str) -> Result<(Stream, RawFd, String), String> {
+    match std::os::unix::net::UnixStream::connect(path) {
+        Ok(s) => {
+            let fd = s.as_raw_fd();
+            Ok((Stream::Unix(s), fd, display_host.to_string()))
+        }
+        Err(e) => Err(format!("connection to server on socket \"{path}\" failed: {e}")),
+    }
+}
+
+// wasm32: no AF_UNIX on WASI p1 — refuse with the C error shape
+// (52 = WASI ENOSYS), matching the tablespace wasm arm.
+#[cfg(target_family = "wasm")]
+fn unix_connect(path: &str, _display_host: &str) -> Result<(Stream, RawFd, String), String> {
+    Err(format!(
+        "connection to server on socket \"{path}\" failed: {}",
+        std::io::Error::from_raw_os_error(52)
+    ))
 }
 
 // libpqrcv_connect (replication=true, logical=false): the physical
@@ -715,16 +781,9 @@ pub fn connect_extended(
 
     let (stream, fd, display_host) = if !host.is_empty() && host.starts_with('/') {
         let path = format!("{host}/.s.PGSQL.{port}");
-        match std::os::unix::net::UnixStream::connect(&path) {
-            Ok(s) => {
-                let fd = s.as_raw_fd();
-                (Stream::Unix(s), fd, host.clone())
-            }
-            Err(e) => {
-                return Ok(Err(format!(
-                    "connection to server on socket \"{path}\" failed: {e}"
-                )))
-            }
+        match unix_connect(&path, &host) {
+            Ok(t) => t,
+            Err(msg) => return Ok(Err(msg)),
         }
     } else {
         let target = if !hostaddr.is_empty() { hostaddr.clone() } else { host.clone() };
@@ -745,6 +804,7 @@ pub fn connect_extended(
 
     match &stream {
         Stream::Tcp(s) => s.set_nonblocking(true).expect("set_nonblocking"),
+        #[cfg(not(target_family = "wasm"))]
         Stream::Unix(s) => s.set_nonblocking(true).expect("set_nonblocking"),
     }
 

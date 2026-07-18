@@ -470,7 +470,7 @@ pub fn logicalrep_worker_stop(subid: Oid, relid: Oid) -> PgResult<()> {
     let Some(slot) = logicalrep_worker_find(subid, relid, false) else {
         return Ok(());
     };
-    logicalrep_worker_stop_internal(slot, libc::SIGTERM)
+    logicalrep_worker_stop_internal(slot, procsignal::signums::SIGTERM)
 }
 
 fn logicalrep_worker_stop_internal(slot: usize, signo: i32) -> PgResult<()> {
@@ -764,8 +764,13 @@ pub fn ApplyLauncherMain(_main_arg: u64) -> PgResult<()> {
     }
     let _onexit = OnExit;
 
-    procsignal::pqsignal_thread(libc::SIGHUP, Simple(interrupt::SignalHandlerForConfigReload));
-    procsignal::pqsignal_thread(libc::SIGTERM, Fallible(postgres::die));
+    // procsignal::signums, not libc::SIG*: the wasi libc crate exposes no
+    // SIG* names (thread-signal emulation numbering, signums law).
+    procsignal::pqsignal_thread(
+        procsignal::signums::SIGHUP,
+        Simple(interrupt::SignalHandlerForConfigReload),
+    );
+    procsignal::pqsignal_thread(procsignal::signums::SIGTERM, Fallible(postgres::die));
     bgworker::BackgroundWorkerUnblockSignals();
 
     // Connection to nailed catalogs (we only ever access pg_subscription).

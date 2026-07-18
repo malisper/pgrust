@@ -240,7 +240,9 @@ fn CreateLockFile(
     let write_result = file.write_all(contents.as_bytes()).and_then(|()| file.sync_all());
     // C's third distinct check: close(fd) itself can fail (e.g. NFS EIO);
     // write, fsync, and close failures all share this exact message.
-    use std::os::unix::io::IntoRawFd;
+    // std::os::fd is the portable spelling (present on wasi too; unix::io
+    // merely re-exports it) — same trait, identical native codegen.
+    use std::os::fd::IntoRawFd;
     let raw_fd = file.into_raw_fd();
     // SAFETY: raw_fd was just taken from `file`, which owned it exclusively;
     // closing it here replaces the implicit close the Drop would have done.

@@ -15267,6 +15267,7 @@ dependencies = [
  "miscinit_seams",
  "pgstat",
  "procarray",
+ "procsignal",
  "procsignal_seams",
  "s_lock_seams",
  "slot_seams",
