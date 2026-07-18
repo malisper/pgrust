@@ -884,6 +884,7 @@ pub fn exec_init_node<'mcx>(
                 plan: lr_plan.plan.lefttree,
                 recheck: None,
                 result_rti: state.lr_arowMarks.first().map_or(0, |a| a.rti),
+                lane_verdicts: None,
             };
             PlanStateNode::LockRows(::mcx::alloc_in(
                 estate.es_query_cxt,
@@ -1306,6 +1307,7 @@ pub fn exec_init_node<'mcx>(
                 recheck: None,
                 // Set per-row by the dispatch closure (multi-resultrel).
                 result_rti: 0,
+                lane_verdicts: None,
             };
             PlanStateNode::ModifyTable(::mcx::alloc_in(
                 mcx,
