@@ -318,7 +318,6 @@ fn generate_series_srf_value_per_call() {
     let mut flinfo = FmgrInfo::new(fc_generate_series_step_int4, 1067, 2, true, true);
     let mut rsinfo = ReturnSetInfo::new(SFRM_ValuePerCall);
     let mut fci = LocalFcinfo::<2>::new(0);
-    fci.resultinfo = rsinfo.as_fmnode_ptr();
     fci.set_arg(0, Datum::from_i32(1));
     fci.set_arg(1, Datum::from_i32(3));
 
@@ -326,6 +325,9 @@ fn generate_series_srf_value_per_call() {
     loop {
         fci.isnull = false;
         rsinfo.isDone = ExprDoneCond::ExprSingleResult;
+        // Re-arm per invoke: the isDone write above invalidates a previously
+        // armed pointer's provenance (miri F6).
+        fci.resultinfo = rsinfo.as_fmnode_ptr();
         let d = flinfo.invoke(&mut fci).unwrap();
         if rsinfo.isDone == ExprDoneCond::ExprEndResult {
             assert!(fci.isnull);
