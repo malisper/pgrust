@@ -14,7 +14,80 @@ fn enter_datadir(dir: &str) -> std::sync::MutexGuard<'static, ()> {
     let guard = CWD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     std::fs::create_dir_all(format!("{dir}/base/pgsql_tmp")).unwrap();
     std::env::set_current_dir(dir).unwrap();
+    // Sim has no cwd: relative paths resolve against "/" (sim.rs norm_path),
+    // so the datadir-relative temp tree must exist at the sim root. fd's
+    // ENOENT retry (temp.rs OpenTemporaryFileInTablespace) only mkdirs the
+    // pgsql_tmp leaf, never `base` — a real datadir always has `base`.
+    #[cfg(pgrust_sim)]
+    vfs_mkdir_p("base/pgsql_tmp");
     guard
+}
+
+// ---------------------------------------------------------------------------
+// DST P4 fixture routing (P1 Ruling 3 Class B, `# pending: sim-fixture-routing`):
+// fixtures are built and asserted through the ACTIVE vfs, so setup, ops, and
+// asserts share one filesystem domain under both cfgs. Under the default cfg
+// these helpers hit PosixVfs — byte-for-byte the same real-fs behavior the old
+// std::fs fixtures had; under `--cfg pgrust_sim` they hit the thread-local
+// SimVfs tree the fd ops actually run against.
+// ---------------------------------------------------------------------------
+
+fn cpath(path: &str) -> std::ffi::CString {
+    std::ffi::CString::new(path).unwrap()
+}
+
+/// `mkdir -p` through the active vfs (EEXIST tolerated per component).
+fn vfs_mkdir_p(path: &str) {
+    let mut prefix = String::new();
+    for comp in path.split('/') {
+        if comp.is_empty() {
+            continue;
+        }
+        if !prefix.is_empty() || path.starts_with('/') {
+            prefix.push('/');
+        }
+        prefix.push_str(comp);
+        let rc = vfs::mkdir(&cpath(&prefix), 0o700);
+        assert!(
+            rc == 0 || vfs::get_errno() == libc::EEXIST,
+            "vfs_mkdir_p({prefix}): errno {}",
+            vfs::get_errno()
+        );
+    }
+}
+
+/// Create/replace a file with `data` through the active vfs.
+fn vfs_write_file(path: &str, data: &[u8]) {
+    let fd = vfs::open(
+        &cpath(path),
+        libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+        0o600,
+    );
+    assert!(fd >= 0, "vfs_write_file open({path}): errno {}", vfs::get_errno());
+    if !data.is_empty() {
+        assert_eq!(vfs::pwrite(fd, data, 0), data.len() as isize, "{path}");
+    }
+    assert_eq!(vfs::close(fd), 0);
+}
+
+/// Whole-file read through the active vfs.
+fn vfs_read_file(path: &str) -> Vec<u8> {
+    let fd = vfs::open(&cpath(path), libc::O_RDONLY, 0);
+    assert!(fd >= 0, "vfs_read_file open({path}): errno {}", vfs::get_errno());
+    let size = vfs::file_size(fd);
+    assert!(size >= 0, "{path}");
+    let mut buf = vec![0u8; size as usize];
+    if size > 0 {
+        assert_eq!(vfs::pread(fd, &mut buf, 0), size as isize, "{path}");
+    }
+    assert_eq!(vfs::close(fd), 0);
+    buf
+}
+
+/// stat() through the active vfs — the same-domain `Path::exists`.
+fn vfs_path_exists(path: &str) -> bool {
+    let mut info = vfs::FileInfo::zeroed();
+    vfs::stat(&cpath(path), &mut info) == 0
 }
 
 fn setup() {
@@ -44,7 +117,13 @@ fn scratch_dir(tag: &str) -> String {
         "pgrust_fd_test_{}_{tag}_{n}",
         std::process::id()
     ));
+    // Real-fs side stays: the posix carve-outs (AllocateFile stdio fopen,
+    // OpenPipeStream popen) resolve scratch paths on the real filesystem
+    // under BOTH cfgs (contract §1.1 — stdio/pipes are out of Vfs scope).
     std::fs::create_dir_all(&dir).unwrap();
+    // Mirror the scratch dir into the active vfs namespace so vfs-routed
+    // fixtures and fd ops resolve; pure EEXIST no-ops under the default cfg.
+    vfs_mkdir_p(dir.to_str().unwrap());
     dir.to_str().unwrap().to_owned()
 }
 
@@ -70,7 +149,7 @@ fn vfd_open_write_read_close_roundtrip() {
     assert_eq!(crate::io::FilePathName(f), path);
 
     crate::io::FileClose(f).unwrap();
-    assert!(std::path::Path::new(&path).exists());
+    assert!(vfs_path_exists(&path));
 }
 
 #[test]
@@ -176,10 +255,10 @@ fn temp_file_deleted_at_close_and_counted() {
     let path = crate::io::FilePathName(f);
     assert_eq!(crate::io::FileWrite(f, &[7u8; 2048], 0, 0).unwrap(), 2048);
     assert_eq!(with_fd(|fd| fd.temporary_files_size), 2048);
-    assert!(std::path::Path::new(&path).exists());
+    assert!(vfs_path_exists(&path));
 
     crate::io::FileClose(f).unwrap();
-    assert!(!std::path::Path::new(&path).exists());
+    assert!(!vfs_path_exists(&path));
     assert_eq!(with_fd(|fd| fd.temporary_files_size), 0);
 }
 
@@ -220,7 +299,7 @@ fn transient_files_track_and_close() {
     setup();
     let dir = scratch_dir("transient");
     let path = format!("{dir}/t");
-    std::fs::write(&path, b"x").unwrap();
+    vfs_write_file(&path, b"x");
 
     let occupied = || with_fd(|fd| crate::vfd::occupied_descs(fd));
     let before = occupied();
@@ -242,15 +321,15 @@ fn durable_rename_and_unlink() {
     let dir = scratch_dir("durable");
     let old = format!("{dir}/old");
     let new = format!("{dir}/new");
-    std::fs::write(&old, b"payload").unwrap();
-    std::fs::write(&new, b"stale").unwrap();
+    vfs_write_file(&old, b"payload");
+    vfs_write_file(&new, b"stale");
 
     assert_eq!(crate::sync::durable_rename(&old, &new, ::types_error::LOG).unwrap(), 0);
-    assert!(!std::path::Path::new(&old).exists());
-    assert_eq!(std::fs::read(&new).unwrap(), b"payload");
+    assert!(!vfs_path_exists(&old));
+    assert_eq!(vfs_read_file(&new), b"payload");
 
     assert_eq!(crate::sync::durable_unlink(&new, ::types_error::LOG).unwrap(), 0);
-    assert!(!std::path::Path::new(&new).exists());
+    assert!(!vfs_path_exists(&new));
 
     assert_eq!(crate::sync::durable_unlink(&new, ::types_error::LOG).unwrap(), -1);
 }
@@ -260,7 +339,7 @@ fn allocate_dir_walks_entries() {
     setup();
     let dir = scratch_dir("dirwalk");
     for name in ["alpha", "beta", "gamma"] {
-        std::fs::write(format!("{dir}/{name}"), b"").unwrap();
+        vfs_write_file(&format!("{dir}/{name}"), b"");
     }
 
     let d = crate::desc::AllocateDir(&dir).unwrap();
@@ -320,7 +399,7 @@ fn subxact_reassigns_or_frees_descs() {
     setup();
     let dir = scratch_dir("subxact");
     let path = format!("{dir}/s");
-    std::fs::write(&path, b"x").unwrap();
+    vfs_write_file(&path, b"x");
 
     let td = crate::desc::OpenTransientFile(&path, libc::O_RDWR).unwrap();
     let idx = with_fd(|fd| fd.allocated_descs.iter().rposition(Option::is_some).unwrap());
@@ -381,16 +460,16 @@ fn temp_tablespace_list_round_robin() {
 fn remove_pg_temp_files_in_dir_filters_prefix() {
     setup();
     let dir = scratch_dir("rmtemp");
-    std::fs::write(format!("{dir}/pgsql_tmp123.0"), b"x").unwrap();
-    std::fs::create_dir(format!("{dir}/pgsql_tmp_sub")).unwrap();
-    std::fs::write(format!("{dir}/pgsql_tmp_sub/anything"), b"x").unwrap();
-    std::fs::write(format!("{dir}/keepme"), b"x").unwrap();
+    vfs_write_file(&format!("{dir}/pgsql_tmp123.0"), b"x");
+    vfs_mkdir_p(&format!("{dir}/pgsql_tmp_sub"));
+    vfs_write_file(&format!("{dir}/pgsql_tmp_sub/anything"), b"x");
+    vfs_write_file(&format!("{dir}/keepme"), b"x");
 
     crate::sync::RemovePgTempFilesInDir(&dir, false, false).unwrap();
 
-    assert!(!std::path::Path::new(&format!("{dir}/pgsql_tmp123.0")).exists());
-    assert!(!std::path::Path::new(&format!("{dir}/pgsql_tmp_sub")).exists());
-    assert!(std::path::Path::new(&format!("{dir}/keepme")).exists());
+    assert!(!vfs_path_exists(&format!("{dir}/pgsql_tmp123.0")));
+    assert!(!vfs_path_exists(&format!("{dir}/pgsql_tmp_sub")));
+    assert!(vfs_path_exists(&format!("{dir}/keepme")));
 
     crate::sync::RemovePgTempFilesInDir(&format!("{dir}/absent"), true, false).unwrap();
 }
