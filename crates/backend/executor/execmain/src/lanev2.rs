@@ -5922,6 +5922,38 @@ pub fn try_own_sort<'mcx>(
         {
             return Ok(None);
         }
+        // SORTFEED-DIFFPROF increment (wave-8 item-3 handback): the lane's
+        // randomAccess ownership is the FEED ONLY. The callgrind pair on
+        // corpus-p1-sortfeed (pgrust-cgpairs-1784351907, dist-prof, A/B
+        // control-dump windows) split the re-earn letter's +2.70% residual
+        // exactly: batch feed vs fused row feed = PAR (feed-side net
+        // −2M Ir/replay, B slightly ahead), read-back per-pull ceremony =
+        // the WHOLE regression (~118M Ir/replay = ~109 Ir per drained row:
+        // `pull_step` + `RootAdapter::accept` + the `sort_feed_if_needed`
+        // early-out + the `sort_randomaccess_memo` probe + a second
+        // check_for_interrupts, on EVERY pull of a full-drain scroll
+        // cursor). So feed once through the breaker sink (batched puts —
+        // the owned tick fires at the feed event inside
+        // `sort_feed_if_needed`, so D4 accounting is unchanged), then
+        // REFUSE every call: the caller's `exec_sort`/`exec_sort_batched`
+        // drain leg serves ALL read-back from the SAME node state (the
+        // contract line above — byte-safe even mid-stream). The RA-vanilla
+        // feed law (region doc) guarantees the tuplesort here is the row
+        // path's own (no refsort, no runtime-sink adoption, no top-N cut
+        // under randomAccess), so the row drain serves it verbatim; the
+        // lane-served drain modes (refsort/runtime_full) exist only on
+        // non-RA nodes, which keep the pull_step emit below. Post-done
+        // pulls exit here in a handful of loads — the same cost class as
+        // the knob-OFF refusal they replace.
+        if !s.state.sort_done() {
+            // C's CHECK_FOR_INTERRUPTS at ExecSort entry (the feed call).
+            ::postgres_seams::check_for_interrupts::call()?;
+            let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
+            // A feed-time refuse (Ok(false)) needs no distinct arm:
+            // ownership is refused either way, before any sort-side effect.
+            let _ = sort_feed_if_needed(state, &mut **outer, outer_desc, None, estate)?;
+        }
+        return Ok(None);
     }
     // C's CHECK_FOR_INTERRUPTS at ExecSort entry.
     ::postgres_seams::check_for_interrupts::call()?;
@@ -6004,15 +6036,30 @@ fn sort_lane_fusible_memo<'mcx>(
 //     production ownership shows in the SortFeed owned ticks.
 // ===========================================================================
 
-/// `PGRUST_LANE_V2_SORT_RANDOMACCESS` — wave-8 WS-AD knob, default OFF
-/// (law 4: the OFF path is one branch on this cached bool, reached only on
-/// already-refused nodes).
+/// `PGRUST_LANE_V2_SORT_RANDOMACCESS` — wave-8 WS-AD knob, **default ON
+/// since the SE9-GATES AD2 flip** (explicit `=0`/`off` = the permanent
+/// kill switch restoring the pre-flip refusal stream; law 4 posture
+/// preserved: either state is one branch on this cached bool, reached
+/// only on already-refused nodes).
+///
+/// AD2 FLIP evidence (the diffprof package,
+/// notes/sortfeed-diffprof-lane.md): the SE8 refusal at +2.705% was
+/// 100% removable read-back dispatch (attribution
+/// pgrust-cgpairs-1784351907-21c3: feed = PAR with the fused arm); the
+/// FEED-ONLY fix (0d4bf241c — RA-admitted ownership feeds once, the
+/// bare exec_sort drain serves all read-back) closed the letter to
+/// B/A = 1.0072 PASS (pgrust-corpus-pairs-1784356345-4d78, bar <=1.02,
+/// the same spelling SE8 refused at 1.027). Remaining +0.72% = the
+/// RA-branch post-done per-pull exit ceremony (~29 Ir/pull),
+/// named-and-ledgered with a documented 3-line shave (check sort_done
+/// before the RA memo probe) if a future bar needs it. Flips never
+/// delete knobs (rowmode FLIP idiom; the AE2/K2 precedents).
 fn sort_randomaccess_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
-        matches!(
+        !matches!(
             std::env::var("PGRUST_LANE_V2_SORT_RANDOMACCESS").as_deref(),
-            Ok("1") | Ok("on")
+            Ok("0") | Ok("off")
         )
     })
 }
