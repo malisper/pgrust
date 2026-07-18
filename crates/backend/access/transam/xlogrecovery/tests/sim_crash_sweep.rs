@@ -766,6 +766,10 @@ fn make_checkpoint() -> controldata_utils::CheckPoint {
     ckpt.wal_level = WAL_LEVEL_REPLICA;
     ckpt.nextXid = types_core::FullTransactionId::from_epoch_and_xid(0, 3);
     ckpt.oldestXid = 3;
+    // inc-6: carry the workload database's oid so the recover child's
+    // StartupXLOG SetTransactionIdLimit call sees the same world the writer
+    // stamps by hand (V5-O5 wraparound-noise fix).
+    ckpt.oldestXidDB = 5;
     ckpt
 }
 
@@ -902,6 +906,14 @@ fn mint_and_boot_writer(with_index: bool) {
     procarray::TransamVariables()
         .nextXid
         .store(types_core::FullTransactionId::from_epoch_and_xid(0, 3).value, Relaxed);
+    // inc-6 (V5-O5 fix): the real boot path stamps the wraparound limits from
+    // the checkpoint (StartupXLOG -> SetTransactionIdLimit); this hand-poked
+    // writer boot skipped that since inc-2, leaving xidVacLimit/xidWarnLimit
+    // at 0 so EVERY GetNewTransactionId printed the cosmetic "database must
+    // be vacuumed within N transactions" WARNING. Same call, same inputs
+    // (oldestXid=3, oldestXidDB=5 per the minted checkpoint's world); no
+    // disk I/O, so packs and op traces are unaffected.
+    varsup::SetTransactionIdLimit(3, 5).unwrap();
     subtrans::StartupSUBTRANS(3).unwrap();
     assert!(transam_xlog::XLogInsertAllowed());
 
