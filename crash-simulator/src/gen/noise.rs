@@ -718,9 +718,10 @@ pub fn gen_query(
         2,
         // scalar-call carries 10 sub-arms, several column-type-gated: at the
         // H6-widened variant count, weight 2 starved sc:numeric-abs in the
-        // query-scarce write-heavy profile (battery reach pin caught it) —
-        // 4 keeps every arm covered at the 500-seed budget.
-        4,
+        // query-scarce write-heavy profile (battery reach pin caught it), and
+        // the merged 42-variant pool starved sc:text-upper at weight 4 — 6
+        // keeps every arm covered at the 500-seed budget.
+        6,
         2,
         2,
         2,
@@ -757,7 +758,10 @@ pub fn gen_query(
         3,
         if two_cols_ok { 2 } else { 0 },
         2,
-        if foreign_ok { 2 } else { 0 },
+        // foreign-scan needs a live foreign table AND the variant draw; at
+        // the merged 42-variant pool weight 2 starved it on the 300-seed
+        // teeth corpus (reach pin), so it carries 4.
+        if foreign_ok { 4 } else { 0 },
     ];
     // H5 reach-gate teeth knob: suppress emission of named productions
     // (weights zeroed) while the reach gate still expects them (see
