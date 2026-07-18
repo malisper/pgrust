@@ -1059,8 +1059,9 @@ fn MaybeRemoveOldWalSummaries(mcx: Mcx<'_>) -> PgResult<()> {
     }
     REDO_POINTER_AT_LAST_SUMMARY_REMOVAL.set(redo_pointer);
 
-    let cutoff_time = unsafe { libc::time(std::ptr::null_mut()) }
-        - wal_summary_keep_time() as i64 * 60;
+    // DST P2 (contract §1.2): retention cutoff on pg_clock::wall_secs().
+    // (The file-mtime duration_since below is P1 SimVfs territory — left raw.)
+    let cutoff_time = pg_clock::wall_secs() - wal_summary_keep_time() as i64 * 60;
 
     let mut wslist = GetWalSummaries(mcx, 0, InvalidXLogRecPtr, InvalidXLogRecPtr)?;
 

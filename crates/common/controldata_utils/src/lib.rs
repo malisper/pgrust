@@ -496,10 +496,8 @@ pub fn update_controlfile(
 ) -> PgResult<()> {
     const F: &str = "update_controlfile";
 
-    control_file.time = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as pg_time_t)
-        .unwrap_or(0);
+    // DST P2 (contract §1.2): control-file stamp on pg_clock::wall_secs().
+    control_file.time = pg_clock::wall_secs() as pg_time_t;
 
     let mut image = control_file.to_disk_bytes();
     let crc = crc_of_image(&image);

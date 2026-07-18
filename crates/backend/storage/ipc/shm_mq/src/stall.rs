@@ -69,11 +69,8 @@ pub fn recheck_ms() -> i64 {
 }
 
 fn now_ms() -> i64 {
-    // SAFETY: clock_gettime(CLOCK_MONOTONIC) into a zeroed timespec.
-    let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
-    // SAFETY: valid pointer to ts.
-    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
-    ts.tv_sec as i64 * 1000 + ts.tv_nsec as i64 / 1_000_000
+    // DST P2 (contract §1.3): stall detection on the one monotonic authority.
+    pg_clock::mono_ms()
 }
 
 /// One logical blocked operation's stall clock. The owner keeps it across

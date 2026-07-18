@@ -930,6 +930,7 @@ dependencies = [
  "mcx",
  "nodes_core",
  "numutils",
+ "pg_clock",
  "pgtz",
  "pqformat",
  "strftime",
@@ -1092,6 +1093,7 @@ dependencies = [
  "hyperloglog",
  "libc",
  "mcx",
+ "pg_clock",
  "pg_strong_random",
  "pgtz",
  "pqformat",
@@ -1797,6 +1799,7 @@ dependencies = [
  "libc",
  "manifest",
  "mcx",
+ "pg_clock",
  "pgstrcasecmp",
  "pqcomm_seams",
  "ps_status",
@@ -1941,6 +1944,7 @@ version = "0.0.0"
 dependencies = [
  "elog",
  "latch",
+ "pg_clock",
  "runtime",
  "types_error",
  "types_storage",
@@ -3002,6 +3006,7 @@ dependencies = [
  "mcx",
  "mcxt_seams",
  "miscinit",
+ "pg_clock",
  "pgstat_seams",
  "pmsignal",
  "postgres_seams",
@@ -3987,6 +3992,7 @@ dependencies = [
  "parser_driver",
  "parser_seams",
  "parser_small1",
+ "pg_clock",
  "pg_database",
  "pg_enum_seams",
  "pg_inherits",
@@ -4160,6 +4166,7 @@ dependencies = [
  "latch",
  "lmgr_proc",
  "lmgr_proc_seams",
+ "pg_clock",
  "pg_sema_seams",
  "postgres_seams",
  "s_lock_seams",
@@ -4204,6 +4211,7 @@ dependencies = [
  "crc32c",
  "elog",
  "libc",
+ "pg_clock",
  "types_core",
  "types_error",
  "vfs",
@@ -4782,6 +4790,7 @@ dependencies = [
  "libc",
  "mbutils_seams",
  "mcx",
+ "pg_clock",
  "pgstat_seams",
  "pqcomm_seams",
  "syslogger_seams",
@@ -5163,6 +5172,7 @@ dependencies = [
  "origin_seams",
  "parallel",
  "partprune",
+ "pg_clock",
  "pg_enum",
  "pg_sema_seams",
  "pgstat",
@@ -8508,6 +8518,7 @@ dependencies = [
  "miscinit_seams",
  "nbt_compare",
  "origin_seams",
+ "pg_clock",
  "pg_sema_seams",
  "pmsignal_seams",
  "postgres_seams",
@@ -10718,6 +10729,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_clock"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "pg_collation"
 version = "0.1.0"
 dependencies = [
@@ -11555,6 +11573,7 @@ dependencies = [
  "lwlock",
  "mcxt_seams",
  "miscinit",
+ "pg_clock",
  "pgstat",
  "procsignal",
  "procsignal_seams",
@@ -12520,6 +12539,7 @@ dependencies = [
  "mcx",
  "miscinit",
  "miscinit_seams",
+ "pg_clock",
  "pg_path",
  "pg_prng",
  "pg_sema_seams",
@@ -14239,6 +14259,7 @@ dependencies = [
  "init_small",
  "loom",
  "parallel",
+ "pg_clock",
  "postgres_seams",
  "types_error",
  "waiter",
@@ -14891,6 +14912,7 @@ dependencies = [
  "libc",
  "lmgr_proc",
  "lmgr_proc_seams",
+ "pg_clock",
  "pg_sema_seams",
  "postgres_seams",
  "s_lock_seams",
@@ -16597,11 +16619,13 @@ version = "0.0.0"
 dependencies = [
  "init_small",
  "latch",
+ "pg_clock",
  "timeout_seams",
  "timestamp_seams",
  "types_core",
  "types_error",
  "types_storage",
+ "waiter",
 ]
 
 [[package]]
@@ -16802,6 +16826,7 @@ dependencies = [
  "mcx",
  "multixact_seams",
  "origin_seams",
+ "pg_clock",
  "pgstat",
  "pgstat_seams",
  "predicate_seams",
@@ -17911,6 +17936,7 @@ dependencies = [
  "adt_uuid",
  "datum",
  "dfmgr",
+ "pg_clock",
  "pg_md5",
  "pg_sha1",
  "pg_strong_random",
@@ -17958,6 +17984,7 @@ dependencies = [
  "miscinit",
  "nbtree",
  "parallel",
+ "pg_clock",
  "pgstat",
  "postgres_seams",
  "procarray_seams",
@@ -18230,6 +18257,7 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "loom",
+ "pg_clock",
 ]
 
 [[package]]
@@ -18270,6 +18298,7 @@ dependencies = [
  "latch",
  "latch_seams",
  "libc",
+ "pg_clock",
  "types_core",
  "types_error",
  "types_storage",
@@ -18411,6 +18440,7 @@ dependencies = [
  "mcx",
  "mcxt_seams",
  "miscinit",
+ "pg_clock",
  "pgstat_seams",
  "postgres_seams",
  "procsignal",
