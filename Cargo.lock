@@ -11753,6 +11753,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pgsync"
+version = "0.1.0"
+dependencies = [
+ "loom",
+]
+
+[[package]]
 name = "pgtz"
 version = "0.1.0"
 dependencies = [
