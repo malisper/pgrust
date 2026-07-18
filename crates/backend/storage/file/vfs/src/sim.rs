@@ -1,6 +1,8 @@
-//! SimVfs — deterministic in-memory filesystem for DST (P1 skeleton).
+//! SimVfs — deterministic in-memory filesystem for DST (P1 skeleton + P4
+//! fault model, increment 1).
 //!
-//! Owner: WS-C (contract §4, §5.1). Compiled only under `--cfg pgrust_sim`
+//! Owner: WS-C (contract §4, §5.1); P4 disk-fault model per
+//! docs/design/dst-and-wasm.md §4.1. Compiled only under `--cfg pgrust_sim`
 //! (the sim harness selector); never present in product builds. Run the sim
 //! battery with `RUSTFLAGS='--cfg pgrust_sim' cargo test -p vfs sim::`.
 //!
@@ -12,35 +14,61 @@
 //!
 //! DETERMINISM RULES (binding, contract §4.1):
 //! - BTree ordering ONLY — no HashMap/HashSet anywhere in this module.
-//! - No wall clock: `FileInfo::mtime_*` is always 0 in P1 (a logical clock,
-//!   if ever needed, comes from the harness in P4).
+//! - No wall clock: `FileInfo::mtime_*` is always 0 (a logical clock, if
+//!   ever needed, comes from the harness).
 //! - Monotonic fd assignment from a high base ([`SIM_FD_BASE`]) — small-int
 //!   posix fds mixed into sim traffic fault loudly as EBADF, catching raw-fd
 //!   domain mixups (the FileGetRawDesc carve-out).
-//! - All randomness comes from the harness seed; SimVfs itself contains zero
-//!   entropy sources.
+//! - All randomness comes from explicit seeds (splitmix64 streams — the
+//!   SimEntropy generator family); SimVfs itself contains ZERO ambient
+//!   entropy sources. Same seed + same plan spec ⇒ same failure at the same
+//!   op, and every injected fault is logged with an op-sequence number
+//!   ([`SimVfs::fault_log`]) so a failure replays from the log line + the
+//!   plan spec alone.
 //!
-//! TWO-IMAGE DURABILITY (P1 trivial impl, contract §4.3): writes land in the
-//! `volatile` image and record their dirty range; fsync/fdatasync promote the
-//! whole volatile image to `durable`; [`SimVfs::crash`] rolls every file back
-//! to its durable image and drops all open fds. Byte-granular torn-write
-//! persistence, namespace-op durability (create/rename/unlink vs dir fsync),
-//! seeded scheduling, crash-point enumeration and EMFILE budget injection are
-//! ALL P4 — but every op already consults the [`FaultPlan`], so P4 adds no
-//! new plumbing through fd.
+//! THE P4 DISK-FAULT MODEL (scoping doc §4.1 — an adversarial SUPERSET of
+//! what posix filesystems do, with three binding constraints):
+//!
+//! 1. **512 B atomicity floor** ([`SECTOR_SIZE`]): a write in flight at a
+//!    crash survives as a prefix ending on an ABSOLUTE sector boundary (or
+//!    the whole write) — never a partial sector, never atomic multi-sector.
+//!    The floor is a documented model parameter; the test-only
+//!    [`SimVfs::set_atomic_write_mode`] weakening exists ONLY so the red
+//!    battery can prove the floor has teeth.
+//! 2. **fsync-failure state machine** (the fsyncgate semantics): writes
+//!    since the last SUCCESSFUL fsync form the unsynced journal. A FAILED
+//!    fsync moves that journal to may-be-lost **permanently** — a later
+//!    successful fsync promotes only writes issued after the failure; the
+//!    doomed epoch never resurrects, and never survives a crash. This is
+//!    what distinguishes "we PANIC'd and recovered from WAL" (correct) from
+//!    "we retried fsync, it said OK, and we believed it" (the fsyncgate
+//!    bug). Dir-fsync failure is currently modeled as promotion-simply-not-
+//!    happening (stale durable dirents) — softer than the file plane;
+//!    ledgered for inc-2.
+//! 3. **Dirent durability requires the parent-dir fsync**: namespace ops
+//!    (create/rename/unlink/mkdir/rmdir) are volatile until the PARENT
+//!    directory is fsync'd; a crash reverts every directory to its last
+//!    fsync'd entry image and rebuilds the namespace from the root. The
+//!    classic lost-dirent-after-rename bug class (missing fsync_parent_path
+//!    in a durable_rename shape) is therefore testable — and caught.
+//!
+//! **Crash ("cut") primitive** ([`SimVfs::cut`]): discard everything not
+//! durable per rules 1–3, deterministically. The surviving subset of each
+//! file's unsynced journal is chosen by the installed [`CrashImage`] policy
+//! (default [`CrashImage::DropAll`], the adversarial floor; seeded arbitrary
+//! subsets via [`CrashImage::SeededSubset`] — fsync is the only barrier, so
+//! unsynced writes may survive in any combination, sector-torn).
 //!
 //! Namespace model: rooted at "/". Relative paths resolve against the root
 //! (the sim harness addresses data dirs absolutely; there is no cwd). Entry
-//! names must be UTF-8 (EINVAL otherwise) per the frozen `BTreeSet<String>` /
-//! `VfsDirIter::from_names` representation. No symlinks in P1: `lstat` ≡
-//! `stat`, `read_link` fails EINVAL like readlink(2) on a non-symlink. Where
+//! names must be UTF-8 (EINVAL otherwise). No symlinks: `lstat` ≡ `stat`,
+//! `read_link` fails EINVAL like readlink(2) on a non-symlink. Where
 //! platforms disagree on an errno, SimVfs speaks the Linux dialect (e.g.
 //! EISDIR for unlink-of-directory).
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::ffi::CStr;
-use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 
 use crate::{c_int, mode_t, off_t, set_errno, FileInfo, Vfs, VfsDirIter, VfsResult, PG_O_DIRECT};
@@ -55,8 +83,16 @@ pub const SIM_FD_BASE: c_int = 1_000_000;
 /// exercises realistic values.
 pub const SIM_FD_BUDGET: usize = 960;
 
+/// The atomicity floor (scoping doc §4.1): torn writes tear on 512 B sector
+/// boundaries only. The ported code, like upstream, relies on ≤512 B writes
+/// being sector-atomic (`controldata_utils` pins PG_CONTROL_MAX_SAFE_SIZE =
+/// 512 with a compile-time assert) — a byte-granularity tear would
+/// manufacture false positives against a design assumption the port itself
+/// asserts.
+pub const SECTOR_SIZE: usize = 512;
+
 // ===========================================================================
-// Fault-model INTERFACE (stubs only — machinery is P4; contract §4.3)
+// Fault-model interface (frozen at P1; P4 fills in the machinery)
 // ===========================================================================
 
 /// Which trait op is about to run.
@@ -88,6 +124,9 @@ pub enum OpKind {
 
 /// Description of the op the fault plan is consulted about. `pread`/`pwrite`
 /// present as single-iovec `PReadV`/`PWriteV` (they share the data plane).
+/// P4 addition: fd-addressed ops resolve `path` to the path the fd was
+/// opened under (rename does not retroactively rewrite it), so path-class
+/// rules apply to the data/durability plane too.
 #[derive(Debug, Clone)]
 pub struct OpDesc<'a> {
     pub kind: OpKind,
@@ -97,11 +136,23 @@ pub struct OpDesc<'a> {
     pub len: Option<usize>,
 }
 
-/// What the fault plan wants done. P1 only ever produces `Proceed` (via
-/// [`NoFaults`]); the other arms are the frozen P4 interface. P4 injection is
-/// restricted to fd's `errcode_for_file_access` errno vocabulary (contract
-/// §1.1): ENOENT, EEXIST, ENOSPC/EDQUOT, EMFILE/ENFILE, EACCES/EPERM, EIO.
-/// SimVfs never emits EINTR (ops are single-shot; retry policy lives in fd).
+/// What the fault plan wants done. P4 injection is restricted to fd's
+/// `errcode_for_file_access` errno vocabulary (contract §1.1): ENOENT,
+/// EEXIST, ENOSPC/EDQUOT, EMFILE/ENFILE, EACCES/EPERM, EIO. SimVfs never
+/// emits EINTR (ops are single-shot; retry policy lives in fd).
+///
+/// P4 semantics:
+/// - `Errno(e)`: the op fails with errno `e` before taking effect. On
+///   fsync/fdatasync of a file this ALSO fires the fsyncgate state machine
+///   (the unsynced journal moves to lost-permanently).
+/// - `ShortWrite(n)` / `ShortRead(n)`: the data-plane op transfers at most
+///   `n` bytes and reports the short count (posix-legal partial transfer).
+/// - `TornWrite { persist_prefix }`: the system CRASHES DURING this write.
+///   The write's surviving on-disk prefix is `persist_prefix` floored to the
+///   512 B sector boundary (rule 1); every other unsynced write survives per
+///   the installed [`CrashImage`] policy; the op returns EIO (the simulated
+///   process is gone — the harness treats this op as the cut).
+/// - `Crash`: cut at the op boundary, before the op takes effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FaultDecision {
     Proceed,
@@ -112,12 +163,12 @@ pub enum FaultDecision {
     Crash,
 }
 
-/// Consulted before every op. Mutable so P4 plans can count/schedule.
+/// Consulted before every op. Mutable so plans can count/schedule.
 pub trait FaultPlan {
     fn before_op(&mut self, op: &OpDesc<'_>) -> FaultDecision;
 }
 
-/// The P1 plan: always proceed.
+/// The always-proceed plan (default).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoFaults;
 
@@ -128,30 +179,269 @@ impl FaultPlan for NoFaults {
 }
 
 // ===========================================================================
+// P4 fault-plan engine — deterministic, seeded, replayable from the log
+// ===========================================================================
+
+/// Path classes for fail-by-class rules (data-dir vocabulary).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathClass {
+    /// pg_wal / pg_xlog segments.
+    Wal,
+    /// pg_control / *.conf (including their durable_rename .tmp companions).
+    Config,
+    /// pgsql_tmp trees and *.tmp staging files.
+    Temp,
+    /// base/ and global/ relation storage.
+    Heap,
+    Other,
+}
+
+/// Classify a path. Order matters: Wal > Config > Temp > Heap (pg_control's
+/// durable_rename companion `pg_control.tmp` is Config, not Temp;
+/// `base/pgsql_tmp/...` is Temp, not Heap).
+pub fn classify_path(p: &Path) -> PathClass {
+    let s = p.to_string_lossy();
+    if s.contains("pg_wal") || s.contains("pg_xlog") {
+        PathClass::Wal
+    } else if s.contains("pg_control") || s.contains(".conf") {
+        PathClass::Config
+    } else if s.contains("pgsql_tmp") || s.ends_with(".tmp") {
+        PathClass::Temp
+    } else if s.contains("/base/") || s.contains("/global/") || s.ends_with("/base") {
+        PathClass::Heap
+    } else {
+        PathClass::Other
+    }
+}
+
+/// Op matcher for [`FaultRule`]. Empty (default) matches every op.
+#[derive(Debug, Clone, Default)]
+pub struct OpMatch {
+    /// Restrict to these op kinds (None = any).
+    pub kinds: Option<Vec<OpKind>>,
+    /// Restrict to ops whose resolved path is in this class (ops without a
+    /// resolvable path never match a class rule).
+    pub class: Option<PathClass>,
+    /// Restrict to paths containing this substring.
+    pub path_contains: Option<String>,
+}
+
+impl OpMatch {
+    pub fn any() -> Self {
+        OpMatch::default()
+    }
+
+    fn matches(&self, op: &OpDesc<'_>) -> bool {
+        if let Some(kinds) = &self.kinds {
+            if !kinds.contains(&op.kind) {
+                return false;
+            }
+        }
+        if let Some(class) = self.class {
+            match op.path {
+                Some(p) => {
+                    if classify_path(p) != class {
+                        return false;
+                    }
+                }
+                None => return false,
+            }
+        }
+        if let Some(sub) = &self.path_contains {
+            match op.path {
+                Some(p) => {
+                    if !p.to_string_lossy().contains(sub.as_str()) {
+                        return false;
+                    }
+                }
+                None => return false,
+            }
+        }
+        true
+    }
+}
+
+/// One rule of a [`SeededFaultPlan`]: on the `nth` (1-based) op matching
+/// `matcher`, inject `action`. Non-sticky rules fire exactly once; sticky
+/// rules fire on the nth and every later match.
+#[derive(Debug, Clone)]
+pub struct FaultRule {
+    pub matcher: OpMatch,
+    pub nth: u64,
+    pub action: FaultDecision,
+    pub sticky: bool,
+}
+
+impl FaultRule {
+    /// Fail the nth op matching `matcher` (once).
+    pub fn nth_matching(matcher: OpMatch, nth: u64, action: FaultDecision) -> Self {
+        FaultRule { matcher, nth, action, sticky: false }
+    }
+
+    /// Crash at the nth op of the run, whatever it is.
+    pub fn crash_at_op(nth: u64) -> Self {
+        FaultRule::nth_matching(OpMatch::any(), nth, FaultDecision::Crash)
+    }
+}
+
+/// The P4 deterministic seeded fault plan. Same `(seed, rules)` ⇒ the same
+/// decision at the same op-sequence number, every run: all entropy is the
+/// explicit seed (splitmix64 — the SimEntropy generator family), never
+/// ambient randomness. Every rule counts its matches independently; when
+/// several rules would fire on one op, the FIRST in rule order wins (rule
+/// order is priority). Every non-Proceed decision is logged centrally by
+/// SimVfs with its op-sequence number.
+pub struct SeededFaultPlan {
+    seed: u64,
+    rules: Vec<(FaultRule, u64 /* matches so far */)>,
+}
+
+impl SeededFaultPlan {
+    pub fn new(seed: u64, rules: Vec<FaultRule>) -> Self {
+        SeededFaultPlan { seed, rules: rules.into_iter().map(|r| (r, 0)).collect() }
+    }
+
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// The common harness shape: install as the active plan AND arm the
+    /// seeded crash-image policy from the same seed.
+    pub fn install(seed: u64, rules: Vec<FaultRule>) {
+        SimVfs::set_crash_image(CrashImage::SeededSubset(seed));
+        SimVfs::set_fault_plan(Box::new(SeededFaultPlan::new(seed, rules)));
+    }
+}
+
+impl FaultPlan for SeededFaultPlan {
+    fn before_op(&mut self, op: &OpDesc<'_>) -> FaultDecision {
+        let mut decision = FaultDecision::Proceed;
+        for (rule, matched) in &mut self.rules {
+            if !rule.matcher.matches(op) {
+                continue;
+            }
+            *matched += 1;
+            let fire = *matched == rule.nth || (rule.sticky && *matched > rule.nth);
+            if fire && decision == FaultDecision::Proceed {
+                decision = rule.action;
+            }
+        }
+        decision
+    }
+}
+
+/// What survives of the unsynced journals at a cut. fsync is the only
+/// barrier: everything promoted by a successful fsync always survives;
+/// everything in a failed-fsync (doomed) epoch never survives; the policy
+/// only governs the in-between (the currently-unsynced set).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrashImage {
+    /// Adversarial floor (default): nothing unsynced survives.
+    DropAll,
+    /// Kindest legal disk: every unsynced op survives whole.
+    KeepAll,
+    /// Seeded arbitrary subset of each file's unsynced ops; surviving
+    /// writes may additionally tear on the 512 B floor. Deterministic in
+    /// (seed, cut number, node, op index).
+    SeededSubset(u64),
+}
+
+/// splitmix64 (Steele/Lea/Flood) — the same pure generator family SimEntropy
+/// uses. All sim randomness flows from explicit seeds through this.
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Deterministic per-journal-entry coin for [`CrashImage::SeededSubset`].
+fn subset_coin(seed: u64, cut_no: u64, node: usize, idx: usize) -> u64 {
+    let mut s = seed
+        ^ cut_no.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (node as u64).wrapping_mul(0xA076_1D64_78BD_642F)
+        ^ (idx as u64).wrapping_mul(0xE703_7ED1_A0B4_28DB);
+    splitmix64(&mut s)
+}
+
+/// The 512 B atomicity floor: the surviving prefix of a torn write ends on
+/// an ABSOLUTE sector boundary (`off + p ≡ 0 mod 512`), or is the whole
+/// write (the final partial sector rides out with the preceding full ones —
+/// a write whose tail shares a sector with its body either got that sector
+/// or didn't). `atomic` is the red-battery weakening: the whole write
+/// persists regardless (multi-sector atomicity — the behavior no disk
+/// guarantees, kept ONLY to prove the floor has teeth).
+fn sector_prefix(off: usize, len: usize, want: usize, atomic: bool) -> usize {
+    if atomic || want >= len {
+        return len;
+    }
+    let end = off + want;
+    (end / SECTOR_SIZE * SECTOR_SIZE).saturating_sub(off).min(len)
+}
+
+// ===========================================================================
 // In-memory tree
 // ===========================================================================
 
 type NodeId = usize;
 
-/// A regular file: two-image store + dirty ranges (contract §4.1 shape).
+/// One op of a file's unsynced journal (everything since the last
+/// SUCCESSFUL fsync). Order preserved for deterministic subset replay.
+#[derive(Debug, Clone)]
+enum JournalOp {
+    Write { off: usize, data: Vec<u8> },
+    SetLen { len: usize },
+}
+
+/// Apply one journal op to an image, keeping at most `keep` bytes of a
+/// Write (usize::MAX = whole; SetLen is metadata and never tears).
+fn apply_journal_op(img: &mut Vec<u8>, op: &JournalOp, keep: usize) {
+    match op {
+        JournalOp::Write { off, data } => {
+            let n = keep.min(data.len());
+            if n == 0 {
+                return;
+            }
+            let end = *off + n;
+            if img.len() < end {
+                img.resize(end, 0);
+            }
+            img[*off..end].copy_from_slice(&data[..n]);
+        }
+        JournalOp::SetLen { len } => img.resize(*len, 0),
+    }
+}
+
+/// A regular file: two-image store + the unsynced journal.
 #[derive(Debug, Default)]
 struct SimFile {
+    /// What the process sees (the page-cache view).
     volatile: Vec<u8>,
+    /// The last successfully-synced on-disk image.
     durable: Vec<u8>,
-    dirty: Vec<Range<usize>>,
+    /// Ops since the last SUCCESSFUL fsync. A successful fsync folds these
+    /// into `durable`; a FAILED fsync discards them (fsyncgate: that epoch
+    /// is may-be-lost permanently — `volatile` keeps showing it, but no
+    /// later fsync can make it durable and no crash lets it survive).
+    unsynced: Vec<JournalOp>,
     /// Permission bits only (type bits synthesized in stat).
     mode: u32,
     nlink: u32,
     /// PG_O_DIRECT was requested on some open of this file (recorded per
-    /// contract §4.2; read by P4 direct-IO faulting, write-only today).
+    /// contract §4.2; read by direct-IO faulting, write-only today).
     #[allow(dead_code)]
     o_direct_seen: bool,
 }
 
 #[derive(Debug, Default)]
 struct SimDir {
-    /// Deterministic readdir: BTree order (contract §4.1).
-    entries: BTreeSet<String>,
+    /// Volatile entry image (deterministic BTree order), name → node.
+    entries: BTreeMap<String, NodeId>,
+    /// Entry image as of this directory's last successful fsync. Crash
+    /// reverts `entries` to this — dirent durability requires the
+    /// parent-dir fsync (rule 3).
+    durable_entries: BTreeMap<String, NodeId>,
     mode: u32,
 }
 
@@ -159,7 +449,7 @@ struct SimDir {
 enum Node {
     File(SimFile),
     Dir(SimDir),
-    /// Arena slot whose file reached nlink == 0 with no open handles.
+    /// Arena slot whose node became unreferenced with no open handles.
     Free,
 }
 
@@ -172,27 +462,47 @@ struct NodeSlot {
 #[derive(Debug, Clone)]
 struct OpenFile {
     node: NodeId,
-    /// Open flags as given (recorded for P4 access-mode faulting; sim does
-    /// not enforce access modes on the data plane in P1).
+    /// Open flags as given (recorded for access-mode faulting; sim does not
+    /// enforce access modes on the data plane).
     #[allow(dead_code)]
     flags: c_int,
+    /// The (normalized) path this fd was opened under — resolved into
+    /// OpDesc.path for fd-addressed ops so path-class fault rules see the
+    /// data plane. Rename does not retroactively rewrite it.
+    path: PathBuf,
 }
 
 struct SimState {
     nodes: Vec<NodeSlot>,
-    /// Absolute normalized path → node. Includes "/" and every dir.
+    /// Absolute normalized path → node. Includes "/" and every dir. This is
+    /// the VOLATILE namespace view; crash rebuilds it from the directories'
+    /// durable entry images.
     namespace: BTreeMap<PathBuf, NodeId>,
     open: BTreeMap<c_int, OpenFile>,
     next_fd: c_int,
     /// Every fd `open` has handed out, in order (replay invariant).
     fd_trace: Vec<c_int>,
     plan: Box<dyn FaultPlan>,
+    /// Increments on every plan consult; the fault log speaks these.
+    op_seq: u64,
+    /// Deterministic log of every injected fault + every cut. Byte-stable
+    /// across same-seed replays (the replay-identity gate byte-compares it).
+    fault_log: Vec<String>,
+    crash_image: CrashImage,
+    /// RED-BATTERY WEAKENING ONLY: pretend multi-sector writes are atomic.
+    atomic_writes: bool,
+    /// Cuts so far (crash numbering for logs and harness detection).
+    cuts: u64,
 }
 
 impl SimState {
     fn fresh() -> Self {
         let root = NodeSlot {
-            node: Node::Dir(SimDir { entries: BTreeSet::new(), mode: 0o700 }),
+            node: Node::Dir(SimDir {
+                entries: BTreeMap::new(),
+                durable_entries: BTreeMap::new(),
+                mode: 0o700,
+            }),
             open_count: 0,
         };
         let mut namespace = BTreeMap::new();
@@ -204,6 +514,11 @@ impl SimState {
             next_fd: SIM_FD_BASE,
             fd_trace: Vec::new(),
             plan: Box::new(NoFaults),
+            op_seq: 0,
+            fault_log: Vec::new(),
+            crash_image: CrashImage::DropAll,
+            atomic_writes: false,
+            cuts: 0,
         }
     }
 }
@@ -226,23 +541,42 @@ impl SimVfs {
     }
 
     /// Harness API: tear down the current thread's simulated disk entirely —
-    /// empty tree, fd counter back to [`SIM_FD_BASE`], empty fd trace,
-    /// [`NoFaults`] plan. NOT a crash (crash keeps durable state).
+    /// empty tree, fd counter back to [`SIM_FD_BASE`], empty fd trace and
+    /// fault log, [`NoFaults`] plan, [`CrashImage::DropAll`], floor armed.
+    /// NOT a crash (crash keeps durable state).
     pub fn reset() {
         SIM.with(|cell| *cell.borrow_mut() = SimState::fresh());
     }
 
-    /// Harness API: install a fault plan (P4 machinery arrives later; the
-    /// plumbing is live today).
+    /// Harness API: install a fault plan.
     pub fn set_fault_plan(plan: Box<dyn FaultPlan>) {
         with(|st| st.plan = plan);
     }
 
-    /// Simulated power loss: every file rolls back to its durable image and
-    /// all open fds are dropped. Namespace ops are treated as immediately
-    /// durable in P1 (modeling them against dir-fsync ordering is P4).
+    /// Harness API: what survives of the unsynced set at a cut.
+    pub fn set_crash_image(policy: CrashImage) {
+        with(|st| st.crash_image = policy);
+    }
+
+    /// RED-BATTERY WEAKENING (test-only, default off): pretend multi-sector
+    /// writes persist atomically at a crash. Exists ONLY so the red battery
+    /// can prove the 512 B floor catches what this mode masks. Never set it
+    /// in a property harness.
+    pub fn set_atomic_write_mode(on: bool) {
+        with(|st| st.atomic_writes = on);
+    }
+
+    /// The crash-simulation primitive: discard everything not durable per
+    /// the model rules (sector floor, fsync barrier, dirent-vs-dir-fsync),
+    /// producing the post-crash image deterministically. All open fds die.
+    pub fn cut() {
+        with(|st| crash_locked(st, None));
+    }
+
+    /// Simulated power loss (alias of [`SimVfs::cut`], kept for the P1
+    /// harness surface).
     pub fn crash(&self) {
-        with(crash_locked);
+        with(|st| crash_locked(st, None));
     }
 
     /// Deterministic dump of the whole tree: (path, None) for dirs,
@@ -267,6 +601,23 @@ impl SimVfs {
         with(|st| st.fd_trace.clone())
     }
 
+    /// The deterministic fault/cut log: one line per injected fault (with
+    /// its op-sequence number) and per cut. Same seed + same plan spec ⇒
+    /// byte-identical log (the replay-identity gate).
+    pub fn fault_log() -> Vec<String> {
+        with(|st| st.fault_log.clone())
+    }
+
+    /// Ops consulted so far (the op-sequence counter the fault log speaks).
+    pub fn op_seq() -> u64 {
+        with(|st| st.op_seq)
+    }
+
+    /// Cuts (crashes) since reset — the harness's "did the plan fire" probe.
+    pub fn cut_count() -> u64 {
+        with(|st| st.cuts)
+    }
+
     /// The [`crate::VfsFd`] drop arm (finding F1b): exactly [`Vfs::close`] —
     /// same fault gating, same fd-table release — except it tolerates the
     /// thread's sim universe already being torn down. Guard drops legally run
@@ -274,7 +625,7 @@ impl SimVfs {
     /// unspecified: once `SimState` is destroyed its open-fd table died with
     /// it, so there is nothing left to release (0, not EBADF).
     ///
-    /// NOTE for P4 fault-plan authors: because this IS the one close code
+    /// NOTE for fault-plan authors: because this IS the one close code
     /// path, guard drops on leak/unwind paths CONSUME plan `Close` steps (and
     /// can trigger a planned `Crash`) exactly like deliberate closes — an
     /// unwind that drops N live holders advances Close-op sequencing by N vs
@@ -293,9 +644,16 @@ impl Default for SimVfs {
 // [`Vfs::close`]'s whole body, shared with [`SimVfs::close_on_drop`] so the
 // guard-drop release and the deliberate close are ONE code path.
 fn close_locked(st: &mut SimState, fd: c_int) -> c_int {
+    let opath = st.open.get(&fd).map(|of| of.path.clone());
     if let Some(e) = gate_simple(
         st,
-        &OpDesc { kind: OpKind::Close, path: None, fd: Some(fd), offset: None, len: None },
+        &OpDesc {
+            kind: OpKind::Close,
+            path: opath.as_deref(),
+            fd: Some(fd),
+            offset: None,
+            len: None,
+        },
     ) {
         return fail(e);
     }
@@ -305,32 +663,156 @@ fn close_locked(st: &mut SimState, fd: c_int) -> c_int {
     st.nodes[of.node].open_count -= 1;
     // FD_DELETE_AT_CLOSE law: unlinked data lives until the LAST close.
     st.maybe_free(of.node);
-    // A dir removed while its handle was open frees on last close.
-    if st.nodes[of.node].open_count == 0 {
-        if matches!(st.nodes[of.node].node, Node::Dir(_))
-            && !st.namespace.values().any(|&id| id == of.node)
-        {
-            st.nodes[of.node].node = Node::Free;
-        }
+    // A dir removed while its handle was open frees on last close — unless a
+    // durable dirent still references it (crash could resurrect it).
+    if st.nodes[of.node].open_count == 0
+        && matches!(st.nodes[of.node].node, Node::Dir(_))
+        && !st.namespace.values().any(|&id| id == of.node)
+        && !st.durably_referenced(of.node)
+    {
+        st.nodes[of.node].node = Node::Free;
     }
     0
 }
 
-fn crash_locked(st: &mut SimState) {
+/// The cut: compute the post-crash image deterministically.
+///
+/// Data plane: each file becomes durable-image + a policy-chosen subset of
+/// its unsynced journal, sector-torn per the floor. `forced` (the in-flight
+/// torn write of a `TornWrite` decision) always survives, last.
+/// Namespace plane: every directory reverts to its last-fsync'd entry image
+/// and the namespace is rebuilt from the root; unreachable nodes are freed
+/// (files reachable under several names get that nlink).
+fn crash_locked(st: &mut SimState, forced: Option<(NodeId, JournalOp)>) {
+    st.cuts += 1;
+    let cut = st.cuts;
+    let seq = st.op_seq;
+    let policy = st.crash_image;
+    let atomic = st.atomic_writes;
+    st.fault_log.push(format!(
+        "CUT#{cut} seq={seq} policy={policy:?} atomic={atomic}"
+    ));
     st.open.clear();
-    for slot in &mut st.nodes {
-        if let Node::File(f) = &mut slot.node {
-            f.volatile = f.durable.clone();
-            f.dirty.clear();
-        }
-        slot.open_count = 0;
-    }
-    // Files that were unlinked-but-open are gone for good now.
-    for slot in &mut st.nodes {
-        if let Node::File(f) = &slot.node {
-            if f.nlink == 0 {
-                slot.node = Node::Free;
+
+    // ---- data plane ----
+    for id in 0..st.nodes.len() {
+        st.nodes[id].open_count = 0;
+        let forced_here = match &forced {
+            Some((nid, op)) if *nid == id => Some(op.clone()),
+            _ => None,
+        };
+        let mut line: Option<String> = None;
+        if let Node::File(f) = &mut st.nodes[id].node {
+            if f.unsynced.is_empty() && forced_here.is_none() {
+                f.volatile = f.durable.clone();
+                continue;
             }
+            let entries = std::mem::take(&mut f.unsynced);
+            let mut img = f.durable.clone();
+            let (mut kept, mut torn) = (0usize, 0usize);
+            for (i, e) in entries.iter().enumerate() {
+                let (keep, cap) = match policy {
+                    CrashImage::DropAll => (false, 0),
+                    CrashImage::KeepAll => (true, usize::MAX),
+                    CrashImage::SeededSubset(seed) => {
+                        let coin = subset_coin(seed, cut, id, i);
+                        let keep = coin & 1 == 1;
+                        let cap = match e {
+                            JournalOp::Write { off, data }
+                                if keep && (coin >> 1) & 3 == 0 =>
+                            {
+                                sector_prefix(
+                                    *off,
+                                    data.len(),
+                                    ((coin >> 3) as usize) % (data.len() + 1),
+                                    atomic,
+                                )
+                            }
+                            _ => usize::MAX,
+                        };
+                        (keep, cap)
+                    }
+                };
+                if keep {
+                    kept += 1;
+                    if cap != usize::MAX {
+                        torn += 1;
+                    }
+                    apply_journal_op(&mut img, e, cap);
+                }
+            }
+            let had_forced = forced_here.is_some();
+            if let Some(op) = forced_here {
+                // The in-flight torn write: its (already sector-floored)
+                // prefix is what reached the platter — it survives whole.
+                apply_journal_op(&mut img, &op, usize::MAX);
+            }
+            line = Some(format!(
+                "CUT#{cut} node={id} unsynced={} kept={kept} torn={torn} inflight={}",
+                entries.len(),
+                had_forced
+            ));
+            f.durable = img.clone();
+            f.volatile = img;
+        }
+        if let Some(l) = line {
+            st.fault_log.push(l);
+        }
+    }
+
+    // ---- namespace plane: revert dirs to their durable entry images ----
+    for slot in &mut st.nodes {
+        if let Node::Dir(d) = &mut slot.node {
+            d.entries = d.durable_entries.clone();
+        }
+    }
+
+    // Rebuild the namespace from the root over the reverted entry images.
+    let mut refs = vec![0u32; st.nodes.len()];
+    refs[0] = 1;
+    let mut visited = vec![false; st.nodes.len()];
+    visited[0] = true;
+    let mut ns: BTreeMap<PathBuf, NodeId> = BTreeMap::new();
+    ns.insert(PathBuf::from("/"), 0);
+    let mut stack: Vec<(PathBuf, NodeId)> = vec![(PathBuf::from("/"), 0)];
+    while let Some((p, id)) = stack.pop() {
+        let children: Vec<(String, NodeId)> = match &st.nodes[id].node {
+            Node::Dir(d) => d.entries.iter().map(|(k, &v)| (k.clone(), v)).collect(),
+            _ => Vec::new(),
+        };
+        for (name, cid) in children {
+            if matches!(st.nodes[cid].node, Node::Free) {
+                // A durable dirent may never point at a freed node (the free
+                // rules guard on durable references); drop it defensively.
+                if let Node::Dir(d) = &mut st.nodes[id].node {
+                    d.entries.remove(&name);
+                }
+                continue;
+            }
+            refs[cid] += 1;
+            let cp = p.join(&name);
+            let is_dir = matches!(st.nodes[cid].node, Node::Dir(_));
+            ns.insert(cp.clone(), cid);
+            if is_dir && !visited[cid] {
+                visited[cid] = true;
+                stack.push((cp, cid));
+            }
+        }
+    }
+    st.namespace = ns;
+    for (id, slot) in st.nodes.iter_mut().enumerate() {
+        if id == 0 {
+            continue;
+        }
+        if matches!(slot.node, Node::Free) {
+            continue;
+        }
+        if refs[id] == 0 {
+            slot.node = Node::Free;
+            continue;
+        }
+        if let Node::File(f) = &mut slot.node {
+            f.nlink = refs[id];
         }
     }
 }
@@ -417,19 +899,65 @@ impl SimState {
         }
     }
 
+    /// True if any directory's DURABLE entry image still references `id`
+    /// (a crash could resurrect the node; it must not be freed).
+    fn durably_referenced(&self, id: NodeId) -> bool {
+        self.nodes.iter().any(|s| {
+            matches!(&s.node, Node::Dir(d) if d.durable_entries.values().any(|&v| v == id))
+        })
+    }
+
     fn maybe_free(&mut self, id: NodeId) {
-        let slot = &mut self.nodes[id];
-        if slot.open_count == 0 {
-            if let Node::File(f) = &slot.node {
-                if f.nlink == 0 {
-                    slot.node = Node::Free;
-                }
-            }
+        if self.nodes[id].open_count != 0 {
+            return;
+        }
+        let unlinked_file = matches!(&self.nodes[id].node, Node::File(f) if f.nlink == 0);
+        if unlinked_file && !self.durably_referenced(id) {
+            self.nodes[id].node = Node::Free;
         }
     }
 
+    /// The fd-op path view for the fault plan (path-at-open).
+    fn fd_path(&self, fd: c_int) -> Option<PathBuf> {
+        self.open.get(&fd).map(|of| of.path.clone())
+    }
+
     fn consult(&mut self, op: &OpDesc<'_>) -> FaultDecision {
-        self.plan.before_op(op)
+        self.op_seq += 1;
+        let d = self.plan.before_op(op);
+        if d != FaultDecision::Proceed {
+            let path = op
+                .path
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "-".to_string());
+            self.fault_log.push(format!(
+                "FAULT seq={} op={:?} path={} fd={:?} off={:?} len={:?} decision={:?}",
+                self.op_seq, op.kind, path, op.fd, op.offset, op.len, d
+            ));
+        }
+        d
+    }
+}
+
+/// Sweep freeable nodes that just lost their last durable reference (runs
+/// after a directory fsync promotes a new entry image).
+fn gc_unreferenced(st: &mut SimState) {
+    let mut free: Vec<NodeId> = Vec::new();
+    for id in 1..st.nodes.len() {
+        if st.nodes[id].open_count != 0 {
+            continue;
+        }
+        let candidate = match &st.nodes[id].node {
+            Node::File(f) => f.nlink == 0,
+            Node::Dir(_) => !st.namespace.values().any(|&v| v == id),
+            Node::Free => false,
+        };
+        if candidate && !st.durably_referenced(id) {
+            free.push(id);
+        }
+    }
+    for id in free {
+        st.nodes[id].node = Node::Free;
     }
 }
 
@@ -440,16 +968,59 @@ fn gate_simple(st: &mut SimState, op: &OpDesc<'_>) -> Option<i32> {
         FaultDecision::Proceed => None,
         FaultDecision::Errno(e) => Some(e),
         FaultDecision::Crash => {
-            crash_locked(st);
+            crash_locked(st, None);
             Some(libc::EIO)
         }
-        // Short/torn decisions are only meaningful on the data plane; a P4
+        // Short/torn decisions are only meaningful on the data plane; a
         // plan emitting them elsewhere is a plan bug — proceed loudly.
         FaultDecision::ShortRead(_)
         | FaultDecision::ShortWrite(_)
         | FaultDecision::TornWrite { .. } => {
             debug_assert!(false, "Short/Torn decision on non-data-plane op {:?}", op.kind);
             None
+        }
+    }
+}
+
+/// fsync/fdatasync body: plan gate + the fsyncgate state machine + promote.
+fn sync_locked(st: &mut SimState, fd: c_int, kind: OpKind) -> c_int {
+    let opath = st.fd_path(fd);
+    let desc = OpDesc { kind, path: opath.as_deref(), fd: Some(fd), offset: None, len: None };
+    match st.consult(&desc) {
+        FaultDecision::Proceed => promote(st, fd),
+        FaultDecision::Errno(e) => {
+            // The fsyncgate state machine: a failed fsync means the dirty
+            // epoch is may-be-lost PERMANENTLY. Discard the journal without
+            // promoting — volatile keeps showing the data (page-cache view),
+            // but no later successful fsync resurrects it and no crash lets
+            // it survive. Retry-and-believe is thereby always caught.
+            if let Some(of) = st.open.get(&fd).cloned() {
+                if let Node::File(f) = &mut st.nodes[of.node].node {
+                    let dropped = f.unsynced.len();
+                    if dropped > 0 {
+                        f.unsynced.clear();
+                        let seq = st.op_seq;
+                        st.fault_log.push(format!(
+                            "FSYNCGATE seq={seq} fd={fd} path={} dropped_ops={dropped}",
+                            of.path.display()
+                        ));
+                    }
+                }
+                // Dir-fsync failure: promotion simply does not happen (the
+                // durable entry image stays stale). Softer than the file
+                // plane; ledgered for inc-2.
+            }
+            fail(e)
+        }
+        FaultDecision::Crash => {
+            crash_locked(st, None);
+            fail(libc::EIO)
+        }
+        FaultDecision::ShortRead(_)
+        | FaultDecision::ShortWrite(_)
+        | FaultDecision::TornWrite { .. } => {
+            debug_assert!(false, "Short/Torn decision on {kind:?}");
+            promote(st, fd)
         }
     }
 }
@@ -495,8 +1066,7 @@ impl Vfs for SimVfs {
                                 // Truncation hits the volatile image only; it
                                 // becomes durable at the next fsync.
                                 f.volatile.clear();
-                                f.dirty.clear();
-                                f.dirty.push(0..0);
+                                f.unsynced.push(JournalOp::SetLen { len: 0 });
                             }
                             id
                         }
@@ -520,7 +1090,7 @@ impl Vfs for SimVfs {
                         node: Node::File(SimFile {
                             volatile: Vec::new(),
                             durable: Vec::new(),
-                            dirty: Vec::new(),
+                            unsynced: Vec::new(),
                             mode: mode as u32 & 0o7777,
                             nlink: 1,
                             o_direct_seen: o_direct,
@@ -529,7 +1099,7 @@ impl Vfs for SimVfs {
                     });
                     match &mut st.nodes[pid].node {
                         Node::Dir(d) => {
-                            d.entries.insert(name);
+                            d.entries.insert(name, id);
                         }
                         _ => unreachable!(),
                     }
@@ -541,7 +1111,7 @@ impl Vfs for SimVfs {
             st.nodes[node].open_count += 1;
             let fd = st.next_fd;
             st.next_fd += 1;
-            st.open.insert(fd, OpenFile { node, flags });
+            st.open.insert(fd, OpenFile { node, flags, path: p.clone() });
             st.fd_trace.push(fd);
             fd
         })
@@ -557,10 +1127,11 @@ impl Vfs for SimVfs {
                 return fail_isize(libc::EINVAL);
             }
             let want: usize = iov.iter().map(|v| v.iov_len).sum();
+            let opath = st.fd_path(fd);
             let mut cap = want;
             match st.consult(&OpDesc {
                 kind: OpKind::PReadV,
-                path: None,
+                path: opath.as_deref(),
                 fd: Some(fd),
                 offset: Some(off),
                 len: Some(want),
@@ -569,7 +1140,7 @@ impl Vfs for SimVfs {
                 FaultDecision::Errno(e) => return fail_isize(e),
                 FaultDecision::ShortRead(n) => cap = cap.min(n),
                 FaultDecision::Crash => {
-                    crash_locked(st);
+                    crash_locked(st, None);
                     return fail_isize(libc::EIO);
                 }
                 FaultDecision::ShortWrite(_) | FaultDecision::TornWrite { .. } => {
@@ -612,10 +1183,12 @@ impl Vfs for SimVfs {
                 return fail_isize(libc::EINVAL);
             }
             let want: usize = iov.iter().map(|v| v.iov_len).sum();
+            let opath = st.fd_path(fd);
             let mut cap = want;
+            let mut torn: Option<usize> = None;
             match st.consult(&OpDesc {
                 kind: OpKind::PWriteV,
-                path: None,
+                path: opath.as_deref(),
                 fd: Some(fd),
                 offset: Some(off),
                 len: Some(want),
@@ -623,11 +1196,9 @@ impl Vfs for SimVfs {
                 FaultDecision::Proceed => {}
                 FaultDecision::Errno(e) => return fail_isize(e),
                 FaultDecision::ShortWrite(n) => cap = cap.min(n),
-                // P1 stub: a torn write behaves as a short write. Byte-granular
-                // torn PERSISTENCE (prefix survives crash, tail does not) is P4.
-                FaultDecision::TornWrite { persist_prefix } => cap = cap.min(persist_prefix),
+                FaultDecision::TornWrite { persist_prefix } => torn = Some(persist_prefix),
                 FaultDecision::Crash => {
-                    crash_locked(st);
+                    crash_locked(st, None);
                     return fail_isize(libc::EIO);
                 }
                 FaultDecision::ShortRead(_) => {
@@ -638,31 +1209,49 @@ impl Vfs for SimVfs {
                 Ok(n) => n,
                 Err(e) => return fail_isize(e),
             };
-            let f = st.file_mut(node);
             let start = off as usize;
-            let mut done = 0usize;
+
+            // Gather the (possibly short-capped) bytes once; the journal
+            // keeps them for crash-time subset/tear replay.
+            let mut data: Vec<u8> = Vec::with_capacity(cap);
             for v in iov {
-                if done == cap {
+                if data.len() == cap {
                     break;
                 }
-                let n = v.iov_len.min(cap - done);
-                let end = start + done + n;
+                let n = v.iov_len.min(cap - data.len());
+                // SAFETY: caller contract — iov bases valid for reads of
+                // their lengths.
+                let sl = unsafe { std::slice::from_raw_parts(v.iov_base as *const u8, n) };
+                data.extend_from_slice(sl);
+            }
+
+            if let Some(pp) = torn {
+                // Crash DURING this write (512 B atomicity floor): the
+                // surviving prefix ends on an absolute sector boundary or is
+                // the whole write; the caller never observes a result — the
+                // simulated process is gone. EIO tells the harness the cut
+                // fired.
+                let keep = sector_prefix(start, data.len(), pp, st.atomic_writes);
+                let seq = st.op_seq;
+                let atomic = st.atomic_writes;
+                st.fault_log.push(format!(
+                    "TORN seq={seq} node={node} off={start} want={} kept={keep} atomic={atomic}",
+                    data.len()
+                ));
+                data.truncate(keep);
+                crash_locked(st, Some((node, JournalOp::Write { off: start, data })));
+                return fail_isize(libc::EIO);
+            }
+
+            let f = st.file_mut(node);
+            let done = data.len();
+            if done > 0 {
+                let end = start + done;
                 if f.volatile.len() < end {
                     f.volatile.resize(end, 0);
                 }
-                // SAFETY: caller contract — iov bases valid for reads of
-                // their lengths; destination range was just sized.
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        v.iov_base as *const u8,
-                        f.volatile.as_mut_ptr().add(start + done),
-                        n,
-                    );
-                }
-                done += n;
-            }
-            if done > 0 {
-                f.dirty.push(start..start + done);
+                f.volatile[start..end].copy_from_slice(&data);
+                f.unsynced.push(JournalOp::Write { off: start, data });
             }
             done as isize
         })
@@ -685,43 +1274,22 @@ impl Vfs for SimVfs {
     }
 
     fn fsync(&self, fd: c_int) -> c_int {
-        with(|st| {
-            if let Some(e) = gate_simple(
-                st,
-                &OpDesc { kind: OpKind::Fsync, path: None, fd: Some(fd), offset: None, len: None },
-            ) {
-                return fail(e);
-            }
-            promote(st, fd)
-        })
+        with(|st| sync_locked(st, fd, OpKind::Fsync))
     }
 
     fn fdatasync(&self, fd: c_int) -> c_int {
-        // P1: identical promotion semantics to fsync (no metadata split yet).
-        with(|st| {
-            if let Some(e) = gate_simple(
-                st,
-                &OpDesc {
-                    kind: OpKind::Fdatasync,
-                    path: None,
-                    fd: Some(fd),
-                    offset: None,
-                    len: None,
-                },
-            ) {
-                return fail(e);
-            }
-            promote(st, fd)
-        })
+        // Identical promotion semantics to fsync (no metadata split).
+        with(|st| sync_locked(st, fd, OpKind::Fdatasync))
     }
 
     fn flush_range(&self, fd: c_int, off: off_t, len: off_t) -> c_int {
         with(|st| {
+            let opath = st.fd_path(fd);
             if let Some(e) = gate_simple(
                 st,
                 &OpDesc {
                     kind: OpKind::FlushRange,
-                    path: None,
+                    path: opath.as_deref(),
                     fd: Some(fd),
                     offset: Some(off),
                     len: Some(len.max(0) as usize),
@@ -743,11 +1311,12 @@ impl Vfs for SimVfs {
             if len < 0 {
                 return fail(libc::EINVAL);
             }
+            let opath = st.fd_path(fd);
             if let Some(e) = gate_simple(
                 st,
                 &OpDesc {
                     kind: OpKind::Ftruncate,
-                    path: None,
+                    path: opath.as_deref(),
                     fd: Some(fd),
                     offset: None,
                     len: Some(len as usize),
@@ -761,7 +1330,7 @@ impl Vfs for SimVfs {
             };
             let f = st.file_mut(node);
             f.volatile.resize(len as usize, 0);
-            f.dirty.push(0..len as usize);
+            f.unsynced.push(JournalOp::SetLen { len: len as usize });
             0
         })
     }
@@ -793,7 +1362,7 @@ impl Vfs for SimVfs {
             match &mut st.nodes[id].node {
                 Node::File(f) => {
                     f.volatile.resize(len as usize, 0);
-                    f.dirty.push(0..len as usize);
+                    f.unsynced.push(JournalOp::SetLen { len: len as usize });
                     0
                 }
                 Node::Dir(_) => fail(libc::EISDIR),
@@ -810,9 +1379,10 @@ impl Vfs for SimVfs {
             if off < 0 || len <= 0 {
                 return libc::EINVAL;
             }
+            let opath = st.fd_path(fd);
             match st.consult(&OpDesc {
                 kind: OpKind::Fallocate,
-                path: None,
+                path: opath.as_deref(),
                 fd: Some(fd),
                 offset: Some(off),
                 len: Some(len as usize),
@@ -820,7 +1390,7 @@ impl Vfs for SimVfs {
                 FaultDecision::Proceed => {}
                 FaultDecision::Errno(e) => return e,
                 FaultDecision::Crash => {
-                    crash_locked(st);
+                    crash_locked(st, None);
                     return libc::EIO;
                 }
                 FaultDecision::ShortRead(_)
@@ -836,9 +1406,8 @@ impl Vfs for SimVfs {
             let f = st.file_mut(node);
             let end = (off + len) as usize;
             if f.volatile.len() < end {
-                let old = f.volatile.len();
                 f.volatile.resize(end, 0); // fallocate-as-zero-extend
-                f.dirty.push(old..end);
+                f.unsynced.push(JournalOp::SetLen { len: end });
             }
             0
         })
@@ -846,11 +1415,12 @@ impl Vfs for SimVfs {
 
     fn file_size(&self, fd: c_int) -> off_t {
         with(|st| {
+            let opath = st.fd_path(fd);
             if let Some(e) = gate_simple(
                 st,
                 &OpDesc {
                     kind: OpKind::FileSize,
-                    path: None,
+                    path: opath.as_deref(),
                     fd: Some(fd),
                     offset: None,
                     len: None,
@@ -867,11 +1437,12 @@ impl Vfs for SimVfs {
 
     fn fadvise_willneed(&self, fd: c_int, off: off_t, len: off_t) -> c_int {
         with(|st| {
+            let opath = st.fd_path(fd);
             if let Some(e) = gate_simple(
                 st,
                 &OpDesc {
                     kind: OpKind::FadviseWillneed,
-                    path: None,
+                    path: opath.as_deref(),
                     fd: Some(fd),
                     offset: Some(off),
                     len: Some(len.max(0) as usize),
@@ -905,9 +1476,16 @@ impl Vfs for SimVfs {
 
     fn fstat(&self, fd: c_int, out: &mut FileInfo) -> c_int {
         with(|st| {
+            let opath = st.fd_path(fd);
             if let Some(e) = gate_simple(
                 st,
-                &OpDesc { kind: OpKind::Fstat, path: None, fd: Some(fd), offset: None, len: None },
+                &OpDesc {
+                    kind: OpKind::Fstat,
+                    path: opath.as_deref(),
+                    fd: Some(fd),
+                    offset: None,
+                    len: None,
+                },
             ) {
                 return fail(e);
             }
@@ -920,7 +1498,7 @@ impl Vfs for SimVfs {
     }
 
     fn lstat(&self, path: &CStr, out: &mut FileInfo) -> c_int {
-        // No symlinks in P1 sim: lstat ≡ stat (the plan still sees Lstat).
+        // No symlinks in sim: lstat ≡ stat (the plan still sees Lstat).
         let p = match norm_path(path) {
             Ok(p) => p,
             Err(e) => return fail(e),
@@ -1002,7 +1580,8 @@ impl Vfs for SimVfs {
             }
             let f = st.file_mut(id);
             f.nlink = f.nlink.saturating_sub(1);
-            // Data lives until last close (FD_DELETE_AT_CLOSE temp files).
+            // Data lives until last close (FD_DELETE_AT_CLOSE temp files) —
+            // or until the last DURABLE dirent stops referencing it.
             st.maybe_free(id);
             0
         })
@@ -1068,7 +1647,7 @@ impl Vfs for SimVfs {
                             return fail(libc::ENOTEMPTY);
                         }
                         st.namespace.remove(&tp);
-                        if st.nodes[dst].open_count == 0 {
+                        if st.nodes[dst].open_count == 0 && !st.durably_referenced(dst) {
                             st.nodes[dst].node = Node::Free;
                         }
                     }
@@ -1077,7 +1656,8 @@ impl Vfs for SimVfs {
                 }
             }
 
-            // Move the entry itself.
+            // Move the entry itself (volatile namespace only: durability of
+            // BOTH dirents requires the corresponding dir fsyncs).
             st.namespace.remove(&fp);
             if let Ok(fpid) = st.dir_id(&fparent) {
                 if let Node::Dir(d) = &mut st.nodes[fpid].node {
@@ -1085,7 +1665,7 @@ impl Vfs for SimVfs {
                 }
             }
             if let Node::Dir(d) = &mut st.nodes[tpid].node {
-                d.entries.insert(tname);
+                d.entries.insert(tname, src);
             }
             st.namespace.insert(tp.clone(), src);
 
@@ -1134,13 +1714,14 @@ impl Vfs for SimVfs {
             let id = st.nodes.len();
             st.nodes.push(NodeSlot {
                 node: Node::Dir(SimDir {
-                    entries: BTreeSet::new(),
+                    entries: BTreeMap::new(),
+                    durable_entries: BTreeMap::new(),
                     mode: mode as u32 & 0o7777,
                 }),
                 open_count: 0,
             });
             if let Node::Dir(d) = &mut st.nodes[pid].node {
-                d.entries.insert(name);
+                d.entries.insert(name, id);
             }
             st.namespace.insert(p.clone(), id);
             0
@@ -1181,7 +1762,7 @@ impl Vfs for SimVfs {
                     d.entries.remove(&name);
                 }
             }
-            if st.nodes[id].open_count == 0 {
+            if st.nodes[id].open_count == 0 && !st.durably_referenced(id) {
                 st.nodes[id].node = Node::Free;
             }
             0
@@ -1212,7 +1793,7 @@ impl Vfs for SimVfs {
                 e
             })?;
             let names: Vec<String> = match &st.nodes[id].node {
-                Node::Dir(d) => d.entries.iter().cloned().collect(),
+                Node::Dir(d) => d.entries.keys().cloned().collect(),
                 _ => unreachable!(),
             };
             // Deterministic BTree order; "." and ".." never yielded (frozen
@@ -1234,36 +1815,45 @@ impl Vfs for SimVfs {
                 },
             );
             // Fixed pinned budget, no real fds touched: determinism over
-            // realism. EMFILE budget INJECTION is P4 and flows through
-            // FaultPlan on open, not through here.
+            // realism. EMFILE budget INJECTION flows through FaultPlan on
+            // open, not through here.
             SIM_FD_BUDGET.min(max_to_probe)
         })
     }
 }
 
-/// fsync/fdatasync promotion: the whole volatile image becomes durable
-/// (trivial P1 model; range-granular promotion is P4).
+/// fsync/fdatasync promotion: fold the unsynced journal into the durable
+/// image (NOT `durable = volatile` — after a failed fsync the doomed epoch
+/// is gone from the journal, and this divergence is exactly the fsyncgate
+/// semantics). Dir fsync promotes the entry image (dirent durability).
 fn promote(st: &mut SimState, fd: c_int) -> c_int {
     let Some(of) = st.open.get(&fd).cloned() else {
         return fail(libc::EBADF);
     };
+    let mut promoted_dir = false;
     match &mut st.nodes[of.node].node {
         Node::File(f) => {
-            f.durable = f.volatile.clone();
-            f.dirty.clear();
+            let ops = std::mem::take(&mut f.unsynced);
+            for op in &ops {
+                apply_journal_op(&mut f.durable, op, usize::MAX);
+            }
         }
-        Node::Dir(_) => {
-            // Dir fsync: namespace ops are already durable in P1 (their
-            // crash-ordering model vs dir fsync is P4).
+        Node::Dir(d) => {
+            d.durable_entries = d.entries.clone();
+            promoted_dir = true;
         }
         Node::Free => return fail(libc::EBADF),
+    }
+    if promoted_dir {
+        // Nodes that just lost their last durable reference are gone for
+        // good (nothing can resurrect them at a crash anymore).
+        gc_unreferenced(st);
     }
     0
 }
 
-// mtime (and any future FileInfo fields, e.g. the dev+ino contract revision
-// WS-B requested) stay zeroed: no wall clock in sim, ever. When dev/ino land,
-// sim should populate ino = NodeId (stable, deterministic) + a fixed dev.
+// mtime stays zeroed: no wall clock in sim, ever. dev/ino/uid/gid synthetic
+// population is the ratified P4-backlog rider (Ruling 2) — untouched here.
 fn info_of(node: &Node) -> FileInfo {
     match node {
         Node::File(f) => FileInfo {
@@ -1283,8 +1873,9 @@ fn info_of(node: &Node) -> FileInfo {
 }
 
 // ===========================================================================
-// Tests: sim semantics, differential golden (sim vs posix), same-ops replay.
-// Run with: RUSTFLAGS='--cfg pgrust_sim' cargo test -p vfs sim::
+// Tests: sim semantics, differential golden (sim vs posix), same-ops replay,
+// the P4 fault model battery. Run with:
+//   RUSTFLAGS='--cfg pgrust_sim' cargo test -p vfs sim::
 // ===========================================================================
 
 #[cfg(test)]
@@ -1306,6 +1897,29 @@ mod tests {
 
     fn open_rw_create(v: &dyn Vfs, path: &str) -> c_int {
         v.open(&c(path), libc::O_CREAT | libc::O_RDWR, 0o600 as mode_t)
+    }
+
+    /// fsync a directory (dirent durability — rule 3).
+    fn dir_fsync(v: &dyn Vfs, path: &str) {
+        let dfd = v.open(&c(path), libc::O_RDONLY, 0 as mode_t);
+        assert!(dfd >= SIM_FD_BASE, "dir open {path}");
+        assert_eq!(v.fsync(dfd), 0, "dir fsync {path}");
+        assert_eq!(v.close(dfd), 0);
+    }
+
+    /// Whole-file read via a fresh fd; None if the path is gone.
+    fn read_file(v: &dyn Vfs, path: &str) -> Option<Vec<u8>> {
+        let fd = v.open(&c(path), libc::O_RDONLY, 0 as mode_t);
+        if fd < 0 {
+            return None;
+        }
+        let size = v.file_size(fd);
+        let mut buf = vec![0u8; size as usize];
+        if size > 0 {
+            assert_eq!(v.pread(fd, &mut buf, 0), size as isize);
+        }
+        assert_eq!(v.close(fd), 0);
+        Some(buf)
     }
 
     #[test]
@@ -1387,12 +2001,15 @@ mod tests {
     fn crash_discards_unsynced_keeps_synced() {
         let v = fresh();
         let fd = open_rw_create(&v, "/wal");
+        // Rule 3: the dirent itself needs the parent-dir fsync to be durable.
+        dir_fsync(&v, "/");
         assert_eq!(v.pwrite(fd, b"SYNCED--", 0), 8);
         assert_eq!(v.fsync(fd), 0);
         assert_eq!(v.pwrite(fd, b"UNSYNCED", 8), 8);
         assert_eq!(v.file_size(fd), 16);
 
         v.crash();
+        assert_eq!(SimVfs::cut_count(), 1);
 
         // fd is dead after the crash
         set_errno(0);
@@ -1400,6 +2017,7 @@ mod tests {
         assert_eq!(get_errno(), libc::EBADF);
 
         let fd2 = v.open(&c("/wal"), libc::O_RDONLY, 0 as mode_t);
+        assert!(fd2 >= SIM_FD_BASE, "durable dirent must survive the crash");
         assert_eq!(v.file_size(fd2), 8, "unsynced tail discarded");
         let mut buf = [0u8; 8];
         assert_eq!(v.pread(fd2, &mut buf, 0), 8);
@@ -1549,8 +2167,6 @@ mod tests {
 
     // -----------------------------------------------------------------
     // Differential golden test (contract §4.4b, trait-level arm).
-    // The fd::File*-level differential run is DEFERRED until WS-A inc-2
-    // lands (fd does not front the trait yet at vfs-trait-v1).
     // -----------------------------------------------------------------
 
     /// Runs the golden script against any Vfs with a path prefix; returns
@@ -1635,9 +2251,9 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // First same-ops-replay test (contract §4.4c): record the op stream
-    // from a seeded scripted run, replay into a fresh SimVfs, assert
-    // byte-identical volatile+durable images and identical fd assignment.
+    // Same-ops-replay test (contract §4.4c): record the op stream from a
+    // seeded scripted run, replay into a fresh SimVfs, assert byte-identical
+    // volatile+durable images and identical fd assignment.
     // -----------------------------------------------------------------
 
     /// All randomness from the harness seed (determinism rule).
@@ -1834,8 +2450,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Fault-interface stub: the plan is consulted on every op and its
-    // decisions are honored (P1 vocabulary: Proceed/Errno/Short*).
+    // Fault-plan plumbing: the plan is consulted on every op and its
+    // decisions are honored.
     // -----------------------------------------------------------------
 
     struct CountingPlan {
@@ -1870,6 +2486,14 @@ mod tests {
         assert_eq!(get_errno(), libc::ENOSPC);
         assert_eq!(v.pwrite(fd, b"fine", 0), 4); // op 4 proceeds
         assert_eq!(v.close(fd), 0);
+        // the injected fault is in the log, with its op-sequence number
+        let log = SimVfs::fault_log();
+        assert_eq!(log.len(), 1, "one injected fault, one log line: {log:?}");
+        assert!(
+            log[0].contains("seq=3") && log[0].contains("Errno"),
+            "log line carries the op-sequence number: {}",
+            log[0]
+        );
     }
 
     struct ShortWritePlan;
@@ -1928,5 +2552,354 @@ mod tests {
         assert_eq!(SimVfs::close_on_drop(raw3), 0);
         assert_eq!(v.fstat(raw3, &mut info), -1);
         assert_eq!(get_errno(), libc::EBADF);
+    }
+
+    // ===================================================================
+    // P4 fault-model battery
+    // ===================================================================
+
+    /// Rule 1: torn writes tear on ABSOLUTE 512 B sector boundaries — any
+    /// prefix of whole sectors, never a partial sector.
+    #[test]
+    fn torn_write_tears_on_absolute_sector_boundaries() {
+        let v = fresh();
+        let fd = open_rw_create(&v, "/f");
+        dir_fsync(&v, "/");
+        // durable base: 2048 bytes of 0xBB
+        let base = vec![0xBBu8; 2048];
+        assert_eq!(v.pwrite(fd, &base, 0), 2048);
+        assert_eq!(v.fsync(fd), 0);
+
+        // Crash during a 1300-byte write at off=100 with persist_prefix=700:
+        // end = 100+700 = 800 → floored to 512 → surviving prefix = 412
+        // bytes ([100, 512) — an absolute sector boundary).
+        SeededFaultPlan::install(
+            0x1,
+            vec![FaultRule::nth_matching(
+                OpMatch { kinds: Some(vec![OpKind::PWriteV]), ..OpMatch::default() },
+                1,
+                FaultDecision::TornWrite { persist_prefix: 700 },
+            )],
+        );
+        // NOTE: install arms SeededSubset, but there are no other unsynced
+        // ops, so only the forced in-flight write matters.
+        let new = vec![0xEEu8; 1300];
+        set_errno(0);
+        assert_eq!(v.pwrite(fd, &new, 100), -1, "cut during the write");
+        assert_eq!(get_errno(), libc::EIO);
+        assert_eq!(SimVfs::cut_count(), 1);
+
+        let img = read_file(&v, "/f").expect("durable dirent");
+        assert_eq!(img.len(), 2048);
+        assert!(img[..100].iter().all(|&b| b == 0xBB));
+        assert!(
+            img[100..512].iter().all(|&b| b == 0xEE),
+            "surviving prefix reaches exactly the sector boundary"
+        );
+        assert!(
+            img[512..].iter().all(|&b| b == 0xBB),
+            "nothing past the sector boundary — never a partial sector"
+        );
+
+        // persist_prefix >= len ⇒ the whole write survives (the final
+        // partial sector rides out with its body).
+        let v = fresh();
+        let fd = open_rw_create(&v, "/g");
+        dir_fsync(&v, "/");
+        assert_eq!(v.pwrite(fd, &vec![0xBBu8; 1024], 0), 1024);
+        assert_eq!(v.fsync(fd), 0);
+        SeededFaultPlan::install(
+            0x1,
+            vec![FaultRule::nth_matching(
+                OpMatch { kinds: Some(vec![OpKind::PWriteV]), ..OpMatch::default() },
+                1,
+                FaultDecision::TornWrite { persist_prefix: 9999 },
+            )],
+        );
+        assert_eq!(v.pwrite(fd, &vec![0xEEu8; 700], 100), -1);
+        let img = read_file(&v, "/g").expect("durable dirent");
+        assert!(img[100..800].iter().all(|&b| b == 0xEE), "full write survived");
+    }
+
+    /// Rule 2 (fsyncgate): a failed fsync's dirty epoch is may-be-lost
+    /// permanently — a later successful fsync does NOT resurrect it; the
+    /// durable image reverts to the last successfully-synced state for
+    /// those bytes.
+    #[test]
+    fn fsyncgate_failed_fsync_never_resurrects() {
+        let v = fresh();
+        let fd = open_rw_create(&v, "/f");
+        dir_fsync(&v, "/");
+        assert_eq!(v.pwrite(fd, b"AAAA", 0), 4);
+        assert_eq!(v.fsync(fd), 0); // epoch 0 durable
+
+        // Fail the NEXT fsync with EIO.
+        SimVfs::set_fault_plan(Box::new(SeededFaultPlan::new(
+            0,
+            vec![FaultRule::nth_matching(
+                OpMatch { kinds: Some(vec![OpKind::Fsync]), ..OpMatch::default() },
+                1,
+                FaultDecision::Errno(libc::EIO),
+            )],
+        )));
+
+        assert_eq!(v.pwrite(fd, b"BBBB", 4), 4); // epoch 1 (doomed)
+        set_errno(0);
+        assert_eq!(v.fsync(fd), -1, "injected fsync failure");
+        assert_eq!(get_errno(), libc::EIO);
+
+        assert_eq!(v.pwrite(fd, b"CCCC", 8), 4); // epoch 2
+        assert_eq!(v.fsync(fd), 0, "retry succeeds — but must not resurrect epoch 1");
+
+        // The page-cache view still shows everything (the trap!).
+        let mut buf = [0u8; 12];
+        assert_eq!(v.pread(fd, &mut buf, 0), 12);
+        assert_eq!(&buf, b"AAAABBBBCCCC", "volatile view hides the loss");
+
+        SimVfs::cut();
+
+        // Post-crash: epoch 0 and epoch 2 are durable; epoch 1 is GONE even
+        // though a later fsync succeeded — the fsyncgate distinction.
+        let img = read_file(&v, "/f").expect("durable dirent");
+        assert_eq!(img.len(), 12);
+        assert_eq!(&img[0..4], b"AAAA");
+        assert_eq!(&img[4..8], &[0u8; 4], "doomed epoch silently gone");
+        assert_eq!(&img[8..12], b"CCCC");
+
+        // The log carries the fsyncgate event with its op-seq.
+        assert!(
+            SimVfs::fault_log().iter().any(|l| l.starts_with("FSYNCGATE ")),
+            "fsyncgate transition must be logged: {:?}",
+            SimVfs::fault_log()
+        );
+    }
+
+    /// Rule 3: dirent durability requires the parent-dir fsync — creation
+    /// and rename both revert if the parent dir was never fsync'd (the
+    /// lost-dirent-after-rename class durable_rename exists to prevent).
+    #[test]
+    fn dirent_durability_requires_parent_dir_fsync() {
+        // --- creation ---
+        let v = fresh();
+        let fd = open_rw_create(&v, "/a");
+        assert_eq!(v.pwrite(fd, b"adata", 0), 5);
+        assert_eq!(v.fsync(fd), 0); // content durable, dirent NOT
+        assert_eq!(v.close(fd), 0);
+        dir_fsync(&v, "/"); // NOW the dirent is durable
+        let fd = open_rw_create(&v, "/c");
+        assert_eq!(v.pwrite(fd, b"cdata", 0), 5);
+        assert_eq!(v.fsync(fd), 0); // content durable, dirent created AFTER the dir fsync
+        assert_eq!(v.close(fd), 0);
+
+        SimVfs::cut();
+
+        assert_eq!(read_file(&v, "/a").as_deref(), Some(b"adata".as_slice()));
+        assert!(read_file(&v, "/c").is_none(), "un-fsync'd dirent lost at crash");
+
+        // --- rename without the parent-dir fsync: the new name is LOST ---
+        let v = fresh();
+        let fd = open_rw_create(&v, "/old");
+        assert_eq!(v.pwrite(fd, b"payload", 0), 7);
+        assert_eq!(v.fsync(fd), 0);
+        assert_eq!(v.close(fd), 0);
+        dir_fsync(&v, "/");
+        assert_eq!(v.rename(&c("/old"), &c("/new")), 0);
+        // (no dir fsync — the durable_rename discipline violated)
+        SimVfs::cut();
+        assert!(read_file(&v, "/new").is_none(), "rename dirent lost at crash");
+        assert_eq!(
+            read_file(&v, "/old").as_deref(),
+            Some(b"payload".as_slice()),
+            "the file is still at its OLD name"
+        );
+
+        // --- same rename + parent fsync: durable ---
+        let v = fresh();
+        let fd = open_rw_create(&v, "/old");
+        assert_eq!(v.pwrite(fd, b"payload", 0), 7);
+        assert_eq!(v.fsync(fd), 0);
+        assert_eq!(v.close(fd), 0);
+        dir_fsync(&v, "/");
+        assert_eq!(v.rename(&c("/old"), &c("/new")), 0);
+        dir_fsync(&v, "/");
+        SimVfs::cut();
+        assert_eq!(read_file(&v, "/new").as_deref(), Some(b"payload".as_slice()));
+        assert!(read_file(&v, "/old").is_none());
+    }
+
+    /// The seeded-subset crash image is deterministic in the seed and
+    /// sensitive to it; KeepAll keeps everything.
+    #[test]
+    fn seeded_subset_cut_is_deterministic_and_seed_sensitive() {
+        fn run(seed: u64) -> (Vec<(PathBuf, Option<(Vec<u8>, Vec<u8>)>)>, Vec<String>) {
+            let v = fresh();
+            let fd = open_rw_create(&v, "/f");
+            dir_fsync(&v, "/");
+            assert_eq!(v.pwrite(fd, &[0x11u8; 1024], 0), 1024);
+            assert_eq!(v.fsync(fd), 0);
+            // 8 unsynced writes
+            for i in 0..8u8 {
+                let val = 0x20 + i;
+                assert_eq!(v.pwrite(fd, &vec![val; 96], (i as off_t) * 128), 96);
+            }
+            SimVfs::set_crash_image(CrashImage::SeededSubset(seed));
+            SimVfs::cut();
+            (v.image_dump(), SimVfs::fault_log())
+        }
+
+        let (img_a1, log_a1) = run(0xA11CE);
+        let (img_a2, log_a2) = run(0xA11CE);
+        assert_eq!(img_a1, img_a2, "same seed ⇒ byte-identical post-crash image");
+        assert_eq!(log_a1, log_a2, "same seed ⇒ byte-identical fault log");
+
+        let (img_b, _) = run(0xB0B);
+        assert_ne!(img_a1, img_b, "different seed ⇒ different surviving subset");
+
+        // KeepAll: the kindest legal disk — everything unsynced survives.
+        let v = fresh();
+        let fd = open_rw_create(&v, "/f");
+        dir_fsync(&v, "/");
+        assert_eq!(v.pwrite(fd, &[0x11u8; 64], 0), 64);
+        assert_eq!(v.fsync(fd), 0);
+        assert_eq!(v.pwrite(fd, &[0x22u8; 64], 64), 64);
+        SimVfs::set_crash_image(CrashImage::KeepAll);
+        SimVfs::cut();
+        let img = read_file(&v, "/f").unwrap();
+        assert_eq!(img.len(), 128);
+        assert!(img[64..].iter().all(|&b| b == 0x22));
+    }
+
+    /// Fail-by-path-class + fail-the-Nth-matching-op: the engine rules fire
+    /// on fd-addressed data-plane ops through the resolved open path.
+    #[test]
+    fn path_class_and_nth_matching_rules() {
+        // classifier vocabulary
+        assert_eq!(classify_path(Path::new("/data/pg_wal/000000010000000000000001")), PathClass::Wal);
+        assert_eq!(classify_path(Path::new("/data/pg_control")), PathClass::Config);
+        assert_eq!(classify_path(Path::new("/data/pg_control.tmp")), PathClass::Config);
+        assert_eq!(classify_path(Path::new("/data/postgresql.conf")), PathClass::Config);
+        assert_eq!(classify_path(Path::new("/data/base/pgsql_tmp/pgsql_tmp1.0")), PathClass::Temp);
+        assert_eq!(classify_path(Path::new("/data/base/5/16384")), PathClass::Heap);
+        assert_eq!(classify_path(Path::new("/data/global/1213")), PathClass::Heap);
+        assert_eq!(classify_path(Path::new("/somewhere/else")), PathClass::Other);
+
+        let v = fresh();
+        assert_eq!(v.mkdir(&c("/data"), 0o700 as mode_t), 0);
+        assert_eq!(v.mkdir(&c("/data/pg_wal"), 0o700 as mode_t), 0);
+        assert_eq!(v.mkdir(&c("/data/base"), 0o700 as mode_t), 0);
+        let wal = open_rw_create(&v, "/data/pg_wal/wal");
+        let heap = open_rw_create(&v, "/data/base/heap");
+
+        // The 2nd WAL-class write fails ENOSPC. Heap writes never match.
+        SimVfs::set_fault_plan(Box::new(SeededFaultPlan::new(
+            0,
+            vec![FaultRule::nth_matching(
+                OpMatch {
+                    kinds: Some(vec![OpKind::PWriteV]),
+                    class: Some(PathClass::Wal),
+                    path_contains: None,
+                },
+                2,
+                FaultDecision::Errno(libc::ENOSPC),
+            )],
+        )));
+
+        assert_eq!(v.pwrite(heap, b"h1", 0), 2);
+        assert_eq!(v.pwrite(wal, b"w1", 0), 2, "1st wal write proceeds");
+        assert_eq!(v.pwrite(heap, b"h2", 2), 2);
+        set_errno(0);
+        assert_eq!(v.pwrite(wal, b"w2", 2), -1, "2nd wal write fails");
+        assert_eq!(get_errno(), libc::ENOSPC);
+        assert_eq!(v.pwrite(wal, b"w3", 2), 2, "rule fired once, disarmed");
+
+        let log = SimVfs::fault_log();
+        assert_eq!(log.len(), 1);
+        assert!(
+            log[0].contains("pg_wal") && log[0].contains("PWriteV"),
+            "log line carries the resolved path + op: {}",
+            log[0]
+        );
+        assert_eq!(v.close(wal), 0);
+        assert_eq!(v.close(heap), 0);
+    }
+
+    /// Same plan + same seed run twice ⇒ byte-identical fault logs and
+    /// images (the replay-identity gate, model level).
+    #[test]
+    fn fault_log_replay_byte_identical() {
+        fn faulted_run() -> (Vec<String>, Vec<(PathBuf, Option<(Vec<u8>, Vec<u8>)>)>) {
+            let v = fresh();
+            SeededFaultPlan::install(
+                0xD57,
+                vec![
+                    FaultRule::nth_matching(
+                        OpMatch { kinds: Some(vec![OpKind::Fsync]), ..OpMatch::default() },
+                        2,
+                        FaultDecision::Errno(libc::EIO),
+                    ),
+                    FaultRule::crash_at_op(24),
+                ],
+            );
+            let fd = open_rw_create(&v, "/f");
+            dir_fsync(&v, "/");
+            let mut i: u64 = 0;
+            loop {
+                // keep issuing ops until the planned crash fires
+                let r = v.pwrite(fd, &i.to_le_bytes(), (i * 8) as off_t);
+                if r < 0 && SimVfs::cut_count() > 0 {
+                    break;
+                }
+                let _ = v.fsync(fd);
+                if SimVfs::cut_count() > 0 {
+                    break;
+                }
+                i += 1;
+                assert!(i < 1000, "planned crash never fired");
+            }
+            (SimVfs::fault_log(), v.image_dump())
+        }
+
+        let (log1, img1) = faulted_run();
+        let (log2, img2) = faulted_run();
+        assert!(!log1.is_empty());
+        assert_eq!(log1, log2, "fault logs must be byte-identical across replay");
+        assert_eq!(img1, img2, "post-crash images must be byte-identical across replay");
+    }
+
+    /// RED BATTERY (model level): the test-only atomic-multi-sector mode
+    /// masks exactly the tear the 512 B floor catches — proving the floor
+    /// is load-bearing. If the two arms ever agree, the model lost its
+    /// teeth and this gate fails.
+    #[test]
+    fn red_atomic_multisector_mode_masks_the_tear() {
+        fn torn_run(atomic: bool) -> Vec<u8> {
+            let v = fresh();
+            let fd = open_rw_create(&v, "/f");
+            dir_fsync(&v, "/");
+            assert_eq!(v.pwrite(fd, &[0xBBu8; 2048], 0), 2048);
+            assert_eq!(v.fsync(fd), 0);
+            SimVfs::set_atomic_write_mode(atomic);
+            SeededFaultPlan::install(
+                0x2,
+                vec![FaultRule::nth_matching(
+                    OpMatch { kinds: Some(vec![OpKind::PWriteV]), ..OpMatch::default() },
+                    1,
+                    FaultDecision::TornWrite { persist_prefix: 700 },
+                )],
+            );
+            assert_eq!(v.pwrite(fd, &[0xEEu8; 1300], 100), -1);
+            read_file(&v, "/f").expect("durable dirent")
+        }
+
+        let floored = torn_run(false);
+        let weakened = torn_run(true);
+
+        // Weakened arm: the FULL 1300-byte write survived — multi-sector
+        // atomicity that no disk guarantees. The tear is masked.
+        assert!(weakened[100..1400].iter().all(|&b| b == 0xEE), "weakened arm masks the tear");
+        // Floor arm: the tear is real — data stops at the sector boundary.
+        assert!(floored[100..512].iter().all(|&b| b == 0xEE));
+        assert!(floored[512..].iter().all(|&b| b == 0xBB), "floor arm catches the tear");
+        assert_ne!(floored, weakened, "if these agree the model has no teeth");
     }
 }
