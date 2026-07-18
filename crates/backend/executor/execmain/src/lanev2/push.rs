@@ -1558,6 +1558,14 @@ pub(crate) fn cursor_store_batch_fill<'m, 'mcx>(
     if estate.es_epq_active {
         return Ok(false);
     }
+    // The lane-family master switch, EXACTLY as the per-pull hook path
+    // gates it (procnode::seq_scan_arm: `if crate::lanev2::enabled()`):
+    // the §7.2 Arm-R definition (CURSORS=1 + lane family OFF) must be the
+    // ROW-CHAIN fill — calling the admission hook here without the master
+    // gate would lane-own a fill the per-pull world would never own.
+    if !super::enabled() {
+        return Ok(false);
+    }
     if dest.mydest() != ::types_dest::CommandDest::Tuplestore {
         return Ok(false);
     }
