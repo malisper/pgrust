@@ -6567,6 +6567,7 @@ dependencies = [
  "types_tuple",
  "variable",
  "varlena",
+ "vfs",
  "xact",
  "xact_seams",
 ]
