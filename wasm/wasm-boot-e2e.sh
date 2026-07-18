@@ -91,6 +91,25 @@ SELECT t.unique1, t.stringu1 FROM wb_tenk t WHERE t.unique1 < 3 ORDER BY t.uniqu
 
 SELECT sum(unique1) AS s, min(unique2) AS mn, max(unique2) AS mx FROM wb_tenk;
 
+WITH pts AS (SELECT x::real AS r FROM generate_series(1, 3) x),
+     fin AS (SELECT r FROM pts WHERE r > 1.5)
+SELECT p.r,
+       CASE WHEN EXISTS (SELECT 1 FROM fin f WHERE f.r = p.r)
+            THEN '**' ELSE '  ' END AS m
+FROM pts p ORDER BY p.r;
+
+SELECT int8range(1, 5) AS r8, int8range(4294967296, 8589934592) AS r8hi;
+
+CREATE TABLE big_part (k bigint) PARTITION BY RANGE (k);
+
+CREATE TABLE big_part_lo PARTITION OF big_part FOR VALUES FROM (0) TO (4294967296);
+
+CREATE TABLE big_part_hi PARTITION OF big_part FOR VALUES FROM (4294967296) TO (8589934592);
+
+INSERT INTO big_part VALUES (1), (4294967297), (8589934591);
+
+SELECT count(*) AS hi_rows FROM big_part WHERE k > 4294967296;
+
 SELECT no_such_column FROM wb_tenk;
 
 SELECT 1 / 0 AS boom;
@@ -144,6 +163,23 @@ grep -q 'checkpoint complete' "$WORK/wasm.err" \
 if grep -q 'panicked' "$WORK/wasm.err"; then
     miss "wasm: panic lines in stderr"
 fi
+# WASM-SUBPLANFIX regression: the CASE WHEN EXISTS probe forces an expression
+# SubPlan, whose sub-Query is copyObject'd in make_subplan via a
+# queryToString/stringToNode round trip (rewrite_manip::copy_query_node) — the
+# same _outDatum writer as relpartbound; wasm32 truncation dies here with
+# `bad integer token "]"` before any row comes back.
+[ "$(grep -c 'm = "\*\*"' "$WORK/wasm.out")" -eq 2 ] \
+    || miss "wasm: EXISTS-SubPlan CASE probe rows missing (copyObject node-string round trip)"
+# WASM-SUBPLANFIX sweep find: range_serialize's byval datum_write took `n`
+# bytes of a usize word — an 8-byte byval range subtype (int8range) panics on
+# wasm32 (`range end index 8 out of range for slice of length 4`).
+grep -q 'r8hi = "\[4294967296,8589934592)"' "$WORK/wasm.out" \
+    || miss "wasm: int8range with high-word bounds missing (range_serialize datum width)"
+# WASM-SUBPLANFIX sweep find: the planner's DatumImage::ByVal carried a usize
+# image; on wasm32 int8-class partition bounds truncated to the low half and
+# pruning compared against garbage (hi_rows came back 0).
+grep -q 'hi_rows = "2"' "$WORK/wasm.out" \
+    || miss "wasm: bigint partition pruning wrong (DatumImage byval width)"
 
 "$PGBIN/pg_controldata" "$WORK/dd-wasm" | grep -q 'shut down' \
     || miss "wasm datadir not in 'shut down' state"
