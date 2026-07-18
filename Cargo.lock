@@ -11639,6 +11639,7 @@ dependencies = [
  "types_snapshot",
  "types_storage",
  "types_tuple",
+ "vfs",
  "xact_seams",
  "zstd",
 ]

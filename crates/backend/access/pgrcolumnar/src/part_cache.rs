@@ -28,7 +28,6 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::os::unix::fs::MetadataExt;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
@@ -174,12 +173,24 @@ fn init() -> PgResult<()> {
     Ok(())
 }
 
+/// The (st_dev, st_ino, st_size) identity stat, via the Vfs boundary
+/// (DST P1 WS-B, contract v1.1 FileInfo dev+ino): one stat(2), exactly like
+/// the std::fs::metadata call it replaces; None on any failure.
+fn stat_info(path: &str) -> Option<vfs::FileInfo> {
+    let c = std::ffi::CString::new(path).ok()?;
+    let mut fi = vfs::FileInfo::zeroed();
+    if vfs::stat(&c, &mut fi) != 0 {
+        return None;
+    }
+    Some(fi)
+}
+
 fn probe(e: &Entry, path: &str, ncols: usize) -> bool {
     if e.path != path || e.ncols != ncols {
         return false;
     }
-    let Ok(md) = std::fs::metadata(path) else { return false };
-    if (md.dev(), md.ino(), md.len()) != (e.dev, e.ino, e.len) {
+    let Some(md) = stat_info(path) else { return false };
+    if (md.dev, md.ino, md.size as u64) != (e.dev, e.ino, e.len) {
         return false;
     }
     // len matched, so the header page is inside the live mapping.
@@ -213,12 +224,12 @@ pub fn cached_part(rel: &::types_rel::Relation<'_>) -> PgResult<Option<Arc<Part>
     // Stat BEFORE the read: a publish racing the build makes the parsed
     // footer newer than the probe values, so the next lookup rebuilds
     // (spurious miss, never a stale hit).
-    let md = std::fs::metadata(&path).ok();
+    let md = stat_info(&path);
     // Thread-local miss: another thread (in the common shape, the leader at
     // plan time) may already hold the parsed directory for this exact file
     // state — share it instead of re-parsing (census B1: the per-worker
     // O(nrgs x ncols) tax).
-    let shared_key = md.as_ref().map(|m| (m.dev(), m.ino(), m.len()));
+    let shared_key = md.as_ref().map(|m| (m.dev, m.ino, m.size as u64));
     let part = match shared_key.and_then(|key| shared_lookup(key, ncols)) {
         Some(live) => {
             PART_DIR_SHARES.fetch_add(1, Relaxed);
@@ -264,9 +275,9 @@ pub fn cached_part(rel: &::types_rel::Relation<'_>) -> PgResult<Option<Arc<Part>
                         part: Arc::clone(&part),
                         path,
                         ncols,
-                        dev: md.dev(),
-                        ino: md.ino(),
-                        len: md.len(),
+                        dev: md.dev,
+                        ino: md.ino,
+                        len: md.size as u64,
                         footer_off: part.footer_off,
                     },
                 );
@@ -278,6 +289,8 @@ pub fn cached_part(rel: &::types_rel::Relation<'_>) -> PgResult<Option<Arc<Part>
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::MetadataExt;
+
     use super::*;
 
     fn entry_for(path: &str, ncols: usize) -> Entry {

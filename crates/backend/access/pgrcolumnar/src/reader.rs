@@ -541,7 +541,16 @@ pub struct Part {
 impl Part {
     // None: empty table (no committed footer yet).
     pub fn open(path: &str, ncols: usize) -> PgResult<Option<Part>> {
-        let ident_stat = std::fs::metadata(path).ok();
+        // Identity stat via the Vfs boundary (DST P1 WS-B, contract v1.1
+        // FileInfo dev+ino): same single stat(2), same fields consumed —
+        // (st_dev, st_ino, st_size), the part-cache identity vocabulary.
+        let ident_stat = {
+            let mut fi = vfs::FileInfo::zeroed();
+            match std::ffi::CString::new(path) {
+                Ok(c) if vfs::stat(&c, &mut fi) == 0 => Some(fi),
+                _ => None,
+            }
+        };
         let mut file = SegFile::open_rw(path)?;
         if file.total_len() < CB_HEADER_LEN {
             return Ok(None);
@@ -559,10 +568,7 @@ impl Part {
         // dev/ino + mapped length); the unstat-able fallback keeps the
         // historical private mapping (same posture as the null identity).
         let map = match ident_stat.as_ref() {
-            Some(md) => {
-                use std::os::unix::fs::MetadataExt;
-                SegMap::open_shared(path, md.dev(), md.ino())?
-            }
+            Some(md) => SegMap::open_shared(path, md.dev, md.ino)?,
             None => SegMap::open(path)?.map(std::sync::Arc::new),
         };
         let Some(map) = map else { return Ok(None) };
@@ -618,12 +624,11 @@ impl Part {
             .unwrap_or(footer_off)
             .min(footer_off);
         let identity = {
-            use std::os::unix::fs::MetadataExt;
             match ident_stat {
                 Some(md) => crate::condcache::PartIdent {
-                    dev: md.dev(),
-                    ino: md.ino(),
-                    len: md.len(),
+                    dev: md.dev,
+                    ino: md.ino,
+                    len: md.size as u64,
                     footer_off,
                 },
                 // Unstat-able path (should be unreachable past open_rw):
@@ -909,6 +914,11 @@ impl Part {
 // One page-aligned madvise(MADV_WILLNEED) over bytes[start..end); advisory
 // (errors ignored). Bounds are the caller's business; start/end are only
 // page-rounded here.
+//
+// RAW libc carve-out (DST-P1): this madvise runs over SegMap's mmap'd
+// bytes and travels with the segfile map_segs mmap cluster — it stays raw
+// until the segmap pread arm lands. Allowlist row retained, tagged
+// `# pending: segmap-pread-arm`.
 #[cfg(unix)]
 fn advise_extent(bytes: &[u8], start: u64, end: u64) -> bool {
     static PAGE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();

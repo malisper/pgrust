@@ -9,6 +9,7 @@ bench-internals = []
 
 [dependencies]
 libc = "0.2"
+vfs = { path = "../../storage/file/vfs" }
 lz4_flex = "0.11"
 mcx = { path = "../../../_support/mcx" }
 datum = { path = "../../../_support/types/datum" }
