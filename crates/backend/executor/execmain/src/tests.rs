@@ -11444,20 +11444,22 @@ mod spi_inc1_aj_w9 {
     /// `_SPI_pquery`'s exact seam cadence (spi/src/execute.rs:560-575):
     /// start(eflags) → ONE run(Forward, tcount) → read es_processed →
     /// finish → end. No second run, no park, no resume.
+    ///
+    /// The QueryDesc carries NO snapshot: the scanfix fixture AM serves rows
+    /// itself (table_beginscan takes Option<Snapshot>; the fixture ignores
+    /// it), and a Some(snapshot) here would drag the resowner + snapmgr
+    /// substrate into the fixture (RegisterSnapshot at querydesc.rs:230
+    /// needs current_resource_owner, whose real seams hashjoin_multibatch
+    /// installs unconditionally — a second installer would panic the suite).
+    /// What these pins freeze is the seam CADENCE and count semantics, not
+    /// MVCC; the select1 seam tests take the same None-snapshot shape.
     fn run_spi_shape(relid: u32, tcount: u64) -> u64 {
         let mcx = leaked_mcx();
         let pstmt = mk_seqscan_pstmt(mcx, relid);
-        let snap_ctx: &'static MemoryContext =
-            Box::leak(Box::new(MemoryContext::new("spi-inc1-snap")));
-        let snapshot: snapmgr::Snapshot =
-            std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
-                snap_ctx.mcx(),
-                ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
-            ));
         let qd = execmain_seams::create_query_desc::call(
             pstmt,
             "SELECT a FROM spi_inc1_fixture",
-            Some(snapshot),
+            None,
             None,
             CommandDest::None,
             ParamListHandle::NULL,
