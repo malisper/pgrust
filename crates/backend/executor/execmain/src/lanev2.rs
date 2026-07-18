@@ -5804,7 +5804,19 @@ pub fn try_own_sort<'mcx>(
         return Ok(None);
     }
     if !sort_lane_fusible_memo(s, estate)? {
-        return Ok(None);
+        // WS-AD wave-8: the chain-shared memo refuses ALL randomAccess
+        // sorts (the policy line). The bare hook alone re-checks knob-ON:
+        // an admitted randomAccess sort runs the RA-vanilla feed and
+        // delegates every random-access read to the row-path Tuplesort
+        // over the SAME node state (region doc at
+        // `sort_randomaccess_memo`). Knob-OFF this is one field load on
+        // the already-refused path — zero cost on owned paths.
+        if !(s.state.randomAccess
+            && sort_randomaccess_enabled()
+            && sort_randomaccess_memo(s, estate)?)
+        {
+            return Ok(None);
+        }
     }
     // C's CHECK_FOR_INTERRUPTS at ExecSort entry.
     ::postgres_seams::check_for_interrupts::call()?;
@@ -5851,6 +5863,85 @@ fn sort_lane_fusible_memo<'mcx>(
     }
 }
 
+// ===========================================================================
+// WS-AD wave-8 region: sort-breaker randomAccess admission (bare hook only).
+// Contract §2 AD0 — the SE-LETTERS diagnosis verbatim: the breaker "already
+// delegates finalize/read-back to the row-path Tuplesort, so the refusal is
+// a policy line, not an architecture gap". Knob-ON, the bare sort hook
+// admits randomAccess sorts (scroll cursors, nestloop-inner REWIND,
+// mergejoin mark/restore): `sort_lane_begin` already builds the tuplesort
+// with TUPLESORT_RANDOMACCESS off the node flag, the lane serves ONLY
+// forward pulls (`sort_lane_next` — the same cursor advance `exec_sort`'s
+// forward drain performs), and every random-access read rides the row-path
+// fallbacks over the SAME node state: backward pulls refuse at
+// `try_own_sort`'s direction gate and fall to `exec_sort`'s
+// direction-aware drain; rewind rides `exec_rescan_sort`'s
+// tuplesort_rescan arm; mark/restore ride `exec_sort_mark_pos`/
+// `exec_sort_restr_pos` on the tuplesort directly.
+//
+// Scope fences (each recorded in notes/se-wave8-sortfeed.md):
+//   * CHAIN hosts keep refusing randomAccess — the shared
+//     `sort_refuse_reason` policy line is unchanged, so every chain memo
+//     verdict is byte-identical to wave-7's. (A refused chain still lands
+//     on the bare hook underneath when Volcano pulls the Sort node, so the
+//     feed win materializes for chain shapes too.)
+//   * The RA-VANILLA FEED LAW: an admitted randomAccess feed is
+//     `exec_sort`'s construction verbatim — no runtime-sink adoption
+//     (self-refused, runtime_sort.rs randomAccess gate), no zone-adaptive
+//     order, no top-k cut, no refsort, no narrowed comparator, no agg
+//     top-N specs (`sort_feed_if_needed` gates below). Every one of those
+//     arms either replaces the tuplesort read-back face or reorders/
+//     prunes arrival — sound for forward LIMIT reads, unproven for
+//     random-access replay. The batched drains stay (put-order-identical
+//     hoists into the real tuplesort).
+//   * EXPLAIN (ENGINE) capture keeps reporting the chain-scope verdict
+//     (RandomAccess) for these nodes knob-ON — ledgered inc-1 limitation;
+//     production ownership shows in the SortFeed owned ticks.
+// ===========================================================================
+
+/// `PGRUST_LANE_V2_SORT_RANDOMACCESS` — wave-8 WS-AD knob, default OFF
+/// (law 4: the OFF path is one branch on this cached bool, reached only on
+/// already-refused nodes).
+fn sort_randomaccess_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("PGRUST_LANE_V2_SORT_RANDOMACCESS").as_deref(),
+            Ok("1") | Ok("on")
+        )
+    })
+}
+
+/// Bare-hook randomAccess verdict, memoized on `SortState` (nodesort's
+/// `lane_ra_fusible` — a SIDE memo: the chain-shared `lane_fusible` stays
+/// `false` for randomAccess nodes, keeping every chain host on wave-7
+/// behavior). The child cascade is `sort_refuse_reason`'s, verbatim
+/// (`sort_child_refuse_reason`); refusals tick under SortFeed with the
+/// child's reason (knob-ON only — the shared memo already ticked
+/// RandomAccess once for the node, a documented knob-ON double-count on
+/// refused nodes).
+fn sort_randomaccess_memo<'mcx>(
+    s: &mut crate::procnode::SortNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    debug_assert!(s.state.randomAccess && sort_randomaccess_enabled());
+    if let Some(v) = ::nodesort::sort_lane_ra_fusible(&s.state) {
+        return Ok(v);
+    }
+    let refuse = sort_child_refuse_reason(s, estate)?;
+    if let Some(r) = refuse {
+        stats::tick_refused(ShapeClass::SortFeed, r);
+    }
+    let v = refuse.is_none();
+    ::nodesort::sort_lane_ra_fusible_set(&mut s.state, v);
+    if v {
+        lane_trace("sort randomAccess admitted (bare hook; read-back delegated)");
+    }
+    Ok(v)
+}
+
+// ===== end WS-AD wave-8 region (randomAccess admission) ====================
+
 /// Feed phase of the sort breaker (pipeline N), once, lazily: drive the scan
 /// pipeline to exhaustion into the breaker sink, then finalize (performsort)
 /// — all inside one call, exactly like `exec_sort`'s build leg. `sort_Done`
@@ -5874,6 +5965,11 @@ fn sort_feed_if_needed<'mcx>(
     if state.sort_done() {
         return Ok(true);
     }
+    // WS-AD wave-8: narrowed comparators never pair with randomAccess (the
+    // `sort_lane_begin_narrowed` invariant). Unreachable by construction —
+    // `narrow` flows only from the sorted-agg chain hosts, whose shared
+    // verdict refuses randomAccess wholesale.
+    debug_assert!(narrow.is_none() || !state.randomAccess);
     // Hash-agg breaker child: build the agg FIRST (its own build-event tick
     // cadence), refusing before any sort-side effect on a multi-batch join
     // spill; then the agg's emit face feeds the breaker sink one finalized
@@ -5899,8 +5995,16 @@ fn sort_feed_if_needed<'mcx>(
                     // m3-sort-b car 1: the sort feed is the one chain that
                     // knows the bounded-sort consumer — resolve the runtime
                     // sink's combine-phase top-N spec pre-build (plan-shape
-                    // reads only; declines arm nothing).
-                    let sink_topn = sink_topn_arm(state, &aps.agg);
+                    // reads only; declines arm nothing). WS-AD RA-vanilla
+                    // feed law: never under randomAccess (a combine-phase
+                    // top-N prunes rows a random-access replay must serve
+                    // identically; the plain build + bounded tuplesort is
+                    // `exec_sort`'s construction verbatim).
+                    let sink_topn = if state.randomAccess {
+                        None
+                    } else {
+                        sink_topn_arm(state, &aps.agg)
+                    };
                     agg_seq_scan_build_if_needed(
                         &mut aps.agg,
                         ss,
@@ -5958,8 +6062,12 @@ fn sort_feed_if_needed<'mcx>(
         // Batched finalize+emit off the compact table (lane-v2 batchemit):
         // resolved AFTER the build (the compact table must exist), composes
         // with the emit-side top-N boundary cut when that also arms. Non-
-        // admission falls through to the per-row paths unchanged.
-        let spec = topn_emit_arm(state, &aps.agg);
+        // admission falls through to the per-row paths unchanged. WS-AD
+        // RA-vanilla feed law: no emit-side top-N cut (and thereby no
+        // topkfin selection — it keys off `spec`) under randomAccess; the
+        // batched drains themselves stay (put-order-identical hoists into
+        // the real tuplesort).
+        let spec = if state.randomAccess { None } else { topn_emit_arm(state, &aps.agg) };
         let bplan = if batch_emit_enabled() {
             ::nodeagg::batch_emit_resolve(&aps.agg)
         } else {
@@ -6025,7 +6133,14 @@ fn sort_feed_if_needed<'mcx>(
             // Zone-adaptive top-N granule order (pgrcolumnar bounded sorts; None
             // = physical order, exactly as before). Armed BEFORE topk_cut_arm
             // so both read the staged qual state the staging arm left.
-            let adaptive = adaptive_topk_arm(state, &outer_desc, ss)?;
+            // WS-AD RA-vanilla feed law: never under randomAccess (adaptive
+            // reorders arrival; its tie machinery is ratified for forward
+            // LIMIT reads only) — physical order, exactly `exec_sort`'s feed.
+            let adaptive = if state.randomAccess {
+                None
+            } else {
+                adaptive_topk_arm(state, &outer_desc, ss)?
+            };
             let tracked = adaptive.is_some_and(|a| a.tracked);
             // Payload-visible adaptive feeds, relaxed default: rule-2 rowref
             // selection (docs/conformance/tie-ordering.md) — the bounded
@@ -6046,8 +6161,12 @@ fn sort_feed_if_needed<'mcx>(
             // Streaming top-k cutoff (bounded sorts over an admitted
             // qual-less seqscan; None = feed unfiltered, exactly as before).
             // Composes with the direct-key put: the keep-mask filters first,
-            // then the direct-key arm reads only surviving rows.
-            let topk = topk_cut_arm(state, ss, estate);
+            // then the direct-key arm reads only surviving rows. WS-AD
+            // RA-vanilla feed law: never under randomAccess (inc-1
+            // conservatism — the cut is content-exact for the bounded heap,
+            // but the vanilla feed keeps the RA byte-identity proof
+            // construction-verbatim).
+            let topk = if state.randomAccess { None } else { topk_cut_arm(state, ss, estate) };
             // Refsort (late-materialization top-N): narrow (key, ref) feed +
             // winner-only gather; `None`/demote = the legacy wide feed below,
             // unchanged. The narrowed-comparator arm never composes (it
@@ -6065,7 +6184,12 @@ fn sort_feed_if_needed<'mcx>(
             // ref column (rule-2 (key, ref) total order — selection-exact,
             // demote-free, byte-identical to the wide rowref arm by
             // construction), reclaiming refsort under the relaxed default.
-            let refsort = if narrow.is_none()
+            // WS-AD RA-vanilla feed law: refsort never arms under
+            // randomAccess (its winner buffer REPLACES the tuplesort
+            // read-back face — `sort_lane_begin_refsort` asserts the
+            // invariant; random-access reads must land on the tuplesort).
+            let refsort = if !state.randomAccess
+                && narrow.is_none()
                 && (tie != TieMode::Rowref || topn_lazyfetch_enabled())
             {
                 refsort_arm(state, ss, &outer_desc)
@@ -6332,9 +6456,29 @@ fn sort_refuse_reason<'mcx>(
     s: &mut crate::procnode::SortNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<RefuseReason>> {
+    // The randomAccess POLICY line (SE-LETTERS §1/§4; wave-8 WS-AD): this
+    // verdict is the one every chain host shares (Limit/Unique/Group/
+    // Result/SubqueryScan/WindowAgg/sorted-agg over the breaker), and it
+    // KEEPS refusing randomAccess wholesale — the chains' re-drive
+    // disciplines over a rescan-preserved tuplesort are unaudited this
+    // increment. The BARE sort hook alone re-checks under
+    // `PGRUST_LANE_V2_SORT_RANDOMACCESS` (`sort_randomaccess_memo`): its
+    // read-back delegates wholesale to the row-path Tuplesort, so
+    // backward/rewind/mark-restore consumers are sound there by
+    // construction.
     if s.state.randomAccess {
         return Ok(Some(RefuseReason::RandomAccess));
     }
+    sort_child_refuse_reason(s, estate)
+}
+
+/// Child-side refuse-set of the sort breaker (`sort_refuse_reason` minus
+/// the randomAccess policy line — split so the WS-AD bare-hook randomAccess
+/// verdict runs the IDENTICAL child cascade). Behavior verbatim.
+fn sort_child_refuse_reason<'mcx>(
+    s: &mut crate::procnode::SortNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<RefuseReason>> {
     // Hash-agg BREAKER child (the final `ORDER BY agg ... LIMIT k` tail over
     // aggregate output): the agg's Source face (its retrieve/emit) feeds the
     // sort breaker exactly as a scan source would — breaker-composes-breaker,
