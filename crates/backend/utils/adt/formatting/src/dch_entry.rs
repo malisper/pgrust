@@ -793,4 +793,33 @@ mod tests {
         j2date(d + POSTGRES_EPOCH_JDATE, &mut y, &mut m, &mut day);
         assert_eq!((y, m, day), (2011, 12, 18));
     }
+
+    // Expected tuples are live C PostgreSQL 18.3 output (2026-07-17);
+    // internal year 0 prints as 0001 BC. Pins the t26-soak to_date
+    // statement class (all-literal format => 1 BC) and its era /
+    // zero-year / century neighbors.
+    #[test]
+    fn to_date_era_zero_year_pins_match_c() {
+        let ctx = MemoryContext::new("dch-test");
+        let ymd = |input: &[u8], fmt: &[u8]| {
+            let d = to_date(ctx.mcx(), ::types_core::InvalidOid, input, fmt).unwrap();
+            let (mut y, mut m, mut day) = (0, 0, 0);
+            j2date(d + POSTGRES_EPOCH_JDATE, &mut y, &mut m, &mut day);
+            (y, m, day)
+        };
+        assert_eq!(ymd(b"16.0", b"16.0"), (0, 1, 1));
+        assert_eq!(ymd(b"", b""), (0, 1, 1));
+        assert_eq!(ymd(b"0000-06-13", b"YYYY-MM-DD"), (0, 6, 13));
+        assert_eq!(ymd(b"0001-06-13 BC", b"YYYY-MM-DD BC"), (0, 6, 13));
+        assert_eq!(ymd(b"0001-06-13 AD", b"YYYY-MM-DD AD"), (1, 6, 13));
+        assert_eq!(ymd(b"1 BC", b"Y BC"), (-2000, 1, 1));
+        assert_eq!(ymd(b"0002 b.c.", b"YYYY B.C."), (-1, 1, 1));
+        assert_eq!(ymd(b"-1234", b"YYYY"), (-1233, 1, 1));
+        assert_eq!(ymd(b"20 00 BC", b"CC YY BC"), (-1999, 1, 1));
+        assert_eq!(ymd(b"21 BC", b"CC BC"), (-2099, 1, 1));
+        assert_eq!(ymd(b"4714-11-24 BC", b"YYYY-MM-DD BC"), (-4713, 11, 24));
+        let err = to_date(ctx.mcx(), ::types_core::InvalidOid, b"4714-11-23 BC", b"YYYY-MM-DD BC")
+            .unwrap_err();
+        assert_eq!(err.message, "date out of range: \"4714-11-23 BC\"");
+    }
 }
