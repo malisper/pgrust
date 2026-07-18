@@ -65,7 +65,8 @@ thread_local! {
     static PARALLEL_VACUUM_WORKER_DELAY_NS: Cell<i64> = const { Cell::new(0) };
     // C's zero-initialized static last_report_time: None forces an immediate
     // first report.
-    static LAST_DELAY_REPORT: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
+    // DST P2 (contract §1.3): cost-delay pacing stamps in pg_clock's mono domain.
+    static LAST_DELAY_REPORT: Cell<Option<pg_clock::MonoStamp>> = const { Cell::new(None) };
 }
 
 const PARALLEL_VACUUM_DELAY_REPORT_INTERVAL_NS: i64 = 1_000_000_000;
@@ -1534,18 +1535,18 @@ pub fn vacuum_delay_point(is_analyze: bool) -> PgResult<()> {
         }
         let delay_start = guc_tables::vars::track_cost_delay_timing
             .read()
-            .then(std::time::Instant::now);
+            .then(pg_clock::MonoStamp::now);
         std::thread::sleep(std::time::Duration::from_micros((msec * 1000.0) as u64));
         if let Some(delay_start) = delay_start {
-            let delay_end = std::time::Instant::now();
-            let delay_ns = delay_end.duration_since(delay_start).as_nanos() as i64;
+            let delay_end = pg_clock::MonoStamp::now();
+            let delay_ns = delay_end.since_ns(delay_start) as i64;
             if parallel_seams::is_parallel_worker::call() {
                 debug_assert!(!is_analyze);
                 let accum = PARALLEL_VACUUM_WORKER_DELAY_NS.get() + delay_ns;
                 PARALLEL_VACUUM_WORKER_DELAY_NS.set(accum);
                 let since_last_report = LAST_DELAY_REPORT
                     .get()
-                    .map_or(i64::MAX, |t| delay_end.duration_since(t).as_nanos() as i64);
+                    .map_or(i64::MAX, |t| delay_end.since_ns(t) as i64);
                 if since_last_report >= PARALLEL_VACUUM_DELAY_REPORT_INTERVAL_NS {
                     pgstat_progress_parallel_incr_param(PROGRESS_VACUUM_DELAY_TIME, accum);
                     LAST_DELAY_REPORT.set(Some(delay_end));
