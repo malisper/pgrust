@@ -6036,15 +6036,30 @@ fn sort_lane_fusible_memo<'mcx>(
 //     production ownership shows in the SortFeed owned ticks.
 // ===========================================================================
 
-/// `PGRUST_LANE_V2_SORT_RANDOMACCESS` — wave-8 WS-AD knob, default OFF
-/// (law 4: the OFF path is one branch on this cached bool, reached only on
-/// already-refused nodes).
+/// `PGRUST_LANE_V2_SORT_RANDOMACCESS` — wave-8 WS-AD knob, **default ON
+/// since the SE9-GATES AD2 flip** (explicit `=0`/`off` = the permanent
+/// kill switch restoring the pre-flip refusal stream; law 4 posture
+/// preserved: either state is one branch on this cached bool, reached
+/// only on already-refused nodes).
+///
+/// AD2 FLIP evidence (the diffprof package,
+/// notes/sortfeed-diffprof-lane.md): the SE8 refusal at +2.705% was
+/// 100% removable read-back dispatch (attribution
+/// pgrust-cgpairs-1784351907-21c3: feed = PAR with the fused arm); the
+/// FEED-ONLY fix (0d4bf241c — RA-admitted ownership feeds once, the
+/// bare exec_sort drain serves all read-back) closed the letter to
+/// B/A = 1.0072 PASS (pgrust-corpus-pairs-1784356345-4d78, bar <=1.02,
+/// the same spelling SE8 refused at 1.027). Remaining +0.72% = the
+/// RA-branch post-done per-pull exit ceremony (~29 Ir/pull),
+/// named-and-ledgered with a documented 3-line shave (check sort_done
+/// before the RA memo probe) if a future bar needs it. Flips never
+/// delete knobs (rowmode FLIP idiom; the AE2/K2 precedents).
 fn sort_randomaccess_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
-        matches!(
+        !matches!(
             std::env::var("PGRUST_LANE_V2_SORT_RANDOMACCESS").as_deref(),
-            Ok("1") | Ok("on")
+            Ok("0") | Ok("off")
         )
     })
 }
