@@ -654,6 +654,9 @@ pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
             RefuseReason::EnvOff,
         ],
     ),
+    // + wave-7 B1 per-shape flip 5/6: namedtuplestorescan SOURCE form
+    // default-ON (tail_source.rs flip ledger; ONE-ROW-PER-CLASS — B1 rides
+    // this merged row).
     (
         ShapeClass::NamedTuplestoreScan,
         &[
