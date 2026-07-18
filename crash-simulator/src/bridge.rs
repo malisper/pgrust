@@ -49,14 +49,19 @@ use crate::vocab::Severity;
 pub fn runner_profile_to_gen(p: &crate::runner::profile::Profile) -> GenProfile {
     let w = |k: &str, d: u64| p.statement_weights.get(k).map(|v| *v as u64).unwrap_or(d);
     let iso = |k: &str| p.iso_mix.get(k).map(|v| *v as u64).unwrap_or(0);
-    let mut arm_sets: Vec<(String, String)> = Vec::new();
-    for set in &p.arm_sets {
-        for arm in set {
-            if let Some((k, v)) = arm.split_once('=') {
-                arm_sets.push((k.to_string(), v.to_string()));
-            }
-        }
-    }
+    // Preserve SET structure (never flatten): a profile arm set is applied
+    // atomically by the generator (H4 arm-set fidelity fix).
+    let arm_sets: Vec<Vec<(String, String)>> = p
+        .arm_sets
+        .iter()
+        .map(|set| {
+            set.iter()
+                .filter_map(|arm| {
+                    arm.split_once('=').map(|(k, v)| (k.to_string(), v.to_string()))
+                })
+                .collect()
+        })
+        .collect();
     let mut property_weights: BTreeMap<String, u64> = p
         .property_weights
         .iter()
@@ -109,8 +114,10 @@ fn profile_view(gp: &GenProfile) -> ProfileView {
     if iso_mix.is_empty() {
         iso_mix.push(PIso::ReadCommitted);
     }
+    // Property-side view keeps set structure; empty control sets are not
+    // useful to X1/L2 (nothing to SET), so they are filtered here.
     let arm_sets: Vec<Vec<(String, String)>> =
-        gp.arm_sets.iter().map(|(k, v)| vec![(k.clone(), v.clone())]).collect();
+        gp.arm_sets.iter().filter(|s| !s.is_empty()).cloned().collect();
     ProfileView { float_lenient: gp.float_lenient, iso_mix, arm_sets }
 }
 

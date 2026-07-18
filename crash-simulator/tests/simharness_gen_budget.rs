@@ -29,7 +29,7 @@ fn test_profile(weights: StatementWeights, len: u64) -> GenProfile {
             col_types: ColTypeWeights { int: 4, bigint: 2, text: 3, numeric: 2, float8: 0 },
         },
         iso_mix: IsoMix { rc: 70, rr: 20, ser: 10 },
-        arm_sets: vec![("work_mem".into(), "64kB".into())],
+        arm_sets: vec![vec![("work_mem".into(), "64kB".into())]],
         property_weights: BTreeMap::new(),
         float_lenient: false,
     }
