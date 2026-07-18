@@ -39,12 +39,17 @@ use core::ffi::c_void;
 use types_error::{PgError, PgResult};
 
 use crate::emit::{Cond, Emitter};
-use crate::interp::chain_next_pos;
+use crate::interp::{chain_next_pos, rowop_misuse, LOOP_TOP_MISUSE};
 use crate::spec::{ChainOutcome, ChainVerdict, Program, RowChainHost, Step};
 
 /// Body exit codes (x0).
 const RC_CHAIN_DONE: i64 = 0;
 const RC_CHAIN_PAUSED: i64 = 1;
+/// A loop-top protocol call answered a row verdict (SkipRow/EmitPause with
+/// no current row): the twin's loud loop-top-law error, raised by `run` —
+/// never a silent re-loop or a bogus pause (the stitched body must diverge
+/// from `eval_row_chain` on NO host, conforming or not).
+const RC_CHAIN_LOOPTOP_MISUSE: i64 = 2;
 
 // Trampoline verdict codes (host -> body). next_row: 1 = row staged,
 // 0 = exhausted, negative = error parked. protocol: 0 = Continue,
@@ -134,6 +139,9 @@ fn plan_rowchain(prog: &Program) -> Option<()> {
 /// program order, `blr` per RowOp step, verdict dispatch on x0. Frame: fp/lr
 /// plus x19 (the params pointer, live across calls).
 fn emit_rowchain(prog: &Program) -> Vec<u32> {
+    // plan_rowchain validated the shape, so the NextRow position exists;
+    // steps before it are the loop-top segment (ProtocolCall-only).
+    let next_pos = chain_next_pos(prog).expect("plan_rowchain validated the chain shape");
     let mut e = Emitter::new();
     e.raw(0xA9BE_7BFD); // stp x29, x30, [sp, #-0x20]!
     e.raw(0x9100_03FD); // mov x29, sp
@@ -143,11 +151,12 @@ fn emit_rowchain(prog: &Program) -> Vec<u32> {
     let ltop = e.new_label();
     let ldone = e.new_label();
     let lpaused = e.new_label();
+    let lmisuse = e.new_label();
     let lerr = e.new_label();
     let lout = e.new_label();
 
     e.bind(ltop);
-    for step in &prog.steps {
+    for (i, step) in prog.steps.iter().enumerate() {
         match *step {
             Step::NextRow => {
                 e.ldr_x(0, 19, 0); // ctx
@@ -164,10 +173,18 @@ fn emit_rowchain(prog: &Program) -> Vec<u32> {
                 e.raw(0xD63F_0100); // blr x8
                 e.cmp_x_imm(0, 0);
                 e.b_cond(Cond::Lt, lerr); // error parked
-                e.cmp_x_imm(0, TR_SKIP as u32);
-                e.b_cond(Cond::Eq, ltop); // SkipRow: back to the loop top
-                e.cmp_x_imm(0, TR_PAUSE as u32);
-                e.b_cond(Cond::Eq, lpaused); // EmitPause
+                if i < next_pos {
+                    // Loop-top segment: the loop-top law says Continue is
+                    // the ONLY legal row verdict here (no current row). Any
+                    // nonzero verdict exits loud — the twin's error, not an
+                    // infinite SkipRow re-loop or a phantom pause.
+                    e.b_cond(Cond::Ne, lmisuse);
+                } else {
+                    e.cmp_x_imm(0, TR_SKIP as u32);
+                    e.b_cond(Cond::Eq, ltop); // SkipRow: back to the loop top
+                    e.cmp_x_imm(0, TR_PAUSE as u32);
+                    e.b_cond(Cond::Eq, lpaused); // EmitPause
+                }
             }
             _ => unreachable!("plan_rowchain admits RowOp steps only"),
         }
@@ -179,6 +196,9 @@ fn emit_rowchain(prog: &Program) -> Vec<u32> {
     e.b(lout);
     e.bind(lpaused);
     e.movz_x(0, RC_CHAIN_PAUSED as u32);
+    e.b(lout);
+    e.bind(lmisuse);
+    e.movz_x(0, RC_CHAIN_LOOPTOP_MISUSE as u32);
     e.b(lout);
     e.bind(lerr);
     e.movn_x(0, 0); // -1: the parked host error
@@ -261,6 +281,9 @@ impl StitchedRowChain {
         match rc {
             RC_CHAIN_DONE => Ok(ChainOutcome::Done),
             RC_CHAIN_PAUSED => Ok(ChainOutcome::Paused),
+            // Loop-top law violated by the host: the twin's identical loud
+            // error (shared string — error identity by construction).
+            RC_CHAIN_LOOPTOP_MISUSE => Err(rowop_misuse(LOOP_TOP_MISUSE)),
             _ => Err(tc
                 .err
                 .take()

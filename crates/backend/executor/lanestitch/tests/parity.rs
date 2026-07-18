@@ -2589,26 +2589,45 @@ mod rowchain_parity {
     }
 
     /// Loop-top law: a loop-top protocol call answering a row verdict is a
-    /// host contract violation and errors loudly on the twin.
+    /// host contract violation and errors loudly — on the twin AND on the
+    /// stitched body, with the identical message (the non-conforming-host
+    /// divergence pin: the stitched body must never SkipRow-loop forever or
+    /// report a phantom pause where the twin errors).
     #[test]
     fn rowchain_loop_top_row_verdict_is_loud() {
-        struct BadHost;
+        struct BadHost(ChainVerdict);
         impl RowChainHost for BadHost {
             fn next_row(&mut self) -> PgResult<bool> {
                 Ok(false)
             }
             fn protocol_call(&mut self, _call: u16) -> PgResult<ChainVerdict> {
-                Ok(ChainVerdict::SkipRow)
+                Ok(self.0)
             }
         }
         let mut p = Program::new();
         p.steps.push(Step::ProtocolCall { call: 9000 });
         p.steps.push(Step::NextRow);
+        // The chain also needs a per-row call so per-row verdict dispatch
+        // stays live in the same body (the loop-top arm must differ).
+        p.steps.push(Step::ProtocolCall { call: 100 });
         let batch = Batch { nrows: 0, lanes: Vec::new() };
-        let mut cursor = ChainCursor::default();
-        let e = eval_row_chain(&p, &batch, &mut cursor, &mut BadHost, &mut [])
-            .map(|_| ())
-            .unwrap_err();
-        assert!(e.message().contains("loop-top protocol call"), "{}", e.message());
+        for verdict in [ChainVerdict::SkipRow, ChainVerdict::EmitPause] {
+            let mut cursor = ChainCursor::default();
+            let e = eval_row_chain(&p, &batch, &mut cursor, &mut BadHost(verdict), &mut [])
+                .map(|_| ())
+                .unwrap_err();
+            assert!(e.message().contains("loop-top protocol call"), "{}", e.message());
+            // Stitched body: identical loud error (skip off-arch/killed).
+            if let Some(chain) = StitchedRowChain::compile_for_parity(&p) {
+                let se = chain.run(&mut BadHost(verdict)).map(|_| ()).unwrap_err();
+                assert_eq!(
+                    se.message(),
+                    e.message(),
+                    "stitched loop-top-law error must match the twin ({verdict:?})"
+                );
+            } else {
+                assert!(!lanestitch::available());
+            }
+        }
     }
 }

@@ -36,10 +36,12 @@ fn out_of_range(width: u8) -> Box<PgError> {
 
 // Loud fail-closed error for a RowOp step reaching a non-chain walker (and
 // for chain-shape violations): the interpreter is the spec, so an illegal
-// program errors rather than silently misbehaving.
+// program errors rather than silently misbehaving. pub(crate): the stitched
+// chain body (rowchain.rs) raises the IDENTICAL error for the loop-top-law
+// violation so a non-conforming host diverges on neither engine.
 #[cold]
 #[inline(never)]
-fn rowop_misuse(what: &str) -> Box<PgError> {
+pub(crate) fn rowop_misuse(what: &str) -> Box<PgError> {
     Box::new(PgError::error(format!("lanestitch row-chain contract violation: {what}")))
 }
 
@@ -279,6 +281,11 @@ pub fn eval_qual(prog: &Program, batch: &Batch<'_>, sel: &mut SelVec) -> PgResul
 /// pure steps have no staged row to read at the loop top. Returns the
 /// `NextRow` position, or None for an ill-formed chain (the stitched tier
 /// refuses; the twin errors loudly).
+/// The loop-top law's violation text — ONE string, shared by the twin and
+/// the stitched body (rowchain.rs) so error identity is by construction.
+pub(crate) const LOOP_TOP_MISUSE: &str =
+    "loop-top protocol call answered a row verdict with no current row";
+
 pub(crate) fn chain_next_pos(prog: &Program) -> Option<usize> {
     let mut pos = None;
     for (i, s) in prog.steps.iter().enumerate() {
@@ -336,9 +343,7 @@ pub fn eval_row_chain(
             match host.protocol_call(call)? {
                 ChainVerdict::Continue => {}
                 ChainVerdict::SkipRow | ChainVerdict::EmitPause => {
-                    return Err(rowop_misuse(
-                        "loop-top protocol call answered a row verdict with no current row",
-                    ));
+                    return Err(rowop_misuse(LOOP_TOP_MISUSE));
                 }
             }
         }
