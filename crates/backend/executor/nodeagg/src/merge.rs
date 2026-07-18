@@ -99,7 +99,7 @@ fn merge_byref_kinds_enabled() -> bool {
 
 // How the merge owns and combines one transno's state (per the whitelists).
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum CombineKind {
+pub(crate) enum CombineKind {
     Byval,
     PolyInt128 { sum_x2: bool },
     NumericAgg { sum_x2: bool },
@@ -1068,14 +1068,49 @@ fn install_classic_handoff<'mcx>(
     id: i32,
 ) -> PgResult<()> {
     let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
-    let kinds = &handoff.kinds;
-    let additionalsize = ph.hashtable.additionalsize();
-    let src = ph.hashtable.entries();
+    let handed = export_handed_table(
+        &ph.hashtable,
+        &handoff.kinds,
+        id,
+        // Stage-4 pool: pre-partition on the worker thread (parallel across
+        // workers) so the leader's merge boundary is bucket-claim-ready.
+        // Armed sessions only — unarmed heap parallel agg keeps the classic
+        // leader-side partitioning byte-for-byte.
+        ::guc_tables::lane_pool::lane_parallel_pool_armed(),
+    );
+    handoff.install(handed);
+    ph.hashtable.reset();
+    Ok(())
+}
+
+// The classic install's entry-export core (also the byref-merge-invariant
+// unit's surface): copy every live entry's [pergroups][tuple][states] image
+// into a self-contained buffer, relocate internal-transtype states, and
+// REBASE each copied hash onto the leader's IV=0 mapping. The rebase is the
+// r3 defect fix: participant tables are built with per-worker variable hash
+// IVs (execGrouping.c parity, the q18fin stall fix), but the finalize's
+// bucket merge compares STORED hashes across participant tables AND its own
+// IV=0 table — same key, different IV => different hash/bucket => equal keys
+// never match => duplicate finalize groups (t26 q18fin-t26-r2 re-earn
+// verdict: 5 copies of every group under 4 workers + leader). C never
+// compares cross-participant hashes (tuple funnel + leader re-hash per ROW);
+// this boundary normalizes at per-GROUP cost on the worker thread —
+// `TupleHashTable::hash_to_iv0` is a closed-form O(1) rebase, not a key
+// re-hash. The LIVE table keeps its own-IV hashes (bucket indexes depend on
+// them); only the handed copies are restamped.
+pub(crate) fn export_handed_table(
+    table: &::execgrouping::TupleHashTable<'_>,
+    kinds: &[CombineKind],
+    id: i32,
+    pre_partition: bool,
+) -> HandedAggTable {
+    let additionalsize = table.additionalsize();
+    let src = table.entries();
     let mut bytes = 0usize;
     for e in src {
         // SAFETY: entry images are live table_ctx allocations led by t_len;
         // pergroup state pointers live in the worker's agg arenas until the
-        // reset below.
+        // caller's reset.
         unsafe {
             let t_len = (*e.tuple().as_ptr()).t_len as usize;
             bytes += (additionalsize + t_len + 15) & !15;
@@ -1092,7 +1127,7 @@ fn install_classic_handoff<'mcx>(
         // Internal-transtype states are relocated behind the image (16-aligned
         // slots off the u128 backing) and the copied pergroups repointed —
         // after this the handed table references nothing worker-owned.
-        let e2 = unsafe {
+        let mut e2 = unsafe {
             let t_len = (*e.tuple().as_ptr()).t_len as usize;
             let img = e.tuple().as_ptr().cast::<u8>().sub(additionalsize);
             let dst = base.add(off);
@@ -1102,20 +1137,16 @@ fn install_classic_handoff<'mcx>(
             let mut e2 = *e;
             // Verbatim image copy: relocate through the table so a by-ref
             // cached key (Text probe kernel) is rebased, not left dangling.
-            ph.hashtable.relocate_entry(
+            table.relocate_entry(
                 &mut e2,
                 NonNull::new_unchecked(dst.add(additionalsize).cast::<MinimalTupleData>()),
             );
             e2
         };
+        e2.set_hash(table.hash_to_iv0(e2.hash()));
         entries.push(e2);
     }
-    // Stage-4 pool: pre-partition on the worker thread (parallel across
-    // workers) so the leader's merge boundary is bucket-claim-ready. Armed
-    // sessions only — unarmed heap parallel agg keeps the classic
-    // leader-side partitioning byte-for-byte.
-    let parts = ::guc_tables::lane_pool::lane_parallel_pool_armed()
-        .then(|| partition_entries(&entries));
+    let parts = pre_partition.then(|| partition_entries(&entries));
     if merge_stats_enabled() {
         eprintln!(
             "AGG_MERGE_STATS install: node={id} entries={} bytes={bytes} pre-partitioned={}",
@@ -1123,9 +1154,16 @@ fn install_classic_handoff<'mcx>(
             parts.is_some(),
         );
     }
-    handoff.install(HandedAggTable { entries, additionalsize, parts, _buf: buf });
-    ph.hashtable.reset();
-    Ok(())
+    HandedAggTable { entries, additionalsize, parts, _buf: buf }
+}
+
+#[cfg(test)]
+impl HandedAggTable {
+    /// Unit view of the handed entries (byref-merge hash-comparability
+    /// invariant tests).
+    pub(crate) fn entries(&self) -> &[TupleHashEntryData] {
+        &self.entries
+    }
 }
 
 // The compact table's handoff export (Stage 2.2 × Stage 4, the G4
@@ -1210,6 +1248,9 @@ fn install_compact_handoff<'mcx>(
             mcx,
         )?;
         let hash = ph.hashtable.hash_slot(&mut ph.hashslot)?;
+        // Rebased onto the leader's IV=0 mapping, exactly like the classic
+        // export (export_handed_table's byref-merge invariant note).
+        let hash = ph.hashtable.hash_to_iv0(hash);
         let t_len = tlens[row] as usize;
         // SAFETY: pass 1 reserved additionalsize + t_len (+ state bytes) at
         // `off` for exactly this row over the same reconstructed datums; the
@@ -1327,6 +1368,15 @@ fn install_raw_handoff<'mcx>(
     }
     let mut hashes: Vec<u32> = Vec::new();
     ph.hashtable.hash_staged(&key_datums, &isnull, &mut hashes)?;
+    // Rebase the bucket-routing hashes onto the leader's IV=0 mapping,
+    // exactly like the classic export (export_handed_table's byref-merge
+    // invariant note): the finalize's consume side buckets its OWN entries
+    // and the exchange null_hash with its IV=0 kernel.
+    if ph.hashtable.has_variable_iv() {
+        for h in &mut hashes {
+            *h = ph.hashtable.hash_to_iv0(*h);
+        }
+    }
     drop(key_datums);
     let mut counts = [0u32; 256];
     for i in 0..n {
