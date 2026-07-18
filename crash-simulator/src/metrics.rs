@@ -158,6 +158,9 @@ pub struct SpeciesCensus {
     /// EXPLAIN statements that errored (counted here, never in the outcome
     /// census — metrics must not perturb the pinned verdict vocabulary).
     pub explain_errors: u64,
+    /// First few EXPLAIN error signatures (diagnosability; a DUT EXPLAIN
+    /// coverage gap is itself a finding).
+    pub explain_error_samples: Vec<String>,
 }
 
 impl SpeciesCensus {
@@ -270,6 +273,7 @@ impl MetricsArtifact<'_> {
                 "curve": s.curve,
                 "explain_sample_every": self.explain_sample_every,
                 "explain_errors": s.explain_errors,
+                "explain_error_samples": s.explain_error_samples,
                 "top_species": top,
             },
             "campaign": {

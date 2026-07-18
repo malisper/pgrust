@@ -293,3 +293,33 @@ fn profile_validator_rejects_unknown_disable_names() {
     let err = simharness::runner::profile::validate(&p).unwrap_err();
     assert!(err.contains("q:no-such-production"), "got: {err}");
 }
+
+/// Battery-profile reach pin: every checked-in profile, at the smoke run-tier
+/// seed budget (500 seeds, FIXED base 1000 — deterministic, no sampling
+/// flake), is gate-green. Catches weight changes that silently starve a
+/// production (the fault-pair find) before the smoke tier goes RED.
+#[test]
+fn battery_profiles_gate_green_at_smoke_budget() {
+    let reg = full_registry();
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("profiles");
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let lp = simharness::runner::profile::load_profile(path.to_str().unwrap()).unwrap();
+        let gp = bridge::runner_profile_to_gen(&lp.profile);
+        let mut acc = KpathAccum::default();
+        for seed in 1000..1500u64 {
+            let (_p, _c, t) = bridge::generate_plan_with_ctx_traced(seed, &gp, "00", "t");
+            acc.add(&t);
+        }
+        let r = evaluate(&acc, &reg, &gp);
+        assert!(
+            r.reach_gap.is_empty(),
+            "profile {} has reach gaps at the 500-seed smoke budget: {:?}",
+            lp.profile.name,
+            r.reach_gap
+        );
+    }
+}

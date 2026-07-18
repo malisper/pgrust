@@ -387,6 +387,9 @@ pub struct RunReport {
     /// deliberately NEVER in `class_counts` (the pinned census vocabulary
     /// must not see metrics-infrastructure statements).
     pub explain_errors: u64,
+    /// First few EXPLAIN error signatures (sqlstate + head), for metrics
+    /// diagnosability (a pgrust EXPLAIN coverage gap is itself a finding).
+    pub explain_error_samples: Vec<String>,
 }
 
 impl RunReport {
@@ -652,8 +655,15 @@ pub fn execute_plan<'a>(
                         // H5 rung B: plan-species fingerprint via EXPLAIN
                         // (COSTS OFF) on the DUT — sampled, DUT-only,
                         // state-neutral. Blind-arms-only statistics ride on
-                        // these (see src/metrics.rs module doc).
-                        if matches!(step, Step::Query(_)) && !dut_out.is_error() {
+                        // these (see src/metrics.rs module doc). SELECT-only:
+                        // property noise emits Query-marked utility
+                        // statements (PREPARE/DEALLOCATE, X4) that EXPLAIN
+                        // rejects — those are not plan species.
+                        let explainable = matches!(step, Step::Query(_))
+                            && sql.text.trim_start().get(..7).is_some_and(|h| {
+                                h.eq_ignore_ascii_case("SELECT ")
+                            });
+                        if explainable && !dut_out.is_error() {
                             query_seen += 1;
                             if opts.explain_every > 0
                                 && (query_seen - 1) % opts.explain_every as u64 == 0
@@ -669,13 +679,21 @@ pub fn execute_plan<'a>(
                                             crate::metrics::canonicalize_explain(&lines),
                                         );
                                     }
-                                    ExecOutcome::SqlError { .. } => {
+                                    ExecOutcome::SqlError { sqlstate, message } => {
                                         // Metrics infrastructure error: count
                                         // in metrics only, resync BOTH legs
                                         // (an EXPLAIN error inside an open tx
                                         // poisons the DUT leg alone — the
                                         // symmetric-recovery law applies).
                                         report.explain_errors += 1;
+                                        if report.explain_error_samples.len() < 5 {
+                                            report.explain_error_samples.push(format!(
+                                                "{} {} @ {}",
+                                                sqlstate,
+                                                message.chars().take(80).collect::<String>(),
+                                                normalize_site(&sql.text)
+                                            ));
+                                        }
                                         disp.recover_both();
                                     }
                                     ExecOutcome::Command { .. } => {

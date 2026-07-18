@@ -225,6 +225,11 @@ pub fn run_campaign(
             species.add_sighting(fp);
         }
         species.explain_errors += report.explain_errors;
+        for s in &report.explain_error_samples {
+            if species.explain_error_samples.len() < 10 {
+                species.explain_error_samples.push(s.clone());
+            }
+        }
         species.checkpoint();
         let run = SeedRun { seed, report, plan_text };
         census.merge(&run.report.class_counts);
