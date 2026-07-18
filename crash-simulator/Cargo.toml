@@ -1,0 +1,30 @@
+# crash-simulator — H1 sim-harness core (contract §0 A2: own cargo workspace,
+# NOT a member of the product workspace; client-side deps must never tax
+# product builds). Owner of this file: WS-RUNNER; dep additions by PR of the
+# needing WS (contract §1.1).
+[package]
+name = "simharness"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "simharness"
+path = "src/main.rs"
+
+[features]
+# Contract §0 A3 run-determinism tier: under `sim`, harness-side wall-clock
+# reads are seed-derived (logical clock) so artifacts are byte-stable. The
+# engine-side sim substrate is a separate concern (report-only gate G-R3b).
+sim = []
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.8"
+rand_chacha = "0.3"
+sha2 = "0.10"
+postgres = "0.19"
+
+# Detach from any enclosing workspace (the product workspace at repo root).
+[workspace]
