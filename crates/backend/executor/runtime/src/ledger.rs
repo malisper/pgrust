@@ -18,50 +18,31 @@
 //! release_slot_locked) and take `inner`; the hot-path entries
 //! (`try_join` / `leave` / `should_continue` / `renudge` / `wants_workers`)
 //! NEVER take `inner` — a worker holding a claim can never deadlock against
-//! a submitting leader. The EXTERNAL face (`admit_external` /
-//! `settle_external` / `retire_external`, WS-O wave 2) takes `inner` ALONE
-//! from executor leader threads that never hold the membership lock —
-//! taking the innermost lock only always respects the order; an
-//! external-face caller must NEVER hold the membership lock (there is no
-//! code path that does, and none may be added).
+//! a submitting leader. The GANG face (`admit_gang` / `settle_gang` /
+//! `retire_gang`, PHASE3-CLOSE WS-WIDTH — the audited successor of WS-O
+//! wave 2's external face) takes `inner` ALONE from executor leader
+//! threads that never hold the membership lock — taking the innermost
+//! lock only always respects the order; a gang-face caller must NEVER
+//! hold the membership lock (there is no code path that does, and none
+//! may be added).
 //!
-//! # External width entries (WS-O wave 2 — the Gather/parallel-gang seam)
+//! # Gang policy lineage (WS-O wave 2 adjudications, all ratified)
 //!
-//! Non-pool parallel gangs (Gather's bgworker helpers) charge width through
-//! `inner`-only entries: no [`EntryWords`], no hot-path words — external
-//! entries exist only at membership-event cadence. Policy (contract
-//! adjudications, all ratified):
-//!
-//! - **HEADROOM-ONLY GRANTS**: an external admit is granted
-//!   `min(requested, cores − Σ pool targets − Σ external active)` at the
-//!   instant of admission — it never displaces admitted pool width. The
-//!   grant MAY BE 0 (saturated box): the caller MUST have a serial path
-//!   (Gather's leader-local scan is exactly that).
-//! - **FROZEN GRANTS (inc-1)**: the grant ceiling never changes after
-//!   admission — external gangs have no claim boundaries to shed at, so
-//!   the ledger never narrows them (the fairness envelope of freezing is a
-//!   fleet measurement before any default-ON).
-//! - **RECOMPUTE PARTICIPATION**: external entries DO enter the target
-//!   recompute — their ACTIVE width is charged against the core budget
-//!   before fair shares split the remainder over pool entries (pool
-//!   incumbents over their narrowed target shed at their next claim
-//!   boundary, the ordinary over-shed doctrine; the liveness floor
-//!   target ≥ 1 still wins).
-//! - **COMPOSITION RULE (the WS-N/WS-O anti-double-clamp guard)**: granted
-//!   counts ACTIVE width — `settle_external` records the launched/live
-//!   worker count and only THAT is charged; parked standing-gang workers
-//!   hold no grant. A consumer must never ALSO clamp itself from the same
-//!   numbers (the ledger clamps width; arm-side DOPCAP clamps footprint at
-//!   the granted width — the 1c rule restated for the external face).
-//! - **LEADER NOT COUNTED (inc-1, C parity)**: requests are denominated in
-//!   WORKERS; a participating leader rides free exactly as C's
-//!   parallel_leader_participation. Reconciled in the C2 design note
-//!   before C2 boards.
-//! - **CAP, FAIL-OPEN**: at most [`MAX_EXTERNAL_ENTRIES`] (64) concurrent
-//!   external entries; past the cap `admit_external` refuses (None) and
-//!   the caller keeps today's uncapped launch path. Unit tests assert the
-//!   refusal (the contract's "debug_assert in tests" — a production panic
-//!   is deliberately NOT risked on a legal, if extreme, workload).
+//! The gang face carries the WS-O external-face policy VERBATIM (the W4
+//! removal deleted the external slab, not the policy): HEADROOM-ONLY
+//! grants (never displace admitted pool width; grant MAY BE 0 — the
+//! caller MUST have a serial path, Gather's leader-local scan); FROZEN
+//! grants (no claim boundaries to shed at; the fairness envelope of
+//! freezing stays a fleet measurement before any default-ON); RECOMPUTE
+//! PARTICIPATION (active width charged before fair shares; liveness floor
+//! target ≥ 1 wins); the COMPOSITION RULE (granted counts ACTIVE width —
+//! `settle_gang` records launched/live and only THAT is charged; a
+//! consumer must never ALSO clamp itself from the same numbers — ledger
+//! clamps width, arm-side DOPCAP clamps footprint); LEADER NOT COUNTED
+//! (C parity — parallel_leader_participation rides free); CAPACITY
+//! FAIL-OPEN (at most [`MAX_GANG_ENTRIES`] concurrent gangs; past it
+//! `admit_gang` refuses (None) and the caller keeps today's uncapped
+//! launch path — asserted in tests, never a production panic).
 //!
 //! Events:
 //! - ARRIVAL NUDGE — [`AdmissionLedger::admit`] registers the entry and
@@ -95,10 +76,10 @@
 //! The WS-O policy invariants above (headroom-only, grant-may-be-0,
 //! frozen, leader-not-counted, anti-double-clamp, advisory-only,
 //! per-startup cadence, capacity fail-open) carry VERBATIM to gang
-//! entries; `admit_gang` takes `inner` ALONE exactly like the external
-//! face (same lock-order law). The external face beside it is the WS-O
-//! wave-2 mechanism this one supersedes — retired by audited removal (W4)
-//! once the flip letters ratify the supersession.
+//! entries; `admit_gang` takes `inner` ALONE (lock-order law above). The
+//! WS-O external slab this face superseded was removed by the W4 audited
+//! removal (this commit); the policy lineage section above preserves the
+//! adjudications.
 //!
 //! Fair-share remainder: targets split the core budget equally over
 //! admitted entries; the remainder is assigned in slot order here, and
@@ -239,14 +220,6 @@ pub struct LedgerSnapshot {
     pub renudges: u64,
     pub renudges_suppressed: u64,
     pub sub_threshold_admits: u64,
-    /// External width entries currently admitted (WS-O external face).
-    pub external_admitted: u32,
-    /// Σ frozen grant ceilings over admitted external entries.
-    pub external_granted: u32,
-    /// Σ ACTIVE external width (the core-budget charge).
-    pub external_active: u32,
-    /// External admissions refused at the 64-entry cap (fail-open).
-    pub external_cap_refusals: u64,
     /// Unified gang entries currently admitted (WS-WIDTH pool face).
     pub gang_admitted: u32,
     /// Σ frozen grant ceilings over admitted gang entries.
@@ -254,9 +227,9 @@ pub struct LedgerSnapshot {
     /// Σ ACTIVE gang width (the core-budget charge inside the ONE recompute).
     pub gang_active: u32,
     /// Gang admissions refused at the [`MAX_GANG_ENTRIES`] capacity
-    /// (FAIL-OPEN — stock launch; the successor of `external_cap_refusals`,
-    /// deliberately a DISTINGUISHABLE name so dashboards never alias the
-    /// two mechanisms' counters).
+    /// (FAIL-OPEN — stock launch; minted as the DISTINGUISHABLE successor
+    /// of the retired WS-O external-face refusal counter so dashboards
+    /// never silently aliased the two mechanisms' counters).
     pub gang_cap_refusals: u64,
     /// Gang admissions granted WIDTH 0 (saturated box — the caller went
     /// serial). FM-3 visibility: sustained pool saturation serializing
@@ -290,32 +263,12 @@ struct EntryWords {
     advert: AtomicU32,
 }
 
-/// External-face cap (contract adjudication): at most 64 concurrently
-/// admitted external entries; past the cap admission FAILS OPEN (no lease —
-/// the caller keeps today's uncapped launch path).
-pub(crate) const MAX_EXTERNAL_ENTRIES: usize = 64;
-
 /// Unified gang-region capacity (PHASE3-CLOSE WS-WIDTH, invariant 8): at
 /// most this many concurrently admitted gang entries past the slot region;
 /// past it `admit_gang` FAILS OPEN (None → stock launch, never block,
-/// never error; counted in `gang_cap_refusals`). The successor of
-/// [`MAX_EXTERNAL_ENTRIES`] — the external slab and its cap disappear with
-/// the W4 removal, leaving this as the ONE non-pool bound.
+/// never error; counted in `gang_cap_refusals`). The ONE non-pool bound
+/// (successor of the retired WS-O 64-entry external cap).
 pub(crate) const MAX_GANG_ENTRIES: usize = 64;
-
-/// One external width entry (module doc "External width entries"): a
-/// non-pool parallel gang charging ACTIVE width against the core budget.
-/// Lives under `inner` only — no EntryWords, never on a hot path.
-#[derive(Clone, Copy, Debug)]
-struct ExternalEntry {
-    /// Frozen grant ceiling (headroom at admission; never changes — the
-    /// caller may run at most this many workers).
-    granted: u32,
-    /// ACTIVE width currently charged (composition rule: parked workers
-    /// hold no grant). Starts at `granted`; `settle_external` moves it
-    /// within [0, granted].
-    active: u32,
-}
 
 /// One unified gang entry (module doc "Unified gang entries"): FROZEN
 /// non-shedding — `granted` never changes after admit (invariant 2);
@@ -350,19 +303,9 @@ struct LedgerInner {
     admitted: u32,
     /// Σ target_i × bytes_i over admitted entries.
     cache_charged: u64,
-    /// External width entries (WS-O wave 2 — superseded by the gang region
-    /// when `PGRUST_RUNTIME_WIDTH_UNIFIED` is on; W4 removes this slab),
-    /// slab-indexed by the id returned from `admit_external`; len grows on
-    /// demand up to [`MAX_EXTERNAL_ENTRIES`].
-    external: Vec<Option<ExternalEntry>>,
 }
 
 impl LedgerInner {
-    /// Σ active external width — the core-budget charge of the WS-O gangs.
-    fn external_active(&self) -> u64 {
-        self.external.iter().flatten().map(|e| u64::from(e.active)).sum()
-    }
-
     /// Σ active unified-gang width — the core-budget charge the ONE
     /// recompute takes off the top (invariant 3).
     fn gang_active(&self) -> u64 {
@@ -396,9 +339,6 @@ struct LedgerStats {
     renudges: AtomicU64,
     renudges_suppressed: AtomicU64,
     sub_threshold_admits: AtomicU64,
-    /// External admissions refused at the [`MAX_EXTERNAL_ENTRIES`] cap
-    /// (fail-open; asserted by the cap unit test).
-    external_cap_refusals: AtomicU64,
     /// Gang admissions refused at [`MAX_GANG_ENTRIES`] (fail-open;
     /// invariant 8 — the DISTINGUISHABLE successor counter).
     gang_cap_refusals: AtomicU64,
@@ -435,7 +375,6 @@ impl AdmissionLedger {
                 table: (0..nslots).map(|_| None).collect(),
                 admitted: 0,
                 cache_charged: 0,
-                external: Vec::new(),
             }),
             join_threshold_ns: AtomicU64::new(budgets.join_threshold_ns),
             budgets,
@@ -593,90 +532,12 @@ impl AdmissionLedger {
         self.entries[slot].granted.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// EXTERNAL ADMIT (WS-O wave 2; module doc "External width entries"):
-    /// register a non-pool parallel gang and grant it HEADROOM-ONLY width —
-    /// `min(requested, cores − Σ pool targets − Σ external active)` under
-    /// `inner` (taken ALONE; the caller never holds the membership lock —
-    /// lock-order note in the module doc). The grant is FROZEN for the
-    /// entry's lifetime and MAY BE 0 (the caller must have a serial path).
-    /// Pool targets are recomputed so the new entry's active width is
-    /// charged immediately (incumbents shed at their next claim boundary).
-    /// None ⇔ the [`MAX_EXTERNAL_ENTRIES`] cap — FAIL-OPEN, the caller
-    /// keeps today's uncapped path.
-    pub(crate) fn admit_external(&self, requested: u32) -> Option<(usize, u32)> {
-        let mut inner = lock(&self.inner);
-        let id = match inner.external.iter().position(Option::is_none) {
-            Some(free) => free,
-            None if inner.external.len() < MAX_EXTERNAL_ENTRIES => {
-                inner.external.push(None);
-                inner.external.len() - 1
-            }
-            None => {
-                RuntimeStats::tick(&self.stats.external_cap_refusals);
-                return None;
-            }
-        };
-        // Headroom at this instant: core budget minus what pool entries are
-        // currently entitled to (their targets — using grants instead would
-        // let a gang seize width an admitted query is about to take back)
-        // minus the other gangs' active width (BOTH faces while they
-        // coexist). Pool floor overshoot (Σ targets can exceed cores when
-        // entries > cores) saturates to 0.
-        let headroom = u64::from(self.budgets.cores)
-            .saturating_sub(inner.pool_targets(&self.entries))
-            .saturating_sub(inner.external_active())
-            .saturating_sub(inner.gang_active());
-        let granted = requested.min(headroom.min(u64::from(u32::MAX)) as u32);
-        inner.external[id] = Some(ExternalEntry { granted, active: granted });
-        // Charge the grant against pool targets NOW (recompute participation
-        // — narrowing only, so the widened count is always 0 here).
-        self.recompute_locked(&mut inner);
-        Some((id, granted))
-    }
-
-    /// EXTERNAL SETTLE: record the gang's ACTIVE width (launched/live
-    /// worker count — parked workers hold no grant; composition rule in the
-    /// module doc). Clamped to the frozen grant; callable repeatedly
-    /// (launch, per-rescan relaunch, partial exit). Returns the number of
-    /// pool entries whose target ROSE — the caller's wake hint.
-    pub(crate) fn settle_external(&self, id: usize, active: u32) -> u32 {
-        let mut inner = lock(&self.inner);
-        let Some(Some(e)) = inner.external.get_mut(id) else {
-            debug_assert!(false, "settle_external on a retired/unknown entry");
-            return 0;
-        };
-        debug_assert!(
-            active <= e.granted,
-            "external settle above the frozen grant ({active} > {})",
-            e.granted
-        );
-        e.active = active.min(e.granted);
-        self.recompute_locked(&mut inner)
-    }
-
-    /// EXTERNAL RETIRE: drop the entry and return its width to the pool
-    /// (recompute; the return value is the widened-targets wake hint).
-    /// Exactly once per admit — the RAII lease owns the id.
-    pub(crate) fn retire_external(&self, id: usize) -> u32 {
-        let mut inner = lock(&self.inner);
-        let Some(slot) = inner.external.get_mut(id) else {
-            debug_assert!(false, "retire_external on an unknown id");
-            return 0;
-        };
-        if slot.take().is_none() {
-            debug_assert!(false, "retire_external on a retired entry");
-            return 0;
-        }
-        self.recompute_locked(&mut inner)
-    }
-
     /// UNIFIED GANG ADMIT (PHASE3-CLOSE WS-WIDTH; module doc "Unified gang
     /// entries"): register a non-pool parallel gang as a FROZEN
     /// NON-SHEDDING row of the ONE entry table and grant it HEADROOM-ONLY
-    /// width — `min(requested, cores − Σ pool targets − Σ gang active −
-    /// Σ external active)` under `inner` (taken ALONE; the caller never
-    /// holds the membership lock — same lock-order law as the external
-    /// face). Invariants 1/2: the grant never displaces admitted pool
+    /// width — `min(requested, cores − Σ pool targets − Σ gang active)`
+    /// under `inner` (taken ALONE; the caller never holds the membership
+    /// lock — the lock-order law). Invariants 1/2: the grant never displaces admitted pool
     /// width, never changes after admit, and MAY BE 0 (counted in
     /// `gang_zero_grants`; the caller MUST have a serial path — Gather's
     /// leader-local scan). Pool targets are recomputed by the ONE
@@ -701,8 +562,7 @@ impl AdmissionLedger {
         };
         let headroom = u64::from(self.budgets.cores)
             .saturating_sub(inner.pool_targets(&self.entries))
-            .saturating_sub(inner.gang_active())
-            .saturating_sub(inner.external_active());
+            .saturating_sub(inner.gang_active());
         let granted = requested.min(headroom.min(u64::from(u32::MAX)) as u32);
         if granted == 0 {
             RuntimeStats::tick(&self.stats.gang_zero_grants);
@@ -856,14 +716,6 @@ impl AdmissionLedger {
                 None => {}
             }
         }
-        let mut external_admitted = 0u32;
-        let mut external_granted = 0u32;
-        let mut external_active = 0u32;
-        for e in inner.external.iter().flatten() {
-            external_admitted += 1;
-            external_granted += e.granted;
-            external_active += e.active;
-        }
         LedgerSnapshot {
             admitted: inner.admitted,
             granted_total,
@@ -873,10 +725,6 @@ impl AdmissionLedger {
             renudges: self.stats.renudges.load(Ordering::Relaxed),
             renudges_suppressed: self.stats.renudges_suppressed.load(Ordering::Relaxed),
             sub_threshold_admits: self.stats.sub_threshold_admits.load(Ordering::Relaxed),
-            external_admitted,
-            external_granted,
-            external_active,
-            external_cap_refusals: self.stats.external_cap_refusals.load(Ordering::Relaxed),
             gang_admitted,
             gang_granted,
             gang_active,
@@ -897,9 +745,8 @@ impl AdmissionLedger {
     /// Target recompute (membership-event cadence, under `inner`) — THE
     /// ONE grant algebra: one walk of the one entry table.
     /// target_i = max(1, min(ceiling_i, predicted_i, fair_i, cache room)).
-    /// Fair shares split the core budget — MINUS the non-shedding charges
-    /// (unified gang active width + the WS-O external entries' active
-    /// width while that face still exists; recompute participation,
+    /// Fair shares split the core budget — MINUS the non-shedding gang
+    /// charges (recompute participation,
     /// module doc: the gangs' charge comes off the top; a zeroed budget
     /// still floors every pool target at 1, the no-wedge guarantee) —
     /// equally; the remainder lands in slot order (WHICH entry actually
@@ -917,7 +764,6 @@ impl AdmissionLedger {
         }
         let budget = u64::from(self.budgets.cores)
             .saturating_sub(inner.gang_active())
-            .saturating_sub(inner.external_active())
             .min(u64::from(u32::MAX)) as u32;
         let base = budget / n;
         let mut rem = budget % n;

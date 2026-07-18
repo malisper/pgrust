@@ -38,29 +38,26 @@ pub struct GatherState<'mcx> {
     // for the child; consumed at the leader's next local pull, after
     // ExecParallelReinitialize.
     pub outer_chg: Bitmapset<'mcx>,
-    // WS-O (wave 2): the gang's admission-ledger width lease
-    // (PGRUST_RUNTIME_LEDGER_GATHER; None on every fail-open path — knob
-    // off, no runtime, ledger off, lease cap). Held launch → workers-done;
-    // dropped (retired) in exec_shutdown_gather_workers.
+    // WS-O (wave 2)/WS-WIDTH: the gang's admission-ledger width lease
+    // (PGRUST_RUNTIME_WIDTH_UNIFIED; None on every fail-open path — knob
+    // off, no runtime, ledger off, gang capacity). Held launch →
+    // workers-done; dropped (retired) in exec_shutdown_gather_workers.
     width_lease: Option<runtime::ParallelWidthLease>,
 }
 
-// The gang-width knob consult (PHASE3-CLOSE WS-WIDTH §2.5): the WS-O
-// `ledger_gather_enabled()` OnceLock collapsed into ONE
-// `runtime::gang_width_face()` read resolving BOTH knobs —
-// `PGRUST_RUNTIME_LEDGER_GATHER` (WS-O wave-2 external face; wave-2
-// R-KNOBS registry) and `PGRUST_RUNTIME_WIDTH_UNIFIED` (unified pool-face
-// gang entries; PHASE3-CLOSE R-KNOBS registry). Unified takes precedence
-// when both are set (the mirror line names the shadowing). Both REQUIRE
-// the ledger (`PGRUST_RUNTIME_LEDGER_V2`) — with the ledger off (or no
-// runtime, or the face's 64-entry capacity) the seam FAILS OPEN to
-// today's launch exactly. The knob-OFF budget pin (§2.6): both knobs off
-// costs exactly the ONE OnceLock read the WS-O seam already paid — zero
-// reads beyond it.
+// The gang-width knob consult (PHASE3-CLOSE WS-WIDTH §2.5, post-W4): ONE
+// `runtime::gang_width_face()` read resolves `PGRUST_RUNTIME_WIDTH_UNIFIED`
+// (unified pool-face gang entries — the ONLY leased path; the WS-O
+// external-face knob died with its body in the W4 audited removal).
+// REQUIRES the ledger (`PGRUST_RUNTIME_LEDGER_V2`) —
+// with the ledger off (or no runtime, or the 64-entry gang capacity) the
+// seam FAILS OPEN to today's launch exactly. The knob-OFF budget pin
+// (§2.6): knob off costs exactly the ONE OnceLock read the WS-O seam
+// already paid — zero reads beyond it.
 
-/// The launch-width seam (WS-O inc-1b, both gather nodes; face routing by
-/// PHASE3-CLOSE WS-WIDTH): lease gang width from the admission ledger
-/// (unified pool face or WS-O external face per the knob consult) and
+/// The launch-width seam (WS-O inc-1b, both gather nodes; unified face by
+/// PHASE3-CLOSE WS-WIDTH): lease gang width from the admission ledger's
+/// pool face and
 /// clamp the context's launch count to the grant through C's own
 /// lower-the-launch mechanism
 /// (`ReinitializeParallelWorkers` / `nworkers_to_launch`) — DSM and queue
@@ -123,7 +120,7 @@ pub(crate) fn settle_gather_width(
 
 /// The WIDTH MIRROR (PHASE3-CLOSE §2.4 = WS-O TODO item 5): one
 /// trace-channel detail line per gather startup — requested / granted /
-/// launched / engine-of-record (unified vs external vs fail-open) — per
+/// launched / engine-of-record (unified vs fail-open) — per
 /// the WS-O adjudication ("a detail line to the trace channel rather than
 /// EXPLAIN"; the lease is not a lane verdict, EXPLAIN stays untouched —
 /// Workers Planned/Launched keeps coming from the existing machinery).
@@ -131,8 +128,7 @@ pub(crate) fn settle_gather_width(
 /// must be VISIBLE) and WS-COVER's census cross-checks. Gated on the
 /// face being armed FIRST (knob-OFF never reaches the trace OnceLock —
 /// the §2.6 budget pin) and on `PGRUST_LANE_V2_TRACE` (the standing
-/// engagement-trace env; stderr → server log, e2e-greppable). When BOTH
-/// gang knobs are set, `shadows=ledger-gather` names the §2.5 precedence.
+/// engagement-trace env; stderr → server log, e2e-greppable).
 pub(crate) fn mirror_gather_width(
     face: runtime::GangWidthFace,
     requested: i32,
@@ -144,14 +140,9 @@ pub(crate) fn mirror_gather_width(
     }
     let engine = lease.as_ref().map_or("fail-open", |l| l.engine());
     let granted = lease.as_ref().map_or(-1, |l| i64::from(l.granted()));
-    let shadows = if runtime::gang_width_knobs_both_set() {
-        " shadows=ledger-gather"
-    } else {
-        ""
-    };
     eprintln!(
         "[gather-width] engine={engine} requested={requested} granted={granted} \
-         launched={launched}{shadows}"
+         launched={launched}"
     );
 }
 
