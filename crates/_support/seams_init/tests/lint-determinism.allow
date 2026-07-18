@@ -266,7 +266,6 @@ time	crates/backend/utils/init/postinit/src/lib.rs	2
 time	crates/backend/utils/misc/guc/src/layers.rs	2
 time	crates/backend/utils/misc/guc/src/store.rs	6
 time	crates/backend/utils/misc/pg_rusage/src/lib.rs	1
-time	crates/backend/utils/misc/timeout/src/lib.rs	5	P2 target: timer-thread deadlines onto the virtual clock (s2.2)
 time	crates/common/controldata_utils/src/lib.rs	2	doc-named P2 reroute: controldata (s2.2)
 time	crates/contrib/uuid_ossp/src/lib.rs	2
 time	crates/port/pg_clock/src/posix.rs	1	DST-REVIEW(ws-clk): sanctioned clock authority internals (s2.2) — the ONE clock_gettime hub; PosixClock #[inline] wrappers
@@ -418,4 +417,3 @@ blocking	crates/backend/storage/lmgr/lmgr/src/lib.rs	2
 blocking	crates/backend/tcop/backend_startup/src/lib.rs	1
 blocking	crates/backend/test_regress/src/lib.rs	1
 blocking	crates/backend/utils/init/postinit/src/lib.rs	1
-blocking	crates/backend/utils/misc/timeout/src/lib.rs	3	P3 violator: timer deadline Condvar (s2.2/s3.3)
