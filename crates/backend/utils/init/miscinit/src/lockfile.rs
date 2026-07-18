@@ -5,7 +5,13 @@
 use std::cell::{Cell, RefCell};
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
+#[cfg(not(target_family = "wasm"))]
 use std::os::unix::fs::{FileExt, OpenOptionsExt};
+// wasm32: std::os::wasi::fs::FileExt is unstable (wasi_ext) and .mode() has
+// no WASI counterpart (no file mode bits); the wasm write arm below seeks
+// then writes — C's own shape (miscinit.c uses lseek + write here).
+#[cfg(target_family = "wasm")]
+use std::io::{Seek, SeekFrom};
 
 use elog::ereport;
 use init_small::globals as g;
@@ -15,6 +21,8 @@ use crate::process::{leading_i64, loc};
 
 pub(crate) const DIRECTORY_LOCK_FILE: &str = "postmaster.pid";
 // pg_file_create_mode default; the 0640 group variant lands with file_perm.c.
+// wasm32: WASI files carry no unix mode bits — the constant has no consumer.
+#[cfg(not(target_family = "wasm"))]
 const PG_FILE_CREATE_MODE: u32 = 0o600;
 const LOCK_FILE_LINE_SHMEM_KEY: usize = 7;
 
@@ -55,6 +63,7 @@ fn register_lock_file(filename: &str) {
 }
 
 // EPERM implies a different userid, so not a competing postmaster.
+#[cfg(not(target_family = "wasm"))]
 fn pid_appears_live(pid: i32) -> bool {
     // SAFETY: kill with signal 0 only probes for existence.
     if unsafe { libc::kill(pid, 0) } == 0 {
@@ -62,6 +71,14 @@ fn pid_appears_live(pid: i32) -> bool {
     }
     let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
     errno != libc::ESRCH && errno != libc::EPERM
+}
+
+// wasm32: WASI p1 has no processes and no kill(2); the instance is the only
+// process that can exist, so a lock-file PID is always a stale remnant of a
+// (native) crash — never a live competitor.
+#[cfg(target_family = "wasm")]
+fn pid_appears_live(_pid: i32) -> bool {
+    false
 }
 
 fn scan_shmem_key_line(buffer: &str) -> Option<(u64, u64)> {
@@ -84,7 +101,12 @@ fn CreateLockFile(
 ) -> PgResult<()> {
     let my_pid = my_pid();
     // SAFETY: getppid has no failure modes.
+    #[cfg(not(target_family = "wasm"))]
     let my_p_pid = unsafe { libc::getppid() } as i32;
+    // wasm32: no parent process exists on WASI; 0 is C's "no such pid"
+    // sentinel (same word my_gp_pid uses when PG_GRANDPARENT_PID is unset).
+    #[cfg(target_family = "wasm")]
+    let my_p_pid = 0i32;
     let my_gp_pid = match std::env::var("PG_GRANDPARENT_PID") {
         Ok(v) => leading_i64(&v) as i32,
         Err(_) => 0,
@@ -93,13 +115,12 @@ fn CreateLockFile(
     let mut file;
     let mut ntries = 0;
     loop {
-        match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .mode(PG_FILE_CREATE_MODE)
-            .open(filename)
-        {
+        let mut open_opts = OpenOptions::new();
+        open_opts.read(true).write(true).create_new(true);
+        // wasm32: WASI has no file modes; create_new keeps the interlock.
+        #[cfg(not(target_family = "wasm"))]
+        open_opts.mode(PG_FILE_CREATE_MODE);
+        match open_opts.open(filename) {
             Ok(f) => {
                 file = f;
                 break;
@@ -270,6 +291,7 @@ pub fn CreateSocketLockFile(
 }
 
 // Keep dates recent so /tmp cleaners spare the files; errors ignored.
+#[cfg(not(target_family = "wasm"))]
 pub fn TouchSocketLockFiles() {
     LOCK_FILES.with_borrow(|files| {
         for f in files.iter() {
@@ -282,6 +304,12 @@ pub fn TouchSocketLockFiles() {
         }
     });
 }
+
+// wasm32: sessions are socketless on WASI (no AF_UNIX), so socket lock files
+// are never created and there is nothing to touch; the wasi libc crate also
+// exposes no utime. No-op keeps the caller shape.
+#[cfg(target_family = "wasm")]
+pub fn TouchSocketLockFiles() {}
 
 // Add or replace one line (no trailing newline in `line`). The file is never
 // truncated, so lines must never shrink; every failure is ereport(LOG).
@@ -326,8 +354,15 @@ pub fn AddToDataDirLockFile(target_line: i32, line: &str) -> PgResult<()> {
         dest.push_str(&src[srcptr + rel + 1..]);
     }
 
+    #[cfg(not(target_family = "wasm"))]
     let result = file
         .write_all_at(dest.as_bytes(), 0)
+        .and_then(|()| file.sync_all());
+    // wasm32: positioned-write ext trait is unstable; seek+write is C's shape.
+    #[cfg(target_family = "wasm")]
+    let result = file
+        .seek(SeekFrom::Start(0))
+        .and_then(|_| file.write_all(dest.as_bytes()))
         .and_then(|()| file.sync_all());
     if let Err(e) = result {
         return ereport(LOG)

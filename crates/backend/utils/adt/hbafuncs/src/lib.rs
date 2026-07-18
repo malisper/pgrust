@@ -42,7 +42,7 @@ fn image_datum(img: mcx::PgVec<'_, u8>) -> Datum {
 // network.c:2060 clean_ipv6_addr: strip a trailing '%zone' suffix so the
 // string round-trips through inet_in.
 fn clean_ipv6_addr(family: i32, addr: &mut String) {
-    if family == libc::AF_INET6 {
+    if family == ip::sys::AF_INET6 {
         if let Some(pos) = addr.find('%') {
             addr.truncate(pos);
         }
@@ -51,7 +51,7 @@ fn clean_ipv6_addr(family: i32, addr: &mut String) {
 
 fn numeric_host(sa: &ip::SockAddr) -> String {
     let mut node = String::new();
-    ip::pg_getnameinfo_all(sa, Some(&mut node), None, libc::NI_NUMERICHOST);
+    ip::pg_getnameinfo_all(sa, Some(&mut node), None, ip::sys::NI_NUMERICHOST);
     clean_ipv6_addr(ip::sockaddr_family(sa), &mut node);
     node
 }

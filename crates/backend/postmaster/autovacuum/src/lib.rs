@@ -145,6 +145,6 @@ pub fn init_seams() {
 fn wake_autovacuum_launcher() {
     let pid = shmem::AUTOVACUUM_LAUNCHER_PID.get();
     if pid != 0 {
-        let _ = procsignal::SendThreadSignal(pid, libc::SIGUSR2);
+        let _ = procsignal::SendThreadSignal(pid, procsignal::signums::SIGUSR2);
     }
 }

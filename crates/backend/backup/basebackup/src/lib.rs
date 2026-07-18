@@ -130,7 +130,12 @@ fn lstat_file(path: &str) -> PgResult<Option<LstatInfo>> {
         mode: st.st_mode as u32,
         uid: st.st_uid as u32,
         gid: st.st_gid as u32,
+        #[cfg(not(target_family = "wasm"))]
         mtime: st.st_mtime as i64,
+        // wasm32: wasi-libc's stat spells it st_mtim (timespec), no
+        // st_mtime alias in the libc crate.
+        #[cfg(target_family = "wasm")]
+        mtime: st.st_mtim.tv_sec as i64,
     }))
 }
 
@@ -1070,13 +1075,26 @@ fn pg_file_create_mode() -> u32 {
 fn pg_dir_create_mode() -> u32 {
     init_small::globals::data_directory_mode() as u32
 }
+#[cfg(not(target_family = "wasm"))]
 fn geteuid() -> u32 {
     // SAFETY: geteuid never fails.
     unsafe { libc::geteuid() }
 }
+#[cfg(not(target_family = "wasm"))]
 fn getegid() -> u32 {
     // SAFETY: getegid never fails.
     unsafe { libc::getegid() }
+}
+// wasm32: WASI has no uids/gids; 0 is the tar-header owner word C would
+// emit on a credential-less platform (base backups are postmaster-only —
+// unreachable from --single).
+#[cfg(target_family = "wasm")]
+fn geteuid() -> u32 {
+    0
+}
+#[cfg(target_family = "wasm")]
+fn getegid() -> u32 {
+    0
 }
 fn time_now() -> i64 {
     // SAFETY: time(NULL) returns the current unix time.

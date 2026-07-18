@@ -23,17 +23,37 @@ const WAIT_EVENT_PROC_SIGNAL_BARRIER: u32 = 0x0800_0000 | 0x2A;
 // Thread-signal numbers are pure indices/bits here (no kernel signals are
 // involved — this crate IS the signal emulation). wasm32: the wasi libc
 // crate exposes no SIG* names; Linux/wasi-libc values.
-#[cfg(not(target_family = "wasm"))]
-use libc::{SIGINT, SIGKILL, SIGSTOP, SIGUSR1};
-#[cfg(target_family = "wasm")]
-mod wasm_signums {
-    pub const SIGINT: i32 = 2;
-    pub const SIGKILL: i32 = 9;
-    pub const SIGUSR1: i32 = 10;
-    pub const SIGSTOP: i32 = 19;
+//
+// `signums` is public: pqsignal_thread/SendThreadSignal callers (auxjobs,
+// tcop) name their dispositions through it so every target agrees on the
+// emulation's numbering without each crate re-deriving the wasm arm.
+pub mod signums {
+    #[cfg(not(target_family = "wasm"))]
+    pub use libc::{
+        SIGABRT, SIGALRM, SIGCHLD, SIGFPE, SIGHUP, SIGINT, SIGKILL, SIGPIPE, SIGQUIT, SIGSTOP,
+        SIGTERM, SIGUSR1, SIGUSR2,
+    };
+    // Linux-numbered thread-signal emulation space (matches wasi-libc).
+    #[cfg(target_family = "wasm")]
+    mod wasm_signums {
+        pub const SIGHUP: i32 = 1;
+        pub const SIGINT: i32 = 2;
+        pub const SIGQUIT: i32 = 3;
+        pub const SIGABRT: i32 = 6;
+        pub const SIGFPE: i32 = 8;
+        pub const SIGKILL: i32 = 9;
+        pub const SIGUSR1: i32 = 10;
+        pub const SIGUSR2: i32 = 12;
+        pub const SIGPIPE: i32 = 13;
+        pub const SIGALRM: i32 = 14;
+        pub const SIGTERM: i32 = 15;
+        pub const SIGCHLD: i32 = 17;
+        pub const SIGSTOP: i32 = 19;
+    }
+    #[cfg(target_family = "wasm")]
+    pub use wasm_signums::*;
 }
-#[cfg(target_family = "wasm")]
-use wasm_signums::*;
+use signums::{SIGINT, SIGKILL, SIGSTOP, SIGUSR1};
 
 pub struct ProcSignalSlot {
     pss_pid: AtomicI32,

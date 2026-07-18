@@ -122,7 +122,7 @@ fn backend_initialize(mcx: Mcx<'_>, client_sock: &ClientSocket, cac: CacState) -
 
     let log_hostname = guc_tables::vars::log_hostname.read();
     let raddr = init_small::globals::WithMyProcPort(|p| p.raddr);
-    let flags = (if log_hostname { 0 } else { libc::NI_NUMERICHOST }) | libc::NI_NUMERICSERV;
+    let flags = (if log_hostname { 0 } else { ip::sys::NI_NUMERICHOST }) | ip::sys::NI_NUMERICSERV;
     let mut remote_host = String::new();
     let mut remote_port = String::new();
     let ret =
@@ -291,7 +291,7 @@ fn process_ssl_startup() -> PgResult<i32> {
     };
 
     let laddr = init_small::globals::WithMyProcPort(|p| p.laddr);
-    if !loaded_ssl::get() || ip::sockaddr_family(&laddr) == libc::AF_UNIX {
+    if !loaded_ssl::get() || ip::sockaddr_family(&laddr) == ip::sys::AF_UNIX {
         return reject(468);
     }
 
@@ -373,7 +373,7 @@ fn process_startup_packet(mcx: Mcx<'_>, mut ssl_done: bool, mut gss_done: bool) 
             let (laddr, ssl_in_use) =
                 init_small::globals::WithMyProcPort(|p| (p.laddr, p.ssl_in_use));
             let ssl_ok =
-                if !loaded_ssl::get() || ip::sockaddr_family(&laddr) == libc::AF_UNIX || ssl_in_use
+                if !loaded_ssl::get() || ip::sockaddr_family(&laddr) == ip::sys::AF_UNIX || ssl_in_use
                 {
                     b'N'
                 } else {
@@ -793,7 +793,7 @@ fn gai_strerror(errcode: i32) -> String {
     // SAFETY: gai_strerror returns a pointer to a static NUL-terminated
     // message for any error code.
     unsafe {
-        std::ffi::CStr::from_ptr(libc::gai_strerror(errcode))
+        std::ffi::CStr::from_ptr(ip::sys::gai_strerror(errcode))
             .to_string_lossy()
             .into_owned()
     }

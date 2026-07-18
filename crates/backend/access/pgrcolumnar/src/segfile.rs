@@ -3,7 +3,13 @@
 //! mdnblocks/mdunlink stay valid on pgrcolumnar relations.
 
 use std::fs::{File, OpenOptions};
+#[cfg(not(target_family = "wasm"))]
 use std::os::unix::fs::FileExt;
+// wasm32: WASI has positioned reads/writes (fd_pread/fd_pwrite); the ext
+// trait is unstable (wasi_ext) — gated at the crate root for the pinned
+// nightly the wasm build runs on.
+#[cfg(target_family = "wasm")]
+use std::os::wasi::fs::FileExt;
 
 use ::types_error::{PgError, PgResult};
 
@@ -166,9 +172,21 @@ impl SegFile {
 
 /// Contiguous read-only view over all segments: PROT_NONE reservation +
 /// MAP_FIXED per segment, so chunk framing can span segment boundaries.
+#[cfg(not(target_family = "wasm"))]
 pub struct SegMap {
     ptr: *const u8,
     maplen: usize,
+}
+
+// wasm32: no mmap exists on wasm32-wasip1 (wasi-libc has no sys_mmap; the
+// address space is a single linear memory). The wasm arm materializes the
+// sealed part bytes into an owned heap buffer via positioned reads — same
+// bytes() contract, no address-space tricks. Cost: whole-part reads and
+// resident copies (fine at boot-increment scale; a paged reader is the
+// structural fix if cbstore-on-wasm ever needs to be cheap).
+#[cfg(target_family = "wasm")]
+pub struct SegMap {
+    buf: Vec<u8>,
 }
 
 // SAFETY (coldio lane, process-shared mappings): the mapping is PROT_READ
@@ -176,7 +194,9 @@ pub struct SegMap {
 // (bytes() hands out &[u8] only) and Drop's munmap runs exactly once when
 // the last holder goes away. Concurrent readers on any thread are the mmap
 // contract itself.
+#[cfg(not(target_family = "wasm"))]
 unsafe impl Send for SegMap {}
+#[cfg(not(target_family = "wasm"))]
 unsafe impl Sync for SegMap {}
 
 // Process-shared SegMap registry (coldio lane): one live mapping per
@@ -271,6 +291,24 @@ impl SegMap {
         Ok(Some(SegMap::map_segs(&files, &lens, maplen)?))
     }
 
+    // wasm32 twin: read every segment into the contiguous buffer at its
+    // logical offset (i*SEG_BYTES), zero-fill between (mmap's reservation
+    // shape). Sealed bytes: no coherence hazard vs the writer's pwrites.
+    #[cfg(target_family = "wasm")]
+    fn map_segs(files: &[File], lens: &[u64], maplen: usize) -> PgResult<SegMap> {
+        let mut buf = vec![0u8; maplen];
+        for (i, f) in files.iter().enumerate() {
+            if lens[i] == 0 {
+                continue;
+            }
+            let at = i * SEG_BYTES as usize;
+            f.read_exact_at(&mut buf[at..at + lens[i] as usize], 0)
+                .map_err(|e| io_err("cbstore segment", e))?;
+        }
+        Ok(SegMap { buf })
+    }
+
+    #[cfg(not(target_family = "wasm"))]
     fn map_segs(files: &[File], lens: &[u64], maplen: usize) -> PgResult<SegMap> {
         unsafe {
             let reserve = libc::mmap(
@@ -310,11 +348,19 @@ impl SegMap {
         }
     }
 
+    #[cfg(not(target_family = "wasm"))]
     pub fn bytes(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.ptr, self.maplen) }
     }
+
+    #[cfg(target_family = "wasm")]
+    pub fn bytes(&self) -> &[u8] {
+        &self.buf
+    }
 }
 
+// wasm32: the owned buffer drops itself.
+#[cfg(not(target_family = "wasm"))]
 impl Drop for SegMap {
     fn drop(&mut self) {
         unsafe {
