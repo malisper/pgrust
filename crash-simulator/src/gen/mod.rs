@@ -3,9 +3,10 @@
 pub mod budget;
 pub mod generator;
 pub mod noise;
+pub mod prodreg;
 pub mod profile;
 pub mod schema;
 pub mod screens;
 pub mod weights;
 
-pub use generator::{generate_plan, Generator};
+pub use generator::{generate_plan, generate_plan_traced, Generator};

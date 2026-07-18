@@ -114,6 +114,13 @@ pub struct GenProfile {
     /// when true.
     #[serde(default)]
     pub float_lenient: bool,
+    /// TEST-ONLY reach-gate teeth knob (H5): production node names (see
+    /// `gen::prodreg`) whose EMISSION is suppressed while the reach gate
+    /// still considers them reachable — simulating a silently-lost
+    /// production (the H3 0/9 shape). Part of the profile bytes, so plan
+    /// determinism is preserved honestly. Never set in battery profiles.
+    #[serde(default)]
+    pub test_disable_productions: Vec<String>,
 }
 
 impl GenProfile {

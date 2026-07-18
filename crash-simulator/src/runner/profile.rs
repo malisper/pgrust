@@ -32,6 +32,12 @@ pub struct Profile {
     /// Declared floors; enforced only when the instrument is present (§0 A4).
     #[serde(default)]
     pub engagement_floors: BTreeMap<String, u64>,
+    /// TEST-ONLY reach-gate teeth knob (H5): production node names whose
+    /// EMISSION is suppressed while the reach gate still expects them —
+    /// simulating a silently-lost production (the H3 0/9 shape). Validated
+    /// against the `gen::prodreg` registry. Never set in battery profiles.
+    #[serde(default)]
+    pub test_disable_productions: Vec<String>,
     pub background_policy: BackgroundPolicy,
     pub steps_min: u32,
     pub steps_max: u32,
@@ -123,6 +129,24 @@ pub fn validate(p: &Profile) -> Result<(), String> {
     }
     if p.steps_min == 0 || p.steps_min > p.steps_max {
         return Err(format!("profile '{}': bad steps range", p.name));
+    }
+    // The reach-gate teeth knob must name registered productions — a typo
+    // here would silently disable nothing while the test believes otherwise.
+    if !p.test_disable_productions.is_empty() {
+        let prop_names: Vec<String> = crate::oracle::props::v1_set()
+            .iter()
+            .map(|id| id.as_str().to_string())
+            .collect();
+        let prop_refs: Vec<&str> = prop_names.iter().map(|s| s.as_str()).collect();
+        let reg = crate::gen::prodreg::registry(&prop_refs);
+        for n in &p.test_disable_productions {
+            if !reg.iter().any(|d| &d.name == n) {
+                return Err(format!(
+                    "profile '{}': test_disable_productions entry '{}' is not a registered production",
+                    p.name, n
+                ));
+            }
+        }
     }
     if p.background_policy.autovacuum != "off" && p.background_policy.autovacuum != "on" {
         return Err(format!("profile '{}': autovacuum must be on|off", p.name));

@@ -380,6 +380,13 @@ pub struct RunReport {
     pub failure: Option<Failure>,
     pub halted_at: Option<usize>,
     pub steps_executed: usize,
+    /// H5 rung B: canonicalized plan fingerprints of sampled Query steps
+    /// (EXPLAIN (COSTS OFF) against the DUT; `ExecOptions::explain_every`).
+    pub plan_fingerprints: Vec<String>,
+    /// EXPLAIN statements that errored — counted here for metrics.json,
+    /// deliberately NEVER in `class_counts` (the pinned census vocabulary
+    /// must not see metrics-infrastructure statements).
+    pub explain_errors: u64,
 }
 
 impl RunReport {
@@ -403,6 +410,11 @@ pub struct ExecOptions {
     /// H1's `fault-reserved-refused` P1 on the main lineage; the
     /// SimVfs-backed driver lights up at t28 (runner::faultdriver doc).
     pub fault_driver: Box<dyn super::faultdriver::FaultDriver>,
+    /// H5 rung B: fingerprint every Nth successfully-executed Query step via
+    /// `EXPLAIN (COSTS OFF)` on the DUT session (0 = off). DUT-only and
+    /// state-neutral; an EXPLAIN error triggers the symmetric resync
+    /// (`recover_both`) so it can never fork diff-c state.
+    pub explain_every: u32,
 }
 
 impl Default for ExecOptions {
@@ -412,6 +424,7 @@ impl Default for ExecOptions {
             stop_on_failure: true,
             post_reset_sql: Vec::new(),
             fault_driver: Box::new(super::faultdriver::NoOpFaultDriver),
+            explain_every: 0,
         }
     }
 }
@@ -535,6 +548,8 @@ pub fn execute_plan<'a>(
     let mut disp = Dispatcher::new(dut, cpg);
     let mut in_skipped_property: Option<u32> = None;
     let mut in_property: Option<u32> = None;
+    // H5 rung B: count of successfully-executed Query steps (sampling base).
+    let mut query_seen: u64 = 0;
 
     for (idx, step) in plan.steps.iter().enumerate() {
         report.steps_executed = idx + 1;
@@ -633,6 +648,64 @@ pub fn execute_plan<'a>(
                                 return report;
                             }
                             continue;
+                        }
+                        // H5 rung B: plan-species fingerprint via EXPLAIN
+                        // (COSTS OFF) on the DUT — sampled, DUT-only,
+                        // state-neutral. Blind-arms-only statistics ride on
+                        // these (see src/metrics.rs module doc).
+                        if matches!(step, Step::Query(_)) && !dut_out.is_error() {
+                            query_seen += 1;
+                            if opts.explain_every > 0
+                                && (query_seen - 1) % opts.explain_every as u64 == 0
+                            {
+                                let esql = format!("EXPLAIN (COSTS OFF) {}", sql.text);
+                                match disp.dut.execute(&esql) {
+                                    ExecOutcome::Rows { rows } => {
+                                        let lines: Vec<String> = rows
+                                            .iter()
+                                            .filter_map(|r| r.first().cloned().flatten())
+                                            .collect();
+                                        report.plan_fingerprints.push(
+                                            crate::metrics::canonicalize_explain(&lines),
+                                        );
+                                    }
+                                    ExecOutcome::SqlError { .. } => {
+                                        // Metrics infrastructure error: count
+                                        // in metrics only, resync BOTH legs
+                                        // (an EXPLAIN error inside an open tx
+                                        // poisons the DUT leg alone — the
+                                        // symmetric-recovery law applies).
+                                        report.explain_errors += 1;
+                                        disp.recover_both();
+                                    }
+                                    ExecOutcome::Command { .. } => {
+                                        report.explain_errors += 1;
+                                    }
+                                    ExecOutcome::ConnectionLost { message } => {
+                                        // A DUT death on a metrics EXPLAIN is
+                                        // a real crash finding, never hidden.
+                                        report.count("rust-crash");
+                                        report.failure = Some(Failure {
+                                            step_idx: idx,
+                                            signature: Signature {
+                                                class: "rust-crash".into(),
+                                                sqlstate: "".into(),
+                                                site: format!(
+                                                    "explain:{}",
+                                                    normalize_site(&sql.text)
+                                                ),
+                                            },
+                                            class: "rust-crash".into(),
+                                            sev: "P1".into(),
+                                            detail: format!(
+                                                "DUT connection lost during metrics EXPLAIN: {}",
+                                                message
+                                            ),
+                                        });
+                                        return report;
+                                    }
+                                }
+                            }
                         }
                         // Panic escalation (H3 finding 1): a CONTAINED backend
                         // panic surfaces as XX000 + panic-payload message and

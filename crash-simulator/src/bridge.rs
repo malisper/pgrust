@@ -95,6 +95,7 @@ pub fn runner_profile_to_gen(p: &crate::runner::profile::Profile) -> GenProfile 
         arm_sets,
         property_weights,
         float_lenient: p.float_lenient,
+        test_disable_productions: p.test_disable_productions.clone(),
     }
 }
 
@@ -351,9 +352,23 @@ pub fn generate_plan_with_ctx(
     profile_sha256: &str,
     generator: &str,
 ) -> (Plan, OracleCtx) {
+    let (plan, ctx, _traces) =
+        generate_plan_with_ctx_traced(seed, profile, profile_sha256, generator);
+    (plan, ctx)
+}
+
+/// `generate_plan_with_ctx` + the H5 production traces (rung A). Trace
+/// collection consumes no RNG draws — the plan bytes are identical.
+pub fn generate_plan_with_ctx_traced(
+    seed: u64,
+    profile: &GenProfile,
+    profile_sha256: &str,
+    generator: &str,
+) -> (Plan, OracleCtx, crate::gen::prodreg::GenTraces) {
     let log = Rc::new(RefCell::new(Vec::new()));
     let registry = oracle_registry(&log);
-    let plan = crate::gen::generate_plan(seed, profile, profile_sha256, generator, &registry);
+    let (plan, traces) =
+        crate::gen::generate_plan_traced(seed, profile, profile_sha256, generator, &registry);
     let insts = log.take();
     let mut it = insts.into_iter();
     let mut by_seq = BTreeMap::new();
@@ -366,7 +381,7 @@ pub fn generate_plan_with_ctx(
             by_seq.insert(*seq, inst);
         }
     }
-    (plan, OracleCtx { by_seq })
+    (plan, OracleCtx { by_seq }, traces)
 }
 
 // ---------------------------------------------------------------------------

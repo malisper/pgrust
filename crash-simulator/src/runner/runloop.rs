@@ -20,6 +20,8 @@ pub struct EngineConfig {
     pub session_setup: Vec<String>,
     /// Fresh-schema SQL run before each seed (property-local isolation).
     pub per_seed_reset: Vec<String>,
+    /// H5 rung B: fingerprint every Nth executed query via EXPLAIN (0 = off).
+    pub explain_every: u32,
 }
 
 impl EngineConfig {
@@ -46,9 +48,21 @@ pub fn gen_plan(seed: u64, lp: &LoadedProfile, generator_version: &str) -> Plan 
 /// ledger ops + probe slots keyed by property seq). The context is derived
 /// deterministically from the seed and never serialized (§0 A3).
 pub fn gen_plan_ctx(seed: u64, lp: &LoadedProfile, generator_version: &str) -> (Plan, OracleCtx) {
+    let (plan, ctx, _traces) = gen_plan_ctx_traced(seed, lp, generator_version);
+    (plan, ctx)
+}
+
+/// `gen_plan_ctx` + the H5 production traces (plan bytes identical — trace
+/// collection consumes no RNG draws).
+pub fn gen_plan_ctx_traced(
+    seed: u64,
+    lp: &LoadedProfile,
+    generator_version: &str,
+) -> (Plan, OracleCtx, crate::gen::prodreg::GenTraces) {
     let gp = bridge::runner_profile_to_gen(&lp.profile);
-    let (core, ctx) = bridge::generate_plan_with_ctx(seed, &gp, &lp.sha256, generator_version);
-    (Plan::from_core(&core), ctx)
+    let (core, ctx, traces) =
+        bridge::generate_plan_with_ctx_traced(seed, &gp, &lp.sha256, generator_version);
+    (Plan::from_core(&core), ctx, traces)
 }
 
 /// Generator version string recorded in plan headers: the harness build's
@@ -120,6 +134,7 @@ pub fn run_plan_ctx(
             .filter(|s| s.to_ascii_uppercase().trim_start().starts_with("SET "))
             .cloned()
             .collect(),
+        explain_every: cfg.explain_every,
         ..ExecOptions::default()
     };
     let classifier = OracleDiffClassifier::new(bridge::load_warts());
@@ -189,6 +204,11 @@ pub fn run_campaign(
     let mut artifacts = ArtifactWriter::new(out_dir)?;
     let mut failures_banked = 0u64;
 
+    // H5 metrics accumulators (rung A: k-path over production traces; rung
+    // B: plan-species census — blind arms only, see src/metrics.rs).
+    let mut kacc = crate::gen::prodreg::KpathAccum::default();
+    let mut species = crate::metrics::SpeciesCensus::default();
+
     // Declared engagement floors: instrument absent at H1 (§0 A4) — counted
     // skip, never silent.
     if !lp.profile.engagement_floors.is_empty() {
@@ -197,9 +217,15 @@ pub fn run_campaign(
 
     for i in 0..seed_count {
         let seed = seed_base + i;
-        let (gen_plan, ctx) = gen_plan_ctx(seed, lp, &generator_version());
+        let (gen_plan, ctx, traces) = gen_plan_ctx_traced(seed, lp, &generator_version());
+        kacc.add(&traces);
         let plan_text = gen_plan.render();
         let report = run_plan_ctx(&gen_plan, cfg, Some(&ctx))?;
+        for fp in &report.plan_fingerprints {
+            species.add_sighting(fp);
+        }
+        species.explain_errors += report.explain_errors;
+        species.checkpoint();
         let run = SeedRun { seed, report, plan_text };
         census.merge(&run.report.class_counts);
         for r in &run.report.records {
@@ -241,6 +267,32 @@ pub fn run_campaign(
         }
     }
 
+    // H5: evaluate k-path coverage + THE REACH GATE against the registry.
+    // A production the profile marks reachable-by-default that never appeared
+    // at k=1 mints `reach-gap` (P1) — campaign verdict RED, distinct from bug
+    // findings. This is the check that would have caught H3's 0/9 pre-run.
+    let prop_names: Vec<String> = crate::oracle::props::v1_set()
+        .iter()
+        .map(|id| id.as_str().to_string())
+        .collect();
+    let prop_refs: Vec<&str> = prop_names.iter().map(|s| s.as_str()).collect();
+    let registry = crate::gen::prodreg::registry(&prop_refs);
+    let gp = bridge::runner_profile_to_gen(&lp.profile);
+    let kreport = crate::gen::prodreg::evaluate(&kacc, &registry, &gp);
+    if !kreport.reach_gap.is_empty() {
+        census.add(crate::metrics::REACH_GAP, kreport.reach_gap.len() as u64);
+    }
+    let metrics = crate::metrics::MetricsArtifact {
+        kpath: &kreport,
+        species: &species,
+        explain_sample_every: cfg.explain_every,
+        profile_name: &lp.profile.name,
+        seed_base,
+        seed_count,
+    };
+    metrics.write(out_dir)?;
+    metrics.emit_stdout();
+
     artifacts.finish(
         &census,
         serde_json::json!({
@@ -250,6 +302,15 @@ pub fn run_campaign(
             "seed_count": seed_count,
             "failures_banked": failures_banked,
             "generator": generator_version(),
+            "metrics": {
+                "k1": format!("{}/{}", kreport.k1.covered, kreport.k1.total),
+                "k2": format!("{}/{}", kreport.k2.covered, kreport.k2.total),
+                "k3": format!("{}/{}", kreport.k3.covered, kreport.k3.total),
+                "reach_gap": kreport.reach_gap,
+                "species_distinct": species.distinct(),
+                "species_n": species.n,
+                "good_turing_u": species.good_turing_u(),
+            },
         }),
     )?;
     Ok(CampaignOutcome { census, seeds_run: seed_count, failures_banked })

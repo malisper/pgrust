@@ -32,6 +32,7 @@ fn test_profile(weights: StatementWeights, len: u64) -> GenProfile {
         arm_sets: vec![vec![("work_mem".into(), "64kB".into())]],
         property_weights: BTreeMap::new(),
         float_lenient: false,
+        test_disable_productions: Vec::new(),
     }
 }
 
