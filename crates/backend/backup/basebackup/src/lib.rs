@@ -1080,7 +1080,7 @@ fn getegid() -> u32 {
 }
 fn time_now() -> i64 {
     // SAFETY: time(NULL) returns the current unix time.
-    unsafe { libc::time(std::ptr::null_mut()) as i64 }
+    pg_clock::wall_secs()
 }
 
 // ===========================================================================

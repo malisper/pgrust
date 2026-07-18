@@ -5,7 +5,6 @@
 
 use std::cell::RefCell;
 use std::io::Write;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use ::types_dest::CommandDest;
 use ::types_error::{
@@ -43,10 +42,10 @@ pub(crate) fn reset_formatted_log_time() {
 }
 
 fn now_timeval() -> (i64, u32) {
-    match SystemTime::now().duration_since(UNIX_EPOCH) {
-        Ok(d) => (d.as_secs() as i64, d.subsec_micros()),
-        Err(_) => (0, 0),
-    }
+    // DST P2 (contract §1.2, doc-named): log-line timestamps are
+    // VIRTUALIZED rather than masked — under sim they read SimClock's wall,
+    // so the determinism smoke diffs them instead of sed-ing them out.
+    pg_clock::wall_timeval()
 }
 
 fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {

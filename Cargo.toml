@@ -402,6 +402,7 @@ members = [
     "crates/backend/utils/activity/backend_progress",
     "crates/backend/utils/resowner/resowner_seams",
     "crates/port/pg_prng_seams",
+    "crates/port/pg_clock",
     "crates/backend/storage/ipc/shmem",
     "crates/backend/catalog/catalog",
     "crates/backend/catalog/catalog_namespace",

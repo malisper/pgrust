@@ -459,11 +459,10 @@ pub(crate) fn drain() -> PgResult<()> {
 }
 
 fn now_millis() -> i64 {
-    // SAFETY: clock_gettime(CLOCK_MONOTONIC) into a zeroed timespec.
-    let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
-    // SAFETY: valid pointer to ts.
-    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
-    ts.tv_sec as i64 * 1000 + ts.tv_nsec as i64 / 1_000_000
+    // DST P2 (contract §1.3): the named waiteventset gap — timeout math on
+    // the one monotonic authority. The epoll block itself stays; scheduler
+    // visibility of the fd-park is P3.
+    pg_clock::mono_ms()
 }
 
 fn wait_event_set_wait_one(
