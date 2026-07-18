@@ -5922,6 +5922,38 @@ pub fn try_own_sort<'mcx>(
         {
             return Ok(None);
         }
+        // SORTFEED-DIFFPROF increment (wave-8 item-3 handback): the lane's
+        // randomAccess ownership is the FEED ONLY. The callgrind pair on
+        // corpus-p1-sortfeed (pgrust-cgpairs-1784351907, dist-prof, A/B
+        // control-dump windows) split the re-earn letter's +2.70% residual
+        // exactly: batch feed vs fused row feed = PAR (feed-side net
+        // −2M Ir/replay, B slightly ahead), read-back per-pull ceremony =
+        // the WHOLE regression (~118M Ir/replay = ~109 Ir per drained row:
+        // `pull_step` + `RootAdapter::accept` + the `sort_feed_if_needed`
+        // early-out + the `sort_randomaccess_memo` probe + a second
+        // check_for_interrupts, on EVERY pull of a full-drain scroll
+        // cursor). So feed once through the breaker sink (batched puts —
+        // the owned tick fires at the feed event inside
+        // `sort_feed_if_needed`, so D4 accounting is unchanged), then
+        // REFUSE every call: the caller's `exec_sort`/`exec_sort_batched`
+        // drain leg serves ALL read-back from the SAME node state (the
+        // contract line above — byte-safe even mid-stream). The RA-vanilla
+        // feed law (region doc) guarantees the tuplesort here is the row
+        // path's own (no refsort, no runtime-sink adoption, no top-N cut
+        // under randomAccess), so the row drain serves it verbatim; the
+        // lane-served drain modes (refsort/runtime_full) exist only on
+        // non-RA nodes, which keep the pull_step emit below. Post-done
+        // pulls exit here in a handful of loads — the same cost class as
+        // the knob-OFF refusal they replace.
+        if !s.state.sort_done() {
+            // C's CHECK_FOR_INTERRUPTS at ExecSort entry (the feed call).
+            ::postgres_seams::check_for_interrupts::call()?;
+            let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
+            // A feed-time refuse (Ok(false)) needs no distinct arm:
+            // ownership is refused either way, before any sort-side effect.
+            let _ = sort_feed_if_needed(state, &mut **outer, outer_desc, None, estate)?;
+        }
+        return Ok(None);
     }
     // C's CHECK_FOR_INTERRUPTS at ExecSort entry.
     ::postgres_seams::check_for_interrupts::call()?;
