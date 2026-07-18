@@ -51,6 +51,13 @@ pub struct TableShape {
     pub cols_min: u32,
     pub cols_max: u32,
     pub rows_max: u32,
+    /// H6 (H5 find 2 fix): column-type weights, keys in
+    /// int|bigint|text|numeric|float8. EMPTY (or absent) = the generator's
+    /// defaults. Before this field existed the bridge hardcoded the default
+    /// weights (float8=0), so `float_lenient` profiles could never actually
+    /// generate a float8 column and the q:float-agg family was vacuous.
+    #[serde(default)]
+    pub col_types: BTreeMap<String, u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -110,6 +117,19 @@ pub fn validate(p: &Profile) -> Result<(), String> {
     let ts = &p.table_shape;
     if ts.tables_min == 0 || ts.tables_min > ts.tables_max || ts.cols_min > ts.cols_max {
         return Err(format!("profile '{}': bad table_shape", p.name));
+    }
+    const COL_TYPES: [&str; 5] = ["int", "bigint", "text", "numeric", "float8"];
+    for k in ts.col_types.keys() {
+        if !COL_TYPES.contains(&k.as_str()) {
+            return Err(format!("profile '{}': unknown col type '{}'", p.name, k));
+        }
+    }
+    if !ts.col_types.is_empty() && ts.col_types.values().all(|w| *w == 0) {
+        return Err(format!(
+            "profile '{}': col_types given but all weights are zero (no column type \
+             can be generated)",
+            p.name
+        ));
     }
     for set in &p.arm_sets {
         for arm in set {

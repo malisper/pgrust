@@ -58,6 +58,29 @@ pub const DDL_CREATE_TABLE: &str = "ddl:create-table";
 pub const DDL_CREATE_INDEX: &str = "ddl:create-index";
 pub const DDL_RENAME_TABLE: &str = "ddl:rename-table";
 pub const DDL_DROP_TABLE: &str = "ddl:drop-table";
+// H6 state arm: index-shape diversity + statistics + foreign-data state ops.
+// "State op" = a DDL step whose point is to change what plans the planner can
+// pick for LATER queries (an index, fresh statistics, a foreign table), not
+// to be interesting by itself.
+pub const DDL_CREATE_INDEX_MULTI: &str = "ddl:create-index-multi";
+pub const DDL_CREATE_INDEX_EXPR: &str = "ddl:create-index-expr";
+pub const DDL_CREATE_INDEX_PARTIAL: &str = "ddl:create-index-partial";
+pub const DDL_CREATE_INDEX_BRIN: &str = "ddl:create-index-brin";
+pub const DDL_DROP_INDEX: &str = "ddl:drop-index";
+pub const DDL_ANALYZE: &str = "ddl:analyze";
+/// BitmapAnd substrate chain: two single-column indexes on one table +
+/// ANALYZE emitted as one decision (first statement traces this node; the
+/// second and third trace ddl:create-index / ddl:analyze).
+pub const DDL_INDEX_PAIR: &str = "ddl:index-pair";
+// file_fdw foreign-table setup chain. One generator decision emits the whole
+// chain as consecutive DDL steps (extension -> server -> csv COPY -> foreign
+// table); each emitted statement gets its own trace node so statement/trace
+// alignment holds. Later picks in the same plan skip the stages the session
+// already has (IF NOT EXISTS keeps the SQL idempotent across seeds).
+pub const DDL_FDW_EXTENSION: &str = "ddl:fdw-extension";
+pub const DDL_FDW_SERVER: &str = "ddl:fdw-server";
+pub const DDL_FDW_COPY: &str = "ddl:fdw-copy";
+pub const DDL_FDW_TABLE: &str = "ddl:fdw-table";
 
 // dml variants
 pub const DML_INSERT: &str = "dml:insert";
@@ -68,6 +91,10 @@ pub const DML_TRUNCATE: &str = "dml:truncate";
 /// ledger-understood subset is preserved; ModifyTable Merge species reaches
 /// the census through the DML explain gate).
 pub const DML_MERGE: &str = "dml:merge";
+/// H6 state arm: set-based INSERT ... SELECT over generate_series — the
+/// cardinality lever (tiny/medium/larger tables make the planner cross its
+/// seq-scan-vs-index cost thresholds).
+pub const DML_BULK_INSERT: &str = "dml:bulk-insert";
 
 // query variants (gen_query)
 pub const Q_FULL_ORDERED: &str = "q:full-ordered";
@@ -84,6 +111,18 @@ pub const Q_SCALAR_CALL: &str = "q:scalar-call";
 pub const Q_INNER_JOIN: &str = "q:inner-join";
 pub const Q_LEFT_JOIN_COALESCE: &str = "q:left-join-coalesce";
 pub const Q_OJ_NEST_COALESCE: &str = "q:oj-nest-coalesce";
+// H6 state arm: query shapes that pay off once the state ops above ran.
+/// ORDER BY <payload-col>, id — with an index on the payload column this is
+/// the Incremental Sort elicitation shape (index gives the prefix order).
+pub const Q_ORDER_PREFIX: &str = "q:order-prefix";
+/// WHERE a = k1 AND b = k2 — with two single-column indexes + ANALYZE'd
+/// stats this is the BitmapAnd elicitation shape.
+pub const Q_TWO_COL_EQ: &str = "q:two-col-eq";
+/// SELECT <col> ... WHERE <col> ... — projection covered by a single-column
+/// index: the Index Only Scan elicitation shape.
+pub const Q_COVERED_SELECT: &str = "q:covered-select";
+/// SELECT over a file_fdw foreign table — the Foreign Scan elicitation shape.
+pub const Q_FOREIGN_SCAN: &str = "q:foreign-scan";
 
 // H6 grammar-arm query variants. Each name is one gen_query alternative;
 // sub-variant nodes (children) follow each family below. All are plain
@@ -221,6 +260,13 @@ pub enum Gate {
     ColsCanBeEmpty,
     /// apply-set needs at least one NON-EMPTY arm set in the profile.
     NonEmptyArmSet,
+    /// needs a table that can have >= 2 payload columns (two-col shapes).
+    TwoPayloadCols,
+    /// DDL-side two-column requirement (the index-pair chain).
+    DdlTwoCols,
+    /// foreign-table read: needs both query and ddl weighted (the foreign
+    /// table only exists after the DDL-side fdw setup chain ran).
+    ForeignScan,
 }
 
 #[derive(Debug, Clone)]
@@ -259,11 +305,24 @@ pub fn registry(property_names: &[&str]) -> Vec<ProdDef> {
         def(DDL_CREATE_INDEX, Some(STMT_DDL), WDdl, false),
         def(DDL_RENAME_TABLE, Some(STMT_DDL), WDdl, false),
         def(DDL_DROP_TABLE, Some(STMT_DDL), WDdl, false),
+        // H6 state ops
+        def(DDL_CREATE_INDEX_MULTI, Some(STMT_DDL), WDdl, false),
+        def(DDL_CREATE_INDEX_EXPR, Some(STMT_DDL), WDdl, false),
+        def(DDL_CREATE_INDEX_PARTIAL, Some(STMT_DDL), WDdl, false),
+        def(DDL_CREATE_INDEX_BRIN, Some(STMT_DDL), WDdl, false),
+        def(DDL_DROP_INDEX, Some(STMT_DDL), WDdl, false),
+        def(DDL_ANALYZE, Some(STMT_DDL), WDdl, false),
+        def(DDL_INDEX_PAIR, Some(STMT_DDL), DdlTwoCols, false),
+        def(DDL_FDW_EXTENSION, Some(STMT_DDL), WDdl, false),
+        def(DDL_FDW_SERVER, Some(STMT_DDL), WDdl, false),
+        def(DDL_FDW_COPY, Some(STMT_DDL), WDdl, false),
+        def(DDL_FDW_TABLE, Some(STMT_DDL), WDdl, false),
         // dml
         def(DML_INSERT, Some(STMT_DML), WDml, false),
         def(DML_UPDATE, Some(STMT_DML), WDml, false),
         def(DML_DELETE, Some(STMT_DML), WDml, false),
         def(DML_TRUNCATE, Some(STMT_DML), WDml, false),
+        def(DML_BULK_INSERT, Some(STMT_DML), WDml, false),
         // query variants
         def(Q_FULL_ORDERED, Some(STMT_QUERY), WQuery, false),
         def(Q_COUNT_STAR, Some(STMT_QUERY), WQuery, false),
@@ -334,6 +393,11 @@ pub fn registry(property_names: &[&str]) -> Vec<ProdDef> {
         // dml explain-census target (H6: EXPLAIN'd plan-only on the DUT;
         // execution is the ordinary differential DML compare)
         def(DML_MERGE, Some(STMT_DML), WDml, false),
+        // H6 state-arm query shapes
+        def(Q_ORDER_PREFIX, Some(STMT_QUERY), WQuery, false),
+        def(Q_TWO_COL_EQ, Some(STMT_QUERY), TwoPayloadCols, false),
+        def(Q_COVERED_SELECT, Some(STMT_QUERY), WQuery, false),
+        def(Q_FOREIGN_SCAN, Some(STMT_QUERY), ForeignScan, false),
         // srf element types
         def(SRF_INT, Some(Q_SRF_UNNEST), WQuery, false),
         def(SRF_TEXT, Some(Q_SRF_UNNEST), WQuery, false),
@@ -444,6 +508,19 @@ pub fn gate_reason(def_: &ProdDef, p: &GenProfile) -> Option<String> {
         Gate::NonEmptyArmSet => closed(
             w.arm > 0 && p.arm_sets.iter().any(|s| !s.is_empty()),
             "no non-empty arm set in profile",
+        ),
+        Gate::TwoPayloadCols => closed(
+            w.query > 0 && p.table_shape.max_cols >= 2,
+            "needs a table with >= 2 payload columns (table_shape.max_cols < 2)",
+        ),
+        Gate::DdlTwoCols => closed(
+            w.ddl > 0 && p.table_shape.max_cols >= 2,
+            "needs ddl weighted AND a table with >= 2 payload columns",
+        ),
+        Gate::ForeignScan => closed(
+            w.query > 0 && w.ddl > 0,
+            "needs statement_weights.query>0 AND ddl>0 (foreign table comes from \
+             the DDL-side fdw setup chain)",
         ),
     }
 }

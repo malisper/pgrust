@@ -66,11 +66,19 @@ pub struct TableShape {
     pub min_cols: u32,
     pub max_cols: u32,
     pub col_types: ColTypeWeights,
+    /// H6: cap on set-based bulk-insert sizes (the cardinality lever). The
+    /// runner-side profile's `table_shape.rows_max` maps here.
+    pub rows_max: u32,
 }
 
 impl Default for TableShape {
     fn default() -> Self {
-        TableShape { min_cols: 2, max_cols: 5, col_types: ColTypeWeights::default() }
+        TableShape {
+            min_cols: 2,
+            max_cols: 5,
+            col_types: ColTypeWeights::default(),
+            rows_max: 400,
+        }
     }
 }
 
