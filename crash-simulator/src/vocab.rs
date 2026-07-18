@@ -185,13 +185,20 @@ pub fn wart_counter(id: &str) -> String {
 ///                                alongside the pinned classification (parity
 ///                                gate untouched) so the verdict FAILs — no
 ///                                campaign can PASS over a panic again.
+///   - `reach-gap`                H5 reach gate: a production the profile
+///                                says is reachable-by-default was NEVER
+///                                emitted across the whole campaign (k=1
+///                                zero). Distinct from bug findings — it is
+///                                a harness/generator reach defect (the H3
+///                                0/9 shape: joins/functions/SRFs at 0%
+///                                emission would have been a pre-run RED).
 pub fn harness_class_severity(class: &str) -> Option<Severity> {
     if class.starts_with("wart:") {
         return Some(Severity::Fine);
     }
     Some(match class {
         "dispatch-refusal" | "fault-reserved-refused" | "fault-restart-noop"
-        | "panic-signature" => Severity::P1,
+        | "panic-signature" | "reach-gap" => Severity::P1,
         "err-uncompared"
         | "fault-skipped-no-restart-cmd"
         | "fault-restart-cmd-failed"

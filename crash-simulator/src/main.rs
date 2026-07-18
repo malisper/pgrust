@@ -39,6 +39,11 @@ struct EngineArgs {
     /// statement_timeout applied per session.
     #[arg(long, default_value = "5s")]
     statement_timeout: String,
+    /// H5 rung B: fingerprint every Nth executed query via EXPLAIN (COSTS
+    /// OFF) on the DUT (plan-species census; 0 = off). Default 1 = every
+    /// query (measured overhead < 10 percent — see notes/h5-metrics.md).
+    #[arg(long, default_value_t = 1)]
+    explain_sample: u32,
 }
 
 impl EngineArgs {
@@ -52,6 +57,7 @@ impl EngineArgs {
                 "SET search_path = simharness".to_string(),
             ],
             per_seed_reset: EngineConfig::default_reset(),
+            explain_every: self.explain_sample,
         }
     }
 }

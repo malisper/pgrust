@@ -14,6 +14,7 @@
 
 pub mod bridge;
 pub mod gen;
+pub mod metrics;
 pub mod oracle;
 pub mod plan;
 pub mod property;

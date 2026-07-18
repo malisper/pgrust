@@ -6,6 +6,7 @@
 //! anywhere in this module. `seed + profile + generator version` =>
 //! byte-identical plan.
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
 
 use rand::RngCore;
@@ -14,6 +15,7 @@ use rand_chacha::ChaCha8Rng;
 
 use crate::gen::budget::{Budgets, Kind};
 use crate::gen::noise;
+use crate::gen::prodreg::{self as pr, GenTraces, ProdPath};
 use crate::gen::profile::GenProfile;
 use crate::gen::schema::{SchemaState, Table};
 use crate::gen::weights::{range_incl, weighted_index};
@@ -42,6 +44,11 @@ fn footprint_fits(budgets: &Budgets, fp: &crate::property::Footprint) -> bool {
 struct NoiseCtx<'a> {
     schema: &'a SchemaState,
     profile: &'a GenProfile,
+    /// H5 production-trace sink. Property noise queries are emitted (and
+    /// executed) statements from the same query grammar, so their traces are
+    /// committed as `stmt:query` paths on ACCEPTANCE only (rejected retry
+    /// candidates never reach the plan and must not enter the metric).
+    trace: &'a RefCell<GenTraces>,
 }
 
 impl NoiseSource for NoiseCtx<'_> {
@@ -51,8 +58,12 @@ impl NoiseSource for NoiseCtx<'_> {
         constraint: &dyn Fn(&Sql) -> bool,
     ) -> Option<Sql> {
         for _ in 0..NOISE_RETRY_BUDGET {
-            let q = noise::gen_query(self.schema, self.profile, rng)?;
+            let mut sub: ProdPath = Vec::new();
+            let q = noise::gen_query(self.schema, self.profile, rng, &mut sub)?;
             if constraint(&q) {
+                let mut path = vec![pr::STMT_QUERY.to_string()];
+                path.extend(sub);
+                self.trace.borrow_mut().paths.push(path);
                 return Some(q);
             }
         }
@@ -98,6 +109,12 @@ pub struct Generator<'a> {
     next_seq: u32,
     emitted_first: bool,
     finished: bool,
+    /// H5 rung A: production traces for every emitted statement. Collection
+    /// consumes no RNG draws and never touches plan bytes (determinism law
+    /// A3 untouched). RefCell: the NoiseCtx borrow runs while `schema` is
+    /// shared-borrowed. Cleanup-tail steps (mechanical ROLLBACK/RESET ALL)
+    /// are not grammar decisions and are deliberately untraced.
+    trace: RefCell<GenTraces>,
 }
 
 impl<'a> Generator<'a> {
@@ -117,7 +134,15 @@ impl<'a> Generator<'a> {
             next_seq: 1,
             emitted_first: false,
             finished: false,
+            trace: RefCell::new(GenTraces::default()),
         }
+    }
+
+    fn commit_path(&self, stmt_node: &str, sub: ProdPath) {
+        let mut path = Vec::with_capacity(1 + sub.len());
+        path.push(stmt_node.to_string());
+        path.extend(sub);
+        self.trace.borrow_mut().paths.push(path);
     }
 
     fn cleanup_tail(&mut self) {
@@ -187,6 +212,12 @@ impl<'a> Generator<'a> {
                 Some(2) => IsoLevel::Serializable,
                 _ => IsoLevel::ReadCommitted, // all-zero mix: degenerate profile
             };
+            let iso_node = match level {
+                IsoLevel::ReadCommitted => pr::ISO_RC,
+                IsoLevel::RepeatableRead => pr::ISO_RR,
+                IsoLevel::Serializable => pr::ISO_SER,
+            };
+            self.commit_path(pr::STMT_TX, vec![pr::TX_BEGIN.into(), iso_node.into()]);
             self.session.in_tx = true;
             self.session.savepoints.clear();
             self.session.sp_snapshots.clear();
@@ -200,6 +231,9 @@ impl<'a> Generator<'a> {
         let has_sp = !self.session.savepoints.is_empty();
         let choice =
             weighted_index(&mut self.rng, &[3, 1, 2, if has_sp { 2 } else { 0 }]).expect("nonzero");
+        const TX_SUBS: [&str; 4] =
+            [pr::TX_COMMIT, pr::TX_ROLLBACK, pr::TX_SAVEPOINT, pr::TX_ROLLBACK_TO];
+        self.commit_path(pr::STMT_TX, vec![TX_SUBS[choice].into()]);
         match choice {
             0 => {
                 self.session.in_tx = false;
@@ -258,16 +292,20 @@ impl<'a> Generator<'a> {
         // parallel-forcing arm within a session — the p6 replant lesson).
         if self.session.gucs_set && range_incl(&mut self.rng, 0, 3) == 0 {
             self.session.gucs_set = false;
+            self.commit_path(pr::STMT_ARM, vec![pr::ARM_RESET_ALL.into()]);
             return Step::Arm(ArmCtl::ResetAll);
         }
         let i = range_incl(&mut self.rng, 0, self.profile.arm_sets.len() as u64 - 1) as usize;
+        self.trace.borrow_mut().arm_set_hits.push(i);
         let set = self.profile.arm_sets[i].clone();
         let mut it = set.into_iter();
         let Some((k, v)) = it.next() else {
             // Empty set = the profile's base-clean control arm: defaults.
             self.session.gucs_set = false;
+            self.commit_path(pr::STMT_ARM, vec![pr::ARM_RESET_ALL.into()]);
             return Step::Arm(ArmCtl::ResetAll);
         };
+        self.commit_path(pr::STMT_ARM, vec![pr::ARM_APPLY_SET.into()]);
         for (k2, v2) in it {
             self.pending.push_back(PlanItem::Step(Step::Arm(ArmCtl::SetGuc(k2, v2))));
         }
@@ -291,12 +329,26 @@ impl<'a> Generator<'a> {
         let prop = eligible[i];
         let name = prop.name();
         let fp = prop.footprint();
-        let mut noise_ctx = NoiseCtx { schema: &self.schema, profile: self.profile };
+        // Trace rollback mark: if instantiation fails BELOW (returns None),
+        // any noise-query traces it committed describe statements that never
+        // reached the plan — truncate back so the metric only sees emissions.
+        let mark = {
+            let t = self.trace.borrow();
+            (t.paths.len(), t.arm_set_hits.len())
+        };
+        let mut noise_ctx =
+            NoiseCtx { schema: &self.schema, profile: self.profile, trace: &self.trace };
         let generated = prop.generate(&mut self.rng, &self.schema, &mut noise_ctx, self.profile);
         // Budget is consumed whether or not instantiation succeeded, so a
         // permanently-unsatisfiable property cannot stall the plan.
         self.budgets.consume_footprint(&fp);
-        let generated = generated?;
+        let Some(generated) = generated else {
+            let mut t = self.trace.borrow_mut();
+            t.paths.truncate(mark.0);
+            t.arm_set_hits.truncate(mark.1);
+            return None;
+        };
+        self.commit_path(pr::STMT_PROPERTY, vec![format!("{}{}", pr::PROP_PREFIX, name)]);
         let seq = self.next_seq;
         self.next_seq += 1;
         Some(PlanItem::Property {
@@ -319,6 +371,7 @@ impl<'a> Generator<'a> {
         if !self.emitted_first {
             self.emitted_first = true;
             let sql = noise::gen_create_table(&mut self.schema, &mut self.rng, self.profile);
+            self.commit_path(pr::STMT_DDL, vec![pr::DDL_CREATE_TABLE.into()]);
             self.budgets.consume(Kind::Ddl, 1);
             return Some(PlanItem::Step(Step::Ddl(sql)));
         }
@@ -332,21 +385,29 @@ impl<'a> Generator<'a> {
             };
             match kind_i {
                 0 => {
-                    let sql = noise::gen_ddl(&mut self.schema, &mut self.rng, self.profile);
+                    let mut sub = Vec::new();
+                    let sql =
+                        noise::gen_ddl(&mut self.schema, &mut self.rng, self.profile, &mut sub);
+                    self.commit_path(pr::STMT_DDL, sub);
                     self.budgets.consume(Kind::Ddl, 1);
                     return Some(PlanItem::Step(Step::Ddl(sql)));
                 }
                 1 => {
-                    if let Some(sql) = noise::gen_dml(&mut self.schema, &mut self.rng) {
+                    let mut sub = Vec::new();
+                    if let Some(sql) = noise::gen_dml(&mut self.schema, &mut self.rng, &mut sub)
+                    {
+                        self.commit_path(pr::STMT_DML, sub);
                         self.budgets.consume(Kind::Dml, 1);
                         return Some(PlanItem::Step(Step::Dml(sql)));
                     }
                     self.budgets.consume(Kind::Dml, 1);
                 }
                 2 => {
+                    let mut sub = Vec::new();
                     if let Some(sql) =
-                        noise::gen_query(&self.schema, self.profile, &mut self.rng)
+                        noise::gen_query(&self.schema, self.profile, &mut self.rng, &mut sub)
                     {
+                        self.commit_path(pr::STMT_QUERY, sub);
                         self.budgets.consume(Kind::Query, 1);
                         return Some(PlanItem::Step(Step::Query(sql)));
                     }
@@ -369,6 +430,7 @@ impl<'a> Generator<'a> {
                     // ABORTS any open tx — its DDL rolls back, so the model's
                     // schema reverts to the BEGIN snapshot with it.
                     self.budgets.consume(Kind::Fault, 2);
+                    self.commit_path(pr::STMT_FAULT, vec![pr::FAULT_DISCONNECT_PAIR.into()]);
                     if let Some(snap) = self.session.tx_snapshot.take() {
                         self.schema.restore_tables(snap.tables);
                     }
@@ -426,6 +488,19 @@ pub fn generate_plan(
     generator: &str,
     registry: &[Box<dyn PropertyGen>],
 ) -> Plan {
+    generate_plan_traced(seed, profile, profile_sha256, generator, registry).0
+}
+
+/// Like `generate_plan`, additionally returning the H5 production traces
+/// (one path per emitted statement + arm-set application indexes). Trace
+/// collection consumes no RNG draws: the plan is byte-identical either way.
+pub fn generate_plan_traced(
+    seed: u64,
+    profile: &GenProfile,
+    profile_sha256: &str,
+    generator: &str,
+    registry: &[Box<dyn PropertyGen>],
+) -> (Plan, GenTraces) {
     let header = PlanHeader {
         seed,
         profile: profile.name.clone(),
@@ -437,5 +512,6 @@ pub fn generate_plan(
     while let Some(item) = g.next_item() {
         items.push(item);
     }
-    Plan { header, items }
+    let traces = g.trace.into_inner();
+    (Plan { header, items }, traces)
 }
