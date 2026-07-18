@@ -186,6 +186,22 @@ fn hj_spill_force_batches() -> Option<u32> {
     })
 }
 
+/// m5p1 multibuild (band 88001): the multi-pipeline QuerySpec plan-walk —
+/// 2+ build sides in ONE engagement (a TREE of probe-local hash joins over
+/// fusible SeqScans feeding the plain-agg sink). ON by default;
+/// `PGRUST_RUNTIME_HASHJOIN_MULTIBUILD=0` restores the single-join-only
+/// admission (nested trees refuse exactly where they always did).
+fn hj_multibuild_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_HASHJOIN_MULTIBUILD").map_or(true, |v| v.trim() != "0")
+    })
+}
+
+/// Defensive cap on multibuild tree size (joins per engagement); beyond it
+/// the walk refuses to the serial arms (task-set fan bound).
+const MB_MAX_JOINS: usize = 8;
+
 // ---------------------------------------------------------------------------
 // K2 inc-1 (wave-8 WS-AC): the heap-fed probe/build feed over the
 // BatchGranuleSource seam (notes/se-wave8-k2.md).
@@ -624,6 +640,9 @@ pub(super) struct RuntimeHjShared {
     partials: Vec<Mutex<Option<RuntimePartial>>>,
     /// The build sink (the ParallelSink of task sets [0]/[1]).
     sink: OnceLock<Arc<JoinBuildSink>>,
+    /// m5p1 multibuild: the multi-pipeline engagement descriptor (empty =
+    /// the phase-1 single-join arm, byte-identical paths throughout).
+    chain: OnceLock<Arc<MbChain>>,
     /// M3.5 batch state (None = unbatched engagement — dormant default).
     spill: Option<Arc<HjSpill>>,
     /// Per-leaf frozen tables (batched engagements; the batch-0 table lives
@@ -1407,7 +1426,13 @@ impl runtime::TaskSetWork for RuntimeHjShared {
             self.fail(PgError::new(ERROR, "runtime hash-join probe without a bound payload").into());
             return;
         };
-        let r = catch_unwind(AssertUnwindSafe(|| probe_morsel_body(&payload, worker, range)));
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            if self.chain.get().is_some() {
+                mb_probe_morsel_body(&payload, worker, range)
+            } else {
+                probe_morsel_body(&payload, worker, range)
+            }
+        }));
         match r {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
@@ -2257,6 +2282,11 @@ fn build_worker_exec(payload: &Arc<RuntimeHjShared>) -> PgResult<()> {
             crate::querydesc::with_qd(qd, |q| {
                 let x = q.exec.as_mut().expect("runtime hash-join worker ExecutorStart");
                 x.with_mut(|d| {
+                    if let Some(chain) = payload.chain.get() {
+                        // m5p1 multibuild: congruence verify + arm every
+                        // scan's staging + begin the plain-agg build.
+                        return mb_arm_worker(&mut d.estate, &mut d.planstate, chain);
+                    }
                     with_join_tree(&mut d.estate, &mut d.planstate, |estate, agg, hj, outer_ss, hstate, inner_ss| {
                         if !agg_runtime_partial_admissible(agg) {
                             return Err(Box::new(PgError::new(
@@ -2350,6 +2380,681 @@ fn ensure_hooks_registered() {
 }
 
 // ---------------------------------------------------------------------------
+// m5p1 MULTIBUILD (band 88001) — the multi-pipeline QuerySpec plan-walk.
+//
+// The matrix row `hashjoin-multibuild-sql` named the gap: "NO arm admits 2+
+// build sides in one engagement (DAG substrate runtime-ready; the
+// multi-pipeline QuerySpec plan-walk is the missing piece)". This section is
+// that walk: a SERIAL-plan plain Agg over a TREE of probe-local hash joins
+// (INNER/LEFT/SEMI/ANTI — no fill task sets, no match-flag barriers) over
+// lane-fusible SeqScans decomposes into PIPELINES (Hyper/Umbra decomposition
+// at this altitude):
+//
+//   * one BUILD pipeline per join j: drive the scan at the bottom of j's
+//     build subtree, probe every frozen table on the way up INSIDE the build
+//     subtree, and accept the emitted rows into table j (ACCEPT/COMBINE task
+//     set pair via `runtime::sink_tasksets`, dormant-default machinery);
+//   * one PROBE pipeline (last): drive the root outer-descent scan, probe
+//     the root-path tables bottom-up, absorb into the plain-agg partial tail
+//     (M1's runtime_partial, verbatim).
+//
+// Pipelines are emitted build-subtrees-first, so every accept's deps (the
+// COMBINEs of the tables it probes) precede it — a deps-DAG the DEFAULT
+// sequential dispatch executes exactly like the M3.5 spill ladder does
+// (PGRUST_RUNTIME_PIPELINE_DAG stays orthogonal: ON overlaps independent
+// build subtrees, OFF runs them in emission order).
+//
+// UNBATCHED ONLY: every build side must fit nbatch==1 under the C combined
+// rule — an estimate above it refuses to the serial arms (the spill ladder
+// stays single-join; its row owns any future multibuild-spill flip). The
+// single-join arm above is byte-untouched: trees divert at the shape gate
+// behind `hj_multibuild_enabled` and everything below runs only for them.
+// ---------------------------------------------------------------------------
+
+/// Chain-admitted join types: exactly the probe-local four (no right-fill
+/// family, no RIGHT_SEMI) — every emission decision is taken during the
+/// probe of one outer row, so no cross-task barrier is needed at any level.
+fn mb_jointype_admits(jt: ::types_nodes::JoinType) -> bool {
+    matches!(
+        jt,
+        ::types_nodes::JoinType::JOIN_INNER
+            | ::types_nodes::JoinType::JOIN_LEFT
+            | ::types_nodes::JoinType::JOIN_SEMI
+            | ::types_nodes::JoinType::JOIN_ANTI
+    )
+}
+
+/// One pipeline of the decomposition: drive `scan`, probe `probes` (join
+/// indices, bottom-up), terminate in build table `sink` (Some) or the
+/// plain-agg absorb (None — the final pipeline, emitted last).
+struct MbPipeline {
+    scan: usize,
+    probes: Vec<usize>,
+    sink: Option<usize>,
+}
+
+/// The engagement's multibuild descriptor (leader-built at admission; the
+/// worker sides read it through the shared payload — indices refer to the
+/// PREORDER (self, outer-subtree, build-subtree) enumeration both the plan
+/// walk and the worker collector produce).
+pub(super) struct MbChain {
+    pipelines: Vec<MbPipeline>,
+    /// Per join index: its build sink (frozen-table publisher).
+    sinks: Vec<Arc<MbBuildSink>>,
+    /// Per scan index: its morsel source (per-AM, `k2_task_source`).
+    sources: Vec<Arc<dyn runtime::MorselSource>>,
+    /// Per join index: the plan node's join type (worker-side congruence
+    /// verification — the rebuilt tree must be the admitted tree).
+    jointypes: Vec<::types_nodes::JoinType>,
+    nscans: usize,
+}
+
+/// Admission output handed to `engage` (sinks are constructed there — they
+/// hold the payload Weak).
+pub(super) struct MbInit {
+    pipelines: Vec<MbPipeline>,
+    sources: Vec<Arc<dyn runtime::MorselSource>>,
+    jointypes: Vec<::types_nodes::JoinType>,
+    /// Per join index: the gang envelope its build table gets.
+    envelopes: Vec<usize>,
+    nscans: usize,
+}
+
+// --- Plan-tree walk (pass A: shape + parallel safety + sizing inputs) -----
+
+enum MbChild {
+    Join(usize),
+    Scan(usize),
+}
+
+struct MbPlanInfo {
+    jointypes: Vec<::types_nodes::JoinType>,
+    hash_rows: Vec<f64>,
+    hash_widths: Vec<i32>,
+    children: Vec<(MbChild, MbChild)>,
+    nscans: usize,
+}
+
+/// Recursive plan walk: `None` = shape outside the multibuild envelope
+/// (refuse — Gather-suppression never keyed it, so this is the walk's own
+/// fail-closed gate). Preorder: reserve this join's slot, then the outer
+/// subtree, then the build subtree.
+fn mb_plan_walk(
+    node: ::types_nodes::Node<'_>,
+    info: &mut MbPlanInfo,
+) -> PgResult<Option<MbChild>> {
+    match node.node_tag() {
+        NodeTag::T_SeqScan => {
+            let scan = node.as_seq_scan().expect("SeqScan tag");
+            if !exprs_parallel_safe(scan.scan.plan.qual.iter())?
+                || !exprs_parallel_safe(scan.scan.plan.targetlist.iter())?
+            {
+                return Ok(None);
+            }
+            let idx = info.nscans;
+            info.nscans += 1;
+            Ok(Some(MbChild::Scan(idx)))
+        }
+        NodeTag::T_HashJoin => {
+            let hj = node.as_hash_join().expect("HashJoin tag");
+            if !mb_jointype_admits(hj.join.jointype) {
+                return Ok(None);
+            }
+            if !exprs_parallel_safe(hj.hashclauses.iter())?
+                || !exprs_parallel_safe(hj.join.joinqual.iter())?
+                || !exprs_parallel_safe(hj.join.plan.qual.iter())?
+                || !exprs_parallel_safe(hj.join.plan.targetlist.iter())?
+            {
+                return Ok(None);
+            }
+            let (Some(outer), Some(hash_node)) =
+                (hj.join.plan.lefttree, hj.join.plan.righttree)
+            else {
+                return Ok(None);
+            };
+            if hash_node.node_tag() != NodeTag::T_Hash {
+                return Ok(None);
+            }
+            let hash = hash_node.as_hash().expect("Hash tag");
+            let Some(inner) = hash.plan.lefttree else { return Ok(None) };
+            let j = info.jointypes.len();
+            if j >= MB_MAX_JOINS {
+                return Ok(None);
+            }
+            info.jointypes.push(hj.join.jointype);
+            info.hash_rows.push(hash.plan.plan_rows);
+            info.hash_widths.push(hash.plan.plan_width);
+            info.children.push((MbChild::Scan(usize::MAX), MbChild::Scan(usize::MAX)));
+            let Some(oc) = mb_plan_walk(outer, info)? else { return Ok(None) };
+            let Some(ic) = mb_plan_walk(inner, info)? else { return Ok(None) };
+            info.children[j] = (oc, ic);
+            Ok(Some(MbChild::Join(j)))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Pipeline decomposition over the admitted topology (see the section doc):
+/// build subtrees first, root outer-descent last — deps-safe emission order
+/// by induction (every prober of table j is emitted after j's builder).
+fn mb_decompose(info: &MbPlanInfo) -> Vec<MbPipeline> {
+    fn emit(
+        info: &MbPlanInfo,
+        node: &MbChild,
+        probes_topdown: &mut Vec<usize>,
+        sink: Option<usize>,
+        out: &mut Vec<MbPipeline>,
+    ) {
+        match *node {
+            MbChild::Scan(k) => {
+                let mut probes = probes_topdown.clone();
+                probes.reverse(); // execute bottom-up (deepest join first)
+                out.push(MbPipeline { scan: k, probes, sink });
+            }
+            MbChild::Join(j) => {
+                let (ref oc, ref ic) = info.children[j];
+                let mut none = Vec::new();
+                emit(info, ic, &mut none, Some(j), out);
+                probes_topdown.push(j);
+                emit(info, oc, probes_topdown, sink, out);
+                probes_topdown.pop();
+            }
+        }
+    }
+    let mut out = Vec::new();
+    emit(info, &MbChild::Join(0), &mut Vec::new(), None, &mut out);
+    out
+}
+
+// --- State-tree walk (pass B: admissibility + fusibility + AM + geometry) --
+
+/// Sequential mutable state walk, congruent with the plan walk's preorder.
+/// `Ok(None)` = refuse (reason already ticked by the caller's funnel).
+/// Collects each scan's morsel source and whether any side is heap-fed.
+struct MbStateInfo {
+    sources: Vec<(u64, Arc<dyn runtime::MorselSource>)>,
+    heap_fed: bool,
+    njoins: usize,
+}
+
+fn mb_state_walk<'mcx>(
+    node: &mut crate::procnode::PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    k2_heap: bool,
+    info: &mut MbStateInfo,
+) -> PgResult<Option<()>> {
+    match node {
+        crate::procnode::PlanStateNode::HashJoin(hjn) => {
+            let hjn: &mut crate::procnode::HashJoinNode<'mcx> = hjn;
+            info.njoins += 1;
+            if !shared_join_admissible(&hjn.state, &hjn.hash.state) {
+                return Ok(None);
+            }
+            if !::nodehashjoin::lane_join_untouched(&hjn.state, &hjn.hash.state) {
+                return Ok(None);
+            }
+            if !mb_jointype_admits(hjn.state.plan.join.jointype) {
+                return Ok(None);
+            }
+            if mb_state_walk(&mut hjn.outer, estate, k2_heap, info)?.is_none() {
+                return Ok(None);
+            }
+            let hash: &mut crate::procnode::HashSubNode<'mcx> = &mut hjn.hash;
+            mb_state_walk(&mut hash.child, estate, k2_heap, info)
+        }
+        crate::procnode::PlanStateNode::SeqScan(ss) => {
+            if !seq_scan_fusible(ss, estate)?
+                || !(::nodeseqscan::seq_scan_is_pgrcolumnar(ss)
+                    || (k2_heap && ::nodeseqscan::seq_scan_is_heap(ss)))
+            {
+                return Ok(None);
+            }
+            info.heap_fed |= ::nodeseqscan::seq_scan_is_heap(ss);
+            let Some(src) = k2_task_source(ss, estate)? else { return Ok(None) };
+            info.sources.push(src);
+            Ok(Some(()))
+        }
+        _ => Ok(None),
+    }
+}
+
+// --- The build sink (per join): JoinBuildSink minus spill/demote ----------
+
+pub(super) struct MbBuildSink {
+    join: usize,
+    budget: Arc<JoinBudget>,
+    plan: Mutex<Option<Arc<CombinePlan>>>,
+    table: Mutex<Option<Arc<FrozenJoinTable>>>,
+    shared: Weak<RuntimeHjShared>,
+}
+
+impl MbBuildSink {
+    fn failed(&self) -> bool {
+        self.shared.upgrade().is_none_or(|s| s.failed.load(Ordering::SeqCst))
+    }
+
+    fn table_clone(&self) -> Option<Arc<FrozenJoinTable>> {
+        lockm(&self.table).clone()
+    }
+
+    fn plan_for(&self, locals: &[JoinBuildLocal]) -> Option<Arc<CombinePlan>> {
+        let mut g = lockm(&self.plan);
+        if let Some(p) = g.as_ref() {
+            return Some(Arc::clone(p));
+        }
+        match CombinePlan::plan(locals, &self.budget) {
+            Ok(p) => {
+                let p = Arc::new(p);
+                *g = Some(Arc::clone(&p));
+                Some(p)
+            }
+            Err(BudgetExceeded) => {
+                drop(g);
+                lane_trace(
+                    "runtime-hashjoin: REFUSED (multibuild envelope crossed at seal) — serial rerun",
+                );
+                if let Some(s) = self.shared.upgrade() {
+                    s.refuse_budget();
+                }
+                None
+            }
+        }
+    }
+}
+
+impl runtime::ParallelSink for MbBuildSink {
+    type Local = JoinBuildLocal;
+
+    fn fork(&self, worker: usize) -> JoinBuildLocal {
+        JoinBuildLocal::new(worker, Arc::clone(&self.budget))
+    }
+
+    fn accept_local(&self, local: &mut JoinBuildLocal, worker: usize, range: runtime::MorselRange) {
+        if self.failed() {
+            return;
+        }
+        let Some(shared) = self.shared.upgrade() else { return };
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            mb_accept_morsel_body(&shared, self.join, local, worker, range)
+        }));
+        match r {
+            Ok(Ok(true)) => {}
+            Ok(Ok(false)) => {
+                lane_trace(
+                    "runtime-hashjoin: REFUSED (multibuild envelope crossed in build) — serial rerun",
+                );
+                shared.refuse_budget();
+            }
+            Ok(Err(e)) => {
+                mark_self_errored();
+                shared.fail(e);
+            }
+            Err(_panic) => {
+                mark_self_errored();
+                shared.fail(
+                    PgError::new(ERROR, "runtime hash-join worker panicked in a multibuild morsel")
+                        .into(),
+                );
+            }
+        }
+    }
+
+    fn partitions(&self) -> u64 {
+        PARTITIONS as u64
+    }
+
+    fn combine(&self, part: u64, _worker: usize, locals: &[JoinBuildLocal]) {
+        if self.failed() {
+            return;
+        }
+        if let Some(plan) = self.plan_for(locals) {
+            plan.combine_partition(part, locals);
+        }
+    }
+
+    fn finalize(&self, locals: &[JoinBuildLocal]) {
+        if self.failed() {
+            return;
+        }
+        let Some(plan) = self.plan_for(locals) else { return };
+        *lockm(&self.table) = Some(Arc::new(freeze(plan, locals)));
+    }
+}
+
+// --- Worker-side tree collection + pipeline drive --------------------------
+
+/// Disjoint mutable references into the worker's rebuilt join tree, in the
+/// SAME preorder as the plan walk. `Option` cells so each drive can `take()`
+/// its disjoint set without unsafe splitting.
+#[derive(Default)]
+struct MbRefs<'a, 'mcx> {
+    joins: Vec<
+        Option<(
+            &'a mut ::nodehashjoin::HashJoinState<'mcx>,
+            &'a mut ::nodehash::HashState<'mcx>,
+        )>,
+    >,
+    scans: Vec<Option<&'a mut ::nodeseqscan::SeqScanState<'mcx>>>,
+}
+
+fn mb_collect<'a, 'mcx>(
+    node: &'a mut crate::procnode::PlanStateNode<'mcx>,
+    refs: &mut MbRefs<'a, 'mcx>,
+) -> PgResult<()> {
+    match node {
+        crate::procnode::PlanStateNode::HashJoin(hjn) => {
+            let hjn: &'a mut crate::procnode::HashJoinNode<'mcx> = hjn;
+            let hash: &'a mut crate::procnode::HashSubNode<'mcx> = &mut hjn.hash;
+            refs.joins.push(Some((&mut hjn.state, &mut hash.state)));
+            mb_collect(&mut hjn.outer, refs)?;
+            mb_collect(&mut hash.child, refs)
+        }
+        crate::procnode::PlanStateNode::SeqScan(ss) => {
+            refs.scans.push(Some(ss));
+            Ok(())
+        }
+        _ => Err(Box::new(PgError::new(
+            ERROR,
+            "runtime hash-join multibuild worker tree diverged from the leader's",
+        ))),
+    }
+}
+
+/// Split the worker root into (agg state, join-tree root) — the chain-mode
+/// counterpart of `with_join_tree`'s fixed destructure: two disjoint field
+/// borrows of the Agg plan-state node.
+fn mb_split_root<'a, 'mcx>(
+    planstate: &'a mut Option<crate::procnode::PlanStateNode<'mcx>>,
+) -> PgResult<(&'a mut ::nodeagg::AggStateData<'mcx>, &'a mut crate::procnode::PlanStateNode<'mcx>)>
+{
+    let Some(crate::procnode::PlanStateNode::Agg(aps)) = planstate.as_mut() else {
+        return Err(Box::new(PgError::new(
+            ERROR,
+            "runtime hash-join multibuild worker plan is not a plain Agg root",
+        )));
+    };
+    let aps: &'a mut crate::procnode::AggPlanState<'mcx> = aps;
+    Ok((&mut aps.agg, &mut aps.outer))
+}
+
+/// One probe level of a pipeline: join state + its hash state (candidate
+/// slot owner) + the frozen table to probe.
+type MbProbe<'x, 'mcx> = (
+    &'x mut ::nodehashjoin::HashJoinState<'mcx>,
+    &'x mut ::nodehash::HashState<'mcx>,
+    Arc<FrozenJoinTable>,
+);
+
+/// A pipeline's terminal.
+enum MbTerm<'x, 'mcx> {
+    Build { hs: &'x mut ::nodehash::HashState<'mcx>, local: &'x mut JoinBuildLocal },
+    Agg { agg: &'x mut ::nodeagg::AggStateData<'mcx> },
+}
+
+/// One emitted source row through the pipeline's probe levels (depth-first;
+/// each level's emit fully consumes before the next candidate overwrites
+/// the level's result slot — the serial nesting discipline) into the
+/// terminal. A build terminal that crosses its envelope sets `crossed`;
+/// later rows short-circuit and the drive refuses (R5 serial rerun).
+fn mb_row<'mcx>(
+    probes: &mut [MbProbe<'_, 'mcx>],
+    term: &mut MbTerm<'_, 'mcx>,
+    crossed: &std::cell::Cell<bool>,
+    estate: &mut EStateData<'mcx>,
+    slot: ExecSlotId,
+) -> PgResult<()> {
+    if crossed.get() {
+        return Ok(());
+    }
+    let Some((first, rest)) = probes.split_first_mut() else {
+        match term {
+            MbTerm::Agg { agg } => {
+                return ::nodeagg::agg_plain_build_accept(agg, estate, slot);
+            }
+            MbTerm::Build { hs, local } => {
+                if shared_build_accept(hs, estate, slot, local)?.is_err() {
+                    crossed.set(true);
+                }
+                return Ok(());
+            }
+        }
+    };
+    let (hj, hs, table) = first;
+    let table = Arc::clone(table);
+    shared_probe_outer(hj, hs, estate, &table, slot, &mut |_hj, estate, out| {
+        mb_row(rest, term, crossed, estate, out)
+    })
+}
+
+/// Drive one claimed morsel of one pipeline: position the scan (per-AM),
+/// stream surviving rows through `mb_row`. `Ok(true)` = clean; `Ok(false)`
+/// = a build terminal crossed its envelope (refusal, not error).
+fn mb_drive_claim<'mcx>(
+    scan: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    probes: &mut [MbProbe<'_, 'mcx>],
+    mut term: MbTerm<'_, 'mcx>,
+    estate: &mut EStateData<'mcx>,
+    range: &runtime::MorselRange,
+) -> PgResult<bool> {
+    let crossed = std::cell::Cell::new(false);
+    if ::nodeseqscan::seq_scan_is_heap(scan) {
+        let mut src = HeapBatchSource::new(scan);
+        let drove = (|| -> PgResult<()> {
+            src.position(estate, range.clone())?;
+            loop {
+                let n = src.next_batch(estate)?;
+                if n == 0 {
+                    return Ok(());
+                }
+                ::postgres_seams::check_for_interrupts::call()?;
+                let skip = {
+                    let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+                    src.skip_sel().map(|s| {
+                        w[..s.len()].copy_from_slice(s);
+                        w
+                    })
+                };
+                ::exectuples::for_each_live(
+                    skip.as_ref().map(|w| &w[..]),
+                    0,
+                    n,
+                    |i| -> PgResult<()> {
+                        let Some(slot_id) = src.emit(estate, i)? else { return Ok(()) };
+                        mb_row(probes, &mut term, &crossed, estate, slot_id)
+                    },
+                )?;
+                if crossed.get() {
+                    return Ok(());
+                }
+            }
+        })();
+        let settled = src.end_claim(estate);
+        drove?;
+        settled?;
+        return Ok(!crossed.get());
+    }
+    ::nodeseqscan::seq_scan_set_morsel_range(scan, estate, range.start, range.end)?;
+    loop {
+        let n = ::nodeseqscan::seq_scan_next_pagebatch(scan, estate)?;
+        if n == 0 {
+            let mcx = estate.es_query_cxt;
+            ::exectuples::exec_clear_tuple(estate.slot_mut(scan.ss.ss_ScanTupleSlot), mcx);
+            break;
+        }
+        ::postgres_seams::check_for_interrupts::call()?;
+        let skip = {
+            let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
+            ::nodeseqscan::seq_scan_batch_skip_sel(scan).map(|s| {
+                w[..s.len()].copy_from_slice(s);
+                w
+            })
+        };
+        let skip = skip.as_ref().map(|w| &w[..]);
+        ::exectuples::for_each_live(skip, 0, n, |i| -> PgResult<()> {
+            let Some(slot_id) = ::nodeseqscan::seq_scan_batch_emit(scan, estate, i)? else {
+                return Ok(());
+            };
+            mb_row(probes, &mut term, &crossed, estate, slot_id)
+        })?;
+        if crossed.get() {
+            break;
+        }
+    }
+    Ok(!crossed.get())
+}
+
+/// Assemble one pipeline's disjoint refs (scan, probe levels with tables,
+/// optional build-target hash state) out of the collected tree.
+fn mb_take_pipeline<'a, 'mcx>(
+    chain: &MbChain,
+    p: &MbPipeline,
+    refs: &mut MbRefs<'a, 'mcx>,
+) -> PgResult<(
+    &'a mut ::nodeseqscan::SeqScanState<'mcx>,
+    Vec<MbProbe<'a, 'mcx>>,
+    Option<&'a mut ::nodehash::HashState<'mcx>>,
+)> {
+    let stale = || {
+        Box::new(PgError::new(
+            ERROR,
+            "runtime hash-join multibuild pipeline refers outside the worker tree",
+        ))
+    };
+    let scan = refs.scans.get_mut(p.scan).and_then(|c| c.take()).ok_or_else(stale)?;
+    let mut probes = Vec::with_capacity(p.probes.len());
+    for &j in &p.probes {
+        let (hj, hs) = refs.joins.get_mut(j).and_then(|c| c.take()).ok_or_else(stale)?;
+        let table = chain
+            .sinks
+            .get(j)
+            .and_then(|s| s.table_clone())
+            .ok_or_else(|| {
+                Box::new(PgError::new(
+                    ERROR,
+                    "runtime hash-join multibuild probe ran without its frozen table",
+                ))
+            })?;
+        probes.push((hj, hs, table));
+    }
+    let target = match p.sink {
+        None => None,
+        Some(j) => {
+            let (_hj, hs) = refs.joins.get_mut(j).and_then(|c| c.take()).ok_or_else(stale)?;
+            Some(hs)
+        }
+    };
+    Ok((scan, probes, target))
+}
+
+/// One BUILD-pipeline morsel (MbBuildSink::accept_local body). `Ok(true)` =
+/// clean; `Ok(false)` = envelope crossed (refusal).
+fn mb_accept_morsel_body(
+    shared: &Arc<RuntimeHjShared>,
+    join: usize,
+    local: &mut JoinBuildLocal,
+    _worker: usize,
+    range: runtime::MorselRange,
+) -> PgResult<bool> {
+    let chain = Arc::clone(shared.chain.get().expect("multibuild accept without a chain"));
+    let p = chain
+        .pipelines
+        .iter()
+        .find(|p| p.sink == Some(join))
+        .expect("every build table has exactly one pipeline");
+    with_worker_exec("runtime hash-join multibuild morsel without a bound executor", |es, ps| {
+        let (_agg, tree) = mb_split_root(ps)?;
+        let mut refs = MbRefs::default();
+        mb_collect(tree, &mut refs)?;
+        let (scan, mut probes, target) = mb_take_pipeline(&chain, p, &mut refs)?;
+        let hs = target.expect("build pipeline has a target table");
+        local.begin_run(range.start);
+        let clean =
+            mb_drive_claim(scan, &mut probes, MbTerm::Build { hs, local }, es, &range)?;
+        local.end_run();
+        Ok(clean)
+    })
+}
+
+/// The final PROBE-pipeline morsel (chain branch of the probe task set):
+/// root outer-descent scan → root-path probes → plain-agg absorb → the
+/// worker's cumulative partial export (M1 overwrite discipline).
+fn mb_probe_morsel_body(
+    payload: &Arc<RuntimeHjShared>,
+    worker: usize,
+    range: runtime::MorselRange,
+) -> PgResult<()> {
+    let chain = Arc::clone(payload.chain.get().expect("multibuild probe without a chain"));
+    let p = chain.pipelines.last().expect("decomposition emits the final pipeline last");
+    debug_assert!(p.sink.is_none(), "the last pipeline is the agg-terminal one");
+    with_worker_exec("runtime hash-join multibuild probe without a bound executor", |es, ps| {
+        let (agg, tree) = mb_split_root(ps)?;
+        let mut refs = MbRefs::default();
+        mb_collect(tree, &mut refs)?;
+        let (scan, mut probes, target) = mb_take_pipeline(&chain, p, &mut refs)?;
+        debug_assert!(target.is_none());
+        let clean = mb_drive_claim(
+            scan,
+            &mut probes,
+            MbTerm::Agg { agg },
+            es,
+            &range,
+        )?;
+        debug_assert!(clean, "the agg terminal has no envelope to cross");
+        let pslot = worker - payload.pins_base;
+        {
+            let mut g = lockm(&payload.partials[pslot]);
+            agg_runtime_export_partial_into(agg, g.get_or_insert_with(Default::default))?;
+        }
+        Ok(())
+    })
+}
+
+/// Chain-mode worker arming (`build_worker_exec` branch): verify the rebuilt
+/// tree is CONGRUENT with the admitted one (counts + per-join types +
+/// per-join admissibility), arm RowFeed staging on every scan, begin the
+/// plain-agg build.
+fn mb_arm_worker<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    planstate: &mut Option<crate::procnode::PlanStateNode<'mcx>>,
+    chain: &MbChain,
+) -> PgResult<()> {
+    let (agg, tree) = mb_split_root(planstate)?;
+    if !agg_runtime_partial_admissible(agg) {
+        return Err(Box::new(PgError::new(
+            ERROR,
+            "runtime hash-join multibuild worker fold plan diverged from the leader's",
+        )));
+    }
+    let mut refs = MbRefs::default();
+    mb_collect(tree, &mut refs)?;
+    if refs.joins.len() != chain.jointypes.len() || refs.scans.len() != chain.nscans {
+        return Err(Box::new(PgError::new(
+            ERROR,
+            "runtime hash-join multibuild worker tree shape diverged from the leader's",
+        )));
+    }
+    for (i, cell) in refs.joins.iter_mut().enumerate() {
+        let (hj, hs) = cell.take().expect("collected join");
+        if hj.plan.join.jointype != chain.jointypes[i] || !shared_join_admissible(hj, hs) {
+            return Err(Box::new(PgError::new(
+                ERROR,
+                "runtime hash-join multibuild worker join diverged from the leader's",
+            )));
+        }
+    }
+    for cell in refs.scans.iter_mut() {
+        let ss = cell.take().expect("collected scan");
+        super::arm_scan_staging(
+            ss,
+            estate,
+            super::ScanFeedShape::RowFeed { ctx: "runtime hash-join multibuild feed", stitch: true },
+        )?;
+    }
+    ::nodeagg::agg_plain_build_begin(agg, estate)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Leader-side admission + engagement.
 // ---------------------------------------------------------------------------
 
@@ -2425,6 +3130,19 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
     // router's consolidated taxonomy (previously silent early returns).
     fn refuse(reason: &'static str) {
         router::tick_refused(ArmClass::HashJoin, reason);
+    }
+
+    // m5p1 multibuild: a join TREE (either child of the top join is itself
+    // a HashJoin) diverts to the multi-pipeline walk; every other shape
+    // keeps the phase-1 single-join path below byte-identically.
+    if matches!(&*hj.outer, crate::procnode::PlanStateNode::HashJoin(_))
+        || matches!(&*hj.hash.child, crate::procnode::PlanStateNode::HashJoin(_))
+    {
+        if !hj_multibuild_enabled() {
+            refuse("multibuild-disabled");
+            return Ok(None);
+        }
+        return try_own_multibuild(agg, hj, estate, rt, dop);
     }
 
     // --- Node shape: HashJoin over two lane-fusible pgrcolumnar SeqScans; a
@@ -2683,10 +3401,197 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
         dop,
         outer_granules,
         outer_source,
-        inner_source,
+        Some(inner_source),
         envelope,
         fill_inner,
         spill_batches,
+        None, // chain: the phase-1 single-join arm
+    )?;
+    router::tick(
+        ArmClass::HashJoin,
+        if r.is_some() { ArmCounter::Completed } else { ArmCounter::Fallback },
+    );
+    Ok(r)
+}
+
+/// m5p1 multibuild admission (the dispatch gate above verified a nested
+/// tree and the knob). Strictly the single-join arm's gates, generalized
+/// per-node over the tree; every refusal falls through to the serial arms
+/// byte-identically (nothing consumed).
+fn try_own_multibuild<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    hj: &mut crate::procnode::HashJoinNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    rt: &'static Arc<runtime::Runtime>,
+    dop: i32,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    fn refuse(reason: &'static str) {
+        router::tick_refused(ArmClass::HashJoin, reason);
+    }
+    if !agg_runtime_partial_admissible(agg) {
+        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
+        refuse("partials-not-order-insensitive-exact");
+        return Ok(None);
+    }
+    if estate.es_instrument != 0 || estate.es_epq_active {
+        refuse("instrumented-or-epq");
+        return Ok(None);
+    }
+    if parallel::IsParallelWorker() || xact::IsInParallelMode() {
+        refuse("in-parallel-mode");
+        return Ok(None);
+    }
+    if estate.es_param_list_info.is_some_and(|p| !p.is_empty()) {
+        refuse("params");
+        return Ok(None);
+    }
+    let Some(leader_pstmt) = estate.es_plannedstmt else {
+        refuse("no-plannedstmt");
+        return Ok(None);
+    };
+    if leader_pstmt.paramExecTypes.iter().next().is_some() {
+        refuse("params");
+        return Ok(None);
+    }
+    // Agg must be the plan root; its child the top HashJoin (the worker
+    // pstmt transfers the whole root subtree).
+    let Some(root) = leader_pstmt.planTree else { return Ok(None) };
+    let Some(root_agg) = root.as_agg() else { return Ok(None) };
+    if !std::ptr::eq(root_agg, agg.plan) {
+        return Ok(None);
+    }
+    let Some(join_node) = agg.plan.plan.lefttree else { return Ok(None) };
+    // Pass A: plan-tree walk (shape, probe-local join types, parallel
+    // safety, per-build sizing inputs, preorder topology).
+    let mut pinfo = MbPlanInfo {
+        jointypes: Vec::new(),
+        hash_rows: Vec::new(),
+        hash_widths: Vec::new(),
+        children: Vec::new(),
+        nscans: 0,
+    };
+    match mb_plan_walk(join_node, &mut pinfo)? {
+        Some(MbChild::Join(0)) => {}
+        _ => {
+            stats::tick_refused(ShapeClass::Join, RefuseReason::ParallelGate);
+            refuse("multibuild-plan-shape");
+            return Ok(None);
+        }
+    }
+    // Ptr-congruence: the executor tree's top join is the plan's top join.
+    let top_plan = join_node.as_hash_join().expect("walk verified the tag");
+    if !std::ptr::eq(top_plan, hj.state.plan) {
+        return Ok(None);
+    }
+    debug_assert!(pinfo.jointypes.len() >= 2, "the dispatch gate saw a nested child");
+    if !estate
+        .es_snapshot
+        .as_deref()
+        .is_some_and(::types_snapshot::IsMVCCSnapshot)
+    {
+        refuse("non-mvcc-snapshot");
+        return Ok(None);
+    }
+    let policy = parallel::query_task_policy_probe();
+    if policy.has_params
+        || policy.temp_state
+        || policy.serializable
+        || policy.pending_invalidations
+    {
+        refuse("binder-policy");
+        return Ok(None);
+    }
+    // Per-build sizing (§6): every table must fit UNBATCHED (nbatch == 1)
+    // under the C combined rule — the spill ladder stays single-join; an
+    // over-estimate keeps the serial arms (and, at plan time, Gather).
+    let combined_limit =
+        ::nodehash::get_hash_memory_limit().saturating_mul(dop.max(0) as usize + 1);
+    let mut envelopes = Vec::with_capacity(pinfo.jointypes.len());
+    for j in 0..pinfo.jointypes.len() {
+        let (_, nbatch, _, space_allowed) = ::nodehash::exec_choose_hash_table_size_full(
+            pinfo.hash_rows[j],
+            pinfo.hash_widths[j],
+            false, // useskew: C PHJ parity
+            true,  // try_combined_hash_mem: pooled participant budget
+            dop,
+        );
+        if nbatch > 1 {
+            stats::tick_refused(ShapeClass::Join, RefuseReason::ParallelGate);
+            refuse("multibuild-nbatch");
+            return Ok(None);
+        }
+        envelopes.push(space_allowed.max(combined_limit));
+    }
+    // Pass B: state-tree walk, preorder-congruent with pass A — per-join
+    // admissibility/untouched/type, per-scan fusibility + AM + geometry.
+    let k2_heap = k2_probe_enabled() && heapfeed_v2_enabled();
+    let mut sinfo = MbStateInfo { sources: Vec::new(), heap_fed: false, njoins: 0 };
+    if !shared_join_admissible(&hj.state, &hj.hash.state)
+        || !::nodehashjoin::lane_join_untouched(&hj.state, &hj.hash.state)
+        || !mb_jointype_admits(hj.state.plan.join.jointype)
+    {
+        stats::tick_refused(ShapeClass::Join, RefuseReason::ParallelGate);
+        refuse("multibuild-join-shape");
+        return Ok(None);
+    }
+    sinfo.njoins += 1;
+    if mb_state_walk(&mut hj.outer, estate, k2_heap, &mut sinfo)?.is_none() {
+        stats::tick_refused(ShapeClass::Join, RefuseReason::ParallelGate);
+        refuse("multibuild-state-shape");
+        return Ok(None);
+    }
+    {
+        let hash: &mut crate::procnode::HashSubNode<'mcx> = &mut hj.hash;
+        if mb_state_walk(&mut hash.child, estate, k2_heap, &mut sinfo)?.is_none() {
+            stats::tick_refused(ShapeClass::Join, RefuseReason::ParallelGate);
+            refuse("multibuild-state-shape");
+            return Ok(None);
+        }
+    }
+    if sinfo.njoins != pinfo.jointypes.len() || sinfo.sources.len() != pinfo.nscans {
+        refuse("multibuild-state-shape");
+        return Ok(None);
+    }
+    // Decompose into pipelines; floor + elastic DOP on the FINAL (root
+    // outer-descent) pipeline's scan — the gang-paying side.
+    let pipelines = mb_decompose(&pinfo);
+    let last_scan = {
+        let last = pipelines.last().expect("root pipeline");
+        debug_assert!(last.sink.is_none(), "decomposition emits the agg pipeline last");
+        last.scan
+    };
+    let probe_granules = sinfo.sources[last_scan].0;
+    if probe_granules < min_granules().max(2 * dop as u64) {
+        refuse("tiny-input-floor");
+        return Ok(None);
+    }
+    let dop = super::runtime_scan::elastic_dop(dop, probe_granules);
+    if ::nodeagg::agg_is_done(agg) {
+        return Ok(Some(None));
+    }
+    router::tick(ArmClass::HashJoin, ArmCounter::Engaged);
+    let sources: Vec<Arc<dyn runtime::MorselSource>> =
+        sinfo.sources.into_iter().map(|(_, s)| s).collect();
+    let probe_source = Arc::clone(&sources[last_scan]);
+    let init = MbInit {
+        pipelines,
+        sources,
+        jointypes: pinfo.jointypes,
+        envelopes,
+        nscans: pinfo.nscans,
+    };
+    let r = engage(
+        agg,
+        estate,
+        rt,
+        dop,
+        probe_granules,
+        probe_source,
+        None,  // inner_source: single-join only
+        0,     // envelope: single-join only (per-join envelopes ride MbInit)
+        false, // fill_inner: probe-local types only
+        None,  // spill_batches: unbatched by admission
+        Some(init),
     )?;
     router::tick(
         ArmClass::HashJoin,
@@ -2706,15 +3611,22 @@ fn engage<'mcx>(
     // pgrcolumnar = PgrcolumnarGranuleSource verbatim; heap = the seam's
     // GranuleMap wrapped boundary-free/non-coalescing (`k2_task_source`).
     outer_source: Arc<dyn runtime::MorselSource>,
-    inner_source: Arc<dyn runtime::MorselSource>,
+    // None ⇔ multibuild (per-scan sources ride `chain`).
+    inner_source: Option<Arc<dyn runtime::MorselSource>>,
     // Combined gang envelope per live table (admission's `envelope`; equals
     // exec_choose's space_allowed exactly when nbatch == 1).
     envelope: usize,
     fill_inner: bool,
     spill_batches: Option<u32>,
+    // m5p1 multibuild descriptor (None = the phase-1 single-join arm).
+    chain: Option<MbInit>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     ensure_hooks_registered();
     crate::execparallel::register_parallel_query_main();
+    debug_assert!(
+        chain.is_none() || (spill_batches.is_none() && !fill_inner && inner_source.is_none()),
+        "multibuild engagements are unbatched, fill-free, chain-sourced"
+    );
 
     // M3.5: the engagement's SpillSet (leader-side creation — fd substrate
     // guaranteed; a creation failure fail-closes to the phase-1 refusal).
@@ -2765,16 +3677,52 @@ fn engage<'mcx>(
         budget_refused: AtomicBool::new(false),
         partials: (0..runtime::MAX_EXTERNAL_LANES).map(|_| Mutex::new(None)).collect(),
         sink: OnceLock::new(),
+        chain: OnceLock::new(),
         spill,
         leaf_tables: (0..leaf_cap).map(|_| Mutex::new(None)).collect(),
     });
-    let sink = Arc::new(JoinBuildSink {
-        budget: JoinBudget::new(envelope),
-        plan: Mutex::new(None),
-        table: Mutex::new(None),
-        shared: Arc::downgrade(&payload),
-    });
-    payload.sink.set(Arc::clone(&sink)).unwrap_or_else(|_| unreachable!("sink set once"));
+    let single = match (chain, inner_source) {
+        (Some(mb), _) => {
+            // Multibuild: one MbBuildSink per join (frozen-table publisher);
+            // the descriptor rides the payload for every task-set body.
+            let sinks: Vec<Arc<MbBuildSink>> = (0..mb.jointypes.len())
+                .map(|j| {
+                    Arc::new(MbBuildSink {
+                        join: j,
+                        budget: JoinBudget::new(mb.envelopes[j]),
+                        plan: Mutex::new(None),
+                        table: Mutex::new(None),
+                        shared: Arc::downgrade(&payload),
+                    })
+                })
+                .collect();
+            payload
+                .chain
+                .set(Arc::new(MbChain {
+                    pipelines: mb.pipelines,
+                    sinks,
+                    sources: mb.sources,
+                    jointypes: mb.jointypes,
+                    nscans: mb.nscans,
+                }))
+                .unwrap_or_else(|_| unreachable!("chain set once"));
+            None
+        }
+        (None, Some(inner_source)) => {
+            let sink = Arc::new(JoinBuildSink {
+                budget: JoinBudget::new(envelope),
+                plan: Mutex::new(None),
+                table: Mutex::new(None),
+                shared: Arc::downgrade(&payload),
+            });
+            payload
+                .sink
+                .set(Arc::clone(&sink))
+                .unwrap_or_else(|_| unreachable!("sink set once"));
+            Some((sink, inner_source))
+        }
+        (None, None) => unreachable!("single-join engagements carry an inner source"),
+    };
 
     xact::EnterParallelMode();
     let engaged = engage_ceremony(
@@ -2784,9 +3732,8 @@ fn engage<'mcx>(
         dop,
         outer_granules,
         outer_source,
-        inner_source,
+        single,
         &payload,
-        sink,
         fill_inner,
     );
     xact::ExitParallelMode();
@@ -2798,6 +3745,132 @@ enum EngageOutcome {
     Completed,
 }
 
+/// The submit-and-park leg shared by the single-join and multibuild arms
+/// (EXTRACTED VERBATIM at m5p1 — semantics unchanged): waiter park with the
+/// CFI/message pump, the all-refused fallback probe, the all-stopped probe,
+/// the inc-2c liveness reap, and the budget/error/abort outcome handling.
+fn park_for_outcome(
+    payload: &Arc<RuntimeHjShared>,
+    rt: &'static Arc<runtime::Runtime>,
+    rg: &runtime::RgHandle,
+    waiter: &runtime::CompletionWaiter,
+    pcxt: parallel::ParallelContextId,
+    launched: i32,
+) -> PgResult<EngageOutcome> {
+    let mut all_exited_seen = false;
+    let outcome = loop {
+        if let Some(o) = waiter.try_wait() {
+            break o;
+        }
+        if let Err(e) = ::postgres_seams::check_for_interrupts::call()
+            .and_then(|()| parallel::ProcessParallelMessages())
+        {
+            rg.abort();
+            drain_rg(rt, rg);
+            return Err(e);
+        }
+        let refused = payload.refused.load(Ordering::SeqCst);
+        let started = payload.started.load(Ordering::SeqCst);
+        if started == 0 && refused >= launched as usize {
+            lane_trace(&format!(
+                "runtime-hashjoin: all {refused} helpers refused the bind"
+            ));
+            rg.abort();
+            drain_rg(rt, rg);
+            return Ok(EngageOutcome::Fallback);
+        }
+        if parallel::parallel_workers_all_stopped(pcxt) {
+            if let Some(o) = waiter.try_wait() {
+                break o;
+            }
+            let claimed = rg.stats().tasks_claimed;
+            lane_trace(&format!(
+                "runtime-hashjoin: helpers all stopped, rg incomplete (claimed={claimed})"
+            ));
+            rg.abort();
+            let drained = drain_rg(rt, rg);
+            if claimed == 0 && drained {
+                return Ok(EngageOutcome::Fallback);
+            }
+            if let Some(e) = payload.take_error() {
+                return Err(e);
+            }
+            return Err(Box::new(PgError::new(
+                ERROR,
+                "runtime hash-join helpers exited before completing the join",
+            )));
+        }
+        // LIVENESS REAP (m35-spill inc-2c port — the FLAG named this
+        // arm class; the agg leg-4d wedge): a pinned RG is invisible to
+        // pool workers, so once every launched helper has exited
+        // without the RG completing, NOBODY will ever step it and the
+        // leader parks forever (the all-stopped probe above cannot see
+        // helpers that exited their drive but parked back to the pool).
+        // Reap: abort + drain the closed generation ourselves; the next
+        // try_wait surfaces Aborted and the existing error/budget/
+        // fallback handling below decides. Two consecutive sightings
+        // before reaping let a mid-settlement completion land first —
+        // belt only: a helper's exit bump happens-after its drive's
+        // completion, and abort + drive_pinned on a completed RG are
+        // benign no-ops.
+        if payload.exited.load(Ordering::SeqCst) >= launched as usize {
+            if all_exited_seen && waiter.try_wait().is_none() {
+                lane_trace(
+                    "runtime-hashjoin: all helpers exited without completing the RG — reaping",
+                );
+                rg.abort();
+                if !drain_rg(rt, rg) {
+                    // The one exit path with no give-up escape would be a
+                    // leader hang: a reap that cannot drain (dead/stuck
+                    // participant) surfaces an error instead of
+                    // re-reaping forever.
+                    if let Some(e) = payload.take_error() {
+                        return Err(e);
+                    }
+                    return Err(Box::new(PgError::new(
+                        ERROR,
+                        "runtime hash-join helpers exited and the RG could not be drained",
+                    )));
+                }
+                continue;
+            }
+            all_exited_seen = true;
+        }
+        // A raised cancel disposition (statement_timeout /
+        // pg_cancel_backend) surfaces from the latch quantum as an Err
+        // (F1 defect layer 2b): abort + drain the RG, then propagate —
+        // exactly the CFI branch above. Discarding it made this park
+        // loop uncancellable (the F1 chaos finding the quantum's
+        // contract documents; fixed at the M5-2 consolidation).
+        if let Err(e) = parallel::wait_parallel_finish_quantum() {
+            rg.abort();
+            drain_rg(rt, rg);
+            return Err(e);
+        }
+    };
+
+    if payload.budget_refused.load(Ordering::SeqCst) {
+        // §6/R5: envelope crossing — whole-attempt rerun on the serial
+        // arm. Drop any recorded secondary errors (the abort races
+        // in-flight morsels); nothing was consumed on the leader.
+        let _ = payload.take_error();
+        lane_trace("runtime-hashjoin: envelope refusal — falling back to the serial arm");
+        stats::tick_refused(ShapeClass::Join, RefuseReason::ParallelGate);
+        return Ok(EngageOutcome::Fallback);
+    }
+    if let Some(e) = payload.take_error() {
+        return Err(e);
+    }
+    if outcome == runtime::RgOutcome::Aborted {
+        ::postgres_seams::check_for_interrupts::call()?;
+        return Err(Box::new(PgError::new(ERROR, "runtime hash-join pipeline aborted")));
+    }
+    if payload.started.load(Ordering::SeqCst) == 0 {
+        return Ok(EngageOutcome::Fallback);
+    }
+    Ok(EngageOutcome::Completed)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn engage_ceremony<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
@@ -2806,9 +3879,9 @@ fn engage_ceremony<'mcx>(
     dop: i32,
     outer_granules: u64,
     outer_source: Arc<dyn runtime::MorselSource>,
-    inner_source: Arc<dyn runtime::MorselSource>,
+    // Single-join build pair (None ⇔ the payload carries a multibuild chain).
+    mut single: Option<(Arc<JoinBuildSink>, Arc<dyn runtime::MorselSource>)>,
     payload: &Arc<RuntimeHjShared>,
-    sink: Arc<JoinBuildSink>,
     fill_inner: bool,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     let pcxt = parallel::CreateParallelContext("postgres", "pgrust_runtime_hashjoin_main", dop)?;
@@ -2827,12 +3900,76 @@ fn engage_ceremony<'mcx>(
             .unwrap_or_else(|_| unreachable!("pcxt shared set once"));
         parallel::set_private(pcxt, Arc::clone(payload) as _);
 
+        // m5p1 multibuild ladder: per pipeline in emission order — build
+        // pipelines as ACCEPT/COMBINE sink pairs (accept deps = the
+        // COMBINEs of every table the pipeline probes on its way up), the
+        // final agg pipeline as the probe task set (emitted last by the
+        // decomposition). The single-join arm's construction is the `else`
+        // arm below, byte-identical.
+        if let Some(mb) = payload.chain.get() {
+            let mut tasksets: Vec<runtime::TaskSetSpec> =
+                Vec::with_capacity(2 * mb.sinks.len() + 1);
+            let mut combine_idx = vec![usize::MAX; mb.sinks.len()];
+            for p in &mb.pipelines {
+                let deps: Vec<usize> = p.probes.iter().map(|&j| combine_idx[j]).collect();
+                debug_assert!(
+                    deps.iter().all(|&d| d != usize::MAX),
+                    "emission order builds every probed table first"
+                );
+                match p.sink {
+                    Some(j) => {
+                        let accept_idx = tasksets.len();
+                        let runtime::SinkTaskSets { mut accept, combine, probe: _p } =
+                            runtime::sink_tasksets(
+                                Arc::clone(&mb.sinks[j]),
+                                Arc::clone(&mb.sources[p.scan]),
+                                rt.nthreads() + runtime::MAX_EXTERNAL_LANES,
+                                accept_idx,
+                            );
+                        accept.deps = deps;
+                        tasksets.push(accept);
+                        combine_idx[j] = tasksets.len();
+                        tasksets.push(combine);
+                    }
+                    None => {
+                        tasksets.push(runtime::TaskSetSpec {
+                            source: Arc::clone(&outer_source),
+                            work: Arc::clone(payload) as Arc<dyn runtime::TaskSetWork>,
+                            deps,
+                        });
+                    }
+                }
+            }
+            static NEXT_MB_QUERY_ID: AtomicUsize = AtomicUsize::new(1);
+            let (rg, waiter) = rt.submit_pinned_with_affinity(
+                runtime::QuerySpec {
+                    query_id: NEXT_MB_QUERY_ID.fetch_add(1, Ordering::SeqCst) as u64,
+                    tasksets,
+                },
+                router::session_affinity_token(),
+            );
+            payload.rg.set(rg.downgrade()).unwrap_or_else(|_| unreachable!("rg set once"));
+            *mut_submitted = Some(rg.clone());
+
+            let launched = parallel::LaunchParallelWorkers(pcxt)?;
+            if launched <= 0 {
+                lane_trace("runtime-hashjoin: zero workers launched");
+                drain_rg(rt, &rg);
+                return Ok(EngageOutcome::Fallback);
+            }
+            lane_trace(&format!(
+                "runtime-hashjoin: engaged dop={launched} outer_granules={outer_granules} builds={} (multibuild)",
+                mb.sinks.len()
+            ));
+            return park_for_outcome(payload, rt, &rg, &waiter, pcxt, launched);
+        }
         // Task sets [0]/[1]: the batch-0 build sink pair. The BUILD-ACCEPT
         // source arrives per-AM from admission (K2 inc-1, `k2_task_source`):
         // pgrcolumnar = PgrcolumnarGranuleSource{coalesce:false} verbatim
         // (straight set_granule_range feed, single-epoch contract, never
         // coalesce); heap = the seam's boundary-free GranuleMap, same
         // never-coalesce posture.
+        let (sink, inner_source) = single.take().expect("single-join ceremony");
         let runtime::SinkTaskSets { accept, combine, probe: _sink_probe } =
             runtime::sink_tasksets(
                 sink,
@@ -2949,118 +4086,7 @@ fn engage_ceremony<'mcx>(
             )),
         }
 
-        let mut all_exited_seen = false;
-        let outcome = loop {
-            if let Some(o) = waiter.try_wait() {
-                break o;
-            }
-            if let Err(e) = ::postgres_seams::check_for_interrupts::call()
-                .and_then(|()| parallel::ProcessParallelMessages())
-            {
-                rg.abort();
-                drain_rg(rt, &rg);
-                return Err(e);
-            }
-            let refused = payload.refused.load(Ordering::SeqCst);
-            let started = payload.started.load(Ordering::SeqCst);
-            if started == 0 && refused >= launched as usize {
-                lane_trace(&format!(
-                    "runtime-hashjoin: all {refused} helpers refused the bind"
-                ));
-                rg.abort();
-                drain_rg(rt, &rg);
-                return Ok(EngageOutcome::Fallback);
-            }
-            if parallel::parallel_workers_all_stopped(pcxt) {
-                if let Some(o) = waiter.try_wait() {
-                    break o;
-                }
-                let claimed = rg.stats().tasks_claimed;
-                lane_trace(&format!(
-                    "runtime-hashjoin: helpers all stopped, rg incomplete (claimed={claimed})"
-                ));
-                rg.abort();
-                let drained = drain_rg(rt, &rg);
-                if claimed == 0 && drained {
-                    return Ok(EngageOutcome::Fallback);
-                }
-                if let Some(e) = payload.take_error() {
-                    return Err(e);
-                }
-                return Err(Box::new(PgError::new(
-                    ERROR,
-                    "runtime hash-join helpers exited before completing the join",
-                )));
-            }
-            // LIVENESS REAP (m35-spill inc-2c port — the FLAG named this
-            // arm class; the agg leg-4d wedge): a pinned RG is invisible to
-            // pool workers, so once every launched helper has exited
-            // without the RG completing, NOBODY will ever step it and the
-            // leader parks forever (the all-stopped probe above cannot see
-            // helpers that exited their drive but parked back to the pool).
-            // Reap: abort + drain the closed generation ourselves; the next
-            // try_wait surfaces Aborted and the existing error/budget/
-            // fallback handling below decides. Two consecutive sightings
-            // before reaping let a mid-settlement completion land first —
-            // belt only: a helper's exit bump happens-after its drive's
-            // completion, and abort + drive_pinned on a completed RG are
-            // benign no-ops.
-            if payload.exited.load(Ordering::SeqCst) >= launched as usize {
-                if all_exited_seen && waiter.try_wait().is_none() {
-                    lane_trace(
-                        "runtime-hashjoin: all helpers exited without completing the RG — reaping",
-                    );
-                    rg.abort();
-                    if !drain_rg(rt, &rg) {
-                        // The one exit path with no give-up escape would be a
-                        // leader hang: a reap that cannot drain (dead/stuck
-                        // participant) surfaces an error instead of
-                        // re-reaping forever.
-                        if let Some(e) = payload.take_error() {
-                            return Err(e);
-                        }
-                        return Err(Box::new(PgError::new(
-                            ERROR,
-                            "runtime hash-join helpers exited and the RG could not be drained",
-                        )));
-                    }
-                    continue;
-                }
-                all_exited_seen = true;
-            }
-            // A raised cancel disposition (statement_timeout /
-            // pg_cancel_backend) surfaces from the latch quantum as an Err
-            // (F1 defect layer 2b): abort + drain the RG, then propagate —
-            // exactly the CFI branch above. Discarding it made this park
-            // loop uncancellable (the F1 chaos finding the quantum's
-            // contract documents; fixed at the M5-2 consolidation).
-            if let Err(e) = parallel::wait_parallel_finish_quantum() {
-                rg.abort();
-                drain_rg(rt, &rg);
-                return Err(e);
-            }
-        };
-
-        if payload.budget_refused.load(Ordering::SeqCst) {
-            // §6/R5: envelope crossing — whole-attempt rerun on the serial
-            // arm. Drop any recorded secondary errors (the abort races
-            // in-flight morsels); nothing was consumed on the leader.
-            let _ = payload.take_error();
-            lane_trace("runtime-hashjoin: envelope refusal — falling back to the serial arm");
-            stats::tick_refused(ShapeClass::Join, RefuseReason::ParallelGate);
-            return Ok(EngageOutcome::Fallback);
-        }
-        if let Some(e) = payload.take_error() {
-            return Err(e);
-        }
-        if outcome == runtime::RgOutcome::Aborted {
-            ::postgres_seams::check_for_interrupts::call()?;
-            return Err(Box::new(PgError::new(ERROR, "runtime hash-join pipeline aborted")));
-        }
-        if payload.started.load(Ordering::SeqCst) == 0 {
-            return Ok(EngageOutcome::Fallback);
-        }
-        Ok(EngageOutcome::Completed)
+        park_for_outcome(payload, rt, &rg, &waiter, pcxt, launched)
     })(&mut submitted);
 
     if let Some(rg) = &submitted {
@@ -3124,6 +4150,58 @@ fn drain_rg(rt: &'static Arc<runtime::Runtime>, rg: &runtime::RgHandle) -> bool 
         lane_trace("runtime-hashjoin: LEAKED pinned RG (drain gave up — dead participant?)");
     }
     drained
+}
+
+// ---------------------------------------------------------------------------
+// m5p1 multibuild unit corpus (band 88001).
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod mb_tests {
+    use super::*;
+
+    /// Decomposition invariants on a SNOWFLAKE topology
+    /// `J0(outer=J1(outer=S0, build=S1), build=J2(outer=S2, build=S3))`
+    /// (preorder: joins [J0, J1, J2], scans [S0..S3]): exact emission
+    /// order, probes bottom-up, the agg pipeline last, and the deps-safety
+    /// induction (every probed table's builder precedes its prober).
+    #[test]
+    fn mb_decompose_snowflake_deps_safe() {
+        let info = MbPlanInfo {
+            jointypes: vec![::types_nodes::JoinType::JOIN_INNER; 3],
+            hash_rows: vec![0.0; 3],
+            hash_widths: vec![0; 3],
+            children: vec![
+                (MbChild::Join(1), MbChild::Join(2)), // J0
+                (MbChild::Scan(0), MbChild::Scan(1)), // J1
+                (MbChild::Scan(2), MbChild::Scan(3)), // J2
+            ],
+            nscans: 4,
+        };
+        let ps = mb_decompose(&info);
+        assert_eq!(ps.len(), 4);
+        assert_eq!((ps[0].scan, &ps[0].probes[..], ps[0].sink), (3, &[][..], Some(2)));
+        assert_eq!((ps[1].scan, &ps[1].probes[..], ps[1].sink), (2, &[2usize][..], Some(0)));
+        assert_eq!((ps[2].scan, &ps[2].probes[..], ps[2].sink), (1, &[][..], Some(1)));
+        assert_eq!((ps[3].scan, &ps[3].probes[..], ps[3].sink), (0, &[1usize, 0][..], None));
+        let mut built = std::collections::BTreeSet::new();
+        for p in &ps {
+            for j in &p.probes {
+                assert!(built.contains(j), "probe of an unbuilt table");
+            }
+            if let Some(j) = p.sink {
+                built.insert(j);
+            }
+        }
+        assert!(ps.last().unwrap().sink.is_none(), "agg pipeline emitted last");
+    }
+
+    /// The multibuild kill switch A/B (OnceLock — one state per process, so
+    /// only the default is asserted here; the =0 posture is the e2e's leg D).
+    #[test]
+    fn mb_knob_default_on() {
+        assert!(hj_multibuild_enabled());
+    }
 }
 
 // ---------------------------------------------------------------------------
