@@ -36,3 +36,8 @@ libc = "0.2"
 
 [dev-dependencies]
 resowner = { path = "../../../utils/resowner/resowner" }
+
+# `pgrust_sim` mirrors vfs's declaration (contract §1.2): non-default cfg set
+# only by the sim harness's RUSTFLAGS; fd's sim-only regression tests use it.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)'] }

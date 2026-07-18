@@ -470,6 +470,44 @@ fn allocate_file_stdio_modes() {
     assert_eq!(vfd::get_errno(), libc::ENOENT);
 }
 
+// DST P1 Ruling 3 Class C regression — the SIM_FD_BASE tripwire that caught
+// the FreeDesc misroute, made permanent. AllocateFile mints its fd posix-side
+// (open_stdio, the fopen carve-out of contract §1.1), so FreeDesc must close
+// it posix-side; routing it through vfs::close makes SimVfs EBADF the foreign
+// fd (below SIM_FD_BASE), FreeFile report -1, and the posix fd leak. The
+// OpenTransientFile RawFd arm is vfs-minted and correctly stays on vfs::close.
+#[cfg(pgrust_sim)]
+#[test]
+fn allocate_file_stdio_free_closes_posix_side_not_vfs() {
+    use std::os::fd::AsRawFd;
+
+    setup();
+    let dir = scratch_dir("stdio_sim_tripwire");
+    let path = format!("{dir}/s");
+
+    let idx = crate::desc::AllocateFile(&path, "w").unwrap();
+    assert!(idx >= 0);
+    let raw = crate::desc::with_allocated_stdio(idx, |f| f.as_raw_fd()).unwrap();
+    assert!(
+        raw < vfs::sim::SIM_FD_BASE,
+        "stdio fd must be posix-minted (carve-out), got sim-domain fd {raw}"
+    );
+
+    // A vfs::close misroute EBADFs inside SimVfs and surfaces here as -1.
+    assert_eq!(
+        crate::desc::FreeFile(idx).unwrap(),
+        0,
+        "FreeDesc routed a posix-minted stdio fd through vfs::close"
+    );
+
+    // And the posix-side close really happened (pre-fix the fd leaked).
+    assert_eq!(
+        unsafe { libc::fcntl(raw, libc::F_GETFD) },
+        -1,
+        "posix fd {raw} leaked: still open after FreeFile"
+    );
+}
+
 
 // Test-process-global: resowner seams install once (seam_core forbids
 // reinstall); every test that needs an owner goes through here.
