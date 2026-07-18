@@ -1,0 +1,35 @@
+# DST sim-boot asset manifest — dst-p3-scheduler §9.3 (the provider seam).
+#
+# Declares the namespace seed for a whole-server sim boot: every read-only,
+# host-born asset tree the composed SimVfs namespace is pre-populated with
+# before the schedule starts. ASSETS IDENTIFY THE WORLD, THE SEED IDENTIFIES
+# THE SCHEDULE: the ingest digests every entry into `asset_hash` (reported on
+# the SIM-ASSETS boot line) so host drift — a tzdata package update, a
+# re-minted datadir — fails loudly as an identity change, never as a silent
+# schedule divergence.
+#
+# Consumed at compile time (include_str!) by `vfs::sim_boot`; sim cfg only.
+# The parser is deliberately minimal: `version = N` plus one `roots = [...]`
+# array under [share]. Grow the vocabulary with the parser, in lockstep.
+
+version = 1
+
+# Share-tree asset roots, relative to the share dir the harness names via
+# PGRUST_PGSHAREDIR (PGRUST_TZDIR, if it points outside the share dir, is
+# ingested as an extra root). These are the trees bootstrap reads through
+# the vfs: the pgtz timezone scan, timezonesets (timezone_abbreviations),
+# and the tsearch dictionary/stopword files.
+[share]
+roots = [
+    "timezone",
+    "timezonesets",
+    "tsearch_data",
+]
+
+# The whole-server world root: the initdb'd datadir snapshot named by the
+# -D invocation option (or PGDATA). Ingested at its host absolute path,
+# which also becomes the sim boot cwd (the product chdir()s into it and
+# addresses it relatively). The host snapshot is immutable under sim — all
+# boot writes land in the SimVfs namespace — so one snapshot serves any
+# number of same-seed runs. Not a [share] root; named here for the record.
+# [datadir] source = "commandline:-D | env:PGDATA"
