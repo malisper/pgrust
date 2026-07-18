@@ -68,3 +68,4 @@ windowagg	epq,backward,instrumented,child-not-lane-owned,shape-qual-proj
 # data rows. One comment line lands per per-shape flip commit; a per-shape
 # revert removes its line.
 # wave-7 B1 1/6: functionscan source form default-ON (rides merged row)
+# wave-7 B1 2/6: tablefuncscan source form default-ON (rides merged row)
