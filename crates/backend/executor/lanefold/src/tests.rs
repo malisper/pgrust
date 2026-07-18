@@ -253,15 +253,17 @@ fn reference_fold(
                 // C int8_avg_accum, per selected row: NOT strict, so the
                 // state allocates on the group's first call even for a NULL
                 // input; only non-null inputs accumulate (do_int128_accum).
-                let st: &mut Int128AggState = if pg.trans_value_is_null {
-                    let st = Box::leak(Box::new(Int128AggState::new(false)));
-                    pg.trans_value = Datum::from_usize(st as *mut Int128AggState as usize);
+                if pg.trans_value_is_null {
+                    let p = Box::into_raw(Box::new(Int128AggState::new(false)));
+                    pg.trans_value = Datum::from_usize(p as usize);
                     pg.trans_value_is_null = false;
-                    st
-                } else {
-                    // SAFETY: the leaked state installed above.
-                    unsafe { &mut *(pg.trans_value.as_usize() as *mut Int128AggState) }
-                };
+                }
+                // SAFETY: the leaked state installed above. Re-derive from
+                // the datum on every row, exactly like the product fold:
+                // keeping a `&mut` across the exposing ptr→int cast would
+                // invalidate the exposed tag on each write (miri F7).
+                let st: &mut Int128AggState =
+                    unsafe { &mut *(pg.trans_value.as_usize() as *mut Int128AggState) };
                 if let Some(v) = row[t.col as usize] {
                     st.sum_x += v as i128;
                     st.n += 1;
