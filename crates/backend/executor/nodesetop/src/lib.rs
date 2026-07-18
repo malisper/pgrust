@@ -59,7 +59,7 @@ struct HashedState<'mcx> {
     // callback (docs/no-drop.md guard rule).
     table_ctx: core::ptr::NonNull<::mcx::MemoryContext>,
     table_filled: bool,
-    hashiter: usize,
+    hashiter: u64,
 }
 
 struct SortedState<'mcx> {

@@ -317,3 +317,20 @@ pub fn EndCriticalSection() {
 pub fn InterruptsCanBeProcessed() -> bool {
     InterruptHoldoffCount() == 0 && CritSectionCount() == 0 && QueryCancelHoldoffCount() == 0
 }
+
+/// `getpid()` / `std::process::id()` with a wasm arm. WASI has no process
+/// ids (std::process::id PANICS there); the instance is the only process
+/// that can exist, so a fixed synthetic pid stands in. 1 is C's classic
+/// "the only process" number; nonzero matters (0/negative are sentinel
+/// words in the lockfile/procsignal vocabularies).
+#[inline]
+pub fn process_id() -> u32 {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        std::process::id()
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        1
+    }
+}

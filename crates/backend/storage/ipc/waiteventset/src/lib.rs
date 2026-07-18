@@ -95,14 +95,19 @@ pub fn InitializeWaitEventSupport() -> PgResult<()> {
 
     // The waiter wake pipe replaces C's self-pipe (created eagerly here to
     // keep the per-backend fd accounting where it always was).
-    if let Err(errno) = waiter::ensure_wake_pipe() {
-        return Err(Box::new(PgError::new(
-            FATAL,
-            format!("waiter wake pipe creation failed: errno {errno}"),
-        )));
+    // wasm32: no pipe(2) on WASI; the wasm backend blocks on time alone
+    // (single thread — no cross-thread wakes exist to route).
+    #[cfg(not(target_family = "wasm"))]
+    {
+        if let Err(errno) = waiter::ensure_wake_pipe() {
+            return Err(Box::new(PgError::new(
+                FATAL,
+                format!("waiter wake pipe creation failed: errno {errno}"),
+            )));
+        }
+        fd::ReserveExternalFD()?;
+        fd::ReserveExternalFD()?;
     }
-    fd::ReserveExternalFD()?;
-    fd::ReserveExternalFD()?;
 
     // The postmaster publishes its well-known waker (children have
     // IsUnderPostmaster set before they reach this in InitPostmasterChild).
@@ -129,8 +134,16 @@ pub fn WakeupPostmaster() {
     waiter::unpark_word(POSTMASTER_WAKER.load(Ordering::Acquire));
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn wakeup_read_fd() -> i32 {
     waiter::wake_read_fd()
+}
+
+// wasm32: no wake pipe exists; latch events carry no fd (the wasm backend
+// blocks on time alone and the generic loop re-checks latch.is_set).
+#[cfg(target_family = "wasm")]
+fn wakeup_read_fd() -> i32 {
+    PGINVALID_SOCKET
 }
 
 pub fn CreateWaitEventSet(nevents: i32) -> PgResult<WaitEventSetHandle> {

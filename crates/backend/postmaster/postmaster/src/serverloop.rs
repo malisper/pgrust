@@ -154,7 +154,7 @@ pub fn ServerLoop() -> PgResult<i32> {
             with_pm(|pm| pm.avlauncher_needs_signal = false);
             let launcher = with_pm(|pm| pm.autovac_launcher);
             if let Some(launcher) = launcher {
-                signal_child(&launcher, libc::SIGUSR2);
+                signal_child(&launcher, procsignal::signums::SIGUSR2);
             }
         }
 
@@ -175,7 +175,7 @@ pub fn ServerLoop() -> PgResult<i32> {
                 1758,
                 "ServerLoop",
             );
-            TerminateChildren(if send_abort { libc::SIGABRT } else { libc::SIGKILL });
+            TerminateChildren(if send_abort { procsignal::signums::SIGABRT } else { procsignal::signums::SIGKILL });
             with_pm(|pm| pm.abort_start_time = 0);
         }
 
@@ -188,7 +188,7 @@ pub fn ServerLoop() -> PgResult<i32> {
                     1779,
                     "ServerLoop",
                 );
-                crate::handle_pm_shutdown_request_signal(libc::SIGQUIT);
+                crate::handle_pm_shutdown_request_signal(procsignal::signums::SIGQUIT);
             }
             last_lockfile_recheck_time = now;
         }

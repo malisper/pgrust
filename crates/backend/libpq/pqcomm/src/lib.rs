@@ -776,7 +776,7 @@ pub fn init_seams() {
     pqcomm_seams::listen_server_port::set(
         |hostname, port, unix_socket_dir, listen_sockets, max_listen| {
             let family =
-                if unix_socket_dir.is_some() { libc::AF_UNIX } else { libc::AF_UNSPEC };
+                if unix_socket_dir.is_some() { ip::sys::AF_UNIX } else { ip::sys::AF_UNSPEC };
             let status = socket::ListenServerPort(
                 family,
                 hostname,

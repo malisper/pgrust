@@ -2293,7 +2293,9 @@ impl<'mcx> CbScanDescData<'mcx> {
             return None;
         }
         let row = self.granule * GRANULE_ROWS + self.staged_lo;
-        debug_assert!(row + self.staged_rows <= u32::MAX as usize + 1);
+        // u64 arithmetic: `u32::MAX as usize + 1` overflows on 32-bit
+        // (wasm32) usize; identical bound on 64-bit targets.
+        debug_assert!(row as u64 + self.staged_rows as u64 <= u32::MAX as u64 + 1);
         Some(((self.rg as u64) << 32) | row as u64)
     }
 

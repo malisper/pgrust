@@ -61,7 +61,7 @@ pub fn InitStandaloneProcess(argv0: &str) -> PgResult<()> {
 
     // pgwin32_signal_initialize: WIN32-only, not this build.
 
-    InitProcessGlobals(std::process::id() as i32);
+    InitProcessGlobals(init_small::globals::process_id() as i32);
 
     /* Initialize process-local latch support */
     waiteventset::InitializeWaitEventSupport()?;
@@ -117,7 +117,13 @@ pub fn InitPostmasterChild(my_proc_pid: i32) -> PgResult<()> {
     InitProcessLocalLatch();
     latch::InitializeLatchWaitSet()?;
 
-    libpq_pqsignal::block_sig_delete(libc::SIGQUIT);
+    // wasm32: the wasi libc crate exposes no SIG* names; 3 is SIGQUIT in the
+    // thread-signal emulation's Linux-numbered space (libpq_pqsignal wasm arm).
+    #[cfg(not(target_family = "wasm"))]
+    const SIGQUIT: i32 = libc::SIGQUIT;
+    #[cfg(target_family = "wasm")]
+    const SIGQUIT: i32 = 3;
+    libpq_pqsignal::block_sig_delete(SIGQUIT);
     libpq_pqsignal::block_signals();
     Ok(())
 }

@@ -1773,9 +1773,15 @@ pub fn TerminateOtherDBBackends(databaseId: types_core::Oid) -> PgResult<()> {
         }
     }
 
+    // wasm32: the wasi libc crate exposes no SIG* names; 15 is SIGTERM in
+    // the thread-signal emulation's Linux-numbered space (procsignal wasm arm).
+    #[cfg(not(target_family = "wasm"))]
+    const SIGTERM: i32 = libc::SIGTERM;
+    #[cfg(target_family = "wasm")]
+    const SIGTERM: i32 = 15;
     for &pid in &pids {
         if BackendPidGetProc(pid).is_some() {
-            let _ = procsignal::SendThreadSignal(pid, libc::SIGTERM);
+            let _ = procsignal::SendThreadSignal(pid, SIGTERM);
         }
     }
     Ok(())

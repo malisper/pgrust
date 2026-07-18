@@ -3,6 +3,22 @@
 use mcx::Mcx;
 use types_error::{ErrorLocation, PgResult, FATAL};
 
+// wasm32: no LC_* names in the wasi libc crate; musl numbering (the
+// pg_locale wasm arm's convention, matching the linked wasi-libc).
+#[cfg(not(target_family = "wasm"))]
+use libc::{LC_COLLATE, LC_CTYPE, LC_MESSAGES, LC_MONETARY, LC_NUMERIC, LC_TIME};
+#[cfg(target_family = "wasm")]
+mod wasm_lc {
+    pub const LC_CTYPE: i32 = 0;
+    pub const LC_NUMERIC: i32 = 1;
+    pub const LC_TIME: i32 = 2;
+    pub const LC_COLLATE: i32 = 3;
+    pub const LC_MONETARY: i32 = 4;
+    pub const LC_MESSAGES: i32 = 5;
+}
+#[cfg(target_family = "wasm")]
+use wasm_lc::*;
+
 pub const PG_BACKEND_VERSIONSTR: &str = "postgres (PostgreSQL) 18.3\n";
 
 const SRC: &str = "src/backend/main/main.c";
@@ -60,6 +76,12 @@ fn init_locale(mcx: Mcx<'_>, categoryname: &str, category: i32, locale: &str) ->
         .finish(loc(407, "init_locale"))
 }
 
+// wasm32: WASI has no uids — root cannot exist and there is nothing to
+// refuse (C's WIN32 arm skips the check the same way).
+#[cfg(target_family = "wasm")]
+fn check_root(_progname: &str) {}
+
+#[cfg(not(target_family = "wasm"))]
 fn check_root(progname: &str) {
     // SAFETY: geteuid/getuid have no preconditions and never fail.
     let (uid, euid) = unsafe { (libc::getuid(), libc::geteuid()) };
@@ -88,7 +110,7 @@ pub fn pg_main(argv: &[String]) -> PgResult<()> {
 
     ps_status::save_ps_display_args();
 
-    init_small::globals::SetMyProcPid(std::process::id() as i32);
+    init_small::globals::SetMyProcPid(init_small::globals::process_id() as i32);
     // MemoryContextInit: top-level contexts are owner-created here; ErrorContext is PgResult.
 
     stack_depth::set_stack_base();
@@ -97,12 +119,12 @@ pub fn pg_main(argv: &[String]) -> PgResult<()> {
 
     let main_context = mcx::MemoryContext::new("Main");
     let mcx = main_context.mcx();
-    init_locale(mcx, "LC_COLLATE", libc::LC_COLLATE, "")?;
-    init_locale(mcx, "LC_CTYPE", libc::LC_CTYPE, "")?;
-    init_locale(mcx, "LC_MESSAGES", libc::LC_MESSAGES, "")?;
-    init_locale(mcx, "LC_MONETARY", libc::LC_MONETARY, "C")?;
-    init_locale(mcx, "LC_NUMERIC", libc::LC_NUMERIC, "C")?;
-    init_locale(mcx, "LC_TIME", libc::LC_TIME, "C")?;
+    init_locale(mcx, "LC_COLLATE", LC_COLLATE, "")?;
+    init_locale(mcx, "LC_CTYPE", LC_CTYPE, "")?;
+    init_locale(mcx, "LC_MESSAGES", LC_MESSAGES, "")?;
+    init_locale(mcx, "LC_MONETARY", LC_MONETARY, "C")?;
+    init_locale(mcx, "LC_NUMERIC", LC_NUMERIC, "C")?;
+    init_locale(mcx, "LC_TIME", LC_TIME, "C")?;
     // SAFETY: single-threaded process startup; no concurrent getenv.
     unsafe {
         libc::unsetenv(c"LC_ALL".as_ptr());
@@ -160,6 +182,24 @@ fn startup_hacks(_progname: &str) {}
 
 // get_user_name_or_exit (src/common/username.c:74): effective user's
 // pw_name, or print the lookup error and exit(1).
+// wasm32: no uids and no passwd db on WASI; the operator supplies the
+// identity through the environment (wasmtime --env USER=<name>, matching
+// the role the datadir was initdb'd with). Absent that, C's exit(1) shape.
+#[cfg(target_family = "wasm")]
+fn get_user_name_or_exit(progname: &str) -> String {
+    match std::env::var("USER") {
+        Ok(u) if !u.is_empty() => u,
+        _ => {
+            elog::write_stderr(&format!(
+                "{progname}: could not determine the effective user name: \
+                 set the USER environment variable\n"
+            ));
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
 fn get_user_name_or_exit(progname: &str) -> String {
     // SAFETY: geteuid never fails; getpwuid returns a static-storage struct
     // (single-threaded startup, per C's use) or NULL with errno set.
@@ -186,6 +226,7 @@ fn get_user_name_or_exit(progname: &str) -> String {
         .into_owned()
 }
 
+#[cfg(not(target_family = "wasm"))] // wasm32: only the native getpwuid path clears errno
 fn set_errno_zero() {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     // SAFETY: __error returns this thread's valid errno location.

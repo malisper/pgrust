@@ -117,6 +117,33 @@ pub fn fc_pg_read_binary_file_all_missing(
     read_binary_file(fcinfo, 0, -1, true, missing_ok)
 }
 
+
+// (size, atime, mtime, ctime) in time_t seconds, C's pg_stat_file words.
+#[cfg(not(target_family = "wasm"))]
+fn stat_words(md: &std::fs::Metadata, _path: &str) -> (i64, i64, i64, i64) {
+    use std::os::unix::fs::MetadataExt;
+    (md.size() as i64, md.atime(), md.mtime(), md.ctime())
+}
+
+// wasm32: std's wasi MetadataExt exposes only dev/ino/nlink; the timestamp
+// words come from wasi-libc's stat (st_atim/st_mtim/st_ctim carry the
+// filestat_t fields std does not surface). Failure leaves epoch zeros —
+// the file was stat-able a moment ago, so this arm is effectively dead.
+#[cfg(target_family = "wasm")]
+fn stat_words(md: &std::fs::Metadata, path: &str) -> (i64, i64, i64, i64) {
+    let size = md.len() as i64;
+    let Ok(c) = std::ffi::CString::new(path) else { return (size, 0, 0, 0) };
+    // SAFETY: stat fills the zeroed out-param only on rc==0, which gates reads.
+    unsafe {
+        let mut st: libc::stat = std::mem::zeroed();
+        if libc::stat(c.as_ptr(), &mut st) == 0 {
+            (size, st.st_atim.tv_sec as i64, st.st_mtim.tv_sec as i64, st.st_ctim.tv_sec as i64)
+        } else {
+            (size, 0, 0, 0)
+        }
+    }
+}
+
 #[cold]
 #[inline(never)]
 fn not_row_type() -> Box<PgError> {
@@ -148,12 +175,12 @@ fn stat_file(
     }
     let tupdesc = resolved.result_tuple_desc.expect("composite result carries a tupdesc");
 
-    use std::os::unix::fs::MetadataExt;
+    let (f_size, f_atime, f_mtime, f_ctime) = stat_words(&md, &filename);
     let values = [
-        Datum::from_i64(md.size() as i64),
-        Datum::from_i64(time_t_to_timestamptz(md.atime())),
-        Datum::from_i64(time_t_to_timestamptz(md.mtime())),
-        Datum::from_i64(time_t_to_timestamptz(md.ctime())),
+        Datum::from_i64(f_size),
+        Datum::from_i64(time_t_to_timestamptz(f_atime)),
+        Datum::from_i64(time_t_to_timestamptz(f_mtime)),
+        Datum::from_i64(time_t_to_timestamptz(f_ctime)),
         Datum::null(),
         Datum::from_bool(md.is_dir()),
     ];
@@ -295,11 +322,11 @@ fn ls_dir_files(
             continue;
         }
 
-        use std::os::unix::fs::MetadataExt;
+        let (e_size, _, e_mtime, _) = stat_words(&md, &path);
         let values = [
             bytes_result(fcinfo, name.as_bytes())?,
-            Datum::from_i64(md.size() as i64),
-            Datum::from_i64(time_t_to_timestamptz(md.mtime())),
+            Datum::from_i64(e_size),
+            Datum::from_i64(time_t_to_timestamptz(e_mtime)),
         ];
         srf.putvalues(&values, &[false, false, false])?;
     }

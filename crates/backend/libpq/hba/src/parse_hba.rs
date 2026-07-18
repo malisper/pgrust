@@ -24,8 +24,8 @@ pub(crate) const fn enable_gss() -> bool {
 
 fn numeric_host_hint() -> AddrInfoHint {
     AddrInfoHint {
-        flags: libc::AI_NUMERICHOST,
-        family: libc::AF_UNSPEC,
+        flags: ip::sys::AI_NUMERICHOST,
+        family: ip::sys::AF_UNSPEC,
         socktype: 0,
     }
 }
@@ -33,7 +33,7 @@ fn numeric_host_hint() -> AddrInfoHint {
 pub(crate) fn gai_strerror(errcode: i32) -> String {
     // SAFETY: gai_strerror returns a static NUL-terminated C string.
     unsafe {
-        let p = libc::gai_strerror(errcode);
+        let p = ip::sys::gai_strerror(errcode);
         if p.is_null() {
             return String::new();
         }
@@ -219,7 +219,7 @@ pub fn parse_hba_line(
             let ret = ip::pg_getaddrinfo_all(Some(addr_part), None, &hint, &mut gai_result);
             if ret == 0 && !gai_result.is_empty() {
                 parsedline.addr = gai_result[0].addr;
-            } else if ret == libc::EAI_NONAME {
+            } else if ret == ip::sys::EAI_NONAME {
                 parsedline.hostname = Some(addr_part.to_string());
             } else {
                 parse_error!(
@@ -244,8 +244,8 @@ pub fn parse_hba_line(
                 }
 
                 let fam = match ss_family(&parsedline.addr) {
-                    f if f == libc::AF_INET => AddressFamily::Inet,
-                    f if f == libc::AF_INET6 => AddressFamily::Inet6,
+                    f if f == ip::sys::AF_INET => AddressFamily::Inet,
+                    f if f == ip::sys::AF_INET6 => AddressFamily::Inet6,
                     _ => AddressFamily::Other,
                 };
                 match ifaddr::pg_sockaddr_cidr_mask(Some(cidr_bits), fam) {
