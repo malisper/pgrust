@@ -717,3 +717,20 @@ rawsync	crates/port/crc32c/src/lib.rs	1
 rawsync	crates/port/pg_clock/src/sim.rs	1
 rawsync	crates/port/pg_strong_random/src/sim.rs	1
 # ================== end PERMIT-S1-SYNC ==================
+
+# ==================== PERMIT-S1-CORE ====================
+# The permit scheduler itself (pgsync::sim, WS-CORE; permit-scheduler.md s1/
+# s3/s4, contract s3). Scanner trap: the sim modules live behind a
+# cfg(pgrust_sim) mod decl the scanner cannot see, so every row below is
+# sim-only code with ZERO product codegen. The scheduler is the machinery
+# that VIRTUALIZES blocking for everyone else — its own primitives are the
+# implementation of the interception layer, not sites to intercept.
+blocking	crates/_support/pgsync/src/sim/sched.rs	4	DST-REVIEW(ws-core): the permit machinery itself — state Condvar (grant park/notify + spawn-fence) is HOW threads park under the scheduler; sim-only
+blocking	crates/_support/pgsync/src/sim/watchdog.rs	1	DST-REVIEW(ws-core): the monitor's poll sleep — THE watchdog is deliberately OUTSIDE the model (permit-holder-blocked-outside-interception needs a wall observer); sim-only
+env	crates/_support/pgsync/src/sim/config.rs	4	DST-REVIEW(ws-core): the 4 scheduler knobs (PGRUST_SIM_SCHED/PREEMPT_P/WATCHDOG_S/SCHEDLOG), R-KNOBS idiom (OnceLock + pure parse fns + unit corpus); pgrust_sim-cfg-only, no product reader; retires onto the s2.5 knobs-registry charter
+once	crates/_support/pgsync/src/sim/config.rs	4	DST-REVIEW(ws-core): knob-read OnceLocks — pure env-read closures (P3 row-19 benign class), one per knob
+once	crates/_support/pgsync/src/sim/sched.rs	1	DST-REVIEW(ws-core): the ONE global-scheduler init (seed fill + watchdog start + hooks install); runs on first spawn-door touch, before any governed thread exists — cannot wedge a permit holder
+once	crates/_support/pgsync/src/sim/watchdog.rs	1	DST-REVIEW(ws-core): wall-epoch Instant OnceLock (pure closure); watchdog-only
+spawn	crates/_support/pgsync/src/sim/watchdog.rs	1	DST-REVIEW(ws-core): THE watchdog monitor thread — deliberately UNREGISTERED and outside the spawn door (it must observe a wedged schedule from outside the model); design s4
+time	crates/_support/pgsync/src/sim/watchdog.rs	3	DST-REVIEW(ws-core): heartbeat wall stamps + stall arithmetic (std Instant) — the watchdog measures WALL stalls of the virtualized world by definition; never logged into SCHEDOP lines
+# ================== end PERMIT-S1-CORE ==================
