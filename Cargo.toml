@@ -134,6 +134,8 @@ members = [
     "crates/backend/libpq/be_secure_openssl",
     "crates/backend/libpq/pqcomm",
     "crates/backend/libpq/pqcomm_stdio",
+    "crates/backend/libpq/fdnb",
+    "crates/backend/libpq/pqcomm_simnet",
     "crates/backend/storage/large_object",
     "crates/backend/catalog/pg_largeobject",
     "crates/backend/libpq/be_fsstubs",

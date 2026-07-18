@@ -5644,6 +5644,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fdnb"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "file_fdw"
 version = "0.0.0"
 dependencies = [
@@ -12668,11 +12675,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "pqcomm_simnet"
+version = "0.0.0"
+dependencies = [
+ "be_secure_seams",
+ "elog",
+ "ip",
+ "libc",
+ "postgres_seams",
+ "pqcomm",
+ "pqcomm_seams",
+ "types_core",
+ "types_error",
+ "types_startup",
+ "types_storage",
+]
+
+[[package]]
 name = "pqcomm_stdio"
 version = "0.0.0"
 dependencies = [
  "be_secure_seams",
  "elog",
+ "fdnb",
  "libc",
  "postgres_seams",
  "pqcomm",
