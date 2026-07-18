@@ -4,12 +4,14 @@
 extern crate alloc;
 
 use alloc::rc::Rc;
+use core::alloc::Layout;
+use core::ptr::NonNull;
 
 use ::datum::NullableDatum;
 use ::execexpr::{exec_eval_expr, exec_init_expr, exec_init_qual, EvalSlots, ExprState};
-use ::execscan::{exec_scan_extended, ScanNode, ScanState};
+use ::execscan::{exec_scan_epq, exec_scan_extended, ScanNode, ScanState};
 use ::executils::{EStateData, ExecSlotId};
-use ::mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Allocator, Mcx, MemoryContext, PgBox, PgVec};
 use ::types_error::{PgError, PgResult, ERRCODE_E_R_I_E_SRF_PROTOCOL_VIOLATED};
 use ::types_fmgr::{
     ExprDoneCond, FmgrInfo, LocalFcinfo, ReturnSetInfo, SetFunctionReturnMode, SFRM_Materialize,
@@ -61,8 +63,32 @@ pub struct FunctionScanState<'mcx> {
     scratch: PgVec<'mcx, NullableDatum>,
     // C argcontext ("Table function arguments"): SRF argument values must
     // survive the ValuePerCall loop's per-tuple resets; reset per rescan.
-    arg_mcx: ::mcx::MemoryContext,
+    // Arena-slot + reset-callback ownership (the nodememoize make_table_ctx
+    // idiom): pgrust child links are accounting-only weak refs, so unlike C
+    // — where FreeExecutorState's MemoryContextDelete(es_query_cxt) recurses
+    // into argcontext — nothing reclaims an owned context embedded in a
+    // forgotten node state. Holding it by value here leaked ~8KB per
+    // FunctionScan per execution (TPROC-C leak #3, notes/memleak4-lane.md).
+    // The registered callback drops it on BOTH teardown paths: the estate
+    // context reset (exec_ctx_pool park) and the abort-path context drop.
+    arg_mcx: NonNull<MemoryContext>,
     eflags: i32,
+}
+
+// C argcontext lifetime (execMain.c FreeExecutorState recursion), built the
+// way nodememoize builds MemoizeHashTable: the context VALUE lives in the
+// estate arena at a stable address, and the estate context's reset callback
+// is the reclaim point (fires exactly once, before the arena bytes go).
+fn make_arg_ctx(mcx: Mcx<'_>) -> PgResult<NonNull<MemoryContext>> {
+    let layout = Layout::new::<MemoryContext>();
+    let raw = mcx.allocate(layout).map_err(|_| mcx.oom(layout.size()))?;
+    let p: NonNull<MemoryContext> = raw.cast();
+    // SAFETY: fresh allocation of the exact layout.
+    unsafe { p.write(mcx.context().new_child_bump("Table function arguments")) };
+    // SAFETY: fires exactly once, before the arena bytes are reclaimed.
+    mcx.context()
+        .register_reset_callback(move || unsafe { core::ptr::drop_in_place(p.as_ptr()) });
+    Ok(p)
 }
 
 impl<'mcx> ScanNode<'mcx> for FunctionScanState<'mcx> {
@@ -94,7 +120,9 @@ impl<'mcx> ScanNode<'mcx> for FunctionScanState<'mcx> {
                     self.eflags & EXEC_FLAG_BACKWARD != 0,
                     estate,
                     self.ss.ps_ExprContext,
-                    &mut self.arg_mcx,
+                    // SAFETY: arena slot armed by make_arg_ctx; exclusive
+                    // during the scan (dropped only by the estate reset cb).
+                    unsafe { self.arg_mcx.as_mut() },
                 )?;
                 store.rescan();
                 fs.tstore = Some(store);
@@ -126,7 +154,9 @@ impl<'mcx> ScanNode<'mcx> for FunctionScanState<'mcx> {
                     self.eflags & EXEC_FLAG_BACKWARD != 0,
                     estate,
                     self.ss.ps_ExprContext,
-                    &mut self.arg_mcx,
+                    // SAFETY: arena slot armed by make_arg_ctx; exclusive
+                    // during the scan (dropped only by the estate reset cb).
+                    unsafe { self.arg_mcx.as_mut() },
                 )?;
                 store.rescan();
                 fs.tstore = Some(store);
@@ -190,6 +220,14 @@ pub fn exec_function_scan<'mcx>(
     node: &mut FunctionScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
+    // C ExecScan reads es_epq_active per call: under an EvalPlanQual recheck
+    // the fetch substitutes this rel's marked original row (relsubs_rowmark
+    // wholerow junk) instead of re-running the function — re-emitting all
+    // rows lets a parameterized-inner join consume the target's test tuple
+    // at the wrong outer row and silently skip the row (epqjoin lane).
+    if estate.es_epq_active {
+        return exec_scan_epq(node, estate);
+    }
     match (node.ss.qual.is_some(), node.ss.ps_ProjInfo.is_some()) {
         (false, false) => exec_scan_extended::<_, false, false>(node, estate),
         (true, false) => exec_scan_extended::<_, true, false>(node, estate),
@@ -302,7 +340,7 @@ pub fn exec_init_function_scan<'mcx>(
         scratch: PgVec::new_in(mcx),
         // Bump (leak-then-reset) like ExprContext's per-tuple context: arg
         // evaluation leaks by-ref datums here by design (C argContext).
-        arg_mcx: mcx.context().new_child_bump("Table function arguments"),
+        arg_mcx: make_arg_ctx(mcx)?,
         eflags,
     })
 }
@@ -763,6 +801,10 @@ pub fn exec_end_function_scan(node: &mut FunctionScanState<'_>) {
         fs.setexpr.args.clear();
     }
     node.funcstates.clear();
+    // arg_mcx is NOT freed here — C parity: ExecEndFunctionScan leaves
+    // argcontext to FreeExecutorState; our equivalent is the estate-reset
+    // callback registered by make_arg_ctx (fires at exec_ctx_pool park on
+    // success and at the estate-context drop on abort).
 }
 
 /// `ExecReScanFunctionScan`, chgParam-NULL arm: rewind the tuplestores.
@@ -817,7 +859,10 @@ pub fn exec_rescan_function_scan_chg<'mcx>(
 mcx::forget_safe_struct!(
     SetExprState<'_> { collation, returns_set, returns_tuple; flinfo, args, elided_func_state },
     FunctionScanPerFuncState<'_> { colcount, rowcount; setexpr, tupdesc, tstore, func_slot, funcparams },
-    // arg_mcx: child of es_query_cxt; forget skips its individual delete,
-    // the query-context teardown reclaims it (C argcontext lifetime).
-    FunctionScanState<'_> { ss, simple, ordinality, ordinal, eflags; funcstates, scratch, arg_mcx },
+    // arg_mcx: NonNull to an arena slot; the context value it points at is
+    // dropped by the estate-reset callback (make_arg_ctx), never by this
+    // struct — the old by-value field leaked its arena on every execution
+    // (leak #3: "query-context teardown reclaims it" was wrong; reset/park
+    // never touches child contexts).
+    FunctionScanState<'_> { ss, simple, ordinality, ordinal, eflags, arg_mcx; funcstates, scratch },
 );

@@ -1492,6 +1492,35 @@ pub fn CountDBConnections(databaseid: types_core::Oid) -> PgResult<i32> {
     Ok(count)
 }
 
+// CountUserBackends(roleid) (procarray.c): rolconnlimit enforcement — the
+// same dense-array walk as CountDBConnections keyed on roleId. Skips
+// prepared xacts (pid == 0) and non-regular backends; counts the calling
+// backend too (roleId is stamped by SetAuthenticatedUserId before
+// InitializeSessionUserId runs the limit check, so `count > rolconnlimit`
+// matches C's off-by-self semantics exactly).
+pub fn CountUserBackends(roleid: types_core::Oid) -> PgResult<i32> {
+    let arrayP = procArray();
+    let hdr = ProcGlobal();
+    let mut count = 0;
+
+    LWLockAcquire(ProcArrayLock(), LW_SHARED, MyProc().expect("no MyProc"))?;
+    for index in 0..arrayP.numProcs.get() as usize {
+        let pgprocno = arrayP.pgprocnos[index].get();
+        let proc = &hdr.allProcs[pgprocno as usize];
+        if proc.pid.load(Relaxed) == 0 {
+            continue; // do not count prepared xacts
+        }
+        if !proc.isRegularBackend.load(Relaxed) {
+            continue; // do not count background workers
+        }
+        if proc.roleId.load(Relaxed) == roleid {
+            count += 1;
+        }
+    }
+    LWLockRelease(ProcArrayLock())?;
+    Ok(count)
+}
+
 // C sends SIGTERM to conflicting autovacuum workers each try; no autovacuum
 // exists here, so the walk-and-retry loop is kept without the kill step.
 pub fn CountOtherDBBackends(databaseid: types_core::Oid) -> PgResult<Option<(i32, i32)>> {
@@ -1642,6 +1671,7 @@ pub fn init_seams() {
     procarray_seams::transaction_id_is_in_progress::set(TransactionIdIsInProgress);
     procarray_seams::xid_cache_remove_running_xids::set(XidCacheRemoveRunningXids);
     procarray_seams::count_db_connections::set(CountDBConnections);
+    procarray_seams::count_user_backends::set(CountUserBackends);
     procarray_seams::get_oldest_active_transaction_id::set(|| {
         GetOldestActiveTransactionId().expect("GetOldestActiveTransactionId")
     });
