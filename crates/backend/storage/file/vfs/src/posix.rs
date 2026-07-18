@@ -38,8 +38,24 @@ impl PosixVfs {
         }
     }
 
+    // wasm32: WASI p1 has neither getrlimit nor dup(2) — fd's own wasm arm
+    // (vfd count_usable_fds) short-circuits before reaching the vfs probe,
+    // so this stub is never called; it exists to keep PosixVfs compiling on
+    // the wasm target (same posture as fd's Ok((max_to_probe, 3))).
+    #[cfg(target_family = "wasm")]
+    pub fn fd_budget_probe_report(&self, max_to_probe: usize) -> FdBudgetProbe {
+        FdBudgetProbe {
+            used: max_to_probe as i32,
+            highest_fd: max_to_probe as i32 + 2,
+            getrlimit_failed: false,
+            getrlimit_errno: 0,
+            stop_errno: 0,
+        }
+    }
+
     /// count_usable_fds' probe core: getrlimit-bounded dup(2) loop, all probe
     /// fds closed before returning. Diagnostics captured for fd to report.
+    #[cfg(not(target_family = "wasm"))]
     pub fn fd_budget_probe_report(&self, max_to_probe: usize) -> FdBudgetProbe {
         let mut opened: Vec<i32> = Vec::with_capacity(1024);
         let mut used: i32 = 0;
@@ -314,7 +330,11 @@ impl Vfs for PosixVfs {
     }
 
     fn read_dir(&self, path: &CStr) -> VfsResult<VfsDirIter> {
+        #[cfg(not(target_family = "wasm"))]
         use std::os::unix::ffi::OsStrExt;
+        // wasm32: wasi's OsStrExt twin (byte-slice conversion is identical).
+        #[cfg(target_family = "wasm")]
+        use std::os::wasi::ffi::OsStrExt;
         let os = std::ffi::OsStr::from_bytes(path.to_bytes());
         match std::fs::read_dir(os) {
             Ok(rd) => Ok(VfsDirIter::from_read_dir(rd)),
@@ -337,8 +357,17 @@ fn file_info_from_stat(st: &libc::stat) -> FileInfo {
         size: st.st_size as i64,
         mode: st.st_mode as u32,
         nlink: st.st_nlink as u64,
+        // wasm32: wasi-libc's stat spells the timestamps st_mtim (timespec);
+        // no st_mtime/st_mtime_nsec aliases in the libc crate (the
+        // basebackup wasm arm's exact note).
+        #[cfg(not(target_family = "wasm"))]
         mtime_sec: st.st_mtime as i64,
+        #[cfg(not(target_family = "wasm"))]
         mtime_nsec: st.st_mtime_nsec as i64,
+        #[cfg(target_family = "wasm")]
+        mtime_sec: st.st_mtim.tv_sec as i64,
+        #[cfg(target_family = "wasm")]
+        mtime_nsec: st.st_mtim.tv_nsec as i64,
         dev: st.st_dev as u64,
         ino: st.st_ino as u64,
         uid: st.st_uid as u32,
