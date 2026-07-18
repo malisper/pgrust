@@ -1898,6 +1898,14 @@ pub(crate) fn cursor_store_batch_fill<'m, 'mcx>(
             !::nodeseqscan::seq_scan_is_pgrcolumnar(ss),
             "capture-batchable probe admitted a pgrcolumnar scan (§3.1 AM narrowing)"
         );
+        // SE-R41 v2: the ROW drive's own page-batch mode owns this scan's
+        // staging (its position is an SoA selection cursor the lane can
+        // neither continue nor adopt) — the row loop serves, byte-correctly.
+        // Structurally unreachable today (both verdicts memoized-sticky
+        // from scan start); one load per FILL, keeps the exclusion local.
+        if ::nodeseqscan::seq_scan_row_batch_mode_on(ss) {
+            return Ok(false);
+        }
         if !super::seq_scan_fusible(ss, estate)? {
             // Run-time refusal (instrumented / no page batch / …): the
             // caller's capture row loop serves this run — correctness
@@ -1905,6 +1913,11 @@ pub(crate) fn cursor_store_batch_fill<'m, 'mcx>(
             return Ok(false);
         }
         debug_assert!(::types_scan::sdir::ScanDirectionIsForward(estate.es_direction));
+        // SE-R41 v2 (notes/se-r41-v2.md §3): the cursor-fill pin posture —
+        // the staged page and its pin survive suspension (C-parity Volcano
+        // posture; the settle walker refuses to park this scan), so the
+        // per-fill park→release→restage ceremony never runs. Idempotent.
+        ss.set_lane_hold_pin();
         super::stats::tick_owned(super::stats::ShapeClass::Cursor);
         let cap = SinkCapture {
             sidecar,
