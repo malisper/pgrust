@@ -2618,6 +2618,21 @@ fn agg_hash_build_fold_drain<'mcx, S: batch_source::BatchGranuleSource<'mcx>>(
         // the survivor set on this admission (no requal tail); forced-
         // fallback bits OR'd into it are harmless (kind-0 rows only fill).
         if let Some(cols) = &latemat_cols {
+            // WS-AH review F3 hardening: this completion trusts the staged
+            // whole-qual bitmap as THIS batch's survivor set. Pin the arm
+            // invariant (an armed drive recomputes the bitmap on every
+            // staged batch — qual_armed + nwords > 0) against future feed
+            // re-plumbing: a batch staged without recomputing the bitmap
+            // would expose stale selection words here (silent stale cells,
+            // not a crash).
+            #[cfg(debug_assertions)]
+            {
+                let ss = batch_source::require_bridge(src)?;
+                debug_assert!(
+                    ::nodeseqscan::seq_scan_batch_qual_bitmap_ready(ss),
+                    "k1-latemat completion without THIS batch's whole-qual bitmap"
+                );
+            }
             let nwords = (n as usize).div_ceil(64);
             let mut sel = [0u64; ::exectuples::SOA_BM_WORDS];
             match src.qual_sel() {
