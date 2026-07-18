@@ -20,7 +20,14 @@
     "tables_max": 4,
     "cols_min": 3,
     "cols_max": 3,
-    "rows_max": 400
+    "rows_max": 1200,
+    "col_types": {
+      "int": 4,
+      "bigint": 2,
+      "text": 3,
+      "numeric": 2,
+      "float8": 3
+    }
   },
   "arm_sets": [
     [],

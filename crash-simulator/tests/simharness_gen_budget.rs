@@ -27,6 +27,7 @@ fn test_profile(weights: StatementWeights, len: u64) -> GenProfile {
             min_cols: 2,
             max_cols: 4,
             col_types: ColTypeWeights { int: 4, bigint: 2, text: 3, numeric: 2, float8: 0 },
+            rows_max: 200,
         },
         iso_mix: IsoMix { rc: 70, rr: 20, ser: 10 },
         arm_sets: vec![vec![("work_mem".into(), "64kB".into())]],
