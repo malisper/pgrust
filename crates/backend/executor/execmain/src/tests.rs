@@ -12066,4 +12066,180 @@ mod spi_inc1_aj_w9 {
         scanfix::quiesced();
     }
 }
+
+// WS-AJ wave-9.5 (SPI Stage-A seam, se/spi-stage-a; append-only growth of
+// this same WS-AJ sub-region): the seam-half pins — knob gate order, the
+// NAMED admission taxonomy, and the knob-ON re-ride of the frozen Volcano
+// cadence pins above through a REAL `CommandDest::Spi` receiver (the budget
+// installs, the STOP-ONLY settle runs, and every count/pin assertion holds
+// byte-for-byte). Knob lever = process-global static: every flipping test
+// serializes on scanfix::TEST_LOCK (the cursors_wave9 precedent) and
+// restores OFF.
+mod spi_stage_a_aj_w95 {
+    use super::*;
+
+    /// The SpiPrintTup receiver's owner callbacks live in spi.c (the spi
+    /// crate installs them at backend boot); the unit world installs
+    /// counting stubs ONCE (seams are set-once process-globals — the
+    /// hashjoin_multibatch double-installer lesson, so this helper is the
+    /// only installer in the suite and it is Once-guarded).
+    fn install_spi_dest_seams() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            ::spi_seams::spi_dest_startup::set(spi_dest_startup_stub);
+            ::spi_seams::spi_printtup::set(spi_printtup_stub);
+        });
+    }
+    fn spi_dest_startup_stub(
+        _operation: i32,
+        _typeinfo: &::types_tuple::TupleDescData<'_>,
+    ) -> ::types_error::PgResult<()> {
+        Ok(())
+    }
+    fn spi_printtup_stub(
+        _slot: &mut ::types_slot::SlotData<'_>,
+    ) -> ::types_error::PgResult<bool> {
+        Ok(true)
+    }
+
+    /// `_SPI_pquery`'s exact cadence (the `run_spi_shape` shape above) but
+    /// through the REAL SPI receiver: dest = SpiPrintTup, CommandDest::Spi
+    /// — the seam-visible SPI signal the install half keys on.
+    fn run_spi_shape_spi_dest(relid: u32, tcount: u64) -> u64 {
+        let mcx = leaked_mcx();
+        let pstmt = mk_seqscan_pstmt(mcx, relid);
+        let qd = execmain_seams::create_query_desc::call(
+            pstmt,
+            "SELECT a FROM spi_stage_a_fixture",
+            None,
+            None,
+            CommandDest::Spi,
+            ParamListHandle::NULL,
+            QueryEnvHandle::NULL,
+            0,
+        )
+        .unwrap();
+        execmain_seams::executor_start::call(qd, 0).unwrap();
+        let mut dest = DestReceiver::SpiPrintTup;
+        execmain_seams::executor_run::call(qd, ForwardScanDirection, tcount, &mut dest)
+            .unwrap();
+        let n = execmain_seams::query_desc_es_processed::call(qd);
+        execmain_seams::executor_finish::call(qd).unwrap();
+        execmain_seams::executor_end::call(qd).unwrap();
+        execmain_seams::free_query_desc::call(qd);
+        n
+    }
+
+    /// Install gate order + knob-OFF-zero (R-KNOBS row semantics): the
+    /// count/select/dest register tests answer BEFORE the knob cell loads;
+    /// knob-OFF installs nothing for ANY shape; knob-ON installs exactly
+    /// `_SPI_pquery`'s count-exact STOP shape.
+    #[test]
+    fn spi_w95_budget_gate_semantics() {
+        let _knob = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let install = crate::lanev2::spi_run_budget_install;
+
+        // Knob OFF (default posture): nothing installs, any shape.
+        crate::lanev2::spi_set_for_tests(false);
+        assert_eq!(install(true, true, true, 93050, false, 0), None, "knob-OFF installs nothing");
+        assert_eq!(install(true, true, true, 1, false, 0), None);
+
+        // Knob ON: exactly the tcount-limited forward serial SELECT into
+        // the SPI receiver.
+        crate::lanev2::spi_set_for_tests(true);
+        assert_eq!(install(true, true, true, 93050, false, 0), Some(93050));
+        assert_eq!(install(true, true, true, 0, false, 0), None, "tcount-0 never installs");
+        assert_eq!(install(false, true, true, 93050, false, 0), None, "non-SELECT never installs");
+        assert_eq!(
+            install(true, false, true, 93050, false, 0),
+            None,
+            "a non-SPI dest never installs (the seam-visibility gate)"
+        );
+        assert_eq!(
+            install(true, true, true, 93050, true, 0),
+            None,
+            "serial-law pin: a parallel run NEVER carries a budget (fail-closed)"
+        );
+
+        crate::lanev2::spi_set_for_tests(false);
+    }
+
+    /// The NAMED admission taxonomy (`ShapeClass::Spi`): all three shape
+    /// arms are FAIL-CLOSED and reuse the GENERIC registry vocabulary
+    /// (backward / scroll-mark / parallel-gate) — `_SPI_pquery` hardcodes
+    /// Forward, passes no random-access eflags, and count-limited runs are
+    /// serial; the arms exist so a regression refuses loudly instead of
+    /// hosting an unsound shape (refusal-not-error).
+    #[test]
+    fn spi_w95_admission_taxonomy_named_classes() {
+        use ::types_slot::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
+        let _knob = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let name = crate::lanev2::spi_admission_refusal_name;
+
+        // Admit: forward, no random-access demand, serial.
+        assert_eq!(name(true, 0, false), None, "the _SPI_pquery shape admits");
+
+        assert_eq!(name(false, 0, false), Some("backward"));
+        assert_eq!(name(true, EXEC_FLAG_REWIND, false), Some("scroll-mark"));
+        assert_eq!(name(true, EXEC_FLAG_BACKWARD, false), Some("scroll-mark"));
+        assert_eq!(name(true, EXEC_FLAG_MARK, false), Some("scroll-mark"));
+        assert_eq!(name(true, 0, true), Some("parallel-gate"));
+
+        // The install half refuses the WHOLE statement on a named refusal:
+        // no budget ⇒ no SPI count-seam machinery ⇒ Volcano byte-identical.
+        crate::lanev2::spi_set_for_tests(true);
+        assert_eq!(
+            crate::lanev2::spi_run_budget_install(
+                true,
+                true,
+                true,
+                93051,
+                false,
+                EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD
+            ),
+            None,
+            "a random-access-eflags run refuses wholesale"
+        );
+        crate::lanev2::spi_set_for_tests(false);
+    }
+
+    /// Knob-ON re-ride of the frozen cadence pins through the REAL SPI
+    /// receiver: the budget installs (dest = Spi, tcount != 0), the
+    /// STOP-ONLY settle runs below the drive loop, and every count
+    /// assertion of the Volcano pins above holds byte-for-byte — with the
+    /// fixture back to zero pins after each run (the settle face +
+    /// teardown, scanfix::quiesced). The knob-OFF arm re-rides the same
+    /// cells first: OFF and ON must be indistinguishable at this seam
+    /// (values move NEVER; the budget is settle discipline + accounting).
+    #[test]
+    fn spi_w95_shape_knob_on_byte_identity_stop_only() {
+        install_seams();
+        install_spi_dest_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let relid: u32 = 93052; // WS-AJ band
+        scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
+
+        // Knob-OFF arm (the default posture the dualexec off-arm rides).
+        crate::lanev2::spi_set_for_tests(false);
+        assert_eq!(run_spi_shape_spi_dest(relid, 2), 2);
+        scanfix::quiesced();
+        assert_eq!(run_spi_shape_spi_dest(relid, 0), 5);
+        scanfix::quiesced();
+
+        // Knob-ON arm: budget installed (tcount-limited SPI-dest SELECT),
+        // STOP-ONLY settle at the count-limited stop; identical counts.
+        crate::lanev2::spi_set_for_tests(true);
+        assert_eq!(run_spi_shape_spi_dest(relid, 2), 2, "tcount=2 stops exactly, knob-ON");
+        scanfix::quiesced();
+        assert_eq!(run_spi_shape_spi_dest(relid, 4), 4, "tcount=4 crosses the page boundary");
+        scanfix::quiesced();
+        assert_eq!(run_spi_shape_spi_dest(relid, 0), 5, "tcount=0 completeness (no budget)");
+        scanfix::quiesced();
+        assert_eq!(run_spi_shape_spi_dest(relid, 99), 5, "tcount>rows saturates");
+        scanfix::quiesced();
+
+        crate::lanev2::spi_set_for_tests(false);
+    }
+}
 // --- end WS-AJ wave-9 sub-region --------------------------------------------

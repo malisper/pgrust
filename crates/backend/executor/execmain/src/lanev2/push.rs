@@ -1306,6 +1306,207 @@ fn resume_walk<'mcx>(
 
 // --- end WS-AI wave-9 ----------------------------------------------------------
 
+// --- WS-AJ wave-9.5 (SPI Stage-A seam, `se/spi-stage-a`; lane-spi.md §1/§3) -----
+//
+// Stage A of docs/design/lane-spi.md: `_SPI_pquery` runs a statement as
+// executor_start → ONE `executor_run(Forward, tcount, dest)`
+// (spi/src/execute.rs:562) → executor_finish/end — the tcount limit is the
+// SAME count-exact stop the cursor budget carries, with ONE difference:
+// SPI never resumes after a tcount stop (STOP-ONLY; the spi_inc1_aj_w9 unit
+// pins freeze the cadence). The seam therefore rides WS-AI's budget-sink
+// SHAPE — an estate-resident per-run budget (`es_spi_run_budget`, its own
+// field so the two taxonomies never cross) installed at the `execute_plan`
+// run seam — and settles lane-staged claims at the count-limited stop with
+// the SAME ParkWalk release chain, but never arms `es_lane_cursor_parked`
+// (nothing ever comes back for a parked SPI position; ExecutorEnd follows
+// immediately).
+//
+// spi.c PROVENANCE, BINDING (the wave-9.5 review's attack list):
+//   * `SPI_processed` = `es_processed` read after the single run
+//     (execute.rs:563) — the budget changes NOTHING about the drive loop's
+//     count enforcement (C's own ExecutePlan `number_tuples` check), so the
+//     count is byte-preserved BY CONSTRUCTION (pins: tcount-exact stop,
+//     tcount=0 completeness, tcount>rows saturation).
+//   * tuptable lifetime / `SPI_freetuptable` timing: the tuptable is built
+//     by the SpiPrintTup receiver ABOVE this seam and owned by the SPI
+//     connection stack; nothing here touches it.
+//   * connect/finish nesting: each nested SPI statement runs on its OWN
+//     QueryDesc/estate (fresh `es_spi_run_budget` written at ITS run entry;
+//     the unconditional-overwrite idiom makes the field per-run by
+//     construction), so nesting cannot leak a budget across levels.
+//   * rewind / EXCEPTION-block unwind mid-SPI: an error unwind abandons the
+//     estate without re-entry; the budget is estate-resident dead state
+//     (no guard needed — the WS-AI unwind argument verbatim), and staged
+//     lane claims release through the normal executor/resowner teardown.
+//   * INVARIANT 5 (teardown ordering, post-t26 map per notes/se-wave9-aj.md
+//     §11.3): the STOP-ONLY settle retires lane-staged claims at the stop
+//     point, BEFORE executor_finish/end return control toward the three
+//     plancache release points (per-eval put-back on invalidation-replan,
+//     `free_function_plans`, the `on_proc_exit` release path).
+//
+// INVARIANT 1 (never route detected-simple): the plpgsql simple path
+// evaluates via ExprState off the function-lifetime plan cache with no
+// ExecutorStart/Run — it can never reach this seam; nothing here can demote
+// it (the rate + Ir/call guard pair is fleet evidence — named obligation
+// `aj-ir-pair` in the worklog, the ai-ir-pair cadence).
+//
+// INVARIANT 3 (thread-affinity LAW), seam-side half: a budgeted SPI run is
+// DOP-1 caller-as-worker BY CONSTRUCTION — count-limited runs never carry a
+// gang (the ported execmain.rs use_parallel_mode gate), and the classifier
+// FAIL-CLOSED refuses a parallel run (ParallelGate) rather than asserting.
+// The plpgsql-side owner of the law is the function-lifetime `EXPR_PLANS`
+// SimpleState machinery (the RV3 re-baseline, se-wave9-aj.md §11.3) — a
+// frozen surface this increment; the owner-side debug assertion lands with
+// t26 absorption (named obligation in the worklog).
+
+use std::sync::atomic::AtomicU8 as SpiAtomicU8;
+
+/// `PGRUST_LANE_V2_SPI` (default OFF; R-KNOBS registry spelling): the SPI
+/// Stage-A gate. OFF = the run seam installs no SPI budget and every byte
+/// of the run path behaves as today (the install call short-circuits on
+/// `count == 0` / non-SELECT / non-SPI dest before this cell is ever
+/// loaded). ON = tcount-limited SPI-statement runs carry a per-run emission
+/// budget and settle lane-staged claims at the count-limited stop.
+/// AtomicU8 + `_set_for_tests` idiom (heapfeed precedent; the CURSORS cell
+/// above).
+static SPI_LANE: SpiAtomicU8 = SpiAtomicU8::new(0);
+
+pub(crate) fn spi_v2_enabled() -> bool {
+    match SPI_LANE.load(Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let on = matches!(std::env::var("PGRUST_LANE_V2_SPI").as_deref(), Ok("1") | Ok("on"));
+            SPI_LANE.store(if on { 2 } else { 1 }, Relaxed);
+            on
+        }
+    }
+}
+
+/// Same-process A/B lever for the unit corpus (`crate::tests`).
+#[cfg(test)]
+pub(crate) fn spi_set_for_tests(on: bool) {
+    SPI_LANE.store(if on { 2 } else { 1 }, Relaxed);
+}
+
+/// Stage-A ADMISSION CLASSIFIER (the NAMED refusal taxonomy,
+/// `ShapeClass::Spi`): given the run-seam-visible statement shape, `None` =
+/// this budgeted run may carry the SPI count-seam machinery (forward, no
+/// random-access eflags demand, serial); `Some(reason)` = the WHOLE
+/// statement refuses to Volcano exactly as today (refusal-not-error). All
+/// three arms are FAIL-CLOSED: `_SPI_pquery` hardcodes Forward
+/// (execute.rs:562), passes eflags ∈ {0, EXEC_FLAG_SKIP_TRIGGERS} (:560),
+/// and count-limited runs are serial by the ported use_parallel_mode gate —
+/// the arms exist so a regression in ANY of those invariants refuses loudly
+/// (corpus-visible) instead of hosting an unsound shape. The generic
+/// vocabulary is deliberately REUSED (Backward / ScrollMark / ParallelGate;
+/// the WS-AI ParallelGate precedent) — no new variant is minted for arms
+/// that cannot tick today.
+pub(crate) fn spi_admission_refusal(
+    forward: bool,
+    top_eflags: i32,
+    use_parallel_mode: bool,
+) -> Option<super::stats::RefuseReason> {
+    use ::types_slot::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
+    if !forward {
+        return Some(super::stats::RefuseReason::Backward);
+    }
+    if top_eflags & (EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) != 0 {
+        return Some(super::stats::RefuseReason::ScrollMark);
+    }
+    if use_parallel_mode {
+        return Some(super::stats::RefuseReason::ParallelGate);
+    }
+    None
+}
+
+/// Test/corpus face of the classifier: the refusal-reason string
+/// (`RefuseReason::name()`, the registry vocabulary) or None on admit.
+#[cfg(test)]
+pub(crate) fn spi_admission_refusal_name(
+    forward: bool,
+    top_eflags: i32,
+    use_parallel_mode: bool,
+) -> Option<&'static str> {
+    spi_admission_refusal(forward, top_eflags, use_parallel_mode).map(|r| r.name())
+}
+
+/// The run seam's install half (`execute_plan`, once per ExecutorRun):
+/// computes the value of `es_spi_run_budget` for this run — `Some(tcount)`
+/// iff this run is a knob-ON, tcount-limited, SPI-ADMITTED (forward,
+/// non-random-access, serial) SELECT driven into the SPI tuptable receiver
+/// (`CommandDest::Spi`): `_SPI_pquery`'s count-exact STOP shape. The caller
+/// writes the result to the estate UNCONDITIONALLY (a None overwrites any
+/// stale value; an estate re-run after an error can never inherit a
+/// budget). Gate order is the cost order: `count == 0` (every SPI_execute
+/// default-tcount statement and every non-SPI simple-protocol run) answers
+/// with one register test before the dest compare or the knob cell load;
+/// the classifier and its ticks run only knob-ON (knob-OFF accounting
+/// byte-identical by construction).
+pub(crate) fn spi_run_budget_install(
+    is_select: bool,
+    spi_dest: bool,
+    forward: bool,
+    count: u64,
+    use_parallel_mode: bool,
+    top_eflags: i32,
+) -> Option<u64> {
+    if count == 0 || !is_select || !spi_dest {
+        return None;
+    }
+    if !spi_v2_enabled() {
+        return None;
+    }
+    if let Some(reason) = spi_admission_refusal(forward, top_eflags, use_parallel_mode) {
+        // Once per budgeted run (never per tuple); no-op unless accounting
+        // is armed.
+        super::stats::tick_refused(super::stats::ShapeClass::Spi, reason);
+        return None;
+    }
+    // INV3 seam-side half (lane-spi.md invariant 3): an admitted budgeted
+    // SPI run is DOP-1 caller-as-worker — the classifier just refused the
+    // parallel arm, so this documents the admitted-world law.
+    debug_assert!(!use_parallel_mode, "budgeted SPI run over a gang");
+    Some(count)
+}
+
+/// The run seam's STOP-ONLY settle half (below the `execute_plan` drive
+/// loop, gated on `es_spi_run_budget.is_some()`): retire every lane-staged
+/// scan claim through the SAME ledgered claim-release chain the cursor park
+/// walker owns (`seq_scan_cursor_settle` → `table_scan_end_claim_release` →
+/// `heap_end_claim_release`; R3 zero-pins-at-settle debug-asserted at every
+/// settled claim), then tick the `spi-plan-refused` roll-up when the plan
+/// carried no lane engagement. UNLIKE the cursor walker's caller this NEVER
+/// arms `es_lane_cursor_parked`: `_SPI_pquery` proceeds straight to
+/// executor_finish/end (the STOP-ONLY pin) — the recorded reposition point
+/// is dead state torn down by ExecutorEnd, and the settled claims are
+/// retired BEFORE control returns toward the plancache release points
+/// (INVARIANT 5). EPQ law shared with cursors: an EPQ recheck drive never
+/// enters `execute_plan`, and the walk refuses under `es_epq_active`.
+pub(crate) fn spi_run_settle<'mcx>(
+    node: &mut crate::procnode::PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) {
+    if estate.es_epq_active {
+        return;
+    }
+    let mut w = ParkWalk { engaged: false, parked: false };
+    w.settle(node, estate);
+    if !w.engaged {
+        // The budgeted SPI statement's plan carried no (scan-class) lane
+        // engagement: the whole statement rides Volcano exactly as today.
+        // Once per budgeted run; no-op unless accounting armed. Detection
+        // breadth = the WS-AI inc-1b scan-class detector.
+        super::stats::tick_refused(
+            super::stats::ShapeClass::Spi,
+            super::stats::RefuseReason::SpiPlanRefused,
+        );
+    }
+    // w.parked deliberately dropped: STOP-ONLY (no resume ever runs).
+}
+
+// --- end WS-AJ wave-9.5 ----------------------------------------------------------
+
 // =============================================================================
 // Row-mode driver mechanics (pull_step_rows over stub source/op): the driver
 // contract itself — resume-before-produce ordering, Paused-then-Finished,

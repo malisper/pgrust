@@ -210,9 +210,28 @@ pub(super) enum ShapeClass {
     /// byte-identical by construction. A cursor refusal NEVER changes
     /// output bytes: the run rides Volcano exactly as today (fail-open law).
     Cursor = 38,
+    // -----------------------------------------------------------------------
+    // Wave-9.5 SPI-admission class (WS-AJ Stage-A seam, `se/spi-stage-a`;
+    // APPEND-ONLY chartered mint, recorded in notes/se-spi-stage-a.md; the
+    // wave-9 §5 placeholder in notes/se-phase0-integration.md names this
+    // landing).
+    // -----------------------------------------------------------------------
+    /// Count-limited SPI-statement admission (docs/design/lane-spi.md §1/§3
+    /// Stage A): the WHOLE-RUN refusal classes of `_SPI_pquery`'s budgeted
+    /// tcount-limited STOP-ONLY emit sink. Cadence = once per budgeted
+    /// `execute_plan` run (never per tuple); ticks fire only with
+    /// `PGRUST_LANE_V2_SPI` ON (knob-OFF never reaches the classifier), so
+    /// default-config accounting is byte-identical by construction. An SPI
+    /// refusal NEVER changes output bytes: the statement rides Volcano
+    /// exactly as today (fail-open law; refusal-not-error). Seam-visibility
+    /// honesty (the `CursorWithHold` precedent): an SPI-entered run with a
+    /// caller-supplied non-SPI receiver (`SPI_execute_extended` dest
+    /// option) is NOT seam-visible below `executor_run` — it installs no
+    /// budget and ticks nothing; no RESERVED variant is minted for it.
+    Spi = 39,
 }
 
-const N_CLASSES: usize = 39;
+const N_CLASSES: usize = 40;
 
 impl ShapeClass {
     pub(super) const ALL: [ShapeClass; N_CLASSES] = [
@@ -255,6 +274,7 @@ impl ShapeClass {
         ShapeClass::LockRows,
         ShapeClass::ModifyTable,
         ShapeClass::Cursor,
+        ShapeClass::Spi,
     ];
 
     pub(super) fn name(self) -> &'static str {
@@ -298,6 +318,7 @@ impl ShapeClass {
             ShapeClass::LockRows => "lockrows",
             ShapeClass::ModifyTable => "modifytable",
             ShapeClass::Cursor => "cursor",
+            ShapeClass::Spi => "spi",
         }
     }
 }
@@ -520,9 +541,30 @@ pub(super) enum RefuseReason {
     /// in inc-1c (recorded in notes/se-wave9-ai.md; over-ticking on
     /// breaker-engaged plans is armed-accounting-only, never semantics).
     CursorPlanRefused = 40,
+    // -----------------------------------------------------------------------
+    // Wave-9.5 SPI-admission refusal (WS-AJ Stage-A seam, `se/spi-stage-a`;
+    // APPEND-ONLY chartered mint, recorded in notes/se-spi-stage-a.md). ONE
+    // new variant: the classifier's shape arms REUSE the generic vocabulary
+    // (`Backward` / `ScrollMark` / `ParallelGate` — the WS-AI ParallelGate
+    // precedent) because all three are FAIL-CLOSED arms structurally
+    // unreachable from `_SPI_pquery` (Forward hardcoded at
+    // spi/src/execute.rs:562; eflags ∈ {0, SKIP_TRIGGERS} at :560;
+    // count-limited runs serial by the ported execmain.rs use_parallel_mode
+    // gate). Ticks ONLY under `ShapeClass::Spi`, once per budgeted run,
+    // knob-ON only; a refusal lands the WHOLE statement on Volcano
+    // byte-identically (fail-open law) — observability, never semantics.
+    // -----------------------------------------------------------------------
+    /// The budgeted SPI run's plan carried no lane engagement — the whole
+    /// statement rides Volcano (exactly as today). The plan's SPECIFIC
+    /// refusal reasons tick under their own classes at the per-pull gates;
+    /// this is the SPI-level roll-up, ticked at the STOP-ONLY settle walk.
+    /// Detection breadth = the WS-AI inc-1b scan-class detector (seqscan /
+    /// cbscan memoized verdicts + settled claims); the same inc-1c breaker
+    /// widening rides for both classes.
+    SpiPlanRefused = 41,
 }
 
-const N_REASONS: usize = 41;
+const N_REASONS: usize = 42;
 
 impl RefuseReason {
     pub(super) fn name(self) -> &'static str {
@@ -568,6 +610,7 @@ impl RefuseReason {
             RefuseReason::CursorWithHold => "cursor-with-hold",
             RefuseReason::CursorPersistHoldable => "cursor-persist-holdable",
             RefuseReason::CursorPlanRefused => "cursor-plan-refused",
+            RefuseReason::SpiPlanRefused => "spi-plan-refused",
         }
     }
 
@@ -615,6 +658,7 @@ impl RefuseReason {
             CursorWithHold,
             CursorPersistHoldable,
             CursorPlanRefused,
+            SpiPlanRefused,
         ][i]
     }
 }
