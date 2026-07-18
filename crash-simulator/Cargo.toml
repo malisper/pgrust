@@ -31,6 +31,11 @@ path = "src/bin/simharness_gen.rs"
 # reads are seed-derived (logical clock) so artifacts are byte-stable. The
 # engine-side sim substrate is a separate concern (report-only gate G-R3b).
 sim = []
+# H2 FaultDriver seam: compiles the SimVfsFaultDriver (fault-plan spec
+# delivery to a sim-built DUT). NO product-crate dependency — the spec types
+# are mirrors and the wire format is JSON; the DUT-side reader is the t28
+# activation step (see src/runner/faultdriver.rs module doc).
+simvfs-faults = []
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

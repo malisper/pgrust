@@ -120,6 +120,7 @@ pub fn run_plan_ctx(
             .filter(|s| s.to_ascii_uppercase().trim_start().starts_with("SET "))
             .cloned()
             .collect(),
+        ..ExecOptions::default()
     };
     let classifier = OracleDiffClassifier::new(bridge::load_warts());
     let oracle_checks;

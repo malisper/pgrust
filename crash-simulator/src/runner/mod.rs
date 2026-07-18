@@ -3,6 +3,7 @@
 
 pub mod bugbase;
 pub mod driver;
+pub mod faultdriver;
 pub mod planface;
 pub mod profile;
 pub mod runloop;

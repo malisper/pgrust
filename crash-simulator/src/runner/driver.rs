@@ -398,11 +398,21 @@ pub struct ExecOptions {
     /// defaults, which nukes the harness's `SET search_path` — the find-1
     /// FP class). Symmetric, uncounted infrastructure statements.
     pub post_reset_sql: Vec<String>,
+    /// H2 seam: reserved fault tags (Crash/TornWrite/Env) dispatch through
+    /// this driver instead of refusing inline. The NoOp default preserves
+    /// H1's `fault-reserved-refused` P1 on the main lineage; the
+    /// SimVfs-backed driver lights up at t28 (runner::faultdriver doc).
+    pub fault_driver: Box<dyn super::faultdriver::FaultDriver>,
 }
 
 impl Default for ExecOptions {
     fn default() -> Self {
-        ExecOptions { restart_cmd: None, stop_on_failure: true, post_reset_sql: Vec::new() }
+        ExecOptions {
+            restart_cmd: None,
+            stop_on_failure: true,
+            post_reset_sql: Vec::new(),
+            fault_driver: Box::new(super::faultdriver::NoOpFaultDriver),
+        }
     }
 }
 
@@ -955,20 +965,52 @@ pub fn execute_plan<'a>(
                     }
                 },
                 reserved => {
-                    // Crash/TornWrite/Env: render+parse OK, EXECUTE refuses (H4).
-                    report.count("fault-reserved-refused");
-                    report.failure = Some(Failure {
-                        step_idx: idx,
-                        signature: Signature {
-                            class: "fault-reserved-refused".into(),
-                            sqlstate: "".into(),
-                            site: format!("{:?}", reserved).chars().take(40).collect(),
-                        },
-                        class: "fault-reserved-refused".into(),
-                        sev: "P1".into(),
-                        detail: format!("reserved fault tag (H4), execute refuses: {:?}", reserved),
-                    });
-                    return report;
+                    // Crash/TornWrite/Env: the H2 FaultDriver seam. The
+                    // driver maps the step to a SimVfs fault-plan spec and
+                    // arms it; the NoOp default refuses, which keeps H1's
+                    // `fault-reserved-refused` P1 verbatim on the main
+                    // lineage (never a silent skip).
+                    let drv = opts.fault_driver.as_ref();
+                    let armed = drv
+                        .map(reserved, plan.header.seed, idx)
+                        .and_then(|spec| drv.arm(&spec).map(|()| spec));
+                    match armed {
+                        Ok(spec) => {
+                            report.count("fault-armed");
+                            report.records.push(StepRecord {
+                                idx,
+                                class: "fault-armed".into(),
+                                sev: "fine".into(),
+                                detail: format!(
+                                    "driver={} seed={} rules={}",
+                                    drv.name(),
+                                    spec.seed,
+                                    spec.rules.len()
+                                ),
+                                stmt_head: format!("{:?}", reserved).chars().take(60).collect(),
+                            });
+                        }
+                        Err(e) => {
+                            report.count("fault-reserved-refused");
+                            report.failure = Some(Failure {
+                                step_idx: idx,
+                                signature: Signature {
+                                    class: "fault-reserved-refused".into(),
+                                    sqlstate: "".into(),
+                                    site: format!("{:?}", reserved).chars().take(40).collect(),
+                                },
+                                class: "fault-reserved-refused".into(),
+                                sev: "P1".into(),
+                                detail: format!(
+                                    "reserved fault tag (H4), driver '{}' refuses: {} ({:?})",
+                                    drv.name(),
+                                    e,
+                                    reserved
+                                ),
+                            });
+                            return report;
+                        }
+                    }
                 }
             },
         }
