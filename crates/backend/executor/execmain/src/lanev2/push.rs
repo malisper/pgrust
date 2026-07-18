@@ -937,18 +937,29 @@ pub(crate) fn cursors_set_for_tests(on: bool) {
 /// walker), not here — the plan's engagement is knowable only after pulls.
 pub(crate) fn cursor_admission_refusal(
     forward: bool,
-    top_eflags: i32,
+    // Kept in the signature (SUNSET): the eflags arm is gone but the seam
+    // passes the value and the taxonomy pins name it; a future arm reading
+    // it again must go through R-VOCAB.
+    _top_eflags: i32,
     use_parallel_mode: bool,
 ) -> Option<super::stats::RefuseReason> {
-    use ::types_slot::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
     if !forward {
         // The direction demand is the more specific class (backward runs
         // reach the seam only through scroll-capable portals).
         return Some(super::stats::RefuseReason::CursorBackward);
     }
-    if top_eflags & (EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) != 0 {
-        return Some(super::stats::RefuseReason::CursorScroll);
-    }
+    // SUNSET (SE10-GATES item 1, the audited shrink; wave-10 contract §3.4):
+    // the inc-1b `cursor-scroll` eflags arm is REMOVED — knob-ON, every
+    // SCROLL/HOLD portal is store-served with a lane-admitted fill, so the
+    // REWIND|BACKWARD|MARK top eflags a run still carries here belong to a
+    // CURRENT-OF-eligible portal's ROW-CHAIN fill (D-CA-2's one fence).
+    // Those runs now take the budget: the batch dispatch and the per-pull
+    // hooks both refuse on the scan's `batch_allowed=false` (init-time
+    // eflags), nothing lane-stages, and the settle walker's roll-up ticks
+    // `cursor-plan-refused` — the RETAINED-redefined class ("the plan's own
+    // refusal ticks AND the cursor is still served"). Removing this arm is
+    // what makes the allowlist-row removal legal (the reason no longer
+    // fires — proven by the three-arm matrix at the wiring tip).
     if use_parallel_mode {
         // FAIL-CLOSED serial-law arm: `use_parallel_mode` is false for
         // every count-limited run by the ported execmain.rs:978 gate; if
@@ -989,7 +1000,7 @@ pub(crate) fn cursor_run_budget_install(
     forward: bool,
     count: u64,
     use_parallel_mode: bool,
-    top_eflags: i32,
+    _top_eflags: i32,
 ) -> Option<u64> {
     if count == 0 || !is_select {
         return None;
@@ -997,7 +1008,7 @@ pub(crate) fn cursor_run_budget_install(
     if !cursors_v2_enabled() {
         return None;
     }
-    if let Some(reason) = cursor_admission_refusal(forward, top_eflags, use_parallel_mode) {
+    if let Some(reason) = cursor_admission_refusal(forward, _top_eflags, use_parallel_mode) {
         // Once per budgeted run (never per tuple); `tick_refused` is a
         // no-op unless accounting is armed.
         super::stats::tick_refused(super::stats::ShapeClass::Cursor, reason);
@@ -1638,12 +1649,13 @@ pub(crate) fn run_seam_backward_evidence_count() -> u64 {
 
 /// The §3.3 refusal, WS-CA's tick face: a store fill over a
 /// CURRENT-OF-eligible plan (§4.1) uses the row-chain fill because the v1
-/// tid capture reads the scan state per row. Ticked once per fill-engine
-/// decision, where the eligibility answer lives (store creation's
-/// search_plan_tree shape test — portal side). RESERVED on this branch
-/// (inc-1b `cursor-with-hold` posture); armed at the composed head. The
-/// named follow-up retiring it (lane tid supply from WS-AH's batch rowref
-/// identity) is chartered in the contract, not implemented here.
+/// tid capture reads the scan state per row. ARMED (SEAM-WIRING): called
+/// through `execmain_seams::cursor_fill_tid_capture_refused` from
+/// `fill_portal_store_to`'s eligible branch — once per fill_to call that
+/// drives the executor (per FETCH-with-deficit; unbounded cadence like
+/// the spi scroll-mark precedent, never per row). The named follow-up
+/// retiring it (lane tid supply from WS-AH's batch rowref identity) is
+/// chartered in the contract, not implemented here.
 pub fn cursor_fill_tid_capture_refused() {
     super::stats::tick_refused(
         super::stats::ShapeClass::Cursor,
