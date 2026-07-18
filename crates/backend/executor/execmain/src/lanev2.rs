@@ -14371,3 +14371,12 @@ pub(crate) mod epq;
 #[cfg(test)]
 pub(crate) use dml::{dml_rowchain_set_for_tests, DML_ROWCHAIN_DRIVES_FOR_TESTS};
 // --- end WS-AA (wave-7) ---
+// --- WS-AE (wave-8): agg-over-IndexScan feed re-exports (AGG_INDEX arm
+// re-earn, contract §3 AE0). The feed itself is indexsource.rs-local (the
+// WS-AE FREE zone); this EOF append is the module-scope re-export only and
+// touches no existing code line (the WS-AA wave-7 EOF-append precedent —
+// the wave-7 WS-AA EOF region above is preserved byte-verbatim).
+pub(crate) use indexsource::try_own_agg_over_index_source;
+#[cfg(test)]
+pub(crate) use indexsource::{agg_indexfeed_set_for_tests, AGG_INDEXFEED_OWNED_FOR_TESTS};
+// --- end WS-AE (wave-8) ---

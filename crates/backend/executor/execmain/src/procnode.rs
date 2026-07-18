@@ -1894,6 +1894,19 @@ fn agg_arm<'mcx>(
                 {
                     return Ok(r);
                 }
+                // --- WS-AE (wave-8): AGG_INDEX arm re-earn ---
+                // The fused drive below, routed through the
+                // BatchGranuleSource storage seam — behind
+                // PGRUST_LANE_V2_AGG_INDEXFEED (default OFF; knob-OFF cost
+                // = one cached-bool test). Refuses fall through to the
+                // UNCHANGED fused/per-tuple paths, byte-identically (the
+                // WS-F IndexOnlyScan hook's posture, one arm up).
+                if let Some(r) =
+                    crate::lanev2::try_own_agg_over_index_source(agg, is, estate)?
+                {
+                    return Ok(r);
+                }
+                // --- end WS-AE (wave-8) ---
             }
             // P2 gate (flip-ladder §5 arm #2): PGRUST_FUSED_ARM_AGG_INDEX.
             if fused_arm_enabled(FusedArm::AggIndex)
