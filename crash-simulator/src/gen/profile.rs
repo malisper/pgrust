@@ -100,9 +100,13 @@ pub struct GenProfile {
     pub table_shape: TableShape,
     #[serde(default)]
     pub iso_mix: IsoMix,
-    /// Serial-safe arm set: pairs [guc, value] (contract §3.3 applicability).
+    /// Serial-safe arm SETS: each inner vec is a set of [guc, value] pairs
+    /// applied ATOMICALLY as consecutive arm steps (H4 fidelity fix: the p6
+    /// replant showed flattening sets into independent single-GUC draws makes
+    /// a 4-GUC parallel arm almost never compose in-session). An EMPTY set is
+    /// the profile's base-clean control arm and lowers to RESET ALL.
     #[serde(default)]
-    pub arm_sets: Vec<(String, String)>,
+    pub arm_sets: Vec<Vec<(String, String)>>,
     /// Per-property weights; 0 = kill-switched. Missing = 1.
     #[serde(default)]
     pub property_weights: BTreeMap<String, u64>,

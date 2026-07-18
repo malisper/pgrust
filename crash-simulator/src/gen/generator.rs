@@ -251,14 +251,26 @@ impl<'a> Generator<'a> {
     }
 
     fn gen_arm_step(&mut self) -> Step {
-        // Occasionally reset if something is set; otherwise set a serial-safe
-        // arm from the profile's arm set.
+        // Occasionally reset if something is set; otherwise apply a
+        // serial-safe arm SET from the profile — ATOMICALLY, as consecutive
+        // SET steps via the pending queue (H4 arm-set fidelity: flattened
+        // one-GUC-per-draw arms almost never compose a multi-GUC set like the
+        // parallel-forcing arm within a session — the p6 replant lesson).
         if self.session.gucs_set && range_incl(&mut self.rng, 0, 3) == 0 {
             self.session.gucs_set = false;
             return Step::Arm(ArmCtl::ResetAll);
         }
         let i = range_incl(&mut self.rng, 0, self.profile.arm_sets.len() as u64 - 1) as usize;
-        let (k, v) = self.profile.arm_sets[i].clone();
+        let set = self.profile.arm_sets[i].clone();
+        let mut it = set.into_iter();
+        let Some((k, v)) = it.next() else {
+            // Empty set = the profile's base-clean control arm: defaults.
+            self.session.gucs_set = false;
+            return Step::Arm(ArmCtl::ResetAll);
+        };
+        for (k2, v2) in it {
+            self.pending.push_back(PlanItem::Step(Step::Arm(ArmCtl::SetGuc(k2, v2))));
+        }
         self.session.gucs_set = true;
         Step::Arm(ArmCtl::SetGuc(k, v))
     }
