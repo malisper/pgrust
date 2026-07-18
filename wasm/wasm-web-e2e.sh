@@ -82,6 +82,13 @@ CREATE TABLE measurement_2024 PARTITION OF measurement FOR VALUES FROM ('2024-01
 CREATE TABLE measurement_2025 PARTITION OF measurement FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');
 INSERT INTO measurement VALUES ('sf', '2024-06-01', 30), ('nyc', '2025-06-01', 33);
 SELECT tableoid::regclass AS part, city, logdate, peaktemp FROM measurement ORDER BY logdate;
+WITH pts AS (SELECT x::real AS r FROM generate_series(1, 3) x), fin AS (SELECT r FROM pts WHERE r > 1.5) SELECT p.r, CASE WHEN EXISTS (SELECT 1 FROM fin f WHERE f.r = p.r) THEN '**' ELSE '  ' END AS m FROM pts p ORDER BY p.r;
+SELECT int8range(1, 5) AS r8, int8range(4294967296, 8589934592) AS r8hi;
+CREATE TABLE big_part (k bigint) PARTITION BY RANGE (k);
+CREATE TABLE big_part_lo PARTITION OF big_part FOR VALUES FROM (0) TO (4294967296);
+CREATE TABLE big_part_hi PARTITION OF big_part FOR VALUES FROM (4294967296) TO (8589934592);
+INSERT INTO big_part VALUES (1), (4294967297), (8589934591);
+SELECT count(*) AS hi_rows FROM big_part WHERE k > 4294967296;
 SELECT no_such_column FROM wb_tenk;
 SELECT 1 / 0 AS boom;
 INSERT INTO wb_tenk VALUES (0, 99, 'dup', 0);
@@ -136,6 +143,51 @@ grep -q 'bad integer token' "$WORK/wasm.err" \
     && miss "wasm: readfuncs datum-width regression (bad integer token)"
 grep -q 'part = "measurement_2025"' "$WORK/wasm.out" \
     || miss "wasm: partitioned insert did not route to measurement_2025"
+# WASM-SUBPLANFIX regression: the CASE WHEN EXISTS probe forces an expression
+# SubPlan; make_subplan copyObject's the sub-Query via a queryToString/
+# stringToNode round trip (rewrite_manip::copy_query_node) — the same
+# _outDatum writer as relpartbound. A pointer-width byval emission on wasm32
+# dies here with `bad integer token "]"` before any row comes back.
+[ "$(grep -c 'm = "\*\*"' "$WORK/wasm.out")" -eq 2 ] \
+    || miss "wasm: EXISTS-SubPlan CASE probe rows missing (copyObject node-string round trip)"
+# WASM-SUBPLANFIX sweep finds: range_serialize byval width (int8range panics
+# on wasm32) and planner DatumImage byval width (bigint partition pruning
+# compared truncated bounds; hi_rows came back 0).
+grep -q 'r8hi = "\[4294967296,8589934592)"' "$WORK/wasm.out" \
+    || miss "wasm: int8range with high-word bounds missing (range_serialize datum width)"
+grep -q 'hi_rows = "2"' "$WORK/wasm.out" \
+    || miss "wasm: bigint partition pruning wrong (DatumImage byval width)"
+
+echo "=== full-demo SubPlan leg: Mandelbrot REPL query (fixture gated) ==="
+# Michael's Mandelbrot REPL query reaches the same make_subplan boundary via
+# its EXISTS-in-CASE leg (plus recursive CTEs needing the complete raw-walker
+# vocabulary). The fixture ships with fix/rawwalker-vocab, so this leg
+# self-activates once that lane's commits are on this lineage.
+MANDEL="$REPO/fixtures/rawwalker-mandelbrot.sql"
+if [ -f "$MANDEL" ]; then
+    # Native --single ends a statement at every newline: flatten the fixture
+    # to one line and feed the SAME bytes to both arms.
+    { tr '\n' ' ' < "$MANDEL"; echo; } > "$WORK/mandel.sql"
+    PGRUST_TZDIR="$TZSRC/timezone" PGRUST_PGSHAREDIR="$TZSRC" \
+        "$NATIVE_BIN" --single "${GUCS[@]}" -D "$WORK/dd-native" postgres \
+        < "$WORK/mandel.sql" > "$WORK/mandel-native.out" 2> "$WORK/mandel-native.err"
+    [ $? -eq 0 ] || miss "native --single (mandelbrot) exited nonzero"
+    PGRUST_WASM="$WORK/assets/postgres.wasm" PGRUST_VFS="$WORK/assets/vfs" \
+        node "$WEB/run-node.mjs" --raw \
+        < "$WORK/mandel.sql" > "$WORK/mandel-wasm.out" 2> "$WORK/mandel-wasm.err"
+    [ $? -eq 0 ] || miss "run-node.mjs (mandelbrot) exited nonzero"
+    if diff -u "$WORK/mandel-native.out" "$WORK/mandel-wasm.out" > "$WORK/mandel.diff"; then
+        echo "mandelbrot stdout byte-identical (native vs wasm-under-node)"
+    else
+        miss "mandelbrot stdout differs (see $WORK/mandel.diff)"
+    fi
+    grep -q 'bad integer token' "$WORK/mandel-wasm.err" \
+        && miss "wasm: mandelbrot readfuncs datum-width regression (bad integer token)"
+    grep -q 'ERROR' "$WORK/mandel-wasm.err" \
+        && miss "wasm: mandelbrot errored (see $WORK/mandel-wasm.err)"
+else
+    echo "SKIP: $MANDEL absent (pre fix/rawwalker-vocab merge; leg self-activates with the fixture)"
+fi
 
 echo "=== worker-model persistence (fresh instance, same long-lived Vfs) ==="
 PGRUST_WEB_DIR="$WEB" node --input-type=module - "$WORK/assets" <<'EOF' > "$WORK/persist.out" 2> "$WORK/persist.err"
