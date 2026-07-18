@@ -6812,6 +6812,7 @@ dependencies = [
  "s_lock_seams",
  "shmem",
  "smgr",
+ "smgr_seams",
  "snapmgr_seams",
  "subtrans_seams",
  "syncrep_seams",
@@ -6841,6 +6842,7 @@ dependencies = [
  "xlogreader",
  "xlogreader_seams",
  "xlogutils",
+ "xlogutils_seams",
 ]
 
 [[package]]
@@ -19348,6 +19350,7 @@ dependencies = [
  "dbcommands_seams",
  "deadlock_seams",
  "elog",
+ "exectuples",
  "fd",
  "freespace_seams",
  "guc",
@@ -19428,6 +19431,7 @@ dependencies = [
  "types_nbtree",
  "types_rel",
  "types_resowner",
+ "types_slot",
  "types_snapshot",
  "types_storage",
  "types_tuple",
