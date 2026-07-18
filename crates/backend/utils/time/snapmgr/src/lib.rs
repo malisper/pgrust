@@ -932,28 +932,34 @@ pub fn ExportSnapshot(snapshot: &Snapshot) -> PgResult<String> {
 }
 
 // Startup-time cleanup of crashed backends' export files; failures stay LOG.
+//
+// fd-routed over the vfs data plane (the provider-seam/relmapper
+// dataplane-class fix, found by the P4 inc-4 real-initdb cut sweep): the
+// export dir is DATADIR-RELATIVE and must resolve in the server's world
+// (the boot cwd under --cfg pgrust_sim), not the ambient process cwd — the
+// raw std::fs walk made this crash-boot cleanup silently target the wrong
+// world under sim. C parity: AllocateDir + ReadDirExtended(LOG) + unlink,
+// all failures LOG-level (snapmgr.c DeleteAllExportedSnapshotFiles).
 pub fn DeleteAllExportedSnapshotFiles() {
-    let dir = match std::fs::read_dir(SNAPSHOT_EXPORT_DIR) {
+    let s_dir = match fd::AllocateDir(SNAPSHOT_EXPORT_DIR) {
         Ok(d) => d,
-        Err(e) => {
-            let _ = ereport(types_error::LOG)
-                .with_saved_errno(e.raw_os_error().unwrap_or(0))
-                .errcode_for_file_access()
-                .errmsg(format!("could not open directory \"{SNAPSHOT_EXPORT_DIR}\": %m"))
-                .finish(loc("DeleteAllExportedSnapshotFiles"));
-            return;
-        }
+        Err(_) => return, // descriptor-pressure path has already reported
     };
-    for entry in dir.flatten() {
-        let buf = format!("{SNAPSHOT_EXPORT_DIR}/{}", entry.file_name().to_string_lossy());
-        if let Err(e) = std::fs::remove_file(&buf) {
-            let _ = ereport(types_error::LOG)
-                .with_saved_errno(e.raw_os_error().unwrap_or(0))
-                .errcode_for_file_access()
-                .errmsg(format!("could not remove file \"{buf}\": %m"))
-                .finish(loc("DeleteAllExportedSnapshotFiles"));
+    loop {
+        match fd::ReadDirExtended(s_dir, SNAPSHOT_EXPORT_DIR, types_error::LOG) {
+            Ok(Some(de)) => {
+                let buf = format!("{SNAPSHOT_EXPORT_DIR}/{}", de.d_name);
+                if fd::pg_unlink(&buf) < 0 {
+                    let _ = ereport(types_error::LOG)
+                        .with_saved_errno(fd::get_errno())
+                        .errmsg(format!("could not unlink file \"{buf}\": %m"))
+                        .finish(loc("DeleteAllExportedSnapshotFiles"));
+                }
+            }
+            Ok(None) | Err(_) => break,
         }
     }
+    let _ = fd::FreeDir(s_dir);
 }
 
 // SNAPSHOT_EXPORT_DIR (snapmgr.c), relative to the data directory (the

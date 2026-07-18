@@ -214,8 +214,10 @@ fs	crates/backend/utils/misc/guc/src/select.rs	2
 fs	crates/backend/utils/misc/guc_file/src/lib.rs	1
 # --- crates/backend/utils/misc/tzparser (2 sites) ---
 fs	crates/backend/utils/misc/tzparser/src/lib.rs	2
-# --- crates/backend/utils/time/snapmgr (6 sites) ---
-fs	crates/backend/utils/time/snapmgr/src/lib.rs	6
+# --- crates/backend/utils/time/snapmgr (4 sites: ImportSnapshot read surface; the
+# DeleteAllExportedSnapshotFiles read_dir/remove_file pair RETIRED by the P4
+# inc-4 fd-reroute — datadir-relative cleanup now vfs-routed) ---
+fs	crates/backend/utils/time/snapmgr/src/lib.rs	4
 # --- crates/bin/waldesc (5 sites) ---
 fs	crates/bin/waldesc/src/main.rs	5
 # --- crates/contrib/file_fdw (3 sites) ---
