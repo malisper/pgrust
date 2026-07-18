@@ -9,6 +9,9 @@ path = "src/lib.rs"
 
 [dependencies]
 pgsync = { path = "../../../_support/pgsync" }
+# permit-s4 row 3: the build wait parks on the waiter hub (pg_barrier phase
+# pattern — waker-word list + 10ms interrupt-cadence timed park).
+waiter = { path = "../../storage/ipc/waiter" }
 types_core = { path = "../../../_support/types/types_core" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 mcx = { path = "../../../_support/mcx" }

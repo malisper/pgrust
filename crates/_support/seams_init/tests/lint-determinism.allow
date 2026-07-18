@@ -406,7 +406,6 @@ blocking	crates/backend/executor/execmain/src/lanev2/runtime_hashjoin.rs	1
 blocking	crates/backend/executor/execmain/src/lanev2/runtime_plaindistinct.rs	1
 blocking	crates/backend/executor/execmain/src/lanev2/runtime_scan.rs	1
 blocking	crates/backend/executor/execmain/src/lanev2/runtime_sort.rs	1
-blocking	crates/backend/executor/nodebitmapheapscan/src/lib.rs	3	CONVERTED-to-pgsync (permit-s3): cv-poll now hooked (sim wait_timeout rides the wrapped Condvar); the pg_barrier phase-pattern conversion stays chartered (census s3 row 3; loom guard = pg_barrier phase models)
 blocking	crates/backend/executor/runtime/src/lib.rs	1
 blocking	crates/backend/executor/runtime/src/lifecycle.rs	3	sanctioned as runtime plumbing; must register as a choke point (s3.3)
 blocking	crates/backend/executor/runtime/src/sync.rs	1	SANCTIONED hub (s3.3); pgsync facade since permit-s1
