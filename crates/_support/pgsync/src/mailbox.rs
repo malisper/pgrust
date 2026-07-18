@@ -219,6 +219,16 @@ impl<T> Drop for MailboxReceiver<T> {
 mod tests {
     use super::*;
 
+    // The four thread-spawning tests are native/loom-only: under
+    // `--cfg pgrust_sim` the pgsync unit binary's scheduler tests install
+    // the GLOBAL sim hooks, and a hooked Condvar wait on a thread that
+    // never entered a scheduler door (these tests spawn raw std threads)
+    // spins/wedges by design (unregistered-thread fall-through is per-op,
+    // not per-wait-loop). Sim-world mailbox coverage = the single-threaded
+    // tests below + the converted call sites' sim corpora (P5 demo). The
+    // cross-test hook-leak interaction is ledgered in
+    // notes/dst-permit-s4.md for the WS-CORE owner.
+
     #[test]
     fn send_recv_fifo() {
         let (tx, rx) = mailbox::<u32>(Some(4));
@@ -246,6 +256,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(pgrust_sim))]
     fn bounded_send_parks_until_recv() {
         let (tx, rx) = mailbox::<u32>(Some(1));
         tx.send(1).unwrap();
@@ -261,6 +272,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(pgrust_sim))]
     fn recv_parks_until_send() {
         let (tx, rx) = mailbox::<u32>(Some(1));
         let t = std::thread::spawn(move || rx.recv());
@@ -270,6 +282,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(pgrust_sim))]
     fn parked_sender_unblocks_on_receiver_drop() {
         let (tx, rx) = mailbox::<u32>(Some(1));
         tx.send(1).unwrap();
@@ -304,6 +317,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(pgrust_sim))]
     fn pipeline_two_consumers() {
         let (tx, rx) = mailbox::<u64>(Some(2));
         let rx2 = rx.clone();
