@@ -914,6 +914,11 @@ impl Part {
 // One page-aligned madvise(MADV_WILLNEED) over bytes[start..end); advisory
 // (errors ignored). Bounds are the caller's business; start/end are only
 // page-rounded here.
+//
+// RAW libc carve-out (DST-P1): this madvise runs over SegMap's mmap'd
+// bytes and travels with the segfile map_segs mmap cluster — it stays raw
+// until the segmap pread arm lands. Allowlist row retained, tagged
+// `# pending: segmap-pread-arm`.
 #[cfg(unix)]
 fn advise_extent(bytes: &[u8], start: u64, end: u64) -> bool {
     static PAGE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
