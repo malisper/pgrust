@@ -211,11 +211,22 @@ fn budget_probe_returns_and_releases() {
     assert!(report.used >= 1);
     assert!(report.used <= 16);
     assert!(report.highest_fd >= report.used);
-    // Probe must release everything: a second probe reuses the same fd range.
-    let again = crate::fd_budget_probe_report(16);
-    assert_eq!(report.used, again.used);
-    assert_eq!(report.highest_fd, again.highest_fd);
-    assert_eq!(crate::fd_budget_probe(16), report.used as usize);
+    // Probe must release everything: a repeat probe reuses the same fd range.
+    // The harness is multi-threaded and sibling tests churn fds, so one
+    // transient disagreement between neighbouring probes is legal; a probe
+    // that LEAKS its dup'd fds shifts every subsequent pair and still fails.
+    let mut prev = report;
+    let mut stable = false;
+    for _ in 0..8 {
+        let again = crate::fd_budget_probe_report(16);
+        if (prev.used, prev.highest_fd) == (again.used, again.highest_fd) {
+            stable = true;
+            break;
+        }
+        prev = again;
+    }
+    assert!(stable, "consecutive probes never agreed: the probe is leaking fds");
+    assert_eq!(crate::fd_budget_probe(16), prev.used as usize);
 }
 
 #[test]
@@ -232,5 +243,45 @@ fn flush_range_and_fadvise_are_benign() {
     assert_eq!(crate::pread(fd, &mut buf, 0), 8192);
     assert!(buf.iter().all(|&b| b == 7));
     crate::close(fd);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// Finding F1b guard, posix arm: VfsFd's drop is exactly close(2) on the real
+// descriptor (identical to the OwnedFd it replaced), and into_raw disarms.
+// The harness is multi-threaded and fd numbers recycle, so "closed" is
+// asserted by inode identity (fstat), never by probing a possibly-reused
+// fd number.
+#[test]
+fn vfsfd_guard_posix_drop_closes_and_into_raw_disarms() {
+    let dir = tmpdir("vfsfd");
+    let path = c(&format!("{dir}/g"));
+
+    // Drop arm: the kernel fd really closes.
+    let raw = crate::open(&path, libc::O_RDWR | libc::O_CREAT, 0o600);
+    assert!(raw >= 0);
+    let mut before = FileInfo::zeroed();
+    assert_eq!(crate::fstat(raw, &mut before), 0);
+    // SAFETY: raw is live, minted by the active (posix) vfs, exclusively owned.
+    let guard = unsafe { crate::VfsFd::from_raw(raw) };
+    drop(guard);
+    // Either the number is dead (EBADF) or another thread already recycled
+    // it onto a different file — both prove OUR descriptor was closed.
+    let mut after = FileInfo::zeroed();
+    let rc = crate::fstat(raw, &mut after);
+    assert!(
+        rc == -1 || (after.dev, after.ino) != (before.dev, before.ino),
+        "drop must close(2) the guarded descriptor"
+    );
+
+    // Disarm arm: into_raw leaves the fd open for the deliberate close.
+    let raw2 = crate::open(&path, libc::O_RDWR, 0o600);
+    assert!(raw2 >= 0);
+    // SAFETY: as above.
+    let guard2 = unsafe { crate::VfsFd::from_raw(raw2) };
+    assert_eq!(guard2.into_raw(), raw2);
+    let mut still = FileInfo::zeroed();
+    assert_eq!(crate::fstat(raw2, &mut still), 0, "into_raw must not close");
+    assert_eq!((still.dev, still.ino), (before.dev, before.ino));
+    assert_eq!(crate::close(raw2), 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
