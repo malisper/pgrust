@@ -292,6 +292,12 @@ pub fn PersistHoldablePortal(portal: &Portal<'static>) -> PgResult<()> {
         if portal.borrow().cursorStoreArmed {
             debug_assert!(scroll);
             pquery::fill_portal_store_to(portal, 0)?;
+            // Auto-held portals (plpgsql pin + intra-procedure COMMIT, the
+            // HoldPinnedPortals class): the filled store is the
+            // transaction-scoped cursorStore — copy it into the fresh
+            // holdStore (detoasting) and drop it. No-op when the store
+            // already IS the holdStore (DECLARE'd WITH HOLD).
+            pquery::cursor_store_persist_into_hold(portal)?;
         } else {
             // SCROLL stores the whole result (rewind first); no-scroll stores
             // only the not-yet-fetched rows, and NoMovement if already at end

@@ -1411,6 +1411,62 @@ pub fn fill_portal_store_to(portal: &Portal<'static>, target_rows: u64) -> PgRes
     snapmgr::PopActiveSnapshot()?;
     Ok(())
 }
+
+/// §2.4 auto-held arm (the HoldPinnedPortals adversarial class): a pinned
+/// plpgsql cursor auto-held at intra-procedure COMMIT was armed WITHOUT
+/// CURSOR_OPT_HOLD, so its store is the transaction-scoped `cursorStore`
+/// (inter_xact=false, NOT detoast-on-append). Persist copies the filled
+/// store into the fresh holdStore through the detoasting receiver (same
+/// bytes C would re-execute for; the source rows are read pre-COMMIT while
+/// their toast data is alive), then drops the transaction-scoped store and
+/// sidecar (their spill files must not survive the transaction). No-op for
+/// DECLARE'd WITH HOLD portals (their store already IS the holdStore).
+pub fn cursor_store_persist_into_hold(portal: &Portal<'static>) -> PgResult<()> {
+    let src = portal.borrow().cursorStore;
+    if src.is_null() {
+        return Ok(());
+    }
+    let dst = portal.borrow().holdStore;
+    debug_assert!(!dst.is_null(), "HoldPortal creates the holdStore before persist");
+    let tup_desc = portal
+        .borrow()
+        .tupDesc
+        .clone()
+        .expect("cursor portal has a tupDesc");
+    // SAFETY: portalContext is PgBox'd for address stability and outlives
+    // this call (freed only in PortalDrop) — the RunFromStore pattern.
+    let ctx: &MemoryContext = unsafe {
+        let p = portal.borrow();
+        &*(&**p.portalContext.as_ref().expect("portal has portalContext")
+            as *const MemoryContext)
+    };
+    let mcx = ctx.mcx();
+    let mut treceiver = tcop_dest::CreateDestReceiver(CommandDest::Tuplestore);
+    tcop_dest::SetTuplestoreDestReceiverParams(&mut treceiver, dst, true);
+    treceiver.startup(CmdType::CMD_SELECT as i32, &tup_desc)?;
+    let mut slot =
+        exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(tup_desc));
+    tuplestore_hold_seams::tuplestore_rescan::call(src)?;
+    while tuplestore_hold_seams::tuplestore_gettupleslot::call(src, true, false, &mut slot)? {
+        treceiver.receive_slot(&mut slot)?;
+        exectuples::exec_clear_tuple(&mut slot, mcx);
+    }
+    treceiver.shutdown()?;
+    treceiver.destroy();
+    drop(slot);
+    let (src, sidecar) = {
+        let mut p = portal.borrow_mut();
+        (
+            core::mem::replace(&mut p.cursorStore, TuplestoreHandle::NULL),
+            core::mem::replace(&mut p.cursorTidStore, TuplestoreHandle::NULL),
+        )
+    };
+    tuplestore_hold_seams::tuplestore_end::call(src);
+    if !sidecar.is_null() {
+        tuplestore_hold_seams::tuplestore_end::call(sidecar);
+    }
+    Ok(())
+}
 // --- end WS-CA wave-10 --------------------------------------------------------
 
 pub fn PlannedStmtRequiresSnapshot(pstmt: &PlannedStmt<'_>) -> bool {
