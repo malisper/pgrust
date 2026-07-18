@@ -273,6 +273,39 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
         }
     }
 
+    // §9 provider seam (dst-p3-scheduler; COMPOSE FINDING 1): under sim cfg
+    // the WHOLE binary sees SimVfs, whose namespace starts empty. Compose
+    // the world — the initdb'd datadir snapshot plus the manifest's share
+    // asset trees — BEFORE the first vfs read: SelectConfigFiles below
+    // already validates timezone GUCs through the pgtz vfs directory scan.
+    // Boot-installer shape (the pqcomm init_seams idiom): one cfg-gated
+    // call, no runtime knob; product builds compile none of this. The
+    // datadir is resolved exactly the way SelectConfigFiles resolves it
+    // (-D else PGDATA, make_absolute_path) so the sim namespace and the
+    // product's DataDir string name the same tree.
+    #[cfg(pgrust_sim)]
+    {
+        match user_d_option
+            .clone()
+            .or_else(|| std::env::var("PGDATA").ok())
+            .map(|d| miscinit::make_absolute_path(&d))
+        {
+            Some(dd) => match vfs::sim_boot::compose_boot_namespace(&dd) {
+                Ok(line) => write_stderr(format!("{line}\n")),
+                Err(e) => {
+                    write_stderr(format!("{PROGNAME}: sim asset ingest failed: {e}\n"));
+                    ExitPostmaster(2);
+                }
+            },
+            None => {
+                write_stderr(format!(
+                    "{PROGNAME}: sim boot requires -D or PGDATA (the asset-manifest datadir root)\n"
+                ));
+                ExitPostmaster(2);
+            }
+        }
+    }
+
     if !guc_seams::select_config_files::call(user_d_option.as_deref(), PROGNAME)? {
         ExitPostmaster(2);
     }
@@ -610,12 +643,15 @@ fn CreateOptsFile(argv: &[String]) -> bool {
         line.push('"');
     }
     line.push('\n');
-    match std::fs::File::create("postmaster.opts").and_then(|mut f| f.write_all(line.as_bytes())) {
+    // vfs-routed (provider-seam reroute): postmaster.opts lives in the
+    // datadir domain; std::fs would bypass the sim namespace.
+    match fd::write_whole_file("postmaster.opts", line.as_bytes(), false) {
         Ok(()) => true,
-        Err(e) => {
+        Err(en) => {
             let _ = elog::ereport(LOG)
+                .with_saved_errno(en)
                 .errcode_for_file_access()
-                .errmsg(format!("could not create file \"postmaster.opts\": {e}"))
+                .errmsg("could not create file \"postmaster.opts\": %m".to_string())
                 .finish(loc(3862, "CreateOptsFile"));
             false
         }
