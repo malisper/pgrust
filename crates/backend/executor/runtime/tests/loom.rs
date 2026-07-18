@@ -1344,3 +1344,123 @@ fn caller_c2_parked_drive_liveness() {
         assert_eq!(snap.granted_total, 0);
     });
 }
+
+/// Ledger model 6 (CALLER-C2 LEDGER HANG fix, the wake-gate's adversarial
+/// oracle): `stream_source_handshake` with the ledger ON. The fix
+/// suppresses the leave hint's wake_all when the task ended STARVED (the
+/// self-wake busy-loop: every starved leave of a granted==target slot
+/// bumped the park epoch, so no park — pool eventcount or caller-C2
+/// bounded park — ever slept). THIS model is the proof the gate loses no
+/// wakeup: a publish/close landing in ANY window around a starved task's
+/// leave must still complete the RG — a starved worker stranded in a park
+/// (the wake the gate suppressed turning out to be load-bearing) deadlocks
+/// the model, which loom's blocked-thread detector oracles. The publish
+/// wake (notify_source_progress) and the epoch capture-before-step are
+/// what close the window, exactly as the pre-ledger handshake model
+/// proved for the knob-OFF path.
+/// LOOM-FAST SIZING (≤5min law): pb 2 as the knob-OFF twin; 2 workers,
+/// 2 granules, one producer.
+#[test]
+fn ledger_starved_leave_wake_gate_no_lost_wakeup() {
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(2);
+    b.max_branches = 200_000;
+    b.check(|| {
+        let rt = small_runtime(2, 0);
+        rt.set_ledger(true);
+        let work = ModelWork::new(2, None);
+        let source = Arc::new(StreamSource::new());
+        let (_h, waiter) = rt.submit(QuerySpec {
+            query_id: 1,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::clone(&source) as _,
+                work: Arc::clone(&work) as Arc<dyn TaskSetWork>,
+                deps: vec![],
+            }],
+        });
+
+        let producer = {
+            let rt = Arc::clone(&rt);
+            let source = Arc::clone(&source);
+            thread::spawn(move || {
+                source.publish(1);
+                rt.notify_source_progress();
+                source.publish(2);
+                source.close();
+                rt.notify_source_progress();
+            })
+        };
+
+        let rt1 = Arc::clone(&rt);
+        let waiter1 = waiter.clone();
+        let t = thread::spawn(move || drive(&rt1, 1, &waiter1));
+        drive(&rt, 0, &waiter);
+        t.join().unwrap();
+        producer.join().unwrap();
+
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Completed));
+        work.assert_complete();
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0, "entry retired at completion");
+        assert_eq!(snap.granted_total, 0, "every grant returned");
+    });
+}
+
+/// Ledger model 7 (CALLER-C2 LEDGER HANG shape under loom): a PINNED RG
+/// on an OPEN starved stream, ledger ON, the caller-C2 bounded park as
+/// the producer — the exact hang configuration (unit twins:
+/// caller_parked_drive_pumps_idle_park_ledger_on / _park_error arm).
+/// Pre-fix this LIVELOCKS: the caller's own starved leave bumps the park
+/// epoch every step, the C2 epoch pre-check never admits the park, the
+/// publish never happens, and the model spins unboundedly (the gate's
+/// timeout is the tripwire). Post-fix the park must run under every
+/// ordering of the ledger words and the drive completes with drained
+/// accounting. LOOM-FAST SIZING: single caller thread, 2 granules.
+#[test]
+fn caller_c2_ledger_starved_park_completes() {
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(2);
+    b.max_branches = 200_000;
+    b.check(|| {
+        let rt = small_runtime(1, 0);
+        rt.set_ledger(true);
+        let work = ModelWork::new(2, None);
+        let source = Arc::new(StreamSource::new());
+        let (h, waiter) = rt.submit_pinned(QuerySpec {
+            query_id: 9,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::clone(&source) as _,
+                work: Arc::clone(&work) as Arc<dyn TaskSetWork>,
+                deps: vec![],
+            }],
+        });
+
+        let mut parks = 0u64;
+        let mut caller = runtime::CallerWorker::enter(&rt).expect("caller lane available");
+        let outcome = caller
+            .drive_with_duties_parked(
+                &rt,
+                &h,
+                &mut || Ok(()),
+                &mut || true,
+                &mut || {
+                    parks += 1;
+                    // Park-as-producer (publish-then-wake order): the
+                    // starved window ends HERE, so reaching the park at
+                    // all is the liveness being modeled.
+                    source.publish(2);
+                    source.close();
+                    rt.notify_source_progress();
+                    Ok(())
+                },
+            )
+            .expect("duty and park never fail");
+        assert_eq!(outcome, RgOutcome::Completed);
+        assert!(parks >= 1, "the bounded idle park must run");
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Completed));
+        work.assert_complete();
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0);
+        assert_eq!(snap.granted_total, 0);
+    });
+}
