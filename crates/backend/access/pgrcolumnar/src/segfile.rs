@@ -5,7 +5,8 @@
 //! DST P1 (WS-B): every CbIo entry point here fronts the `vfs` boundary —
 //! opens via `vfs::open`, the pread/pwrite data plane, fstat sizing,
 //! ftruncate padding, fdatasync durability, fadvise hints, and fd lifecycle
-//! (`SegFd` closes via `vfs::close`). Semantics are byte-identical to the
+//! (`SegFd` closes via the `vfs::VfsFd` guard — same close code path as
+//! `vfs::close`, TLS-teardown-safe under sim). Semantics are byte-identical to the
 //! pre-P1 `std::fs` path by construction: same open flags (O_CLOEXEC, mode
 //! 0o666, no O_TRUNC on the create arm), same syscall order, the same
 //! EINTR-retry loops `std::os::unix::fs::FileExt` ran, and the same error
@@ -52,13 +53,21 @@ pub fn seg_path(base: &str, segno: usize) -> String {
     }
 }
 
-/// RAII segment descriptor: opened via `vfs::open`, closed via `vfs::close`
-/// — the whole fd lifecycle travels through the Vfs boundary.
-struct SegFd(libc::c_int);
+/// RAII segment descriptor: opened via `vfs::open`, closed by the
+/// [`vfs::VfsFd`] guard on Drop — the whole fd lifecycle travels through the
+/// Vfs boundary. The guard's drop arm is the same close code path as
+/// `vfs::close` while the thread's vfs universe is alive (posix arm: literally
+/// `close(2)`, identical to the direct `vfs::close` Drop this replaces), and
+/// is additionally safe if a SegFile/SegFd drops during thread-exit TLS
+/// teardown under `--cfg pgrust_sim`, where a direct `vfs::close` would hit
+/// the panicking `SIM.with` arm inside a TLS destructor.
+struct SegFd(vfs::VfsFd);
 
-impl Drop for SegFd {
-    fn drop(&mut self) {
-        vfs::close(self.0);
+impl SegFd {
+    #[inline]
+    fn raw(&self) -> libc::c_int {
+        use std::os::fd::AsRawFd;
+        self.0.as_raw_fd()
     }
 }
 
@@ -70,7 +79,9 @@ fn open_fd(path: &str, flags: libc::c_int) -> PgResult<SegFd> {
     loop {
         let fd = vfs::open(&c, flags | libc::O_CLOEXEC, 0o666);
         if fd >= 0 {
-            return Ok(SegFd(fd));
+            // SAFETY: fresh descriptor minted by the active vfs on this
+            // thread, exclusively owned by the guard.
+            return Ok(SegFd(unsafe { vfs::VfsFd::from_raw(fd) }));
         }
         if vfs::get_errno() != libc::EINTR {
             return Err(io_err_errno(path));
@@ -116,7 +127,7 @@ impl SegFile {
             let flags = if create { libc::O_RDWR | libc::O_CREAT } else { libc::O_RDWR };
             self.segs.push(open_fd(&p, flags)?);
         }
-        Ok(self.segs[segno].0)
+        Ok(self.segs[segno].raw())
     }
 
     pub fn write_all_at(&mut self, mut buf: &[u8], mut off: u64) -> PgResult<()> {
@@ -195,7 +206,7 @@ impl SegFile {
             // metadata().len() parity: fstat; an fstat failure contributes 0
             // (the old unwrap_or(0)).
             let mut fi = vfs::FileInfo::zeroed();
-            if vfs::fstat(f.0, &mut fi) == 0 {
+            if vfs::fstat(f.raw(), &mut fi) == 0 {
                 total += fi.size as u64;
             }
         }
@@ -260,7 +271,7 @@ impl SegFile {
 
     pub fn sync_data(&mut self) -> PgResult<()> {
         for f in &self.segs {
-            sync_fd(f.0, &self.base)?;
+            sync_fd(f.raw(), &self.base)?;
         }
         Ok(())
     }
@@ -332,7 +343,7 @@ impl SegMap {
         let mut total = 0u64;
         for f in &files {
             let mut fi = vfs::FileInfo::zeroed();
-            if vfs::fstat(f.0, &mut fi) < 0 {
+            if vfs::fstat(f.raw(), &mut fi) < 0 {
                 return Err(io_err_errno(base));
             }
             lens.push(fi.size as u64);
@@ -407,7 +418,7 @@ impl SegMap {
                     lens[i] as usize,
                     libc::PROT_READ,
                     libc::MAP_SHARED | libc::MAP_FIXED,
-                    f.0,
+                    f.raw(),
                     0,
                 );
                 if p == libc::MAP_FAILED {

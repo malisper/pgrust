@@ -411,6 +411,13 @@ const _: () = {
 impl VfsFd {
     /// Take ownership of `raw`.
     ///
+    /// Thread affinity: drop (or deliberately close) the guard on the thread
+    /// that minted `raw`. Under `--cfg pgrust_sim` each thread is its own vfs
+    /// universe (thread-local fd table), so a guard moved cross-thread would
+    /// release into the DESTINATION thread's sim table — EBADF there, silent
+    /// leak in the minting universe. All current holders are FdState-TLS-bound
+    /// so this cannot happen today; keep it that way.
+    ///
     /// # Safety
     /// `raw` must be a live descriptor minted by the ACTIVE vfs ([`open`]),
     /// exclusively owned by the returned guard (`OwnedFd::from_raw_fd` rules,

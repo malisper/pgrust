@@ -273,6 +273,12 @@ impl SimVfs {
     /// inside thread-exit TLS destructors, and TLS destructor order is
     /// unspecified: once `SimState` is destroyed its open-fd table died with
     /// it, so there is nothing left to release (0, not EBADF).
+    ///
+    /// NOTE for P4 fault-plan authors: because this IS the one close code
+    /// path, guard drops on leak/unwind paths CONSUME plan `Close` steps (and
+    /// can trigger a planned `Crash`) exactly like deliberate closes — an
+    /// unwind that drops N live holders advances Close-op sequencing by N vs
+    /// the pre-guard behavior (where those closes went posix-side/EBADF).
     pub fn close_on_drop(fd: c_int) -> c_int {
         SIM.try_with(|cell| close_locked(&mut cell.borrow_mut(), fd)).unwrap_or(0)
     }
