@@ -96,6 +96,48 @@ fn run_plant(iters: u64) -> ! {
 }
 
 // ---------------------------------------------------------------------------
+// P5 (PERMIT-S2 F2): the wpool 2-worker demo.
+// ---------------------------------------------------------------------------
+
+/// Drive the REAL launch_backend wpool through its (now-doored) spawn site.
+/// Boot half must have completed on THIS thread — the standby prelude
+/// restores the postmaster GUC snapshot. Sequence: `maintain()` spawns
+/// `max_parallel_workers` pooled standbys (parent-side door registration,
+/// child-side gate); one virtual-time park lets every standby run its
+/// prelude to the recv() park (virtual time advances only when nothing is
+/// runnable — the deterministic rendezvous); `flush()` retires them
+/// (hooked channel-drop wakes); the drain loop rides TimedParks until every
+/// standby exit dropped its population charge. One grep-stable line:
+/// `WPOOL target=N spawned_population=N drained=0`. The e2e (P5) asserts
+/// both standby registrations + grants in the SCHEDOP stream and x3
+/// same-seed byte-identity. With the scheduler off this degrades to real
+/// sleeps over OS scheduling (scaffold mode) — same line, no SCHEDOP.
+pub(crate) fn run_wpool_demo() -> ! {
+    // NO register_self here: this runs on the boot/driver thread, which
+    // PostgresSimNetMain already registered ("simnet-main"). A second
+    // registration would rebind TLS to a fresh slot and park waiting for
+    // its grant while the OLD slot still holds the permit — a
+    // self-inflicted watchdog wedge (found live at PERMIT-S2 bring-up).
+    let target = init_small::globals::max_parallel_workers();
+    // Seam-routed (tcop -> launch_backend directly is a package cycle
+    // through autovacuum -> commands_vacuum -> explain).
+    postmaster_seams::wpool_maintain::call();
+    let spawned = postmaster_seams::wpool_population::call();
+    // Rendezvous: when this park returns, every standby has either parked
+    // in recv() or exited.
+    pgsync::thread::sleep(std::time::Duration::from_millis(10));
+    postmaster_seams::wpool_flush::call();
+    let mut polls = 0u32;
+    while postmaster_seams::wpool_population::call() > 0 {
+        pgsync::thread::sleep(std::time::Duration::from_millis(1));
+        polls += 1;
+        assert!(polls < 60_000, "wpool demo: standbys never drained");
+    }
+    println!("WPOOL target={target} spawned_population={spawned} drained=0");
+    std::process::exit(0)
+}
+
+// ---------------------------------------------------------------------------
 // P4: the watchdog red fixture (intentionally unshimmed blocking).
 // ---------------------------------------------------------------------------
 

@@ -14,8 +14,26 @@
 //! Seeding: the picker stream is splitmix64 over a seed that is one 8-byte
 //! fill drawn through `pg_strong_random` — the sanctioned SimEntropy funnel
 //! keyed by `(PGRUST_SIM_SEED, fill_no)` — so every OS-arbitrary choice is
-//! a deterministic function of the master seed (uniform pick, inc-1; PCT is
-//! step 3 and deliberately NOT built here).
+//! a deterministic function of the master seed.
+//!
+//! Picking (PERMIT-S2 step 1): the GLOBAL scheduler defaults to PCT —
+//! Burckhardt, Kothari, Musuvathi, Nagarakatte, "A Randomized Scheduler
+//! with Probabilistic Guarantees of Finding Bugs" (ASPLOS 2010): every
+//! thread gets a seeded random priority ≥ d at registration; d−1 seeded
+//! priority-change points (step index, target priority d−1…1) are drawn per
+//! run over an estimated step budget k; the scheduler always runs the
+//! highest-priority RUNNABLE slot, and when the running slot's step counter
+//! crosses a change point its priority drops to that point's value. For a
+//! bug of depth d over n threads and k steps this finds the bug with
+//! probability ≥ 1/(n·k^(d−1)) PER RUN — the guarantee uniform random
+//! walks lack. Adaptation notes (granularity honest, ledgered in
+//! notes/permit-s2.md): a "step" is a pgsync interception (touch / park),
+//! not an instruction; `pick_waiter` wait-list choices stay seeded-uniform
+//! (the wrapper passes only `n`, not identities); `Spawn` touches never
+//! count as steps nor preempt (the spawn fence's invariant, step-1 shape).
+//! `PGRUST_SIM_SCHED_ALGO=uniform` restores the step-1 uniform pick +
+//! `PGRUST_SIM_PREEMPT_P` coin; instances default to Uniform so the step-1
+//! unit battery drives unchanged schedules.
 //!
 //! Instance discipline: the scheduler is instance-based (unit batteries
 //! construct private instances with private virtual clocks so parallel
@@ -100,12 +118,35 @@ pub enum ClockMode {
     PgClock,
 }
 
+/// Which picker drives handoffs (module docs "Picking").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickAlgo {
+    /// Step-1 shape: seeded uniform pick over Runnable + the
+    /// `preempt_p` coin at non-blocking touches.
+    Uniform,
+    /// PCT (Burckhardt et al., ASPLOS 2010): random per-thread priorities
+    /// ≥ `depth`, `depth − 1` seeded priority-change points over an
+    /// estimated `steps` budget, highest-priority-runnable wins every
+    /// handoff. Per-run bug-find probability ≥ 1/(n·kᵈ⁻¹) for depth-d bugs.
+    Pct {
+        /// Bug depth d (number of ordering constraints; d−1 change points).
+        depth: u32,
+        /// Estimated step budget k the change points are drawn over.
+        steps: u64,
+    },
+}
+
 pub struct SchedulerConfig {
     /// Picker-stream seed. The global scheduler draws this through the
     /// SimEntropy funnel; instances pin it explicitly.
     pub seed: u64,
+    /// Handoff picker. Global default: PCT (knobs `PGRUST_SIM_SCHED_ALGO` /
+    /// `PGRUST_SIM_PCT_D` / `PGRUST_SIM_PCT_K`); instance/unit default:
+    /// Uniform (the step-1 battery's schedules are pinned to it).
+    pub algo: PickAlgo,
     /// Seeded-preemption probability at touches; 0.0 disables (and draws
     /// nothing, keeping the stream stable for pick-only corpora).
+    /// Uniform-only: PCT preemption is priority-driven, never a coin.
     pub preempt_p: f64,
     pub log_cap: usize,
     pub stream_log: bool,
@@ -124,6 +165,7 @@ impl Default for SchedulerConfig {
     fn default() -> Self {
         SchedulerConfig {
             seed: 0,
+            algo: PickAlgo::Uniform,
             preempt_p: 0.0,
             log_cap: DEFAULT_LOG_CAP,
             stream_log: false,
@@ -171,6 +213,9 @@ struct Slot {
     granted: bool,
     /// TimedPark disambiguation: explicit wake vs deadline expiry.
     woken: bool,
+    /// PCT priority (seeded at registration, ≥ depth; lowered when the slot
+    /// crosses a priority-change point). Unused (0) under Uniform.
+    prio: u64,
     /// The last shim event — what the watchdog dump NAMES symbolically
     /// (op-class + `#[track_caller]` Location of the pgsync public op).
     last_event: Option<(&'static str, &'static Location<'static>)>,
@@ -188,15 +233,22 @@ struct Inner {
     /// `children_spawned` and wall-waits `children_registered` to catch up.
     children_spawned: u64,
     children_registered: u64,
+    /// PCT state: executed-step counter (touches + parks of registered
+    /// threads; Spawn excluded), the seeded change points sorted ascending
+    /// by step `(step, target_prio)`, and the low-water index into them.
+    pct_step: u64,
+    pct_cps: Vec<(u64, u64)>,
+    pct_next_cp: usize,
 }
 
 pub struct Scheduler {
     pub(crate) cfg: SchedulerConfig,
     inner: Mutex<Inner>,
     cv: Condvar,
-    /// Handoff heartbeat: seq + wall stamp (watchdog food; contract §3.2).
+    /// Handoff heartbeat seq (watchdog food; contract §3.2). The wall stamp
+    /// twin was dropped at the F7 ledger row (written, never read — the
+    /// watchdog keeps its own `last_change_ms`).
     pub(crate) heartbeat_seq: AtomicU64,
-    pub(crate) heartbeat_stamp_ms: AtomicU64,
     /// Teardown hooks run in the exiting thread's final quantum (rule 1).
     teardown: Mutex<Vec<Arc<dyn Fn(Vpid) + Send + Sync>>>,
     /// Synthetic-vpid dispenser for [`Scheduler::register_self`]
@@ -230,6 +282,46 @@ fn current_sched() -> Option<(Arc<Scheduler>, usize, Vpid)> {
     })
 }
 
+/// Rename the CALLING thread's live slot to `new_vpid` — the wpool retention
+/// shape (F2): a retained standby serves every task under a fresh synthetic
+/// pid, and sim waiter-slot identity keys off `current_vpid`, so the model
+/// identity must follow MyProcPid or rule 2 skews. NOT a scheduling event:
+/// no step, no handoff, the PCT priority carries. The old vpid retires with
+/// the rename — safe because `reserve_child_pid` never re-issues pids, and
+/// no wait list can still carry the old vpid (this thread is RUNNING, and
+/// wait-list entries are enqueued by the waiter itself). No-op when the
+/// thread is unregistered (scheduler off).
+#[track_caller]
+pub(crate) fn rekey_current(new_vpid: Vpid) {
+    let site = Location::caller();
+    if let Some((s, idx, old)) = current_sched() {
+        if old == new_vpid {
+            return;
+        }
+        {
+            let mut inner = plock(&s.inner);
+            assert!(
+                !inner.by_vpid.contains_key(&new_vpid),
+                "pgsync::sim: rekey to a live vpid {new_vpid} (slot identity is keyed by vpid)"
+            );
+            inner.by_vpid.remove(&old);
+            inner.by_vpid.insert(new_vpid, idx);
+            inner.slots[idx].vpid = new_vpid;
+            inner.log.emit(
+                Some(old),
+                "Rekey",
+                Some(site),
+                &[("new", new_vpid.to_string())],
+            );
+        }
+        CURRENT.with(|c| {
+            if let Some(cur) = c.borrow_mut().as_mut() {
+                cur.vpid = new_vpid;
+            }
+        });
+    }
+}
+
 /// Poison-tolerant acquire — the repo discipline (runtime/sync.rs law).
 fn plock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -248,7 +340,20 @@ fn splitmix64(state: &mut u64) -> u64 {
 
 impl Scheduler {
     pub fn new(cfg: SchedulerConfig) -> Arc<Scheduler> {
-        let rng = cfg.seed;
+        let mut rng = cfg.seed;
+        // PCT: draw the d−1 priority-change points up front (ASPLOS 2010
+        // §3: change point i targets priority d−i, at a uniformly random
+        // step in [1, k]). Drawn FIRST so the stream position of every
+        // later draw (slot priorities) is a pure function of the seed.
+        let mut pct_cps: Vec<(u64, u64)> = Vec::new();
+        if let PickAlgo::Pct { depth, steps } = cfg.algo {
+            let k = steps.max(1);
+            for i in 1..depth.max(1) as u64 {
+                let step = 1 + splitmix64(&mut rng) % k;
+                pct_cps.push((step, depth.max(1) as u64 - i));
+            }
+            pct_cps.sort_unstable();
+        }
         let log = SchedLog::new(cfg.log_cap, cfg.stream_log);
         Arc::new(Scheduler {
             cfg,
@@ -261,10 +366,12 @@ impl Scheduler {
                 log,
                 children_spawned: 0,
                 children_registered: 0,
+                pct_step: 0,
+                pct_cps,
+                pct_next_cp: 0,
             }),
             cv: Condvar::new(),
             heartbeat_seq: AtomicU64::new(0),
-            heartbeat_stamp_ms: AtomicU64::new(0),
             teardown: Mutex::new(Vec::new()),
             synth_vpid: AtomicU32::new(0),
         })
@@ -298,12 +405,22 @@ impl Scheduler {
             "pgsync::sim: duplicate vpid {vpid} registration (slot identity is keyed by vpid)"
         );
         let idx = inner.slots.len();
+        // PCT: fresh seeded priority ≥ depth (the change-point targets
+        // d−1…1 stay strictly below every initial priority; distinctness
+        // is near-certain over the 2^32 span and ties break by slot index,
+        // deterministically). Uniform burns no draw here (stream shape of
+        // step-1 preserved).
+        let prio = match self.cfg.algo {
+            PickAlgo::Uniform => 0,
+            PickAlgo::Pct { depth, .. } => depth as u64 + (splitmix64(&mut inner.rng) >> 32),
+        };
         inner.slots.push(Slot {
             vpid,
             name: name.to_string(),
             state: SlotState::Runnable,
             granted: false,
             woken: false,
+            prio,
             last_event: None,
         });
         inner.by_vpid.insert(vpid, idx);
@@ -384,14 +501,35 @@ impl Scheduler {
 
     // --- the interception surface (instance side of the Router) ------------
 
+    /// PCT step accounting (module docs "Picking"): every non-Spawn
+    /// interception by the running thread is one executed step; a
+    /// priority-change point whose step is reached drops the RUNNING
+    /// slot's priority to the point's target. No-op under Uniform.
+    fn pct_step_locked(&self, inner: &mut Inner, idx: usize) {
+        if !matches!(self.cfg.algo, PickAlgo::Pct { .. }) {
+            return;
+        }
+        inner.pct_step += 1;
+        while inner.pct_next_cp < inner.pct_cps.len()
+            && inner.pct_cps[inner.pct_next_cp].0 <= inner.pct_step
+        {
+            let (_, target) = inner.pct_cps[inner.pct_next_cp];
+            inner.pct_next_cp += 1;
+            inner.slots[idx].prio = target;
+        }
+    }
+
     /// Mandatory handoff on would-block (contract §3.1). The calling thread
     /// must hold the permit; it parks until an explicit wake makes it
     /// Runnable and a later handoff picks it.
     fn block_on_slot(&self, idx: usize, site: &'static Location<'static>, kind: OpClass) {
         {
             let mut inner = plock(&self.inner);
+            self.pct_step_locked(&mut inner, idx);
             let slot = &mut inner.slots[idx];
-            debug_assert!(
+            // Real assert (F6 ledger row): a wrapper-protocol violation must
+            // fail loudly in every profile — sim-only code, cost immaterial.
+            assert!(
                 slot.granted,
                 "pgsync::sim: block_on from a thread that does not hold the permit"
             );
@@ -443,29 +581,60 @@ impl Scheduler {
     }
 
     /// Optional-preemption point at a non-blocking touch (unlock / notify /
-    /// send / spawn). Draws once per touch whenever preemption is enabled,
-    /// so the pick stream is a stable function of the schedule.
+    /// send / spawn). Uniform draws one preempt_p coin per touch whenever
+    /// preemption is enabled, so the pick stream is a stable function of
+    /// the schedule; PCT preempts exactly when a change point (or an
+    /// earlier wake/spawn) leaves a strictly-higher-priority slot Runnable.
     /// `OpClass::Spawn` touches additionally run the spawn fence (module
-    /// docs) BEFORE the draw, and never preempt themselves.
+    /// docs) BEFORE the draw, and never preempt themselves (nor count as a
+    /// PCT step) — the fence invariant, step-1 shape.
+    /// SPAWN FENCE (module docs): wall-wait (outside the model) until every
+    /// OS-spawned wrapper child's registration has landed, so the slot set
+    /// at the next handoff is schedule-determined, not wall-luck. Runs on
+    /// the GLOBAL scheduler regardless of the toucher's TLS binding —
+    /// wrapper-spawn registration always lands there (`Router::spawn`), so
+    /// the spawned-side bump must too or the counters diverge (F1: an
+    /// off-model spawner left a permanent surplus that made every later
+    /// fence pass vacuously; F4: an instance-bound spawner fence-waited on
+    /// its instance for a registration the global received).
+    fn spawn_fence(&self) {
+        let mut inner = plock(&self.inner);
+        inner.children_spawned += 1;
+        while inner.children_registered < inner.children_spawned {
+            inner = self.cv.wait(inner).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
     fn touch_slot(&self, idx: usize, site: &'static Location<'static>, kind: OpClass) {
         let preempt = {
             let mut inner = plock(&self.inner);
-            if kind == OpClass::Spawn {
-                // SPAWN FENCE: wall-wait (outside the model) until the
-                // OS-spawned child's registration lands, so the slot set at
-                // the next handoff is schedule-determined, not wall-luck.
-                inner.children_spawned += 1;
-                while inner.children_registered < inner.children_spawned {
-                    inner = self.cv.wait(inner).unwrap_or_else(|e| e.into_inner());
-                }
+            if kind != OpClass::Spawn {
+                self.pct_step_locked(&mut inner, idx);
             }
             let vpid = inner.slots[idx].vpid;
             inner.slots[idx].last_event = Some((kind.as_str(), site));
-            let preempt = if kind != OpClass::Spawn && self.cfg.preempt_p > 0.0 {
-                let d = splitmix64(&mut inner.rng);
-                ((d >> 11) as f64 / (1u64 << 53) as f64) < self.cfg.preempt_p
-            } else {
+            let preempt = if kind == OpClass::Spawn {
                 false
+            } else {
+                match self.cfg.algo {
+                    PickAlgo::Uniform => {
+                        if self.cfg.preempt_p > 0.0 {
+                            let d = splitmix64(&mut inner.rng);
+                            ((d >> 11) as f64 / (1u64 << 53) as f64) < self.cfg.preempt_p
+                        } else {
+                            false
+                        }
+                    }
+                    // PCT: highest-priority-runnable must run — hand off iff
+                    // some Runnable slot strictly outranks the running one.
+                    PickAlgo::Pct { .. } => {
+                        let cur = inner.slots[idx].prio;
+                        inner
+                            .slots
+                            .iter()
+                            .any(|s| s.state == SlotState::Runnable && s.prio > cur)
+                    }
+                }
             };
             inner.log.emit(
                 Some(vpid),
@@ -501,13 +670,18 @@ impl Scheduler {
     ) -> bool {
         let deadline_ns = {
             let mut inner = plock(&self.inner);
+            self.pct_step_locked(&mut inner, idx);
             let now = match self.cfg.clock {
                 ClockMode::Instance => inner.vnow_ns,
                 ClockMode::PgClock => pg_clock::mono_ns(),
             };
             let deadline_ns = now.saturating_add(dur.as_nanos().min(u64::MAX as u128) as u64);
             let slot = &mut inner.slots[idx];
-            debug_assert!(slot.granted);
+            // Real assert (F6 ledger row; see block_on_slot).
+            assert!(
+                slot.granted,
+                "pgsync::sim: timed_park from a thread that does not hold the permit"
+            );
             let vpid = slot.vpid;
             slot.state = SlotState::TimedParked(deadline_ns);
             slot.granted = false;
@@ -606,6 +780,33 @@ impl Scheduler {
         plock(&self.teardown).push(Arc::new(hook));
     }
 
+    /// Retire a slot whose OS spawn FAILED before the child ever bound (F3
+    /// ledger row, applied at PERMIT-S2 while dooring the wpool site): the
+    /// parent-side registration would otherwise leak a Runnable ghost whose
+    /// eventual grant wedges the schedule (dump shows site=-). If the
+    /// bootstrap handoff already granted the ghost, revoke and hand off
+    /// again. Never-entered only: no teardown hooks, no join wakes (no
+    /// joiner can hold a handle to a failed spawn).
+    #[track_caller]
+    pub fn cancel_never_entered(&self, slot: SlotId) {
+        let site = Location::caller();
+        let actor = current_vpid();
+        let mut inner = plock(&self.inner);
+        let vpid = inner.slots[slot.0].vpid;
+        let was_granted = inner.slots[slot.0].granted;
+        inner.slots[slot.0].state = SlotState::Exited;
+        inner.slots[slot.0].granted = false;
+        inner.log.emit(
+            actor,
+            "Cancel",
+            Some(site),
+            &[("child", vpid.to_string())],
+        );
+        if was_granted {
+            self.handoff_locked(&mut inner, actor);
+        }
+    }
+
     // --- virtual time -------------------------------------------------------
 
     /// Current virtual now (ns) on this scheduler's clock.
@@ -688,8 +889,11 @@ impl Scheduler {
     /// caller has already taken the current thread out of Running.
     fn handoff_locked(&self, inner: &mut Inner, actor: Option<Vpid>) {
         loop {
-            // 1. seeded uniform pick over Runnable slots (slot order = fixed
-            //    registration order; the draw is the only entropy).
+            // 1. pick over Runnable slots (slot order = fixed registration
+            //    order). Uniform: the seeded draw is the only entropy.
+            //    PCT: highest priority wins, ties to the lowest slot index —
+            //    deterministic, no draw (the entropy went into the
+            //    priorities and change points).
             let runnable: Vec<usize> = inner
                 .slots
                 .iter()
@@ -701,15 +905,32 @@ impl Scheduler {
                 let pick = if runnable.len() == 1 {
                     0
                 } else {
-                    (splitmix64(&mut inner.rng) % runnable.len() as u64) as usize
+                    match self.cfg.algo {
+                        PickAlgo::Uniform => {
+                            (splitmix64(&mut inner.rng) % runnable.len() as u64) as usize
+                        }
+                        PickAlgo::Pct { .. } => runnable
+                            .iter()
+                            .enumerate()
+                            .max_by(|(_, a), (_, b)| {
+                                inner.slots[**a]
+                                    .prio
+                                    .cmp(&inner.slots[**b].prio)
+                                    // ties: LOWEST slot index wins (max_by
+                                    // keeps the last max; reverse the index
+                                    // order so the first-registered slot is
+                                    // the deterministic winner).
+                                    .then(b.cmp(a))
+                            })
+                            .map(|(i, _)| i)
+                            .expect("non-empty runnable"),
+                    }
                 };
                 let chosen = runnable[pick];
                 inner.slots[chosen].granted = true;
                 inner.slots[chosen].state = SlotState::Running;
                 inner.permit_held = true;
                 self.heartbeat_seq.fetch_add(1, Ordering::Relaxed);
-                self.heartbeat_stamp_ms
-                    .store(watchdog::wall_ms(), Ordering::Relaxed);
                 let next = inner.slots[chosen].vpid;
                 inner.log.emit(
                     actor,
@@ -866,6 +1087,16 @@ impl SchedulerHooks for Router {
     }
 
     fn touch(&self, site: &'static Location<'static>, kind: OpClass) {
+        if kind == OpClass::Spawn {
+            // F1/F4 fix (PERMIT-S2): the fence pairs with the child-side
+            // registration, which ALWAYS lands on the global scheduler
+            // (`Router::spawn` below) — so the spawned-side bump runs there
+            // too, whatever the toucher's binding (registered slot, unit
+            // instance, off-model thread). Conservation holds in all cases.
+            if let Some(g) = global() {
+                g.spawn_fence();
+            }
+        }
         if let Some((s, idx, _)) = current_sched() {
             s.touch_slot(idx, site, kind);
         }
@@ -888,6 +1119,7 @@ impl SchedulerHooks for Router {
         }
     }
 
+    #[track_caller]
     fn exit(&self, vpid: Vpid) {
         if let Some((s, idx, cur)) = current_sched() {
             debug_assert_eq!(cur, vpid, "pgsync::sim: exit(vpid) from a different thread");
@@ -954,8 +1186,17 @@ pub fn global() -> Option<&'static Arc<Scheduler>> {
             // Under pgrust_sim the funnel is SimEntropy (infallible fill);
             // the bool is the native-arm OS-entropy failure signal.
             let _ = pg_strong_random::pg_strong_random(&mut seed_bytes);
+            let algo = if config::sched_algo_is_pct() {
+                PickAlgo::Pct {
+                    depth: config::pct_depth(),
+                    steps: config::pct_steps(),
+                }
+            } else {
+                PickAlgo::Uniform
+            };
             let cfg = SchedulerConfig {
                 seed: u64::from_le_bytes(seed_bytes),
+                algo,
                 preempt_p: config::preempt_p(),
                 log_cap: DEFAULT_LOG_CAP,
                 stream_log: config::stream_schedlog(),
