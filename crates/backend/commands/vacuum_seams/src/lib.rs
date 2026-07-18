@@ -10,6 +10,8 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // Returns C's (*frozenxid_updated, *minmulti_updated) out-params: whether
+    // relfrozenxid / relminmxid were actually advanced (vacuum.c).
     pub fn vac_update_relstats(
         relation: &RelationData<'_>,
         num_pages: BlockNumber,
@@ -20,5 +22,5 @@ seam_core::seam!(
         frozenxid: types_core::TransactionId,
         minmulti: types_core::MultiXactId,
         in_outer_xact: bool,
-    ) -> PgResult<()>
+    ) -> PgResult<(bool, bool)>
 );

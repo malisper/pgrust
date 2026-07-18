@@ -41,3 +41,9 @@ seam_core::seam!(
     // CheckPointReplicationOrigin() (origin.c).
     pub fn check_point_replication_origin() -> PgResult<()>
 );
+
+seam_core::seam!(
+    // replorigin_redo (origin.c) — the REPLORIGIN rmgr rm_redo callback;
+    // rmgr's table row calls through this seam.
+    pub fn replorigin_redo(record: &mut xlogreader_seams::XLogReaderState) -> PgResult<()>
+);

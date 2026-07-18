@@ -36,7 +36,7 @@ pub fn log_startup_progress_interval() -> i32 {
 }
 
 fn WakeupRecovery() {
-    panic!("WakeupRecovery: recoveryWakeupLatch unported (xlogrecovery's wait loop)");
+    xlogrecovery_seams::wakeup_recovery::call();
 }
 
 /// SIGUSR2 handler body (promotion trigger).
@@ -60,9 +60,21 @@ pub fn StartupProcShutdownHandler() {
     WakeupRecovery();
 }
 
+// StartupRereadConfig (startup.c:157): a walreceiver-parameter change
+// across the reload forces a walreceiver restart so the new
+// primary_conninfo/slot takes effect (048_vacuum_horizon_floor relies on the
+// walreceiver dying when primary_conninfo goes invalid). The C diff of this
+// process's private pre/post-reload GUC copies is impossible here — string
+// GUC backings are process-shared, the postmaster's reload is visible before
+// ours runs — so xlogrecovery diffs against the walreceiver's started-with
+// values instead.
 fn StartupRereadConfig() -> PgResult<()> {
-    // Walreceiver-restart diff dropped: no walreceiver exists while unported.
-    guc_file::ProcessConfigFile(types_guc::GucContext::PGC_SIGHUP)
+    guc_file::ProcessConfigFile(types_guc::GucContext::PGC_SIGHUP)?;
+
+    if xlogrecovery_seams::startup_reread_walrcv_config::is_installed() {
+        xlogrecovery_seams::startup_reread_walrcv_config::call();
+    }
+    Ok(())
 }
 
 pub fn ProcessStartupProcInterrupts() -> PgResult<()> {
@@ -211,4 +223,9 @@ pub fn init_seams() {
     startup_seams::begin_startup_progress_phase::set(begin_startup_progress_phase);
     startup_seams::register_startup_progress_timeout::set(register_startup_progress_timeout);
     startup_seams::process_startup_proc_interrupts::set(ProcessStartupProcInterrupts);
+    startup_seams::is_promote_signaled::set(IsPromoteSignaled);
+    startup_seams::reset_promote_signaled::set(ResetPromoteSignaled);
+    startup_seams::disable_startup_progress_timeout::set(disable_startup_progress_timeout);
+    startup_seams::pre_restore_command::set(PreRestoreCommand);
+    startup_seams::post_restore_command::set(PostRestoreCommand);
 }

@@ -116,10 +116,12 @@ fn CreateLockFile(
             }
         }
 
-        let mut buffer = String::new();
+        // Raw bytes, like C's read(): a torn write leaving non-UTF8 garbage
+        // past the leading PID digits must not abort the whole parse.
+        let mut raw = Vec::new();
         match OpenOptions::new().read(true).open(filename) {
             Ok(mut f) => {
-                if let Err(e) = f.read_to_string(&mut buffer) {
+                if let Err(e) = f.read_to_end(&mut raw) {
                     ereport(FATAL)
                         .with_saved_errno(e.raw_os_error().unwrap_or(0))
                         .errcode_for_file_access()
@@ -140,7 +142,7 @@ fn CreateLockFile(
             }
         }
 
-        if buffer.is_empty() {
+        if raw.is_empty() {
             ereport(FATAL)
                 .errcode(ERRCODE_LOCK_FILE_EXISTS)
                 .errmsg(format!("lock file \"{filename}\" is empty"))
@@ -150,15 +152,17 @@ fn CreateLockFile(
                 )
                 .finish(loc(1315, "CreateLockFile"))?;
         }
+        let buffer = String::from_utf8_lossy(&raw).into_owned();
 
         // encoded_pid < 0 marks a standalone postgres, not a postmaster.
         let encoded_pid = leading_i64(&buffer) as i32;
         let other_pid = encoded_pid.unsigned_abs() as i32;
         if other_pid <= 0 {
+            // C's elog(FATAL, ..., buffer) prints the whole raw buffer, not
+            // just its first line.
             ereport(FATAL)
                 .errmsg_internal(format!(
-                    "bogus data in lock file \"{filename}\": \"{}\"",
-                    buffer.lines().next().unwrap_or("")
+                    "bogus data in lock file \"{filename}\": \"{buffer}\""
                 ))
                 .finish(loc(1326, "CreateLockFile"))?;
         }
@@ -234,15 +238,33 @@ fn CreateLockFile(
     }
 
     let write_result = file.write_all(contents.as_bytes()).and_then(|()| file.sync_all());
+    // C's third distinct check: close(fd) itself can fail (e.g. NFS EIO);
+    // write, fsync, and close failures all share this exact message.
+    use std::os::unix::io::IntoRawFd;
+    let raw_fd = file.into_raw_fd();
+    // SAFETY: raw_fd was just taken from `file`, which owned it exclusively;
+    // closing it here replaces the implicit close the Drop would have done.
+    let close_errno = if unsafe { libc::close(raw_fd) } != 0 {
+        std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+    } else {
+        0
+    };
     if let Err(e) = write_result {
         let errno = e.raw_os_error().unwrap_or(libc::ENOSPC);
-        drop(file);
         let _ = std::fs::remove_file(filename);
         ereport(FATAL)
             .with_saved_errno(errno)
             .errcode_for_file_access()
             .errmsg(format!("could not write lock file \"{filename}\": %m"))
             .finish(loc(1461, "CreateLockFile"))?;
+    }
+    if close_errno != 0 {
+        let _ = std::fs::remove_file(filename);
+        ereport(FATAL)
+            .with_saved_errno(close_errno)
+            .errcode_for_file_access()
+            .errmsg(format!("could not write lock file \"{filename}\": %m"))
+            .finish(loc(1486, "CreateLockFile"))?;
     }
 
     register_lock_file(filename);
