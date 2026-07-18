@@ -316,6 +316,15 @@ fn math_domains_and_live_pg_values() {
     assert_eq!(out8(derf(1.0).unwrap()), "0.8427007929497149");
     assert_eq!(out8(derfc(1.0).unwrap()), "0.15729920705028513");
     assert_eq!(out8(dgamma(5.5).unwrap()), "52.34277778455352");
+    // glibc's lgamma(10.5) differs by 1 ULP between aarch64 and x86_64;
+    // funcs.rs binds the SYSTEM libm (C's parity reference), so each arm
+    // below byte-matches the same-arch live C PG (x86 stage-1 bring-up
+    // lane, 2026-07-17: PGDG 18.4 x86_64 SELECT lgamma(10.5) =
+    // 13.940625219403762 verified in-pod; every other literal in this
+    // block matched cross-arch).
+    #[cfg(target_arch = "x86_64")]
+    assert_eq!(out8(dlgamma(10.5).unwrap()), "13.940625219403762");
+    #[cfg(not(target_arch = "x86_64"))]
     assert_eq!(out8(dlgamma(10.5).unwrap()), "13.940625219403763");
 
     assert_eq!(dpow(f64::NAN, 0.0).unwrap(), 1.0);
