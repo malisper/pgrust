@@ -446,8 +446,13 @@ fn second_session_thread(
     argv: Vec<String>,
     datadir: String,
     snap: SimInherited,
-) -> std::thread::JoinHandle<i32> {
-    std::thread::Builder::new()
+) -> pgsync::thread::JoinHandle<i32> {
+    // PERMIT-S1 compose wiring: pgsync spawn — under PGRUST_SIM_SCHED=1 the
+    // child registers in-model (synthetic vpid, parent-side spawn fence) so
+    // the two backends interleave ONLY at scheduler touches and the SCHEDOP
+    // stream is a seeded function of PGRUST_SIM_SEED; plain std passthrough
+    // when the scheduler is off (the pre-compose behavior).
+    pgsync::thread::Builder::new()
         .name("sim-session-2".into())
         .stack_size(64 * 1024 * 1024)
         .spawn(move || {
@@ -497,10 +502,12 @@ fn second_session_thread(
             // 1's InitPostgres, so an early second backend reads snapshots
             // "in recovery" (unported KnownAssignedXids panic). Same gate,
             // demo-shaped: wait for the shared recovery state to clear.
-            // (Under the permit scheduler this sleep is a TimedPark.)
+            // pgsync sleep = TimedPark under the permit scheduler (a raw
+            // std sleep here would hold the permit across the poll and
+            // starve session 1 out of ever finishing recovery).
             let mut waited_ms = 0u32;
             while transam_xlog::RecoveryInProgress() {
-                std::thread::sleep(std::time::Duration::from_millis(1));
+                pgsync::thread::sleep(std::time::Duration::from_millis(1));
                 waited_ms += 1;
                 assert!(waited_ms < 60_000, "s2: recovery never completed (W5 gate)");
             }
@@ -515,6 +522,12 @@ pub fn PostgresSimNetMain(argv: &[String], username: &str) -> ! {
     // ---- PERMIT-S1 demo corpora that need no server boot at all: the
     // planted race (P2) and the watchdog red fixture (P4) divert here.
     crate::sim_sched_demo::maybe_run_demo_corpus_from_env();
+
+    // PERMIT-S1 compose wiring: register the boot/driver thread at the
+    // spawn door (core hand-back: registrations from a REGISTERED thread
+    // are program-ordered — the deterministic pattern). No-op unless
+    // PGRUST_SIM_SCHED=1, so sim-net-e2e and dst-smoke are byte-unaffected.
+    let _sched_door = pgsync::sim::spawn_door::register_self("simnet-main");
 
     // ---- Sim-harness plumbing BEFORE the transport-blind ladder runs.
     // Datadir: the -D argument (the ladder re-parses it itself later).

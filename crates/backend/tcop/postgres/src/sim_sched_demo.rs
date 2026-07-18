@@ -24,18 +24,19 @@
 //!   fallback timer FAILS the fixture (exit 3, `RED-FALLBACK` line) if no
 //!   watchdog kills the process first.
 //!
-//! Lock imports are `std::sync` TODAY (pgsync does not exist yet at this
-//! branch's base). PERMIT-S1 wiring point: when dst/permit-s1-sync lands,
-//! the PLANT's imports flip to `pgsync::…` (one-line swap below) so its
-//! ops are scheduler touches; the RED's raw `std::sync::Mutex` stays raw
-//! FOREVER — it is the fixture. DST-REVIEW: this module is cfg(pgrust_sim)
-//! (invisible to the determinism-lint scanner per the simnet-lane trap);
-//! when WS-SYNC's `rawsync` category lands, this file's rows belong in the
-//! `# PERMIT-S1-DEMO` allowlist band as the named red fixture.
+//! WIRED AT COMPOSE (dst/permit-s1): lock ops are `pgsync::…` (scheduler
+//! touches), corpus threads register — main via the spawn door
+//! (`register_self`), children via `pgsync::thread` (child-side synthetic
+//! registration behind the parent-side spawn fence) — so the schedule is a
+//! seeded function of `PGRUST_SIM_SEED` under `PGRUST_SIM_SCHED=1`. The
+//! RED's raw `std::sync::Mutex` stays raw FOREVER — it is the fixture (its
+//! rawsync allowlist row names it). With the scheduler off everything here
+//! degrades to plain std (scaffold mode, exactly the pre-compose behavior).
 
-// PERMIT-S1 wiring point (WS-SYNC): flip to `use pgsync::{Mutex, Condvar};`
-// and `use pgsync::thread;` for the PLANT. The RED keeps raw std::sync.
-use std::sync::{Arc, Condvar, Mutex};
+// PERMIT-S1 wiring point (WS-SYNC): FLIPPED at compose. The RED keeps its
+// raw std::sync::Mutex (fully-qualified below — the fixture).
+use pgsync::{Condvar, Mutex};
+use std::sync::Arc;
 
 /// Env-dispatched corpus entry: called by PostgresSimNetMain FIRST; returns
 /// only if no demo-corpus env is set (the normal session path proceeds).
@@ -54,19 +55,24 @@ pub(crate) fn maybe_run_demo_corpus_from_env() {
 // ---------------------------------------------------------------------------
 
 fn run_plant(iters: u64) -> ! {
+    // In-model driver: register main at the spawn door (no-op when the
+    // scheduler is off) so the children's registrations are program-ordered
+    // (spawn fence) and the joins below are hooked parks.
+    let _door = pgsync::sim::spawn_door::register_self("plant-main");
     let ctr = Arc::new(Mutex::new(0u64));
     let mut handles = Vec::new();
     for t in 0..2u32 {
         let ctr = Arc::clone(&ctr);
         handles.push(
-            std::thread::Builder::new()
+            pgsync::thread::Builder::new()
                 .name(format!("plant-{t}"))
                 .spawn(move || {
                     for _ in 0..iters {
                         // THE RACE: read under one acquisition …
                         let seen = *ctr.lock().unwrap_or_else(|e| e.into_inner());
-                        // … window (a scheduling touch under the permit
-                        // scheduler; a plain yield today) …
+                        // … window (under the permit scheduler the seeded
+                        // preemption dial at the surrounding lock/unlock
+                        // touches opens it; a plain yield otherwise) …
                         std::thread::yield_now();
                         // … write under a SECOND acquisition. An
                         // interleaved peer increment in the window is
@@ -94,6 +100,11 @@ fn run_plant(iters: u64) -> ! {
 // ---------------------------------------------------------------------------
 
 fn run_watchdog_red() -> ! {
+    // In-model victim: THIS thread (B) registers, so when it blocks on the
+    // raw mutex below it is the PERMIT HOLDER blocked outside interception —
+    // the one wedge shape THE watchdog exists to catch. No-op when the
+    // scheduler is off (scaffold mode: fallback timer trips).
+    let _door = pgsync::sim::spawn_door::register_self("red-main");
     // Fallback FAIL timer (red-battery discipline: the fixture FAILS if the
     // watchdog does not fire). Plain unregistered std thread, wall clock —
     // exactly like the watchdog itself, outside the model.
@@ -115,7 +126,10 @@ fn run_watchdog_red() -> ! {
     let a = {
         let gate = Arc::clone(&gate);
         let raw = Arc::clone(&raw);
-        std::thread::Builder::new()
+        // In-model holder (pgsync spawn: registered behind the spawn fence):
+        // A parks forever in a SHIM wait while holding the raw mutex, so the
+        // schedule stays live until B reaches the raw lock.
+        pgsync::thread::Builder::new()
             .name("red-holder".into())
             .spawn(move || {
                 let _held = raw.lock().unwrap_or_else(|e| e.into_inner());

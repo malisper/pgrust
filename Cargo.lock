@@ -12380,6 +12380,7 @@ dependencies = [
  "pg_strong_random",
  "pgstat",
  "pgstat_seams",
+ "pgsync",
  "pgtz",
  "plancache",
  "planner",
