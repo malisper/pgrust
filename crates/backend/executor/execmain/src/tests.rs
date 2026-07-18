@@ -11413,3 +11413,82 @@ mod epq_capture_w7 {
     }
 }
 // --- end WS-Y wave-7 ------------------------------------------------------------
+
+// ============================================================================
+// ===== WAVE-9 SHARED TEST REGION (contract §7) — sub-regions in AG, AH, AI,
+// AJ order; each WS fills ONLY its own block; integration splices verbatim.
+// ============================================================================
+// --- WS-AG (wave-9): the fusion D1a per-mask chain-program pins ------------
+// The engagement/refusal A/B units stay the wave-7 dml_ab set (levers
+// unchanged); the trigger-fixture blocker (wave-7 D3: relcache-sourced
+// trigdesc) still stands, so seam-drive identity rides the dualexec corpus
+// (scripts/dualexec/corpus-dml-rowchain.sql, the E2 gate re-ride). These
+// pins own what IS unit-decidable: every shape mask's program is a
+// well-formed admitted chain (lanestitch classification), with the BR/RET
+// steps present exactly per mask and the loop-top law structural.
+mod rowchain_wave9_ag {
+    use ::lanestitch::Step;
+
+    #[test]
+    fn rowchain_mask_programs_are_admitted_chain_shapes() {
+        for mask in 0..::nodemodifytable::MT_ROWCHAIN_MASKS as u8 {
+            let p = crate::lanev2::rowchain_insert_prog_for_mask(mask);
+            // Admitted by the stitcher's classification (NAMED refusals).
+            assert_eq!(
+                ::lanestitch::rowchain_plan_refusal(&p),
+                None,
+                "mask {mask} program must be an admitted chain shape"
+            );
+            // Shape: [PROLOGUE, NextRow, STAGE, (BR), WRITE, EPILOGUE, (RET)].
+            let want_len = 5
+                + usize::from(mask & ::nodemodifytable::MT_ROWCHAIN_BR != 0)
+                + usize::from(mask & ::nodemodifytable::MT_ROWCHAIN_RET != 0);
+            assert_eq!(p.steps.len(), want_len, "mask {mask}");
+            assert!(matches!(p.steps[0], Step::ProtocolCall { .. }), "loop-top prologue");
+            assert!(matches!(p.steps[1], Step::NextRow), "single pull at position 1");
+            for (i, s) in p.steps.iter().enumerate().skip(2) {
+                assert!(
+                    matches!(s, Step::ProtocolCall { .. }),
+                    "mask {mask} step {i} must be a protocol call"
+                );
+            }
+            // Call ids unique within the program (verdict dispatch sanity).
+            let mut ids: Vec<u16> = p
+                .steps
+                .iter()
+                .filter_map(|s| match s {
+                    Step::ProtocolCall { call } => Some(*call),
+                    _ => None,
+                })
+                .collect();
+            ids.sort_unstable();
+            let n = ids.len();
+            ids.dedup();
+            assert_eq!(ids.len(), n, "mask {mask}: duplicate protocol call ids");
+        }
+        // Mask monotonicity: BR adds exactly one step after STAGE; RET
+        // appends exactly one step at the end (the emit-pause position).
+        let base = crate::lanev2::rowchain_insert_prog_for_mask(0);
+        let br = crate::lanev2::rowchain_insert_prog_for_mask(::nodemodifytable::MT_ROWCHAIN_BR);
+        let ret = crate::lanev2::rowchain_insert_prog_for_mask(::nodemodifytable::MT_ROWCHAIN_RET);
+        assert_eq!(br.steps.len(), base.steps.len() + 1);
+        assert_eq!(ret.steps.len(), base.steps.len() + 1);
+        let last_ret = match ret.steps.last() {
+            Some(Step::ProtocolCall { call }) => *call,
+            other => panic!("RET program must end in a protocol call, got {other:?}"),
+        };
+        let base_ids: Vec<u16> = base
+            .steps
+            .iter()
+            .filter_map(|s| match s {
+                Step::ProtocolCall { call } => Some(*call),
+                _ => None,
+            })
+            .collect();
+        assert!(!base_ids.contains(&last_ret), "RET step must be mask-only");
+    }
+}
+// --- end WS-AG (wave-9) ------------------------------------------------------
+// --- WS-AH (wave-9): reserved ---
+// --- WS-AI (wave-9): reserved ---
+// --- WS-AJ (wave-9): reserved ---

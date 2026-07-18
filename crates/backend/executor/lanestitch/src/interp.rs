@@ -286,6 +286,16 @@ pub fn eval_qual(prog: &Program, batch: &Batch<'_>, sel: &mut SelVec) -> PgResul
 pub(crate) const LOOP_TOP_MISUSE: &str =
     "loop-top protocol call answered a row verdict with no current row";
 
+/// The D2 cursor/lane bound's violation text (wave-9 WS-AG rung 1, the
+/// wave-7 D2 charter rider): a pure step needs a staged lane row at the
+/// cursor index, so a chain whose host pulls past the staged batch (or
+/// whose batch exceeds the MAX_ROWS lane contract) errors loudly instead
+/// of indexing out of bounds. ONE string, shared with the stitched tier
+/// when pure steps join production chains (rung 4) — error identity by
+/// construction, the LOOP_TOP_MISUSE precedent.
+pub(crate) const CURSOR_PAST_BATCH: &str =
+    "chain cursor past the staged batch (pure step with no staged lane row)";
+
 pub(crate) fn chain_next_pos(prog: &Program) -> Option<usize> {
     let mut pos = None;
     for (i, s) in prog.steps.iter().enumerate() {
@@ -336,6 +346,14 @@ pub fn eval_row_chain(
             "chain program needs exactly one NextRow with a protocol-only loop top",
         ));
     };
+    // D2 precondition (wave-9 WS-AG rung 1): pure steps index the staged
+    // batch lanes at the cursor row, so their rows must stay inside the
+    // batch (and the batch inside the MAX_ROWS lane contract). Computed
+    // once per drive; protocol-only chains stage no lane rows and stay
+    // unbounded — the DML chain's cursor counts pulls, not lane rows.
+    let has_pure = prog.steps[next_pos + 1..]
+        .iter()
+        .any(|s| !matches!(s, Step::ProtocolCall { .. }));
     'chain: loop {
         // Loop-top segment (validated ProtocolCall-only).
         for step in &prog.steps[..next_pos] {
@@ -353,6 +371,11 @@ pub fn eval_row_chain(
         }
         let row = cursor.row;
         cursor.row += 1;
+        // The D2 cursor/lane bound (loud, never an OOB index): only chains
+        // with pure steps read lanes, and they may not outrun the batch.
+        if has_pure && (row >= batch.nrows || batch.nrows as usize > MAX_ROWS) {
+            return Err(rowop_misuse(CURSOR_PAST_BATCH));
+        }
         // Per-row segment.
         let mut regs = [NullableDatum::null(); MAX_REGS];
         for step in &prog.steps[next_pos + 1..] {
