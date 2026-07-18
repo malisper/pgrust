@@ -11870,6 +11870,7 @@ dependencies = [
  "lz4_flex",
  "mbutils_seams",
  "mcx",
+ "pgsync",
  "relpath",
  "snapmgr",
  "tableam_vocab",

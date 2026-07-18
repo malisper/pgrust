@@ -390,7 +390,6 @@ blocking	crates/backend/access/heap/vacuumlazy/src/lib.rs	1
 blocking	crates/backend/access/heap/vacuumlazy/src/morsels.rs	1
 blocking	crates/backend/access/pgrcolumnar/src/loadsort.rs	6	P3: readahead channels (s3.3)
 blocking	crates/backend/access/pgrcolumnar/src/scan.rs	2
-blocking	crates/backend/access/pgrcolumnar/src/writer.rs	3	P3: stitch-pool channels (s3.3)
 blocking	crates/backend/access/transam/parallel/src/lib.rs	3	P3: parallel error-queue channels (s3.3)
 blocking	crates/backend/access/transam/parallel/src/standing.rs	4	CONVERTED (permit-s3): gang Condvar/Mutex/OnceLock = pgsync types; leader join = the modeled detach-count cv join (loom standing_gang_detach_count_join_no_lost_wake); SCHED-VISIBLE under sim
 blocking	crates/backend/access/transam/transam_xlog/src/startup.rs	1
@@ -592,7 +591,7 @@ rawsync	crates/backend/access/pgrcolumnar/src/part_cache.rs	1
 rawsync	crates/backend/access/pgrcolumnar/src/reader.rs	9
 rawsync	crates/backend/access/pgrcolumnar/src/scan.rs	4
 rawsync	crates/backend/access/pgrcolumnar/src/segfile.rs	3
-rawsync	crates/backend/access/pgrcolumnar/src/writer.rs	7
+rawsync	crates/backend/access/pgrcolumnar/src/writer.rs	4
 rawsync	crates/backend/access/transam/clog/src/lib.rs	1
 rawsync	crates/backend/access/transam/commit_ts/src/lib.rs	1
 rawsync	crates/backend/access/transam/multixact/src/lib.rs	1
