@@ -256,26 +256,26 @@ fn collect_tablespaces(
         let fullpath = format!("{PG_TBLSPC_DIR}/{d_name}");
 
         // get_dirent_type(look_through_symlinks = false): lstat.
-        let md = match std::fs::symlink_metadata(&fullpath) {
-            Ok(m) => m,
-            Err(_) => return Ok(false),
-        };
-        let ftype = md.file_type();
+        let mut md = fd::FileInfo::zeroed();
+        if fd::pg_lstat(&fullpath, &mut md) != 0 {
+            return Ok(false);
+        }
 
         let linkpath: String;
         let mut relpath: Option<String> = None;
 
-        if ftype.is_symlink() {
-            let target = match std::fs::read_link(&fullpath) {
-                Ok(t) => t.to_string_lossy().into_owned(),
-                Err(_) => {
-                    ereport(WARNING)
-                        .errmsg(format!("could not read symbolic link \"{fullpath}\": %m"))
-                        .finish(loc("do_pg_backup_start"))
-                        .ok();
-                    return Ok(false);
-                }
-            };
+        if md.is_symlink() {
+            // readlink(2), MAXPGPATH-bounded like C's buffer.
+            let mut buf = [0u8; MAXPGPATH];
+            let n = fd::pg_readlink(&fullpath, &mut buf);
+            if n < 0 {
+                ereport(WARNING)
+                    .errmsg(format!("could not read symbolic link \"{fullpath}\": %m"))
+                    .finish(loc("do_pg_backup_start"))
+                    .ok();
+                return Ok(false);
+            }
+            let target = String::from_utf8_lossy(&buf[..n as usize]).into_owned();
             if target.len() >= MAXPGPATH {
                 ereport(WARNING)
                     .errmsg(format!("symbolic link \"{fullpath}\" target is too long"))
@@ -303,7 +303,7 @@ fn collect_tablespaces(
                 escapedpath.push(c as char);
             }
             tblspcmapfile.extend_from_slice(format!("{d_name} {escapedpath}\n").as_bytes());
-        } else if ftype.is_dir() {
+        } else if md.is_dir() {
             // allow_in_place_tablespaces: a directory directly under pg_tblspc.
             // Store a relative path.
             linkpath = format!("{PG_TBLSPC_DIR}/{d_name}");
@@ -558,7 +558,7 @@ fn CleanupBackupHistory() -> PgResult<()> {
             .finish(loc("CleanupBackupHistory"))
             .ok();
         let path = format!("{XLOGDIR}/{d_name}");
-        let _ = std::fs::remove_file(&path);
+        let _ = fd::pg_unlink(&path);
         xlogarchive_seams::xlog_archive_cleanup::call(&d_name);
     }
     Ok(())

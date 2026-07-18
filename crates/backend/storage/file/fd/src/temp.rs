@@ -196,9 +196,9 @@ pub fn PathNameCreateTemporaryDir(basedir: &str, directory: &str) -> PgResult<()
 
 pub fn PathNameDeleteTemporaryDir(dirname: &str) -> PgResult<()> {
     // Silently ignore a missing directory.
-    match std::fs::symlink_metadata(dirname) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        _ => {}
+    let mut info = vfs::FileInfo::zeroed();
+    if vfs::lstat(&vfd::cpath(dirname), &mut info) != 0 && get_errno() == libc::ENOENT {
+        return Ok(());
     }
 
     // Used on cleanup paths: failures are logged, not propagated.
@@ -206,9 +206,12 @@ pub fn PathNameDeleteTemporaryDir(dirname: &str) -> PgResult<()> {
 }
 
 pub fn PathNameDeleteTemporaryFile(path: &str, error_on_failure: bool) -> PgResult<bool> {
-    let (stat_errno, filesize) = match std::fs::metadata(path) {
-        Ok(md) => (0, md.len()),
-        Err(e) => (e.raw_os_error().unwrap_or(0), 0),
+    let cp = vfd::cpath(path);
+    let mut md = vfs::FileInfo::zeroed();
+    let (stat_errno, filesize) = if vfs::stat(&cp, &mut md) == 0 {
+        (0, md.size as u64)
+    } else {
+        (get_errno(), 0)
     };
 
     // Unlike FileClose's deletion, tolerate non-existence: BufFileDeleteFileSet
@@ -217,8 +220,8 @@ pub fn PathNameDeleteTemporaryFile(path: &str, error_on_failure: bool) -> PgResu
         return Ok(false);
     }
 
-    if let Err(e) = std::fs::remove_file(path) {
-        let unlink_errno = e.raw_os_error().unwrap_or(0);
+    if vfs::unlink(&cp) != 0 {
+        let unlink_errno = get_errno();
         if unlink_errno != libc::ENOENT {
             ereport(if error_on_failure { ERROR } else { LOG })
                 .with_saved_errno(unlink_errno)

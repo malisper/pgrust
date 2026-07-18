@@ -51,28 +51,27 @@ fn data_path(rel: &str) -> String {
 
 pub(crate) fn ValidateXLOGDirectoryStructure() -> PgResult<()> {
     let pg_wal = data_path(XLOGDIR);
-    if !std::path::Path::new(&pg_wal).is_dir() {
+    let mut fi = fd::FileInfo::zeroed();
+    if !(fd::pg_stat(&pg_wal, &mut fi) == 0 && fi.is_dir()) {
         return ereport(FATAL)
             .errmsg(format!("required WAL directory \"{XLOGDIR}\" does not exist"))
             .finish(loc("ValidateXLOGDirectoryStructure"));
     }
     for sub in ["archive_status", "summaries"] {
         let path = format!("{pg_wal}/{sub}");
-        let meta = std::fs::metadata(&path);
-        match meta {
-            Ok(m) if m.is_dir() => {}
-            Ok(_) => {
+        let mut fi = fd::FileInfo::zeroed();
+        if fd::pg_stat(&path, &mut fi) == 0 {
+            if !fi.is_dir() {
                 return ereport(FATAL)
                     .errmsg(format!("required WAL directory \"{XLOGDIR}/{sub}\" does not exist"))
                     .finish(loc("ValidateXLOGDirectoryStructure"));
             }
-            Err(_) => {
-                let _ = elog(LOG, format!("creating missing WAL directory \"{XLOGDIR}/{sub}\""));
-                if fd::MakePGDirectory(&path) < 0 {
-                    return ereport(FATAL)
-                        .errmsg(format!("could not create missing directory \"{XLOGDIR}/{sub}\""))
-                        .finish(loc("ValidateXLOGDirectoryStructure"));
-                }
+        } else {
+            let _ = elog(LOG, format!("creating missing WAL directory \"{XLOGDIR}/{sub}\""));
+            if fd::MakePGDirectory(&path) < 0 {
+                return ereport(FATAL)
+                    .errmsg(format!("could not create missing directory \"{XLOGDIR}/{sub}\""))
+                    .finish(loc("ValidateXLOGDirectoryStructure"));
             }
         }
     }
@@ -81,22 +80,30 @@ pub(crate) fn ValidateXLOGDirectoryStructure() -> PgResult<()> {
 
 fn RemoveTempXlogFiles() -> PgResult<()> {
     let dir = data_path(XLOGDIR);
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for e in entries.flatten() {
-            let name = e.file_name();
-            if name.to_string_lossy().starts_with("xlogtemp.") {
-                let _ = std::fs::remove_file(e.path());
-            }
+    // Silent on an unopenable dir, like the pre-P1 shape.
+    let d = fd::AllocateDir(&dir)?;
+    if d.is_none() {
+        return Ok(());
+    }
+    while let Some(de) = fd::ReadDirExtended(d, &dir, types_error::DEBUG1)? {
+        if de.d_name.starts_with("xlogtemp.") {
+            let _ = fd::pg_unlink(&format!("{dir}/{}", de.d_name));
         }
     }
+    fd::FreeDir(d)?;
     Ok(())
 }
 
 fn dir_is_empty(rel: &str) -> bool {
-    match std::fs::read_dir(data_path(rel)) {
-        Ok(mut it) => it.next().is_none(),
-        Err(_) => true,
+    let dir = data_path(rel);
+    let Ok(d) = fd::AllocateDir(&dir) else { return true };
+    if d.is_none() {
+        return true;
     }
+    let first = fd::ReadDirExtended(d, &dir, types_error::DEBUG1);
+    let empty = !matches!(first, Ok(Some(_)));
+    let _ = fd::FreeDir(d);
+    empty
 }
 
 // Unported-unit guard: no-op only when provably no-op, loud panic otherwise.
