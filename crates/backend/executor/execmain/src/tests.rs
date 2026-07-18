@@ -10815,3 +10815,250 @@ mod dml_ab_wave5 {
 // --- WS-X wave-5 sub-region (cursors/SPI design; band 82001+, expected unused) --
 // (reserved; WS-X appends here)
 // --- end WS-X wave-5 sub-region -------------------------------------------------
+
+// --- WS-Y wave-7 (EPQ inc-5 rungs Y0-Y2; band 83001+) ---------------------------
+// Unit corpus for the lane-side EPQ module (lanev2/epq.rs). This commit:
+// Y0 captured-singleton source latch orderings + dark-code refusals.
+// Serialization: every exec-fixture test holds scanfix::TEST_LOCK for its
+// full span (wave-2 precedent-3).
+mod epq_capture_w7 {
+    use super::*;
+    use crate::lanev2::epq::EpqCaptureFeed;
+
+    /// Y0 exactly-once latch: the captured-singleton source stages the
+    /// parked test tuple ONCE (relsubs_done latched at the handout, like C
+    /// ExecScanFetch), drains to zero, refuses emit after end_claim with a
+    /// loud PgError, and a SECOND source over the latched rel stages
+    /// nothing until the latch is reloaded (EvalPlanQualBegin's rescan
+    /// arm, mimicked by hand).
+    #[test]
+    fn epq_w7_captured_source_exactly_once_latch() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mcx = leaked_mcx();
+
+        let relid: u32 = 83002;
+        scanfix::register_table_2col(relid, &[&[(1, 10)]]);
+        let pstmt = mk_epq_update_subplan_pstmt(mcx, relid);
+
+        let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+        let snapshot: snapmgr::Snapshot =
+            std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                snap_ctx.mcx(),
+                ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+            ));
+
+        with_exec_data(pstmt, |data, pstmt| {
+            data.estate.es_snapshot = Some(snapshot);
+            crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+            let ExecData { estate, planstate } = data;
+
+            let mut subs = None;
+            ::executils::ensure_epq_subs(&mut subs, estate.es_query_cxt, estate.epq_rtsize(), 1);
+            let desc = estate.es_relations[0].as_ref().unwrap().rd_att.clone();
+            let test = estate.exec_init_extra_tuple_slot(
+                Some(desc),
+                ::types_slot::TupleSlotKind::Virtual,
+            );
+            subs.as_mut().unwrap().relsubs_slot[0] = Some(test);
+            epq_store_test_tuple(estate, test, 1, 99);
+
+            // Swap in like eval_plan_qual's wrapper (capture model: the ONE
+            // parent estate, the owner's subs), then mirror EvalPlanQual's
+            // availability reset: the rel UNDER TEST is transiently
+            // unblocked (ensure_epq_subs starts result_rti blocked+done,
+            // per C EvalPlanQualStart).
+            estate.es_epq = subs.take();
+            estate.es_epq_active = true;
+            {
+                let s = estate.es_epq.as_mut().unwrap();
+                s.relsubs_done[0] = false;
+                s.relsubs_blocked[0] = false;
+            }
+            crate::lanev2::epq_lane_set_for_tests(true);
+
+            let p = crate::lanev2::epq::epq_captured_probe_for_tests(
+                estate,
+                1,
+                EpqCaptureFeed::TestSlot,
+            )
+            .unwrap()
+            .expect("constructed: knob ON, active recheck, slot parked");
+            assert_eq!(p.granule_total, 1, "ONE granule: the captured row");
+            assert_eq!(p.first_batch, 1, "the singleton batch stages");
+            assert_eq!(p.emitted, Some(test), "emit(0) hands out the parked test slot");
+            assert_eq!(p.second_batch, 0, "drained after the handout");
+            assert!(p.done_latched, "relsubs_done latched at the handout (exactly-once)");
+            assert!(p.reemit_refused, "emit after end_claim = loud PgError, never a panic");
+
+            // Latched rel: a fresh source constructs (slot still parked)
+            // but stages nothing — the done latch IS source exhaustion.
+            let p2 = crate::lanev2::epq::epq_captured_probe_for_tests(
+                estate,
+                1,
+                EpqCaptureFeed::TestSlot,
+            )
+            .unwrap()
+            .expect("constructed");
+            assert_eq!(p2.first_batch, 0, "done-latched rel stages nothing");
+            assert_eq!(p2.emitted, None);
+
+            // Begin's rescan arm reloads done from blocked (both false
+            // here): the reloaded latch re-arms the singleton.
+            estate.es_epq.as_mut().unwrap().relsubs_done[0] = false;
+            let p3 = crate::lanev2::epq::epq_captured_probe_for_tests(
+                estate,
+                1,
+                EpqCaptureFeed::TestSlot,
+            )
+            .unwrap()
+            .expect("constructed");
+            assert_eq!(p3.first_batch, 1, "latch reload re-arms the captured row");
+
+            crate::lanev2::epq_lane_set_for_tests(false);
+            estate.es_epq_active = false;
+            subs = estate.es_epq.take();
+
+            let mut epq = crate::epq::EpqState {
+                plan: pstmt.planTree,
+                recheck: None,
+                result_rti: 1,
+            };
+            crate::epq::eval_plan_qual_end(&mut epq, &mut subs, estate).unwrap();
+            let ps = planstate.as_mut().unwrap();
+            crate::exec_end_node(ps, estate).unwrap();
+            estate.exec_reset_tuple_table(false);
+            estate.exec_close_range_table_relations().unwrap();
+        });
+        scanfix::quiesced();
+    }
+
+    /// Y0 dark-code + blocked/origslot arms: the constructor refuses knob
+    /// OFF, refuses outside an active recheck, refuses an unparked feed
+    /// cell; a blocked rel (done reloaded true by Begin) stages nothing;
+    /// the OrigSlot flavor stages the row under recheck from
+    /// `EpqSubs::origslot` (the rowmark feed of lane-epq.md §2).
+    #[test]
+    fn epq_w7_captured_source_dark_blocked_origslot_arms() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mcx = leaked_mcx();
+
+        let relid: u32 = 83003;
+        scanfix::register_table_2col(relid, &[&[(1, 10)]]);
+        let pstmt = mk_epq_update_subplan_pstmt(mcx, relid);
+
+        let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+        let snapshot: snapmgr::Snapshot =
+            std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                snap_ctx.mcx(),
+                ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+            ));
+
+        with_exec_data(pstmt, |data, pstmt| {
+            data.estate.es_snapshot = Some(snapshot);
+            crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+            let ExecData { estate, planstate } = data;
+
+            let mut subs = None;
+            ::executils::ensure_epq_subs(&mut subs, estate.es_query_cxt, estate.epq_rtsize(), 1);
+            let desc = estate.es_relations[0].as_ref().unwrap().rd_att.clone();
+            let test = estate.exec_init_extra_tuple_slot(
+                Some(desc),
+                ::types_slot::TupleSlotKind::Virtual,
+            );
+            subs.as_mut().unwrap().relsubs_slot[0] = Some(test);
+            epq_store_test_tuple(estate, test, 1, 99);
+            estate.es_epq = subs.take();
+
+            // Dark-code arm 1: knob OFF refuses even inside a recheck.
+            estate.es_epq_active = true;
+            crate::lanev2::epq_lane_set_for_tests(false);
+            assert!(crate::lanev2::epq::epq_captured_probe_for_tests(
+                estate,
+                1,
+                EpqCaptureFeed::TestSlot
+            )
+            .unwrap()
+            .is_none());
+
+            // Dark-code arm 2: knob ON outside an active recheck refuses.
+            crate::lanev2::epq_lane_set_for_tests(true);
+            estate.es_epq_active = false;
+            assert!(crate::lanev2::epq::epq_captured_probe_for_tests(
+                estate,
+                1,
+                EpqCaptureFeed::TestSlot
+            )
+            .unwrap()
+            .is_none());
+
+            // Unparked feed cell refuses (the plain-rescannable rel is not
+            // this source's shape).
+            estate.es_epq_active = true;
+            assert!(
+                crate::lanev2::epq::epq_captured_probe_for_tests(
+                    estate,
+                    1,
+                    EpqCaptureFeed::OrigSlot
+                )
+                .unwrap()
+                .is_none(),
+                "no origslot parked => refuse"
+            );
+
+            // Blocked rel (writep4a/writep4b inheritance class): Begin
+            // reloads done from blocked; the source stages nothing.
+            {
+                let s = estate.es_epq.as_mut().unwrap();
+                s.relsubs_blocked[0] = true;
+                s.relsubs_done[0] = true;
+            }
+            let pb = crate::lanev2::epq::epq_captured_probe_for_tests(
+                estate,
+                1,
+                EpqCaptureFeed::TestSlot,
+            )
+            .unwrap()
+            .expect("constructed: slot parked");
+            assert_eq!(pb.first_batch, 0, "blocked rel stages nothing");
+
+            // OrigSlot flavor: the row under recheck feeds the singleton.
+            {
+                let s = estate.es_epq.as_mut().unwrap();
+                s.relsubs_blocked[0] = false;
+                s.relsubs_done[0] = false;
+                s.origslot = Some(test);
+            }
+            let po = crate::lanev2::epq::epq_captured_probe_for_tests(
+                estate,
+                1,
+                EpqCaptureFeed::OrigSlot,
+            )
+            .unwrap()
+            .expect("constructed: origslot parked");
+            assert_eq!(po.first_batch, 1);
+            assert_eq!(po.emitted, Some(test), "origslot feeds the captured row");
+            assert!(po.done_latched, "rowmark handout latches done too (C 18 semantics)");
+
+            crate::lanev2::epq_lane_set_for_tests(false);
+            estate.es_epq_active = false;
+            subs = estate.es_epq.take();
+
+            let mut epq = crate::epq::EpqState {
+                plan: pstmt.planTree,
+                recheck: None,
+                result_rti: 1,
+            };
+            crate::epq::eval_plan_qual_end(&mut epq, &mut subs, estate).unwrap();
+            let ps = planstate.as_mut().unwrap();
+            crate::exec_end_node(ps, estate).unwrap();
+            estate.exec_reset_tuple_table(false);
+            estate.exec_close_range_table_relations().unwrap();
+        });
+        scanfix::quiesced();
+    }
+}
+// --- end WS-Y wave-7 ------------------------------------------------------------
