@@ -23,7 +23,8 @@ use types_core::TimestampTz;
 use types_error::{
     ereturn, ErrorLocation, PgError, PgResult, SoftErrorContext,
     ERRCODE_DATETIME_VALUE_OUT_OF_RANGE, ERRCODE_DIVISION_BY_ZERO,
-    ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE, WARNING,
+    ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_PARAMETER_VALUE,
+    WARNING,
 };
 
 use crate::{
@@ -1075,6 +1076,14 @@ fn invalid_interval_typmod() -> Box<PgError> {
     )
 }
 
+#[cold]
+fn invalid_interval_typmod_range(typmod: i32) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("invalid INTERVAL typmod: {typmod:#x}"))
+            .with_sqlstate(ERRCODE_INTERNAL_ERROR),
+    )
+}
+
 fn interval_range_valid(range: i32) -> bool {
     range == INTERVAL_MASK(YEAR)
         || range == INTERVAL_MASK(MONTH)
@@ -1134,9 +1143,9 @@ pub fn intervaltypmodin(tl: &[i32]) -> PgResult<i32> {
     }
 }
 
-pub fn intervaltypmodout(typmod: i32, buf: &mut [u8; 64]) -> usize {
+pub fn intervaltypmodout(typmod: i32, buf: &mut [u8; 64]) -> PgResult<usize> {
     if typmod < 0 {
-        return 0;
+        return Ok(0);
     }
 
     let fields = INTERVAL_RANGE(typmod);
@@ -1173,7 +1182,7 @@ pub fn intervaltypmodout(typmod: i32, buf: &mut [u8; 64]) -> usize {
     } else if fields == INTERVAL_FULL_RANGE {
         b""
     } else {
-        panic!("invalid INTERVAL typmod: {typmod:#x}");
+        return Err(invalid_interval_typmod_range(typmod));
     };
 
     buf[..fieldstr.len()].copy_from_slice(fieldstr);
@@ -1199,32 +1208,32 @@ pub fn intervaltypmodout(typmod: i32, buf: &mut [u8; 64]) -> usize {
         buf[len] = b')';
         len += 1;
     }
-    len
+    Ok(len)
 }
 
 // 0 = SECOND .. 5 = YEAR; the truncation granularity a typmod boils down to.
-pub fn intervaltypmodleastfield(typmod: i32) -> i32 {
+pub fn intervaltypmodleastfield(typmod: i32) -> PgResult<i32> {
     if typmod < 0 {
-        return 0;
+        return Ok(0);
     }
     let fields = INTERVAL_RANGE(typmod);
     if fields == INTERVAL_MASK(YEAR) {
-        5
+        Ok(5)
     } else if fields == INTERVAL_MASK(MONTH)
         || fields == (INTERVAL_MASK(YEAR) | INTERVAL_MASK(MONTH))
     {
-        4
+        Ok(4)
     } else if fields == INTERVAL_MASK(DAY) {
-        3
+        Ok(3)
     } else if fields == INTERVAL_MASK(HOUR)
         || fields == (INTERVAL_MASK(DAY) | INTERVAL_MASK(HOUR))
     {
-        2
+        Ok(2)
     } else if fields == INTERVAL_MASK(MINUTE)
         || fields == (INTERVAL_MASK(DAY) | INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE))
         || fields == (INTERVAL_MASK(HOUR) | INTERVAL_MASK(MINUTE))
     {
-        1
+        Ok(1)
     } else if fields == INTERVAL_MASK(SECOND)
         || fields
             == (INTERVAL_MASK(DAY)
@@ -1235,9 +1244,9 @@ pub fn intervaltypmodleastfield(typmod: i32) -> i32 {
         || fields == (INTERVAL_MASK(MINUTE) | INTERVAL_MASK(SECOND))
         || fields == INTERVAL_FULL_RANGE
     {
-        0
+        Ok(0)
     } else {
-        panic!("invalid INTERVAL typmod: {typmod:#x}");
+        Err(invalid_interval_typmod_range(typmod))
     }
 }
 

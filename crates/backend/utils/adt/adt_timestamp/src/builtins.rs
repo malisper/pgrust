@@ -477,7 +477,7 @@ pub fn fc_intervaltypmodout(
         // SAFETY: single-threaded backend; the sole live access is this call.
         let buf = unsafe { &mut *c.get() };
         let mut tmp = [0u8; 64];
-        let len = crate::interval::intervaltypmodout(typmod, &mut tmp);
+        let len = crate::interval::intervaltypmodout(typmod, &mut tmp)?;
         buf[..len].copy_from_slice(&tmp[..len]);
         buf[len] = 0;
         Ok(Datum::from_usize(buf.as_ptr() as usize))
@@ -657,8 +657,8 @@ pub fn fc_interval_support(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) 
         true
     } else {
         let old_typmod = nodes_core::expr_typmod(source);
-        let old_least_field = intervaltypmodleastfield(old_typmod);
-        let new_least_field = intervaltypmodleastfield(new_typmod);
+        let old_least_field = intervaltypmodleastfield(old_typmod)?;
+        let new_least_field = intervaltypmodleastfield(new_typmod)?;
         let old_precis = if old_typmod < 0 {
             crate::interval::INTERVAL_FULL_PRECISION
         } else {
