@@ -18,7 +18,7 @@
 //!   - the plan ends outside a tx with no GUC left set (GUC-leak law).
 //!
 //! Sweep covers the review's traced failures (seed 42020/default, seed
-//! 42105/float-lenient) inside 42000..42400 x all 5 profiles.
+//! 42105/float-lenient) inside 42000..42400 x all 6 profiles.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -111,7 +111,29 @@ impl RefServer {
         } else if let Ok(rest) = after(text, "TRUNCATE ") {
             self.require_table(ident_prefix(rest)?, text)?;
         } else if text.starts_with("SELECT ") {
-            self.require_table(ident_prefix(after(text, " FROM ")?)?, text)?;
+            // Every FROM/JOIN relation target must exist. SRF calls
+            // (unnest/generate_series — H4 function-call grammar) and
+            // pg_catalog relations always exist; subquery parens recurse via
+            // their own inner FROM occurrence.
+            let mut checked_any = false;
+            for kw in [" FROM ", " JOIN "] {
+                let mut hay = text;
+                while let Ok(rest) = after(hay, kw) {
+                    if !rest.starts_with('(') {
+                        let id = ident_prefix(rest)?;
+                        if id != "unnest" && id != "generate_series" && !id.starts_with("pg_") {
+                            self.require_table(id, text)?;
+                        }
+                        checked_any = true;
+                    } else {
+                        checked_any = true;
+                    }
+                    hay = rest;
+                }
+            }
+            if !checked_any {
+                return Err(format!("SELECT without FROM target: {text}"));
+            }
         } else {
             return Err(format!("unrecognized statement shape: {text}"));
         }
@@ -227,7 +249,7 @@ fn generated_plans_are_tx_coherent_400_seeds_all_profiles() {
         .filter(|p| p.extension().is_some_and(|x| x == "json"))
         .collect();
     profiles.sort();
-    assert_eq!(profiles.len(), 5, "expected 5 gen profiles");
+    assert_eq!(profiles.len(), 6, "expected 6 gen profiles");
     let mut plans = 0u64;
     for ppath in &profiles {
         let bytes = fs::read(ppath).unwrap();
@@ -246,7 +268,7 @@ fn generated_plans_are_tx_coherent_400_seeds_all_profiles() {
             plans += 1;
         }
     }
-    assert_eq!(plans, 2000);
+    assert_eq!(plans, 2400);
 }
 
 // ---------------------------------------------------------------------------

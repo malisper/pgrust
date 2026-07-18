@@ -172,14 +172,62 @@ fn pick_payload_col<'t>(t: &'t Table, rng: &mut dyn RngCore) -> Option<&'t Col> 
     Some(&t.cols[ci])
 }
 
-/// Weighted read-query choice over one table.
+/// Typed scalar-call expression over an exact-typed column (function-call
+/// grammar class, H4: the surface the p9/p5 bug family lives on). Returns
+/// (select-expr) for `SELECT id, <expr> FROM ...`.
+fn scalar_call(rng: &mut dyn RngCore, t: &Table) -> String {
+    let exact: Vec<&Col> = t.cols.iter().filter(|c| c.ty.is_exact()).collect();
+    let Some(c) = (!exact.is_empty())
+        .then(|| exact[range_incl(rng, 0, exact.len() as u64 - 1) as usize])
+    else {
+        return "abs(id)".to_string();
+    };
+    match c.ty {
+        ColType::Int | ColType::Bigint => match range_incl(rng, 0, 3) {
+            0 => format!("abs({})", c.name),
+            1 => format!("({} % 7)", c.name),
+            2 => format!("coalesce({}, 0)", c.name),
+            _ => format!("nullif({}, {})", c.name, range_incl(rng, 0, 99)),
+        },
+        ColType::Text => match range_incl(rng, 0, 2) {
+            0 => format!("length({})", c.name),
+            1 => format!("upper({})", c.name),
+            _ => format!("coalesce({}, 's00')", c.name),
+        },
+        ColType::Numeric => match range_incl(rng, 0, 1) {
+            0 => format!("abs({})", c.name),
+            _ => format!("coalesce({}, 0)", c.name),
+        },
+        ColType::Float8 => "abs(id)".to_string(), // unreachable (is_exact gate)
+    }
+}
+
+/// Weighted read-query choice over one table (plus join/SRF classes drawing
+/// additional tables from the schema).
 pub fn gen_query(schema: &SchemaState, profile: &GenProfile, rng: &mut dyn RngCore) -> Option<Sql> {
     let t = schema.pick_table(rng)?;
     // Variants: 0 full-ordered / 1 count / 2 exact-agg / 3 filtered / 4 topk /
-    // 5 offset / 6 group / 7 float-agg (float-lenient profiles only)
+    // 5 offset / 6 group / 7 float-agg (float-lenient profiles only) /
+    // 8 srf-unnest / 9 generate-series / 10 scalar-call /
+    // 11 inner-join / 12 left-join-coalesce / 13 oj-nest-coalesce (p8 shape)
     let float_cols = t.cols_of_type(|ty| ty == ColType::Float8);
     let float_ok = profile.float_lenient && !float_cols.is_empty();
-    let weights = [4u64, 3, 3, 4, 3, 2, 2, if float_ok { 2 } else { 0 }];
+    let weights = [
+        4u64,
+        3,
+        3,
+        4,
+        3,
+        2,
+        2,
+        if float_ok { 2 } else { 0 },
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+    ];
     let flags = SqlFlags::default();
     Some(match weighted_index(rng, &weights).expect("static nonzero weights") {
         0 => {
@@ -268,6 +316,78 @@ pub fn gen_query(schema: &SchemaState, profile: &GenProfile, rng: &mut dyn RngCo
                 format!("SELECT sum({col}) FROM {};", t.cur_name),
                 Mark::Read,
                 SqlFlags { order_underdetermined: false, float_lenient: true },
+            )
+        }
+        8 => {
+            // SRF FunctionScan (the p2 argcontext class site). Deterministic
+            // typed literals; sort-normalized compare makes array order moot.
+            let ty = [ColType::Int, ColType::Text, ColType::Numeric]
+                [range_incl(rng, 0, 2) as usize];
+            let (a, b, c) = (literal(rng, ty), literal(rng, ty), literal(rng, ty));
+            sql(
+                format!("SELECT x FROM unnest(ARRAY[{a}, {b}, {c}]) AS u(x);"),
+                Mark::Read,
+                flags,
+            )
+        }
+        9 => {
+            let lo = range_incl(rng, 0, 20);
+            let n = range_incl(rng, 0, 20);
+            sql(
+                format!("SELECT g FROM generate_series({lo}, {}) AS g;", lo + n),
+                Mark::Read,
+                flags,
+            )
+        }
+        10 => {
+            let expr = scalar_call(rng, t);
+            sql(
+                format!("SELECT id, {expr} FROM {} ORDER BY id;", t.cur_name),
+                Mark::Read,
+                flags,
+            )
+        }
+        11 => {
+            // INNER join over the FK-ish unique keys (self-join allowed —
+            // the p8 witness itself joins one table twice).
+            let t2 = schema.pick_table(rng)?;
+            sql(
+                format!(
+                    "SELECT a.id, b.id FROM {} a JOIN {} b ON a.id = b.id ORDER BY a.id;",
+                    t.cur_name, t2.cur_name
+                ),
+                Mark::Read,
+                flags,
+            )
+        }
+        12 => {
+            // LEFT join, optionally with the COALESCE-guarded qual over the
+            // nullable side (the OJ nullingrels family's trigger shape).
+            let t2 = schema.pick_table(rng)?;
+            let filtered = range_incl(rng, 0, 1) == 0;
+            let qual = if filtered { " WHERE COALESCE(b.id, 0) = 0" } else { "" };
+            sql(
+                format!(
+                    "SELECT a.id, COALESCE(b.id, 0) FROM {} a LEFT JOIN {} b ON a.id = b.id{qual} ORDER BY a.id;",
+                    t.cur_name, t2.cur_name
+                ),
+                Mark::Read,
+                flags,
+            )
+        }
+        13 => {
+            // The p8 nullingrels shape: OJ over a flattenable subquery whose
+            // WHERE COALESCE references the nullable side, plus the same
+            // guard above the outer join (depth-bounded: 3 relations).
+            let t2 = schema.pick_table(rng)?;
+            let t3 = schema.pick_table(rng)?;
+            sql(
+                format!(
+                    "SELECT a.id, COALESCE(d.bid, 0) FROM {} a LEFT JOIN (SELECT b.id AS bid FROM {} b LEFT JOIN {} c ON b.id = c.id WHERE COALESCE(c.id, 0) = 0) d ON a.id = d.bid WHERE COALESCE(d.bid, 0) = 0 ORDER BY a.id;",
+                    t.cur_name, t2.cur_name, t3.cur_name
+                ),
+                Mark::Read,
+                flags,
             )
         }
         _ => unreachable!(),

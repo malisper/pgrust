@@ -26,8 +26,8 @@ use crate::gen::profile::{
 };
 use crate::gen::schema::SchemaState;
 use crate::oracle::check::{
-    check_from_json, check_to_json, eval_check, CheckOutcome, NoHooks, ResultStack as OracleStack,
-    Row, StmtResult, Value,
+    check_from_json, check_to_json, eval_check, CheckOutcome, HookKind, HookProbe,
+    ResultStack as OracleStack, Row, StmtResult, Value,
 };
 use crate::oracle::classifier::{classify_step, digest_rows, RunStatus};
 use crate::oracle::ledger::{reconcile, ApplyOutcome, EngineDmlResult, Ledger};
@@ -418,12 +418,55 @@ struct OracleEvalState {
     dead: bool,
 }
 
+/// Engine-hook capability set, probed against the LIVE DUT session at
+/// connect (contract §0 A5). H1 shipped the `NoHooks` posture — both
+/// hook-gated properties (F7/F8) were structurally vacuous (h3: 107 loud
+/// `skipped-no-hook` per campaign). H4 wires the Memory channel: presence =
+/// the DUT answers `f7_memory_baseline::WATERMARK_SQL`. Resource (F8) stays
+/// unprobed pending the fd-budget knob (h3 queue #6).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProbedHooks {
+    pub memory: bool,
+    pub resource: bool,
+}
+
+impl ProbedHooks {
+    pub fn none() -> Self {
+        ProbedHooks::default()
+    }
+}
+
+impl HookProbe for ProbedHooks {
+    fn has(&self, hook: HookKind) -> bool {
+        match hook {
+            HookKind::Memory => self.memory,
+            HookKind::Resource => self.resource,
+        }
+    }
+}
+
+/// Probe the live DUT session for hook capabilities: one uncompared read per
+/// channel. State-neutral (plain SELECTs) and it warms the probe statement
+/// in-session, which is exactly the F7 warm-baseline discipline's friend.
+pub fn probe_hooks(dut: &mut dyn crate::runner::driver::Session) -> ProbedHooks {
+    let memory = !matches!(
+        dut.execute(crate::oracle::props::f7_memory_baseline::WATERMARK_SQL),
+        ExecOutcome::SqlError { .. } | ExecOutcome::ConnectionLost { .. }
+    );
+    ProbedHooks { memory, resource: false }
+}
+
 pub struct OracleCheckEval {
     inner: RefCell<OracleEvalState>,
+    hooks: ProbedHooks,
 }
 
 impl OracleCheckEval {
     pub fn new(ctx: &OracleCtx) -> Self {
+        Self::with_hooks(ctx, ProbedHooks::none())
+    }
+
+    pub fn with_hooks(ctx: &OracleCtx, hooks: ProbedHooks) -> Self {
         OracleCheckEval {
             inner: RefCell::new(OracleEvalState {
                 by_seq: ctx.by_seq.clone(),
@@ -432,6 +475,7 @@ impl OracleCheckEval {
                 cur: None,
                 dead: false,
             }),
+            hooks,
         }
     }
 }
@@ -462,7 +506,7 @@ impl CheckEval for OracleCheckEval {
             Ok(c) => c,
             Err(e) => return CheckVerdict::Fail(format!("bad check json: {e}")),
         };
-        match eval_check(&check, &st.stack, &st.ledger, &NoHooks) {
+        match eval_check(&check, &st.stack, &st.ledger, &self.hooks) {
             CheckOutcome::Pass => CheckVerdict::Pass,
             CheckOutcome::Fail(why) => CheckVerdict::Fail(why),
             CheckOutcome::SkipNoHook => CheckVerdict::Skip("no-hook".into()),

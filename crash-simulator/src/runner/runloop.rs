@@ -126,7 +126,11 @@ pub fn run_plan_ctx(
     let oracle_checks;
     let checks: &dyn CheckEval = match ctx {
         Some(c) => {
-            oracle_checks = OracleCheckEval::new(c);
+            // Engine-hook capability probe against the live DUT session
+            // (contract §0 A5): one uncompared read per channel. Presence
+            // un-gates F7 (Memory); absence keeps the counted skip.
+            let hooks = bridge::probe_hooks(&mut dut);
+            oracle_checks = OracleCheckEval::with_hooks(c, hooks);
             &oracle_checks
         }
         None => &SkipAllCheckEval,
