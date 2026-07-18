@@ -47,3 +47,22 @@ seam_core::seam!(
     // hold POPULATION at target so maintain() never replenishes fresh ones.
     pub fn parallel_pool_retire_db(dboid: types_core::Oid)
 );
+
+seam_core::seam!(
+    // PERMIT-S2 F2 (sim wpool demo): postmaster-thread pool replenish —
+    // spawn standbys up to target. The tcop sim corpus drives the REAL
+    // wpool through this seam (a direct launch_backend dep would be a
+    // package cycle through autovacuum -> commands_vacuum -> explain).
+    pub fn wpool_maintain()
+);
+
+seam_core::seam!(
+    // PERMIT-S2 F2 (sim wpool demo): retire every parked standby.
+    pub fn wpool_flush()
+);
+
+seam_core::seam!(
+    // PERMIT-S2 F2 (sim wpool demo): live standby-thread count (the demo's
+    // drain probe).
+    pub fn wpool_population() -> i32
+);

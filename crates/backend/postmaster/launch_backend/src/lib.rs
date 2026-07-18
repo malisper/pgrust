@@ -484,7 +484,14 @@ pub fn postmaster_child_launch(
                 .push((child_pid, handle));
             child_pid
         }
-        Err(_) => -1,
+        Err(_) => {
+            // F3 ledger row (fixed at PERMIT-S2, taken while dooring the
+            // wpool site): retire the never-entered slot so the failed
+            // spawn cannot leak a Runnable ghost into the schedule.
+            #[cfg(pgrust_sim)]
+            pgsync::sim::spawn_door::cancel_child(sim_sched_slot);
+            -1
+        }
     }
 }
 
@@ -510,6 +517,11 @@ fn child_thread_stack_size() -> usize {
 pub fn init_seams() {
     postmaster_seams::parallel_pool_dispatch::set(wpool::dispatch);
     postmaster_seams::parallel_pool_retire_db::set(retire_db_all_pools);
+    // PERMIT-S2 F2: the sim wpool demo drives the real pool through seams
+    // (tcop cannot depend on this crate — package cycle via autovacuum).
+    postmaster_seams::wpool_maintain::set(wpool::maintain);
+    postmaster_seams::wpool_flush::set(wpool::flush);
+    postmaster_seams::wpool_population::set(wpool::population);
 }
 
 /// DROP DATABASE rider for BOTH db-pinned pools: wpool's parked standbys
@@ -539,8 +551,18 @@ pub mod wpool {
     //! — one task per standby — exactly as phase 1 shipped.
 
     use std::sync::atomic::{AtomicI32, AtomicU64, Ordering::Relaxed};
-    use std::sync::mpsc::{Receiver, SyncSender};
-    use std::sync::Mutex;
+
+    // PERMIT-S2 (F2, the SECOND spawn door): the standby handoff channels
+    // and the pool registries are pgsync types. Native arm = the identical
+    // std re-exports (zero cost, no semantics change); under the sim permit
+    // scheduler the standby's recv() park, the claim's send, and the
+    // retire-drop wakes are hooked ops — pooled workers are schedulable.
+    // (AVAILABLE must be pgsync too: retire/flush drop Standby channels
+    // INSIDE its guard, and a preemption at that drop-wake touch would let
+    // another registered thread block raw on the registry mutex while
+    // holding the permit — the watchdog wedge shape.)
+    use pgsync::mpsc::{Receiver, SyncSender};
+    use pgsync::Mutex;
 
     use types_core::{init::BackendType, pid_t, InvalidOid, Oid};
     use types_startup::{BgWorkerStartupData, StartupData};
@@ -583,8 +605,14 @@ pub mod wpool {
     // prelude snapshot predates the reload; on crash the pool is dead).
     static FLUSH_EPOCH: AtomicU64 = AtomicU64::new(0);
 
-    fn available() -> std::sync::MutexGuard<'static, Vec<Standby>> {
+    fn available() -> pgsync::MutexGuard<'static, Vec<Standby>> {
         AVAILABLE.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Live standby-thread count (POPULATION discipline above). Public for
+    /// the sim wpool demo's drain probe; harmless elsewhere.
+    pub fn population() -> i32 {
+        POPULATION.load(Relaxed)
     }
 
     fn target() -> i32 {
@@ -673,12 +701,26 @@ pub mod wpool {
         } else {
             guc::store::capture_nondefault_variables()
         };
-        let (tx, rx) = std::sync::mpsc::sync_channel::<StandbyTask>(1);
-        let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let (tx, rx) = pgsync::mpsc::sync_channel::<StandbyTask>(1);
+        let (ack_tx, ack_rx) = pgsync::mpsc::sync_channel::<()>(1);
+        // PERMIT-S2 (F2): the wpool spawn door — pooled standbys register
+        // parent-side BEFORE the OS spawn, exactly like the
+        // postmaster_child_launch door above. No-op unless PGRUST_SIM_SCHED=1.
+        #[cfg(pgrust_sim)]
+        let sim_sched_slot = pgsync::sim::spawn_door::register_child(
+            spawn_pid as u32,
+            &format!("wpool-standby:{spawn_pid}"),
+        );
         let spawned = std::thread::Builder::new()
             .name(format!("pg:standby:{spawn_pid}"))
             .stack_size(super::child_thread_stack_size())
             .spawn(move || {
+                // PERMIT-S1 door discipline: bind + gate FIRST, so this
+                // guard's Drop (the teardown epilogue) runs LAST — after
+                // the population charge and every TLS-owning guard below
+                // has dropped inside the final quantum.
+                #[cfg(pgrust_sim)]
+                let _sim_sched_permit = pgsync::sim::spawn_door::enter_child(sim_sched_slot);
                 // Any exit — rotation, retire, or a prelude panic — drops the
                 // population charge exactly once.
                 struct PopulationCharge;
@@ -723,7 +765,13 @@ pub mod wpool {
                 });
                 true
             }
-            Err(_) => false,
+            Err(_) => {
+                // F3 shape: retire the never-entered slot so the failed
+                // spawn cannot leak a Runnable ghost into the schedule.
+                #[cfg(pgrust_sim)]
+                pgsync::sim::spawn_door::cancel_child(sim_sched_slot);
+                false
+            }
         }
     }
 
@@ -740,6 +788,12 @@ pub mod wpool {
                 Ok(task) => {
                     bgworker::gtrace("w.pool.task");
                     rekey_child_thread(thread_key, task.child_pid);
+                    // PERMIT-S2 (F2): the model identity follows the task
+                    // pid — sim waiter slots key off current_vpid (rule 2),
+                    // so a retained standby's slot renames at every claim.
+                    // No-op with the scheduler off.
+                    #[cfg(pgrust_sim)]
+                    pgsync::sim::spawn_door::rekey_self(task.child_pid as u32);
                     thread_key = task.child_pid;
                     let pre_flush = FLUSH_EPOCH.load(Relaxed);
                     let pre_crash = CRASH_EPOCH.load(Relaxed);
@@ -773,8 +827,8 @@ pub mod wpool {
                             types_core::init::ProcessingMode::InitProcessing,
                         );
                         ipc::reset_exit_state_for_retained_park();
-                        let (tx2, rx2) = std::sync::mpsc::sync_channel::<StandbyTask>(1);
-                        let (ack_tx2, ack_rx2) = std::sync::mpsc::sync_channel::<()>(1);
+                        let (tx2, rx2) = pgsync::mpsc::sync_channel::<StandbyTask>(1);
+                        let (ack_tx2, ack_rx2) = pgsync::mpsc::sync_channel::<()>(1);
                         parked_crash_epoch = pre_crash;
                         available().push(Standby {
                             pid: task.child_pid,
