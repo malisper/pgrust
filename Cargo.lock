@@ -15589,6 +15589,7 @@ dependencies = [
  "init_small",
  "ipc_seams",
  "latch_seams",
+ "libc",
  "lmgr_proc",
  "lock_seams",
  "lwlock",
@@ -15613,6 +15614,7 @@ dependencies = [
  "types_resowner",
  "types_snapshot",
  "varsup",
+ "vfs",
  "waitevent_seams",
  "xact_seams",
 ]
