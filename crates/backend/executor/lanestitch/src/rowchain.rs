@@ -114,25 +114,43 @@ unsafe extern "C" fn tramp_protocol(ctx: *mut c_void, call: u64) -> i64 {
 /// Fail-closed classification of the v1 stitched chain vocabulary: exactly
 /// one `NextRow` (with the protocol-only loop top `chain_next_pos` already
 /// demands), every step a RowOp, no consts/arrays, not volatile-pinned.
-/// Anything else refuses — the chain stays on its portable host.
-fn plan_rowchain(prog: &Program) -> Option<()> {
-    if prog.volatile || prog.steps.is_empty() {
-        return None;
+/// Anything else refuses — the chain stays on its portable host. Refusals
+/// are NAMED (wave-9 WS-AG rung 1, M5-1 funnel discipline): the reason
+/// string is pinnable by tests and traceable by callers.
+fn plan_rowchain(prog: &Program) -> Result<(), &'static str> {
+    if prog.volatile {
+        return Err("rowchain-volatile");
+    }
+    if prog.steps.is_empty() {
+        return Err("rowchain-empty");
     }
     if !prog.consts.is_empty() || !prog.arrays.is_empty() {
-        return None;
+        return Err("rowchain-consts");
     }
-    chain_next_pos(prog)?;
+    if chain_next_pos(prog).is_none() {
+        return Err("rowchain-shape");
+    }
     if !prog
         .steps
         .iter()
         .all(|s| matches!(s, Step::NextRow | Step::ProtocolCall { .. }))
     {
         // Pure steps (junk-filter / projection segments) are twin-only until
-        // their scalar stencils land (fail closed).
-        return None;
+        // their scalar stencils land (rung 4). The D2 cursor/lane bound is
+        // in the twin (interp.rs, wave-9 rung 1), but the stitched body has
+        // neither the bound nor the pure stencils — fail closed with the
+        // contract-named reason.
+        return Err("rowchain-pure-step-unbounded");
     }
-    Some(())
+    Ok(())
+}
+
+/// The named classification refusal for `prog`, or None = the v1 stitched
+/// vocabulary admits it. Doc-hidden test/trace surface (the parity suite
+/// pins the wave-9-contract-named `rowchain-pure-step-unbounded` reason).
+#[doc(hidden)]
+pub fn rowchain_plan_refusal(prog: &Program) -> Option<&'static str> {
+    plan_rowchain(prog).err()
 }
 
 /// Emits the chain body: the row loop INSIDE one aarch64 body, steps in
@@ -249,8 +267,13 @@ impl StitchedRowChain {
 
     fn compile_gated(prog: &Program) -> Option<StitchedRowChain> {
         let t0 = std::time::Instant::now();
-        plan_rowchain(prog)?;
+        plan_rowchain(prog).ok()?;
         let words = emit_rowchain(prog);
+        // Wave-9 rung 0 fault lever: refuse at the INSTALL step exactly as
+        // an exhausted arena would (fail-open landing under armed knobs).
+        if crate::rowchain_arena_fault_for_tests() {
+            return None;
+        }
         let block = jit_deform::install_code(&words)?;
         // SAFETY: block holds a complete body starting at base, RX-mapped
         // and icache-flushed by install_code.
