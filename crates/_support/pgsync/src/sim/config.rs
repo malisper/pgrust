@@ -17,6 +17,14 @@
 //!  - `PGRUST_SIM_SCHEDLOG`    — "stream" additionally streams every SCHEDOP
 //!                               line to stderr as emitted (WS-DEMO's
 //!                               byte-compare capture); default ring-only.
+//!  - `PGRUST_SIM_SCHED_ALGO`  — "uniform" restores the step-1 uniform pick
+//!                               (+ preempt_p coin); anything else / unset =
+//!                               "pct" (PERMIT-S2 default: PCT priorities,
+//!                               Burckhardt et al. ASPLOS 2010).
+//!  - `PGRUST_SIM_PCT_D`       — PCT bug depth d (d−1 priority-change
+//!                               points per run; default 3).
+//!  - `PGRUST_SIM_PCT_K`       — PCT estimated step budget k the change
+//!                               points are drawn over (default 4096).
 //!
 //! NOTE: `PGRUST_SIM_SEED` is deliberately NOT read here. The picker seed is
 //! one 8-byte fill drawn through `pg_strong_random` — the sanctioned
@@ -29,6 +37,11 @@ use std::sync::OnceLock;
 pub const DEFAULT_PREEMPT_P: f64 = 0.05;
 /// Default watchdog threshold, wall seconds (contract §3.2).
 pub const DEFAULT_WATCHDOG_S: u64 = 30;
+/// Default PCT bug depth d (ASPLOS 2010 practice: small depths find most
+/// bugs; d=3 covers every depth-≤3 ordering bug with the paper's bound).
+pub const DEFAULT_PCT_DEPTH: u32 = 3;
+/// Default PCT step-budget estimate k (change points drawn over [1, k]).
+pub const DEFAULT_PCT_STEPS: u64 = 4096;
 
 pub(crate) fn sched_enabled() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
@@ -58,6 +71,36 @@ pub(crate) fn watchdog_timeout_ms() -> u64 {
             .and_then(|v| parse_seconds(&v))
             .unwrap_or(DEFAULT_WATCHDOG_S)
             .saturating_mul(1000)
+    })
+}
+
+pub(crate) fn sched_algo_is_pct() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("PGRUST_SIM_SCHED_ALGO")
+            .ok()
+            .map(|v| parse_algo_is_pct(&v))
+            .unwrap_or(true)
+    })
+}
+
+pub(crate) fn pct_depth() -> u32 {
+    static V: OnceLock<u32> = OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("PGRUST_SIM_PCT_D")
+            .ok()
+            .and_then(|v| parse_pct_depth(&v))
+            .unwrap_or(DEFAULT_PCT_DEPTH)
+    })
+}
+
+pub(crate) fn pct_steps() -> u64 {
+    static V: OnceLock<u64> = OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("PGRUST_SIM_PCT_K")
+            .ok()
+            .and_then(|v| parse_pct_steps(&v))
+            .unwrap_or(DEFAULT_PCT_STEPS)
     })
 }
 
@@ -98,6 +141,25 @@ pub(crate) fn parse_seconds(raw: &str) -> Option<u64> {
     raw.trim().parse::<u64>().ok()
 }
 
+/// Pure: "uniform" (any case, trimmed) = false; everything else — incl.
+/// "pct", empty, malformed — = true (PCT is the default; the sim-knob
+/// convention: unparsable falls back to the default).
+pub(crate) fn parse_algo_is_pct(raw: &str) -> bool {
+    !raw.trim().eq_ignore_ascii_case("uniform")
+}
+
+/// Pure: a decimal u32 depth ≥ 1. `None` on malformed/zero — the reader
+/// falls back to [`DEFAULT_PCT_DEPTH`].
+pub(crate) fn parse_pct_depth(raw: &str) -> Option<u32> {
+    raw.trim().parse::<u32>().ok().filter(|d| *d >= 1)
+}
+
+/// Pure: a decimal u64 step budget ≥ 1. `None` on malformed/zero — the
+/// reader falls back to [`DEFAULT_PCT_STEPS`].
+pub(crate) fn parse_pct_steps(raw: &str) -> Option<u64> {
+    raw.trim().parse::<u64>().ok().filter(|k| *k >= 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,6 +186,29 @@ mod tests {
         assert_eq!(parse_probability("NaN"), None);
         assert_eq!(parse_probability("inf"), None);
         assert_eq!(parse_probability("p"), None);
+    }
+
+    #[test]
+    fn algo_corpus() {
+        for pct in ["", "pct", "PCT", " pct ", "garbage", "1"] {
+            assert!(parse_algo_is_pct(pct), "{pct:?}");
+        }
+        for uni in ["uniform", "UNIFORM", " Uniform "] {
+            assert!(!parse_algo_is_pct(uni), "{uni:?}");
+        }
+    }
+
+    #[test]
+    fn pct_knob_corpus() {
+        assert_eq!(parse_pct_depth("3"), Some(3));
+        assert_eq!(parse_pct_depth(" 1 "), Some(1));
+        assert_eq!(parse_pct_depth("0"), None);
+        assert_eq!(parse_pct_depth(""), None);
+        assert_eq!(parse_pct_depth("-2"), None);
+        assert_eq!(parse_pct_steps("4096"), Some(4096));
+        assert_eq!(parse_pct_steps("1"), Some(1));
+        assert_eq!(parse_pct_steps("0"), None);
+        assert_eq!(parse_pct_steps("k"), None);
     }
 
     #[test]

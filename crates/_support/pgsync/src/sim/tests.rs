@@ -17,7 +17,8 @@ use std::sync::{Arc, Mutex};
 
 use super::hooks::{OpClass, Vpid};
 use super::sched::{
-    router, ClockMode, FailAction, Scheduler, SchedulerConfig, WatchdogSink, UNREGISTERED_VPID,
+    router, ClockMode, FailAction, PickAlgo, Scheduler, SchedulerConfig, WatchdogSink,
+    UNREGISTERED_VPID,
 };
 use super::watchdog;
 
@@ -685,4 +686,130 @@ fn condvar_wait_timeout_survives_pre_park_notify_consumption() {
         "16-seed sweep never produced the BLOCKING-1 interleaving on the \
          wait_timeout leg: the corpus lost its teeth"
     );
+}
+
+// --- PCT priorities (PERMIT-S2 step 1; Burckhardt et al. ASPLOS 2010) -----------
+
+/// Two registered threads each run `iters` non-blocking touches (sends into
+/// a never-received SimChan) under PCT and exit. Returns the SCHEDOP stream.
+fn run_pct_touch_corpus(seed: u64, depth: u32, steps: u64, iters: u64) -> String {
+    let mut cfg = test_cfg(seed);
+    cfg.algo = PickAlgo::Pct { depth, steps };
+    let sched = Scheduler::new(cfg);
+    let chan = Arc::new(SimChan::new());
+    let a = sched.register(101, "pct:a");
+    let b = sched.register(102, "pct:b");
+    let (sa, sb) = (sched.clone(), sched.clone());
+    let (ca, cb) = (chan.clone(), chan.clone());
+    let ta = std::thread::spawn(move || {
+        sa.enter(a);
+        for i in 0..iters {
+            ca.send(i);
+        }
+        router().exit(101);
+    });
+    let tb = std::thread::spawn(move || {
+        sb.enter(b);
+        for i in 0..iters {
+            cb.send(100 + i);
+        }
+        router().exit(102);
+    });
+    ta.join().unwrap();
+    tb.join().unwrap();
+    sched.dump_log()
+}
+
+fn preempt_count(log: &str) -> usize {
+    log.lines().filter(|l| l.contains("preempt=1")).count()
+}
+
+/// Depth 1 = zero change points: the highest-priority runnable slot runs to
+/// its exit uninterrupted. The only possible preemption is the initial
+/// priority sort-out (the first-granted slot losing to a higher-priority
+/// peer at its first touch), so preempt=1 appears AT MOST ONCE — and a seed
+/// sweep must produce both priority orders (the priorities are seeded).
+#[test]
+fn pct_depth1_highest_priority_runs_uninterrupted() {
+    let mut orders = std::collections::HashSet::new();
+    for seed in 0..16u64 {
+        let log = run_pct_touch_corpus(seed, 1, 64, 6);
+        let n = preempt_count(&log);
+        assert!(n <= 1, "seed {seed}: depth-1 PCT preempted {n} times:\n{log}");
+        orders.insert(n);
+    }
+    assert_eq!(
+        orders.len(),
+        2,
+        "16 seeds must produce both priority orders (0- and 1-preempt runs)"
+    );
+}
+
+/// Depth 2 over a tiny step budget: the single change point fires while
+/// both threads are live in some seeds, dropping the running thread below
+/// its peer — a second preemption the depth-1 corpus can never produce.
+/// Every seed replays byte-identically.
+#[test]
+fn pct_change_point_preempts_and_replays() {
+    let mut cp_preempt_seen = false;
+    for seed in 0..16u64 {
+        let l1 = run_pct_touch_corpus(seed, 2, 8, 6);
+        let l2 = run_pct_touch_corpus(seed, 2, 8, 6);
+        assert_eq!(l1, l2, "seed {seed}: PCT schedule must replay byte-identically");
+        if preempt_count(&l1) >= 2 {
+            cp_preempt_seen = true;
+        }
+    }
+    assert!(
+        cp_preempt_seen,
+        "16-seed depth-2 sweep never showed a change-point preemption"
+    );
+}
+
+/// The planted lost-update RMW shape (P2's plant, in-unit): read under one
+/// touch-delimited window, write under another. PCT with d=2 must find both
+/// outcomes across a seed sweep (a depth-2 bug: one forced preemption in
+/// the window), and each outcome must replay from its seed.
+#[test]
+fn pct_finds_depth2_lost_update_in_seed_sweep() {
+    fn run(seed: u64) -> u64 {
+        let mut cfg = test_cfg(seed);
+        cfg.algo = PickAlgo::Pct { depth: 2, steps: 64 };
+        let sched = Scheduler::new(cfg);
+        let chan = Arc::new(SimChan::new());
+        let ctr = Arc::new(Mutex::new(0u64));
+        let a = sched.register(101, "rmw:a");
+        let b = sched.register(102, "rmw:b");
+        let mut handles = Vec::new();
+        for (slot, vpid) in [(a, 101u32), (b, 102u32)] {
+            let (s, c, v) = (sched.clone(), chan.clone(), ctr.clone());
+            handles.push(std::thread::spawn(move || {
+                s.enter(slot);
+                for i in 0..4u64 {
+                    let seen = *plock(&v);
+                    c.send(i); // the window: a non-blocking touch
+                    *plock(&v) = seen + 1;
+                }
+                router().exit(vpid);
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        let f = *plock(&ctr);
+        assert!(f <= 8);
+        f
+    }
+    let finals: Vec<u64> = (0..64u64).map(run).collect();
+    let lost0 = finals.iter().filter(|f| **f == 8).count();
+    let lost_n = finals.iter().filter(|f| **f < 8).count();
+    assert!(
+        lost0 > 0 && lost_n > 0,
+        "64-seed PCT sweep must find both outcomes (no-loss {lost0} / lost {lost_n})"
+    );
+    // Replay: one representative seed per outcome, x2 identical.
+    let s0 = (0..64u64).find(|s| finals[*s as usize] == 8).unwrap();
+    let sn = (0..64u64).find(|s| finals[*s as usize] < 8).unwrap();
+    assert_eq!(run(s0), finals[s0 as usize], "no-loss seed replays");
+    assert_eq!(run(sn), finals[sn as usize], "lost seed replays");
 }
