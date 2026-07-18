@@ -1,10 +1,26 @@
 // The RowOp row-chain stitched tier (WS-AA wave-7, fusion inc-0 + inc-1a;
-// docs/design/rowmode-endgame.md §2). One chain drive = one aarch64 body
-// whose loop body is still strictly per-row: `NextRow` and `ProtocolCall`
-// steps compile to `blr` calls through Rust trampolines into the chain
-// host (the node's own helpers — BR trigger fire, heap+index write, AR
-// epilogue). Fusion removes interpretation/dispatch overhead, never
-// ordering: every protocol step executes at exactly its Volcano position.
+// wave-9 WS-AG rung 3 = the D1b indirection kill; docs/design/
+// rowmode-endgame.md §2). One chain drive = one aarch64 body whose loop
+// body is still strictly per-row: `NextRow` and `ProtocolCall` steps
+// compile to `blr` calls through Rust trampolines into the chain host (the
+// node's own helpers — BR trigger fire, heap+index write, AR epilogue).
+// Fusion removes interpretation/dispatch overhead, never ordering: every
+// protocol step executes at exactly its Volcano position.
+//
+// D1b (wave-9 rung 3) killed the indirection tax on that boundary:
+// * The trampolines are MONOMORPHIZED per concrete host type (`run` is
+//   generic over `H: RowChainHost + ?Sized`): `tramp_protocol::<H>` calls
+//   `H::protocol_call` statically — the `dyn` vtable hop is gone, and for
+//   the DML chain the concrete `MtInsertChainHost` dispatch inlines into
+//   the trampoline body. `run::<dyn RowChainHost>` still compiles for
+//   callers that want the erased form (it monomorphizes to the old dyn
+//   behavior — the parity suite pins both worlds identical).
+// * ctx and both trampoline addresses load ONCE in the body prologue into
+//   callee-saved x20-x22; call sites are `mov x0, x20; blr x21/x22` — the
+//   three per-call params-block reloads are gone.
+// * Verdict dispatch is tightened: the hot verdict (Continue / row-staged)
+//   is one not-taken compare-branch per call; Skip/Pause/error/misuse
+//   dispatch lives in shared out-of-line cold blocks.
 //
 // # Equivalence contract
 //
@@ -61,7 +77,10 @@ const TR_SKIP: i64 = 1;
 const TR_PAUSE: i64 = 2;
 const TR_ERR: i64 = -1;
 
-/// The per-drive params block the body reads (x19 across calls).
+/// The per-drive params block. Wave-9 rung 3 (D1b): the body reads it ONCE
+/// in the prologue — ctx into x20, the two trampoline addresses into
+/// x21/x22 (callee-saved) — instead of reloading through x19 at every call
+/// site.
 #[repr(C)]
 struct RowChainJitParams {
     ctx: *mut c_void,
@@ -78,15 +97,20 @@ type RowChainFn = unsafe extern "C" fn(*mut RowChainJitParams) -> i64;
 /// Trampoline context: the host plus the parked error (the body constructs
 /// no error object — a negative trampoline verdict routes `run` to the
 /// parked PgError, which is the host's own unwind, byte-identical by
-/// construction).
-struct TrampCtx<'a> {
-    host: &'a mut dyn RowChainHost,
+/// construction). Wave-9 rung 3 (D1b): generic over the CONCRETE host type
+/// — the trampolines monomorphize per host and dispatch statically (no
+/// `dyn` vtable hop; the DML chain's `MtInsertChainHost` dispatch inlines
+/// into its trampoline instantiation).
+struct TrampCtx<'a, H: RowChainHost + ?Sized> {
+    host: &'a mut H,
     err: Option<Box<PgError>>,
 }
 
-unsafe extern "C" fn tramp_next_row(ctx: *mut c_void) -> i64 {
-    // SAFETY: ctx is the TrampCtx `run` passed in params, live for the call.
-    let c = unsafe { &mut *(ctx as *mut TrampCtx<'_>) };
+unsafe extern "C" fn tramp_next_row<H: RowChainHost + ?Sized>(ctx: *mut c_void) -> i64 {
+    // SAFETY: ctx is the TrampCtx<H> `run::<H>` passed in params, live for
+    // the call (the monomorphized trampoline is only ever paired with its
+    // own H's ctx — `run` constructs both from the same H).
+    let c = unsafe { &mut *(ctx as *mut TrampCtx<'_, H>) };
     match c.host.next_row() {
         Ok(true) => TR_NEXT_ROW,
         Ok(false) => TR_NEXT_DONE,
@@ -97,9 +121,10 @@ unsafe extern "C" fn tramp_next_row(ctx: *mut c_void) -> i64 {
     }
 }
 
-unsafe extern "C" fn tramp_protocol(ctx: *mut c_void, call: u64) -> i64 {
-    // SAFETY: ctx is the TrampCtx `run` passed in params, live for the call.
-    let c = unsafe { &mut *(ctx as *mut TrampCtx<'_>) };
+unsafe extern "C" fn tramp_protocol<H: RowChainHost + ?Sized>(ctx: *mut c_void, call: u64) -> i64 {
+    // SAFETY: ctx is the TrampCtx<H> `run::<H>` passed in params, live for
+    // the call (same pairing argument as tramp_next_row).
+    let c = unsafe { &mut *(ctx as *mut TrampCtx<'_, H>) };
     match c.host.protocol_call(call as u16) {
         Ok(ChainVerdict::Continue) => TR_CONT,
         Ok(ChainVerdict::SkipRow) => TR_SKIP,
@@ -154,17 +179,30 @@ pub fn rowchain_plan_refusal(prog: &Program) -> Option<&'static str> {
 }
 
 /// Emits the chain body: the row loop INSIDE one aarch64 body, steps in
-/// program order, `blr` per RowOp step, verdict dispatch on x0. Frame: fp/lr
-/// plus x19 (the params pointer, live across calls).
+/// program order, `blr` per RowOp step, verdict dispatch on x0.
+///
+/// Wave-9 rung 3 (D1b) register discipline: the prologue loads ctx into
+/// x20 and the next_row/protocol trampoline addresses into x21/x22 (all
+/// callee-saved, so they survive the `blr` calls) ONCE per drive; every
+/// call site is then `mov x0, x20` (+ `movz x1, call`) + `blr`. Verdict
+/// dispatch is hot-path-tightened: Continue / row-staged falls through on
+/// ONE not-taken branch; the Skip/Pause/Done/error/misuse dispatch lives
+/// in three SHARED out-of-line cold blocks (every per-row call skips to
+/// the same targets, so one block serves all sites of its segment kind).
 fn emit_rowchain(prog: &Program) -> Vec<u32> {
     // plan_rowchain validated the shape, so the NextRow position exists;
     // steps before it are the loop-top segment (ProtocolCall-only).
     let next_pos = chain_next_pos(prog).expect("plan_rowchain validated the chain shape");
     let mut e = Emitter::new();
-    e.raw(0xA9BE_7BFD); // stp x29, x30, [sp, #-0x20]!
+    e.raw(0xA9BD_7BFD); // stp x29, x30, [sp, #-0x30]!
     e.raw(0x9100_03FD); // mov x29, sp
-    e.str_x(19, 31, 0x10); // str x19, [sp, #0x10]
-    e.mov_x(19, 0); // params
+    e.str_x(20, 31, 0x10); // str x20, [sp, #0x10]
+    e.str_x(21, 31, 0x18); // str x21, [sp, #0x18]
+    e.str_x(22, 31, 0x20); // str x22, [sp, #0x20]
+    // The D1b once-per-drive loads (x0 = params on entry).
+    e.ldr_x(20, 0, 0); // x20 = ctx
+    e.ldr_x(21, 0, 8); // x21 = next_row trampoline
+    e.ldr_x(22, 0, 16); // x22 = protocol trampoline
 
     let ltop = e.new_label();
     let ldone = e.new_label();
@@ -172,42 +210,62 @@ fn emit_rowchain(prog: &Program) -> Vec<u32> {
     let lmisuse = e.new_label();
     let lerr = e.new_label();
     let lout = e.new_label();
+    // Shared cold dispatch blocks (one per segment kind).
+    let lnr_slow = e.new_label(); // NextRow: not-staged (done / error)
+    let ltop_slow = e.new_label(); // loop-top call: nonzero (misuse / error)
+    let lrow_slow = e.new_label(); // per-row call: nonzero (skip/pause/error)
 
     e.bind(ltop);
     for (i, step) in prog.steps.iter().enumerate() {
         match *step {
             Step::NextRow => {
-                e.ldr_x(0, 19, 0); // ctx
-                e.ldr_x(8, 19, 8); // next_row trampoline
-                e.raw(0xD63F_0100); // blr x8
-                e.cmp_x_imm(0, 0);
-                e.b_cond(Cond::Lt, lerr); // error parked
-                e.b_cond(Cond::Eq, ldone); // exhausted
+                e.mov_x(0, 20); // ctx
+                e.raw(0xD63F_02A0); // blr x21
+                // Hot verdict TR_NEXT_ROW (1) falls through on one
+                // not-taken branch; 0/negative dispatch is out of line.
+                e.cmp_x_imm(0, 1);
+                e.b_cond(Cond::Lt, lnr_slow);
             }
             Step::ProtocolCall { call } => {
-                e.ldr_x(0, 19, 0); // ctx
+                e.mov_x(0, 20); // ctx
                 e.movz_x(1, call as u32);
-                e.ldr_x(8, 19, 16); // protocol trampoline
-                e.raw(0xD63F_0100); // blr x8
-                e.cmp_x_imm(0, 0);
-                e.b_cond(Cond::Lt, lerr); // error parked
+                e.raw(0xD63F_02C0); // blr x22
+                // Hot verdict TR_CONT (0) falls through on one not-taken
+                // branch; everything else dispatches out of line.
                 if i < next_pos {
                     // Loop-top segment: the loop-top law says Continue is
                     // the ONLY legal row verdict here (no current row). Any
                     // nonzero verdict exits loud — the twin's error, not an
                     // infinite SkipRow re-loop or a phantom pause.
-                    e.b_cond(Cond::Ne, lmisuse);
+                    e.cbnz_x(0, ltop_slow);
                 } else {
-                    e.cmp_x_imm(0, TR_SKIP as u32);
-                    e.b_cond(Cond::Eq, ltop); // SkipRow: back to the loop top
-                    e.cmp_x_imm(0, TR_PAUSE as u32);
-                    e.b_cond(Cond::Eq, lpaused); // EmitPause
+                    e.cbnz_x(0, lrow_slow);
                 }
             }
             _ => unreachable!("plan_rowchain admits RowOp steps only"),
         }
     }
     e.b(ltop); // row fully processed: loop
+
+    // Cold: NextRow answered 0 (exhausted) or negative (error parked).
+    e.bind(lnr_slow);
+    e.cbz_x(0, ldone);
+    e.b(lerr);
+    // Cold: loop-top call answered nonzero — negative = error parked, any
+    // row verdict = the loop-top-law violation.
+    e.bind(ltop_slow);
+    e.cmp_x_imm(0, 0);
+    e.b_cond(Cond::Lt, lerr);
+    e.b(lmisuse);
+    // Cold: per-row call answered nonzero — negative = error parked,
+    // TR_SKIP = back to the loop top, else (TR_PAUSE, the only remaining
+    // trampoline verdict) = pause.
+    e.bind(lrow_slow);
+    e.cmp_x_imm(0, 0);
+    e.b_cond(Cond::Lt, lerr);
+    e.cmp_x_imm(0, TR_SKIP as u32);
+    e.b_cond(Cond::Eq, ltop);
+    e.b(lpaused);
 
     e.bind(ldone);
     e.movz_x(0, RC_CHAIN_DONE as u32);
@@ -221,8 +279,10 @@ fn emit_rowchain(prog: &Program) -> Vec<u32> {
     e.bind(lerr);
     e.movn_x(0, 0); // -1: the parked host error
     e.bind(lout);
-    e.ldr_x(19, 31, 0x10);
-    e.raw(0xA8C2_7BFD); // ldp x29, x30, [sp], #0x20
+    e.ldr_x(20, 31, 0x10);
+    e.ldr_x(21, 31, 0x18);
+    e.ldr_x(22, 31, 0x20);
+    e.raw(0xA8C3_7BFD); // ldp x29, x30, [sp], #0x30
     e.ret();
     e.finish()
 }
@@ -290,12 +350,18 @@ impl StitchedRowChain {
     /// `interp::eval_row_chain` in host-call sequence, outcome, and error.
     /// `Paused` = a protocol step emitted one row; drive again to resume at
     /// the loop top. Errors are the host's own PgError, re-raised here.
-    pub fn run(&self, host: &mut dyn RowChainHost) -> PgResult<ChainOutcome> {
+    ///
+    /// Generic over the concrete host (wave-9 rung 3 / D1b): the trampoline
+    /// pair monomorphizes per `H`, so the host dispatch is static (for the
+    /// DML chain, `MtInsertChainHost::protocol_call` inlines into its
+    /// trampoline). `H = dyn RowChainHost` still compiles for erased
+    /// callers and behaves identically (parity-pinned).
+    pub fn run<H: RowChainHost + ?Sized>(&self, host: &mut H) -> PgResult<ChainOutcome> {
         let mut tc = TrampCtx { host, err: None };
         let mut params = RowChainJitParams {
-            ctx: (&mut tc as *mut TrampCtx<'_>).cast::<c_void>(),
-            next_row: tramp_next_row,
-            protocol: tramp_protocol,
+            ctx: (&mut tc as *mut TrampCtx<'_, H>).cast::<c_void>(),
+            next_row: tramp_next_row::<H>,
+            protocol: tramp_protocol::<H>,
         };
         // SAFETY: the body only calls the two trampolines with ctx and
         // branches on their verdicts; ctx outlives the call; the trampolines

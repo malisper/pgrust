@@ -2748,5 +2748,98 @@ mod rowchain_wave9 {
         assert_eq!(rowchain_plan_refusal(&two), Some("rowchain-shape"));
         assert_eq!(rowchain_plan_refusal(&Program::new()), Some("rowchain-empty"));
     }
+
+    // ---- rung 3 (D1b indirection kill) pins --------------------------------
+    use lanestitch::StitchedRowChain;
+
+    /// Scripted host for the D1b pin: deterministic verdicts covering every
+    /// dispatch arm (Continue / SkipRow / EmitPause / exhaustion), recording
+    /// the call stream. Mint sub-range 9905+ (wave-9 band mapping, header).
+    struct ScriptHost {
+        nrows: u32,
+        pulls: u32,
+        events: Vec<(u16, u32)>,
+    }
+
+    impl RowChainHost for ScriptHost {
+        fn next_row(&mut self) -> PgResult<bool> {
+            if self.pulls >= self.nrows {
+                return Ok(false);
+            }
+            self.pulls += 1;
+            Ok(true)
+        }
+        fn protocol_call(&mut self, call: u16) -> PgResult<ChainVerdict> {
+            self.events.push((call, self.pulls));
+            Ok(match (call, self.pulls % 5) {
+                // Loop-top id: Continue always (host law).
+                (9905, _) => ChainVerdict::Continue,
+                (9906, 2) => ChainVerdict::SkipRow,
+                (9907, 3) => ChainVerdict::EmitPause,
+                _ => ChainVerdict::Continue,
+            })
+        }
+    }
+
+    /// The rung-3 monomorphization pin: `run::<H>` (static host dispatch,
+    /// the D1b trampolines) and `run::<dyn RowChainHost>` (the erased form)
+    /// replay the identical event stream, pause cadence, and outcome over
+    /// the identical body — the vtable kill changed dispatch, never
+    /// semantics. Rides the wave-7 equivalence contract: both worlds also
+    /// match the interpreter twin.
+    #[test]
+    fn rowchain_mono_and_dyn_hosts_replay_identically() {
+        let mut p = Program::new();
+        p.steps.push(Step::ProtocolCall { call: 9905 }); // loop-top segment
+        p.steps.push(Step::NextRow);
+        p.steps.push(Step::ProtocolCall { call: 9906 }); // skip arm
+        p.steps.push(Step::ProtocolCall { call: 9907 }); // pause arm
+        let Some(chain) = StitchedRowChain::compile_for_parity(&p) else {
+            assert!(!lanestitch::available(), "chain refused on available hardware");
+            return;
+        };
+
+        let drive = |erased: bool| -> (Vec<(u16, u32)>, u32) {
+            let mut host = ScriptHost { nrows: 17, pulls: 0, events: Vec::new() };
+            let mut pauses = 0u32;
+            loop {
+                let out = if erased {
+                    let dh: &mut dyn RowChainHost = &mut host;
+                    chain.run(dh)
+                } else {
+                    chain.run(&mut host)
+                }
+                .expect("scripted host never errors");
+                match out {
+                    ChainOutcome::Paused => pauses += 1,
+                    ChainOutcome::Done => return (host.events, pauses),
+                }
+            }
+        };
+        // Twin oracle stream (the wave-7 equivalence contract).
+        let twin = {
+            let mut host = ScriptHost { nrows: 17, pulls: 0, events: Vec::new() };
+            let batch = Batch { nrows: 0, lanes: Vec::new() };
+            let mut cursor = ChainCursor::default();
+            let mut pauses = 0u32;
+            loop {
+                match eval_row_chain(&p, &batch, &mut cursor, &mut host, &mut [])
+                    .expect("scripted host never errors")
+                {
+                    ChainOutcome::Paused => pauses += 1,
+                    ChainOutcome::Done => break (host.events, pauses),
+                }
+            }
+        };
+        let mono = drive(false);
+        let dyn_ = drive(true);
+        assert_eq!(mono, dyn_, "mono and dyn trampolines diverged");
+        assert_eq!(mono, twin, "stitched body diverged from the twin");
+        assert!(mono.1 > 0, "the pause arm must exercise (script covers EmitPause)");
+        assert!(
+            mono.0.iter().any(|&(c, p)| c == 9906 && p % 5 == 2),
+            "the skip arm must exercise (script covers SkipRow)"
+        );
+    }
 }
 // --- end WS-AG (wave-9) -------------------------------------------------------
