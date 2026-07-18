@@ -1306,6 +1306,306 @@ fn resume_walk<'mcx>(
 
 // --- end WS-AI wave-9 ----------------------------------------------------------
 
+// --- WS-CB wave-10 (cursors inc-2: the batch store fill; contract §2.1, band 95001+) ---
+//
+// The ratified fill shape: SCROLL/WITH-HOLD cursors are served from a
+// portal-boundary tuplestore, and the store FILL is a lane-engine batch
+// producer from day one — batches flow into the store WITHOUT the
+// capacity-one per-row pull ceremony. `TuplestoreBatchSink` is the
+// push-mode generalization the WS-AI enforcement-honesty note (above)
+// names: when the emit face is driven as a push sink (capacity > 1), the
+// per-accept budget decrement moves INTO the sink's `accept`, and
+// `es_cursor_run_budget` is its source of truth.
+//
+// BYTE-IDENTITY BY IDENTITY, not reimplementation: `accept` hands each
+// produced slot to the SAME `DestReceiver` the row-chain fill uses (the
+// tuplestore receiver — `tuplestore::hold::puttupleslot` per row,
+// detoast-on-append when armed; tstoreReceiver.c semantics), and carries
+// the drive loop's own SELECT accounting (`es_processed += 1`). The store
+// therefore receives the identical row stream in the identical order under
+// either fill engine — the §2.3 fetch-invisibility gate's substrate.
+//
+// Park shape (§2.1, load-bearing): budget exhaustion mid-batch returns
+// `SinkFeed::Full` ⇒ the operator saves its position NODE-RESIDENT and
+// returns `OpStatus::Paused`; the run returns through `execute_plan`'s
+// EXISTING wave-9.5 settle point (`cursor_run_park` — claims retire through
+// the ledgered claim-release chain, R3 zero-pins-at-settle), and the next
+// run's entry repossesses (`cursor_park_resume`). No new park machinery:
+// the sink's pause is indistinguishable from the row-chain pause at the
+// settle seam (batch_source.rs re-audit finding, worklog §1).
+//
+// EPQ + staleness pins (§2.1; WS-AI worklog §5 + §6 item 8, due here):
+// the dispatch refuses under `es_epq_active` (an EPQ recheck drive inside
+// a budgeted run must not read the outer run's budget) and the sink
+// debug-asserts it per accept; the budget field is meaningful ONLY between
+// `execute_plan` entry and return (the sink runs strictly inside that
+// window; NoMovement runs never overwrite).
+
+/// The §7.3 knob face for the PORTAL layer (WS-CA gates store arming on
+/// it): pquery must not link lanev2 internals — this is the pub face,
+/// re-exported at the execmain crate root (worklog EX-CB-1). Same cell as
+/// `cursors_v2_enabled` (inc-2 rides `PGRUST_LANE_V2_CURSORS`, no new
+/// knob — contract §7.3).
+pub fn cursor_store_fill_enabled() -> bool {
+    cursors_v2_enabled()
+}
+
+/// §6 deletion-clock staging: set once by WS-CA when a cursor store is
+/// armed in this process. Arms the run seam's forward-only debug assert
+/// (a store-armed world never legally drives the executor backward);
+/// before any store exists (this branch pre-integration; knob-OFF worlds)
+/// the assert is inert and only the evidence counter ticks.
+static STORE_ARMED: AtomicU8 = AtomicU8::new(0);
+
+pub fn cursor_store_armed_note() {
+    STORE_ARMED.store(1, Relaxed);
+}
+
+pub(crate) fn cursor_store_ever_armed() -> bool {
+    STORE_ARMED.load(Relaxed) != 0
+}
+
+/// §6 staging (a): release-mode evidence counter — every
+/// `BackwardScanDirection` drive reaching `execute_plan`. The post-flip
+/// physical-deletion bake reads this at zero across all corpora
+/// (`counter\trun-seam-backward` dump line, stats.rs wave-10 block).
+static BACKWARD_RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn run_seam_backward_evidence() {
+    BACKWARD_RUNS.fetch_add(1, Relaxed);
+    debug_assert!(
+        !cursor_store_ever_armed(),
+        "forward-only run seam (§6): backward ExecutorRun after a cursor store was armed \
+         — every SCROLL/HOLD portal is store-served, so no backward drive may reach the \
+         executor core"
+    );
+}
+
+pub(crate) fn run_seam_backward_evidence_count() -> u64 {
+    BACKWARD_RUNS.load(Relaxed)
+}
+
+/// The §3.3 refusal, WS-CA's tick face: a store fill over a
+/// CURRENT-OF-eligible plan (§4.1) uses the row-chain fill because the v1
+/// tid capture reads the scan state per row. Ticked once per fill-engine
+/// decision, where the eligibility answer lives (store creation's
+/// search_plan_tree shape test — portal side). RESERVED on this branch
+/// (inc-1b `cursor-with-hold` posture); armed at the composed head. The
+/// named follow-up retiring it (lane tid supply from WS-AH's batch rowref
+/// identity) is chartered in the contract, not implemented here.
+pub fn cursor_fill_tid_capture_refused() {
+    super::stats::tick_refused(
+        super::stats::ShapeClass::Cursor,
+        super::stats::RefuseReason::CursorCurrentOfTidCapture,
+    );
+}
+
+/// The batch store sink (§2.1, THE WS-CB core deliverable). Capacity-N push
+/// face over the fill run's `DestReceiver`: `accept` appends the produced
+/// slot to the portal store through the receiver (the row-chain receive
+/// path verbatim), bumps `es_processed`, and decrements the per-run
+/// emission budget; `Full` exactly when the budget hits zero. Budget `None`
+/// (a count-0 drain — the §2.4 persist arms) never fills: breaker posture,
+/// the fill runs to exhaustion inside one ExecutorRun (and never suspends
+/// mid-gang, §2.6).
+pub(super) struct TuplestoreBatchSink<'d, 'm> {
+    dest: &'d mut ::tcop_dest::DestReceiver<'m>,
+    /// End-of-stream projected-slot clear, mirroring `RootAdapter`'s
+    /// `clear_on_finish` (byte/state parity with the per-pull drive at
+    /// exhaustion).
+    clear_on_finish: Option<ExecSlotId>,
+    /// The receiver returned false (receiver-initiated stop — the row
+    /// loop's `break` arm). Never produced by the tuplestore receiver
+    /// today; carried for protocol completeness.
+    stopped: bool,
+}
+
+impl<'d, 'm> TuplestoreBatchSink<'d, 'm> {
+    pub(super) fn new(
+        dest: &'d mut ::tcop_dest::DestReceiver<'m>,
+        clear_on_finish: Option<ExecSlotId>,
+    ) -> Self {
+        TuplestoreBatchSink { dest, clear_on_finish, stopped: false }
+    }
+}
+
+impl<'mcx> Sink<'mcx> for TuplestoreBatchSink<'_, '_> {
+    fn accept(
+        &mut self,
+        tuple: ExecSlotId,
+        estate: &mut EStateData<'mcx>,
+    ) -> PgResult<SinkFeed> {
+        // EPQ pin (§2.1): the budget belongs to the outer run; an EPQ
+        // recheck drive must never reach a store sink.
+        debug_assert!(!estate.es_epq_active, "TuplestoreBatchSink inside an EPQ drive");
+        // Overfill = the operator ignored `SinkFeed::Full` (the
+        // RootAdapter-overfill law: silent row loss is a hard error in
+        // release too).
+        if estate.es_cursor_run_budget == Some(0) || self.stopped {
+            return Err(Box::new(::types_error::PgError::error(
+                "lane-v2 cursor store sink overfilled (operator ignored SinkFeed::Full)"
+                    .to_string(),
+            )));
+        }
+        {
+            let slot = estate.slot_mut(tuple);
+            // SAFETY: lifetime bridge at the seam boundary — identical to
+            // `execute_plan`'s receive_slot arm (the receiver only copies
+            // datums out during the call and retains no borrow).
+            let slot: &mut ::types_slot::SlotData<'_> = unsafe {
+                &mut *(slot as *mut ::types_slot::SlotData<'mcx>)
+                    .cast::<::types_slot::SlotData<'_>>()
+            };
+            if !self.dest.receive_slot(slot)? {
+                self.stopped = true;
+                return Ok(SinkFeed::Full);
+            }
+        }
+        // The drive loop's SELECT accounting, moved with the drive (budget
+        // installs only on CMD_SELECT runs).
+        estate.es_processed += 1;
+        // The per-accept budget decrement (the WS-AI enforcement-honesty
+        // note executed): this field is the push drive's source of truth.
+        match estate.es_cursor_run_budget.as_mut() {
+            Some(b) => {
+                *b -= 1;
+                Ok(if *b == 0 { SinkFeed::Full } else { SinkFeed::NeedMore })
+            }
+            // Count-0 drain (§2.4): no budget, never Full.
+            None => Ok(SinkFeed::NeedMore),
+        }
+    }
+
+    fn finish(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
+        if let Some(slot) = self.clear_on_finish {
+            let mcx = estate.es_query_cxt;
+            ::exectuples::exec_clear_tuple(estate.slot_mut(slot), mcx);
+        }
+        Ok(())
+    }
+}
+
+/// The fill driver (§2.2's executor half, one budgeted ExecutorRun's
+/// worth): batches flow `Source → Operator → store sink` with NO
+/// capacity-one per-row pull ceremony — the ratification's batching
+/// clause. `drain_pipeline`'s pause-tolerant sibling: `Paused` (budget
+/// exhausted mid-batch, position node-resident) returns control to the
+/// run seam — the wave-9.5 settle point below the caller then parks the
+/// staged claim (R3). Returns true iff the source exhausted
+/// (`sink.finish` runs only then, mirroring `pull_step`'s end-of-stream
+/// clear; a paused fill keeps its staged state for the resume walk).
+pub(super) fn fill_step<'mcx, S, O>(
+    node: &mut S::Node,
+    src: &mut S,
+    op: &mut O,
+    sink: &mut TuplestoreBatchSink<'_, '_>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool>
+where
+    S: Source<'mcx>,
+    O: Operator<'mcx, Node = S::Node>,
+{
+    loop {
+        let batch = match op.pending(node) {
+            Some(b) => b,
+            None => match src.produce(node, estate)? {
+                Some(b) => b,
+                None => {
+                    sink.finish(estate)?;
+                    return Ok(true);
+                }
+            },
+        };
+        match op.consume(node, batch, sink, estate)? {
+            OpStatus::Paused => return Ok(false),
+            OpStatus::NeedInput => {}
+            // Operator-driven early stop: treated exactly like source
+            // exhaustion (`pull_step`'s Finished arm).
+            OpStatus::Finished => {
+                sink.finish(estate)?;
+                return Ok(true);
+            }
+        }
+    }
+}
+
+/// `execute_plan`'s batch-fill arm (§2.1/§2.3, called from the wave-10 CB
+/// sub-region at the run seam): the fill-engine decision for a budgeted
+/// store-fill run. Returns true iff the batch fill DROVE this run (the
+/// caller then skips the per-tuple loop — the budget was consumed by the
+/// sink); false = not a batch-fill shape, the row loop serves the same
+/// store byte-identically (§2.3 fallback; the plan's own refusal reasons
+/// ticked by the admission hooks).
+///
+/// Gates, in cost order: EPQ (§2.1 pin), the store face
+/// (`CommandDest::Tuplestore` — any other receiver keeps the row loop;
+/// this is also the compose-safe default for CURRENT-OF capturing
+/// receivers, worklog §3), then the top-node shape. Batch-fill breadth
+/// this increment = the standalone SeqScan pipeline; admission is
+/// `try_own_seq_scan` ITSELF (first row through the standard hook — zero
+/// duplication of the §3.2 admission set; heap standalone refuses on
+/// today's admission economics and rides the row loop), remainder through
+/// `fill_step`.
+pub(crate) fn cursor_store_batch_fill<'m, 'mcx>(
+    node: &mut crate::procnode::PlanStateNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    dest: &mut ::tcop_dest::DestReceiver<'m>,
+) -> PgResult<bool> {
+    debug_assert!(
+        estate.es_cursor_run_budget.is_some(),
+        "cursor_store_batch_fill on an unbudgeted run"
+    );
+    if estate.es_epq_active {
+        return Ok(false);
+    }
+    if dest.mydest() != ::types_dest::CommandDest::Tuplestore {
+        return Ok(false);
+    }
+    let crate::procnode::PlanStateNode::SeqScan(ss) = node else {
+        return Ok(false);
+    };
+    // First row through the standard admission hook: the identical verdict
+    // cascade, stats ticks and engine capture as a per-pull drive; a
+    // refusal falls to the row-chain fill of the same store (§2.3).
+    let Some(first) = super::try_own_seq_scan(ss, estate)? else {
+        return Ok(false);
+    };
+    let mut sink =
+        TuplestoreBatchSink::new(dest, ss.ss.ps_ProjInfo.as_ref().map(|p| p.pi_result_slot));
+    if let Some(slot) = first {
+        if let SinkFeed::Full = sink.accept(slot, estate)? {
+            // Budget 1 (or receiver stop): the fill ran and paused with the
+            // first row; position is node-resident from the pull.
+            return Ok(true);
+        }
+    } else {
+        // Admitted and exhausted at the first pull (empty result): the
+        // pull's RootAdapter already ran the end-of-stream clear.
+        return Ok(true);
+    }
+    fill_step(ss, &mut super::SeqScanSource, &mut super::SeqScanFilterProject, &mut sink, estate)?;
+    Ok(true)
+}
+
+/// Test face: drive the standalone-scan fill pipeline into a
+/// `TuplestoreBatchSink` over `dest` WITHOUT the admission cascade (the
+/// scanfix heap fixture refuses standalone admission by design, so the
+/// band-95001 protocol pins enter below the verdict — the same
+/// Source/Operator/sink composition `cursor_store_batch_fill` drives after
+/// admission). Returns `fill_step`'s exhausted-vs-paused.
+#[cfg(test)]
+pub(crate) fn cursor_fill_step_seqscan_for_tests<'m, 'mcx>(
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    dest: &mut ::tcop_dest::DestReceiver<'m>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    let clear = ss.ss.ps_ProjInfo.as_ref().map(|p| p.pi_result_slot);
+    let mut sink = TuplestoreBatchSink::new(dest, clear);
+    fill_step(ss, &mut super::SeqScanSource, &mut super::SeqScanFilterProject, &mut sink, estate)
+}
+
+// --- end WS-CB wave-10 -----------------------------------------------------------
+
 // =============================================================================
 // Row-mode driver mechanics (pull_step_rows over stub source/op): the driver
 // contract itself — resume-before-produce ordering, Paused-then-Finished,
