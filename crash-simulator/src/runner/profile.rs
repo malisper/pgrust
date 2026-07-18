@@ -112,6 +112,15 @@ pub fn validate(p: &Profile) -> Result<(), String> {
             }
         }
     }
+    // A weighted 'arm' kind with no arm sets can never emit a step — the
+    // generator would draw it forever without making progress (infinite
+    // loop when 'arm' is the only weighted kind). Reject at validation.
+    if p.statement_weights.get("arm").copied().unwrap_or(0) > 0 && p.arm_sets.is_empty() {
+        return Err(format!(
+            "profile '{}': statement kind 'arm' is weighted but arm_sets is empty (no arm can be generated)",
+            p.name
+        ));
+    }
     if p.steps_min == 0 || p.steps_min > p.steps_max {
         return Err(format!("profile '{}': bad steps range", p.name));
     }

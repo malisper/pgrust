@@ -281,7 +281,11 @@ fn real_main() -> Result<i32, String> {
             }
             emit_verdict(&census);
             println!("test: {}/{} still red", still_red, matches.len());
-            Ok(if still_red > 0 { 1 } else { 0 })
+            // Exit must cohere with the verdict line: red if the banked
+            // signature reproduced OR the reruns surfaced any P1 (a rerun
+            // that fails with a DIFFERENT signature is still a failure —
+            // grep-based gates key on SIMHARNESS-VERDICT|FAIL).
+            Ok(if still_red > 0 || !census.p1_classes().is_empty() { 1 } else { 0 })
         }
         Cmd::Loop { n, bugbase, engine } => {
             let bb = BugBase::new(&bugbase);

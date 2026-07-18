@@ -17,6 +17,9 @@ pub enum MockBehavior {
     Rows(Vec<Vec<Option<String>>>),
     Error { sqlstate: String, message: String },
     Crash,
+    /// ConnectionLost until reconnect() is called, then behaves like Ok —
+    /// models a server that was genuinely restarted under an old session.
+    DeadUntilReconnect,
 }
 
 pub struct MockSession {
@@ -54,6 +57,14 @@ impl MockSession {
             reconnects: 0,
         }
     }
+    pub fn dead_until_reconnect(name: &str) -> Self {
+        MockSession {
+            name: name.into(),
+            behavior: MockBehavior::DeadUntilReconnect,
+            calls: vec![],
+            reconnects: 0,
+        }
+    }
 }
 
 impl Session for MockSession {
@@ -75,6 +86,15 @@ impl Session for MockSession {
                 ExecOutcome::SqlError { sqlstate: sqlstate.clone(), message: message.clone() }
             }
             MockBehavior::Crash => ExecOutcome::ConnectionLost { message: "server closed the connection".into() },
+            MockBehavior::DeadUntilReconnect => {
+                if self.reconnects == 0 {
+                    ExecOutcome::ConnectionLost { message: "server closed the connection".into() }
+                } else if sql.trim_start().to_ascii_uppercase().starts_with("SELECT") {
+                    ExecOutcome::Rows { rows: vec![] }
+                } else {
+                    ExecOutcome::Command { tag: "OK".into() }
+                }
+            }
         }
     }
     fn reconnect(&mut self) -> Result<(), String> {
