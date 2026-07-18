@@ -449,7 +449,26 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      function of THIS thread's GUC store, and any session
     //      bind/unbind/SET/RESET/xact-revert mutates that store through
     //      with_store_mut, which bumps the key and invalidates the entry.
-    assert_eq!(count_tree(crates), 496, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 500, train-28 merge (the DST t28-set + provider-seam + wasm/t28-set
+    // cars meet the census; renumbered 37-40 over the t27 slots):
+    //   37. _support/pgsync/src/sim/sched.rs — the permit scheduler's
+    //      per-thread slot (vpid binding/current pick state). The whole
+    //      sim module is `cfg(pgrust_sim)`-gated — ABSENT from product
+    //      codegen; DST test infrastructure only (slot-34 sim.rs class).
+    //   38. backend/libpq/pqcomm_simnet/src/imp.rs — sim-net transport
+    //      provider's per-thread duplex state. Crate compiles EMPTY on
+    //      native by design (cfg pgrust_sim) — slot-34 class, never in a
+    //      shipped binary.
+    //   39. backend/libpq/pqcomm_stdio/src/lib.rs STATE — the stdio
+    //      transport provider's noblock bit: the stdio twin of
+    //      pqcomm::socket's CLIENT_STATE (already-classified transport
+    //      connection state). One session per process in stdio-wire mode
+    //      by construction; no session identity, no state movement.
+    //   40. backend/tcop/postgres/src/switches.rs USER_D_OPTION — the
+    //      userDoption analog (postgres.c:106): -D switch storage consumed
+    //      by SelectConfigFiles at single-user/stdio-wire boot. Boot-time
+    //      argv plumbing on the main thread; dead after startup.
+    assert_eq!(count_tree(crates), 500, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
