@@ -305,7 +305,7 @@ env	crates/backend/commands/extension/src/control.rs	1
 env	crates/backend/commands/seclabel/src/lib.rs	1
 env	crates/backend/executor/execexpr/src/compile.rs	1
 env	crates/backend/executor/execexpr/src/jit.rs	2
-env	crates/backend/executor/execmain/src/execmain.rs	1
+env	crates/backend/executor/execmain/src/execmain.rs	2	DST-REVIEW(t27-train): budget 1->2 — spi-compile-residual car (PROCPERF P2) PGRUST_* knob gate landed post-census; routing onto the knobs registry (s2.5) chartered to the DST program (t28)
 env	crates/backend/executor/execmain/src/execparallel.rs	3
 env	crates/backend/executor/execmain/src/lanev2.rs	30
 env	crates/backend/executor/execmain/src/lanev2/exprkey.rs	6
@@ -376,7 +376,8 @@ env	crates/port/pg_clock/src/sim.rs	2	DST-REVIEW(ws-clk): PGRUST_SIM_CLOCK_MODE/
 env	crates/port/pg_path/src/lib.rs	1
 env	crates/port/pg_strong_random/src/sim.rs	1	DST-REVIEW(ws-rng): PGRUST_SIM_SEED knob read (R-KNOBS, s2.3); pgrust_sim-cfg-only — no product reader exists; retires onto the P2 knobs-registry charter when that lands
 env	crates/backend/executor/execgrouping/src/lib.rs	1	DST-REVIEW(t27-train): t27-train merge reconciliation — site landed in the t26 recovery/metalfix re-board (post-dates the DST census seed @ 3fee87ff0); routing onto the knobs registry (s2.5) chartered to the DST program (t28)
-env	crates/backend/replication/walreceiver/src/client.rs	3	DST-REVIEW(t27-train): t27-train merge reconciliation — site landed in the t26 recovery/metalfix re-board (post-dates the DST census seed @ 3fee87ff0); routing onto the knobs registry (s2.5) chartered to the DST program (t28)
+env	crates/backend/replication/walreceiver/src/client.rs	5	DST-REVIEW(t27-train): t27-train merge reconciliation — site landed in the t26 recovery/metalfix re-board (post-dates the DST census seed @ 3fee87ff0); routing onto the knobs registry (s2.5) chartered to the DST program (t28); DST-REVIEW(t27-train): budget 3->5 — wasm-portability car cfg-twin PGUSER/USER reads (native bodies unchanged); knobs-registry routing chartered to the DST program (t28)
+env	crates/pl/plpgsql/src/handler.rs	1	DST-REVIEW(t27-train): spi-compile-residual car (PROCPERF P2) PGRUST_* knob gate landed post-census; routing onto the knobs registry (s2.5) chartered to the DST program (t28)
 
 # ==== blocking ====
 blocking	crates/backend/access/heap/vacuumlazy/src/lib.rs	1
@@ -471,7 +472,7 @@ once	crates/backend/access/transam/xlogrecovery/src/lib.rs	1
 once	crates/backend/catalog/pg_constraint/src/lib.rs	1
 once	crates/backend/commands/copy/src/parallel.rs	15
 once	crates/backend/executor/execexpr/src/jit.rs	3
-once	crates/backend/executor/execmain/src/execmain.rs	1
+once	crates/backend/executor/execmain/src/execmain.rs	2	DST-REVIEW(t27-train): budget 1->2 — spi-compile-residual car (PROCPERF P2) OnceLock knob memo landed post-census; P3 row-19 once-ledger classification chartered to the DST program (t28)
 once	crates/backend/executor/execmain/src/lanev2.rs	30	P3 row 19: lanev2 runtime knobs (design-cited class)
 once	crates/backend/executor/execmain/src/lanev2/exprkey.rs	6
 once	crates/backend/executor/execmain/src/lanev2/router.rs	1
@@ -546,6 +547,7 @@ once	crates/port/pg_clock/src/sim.rs	1
 once	crates/port/pg_strong_random/src/sim.rs	1
 once	crates/backend/access/transam/xlogrecovery/src/targets.rs	1	DST-REVIEW(t27-train): t27-train merge reconciliation — site landed in the t26 recovery/metalfix re-board (post-dates the DST census seed @ 3fee87ff0); routing onto the P3 row-19 once-ledger classification chartered to the DST program (t28)
 once	crates/backend/executor/execgrouping/src/lib.rs	1	DST-REVIEW(t27-train): t27-train merge reconciliation — site landed in the t26 recovery/metalfix re-board (post-dates the DST census seed @ 3fee87ff0); routing onto the P3 row-19 once-ledger classification chartered to the DST program (t28)
+once	crates/pl/plpgsql/src/handler.rs	1	DST-REVIEW(t27-train): spi-compile-residual car (PROCPERF P2) OnceLock knob memo landed post-census; P3 row-19 once-ledger classification chartered to the DST program (t28)
 
 # ==== scope ====
 # P3 s1.3 layer-2 widened arm (s3 row 15) — seeded 2026-07-17d: the 6
