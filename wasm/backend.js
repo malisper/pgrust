@@ -19,6 +19,8 @@
 // using format.js's ASCII table) so we can hand the design structured
 // columns/rows/aligns and let ITS terminal renderer draw the table pixel-perfect.
 
+import { stripLogPrefix } from './format.js';
+
 // ---- worker plumbing: one long-lived worker, request/response by id ----------
 let worker = null;
 let readyPromise = null;
@@ -174,13 +176,17 @@ function parseTable(raw) {
   return { columns, rows: outRows, aligns };
 }
 
-// Diagnostics that the single-user backend writes to STDERR.
-function parseDiagnostics(stderr) {
+// Diagnostics that the single-user backend writes to STDERR. Each line carries
+// the engine's default log_line_prefix '%m [%p] ' (C-faithful), so strip it
+// before anchoring on the severity keyword — see stripLogPrefix in format.js.
+// Exported so the gates (wasm-web-e2e.sh, verify.html) can drive the REAL
+// parser against the engine's real stderr.
+export function parseDiagnostics(stderr) {
   if (!stderr) return { error: null, notices: [] };
   let error = null;
   const notices = [];
   for (const lineRaw of stderr.split('\n')) {
-    const line = lineRaw.trim();
+    const line = stripLogPrefix(lineRaw.trim());
     const m = /^(ERROR|FATAL|PANIC):\s*([\s\S]*)$/.exec(line);
     if (m) { if (!error) error = m[2]; continue; }
     const w = /^(WARNING|NOTICE|HINT|DETAIL):\s*([\s\S]*)$/.exec(line);

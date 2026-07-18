@@ -15,6 +15,10 @@
 #   4. worker-model persistence: run #1 CREATE TABLE + INSERT, run #2 (fresh
 #      module instance, SAME long-lived Vfs) reads the rows back; a reset Vfs
 #      does not see them.
+#   5. the SITE's diagnostic parsers (backend.js parseDiagnostics, format.js
+#      formatRun) surface the engine's stderr errors — the stderr lines carry
+#      the log_line_prefix default '%m [%p] ', and an anchored parser that
+#      misses it renders errors invisible and failed writes as success.
 #
 # Prereqs: node, C PostgreSQL 18 initdb (PGINSTALL or /opt/homebrew/bin),
 # native binary at target/debug/postgres (or PGRUST_NATIVE_BIN), wasm module
@@ -75,6 +79,7 @@ SELECT n, n * n AS square, sum(n * n) OVER (ORDER BY n) AS running_sum FROM gene
 WITH RECURSIVE fib(i, a, b) AS ( SELECT 1, 0::bigint, 1::bigint UNION ALL SELECT i + 1, b, a + b FROM fib WHERE i < 15 ) SELECT i, a AS fib FROM fib;
 SELECT no_such_column FROM wb_tenk;
 SELECT 1 / 0 AS boom;
+INSERT INTO wb_tenk VALUES (0, 99, 'dup', 0);
 SELECT 'alive after errors' AS marker;
 BEGIN;
 UPDATE wb_tenk SET even = even + 1 WHERE unique1 = 0;
@@ -149,6 +154,31 @@ console.log('RESET_CLEAN=' + !r3.text.includes('persisted = "7"'));
 EOF
 grep -q 'PERSIST=true' "$WORK/persist.out" || miss "persistence across module instances not observed"
 grep -q 'RESET_CLEAN=true' "$WORK/persist.out" || miss "reset VFS unexpectedly saw persisted rows"
+
+echo "=== site diagnostic parsers surface the engine's stderr errors ==="
+# Drive the REAL parsers the site uses (not a grep re-implementation) over the
+# wasm session's captured stderr: backend.js parseDiagnostics feeds the REPL's
+# error rendering; format.js formatRun is what worker.js/run-node.mjs display.
+PGRUST_WEB_DIR="$WEB" node --input-type=module - "$WORK/wasm.err" <<'EOF' > "$WORK/diag.out" 2> "$WORK/diag.node.err"
+import fs from 'node:fs';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+const web = process.env.PGRUST_WEB_DIR;
+const { parseDiagnostics } = await import(pathToFileURL(path.join(web, 'backend.js')));
+const { formatRun } = await import(pathToFileURL(path.join(web, 'format.js')));
+const err = fs.readFileSync(process.argv[2], 'utf8');
+const d = parseDiagnostics(err);
+console.log('FIRST_ERROR=' + (d.error || '(none)'));
+console.log('DUP_DETAIL=' + d.notices.some((n) => /^DETAIL:\s+Key \(unique1\)=\(0\) already exists\./.test(n)));
+const fmt = formatRun('', err);
+console.log('FMT_DIVZERO=' + /(^|\n)ERROR:\s+division by zero/.test(fmt));
+console.log('FMT_DUPKEY=' + /(^|\n)ERROR:\s+duplicate key value violates unique constraint "wb_tenk_unique1"/.test(fmt));
+EOF
+grep -q 'FIRST_ERROR=column "no_such_column" does not exist' "$WORK/diag.out" \
+    || miss "parseDiagnostics did not surface the first ERROR (stderr log_line_prefix regression?)"
+grep -q 'DUP_DETAIL=true' "$WORK/diag.out" || miss "parseDiagnostics missed the duplicate-key DETAIL line"
+grep -q 'FMT_DIVZERO=true' "$WORK/diag.out" || miss "formatRun did not render ERROR: division by zero"
+grep -q 'FMT_DUPKEY=true' "$WORK/diag.out" || miss "formatRun did not render the duplicate-key ERROR"
 
 if [ "$fail" -eq 0 ]; then
     echo "VERDICT: wasm-web-e2e PASS"
