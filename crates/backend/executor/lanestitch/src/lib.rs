@@ -76,6 +76,8 @@ use std::cell::Cell;
 use types_error::PgResult;
 
 pub use interp::{eval_project, eval_qual, eval_row, eval_row_chain};
+#[doc(hidden)]
+pub use rowchain::rowchain_plan_refusal;
 pub use rowchain::StitchedRowChain;
 pub use spec::{
     ArithOp, Batch, BoolTestKind, ChainCursor, ChainOutcome, ChainVerdict, CmpOp, Lane,
@@ -103,6 +105,31 @@ pub fn available() -> bool {
 pub fn sve2_active() -> bool {
     matches!(stitch::simd_tier(), stitch::SimdTier::Sve2 { .. })
 }
+
+// ===== WAVE-9 WS-AG rung 0: the emit-arena fault lever (test-only) ==========
+// The leg-3a gap: the fault-injection acceptance leg needs a refused
+// compile whose CAUSE is the arena (install_code = None) while the master
+// kill switch and the family knob both still read armed — the master-kill
+// exit refuses too early to exercise the fail-open landing. `_set_for_tests`
+// idiom: doc-hidden, zero production callers; the read sits on the
+// compile-once path only (never per-row / per-drive), so the production
+// cost is one relaxed load per chain-body compile.
+static ROWCHAIN_ARENA_FAULT_FOR_TESTS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Force the rowchain compile's install step to refuse as if the W^X arena
+/// were exhausted (see the region header above). Test-only; NOT a knob (no
+/// env read, no R-KNOBS row — wave-9 contract §1 knob posture).
+#[doc(hidden)]
+pub fn _rowchain_arena_fault_set_for_tests(on: bool) {
+    ROWCHAIN_ARENA_FAULT_FOR_TESTS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[inline]
+pub(crate) fn rowchain_arena_fault_for_tests() -> bool {
+    ROWCHAIN_ARENA_FAULT_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+// ===== end wave-9 rung 0 ====================================================
 
 /// The RowOp chain-stitching gate (WS-AA wave-7 fusion inc-0): master
 /// availability (arch + PGRUST_LANESTITCH kill switch) AND the per-family
