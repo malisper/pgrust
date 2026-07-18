@@ -14649,5 +14649,12 @@ pub(crate) use dml::rowchain_insert_prog_for_mask;
 pub(crate) use push::cursor_run_budget_install;
 #[cfg(test)]
 pub(crate) use push::{cursor_run_budget, cursors_set_for_tests};
+// inc-1b (se/wave95-cursors-1b, this same WS-AI sub-region — append-only
+// growth): the §2 park-shape walkers, consumed by the `execute_plan` run
+// seam (settle below the drive loop, resume at entry), plus the
+// admission-classifier test face (the NAMED refusal-taxonomy strings).
+pub(crate) use push::{cursor_park_resume, cursor_run_park};
+#[cfg(test)]
+pub(crate) use push::cursor_admission_refusal_name;
 // --- end WS-AI wave-9 -----------------------------------------------------------
 // --- WS-AJ (wave-9): reserved ---
