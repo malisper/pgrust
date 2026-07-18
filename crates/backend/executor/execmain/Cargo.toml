@@ -108,6 +108,9 @@ nodelockrows = { path = "../nodelockrows" }
 types_snapshot = { path = "../../../_support/types/snapshot" }
 pgstat = { path = "../../utils/activity/pgstat" }
 tableam = { path = "../../access/table/tableam" }
+# SEAM-WIRING (SE10-GATES item 1): relam_is_pgrcolumnar for the §4.1
+# CURRENT-OF eligibility probe's AM narrowing (execcurrent.rs).
+reloptions = { path = "../../access/common/reloptions" }
 [dev-dependencies]
 adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
 adt_numeric = { path = "../../utils/adt/numeric" }

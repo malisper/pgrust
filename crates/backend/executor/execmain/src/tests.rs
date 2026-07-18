@@ -12755,26 +12755,34 @@ mod cursors_wave10_cb {
         scanfix::quiesced();
     }
 
-    /// §6 staging faces: the run-seam backward evidence counter ticks (the
-    /// release-mode bake instrument) and the debug assert stays INERT until
-    /// WS-CA arms a store (`cursor_store_ever_armed` defaults false on this
-    /// branch — the assert-arming note is CA's store-creation call).
+    /// §6 staging faces, SEAM-WIRING F3 REWORK (SE10-GATES item 7): the
+    /// original pin asserted `!cursor_store_ever_armed()` against the
+    /// process-global never-cleared static — a test-order hazard once the
+    /// armed note went live. The reworked pin is order-independent: it
+    /// tests the evidence counter with the assert PROVABLY inert (knob
+    /// forced OFF — the assert is knob-scoped, push.rs), then the
+    /// monotonic arming transition, then the knob faces. It never asserts
+    /// the static's initial state and leaves the knob OFF (the static may
+    /// remain armed — harmless under the knob-scoped assert).
     #[test]
     fn cursors_w10_forward_only_staging_faces() {
         // The knob lever is a process-global static: serialize with every
         // other flipping test (the fixture lock is the module's knob lock).
         let _knob = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Evidence counter ticks with the debug assert inert: knob OFF makes
+        // the assert's conjunct false regardless of prior arming.
+        crate::lanev2::cursors_set_for_tests(false);
         let before = crate::lanev2::run_seam_backward_evidence_count();
-        assert!(
-            !crate::lanev2::cursor_store_ever_armed(),
-            "no store exists on this branch: the §6 assert must be inert"
-        );
         crate::lanev2::run_seam_backward_evidence();
         assert_eq!(crate::lanev2::run_seam_backward_evidence_count(), before + 1);
-        // The pub knob face (the CA-facing seam) mirrors the test lever.
-        crate::lanev2::cursors_set_for_tests(true);
+        // The arming note is monotonic (never clears).
+        crate::lanev2::cursor_store_armed_note();
+        assert!(crate::lanev2::cursor_store_ever_armed());
+        // The pub knob face (the CA-facing seam) mirrors the test lever —
+        // one cell serves the portal face and the budget classifier.
+        crate::lanev2::cursor_store_fill_set_for_tests(true);
         assert!(crate::lanev2::cursor_store_fill_enabled());
-        crate::lanev2::cursors_set_for_tests(false);
+        crate::lanev2::cursor_store_fill_set_for_tests(false);
         assert!(!crate::lanev2::cursor_store_fill_enabled());
     }
 }

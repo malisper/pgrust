@@ -399,12 +399,27 @@ pub fn PortalStart(
                 // per-row identity capture reads the scan state, which only
                 // the row chain maintains); the batch engine's standing
                 // eflags refusal (batch_allowed = no BACKWARD|MARK) is the
-                // in-fence mechanism forcing that until WS-CB's named
-                // cursor-currentof-tidcapture reason supersedes it. The
+                // in-fence mechanism forcing that AT BOTH lane surfaces
+                // (per-pull ownership and the batch-fill dispatch). The
                 // store still serves every fetch either way
                 // (fill-strategy invisibility, §2.3).
+                //
+                // SEAM-WIRING (SE10-GATES item 1): the CA/CB interface
+                // review KEEPS the eflags fence as THE one armed fence (the
+                // CB F1 keep-exactly-one-fence constraint: retiring it in
+                // favor of reason-41 dispatch routing would expose
+                // lane-parked eligible fills to the settle walker's slot
+                // hygiene AND leave per-pull ownership unfenced). The §3.3
+                // reason-41 tick is armed as the ACCOUNTING for this routing
+                // decision at fill_to's eligible branch; eligibility itself
+                // is AM-narrowed in the probe (pgrcolumnar scans carry no
+                // tids — execcurrent.rs), which is what opens the lane
+                // batch-fill breadth. Knob read = the CB seam (THE single
+                // knob cell; the portalmem duplicate is retired).
                 let scroll = (portal.borrow().cursorOptions & CURSOR_OPT_SCROLL) != 0;
-                let store_armed = scroll && portalmem::cursor_store_enabled();
+                let store_armed = scroll
+                    && execmain_seams::cursor_store_fill_enabled::is_installed()
+                    && execmain_seams::cursor_store_fill_enabled::call();
                 let current_of_eligible = store_armed
                     && execmain_seams::cursor_plan_current_of_eligible::is_installed()
                     && execmain_seams::cursor_plan_current_of_eligible::call(&stmts[0]);
@@ -435,6 +450,13 @@ pub fn PortalStart(
                     p.currentOfEligible = Some(current_of_eligible);
                 }
                 drop(p);
+                // SEAM-WIRING (SE10-GATES item 1): note the arming decision
+                // once per armed portal — arms the run seam's §6
+                // forward-only debug assert (a store-armed knob-ON world
+                // never legally drives the executor backward).
+                if store_armed {
+                    execmain_seams::cursor_store_armed_note::call();
+                }
 
                 snapmgr::PopActiveSnapshot()?;
             }
@@ -1371,6 +1393,14 @@ pub fn fill_portal_store_to(portal: &Portal<'static>, target_rows: u64) -> PgRes
     snapmgr::PushActiveSnapshot(&snap)?;
     if eligible {
         debug_assert!(!tid_store.is_null());
+        // SEAM-WIRING (SE10-GATES item 1): the §3.3 reason-41 accounting,
+        // armed — one tick per fill-engine decision that routes an eligible
+        // plan's fill onto the row chain (this branch; the eflags fence is
+        // the mechanism, the tick is its named accounting). Cadence: per
+        // fill_to call that drives the executor, never per row.
+        if execmain_seams::cursor_fill_tid_capture_refused::is_installed() {
+            execmain_seams::cursor_fill_tid_capture_refused::call();
+        }
         // §4.2 capture reads the scan state per emitted row: single-row
         // drives, identity appended sidecar-aligned with the store.
         let mut filled: u64 = 0;

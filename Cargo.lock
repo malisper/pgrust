@@ -5180,6 +5180,7 @@ dependencies = [
  "queryenvironment",
  "relation_seams",
  "relcache_seams",
+ "reloptions",
  "resowner",
  "resowner_seams",
  "runtime",

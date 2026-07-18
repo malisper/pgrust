@@ -1581,11 +1581,24 @@ pub fn cursor_store_fill_enabled() -> bool {
     cursors_v2_enabled()
 }
 
+/// SEAM-WIRING (SE10-GATES item 1): the SAME-PROCESS A/B lever for the
+/// portal-layer unit batteries (pquery/portalcmds band-94001 pins run in
+/// dependent crates, so this cannot be `cfg(test)` — the retired portalmem
+/// `cursor_store_set_for_tests` precedent). Writes THE single knob cell
+/// (`CURSORS`), so the portal face and the run-seam budget classifier can
+/// never skew — the CB review F1(a) hazard closed by construction.
+#[doc(hidden)]
+pub fn cursor_store_fill_set_for_tests(on: bool) {
+    CURSORS.store(if on { 2 } else { 1 }, Relaxed);
+}
+
 /// §6 deletion-clock staging: set once by WS-CA when a cursor store is
-/// armed in this process. Arms the run seam's forward-only debug assert
-/// (a store-armed world never legally drives the executor backward);
-/// before any store exists (this branch pre-integration; knob-OFF worlds)
-/// the assert is inert and only the evidence counter ticks.
+/// armed in this process (SEAM-WIRING: now LIVE — pquery's PortalStart
+/// calls the `cursor_store_armed_note` seam on every arming decision).
+/// Arms the run seam's forward-only debug assert (a store-armed KNOB-ON
+/// world never legally drives the executor backward); before any store
+/// exists (knob-OFF worlds; processes that never arm) the assert is inert
+/// and only the evidence counter ticks.
 static STORE_ARMED: AtomicU8 = AtomicU8::new(0);
 
 pub fn cursor_store_armed_note() {
@@ -1604,11 +1617,18 @@ static BACKWARD_RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 
 pub(crate) fn run_seam_backward_evidence() {
     BACKWARD_RUNS.fetch_add(1, Relaxed);
+    // SEAM-WIRING F3 rework: the assert is scoped to the KNOB-ON world.
+    // Production processes fix the env at start, so armed ⇒ knob-ON there
+    // and the conjunct is free; test processes flip the knob per-test with
+    // a never-cleared armed static — a knob-OFF backward drive after some
+    // earlier test armed a store is legal (that test's knob-ON world ended
+    // with its `_set_for_tests(false)` restore), and asserting on it was
+    // the F3 order hazard.
     debug_assert!(
-        !cursor_store_ever_armed(),
+        !(cursor_store_ever_armed() && cursors_v2_enabled()),
         "forward-only run seam (§6): backward ExecutorRun after a cursor store was armed \
-         — every SCROLL/HOLD portal is store-served, so no backward drive may reach the \
-         executor core"
+         — every SCROLL/HOLD portal is store-served knob-ON, so no backward drive may \
+         reach the executor core"
     );
 }
 
@@ -1809,6 +1829,13 @@ pub(crate) fn cursor_store_batch_fill<'m, 'mcx>(
     let Some(first) = super::try_own_seq_scan(ss, estate)? else {
         return Ok(false);
     };
+    // SEAM-WIRING (SE10-GATES item 1): the `owned cursor` census goes LIVE —
+    // one OWNED tick per ENGAGED batch store fill (per budgeted run the sink
+    // drives, never per tuple; the scan's own class ticked its ownership in
+    // the hook above). This is the §7.2 Arm-L attribution counter the
+    // three-arm matrix's MATRIX_REQUIRE_LANE_FILL bar reads
+    // (`owned\tcursor\tN>0`).
+    super::stats::tick_owned(super::stats::ShapeClass::Cursor);
     let mut sink =
         TuplestoreBatchSink::new(dest, ss.ss.ps_ProjInfo.as_ref().map(|p| p.pi_result_slot));
     if let Some(slot) = first {
