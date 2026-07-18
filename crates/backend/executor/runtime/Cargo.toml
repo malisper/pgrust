@@ -16,6 +16,8 @@ path = "src/lib.rs"
 # src/sync.rs; the heavy binder re-export (`parallel`) is cfg(not(loom)) so
 # the loom build cone stays small.
 [dependencies]
+# THE single lock library (permit-s1): src/sync.rs is a facade over it.
+pgsync = { path = "../../../_support/pgsync" }
 pg_clock = { path = "../../../port/pg_clock" }
 types_error = { path = "../../../_support/types/types_error" }
 init_small = { path = "../../utils/init/init_small" }
@@ -37,6 +39,11 @@ aio_seams = { path = "../../storage/aio/aio_seams" }
 # Loom is cfg-gated, not feature-gated, so release binaries can never link
 # it: build the models with
 #   RUSTFLAGS="--cfg loom" cargo test -p runtime --test loom --release
+# Post-pgsync note: sync-TYPE selection lives in pgsync, but this row is
+# still LOAD-BEARING FOR src/: rg.rs keeps its pre-existing cfg(loom) wait()
+# polyfill (loom::thread::yield_now; outside the s1 §2.4 migration scope).
+# tests/loom.rs model Builders also use it; the loom-breadth reconciliation
+# migrates the fenced models (tests/loom.rs is fenced).
 [target.'cfg(loom)'.dependencies]
 loom = "0.7"
 

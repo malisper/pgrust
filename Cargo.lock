@@ -11753,6 +11753,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pgsync"
+version = "0.1.0"
+dependencies = [
+ "loom",
+]
+
+[[package]]
 name = "pgtz"
 version = "0.1.0"
 dependencies = [
@@ -14314,6 +14321,7 @@ dependencies = [
  "loom",
  "parallel",
  "pg_clock",
+ "pgsync",
  "postgres_seams",
  "types_error",
  "waiter",
@@ -18315,6 +18323,7 @@ dependencies = [
  "libc",
  "loom",
  "pg_clock",
+ "pgsync",
 ]
 
 [[package]]

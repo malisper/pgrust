@@ -116,7 +116,7 @@ pub(crate) fn stride_for(priority: u32) -> u64 {
 /// lowest-index pick (byte-identical to the pre-M5-4 scheduler). Default ON.
 /// Read once; tests toggle per-instance via [`crate::Runtime::set_stride`].
 fn stride_default() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static ON: crate::sync::OnceLock<bool> = crate::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_STRIDE").map_or(true, |v| v.trim() != "0"))
 }
 
@@ -126,7 +126,7 @@ fn stride_default() -> bool {
 /// walk, byte-identical. Read once; tests toggle per-instance via
 /// [`crate::Runtime::set_dag`].
 fn dag_default() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static ON: crate::sync::OnceLock<bool> = crate::sync::OnceLock::new();
     *ON.get_or_init(|| {
         matches!(std::env::var("PGRUST_RUNTIME_PIPELINE_DAG").as_deref(), Ok("1") | Ok("on"))
     })
@@ -155,12 +155,12 @@ pub(crate) const P_MIN_DEFAULT: u32 = crate::rg::INITIAL_PRIORITY / 16;
 /// M5-4 equal-shares scheduler exactly). Default ON. Read once; tests
 /// toggle per-instance via [`crate::Runtime::set_decay`].
 fn decay_default() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static ON: crate::sync::OnceLock<bool> = crate::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_DECAY").map_or(true, |v| v.trim() != "0"))
 }
 
 fn decay_lambda_default() -> f64 {
-    static V: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    static V: crate::sync::OnceLock<f64> = crate::sync::OnceLock::new();
     *V.get_or_init(|| {
         std::env::var("PGRUST_RUNTIME_DECAY_LAMBDA")
             .ok()
@@ -171,7 +171,7 @@ fn decay_lambda_default() -> f64 {
 }
 
 fn decay_quantum_default() -> u64 {
-    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    static V: crate::sync::OnceLock<u64> = crate::sync::OnceLock::new();
     *V.get_or_init(|| {
         std::env::var("PGRUST_RUNTIME_DECAY_QUANTUM_US")
             .ok()
@@ -183,7 +183,7 @@ fn decay_quantum_default() -> u64 {
 }
 
 fn p_min_default() -> u32 {
-    static V: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    static V: crate::sync::OnceLock<u32> = crate::sync::OnceLock::new();
     *V.get_or_init(|| {
         std::env::var("PGRUST_RUNTIME_PMIN")
             .ok()
@@ -355,7 +355,7 @@ impl WorkerLocal {
 /// m0-acceptance-instruments; ≤1-task-duration acceptance). Default OFF:
 /// zero cost beyond one branch per task.
 fn markers_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static ON: crate::sync::OnceLock<bool> = crate::sync::OnceLock::new();
     *ON.get_or_init(|| {
         matches!(std::env::var("PGRUST_MORSEL_MARKERS").as_deref(), Ok("1") | Ok("on"))
     })
@@ -365,7 +365,7 @@ fn markers_enabled() -> bool {
 /// restores the per-step permit acquire/release + unthrottled Retry spin
 /// (the pre-fix loops, byte-identical). Default ON. Read once.
 pub(crate) fn step_v2() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static ON: crate::sync::OnceLock<bool> = crate::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_STEP_V2").map_or(true, |v| v.trim() != "0"))
 }
 
@@ -374,7 +374,7 @@ pub(crate) fn step_v2() -> bool {
 /// stderr like WFIN). Default OFF: counters still accumulate (plain
 /// thread-owned u64 adds), but no clock reads and no emission.
 pub(crate) fn cprobe_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static ON: crate::sync::OnceLock<bool> = crate::sync::OnceLock::new();
     *ON.get_or_init(|| {
         matches!(std::env::var("PGRUST_RUNTIME_CPROBE").as_deref(), Ok("1") | Ok("on"))
     })
@@ -393,7 +393,7 @@ pub(crate) const RETRY_PARK_AFTER: u32 = 16;
 /// `0`) disables coalescing — the inc-2 one-epoch-per-claim behavior, the
 /// A/B arm. Read once.
 fn coalesce_epochs() -> u64 {
-    static N: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    static N: crate::sync::OnceLock<u64> = crate::sync::OnceLock::new();
     *N.get_or_init(|| {
         std::env::var("PGRUST_RUNTIME_COALESCE_EPOCHS")
             .ok()
@@ -414,7 +414,7 @@ fn coalesce_epochs() -> u64 {
 /// splitting). Engages only at width > 32 (16-core behavior unchanged by
 /// construction). Kill switch: PGRUST_RUNTIME_ENDGAME_SPLIT=0.
 fn endgame_split_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static ON: crate::sync::OnceLock<bool> = crate::sync::OnceLock::new();
     *ON.get_or_init(|| {
         std::env::var("PGRUST_RUNTIME_ENDGAME_SPLIT").map_or(true, |v| v.trim() != "0")
     })
