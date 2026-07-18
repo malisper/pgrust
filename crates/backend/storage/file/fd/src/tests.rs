@@ -643,3 +643,93 @@ fn allocated_desc_indices_stable_across_out_of_order_free() {
     crate::desc::FreeFile(b).unwrap();
     with_fd(|fd| assert!(fd.allocated_descs.is_empty()));
 }
+
+// DST P1 inc-4 fence assert: the spill/temp plane (tuplestore, tuplesort,
+// sharedtuplestore, sort_storage, spillset, nodehash) had ZERO raw fs sites
+// at the P1 census and must stay that way — all of its IO rides the fd File*
+// APIs (and therefore the VFS). A hit here means a raw syscall or std::fs
+// call crept into a sim-scoped spill path; route it through fd instead.
+#[test]
+fn dst_p1_spill_crates_have_zero_raw_fs_sites() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+    let spill_crates = [
+        "backend/utils/sort/tuplestore",
+        "backend/utils/sort/tuplesort",
+        "backend/utils/sort/sharedtuplestore",
+        "backend/utils/sort/sort_storage",
+        "backend/executor/spillset",
+        "backend/executor/nodehash",
+    ];
+    let needles = [
+        "std::fs::",
+        "libc::open",
+        "libc::close",
+        "libc::read",
+        "libc::write",
+        "libc::pread",
+        "libc::pwrite",
+        "libc::preadv",
+        "libc::pwritev",
+        "libc::stat",
+        "libc::fstat",
+        "libc::lstat",
+        "libc::unlink",
+        "libc::rename",
+        "libc::mkdir",
+        "libc::rmdir",
+        "libc::lseek",
+        "libc::ftruncate",
+        "libc::truncate",
+        "libc::fsync",
+        "libc::fdatasync",
+        "libc::fallocate",
+        "libc::readlink",
+        "libc::access",
+    ];
+
+    let mut offenders: Vec<String> = Vec::new();
+    for krate in spill_crates {
+        let src = root.join(krate).join("src");
+        assert!(src.is_dir(), "spill-fence census: missing {src:?}");
+        let mut stack = vec![src];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read spill crate src") {
+                let path = entry.expect("dirent").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                // Prod sites only: test scaffolding may build fixture dirs.
+                let p = path.to_string_lossy().into_owned();
+                if p.ends_with("/tests.rs") || p.contains("/tests/") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("read source");
+                for (lineno, line) in text.lines().enumerate() {
+                    let code = line.trim_start();
+                    if code.starts_with("//") {
+                        continue;
+                    }
+                    for needle in needles {
+                        if code.contains(needle) {
+                            offenders.push(format!(
+                                "{}:{}: {}",
+                                path.display(),
+                                lineno + 1,
+                                line.trim()
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "raw fs sites appeared in the fenced spill/temp crates:\n{}",
+        offenders.join("\n")
+    );
+}

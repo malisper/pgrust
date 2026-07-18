@@ -4203,8 +4203,10 @@ version = "0.0.0"
 dependencies = [
  "crc32c",
  "elog",
+ "libc",
  "types_core",
  "types_error",
+ "vfs",
 ]
 
 [[package]]

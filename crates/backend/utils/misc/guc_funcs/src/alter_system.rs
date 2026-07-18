@@ -198,8 +198,8 @@ pub fn AlterSystemSetConfigFile(stmt: &AlterSystemStmt<'_>) -> PgResult<()> {
 
     let mut head: Vec<ConfigVariable> = Vec::new();
     if !resetall {
-        match std::fs::read(PG_AUTOCONF_FILENAME) {
-            Ok(contents) => {
+        match read_autoconf_via_fd() {
+            Ok(Some(contents)) => {
                 if !ParseConfigFp(
                     &contents,
                     std::path::Path::new(PG_AUTOCONF_FILENAME),
@@ -216,7 +216,7 @@ pub fn AlterSystemSetConfigFile(stmt: &AlterSystemStmt<'_>) -> PgResult<()> {
                         .into());
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(None) => {}
             Err(e) => {
                 return Err(file_error(
                     format!("could not open file \"{PG_AUTOCONF_FILENAME}\": %m"),
@@ -256,14 +256,54 @@ pub fn AlterSystemSetConfigFile(stmt: &AlterSystemStmt<'_>) -> PgResult<()> {
     // Close before renaming (PG_CATCH parity: close then unlink on error).
     drop(file);
     if let Err(e) = write_result {
-        let _ = std::fs::remove_file(&tmp_file_name);
+        let _ = fd::pg_unlink(&tmp_file_name);
         return Err(e);
     }
     if let Err(e) = fd::durable_rename(&tmp_file_name, PG_AUTOCONF_FILENAME, ERROR) {
-        let _ = std::fs::remove_file(&tmp_file_name);
+        let _ = fd::pg_unlink(&tmp_file_name);
         return Err(e);
     }
 
     lwlock::LWLockRelease(lwlock::main_lock(AUTO_FILE_LOCK))?;
     Ok(())
+}
+
+// postgresql.auto.conf read via the fd-crate front (DST P1 inc-4): transient
+// fd + fstat-sized pg_pread. Ok(None) = ENOENT (fresh cluster).
+fn read_autoconf_via_fd() -> Result<Option<Vec<u8>>, std::io::Error> {
+    let fdnum = fd::OpenTransientFile(PG_AUTOCONF_FILENAME, libc::O_RDONLY)
+        .map_err(|_| std::io::Error::from_raw_os_error(libc::EIO))?;
+    if fdnum < 0 {
+        let en = fd::get_errno();
+        if en == libc::ENOENT {
+            return Ok(None);
+        }
+        return Err(std::io::Error::from_raw_os_error(en));
+    }
+    let mut fi = fd::FileInfo::zeroed();
+    if fd::pg_fstat(fdnum, &mut fi) != 0 {
+        let en = fd::get_errno();
+        fd::CloseTransientFile(fdnum);
+        return Err(std::io::Error::from_raw_os_error(en));
+    }
+    let mut contents = vec![0u8; fi.size.max(0) as usize];
+    let mut r = 0usize;
+    while r < contents.len() {
+        let n = fd::pg_pread(fdnum, &mut contents[r..], r as i64);
+        if n == 0 {
+            contents.truncate(r);
+            break;
+        }
+        if n < 0 {
+            let en = fd::get_errno();
+            if en == libc::EINTR {
+                continue;
+            }
+            fd::CloseTransientFile(fdnum);
+            return Err(std::io::Error::from_raw_os_error(en));
+        }
+        r += n as usize;
+    }
+    fd::CloseTransientFile(fdnum);
+    Ok(Some(contents))
 }
