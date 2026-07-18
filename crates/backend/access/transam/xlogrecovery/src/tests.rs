@@ -1,3 +1,8 @@
+//! NATIVE ARM ONLY: these units build fixtures through std::fs, which under
+//! `--cfg pgrust_sim` would split across the real disk and the SimVfs
+//! namespace; the sim-cfg recovery battery is tests/sim_crash_sweep.rs.
+#![cfg(not(pgrust_sim))]
+
 use super::*;
 use controldata_utils::{CheckPoint, ControlFileData, SIZEOF_CHECKPOINT};
 use transam_xlog::control_file::{
