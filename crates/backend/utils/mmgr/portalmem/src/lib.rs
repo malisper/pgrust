@@ -254,6 +254,7 @@ pub fn CreatePortal(name: &str, allowDup: bool, dupSilent: bool) -> PgResult<Por
             cursorStore: TuplestoreHandle::NULL,
             cursorFillExhausted: false,
             currentOfEligible: None,
+            cursorCaptureBatch: false,
             cursorTidStore: TuplestoreHandle::NULL,
         };
         // Portal-slot reuse: overwrite a parked slot no clone can still see
@@ -506,6 +507,7 @@ pub fn PortalDrop(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<()> {
         p.cursorStoreArmed = false;
         p.cursorFillExhausted = false;
         p.currentOfEligible = None;
+        p.cursorCaptureBatch = false;
         (
             core::mem::replace(&mut p.cursorStore, TuplestoreHandle::NULL),
             core::mem::replace(&mut p.cursorTidStore, TuplestoreHandle::NULL),

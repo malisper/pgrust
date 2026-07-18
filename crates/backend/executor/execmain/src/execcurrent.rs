@@ -274,7 +274,9 @@ fn search_plan_tree<'a, 'mcx>(
 
 /// §4.2 tid packing: block<<16 | offset (both fields of ItemPointerData;
 /// posid 0 == invalid survives the round trip).
-fn pack_tid(t: &ItemPointerData) -> u64 {
+/// pub(crate): SE-R41's in-run capture surfaces (the capture-armed batch
+/// sink and the capture row loop) pack the same identity.
+pub(crate) fn pack_tid(t: &ItemPointerData) -> u64 {
     let block = ::types_tuple::itemptr::ItemPointerGetBlockNumberNoCheck(t) as u64;
     (block << 16) | (t.ip_posid as u64)
 }
@@ -454,6 +456,49 @@ pub(crate) fn cursor_plan_current_of_eligible_seam(
     pstmt: &::types_nodes::plannodes::PlannedStmt<'_>,
 ) -> bool {
     plan_has_capturable_scan(pstmt.planTree, &pstmt.rtable)
+}
+
+/// Seam impl (execmain_seams::cursor_plan_capture_batch_fill; SE-R41,
+/// notes/se-r41-retire.md §3.1): is this ELIGIBLE plan the batch store-fill
+/// shape — a bare T_SeqScan top (the exact `PlanStateNode::SeqScan` gate of
+/// `cursor_store_batch_fill`; no Result/Limit/Append/SubqueryScan wrapper)
+/// over a tid-capable AM? TRUE moves the §4.2 capture inside the run (per
+/// accepted row, at the emit surface — settle-safe by ordering), which is
+/// what lets the portal drop the D-CA-2 fence eflags and lets the lane
+/// batch fill own the heap fill cell. The AM re-check is defensive: the
+/// caller only probes when the eligibility answer (already AM-narrowed on
+/// the T_SeqScan arm) was TRUE.
+pub(crate) fn cursor_plan_capture_batch_fill_seam(
+    pstmt: &::types_nodes::plannodes::PlannedStmt<'_>,
+) -> bool {
+    use ::types_nodes::NodeTag;
+    let Some(node) = pstmt.planTree else {
+        return false;
+    };
+    if node.node_tag() != NodeTag::T_SeqScan {
+        return false;
+    }
+    let ss = node
+        .as_variant::<::types_nodes::plannodes::SeqScan<'_>>()
+        .expect("T_SeqScan");
+    scan_rte_tid_capturable(ss.scan.scanrelid, &pstmt.rtable)
+}
+
+/// SE-R41 (notes/se-r41-retire.md §3.7): the capture row loop's per-row
+/// body — the run-seam fallback for capture-armed budgeted runs the batch
+/// fill refused (Instrumented wrapper, page-batch refusal, lane family
+/// OFF, …). Same identity walk as the seam-driven row-chain capture
+/// (`cursor_capture_current_seam`), applied INSIDE the run right after the
+/// receiver accepted the row — which is exactly what keeps it settle-safe
+/// and sidecar/store-aligned regardless of which engine drove.
+pub(crate) fn capture_current_into_sidecar<'mcx>(
+    planstate: &PlanStateNode<'mcx>,
+    estate: &::executils::EStateData<'mcx>,
+    sidecar: ::types_portal::TuplestoreHandle,
+) -> PgResult<()> {
+    let hit = capture_positioned(planstate, estate);
+    let (oid, packed) = hit.map(|(o, t)| (o, pack_tid(&t))).unwrap_or((0, 0));
+    ::tuplestore::hold::tidstore_put(sidecar, oid, packed)
 }
 
 /// Seam impl (execmain_seams::cursor_capture_current, escalation EX-CA-1).

@@ -423,7 +423,20 @@ pub fn PortalStart(
                 let current_of_eligible = store_armed
                     && execmain_seams::cursor_plan_current_of_eligible::is_installed()
                     && execmain_seams::cursor_plan_current_of_eligible::call(&stmts[0]);
-                let myeflags = if scroll && (!store_armed || current_of_eligible) {
+                // SE-R41 (notes/se-r41-retire.md §3.1/§3.2): an eligible
+                // plan of the batch store-fill shape (bare heap SeqScan
+                // top) captures §4.2 identity INSIDE the run — batch sink
+                // or capture row loop, both settle-safe — so it takes the
+                // PLAIN store-armed eflags (backward consumed by the
+                // store, rewind = store rescan; the non-eligible arm
+                // verbatim). The D-CA-2 fence stays, unchanged, for every
+                // eligible shape whose capture still needs the row chain.
+                let capture_batch = current_of_eligible
+                    && execmain_seams::cursor_plan_capture_batch_fill::is_installed()
+                    && execmain_seams::cursor_plan_capture_batch_fill::call(&stmts[0]);
+                let myeflags = if scroll
+                    && (!store_armed || (current_of_eligible && !capture_batch))
+                {
                     eflags | EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD
                 } else {
                     eflags
@@ -448,6 +461,7 @@ pub fn PortalStart(
                 p.cursorStoreArmed = store_armed;
                 if store_armed {
                     p.currentOfEligible = Some(current_of_eligible);
+                    p.cursorCaptureBatch = capture_batch;
                 }
                 drop(p);
                 // SEAM-WIRING (SE10-GATES item 1): note the arming decision
@@ -1351,9 +1365,11 @@ fn ensure_cursor_store(portal: &Portal<'static>) -> PgResult<()> {
 ///
 /// The fill's ExecutorRun goes through the standard run seam, so WS-AI's
 /// budget install arms it (`es_cursor_run_budget = Some(deficit)` — the
-/// WS-AI hand-off point). CURRENT-OF-eligible plans fill row-at-a-time with
-/// per-row identity capture into the sidecar (§3.3's mode choice inside a
-/// still-store-served cursor; fetch-invisible).
+/// WS-AI hand-off point). CURRENT-OF-eligible plans of the batch store-fill
+/// shape (SE-R41 `cursorCaptureBatch`) run ONE budgeted drive with in-run
+/// identity capture (sidecar-armed receiver); the remaining eligible shapes
+/// fill row-at-a-time with per-row identity capture into the sidecar
+/// (§3.3's mode choice inside a still-store-served cursor; fetch-invisible).
 ///
 /// eof-pointer invariant (why appends are always visible to ptr0): the
 /// tuplestore keeps the ACTIVE eof reader at EOF across appends
@@ -1379,6 +1395,7 @@ pub fn fill_portal_store_to(portal: &Portal<'static>, target_rows: u64) -> PgRes
     let deficit = if target_rows == 0 { 0 } else { target_rows - have };
     let hold = (portal.borrow().cursorOptions & CURSOR_OPT_HOLD) != 0;
     let eligible = portal.borrow().currentOfEligible == Some(true);
+    let capture_batch = eligible && portal.borrow().cursorCaptureBatch;
     let tid_store = portal.borrow().cursorTidStore;
 
     let mut treceiver = tcop_dest::CreateDestReceiver(CommandDest::Tuplestore);
@@ -1391,7 +1408,32 @@ pub fn fill_portal_store_to(portal: &Portal<'static>, target_rows: u64) -> PgRes
     let snap = execmain_seams::query_desc_snapshot::call(query_desc)
         .expect("queryDesc->snapshot set while executor is active");
     snapmgr::PushActiveSnapshot(&snap)?;
-    if eligible {
+    if capture_batch {
+        // SE-R41 (notes/se-r41-retire.md §3.4): the capture-batch arm —
+        // ONE budgeted run for the whole fill; §4.2 identity is captured
+        // INSIDE the run (the sidecar-armed receiver: batch sink per
+        // accepted row, or the run seam's capture row loop when the batch
+        // fill refuses), so the per-row ExecutorRun(1) + post-run capture
+        // ceremony of the row-chain arm never runs here. deficit 0 (FETCH
+        // ALL / §2.4 persist) is spelled as a u64::MAX-count budgeted run:
+        // count semantics are identical for any count > rowcount, and the
+        // capture dispatch stays armed — a fill-to-EOF MUST still capture
+        // (MOVE BACKWARD after FETCH ALL resolves CURRENT OF from the
+        // sidecar).
+        debug_assert!(!tid_store.is_null());
+        tcop_dest::SetTuplestoreCaptureSidecar(&mut treceiver, tid_store);
+        let effective = if deficit == 0 { u64::MAX } else { deficit };
+        execmain_seams::executor_run::call(
+            query_desc,
+            ForwardScanDirection,
+            effective,
+            &mut treceiver,
+        )?;
+        let nprocessed = execmain_seams::query_desc_es_processed::call(query_desc);
+        if deficit == 0 || nprocessed < deficit {
+            portal.borrow_mut().cursorFillExhausted = true;
+        }
+    } else if eligible {
         debug_assert!(!tid_store.is_null());
         // SEAM-WIRING (SE10-GATES item 1): the §3.3 reason-41 accounting,
         // armed — one tick per fill-engine decision that routes an eligible

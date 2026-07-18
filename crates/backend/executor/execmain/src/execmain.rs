@@ -1114,11 +1114,21 @@ pub(crate) fn execute_plan<'m, 'mcx>(
     // byte-identically (§2.3 fetch-invisibility). Knob-OFF/count-0 runs
     // read one None here — per-RUN cost only, never per-tuple (the
     // instruction-invisibility law).
+    //
+    // SE-R41 (notes/se-r41-retire.md §3): a capture-batchable eligible
+    // fill arms the receiver with the §4.2 identity sidecar; the batch
+    // fill then captures per accepted row inside the sink, and a refused
+    // capture-armed run takes the CAPTURE row loop below (per-RUN branch;
+    // the row loop captures after each accepted row) — the store and
+    // sidecar stay aligned no matter which engine drove. Knob-OFF and
+    // unarmed fills read one more None here, per RUN only.
+    let mut cursor_capture_sidecar: Option<::types_portal::TuplestoreHandle> = None;
     let cursor_fill_engaged = if estate.es_cursor_run_budget.is_some()
         && send_tuples
         && estate.es_junkFilter.is_none()
     {
-        crate::lanev2::cursor_store_batch_fill(planstate, estate, dest)?
+        cursor_capture_sidecar = dest.tuplestore_capture_sidecar();
+        crate::lanev2::cursor_store_batch_fill(planstate, estate, dest, cursor_capture_sidecar)?
     } else {
         false
     };
@@ -1133,38 +1143,79 @@ pub(crate) fn execute_plan<'m, 'mcx>(
     // WS-CB wave-10: an engaged batch fill consumed the run's budget inside
     // the sink — the per-tuple loop must not drive the plan again this run.
     // One branch per RUN (hoisted out of the loop, never per tuple).
+    //
+    // SE-R41: the capture split is likewise one branch per RUN — the
+    // knob-OFF/unarmed world runs the loop below byte-identically; a
+    // capture-armed run the batch fill refused runs the capture variant
+    // (per-row identity append after each accepted row — the row-chain
+    // capture moved inside the run, notes/se-r41-retire.md §3.7).
     if !cursor_fill_engaged {
-        loop {
-            estate.reset_per_tuple_expr_context();
+        if let Some(sidecar) = cursor_capture_sidecar {
+            loop {
+                estate.reset_per_tuple_expr_context();
 
-            let Some(mut slot_id) = exec_proc_node(planstate, estate)? else {
-                break;
-            };
+                let Some(slot_id) = exec_proc_node(planstate, estate)? else {
+                    break;
+                };
+                // Capture-armed fills are budgeted store fills: SELECT,
+                // junk-free (the dispatch gate above), send_tuples — the
+                // plain loop's junk/send branches degenerate accordingly.
+                debug_assert!(send_tuples && estate.es_junkFilter.is_none());
 
-            if estate.es_junkFilter.is_some() {
-                slot_id = execjunk::exec_filter_junk(estate, slot_id);
-            }
+                {
+                    let slot = estate.slot_mut(slot_id);
+                    // SAFETY: lifetime bridge at the seam boundary — the
+                    // plain loop's receive_slot arm verbatim.
+                    let slot: &mut SlotData<'m> =
+                        unsafe { &mut *(slot as *mut SlotData<'mcx>).cast::<SlotData<'m>>() };
+                    if !dest.receive_slot(slot)? {
+                        break;
+                    }
+                }
+                crate::execcurrent::capture_current_into_sidecar(planstate, estate, sidecar)?;
 
-            if send_tuples {
-                let slot = estate.slot_mut(slot_id);
-                // SAFETY: lifetime bridge at the seam boundary (C passes a raw
-                // TupleTableSlot*). The receiver only copies datums out during
-                // the call and retains no borrow of the slot (printtup keeps an
-                // address token + its own wire buffer).
-                let slot: &mut SlotData<'m> =
-                    unsafe { &mut *(slot as *mut SlotData<'mcx>).cast::<SlotData<'m>>() };
-                if !dest.receive_slot(slot)? {
+                if operation == CmdType::CMD_SELECT {
+                    estate.es_processed += 1;
+                }
+
+                current_tuple_count += 1;
+                if number_tuples != 0 && number_tuples == current_tuple_count {
                     break;
                 }
             }
+        } else {
+            loop {
+                estate.reset_per_tuple_expr_context();
 
-            if operation == CmdType::CMD_SELECT {
-                estate.es_processed += 1;
-            }
+                let Some(mut slot_id) = exec_proc_node(planstate, estate)? else {
+                    break;
+                };
 
-            current_tuple_count += 1;
-            if number_tuples != 0 && number_tuples == current_tuple_count {
-                break;
+                if estate.es_junkFilter.is_some() {
+                    slot_id = execjunk::exec_filter_junk(estate, slot_id);
+                }
+
+                if send_tuples {
+                    let slot = estate.slot_mut(slot_id);
+                    // SAFETY: lifetime bridge at the seam boundary (C passes a raw
+                    // TupleTableSlot*). The receiver only copies datums out during
+                    // the call and retains no borrow of the slot (printtup keeps an
+                    // address token + its own wire buffer).
+                    let slot: &mut SlotData<'m> =
+                        unsafe { &mut *(slot as *mut SlotData<'mcx>).cast::<SlotData<'m>>() };
+                    if !dest.receive_slot(slot)? {
+                        break;
+                    }
+                }
+
+                if operation == CmdType::CMD_SELECT {
+                    estate.es_processed += 1;
+                }
+
+                current_tuple_count += 1;
+                if number_tuples != 0 && number_tuples == current_tuple_count {
+                    break;
+                }
             }
         }
     }
