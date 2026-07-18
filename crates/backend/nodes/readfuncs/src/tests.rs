@@ -332,3 +332,21 @@ fn reads_nil_element_in_node_list_field() {
     let empty = q.groupingSets.nth(1).as_list().expect("NIL member reads as a List");
     assert!(empty.is_nil());
 }
+
+// stringToNode("<>") is C's NULL return (read.c OTHER_TOKEN, tok_len == 0):
+// pg_rewrite.ev_qual holds the bare marker on every unconditional rule, and
+// pg_get_expr reads it straight from SQL (public issue #18).
+#[test]
+fn bare_null_marker_reads_as_none() {
+    let ctx = MemoryContext::new("t");
+    assert!(crate::stringToNodeNullable(ctx.mcx(), "<>").unwrap().is_none());
+}
+
+// The non-null entry keeps the loud panic for columns that never hold "<>"
+// (their C readers dereference the NULL unconditionally).
+#[test]
+#[should_panic(expected = "null node")]
+fn nonnull_entry_panics_on_bare_null_marker() {
+    let ctx = MemoryContext::new("t");
+    let _ = stringToNode(ctx.mcx(), "<>");
+}

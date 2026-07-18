@@ -31,10 +31,24 @@ use types_nodes::Node;
 #[cfg(test)]
 mod tests;
 
-pub fn stringToNode<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Node<'mcx>> {
+// stringToNode (read.c) for node strings that may be the two-character
+// null-node marker "<>" (outfuncs writes it for a NULL node; pg_rewrite's
+// ev_qual column holds it on every unconditional rule — 146/147 rows in a
+// fresh catalog). C's stringToNode returns NULL there; this returns Ok(None).
+// SQL-reachable readers of such columns (pg_get_expr) MUST use this entry.
+pub fn stringToNodeNullable<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Option<Node<'mcx>>> {
     let mut r = Reader { mcx, buf: s.as_bytes(), pos: 0 };
-    let node = r.node_read().expect("stringToNode: empty input")?;
-    Ok(node.expect("stringToNode: <> input"))
+    r.node_read().expect("stringToNode: empty input")
+}
+
+// stringToNode (read.c) for the call sites whose C counterpart dereferences
+// the result unconditionally — the catalog columns they read never hold "<>"
+// (a NULL there would crash C). Loud panic per this crate's charter; columns
+// that CAN hold "<>" go through stringToNodeNullable, or pre-filter the
+// marker like relcache rules.rs / ruledef.rs do for ev_qual.
+pub fn stringToNode<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Node<'mcx>> {
+    Ok(stringToNodeNullable(mcx, s)?
+        .expect("stringToNode: <> (null node) in a never-null node column"))
 }
 
 struct Reader<'a, 'mcx> {
