@@ -931,3 +931,7 @@ fn dst_p1_spill_crates_have_zero_raw_fs_sites() {
         offenders.join("\n")
     );
 }
+
+// DST P4 inc-1: crash-recovery property sweep + red battery (sim-only).
+#[cfg(pgrust_sim)]
+mod crash_sweep;
