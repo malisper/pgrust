@@ -14321,6 +14321,7 @@ dependencies = [
  "loom",
  "parallel",
  "pg_clock",
+ "pgsync",
  "postgres_seams",
  "types_error",
  "waiter",
@@ -18322,6 +18323,7 @@ dependencies = [
  "libc",
  "loom",
  "pg_clock",
+ "pgsync",
 ]
 
 [[package]]
