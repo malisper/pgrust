@@ -88,15 +88,15 @@ pub fn BackgroundWriterMain(startup_data: &StartupData) -> ! {
 
     {
         use procsignal::ThreadSignalHandler::{Ignore, Simple};
-        procsignal::pqsignal_thread(libc::SIGHUP, Simple(interrupt::SignalHandlerForConfigReload));
-        procsignal::pqsignal_thread(libc::SIGINT, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGHUP, Simple(interrupt::SignalHandlerForConfigReload));
+        procsignal::pqsignal_thread(procsignal::signums::SIGINT, Ignore);
         procsignal::pqsignal_thread(
-            libc::SIGTERM,
+            procsignal::signums::SIGTERM,
             Simple(interrupt::SignalHandlerForShutdownRequest),
         );
-        procsignal::pqsignal_thread(libc::SIGALRM, Ignore);
-        procsignal::pqsignal_thread(libc::SIGPIPE, Ignore);
-        procsignal::pqsignal_thread(libc::SIGUSR2, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGALRM, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGPIPE, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGUSR2, Ignore);
     }
 
     let mut state = BgWriterState::new();

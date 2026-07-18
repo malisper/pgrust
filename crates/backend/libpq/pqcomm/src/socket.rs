@@ -86,12 +86,12 @@ fn setsockopt_int(sock: pgsocket, level: i32, optname: i32, val: i32) -> Result<
     let val: libc::c_int = val;
     // SAFETY: val outlives the call; optlen matches.
     let rc = unsafe {
-        libc::setsockopt(
+        ip::sys::setsockopt(
             sock,
             level,
             optname,
             std::ptr::from_ref(&val).cast(),
-            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            std::mem::size_of::<libc::c_int>() as ip::sys::socklen_t,
         )
     };
     if rc < 0 {
@@ -103,10 +103,10 @@ fn setsockopt_int(sock: pgsocket, level: i32, optname: i32, val: i32) -> Result<
 
 fn getsockopt_int(sock: pgsocket, level: i32, optname: i32) -> Result<i32, ()> {
     let mut val: libc::c_int = 0;
-    let mut size = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    let mut size = std::mem::size_of::<libc::c_int>() as ip::sys::socklen_t;
     // SAFETY: out-pointers sized by `size`.
     let rc = unsafe {
-        libc::getsockopt(
+        ip::sys::getsockopt(
             sock,
             level,
             optname,
@@ -127,9 +127,9 @@ pub fn pq_init(client_sock: &ClientSocket) -> PgResult<Port> {
     port.laddr.salen = port.laddr.addr.len() as u32;
     // SAFETY: laddr.addr is sockaddr_storage-sized; salen is in/out.
     if unsafe {
-        libc::getsockname(
+        ip::sys::getsockname(
             port.sock,
-            port.laddr.addr.as_mut_ptr().cast::<libc::sockaddr>(),
+            port.laddr.addr.as_mut_ptr().cast::<ip::sys::sockaddr>(),
             &mut port.laddr.salen,
         )
     } < 0
@@ -140,14 +140,14 @@ pub fn pq_init(client_sock: &ClientSocket) -> PgResult<Port> {
             .finish(loc("pq_init"))?;
     }
 
-    if sockaddr_family(&port.laddr) != libc::AF_UNIX {
-        if setsockopt_int(port.sock, libc::IPPROTO_TCP, libc::TCP_NODELAY, 1).is_err() {
+    if sockaddr_family(&port.laddr) != ip::sys::AF_UNIX {
+        if setsockopt_int(port.sock, ip::sys::IPPROTO_TCP, ip::sys::TCP_NODELAY, 1).is_err() {
             ereport(FATAL)
                 .with_saved_errno(errno())
                 .errmsg("setsockopt(TCP_NODELAY) failed: %m")
                 .finish(loc("pq_init"))?;
         }
-        if setsockopt_int(port.sock, libc::SOL_SOCKET, libc::SO_KEEPALIVE, 1).is_err() {
+        if setsockopt_int(port.sock, ip::sys::SOL_SOCKET, ip::sys::SO_KEEPALIVE, 1).is_err() {
             ereport(FATAL)
                 .with_saved_errno(errno())
                 .errmsg("setsockopt(SO_KEEPALIVE) failed: %m")
@@ -256,13 +256,13 @@ pub fn pq_wait_event_set_wait_fe_be(timeout: i64, wait_event_info: u32) -> PgRes
 
 fn sun_path_buflen() -> usize {
     // SAFETY: plain-old-data zero pattern.
-    let su: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    let su: ip::sys::sockaddr_un = unsafe { std::mem::zeroed() };
     su.sun_path.len()
 }
 
 fn gai_strerror_string(err: i32) -> String {
     // SAFETY: gai_strerror returns a static NUL-terminated message.
-    unsafe { std::ffi::CStr::from_ptr(libc::gai_strerror(err)) }
+    unsafe { std::ffi::CStr::from_ptr(ip::sys::gai_strerror(err)) }
         .to_string_lossy()
         .into_owned()
 }
@@ -278,14 +278,14 @@ pub fn ListenServerPort(
     max_listen: usize,
 ) -> PgResult<i32> {
     let hint = AddrInfoHint {
-        flags: libc::AI_PASSIVE,
+        flags: ip::sys::AI_PASSIVE,
         family,
-        socktype: libc::SOCK_STREAM,
+        socktype: ip::sys::SOCK_STREAM,
     };
 
     let mut unix_socket_path = String::new();
     let service: String;
-    if family == libc::AF_UNIX {
+    if family == ip::sys::AF_UNIX {
         let dir = unix_socket_dir.expect("ListenServerPort: AF_UNIX requires unixSocketDir");
         debug_assert!(!dir.is_empty());
         unix_socket_path = format!("{}/.s.PGSQL.{}", dir, port_number);
@@ -328,7 +328,7 @@ pub fn ListenServerPort(
     let mut added = 0usize;
     for addr in &addrs {
         // Unix sockets only when asked for (the service/port differs then).
-        if family != libc::AF_UNIX && addr.family == libc::AF_UNIX {
+        if family != ip::sys::AF_UNIX && addr.family == ip::sys::AF_UNIX {
             continue;
         }
 
@@ -343,21 +343,21 @@ pub fn ListenServerPort(
         }
 
         let family_desc: String = match addr.family {
-            x if x == libc::AF_INET => "IPv4".to_owned(),
-            x if x == libc::AF_INET6 => "IPv6".to_owned(),
-            x if x == libc::AF_UNIX => "Unix".to_owned(),
+            x if x == ip::sys::AF_INET => "IPv4".to_owned(),
+            x if x == ip::sys::AF_INET6 => "IPv6".to_owned(),
+            x if x == ip::sys::AF_UNIX => "Unix".to_owned(),
             other => format!("unrecognized address family {}", other),
         };
-        let addr_desc: String = if addr.family == libc::AF_UNIX {
+        let addr_desc: String = if addr.family == ip::sys::AF_UNIX {
             unix_socket_path.clone()
         } else {
             let mut node = String::new();
-            ip::pg_getnameinfo_all(&addr.addr, Some(&mut node), None, libc::NI_NUMERICHOST);
+            ip::pg_getnameinfo_all(&addr.addr, Some(&mut node), None, ip::sys::NI_NUMERICHOST);
             node
         };
 
         // SAFETY: plain socket(2).
-        let fd = unsafe { libc::socket(addr.family, libc::SOCK_STREAM, 0) };
+        let fd = unsafe { ip::sys::socket(addr.family, ip::sys::SOCK_STREAM, 0) };
         if fd == PGINVALID_SOCKET {
             let _ = ereport(LOG)
                 .with_saved_errno(errno())
@@ -379,8 +379,8 @@ pub fn ListenServerPort(
 
         // Without SO_REUSEADDR a new postmaster can't start right away after
         // a stop or crash.
-        if addr.family != libc::AF_UNIX
-            && setsockopt_int(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR, 1).is_err()
+        if addr.family != ip::sys::AF_UNIX
+            && setsockopt_int(fd, ip::sys::SOL_SOCKET, ip::sys::SO_REUSEADDR, 1).is_err()
         {
             let _ = ereport(LOG)
                 .with_saved_errno(errno())
@@ -394,8 +394,8 @@ pub fn ListenServerPort(
             continue;
         }
 
-        if addr.family == libc::AF_INET6
-            && setsockopt_int(fd, libc::IPPROTO_IPV6, libc::IPV6_V6ONLY, 1).is_err()
+        if addr.family == ip::sys::AF_INET6
+            && setsockopt_int(fd, ip::sys::IPPROTO_IPV6, ip::sys::IPV6_V6ONLY, 1).is_err()
         {
             let _ = ereport(LOG)
                 .with_saved_errno(errno())
@@ -411,10 +411,10 @@ pub fn ListenServerPort(
 
         // SAFETY: addr.addr holds salen valid sockaddr bytes.
         let err = unsafe {
-            libc::bind(
+            ip::sys::bind(
                 fd,
-                addr.addr.addr.as_ptr().cast::<libc::sockaddr>(),
-                addr.addr.salen as libc::socklen_t,
+                addr.addr.addr.as_ptr().cast::<ip::sys::sockaddr>(),
+                addr.addr.salen as ip::sys::socklen_t,
             )
         };
         if err < 0 {
@@ -427,7 +427,7 @@ pub fn ListenServerPort(
                     family_desc, addr_desc
                 ));
             if saved_errno == libc::EADDRINUSE {
-                b = if addr.family == libc::AF_UNIX {
+                b = if addr.family == ip::sys::AF_UNIX {
                     b.errhint(format!(
                         "Is another postmaster already running on port {}?",
                         port_number
@@ -444,7 +444,7 @@ pub fn ListenServerPort(
             continue;
         }
 
-        if addr.family == libc::AF_UNIX && Setup_AF_UNIX(&service)? != STATUS_OK {
+        if addr.family == ip::sys::AF_UNIX && Setup_AF_UNIX(&service)? != STATUS_OK {
             unsafe { libc::close(fd) };
             break;
         }
@@ -453,7 +453,7 @@ pub fn ListenServerPort(
         // postmaster will permit.
         let maxconn = g::MaxConnections() * 2;
 
-        if unsafe { libc::listen(fd, maxconn) } < 0 {
+        if unsafe { ip::sys::listen(fd, maxconn) } < 0 {
             let _ = ereport(LOG)
                 .with_saved_errno(errno())
                 .errcode_for_socket_access()
@@ -466,7 +466,7 @@ pub fn ListenServerPort(
             continue;
         }
 
-        let _ = if addr.family == libc::AF_UNIX {
+        let _ = if addr.family == ip::sys::AF_UNIX {
             ereport(LOG).errmsg(format!("listening on Unix socket \"{}\"", addr_desc))
         } else {
             ereport(LOG).errmsg(format!(
@@ -556,7 +556,7 @@ fn Setup_AF_UNIX(sock_path: &str) -> PgResult<i32> {
         } else {
             let group_c = CString::new(group.as_str()).expect("group name contains NUL");
             // SAFETY: NUL-terminated name; result checked for NULL before use.
-            let gr = unsafe { libc::getgrnam(group_c.as_ptr()) };
+            let gr = unsafe { ip::sys::getgrnam(group_c.as_ptr()) };
             if gr.is_null() {
                 let _ = ereport(LOG)
                     .errmsg(format!("group \"{}\" does not exist", group))
@@ -566,7 +566,7 @@ fn Setup_AF_UNIX(sock_path: &str) -> PgResult<i32> {
             unsafe { (*gr).gr_gid }
         };
         // uid_t::MAX is C's (uid_t) -1 "don't change owner".
-        if unsafe { libc::chown(path_c.as_ptr(), libc::uid_t::MAX, gid) } == -1 {
+        if unsafe { ip::sys::chown(path_c.as_ptr(), libc::uid_t::MAX, gid) } == -1 {
             let _ = ereport(LOG)
                 .with_saved_errno(errno())
                 .errcode_for_file_access()
@@ -594,9 +594,9 @@ pub fn AcceptConnection(server_fd: pgsocket, client_sock: &mut ClientSocket) -> 
     client_sock.raddr.salen = client_sock.raddr.addr.len() as u32;
     // SAFETY: raddr.addr is sockaddr_storage-sized; salen is in/out.
     let fd = unsafe {
-        libc::accept(
+        ip::sys::accept(
             server_fd,
-            client_sock.raddr.addr.as_mut_ptr().cast::<libc::sockaddr>(),
+            client_sock.raddr.addr.as_mut_ptr().cast::<ip::sys::sockaddr>(),
             &mut client_sock.raddr.salen,
         )
     };
@@ -618,6 +618,7 @@ pub fn AcceptConnection(server_fd: pgsocket, client_sock: &mut ClientSocket) -> 
 }
 
 /// Mark socket files recently accessed, protecting them from /tmp cleaners.
+#[cfg(not(target_family = "wasm"))]
 pub fn TouchSocketFiles() {
     SOCK_PATHS.with(|p| {
         for sock_path in p.borrow().iter() {
@@ -628,6 +629,11 @@ pub fn TouchSocketFiles() {
         }
     });
 }
+
+// wasm32: AF_UNIX socket files are never created on WASI (no sockets), so
+// there is nothing to touch; the wasi libc crate also exposes no utime.
+#[cfg(target_family = "wasm")]
+pub fn TouchSocketFiles() {}
 
 pub fn RemoveSocketFiles() {
     SOCK_PATHS.with(|p| {
@@ -646,7 +652,7 @@ const PG_TCP_KEEPALIVE_IDLE: i32 = libc::TCP_KEEPALIVE;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 const PG_TCP_KEEPALIVE_IDLE_STR: &str = "TCP_KEEPALIVE";
 #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-const PG_TCP_KEEPALIVE_IDLE: i32 = libc::TCP_KEEPIDLE;
+const PG_TCP_KEEPALIVE_IDLE: i32 = ip::sys::TCP_KEEPIDLE;
 #[cfg(not(any(target_os = "macos", target_os = "ios")))]
 const PG_TCP_KEEPALIVE_IDLE_STR: &str = "TCP_KEEPIDLE";
 
@@ -659,7 +665,7 @@ fn log_sockopt_failure(call: &str, optname: &str, funcname: &'static str) {
 
 pub fn pq_getkeepalivesidle(port: Option<&mut Port>) -> i32 {
     let Some(port) = port else { return 0 };
-    if sockaddr_family(&port.laddr) == libc::AF_UNIX {
+    if sockaddr_family(&port.laddr) == ip::sys::AF_UNIX {
         return 0;
     }
 
@@ -668,7 +674,7 @@ pub fn pq_getkeepalivesidle(port: Option<&mut Port>) -> i32 {
     }
 
     if port.default_keepalives_idle == 0 {
-        match getsockopt_int(port.sock, libc::IPPROTO_TCP, PG_TCP_KEEPALIVE_IDLE) {
+        match getsockopt_int(port.sock, ip::sys::IPPROTO_TCP, PG_TCP_KEEPALIVE_IDLE) {
             Ok(v) => port.default_keepalives_idle = v,
             Err(()) => {
                 log_sockopt_failure(
@@ -686,7 +692,7 @@ pub fn pq_getkeepalivesidle(port: Option<&mut Port>) -> i32 {
 
 pub fn pq_setkeepalivesidle(idle: i32, port: Option<&mut Port>) -> i32 {
     let Some(port) = port else { return STATUS_OK };
-    if sockaddr_family(&port.laddr) == libc::AF_UNIX {
+    if sockaddr_family(&port.laddr) == ip::sys::AF_UNIX {
         return STATUS_OK;
     }
 
@@ -706,7 +712,7 @@ pub fn pq_setkeepalivesidle(idle: i32, port: Option<&mut Port>) -> i32 {
         idle = port.default_keepalives_idle;
     }
 
-    if setsockopt_int(port.sock, libc::IPPROTO_TCP, PG_TCP_KEEPALIVE_IDLE, idle).is_err() {
+    if setsockopt_int(port.sock, ip::sys::IPPROTO_TCP, PG_TCP_KEEPALIVE_IDLE, idle).is_err() {
         log_sockopt_failure(
             "setsockopt",
             PG_TCP_KEEPALIVE_IDLE_STR,
@@ -721,7 +727,7 @@ pub fn pq_setkeepalivesidle(idle: i32, port: Option<&mut Port>) -> i32 {
 
 pub fn pq_getkeepalivesinterval(port: Option<&mut Port>) -> i32 {
     let Some(port) = port else { return 0 };
-    if sockaddr_family(&port.laddr) == libc::AF_UNIX {
+    if sockaddr_family(&port.laddr) == ip::sys::AF_UNIX {
         return 0;
     }
 
@@ -730,7 +736,7 @@ pub fn pq_getkeepalivesinterval(port: Option<&mut Port>) -> i32 {
     }
 
     if port.default_keepalives_interval == 0 {
-        match getsockopt_int(port.sock, libc::IPPROTO_TCP, libc::TCP_KEEPINTVL) {
+        match getsockopt_int(port.sock, ip::sys::IPPROTO_TCP, ip::sys::TCP_KEEPINTVL) {
             Ok(v) => port.default_keepalives_interval = v,
             Err(()) => {
                 log_sockopt_failure("getsockopt", "TCP_KEEPINTVL", "pq_getkeepalivesinterval");
@@ -744,7 +750,7 @@ pub fn pq_getkeepalivesinterval(port: Option<&mut Port>) -> i32 {
 
 pub fn pq_setkeepalivesinterval(interval: i32, port: Option<&mut Port>) -> i32 {
     let Some(port) = port else { return STATUS_OK };
-    if sockaddr_family(&port.laddr) == libc::AF_UNIX {
+    if sockaddr_family(&port.laddr) == ip::sys::AF_UNIX {
         return STATUS_OK;
     }
 
@@ -764,7 +770,7 @@ pub fn pq_setkeepalivesinterval(interval: i32, port: Option<&mut Port>) -> i32 {
         interval = port.default_keepalives_interval;
     }
 
-    if setsockopt_int(port.sock, libc::IPPROTO_TCP, libc::TCP_KEEPINTVL, interval).is_err() {
+    if setsockopt_int(port.sock, ip::sys::IPPROTO_TCP, ip::sys::TCP_KEEPINTVL, interval).is_err() {
         log_sockopt_failure("setsockopt", "TCP_KEEPINTVL", "pq_setkeepalivesinterval");
         return STATUS_ERROR;
     }
@@ -775,7 +781,7 @@ pub fn pq_setkeepalivesinterval(interval: i32, port: Option<&mut Port>) -> i32 {
 
 pub fn pq_getkeepalivescount(port: Option<&mut Port>) -> i32 {
     let Some(port) = port else { return 0 };
-    if sockaddr_family(&port.laddr) == libc::AF_UNIX {
+    if sockaddr_family(&port.laddr) == ip::sys::AF_UNIX {
         return 0;
     }
 
@@ -784,7 +790,7 @@ pub fn pq_getkeepalivescount(port: Option<&mut Port>) -> i32 {
     }
 
     if port.default_keepalives_count == 0 {
-        match getsockopt_int(port.sock, libc::IPPROTO_TCP, libc::TCP_KEEPCNT) {
+        match getsockopt_int(port.sock, ip::sys::IPPROTO_TCP, ip::sys::TCP_KEEPCNT) {
             Ok(v) => port.default_keepalives_count = v,
             Err(()) => {
                 log_sockopt_failure("getsockopt", "TCP_KEEPCNT", "pq_getkeepalivescount");
@@ -798,7 +804,7 @@ pub fn pq_getkeepalivescount(port: Option<&mut Port>) -> i32 {
 
 pub fn pq_setkeepalivescount(count: i32, port: Option<&mut Port>) -> i32 {
     let Some(port) = port else { return STATUS_OK };
-    if sockaddr_family(&port.laddr) == libc::AF_UNIX {
+    if sockaddr_family(&port.laddr) == ip::sys::AF_UNIX {
         return STATUS_OK;
     }
 
@@ -818,7 +824,7 @@ pub fn pq_setkeepalivescount(count: i32, port: Option<&mut Port>) -> i32 {
         count = port.default_keepalives_count;
     }
 
-    if setsockopt_int(port.sock, libc::IPPROTO_TCP, libc::TCP_KEEPCNT, count).is_err() {
+    if setsockopt_int(port.sock, ip::sys::IPPROTO_TCP, ip::sys::TCP_KEEPCNT, count).is_err() {
         log_sockopt_failure("setsockopt", "TCP_KEEPCNT", "pq_setkeepalivescount");
         return STATUS_ERROR;
     }
@@ -830,7 +836,7 @@ pub fn pq_setkeepalivescount(count: i32, port: Option<&mut Port>) -> i32 {
 #[cfg(target_os = "linux")]
 pub fn pq_gettcpusertimeout(port: Option<&mut Port>) -> i32 {
     let Some(port) = port else { return 0 };
-    if sockaddr_family(&port.laddr) == libc::AF_UNIX {
+    if sockaddr_family(&port.laddr) == ip::sys::AF_UNIX {
         return 0;
     }
 
@@ -839,7 +845,7 @@ pub fn pq_gettcpusertimeout(port: Option<&mut Port>) -> i32 {
     }
 
     if port.default_tcp_user_timeout == 0 {
-        match getsockopt_int(port.sock, libc::IPPROTO_TCP, libc::TCP_USER_TIMEOUT) {
+        match getsockopt_int(port.sock, ip::sys::IPPROTO_TCP, libc::TCP_USER_TIMEOUT) {
             Ok(v) => port.default_tcp_user_timeout = v,
             Err(()) => {
                 log_sockopt_failure("getsockopt", "TCP_USER_TIMEOUT", "pq_gettcpusertimeout");
@@ -860,7 +866,7 @@ pub fn pq_gettcpusertimeout(_port: Option<&mut Port>) -> i32 {
 #[cfg(target_os = "linux")]
 pub fn pq_settcpusertimeout(timeout: i32, port: Option<&mut Port>) -> i32 {
     let Some(port) = port else { return STATUS_OK };
-    if sockaddr_family(&port.laddr) == libc::AF_UNIX {
+    if sockaddr_family(&port.laddr) == ip::sys::AF_UNIX {
         return STATUS_OK;
     }
 
@@ -882,7 +888,7 @@ pub fn pq_settcpusertimeout(timeout: i32, port: Option<&mut Port>) -> i32 {
 
     if setsockopt_int(
         port.sock,
-        libc::IPPROTO_TCP,
+        ip::sys::IPPROTO_TCP,
         libc::TCP_USER_TIMEOUT,
         timeout,
     )
@@ -899,7 +905,7 @@ pub fn pq_settcpusertimeout(timeout: i32, port: Option<&mut Port>) -> i32 {
 #[cfg(not(target_os = "linux"))]
 pub fn pq_settcpusertimeout(timeout: i32, port: Option<&mut Port>) -> i32 {
     let Some(port) = port else { return STATUS_OK };
-    if sockaddr_family(&port.laddr) == libc::AF_UNIX {
+    if sockaddr_family(&port.laddr) == ip::sys::AF_UNIX {
         return STATUS_OK;
     }
     if timeout != 0 {
@@ -969,11 +975,19 @@ fn show_tcp_user_timeout() -> String {
 /// [`crate::init_seams`]: test binaries that stub the transport install that
 /// one alone.
 pub fn init_socket_seams() {
-    use guc_tables::{hooks, vars, GucVarAccessors};
-
     pqcomm_seams::pq_init::set(pq_init);
     pqcomm_seams::modify_fe_be_wait_set_latch::set(pq_modify_fe_be_wait_set_latch);
     be_secure_seams::set_port_noblock::set(set_port_noblock);
+
+    init_socket_gucs();
+}
+
+/// This file's GUC storage installs alone: an alternative transport provider
+/// (pqcomm_stdio; P4 sim-net) owns the pq_init/noblock slots but the
+/// keepalive/unix-socket GUCs must still exist for guc boot — their assign
+/// hooks no-op without a TCP MyProcPort, as on an AF_UNIX connection.
+pub fn init_socket_gucs() {
+    use guc_tables::{hooks, vars, GucVarAccessors};
 
     vars::tcp_keepalives_idle.install(GucVarAccessors {
         get: || cfg::TCP_KEEPALIVES_IDLE.get(),

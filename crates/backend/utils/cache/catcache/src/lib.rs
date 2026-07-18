@@ -214,7 +214,9 @@ impl<'mcx> CatCacheState<'mcx> {
 
 #[inline]
 pub(crate) fn pack_ref(off: u32, len: u32) -> Datum {
-    Datum::from_usize(((off as usize) << 32) | len as usize)
+    // Full 8-byte Datum word (u64, not usize: a usize shift truncates on
+    // 32-bit wasm — ILP32 Datum-word audit). Identical on 64-bit targets.
+    Datum::from_u64(((off as u64) << 32) | len as u64)
 }
 
 /// # Safety
@@ -222,7 +224,7 @@ pub(crate) fn pack_ref(off: u32, len: u32) -> Datum {
 /// allocation (insert-time invariant: `off + len <= payload_len`).
 #[inline]
 pub(crate) unsafe fn stored_bytes<'a>(payload: *const u8, key: Datum) -> &'a [u8] {
-    let w = key.as_usize();
+    let w = key.as_u64();
     let off = (w >> 32) as u32;
     let len = (w & 0xFFFF_FFFF) as u32;
     unsafe { core::slice::from_raw_parts(payload.add(off as usize), len as usize) }

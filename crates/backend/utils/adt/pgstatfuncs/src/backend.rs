@@ -146,7 +146,7 @@ pub fn fc_pg_stat_get_backend_client_addr(
     }
     match ss_family(&be.st_clientaddr.addr) {
         // unported: inet datum — adt network lane.
-        f if f == libc::AF_INET as i32 || f == libc::AF_INET6 as i32 => Err(Box::new(
+        f if f == crate::activity::AF_INET as i32 || f == crate::activity::AF_INET6 as i32 => Err(Box::new(
             PgError::error(
                 "pg_stat_get_backend_client_addr: reporting an inet client \
                  address is not yet implemented",
@@ -172,14 +172,14 @@ pub fn fc_pg_stat_get_backend_client_port(
     }
     match ss_family(&be.st_clientaddr.addr) {
         // unported: pg_getnameinfo_all port — adt network lane.
-        f if f == libc::AF_INET as i32 || f == libc::AF_INET6 as i32 => Err(Box::new(
+        f if f == crate::activity::AF_INET as i32 || f == crate::activity::AF_INET6 as i32 => Err(Box::new(
             PgError::error(
                 "pg_stat_get_backend_client_port: reporting an inet client \
                  port is not yet implemented",
             )
             .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
         )),
-        f if f == libc::AF_UNIX as i32 => Ok(Datum::from_i32(-1)),
+        f if f == crate::activity::AF_UNIX as i32 => Ok(Datum::from_i32(-1)),
         _ => Ok(fcinfo.return_null()),
     }
 }

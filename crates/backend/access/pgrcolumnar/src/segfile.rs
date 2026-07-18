@@ -279,9 +279,21 @@ impl SegFile {
 
 /// Contiguous read-only view over all segments: PROT_NONE reservation +
 /// MAP_FIXED per segment, so chunk framing can span segment boundaries.
+#[cfg(not(target_family = "wasm"))]
 pub struct SegMap {
     ptr: *const u8,
     maplen: usize,
+}
+
+// wasm32: no mmap exists on wasm32-wasip1 (wasi-libc has no sys_mmap; the
+// address space is a single linear memory). The wasm arm materializes the
+// sealed part bytes into an owned heap buffer via positioned reads — same
+// bytes() contract, no address-space tricks. Cost: whole-part reads and
+// resident copies (fine at boot-increment scale; a paged reader is the
+// structural fix if cbstore-on-wasm ever needs to be cheap).
+#[cfg(target_family = "wasm")]
+pub struct SegMap {
+    buf: Vec<u8>,
 }
 
 // SAFETY (coldio lane, process-shared mappings): the mapping is PROT_READ
@@ -289,7 +301,9 @@ pub struct SegMap {
 // (bytes() hands out &[u8] only) and Drop's munmap runs exactly once when
 // the last holder goes away. Concurrent readers on any thread are the mmap
 // contract itself.
+#[cfg(not(target_family = "wasm"))]
 unsafe impl Send for SegMap {}
+#[cfg(not(target_family = "wasm"))]
 unsafe impl Sync for SegMap {}
 
 // Process-shared SegMap registry (coldio lane): one live mapping per
@@ -389,12 +403,52 @@ impl SegMap {
         Ok(Some(SegMap::map_segs(&files, &lens, maplen)?))
     }
 
+    // wasm32 twin: read every segment into the contiguous buffer at its
+    // logical offset (i*SEG_BYTES), zero-fill between (mmap's reservation
+    // shape). Sealed bytes: no coherence hazard vs the writer's pwrites.
+    // Merge composition (dst/p4-simnet): the p5 twin read via std::fs::File;
+    // the substrate rewired segments onto vfs::VfsFd, so the twin now preads
+    // through the same vfs data plane (EINTR loop matching SegFile::read).
+    #[cfg(target_family = "wasm")]
+    fn map_segs(files: &[SegFd], lens: &[u64], maplen: usize) -> PgResult<SegMap> {
+        let mut buf = vec![0u8; maplen];
+        for (i, f) in files.iter().enumerate() {
+            if lens[i] == 0 {
+                continue;
+            }
+            let at = i * SEG_BYTES as usize;
+            let dst = &mut buf[at..at + lens[i] as usize];
+            let mut done = 0usize;
+            while done < dst.len() {
+                let n = vfs::pread(f.raw(), &mut dst[done..], done as libc::off_t);
+                if n < 0 {
+                    if vfs::get_errno() == libc::EINTR {
+                        continue;
+                    }
+                    return Err(io_err_errno("cbstore segment"));
+                }
+                if n == 0 {
+                    return Err(io_err(
+                        "cbstore segment",
+                        std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "failed to fill whole buffer",
+                        ),
+                    ));
+                }
+                done += n as usize;
+            }
+        }
+        Ok(SegMap { buf })
+    }
+
     // CARVE-OUT (DST P1 contract §3 item 5): the mmap read arm stays RAW
     // libc — mmap/madvise/munmap are out of Vfs scope until the segmap
     // pread arm lands. P0 allowlist rows retained, tagged
     // "# pending: segmap-pread-arm". The mapping-mode kill switch above and
     // the coldio SegMap registry are untouched. Sim-scope callers must not
     // reach this arm (SimVfs fds cannot back a MAP_SHARED mapping).
+    #[cfg(not(target_family = "wasm"))]
     fn map_segs(files: &[SegFd], lens: &[u64], maplen: usize) -> PgResult<SegMap> {
         unsafe {
             let reserve = libc::mmap(
@@ -434,11 +488,19 @@ impl SegMap {
         }
     }
 
+    #[cfg(not(target_family = "wasm"))]
     pub fn bytes(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.ptr, self.maplen) }
     }
+
+    #[cfg(target_family = "wasm")]
+    pub fn bytes(&self) -> &[u8] {
+        &self.buf
+    }
 }
 
+// wasm32: the owned buffer drops itself.
+#[cfg(not(target_family = "wasm"))]
 impl Drop for SegMap {
     fn drop(&mut self) {
         unsafe {

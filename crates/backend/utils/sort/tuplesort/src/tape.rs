@@ -828,7 +828,10 @@ fn readtup<'m>(
                 ts.tape_read_exact(tape, &mut buf)?;
                 SortTuple {
                     tuple: core::ptr::null_mut(),
-                    datum1: Datum::from_usize(usize::from_ne_bytes(buf)),
+                    // Full 8-byte Datum word on every target (writetup wrote
+                    // size_of::<Datum>() == 8; a usize round-trip would
+                    // truncate on 32-bit wasm — ILP32 Datum-word audit).
+                    datum1: Datum::from_u64(u64::from_ne_bytes(buf)),
                     isnull1: false,
                 }
             } else {

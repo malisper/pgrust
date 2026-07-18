@@ -497,9 +497,9 @@ impl<D: AuxDaemon> BgJob for AuxJob<D> {
             use procsignal::ThreadSignalHandler::Simple;
             // Crash-fanout renderings (thread daemons die by unwind; a
             // threadless job converts them into Abandon at control()).
-            procsignal::pqsignal_thread(libc::SIGQUIT, Simple(note_crash));
-            procsignal::pqsignal_thread(libc::SIGABRT, Simple(note_crash));
-            procsignal::pqsignal_thread(libc::SIGKILL, Simple(note_crash));
+            procsignal::pqsignal_thread(procsignal::signums::SIGQUIT, Simple(note_crash));
+            procsignal::pqsignal_thread(procsignal::signums::SIGABRT, Simple(note_crash));
+            procsignal::pqsignal_thread(procsignal::signums::SIGKILL, Simple(note_crash));
         }
 
         self.daemon.on_started();
@@ -517,7 +517,7 @@ impl<D: AuxDaemon> BgJob for AuxJob<D> {
             // identity is ABANDONED (shmem resets wholesale); stop
             // pointing at the doomed PGPROC.
             self.procno.store(INVALID_PROC_NUMBER, Ordering::Release);
-            self.announce(libc::SIGQUIT);
+            self.announce(procsignal::signums::SIGQUIT);
             return Control::Abandon;
         }
         if procsignal_seams::proc_signal_barrier_pending::call() {
@@ -558,7 +558,7 @@ impl<D: AuxDaemon> BgJob for AuxJob<D> {
     /// wedging shutdown on a child that never exits.
     fn crashed(&self) {
         self.procno.store(INVALID_PROC_NUMBER, Ordering::Release);
-        self.announce(libc::SIGABRT);
+        self.announce(procsignal::signums::SIGABRT);
     }
 
     fn run_cycle(&self, reason: CycleReason) -> CycleOutcome {

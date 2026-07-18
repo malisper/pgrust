@@ -23,6 +23,8 @@ pub struct Node<'mcx> {
     _arena: PhantomData<&'mcx ()>,
 }
 
+// 64-bit layout pin (NonNull); wasm32 (ILP32) shrinks it to 4.
+#[cfg(not(target_family = "wasm"))]
 const _: () = assert!(core::mem::size_of::<Node<'static>>() == 8);
 const _: () = assert!(!core::mem::needs_drop::<Node<'static>>());
 // SAFETY: Copy arena pointer — nothing to run, nothing to leak.

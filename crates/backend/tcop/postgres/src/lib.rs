@@ -12,6 +12,8 @@ use ::types_error::{ErrorLocation, PgResult, ERRCODE_QUERY_CANCELED, ERROR, FATA
 pub mod extended_query;
 pub mod main_loop;
 pub mod simple_query;
+pub mod single_user;
+pub mod stdio_wire;
 pub mod stmt_trace;
 pub mod switches;
 #[cfg(test)]
@@ -25,6 +27,8 @@ pub use extended_query::{
     pg_analyze_and_rewrite_varparams,
 };
 pub use main_loop::PostgresMain;
+pub use single_user::PostgresSingleUserMain;
+pub use stdio_wire::PostgresStdioWireMain;
 pub use simple_query::{
     exec_simple_query, finish_xact_command, pg_analyze_and_rewrite_fixedparams, pg_parse_query,
     pg_plan_queries, pg_plan_query, pg_rewrite_query, start_xact_command,
@@ -32,6 +36,8 @@ pub use simple_query::{
 
 pub fn init_seams() {
     postgres_seams::postgres_main::set(postgres_main_seam);
+    postgres_seams::postgres_single_user_main::set(PostgresSingleUserMain);
+    postgres_seams::postgres_stdio_wire_main::set(PostgresStdioWireMain);
     postgres_seams::check_for_interrupts::set(check_for_interrupts);
     postgres_seams::die::set(die);
     postgres_seams::statement_cancel_handler::set(StatementCancelHandler);
@@ -116,6 +122,23 @@ thread_local! {
     static DOING_EXTENDED_QUERY_MESSAGE: Cell<bool> = const { Cell::new(false) };
     static IGNORE_TILL_SYNC: Cell<bool> = const { Cell::new(false) };
     static DOING_COMMAND_READ: Cell<bool> = const { Cell::new(false) };
+    // EchoQuery / UseSemiNewlineNewline (postgres.c:154-155): the single-user
+    // -E and -j switches.
+    static ECHO_QUERY: Cell<bool> = const { Cell::new(false) };
+    static USE_SEMI_NEWLINE_NEWLINE: Cell<bool> = const { Cell::new(false) };
+}
+
+pub(crate) fn echo_query() -> bool {
+    ECHO_QUERY.with(Cell::get)
+}
+pub(crate) fn set_echo_query(v: bool) {
+    ECHO_QUERY.with(|c| c.set(v));
+}
+pub(crate) fn use_semi_newline_newline() -> bool {
+    USE_SEMI_NEWLINE_NEWLINE.with(Cell::get)
+}
+pub(crate) fn set_use_semi_newline_newline(v: bool) {
+    USE_SEMI_NEWLINE_NEWLINE.with(|c| c.set(v));
 }
 
 pub(crate) fn xact_started() -> bool {
@@ -363,6 +386,28 @@ pub fn ProcessInterrupts() -> PgResult<()> {
     Ok(())
 }
 
+// wasm32: the wasi libc crate exposes no SIG* names; these are the
+// thread-signal emulation's Linux-numbered space (procsignal wasm arm).
+#[cfg(not(target_family = "wasm"))]
+pub(crate) use libc::{
+    SIGCHLD, SIGFPE, SIGHUP, SIGINT, SIGKILL, SIGPIPE, SIGQUIT, SIGTERM, SIGUSR1, SIGUSR2,
+};
+#[cfg(target_family = "wasm")]
+mod wasm_signums {
+    pub const SIGHUP: i32 = 1;
+    pub const SIGINT: i32 = 2;
+    pub const SIGQUIT: i32 = 3;
+    pub const SIGFPE: i32 = 8;
+    pub const SIGKILL: i32 = 9;
+    pub const SIGUSR1: i32 = 10;
+    pub const SIGUSR2: i32 = 12;
+    pub const SIGPIPE: i32 = 13;
+    pub const SIGTERM: i32 = 15;
+    pub const SIGCHLD: i32 = 17;
+}
+#[cfg(target_family = "wasm")]
+pub(crate) use wasm_signums::*;
+
 // The C pqsignal block at PostgresMain entry (postgres.c:4217-4251), rendered
 // as pqsignal_thread dispositions drained at this thread's latch/client-IO
 // wakes. am_walsender arm (WalSndSignals: SIGUSR2 last-cycle handler) lands
@@ -370,22 +415,22 @@ pub fn ProcessInterrupts() -> PgResult<()> {
 // walsenders, SIGUSR2 stays Ignore.
 pub fn install_thread_signal_handlers() {
     use procsignal::ThreadSignalHandler::{Fallible, Ignore, Simple};
-    procsignal::pqsignal_thread(libc::SIGHUP, Simple(interrupt::SignalHandlerForConfigReload));
-    procsignal::pqsignal_thread(libc::SIGINT, Simple(StatementCancelHandler));
-    procsignal::pqsignal_thread(libc::SIGTERM, Fallible(die));
+    procsignal::pqsignal_thread(SIGHUP, Simple(interrupt::SignalHandlerForConfigReload));
+    procsignal::pqsignal_thread(SIGINT, Simple(StatementCancelHandler));
+    procsignal::pqsignal_thread(SIGTERM, Fallible(die));
     if init_small::globals::IsUnderPostmaster() {
-        procsignal::pqsignal_thread(libc::SIGQUIT, Simple(quickdie_handler));
+        procsignal::pqsignal_thread(SIGQUIT, Simple(quickdie_handler));
         // No C analog (SIGKILL has no handler): the crash-test injection's
         // kill-9 rendering, reachable only via procsignal::SendThreadKill.
-        procsignal::pqsignal_thread(libc::SIGKILL, Simple(kill9_handler));
+        procsignal::pqsignal_thread(SIGKILL, Simple(kill9_handler));
     } else {
-        procsignal::pqsignal_thread(libc::SIGQUIT, Fallible(die));
+        procsignal::pqsignal_thread(SIGQUIT, Fallible(die));
     }
-    procsignal::pqsignal_thread(libc::SIGPIPE, Ignore);
-    procsignal::pqsignal_thread(libc::SIGUSR1, Simple(procsignal::procsignal_sigusr1_handler));
-    procsignal::pqsignal_thread(libc::SIGUSR2, Ignore);
-    procsignal::pqsignal_thread(libc::SIGFPE, Fallible(FloatExceptionHandler));
-    procsignal::pqsignal_thread(libc::SIGCHLD, Ignore);
+    procsignal::pqsignal_thread(SIGPIPE, Ignore);
+    procsignal::pqsignal_thread(SIGUSR1, Simple(procsignal::procsignal_sigusr1_handler));
+    procsignal::pqsignal_thread(SIGUSR2, Ignore);
+    procsignal::pqsignal_thread(SIGFPE, Fallible(FloatExceptionHandler));
+    procsignal::pqsignal_thread(SIGCHLD, Ignore);
 }
 
 fn quickdie_handler() {
@@ -401,7 +446,7 @@ fn kill9_handler() {
         elog::config::set_where_to_send_output(types_dest::CommandDest::None);
     }
     elog::clear_emit_context_callbacks();
-    ipc::exit_thread_killed(libc::SIGKILL)
+    ipc::exit_thread_killed(SIGKILL)
 }
 
 pub fn die() -> PgResult<()> {
@@ -535,6 +580,7 @@ thread_local! {
     static SAVE_RUSAGE: Cell<Option<(libc::rusage, libc::timeval)>> = const { Cell::new(None) };
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn getrusage_self() -> libc::rusage {
     // SAFETY: plain libc call filling a zeroed out-struct.
     unsafe {
@@ -542,6 +588,15 @@ fn getrusage_self() -> libc::rusage {
         libc::getrusage(libc::RUSAGE_SELF, &mut r);
         r
     }
+}
+
+// wasm32: WASI has no getrusage (wasi-libc defines no symbol; calling would
+// fail at link) — zeroed snapshot, the pg_rusage wasm arm's shape.
+#[cfg(target_family = "wasm")]
+fn getrusage_self() -> libc::rusage {
+    // SAFETY: rusage is plain data; a zeroed struct is the documented
+    // "no counters on this platform" value.
+    unsafe { core::mem::zeroed() }
 }
 
 fn gettimeofday_now() -> libc::timeval {
@@ -594,6 +649,11 @@ pub fn ShowUsage(title: &str) -> PgResult<()> {
         "!\t[{}.{:06} s user, {}.{:06} s system total]\n",
         user.tv_sec, user.tv_usec, sys.tv_sec, sys.tv_usec,
     ));
+    // wasm32: WASI's rusage carries only ru_utime/ru_stime; the counters
+    // below don't exist on the type (C's own ShowUsage guards the
+    // equivalent section with !defined(WIN32)).
+    #[cfg(not(target_family = "wasm"))]
+    {
     #[cfg(target_os = "macos")]
     let maxrss = r.ru_maxrss / 1024;
     #[cfg(not(target_os = "macos"))]
@@ -631,6 +691,7 @@ pub fn ShowUsage(title: &str) -> PgResult<()> {
         r.ru_nvcsw,
         r.ru_nivcsw,
     ));
+    }
 
     if str_.ends_with('\n') {
         str_.pop();

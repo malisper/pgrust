@@ -80,6 +80,9 @@ pub fn checkDataDir() -> PgResult<()> {
 
     // Essential to the two-postmasters interlock (CreateLockFile); do not weaken.
     // SAFETY: geteuid has no failure modes.
+    // wasm32: WASI has no uids (C's non-POSIX arm shape — ownership check
+    // skipped, like C skips it under WIN32); fd_filestat carries no owner.
+    #[cfg(not(target_family = "wasm"))]
     if st.st_uid != unsafe { libc::geteuid() } {
         ereport(FATAL)
             .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
@@ -98,9 +101,14 @@ pub fn checkDataDir() -> PgResult<()> {
 
     let mask = set_data_directory_create_perm(st.st_mode as u32);
     // SAFETY: umask is async-signal-safe and process-global by design here.
+    // wasm32: no umask on WASI (files carry no mode bits); the create-mode
+    // globals above still record the owner/group decision for lock files.
+    #[cfg(not(target_family = "wasm"))]
     unsafe {
         libc::umask(mask as libc::mode_t);
     }
+    #[cfg(target_family = "wasm")]
+    let _ = mask;
     g::set_data_directory_mode(fd::vfd::pg_dir_create_mode() as i32);
 
     ValidatePgVersion(data_dir)

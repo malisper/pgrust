@@ -77,21 +77,21 @@ pub fn AutoVacLauncherMain(startup_data: &StartupData) -> ! {
 
     {
         use procsignal::ThreadSignalHandler::{Fallible, Ignore, Simple};
-        procsignal::pqsignal_thread(libc::SIGHUP, Simple(interrupt::SignalHandlerForConfigReload));
-        procsignal::pqsignal_thread(libc::SIGINT, Simple(postgres::StatementCancelHandler));
+        procsignal::pqsignal_thread(procsignal::signums::SIGHUP, Simple(interrupt::SignalHandlerForConfigReload));
+        procsignal::pqsignal_thread(procsignal::signums::SIGINT, Simple(postgres::StatementCancelHandler));
         procsignal::pqsignal_thread(
-            libc::SIGTERM,
+            procsignal::signums::SIGTERM,
             Simple(interrupt::SignalHandlerForShutdownRequest),
         );
         timeout_seams::initialize_timeouts::call();
-        procsignal::pqsignal_thread(libc::SIGPIPE, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGPIPE, Ignore);
         procsignal::pqsignal_thread(
-            libc::SIGUSR1,
+            procsignal::signums::SIGUSR1,
             Simple(procsignal::procsignal_sigusr1_handler),
         );
-        procsignal::pqsignal_thread(libc::SIGUSR2, Simple(avl_sigusr2_handler));
-        procsignal::pqsignal_thread(libc::SIGFPE, Fallible(postgres::FloatExceptionHandler));
-        procsignal::pqsignal_thread(libc::SIGCHLD, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGUSR2, Simple(avl_sigusr2_handler));
+        procsignal::pqsignal_thread(procsignal::signums::SIGFPE, Fallible(postgres::FloatExceptionHandler));
+        procsignal::pqsignal_thread(procsignal::signums::SIGCHLD, Ignore);
     }
 
     let init = (|| -> PgResult<()> {

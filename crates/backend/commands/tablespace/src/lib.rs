@@ -467,9 +467,17 @@ fn create_tablespace_directories(location: &str, tablespaceoid: Oid) -> PgResult
     let in_recovery = xlogutils_seams::in_recovery::call();
 
     if !in_place {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(fd::vfd::pg_dir_create_mode());
-        if let Err(e) = std::fs::set_permissions(location, perms) {
+        // wasm32: WASI files carry no unix mode bits (no chmod); the ENOENT
+        // report below is what this stanza exists for, so stat stands in.
+        #[cfg(not(target_family = "wasm"))]
+        let perm_result = {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(fd::vfd::pg_dir_create_mode());
+            std::fs::set_permissions(location, perms)
+        };
+        #[cfg(target_family = "wasm")]
+        let perm_result = std::fs::metadata(location).map(|_| ());
+        if let Err(e) = perm_result {
             if e.kind() == std::io::ErrorKind::NotFound {
                 let mut b = ereport(ERROR)
                     .errcode(ERRCODE_UNDEFINED_FILE)
@@ -539,7 +547,16 @@ fn create_tablespace_directories(location: &str, tablespaceoid: Oid) -> PgResult
     }
 
     if !in_place {
-        if let Err(e) = std::os::unix::fs::symlink(location, &linkloc) {
+        // wasm32: std exposes no symlink creation on wasi (unix::fs is
+        // absent; wasi::fs's is unstable), and preopen-relative symlink
+        // targets are runtime-dependent — refuse with the C error shape
+        // (52 = WASI ENOSYS). Non-in-place tablespaces are effectively
+        // unsupported on wasm.
+        #[cfg(target_family = "wasm")]
+        let link_result: std::io::Result<()> = Err(std::io::Error::from_raw_os_error(52));
+        #[cfg(not(target_family = "wasm"))]
+        let link_result = std::os::unix::fs::symlink(location, &linkloc);
+        if let Err(e) = link_result {
             return Err(ereport(ERROR)
                 .with_saved_errno(e.raw_os_error().unwrap_or(0))
                 .errcode_for_file_access()
