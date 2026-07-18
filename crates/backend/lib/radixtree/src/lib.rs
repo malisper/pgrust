@@ -80,7 +80,10 @@ struct Node256 {
     children: [RtSlot; RT_FANOUT_256],
 }
 
-// Layout parity with the C structs (transcription-error guard).
+// Layout parity with the C structs (transcription-error guard). 64-bit
+// layout pin: RtSlot is a pointer, so every children offset shrinks on
+// wasm32 (ILP32); the tree is heap-internal and stays self-consistent there.
+#[cfg(not(target_family = "wasm"))]
 const _: () = {
     assert!(size_of::<RtNode>() == 3);
     assert!(offset_of!(Node4, children) == 8);

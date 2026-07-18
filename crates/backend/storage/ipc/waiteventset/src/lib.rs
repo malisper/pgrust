@@ -24,8 +24,13 @@ use types_storage::waiteventset::{
 #[cfg(target_os = "linux")]
 #[path = "epoll.rs"]
 mod backend;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_family = "wasm")))]
 #[path = "kqueue.rs"]
+mod backend;
+// wasm32: compile-clean stub; the functional WASI poll_oneoff backend is the
+// P5 boot increment (docs/design/dst-and-wasm.md §5).
+#[cfg(target_family = "wasm")]
+#[path = "wasm_stub.rs"]
 mod backend;
 
 #[cfg(test)]
@@ -53,6 +58,8 @@ thread_local! {
 // registry (SendPostmasterSignal's kill(PostmasterPid, SIGUSR1) analog).
 static POSTMASTER_WAKER: AtomicU64 = AtomicU64::new(0);
 
+// Only the epoll/kqueue backends raise OS errors; the wasm stub never does.
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
 #[cold]
 #[inline(never)]
 fn os_error(level: ErrorLevel, msg: &str) -> Box<PgError> {

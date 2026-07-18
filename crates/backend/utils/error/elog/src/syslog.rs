@@ -14,7 +14,12 @@ struct SyslogState {
     seq: u64,
 }
 
+#[cfg(not(target_family = "wasm"))]
 const DEFAULT_SYSLOG_FACILITY: i32 = libc::LOG_LOCAL0;
+// wasm32: no syslogd on WASI; the numeric value (16<<3) only feeds the
+// bookkeeping state, never a syscall.
+#[cfg(target_family = "wasm")]
+const DEFAULT_SYSLOG_FACILITY: i32 = 16 << 3;
 
 static SYSLOG_STATE: Mutex<SyslogState> = Mutex::new(SyslogState {
     openlog_done: false,
@@ -32,7 +37,10 @@ pub(crate) fn assign_syslog_ident(newval: &str) {
     if changed {
         if state.openlog_done {
             // SAFETY: closelog has no preconditions.
-            unsafe { libc::closelog() };
+            #[cfg(not(target_family = "wasm"))]
+            unsafe {
+                libc::closelog()
+            };
             state.openlog_done = false;
         }
         state.ident = CString::new(newval).ok();
@@ -48,13 +56,17 @@ pub(crate) fn assign_syslog_facility(newval: i32) {
     if state.facility != newval {
         if state.openlog_done {
             // SAFETY: closelog has no preconditions.
-            unsafe { libc::closelog() };
+            #[cfg(not(target_family = "wasm"))]
+            unsafe {
+                libc::closelog()
+            };
             state.openlog_done = false;
         }
         state.facility = newval;
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn open_syslog(ident: &Option<CString>, facility: i32) {
     let ident_ptr = ident.as_ref().map_or(c"postgres".as_ptr(), |i| i.as_ptr());
     // SAFETY: ident_ptr is a live NUL-terminated string; openlog retains it,
@@ -69,6 +81,13 @@ fn open_syslog(ident: &Option<CString>, facility: i32) {
     }
 }
 
+// wasm32: no syslogd on WASI — connection is a no-op and messages are
+// dropped (stderr stays the wasm log path; report.rs never selects the
+// syslog destination on wasm).
+#[cfg(target_family = "wasm")]
+fn open_syslog(_ident: &Option<CString>, _facility: i32) {}
+
+#[cfg(not(target_family = "wasm"))]
 fn raw_syslog(level: i32, message: &[u8]) {
     // Interior NULs cannot occur in text built from Rust strings, but guard.
     let Ok(cmsg) = CString::new(message) else {
@@ -80,6 +99,9 @@ fn raw_syslog(level: i32, message: &[u8]) {
         libc::syslog(level, c"%s".as_ptr(), cmsg.as_ptr());
     }
 }
+
+#[cfg(target_family = "wasm")]
+fn raw_syslog(_level: i32, _message: &[u8]) {}
 
 #[cold]
 #[inline(never)]

@@ -17,9 +17,10 @@ pub struct PgRUsage {
 // one thread of a shared process, so per-thread usage is the parity reading.
 #[cfg(target_os = "linux")]
 const RUSAGE_WHO: libc::c_int = libc::RUSAGE_THREAD;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_family = "wasm")))]
 const RUSAGE_WHO: libc::c_int = libc::RUSAGE_SELF;
 
+#[cfg(not(target_family = "wasm"))]
 pub fn pg_rusage_init() -> PgRUsage {
     let mut tv = libc::timeval { tv_sec: 0, tv_usec: 0 };
     let mut ru: libc::rusage = unsafe { core::mem::zeroed() };
@@ -35,6 +36,13 @@ pub fn pg_rusage_init() -> PgRUsage {
         ru_stime_sec: ru.ru_stime.tv_sec as i64,
         ru_stime_usec: ru.ru_stime.tv_usec as i64,
     }
+}
+
+// wasm32: WASI p1 has no getrusage; VERBOSE rusage deltas read zero (the
+// boot increment may route the wall leg through the clock seam instead).
+#[cfg(target_family = "wasm")]
+pub fn pg_rusage_init() -> PgRUsage {
+    PgRUsage::default()
 }
 
 pub struct RUsageShow {
