@@ -1109,7 +1109,12 @@ fn fstat_fd(fd: i32, path: &str) -> PgResult<LstatInfo> {
         mode: st.st_mode as u32,
         uid: st.st_uid,
         gid: st.st_gid,
+        #[cfg(not(target_family = "wasm"))]
         mtime: st.st_mtime,
+        // wasm32: wasi-libc's stat spells it st_mtim (timespec), no
+        // st_mtime alias in the libc crate.
+        #[cfg(target_family = "wasm")]
+        mtime: st.st_mtim.tv_sec as i64,
     })
 }
 
