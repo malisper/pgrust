@@ -180,17 +180,26 @@ mod tests {
     /// N2 red scenario: the fd is DEAD (closed). The old probe mapped
     /// POLLNVAL to "not ready" = EWOULDBLOCK forever; the fix reports ready
     /// and the op surfaces EBADF.
+    ///
+    /// The dead fd is pinned to a HIGH descriptor number first (dup2):
+    /// sibling tests run in parallel and their pipe(2) calls re-mint
+    /// lowest-available fds, which would resurrect a just-closed low fd and
+    /// race this test's "definitely invalid" premise.
     #[test]
     fn n2_dead_fd_surfaces_ebadf_not_eternal_wouldblock() {
         let (r, w) = mk_pipe();
+        let dead = 700;
+        // SAFETY: dup2 onto an unused high slot this test owns.
+        assert_eq!(unsafe { libc::dup2(r, dead) }, dead);
         close(r);
         close(w);
-        assert!(poll_ready(r, libc::POLLIN), "POLLNVAL must report ready (N2)");
+        close(dead);
+        assert!(poll_ready(dead, libc::POLLIN), "POLLNVAL must report ready (N2)");
         let mut buf = [0u8; 4];
-        let (n, e) = read_noblock(r, &mut buf);
+        let (n, e) = read_noblock(dead, &mut buf);
         assert_eq!(n, -1);
         assert_eq!(e, libc::EBADF);
-        let (n, e) = write_noblock(w, b"x");
+        let (n, e) = write_noblock(dead, b"x");
         assert_eq!(n, -1);
         assert_eq!(e, libc::EBADF);
     }
