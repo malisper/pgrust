@@ -11981,9 +11981,12 @@ mod cursors_wave9 {
 // seam (PGRUST_LANE_V2_SPI) must keep every assertion green byte-for-byte:
 //   * tcount=N stops after exactly N emitted rows; es_processed == N
 //     (SPI_processed correct BY CONSTRUCTION);
-//   * the SPI shape is STOP-ONLY: ExecutorFinish/End run directly after the
-//     single count-limited run — no park, no resume — and teardown returns
-//     the fixture to zero pins (the settle face, scanfix::quiesced());
+//   * the `_SPI_pquery` shape is STOP-then-END: ExecutorFinish/End run
+//     directly after the single count-limited run — no park, no resume —
+//     and teardown returns the fixture to zero pins (the settle face,
+//     scanfix::quiesced()). (SPI portal fetches are the second, RESUMABLE
+//     producer of count-limited Spi-dest runs — review re-baseline,
+//     notes/se-spi-stage-a.md §8; pinned in spi_stage_a_aj_w95.)
 //   * tcount=0 runs to completion; tcount > available saturates.
 mod spi_inc1_aj_w9 {
     use super::*;
@@ -12026,8 +12029,8 @@ mod spi_inc1_aj_w9 {
     }
 
     /// tcount=N (N < rows): count-exact stop with es_processed == N, and the
-    /// STOP-ONLY teardown releases every pin mid-scan (early stop inside a
-    /// page and at a page boundary).
+    /// STOP-then-END teardown releases every pin mid-scan (early stop inside
+    /// a page and at a page boundary).
     #[test]
     fn spi_shape_tcount_stops_exactly_and_settles() {
         install_seams();
@@ -12069,12 +12072,14 @@ mod spi_inc1_aj_w9 {
 
 // WS-AJ wave-9.5 (SPI Stage-A seam, se/spi-stage-a; append-only growth of
 // this same WS-AJ sub-region): the seam-half pins — knob gate order, the
-// NAMED admission taxonomy, and the knob-ON re-ride of the frozen Volcano
+// NAMED admission taxonomy, the knob-ON re-ride of the frozen Volcano
 // cadence pins above through a REAL `CommandDest::Spi` receiver (the budget
-// installs, the STOP-ONLY settle runs, and every count/pin assertion holds
-// byte-for-byte). Knob lever = process-global static: every flipping test
-// serializes on scanfix::TEST_LOCK (the cursors_wave9 precedent) and
-// restores OFF.
+// installs, the settle runs, and every count/pin assertion holds
+// byte-for-byte), and the review-re-baseline park/resume pin (a budgeted
+// SPI-dest run that parks arms the SHARED es_lane_cursor_parked resume
+// signal — the portal-fetch producer resumes; notes/se-spi-stage-a.md §8).
+// Knob lever = process-global static: every flipping test serializes on
+// scanfix::TEST_LOCK (the cursors_wave9 precedent) and restores OFF.
 mod spi_stage_a_aj_w95 {
     use super::*;
 
@@ -12164,12 +12169,14 @@ mod spi_stage_a_aj_w95 {
         crate::lanev2::spi_set_for_tests(false);
     }
 
-    /// The NAMED admission taxonomy (`ShapeClass::Spi`): all three shape
-    /// arms are FAIL-CLOSED and reuse the GENERIC registry vocabulary
-    /// (backward / scroll-mark / parallel-gate) — `_SPI_pquery` hardcodes
-    /// Forward, passes no random-access eflags, and count-limited runs are
-    /// serial; the arms exist so a regression refuses loudly instead of
-    /// hosting an unsound shape (refusal-not-error).
+    /// The NAMED admission taxonomy (`ShapeClass::Spi`), reusing the
+    /// GENERIC registry vocabulary (backward / scroll-mark /
+    /// parallel-gate). Reachability (review re-baseline, worklog §8):
+    /// scroll-mark ticks for every auto-SCROLL SPI portal fetch (plain
+    /// plpgsql FOR loops) and backward via SPI_scroll_cursor_fetch — both
+    /// carry allowlist rows; parallel-gate stays the fail-closed
+    /// serial-law pin. A refusal refuses the WHOLE statement to Volcano
+    /// (refusal-not-error).
     #[test]
     fn spi_w95_admission_taxonomy_named_classes() {
         use ::types_slot::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
@@ -12205,14 +12212,14 @@ mod spi_stage_a_aj_w95 {
 
     /// Knob-ON re-ride of the frozen cadence pins through the REAL SPI
     /// receiver: the budget installs (dest = Spi, tcount != 0), the
-    /// STOP-ONLY settle runs below the drive loop, and every count
+    /// settle runs below the drive loop, and every count
     /// assertion of the Volcano pins above holds byte-for-byte — with the
     /// fixture back to zero pins after each run (the settle face +
     /// teardown, scanfix::quiesced). The knob-OFF arm re-rides the same
     /// cells first: OFF and ON must be indistinguishable at this seam
     /// (values move NEVER; the budget is settle discipline + accounting).
     #[test]
-    fn spi_w95_shape_knob_on_byte_identity_stop_only() {
+    fn spi_w95_shape_knob_on_byte_identity() {
         install_seams();
         install_spi_dest_seams();
         scanfix::install();
@@ -12228,7 +12235,7 @@ mod spi_stage_a_aj_w95 {
         scanfix::quiesced();
 
         // Knob-ON arm: budget installed (tcount-limited SPI-dest SELECT),
-        // STOP-ONLY settle at the count-limited stop; identical counts.
+        // settle at the count-limited stop; identical counts.
         crate::lanev2::spi_set_for_tests(true);
         assert_eq!(run_spi_shape_spi_dest(relid, 2), 2, "tcount=2 stops exactly, knob-ON");
         scanfix::quiesced();
@@ -12240,6 +12247,103 @@ mod spi_stage_a_aj_w95 {
         scanfix::quiesced();
 
         crate::lanev2::spi_set_for_tests(false);
+    }
+
+    /// REVIEW RE-BASELINE PIN (notes/se-spi-stage-a.md §8, finding 1): a
+    /// budgeted SPI-dest run whose scan holds a lane-staged page batch at
+    /// the count-limited stop SETTLES (claim released — R3 zero pins,
+    /// scanfix::quiesced is the teeth) and REPORTS parked=true — the
+    /// execute_plan caller then arms `es_lane_cursor_parked`, the SHARED
+    /// WS-AI resume signal — and the entry-side resume walk restages the
+    /// batch with the consume cursor restored. Load-bearing because the
+    /// portal-fetch producer (SPI_cursor_fetch → PortalRunFetch →
+    /// PortalRunSelect; the plpgsql FOR-loop fetch(10)/fetch(50) cadence)
+    /// RESUMES the same QueryDesc/estate: dropping the parked bit (the
+    /// original STOP-ONLY shape) would resume an un-inited scan the moment
+    /// a budgeted SPI run carries a lane-staged batch. Also pins the EPQ
+    /// law (settle refuses under es_epq_active, budget belongs to the
+    /// outer run).
+    #[test]
+    fn spi_w95_settle_arms_resume_signal_for_portal_fetch_producer() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mcx = leaked_mcx();
+        crate::lanev2::spi_set_for_tests(true);
+
+        let relid: u32 = 93053; // WS-AJ band
+        scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
+        let pstmt = mk_seqscan_pstmt(mcx, relid);
+        let snap_ctx: &'static MemoryContext =
+            Box::leak(Box::new(MemoryContext::new("snap")));
+        let snapshot: snapmgr::Snapshot =
+            std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                snap_ctx.mcx(),
+                ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+            ));
+        with_exec_data(pstmt, |data, pstmt| {
+            data.estate.es_snapshot = Some(snapshot);
+            crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+            let ExecData { estate, planstate } = data;
+            let planstate = planstate.as_mut().unwrap();
+
+            // Stage page 0 and park the consume cursor mid-batch (the
+            // standalone-pipeline shape a lane-engaged scan holds when a
+            // tcount-limited fetch stops).
+            {
+                let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate
+                else {
+                    panic!("bare seqscan plan");
+                };
+                let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate).unwrap();
+                assert_eq!(n, 3);
+                ss.set_lane_cursor(1, n);
+            }
+
+            // EPQ law: a budgeted estate inside an EPQ recheck settles
+            // NOTHING (the budget belongs to the outer run).
+            estate.es_epq_active = true;
+            assert!(
+                !crate::lanev2::spi_run_settle(planstate, estate),
+                "EPQ drive must not settle/park"
+            );
+            estate.es_epq_active = false;
+
+            // The count-limited stop: settle releases the staged claim
+            // and reports parked (the caller arms es_lane_cursor_parked).
+            assert!(
+                crate::lanev2::spi_run_settle(planstate, estate),
+                "a lane-staged batch parks (the bit the caller must arm)"
+            );
+            scanfix::quiesced(); // R3: ZERO pins while suspended
+            {
+                let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate
+                else {
+                    unreachable!()
+                };
+                assert!(::nodeseqscan::seq_scan_cursor_parked(ss));
+                assert_eq!(ss.lane_cursor(), (0, 0), "staged state settled");
+            }
+
+            // The next fetch's entry-side repossession (execute_plan runs
+            // the SHARED WS-AI resume walk off es_lane_cursor_parked):
+            // batch restaged, consume cursor restored.
+            crate::lanev2::cursor_park_resume(planstate, estate).unwrap();
+            {
+                let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate
+                else {
+                    unreachable!()
+                };
+                assert!(!::nodeseqscan::seq_scan_cursor_parked(ss));
+                assert_eq!(ss.lane_cursor(), (1, 3), "consume cursor restored");
+            }
+
+            crate::exec_end_node(planstate, estate).unwrap();
+            estate.exec_reset_tuple_table(false);
+            estate.exec_close_range_table_relations().unwrap();
+        });
+        crate::lanev2::spi_set_for_tests(false);
+        scanfix::quiesced();
     }
 }
 // --- end WS-AJ wave-9 sub-region --------------------------------------------
