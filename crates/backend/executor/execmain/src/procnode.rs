@@ -1897,10 +1897,12 @@ fn agg_arm<'mcx>(
                 // --- WS-AE (wave-8): AGG_INDEX arm re-earn ---
                 // The fused drive below, routed through the
                 // BatchGranuleSource storage seam — behind
-                // PGRUST_LANE_V2_AGG_INDEXFEED (default OFF; knob-OFF cost
-                // = one cached-bool test). Refuses fall through to the
-                // UNCHANGED fused/per-tuple paths, byte-identically (the
-                // WS-F IndexOnlyScan hook's posture, one arm up).
+                // PGRUST_LANE_V2_AGG_INDEXFEED (default ON since the
+                // SE8-GATES AE2 flip; `=0`/`off` = permanent kill switch;
+                // knob-OFF cost = one cached-bool test). Refuses fall
+                // through to the UNCHANGED fused/per-tuple paths,
+                // byte-identically (the WS-F IndexOnlyScan hook's posture,
+                // one arm up).
                 if let Some(r) =
                     crate::lanev2::try_own_agg_over_index_source(agg, is, estate)?
                 {
