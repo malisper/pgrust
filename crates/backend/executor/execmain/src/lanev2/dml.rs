@@ -679,31 +679,40 @@ pub(crate) fn dml_oc_set_for_tests(on: bool) {
 // `PGRUST_LANESTITCH_ROWCHAIN` chain-family knob, default OFF; every other
 // refusal arm is byte-identical).
 //
-// Chain form THIS increment (recorded deferral in notes/se-wave7-fusion.md):
-// the protocol targets are the mt_* SEAMS THEMSELVES — CALL_ROW_PROLOGUE =
-// `mt_row_prologue` (+ the MERGE-pending contract assert), CALL_ACCEPT_ROW
-// = `mt_accept_row` with THE pinned epq_eval closure — so the statement
-// stream is DmlInsertOp's arm for arm and byte-identity holds by
-// construction (the two-regime error law's own argument: the bl target IS
-// the node's helper). The §2.2 finer decomposition (separate
-// br_row_triggers / table_tuple_insert+index / ar_insert_triggers /
-// exec_process_returning targets + junk-filter/projection stencils) lands
-// when the pure-step scalar stencils join the stitched vocabulary; the
-// loop_top_owed LAW is already structural here (the prologue is the chain's
-// loop-top segment — lanestitch runs it before EVERY pull by construction).
+// Chain form: WAVE-9 WS-AG rung 2 (fusion D1a) REPLACED the wave-7 single
+// CALL_ACCEPT_ROW target with the rowmode-endgame §2.2 decomposition — the
+// protocol targets are now the five `mt_ins_*` seams (nodemodifytable
+// wave-9 append region): CALL_ROW_PROLOGUE = `mt_row_prologue` (+ the
+// MERGE-pending contract assert), CALL_INS_STAGE / CALL_INS_BR /
+// CALL_INS_WRITE / CALL_INS_EPILOGUE / CALL_INS_RETURNING. The chain
+// program is per-statement-SHAPE, selected at admission from
+// `mt_rowchain_shape_mask` (BR-armed x RETURNING-present — a closed set of
+// four compiled bodies keyed by the mask, compile-once per variant; this
+// replaced the wave-7 single OnceLock, E4 decision carried: refusal caches
+// per mask FOREVER, notes/se-wave9-ag.md §2). The work-removal channel:
+// the per-row drive stops re-deciding the view/partition/leaf/ON-CONFLICT
+// arms that are structurally dead for the admitted shape — those checks
+// hoisted to the once-per-statement mask probe. Byte-identity per target
+// is argued in the nodemodifytable region header (each seam's statements
+// are mt_accept_row's / exec_insert's own, in original order, dead-for-
+// the-shape branches elided).
 //
 // Statement-stream identity with DmlInsertOp, per pull:
 // * chain loop top = P (+ pending assert)  ≡  resume: P + mt_pending arm
 //   (pending is MERGE-only and MERGE never reaches here — loud, not silent).
 // * NextRow = the same feed split (lane-fed SeqScan statements verbatim /
 //   exec_proc_node)  ≡  MtLaneFedSeqScanSource / MtChildSource.
-// * CALL_ACCEPT_ROW: None -> SkipRow (loop top re-runs P — loop_top_owed
-//   re-armed)  ≡  accept -> NeedInput; Some -> EmitPause (capacity-one
-//   pause; next owned pull re-enters at the loop top)  ≡  push -> Paused.
+// * STAGE -> BR -> WRITE -> EPILOGUE -> RETURNING ≡ mt_accept_row's
+//   CMD_INSERT statement order (stage projection, exec_insert's BR + write
+//   + AR/epilogue, then the RETURNING block): BR suppression -> SkipRow
+//   (loop top re-runs P) ≡ exec_insert Ok(None) -> accept NeedInput;
+//   RETURNING -> EmitPause ≡ push -> Paused; masks without a step run the
+//   identical statements MINUS the step's guard-false body (the guard is
+//   hoisted to the mask, not skipped).
 // * exhaustion: P already ran this round, then mt_source_exhausted under
 //   the mt_done latch  ≡  resume-P -> pull(None) -> source_exhausted.
 // Statement-tag identity (canSetTag / es_processed) lives INSIDE
-// mt_accept_row -> exec_insert, unchanged on every host.
+// `mt_ins_epilogue` (exec_insert's own tail statements), unchanged.
 //
 // Rails: es_epq_active refused ALL ownership before the shape gate (EPQ
 // unreachable in this shape — no OC UPDATE — but the rail stands); the
@@ -752,22 +761,39 @@ pub(crate) fn dml_rowchain_set_for_tests(on: bool) {
 pub(crate) static DML_ROWCHAIN_DRIVES_FOR_TESTS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
-/// The chain-family protocol call ids (chain-private vocabulary).
+/// The chain-family protocol call ids (chain-private vocabulary). Wave-9
+/// WS-AG rung 2 RETIRED the wave-7 single-ACCEPT id (2) — the id stays
+/// reserved, never reused — and minted the §2.2 decomposed targets.
 const CALL_ROW_PROLOGUE: u16 = 1;
-const CALL_ACCEPT_ROW: u16 = 2;
+const CALL_INS_STAGE: u16 = 3;
+const CALL_INS_BR: u16 = 4;
+const CALL_INS_WRITE: u16 = 5;
+const CALL_INS_EPILOGUE: u16 = 6;
+const CALL_INS_RETURNING: u16 = 7;
 
-/// The trigger-INSERT chain program: loop-top prologue, pull, accept.
-/// Shape-static for the whole family — ONE compiled body serves every
-/// statement (hosts vary per drive, never the code).
-fn rowchain_insert_prog() -> ::lanestitch::Program {
+/// The trigger-INSERT chain program for one shape mask (wave-9 rung 2):
+/// loop-top prologue, pull, then the §2.2 seam sequence — BR and RETURNING
+/// steps present iff the mask carries their bits. Shape-static per mask —
+/// one compiled body per variant serves every statement of that shape
+/// (hosts vary per drive, never the code).
+pub(crate) fn rowchain_insert_prog_for_mask(mask: u8) -> ::lanestitch::Program {
+    debug_assert!((mask as usize) < ::nodemodifytable::MT_ROWCHAIN_MASKS);
     let mut p = ::lanestitch::Program::new();
     p.steps.push(::lanestitch::Step::ProtocolCall { call: CALL_ROW_PROLOGUE });
     p.steps.push(::lanestitch::Step::NextRow);
-    p.steps.push(::lanestitch::Step::ProtocolCall { call: CALL_ACCEPT_ROW });
+    p.steps.push(::lanestitch::Step::ProtocolCall { call: CALL_INS_STAGE });
+    if mask & ::nodemodifytable::MT_ROWCHAIN_BR != 0 {
+        p.steps.push(::lanestitch::Step::ProtocolCall { call: CALL_INS_BR });
+    }
+    p.steps.push(::lanestitch::Step::ProtocolCall { call: CALL_INS_WRITE });
+    p.steps.push(::lanestitch::Step::ProtocolCall { call: CALL_INS_EPILOGUE });
+    if mask & ::nodemodifytable::MT_ROWCHAIN_RET != 0 {
+        p.steps.push(::lanestitch::Step::ProtocolCall { call: CALL_INS_RETURNING });
+    }
     p
 }
 
-/// The process-global compiled chain body. SAFETY (Send/Sync): a
+/// One process-global compiled chain body. SAFETY (Send/Sync): a
 /// `StitchedRowChain` is immutable after construction — an RX-mapped code
 /// block plus plain telemetry fields, no interior mutability; `run` takes
 /// `&self` and all mutable state lives in the per-drive host/params.
@@ -777,32 +803,47 @@ unsafe impl Send for ShareChain {}
 // SAFETY: see ShareChain doc.
 unsafe impl Sync for ShareChain {}
 
-/// Compile-once accessor. None = the stitched tier refused (non-aarch64,
-/// master kill switch, family knob, arena full at first use): every
-/// trigger-INSERT statement runs the DmlInsertOp portable host instead —
-/// permanently for this process (the refusal inputs are process-static;
-/// an arena-full first compile deopting forever is the documented
-/// fail-open posture).
-fn rowchain_body() -> Option<&'static ::lanestitch::StitchedRowChain> {
-    static BODY: std::sync::OnceLock<ShareChain> = std::sync::OnceLock::new();
-    BODY.get_or_init(|| {
-        // The production entry: the family kill knob stays live here
-        // (fault-injection acceptance leg), unlike the parity-only entry.
-        ShareChain(::lanestitch::StitchedRowChain::compile(&rowchain_insert_prog()))
-    })
-    .0
-    .as_ref()
+/// Compile-once accessor, keyed by the shape mask (the wave-9 rung-2 cache
+/// replacing the wave-7 single OnceLock). None = the stitched tier refused
+/// (non-aarch64, master kill switch, family knob, arena full at first use):
+/// every statement of that shape runs the DmlInsertOp portable host instead
+/// — permanently for this process and mask (E4 decision, cached-forever:
+/// notes/se-wave9-ag.md §2; lanestitch itself never latches — the latch is
+/// exactly this cache).
+fn rowchain_body_for_mask(mask: u8) -> Option<&'static ::lanestitch::StitchedRowChain> {
+    static BODIES: [std::sync::OnceLock<ShareChain>; ::nodemodifytable::MT_ROWCHAIN_MASKS] = [
+        std::sync::OnceLock::new(),
+        std::sync::OnceLock::new(),
+        std::sync::OnceLock::new(),
+        std::sync::OnceLock::new(),
+    ];
+    BODIES[mask as usize]
+        .get_or_init(|| {
+            // The production entry: the family kill knob stays live here
+            // (fault-injection acceptance leg), unlike the parity-only entry.
+            ShareChain(::lanestitch::StitchedRowChain::compile(&rowchain_insert_prog_for_mask(
+                mask,
+            )))
+        })
+        .0
+        .as_ref()
 }
 
-/// The chain host: protocol targets are the mt seams, the feed is the
-/// inc-2 feed split verbatim. Holds the same disjoint borrows as the
-/// DmlInsertOp composition (op fields mt+epq; the subplan field feeds).
+/// The chain host: protocol targets are the wave-9 `mt_ins_*` seams (the
+/// §2.2 decomposition), the feed is the inc-2 feed split verbatim. Holds
+/// the same disjoint borrows as the DmlInsertOp composition (op fields
+/// mt+epq; the subplan field feeds). Per-row currency between seams
+/// (`staged` plan slot, `insert_slot`, the write's `recheck` list) lives
+/// here and is complete before any pause — RETURNING (the only pausing
+/// step) runs after write+epilogue, so a fresh host per drive re-enters at
+/// the loop top with nothing in flight (the wave-7 cadence, unchanged).
 struct MtInsertChainHost<'a, 'mcx> {
     mt: &'a mut ::nodemodifytable::ModifyTableState<'mcx>,
-    epq: &'a mut crate::epq::EpqState<'mcx>,
     subplan: &'a mut crate::procnode::PlanStateNode<'mcx>,
     estate: &'a mut EStateData<'mcx>,
     staged: Option<ExecSlotId>,
+    insert_slot: Option<ExecSlotId>,
+    recheck: Option<::mcx::PgVec<'mcx, ::types_core::Oid>>,
     emitted: Option<ExecSlotId>,
 }
 
@@ -851,31 +892,59 @@ impl<'mcx> ::lanestitch::RowChainHost for MtInsertChainHost<'_, 'mcx> {
                 }
                 Ok(::lanestitch::ChainVerdict::Continue)
             }
-            CALL_ACCEPT_ROW => {
-                let slot = self.staged.take().expect("accept with no staged row");
-                let Self { mt, epq, estate, .. } = self;
-                // THE pinned epq_eval closure, byte-identical to
-                // DmlInsertOp::accept (rechecks initiated by the delegated
-                // exec_insert drive through it — EPQ LAW distinction).
-                let rslot = ::nodemodifytable::mt_accept_row(
-                    mt,
-                    estate,
-                    slot,
-                    &mut |subs, e, inputslot, rti| {
-                        epq.result_rti = rti;
-                        crate::epq::eval_plan_qual(epq, subs, e, inputslot)
-                    },
-                )?;
-                match rslot {
-                    // Row consumed (BR suppression / no RETURNING): back to
-                    // the loop top — the prologue re-runs before the next
-                    // pull (loop_top_owed re-armed, structurally).
-                    None => Ok(::lanestitch::ChainVerdict::SkipRow),
-                    Some(r) => {
-                        self.emitted = Some(r);
-                        Ok(::lanestitch::ChainVerdict::EmitPause)
-                    }
+            // The §2.2 decomposed targets (wave-9 rung 2). Statement order
+            // across the calls ≡ mt_accept_row's CMD_INSERT arm; every
+            // erroring statement is the node's own seam (error identity by
+            // construction). The epq_eval closure of the wave-7 ACCEPT arm
+            // is NOT needed here: the decomposed shape is ONCONFLICT_NONE
+            // plain INSERT — exec_insert's only epq_eval consumer is the OC
+            // DO-UPDATE dispatch, dead by shape (the mask probe refuses
+            // anything else; the DmlInsertOp host still carries the pinned
+            // closure for every non-chain shape).
+            CALL_INS_STAGE => {
+                let plan_slot = self.staged.expect("stage with no staged row");
+                let Self { mt, estate, .. } = self;
+                let islot = ::nodemodifytable::mt_ins_stage(mt, estate, plan_slot)?;
+                self.insert_slot = Some(islot);
+                Ok(::lanestitch::ChainVerdict::Continue)
+            }
+            CALL_INS_BR => {
+                let islot = self.insert_slot.expect("BR with no staged insert row");
+                let Self { mt, estate, .. } = self;
+                if ::nodemodifytable::mt_ins_br_triggers(mt, estate, islot)? {
+                    Ok(::lanestitch::ChainVerdict::Continue)
+                } else {
+                    // BR suppression ≡ exec_insert's Ok(None): the row is
+                    // consumed — es_processed and the RETURNING stream see
+                    // nothing; the loop top re-runs the prologue.
+                    self.insert_slot = None;
+                    Ok(::lanestitch::ChainVerdict::SkipRow)
                 }
+            }
+            CALL_INS_WRITE => {
+                let islot = self.insert_slot.expect("write with no staged insert row");
+                let Self { mt, estate, .. } = self;
+                let recheck = ::nodemodifytable::mt_ins_write(mt, estate, islot)?;
+                self.recheck = Some(recheck);
+                Ok(::lanestitch::ChainVerdict::Continue)
+            }
+            CALL_INS_EPILOGUE => {
+                let islot = self.insert_slot.expect("epilogue with no staged insert row");
+                let recheck = self.recheck.take().expect("epilogue with no write recheck list");
+                let Self { mt, estate, .. } = self;
+                ::nodemodifytable::mt_ins_epilogue(mt, estate, islot, &recheck)?;
+                // No-RETURNING masks end the per-row segment here: Continue
+                // falls off the program and the body loops to the top —
+                // ≡ mt_accept_row Ok(None) ≡ accept -> NeedInput.
+                Ok(::lanestitch::ChainVerdict::Continue)
+            }
+            CALL_INS_RETURNING => {
+                let islot = self.insert_slot.expect("returning with no staged insert row");
+                let plan_slot = self.staged.expect("returning with no staged plan row");
+                let Self { mt, estate, .. } = self;
+                let out = ::nodemodifytable::mt_ins_returning(mt, estate, islot, plan_slot)?;
+                self.emitted = Some(out);
+                Ok(::lanestitch::ChainVerdict::EmitPause)
             }
             other => Err(Box::new(PgError::error(format!(
                 "lane-v2 rowchain: unknown protocol call {other}"
@@ -893,7 +962,13 @@ fn drive_insert_rowchain<'mcx>(
     node: &mut crate::procnode::ModifyTablePlanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
-    let Some(chain) = rowchain_body() else {
+    // The wave-9 rung-2 shape mask: the once-per-drive hoist of the
+    // per-row shape checks. None = the seams' specializations don't hold
+    // (defensive — admission normally guarantees them): DmlInsertOp host.
+    let Some(mask) = ::nodemodifytable::mt_rowchain_shape_mask(&node.mt) else {
+        return Ok(None);
+    };
+    let Some(chain) = rowchain_body_for_mask(mask) else {
         return Ok(None);
     };
     if super::lane_trace_enabled() {
@@ -901,13 +976,14 @@ fn drive_insert_rowchain<'mcx>(
     }
     #[cfg(test)]
     DML_ROWCHAIN_DRIVES_FOR_TESTS.fetch_add(1, Relaxed);
-    let crate::procnode::ModifyTablePlanState { mt, subplan, epq } = node;
+    let crate::procnode::ModifyTablePlanState { mt, subplan, epq: _ } = node;
     let mut host = MtInsertChainHost {
         mt,
-        epq,
         subplan,
         estate,
         staged: None,
+        insert_slot: None,
+        recheck: None,
         emitted: None,
     };
     match chain.run(&mut host)? {
