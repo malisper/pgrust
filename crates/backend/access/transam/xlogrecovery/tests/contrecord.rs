@@ -6,6 +6,10 @@
 // after that record but before the end-of-recovery checkpoint took effect
 // (old pg_control restored): replay must skip the torn record, verify the
 // overwrite record (xlogrecovery_redo), and finish.
+//
+// NATIVE ARM ONLY (std::fs fixture plumbing; see crash_recovery.rs note).
+#![cfg(not(pgrust_sim))]
+
 use std::sync::atomic::Ordering::Relaxed;
 
 use mcx::PgVec;
