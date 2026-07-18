@@ -6,9 +6,12 @@
 use core::ffi::CStr;
 
 use crate::{
-    c_int, get_errno, mode_t, off_t, set_errno, FdBudgetProbe, FileInfo, Vfs, VfsDirIter,
-    VfsResult, PG_O_DIRECT,
+    c_int, mode_t, off_t, set_errno, FdBudgetProbe, FileInfo, Vfs, VfsDirIter, VfsResult,
+    PG_O_DIRECT,
 };
+// wasm32: only the (not-wasm) probe + macOS open path read errno directly.
+#[cfg(not(target_family = "wasm"))]
+use crate::get_errno;
 
 pub struct PosixVfs;
 
@@ -40,6 +43,23 @@ impl PosixVfs {
 
     /// count_usable_fds' probe core: getrlimit-bounded dup(2) loop, all probe
     /// fds closed before returning. Diagnostics captured for fd to report.
+    ///
+    /// wasm32: WASI p1 has neither getrlimit nor dup(2); fd's own
+    /// count_usable_fds wasm arm short-circuits before reaching the Vfs, so
+    /// this probe is launch-unreachable there — the arm reports an honest
+    /// zero-probe (ENOSYS) and exists only so the hub compiles.
+    #[cfg(target_family = "wasm")]
+    pub fn fd_budget_probe_report(&self, _max_to_probe: usize) -> FdBudgetProbe {
+        FdBudgetProbe {
+            used: 0,
+            highest_fd: 0,
+            getrlimit_failed: true,
+            getrlimit_errno: libc::ENOSYS,
+            stop_errno: libc::ENOSYS,
+        }
+    }
+
+    #[cfg(not(target_family = "wasm"))]
     pub fn fd_budget_probe_report(&self, max_to_probe: usize) -> FdBudgetProbe {
         let mut opened: Vec<i32> = Vec::with_capacity(1024);
         let mut used: i32 = 0;
@@ -314,7 +334,11 @@ impl Vfs for PosixVfs {
     }
 
     fn read_dir(&self, path: &CStr) -> VfsResult<VfsDirIter> {
+        #[cfg(not(target_family = "wasm"))]
         use std::os::unix::ffi::OsStrExt;
+        // wasm32: same from_bytes surface, wasi's spelling of the trait home.
+        #[cfg(target_family = "wasm")]
+        use std::os::wasi::ffi::OsStrExt;
         let os = std::ffi::OsStr::from_bytes(path.to_bytes());
         match std::fs::read_dir(os) {
             Ok(rd) => Ok(VfsDirIter::from_read_dir(rd)),
@@ -333,12 +357,18 @@ impl Vfs for PosixVfs {
 
 #[inline]
 fn file_info_from_stat(st: &libc::stat) -> FileInfo {
+    #[cfg(not(target_family = "wasm"))]
+    let (mtime_sec, mtime_nsec) = (st.st_mtime as i64, st.st_mtime_nsec as i64);
+    // wasm32: wasi-libc's stat spells it st_mtim (timespec); the libc crate
+    // exposes no st_mtime/st_mtime_nsec alias fields (basebackup precedent).
+    #[cfg(target_family = "wasm")]
+    let (mtime_sec, mtime_nsec) = (st.st_mtim.tv_sec as i64, st.st_mtim.tv_nsec as i64);
     FileInfo {
         size: st.st_size as i64,
         mode: st.st_mode as u32,
         nlink: st.st_nlink as u64,
-        mtime_sec: st.st_mtime as i64,
-        mtime_nsec: st.st_mtime_nsec as i64,
+        mtime_sec,
+        mtime_nsec,
         dev: st.st_dev as u64,
         ino: st.st_ino as u64,
         uid: st.st_uid as u32,
