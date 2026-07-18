@@ -17010,6 +17010,7 @@ dependencies = [
  "init_small",
  "latch",
  "pg_clock",
+ "pgsync",
  "timeout_seams",
  "timestamp_seams",
  "types_core",

@@ -1458,3 +1458,123 @@ fn bitmapheap_phase_publish_unparks_registered_waiter() {
         assert_eq!(sh.state.lock().unwrap().0, Phase::Finished);
     });
 }
+
+// ===========================================================================
+// PERMIT-S5 — the runtime-doors / row-16 tranche models
+// (notes/dst-permit-s5.md). Dialect, disclosed:
+//
+//   * timeout_timer_arm_fire_never_lost — MIRROR over the REAL waiter Slot
+//     core: the timeout crate is not loom-buildable (its dep tree pulls
+//     `latch`, which fails under --cfg loom — the standing mirror-model
+//     reason), so the timer/armer Dekker protocol is mirrored 1:1 from
+//     timeout/src/lib.rs (`timer_thread` publish-scan-park + `arm_timer`
+//     insert-then-unpark), driving the real Slot token park/unpark and a
+//     (pgsync=loom) Mutex slots registry — the registry type this lane
+//     converted from raw std::sync so the REGISTERED timer thread can
+//     never block raw while holding the permit.
+// ===========================================================================
+
+/// Row 16 (timer door): the timeout arm/fire Dekker protocol. The timer
+/// thread publishes its waker word BEFORE scanning the registry, scans
+/// under the (pgsync) mutex, drops it, parks untimed; an armer inserts its
+/// deadline under the mutex, drops it, then unparks through the published
+/// word (a 0 word = the timer has not published yet, and its first
+/// publish-then-scan must see the insert). In every interleaving the timer
+/// observes the arm.
+///
+/// RED: swap `arm` for `arm_naked` (insert WITHOUT the unpark — the lost-arm
+/// shape the Dekker discipline exists to kill): the timer parks forever with
+/// an armed deadline it never scanned — loom deadlock, CAUGHT.
+#[test]
+fn timeout_timer_arm_fire_never_lost() {
+    use loom::sync::atomic::AtomicU64;
+    use waiter::clock::WaiterClock;
+    use waiter::{Slot, SlotInner};
+
+    struct ModelClock;
+    impl WaiterClock for ModelClock {
+        fn now_ms(&self) -> i64 {
+            0
+        }
+        fn wait<'a>(
+            &self,
+            slot: &'a Slot,
+            guard: pgsync::MutexGuard<'a, SlotInner>,
+            _timeout_ms: Option<i64>,
+        ) -> (pgsync::MutexGuard<'a, SlotInner>, bool) {
+            (slot.wait_for_model(guard), false)
+        }
+    }
+    static CLOCK: ModelClock = ModelClock;
+
+    struct TimerMirror {
+        // (armed, fired) — the slots HashMap collapsed to one entry; the
+        // protocol is per-entry independent.
+        state: Mutex<(bool, bool)>,
+        // The timer thread's published waker word (0 until published) —
+        // timeout's TimerShared.timer_waker.
+        timer_waker: AtomicU64,
+    }
+
+    // arm_timer mirrored: insert under the lock, release, THEN unpark
+    // through the published word.
+    fn arm(sh: &TimerMirror, slots: &[Arc<Slot>]) {
+        {
+            let mut g = sh.state.lock().unwrap();
+            g.0 = true;
+        }
+        let w = sh.timer_waker.load(Ordering::SeqCst);
+        if w != 0 {
+            let (idx, token) = ((w >> 32) as usize - 1, w as u32);
+            let _ = slots[idx].unpark_token(token);
+        }
+    }
+
+    // RED helper (one-line swap below): the naked insert.
+    #[allow(dead_code)]
+    fn arm_naked(sh: &TimerMirror) {
+        let mut g = sh.state.lock().unwrap();
+        g.0 = true;
+    }
+
+    loom::model(|| {
+        let sh = Arc::new(TimerMirror {
+            state: Mutex::new((false, false)),
+            timer_waker: AtomicU64::new(0),
+        });
+        // Model-owned slot slab (the waiter global slab is production-only).
+        let slots: Arc<Vec<Arc<Slot>>> = Arc::new(vec![Arc::new(Slot::new_for_model())]);
+
+        let timer_t = {
+            let (sh, slots) = (Arc::clone(&sh), Arc::clone(&slots));
+            thread::spawn(move || {
+                // timer_thread mirrored: publish BEFORE scan, park outside
+                // the lock (Dekker: either the scan sees the arm, or the
+                // arm's unpark hits the published word — unparks latched).
+                let token = slots[0].issue_token();
+                let word = (1u64 << 32) | token as u64;
+                loop {
+                    sh.timer_waker.store(word, Ordering::SeqCst);
+                    {
+                        let mut g = sh.state.lock().unwrap();
+                        if g.0 {
+                            // "Fire": post + wake the owner (model: flag).
+                            g.1 = true;
+                            return;
+                        }
+                    }
+                    // No deadline armed: untimed park (production parks
+                    // timed to the nearest deadline; untimed here makes a
+                    // lost arm a deadlock loom must catch).
+                    let _ = slots[0].park_core(None, None, &CLOCK);
+                }
+            })
+        };
+
+        // The armer (a backend's arm_timer).
+        arm(&sh, &slots); // RED: arm_naked(&sh)
+
+        timer_t.join().unwrap();
+        assert!(sh.state.lock().unwrap().1, "the armed timeout fired");
+    });
+}
