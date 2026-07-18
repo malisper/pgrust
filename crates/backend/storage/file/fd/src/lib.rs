@@ -35,9 +35,10 @@ pub use io::{
 pub use sync::{
     data_sync_elevel, durable_rename, durable_unlink, fsync_fname, fsync_fname_ext,
     looks_like_temp_rel_name, pg_close, pg_fdatasync, pg_file_exists, pg_flush_data, pg_fstat,
-    pg_fsync, pg_fsync_no_writethrough, pg_fsync_writethrough, pg_lstat, pg_readlink, pg_stat,
-    pg_truncate, pg_unlink, AtEOSubXact_Files, AtEOXact_Files, BeforeShmemExit_Files, RemovePgTempFiles,
-    RemovePgTempFilesInDir, SyncDataDirectory,
+    pg_fsync, pg_fsync_no_writethrough, pg_fsync_writethrough, pg_lstat, pg_readlink, pg_rename,
+    pg_stat, pg_truncate, pg_unlink, read_whole_file, write_whole_file, AtEOSubXact_Files,
+    AtEOXact_Files, BeforeShmemExit_Files, RemovePgTempFiles, RemovePgTempFilesInDir,
+    SyncDataDirectory,
 };
 // The VFS's plain stat carrier, for the pg_stat/pg_lstat callers.
 pub use ::vfs::FileInfo;

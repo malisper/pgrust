@@ -1,11 +1,9 @@
-use std::fs;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use mcx::{Mcx, MemoryContext, PgString, PgVec};
 use types_core::{InvalidSubTransactionId, Oid, RECORDOID};
-use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR, WARNING};
+use types_error::{PgError, PgResult, DEBUG1, ERRCODE_INTERNAL_ERROR, WARNING};
 use types_rel::{FormData_pg_class, FormData_pg_index, RelationData, RELKIND_INDEX};
 use types_rel::{
     AutoVacOpts, BTOptions, BrinOptions, GinOptions, GistOptions, HashOptions, RdOptions,
@@ -905,15 +903,23 @@ fn load_relcache_init_file(shared: bool) -> PgResult<bool> {
     let Some(path) = init_file_path(shared) else {
         return Ok(false);
     };
-    let Ok(bytes) = fs::read(&path) else {
+    // vfs-routed (provider-seam reroute): init files are datadir domain;
+    // std::fs would bypass the sim namespace.
+    let path_s = path.to_str().expect("datadir paths are UTF-8");
+    let Ok(bytes) = fd::read_whole_file(path_s) else {
         return Ok(false);
     };
     // A newer C pg_internal.init beside ours means a C backend served this
     // datadir after we wrote our file; C's DDL unlinks only its own name, so
-    // ours may be stale — rebuild.
-    if let (Ok(ours), Ok(theirs)) = (
-        fs::metadata(&path).and_then(|m| m.modified()),
-        fs::metadata(path.with_file_name(C_RELCACHE_INIT_FILENAME)).and_then(|m| m.modified()),
+    // ours may be stale — rebuild. (Under sim, vfs mtimes are all zero and
+    // no C backend can enter the sim world, so this never fires there.)
+    let mtime_of = |p: &Path| -> Option<(i64, i64)> {
+        let mut st = fd::FileInfo::zeroed();
+        (fd::pg_stat(p.to_str()?, &mut st) == 0).then_some((st.mtime_sec, st.mtime_nsec))
+    };
+    if let (Some(ours), Some(theirs)) = (
+        mtime_of(&path),
+        mtime_of(&path.with_file_name(C_RELCACHE_INIT_FILENAME)),
     ) {
         if theirs > ours {
             return Ok(false);
@@ -996,10 +1002,14 @@ fn write_relcache_init_file(shared: bool) -> PgResult<()> {
         RELCACHE_INIT_FILENAME,
         std::process::id()
     ));
-    let _ = fs::remove_file(&temp_path);
-    let mut file = match fs::File::create(&temp_path) {
-        Ok(f) => f,
-        Err(e) => {
+    // vfs-routed (provider-seam reroute): datadir-domain create/write/rename
+    // must ride the vfs; std::fs would bypass the sim namespace.
+    let temp_s = temp_path.to_str().expect("datadir paths are UTF-8");
+    let _ = fd::pg_unlink(temp_s);
+    let fd_ = match fd::OpenTransientFile(temp_s, libc::O_CREAT | libc::O_TRUNC | libc::O_WRONLY) {
+        Ok(f) if f >= 0 => f,
+        _ => {
+            let e = std::io::Error::from_raw_os_error(fd::get_errno());
             elog::elog(
                 WARNING,
                 format!(
@@ -1010,10 +1020,19 @@ fn write_relcache_init_file(shared: bool) -> PgResult<()> {
             return Ok(());
         }
     };
-    if let Err(e) = file.write_all(&buf) {
-        return Err(could_not_write(e));
+    let mut off: usize = 0;
+    while off < buf.len() {
+        let n = fd::pg_pwrite(fd_, &buf[off..], off as i64);
+        if n <= 0 {
+            let e = std::io::Error::from_raw_os_error(fd::get_errno());
+            fd::CloseTransientFile(fd_);
+            return Err(could_not_write(e));
+        }
+        off += n as usize;
     }
-    drop(file);
+    if fd::CloseTransientFile(fd_) != 0 {
+        return Err(could_not_write(std::io::Error::from_raw_os_error(fd::get_errno())));
+    }
 
     // Stale-write race: recheck invals under RelCacheInitLock after draining
     // SI; another backend's committed DDL between our snapshot and here must
@@ -1023,11 +1042,12 @@ fn write_relcache_init_file(shared: bool) -> PgResult<()> {
     let result = (|| -> PgResult<()> {
         inval_seams::accept_invalidation_messages::call()?;
         if with_state(|st| st.invals_received == 0) {
-            if fs::rename(&temp_path, &final_path).is_err() {
-                let _ = fs::remove_file(&temp_path);
+            let final_s = final_path.to_str().expect("datadir paths are UTF-8");
+            if fd::pg_rename(temp_s, final_s) < 0 {
+                let _ = fd::pg_unlink(temp_s);
             }
         } else {
-            let _ = fs::remove_file(&temp_path);
+            let _ = fd::pg_unlink(temp_s);
         }
         Ok(())
     })();
@@ -1049,15 +1069,19 @@ pub fn RelationIdIsInInitFile(relationId: Oid) -> bool {
 }
 
 fn unlink_initfile(path: &Path, error_level: bool) -> PgResult<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) if error_level => Err(Box::new(
+    // vfs-routed (provider-seam reroute).
+    let path_s = path.to_str().expect("datadir paths are UTF-8");
+    if fd::pg_unlink(path_s) == 0 || fd::get_errno() == libc::ENOENT {
+        return Ok(());
+    }
+    if error_level {
+        let e = std::io::Error::from_raw_os_error(fd::get_errno());
+        return Err(Box::new(
             PgError::error(format!("could not remove cache file \"{}\": {e}", path.display()))
                 .with_sqlstate(ERRCODE_INTERNAL_ERROR),
-        )),
-        Err(_) => Ok(()),
+        ));
     }
+    Ok(())
 }
 
 fn unlink_both(dir: &Path, error_level: bool) -> PgResult<()> {
@@ -1081,25 +1105,35 @@ pub fn RelationCacheInitFilePostInvalidate() -> PgResult<()> {
 }
 
 // Startup removal: init files may be stale after crash recovery / PITR.
+// vfs-routed walks (provider-seam reroute): the stale files live in the
+// datadir namespace, which is simulated under sim.
 pub fn RelationCacheInitFileRemove() {
     let _ = unlink_both(Path::new("global"), false);
     remove_in_dir(Path::new("base"));
-    if let Ok(entries) = fs::read_dir(PG_TBLSPC_DIR) {
-        for de in entries.flatten() {
-            if de.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit()) {
-                remove_in_dir(&de.path().join(TABLESPACE_VERSION_DIRECTORY));
+    let _ = (|| -> PgResult<()> {
+        let dir = fd::AllocateDir(PG_TBLSPC_DIR)?;
+        while let Some(de) = fd::ReadDirExtended(dir, PG_TBLSPC_DIR, DEBUG1)? {
+            if de.d_name.bytes().all(|b| b.is_ascii_digit()) {
+                remove_in_dir(
+                    &Path::new(PG_TBLSPC_DIR).join(&de.d_name).join(TABLESPACE_VERSION_DIRECTORY),
+                );
             }
         }
-    }
+        fd::FreeDir(dir)?;
+        Ok(())
+    })();
 }
 
 fn remove_in_dir(tblspc: &Path) {
-    let Ok(entries) = fs::read_dir(tblspc) else {
-        return;
-    };
-    for de in entries.flatten() {
-        if de.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit()) {
-            let _ = unlink_both(&de.path(), false);
+    let _ = (|| -> PgResult<()> {
+        let dirname = tblspc.to_str().expect("datadir paths are UTF-8");
+        let dir = fd::AllocateDir(dirname)?;
+        while let Some(de) = fd::ReadDirExtended(dir, dirname, DEBUG1)? {
+            if de.d_name.bytes().all(|b| b.is_ascii_digit()) {
+                let _ = unlink_both(&tblspc.join(&de.d_name), false);
+            }
         }
-    }
+        fd::FreeDir(dir)?;
+        Ok(())
+    })();
 }
