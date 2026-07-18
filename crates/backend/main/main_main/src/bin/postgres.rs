@@ -7,7 +7,16 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() {
-    seams_init::init_all();
+    // Transport provider resolution (§2.4 seam): one argv peek, once, before
+    // any seam install — set-once at boot is the house pattern. Everything
+    // but `--stdio-wire` (all the C dispatch options included) boots the
+    // socket provider, i.e. the unchanged native byte path.
+    let transport = if std::env::args().nth(1).as_deref() == Some("--stdio-wire") {
+        seams_init::Transport::StdioWire
+    } else {
+        seams_init::Transport::Socket
+    };
+    seams_init::init_all_with_transport(transport);
     // mi_collect(force) releases mimalloc's freed-but-retained segments;
     // called only at alloc-churn boundaries (hashagg spill batch resets)
     // where retention would otherwise hold batch-sized RSS for the whole

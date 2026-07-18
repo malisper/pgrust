@@ -1,5 +1,27 @@
+/// The transport provider for this process's client byte path (§2.4 seam,
+/// docs/design/dst-and-wasm.md): which implementations get installed into
+/// be_secure_seams::{secure_read,secure_write,secure_close,set_port_noblock}
+/// and pqcomm_seams::{pq_init,modify_fe_be_wait_set_latch}. Resolved ONCE
+/// here, during single-threaded boot — the hot path pays the same one
+/// relaxed-load + indirect-call it always did, no per-byte branch. P4
+/// sim-net is the third provider (in-memory duplex under the sim scheduler)
+/// and installs into the SAME slots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transport {
+    /// Existing socket code (libc::recv/send + listen/accept): the default,
+    /// byte-identical native arm.
+    Socket,
+    /// pgwire over stdin/stdout (pqcomm_stdio): --stdio-wire on any target;
+    /// the wasm32-wasip1 client-server story (WASI p1 has no socket()).
+    StdioWire,
+}
+
 // One line per crate: the full seam-install closure for the postgres binary.
 pub fn init_all() {
+    init_all_with_transport(Transport::Socket)
+}
+
+pub fn init_all_with_transport(transport: Transport) {
     install_panic_hook();
     detoast::init_seams();
     ruleutils::init_seams();
@@ -92,11 +114,19 @@ pub fn init_all() {
     auth::init_seams();
     auth_scram::init_seams();
     crypt::init_seams();
-    be_secure::init_seams();
     hba::init_seams();
     libpq_pqsignal::init_seams();
     pqcomm::init_seams();
-    pqcomm::init_socket_seams();
+    match transport {
+        Transport::Socket => {
+            be_secure::init_seams();
+            pqcomm::init_socket_seams();
+        }
+        Transport::StdioWire => {
+            pqcomm_stdio::init_transport_seams();
+            pqcomm::init_socket_gucs();
+        }
+    }
     pqformat::init_seams();
     vars::init_seams();
     parser_driver::init_seams();

@@ -975,11 +975,19 @@ fn show_tcp_user_timeout() -> String {
 /// [`crate::init_seams`]: test binaries that stub the transport install that
 /// one alone.
 pub fn init_socket_seams() {
-    use guc_tables::{hooks, vars, GucVarAccessors};
-
     pqcomm_seams::pq_init::set(pq_init);
     pqcomm_seams::modify_fe_be_wait_set_latch::set(pq_modify_fe_be_wait_set_latch);
     be_secure_seams::set_port_noblock::set(set_port_noblock);
+
+    init_socket_gucs();
+}
+
+/// This file's GUC storage installs alone: an alternative transport provider
+/// (pqcomm_stdio; P4 sim-net) owns the pq_init/noblock slots but the
+/// keepalive/unix-socket GUCs must still exist for guc boot — their assign
+/// hooks no-op without a TCP MyProcPort, as on an AF_UNIX connection.
+pub fn init_socket_gucs() {
+    use guc_tables::{hooks, vars, GucVarAccessors};
 
     vars::tcp_keepalives_idle.install(GucVarAccessors {
         get: || cfg::TCP_KEEPALIVES_IDLE.get(),

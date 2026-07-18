@@ -12643,6 +12643,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "pqcomm_stdio"
+version = "0.0.0"
+dependencies = [
+ "be_secure_seams",
+ "elog",
+ "libc",
+ "postgres_seams",
+ "pqcomm",
+ "pqcomm_seams",
+ "types_error",
+ "types_startup",
+ "types_storage",
+]
+
+[[package]]
 name = "pqformat"
 version = "0.1.0"
 dependencies = [
@@ -14575,6 +14590,7 @@ dependencies = [
  "postmaster",
  "postmaster_startup",
  "pqcomm",
+ "pqcomm_stdio",
  "pqformat",
  "pquery",
  "predicate",
