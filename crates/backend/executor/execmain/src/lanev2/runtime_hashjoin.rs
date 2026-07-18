@@ -2962,7 +2962,7 @@ fn mb_accept_morsel_body(
         .find(|p| p.sink == Some(join))
         .expect("every build table has exactly one pipeline");
     with_worker_exec("runtime hash-join multibuild morsel without a bound executor", |es, ps| {
-        let (_aps, tree) = mb_split_root(ps)?;
+        let (_agg, tree) = mb_split_root(ps)?;
         let mut refs = MbRefs::default();
         mb_collect(tree, &mut refs)?;
         let (scan, mut probes, target) = mb_take_pipeline(&chain, p, &mut refs)?;
@@ -2987,7 +2987,7 @@ fn mb_probe_morsel_body(
     let p = chain.pipelines.last().expect("decomposition emits the final pipeline last");
     debug_assert!(p.sink.is_none(), "the last pipeline is the agg-terminal one");
     with_worker_exec("runtime hash-join multibuild probe without a bound executor", |es, ps| {
-        let (aps, tree) = mb_split_root(ps)?;
+        let (agg, tree) = mb_split_root(ps)?;
         let mut refs = MbRefs::default();
         mb_collect(tree, &mut refs)?;
         let (scan, mut probes, target) = mb_take_pipeline(&chain, p, &mut refs)?;
@@ -2995,7 +2995,7 @@ fn mb_probe_morsel_body(
         let clean = mb_drive_claim(
             scan,
             &mut probes,
-            MbTerm::Agg { agg: &mut aps.agg },
+            MbTerm::Agg { agg },
             es,
             &range,
         )?;
@@ -3003,7 +3003,7 @@ fn mb_probe_morsel_body(
         let pslot = worker - payload.pins_base;
         {
             let mut g = lockm(&payload.partials[pslot]);
-            agg_runtime_export_partial_into(&mut aps.agg, g.get_or_insert_with(Default::default))?;
+            agg_runtime_export_partial_into(agg, g.get_or_insert_with(Default::default))?;
         }
         Ok(())
     })
@@ -3018,8 +3018,8 @@ fn mb_arm_worker<'mcx>(
     planstate: &mut Option<crate::procnode::PlanStateNode<'mcx>>,
     chain: &MbChain,
 ) -> PgResult<()> {
-    let (aps, tree) = mb_split_root(planstate)?;
-    if !agg_runtime_partial_admissible(&aps.agg) {
+    let (agg, tree) = mb_split_root(planstate)?;
+    if !agg_runtime_partial_admissible(agg) {
         return Err(Box::new(PgError::new(
             ERROR,
             "runtime hash-join multibuild worker fold plan diverged from the leader's",
@@ -3050,7 +3050,7 @@ fn mb_arm_worker<'mcx>(
             super::ScanFeedShape::RowFeed { ctx: "runtime hash-join multibuild feed", stitch: true },
         )?;
     }
-    ::nodeagg::agg_plain_build_begin(&mut aps.agg, estate)?;
+    ::nodeagg::agg_plain_build_begin(agg, estate)?;
     Ok(())
 }
 
@@ -4150,6 +4150,58 @@ fn drain_rg(rt: &'static Arc<runtime::Runtime>, rg: &runtime::RgHandle) -> bool 
         lane_trace("runtime-hashjoin: LEAKED pinned RG (drain gave up — dead participant?)");
     }
     drained
+}
+
+// ---------------------------------------------------------------------------
+// m5p1 multibuild unit corpus (band 88001).
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod mb_tests {
+    use super::*;
+
+    /// Decomposition invariants on a SNOWFLAKE topology
+    /// `J0(outer=J1(outer=S0, build=S1), build=J2(outer=S2, build=S3))`
+    /// (preorder: joins [J0, J1, J2], scans [S0..S3]): exact emission
+    /// order, probes bottom-up, the agg pipeline last, and the deps-safety
+    /// induction (every probed table's builder precedes its prober).
+    #[test]
+    fn mb_decompose_snowflake_deps_safe() {
+        let info = MbPlanInfo {
+            jointypes: vec![::types_nodes::JoinType::JOIN_INNER; 3],
+            hash_rows: vec![0.0; 3],
+            hash_widths: vec![0; 3],
+            children: vec![
+                (MbChild::Join(1), MbChild::Join(2)), // J0
+                (MbChild::Scan(0), MbChild::Scan(1)), // J1
+                (MbChild::Scan(2), MbChild::Scan(3)), // J2
+            ],
+            nscans: 4,
+        };
+        let ps = mb_decompose(&info);
+        assert_eq!(ps.len(), 4);
+        assert_eq!((ps[0].scan, &ps[0].probes[..], ps[0].sink), (3, &[][..], Some(2)));
+        assert_eq!((ps[1].scan, &ps[1].probes[..], ps[1].sink), (2, &[2usize][..], Some(0)));
+        assert_eq!((ps[2].scan, &ps[2].probes[..], ps[2].sink), (1, &[][..], Some(1)));
+        assert_eq!((ps[3].scan, &ps[3].probes[..], ps[3].sink), (0, &[1usize, 0][..], None));
+        let mut built = std::collections::BTreeSet::new();
+        for p in &ps {
+            for j in &p.probes {
+                assert!(built.contains(j), "probe of an unbuilt table");
+            }
+            if let Some(j) = p.sink {
+                built.insert(j);
+            }
+        }
+        assert!(ps.last().unwrap().sink.is_none(), "agg pipeline emitted last");
+    }
+
+    /// The multibuild kill switch A/B (OnceLock — one state per process, so
+    /// only the default is asserted here; the =0 posture is the e2e's leg D).
+    #[test]
+    fn mb_knob_default_on() {
+        assert!(hj_multibuild_enabled());
+    }
 }
 
 // ---------------------------------------------------------------------------
