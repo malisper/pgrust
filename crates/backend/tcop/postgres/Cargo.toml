@@ -79,6 +79,7 @@ transam_xlog = { path = "../../access/transam/transam_xlog" }
 transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
 pmchild_seams = { path = "../../postmaster/pmchild_seams" }
 postmaster_seams = { path = "../../postmaster/postmaster_seams" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
 stack_depth = { path = "../../utils/misc/stack_depth" }
 fd = { path = "../../storage/file/fd" }
 libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
