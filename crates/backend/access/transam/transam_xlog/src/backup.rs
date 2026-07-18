@@ -432,14 +432,57 @@ pub fn do_pg_backup_stop(state: &mut BackupState, waitforarchive: bool) -> PgRes
             || (backup_stopped_in_recovery && xlog_archiving_always));
 
     if should_wait {
-        // The archive-completion poll needs XLogArchiveIsBusy, which has no
-        // transam_xlog seam yet. Every gated path (SQL pg_backup_stop and
-        // BASE_BACKUP under the recovery rig) runs with archive_mode=off, so
-        // should_wait is false there and this is unreachable.
-        panic!(
-            "do_pg_backup_stop: waitforarchive WAL-archive wait unported \
-             (replication-p1 increment 4 deferred; XLogArchiveIsBusy has no seam)"
-        );
+        const WAIT_EVENT_BACKUP_WAIT_WAL_ARCHIVE: u32 = 0x0800_0000 + 4;
+        use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
+        let seg_no = crate::XLByteToPrevSeg(state.stoppoint, wal_segment_size);
+        let lastxlogfilename = crate::XLogFileName(state.stoptli, seg_no, wal_segment_size);
+        let seg_no = XLByteToSeg(state.startpoint, wal_segment_size);
+        let histfilename =
+            BackupHistoryFileName(state.stoptli, seg_no, state.startpoint, wal_segment_size);
+
+        let mut seconds_before_warning = 60;
+        let mut waits = 0;
+        let mut reported_waiting = false;
+        while xlogarchive_seams::xlog_archive_is_busy::call(&lastxlogfilename)
+            || xlogarchive_seams::xlog_archive_is_busy::call(&histfilename)
+        {
+            postgres_seams::check_for_interrupts::call()?;
+            if !reported_waiting && waits > 5 {
+                ereport(NOTICE)
+                    .errmsg(
+                        "base backup done, waiting for required WAL segments to be archived",
+                    )
+                    .finish(loc("do_pg_backup_stop"))
+                    .ok();
+                reported_waiting = true;
+            }
+            let _ = latch::WaitLatch(
+                init_small::globals::MyLatch(),
+                WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+                1000,
+                WAIT_EVENT_BACKUP_WAIT_WAL_ARCHIVE,
+            )?;
+            if let Some(l) = init_small::globals::MyLatch() {
+                latch::ResetLatch(l);
+            }
+            waits += 1;
+            if waits >= seconds_before_warning {
+                seconds_before_warning *= 2;
+                ereport(WARNING)
+                    .errmsg(format!(
+                        "still waiting for all required WAL segments to be archived ({waits} seconds elapsed)"
+                    ))
+                    .errhint(
+                        "Check that your \"archive_command\" is executing properly.  You can safely cancel this backup, but the database backup will not be usable without all the WAL segments.",
+                    )
+                    .finish(loc("do_pg_backup_stop"))
+                    .ok();
+            }
+        }
+        ereport(NOTICE)
+            .errmsg("all required WAL segments have been archived")
+            .finish(loc("do_pg_backup_stop"))
+            .ok();
     } else if waitforarchive {
         ereport(NOTICE)
             .errmsg(

@@ -846,7 +846,7 @@ fn boot() {
         if rel.rd_id == T_OID {
             *T_RELPAGES.lock().unwrap() = (num_pages as i32, num_tuples as f32);
         }
-        Ok(())
+        Ok((false, false))
     });
 
     fd::InitFileAccess();

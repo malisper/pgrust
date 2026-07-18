@@ -266,6 +266,7 @@ fn vacrel<'a, 'mcx>(rel: &'a RelationData<'mcx>, mcx: Mcx<'mcx>) -> LVRelState<'
         nindexes: 1,
         bstrategy: None,
         aggressive: false,
+        verbose: false,
         skipwithvm: true,
         consider_bypass_optimization: false,
         do_index_vacuuming: true,
@@ -283,6 +284,7 @@ fn vacrel<'a, 'mcx>(rel: &'a RelationData<'mcx>, mcx: Mcx<'mcx>) -> LVRelState<'
         skippedallvis: false,
         coverage_hole: false,
         rel_pages: 1,
+        removed_pages: 0,
         folds: {
             // Seed = (OldestXmin, OldestMxact), as heap_vacuum_rel.
             let mut counters = ::vacuum_morsels::ScanCounters::seed(1000, 1);

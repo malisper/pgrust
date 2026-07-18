@@ -646,6 +646,7 @@ dependencies = [
  "varlena",
  "varsup",
  "waitevent",
+ "walreceiverfuncs_seams",
  "walsummarizer_seams",
  "xlogbackup",
  "xloginsert_seams",
@@ -1789,6 +1790,7 @@ version = "0.0.0"
 dependencies = [
  "backup_copy",
  "backup_copy_seams",
+ "basebackup_target",
  "datum",
  "elog",
  "exectuples_output",
@@ -1803,6 +1805,7 @@ dependencies = [
  "ps_status_seams",
  "repl_gram",
  "sink",
+ "sink_support",
  "tcop_dest",
  "throttle",
  "transam_xlog",
@@ -1822,11 +1825,17 @@ dependencies = [
 name = "basebackup_target"
 version = "0.0.0"
 dependencies = [
+ "acl_seams",
  "elog",
+ "fd",
+ "libc",
  "mcx",
+ "miscinit_seams",
  "sink",
  "types_core",
  "types_error",
+ "types_storage",
+ "xact_seams",
 ]
 
 [[package]]
@@ -4499,12 +4508,14 @@ dependencies = [
  "pg_depend",
  "pg_locale",
  "pg_shdepend",
+ "pgstat",
  "postgres_seams",
  "postmaster_seams",
  "procarray",
  "procsignal",
  "relmapper",
  "relpath",
+ "slot_seams",
  "smgr",
  "snapmgr",
  "standby",
@@ -7487,6 +7498,7 @@ dependencies = [
  "lwlock",
  "mbutils_seams",
  "multixact",
+ "origin",
  "pg_prng",
  "pg_sema_seams",
  "pgarch",
@@ -7512,6 +7524,7 @@ dependencies = [
  "types_storage",
  "varsup",
  "waitevent",
+ "walreceiverfuncs",
  "walsummarizer",
  "xact_seams",
  "xlogprefetcher",
@@ -7704,6 +7717,7 @@ dependencies = [
  "runtime",
  "scalar_seams",
  "sinval",
+ "slotsync",
  "stack_depth",
  "syslogger_seams",
  "timeout_seams",
@@ -7715,6 +7729,7 @@ dependencies = [
  "types_storage",
  "waiteventset",
  "waiteventset_seams",
+ "walreceiver",
  "walsummarizer",
  "walwriter",
  "xact_seams",
@@ -7724,9 +7739,29 @@ dependencies = [
 name = "launcher"
 version = "0.0.0"
 dependencies = [
+ "bgworker",
+ "elog",
+ "guc_file",
  "guc_tables",
  "init_small",
+ "interrupt",
+ "ipc",
+ "latch",
  "launcher_seams",
+ "libc",
+ "lmgr_proc",
+ "logical_worker_seams",
+ "mcx",
+ "pg_subscription",
+ "postgres",
+ "postgres_seams",
+ "procsignal",
+ "timestamp_seams",
+ "types_core",
+ "types_error",
+ "types_guc",
+ "types_storage",
+ "xact",
 ]
 
 [[package]]
@@ -8055,6 +8090,99 @@ dependencies = [
  "types_tuple",
  "varlena",
  "xlogreader",
+ "xlogrecovery_seams",
+]
+
+[[package]]
+name = "logicalproto"
+version = "0.1.0"
+dependencies = [
+ "datum",
+ "detoast",
+ "elog",
+ "fmgr_seams",
+ "lsyscache",
+ "mcx",
+ "relcache_seams",
+ "syscache_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_rel",
+ "types_tuple",
+]
+
+[[package]]
+name = "logicalrelation"
+version = "0.1.0"
+dependencies = [
+ "catalog_namespace",
+ "datum",
+ "elog",
+ "inval",
+ "logicalproto",
+ "mcx",
+ "pg_subscription",
+ "rel_vocab",
+ "relcache",
+ "table",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_rel",
+]
+
+[[package]]
+name = "logicalworker"
+version = "0.1.0"
+dependencies = [
+ "adt_timestamp",
+ "bgworker",
+ "cache_syscache",
+ "copy_cmd",
+ "datum",
+ "elog",
+ "execindexing",
+ "execreplication",
+ "exectuples",
+ "fmgr_seams",
+ "guc_tables",
+ "heapam",
+ "indexam",
+ "init_small",
+ "inval",
+ "latch",
+ "launcher",
+ "lmgr",
+ "logical_worker_seams",
+ "logicalproto",
+ "logicalrelation",
+ "lsyscache",
+ "mcx",
+ "nodemodifytable",
+ "origin",
+ "pg_subscription",
+ "postgres_seams",
+ "snapmgr",
+ "table",
+ "tableam",
+ "tableam_vocab",
+ "tablecmds",
+ "timestamp_seams",
+ "transam_xlog",
+ "transam_xlog_seams",
+ "typcache",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_slot",
+ "types_storage",
+ "types_tuple",
+ "walreceiver",
+ "xact",
 ]
 
 [[package]]
@@ -9875,12 +10003,56 @@ dependencies = [
 ]
 
 [[package]]
+name = "origin"
+version = "0.1.0"
+dependencies = [
+ "cache_syscache",
+ "catalog",
+ "catalog_indexing",
+ "condition_variable",
+ "crc32c",
+ "datum",
+ "detoast",
+ "elog",
+ "fd",
+ "fmgr_seams",
+ "funcapi",
+ "genam",
+ "guc_tables",
+ "heaptuple",
+ "init_small",
+ "ipc",
+ "libc",
+ "lmgr",
+ "lwlock",
+ "mcx",
+ "origin_seams",
+ "postgres_seams",
+ "table",
+ "transam_xlog",
+ "transam_xlog_seams",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_rel",
+ "types_scan",
+ "types_snapshot",
+ "types_storage",
+ "types_tuple",
+ "varlena",
+ "xact",
+ "xloginsert",
+ "xlogreader_seams",
+]
+
+[[package]]
 name = "origin_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+ "xlogreader_seams",
 ]
 
 [[package]]
@@ -11612,6 +11784,34 @@ name = "pglz"
 version = "0.1.0"
 
 [[package]]
+name = "pgoutput"
+version = "0.1.0"
+dependencies = [
+ "adt_bool",
+ "cache_syscache",
+ "datum",
+ "dfmgr",
+ "elog",
+ "inval",
+ "logical",
+ "logicalproto",
+ "lsyscache",
+ "mbutils",
+ "mcx",
+ "pg_inherits",
+ "pg_publication",
+ "relcache",
+ "reorderbuffer",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_rel",
+ "types_tuple",
+ "varlena",
+]
+
+[[package]]
 name = "pgrcolumnar"
 version = "0.0.0"
 dependencies = [
@@ -11710,6 +11910,8 @@ dependencies = [
  "types_storage",
  "varlena",
  "waitevent",
+ "walreceiverfuncs_seams",
+ "walsender_seams",
  "xlogprefetcher_seams",
 ]
 
@@ -12282,6 +12484,7 @@ dependencies = [
  "backend_status_seams",
  "be_fsstubs_seams",
  "be_secure_seams",
+ "bufmgr",
  "catalog_index_seams",
  "catalog_storage_seams",
  "cmdtag",
@@ -12537,6 +12740,7 @@ dependencies = [
  "scalar_seams",
  "seam_core",
  "shmem",
+ "slotsync",
  "stack_depth",
  "syslogger",
  "syslogger_seams",
@@ -12590,6 +12794,7 @@ dependencies = [
  "types_error",
  "types_guc",
  "types_startup",
+ "xlogrecovery_seams",
  "xlogutils",
 ]
 
@@ -12941,8 +13146,10 @@ dependencies = [
  "superuser_seams",
  "syncrep_seams",
  "timeout_seams",
+ "timestamp_seams",
  "transam_seams",
  "transam_xlog_seams",
+ "twophase_seams",
  "types_core",
  "types_error",
  "types_rel",
@@ -12952,6 +13159,7 @@ dependencies = [
  "waitevent_seams",
  "xact",
  "xact_seams",
+ "xlogutils",
 ]
 
 [[package]]
@@ -12962,6 +13170,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_rel",
+ "types_storage",
 ]
 
 [[package]]
@@ -13002,6 +13211,7 @@ dependencies = [
  "mcxt_seams",
  "parallel_seams",
  "pg_sema_seams",
+ "postgres_seams",
  "procsignal_seams",
  "s_lock_seams",
  "shmem_seams",
@@ -13010,6 +13220,7 @@ dependencies = [
  "types_core",
  "types_error",
  "types_storage",
+ "walsender_seams",
 ]
 
 [[package]]
@@ -13018,6 +13229,7 @@ version = "0.0.0"
 dependencies = [
  "seam_core",
  "types_error",
+ "types_storage",
 ]
 
 [[package]]
@@ -14097,6 +14309,7 @@ dependencies = [
  "mcx",
  "multixact",
  "nbtree_xlog",
+ "origin_seams",
  "relmapper",
  "rmgrdesc",
  "sequence_xlog",
@@ -14491,6 +14704,8 @@ dependencies = [
  "lock",
  "logical",
  "logicalfuncs",
+ "logicalrelation",
+ "logicalworker",
  "lsyscache",
  "ltree",
  "mbutils",
@@ -14519,6 +14734,7 @@ dependencies = [
  "opclasscmds",
  "operatorcmds",
  "orderedsetaggs",
+ "origin",
  "parallel",
  "parse_clause",
  "parse_collate",
@@ -14553,6 +14769,7 @@ dependencies = [
  "pg_walinspect",
  "pgarch",
  "pgcrypto",
+ "pgoutput",
  "pgstat",
  "pgtz",
  "pgvector",
@@ -14606,6 +14823,7 @@ dependencies = [
  "sinval",
  "slot",
  "slotfuncs",
+ "slotsync",
  "smgr",
  "snapbuild",
  "snapmgr",
@@ -14623,6 +14841,7 @@ dependencies = [
  "subtrans",
  "superuser",
  "sync",
+ "syncrep",
  "syncscan",
  "syslogger",
  "table",
@@ -14656,6 +14875,8 @@ dependencies = [
  "varsup",
  "waitevent",
  "waiteventset",
+ "walreceiver",
+ "walreceiverfuncs",
  "walsender",
  "walsender_config",
  "walsummarizer",
@@ -15046,6 +15267,7 @@ dependencies = [
  "miscinit_seams",
  "pgstat",
  "procarray",
+ "procsignal_seams",
  "s_lock_seams",
  "slot_seams",
  "standby_seams",
@@ -15057,6 +15279,7 @@ dependencies = [
  "types_tuple",
  "varlena",
  "walsender_config",
+ "walsender_seams",
  "wchar",
  "xlogrecovery_seams",
 ]
@@ -15066,6 +15289,7 @@ name = "slot_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+ "types_core",
  "types_error",
 ]
 
@@ -15087,6 +15311,7 @@ dependencies = [
  "postgres_seams",
  "resowner",
  "slot",
+ "slotsync",
  "transam_xlog",
  "types_core",
  "types_error",
@@ -15096,6 +15321,49 @@ dependencies = [
  "varlena",
  "xlogreader",
  "xlogrecovery",
+]
+
+[[package]]
+name = "slotsync"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "dbcommands_seams",
+ "elog",
+ "guc",
+ "guc_file",
+ "guc_tables",
+ "init_small",
+ "interrupt",
+ "ipc",
+ "latch",
+ "libc",
+ "lmgr",
+ "lmgr_proc",
+ "mcx",
+ "miscinit",
+ "postgres",
+ "postgres_seams",
+ "postinit",
+ "procarray",
+ "procsignal",
+ "ps_status_seams",
+ "seam_core",
+ "slot",
+ "snapbuild",
+ "timestamp_seams",
+ "transam_xlog",
+ "types_core",
+ "types_error",
+ "types_guc",
+ "types_startup",
+ "types_storage",
+ "types_tuple",
+ "walreceiver",
+ "walreceiverfuncs_seams",
+ "walsender_config",
+ "xact",
+ "xlogrecovery_seams",
 ]
 
 [[package]]
@@ -15179,6 +15447,7 @@ dependencies = [
  "libc",
  "lmgr",
  "mcx",
+ "procarray",
  "reorderbuffer",
  "seam_core",
  "slot",
@@ -15936,6 +16205,7 @@ dependencies = [
  "cache_syscache",
  "catalog",
  "catalog_indexing",
+ "catalog_namespace",
  "commands_define",
  "datum",
  "dbcommands",
@@ -15946,16 +16216,21 @@ dependencies = [
  "guc_tables",
  "heaptuple",
  "init_small",
+ "launcher",
  "lmgr",
+ "lsyscache",
  "mcx",
  "miscinit",
+ "origin",
  "origin_seams",
  "pg_depend",
  "pg_shdepend",
  "pg_subscription",
  "pgstat",
+ "rel_vocab",
  "superuser",
  "table",
+ "transam_xlog",
  "transam_xlog_seams",
  "types_core",
  "types_error",
@@ -15967,6 +16242,7 @@ dependencies = [
  "types_snapshot",
  "types_tuple",
  "varlena",
+ "walreceiver",
  "xact",
 ]
 
@@ -16084,6 +16360,28 @@ dependencies = [
  "seam_core",
  "types_error",
  "types_storage",
+]
+
+[[package]]
+name = "syncrep"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "guc",
+ "guc_tables",
+ "init_small",
+ "latch",
+ "lmgr_proc",
+ "lwlock",
+ "ps_status_seams",
+ "syncrep_seams",
+ "types_core",
+ "types_dest",
+ "types_error",
+ "types_guc",
+ "types_storage",
+ "walsender",
+ "walsender_config",
 ]
 
 [[package]]
@@ -16802,6 +17100,7 @@ dependencies = [
  "origin_seams",
  "pgstat",
  "pgstat_seams",
+ "postgres_seams",
  "predicate_seams",
  "procarray",
  "procarray_seams",
@@ -16828,6 +17127,7 @@ dependencies = [
  "varsup",
  "varsup_seams",
  "waitevent_seams",
+ "walreceiverfuncs_seams",
  "walsender_seams",
  "walsummarizer_seams",
  "xact_seams",
@@ -17228,6 +17528,7 @@ dependencies = [
  "s_lock_seams",
  "shmem_seams",
  "sinval",
+ "standby_seams",
  "subtrans",
  "subtrans_seams",
  "superuser_seams",
@@ -17242,6 +17543,7 @@ dependencies = [
  "twophase_config",
  "twophase_rmgr",
  "twophase_seams",
+ "typcache_seams",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -17938,11 +18240,13 @@ dependencies = [
 name = "vacuumlazy"
 version = "0.0.0"
 dependencies = [
+ "adt_timestamp",
  "autovacuum_seams",
  "backend_progress",
  "bufmgr_seams",
  "catalog_storage",
  "commands_vacuum",
+ "dbcommands_seams",
  "elog",
  "freespace",
  "guc_tables",
@@ -17950,12 +18254,14 @@ dependencies = [
  "heapam_visibility_seams",
  "indexam",
  "init_small",
+ "instrument",
  "latch",
  "lmgr",
  "mcx",
  "miscinit",
  "nbtree",
  "parallel",
+ "pg_rusage",
  "pgstat",
  "postgres_seams",
  "procarray_seams",
@@ -17964,6 +18270,7 @@ dependencies = [
  "runtime",
  "sinval_seams",
  "smgr_seams",
+ "syscache_seams",
  "table",
  "tableam_seams",
  "tableam_vocab",
@@ -17980,6 +18287,7 @@ dependencies = [
  "vacuum_morsels",
  "vacuum_seams",
  "vacuumparallel",
+ "varsup",
  "visibilitymap",
  "xact",
  "xloginsert_seams",
@@ -18037,6 +18345,7 @@ dependencies = [
  "adt_timestamp",
  "backend_status",
  "elog",
+ "fd",
  "guc",
  "guc_tables",
  "init_small",
@@ -18055,6 +18364,7 @@ dependencies = [
  "syscache_seams",
  "timestamp_seams",
  "transam_xlog",
+ "transam_xlog_seams",
  "types_core",
  "types_error",
  "types_guc",
@@ -18310,6 +18620,79 @@ dependencies = [
 ]
 
 [[package]]
+name = "walreceiver"
+version = "0.0.0"
+dependencies = [
+ "adt_timestamp",
+ "auxprocess",
+ "elog",
+ "guc_file",
+ "guc_tables",
+ "init_small",
+ "interrupt",
+ "ipc",
+ "latch",
+ "libc",
+ "libpq_pqsignal",
+ "mbutils_seams",
+ "mcx",
+ "miscinit",
+ "pg_b64",
+ "pg_hmac",
+ "pg_md5",
+ "pgstat",
+ "postgres_seams",
+ "procarray",
+ "procsignal",
+ "ps_status_seams",
+ "saslprep",
+ "scram_common",
+ "timeline",
+ "timestamp_seams",
+ "transam_xlog",
+ "types_core",
+ "types_error",
+ "types_guc",
+ "types_startup",
+ "types_storage",
+ "varsup",
+ "waitevent_seams",
+ "walreceiverfuncs",
+ "walreceiverfuncs_seams",
+ "walsender_seams",
+ "xlogarchive",
+ "xlogrecovery_seams",
+]
+
+[[package]]
+name = "walreceiverfuncs"
+version = "0.0.0"
+dependencies = [
+ "adt_timestamp",
+ "condition_variable",
+ "latch",
+ "libc",
+ "pmsignal",
+ "procsignal",
+ "timestamp_seams",
+ "transam_xlog",
+ "types_core",
+ "types_error",
+ "types_storage",
+ "walreceiverfuncs_seams",
+ "xlogrecovery",
+]
+
+[[package]]
+name = "walreceiverfuncs_seams"
+version = "0.0.0"
+dependencies = [
+ "seam_core",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "walsender"
 version = "0.0.0"
 dependencies = [
@@ -18328,19 +18711,27 @@ dependencies = [
  "interrupt",
  "ipc_seams",
  "latch",
+ "latch_seams",
  "libc",
+ "lmgr_proc",
+ "logical",
+ "logical_decode",
  "lwlock",
  "mcx",
+ "pgstat",
  "pmsignal",
  "postgres_seams",
  "pqcomm",
  "procarray",
+ "procsignal",
  "ps_status_seams",
  "repl_gram",
  "resowner",
  "slot",
  "snapbuild",
+ "snapmgr",
  "stringinfo",
+ "syncrep_seams",
  "tcop_dest",
  "timeline",
  "timeline_seams",
@@ -18353,12 +18744,14 @@ dependencies = [
  "types_guc",
  "types_storage",
  "varlena",
+ "walreceiverfuncs_seams",
  "walsender_config",
  "walsender_seams",
  "xact",
  "xlogreader",
  "xlogreader_seams",
  "xlogrecovery_seams",
+ "xlogutils",
 ]
 
 [[package]]
@@ -18551,7 +18944,7 @@ dependencies = [
  "guc_tables",
  "init_small",
  "inval",
- "launcher",
+ "launcher_seams",
  "libpq_pqsignal",
  "lmgr",
  "lmgr_proc",
@@ -18808,6 +19201,8 @@ dependencies = [
  "aclchk_seams",
  "adt_bool",
  "adt_float",
+ "adt_pg_lsn",
+ "adt_timestamp",
  "aio_seams",
  "async_seams",
  "autovacuum_seams",
@@ -18819,9 +19214,11 @@ dependencies = [
  "catalog_index_seams",
  "catalog_seams",
  "catalog_storage_seams",
+ "checkpointer_seams",
  "clog",
  "combocid_seams",
  "commit_ts_seams",
+ "condition_variable",
  "condition_variable_seams",
  "controldata_utils",
  "crc32c",
@@ -18839,7 +19236,9 @@ dependencies = [
  "heaptuple",
  "init_small",
  "inval",
+ "ipc",
  "ipc_seams",
+ "latch",
  "latch_seams",
  "libc",
  "lmgr_proc",
@@ -18865,6 +19264,8 @@ dependencies = [
  "postgres_seams",
  "predicate_seams",
  "procarray",
+ "procarray_seams",
+ "procsignal_seams",
  "pruneheap_seams",
  "ps_status_seams",
  "relcache_seams",
@@ -18874,6 +19275,7 @@ dependencies = [
  "s_lock_seams",
  "shmem",
  "sinval_seams",
+ "slot",
  "smgr",
  "snapbuild_seams",
  "snapmgr",
@@ -18908,9 +19310,11 @@ dependencies = [
  "types_tuple",
  "varsup",
  "waitevent_seams",
+ "walreceiverfuncs_seams",
  "walsender_config",
  "walsummarizer_seams",
  "xact",
+ "xlogarchive",
  "xloginsert",
  "xloginsert_seams",
  "xlogprefetcher",

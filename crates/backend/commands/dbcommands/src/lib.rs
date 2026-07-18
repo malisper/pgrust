@@ -360,8 +360,10 @@ pub fn dbase_redo(record: &mut XLogReaderState) -> PgResult<()> {
             standby::ResolveRecoveryConflictWithDatabase(db_id)?;
         }
 
-        // ReplicationSlotsDropDBSlots is unconditional in C (slot.c home):
-        // wire it as a named loud when the slot crate lands.
+        // Drop any database-specific replication slots (dbcommands.c:3432).
+        if slot_seams::replication_slots_drop_db_slots::is_installed() {
+            slot_seams::replication_slots_drop_db_slots::call(db_id)?;
+        }
         bufmgr::DropDatabaseBuffers(db_id)?;
         smgr::ForgetDatabaseSyncRequests(db_id)?;
         xlogutils::XLogDropDatabase(db_id)?;
