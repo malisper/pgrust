@@ -58,3 +58,18 @@ unique	epq,backward,instrumented,scroll-mark
 lockrows	epq,backward,instrumented,scroll-mark
 mergejoin	epq,backward,instrumented
 windowagg	epq,backward,instrumented,child-not-lane-owned,shape-qual-proj
+#
+# ----- wave-7 TIER-B B1 per-shape flips (se/wave7-flips-b1b2) -----
+# FLIP scans-t3 boarded as ONE COMMIT PER SHAPE (wave-7 contract §2; the
+# all-six-classes scope CONFIRMED by the wave-4 integrator,
+# notes/se-wave4-flips.md). ONE-ROW-PER-CLASS law (tierB review finding 2):
+# each shape's B1 allowed list (epq,backward,instrumented,env-off) is a
+# subset of its FLIP-1 merged row above — B1 RIDES the existing row, no new
+# data rows. One comment line lands per per-shape flip commit; a per-shape
+# revert removes its line.
+# wave-7 B1 1/6: functionscan source form default-ON (rides merged row)
+# wave-7 B1 2/6: tablefuncscan source form default-ON (rides merged row)
+# wave-7 B1 3/6: samplescan source form default-ON (rides merged row)
+# wave-7 B1 4/6: tidscan source form default-ON (rides merged row)
+# wave-7 B1 5/6: namedtuplestorescan source form default-ON (rides merged row)
+# wave-7 B1 6/6: tidrangescan source form default-ON (rides merged row) — ladder COMPLETE

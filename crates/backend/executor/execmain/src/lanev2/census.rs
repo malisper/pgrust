@@ -569,6 +569,16 @@ fn append_rows(dir: &PathBuf, rows: &str) {
 ///     structural refuses (child-not-lane-owned for non-Sort/agg-fed
 ///     children, shape-qual-proj for non-W1 window shapes; both stay legal
 ///     post-flip — the sticky-batch lane owns only its admitted family).
+///
+/// ONE ROW PER CLASS (rebase law; tierB review finding 2, boards with B1):
+/// `assert_covered_check` is first-match-wins, so a duplicate class row
+/// silently shadows every row below it. When two flips claim the same
+/// class (the six T3 tail classes are shared between FLIP-1 delegation and
+/// the wave-7 B1 source-form per-shape flips), the lists MUST be merged
+/// into a single row per class — union of allowed reasons, same merge
+/// mirrored in flip-manifest.tsv — never stacked. The
+/// `manifest_has_no_duplicate_class_rows` unit turns a stacked duplicate
+/// into a loud failure.
 pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
     // --- FLIP-1: rowmode (rung 1) -----------------------------------------
     (
@@ -582,6 +592,10 @@ pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
             RefuseReason::SrfSetExpansion,
         ],
     ),
+    // + wave-7 B1 per-shape flip 1/6: functionscan SOURCE form default-ON
+    // (tail_source.rs flip ledger). ONE-ROW-PER-CLASS law: B1 rides this
+    // merged row — its allowed list (epq,backward,instrumented,env-off) is
+    // already a subset of the FLIP-1 union here.
     (
         ShapeClass::FunctionScan,
         &[
@@ -592,6 +606,9 @@ pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
             RefuseReason::EnvOff,
         ],
     ),
+    // + wave-7 B1 per-shape flip 2/6: tablefuncscan SOURCE form default-ON
+    // (tail_source.rs flip ledger; ONE-ROW-PER-CLASS — B1 rides this
+    // merged row).
     (
         ShapeClass::TableFuncScan,
         &[
@@ -611,6 +628,9 @@ pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
             RefuseReason::ScrollMark,
         ],
     ),
+    // + wave-7 B1 per-shape flip 3/6: samplescan SOURCE form default-ON
+    // (tail_source.rs flip ledger; ONE-ROW-PER-CLASS — B1 rides this
+    // merged row).
     (
         ShapeClass::SampleScan,
         &[
@@ -621,6 +641,9 @@ pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
             RefuseReason::EnvOff,
         ],
     ),
+    // + wave-7 B1 per-shape flip 4/6: tidscan SOURCE form default-ON
+    // (tail_source.rs flip ledger; ONE-ROW-PER-CLASS — B1 rides this
+    // merged row).
     (
         ShapeClass::TidScan,
         &[
@@ -631,6 +654,10 @@ pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
             RefuseReason::EnvOff,
         ],
     ),
+    // + wave-7 B1 per-shape flip 6/6: tidrangescan SOURCE form default-ON
+    // (tail_source.rs flip ledger; ONE-ROW-PER-CLASS — B1 rides this
+    // merged row). The ladder is COMPLETE: all six T3 classes source-form
+    // default-hosted; delegation stays the rollback form.
     (
         ShapeClass::TidRangeScan,
         &[
@@ -641,6 +668,9 @@ pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
             RefuseReason::EnvOff,
         ],
     ),
+    // + wave-7 B1 per-shape flip 5/6: namedtuplestorescan SOURCE form
+    // default-ON (tail_source.rs flip ledger; ONE-ROW-PER-CLASS — B1 rides
+    // this merged row).
     (
         ShapeClass::NamedTuplestoreScan,
         &[
@@ -859,6 +889,28 @@ mod tests {
             };
             let compiled: Vec<&str> = allowed.iter().map(|r| r.name()).collect();
             assert_eq!(mirror_reasons, compiled);
+        }
+    }
+
+    /// `assert_covered_check` is FIRST-MATCH-WINS over ASSERT_MANIFEST, so a
+    /// duplicate class row would silently shadow every row below it — the §4
+    /// rebase hazard (tierB review finding 2, 4b22d75c4; that unit boards
+    /// with B1 per the wave-4 integrator, notes/se-wave4-flips.md): the six
+    /// T3 tail classes are shared between the FLIP-1 rows and the wave-7 B1
+    /// per-shape flips, so stacked duplicates would silently drop an
+    /// allowed-reason. Duplicates must be reconciled into ONE merged row per
+    /// class (union of allowed reasons, mirrored in flip-manifest.tsv); this
+    /// pin turns the silent shadow into a loud unit failure at rebase time.
+    #[test]
+    fn manifest_has_no_duplicate_class_rows() {
+        for (i, (class, _)) in ASSERT_MANIFEST.iter().enumerate() {
+            assert!(
+                !ASSERT_MANIFEST[..i].iter().any(|(c, _)| c == class),
+                "duplicate ASSERT_MANIFEST row for class {} — first-match-wins \
+                 shadowing; merge the allowed-reason lists into one row (same \
+                 merge in flip-manifest.tsv)",
+                class.name()
+            );
         }
     }
 
