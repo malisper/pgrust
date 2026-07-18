@@ -27,6 +27,22 @@ const INDEX_SIZE_MASK: u16 = 0x1FFF;
 const SizeOfBtreeOpaque: usize = core::mem::size_of::<BTPageOpaqueData>();
 const MaxIndexTuplesPerPage: usize = (BLCKSZ - SizeOfPageHeaderData) / (16 + 4);
 
+/// DST fault-sweep RED hook (sim-cfg only, zero native surface): when armed,
+/// XLOG_BTREE_VACUUM redo keeps the page fully valid but SKIPS the item
+/// deletions — a deliberately weakened vacuum-content redo (stale index
+/// entries silently survive replay; structure stays walkable). The crash
+/// sweep's LP-reuse red leg arms this and must CATCH it SILENTLY through the
+/// index key-vs-heap-value / coverage properties alone (the V-O1 silent-only
+/// leg), never through a replay failure.
+#[cfg(pgrust_sim)]
+pub mod sim_red {
+    use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
+    pub static KEEP_VACUUMED_ITEMS: AtomicBool = AtomicBool::new(false);
+    pub fn armed() -> bool {
+        KEEP_VACUUMED_ITEMS.load(Relaxed)
+    }
+}
+
 fn main_data<'a>(record: &'a XLogReaderState) -> &'a [u8] {
     let rec = record.record.as_ref().expect("btree redo with no decoded record");
     // SAFETY: points into the reader's decode buffer, valid for the redo
@@ -806,6 +822,11 @@ fn btree_xlog_vacuum_or_delete(record: &mut XLogReaderState, is_vacuum: bool) ->
             let updates = &ptr[ndeleted * 2 + nupdated * 2..];
             btree_xlog_updates(&mut pm, updatedoffsets, updates, nupdated)?;
         }
+
+        // DST RED (sim-cfg only): the deliberately weakened vacuum redo —
+        // stale entries kept, everything else applied. See sim_red.
+        #[cfg(pgrust_sim)]
+        let ndeleted = if is_vacuum && crate::sim_red::armed() { 0 } else { ndeleted };
 
         if ndeleted > 0 {
             let mut offsets = [0 as OffsetNumber; MaxIndexTuplesPerPage];
