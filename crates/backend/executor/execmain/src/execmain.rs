@@ -1024,11 +1024,12 @@ pub(crate) fn execute_plan<'m, 'mcx>(
     let planstate = planstate.as_mut().expect("ExecutorRun without a plan state");
     estate.es_direction = direction;
     estate.es_use_parallel_mode = use_parallel_mode;
-    // wave-9 WS-AI (cursors inc-1, contract §3): per-run emission budget.
-    // Guard-scoped over the whole run (drop = restore, incl. error unwind
-    // and nested ExecutorRun); knob-OFF and count-0 runs answer at the
-    // callee's first test. See lanev2/push.rs WS-AI region.
-    let _cursor_run_budget = crate::lanev2::cursor_run_budget_install(
+    // wave-9 WS-AI (cursors inc-1, contract §3): per-run emission budget,
+    // written UNCONDITIONALLY like es_direction above it (None on knob-OFF
+    // and count-0 runs, which answer at the callee's first test; a None
+    // overwrite means no stale budget survives an error unwind or estate
+    // reuse). See lanev2/push.rs WS-AI region for the gate + serial law.
+    estate.es_cursor_run_budget = crate::lanev2::cursor_run_budget_install(
         operation == CmdType::CMD_SELECT,
         ::types_scan::sdir::ScanDirectionIsForward(direction),
         number_tuples,
