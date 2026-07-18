@@ -203,6 +203,67 @@ fn mutator_rebuilds_on_change() {
     assert_eq!(new_te.expr.as_param().unwrap().paramid, 2);
 }
 
+// Michael's wasm-REPL bug (a): generate_series in FROM of a recursive CTE hit
+// the deferred arm. C raw_expression_tree_walker T_RangeFunction walks
+// functions, alias, coldeflist.
+#[test]
+fn raw_walker_range_function_walks_functions_and_coldeflist() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let fc = Node::mk_param_ref(mcx, 1, -1).unwrap();
+    let cd = Node::mk_param_ref(mcx, 2, -1).unwrap();
+    let alias = Node::mk_mut(
+        mcx,
+        types_nodes::primnodes::Alias { aliasname: Some("x"), colnames: NodeList::nil() },
+    )
+    .unwrap()
+    .seal_ref();
+    let rf = Node::mk(
+        mcx,
+        types_nodes::rawnodes::RangeFunction {
+            functions: NodeList::from_slice(mcx, &[fc]).unwrap(),
+            alias: Some(alias),
+            coldeflist: NodeList::from_slice(mcx, &[cd]).unwrap(),
+            ..types_nodes::rawnodes::RangeFunction::default()
+        },
+    )
+    .unwrap();
+    let mut w = CountParams { analyzed: 0, raw: 0 };
+    assert!(!raw_expression_tree_walker(rf, &mut w).unwrap());
+    assert_eq!(w.raw, 2);
+}
+
+// Michael's wasm-REPL bug (b): CASE in a recursive term hit the deferred arm.
+// C raw_expression_tree_walker T_CaseExpr walks arg, each CaseWhen's
+// expr/result (no callback on the CaseWhen itself), then defresult.
+#[test]
+fn raw_walker_case_expr_walks_arg_whens_defresult() {
+    let ctx = cx();
+    let mcx = ctx.mcx();
+    let when = Node::mk(
+        mcx,
+        types_nodes::primnodes::CaseWhen {
+            expr: Some(Node::mk_param_ref(mcx, 2, -1).unwrap()),
+            result: Some(Node::mk_param_ref(mcx, 3, -1).unwrap()),
+            location: -1,
+        },
+    )
+    .unwrap();
+    let case = Node::mk(
+        mcx,
+        types_nodes::primnodes::CaseExpr {
+            arg: Some(Node::mk_param_ref(mcx, 1, -1).unwrap()),
+            args: NodeList::from_slice(mcx, &[when]).unwrap(),
+            defresult: Some(Node::mk_param_ref(mcx, 4, -1).unwrap()),
+            ..types_nodes::primnodes::CaseExpr::default()
+        },
+    )
+    .unwrap();
+    let mut w = CountParams { analyzed: 0, raw: 0 };
+    assert!(!raw_expression_tree_walker(case, &mut w).unwrap());
+    assert_eq!(w.raw, 4);
+}
+
 #[test]
 #[should_panic(expected = "raw_expression_tree_walker")]
 fn raw_walker_unported_vocab_is_loud() {

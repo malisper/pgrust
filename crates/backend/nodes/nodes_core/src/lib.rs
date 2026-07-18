@@ -554,7 +554,8 @@ pub fn raw_expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
         | NodeTag::T_ParamRef
         | NodeTag::T_A_Const
         | NodeTag::T_A_Star
-        | NodeTag::T_MergeSupportFunc => Ok(false),
+        | NodeTag::T_MergeSupportFunc
+        | NodeTag::T_ReturningOption => Ok(false),
         // C: "we assume the colnames list isn't interesting".
         NodeTag::T_Alias => Ok(false),
         NodeTag::T_RangeVar => match node.as_range_var().unwrap().alias {
@@ -721,6 +722,156 @@ pub fn raw_expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
         NodeTag::T_JsonArrayQueryConstructor => {
             let c = node.as_json_array_query_constructor().unwrap();
             Ok(walk_opt(c.output, w)? || walk_opt(c.query, w)?)
+        }
+        // Arms below follow C's raw_expression_tree_walker case order.
+        NodeTag::T_GroupingFunc => walk_list(&node.as_grouping_func().unwrap().args, w),
+        NodeTag::T_SubLink => {
+            let sl = node.as_sub_link().unwrap();
+            // C: "we assume the operName is not interesting".
+            Ok(walk_opt(sl.testexpr, w)? || w.visit(sl.subselect)?)
+        }
+        NodeTag::T_CaseExpr => {
+            let c = node.as_case_expr().unwrap();
+            if walk_opt(c.arg, w)? {
+                return Ok(true);
+            }
+            // C: "we assume walker doesn't care about CaseWhens, either".
+            for cell in &c.args {
+                let cw = cell.as_case_when().expect("CaseExpr args are CaseWhen");
+                if walk_opt(cw.expr, w)? || walk_opt(cw.result, w)? {
+                    return Ok(true);
+                }
+            }
+            walk_opt(c.defresult, w)
+        }
+        NodeTag::T_CoalesceExpr => walk_list(&node.as_coalesce_expr().unwrap().args, w),
+        NodeTag::T_MinMaxExpr => walk_list(&node.as_min_max_expr().unwrap().args, w),
+        NodeTag::T_XmlExpr => {
+            let x = node.as_xml_expr().unwrap();
+            // C: "we assume walker doesn't care about arg_names".
+            Ok(walk_list(&x.named_args, w)? || walk_list(&x.args, w)?)
+        }
+        NodeTag::T_NullTest => walk_opt(node.as_null_test().unwrap().arg, w),
+        NodeTag::T_JoinExpr => {
+            let j = node.as_join_expr().unwrap();
+            // C: "using list is deemed uninteresting".
+            Ok(w.visit(j.larg)?
+                || w.visit(j.rarg)?
+                || walk_opt(j.quals, w)?
+                || match j.alias {
+                    Some(a) => w.visit_alias_ref(a)?,
+                    None => false,
+                })
+        }
+        NodeTag::T_IntoClause => {
+            let into = node.as_into_clause().unwrap();
+            // C: "colNames, options are deemed uninteresting"; "viewQuery
+            // should be null in raw parsetree, but check it".
+            Ok(walk_opt(into.rel, w)? || walk_opt(into.viewQuery, w)?)
+        }
+        NodeTag::T_InsertStmt => {
+            let s = node.as_insert_stmt().unwrap();
+            Ok(walk_opt(s.relation, w)?
+                || walk_list(&s.cols, w)?
+                || walk_opt(s.selectStmt, w)?
+                || walk_opt(s.onConflictClause, w)?
+                || walk_opt(s.returningClause, w)?
+                || walk_opt(s.withClause, w)?)
+        }
+        NodeTag::T_DeleteStmt => {
+            let s = node.as_delete_stmt().unwrap();
+            Ok(walk_opt(s.relation, w)?
+                || walk_list(&s.usingClause, w)?
+                || walk_opt(s.whereClause, w)?
+                || walk_opt(s.returningClause, w)?
+                || walk_opt(s.withClause, w)?)
+        }
+        NodeTag::T_UpdateStmt => {
+            let s = node.as_update_stmt().unwrap();
+            Ok(walk_opt(s.relation, w)?
+                || walk_list(&s.targetList, w)?
+                || walk_opt(s.whereClause, w)?
+                || walk_list(&s.fromClause, w)?
+                || walk_opt(s.returningClause, w)?
+                || walk_opt(s.withClause, w)?)
+        }
+        NodeTag::T_MergeStmt => {
+            let s = node.as_merge_stmt().unwrap();
+            Ok(walk_opt(s.relation, w)?
+                || walk_opt(s.sourceRelation, w)?
+                || walk_opt(s.joinCondition, w)?
+                || walk_list(&s.mergeWhenClauses, w)?
+                || walk_opt(s.returningClause, w)?
+                || walk_opt(s.withClause, w)?)
+        }
+        NodeTag::T_MergeWhenClause => {
+            let m = node.as_merge_when_clause().unwrap();
+            Ok(walk_opt(m.condition, w)?
+                || walk_list(&m.targetList, w)?
+                || walk_list(&m.values, w)?)
+        }
+        NodeTag::T_ReturningClause => {
+            let r = node.as_returning_clause().unwrap();
+            Ok(walk_list(&r.options, w)? || walk_list(&r.exprs, w)?)
+        }
+        NodeTag::T_PLAssignStmt => {
+            let s = node.as_pl_assign_stmt().unwrap();
+            Ok(walk_list(&s.indirection, w)? || walk_opt(s.val, w)?)
+        }
+        NodeTag::T_BoolExpr => walk_list(&node.as_bool_expr().unwrap().args, w),
+        NodeTag::T_NamedArgExpr => walk_opt(node.as_named_arg_expr().unwrap().arg, w),
+        NodeTag::T_MultiAssignRef => walk_opt(node.as_multi_assign_ref().unwrap().source, w),
+        NodeTag::T_RangeSubselect => {
+            let rs = node.as_range_subselect().unwrap();
+            Ok(walk_opt(rs.subquery, w)?
+                || match rs.alias {
+                    Some(a) => w.visit_alias_ref(a)?,
+                    None => false,
+                })
+        }
+        NodeTag::T_RangeFunction => {
+            let rf = node.as_range_function().unwrap();
+            Ok(walk_list(&rf.functions, w)?
+                || match rf.alias {
+                    Some(a) => w.visit_alias_ref(a)?,
+                    None => false,
+                }
+                || walk_list(&rf.coldeflist, w)?)
+        }
+        NodeTag::T_RangeTableSample => {
+            let rts = node.as_range_table_sample().unwrap();
+            // C: "method name is deemed uninteresting".
+            Ok(walk_opt(rts.relation, w)?
+                || walk_list(&rts.args, w)?
+                || walk_opt(rts.repeatable, w)?)
+        }
+        NodeTag::T_ColumnDef => {
+            let cd = node.as_column_def().unwrap();
+            // C: "for now, constraints are ignored".
+            Ok(walk_opt(cd.typeName, w)?
+                || walk_opt(cd.raw_default, w)?
+                || walk_opt(cd.collClause, w)?)
+        }
+        // C: "collation and opclass names are deemed uninteresting".
+        NodeTag::T_IndexElem => walk_opt(node.as_index_elem().unwrap().expr, w),
+        NodeTag::T_GroupingSet => walk_list(&node.as_grouping_set().unwrap().content, w),
+        NodeTag::T_LockingClause => {
+            walk_list(&node.as_locking_clause().unwrap().lockedRels, w)
+        }
+        NodeTag::T_WithClause => walk_list(&node.as_with_clause().unwrap().ctes, w),
+        NodeTag::T_InferClause => {
+            let ic = node.as_infer_clause().unwrap();
+            Ok(walk_list(&ic.indexElems, w)? || walk_opt(ic.whereClause, w)?)
+        }
+        NodeTag::T_OnConflictClause => {
+            let oc = node.as_on_conflict_clause().unwrap();
+            Ok(walk_opt(oc.infer, w)?
+                || walk_list(&oc.targetList, w)?
+                || walk_opt(oc.whereClause, w)?)
+        }
+        // C: "search_clause and cycle_clause are not interesting here".
+        NodeTag::T_CommonTableExpr => {
+            walk_opt(node.as_common_table_expr().unwrap().ctequery, w)
         }
         other => deferred("raw_expression_tree_walker", other),
     }
