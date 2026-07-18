@@ -20,7 +20,9 @@
 #             StdRng/thread_rng/from_entropy (bare-name patterns, so
 #             libc::getrandom / libc::getentropy are caught too). Calls to
 #             pg_strong_random are NOT flagged — that crate IS the sanctioned
-#             entropy funnel (§2.3); only its internals appear in the ledger.
+#             entropy funnel (§2.3, the P2 EntropySource seam); only its raw
+#             internals (src/os.rs, the OsEntropy getentropy+urandom ladder)
+#             appear in the ledger.
 #   spawn     thread::spawn / thread::Builder / libc::fork / pthread_create
 #             (sanctioned: launch_backend's spawner seam — the spawn door, §3.3)
 #   env       std::env::var/var_os/vars/vars_os/set_var/remove_var — at call
