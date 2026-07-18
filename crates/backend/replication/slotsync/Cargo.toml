@@ -9,6 +9,7 @@ name = "slotsync"
 path = "src/lib.rs"
 
 [dependencies]
+pgsync = { path = "../../../_support/pgsync" }
 libc = "0.2"
 mcx = { path = "../../../_support/mcx" }
 seam_core = { path = "../../../_support/seam_core" }

@@ -10,7 +10,7 @@
 
 #![allow(non_snake_case)]
 
-use std::sync::Mutex;
+use pgsync::Mutex;
 
 use elog::{elog, ereport};
 use types_core::{Oid, TransactionId, XLogRecPtr};

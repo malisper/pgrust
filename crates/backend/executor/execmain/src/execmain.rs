@@ -310,7 +310,7 @@ const SKELETON_RETAIN_MAX_BYTES: usize = 256 * 1024;
 // expression compiles without the per-row-payoff ready passes. 0.0 disables.
 // Latched once per process.
 fn execexpr_economy_threshold() -> f64 {
-    static T: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    static T: pgsync::OnceLock<f64> = pgsync::OnceLock::new();
     *T.get_or_init(|| match std::env::var("PGRUST_EXECEXPR_ECONOMY") {
         Err(_) => 1000.0,
         Ok(v) => match v.trim() {
@@ -325,7 +325,7 @@ fn execexpr_economy_threshold() -> f64 {
 // restores the pre-gate behavior (custom plans pay skeleton-candidate
 // ceremony at executor start). Latched once per process.
 fn skeleton_custom_gate_disabled() -> bool {
-    static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static DISABLED: pgsync::OnceLock<bool> = pgsync::OnceLock::new();
     *DISABLED.get_or_init(|| {
         matches!(
             std::env::var("PGRUST_EXEC_SKELETON_CUSTOM_GATE").as_deref(),

@@ -10,7 +10,7 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::Mutex;
+use pgsync::Mutex;
 
 use elog::{elog as log_report, ereport};
 use guc_tables::{vars, GucVarAccessors};
