@@ -10697,6 +10697,8 @@ name = "pg_barrier"
 version = "0.0.0"
 dependencies = [
  "init_small",
+ "loom",
+ "pgsync",
  "postgres_seams",
  "types_error",
  "waiter",
