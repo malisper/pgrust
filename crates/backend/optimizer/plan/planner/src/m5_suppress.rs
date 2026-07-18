@@ -1132,6 +1132,16 @@ fn classify_multibuild<'mcx>(
     if !equi_graph_connected(rtis, quals)? {
         return refuse_join("equi graph does not connect all relations");
     }
+    // EC discipline (SE-AGGJOIN fixer — the grouped row's hostile review
+    // proved the channel PRE-EXISTS here: at base 11fe9c48b the plain
+    // variant of H2 keys CbHashJoinMultiBuild and lands the identical
+    // serial merge plan). Distinct-relid dims off one shared fact key merge
+    // into one EC exactly like B1's aliases do; refuse shared-endpoint
+    // shapes. The plain row keeps its wider qual admission otherwise
+    // (filter-term X5-class discipline = GL-M5P1-1's handoff).
+    if ec_disjoint_equi_edges(rtis, quals)?.is_none() {
+        return refuse_join("equi terms share a join key (EC-derived clause hazard)");
+    }
     // Emit discipline: every tlist entry a whitelisted plain aggregate
     // whose args live on one of the joined rels (count(*) included).
     let mut n = 0usize;
@@ -1265,6 +1275,63 @@ fn equi_graph_connected(rtis: &[usize], quals: &[Node<'_>]) -> PgResult<bool> {
     Ok(true)
 }
 
+/// SE-AGGJOIN fixer guard (hostile-review BLOCKING find, legs
+/// h1_ecdim/h2_trans): EquivalenceClass derivation evades PER-QUAL
+/// discipline. Two equi terms sharing a key var — H2 `f.k1 = d1.k AND
+/// f.k1 = db.k` (EC-derived dim-dim clause), H1 `f.k1 = d1.k AND
+/// d1.k = d2.k` (written dim-dim term through a shared var) — merge into
+/// ONE EquivalenceClass; the planner derives the dim-dim equality and can
+/// cost a serial Merge Join + Materialize on it with no indexes present —
+/// a shape the multibuild walk refuses (suppress-then-refuse, the B1
+/// defect class, EC flavor; B1's repeated-relid guard is the SAME
+/// mechanism through alias ECs). Guard: over the DISTINCT equi edges
+/// (exact-duplicate terms collapse first — the planner dedups them into
+/// one two-var EC with nothing left to derive, so `f.k1 = d1.k AND
+/// f.k1 = d1.k` stays owned), no (rel, attno) endpoint may appear in more
+/// than one edge — pairwise-DISJOINT two-var ECs leave the planner nothing
+/// to derive, so the join graph it costs is exactly the written tree.
+/// `None` = a shared endpoint (caller refuses); `Some(n)` = n distinct
+/// edges (the grouped row additionally requires n == rels-1: a TREE, no
+/// parallel edges — multi-clause hash joins are outside the proven
+/// envelope, fail closed).
+fn ec_disjoint_equi_edges(rtis: &[usize], quals: &[Node<'_>]) -> PgResult<Option<usize>> {
+    let mut edges: Vec<((usize, i32), (usize, i32))> = Vec::new();
+    for &qual in quals {
+        let Some(op) = qual.as_op_expr() else { continue };
+        if op.args.len() != 2 {
+            continue;
+        }
+        let (a, b) = (op.args.nth(0), op.args.nth(1));
+        let hit = |e: Node<'_>| rtis.iter().position(|&rti| key_var(e, rti).is_some());
+        let (Some(ia), Some(ib)) = (hit(a), hit(b)) else { continue };
+        if ia == ib {
+            continue;
+        }
+        let (Some(va), Some(vb)) = (key_var(a, rtis[ia]), key_var(b, rtis[ib])) else {
+            continue;
+        };
+        if !is_int_family(va.vartype)
+            || !is_int_family(vb.vartype)
+            || !lsyscache::op_hashjoinable(op.opno, va.vartype)?
+        {
+            continue;
+        }
+        let (ea, eb) = ((ia, va.varattno as i32), (ib, vb.varattno as i32));
+        let edge = if ea <= eb { (ea, eb) } else { (eb, ea) };
+        if !edges.contains(&edge) {
+            edges.push(edge);
+        }
+    }
+    for (i, e1) in edges.iter().enumerate() {
+        for e2 in edges.iter().skip(i + 1) {
+            if e1.0 == e2.0 || e1.0 == e2.1 || e1.1 == e2.0 || e1.1 == e2.1 {
+                return Ok(None);
+            }
+        }
+    }
+    Ok(Some(edges.len()))
+}
+
 /// SE-AGGJOIN (band 87001): the grouped-agg-over-join classifier — the
 /// CbHashJoinGroupedAgg row (see the CoverClass doc for the full guard
 /// list). Shared by every keyed FROM form (flat 2..=6-RangeTblRef INNER;
@@ -1381,6 +1448,16 @@ fn classify_aggjoin_grouped<'mcx>(
         if !key_var_estimable(run, a)? || !key_var_estimable(run, b)? {
             return refuse_join("join key without statistics (statistics-free rel)");
         }
+    }
+    // EC discipline (hostile-review BLOCKING find — see ec_disjoint_equi_edges):
+    // pairwise-disjoint two-var ECs only, and exactly rels-1 distinct edges
+    // (a TREE — parallel edges plan multi-clause hash joins outside the
+    // proven envelope). Either violation keeps Gather.
+    let Some(nedges) = ec_disjoint_equi_edges(rtis, quals)? else {
+        return refuse_join("equi terms share a join key (EC-derived clause hazard)");
+    };
+    if nedges != rtis.len().saturating_sub(1) {
+        return refuse_join("equi terms exceed a join tree (parallel edges)");
     }
     // Key discipline: every group key a bare int2/4/8 Var on one joined rel
     // (the walk's byval word-equality whitelist is wider — probe narrower).
