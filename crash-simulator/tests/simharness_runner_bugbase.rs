@@ -35,7 +35,25 @@ fn bank_list_reload_round_trip() {
     let lp = load_profile(dir.to_str().unwrap()).unwrap();
     let plan = gen_plan(4242, &lp, "testgen");
     let text = plan.render();
-    let shrunk = Plan { header: plan.header.clone(), steps: plan.steps[..2].to_vec() };
+    // A structurally-valid strict prefix: never cut a property block open
+    // (H6: the seed-4242 plan shape changed; a fixed [..2] slice landed
+    // inside a property, which does not render/parse round-trip).
+    let mut cut = 1;
+    let mut depth = 0i32;
+    for (i, s) in plan.steps.iter().enumerate() {
+        match s {
+            Step::BeginProperty { .. } => depth += 1,
+            Step::EndProperty { .. } => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 {
+            cut = i + 1;
+            if cut >= 2 && cut < plan.steps.len() {
+                break;
+            }
+        }
+    }
+    let shrunk = Plan { header: plan.header.clone(), steps: plan.steps[..cut].to_vec() };
 
     bb.bank(4242, &text, Some(&shrunk.render()), &runs(4242, "property-violation", "SELECT v FROM st_# WHERE k = #"))
         .unwrap();

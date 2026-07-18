@@ -39,6 +39,8 @@ fn profile_dir() -> PathBuf {
 struct Db {
     tables: BTreeSet<String>,
     indexes: BTreeSet<String>,
+    /// H6: file_fdw foreign tables (read-only relations; SELECT-able only).
+    foreign_tables: BTreeSet<String>,
     guc_set: bool,
 }
 
@@ -78,8 +80,36 @@ impl RefServer {
         }
     }
 
+    fn require_readable(&self, name: &str, text: &str) -> Result<(), String> {
+        if self.db.tables.contains(name) || self.db.foreign_tables.contains(name) {
+            Ok(())
+        } else {
+            Err(format!("42P01: relation '{name}' does not exist at: {text}"))
+        }
+    }
+
     fn apply_sql(&mut self, text: &str) -> Result<(), String> {
-        if let Ok(rest) = after(text, "CREATE TABLE ") {
+        if let Ok(rest) = after(text, "CREATE FOREIGN TABLE ") {
+            // H6 fdw chain tail. Transactional like all DDL; SELECT-only.
+            let name = ident_prefix(rest)?;
+            if !self.db.foreign_tables.insert(name.to_string()) {
+                return Err(format!("42P07: foreign table '{name}' already exists at: {text}"));
+            }
+        } else if text.starts_with("CREATE EXTENSION IF NOT EXISTS ")
+            || text.starts_with("CREATE SERVER IF NOT EXISTS ")
+        {
+            // Idempotent database-global fdw setup (H6); nothing to model.
+        } else if text.starts_with("COPY (SELECT ") {
+            // H6 deterministic CSV writer; references no user relation.
+        } else if text.starts_with("ANALYZE ") {
+            let name = ident_prefix(after(text, "ANALYZE ")?)?;
+            self.require_table(name, text)?;
+        } else if let Ok(rest) = after(text, "DROP INDEX ") {
+            let iname = ident_prefix(rest)?;
+            if !self.db.indexes.remove(iname) {
+                return Err(format!("42P01: index '{iname}' does not exist at: {text}"));
+            }
+        } else if let Ok(rest) = after(text, "CREATE TABLE ") {
             let name = ident_prefix(rest)?;
             if !self.db.tables.insert(name.to_string()) {
                 return Err(format!("42P07: relation '{name}' already exists at: {text}"));
@@ -145,7 +175,9 @@ impl RefServer {
                             && !id.starts_with("pg_")
                             && !cte_names.contains(id)
                         {
-                            self.require_table(id, text)?;
+                            // H6-state: foreign tables are readable relations
+                            // too, so route through require_readable.
+                            self.require_readable(id, text)?;
                         }
                         checked_any = true;
                     } else {

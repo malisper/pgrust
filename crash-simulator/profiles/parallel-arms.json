@@ -20,7 +20,7 @@
     "tables_max": 3,
     "cols_min": 3,
     "cols_max": 3,
-    "rows_max": 2000
+    "rows_max": 6000
   },
   "arm_sets": [
     [
