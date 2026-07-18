@@ -231,10 +231,15 @@ fn deconstruct_qualified_name<'a>(names: &[&'a str]) -> PgResult<(Option<&'a str
     match names {
         [objname] => Ok((None, objname)),
         [schemaname, objname] => Ok((Some(schemaname), objname)),
-        [_, _, _] => panic!(
-            "DeconstructQualifiedName (namespace.c): catalog-qualified name arm \
-             (cross-database check) unported"
-        ),
+        // unported: DeconstructQualifiedName (namespace.c) catalog-qualified
+        // arm (needs the get_database_name cross-database check).
+        [_, _, _] => Err(Box::new(
+            PgError::error(format!(
+                "catalog-qualified names are not yet implemented: {}",
+                names.join(".")
+            ))
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        )),
         _ => Err(Box::new(
             PgError::error(format!(
                 "improper qualified name (too many dotted names): {}",
@@ -250,7 +255,12 @@ fn deconstruct_qualified_name<'a>(names: &[&'a str]) -> PgResult<(Option<&'a str
 /// The pg_temp alias arm needs myTempNamespace — loud.
 fn lookup_explicit_namespace(nspname: &str, missing_ok: bool) -> PgResult<Oid> {
     if nspname == "pg_temp" {
-        panic!("LookupExplicitNamespace (namespace.c): pg_temp alias arm unported in adt_regproc");
+        // unported: LookupExplicitNamespace (namespace.c) pg_temp alias arm
+        // (needs myTempNamespace).
+        return Err(Box::new(
+            PgError::error("the pg_temp schema alias is not yet implemented here")
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
     }
     let namespace_id = syscache_seams::lookup_pg_namespace_oid_by_name::call(nspname)?;
     if !OidIsValid(namespace_id) {

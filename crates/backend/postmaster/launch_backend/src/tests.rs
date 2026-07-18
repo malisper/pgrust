@@ -12,6 +12,7 @@ struct ChildSnapshot {
     my_proc_pid: i32,
     is_under_postmaster: bool,
     work_mem: i32,
+    max_safe_fds: i32,
     postmaster_pid: i32,
     data_dir: Option<&'static str>,
     my_latch_set: bool,
@@ -63,6 +64,7 @@ fn install() {
                 my_proc_pid: init_small::globals::MyProcPid(),
                 is_under_postmaster: init_small::globals::IsUnderPostmaster(),
                 work_mem: init_small::globals::work_mem(),
+                max_safe_fds: fd::max_safe_fds(),
                 postmaster_pid: init_small::globals::PostmasterPid(),
                 data_dir: init_small::globals::DataDir(),
                 my_latch_set: init_small::globals::MyLatch().is_some(),
@@ -137,6 +139,9 @@ fn launch_backend_thread_runs_child_init_in_order() {
     .unwrap();
     init_small::globals::SetPostmasterPid(42);
     init_small::globals::SetDataDir("/tmp/pg-launch-test");
+    // PostmasterMain's set_max_safe_fds() result must cross into the child
+    // thread (C: fork inheritance); a stand-in value proves the wire.
+    fd::vfd::set_max_safe_fds_value(987);
 
     let startup = StartupData::Backend(BackendStartupData {
         can_accept_connections: CacState::Ok,
@@ -155,6 +160,7 @@ fn launch_backend_thread_runs_child_init_in_order() {
     assert_eq!(snap.my_proc_pid, pid);
     assert!(snap.is_under_postmaster);
     assert_eq!(snap.work_mem, 4321);
+    assert_eq!(snap.max_safe_fds, 987, "max_safe_fds must inherit into child threads");
     assert_eq!(snap.postmaster_pid, 42);
     assert_eq!(snap.data_dir, Some("/tmp/pg-launch-test"));
     assert!(snap.my_latch_set);

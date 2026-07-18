@@ -643,3 +643,65 @@ fn allocated_desc_indices_stable_across_out_of_order_free() {
     crate::desc::FreeFile(b).unwrap();
     with_fd(|fd| assert!(fd.allocated_descs.is_empty()));
 }
+
+// The TPCC wh100 vu64 finding (notes/fdcap-lane.md): many pg_subtrans SLRU
+// segment fds held open at once by one backend. A thread left at the
+// FD_MINFREE boot default (never handed the postmaster's set_max_safe_fds
+// probe) freezes maxAllocatedDescs at FD_MINFREE/3 = 16; with the probed
+// value applied, reserveAllocatedDesc scales the cap to max_safe_fds/3 and
+// the refusal only fires at the real bound (C fd.c reserveAllocatedDesc).
+#[test]
+fn transient_fd_cap_scales_with_max_safe_fds() {
+    setup();
+    let dir = scratch_dir("fdcap");
+
+    let saved = vfd::max_safe_fds();
+    assert_eq!(
+        saved,
+        ::types_storage::FD_MINFREE,
+        "a fresh thread boots at the FD_MINFREE default"
+    );
+
+    let path_of = |i: usize| format!("{dir}/seg{i:04}");
+    for i in 0..41 {
+        std::fs::write(path_of(i), b"x").unwrap();
+    }
+
+    let mut open_fds = Vec::new();
+    for i in 0..16 {
+        let fd = crate::desc::OpenTransientFile(&path_of(i), libc::O_RDONLY).unwrap();
+        assert!(fd >= 0, "open {i} failed");
+        open_fds.push(fd);
+    }
+
+    // 17th simultaneous open on the un-inherited default: the ladder's error.
+    let err = crate::desc::OpenTransientFile(&path_of(16), libc::O_RDONLY).unwrap_err();
+    assert!(
+        err.message()
+            .contains("exceeded maxAllocatedDescs (16) while trying to open file"),
+        "{err:?}"
+    );
+
+    // The postmaster's probed max_safe_fds arrives (launch_backend Inherited):
+    // the same open now succeeds and the cap scales to max_safe_fds/3.
+    vfd::set_max_safe_fds_value(120);
+    for i in 16..40 {
+        let fd = crate::desc::OpenTransientFile(&path_of(i), libc::O_RDONLY).unwrap();
+        assert!(fd >= 0, "open {i} failed after the cap scaled");
+        open_fds.push(fd);
+    }
+
+    // The guard still holds at the scaled bound, with C's message.
+    let err = crate::desc::OpenTransientFile(&path_of(40), libc::O_RDONLY).unwrap_err();
+    assert!(
+        err.message()
+            .contains("exceeded maxAllocatedDescs (40) while trying to open file"),
+        "{err:?}"
+    );
+
+    for fd in open_fds {
+        assert_eq!(crate::desc::CloseTransientFile(fd), 0);
+    }
+    with_fd(|fd| assert_eq!(crate::vfd::occupied_descs(fd), 0));
+    vfd::set_max_safe_fds_value(saved);
+}

@@ -5,8 +5,8 @@ use ::types_error::{
     make_sqlstate, ErrorLevel, ErrorLocation, PgError, DEBUG1, ERRCODE_CONNECTION_FAILURE,
     ERRCODE_DISK_FULL, ERRCODE_DUPLICATE_FILE, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_INTERNAL_ERROR, ERRCODE_UNDEFINED_FILE, ERROR, FATAL, INFO, LOG,
-    LOG_DESTINATION_CSVLOG, LOG_DESTINATION_JSONLOG, LOG_DESTINATION_STDERR,
-    LOG_DESTINATION_SYSLOG, LOG_SERVER_ONLY, NOTICE, PANIC, WARNING, WARNING_CLIENT_ONLY,
+    LOG_DESTINATION_STDERR, LOG_DESTINATION_SYSLOG, LOG_SERVER_ONLY, NOTICE, PANIC, WARNING,
+    WARNING_CLIENT_ONLY,
 };
 
 use super::*;
@@ -616,22 +616,15 @@ fn assign_backtrace_functions_updates_matcher() {
 #[test]
 fn log_destination_check_accepts_postgres_keywords() {
     assert_eq!(
-        check_log_destination("stderr, csvlog, JSONLOG, syslog").unwrap(),
-        LOG_DESTINATION_STDERR
-            | LOG_DESTINATION_CSVLOG
-            | LOG_DESTINATION_JSONLOG
-            | LOG_DESTINATION_SYSLOG
-    );
-    assert_eq!(
-        check_log_destination("\"stderr\", csvlog").unwrap(),
-        LOG_DESTINATION_STDERR | LOG_DESTINATION_CSVLOG
+        check_log_destination("stderr, syslog").unwrap(),
+        LOG_DESTINATION_STDERR | LOG_DESTINATION_SYSLOG
     );
     assert_eq!(
         check_log_destination("\"STDERR\"").unwrap(),
         LOG_DESTINATION_STDERR
     );
     assert_eq!(
-        check_log_destination("stderr,,csvlog").unwrap_err().message,
+        check_log_destination("stderr,,syslog").unwrap_err().message,
         "List syntax is invalid."
     );
     assert_eq!(
@@ -639,6 +632,26 @@ fn log_destination_check_accepts_postgres_keywords() {
         "Unrecognized key word: \"unknown\"."
     );
     assert!(check_log_destination("eventlog").is_err());
+}
+
+#[test]
+fn log_destination_check_rejects_unported_writers() {
+    // csvlog/jsonlog are recognized keywords whose writer seams are unported;
+    // accepting them panicked per log line inside error reporting (seam-audit
+    // F2). They are rejected at check time — with a message distinct from the
+    // unrecognized-keyword one — until write_csvlog/write_jsonlog land.
+    assert_eq!(
+        check_log_destination("csvlog").unwrap_err().message,
+        "Destination \"csvlog\" is not supported in this build."
+    );
+    assert_eq!(
+        check_log_destination("stderr, JSONLOG").unwrap_err().message,
+        "Destination \"jsonlog\" is not supported in this build."
+    );
+    assert_eq!(
+        check_log_destination("\"stderr\", csvlog").unwrap_err().message,
+        "Destination \"csvlog\" is not supported in this build."
+    );
 }
 
 #[test]
