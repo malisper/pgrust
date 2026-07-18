@@ -2699,3 +2699,114 @@ fn sorted_emit_acc_round_trip() {
         assert_eq!(&got[4..], b"hello");
     }
 }
+
+// q18fin r3 red/green unit — byref merge under variable hash IVs (the t26
+// integration ledger's "q18fin-t26-r2 re-earn verdict" defect). Participants
+// (leader partial = worker -1, workers 0 and 1) build their partial tables
+// with per-participant hash IVs (execGrouping.c parity — the q18
+// parallel-finalize stall fix), but the byref finalize merge compares STORED
+// hashes across the handed tables AND the finalize's own IV=0 table (parts[0]
+// of consume_handoff). Without the export-boundary rebase
+// (TupleHashTable::hash_to_iv0 in export_handed_table), the same key carries
+// a different hash per participant: radix buckets diverge (partition by
+// hash>>24), equal keys never match in the bucket probe (h == e.hash() gate),
+// and every group emits once PER PARTICIPANT — select_parallel's
+// `select length(stringu1) from tenk1 group by length(stringu1)` under a
+// Finalize HashAggregate returned 5 duplicate rows of the single group
+// (4 workers + leader), and write_parallel's parallel matview CREATE then
+// failed its unique index. RED at q18fin-t26-r2 (exports copy worker-IV
+// hashes verbatim); GREEN with the r3 rebase.
+#[test]
+fn byref_merge_handed_tables_share_leader_bucket_mapping_under_variable_iv() {
+    install_seams();
+    let ctx = MemoryContext::new("q18r3-byref-iv");
+    let mcx = ctx.mcx();
+    let table_ctx = MemoryContext::new("q18r3-entries");
+    let desc = one_col_desc(mcx, INT4OID, 4, TYPALIGN_INT);
+    // The repro's shape: a handful of int4 groups, identical in every
+    // participant (kinds = [] — the repro query has no aggregates at all).
+    let keys: [i32; 3] = [6, 42, -1];
+
+    let build_filled = |iv: u32| {
+        // hashint4 / int4eq, additionalsize 0, as the repro's plain GROUP BY.
+        let mut table = ::execgrouping::build_tuple_hash_table_with_iv(
+            mcx,
+            &desc,
+            &[1],
+            &[F_INT4EQ],
+            &[F_HASHINT4],
+            &[0],
+            16,
+            0,
+            iv,
+        )
+        .unwrap();
+        let mut slot =
+            exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(desc.clone()));
+        for &k in &keys {
+            exectuples::exec_clear_tuple(&mut slot, mcx);
+            slot.base_mut().tts_values[0] = Datum::from_i32(k);
+            slot.base_mut().tts_isnull[0] = false;
+            exectuples::exec_store_virtual_tuple(&mut slot);
+            let hash = table.hash_slot(&mut slot).unwrap();
+            let (ix, _) = table.lookup(&mut slot, hash, Some(table_ctx.mcx()), mcx).unwrap();
+            ix.unwrap();
+        }
+        table
+    };
+
+    // The finalize's own row-built table: IV 0 (AGGSPLIT_FINAL_DESERIAL never
+    // sets use_variable_hash_iv) — the reference mapping every handed source
+    // must be comparable with.
+    let finalize_table = build_filled(0);
+
+    // Per-participant IVs exactly as build_tuple_hash_table derives them:
+    // murmurhash32(ParallelWorkerNumber). Worker 0 is C's quirk (IV == 0).
+    let participant_ivs: [u32; 3] = [
+        ::hashfn::murmurhash32(-1i32 as u32), // leader-participation partial
+        ::hashfn::murmurhash32(0),            // worker 0
+        ::hashfn::murmurhash32(1),            // worker 1
+    ];
+    let handed: Vec<crate::merge::HandedAggTable> = participant_ivs
+        .iter()
+        .map(|&iv| {
+            let table = build_filled(iv);
+            // The REAL install export core (install_classic_handoff's body).
+            crate::merge::export_handed_table(&table, &[], 0, false)
+        })
+        .collect();
+
+    // The byref-merge invariant (docs in export_handed_table): every source's
+    // stored hash for the same key must equal the finalize table's — one
+    // bucket mapping across parts[0] + all handed tables. Entries are in
+    // insertion order on both sides, so index j <=> keys[j].
+    for (j, &k) in keys.iter().enumerate() {
+        let expect = finalize_table.entries()[j].hash();
+        for (t, &iv) in handed.iter().zip(&participant_ivs) {
+            assert_eq!(
+                t.entries()[j].hash(),
+                expect,
+                "handed hash for key {k} from participant iv={iv:#x} must ride the leader's IV=0 mapping",
+            );
+        }
+    }
+
+    // The observable defect: merged group count. The bucket merge unifies
+    // entries agreeing on (bucket, hash, key); with identical keys per
+    // source, distinct stored hashes per key index == distinct emitted
+    // groups. r2 emitted one per PARTICIPANT (the 5-duplicate-rows repro).
+    let mut groups = std::collections::HashSet::new();
+    for (j, e) in finalize_table.entries().iter().enumerate() {
+        groups.insert((j, e.hash()));
+    }
+    for t in &handed {
+        for (j, e) in t.entries().iter().enumerate() {
+            groups.insert((j, e.hash()));
+        }
+    }
+    assert_eq!(
+        groups.len(),
+        keys.len(),
+        "one merged group per key — duplicate finalize groups otherwise (write_parallel unique-index class)",
+    );
+}

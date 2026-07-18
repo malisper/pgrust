@@ -1947,7 +1947,12 @@ fn init_perhash<'mcx>(
         node.grpCollations,
         nbuckets,
         additionalsize,
-        false,
+        // C build_hash_table: DO_AGGSPLIT_SKIPFINAL(aggsplit) — partial aggs
+        // (each parallel participant, leader included) get a per-worker hash
+        // IV so their bucket-order EMISSION doesn't feed the finalize's
+        // identically-mapped table in hash order (q18fin lane: that
+        // correlation cost 104e9 probes / ~500s on TPROC-H q18's finalize).
+        node.aggsplit & AGGSPLITOP_SKIPFINAL != 0,
     )?;
     let hashslot =
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(hash_desc.clone()));
