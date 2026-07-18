@@ -470,7 +470,7 @@ pub fn logicalrep_worker_stop(subid: Oid, relid: Oid) -> PgResult<()> {
     let Some(slot) = logicalrep_worker_find(subid, relid, false) else {
         return Ok(());
     };
-    logicalrep_worker_stop_internal(slot, libc::SIGTERM)
+    logicalrep_worker_stop_internal(slot, procsignal::signums::SIGTERM)
 }
 
 fn logicalrep_worker_stop_internal(slot: usize, signo: i32) -> PgResult<()> {
@@ -764,8 +764,13 @@ pub fn ApplyLauncherMain(_main_arg: u64) -> PgResult<()> {
     }
     let _onexit = OnExit;
 
-    procsignal::pqsignal_thread(libc::SIGHUP, Simple(interrupt::SignalHandlerForConfigReload));
-    procsignal::pqsignal_thread(libc::SIGTERM, Fallible(postgres::die));
+    // procsignal::signums, not libc::SIG*: the wasi libc crate exposes no
+    // SIG* names (thread-signal emulation numbering, signums law).
+    procsignal::pqsignal_thread(
+        procsignal::signums::SIGHUP,
+        Simple(interrupt::SignalHandlerForConfigReload),
+    );
+    procsignal::pqsignal_thread(procsignal::signums::SIGTERM, Fallible(postgres::die));
     bgworker::BackgroundWorkerUnblockSignals();
 
     // Connection to nailed catalogs (we only ever access pg_subscription).
@@ -819,7 +824,9 @@ pub fn ApplyLauncherMain(_main_arg: u64) -> PgResult<()> {
         let rc = latch::WaitLatch(
             g::MyLatch(),
             WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
-            wait_time as core::ffi::c_long,
+            // WaitLatch takes i64, not c_long: c_long is i32 on wasm32
+            // (ILP32) — identical on LP64 native.
+            wait_time as i64,
             WAIT_EVENT_LOGICAL_LAUNCHER_MAIN,
         )?;
         if rc & WL_LATCH_SET != 0 {

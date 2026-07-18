@@ -537,12 +537,14 @@ pub fn install_thread_signal_handlers() {
     if walsender_seams::am_walsender()
         && walsender_seams::wal_snd_last_cycle_handler::is_installed()
     {
+        // procsignal::signums, not libc::SIG*: the wasi libc crate exposes
+        // no SIG* names (thread-signal emulation numbering, signums law).
         procsignal::pqsignal_thread(
-            libc::SIGUSR2,
+            procsignal::signums::SIGUSR2,
             Simple(|| walsender_seams::wal_snd_last_cycle_handler::call()),
         );
     } else {
-        procsignal::pqsignal_thread(libc::SIGUSR2, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGUSR2, Ignore);
     }
     procsignal::pqsignal_thread(libc::SIGFPE, Fallible(FloatExceptionHandler));
     procsignal::pqsignal_thread(libc::SIGCHLD, Ignore);
