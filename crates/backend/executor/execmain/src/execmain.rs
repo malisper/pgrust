@@ -305,6 +305,22 @@ pub(crate) fn executor_finish_and_park_seam(h: QueryDescHandle) -> PgResult<bool
 // executions).
 const SKELETON_RETAIN_MAX_BYTES: usize = 256 * 1024;
 
+// PROCPERF P2 compile-economy threshold (see the economy_window call site in
+// standard_executor_start): plans whose total_cost is below this run their
+// expression compiles without the per-row-payoff ready passes. 0.0 disables.
+// Latched once per process.
+fn execexpr_economy_threshold() -> f64 {
+    static T: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *T.get_or_init(|| match std::env::var("PGRUST_EXECEXPR_ECONOMY") {
+        Err(_) => 1000.0,
+        Ok(v) => match v.trim() {
+            "" => 1000.0,
+            "0" | "off" | "false" => 0.0,
+            s => s.parse().unwrap_or(1000.0),
+        },
+    })
+}
+
 // replanfix increment-1 kill switch: PGRUST_EXEC_SKELETON_CUSTOM_GATE=0
 // restores the pre-gate behavior (custom plans pay skeleton-candidate
 // ceremony at executor start). Latched once per process.
@@ -811,6 +827,23 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
         es.es_top_eflags = eflags;
         es.es_instrument = instrument;
         es.es_jit_flags = pstmt.jitFlags;
+        // PROCPERF P2 compile economy: OLTP-cheap statements recompile their
+        // expression programs on every execution (SPI statements in stored
+        // procedure bodies, unprepared point queries), and the per-row-payoff
+        // ready passes (lane-v2 censuses + fusion peephole) never amortize at
+        // point-plan row counts — C runs no equivalent work. Arm execexpr's
+        // economy window over InitPlan when the planner's own work estimate
+        // is below the threshold; same thread-local-window shape as the jit
+        // flags below. Kill switch / tuning: PGRUST_EXECEXPR_ECONOMY=0
+        // disables, =<cost> retunes (default 1000).
+        let economy_threshold = execexpr_economy_threshold();
+        let _economy = ::execexpr::economy_window(
+            economy_threshold > 0.0
+                && pstmt
+                    .planTree
+                    .and_then(|n| n.as_plan())
+                    .is_some_and(|p| p.total_cost < economy_threshold),
+        );
         // C jit_compile_expr reads es_jit_flags through the PlanState parent;
         // expression compile has no estate linkage here, so the flags ride a
         // thread-local window over InitPlan and the kernels come back through

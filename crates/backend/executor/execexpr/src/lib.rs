@@ -27,6 +27,7 @@ mod steps;
 mod tests;
 
 pub use compile::{
+    economy_window, EconomyWindow,
     erase_fn_expr, exec_build_agg_projection_info, exec_build_agg_projection_info_subplans,
     exec_build_agg_qual, exec_build_agg_qual_subplans, exec_build_agg_trans,
     exec_build_window_projection_info, exec_build_window_projection_info_subplans,

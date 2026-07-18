@@ -431,7 +431,25 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      fd thread_local counts identical to main; vfs product code adds
     //      zero TLS). DST test infrastructure only: no session identity,
     //      no state movement, never compiled into a shipped binary.
-    assert_eq!(count_tree(crates), 494, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 496, spi-compile-residual lane (renumbered 35/36 over the t26+DST slots at the train-27 merge)
+    // original header: 481, spi-compile-residual lane (fix/spi-compile-residual, PROCPERF P2):
+    //   35. executor/execexpr/src/compile.rs COMPILE_ECONOMY — Cell<bool>
+    //      compile-cost-policy window armed by standard_executor_start over
+    //      InitPlan of cost-gated-cheap statements and RAII-restored
+    //      (EconomyWindow) before the start seam returns; it never spans a
+    //      statement boundary, carries no session state, and only chooses
+    //      whether ready_expr runs its per-row-payoff passes — never a
+    //      result byte. Same transient-window class as execexpr's jit
+    //      session collector.
+    //   36. pl/plpgsql/src/handler.rs PL_GUC_VALUES — Cell<Option<..>>
+    //      derived cache of the parsed plpgsql.* GUC values keyed by the
+    //      GUC store's per-thread mutation counter (store_mutation_count;
+    //      the guc::layers cache-key pattern). Deliberately non-session
+    //      TLS: it caches nothing a session owns — it memoizes a pure
+    //      function of THIS thread's GUC store, and any session
+    //      bind/unbind/SET/RESET/xact-revert mutates that store through
+    //      with_store_mut, which bumps the key and invalidates the entry.
+    assert_eq!(count_tree(crates), 496, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
