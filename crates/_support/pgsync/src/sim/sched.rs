@@ -459,7 +459,21 @@ impl Scheduler {
             inner.slots[slot.0].vpid
         };
         CURRENT.with(|c| {
-            *c.borrow_mut() = Some(Current {
+            let mut cur = c.borrow_mut();
+            // permit-s2 review NB-4 / W-S2-1 "one door per thread", now an
+            // ASSERT (permit-s4): a thread entering a second door used to
+            // silently overwrite its binding and self-wedge into a 30s
+            // watchdog dump; this turns it into an immediate symbolic panic
+            // naming both bindings. register_self routes through here too.
+            if let Some(prev) = cur.as_ref() {
+                panic!(
+                    "pgsync sim scheduler: thread entered a second door \
+                     (one-door law, W-S2-1): already bound to vpid {:#x}, \
+                     now entering as vpid {vpid:#x} at {site}",
+                    prev.vpid
+                );
+            }
+            *cur = Some(Current {
                 sched: self.clone(),
                 idx: slot.0,
                 vpid,
