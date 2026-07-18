@@ -912,6 +912,11 @@ fn preprocess_rte_expressions<'mcx>(
             }
             _ => {}
         }
+        // Re-derive the shared ref: the with_mut arms above invalidated the
+        // pre-match `rte` (with_mut contract, node_tree.rs — no reference
+        // derived before the mutation may be used during or after it).
+        // (Miri F5, notes/miri-pilot-lane.md.)
+        let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
         if !rte.securityQuals.is_nil() {
             let mut quals = types_nodes::list::NodeList::nil();
             for sq in &rte.securityQuals {
