@@ -50,10 +50,12 @@ struct RefServer {
     savepoints: Vec<(String, Db)>,
 }
 
-/// First identifier token starting at `rest` (ends at space, '(' or ';').
+/// First identifier token starting at `rest` (ends at space, '(', ')', ','
+/// or ';' — ')' and ',' close H6 subquery/CTE bodies, e.g.
+/// `... (SELECT id FROM t1)`).
 fn ident_prefix(rest: &str) -> Result<&str, String> {
     let end = rest
-        .find(|c: char| c == ' ' || c == '(' || c == ';')
+        .find(|c: char| c == ' ' || c == '(' || c == ')' || c == ',' || c == ';')
         .ok_or_else(|| format!("cannot find identifier end in '{rest}'"))?;
     let id = &rest[..end];
     if id.is_empty() {
@@ -102,6 +104,13 @@ impl RefServer {
             let name = ident_prefix(rest)?;
             self.require_table(name, text)?;
             self.db.tables.remove(name);
+        } else if text.starts_with("MERGE INTO ") {
+            // H6 dml:merge — key-addressed MERGE; only the target must exist
+            // (the USING source is a constant VALUES list). Checked BEFORE
+            // the substring-matched UPDATE/DELETE branches: the WHEN MATCHED
+            // action text contains "UPDATE SET".
+            let rest = after(text, "MERGE INTO ")?;
+            self.require_table(ident_prefix(rest)?, text)?;
         } else if let Ok(rest) = after(text, "INSERT INTO ") {
             self.require_table(ident_prefix(rest)?, text)?;
         } else if let Ok(rest) = after(text, "UPDATE ") {
@@ -110,18 +119,32 @@ impl RefServer {
             self.require_table(ident_prefix(rest)?, text)?;
         } else if let Ok(rest) = after(text, "TRUNCATE ") {
             self.require_table(ident_prefix(rest)?, text)?;
-        } else if text.starts_with("SELECT ") {
+        } else if text.starts_with("SELECT ") || text.starts_with("WITH ") {
             // Every FROM/JOIN relation target must exist. SRF calls
-            // (unnest/generate_series — H4 function-call grammar) and
-            // pg_catalog relations always exist; subquery parens recurse via
-            // their own inner FROM occurrence.
+            // (unnest/generate_series — H4 function-call grammar),
+            // json_table (H6 table-function grammar), and pg_catalog
+            // relations always exist; subquery parens recurse via their own
+            // inner FROM occurrence; CTE names (H6 WITH grammar) are
+            // statement-local relations.
+            let mut cte_names: BTreeSet<String> = BTreeSet::new();
+            if let Ok(rest) = after(text, "WITH ") {
+                // Our grammar emits exactly one CTE per statement:
+                // `WITH [RECURSIVE] <name>[(cols)] AS ...`.
+                let rest = rest.strip_prefix("RECURSIVE ").unwrap_or(rest);
+                cte_names.insert(ident_prefix(rest)?.to_string());
+            }
             let mut checked_any = false;
             for kw in [" FROM ", " JOIN "] {
                 let mut hay = text;
                 while let Ok(rest) = after(hay, kw) {
                     if !rest.starts_with('(') {
                         let id = ident_prefix(rest)?;
-                        if id != "unnest" && id != "generate_series" && !id.starts_with("pg_") {
+                        if id != "unnest"
+                            && id != "generate_series"
+                            && id != "json_table"
+                            && !id.starts_with("pg_")
+                            && !cte_names.contains(id)
+                        {
                             self.require_table(id, text)?;
                         }
                         checked_any = true;
@@ -131,8 +154,11 @@ impl RefServer {
                     hay = rest;
                 }
             }
-            if !checked_any {
-                return Err(format!("SELECT without FROM target: {text}"));
+            // H6 res:no-from — a FROM-less constant SELECT is valid; only a
+            // statement that HAS a FROM the scanner failed to check is a
+            // parse-model gap.
+            if !checked_any && text.contains(" FROM ") {
+                return Err(format!("SELECT with unparsed FROM target: {text}"));
             }
         } else {
             return Err(format!("unrecognized statement shape: {text}"));
