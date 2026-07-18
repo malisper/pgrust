@@ -345,14 +345,42 @@ fn capture_positioned<'mcx>(
     }
 }
 
-/// Seam impl (execmain_seams::cursor_capture_probe, escalation EX-CA-1).
-pub(crate) fn cursor_capture_probe_seam(query_desc: ::types_portal::QueryDescHandle) -> bool {
-    querydesc::with_qd(query_desc, |qd| {
-        let Some(exec) = qd.exec.as_mut() else {
-            return false;
-        };
-        exec.with_mut(|d| d.planstate.as_ref().is_some_and(|root| has_capturable_scan(root)))
-    })
+/// The PLAN-tree twin of the wildcard walk: the §4.1 shape test as run at
+/// PortalStart, BEFORE ExecutorStart fixes the eflags. Same spine as
+/// `search_plan_tree` (and as `has_capturable_scan` above, which asserts the
+/// two agree at fill time).
+fn plan_has_capturable_scan(node: Option<::types_nodes::node_tree::Node<'_>>) -> bool {
+    use ::types_nodes::NodeTag;
+    let Some(node) = node else {
+        return false;
+    };
+    let plan = node.as_plan().expect("plan-tree node has a Plan prefix");
+    match node.node_tag() {
+        NodeTag::T_SeqScan
+        | NodeTag::T_SampleScan
+        | NodeTag::T_IndexScan
+        | NodeTag::T_IndexOnlyScan
+        | NodeTag::T_TidScan
+        | NodeTag::T_TidRangeScan
+        | NodeTag::T_BitmapHeapScan => true,
+        NodeTag::T_Append => {
+            let a = node.as_append().expect("T_Append");
+            a.appendplans.iter().any(|p| plan_has_capturable_scan(Some(p)))
+        }
+        NodeTag::T_Result | NodeTag::T_Limit => plan_has_capturable_scan(plan.lefttree),
+        NodeTag::T_SubqueryScan => {
+            plan_has_capturable_scan(node.as_subquery_scan().expect("T_SubqueryScan").subplan)
+        }
+        _ => false,
+    }
+}
+
+/// Seam impl (execmain_seams::cursor_plan_current_of_eligible, escalation
+/// EX-CA-1): the §4.1 eligibility answer for PortalStart's arming decision.
+pub(crate) fn cursor_plan_current_of_eligible_seam(
+    pstmt: &::types_nodes::plannodes::PlannedStmt<'_>,
+) -> bool {
+    plan_has_capturable_scan(pstmt.planTree)
 }
 
 /// Seam impl (execmain_seams::cursor_capture_current, escalation EX-CA-1).

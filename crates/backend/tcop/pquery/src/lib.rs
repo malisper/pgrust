@@ -393,9 +393,22 @@ pub fn PortalStart(
                 // store, rewind is a store rescan — so the child gets NEITHER
                 // flag. Knob-OFF keeps C's arm verbatim (deleted at flip,
                 // contract §6 item 1).
+                //
+                // D-CA-2 (worklog): CURRENT-OF-ELIGIBLE armed portals keep
+                // C's flags. Their fill must be the row chain (§3.3 — the
+                // per-row identity capture reads the scan state, which only
+                // the row chain maintains); the batch engine's standing
+                // eflags refusal (batch_allowed = no BACKWARD|MARK) is the
+                // in-fence mechanism forcing that until WS-CB's named
+                // cursor-currentof-tidcapture reason supersedes it. The
+                // store still serves every fetch either way
+                // (fill-strategy invisibility, §2.3).
                 let scroll = (portal.borrow().cursorOptions & CURSOR_OPT_SCROLL) != 0;
                 let store_armed = scroll && portalmem::cursor_store_enabled();
-                let myeflags = if scroll && !store_armed {
+                let current_of_eligible = store_armed
+                    && execmain_seams::cursor_plan_current_of_eligible::is_installed()
+                    && execmain_seams::cursor_plan_current_of_eligible::call(&stmts[0]);
+                let myeflags = if scroll && (!store_armed || current_of_eligible) {
                     eflags | EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD
                 } else {
                     eflags
@@ -413,7 +426,14 @@ pub fn PortalStart(
                 p.atStart = true;
                 p.atEnd = false; /* allow fetches */
                 p.portalPos = 0;
-                p.cursorStoreArmed = store_armed; // WS-CA wave-10
+                // WS-CA wave-10: arming + the §4.1 eligibility answer are
+                // both PortalStart-fixed (the fill and execCurrentOf read
+                // them; the wildcard planstate walk at capture time agrees
+                // with the plan-shape answer by construction).
+                p.cursorStoreArmed = store_armed;
+                if store_armed {
+                    p.currentOfEligible = Some(current_of_eligible);
+                }
                 drop(p);
 
                 snapmgr::PopActiveSnapshot()?;
@@ -1270,25 +1290,26 @@ fn cursor_read_store(portal: &Portal<'static>) -> TuplestoreHandle {
 /// plans.
 fn ensure_cursor_store(portal: &Portal<'static>) -> PgResult<()> {
     debug_assert!(portal.borrow().cursorStoreArmed);
-    {
+    let hold = (portal.borrow().cursorOptions & CURSOR_OPT_HOLD) != 0;
+    let store_missing = {
         let p = portal.borrow();
-        if !p.cursorStore.is_null() || !p.holdStore.is_null() {
-            return Ok(());
+        p.cursorStore.is_null() && p.holdStore.is_null()
+    };
+    if store_missing {
+        if hold {
+            portalmem::PortalCreateHoldStore(portal)?;
+        } else {
+            let store = tuplestore_hold_seams::tuplestore_begin_heap_cursor::call(true, false)?;
+            portal.borrow_mut().cursorStore = store;
         }
     }
-    let hold = (portal.borrow().cursorOptions & CURSOR_OPT_HOLD) != 0;
-    if hold {
-        portalmem::PortalCreateHoldStore(portal)?;
-    } else {
-        let store = tuplestore_hold_seams::tuplestore_begin_heap_cursor::call(true, false)?;
-        portal.borrow_mut().cursorStore = store;
-    }
-    // §4.1: the eligibility shape test runs once per portal. Uninstalled seam
-    // (unit fixtures that don't exercise CURRENT OF) probes ineligible.
-    let eligible = execmain_seams::cursor_capture_probe::is_installed()
-        && execmain_seams::cursor_capture_probe::call(portal.borrow().queryDesc);
-    portal.borrow_mut().currentOfEligible = Some(eligible);
-    if eligible {
+    // §4.1: the eligibility answer was fixed at PortalStart (plan shape).
+    // Checked independently of store creation: a never-run WITH HOLD cursor
+    // reaches its first fill at COMMIT with the holdStore already minted by
+    // HoldPortal — the sidecar must still ride along.
+    if portal.borrow().currentOfEligible == Some(true)
+        && portal.borrow().cursorTidStore.is_null()
+    {
         let sidecar = tuplestore_hold_seams::tuplestore_begin_heap_cursor::call(true, hold)?;
         portal.borrow_mut().cursorTidStore = sidecar;
     }

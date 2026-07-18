@@ -336,12 +336,17 @@ seam_core::seam!(
 // precedent shape). -----------------------------------------------------------
 
 seam_core::seam!(
-    // §4.1 eligibility probe, run once per store-armed portal at first fill:
-    // true iff search_plan_tree's spine walk over the live planstate can ever
-    // resolve a simply-updatable scan (any table). false ⇒ the per-table walk
-    // can never succeed, so no row identity is captured and execCurrentOf
-    // reaches only C's error arms.
-    pub fn cursor_capture_probe(query_desc: QueryDescHandle) -> bool
+    // §4.1 eligibility shape test, run once per SCROLL portal at PortalStart
+    // (BEFORE ExecutorStart fixes the eflags): true iff search_plan_tree's
+    // spine can ever resolve a simply-updatable scan of this plan. Eligible
+    // armed portals keep C's REWIND|BACKWARD child flags so the fill drive
+    // stays on the row chain (the contract §3.3 carve-out; the batch engine's
+    // eflags refusal is the interim mechanism until WS-CB's named
+    // cursor-currentof-tidcapture reason supersedes it). false ⇒ the
+    // per-table walk can never succeed: no capture, error arms only.
+    pub fn cursor_plan_current_of_eligible<'p, 'a>(
+        pstmt: &'p PlannedStmt<'a>,
+    ) -> bool
 );
 
 seam_core::seam!(
