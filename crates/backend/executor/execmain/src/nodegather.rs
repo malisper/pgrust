@@ -45,21 +45,24 @@ pub struct GatherState<'mcx> {
     width_lease: Option<runtime::ParallelWidthLease>,
 }
 
-/// `PGRUST_RUNTIME_LEDGER_GATHER` (wave-2 R-KNOBS registry, WS-O; default
-/// OFF): Gather/GatherMerge launch width rides an admission-ledger width
-/// lease. REQUIRES the ledger (`PGRUST_RUNTIME_LEDGER_V2`) — with the
-/// ledger off (or no runtime, or the 64-lease cap) the seam FAILS OPEN to
-/// today's launch exactly. Read once.
-pub(crate) fn ledger_gather_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        matches!(std::env::var("PGRUST_RUNTIME_LEDGER_GATHER").as_deref(), Ok("1") | Ok("on"))
-    })
-}
+// The gang-width knob consult (PHASE3-CLOSE WS-WIDTH §2.5): the WS-O
+// `ledger_gather_enabled()` OnceLock collapsed into ONE
+// `runtime::gang_width_face()` read resolving BOTH knobs —
+// `PGRUST_RUNTIME_LEDGER_GATHER` (WS-O wave-2 external face; wave-2
+// R-KNOBS registry) and `PGRUST_RUNTIME_WIDTH_UNIFIED` (unified pool-face
+// gang entries; PHASE3-CLOSE R-KNOBS registry). Unified takes precedence
+// when both are set (the mirror line names the shadowing). Both REQUIRE
+// the ledger (`PGRUST_RUNTIME_LEDGER_V2`) — with the ledger off (or no
+// runtime, or the face's 64-entry capacity) the seam FAILS OPEN to
+// today's launch exactly. The knob-OFF budget pin (§2.6): both knobs off
+// costs exactly the ONE OnceLock read the WS-O seam already paid — zero
+// reads beyond it.
 
-/// The launch-width seam (WS-O inc-1b, both gather nodes): lease external
-/// width for the gang and clamp the context's launch count to the grant
-/// through C's own lower-the-launch mechanism
+/// The launch-width seam (WS-O inc-1b, both gather nodes; face routing by
+/// PHASE3-CLOSE WS-WIDTH): lease gang width from the admission ledger
+/// (unified pool face or WS-O external face per the knob consult) and
+/// clamp the context's launch count to the grant through C's own
+/// lower-the-launch mechanism
 /// (`ReinitializeParallelWorkers` / `nworkers_to_launch`) — DSM and queue
 /// sizing stay at plan width, only fewer workers launch, exactly the
 /// C-parity "launched < planned" shape every reader already handles.
@@ -69,23 +72,42 @@ pub(crate) fn ledger_gather_enabled() -> bool {
 /// knob and runtime presence are process-static, and a cap refusal leaves
 /// the count at the previous startup's value only if THAT startup leased,
 /// so the fail-open arm restores the plan width defensively).
+///
+/// STATED DIVERGENCE — PINNED (PHASE3-CLOSE FM-1; do NOT "fix"): C
+/// degrades to fewer/zero launched workers on bgworker-slot exhaustion;
+/// under these knobs we ADDITIONALLY degrade on ledger width saturation.
+/// Advisory policy only — plan bytes and result bytes are identical,
+/// the divergence is visible ONLY in launch counts. The degrade shape is
+/// C's own (fewer/zero via this clamp, leader-local scan serves); it must
+/// NEVER become a blocking wait, an error, or a re-plan. FM-3 rider:
+/// sustained saturation serializes every relaunch (per-startup cadence) —
+/// accepted, and VISIBLE via `gang_zero_grants` + the width mirror line;
+/// a measured real-workload regression escalates to a BOARD decision
+/// (gang minimum-grant floor), never silent code.
+///
+/// Returns the lease AND the consulted face (the §2.4 mirror's
+/// engine-of-record input — carrying it avoids a second OnceLock read on
+/// the knob-OFF path).
 pub(crate) fn lease_gather_width(
     pcxt: parallel::ParallelContextId,
     num_workers: i32,
-) -> Option<runtime::ParallelWidthLease> {
-    if !ledger_gather_enabled() {
-        return None;
+) -> (Option<runtime::ParallelWidthLease>, runtime::GangWidthFace) {
+    let face = runtime::gang_width_face();
+    if face == runtime::GangWidthFace::Off {
+        return (None, face);
     }
-    let rt = runtime::global()?;
+    let Some(rt) = runtime::global() else {
+        return (None, face);
+    };
     if !rt.ledger_enabled() {
-        return None;
+        return (None, face);
     }
     let lease = rt.lease_parallel_width(num_workers.max(0) as u32);
     let clamp = lease
         .as_ref()
         .map_or(num_workers, |l| l.granted().min(i32::MAX as u32) as i32);
     parallel::ReinitializeParallelWorkers(pcxt, clamp);
-    lease
+    (lease, face)
 }
 
 /// Post-launch settle: charge only the gang's ACTIVE width (launched may
@@ -200,7 +222,8 @@ fn gather_startup<'mcx>(
         // the launch untouched). Acquired per startup — a rescan relaunch
         // re-leases against the headroom of ITS moment.
         debug_assert!(node.width_lease.is_none(), "lease survived a shutdown");
-        node.width_lease = lease_gather_width(pei.pcxt, gather.num_workers);
+        let (lease, _face) = lease_gather_width(pei.pcxt, gather.num_workers);
+        node.width_lease = lease;
         parallel::LaunchParallelWorkers(pei.pcxt)?;
         node.nworkers_launched = parallel::nworkers_launched(pei.pcxt);
         settle_gather_width(&mut node.width_lease, node.nworkers_launched);
