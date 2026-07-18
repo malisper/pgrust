@@ -7,21 +7,32 @@
 # WHAT IT FENCES: every raw nondeterminism primitive the DST program must
 # eventually virtualize. Six categories, each a per-line grep over production
 # code, diffed against a budgeted allowlist:
-#   fs        raw std::fs / File:: / OpenOptions / read_dir / fsync-family IO
+#   fs        raw std::fs / File:: / OpenOptions / read_dir / fsync-family IO,
+#             `use std::fs::{...}` / `use std::fs::*` import declarations, and
+#             the libc fs/fd syscall surface (libc::open/read/write/pread/
+#             fsync/stat/rename/fcntl/dup/stdio-FILE*/…, incl. the
+#             libc::syscall escape hatch)
 #             (sanctioned surface: the fd/vfd layer — the P1 Vfs choke, §2.1)
-#   time      SystemTime / Instant / UNIX_EPOCH / .elapsed( / duration_since
+#   time      SystemTime / Instant / UNIX_EPOCH / .elapsed( / duration_since,
+#             plus libc::clock_gettime / gettimeofday / time
 #             (sanctioned: waiter::clock::WaiterClock + timestamp_seams, §2.2)
 #   rand      raw OS entropy: getrandom/getentropy/urandom, rand::/OsRng/
-#             StdRng/thread_rng/from_entropy. Calls to pg_strong_random are
-#             NOT flagged — that crate IS the sanctioned entropy funnel
-#             (§2.3); only its internals appear in the ledger.
-#   spawn     thread::spawn / thread::Builder
+#             StdRng/thread_rng/from_entropy (bare-name patterns, so
+#             libc::getrandom / libc::getentropy are caught too). Calls to
+#             pg_strong_random are NOT flagged — that crate IS the sanctioned
+#             entropy funnel (§2.3); only its internals appear in the ledger.
+#   spawn     thread::spawn / thread::Builder / libc::fork / pthread_create
 #             (sanctioned: launch_backend's spawner seam — the spawn door, §3.3)
-#   env       std::env::var/var_os/vars/vars_os
+#   env       std::env::var/var_os/vars/vars_os/set_var/remove_var — at call
+#             sites AND at `use std::env::var`-style import declarations —
+#             plus `use std::env::{...}` / `::*` groups and
+#             libc::getenv/setenv/unsetenv/putenv
 #             (sanctioned-to-be: the P2 knobs registry, §2.5)
-#   blocking  raw std::sync::Condvar / mpsc / crossbeam channels / thread::park
-#             outside the waiter/pg_barrier/runtime hubs (§3.3 token invariant;
-#             conversion precedent: runtime/src/rg.rs onto the Waiter)
+#   blocking  raw std::sync::Condvar / mpsc / crossbeam channels / thread::park,
+#             plus thread::sleep and libc::nanosleep/usleep/sleep (sleeps are
+#             invisible to a virtual clock), outside the waiter/pg_barrier/
+#             runtime hubs (§3.3 token invariant; conversion precedent:
+#             runtime/src/rg.rs onto the Waiter)
 #
 # PRODUCTION CODE = crates/**/*.rs minus tests|test|benches|examples dirs,
 # tests.rs/test.rs/*_test(s).rs/build.rs basenames, brace-matched
@@ -34,9 +45,40 @@
 # deleted. A new raw site fails this lint. The fix is to route it through
 # the sanctioned surface for its category — or, if a reviewer deliberately
 # accepts a new raw site, add a row carrying a "DST-REVIEW(<who>): <why>"
-# marker (the lint recognizes marker rows and reports them as NOTEs so every
-# train diff shows them). Rows whose sites vanished get a stale WARN: delete
-# them. Rows whose sites shrank get a shrink WARN: lower the budget.
+# marker. Marker discipline on NEW/RAISED rows is enforced by HUMAN REVIEW
+# of allowlist diffs — this lint cannot distinguish a new row from a seeded
+# one. What the lint machine-enforces: malformed DST-REVIEW text, duplicate
+# rows, and budget<1 are CONFIG-FAILs (exit 2), and every marker row is
+# surfaced as a NOTE on every run so train diffs carry exceptions visibly.
+# Rows whose sites vanished get a stale WARN: delete them. Rows whose sites
+# shrank get a shrink WARN: lower the budget.
+#
+# ACCEPTED LIMITS of a grep-family ratchet (ledgered 2026-07-17, review
+# dst/p0-fencing-lint; each was weighed and deliberately not chased):
+#   * a "site" is a matched LINE: two calls joined onto one line count once,
+#     so line-joining refactors can consume ratchet headroom invisibly;
+#   * scope is crates/ only — bench/rig crates inside crates/ ARE scanned
+#     (ledgered as such), but fuzz/, scripts/, and generated code outside
+#     crates/ sit outside the fence (non-product);
+#   * aliased imports (`use std::fs as f`, `use std::env::var as getenv`)
+#     count once at the import line; call sites through the alias are not
+#     individually counted (call-count does not scale with use);
+#   * macro-generated sites count at the macro definition only;
+#   * nested block comments (/* /* */ */) are closed at the first */;
+#   * multi-line and raw string literals are not tracked across lines — a
+#     "//", "/*", or brace inside one can perturb the scan (single-line
+#     normal strings and char literals ARE handled correctly);
+#   * spaced path tokens (`std :: fs :: rename`) are not matched;
+#   * method-name patterns (.metadata( / .elapsed( / .sync_all( …) are
+#     name-based: a same-named method on a non-fs type will flag — ledger
+#     the row with an explanatory annotation, or rename the method;
+#   * #[cfg(...)] attrs containing not( are NEVER treated as test-only
+#     (prod-safe: cfg(not(test)) code stays censused; the cost is that
+#     any(not(test),…)-style test code would be counted — ledger it);
+#   * out-of-P0-scope primitives are not fenced here: std::process::Command,
+#     HashMap RandomState seeding/iteration order, the mmap family,
+#     socket/network IO, and the epoll/kevent poll layer (P1+ per
+#     dst-and-wasm.md; the poll layer lives inside the runtime hubs).
 #
 # Output ordering is deterministic (LC_ALL=C sorted; violations, then
 # warnings, then notes, then fixed-order per-category summary).
@@ -74,38 +116,79 @@ find "$TREE/crates" -type f -name '*.rs' \
     | LC_ALL=C sort > "$TMP/files" || exit 2
 
 # --- scanner: one "category<TAB>relpath" record per surviving line ----------
+# (plus "poison<TAB>relpath" when scan state is still open at a file's EOF)
 cat > "$TMP/scan.awk" <<'AWK'
 function brace_delta(line,   t, d) {
     t = line
-    # string-literal contents must not perturb brace matching
+    # char-literal contents first ('"' / '{' / '}' must not perturb string
+    # or brace state), then string-literal contents
+    gsub(/'([^'\\]|\\.)'/, "''", t)
     gsub(/"([^"\\]|\\.)*"/, "\"\"", t)
     d = gsub(/\{/, "", t); d -= gsub(/\}/, "", t)
     return d
 }
-FNR == 1 { skip = 0; pend = 0; inblk = 0; rel = substr(FILENAME, length(tree) + 1) }
-{
-    line = $0
-
-    # ---- comments (left-to-right: whichever of "//" or "/*" comes first
-    #      wins, so a "/*" inside a line comment cannot open a phantom
-    #      block; line-preserving) ----
+# strip comments from one line, string/char-literal aware: a "//" or "/*"
+# inside a string or char literal is NOT a comment start (and cannot truncate
+# the line or open a phantom block). Uses/updates the global inblk. Known
+# limits (see header): nested block comments, multi-line/raw strings.
+function strip_code(line,   out, i, n, c, c2, q) {
     if (inblk) {
-        p = index(line, "*/")
-        if (p == 0) next
-        line = substr(line, p + 2); inblk = 0
-    }
-    res = ""
-    while (1) {
-        li = index(line, "//"); bi = index(line, "/*")
-        if (li > 0 && (bi == 0 || li < bi)) { line = substr(line, 1, li - 1); break }
-        if (bi == 0) break
-        res = res substr(line, 1, bi - 1)
-        line = substr(line, bi + 2)
         q = index(line, "*/")
-        if (q == 0) { inblk = 1; line = ""; break }
-        line = substr(line, q + 2)
+        if (q == 0) return ""
+        line = substr(line, q + 2); inblk = 0
     }
-    line = res line
+    if (index(line, "//") == 0 && index(line, "/*") == 0) return line
+    out = ""; i = 1; n = length(line)
+    while (i <= n) {
+        c = substr(line, i, 1)
+        if (c == "\"") {
+            out = out c; i++
+            while (i <= n) {
+                c = substr(line, i, 1)
+                if (c == "\\") { out = out substr(line, i, 2); i += 2; continue }
+                out = out c; i++
+                if (c == "\"") break
+            }
+            continue
+        }
+        if (c == "'") {
+            if (substr(line, i + 1, 1) == "\\" && substr(line, i + 3, 1) == "'") {
+                out = out substr(line, i, 4); i += 4; continue
+            }
+            if (substr(line, i + 1, 1) != "\\" && substr(line, i + 2, 1) == "'") {
+                out = out substr(line, i, 3); i += 3; continue
+            }
+            out = out c; i++; continue
+        }
+        c2 = substr(line, i, 2)
+        if (c2 == "//") break
+        if (c2 == "/*") {
+            q = index(substr(line, i + 2), "*/")
+            if (q == 0) { inblk = 1; break }
+            i = i + q + 3
+            continue
+        }
+        out = out c; i++
+    }
+    return out
+}
+# test-only cfg attr? Positional (test first) or test anywhere in an
+# any()/all() list — but an attr containing not( is NEVER test-only
+# (cfg(not(test)) is production code; prod-safe conservatism, see header).
+function is_cfg_test(line) {
+    if (line ~ /#\[[ \t]*cfg[ \t]*\([ \t]*((any|all)[ \t]*\([ \t]*)?test[^A-Za-z0-9_]/) return 1
+    if (line ~ /#\[[ \t]*cfg[ \t]*\([ \t]*(any|all)[ \t]*\(/ \
+        && line !~ /not[ \t]*\(/ \
+        && line ~ /#\[[ \t]*cfg[ \t]*\([^]]*[(, \t]test[ \t]*[,)]/) return 1
+    return 0
+}
+FNR == 1 {
+    if (rel != "" && (inblk || skip > 0)) print "poison\t" rel
+    skip = 0; pend = 0; inblk = 0
+    rel = substr(FILENAME, length(tree) + 1)
+}
+{
+    line = strip_code($0)
 
     # ---- #[cfg(test)]-fenced items (brace-matched; seam-lint pattern) ----
     if (skip > 0) { skip += brace_delta(line); next }
@@ -114,26 +197,28 @@ FNR == 1 { skip = 0; pend = 0; inblk = 0; rel = substr(FILENAME, length(tree) + 
         if (line ~ /;[ \t]*$/) { pend = 0; next }
         next
     }
-    if (line ~ /#\[[ \t]*cfg[ \t]*\([ \t]*((any|all)[ \t]*\([ \t]*)?test[^A-Za-z0-9_]/) {
+    if (is_cfg_test(line)) {
         if (line ~ /\{/) { skip = brace_delta(line); if (skip <= 0) skip = 0 }
         else pend = 1
         next
     }
 
     # ---- category patterns (census parity; >=1 match on a line = 1 site) ----
-    if (line ~ /(^|[^A-Za-z0-9_])std::fs($|[^A-Za-z0-9_:])|(^|[^A-Za-z0-9_])fs::[A-Za-z_]|File::(open|create|create_new|options)($|[^A-Za-z0-9_])|(^|[^A-Za-z0-9_])OpenOptions($|[^A-Za-z0-9_])|(^|[^:A-Za-z0-9_])(read_to_string|create_dir|create_dir_all|remove_file|remove_dir|remove_dir_all|read_dir|hard_link|symlink_metadata|set_permissions)($|[^A-Za-z0-9_])|\.metadata\(|\.(sync_all|sync_data|read_exact_at|write_all_at)\(/)
+    if (line ~ /(^|[^A-Za-z0-9_])std::fs($|[^A-Za-z0-9_:])|(^|[^A-Za-z0-9_])fs::[A-Za-z_{*]|File::(open|create|create_new|options)($|[^A-Za-z0-9_])|(^|[^A-Za-z0-9_])OpenOptions($|[^A-Za-z0-9_])|(^|[^:A-Za-z0-9_])(read_to_string|create_dir|create_dir_all|remove_file|remove_dir|remove_dir_all|read_dir|hard_link|symlink_metadata|set_permissions)($|[^A-Za-z0-9_])|\.metadata\(|\.(sync_all|sync_data|read_exact_at|write_all_at)\(/ \
+        || line ~ /libc::(open|openat|creat|close|read|readv|pread|preadv|write|writev|pwrite|pwritev|fsync|fdatasync|syncfs|sync_file_range|copy_file_range|fallocate|posix_fallocate|posix_fadvise|unlink|unlinkat|rename|renameat|link|linkat|symlink|symlinkat|readlink|readlinkat|mkdir|mkdirat|rmdir|stat|fstat|lstat|fstatat|statvfs|fstatvfs|truncate|ftruncate|lseek|access|faccessat|chmod|fchmod|chown|fchown|utime|utimes|futimens|realpath|opendir|readdir|closedir|umask|fcntl|flock|dup|dup2|fopen|fdopen|fclose|fread|fwrite|fseek|fseeko|ftell|ftello|fflush|setvbuf|syscall)($|[^A-Za-z0-9_])/)
         print "fs\t" rel
-    if (line ~ /(^|[^A-Za-z0-9_])(SystemTime|Instant|UNIX_EPOCH)($|[^A-Za-z0-9_])|\.elapsed\(|(^|[^A-Za-z0-9_])duration_since($|[^A-Za-z0-9_])/)
+    if (line ~ /(^|[^A-Za-z0-9_])(SystemTime|Instant|UNIX_EPOCH)($|[^A-Za-z0-9_])|\.elapsed\(|(^|[^A-Za-z0-9_])duration_since($|[^A-Za-z0-9_])|libc::(clock_gettime|gettimeofday|time)($|[^A-Za-z0-9_])/)
         print "time\t" rel
     if (line ~ /(^|[^A-Za-z0-9_])(getrandom|thread_rng|OsRng|StdRng|from_entropy|getentropy)($|[^A-Za-z0-9_])|(^|[^A-Za-z0-9_])rand::|urandom/)
         print "rand\t" rel
-    if (line ~ /thread::spawn|thread::Builder/)
+    if (line ~ /thread::spawn|thread::Builder|libc::(fork|pthread_create)($|[^A-Za-z0-9_])/)
         print "spawn\t" rel
-    if (line ~ /env::(var|var_os|vars|vars_os)[ \t]*\(/)
+    if (line ~ /(^|[^A-Za-z0-9_])env::(var|var_os|vars|vars_os|set_var|remove_var)($|[^A-Za-z0-9_])|(^|[^A-Za-z0-9_])env::[{*]|libc::(getenv|setenv|unsetenv|putenv)($|[^A-Za-z0-9_])/)
         print "env\t" rel
-    if (line ~ /(^|[^A-Za-z0-9_])(Condvar|mpsc)($|[^A-Za-z0-9_])|crossbeam_channel|crossbeam::channel|thread::park/)
+    if (line ~ /(^|[^A-Za-z0-9_])(Condvar|mpsc)($|[^A-Za-z0-9_])|crossbeam_channel|crossbeam::channel|thread::park|thread::sleep|libc::(nanosleep|usleep|sleep)($|[^A-Za-z0-9_])/)
         print "blocking\t" rel
 }
+END { if (rel != "" && (inblk || skip > 0)) print "poison\t" rel }
 AWK
 
 tr '\n' '\0' < "$TMP/files" \
@@ -147,6 +232,7 @@ if [ "$MODE" = "regen" ]; then
     echo "# lint-determinism.allow — REGENERATED LEDGER (annotations lost; reseed"
     echo "# only under explicit charter — the ratchet law says rows only die)."
     echo "# Row format (tab-separated): <category>\t<file>\t<max-sites>[\t<annotation>]"
+    awk -F'\t' '$1 == "poison" { printf "# SCAN-POISON: %s — scanner state still open at EOF; counts below may be incomplete\n", $2 }' "$TMP/scan"
     for cat in fs time rand spawn env blocking; do
         echo ""
         echo "# ==== $cat ===="
@@ -224,6 +310,7 @@ ALLOWBASE=$(basename "$ALLOWLIST")
     }
     $1 == "A" { budget[$2 "\t" $3] = $4 + 0; annot[$2 "\t" $3] = $5; next }
     $1 == "S" {
+        if ($2 == "poison") { poison[$3] = 1; next }
         k = $2 "\t" $3; n[k] = $4 + 0
         scnt[$2] += $4; sfiles[$2]++
     }
@@ -255,6 +342,10 @@ ALLOWBASE=$(basename "$ALLOWLIST")
             if (annot[k] ~ /DST-REVIEW\(/) {
                 printf "3\tNOTE(review-marker): [%s] %s — %s\n", cat, path, annot[k]
             }
+        }
+        for (p in poison) {
+            printf "2\tWARN(scan-poison): %s — scanner state still open at EOF (unclosed block comment or unbalanced #[cfg(test)] braces); code after the poison point was NOT scanned. Fix the source shape (or the scanner) before trusting this file'"'"'s counts.\n", p
+            warn++
         }
         print viol "\t" warn > counts
         norder = split("fs time rand spawn env blocking", ord, " ")
