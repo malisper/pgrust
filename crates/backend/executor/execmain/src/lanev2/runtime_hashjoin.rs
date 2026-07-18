@@ -191,28 +191,45 @@ fn hj_spill_force_batches() -> Option<u32> {
 // BatchGranuleSource seam (notes/se-wave8-k2.md).
 // ---------------------------------------------------------------------------
 
-/// `PGRUST_LANE_V2_K2_PROBE` (default OFF; K2 inc-1, R-KNOBS registry
-/// spelling): the hash-join heap-feed arm knob. Heap SeqScans admit into
-/// this arm only when BOTH this and `PGRUST_LANE_V2_HEAPFEED` are on —
-/// OFF (either knob) the admission gates refuse heap exactly where they
-/// always did (one cached-bool branch; today's bytes, today's refusal
-/// stream). AtomicU8 + `_set_for_tests` idiom (the HEAPFEED precedent) so
-/// units can A/B both states in one process.
+/// `PGRUST_LANE_V2_K2_PROBE` (default ON since the SE9-GATES K2 flip;
+/// explicit `=0`/`off` is the permanent kill switch; K2 inc-1, R-KNOBS
+/// registry spelling): the hash-join heap-feed arm knob. Heap SeqScans
+/// admit into this arm only when BOTH this and `PGRUST_LANE_V2_HEAPFEED`
+/// are on — with HEAPFEED at its OFF default the flipped default is
+/// armed-unengaged (priced at the measurement floor, SE8-GATES item 2c:
+/// cbwin +0.0007%); OFF (either knob) the admission gates refuse heap
+/// exactly where they always did (one cached-bool branch; the pre-flip
+/// bytes, the pre-flip refusal stream). AtomicU8 + `_set_for_tests` idiom
+/// (the HEAPFEED precedent) so units can A/B both states in one process.
 static K2_PROBE: AtomicU8 = AtomicU8::new(0);
 
 fn k2_probe_enabled() -> bool {
     match K2_PROBE.load(Ordering::Relaxed) {
         1 => false,
         2 => true,
-        _ => {
-            let on = matches!(
-                std::env::var("PGRUST_LANE_V2_K2_PROBE").as_deref(),
-                Ok("1") | Ok("on")
-            );
-            K2_PROBE.store(if on { 2 } else { 1 }, Ordering::Relaxed);
-            on
-        }
+        _ => k2_probe_resolve(),
     }
+}
+
+#[cold]
+#[inline(never)]
+fn k2_probe_resolve() -> bool {
+    // SE9-GATES K2 FLIP (wave-9 queue item 3, executed on the SE8-GATES
+    // banked evidence — notes/se-wave8-gates.md item 2): default ON. The
+    // K2 win letter read 13.9x/16.3x instr against BOTH comparands
+    // (pgrust-corpus-pairs-1784346410-0a41) and EXACT-FLAT on the K1
+    // census channel (cbwin -0.002%, pgrust-corpus-pairs-1784346413-5741);
+    // the armed-unengaged arm priced at the measurement floor (+0.0007%,
+    // item 2c). Only this default read changes — the explicit `=0`/`off`
+    // spelling is the permanent kill switch restoring the pre-flip
+    // refusal stream's bytes AND ticks (rowmode FLIP-1/FLIP-2 idiom
+    // verbatim, the AE2 precedent; flips never delete knobs).
+    let on = !matches!(
+        std::env::var("PGRUST_LANE_V2_K2_PROBE").as_deref(),
+        Ok("0") | Ok("off")
+    );
+    K2_PROBE.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+    on
 }
 
 /// Same-process A/B lever for the unit corpus.
@@ -2438,8 +2455,10 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
     // K2 inc-1 (wave-8 WS-AC): the pgrcolumnar-only admission, widened onto
     // the BatchGranuleSource seam — a heap SeqScan admits IFF BOTH
     // PGRUST_LANE_V2_HEAPFEED and PGRUST_LANE_V2_K2_PROBE are on (cached
-    // bools, both default OFF: the knob-OFF world short-circuits to false
-    // and refuses every heap shape exactly where it always did).
+    // bools; K2_PROBE default ON since the SE9-GATES K2 flip, `=0`/`off`
+    // = permanent kill; HEAPFEED still default OFF, so the bare-default
+    // world short-circuits to false and refuses every heap shape exactly
+    // where it always did).
     let k2_heap = k2_probe_enabled() && heapfeed_v2_enabled();
     if !seq_scan_fusible(outer_ss, estate)?
         || !(::nodeseqscan::seq_scan_is_pgrcolumnar(outer_ss)
@@ -3117,9 +3136,10 @@ mod k2_tests {
     use ::types_nodes::JoinType;
 
     /// `PGRUST_LANE_V2_K2_PROBE` A/B lever (AtomicU8 idiom): both states
-    /// resolvable in one process; restored to OFF (the default the rest of
-    /// the suite assumes — knob-OFF = today's bytes and today's refusal
-    /// stream).
+    /// resolvable in one process; restored to OFF (the state the rest of
+    /// the suite assumes — heap admission is dual-gated on HEAPFEED, whose
+    /// default stays OFF, so either restore preserves the suite's refusal
+    /// stream; OFF keeps the pre-flip memo the suites were written under).
     #[test]
     fn k2_probe_knob_ab() {
         k2_probe_set_for_tests(true);
