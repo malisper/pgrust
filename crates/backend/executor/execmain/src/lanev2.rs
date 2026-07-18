@@ -14524,3 +14524,15 @@ pub(crate) use indexsource::try_own_agg_over_index_source;
 #[cfg(test)]
 pub(crate) use indexsource::{agg_indexfeed_set_for_tests, AGG_INDEXFEED_OWNED_FOR_TESTS};
 // --- end WS-AE (wave-8) ---
+// ============================================================================
+// ===== WAVE-9 SHARED EOF REGION (contract §7) — sub-regions in AG, AH, AI,
+// AJ order; each WS fills ONLY its own block; integration splices verbatim.
+// ============================================================================
+// --- WS-AG (wave-9): per-mask chain-program test re-export (the wave-7
+// WS-AA lever precedent verbatim; zero code lines touched above).
+#[cfg(test)]
+pub(crate) use dml::rowchain_insert_prog_for_mask;
+// --- end WS-AG (wave-9) ---
+// --- WS-AH (wave-9): reserved ---
+// --- WS-AI (wave-9): reserved ---
+// --- WS-AJ (wave-9): reserved ---

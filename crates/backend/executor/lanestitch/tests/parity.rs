@@ -2631,3 +2631,215 @@ mod rowchain_parity {
         }
     }
 }
+
+// ===== WAVE-9 APPEND REGION (WS-AG fusion D1/D2) — do not edit above =========
+// Rung 0/1 pins: the D2 cursor/lane bound (the wave-7 review-finding-4
+// charter rider) and the NAMED pure-step classification refusal. Minted
+// ids ride the wave-9 band 90001+ where the type admits it; ProtocolCall
+// ids are u16 (chain-family-private vocabulary), so these tests mint in
+// the 9901+ sub-range (disjoint from the fuzzer's 9000-9002 loop-top ids
+// and the 100+ per-row ids) and record the band mapping here.
+mod rowchain_wave9 {
+    use lanestitch::{
+        eval_row_chain, rowchain_plan_refusal, Batch, ChainCursor, ChainOutcome, ChainVerdict,
+        Lane, Program, RowChainHost, Step,
+    };
+    use types_error::PgResult;
+
+    /// Host that stages `pulls_available` rows regardless of the batch —
+    /// the D2 hazard shape: a host outrunning the staged lanes.
+    struct OverrunHost {
+        pulls_available: u32,
+        pulls: u32,
+        calls: Vec<u32>,
+    }
+
+    impl RowChainHost for OverrunHost {
+        fn next_row(&mut self) -> PgResult<bool> {
+            if self.pulls >= self.pulls_available {
+                return Ok(false);
+            }
+            self.pulls += 1;
+            Ok(true)
+        }
+        fn protocol_call(&mut self, _call: u16) -> PgResult<ChainVerdict> {
+            self.calls.push(self.pulls - 1);
+            Ok(ChainVerdict::Continue)
+        }
+    }
+
+    fn pure_chain_prog() -> Program {
+        // [NextRow, LoadLane, ProtocolCall]: the minimal pure-step chain.
+        let mut p = Program::new();
+        p.steps.push(Step::NextRow);
+        p.steps.push(Step::LoadLane { col: 0, out: 0 });
+        p.steps.push(Step::ProtocolCall { call: 9901 });
+        p
+    }
+
+    /// The D2 bound pin (rung 1): a pure-step chain whose host stages more
+    /// rows than the batch errors LOUDLY on the first out-of-batch row —
+    /// prior rows fully consumed, never an out-of-bounds lane index.
+    #[test]
+    fn rowchain_pure_step_cursor_bound_is_loud() {
+        use datum::Datum;
+        let values = vec![Datum::from_i64(1), Datum::from_i64(2)];
+        let isnull = vec![false, false];
+        let batch = Batch { nrows: 2, lanes: vec![Lane { values: &values, isnull: &isnull }] };
+        let prog = pure_chain_prog();
+        let mut host = OverrunHost { pulls_available: 4, pulls: 0, calls: Vec::new() };
+        let mut cursor = ChainCursor::default();
+        let e = eval_row_chain(&prog, &batch, &mut cursor, &mut host, &mut [])
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            e.message().contains("chain cursor past the staged batch"),
+            "{}",
+            e.message()
+        );
+        assert_eq!(host.calls, vec![0, 1], "in-batch rows fully consumed before the bound");
+
+        // Zero-row batch: the bound trips on the very first staged row.
+        let batch0 = Batch { nrows: 0, lanes: vec![Lane { values: &values, isnull: &isnull }] };
+        let mut host0 = OverrunHost { pulls_available: 1, pulls: 0, calls: Vec::new() };
+        let mut cursor0 = ChainCursor::default();
+        let e0 = eval_row_chain(&prog, &batch0, &mut cursor0, &mut host0, &mut [])
+            .map(|_| ())
+            .unwrap_err();
+        assert!(e0.message().contains("chain cursor past the staged batch"), "{}", e0.message());
+        assert!(host0.calls.is_empty());
+    }
+
+    /// Protocol-only chains stay UNBOUNDED (the DML chain's cursor counts
+    /// pulls, not lane rows): the bound must never trip without pure steps.
+    #[test]
+    fn rowchain_protocol_only_chain_stays_unbounded() {
+        let mut p = Program::new();
+        p.steps.push(Step::NextRow);
+        p.steps.push(Step::ProtocolCall { call: 9902 });
+        let batch = Batch { nrows: 0, lanes: Vec::new() };
+        let mut host = OverrunHost { pulls_available: 7, pulls: 0, calls: Vec::new() };
+        let mut cursor = ChainCursor::default();
+        let out = eval_row_chain(&p, &batch, &mut cursor, &mut host, &mut [])
+            .expect("protocol-only chain never trips the lane bound");
+        assert_eq!(out, ChainOutcome::Done);
+        assert_eq!(host.calls, vec![0, 1, 2, 3, 4, 5, 6]);
+    }
+
+    /// The contract-NAMED classification refusal (wave-9 §1 rung 1): pure
+    /// steps refuse to stitch under `rowchain-pure-step-unbounded` until
+    /// their scalar stencils land (rung 4).
+    #[test]
+    fn rowchain_pure_step_refusal_is_named() {
+        assert_eq!(
+            rowchain_plan_refusal(&pure_chain_prog()),
+            Some("rowchain-pure-step-unbounded")
+        );
+        // The admitted v1 shape stays admitted.
+        let mut ok = Program::new();
+        ok.steps.push(Step::ProtocolCall { call: 9903 });
+        ok.steps.push(Step::NextRow);
+        ok.steps.push(Step::ProtocolCall { call: 9904 });
+        assert_eq!(rowchain_plan_refusal(&ok), None);
+        // The other named arms.
+        let mut two = Program::new();
+        two.steps.push(Step::NextRow);
+        two.steps.push(Step::NextRow);
+        assert_eq!(rowchain_plan_refusal(&two), Some("rowchain-shape"));
+        assert_eq!(rowchain_plan_refusal(&Program::new()), Some("rowchain-empty"));
+    }
+
+    // ---- rung 3 (D1b indirection kill) pins --------------------------------
+    use lanestitch::StitchedRowChain;
+
+    /// Scripted host for the D1b pin: deterministic verdicts covering every
+    /// dispatch arm (Continue / SkipRow / EmitPause / exhaustion), recording
+    /// the call stream. Mint sub-range 9905+ (wave-9 band mapping, header).
+    struct ScriptHost {
+        nrows: u32,
+        pulls: u32,
+        events: Vec<(u16, u32)>,
+    }
+
+    impl RowChainHost for ScriptHost {
+        fn next_row(&mut self) -> PgResult<bool> {
+            if self.pulls >= self.nrows {
+                return Ok(false);
+            }
+            self.pulls += 1;
+            Ok(true)
+        }
+        fn protocol_call(&mut self, call: u16) -> PgResult<ChainVerdict> {
+            self.events.push((call, self.pulls));
+            Ok(match (call, self.pulls % 5) {
+                // Loop-top id: Continue always (host law).
+                (9905, _) => ChainVerdict::Continue,
+                (9906, 2) => ChainVerdict::SkipRow,
+                (9907, 3) => ChainVerdict::EmitPause,
+                _ => ChainVerdict::Continue,
+            })
+        }
+    }
+
+    /// The rung-3 monomorphization pin: `run::<H>` (static host dispatch,
+    /// the D1b trampolines) and `run::<dyn RowChainHost>` (the erased form)
+    /// replay the identical event stream, pause cadence, and outcome over
+    /// the identical body — the vtable kill changed dispatch, never
+    /// semantics. Rides the wave-7 equivalence contract: both worlds also
+    /// match the interpreter twin.
+    #[test]
+    fn rowchain_mono_and_dyn_hosts_replay_identically() {
+        let mut p = Program::new();
+        p.steps.push(Step::ProtocolCall { call: 9905 }); // loop-top segment
+        p.steps.push(Step::NextRow);
+        p.steps.push(Step::ProtocolCall { call: 9906 }); // skip arm
+        p.steps.push(Step::ProtocolCall { call: 9907 }); // pause arm
+        let Some(chain) = StitchedRowChain::compile_for_parity(&p) else {
+            assert!(!lanestitch::available(), "chain refused on available hardware");
+            return;
+        };
+
+        let drive = |erased: bool| -> (Vec<(u16, u32)>, u32) {
+            let mut host = ScriptHost { nrows: 17, pulls: 0, events: Vec::new() };
+            let mut pauses = 0u32;
+            loop {
+                let out = if erased {
+                    let dh: &mut dyn RowChainHost = &mut host;
+                    chain.run(dh)
+                } else {
+                    chain.run(&mut host)
+                }
+                .expect("scripted host never errors");
+                match out {
+                    ChainOutcome::Paused => pauses += 1,
+                    ChainOutcome::Done => return (host.events, pauses),
+                }
+            }
+        };
+        // Twin oracle stream (the wave-7 equivalence contract).
+        let twin = {
+            let mut host = ScriptHost { nrows: 17, pulls: 0, events: Vec::new() };
+            let batch = Batch { nrows: 0, lanes: Vec::new() };
+            let mut cursor = ChainCursor::default();
+            let mut pauses = 0u32;
+            loop {
+                match eval_row_chain(&p, &batch, &mut cursor, &mut host, &mut [])
+                    .expect("scripted host never errors")
+                {
+                    ChainOutcome::Paused => pauses += 1,
+                    ChainOutcome::Done => break (host.events, pauses),
+                }
+            }
+        };
+        let mono = drive(false);
+        let dyn_ = drive(true);
+        assert_eq!(mono, dyn_, "mono and dyn trampolines diverged");
+        assert_eq!(mono, twin, "stitched body diverged from the twin");
+        assert!(mono.1 > 0, "the pause arm must exercise (script covers EmitPause)");
+        assert!(
+            mono.0.iter().any(|&(c, p)| c == 9906 && p % 5 == 2),
+            "the skip arm must exercise (script covers SkipRow)"
+        );
+    }
+}
+// --- end WS-AG (wave-9) -------------------------------------------------------
