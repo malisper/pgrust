@@ -26,6 +26,12 @@
     [],
     [
       "work_mem=4MB"
+    ],
+    [
+      "enable_hashagg=off"
+    ],
+    [
+      "enable_seqscan=off"
     ]
   ],
   "property_weights": {

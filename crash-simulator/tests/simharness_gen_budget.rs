@@ -169,7 +169,19 @@ fn budget_distribution_holds_across_property_embedded_steps() {
     assert_close(c.query, total * 40 / 100, total, "query (incl. property-embedded)");
     assert_close(c.dml, total * 25 / 100, total, "dml (incl. property-embedded)");
     // Property budget = 10% of total; each block consumes one property unit.
-    assert_close(c.props, total * 10 / 100, total, "property blocks");
+    // Structural tail-race allowance (measured, H6): a property fire needs
+    // remaining query >= 2 AND dml >= 1, so when those pools exhaust first
+    // the tail of the property budget is dead — the deficit is ~15% of the
+    // property budget and shifts a few blocks with ANY generator-version
+    // change (base h5 = 853, h6-grammar = 847 at seed 777). 2% of total
+    // keeps teeth against real starvation without pinning the race.
+    let props_expected = total * 10 / 100;
+    let props_tol = total * 2 / 100;
+    assert!(
+        c.props.abs_diff(props_expected) <= props_tol,
+        "property blocks: actual {} vs expected {props_expected} (tolerance {props_tol}, total {total})",
+        c.props
+    );
 }
 
 #[test]
