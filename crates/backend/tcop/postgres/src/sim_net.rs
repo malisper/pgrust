@@ -569,6 +569,17 @@ pub fn PostgresSimNetMain(argv: &[String], username: &str) -> ! {
         crate::sim_sched_demo::run_wpool_demo();
     }
 
+    // ---- PERMIT-S5: the rtpool 2-worker demo (runtime doors). Boot half
+    // for the same reason as wpool (the dispatcher prelude restores the
+    // postmaster GUC snapshot); never returns.
+    if std::env::var("PGRUST_PERMIT_RTPOOL").is_ok_and(|v| v == "1") {
+        if let Err(err) = crate::stdio_wire::stdio_wire_boot_half(argv, username) {
+            elog::emit_error_report_for(&err);
+            std::process::exit(1);
+        }
+        crate::sim_sched_demo::run_rtpool_demo();
+    }
+
     if sessions <= 1 {
         // ---- The single-session path (stdio_wire's inner, verbatim).
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(

@@ -37,7 +37,14 @@
 //! the job envelope bind, which owns ResetLatch and signal drains.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+// pgsync by crate law (permit-s5, riding the dispatcher spawn door): the
+// jobs registry is locked by the REGISTERED dispatcher thread and by
+// registering backends — a raw std lock here would be the
+// permit-holder-blocks-raw watchdog wedge shape under the scheduler (the
+// s2 AVAILABLE-registry precedent). Native arm = identical std re-exports.
+use std::sync::Arc;
+
+use pgsync::{Mutex, OnceLock};
 use std::time::Duration;
 
 // DST P2 (contract §1.3): dispatcher deadlines in pg_clock's mono domain.

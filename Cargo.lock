@@ -1954,6 +1954,7 @@ dependencies = [
  "elog",
  "latch",
  "pg_clock",
+ "pgsync",
  "runtime",
  "types_error",
  "types_storage",
