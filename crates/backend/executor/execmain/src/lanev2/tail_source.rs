@@ -244,7 +244,7 @@ impl T3Shape {
             T3Shape::FunctionScan => true,  // B1 per-shape commit 1/6 — FLIPPED
             T3Shape::TableFuncScan => true, // B1 per-shape commit 2/6 — FLIPPED
             T3Shape::SampleScan => true,    // B1 per-shape commit 3/6 — FLIPPED
-            T3Shape::TidScan => false,      // B1 per-shape commit 4/6
+            T3Shape::TidScan => true,       // B1 per-shape commit 4/6 — FLIPPED
             T3Shape::NamedTuplestoreScan => false, // B1 per-shape commit 5/6
             T3Shape::TidRangeScan => false, // B1 per-shape commit 6/6
         }
@@ -724,7 +724,7 @@ mod flip_ledger_tests {
             (T3Shape::FunctionScan, true),
             (T3Shape::TableFuncScan, true),
             (T3Shape::SampleScan, true),
-            (T3Shape::TidScan, false),
+            (T3Shape::TidScan, true),
             (T3Shape::NamedTuplestoreScan, false),
             (T3Shape::TidRangeScan, false),
         ];
