@@ -768,6 +768,10 @@ impl SimVfs {
                 node: Node::Dir(SimDir {
                     entries: BTreeMap::new(),
                     durable_entries: BTreeMap::new(),
+                    // Durable from birth (§9.3): the ingested namespace is
+                    // pre-history — empty inc-3 dirent journal, exactly as
+                    // ingest_file's empty file journal below.
+                    unsynced: Vec::new(),
                     mode: mode & 0o7777,
                 }),
                 open_count: 0,
