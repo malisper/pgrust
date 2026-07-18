@@ -151,12 +151,23 @@ mod alloc_track {
         }
     }
 
+    // ASLR slide for offline symbolication (atos) — a macOS dyld concept.
+    // _dyld_get_image_vmaddr_slide does not exist on Linux (undefined
+    // reference at link time on the fleet — t29 fold find); the Linux arm
+    // reports 0 and symbolication uses /proc/<pid>/maps offsets instead.
+    #[cfg(target_os = "macos")]
     unsafe extern "C" {
         fn _dyld_get_image_vmaddr_slide(image_index: u32) -> isize;
     }
 
+    #[cfg(target_os = "macos")]
     unsafe fn slide0() -> isize {
         unsafe { _dyld_get_image_vmaddr_slide(0) }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    unsafe fn slide0() -> isize {
+        0
     }
 
     pub struct Tracker(pub mimalloc::MiMalloc);
