@@ -210,9 +210,30 @@ pub(super) enum ShapeClass {
     /// byte-identical by construction. A cursor refusal NEVER changes
     /// output bytes: the run rides Volcano exactly as today (fail-open law).
     Cursor = 38,
+    // -----------------------------------------------------------------------
+    // Wave-9.5 SPI-admission class (WS-AJ Stage-A seam, `se/spi-stage-a`;
+    // APPEND-ONLY chartered mint, recorded in notes/se-spi-stage-a.md; the
+    // wave-9 §5 placeholder in notes/se-phase0-integration.md names this
+    // landing).
+    // -----------------------------------------------------------------------
+    /// Count-limited SPI-statement admission (docs/design/lane-spi.md §1/§3
+    /// Stage A): the WHOLE-RUN refusal classes of a budgeted tcount-limited
+    /// `CommandDest::Spi` run — `_SPI_pquery`'s STOP-then-END shape and the
+    /// portal-fetch (SPI cursor / plpgsql FOR loop) resumable shape alike
+    /// (notes/se-spi-stage-a.md §8). Cadence = once per budget-eligible
+    /// `execute_plan` run (never per tuple); ticks fire only with
+    /// `PGRUST_LANE_V2_SPI` ON (knob-OFF never reaches the classifier), so
+    /// default-config accounting is byte-identical by construction. An SPI
+    /// refusal NEVER changes output bytes: the statement rides Volcano
+    /// exactly as today (fail-open law; refusal-not-error). Seam-visibility
+    /// honesty (the `CursorWithHold` precedent): an SPI-entered run with a
+    /// caller-supplied non-SPI receiver (`SPI_execute_extended` dest
+    /// option) is NOT seam-visible below `executor_run` — it installs no
+    /// budget and ticks nothing; no RESERVED variant is minted for it.
+    Spi = 39,
 }
 
-const N_CLASSES: usize = 39;
+const N_CLASSES: usize = 40;
 
 impl ShapeClass {
     pub(super) const ALL: [ShapeClass; N_CLASSES] = [
@@ -255,6 +276,7 @@ impl ShapeClass {
         ShapeClass::LockRows,
         ShapeClass::ModifyTable,
         ShapeClass::Cursor,
+        ShapeClass::Spi,
     ];
 
     pub(super) fn name(self) -> &'static str {
@@ -298,6 +320,7 @@ impl ShapeClass {
             ShapeClass::LockRows => "lockrows",
             ShapeClass::ModifyTable => "modifytable",
             ShapeClass::Cursor => "cursor",
+            ShapeClass::Spi => "spi",
         }
     }
 }
@@ -539,9 +562,39 @@ pub(super) enum RefuseReason {
     /// free discriminant, 36" before inc-1b's chartered mint landed
     /// 36..40; next free is 41 (worklog §1 drift record).
     CursorCurrentOfTidCapture = 41,
+    // Wave-9.5 SPI-admission refusal (WS-AJ Stage-A seam, `se/spi-stage-a`;
+    // APPEND-ONLY chartered mint, recorded in notes/se-spi-stage-a.md). ONE
+    // new variant: the classifier's shape arms REUSE the generic vocabulary
+    // (`Backward` / `ScrollMark` / `ParallelGate` — the WS-AI ParallelGate
+    // precedent). REACHABILITY, corrected by the review re-baseline
+    // (notes/se-spi-stage-a.md §8; the original "all three structurally
+    // unreachable from `_SPI_pquery`" record was falsified live):
+    // `ScrollMark` ticks per fetch for every auto-SCROLL SPI portal (plain
+    // plpgsql FOR loops whose plan supports backward scan —
+    // SPI_cursor_open picks CURSOR_OPT_SCROLL, PortalStart passes
+    // REWIND|BACKWARD eflags); `Backward` ticks via SPI_scroll_cursor_fetch
+    // (plpgsql FETCH BACKWARD); both carry allowlist rows. `ParallelGate`
+    // stays the fail-closed serial-law pin (count-limited runs serial by
+    // the ported execmain.rs use_parallel_mode gate; no row). Ticks ONLY
+    // under `ShapeClass::Spi`, once per budgeted run, knob-ON only; a
+    // refusal lands the WHOLE statement on Volcano byte-identically
+    // (fail-open law) — observability, never semantics.
+    // -----------------------------------------------------------------------
+    /// The budgeted SPI run's plan carried no lane engagement — the whole
+    /// statement rides Volcano (exactly as today). The plan's SPECIFIC
+    /// refusal reasons tick under their own classes at the per-pull gates;
+    /// this is the SPI-level roll-up, ticked at the settle walk.
+    /// Detection breadth = the WS-AI inc-1b scan-class detector (seqscan /
+    /// cbscan memoized verdicts + settled claims); the same inc-1c breaker
+    /// widening rides for both classes.
+    /// Board-act drift record (the WS-CB "authored as 36" precedent
+    /// above): authored as "next free discriminant, 41" on the branch
+    /// before wave-10's `CursorCurrentOfTidCapture` landed 41; renumbered
+    /// at the SE-BOARD-SPI merge — next free is 43.
+    SpiPlanRefused = 42,
 }
 
-const N_REASONS: usize = 42;
+const N_REASONS: usize = 43;
 
 impl RefuseReason {
     pub(super) fn name(self) -> &'static str {
@@ -588,6 +641,7 @@ impl RefuseReason {
             RefuseReason::CursorPersistHoldable => "cursor-persist-holdable",
             RefuseReason::CursorPlanRefused => "cursor-plan-refused",
             RefuseReason::CursorCurrentOfTidCapture => "cursor-currentof-tidcapture",
+            RefuseReason::SpiPlanRefused => "spi-plan-refused",
         }
     }
 
@@ -636,6 +690,7 @@ impl RefuseReason {
             CursorPersistHoldable,
             CursorPlanRefused,
             CursorCurrentOfTidCapture,
+            SpiPlanRefused,
         ][i]
     }
 }

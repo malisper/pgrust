@@ -1058,7 +1058,36 @@ pub(crate) fn execute_plan<'m, 'mcx>(
         crate::lanev2::cursor_park_resume(planstate, estate)?;
     }
     // --- end WS-AI wave-9 -------------------------------------------------------
-    // --- WS-AJ wave-9 sub-region (reserved) -------------------------------------
+    // --- WS-AJ wave-9 sub-region (SPI Stage-A seam, se/spi-stage-a; lane-spi.md
+    // §1/§3) -----------------------------------------------------------------------
+    // Per-run SPI emission budget, written UNCONDITIONALLY like the WS-AI
+    // field above it (None on knob-OFF / tcount-0 / non-SPI-dest runs, which
+    // answer at the callee's first tests; the None overwrite means no stale
+    // budget survives an error unwind or estate reuse). TWO producers of a
+    // count-limited `CommandDest::Spi` run reach here (review re-baseline,
+    // notes/se-spi-stage-a.md §8): `_SPI_pquery`'s tcount-limited run
+    // (spi/src/execute.rs:562, STOP-then-END) AND `SPI_cursor_fetch`'s
+    // per-fetch receiver threaded through PortalRunFetch → PortalRunSelect
+    // (pquery/src/lib.rs:594-630) — the plpgsql FOR-loop cadence, which
+    // RESUMES on the same QueryDesc/estate. The dest compare IS the
+    // seam-visible SPI signal — no SPI-layer code change (design §3
+    // Stage A). The install runs the NAMED SPI-admission classifier
+    // (refusals tick the ShapeClass::Spi taxonomy, knob-ON only); the
+    // budgeted run's settle sits below the drive loop (WS-AJ block beside
+    // the WS-AI park walker) and arms the SHARED `es_lane_cursor_parked`
+    // resume signal, repossessed by the WS-AI resume walk at the next
+    // entry above. Knob-OFF cost, per RUN and never per tuple: the eager
+    // argument set (one `mydest` enum match + the direction compare) plus
+    // the callee's count/select/dest register tests; the knob cell loads
+    // only for count-limited SPI-dest SELECTs.
+    estate.es_spi_run_budget = crate::lanev2::spi_run_budget_install(
+        operation == CmdType::CMD_SELECT,
+        dest.mydest() == ::types_dest::CommandDest::Spi,
+        ::types_scan::sdir::ScanDirectionIsForward(direction),
+        number_tuples,
+        use_parallel_mode,
+        estate.es_top_eflags,
+    );
     // --- end WS-AJ wave-9 -------------------------------------------------------
     // === wave-10 shared-file marker (cursors inc-2 contract §8; sub-regions CA, CB, CC) ===
     // --- WS-CA wave-10 sub-region (reserved) ------------------------------------
@@ -1157,6 +1186,29 @@ pub(crate) fn execute_plan<'m, 'mcx>(
         }
     }
     // --- end WS-AI wave-9.5 -----------------------------------------------------
+    // --- WS-AJ wave-9.5 (SPI Stage-A): the settle point. A budgeted
+    // (tcount-limited SPI-dest) run that stops here retires lane-staged
+    // claims through the same claim-release chain the cursor walker owns —
+    // BEFORE executor_finish/end return control toward the plancache release
+    // points (lane-spi.md INVARIANT 5; post-t26 release-point map in
+    // notes/se-wave9-aj.md §11.3) — and ticks the spi-plan-refused roll-up
+    // when the plan carried no lane engagement. The park flag IS armed
+    // (review re-baseline, notes/se-spi-stage-a.md §8): the portal-fetch
+    // producer (SPI_cursor_fetch → PortalRunSelect, the plpgsql FOR-loop
+    // cadence) RESUMES this QueryDesc/estate, and the WS-AI resume walk at
+    // the next entry repossesses the parked position — dropping the bit
+    // would resume an un-inited scan. For a true _SPI_pquery run the flag
+    // is dead state torn down by the immediately-following ExecutorEnd
+    // (the parked-then-close path cursors already ride). Never CLEARED
+    // here: under the composed arm the WS-AI walker above may have armed
+    // it already (settle is release-only/idempotent). Knob-OFF / tcount-0
+    // / non-SPI runs read one None and skip (per-run cost only, never
+    // per-tuple). EPQ law shared with the WS-AI walker (the walk refuses
+    // under es_epq_active).
+    if estate.es_spi_run_budget.is_some() && crate::lanev2::spi_run_settle(planstate, estate) {
+        estate.es_lane_cursor_parked = true;
+    }
+    // --- end WS-AJ wave-9.5 -----------------------------------------------------
     if estate.es_top_eflags & EXEC_FLAG_BACKWARD == 0 {
         exec_shutdown_node(planstate, estate)?;
     }

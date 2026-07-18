@@ -833,6 +833,26 @@ pub struct EStateData<'mcx> {
     /// per-run branch). Estate-resident by the same TLS-census-zero
     /// argument as `es_cursor_run_budget` above.
     pub es_lane_cursor_parked: bool,
+    /// wave-9.5 WS-AJ (SPI Stage-A seam, docs/design/lane-spi.md §1/§3;
+    /// worklog notes/se-spi-stage-a.md): the per-run emission budget of a
+    /// tcount-limited SPI-statement run — `Some(tcount)` iff
+    /// `PGRUST_LANE_V2_SPI` is ON and this ExecutorRun is a count-limited
+    /// `CommandDest::Spi` shape (knob-ON, tcount != 0, forward, SELECT,
+    /// serial): `_SPI_pquery`'s count-exact STOP or an SPI portal fetch
+    /// (the RESUMABLE producer — notes/se-spi-stage-a.md §8). Written
+    /// UNCONDITIONALLY at every `execute_plan` entry (compute =
+    /// `lanev2::spi_run_budget_install`) — the `es_cursor_run_budget`
+    /// idiom verbatim: per-run by construction, nested-run-safe (a nested
+    /// SPI statement owns its own estate) and unwind-safe with no guard.
+    /// Consumer: the settle walk below the drive loop retires lane-staged
+    /// claims at the count-limited stop, BEFORE ExecutorFinish/End reach
+    /// the plancache release points (lane-spi.md INVARIANT 5), and its
+    /// parked result arms `es_lane_cursor_parked` (the shared WS-AI
+    /// resume signal) so the portal-fetch producer's next run
+    /// repossesses. Estate-resident by the same TLS-census-zero argument
+    /// as the two fields above. Knob-OFF and tcount-0 runs always read
+    /// None.
+    pub es_spi_run_budget: Option<u64>,
 }
 
 /// One worker's instrumentation snapshot: `instrument` is indexed by
@@ -1088,6 +1108,7 @@ impl<'mcx> EStateData<'mcx> {
             es_lane_leaf_fast: false,
             es_cursor_run_budget: None,
             es_lane_cursor_parked: false,
+            es_spi_run_budget: None,
             es_instrumentation: PgVec::new_in(mcx),
             es_runtime_ea_refusals: PgVec::new_in(mcx),
             es_runtime_ea_pipelines: PgVec::new_in(mcx),
@@ -1588,7 +1609,8 @@ mcx::forget_safe_struct!(
         es_param_subplans, es_per_tuple_exprcontext,
         es_sourceText, es_use_parallel_mode, es_parallel_workers_to_launch,
         es_parallel_workers_launched, es_jit_flags, es_jit_instr, es_epq,
-        es_epq_active, es_lane_leaf_fast, es_cursor_run_budget, es_lane_cursor_parked, es_rowmarks;
+        es_epq_active, es_lane_leaf_fast, es_cursor_run_budget, es_lane_cursor_parked,
+        es_spi_run_budget, es_rowmarks;
         es_jit_blocks,
         es_snapshot, es_crosscheck_snapshot, es_relations, es_junkFilter,
         es_tupleTable, es_exprcontexts, es_cte_shared, es_worktable_shared,
