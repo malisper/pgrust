@@ -7715,6 +7715,7 @@ dependencies = [
  "miscinit",
  "parallel",
  "pgarch",
+ "pgsync",
  "pmchild_seams",
  "postinit",
  "postmaster_seams",
@@ -11757,6 +11758,8 @@ name = "pgsync"
 version = "0.1.0"
 dependencies = [
  "loom",
+ "pg_clock",
+ "pg_strong_random",
 ]
 
 [[package]]
