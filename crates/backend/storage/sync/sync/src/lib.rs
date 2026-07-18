@@ -138,7 +138,11 @@ pub fn InitSync() -> PgResult<()> {
             let mut slot = p.borrow_mut();
             if slot.is_none() {
                 let cx: &'static MemoryContext =
-                    Box::leak(Box::new(MemoryContext::new("Pending ops context")));
+                    ::mcx::session_root("Pending ops context");
+                // LIFO: empty the droppy TLS slot before its context is freed.
+                ::mcx::register_session_cleanup(Box::new(|| {
+                    PENDING.with(|p| drop(p.borrow_mut().take()));
+                }));
                 let mut ops = PgHashMap::new_in(cx.mcx());
                 let _ = ops.try_reserve(100);
                 *slot = Some(PendingOps {
