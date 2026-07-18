@@ -262,6 +262,18 @@ const QUERY_VARIANTS: [&str; 14] = [
     pr::Q_OJ_NEST_COALESCE,
 ];
 
+/// True when `name` is honored by the reach-gate teeth knob
+/// (`test_disable_productions`). The knob zeroes weights ONLY at the
+/// `gen_query` emission site below, so exactly the `QUERY_VARIANTS` names
+/// have any effect. The profile validator rejects every other name — a
+/// registered-but-unhonored entry (e.g. `dml:update`) would otherwise
+/// validate fine, keep emitting, and silently disable nothing while a teeth
+/// test believes otherwise (H5 review find F1). If the knob is ever honored
+/// at another emission site, extend this predicate in the same commit.
+pub fn teeth_knob_honored(name: &str) -> bool {
+    QUERY_VARIANTS.iter().any(|v| *v == name)
+}
+
 /// Weighted read-query choice over one table (plus join/SRF classes drawing
 /// additional tables from the schema).
 pub fn gen_query(
