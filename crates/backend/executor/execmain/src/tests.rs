@@ -11805,7 +11805,7 @@ mod cursors_wave9 {
                     // recheck settles NOTHING.
                     estate.es_epq_active = true;
                     assert!(
-                        !crate::lanev2::cursor_run_park(planstate, estate),
+                        !crate::lanev2::cursor_run_park(planstate, estate).unwrap(),
                         "EPQ drive must not park"
                     );
                     estate.es_epq_active = false;
@@ -11821,7 +11821,7 @@ mod cursors_wave9 {
                     // SUSPENSION 1 (mid-batch): settle releases the staged
                     // claim's pin — R3 zero-pins-at-settle, asserted by the
                     // fixture's pin census.
-                    assert!(crate::lanev2::cursor_run_park(planstate, estate), "parks");
+                    assert!(crate::lanev2::cursor_run_park(planstate, estate).unwrap(), "parks");
                     scanfix::quiesced(); // R3: ZERO pins while suspended
                     {
                         let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate
@@ -11858,7 +11858,7 @@ mod cursors_wave9 {
                     // staged batch still holds its pin, so it still parks;
                     // the second cycle also pins the resumed-window
                     // remainder arithmetic).
-                    assert!(crate::lanev2::cursor_run_park(planstate, estate), "re-parks");
+                    assert!(crate::lanev2::cursor_run_park(planstate, estate).unwrap(), "re-parks");
                     scanfix::quiesced();
                     crate::lanev2::cursor_park_resume(planstate, estate).unwrap();
                     {
@@ -11896,6 +11896,126 @@ mod cursors_wave9 {
             arm_rows[0], arm_rows[1],
             "suspended+resumed drive byte-identical to the straight drive"
         );
+        crate::lanev2::cursors_set_for_tests(false);
+        scanfix::quiesced();
+    }
+
+    /// BRIN-BUDGET P1 pin (band 99301): the settle walk's slot hygiene
+    /// MATERIALIZES the parked scan's emitted slot instead of clearing it.
+    /// A node above the seam (a lane join probe holding `ecxt_outertuple`
+    /// for the whole inner iteration — the brin/brin_bloom/brin_multi
+    /// DO-loop shape, plpgsql FOR over `brinopers JOIN unnest(op)`) reads
+    /// the suspended run's last emitted slot on the NEXT fetch; the old
+    /// clear made that read `heap slot without tuple`
+    /// (deform.rs:420/535), deterministic under EITHER budget flavor.
+    /// Pinned here: after a park the slot is (a) NON-EMPTY with the
+    /// emitted row's values readable — the join-holder read — and (b)
+    /// pin-free (R3 zero-pins across the suspension, `scanfix::quiesced`),
+    /// and the resumed drive stays byte-identical.
+    #[test]
+    fn cursors_brinfix_park_retains_emitted_slot_values() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mcx = leaked_mcx();
+        crate::lanev2::cursors_set_for_tests(true);
+
+        scanfix::register_table(99301, &[&[7, 8, 9], &[10, 11]]);
+        let pstmt = mk_seqscan_pstmt(mcx, 99301);
+        let snap_ctx: &'static MemoryContext =
+            Box::leak(Box::new(MemoryContext::new("snap")));
+        let snapshot: snapmgr::Snapshot =
+            std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                snap_ctx.mcx(),
+                ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+            ));
+        let mut rows: Vec<i32> = Vec::new();
+        with_exec_data(pstmt, |data, pstmt| {
+            data.estate.es_snapshot = Some(snapshot);
+            crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+            let ExecData { estate, planstate } = data;
+            let planstate = planstate.as_mut().unwrap();
+
+            // Stage page 0 and emit one row (the suspended run's last
+            // emitted tuple — the slot a join probe above still holds).
+            let scan_slot_id = {
+                let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate
+                else {
+                    panic!("bare seqscan plan");
+                };
+                let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate).unwrap();
+                assert_eq!(n, 3);
+                ss.set_lane_cursor(0, n);
+                let slot_id = ::nodeseqscan::seq_scan_batch_emit(ss, estate, 0)
+                    .unwrap()
+                    .expect("staged row emits");
+                let mut isnull = false;
+                let v = exectuples::slot_getattr(estate.slot_mut(slot_id), 1, &mut isnull);
+                assert!(!isnull);
+                rows.push(v.as_i32());
+                ss.set_lane_cursor(1, n);
+                slot_id
+            };
+            assert_eq!(rows, vec![7]);
+
+            // Park. R3: zero pins while suspended.
+            assert!(crate::lanev2::cursor_run_park(planstate, estate).unwrap(), "parks");
+            scanfix::quiesced();
+
+            // THE PIN: the emitted slot survived the settle — non-empty,
+            // values intact (the read that used to die with
+            // "heap slot without tuple" on the next fetch's join
+            // projection).
+            {
+                let slot = estate.slot_mut(scan_slot_id);
+                assert!(
+                    !slot.base().is_empty(),
+                    "parked scan's emitted slot must retain its tuple (materialized, not cleared)"
+                );
+                let mut isnull = false;
+                let v = exectuples::slot_getattr(slot, 1, &mut isnull);
+                assert!(!isnull);
+                assert_eq!(v.as_i32(), 7, "materialized slot serves the emitted row's values");
+            }
+
+            // Resume and drain the remainder — byte-identical continuation.
+            crate::lanev2::cursor_park_resume(planstate, estate).unwrap();
+            {
+                let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate
+                else {
+                    unreachable!()
+                };
+                assert_eq!(ss.lane_cursor(), (1, 3), "consume cursor restored");
+                loop {
+                    let (mut pos, n) = ss.lane_cursor();
+                    while pos < n {
+                        let slot_id = ::nodeseqscan::seq_scan_batch_emit(ss, estate, pos)
+                            .unwrap()
+                            .expect("staged row emits");
+                        let mut isnull = false;
+                        let v = exectuples::slot_getattr(
+                            estate.slot_mut(slot_id),
+                            1,
+                            &mut isnull,
+                        );
+                        assert!(!isnull);
+                        rows.push(v.as_i32());
+                        pos += 1;
+                        ss.set_lane_cursor(pos, n);
+                    }
+                    let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    ss.set_lane_cursor(0, n);
+                }
+            }
+
+            crate::exec_end_node(planstate, estate).unwrap();
+            estate.exec_reset_tuple_table(false);
+            estate.exec_close_range_table_relations().unwrap();
+        });
+        assert_eq!(rows, vec![7, 8, 9, 10, 11], "the whole table, in order");
         crate::lanev2::cursors_set_for_tests(false);
         scanfix::quiesced();
     }
@@ -12317,7 +12437,7 @@ mod spi_stage_a_aj_w95 {
             // NOTHING (the budget belongs to the outer run).
             estate.es_epq_active = true;
             assert!(
-                !crate::lanev2::spi_run_settle(planstate, estate),
+                !crate::lanev2::spi_run_settle(planstate, estate).unwrap(),
                 "EPQ drive must not settle/park"
             );
             estate.es_epq_active = false;
@@ -12325,7 +12445,7 @@ mod spi_stage_a_aj_w95 {
             // The count-limited stop: settle releases the staged claim
             // and reports parked (the caller arms es_lane_cursor_parked).
             assert!(
-                crate::lanev2::spi_run_settle(planstate, estate),
+                crate::lanev2::spi_run_settle(planstate, estate).unwrap(),
                 "a lane-staged batch parks (the bit the caller must arm)"
             );
             scanfix::quiesced(); // R3: ZERO pins while suspended
@@ -12473,7 +12593,7 @@ mod cursors_wave10_cb {
                 }
                 // Settle at the run seam's park point (the EXISTING inc-1b
                 // walker — no new machinery): R3 zero pins while suspended.
-                assert!(crate::lanev2::cursor_run_park(planstate, estate), "parks");
+                assert!(crate::lanev2::cursor_run_park(planstate, estate).unwrap(), "parks");
                 scanfix::quiesced();
                 // Resume-reposition.
                 crate::lanev2::cursor_park_resume(planstate, estate).unwrap();
