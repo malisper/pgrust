@@ -192,8 +192,6 @@ fs	crates/backend/utils/adt/genfile/src/builtins.rs	10	DST-REVIEW(p4-simnet): +3
 fs	crates/backend/utils/adt/genfile/src/lib.rs	1
 # --- crates/backend/utils/cache/relcache (12 sites) ---
 fs	crates/backend/utils/cache/relcache/src/initfile.rs	12
-# --- crates/backend/utils/cache/relmapper (2 sites) ---
-fs	crates/backend/utils/cache/relmapper/src/lib.rs	2
 # --- crates/backend/utils/error/elog (7 sites) ---
 fs	crates/backend/utils/error/elog/src/report.rs	7
 # --- crates/backend/utils/init/miscinit (20 sites) ---

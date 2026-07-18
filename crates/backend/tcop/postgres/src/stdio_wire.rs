@@ -54,7 +54,10 @@ pub fn PostgresStdioWireMain(argv: &[String], username: &str) -> ! {
 
 // Never returns Ok: the tail call is PostgresMain (-> !); every early exit
 // is a FATAL ereport (which proc_exits via unwind) or an Err.
-fn stdio_wire_main_inner(
+// pub(crate): the ladder + session half are TRANSPORT-BLIND (everything
+// provider-specific lives behind the §2.4 seam slots installed at boot), so
+// the P4 sim-net mode (sim_net.rs) runs this exact fn over its provider.
+pub(crate) fn stdio_wire_main_inner(
     argv: &[String],
     username: &str,
 ) -> PgResult<core::convert::Infallible> {

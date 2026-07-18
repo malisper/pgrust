@@ -14,6 +14,11 @@ pub enum Transport {
     /// pgwire over stdin/stdout (pqcomm_stdio): --stdio-wire on any target;
     /// the wasm32-wasip1 client-server story (WASI p1 has no socket()).
     StdioWire,
+    /// The deterministic in-memory duplex pair (pqcomm_simnet): --sim-net,
+    /// `--cfg pgrust_sim` builds only (P4; the variant does not exist on
+    /// product builds).
+    #[cfg(pgrust_sim)]
+    SimNet,
 }
 
 // One line per crate: the full seam-install closure for the postgres binary.
@@ -124,6 +129,13 @@ pub fn init_all_with_transport(transport: Transport) {
         }
         Transport::StdioWire => {
             pqcomm_stdio::init_transport_seams();
+            pqcomm::init_socket_gucs();
+        }
+        // P4 sim-net: the third provider into the same slots, incl. the
+        // virtual listen/accept pair the init_seams split freed.
+        #[cfg(pgrust_sim)]
+        Transport::SimNet => {
+            pqcomm_simnet::init_transport_seams();
             pqcomm::init_socket_gucs();
         }
     }
