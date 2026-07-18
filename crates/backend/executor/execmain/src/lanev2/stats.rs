@@ -1025,6 +1025,15 @@ fn dump() {
         "counter\trefsort-demoted\t{}\n",
         REFSORT_DEMOTED.load(Relaxed)
     ));
+    // --- WS-CB wave-10 (cursors inc-2 §6 staging; worklog EX-CB-2): the
+    // run-seam backward-drive evidence counter — the post-flip deletion
+    // bake reads this at zero across all corpora. Static lives in push.rs
+    // (the WS-CB grant surface); this is the dump row only.
+    out.push_str(&format!(
+        "counter\trun-seam-backward\t{}\n",
+        super::run_seam_backward_evidence_count()
+    ));
+    // --- end WS-CB wave-10 ---
     let pid = std::process::id();
     let final_path = dir.join(format!("lane-v2-stats.{pid}.tsv"));
     let tmp_path = dir.join(format!(
