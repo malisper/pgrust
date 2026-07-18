@@ -859,3 +859,269 @@ mod scanfix {
         Ok(Relation::open(data, Some(record_close)))
     }
 }
+
+// --- WS-CA wave-10 (cursors inc-2, contract §1/§2/§4; band 94001+) -------------
+//
+// The store-armed SCROLL cursor pins: same live-seqscan substrate as the
+// knob-OFF sequence test above, PGRUST_LANE_V2_CURSORS ON via the portalmem
+// memo lever. Every test holds scanfix::TEST_LOCK (the knob cell is
+// process-global; the guard restores OFF on every exit path).
+mod cursors_w10_ca {
+    use super::*;
+    use ::types_portal::CURSOR_OPT_HOLD;
+
+    struct KnobGuard;
+    impl KnobGuard {
+        fn on() -> KnobGuard {
+            portalmem::cursor_store_set_for_tests(true);
+            KnobGuard
+        }
+    }
+    impl Drop for KnobGuard {
+        fn drop(&mut self) {
+            portalmem::cursor_store_set_for_tests(false);
+        }
+    }
+
+    fn mk_armed_cursor(mcx: Mcx<'static>, name: &'static str, relid: u32, options: i32) {
+        let pstmt = mk_seqscan_pstmt(mcx, relid);
+        // SAFETY: pstmt is arena-backed by the leaked mcx.
+        let stmts = unsafe { pquery::stmt_list::register(core::slice::from_ref(pstmt)) };
+        let portal = portalmem::CreatePortal(name, false, false).unwrap();
+        portalmem::PortalDefineQuery(
+            &portal,
+            None,
+            "DECLARE (wave-10 store-armed test cursor)",
+            types_portal::CMDTAG_SELECT,
+            stmts,
+            CachedPlanHandle::NULL,
+        )
+        .unwrap();
+        portal.borrow_mut().cursorOptions = options;
+        push_snapshot();
+        pquery::PortalStart(&portal, ParamListHandle::NULL, 0, Some(snapmgr::GetActiveSnapshot()))
+            .unwrap();
+        snapmgr::PopActiveSnapshot().unwrap();
+    }
+
+    fn store_count(name: &str) -> i64 {
+        let portal = portalmem::GetPortalByName(Some(name)).unwrap();
+        let store = {
+            let p = portal.borrow();
+            if !p.cursorStore.is_null() { p.cursorStore } else { p.holdStore }
+        };
+        assert!(!store.is_null(), "store-armed portal has a cursor store");
+        tuplestore_hold_seams::tuplestore_tuple_count::call(store)
+    }
+
+    fn fill_exhausted(name: &str) -> bool {
+        portalmem::GetPortalByName(Some(name)).unwrap().borrow().cursorFillExhausted
+    }
+
+    /// 94001: the full knob-OFF fetch sequence byte-for-byte (fetch
+    /// invisibility, contract §2.3) PLUS the §2.2 laziness ledger: the store
+    /// grows exactly as far as each fetch demands; backward/rewind/absolute
+    /// below the high-water are pure replays (fill count frozen).
+    #[test]
+    fn w10ca_94001_store_armed_scroll_sequence_and_laziness() {
+        install_fixtures();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _knob = KnobGuard::on();
+        let mcx = leaked_mcx();
+        let relid: u32 = 94001;
+        scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
+        mk_armed_cursor(mcx, "w10a", relid, CURSOR_OPT_SCROLL);
+        {
+            let portal = portalmem::GetPortalByName(Some("w10a")).unwrap();
+            assert!(portal.borrow().cursorStoreArmed, "knob-ON SCROLL ONE_SELECT arms");
+        }
+
+        let (qc, rows) = fetch("w10a", FETCH_FORWARD, 2, false);
+        assert_eq!((qc.commandTag, qc.nprocessed), (CMDTAG_FETCH, 2));
+        assert_eq!(rows, ["1", "2"]);
+        assert_eq!(pos("w10a"), (false, false, 2));
+        assert_eq!(store_count("w10a"), 2, "§2.2: filled exactly as far as the fetch demands");
+        assert!(!fill_exhausted("w10a"));
+        {
+            // Non-hold SCROLL: the §1.1 cursorStore, not the holdStore.
+            let portal = portalmem::GetPortalByName(Some("w10a")).unwrap();
+            assert!(!portal.borrow().cursorStore.is_null());
+            assert!(portal.borrow().holdStore.is_null());
+            // Bare seqscan is CURRENT-OF-eligible: sidecar rides along.
+            assert_eq!(portal.borrow().currentOfEligible, Some(true));
+            assert!(!portal.borrow().cursorTidStore.is_null());
+        }
+
+        let (qc, rows) = fetch("w10a", FETCH_BACKWARD, 1, false);
+        assert_eq!((qc.commandTag, qc.nprocessed), (CMDTAG_FETCH, 1));
+        assert_eq!(rows, ["1"]);
+        assert_eq!(pos("w10a"), (false, false, 1));
+        assert_eq!(store_count("w10a"), 2, "backward fetch = pure store seek");
+
+        let (qc, rows) = fetch("w10a", FETCH_ABSOLUTE, 3, true);
+        assert_eq!((qc.commandTag, qc.nprocessed), (CMDTAG_MOVE, 1));
+        assert!(rows.is_empty(), "MOVE sends no rows");
+        assert_eq!(pos("w10a"), (false, false, 3));
+        assert_eq!(store_count("w10a"), 3, "MOVE ABSOLUTE 3 fills to row 3, never further");
+
+        let (qc, rows) = fetch("w10a", FETCH_FORWARD, FETCH_ALL, false);
+        assert_eq!((qc.commandTag, qc.nprocessed), (CMDTAG_FETCH, 2));
+        assert_eq!(rows, ["4", "5"]);
+        assert_eq!(pos("w10a"), (false, true, 5));
+        assert_eq!(store_count("w10a"), 5);
+        assert!(fill_exhausted("w10a"), "count-0 drain exhausts the fill");
+
+        // FETCH ABSOLUTE 2 takes the rewind leg: store replay, no re-execution
+        // (§5 D1 — the fill high-water is kept).
+        let (qc, rows) = fetch("w10a", FETCH_ABSOLUTE, 2, false);
+        assert_eq!((qc.commandTag, qc.nprocessed), (CMDTAG_FETCH, 1));
+        assert_eq!(rows, ["2"]);
+        assert_eq!(pos("w10a"), (false, false, 2));
+        assert_eq!(store_count("w10a"), 5, "rewind-refetch replays; nothing re-executes");
+
+        let (qc, rows) = fetch("w10a", FETCH_RELATIVE, 2, false);
+        assert_eq!((qc.commandTag, qc.nprocessed), (CMDTAG_FETCH, 1));
+        assert_eq!(rows, ["4"]);
+        assert_eq!(pos("w10a"), (false, false, 4));
+
+        let (qc, rows) = fetch("w10a", FETCH_BACKWARD, FETCH_ALL, false);
+        assert_eq!((qc.commandTag, qc.nprocessed), (CMDTAG_FETCH, 3));
+        assert_eq!(rows, ["3", "2", "1"]);
+        assert_eq!(pos("w10a"), (true, false, 0));
+
+        let (qc, _) = fetch("w10a", FETCH_FORWARD, FETCH_ALL, true);
+        assert_eq!((qc.commandTag, qc.nprocessed), (CMDTAG_MOVE, 5));
+        assert_eq!(pos("w10a"), (false, true, 5));
+
+        let (qc, _) = fetch("w10a", FETCH_BACKWARD, FETCH_ALL, true);
+        assert_eq!((qc.commandTag, qc.nprocessed), (CMDTAG_MOVE, 5));
+        assert_eq!(pos("w10a"), (true, false, 0));
+
+        let (qc, rows) = fetch("w10a", FETCH_FORWARD, 1, false);
+        assert_eq!((qc.commandTag, qc.nprocessed), (CMDTAG_FETCH, 1));
+        assert_eq!(rows, ["1"]);
+        assert_eq!(store_count("w10a"), 5);
+
+        PerformPortalClose(Some("w10a")).unwrap();
+        assert!(portalmem::GetPortalByName(Some("w10a")).is_none());
+        scanfix::quiesced();
+    }
+
+    /// 94002: §2.4 arm 1 — SCROLL+HOLD persist keeps the fetched prefix
+    /// (fill_to(EOF) resume, no rewind/re-execution), tears the executor
+    /// down, and post-persist fetches serve from the same holdStore with the
+    /// cursor position intact (§5 D2).
+    #[test]
+    fn w10ca_94002_scroll_hold_persist_keeps_prefix() {
+        install_fixtures();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _knob = KnobGuard::on();
+        let mcx = leaked_mcx();
+        let relid: u32 = 94002;
+        scanfix::register_table(relid, &[&[10, 20, 30], &[40, 50]]);
+        mk_armed_cursor(mcx, "w10h", relid, CURSOR_OPT_SCROLL | CURSOR_OPT_HOLD);
+
+        let (_, rows) = fetch("w10h", FETCH_FORWARD, 2, false);
+        assert_eq!(rows, ["10", "20"]);
+        {
+            // SCROLL+HOLD is holdStore-resident from FIRST RUN (§1.1 row 3).
+            let portal = portalmem::GetPortalByName(Some("w10h")).unwrap();
+            assert!(portal.borrow().cursorStore.is_null());
+            assert!(!portal.borrow().holdStore.is_null());
+        }
+        assert_eq!(store_count("w10h"), 2);
+
+        let portal = portalmem::GetPortalByName(Some("w10h")).unwrap();
+        crate::PersistHoldablePortal(&portal).unwrap();
+        assert!(portal.borrow().queryDesc.is_null(), "persist tore the executor down");
+        drop(portal);
+        assert_eq!(store_count("w10h"), 5, "persist = fill_to(EOF) resume from high-water");
+        assert!(fill_exhausted("w10h"));
+        assert_eq!(pos("w10h"), (false, false, 2), "cursor position survives persist");
+
+        let (_, rows) = fetch("w10h", FETCH_FORWARD, FETCH_ALL, false);
+        assert_eq!(rows, ["30", "40", "50"]);
+        assert_eq!(pos("w10h"), (false, true, 5));
+
+        let (_, rows) = fetch("w10h", FETCH_BACKWARD, 2, false);
+        assert_eq!(rows, ["50", "40"], "backward across COMMIT-persisted store");
+
+        PerformPortalClose(Some("w10h")).unwrap();
+        scanfix::quiesced();
+    }
+
+    /// 94003: §4 — WHERE CURRENT OF over a store-armed cursor resolves the
+    /// tid from the sidecar at portalPos-1 (the fill high-water mark is
+    /// several rows ahead: reading the scan state would target the wrong
+    /// row — the portals.sql FETCH ABSOLUTE 12 / ABSOLUTE 8 hazard shape).
+    #[test]
+    fn w10ca_94003_current_of_resolves_from_sidecar() {
+        install_fixtures();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _knob = KnobGuard::on();
+        let mcx = leaked_mcx();
+        let relid: u32 = 94003;
+        scanfix::register_table(relid, &[&[7, 8, 9], &[11, 12]]);
+        mk_armed_cursor(mcx, "w10c", relid, CURSOR_OPT_SCROLL);
+
+        // Drive the fill to row 4 (block 1 offset 1), then move BACKWARD to
+        // row 2 (block 0 offset 2): scan sits at high-water 4, cursor at 2.
+        let (_, rows) = fetch("w10c", FETCH_ABSOLUTE, 4, false);
+        assert_eq!(rows, ["11"]);
+        let (qc, _) = fetch("w10c", FETCH_ABSOLUTE, 2, true);
+        assert_eq!((qc.commandTag, qc.nprocessed), (CMDTAG_MOVE, 1));
+        assert_eq!(pos("w10c"), (false, false, 2));
+        assert_eq!(store_count("w10c"), 4, "high-water stays at 4");
+
+        let tid = execmain_seams::exec_current_of::call(Some("w10c"), 0, relid, "t")
+            .unwrap()
+            .expect("cursor is on a row of this table");
+        assert_eq!(
+            (types_tuple::ItemPointerGetBlockNumber(&tid), tid.ip_posid),
+            (0, 2),
+            "CURRENT OF answers the CURSOR row, not the scan's high-water row"
+        );
+
+        // Another table's oid: the per-table search fails exactly as in C.
+        let err = execmain_seams::exec_current_of::call(Some("w10c"), 0, relid + 1, "other")
+            .unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_CURSOR_STATE);
+
+        // Off-row (atEnd): C's "not positioned on a row".
+        let (_, _) = fetch("w10c", FETCH_FORWARD, FETCH_ALL, true);
+        assert_eq!(pos("w10c"), (false, true, 5));
+        let err =
+            execmain_seams::exec_current_of::call(Some("w10c"), 0, relid, "t").unwrap_err();
+        assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_CURSOR_STATE);
+
+        PerformPortalClose(Some("w10c")).unwrap();
+        scanfix::quiesced();
+    }
+
+    /// 94004: knob-OFF world untouched — SCROLL portals arm nothing and run
+    /// the legacy executor-backward path (the sequence test above pins its
+    /// bytes); the memo lever answers exactly what the tests set.
+    #[test]
+    fn w10ca_94004_knob_off_arms_nothing() {
+        install_fixtures();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        portalmem::cursor_store_set_for_tests(false);
+        let mcx = leaked_mcx();
+        let relid: u32 = 94004;
+        scanfix::register_table(relid, &[&[1, 2]]);
+        mk_armed_cursor(mcx, "w10off", relid, CURSOR_OPT_SCROLL);
+        let (_, rows) = fetch("w10off", FETCH_FORWARD, 1, false);
+        assert_eq!(rows, ["1"]);
+        {
+            let portal = portalmem::GetPortalByName(Some("w10off")).unwrap();
+            let p = portal.borrow();
+            assert!(!p.cursorStoreArmed);
+            assert!(p.cursorStore.is_null());
+            assert!(p.cursorTidStore.is_null());
+            assert_eq!(p.currentOfEligible, None);
+        }
+        PerformPortalClose(Some("w10off")).unwrap();
+        scanfix::quiesced();
+    }
+}
+// --- end WS-CA wave-10 (band 94001+) --------------------------------------------

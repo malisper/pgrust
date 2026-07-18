@@ -17,10 +17,11 @@ use ::types_nodes::primnodes::TargetEntry;
 use ::types_nodes::NodeTag;
 use ::types_portal::{
     FetchDirection, ParamListHandle, Portal, PortalData, PortalStrategy, QueryCompletion,
-    QueryDescHandle, QueryEnvHandle, StmtListHandle, CMDTAG_DELETE, CMDTAG_INSERT, CMDTAG_MERGE,
-    CMDTAG_SELECT, CMDTAG_UNKNOWN, CMDTAG_UPDATE, CURSOR_OPT_NO_SCROLL, CURSOR_OPT_SCROLL,
-    FETCH_ALL, PORTAL_DEFINED, PORTAL_MULTI_QUERY, PORTAL_ONE_MOD_WITH, PORTAL_ONE_RETURNING,
-    PORTAL_ONE_SELECT, PORTAL_READY, PORTAL_UTIL_SELECT,
+    QueryDescHandle, QueryEnvHandle, StmtListHandle, TuplestoreHandle, CMDTAG_DELETE,
+    CMDTAG_INSERT, CMDTAG_MERGE, CMDTAG_SELECT, CMDTAG_UNKNOWN, CMDTAG_UPDATE, CURSOR_OPT_HOLD,
+    CURSOR_OPT_NO_SCROLL, CURSOR_OPT_SCROLL, FETCH_ALL, PORTAL_DEFINED, PORTAL_MULTI_QUERY,
+    PORTAL_ONE_MOD_WITH, PORTAL_ONE_RETURNING, PORTAL_ONE_SELECT, PORTAL_READY,
+    PORTAL_UTIL_SELECT,
 };
 use ::types_scan::sdir::{
     BackwardScanDirection, ForwardScanDirection, NoMovementScanDirection, ScanDirection,
@@ -387,12 +388,31 @@ pub fn PortalStart(
                     )?
                 };
 
-                let myeflags =
-                    if (portal.borrow().cursorOptions & CURSOR_OPT_SCROLL) != 0 {
-                        eflags | EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD
-                    } else {
-                        eflags
-                    };
+                // WS-CA wave-10 (contract §3.1): a store-armed SCROLL portal
+                // is a plain forward plan — backward is consumed by the
+                // store, rewind is a store rescan — so the child gets NEITHER
+                // flag. Knob-OFF keeps C's arm verbatim (deleted at flip,
+                // contract §6 item 1).
+                //
+                // D-CA-2 (worklog): CURRENT-OF-ELIGIBLE armed portals keep
+                // C's flags. Their fill must be the row chain (§3.3 — the
+                // per-row identity capture reads the scan state, which only
+                // the row chain maintains); the batch engine's standing
+                // eflags refusal (batch_allowed = no BACKWARD|MARK) is the
+                // in-fence mechanism forcing that until WS-CB's named
+                // cursor-currentof-tidcapture reason supersedes it. The
+                // store still serves every fetch either way
+                // (fill-strategy invisibility, §2.3).
+                let scroll = (portal.borrow().cursorOptions & CURSOR_OPT_SCROLL) != 0;
+                let store_armed = scroll && portalmem::cursor_store_enabled();
+                let current_of_eligible = store_armed
+                    && execmain_seams::cursor_plan_current_of_eligible::is_installed()
+                    && execmain_seams::cursor_plan_current_of_eligible::call(&stmts[0]);
+                let myeflags = if scroll && (!store_armed || current_of_eligible) {
+                    eflags | EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD
+                } else {
+                    eflags
+                };
 
                 // Not yet reachable from the portal: owned until it is.
                 let mut qd_owner = QueryDescOwner(query_desc);
@@ -406,6 +426,14 @@ pub fn PortalStart(
                 p.atStart = true;
                 p.atEnd = false; /* allow fetches */
                 p.portalPos = 0;
+                // WS-CA wave-10: arming + the §4.1 eligibility answer are
+                // both PortalStart-fixed (the fill and execCurrentOf read
+                // them; the wildcard planstate walk at capture time agrees
+                // with the plan-shape answer by construction).
+                p.cursorStoreArmed = store_armed;
+                if store_armed {
+                    p.currentOfEligible = Some(current_of_eligible);
+                }
                 drop(p);
 
                 snapmgr::PopActiveSnapshot()?;
@@ -599,6 +627,11 @@ fn PortalRunSelect(
 ) -> PgResult<u64> {
     let query_desc = portal.borrow().queryDesc;
     let hold_store = portal.borrow().holdStore;
+    // WS-CA wave-10: a store-armed portal with a live executor serves every
+    // fetch from the cursor store (fill_to + RunFromStore). Once the executor
+    // is gone (post-persist), the armed portal falls through to the ordinary
+    // holdStore arm — same store, same reads.
+    let store_armed = portal.borrow().cursorStoreArmed && !query_desc.is_null();
 
     debug_assert!(!query_desc.is_null() || !hold_store.is_null());
 
@@ -620,8 +653,22 @@ fn PortalRunSelect(
             count = 0;
         }
 
-        if !hold_store.is_null() {
-            nprocessed = RunFromStore(portal, direction, count as u64, dest)?;
+        if store_armed {
+            // §2.2: fill exactly as far as the fetch demands — never further
+            // (count 0 / FETCH_ALL ⇒ fill to EOF) — then replay from the
+            // store. NoMovement touches neither fill nor store rows.
+            if !ScanDirectionIsNoMovement(direction) {
+                let target = if count == 0 {
+                    0
+                } else {
+                    portal.borrow().portalPos.saturating_add(count as u64)
+                };
+                fill_portal_store_to(portal, target)?;
+            }
+            nprocessed =
+                RunFromStore(portal, direction, count as u64, dest, cursor_read_store(portal))?;
+        } else if !hold_store.is_null() {
+            nprocessed = RunFromStore(portal, direction, count as u64, dest, hold_store)?;
         } else {
             let snap = execmain_seams::query_desc_snapshot::call(query_desc)
                 .expect("queryDesc->snapshot set while executor is active");
@@ -657,8 +704,14 @@ fn PortalRunSelect(
             count = 0;
         }
 
-        if !hold_store.is_null() {
-            nprocessed = RunFromStore(portal, direction, count as u64, dest)?;
+        if store_armed {
+            // §2.2: backward is a pure store seek — zero executor contact.
+            // The store exists whenever atStart is false (a forward fetch
+            // filled it); the NoMovement arm never touches store rows.
+            nprocessed =
+                RunFromStore(portal, direction, count as u64, dest, cursor_read_store(portal))?;
+        } else if !hold_store.is_null() {
+            nprocessed = RunFromStore(portal, direction, count as u64, dest, hold_store)?;
         } else {
             let snap = execmain_seams::query_desc_snapshot::call(query_desc)
                 .expect("queryDesc->snapshot set while executor is active");
@@ -729,11 +782,15 @@ fn FillPortalStore(portal: &Portal<'static>, is_top_level: bool) -> PgResult<()>
     Ok(())
 }
 
+// WS-CA wave-10: the store to read is now a parameter — the holdStore for
+// held/RETURNING/UTIL portals (unchanged), the cursor store for store-armed
+// portals. A NULL handle is legal only under NoMovement (loop never entered).
 fn RunFromStore(
     portal: &Portal<'static>,
     direction: ScanDirection,
     count: u64,
     dest: &mut DestReceiver<'_>,
+    hold_store: TuplestoreHandle,
 ) -> PgResult<u64> {
     let mut current_tuple_count: u64 = 0;
 
@@ -742,7 +799,6 @@ fn RunFromStore(
         .tupDesc
         .clone()
         .expect("RunFromStore: portal has a tupDesc");
-    let hold_store = portal.borrow().holdStore;
 
     // C builds the slot in CurrentMemoryContext (== portalContext here).
     // SAFETY: portalContext is PgBox'd for address stability and outlives this
@@ -1164,6 +1220,23 @@ fn DoPortalRewind(portal: &Portal<'static>) -> PgResult<()> {
         }
     }
 
+    // WS-CA wave-10 (contract §5 D1): a store-armed portal rewinds the STORE
+    // and keeps the executor at the fill high-water mark — re-fetch after
+    // rewind is a store replay, never a re-execution. C rewinds the executor
+    // (pquery.c DoPortalRewind -> ExecutorRewind); streams are identical by
+    // replay and strictly more deterministic for volatile queries.
+    if portal.borrow().cursorStoreArmed {
+        let store = cursor_read_store(portal);
+        if !store.is_null() {
+            tuplestore_hold_seams::tuplestore_rescan::call(store)?;
+        }
+        let mut p = portal.borrow_mut();
+        p.atStart = true;
+        p.atEnd = false;
+        p.portalPos = 0;
+        return Ok(());
+    }
+
     let hold_store = portal.borrow().holdStore;
     if !hold_store.is_null() {
         tuplestore_hold_seams::tuplestore_rescan::call(hold_store)?;
@@ -1184,6 +1257,217 @@ fn DoPortalRewind(portal: &Portal<'static>) -> PgResult<()> {
     p.portalPos = 0;
     Ok(())
 }
+
+// --- WS-CA wave-10 (cursors inc-2): the portal-boundary cursor store ---------
+//
+// Contract §1 (store class/creation), §2.2 (fill_to laziness), §2.3 (fill
+// strategy invisible to fetch), §4.2 (row-identity capture). CA-1 is the
+// row-chain fill (the executor drives rows into the store through the
+// ordinary tuplestore DestReceiver); WS-CB's lane batch sink replaces the
+// drive INSIDE executor_run without changing a byte here (fill-strategy
+// invisibility is the §7.2 asserted gate).
+
+/// The store a store-armed portal reads: `cursorStore` (SCROLL without HOLD)
+/// or the early-created `holdStore` (SCROLL + HOLD).
+fn cursor_read_store(portal: &Portal<'static>) -> TuplestoreHandle {
+    let p = portal.borrow();
+    if !p.cursorStore.is_null() {
+        p.cursorStore
+    } else {
+        p.holdStore
+    }
+}
+
+/// §1.1 creation matrix, executed at first fill demand:
+/// * SCROLL, no HOLD — `begin_heap(random_access=true, inter_xact=false,
+///   work_mem)` (C provenance: portalmem.c:331 store shape minus the
+///   cross-transaction properties it doesn't need); dies at PortalDrop.
+/// * SCROLL + HOLD — the portal's holdStore via PortalCreateHoldStore
+///   verbatim (holdContext under TopPortalContext, inter_xact=true), created
+///   NOW instead of at commit; the fill receiver detoasts on append
+///   (portalcmds.c:326's obligation moved to append time).
+/// Plus the §4 eligibility probe (once) and the tid sidecar for eligible
+/// plans.
+fn ensure_cursor_store(portal: &Portal<'static>) -> PgResult<()> {
+    debug_assert!(portal.borrow().cursorStoreArmed);
+    let hold = (portal.borrow().cursorOptions & CURSOR_OPT_HOLD) != 0;
+    let store_missing = {
+        let p = portal.borrow();
+        p.cursorStore.is_null() && p.holdStore.is_null()
+    };
+    if store_missing {
+        if hold {
+            portalmem::PortalCreateHoldStore(portal)?;
+        } else {
+            let store = tuplestore_hold_seams::tuplestore_begin_heap_cursor::call(true, false)?;
+            portal.borrow_mut().cursorStore = store;
+        }
+    }
+    // §4.1: the eligibility answer was fixed at PortalStart (plan shape).
+    // Checked independently of store creation: a never-run WITH HOLD cursor
+    // reaches its first fill at COMMIT with the holdStore already minted by
+    // HoldPortal — the sidecar must still ride along.
+    if portal.borrow().currentOfEligible == Some(true)
+        && portal.borrow().cursorTidStore.is_null()
+    {
+        let sidecar = tuplestore_hold_seams::tuplestore_begin_heap_cursor::call(true, hold)?;
+        portal.borrow_mut().cursorTidStore = sidecar;
+    }
+    Ok(())
+}
+
+/// Contract §2.2 — the laziness contract, verbatim:
+///
+/// ```text
+/// fill_to(portal, target_rows):
+///     if fill_exhausted or store.tuple_count() >= target_rows: return
+///     deficit = target_rows - store.tuple_count()   # target 0 = fill to EOF
+///     executor_run(queryDesc, Forward, deficit, dest = store sink)
+///     if nprocessed < deficit (or deficit was 0): fill_exhausted = true
+/// ```
+///
+/// The fill's ExecutorRun goes through the standard run seam, so WS-AI's
+/// budget install arms it (`es_cursor_run_budget = Some(deficit)` — the
+/// WS-AI hand-off point). CURRENT-OF-eligible plans fill row-at-a-time with
+/// per-row identity capture into the sidecar (§3.3's mode choice inside a
+/// still-store-served cursor; fetch-invisible).
+///
+/// eof-pointer invariant (why appends are always visible to ptr0): the
+/// tuplestore keeps the ACTIVE eof reader at EOF across appends
+/// (tuplestore.c puttuple_common). ptr0 reaches eof_reached only via an
+/// overshooting read, and RunFromStore can overshoot only when the store is
+/// short of the fetch — which fill_to only permits at fill exhaustion, after
+/// which no append ever happens (the flag is never cleared, rewind included).
+///
+/// pub: portalcmds' PersistHoldablePortal drives the §2.4 commit-time
+/// `fill_to(EOF)` through this same function.
+pub fn fill_portal_store_to(portal: &Portal<'static>, target_rows: u64) -> PgResult<()> {
+    ensure_cursor_store(portal)?;
+    if portal.borrow().cursorFillExhausted {
+        return Ok(());
+    }
+    let store = cursor_read_store(portal);
+    let have = tuplestore_hold_seams::tuplestore_tuple_count::call(store) as u64;
+    if target_rows != 0 && have >= target_rows {
+        return Ok(());
+    }
+    let query_desc = portal.borrow().queryDesc;
+    debug_assert!(!query_desc.is_null(), "fill_to on a portal without an executor");
+    let deficit = if target_rows == 0 { 0 } else { target_rows - have };
+    let hold = (portal.borrow().cursorOptions & CURSOR_OPT_HOLD) != 0;
+    let eligible = portal.borrow().currentOfEligible == Some(true);
+    let tid_store = portal.borrow().cursorTidStore;
+
+    let mut treceiver = tcop_dest::CreateDestReceiver(CommandDest::Tuplestore);
+    // detoast=true exactly for the holdStore shape (§1.1): same bytes
+    // (detoasting is deterministic), earlier cost, no re-execution at commit.
+    tcop_dest::SetTuplestoreDestReceiverParams(&mut treceiver, store, hold);
+
+    // Same snapshot discipline as the executor arm of PortalRunSelect; on
+    // error the active snapshot unwinds with the (now FAILED) transaction.
+    let snap = execmain_seams::query_desc_snapshot::call(query_desc)
+        .expect("queryDesc->snapshot set while executor is active");
+    snapmgr::PushActiveSnapshot(&snap)?;
+    if eligible {
+        debug_assert!(!tid_store.is_null());
+        // §4.2 capture reads the scan state per emitted row: single-row
+        // drives, identity appended sidecar-aligned with the store.
+        let mut filled: u64 = 0;
+        loop {
+            execmain_seams::executor_run::call(
+                query_desc,
+                ForwardScanDirection,
+                1,
+                &mut treceiver,
+            )?;
+            if execmain_seams::query_desc_es_processed::call(query_desc) == 0 {
+                portal.borrow_mut().cursorFillExhausted = true;
+                break;
+            }
+            let hit = execmain_seams::cursor_capture_current::call(query_desc)?;
+            // None (no positioned scan) stores an invalid identity so the
+            // sidecar stays row-aligned; resolution answers Ok(None) for it,
+            // C's empty-slot arm.
+            let (oid, packed) = hit.unwrap_or((0, 0));
+            tuplestore_hold_seams::tuplestore_tidstore_put::call(tid_store, oid, packed)?;
+            filled += 1;
+            if deficit != 0 && filled == deficit {
+                break;
+            }
+        }
+    } else {
+        execmain_seams::executor_run::call(
+            query_desc,
+            ForwardScanDirection,
+            deficit,
+            &mut treceiver,
+        )?;
+        let nprocessed = execmain_seams::query_desc_es_processed::call(query_desc);
+        if deficit == 0 || nprocessed < deficit {
+            portal.borrow_mut().cursorFillExhausted = true;
+        }
+    }
+    treceiver.destroy();
+    snapmgr::PopActiveSnapshot()?;
+    Ok(())
+}
+
+/// §2.4 auto-held arm (the HoldPinnedPortals adversarial class): a pinned
+/// plpgsql cursor auto-held at intra-procedure COMMIT was armed WITHOUT
+/// CURSOR_OPT_HOLD, so its store is the transaction-scoped `cursorStore`
+/// (inter_xact=false, NOT detoast-on-append). Persist copies the filled
+/// store into the fresh holdStore through the detoasting receiver (same
+/// bytes C would re-execute for; the source rows are read pre-COMMIT while
+/// their toast data is alive), then drops the transaction-scoped store and
+/// sidecar (their spill files must not survive the transaction). No-op for
+/// DECLARE'd WITH HOLD portals (their store already IS the holdStore).
+pub fn cursor_store_persist_into_hold(portal: &Portal<'static>) -> PgResult<()> {
+    let src = portal.borrow().cursorStore;
+    if src.is_null() {
+        return Ok(());
+    }
+    let dst = portal.borrow().holdStore;
+    debug_assert!(!dst.is_null(), "HoldPortal creates the holdStore before persist");
+    let tup_desc = portal
+        .borrow()
+        .tupDesc
+        .clone()
+        .expect("cursor portal has a tupDesc");
+    // SAFETY: portalContext is PgBox'd for address stability and outlives
+    // this call (freed only in PortalDrop) — the RunFromStore pattern.
+    let ctx: &MemoryContext = unsafe {
+        let p = portal.borrow();
+        &*(&**p.portalContext.as_ref().expect("portal has portalContext")
+            as *const MemoryContext)
+    };
+    let mcx = ctx.mcx();
+    let mut treceiver = tcop_dest::CreateDestReceiver(CommandDest::Tuplestore);
+    tcop_dest::SetTuplestoreDestReceiverParams(&mut treceiver, dst, true);
+    treceiver.startup(CmdType::CMD_SELECT as i32, &tup_desc)?;
+    let mut slot =
+        exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(tup_desc));
+    tuplestore_hold_seams::tuplestore_rescan::call(src)?;
+    while tuplestore_hold_seams::tuplestore_gettupleslot::call(src, true, false, &mut slot)? {
+        treceiver.receive_slot(&mut slot)?;
+        exectuples::exec_clear_tuple(&mut slot, mcx);
+    }
+    treceiver.shutdown()?;
+    treceiver.destroy();
+    drop(slot);
+    let (src, sidecar) = {
+        let mut p = portal.borrow_mut();
+        (
+            core::mem::replace(&mut p.cursorStore, TuplestoreHandle::NULL),
+            core::mem::replace(&mut p.cursorTidStore, TuplestoreHandle::NULL),
+        )
+    };
+    tuplestore_hold_seams::tuplestore_end::call(src);
+    if !sidecar.is_null() {
+        tuplestore_hold_seams::tuplestore_end::call(sidecar);
+    }
+    Ok(())
+}
+// --- end WS-CA wave-10 --------------------------------------------------------
 
 pub fn PlannedStmtRequiresSnapshot(pstmt: &PlannedStmt<'_>) -> bool {
     let Some(utility_stmt) = pstmt.utilityStmt else {
