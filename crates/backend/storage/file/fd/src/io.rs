@@ -1,5 +1,7 @@
 use std::io::{IoSlice, IoSliceMut};
-use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd, RawFd};
+use std::os::fd::RawFd;
+
+use ::vfs::VfsFd;
 
 use ::elog::ereport;
 use ::types_core::BLCKSZ;
@@ -80,8 +82,8 @@ pub fn PathNameOpenFilePerm(file_name: &str, file_flags: i32, file_mode: u32) ->
         fd.nfile += 1;
 
         let vfd_p = &mut fd.vfd_cache[file as usize];
-        // SAFETY: `raw` is a freshly opened descriptor now owned by the VFD.
-        vfd_p.fd = Some(unsafe { OwnedFd::from_raw_fd(raw) });
+        // SAFETY: `raw` is a freshly vfs-opened descriptor now owned by the VFD.
+        vfd_p.fd = Some(unsafe { VfsFd::from_raw(raw) });
         vfd_p.file_name = Some(fnamecopy);
         vfd_p.file_flags = file_flags & !(libc::O_CREAT | libc::O_TRUNC | libc::O_EXCL);
         vfd_p.file_mode = file_mode;
@@ -111,8 +113,9 @@ pub fn FileClose(file: File) -> PgResult<()> {
             let handle = fd.vfd_cache[file as usize].fd.take().unwrap();
             crate::pgaio_closing_fd_if_engine_present(handle.as_raw());
 
-            // Live descriptor released from its guard; closed once here.
-            let raw = handle.into_raw_fd();
+            // Live descriptor released from its guard (disarmed); closed
+            // once here.
+            let raw = handle.into_raw();
             let failed = vfs::close(raw) != 0;
             let en = get_errno();
 

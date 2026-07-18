@@ -1,5 +1,5 @@
 use std::fs::File as StdFile;
-use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
 
 use ::elog::ereport;
 use ::types_core::SubTransactionId;
@@ -13,7 +13,10 @@ pub(crate) enum AllocatedHandle {
     // (OpenPipeStream popen) stay posix-only in P1 — out of Vfs scope.
     File(StdFile),
     Dir(Option<vfs::VfsDirIter>),
-    RawFd(OwnedFd),
+    // vfs-minted, so the holder must be the vfs-close guard (finding F1b):
+    // an unwind/thread-exit drop releases into the active vfs namespace,
+    // never posix-side.
+    RawFd(vfs::VfsFd),
     Pipe(PipeHandle),
 }
 
@@ -110,8 +113,9 @@ pub(crate) fn FreeDesc(index: i32) -> i32 {
         }
         AllocatedHandle::RawFd(file) => {
             crate::pgaio_closing_fd_if_engine_present(file.as_raw_fd());
-            // Live descriptor released from its guard; closed once here.
-            let raw = file.into_raw_fd();
+            // Live descriptor released from its guard (disarmed); closed
+            // exactly once here.
+            let raw = file.into_raw();
             vfs::close(raw)
         }
     }
@@ -202,11 +206,9 @@ pub fn OpenTransientFilePerm(file_name: &str, file_flags: i32, file_mode: u32) -
                 fd,
                 AllocateDesc {
                     create_subid: current_subid(),
-                    // SAFETY: freshly opened descriptor now owned by the table.
-                    desc: AllocatedHandle::RawFd(unsafe {
-                        use std::os::fd::FromRawFd;
-                        OwnedFd::from_raw_fd(raw)
-                    }),
+                    // SAFETY: freshly vfs-opened descriptor now owned by the
+                    // table's guard.
+                    desc: AllocatedHandle::RawFd(unsafe { vfs::VfsFd::from_raw(raw) }),
                 },
             );
         }
