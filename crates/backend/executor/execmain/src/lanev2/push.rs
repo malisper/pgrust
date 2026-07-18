@@ -937,18 +937,29 @@ pub(crate) fn cursors_set_for_tests(on: bool) {
 /// walker), not here — the plan's engagement is knowable only after pulls.
 pub(crate) fn cursor_admission_refusal(
     forward: bool,
-    top_eflags: i32,
+    // Kept in the signature (SUNSET): the eflags arm is gone but the seam
+    // passes the value and the taxonomy pins name it; a future arm reading
+    // it again must go through R-VOCAB.
+    _top_eflags: i32,
     use_parallel_mode: bool,
 ) -> Option<super::stats::RefuseReason> {
-    use ::types_slot::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
     if !forward {
         // The direction demand is the more specific class (backward runs
         // reach the seam only through scroll-capable portals).
         return Some(super::stats::RefuseReason::CursorBackward);
     }
-    if top_eflags & (EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) != 0 {
-        return Some(super::stats::RefuseReason::CursorScroll);
-    }
+    // SUNSET (SE10-GATES item 1, the audited shrink; wave-10 contract §3.4):
+    // the inc-1b `cursor-scroll` eflags arm is REMOVED — knob-ON, every
+    // SCROLL/HOLD portal is store-served with a lane-admitted fill, so the
+    // REWIND|BACKWARD|MARK top eflags a run still carries here belong to a
+    // CURRENT-OF-eligible portal's ROW-CHAIN fill (D-CA-2's one fence).
+    // Those runs now take the budget: the batch dispatch and the per-pull
+    // hooks both refuse on the scan's `batch_allowed=false` (init-time
+    // eflags), nothing lane-stages, and the settle walker's roll-up ticks
+    // `cursor-plan-refused` — the RETAINED-redefined class ("the plan's own
+    // refusal ticks AND the cursor is still served"). Removing this arm is
+    // what makes the allowlist-row removal legal (the reason no longer
+    // fires — proven by the three-arm matrix at the wiring tip).
     if use_parallel_mode {
         // FAIL-CLOSED serial-law arm: `use_parallel_mode` is false for
         // every count-limited run by the ported execmain.rs:978 gate; if
@@ -989,7 +1000,7 @@ pub(crate) fn cursor_run_budget_install(
     forward: bool,
     count: u64,
     use_parallel_mode: bool,
-    top_eflags: i32,
+    _top_eflags: i32,
 ) -> Option<u64> {
     if count == 0 || !is_select {
         return None;
@@ -997,7 +1008,7 @@ pub(crate) fn cursor_run_budget_install(
     if !cursors_v2_enabled() {
         return None;
     }
-    if let Some(reason) = cursor_admission_refusal(forward, top_eflags, use_parallel_mode) {
+    if let Some(reason) = cursor_admission_refusal(forward, _top_eflags, use_parallel_mode) {
         // Once per budgeted run (never per tuple); `tick_refused` is a
         // no-op unless accounting is armed.
         super::stats::tick_refused(super::stats::ShapeClass::Cursor, reason);
@@ -1581,11 +1592,24 @@ pub fn cursor_store_fill_enabled() -> bool {
     cursors_v2_enabled()
 }
 
+/// SEAM-WIRING (SE10-GATES item 1): the SAME-PROCESS A/B lever for the
+/// portal-layer unit batteries (pquery/portalcmds band-94001 pins run in
+/// dependent crates, so this cannot be `cfg(test)` — the retired portalmem
+/// `cursor_store_set_for_tests` precedent). Writes THE single knob cell
+/// (`CURSORS`), so the portal face and the run-seam budget classifier can
+/// never skew — the CB review F1(a) hazard closed by construction.
+#[doc(hidden)]
+pub fn cursor_store_fill_set_for_tests(on: bool) {
+    CURSORS.store(if on { 2 } else { 1 }, Relaxed);
+}
+
 /// §6 deletion-clock staging: set once by WS-CA when a cursor store is
-/// armed in this process. Arms the run seam's forward-only debug assert
-/// (a store-armed world never legally drives the executor backward);
-/// before any store exists (this branch pre-integration; knob-OFF worlds)
-/// the assert is inert and only the evidence counter ticks.
+/// armed in this process (SEAM-WIRING: now LIVE — pquery's PortalStart
+/// calls the `cursor_store_armed_note` seam on every arming decision).
+/// Arms the run seam's forward-only debug assert (a store-armed KNOB-ON
+/// world never legally drives the executor backward); before any store
+/// exists (knob-OFF worlds; processes that never arm) the assert is inert
+/// and only the evidence counter ticks.
 static STORE_ARMED: AtomicU8 = AtomicU8::new(0);
 
 pub fn cursor_store_armed_note() {
@@ -1604,11 +1628,18 @@ static BACKWARD_RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 
 pub(crate) fn run_seam_backward_evidence() {
     BACKWARD_RUNS.fetch_add(1, Relaxed);
+    // SEAM-WIRING F3 rework: the assert is scoped to the KNOB-ON world.
+    // Production processes fix the env at start, so armed ⇒ knob-ON there
+    // and the conjunct is free; test processes flip the knob per-test with
+    // a never-cleared armed static — a knob-OFF backward drive after some
+    // earlier test armed a store is legal (that test's knob-ON world ended
+    // with its `_set_for_tests(false)` restore), and asserting on it was
+    // the F3 order hazard.
     debug_assert!(
-        !cursor_store_ever_armed(),
+        !(cursor_store_ever_armed() && cursors_v2_enabled()),
         "forward-only run seam (§6): backward ExecutorRun after a cursor store was armed \
-         — every SCROLL/HOLD portal is store-served, so no backward drive may reach the \
-         executor core"
+         — every SCROLL/HOLD portal is store-served knob-ON, so no backward drive may \
+         reach the executor core"
     );
 }
 
@@ -1618,12 +1649,13 @@ pub(crate) fn run_seam_backward_evidence_count() -> u64 {
 
 /// The §3.3 refusal, WS-CA's tick face: a store fill over a
 /// CURRENT-OF-eligible plan (§4.1) uses the row-chain fill because the v1
-/// tid capture reads the scan state per row. Ticked once per fill-engine
-/// decision, where the eligibility answer lives (store creation's
-/// search_plan_tree shape test — portal side). RESERVED on this branch
-/// (inc-1b `cursor-with-hold` posture); armed at the composed head. The
-/// named follow-up retiring it (lane tid supply from WS-AH's batch rowref
-/// identity) is chartered in the contract, not implemented here.
+/// tid capture reads the scan state per row. ARMED (SEAM-WIRING): called
+/// through `execmain_seams::cursor_fill_tid_capture_refused` from
+/// `fill_portal_store_to`'s eligible branch — once per fill_to call that
+/// drives the executor (per FETCH-with-deficit; unbounded cadence like
+/// the spi scroll-mark precedent, never per row). The named follow-up
+/// retiring it (lane tid supply from WS-AH's batch rowref identity) is
+/// chartered in the contract, not implemented here.
 pub fn cursor_fill_tid_capture_refused() {
     super::stats::tick_refused(
         super::stats::ShapeClass::Cursor,
@@ -1809,6 +1841,13 @@ pub(crate) fn cursor_store_batch_fill<'m, 'mcx>(
     let Some(first) = super::try_own_seq_scan(ss, estate)? else {
         return Ok(false);
     };
+    // SEAM-WIRING (SE10-GATES item 1): the `owned cursor` census goes LIVE —
+    // one OWNED tick per ENGAGED batch store fill (per budgeted run the sink
+    // drives, never per tuple; the scan's own class ticked its ownership in
+    // the hook above). This is the §7.2 Arm-L attribution counter the
+    // three-arm matrix's MATRIX_REQUIRE_LANE_FILL bar reads
+    // (`owned\tcursor\tN>0`).
+    super::stats::tick_owned(super::stats::ShapeClass::Cursor);
     let mut sink =
         TuplestoreBatchSink::new(dest, ss.ss.ps_ProjInfo.as_ref().map(|p| p.pi_result_slot));
     if let Some(slot) = first {
