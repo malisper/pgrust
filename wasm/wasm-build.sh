@@ -81,11 +81,21 @@ echo "wasm-build: crate-subset compile OK (panic=unwind, +exception-handling)"
 # Codegen + LINK leg (the F1 remedy): the postgres binary must actually link
 # for wasip1 — cargo check proves neither monomorphization-time const evals
 # nor linkage. Skippable for quick iterations with PGRUST_WASM_SKIP_LINK=1.
+#
+# PGRUST_WASM_PROFILE selects the cargo profile for this leg. The default dev
+# profile is the gate's fast path; PGRUST_WASM_PROFILE=wasm-release builds the
+# optimized module the web demo (wasm) ships — ~44MB vs the ~217MB
+# dev binary (the profile is native-inert: nothing native selects it).
+PROFILE="${PGRUST_WASM_PROFILE:-dev}"
+case "$PROFILE" in
+    dev) PROFILE_DIR=debug ;;
+    *)   PROFILE_DIR="$PROFILE" ;;
+esac
 if [ "${PGRUST_WASM_SKIP_LINK:-0}" != "1" ]; then
-    cargo +"${TOOLCHAIN}" build --target "$TARGET" -Zbuild-std=std,panic_unwind -p main_main --bin postgres
-    BIN_WASM="$ROOT/target/${TARGET}/debug/postgres.wasm"
+    cargo +"${TOOLCHAIN}" build --target "$TARGET" -Zbuild-std=std,panic_unwind -p main_main --bin postgres --profile "$PROFILE"
+    BIN_WASM="$ROOT/target/${TARGET}/${PROFILE_DIR}/postgres.wasm"
     [ -f "$BIN_WASM" ] || { echo "wasm-build: FAIL — postgres.wasm not produced" >&2; exit 1; }
-    echo "wasm-build: postgres.wasm linked ($(du -h "$BIN_WASM" | cut -f1))"
+    echo "wasm-build: postgres.wasm linked ($(du -h "$BIN_WASM" | cut -f1), profile $PROFILE)"
 else
     echo "wasm-build: bin link SKIPPED (PGRUST_WASM_SKIP_LINK=1)"
 fi
