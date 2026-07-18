@@ -33,6 +33,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 use core::ffi::CStr;
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 
 pub use libc::{c_int, mode_t, off_t};
 
@@ -368,6 +369,101 @@ shims! {
     fn rmdir(path: &CStr) -> c_int;
     fn read_dir(path: &CStr) -> VfsResult<VfsDirIter>;
     fn fd_budget_probe(max_to_probe: usize) -> usize;
+}
+
+// ---------------------------------------------------------------------------
+// VfsFd — the owned handle for vfs-minted descriptors (DST P4 finding F1b).
+// Additive helper NEXT TO the contract, not a trait revision: the Vfs op-set
+// and signatures are untouched.
+// ---------------------------------------------------------------------------
+
+/// Owned handle to a **vfs-minted** file descriptor.
+///
+/// Deliberate close paths call [`VfsFd::into_raw`] (which disarms the guard)
+/// and then [`close`], exactly as they did with `OwnedFd::into_raw_fd`. The
+/// Drop arm exists for the paths that never reach a deliberate close —
+/// unwinds and thread-exit TLS teardown — and routes the release through the
+/// SAME provider that minted the fd ([`close_on_drop`]). With plain `OwnedFd`
+/// those paths closed posix-side: under `--cfg pgrust_sim` the fd is foreign
+/// to the kernel, so the close EBADF'd, the sim fd leaked in the sim table,
+/// and std's debug IO-safety check aborted the whole process (P4 fault
+/// injection unwinds through exactly these states).
+///
+/// Zero-cost off-sim by construction: `repr(transparent)` over
+/// `ManuallyDrop<OwnedFd>` keeps the size AND the niche (`Option<VfsFd>` is
+/// fd-sized, like `Option<OwnedFd>` — const-asserted below); `as_raw_fd` /
+/// `into_raw` are field reads; and the Drop arm monomorphizes to the same
+/// single `close(2)` call `OwnedFd`'s own Drop makes (minus std's debug-only
+/// already-closed probe).
+#[repr(transparent)]
+pub struct VfsFd(core::mem::ManuallyDrop<std::os::fd::OwnedFd>);
+
+// The zero-cost law, machine-checked: same size and same niche as the
+// OwnedFd this type replaces inside Option<>-shaped holders.
+const _: () = {
+    assert!(
+        core::mem::size_of::<Option<VfsFd>>()
+            == core::mem::size_of::<Option<std::os::fd::OwnedFd>>()
+    );
+    assert!(core::mem::size_of::<Option<VfsFd>>() == core::mem::size_of::<c_int>());
+};
+
+impl VfsFd {
+    /// Take ownership of `raw`.
+    ///
+    /// # Safety
+    /// `raw` must be a live descriptor minted by the ACTIVE vfs ([`open`]),
+    /// exclusively owned by the returned guard (`OwnedFd::from_raw_fd` rules,
+    /// with "open file description" read against the active vfs domain).
+    #[inline]
+    pub unsafe fn from_raw(raw: RawFd) -> VfsFd {
+        // SAFETY: caller contract above.
+        VfsFd(core::mem::ManuallyDrop::new(unsafe {
+            std::os::fd::OwnedFd::from_raw_fd(raw)
+        }))
+    }
+
+    /// Disarm the guard and hand the descriptor back to the caller, who must
+    /// [`close`] it — the deliberate-close path. No close happens here.
+    #[inline]
+    pub fn into_raw(self) -> RawFd {
+        let raw = self.0.as_raw_fd();
+        core::mem::forget(self);
+        raw
+    }
+}
+
+impl std::os::fd::AsRawFd for VfsFd {
+    #[inline]
+    fn as_raw_fd(&self) -> RawFd {
+        self.0.as_raw_fd()
+    }
+}
+
+impl Drop for VfsFd {
+    #[inline]
+    fn drop(&mut self) {
+        // Leak/unwind path only: deliberate closes disarm via into_raw().
+        // The result is deliberately ignored — Drop has nobody to report to,
+        // exactly like OwnedFd's own Drop.
+        let _ = close_on_drop(self.0.as_raw_fd());
+    }
+}
+
+/// The [`VfsFd`] drop arm. Posix: exactly `close(2)` — the identical single
+/// call `OwnedFd`'s Drop makes. Sim: [`sim::SimVfs::close_on_drop`] — the
+/// same close as [`close`], but tolerant of the sim thread-local already
+/// being destroyed (guard drops legally run inside thread-exit TLS
+/// destructors, and TLS destructor order is unspecified).
+#[cfg(not(pgrust_sim))]
+#[inline]
+fn close_on_drop(fd: c_int) -> c_int {
+    ACTIVE.close(fd)
+}
+#[cfg(pgrust_sim)]
+#[inline]
+fn close_on_drop(fd: c_int) -> c_int {
+    sim::SimVfs::close_on_drop(fd)
 }
 
 /// The macOS F_FULLFSYNC arm of pg_fsync (wal_sync_method=fsync_writethrough).

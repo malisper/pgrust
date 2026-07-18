@@ -266,12 +266,48 @@ impl SimVfs {
     pub fn fd_trace(&self) -> Vec<c_int> {
         with(|st| st.fd_trace.clone())
     }
+
+    /// The [`crate::VfsFd`] drop arm (finding F1b): exactly [`Vfs::close`] —
+    /// same fault gating, same fd-table release — except it tolerates the
+    /// thread's sim universe already being torn down. Guard drops legally run
+    /// inside thread-exit TLS destructors, and TLS destructor order is
+    /// unspecified: once `SimState` is destroyed its open-fd table died with
+    /// it, so there is nothing left to release (0, not EBADF).
+    pub fn close_on_drop(fd: c_int) -> c_int {
+        SIM.try_with(|cell| close_locked(&mut cell.borrow_mut(), fd)).unwrap_or(0)
+    }
 }
 
 impl Default for SimVfs {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// [`Vfs::close`]'s whole body, shared with [`SimVfs::close_on_drop`] so the
+// guard-drop release and the deliberate close are ONE code path.
+fn close_locked(st: &mut SimState, fd: c_int) -> c_int {
+    if let Some(e) = gate_simple(
+        st,
+        &OpDesc { kind: OpKind::Close, path: None, fd: Some(fd), offset: None, len: None },
+    ) {
+        return fail(e);
+    }
+    let Some(of) = st.open.remove(&fd) else {
+        return fail(libc::EBADF);
+    };
+    st.nodes[of.node].open_count -= 1;
+    // FD_DELETE_AT_CLOSE law: unlinked data lives until the LAST close.
+    st.maybe_free(of.node);
+    // A dir removed while its handle was open frees on last close.
+    if st.nodes[of.node].open_count == 0 {
+        if matches!(st.nodes[of.node].node, Node::Dir(_))
+            && !st.namespace.values().any(|&id| id == of.node)
+        {
+            st.nodes[of.node].node = Node::Free;
+        }
+    }
+    0
 }
 
 fn crash_locked(st: &mut SimState) {
@@ -506,29 +542,7 @@ impl Vfs for SimVfs {
     }
 
     fn close(&self, fd: c_int) -> c_int {
-        with(|st| {
-            if let Some(e) = gate_simple(
-                st,
-                &OpDesc { kind: OpKind::Close, path: None, fd: Some(fd), offset: None, len: None },
-            ) {
-                return fail(e);
-            }
-            let Some(of) = st.open.remove(&fd) else {
-                return fail(libc::EBADF);
-            };
-            st.nodes[of.node].open_count -= 1;
-            // FD_DELETE_AT_CLOSE law: unlinked data lives until the LAST close.
-            st.maybe_free(of.node);
-            // A dir removed while its handle was open frees on last close.
-            if st.nodes[of.node].open_count == 0 {
-                if matches!(st.nodes[of.node].node, Node::Dir(_))
-                    && !st.namespace.values().any(|&id| id == of.node)
-                {
-                    st.nodes[of.node].node = Node::Free;
-                }
-            }
-            0
-        })
+        with(|st| close_locked(st, fd))
     }
 
     fn preadv(&self, fd: c_int, iov: &[libc::iovec], off: off_t) -> isize {
@@ -1871,5 +1885,42 @@ mod tests {
         assert_eq!(v.pwrite(fd, b"abcdef", 0), 3, "short write honored");
         assert_eq!(v.file_size(fd), 3);
         assert_eq!(v.close(fd), 0);
+    }
+
+    // Finding F1b: the VfsFd guard's drop must release the fd IN THE SIM
+    // TABLE (never posix-side), and into_raw must disarm it (no double-close).
+    #[test]
+    fn vfsfd_guard_drop_releases_sim_side_and_into_raw_disarms() {
+        let v = fresh();
+        let mut info = crate::FileInfo::zeroed();
+
+        // Drop arm: guard falls out of scope armed → sim fd released.
+        let raw = open_rw_create(&v, "/g1");
+        assert!(raw >= SIM_FD_BASE);
+        // SAFETY: raw is live, sim-minted, exclusively owned by the guard.
+        let guard = unsafe { crate::VfsFd::from_raw(raw) };
+        assert_eq!(v.fstat(raw, &mut info), 0, "open before drop");
+        drop(guard);
+        assert_eq!(v.fstat(raw, &mut info), -1, "guard drop must close sim-side");
+        assert_eq!(get_errno(), libc::EBADF);
+
+        // Disarm arm: into_raw hands the fd back, no close happens; the
+        // deliberate vfs close is then the ONLY close (no EBADF double-close).
+        let raw2 = open_rw_create(&v, "/g2");
+        // SAFETY: as above.
+        let guard2 = unsafe { crate::VfsFd::from_raw(raw2) };
+        let handed = guard2.into_raw();
+        assert_eq!(handed, raw2);
+        assert_eq!(v.fstat(raw2, &mut info), 0, "into_raw must not close");
+        assert_eq!(v.close(raw2), 0, "single deliberate close after disarm");
+
+        // Teardown tolerance is exercised end-to-end by fd's
+        // thread_exit_with_live_vfs_fd_holders_does_not_abort_process; here
+        // pin the direct contract: close_on_drop == close semantics while the
+        // universe is alive.
+        let raw3 = open_rw_create(&v, "/g3");
+        assert_eq!(SimVfs::close_on_drop(raw3), 0);
+        assert_eq!(v.fstat(raw3, &mut info), -1);
+        assert_eq!(get_errno(), libc::EBADF);
     }
 }
