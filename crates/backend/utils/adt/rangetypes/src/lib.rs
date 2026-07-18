@@ -337,7 +337,11 @@ fn datum_write(
     if typbyval {
         off = att_align_nominal(off, typalign);
         let n = typlen as usize;
-        let bytes = datum.as_usize().to_ne_bytes();
+        // C store_att_byval stores `n` low-order bytes of the full Datum
+        // word; SIZEOF_DATUM is pinned to 8 on every target. as_usize() is
+        // only 4 bytes on wasm32, so `bytes[..n]` panics for the 8-byte byval
+        // range subtypes (int8/float8/timestamp) there.
+        let bytes = datum.as_u64().to_ne_bytes();
         out[off..off + n].copy_from_slice(&bytes[..n]);
         off += n;
         return off;
