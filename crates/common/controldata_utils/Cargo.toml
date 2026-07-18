@@ -9,6 +9,11 @@ name = "controldata_utils"
 path = "src/lib.rs"
 
 [dependencies]
+# DST P1 census delta 4: common/ crate, cannot dep backend fd; plain dep on
+# the leaf vfs crate instead (vfs has no backend deps by construction).
+vfs = { path = "../../backend/storage/file/vfs" }
+libc = "0.2"
+pg_clock = { path = "../../port/pg_clock" }
 crc32c = { path = "../../port/crc32c" }
 elog = { path = "../../backend/utils/error/elog" }
 types_core = { path = "../../_support/types/types_core" }

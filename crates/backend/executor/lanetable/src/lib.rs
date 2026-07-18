@@ -170,7 +170,13 @@ impl HashKind {
 /// One-time HWCAP check for the aarch64 CRC32 extension.
 #[inline(always)]
 fn crc_supported() -> bool {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", miri))]
+    {
+        // Miri interprets the bit-exact software crc32cx below; keep the CRC
+        // hash path exercised under the UB gate.
+        true
+    }
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
     {
         static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         *OK.get_or_init(|| std::arch::is_aarch64_feature_detected!("crc"))
@@ -187,19 +193,43 @@ fn crc_supported() -> bool {
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 fn crc32cx(crc: u32, data: u64) -> u32 {
-    let out: u32;
-    // SAFETY: single register-to-register instruction, no memory access.
-    unsafe {
-        core::arch::asm!(
-            ".arch_extension crc",
-            "crc32cx {out:w}, {crc:w}, {data}",
-            out = lateout(reg) out,
-            crc = in(reg) crc,
-            data = in(reg) data,
-            options(pure, nomem, nostack, preserves_flags),
-        );
+    // Miri cannot interpret inline asm; delegate to the bit-exact software
+    // fallback (parity asserted natively in tests::software_crc32cx_parity).
+    #[cfg(miri)]
+    return crc32cx_sw(crc, data);
+    #[cfg(not(miri))]
+    {
+        let out: u32;
+        // SAFETY: single register-to-register instruction, no memory access.
+        unsafe {
+            core::arch::asm!(
+                ".arch_extension crc",
+                "crc32cx {out:w}, {crc:w}, {data}",
+                out = lateout(reg) out,
+                crc = in(reg) crc,
+                data = in(reg) data,
+                options(pure, nomem, nostack, preserves_flags),
+            );
+        }
+        out
     }
-    out
+}
+
+/// Bit-exact software `crc32cx`: CRC-32C (reflected poly 0x82F63B78)
+/// accumulated over the eight little-endian bytes of `data`, no final xor —
+/// the instruction's exact semantics. Compiled only for miri (which cannot
+/// interpret inline asm) and for the native parity test; absent from
+/// production builds.
+#[cfg(all(target_arch = "aarch64", any(miri, test)))]
+pub(crate) fn crc32cx_sw(crc: u32, data: u64) -> u32 {
+    let mut crc = crc;
+    for b in data.to_le_bytes() {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ ((crc & 1).wrapping_neg() & 0x82F6_3B78);
+        }
+    }
+    crc
 }
 
 /// Spread a 32-bit CRC to 64 bits: one Fibonacci multiply. Low bits keep the
@@ -378,7 +408,14 @@ const BYTES_KEY_WORDS: usize = 3;
 /// Row storage: fixed-stride rows in chunked, allocation-stable u64 arrays
 /// (pointers into a row never move — resize allocates new chunks only).
 struct RowStore {
+    // Owners only (allocation lifetime + Drop). Row memory is never accessed
+    // through these: a `&self`-derived slice pointer carries read-only
+    // provenance, and callers write through row pointers (miri F8,
+    // notes/miri-ubfix-lane.md). All row addressing goes through `bases`.
     chunks: Vec<Box<[u64]>>,
+    // Per-chunk base pointers captured from `&mut` at alloc time (full
+    // read-write provenance). Kept in lockstep with `chunks`.
+    bases: Vec<core::ptr::NonNull<u64>>,
     stride_words: usize,
     // Power-of-two rows per chunk as shift/mask — row_ptr is the probe hot
     // path's dependent load chain; a runtime div here costs ~2x on the
@@ -396,6 +433,7 @@ impl RowStore {
         let rows_per_chunk = ((1usize << 15) / stride_words).next_power_of_two().max(64);
         RowStore {
             chunks: Vec::new(),
+            bases: Vec::new(),
             stride_words,
             chunk_shift: rows_per_chunk.trailing_zeros(),
             chunk_mask: rows_per_chunk - 1,
@@ -414,7 +452,8 @@ impl RowStore {
         let c = row >> self.chunk_shift;
         let s = row & self.chunk_mask;
         // SAFETY: row < nrows ⇒ chunk exists and slot is within the chunk.
-        unsafe { self.chunks.get_unchecked(c).as_ptr().add(s * self.stride_words) as *mut u64 }
+        // The base carries write provenance (captured from `&mut` at alloc).
+        unsafe { self.bases.get_unchecked(c).as_ptr().add(s * self.stride_words) }
     }
 
     /// Allocate one zeroed row; returns its index (stable forever).
@@ -424,6 +463,11 @@ impl RowStore {
         if row == self.chunks.len() * self.rows_per_chunk() {
             self.chunks
                 .push(vec![0u64; self.rows_per_chunk() * self.stride_words].into_boxed_slice());
+            // Capture the write-provenance base AFTER the Box settles in the
+            // Vec: moving a Box retags under Stacked Borrows (miri F1's
+            // lesson), so a pointer taken before the push would be dead.
+            let base = self.chunks.last_mut().expect("just pushed").as_mut_ptr();
+            self.bases.push(core::ptr::NonNull::new(base).expect("chunk base"));
         }
         self.nrows += 1;
         row
@@ -437,8 +481,12 @@ impl RowStore {
         // Keep one chunk's allocation (rescan warmth), zero it for the
         // zero-initialized state contract.
         self.chunks.truncate(1);
+        self.bases.truncate(1);
         if let Some(c) = self.chunks.first_mut() {
             c.fill(0);
+            // fill() went through a fresh `&mut`, which invalidates the
+            // previously captured base — re-capture (miri F8).
+            self.bases[0] = core::ptr::NonNull::new(c.as_mut_ptr()).expect("chunk base");
         }
         self.nrows = 0;
     }
@@ -839,7 +887,7 @@ impl LaneAggTable {
                 let s = &mut self.single;
                 (s.entries.as_mut_ptr(), s.mask)
             };
-            let rows_chunks = self.rows.chunks.as_ptr();
+            let rows_chunks = self.rows.bases.as_ptr();
             let rows_shift = self.rows.chunk_shift;
             let rows_cmask = self.rows.chunk_mask;
             let rows_stride = self.rows.stride_words;
@@ -954,7 +1002,7 @@ impl LaneAggTable {
                 let s = &mut self.single;
                 (s.entries.as_mut_ptr(), s.mask)
             };
-            let rows_chunks = self.rows.chunks.as_ptr();
+            let rows_chunks = self.rows.bases.as_ptr();
             let rows_shift = self.rows.chunk_shift;
             let rows_cmask = self.rows.chunk_mask;
             let rows_stride = self.rows.stride_words;
@@ -1246,7 +1294,7 @@ impl LaneAggTable {
                 let s = &mut self.single;
                 (s.entries.as_mut_ptr(), s.mask)
             };
-            let rows_chunks = self.rows.chunks.as_ptr();
+            let rows_chunks = self.rows.bases.as_ptr();
             let rows_shift = self.rows.chunk_shift;
             let rows_cmask = self.rows.chunk_mask;
             let rows_stride = self.rows.stride_words;
@@ -1326,7 +1374,7 @@ impl LaneAggTable {
                 let s = &mut self.single;
                 (s.entries.as_mut_ptr(), s.mask)
             };
-            let rows_chunks = self.rows.chunks.as_ptr();
+            let rows_chunks = self.rows.bases.as_ptr();
             let rows_shift = self.rows.chunk_shift;
             let rows_cmask = self.rows.chunk_mask;
             let rows_stride = self.rows.stride_words;
@@ -1822,10 +1870,13 @@ impl LaneAggTable {
 /// [`RowStore::row_ptr`]).
 ///
 /// SAFETY: caller holds `row < nrows` for the store whose parts these are,
-/// and no chunk allocation happened since the parts were read.
+/// and no chunk allocation happened since the parts were read. `bases` is
+/// `RowStore::bases.as_ptr()`: the loaded pointer VALUE carries the chunk's
+/// captured write provenance, so writes through the result are sound even
+/// though `bases` itself was derived from a shared borrow (miri F8).
 #[inline(always)]
 unsafe fn row_ptr_raw(
-    chunks: *const Box<[u64]>,
+    bases: *const core::ptr::NonNull<u64>,
     shift: u32,
     cmask: usize,
     stride: usize,
@@ -1834,7 +1885,7 @@ unsafe fn row_ptr_raw(
     let c = row >> shift;
     let s = row & cmask;
     // SAFETY: per the function contract.
-    unsafe { (*chunks.add(c)).as_ptr().add(s * stride) as *mut u64 }
+    unsafe { (*bases.add(c)).as_ptr().add(s * stride) }
 }
 
 /// Kind-dispatched integer hash (the single dispatch point for probes and
@@ -1934,20 +1985,21 @@ fn grow_in_place(set: &mut EntrySet, hash_of: impl Fn(u64, usize) -> u64) {
     *set = newset;
 }
 
-/// Best-effort read prefetch (L1). No-op on targets without a stable idiom.
+/// Best-effort read prefetch (L1). No-op on targets without a stable idiom,
+/// and under miri (a hint carries no semantics an interpreter must model).
 #[inline(always)]
 fn prefetch(p: *const u64) {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
     // SAFETY: prfm is a hint; any address is allowed.
     unsafe {
         core::arch::asm!("prfm pldl1keep, [{0}]", in(reg) p, options(nostack, preserves_flags));
     }
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", not(miri)))]
     // SAFETY: prefetch is a hint; any address is allowed.
     unsafe {
         core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T0 }>(p as *const i8);
     }
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[cfg(any(miri, not(any(target_arch = "aarch64", target_arch = "x86_64"))))]
     let _ = p;
 }
 

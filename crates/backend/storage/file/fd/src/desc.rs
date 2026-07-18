@@ -1,5 +1,5 @@
 use std::fs::File as StdFile;
-use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
 
 use ::elog::ereport;
 use ::types_core::SubTransactionId;
@@ -9,9 +9,14 @@ use ::types_storage::{Dir, DirEnt, FD_MINFREE};
 use crate::vfd::{self, get_errno, loc, set_errno, with_fd, FdState};
 
 pub(crate) enum AllocatedHandle {
+    // DST P1 carve-out: buffered stdio streams (AllocateFile fopen) and pipes
+    // (OpenPipeStream popen) stay posix-only in P1 — out of Vfs scope.
     File(StdFile),
-    Dir(Option<std::fs::ReadDir>),
-    RawFd(OwnedFd),
+    Dir(Option<vfs::VfsDirIter>),
+    // vfs-minted, so the holder must be the vfs-close guard (finding F1b):
+    // an unwind/thread-exit drop releases into the active vfs namespace,
+    // never posix-side.
+    RawFd(vfs::VfsFd),
     Pipe(PipeHandle),
 }
 
@@ -89,8 +94,16 @@ pub(crate) fn FreeDesc(index: i32) -> i32 {
     });
     match desc.desc {
         AllocatedHandle::File(file) => {
+            // DST P1 carve-out boundary (contract §1.1, Ruling 3 Class C):
+            // this fd was minted posix-side by open_stdio (the fopen plane,
+            // permanently out of Vfs scope), so it must close posix-side too
+            // — vfs::close is reserved for vfs-minted fds. Under sim, SimVfs
+            // EBADFs foreign fds below SIM_FD_BASE (the domain tripwire that
+            // caught the original misroute; the fd then leaked). Allowlist
+            // row retained under the P0 fencing lint with the fopen sites.
+            // Live descriptor released from its guard; closed once here.
             let raw = file.into_raw_fd();
-            // SAFETY: live descriptor released from its guard; closed once here.
+            // SAFETY: into_raw_fd transferred ownership; closed exactly once.
             unsafe { libc::close(raw) }
         }
         AllocatedHandle::Pipe(pipe) => pclose(pipe),
@@ -100,9 +113,10 @@ pub(crate) fn FreeDesc(index: i32) -> i32 {
         }
         AllocatedHandle::RawFd(file) => {
             crate::pgaio_closing_fd_if_engine_present(file.as_raw_fd());
-            let raw = file.into_raw_fd();
-            // SAFETY: live descriptor released from its guard; closed once here.
-            unsafe { libc::close(raw) }
+            // Live descriptor released from its guard (disarmed); closed
+            // exactly once here.
+            let raw = file.into_raw();
+            vfs::close(raw)
         }
     }
 }
@@ -192,11 +206,9 @@ pub fn OpenTransientFilePerm(file_name: &str, file_flags: i32, file_mode: u32) -
                 fd,
                 AllocateDesc {
                     create_subid: current_subid(),
-                    // SAFETY: freshly opened descriptor now owned by the table.
-                    desc: AllocatedHandle::RawFd(unsafe {
-                        use std::os::fd::FromRawFd;
-                        OwnedFd::from_raw_fd(raw)
-                    }),
+                    // SAFETY: freshly vfs-opened descriptor now owned by the
+                    // table's guard.
+                    desc: AllocatedHandle::RawFd(unsafe { vfs::VfsFd::from_raw(raw) }),
                 },
             );
         }
@@ -227,8 +239,8 @@ pub fn CloseTransientFile(fd_to_close: i32) -> i32 {
         .finish(loc("CloseTransientFile"));
 
     crate::pgaio_closing_fd_if_engine_present(fd_to_close);
-    // SAFETY: caller asserts ownership of this descriptor, as in C.
-    unsafe { libc::close(fd_to_close) }
+    // Caller asserts ownership of this descriptor, as in C.
+    vfs::close(fd_to_close)
 }
 
 // C contract: table index >= 0, or -1 with errno set on popen failure.
@@ -333,8 +345,9 @@ pub fn AllocateDir(dirname: &str) -> PgResult<Option<Dir>> {
 
     with_fd(vfd::ReleaseLruFiles)?;
 
+    let cdir = vfd::cpath(dirname);
     loop {
-        match std::fs::read_dir(dirname) {
+        match vfs::read_dir(&cdir) {
             Ok(iter) => {
                 let create_subid = current_subid();
                 return with_fd(|fd| {
@@ -344,8 +357,7 @@ pub fn AllocateDir(dirname: &str) -> PgResult<Option<Dir>> {
                     )))
                 });
             }
-            Err(e) => {
-                let en = e.raw_os_error().unwrap_or(0);
+            Err(en) => {
                 if en == libc::EMFILE || en == libc::ENFILE {
                     set_errno(en);
                     out_of_fds_log()?;
@@ -389,12 +401,10 @@ pub fn ReadDirExtended(
     });
 
     match next {
-        Some(Ok(entry)) => Ok(Some(DirEnt {
-            d_name: entry.file_name().to_string_lossy().into_owned(),
-        })),
-        Some(Err(e)) => {
+        Some(Ok(d_name)) => Ok(Some(DirEnt { d_name })),
+        Some(Err(en)) => {
             ereport(elevel)
-                .with_saved_errno(e.raw_os_error().unwrap_or(0))
+                .with_saved_errno(en)
                 .errcode_for_file_access()
                 .errmsg(format!("could not read directory \"{dirname}\": %m"))
                 .finish(loc("ReadDirExtended"))?;
@@ -478,6 +488,9 @@ pub fn with_allocated_dir(
     Ok(last)
 }
 
+// DST P1 carve-out: the buffered-stream (fopen) plane stays posix-only in P1;
+// stdio is permanently out of Vfs scope (contract §1.1). Allowlist row
+// retained under the P0 fencing lint.
 fn open_stdio(name: &str, mode: &str) -> Result<StdFile, i32> {
     use std::fs::OpenOptions;
 
@@ -552,6 +565,8 @@ pub fn with_allocated_stdio<R>(index: i32, f: impl FnOnce(&mut StdFile) -> R) ->
 }
 
 // Raw kernel fd behind a transient-file value (fstat-style callers).
+// Raw-fd escape hatch (DST P1 contract §1.1 carve-out): the returned kernel
+// descriptor bypasses the VFS. Sim-scope callers must not use it.
 pub fn TransientFileRawFd(fd_value: i32) -> Option<RawFd> {
     with_fd(|fd| {
         fd.allocated_descs.iter().rev().flatten().find_map(|d| match &d.desc {

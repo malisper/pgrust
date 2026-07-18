@@ -80,13 +80,14 @@ pub(crate) fn timestamp_out_of_range() -> Box<PgError> {
 }
 
 pub fn GetCurrentTimestamp() -> TimestampTz {
-    let mut tp = libc::timeval { tv_sec: 0, tv_usec: 0 };
-    // SAFETY: valid pointer to a timeval; NULL timezone as in C.
-    unsafe { libc::gettimeofday(&mut tp, core::ptr::null_mut()) };
+    // DST P2 (contract §1.2): the SEMANTIC wall read rides pg_clock; the
+    // timestamp_seams::get_current_timestamp backend collapses onto this
+    // (the seam survives as API; test_boot stub behavior preserved).
+    let (tv_sec, tv_usec) = pg_clock::wall_timeval();
 
-    let mut result = tp.tv_sec as i64
-        - ((POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) as i64 * SECS_PER_DAY as i64);
-    result = result * USECS_PER_SEC + tp.tv_usec as i64;
+    let mut result =
+        tv_sec - ((POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) as i64 * SECS_PER_DAY as i64);
+    result = result * USECS_PER_SEC + tv_usec as i64;
     result
 }
 
@@ -1570,12 +1571,11 @@ pub fn GetSQLLocalTimestamp(typmod: i32) -> PgResult<Timestamp> {
 
 /// C `timeofday` body: formatted text into `buf`, returns the length.
 pub fn timeofday_into(buf: &mut [u8; 128]) -> usize {
-    let mut tp = libc::timeval { tv_sec: 0, tv_usec: 0 };
-    // SAFETY: valid pointer to a timeval; NULL timezone as in C.
-    unsafe { libc::gettimeofday(&mut tp, core::ptr::null_mut()) };
+    // DST P2 (contract §1.2): gettimeofday -> pg_clock::wall_timeval().
+    let (tv_sec, tv_usec) = pg_clock::wall_timeval();
 
     let zone = require_session_timezone();
-    let tx = localtime::pg_localtime(tp.tv_sec as i64, zone)
+    let tx = localtime::pg_localtime(tv_sec, zone)
         .expect("current time within pg_localtime range");
     let mut templ = [0u8; 128];
     let n = strftime::pg_strftime(&mut templ, b"%a %b %d %H:%M:%S.%%06d %Y %Z", &tx)
@@ -1587,7 +1587,7 @@ pub fn timeofday_into(buf: &mut [u8; 128]) -> usize {
         .position(|w| w == b"%06d")
         .expect("template keeps the %06d hole");
     buf[..pos].copy_from_slice(&templ[..pos]);
-    let mut usec = tp.tv_usec as u32;
+    let mut usec = tv_usec;
     for i in (0..6).rev() {
         buf[pos + i] = b'0' + (usec % 10) as u8;
         usec /= 10;

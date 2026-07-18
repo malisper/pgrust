@@ -455,7 +455,7 @@ pub fn process_pm_pmsignal() -> PgResult<()> {
         && xlogrecovery_seams::check_promote_signal::call()
     {
         if let Some(startup) = with_pm(|pm| pm.startup) {
-            statemachine::signal_child(&startup, libc::SIGUSR2);
+            statemachine::signal_child(&startup, procsignal::signums::SIGUSR2);
         }
     }
 

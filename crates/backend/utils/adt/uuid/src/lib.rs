@@ -23,7 +23,6 @@ pub type PgUuid = [u8; UUID_LEN];
 pub const UUID_OUT_LEN: usize = 2 * UUID_LEN + 4;
 
 const US_PER_MS: i64 = 1_000;
-const NS_PER_S: i64 = 1_000_000_000;
 const NS_PER_MS: i64 = 1_000_000;
 const NS_PER_US: i64 = 1_000;
 const GREGORIAN_EPOCH_JDATE: i64 = 2_299_161;
@@ -63,10 +62,10 @@ std::thread_local! {
 }
 
 fn get_real_time_ns_ascending() -> i64 {
-    let mut tmp = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-    // SAFETY: clock_gettime fills the timespec out-param.
-    unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut tmp) };
-    let mut ns = tmp.tv_sec as i64 * NS_PER_S + tmp.tv_nsec as i64;
+    // DST P2 (contract §1.2): clock_gettime -> pg_clock::wall_ns(); the
+    // ascending-guard TLS below is unchanged — under sim, correctness rides
+    // the wall = base + mono coupling law (§0.3).
+    let mut ns = pg_clock::wall_ns();
     let previous_ns = PREVIOUS_NS.get();
     if previous_ns + SUBMS_MINIMAL_STEP_NS >= ns {
         ns = previous_ns + SUBMS_MINIMAL_STEP_NS;

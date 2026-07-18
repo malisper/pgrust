@@ -183,20 +183,23 @@ fn wal_receiver_main_inner() -> PgResult<()> {
     ipc::on_shmem_exit(wal_rcv_die, 0);
 
     {
+        // procsignal::signums, not libc::SIG*: the wasi libc crate exposes
+        // no SIG* names (thread-signal emulation numbering, signums law).
+        use procsignal::signums::{SIGALRM, SIGHUP, SIGINT, SIGPIPE, SIGTERM, SIGUSR1, SIGUSR2};
         use procsignal::ThreadSignalHandler::{Fallible, Ignore, Simple};
         procsignal::pqsignal_thread(
-            libc::SIGHUP,
+            SIGHUP,
             Simple(interrupt::SignalHandlerForConfigReload),
         );
-        procsignal::pqsignal_thread(libc::SIGINT, Ignore);
-        procsignal::pqsignal_thread(libc::SIGTERM, Fallible(sigterm_die));
-        procsignal::pqsignal_thread(libc::SIGALRM, Ignore);
-        procsignal::pqsignal_thread(libc::SIGPIPE, Ignore);
+        procsignal::pqsignal_thread(SIGINT, Ignore);
+        procsignal::pqsignal_thread(SIGTERM, Fallible(sigterm_die));
+        procsignal::pqsignal_thread(SIGALRM, Ignore);
+        procsignal::pqsignal_thread(SIGPIPE, Ignore);
         procsignal::pqsignal_thread(
-            libc::SIGUSR1,
+            SIGUSR1,
             Simple(procsignal::procsignal_sigusr1_handler),
         );
-        procsignal::pqsignal_thread(libc::SIGUSR2, Ignore);
+        procsignal::pqsignal_thread(SIGUSR2, Ignore);
     }
     libpq_pqsignal::unblock_signals();
 

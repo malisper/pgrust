@@ -125,8 +125,16 @@ pub enum DatumVal {
 
 struct PlanEntry {
     plan: SpiPlanPtr,
-    paramnos: Vec<Dno>,
-    argtypes: Vec<Oid>,
+    // Rc slices: every execution reads these under the EXPR_PLANS borrow and
+    // must release the borrow before running SPI — the clone is per
+    // execution, so it must be a refcount bump, not a Vec copy (PROCPERF P2).
+    paramnos: std::rc::Rc<[Dno]>,
+    argtypes: std::rc::Rc<[Oid]>,
+    // C stmt->mod_stmt (pl_exec.c exec_stmt_execsql: computed once, cached
+    // via mod_stmt_set): command tags are parse-time facts of the plan
+    // sources, fixed for the entry's lifetime; a re-prepare rebuilds the
+    // entry and recomputes.
+    mod_stmt: bool,
     // Owned copy of the parser-hook tables the plan was prepared under, for
     // plancache revalidation (C: parserSetup + expr->func->cur_estate). Types
     // are as-of the last prepare; a between-executions change re-prepares via
@@ -288,7 +296,7 @@ struct SimpleExpr {
     // ceremony per evaluation (pl_exec.c:6198-6204).
     mutable: bool,
     // Datum sources for the compiled program, replayed before each eval.
-    paramnos: Vec<Dno>,
+    paramnos: std::rc::Rc<[Dno]>,
     // Stable param image whose slot addresses are baked into the compiled
     // ParamExtern steps (C instead reads params at eval time through the
     // per-estate econtext, pl_exec.c:6154-6164; a per-expression image is
@@ -363,7 +371,7 @@ enum SimpleTake {
     Ready(Box<SimpleExpr>),
     /// Undetermined; caller owns the build. Carries what the build needs so
     /// no second map borrow is required.
-    Build { plan: SpiPlanPtr, paramnos: Vec<Dno>, argtypes: Vec<Oid> },
+    Build { plan: SpiPlanPtr, paramnos: std::rc::Rc<[Dno]>, argtypes: std::rc::Rc<[Oid]> },
 }
 
 fn take_simple(expr_id: u32, take_unknown: bool) -> SimpleTake {
@@ -826,10 +834,18 @@ impl<'a> Estate<'a> {
         }
         let mut paramnos = used.into_inner();
         paramnos.sort_unstable();
-        let argtypes: Vec<Oid> = params_by_dno
+        let paramnos: std::rc::Rc<[Dno]> = paramnos.into();
+        let argtypes: std::rc::Rc<[Oid]> = params_by_dno
             .iter()
             .map(|s| s.map(|(t, _, _)| t).unwrap_or(types_core::InvalidOid))
             .collect();
+        // C exec_stmt_execsql's one-time mod_stmt derivation (mod_stmt_set).
+        let mod_stmt = spi::SPI_plan_command_tags(plan).iter().any(|&tag| {
+            tag == types_portal::CMDTAG_INSERT
+                || tag == types_portal::CMDTAG_UPDATE
+                || tag == types_portal::CMDTAG_DELETE
+                || tag == types_portal::CMDTAG_MERGE
+        });
         let hooks = std::rc::Rc::new(HookSnapshot {
             names: hooks_names,
             params_by_dno,
@@ -841,7 +857,7 @@ impl<'a> Estate<'a> {
         let old = EXPR_PLANS.with(|t| {
             t.borrow_mut().insert(
                 expr.expr_id,
-                PlanEntry { plan, paramnos, argtypes, hooks, simple: SimpleState::Unknown },
+                PlanEntry { plan, paramnos, argtypes, mod_stmt, hooks, simple: SimpleState::Unknown },
             )
         });
         debug_assert!(old.is_none(), "ensure_plan: stale path removed the old entry");
@@ -1350,8 +1366,8 @@ impl<'a> Estate<'a> {
         &mut self,
         expr: &PlExpr,
         plan: SpiPlanPtr,
-        paramnos: Vec<Dno>,
-        argtypes: Vec<Oid>,
+        paramnos: std::rc::Rc<[Dno]>,
+        argtypes: std::rc::Rc<[Oid]>,
     ) -> PgResult<Option<Box<SimpleExpr>>> {
         let Some((psrc, _)) = spi::SPI_plan_single_source(plan) else {
             return Ok(None);
@@ -1401,7 +1417,7 @@ impl<'a> Estate<'a> {
                     ptype: types_core::InvalidOid,
                 })
                 .collect();
-            for &dno in &paramnos {
+            for &dno in paramnos.iter() {
                 let slot = &mut param_buf[dno as usize];
                 slot.ptype = argtypes[dno as usize];
                 slot.pflags = types_portal::params::PARAM_FLAG_CONST;
@@ -1487,7 +1503,7 @@ impl<'a> Estate<'a> {
 
     fn eval_simple_body(&mut self, se: &mut SimpleExpr) -> PgResult<(Datum, bool, Oid, i32)> {
         // Current param values into the stable image the program reads.
-        for &dno in &se.paramnos {
+        for &dno in se.paramnos.iter() {
             let planned = se.param_buf[dno as usize].ptype;
             let (v, isnull) = self.datum_as_param(dno, Some(planned))?;
             let slot = &mut se.param_buf[dno as usize];
@@ -3363,11 +3379,9 @@ impl<'a> Estate<'a> {
     }
 
     fn exec_stmt_assert(&mut self, cond: &PlExpr, message: Option<&PlExpr>) -> PgResult<i32> {
-        // plpgsql_check_asserts: DefineCustomBoolVariable is the extension-GUC
-        // lane; the SET-created placeholder carries the session value and an
-        // unset name means C's default (true).
-        let enabled = guc::GetConfigOption("plpgsql.check_asserts", true, false)?
-            .map_or(true, |v| !matches!(v.as_str(), "off" | "false" | "no" | "0" | "f" | "n"));
+        // plpgsql_check_asserts via the mutation-keyed GUC snapshot
+        // (handler.rs PROCPERF P2); unset means C's default (true).
+        let enabled = crate::handler::check_asserts_enabled()?;
         if !enabled {
             return Ok(RC_OK);
         }
@@ -3400,17 +3414,10 @@ impl<'a> Estate<'a> {
         target: Dno,
     ) -> PgResult<i32> {
         self.ensure_plan(expr, CURSOR_OPT_PARALLEL_OK)?;
-        let (plan, paramnos, argtypes) = EXPR_PLANS.with(|t| {
+        let (plan, paramnos, argtypes, mod_stmt) = EXPR_PLANS.with(|t| {
             let t = t.borrow();
             let e = t.get(&expr.expr_id).expect("plan ensured");
-            (e.plan, e.paramnos.clone(), e.argtypes.clone())
-        });
-
-        let mod_stmt = spi::SPI_plan_command_tags(plan).iter().any(|&tag| {
-            tag == types_portal::CMDTAG_INSERT
-                || tag == types_portal::CMDTAG_UPDATE
-                || tag == types_portal::CMDTAG_DELETE
-                || tag == types_portal::CMDTAG_MERGE
+            (e.plan, e.paramnos.clone(), e.argtypes.clone(), e.mod_stmt)
         });
 
         // too_many_rows extra check reads the GUCs at execution, not compile

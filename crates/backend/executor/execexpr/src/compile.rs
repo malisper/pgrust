@@ -4560,12 +4560,17 @@ pub(crate) fn ready_expr(state: &mut ExprState<'_>) {
     }
     state.flags |= crate::steps::EEO_FLAG_INTERPRETER_INITIALIZED;
     state.kernel = select_kernel(state);
+    // PROCPERF P2 compile economy (see COMPILE_ECONOMY): censuses + fusion
+    // are per-row-payoff passes; under the cheap-statement window they are
+    // skipped — a kernelized program skips them anyway, so economy leaves
+    // kernelized programs (select1's shape) byte-identical.
+    let economy = economy_active();
     // Multi-clause scan-cmp-const census (lane-v2 batched qual tiers): must
     // run on the PRISTINE program — fuse_program below rewrites the clause
     // shapes (FUNCEXPR_STRICT_2 + QUAL -> FuncStrict2Qual etc.). Quals only;
     // the walk is a few steps on the shapes it can match, and it bails on
     // the first non-matching step otherwise.
-    if matches!(state.kernel, Kernel::Program) && state.flags & EEO_FLAG_IS_QUAL != 0 {
+    if matches!(state.kernel, Kernel::Program) && state.flags & EEO_FLAG_IS_QUAL != 0 && !economy {
         state.scan_cmp_clauses = select_scan_cmp_clauses(state);
         // Contains-LIKE census (lane-v2 strsearch qual kernel): disjoint by
         // construction (the cmp census admits only int comparators), so it
@@ -4577,7 +4582,7 @@ pub(crate) fn ready_expr(state: &mut ExprState<'_>) {
     // Scan-projection census (lane-v2 stitched-projection tier): same
     // PRISTINE-program requirement as the qual census above. Non-quals only;
     // the walk bails on the first non-matching step.
-    if matches!(state.kernel, Kernel::Program) && state.flags & EEO_FLAG_IS_QUAL == 0 {
+    if matches!(state.kernel, Kernel::Program) && state.flags & EEO_FLAG_IS_QUAL == 0 && !economy {
         state.scan_proj_cols = select_scan_proj_cols(state);
         // Expr-key census (lane-v2 expression group keys): same PRISTINE-
         // program requirement; bails on the first non-matching step.
@@ -4592,7 +4597,11 @@ pub(crate) fn ready_expr(state: &mut ExprState<'_>) {
         // single thread-local read.
         crate::jit::try_compile(state);
         if state.jit.is_none() {
-            fuse_program(state);
+            if economy {
+                thin_steps(state);
+            } else {
+                fuse_program(state);
+            }
         }
     }
     if dump_programs_enabled() {
@@ -4804,6 +4813,55 @@ thread_local! {
         const { core::cell::Cell::new(false) };
 }
 
+thread_local! {
+    // PROCPERF P2 compile economy: per-thread window armed by execmain's
+    // standard_executor_start over InitPlan when the statement is cost-gated
+    // cheap. While active, ready_expr skips the interpreter-loop optimization
+    // passes (lane-v2 censuses + the fusion peephole) whose payoff is
+    // per-row: an OLTP point statement recompiles its programs on every
+    // execution and runs a handful of rows, so the passes cost more than
+    // they can return (C's ExecReadyInterpretedExpr is a single
+    // dispatch-assignment walk). RAII-scoped (EconomyWindow) so nested
+    // executor starts and error unwinds can never leak the flag across
+    // statements. NOT session state: the window never spans a statement
+    // boundary, and its effect is a per-program compile-cost policy, never a
+    // result byte.
+    static COMPILE_ECONOMY: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+#[inline]
+pub(crate) fn economy_active() -> bool {
+    COMPILE_ECONOMY.with(core::cell::Cell::get)
+}
+
+/// RAII compile-economy window (PROCPERF P2, see COMPILE_ECONOMY): while
+/// held with `active`, ready_expr skips the per-row-payoff passes (censuses
+/// + fusion peephole; kernel selection and the thin-ABI rewrite stay ON).
+/// Restores the previous state on drop.
+pub struct EconomyWindow {
+    prev: bool,
+}
+
+pub fn economy_window(active: bool) -> EconomyWindow {
+    EconomyWindow { prev: COMPILE_ECONOMY.with(|c| c.replace(active)) }
+}
+
+impl Drop for EconomyWindow {
+    fn drop(&mut self) {
+        COMPILE_ECONOMY.with(|c| c.set(self.prev));
+    }
+}
+
+// The thin-ABI rewrite alone (fuse_program's no-pair arm): one cheap pass
+// that lowers per-eval fmgr cost even at row 1, kept under economy.
+fn thin_steps(state: &mut ExprState<'_>) {
+    for s in state.steps.iter_mut() {
+        if let Some(t) = thin_single(s) {
+            *s = t;
+        }
+    }
+}
+
 pub(crate) fn fuse_program(state: &mut ExprState<'_>) {
     #[cfg(test)]
     if SKIP_FUSE_FOR_TESTS.with(|c| c.get()) {
@@ -4811,11 +4869,7 @@ pub(crate) fn fuse_program(state: &mut ExprState<'_>) {
     }
     let len = state.steps.len();
     if len < 3 {
-        for s in state.steps.iter_mut() {
-            if let Some(t) = thin_single(s) {
-                *s = t;
-            }
-        }
+        thin_steps(state);
         return;
     }
     let has_pair = state
@@ -4827,11 +4881,7 @@ pub(crate) fn fuse_program(state: &mut ExprState<'_>) {
     let fuse_barrier =
         state.steps.as_slice().iter().any(|s| matches!(s, Step::JsonExprPath { .. }));
     if !has_pair || fuse_barrier {
-        for s in state.steps.iter_mut() {
-            if let Some(t) = thin_single(s) {
-                *s = t;
-            }
-        }
+        thin_steps(state);
         return;
     }
     let mcx = *state.steps.allocator();

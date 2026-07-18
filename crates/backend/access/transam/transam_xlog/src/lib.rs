@@ -453,8 +453,8 @@ pub fn XactLastRecEnd() -> XLogRecPtr {
 }
 
 pub(crate) fn now_pg_time() -> pg_time_t {
-    // SAFETY: libc::time with a null out-pointer.
-    unsafe { libc::time(std::ptr::null_mut()) as pg_time_t }
+    // DST P2 (contract §1.2): libc::time -> pg_clock::wall_secs().
+    pg_clock::wall_secs() as pg_time_t
 }
 
 pub fn init_seams() {

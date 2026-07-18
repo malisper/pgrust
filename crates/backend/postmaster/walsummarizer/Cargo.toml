@@ -9,6 +9,7 @@ name = "walsummarizer"
 path = "src/lib.rs"
 
 [dependencies]
+pg_clock = { path = "../../../port/pg_clock" }
 auxprocess = { path = "../auxprocess" }
 blkreftable = { path = "../../../common/blkreftable" }
 condition_variable = { path = "../../storage/lmgr/condition_variable" }

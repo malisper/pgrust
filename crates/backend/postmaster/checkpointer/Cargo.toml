@@ -9,6 +9,7 @@ name = "checkpointer"
 path = "src/lib.rs"
 
 [dependencies]
+pg_clock = { path = "../../../port/pg_clock" }
 datum = { path = "../../../_support/types/datum" }
 mcx = { path = "../../../_support/mcx" }
 types_core = { path = "../../../_support/types/types_core" }

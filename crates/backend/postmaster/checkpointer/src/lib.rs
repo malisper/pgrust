@@ -210,10 +210,8 @@ pub fn CheckpointerShmemResetAfterCrash() {
 }
 
 fn time_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    // DST P2 (contract §1.2): SystemTime -> pg_clock::wall_secs().
+    pg_clock::wall_secs()
 }
 
 fn am_checkpointer() -> bool {
@@ -650,11 +648,11 @@ fn IsCheckpointOnSchedule(progress: f64) -> bool {
         return false;
     }
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let elapsed_time = ((now.as_secs() as i64 - CKPT_START_TIME.get()) as f64
-        + f64::from(now.subsec_micros()) / 1_000_000.0)
+    // DST P2 (contract §1.2): only the raw read moves — IsCheckpointOnSchedule
+    // keeps its wall-fraction semantics (CKPT_START_TIME is a wall stamp).
+    let (now_sec, now_usec) = pg_clock::wall_timeval();
+    let elapsed_time = ((now_sec - CKPT_START_TIME.get()) as f64
+        + f64::from(now_usec) / 1_000_000.0)
         / CheckPointTimeout() as f64;
 
     if progress < elapsed_time {
