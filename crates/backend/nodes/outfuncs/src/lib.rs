@@ -832,7 +832,10 @@ fn out_const(out: &mut PgString<'_>, c: &Const) {
 // the byte-compare oracle; readfuncs accepts either signedness.
 fn out_datum(out: &mut PgString<'_>, value: Datum, typlen: i32, typbyval: bool) {
     if typbyval {
-        let bytes = value.as_usize().to_le_bytes();
+        // The full 8-byte Datum word: SIZEOF_DATUM is pinned to 8 on every
+        // target and readDatum consumes exactly 8 byte tokens. as_usize()
+        // emits only 4 bytes on wasm32 and the reader then dies on "]".
+        let bytes = value.as_u64().to_le_bytes();
         w!(out, "{} [ ", typlen as u32);
         for b in bytes {
             w!(out, "{b} ");

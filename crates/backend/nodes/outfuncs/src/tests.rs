@@ -445,3 +445,60 @@ fn row_compare_expr_matches_c_format() {
     let s2 = nodeToString(mcx, back).unwrap();
     assert_eq!(s1.as_str(), s2.as_str());
 }
+
+// The ILP32 datum-width class (wasm32): _outDatum must emit the FULL 8-byte
+// Datum word for byval values — readDatum unconditionally consumes
+// sizeof(Datum) == 8 byte tokens, so a pointer-width (4-byte) emission makes
+// the reader die on the "]" token. High-word bits prove no truncation.
+#[test]
+fn byval_datum_emits_all_eight_word_bytes() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let node = Node::mk(
+        mcx,
+        Const {
+            consttype: 20, // int8
+            consttypmod: -1,
+            constcollid: 0,
+            constlen: 8,
+            constvalue: Datum::from_i64(0x0102_0304_0506_0708),
+            constisnull: false,
+            constbyval: true,
+            location: 3,
+        },
+    )
+    .unwrap();
+    let s = nodeToString(mcx, node).unwrap();
+    assert!(
+        s.as_str().contains(":constvalue 8 [ 8 7 6 5 4 3 2 1 ]"),
+        "byval constvalue lost datum-word bytes: {}",
+        s.as_str()
+    );
+    let back = readfuncs::stringToNode(mcx, s.as_str()).unwrap();
+    assert_eq!(nodeToString(mcx, back).unwrap().as_str(), s.as_str());
+}
+
+// Captured from live pgrust (native --single, PG18.3 catalog):
+// CREATE TABLE measurement (... ) PARTITION BY RANGE (logdate);
+// CREATE TABLE measurement_2024 PARTITION OF measurement
+//   FOR VALUES FROM ('2024-01-01') TO ('2025-01-01');
+// SELECT relpartbound FROM pg_class WHERE relname = 'measurement_2024';
+// The wasm web-demo repro: partition 2's CREATE is the first reader of this
+// string; a 4-byte constvalue emission breaks it with `bad integer token "]"`.
+const RELPARTBOUND_MEASUREMENT_2024: &str = "{PARTITIONBOUNDSPEC :strategy r \
+    :is_default false :modulus 0 :remainder 0 :listdatums <> :lowerdatums \
+    ({PARTITIONRANGEDATUM :kind 0 :value {CONST :consttype 1082 :consttypmod -1 \
+    :constcollid 0 :constlen 4 :constbyval true :constisnull false :location -1 \
+    :constvalue 4 [ 62 34 0 0 0 0 0 0 ]} :location -1}) :upperdatums \
+    ({PARTITIONRANGEDATUM :kind 0 :value {CONST :consttype 1082 :consttypmod -1 \
+    :constcollid 0 :constlen 4 :constbyval true :constisnull false :location -1 \
+    :constvalue 4 [ 172 35 0 0 0 0 0 0 ]} :location -1}) :location -1}";
+
+#[test]
+fn relpartbound_range_capture_roundtrips() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let node = readfuncs::stringToNode(mcx, RELPARTBOUND_MEASUREMENT_2024).unwrap();
+    let written = nodeToString(mcx, node).unwrap();
+    assert_eq!(written.as_str(), RELPARTBOUND_MEASUREMENT_2024);
+}
