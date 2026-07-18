@@ -15,7 +15,7 @@ use rand_chacha::ChaCha8Rng;
 use crate::gen::budget::{Budgets, Kind};
 use crate::gen::noise;
 use crate::gen::profile::GenProfile;
-use crate::gen::schema::SchemaState;
+use crate::gen::schema::{SchemaState, Table};
 use crate::gen::weights::{range_incl, weighted_index};
 use crate::plan::{
     ArmCtl, FaultPoint, IsoLevel, Plan, PlanHeader, PlanItem, Sql, Step, TxCtl,
@@ -60,6 +60,15 @@ impl NoiseSource for NoiseCtx<'_> {
     }
 }
 
+/// Transaction-visible model state captured at BEGIN / SAVEPOINT and restored
+/// on ROLLBACK / ROLLBACK TO / aborting disconnect. DDL and (non-LOCAL) SET
+/// are both transactional in PostgreSQL, so both revert with the tx.
+#[derive(Clone)]
+struct TxSnapshot {
+    tables: Vec<Table>,
+    gucs_set: bool,
+}
+
 /// Session-visible state the generator must model to stay coherent
 /// (serial single-session — §0 A1).
 #[derive(Default)]
@@ -68,6 +77,13 @@ struct SessionModel {
     savepoints: Vec<String>,
     next_savepoint: u32,
     gucs_set: bool,
+    /// Model state as of BEGIN (`Some` iff `in_tx`): the server reverts to
+    /// this on ROLLBACK or on a disconnect that aborts the open tx.
+    tx_snapshot: Option<TxSnapshot>,
+    /// One snapshot per live savepoint, aligned index-for-index with
+    /// `savepoints` (state as of the SAVEPOINT statement; ROLLBACK TO
+    /// restores it and keeps the savepoint — and its snapshot — live).
+    sp_snapshots: Vec<TxSnapshot>,
 }
 
 pub struct Generator<'a> {
@@ -109,8 +125,15 @@ impl<'a> Generator<'a> {
         // any GUC was set (the 1session GUC-leak law).
         if self.session.in_tx {
             self.pending.push_back(PlanItem::Step(Step::Tx(TxCtl::Rollback)));
+            // The tail ROLLBACK reverts the server to the BEGIN snapshot, so
+            // whether RESET ALL is still owed is decided by the snapshot's
+            // GUC state, not the in-tx state.
+            let snap = self.session.tx_snapshot.take().expect("in_tx implies tx snapshot");
+            self.schema.restore_tables(snap.tables);
+            self.session.gucs_set = snap.gucs_set;
             self.session.in_tx = false;
             self.session.savepoints.clear();
+            self.session.sp_snapshots.clear();
         }
         if self.session.gucs_set {
             self.pending.push_back(PlanItem::Step(Step::Arm(ArmCtl::ResetAll)));
@@ -166,6 +189,11 @@ impl<'a> Generator<'a> {
             };
             self.session.in_tx = true;
             self.session.savepoints.clear();
+            self.session.sp_snapshots.clear();
+            self.session.tx_snapshot = Some(TxSnapshot {
+                tables: self.schema.snapshot_tables(),
+                gucs_set: self.session.gucs_set,
+            });
             return Step::Tx(TxCtl::Begin(level));
         }
         // In tx: commit 3 / rollback 1 / savepoint 2 / rollback-to 2.
@@ -176,25 +204,46 @@ impl<'a> Generator<'a> {
             0 => {
                 self.session.in_tx = false;
                 self.session.savepoints.clear();
+                self.session.sp_snapshots.clear();
+                self.session.tx_snapshot = None;
                 Step::Tx(TxCtl::Commit)
             }
             1 => {
+                // ROLLBACK reverts everything since BEGIN on the server —
+                // including DDL and SET — so the model reverts with it
+                // (transactional-DDL law; without this the rest of the plan
+                // addresses tables the server rolled away).
+                let snap = self.session.tx_snapshot.take().expect("in_tx implies tx snapshot");
+                self.schema.restore_tables(snap.tables);
+                self.session.gucs_set = snap.gucs_set;
                 self.session.in_tx = false;
                 self.session.savepoints.clear();
+                self.session.sp_snapshots.clear();
                 Step::Tx(TxCtl::Rollback)
             }
             2 => {
                 self.session.next_savepoint += 1;
                 let name = format!("sp{}", self.session.next_savepoint);
                 self.session.savepoints.push(name.clone());
+                self.session.sp_snapshots.push(TxSnapshot {
+                    tables: self.schema.snapshot_tables(),
+                    gucs_set: self.session.gucs_set,
+                });
                 Step::Tx(TxCtl::Savepoint(name))
             }
             3 => {
                 let i =
                     range_incl(&mut self.rng, 0, self.session.savepoints.len() as u64 - 1) as usize;
                 let name = self.session.savepoints[i].clone();
-                // ROLLBACK TO keeps the savepoint itself but destroys later ones.
+                // ROLLBACK TO keeps the savepoint itself but destroys later
+                // ones; the server reverts to the state as of the SAVEPOINT
+                // statement, and the snapshot stays live for repeated
+                // ROLLBACK TO.
+                let snap = self.session.sp_snapshots[i].clone();
+                self.schema.restore_tables(snap.tables);
+                self.session.gucs_set = snap.gucs_set;
                 self.session.savepoints.truncate(i + 1);
+                self.session.sp_snapshots.truncate(i + 1);
                 Step::Tx(TxCtl::RollbackTo(name))
             }
             _ => unreachable!(),
@@ -304,10 +353,16 @@ impl<'a> Generator<'a> {
                 5 => {
                     // Disconnect + ReconnectServer as an adjacent pair (v1
                     // policy — the runner reconnects immediately). Session
-                    // state does not survive the disconnect.
+                    // state does not survive the disconnect, and the server
+                    // ABORTS any open tx — its DDL rolls back, so the model's
+                    // schema reverts to the BEGIN snapshot with it.
                     self.budgets.consume(Kind::Fault, 2);
+                    if let Some(snap) = self.session.tx_snapshot.take() {
+                        self.schema.restore_tables(snap.tables);
+                    }
                     self.session.in_tx = false;
                     self.session.savepoints.clear();
+                    self.session.sp_snapshots.clear();
                     self.session.gucs_set = false;
                     self.pending
                         .push_back(PlanItem::Step(Step::Fault(FaultPoint::ReconnectServer)));

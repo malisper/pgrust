@@ -192,26 +192,58 @@ fn first_interaction_is_always_create_table() {
 #[test]
 fn plans_end_clean_no_dangling_tx_or_guc() {
     // Session-model invariant: any open tx is closed and set GUCs reset by the
-    // deterministic cleanup tail (1session GUC-leak law).
+    // deterministic cleanup tail (1session GUC-leak law). The mini-model here
+    // is tx-aware: non-LOCAL SET (and RESET ALL) is TRANSACTIONAL in
+    // PostgreSQL, so its effect inside a rolled-back tx/subtx reverts on the
+    // server — the generator models exactly that (tx-DDL/GUC fix, review
+    // BLOCKING-1), and this replay must too. Full statement-level coherence
+    // lives in tests/simharness_gen_coherence.rs.
     for seed in 100..150u64 {
         let profile = test_profile(StatementWeights::default(), 80);
         let plan = generate_plan(seed, &profile, "ab", "g", &[]);
         let mut in_tx = false;
         let mut gucs = false;
+        let mut gucs_at_begin = false;
+        let mut sp_gucs: Vec<(String, bool)> = Vec::new();
         let steps = plan.items.iter().flat_map(|it| match it {
             PlanItem::Step(s) => std::slice::from_ref(s).iter(),
             PlanItem::Property { steps, .. } => steps.iter(),
         });
         for s in steps {
             match s {
-                Step::Tx(simharness::plan::TxCtl::Begin(_)) => in_tx = true,
-                Step::Tx(simharness::plan::TxCtl::Commit)
-                | Step::Tx(simharness::plan::TxCtl::Rollback) => in_tx = false,
+                Step::Tx(simharness::plan::TxCtl::Begin(_)) => {
+                    in_tx = true;
+                    gucs_at_begin = gucs;
+                    sp_gucs.clear();
+                }
+                Step::Tx(simharness::plan::TxCtl::Commit) => {
+                    in_tx = false;
+                    sp_gucs.clear();
+                }
+                Step::Tx(simharness::plan::TxCtl::Rollback) => {
+                    in_tx = false;
+                    gucs = gucs_at_begin;
+                    sp_gucs.clear();
+                }
+                Step::Tx(simharness::plan::TxCtl::Savepoint(n)) => {
+                    sp_gucs.push((n.clone(), gucs));
+                }
+                Step::Tx(simharness::plan::TxCtl::RollbackTo(n)) => {
+                    let i = sp_gucs
+                        .iter()
+                        .rposition(|(sn, _)| sn == n)
+                        .unwrap_or_else(|| panic!("seed {seed}: phantom savepoint '{n}'"));
+                    gucs = sp_gucs[i].1;
+                    sp_gucs.truncate(i + 1);
+                }
                 Step::Arm(simharness::plan::ArmCtl::SetGuc(..)) => gucs = true,
                 Step::Arm(simharness::plan::ArmCtl::ResetAll) => gucs = false,
                 Step::Fault(simharness::plan::FaultPoint::Disconnect) => {
+                    // Disconnect aborts any open tx and the fresh session
+                    // after reconnect has no GUCs set at all.
                     in_tx = false;
                     gucs = false;
+                    sp_gucs.clear();
                 }
                 _ => {}
             }

@@ -176,4 +176,24 @@ impl SchemaState {
     pub fn drop_table(&mut self, idx: usize) -> Table {
         self.tables.remove(idx)
     }
+
+    /// Transaction-visible schema snapshot (transactional-DDL modeling: DDL in
+    /// PostgreSQL is transactional, so ROLLBACK / ROLLBACK TO SAVEPOINT / an
+    /// aborting disconnect reverts it on the server; the generator's model
+    /// must revert with it or every later statement addresses tables the
+    /// server rolled away — 42P01/25P02 storms).
+    ///
+    /// The global name counters (`next_table` / `next_index` / `next_rename`)
+    /// are deliberately NOT part of the snapshot: identifiers stay monotonic
+    /// across rollbacks, so a name is never reused. A rolled-back name is free
+    /// on the server (skipping it is always valid SQL), and birth ids stay
+    /// unique plan-wide, which the table-dependency API relies on.
+    pub fn snapshot_tables(&self) -> Vec<Table> {
+        self.tables.clone()
+    }
+
+    /// Restore the tx-visible state captured by [`snapshot_tables`].
+    pub fn restore_tables(&mut self, tables: Vec<Table>) {
+        self.tables = tables;
+    }
 }
