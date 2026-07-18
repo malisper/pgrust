@@ -297,3 +297,100 @@ fn lookup_int8_kernel() {
     assert_eq!(i4, i5);
     assert_eq!(table.num_entries(), 3);
 }
+
+// q18fin diagnostic (fix/parallel-finalize-stall): the TPROC-H q18 finalize
+// does 15M all-miss int8 inserts through lookup() at ~19us each while the
+// serial agg's identical call site pays ~140ns. This probe isolates the
+// variable: N distinct int8 keys inserted (a) in ascending arrival order
+// (serial scan shape) vs (b) in shuffled arrival order (Gather-funnel shape),
+// same keys, same hashes, same growth trajectory. Run explicitly:
+//   cargo test -p execgrouping --release -- --ignored --nocapture probe_cost
+#[test]
+#[ignore]
+fn probe_cost_insert_order() {
+    install();
+    let n: usize = std::env::var("PROBE_N").ok().and_then(|v| v.parse().ok()).unwrap_or(4_000_000);
+    let init_buckets: usize =
+        std::env::var("PROBE_BUCKETS").ok().and_then(|v| v.parse().ok()).unwrap_or(250_000);
+
+    // Deterministic shuffle (splitmix-based Fisher-Yates).
+    let mut keys: Vec<i64> = (1..=n as i64).collect();
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut rng = move || {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    };
+    let mut shuffled = keys.clone();
+    for i in (1..shuffled.len()).rev() {
+        let j = (rng() % (i as u64 + 1)) as usize;
+        shuffled.swap(i, j);
+    }
+
+    let mut run = |label: &str, order: &[i64]| {
+        let ctx = MemoryContext::new("probe-cost");
+        let mcx = ctx.mcx();
+        let table_ctx = MemoryContext::new("probe-entries");
+        let att = FormData_pg_attribute {
+            attnum: 1,
+            atttypid: ::types_core::INT8OID,
+            atttypmod: -1,
+            attlen: 8,
+            attbyval: true,
+            attalign: ::types_tuple::TYPALIGN_DOUBLE,
+            attstorage: TYPSTORAGE_PLAIN,
+            ..Default::default()
+        };
+        let mut attrs = PgVec::new_in(mcx);
+        let mut compact = PgVec::new_in(mcx);
+        compact.push(CompactAttribute::populate_from(&att));
+        attrs.push(att);
+        let desc = Rc::new(TupleDescData {
+            natts: 1,
+            tdtypeid: 0,
+            tdtypmod: -1,
+            tdrefcount: -1,
+            constr: None,
+            compact_attrs: compact,
+            attrs,
+        });
+        let mut table = build_tuple_hash_table(
+            mcx, &desc, &[1], &[467], &[949], &[0], init_buckets, 16, false,
+        )
+        .unwrap();
+        let mut slot = exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(desc));
+        let t0 = std::time::Instant::now();
+        for &v in order {
+            exectuples::exec_clear_tuple(&mut slot, mcx);
+            slot.base_mut().tts_values[0] = Datum::from_i64(v);
+            slot.base_mut().tts_isnull[0] = false;
+            exectuples::exec_store_virtual_tuple(&mut slot);
+            let hash = table.hash_slot(&mut slot).unwrap();
+            let (ix, _isnew) = table.lookup(&mut slot, hash, Some(table_ctx.mcx()), mcx).unwrap();
+            ix.unwrap();
+        }
+        let el = t0.elapsed();
+        eprintln!(
+            "probe_cost[{label}]: n={} init_buckets={} wall={:.3}s ns/insert={:.0} entries={}",
+            order.len(),
+            init_buckets,
+            el.as_secs_f64(),
+            el.as_nanos() as f64 / order.len() as f64,
+            table.num_entries()
+        );
+        assert!(table.num_entries() <= order.len());
+        table.release();
+    };
+
+    run("ascending", &keys);
+    run("shuffled", &shuffled);
+    // Serial-scan facsimile: 4 consecutive rows per key (3 hits per insert).
+    let mut serial_like: Vec<i64> = Vec::with_capacity(n * 4);
+    for &k in &keys {
+        serial_like.extend_from_slice(&[k, k, k, k]);
+    }
+    keys.clear();
+    run("ascending-x4", &serial_like);
+}
