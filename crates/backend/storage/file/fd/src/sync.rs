@@ -26,14 +26,29 @@ pub fn pg_fsync(fd: RawFd) -> i32 {
         // read-only (fd.c:391-424). fstat failure is ignored.
         let mut st = vfs::FileInfo::zeroed();
         if vfs::fstat(fd, &mut st) == 0 {
-            // SAFETY: F_GETFL reads the descriptor flags. Debug-only fd-state
-            // introspection, not IO — stays raw (vfs carve-out).
-            let desc_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) } & libc::O_ACCMODE;
-            if st.is_dir() {
-                debug_assert!(desc_flags == libc::O_RDONLY);
-            } else {
-                debug_assert!(desc_flags != libc::O_RDONLY);
+            // DST P4 finding F1 (Ruling 3 Class C mirror): this introspection
+            // must not run raw against a vfs-minted fd. Under sim the fd is
+            // foreign to the kernel, fcntl returns -1, and `-1 & O_ACCMODE`
+            // reads as O_ACCMODE — the directory arm then debug-panicked on
+            // EVERY dir fsync (fsync_parent_path), and the unwind leaked the
+            // transient desc into the FdState TLS teardown, whose posix-side
+            // OwnedFd drop aborted the process (Rust IO-safety EBADF check).
+            // Posix-only until the Vfs grows an accmode probe; the sim domain
+            // loses only this debug assert.
+            #[cfg(not(pgrust_sim))]
+            {
+                // SAFETY: F_GETFL reads the descriptor flags. Debug-only
+                // fd-state introspection, not IO — stays raw (vfs carve-out,
+                // posix-minted fds only).
+                let desc_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) } & libc::O_ACCMODE;
+                if st.is_dir() {
+                    debug_assert!(desc_flags == libc::O_RDONLY);
+                } else {
+                    debug_assert!(desc_flags != libc::O_RDONLY);
+                }
             }
+            #[cfg(pgrust_sim)]
+            let _ = &st;
         }
         set_errno(0);
     }
