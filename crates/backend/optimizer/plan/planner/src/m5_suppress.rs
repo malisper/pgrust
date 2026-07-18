@@ -149,9 +149,15 @@ pub enum CoverClass {
     /// rels, every rel nbatch==1 — the B1 discipline inherited),
     /// enable_hashagg + enable_hashjoin required ON (either off costs a
     /// sort/merge/NL serial shape the walk refuses — the suppress-then-
-    /// refuse direction), no ORDER BY/LIMIT/OFFSET/DISTINCT (the Agg must
-    /// be the plan ROOT), ngroups floored under BOTH the groupby_high
-    /// boundary and the export-cap headroom.
+    /// refuse direction), BARE-EQUI-ONLY quals (every top-level AND term an
+    /// int-family hashjoinable equi clause between distinct rels — residual
+    /// filter quals shifted the costing to a top-level Merge Join with full
+    /// statistics present, the e2e leg-X5 live finding), statistics on
+    /// every join/group key var (statistics-free keys default the join
+    /// selectivities into the same merge landing — leg X6), no ORDER BY/
+    /// LIMIT/OFFSET/DISTINCT (the Agg must be the plan ROOT), ngroups
+    /// floored under BOTH the groupby_high boundary and the export-cap
+    /// headroom.
     CbHashJoinGroupedAgg,
     /// M5-5 Meta-over-Gather (the band-2a q30 handoff): plain (ungrouped)
     /// FOOTER-ANSWERABLE aggregation over one plain pgrcolumnar rel with NO
@@ -1283,6 +1289,28 @@ fn groupsink_enabled() -> bool {
 /// would engage, cross it at runtime, and land the R5 serial rerun.
 const GROUPSINK_NGROUPS_FLOOR: f64 = 65_536.0;
 
+/// SE-AGGJOIN stats guard (the e2e leg-X6 LIVE finding): on STATISTICS-FREE
+/// relations the costing's default join selectivities explode the join-row
+/// estimates and elect serial MERGE shapes the walk refuses — the B1
+/// suppress-then-refuse defect class, costing flavor (reproduced: unanalyzed
+/// 3-rel fixture planned `HashAggregate -> Merge Join` post-suppression). A
+/// key var is ESTIMABLE when it carries pg_statistic rows or is provably
+/// unique — the signals `eqjoinsel` actually consults (the pgrcolumnar
+/// FOOTER NDV feeds only the GROUP estimation path, not join selectivity —
+/// footer-only rels reproduced the merge landing with a perfect ngroups
+/// estimate, so footers deliberately do NOT admit; a footer-backed ANALYZE
+/// harvests stadistinct and is the class's admission ticket — GL-AGGJOIN-1
+/// leg (c) verifies the fleet fixtures key). Any key without one keeps
+/// Gather.
+fn key_var_estimable<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    v_node: Node<'mcx>,
+) -> PgResult<bool> {
+    let id = run.intern_expr(v_node);
+    let vd = crate::selfuncs::examine_variable(run, id, v_node, 0)?;
+    Ok(vd.stats.is_some() || vd.isunique)
+}
+
 fn classify_aggjoin_grouped<'mcx>(
     run: &mut PlannerRun<'mcx>,
     parse: &Query<'mcx>,
@@ -1318,6 +1346,42 @@ fn classify_aggjoin_grouped<'mcx>(
     if !equi_graph_connected(rtis, quals)? {
         return refuse_join("equi graph does not connect all relations");
     }
+    // Qual discipline (legs X5+X6, both reproduced LIVE by this lane's e2e):
+    // EVERY top-level AND term must be an int-family hashjoinable equi
+    // clause between two DISTINCT joined rels, with statistics on BOTH key
+    // vars. Residual filter quals shift the costing toward sort/merge
+    // shapes the walk refuses (a fact-side filter elected a top-level Merge
+    // Join with FULL statistics present — X5), and statistics-free keys give
+    // the costing default join selectivities with the same merge landing
+    // (X6). Bare equi-join grouped shapes over analyzed rels ONLY.
+    for &qual in quals {
+        let Some(op) = qual.as_op_expr() else {
+            return refuse_join("non-equi qual (costing can elect merge/sort shapes)");
+        };
+        if op.args.len() != 2 {
+            return refuse_join("non-equi qual (costing can elect merge/sort shapes)");
+        }
+        let (a, b) = (op.args.nth(0), op.args.nth(1));
+        let hit = |e: Node<'_>| rtis.iter().position(|&rti| key_var(e, rti).is_some());
+        let (Some(ia), Some(ib)) = (hit(a), hit(b)) else {
+            return refuse_join("non-equi qual (costing can elect merge/sort shapes)");
+        };
+        if ia == ib {
+            return refuse_join("non-equi qual (costing can elect merge/sort shapes)");
+        }
+        let (Some(va), Some(vb)) = (key_var(a, rtis[ia]), key_var(b, rtis[ib])) else {
+            return refuse_join("non-equi qual (costing can elect merge/sort shapes)");
+        };
+        if !is_int_family(va.vartype)
+            || !is_int_family(vb.vartype)
+            || !lsyscache::op_hashjoinable(op.opno, va.vartype)?
+        {
+            return refuse_join("non-hashjoinable qual term");
+        }
+        if !key_var_estimable(run, a)? || !key_var_estimable(run, b)? {
+            return refuse_join("join key without statistics (statistics-free rel)");
+        }
+    }
     // Key discipline: every group key a bare int2/4/8 Var on one joined rel
     // (the walk's byval word-equality whitelist is wider — probe narrower).
     let mut key_refs: Vec<u32> = Vec::new();
@@ -1331,6 +1395,9 @@ fn classify_aggjoin_grouped<'mcx>(
         };
         if !is_int_family(v.vartype) {
             return refuse_join("group key not int-family");
+        }
+        if !key_var_estimable(run, tle.expr)? {
+            return refuse_join("group key without estimable ndistinct (statistics-free rel)");
         }
         key_refs.push(gc.tleSortGroupRef);
     }
