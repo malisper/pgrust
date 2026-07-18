@@ -1159,30 +1159,26 @@ pub fn RemoveWalSummaryIfOlderThan(ws: &WalSummaryFile, cutoff_time: i64) -> PgR
         ws.end_lsn as u32
     );
 
-    let md = match std::fs::symlink_metadata(&path) {
-        Ok(md) => md,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => {
-            ereport(ERROR)
-                .with_saved_errno(e.raw_os_error().unwrap_or(0))
-                .errcode_for_file_access()
-                .errmsg(format!("could not stat file \"{path}\": %m"))
-                .finish(loc("RemoveWalSummaryIfOlderThan"))?;
-            unreachable!();
+    let mut md = fd::FileInfo::zeroed();
+    if fd::pg_lstat(&path, &mut md) != 0 {
+        let en = fd::get_errno();
+        if en == libc::ENOENT {
+            return Ok(());
         }
-    };
-    let mtime = md
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(i64::MAX);
+        ereport(ERROR)
+            .with_saved_errno(en)
+            .errcode_for_file_access()
+            .errmsg(format!("could not stat file \"{path}\": %m"))
+            .finish(loc("RemoveWalSummaryIfOlderThan"))?;
+        unreachable!();
+    }
+    let mtime = if md.mtime_sec >= 0 { md.mtime_sec } else { i64::MAX };
     if mtime >= cutoff_time {
         return Ok(());
     }
-    if let Err(e) = std::fs::remove_file(&path) {
+    if fd::pg_unlink(&path) != 0 {
         ereport(ERROR)
-            .with_saved_errno(e.raw_os_error().unwrap_or(0))
+            .with_saved_errno(fd::get_errno())
             .errcode_for_file_access()
             .errmsg(format!("could not remove file \"{path}\": %m"))
             .finish(loc("RemoveWalSummaryIfOlderThan"))?;

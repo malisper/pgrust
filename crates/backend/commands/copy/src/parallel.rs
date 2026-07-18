@@ -939,10 +939,24 @@ impl ParCopyShared {
             return Ok(());
         }
         let sort = self.sort.as_ref().expect("spill without sort mode");
+        // MakePGDirectory, EEXIST-tolerant: "base" always exists, so the one
+        // missing component is pgsql_tmp itself (DST P1 inc-4 fence). EEXIST
+        // is only usable when the existing path really is a directory
+        // (pre-fence create_dir_all errored on a plain file here).
         let dir = std::path::Path::new("base/pgsql_tmp");
-        std::fs::create_dir_all(dir).map_err(|e| {
-            Box::new(PgError::error(format!("parallel load-sort temp dir: {e}")))
-        })?;
+        if fd::MakePGDirectory("base/pgsql_tmp") < 0 {
+            let en = fd::get_errno();
+            let mut fi = fd::FileInfo::zeroed();
+            let usable_dir = en == libc::EEXIST
+                && fd::pg_stat("base/pgsql_tmp", &mut fi) == 0
+                && fi.is_dir();
+            if !usable_dir {
+                let e = std::io::Error::from_raw_os_error(en);
+                return Err(Box::new(PgError::error(format!(
+                    "parallel load-sort temp dir: {e}"
+                ))));
+            }
+        }
         let seq = self.sort_run_seq.fetch_add(1, Ordering::SeqCst);
         let path = dir.join(format!(
             "pgsql_tmp{}.parcopysort.{:x}.{}.run",
@@ -1268,7 +1282,7 @@ fn merge_sorted_runs(
     // Eager unlink: the open fds keep the data; a crash from here leaves
     // no orphan files.
     for p in &paths {
-        let _ = std::fs::remove_file(p);
+        let _ = fd::pg_unlink(&p.to_string_lossy());
     }
     let nenc = sort_encoders(shared.rt);
     ptrace(&format!(
@@ -1756,7 +1770,7 @@ pub(crate) fn copy_from_parallel<'mcx>(
                 &mut *self.0.sort_runs.lock().unwrap_or_else(|p| p.into_inner()),
             );
             for p in paths {
-                let _ = std::fs::remove_file(p);
+                let _ = fd::pg_unlink(&p.to_string_lossy());
             }
         }
     }

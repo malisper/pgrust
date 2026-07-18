@@ -198,31 +198,21 @@ pub fn AlterSystemSetConfigFile(stmt: &AlterSystemStmt<'_>) -> PgResult<()> {
 
     let mut head: Vec<ConfigVariable> = Vec::new();
     if !resetall {
-        match std::fs::read(PG_AUTOCONF_FILENAME) {
-            Ok(contents) => {
-                if !ParseConfigFp(
-                    &contents,
-                    std::path::Path::new(PG_AUTOCONF_FILENAME),
-                    CONF_FILE_START_DEPTH,
-                    LOG,
-                    &mut head,
-                )? {
-                    return Err(ereport(ERROR)
-                        .errcode(ERRCODE_CONFIG_FILE_ERROR)
-                        .errmsg(format!(
-                            "could not parse contents of file \"{PG_AUTOCONF_FILENAME}\""
-                        ))
-                        .into_error()
-                        .into());
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(file_error(
-                    format!("could not open file \"{PG_AUTOCONF_FILENAME}\": %m"),
-                    &e,
-                )
-                .into())
+        if let Some(contents) = read_autoconf_via_fd()? {
+            if !ParseConfigFp(
+                &contents,
+                std::path::Path::new(PG_AUTOCONF_FILENAME),
+                CONF_FILE_START_DEPTH,
+                LOG,
+                &mut head,
+            )? {
+                return Err(ereport(ERROR)
+                    .errcode(ERRCODE_CONFIG_FILE_ERROR)
+                    .errmsg(format!(
+                        "could not parse contents of file \"{PG_AUTOCONF_FILENAME}\""
+                    ))
+                    .into_error()
+                    .into());
             }
         }
         replace_auto_config_value(&mut head, name, value.as_deref());
@@ -256,14 +246,61 @@ pub fn AlterSystemSetConfigFile(stmt: &AlterSystemStmt<'_>) -> PgResult<()> {
     // Close before renaming (PG_CATCH parity: close then unlink on error).
     drop(file);
     if let Err(e) = write_result {
-        let _ = std::fs::remove_file(&tmp_file_name);
+        let _ = fd::pg_unlink(&tmp_file_name);
         return Err(e);
     }
     if let Err(e) = fd::durable_rename(&tmp_file_name, PG_AUTOCONF_FILENAME, ERROR) {
-        let _ = std::fs::remove_file(&tmp_file_name);
+        let _ = fd::pg_unlink(&tmp_file_name);
         return Err(e);
     }
 
     lwlock::LWLockRelease(lwlock::main_lock(AUTO_FILE_LOCK))?;
     Ok(())
+}
+
+// postgresql.auto.conf read via the fd-crate front (DST P1 inc-4): transient
+// fd + fstat-sized pg_pread. Ok(None) = ENOENT (fresh cluster). Errno-shaped
+// failures become the C "could not open file" report here; a PgError from
+// OpenTransientFile itself (e.g. desc-table exhaustion) propagates unchanged.
+fn read_autoconf_via_fd() -> PgResult<Option<Vec<u8>>> {
+    let io_err = |en: i32| {
+        file_error(
+            format!("could not open file \"{PG_AUTOCONF_FILENAME}\": %m"),
+            &std::io::Error::from_raw_os_error(en),
+        )
+    };
+    let fdnum = fd::OpenTransientFile(PG_AUTOCONF_FILENAME, libc::O_RDONLY)?;
+    if fdnum < 0 {
+        let en = fd::get_errno();
+        if en == libc::ENOENT {
+            return Ok(None);
+        }
+        return Err(io_err(en).into());
+    }
+    let mut fi = fd::FileInfo::zeroed();
+    if fd::pg_fstat(fdnum, &mut fi) != 0 {
+        let en = fd::get_errno();
+        fd::CloseTransientFile(fdnum);
+        return Err(io_err(en).into());
+    }
+    let mut contents = vec![0u8; fi.size.max(0) as usize];
+    let mut r = 0usize;
+    while r < contents.len() {
+        let n = fd::pg_pread(fdnum, &mut contents[r..], r as i64);
+        if n == 0 {
+            contents.truncate(r);
+            break;
+        }
+        if n < 0 {
+            let en = fd::get_errno();
+            if en == libc::EINTR {
+                continue;
+            }
+            fd::CloseTransientFile(fdnum);
+            return Err(io_err(en).into());
+        }
+        r += n as usize;
+    }
+    fd::CloseTransientFile(fdnum);
+    Ok(Some(contents))
 }

@@ -1,0 +1,21 @@
+[package]
+name = "vfs"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "vfs"
+path = "src/lib.rs"
+
+# LEAF CRATE (DST P1 contract §1.1): libc + plain types only. No backend deps,
+# ever — `fd` and `common/controldata_utils` take plain cargo deps on this
+# crate, so any backend dep added here would create a cycle.
+[dependencies]
+libc = "0.2"
+
+# `pgrust_sim` is the non-default cfg selecting SimVfs (contract §1.2). It is
+# set exclusively by the sim harness's RUSTFLAGS — never in .cargo/config, any
+# product profile, or fleet submit envs.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)'] }
