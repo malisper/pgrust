@@ -5,6 +5,23 @@ fn states_i64(p: *mut u8) -> *mut i64 {
     p.cast()
 }
 
+/// The miri fallback must be bit-exact with the hardware instruction, or the
+/// UB gate would hash (and bucket) differently than production runs.
+#[test]
+#[cfg(all(target_arch = "aarch64", not(miri)))]
+fn software_crc32cx_parity() {
+    if !crc_supported() {
+        return;
+    }
+    let mut x: u64 = 0x243F_6A88_85A3_08D3;
+    let mut crc: u32 = 0;
+    for _ in 0..4096 {
+        x = x.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(0xB5AD_4ECE_DA1C_E2A9);
+        assert_eq!(crc32cx(crc, x), crc32cx_sw(crc, x), "data={x:#x} crc={crc:#x}");
+        crc = crc32cx(crc, x);
+    }
+}
+
 /// Reference-checked int build: fold (sum, count) per key across the salt
 /// enable threshold, growth, and (optionally) two-level conversion — over
 /// the full (hash kind × entry layout) config matrix.
