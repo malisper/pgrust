@@ -393,3 +393,20 @@ seam_core::seam!(
     pub fn cursor_fill_tid_capture_refused()
 );
 // --- end SEAM-WIRING -------------------------------------------------------------
+
+// --- SE-R41 (reason-41 retirement, se/r41-retire; notes/se-r41-retire.md) --------
+
+seam_core::seam!(
+    // §3.1 capture-batchable probe, run at PortalStart only for
+    // CURRENT-OF-ELIGIBLE armed portals: true iff the plan is the batch
+    // store-fill shape (bare T_SeqScan top over a tid-capable heap AM —
+    // the plan-side twin of `cursor_store_batch_fill`'s planstate gate).
+    // TRUE ⇒ the portal takes the PLAIN store-armed eflags and its fill
+    // captures §4.2 identity INSIDE the run (batch sink / capture row
+    // loop); FALSE (and uninstalled worlds) keep the D-CA-2 fence + the
+    // row-chain capture loop verbatim.
+    pub fn cursor_plan_capture_batch_fill<'p, 'a>(
+        pstmt: &'p PlannedStmt<'a>,
+    ) -> bool
+);
+// --- end SE-R41 ------------------------------------------------------------------

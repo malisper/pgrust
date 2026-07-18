@@ -208,7 +208,11 @@ fn with_tid_desc<R>(
     f(mcx, desc)
 }
 
-fn tidstore_put(h: TuplestoreHandle, tableoid: u32, tid_packed: u64) -> PgResult<()> {
+/// §4.2 sidecar append. Plain pub fn AND the seam impl: the seam serves
+/// pquery's row-chain capture loop; execmain's in-run capture surfaces
+/// (SE-R41 batch sink + capture row loop) link tuplestore directly — the
+/// `tidstore_get` precedent below.
+pub fn tidstore_put(h: TuplestoreHandle, tableoid: u32, tid_packed: u64) -> PgResult<()> {
     with_tid_desc(|_mcx, desc| {
         let values = [
             ::datum::Datum::from_i64(tableoid as i64),
