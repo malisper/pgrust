@@ -1072,12 +1072,12 @@ pub(crate) fn cursor_run_budget(estate: &::executils::EStateData<'_>) -> Option<
 pub(crate) fn cursor_run_park<'mcx>(
     node: &mut crate::procnode::PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> bool {
+) -> PgResult<bool> {
     if estate.es_epq_active {
-        return false;
+        return Ok(false);
     }
     let mut w = ParkWalk { engaged: false, parked: false };
-    w.settle(node, estate);
+    w.settle(node, estate)?;
     if !w.engaged {
         // The budgeted run's top plan carried no (scan-class) lane
         // engagement: the whole portal rides Volcano exactly as today.
@@ -1088,7 +1088,7 @@ pub(crate) fn cursor_run_park<'mcx>(
             super::stats::RefuseReason::CursorPlanRefused,
         );
     }
-    w.parked
+    Ok(w.parked)
 }
 
 /// Repossession (design §2 "on resume, the source repositions"): restage
@@ -1114,95 +1114,114 @@ impl ParkWalk {
     /// arms). Leaf behavior: a SeqScan with a lane-STAGED page batch
     /// settles through the claim-release chain; everything else is a
     /// no-op (their staged state is either drain-scoped or pin-free — the
-    /// module doc's audit). Infallible: settling is release-only.
+    /// module doc's audit). Fallible ONLY through the slot-materialize
+    /// hygiene (allocation); the release half never fails.
     fn settle<'mcx>(
         &mut self,
         node: &mut crate::procnode::PlanStateNode<'mcx>,
         estate: &mut EStateData<'mcx>,
-    ) {
+    ) -> PgResult<()> {
         use crate::procnode::PlanStateNode as P;
         match node {
             P::SeqScan(ss) => {
                 if ss.lane_verdict() == Some(true) || ss.cb_standalone_verdict() == Some(true) {
                     self.engaged = true;
                 }
-                if ::nodeseqscan::seq_scan_cursor_settle(ss) {
-                    self.parked = true;
-                    self.engaged = true;
-                    // Slot hygiene (the `end_claim_clear_slot` discipline):
-                    // the emitted-slot path aliases/pins the released page;
-                    // nothing above the seam reads a suspended run's last
-                    // slot (the receiver copied out during receive_slot).
+                if ::nodeseqscan::seq_scan_cursor_park_pending(ss) {
+                    // Slot hygiene (BRIN-BUDGET P1 fix, was the
+                    // `end_claim_clear_slot` clear): a node ABOVE the seam
+                    // can still hold the suspended scan's last emitted slot
+                    // across the park — a lane join probe keeps
+                    // `ecxt_outertuple` pointing at the scan/result slot
+                    // for the whole inner iteration (the receiver-copied-out
+                    // argument covered only the standalone pipeline). So the
+                    // emitted slots MATERIALIZE (C's ExecMaterializeSlot
+                    // contract: values survive the buffer going away) rather
+                    // than clear. Order is load-bearing: the RESULT slot's
+                    // virtual byref datums may alias the staged page with no
+                    // pin of their own, so it copies out FIRST, while the
+                    // page is still pinned; the scan slot's materialize then
+                    // drops the slot's own buffer pin (R3 zero-pins across
+                    // the suspension preserved), and the settle call below
+                    // releases the claim pin. Park cadence only — never
+                    // per-tuple, unreachable budgets-off.
                     let mcx = estate.es_query_cxt;
-                    ::exectuples::exec_clear_tuple(
-                        estate.slot_mut(ss.ss.ss_ScanTupleSlot),
-                        mcx,
-                    );
                     if let Some(p) = ss.ss.ps_ProjInfo.as_ref() {
                         let result_slot = p.pi_result_slot;
-                        ::exectuples::exec_clear_tuple(estate.slot_mut(result_slot), mcx);
+                        let slot = estate.slot_mut(result_slot);
+                        if !slot.base().is_empty() {
+                            ::exectuples::exec_materialize_slot(slot, mcx)?;
+                        }
                     }
+                    let slot = estate.slot_mut(ss.ss.ss_ScanTupleSlot);
+                    if !slot.base().is_empty() {
+                        ::exectuples::exec_materialize_slot(slot, mcx)?;
+                    }
+                    let parked = ::nodeseqscan::seq_scan_cursor_settle(ss);
+                    debug_assert!(parked, "park-pending probe and settle disagree");
+                    self.parked = true;
+                    self.engaged = true;
                 }
             }
-            P::Instrumented(w) => self.settle(&mut w.inner, estate),
+            P::Instrumented(w) => self.settle(&mut w.inner, estate)?,
             P::Result(rs) => {
                 if let Some(outer) = rs.outer.as_deref_mut() {
-                    self.settle(outer, estate);
+                    self.settle(outer, estate)?;
                 }
             }
-            P::ProjectSet(ps) => self.settle(&mut ps.outer, estate),
+            P::ProjectSet(ps) => self.settle(&mut ps.outer, estate)?,
             P::RecursiveUnion(ru) => {
                 let ru = &mut **ru;
-                self.settle(&mut ru.outer, estate);
-                self.settle(&mut ru.inner, estate);
+                self.settle(&mut ru.outer, estate)?;
+                self.settle(&mut ru.inner, estate)?;
             }
-            P::Agg(aps) => self.settle(&mut aps.outer, estate),
-            P::WindowAgg(w) => self.settle(&mut w.outer, estate),
-            P::Sort(s) => self.settle(&mut s.outer, estate),
-            P::IncrementalSort(s) => self.settle(&mut s.outer, estate),
-            P::Material(m) => self.settle(&mut m.outer, estate),
-            P::Memoize(m) => self.settle(&mut m.outer, estate),
-            P::Unique(u) => self.settle(&mut u.outer, estate),
-            P::Group(g) => self.settle(&mut g.outer, estate),
-            P::Limit(l) => self.settle(&mut l.outer, estate),
-            P::LockRows(l) => self.settle(&mut l.outer, estate),
-            P::ModifyTable(mps) => self.settle(&mut mps.subplan, estate),
+            P::Agg(aps) => self.settle(&mut aps.outer, estate)?,
+            P::WindowAgg(w) => self.settle(&mut w.outer, estate)?,
+            P::Sort(s) => self.settle(&mut s.outer, estate)?,
+            P::IncrementalSort(s) => self.settle(&mut s.outer, estate)?,
+            P::Material(m) => self.settle(&mut m.outer, estate)?,
+            P::Memoize(m) => self.settle(&mut m.outer, estate)?,
+            P::Unique(u) => self.settle(&mut u.outer, estate)?,
+            P::Group(g) => self.settle(&mut g.outer, estate)?,
+            P::Limit(l) => self.settle(&mut l.outer, estate)?,
+            P::LockRows(l) => self.settle(&mut l.outer, estate)?,
+            P::ModifyTable(mps) => self.settle(&mut mps.subplan, estate)?,
             P::Append(a) => {
                 for sub in a.substates.iter_mut() {
-                    self.settle(sub, estate);
+                    self.settle(sub, estate)?;
                 }
             }
             P::MergeAppend(m) => {
                 for sub in m.substates.iter_mut() {
-                    self.settle(sub, estate);
+                    self.settle(sub, estate)?;
                 }
             }
-            P::SubqueryScan(s) => self.settle(&mut s.subplan, estate),
+            P::SubqueryScan(s) => self.settle(&mut s.subplan, estate)?,
             P::SetOp(s) => {
                 let s = &mut **s;
-                self.settle(&mut s.outer, estate);
-                self.settle(&mut s.inner, estate);
+                self.settle(&mut s.outer, estate)?;
+                self.settle(&mut s.inner, estate)?;
             }
             P::NestLoop(nl) => {
-                self.settle(&mut nl.outer, estate);
-                self.settle(&mut nl.inner, estate);
+                self.settle(&mut nl.outer, estate)?;
+                self.settle(&mut nl.inner, estate)?;
             }
             P::HashJoin(hj) => {
                 let hj = &mut **hj;
-                self.settle(&mut hj.outer, estate);
-                self.settle(&mut hj.hash.child, estate);
+                self.settle(&mut hj.outer, estate)?;
+                self.settle(&mut hj.hash.child, estate)?;
             }
             P::MergeJoin(mj) => {
                 let mj = &mut **mj;
-                self.settle(&mut mj.outer, estate);
-                self.settle(&mut mj.inner, estate);
+                self.settle(&mut mj.outer, estate)?;
+                self.settle(&mut mj.inner, estate)?;
             }
-            P::Gather(g) => self.settle(&mut g.outer, estate),
-            P::GatherMerge(gm) => self.settle(&mut gm.outer, estate),
-            P::BitmapHeapScan(b) => self.settle(&mut b.bitmapqual, estate),
+            P::Gather(g) => self.settle(&mut g.outer, estate)?,
+            P::GatherMerge(gm) => self.settle(&mut gm.outer, estate)?,
+            P::BitmapHeapScan(b) => self.settle(&mut b.bitmapqual, estate)?,
             P::BitmapAnd(bc) | P::BitmapOr(bc) => {
                 for sub in bc.substates.iter_mut() {
-                    self.settle(sub, estate);
+                    self.settle(sub, estate)?;
                 }
             }
             // Leaves with no lane-staged claim state (drain-scoped or
@@ -1222,6 +1241,7 @@ impl ParkWalk {
             | P::IndexOnlyScan(_)
             | P::BitmapIndexScan(_) => {}
         }
+        Ok(())
     }
 }
 
@@ -1527,12 +1547,12 @@ pub(crate) fn spi_run_budget_install(
 pub(crate) fn spi_run_settle<'mcx>(
     node: &mut crate::procnode::PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> bool {
+) -> PgResult<bool> {
     if estate.es_epq_active {
-        return false;
+        return Ok(false);
     }
     let mut w = ParkWalk { engaged: false, parked: false };
-    w.settle(node, estate);
+    w.settle(node, estate)?;
     if !w.engaged {
         // The budgeted SPI statement's plan carried no (scan-class) lane
         // engagement: the whole statement rides Volcano exactly as today.
@@ -1543,7 +1563,7 @@ pub(crate) fn spi_run_settle<'mcx>(
             super::stats::RefuseReason::SpiPlanRefused,
         );
     }
-    w.parked
+    Ok(w.parked)
 }
 
 // --- end WS-AJ wave-9.5 ----------------------------------------------------------

@@ -1181,7 +1181,7 @@ pub(crate) fn execute_plan<'m, 'mcx>(
     // belongs to the outer run — the inc-1a §5 design note, pinned in
     // units).
     if estate.es_cursor_run_budget.is_some() {
-        if crate::lanev2::cursor_run_park(planstate, estate) {
+        if crate::lanev2::cursor_run_park(planstate, estate)? {
             estate.es_lane_cursor_parked = true;
         }
     }
@@ -1205,7 +1205,7 @@ pub(crate) fn execute_plan<'m, 'mcx>(
     // / non-SPI runs read one None and skip (per-run cost only, never
     // per-tuple). EPQ law shared with the WS-AI walker (the walk refuses
     // under es_epq_active).
-    if estate.es_spi_run_budget.is_some() && crate::lanev2::spi_run_settle(planstate, estate) {
+    if estate.es_spi_run_budget.is_some() && crate::lanev2::spi_run_settle(planstate, estate)? {
         estate.es_lane_cursor_parked = true;
     }
     // --- end WS-AJ wave-9.5 -----------------------------------------------------
