@@ -241,7 +241,7 @@ impl T3Shape {
     /// `T3_DEFAULT_OWNED` list travel with each row, same commit).
     fn flipped_default(self) -> bool {
         match self {
-            T3Shape::FunctionScan => false, // B1 per-shape commit 1/6
+            T3Shape::FunctionScan => true,  // B1 per-shape commit 1/6 — FLIPPED
             T3Shape::TableFuncScan => false, // B1 per-shape commit 2/6
             T3Shape::SampleScan => false,   // B1 per-shape commit 3/6
             T3Shape::TidScan => false,      // B1 per-shape commit 4/6
@@ -721,7 +721,7 @@ mod flip_ledger_tests {
     #[test]
     fn t3_flip_ledger_pin() {
         let expected: &[(T3Shape, bool)] = &[
-            (T3Shape::FunctionScan, false),
+            (T3Shape::FunctionScan, true),
             (T3Shape::TableFuncScan, false),
             (T3Shape::SampleScan, false),
             (T3Shape::TidScan, false),
