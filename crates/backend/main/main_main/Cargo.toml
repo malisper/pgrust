@@ -24,4 +24,5 @@ stack_depth = { path = "../../utils/misc/stack_depth" }
 ps_status = { path = "../../utils/misc/ps_status" }
 pg_locale = { path = "../../utils/adt/pg_locale" }
 postmaster = { path = "../../postmaster/postmaster" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
 seams_init = { path = "../../../_support/seams_init" }

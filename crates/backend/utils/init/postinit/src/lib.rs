@@ -1019,6 +1019,17 @@ fn shutdown_postgres_cb(code: i32, arg: datum::Datum) -> PgResult<()> {
 }
 
 fn shutdown_xlog_cb(_code: i32, _arg: datum::Datum) -> PgResult<()> {
+    // ShutdownXLOG's entry arm (xlog.c:6740): the shutdown checkpoint's
+    // buffer pins need the aux-process resource owner. C reinstates it
+    // inside ShutdownXLOG; hosted at this standalone-only callback here
+    // (registered solely on the !IsUnderPostmaster path — the checkpointer's
+    // ShutdownXLOG call site already runs under its own aux owner).
+    debug_assert!(!resowner::AuxProcessResourceOwner().is_null());
+    debug_assert!(
+        resowner::CurrentResourceOwner().is_null()
+            || resowner::CurrentResourceOwner() == resowner::AuxProcessResourceOwner()
+    );
+    resowner::SetCurrentResourceOwner(resowner::AuxProcessResourceOwner());
     transam_xlog_seams::shutdown_xlog::call()
 }
 
