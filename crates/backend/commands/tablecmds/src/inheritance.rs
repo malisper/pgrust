@@ -538,7 +538,7 @@ fn coldef_type(def: &ColumnDef<'_>) -> (Oid, i32) {
 fn mcx_dummy() -> Mcx<'static> {
     thread_local! {
         static CTX: &'static mcx::MemoryContext =
-            Box::leak(Box::new(mcx::MemoryContext::new("coldef-type-scratch")));
+            mcx::session_root("coldef-type-scratch");
     }
     CTX.with(|c| c.mcx())
 }
@@ -1753,7 +1753,7 @@ mod tests {
     use super::*;
 
     fn ctx() -> &'static mcx::MemoryContext {
-        Box::leak(Box::new(mcx::MemoryContext::new("merge-test")))
+        mcx::session_root("merge-test")
     }
 
     fn coldef<'m>(mcx: Mcx<'m>, name: &'m str, from_type: bool, not_null: bool) -> Node<'m> {

@@ -49,7 +49,7 @@ pub(crate) fn rb_error(msg: String) -> Box<PgError> {
 thread_local! {
     // rb->context family collapsed to one long-lived AllocSet; per-object
     // frees go through Rust drops instead of C's slab/generation contexts.
-    static RB_CTX: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("ReorderBuffer")));
+    static RB_CTX: &'static MemoryContext = ::mcx::session_root("ReorderBuffer");
 }
 
 pub(crate) fn rb_mcx() -> Mcx<'static> {
