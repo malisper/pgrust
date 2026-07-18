@@ -20,7 +20,14 @@ use types_error::{ErrorLocation, PgResult, DEBUG1, DEBUG2, LOG};
 use types_storage::latch::LatchHandle;
 use types_storage::waiteventset::WaitEventSetHandle;
 
+#[cfg(not(target_family = "wasm"))]
 pub mod crash_signals;
+// wasm32: no signals on WASI — a fatal fault is a wasm trap and the runtime
+// itself reports it; there is no disposition to install or restore.
+#[cfg(target_family = "wasm")]
+pub mod crash_signals {
+    pub fn install_crash_signal_reporter() {}
+}
 pub mod main_entry;
 pub mod serverloop;
 pub mod statemachine;
@@ -239,14 +246,14 @@ pub fn handle_pm_reload_request_signal(_sig: i32) {
 
 pub fn handle_pm_shutdown_request_signal(sig: i32) {
     match sig {
-        libc::SIGTERM => {
+        procsignal::signums::SIGTERM => {
             PENDING_PM_SHUTDOWN_REQUEST.store(true, Ordering::Release);
         }
-        libc::SIGINT => {
+        procsignal::signums::SIGINT => {
             PENDING_PM_FAST_SHUTDOWN_REQUEST.store(true, Ordering::Release);
             PENDING_PM_SHUTDOWN_REQUEST.store(true, Ordering::Release);
         }
-        libc::SIGQUIT => {
+        procsignal::signums::SIGQUIT => {
             PENDING_PM_IMMEDIATE_SHUTDOWN_REQUEST.store(true, Ordering::Release);
             PENDING_PM_SHUTDOWN_REQUEST.store(true, Ordering::Release);
         }
@@ -302,11 +309,11 @@ pub fn process_pm_reload_request() -> PgResult<()> {
         // (guc::layers, parallelism-redesign §2.4).
         guc::layers::ensure_base_current();
         pmchild_seams::signal_children::call(
-            libc::SIGHUP,
+            procsignal::signums::SIGHUP,
             btmask_all_except(&[BackendType::DeadEndBackend]),
         );
         if with_pm(|pm| pm.syslogger.is_some()) {
-            syslogger::collector_kill(libc::SIGHUP);
+            syslogger::collector_kill(procsignal::signums::SIGHUP);
         }
 
         if !auth_seams::load_hba::call() {
@@ -391,10 +398,10 @@ pub fn process_pm_pmsignal() -> PgResult<()> {
     // direct poke (see syslogger::collector_kill).
     if with_pm(|pm| pm.syslogger.is_some()) {
         if syslogger_seams::check_logrotate_signal::call() {
-            syslogger::collector_kill(libc::SIGUSR1);
+            syslogger::collector_kill(procsignal::signums::SIGUSR1);
             syslogger_seams::remove_logrotate_signal_files::call();
         } else if pmsignal::CheckPostmasterSignal(PMSIGNAL_ROTATE_LOGFILE) {
-            syslogger::collector_kill(libc::SIGUSR1);
+            syslogger::collector_kill(procsignal::signums::SIGUSR1);
         }
     }
 
@@ -422,9 +429,9 @@ pub fn process_pm_pmsignal() -> PgResult<()> {
             debug_assert!(with_pm(|pm| pm.shutdown > NoShutdown));
             let pgarch = with_pm(|pm| pm.pgarch);
             if let Some(pgarch) = pgarch {
-                statemachine::signal_child(&pgarch, libc::SIGUSR2);
+                statemachine::signal_child(&pgarch, procsignal::signums::SIGUSR2);
             }
-            pmchild_seams::signal_children::call(libc::SIGUSR2, btmask(BackendType::WalSender));
+            pmchild_seams::signal_children::call(procsignal::signums::SIGUSR2, btmask(BackendType::WalSender));
             statemachine::UpdatePMState(PMState::PM_WAIT_XLOG_ARCHIVAL);
         } else if with_pm(|pm| !pm.fatal_error && pm.shutdown != ImmediateShutdown) {
             report(LOG, "WAL was shut down unexpectedly".into(), 3846, "process_pm_pmsignal");
@@ -543,7 +550,7 @@ pub fn process_pm_child_exit() -> PgResult<()> {
                     pm.startup_status = StartupStatusEnum::NotRunning;
                     pm.shutdown = pm.shutdown.max(SmartShutdown);
                 });
-                statemachine::TerminateChildren(libc::SIGTERM);
+                statemachine::TerminateChildren(procsignal::signums::SIGTERM);
                 statemachine::UpdatePMState(PMState::PM_WAIT_BACKENDS);
                 continue;
             }
@@ -612,7 +619,7 @@ pub fn process_pm_child_exit() -> PgResult<()> {
                 statemachine::UpdatePMState(PMState::PM_WAIT_DEAD_END);
                 serverloop::ConfigurePostmasterWaitSet(false)?;
                 statemachine::SignalChildren(
-                    libc::SIGTERM,
+                    procsignal::signums::SIGTERM,
                     btmask_all_except(&[BackendType::Logger]),
                 );
             } else {
@@ -792,7 +799,8 @@ fn handle_child_crash(procname: &str, pid: pid_t, exitstatus: i32) -> PgResult<(
 
 pub fn init_seams() {
     postmaster_seams::announce_child_exit::set(announce_child_exit);
-    postmaster_seams::signal_postmaster_sigusr1::set(|| handle_pm_pmsignal_signal(libc::SIGUSR1));
-    postmaster_seams::signal_postmaster_sighup::set(|| handle_pm_reload_request_signal(libc::SIGHUP));
+    postmaster_seams::signal_postmaster_sigusr1::set(|| handle_pm_pmsignal_signal(procsignal::signums::SIGUSR1));
+    postmaster_seams::signal_postmaster_sighup::set(|| handle_pm_reload_request_signal(procsignal::signums::SIGHUP));
     postmaster_seams::pg_start_time::set(main_entry::pg_start_time);
+    postmaster_seams::set_pg_start_time::set(main_entry::set_pg_start_time);
 }

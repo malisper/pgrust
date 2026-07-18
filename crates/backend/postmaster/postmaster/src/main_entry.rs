@@ -24,7 +24,7 @@ const ARCHIVE_MODE_OFF: i32 = 0;
 pub fn InitProcessGlobals() {
     // miscinit's InitProcessGlobals carries C's whole body, including the
     // strong-seed of the (thread-local) global PRNG.
-    miscinit::InitProcessGlobals(std::process::id() as i32);
+    miscinit::InitProcessGlobals(init_small::globals::process_id() as i32);
 }
 
 fn getInstallationPaths(argv0: &str) {
@@ -91,6 +91,13 @@ extern "C" fn c_handle_pm_pmsignal(sig: i32) {
 }
 extern "C" fn c_dummy_handler(_sig: i32) {}
 
+// wasm32: WASI p1 delivers no signals; the postmaster's process-signal
+// installs are no-ops (the postmaster is unreachable on wasm anyway —
+// no listen sockets — but the crate must compile).
+#[cfg(target_family = "wasm")]
+fn pqsignal(_signum: i32, _handler: extern "C" fn(i32)) {}
+
+#[cfg(not(target_family = "wasm"))]
 fn pqsignal(signum: i32, handler: extern "C" fn(i32)) {
     // SAFETY: standard sigaction install; handlers only touch atomics + the
     // signal-safe SetLatch path.
@@ -103,6 +110,10 @@ fn pqsignal(signum: i32, handler: extern "C" fn(i32)) {
     }
 }
 
+#[cfg(target_family = "wasm")]
+fn pqsignal_ignore(_signum: i32) {}
+
+#[cfg(not(target_family = "wasm"))]
 fn pqsignal_ignore(signum: i32) {
     // SAFETY: SIG_IGN install, no handler code runs.
     unsafe {
@@ -142,6 +153,8 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
     init_small::globals::SetIsPostmasterEnvironment(true);
 
     // SAFETY: umask is async-signal-safe and process-global by design here.
+    // wasm32: no umask on WASI (files carry no mode bits) — no-op.
+    #[cfg(not(target_family = "wasm"))]
     unsafe {
         libc::umask(PG_MODE_MASK_OWNER);
     }
@@ -156,14 +169,14 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
     libpq_pqsignal::pqinitmask();
     libpq_pqsignal::block_signals();
 
-    pqsignal(libc::SIGHUP, c_handle_pm_reload);
-    pqsignal(libc::SIGINT, c_handle_pm_shutdown);
-    pqsignal(libc::SIGQUIT, c_handle_pm_shutdown);
-    pqsignal(libc::SIGTERM, c_handle_pm_shutdown);
-    pqsignal_ignore(libc::SIGALRM);
-    pqsignal_ignore(libc::SIGPIPE);
-    pqsignal(libc::SIGUSR1, c_handle_pm_pmsignal);
-    pqsignal(libc::SIGUSR2, c_dummy_handler);
+    pqsignal(procsignal::signums::SIGHUP, c_handle_pm_reload);
+    pqsignal(procsignal::signums::SIGINT, c_handle_pm_shutdown);
+    pqsignal(procsignal::signums::SIGQUIT, c_handle_pm_shutdown);
+    pqsignal(procsignal::signums::SIGTERM, c_handle_pm_shutdown);
+    pqsignal_ignore(procsignal::signums::SIGALRM);
+    pqsignal_ignore(procsignal::signums::SIGPIPE);
+    pqsignal(procsignal::signums::SIGUSR1, c_handle_pm_pmsignal);
+    pqsignal(procsignal::signums::SIGUSR2, c_dummy_handler);
     // SIGCHLD: no forked children under the thread model; child-exit
     // notification is pmchild's channel (handle_pm_child_exit_signal kept
     // for it to invoke).
@@ -174,9 +187,14 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
         crate::publish_pm_latch(l);
     }
 
-    pqsignal_ignore(libc::SIGTTIN);
-    pqsignal_ignore(libc::SIGTTOU);
-    pqsignal_ignore(libc::SIGXFSZ);
+    // Terminal/job-control signals: real-kernel-only names (the emulation
+    // never delivers them); wasm32 has no signals at all — no-op there.
+    #[cfg(not(target_family = "wasm"))]
+    {
+        pqsignal_ignore(libc::SIGTTIN);
+        pqsignal_ignore(libc::SIGTTOU);
+        pqsignal_ignore(libc::SIGXFSZ);
+    }
 
     libpq_pqsignal::unblock_signals();
 
@@ -487,8 +505,16 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
     if let Some(pidfile) = guc_tables::vars::external_pid_file.read().filter(|s| !s.is_empty()) {
         match std::fs::write(&pidfile, format!("{}\n", init_small::globals::MyProcPid())) {
             Ok(()) => {
-                let perms = std::os::unix::fs::PermissionsExt::from_mode(0o644);
-                if std::fs::set_permissions(&pidfile, perms).is_err() {
+                // wasm32: no unix mode bits on WASI; the chmod is a no-op
+                // (Ok(()) keeps the C control flow: only failures report).
+                #[cfg(not(target_family = "wasm"))]
+                let perm_result = {
+                    let perms = std::os::unix::fs::PermissionsExt::from_mode(0o644);
+                    std::fs::set_permissions(&pidfile, perms)
+                };
+                #[cfg(target_family = "wasm")]
+                let perm_result: std::io::Result<()> = Ok(());
+                if perm_result.is_err() {
                     write_stderr(format!(
                         "{PROGNAME}: could not change permissions of external PID file \"{pidfile}\"\n"
                     ));

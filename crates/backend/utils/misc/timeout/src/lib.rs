@@ -111,6 +111,11 @@ fn timer() -> &'static TimerShared {
             timer_waker: AtomicU64::new(0),
         }));
         // Timer-thread *spawn* seam = P3; untouched (contract §1.3).
+        // wasm32: wasm32-wasip1 has no threads, so no timer can fire
+        // asynchronously (and no SIGALRM exists either) — armed timeouts
+        // are recorded but never fire. Known limitation of the boot
+        // increment: statement_timeout/lock_timeout are inert on wasm.
+        #[cfg(not(target_family = "wasm"))]
         std::thread::Builder::new()
             .name("pg-timeout-timer".into())
             .spawn(move || timer_thread(shared))

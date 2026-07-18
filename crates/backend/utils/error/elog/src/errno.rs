@@ -31,7 +31,12 @@ pub const ENETRESET: i32 = libc::ENETRESET;
 pub const ECONNABORTED: i32 = libc::ECONNABORTED;
 pub const ECONNRESET: i32 = libc::ECONNRESET;
 pub const ETIMEDOUT: i32 = libc::ETIMEDOUT;
+#[cfg(not(target_family = "wasm"))]
 pub const EHOSTDOWN: i32 = libc::EHOSTDOWN;
+// wasm32: WASI has no EHOSTDOWN errno; musl's value keeps the SQLSTATE match
+// arm well-formed (nothing on wasm can ever raise it).
+#[cfg(target_family = "wasm")]
+pub const EHOSTDOWN: i32 = 112;
 pub const EHOSTUNREACH: i32 = libc::EHOSTUNREACH;
 
 pub fn sqlstate_for_file_access(errno: i32) -> SqlState {

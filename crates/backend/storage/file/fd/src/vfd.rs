@@ -439,6 +439,16 @@ fn before_shmem_exit_files_cb(code: i32, arg: datum::Datum) -> PgResult<()> {
     Ok(())
 }
 
+// wasm32: WASI p1 has neither getrlimit nor dup(2)-probing; report the whole
+// request usable with just stdio open (fd table is embedder-sized). The
+// FD_MINFREE fatal arm in set_max_safe_fds still guards absurd
+// max_files_per_process settings.
+#[cfg(target_family = "wasm")]
+pub(crate) fn count_usable_fds(max_to_probe: i32) -> PgResult<(i32, i32)> {
+    Ok((max_to_probe, 3))
+}
+
+#[cfg(not(target_family = "wasm"))]
 pub(crate) fn count_usable_fds(max_to_probe: i32) -> PgResult<(i32, i32)> {
     // The getrlimit + dup(2) probe runs inside the VFS (SimVfs: fixed pinned
     // budget, no real fds touched); this function keeps the C-shaped

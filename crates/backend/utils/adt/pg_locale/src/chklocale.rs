@@ -140,7 +140,7 @@ pub fn pg_get_encoding_from_locale(ctype: Option<&str>, write_message: bool) -> 
         None => {
             // SAFETY: setlocale(cat, NULL) only reads; result copied before
             // any other locale call.
-            let p = unsafe { libc::setlocale(libc::LC_CTYPE, core::ptr::null()) };
+            let p = unsafe { libc::setlocale(crate::lc::LC_CTYPE, core::ptr::null()) };
             active = if p.is_null() {
                 String::new()
             } else {
@@ -160,7 +160,7 @@ pub fn pg_get_encoding_from_locale(ctype: Option<&str>, write_message: bool) -> 
     // SAFETY: cbuf is NUL-terminated and outlives the call.
     let loc = unsafe {
         libc::newlocale(
-            libc::LC_CTYPE_MASK,
+            crate::lc::LC_CTYPE_MASK,
             cbuf.as_ptr() as *const c_char,
             core::ptr::null_mut(),
         )

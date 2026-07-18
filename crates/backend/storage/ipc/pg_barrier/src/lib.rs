@@ -7,9 +7,127 @@
 // surfaces as an error instead of a hang, and cancels keep their latency.
 #![allow(non_snake_case)]
 
-use std::sync::Mutex;
-
 use ::types_error::PgResult;
+
+// PERMIT-S2 absorb (permit-s1 compose §1.3 recipe): the loom-breadth
+// branch's private cfg(loom) shim became an unconditional pgsync import —
+// pgsync is THE single world-cfg point (native arm = the identical std
+// re-export, zero cost; `--cfg loom` = loom's checked Mutex), so the loom
+// models in tests/loom.rs drive the real pgsync types.
+use pgsync::{Mutex, MutexGuard};
+
+// Park route: how a non-releasing arrival blocks and how a phase advance
+// wakes it. Production rides the global waiter slab (10ms timed park = the
+// InterruptPending poll cadence C's ConditionVariableSleep had); the loom
+// build routes through model-owned waiter Slots (the waiter crate's slot
+// core IS loom-modeled), with untimed parks — a lost phase-advance wake is
+// then a deadlock loom's detector reports instead of something the 10ms
+// cadence would paper over. The interrupt drain is production-only (seams
+// are not installed in models; a model never has InterruptPending).
+#[cfg(not(loom))]
+mod route {
+    use ::types_error::PgResult;
+
+    #[inline]
+    pub(crate) fn current_word() -> u64 {
+        waiter::current_handle().as_u64()
+    }
+
+    #[inline]
+    pub(crate) fn park_wait() -> PgResult<()> {
+        // 10ms timed park = the InterruptPending poll cadence the old
+        // Condvar wait had; a phase advance unparks promptly.
+        let _ = waiter::park_timeout(core::time::Duration::from_millis(10));
+        if init_small::globals::InterruptPending() {
+            postgres_seams::check_for_interrupts::call()?;
+        }
+        Ok(())
+    }
+
+    #[inline]
+    pub(crate) fn unpark_word(word: u64) {
+        waiter::unpark_word(word);
+    }
+}
+
+#[cfg(loom)]
+mod route {
+    use std::cell::Cell;
+    use std::sync::Arc;
+
+    use ::types_error::PgResult;
+    use waiter::clock::WaiterClock;
+    use waiter::{Slot, SlotInner};
+
+    /// Untimed model clock (the waiter loom models' LoomClock shape): parks
+    /// block on the slot condvar until a real unpark — no cadence, no time.
+    struct ModelClock;
+
+    impl WaiterClock for ModelClock {
+        fn now_ms(&self) -> i64 {
+            0
+        }
+        fn wait<'a>(
+            &self,
+            slot: &'a Slot,
+            guard: pgsync::MutexGuard<'a, SlotInner>,
+            _timeout_ms: Option<i64>,
+        ) -> (pgsync::MutexGuard<'a, SlotInner>, bool) {
+            (slot.wait_for_model(guard), false)
+        }
+    }
+
+    static CLOCK: ModelClock = ModelClock;
+
+    // Per-execution slot registry (loom::lazy_static resets between model
+    // iterations, loom::thread_local between model threads). Word layout
+    // mirrors WakerHandle: (index+1) << 32 | token, never zero.
+    loom::lazy_static! {
+        static ref SLOTS: loom::sync::Mutex<Vec<Arc<Slot>>> =
+            loom::sync::Mutex::new(Vec::new());
+    }
+    loom::thread_local! {
+        static MY_WORD: Cell<u64> = Cell::new(0);
+    }
+
+    pub(crate) fn current_word() -> u64 {
+        MY_WORD.with(|w| {
+            if w.get() == 0 {
+                let slot = Arc::new(Slot::new_for_model());
+                let token = slot.issue_token();
+                let mut v = SLOTS.lock().unwrap();
+                v.push(slot);
+                w.set(((v.len() as u64) << 32) | token as u64);
+            }
+            w.get()
+        })
+    }
+
+    pub(crate) fn park_wait() -> PgResult<()> {
+        let word = current_word();
+        let slot = {
+            let v = SLOTS.lock().unwrap();
+            Arc::clone(&v[((word >> 32) - 1) as usize])
+        };
+        // Notified is the only outcome (untimed, no cadence); the caller's
+        // loop re-tests the phase either way.
+        let _ = slot.park_core(None, None, &CLOCK);
+        Ok(())
+    }
+
+    pub(crate) fn unpark_word(word: u64) {
+        if word == 0 {
+            return;
+        }
+        let slot = {
+            let v = SLOTS.lock().unwrap();
+            v.get(((word >> 32) - 1) as usize).map(Arc::clone)
+        };
+        if let Some(s) = slot {
+            let _ = s.unpark_token(word as u32);
+        }
+    }
+}
 
 pub fn init_seams() {}
 
@@ -42,7 +160,9 @@ impl Barrier {
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, BarrierInner> {
+    fn lock(&self) -> MutexGuard<'_, BarrierInner> {
+        // Poison-tolerant (loom's Mutex never poisons in models but keeps
+        // the same Result API, so this line is cfg-free).
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -65,7 +185,7 @@ impl Barrier {
             }
         }
         let mut elected = false;
-        let handle = waiter::current_handle().as_u64();
+        let handle = route::current_word();
         let mut b = self.lock();
         loop {
             debug_assert!(b.phase == start_phase || b.phase == next_phase);
@@ -82,12 +202,7 @@ impl Barrier {
                 b.waiters.push(handle);
             }
             drop(b);
-            // 10ms timed park = the InterruptPending poll cadence the old
-            // Condvar wait had; a phase advance unparks promptly.
-            let _ = waiter::park_timeout(core::time::Duration::from_millis(10));
-            if init_small::globals::InterruptPending() {
-                postgres_seams::check_for_interrupts::call()?;
-            }
+            route::park_wait()?;
             b = self.lock();
         }
         if let Some(pos) = b.waiters.iter().position(|w| *w == handle) {
@@ -98,7 +213,7 @@ impl Barrier {
 
     fn unpark_all(handles: Vec<u64>) {
         for h in handles {
-            waiter::unpark_word(h);
+            route::unpark_word(h);
         }
     }
 
@@ -179,7 +294,9 @@ impl Barrier {
     }
 }
 
-#[cfg(test)]
+// Unit tests drive real std threads over the global waiter slab — production
+// surface only (the loom models live in tests/loom.rs).
+#[cfg(all(test, not(loom)))]
 mod tests {
     use super::Barrier;
 

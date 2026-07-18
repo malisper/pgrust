@@ -153,6 +153,9 @@ pub struct SortTuple {
     pub(crate) isnull1: bool,
 }
 
+// wasm32: 4-byte pointers pack SortTuple to 16; the 24-byte pin documents
+// the native cost shape only.
+#[cfg(not(target_family = "wasm"))]
 const _: () = assert!(mem::size_of::<SortTuple>() == 24);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

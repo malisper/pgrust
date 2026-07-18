@@ -136,9 +136,12 @@ pub fn BeginCopyTo<'mcx, 's>(
                 ));
             }
             // SAFETY: process-global umask swap around open, as C's BeginCopyTo.
+            // wasm32: no umask on WASI (files carry no mode bits).
+            #[cfg(not(target_family = "wasm"))]
             let oumask = unsafe { libc::umask(0o022) };
             let copy_file = fd::AllocateFile(filename, "wb");
             // SAFETY: restore saved umask.
+            #[cfg(not(target_family = "wasm"))]
             unsafe { libc::umask(oumask) };
             let copy_file = copy_file?;
             if copy_file < 0 {

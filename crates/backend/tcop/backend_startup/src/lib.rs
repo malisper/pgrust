@@ -98,6 +98,87 @@ pub fn backend_main(startup_data: &StartupData) -> ! {
     postgres_seams::postgres_main::call(&dbname, &username)
 }
 
+/// Wire-session bring-up for a single-process transport session (pgrust
+/// extension, no C counterpart; --stdio-wire / the wasm client-server mode).
+/// BackendInitialize's connection half over whatever transport provider the
+/// boot installed into the pq_init/secure_* seam slots (§2.4): the stdio
+/// provider today, P4 sim-net's in-memory pair tomorrow — SAME entry, both
+/// consumers. Deliberate deltas from backend_initialize, which stays
+/// byte-identical for the postmaster path:
+///   * no remote-address resolution — there is no sockaddr; the peer is the
+///     host process, named "[local]" (C's AF_UNIX nameinfo result);
+///   * auth is trust-by-construction (the transport is host-supplied):
+///     AuthenticationOk goes out directly after the startup packet — hba
+///     evaluation stays with the postmaster path;
+///   * cac is always Ok (no postmaster state machine to consult).
+/// A refused startup (EOF, cancel packet, negotiation-only client) takes
+/// C's proc_exit(0), as backend_initialize does.
+pub fn wire_session_initialize(mcx: Mcx<'_>) -> PgResult<()> {
+    // Synthetic ClientSocket: the transport provider's pq_init ignores the
+    // fd; all-zeros raddr = "client address unknown".
+    let client_sock = ClientSocket {
+        sock: types_core::PGINVALID_SOCKET,
+        raddr: ip::SockAddr::zeroed(),
+    };
+
+    fd::ReserveExternalFD()?;
+
+    elog::config::set_client_auth_in_progress(true);
+
+    let port = pqcomm_seams::pq_init::call(&client_sock)?;
+    init_small::globals::SetMyProcPort(port);
+
+    elog::config::set_where_to_send_output(CommandDest::Remote);
+
+    timeout_seams::initialize_timeouts::call();
+    libpq_pqsignal::block_startup_signals();
+
+    init_small::globals::WithMyProcPort(|p| p.remote_host = "[local]".to_string());
+    if log_connections::get() & LOG_CONNECTION_RECEIPT != 0 {
+        ereport(LOG)
+            .errmsg("connection received: host=[local]")
+            .finish(loc(231, "wire_session_initialize"))?;
+    }
+
+    timeout_seams::register_timeout::call(
+        timeout_seams::STARTUP_PACKET_TIMEOUT,
+        startup_packet_timeout_handler,
+    );
+    let auth_timeout = guc_tables::vars::AuthenticationTimeout.read();
+    timeout_seams::enable_timeout_after::call(
+        timeout_seams::STARTUP_PACKET_TIMEOUT,
+        auth_timeout * 1000,
+    )?;
+
+    let mut status = process_ssl_startup()?;
+    if status == STATUS_OK {
+        status = process_startup_packet(mcx, false, false)?;
+    }
+
+    timeout_seams::disable_timeout::call(timeout_seams::STARTUP_PACKET_TIMEOUT, false)?;
+    libpq_pqsignal::block_signals();
+
+    // NO check_on_shmem_exit_lists_are_empty here: that assertion is fork-
+    // model vocabulary (a fresh child has not attached shmem yet); the wire
+    // boot ran the full single-user shmem ladder first, so the exit lists
+    // legitimately carry its callbacks (shutdown checkpoint among them).
+
+    if status != STATUS_OK {
+        ipc_seams::proc_exit::call(0, init_small::globals::MyProcPid())
+    }
+
+    // Trust auth: 'R' AUTH_REQ_OK (auth.c sendAuthRequest's shape; no flush —
+    // ParameterStatus/BackendKeyData/ReadyForQuery follow before the client
+    // needs to answer).
+    let mut buf = pqformat::pq_beginmessage(mcx, b'R')?;
+    pqformat::pq_sendint32(&mut buf, 0)?;
+    pqformat::pq_endmessage(buf)?;
+    elog::config::set_client_auth_in_progress(false);
+
+    build_ps_title();
+    Ok(())
+}
+
 // BackendInitialize: C terminates on failure; here Err after the report ran.
 fn backend_initialize(mcx: Mcx<'_>, client_sock: &ClientSocket, cac: CacState) -> PgResult<()> {
     fd::ReserveExternalFD()?;
@@ -122,7 +203,7 @@ fn backend_initialize(mcx: Mcx<'_>, client_sock: &ClientSocket, cac: CacState) -
 
     let log_hostname = guc_tables::vars::log_hostname.read();
     let raddr = init_small::globals::WithMyProcPort(|p| p.raddr);
-    let flags = (if log_hostname { 0 } else { libc::NI_NUMERICHOST }) | libc::NI_NUMERICSERV;
+    let flags = (if log_hostname { 0 } else { ip::sys::NI_NUMERICHOST }) | ip::sys::NI_NUMERICSERV;
     let mut remote_host = String::new();
     let mut remote_port = String::new();
     let ret =
@@ -291,7 +372,7 @@ fn process_ssl_startup() -> PgResult<i32> {
     };
 
     let laddr = init_small::globals::WithMyProcPort(|p| p.laddr);
-    if !loaded_ssl::get() || ip::sockaddr_family(&laddr) == libc::AF_UNIX {
+    if !loaded_ssl::get() || ip::sockaddr_family(&laddr) == ip::sys::AF_UNIX {
         return reject(468);
     }
 
@@ -373,7 +454,7 @@ fn process_startup_packet(mcx: Mcx<'_>, mut ssl_done: bool, mut gss_done: bool) 
             let (laddr, ssl_in_use) =
                 init_small::globals::WithMyProcPort(|p| (p.laddr, p.ssl_in_use));
             let ssl_ok =
-                if !loaded_ssl::get() || ip::sockaddr_family(&laddr) == libc::AF_UNIX || ssl_in_use
+                if !loaded_ssl::get() || ip::sockaddr_family(&laddr) == ip::sys::AF_UNIX || ssl_in_use
                 {
                     b'N'
                 } else {
@@ -793,7 +874,7 @@ fn gai_strerror(errcode: i32) -> String {
     // SAFETY: gai_strerror returns a pointer to a static NUL-terminated
     // message for any error code.
     unsafe {
-        std::ffi::CStr::from_ptr(libc::gai_strerror(errcode))
+        std::ffi::CStr::from_ptr(ip::sys::gai_strerror(errcode))
             .to_string_lossy()
             .into_owned()
     }

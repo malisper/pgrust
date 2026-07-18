@@ -2,6 +2,14 @@
 // bufmgr/smgr/xloginsert/xact, datadir copied mid-run (pages unflushed, heap
 // file truncated), then a child process boots the copy through the real
 // StartupXLOG/PerformWalRecovery and verifies page bytes + MVCC visibility.
+//
+// NATIVE ARM ONLY: this rig mixes std::fs fixture plumbing with the fd/vfs
+// data plane, which under `--cfg pgrust_sim` would split across two worlds
+// (real disk vs the SimVfs namespace). The sim-cfg twin — the same product
+// write/recovery paths driven entirely inside SimVfs, swept with the P4
+// fault model — is tests/sim_crash_sweep.rs.
+#![cfg(not(pgrust_sim))]
+
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::atomic::Ordering::Relaxed;

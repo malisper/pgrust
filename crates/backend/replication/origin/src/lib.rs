@@ -499,10 +499,11 @@ pub fn CheckPointReplicationOrigin() -> PgResult<()> {
         return Ok(());
     }
 
-    // Make sure no old temp file is remaining.
-    let tmp_c = std::ffi::CString::new(tmppath).expect("no NUL");
-    // SAFETY: NUL-terminated path.
-    if unsafe { libc::unlink(tmp_c.as_ptr()) } < 0 && errno::current_errno() != libc::ENOENT {
+    // Make sure no old temp file is remaining. fd::pg_unlink = the fd-crate
+    // front onto the Vfs choke (the s2.1 routing the t27-train allowlist row
+    // chartered to t28): a raw libc::unlink acts on the REAL fs while the
+    // file lives in SimVfs under pgrust_sim.
+    if fd::pg_unlink(tmppath) < 0 && errno::current_errno() != libc::ENOENT {
         ereport(PANIC)
             .with_saved_errno(errno::current_errno())
             .errcode_for_file_access()
@@ -522,9 +523,13 @@ pub fn CheckPointReplicationOrigin() -> PgResult<()> {
         unreachable!();
     }
 
+    // t28-compose finding (the relmapper/loadsort/alter_system dataplane
+    // class): OpenTransientFile mints a Vfs fd — a raw libc::write EBADFs
+    // under pgrust_sim. fd::pg_pwrite at the tracked offset == write(2) on
+    // the just-created O_EXCL|O_WRONLY fd (relmapper precedent).
+    let write_off = Cell::new(0i64);
     let write_all = |fd_: i32, bytes: &[u8]| -> PgResult<()> {
-        // SAFETY: bytes is a live readable buffer.
-        if unsafe { libc::write(fd_, bytes.as_ptr().cast(), bytes.len()) } != bytes.len() as isize {
+        if fd::pg_pwrite(fd_, bytes, write_off.get()) != bytes.len() as isize {
             let mut save_errno = errno::current_errno();
             if save_errno == 0 {
                 save_errno = libc::ENOSPC;
@@ -536,6 +541,7 @@ pub fn CheckPointReplicationOrigin() -> PgResult<()> {
                 .finish(loc("CheckPointReplicationOrigin"))?;
         unreachable!();
         }
+        write_off.set(write_off.get() + bytes.len() as i64);
         Ok(())
     };
 
@@ -577,24 +583,12 @@ pub fn CheckPointReplicationOrigin() -> PgResult<()> {
         unreachable!();
     }
 
-    // durable_rename(tmppath, path, PANIC): fsync temp, rename, fsync file
-    // and containing directory.
-    fd::fsync_fname(tmppath, false)?;
-    let (tmp_c, path_c) = (
-        std::ffi::CString::new(tmppath).expect("no NUL"),
-        std::ffi::CString::new(path).expect("no NUL"),
-    );
-    // SAFETY: NUL-terminated paths.
-    if unsafe { libc::rename(tmp_c.as_ptr(), path_c.as_ptr()) } != 0 {
-        ereport(PANIC)
-            .with_saved_errno(errno::current_errno())
-            .errcode_for_file_access()
-            .errmsg(format!("could not rename file \"{tmppath}\" to \"{path}\": %m"))
-            .finish(loc("CheckPointReplicationOrigin"))?;
-        unreachable!();
-    }
-    fd::fsync_fname(path, false)?;
-    fd::fsync_fname("pg_logical", true)?;
+    // durable_rename(tmppath, path, PANIC) — C's actual call (origin.c),
+    // routed through the fd crate's vfs-backed fd.c:782 port (fsync temp,
+    // rename, fsync file and containing directory). The hand-rolled
+    // fsync+libc::rename+fsync it replaces drove the REAL fs while the file
+    // lives in SimVfs under pgrust_sim (t28-compose finding).
+    fd::durable_rename(tmppath, path, PANIC)?;
     Ok(())
 }
 
@@ -624,9 +618,13 @@ pub fn StartupReplicationOrigin() -> PgResult<()> {
         }
     };
 
+    // t28-compose finding (the relmapper/loadsort/alter_system dataplane
+    // class): OpenTransientFile mints a Vfs fd — a raw libc::read EBADFs
+    // under pgrust_sim. fd::pg_pread at the tracked offset == read(2) on the
+    // just-opened O_RDONLY fd (relmapper precedent).
+    let read_off = Cell::new(0i64);
     let read_exact = |fd_: i32, buf: &mut [u8]| -> PgResult<isize> {
-        // SAFETY: buf is a live writable buffer.
-        let n = unsafe { libc::read(fd_, buf.as_mut_ptr().cast(), buf.len()) };
+        let n = fd::pg_pread(fd_, buf, read_off.get());
         if n < 0 {
             ereport(PANIC)
                 .with_saved_errno(errno::current_errno())
@@ -635,6 +633,7 @@ pub fn StartupReplicationOrigin() -> PgResult<()> {
                 .finish(loc("StartupReplicationOrigin"))?;
         unreachable!();
         }
+        read_off.set(read_off.get() + n as i64);
         Ok(n)
     };
 

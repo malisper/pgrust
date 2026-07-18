@@ -50,6 +50,8 @@ libc = "0.2"
 bufmgr = { path = "../../../storage/buffer/bufmgr" }
 
 [dev-dependencies]
+vfs = { path = "../../../storage/file/vfs" }
+standby_seams = { path = "../../../storage/ipc/standby_seams" }
 timeline = { path = "../timeline" }
 crc32c = { path = "../../../../port/crc32c" }
 relpath = { path = "../../../../common/relpath" }

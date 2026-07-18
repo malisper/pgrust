@@ -19,6 +19,7 @@ use types_error::{PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE, ErrorLocation, W
 mod builtin_case;
 mod chklocale;
 mod icu;
+mod lc;
 mod locale_time;
 mod icu_ffi;
 mod lconv;
