@@ -17,6 +17,21 @@ const SIZEOF_OPAQUE: usize = core::mem::size_of::<GinPageOpaqueData>();
 const OPAQUE_OFF: usize = BLCKSZ - SIZEOF_OPAQUE;
 const ITUP_SIZE_MASK: u16 = 0x1FFF;
 
+/// DST fault-sweep RED hook (sim-cfg only, zero native surface): when armed,
+/// `redo_insert_listpage` restores the pending-list page's STRUCTURE
+/// (init, flags, rightlink) but SKIPS its tuple content — a deliberately
+/// weakened redo modeling a lost pending-list content restore. The crash
+/// sweep's gin red leg arms this and must CATCH the silent loss through its
+/// index-coverage property (never through a replay failure).
+#[cfg(pgrust_sim)]
+pub mod sim_red {
+    use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
+    pub static SKIP_LISTPAGE_CONTENT: AtomicBool = AtomicBool::new(false);
+    pub fn armed() -> bool {
+        SKIP_LISTPAGE_CONTENT.load(Relaxed)
+    }
+}
+
 fn main_data<'a>(record: &'a XLogReaderState) -> &'a [u8] {
     let rec = record.record.as_ref().expect("gin redo with no decoded record");
     // SAFETY: points into the reader's decode buffer, valid for the redo
@@ -568,6 +583,14 @@ fn redo_insert_listpage(record: &XLogReaderState) -> PgResult<()> {
             o.maxoff = 0;
         }
         write_opaque_to(bytes, &o);
+    }
+    // DST RED (sim-cfg only): the deliberately weakened redo — page structure
+    // restored above, tuple content skipped. See sim_red.
+    #[cfg(pgrust_sim)]
+    if crate::sim_red::armed() {
+        set_lsn(buffer, lsn);
+        bufmgr_seams::mark_buffer_dirty::call(buffer)?;
+        return unlock_release(buffer);
     }
     {
         let payload = block_data(record, 0);

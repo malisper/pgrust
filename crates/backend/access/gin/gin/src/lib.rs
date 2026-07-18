@@ -51,6 +51,22 @@ pub mod build {
     pub use crate::{check_for_interrupts, relation_needs_wal};
 }
 
+/// DST fault-sweep rig surface (sim-cfg only, zero native surface): the
+/// raw-image page initializers the crash-sweep rig uses to MINT an empty
+/// gin index file beneath smgr (the bt_initmetapage precedent — ginbuild's
+/// empty C-shape image as durable pre-history).
+#[cfg(pgrust_sim)]
+pub mod sim_rig {
+    /// GinInitMetabuffer over a raw BLCKSZ image.
+    pub fn init_metapage_bytes(bytes: &mut [u8]) {
+        crate::util::gin_init_metapage_bytes(bytes)
+    }
+    /// GinInitPage over a raw BLCKSZ image.
+    pub fn init_page_bytes(bytes: &mut [u8], flags: u16) {
+        crate::util::gin_init_page_bytes(bytes, flags)
+    }
+}
+
 #[cold]
 #[inline(never)]
 pub(crate) fn unported(what: &str) -> ! {
