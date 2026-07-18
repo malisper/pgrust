@@ -892,13 +892,14 @@ pub(super) fn pull_step_point<'mcx, S: RowSource<'mcx>>(
 
 use std::sync::atomic::{AtomicU8, Ordering::Relaxed};
 
-/// `PGRUST_LANE_V2_CURSORS` (default OFF; R-KNOBS registry spelling): the
-/// forward-pull cursor gate. OFF = the run seam installs no budget and every
-/// byte of the run path behaves as today (the install call short-circuits on
-/// `count == 0` before reaching this cell, so simple-query runs never even
-/// load it). ON = count-limited forward SELECT runs carry a per-run emission
-/// budget for the cursor machinery to read. AtomicU8 + `_set_for_tests`
-/// idiom (heapfeed precedent, batch_source.rs).
+/// `PGRUST_LANE_V2_CURSORS` (default ON since the SE12-GATES flip; R-KNOBS
+/// registry spelling): the forward-pull cursor gate. ON = count-limited
+/// forward SELECT runs carry a per-run emission budget for the cursor
+/// machinery to read, and scrollable portals arm the wave-10 cursor store.
+/// Explicit `=0`/`off` is the permanent kill switch and restores the legacy
+/// run path byte-identically (rowmode FLIP-1/FLIP-2 idiom verbatim; flips
+/// never delete knobs). AtomicU8 + `_set_for_tests` idiom (heapfeed
+/// precedent, batch_source.rs).
 static CURSORS: AtomicU8 = AtomicU8::new(0);
 
 pub(crate) fn cursors_v2_enabled() -> bool {
@@ -906,9 +907,17 @@ pub(crate) fn cursors_v2_enabled() -> bool {
         1 => false,
         2 => true,
         _ => {
-            let on = matches!(
+            // SE12-GATES CURSORS FLIP (flip-ladder board; notes/se12-gates.md):
+            // default ON — the SE11 B1 blocker (+18.15% instr forloop cadence)
+            // was cleared to FLAT by the se/b1fix NO_SCROLL C-parity fix
+            // (notes/se-b1fix.md §5: B1 −0.01% instr, cb store leg −6.66%,
+            // point-pair invisibility ±0.01%), and the flip letter battery
+            // re-proved every bar at the flipped tip. Only this default read
+            // changes — the explicit `=0`/`off` spelling is the permanent
+            // kill switch (restores legacy bytes AND ticks).
+            let on = !matches!(
                 std::env::var("PGRUST_LANE_V2_CURSORS").as_deref(),
-                Ok("1") | Ok("on")
+                Ok("0") | Ok("off")
             );
             CURSORS.store(if on { 2 } else { 1 }, Relaxed);
             on
