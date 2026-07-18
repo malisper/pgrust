@@ -154,6 +154,22 @@ fn drift_findings() {
     assert_eq!(refused, vec![463, 464, 465], "documented refusals: int8 pl/mi/mul fold-affine");
 }
 
+// WS-AA wave-7 fusion inc-0: the RowOp tier exists with ZERO coverage rows —
+// the shipped consumer (the trigger-DML row chain) carries no OID-backed
+// steps, and the conformance law says rows land in the same edit as their
+// consumer arm. This pin makes silently adding a row without a consumer (or
+// vice versa) a test failure: whoever admits the first OID-backed chain step
+// updates the consumer, the registry row, AND this count together (and adds
+// the report column then).
+#[test]
+fn rowop_rows_ship_with_their_consumer() {
+    let n = ENTRIES
+        .iter()
+        .filter(|e| e.tier(Tier::RowOp).is_some())
+        .count();
+    assert_eq!(n, 0, "RowOp coverage rows appeared; ship them with the consumer arm");
+}
+
 // The coverage report is a checked-in artifact regenerated from the registry.
 // If this fails, run with LANEREG_WRITE_REPORT=1 to refresh the doc.
 #[test]

@@ -2171,3 +2171,355 @@ fn sve2_match_admission_edges() {
         assert_eq!(want, got, "case {i}");
     }
 }
+
+// ============================================================================
+// ===== WS-AA wave-7 append region — RowOp chain parity (fusion inc-0) ======
+// The mock protocol-call recorder standard: for every RowOp program and
+// every scripted host, the twin's host-call sequence must satisfy
+// CALL ORDER == ROW ORDER (loop-top calls before each pull, per-row calls
+// strictly between their row's pull and the next). Lands BEFORE the
+// stitched rowchain body (the inc-0 ordering gate): the stitched-vs-twin
+// legs extend this module in the stencil commit.
+// ============================================================================
+mod rowchain_parity {
+    use super::Lcg;
+    use lanestitch::{
+        eval_row, eval_row_chain, Batch, ChainCursor, ChainOutcome, ChainVerdict, CmpOp, Lane,
+        Program, RowChainHost, Step,
+    };
+    use types_error::{PgError, PgResult};
+
+    /// One recorded host event.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Ev {
+        /// next_row answered: staged row index (pulls-1), or u32::MAX = done.
+        Pull(u32),
+        /// protocol_call: (call id, pulls at call time). Loop-top calls carry
+        /// the count BEFORE the round's pull; per-row calls carry row+1.
+        Call(u16, u32),
+    }
+
+    /// Deterministic scripted host + the recorder. Verdicts are a pure
+    /// function of (pulls, call id, seed) so every engine replays identical
+    /// scripts.
+    struct RecHost {
+        nrows: u32,
+        pulls: u32,
+        seed: u64,
+        /// verdict share in percent: (skip, pause) — rest Continue.
+        skip_pct: u64,
+        pause_pct: u64,
+        /// loop-top call ids (verdicts forced Continue by the host law).
+        loop_top_calls: Vec<u16>,
+        /// inject Err on the k-th protocol call overall (0-based), if Some.
+        err_on_call: Option<u32>,
+        ncalls: u32,
+        events: Vec<Ev>,
+    }
+
+    impl RecHost {
+        fn new(nrows: u32, seed: u64, loop_top_calls: Vec<u16>) -> RecHost {
+            RecHost {
+                nrows,
+                pulls: 0,
+                seed,
+                skip_pct: 12,
+                pause_pct: 12,
+                loop_top_calls,
+                err_on_call: None,
+                ncalls: 0,
+                events: Vec::new(),
+            }
+        }
+    }
+
+    impl RowChainHost for RecHost {
+        fn next_row(&mut self) -> PgResult<bool> {
+            if self.pulls >= self.nrows {
+                self.events.push(Ev::Pull(u32::MAX));
+                return Ok(false);
+            }
+            self.events.push(Ev::Pull(self.pulls));
+            self.pulls += 1;
+            Ok(true)
+        }
+
+        fn protocol_call(&mut self, call: u16) -> PgResult<ChainVerdict> {
+            self.events.push(Ev::Call(call, self.pulls));
+            let k = self.ncalls;
+            self.ncalls += 1;
+            if self.err_on_call == Some(k) {
+                return Err(Box::new(PgError::error("chain host injected error")));
+            }
+            if self.loop_top_calls.contains(&call) {
+                return Ok(ChainVerdict::Continue);
+            }
+            // Scripted verdict: pure function of (pulls, call, seed).
+            let mut h = self
+                .seed
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .wrapping_add((self.pulls as u64) << 17)
+                .wrapping_add(call as u64);
+            h ^= h >> 33;
+            h = h.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+            let roll = (h >> 24) % 100;
+            Ok(if roll < self.skip_pct {
+                ChainVerdict::SkipRow
+            } else if roll < self.skip_pct + self.pause_pct {
+                ChainVerdict::EmitPause
+            } else {
+                ChainVerdict::Continue
+            })
+        }
+    }
+
+    /// The recorder invariant: call order == row order. Loop-top calls for
+    /// round r carry pulls == r and precede Pull(r); per-row calls carry
+    /// pulls == r+1 and follow Pull(r); staged rows ascend 0,1,2,...
+    fn assert_call_order_is_row_order(events: &[Ev], loop_top: &[u16]) {
+        let mut expected_next = 0u32;
+        let mut current: Option<u32> = None;
+        for ev in events {
+            match *ev {
+                Ev::Pull(u32::MAX) => current = None,
+                Ev::Pull(r) => {
+                    assert_eq!(r, expected_next, "pulled rows must ascend contiguously");
+                    expected_next += 1;
+                    current = Some(r);
+                }
+                Ev::Call(call, pulls) => {
+                    if loop_top.contains(&call) {
+                        assert_eq!(
+                            pulls, expected_next,
+                            "loop-top call must precede its round's pull"
+                        );
+                    } else {
+                        let r = current.expect("per-row call with no staged row");
+                        assert_eq!(pulls, r + 1, "per-row call left its row's window");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Chain programs for the fuzzer: 0-2 loop-top ProtocolCalls, NextRow,
+    /// 1-4 per-row ProtocolCalls. Returns (program, loop-top call ids).
+    fn gen_chain_prog(r: &mut Lcg) -> (Program, Vec<u16>) {
+        let mut p = Program::new();
+        let n_top = r.below(3) as u16;
+        let n_row = 1 + r.below(4) as u16;
+        let mut top = Vec::new();
+        for i in 0..n_top {
+            // Loop-top ids live in 9000+; per-row ids in 100+ (disjoint).
+            let call = 9000 + i;
+            top.push(call);
+            p.steps.push(Step::ProtocolCall { call });
+        }
+        p.steps.push(Step::NextRow);
+        for i in 0..n_row {
+            p.steps.push(Step::ProtocolCall { call: 100 + i });
+        }
+        (p, top)
+    }
+
+    /// Drive the twin to completion (re-entering across pauses), returning
+    /// (events, pause count, error message if any).
+    fn drive_twin(
+        prog: &Program,
+        host: &mut RecHost,
+    ) -> (Vec<Ev>, u32, Option<String>) {
+        let batch = Batch { nrows: 0, lanes: Vec::new() };
+        let mut cursor = ChainCursor::default();
+        let mut pauses = 0;
+        loop {
+            match eval_row_chain(prog, &batch, &mut cursor, host, &mut []) {
+                Ok(ChainOutcome::Paused) => pauses += 1,
+                Ok(ChainOutcome::Done) => return (host.events.clone(), pauses, None),
+                Err(e) => return (host.events.clone(), pauses, Some(e.message().to_string())),
+            }
+        }
+    }
+
+    /// The inc-0 recorder gate: fuzzed RowOp programs on the twin, the
+    /// recorder proving call order == row order across skip/pause/error
+    /// scripts. (The stitched-vs-twin comparison extends this in the
+    /// stencil commit — fuzzer first, stencil second: the ordering gate.)
+    #[test]
+    fn rowchain_fuzz_recorder_call_order_is_row_order() {
+        let mut r = Lcg(0xA0_0007);
+        for round in 0..400u32 {
+            let (prog, top) = gen_chain_prog(&mut r);
+            let nrows = r.below(40) as u32;
+            let seed = r.next();
+            let err_on = if r.chance(25) { Some(r.below(60) as u32) } else { None };
+
+            let mut th = RecHost::new(nrows, seed, top.clone());
+            th.err_on_call = err_on;
+            let (tev, _tpause, terr) = drive_twin(&prog, &mut th);
+            assert_call_order_is_row_order(&tev, &top);
+            if err_on.is_none() {
+                assert!(terr.is_none(), "round {round}: twin errored with no injection");
+            }
+        }
+    }
+
+    /// The spec-level fail-closed backstop: RowOp steps in a qual/projection
+    /// walker error loudly (and the qual/projection stitcher refuses them).
+    #[test]
+    fn rowop_steps_refuse_outside_chains() {
+        let mut p = Program::new();
+        p.steps.push(Step::NextRow);
+        let batch = Batch { nrows: 1, lanes: Vec::new() };
+        let e = eval_row(&p, &batch, 0).unwrap_err();
+        assert!(e.message().contains("row-chain contract violation"), "{}", e.message());
+        assert!(lanestitch::StitchedProgram::compile(&p, 1).is_none());
+        // An ill-formed chain program (zero NextRow) errors loudly on the
+        // twin too. ([NextRow] alone is a WELL-formed chain: a pull-only
+        // loop — so the ill-formed pin needs a protocol-only program.)
+        let mut bad = Program::new();
+        bad.steps.push(Step::ProtocolCall { call: 1 });
+        let mut host = RecHost::new(1, 1, Vec::new());
+        let mut cursor = ChainCursor::default();
+        let e = eval_row_chain(&bad, &batch, &mut cursor, &mut host, &mut [])
+            .map(|_| ())
+            .unwrap_err();
+        assert!(e.message().contains("row-chain contract violation"), "{}", e.message());
+    }
+
+    /// Twin-only: pure per-row segments (junk-filter shape) — a Qual step
+    /// skipping a row must skip its downstream protocol call, and the pass
+    /// set must equal the eval_row oracle on the same pure steps (the
+    /// BR-suppression analog in vocabulary form).
+    #[test]
+    fn rowchain_pure_qual_segment_matches_eval_row_oracle() {
+        use datum::Datum;
+        let mut r = Lcg(0xBEEF_0002);
+        for _ in 0..200 {
+            let nrows = 1 + r.below(48) as u32;
+            let konst = (r.below(100) as i64) - 50;
+            // Column data.
+            let mut values = Vec::new();
+            let mut isnull = Vec::new();
+            for _ in 0..nrows {
+                values.push(Datum::from_i64((r.below(100) as i64) - 50));
+                isnull.push(r.chance(15));
+            }
+            // The pure segment: lane0 > konst.
+            let mk = |chain: bool| {
+                let mut p = Program::new();
+                if chain {
+                    p.steps.push(Step::NextRow);
+                }
+                let k = p.push_const(datum::NullableDatum {
+                    value: Datum::from_i64(konst),
+                    isnull: false,
+                });
+                p.steps.push(Step::LoadLane { col: 0, out: 0 });
+                p.steps.push(Step::LoadConst { k, out: 1 });
+                p.steps.push(Step::Cmp { op: CmpOp::Int8Gt, a: 0, b: 1, out: 2 });
+                p.steps.push(Step::Qual { a: 2 });
+                if chain {
+                    p.steps.push(Step::ProtocolCall { call: 100 });
+                }
+                p
+            };
+            let chain_prog = mk(true);
+            let qual_prog = mk(false);
+            let batch = Batch {
+                nrows,
+                lanes: vec![Lane { values: &values, isnull: &isnull }],
+            };
+            let mut host = RecHost::new(nrows, 0, Vec::new());
+            host.skip_pct = 0;
+            host.pause_pct = 0;
+            let mut cursor = ChainCursor::default();
+            let out = eval_row_chain(&chain_prog, &batch, &mut cursor, &mut host, &mut [])
+                .expect("pure chain never errors");
+            assert_eq!(out, ChainOutcome::Done);
+            let called: Vec<u32> = host
+                .events
+                .iter()
+                .filter_map(|e| match e {
+                    Ev::Call(100, pulls) => Some(pulls - 1),
+                    _ => None,
+                })
+                .collect();
+            let mut want = Vec::new();
+            for i in 0..nrows {
+                if eval_row(&qual_prog, &batch, i).unwrap() {
+                    want.push(i);
+                }
+            }
+            assert_eq!(called, want, "protocol calls must fire exactly for qual-passing rows");
+        }
+    }
+
+    /// Twin-only: an erroring pure step (div by zero) stops the chain at
+    /// C's row with C's message; prior rows' protocol calls are consumed.
+    #[test]
+    fn rowchain_pure_arith_error_fires_on_cs_row() {
+        use datum::Datum;
+        use lanestitch::ArithOp;
+        let nrows = 5u32;
+        // lane0 / lane1 with a zero divisor on row 3.
+        let values0: Vec<Datum> = (0..nrows as i64).map(Datum::from_i64).collect();
+        let isnull0 = vec![false; nrows as usize];
+        let values1: Vec<Datum> =
+            [1i64, 2, 3, 0, 5].iter().copied().map(Datum::from_i64).collect();
+        let isnull1 = vec![false; nrows as usize];
+        let mut p = Program::new();
+        p.steps.push(Step::NextRow);
+        p.steps.push(Step::LoadLane { col: 0, out: 0 });
+        p.steps.push(Step::LoadLane { col: 1, out: 1 });
+        p.steps.push(Step::Arith { op: ArithOp::Div8, a: 0, b: 1, out: 2 });
+        p.steps.push(Step::ProtocolCall { call: 100 });
+        let batch = Batch {
+            nrows,
+            lanes: vec![
+                Lane { values: &values0, isnull: &isnull0 },
+                Lane { values: &values1, isnull: &isnull1 },
+            ],
+        };
+        let mut host = RecHost::new(nrows, 0, Vec::new());
+        host.skip_pct = 0;
+        host.pause_pct = 0;
+        let mut cursor = ChainCursor::default();
+        let err = eval_row_chain(&p, &batch, &mut cursor, &mut host, &mut [])
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.message(), "division by zero");
+        let called: Vec<u32> = host
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                Ev::Call(100, pulls) => Some(pulls - 1),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(called, vec![0, 1, 2], "rows before C's erroring row fully consumed");
+    }
+
+    /// Loop-top law: a loop-top protocol call answering a row verdict is a
+    /// host contract violation and errors loudly on the twin.
+    #[test]
+    fn rowchain_loop_top_row_verdict_is_loud() {
+        struct BadHost;
+        impl RowChainHost for BadHost {
+            fn next_row(&mut self) -> PgResult<bool> {
+                Ok(false)
+            }
+            fn protocol_call(&mut self, _call: u16) -> PgResult<ChainVerdict> {
+                Ok(ChainVerdict::SkipRow)
+            }
+        }
+        let mut p = Program::new();
+        p.steps.push(Step::ProtocolCall { call: 9000 });
+        p.steps.push(Step::NextRow);
+        let batch = Batch { nrows: 0, lanes: Vec::new() };
+        let mut cursor = ChainCursor::default();
+        let e = eval_row_chain(&p, &batch, &mut cursor, &mut BadHost, &mut [])
+            .map(|_| ())
+            .unwrap_err();
+        assert!(e.message().contains("loop-top protocol call"), "{}", e.message());
+    }
+}
