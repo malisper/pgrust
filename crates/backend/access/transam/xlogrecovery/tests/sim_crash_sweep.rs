@@ -57,17 +57,26 @@ use types_core::{
     RELPERSISTENCE_PERMANENT,
 };
 use types_error::PgResult;
+use types_fmgr::{FmgrInfo, FunctionCallInfoBaseData};
+use types_nbtree::{
+    BTPageOpaqueData, BTP_DELETED, BTP_HALF_DEAD, BTP_LEAF, P_NONE as BT_P_NONE,
+};
 use types_rel::{
-    FormData_pg_class, LockInfoData, LockRelId, RelationData, LOCKMODE, RELKIND_RELATION,
+    FormData_pg_class, FormData_pg_index, LockInfoData, LockRelId, Relation, RelationData,
+    LOCKMODE, RELKIND_INDEX, RELKIND_RELATION,
 };
 use types_snapshot::{SnapshotData, SnapshotType};
+use types_storage::bufpage::PageMut;
 use types_storage::RelFileLocator;
+use types_tuple::itemptr::ItemPointerCompare;
 use types_tuple::{
     CompactAttribute, FormData_pg_attribute, HeapTupleData, ItemPointerData, NameData,
     TupleDescData,
 };
 
-use vfs::sim::{CrashImage, FaultRule, SeededFaultPlan, SimVfs};
+use vfs::sim::{
+    CrashImage, FaultDecision, FaultRule, OpKind, OpMatch, PathClass, SeededFaultPlan, SimVfs,
+};
 
 /// inc-3: 1 MB WAL segments (a valid wal_segment_size) so the scaled
 /// workload CROSSES segment boundaries — XLogFileInit (zero-fill + install
@@ -87,7 +96,17 @@ const CKPT_TOT_LEN: usize = SizeOfXLogRecord + 2 + controldata_utils::SIZEOF_CHE
 /// txn t <-> xid t+2. A product CreateCheckPoint runs after each txn in
 /// CKPT_AFTER — the second one sits past the first segment crossing so
 /// RemoveOldXlogFiles gets recyclable segments.
-const TXNS: u32 = 10;
+///
+/// inc-4 (SEGMENT-RECYCLE CUT CLASSES): 13 txns push the WAL tail INTO the
+/// recycled segment — the txn-8 checkpoint recycles segment 1 to the future
+/// segment 3 name WITH ITS STALE CONTENT (recycled segments are not
+/// re-zeroed; XLogFileInitInternal's open of an existing segment is the
+/// reuse), so the last txns write live WAL over stale segment-1 residue.
+/// Cuts there exercise the stale-residue guards (xlp_pageaddr + CRC) that
+/// make recycling safe. inc-3 trap re-checked: CKPT_AFTER[1]=8 still sits
+/// past the first crossing (txn 6), and NBuffers=128 stays below the ~150
+/// heap pages so mid-run eviction writes remain cut points.
+const TXNS: u32 = 13;
 const ROWS_PER_TXN: u32 = 2600;
 const CKPT_AFTER: [u32; 2] = [3, 8];
 
@@ -96,8 +115,61 @@ const SEED: u64 = 0x5EED_FA17_0002;
 const ROLE_ENV: &str = "PGRUST_SIM_SWEEP_ROLE";
 const K_ENV: &str = "PGRUST_SIM_SWEEP_K";
 const PACK_ENV: &str = "PGRUST_SIM_SWEEP_PACK";
+/// Red-arm selector: "" (none), "fsync" (product fsync layer disabled),
+/// "recycle-needed" (over-eager recycle of a segment the redo horizon still
+/// needs), "stale-residue" (validating stale bytes at the WAL tail).
 const RED_ENV: &str = "PGRUST_SIM_SWEEP_RED";
 const INITDB_ENV: &str = "PGRUST_SIM_SWEEP_INITDB_DD";
+/// Writer/recover rig selector: "" (the minted 1 MB-segment rig) or
+/// "initdb" (the real-initdb datadir composed through the t28 provider seam
+/// — vfs::sim_boot::compose_boot_namespace).
+const ARM_ENV: &str = "PGRUST_SIM_SWEEP_ARM";
+
+/// Transactions for the initdb-composition arm (16 MB real segments — this
+/// arm widens the cut distribution over the REAL datadir composition; the
+/// segment-crossing/recycle classes stay on the minted 1 MB rig).
+const INITDB_TXNS: u32 = 6;
+
+// ---------------------------------------------------------------------------
+// inc-5 INDEX LANE (btree arm): a second relation — a real nbtree index over
+// the int4 column — driven through the PRODUCT's btinsert/btbulkdelete on the
+// live buffer manager, in the minted 1 MB-segment rig. New cut classes:
+// btree leaf inserts + page splits + NEWROOT in the WAL stream, index-file
+// page flushes at checkpoints, and the VACUUM (_bt_delitems_vacuum) window.
+// ---------------------------------------------------------------------------
+
+const IDX_OID: Oid = 61001;
+const IDX_RLOC: RelFileLocator = RelFileLocator::new(1663, 5, IDX_OID);
+/// btree-arm workload: BT_TXNS txns; every txn but the delete txn inserts
+/// BT_ROWS (heap row + index entry per row). Txn BT_DELETE_TXN heap-deletes
+/// txn 1's rows and commits; btbulkdelete (the product vacuum entry) then
+/// removes their index entries — vacuum runs only after the deleting commit
+/// was ACKED, so its durability precedes every later cut (the C invariant:
+/// vacuum only removes tuples whose deleting xid is durably committed).
+const BT_TXNS: u32 = 8;
+const BT_ROWS: u32 = 900;
+const BT_DELETE_TXN: u32 = 6;
+const BT_CKPT_AFTER: [u32; 2] = [3, 6];
+
+/// Index-arm keys. `hash`: a bijective odd-multiplier scramble — unique keys
+/// in pseudorandom order, so splits land mid-tree (the general split path).
+/// `asc`: dense ascending — rightmost-split fastpath; the idx-stale red uses
+/// it so txns 4-5 never touch the leftmost leaf again after the checkpoint.
+fn bt_key(kind: &str, t: u32, i: u32) -> i32 {
+    let ord = (t - 1) * BT_ROWS + i;
+    match kind {
+        "asc" => (ord + 1) as i32,
+        _ => ord.wrapping_add(1).wrapping_mul(2_654_435_761) as i32,
+    }
+}
+
+/// Torn-write arm selector: "<heap|wal>:<j>:<p>" — the j-th PWriteV of that
+/// path class crashes MID-WRITE keeping a p-byte prefix (floored to the
+/// 512 B sector atomicity floor by the engine).
+const TORN_ENV: &str = "PGRUST_SIM_SWEEP_TORN";
+/// EMFILE arm selector: "<once|sticky>:<j>" — the j-th Open fails with
+/// EMFILE (descriptor exhaustion); sticky = that open and every later one.
+const EMFILE_ENV: &str = "PGRUST_SIM_SWEEP_EMFILE";
 
 fn per_point_seed(k: u64) -> u64 {
     SEED ^ k.wrapping_mul(0x9E37_79B9_7F4A_7C15)
@@ -286,6 +358,11 @@ fn install_stub_seams() {
     });
     catalog_storage_seams::smgr_do_pending_deletes::set(|_| Ok(()));
     catalog_storage_seams::smgr_do_pending_syncs::set(|_, _| Ok(()));
+    // inc-4 initdb arm: real initdb datadirs carry DATA CHECKSUMS (the PG 18
+    // initdb default), so MarkBufferDirtyHint consults the wal-skip route
+    // (XLogHintBitIsNeeded); the rig has no pending-sync state — nothing
+    // skips WAL (matches the smgr pending stubs above).
+    catalog_storage_seams::rel_file_locator_skipping_wal::set(|_| false);
     combocid_seams::at_eoxact_combocid::set(|| {});
     combocid_seams::heap_tuple_header_adjust_cmax::set(|_hdr, cid| Ok((cid, false)));
     combocid_seams::heap_tuple_header_get_cmax::set(|hdr| hdr.raw_command_id());
@@ -517,6 +594,169 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>, oid: Oid) -> RelationData<'mcx> {
     }
 }
 
+fn noop_close(_oid: Oid, _mode: LOCKMODE) -> PgResult<()> {
+    Ok(())
+}
+
+/// btint4cmp's C shape (pg_proc 351) — the FmgrInfo the rig installs into
+/// rd_supportinfo is exactly what index_getprocinfo would build from the
+/// catalog (the opclass/fmgr support wiring the sim harness lacked; the
+/// M4 crash_recovery.rs precedent).
+fn rig_btint4cmp(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> PgResult<datum::Datum> {
+    let a = fcinfo.arg(0).as_i32();
+    let b = fcinfo.arg(1).as_i32();
+    Ok(datum::Datum::from_i32((a > b) as i32 - (a < b) as i32))
+}
+
+/// The btree index relation (int4_ops shape: opfamily 1976, opcintype 23,
+/// support proc 1 = btint4cmp/351), M4 crash_recovery.rs's index_rel.
+fn index_rel<'mcx>(mcx: Mcx<'mcx>) -> Relation<'mcx> {
+    let mut relname = NameData::default();
+    relname.namestrcpy("t_idx");
+    let one = |v: Oid| {
+        let mut vec = PgVec::new_in(mcx);
+        vec.push(v);
+        vec
+    };
+    let mut indkey = PgVec::new_in(mcx);
+    indkey.push(1i16);
+    let mut indoption = PgVec::new_in(mcx);
+    indoption.push(0i16);
+    let data = RelationData {
+        rd_locator: Default::default(),
+        rd_smgr: Default::default(),
+        rd_id: IDX_OID,
+        rd_backend: INVALID_PROC_NUMBER,
+        rd_islocaltemp: false,
+        rd_isvalid: Cell::new(true),
+        rd_createSubid: Cell::new(0),
+        rd_newRelfilelocatorSubid: Cell::new(0),
+        rd_firstRelfilelocatorSubid: Cell::new(0),
+        rd_droppedSubid: Cell::new(0),
+        rd_lockInfo: LockInfoData {
+            lockRelId: LockRelId { relId: IDX_OID, dbId: 5 },
+        },
+        rd_rel: FormData_pg_class {
+            relname,
+            relnamespace: 2200,
+            reltype: 0,
+            relowner: 10,
+            relam: types_core::BTREE_AM_OID,
+            relfilenode: IDX_OID,
+            reltablespace: 0,
+            relpages: 0,
+            reltuples: -1.0,
+            relallvisible: 0,
+            reltoastrelid: 0,
+            relhasindex: false,
+            relisshared: false,
+            relpersistence: RELPERSISTENCE_PERMANENT,
+            relkind: RELKIND_INDEX,
+            relhassubclass: false,
+            relrowsecurity: false,
+            relispopulated: true,
+            relreplident: b'd',
+            relispartition: false,
+            relfrozenxid: 3,
+            relminmxid: 1,
+        },
+        rd_att: int4_tupdesc(mcx),
+        rd_index: Some(FormData_pg_index {
+            indexrelid: IDX_OID,
+            indrelid: REL_OID,
+            indnatts: 1,
+            indnkeyatts: 1,
+            indisunique: false,
+            indnullsnotdistinct: false,
+            indisprimary: false,
+            indisexclusion: false,
+            indimmediate: true,
+            indisvalid: true,
+            indisready: true,
+            indkey,
+            has_indpred: false,
+            indexprs_src: None,
+            indpred_src: None,
+        }),
+        rd_opcintype: one(23),
+        rd_opfamily: one(1976),
+        rd_indoption: indoption,
+        rd_indcollation: one(0),
+        rd_options: None,
+        pgstat_enabled: Cell::new(false),
+        pgstat_link: core::cell::Cell::new((0, core::ptr::null_mut())),
+        rd_amcache: Default::default(),
+        rd_amcache_hash: Default::default(),
+        rd_amcache_gin: Default::default(),
+        rd_amcache_spgist: Default::default(),
+        rd_support: PgVec::new_in(mcx),
+        rd_supportinfo: Default::default(),
+        rd_opcoptions: Default::default(),
+        rd_indexlist: Default::default(),
+        rd_trigdesc: Default::default(),
+        rd_hastriggers: false,
+        rd_hasrules: false,
+    };
+    let rel = Relation::open(data, Some(noop_close));
+    rel.rd_supportinfo
+        .borrow_mut()
+        .push(Some(FmgrInfo::new(rig_btint4cmp, 351, 2, true, false)));
+    rel
+}
+
+/// Parse a btree page opaque from a raw 8 KB page image.
+/// PageHeaderData: pd_lsn 0..8, pd_checksum 8..10, pd_flags 10..12,
+/// pd_lower 12..14, pd_upper 14..16, pd_special 16..18.
+fn bt_opaque_of(page: &[u8]) -> BTPageOpaqueData {
+    let special = u16::from_ne_bytes([page[16], page[17]]) as usize;
+    let off = if special == 0 || special + 16 > page.len() {
+        page.len() - 16
+    } else {
+        special
+    };
+    BTPageOpaqueData {
+        btpo_prev: u32::from_ne_bytes(page[off..off + 4].try_into().unwrap()),
+        btpo_next: u32::from_ne_bytes(page[off + 4..off + 8].try_into().unwrap()),
+        btpo_level: u32::from_ne_bytes(page[off + 8..off + 12].try_into().unwrap()),
+        btpo_flags: u16::from_ne_bytes(page[off + 12..off + 14].try_into().unwrap()),
+        btpo_cycleid: u16::from_ne_bytes(page[off + 14..off + 16].try_into().unwrap()),
+    }
+}
+
+/// (line-pointer count, item offset+len for a 1-based offset#) of a raw page.
+fn raw_item(page: &[u8], off: usize) -> Option<(usize, usize)> {
+    let pd_lower = u16::from_ne_bytes([page[12], page[13]]) as usize;
+    let nitems = pd_lower.saturating_sub(24) / 4;
+    if off == 0 || off > nitems {
+        return None;
+    }
+    let raw = u32::from_ne_bytes(page[24 + (off - 1) * 4..24 + off * 4].try_into().unwrap());
+    let lp_off = (raw & 0x7FFF) as usize;
+    let lp_flags = (raw >> 15) & 3;
+    let lp_len = (raw >> 17) as usize;
+    if lp_flags != 1 {
+        return None; // LP_NORMAL only
+    }
+    Some((lp_off, lp_len))
+}
+
+fn raw_max_offset(page: &[u8]) -> usize {
+    let pd_lower = u16::from_ne_bytes([page[12], page[13]]) as usize;
+    pd_lower.saturating_sub(24) / 4
+}
+
+/// An index tuple's (heap block, heap posid, int4 key) from a raw item.
+fn raw_index_tuple(page: &[u8], lp_off: usize) -> (u32, u16, i32) {
+    let hi = u16::from_ne_bytes(page[lp_off..lp_off + 2].try_into().unwrap());
+    let lo = u16::from_ne_bytes(page[lp_off + 2..lp_off + 4].try_into().unwrap());
+    let posid = u16::from_ne_bytes(page[lp_off + 4..lp_off + 6].try_into().unwrap());
+    let key = i32::from_ne_bytes(page[lp_off + 8..lp_off + 12].try_into().unwrap());
+    (((hi as u32) << 16) | lo as u32, posid, key)
+}
+
 fn make_checkpoint() -> controldata_utils::CheckPoint {
     let mut ckpt = controldata_utils::CheckPoint::ZEROED;
     ckpt.redo = CKPT_LOC;
@@ -592,8 +832,10 @@ fn mint_wal_segment(ckpt: &controldata_utils::CheckPoint) {
 /// Mint the datadir inside the sim namespace and boot the WRITER rig
 /// (insert-capable XLogCtl, StartupXLOG skipped — the M4 writer shape).
 /// Everything here happens BEFORE the fault plan installs: it is the
-/// durable pre-history at every sweep point.
-fn mint_and_boot_writer() {
+/// durable pre-history at every sweep point. `with_index`: also mint the
+/// btree index file with its empty metapage (btbuild's C-shape image —
+/// initdb-side artifact, durable pre-history like the heap file).
+fn mint_and_boot_writer(with_index: bool) {
     for d in [
         "/global",
         "/pg_wal",
@@ -672,8 +914,190 @@ fn mint_and_boot_writer() {
     )
     .unwrap();
 
+    if with_index {
+        let idx_key = types_storage::RelFileLocatorBackend {
+            locator: IDX_RLOC,
+            backend: INVALID_PROC_NUMBER,
+        };
+        smgr::smgropen(IDX_RLOC, INVALID_PROC_NUMBER).unwrap();
+        smgr::smgrcreate(idx_key, ForkNumber::MAIN_FORKNUM, false).unwrap();
+        #[repr(align(8))]
+        struct P([u8; BLCKSZ]);
+        let mut p = P([0u8; BLCKSZ]);
+        // SAFETY: aligned, exclusively owned stack page.
+        let mut pm = unsafe {
+            PageMut::from_raw(core::ptr::NonNull::new(p.0.as_mut_ptr()).unwrap())
+        };
+        nbtree::bt_initmetapage(&mut pm, BT_P_NONE, 0, false);
+        smgr::smgrextend(idx_key, ForkNumber::MAIN_FORKNUM, 0, &p.0, false).unwrap();
+    }
+
     // The mint is durable pre-history: fold every journal, promote every dir.
     sim_fsync_tree();
+}
+
+/// inc-4 arm (b): boot the WRITER over a REAL C-initdb datadir composed
+/// into the sim namespace through the t28 provider seam —
+/// `vfs::sim_boot::compose_boot_namespace` (process-shared universe,
+/// durable-from-birth ingest, boot cwd = the datadir, SIM-ASSETS content
+/// identity). Unlike the minted rig there is no XLogCtl hand-poke: the
+/// PRODUCT's own StartupXLOG boots the composed image into insert mode.
+/// Returns (datadir_abs, first workload xid).
+fn boot_initdb_writer() -> (String, u32) {
+    let dd = std::env::var(INITDB_ENV).expect("initdb arm needs the datadir env");
+    // PGRUST_PGSHAREDIR: the orchestrator points it at an EMPTY dir — the
+    // recovery entry point never consults share/timezone (the inc-2 COMPOSE
+    // FINDING 1 scope fact); what this arm exercises is the seam's datadir
+    // composition, and lean packs keep the sweep a local gate.
+    assert!(
+        std::env::var("PGRUST_PGSHAREDIR").is_ok(),
+        "orchestrator must set PGRUST_PGSHAREDIR for the initdb arm"
+    );
+    let assets =
+        vfs::sim_boot::compose_boot_namespace(&dd).expect("compose_boot_namespace failed");
+    println!("{assets}");
+    init_small::globals::SetDataDir(&dd);
+    init_small::globals::set_enableFsync(true);
+    install_stub_seams();
+    install_real();
+
+    transam_xlog::ReadControlFile().unwrap();
+    transam_xlog::XLOGShmemInit();
+    transam_xlog::StartupXLOG().unwrap();
+
+    // The workload heap rel file (the rig's initdb-side artifact, as in the
+    // minted arm; base/5 is the real postgres database directory).
+    smgr::smgropen(RLOC, INVALID_PROC_NUMBER).unwrap();
+    smgr::smgrcreate(
+        types_storage::RelFileLocatorBackend { locator: RLOC, backend: INVALID_PROC_NUMBER },
+        ForkNumber::MAIN_FORKNUM,
+        false,
+    )
+    .unwrap();
+
+    // Boot mutations (control update, end-of-recovery WAL) become durable
+    // pre-history: the fault plan installs after this, so the sweep never
+    // cuts into the boot itself.
+    sim_fsync_tree();
+
+    let next = procarray::TransamVariables().nextXid.load(Relaxed);
+    (dd, (next & 0xFFFF_FFFF) as u32)
+}
+
+/// RED (recycle-window class): an OVER-EAGER RECYCLE — durably rename a
+/// segment the last checkpoint's redo horizon still NEEDS to a future
+/// segno (fd::durable_rename, parent-dir-fsync'd: no cut policy can undo
+/// it), then cut. RemoveOldXlogFiles' horizon compare (`fname <= lastoff`)
+/// is the product guard this bypasses from beneath; the sweep must flag
+/// the unrecoverable image (property 1). If this red ever comes back
+/// green, cuts in the recycle window have lost their teeth.
+fn red_overeager_recycle() {
+    let cf = *transam_xlog::control_file::control_file();
+    let segno = cf.checkPointCopy.redo / SEG as u64;
+    let name = transam_xlog::XLogFileName(1, segno, SEG);
+    let future = transam_xlog::XLogFileName(1, segno + 7, SEG);
+    let rc = fd::durable_rename(
+        &format!("pg_wal/{name}"),
+        &format!("pg_wal/{future}"),
+        types_error::LOG,
+    )
+    .expect("red recycle durable_rename");
+    assert_eq!(rc, 0, "red recycle durable_rename rc");
+}
+
+/// RED (recycled-reuse class): VALIDATING STALE RESIDUE. A correct recycle
+/// leaves old-segment pages whose xlp_pageaddr/CRC guards reject them —
+/// the green sweep's reuse window proves exactly that. The bug class this
+/// red pins is residue that PASSES the guards: bytes at the exact
+/// end-of-WAL whose header chain and CRC are valid. Plant a fully valid
+/// commit record for a FUTURE txn's xid (a clog-prefix gap), durably,
+/// beneath the product; cut. Recovery cannot distinguish it from real WAL
+/// (WAL is self-describing) and replays it — the sweep's clog-prefix
+/// property is the tooth that must catch the stale replay.
+fn red_plant_validating_stale_record(gap_xid: u32) {
+    const REC_LEN: usize = SizeOfXLogRecord + 2 + 8;
+    let ctl = transam_xlog::ctl::XLogCtl();
+    let insert_lsn =
+        transam_xlog::XLogBytePosToRecPtr(ctl.Insert.CurrBytePos.load(Relaxed));
+    let prev_lsn = transam_xlog::XLogBytePosToRecPtr(ctl.Insert.PrevBytePos.load(Relaxed));
+    // Deterministic workload: the plant must sit mid-page (no page-header
+    // interleaving) and within one segment.
+    assert!(
+        insert_lsn % 8192 != 0 && insert_lsn % 8192 + (REC_LEN as u64) <= 8192,
+        "stale-residue plant would straddle a page boundary (insert_lsn={insert_lsn:#x})"
+    );
+
+    let mut rec = vec![0u8; REC_LEN];
+    rec[0..4].copy_from_slice(&(REC_LEN as u32).to_ne_bytes());
+    rec[4..8].copy_from_slice(&gap_xid.to_ne_bytes());
+    rec[8..16].copy_from_slice(&prev_lsn.to_ne_bytes());
+    rec[16] = xact::XLOG_XACT_COMMIT; // xl_info
+    rec[17] = types_core::RmgrIds::RM_XACT_ID as u8; // xl_rmid
+    rec[24] = 255; // XLR_BLOCK_ID_DATA_SHORT
+    rec[25] = 8; // main data: xl_xact_commit { TimestampTz xact_time }
+    rec[26..34].copy_from_slice(&777_000_000i64.to_ne_bytes());
+    let crc = crc32c::fin_crc32c(crc32c::pg_comp_crc32c(
+        crc32c::pg_comp_crc32c(crc32c::CRC32C_INIT, &rec[SizeOfXLogRecord..]),
+        &rec[..20],
+    ));
+    rec[20..24].copy_from_slice(&crc.to_ne_bytes());
+
+    let segno = insert_lsn / SEG as u64;
+    let name = transam_xlog::XLogFileName(1, segno, SEG);
+    let off = (insert_lsn % SEG as u64) as i64;
+    // Raw vfs write + fsync: durable stale bytes planted beneath the
+    // product's WAL layer (deliberately NOT pg_write/pg_fsync — the plant
+    // models disk-borne residue, not engine activity).
+    let fdno = vfs::open(&cpath(&format!("/pg_wal/{name}")), libc::O_RDWR, 0);
+    assert!(fdno >= 0, "plant open: errno {}", vfs::get_errno());
+    assert_eq!(vfs::pwrite(fdno, &rec, off), REC_LEN as isize);
+    assert_eq!(vfs::fsync(fdno), 0);
+    assert_eq!(vfs::close(fdno), 0);
+}
+
+/// RED (index lane): a LOST INDEX PAGE. The idx-stale writer uses ASCENDING
+/// keys, so after the txn-3 checkpoint flushed the tree, txns 4-5 only touch
+/// the RIGHT edge — the leftmost leaf's last modification predates the
+/// checkpoint redo, so no post-checkpoint WAL (and no FPI) covers it. Zero
+/// that leaf durably beneath the product and cut: recovery has nothing to
+/// restore it from, and the sweep's index walk/coverage properties must flag
+/// the loss. If this red ever comes back green, the index-lane cut points
+/// stopped proving anything.
+fn red_zero_leftmost_leaf() {
+    let idx_path = format!("/base/5/{IDX_OID}");
+    let read_blk =
+        |b: u32| vfs_read_range(&idx_path, b as i64 * BLCKSZ as i64, BLCKSZ);
+    // On-disk state = the txn-3 checkpoint image (no eviction at this scale):
+    // a consistent tree whose left spine is final for this workload.
+    let meta = read_blk(0);
+    let hdr = 24usize; // SizeOfPageHeaderData: BTMetaPageData starts here
+    let mut blk = u32::from_ne_bytes(meta[hdr + 8..hdr + 12].try_into().unwrap());
+    let mut level = u32::from_ne_bytes(meta[hdr + 12..hdr + 16].try_into().unwrap());
+    assert!(blk != BT_P_NONE, "idx-stale red needs a rooted on-disk tree");
+    while level > 0 {
+        let page = read_blk(blk);
+        let opaque = bt_opaque_of(&page);
+        assert_eq!(opaque.btpo_level, level, "on-disk left spine consistent");
+        let first = if opaque.btpo_next == BT_P_NONE { 1 } else { 2 };
+        let (off, _len) = raw_item(&page, first).expect("internal downlink item");
+        let (child, _pos, _key) = raw_index_tuple(&page, off);
+        blk = child;
+        level -= 1;
+    }
+    let leaf = read_blk(blk);
+    assert!(bt_opaque_of(&leaf).btpo_flags & BTP_LEAF != 0, "descend ends on a leaf");
+    // Raw vfs write + fsync: durable page loss planted beneath the product's
+    // WAL/buffer layers (disk-borne damage, not engine activity).
+    let fdno = vfs::open(&cpath(&idx_path), libc::O_RDWR, 0);
+    assert!(fdno >= 0, "idx-stale plant open: errno {}", vfs::get_errno());
+    let zeros = vec![0u8; BLCKSZ];
+    assert_eq!(
+        vfs::pwrite(fdno, &zeros, blk as i64 * BLCKSZ as i64),
+        BLCKSZ as isize
+    );
+    assert_eq!(vfs::fsync(fdno), 0);
+    assert_eq!(vfs::close(fdno), 0);
+    eprintln!("IDX_STALE_RED zeroed leftmost leaf block {blk}");
 }
 
 // ---------------------------------------------------------------------------
@@ -704,6 +1128,58 @@ fn run_one_txn<'m>(
     Ok(())
 }
 
+/// One committed btree-arm transaction: heap row + product btinsert per row
+/// (insert txns), or the heap_delete of txn 1's rows (the delete txn).
+fn run_one_btree_txn<'m>(
+    mcx: Mcx<'m>,
+    rel: &RelationData<'m>,
+    idx: &Relation<'m>,
+    tupdesc: &Rc<TupleDescData<'m>>,
+    t: u32,
+    keys: &str,
+    txn1_tids: &mut Vec<ItemPointerData>,
+) -> PgResult<()> {
+    xact::StartTransactionCommand()?;
+    if t == BT_DELETE_TXN {
+        for tid in txn1_tids.iter() {
+            let mut tmfd = tableam_vocab::TM_FailureData::default();
+            let r = heapam::heap_delete(rel, tid, 0, None, true, &mut tmfd, false)?;
+            assert!(
+                matches!(r, tableam_vocab::TM_Result::TM_Ok),
+                "single-backend heap_delete must succeed: {r:?}"
+            );
+        }
+    } else {
+        for i in 0..BT_ROWS {
+            let key = bt_key(keys, t, i);
+            let mut tup = heaptuple::heap_form_tuple(
+                mcx,
+                tupdesc,
+                &[datum::Datum::from_i32(key)],
+                &[false],
+            )?;
+            heapam::heap_insert(rel, tup.as_tuple_mut(), 0, 0, None)?;
+            let tid = tup.as_tuple().t_self;
+            if t == 1 {
+                txn1_tids.push(tid);
+            }
+            let icx = MemoryContext::new("sim-sweep-btins");
+            nbtree::btinsert(
+                icx.mcx(),
+                idx,
+                &[datum::Datum::from_i32(key)],
+                &[false],
+                &tid,
+                idx,
+                types_nbtree::genam::IndexUniqueCheck::UNIQUE_CHECK_NO,
+                false,
+            )?;
+        }
+    }
+    xact::CommitTransactionCommand()?;
+    Ok(())
+}
+
 #[test]
 #[ignore]
 fn sim_sweep_writer_child() {
@@ -712,24 +1188,130 @@ fn sim_sweep_writer_child() {
     }
     let k: u64 = std::env::var(K_ENV).unwrap().parse().unwrap();
     let pack = std::path::PathBuf::from(std::env::var(PACK_ENV).unwrap());
-    let red = std::env::var(RED_ENV).as_deref() == Ok("1");
+    let red = match std::env::var(RED_ENV).as_deref() {
+        Ok("0") | Err(_) => String::new(),
+        Ok(v) => v.to_string(),
+    };
+    let arm = std::env::var(ARM_ENV).unwrap_or_default();
 
     SimVfs::reset();
-    mint_and_boot_writer();
+    let (datadir, base_xid) = if arm == "initdb" {
+        boot_initdb_writer()
+    } else {
+        mint_and_boot_writer(arm == "btree");
+        ("/".to_string(), 3)
+    };
+
+    // inc-5 arms: torn-write and EMFILE specs ride their own envs so the
+    // sweep's k naming stays the crash-at-op contract.
+    let torn_spec = std::env::var(TORN_ENV).ok().filter(|s| !s.is_empty());
+    let emfile_spec = std::env::var(EMFILE_ENV).ok().filter(|s| !s.is_empty());
+    // Index-arm key pattern: the idx-stale red uses ascending keys (see
+    // red_zero_leftmost_leaf); everything else the bijective hash scramble.
+    let keys = if red == "idx-stale" { "asc" } else { "hash" };
 
     // inc-3 WHOLE-NODE KILL: the cut kills the node — every post-cut vfs op
     // the engine's error/unwind paths issue is refused without mutation, so
     // the packed image is the PURE at-cut image (no unwind residue).
     SimVfs::set_kill_on_cut(true);
-    if red {
+    if red == "fsync" {
         // PRODUCT-SHAPED RED ARM: disable the product's fsync layer through
         // its own knob (fd::pg_fsync and issue_xlog_fsync both consult
         // enableFsync). Every commit will claim durability it never bought.
         init_small::globals::set_enableFsync(false);
         SimVfs::set_crash_image(CrashImage::DropAll);
-    } else if k > 0 {
+    } else if red == "fpw-torn" {
+        // inc-5 RED (torn-write class): the PRODUCT's full-page-writes knob
+        // OFF (XLogInsert's doPageWrites consults Insert.fullPageWrites), so
+        // no FPI protects torn data pages — then a heap-page flush inside
+        // the first checkpoint's write wave (the spec is computed by the
+        // orchestrator from the green baseline: heap-class write counts are
+        // FPW-independent) tears mid-page. Recovery has no base image to
+        // restore; the fold property must catch the damage.
+        transam_xlog::ctl::XLogCtl()
+            .Insert
+            .fullPageWrites
+            .store(false, Relaxed);
+        let spec = torn_spec.clone().expect("fpw-torn red needs a TORN spec");
+        let mut it = spec.split(':');
+        assert_eq!(it.next(), Some("heap"), "fpw-torn tears heap pages");
+        let j: u64 = it.next().unwrap().parse().unwrap();
+        let p: usize = it.next().unwrap().parse().unwrap();
+        SeededFaultPlan::install(
+            per_point_seed(0xF937_0000 ^ j),
+            vec![FaultRule::nth_matching(
+                OpMatch {
+                    kinds: Some(vec![OpKind::PWriteV]),
+                    class: Some(PathClass::Heap),
+                    path_contains: None,
+                },
+                j,
+                FaultDecision::TornWrite { persist_prefix: p },
+            )],
+        );
+    } else if red == "emfile-ack" {
+        // inc-5 RED (EMFILE class): descriptor exhaustion from the 8th open
+        // on; the buggy-server model below ACKS the failing transaction
+        // anyway — the sweep must flag the acked loss.
+        SeededFaultPlan::install(
+            per_point_seed(0xEACC),
+            vec![FaultRule {
+                matcher: OpMatch {
+                    kinds: Some(vec![OpKind::Open]),
+                    class: None,
+                    path_contains: None,
+                },
+                nth: 8,
+                action: FaultDecision::Errno(libc::EMFILE),
+                sticky: true,
+            }],
+        );
+    } else if red.is_empty() && torn_spec.is_some() {
+        // "<heap|wal>:<j>:<p>": the j-th data write of that class crashes
+        // MID-WRITE keeping a p-byte prefix (sector-floored by the engine).
+        let spec = torn_spec.clone().unwrap();
+        let mut it = spec.split(':');
+        let class = match it.next().unwrap() {
+            "wal" => PathClass::Wal,
+            _ => PathClass::Heap,
+        };
+        let j: u64 = it.next().unwrap().parse().unwrap();
+        let p: usize = it.next().unwrap().parse().unwrap();
+        SeededFaultPlan::install(
+            per_point_seed(0x7093_0000 ^ j),
+            vec![FaultRule::nth_matching(
+                OpMatch {
+                    kinds: Some(vec![OpKind::PWriteV]),
+                    class: Some(class),
+                    path_contains: None,
+                },
+                j,
+                FaultDecision::TornWrite { persist_prefix: p },
+            )],
+        );
+    } else if red.is_empty() && emfile_spec.is_some() {
+        // "<once|sticky>:<j>": the j-th Open fails with EMFILE (sticky: that
+        // one and every later open — the exhaustion regime).
+        let spec = emfile_spec.clone().unwrap();
+        let mut it = spec.split(':');
+        let sticky = it.next().unwrap() == "sticky";
+        let j: u64 = it.next().unwrap().parse().unwrap();
+        SeededFaultPlan::install(
+            per_point_seed(0xEF11_0000 ^ j),
+            vec![FaultRule {
+                matcher: OpMatch {
+                    kinds: Some(vec![OpKind::Open]),
+                    class: None,
+                    path_contains: None,
+                },
+                nth: j,
+                action: FaultDecision::Errno(libc::EMFILE),
+                sticky,
+            }],
+        );
+    } else if red.is_empty() && k > 0 {
         SeededFaultPlan::install(per_point_seed(k), vec![FaultRule::crash_at_op(k)]);
-    } else {
+    } else if red.is_empty() {
         // Baseline: record the op trace — the sweep stratifier reads it.
         SimVfs::set_op_trace(true);
     }
@@ -740,12 +1322,35 @@ fn sim_sweep_writer_child() {
     let mcx = ctx.mcx();
     let rel = test_relation(mcx, REL_OID);
     let tupdesc = int4_tupdesc(mcx);
+    let idx = if arm == "btree" { Some(index_rel(mcx)) } else { None };
+    let mut txn1_tids: Vec<ItemPointerData> = Vec::new();
+    let mut vac_span: Option<(u64, u64)> = None;
+    let mut vac_removed: i64 = -1;
+
+    // The recycle-class reds stop the workload at a deterministic horizon:
+    // "recycle-needed" right after the recycling checkpoint (txn 8), the
+    // stale plant with acked txns 1..7 so the planted txn-10 commit is a
+    // clog-prefix GAP the checker must flag. The idx-stale red stops after
+    // txn 5 — the leftmost leaf's content is then pre-checkpoint history.
+    let txn_limit = match red.as_str() {
+        "recycle-needed" => 8,
+        "stale-residue" => 7,
+        "idx-stale" => 5,
+        _ if arm == "initdb" => INITDB_TXNS,
+        _ if arm == "btree" => BT_TXNS,
+        _ => TXNS,
+    };
+    let ckpt_after: &[u32] = if arm == "btree" { &BT_CKPT_AFTER } else { &CKPT_AFTER };
 
     let mut acked: u32 = 0;
     let mut stopped: Option<String> = None;
-    for t in 1..=TXNS {
+    for t in 1..=txn_limit {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_one_txn(mcx, &rel, &tupdesc, t)
+            if let Some(idx) = &idx {
+                run_one_btree_txn(mcx, &rel, idx, &tupdesc, t, keys, &mut txn1_tids)
+            } else {
+                run_one_txn(mcx, &rel, &tupdesc, t)
+            }
         }));
         match r {
             Ok(Ok(())) => {
@@ -755,18 +1360,31 @@ fn sim_sweep_writer_child() {
                 acked += 1;
             }
             Ok(Err(e)) => {
-                stopped = Some(format!("txn {t} error: {e:?}"));
+                if red == "emfile-ack" {
+                    // The buggy-server model: reports success to the client
+                    // although the transaction failed under fd pressure.
+                    acked += 1;
+                    stopped = Some(format!("txn {t} error acked anyway: {e:?}"));
+                } else {
+                    stopped = Some(format!("txn {t} error: {e:?}"));
+                }
                 break;
             }
             Err(_) => {
-                stopped = Some(format!("txn {t} panicked (engine stop)"));
+                if red == "emfile-ack" {
+                    // The buggy-server model acks even an engine-stop txn.
+                    acked += 1;
+                    stopped = Some(format!("txn {t} panicked, acked anyway"));
+                } else {
+                    stopped = Some(format!("txn {t} panicked (engine stop)"));
+                }
                 break;
             }
         }
         if SimVfs::cut_count() > 0 {
             break; // power is gone; do not touch the image any further
         }
-        if CKPT_AFTER.contains(&t) {
+        if ckpt_after.contains(&t) {
             // The PRODUCT's checkpoint: CheckPointGuts (clog/subtrans/buffer
             // flushes + sync requests) and the in-place control update. The
             // checkpointer's buffer pins need a live owner (C: the aux
@@ -799,11 +1417,84 @@ fn sim_sweep_writer_child() {
                 break;
             }
         }
+        // inc-5 INDEX LANE: the product vacuum entry (btbulkdelete) right
+        // after the deleting txn's ACKED commit + checkpoint — the C
+        // invariant (vacuum only removes tuples whose deleting xid is
+        // durably committed) holds at every later cut by construction. Its
+        // op span is the VACUUM cut-class window (_bt_delitems_vacuum WAL +
+        // page writes), recorded in the meta for the stratifier.
+        if arm == "btree" && t == BT_DELETE_TXN && red.is_empty() {
+            let vac_lo = SimVfs::op_seq() - ops_at_start + 1;
+            let idx_ref = idx.as_ref().unwrap();
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                || -> PgResult<types_nbtree::genam::IndexBulkDeleteResult> {
+                    xact::StartTransactionCommand()?;
+                    let mut dead = txn1_tids.clone();
+                    dead.sort_by(|a, b| ItemPointerCompare(a, b).cmp(&0));
+                    let info = nbtree::IndexVacuumInfo {
+                        index: idx_ref,
+                        heaprel: &rel,
+                        analyze_only: false,
+                        estimated_count: false,
+                        num_heap_tuples: -1.0,
+                        strategy: None,
+                    };
+                    let vcx = MemoryContext::new("sim-sweep-btvac");
+                    let stats = nbtree::btbulkdelete(vcx.mcx(), &info, None, &dead)?;
+                    xact::CommitTransactionCommand()?;
+                    Ok(stats)
+                },
+            ));
+            match r {
+                Ok(Ok(stats)) => {
+                    vac_removed = stats.tuples_removed as i64;
+                    vac_span = Some((vac_lo, SimVfs::op_seq() - ops_at_start));
+                }
+                Ok(Err(e)) => {
+                    vac_span = Some((vac_lo, SimVfs::op_seq() - ops_at_start));
+                    stopped = Some(format!("btree vacuum error: {e:?}"));
+                    break;
+                }
+                Err(_) => {
+                    vac_span = Some((vac_lo, SimVfs::op_seq() - ops_at_start));
+                    stopped = Some(format!("btree vacuum panicked (engine stop)"));
+                    break;
+                }
+            }
+            if SimVfs::cut_count() > 0 {
+                break;
+            }
+        }
     }
 
     let ops_used = SimVfs::op_seq() - ops_at_start;
-    if red && SimVfs::cut_count() == 0 {
-        // Power loss after the "successful" run: the red arm's cut.
+    match red.as_str() {
+        "recycle-needed" if SimVfs::cut_count() == 0 => {
+            red_overeager_recycle();
+            SimVfs::cut();
+        }
+        "stale-residue" if SimVfs::cut_count() == 0 => {
+            // Plant a commit for txn 10's xid: acked ends at txn 7, so the
+            // replayed plant is a clog-prefix gap (txns 8 and 9 missing).
+            red_plant_validating_stale_record(base_xid + 9);
+            SimVfs::cut();
+        }
+        "fsync" if SimVfs::cut_count() == 0 => {
+            // Power loss after the "successful" run: the red arm's cut.
+            SimVfs::cut();
+        }
+        "idx-stale" if SimVfs::cut_count() == 0 => {
+            red_zero_leftmost_leaf();
+            SimVfs::cut();
+        }
+        "emfile-ack" if SimVfs::cut_count() == 0 => {
+            SimVfs::cut();
+        }
+        _ => {}
+    }
+    // The EMFILE battery's power loss at end-of-regime: the recover child
+    // must find every acked txn intact — degraded-but-never-corrupt.
+    if emfile_spec.is_some() && red.is_empty() && SimVfs::cut_count() == 0 {
         SimVfs::cut();
     }
 
@@ -814,12 +1505,27 @@ fn sim_sweep_writer_child() {
     let mut meta = String::new();
     meta.push_str(&format!("k={k}\n"));
     meta.push_str(&format!("seed={:#x}\n", per_point_seed(k)));
+    meta.push_str(&format!("arm={}\n", if arm.is_empty() { "minted" } else { &arm }));
+    meta.push_str(&format!("datadir={datadir}\n"));
+    meta.push_str(&format!("base_xid={base_xid}\n"));
     meta.push_str(&format!("acked={acked}\n"));
     meta.push_str(&format!("ops={ops_used}\n"));
     meta.push_str(&format!("cuts={}\n", SimVfs::cut_count()));
     meta.push_str(&format!("killed={}\n", SimVfs::killed()));
     meta.push_str(&format!("frozen={}\n", SimVfs::frozen_op_count()));
     meta.push_str(&format!("stopped={}\n", stopped.as_deref().unwrap_or("-")));
+    meta.push_str(&format!("keys={keys}\n"));
+    if let Some(spec) = &torn_spec {
+        meta.push_str(&format!("torn={spec}\n"));
+    }
+    if let Some(spec) = &emfile_spec {
+        meta.push_str(&format!("emfile={spec}\n"));
+    }
+    if let Some((lo, hi)) = vac_span {
+        meta.push_str(&format!("vac_lo={lo}\n"));
+        meta.push_str(&format!("vac_hi={hi}\n"));
+        meta.push_str(&format!("vac_removed={vac_removed}\n"));
+    }
     for l in SimVfs::fault_log() {
         meta.push_str(&format!("faultlog: {l}\n"));
     }
@@ -847,11 +1553,13 @@ fn sim_sweep_writer_child() {
 // RECOVER child: import the crash image, boot the PRODUCT recovery, verify
 // ---------------------------------------------------------------------------
 
-fn mvcc_snapshot<'m>(mcx: Mcx<'m>) -> SnapshotData<'m> {
+fn mvcc_snapshot<'m>(mcx: Mcx<'m>, base_xid: u32) -> SnapshotData<'m> {
     let mut s = SnapshotData::sentinel(mcx, SnapshotType::SNAPSHOT_MVCC);
-    // Every workload xid (3..) is in the past: visibility = did it commit.
-    s.xmin = 1000;
-    s.xmax = 1000;
+    // Every workload xid (base_xid..) is in the past: visibility = did it
+    // commit. base_xid-relative so the initdb arm's real xid range (the
+    // datadir's post-boot nextXid) is covered too.
+    s.xmin = base_xid + 1000;
+    s.xmax = base_xid + 1000;
     s.regd_count.set(1);
     s
 }
@@ -884,14 +1592,35 @@ fn sim_sweep_recover_child() {
             .unwrap()
     };
     let acked: u32 = get("acked").parse().unwrap();
+    let base_xid: u32 = get("base_xid").parse().unwrap();
+    let arm = get("arm");
+    let writer_dd = get("datadir");
     let k = get("k");
     let seed = get("seed");
+    // Index-arm key pattern (absent in pre-inc-5 metas: default hash).
+    let keys = meta
+        .lines()
+        .find(|l| l.starts_with("keys="))
+        .map(|l| l.split('=').nth(1).unwrap().to_string())
+        .unwrap_or_else(|| "hash".to_string());
     let tag = format!("k={k} seed={seed}");
     let mut violations: Vec<String> = Vec::new();
 
     SimVfs::reset();
-    import_tree_into_sim(&pack.join("root"), "/");
-    init_small::globals::SetDataDir("/");
+    if arm == "initdb" {
+        // The post-crash datadir sits inside the pack at the writer's host
+        // absolute path; compose it through the SAME provider seam the
+        // writer used (fresh process-shared universe, boot cwd = the pack
+        // datadir, SIM-ASSETS = the post-crash composition identity).
+        let dd = format!("{}{}", pack.join("root").to_str().unwrap(), writer_dd);
+        let assets =
+            vfs::sim_boot::compose_boot_namespace(&dd).expect("recover compose failed");
+        println!("{assets}");
+        init_small::globals::SetDataDir(&dd);
+    } else {
+        import_tree_into_sim(&pack.join("root"), "/");
+        init_small::globals::SetDataDir("/");
+    }
     init_small::globals::set_enableFsync(true);
     install_stub_seams();
     install_real();
@@ -911,17 +1640,29 @@ fn sim_sweep_recover_child() {
     }
 
     if violations.is_empty() {
+        // A corrupt recovered image may make the verifiers themselves panic
+        // (garbage tuple headers under the visibility check, torn pages
+        // under the walks): that is a property VIOLATION, not a harness
+        // crash — catch it and say so.
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let cf = *transam_xlog::control_file::control_file();
         if cf.state != DB_IN_PRODUCTION {
             violations.push(format!("{tag}: post-recovery control state {}", cf.state));
         }
 
         // Property 3 scaffold: clog-committed txns must be a PREFIX 1..=h
-        // (commits are strictly sequential in this workload).
+        // (commits are strictly sequential in this workload). Txn t's xid is
+        // base_xid + t - 1 (3 + t - 1 on the minted rig; the real datadir's
+        // post-boot nextXid on the initdb arm).
         let mut h: u32 = 0;
         let mut prefix_ok = true;
-        for t in 1..=TXNS {
-            let xid = t + 2;
+        let arm_txns = match arm.as_str() {
+            "initdb" => INITDB_TXNS,
+            "btree" => BT_TXNS,
+            _ => TXNS,
+        };
+        for t in 1..=arm_txns {
+            let xid = base_xid + t - 1;
             let committed = transam::TransactionIdDidCommit(xid).unwrap_or(false);
             if committed {
                 if t != h + 1 {
@@ -955,7 +1696,7 @@ fn sim_sweep_recover_child() {
             backend: INVALID_PROC_NUMBER,
         };
         let nblocks = smgr::smgrnblocks(key, ForkNumber::MAIN_FORKNUM).unwrap();
-        let snap = mvcc_snapshot(mcx);
+        let snap = mvcc_snapshot(mcx, base_xid);
         let mut visible: Vec<i32> = Vec::new();
         for b in 0..nblocks {
             let buf = bufmgr::ReadBuffer(&rel, b).unwrap();
@@ -990,9 +1731,26 @@ fn sim_sweep_recover_child() {
             bufmgr::ReleaseBuffer(buf).unwrap();
         }
         visible.sort_unstable();
-        let expected: Vec<i32> = (1..=h as i32)
-            .flat_map(|t| std::iter::repeat(t).take(ROWS_PER_TXN as usize))
-            .collect();
+        let expected: Vec<i32> = if arm == "btree" {
+            // btree-arm fold: keys of every committed insert txn; the delete
+            // txn inserts nothing, and once it is committed txn 1's rows are
+            // deleted (invisible).
+            let mut v = Vec::new();
+            for t in 1..=h {
+                if t == BT_DELETE_TXN || (t == 1 && h >= BT_DELETE_TXN) {
+                    continue;
+                }
+                for i in 0..BT_ROWS {
+                    v.push(bt_key(&keys, t, i));
+                }
+            }
+            v.sort_unstable();
+            v
+        } else {
+            (1..=h as i32)
+                .flat_map(|t| std::iter::repeat(t).take(ROWS_PER_TXN as usize))
+                .collect()
+        };
         if visible != expected {
             let mut msg = format!(
                 "{tag}: visible heap fold diverges — {} visible rows vs {} expected \
@@ -1011,6 +1769,175 @@ fn sim_sweep_recover_child() {
             violations.push(msg);
         }
 
+        // inc-5 INDEX LANE properties (btree arm): walk the recovered tree
+        // (descend the left spine, then the leaf right-link chain) and prove
+        //  (a) the walk is structurally sound (no zeroed/non-leaf pages, no
+        //      loops),
+        //  (b) leaf keys are nondecreasing along the chain,
+        //  (c) every index entry's TID resolves to a real heap item, visible
+        //      entries carry the heap value as their key, and the multiset
+        //      of visible-index keys equals EXACTLY the visible heap fold —
+        //      the index covers every committed row and nothing else.
+        let mut idx_visible: Vec<i32> = Vec::new();
+        if arm == "btree" {
+            let idx = index_rel(mcx);
+            let idx_key = types_storage::RelFileLocatorBackend {
+                locator: IDX_RLOC,
+                backend: INVALID_PROC_NUMBER,
+            };
+            smgr::smgropen(IDX_RLOC, INVALID_PROC_NUMBER).unwrap();
+            let idx_nblocks = smgr::smgrnblocks(idx_key, ForkNumber::MAIN_FORKNUM).unwrap();
+            let read_page = |b: u32| -> Vec<u8> {
+                let buf = bufmgr::ReadBuffer(&idx, b).unwrap();
+                let ptr = bufmgr::BufferGetPagePtr(buf).as_ptr();
+                // SAFETY: pinned BLCKSZ page image, copied under the pin.
+                let v = unsafe { core::slice::from_raw_parts(ptr as *const u8, BLCKSZ) }
+                    .to_vec();
+                bufmgr::ReleaseBuffer(buf).unwrap();
+                v
+            };
+            let meta_pg = read_page(0);
+            let hdr = 24usize;
+            let root = u32::from_ne_bytes(meta_pg[hdr + 8..hdr + 12].try_into().unwrap());
+            let mut walk_ok = true;
+            let mut entries: Vec<(i32, u32, u16)> = Vec::new();
+            if root != BT_P_NONE {
+                // Descend the left spine to the leftmost leaf.
+                let mut blk = root;
+                let mut hops = 0u32;
+                loop {
+                    hops += 1;
+                    if hops > idx_nblocks + 2 {
+                        violations.push(format!("{tag}: index descend loops (block {blk})"));
+                        walk_ok = false;
+                        break;
+                    }
+                    let page = read_page(blk);
+                    let op = bt_opaque_of(&page);
+                    if op.btpo_level == 0 {
+                        break;
+                    }
+                    let first = if op.btpo_next == BT_P_NONE { 1 } else { 2 };
+                    match raw_item(&page, first) {
+                        Some((off, _len)) => {
+                            let (child, _pos, _key) = raw_index_tuple(&page, off);
+                            blk = child;
+                        }
+                        None => {
+                            violations.push(format!(
+                                "{tag}: index descend broken at block {blk} (no downlink)"
+                            ));
+                            walk_ok = false;
+                            break;
+                        }
+                    }
+                }
+                // Leaf chain walk.
+                if walk_ok {
+                    let mut steps = 0u32;
+                    let mut last_key = i64::MIN;
+                    let mut cur = blk;
+                    while cur != BT_P_NONE {
+                        steps += 1;
+                        if steps > idx_nblocks * 2 {
+                            violations
+                                .push(format!("{tag}: index leaf chain loops at block {cur}"));
+                            walk_ok = false;
+                            break;
+                        }
+                        let page = read_page(cur);
+                        let op = bt_opaque_of(&page);
+                        if op.btpo_flags & (BTP_DELETED | BTP_HALF_DEAD) == 0 {
+                            if op.btpo_flags & BTP_LEAF == 0 {
+                                violations.push(format!(
+                                    "{tag}: index leaf chain hit non-leaf block {cur} \
+                                     (flags {:#x})",
+                                    op.btpo_flags
+                                ));
+                                walk_ok = false;
+                                break;
+                            }
+                            let first = if op.btpo_next == BT_P_NONE { 1 } else { 2 };
+                            for off in first..=raw_max_offset(&page) {
+                                let Some((lp, _len)) = raw_item(&page, off) else {
+                                    continue;
+                                };
+                                let (hblk, hpos, key) = raw_index_tuple(&page, lp);
+                                if (key as i64) < last_key {
+                                    violations.push(format!(
+                                        "{tag}: index key order broken at block {cur} \
+                                         off {off} ({key} after {last_key})"
+                                    ));
+                                }
+                                last_key = key as i64;
+                                entries.push((key, hblk, hpos));
+                            }
+                        }
+                        cur = op.btpo_next;
+                    }
+                }
+            }
+            // Project the entries through heap visibility.
+            if walk_ok {
+                for (key, hblk, hpos) in entries {
+                    if hblk >= nblocks {
+                        violations.push(format!(
+                            "{tag}: index entry {key} points past heap end \
+                             (block {hblk} of {nblocks})"
+                        ));
+                        continue;
+                    }
+                    let buf = bufmgr::ReadBuffer(&rel, hblk).unwrap();
+                    let page_addr = bufmgr::BufferGetPagePtr(buf).as_ptr();
+                    // SAFETY: pinned page image.
+                    let page = unsafe {
+                        types_storage::bufpage::PageRef::from_raw(
+                            core::ptr::NonNull::new(page_addr).unwrap(),
+                        )
+                    };
+                    let id = page.item_id(hpos);
+                    if !id.is_normal() {
+                        violations.push(format!(
+                            "{tag}: index entry {key} points at missing heap item \
+                             ({hblk},{hpos})"
+                        ));
+                        bufmgr::ReleaseBuffer(buf).unwrap();
+                        continue;
+                    }
+                    let mut t = page_tuple(page_addr, hpos);
+                    let vis = heapam_visibility_seams::heap_tuple_satisfies_visibility::call(
+                        &mut t, &snap, buf,
+                    )
+                    .unwrap();
+                    if vis {
+                        let (ptr, _len) = page.item_raw(id);
+                        // SAFETY: heap tuple in-page (see the fold walk).
+                        let val = unsafe {
+                            let hoff = *ptr.add(22) as usize;
+                            ptr.add(hoff).cast::<i32>().read_unaligned()
+                        };
+                        if val != key {
+                            violations.push(format!(
+                                "{tag}: index key {key} != heap value {val} at \
+                                 ({hblk},{hpos})"
+                            ));
+                        }
+                        idx_visible.push(key);
+                    }
+                    bufmgr::ReleaseBuffer(buf).unwrap();
+                }
+                idx_visible.sort_unstable();
+                if idx_visible != expected {
+                    violations.push(format!(
+                        "{tag}: index coverage diverges — {} visible-index keys vs {} \
+                         expected (h={h})",
+                        idx_visible.len(),
+                        expected.len()
+                    ));
+                }
+            }
+        }
+
         // Determinism digest (FNV over the visible fold + horizons).
         let mut digest: u64 = 0xcbf2_9ce4_8422_2325;
         let mut mix = |b: u64| {
@@ -1022,11 +1949,20 @@ fn sim_sweep_recover_child() {
         for v in &visible {
             mix(*v as u64);
         }
+        for v in &idx_visible {
+            mix(*v as u64);
+        }
         mix(cf.checkPoint);
         println!(
             "SIM_RECOVER_STATE h={h} acked={acked} visible_rows={} nblocks={nblocks} digest={digest:016x}",
             visible.len()
         );
+        }))
+        .is_err();
+        if panicked {
+            violations
+                .push(format!("{tag}: property verification panicked on the recovered image"));
+        }
     }
 
     for v in &violations {
@@ -1054,28 +1990,50 @@ fn spawn_child(test_name: &str, envs: &[(&str, String)]) -> (bool, String) {
     (out.status.success(), text)
 }
 
-fn run_point(base: &std::path::Path, k: u64, red: bool) -> (String, String) {
-    let pack = base.join(format!("pack_k{k}{}", if red { "_red" } else { "" }));
-    let (ok, wtext) = spawn_child(
-        "sim_sweep_writer_child",
-        &[
-            (ROLE_ENV, "writer".into()),
-            (K_ENV, k.to_string()),
-            (PACK_ENV, pack.to_str().unwrap().into()),
-            (RED_ENV, if red { "1" } else { "0" }.into()),
-        ],
-    );
+/// Run one writer+recover point pair. `red` is the red-arm selector (""
+/// for the property sweep); `extra` env pairs select the rig arm (the
+/// initdb-composition arm passes ARM/INITDB/PGRUST_PGSHAREDIR through to
+/// both children).
+fn run_point(
+    base: &std::path::Path,
+    k: u64,
+    red: &str,
+    extra: &[(&str, String)],
+) -> (String, String) {
+    run_point_tagged(base, k, red, extra, "")
+}
+
+/// `tag` disambiguates pack directories for arms that all run at k=0 with
+/// their own fault envs (torn/EMFILE points run concurrently).
+fn run_point_tagged(
+    base: &std::path::Path,
+    k: u64,
+    red: &str,
+    extra: &[(&str, String)],
+    tag: &str,
+) -> (String, String) {
+    let pack = base.join(format!(
+        "pack_k{k}{tag}{}",
+        if red.is_empty() { String::new() } else { format!("_red_{red}") }
+    ));
+    let mut wenvs: Vec<(&str, String)> = vec![
+        (ROLE_ENV, "writer".into()),
+        (K_ENV, k.to_string()),
+        (PACK_ENV, pack.to_str().unwrap().into()),
+        (RED_ENV, red.to_string()),
+    ];
+    wenvs.extend(extra.iter().cloned());
+    let (ok, wtext) = spawn_child("sim_sweep_writer_child", &wenvs);
     assert!(
         ok && wtext.contains("SIM_WRITER_DONE"),
         "writer child failed at k={k}:\n{wtext}"
     );
-    let (ok, rtext) = spawn_child(
-        "sim_sweep_recover_child",
-        &[
-            (ROLE_ENV, "recover".into()),
-            (PACK_ENV, pack.to_str().unwrap().into()),
-        ],
-    );
+    let mut renvs: Vec<(&str, String)> = vec![
+        (ROLE_ENV, "recover".into()),
+        (PACK_ENV, pack.to_str().unwrap().into()),
+    ];
+    renvs.extend(extra.iter().cloned());
+    let (ok, rtext) = spawn_child("sim_sweep_recover_child", &renvs);
     assert!(
         ok && rtext.contains("SIM_RECOVER_DONE"),
         "recover child failed at k={k}:\n{rtext}"
@@ -1102,14 +2060,15 @@ fn marker_line(text: &str, marker: &str) -> Option<String> {
         .find_map(|l| l.find(marker).map(|i| l[i..].to_string()))
 }
 
-/// Parse the baseline meta's op-trace lines into (k, kind, class).
-fn parse_trace(meta: &str) -> Vec<(u64, String, String)> {
+/// Parse the baseline meta's op-trace lines into (k, kind, class, path).
+fn parse_trace(meta: &str) -> Vec<(u64, String, String, String)> {
     meta.lines()
         .filter_map(|l| l.strip_prefix("optrace: "))
         .filter_map(|l| {
             let mut k = None;
             let mut kind = None;
             let mut class = None;
+            let mut path = None;
             for w in l.split_whitespace() {
                 if let Some(v) = w.strip_prefix("k=") {
                     k = v.parse().ok();
@@ -1117,25 +2076,83 @@ fn parse_trace(meta: &str) -> Vec<(u64, String, String)> {
                     kind = Some(v.to_string());
                 } else if let Some(v) = w.strip_prefix("class=") {
                     class = Some(v.to_string());
+                } else if let Some(v) = w.strip_prefix("path=") {
+                    path = Some(v.to_string());
                 }
             }
-            Some((k?, kind?, class?))
+            Some((k?, kind?, class?, path.unwrap_or_default()))
         })
         .collect()
 }
 
+/// inc-4: locate the SEGMENT-RECYCLE cut classes in the baseline trace.
+///
+/// * `k_recycle` — the RECYCLE rename: a Wal-class Rename whose FROM path
+///   (the path the sim op consult logs) is a real segment name, NOT the
+///   `xlogtemp.<pid>` install temp file. This is checkpoint-time
+///   RemoveOldXlogFiles renaming an obsolete segment to a future segno.
+/// * `k_reuse` — the first write INTO the recycled segment: the first
+///   Wal-class PWriteV on a segment path that was never written before the
+///   recycle rename (the recycled node's primary name is the future segment
+///   name from the rename on — the N4 path-at-op work exists for exactly
+///   this shape).
+fn find_recycle_and_reuse(trace: &[(u64, String, String, String)]) -> (Option<u64>, Option<u64>) {
+    let k_recycle = trace
+        .iter()
+        .find(|(_, kind, class, path)| {
+            kind == "Rename" && class == "Wal" && !path.contains("xlogtemp")
+        })
+        .map(|(k, _, _, _)| *k);
+    let Some(krec) = k_recycle else {
+        return (None, None);
+    };
+    let pre_recycle_wal_writes: std::collections::BTreeSet<&str> = trace
+        .iter()
+        .filter(|(k, kind, class, _)| *k < krec && kind == "PWriteV" && class == "Wal")
+        .map(|(_, _, _, path)| path.as_str())
+        .collect();
+    let k_reuse = trace
+        .iter()
+        .find(|(k, kind, class, path)| {
+            *k > krec
+                && kind == "PWriteV"
+                && class == "Wal"
+                && !path.contains("xlogtemp")
+                && !pre_recycle_wal_writes.contains(path.as_str())
+        })
+        .map(|(k, _, _, _)| *k);
+    (k_recycle, k_reuse)
+}
+
 /// inc-3 stratified cut-point selection over the scaled workload's op span
 /// (the span is too wide to sweep every op as a routine gate). Picks, in
-/// order: (1) EVERY durability/namespace/metadata op — fsyncs, renames
-/// (segment install + recycle), opens, unlinks, truncates, mkdirs; (2) ±1
-/// neighbors of every rename (the install/recycle windows); (3) evenly
-/// thinned class-boundary writes (first write after the active path class
-/// changed — WAL<->heap<->clog transitions); (4) a uniform stride over the
-/// remaining span. Deterministic in the trace alone.
-fn stratify(trace: &[(u64, String, String)], n: u64, cap: usize) -> Vec<u64> {
+/// order: (0) EVERY op inside the caller's dense windows (inc-4: the
+/// segment-recycle rename window and the recycled-segment reuse window);
+/// (1) EVERY durability/namespace/metadata op — fsyncs, renames (segment
+/// install + recycle), opens, unlinks, truncates, mkdirs; (2) ±1 neighbors
+/// of every rename (the install/recycle windows); (3) evenly thinned
+/// class-boundary writes (first write after the active path class changed —
+/// WAL<->heap<->clog transitions); (4) a uniform stride over the remaining
+/// span. Deterministic in the trace alone.
+///
+/// `target` is a soft size goal, not a hard cap (the inc-3 review's O2
+/// observation, resolved by renaming per its disposition): mandatory picks
+/// — window ops, durability ops, rename neighbors, the boundary-fill floor
+/// — may exceed it; only the optional stride fill respects it.
+fn stratify(
+    trace: &[(u64, String, String, String)],
+    n: u64,
+    target: usize,
+    windows: &[(u64, u64)],
+) -> Vec<u64> {
     use std::collections::BTreeSet;
     let mut pick: BTreeSet<u64> = BTreeSet::new();
-    for (k, kind, _) in trace {
+    for &(lo, hi) in windows {
+        for k in lo.max(1)..=hi.min(n) {
+            pick.insert(k);
+        }
+    }
+    for (k, kind, _, _) in trace {
         if matches!(
             kind.as_str(),
             "Fsync" | "Fdatasync" | "Rename" | "Unlink" | "Open" | "Ftruncate"
@@ -1144,7 +2161,7 @@ fn stratify(trace: &[(u64, String, String)], n: u64, cap: usize) -> Vec<u64> {
             pick.insert(*k);
         }
     }
-    for (k, kind, _) in trace {
+    for (k, kind, _, _) in trace {
         if kind == "Rename" {
             if *k > 1 {
                 pick.insert(k - 1);
@@ -1156,21 +2173,21 @@ fn stratify(trace: &[(u64, String, String)], n: u64, cap: usize) -> Vec<u64> {
     }
     let mut boundaries: Vec<u64> = Vec::new();
     let mut prev_class = String::new();
-    for (k, kind, class) in trace {
+    for (k, kind, class, _) in trace {
         if kind == "PWriteV" && *class != prev_class {
             boundaries.push(*k);
         }
         prev_class = class.clone();
     }
-    let room = cap.saturating_sub(pick.len()).max(20) / 2;
+    let room = target.saturating_sub(pick.len()).max(20) / 2;
     let step = (boundaries.len() / room.max(1)).max(1);
     for k in boundaries.iter().step_by(step) {
         pick.insert(*k);
     }
-    if pick.len() < cap {
-        let stride = (n.max(1) / (cap - pick.len()).max(1) as u64).max(1);
+    if pick.len() < target {
+        let stride = (n.max(1) / (target - pick.len()).max(1) as u64).max(1);
         let mut k = 1;
-        while k <= n && pick.len() < cap {
+        while k <= n && pick.len() < target {
             pick.insert(k);
             k += stride;
         }
@@ -1194,7 +2211,7 @@ fn product_shaped_crash_recovery_sweep() {
     std::fs::create_dir_all(&base).unwrap();
 
     // Fault-free baseline defines the op span and proves the writer rig.
-    let (rtext, meta) = run_point(&base, 0, false);
+    let (rtext, meta) = run_point(&base, 0, "", &[]);
     assert_eq!(meta_field(&meta, "acked"), TXNS.to_string(), "baseline acks all: {meta}");
     assert_eq!(meta_field(&meta, "cuts"), "0", "baseline must not cut: {meta}");
     assert!(
@@ -1207,22 +2224,41 @@ fn product_shaped_crash_recovery_sweep() {
     assert_eq!(trace.len() as u64, n, "trace must cover the whole workload span");
     // The inc-3 scale-up must actually reach its new cut classes.
     assert!(
-        trace.iter().any(|(_, kind, class)| kind == "Rename" && class == "Wal"),
+        trace.iter().any(|(_, kind, class, _)| kind == "Rename" && class == "Wal"),
         "workload must cross a WAL segment (install/recycle renames)"
     );
     assert!(
-        trace.iter().any(|(_, kind, class)| kind == "PWriteV" && class == "Heap"),
+        trace.iter().any(|(_, kind, class, _)| kind == "PWriteV" && class == "Heap"),
         "workload must write heap pages mid-run (multi-page + eviction)"
     );
+    // inc-4 SEGMENT-RECYCLE CUT CLASSES: the workload must both RECYCLE a
+    // segment (checkpoint-time RemoveOldXlogFiles rename to a future segno)
+    // and REUSE it (live WAL written over the stale residue) — an absent
+    // class would make the dense windows below vacuous.
+    let (k_recycle, k_reuse) = find_recycle_and_reuse(&trace);
+    let k_recycle = k_recycle.expect("workload must RECYCLE a segment (RemoveOldXlogFiles)");
+    let k_reuse =
+        k_reuse.expect("workload must REUSE the recycled segment (write over stale residue)");
+    assert!(k_reuse > k_recycle);
     let baseline_rows = marker_line(&rtext, "SIM_RECOVER_STATE").unwrap_or_default();
     assert!(
         baseline_rows.contains(&format!("visible_rows={}", TXNS * ROWS_PER_TXN)),
         "baseline fold must carry all rows: {baseline_rows}"
     );
 
-    let points = stratify(&trace, n, 180);
+    // Dense every-op windows around the two recycle-class anchors: the
+    // recycle window covers RemoveXlogFile's whole op neighborhood (lstat,
+    // rename, durable_rename's parent-dir fsync open/fsync/close, archive
+    // cleanup unlinks); the reuse window covers the recycled segment's open
+    // and its first stale-overwriting WAL writes.
+    let windows = [
+        (k_recycle.saturating_sub(8), k_recycle + 12),
+        (k_reuse.saturating_sub(2), k_reuse + 18),
+    ];
+    let points = stratify(&trace, n, 180, &windows);
     eprintln!(
-        "PRODUCT-SHAPED SWEEP: stratified {} cut points over {n} product-workload ops",
+        "PRODUCT-SHAPED SWEEP: stratified {} cut points over {n} product-workload ops \
+         (recycle rename k={k_recycle}, recycled-reuse first write k={k_reuse})",
         points.len()
     );
 
@@ -1237,7 +2273,7 @@ fn product_shaped_crash_recovery_sweep() {
                     break;
                 }
                 let k = points[i];
-                let (rtext, meta) = run_point(&base, k, false);
+                let (rtext, meta) = run_point(&base, k, "", &[]);
                 if meta_field(&meta, "cuts") == "0" {
                     failures
                         .lock()
@@ -1296,6 +2332,23 @@ fn normalize_pid(s: &str) -> String {
     out
 }
 
+/// Flatten a pack tree to (pid-normalized file name, bytes) pairs in sorted
+/// walk order — the byte-compare unit of the determinism gates.
+fn tree_digest(dir: &std::path::Path, acc: &mut Vec<(String, Vec<u8>)>) {
+    let mut entries: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap()).collect();
+    entries.sort_by_key(|e| e.file_name());
+    for e in entries {
+        if e.file_type().unwrap().is_dir() {
+            tree_digest(&e.path(), acc);
+        } else {
+            acc.push((
+                normalize_pid(e.path().to_str().unwrap().rsplit('/').next().unwrap()),
+                std::fs::read(e.path()).unwrap(),
+            ));
+        }
+    }
+}
+
 /// Same point, three fresh universes: byte-identical packs, metas (incl. the
 /// fault log) and recovered state (the replay-determinism gate, x3).
 /// inc-3 (review observation 2): the pinned points are ROTATED/WIDENED —
@@ -1312,34 +2365,23 @@ fn sweep_point_replay_determinism_x3() {
 
     // Re-derive the pins from the baseline op count/trace so they survive
     // workload evolution.
-    let (_, meta) = run_point(&base, 0, false);
+    let (_, meta) = run_point(&base, 0, "", &[]);
     let n: u64 = meta_field(&meta, "ops").parse().unwrap();
     let trace = parse_trace(&meta);
     let mut pins = vec![n / 4, n / 2, 3 * n / 4];
-    if let Some((k, _, _)) = trace
+    if let Some((k, _, _, _)) = trace
         .iter()
-        .find(|(_, kind, class)| kind == "Rename" && class == "Wal")
+        .find(|(_, kind, class, _)| kind == "Rename" && class == "Wal")
     {
-        pins.push(*k); // cut ON the segment install/recycle rename
+        pins.push(*k); // cut ON the segment install rename
     }
+    // inc-4 rotation: cut ON the recycle rename and ON the first write into
+    // the recycled segment (the new cut classes get their own replay pins).
+    let (k_recycle, k_reuse) = find_recycle_and_reuse(&trace);
+    pins.extend(k_recycle);
+    pins.extend(k_reuse);
     pins.sort_unstable();
     pins.dedup();
-
-    fn tree_digest(dir: &std::path::Path, acc: &mut Vec<(String, Vec<u8>)>) {
-        let mut entries: Vec<_> =
-            std::fs::read_dir(dir).unwrap().map(|e| e.unwrap()).collect();
-        entries.sort_by_key(|e| e.file_name());
-        for e in entries {
-            if e.file_type().unwrap().is_dir() {
-                tree_digest(&e.path(), acc);
-            } else {
-                acc.push((
-                    normalize_pid(e.path().to_str().unwrap().rsplit('/').next().unwrap()),
-                    std::fs::read(e.path()).unwrap(),
-                ));
-            }
-        }
-    }
 
     for &k in &pins {
         let mut runs: Vec<(Vec<(String, Vec<u8>)>, String, String)> = Vec::new();
@@ -1408,7 +2450,7 @@ fn red_product_fsync_disabled_is_caught() {
     let base = std::env::temp_dir().join(format!("pgrust_simred_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&base).unwrap();
-    let (rtext, meta) = run_point(&base, 0, true);
+    let (rtext, meta) = run_point(&base, 0, "fsync", &[]);
     let _ = std::fs::remove_dir_all(&base);
 
     assert_eq!(
@@ -1420,6 +2462,224 @@ fn red_product_fsync_disabled_is_caught() {
         rtext.contains("VIOLATION:") && rtext.contains("ACKED txn"),
         "the sweep must flag the acked-data loss of the fsync-disabled arm:\n{rtext}"
     );
+}
+
+/// inc-4 RED (recycle-window class): an over-eager recycle durably renames
+/// a segment the redo horizon still NEEDS to a future segno (bypassing
+/// RemoveOldXlogFiles' `fname <= lastoff` horizon guard from beneath), then
+/// the node dies. The sweep must flag the unrecoverable image — property 1
+/// (recovery completes) is the tooth. If this ever comes back clean, cuts
+/// in the recycle window stopped proving anything.
+#[test]
+fn red_overeager_recycle_of_needed_segment_is_caught() {
+    if std::env::var(ROLE_ENV).is_ok() {
+        return;
+    }
+    let base = std::env::temp_dir().join(format!("pgrust_simredrec_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let (rtext, meta) = run_point(&base, 0, "recycle-needed", &[]);
+    let _ = std::fs::remove_dir_all(&base);
+
+    assert_eq!(meta_field(&meta, "acked"), "8", "red arm acks through txn 8: {meta}");
+    assert_eq!(meta_field(&meta, "cuts"), "1", "red arm must cut: {meta}");
+    assert!(
+        rtext.contains("VIOLATION:")
+            && (rtext.contains("RECOVERY FAILED") || rtext.contains("RECOVERY PANICKED")),
+        "the sweep must flag the over-eager recycle as a recovery-completeness \
+         violation:\n{rtext}"
+    );
+}
+
+/// inc-4 RED (recycled-reuse class): VALIDATING stale residue at the WAL
+/// tail — a fully valid commit record for a future txn's xid, planted
+/// durably beneath the product. Recovery cannot tell it from real WAL and
+/// replays it; the clog-prefix property must catch the stale replay. The
+/// green reuse-window sweep + this red together prove the reuse cut class
+/// has teeth: honest recycled residue is rejected (xlp_pageaddr/CRC), and
+/// if residue ever validated, the sweep would see it.
+#[test]
+fn red_stale_recycled_residue_replay_is_caught() {
+    if std::env::var(ROLE_ENV).is_ok() {
+        return;
+    }
+    let base = std::env::temp_dir().join(format!("pgrust_simredstale_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let (rtext, meta) = run_point(&base, 0, "stale-residue", &[]);
+    let _ = std::fs::remove_dir_all(&base);
+
+    assert_eq!(meta_field(&meta, "acked"), "7", "red arm acks through txn 7: {meta}");
+    assert_eq!(meta_field(&meta, "cuts"), "1", "red arm must cut: {meta}");
+    assert!(
+        rtext.contains("VIOLATION:") && rtext.contains("clog commit gap"),
+        "the sweep must flag the replayed stale commit as a clog-prefix gap:\n{rtext}"
+    );
+}
+
+/// inc-4 arm (b): the CUT-SWEEP OVER THE REAL-INITDB IMAGE. The writer
+/// boots a real C-initdb datadir through the t28 provider seam
+/// (compose_boot_namespace: process-shared universe, durable-from-birth
+/// ingest, boot cwd), runs the product workload over the REAL datadir
+/// composition (real control file, real 16 MB segment, real clog/xid range,
+/// real catalog namespace), and the stratified cut distribution runs over
+/// those ops; recovery is the product StartupXLOG over the packed post-cut
+/// composition, re-composed through the same seam. Plus the arm's own red
+/// (product fsync knob) and an x3 replay-determinism pin.
+#[test]
+fn initdb_image_cut_sweep() {
+    if std::env::var(ROLE_ENV).is_ok() {
+        return;
+    }
+    let Some(dd) = find_or_mint_initdb_dd("sweep") else {
+        eprintln!(
+            "SKIP initdb_image_cut_sweep: no C PostgreSQL 18 initdb found \
+             (set {INITDB_ENV} or install to /opt/homebrew/bin) — flagged, not silent"
+        );
+        return;
+    };
+    let base = std::env::temp_dir().join(format!("pgrust_simsweep_dd_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    // Empty share dir: the recovery entry point never consults share assets
+    // (inc-2 COMPOSE FINDING 1 scope fact); manifest roots that do not exist
+    // under it are skipped as part of the world identity.
+    let share = base.join("empty_share");
+    std::fs::create_dir_all(&share).unwrap();
+    let extra: Vec<(&str, String)> = vec![
+        (ARM_ENV, "initdb".into()),
+        (INITDB_ENV, dd.to_str().unwrap().into()),
+        ("PGRUST_PGSHAREDIR", share.to_str().unwrap().into()),
+    ];
+
+    // Fault-free baseline: proves the composed writer rig and defines the
+    // op span for the stratifier.
+    let (rtext, meta) = run_point(&base, 0, "", &extra);
+    assert_eq!(
+        meta_field(&meta, "acked"),
+        INITDB_TXNS.to_string(),
+        "initdb baseline acks all: {meta}"
+    );
+    assert_eq!(meta_field(&meta, "cuts"), "0", "initdb baseline must not cut: {meta}");
+    assert_eq!(meta_field(&meta, "arm"), "initdb", "{meta}");
+    assert!(
+        rtext.contains("SIM_RECOVER_DONE violations=0"),
+        "initdb baseline recovery must be clean:\n{rtext}"
+    );
+    let base_xid: u32 = meta_field(&meta, "base_xid").parse().unwrap();
+    assert!(base_xid > 3, "initdb arm must run in the REAL xid range, got {base_xid}");
+    let n: u64 = meta_field(&meta, "ops").parse().unwrap();
+    assert!(n > 100, "initdb workload too small to stratify ({n} ops)");
+    let trace = parse_trace(&meta);
+    assert_eq!(trace.len() as u64, n, "trace must cover the whole workload span");
+    let baseline_state = marker_line(&rtext, "SIM_RECOVER_STATE").unwrap_or_default();
+    assert!(
+        baseline_state.contains(&format!("visible_rows={}", INITDB_TXNS * ROWS_PER_TXN)),
+        "initdb baseline fold must carry all rows: {baseline_state}"
+    );
+
+    let points = stratify(&trace, n, 60, &[]);
+    eprintln!(
+        "INITDB-IMAGE SWEEP: stratified {} cut points over {n} ops on the composed \
+         real-initdb datadir (base_xid={base_xid})",
+        points.len()
+    );
+
+    let failures = std::sync::Mutex::new(Vec::<String>::new());
+    let cut_points = std::sync::atomic::AtomicU64::new(0);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|s| {
+        for _ in 0..6 {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if i >= points.len() {
+                    break;
+                }
+                let k = points[i];
+                let (rtext, meta) = run_point(&base, k, "", &extra);
+                if meta_field(&meta, "cuts") == "0" {
+                    failures
+                        .lock()
+                        .unwrap()
+                        .push(format!("initdb k={k}: planned cut never fired"));
+                    continue;
+                }
+                cut_points.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                for line in rtext.lines() {
+                    if let Some(i) = line.find("VIOLATION: ") {
+                        failures.lock().unwrap().push(line[i + 11..].to_string());
+                    }
+                }
+            });
+        }
+    });
+    let cut_points = cut_points.into_inner();
+    let failures_v = failures.into_inner().unwrap();
+    eprintln!(
+        "INITDB-IMAGE SWEEP: {cut_points} cut points over {n} ops \
+         ({INITDB_TXNS} txns x {ROWS_PER_TXN} rows + 1 product checkpoint, \
+         whole-node kill, provider-seam composition), {} violations",
+        failures_v.len()
+    );
+    assert_eq!(cut_points as usize, points.len(), "every initdb sweep point must cut");
+    assert!(
+        failures_v.is_empty(),
+        "INITDB-IMAGE CRASH-RECOVERY VIOLATIONS ({}):\n{}",
+        failures_v.len(),
+        failures_v.join("\n")
+    );
+
+    // The arm's RED: the product fsync knob off — acked-loss must be caught
+    // on the composed image too (teeth end-to-end for this arm).
+    let (rtext, meta) = run_point(&base, 0, "fsync", &extra);
+    assert_eq!(meta_field(&meta, "acked"), INITDB_TXNS.to_string(), "{meta}");
+    assert!(
+        rtext.contains("VIOLATION:") && rtext.contains("ACKED txn"),
+        "the initdb arm must flag acked-data loss when the product fsync layer \
+         is disabled:\n{rtext}"
+    );
+
+    // Replay determinism x3 at the mid-workload pin: byte-identical packs
+    // (the whole composed post-cut datadir), metas (incl. the fault log and
+    // the SIM-ASSETS content identity) and recovered state.
+    let pin = n / 2;
+    let mut runs: Vec<(Vec<(String, Vec<u8>)>, String, String)> = Vec::new();
+    for rep in 0..3 {
+        let pack = base.join(format!("dddet_k{pin}_rep{rep}"));
+        let mut wenvs: Vec<(&str, String)> = vec![
+            (ROLE_ENV, "writer".into()),
+            (K_ENV, pin.to_string()),
+            (PACK_ENV, pack.to_str().unwrap().into()),
+            (RED_ENV, String::new()),
+        ];
+        wenvs.extend(extra.iter().cloned());
+        let (ok, _) = spawn_child("sim_sweep_writer_child", &wenvs);
+        assert!(ok);
+        let mut renvs: Vec<(&str, String)> = vec![
+            (ROLE_ENV, "recover".into()),
+            (PACK_ENV, pack.to_str().unwrap().into()),
+        ];
+        renvs.extend(extra.iter().cloned());
+        let (ok, rtext) = spawn_child("sim_sweep_recover_child", &renvs);
+        assert!(ok, "initdb det recover k={pin} rep {rep} failed:\n{rtext}");
+        let mut tree = Vec::new();
+        tree_digest(&pack.join("root"), &mut tree);
+        let meta = normalize_pid(&std::fs::read_to_string(pack.join("meta.txt")).unwrap());
+        let state = marker_line(&rtext, "SIM_RECOVER_STATE")
+            .unwrap_or_else(|| "MISSING".to_string());
+        assert_ne!(state, "MISSING", "initdb det k={pin} rep {rep}: state line absent");
+        runs.push((tree, meta, state));
+        let _ = std::fs::remove_dir_all(&pack);
+    }
+    assert!(runs[0].1.contains("cuts=1"), "initdb det pin must cut: {}", runs[0].1);
+    for rep in 1..3 {
+        assert_eq!(runs[0].0, runs[rep].0, "initdb det k={pin}: pack trees differ");
+        assert_eq!(runs[0].1, runs[rep].1, "initdb det k={pin}: metas differ");
+        assert_eq!(runs[0].2, runs[rep].2, "initdb det k={pin}: recovered state differs");
+    }
+    eprintln!("INITDB DETERMINISM x3 OK at k={pin}: {}", runs[0].2);
+
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// Item 1 of the inc-2 charter: a REAL (C PostgreSQL 18) initdb'd datadir
@@ -1435,13 +2695,10 @@ fn red_product_fsync_disabled_is_caught() {
 /// Needs a native C initdb (the wasm-boot prereq): set PGRUST_SIM_SWEEP_INITDB_DD
 /// to a pre-minted datadir, or have initdb on the wasm-boot probe paths.
 /// Skips LOUDLY when absent.
-#[test]
-fn initdb_datadir_boots_under_sim() {
-    if std::env::var(ROLE_ENV).is_ok() {
-        return;
-    }
-    // Find or mint a native datadir.
-    let dd: Option<std::path::PathBuf> = match std::env::var(INITDB_ENV) {
+/// Find (env override) or mint (native C initdb) a real datadir; None when
+/// no initdb exists on this box — callers must SKIP LOUDLY, never silently.
+fn find_or_mint_initdb_dd(tag: &str) -> Option<std::path::PathBuf> {
+    match std::env::var(INITDB_ENV) {
         Ok(p) => Some(std::path::PathBuf::from(p)),
         Err(_) => {
             let mut found = None;
@@ -1453,7 +2710,7 @@ fn initdb_datadir_boots_under_sim() {
             }
             found.map(|initdb| {
                 let dd = std::env::temp_dir()
-                    .join(format!("pgrust_sim_initdb_{}", std::process::id()));
+                    .join(format!("pgrust_sim_initdb_{tag}_{}", std::process::id()));
                 let _ = std::fs::remove_dir_all(&dd);
                 let out = std::process::Command::new(initdb)
                     .args([
@@ -1476,8 +2733,15 @@ fn initdb_datadir_boots_under_sim() {
                 dd
             })
         }
-    };
-    let Some(dd) = dd else {
+    }
+}
+
+#[test]
+fn initdb_datadir_boots_under_sim() {
+    if std::env::var(ROLE_ENV).is_ok() {
+        return;
+    }
+    let Some(dd) = find_or_mint_initdb_dd("boot") else {
         eprintln!(
             "SKIP initdb_datadir_boots_under_sim: no C PostgreSQL 18 initdb found \
              (set {INITDB_ENV} or install to /opt/homebrew/bin) — flagged, not silent"
@@ -1530,5 +2794,560 @@ fn sim_initdb_boot_child() {
     println!(
         "SIM_INITDB_BOOT_OK sysid={:#x} ckpt={:#x} tli={}",
         cf.system_identifier, cf.checkPoint, cf.checkPointCopy.ThisTimeLineID
+    );
+}
+
+// ---------------------------------------------------------------------------
+// inc-5 arms: INDEX LANE (btree), TORN-WRITE (FPW repair), EMFILE battery
+// ---------------------------------------------------------------------------
+
+/// inc-5 INDEX LANE: the btree-arm crash-recovery sweep. The workload drives
+/// the PRODUCT's btinsert per heap row (leaf inserts, page splits, NEWROOT in
+/// WAL), checkpoints flush index pages (index-file write/fsync cut class),
+/// txn 6 heap-deletes txn 1's rows and the product btbulkdelete removes their
+/// index entries (the VACUUM cut-class window). Cuts land densely around the
+/// first index-file write and inside the vacuum window, plus the standard
+/// stratification; recovery must satisfy the heap properties AND the index
+/// walk/order/coverage properties at every point. Ends with the arm's
+/// replay-determinism x3 at two rotated pins.
+#[test]
+fn btree_index_crash_recovery_sweep() {
+    if std::env::var(ROLE_ENV).is_ok() {
+        return;
+    }
+    let base = std::env::temp_dir().join(format!("pgrust_simsweep_bt_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let extra: Vec<(&str, String)> = vec![(ARM_ENV, "btree".into())];
+
+    let (rtext, meta) = run_point(&base, 0, "", &extra);
+    assert_eq!(meta_field(&meta, "acked"), BT_TXNS.to_string(), "btree baseline acks all: {meta}");
+    assert_eq!(meta_field(&meta, "cuts"), "0", "btree baseline must not cut: {meta}");
+    assert!(
+        rtext.contains("SIM_RECOVER_DONE violations=0"),
+        "btree baseline recovery must be clean:\n{rtext}"
+    );
+    let baseline_state = marker_line(&rtext, "SIM_RECOVER_STATE").unwrap_or_default();
+    assert!(
+        baseline_state.contains(&format!("visible_rows={}", 6 * BT_ROWS)),
+        "btree baseline fold: 6 insert txns survive the delete txn: {baseline_state}"
+    );
+    let n: u64 = meta_field(&meta, "ops").parse().unwrap();
+    let trace = parse_trace(&meta);
+    assert_eq!(trace.len() as u64, n, "trace must cover the whole workload span");
+    // The index cut classes must EXIST: index-file page writes + the vacuum
+    // window (btbulkdelete removed exactly txn 1's entries).
+    let idx_path_frag = format!("/base/5/{IDX_OID}");
+    let k_idx = trace
+        .iter()
+        .find(|(_, kind, _, path)| kind == "PWriteV" && path.contains(&idx_path_frag))
+        .map(|(k, _, _, _)| *k)
+        .expect("workload must flush btree index pages (checkpoint wave)");
+    let vac_lo: u64 = meta_field(&meta, "vac_lo").parse().unwrap();
+    let vac_hi: u64 = meta_field(&meta, "vac_hi").parse().unwrap();
+    assert!(vac_lo < vac_hi && vac_hi <= n);
+    assert_eq!(
+        meta_field(&meta, "vac_removed"),
+        BT_ROWS.to_string(),
+        "btbulkdelete must remove exactly txn 1's index entries: {meta}"
+    );
+
+    let windows = [
+        (k_idx.saturating_sub(2), k_idx + 10),
+        (vac_lo, vac_hi.min(vac_lo + 18)),
+    ];
+    let points = stratify(&trace, n, 90, &windows);
+    eprintln!(
+        "BTREE-INDEX SWEEP: stratified {} cut points over {n} ops \
+         (first index-page write k={k_idx}, vacuum window [{vac_lo},{vac_hi}])",
+        points.len()
+    );
+
+    let failures = std::sync::Mutex::new(Vec::<String>::new());
+    let cut_points = std::sync::atomic::AtomicU64::new(0);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|s| {
+        for _ in 0..6 {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if i >= points.len() {
+                    break;
+                }
+                let k = points[i];
+                let (rtext, meta) = run_point(&base, k, "", &extra);
+                if meta_field(&meta, "cuts") == "0" {
+                    failures
+                        .lock()
+                        .unwrap()
+                        .push(format!("btree k={k}: planned cut never fired"));
+                    continue;
+                }
+                cut_points.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                for line in rtext.lines() {
+                    if let Some(i) = line.find("VIOLATION: ") {
+                        failures.lock().unwrap().push(line[i + 11..].to_string());
+                    }
+                }
+            });
+        }
+    });
+    let cut_points = cut_points.into_inner();
+    let failures_v = failures.into_inner().unwrap();
+    eprintln!(
+        "BTREE-INDEX SWEEP: {cut_points} cut points over {n} ops \
+         ({BT_TXNS} txns x {BT_ROWS} rows, delete txn {BT_DELETE_TXN} + product \
+         btbulkdelete, whole-node kill), {} violations",
+        failures_v.len()
+    );
+    assert_eq!(cut_points as usize, points.len(), "every btree sweep point must cut");
+    assert!(
+        failures_v.is_empty(),
+        "BTREE-INDEX CRASH-RECOVERY VIOLATIONS ({}):\n{}",
+        failures_v.len(),
+        failures_v.join("\n")
+    );
+
+    // Replay determinism x3 at two rotated pins: mid-span and inside the
+    // vacuum window (the new cut class gets its own pin).
+    for pin in [n / 2, vac_lo + 2] {
+        let mut runs: Vec<(Vec<(String, Vec<u8>)>, String, String)> = Vec::new();
+        for rep in 0..3 {
+            let pack = base.join(format!("btdet_k{pin}_rep{rep}"));
+            let mut wenvs: Vec<(&str, String)> = vec![
+                (ROLE_ENV, "writer".into()),
+                (K_ENV, pin.to_string()),
+                (PACK_ENV, pack.to_str().unwrap().into()),
+                (RED_ENV, String::new()),
+            ];
+            wenvs.extend(extra.iter().cloned());
+            let (ok, _) = spawn_child("sim_sweep_writer_child", &wenvs);
+            assert!(ok);
+            let mut renvs: Vec<(&str, String)> = vec![
+                (ROLE_ENV, "recover".into()),
+                (PACK_ENV, pack.to_str().unwrap().into()),
+            ];
+            renvs.extend(extra.iter().cloned());
+            let (ok, rtext) = spawn_child("sim_sweep_recover_child", &renvs);
+            assert!(ok, "btree det recover k={pin} rep {rep} failed:\n{rtext}");
+            let mut tree = Vec::new();
+            tree_digest(&pack.join("root"), &mut tree);
+            let m = normalize_pid(&std::fs::read_to_string(pack.join("meta.txt")).unwrap());
+            let state = marker_line(&rtext, "SIM_RECOVER_STATE")
+                .unwrap_or_else(|| "MISSING".to_string());
+            assert_ne!(state, "MISSING", "btree det k={pin} rep {rep}: state line absent");
+            runs.push((tree, m, state));
+            let _ = std::fs::remove_dir_all(&pack);
+        }
+        assert!(runs[0].1.contains("cuts=1"), "btree det pin k={pin} must cut");
+        for rep in 1..3 {
+            assert_eq!(runs[0].0, runs[rep].0, "btree det k={pin}: pack trees differ");
+            assert_eq!(runs[0].1, runs[rep].1, "btree det k={pin}: metas differ");
+            assert_eq!(runs[0].2, runs[rep].2, "btree det k={pin}: recovered state differs");
+        }
+        eprintln!("BTREE DETERMINISM x3 OK at k={pin}: {}", runs[0].2);
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// inc-5 RED (index lane): a lost index page. Ascending keys leave the
+/// leftmost leaf untouched after the txn-3 checkpoint; the red zeroes it
+/// durably beneath the product and cuts. No post-checkpoint WAL (hence no
+/// FPI) covers that page, so recovery cannot restore it — the index
+/// walk/coverage properties must flag the loss. If this comes back green,
+/// the index-lane sweep lost its teeth.
+#[test]
+fn red_stale_btree_page_is_caught() {
+    if std::env::var(ROLE_ENV).is_ok() {
+        return;
+    }
+    let base = std::env::temp_dir().join(format!("pgrust_simredbt_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let extra: Vec<(&str, String)> = vec![(ARM_ENV, "btree".into())];
+    let (rtext, meta) = run_point(&base, 0, "idx-stale", &extra);
+    let _ = std::fs::remove_dir_all(&base);
+
+    assert_eq!(meta_field(&meta, "acked"), "5", "idx-stale red acks txns 1-5: {meta}");
+    assert_eq!(meta_field(&meta, "cuts"), "1", "idx-stale red must cut: {meta}");
+    assert!(
+        rtext.contains("VIOLATION:") && rtext.contains("index"),
+        "the sweep must flag the zeroed pre-checkpoint index leaf via the \
+         index properties:\n{rtext}"
+    );
+}
+
+/// inc-5 TORN-WRITE arm (product-shaped FPW proof): cut points that crash
+/// MID-WRITE on data-plane writes, the surviving prefix floored to the 512 B
+/// sector atomicity floor. Torn HEAP-page flushes must be repaired by
+/// recovery from full-page images (WAL-before-data: the FPI is durable
+/// before any page write); torn WAL-tail writes must be truncated at the
+/// guards (CRC/pageaddr) with every acked commit before them intact.
+#[test]
+fn torn_write_fpw_repair_sweep() {
+    if std::env::var(ROLE_ENV).is_ok() {
+        return;
+    }
+    let base = std::env::temp_dir().join(format!("pgrust_simtorn_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+
+    let (_, meta) = run_point(&base, 0, "", &[]);
+    let trace = parse_trace(&meta);
+    let class_writes = |class: &str| -> Vec<u64> {
+        trace
+            .iter()
+            .filter(|(_, kind, c, _)| kind == "PWriteV" && c == class)
+            .map(|(k, _, _, _)| *k)
+            .collect()
+    };
+    let heap_ws = class_writes("Heap");
+    let wal_ws = class_writes("Wal");
+    assert!(heap_ws.len() >= 20, "workload must flush heap pages ({})", heap_ws.len());
+    assert!(wal_ws.len() >= 20, "workload must write WAL ({})", wal_ws.len());
+    // Evenly spread torn points: the j-th class write, torn at a seeded
+    // sector prefix (1..15 sectors of an 8 KB page).
+    let mut specs: Vec<(String, u64)> = Vec::new();
+    for i in 0..10u64 {
+        let j = 1 + i * (heap_ws.len() as u64 - 1) / 9;
+        let p = 512 * (1 + per_point_seed(heap_ws[(j - 1) as usize]) % 15);
+        specs.push((format!("heap:{j}:{p}"), heap_ws[(j - 1) as usize]));
+    }
+    for i in 0..6u64 {
+        let j = 1 + i * (wal_ws.len() as u64 - 1) / 5;
+        let p = 512 * (1 + per_point_seed(wal_ws[(j - 1) as usize]) % 15);
+        specs.push((format!("wal:{j}:{p}"), wal_ws[(j - 1) as usize]));
+    }
+    eprintln!("TORN-WRITE SWEEP: {} torn points (heap + wal classes)", specs.len());
+
+    let failures = std::sync::Mutex::new(Vec::<String>::new());
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|s| {
+        for _ in 0..6 {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if i >= specs.len() {
+                    break;
+                }
+                let (spec, k) = &specs[i];
+                let tag = format!("_torn_{}", spec.replace(':', "_"));
+                let extra: Vec<(&str, String)> = vec![(TORN_ENV, spec.clone())];
+                let (rtext, meta) = run_point_tagged(&base, 0, "", &extra, &tag);
+                if meta_field(&meta, "cuts") != "1" {
+                    failures
+                        .lock()
+                        .unwrap()
+                        .push(format!("torn {spec} (trace k={k}): cut never fired"));
+                    continue;
+                }
+                if !meta.contains("faultlog: TORN") {
+                    failures
+                        .lock()
+                        .unwrap()
+                        .push(format!("torn {spec}: no TORN fault-log entry"));
+                }
+                for line in rtext.lines() {
+                    if let Some(i) = line.find("VIOLATION: ") {
+                        failures
+                            .lock()
+                            .unwrap()
+                            .push(format!("torn {spec}: {}", &line[i + 11..]));
+                    }
+                }
+            });
+        }
+    });
+    let failures_v = failures.into_inner().unwrap();
+    eprintln!(
+        "TORN-WRITE SWEEP: {} torn points, {} violations",
+        specs.len(),
+        failures_v.len()
+    );
+    assert!(
+        failures_v.is_empty(),
+        "TORN-WRITE VIOLATIONS ({}):\n{}",
+        failures_v.len(),
+        failures_v.join("\n")
+    );
+
+    // Replay determinism x3 at one torn heap point (seeded tear prefix +
+    // seeded crash-image subset must reproduce byte-identically).
+    let (spec, _) = &specs[4];
+    let mut runs: Vec<(Vec<(String, Vec<u8>)>, String, String)> = Vec::new();
+    for rep in 0..3 {
+        let pack = base.join(format!("torndet_rep{rep}"));
+        let (ok, _) = spawn_child(
+            "sim_sweep_writer_child",
+            &[
+                (ROLE_ENV, "writer".into()),
+                (K_ENV, "0".into()),
+                (PACK_ENV, pack.to_str().unwrap().into()),
+                (RED_ENV, String::new()),
+                (TORN_ENV, spec.clone()),
+            ],
+        );
+        assert!(ok);
+        let (ok, rtext) = spawn_child(
+            "sim_sweep_recover_child",
+            &[
+                (ROLE_ENV, "recover".into()),
+                (PACK_ENV, pack.to_str().unwrap().into()),
+            ],
+        );
+        assert!(ok, "torn det rep {rep} failed:\n{rtext}");
+        let mut tree = Vec::new();
+        tree_digest(&pack.join("root"), &mut tree);
+        let m = normalize_pid(&std::fs::read_to_string(pack.join("meta.txt")).unwrap());
+        let state =
+            marker_line(&rtext, "SIM_RECOVER_STATE").unwrap_or_else(|| "MISSING".to_string());
+        assert_ne!(state, "MISSING");
+        runs.push((tree, m, state));
+        let _ = std::fs::remove_dir_all(&pack);
+    }
+    for rep in 1..3 {
+        assert_eq!(runs[0].0, runs[rep].0, "torn det: pack trees differ");
+        assert_eq!(runs[0].1, runs[rep].1, "torn det: metas differ");
+        assert_eq!(runs[0].2, runs[rep].2, "torn det: recovered state differs");
+    }
+    eprintln!("TORN DETERMINISM x3 OK ({spec}): {}", runs[0].2);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// inc-5 RED (torn-write class): the product's full-page-writes knob OFF,
+/// then a torn heap-page flush. Without an FPI the torn page cannot be
+/// rebuilt (the record-level redo is LSN-skipped by the surviving new page
+/// header) — the fold/recovery properties must flag the damage. Proves the
+/// green sweep's cleanliness IS the FPW guarantee, not an accident.
+#[test]
+fn red_torn_write_without_fpw_is_caught() {
+    if std::env::var(ROLE_ENV).is_ok() {
+        return;
+    }
+    let base = std::env::temp_dir().join(format!("pgrust_simredfpw_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    // FPW only matters for pages whose history STRADDLES a completed
+    // checkpoint: replay rebuilds any younger page from self-contained
+    // insert records alone. So the tear must hit the REWRITE of a page that
+    // the first checkpoint already flushed durably (its pre-redo-point rows
+    // exist only on disk): pick the first heap write AFTER the first
+    // heap-file fsync whose page offset was also written BEFORE it. Heap
+    // write ranks are FPW-independent (same rows, same pages), so the green
+    // baseline's rank carries to the FPW-off run.
+    let (_, meta) = run_point(&base, 0, "", &[]);
+    let heap_ops: Vec<(u64, String, i64)> = meta
+        .lines()
+        .filter_map(|l| l.strip_prefix("optrace: "))
+        .filter(|l| l.contains("class=Heap"))
+        .filter_map(|l| {
+            let mut k = None;
+            let mut kind = None;
+            let mut off = None;
+            for w in l.split_whitespace() {
+                if let Some(v) = w.strip_prefix("k=") {
+                    k = v.parse().ok();
+                } else if let Some(v) = w.strip_prefix("kind=") {
+                    kind = Some(v.to_string());
+                } else if let Some(v) = w.strip_prefix("off=") {
+                    off = v.parse().ok();
+                }
+            }
+            Some((k?, kind?, off.unwrap_or(-1)))
+        })
+        .collect();
+    let k_fsync1 = heap_ops
+        .iter()
+        .find(|(_, kind, _)| kind == "Fsync" || kind == "Fdatasync")
+        .map(|(k, _, _)| *k)
+        .expect("checkpoint must fsync heap files");
+    let pre: std::collections::BTreeSet<i64> = heap_ops
+        .iter()
+        .filter(|(k, kind, _)| *k < k_fsync1 && kind == "PWriteV")
+        .map(|(_, _, off)| *off)
+        .collect();
+    let mut j: u64 = 0;
+    let mut rewrite_rank: Option<u64> = None;
+    for (k, kind, off) in &heap_ops {
+        if kind == "PWriteV" {
+            j += 1;
+            if *k > k_fsync1 && pre.contains(off) {
+                rewrite_rank = Some(j);
+                break;
+            }
+        }
+    }
+    let j = rewrite_rank
+        .expect("a checkpointed heap page must be rewritten later (partial-page refill)");
+    let extra: Vec<(&str, String)> = vec![(TORN_ENV, format!("heap:{j}:1024"))];
+    let (rtext, meta) = run_point(&base, 0, "fpw-torn", &extra);
+    let _ = std::fs::remove_dir_all(&base);
+
+    assert_eq!(meta_field(&meta, "cuts"), "1", "fpw-torn red must cut mid-write: {meta}");
+    assert!(meta.contains("faultlog: TORN"), "fpw-torn red must tear: {meta}");
+    assert!(
+        rtext.contains("VIOLATION:"),
+        "with full-page writes disabled the torn heap page must be caught:\n{rtext}"
+    );
+}
+
+/// inc-5 EMFILE battery: file-descriptor exhaustion injected at swept Open
+/// points. `once` legs (a single EMFILE) must be absorbed by the fd layer's
+/// LRU-release retry (degrade cleanly) or fail loudly; `sticky` legs (every
+/// open fails from the j-th on) must stop the engine loudly. In EVERY case
+/// the post-regime crash image must recover with zero property violations —
+/// degraded, loud, but never corrupt.
+#[test]
+fn emfile_exhaustion_battery() {
+    if std::env::var(ROLE_ENV).is_ok() {
+        return;
+    }
+    let base = std::env::temp_dir().join(format!("pgrust_simemf_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+
+    let (_, meta) = run_point(&base, 0, "", &[]);
+    let trace = parse_trace(&meta);
+    let n_open = trace.iter().filter(|(_, kind, _, _)| kind == "Open").count() as u64;
+    assert!(n_open >= 8, "workload must open files ({n_open} opens)");
+
+    let mut specs: Vec<String> = Vec::new();
+    for i in 0..8u64 {
+        specs.push(format!("once:{}", 1 + i * (n_open - 1) / 7));
+    }
+    for i in 0..5u64 {
+        specs.push(format!("sticky:{}", 1 + i * (n_open - 1) / 4));
+    }
+    eprintln!("EMFILE BATTERY: {} injection points over {n_open} opens", specs.len());
+
+    let results = std::sync::Mutex::new(Vec::<(String, u32, String, usize)>::new());
+    let failures = std::sync::Mutex::new(Vec::<String>::new());
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|s| {
+        for _ in 0..6 {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if i >= specs.len() {
+                    break;
+                }
+                let spec = &specs[i];
+                let tag = format!("_emf_{}", spec.replace(':', "_"));
+                let extra: Vec<(&str, String)> = vec![(EMFILE_ENV, spec.clone())];
+                let (rtext, meta) = run_point_tagged(&base, 0, "", &extra, &tag);
+                let acked: u32 = meta_field(&meta, "acked").parse().unwrap();
+                let stopped = meta_field(&meta, "stopped");
+                let nviol = rtext.lines().filter(|l| l.contains("VIOLATION: ")).count();
+                if meta_field(&meta, "cuts") != "1" {
+                    failures
+                        .lock()
+                        .unwrap()
+                        .push(format!("emfile {spec}: end-of-regime cut missing"));
+                }
+                // Fail LOUDLY or complete: a partial run without a loud stop
+                // would be a silent-degradation bug.
+                if acked < TXNS && stopped == "-" {
+                    failures.lock().unwrap().push(format!(
+                        "emfile {spec}: silent degradation (acked {acked}/{TXNS}, no stop)"
+                    ));
+                }
+                for line in rtext.lines() {
+                    if let Some(p) = line.find("VIOLATION: ") {
+                        failures
+                            .lock()
+                            .unwrap()
+                            .push(format!("emfile {spec}: {}", &line[p + 11..]));
+                    }
+                }
+                results.lock().unwrap().push((spec.clone(), acked, stopped, nviol));
+            });
+        }
+    });
+    let mut results = results.into_inner().unwrap();
+    results.sort();
+    let mut absorbed = 0;
+    for (spec, acked, stopped, nviol) in &results {
+        eprintln!("EMFILE {spec}: acked={acked}/{TXNS} stopped={stopped} violations={nviol}");
+        if spec.starts_with("once:") && *acked == TXNS && stopped == "-" {
+            absorbed += 1;
+        }
+    }
+    let failures_v = failures.into_inner().unwrap();
+    assert!(
+        failures_v.is_empty(),
+        "EMFILE BATTERY FAILURES ({}):\n{}",
+        failures_v.len(),
+        failures_v.join("\n")
+    );
+    // The fd layer's EMFILE machinery (ReleaseLruFile retry) must absorb at
+    // least one single-shot injection transparently, or the battery is not
+    // actually exercising the native degrade path.
+    assert!(
+        absorbed >= 1,
+        "no once-EMFILE point was absorbed by the fd LRU-release retry:\n{results:?}"
+    );
+
+    // Replay determinism x3 at one sticky exhaustion point.
+    let spec = specs.last().unwrap().clone();
+    let mut runs: Vec<(Vec<(String, Vec<u8>)>, String, String)> = Vec::new();
+    for rep in 0..3 {
+        let pack = base.join(format!("emfdet_rep{rep}"));
+        let (ok, _) = spawn_child(
+            "sim_sweep_writer_child",
+            &[
+                (ROLE_ENV, "writer".into()),
+                (K_ENV, "0".into()),
+                (PACK_ENV, pack.to_str().unwrap().into()),
+                (RED_ENV, String::new()),
+                (EMFILE_ENV, spec.clone()),
+            ],
+        );
+        assert!(ok);
+        let (ok, rtext) = spawn_child(
+            "sim_sweep_recover_child",
+            &[
+                (ROLE_ENV, "recover".into()),
+                (PACK_ENV, pack.to_str().unwrap().into()),
+            ],
+        );
+        assert!(ok, "emfile det rep {rep} failed:\n{rtext}");
+        let mut tree = Vec::new();
+        tree_digest(&pack.join("root"), &mut tree);
+        let m = normalize_pid(&std::fs::read_to_string(pack.join("meta.txt")).unwrap());
+        let state =
+            marker_line(&rtext, "SIM_RECOVER_STATE").unwrap_or_else(|| "MISSING".to_string());
+        assert_ne!(state, "MISSING");
+        runs.push((tree, m, state));
+        let _ = std::fs::remove_dir_all(&pack);
+    }
+    for rep in 1..3 {
+        assert_eq!(runs[0].0, runs[rep].0, "emfile det: pack trees differ");
+        assert_eq!(runs[0].1, runs[rep].1, "emfile det: metas differ");
+        assert_eq!(runs[0].2, runs[rep].2, "emfile det: recovered state differs");
+    }
+    eprintln!("EMFILE DETERMINISM x3 OK ({spec}): {}", runs[0].2);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// inc-5 RED (EMFILE class): a buggy server that ACKS a transaction which
+/// failed under descriptor exhaustion. The sweep's acked-txn-survives
+/// property must flag the loss — proving the battery's "never corrupt"
+/// verdict has teeth against dirty degradation.
+#[test]
+fn red_emfile_acked_loss_is_caught() {
+    if std::env::var(ROLE_ENV).is_ok() {
+        return;
+    }
+    let base = std::env::temp_dir().join(format!("pgrust_simredemf_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let (rtext, meta) = run_point(&base, 0, "emfile-ack", &[]);
+    let _ = std::fs::remove_dir_all(&base);
+
+    assert_eq!(meta_field(&meta, "cuts"), "1", "emfile-ack red must cut: {meta}");
+    assert!(
+        meta_field(&meta, "stopped").contains("acked anyway"),
+        "emfile-ack red must hit the buggy-ack path: {meta}"
+    );
+    assert!(
+        rtext.contains("VIOLATION:") && rtext.contains("ACKED txn"),
+        "the sweep must flag the acked-but-lost transaction:\n{rtext}"
     );
 }
