@@ -1277,6 +1277,20 @@ pub fn table_scan_cursor_park_point(scan: &TableScanDesc<'_>) -> Option<(u64, u6
     }
 }
 
+/// Mid-page batch adoption (SE-R41 v2, the page-remainder defect fix): when
+/// a batch drive freshly engages over a scan the per-tuple walk already
+/// advanced mid-page, adopt the current page's unconsumed remainder
+/// `[start, n)` instead of advancing past it (`heap_adopt_midpage_batch`).
+/// None = nothing to adopt — a fresh/drained scan stages the next page as
+/// before. pgrcolumnar: its staged windows are not page-cursor-interleaved
+/// (different staging machinery) — always None below the AM dispatch.
+pub fn table_scan_adopt_midpage_batch(scan: &mut TableScanDesc<'_>) -> Option<(u32, u32)> {
+    match scan {
+        TableScanDesc::Heap(h) => ::heapam::heap_adopt_midpage_batch(h),
+        TableScanDesc::Pgrcolumnar(_) => None,
+    }
+}
+
 /// R3 settle probe (debug-assert face of the zero-pins-at-settle law):
 /// does this scan still hold a claim page pin? pgrcolumnar stages no page
 /// pins — always false below the AM dispatch.

@@ -1137,6 +1137,18 @@ impl<'mcx> Source<'mcx> for SeqScanSource {
         node: &mut Self::Node,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<Option<Batch>> {
+        // SE-R41 v2 (the page-remainder defect fix, notes/se-r41-v2.md §2):
+        // a FRESH batch engagement over a scan the per-tuple row walk left
+        // mid-page ADOPTS the current page's unconsumed remainder instead of
+        // advancing past it (`heap_getnextpagebatch` advances pages — the
+        // documented no-interleave invariant this probe discharges). The
+        // probe is self-limiting: after any batch staging or adoption the
+        // AM's per-tuple cursor parks at page end, so it answers None on
+        // every in-fill page exhaustion.
+        if let Some((start, n)) = ::nodeseqscan::seq_scan_adopt_midpage_batch(node) {
+            node.set_lane_cursor(start, n);
+            return Ok(Some(Batch { n }));
+        }
         let n = ::nodeseqscan::seq_scan_next_pagebatch(node, estate)?;
         node.set_lane_cursor(0, n);
         if n == 0 {
