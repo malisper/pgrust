@@ -347,7 +347,7 @@ env	crates/backend/storage/ipc/shm_mq/src/stall.rs	2
 env	crates/backend/storage/ipc/waiter/src/lib.rs	2
 env	crates/backend/storage/lmgr/condition_variable/src/lib.rs	1
 env	crates/backend/tcop/postgres/src/simple_query.rs	2
-env	crates/backend/tcop/postgres/src/sim_net.rs	4	DST-REVIEW(p4-simnet): SIM-HARNESS knobs (PGRUST_SIMNET_SQL/TRANSCRIPT/OPLOG/SEED_DIRS), cfg(pgrust_sim)-only via the mod decl (no product reader) — pg_clock/sim.rs precedent; absorbed by the s2.5 knobs-registry charter
+env	crates/backend/tcop/postgres/src/sim_net.rs	6	DST-REVIEW(p4-simnet): SIM-HARNESS knobs (PGRUST_SIMNET_SQL/TRANSCRIPT/OPLOG/SEED_DIRS), cfg(pgrust_sim)-only via the mod decl (no product reader) — pg_clock/sim.rs precedent; absorbed by the s2.5 knobs-registry charter. +2 permit-s1-demo (PGRUST_SIMNET_SESSIONS/DUO_SERIAL two-backend corpus knobs, same domain)
 env	crates/backend/tcop/postgres/src/stmt_trace.rs	1
 env	crates/backend/test_regress/src/lib.rs	2
 env	crates/backend/timezone/pgtz/src/lib.rs	1
@@ -547,3 +547,17 @@ scope	crates/backend/access/pgrcolumnar/src/scan.rs	1	P3 row 15 gang L2682
 scope	crates/backend/commands/copy/src/parallel.rs	1	P3 row 15 gang L1317 (design cited L1303 pre-compose); joins bounded by row-5 abort topology
 scope	crates/backend/executor/nodeagg/src/merge.rs	2	P3 rows 15/18 gangs L2678 + L2916 (the raw-merge claim gang the first census pass missed)
 scope	crates/backend/executor/nodeagg/src/pardistinct.rs	2	P3 row 15 gangs L1827/L1973
+
+# PERMIT-S1-DEMO — WS-DEMO corpus/harness rows (contract notes/permit-s1-demo.md
+# band discipline). All sim-harness domain: both files sit behind
+# cfg(pgrust_sim) mod decls (zero product codegen). The sim_sched_demo raw
+# std::sync/std::thread surface is DELIBERATE — the P4 red fixture's rawness
+# IS the fixture (the watchdog must catch it); the P2 plant's ops flip to
+# pgsync when dst/permit-s1-sync lands (wiring point in the file header).
+blocking	crates/backend/tcop/postgres/src/sim_net.rs	1	DST-REVIEW(permit-s1-demo): W5 recovery-done gate in the two-backend corpus (1ms poll sleep until shared recovery state clears, the postmaster's backends-after-recovery law) — becomes a TimedPark under the WS-CORE scheduler
+join	crates/backend/tcop/postgres/src/sim_net.rs	2	DST-REVIEW(permit-s1-demo): session-2 JoinHandle joins (serial + concurrent arms); join-bounded-after-wake (session 2 exits on its own Terminate; no run token involved) — becomes a hooked join via pgsync
+spawn	crates/backend/tcop/postgres/src/sim_net.rs	1	DST-REVIEW(permit-s1-demo): the session-2 thread spawn (first multi-thread sim run); migrates to the launch_backend/pgsync spawn door when WS-CORE's registration hook lands (worklog hand-back row)
+blocking	crates/backend/tcop/postgres/src/sim_sched_demo.rs	3	DST-REVIEW(permit-s1-demo): P4 red fixture cv-wait pair + fallback timer sleep — the INTENTIONALLY unshimmed watchdog-red corpus; red-battery discipline, never converts
+env	crates/backend/tcop/postgres/src/sim_sched_demo.rs	3	DST-REVIEW(permit-s1-demo): corpus knobs PGRUST_PERMIT_PLANT/RED/RED_FALLBACK_S, sim-harness domain (sim_net.rs knob precedent)
+join	crates/backend/tcop/postgres/src/sim_sched_demo.rs	1	DST-REVIEW(permit-s1-demo): plant thread joins (bounded: fixed iteration count, no run token); flips to pgsync join with the plant
+spawn	crates/backend/tcop/postgres/src/sim_sched_demo.rs	3	DST-REVIEW(permit-s1-demo): plant pair + red holder + red fallback-timer spawns (no-boot corpora; the fallback timer is outside the model BY DESIGN, the watchdog's own pattern)
