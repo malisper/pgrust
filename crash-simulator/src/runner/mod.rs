@@ -3,10 +3,8 @@
 
 pub mod bugbase;
 pub mod driver;
-pub mod plan_scaffold;
 pub mod planface;
 pub mod profile;
 pub mod runloop;
 pub mod shrink;
-pub mod stubgen;
 pub mod verdict;

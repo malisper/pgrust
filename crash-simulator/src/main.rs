@@ -12,7 +12,7 @@ use runner::bugbase::BugBase;
 use runner::planface::Plan;
 use runner::profile::load_profile;
 use runner::runloop::{
-    self, emit_verdict, gen_plan, generator_version, run_plan, EngineConfig,
+    self, emit_verdict, gen_plan, gen_plan_ctx, generator_version, run_plan, EngineConfig,
 };
 use runner::verdict::Census;
 use std::path::PathBuf;
@@ -189,7 +189,7 @@ fn real_main() -> Result<i32, String> {
         }
         Cmd::Replay { seed, profile, plan, times, no_exec, engine } => {
             let lp = load_profile(&profile)?;
-            let regen = gen_plan(seed, &lp, &generator_version());
+            let (regen, ctx) = gen_plan_ctx(seed, &lp, &generator_version());
             let regen_text = regen.render();
             if let Some(p) = &plan {
                 let shipped = std::fs::read_to_string(p).map_err(|e| e.to_string())?;
@@ -211,7 +211,7 @@ fn real_main() -> Result<i32, String> {
                 return Ok(0);
             }
             let cfg = engine.config();
-            let (attempts, refails, sig) = runloop::replay_n(&regen, &cfg, times)?;
+            let (attempts, refails, sig) = runloop::replay_n(&regen, &cfg, times, Some(&ctx))?;
             println!(
                 "replay: seed={} attempts={} refails={} rate={:.2} sig={}",
                 seed,
@@ -294,7 +294,7 @@ fn real_main() -> Result<i32, String> {
             for (seed, runs) in &entries {
                 let text = bb.load_plan(*seed, false)?;
                 let plan = Plan::parse(&text)?;
-                let (attempts, refails, _) = runloop::replay_n(&plan, &cfg, n)?;
+                let (attempts, refails, _) = runloop::replay_n(&plan, &cfg, n, None)?;
                 println!(
                     "loop: seed={} sig={} refails={}/{}",
                     seed,

@@ -162,6 +162,7 @@ impl<'a> Generator<'a> {
         ];
         if !self.registry.is_empty() && self.budgets.remaining(Kind::Property) > 0 {
             let caps = self.schema.caps();
+            let in_tx = self.session.in_tx;
             let eligible: u64 = self
                 .registry
                 .iter()
@@ -169,6 +170,12 @@ impl<'a> Generator<'a> {
                     caps.contains(p.required_caps())
                         && p.weight(self.profile) > 0
                         && footprint_fits(&self.budgets, &p.footprint())
+                        // Integration note (harness/h1): a property that opens
+                        // its own tx (footprint.tx > 0: M1, F8) is offered only
+                        // OUTSIDE an open transaction — a nested BEGIN is a
+                        // warning-level no-op whose COMMIT would commit the
+                        // OUTER tx and desynchronize this session model.
+                        && !(in_tx && p.footprint().tx > 0)
                 })
                 .count() as u64;
             if eligible > 0 {
@@ -265,6 +272,7 @@ impl<'a> Generator<'a> {
 
     fn gen_property_item(&mut self) -> Option<PlanItem> {
         let caps = self.schema.caps();
+        let in_tx = self.session.in_tx;
         let eligible: Vec<&Box<dyn PropertyGen>> = self
             .registry
             .iter()
@@ -272,6 +280,8 @@ impl<'a> Generator<'a> {
                 caps.contains(p.required_caps())
                     && p.weight(self.profile) > 0
                     && footprint_fits(&self.budgets, &p.footprint())
+                    // Tx-opening properties only outside a tx (see kind_weights).
+                    && !(in_tx && p.footprint().tx > 0)
             })
             .collect();
         let weights: Vec<u64> = eligible.iter().map(|p| p.weight(self.profile)).collect();

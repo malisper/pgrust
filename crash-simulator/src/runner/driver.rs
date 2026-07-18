@@ -169,8 +169,24 @@ pub enum CheckVerdict {
 }
 
 /// WS-ORACLE owns real check semantics; the runner calls through this trait.
+/// Post-integration the property hooks feed the oracle's ledger + slot stack
+/// (`bridge::OracleCheckEval`); implementations without model state keep the
+/// default no-op hooks.
 pub trait CheckEval {
     fn eval(&self, check_json: &str, stack: &ResultStack) -> CheckVerdict;
+
+    /// A `-- begin property` marker was reached.
+    fn on_property_begin(&self, _seq: u32) {}
+
+    /// The matching `-- end property` marker was reached.
+    fn on_property_end(&self, _seq: u32) {}
+
+    /// An executed Sql/Tx/Arm step INSIDE a property block, with the DUT
+    /// outcome. Returns a violation detail when the model reconciliation
+    /// diverges (engine-ok/model-errs or the converse — both directions).
+    fn on_step_outcome(&self, _outcome: &ExecOutcome) -> Option<String> {
+        None
+    }
 }
 
 /// SCAFFOLD checker: rowcount ops against the top of the result stack.
@@ -202,6 +218,17 @@ impl CheckEval for BasicCheckEval {
         } else {
             CheckVerdict::Fail(format!("{} want {} got {}", op, want, got))
         }
+    }
+}
+
+/// No-context checker: every check is a counted skip. Used when a plan is
+/// executed WITHOUT its seed-regenerated oracle context (`test -b`, `loop`) —
+/// a check that cannot be evaluated must never mint a verdict either way.
+pub struct SkipAllCheckEval;
+
+impl CheckEval for SkipAllCheckEval {
+    fn eval(&self, _check_json: &str, _stack: &ResultStack) -> CheckVerdict {
+        CheckVerdict::Skip("no-oracle-ctx".into())
     }
 }
 
@@ -366,11 +393,16 @@ pub struct ExecOptions {
     pub restart_cmd: Option<String>,
     /// Stop on first failure (replay/shrink use this).
     pub stop_on_failure: bool,
+    /// Harness session statements replayed on BOTH legs after any
+    /// `ARM reset-all` (RESET ALL reverts session GUCs to connection
+    /// defaults, which nukes the harness's `SET search_path` — the find-1
+    /// FP class). Symmetric, uncounted infrastructure statements.
+    pub post_reset_sql: Vec<String>,
 }
 
 impl Default for ExecOptions {
     fn default() -> Self {
-        ExecOptions { restart_cmd: None, stop_on_failure: true }
+        ExecOptions { restart_cmd: None, stop_on_failure: true, post_reset_sql: Vec::new() }
     }
 }
 
@@ -467,16 +499,23 @@ pub fn execute_plan<'a>(
     let mut stack = ResultStack::new();
     let mut disp = Dispatcher::new(dut, cpg);
     let mut in_skipped_property: Option<u32> = None;
+    let mut in_property: Option<u32> = None;
 
     for (idx, step) in plan.steps.iter().enumerate() {
         report.steps_executed = idx + 1;
         match step {
-            Step::BeginProperty { .. } | Step::EndProperty { .. } => {
-                if let (Step::EndProperty { seq }, Some(skip_seq)) = (step, in_skipped_property) {
+            Step::BeginProperty { seq, .. } => {
+                in_property = Some(*seq);
+                checks.on_property_begin(*seq);
+            }
+            Step::EndProperty { seq } => {
+                if let Some(skip_seq) = in_skipped_property {
                     if *seq == skip_seq {
                         in_skipped_property = None;
                     }
                 }
+                in_property = None;
+                checks.on_property_end(*seq);
             }
             _ if in_skipped_property.is_some() => {
                 // ASSUME failed for this property: remaining steps of the span
@@ -559,6 +598,37 @@ pub fn execute_plan<'a>(
                                 return report;
                             }
                             continue;
+                        }
+                        // Oracle model step (ledger apply + reconcile, slot
+                        // capture) for statements inside a property block.
+                        // Both-direction reconcile divergence is a
+                        // property-violation P1 (contract §3.1.2).
+                        if in_property.is_some() {
+                            if let Some(why) = checks.on_step_outcome(&dut_out) {
+                                report.count("property-violation");
+                                let f = Failure {
+                                    step_idx: idx,
+                                    signature: Signature {
+                                        class: "property-violation".into(),
+                                        sqlstate: dut_out.sqlstate().unwrap_or("").into(),
+                                        site: normalize_site(&sql.text),
+                                    },
+                                    class: "property-violation".into(),
+                                    sev: "P1".into(),
+                                    detail: why,
+                                };
+                                report.records.push(StepRecord {
+                                    idx,
+                                    class: f.class.clone(),
+                                    sev: f.sev.clone(),
+                                    detail: f.detail.clone(),
+                                    stmt_head: head.clone(),
+                                });
+                                report.failure = Some(f);
+                                if opts.stop_on_failure {
+                                    return report;
+                                }
+                            }
                         }
                         match (&cpg_out, sql.mark) {
                             (Some(c_out), Mark::Read) => {
@@ -654,18 +724,38 @@ pub fn execute_plan<'a>(
             }
             Step::Tx(tx) => {
                 let sql = tx_sql(tx);
-                if run_ctl_step(&mut disp, &mut report, idx, &sql, "tx-control") {
+                let hook = if in_property.is_some() { Some(checks) } else { None };
+                if run_ctl_step(&mut disp, &mut report, idx, &sql, "tx-control", hook, opts) {
                     return report;
                 }
             }
             Step::Arm(arm) => {
                 let sql = arm_sql(arm);
-                if run_ctl_step(&mut disp, &mut report, idx, &sql, "arm") {
+                let hook = if in_property.is_some() { Some(checks) } else { None };
+                if run_ctl_step(&mut disp, &mut report, idx, &sql, "arm", hook, opts) {
                     return report;
+                }
+                if matches!(arm, ArmCtl::ResetAll) {
+                    // RESET ALL reverted session GUCs to connection defaults
+                    // on both legs; replay the harness session setup (e.g.
+                    // search_path) symmetrically so generated unqualified
+                    // names keep resolving (find-1 law).
+                    for s in &opts.post_reset_sql {
+                        let _ = disp.dut.execute(s);
+                        if let Some(c) = disp.cpg.as_deref_mut() {
+                            let _ = c.execute(s);
+                        }
+                    }
                 }
             }
             Step::Assumption(j) => match checks.eval(j, &stack) {
                 CheckVerdict::Pass => report.count("ok"),
+                CheckVerdict::Skip(w) if w.starts_with("no-hook") => {
+                    // Contract §0 A5: hook absent — counted, never a silent
+                    // pass (`SIMHARNESS|skipped-no-hook|n`).
+                    report.count("skipped-no-hook");
+                    in_skipped_property = enclosing_property_seq(plan, idx);
+                }
                 CheckVerdict::Fail(_) | CheckVerdict::Skip(_) => {
                     // Failed ASSUME = property does not apply: skip the rest
                     // of the enclosing property span, counted.
@@ -890,6 +980,8 @@ pub fn execute_plan<'a>(
 /// arms: a dead DUT on COMMIT (the classic engine-bug site) is rust-crash
 /// P1, a dead C leg is c-crash P1 — never a silent "ok" and never an
 /// err-ladder P2. Symmetric SqlErrors recover BOTH legs (resync law).
+/// `hook` (present inside property blocks) steps the oracle model (ledger
+/// tx bookkeeping); a model violation is a property-violation P1.
 /// Returns true when the plan must stop.
 fn run_ctl_step(
     disp: &mut Dispatcher,
@@ -897,6 +989,8 @@ fn run_ctl_step(
     idx: usize,
     sql: &str,
     what: &str,
+    hook: Option<&dyn CheckEval>,
+    opts: &ExecOptions,
 ) -> bool {
     let head: String = sql.chars().take(60).collect();
     let dut_out = disp.dut.execute(sql);
@@ -955,6 +1049,33 @@ fn run_ctl_step(
             return true;
         }
         c_err = Some(c_out.is_error());
+    }
+    // Oracle model step (ledger tx bookkeeping) inside property blocks.
+    if let Some(h) = hook {
+        if let Some(why) = h.on_step_outcome(&dut_out) {
+            report.count("property-violation");
+            report.records.push(StepRecord {
+                idx,
+                class: "property-violation".into(),
+                sev: "P1".into(),
+                detail: why.clone(),
+                stmt_head: sql.chars().take(60).collect(),
+            });
+            report.failure = Some(Failure {
+                step_idx: idx,
+                signature: Signature {
+                    class: "property-violation".into(),
+                    sqlstate: dut_out.sqlstate().unwrap_or("").into(),
+                    site: normalize_site(sql),
+                },
+                class: "property-violation".into(),
+                sev: "P1".into(),
+                detail: why,
+            });
+            if opts.stop_on_failure {
+                return true;
+            }
+        }
     }
     let dut_err = dut_out.is_error();
     if let Some(c_err) = c_err {

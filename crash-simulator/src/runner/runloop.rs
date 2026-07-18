@@ -1,14 +1,14 @@
 //! Run loop, replay-from-seed, and distillation (contract §4.1.3/4/6).
 
+use crate::bridge::{self, OracleCheckEval, OracleCtx, OracleDiffClassifier};
 use super::bugbase::{now_utc_string, BugBase, RunsJson};
 use super::driver::{
-    execute_plan, BasicCheckEval, BasicDiffClassifier, ExecOptions, PgSession, RunReport, Session,
-    Signature,
+    execute_plan, CheckEval, ExecOptions, PgSession, RunReport, Session, Signature,
+    SkipAllCheckEval,
 };
 use super::planface::Plan;
 use super::profile::LoadedProfile;
 use super::shrink;
-use super::stubgen;
 use super::verdict::{severity, ArtifactWriter, Census};
 use std::path::Path;
 
@@ -35,11 +35,20 @@ impl EngineConfig {
     }
 }
 
-/// Generate the plan for a seed. THE integration point with WS-GEN: today
-/// this calls the scaffold generator; post-integration it calls
-/// `crate::gen::generate` behind the same signature.
+/// Generate the plan for a seed — THE integration point with WS-GEN: drives
+/// `crate::gen::generate_plan` with the oracle property registry and returns
+/// the flat execution view.
 pub fn gen_plan(seed: u64, lp: &LoadedProfile, generator_version: &str) -> Plan {
-    stubgen::generate(seed, &lp.profile, &lp.sha256, generator_version)
+    gen_plan_ctx(seed, lp, generator_version).0
+}
+
+/// Generate the plan AND its oracle run context (property instances with
+/// ledger ops + probe slots keyed by property seq). The context is derived
+/// deterministically from the seed and never serialized (§0 A3).
+pub fn gen_plan_ctx(seed: u64, lp: &LoadedProfile, generator_version: &str) -> (Plan, OracleCtx) {
+    let gp = bridge::runner_profile_to_gen(&lp.profile);
+    let (core, ctx) = bridge::generate_plan_with_ctx(seed, &gp, &lp.sha256, generator_version);
+    (Plan::from_core(&core), ctx)
 }
 
 /// Generator version string recorded in plan headers: the harness build's
@@ -75,27 +84,58 @@ fn reset_leg(s: &mut dyn Session, resets: &[String]) -> Result<(), String> {
 }
 
 pub fn run_one_seed(seed: u64, lp: &LoadedProfile, cfg: &EngineConfig) -> Result<SeedRun, String> {
-    let plan = gen_plan(seed, lp, &generator_version());
+    let (plan, ctx) = gen_plan_ctx(seed, lp, &generator_version());
     let plan_text = plan.render();
-    let report = run_plan(&plan, cfg)?;
+    let report = run_plan_ctx(&plan, cfg, Some(&ctx))?;
     Ok(SeedRun { seed, report, plan_text })
 }
 
 pub fn run_plan(plan: &Plan, cfg: &EngineConfig) -> Result<RunReport, String> {
+    run_plan_ctx(plan, cfg, None)
+}
+
+/// Run a plan. With an oracle context the model oracle is ON (ledger
+/// reconcile + slot-addressed checks); without one, checks evaluate to a
+/// counted skip (`property-skipped`) — never a false verdict (plans loaded
+/// from disk without their seed's regenerated context, e.g. `test -b`).
+pub fn run_plan_ctx(
+    plan: &Plan,
+    cfg: &EngineConfig,
+    ctx: Option<&OracleCtx>,
+) -> Result<RunReport, String> {
     let (mut dut, mut cpg) = connect_legs(cfg)?;
     reset_leg(&mut dut, &cfg.per_seed_reset)?;
     if let Some(c) = cpg.as_mut() {
         reset_leg(c, &cfg.per_seed_reset)?;
     }
-    // NOTE: reconnect() must restore search_path; extend session_setup so
-    // Fault(Disconnect) legs land back in the harness schema.
-    let opts = ExecOptions { restart_cmd: cfg.restart_cmd.clone(), stop_on_failure: true };
+    // reconnect() restores session_setup (incl. search_path); ARM reset-all
+    // replays post_reset_sql so generated unqualified names keep resolving.
+    let opts = ExecOptions {
+        restart_cmd: cfg.restart_cmd.clone(),
+        stop_on_failure: true,
+        post_reset_sql: cfg
+            .session_setup
+            .iter()
+            .chain(cfg.per_seed_reset.iter())
+            .filter(|s| s.to_ascii_uppercase().trim_start().starts_with("SET "))
+            .cloned()
+            .collect(),
+    };
+    let classifier = OracleDiffClassifier::new(bridge::load_warts());
+    let oracle_checks;
+    let checks: &dyn CheckEval = match ctx {
+        Some(c) => {
+            oracle_checks = OracleCheckEval::new(c);
+            &oracle_checks
+        }
+        None => &SkipAllCheckEval,
+    };
     Ok(execute_plan(
         plan,
         &mut dut,
         cpg.as_mut().map(|c| c as &mut dyn Session),
-        &BasicCheckEval,
-        &BasicDiffClassifier,
+        checks,
+        &classifier,
         &opts,
     ))
 }
@@ -103,11 +143,16 @@ pub fn run_plan(plan: &Plan, cfg: &EngineConfig) -> Result<RunReport, String> {
 /// Replay-N flake policy (contract §4.1.4): re-run K times, report re-fail
 /// rate. Probabilistic failures are findings-with-a-plan, never
 /// gate-blockers (spec HR3).
-pub fn replay_n(plan: &Plan, cfg: &EngineConfig, times: u32) -> Result<(u32, u32, Option<Signature>), String> {
+pub fn replay_n(
+    plan: &Plan,
+    cfg: &EngineConfig,
+    times: u32,
+    ctx: Option<&OracleCtx>,
+) -> Result<(u32, u32, Option<Signature>), String> {
     let mut refails = 0;
     let mut last_sig = None;
     for _ in 0..times {
-        let report = run_plan(plan, cfg)?;
+        let report = run_plan_ctx(plan, cfg, ctx)?;
         if let Some(f) = report.failure {
             refails += 1;
             last_sig = Some(f.signature);
@@ -147,18 +192,23 @@ pub fn run_campaign(
 
     for i in 0..seed_count {
         let seed = seed_base + i;
-        let run = run_one_seed(seed, lp, cfg)?;
+        let (gen_plan, ctx) = gen_plan_ctx(seed, lp, &generator_version());
+        let plan_text = gen_plan.render();
+        let report = run_plan_ctx(&gen_plan, cfg, Some(&ctx))?;
+        let run = SeedRun { seed, report, plan_text };
         census.merge(&run.report.class_counts);
         for r in &run.report.records {
             artifacts.record(seed, &r.class, &r.sev, &r.detail, &r.stmt_head);
         }
         if let Some(failure) = &run.report.failure {
             // Bank: replay-N first (flake evidence), then shrink with
-            // same-signature keep, then distill.
+            // same-signature keep, then distill. The oracle context is the
+            // seed's own (shrunk candidates keep property seqs, so instance
+            // lookup by seq stays valid on subsets).
             let plan = Plan::parse(&run.plan_text).map_err(|e| format!("re-parse banked plan: {}", e))?;
-            let (attempts, refails, _) = replay_n(&plan, cfg, replay_times)?;
+            let (attempts, refails, _) = replay_n(&plan, cfg, replay_times, Some(&ctx))?;
             let mut rerun = |cand: &Plan| -> Option<Signature> {
-                run_plan(cand, cfg).ok().and_then(|r| r.failure.map(|f| f.signature))
+                run_plan_ctx(cand, cfg, Some(&ctx)).ok().and_then(|r| r.failure.map(|f| f.signature))
             };
             let shrunk =
                 shrink::shrink(&plan, failure.step_idx, &failure.signature, &mut rerun);
