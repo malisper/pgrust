@@ -174,7 +174,7 @@ pub fn evaluate_instance(
                         detail: None,
                     }
                 }
-                CheckOutcome::Fail(_) => {
+                CheckOutcome::Fail(_) | CheckOutcome::SkipInapplicable(_) => {
                     return PropertyReport {
                         property: inst.property,
                         outcome: PropertyOutcome::AssumptionFailed,
@@ -190,6 +190,16 @@ pub fn evaluate_instance(
                         outcome: PropertyOutcome::SkippedNoHook,
                         detail: None,
                     }
+                }
+                CheckOutcome::SkipInapplicable(_) => {
+                    // An arm errored: the metamorphic law is not evaluable —
+                    // counted skip (the statement-level classification owns
+                    // the error), never a false violation.
+                    return PropertyReport {
+                        property: inst.property,
+                        outcome: PropertyOutcome::AssumptionFailed,
+                        detail: None,
+                    };
                 }
                 CheckOutcome::Fail(why) => {
                     return PropertyReport {
@@ -221,20 +231,48 @@ impl LedgerSimExecutor {
         Self::default()
     }
 
+    fn probe(&self, spec: &ProbeSpec) -> StmtResult {
+        answer_probe(&self.ledger, spec, &|pred, row, sel| pred.in_partition(row, sel))
+    }
+}
+
+/// WHERE-clause partition membership hook: does `row` fall in the `sel`
+/// partition of `pred`? The correct engine passes `PredSpec::in_partition`;
+/// planted wrong-DUT executors (metamorphic teeth tests) pass a deliberately
+/// broken membership (e.g. UNKNOWN treated as TRUE) — the projection-side
+/// evaluation (`PredProjection`) stays correct in both, which is exactly the
+/// asymmetry NoREC exists to catch.
+pub type PartitionMembership<'a> = &'a dyn Fn(&PredSpec, &Row, TriSel) -> bool;
+
+/// Answer a structured probe from a ledger. Shared by the perfect-engine
+/// double and (with a broken `membership`) the planted wrong-DUT doubles.
+pub fn answer_probe(
+    ledger: &Ledger,
+    spec: &ProbeSpec,
+    membership: PartitionMembership,
+) -> StmtResult {
+    LedgerAnswers { ledger, membership }.probe(spec)
+}
+
+struct LedgerAnswers<'a> {
+    ledger: &'a Ledger,
+    membership: PartitionMembership<'a>,
+}
+
+impl LedgerAnswers<'_> {
     fn eval_pred(pred: &PredSpec, row: &Row) -> Option<bool> {
-        match pred {
-            PredSpec::ColModEq { col, m, r } => match row.0.get(*col) {
-                Some(Value::Int(v)) => Some(v.rem_euclid(*m) == *r),
-                Some(Value::Null) | None => None,
-                Some(_) => None,
-            },
-        }
+        pred.eval3(row)
+    }
+
+    fn in_part(&self, pred: &PredSpec, row: &Row, sel: TriSel) -> bool {
+        (self.membership)(pred, row, sel)
     }
 
     fn probe(&self, spec: &ProbeSpec) -> StmtResult {
+        let ledger = self.ledger;
         let missing = || StmtResult::Error { sqlstate: SQLSTATE_UNDEFINED_TABLE.to_string() };
         match spec {
-            ProbeSpec::CountAll { table } => match self.ledger.table_cardinality(table) {
+            ProbeSpec::CountAll { table } => match ledger.table_cardinality(table) {
                 None => missing(),
                 Some(n) => StmtResult::Rows { rows: vec![Row(vec![Value::Int(n as i64)])] },
             },
@@ -267,17 +305,7 @@ impl LedgerSimExecutor {
                 match self.ledger.table_rows(table) {
                     None => missing(),
                     Some(rows) => {
-                        let n = rows
-                            .iter()
-                            .filter(|r| {
-                                let p = Self::eval_pred(pred, r);
-                                match sel {
-                                    TriSel::True => p == Some(true),
-                                    TriSel::False => p == Some(false),
-                                    TriSel::Null => p.is_none(),
-                                }
-                            })
-                            .count();
+                        let n = rows.iter().filter(|r| self.in_part(pred, r, *sel)).count();
                         StmtResult::Rows { rows: vec![Row(vec![Value::Int(n as i64)])] }
                     }
                 }
@@ -289,14 +317,7 @@ impl LedgerSimExecutor {
                     let mut sum = 0i64;
                     for r in rows.iter().filter(|r| match filter {
                         None => true,
-                        Some((pred, sel)) => {
-                            let p = Self::eval_pred(pred, r);
-                            match sel {
-                                TriSel::True => p == Some(true),
-                                TriSel::False => p == Some(false),
-                                TriSel::Null => p.is_none(),
-                            }
-                        }
+                        Some((pred, sel)) => self.in_part(pred, r, *sel),
                     }) {
                         if let Some(Value::Int(v)) = r.0.get(*col) {
                             any = true;
@@ -331,6 +352,81 @@ impl LedgerSimExecutor {
                     }
                 }
             }
+            ProbeSpec::RowsWherePred { table, pred, sel } => {
+                match self.ledger.table_rows(table) {
+                    None => missing(),
+                    Some(rows) => {
+                        let out: Vec<Row> = rows
+                            .into_iter()
+                            .filter(|r| match sel {
+                                None => true,
+                                Some(sel) => self.in_part(pred, r, *sel),
+                            })
+                            .collect();
+                        StmtResult::Rows { rows: out }
+                    }
+                }
+            }
+            ProbeSpec::DistinctCol { table, col, filter } => {
+                match self.ledger.table_rows(table) {
+                    None => missing(),
+                    Some(rows) => {
+                        let mut seen = std::collections::BTreeSet::new();
+                        for r in rows.iter().filter(|r| match filter {
+                            None => true,
+                            Some((pred, sel)) => self.in_part(pred, r, *sel),
+                        }) {
+                            seen.insert(r.0[*col].clone());
+                        }
+                        StmtResult::Rows {
+                            rows: seen.into_iter().map(|v| Row(vec![v])).collect(),
+                        }
+                    }
+                }
+            }
+            ProbeSpec::ExtremeCol { table, col, filter, max } => {
+                match self.ledger.table_rows(table) {
+                    None => missing(),
+                    Some(rows) => {
+                        let mut ext: Option<i64> = None;
+                        for r in rows.iter().filter(|r| match filter {
+                            None => true,
+                            Some((pred, sel)) => self.in_part(pred, r, *sel),
+                        }) {
+                            if let Some(Value::Int(v)) = r.0.get(*col) {
+                                ext = Some(match ext {
+                                    None => *v,
+                                    Some(e) if *max => e.max(*v),
+                                    Some(e) => e.min(*v),
+                                });
+                            }
+                        }
+                        let v = match ext {
+                            Some(e) => Value::Int(e),
+                            None => Value::Null,
+                        };
+                        StmtResult::Rows { rows: vec![Row(vec![v])] }
+                    }
+                }
+            }
+            ProbeSpec::PredProjection { table, pred } => match self.ledger.table_rows(table) {
+                None => missing(),
+                Some(rows) => {
+                    // Wire-format parity: booleans arrive as 't'/'f' text over
+                    // the simple-query protocol; UNKNOWN is NULL.
+                    let out: Vec<Row> = rows
+                        .iter()
+                        .map(|r| {
+                            Row(vec![match Self::eval_pred(pred, r) {
+                                Some(true) => Value::Text("t".into()),
+                                Some(false) => Value::Text("f".into()),
+                                None => Value::Null,
+                            }])
+                        })
+                        .collect();
+                    StmtResult::Rows { rows: out }
+                }
+            },
             ProbeSpec::HookScalar { .. } => {
                 // A well-behaved hook channel: constant watermark.
                 StmtResult::Rows { rows: vec![Row(vec![Value::Int(0)])] }

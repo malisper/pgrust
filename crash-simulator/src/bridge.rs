@@ -31,7 +31,7 @@ use crate::oracle::check::{
 };
 use crate::oracle::classifier::{classify_step, digest_rows, RunStatus};
 use crate::oracle::ledger::{reconcile, ApplyOutcome, EngineDmlResult, Ledger};
-use crate::oracle::props::{self, ProfileView, SchemaView};
+use crate::oracle::props::{self, ProfileView};
 use crate::oracle::pstep::{
     ArmCtl as PArmCtl, IsoLevel as PIso, Mark as PMark, NoiseConstraint, PropertyInstance, PStep,
     SqlMeta, SqlStep, TxCtl as PTxCtl,
@@ -97,6 +97,37 @@ pub fn runner_profile_to_gen(p: &crate::runner::profile::Profile) -> GenProfile 
         float_lenient: p.float_lenient,
         test_disable_productions: p.test_disable_productions.clone(),
     }
+}
+
+/// The typed-generator schema, viewed for the metamorphic properties (L1/L2
+/// live-table arms): current SQL names + birth ids + predicate-relevant
+/// column kinds. `id` is always present (Int, NOT NULL unique).
+fn schema_view(schema: &SchemaState) -> props::SchemaView {
+    use crate::gen::schema::ColType;
+    let tables = schema
+        .tables()
+        .iter()
+        .map(|t| {
+            let mut cols = vec![props::SchemaCol {
+                name: "id".to_string(),
+                kind: props::PredColKind::Int,
+            }];
+            cols.extend(t.cols.iter().map(|c| props::SchemaCol {
+                name: c.name.clone(),
+                kind: match c.ty {
+                    ColType::Int | ColType::Bigint => props::PredColKind::Int,
+                    ColType::Text => props::PredColKind::Text,
+                    ColType::Numeric | ColType::Float8 => props::PredColKind::Other,
+                },
+            }));
+            props::SchemaTable {
+                name: t.cur_name.clone(),
+                birth_id: t.birth_id.clone(),
+                cols,
+            }
+        })
+        .collect();
+    props::SchemaView { tables }
 }
 
 fn profile_view(gp: &GenProfile) -> ProfileView {
@@ -257,12 +288,14 @@ impl PropertyGen for OraclePropGen {
     fn generate(
         &self,
         rng: &mut dyn RngCore,
-        _schema: &SchemaState,
+        schema: &SchemaState,
         noise: &mut dyn NoiseSource,
         profile: &GenProfile,
     ) -> Option<GeneratedProperty> {
         let pv = profile_view(profile);
-        let sv = SchemaView::default();
+        // Live typed-generator schema, threaded through for the metamorphic
+        // properties' live-table arms (self-local properties ignore it).
+        let sv = schema_view(schema);
         let inst = props::generate(self.id, &mut &mut *rng, &sv, &pv);
 
         // Lower 1:1 into plan steps; substitute noise slots so the recorded
@@ -532,6 +565,11 @@ impl CheckEval for OracleCheckEval {
             CheckOutcome::Pass => CheckVerdict::Pass,
             CheckOutcome::Fail(why) => CheckVerdict::Fail(why),
             CheckOutcome::SkipNoHook => CheckVerdict::Skip("no-hook".into()),
+            // Metamorphic law over an errored slot: counted property-skip
+            // (the erroring statement is classified by the statement ladder).
+            CheckOutcome::SkipInapplicable(why) => {
+                CheckVerdict::Skip(format!("inapplicable: {why}"))
+            }
         }
     }
 

@@ -90,6 +90,16 @@ pub enum ProbeSpec {
     SumCol { table: String, col: usize, filter: Option<(PredSpec, TriSel)> },
     /// NoREC form: SELECT sum(CASE WHEN p THEN 1 ELSE 0 END) FROM table
     NoRecSum { table: String, pred: PredSpec },
+    /// SELECT <all cols> FROM table [WHERE <pred partition>] — full rows of a
+    /// 3VL partition; `sel: None` = the unpartitioned whole (WHERE-TLP).
+    RowsWherePred { table: String, pred: PredSpec, sel: Option<TriSel> },
+    /// SELECT DISTINCT <col> FROM table [WHERE <pred partition>] (DISTINCT-TLP)
+    DistinctCol { table: String, col: usize, filter: Option<(PredSpec, TriSel)> },
+    /// SELECT min|max(<col>) FROM table [WHERE <pred partition>] (MIN/MAX-TLP)
+    ExtremeCol { table: String, col: usize, filter: Option<(PredSpec, TriSel)>, max: bool },
+    /// SELECT (p) FROM table — the NoREC non-optimizable form: one boolean
+    /// column per row ('t'/'f'/NULL); trues are counted harness-side.
+    PredProjection { table: String, pred: PredSpec },
     /// SELECT <col> FROM table [UNION ALL SELECT <col> FROM table]
     SelectColAll { table: String, col: usize, doubled: bool },
     /// Engine-hook scalar probe (F7/F8); sim answers a constant.
@@ -99,12 +109,130 @@ pub enum ProbeSpec {
     Opaque,
 }
 
-/// Predicate vocabulary for TLP/NoREC/partition identities. 3-valued: a NULL
-/// column makes the predicate UNKNOWN.
+/// Comparison operator for `PredSpec::ColCmp` (SQL 3VL comparison: a NULL
+/// operand makes the comparison UNKNOWN).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmpOp {
+    Lt,
+    Le,
+    Eq,
+    Ge,
+    Gt,
+    Ne,
+}
+
+impl CmpOp {
+    pub fn sql(self) -> &'static str {
+        match self {
+            CmpOp::Lt => "<",
+            CmpOp::Le => "<=",
+            CmpOp::Eq => "=",
+            CmpOp::Ge => ">=",
+            CmpOp::Gt => ">",
+            CmpOp::Ne => "<>",
+        }
+    }
+}
+
+/// Predicate vocabulary for TLP/NoREC/partition identities. 3-valued
+/// (Kleene logic, PostgreSQL semantics): a NULL column makes a comparison
+/// UNKNOWN; AND/OR/NOT propagate UNKNOWN per Kleene truth tables; IS NULL is
+/// always two-valued.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PredSpec {
     /// (col % m) = r  — NULL col => UNKNOWN
     ColModEq { col: usize, m: i64, r: i64 },
+    /// col <op> literal — NULL col (or NULL literal) => UNKNOWN
+    ColCmp { col: usize, op: CmpOp, lit: crate::oracle::check::Value },
+    /// col IS NULL — two-valued, never UNKNOWN
+    ColIsNull { col: usize },
+    Not(Box<PredSpec>),
+    And(Box<PredSpec>, Box<PredSpec>),
+    Or(Box<PredSpec>, Box<PredSpec>),
+}
+
+impl PredSpec {
+    /// SQL rendering. `cols[i]` is the SQL name (possibly qualified, e.g.
+    /// `b.id`) of predicate column index `i`.
+    pub fn sql(&self, cols: &[&str]) -> String {
+        match self {
+            PredSpec::ColModEq { col, m, r } => format!("({} % {m}) = {r}", cols[*col]),
+            PredSpec::ColCmp { col, op, lit } => {
+                format!("{} {} {}", cols[*col], op.sql(), lit.sql())
+            }
+            PredSpec::ColIsNull { col } => format!("{} IS NULL", cols[*col]),
+            PredSpec::Not(p) => format!("NOT ({})", p.sql(cols)),
+            PredSpec::And(a, b) => format!("({}) AND ({})", a.sql(cols), b.sql(cols)),
+            PredSpec::Or(a, b) => format!("({}) OR ({})", a.sql(cols), b.sql(cols)),
+        }
+    }
+
+    /// Kleene 3VL evaluation over a row of `check::Value`s: `Some(bool)` when
+    /// determined, `None` = UNKNOWN. Must agree with PostgreSQL's semantics
+    /// for the generated vocabulary — this is the sim/oracle side of every
+    /// partition probe.
+    pub fn eval3(&self, row: &crate::oracle::check::Row) -> Option<bool> {
+        use crate::oracle::check::Value;
+        match self {
+            PredSpec::ColModEq { col, m, r } => match row.0.get(*col) {
+                Some(Value::Int(v)) => Some(v.rem_euclid(*m) == *r),
+                _ => None,
+            },
+            PredSpec::ColCmp { col, op, lit } => {
+                let v = row.0.get(*col)?;
+                let ord = match (v, lit) {
+                    (Value::Null, _) | (_, Value::Null) => return None,
+                    (Value::Int(a), Value::Int(b)) => a.cmp(b),
+                    // C-collation byte compare (harness boots initdb
+                    // --no-locale); generation only pairs text with text.
+                    (Value::Text(a), Value::Text(b)) => a.cmp(b),
+                    _ => return None, // type-mismatched compare is never generated
+                };
+                Some(match op {
+                    CmpOp::Lt => ord.is_lt(),
+                    CmpOp::Le => ord.is_le(),
+                    CmpOp::Eq => ord.is_eq(),
+                    CmpOp::Ge => ord.is_ge(),
+                    CmpOp::Gt => ord.is_gt(),
+                    CmpOp::Ne => ord.is_ne(),
+                })
+            }
+            PredSpec::ColIsNull { col } => {
+                Some(matches!(row.0.get(*col), Some(Value::Null) | None))
+            }
+            PredSpec::Not(p) => p.eval3(row).map(|b| !b),
+            PredSpec::And(a, b) => match (a.eval3(row), b.eval3(row)) {
+                (Some(false), _) | (_, Some(false)) => Some(false),
+                (Some(true), Some(true)) => Some(true),
+                _ => None,
+            },
+            PredSpec::Or(a, b) => match (a.eval3(row), b.eval3(row)) {
+                (Some(true), _) | (_, Some(true)) => Some(true),
+                (Some(false), Some(false)) => Some(false),
+                _ => None,
+            },
+        }
+    }
+
+    /// Does `row` fall in the `sel` partition of this predicate?
+    pub fn in_partition(&self, row: &crate::oracle::check::Row, sel: TriSel) -> bool {
+        let p = self.eval3(row);
+        match sel {
+            TriSel::True => p == Some(true),
+            TriSel::False => p == Some(false),
+            TriSel::Null => p.is_none(),
+        }
+    }
+}
+
+/// Render one TLP partition arm of `pred` as a WHERE-clause body.
+pub fn partition_sql(pred: &PredSpec, sel: TriSel, cols: &[&str]) -> String {
+    let p = pred.sql(cols);
+    match sel {
+        TriSel::True => format!("({p})"),
+        TriSel::False => format!("NOT ({p})"),
+        TriSel::Null => format!("({p}) IS NULL"),
+    }
 }
 
 /// Which 3VL partition a probe selects.
