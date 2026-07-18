@@ -130,8 +130,13 @@ pub fn validate(p: &Profile) -> Result<(), String> {
     if p.steps_min == 0 || p.steps_min > p.steps_max {
         return Err(format!("profile '{}': bad steps range", p.name));
     }
-    // The reach-gate teeth knob must name registered productions — a typo
-    // here would silently disable nothing while the test believes otherwise.
+    // The reach-gate teeth knob must name productions the knob actually
+    // HONORS, not merely registered ones. Two failure shapes are rejected:
+    // a typo (unregistered), and — the H5 review F1 trap — a registered
+    // production whose emission site never consults the knob (`dml:update`
+    // used to validate fine, kept emitting, and silently disabled nothing
+    // while the teeth test believed otherwise). The knob is honored only at
+    // the `gen_query` emission site, so only query-variant names pass.
     if !p.test_disable_productions.is_empty() {
         let prop_names: Vec<String> = crate::oracle::props::v1_set()
             .iter()
@@ -143,6 +148,12 @@ pub fn validate(p: &Profile) -> Result<(), String> {
             if !reg.iter().any(|d| &d.name == n) {
                 return Err(format!(
                     "profile '{}': test_disable_productions entry '{}' is not a registered production",
+                    p.name, n
+                ));
+            }
+            if !crate::gen::noise::teeth_knob_honored(n) {
+                return Err(format!(
+                    "profile '{}': test_disable_productions entry '{}' is registered but not honored at any emission site (only gen_query variants are) — it would silently disable nothing",
                     p.name, n
                 ));
             }
