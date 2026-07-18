@@ -13301,7 +13301,9 @@ mod cursors_r41 {
                     assert_eq!(estate.es_processed, 4);
                 }
                 // The suspension: settle walk at the run seam's park point.
-                let parked = crate::lanev2::cursor_run_park(planstate, estate);
+                // SE14 boarding composition: brinfix (SE13) made the park
+                // walk fallible (slot-materialize hygiene) — PgResult<bool>.
+                let parked = crate::lanev2::cursor_run_park(planstate, estate).unwrap();
                 if hold_pin {
                     assert!(!parked, "posture: the walker refuses to park");
                     let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate else {
