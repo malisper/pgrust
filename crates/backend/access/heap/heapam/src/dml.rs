@@ -10,7 +10,7 @@ use ::tableam_vocab::{
     BulkInsertStateData, LockTupleMode, LockWaitPolicy, TM_FailureData, TM_Result,
     TU_UpdateIndexes,
 };
-use ::types_core::xact::{InvalidTransactionId, TransactionIdIsValid};
+use ::types_core::xact::{InvalidTransactionId, InvalidXLogRecPtr, TransactionIdIsValid};
 use ::types_core::{CommandId, InvalidBlockNumber, MultiXactId, TransactionId};
 use ::types_error::{PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
 use ::types_rel::{
@@ -51,6 +51,7 @@ pub const XLH_INSERT_ALL_VISIBLE_CLEARED: u8 = 1 << 0;
 pub const XLH_INSERT_IS_SPECULATIVE: u8 = 1 << 2;
 pub const XLH_INSERT_CONTAINS_NEW_TUPLE: u8 = 1 << 3;
 pub const XLH_INSERT_ON_TOAST_RELATION: u8 = 1 << 4;
+pub const XLH_INSERT_ALL_FROZEN_SET: u8 = 1 << 5;
 pub const XLH_DELETE_ALL_VISIBLE_CLEARED: u8 = 1 << 0;
 pub const XLH_DELETE_CONTAINS_OLD_TUPLE: u8 = 1 << 1;
 pub const XLH_DELETE_CONTAINS_OLD_KEY: u8 = 1 << 2;
@@ -506,6 +507,10 @@ pub fn heap_multi_insert<'mcx>(
     let mut npages = 0i32;
     let mut npages_used = 0i32;
     let mut starting_with_empty_page = false;
+    // C heapam.c:2360 carries one vmbuffer across the whole insert loop and
+    // releases it after (heapam.c:2659-2668): consecutive heap pages nearly
+    // always share a VM page, so the pin survives page switches.
+    let mut vmb = visibilitymap::VmBuffer::new();
     while ndone < ntuples {
         if ndone == 0 || !starting_with_empty_page {
             npages = heap_multi_insert_pages(&heaptuples, ndone, save_free_space);
@@ -523,6 +528,12 @@ pub fn heap_multi_insert<'mcx>(
             npages - npages_used,
         )?;
         starting_with_empty_page = pin.page().max_offset_number() == 0;
+
+        // COPY FREEZE onto a page we started empty: every row the page will
+        // ever hold in this batch is frozen, so the page and the VM can be
+        // marked all-visible + all-frozen at insert time (heapam.c:2460-2461).
+        let all_frozen_set =
+            starting_with_empty_page && (options & crate::hio::HEAP_INSERT_FROZEN) != 0;
 
         RelationPutHeapTuple(relation, &pin, &mut heaptuples[ndone], false)?;
         if needwal && need_cids {
@@ -543,11 +554,18 @@ pub fn heap_multi_insert<'mcx>(
         }
 
         // Pin-at-clear divergence (heap_insert shape): C pins the vm page in
-        // RelationGetBufferForTuple, before the content lock.
+        // RelationGetBufferForTuple, before the content lock (hio.c:618-627,
+        // 774-789 — C must not do VM-fork I/O under a content lock; our
+        // single-threaded-per-page model tolerates it and every existing VM
+        // touch point in this file already pins at use).
+        //
+        // C heapam.c:2496-2512: an all-visible page only loses its bit when
+        // the incoming rows are NOT frozen; frozen rows keep it true. A page
+        // we started empty under FREEZE becomes all-visible right here, so
+        // the WAL record (and INIT_PAGE replay) carries the flag.
         let mut all_visible_cleared = false;
-        if pin.page().is_all_visible() {
+        if pin.page().is_all_visible() && (options & crate::hio::HEAP_INSERT_FROZEN) == 0 {
             all_visible_cleared = true;
-            let mut vmb = visibilitymap::VmBuffer::new();
             visibilitymap::visibilitymap_pin(relation, pin.block_number(), &mut vmb)?;
             // SAFETY: pinned + exclusive content lock since RelationGetBufferForTuple.
             let mut pm =
@@ -559,16 +577,25 @@ pub fn heap_multi_insert<'mcx>(
                 &vmb,
                 visibilitymap::VISIBILITYMAP_VALID_BITS,
             )?;
-            vmb.release();
+        } else if all_frozen_set {
+            // SAFETY: pinned + exclusive content lock since RelationGetBufferForTuple.
+            let mut pm =
+                unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
+            pm.set_all_visible();
         }
 
         bufmgr_seams::mark_buffer_dirty::call(pin.buffer())?;
 
         if needwal {
             let init = starting_with_empty_page;
+            // C heapam.c:2555: the two VM-state flags are mutually exclusive.
+            debug_assert!(!(all_visible_cleared && all_frozen_set));
             let mut xl_flags = 0u8;
             if all_visible_cleared {
                 xl_flags |= XLH_INSERT_ALL_VISIBLE_CLEARED;
+            }
+            if all_frozen_set {
+                xl_flags |= XLH_INSERT_ALL_FROZEN_SET;
             }
             if need_tuple_data {
                 xl_flags |= XLH_INSERT_CONTAINS_NEW_TUPLE;
@@ -642,10 +669,34 @@ pub fn heap_multi_insert<'mcx>(
             pm.set_lsn(recptr);
         }
 
+        // C heapam.c:2636-2654: set the VM bits after the multi-insert record,
+        // still under the heap page's content lock. visibilitymap_set emits
+        // its own XLOG_HEAP2_VISIBLE record for the VM-page change (C's WAL
+        // shape: visibilitymap.c:288-293); a crash between the two records
+        // replays PD_ALL_VISIBLE without the VM bit — the benign direction.
+        // InvalidTransactionId cutoff as C: FROZEN intentionally violates
+        // visibility rules, and only same-xact readers can see the table.
+        if all_frozen_set {
+            debug_assert!(pin.page().is_all_visible());
+            visibilitymap::visibilitymap_pin(relation, pin.block_number(), &mut vmb)?;
+            visibilitymap::visibilitymap_set(
+                relation,
+                pin.block_number(),
+                pin.buffer(),
+                InvalidXLogRecPtr,
+                &vmb,
+                InvalidTransactionId,
+                visibilitymap::VISIBILITYMAP_ALL_VISIBLE
+                    | visibilitymap::VISIBILITYMAP_ALL_FROZEN,
+            )?;
+        }
+
         bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
         pin.release();
         ndone += nthispage;
     }
+    // C heapam.c:2666-2668: done inserting; release the carried vmbuffer.
+    vmb.release();
 
     predicate_seams::check_for_serializable_conflict_in::call(relation, None, InvalidBlockNumber)?;
 
