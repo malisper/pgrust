@@ -144,6 +144,88 @@ pub fn pg_readlink(path: &str, buf: &mut [u8]) -> isize {
     vfs::read_link(&vfd::cpath(path), buf)
 }
 
+/// rename(2) shape: 0 or -1/errno. NOT durable_rename — no fsyncs.
+#[inline]
+pub fn pg_rename(from: &str, to: &str) -> i32 {
+    vfs::rename(&vfd::cpath(from), &vfd::cpath(to))
+}
+
+/// Whole-file read through the VFS (provider-seam reroutes: C sites whose
+/// shape is "read the whole small file" — relcache init files, pgstat
+/// snapshots, postmaster.opts — but whose DOMAIN is the datadir, so std::fs
+/// would bypass the sim namespace). Err(errno); the short-transfer loop is
+/// fd-layer retry policy, per the vfs contract.
+pub fn read_whole_file(path: &str) -> Result<Vec<u8>, i32> {
+    let cp = vfd::cpath(path);
+    let fd = vfs::open(&cp, libc::O_RDONLY, 0);
+    if fd < 0 {
+        return Err(get_errno());
+    }
+    let size = vfs::file_size(fd);
+    if size < 0 {
+        let e = get_errno();
+        vfs::close(fd);
+        return Err(e);
+    }
+    let mut buf = vec![0u8; size as usize];
+    let mut off: usize = 0;
+    while off < buf.len() {
+        let n = vfs::pread(fd, &mut buf[off..], off as libc::off_t);
+        if n < 0 {
+            let e = get_errno();
+            if e == libc::EINTR {
+                continue;
+            }
+            vfs::close(fd);
+            return Err(e);
+        }
+        if n == 0 {
+            buf.truncate(off); // shrank underneath us: return what exists
+            break;
+        }
+        off += n as usize;
+    }
+    vfs::close(fd);
+    Ok(buf)
+}
+
+/// Whole-file create/replace through the VFS (the write-side twin of
+/// [`read_whole_file`]): O_CREAT|O_TRUNC|O_WRONLY at pg_file_create_mode,
+/// optional fsync before close. Err(errno).
+pub fn write_whole_file(path: &str, data: &[u8], do_sync: bool) -> Result<(), i32> {
+    let cp = vfd::cpath(path);
+    let fd = vfs::open(
+        &cp,
+        libc::O_CREAT | libc::O_TRUNC | libc::O_WRONLY,
+        vfd::pg_file_create_mode() as libc::mode_t,
+    );
+    if fd < 0 {
+        return Err(get_errno());
+    }
+    let mut off: usize = 0;
+    while off < data.len() {
+        let n = vfs::pwrite(fd, &data[off..], off as libc::off_t);
+        if n < 0 && get_errno() == libc::EINTR {
+            continue;
+        }
+        if n <= 0 {
+            let e = if get_errno() == 0 { libc::ENOSPC } else { get_errno() };
+            vfs::close(fd);
+            return Err(e);
+        }
+        off += n as usize;
+    }
+    if do_sync && pg_fsync(fd) != 0 {
+        let e = get_errno();
+        vfs::close(fd);
+        return Err(e);
+    }
+    if vfs::close(fd) < 0 {
+        return Err(get_errno());
+    }
+    Ok(())
+}
+
 pub fn pg_file_exists(name: &str) -> PgResult<bool> {
     let path = vfd::cpath(name);
     let mut st = vfs::FileInfo::zeroed();

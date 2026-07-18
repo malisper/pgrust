@@ -150,8 +150,10 @@ fs	crates/backend/postmaster/launch_backend/src/lib.rs	1
 fs	crates/backend/postmaster/pgarch/src/lib.rs	4
 # --- crates/backend/postmaster/postmaster (12 sites) ---
 fs	crates/backend/postmaster/postmaster/src/crash_signals.rs	1
-fs	crates/backend/postmaster/postmaster/src/main_entry.rs	9
+fs	crates/backend/postmaster/postmaster/src/main_entry.rs	8
 fs	crates/backend/postmaster/postmaster/src/serverloop.rs	2
+fs	crates/backend/storage/file/vfs/src/sim_boot.rs	8	DST-REVIEW(provider-seam): the §9.3 asset ingest IS the declared host boundary — the one place the sim world is seeded from a pinned host snapshot (std::fs read-only walk, pre-schedule, digest-covered via asset_hash); sim cfg only, dead in product builds
+env	crates/backend/storage/file/vfs/src/sim_boot.rs	2	DST-REVIEW(provider-seam): PGRUST_PGSHAREDIR/PGRUST_TZDIR are sim-harness asset locators consumed once at boot ingest (§9.3); sim cfg only, dead in product builds
 # --- crates/backend/postmaster/syslogger (32 sites) ---
 fs	crates/backend/postmaster/syslogger/src/lib.rs	32
 # --- crates/backend/replication/logical/reorderbuffer (5 sites) ---
@@ -185,7 +187,6 @@ fs	crates/backend/timezone/pgtz/src/lib.rs	2
 # --- crates/backend/tsearch/ts_locale (1 sites) ---
 fs	crates/backend/tsearch/ts_locale/src/public.rs	1
 # --- crates/backend/utils/activity/pgstat (7 sites) ---
-fs	crates/backend/utils/activity/pgstat/src/file.rs	7
 # --- crates/backend/utils/adt/adt_misc (5 sites) ---
 fs	crates/backend/utils/adt/adt_misc/src/builtins.rs	5
 # --- crates/backend/utils/adt/dbsize (5 sites) ---
@@ -194,7 +195,7 @@ fs	crates/backend/utils/adt/dbsize/src/builtins.rs	5
 fs	crates/backend/utils/adt/genfile/src/builtins.rs	10	DST-REVIEW(p4-simnet): +3 = wasm/p5-boot stat_words cfg twins (wasi MetadataExt vs unix); wasm-lane arms met the lint at this merge — routing rides the P1 Vfs backlog
 fs	crates/backend/utils/adt/genfile/src/lib.rs	1
 # --- crates/backend/utils/cache/relcache (12 sites) ---
-fs	crates/backend/utils/cache/relcache/src/initfile.rs	12
+# --- crates/backend/utils/cache/relmapper (2 sites) ---
 # --- crates/backend/utils/error/elog (7 sites) ---
 fs	crates/backend/utils/error/elog/src/report.rs	7
 # --- crates/backend/tcop/postgres sim harness (6 sites, cfg pgrust_sim) ---
@@ -352,7 +353,7 @@ env	crates/backend/postmaster/autovacuum/src/worker.rs	1
 env	crates/backend/postmaster/bgjobs/src/lib.rs	2
 env	crates/backend/postmaster/bgworker/src/lib.rs	1
 env	crates/backend/postmaster/launch_backend/src/lib.rs	4
-env	crates/backend/postmaster/postmaster/src/main_entry.rs	1
+env	crates/backend/postmaster/postmaster/src/main_entry.rs	2	DST-REVIEW(provider-seam): +1 = the cfg(pgrust_sim) §9 boot installer reading PGDATA exactly the way SelectConfigFiles does (same -D-else-PGDATA resolution; sim cfg only, dead in product builds)
 env	crates/backend/storage/aio/aio_uring/src/lib.rs	1
 env	crates/backend/storage/ipc/procarray/src/lib.rs	1
 env	crates/backend/storage/ipc/shm_mq/src/stall.rs	2

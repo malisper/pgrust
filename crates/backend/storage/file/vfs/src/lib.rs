@@ -309,6 +309,8 @@ pub type ActiveVfs = posix::PosixVfs;
 #[cfg(pgrust_sim)]
 pub mod sim;
 #[cfg(pgrust_sim)]
+pub mod sim_boot;
+#[cfg(pgrust_sim)]
 pub type ActiveVfs = sim::SimVfs;
 // --- end append region (WS-C) ---
 
