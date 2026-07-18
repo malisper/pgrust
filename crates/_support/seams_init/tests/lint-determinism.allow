@@ -41,10 +41,26 @@
 # fs 334 sites/74 files, time 182/34, rand 4/1, spawn 11/7, env 289/91,
 # blocking 84/42 — allowlist == census exactly, 0 violations 0 warnings.
 #
+# WIDENING 2026-07-17d (P3-CENSUS, branch dst/p3-census @ dst/substrate
+# e1a7e7b47 — the dst-p3-scheduler.md s7 Wave-1 ENTRY gate; charter: the
+# s1.3 layer-2 widened re-census the adversarial review commissioned).
+# FOUR NEW SECTIONS seeded below, existing rows untouched:
+#   join 12/9, barrier 7/2, once 289/91, scope 6/4 — allowlist == widened
+#   census exactly, 0 violations 0 warnings at seed.
+# Every widened-arm site maps to a s3 conversion row (14/15/18/19), a
+# sanctioned type (pg_barrier in nodehash), or a ledgered name collision
+# (the lifecycle armed join in runtime/sched.rs) — NO new unclassified
+# blocking class was found. Two sites are NEW versus the design's own row
+# lists (writer.rs finalize-path join L996; the explicit scoped pump join
+# copy/parallel.rs L1506) — flagged in notes/dst-p3-census.md. Lock waits
+# are deliberately NOT a section here (not statically lintable — see the
+# lint header; s1.3 layer 1 owns that class at runtime).
+#
 # ROW FORMAT (tab-separated):
 #   <category>\t<file>\t<max-sites>[\t<annotation>]
 # <max-sites> is the file's site budget: matching production source lines
-# the lint tolerates. Categories: fs time rand spawn env blocking.
+# the lint tolerates. Categories: fs time rand spawn env blocking
+# join barrier once scope.
 #
 # THE RATCHET LAW:
 #   * budgets may only SHRINK; rows may only be DELETED;
@@ -393,3 +409,136 @@ blocking	crates/backend/storage/lmgr/lmgr/src/lib.rs	2
 blocking	crates/backend/tcop/backend_startup/src/lib.rs	1
 blocking	crates/backend/test_regress/src/lib.rs	1
 blocking	crates/backend/utils/init/postinit/src/lib.rs	1
+
+# ==== join ====
+# P3 s1.3 layer-2 widened arm (dst-p3-scheduler.md s3 row 14) — seeded
+# 2026-07-17d @ dst/substrate e1a7e7b47 (P3-CENSUS). Zero-arg .join()
+# call shape. Exit criterion: every row converted, proof-ledgered, or
+# annotated as a non-thread name collision.
+join	crates/backend/access/pgrcolumnar/src/loadsort.rs	1	P3 row 14: prefetch-pool drop-path join L489 (design cited L462 pre-compose); bounded — joins after stop flag + channel drop
+join	crates/backend/access/pgrcolumnar/src/writer.rs	2	P3 row 14: stitch-pool joins — drop path L438 + finalize path L996; L996 is NEW vs the design row-14 list (same close-then-join shape)
+join	crates/backend/commands/copy/src/parallel.rs	1	P3 row 15: explicit scoped pump join L1506 inside the row-5 gang (design row 14 called scope-gang joins "implicit")
+join	crates/backend/executor/nodeagg/src/merge.rs	2	P3 rows 15/18: scoped claimer joins L2692/L2922, gang-bounded
+join	crates/backend/executor/nodeagg/src/pardistinct.rs	2	P3 row 15: scoped claimer joins L1832/L1977, gang-bounded
+join	crates/backend/executor/runtime/src/pool.rs	1	P3 row 14: pool shutdown join L164, post stop-flag + wake_all
+join	crates/backend/executor/runtime/src/sched.rs	1	NOT a thread join: lifecycle TaskHandle::join armed join L1392 (lifecycle.rs:495) — name collision; the cv rides the row-4 registered choke
+join	crates/backend/lib/dshash/bench/rig/src/main.rs	1	bench-rig crate, not server prod (mirrors its spawn row)
+join	crates/backend/postmaster/launch_backend/src/lib.rs	1	P3 row 14: reaper join L193, only post-announce
+
+# ==== barrier ====
+# P3 s1.3 layer-2 widened arm (s3 row 18) — seeded 2026-07-17d. The class
+# the review found by hand: a raw std Barrier wait is a watchdog-invisible
+# sim wedge. pg_barrier is the sanctioned hub type.
+barrier	crates/backend/executor/nodeagg/src/merge.rs	3	P3 row 18: THE production std::sync::Barrier — import L12, new L2673/L2901, waits L2520/L2853; -> pg_barrier in wave 2, MUST precede the first C2 seed
+barrier	crates/backend/executor/nodehash/src/parallel.rs	4	pg_barrier::Barrier constructions L194-196/L392 — the SANCTIONED Waiter-backed type riding C1/C9; bare-name collision with the Barrier::new arm; SCHED-VISIBLE
+
+# ==== once ====
+# P3 s1.3 layer-2 widened arm (s3 row 19) — seeded 2026-07-17d: racing
+# get_or_init/get_or_try_init/call_once lazy-init (289 sites / 91 files;
+# the design said "~139 prod files" — corrected by the cfg(test)-stripped
+# census). Every row is row-19 once-ledger scope: the Wave-1 ledger must
+# classify each init closure (a) pure/env-read or (b) choke-crossing.
+# Unannotated rows carry no per-row claim yet — the ledger is the Wave-1
+# deliverable, this section is the ratchet that fences NEW sites.
+once	crates/_support/jit_deform/src/lib.rs	1
+once	crates/_support/pgrust/trace/src/lib.rs	1
+once	crates/_support/seams_init/src/lib.rs	1
+once	crates/_support/test_boot/src/lib.rs	2
+once	crates/backend/access/heap/vacuumlazy/src/morsels.rs	6
+once	crates/backend/access/pgrcolumnar/src/condcache.rs	2
+once	crates/backend/access/pgrcolumnar/src/part_cache.rs	3	P3 row-19 danger class (design-cited): scan-path part-registry singletons L97/L139 (design cited 98/140; -1 drift) + debug knob L149
+once	crates/backend/access/pgrcolumnar/src/reader.rs	7
+once	crates/backend/access/pgrcolumnar/src/scan.rs	2	P3 row-19 danger class (design-cited): L22/L562 multi-thread scan knobs
+once	crates/backend/access/pgrcolumnar/src/segfile.rs	1
+once	crates/backend/access/pgrcolumnar/src/writer.rs	4
+once	crates/backend/access/transam/parallel/src/lib.rs	2
+once	crates/backend/access/transam/parallel/src/query_task_guard.rs	2
+once	crates/backend/access/transam/parallel/src/standing.rs	2	P3 row 19 (design-cited L148): gang OnceLock init — pure Mutex+Condvar alloc closure
+once	crates/backend/access/transam/xlogrecovery/src/lib.rs	1
+once	crates/backend/catalog/pg_constraint/src/lib.rs	1
+once	crates/backend/commands/copy/src/parallel.rs	15
+once	crates/backend/executor/execexpr/src/jit.rs	3
+once	crates/backend/executor/execmain/src/execmain.rs	1
+once	crates/backend/executor/execmain/src/lanev2.rs	30	P3 row 19: lanev2 runtime knobs (design-cited class)
+once	crates/backend/executor/execmain/src/lanev2/exprkey.rs	6
+once	crates/backend/executor/execmain/src/lanev2/router.rs	1
+once	crates/backend/executor/execmain/src/lanev2/runtime_agg_sorted.rs	3
+once	crates/backend/executor/execmain/src/lanev2/runtime_agg.rs	30	P3 row 19: lanev2 runtime knobs (design-cited class)
+once	crates/backend/executor/execmain/src/lanev2/runtime_bitmap.rs	3
+once	crates/backend/executor/execmain/src/lanev2/runtime_distinct.rs	8
+once	crates/backend/executor/execmain/src/lanev2/runtime_hashjoin.rs	6
+once	crates/backend/executor/execmain/src/lanev2/runtime_plaindistinct.rs	2
+once	crates/backend/executor/execmain/src/lanev2/runtime_scan.rs	10
+once	crates/backend/executor/execmain/src/lanev2/runtime_sort.rs	5
+once	crates/backend/executor/execmain/src/lanev2/stats.rs	1
+once	crates/backend/executor/instrument/src/lib.rs	1
+once	crates/backend/executor/laneexec/src/dicteval.rs	1
+once	crates/backend/executor/lanestitch/src/lib.rs	1
+once	crates/backend/executor/lanestitch/src/stitch.rs	1
+once	crates/backend/executor/lanetable/src/lib.rs	3
+once	crates/backend/executor/nodeagg/src/codedgroup.rs	3
+once	crates/backend/executor/nodeagg/src/compact.rs	3
+once	crates/backend/executor/nodeagg/src/distinctset.rs	2
+once	crates/backend/executor/nodeagg/src/hashgrouped.rs	4
+once	crates/backend/executor/nodeagg/src/lib.rs	3
+once	crates/backend/executor/nodeagg/src/merge.rs	4
+once	crates/backend/executor/nodeagg/src/pardistinct.rs	4
+once	crates/backend/executor/nodeagg/src/sink.rs	4
+once	crates/backend/executor/nodeagg/src/spankey.rs	2
+once	crates/backend/executor/nodeseqscan/src/lib.rs	5
+once	crates/backend/executor/runtime/src/io.rs	1
+once	crates/backend/executor/runtime/src/lib.rs	2
+once	crates/backend/executor/runtime/src/sched.rs	11
+once	crates/backend/executor/runtime/src/sizing.rs	1
+once	crates/backend/lib/dshash/bench/rig/src/main.rs	1
+once	crates/backend/optimizer/path/costsize/src/gucs.rs	3
+once	crates/backend/optimizer/plan/planner/src/m5_suppress.rs	3
+once	crates/backend/optimizer/plan/planner/src/selfuncs.rs	1
+once	crates/backend/optimizer/plan/planner/src/syscache_memo.rs	3
+once	crates/backend/postmaster/autovacuum/src/shmem.rs	1
+once	crates/backend/postmaster/bgjobs/src/lib.rs	3
+once	crates/backend/postmaster/bgworker/src/lib.rs	1
+once	crates/backend/postmaster/launch_backend/src/lib.rs	2
+once	crates/backend/replication/walsender/src/lib.rs	1
+once	crates/backend/storage/ipc/pmsignal/src/lib.rs	1
+once	crates/backend/storage/ipc/procsignal/src/lib.rs	1
+once	crates/backend/storage/ipc/shm_mq/src/stall.rs	2
+once	crates/backend/storage/ipc/waiter/src/clock.rs	1
+once	crates/backend/storage/ipc/waiter/src/lib.rs	2
+once	crates/backend/storage/lmgr/condition_variable/src/lib.rs	1
+once	crates/backend/tcop/postgres/src/stmt_trace.rs	1
+once	crates/backend/timezone/pgtz/src/lib.rs	1
+once	crates/backend/tsearch/ts_locale/src/public.rs	2
+once	crates/backend/utils/activity/pgstat/src/lib.rs	1
+once	crates/backend/utils/adt/adt_date/src/builtins.rs	1
+once	crates/backend/utils/adt/adt_timestamp/src/builtins.rs	1
+once	crates/backend/utils/adt/float/src/funcs.rs	1
+once	crates/backend/utils/adt/geo/src/tests_full.rs	1
+once	crates/backend/utils/adt/pg_locale/src/icu_ffi.rs	1
+once	crates/backend/utils/adt/xml/src/libxml.rs	1
+once	crates/backend/utils/cache/relcache/src/initfile.rs	1
+once	crates/backend/utils/cache/syscache_seams/src/lib.rs	3
+once	crates/backend/utils/init/init_small/src/wretain.rs	1
+once	crates/backend/utils/init/postinit/src/lib.rs	2
+once	crates/backend/utils/misc/guc_tables/src/lane_pool.rs	5
+once	crates/backend/utils/misc/guc_tables/src/parallel_engine.rs	3
+once	crates/backend/utils/misc/guc_tables/src/runtime_pool.rs	8
+once	crates/backend/utils/misc/guc/src/layers.rs	3
+once	crates/backend/utils/misc/guc/src/store.rs	1
+once	crates/backend/utils/misc/timeout/src/lib.rs	1
+once	crates/backend/utils/misc/tzparser/src/lib.rs	1
+once	crates/contrib/pgcrypto/src/crypt/cryptdes.rs	1
+once	crates/port/crc32c/src/lib.rs	1
+once	crates/port/pg_clock/src/sim.rs	1
+once	crates/port/pg_strong_random/src/sim.rs	1
+
+# ==== scope ====
+# P3 s1.3 layer-2 widened arm (s3 row 15) — seeded 2026-07-17d: the 6
+# production std::thread::scope gangs (6 test-fenced siblings are outside
+# the prod census by methodology). This section makes row 15's "scope
+# sites are enumerable by lint" claim true — no prior pattern matched
+# thread::scope.
+scope	crates/backend/access/pgrcolumnar/src/scan.rs	1	P3 row 15 gang L2682
+scope	crates/backend/commands/copy/src/parallel.rs	1	P3 row 15 gang L1317 (design cited L1303 pre-compose); joins bounded by row-5 abort topology
+scope	crates/backend/executor/nodeagg/src/merge.rs	2	P3 rows 15/18 gangs L2678 + L2916 (the raw-merge claim gang the first census pass missed)
+scope	crates/backend/executor/nodeagg/src/pardistinct.rs	2	P3 row 15 gangs L1827/L1973

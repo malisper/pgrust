@@ -1,8 +1,10 @@
 //! Unit-shaped wiring for crates/_support/seams_init/tests/lint-determinism.sh — the DST P0
 //! determinism-fencing ratchet (docs/design/dst-and-wasm.md, P0 phasing row
-//! + §3.3 blocking census). Six categories of raw nondeterminism (fs, time,
-//! rand, spawn, env, blocking) are grepped over production code and diffed
-//! against the budgeted ledger in crates/_support/seams_init/tests/lint-determinism.allow; budgets
+//! + §3.3 blocking census). Ten categories of raw nondeterminism (fs, time,
+//! rand, spawn, env, blocking, plus the P3 §1.3 layer-2 widened arms join,
+//! barrier, once, scope — dst-p3-scheduler.md §3 rows 14/15/18/19, seeded
+//! by the P3-CENSUS Wave-1 entry gate) are grepped over production code and
+//! diffed against the budgeted ledger in crates/_support/seams_init/tests/lint-determinism.allow; budgets
 //! may only shrink and rows may only die. Deliberate exceptions carry a
 //! "DST-REVIEW(<who>): <why>" marker — a review convention enforced by
 //! humans diffing the allowlist (the lint cannot tell a new row from a
@@ -196,6 +198,44 @@ fn import_line_and_sleep_evasions_fail() {
         "VIOLATION(new-site): [fs] crates/backend/synthetic/src/lib.rs",
         "VIOLATION(new-site): [env] crates/backend/synthetic/src/lib.rs",
         "VIOLATION(new-site): [blocking] crates/backend/synthetic/src/lib.rs",
+    ] {
+        assert!(report.contains(want), "missing {want:?} in:\n{report}");
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// NEGATIVE: the P3 §1.3 layer-2 widened arms — a raw std::sync::Barrier,
+/// a zero-arg thread join, a racing get_or_init, and a thread::scope gang
+/// each fail under their own category (the census-blind classes the
+/// adversarial review proved live; dst-p3-scheduler.md §3 rows 14/15/18/19).
+#[test]
+fn widened_arms_barrier_join_once_scope_fail() {
+    let dir = scratch("widened");
+    let src_dir = dir.join("tree/crates/backend/synthetic/src");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::write(
+        src_dir.join("lib.rs"),
+        "use std::sync::{Arc, Barrier, OnceLock};\n\
+         static KNOB: OnceLock<bool> = OnceLock::new();\n\
+         pub fn gang(b: &Barrier) {\n\
+         \x20   let _ = KNOB.get_or_init(|| true);\n\
+         \x20   let h = std::thread::spawn(|| ());\n\
+         \x20   let _ = h.join();\n\
+         \x20   std::thread::scope(|s| { s.spawn(|| { b.wait(); }); });\n\
+         }\n",
+    )
+    .unwrap();
+    let allow = dir.join("empty.allow");
+    fs::write(&allow, "# empty\n").unwrap();
+
+    let (ok, report) = run_lint(Some(&dir.join("tree")), Some(&allow));
+    assert!(!ok, "widened-arm sites must fail:\n{report}");
+    for want in [
+        "VIOLATION(new-site): [barrier] crates/backend/synthetic/src/lib.rs",
+        "VIOLATION(new-site): [join] crates/backend/synthetic/src/lib.rs",
+        "VIOLATION(new-site): [once] crates/backend/synthetic/src/lib.rs",
+        "VIOLATION(new-site): [scope] crates/backend/synthetic/src/lib.rs",
+        "VIOLATION(new-site): [spawn] crates/backend/synthetic/src/lib.rs",
     ] {
         assert!(report.contains(want), "missing {want:?} in:\n{report}");
     }
