@@ -702,6 +702,13 @@ pub(crate) struct Scheduler {
     /// instance via [`crate::Runtime::set_ledger`]). OFF ⇒ today's
     /// scheduler, byte-identical.
     ledger_on: AtomicBool,
+    /// PHASE3-CLOSE WS-WIDTH: which face `lease_parallel_width` backs onto
+    /// — false = the WS-O external slab (today's path, exactly), true =
+    /// unified gang entries in the pool face's table. Env default from
+    /// [`crate::gang_width_face`] (the ONE OnceLock resolving both gang
+    /// knobs); tests toggle per instance via
+    /// [`crate::Runtime::set_width_unified`] (the set_ledger precedent).
+    width_unified: AtomicBool,
     clock: Arc<dyn Clock>,
     params: SizingParams,
     pub(crate) stats: RuntimeStats,
@@ -749,6 +756,9 @@ impl Scheduler {
             global_pass: AtomicU64::new(0),
             ledger: AdmissionLedger::new(nslots, LedgerBudgets::from_env(permits as u32)),
             ledger_on: AtomicBool::new(ledger_default()),
+            width_unified: AtomicBool::new(
+                crate::gang_width_face() == crate::GangWidthFace::Unified,
+            ),
             clock,
             params,
             stats: RuntimeStats::default(),
@@ -889,6 +899,50 @@ impl Scheduler {
     /// pool targets widen. NOT gated on ledger_on (as settle).
     pub(crate) fn retire_external_width(&self, id: usize) {
         if self.ledger.retire_external(id) > 0 {
+            self.park.wake_all();
+        }
+    }
+
+    /// PHASE3-CLOSE WS-WIDTH: per-instance face toggle (tests / A-B;
+    /// production reads [`crate::gang_width_face`] once at construction —
+    /// default OFF = the WS-O external face). Toggle BEFORE leasing: a
+    /// live lease's face is fixed at acquisition (the RAII routes its own
+    /// settle/retire).
+    pub(crate) fn set_width_unified(&self, on: bool) {
+        self.width_unified.store(on, Ordering::SeqCst);
+    }
+
+    pub(crate) fn width_unified_enabled(&self) -> bool {
+        self.width_unified.load(Ordering::Relaxed)
+    }
+
+    /// Unified gang width lease (ledger.rs "Unified gang entries"): admit
+    /// a non-pool parallel gang as a frozen non-shedding POOL-face entry.
+    /// None ⇔ ledger OFF or [`crate::ledger::MAX_GANG_ENTRIES`] — FAIL-OPEN,
+    /// the caller keeps today's uncapped path. The grant may be 0 (the
+    /// caller must have a serial path). Takes ledger.inner ALONE — never
+    /// called under the membership lock (lock-order note in the ledger
+    /// module doc; same law as the external face).
+    pub(crate) fn lease_gang_width(&self, requested: u32) -> Option<(usize, u32)> {
+        if !self.ledger_on.load(Ordering::Relaxed) {
+            return None;
+        }
+        self.ledger.admit_gang(requested)
+    }
+
+    /// Settle a gang entry to its ACTIVE width; widened pool targets wake
+    /// parked workers (the retire wake discipline). NOT gated on
+    /// ledger_on: a live entry must stay settleable across a test toggle.
+    pub(crate) fn settle_gang_width(&self, id: usize, active: u32) {
+        if self.ledger.settle_gang(id, active) > 0 {
+            self.park.wake_all();
+        }
+    }
+
+    /// Retire a gang entry (lease drop), waking parked workers when pool
+    /// targets widen. NOT gated on ledger_on (as settle).
+    pub(crate) fn retire_gang_width(&self, id: usize) {
+        if self.ledger.retire_gang(id) > 0 {
             self.park.wake_all();
         }
     }
