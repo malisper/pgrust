@@ -388,7 +388,7 @@ env	crates/pl/plpgsql/src/handler.rs	1	DST-REVIEW(t27-train): spi-compile-residu
 # ==== blocking ====
 blocking	crates/backend/access/heap/vacuumlazy/src/lib.rs	1
 blocking	crates/backend/access/heap/vacuumlazy/src/morsels.rs	1
-blocking	crates/backend/access/index/relscan/src/parallel.rs	3	P3 violator: btree parallel-scan Condvar (s3.3)
+blocking	crates/backend/access/index/relscan/src/parallel.rs	3	CONVERTED-to-pgsync (permit-s3): btree parallel-scan Condvar now hooked/SCHED-VISIBLE; the rg.rs::seize protocol conversion stays chartered (census s3 row 2; loom guard = ParkLot eventcount models, direct model owed at the seize API)
 blocking	crates/backend/access/pgrcolumnar/src/loadsort.rs	6	P3: readahead channels (s3.3)
 blocking	crates/backend/access/pgrcolumnar/src/scan.rs	2
 blocking	crates/backend/access/pgrcolumnar/src/writer.rs	3	P3: stitch-pool channels (s3.3)
@@ -407,7 +407,7 @@ blocking	crates/backend/executor/execmain/src/lanev2/runtime_hashjoin.rs	1
 blocking	crates/backend/executor/execmain/src/lanev2/runtime_plaindistinct.rs	1
 blocking	crates/backend/executor/execmain/src/lanev2/runtime_scan.rs	1
 blocking	crates/backend/executor/execmain/src/lanev2/runtime_sort.rs	1
-blocking	crates/backend/executor/nodebitmapheapscan/src/lib.rs	3	P3 violator: 10ms cv poll, invisible to the virtual clock (s3.3)
+blocking	crates/backend/executor/nodebitmapheapscan/src/lib.rs	3	CONVERTED-to-pgsync (permit-s3): cv-poll now hooked (sim wait_timeout rides the wrapped Condvar); the pg_barrier phase-pattern conversion stays chartered (census s3 row 3; loom guard = pg_barrier phase models)
 blocking	crates/backend/executor/runtime/src/lib.rs	1
 blocking	crates/backend/executor/runtime/src/lifecycle.rs	3	sanctioned as runtime plumbing; must register as a choke point (s3.3)
 blocking	crates/backend/executor/runtime/src/sync.rs	1	SANCTIONED hub (s3.3); pgsync facade since permit-s1
@@ -588,8 +588,6 @@ rawsync	crates/_support/test_boot/src/lib.rs	1
 rawsync	crates/backend/access/common/syncscan/src/lib.rs	1
 rawsync	crates/backend/access/common/tidstore/src/lib.rs	1
 rawsync	crates/backend/access/heap/vacuumlazy/src/morsels.rs	1
-rawsync	crates/backend/access/index/relscan/src/parallel.rs	1
-rawsync	crates/backend/access/nbtree/nbtree/src/utils.rs	1
 rawsync	crates/backend/access/pgrcolumnar/src/condcache.rs	1
 rawsync	crates/backend/access/pgrcolumnar/src/loadsort.rs	5
 rawsync	crates/backend/access/pgrcolumnar/src/part_cache.rs	1
@@ -644,7 +642,6 @@ rawsync	crates/backend/executor/nodeagg/src/pardistinct.rs	5
 rawsync	crates/backend/executor/nodeagg/src/sink.rs	4
 rawsync	crates/backend/executor/nodeagg/src/spankey.rs	2
 rawsync	crates/backend/executor/nodeappend/src/lib.rs	1
-rawsync	crates/backend/executor/nodebitmapheapscan/src/lib.rs	1
 rawsync	crates/backend/executor/nodehash/src/parallel.rs	1
 rawsync	crates/backend/executor/nodeseqscan/src/lib.rs	5
 rawsync	crates/backend/executor/tqueue/src/lib.rs	1
