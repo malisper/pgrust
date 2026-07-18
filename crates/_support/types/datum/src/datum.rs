@@ -4,9 +4,21 @@ use ::types_core::{Oid, TransactionId};
 // invariant: typbyval/typlen are threaded from context, never probed from the
 // word; by-ref values cross only as raw pointer words (from_usize/as_usize)
 // borrowed from the page/tuple/context that owns them.
+//
+// SIZEOF_DATUM stays 8 on EVERY target, including 32-bit-pointer wasm32: the
+// whole port hardcodes C's 64-bit catalog configuration (int8/float8 byval,
+// 8-byte alignment); C's own 32-bit story (pointer-width Datum, float8
+// byref) is a different catalog and is NOT what this tree ports. On wasm32
+// the word is u64 and pointers occupy the low 32 bits — from_usize
+// zero-extends, as_usize truncates back losslessly.
+#[cfg(not(target_family = "wasm"))]
+type DatumWord = usize;
+#[cfg(target_family = "wasm")]
+type DatumWord = u64;
+
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 #[repr(transparent)]
-pub struct Datum(usize);
+pub struct Datum(DatumWord);
 
 const _: () = assert!(core::mem::size_of::<Datum>() == 8);
 
@@ -18,15 +30,15 @@ impl Datum {
     }
 
     pub const fn from_usize(value: usize) -> Self {
-        Self(value)
+        Self(value as DatumWord)
     }
 
     pub const fn as_usize(self) -> usize {
-        self.0
+        self.0 as usize
     }
 
     pub const fn from_bool(value: bool) -> Self {
-        Self(value as usize)
+        Self(value as DatumWord)
     }
 
     // C `DatumGetBool` is `(X != 0)`: any nonzero word reads back true.
@@ -35,7 +47,7 @@ impl Datum {
     }
 
     pub const fn from_i16(value: i16) -> Self {
-        Self(value as usize)
+        Self(value as DatumWord)
     }
 
     pub const fn as_i16(self) -> i16 {
@@ -44,7 +56,7 @@ impl Datum {
 
     // Signed *GetDatum sign-extends into the full word, matching C.
     pub const fn from_i32(value: i32) -> Self {
-        Self(value as usize)
+        Self(value as DatumWord)
     }
 
     pub const fn as_i32(self) -> i32 {
@@ -52,7 +64,7 @@ impl Datum {
     }
 
     pub const fn from_u32(value: u32) -> Self {
-        Self(value as usize)
+        Self(value as DatumWord)
     }
 
     pub const fn as_u32(self) -> u32 {
@@ -68,7 +80,7 @@ impl Datum {
     }
 
     pub const fn from_char(value: i8) -> Self {
-        Self(value as usize)
+        Self(value as DatumWord)
     }
 
     pub const fn as_char(self) -> i8 {
@@ -76,7 +88,7 @@ impl Datum {
     }
 
     pub const fn from_i8(value: i8) -> Self {
-        Self(value as usize)
+        Self(value as DatumWord)
     }
 
     pub const fn as_i8(self) -> i8 {
@@ -84,7 +96,7 @@ impl Datum {
     }
 
     pub const fn from_u8(value: u8) -> Self {
-        Self(value as usize)
+        Self(value as DatumWord)
     }
 
     pub const fn as_u8(self) -> u8 {
@@ -92,7 +104,7 @@ impl Datum {
     }
 
     pub const fn from_u16(value: u16) -> Self {
-        Self(value as usize)
+        Self(value as DatumWord)
     }
 
     pub const fn as_u16(self) -> u16 {
@@ -100,7 +112,7 @@ impl Datum {
     }
 
     pub const fn from_i64(value: i64) -> Self {
-        Self(value as usize)
+        Self(value as DatumWord)
     }
 
     pub const fn as_i64(self) -> i64 {
@@ -108,7 +120,7 @@ impl Datum {
     }
 
     pub const fn from_u64(value: u64) -> Self {
-        Self(value as usize)
+        Self(value as DatumWord)
     }
 
     pub const fn as_u64(self) -> u64 {
@@ -116,7 +128,7 @@ impl Datum {
     }
 
     pub const fn from_f32(value: f32) -> Self {
-        Self(value.to_bits() as usize)
+        Self(value.to_bits() as DatumWord)
     }
 
     pub const fn as_f32(self) -> f32 {
@@ -124,7 +136,7 @@ impl Datum {
     }
 
     pub const fn from_f64(value: f64) -> Self {
-        Self(value.to_bits() as usize)
+        Self(value.to_bits() as DatumWord)
     }
 
     pub const fn as_f64(self) -> f64 {
@@ -132,7 +144,7 @@ impl Datum {
     }
 
     pub const fn from_transaction_id(value: TransactionId) -> Self {
-        Self(value as usize)
+        Self(value as DatumWord)
     }
 
     pub const fn as_transaction_id(self) -> TransactionId {

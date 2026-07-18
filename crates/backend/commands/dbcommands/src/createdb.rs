@@ -19,6 +19,15 @@ use types_storage::lock::{AccessShareLock, RowExclusiveLock, ShareLock};
 use types_tuple::NameData;
 use wchar::{PG_SQL_ASCII, PG_UTF8};
 
+// wasm32: no LC_* names in the wasi libc crate; musl numbering (the
+// pg_locale wasm arm's convention).
+#[cfg(not(target_family = "wasm"))]
+use libc::{LC_COLLATE, LC_CTYPE};
+#[cfg(target_family = "wasm")]
+const LC_CTYPE: i32 = 0;
+#[cfg(target_family = "wasm")]
+const LC_COLLATE: i32 = 3;
+
 use crate::{
     check_db_file_conflict, database_is_invalid_form, get_db_info, have_createdb_privilege, loc,
     GLOBALTABLESPACE_OID, TableSpaceRelationId, XLOG_DBASE_CREATE_FILE_COPY,
@@ -469,7 +478,7 @@ pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid
             .into());
     }
 
-    let (ok, canon) = pg_locale::check_locale(libc::LC_COLLATE, dbcollate_v)?;
+    let (ok, canon) = pg_locale::check_locale(LC_COLLATE, dbcollate_v)?;
     if !ok {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_WRONG_OBJECT_TYPE)
@@ -478,7 +487,7 @@ pub fn createdb<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid
             .into());
     }
     let dbcollate_s: String = canon.unwrap_or_else(|| dbcollate_v.to_owned());
-    let (ok, canon) = pg_locale::check_locale(libc::LC_CTYPE, dbctype_v)?;
+    let (ok, canon) = pg_locale::check_locale(LC_CTYPE, dbctype_v)?;
     if !ok {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_WRONG_OBJECT_TYPE)

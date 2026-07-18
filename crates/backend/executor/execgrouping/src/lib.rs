@@ -439,7 +439,9 @@ impl SimpleHashIndex {
     /// SH_START_ITERATE + SH_ITERATE: backward walk from the first free
     /// bucket. `cursor` starts at 0; it packs the start bucket (high 32
     /// bits) and visited count + 1 (low 32 bits).
-    fn iterate(&self, cursor: &mut usize) -> Option<u32> {
+    // Cursor packing is u64 (not usize: the high-32 shift truncates on
+    // 32-bit wasm); identical words on 64-bit targets.
+    fn iterate(&self, cursor: &mut u64) -> Option<u32> {
         let size = self.size() as usize;
         let (start, mut visited) = if *cursor == 0 {
             let start =
@@ -447,7 +449,7 @@ impl SimpleHashIndex {
                     as u32;
             (start, 0usize)
         } else {
-            ((*cursor >> 32) as u32, (*cursor & 0xffff_ffff) - 1)
+            ((*cursor >> 32) as u32, ((*cursor & 0xffff_ffff) as usize) - 1)
         };
         let mut result = None;
         while visited < size {
@@ -459,7 +461,7 @@ impl SimpleHashIndex {
                 break;
             }
         }
-        *cursor = ((start as usize) << 32) | (visited + 1);
+        *cursor = ((start as u64) << 32) | (visited as u64 + 1);
         result
     }
 
@@ -871,7 +873,7 @@ impl<'mcx> TupleHashTable<'mcx> {
     }
 
     /// C SH_START_ITERATE/SH_ITERATE bucket-order drain; `cursor` starts 0.
-    pub fn iterate(&self, cursor: &mut usize) -> Option<u32> {
+    pub fn iterate(&self, cursor: &mut u64) -> Option<u32> {
         self.hashtab.iterate(cursor)
     }
 

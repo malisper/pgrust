@@ -77,6 +77,8 @@ unsafe impl mcx::ArenaSafe for Bitmapset<'_> {}
 unsafe impl mcx::ForgetSafe for Bitmapset<'_> {}
 
 const _: () = assert!(!core::mem::needs_drop::<Bitmapset<'static>>());
+// 64-bit layout pin (fat pointer); wasm32 (ILP32) shrinks it.
+#[cfg(not(target_family = "wasm"))]
 const _: () = assert!(core::mem::size_of::<Bitmapset<'static>>() == 16);
 
 impl<'mcx> Bitmapset<'mcx> {

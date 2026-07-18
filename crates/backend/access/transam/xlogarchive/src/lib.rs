@@ -134,7 +134,13 @@ pub fn RestoreArchivedFile(
         }
     }
 
-    if wait_error::wait_result_is_signal(rc, libc::SIGTERM) {
+    // wasm32: no SIG* names in the wasi libc crate; 15 = SIGTERM in the
+    // POSIX bit-form wait words wait_error's wasm arm decodes.
+    #[cfg(not(target_family = "wasm"))]
+    const SIGTERM: i32 = libc::SIGTERM;
+    #[cfg(target_family = "wasm")]
+    const SIGTERM: i32 = 15;
+    if wait_error::wait_result_is_signal(rc, SIGTERM) {
         ipc::proc_exit(1, g::MyProcPid());
     }
 

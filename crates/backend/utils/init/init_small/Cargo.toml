@@ -19,3 +19,8 @@ acl_seams = { path = "../../adt/acl_seams" }
 guc_seams = { path = "../../misc/guc_seams" }
 types_storage = { path = "../../../../_support/types/types_storage" }
 types_startup = { path = "../../../../_support/types/types_startup" }
+
+# `pgrust_sim` (non-default cfg): P4 sim arms live behind it; empty/absent
+# in product builds (law 0.1).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)'] }

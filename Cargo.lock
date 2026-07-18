@@ -5644,6 +5644,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fdnb"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "file_fdw"
 version = "0.0.0"
 dependencies = [
@@ -6174,6 +6181,7 @@ dependencies = [
  "guc_tables",
  "heaptuple",
  "init_small",
+ "libc",
  "mbutils",
  "miscinit",
  "pg_path",
@@ -8171,6 +8179,7 @@ dependencies = [
  "mcx",
  "mimalloc",
  "pg_locale",
+ "postgres_seams",
  "postmaster",
  "ps_status",
  "seams_init",
@@ -8350,6 +8359,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "parallel_seams",
+ "pg_path",
  "pg_prng",
  "pg_strong_random",
  "pgstat_seams",
@@ -12315,11 +12325,13 @@ dependencies = [
  "execmain",
  "execmain_seams",
  "fastpath",
+ "fd",
  "fmgr_core",
  "fmgr_seams",
  "gram_core",
  "guc",
  "guc_file",
+ "guc_seams",
  "guc_tables",
  "init_small",
  "init_small_seams",
@@ -12327,9 +12339,11 @@ dependencies = [
  "inval_seams",
  "ipc",
  "ipc_seams",
+ "ipci_seams",
  "latch",
  "latch_seams",
  "libc",
+ "libpq_pqsignal",
  "lmgr_proc",
  "lock",
  "lock_seams",
@@ -12359,13 +12373,16 @@ dependencies = [
  "plancache",
  "planner",
  "planner_seams",
+ "pmchild_seams",
  "pmsignal",
  "pmsignal_seams",
  "portalcmds_seams",
  "portalmem",
  "postgres_seams",
  "postinit",
+ "postmaster_seams",
  "pqcomm",
+ "pqcomm_simnet",
  "pqformat",
  "pquery",
  "predicate_seams",
@@ -12391,6 +12408,7 @@ dependencies = [
  "snapbuild_seams",
  "snapmgr",
  "spi_seams",
+ "stack_depth",
  "stringinfo",
  "subtrans_seams",
  "superuser_seams",
@@ -12400,6 +12418,7 @@ dependencies = [
  "tcop_dest",
  "timeout_seams",
  "timestamp_seams",
+ "transam_xlog",
  "transam_xlog_seams",
  "trigger_seams",
  "tuplestore",
@@ -12420,6 +12439,7 @@ dependencies = [
  "variable",
  "varlena",
  "varsup",
+ "vfs",
  "waitevent_seams",
  "walsender_seams",
  "xact",
@@ -12651,6 +12671,39 @@ name = "pqcomm_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+ "types_error",
+ "types_startup",
+ "types_storage",
+]
+
+[[package]]
+name = "pqcomm_simnet"
+version = "0.0.0"
+dependencies = [
+ "be_secure_seams",
+ "elog",
+ "ip",
+ "libc",
+ "postgres_seams",
+ "pqcomm",
+ "pqcomm_seams",
+ "types_core",
+ "types_error",
+ "types_startup",
+ "types_storage",
+]
+
+[[package]]
+name = "pqcomm_stdio"
+version = "0.0.0"
+dependencies = [
+ "be_secure_seams",
+ "elog",
+ "fdnb",
+ "libc",
+ "postgres_seams",
+ "pqcomm",
+ "pqcomm_seams",
  "types_error",
  "types_startup",
  "types_storage",
@@ -14590,6 +14643,8 @@ dependencies = [
  "postmaster",
  "postmaster_startup",
  "pqcomm",
+ "pqcomm_simnet",
+ "pqcomm_stdio",
  "pqformat",
  "pquery",
  "predicate",
@@ -16590,6 +16645,7 @@ dependencies = [
  "elog",
  "fd",
  "guc_tables",
+ "init_small",
  "init_small_seams",
  "ipc_seams",
  "libc",
