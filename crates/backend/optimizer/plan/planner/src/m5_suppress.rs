@@ -1033,11 +1033,17 @@ fn is_whitelisted_agg_nrti(expr: Node<'_>, rtis: &[usize], whitelist: &[u32]) ->
 /// body of both keyed FROM forms (flat N-RangeTblRef; left-deep INNER
 /// chain). Strictly narrower than the multibuild walk (probe ⊂ walk, risk
 /// P1) PLUS the planner-choice guards the walk cannot express — unindexed
-/// rels (no serial merge/NL-with-inner-index plan for the costing to
-/// prefer), EVERY rel's build estimate nbatch==1 (any rel may be hashed;
-/// the walk is unbatched-only), and a CONNECTED int-family hashjoinable
-/// equi graph (a disconnected component would cost a cartesian shape the
-/// walk refuses). Every early `false` keeps Gather exactly as today.
+/// rels (no serial NL-with-inner-index plan for the costing to prefer),
+/// DISTINCT relids (a repeated relation lets the EC machinery derive a
+/// dim-dim equality clause between the two aliases, and the costing then
+/// prefers a serial Merge Join + Materialize on it WITHOUT any index —
+/// the B1 suppress-then-refuse false positive; refused outright), EVERY
+/// rel's build estimate nbatch==1 (any rel may be hashed; the walk is
+/// unbatched-only), and a CONNECTED int-family hashjoinable equi graph
+/// (a disconnected component would cost a cartesian shape the walk
+/// refuses). Residual risk — the costing electing merge/NL among DISTINCT
+/// unindexed rels via an EC-derived clause — rides GL-M5P1-1's engagement
+/// counters. Every early `false` keeps Gather exactly as today.
 /// m5p1 knob coherence: the executor walk's multibuild kill switch
 /// (`PGRUST_RUNTIME_HASHJOIN_MULTIBUILD=0`) must also un-key the probe —
 /// a suppression the walk then refuses would land on serial (risk P1's
@@ -1080,6 +1086,15 @@ fn classify_multibuild(
             || rte.tablesample.is_some()
         {
             return refuse_join("side not a plain relation");
+        }
+        if relids.contains(&rte.relid) {
+            // B1 guard: a relation joined twice (self-join via aliases)
+            // seeds an EquivalenceClass spanning both aliases; the planner
+            // derives the alias-alias equality clause and can cost a serial
+            // Merge Join + Materialize on it with NO indexes present — a
+            // shape the multibuild walk refuses, which would land the
+            // suppression on serial (probe-outruns-walk, risk P1).
+            return refuse_join("relation appears more than once (EC self-join clause)");
         }
         relids.push(rte.relid);
         let Some(rel_id) = run.root.simple_rel_array.get(rti).copied().flatten() else {
