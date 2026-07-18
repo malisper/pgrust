@@ -256,7 +256,6 @@ time	crates/backend/postmaster/postmaster/src/statemachine.rs	2	doc-named P2 rer
 time	crates/backend/postmaster/syslogger/src/lib.rs	1
 time	crates/backend/postmaster/walsummarizer/src/lib.rs	2
 time	crates/backend/storage/ipc/shm_mq/src/stall.rs	1
-time	crates/backend/storage/ipc/waiter/src/clock.rs	1
 time	crates/backend/storage/ipc/waiteventset/src/lib.rs	1
 time	crates/backend/storage/lmgr/condition_variable/src/lib.rs	3	clock-adjacent wait-deadline surface
 time	crates/backend/tcop/postgres/src/lib.rs	3
