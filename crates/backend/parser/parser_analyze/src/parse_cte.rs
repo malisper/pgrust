@@ -662,13 +662,15 @@ impl<'a, 'mcx> NodeWalker<'mcx> for DependencyGraphWalker<'a, 'mcx> {
             | NodeTag::T_DeleteStmt
             | NodeTag::T_MergeStmt => match raw_stmt_with_clause(node) {
                 Some(wc) => {
-                    self.walk_inner_with(wc, |w| walk_raw(node, w).map(|_| ()))?;
+                    self.walk_inner_with(wc, |w| {
+                        nodes_core::raw_expression_tree_walker(node, w).map(|_| ())
+                    })?;
                     Ok(false)
                 }
-                None => walk_raw(node, self),
+                None => nodes_core::raw_expression_tree_walker(node, self),
             },
             NodeTag::T_WithClause => Ok(false),
-            _ => walk_raw(node, self),
+            _ => nodes_core::raw_expression_tree_walker(node, self),
         }
     }
 
@@ -692,92 +694,6 @@ fn name_captured(innerwiths: &PgVec<'_, NodeList<'_>>, relname: &str) -> bool {
         }
     }
     false
-}
-
-// Raw-tree arms C's raw_expression_tree_walker carries that nodes_core's port
-// has not grown yet; unlisted tags stay loud through the nodes_core fallback.
-fn walk_raw<'mcx, W: NodeWalker<'mcx> + ?Sized>(node: Node<'mcx>, w: &mut W) -> PgResult<bool> {
-    match node.node_tag() {
-        NodeTag::T_BoolExpr => {
-            nodes_core::walk_list(&node.as_bool_expr().expect("tag checked").args, w)
-        }
-        NodeTag::T_NullTest => {
-            nodes_core::walk_opt(node.as_null_test().expect("tag checked").arg, w)
-        }
-        NodeTag::T_SubLink => {
-            let sl = node.as_sub_link().expect("tag checked");
-            Ok(nodes_core::walk_opt(sl.testexpr, w)? || w.visit(sl.subselect)?)
-        }
-        NodeTag::T_JoinExpr => {
-            let j = node.as_join_expr().expect("tag checked");
-            Ok(w.visit(j.larg)? || w.visit(j.rarg)? || nodes_core::walk_opt(j.quals, w)?)
-        }
-        NodeTag::T_RangeSubselect => {
-            nodes_core::walk_opt(node.as_range_subselect().expect("tag checked").subquery, w)
-        }
-        NodeTag::T_CommonTableExpr => {
-            nodes_core::walk_opt(node.as_common_table_expr().expect("tag checked").ctequery, w)
-        }
-        NodeTag::T_LockingClause => {
-            nodes_core::walk_list(&node.as_locking_clause().expect("tag checked").lockedRels, w)
-        }
-        NodeTag::T_InsertStmt => {
-            let s = node.as_insert_stmt().expect("tag checked");
-            Ok(nodes_core::walk_opt(s.relation, w)?
-                || nodes_core::walk_list(&s.cols, w)?
-                || nodes_core::walk_opt(s.selectStmt, w)?
-                || nodes_core::walk_opt(s.onConflictClause, w)?
-                || nodes_core::walk_opt(s.returningClause, w)?
-                || nodes_core::walk_opt(s.withClause, w)?)
-        }
-        NodeTag::T_UpdateStmt => {
-            let s = node.as_update_stmt().expect("tag checked");
-            Ok(nodes_core::walk_opt(s.relation, w)?
-                || nodes_core::walk_list(&s.targetList, w)?
-                || nodes_core::walk_opt(s.whereClause, w)?
-                || nodes_core::walk_list(&s.fromClause, w)?
-                || nodes_core::walk_opt(s.returningClause, w)?
-                || nodes_core::walk_opt(s.withClause, w)?)
-        }
-        NodeTag::T_DeleteStmt => {
-            let s = node.as_delete_stmt().expect("tag checked");
-            Ok(nodes_core::walk_opt(s.relation, w)?
-                || nodes_core::walk_list(&s.usingClause, w)?
-                || nodes_core::walk_opt(s.whereClause, w)?
-                || nodes_core::walk_opt(s.returningClause, w)?
-                || nodes_core::walk_opt(s.withClause, w)?)
-        }
-        NodeTag::T_MergeStmt => {
-            let s = node.as_merge_stmt().expect("tag checked");
-            Ok(nodes_core::walk_opt(s.relation, w)?
-                || nodes_core::walk_opt(s.sourceRelation, w)?
-                || nodes_core::walk_opt(s.joinCondition, w)?
-                || nodes_core::walk_list(&s.mergeWhenClauses, w)?
-                || nodes_core::walk_opt(s.returningClause, w)?
-                || nodes_core::walk_opt(s.withClause, w)?)
-        }
-        NodeTag::T_ReturningClause => {
-            let s = node.as_returning_clause().expect("tag checked");
-            Ok(nodes_core::walk_list(&s.options, w)? || nodes_core::walk_list(&s.exprs, w)?)
-        }
-        NodeTag::T_OnConflictClause => {
-            let s = node.as_on_conflict_clause().expect("tag checked");
-            Ok(nodes_core::walk_opt(s.infer, w)?
-                || nodes_core::walk_list(&s.targetList, w)?
-                || nodes_core::walk_opt(s.whereClause, w)?)
-        }
-        NodeTag::T_InferClause => {
-            let s = node.as_infer_clause().expect("tag checked");
-            Ok(nodes_core::walk_list(&s.indexElems, w)? || nodes_core::walk_opt(s.whereClause, w)?)
-        }
-        NodeTag::T_MergeWhenClause => {
-            let s = node.as_merge_when_clause().expect("tag checked");
-            Ok(nodes_core::walk_opt(s.condition, w)?
-                || nodes_core::walk_list(&s.targetList, w)?
-                || nodes_core::walk_list(&s.values, w)?)
-        }
-        _ => nodes_core::raw_expression_tree_walker(node, w),
-    }
 }
 
 fn raw_stmt_with_clause<'mcx>(node: Node<'mcx>) -> Option<&'mcx WithClause<'mcx>> {
@@ -1114,7 +1030,7 @@ impl<'a, 'p, 'mcx> NodeWalker<'mcx> for WellFormedWalker<'a, 'p, 'mcx> {
                 nodes_core::walk_opt(sl.testexpr, self)?;
                 Ok(false)
             }
-            _ => walk_raw(node, self),
+            _ => nodes_core::raw_expression_tree_walker(node, self),
         }
     }
 
