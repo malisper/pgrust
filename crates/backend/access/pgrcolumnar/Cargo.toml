@@ -36,3 +36,6 @@ mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
 [dev-dependencies]
 laneexec = { path = "../../executor/laneexec" }
 tuplesort = { path = "../../utils/sort/tuplesort" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)'] }
