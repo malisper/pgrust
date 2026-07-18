@@ -6161,6 +6161,7 @@ dependencies = [
  "guc_tables",
  "heaptuple",
  "init_small",
+ "libc",
  "mbutils",
  "miscinit",
  "pg_path",

@@ -619,7 +619,10 @@ struct PerHashData<'mcx> {
     hash_ngroups_current: u64,
     hash_mem_limit: usize,
     table_filled: bool,
-    hashiter: usize,
+    // u64: hashtable mode holds execgrouping's packed (start,visited)
+    // cursor (high-32 packing must survive 32-bit wasm); compact mode a
+    // plain row index (cast at use).
+    hashiter: u64,
     // C hash_tablecxt: entries + pergroups (transvalues stay in aggcontext).
     table_ctx: MemoryContext,
     spill: HashSpillState<'mcx>,

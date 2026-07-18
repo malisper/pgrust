@@ -560,7 +560,10 @@ impl Part {
         // historical private mapping (same posture as the null identity).
         let map = match ident_stat.as_ref() {
             Some(md) => {
-                use std::os::unix::fs::MetadataExt;
+                #[cfg(not(target_family = "wasm"))]
+use std::os::unix::fs::MetadataExt;
+#[cfg(target_family = "wasm")]
+use std::os::wasi::fs::MetadataExt;
                 SegMap::open_shared(path, md.dev(), md.ino())?
             }
             None => SegMap::open(path)?.map(std::sync::Arc::new),
@@ -618,7 +621,10 @@ impl Part {
             .unwrap_or(footer_off)
             .min(footer_off);
         let identity = {
-            use std::os::unix::fs::MetadataExt;
+            #[cfg(not(target_family = "wasm"))]
+use std::os::unix::fs::MetadataExt;
+#[cfg(target_family = "wasm")]
+use std::os::wasi::fs::MetadataExt;
             match ident_stat {
                 Some(md) => crate::condcache::PartIdent {
                     dev: md.dev(),
@@ -947,12 +953,21 @@ pub(crate) fn decompress_frame_into(codec: Codec, src: &[u8], dst: &mut [u8], ra
             crate::lz4dec::decompress_padded(src, dst, raw_len)
                 .unwrap_or_else(|e| panic!("cbstore: corrupt LZ4 frame: {e}"));
         }
+        #[cfg(not(target_family = "wasm"))]
         Codec::Zstd => {
             let got = zstd::bulk::Decompressor::new()
                 .expect("cbstore: zstd decompressor init failed")
                 .decompress_to_buffer(src, &mut dst[..raw_len])
                 .expect("cbstore: corrupt ZSTD frame");
             assert_eq!(got, raw_len, "cbstore: ZSTD frame length mismatch");
+        }
+        // wasm32: zstd-sys links C and has no wasm build; cbstore tables
+        // carrying ZSTD frames are unreadable on this target (documented
+        // ledger out until a pure-Rust decoder is adopted).
+        #[cfg(target_family = "wasm")]
+        Codec::Zstd => {
+            let _ = (src, raw_len);
+            panic!("cbstore: ZSTD frames are not supported on wasm32-wasip1");
         }
         Codec::None => unreachable!("cbstore: decompress with Codec::None"),
     }
@@ -2278,7 +2293,10 @@ mod tests {
     // privately; the Weak registry never keeps a dead mapping alive.
     #[test]
     fn shared_segmap_identity() {
-        use std::os::unix::fs::MetadataExt;
+        #[cfg(not(target_family = "wasm"))]
+use std::os::unix::fs::MetadataExt;
+#[cfg(target_family = "wasm")]
+use std::os::wasi::fs::MetadataExt;
         let path = test_part("cb_sharedmap_test.part", &[100, 100], 2);
         let md = std::fs::metadata(&path).unwrap();
         let a = SegMap::open_shared(&path, md.dev(), md.ino()).unwrap().unwrap();

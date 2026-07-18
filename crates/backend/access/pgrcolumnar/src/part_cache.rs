@@ -28,7 +28,10 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+#[cfg(not(target_family = "wasm"))]
 use std::os::unix::fs::MetadataExt;
+#[cfg(target_family = "wasm")]
+use std::os::wasi::fs::MetadataExt;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 

@@ -88,15 +88,15 @@ pub fn AutoVacWorkerMain(startup_data: &StartupData) -> ! {
 
     {
         use procsignal::ThreadSignalHandler::{Fallible, Ignore, Simple};
-        procsignal::pqsignal_thread(libc::SIGHUP, Simple(interrupt::SignalHandlerForConfigReload));
-        procsignal::pqsignal_thread(libc::SIGINT, Simple(postgres::StatementCancelHandler));
-        procsignal::pqsignal_thread(libc::SIGTERM, Fallible(postgres::die));
+        procsignal::pqsignal_thread(procsignal::signums::SIGHUP, Simple(interrupt::SignalHandlerForConfigReload));
+        procsignal::pqsignal_thread(procsignal::signums::SIGINT, Simple(postgres::StatementCancelHandler));
+        procsignal::pqsignal_thread(procsignal::signums::SIGTERM, Fallible(postgres::die));
         timeout_seams::initialize_timeouts::call();
-        procsignal::pqsignal_thread(libc::SIGPIPE, Ignore);
-        procsignal::pqsignal_thread(libc::SIGUSR1, Simple(procsignal::procsignal_sigusr1_handler));
-        procsignal::pqsignal_thread(libc::SIGUSR2, Ignore);
-        procsignal::pqsignal_thread(libc::SIGFPE, Fallible(postgres::FloatExceptionHandler));
-        procsignal::pqsignal_thread(libc::SIGCHLD, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGPIPE, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGUSR1, Simple(procsignal::procsignal_sigusr1_handler));
+        procsignal::pqsignal_thread(procsignal::signums::SIGUSR2, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGFPE, Fallible(postgres::FloatExceptionHandler));
+        procsignal::pqsignal_thread(procsignal::signums::SIGCHLD, Ignore);
     }
 
     if let Err(e) = (|| -> PgResult<()> {
@@ -168,7 +168,7 @@ fn worker_body() -> PgResult<()> {
 
             let launcherpid = shmem::launcher_pid();
             if launcherpid != 0 {
-                let _ = procsignal::SendThreadSignal(launcherpid, libc::SIGUSR2);
+                let _ = procsignal::SendThreadSignal(launcherpid, procsignal::signums::SIGUSR2);
             }
             dbid
         } else {

@@ -523,7 +523,16 @@ fn fc_wait_pid(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum
         return Err(err("must be superuser to check PID liveness".to_string()));
     }
     loop {
+        // wasm32: no processes and no kill(2) on WASI — every probed pid is
+        // dead, so the wait returns immediately (matches miscinit's
+        // pid_appears_live wasm arm).
+        #[cfg(target_family = "wasm")]
+        {
+            let _ = pid;
+            break;
+        }
         // SAFETY: kill(pid, 0) sends nothing; it only probes liveness.
+        #[cfg(not(target_family = "wasm"))]
         if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
             let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
             if errno != libc::ESRCH {

@@ -4,6 +4,8 @@
 //! pg_freeaddrinfo_all); name out-buffers are `String`s filled even on
 //! failure. Never ereports — returns the resolver's `EAI_*` code.
 
+pub mod sys;
+
 #[cfg(not(target_family = "wasm"))]
 use std::mem::{size_of, MaybeUninit};
 #[cfg(not(target_family = "wasm"))]
