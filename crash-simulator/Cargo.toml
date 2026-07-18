@@ -1,9 +1,10 @@
-# simharness — H1 sim-harness core (contract: scratchpad harness-h1-contract.md §0 A2).
+# crash-simulator — H1 sim-harness core (contract: harness-h1-contract.md §0 A2).
 #
 # OWN cargo workspace, deliberately NOT a member of the repo root workspace:
 # client-side deps here must never enter the product build closure (zero-cost
 # gate, builds-on-fleet law). WS-RUNNER owns this manifest going forward;
-# WS-GEN bootstrapped it (inc-1) with the deps the generator needs.
+# integration union of the WS-GEN / WS-ORACLE / WS-RUNNER bootstraps
+# (regex + toml from WS-ORACLE for the triage.py screen ports and warts.toml).
 [workspace]
 
 [package]
@@ -12,12 +13,18 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[lib]
+name = "simharness"
+path = "src/lib.rs"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rand = "0.8"
 rand_chacha = "0.3"
 sha2 = "0.10"
+regex = "1"
+toml = "0.8"
 
 [[bin]]
 # Bootstrap gen-only CLI (WS-GEN). WS-RUNNER's `simharness` binary (src/main.rs)
