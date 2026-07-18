@@ -381,39 +381,15 @@ pub fn PortalCreateHoldStore(portal: &Portal<'static>) -> PgResult<()> {
 
 // --- WS-CA wave-10 (cursors inc-2, contract §7.3) --------------------------
 //
-// The portal layer's read of `PGRUST_LANE_V2_CURSORS` (the single wave-10
-// knob; inc-2 rides WS-AI's, no new knob). Same env var, same accepted
-// values ("1"|"on"), same AtomicU8 memo idiom as lanev2/push.rs's
-// `cursors_v2_enabled` — a second memo CELL, not a second knob: the env is
-// the source of truth and is fixed at server start in every battery arm.
-// portalmem hosts it because pquery, portalcmds and execmain all already
-// link portalmem and the portal layer must not link lanev2 internals
-// (contract §8 hand-off point 4; CA/CB interface decision, worklog §2).
-static CURSOR_STORE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
-
-pub fn cursor_store_enabled() -> bool {
-    use core::sync::atomic::Ordering::Relaxed;
-    match CURSOR_STORE.load(Relaxed) {
-        1 => false,
-        2 => true,
-        _ => {
-            let on = matches!(
-                std::env::var("PGRUST_LANE_V2_CURSORS").as_deref(),
-                Ok("1") | Ok("on")
-            );
-            CURSOR_STORE.store(if on { 2 } else { 1 }, Relaxed);
-            on
-        }
-    }
-}
-
-/// Same-process A/B lever for the unit batteries (pquery/portalcmds band
-/// 94001 pins run in dependent crates, so this cannot be cfg(test)).
-#[doc(hidden)]
-pub fn cursor_store_set_for_tests(on: bool) {
-    use core::sync::atomic::Ordering::Relaxed;
-    CURSOR_STORE.store(if on { 2 } else { 1 }, Relaxed);
-}
+// RETIRED (SEAM-WIRING, SE10-GATES item 1 — CB review F1(a)): the portal
+// layer's duplicate `PGRUST_LANE_V2_CURSORS` memo cell (`CURSOR_STORE` +
+// `cursor_store_enabled` + `cursor_store_set_for_tests`) lived here between
+// the CA landing and the seam wiring. THE single knob cell is
+// lanev2/push.rs `CURSORS`; the portal layer reads it through the
+// `execmain_seams::cursor_store_fill_enabled` seam (pquery PortalStart),
+// and unit batteries flip it through the execmain crate-root re-export
+// `cursor_store_fill_set_for_tests`. Two cells parsing one env var could
+// skew under the two independent test levers — closed by construction.
 // --- end WS-CA wave-10 ------------------------------------------------------
 
 pub fn PinPortal(portal: &Portal<'static>) -> PgResult<()> {

@@ -11552,14 +11552,18 @@ mod cursors_wave9 {
         let _knob = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let name = crate::lanev2::cursor_admission_refusal_name;
 
-        // Admit: forward, no scroll demand, serial.
+        // Admit: forward, serial.
         assert_eq!(name(true, 0, false), None, "the forward-only shape admits");
 
-        // cursor-scroll: declared/free-upgraded SCROLL portals (PortalStart
-        // eflags), MARK folded in as the same rewind-capable demand.
-        assert_eq!(name(true, EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD, false), Some("cursor-scroll"));
-        assert_eq!(name(true, EXEC_FLAG_REWIND, false), Some("cursor-scroll"));
-        assert_eq!(name(true, EXEC_FLAG_MARK, false), Some("cursor-scroll"));
+        // SUNSET EXECUTED (se/seam-wiring, SE10-GATES item 1): the
+        // cursor-scroll eflags arm is REMOVED — scroll-capable eflags no
+        // longer refuse the budget (store-served portals are
+        // lane-ADMITTED; eligible row-chain fills carry these eflags and
+        // refuse per-scan via batch_allowed, rolling up as
+        // cursor-plan-refused). The classifier ADMITS these shapes now.
+        assert_eq!(name(true, EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD, false), None);
+        assert_eq!(name(true, EXEC_FLAG_REWIND, false), None);
+        assert_eq!(name(true, EXEC_FLAG_MARK, false), None);
 
         // cursor-backward: the direction demand outranks the portal
         // capability (the corpus's explicit-backward cell naming).
@@ -11572,8 +11576,12 @@ mod cursors_wave9 {
         // Serial-law fail-closed arm (NOT a cursor taxonomy row).
         assert_eq!(name(true, 0, true), Some("parallel-gate"));
 
-        // The install half refuses the WHOLE run on a named refusal: no
-        // budget ⇒ no cursor machinery ⇒ Volcano byte-identical (fail-open).
+        // The install half post-SUNSET: scroll-capable eflags no longer
+        // refuse — the budget INSTALLS (store-served portals are
+        // lane-admitted; eligible row-chain fills refuse per-scan via
+        // batch_allowed and nothing lane-stages). A named refusal
+        // (backward direction) still refuses the WHOLE run: no budget ⇒
+        // no cursor machinery ⇒ Volcano byte-identical (fail-open).
         crate::lanev2::cursors_set_for_tests(true);
         assert_eq!(
             crate::lanev2::cursor_run_budget_install(
@@ -11583,8 +11591,13 @@ mod cursors_wave9 {
                 false,
                 EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD
             ),
+            Some(92010),
+            "post-SUNSET: scroll-capable eflags install the budget"
+        );
+        assert_eq!(
+            crate::lanev2::cursor_run_budget_install(true, false, 92010, false, 0),
             None,
-            "a scroll portal's budgeted run refuses wholesale"
+            "a backward run still refuses wholesale (cursor-backward)"
         );
         assert_eq!(
             crate::lanev2::cursor_run_budget_install(true, true, 92010, false, 0),
@@ -12755,26 +12768,34 @@ mod cursors_wave10_cb {
         scanfix::quiesced();
     }
 
-    /// §6 staging faces: the run-seam backward evidence counter ticks (the
-    /// release-mode bake instrument) and the debug assert stays INERT until
-    /// WS-CA arms a store (`cursor_store_ever_armed` defaults false on this
-    /// branch — the assert-arming note is CA's store-creation call).
+    /// §6 staging faces, SEAM-WIRING F3 REWORK (SE10-GATES item 7): the
+    /// original pin asserted `!cursor_store_ever_armed()` against the
+    /// process-global never-cleared static — a test-order hazard once the
+    /// armed note went live. The reworked pin is order-independent: it
+    /// tests the evidence counter with the assert PROVABLY inert (knob
+    /// forced OFF — the assert is knob-scoped, push.rs), then the
+    /// monotonic arming transition, then the knob faces. It never asserts
+    /// the static's initial state and leaves the knob OFF (the static may
+    /// remain armed — harmless under the knob-scoped assert).
     #[test]
     fn cursors_w10_forward_only_staging_faces() {
         // The knob lever is a process-global static: serialize with every
         // other flipping test (the fixture lock is the module's knob lock).
         let _knob = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Evidence counter ticks with the debug assert inert: knob OFF makes
+        // the assert's conjunct false regardless of prior arming.
+        crate::lanev2::cursors_set_for_tests(false);
         let before = crate::lanev2::run_seam_backward_evidence_count();
-        assert!(
-            !crate::lanev2::cursor_store_ever_armed(),
-            "no store exists on this branch: the §6 assert must be inert"
-        );
         crate::lanev2::run_seam_backward_evidence();
         assert_eq!(crate::lanev2::run_seam_backward_evidence_count(), before + 1);
-        // The pub knob face (the CA-facing seam) mirrors the test lever.
-        crate::lanev2::cursors_set_for_tests(true);
+        // The arming note is monotonic (never clears).
+        crate::lanev2::cursor_store_armed_note();
+        assert!(crate::lanev2::cursor_store_ever_armed());
+        // The pub knob face (the CA-facing seam) mirrors the test lever —
+        // one cell serves the portal face and the budget classifier.
+        crate::lanev2::cursor_store_fill_set_for_tests(true);
         assert!(crate::lanev2::cursor_store_fill_enabled());
-        crate::lanev2::cursors_set_for_tests(false);
+        crate::lanev2::cursor_store_fill_set_for_tests(false);
         assert!(!crate::lanev2::cursor_store_fill_enabled());
     }
 }

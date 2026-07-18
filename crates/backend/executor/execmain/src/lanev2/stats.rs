@@ -498,16 +498,17 @@ pub(super) enum RefuseReason {
     // cursor refusal lands the WHOLE portal on Volcano byte-identically
     // (the fail-open law) — these rows are observability, never semantics.
     // -----------------------------------------------------------------------
-    /// SUNSET (wave-10 REMOVES this class): the portal is scrollable —
-    /// declared SCROLL or free-upgraded at DECLARE (both arrive as
-    /// `EXEC_FLAG_REWIND|EXEC_FLAG_BACKWARD` top eflags from PortalStart,
-    /// pquery.rs:390-395; MARK is folded in as the same rewind-capable
-    /// demand). Michael has ratified a lazy-materialized store with lane
-    /// batch-fill for SCROLL/WITH-HOLD cursors in wave-10 (contract in
-    /// authoring): wave-10 removes the TICK SITE + its allowlist row — a
-    /// clean audited shrink. The variant itself then retires to a
-    /// never-ticking tombstone (the registry is append-only; discriminants
-    /// never move).
+    /// TOMBSTONE (SUNSET EXECUTED — se/seam-wiring, SE10-GATES item 1;
+    /// notes/se-seam-wiring.md §5): the inc-1b scrollable-portal refusal.
+    /// The tick site (the classifier's eflags arm,
+    /// `cursor_admission_refusal`) and the `cursor cursor-scroll`
+    /// allowlist row were REMOVED together once lane fill owned scroll
+    /// stores — the audited shrink the wave-9.5 SUNSET note scheduled.
+    /// Store-served SCROLL/HOLD portals are lane-ADMITTED; the eflags a
+    /// run still carries (CURRENT-OF-eligible row-chain fills, D-CA-2's
+    /// fence) refuse per-scan via `batch_allowed` and roll up as
+    /// `cursor-plan-refused`. NEVER-TICKING; the variant stays because the
+    /// registry is append-only and discriminants never move.
     CursorScroll = 36,
     /// Non-forward demand on a budgeted run (backward FETCH reaching the
     /// run seam). Reachable only through scroll-capable portals (NO SCROLL
@@ -551,16 +552,19 @@ pub(super) enum RefuseReason {
     /// A store fill over a CURRENT-OF-eligible plan (contract §4.1) uses
     /// the ROW-CHAIN fill: the v1 tid capture reads the scan state per
     /// row, so the lane batch fill declines. A mode choice inside a
-    /// still-store-served cursor (fetch-invisible), ticked once per
-    /// fill-engine decision — the tick face is
-    /// `push::cursor_fill_tid_capture_refused`, called where the
-    /// eligibility answer lives (WS-CA's store-creation shape test).
-    /// RESERVED tick site on this branch (the `CursorWithHold` posture);
-    /// arms at the composed head. Named follow-up (chartered, not inc-2):
-    /// lane fill supplies per-row `(tableoid, ctid)` from batch rowref
-    /// identity, retiring this reason. Contract note: authored as "next
-    /// free discriminant, 36" before inc-1b's chartered mint landed
-    /// 36..40; next free is 41 (worklog §1 drift record).
+    /// still-store-served cursor (fetch-invisible). ARMED (SEAM-WIRING,
+    /// SE10-GATES item 1): the tick face is
+    /// `push::cursor_fill_tid_capture_refused`, called through the
+    /// execmain_seams face from `fill_portal_store_to`'s eligible branch —
+    /// where the eligibility answer lives. CADENCE HONESTY (the
+    /// aj-allowlist-honesty family): once per fill_to CALL that drives the
+    /// executor, i.e. per FETCH-with-deficit on an eligible portal — an
+    /// UNBOUNDED-cadence row (fwd corpus: ~99k ticks/run), never per row.
+    /// Named follow-up (chartered, not inc-2): lane fill supplies per-row
+    /// `(tableoid, ctid)` from batch rowref identity, retiring this
+    /// reason. Contract note: authored as "next free discriminant, 36"
+    /// before inc-1b's chartered mint landed 36..40; next free is 41
+    /// (worklog §1 drift record).
     CursorCurrentOfTidCapture = 41,
     // Wave-9.5 SPI-admission refusal (WS-AJ Stage-A seam, `se/spi-stage-a`;
     // APPEND-ONLY chartered mint, recorded in notes/se-spi-stage-a.md). ONE
