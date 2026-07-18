@@ -1286,6 +1286,7 @@ fn cursor_read_store(portal: &Portal<'static>) -> TuplestoreHandle {
 ///   verbatim (holdContext under TopPortalContext, inter_xact=true), created
 ///   NOW instead of at commit; the fill receiver detoasts on append
 ///   (portalcmds.c:326's obligation moved to append time).
+///
 /// Plus the §4 eligibility probe (once) and the tid sidecar for eligible
 /// plans.
 fn ensure_cursor_store(portal: &Portal<'static>) -> PgResult<()> {
