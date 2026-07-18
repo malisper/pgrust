@@ -168,11 +168,20 @@ fn process_postgres_switches_inner(
                         let n = optarg.len().min(types_core::MAXPGPATH - 1);
                         buf[..n].copy_from_slice(&optarg.as_bytes()[..n]);
                         init_small::globals::SetOutputFileName(buf);
+                        // C has one OutputFileName global; this tree has two
+                        // slots (elog can't depend on init_small). The only
+                        // consumer, elog::DebugFileOpen (BaseInit), reads the
+                        // elog mirror — keep it in sync, same truncation.
+                        elog::config::set_output_file_name(Some(
+                            String::from_utf8_lossy(&buf[..n]).into_owned(),
+                        ));
                     }
                 }
                 // -v (FrontendProtocol override): kept by C only for a
-                // hypothetical FE/BE-protocol standalone mode; no storage
-                // consumer here, parsed and dropped.
+                // hypothetical FE/BE-protocol standalone mode; storage exists
+                // (init_small::globals::SetFrontendProtocol) but nothing
+                // standalone reads it, so it is deliberately parsed and
+                // dropped here.
                 b'v' => {}
                 b'-' | b'c' => {
                     if flag == b'-' && is_dispatch_option(optarg) {

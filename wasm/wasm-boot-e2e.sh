@@ -91,6 +91,25 @@ SELECT t.unique1, t.stringu1 FROM wb_tenk t WHERE t.unique1 < 3 ORDER BY t.uniqu
 
 SELECT sum(unique1) AS s, min(unique2) AS mn, max(unique2) AS mx FROM wb_tenk;
 
+WITH pts AS (SELECT x::real AS r FROM generate_series(1, 3) x),
+     fin AS (SELECT r FROM pts WHERE r > 1.5)
+SELECT p.r,
+       CASE WHEN EXISTS (SELECT 1 FROM fin f WHERE f.r = p.r)
+            THEN '**' ELSE '  ' END AS m
+FROM pts p ORDER BY p.r;
+
+SELECT int8range(1, 5) AS r8, int8range(4294967296, 8589934592) AS r8hi;
+
+CREATE TABLE big_part (k bigint) PARTITION BY RANGE (k);
+
+CREATE TABLE big_part_lo PARTITION OF big_part FOR VALUES FROM (0) TO (4294967296);
+
+CREATE TABLE big_part_hi PARTITION OF big_part FOR VALUES FROM (4294967296) TO (8589934592);
+
+INSERT INTO big_part VALUES (1), (4294967297), (8589934591);
+
+SELECT count(*) AS hi_rows FROM big_part WHERE k > 4294967296;
+
 SELECT no_such_column FROM wb_tenk;
 
 SELECT 1 / 0 AS boom;
@@ -144,10 +163,80 @@ grep -q 'checkpoint complete' "$WORK/wasm.err" \
 if grep -q 'panicked' "$WORK/wasm.err"; then
     miss "wasm: panic lines in stderr"
 fi
+# WASM-SUBPLANFIX regression: the CASE WHEN EXISTS probe forces an expression
+# SubPlan, whose sub-Query is copyObject'd in make_subplan via a
+# queryToString/stringToNode round trip (rewrite_manip::copy_query_node) — the
+# same _outDatum writer as relpartbound; wasm32 truncation dies here with
+# `bad integer token "]"` before any row comes back.
+[ "$(grep -c 'm = "\*\*"' "$WORK/wasm.out")" -eq 2 ] \
+    || miss "wasm: EXISTS-SubPlan CASE probe rows missing (copyObject node-string round trip)"
+# WASM-SUBPLANFIX sweep find: range_serialize's byval datum_write took `n`
+# bytes of a usize word — an 8-byte byval range subtype (int8range) panics on
+# wasm32 (`range end index 8 out of range for slice of length 4`).
+grep -q 'r8hi = "\[4294967296,8589934592)"' "$WORK/wasm.out" \
+    || miss "wasm: int8range with high-word bounds missing (range_serialize datum width)"
+# WASM-SUBPLANFIX sweep find: the planner's DatumImage::ByVal carried a usize
+# image; on wasm32 int8-class partition bounds truncated to the low half and
+# pruning compared against garbage (hi_rows came back 0).
+grep -q 'hi_rows = "2"' "$WORK/wasm.out" \
+    || miss "wasm: bigint partition pruning wrong (DatumImage byval width)"
 
 "$PGBIN/pg_controldata" "$WORK/dd-wasm" | grep -q 'shut down' \
     || miss "wasm datadir not in 'shut down' state"
 [ -f "$WORK/dd-wasm/postmaster.pid" ] && miss "wasm: postmaster.pid not removed"
+
+echo "=== partitioning leg: relpartbound round trip across sessions ==="
+# WASM-PARTFIX regression: partition 1's CREATE writes a relpartbound node
+# string (outfuncs); partition 2's CREATE is its first READER (readfuncs).
+# A pointer-width _outDatum emission on wasm32 wrote 4 byte tokens where
+# readDatum consumes sizeof(Datum) == 8, dying with `bad integer token "]"`.
+# Run as a SECOND --single session on the same datadirs so the bound crosses
+# a session boundary exactly like the web REPL (one process per statement).
+cat > "$WORK/part.sql" <<'SQL'
+CREATE TABLE measurement (city text, logdate date, peaktemp int) PARTITION BY RANGE (logdate);
+
+CREATE TABLE measurement_2024 PARTITION OF measurement FOR VALUES FROM ('2024-01-01') TO ('2025-01-01');
+
+SELECT relpartbound FROM pg_class WHERE relname = 'measurement_2024';
+
+CREATE TABLE measurement_2025 PARTITION OF measurement FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');
+
+INSERT INTO measurement VALUES ('sf', '2024-06-01', 30), ('nyc', '2025-06-01', 33);
+
+SELECT tableoid::regclass AS part, city, logdate, peaktemp FROM measurement ORDER BY logdate;
+
+SELECT count(*) AS pruned FROM measurement WHERE logdate >= '2025-01-01';
+
+SQL
+
+PGRUST_TZDIR="$TZSRC/timezone" PGRUST_PGSHAREDIR="$TZSRC" \
+    "$NATIVE_BIN" --single -j "${GUCS[@]}" -D "$WORK/dd-native" postgres \
+    < "$WORK/part.sql" > "$WORK/native-part.out" 2> "$WORK/native-part.err"
+[ $? -eq 0 ] || miss "native --single (partitioning) exited nonzero"
+
+wasmtime run -W exceptions=y,max-wasm-stack=16777216 \
+    --dir "$WORK::/work" \
+    --env USER=postgres \
+    --env PGRUST_TZDIR=/work/share/timezone \
+    --env PGRUST_PGSHAREDIR=/work/share \
+    --env PGRUST_RUNTIME=0 \
+    --env RUST_BACKTRACE=1 \
+    "$WASM_BIN" --single -j "${GUCS[@]}" -D /work/dd-wasm postgres \
+    < "$WORK/part.sql" > "$WORK/wasm-part.out" 2> "$WORK/wasm-part.err"
+[ $? -eq 0 ] || miss "wasm --single (partitioning) exited nonzero"
+
+if diff -u "$WORK/native-part.out" "$WORK/wasm-part.out" > "$WORK/part.diff"; then
+    echo "partitioning stdout byte-identical (native vs wasm)"
+else
+    miss "partitioning stdout differs (see $WORK/part.diff)"
+fi
+grep -q 'bad integer token' "$WORK/wasm-part.err" \
+    && miss "wasm: readfuncs datum-width regression (bad integer token)"
+grep -q 'part = "measurement_2025"' "$WORK/wasm-part.out" \
+    || miss "wasm: tuple did not route to partition measurement_2025"
+if grep -q 'panicked' "$WORK/wasm-part.err"; then
+    miss "wasm: panic lines in partitioning stderr"
+fi
 
 echo "=== cross-boot: native binary reads the wasm-written datadir ==="
 CROSS=$(echo "SELECT count(*) AS wasm_written_rows FROM wb_tenk;" | \
@@ -155,6 +244,11 @@ CROSS=$(echo "SELECT count(*) AS wasm_written_rows FROM wb_tenk;" | \
     "$NATIVE_BIN" --single "${GUCS[@]}" -D "$WORK/dd-wasm" postgres 2>"$WORK/cross.err")
 echo "$CROSS" | grep -q 'wasm_written_rows = "10"' \
     || miss "cross-boot readback missed (wanted 10 rows)"
+CROSSP=$(echo "SELECT count(*) AS wasm_partition_rows FROM measurement;" | \
+    PGRUST_TZDIR="$TZSRC/timezone" PGRUST_PGSHAREDIR="$TZSRC" \
+    "$NATIVE_BIN" --single "${GUCS[@]}" -D "$WORK/dd-wasm" postgres 2>"$WORK/crossp.err")
+echo "$CROSSP" | grep -q 'wasm_partition_rows = "2"' \
+    || miss "cross-boot partitioned readback missed (wasm-written relpartbound unreadable natively?)"
 
 if [ "$fail" -eq 0 ]; then
     echo "VERDICT: wasm-boot-e2e PASS"
