@@ -79,8 +79,9 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use ::executils::{EStateData, ExecSlotId};
 use ::nodeagg::runtime_partial::{
-    agg_runtime_combine, agg_runtime_export_partial_into, agg_runtime_partial_admissible,
-    exec_agg_runtime_partials, RuntimePartial,
+    agg_grouped_runtime_combine, agg_runtime_combine, agg_runtime_export_partial_into,
+    agg_runtime_partial_admissible, exec_agg_runtime_partials, GroupedRuntimePartial,
+    RuntimePartial,
 };
 use ::nodehashjoin::batch::{
     batch_of, batch_record_push, estimate_batch_table_mem, split_child, BatchRecords, LeafMap,
@@ -201,6 +202,34 @@ fn hj_multibuild_enabled() -> bool {
 /// Defensive cap on multibuild tree size (joins per engagement); beyond it
 /// the walk refuses to the serial arms (task-set fan bound).
 const MB_MAX_JOINS: usize = 8;
+
+/// SE-AGGJOIN grouped sink (band 87001): GROUPED (AGG_HASHED) agg roots over
+/// the multibuild join walk — per-worker hashed builds exported as
+/// self-contained grouped partials, combined on the leader, absorbed into
+/// the serial node's own table for the canonical retrieve. ON by default;
+/// `PGRUST_RUNTIME_HASHJOIN_GROUPSINK=0` restores the grouped refusal
+/// exactly (and un-keys the planner probe — knob coherence, same spelling).
+fn hj_groupsink_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_HASHJOIN_GROUPSINK").map_or(true, |v| v.trim() != "0")
+    })
+}
+
+/// Grouped-sink export envelope: a worker table above this many groups (or
+/// any hashagg spill entry) refuses the whole engagement to the serial arm —
+/// the per-morsel cumulative export walk and the leader absorb are both
+/// O(groups), and the planner floors keep engaged shapes far below it.
+fn mbg_max_groups() -> usize {
+    static N: OnceLock<usize> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_HASHJOIN_GROUPSINK_MAX_GROUPS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(131_072)
+    })
+}
 
 // ---------------------------------------------------------------------------
 // K2 inc-1 (wave-8 WS-AC): the heap-fed probe/build feed over the
@@ -638,6 +667,10 @@ pub(super) struct RuntimeHjShared {
     budget_refused: AtomicBool,
     /// Per-ordinal cumulative probe partials (M1 overwrite discipline).
     partials: Vec<Mutex<Option<RuntimePartial>>>,
+    /// SE-AGGJOIN (band 87001): per-worker GROUPED partial slots (the
+    /// grouped chain terminal's cumulative-overwrite export; empty and
+    /// untouched on plain engagements).
+    grouped_partials: Vec<Mutex<Option<GroupedRuntimePartial>>>,
     /// The build sink (the ParallelSink of task sets [0]/[1]).
     sink: OnceLock<Arc<JoinBuildSink>>,
     /// m5p1 multibuild: the multi-pipeline engagement descriptor (empty =
@@ -2447,6 +2480,10 @@ pub(super) struct MbChain {
     /// verification — the rebuilt tree must be the admitted tree).
     jointypes: Vec<::types_nodes::JoinType>,
     nscans: usize,
+    /// SE-AGGJOIN (band 87001): the final pipeline's terminal is the GROUPED
+    /// (AGG_HASHED) sink — per-worker hashed builds + grouped partial export
+    /// (false = the m5p1 plain-agg tail, byte-identical).
+    grouped: bool,
 }
 
 /// Admission output handed to `engage` (sinks are constructed there — they
@@ -2458,6 +2495,8 @@ pub(super) struct MbInit {
     /// Per join index: the gang envelope its build table gets.
     envelopes: Vec<usize>,
     nscans: usize,
+    /// SE-AGGJOIN: grouped (AGG_HASHED) terminal (see `MbChain::grouped`).
+    grouped: bool,
 }
 
 // --- Plan-tree walk (pass A: shape + parallel safety + sizing inputs) -----
@@ -2789,6 +2828,10 @@ type MbProbe<'x, 'mcx> = (
 enum MbTerm<'x, 'mcx> {
     Build { hs: &'x mut ::nodehash::HashState<'mcx>, local: &'x mut JoinBuildLocal },
     Agg { agg: &'x mut ::nodeagg::AggStateData<'mcx> },
+    /// SE-AGGJOIN grouped terminal: the worker's OWN hashed build (C's
+    /// checked per-row transition program; spill-mode entries are caught by
+    /// the post-morsel export, which refuses the engagement fail-closed).
+    AggHash { agg: &'x mut ::nodeagg::AggStateData<'mcx> },
 }
 
 /// One emitted source row through the pipeline's probe levels (depth-first;
@@ -2810,6 +2853,9 @@ fn mb_row<'mcx>(
         match term {
             MbTerm::Agg { agg } => {
                 return ::nodeagg::agg_plain_build_accept(agg, estate, slot);
+            }
+            MbTerm::AggHash { agg } => {
+                return ::nodeagg::agg_hash_build_accept(agg, estate, slot);
             }
             MbTerm::Build { hs, local } => {
                 if shared_build_accept(hs, estate, slot, local)?.is_err() {
@@ -2992,6 +3038,23 @@ fn mb_probe_morsel_body(
         mb_collect(tree, &mut refs)?;
         let (scan, mut probes, target) = mb_take_pipeline(&chain, p, &mut refs)?;
         debug_assert!(target.is_none());
+        if chain.grouped {
+            // SE-AGGJOIN grouped terminal: hashed build per row, then the
+            // cumulative-overwrite grouped export (the M1 partial-export
+            // discipline, grouped twin). An unexportable table (spill entry
+            // or group-cap crossing) refuses the WHOLE engagement to the
+            // serial arm — R5, exactly the build-envelope posture.
+            let clean = mb_drive_claim(scan, &mut probes, MbTerm::AggHash { agg }, es, &range)?;
+            debug_assert!(clean, "the hashed agg terminal has no envelope to cross");
+            let pslot = worker - payload.pins_base;
+            let mut g = lockm(&payload.grouped_partials[pslot]);
+            let out = g.get_or_insert_with(Default::default);
+            if !::nodeagg::agg_hash_export_grouped_into(agg, es, mbg_max_groups(), out)? {
+                drop(g);
+                payload.refuse_budget_traced("grouped export envelope crossed");
+            }
+            return Ok(());
+        }
         let clean = mb_drive_claim(
             scan,
             &mut probes,
@@ -3019,7 +3082,16 @@ fn mb_arm_worker<'mcx>(
     chain: &MbChain,
 ) -> PgResult<()> {
     let (agg, tree) = mb_split_root(planstate)?;
-    if !agg_runtime_partial_admissible(agg) {
+    if chain.grouped {
+        // SE-AGGJOIN: grouped congruence — the rebuilt agg must admit the
+        // grouped export exactly as the leader's did.
+        if !::nodeagg::agg_grouped_runtime_admissible(agg) {
+            return Err(Box::new(PgError::new(
+                ERROR,
+                "runtime hash-join grouped worker agg diverged from the leader's",
+            )));
+        }
+    } else if !agg_runtime_partial_admissible(agg) {
         return Err(Box::new(PgError::new(
             ERROR,
             "runtime hash-join multibuild worker fold plan diverged from the leader's",
@@ -3050,7 +3122,9 @@ fn mb_arm_worker<'mcx>(
             super::ScanFeedShape::RowFeed { ctx: "runtime hash-join multibuild feed", stitch: true },
         )?;
     }
-    ::nodeagg::agg_plain_build_begin(agg, estate)?;
+    if !chain.grouped {
+        ::nodeagg::agg_plain_build_begin(agg, estate)?;
+    }
     Ok(())
 }
 
@@ -3121,15 +3195,34 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
         return Ok(None);
     }
     let Some(rt) = runtime::global() else { return Ok(None) };
-    // Done-repulls (the post-completion pull that exits via agg_is_done
-    // below) are not offers — see the scan arm's identical gate.
-    if !::nodeagg::agg_is_done(agg) {
-        router::tick(ArmClass::HashJoin, ArmCounter::Offered);
-    }
     // M5-1 refusal funnel: every admission exit names its gate for the
     // router's consolidated taxonomy (previously silent early returns).
     fn refuse(reason: &'static str) {
         router::tick_refused(ArmClass::HashJoin, reason);
+    }
+
+    // SE-AGGJOIN (band 87001): GROUPED (AGG_HASHED) roots divert to the
+    // grouped multibuild sink — single joins and trees alike. A FILLED
+    // table (this arm's completed engagement, or a serial arm's build after
+    // an earlier refusal) is an emit-phase repull, never an offer: return
+    // un-engaged and let the serial emit paths (breaker composition /
+    // exec_agg's canonical retrieve) stream it. The plain paths below are
+    // byte-untouched — they only ever saw AGG_PLAIN engagements.
+    if ::nodeagg::agg_is_hashed(agg) {
+        if ::nodeagg::agg_hash_table_filled(agg) || ::nodeagg::agg_is_done(agg) {
+            return Ok(None);
+        }
+        router::tick(ArmClass::HashJoin, ArmCounter::Offered);
+        if !hj_groupsink_enabled() {
+            refuse("groupsink-disabled");
+            return Ok(None);
+        }
+        return try_own_multibuild(agg, hj, estate, rt, dop, true);
+    }
+    // Done-repulls (the post-completion pull that exits via agg_is_done
+    // below) are not offers — see the scan arm's identical gate.
+    if !::nodeagg::agg_is_done(agg) {
+        router::tick(ArmClass::HashJoin, ArmCounter::Offered);
     }
 
     // m5p1 multibuild: a join TREE (either child of the top join is itself
@@ -3142,7 +3235,7 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
             refuse("multibuild-disabled");
             return Ok(None);
         }
-        return try_own_multibuild(agg, hj, estate, rt, dop);
+        return try_own_multibuild(agg, hj, estate, rt, dop, false);
     }
 
     // --- Node shape: HashJoin over two lane-fusible pgrcolumnar SeqScans; a
@@ -3415,20 +3508,30 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
 }
 
 /// m5p1 multibuild admission (the dispatch gate above verified a nested
-/// tree and the knob). Strictly the single-join arm's gates, generalized
-/// per-node over the tree; every refusal falls through to the serial arms
-/// byte-identically (nothing consumed).
+/// tree and the knob — or, `grouped`, a hashed root over ANY join shape).
+/// Strictly the single-join arm's gates, generalized per-node over the
+/// tree; every refusal falls through to the serial arms byte-identically
+/// (nothing consumed). SE-AGGJOIN (band 87001): `grouped` swaps the
+/// plain-agg tail for the grouped sink (per-worker hashed builds + grouped
+/// partial export/combine/absorb) and admits single-join trees too.
 fn try_own_multibuild<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     hj: &mut crate::procnode::HashJoinNode<'mcx>,
     estate: &mut EStateData<'mcx>,
     rt: &'static Arc<runtime::Runtime>,
     dop: i32,
+    grouped: bool,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     fn refuse(reason: &'static str) {
         router::tick_refused(ArmClass::HashJoin, reason);
     }
-    if !agg_runtime_partial_admissible(agg) {
+    if grouped {
+        if !::nodeagg::agg_grouped_runtime_admissible(agg) {
+            stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
+            refuse("grouped-agg-not-exportable");
+            return Ok(None);
+        }
+    } else if !agg_runtime_partial_admissible(agg) {
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
         refuse("partials-not-order-insensitive-exact");
         return Ok(None);
@@ -3483,7 +3586,18 @@ fn try_own_multibuild<'mcx>(
     if !std::ptr::eq(top_plan, hj.state.plan) {
         return Ok(None);
     }
-    debug_assert!(pinfo.jointypes.len() >= 2, "the dispatch gate saw a nested child");
+    debug_assert!(
+        grouped || pinfo.jointypes.len() >= 2,
+        "the dispatch gate saw a nested child"
+    );
+    // Knob coherence (grouped trees): 2+ build sides ride the multibuild
+    // walk's machinery, so its kill switch must also refuse them here (the
+    // probe reads BOTH knobs for the grouped class — suppression must never
+    // outrun the walk).
+    if grouped && pinfo.jointypes.len() >= 2 && !hj_multibuild_enabled() {
+        refuse("multibuild-disabled");
+        return Ok(None);
+    }
     if !estate
         .es_snapshot
         .as_deref()
@@ -3567,7 +3681,8 @@ fn try_own_multibuild<'mcx>(
     }
     let dop = super::runtime_scan::elastic_dop(dop, probe_granules);
     if ::nodeagg::agg_is_done(agg) {
-        return Ok(Some(None));
+        // Grouped done-repulls exit at the dispatch gate; belt only.
+        return if grouped { Ok(None) } else { Ok(Some(None)) };
     }
     router::tick(ArmClass::HashJoin, ArmCounter::Engaged);
     let sources: Vec<Arc<dyn runtime::MorselSource>> =
@@ -3579,6 +3694,7 @@ fn try_own_multibuild<'mcx>(
         jointypes: pinfo.jointypes,
         envelopes,
         nscans: pinfo.nscans,
+        grouped,
     };
     let r = engage(
         agg,
@@ -3676,6 +3792,7 @@ fn engage<'mcx>(
         failed: AtomicBool::new(false),
         budget_refused: AtomicBool::new(false),
         partials: (0..runtime::MAX_EXTERNAL_LANES).map(|_| Mutex::new(None)).collect(),
+        grouped_partials: (0..runtime::MAX_EXTERNAL_LANES).map(|_| Mutex::new(None)).collect(),
         sink: OnceLock::new(),
         chain: OnceLock::new(),
         spill,
@@ -3704,6 +3821,7 @@ fn engage<'mcx>(
                     sources: mb.sources,
                     jointypes: mb.jointypes,
                     nscans: mb.nscans,
+                    grouped: mb.grouped,
                 }))
                 .unwrap_or_else(|_| unreachable!("chain set once"));
             None
@@ -3958,8 +4076,9 @@ fn engage_ceremony<'mcx>(
                 return Ok(EngageOutcome::Fallback);
             }
             lane_trace(&format!(
-                "runtime-hashjoin: engaged dop={launched} outer_granules={outer_granules} builds={} (multibuild)",
-                mb.sinks.len()
+                "runtime-hashjoin: engaged dop={launched} outer_granules={outer_granules} builds={} (multibuild{})",
+                mb.sinks.len(),
+                if mb.grouped { " grouped" } else { "" }
             ));
             return park_for_outcome(payload, rt, &rg, &waiter, pcxt, launched);
         }
@@ -4104,6 +4223,33 @@ fn engage_ceremony<'mcx>(
             Ok(None)
         }
         EngageOutcome::Completed => {
+            // SE-AGGJOIN grouped adopt: combine the workers' grouped
+            // partials and absorb them into the leader's OWN hash table;
+            // the canonical retrieve (finalize + HAVING + projection, C's
+            // iteration) then emits — first row here, the rest through the
+            // serial emit paths (the dispatch's filled-table gate).
+            if payload.chain.get().is_some_and(|c| c.grouped) {
+                let parts: Vec<GroupedRuntimePartial> = payload
+                    .grouped_partials
+                    .iter()
+                    .filter_map(|m| lockm(m).take())
+                    .collect();
+                let combined = agg_grouped_runtime_combine(agg, &parts)?;
+                if !::nodeagg::exec_agg_grouped_runtime_partials(agg, estate, &combined)? {
+                    lane_trace(
+                        "runtime-hashjoin: grouped absorb refused — falling back to the serial arm",
+                    );
+                    stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
+                    return Ok(None);
+                }
+                stats::tick_owned(ShapeClass::Join);
+                lane_trace(&format!(
+                    "runtime-hashjoin: complete, grouped partials={} groups={}",
+                    parts.len(),
+                    combined.len()
+                ));
+                return Ok(Some(::nodeagg::agg_hash_retrieve(agg, estate)?));
+            }
             let parts: Vec<RuntimePartial> = payload
                 .partials
                 .iter()
@@ -4201,6 +4347,32 @@ mod mb_tests {
     #[test]
     fn mb_knob_default_on() {
         assert!(hj_multibuild_enabled());
+    }
+
+    /// SE-AGGJOIN (band 87001): grouped-sink knob default + group-cap
+    /// default (the =0 / cap postures are e2e restart legs).
+    #[test]
+    fn mbg_knob_default_on() {
+        assert!(hj_groupsink_enabled());
+        assert_eq!(mbg_max_groups(), 131_072);
+    }
+
+    /// SE-AGGJOIN: the SINGLE-join tree decomposes to exactly one build
+    /// pipeline + the agg pipeline (the grouped arm admits 1-join trees the
+    /// plain dispatch never sends here).
+    #[test]
+    fn mb_decompose_single_join() {
+        let info = MbPlanInfo {
+            jointypes: vec![::types_nodes::JoinType::JOIN_INNER],
+            hash_rows: vec![0.0],
+            hash_widths: vec![0],
+            children: vec![(MbChild::Scan(0), MbChild::Scan(1))],
+            nscans: 2,
+        };
+        let ps = mb_decompose(&info);
+        assert_eq!(ps.len(), 2);
+        assert_eq!((ps[0].scan, &ps[0].probes[..], ps[0].sink), (1, &[][..], Some(0)));
+        assert_eq!((ps[1].scan, &ps[1].probes[..], ps[1].sink), (0, &[0usize][..], None));
     }
 }
 
