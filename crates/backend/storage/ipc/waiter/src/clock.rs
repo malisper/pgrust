@@ -38,7 +38,7 @@ pub trait WaiterClock: Sync + Send {
 #[cfg(not(loom))]
 mod real {
     use super::*;
-    use std::sync::OnceLock;
+    use pgsync::OnceLock;
 
     pub(crate) struct RealClock;
 
@@ -101,7 +101,7 @@ pub mod virtual_time {
     use super::*;
     #[cfg(not(pgrust_sim))]
     use std::sync::atomic::{AtomicI64, Ordering};
-    use std::sync::Mutex;
+    use pgsync::Mutex;
 
     pub struct VirtualClock {
         /// Plain test builds drive their own counter (the deterministic test

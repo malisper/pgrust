@@ -46,10 +46,11 @@
 //! equivalence).
 
 pub(crate) mod sync {
-    #[cfg(loom)]
-    pub(crate) use loom::sync::{atomic, Condvar, Mutex, MutexGuard};
-    #[cfg(not(loom))]
-    pub(crate) use std::sync::{atomic, Condvar, Mutex, MutexGuard};
+    // The old per-crate cfg(loom) shim SUPERSEDED by pgsync, THE single lock
+    // library (permit-s1 contract §0): call sites import unconditionally;
+    // world selection lives in pgsync alone. This hub's blocking rows stay
+    // lint-annotated SCHED-VISIBLE — under sim its parks are hooked ops.
+    pub(crate) use pgsync::{atomic, Condvar, Mutex, MutexGuard};
 }
 
 pub mod clock;
@@ -59,7 +60,7 @@ use sync::MutexGuard;
 #[cfg(not(loom))]
 use sync::atomic::{AtomicU64, Ordering};
 #[cfg(not(loom))]
-use std::sync::OnceLock;
+use pgsync::OnceLock;
 #[cfg(not(loom))]
 use std::time::Duration;
 
