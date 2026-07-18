@@ -171,6 +171,7 @@ fn single_user_main_inner(argv: &[String], username: &str) -> PgResult<core::con
     crate::PostgresMain(&dbname, username)
 }
 
+#[cfg(not(target_family = "wasm"))]
 extern "C" fn bridge_signal_handler(signo: i32) {
     let saved = get_errno();
     // Pends this thread's disposition bit; drained at the next interrupt
@@ -193,6 +194,16 @@ extern "C" fn bridge_signal_handler(signo: i32) {
     set_errno(saved);
 }
 
+// wasm32: WASI p1 delivers no signals — there is nothing to bridge. The
+// thread-signal dispositions installed by PostgresMain still work for
+// self-pended interrupts (statement_timeout, die() via SendThreadSignal);
+// an operator Ctrl-C simply kills the wasmtime process, like SIGKILL would
+// a native --single (the shutdown checkpoint is then skipped — crash
+// recovery on next boot, C's own no-graceful-signal story).
+#[cfg(target_family = "wasm")]
+fn install_single_user_signal_bridge() {}
+
+#[cfg(not(target_family = "wasm"))]
 fn install_single_user_signal_bridge() {
     for signo in [libc::SIGHUP, libc::SIGINT, libc::SIGTERM, libc::SIGQUIT] {
         // SAFETY: standard sigaction install; the handler restores errno.
@@ -211,6 +222,7 @@ fn install_single_user_signal_bridge() {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn get_errno() -> i32 {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     // SAFETY: __error returns this thread's valid errno location.
@@ -224,6 +236,7 @@ fn get_errno() -> i32 {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn set_errno(value: i32) {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     // SAFETY: __error returns this thread's valid errno location.

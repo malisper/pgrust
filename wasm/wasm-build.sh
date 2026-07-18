@@ -31,7 +31,11 @@ LEDGER="$ROOT/docs/design/wasm-crate-ledger.md"
 # re2 is a build.rs probe; force the stub engine deterministically on wasm.
 export PGRUST_FORCE_NO_RE2=1
 # panic=unwind + Wasm EH codegen for every unit, including build-std units.
-export RUSTFLAGS="${PGRUST_WASM_RUSTFLAGS:--C panic=unwind -C target-feature=+exception-handling}"
+# 64MiB shadow stack: dev-profile frames are huge and the boot harness pins
+# max_stack_depth=60000kB (matching the native e2e); the 1MiB link default
+# turns legitimate executor recursion into "stack depth limit exceeded".
+# Any PGRUST_WASM_RUSTFLAGS override MUST carry all three flags.
+export RUSTFLAGS="${PGRUST_WASM_RUSTFLAGS:--C panic=unwind -C target-feature=+exception-handling -C link-arg=-zstack-size=67108864}"
 
 if ! rustup toolchain list | grep -q "^${TOOLCHAIN}"; then
     echo "wasm-build: installing pinned toolchain ${TOOLCHAIN}" >&2
@@ -73,6 +77,18 @@ for p in $INCLUDE; do PKG_ARGS="$PKG_ARGS -p $p"; done
 cargo +"${TOOLCHAIN}" check --target "$TARGET" -Zbuild-std=std,panic_unwind $PKG_ARGS
 
 echo "wasm-build: crate-subset compile OK (panic=unwind, +exception-handling)"
+
+# Codegen + LINK leg (the F1 remedy): the postgres binary must actually link
+# for wasip1 — cargo check proves neither monomorphization-time const evals
+# nor linkage. Skippable for quick iterations with PGRUST_WASM_SKIP_LINK=1.
+if [ "${PGRUST_WASM_SKIP_LINK:-0}" != "1" ]; then
+    cargo +"${TOOLCHAIN}" build --target "$TARGET" -Zbuild-std=std,panic_unwind -p main_main --bin postgres
+    BIN_WASM="$ROOT/target/${TARGET}/debug/postgres.wasm"
+    [ -f "$BIN_WASM" ] || { echo "wasm-build: FAIL — postgres.wasm not produced" >&2; exit 1; }
+    echo "wasm-build: postgres.wasm linked ($(du -h "$BIN_WASM" | cut -f1))"
+else
+    echo "wasm-build: bin link SKIPPED (PGRUST_WASM_SKIP_LINK=1)"
+fi
 
 # Toolchain-validation smoke: catch_unwind must CATCH under a Wasm
 # exception-handling runtime, proving the unwind story is real.

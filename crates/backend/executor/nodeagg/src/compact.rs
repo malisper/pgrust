@@ -1910,7 +1910,7 @@ pub(crate) fn compact_retrieve_next<'mcx>(
 ) -> PgResult<Option<NonNull<AggPerGroup>>> {
     let mcx = estate.es_query_cxt;
     let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
-    let mut row = ph.hashiter;
+    let mut row = ph.hashiter as usize;
     let nrows = ph.compact.as_ref().expect("compact retrieve requires the table").table.nrows();
     if let Some(c) = cut {
         let table = &ph.compact.as_ref().expect("compact retrieve requires the table").table;
@@ -1930,10 +1930,10 @@ pub(crate) fn compact_retrieve_next<'mcx>(
         }
     }
     if row >= nrows {
-        ph.hashiter = row;
+        ph.hashiter = row as u64;
         return Ok(None);
     }
-    ph.hashiter = row + 1;
+    ph.hashiter = row as u64 + 1;
     ::exectuples::exec_store_all_null_tuple(&mut ph.first_slot, mcx);
     let ch = ph.compact.as_ref().expect("compact retrieve requires the table");
     match &ch.key {
@@ -2015,7 +2015,7 @@ pub fn batch_emit_scan_block<'mcx>(
     let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
     let ch = ph.compact.as_ref().expect("batch emit requires the compact table");
     let nrows = ch.table.nrows();
-    let mut row = ph.hashiter;
+    let mut row = ph.hashiter as usize;
     plan.idx.clear();
     while row < nrows && plan.idx.len() < BATCH_EMIT_BLOCK {
         // The per-group retrieve cadence (skipped and emitted alike).
@@ -2035,7 +2035,7 @@ pub fn batch_emit_scan_block<'mcx>(
         plan.idx.push(row as u32);
         row += 1;
     }
-    ph.hashiter = row;
+    ph.hashiter = row as u64;
     let drained = row >= nrows;
     if drained {
         node.agg_done = true;
@@ -2423,7 +2423,7 @@ pub fn batch_emit_set_block<'mcx>(
 pub fn agg_emit_mark_drained(node: &mut AggStateData<'_>) {
     let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
     ph.hashiter =
-        ph.compact.as_ref().expect("topkfin requires the compact table").table.nrows();
+        ph.compact.as_ref().expect("topkfin requires the compact table").table.nrows() as u64;
     node.agg_done = true;
 }
 

@@ -219,7 +219,7 @@ pub fn BackgroundWorkerStateChange(allow_new_workers: bool) {
                 if slot_terminate && !rw.terminate {
                     rw.terminate = true;
                     if rw.pid != 0 {
-                        notifies.push((rw.pid, libc::SIGTERM));
+                        notifies.push((rw.pid, procsignal::signums::SIGTERM));
                     } else {
                         // Report never-started, now-terminated worker as dead.
                         let pid = rw.pid;
@@ -227,7 +227,7 @@ pub fn BackgroundWorkerStateChange(allow_new_workers: bool) {
                         let shmem_slot = rw.shmem_slot;
                         reg.slots[shmem_slot as usize].pid = pid;
                         if notify_pid != 0 {
-                            notifies.push((notify_pid, libc::SIGUSR1));
+                            notifies.push((notify_pid, procsignal::signums::SIGUSR1));
                         }
                     }
                 }
@@ -248,7 +248,7 @@ pub fn BackgroundWorkerStateChange(allow_new_workers: bool) {
                 slot.pid = 0;
                 slot.in_use = false;
                 if notify_pid != 0 {
-                    notifies.push((notify_pid, libc::SIGUSR1));
+                    notifies.push((notify_pid, procsignal::signums::SIGUSR1));
                 }
                 continue;
             }
@@ -319,7 +319,7 @@ pub fn ReportBackgroundWorkerPID(idx: usize) {
         notify_pid
     });
     if notify_pid != 0 {
-        send_signal(notify_pid, libc::SIGUSR1);
+        send_signal(notify_pid, procsignal::signums::SIGUSR1);
     }
 }
 
@@ -337,7 +337,7 @@ pub fn ReportBackgroundWorkerExit(idx: usize) {
         notify_pid
     });
     if notify_pid != 0 {
-        send_signal(notify_pid, libc::SIGUSR1);
+        send_signal(notify_pid, procsignal::signums::SIGUSR1);
     }
 }
 
@@ -364,7 +364,7 @@ pub fn ForgetUnstartedBackgroundWorkers() {
         }
     });
     for pid in notifies {
-        send_signal(pid, libc::SIGUSR1);
+        send_signal(pid, procsignal::signums::SIGUSR1);
     }
 }
 
@@ -622,7 +622,7 @@ pub fn RegisterDynamicBackgroundWorker(
         gtrace("l.register.signaled");
         // ReportBackgroundWorkerPID parity for the pool path.
         if pool_pid != 0 && worker.bgw_notify_pid != 0 {
-            send_signal(worker.bgw_notify_pid, libc::SIGUSR1);
+            send_signal(worker.bgw_notify_pid, procsignal::signums::SIGUSR1);
         }
     }
 
@@ -831,23 +831,23 @@ fn install_signal_handlers(db_connection: bool) {
     use procsignal::ThreadSignalHandler::{Fallible, Ignore, Simple};
 
     if db_connection {
-        procsignal::pqsignal_thread(libc::SIGINT, Simple(postgres::StatementCancelHandler));
-        procsignal::pqsignal_thread(libc::SIGUSR1, Simple(procsignal::procsignal_sigusr1_handler));
-        procsignal::pqsignal_thread(libc::SIGFPE, Fallible(postgres::FloatExceptionHandler));
+        procsignal::pqsignal_thread(procsignal::signums::SIGINT, Simple(postgres::StatementCancelHandler));
+        procsignal::pqsignal_thread(procsignal::signums::SIGUSR1, Simple(procsignal::procsignal_sigusr1_handler));
+        procsignal::pqsignal_thread(procsignal::signums::SIGFPE, Fallible(postgres::FloatExceptionHandler));
     } else {
-        procsignal::pqsignal_thread(libc::SIGINT, Ignore);
-        procsignal::pqsignal_thread(libc::SIGUSR1, Ignore);
-        procsignal::pqsignal_thread(libc::SIGFPE, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGINT, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGUSR1, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGFPE, Ignore);
     }
-    procsignal::pqsignal_thread(libc::SIGTERM, Fallible(bgworker_die));
+    procsignal::pqsignal_thread(procsignal::signums::SIGTERM, Fallible(bgworker_die));
     // SIGQUIT disposition installed by the launch path.
-    procsignal::pqsignal_thread(libc::SIGHUP, Ignore);
+    procsignal::pqsignal_thread(procsignal::signums::SIGHUP, Ignore);
 
     timeout_seams::initialize_timeouts::call();
 
-    procsignal::pqsignal_thread(libc::SIGPIPE, Ignore);
-    procsignal::pqsignal_thread(libc::SIGUSR2, Ignore);
-    procsignal::pqsignal_thread(libc::SIGCHLD, Ignore);
+    procsignal::pqsignal_thread(procsignal::signums::SIGPIPE, Ignore);
+    procsignal::pqsignal_thread(procsignal::signums::SIGUSR2, Ignore);
+    procsignal::pqsignal_thread(procsignal::signums::SIGCHLD, Ignore);
 }
 
 fn fatal_exit(e: &PgError) -> ! {

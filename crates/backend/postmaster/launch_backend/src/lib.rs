@@ -319,7 +319,7 @@ fn run_child_task(
             .unwrap_or_else(|e| panic!("InitPostmasterChild failed: {e:?}"));
         // InitPostmasterChild's SIGQUIT default; miscinit can't reach interrupt.
         procsignal::pqsignal_thread(
-            libc::SIGQUIT,
+            procsignal::signums::SIGQUIT,
             procsignal::ThreadSignalHandler::Simple(default_sigquit_handler),
         );
     }
@@ -363,7 +363,7 @@ fn run_child_task(
         .downcast_ref::<ipc::ProcExitThread>()
         .map(|p| p.code << 8)
         .or_else(|| payload.downcast_ref::<ipc::KilledBySignal>().map(|k| k.signo))
-        .unwrap_or(libc::SIGABRT);
+        .unwrap_or(procsignal::signums::SIGABRT);
     // Park in flight (wretain): the reaper must treat this announce as a
     // task end, not a thread end. Marked before the announce so the reaper
     // can never observe the announce without the marker.
@@ -1181,7 +1181,7 @@ pub mod rtgang {
             return;
         }
         procsignal::pqsignal_thread(
-            libc::SIGQUIT,
+            procsignal::signums::SIGQUIT,
             procsignal::ThreadSignalHandler::Simple(super::default_sigquit_handler),
         );
         miscinit::SetMyBackendType(types_core::init::BackendType::BgWorker);
