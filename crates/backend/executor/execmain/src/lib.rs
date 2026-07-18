@@ -35,6 +35,13 @@ pub use execmain::{
 };
 pub use execparallel::{parallel_query_main, register_parallel_query_main};
 pub use lanev2::coverage::{coverage_snapshot, LANEV2_BUILTINS, PGRUST_FOID_RANGE};
+// WS-CB wave-10 (cursors inc-2 contract §8; worklog notes/se-wave10-cb.md
+// EX-CB-1): the CA-facing portal seam — pquery must not link lanev2
+// internals. Knob face for store arming (§7.3), the §6 assert-arming note,
+// and the §3.3 tick face; coverage-export precedent above.
+pub use lanev2::{
+    cursor_fill_tid_capture_refused, cursor_store_armed_note, cursor_store_fill_enabled,
+};
 pub use nodegather::GatherState;
 pub use nodegathermerge::GatherMergeState;
 pub use noderesult::ResultState;

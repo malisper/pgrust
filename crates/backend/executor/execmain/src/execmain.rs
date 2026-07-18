@@ -1060,42 +1060,83 @@ pub(crate) fn execute_plan<'m, 'mcx>(
     // --- end WS-AI wave-9 -------------------------------------------------------
     // --- WS-AJ wave-9 sub-region (reserved) -------------------------------------
     // --- end WS-AJ wave-9 -------------------------------------------------------
+    // === wave-10 shared-file marker (cursors inc-2 contract §8; sub-regions CA, CB, CC) ===
+    // --- WS-CA wave-10 sub-region (reserved) ------------------------------------
+    // --- end WS-CA wave-10 --------------------------------------------------------
+    // --- WS-CB wave-10 (cursors inc-2: batch store fill + §6 staging; band 95001+) ---
+    // §6 deletion-clock staging (a): the forward-only run seam. Every
+    // backward drive ticks the release-mode evidence counter (the
+    // post-flip physical-deletion bake reads it at zero across all
+    // corpora); the debug assert (direction ∈ {Forward, NoMovement}) arms
+    // once a cursor store has been armed in this process (WS-CA's
+    // `cursor_store_armed_note` — a store-served world never legally
+    // drives the executor backward). NoMovement never enters this
+    // function (standard_executor_run gates), so the backward test is the
+    // whole check.
+    if ::types_scan::sdir::ScanDirectionIsBackward(direction) {
+        crate::lanev2::run_seam_backward_evidence();
+    }
+    // §2.1/§2.3 batch store fill: a budgeted (cursor-FETCH-cadence) run
+    // whose receiver is the portal store may be driven as a lane batch
+    // pipeline into the store — batches, not the capacity-one per-row
+    // pull ceremony. Engagement is decided by the standard admission
+    // hooks inside `cursor_store_batch_fill`; refusals (and every
+    // non-store, non-budgeted run) take the per-tuple loop below,
+    // byte-identically (§2.3 fetch-invisibility). Knob-OFF/count-0 runs
+    // read one None here — per-RUN cost only, never per-tuple (the
+    // instruction-invisibility law).
+    let cursor_fill_engaged = if estate.es_cursor_run_budget.is_some()
+        && send_tuples
+        && estate.es_junkFilter.is_none()
+    {
+        crate::lanev2::cursor_store_batch_fill(planstate, estate, dest)?
+    } else {
+        false
+    };
+    // --- end WS-CB wave-10 ----------------------------------------------------------
+    // --- WS-CC wave-10 sub-region (reserved) ------------------------------------
+    // --- end WS-CC wave-10 --------------------------------------------------------
     if use_parallel_mode {
         enter_parallel_mode_outlined();
     }
 
     let mut current_tuple_count: u64 = 0;
-    loop {
-        estate.reset_per_tuple_expr_context();
+    // WS-CB wave-10: an engaged batch fill consumed the run's budget inside
+    // the sink — the per-tuple loop must not drive the plan again this run.
+    // One branch per RUN (hoisted out of the loop, never per tuple).
+    if !cursor_fill_engaged {
+        loop {
+            estate.reset_per_tuple_expr_context();
 
-        let Some(mut slot_id) = exec_proc_node(planstate, estate)? else {
-            break;
-        };
+            let Some(mut slot_id) = exec_proc_node(planstate, estate)? else {
+                break;
+            };
 
-        if estate.es_junkFilter.is_some() {
-            slot_id = execjunk::exec_filter_junk(estate, slot_id);
-        }
+            if estate.es_junkFilter.is_some() {
+                slot_id = execjunk::exec_filter_junk(estate, slot_id);
+            }
 
-        if send_tuples {
-            let slot = estate.slot_mut(slot_id);
-            // SAFETY: lifetime bridge at the seam boundary (C passes a raw
-            // TupleTableSlot*). The receiver only copies datums out during
-            // the call and retains no borrow of the slot (printtup keeps an
-            // address token + its own wire buffer).
-            let slot: &mut SlotData<'m> =
-                unsafe { &mut *(slot as *mut SlotData<'mcx>).cast::<SlotData<'m>>() };
-            if !dest.receive_slot(slot)? {
+            if send_tuples {
+                let slot = estate.slot_mut(slot_id);
+                // SAFETY: lifetime bridge at the seam boundary (C passes a raw
+                // TupleTableSlot*). The receiver only copies datums out during
+                // the call and retains no borrow of the slot (printtup keeps an
+                // address token + its own wire buffer).
+                let slot: &mut SlotData<'m> =
+                    unsafe { &mut *(slot as *mut SlotData<'mcx>).cast::<SlotData<'m>>() };
+                if !dest.receive_slot(slot)? {
+                    break;
+                }
+            }
+
+            if operation == CmdType::CMD_SELECT {
+                estate.es_processed += 1;
+            }
+
+            current_tuple_count += 1;
+            if number_tuples != 0 && number_tuples == current_tuple_count {
                 break;
             }
-        }
-
-        if operation == CmdType::CMD_SELECT {
-            estate.es_processed += 1;
-        }
-
-        current_tuple_count += 1;
-        if number_tuples != 0 && number_tuples == current_tuple_count {
-            break;
         }
     }
 
