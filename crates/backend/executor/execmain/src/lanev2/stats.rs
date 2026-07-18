@@ -520,9 +520,28 @@ pub(super) enum RefuseReason {
     /// in inc-1c (recorded in notes/se-wave9-ai.md; over-ticking on
     /// breaker-engaged plans is armed-accounting-only, never semantics).
     CursorPlanRefused = 40,
+    // -----------------------------------------------------------------------
+    // Wave-10 cursors inc-2 (WS-CB, `se/wave10-ws-cb`; APPEND-ONLY —
+    // contract §3.3, the increment's SINGLE vocabulary mint; allowlist row
+    // in the same commit; worklog notes/se-wave10-cb.md).
+    // -----------------------------------------------------------------------
+    /// A store fill over a CURRENT-OF-eligible plan (contract §4.1) uses
+    /// the ROW-CHAIN fill: the v1 tid capture reads the scan state per
+    /// row, so the lane batch fill declines. A mode choice inside a
+    /// still-store-served cursor (fetch-invisible), ticked once per
+    /// fill-engine decision — the tick face is
+    /// `push::cursor_fill_tid_capture_refused`, called where the
+    /// eligibility answer lives (WS-CA's store-creation shape test).
+    /// RESERVED tick site on this branch (the `CursorWithHold` posture);
+    /// arms at the composed head. Named follow-up (chartered, not inc-2):
+    /// lane fill supplies per-row `(tableoid, ctid)` from batch rowref
+    /// identity, retiring this reason. Contract note: authored as "next
+    /// free discriminant, 36" before inc-1b's chartered mint landed
+    /// 36..40; next free is 41 (worklog §1 drift record).
+    CursorCurrentOfTidCapture = 41,
 }
 
-const N_REASONS: usize = 41;
+const N_REASONS: usize = 42;
 
 impl RefuseReason {
     pub(super) fn name(self) -> &'static str {
@@ -568,6 +587,7 @@ impl RefuseReason {
             RefuseReason::CursorWithHold => "cursor-with-hold",
             RefuseReason::CursorPersistHoldable => "cursor-persist-holdable",
             RefuseReason::CursorPlanRefused => "cursor-plan-refused",
+            RefuseReason::CursorCurrentOfTidCapture => "cursor-currentof-tidcapture",
         }
     }
 
@@ -615,6 +635,7 @@ impl RefuseReason {
             CursorWithHold,
             CursorPersistHoldable,
             CursorPlanRefused,
+            CursorCurrentOfTidCapture,
         ][i]
     }
 }
