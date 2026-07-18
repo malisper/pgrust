@@ -4304,6 +4304,7 @@ dependencies = [
  "parse_relation",
  "parser_small1",
  "pgrcolumnar",
+ "pgsync",
  "planner",
  "portalmem",
  "postgres",
@@ -8920,6 +8921,7 @@ dependencies = [
  "types_snapshot",
  "types_storage",
  "types_tuple",
+ "waiter",
  "xact_seams",
 ]
 
@@ -11868,6 +11870,7 @@ dependencies = [
  "lz4_flex",
  "mbutils_seams",
  "mcx",
+ "pgsync",
  "relpath",
  "snapmgr",
  "tableam_vocab",

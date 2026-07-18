@@ -8,6 +8,8 @@ publish.workspace = true
 bench-internals = []
 
 [dependencies]
+# permit-s4 row 10: stitch-pool feed channels on pgsync::mailbox.
+pgsync = { path = "../../../_support/pgsync" }
 libc = "0.2"
 vfs = { path = "../../storage/file/vfs" }
 lz4_flex = "0.11"

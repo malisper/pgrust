@@ -438,7 +438,12 @@ enum StitchMsg {
 }
 
 struct StitchPool {
-    txs: Vec<std::sync::mpsc::Sender<StitchMsg>>,
+    // permit-s4 row 10: per-thread unbounded pgsync::mailbox (send never
+    // parks — mpsc::channel parity). Finalize-by-close is reproduced
+    // exactly: clearing `txs` drops the last sender of each mailbox, the
+    // owning thread drains remaining messages and exits (drain-then-exit =
+    // mpsc disconnect semantics), and only then is it joined.
+    txs: Vec<pgsync::MailboxSender<StitchMsg>>,
     handles: Vec<std::thread::JoinHandle<Vec<(usize, u64, Vec<Vec<u8>>)>>>,
     /// col -> owning thread index (None = int column / no stitch).
     assign: Vec<Option<usize>>,
@@ -455,9 +460,12 @@ impl Drop for StitchPool {
     }
 }
 
-fn stitch_pool_thread(owned: Vec<(usize, StitchCol)>, rx: std::sync::mpsc::Receiver<StitchMsg>) -> Vec<(usize, u64, Vec<Vec<u8>>)> {
+fn stitch_pool_thread(
+    owned: Vec<(usize, StitchCol)>,
+    rx: pgsync::MailboxReceiver<StitchMsg>,
+) -> Vec<(usize, u64, Vec<Vec<u8>>)> {
     let mut cols: HashMap<usize, StitchCol> = owned.into_iter().collect();
-    while let Ok(StitchMsg::Rg { col, entries }) = rx.recv() {
+    while let Some(StitchMsg::Rg { col, entries }) = rx.recv() {
         let Some(st) = cols.get_mut(&col) else { continue };
         if st.poisoned {
             continue;
@@ -1589,7 +1597,7 @@ impl CbWriter {
         let mut txs = Vec::with_capacity(n);
         let mut handles = Vec::with_capacity(n);
         for owned in per_thread {
-            let (tx, rx) = std::sync::mpsc::channel::<StitchMsg>();
+            let (tx, rx) = pgsync::mailbox::<StitchMsg>(None);
             let h = std::thread::Builder::new()
                 .name("cb-stitch".into())
                 .spawn(move || stitch_pool_thread(owned, rx))
