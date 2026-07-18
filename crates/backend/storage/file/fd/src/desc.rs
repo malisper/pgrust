@@ -91,9 +91,17 @@ pub(crate) fn FreeDesc(index: i32) -> i32 {
     });
     match desc.desc {
         AllocatedHandle::File(file) => {
+            // DST P1 carve-out boundary (contract §1.1, Ruling 3 Class C):
+            // this fd was minted posix-side by open_stdio (the fopen plane,
+            // permanently out of Vfs scope), so it must close posix-side too
+            // — vfs::close is reserved for vfs-minted fds. Under sim, SimVfs
+            // EBADFs foreign fds below SIM_FD_BASE (the domain tripwire that
+            // caught the original misroute; the fd then leaked). Allowlist
+            // row retained under the P0 fencing lint with the fopen sites.
             // Live descriptor released from its guard; closed once here.
             let raw = file.into_raw_fd();
-            vfs::close(raw)
+            // SAFETY: into_raw_fd transferred ownership; closed exactly once.
+            unsafe { libc::close(raw) }
         }
         AllocatedHandle::Pipe(pipe) => pclose(pipe),
         AllocatedHandle::Dir(dir) => {
