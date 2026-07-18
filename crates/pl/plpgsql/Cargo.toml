@@ -9,6 +9,7 @@ name = "plpgsql"
 path = "src/lib.rs"
 
 [dependencies]
+pgsync = { path = "../../_support/pgsync" }
 array = { package = "types_array", path = "../../_support/types/array" }
 cache_syscache = { path = "../../backend/utils/cache/cache_syscache" }
 catalog_namespace = { path = "../../backend/catalog/catalog_namespace" }

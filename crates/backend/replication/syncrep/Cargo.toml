@@ -9,6 +9,7 @@ name = "syncrep"
 path = "src/lib.rs"
 
 [dependencies]
+pgsync = { path = "../../../_support/pgsync" }
 elog = { path = "../../utils/error/elog" }
 guc = { path = "../../utils/misc/guc" }
 guc_tables = { path = "../../utils/misc/guc_tables" }

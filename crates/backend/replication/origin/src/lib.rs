@@ -14,7 +14,7 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::sync::OnceLock;
+use pgsync::OnceLock;
 
 use condition_variable::{
     ConditionVariable, ConditionVariableBroadcast, ConditionVariableCancelSleep,

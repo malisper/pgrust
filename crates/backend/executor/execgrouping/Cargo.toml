@@ -7,6 +7,7 @@ edition = "2021"
 path = "src/lib.rs"
 
 [dependencies]
+pgsync = { path = "../../../_support/pgsync" }
 datum = { path = "../../../_support/types/datum" }
 execexpr = { path = "../execexpr" }
 exectuples = { path = "../exectuples" }

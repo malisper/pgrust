@@ -13,7 +13,7 @@
 pub mod config;
 
 use std::sync::atomic::Ordering::Relaxed;
-use std::sync::RwLock;
+use pgsync::RwLock;
 
 use elog::ereport;
 use types_core::{InvalidXLogRecPtr, ProcNumber, XLogRecPtr};

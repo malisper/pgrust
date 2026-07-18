@@ -275,7 +275,7 @@ struct SimpleHashIndex {
 /// One env probe: report per-table probe/grow counters through the server
 /// log every 2^20 lookups (q18fin leader-stall forensics).
 fn probe_stats_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static ON: pgsync::OnceLock<bool> = pgsync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("PGRUST_GROUPING_PROBE_STATS").is_some())
 }
 

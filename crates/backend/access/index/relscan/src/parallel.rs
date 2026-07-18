@@ -1,7 +1,7 @@
 //! Parallel index scan shared descriptors, thread-native: C's shm_toc blob
 //! becomes typed Arc-shared state (std collections: cross-thread by design).
 
-use std::sync::{Condvar, Mutex};
+use pgsync::{Condvar, Mutex};
 
 use ::datum::Datum;
 use ::types_core::{BlockNumber, InvalidBlockNumber};

@@ -4,7 +4,9 @@
 // bitmap_table_scan_setup.
 #![allow(non_snake_case)]
 
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
+
+use pgsync::{Condvar, Mutex};
 
 use ::execexpr::ExprState;
 use ::executils::exec_recheck_qual_and_reset;

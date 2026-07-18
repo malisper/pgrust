@@ -1931,7 +1931,7 @@ struct BtVacInfo {
     vacuums: Vec<(::types_core::Oid, ::types_core::Oid, ::types_nbtree::BTCycleId)>,
 }
 
-static BTVACINFO: std::sync::Mutex<BtVacInfo> = std::sync::Mutex::new(BtVacInfo {
+static BTVACINFO: pgsync::Mutex<BtVacInfo> = pgsync::Mutex::new(BtVacInfo {
     cycle_ctr: 0,
     vacuums: Vec::new(),
 });
