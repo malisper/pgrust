@@ -26,6 +26,41 @@ fn io_err(what: &str, e: std::io::Error) -> Box<PgError> {
     Box::new(PgError::error(format!("parallel load-sort {what}: {e}")))
 }
 
+/// DST P1 (WS-B): spill-run creates/opens go through the Vfs boundary; the
+/// returned std::fs::File wraps the vfs fd (`File::from_raw_fd` — the
+/// contract's alter_system precedent), so the buffered stream reads/writes
+/// and close stay std until the sim read arm lands. std::fs parity flags:
+/// O_CLOEXEC always, mode 0o666 (umask applies).
+fn vfs_open_file(
+    path: &std::path::Path,
+    flags: libc::c_int,
+    what: &str,
+) -> PgResult<std::fs::File> {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        io_err(
+            what,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "file name contained an unexpected NUL byte",
+            ),
+        )
+    })?;
+    // std parity: open(2) EINTR-retried (cvt_r), O_CLOEXEC, mode 0o666.
+    let fd = loop {
+        let fd = vfs::open(&c, flags | libc::O_CLOEXEC, 0o666);
+        if fd >= 0 {
+            break fd;
+        }
+        if vfs::get_errno() != libc::EINTR {
+            return Err(io_err(what, std::io::Error::from_raw_os_error(vfs::get_errno())));
+        }
+    };
+    // SAFETY: fresh descriptor from vfs::open, exclusively owned by the File.
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
 // ---- row codec -------------------------------------------------------------
 
 pub struct RowCodec {
@@ -194,7 +229,8 @@ impl SortBatch {
     /// reassembles a byte stream identical to the raw format, so the
     /// merge is unaffected by construction.
     pub fn spill_run_opts(&mut self, path: &std::path::Path, lz4: bool) -> PgResult<u64> {
-        let f = std::fs::File::create(path).map_err(|e| io_err("run create", e))?;
+        let f =
+            vfs_open_file(path, libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC, "run create")?;
         let mut w = BufWriter::with_capacity(1 << 20, f);
         let mut written: u64 = 0;
         if !lz4 {
@@ -327,22 +363,13 @@ fn check_run_magic(r: &mut impl Read) -> std::io::Result<()> {
 // ---- run reader + k-way merge ----------------------------------------------
 
 /// loadcommit C2a: non-blocking kernel readahead hint for a run file's
-/// upcoming window (pure hint — zero effect on the bytes read). Linux
-/// only; a no-op elsewhere.
-#[cfg(target_os = "linux")]
+/// upcoming window (pure hint — zero effect on the bytes read). Routed
+/// through the Vfs boundary (DST P1); the platform split lives inside
+/// PosixVfs (posix_fadvise WILLNEED on Linux). Errors ignored, as before.
 fn fadvise_willneed(f: &std::fs::File, off: u64, len: u64) {
     use std::os::unix::io::AsRawFd;
-    unsafe {
-        libc::posix_fadvise(
-            f.as_raw_fd(),
-            off as libc::off_t,
-            len as libc::off_t,
-            libc::POSIX_FADV_WILLNEED,
-        );
-    }
+    vfs::fadvise_willneed(f.as_raw_fd(), off as libc::off_t, len as libc::off_t);
 }
-#[cfg(not(target_os = "linux"))]
-fn fadvise_willneed(_f: &std::fs::File, _off: u64, _len: u64) {}
 
 // ---- loadcommit C2b: explicit bounded run prefetch --------------------------
 //
@@ -594,7 +621,7 @@ struct RunReader {
 
 impl RunReader {
     fn open(path: &std::path::Path, key_w: usize) -> PgResult<RunReader> {
-        let f = std::fs::File::open(path).map_err(|e| io_err("run open", e))?;
+        let f = vfs_open_file(path, libc::O_RDONLY, "run open")?;
         Self::from_src(RunSrc::Buf(BufReader::with_capacity(1 << 20, f)), key_w)
     }
 
@@ -841,7 +868,7 @@ impl RunMergeV2 {
         let mut readers = Vec::with_capacity(paths.len());
         for p in paths {
             if lz4 {
-                let f = std::fs::File::open(p).map_err(|e| io_err("run open", e))?;
+                let f = vfs_open_file(p, libc::O_RDONLY, "run open")?;
                 let mut r = BufReader::with_capacity(1 << 20, f);
                 check_run_magic(&mut r).map_err(|e| io_err("run magic", e))?;
                 let src = RunSrc::Lz4(Lz4Source {
@@ -877,7 +904,7 @@ impl RunMergeV2 {
         let mut buckets: Vec<Vec<FeedRun>> = (0..threads).map(|_| Vec::new()).collect();
         let mut sources = Vec::with_capacity(paths.len());
         for (i, p) in paths.iter().enumerate() {
-            let f = std::fs::File::open(p).map_err(|e| io_err("run open", e))?;
+            let f = vfs_open_file(p, libc::O_RDONLY, "run open")?;
             let mut f = BufReader::with_capacity(if lz4 { 64 << 10 } else { 8 << 10 }, f);
             if lz4 {
                 check_run_magic(&mut f).map_err(|e| io_err("run magic", e))?;
