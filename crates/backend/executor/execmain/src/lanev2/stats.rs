@@ -195,9 +195,24 @@ pub(super) enum ShapeClass {
     /// authored here per contract §1/§6-WS-L(1) so the wave-2 vocabulary is
     /// one commit. Ticks NOTHING until dml.rs lands.
     ModifyTable = 37,
+    // -----------------------------------------------------------------------
+    // Wave-9.5 cursor-admission vocabulary (WS-AI inc-1b,
+    // `se/wave95-cursors-1b`, band 92001+; chartered append — the registry
+    // is APPEND-ONLY, nobody edits discriminants above this line; the
+    // wave-9 §5 zero-mint expectation is superseded by the inc-1b charter,
+    // recorded in notes/se-wave9-ai.md).
+    // -----------------------------------------------------------------------
+    /// Forward-pull cursor admission (lane-cursors.md §1-§3, contract §3):
+    /// the WHOLE-RUN refusal classes of the budgeted (FETCH-cadence) emit
+    /// sink. Cadence = once per budgeted `execute_plan` run (never per
+    /// tuple); ticks fire only with `PGRUST_LANE_V2_CURSORS` ON (knob-OFF
+    /// never reaches the classifier), so default-config accounting is
+    /// byte-identical by construction. A cursor refusal NEVER changes
+    /// output bytes: the run rides Volcano exactly as today (fail-open law).
+    Cursor = 38,
 }
 
-const N_CLASSES: usize = 38;
+const N_CLASSES: usize = 39;
 
 impl ShapeClass {
     pub(super) const ALL: [ShapeClass; N_CLASSES] = [
@@ -239,6 +254,7 @@ impl ShapeClass {
         ShapeClass::Unique,
         ShapeClass::LockRows,
         ShapeClass::ModifyTable,
+        ShapeClass::Cursor,
     ];
 
     pub(super) fn name(self) -> &'static str {
@@ -281,6 +297,7 @@ impl ShapeClass {
             ShapeClass::Unique => "unique",
             ShapeClass::LockRows => "lockrows",
             ShapeClass::ModifyTable => "modifytable",
+            ShapeClass::Cursor => "cursor",
         }
     }
 }
@@ -449,9 +466,63 @@ pub(super) enum RefuseReason {
     /// (WS-L, WS-M, WS-P add ZERO reasons; the Layer-A assert reads reasons,
     /// never adds them).
     DmlShape = 35,
+    // -----------------------------------------------------------------------
+    // Wave-9.5 cursor-admission refusal taxonomy (WS-AI inc-1b,
+    // `se/wave95-cursors-1b`; APPEND-ONLY — chartered mint, recorded in
+    // notes/se-wave9-ai.md; the wave-9 §5 zero-mint expectation is
+    // superseded by the inc-1b charter). All five tick ONLY under the
+    // `ShapeClass::Cursor` class, once per budgeted run, knob-ON only; a
+    // cursor refusal lands the WHOLE portal on Volcano byte-identically
+    // (the fail-open law) — these rows are observability, never semantics.
+    // -----------------------------------------------------------------------
+    /// SUNSET (wave-10 REMOVES this class): the portal is scrollable —
+    /// declared SCROLL or free-upgraded at DECLARE (both arrive as
+    /// `EXEC_FLAG_REWIND|EXEC_FLAG_BACKWARD` top eflags from PortalStart,
+    /// pquery.rs:390-395; MARK is folded in as the same rewind-capable
+    /// demand). Michael has ratified a lazy-materialized store with lane
+    /// batch-fill for SCROLL/WITH-HOLD cursors in wave-10 (contract in
+    /// authoring): wave-10 removes the TICK SITE + its allowlist row — a
+    /// clean audited shrink. The variant itself then retires to a
+    /// never-ticking tombstone (the registry is append-only; discriminants
+    /// never move).
+    CursorScroll = 36,
+    /// Non-forward demand on a budgeted run (backward FETCH reaching the
+    /// run seam). Reachable only through scroll-capable portals (NO SCROLL
+    /// backward errors above the seam, pquery.rs no_scroll arm), but named
+    /// apart from `CursorScroll` because the corpus's explicit-backward
+    /// cells assert the direction demand, not the portal capability.
+    CursorBackward = 37,
+    /// SUNSET (wave-10 REMOVES this class, same ratification as
+    /// `CursorScroll` — the two are named consistently so the wave-10
+    /// removal is one audited shrink): WITH HOLD portal. RESERVED tick
+    /// site: holdability is portal-level state (`CURSOR_OPT_HOLD`,
+    /// portalcmds) and is NOT visible below the `executor_run` seam —
+    /// today's structural posture already satisfies §5 (the persist drive
+    /// is a count-0 run, which never installs a budget; pre-COMMIT FETCHes
+    /// are ordinary forward budgeted runs and resume-forward is the
+    /// DECIDED §5 shape). Ticks NOTHING until a seam-visible holdability
+    /// signal exists or wave-10 removes it, whichever lands first
+    /// (`DmlShape` reserved-row precedent).
+    CursorWithHold = 38,
+    /// `PersistHoldablePortal`'s COMMIT-time persist drive over an engaged
+    /// lane pipeline. RESERVED tick site, same seam-visibility argument as
+    /// `CursorWithHold` (the persist drive arrives as a plain count-0
+    /// forward/NoMovement run); its wave-10 disposition rides the WITH-HOLD
+    /// lazy-materialized-store contract (not marked SUNSET here — wave-10
+    /// decides whether the persist path keeps a named class).
+    CursorPersistHoldable = 39,
+    /// The budgeted run's top plan carried no lane engagement — the whole
+    /// portal rides Volcano (exactly as today). The plan's SPECIFIC refusal
+    /// reasons tick under their own classes at the per-pull gates; this is
+    /// the cursor-level roll-up. inc-1b detection breadth: scan-class
+    /// engagement (seqscan/cbscan memoized verdicts + settled parks) —
+    /// breaker-lane engagement (agg/sort/join builds) widens the detector
+    /// in inc-1c (recorded in notes/se-wave9-ai.md; over-ticking on
+    /// breaker-engaged plans is armed-accounting-only, never semantics).
+    CursorPlanRefused = 40,
 }
 
-const N_REASONS: usize = 36;
+const N_REASONS: usize = 41;
 
 impl RefuseReason {
     pub(super) fn name(self) -> &'static str {
@@ -492,6 +563,11 @@ impl RefuseReason {
             RefuseReason::ExprKeyShape => "exprkey-shape",
             RefuseReason::RedKeyShape => "redkey-shape",
             RefuseReason::DmlShape => "dml-shape",
+            RefuseReason::CursorScroll => "cursor-scroll",
+            RefuseReason::CursorBackward => "cursor-backward",
+            RefuseReason::CursorWithHold => "cursor-with-hold",
+            RefuseReason::CursorPersistHoldable => "cursor-persist-holdable",
+            RefuseReason::CursorPlanRefused => "cursor-plan-refused",
         }
     }
 
@@ -534,6 +610,11 @@ impl RefuseReason {
             ExprKeyShape,
             RedKeyShape,
             DmlShape,
+            CursorScroll,
+            CursorBackward,
+            CursorWithHold,
+            CursorPersistHoldable,
+            CursorPlanRefused,
         ][i]
     }
 }

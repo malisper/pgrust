@@ -1036,13 +1036,27 @@ pub(crate) fn execute_plan<'m, 'mcx>(
     // above it (None on knob-OFF and count-0 runs, which answer at the
     // callee's first test; a None overwrite means no stale budget survives
     // an error unwind or estate reuse). See lanev2/push.rs WS-AI region for
-    // the gate + serial law.
+    // the gate + serial law. inc-1b: the install now runs the NAMED
+    // cursor-admission classifier (forward / non-scroll eflags / serial;
+    // refusals tick the ShapeClass::Cursor taxonomy, knob-ON only) and the
+    // budgeted-run suspension SETTLES at the end of this function (the park
+    // walker below the loop); a parked pipeline repossesses at the next
+    // entry (the resume walk right here).
     estate.es_cursor_run_budget = crate::lanev2::cursor_run_budget_install(
         operation == CmdType::CMD_SELECT,
         ::types_scan::sdir::ScanDirectionIsForward(direction),
         number_tuples,
         use_parallel_mode,
+        estate.es_top_eflags,
     );
+    // inc-1b re-entry (lane-cursors.md §2 "repossess on resume"): one bool
+    // load per run knob-OFF/never-parked (the flag is set only by a knob-ON
+    // budgeted settle). Restages every parked scan's suspended page batch
+    // before the first pull touches staged state.
+    if estate.es_lane_cursor_parked {
+        estate.es_lane_cursor_parked = false;
+        crate::lanev2::cursor_park_resume(planstate, estate)?;
+    }
     // --- end WS-AI wave-9 -------------------------------------------------------
     // --- WS-AJ wave-9 sub-region (reserved) -------------------------------------
     // --- end WS-AJ wave-9 -------------------------------------------------------
@@ -1085,6 +1099,23 @@ pub(crate) fn execute_plan<'m, 'mcx>(
         }
     }
 
+    // --- WS-AI wave-9.5 (cursors inc-1b): the §2 park shape's settle point.
+    // A budgeted (cursor-FETCH-cadence) run that stops with the pipeline
+    // suspended SETTLES here: lane-staged claims retire through the
+    // claim-release chain (HeapBatchSource-class staged page → the R3
+    // zero-pins-at-settle law), position recorded node-resident; the next
+    // run's resume walk (entry, above) repossesses. Knob-OFF / count-0 /
+    // FETCH_ALL runs read one None and skip (per-run cost only, never
+    // per-tuple). EPQ law: an EPQ recheck drive never enters execute_plan,
+    // and the walker independently refuses under es_epq_active (the budget
+    // belongs to the outer run — the inc-1a §5 design note, pinned in
+    // units).
+    if estate.es_cursor_run_budget.is_some() {
+        if crate::lanev2::cursor_run_park(planstate, estate) {
+            estate.es_lane_cursor_parked = true;
+        }
+    }
+    // --- end WS-AI wave-9.5 -----------------------------------------------------
     if estate.es_top_eflags & EXEC_FLAG_BACKWARD == 0 {
         exec_shutdown_node(planstate, estate)?;
     }

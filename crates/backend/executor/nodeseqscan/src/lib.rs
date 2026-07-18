@@ -86,9 +86,31 @@ pub struct SeqScanState<'mcx> {
     // per-pull refusal accounting ticks tiny-input-floor instead of
     // admission-economics. Reset with cb_standalone on park.
     cb_tiny: bool,
+    // Cursor-suspension park record (WS-AI wave-9.5, lane-cursors.md §2):
+    // (b0, b1, pos, n) — the settled lane-staged page batch's block b0, the
+    // remainder window end b1 (forward walk [b0, b1), no wrap — the
+    // park-point probe refuses wrap-capable walks), and the consume cursor
+    // at suspension. Written by `seq_scan_cursor_settle` (which released
+    // the staged claim's pin — R3 zero-pins-at-settle), consumed by
+    // `seq_scan_cursor_resume` (restage + cursor restore). Reset on
+    // rescan/skeleton-park (a rebound or rescanned scan restarts; a stale
+    // park record must never reposition it).
+    lane_park: Option<SeqScanCursorPark>,
     // pgrcolumnar relations only: plan-derived column need-set + zone-mappable
     // conjuncts, installed on the scan desc at open (pgrcolumnar-impl.md §7.3).
     cb_scan: Option<std::boxed::Box<CbScanInfo>>,
+}
+
+/// Cursor-suspension park record (WS-AI wave-9.5; the `lane_park` field's
+/// payload): the settled lane-staged batch's block `b0`, remainder window
+/// end `b1` (forward walk `[b0, b1)`, no wrap), and the consume cursor
+/// `(pos, n)` at suspension.
+#[derive(Clone, Copy)]
+struct SeqScanCursorPark {
+    b0: u64,
+    b1: u64,
+    pos: u32,
+    n: u32,
 }
 
 /// Plan-derived pgrcolumnar scan settings (built once at init, applied to every
@@ -3526,6 +3548,7 @@ pub fn exec_init_seq_scan_rel<'mcx>(
         cb_standalone: None,
         cb_prewhere_refused: false,
         cb_tiny: false,
+        lane_park: None,
         cb_scan,
     })
 }
@@ -3629,6 +3652,89 @@ pub fn seq_scan_end_claim_release(node: &mut SeqScanState<'_>) {
     if let Some(scan) = node.ss.ss_currentScanDesc.as_mut() {
         ::tableam::table_scan_end_claim_release(scan);
     }
+}
+
+/// Cursor-suspension settle (WS-AI wave-9.5, lane-cursors.md §2; the
+/// claim-release chain's cursor arm): if this scan holds a LANE-STAGED page
+/// batch (`lane_n > 0` — the standalone lane pipeline's node-resident
+/// consume cursor; drain-site claims never span a suspension), record its
+/// reposition point and retire the claim through
+/// `table_scan_end_claim_release` → `heap_end_claim_release`. Returns true
+/// iff a park record was written (the caller then clears the scan/result
+/// slots and arms the estate resume flag).
+///
+/// What deliberately does NOT settle here:
+/// * the VOLCANO scan's own cross-FETCH `rs_cbuf` pin (`lane_n == 0`) — C
+///   parity, untouched (design §2's stated divergence prices LANE claims
+///   only);
+/// * pgrcolumnar staged windows — the park-point probe answers None below
+///   the AM dispatch (R4 decode scratch is Arc/mmap-backed, holds no
+///   bufmgr pins, and is node-resident by design §1);
+/// * wrap-capable heap walks (syncscan-started) — the probe refuses them
+///   and the pin-held C-parity posture stands (production standalone lane
+///   admission is pgrcolumnar-only today; the heap arm is exercised by the
+///   unit fixture).
+///
+/// R3 ZERO-PINS-AT-SETTLE is debug-asserted: a settled claim holds no pin.
+pub fn seq_scan_cursor_settle(node: &mut SeqScanState<'_>) -> bool {
+    if node.lane_n == 0 {
+        return false;
+    }
+    let Some(scan) = node.ss.ss_currentScanDesc.as_mut() else {
+        return false;
+    };
+    let Some((b0, b1)) = ::tableam::table_scan_cursor_park_point(scan) else {
+        return false;
+    };
+    node.lane_park =
+        Some(SeqScanCursorPark { b0, b1, pos: node.lane_pos, n: node.lane_n });
+    node.lane_pos = 0;
+    node.lane_n = 0;
+    ::tableam::table_scan_end_claim_release(scan);
+    debug_assert!(
+        !::tableam::table_scan_holds_claim_pin(scan),
+        "R3 zero-pins-at-settle: cursor settle left a claim pin behind"
+    );
+    true
+}
+
+/// True iff this scan carries an unconsumed cursor park record (unit face).
+pub fn seq_scan_cursor_parked(node: &SeqScanState<'_>) -> bool {
+    node.lane_park.is_some()
+}
+
+/// Cursor-suspension resume (the §2 "repossess on resume" half): reposition
+/// the scan on the parked remainder window (`heap_set_block_range`'s
+/// reset-half shape, through the AM dispatch), restage the suspended page
+/// batch, and restore the consume cursor. Under the run's MVCC snapshot the
+/// restaged visible set is the suspended one (same page, same snapshot —
+/// same `page_collect_tuples` answer; pruning removes only all-dead tuples
+/// and line-pointer numbering is stable), so the resumed emission is
+/// byte-identical; a count mismatch fails LOUD rather than emitting a
+/// shifted remainder. Ok(false) = nothing parked.
+pub fn seq_scan_cursor_resume<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    let Some(SeqScanCursorPark { b0, b1, pos, n }) = node.lane_park.take() else {
+        return Ok(false);
+    };
+    node.ensure_scandesc(estate)?;
+    ::tableam::table_scan_set_morsel_range(
+        node.ss.ss_currentScanDesc.as_mut().unwrap(),
+        b0,
+        b1,
+    )?;
+    let restaged = seq_scan_next_pagebatch(node, estate)?;
+    if restaged != n {
+        return Err(::types_error::PgError::error(format!(
+            "cursor resume restaged a different visible set (block {b0}: {restaged} rows, suspended with {n})"
+        ))
+        .into());
+    }
+    node.lane_pos = pos;
+    node.lane_n = n;
+    Ok(true)
 }
 
 /// Position the scan on the morsel claim [g0, g1) (the runtime's
@@ -3990,6 +4096,7 @@ pub fn skeleton_park(node: &mut SeqScanState<'_>) -> PgResult<()> {
     node.cb_standalone = None;
     node.cb_prewhere_refused = false;
     node.cb_tiny = false;
+    node.lane_park = None;
     if let Some(scandesc) = node.ss.ss_currentScanDesc.take() {
         table_endscan(scandesc)?;
     }
@@ -4026,6 +4133,7 @@ pub fn exec_rescan_seq_scan<'mcx>(
     }
     node.lane_pos = 0;
     node.lane_n = 0;
+    node.lane_park = None;
     if let Some(b) = node.batch_soa.as_deref_mut() {
         b.reset_staged();
     }
@@ -4087,11 +4195,13 @@ mcx::forget_safe_nodrop!(SeqScanVariant);
 
 mcx::forget_safe_nodrop!(ScanBatchMode);
 
+mcx::forget_safe_nodrop!(SeqScanCursorPark);
+
 // bloom/parallel exempt: released in exec_end_seq_scan / release_parallel.
 mcx::forget_safe_struct!(
     SeqScanState<'_> {
         ss, variant, plan_node_id, plan_rows, parallel_aware, batch_soa, scan_batch, batch_allowed,
-        lane_pos, lane_n, lane_verdict, cb_standalone, cb_prewhere_refused, cb_tiny;
+        lane_pos, lane_n, lane_verdict, cb_standalone, cb_prewhere_refused, cb_tiny, lane_park;
         bloom, parallel, cb_scan
     },
     // stitch/proj exempt: the stitched programs (heap Vecs + the W^X code

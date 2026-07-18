@@ -1262,6 +1262,31 @@ pub fn table_scan_end_claim_release(scan: &mut TableScanDesc<'_>) {
     }
 }
 
+/// Cursor-suspension park point (WS-AI wave-9.5, lane-cursors.md §2,
+/// append-only seam): the staged page batch's reposition window
+/// `(b0, b1)` — restageable remainder `[b0, b1)` including the staged
+/// block — iff the scan holds a settleable mid-claim heap page
+/// (`heap_cursor_park_point`). None = nothing staged/pinned, a
+/// wrap-capable walk (syncscan-started), a parallel scan, or pgrcolumnar
+/// (whose staged windows hold no bufmgr pins — R4 decode scratch; nothing
+/// to settle, node-resident by design).
+pub fn table_scan_cursor_park_point(scan: &TableScanDesc<'_>) -> Option<(u64, u64)> {
+    match scan {
+        TableScanDesc::Heap(h) => ::heapam::heap_cursor_park_point(h),
+        TableScanDesc::Pgrcolumnar(_) => None,
+    }
+}
+
+/// R3 settle probe (debug-assert face of the zero-pins-at-settle law):
+/// does this scan still hold a claim page pin? pgrcolumnar stages no page
+/// pins — always false below the AM dispatch.
+pub fn table_scan_holds_claim_pin(scan: &TableScanDesc<'_>) -> bool {
+    match scan {
+        TableScanDesc::Heap(h) => h.rs_cbuf.is_some(),
+        TableScanDesc::Pgrcolumnar(_) => false,
+    }
+}
+
 /// Drive-scaling observability counters of a pgrcolumnar scan (the runtime
 /// WFIN channel): (rg_switches, dict_builds, granules_scanned,
 /// windows_staged). None = heap.

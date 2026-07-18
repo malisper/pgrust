@@ -823,6 +823,16 @@ pub struct EStateData<'mcx> {
     /// Knob-OFF and count-0 runs always read None. First consumer = the
     /// inc-1b park/settle walker (lanev2/batch_source.rs glue).
     pub es_cursor_run_budget: Option<u64>,
+    /// wave-9.5 WS-AI (cursors inc-1b, lane-cursors.md §2 — EX-AI-2, the
+    /// EX-AI-1 estate-surface shape, recorded for board ratification in
+    /// notes/se-wave9-ai.md): the previous budgeted run SETTLED a
+    /// lane-staged claim (park record node-resident); the next
+    /// `execute_plan` entry must run the resume walk before the first pull
+    /// touches staged state. Set only by the knob-ON settle walker; cleared
+    /// at every resume; knob-OFF world always reads false (one predictable
+    /// per-run branch). Estate-resident by the same TLS-census-zero
+    /// argument as `es_cursor_run_budget` above.
+    pub es_lane_cursor_parked: bool,
 }
 
 /// One worker's instrumentation snapshot: `instrument` is indexed by
@@ -1077,6 +1087,7 @@ impl<'mcx> EStateData<'mcx> {
             es_instrument: 0,
             es_lane_leaf_fast: false,
             es_cursor_run_budget: None,
+            es_lane_cursor_parked: false,
             es_instrumentation: PgVec::new_in(mcx),
             es_runtime_ea_refusals: PgVec::new_in(mcx),
             es_runtime_ea_pipelines: PgVec::new_in(mcx),
@@ -1577,7 +1588,7 @@ mcx::forget_safe_struct!(
         es_param_subplans, es_per_tuple_exprcontext,
         es_sourceText, es_use_parallel_mode, es_parallel_workers_to_launch,
         es_parallel_workers_launched, es_jit_flags, es_jit_instr, es_epq,
-        es_epq_active, es_lane_leaf_fast, es_cursor_run_budget, es_rowmarks;
+        es_epq_active, es_lane_leaf_fast, es_cursor_run_budget, es_lane_cursor_parked, es_rowmarks;
         es_jit_blocks,
         es_snapshot, es_crosscheck_snapshot, es_relations, es_junkFilter,
         es_tupleTable, es_exprcontexts, es_cte_shared, es_worktable_shared,
