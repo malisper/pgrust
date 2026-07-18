@@ -1,3 +1,11 @@
+// PosixVfs battery (DST P1 Ruling 3 Class A): every test here builds real-fs
+// fixtures (std::env::temp_dir + std::fs::create_dir_all + symlink) and runs
+// them against ActiveVfs. Under `--cfg pgrust_sim` ActiveVfs is SimVfs, whose
+// namespace is empty — the fixtures ENOENT at the first open. Posix-only by
+// construction; SimVfs coverage lives in `sim::tests` (differential golden
+// included).
+#![cfg(not(pgrust_sim))]
+
 use std::ffi::CString;
 
 use crate::{FileInfo, PG_O_DIRECT};
