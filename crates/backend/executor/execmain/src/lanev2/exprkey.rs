@@ -1875,6 +1875,13 @@ fn exprkey_k1_latemat_arm<'mcx>(
             return None;
         }
     };
+    // K1-F2 selectivity gate (SE9-GATES item 2): the hashed drain's exact
+    // admission — late-mat only inside the plan-time low-selectivity win
+    // envelope; one estimate per BUILD.
+    if let Err(reason) = super::batch_source::k1_latemat_sel_admits(ss) {
+        ::laneexec::log_refused(reason);
+        return None;
+    }
     match ::nodeseqscan::seq_scan_k1_latemat_arm(ss, &keys) {
         Ok(cols) => {
             trace_feed("k1 late-mat staging engaged (expr-key twin)");

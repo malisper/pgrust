@@ -4464,6 +4464,14 @@ fn scan_k1_latemat_arm<'mcx>(
     } else {
         return None;
     }
+    // K1-F2 selectivity gate (SE9-GATES item 2): admit late-mat only where
+    // the plan-time qual-selectivity estimate sits in the letter's win
+    // envelope; above the threshold the completion round-trip is pure cost
+    // and full staging wins. One estimate per BUILD (never per-row).
+    if let Err(reason) = batch_source::k1_latemat_sel_admits(ss) {
+        ::laneexec::log_refused(reason);
+        return None;
+    }
     match ::nodeseqscan::seq_scan_k1_latemat_arm(ss, &keys) {
         Ok(cols) => {
             trace_feed("k1 late-mat staging engaged (deform narrowed to qual+key cols)");
