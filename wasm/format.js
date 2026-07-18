@@ -172,6 +172,19 @@ export function formatSingleUser(raw) {
   return renderTable(cols.map((c) => c == null ? '?' : c), rows);
 }
 
+// stripLogPrefix — the engine's stderr diagnostics carry the C-faithful
+// log_line_prefix default '%m [%p] ', e.g.
+//   2026-07-18 05:47:30.613 GMT [1] ERROR:  division by zero
+// (fabled's engine printed bare 'ERROR: ...' lines; anchoring the severity
+// match at the line start therefore missed EVERY diagnostic from this engine —
+// errors were invisible and failed writes rendered as success). Strip that
+// prefix, when present, before matching severities. The pattern is tight
+// (date, time, tz, [pid]) so a legitimate message line can't be mis-stripped.
+const LOG_LINE_PREFIX_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)? \S+ \[\d+\] /;
+export function stripLogPrefix(line) {
+  return line.replace(LOG_LINE_PREFIX_RE, '');
+}
+
 // formatRun — produce the full block a Run should show: the formatted table /
 // command output, PLUS any ERROR/WARNING/NOTICE lines (the single-user backend
 // writes these to STDERR, so a failing query otherwise renders as blank). This
@@ -180,8 +193,8 @@ export function formatRun(stdout, stderr) {
   const table = formatSingleUser(stdout || '');
   const diag = (stderr || '')
     .split('\n')
-    .filter((l) => /^(ERROR|FATAL|PANIC|WARNING|NOTICE|HINT|DETAIL):/.test(l.trim()))
-    .map((l) => l.trim());
+    .map((l) => stripLogPrefix(l.trim()))
+    .filter((l) => /^(ERROR|FATAL|PANIC|WARNING|NOTICE|HINT|DETAIL):/.test(l));
   const parts = [];
   if (table) parts.push(table);
   if (diag.length) parts.push(diag.join('\n'));

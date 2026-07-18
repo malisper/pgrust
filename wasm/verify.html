@@ -2,9 +2,14 @@
 <html><head><meta charset="utf-8"><title>pgrust verify</title></head>
 <body><pre id="out">starting…</pre>
 <script type="module">
-// Headless-verification harness: boots two queries through the SAME worker the
-// real app uses, and writes a machine-readable result to document.title +
-// console so a headless driver can scrape it.
+// Headless-verification harness: boots three queries (two succeeding, one
+// DELIBERATELY FAILING) through the SAME worker the real app uses, and writes
+// a machine-readable result to document.title + console so a headless driver
+// can scrape it. The failing statement is checked through the REPL's real
+// diagnostic parser (backend.js parseDiagnostics) so an error-rendering
+// regression — e.g. the stderr log_line_prefix mismatch that once made every
+// error invisible — fails this gate.
+import { parseDiagnostics } from './backend.js';
 const out = document.getElementById('out');
 function log(s){ out.textContent += '\n' + s; console.log('[VERIFY] ' + s); }
 
@@ -17,6 +22,7 @@ const worker = new Worker(workerUrl, { type: 'module' });
 const queries = [
   'SELECT 1;',
   "SELECT * FROM (VALUES (1,'a'),(2,'b')) v(i,t);",
+  'SELECT 1/0;', // deliberately failing: the diagnostic parser must see it
 ];
 let idx = 0;
 const results = [];
@@ -28,7 +34,7 @@ worker.onmessage = (ev) => {
   else if (m.type === 'result') {
     log('RESULT q' + idx + ' exit=' + m.exitCode + ' ms=' + m.ms);
     log('STDOUT<<<' + m.stdout + '>>>');
-    results.push(m.stdout);
+    results.push({ stdout: m.stdout, stderr: m.stderr });
     idx++;
     if (idx < queries.length) runNext();
     else finish();
@@ -37,10 +43,13 @@ worker.onmessage = (ev) => {
 };
 function runNext(){ log('running q' + idx + ': ' + queries[idx]); worker.postMessage({ type:'run', sql: queries[idx] }); }
 function finish(){
-  const okSelect1 = results[0] && results[0].includes('?column? = "1"');
-  const okValues = results[1] && results[1].includes('= "1"') && results[1].includes('= "a"') && results[1].includes('= "2"') && results[1].includes('= "b"');
-  log('CHECK select1=' + okSelect1 + ' values=' + okValues);
-  document.title = (okSelect1 && okValues) ? 'VERIFY_PASS' : 'VERIFY_FAIL';
+  const okSelect1 = results[0] && results[0].stdout.includes('?column? = "1"');
+  const okValues = results[1] && results[1].stdout.includes('= "1"') && results[1].stdout.includes('= "a"') && results[1].stdout.includes('= "2"') && results[1].stdout.includes('= "b"');
+  const parsedError = results[2] ? parseDiagnostics(results[2].stderr).error : null;
+  const okError = !!parsedError && parsedError.includes('division by zero');
+  log('PARSED_ERROR<<<' + parsedError + '>>>');
+  log('CHECK select1=' + okSelect1 + ' values=' + okValues + ' error=' + okError);
+  document.title = (okSelect1 && okValues && okError) ? 'VERIFY_PASS' : 'VERIFY_FAIL';
   log(document.title);
 }
 </script>
