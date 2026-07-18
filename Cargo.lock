@@ -10155,6 +10155,7 @@ dependencies = [
  "pg_enum",
  "pg_sema_seams",
  "pgstat",
+ "pgsync",
  "pmchild_seams",
  "pmsignal",
  "pmsignal_seams",
