@@ -168,6 +168,40 @@ pub fn wart_counter(id: &str) -> String {
     format!("wart:{id}")
 }
 
+/// Runner-mechanics classes (harness self-checks), folded from WS-RUNNER at
+/// integration so vocab.rs stays the single severity source. These are
+/// namespaced away from the triage vocabulary; P1 entries fail the run:
+///   - `dispatch-refusal`         mutation-split law would be violated
+///   - `fault-reserved-refused`   reserved fault tag reached execution (H4)
+///   - `fault-restart-noop`       restart_cmd exited 0 but the DUT survived
+pub fn harness_class_severity(class: &str) -> Option<Severity> {
+    if class.starts_with("wart:") {
+        return Some(Severity::Fine);
+    }
+    Some(match class {
+        "dispatch-refusal" | "fault-reserved-refused" | "fault-restart-noop" => Severity::P1,
+        "err-uncompared"
+        | "fault-skipped-no-restart-cmd"
+        | "fault-restart-cmd-failed"
+        | "floor-skipped-no-instrument"
+        | "skipped-no-hook" => Severity::Fine,
+        _ => return None,
+    })
+}
+
+/// Severity for ANY census class string (pinned Class first, then the
+/// harness-mechanics table, then Fine). `Coverage` maps to Fine for verdict
+/// purposes (the coverage downgrade never fails a run).
+pub fn severity_of(class: &str) -> Severity {
+    if let Some(c) = Class::from_str(class) {
+        return match c.severity() {
+            Severity::Coverage => Severity::Fine,
+            s => s,
+        };
+    }
+    harness_class_severity(class).unwrap_or(Severity::Fine)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

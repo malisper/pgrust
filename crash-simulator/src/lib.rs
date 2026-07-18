@@ -12,6 +12,7 @@
 //!   runner/, main.rs — WS-RUNNER (session driver, run loop, bugbase,
 //!              shrinker v1, verdict emission)
 
+pub mod bridge;
 pub mod gen;
 pub mod oracle;
 pub mod plan;

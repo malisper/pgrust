@@ -369,7 +369,7 @@ fn reconnect_server_restarts_and_resyncs_both_legs() {
     };
     let mut dut = MockSession::dead_until_reconnect("dut"); // old conn dead = real restart
     let mut cpg = MockSession::ok("cpg");
-    let opts = ExecOptions { restart_cmd: Some("true".into()), stop_on_failure: true };
+    let opts = ExecOptions { restart_cmd: Some("true".into()), stop_on_failure: true, post_reset_sql: vec![] };
     let report = execute_plan(
         &plan,
         &mut dut,
@@ -397,7 +397,7 @@ fn reconnect_server_noop_restart_is_refused_p1() {
     };
     let mut dut = MockSession::ok("dut"); // old conn still answers = no-op restart
     let mut cpg = MockSession::ok("cpg");
-    let opts = ExecOptions { restart_cmd: Some("true".into()), stop_on_failure: true };
+    let opts = ExecOptions { restart_cmd: Some("true".into()), stop_on_failure: true, post_reset_sql: vec![] };
     let report = execute_plan(
         &plan,
         &mut dut,

@@ -12,16 +12,10 @@ use std::io::Write;
 use std::path::Path;
 
 /// Pinned severity for verdict purposes (P1 classes fail the run).
+/// Post-integration the single source is `crate::vocab` (§1.3 pinned classes
+/// + the folded harness-mechanics table).
 pub fn severity(class: &str) -> &'static str {
-    match class {
-        "rust-crash" | "c-crash" | "wrong-results" | "property-violation" | "dispatch-refusal"
-        | "fault-reserved-refused" | "fault-restart-noop" => "P1",
-        "rust-err-c-ok" | "c-err-rust-ok" | "err-state-mismatch" | "harness-fetch" => "P2",
-        "err-text-drift" | "err-timeout-one-side" => "P3",
-        _ => "fine", // ok, err-match, wrong-results-volatile/-nondet/-underdetermined,
-                     // rust-err-c-ok-coverage, big-result-skipped, property-skipped,
-                     // wart:<id>, floor-skipped-no-instrument, fault-skipped-*, ...
-    }
+    crate::vocab::severity_of(class).as_str()
 }
 
 #[derive(Debug, Default, Clone)]
