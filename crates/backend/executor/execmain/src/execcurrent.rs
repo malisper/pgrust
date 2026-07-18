@@ -272,6 +272,13 @@ fn unpack_tid(v: u64) -> ItemPointerData {
 /// scan that could ever answer a per-table search. Probe FALSE ⇒ the
 /// per-table walk can never succeed ⇒ execCurrentOf reaches only C's error
 /// arms for this plan, and no capture runs.
+///
+/// Debug-wired into `cursor_capture_current_seam` below: capture runs only
+/// for portals the §4.1 plan-shape probe judged eligible, so this planstate
+/// walk must return true there. That is one direction of the probe/planstate
+/// spine-agreement invariant; the other direction (probe FALSE + per-table
+/// search success) is guarded by the `tid_store.is_null()` debug_assert in
+/// `exec_current_of`'s store-armed arm.
 fn has_capturable_scan(node: &PlanStateNode<'_>) -> bool {
     match node {
         PlanStateNode::Instrumented(w) => has_capturable_scan(&w.inner),
@@ -347,8 +354,8 @@ fn capture_positioned<'mcx>(
 
 /// The PLAN-tree twin of the wildcard walk: the §4.1 shape test as run at
 /// PortalStart, BEFORE ExecutorStart fixes the eflags. Same spine as
-/// `search_plan_tree` (and as `has_capturable_scan` above, which asserts the
-/// two agree at fill time).
+/// `search_plan_tree` (and as `has_capturable_scan` above, which the capture
+/// seam debug_asserts against this probe's answer at fill time).
 fn plan_has_capturable_scan(node: Option<::types_nodes::node_tree::Node<'_>>) -> bool {
     use ::types_nodes::NodeTag;
     let Some(node) = node else {
@@ -392,6 +399,15 @@ pub(crate) fn cursor_capture_current_seam(
             return Ok(None);
         };
         exec.with_mut(|d| {
+            // This seam only runs for portals the §4.1 plan-shape probe
+            // judged eligible; assert the live-planstate spine agrees
+            // (probe TRUE ⇒ wildcard walk TRUE). The opposite disagreement
+            // direction is the tid_store.is_null() debug_assert in
+            // exec_current_of's store-armed arm.
+            debug_assert!(
+                d.planstate.as_ref().is_some_and(|root| has_capturable_scan(root)),
+                "cursor_capture_current: §4.1 plan-shape probe disagrees with the planstate spine"
+            );
             let hit = d
                 .planstate
                 .as_ref()
