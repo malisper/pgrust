@@ -9,6 +9,7 @@ name = "controldata_utils"
 path = "src/lib.rs"
 
 [dependencies]
+pg_clock = { path = "../../port/pg_clock" }
 crc32c = { path = "../../port/crc32c" }
 elog = { path = "../../backend/utils/error/elog" }
 types_core = { path = "../../_support/types/types_core" }

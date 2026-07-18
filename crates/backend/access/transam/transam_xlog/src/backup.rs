@@ -64,11 +64,8 @@ std::thread_local! {
 
 /// (pg_time_t) time(NULL) — wall-clock seconds for starttime / stoptime.
 fn wallclock_time() -> types_core::pg_time_t {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as types_core::pg_time_t)
-        .unwrap_or(0)
+    // DST P2 (contract §1.2): SystemTime -> pg_clock::wall_secs().
+    pg_clock::wall_secs() as types_core::pg_time_t
 }
 
 /// get_backup_status(void) (xlog.c:9175).

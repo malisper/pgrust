@@ -221,15 +221,11 @@ fs	crates/port/pg_strong_random/src/lib.rs	4
 time	crates/backend/access/common/tidstore/bench/rig/src/main.rs	7	bench-rig crate, not server prod
 time	crates/backend/access/heap/vacuumlazy/src/lib.rs	3	semantic: vacuum cost delay; P2 reroute set (s2.2)
 time	crates/backend/access/heap/vacuumlazy/src/morsels.rs	16	semantic: vacuum cost delay; P2 reroute set (s2.2)
-time	crates/backend/access/nbtree/nbtree/src/utils.rs	2
 time	crates/backend/access/pgrcolumnar/src/loadsort.rs	2
 time	crates/backend/access/pgrcolumnar/src/part_cache.rs	2
 time	crates/backend/access/pgrcolumnar/src/reader.rs	2
 time	crates/backend/access/pgrcolumnar/src/writer.rs	8
 time	crates/backend/access/transam/parallel/src/lib.rs	2
-time	crates/backend/access/transam/transam_xlog/src/backup.rs	3
-time	crates/backend/access/transam/transam_xlog/src/lib.rs	1
-time	crates/backend/backup/basebackup/src/lib.rs	1
 time	crates/backend/commands/analyze/src/lib.rs	9
 time	crates/backend/commands/copy/src/parallel.rs	23
 time	crates/backend/commands/explain/src/lib.rs	3
@@ -248,26 +244,17 @@ time	crates/backend/executor/runtime/src/lib.rs	4	telemetry; runtime is a sancti
 time	crates/backend/lib/dshash/bench/rig/src/main.rs	11	bench-rig crate, not server prod
 time	crates/backend/postmaster/bgjobs/src/lib.rs	8
 time	crates/backend/postmaster/bgworker/src/lib.rs	2
-time	crates/backend/postmaster/checkpointer/src/lib.rs	4	doc-named P2 reroute: SystemTime/pacing (s2.2)
-time	crates/backend/postmaster/pgarch/src/lib.rs	2
-time	crates/backend/postmaster/postmaster/src/serverloop.rs	2	doc-named P2 reroute: postmaster state machine (s2.2)
-time	crates/backend/postmaster/postmaster/src/statemachine.rs	2	doc-named P2 reroute: postmaster state machine (s2.2)
 time	crates/backend/postmaster/syslogger/src/lib.rs	1
-time	crates/backend/postmaster/walsummarizer/src/lib.rs	2
-time	crates/backend/tcop/postgres/src/lib.rs	3
+time	crates/backend/postmaster/walsummarizer/src/lib.rs	1	P1-VFS-lane: file-mtime duration_since, virtualizes via SimVfs metadata (census note (d)); retention-cutoff site routed (P2)
+time	crates/backend/tcop/postgres/src/lib.rs	1	INFRA-telemetry: ShowUsage rusage/gettimeofday; the private get_current_timestamp duplicate deduped onto timestamp_seams (census (c), P2)
 time	crates/backend/tcop/postgres/src/stmt_trace.rs	3
 time	crates/backend/utils/activity/pgstat/src/lib.rs	4
-time	crates/backend/utils/adt/adt_timestamp/src/lib.rs	2
 time	crates/backend/utils/adt/pg_locale/src/locale_time.rs	1
-time	crates/backend/utils/adt/uuid/src/lib.rs	1
 time	crates/backend/utils/cache/relcache/src/initfile.rs	6
-time	crates/backend/utils/error/elog/src/report.rs	2	doc-named P2 reroute: elog timestamps (s2.2)
 time	crates/backend/utils/init/postinit/src/lib.rs	2
 time	crates/backend/utils/misc/guc/src/layers.rs	2
 time	crates/backend/utils/misc/guc/src/store.rs	6
 time	crates/backend/utils/misc/pg_rusage/src/lib.rs	1
-time	crates/common/controldata_utils/src/lib.rs	2	doc-named P2 reroute: controldata (s2.2)
-time	crates/contrib/uuid_ossp/src/lib.rs	2
 time	crates/port/pg_clock/src/posix.rs	1	DST-REVIEW(ws-clk): sanctioned clock authority internals (s2.2) — the ONE clock_gettime hub; PosixClock #[inline] wrappers
 
 # ==== rand ====
