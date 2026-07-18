@@ -198,7 +198,7 @@ fn XLogFileInitInternal(
         }
     }
 
-    let tmppath = format!("{XLOGDIR}/xlogtemp.{}", std::process::id());
+    let tmppath = format!("{XLOGDIR}/xlogtemp.{}", init_small::globals::process_id());
     let _ = std::fs::remove_file(&tmppath);
 
     let f = fd::BasicOpenFile(&tmppath, libc::O_RDWR | libc::O_CREAT | libc::O_EXCL)?;

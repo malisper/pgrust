@@ -61,7 +61,7 @@ pub fn InitStandaloneProcess(argv0: &str) -> PgResult<()> {
 
     // pgwin32_signal_initialize: WIN32-only, not this build.
 
-    InitProcessGlobals(std::process::id() as i32);
+    InitProcessGlobals(init_small::globals::process_id() as i32);
 
     /* Initialize process-local latch support */
     waiteventset::InitializeWaitEventSupport()?;

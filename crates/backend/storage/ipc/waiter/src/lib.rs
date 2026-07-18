@@ -597,6 +597,9 @@ mod global {
     pub fn begin_fd_park() -> bool {
         let idx = current_slot();
         let mut g = slot(idx).lock();
+        // wasm32: no wake pipe can exist (no pipe(2)); "parked" is pure mode
+        // bookkeeping — the wasm wait backend blocks on time alone.
+        #[cfg(not(target_family = "wasm"))]
         debug_assert!(g.wake_wfd >= 0, "fd-park without a wake pipe");
         match g.mode {
             Mode::Notified => {

@@ -406,6 +406,21 @@ fn normalize_exec_path(path: &str) -> Result<String, String> {
 pub fn find_my_exec(argv0: &str, mut log_error: impl FnMut(String)) -> Result<String, String> {
     let retpath = &argv0[..argv0.len().min(MAXPGPATH - 1)];
 
+    // wasm32: the running module is not a file in the guest namespace (the
+    // host runtime loaded it) — PATH search and X_OK probes are meaningless.
+    // A synthetic absolute path keeps my_exec_path non-empty for the
+    // pkglib/share derivations, which the PGRUST_* dir overrides control on
+    // this target anyway.
+    #[cfg(target_family = "wasm")]
+    {
+        let _ = &mut log_error;
+        return Ok(if retpath.starts_with('/') {
+            retpath.to_string()
+        } else {
+            format!("/{retpath}")
+        });
+    }
+
     if first_dir_separator(retpath).is_some() {
         if validate_exec(retpath) == 0 {
             return normalize_exec_path(retpath);
