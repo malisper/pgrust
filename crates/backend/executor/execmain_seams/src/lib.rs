@@ -329,3 +329,30 @@ seam_core::seam!(
         perm_infos: &'p types_nodes::NodeList<'a>,
     ) -> PgResult<()>
 );
+
+// --- WS-CA wave-10 (cursors inc-2, contract §4; escalation EX-CA-1 in
+// notes/se-wave10-ca.md §3 — appended here because production pquery reaches
+// the executor only through this crate; the exec_current_of seam above is the
+// precedent shape). -----------------------------------------------------------
+
+seam_core::seam!(
+    // §4.1 eligibility probe, run once per store-armed portal at first fill:
+    // true iff search_plan_tree's spine walk over the live planstate can ever
+    // resolve a simply-updatable scan (any table). false ⇒ the per-table walk
+    // can never succeed, so no row identity is captured and execCurrentOf
+    // reaches only C's error arms.
+    pub fn cursor_capture_probe(query_desc: QueryDescHandle) -> bool
+);
+
+seam_core::seam!(
+    // §4.2 per-row capture after each single-row forward fill drive of a
+    // CURRENT-OF-eligible plan: the (tableoid, block<<16|offset ctid)
+    // identity of the scan-state row that produced the plan's current output
+    // row — the SAME data C's execCurrentOf reads (execCurrent.c:155-232).
+    // None = no positioned scan (the caller stores an invalid-identity row to
+    // keep sidecar/store row alignment).
+    pub fn cursor_capture_current(
+        query_desc: QueryDescHandle,
+    ) -> PgResult<Option<(types_core::Oid, u64)>>
+);
+// --- end WS-CA wave-10 ---------------------------------------------------------

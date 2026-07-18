@@ -112,6 +112,10 @@ pub fn init_seams() {
     execmain_seams::query_desc_worker_incsort_instrument::set(
         querydesc::query_desc_worker_incsort_instrument_seam,
     );
+    // --- WS-CA wave-10 (cursors inc-2, contract §4; escalation EX-CA-1) ---
+    execmain_seams::cursor_capture_probe::set(execcurrent::cursor_capture_probe_seam);
+    execmain_seams::cursor_capture_current::set(execcurrent::cursor_capture_current_seam);
+    // --- end WS-CA wave-10 ---
     execparallel::register_parallel_query_main();
     {
         guc_tables::session_guc_bool!(PLP, parallel_leader_participation_stand_in, set_parallel_leader_participation_stand_in, true);
