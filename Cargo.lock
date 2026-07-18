@@ -12442,7 +12442,6 @@ dependencies = [
  "varsup",
  "vfs",
  "waitevent_seams",
- "waiteventset",
  "walsender_seams",
  "xact",
  "xloginsert_seams",
