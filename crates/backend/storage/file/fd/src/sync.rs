@@ -165,7 +165,15 @@ pub fn pg_flush_data(fd: RawFd, offset: i64, nbytes: i64) -> PgResult<()> {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+// wasm32: pg_flush_data is a writeback HINT (fd.c commentary); WASI has no
+// mmap/msync/sync_file_range, and C built with none of the HAVE_* flush
+// mechanisms compiles this to a no-op — same arm here.
+#[cfg(target_family = "wasm")]
+pub fn pg_flush_data(_fd: RawFd, _offset: i64, _nbytes: i64) -> PgResult<()> {
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_family = "wasm")))]
 pub fn pg_flush_data(fd: RawFd, offset: i64, mut nbytes: i64) -> PgResult<()> {
     use ::types_error::FATAL;
 

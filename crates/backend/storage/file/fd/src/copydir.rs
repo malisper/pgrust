@@ -241,17 +241,21 @@ pub fn directory_is_empty(path: &str) -> PgResult<bool> {
 // pg_mkdir_p (port/path.c) shape: create path and missing parents with
 // pg_dir_create_mode.
 pub fn pg_mkdir_p(path: &str) -> PgResult<()> {
-    use std::os::unix::fs::DirBuilderExt;
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(crate::vfd::pg_dir_create_mode())
-        .create(path)
-        .map_err(|e| {
-            ereport(ERROR)
-                .with_saved_errno(e.raw_os_error().unwrap_or(0))
-                .errcode_for_file_access()
-                .errmsg(format!("could not create directory \"{path}\": %m"))
-                .finish(loc("pg_mkdir_p"))
-                .unwrap_err()
-        })
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    // wasm32: WASI has no file modes (DirBuilderExt::mode is unix-only);
+    // directories inherit the preopen's capabilities.
+    #[cfg(not(target_family = "wasm"))]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(crate::vfd::pg_dir_create_mode());
+    }
+    builder.create(path).map_err(|e| {
+        ereport(ERROR)
+            .with_saved_errno(e.raw_os_error().unwrap_or(0))
+            .errcode_for_file_access()
+            .errmsg(format!("could not create directory \"{path}\": %m"))
+            .finish(loc("pg_mkdir_p"))
+            .unwrap_err()
+    })
 }
