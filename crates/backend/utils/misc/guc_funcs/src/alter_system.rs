@@ -2,8 +2,6 @@
 // write_auto_conf_file (guc.c:4469) and replace_auto_config_value (guc.c:4537).
 
 use std::cmp::Ordering;
-use std::io::Write;
-use std::os::fd::FromRawFd;
 
 use elog::ereport;
 use guc::name::guc_name_compare;
@@ -231,21 +229,8 @@ pub fn AlterSystemSetConfigFile(stmt: &AlterSystemStmt<'_>) -> PgResult<()> {
         )
         .into());
     }
-    // SAFETY: raw is a live fd we own; File takes ownership and closes it.
-    let mut file = unsafe { std::fs::File::from_raw_fd(raw) };
-    let write_result = (|| -> PgResult<()> {
-        let content = render_auto_conf_file(&head);
-        file.write_all(content.as_bytes()).map_err(|e| {
-            file_error(format!("could not write to file \"{tmp_file_name}\": %m"), &e)
-        })?;
-        file.sync_all().map_err(|e| {
-            file_error(format!("could not fsync file \"{tmp_file_name}\": %m"), &e)
-        })?;
-        Ok(())
-    })();
-    // Close before renaming (PG_CATCH parity: close then unlink on error).
-    drop(file);
-    if let Err(e) = write_result {
+    let content = render_auto_conf_file(&head);
+    if let Err(e) = write_and_sync_auto_conf_tmp(raw, content.as_bytes(), &tmp_file_name) {
         let _ = fd::pg_unlink(&tmp_file_name);
         return Err(e);
     }
@@ -256,6 +241,61 @@ pub fn AlterSystemSetConfigFile(stmt: &AlterSystemStmt<'_>) -> PgResult<()> {
 
     lwlock::LWLockRelease(lwlock::main_lock(AUTO_FILE_LOCK))?;
     Ok(())
+}
+
+// write_auto_conf_file's IO tail (guc.c:4495-4509): write the rendered
+// buffer, fsync "before considering the write to be successful", and close
+// before the caller renames (PG_CATCH parity: the caller unlinks on error).
+//
+// DST P4 dataplane arm: the whole sequence runs through the Vfs data plane —
+// BasicOpenFile minted `raw` via vfs::open, the writes are fd::pg_pwrite,
+// the fsync is fd::pg_fsync (the call C makes here — enableFsync-gated,
+// EINTR-retried, wal_sync_method-aware, unlike the std sync_all it
+// replaces), the close is fd::pg_close — so under `--cfg pgrust_sim` every
+// step lands in SimVfs and P4 fault plans can gate/crash each op
+// (PWriteV / Fsync / Close on the temp file, then fd's durable_rename
+// composite). Off-sim the syscalls are pwrite(2)/fsync(2)/close(2) — the
+// same count the std::fs::File data plane issued on this cold DDL path.
+fn write_and_sync_auto_conf_tmp(raw: i32, content: &[u8], tmp_file_name: &str) -> PgResult<()> {
+    let result = (|| -> PgResult<()> {
+        let mut off: usize = 0;
+        while off < content.len() {
+            let n = fd::pg_pwrite(raw, &content[off..], off as i64);
+            if n < 0 {
+                let en = fd::get_errno();
+                if en == libc::EINTR {
+                    continue;
+                }
+                return Err(file_error(
+                    format!("could not write to file \"{tmp_file_name}\": %m"),
+                    &std::io::Error::from_raw_os_error(en),
+                )
+                .into());
+            }
+            if n == 0 {
+                // C parity (guc.c:4497): a write that makes no progress and
+                // sets no errno is assumed to be out of disk space.
+                return Err(file_error(
+                    format!("could not write to file \"{tmp_file_name}\": %m"),
+                    &std::io::Error::from_raw_os_error(libc::ENOSPC),
+                )
+                .into());
+            }
+            off += n as usize;
+        }
+        if fd::pg_fsync(raw) != 0 {
+            return Err(file_error(
+                format!("could not fsync file \"{tmp_file_name}\": %m"),
+                &std::io::Error::from_raw_os_error(fd::get_errno()),
+            )
+            .into());
+        }
+        Ok(())
+    })();
+    // Close before renaming, error or not (PG_CATCH parity); the result is
+    // ignored exactly as the old std File drop ignored it.
+    let _ = fd::pg_close(raw);
+    result
 }
 
 // postgresql.auto.conf read via the fd-crate front (DST P1 inc-4): transient
@@ -303,4 +343,64 @@ fn read_autoconf_via_fd() -> PgResult<Option<Vec<u8>>> {
     }
     fd::CloseTransientFile(fdnum);
     Ok(Some(contents))
+}
+
+// DST P4 dataplane arm (site: the postgresql.auto.conf temp-file rewrite).
+#[cfg(all(test, pgrust_sim))]
+mod sim_dataplane_tests {
+    use super::write_and_sync_auto_conf_tmp;
+
+    /// The write/fsync/close tail must land in the SAME provider that
+    /// minted the fd (SimVfs under `--cfg pgrust_sim`): the bytes read back
+    /// through the vfs, the fsync promoted them into the durable image
+    /// (what a P4 crash plan rolls back to), the fd is closed sim-side, and
+    /// the real filesystem never saw the file. RED before the routing:
+    /// BasicOpenFile minted a sim fd but the data plane was std::fs::File —
+    /// kernel write(2)/fsync(2)/close(2) on an fd >= SIM_FD_BASE (EBADF +
+    /// std's IO-safety abort on the File drop).
+    #[test]
+    fn sim_auto_conf_tmp_write_lands_in_simvfs() {
+        // pg_fsync consults wal_sync_method (macOS writethrough dispatch);
+        // give the slot a default backing, as fd's own tests do.
+        static WAL_SYNC_METHOD: std::sync::atomic::AtomicI32 =
+            std::sync::atomic::AtomicI32::new(0);
+        guc_tables::vars::wal_sync_method.install_if_absent(guc_tables::GucVarAccessors {
+            get: || WAL_SYNC_METHOD.load(std::sync::atomic::Ordering::Relaxed),
+            set: |v| WAL_SYNC_METHOD.store(v, std::sync::atomic::Ordering::Relaxed),
+        });
+
+        let name = "pgrust-dataplane-test.auto.conf.tmp";
+        let content: &[u8] = b"# Do not edit this file manually!\nwork_mem = '64MB'\n";
+        let raw =
+            fd::BasicOpenFile(name, libc::O_CREAT | libc::O_RDWR | libc::O_TRUNC).unwrap();
+        assert!(raw >= 0, "BasicOpenFile: errno {}", fd::get_errno());
+        write_and_sync_auto_conf_tmp(raw, content, name).unwrap();
+
+        // The fd is closed (sim-side): fstat on it is EBADF, not a leak.
+        let mut fi = fd::FileInfo::zeroed();
+        assert_ne!(fd::pg_fstat(raw, &mut fi), 0, "tmp fd still open after helper");
+        assert_eq!(fd::get_errno(), libc::EBADF);
+
+        // The bytes are visible through the vfs read plane.
+        let rd = fd::BasicOpenFile(name, libc::O_RDONLY).unwrap();
+        assert!(rd >= 0, "reopen: errno {}", fd::get_errno());
+        let mut back = vec![0u8; content.len() + 8];
+        let n = fd::pg_pread(rd, &mut back, 0);
+        assert_eq!(n as usize, content.len());
+        assert_eq!(&back[..content.len()], content);
+        let _ = fd::pg_close(rd);
+
+        // The fsync step promoted the volatile image to durable.
+        let dump = vfs::ACTIVE.image_dump();
+        let entry = dump
+            .iter()
+            .find(|(p, _)| p.ends_with(name))
+            .expect("tmp file present in the sim namespace");
+        let (volatile, durable) = entry.1.as_ref().expect("regular file");
+        assert_eq!(volatile.as_slice(), content);
+        assert_eq!(durable.as_slice(), content, "fsync did not promote the durable image");
+
+        // The real filesystem never saw it.
+        assert!(std::fs::metadata(name).is_err(), "temp file leaked to the real fs");
+    }
 }

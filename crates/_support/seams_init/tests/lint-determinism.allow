@@ -100,8 +100,7 @@
 # ==== fs ====
 # --- crates/_support/test_boot (3 sites) ---
 fs	crates/_support/test_boot/src/lib.rs	3	test-support crate (census-flagged allowlist candidate)
-# --- crates/backend/access/pgrcolumnar (20 sites) ---
-fs	crates/backend/access/pgrcolumnar/src/loadsort.rs	7
+# --- crates/backend/access/pgrcolumnar (13 sites) ---
 fs	crates/backend/access/pgrcolumnar/src/reader.rs	6
 fs	crates/backend/access/pgrcolumnar/src/writer.rs	7
 # --- crates/backend/access/transam/xlogreader (1 sites) ---
@@ -206,8 +205,6 @@ fs	crates/backend/utils/misc/conffiles/src/lib.rs	2
 fs	crates/backend/utils/misc/guc/src/select.rs	2
 # --- crates/backend/utils/misc/guc_file (1 sites) ---
 fs	crates/backend/utils/misc/guc_file/src/lib.rs	1
-# --- crates/backend/utils/misc/guc_funcs (2 sites) ---
-fs	crates/backend/utils/misc/guc_funcs/src/alter_system.rs	2
 # --- crates/backend/utils/misc/tzparser (2 sites) ---
 fs	crates/backend/utils/misc/tzparser/src/lib.rs	2
 # --- crates/backend/utils/time/snapmgr (6 sites) ---
