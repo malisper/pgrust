@@ -1800,12 +1800,17 @@ fn thin_agg_count_star_kernel() {
         assert_eq!(pergroup[0].trans_value.as_i64(), 294);
 
         // In-batch overflow refuses the advance (per-row walk owns the error).
-        pergroup[0].trans_value = Datum::from_i64(i64::MAX - 2);
+        // Seed through `base`: a safe `pergroup[0]` write would invalidate
+        // the kernel's pointer, which shares base's provenance (miri F3).
+        // SAFETY: base points at the live local above; no other reference is
+        // active across these writes.
+        unsafe { (*base.as_ptr()).trans_value = Datum::from_i64(i64::MAX - 2) };
         assert!(!crate::steps::agg_count_star_advance(pg, strict, 3));
         assert_eq!(pergroup[0].trans_value.as_i64(), i64::MAX - 2);
 
         // Strict + null transvalue: all n calls are skipped.
-        pergroup[0].trans_value_is_null = true;
+        // SAFETY: as above (miri F3).
+        unsafe { (*base.as_ptr()).trans_value_is_null = true };
         assert!(crate::steps::agg_count_star_advance(pg, true, 7));
         assert!(pergroup[0].trans_value_is_null);
         // Non-strict + null: refused (per-row resolves it).
@@ -4084,9 +4089,13 @@ fn qual_bitmap_contains_matches_perrow_like_oracle() {
                 0 => isnull[i] = true,
                 1 if round % 2 == 0 => {
                     // Undecidable: 1B_E toast-pointer header (0x01 tag byte).
+                    // Push BEFORE taking the pointer: moving the Box after
+                    // the ptr→int cast invalidates the exposed tag under
+                    // Stacked Borrows (miri F1).
                     let raw: Box<[u8]> = vec![0x01, 18, 0, 0].into_boxed_slice();
-                    values[i] = Datum::from_usize(raw.as_ptr() as usize);
                     owners.push(raw);
+                    values[i] =
+                        Datum::from_usize(owners.last().unwrap().as_ptr() as usize);
                 }
                 _ => {
                     let len = (lcg() as usize) % 40;
@@ -4098,9 +4107,11 @@ fn qual_bitmap_contains_matches_perrow_like_oracle() {
                         ::types_tuple::varatt::set_varsize_4b_word((4 + b.len()) as u32);
                     v[..4].copy_from_slice(&word.to_ne_bytes());
                     v[4..].copy_from_slice(b);
+                    // As above: push before exposing the pointer (miri F1).
                     let raw = v.into_boxed_slice();
-                    values[i] = Datum::from_usize(raw.as_ptr() as usize);
                     owners.push(raw);
+                    values[i] =
+                        Datum::from_usize(owners.last().unwrap().as_ptr() as usize);
                 }
             }
         }
