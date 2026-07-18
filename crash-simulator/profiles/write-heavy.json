@@ -1,0 +1,15 @@
+{
+  "name": "write-heavy",
+  "connections": 1,
+  "iso_mix": { "read-committed": 70, "repeatable-read": 20, "serializable": 10 },
+  "statement_weights": { "ddl": 6, "dml": 52, "query": 12, "tx": 14, "arm": 2, "fault": 2, "property": 12 },
+  "table_shape": { "tables_min": 2, "tables_max": 5, "cols_min": 3, "cols_max": 3, "rows_max": 500 },
+  "arm_sets": [ [] ],
+  "property_weights": { "ReadYourWrites": 40, "InsertCountDelta": 60 },
+  "kill_switches": [],
+  "float_lenient": false,
+  "engagement_floors": {},
+  "background_policy": { "autovacuum": "off" },
+  "steps_min": 40,
+  "steps_max": 96
+}
