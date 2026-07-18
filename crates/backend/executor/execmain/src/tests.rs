@@ -12067,3 +12067,507 @@ mod spi_inc1_aj_w9 {
     }
 }
 // --- end WS-AJ wave-9 sub-region --------------------------------------------
+
+// =============================================================================
+// WS-MJ1 (LANE-MERGEJOIN inc-1) lane-surface pins — band 99101+ (lane band
+// 99001+ per the branch-open re-grep, worklog notes/mergejoin-ws-mj1.md §1.2;
+// 990xx = FSM-level pins in nodemergejoin/src/tests.rs, 991xx = this region).
+// The surface under test: lanev2.rs `try_own_merge_join` (knob
+// PGRUST_LANE_V2_MERGEJOIN_NATIVE, default OFF) over the ported EXEC_MJ_*
+// FSM with lane feed adapters (lanev2/lane_mergejoin.rs). Fixtures/harness
+// reused from the WS-G row-mode corpus (mk_mergejoin_pstmt / scanfix /
+// drain_wide_rows_nullable / rowmode_ab::KNOB) — test-file-only reuse, the
+// WS-L precedent.
+// =============================================================================
+mod mergejoin_native_ws_mj1 {
+    use super::mergejoin_rowmode_ab::{install_mj_seams, mk_mergejoin_pstmt, Inner};
+    use super::*;
+    use std::sync::atomic::Ordering::Relaxed;
+
+    fn owned() -> u64 {
+        crate::lanev2::MJ_NATIVE_OWNED_FOR_TESTS.load(Relaxed)
+    }
+    fn marks() -> u64 {
+        crate::lanev2::MJ_NATIVE_MARKS_FOR_TESTS.load(Relaxed)
+    }
+    fn restores() -> u64 {
+        crate::lanev2::MJ_NATIVE_RESTORES_FOR_TESTS.load(Relaxed)
+    }
+    fn refused(i: usize) -> u64 {
+        crate::lanev2::MJ_NATIVE_REFUSED_FOR_TESTS[i].load(Relaxed)
+    }
+
+    /// INNER-only, Sort-inner-only plan with the two planner flags the
+    /// skip_mark_restore pin needs (mk_mergejoin_pstmt hardcodes both false;
+    /// costsize.c:3904-3906: skip_mark_restore iff (SEMI ∨ ANTI ∨
+    /// inner_unique) ∧ joinrestrictinfo == mergeclauses — modeled here as
+    /// inner_unique with an all-mergeclause restrictlist).
+    fn mk_mj99_pstmt<'mcx>(
+        mcx: ::mcx::Mcx<'mcx>,
+        outer_relid: u32,
+        inner_relid: u32,
+        skip_mark_restore: bool,
+        inner_unique: bool,
+    ) -> &'mcx PlannedStmt<'mcx> {
+        use ::types_nodes::bitmapset::Bitmapset;
+        use ::types_nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
+        use ::types_nodes::plannodes::{Join, MergeJoin, Plan, Scan, SeqScan, Sort};
+        use ::types_nodes::primnodes::{INNER_VAR, OUTER_VAR};
+
+        let scan_tlist = |varno: i32| {
+            let a = Node::mk_var(mcx, varno, 1, INT4OID, -1, 0, 0).unwrap();
+            let b = Node::mk_var(mcx, varno, 2, INT4OID, -1, 0, 0).unwrap();
+            NodeList::make2(
+                mcx,
+                Node::mk_target_entry(mcx, a, 1, Some("c1"), false).unwrap(),
+                Node::mk_target_entry(mcx, b, 2, Some("c2"), false).unwrap(),
+            )
+            .unwrap()
+        };
+        let mk_scan = |scanrelid: u32, varno: i32| {
+            Node::mk(
+                mcx,
+                SeqScan {
+                    cb_scan_cols: None,
+                    scan: Scan {
+                        plan: Plan { targetlist: scan_tlist(varno), ..Default::default() },
+                        scanrelid,
+                    },
+                },
+            )
+            .unwrap()
+        };
+        let wrapper_tlist = || {
+            let a = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+            let b = Node::mk_var(mcx, OUTER_VAR, 2, INT4OID, -1, 0, 0).unwrap();
+            NodeList::make2(
+                mcx,
+                Node::mk_target_entry(mcx, a, 1, Some("c1"), false).unwrap(),
+                Node::mk_target_entry(mcx, b, 2, Some("c2"), false).unwrap(),
+            )
+            .unwrap()
+        };
+        let inner_tree = {
+            let mut sort = Node::build::<Sort>(mcx).unwrap();
+            sort.plan.targetlist = wrapper_tlist();
+            sort.plan.lefttree = Some(mk_scan(2, 2));
+            sort.numCols = 1;
+            sort.sortColIdx = ::mcx::slice_borrow_in(mcx, &[1i16]).unwrap();
+            sort.sortOperators = ::mcx::slice_borrow_in(mcx, &[INT4_LT]).unwrap();
+            sort.collations = ::mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+            sort.nullsFirst = ::mcx::slice_borrow_in(mcx, &[false]).unwrap();
+            sort.seal()
+        };
+        let mut join_tlist = NodeList::nil();
+        for (i, &(varno, attno)) in
+            [(OUTER_VAR, 1i16), (OUTER_VAR, 2), (INNER_VAR, 1), (INNER_VAR, 2)].iter().enumerate()
+        {
+            let v = Node::mk_var(mcx, varno, attno, INT4OID, -1, 0, 0).unwrap();
+            join_tlist
+                .lappend(
+                    mcx,
+                    Node::mk_target_entry(mcx, v, i as i16 + 1, Some("x"), false).unwrap(),
+                )
+                .unwrap();
+        }
+        let mergeclause = {
+            let l = Node::mk_var(mcx, OUTER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+            let r = Node::mk_var(mcx, INNER_VAR, 1, INT4OID, -1, 0, 0).unwrap();
+            Node::mk(
+                mcx,
+                ::types_nodes::primnodes::OpExpr {
+                    opno: INT4_EQ,
+                    opfuncid: 65,
+                    opresulttype: BOOLOID,
+                    opretset: false,
+                    opcollid: 0,
+                    inputcollid: 0,
+                    args: NodeList::make2(mcx, l, r).unwrap(),
+                    location: -1,
+                },
+            )
+            .unwrap()
+        };
+
+        let mut mj = Node::build::<MergeJoin>(mcx).unwrap();
+        mj.join = Join {
+            plan: Plan {
+                targetlist: join_tlist,
+                lefttree: Some(mk_scan(1, 1)),
+                righttree: Some(inner_tree),
+                ..Default::default()
+            },
+            jointype: ::types_nodes::JoinType::JOIN_INNER,
+            inner_unique,
+            joinqual: NodeList::nil(),
+        };
+        mj.skip_mark_restore = skip_mark_restore;
+        mj.mergeclauses = NodeList::make1(mcx, mergeclause).unwrap();
+        mj.mergeFamilies = ::mcx::slice_borrow_in(mcx, &[INTEGER_BTREE_FAM]).unwrap();
+        mj.mergeCollations = ::mcx::slice_borrow_in(mcx, &[0u32]).unwrap();
+        mj.mergeReversals = ::mcx::slice_borrow_in(mcx, &[false]).unwrap();
+        mj.mergeNullsFirst = ::mcx::slice_borrow_in(mcx, &[false]).unwrap();
+
+        let mk_rte = |relid: u32, perminfoindex: u32| {
+            Node::mk(
+                mcx,
+                RangeTblEntry {
+                    rtekind: RTEKind::RTE_RELATION,
+                    relid,
+                    relkind: ::types_rel::RELKIND_RELATION,
+                    rellockmode: ::types_rel::AccessShareLock,
+                    perminfoindex,
+                    inFromCl: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let mk_perm = |relid: u32| {
+            Node::mk(
+                mcx,
+                RTEPermissionInfo { relid, requiredPerms: 1 << 1, ..Default::default() },
+            )
+            .unwrap()
+        };
+        let mut rtable = NodeList::make1(mcx, mk_rte(outer_relid, 1)).unwrap();
+        rtable.lappend(mcx, mk_rte(inner_relid, 2)).unwrap();
+        let mut perms = NodeList::make1(mcx, mk_perm(outer_relid)).unwrap();
+        perms.lappend(mcx, mk_perm(inner_relid)).unwrap();
+        let mut unpruned = Bitmapset::empty();
+        unpruned.add_member(mcx, 1).unwrap();
+        unpruned.add_member(mcx, 2).unwrap();
+
+        let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+        pstmt.commandType = CmdType::CMD_SELECT;
+        pstmt.canSetTag = true;
+        pstmt.planTree = Some(mj.seal());
+        pstmt.rtable = rtable;
+        pstmt.permInfos = perms;
+        pstmt.unprunableRelids = unpruned;
+        pstmt.seal_ref()
+    }
+
+    /// One native A/B round: knob OFF (Volcano) then knob ON (lane-native
+    /// drive), same plan built fresh per arm, `passes` drains (pass 2+ =
+    /// rescan through exec_rescan_merge_join — the §1.4 RescanComposed
+    /// parity duty); identical rows demanded, ON arm must ENGAGE.
+    fn ab_mj_native(
+        mk: impl Fn(::mcx::Mcx<'static>) -> &'static PlannedStmt<'static>,
+        natts: usize,
+        passes: usize,
+    ) -> Vec<Vec<Vec<Option<i32>>>> {
+        install_seams();
+        install_mj_seams();
+        scanfix::install();
+        let guard = rowmode_ab::KNOB.lock().unwrap_or_else(|p| p.into_inner());
+        crate::lanev2::mergejoin_native_set_for_tests(false);
+        let off = drain_wide_rows_nullable(mk(leaked_mcx()), natts, passes);
+        crate::lanev2::mergejoin_native_set_for_tests(true);
+        let owned_before = owned();
+        let on = drain_wide_rows_nullable(mk(leaked_mcx()), natts, passes);
+        let owned_after = owned();
+        crate::lanev2::mergejoin_native_set_for_tests(false);
+        drop(guard);
+        assert_eq!(off, on, "knob OFF vs ON must be byte-identical");
+        assert!(
+            owned_after > owned_before,
+            "ON arm never engaged the lane-native mergejoin drive"
+        );
+        off
+    }
+
+    fn row(vals: &[i32]) -> Vec<Option<i32>> {
+        vals.iter().map(|&v| Some(v)).collect()
+    }
+
+    /// §2.3 THE NEST — duplicate-rich keys BOTH sides over the Sort inner:
+    /// every second same-key outer forces the TESTOUTER cmp==0 restore to
+    /// the marked group start (restore repositions to AFTER the marked
+    /// tuple; the marked COPY stands in for the current inner — off-by-one
+    /// either way changes these rows). Exact mark/restore CADENCE pinned via
+    /// the lane adapter probes: marks fire in SKIP_TEST cmp==0 ONLY (one per
+    /// key group: 2), restores in TESTOUTER cmp==0 ONLY (one for the
+    /// duplicate outer: 1) — and NEVER in NEXTINNER (the §2.4 counter-trap:
+    /// "NB: must NOT do 'extraMarks' here"; mj_ExtraMarks is also
+    /// init-false for a Sort inner). Two passes pin rescan parity.
+    /// (Inner dup payloads are identical: tuplesort is not stable, so
+    /// distinct payloads would make the expected vector nondeterministic.)
+    #[test]
+    fn mj99101_lane_testouter_restore_dup_keys_both_sides_sort_inner() {
+        let outer: u32 = 99101;
+        let inner: u32 = 99102;
+        scanfix::register_table_2col(outer, &[&[(1, 10), (1, 11), (2, 20)]]);
+        scanfix::register_table_2col(inner, &[&[(2, 200), (1, 100), (1, 100)]]);
+        let expected = vec![
+            row(&[1, 10, 1, 100]),
+            row(&[1, 10, 1, 100]),
+            row(&[1, 11, 1, 100]), // <- replay after TESTOUTER restore
+            row(&[1, 11, 1, 100]),
+            row(&[2, 20, 2, 200]),
+        ];
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (m0, r0) = (marks(), restores());
+        let runs = ab_mj_native(
+            move |mcx| mk_mj99_pstmt(mcx, outer, inner, false, false),
+            4,
+            2,
+        );
+        assert_eq!(runs, vec![expected.clone(), expected]);
+        // Cadence over the ON arm (2 passes): 2 marks + 1 restore per pass.
+        assert_eq!(marks() - m0, 4, "mark cadence: SKIP_TEST cmp==0 only, 2 key groups x 2 passes");
+        assert_eq!(restores() - r0, 2, "restore cadence: TESTOUTER cmp==0 only, 1 dup outer x 2 passes");
+        scanfix::quiesced();
+    }
+
+    /// §2.3 skip_mark_restore (provenance costsize.c:3904-3906): the lane
+    /// surface honors the planner flag identically — probe-pinned: NO
+    /// mark/restore call is ever issued under it (the TESTOUTER cmp==0 arm
+    /// takes the "current inner is already the first possible match" leg;
+    /// SKIP_TEST skips ExecMarkPos). inner_unique also arms js_single_match
+    /// (first-match advance).
+    #[test]
+    fn mj99102_lane_skip_mark_restore_no_mark_calls() {
+        let outer: u32 = 99103;
+        let inner: u32 = 99104;
+        scanfix::register_table_2col(outer, &[&[(1, 10), (1, 11)]]);
+        scanfix::register_table_2col(inner, &[&[(1, 100)]]);
+        let expected = vec![row(&[1, 10, 1, 100]), row(&[1, 11, 1, 100])];
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (m0, r0) = (marks(), restores());
+        let runs = ab_mj_native(
+            move |mcx| mk_mj99_pstmt(mcx, outer, inner, true, true),
+            4,
+            2,
+        );
+        assert_eq!(runs, vec![expected.clone(), expected]);
+        assert_eq!(marks() - m0, 0, "skip_mark_restore: no ExecMarkPos ever");
+        assert_eq!(restores() - r0, 0, "skip_mark_restore: no ExecRestrPos ever");
+        scanfix::quiesced();
+    }
+
+    /// §2.5 (the inc-1 INNER halves of the INITIALIZE arms): empty inputs.
+    /// Empty outer = INITIALIZE_OUTER ENDOFJOIN, no fill -> zero rows (the
+    /// inner sort is never even fed); empty inner = INITIALIZE_INNER
+    /// ENDOFJOIN, no fill -> zero rows. (The fill-mode asymmetry halves —
+    /// MatchedInner=true / MatchedOuter=false — are FSM-pinned in
+    /// nodemergejoin tests mj99003 + right_join_empty_outer; they become
+    /// lane-reachable at inc-2/3.)
+    #[test]
+    fn mj99103_lane_empty_inputs_initialize_arms() {
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let none: Vec<Vec<Option<i32>>> = Vec::new();
+        // empty inner
+        scanfix::register_table_2col(99105, &[&[(1, 10), (2, 20)]]);
+        scanfix::register_table_2col(99106, &[]);
+        let runs =
+            ab_mj_native(move |mcx| mk_mj99_pstmt(mcx, 99105, 99106, false, false), 4, 1);
+        assert_eq!(runs, vec![none.clone()]);
+        // empty outer
+        scanfix::register_table_2col(99107, &[]);
+        scanfix::register_table_2col(99108, &[&[(1, 100)]]);
+        let runs =
+            ab_mj_native(move |mcx| mk_mj99_pstmt(mcx, 99107, 99108, false, false), 4, 1);
+        assert_eq!(runs, vec![none]);
+        scanfix::quiesced();
+    }
+
+    /// §1.2/§1.3 NAMED refusals, knob-ON: (a) a non-INNER face refuses
+    /// `mergejoin-jointype` (JoinShape carrier) and falls through to the
+    /// Volcano drive byte-identically; (b) a non-Sort inner (Material)
+    /// refuses `mergejoin-inner-feed` (ChildNotLaneOwned carrier). The
+    /// owned probe must NOT move in either case.
+    #[test]
+    fn mj99104_lane_named_refusals_fall_through_byte_identically() {
+        install_seams();
+        install_mj_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = rowmode_ab::KNOB.lock().unwrap_or_else(|p| p.into_inner());
+
+        // (a) LEFT jointype, Sort inner.
+        scanfix::register_table_2col(99109, &[&[(1, 10), (2, 20)]]);
+        scanfix::register_table_2col(99110, &[&[(2, 200)]]);
+        let mk_left = move |mcx| {
+            mk_mergejoin_pstmt(mcx, 99109, 99110, ::types_nodes::JoinType::JOIN_LEFT, Inner::Sort)
+        };
+        crate::lanev2::mergejoin_native_set_for_tests(false);
+        let off = drain_wide_rows_nullable(mk_left(leaked_mcx()), 4, 1);
+        crate::lanev2::mergejoin_native_set_for_tests(true);
+        let (o0, j0) = (owned(), refused(3));
+        let on = drain_wide_rows_nullable(mk_left(leaked_mcx()), 4, 1);
+        assert_eq!(off, on, "jointype refusal must fall through byte-identically");
+        assert!(refused(3) > j0, "mergejoin-jointype (join-shape) never ticked");
+        assert_eq!(owned(), o0, "refused shape must not be owned");
+
+        // (b) INNER jointype, Material inner.
+        let mk_mat = move |mcx| {
+            mk_mergejoin_pstmt(
+                mcx,
+                99109,
+                99110,
+                ::types_nodes::JoinType::JOIN_INNER,
+                Inner::Material,
+            )
+        };
+        crate::lanev2::mergejoin_native_set_for_tests(false);
+        let off = drain_wide_rows_nullable(mk_mat(leaked_mcx()), 4, 1);
+        crate::lanev2::mergejoin_native_set_for_tests(true);
+        let (o1, f0) = (owned(), refused(4));
+        let on = drain_wide_rows_nullable(mk_mat(leaked_mcx()), 4, 1);
+        assert_eq!(off, on, "inner-feed refusal must fall through byte-identically");
+        assert!(refused(4) > f0, "mergejoin-inner-feed (child-not-lane-owned) never ticked");
+        assert_eq!(owned(), o1, "refused shape must not be owned");
+
+        crate::lanev2::mergejoin_native_set_for_tests(false);
+        drop(guard);
+        scanfix::quiesced();
+    }
+
+    /// §1.4 es_epq_active HARD LAW, pinned INSIDE a DRIVEN recheck (the
+    /// AF-rung pattern, mandatory at inc-1): EvalPlanQual over the MergeJoin
+    /// plan with the knob ON must (i) tick the `epq` refusal from this
+    /// surface at recheck initiation, (ii) NEVER own a recheck pull, and
+    /// (iii) produce the recheck verdict byte-identically to knob OFF. The
+    /// lift is Y3's, one step, census-gated — never here.
+    #[test]
+    fn mj99105_lane_epq_hard_law_inside_driven_recheck() {
+        install_seams();
+        install_mj_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = rowmode_ab::KNOB.lock().unwrap_or_else(|p| p.into_inner());
+
+        scanfix::register_table_2col(99111, &[&[(5, 50)]]);
+        scanfix::register_table_2col(99112, &[&[(5, 500)]]);
+
+        let run_recheck = |native_on: bool| -> Vec<i32> {
+            crate::lanev2::mergejoin_native_set_for_tests(native_on);
+            let pstmt = mk_mj99_pstmt(leaked_mcx(), 99111, 99112, false, false);
+            let snap_ctx: &'static MemoryContext =
+                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snapshot: snapmgr::Snapshot =
+                std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                    snap_ctx.mcx(),
+                    ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+                ));
+            let mut vals = Vec::new();
+            with_exec_data(pstmt, |data, pstmt| {
+                data.estate.es_snapshot = Some(snapshot);
+                crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+                let ExecData { estate, planstate } = data;
+                let mut epq = crate::epq::EpqState {
+                    plan: pstmt.planTree,
+                    recheck: None,
+                    result_rti: 1,
+                    lane_verdicts: None,
+                };
+                let mut subs = None;
+                ::executils::ensure_epq_subs(
+                    &mut subs,
+                    estate.es_query_cxt,
+                    estate.epq_rtsize(),
+                    1,
+                );
+                let desc = estate.es_relations[0].as_ref().unwrap().rd_att.clone();
+                let test = estate.exec_init_extra_tuple_slot(
+                    Some(desc),
+                    ::types_slot::TupleSlotKind::Virtual,
+                );
+                subs.as_mut().unwrap().relsubs_slot[0] = Some(test);
+                // Substituted outer row (5, 77): keyed to match the inner.
+                {
+                    let mcx = estate.es_query_cxt;
+                    let s = estate.slot_mut(test);
+                    exectuples::exec_clear_tuple(s, mcx);
+                    {
+                        let base = s.base_mut();
+                        base.tts_values[0] = Datum::from_i32(5);
+                        base.tts_isnull[0] = false;
+                        base.tts_values[1] = Datum::from_i32(77);
+                        base.tts_isnull[1] = false;
+                    }
+                    exectuples::exec_store_virtual_tuple(s);
+                }
+                let got = crate::epq::eval_plan_qual(&mut epq, &mut subs, estate, test)
+                    .unwrap()
+                    .expect("recheck joins the substituted row");
+                let s = estate.slot_mut(got);
+                for att in 1..=4 {
+                    let mut isnull = false;
+                    let v = exectuples::slot_getattr(s, att, &mut isnull);
+                    assert!(!isnull);
+                    vals.push(v.as_i32());
+                }
+                crate::epq::eval_plan_qual_end(&mut epq, &mut subs, estate).unwrap();
+                let ps = planstate.as_mut().unwrap();
+                crate::exec_end_node(ps, estate).unwrap();
+                estate.exec_reset_tuple_table(false);
+                estate.exec_close_range_table_relations().unwrap();
+            });
+            vals
+        };
+
+        let off = run_recheck(false);
+        assert_eq!(off, vec![5, 77, 5, 500]);
+        let (o0, e0) = (owned(), refused(0));
+        let on = run_recheck(true);
+        assert_eq!(on, off, "recheck verdict must be knob-invariant (HARD LAW)");
+        assert!(refused(0) > e0, "epq refusal never ticked from the lane surface");
+        assert_eq!(owned(), o0, "the surface must NEVER own inside a recheck pre-Y3");
+
+        crate::lanev2::mergejoin_native_set_for_tests(false);
+        drop(guard);
+        scanfix::quiesced();
+    }
+
+    /// Mixed-arm coherence (worklog §1.6, pinned by construction claim):
+    /// lane and Volcano share ONE MergeJoinState, so a mid-stream knob flip
+    /// hands the drive over without loss or replay.
+    #[test]
+    fn mj99106_lane_mixed_arm_pull_coherence() {
+        install_seams();
+        install_mj_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = rowmode_ab::KNOB.lock().unwrap_or_else(|p| p.into_inner());
+        scanfix::register_table_2col(99113, &[&[(1, 10), (2, 20), (3, 30)]]);
+        scanfix::register_table_2col(99114, &[&[(3, 300), (1, 100), (2, 200)]]);
+        let pstmt = mk_mj99_pstmt(leaked_mcx(), 99113, 99114, false, false);
+        let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+        let snapshot: snapmgr::Snapshot =
+            std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                snap_ctx.mcx(),
+                ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+            ));
+        with_exec_data(pstmt, |data, pstmt| {
+            data.estate.es_snapshot = Some(snapshot);
+            crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+            let ExecData { estate, planstate } = data;
+            let ps = planstate.as_mut().unwrap();
+            let mut keys = Vec::new();
+            // Rows 1-2 lane-owned, rest Volcano: same join, same state.
+            crate::lanev2::mergejoin_native_set_for_tests(true);
+            let o0 = owned();
+            for _ in 0..2 {
+                let slot = exec_proc_node(ps, estate).unwrap().unwrap();
+                let mut isnull = false;
+                keys.push(exectuples::slot_getattr(estate.slot_mut(slot), 1, &mut isnull).as_i32());
+            }
+            assert!(owned() > o0, "first pulls must be lane-owned");
+            crate::lanev2::mergejoin_native_set_for_tests(false);
+            while let Some(slot) = exec_proc_node(ps, estate).unwrap() {
+                let mut isnull = false;
+                keys.push(exectuples::slot_getattr(estate.slot_mut(slot), 1, &mut isnull).as_i32());
+            }
+            assert_eq!(keys, vec![1, 2, 3], "handover must neither drop nor replay rows");
+            crate::exec_end_node(ps, estate).unwrap();
+            estate.exec_reset_tuple_table(false);
+            estate.exec_close_range_table_relations().unwrap();
+        });
+        crate::lanev2::mergejoin_native_set_for_tests(false);
+        drop(guard);
+        scanfix::quiesced();
+    }
+}
+// --- end WS-MJ1 (LANE-MERGEJOIN inc-1) sub-region ----------------------------
