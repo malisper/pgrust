@@ -28,6 +28,7 @@ libc = "0.2"
 
 [dev-dependencies]
 guc_tables = { path = "../../misc/guc_tables" }
+vfs = { path = "../../../storage/file/vfs" }
 sinval_seams = { path = "../../../storage/ipc/sinval_seams" }
 shmem_seams = { path = "../../../storage/ipc/shmem_seams" }
 aio_seams = { path = "../../../storage/aio/aio_seams" }
