@@ -111,14 +111,14 @@ impl Session for PgSession {
             }
             Err(e) => {
                 if let Some(db) = e.as_db_error() {
-                    let out = ExecOutcome::SqlError {
+                    // NOTE: no recovery ROLLBACK here. Recovering only the
+                    // erroring leg forks diff-c state (the other leg's open
+                    // tx keeps running) — recovery is the DISPATCHER's job,
+                    // symmetric across legs (Dispatcher::recover_both).
+                    ExecOutcome::SqlError {
                         sqlstate: db.code().code().to_string(),
                         message: db.message().to_string(),
-                    };
-                    // Failed statement poisons the tx; recover to autocommit
-                    // like triage.py does (rollback, ignore failure).
-                    let _ = client.simple_query("ROLLBACK");
-                    out
+                    }
                 } else if e.is_closed() {
                     self.client = None;
                     ExecOutcome::ConnectionLost { message: e.to_string() }
@@ -316,7 +316,15 @@ pub fn normalize_site(stmt: &str) -> String {
         }
         last_space = false;
     }
-    out.truncate(80);
+    // Byte cap on a char boundary (a multibyte literal from the real WS-GEN
+    // generator must not panic the harness).
+    if out.len() > 80 {
+        let mut end = 80;
+        while !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.truncate(end);
+    }
     out
 }
 
@@ -403,7 +411,27 @@ impl<'a> Dispatcher<'a> {
             }
             (None, _) => None,
         };
+        // Statement-level error recovery is SYMMETRIC (resync law): a failed
+        // statement poisons its own leg's tx; rolling back only that leg
+        // while the other leg's open tx keeps running is a permanent state
+        // fork (cascading false wrong-results downstream). ROLLBACK both.
+        let any_sql_error = matches!(dut_out, ExecOutcome::SqlError { .. })
+            || matches!(cpg_out, Some(ExecOutcome::SqlError { .. }));
+        if any_sql_error {
+            self.recover_both();
+        }
         Ok((dut_out, cpg_out))
+    }
+
+    /// Post-error resync: ROLLBACK on every leg (no-op warning outside a tx,
+    /// aborts the poisoned/healthy txs symmetrically inside one). Outcomes
+    /// deliberately ignored — a dead leg is detected by the caller's crash
+    /// classification, not here.
+    pub fn recover_both(&mut self) {
+        let _ = self.dut.execute("ROLLBACK");
+        if let Some(c) = self.cpg.as_deref_mut() {
+            let _ = c.execute("ROLLBACK");
+        }
     }
 }
 
@@ -489,6 +517,44 @@ pub fn execute_plan<'a>(
                                 sev: sev.into(),
                                 detail: message.clone(),
                             });
+                            if opts.stop_on_failure {
+                                return report;
+                            }
+                            continue;
+                        }
+                        // C-leg crash detection, ANY mark (pinned §1.3: a
+                        // dead server is c-crash P1, never an err-ladder P2;
+                        // the diff stream is broken => HALT).
+                        if let Some(ExecOutcome::ConnectionLost { message }) = &cpg_out {
+                            let class = if message.starts_with("client:") {
+                                "harness-fetch"
+                            } else {
+                                "c-crash"
+                            };
+                            let sev = if class == "c-crash" { "P1" } else { "P2" };
+                            report.count(class);
+                            report.records.push(StepRecord {
+                                idx,
+                                class: class.into(),
+                                sev: sev.into(),
+                                detail: format!("C leg: {}", message),
+                                stmt_head: head.clone(),
+                            });
+                            report.failure = Some(Failure {
+                                step_idx: idx,
+                                signature: Signature {
+                                    class: class.into(),
+                                    sqlstate: "".into(),
+                                    site: normalize_site(&sql.text),
+                                },
+                                class: class.into(),
+                                sev: sev.into(),
+                                detail: format!("C leg: {}", message),
+                            });
+                            if class == "c-crash" {
+                                report.halted_at = Some(idx);
+                                return report; // dead C server: HALT unconditional.
+                            }
                             if opts.stop_on_failure {
                                 return report;
                             }
@@ -588,51 +654,15 @@ pub fn execute_plan<'a>(
             }
             Step::Tx(tx) => {
                 let sql = tx_sql(tx);
-                let dut_out = disp.dut.execute(&sql);
-                if let Some(c) = disp.cpg.as_deref_mut() {
-                    let c_out = c.execute(&sql);
-                    if dut_out.is_error() != c_out.is_error() {
-                        report.count("err-state-mismatch");
-                        report.halted_at = Some(idx);
-                        report.failure = Some(Failure {
-                            step_idx: idx,
-                            signature: Signature {
-                                class: "err-state-mismatch".into(),
-                                sqlstate: dut_out.sqlstate().unwrap_or("").into(),
-                                site: normalize_site(&sql),
-                            },
-                            class: "err-state-mismatch".into(),
-                            sev: "P2".into(),
-                            detail: format!("tx-control divergence at step {} — HALT", idx),
-                        });
-                        return report;
-                    }
+                if run_ctl_step(&mut disp, &mut report, idx, &sql, "tx-control") {
+                    return report;
                 }
-                report.count("ok");
             }
             Step::Arm(arm) => {
                 let sql = arm_sql(arm);
-                let dut_out = disp.dut.execute(&sql);
-                if let Some(c) = disp.cpg.as_deref_mut() {
-                    let c_out = c.execute(&sql);
-                    if dut_out.is_error() != c_out.is_error() {
-                        report.count("err-state-mismatch");
-                        report.halted_at = Some(idx);
-                        report.failure = Some(Failure {
-                            step_idx: idx,
-                            signature: Signature {
-                                class: "err-state-mismatch".into(),
-                                sqlstate: dut_out.sqlstate().unwrap_or("").into(),
-                                site: normalize_site(&sql),
-                            },
-                            class: "err-state-mismatch".into(),
-                            sev: "P2".into(),
-                            detail: format!("arm divergence at step {} — HALT", idx),
-                        });
-                        return report;
-                    }
+                if run_ctl_step(&mut disp, &mut report, idx, &sql, "arm") {
+                    return report;
                 }
-                report.count("ok");
             }
             Step::Assumption(j) => match checks.eval(j, &stack) {
                 CheckVerdict::Pass => report.count("ok"),
@@ -723,11 +753,59 @@ pub fn execute_plan<'a>(
                 FaultPoint::ReconnectServer => match &opts.restart_cmd {
                     None => {
                         report.count("fault-skipped-no-restart-cmd");
+                        // The generator models reconnect-server as ending any
+                        // open tx (stubgen gen_fault, in_tx=false). A SKIPPED
+                        // fault must not leave executed session state
+                        // diverging from that model — a still-open tx turns
+                        // every later generated BEGIN into a 25001. Resync
+                        // both legs to the model (ROLLBACK, no-op outside a
+                        // tx).
+                        disp.recover_both();
                     }
                     Some(cmd) => {
                         let st = std::process::Command::new("sh").arg("-c").arg(cmd).status();
                         match st {
                             Ok(s) if s.success() => {
+                                // Refuse no-op "restarts": if the OLD DUT
+                                // connection still answers, the server never
+                                // restarted — reconnecting would silently
+                                // reset the DUT session (tx/GUCs) while the
+                                // C leg keeps its state: a state fork that
+                                // mints false wrong-results P1s. Harness
+                                // misconfiguration, P1 self-check.
+                                let mut probe =
+                                    disp.dut.execute("SELECT 1 /* simharness restart-probe */");
+                                if let ExecOutcome::SqlError { sqlstate, .. } = &probe {
+                                    // A fast shutdown leaves a buffered FATAL
+                                    // (57P01 admin-shutdown / 57P02 crash-
+                                    // shutdown) on the old connection; the
+                                    // first read surfaces it as a SqlError
+                                    // although the connection underneath is
+                                    // dead. Drain it and probe again.
+                                    if sqlstate == "57P01" || sqlstate == "57P02" {
+                                        probe = disp
+                                            .dut
+                                            .execute("SELECT 1 /* simharness restart-probe-2 */");
+                                    }
+                                }
+                                if !matches!(probe, ExecOutcome::ConnectionLost { .. }) {
+                                    report.count("fault-restart-noop");
+                                    report.failure = Some(Failure {
+                                        step_idx: idx,
+                                        signature: Signature {
+                                            class: "fault-restart-noop".into(),
+                                            sqlstate: "".into(),
+                                            site: "fault:reconnect-server".into(),
+                                        },
+                                        class: "fault-restart-noop".into(),
+                                        sev: "P1".into(),
+                                        detail: format!(
+                                            "restart_cmd '{}' exited 0 but the DUT session survived — configure a real restart or drop --restart-cmd (counted skip)",
+                                            cmd
+                                        ),
+                                    });
+                                    return report;
+                                }
                                 if let Err(e) = disp.dut.reconnect() {
                                     report.count("rust-crash");
                                     report.failure = Some(Failure {
@@ -743,6 +821,30 @@ pub fn execute_plan<'a>(
                                     });
                                     return report;
                                 }
+                                // Resynchronize the C leg: the restart reset
+                                // the DUT session (open tx aborted, GUCs
+                                // gone) while the C session kept its state.
+                                // Reconnect it too so both legs land in
+                                // identical fresh-session state (zero-FP
+                                // law; same shape as Fault(Disconnect)).
+                                if let Some(c) = disp.cpg.as_deref_mut() {
+                                    if let Err(e) = c.reconnect() {
+                                        report.count("c-crash");
+                                        report.halted_at = Some(idx);
+                                        report.failure = Some(Failure {
+                                            step_idx: idx,
+                                            signature: Signature {
+                                                class: "c-crash".into(),
+                                                sqlstate: "".into(),
+                                                site: "fault:reconnect-server".into(),
+                                            },
+                                            class: "c-crash".into(),
+                                            sev: "P1".into(),
+                                            detail: format!("C leg resync reconnect failed: {}", e),
+                                        });
+                                        return report;
+                                    }
+                                }
                                 report.count("ok");
                             }
                             other => {
@@ -754,6 +856,10 @@ pub fn execute_plan<'a>(
                                     detail: format!("{:?}", other),
                                     stmt_head: cmd.chars().take(60).collect(),
                                 });
+                                // Same resync-to-model as the counted skip
+                                // above: the restart did not happen, but the
+                                // generator assumes the tx is gone.
+                                disp.recover_both();
                             }
                         }
                     }
@@ -778,6 +884,111 @@ pub fn execute_plan<'a>(
         }
     }
     report
+}
+
+/// TX/ARM control-statement step. Crash detection matches the statement
+/// arms: a dead DUT on COMMIT (the classic engine-bug site) is rust-crash
+/// P1, a dead C leg is c-crash P1 — never a silent "ok" and never an
+/// err-ladder P2. Symmetric SqlErrors recover BOTH legs (resync law).
+/// Returns true when the plan must stop.
+fn run_ctl_step(
+    disp: &mut Dispatcher,
+    report: &mut RunReport,
+    idx: usize,
+    sql: &str,
+    what: &str,
+) -> bool {
+    let head: String = sql.chars().take(60).collect();
+    let dut_out = disp.dut.execute(sql);
+    if let ExecOutcome::ConnectionLost { message } = &dut_out {
+        let class = if message.starts_with("client:") { "harness-fetch" } else { "rust-crash" };
+        let sev = if class == "rust-crash" { "P1" } else { "P2" };
+        report.count(class);
+        report.records.push(StepRecord {
+            idx,
+            class: class.into(),
+            sev: sev.into(),
+            detail: message.clone(),
+            stmt_head: head,
+        });
+        report.failure = Some(Failure {
+            step_idx: idx,
+            signature: Signature {
+                class: class.into(),
+                sqlstate: "".into(),
+                site: normalize_site(sql),
+            },
+            class: class.into(),
+            sev: sev.into(),
+            detail: message.clone(),
+        });
+        return true; // control-statement stream broken either way: stop.
+    }
+    let mut c_err = None;
+    if let Some(c) = disp.cpg.as_deref_mut() {
+        let c_out = c.execute(sql);
+        if let ExecOutcome::ConnectionLost { message } = &c_out {
+            let class = if message.starts_with("client:") { "harness-fetch" } else { "c-crash" };
+            let sev = if class == "c-crash" { "P1" } else { "P2" };
+            report.count(class);
+            report.records.push(StepRecord {
+                idx,
+                class: class.into(),
+                sev: sev.into(),
+                detail: format!("C leg: {}", message),
+                stmt_head: head,
+            });
+            if class == "c-crash" {
+                report.halted_at = Some(idx);
+            }
+            report.failure = Some(Failure {
+                step_idx: idx,
+                signature: Signature {
+                    class: class.into(),
+                    sqlstate: "".into(),
+                    site: normalize_site(sql),
+                },
+                class: class.into(),
+                sev: sev.into(),
+                detail: format!("C leg: {}", message),
+            });
+            return true;
+        }
+        c_err = Some(c_out.is_error());
+    }
+    let dut_err = dut_out.is_error();
+    if let Some(c_err) = c_err {
+        if dut_err != c_err {
+            report.count("err-state-mismatch");
+            report.halted_at = Some(idx);
+            report.failure = Some(Failure {
+                step_idx: idx,
+                signature: Signature {
+                    class: "err-state-mismatch".into(),
+                    sqlstate: dut_out.sqlstate().unwrap_or("").into(),
+                    site: normalize_site(sql),
+                },
+                class: "err-state-mismatch".into(),
+                sev: "P2".into(),
+                detail: format!("{} divergence at step {} — HALT", what, idx),
+            });
+            return true;
+        }
+    }
+    if dut_err {
+        // Symmetric (or standalone) control-statement error: recover both
+        // legs to autocommit so session state stays lockstep, and count
+        // honestly (never "ok" for an uncompared error).
+        disp.recover_both();
+        if c_err.is_some() {
+            report.count("ok"); // both legs erred identically: lockstep held.
+        } else {
+            report.count("err-uncompared");
+        }
+    } else {
+        report.count("ok");
+    }
+    false
 }
 
 fn enclosing_property_seq(plan: &Plan, idx: usize) -> Option<u32> {

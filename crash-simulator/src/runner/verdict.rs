@@ -15,7 +15,7 @@ use std::path::Path;
 pub fn severity(class: &str) -> &'static str {
     match class {
         "rust-crash" | "c-crash" | "wrong-results" | "property-violation" | "dispatch-refusal"
-        | "fault-reserved-refused" => "P1",
+        | "fault-reserved-refused" | "fault-restart-noop" => "P1",
         "rust-err-c-ok" | "c-err-rust-ok" | "err-state-mismatch" | "harness-fetch" => "P2",
         "err-text-drift" | "err-timeout-one-side" => "P3",
         _ => "fine", // ok, err-match, wrong-results-volatile/-nondet/-underdetermined,

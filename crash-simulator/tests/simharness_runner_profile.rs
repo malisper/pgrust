@@ -92,3 +92,13 @@ fn declared_floors_skip_with_count() {
     assert!(s.contains("SIMHARNESS|floor-skipped-no-instrument|1"));
     assert!(s.contains("SIMHARNESS-VERDICT|PASS"), "skip is fine-class, not a failure: {}", s);
 }
+
+#[test]
+fn arm_weight_with_empty_arm_sets_rejected() {
+    // Review note: an 'arm'-weighted profile with arm_sets=[] made the
+    // generator loop forever (arm draws emit no step). Reject at validation.
+    let mut p = base_profile();
+    p.arm_sets.clear();
+    let err = validate(&p).unwrap_err();
+    assert!(err.contains("arm_sets"), "must name the empty arm_sets: {}", err);
+}
