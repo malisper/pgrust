@@ -189,10 +189,10 @@ extern "C" fn bridge_signal_handler(signo: i32) {
 // a native --single (the shutdown checkpoint is then skipped — crash
 // recovery on next boot, C's own no-graceful-signal story).
 #[cfg(target_family = "wasm")]
-fn install_single_user_signal_bridge() {}
+pub(crate) fn install_single_user_signal_bridge() {}
 
 #[cfg(not(target_family = "wasm"))]
-fn install_single_user_signal_bridge() {
+pub(crate) fn install_single_user_signal_bridge() {
     for signo in [libc::SIGHUP, libc::SIGINT, libc::SIGTERM, libc::SIGQUIT] {
         // SAFETY: standard sigaction install; the handler touches only
         // atomics + the signal-safe SetLatch path, and restores errno.

@@ -34,6 +34,11 @@ pub enum DispatchOption {
     Forkchild,
     DescribeConfig,
     Single,
+    // pgrust extension (no C counterpart): one wire-protocol session over
+    // the boot-installed stdio transport provider (§2.4 seam). The
+    // wasm32-wasip1 client-server mode — WASI p1 has no socket(); native
+    // --stdio-wire is the differential arm.
+    StdioWire,
     Postmaster,
 }
 
@@ -43,6 +48,7 @@ const DISPATCH_OPTION_NAMES: &[(DispatchOption, &str)] = &[
     (DispatchOption::Forkchild, "forkchild"),
     (DispatchOption::DescribeConfig, "describe-config"),
     (DispatchOption::Single, "single"),
+    (DispatchOption::StdioWire, "stdio-wire"),
 ];
 
 pub fn parse_dispatch_option(name: &str) -> DispatchOption {
@@ -174,6 +180,12 @@ pub fn pg_main(argv: &[String]) -> PgResult<()> {
             let username = get_user_name_or_exit(&progname);
             postgres_seams::postgres_single_user_main::call(argv, &username)
         }
+        DispatchOption::StdioWire => {
+            // pgrust extension: identity ultimately comes from the startup
+            // packet; the OS/env user is the single-user-style fallback.
+            let username = get_user_name_or_exit(&progname);
+            postgres_seams::postgres_stdio_wire_main::call(argv, &username)
+        }
         DispatchOption::Postmaster => postmaster::PostmasterMain(argv),
     }
 }
@@ -302,6 +314,7 @@ mod tests {
         assert_eq!(parse_dispatch_option("boot"), DispatchOption::Boot);
         assert_eq!(parse_dispatch_option("describe-config"), DispatchOption::DescribeConfig);
         assert_eq!(parse_dispatch_option("single"), DispatchOption::Single);
+        assert_eq!(parse_dispatch_option("stdio-wire"), DispatchOption::StdioWire);
         assert_eq!(parse_dispatch_option("forkchild"), DispatchOption::Postmaster);
         assert_eq!(parse_dispatch_option("nonsense"), DispatchOption::Postmaster);
         assert_eq!(parse_dispatch_option(""), DispatchOption::Postmaster);

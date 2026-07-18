@@ -12,6 +12,16 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // PostgresStdioWireMain (pgrust extension, no C counterpart): the
+    // single-user boot ladder + BackendInitialize's connection half, one
+    // wire-protocol session over the boot-installed stdio transport
+    // provider (§2.4 seam). argv[1] == "--stdio-wire"; username is the
+    // fallback identity (the startup packet's user wins). Exits the
+    // process; never returns.
+    pub fn postgres_stdio_wire_main(argv: &[String], username: &str) -> !
+);
+
+seam_core::seam!(
     // ProcessClientReadInterrupt(blocked) (tcop/postgres.c); Err is the
     // ereport(FATAL) "terminating connection" path.
     pub fn process_client_read_interrupt(blocked: bool) -> types_error::PgResult<()>
