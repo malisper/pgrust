@@ -25,6 +25,13 @@ pub struct EpqState<'mcx> {
     pub plan: Option<Node<'mcx>>,
     pub recheck: Option<PlanStateNode<'mcx>>,
     pub result_rti: u32,
+    /// WS-Y wave-7 (Y1): the memoized per-node lane-admission verdicts for
+    /// `plan` — classified ONCE per recheck plan by
+    /// `lanev2::epq::epq_recheck_admission` (knob-ON only; stays None
+    /// forever on the OFF arm). The plan is fixed at plan init (procnode.rs
+    /// builds EpqState once), so this cache never goes stale; a future
+    /// dynamic SetPlan owner must reset it alongside `recheck`.
+    pub(crate) lane_verdicts: Option<crate::lanev2::epq::EpqPlanVerdicts<'mcx>>,
 }
 
 /// `EvalPlanQual`: `Some` = new candidate tuple, `None` = skip the row.
@@ -35,14 +42,22 @@ pub fn eval_plan_qual<'mcx>(
     estate: &mut EStateData<'mcx>,
     inputslot: ExecSlotId,
 ) -> PgResult<Option<ExecSlotId>> {
-    // WS-U wave-5 (contract §6.3): inc-5's admission chokepoint, structure
-    // first. `PGRUST_LANE_V2_EPQ` default-OFF; ON runs the admission walk,
-    // which refuses every recheck shape through the existing `epq` carrier
-    // and the drive below stays Volcano either way — zero ownership, zero
-    // behavior delta this wave. The OFF arm is one relaxed byte load at
-    // recheck INITIATION only (never per-row/per-batch; §0.6 idiom).
+    // Inc-5's admission chokepoint (WS-U wave-5 structure, WS-Y wave-7
+    // widening): `PGRUST_LANE_V2_EPQ` default-OFF; ON classifies the
+    // recheck plan into per-node verdicts ONCE (memoized in
+    // `epq.lane_verdicts` — one classification per recheck plan, never per
+    // recheck row) and, while the es_epq_active HARD LAW stands (the Y3
+    // lift is census-gated and did not land at wave-7), still refuses
+    // every mappable shape through the existing `epq` carrier per
+    // initiation — the drive below stays Volcano either way. The OFF arm
+    // is one relaxed byte load at recheck INITIATION only (never
+    // per-row/per-batch; §0.6 idiom).
     if crate::lanev2::epq_lane_enabled() {
-        crate::lanev2::epq_recheck_refuse_all(epq.plan);
+        crate::lanev2::epq::epq_recheck_admission(
+            epq.plan,
+            &mut epq.lane_verdicts,
+            estate.es_query_cxt,
+        );
     }
     ::executils::ensure_epq_subs(subs, estate.es_query_cxt, estate.epq_rtsize(), epq.result_rti);
     let saved_subs = core::mem::replace(&mut estate.es_epq, subs.take());
@@ -259,4 +274,4 @@ pub fn eval_plan_qual_end<'mcx>(
     Ok(())
 }
 
-::mcx::forget_safe_struct!(EpqState<'_> { plan, recheck, result_rti });
+::mcx::forget_safe_struct!(EpqState<'_> { plan, recheck, result_rti, lane_verdicts });

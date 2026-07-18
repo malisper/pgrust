@@ -4057,6 +4057,7 @@ fn eval_plan_qual_recheck_over_seqscan() {
             plan: pstmt.planTree,
             recheck: None,
             result_rti: 1,
+            lane_verdicts: None,
         };
         let mut subs = None;
         ::executils::ensure_epq_subs(&mut subs, estate.es_query_cxt, estate.epq_rtsize(), 1);
@@ -9778,6 +9779,7 @@ mod epq_seams_w5 {
                 plan: pstmt.planTree,
                 recheck: None,
                 result_rti: 1,
+                lane_verdicts: None,
             };
             let mut subs = None;
             ::executils::ensure_epq_subs(&mut subs, estate.es_query_cxt, estate.epq_rtsize(), 1);
@@ -9869,6 +9871,7 @@ mod epq_seams_w5 {
                 plan: pstmt.planTree,
                 recheck: None,
                 result_rti: 1,
+                lane_verdicts: None,
             };
             let mut subs = None;
             ::executils::ensure_epq_subs(&mut subs, estate.es_query_cxt, estate.epq_rtsize(), 1);
@@ -9943,6 +9946,7 @@ mod epq_seams_w5 {
                 plan: pstmt.planTree,
                 recheck: None,
                 result_rti: 1,
+                lane_verdicts: None,
             };
             let mut subs = None;
             ::executils::ensure_epq_subs(&mut subs, estate.es_query_cxt, estate.epq_rtsize(), 1);
@@ -10817,13 +10821,180 @@ mod dml_ab_wave5 {
 // --- end WS-X wave-5 sub-region -------------------------------------------------
 
 // --- WS-Y wave-7 (EPQ inc-5 rungs Y0-Y2; band 83001+) ---------------------------
-// Unit corpus for the lane-side EPQ module (lanev2/epq.rs). This commit:
-// Y0 captured-singleton source latch orderings + dark-code refusals.
-// Serialization: every exec-fixture test holds scanfix::TEST_LOCK for its
-// full span (wave-2 precedent-3).
+// Unit corpus for the lane-side EPQ module (lanev2/epq.rs): Y0
+// captured-singleton source latch orderings + dark-code refusals, Y1
+// per-node verdicts memoized once per recheck plan (wave-5 review finding
+// 5's binding law), Y2 loud-admission-list tightenings (scanrelid == 0 +
+// SubqueryScan.subplan recursion). Serialization: every exec-fixture test
+// holds scanfix::TEST_LOCK for its full span (wave-2 precedent-3).
 mod epq_capture_w7 {
     use super::*;
-    use crate::lanev2::epq::EpqCaptureFeed;
+    use crate::lanev2::epq::{EpqCaptureFeed, EpqNodeVerdict};
+
+    /// Y1 memoization law (wave-5 review finding 5, ledgered in
+    /// lane-epq.md §6): the classification WALK runs once per recheck
+    /// plan; the refusal TICKS keep wave-5 semantics (once per mappable
+    /// node per recheck initiation, through the existing `epq` carrier).
+    /// Two initiations over one EpqState: walks +1, ticks +2, outcomes
+    /// byte-identical to the knob-OFF oracle.
+    #[test]
+    fn epq_w7_verdict_walk_memoized_once_per_plan() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mcx = leaked_mcx();
+
+        let relid: u32 = 83001;
+        scanfix::register_table_2col(relid, &[&[(1, 10), (2, 20)]]);
+        let pstmt = mk_epq_update_subplan_pstmt(mcx, relid);
+
+        let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+        let snapshot: snapmgr::Snapshot =
+            std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                snap_ctx.mcx(),
+                ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+            ));
+
+        let walks = || {
+            crate::lanev2::epq::EPQ_CLASSIFY_WALKS_FOR_TESTS
+                .load(std::sync::atomic::Ordering::Relaxed)
+        };
+        let ticks = || {
+            crate::lanev2::EPQ_ADMISSION_REFUSED_FOR_TESTS
+                .load(std::sync::atomic::Ordering::Relaxed)
+        };
+
+        with_exec_data(pstmt, |data, pstmt| {
+            data.estate.es_snapshot = Some(snapshot);
+            crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+            let ExecData { estate, planstate } = data;
+
+            let mut epq = crate::epq::EpqState {
+                plan: pstmt.planTree,
+                recheck: None,
+                result_rti: 1,
+                lane_verdicts: None,
+            };
+            let mut subs = None;
+            ::executils::ensure_epq_subs(&mut subs, estate.es_query_cxt, estate.epq_rtsize(), 1);
+            let desc = estate.es_relations[0].as_ref().unwrap().rd_att.clone();
+            let test = estate.exec_init_extra_tuple_slot(
+                Some(desc),
+                ::types_slot::TupleSlotKind::Virtual,
+            );
+            subs.as_mut().unwrap().relsubs_slot[0] = Some(test);
+
+            // Knob-OFF oracle first: the byte-identity baseline; neither
+            // counter moves and no cache is built.
+            crate::lanev2::epq_lane_set_for_tests(false);
+            let (w0, t0) = (walks(), ticks());
+            epq_store_test_tuple(estate, test, 1, 99);
+            let off = crate::epq::eval_plan_qual(&mut epq, &mut subs, estate, test)
+                .unwrap()
+                .expect("qual passes");
+            let off_vals = epq_slot_vals(estate, off);
+            assert_eq!((walks(), ticks()), (w0, t0), "OFF arm must tick NOTHING");
+            assert!(epq.lane_verdicts.is_none(), "OFF arm must build no cache");
+
+            // ON arm, initiation 1: ONE classification walk + one tick for
+            // the single mappable node (the SeqScan recheck plan).
+            crate::lanev2::epq_lane_set_for_tests(true);
+            epq_store_test_tuple(estate, test, 1, 99);
+            let on1 = crate::epq::eval_plan_qual(&mut epq, &mut subs, estate, test)
+                .unwrap()
+                .expect("qual passes");
+            let on1_vals = epq_slot_vals(estate, on1);
+            assert_eq!(walks(), w0 + 1, "first initiation classifies the plan");
+            assert_eq!(ticks(), t0 + 1, "one mappable node refuses via the epq carrier");
+            assert!(epq.lane_verdicts.is_some(), "verdicts memoized on the EpqState");
+
+            // ON arm, initiation 2 (same EpqState = same recheck plan): the
+            // WALK does not re-run; the tick re-fires from the memo.
+            epq_store_test_tuple(estate, test, 1, 5);
+            let on2 = crate::epq::eval_plan_qual(&mut epq, &mut subs, estate, test)
+                .unwrap()
+                .expect("qual passes");
+            let on2_vals = epq_slot_vals(estate, on2);
+            crate::lanev2::epq_lane_set_for_tests(false);
+            assert_eq!(walks(), w0 + 1, "ONE classification per recheck plan (memo law)");
+            assert_eq!(ticks(), t0 + 2, "ticks stay per-initiation (wave-5 census semantics)");
+
+            assert_eq!(on1_vals, off_vals, "knob arms behave identically (drive stays Volcano)");
+            assert_eq!(on2_vals, (1, 5));
+
+            crate::epq::eval_plan_qual_end(&mut epq, &mut subs, estate).unwrap();
+            let ps = planstate.as_mut().unwrap();
+            crate::exec_end_node(ps, estate).unwrap();
+            estate.exec_reset_tuple_table(false);
+            estate.exec_close_range_table_relations().unwrap();
+        });
+        scanfix::quiesced();
+    }
+
+    /// Y1 verdict vocabulary: per-node verdicts reuse the EXISTING
+    /// engagement classes (mint count zero) and the walk visits exactly
+    /// the loud admission list's edges. Sort-over-SeqScan classifies as
+    /// [RescanComposed, CaptureScan]; Material/TidScan are structurally
+    /// Short (no try_own_* surface — Y3 gate-delta rows); Hash is glue
+    /// and contributes no entry.
+    #[test]
+    fn epq_w7_per_node_verdicts_reuse_engagement_classes() {
+        use ::types_nodes::plannodes::{Hash, Material, Plan, Scan, SeqScan, Sort, TidScan};
+        let mcx = leaked_mcx();
+
+        let seq = Node::mk(
+            mcx,
+            SeqScan { cb_scan_cols: None, scan: Scan { plan: Plan::default(), scanrelid: 1 } },
+        )
+        .unwrap();
+        let sort = Node::mk(
+            mcx,
+            Sort {
+                plan: Plan { lefttree: Some(seq), ..Default::default() },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // The loud list admits the same tree the verdict walk classifies.
+        crate::epq::check_epq_plan(sort);
+        let rows = crate::lanev2::epq::epq_classify_for_tests(Some(sort));
+        assert_eq!(
+            rows,
+            vec![
+                ("sortfeed", EpqNodeVerdict::RescanComposed),
+                ("seqscan", EpqNodeVerdict::CaptureScan),
+            ],
+            "existing engagement classes, walk order == loud-list order"
+        );
+
+        let material = Node::mk(mcx, Material { plan: Plan::default() }).unwrap();
+        assert_eq!(
+            crate::lanev2::epq::epq_classify_for_tests(Some(material)),
+            vec![("material", EpqNodeVerdict::Short)],
+            "no try_own_* surface => structurally Short (Y3 gate delta)"
+        );
+
+        let tid = Node::mk(
+            mcx,
+            TidScan {
+                scan: Scan { plan: Plan::default(), scanrelid: 1 },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            crate::lanev2::epq::epq_classify_for_tests(Some(tid)),
+            vec![("tidscan", EpqNodeVerdict::Short)],
+            "tid fallthrough + recheckMtd unwired => Short"
+        );
+
+        let hash = Node::mk(mcx, Hash::default()).unwrap();
+        assert_eq!(
+            crate::lanev2::epq::epq_classify_for_tests(Some(hash)),
+            vec![],
+            "glue tags tick nothing (vocab law: no new classes/reasons)"
+        );
+    }
 
     /// Y0 exactly-once latch: the captured-singleton source stages the
     /// parked test tuple ONCE (relsubs_done latched at the handout, like C
@@ -10924,6 +11095,7 @@ mod epq_capture_w7 {
                 plan: pstmt.planTree,
                 recheck: None,
                 result_rti: 1,
+                lane_verdicts: None,
             };
             crate::epq::eval_plan_qual_end(&mut epq, &mut subs, estate).unwrap();
             let ps = planstate.as_mut().unwrap();
@@ -11051,6 +11223,7 @@ mod epq_capture_w7 {
                 plan: pstmt.planTree,
                 recheck: None,
                 result_rti: 1,
+                lane_verdicts: None,
             };
             crate::epq::eval_plan_qual_end(&mut epq, &mut subs, estate).unwrap();
             let ps = planstate.as_mut().unwrap();
@@ -11060,5 +11233,6 @@ mod epq_capture_w7 {
         });
         scanfix::quiesced();
     }
+
 }
 // --- end WS-Y wave-7 ------------------------------------------------------------

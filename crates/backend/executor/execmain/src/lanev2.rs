@@ -14325,70 +14325,21 @@ pub(crate) fn epq_lane_set_for_tests(on: bool) {
     EPQ_LANE.store(if on { 2 } else { 1 }, Relaxed);
 }
 
-/// Test-only refusal probe: recheck admission-walk refusals ticked by
-/// `epq_recheck_refuse_all` (the unit corpus proves ON ticks and OFF ticks
-/// NOTHING without a stats-env dump).
+/// Test-only refusal probe: recheck admission-walk refusals ticked by the
+/// admission chokepoint (wave-5's `epq_recheck_refuse_all`, widened at
+/// wave-7 into `epq::epq_recheck_admission` — the unit corpus proves ON
+/// ticks and OFF ticks NOTHING without a stats-env dump).
 #[cfg(test)]
 pub(crate) static EPQ_ADMISSION_REFUSED_FOR_TESTS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
-/// Wave-5 inc-1 admission structure (contract §6.3): walk the recheck plan
-/// exactly as `crate::epq::check_epq_plan` admits it and REFUSE every
-/// mappable shape via the existing `epq` carrier — the per-node skeleton
-/// inc-5 will widen into real verdicts. Mints nothing: node tags without a
-/// ShapeClass (Limit / Hash / BitmapIndexScan glue) tick nothing (vocab
-/// law §0.7 — no new classes, no new reasons). `#[cold]`: reachable only
-/// knob-ON at recheck initiation.
-#[cold]
-#[inline(never)]
-pub(crate) fn epq_recheck_refuse_all(plan: Option<::types_nodes::Node<'_>>) {
-    let Some(plan) = plan else { return };
-    if let Some(class) = epq_recheck_shape_class(plan) {
-        stats::tick_refused(class, RefuseReason::Epq);
-        #[cfg(test)]
-        EPQ_ADMISSION_REFUSED_FOR_TESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-    if let Some(ap) = plan.as_append() {
-        for child in ap.appendplans.iter() {
-            epq_recheck_refuse_all(Some(child));
-        }
-    }
-    if let Some(p) = plan.as_plan() {
-        if let Some(l) = p.lefttree {
-            epq_recheck_refuse_all(Some(l));
-        }
-        if let Some(r) = p.righttree {
-            epq_recheck_refuse_all(Some(r));
-        }
-    }
-}
-
-/// The check_epq_plan whitelist tags -> their EXISTING engagement classes
-/// (reuse only; the unmappable glue tags return None and tick nothing).
-fn epq_recheck_shape_class(plan: ::types_nodes::Node<'_>) -> Option<ShapeClass> {
-    use ::types_nodes::NodeTag as T;
-    Some(match plan.node_tag() {
-        T::T_SeqScan => ShapeClass::SeqScan,
-        T::T_IndexScan => ShapeClass::IndexScan,
-        T::T_IndexOnlyScan => ShapeClass::IndexOnlyScan,
-        T::T_BitmapHeapScan => ShapeClass::BitmapHeapScan,
-        T::T_TidScan => ShapeClass::TidScan,
-        T::T_TidRangeScan => ShapeClass::TidRangeScan,
-        T::T_NestLoop => ShapeClass::NestLoop,
-        T::T_MergeJoin => ShapeClass::MergeJoin,
-        T::T_HashJoin => ShapeClass::Join,
-        T::T_Sort => ShapeClass::SortFeed,
-        T::T_Material => ShapeClass::Material,
-        T::T_Result => ShapeClass::ResultNode,
-        T::T_ValuesScan => ShapeClass::ValuesScan,
-        T::T_CteScan => ShapeClass::CteScan,
-        T::T_SubqueryScan => ShapeClass::SubqueryScan,
-        T::T_FunctionScan => ShapeClass::FunctionScan,
-        T::T_Append => ShapeClass::Append,
-        T::T_LockRows => ShapeClass::LockRows,
-        _ => return None,
-    })
-}
+// Wave-5's `epq_recheck_refuse_all` (the unconditional refuse-all walk) and
+// its `epq_recheck_shape_class` map were WIDENED at wave-7 into the
+// per-node, per-plan-memoized verdict machinery in `lanev2/epq.rs`
+// (`epq::epq_recheck_admission` — WS-Y wave-7 rung Y1). Same chokepoint,
+// same `epq` refusal carrier, same tick-per-initiation census semantics;
+// the classification walk now runs ONCE per recheck plan (wave-5 review
+// finding 5). See the module doc there.
 // --- end WS-U wave-5 ----------------------------------------------------------
 
 // --- WS-V wave-5 sub-region (reserved) ----------------------------------------
@@ -14404,9 +14355,11 @@ pub(crate) use dml::dml_oc_set_for_tests;
 // --- end WS-X wave-5 ----------------------------------------------------------
 
 // --- WS-Y wave-7 (EPQ inc-5 rungs Y0-Y2; contract §1) ---------------------------
-// The lane-side EPQ module: Y0 captured-singleton source (dark). Mounted
-// here because the vocabulary it composes with (the BatchGranuleSource
-// seam, and from Y1 on ShapeClass/RefuseReason) is lanev2-private (§2
-// shim-fallback precedent, wave-5).
+// The lane-side EPQ module: Y0 captured-singleton source (dark), Y1 per-node
+// verdicts memoized per recheck plan, chokepoint entry `epq_recheck_admission`.
+// Mounted here because the vocabulary it reuses (ShapeClass/RefuseReason and
+// the BatchGranuleSource seam) is lanev2-private (§2 shim-fallback precedent,
+// wave-5). Y3 (the es_epq_active lift at the try_own_* sites) did NOT land
+// this wave — census gate not met; see notes/se-wave7-epq.md (Y3 CARRIED).
 pub(crate) mod epq;
 // --- end WS-Y wave-7 ------------------------------------------------------------

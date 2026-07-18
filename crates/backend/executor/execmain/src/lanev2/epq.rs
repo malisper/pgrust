@@ -1,24 +1,200 @@
-//! Lane-side EPQ — WS-Y wave-7, the ladder's inc-5 rungs
+//! Lane-side EPQ — WS-Y wave-7, the ladder's inc-5 rungs Y0-Y2
 //! (docs/design/lane-epq.md §2/§6; wave-7 contract §1).
 //!
-//! This module is the lane home of EPQ-capture work. This commit lands
-//! **Y0 — the capture substrate**: [`EpqCapturedSource`], the
-//! captured-singleton [`BatchGranuleSource`] flavor of lane-epq.md §2 —
-//! a one-row source fed from the owner's swapped-in `EpqSubs`
-//! (`relsubs_slot` test tuple or `origslot` rowmark row) whose
-//! exhaustion state IS the `relsubs_done`/`relsubs_blocked` latches.
-//! DARK CODE this wave: constructible only under `PGRUST_LANE_V2_EPQ`
-//! inside an active recheck (`es_epq_active`), and nothing drives it in
-//! production until rung Y3 (the census-gated es_epq_active lift)
-//! lands. The child-EState port is REJECTED PERMANENTLY (lane-epq.md
-//! §4): this source reads the ONE parent estate's swapped-in subs —
-//! any drift back toward a private recheck estate is a contract
-//! violation, not a judgment call.
+//! This module is the lane home of EPQ-capture work. It holds:
+//!
+//! * **Y0 — the capture substrate**: [`EpqCapturedSource`], the
+//!   captured-singleton [`BatchGranuleSource`] flavor of lane-epq.md §2 —
+//!   a one-row source fed from the owner's swapped-in `EpqSubs`
+//!   (`relsubs_slot` test tuple or `origslot` rowmark row) whose
+//!   exhaustion state IS the `relsubs_done`/`relsubs_blocked` latches.
+//!   DARK CODE this wave: constructible only under `PGRUST_LANE_V2_EPQ`
+//!   inside an active recheck (`es_epq_active`), and nothing drives it in
+//!   production until rung Y3 (the census-gated es_epq_active lift)
+//!   lands. The child-EState port is REJECTED PERMANENTLY (lane-epq.md
+//!   §4): this source reads the ONE parent estate's swapped-in subs —
+//!   any drift back toward a private recheck estate is a contract
+//!   violation, not a judgment call.
+//!
+//! * **Y1 — per-node verdicts, memoized per plan**: the wave-5 refuse-all
+//!   chokepoint (`lanev2::epq_recheck_refuse_all`) widened into
+//!   [`epq_recheck_admission`] — one [`EpqNodeVerdict`] per mappable
+//!   recheck-plan node, reusing the EXISTING engagement classes (vocab
+//!   mint count: zero) and MEMOIZED per (plan node, recheck plan) in
+//!   [`EpqPlanVerdicts`] (wave-5 review finding 5, ledgered in
+//!   lane-epq.md §6 + notes/se-ws-u-epq-inc1.md: classification is a
+//!   plan-shape function — paid once per plan, never once per recheck
+//!   row). The REFUSAL accounting keeps wave-5 semantics: while the
+//!   es_epq_active HARD LAW stands (it lifts at Y3 only, in one step,
+//!   under the 100% census gate), every classified node still refuses
+//!   through the existing `epq` carrier at every recheck initiation —
+//!   the tick re-fires from the memo, the walk does not re-run.
+//!
+//! `check_epq_plan` (crate::epq) stays THE loud admission list (Y2): this
+//! module's verdict map covers exactly the tags that list admits, and the
+//! two walks are unit-pinned against each other.
 
 use ::executils::{EStateData, ExecSlotId};
+use ::mcx::{Mcx, PgVec};
 use ::types_error::{PgError, PgResult, ERROR};
+use ::types_nodes::Node;
 
 use super::batch_source::{BatchGranuleSource, SourceCaps};
+use super::stats::{self, RefuseReason, ShapeClass};
+
+// ---------------------------------------------------------------------------
+// Y1 — per-node verdicts, memoized per recheck plan
+// ---------------------------------------------------------------------------
+
+/// The per-node admission verdict for one recheck-plan node. STRUCTURAL
+/// (plan-shape) facts only — never census statistics: the verdict says what
+/// surface exists at this head, and the Y3 gate separately requires every
+/// admitted shape census-green before the lift.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum EpqNodeVerdict {
+    /// A scan shape the Y0 captured-singleton substrate can feed when its
+    /// rel is captured (test slot parked / rowmark present), AND whose
+    /// plain-rel fallthrough (a real rescan inside the recheck — the
+    /// join-source case) has a `try_own_*` lane surface today.
+    CaptureScan,
+    /// A non-scan shape recomposed over its children inside the recheck; a
+    /// `try_own_*` lane surface exists for the class at this head.
+    RescanComposed,
+    /// No unconditional lane-ownership surface exists for the shape at this
+    /// head — census-short BY CONSTRUCTION: a Y3 gate-delta row (the shape
+    /// is admitted by `check_epq_plan` but cannot be census-green until an
+    /// owner lands its lane surface).
+    Short,
+}
+
+::mcx::forget_safe_nodrop!(EpqNodeVerdict);
+
+/// The memoized per-plan verdict list (Y1's memoization law): one entry per
+/// mappable node of ONE recheck plan, in `check_epq_plan` walk order.
+/// Owner-held in `crate::epq::EpqState::lane_verdicts` — the recheck plan
+/// is fixed at plan init (procnode.rs builds `EpqState` once; there is no
+/// dynamic SetPlan reset today), so the cache's lifetime IS the plan's.
+pub(crate) struct EpqPlanVerdicts<'mcx> {
+    entries: PgVec<'mcx, (ShapeClass, EpqNodeVerdict)>,
+}
+
+::mcx::forget_safe_struct!(EpqPlanVerdicts<'_> { entries });
+
+// The tuple element type of the memo must be ForgetSafe; ShapeClass is a
+// no-drop leaf vocabulary enum (stats.rs) with no impl of its own yet.
+::mcx::forget_safe_nodrop!(ShapeClass);
+
+/// Test-only probe: classification WALKS (not ticks) — the memoization
+/// unit proves one walk per plan however many rechecks re-initiate.
+#[cfg(test)]
+pub(crate) static EPQ_CLASSIFY_WALKS_FOR_TESTS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Wave-7 Y1 chokepoint (widens wave-5's `epq_recheck_refuse_all`; the ONE
+/// call site is `crate::epq::eval_plan_qual`, knob-ON at recheck initiation
+/// only — never per row, never per batch). First initiation classifies the
+/// plan into `cache` (ONE walk per recheck plan — the memoization law);
+/// every initiation re-ticks the refusals from the memo: while the
+/// es_epq_active HARD LAW stands, every mappable node refuses through the
+/// EXISTING `epq` carrier, exactly as wave-5 (census semantics preserved:
+/// refusal counts still scale with recheck initiations). `#[cold]`:
+/// reachable only knob-ON on the TM_Updated conflict path.
+#[cold]
+#[inline(never)]
+pub(crate) fn epq_recheck_admission<'mcx>(
+    plan: Option<Node<'_>>,
+    cache: &mut Option<EpqPlanVerdicts<'mcx>>,
+    mcx: Mcx<'mcx>,
+) {
+    if cache.is_none() {
+        let mut entries = PgVec::new_in(mcx);
+        classify_into(plan, &mut entries);
+        #[cfg(test)]
+        EPQ_CLASSIFY_WALKS_FOR_TESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        *cache = Some(EpqPlanVerdicts { entries });
+    }
+    for &(class, _verdict) in cache.as_ref().expect("just ensured").entries.iter() {
+        stats::tick_refused(class, RefuseReason::Epq);
+        #[cfg(test)]
+        super::EPQ_ADMISSION_REFUSED_FOR_TESTS
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// The classification walk: EXACTLY `check_epq_plan`'s edges (Append member
+/// list, lefttree/righttree, SubqueryScan.subplan) — the two walks are
+/// unit-pinned to visit the same nodes so the loud admission list and the
+/// verdict map can never drift apart silently.
+fn classify_into<'mcx>(
+    plan: Option<Node<'_>>,
+    entries: &mut PgVec<'mcx, (ShapeClass, EpqNodeVerdict)>,
+) {
+    let Some(plan) = plan else { return };
+    if let Some(row) = epq_recheck_verdict(plan) {
+        entries.push(row);
+    }
+    if let Some(ap) = plan.as_append() {
+        for child in ap.appendplans.iter() {
+            classify_into(Some(child), entries);
+        }
+    }
+    if let Some(sq) = plan.as_subquery_scan() {
+        classify_into(sq.subplan, entries);
+    }
+    if let Some(p) = plan.as_plan() {
+        if let Some(l) = p.lefttree {
+            classify_into(Some(l), entries);
+        }
+        if let Some(r) = p.righttree {
+            classify_into(Some(r), entries);
+        }
+    }
+}
+
+/// The `check_epq_plan` whitelist tags -> (EXISTING engagement class,
+/// wave-7 verdict). Reuse only — the unmappable glue tags (Limit / Hash /
+/// BitmapIndexScan) return None and tick nothing (vocab law §0.7: no new
+/// classes, no new reasons; identical to the wave-5 map's glue handling).
+///
+/// Verdicts are structural facts at this head, mechanically derived from
+/// the `try_own_*` inventory in lanev2.rs (the census delta of
+/// notes/se-wave7-epq.md re-derives this table; the Short rows ARE the Y3
+/// gate delta):
+///   * CaptureScan      — Y0 substrate + a try_own_* fallthrough surface
+///   * RescanComposed   — try_own_* surface for the composed shape
+///   * Short            — NO try_own_* surface exists (TidScan,
+///                        TidRangeScan, MergeJoin, Material, ValuesScan,
+///                        CteScan, FunctionScan, LockRows)
+fn epq_recheck_verdict(plan: Node<'_>) -> Option<(ShapeClass, EpqNodeVerdict)> {
+    use ::types_nodes::NodeTag as T;
+    use EpqNodeVerdict as V;
+    Some(match plan.node_tag() {
+        T::T_SeqScan => (ShapeClass::SeqScan, V::CaptureScan),
+        T::T_IndexScan => (ShapeClass::IndexScan, V::CaptureScan),
+        T::T_IndexOnlyScan => (ShapeClass::IndexOnlyScan, V::CaptureScan),
+        T::T_BitmapHeapScan => (ShapeClass::BitmapHeapScan, V::CaptureScan),
+        // Tid scans: the Y0 substrate can feed their CAPTURED case, but no
+        // try_own_tid_scan/_tid_range_scan surface exists for the plain-rel
+        // fallthrough (and the AM recheckMtd divergence — TidRecheck's
+        // bsearch vs TidRangeRecheck's range re-compare, pinned by
+        // epq-storm-tid — is unwired on lanes): structurally Short.
+        T::T_TidScan => (ShapeClass::TidScan, V::Short),
+        T::T_TidRangeScan => (ShapeClass::TidRangeScan, V::Short),
+        T::T_NestLoop => (ShapeClass::NestLoop, V::RescanComposed),
+        T::T_MergeJoin => (ShapeClass::MergeJoin, V::Short),
+        T::T_HashJoin => (ShapeClass::Join, V::RescanComposed),
+        T::T_Sort => (ShapeClass::SortFeed, V::RescanComposed),
+        T::T_Material => (ShapeClass::Material, V::Short),
+        T::T_Result => (ShapeClass::ResultNode, V::RescanComposed),
+        T::T_ValuesScan => (ShapeClass::ValuesScan, V::Short),
+        T::T_CteScan => (ShapeClass::CteScan, V::Short),
+        T::T_SubqueryScan => (ShapeClass::SubqueryScan, V::RescanComposed),
+        T::T_FunctionScan => (ShapeClass::FunctionScan, V::Short),
+        T::T_Append => (ShapeClass::Append, V::RescanComposed),
+        T::T_LockRows => (ShapeClass::LockRows, V::Short),
+        _ => return None,
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Y0 — the captured-singleton BatchGranuleSource flavor (dark this wave)
@@ -251,4 +427,16 @@ pub(crate) fn epq_captured_probe_for_tests<'mcx>(
         done_latched,
         reemit_refused,
     }))
+}
+
+/// Classification probe for the unit corpus: (class name, verdict) rows for
+/// one plan, WITHOUT touching any cache or counter.
+#[cfg(test)]
+pub(crate) fn epq_classify_for_tests(
+    plan: Option<Node<'_>>,
+) -> Vec<(&'static str, EpqNodeVerdict)> {
+    let mcx_owned = ::mcx::MemoryContext::new("epq-classify-probe");
+    let mut entries = PgVec::new_in(mcx_owned.mcx());
+    classify_into(plan, &mut entries);
+    entries.iter().map(|&(c, v)| (c.name(), v)).collect()
 }
