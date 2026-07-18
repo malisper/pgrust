@@ -14402,3 +14402,12 @@ pub(crate) use dml::dml_oc_set_for_tests;
 
 // --- WS-X wave-5 sub-region (reserved) ----------------------------------------
 // --- end WS-X wave-5 ----------------------------------------------------------
+
+// --- WS-AA (wave-7): rowchain admission test levers (the admission entry and
+// chain dispatch are dml.rs-local per the wave-7 contract §3; this is the
+// unit-corpus re-export only — the WS-W wave-5 dml_oc precedent verbatim.
+// Contract-deviation note: §5 marks lanev2.rs "WS-AA: no edits"; this EOF
+// append touches no code line (recorded in notes/se-wave7-fusion.md).)
+#[cfg(test)]
+pub(crate) use dml::{dml_rowchain_set_for_tests, DML_ROWCHAIN_DRIVES_FOR_TESTS};
+// --- end WS-AA (wave-7) ---
