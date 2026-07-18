@@ -222,6 +222,7 @@ fn make_portal<'mcx>(mcx: Mcx<'mcx>, formats: &[i16]) -> Portal<'mcx> {
         cursorStore: TuplestoreHandle::NULL,
         cursorFillExhausted: false,
         currentOfEligible: None,
+        cursorCaptureBatch: false,
         cursorTidStore: TuplestoreHandle::NULL,
     })
 }

@@ -911,6 +911,14 @@ mod scanfix {
         });
     }
 
+    /// Outstanding pin census (SE-R41 v2 posture teeth): the total page-pin
+    /// count across the fixture — the hold-pin pin asserts it is NONZERO at
+    /// a cursor-fill suspension (the C-parity Volcano posture holds the
+    /// staged page) where the parked posture asserted zero.
+    pub fn held_pins() -> i32 {
+        with_fake(|f| f.pins.iter().sum())
+    }
+
     fn int4_tupdesc<'mcx>(mcx: Mcx<'mcx>, natts: i16) -> Rc<TupleDescData<'mcx>> {
         let mut attrs = PgVec::new_in(mcx);
         let mut compact = PgVec::new_in(mcx);
@@ -12717,7 +12725,7 @@ mod cursors_wave10_cb {
                 estate.es_epq_active = true;
                 let (h, mut dest) = mk_store_dest();
                 assert!(
-                    !crate::lanev2::cursor_store_batch_fill(planstate, estate, &mut dest)
+                    !crate::lanev2::cursor_store_batch_fill(planstate, estate, &mut dest, None)
                         .unwrap(),
                     "EPQ drive never batch-fills"
                 );
@@ -12726,7 +12734,7 @@ mod cursors_wave10_cb {
                 // Store-face gate: a non-tuplestore receiver keeps the loop.
                 let mut nodest = DestReceiver::DoNothing;
                 assert!(
-                    !crate::lanev2::cursor_store_batch_fill(planstate, estate, &mut nodest)
+                    !crate::lanev2::cursor_store_batch_fill(planstate, estate, &mut nodest, None)
                         .unwrap(),
                     "non-store receivers keep the row loop"
                 );
@@ -12734,7 +12742,7 @@ mod cursors_wave10_cb {
                 // Heap standalone refuses admission: dispatch falls through
                 // with NOTHING consumed (the row loop then owns the run).
                 assert!(
-                    !crate::lanev2::cursor_store_batch_fill(planstate, estate, &mut dest)
+                    !crate::lanev2::cursor_store_batch_fill(planstate, estate, &mut dest, None)
                         .unwrap(),
                     "Volcano-refused plan keeps the row loop"
                 );
@@ -12920,6 +12928,433 @@ mod cursors_wave10_cb {
     }
 }
 // --- end WS-CB wave-10 --------------------------------------------------------
+
+// --- SE-R41 (reason-41 retirement: the capture-batch heap fill; band 99201+) ---
+// Unit pins for the in-run §4.2 capture that retires the row-chain fallback
+// for heap cursor fills (notes/se-r41-retire.md §3): the capture-batchable
+// plan probe, the capture-armed batch fill through the REAL run seam
+// (sidecar/store row alignment with GENUINE (block, lineoff) tids off the
+// scanfix heap pages), and the capture ROW LOOP fallback when the dispatch
+// refuses at run time — whose sidecar must be byte-identical to the sink's
+// (the fallback-parity teeth: correctness never rides on the lane
+// admitting). Same serialization discipline as the WS-CB region.
+mod cursors_r41 {
+    use super::*;
+
+    fn mk_sidecar() -> ::types_portal::TuplestoreHandle {
+        tuplestore::hold::register(tuplestore::Tuplestore::begin_heap(true, false, 1024))
+    }
+
+    fn read_sidecar(h: ::types_portal::TuplestoreHandle) -> Vec<(u32, u64)> {
+        let mut rows = Vec::new();
+        loop {
+            match tuplestore::hold::tidstore_get(h, rows.len() as i64).unwrap() {
+                Some(row) => rows.push(row),
+                None => break,
+            }
+        }
+        rows
+    }
+
+    // Store dest + reader, the cursors_wave10_cb idiom (module-private
+    // there; duplicated rather than widened).
+    fn mk_store_dest() -> (::types_portal::TuplestoreHandle, DestReceiver<'static>) {
+        let store = tuplestore::Tuplestore::begin_heap(true, false, 1024);
+        let h = tuplestore::hold::register(store);
+        let mut dr = tstore_receiver::tstore_create_DR();
+        tstore_receiver::set_params(&mut dr, h, false);
+        (h, DestReceiver::Tuplestore(dr))
+    }
+
+    fn read_store_i32s(
+        h: ::types_portal::TuplestoreHandle,
+        desc: &std::rc::Rc<::types_tuple::TupleDescData<'static>>,
+    ) -> Vec<i32> {
+        let read_cx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("read")));
+        let mut slot = exectuples::make_tuple_table_slot(
+            read_cx.mcx(),
+            ::types_slot::TupleSlotKind::MinimalTuple,
+            Some(desc.clone()),
+        );
+        let mut rows: Vec<i32> = Vec::new();
+        loop {
+            let got = tuplestore::hold::with_store(h, |ts| {
+                ts.gettupleslot(true, true, &mut slot, read_cx.mcx())
+            })
+            .unwrap();
+            if !got {
+                break;
+            }
+            let mut isnull = false;
+            let v = exectuples::slot_getattr(&mut slot, 1, &mut isnull);
+            assert!(!isnull);
+            rows.push(v.as_i32());
+        }
+        rows
+    }
+
+    /// §3.1 probe shapes: a bare heap SeqScan top is capture-batchable; a
+    /// wrapped top (Limit/Sort over the same scan) is NOT — it keeps the
+    /// D-CA-2 fence and the row-chain capture loop verbatim.
+    #[test]
+    fn cursors_r41_capture_probe_admits_bare_seqscan_only() {
+        let mcx = leaked_mcx();
+        assert!(crate::execcurrent::cursor_plan_capture_batch_fill_seam(mk_seqscan_pstmt(
+            mcx, 99201
+        )));
+        assert!(!crate::execcurrent::cursor_plan_capture_batch_fill_seam(
+            mk_sort_limit_pstmt(mcx, 99201, true, None, Some(3))
+        ));
+    }
+
+    /// THE retirement pin: a capture-armed budgeted store fill over a
+    /// two-page heap table, driven through the REAL run seam twice
+    /// (budget 4 = pause mid-batch-2 + park, then a slack budget = resume
+    /// + drain). The batch fill ENGAGES (lane staging position is the
+    /// teeth), the store receives the whole table in order, and the
+    /// sidecar is row-aligned with the store carrying the GENUINE page
+    /// tids — (0,1)..(0,3), (1,1)..(1,2) — captured per accepted row
+    /// inside the run (settle-safe by ordering). Then the FALLBACK arm:
+    /// an identical table whose scan init carries the fence eflags
+    /// (`batch_allowed=false` — the unit-level stand-in for any run-time
+    /// dispatch refusal), so the capture ROW LOOP serves the same fills —
+    /// store AND sidecar must land byte-identical to the sink's.
+    #[test]
+    fn cursors_r41_capture_batch_fill_sidecar_alignment_and_rowloop_fallback_parity() {
+        use ::types_slot::EXEC_FLAG_BACKWARD;
+
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mcx = leaked_mcx();
+        crate::lanev2::cursors_set_for_tests(true);
+
+        // The genuine page tids of the 3+2-row fixture: block<<16 | lineoff.
+        let expect_packed: Vec<u64> = vec![1, 2, 3, (1 << 16) | 1, (1 << 16) | 2];
+        let mut arm_store: Vec<Vec<i32>> = Vec::new();
+        let mut arm_packed: Vec<Vec<u64>> = Vec::new();
+
+        for (relid, fence_eflags) in [(99202u32, 0), (99203u32, EXEC_FLAG_BACKWARD)] {
+            scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
+            let pstmt = mk_seqscan_pstmt(mcx, relid);
+            let snap_ctx: &'static MemoryContext =
+                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snapshot: snapmgr::Snapshot =
+                std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                    snap_ctx.mcx(),
+                    ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+                ));
+            let mut rows: Vec<i32> = Vec::new();
+            let mut sidecar_rows: Vec<(u32, u64)> = Vec::new();
+            with_exec_data(pstmt, |data, pstmt| {
+                data.estate.es_snapshot = Some(snapshot);
+                let desc =
+                    crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, fence_eflags)
+                        .unwrap();
+                let (h, mut dest) = mk_store_dest();
+                let sidecar = mk_sidecar();
+                tcop_dest::SetTuplestoreCaptureSidecar(&mut dest, sidecar);
+                // Budgeted drive 1: FETCH 4 (crosses the 3-row page batch;
+                // the engaged arm pauses mid-batch-2 and parks).
+                data.estate.es_processed = 0;
+                crate::execmain::execute_plan(
+                    data,
+                    CmdType::CMD_SELECT,
+                    true,
+                    4,
+                    ForwardScanDirection,
+                    false,
+                    &mut dest,
+                )
+                .unwrap();
+                assert_eq!(data.estate.es_processed, 4);
+                // Engagement teeth (SE-R41 v2, the pin posture): the engaged
+                // batch fill pauses WITHOUT parking — the staged page batch
+                // and its pin survive the suspension (C-parity Volcano
+                // posture; `seq_scan_cursor_settle` refuses on
+                // `lane_hold_pin`), so the resume flag never arms on EITHER
+                // arm and the next fill continues from the node-resident
+                // cursor with zero restage. The unfenced arm's engagement
+                // evidence is the live staged cursor + posture flag + a HELD
+                // page pin; the fenced (capture row loop) arm stages nothing
+                // and holds only the Volcano scan's own cross-FETCH pin.
+                assert!(
+                    !data.estate.es_lane_cursor_parked,
+                    "hold-pin posture: an engaged cursor fill never parks"
+                );
+                {
+                    let planstate = data.planstate.as_mut().unwrap();
+                    let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate
+                    else {
+                        panic!("bare seqscan plan");
+                    };
+                    if fence_eflags == 0 {
+                        assert!(ss.lane_hold_pin(), "posture set at engagement");
+                        assert_eq!(
+                            ss.lane_cursor(),
+                            (1, 2),
+                            "staged batch survives the suspension (mid-batch-2)"
+                        );
+                        assert!(
+                            !::nodeseqscan::seq_scan_cursor_parked(ss),
+                            "no park record under the pin posture"
+                        );
+                        assert!(
+                            scanfix::held_pins() > 0,
+                            "the staged page's pin is HELD across the suspension"
+                        );
+                    } else {
+                        assert!(!ss.lane_hold_pin(), "fenced arm never engages the fill");
+                        assert_eq!(ss.lane_cursor(), (0, 0), "row loop stages nothing");
+                    }
+                }
+                // Budgeted drive 2: slack budget drains the remainder
+                // (resume-repossession for the engaged arm).
+                data.estate.es_processed = 0;
+                crate::execmain::execute_plan(
+                    data,
+                    CmdType::CMD_SELECT,
+                    true,
+                    99,
+                    ForwardScanDirection,
+                    false,
+                    &mut dest,
+                )
+                .unwrap();
+                assert_eq!(data.estate.es_processed, 1);
+                rows = read_store_i32s(h, &desc);
+                sidecar_rows = read_sidecar(sidecar);
+                tuplestore::hold::end(sidecar);
+                tuplestore::hold::end(h);
+                let ExecData { estate, planstate } = data;
+                crate::exec_end_node(planstate.as_mut().unwrap(), estate).unwrap();
+                estate.exec_reset_tuple_table(false);
+                estate.exec_close_range_table_relations().unwrap();
+            });
+            assert_eq!(rows, vec![1, 2, 3, 4, 5], "the whole table, in order");
+            assert_eq!(
+                sidecar_rows.len(),
+                rows.len(),
+                "sidecar/store row alignment (one identity per accepted row)"
+            );
+            assert_eq!(
+                sidecar_rows.iter().map(|&(o, _)| o).collect::<Vec<_>>(),
+                vec![relid; 5],
+                "capture stamps the scan relation oid"
+            );
+            arm_store.push(rows);
+            arm_packed.push(sidecar_rows.into_iter().map(|(_, t)| t).collect());
+        }
+
+        assert_eq!(
+            arm_packed[0], expect_packed,
+            "sink capture reads the genuine (block, lineoff) page tids"
+        );
+        assert_eq!(arm_store[0], arm_store[1], "store parity across fill engines");
+        assert_eq!(
+            arm_packed[0], arm_packed[1],
+            "sidecar parity: sink capture == capture row loop (fallback-parity teeth)"
+        );
+
+        crate::lanev2::cursors_set_for_tests(false);
+        scanfix::quiesced();
+    }
+
+    /// SE-R41 v2 §2 — THE PAGE-REMAINDER PIN (the SE12 budget-floor probe's
+    /// es_processed 8-vs-16 loss, made a unit): a batch fill that freshly
+    /// engages over a scan the per-tuple row walk left MID-PAGE must adopt
+    /// the current page's unconsumed remainder — never advance past it
+    /// (`heap_getnextpagebatch` advances pages; the documented no-interleave
+    /// invariant). Fixture: 16 rows over two 8-row pages; the row walk
+    /// consumes 3, then a fill engages through the test face (below the
+    /// memoized-verdict dispatch — exactly the shape the SE12 floor probe
+    /// made reachable). RED pre-fix: the fresh staging advanced to page 1
+    /// and delivered 8 rows (the page-0 remainder LOST); GREEN: 13 rows,
+    /// byte-exact, in order.
+    #[test]
+    fn cursors_r41v2_midpage_engagement_adopts_page_remainder() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mcx = leaked_mcx();
+        crate::lanev2::cursors_set_for_tests(true);
+
+        let relid = 99204u32;
+        scanfix::register_table(
+            relid,
+            &[&[1, 2, 3, 4, 5, 6, 7, 8], &[9, 10, 11, 12, 13, 14, 15, 16]],
+        );
+        let pstmt = mk_seqscan_pstmt(mcx, relid);
+        let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+        let snapshot: snapmgr::Snapshot =
+            std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                snap_ctx.mcx(),
+                ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+            ));
+        let mut rows: Vec<i32> = Vec::new();
+        with_exec_data(pstmt, |data, pstmt| {
+            data.estate.es_snapshot = Some(snapshot);
+            let desc = crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+            let (h, mut dest) = mk_store_dest();
+            let ExecData { estate, planstate } = data;
+            let planstate = planstate.as_mut().unwrap();
+            estate.es_direction = ForwardScanDirection;
+
+            // The row-chain drive first: three per-tuple pulls leave the AM
+            // mid-page-0 (last-returned index 2 of 8).
+            for expect in [1, 2, 3] {
+                let slot_id = crate::exec_proc_node(planstate, estate)
+                    .unwrap()
+                    .expect("row walk row");
+                let mut isnull = false;
+                let v = exectuples::slot_getattr(estate.slot_mut(slot_id), 1, &mut isnull);
+                assert!(!isnull);
+                assert_eq!(v.as_i32(), expect);
+            }
+
+            // Fresh batch engagement MID-PAGE: the fill must adopt rows
+            // 4..8 of the pinned page before walking on.
+            estate.es_processed = 0;
+            estate.es_cursor_run_budget =
+                crate::lanev2::cursor_run_budget_install(true, true, 999, false, 0);
+            {
+                let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate else {
+                    panic!("bare seqscan plan");
+                };
+                let exhausted =
+                    crate::lanev2::cursor_fill_step_seqscan_for_tests(ss, &mut dest, estate)
+                        .unwrap();
+                assert!(exhausted, "slack budget drains to end of scan");
+            }
+            assert_eq!(
+                estate.es_processed, 13,
+                "the page-0 remainder is ADOPTED, not lost (the 8-vs-16 defect class)"
+            );
+            rows = read_store_i32s(h, &desc);
+            tuplestore::hold::end(h);
+            crate::exec_end_node(planstate, estate).unwrap();
+            estate.exec_reset_tuple_table(false);
+            estate.exec_close_range_table_relations().unwrap();
+        });
+        assert_eq!(
+            rows,
+            (4..=16).collect::<Vec<i32>>(),
+            "remainder + following pages, byte-exact, in order"
+        );
+        crate::lanev2::cursors_set_for_tests(false);
+        scanfix::quiesced();
+    }
+
+    /// SE-R41 v2 §3 — the pin-posture walker pin: a cursor-fill-owned scan
+    /// (`lane_hold_pin`, set by the dispatch at engagement) suspends WITHOUT
+    /// parking — the settle walker refuses, the staged page batch and its
+    /// pin survive (held_pins > 0 where the parked posture asserted zero),
+    /// and the next fill continues from the node-resident cursor with ZERO
+    /// restage, byte-identically. Control arm: the SAME shape without the
+    /// posture flag still parks with zero pins — R3 for lane claims is
+    /// unchanged.
+    #[test]
+    fn cursors_r41v2_hold_pin_posture_suspends_without_park_and_resumes_in_place() {
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mcx = leaked_mcx();
+        crate::lanev2::cursors_set_for_tests(true);
+
+        let mut arm_rows: Vec<Vec<i32>> = Vec::new();
+        for (hold_pin, relid) in [(true, 99205u32), (false, 99206u32)] {
+            scanfix::register_table(relid, &[&[1, 2, 3], &[4, 5]]);
+            let pstmt = mk_seqscan_pstmt(mcx, relid);
+            let snap_ctx: &'static MemoryContext =
+                Box::leak(Box::new(MemoryContext::new("snap")));
+            let snapshot: snapmgr::Snapshot =
+                std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                    snap_ctx.mcx(),
+                    ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+                ));
+            let mut rows: Vec<i32> = Vec::new();
+            with_exec_data(pstmt, |data, pstmt| {
+                data.estate.es_snapshot = Some(snapshot);
+                let desc =
+                    crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+                let (h, mut dest) = mk_store_dest();
+                let ExecData { estate, planstate } = data;
+                let planstate = planstate.as_mut().unwrap();
+                estate.es_direction = ForwardScanDirection;
+
+                // Budgeted fill 1 (FETCH 4): pauses mid-batch-2.
+                estate.es_processed = 0;
+                estate.es_cursor_run_budget =
+                    crate::lanev2::cursor_run_budget_install(true, true, 4, false, 0);
+                {
+                    let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate else {
+                        panic!("bare seqscan plan");
+                    };
+                    if hold_pin {
+                        // As the dispatch does at engagement.
+                        ss.set_lane_hold_pin();
+                    }
+                    let exhausted =
+                        crate::lanev2::cursor_fill_step_seqscan_for_tests(ss, &mut dest, estate)
+                            .unwrap();
+                    assert!(!exhausted, "budget exhaustion pauses");
+                    assert_eq!(estate.es_processed, 4);
+                }
+                // The suspension: settle walk at the run seam's park point.
+                let parked = crate::lanev2::cursor_run_park(planstate, estate);
+                if hold_pin {
+                    assert!(!parked, "posture: the walker refuses to park");
+                    let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate else {
+                        unreachable!()
+                    };
+                    assert_eq!(ss.lane_cursor(), (1, 2), "staged cursor survives");
+                    assert!(!::nodeseqscan::seq_scan_cursor_parked(ss));
+                    assert!(
+                        scanfix::held_pins() > 0,
+                        "the staged page's pin is HELD across the suspension"
+                    );
+                } else {
+                    assert!(parked, "control: the lane claim parks as before");
+                    scanfix::quiesced(); // R3 zero-pins-at-settle unchanged
+                    crate::lanev2::cursor_park_resume(planstate, estate).unwrap();
+                    let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate else {
+                        unreachable!()
+                    };
+                    assert_eq!(ss.lane_cursor(), (1, 2), "consume cursor restored");
+                }
+                // Budgeted fill 2: continues in place (posture arm restages
+                // NOTHING — there is nothing to restage) and drains.
+                estate.es_processed = 0;
+                estate.es_cursor_run_budget =
+                    crate::lanev2::cursor_run_budget_install(true, true, 99, false, 0);
+                {
+                    let crate::procnode::PlanStateNode::SeqScan(ss) = &mut *planstate else {
+                        unreachable!()
+                    };
+                    let exhausted =
+                        crate::lanev2::cursor_fill_step_seqscan_for_tests(ss, &mut dest, estate)
+                            .unwrap();
+                    assert!(exhausted, "source exhausted under a slack budget");
+                    assert_eq!(estate.es_processed, 1);
+                }
+                rows = read_store_i32s(h, &desc);
+                tuplestore::hold::end(h);
+                crate::exec_end_node(planstate, estate).unwrap();
+                estate.exec_reset_tuple_table(false);
+                estate.exec_close_range_table_relations().unwrap();
+            });
+            assert_eq!(rows, vec![1, 2, 3, 4, 5], "the whole table, in order");
+            arm_rows.push(rows);
+        }
+        assert_eq!(
+            arm_rows[0], arm_rows[1],
+            "pin posture is byte-identical to the parked posture"
+        );
+        crate::lanev2::cursors_set_for_tests(false);
+        scanfix::quiesced();
+    }
+}
+// --- end SE-R41 -----------------------------------------------------------------
 
 // =============================================================================
 // WS-MJ1 (LANE-MERGEJOIN inc-1) lane-surface pins — band 99101+ (lane band

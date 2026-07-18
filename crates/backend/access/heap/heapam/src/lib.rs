@@ -1164,6 +1164,38 @@ pub fn heap_getnextpagebatch(scan: &mut HeapScanDescData<'_>) -> PgResult<u32> {
     }
 }
 
+/// Mid-page adoption for a FRESH batch engagement over a scan the PER-TUPLE
+/// pagemode walk already advanced (SE-R41 v2, the page-remainder defect fix;
+/// notes/se-r41-v2.md §2): `heap_getnextpagebatch`'s documented invariant is
+/// "no interleaving with per-tuple getnext calls" because it ADVANCES pages —
+/// a batch drive that freshly engages while the row walk sits mid-page would
+/// silently skip the current page's unconsumed remainder (the SE12
+/// budget-floor probe's es_processed 8-vs-16 loss). This probe ADOPTS that
+/// remainder instead: if the scan holds a per-tuple-walked page with
+/// unreturned visible tuples, park `rs_cindex` at the page end (the batch
+/// consumption convention — a stray per-tuple continue advances pages) and
+/// hand the batch drive the window `[start, n)` over the ALREADY-COLLECTED
+/// `rs_vistuples` of the pinned page. `rs_cindex` is the index of the tuple
+/// the per-tuple walk last RETURNED (`lineindex = rs_cindex + dir`), so the
+/// remainder starts at `rs_cindex + 1`; rows `<= rs_cindex` were already
+/// delivered to the caller's qual by the row walk. None = nothing to adopt
+/// (fresh/drained scan, or the page is fully consumed): the caller stages
+/// the NEXT page via `heap_getnextpagebatch` as before. Forward pagemode
+/// only (the batch drive's admission gates).
+pub fn heap_adopt_midpage_batch(scan: &mut HeapScanDescData<'_>) -> Option<(u32, u32)> {
+    debug_assert!((scan.rs_base.rs_flags & SO_ALLOW_PAGEMODE) != 0);
+    debug_assert!(scan.rs_base.rs_nkeys == 0);
+    if !scan.rs_inited || scan.rs_cbuf.is_none() || scan.rs_ntuples == 0 {
+        return None;
+    }
+    let start = scan.rs_cindex + 1;
+    if start >= scan.rs_ntuples {
+        return None;
+    }
+    scan.rs_cindex = scan.rs_ntuples - 1;
+    Some((start, scan.rs_ntuples))
+}
+
 pub fn heap_batch_deform_soa<'mcx>(
     scan: &mut HeapScanDescData<'mcx>,
     plan: &exectuples::SoaDeformPlan<'_>,

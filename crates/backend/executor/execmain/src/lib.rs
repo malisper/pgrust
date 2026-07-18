@@ -133,6 +133,11 @@ pub fn init_seams() {
     execmain_seams::cursor_store_armed_note::set(lanev2::cursor_store_armed_note);
     execmain_seams::cursor_fill_tid_capture_refused::set(lanev2::cursor_fill_tid_capture_refused);
     // --- end SEAM-WIRING ---
+    // --- SE-R41 (reason-41 retirement): the §3.1 capture-batchable probe ---
+    execmain_seams::cursor_plan_capture_batch_fill::set(
+        execcurrent::cursor_plan_capture_batch_fill_seam,
+    );
+    // --- end SE-R41 ---
     execparallel::register_parallel_query_main();
     {
         guc_tables::session_guc_bool!(PLP, parallel_leader_participation_stand_in, set_parallel_leader_participation_stand_in, true);

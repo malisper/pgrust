@@ -176,6 +176,13 @@ pub struct PortalData<'mcx> {
     /// §4 CURRENT-OF eligibility, probed once at first fill (None = not yet
     /// probed; Some(false) = scan-state resolution can never find a row).
     pub currentOfEligible: Option<bool>,
+    /// SE-R41 (notes/se-r41-retire.md §3.1/§3.2): the eligible plan is the
+    /// batch-fill shape (bare T_SeqScan top over a tid-capable heap AM), so
+    /// the fill captures §4.2 identity INSIDE the run (batch sink / capture
+    /// row loop) and the portal takes the PLAIN store-armed eflags instead
+    /// of the D-CA-2 fence. PortalStart-fixed like `currentOfEligible`;
+    /// meaningful only when `currentOfEligible == Some(true)`.
+    pub cursorCaptureBatch: bool,
     /// §4.2 hidden (tableoid, ctid) row-identity sidecar, eligible plans
     /// only; row index == store row index; spill-armed like the store.
     pub cursorTidStore: TuplestoreHandle,
