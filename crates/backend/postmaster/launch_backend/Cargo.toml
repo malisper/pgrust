@@ -27,6 +27,8 @@ bgwriter = { path = "../bgwriter" }
 checkpointer = { path = "../checkpointer" }
 pgarch = { path = "../pgarch" }
 walsummarizer = { path = "../walsummarizer" }
+walreceiver = { path = "../../replication/walreceiver" }
+slotsync = { path = "../../replication/slotsync" }
 postmaster_startup = { path = "../startup" }
 walwriter = { path = "../walwriter" }
 pmchild_seams = { path = "../pmchild_seams" }

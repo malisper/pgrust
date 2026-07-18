@@ -390,7 +390,38 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      no state movement, never reset — the registered callback (and
     //      the flag's meaning) live exactly as long as the backend thread,
     //      same class as the router DUMP guard (slot 18).
-    assert_eq!(count_tree(crates), 479, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // +14 recovery slots (t26 car-10 re-board; renumbered after the simplecache slot): ALL
+    // one class — C per-PROCESS function-statics of the replication/
+    // recovery machinery become per-THREAD TLS on the thread model, owned
+    // by DEDICATED background threads (startup, walreceiver, walsender,
+    // logical apply/tablesync workers, slotsync) that never host a swapped
+    // session; no envelope capture/restore applies. Deliberately
+    // non-session TLS, no SESSION_ENVELOPE_MANIFEST rows:
+    //   21. transam/xlogrecovery/src/targets.rs (x2) — recovery-target
+    //      bookkeeping of the startup thread.
+    //   22. transam/xlogrecovery/src/lib.rs (+1) — startup-thread replay
+    //      state beside the existing slot.
+    //   23. replication/logical/relation/src/lib.rs — apply-worker
+    //      relation-map cache.
+    //   24. replication/logical/worker/src/lib.rs — apply-worker state
+    //      (worker.c per-process statics).
+    //   25. replication/logical/worker/src/tablesync.rs — tablesync-worker
+    //      state.
+    //   26. replication/origin/src/lib.rs — session_replication_origin
+    //      analog on the apply thread.
+    //   27. replication/slot/src/lib.rs (+1) — per-thread acquired-slot
+    //      pointer (MyReplicationSlot analog).
+    //   28. replication/slotsync/src/lib.rs — slotsync-worker state.
+    //   29. replication/syncrep/src/lib.rs — walsender syncrep queue state.
+    //   30. replication/walreceiver/src/lib.rs — walreceiver-thread state.
+    //   31. replication/walsender/src/logical_stream.rs — per-walsender
+    //      logical-stream state (incl. the WalFlushPacing analog of C's
+    //      function-static).
+    //   32. storage/ipc/procarray/src/known_assigned.rs — startup-thread
+    //      KnownAssignedXids bookkeeping.
+    //   33. contrib/pgoutput/src/lib.rs — pgoutput per-decoder context on
+    //      the walsender thread.
+    assert_eq!(count_tree(crates), 493, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
