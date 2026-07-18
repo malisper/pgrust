@@ -305,11 +305,10 @@ pub trait Vfs {
 pub type ActiveVfs = posix::PosixVfs;
 
 // --- append region (WS-C): sim module + cfg hook ---
-// WS-C appends here, and ONLY here (contract §5.2):
-//   #[cfg(pgrust_sim)] pub mod sim;
-//   #[cfg(pgrust_sim)] pub type ActiveVfs = sim::SimVfs;
-//   (+ sim conformance line in the assert below, and SimVfs must provide
-//    `pub const fn new()`.)
+#[cfg(pgrust_sim)]
+pub mod sim;
+#[cfg(pgrust_sim)]
+pub type ActiveVfs = sim::SimVfs;
 // --- end append region (WS-C) ---
 
 /// The one active instance. Both PosixVfs and SimVfs are ZSTs with
@@ -323,6 +322,8 @@ const _: () = {
     #[allow(dead_code)]
     fn _both() {
         assert_conforms::<posix::PosixVfs>();
+        #[cfg(pgrust_sim)]
+        assert_conforms::<sim::SimVfs>();
     }
 };
 
