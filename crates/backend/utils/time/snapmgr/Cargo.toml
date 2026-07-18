@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 fd = { path = "../../../storage/file/fd" }
+libc = "0.2"
 predicate_seams = { path = "../../../storage/lmgr/predicate_seams" }
 mcx = { path = "../../../../_support/mcx" }
 types_core = { path = "../../../../_support/types/types_core" }
@@ -24,6 +25,7 @@ syscache_seams = { path = "../../cache/syscache_seams" }
 elog = { path = "../../error/elog" }
 
 [dev-dependencies]
+vfs = { path = "../../../storage/file/vfs" }
 varsup = { path = "../../../access/transam/varsup" }
 lwlock = { path = "../../../storage/lmgr/lwlock" }
 init_small = { path = "../../init/init_small" }

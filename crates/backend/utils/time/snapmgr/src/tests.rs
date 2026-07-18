@@ -68,6 +68,16 @@ fn setup() {
         xact_seams::get_current_command_id::set(|_| Ok(CURCID.get()));
         xact_seams::get_current_transaction_nest_level::set(|| 1);
         xact_seams::is_in_parallel_mode::set(|| false);
+        // Export/Import surface (the inc-5 fd-reroute tests).
+        xact_seams::get_top_transaction_id_if_any::set(|| InvalidTransactionId);
+        xact_seams::is_sub_transaction::set(|| false);
+        xact_seams::get_current_sub_transaction_id::set(|| 1);
+        xact_seams::xact_get_committed_children::set(|| Ok(Vec::new()));
+        xact_seams::get_xact_iso_level::set(|| 1);
+        xact_seams::xact_read_only::set(|| false);
+        g::SetMyDatabaseId(5);
+        fd::init_seams();
+        fd::InitFileAccess();
         xact_seams::isolation_uses_xact_snapshot::set(|| ISO_USES_XACT_SNAPSHOT.get());
         xact_seams::isolation_is_serializable::set(|| false);
         xact_seams::transaction_id_is_current_transaction_id::set(|_| false);
@@ -443,4 +453,113 @@ fn panic_inside_with_state_does_not_poison_the_session() {
     AtEOXact_Snapshot(false, true).expect("abort-path AtEOXact_Snapshot");
     assert!(with_state(|s| s.active.is_empty() && s.registered.is_empty()));
     assert!(!with_state(|s| s.first_snapshot_set));
+}
+
+// ---------------------------------------------------------------------------
+// pg_snapshots fs surface (the P4 inc-5 fd-reroute, closing the inc-4
+// ledger's "ImportSnapshot read surface" allowlist rows): the export/import
+// files are DATADIR-RELATIVE and must resolve through the fd -> vfs choke
+// (the relmapper/initfile dataplane precedent) — PosixVfs in the entered
+// real cwd under the default cfg, the SimVfs namespace (which has no cwd:
+// relative paths resolve at the sim root) under --cfg pgrust_sim.
+// ---------------------------------------------------------------------------
+
+fn cpath(path: &str) -> std::ffi::CString {
+    std::ffi::CString::new(path).unwrap()
+}
+
+fn vfs_mkdir(dir: &str) {
+    let rc = vfs::mkdir(&cpath(dir), 0o700);
+    assert!(
+        rc == 0 || vfs::get_errno() == libc::EEXIST,
+        "vfs_mkdir({dir}): errno {}",
+        vfs::get_errno()
+    );
+}
+
+fn vfs_read_file(path: &str) -> Vec<u8> {
+    let fd = vfs::open(&cpath(path), libc::O_RDONLY, 0);
+    assert!(fd >= 0, "vfs_read_file open({path}): errno {}", vfs::get_errno());
+    let mut out = Vec::new();
+    let mut buf = [0u8; 4096];
+    let mut off = 0i64;
+    loop {
+        let n = vfs::pread(fd, &mut buf, off);
+        assert!(n >= 0, "vfs_read_file pread({path}): errno {}", vfs::get_errno());
+        if n == 0 {
+            break;
+        }
+        out.extend_from_slice(&buf[..n as usize]);
+        off += n as i64;
+    }
+    assert_eq!(vfs::close(fd), 0);
+    out
+}
+
+static CWD: Mutex<()> = Mutex::new(());
+
+fn enter_dir(dir: &str) -> std::sync::MutexGuard<'static, ()> {
+    let guard = CWD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::env::set_current_dir(dir).unwrap();
+    guard
+}
+
+fn scratch_dir(tag: &str) -> String {
+    let dir = std::env::temp_dir().join(format!("pgrust_snapmgr_{}_{tag}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.to_str().unwrap().to_owned()
+}
+
+#[test]
+fn export_snapshot_and_eoxact_unlink_are_fd_routed() {
+    let _g = test_lock();
+    my_backend();
+    let root = scratch_dir("snapexport");
+    let _cwd = enter_dir(&root);
+    // The vfs domain's mirror of the relative export dir (EEXIST no-op in
+    // the entered real cwd under the default cfg; minted at the sim root
+    // under --cfg pgrust_sim).
+    vfs_mkdir("pg_snapshots");
+
+    let snap = GetTransactionSnapshot().unwrap();
+    let name = ExportSnapshot(&snap).unwrap();
+    drop(snap);
+    let path = format!("pg_snapshots/{name}");
+    let content = vfs_read_file(&path);
+    assert!(
+        content.starts_with(b"vxid:"),
+        "export file must exist in the vfs domain with the C layout"
+    );
+    // The tmp staging file was renamed away (fd::pg_rename, not std::fs).
+    assert!(
+        vfs::open(&cpath(&format!("{path}.tmp")), libc::O_RDONLY, 0) < 0,
+        "the .tmp staging file must not survive the rename"
+    );
+
+    // AtEOXact_Snapshot(commit): the export file unlinks through fd::pg_unlink.
+    end_xact();
+    assert!(
+        vfs::open(&cpath(&path), libc::O_RDONLY, 0) < 0,
+        "export file must be unlinked from the vfs domain at EOXact"
+    );
+}
+
+#[test]
+fn import_snapshot_missing_file_is_fd_routed() {
+    let _g = test_lock();
+    my_backend();
+    let root = scratch_dir("snapimport");
+    let _cwd = enter_dir(&root);
+    vfs_mkdir("pg_snapshots");
+    end_xact(); // FirstSnapshotSet must be false for the precondition gate
+
+    ISO_USES_XACT_SNAPSHOT.set(true);
+    let err = ImportSnapshot("00000000-00000000-1").unwrap_err();
+    ISO_USES_XACT_SNAPSHOT.set(false);
+    // The fd-routed open reported ENOENT: C's "snapshot does not exist" arm.
+    assert!(
+        err.message.contains("does not exist"),
+        "unexpected ImportSnapshot error: {}",
+        err.message
+    );
 }
