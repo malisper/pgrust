@@ -31,18 +31,34 @@ const pending = new Map(); // id -> { resolve, reject }
 // wasm-EH + baseline post-MVP features, no SIMD/memory64) loads in Chrome,
 // Firefox, and WebKit/Safari including iOS — the old wasm64-desktop /
 // wasm32-safari dual-asset split is gone.
+//
+// TWO engine MODES over that one asset (worker.js picks by JSPI feature
+// detection, ?engineMode= overrides): 'wire' = one long-lived protocol
+// session (temp tables / prepared statements / transactions span REPL
+// lines); 'single' = the original per-statement --single model (WebKit/
+// Safari fallback — no JSPI there as of mid-2026).
 const BUILD_INFO = {
-  wasip1: {
+  wire: {
     build: 'wasip1',
-    label: 'wasm32-wasip1 · full build',
-    shortLabel: 'wasm · wasip1',
+    label: 'wasm32-wasip1 · protocol session',
+    shortLabel: 'wasm · session',
+    note: '',
+  },
+  single: {
+    build: 'wasip1',
+    label: 'wasm32-wasip1 · single-user',
+    shortLabel: 'wasm · single',
     note: '',
   },
 };
 
+let engineMode = 'single'; // updated by the worker's build/ready messages
+
 export function getBuildInfo() {
-  return BUILD_INFO.wasip1;
+  return BUILD_INFO[engineMode] || BUILD_INFO.single;
 }
+
+export function getEngineMode() { return engineMode; }
 
 function ensureWorker() {
   if (worker) return readyPromise;
@@ -50,14 +66,30 @@ function ensureWorker() {
   const assetEncoding = params.get('assetEncoding');
   const workerParams = new URLSearchParams();
   if (assetEncoding) workerParams.set('assetEncoding', assetEncoding);
+  const engineOverride = params.get('engineMode');
+  if (engineOverride) workerParams.set('engineMode', engineOverride);
   const qs = workerParams.toString();
   const workerUrl = qs ? `./worker.js?${qs}` : './worker.js';
   worker = new Worker(workerUrl, { type: 'module' });
   readyPromise = new Promise((resolve, reject) => {
     worker.onmessage = (ev) => {
       const m = ev.data;
-      if (m.type === 'build') { return; }
-      if (m.type === 'ready') { resolve(); return; }
+      if (m.type === 'build') { if (m.engine) engineMode = m.engine; return; }
+      if (m.type === 'ready') {
+        if (m.engine) engineMode = m.engine;
+        persistState = { persist: !!m.persist, available: !!m.persistAvailable, restored: !!m.restored };
+        if (onPersist) onPersist(persistState, null);
+        resolve();
+        return;
+      }
+      if (m.type === 'persist-state') {
+        persistState = { ...persistState, persist: !!m.persist };
+        if (onPersist) onPersist(persistState, m.note || null);
+        if (m.id != null && pending.has(m.id)) {
+          const p = pending.get(m.id); pending.delete(m.id); p.resolve({ persist: !!m.persist, note: m.note || null });
+        }
+        return;
+      }
       if (m.type === 'status') { /* boot progress — surfaced via onStatus hook */ if (onStatus) onStatus(m.text); return; }
       if (m.type === 'reset-done') {
         const p = pending.get(m.id); if (p) { pending.delete(m.id); p.resolve({ ok: true }); }
@@ -86,6 +118,21 @@ function ensureWorker() {
 
 let onStatus = null;
 export function setStatusListener(fn) { onStatus = fn; }
+
+// ---- persistence (OPFS snapshot toggle; worker owns the mechanics) ----------
+let persistState = { persist: false, available: false, restored: false };
+let onPersist = null;
+export function setPersistListener(fn) { onPersist = fn; }
+export function getPersistState() { return persistState; }
+
+export async function setPersist(on) {
+  await ensureWorker();
+  const id = nextId++;
+  return new Promise((resolve, reject) => {
+    pending.set(id, { resolve, reject });
+    worker.postMessage({ type: 'persist', id, on: !!on });
+  });
+}
 
 export async function bootBackend() { return ensureWorker(); }
 
@@ -234,12 +281,34 @@ function commandTag(sql) {
   }
 }
 
+// Map a wire-mode result (worker.js summarizeWire) onto the design's result
+// kinds. Errors/notices arrive as protocol messages (ErrorResponse/
+// NoticeResponse), the command tag is the REAL backend tag — no stderr
+// scraping and no tag guessing on this path.
+function execWireResult(m) {
+  const w = m.wire;
+  if (w.error) return { kind: 'error', text: w.error.message, durationMs: m.ms };
+  if (w.columns && w.columns.length) {
+    const rows = w.rows.map((r) => r.map((v) => (v == null ? '' : v)));
+    if (rows.length === 1 && w.columns.length === 1 &&
+        typeof rows[0][0] === 'string' && rows[0][0].includes('\n')) {
+      return { kind: 'raw', text: rows[0][0], rowCount: 1, durationMs: m.ms };
+    }
+    const columns = w.columns.map((c) => c.name);
+    const aligns = w.columns.map((c) => (NUMERIC_TYPEIDS.has(c.typeid) ? 'r' : 'l'));
+    return { kind: 'table', columns, rows, aligns, durationMs: m.ms };
+  }
+  if (w.notices.length) return { kind: 'notice', text: w.notices.join('\n'), durationMs: m.ms };
+  return { kind: 'command', text: w.tag || '', durationMs: m.ms };
+}
+
 // ---- the exec() the design's REPL calls --------------------------------------
 // One SQL statement in (the design splits on ';' and calls us per statement);
 // one result object out.
 async function exec(sql) {
   await ensureWorker();
   const m = await postRun(sql);
+  if (m.engine === 'wire' && m.wire) return execWireResult(m);
   const { error, notices } = parseDiagnostics(m.stderr);
   if (error) return { kind: 'error', text: error, durationMs: m.ms };
 

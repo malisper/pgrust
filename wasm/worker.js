@@ -1,14 +1,30 @@
-// worker.js — boots the pgrust wasm module off the UI thread.
+// worker.js — boots the pgrust wasm engine off the UI thread.
 //
-// Loads postgres.wasm + the VFS image/manifest once, then keeps ONE long-lived
-// in-memory VFS (datadir). On each `run` message it instantiates a fresh module
-// instance against that SHARED VFS and feeds it the SQL. `postgres --single`
-// runs to completion (clean shutdown checkpoint) and exits per invocation,
-// but the writes it made (CREATE TABLE, INSERT, …) PERSIST in the VFS, so the
-// next Run boots over the mutated datadir and sees them — REPL-style state.
-// `reset` rebuilds the VFS from the pristine packed image (fresh initdb'd dir).
+// TWO engine modes over the same module + long-lived in-memory VFS (datadir):
+//
+//   'wire'   (default where JSPI exists): ONE long-lived `postgres
+//            --stdio-wire` instance serving a real pgwire session
+//            (wiresession.js). The worker speaks protocol frames over the
+//            stdin/stdout host pipes; SESSION state — temp tables, prepared
+//            statements, transactions spanning REPL lines — persists across
+//            statements. This is the browser port of the wasm-net-e2e
+//            wasmtime driver.
+//   'single' (fallback; ?engineMode=single forces it): the original model —
+//            each statement runs `postgres --single` to completion in a
+//            fresh instance over the SHARED VFS. Datadir state persists,
+//            session state does not. Engines without JSPI (WebKit/Safari as
+//            of mid-2026) always take this path via feature detection.
+//
+// PERSISTENCE (OPFS, snapshot-class — snapshot.js): when the persist toggle
+// is on, the worker serializes the VFS to an OPFS snapshot after each
+// completed statement (wire mode runs CHECKPOINT first, so a restore replays
+// only the WAL tail) and restores the newest valid snapshot at boot. Corrupt
+// snapshots and quota failures degrade to a fresh datadir / persistence-off
+// with a status message — never a wedged page.
 import { run, Vfs } from './pgrust-wasi.js';
 import { formatRun, normalizeSingleUserInput } from './format.js';
+import { WireSession, WireSessionDead, jspiSupported, parseMessage } from './wiresession.js';
+import { openOpfsStore, loadLatestSnapshot, saveSnapshot, clearSnapshots } from './snapshot.js';
 
 let wasmModule = null;
 let baseImage = null;     // immutable packed file bytes (the pristine template)
@@ -17,16 +33,35 @@ let vfs = null;           // long-lived datadir — PERSISTS across runs until r
 // One asset leg: the wasm32-wasip1 module runs everywhere we target (its
 // exnref wasm-EH encoding + feature set is accepted by Chrome, Firefox, and
 // WebKit/Safari incl. iOS — no desktop/safari dual-asset split needed).
+const PARAMS = new URLSearchParams(self.location.search);
 const ASSET_PREFIX = (() => {
-  const params = new URLSearchParams(self.location.search);
-  const mode = params.get('assetEncoding');
+  const mode = PARAMS.get('assetEncoding');
   if (mode === 'raw') return './raw/assets';
   if (mode === 'gzip') return './gzip/assets';
   if (mode === 'br') return './br/assets';
   return './assets';
 })();
+// Engine selection: explicit ?engineMode= wins; otherwise protocol mode
+// wherever the engine has JSPI (Chrome/Edge; Node), --single elsewhere
+// (WebKit/Safari incl. iOS — no JSPI as of mid-2026).
+const ENGINE = (() => {
+  const m = PARAMS.get('engineMode');
+  if (m === 'single' || m === 'wire') return m;
+  return jspiSupported() ? 'wire' : 'single';
+})();
 const WASM_CACHE_DB = 'pgrust-wasm-cache-v1';
 const WASM_CACHE_STORE = 'modules';
+
+let session = null;       // wire mode: the live WireSession
+let sessionStderr = [];   // wire mode: stderr chunks since the last statement
+let runChain = Promise.resolve(); // serializes wire queries (runs + checkpoints)
+
+// Persistence state.
+let store = null;         // OPFS store or null (unavailable)
+let persist = false;
+let snapGen = 0;
+let snapSlot = null;
+let restoredFromSnapshot = false;
 
 function post(m) { self.postMessage(m); }
 
@@ -112,6 +147,91 @@ async function runPreparedSql(sql) {
   };
 }
 
+// ---- wire engine ------------------------------------------------------------
+
+// A restored snapshot (and any crashed-session restart) boots over a datadir
+// whose previous owner never exited: drop its lockfile host-side (the
+// container-restart convention) and let StartupXLOG's normal recovery run.
+function scrubStaleLockfile() {
+  vfs.unlink('/pgdata/postmaster.pid');
+}
+
+async function startWireSession() {
+  session = new WireSession({
+    wasmModule,
+    vfs,
+    onStderr: (b) => sessionStderr.push(b),
+  });
+  await session.start(); // handshake through the first ReadyForQuery
+}
+
+async function stopWireSession() {
+  if (!session) return;
+  try { await session.terminate(); } catch { /* already dead */ }
+  session = null;
+}
+
+// Summarize one simple-query cycle's messages for the UI.
+function summarizeWire(msgs) {
+  const out = { columns: null, rows: [], tag: null, error: null, notices: [], status: 'I', resultSets: 0 };
+  for (const { t, body } of msgs) {
+    const m = parseMessage(t, body);
+    if (t === 'T') { out.columns = m.columns; out.rows = []; out.resultSets++; }
+    else if (t === 'D') { out.rows.push(m.values); }
+    else if (t === 'C') { out.tag = m.tag; }
+    else if (t === 'E') { if (!out.error) out.error = { severity: m.severity, message: m.message, fields: m.fields }; }
+    else if (t === 'N') { out.notices.push(`${m.severity}:  ${m.message}`); }
+    else if (t === 'Z') { out.status = m.status; }
+  }
+  return out;
+}
+
+async function wireQuery(sql) {
+  sessionStderr = [];
+  const msgs = await session.query(sql);
+  const dec = new TextDecoder();
+  return {
+    wire: summarizeWire(msgs),
+    stderr: sessionStderr.map((b) => dec.decode(b)).join(''),
+  };
+}
+
+// Recover a dead wire session in place (e.g. a FATAL took the backend down):
+// the datadir VFS survives; boot a fresh session over it.
+async function reviveWireSession() {
+  session = null;
+  scrubStaleLockfile();
+  await startWireSession();
+}
+
+// ---- persistence ------------------------------------------------------------
+
+async function snapshotNow() {
+  if (!persist || !store) return;
+  try {
+    if (ENGINE === 'wire' && session && !session.dead) {
+      // Quiesce: a completed CHECKPOINT bounds restore-time WAL replay.
+      await session.query('CHECKPOINT;');
+    }
+    const r = await saveSnapshot(store, vfs, snapGen, snapSlot);
+    snapGen = r.generation;
+    snapSlot = r.slot;
+    post({ type: 'persist-state', persist: true, note: `snapshot saved (${(r.bytes / (1024 * 1024)).toFixed(1)} MB)` });
+  } catch (e) {
+    // Quota or any other storage failure: degrade to persistence-off, keep
+    // the live session untouched.
+    persist = false;
+    post({ type: 'persist-state', persist: false, note: `persistence disabled: snapshot failed (${String(e && e.message || e)})` });
+  }
+}
+
+function scheduleSnapshot() {
+  if (!persist || !store) return;
+  runChain = runChain.then(() => snapshotNow());
+}
+
+// ---- boot -------------------------------------------------------------------
+
 async function fetchAsset(url) {
   let resp;
   try {
@@ -152,9 +272,34 @@ async function loadWasmModule(url) {
   return module;
 }
 
+// Restore the newest valid snapshot into the live VFS; false = pristine boot.
+async function tryRestoreSnapshot() {
+  if (!store) return false;
+  const snap = await loadLatestSnapshot(store, (slot, e) => {
+    post({ type: 'status', text: `Ignoring corrupt snapshot ${slot} (${String(e && e.message || e)})…` });
+  });
+  if (!snap) return false;
+  vfs = new Vfs(snap.image, snap.manifest);
+  scrubStaleLockfile();
+  snapGen = snap.generation;
+  snapSlot = snap.slot;
+  return true;
+}
+
+async function warmEngine() {
+  if (ENGINE === 'wire') {
+    await startWireSession();
+    const r = await wireQuery('SELECT 1;');
+    if (r.wire.error) throw new Error(`warm-up failed: ${r.wire.error.message}`);
+  } else {
+    const r = await runPreparedSql('SELECT 1;');
+    if (r.exitCode !== 0) throw new Error(`warm-up exited with code ${r.exitCode}`);
+  }
+}
+
 async function init() {
   try {
-    post({ type: 'build', build: 'wasip1' });
+    post({ type: 'build', build: 'wasip1', engine: ENGINE });
     post({ type: 'status', text: 'Fetching wasm module…' });
     wasmModule = await loadWasmModule(`${ASSET_PREFIX}/postgres.wasm`);
     post({ type: 'status', text: 'Fetching datadir VFS…' });
@@ -164,50 +309,146 @@ async function init() {
     ]);
     baseImage = new Uint8Array(imgBuf);
     manifest = manResp;
-    resetVfs(); // initialize the persistent datadir
+
+    // Persistence: a present snapshot means the toggle was on last visit.
+    store = await openOpfsStore();
+    restoredFromSnapshot = await tryRestoreSnapshot();
+    if (restoredFromSnapshot) {
+      persist = true;
+      post({ type: 'status', text: 'Restored persisted datadir from OPFS snapshot…' });
+    } else {
+      resetVfs(); // initialize the pristine datadir
+    }
+
     const warmStart = performance.now();
-    post({ type: 'status', text: 'Warming query engine…' });
-    await runPreparedSql('SELECT 1;');
+    post({ type: 'status', text: ENGINE === 'wire' ? 'Starting protocol session…' : 'Warming query engine…' });
+    try {
+      await warmEngine();
+    } catch (e) {
+      if (!restoredFromSnapshot) throw e;
+      // GUARD: a snapshot that validates but cannot boot must not wedge the
+      // page — discard it, boot the pristine image, tell the user.
+      post({ type: 'status', text: `Persisted snapshot unusable (${String(e && e.message || e)}); starting fresh…` });
+      await stopWireSession();
+      await clearSnapshots(store);
+      persist = false;
+      restoredFromSnapshot = false;
+      snapGen = 0; snapSlot = null;
+      resetVfs();
+      await warmEngine();
+    }
     post({ type: 'status', text: `Query engine warmed in ${Math.round(performance.now() - warmStart)}ms…` });
-    post({ type: 'ready' });
+    post({ type: 'ready', engine: ENGINE, persist, persistAvailable: !!store, restored: restoredFromSnapshot });
   } catch (e) {
     post({ type: 'error', message: String(e && e.stack || e) });
   }
 }
 
-self.onmessage = async (ev) => {
-  const id = ev.data.id;
-  if (ev.data.type === 'reset') {
-    try {
-      // True reset: throw away all accumulated state, restore a fresh datadir.
-      resetVfs();
-      await runPreparedSql('SELECT 1;');
-      post({ type: 'reset-done', id });
-    } catch (e) {
-      post({ type: 'error', id, message: String(e && e.stack || e) });
-    }
-    return;
-  }
-  if (ev.data.type !== 'run') return;
+// ---- message handlers -------------------------------------------------------
 
-  const t0 = performance.now();
+async function handleRunSingle(id, sql, t0) {
+  const result = await runPreparedSql(sql);
+  post({
+    type: 'result',
+    id,
+    engine: 'single',
+    stdout: result.stdout,
+    formatted: formatRun(result.stdout, result.stderr),
+    stderr: result.stderr,
+    exitCode: result.exitCode,
+    ms: Math.round(performance.now() - t0),
+  });
+  if (result.exitCode === 0) scheduleSnapshot();
+}
+
+async function handleRunWire(id, sql, t0) {
+  let r;
   try {
-    // Boot over the PERSISTENT VFS: this Run's writes mutate it in place and
-    // remain visible to the next Run (until Reset). `postgres --single` shut
-    // down cleanly last time, so this is a normal clean restart of the datadir.
-    const result = await runPreparedSql(ev.data.sql || '');
+    r = await wireQuery(sql);
+  } catch (e) {
+    if (!(e instanceof WireSessionDead)) throw e;
+    // The backend exited under us (FATAL/crash class). Revive over the same
+    // datadir and surface the failure; the next statement gets a live session.
+    const note = `session exited (code ${session ? session.exitCode : '?'}); restarted — session state (temp tables, prepared statements) was lost`;
+    await reviveWireSession();
     post({
       type: 'result',
       id,
-      stdout: result.stdout,
-      formatted: formatRun(result.stdout, result.stderr),
-      stderr: result.stderr,
-      exitCode: result.exitCode,
+      engine: 'wire',
+      wire: { columns: null, rows: [], tag: null, error: { severity: 'FATAL', message: note }, notices: [], status: 'I', resultSets: 0 },
+      stderr: '',
+      exitCode: null,
       ms: Math.round(performance.now() - t0),
     });
-  } catch (e) {
-    post({ type: 'error', id, message: String(e && e.stack || e) });
+    return;
   }
+  post({
+    type: 'result',
+    id,
+    engine: 'wire',
+    wire: r.wire,
+    stderr: r.stderr,
+    exitCode: null, // session still alive
+    ms: Math.round(performance.now() - t0),
+  });
+  if (!r.wire.error) scheduleSnapshot();
+}
+
+self.onmessage = (ev) => {
+  const id = ev.data.id;
+  const kind = ev.data.type;
+  // Serialize EVERYTHING through the run chain: wire queries must never
+  // overlap (one in-flight simple-query cycle per session), and single-mode
+  // keeps its historical one-at-a-time behavior.
+  runChain = runChain.then(async () => {
+    if (kind === 'reset') {
+      try {
+        await stopWireSession();
+        resetVfs();
+        if (persist && store) {
+          // Reset wipes the durable state too, then snapshots the fresh
+          // datadir so a reload lands where the user left it: reset.
+          await clearSnapshots(store);
+          snapGen = 0; snapSlot = null;
+        }
+        await warmEngine();
+        if (persist && store) await snapshotNow();
+        post({ type: 'reset-done', id });
+      } catch (e) {
+        post({ type: 'error', id, message: String(e && e.stack || e) });
+      }
+      return;
+    }
+    if (kind === 'persist') {
+      try {
+        if (ev.data.on) {
+          if (!store) {
+            post({ type: 'persist-state', id, persist: false, note: 'persistence unavailable (no OPFS in this browser/profile)' });
+            return;
+          }
+          persist = true;
+          await snapshotNow();
+          post({ type: 'persist-state', id, persist, note: persist ? 'persistence on — datadir snapshots to OPFS after each statement' : undefined });
+        } else {
+          persist = false;
+          if (store) await clearSnapshots(store);
+          snapGen = 0; snapSlot = null;
+          post({ type: 'persist-state', id, persist: false, note: 'persistence off — stored snapshots cleared' });
+        }
+      } catch (e) {
+        post({ type: 'error', id, message: String(e && e.stack || e) });
+      }
+      return;
+    }
+    if (kind !== 'run') return;
+    const t0 = performance.now();
+    try {
+      if (ENGINE === 'wire' && session) await handleRunWire(id, ev.data.sql || '', t0);
+      else await handleRunSingle(id, ev.data.sql || '', t0);
+    } catch (e) {
+      post({ type: 'error', id, message: String(e && e.stack || e) });
+    }
+  });
 };
 
 init();
