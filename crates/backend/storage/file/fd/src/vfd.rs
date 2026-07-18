@@ -1,6 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::ffi::CString;
-use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+
+use ::vfs::VfsFd;
 
 use ::elog::ereport;
 use ::types_core::Oid;
@@ -17,37 +18,19 @@ pub(crate) const FD_DELETE_AT_CLOSE: u16 = 1 << 0;
 pub(crate) const FD_CLOSE_AT_EOXACT: u16 = 1 << 1;
 pub(crate) const FD_TEMP_FILE_LIMIT: u16 = 1 << 2;
 
-#[cfg(target_os = "linux")]
-pub const PG_O_DIRECT: i32 = libc::O_DIRECT;
-// storage/fd.h: the F_NOCACHE stand-in bit; asserted disjoint from open(2) flags.
-#[cfg(target_os = "macos")]
-pub const PG_O_DIRECT: i32 = 0x8000_0000u32 as i32;
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub const PG_O_DIRECT: i32 = 0;
-
-#[cfg(target_os = "macos")]
-const _: () = assert!(
-    PG_O_DIRECT
-        & (libc::O_APPEND
-            | libc::O_CLOEXEC
-            | libc::O_CREAT
-            | libc::O_DSYNC
-            | libc::O_EXCL
-            | libc::O_RDWR
-            | libc::O_RDONLY
-            | libc::O_SYNC
-            | libc::O_TRUNC
-            | libc::O_WRONLY)
-        == 0
-);
+// The synthetic direct-IO bit lives in vfs (its F_NOCACHE mapping is
+// PosixVfs's platform split); re-exported here for the existing callers.
+pub use ::vfs::PG_O_DIRECT;
 
 pub(crate) struct Vfd {
-    // `fd` -- None is VFD_CLOSED; the OwnedFd is the RAII close guard.
-    pub fd: Option<OwnedFd>,
+    // `fd` -- None is VFD_CLOSED; the VfsFd is the RAII close guard (finding
+    // F1b: vfs-minted, so an unwind/thread-exit drop must release through the
+    // vfs that minted it, never posix-side).
+    pub fd: Option<VfsFd>,
     // Companion O_DIRECT descriptor, used ONLY by uring pool-read SQEs; every
     // other path (sync reads, writes, WAL, recovery) stays on the buffered fd
     // so kernel readahead/caching there is untouched.
-    pub fd_dio: Option<OwnedFd>,
+    pub fd_dio: Option<VfsFd>,
     pub dio_failed: bool,
     pub fdstate: u16,
     pub resowner: ResourceOwner,
@@ -203,28 +186,9 @@ pub fn set_temp_tablespaces_guc(value: Option<String>) {
     TEMP_TABLESPACES_GUC.with(|c| *c.borrow_mut() = value);
 }
 
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
-fn errno_location() -> *mut libc::c_int {
-    // SAFETY: returns the thread-local errno lvalue.
-    unsafe { libc::__error() }
-}
-#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd")))]
-fn errno_location() -> *mut libc::c_int {
-    // SAFETY: returns the thread-local errno lvalue.
-    unsafe { libc::__errno_location() }
-}
-
-pub(crate) fn get_errno() -> i32 {
-    // SAFETY: reading the thread-local errno.
-    unsafe { *errno_location() }
-}
-
-pub(crate) fn set_errno(value: i32) {
-    // SAFETY: writing the thread-local errno.
-    unsafe {
-        *errno_location() = value;
-    }
-}
+// The shared errno TLS cell lives in vfs (DST P1 contract §1.1: SimVfs sets
+// errno through the same cell fd reads).
+pub(crate) use ::vfs::{get_errno, set_errno};
 
 pub(crate) fn cpath(path: &str) -> CString {
     CString::new(path.as_bytes()).unwrap_or_else(|_| CString::new("").unwrap())
@@ -246,6 +210,12 @@ pub(crate) fn CloseDioFd(fd: &mut FdState, file: i32) {
     if let Some(dio) = fd.vfd_cache[file as usize].fd_dio.take() {
         crate::pgaio_closing_fd_if_engine_present(dio.as_raw());
         set_num_external_fds(num_external_fds() - 1);
+        // Deliberate close path, made explicit (this used to be an implicit
+        // posix-side OwnedFd drop — an F1b instance on a NON-unwind path):
+        // disarm the guard and close through the vfs that minted the fd.
+        // Result ignored, exactly as the old drop ignored it.
+        let raw = dio.into_raw();
+        let _ = vfs::close(raw);
     }
 }
 
@@ -256,10 +226,10 @@ pub(crate) fn LruDelete(fd: &mut FdState, file: i32) -> PgResult<()> {
     let handle = fd.vfd_cache[file as usize].fd.take().expect("LruDelete on closed VFD");
     crate::pgaio_closing_fd_if_engine_present(handle.as_raw());
 
-    let raw = handle.into_raw_fd();
-    // SAFETY: `raw` is the live descriptor just released from the guard;
-    // closed exactly once here.
-    let close_failed = unsafe { libc::close(raw) } != 0;
+    // Live descriptor just released from the guard (disarmed); closed
+    // exactly once here.
+    let raw = handle.into_raw();
+    let close_failed = vfs::close(raw) != 0;
     fd.nfile -= 1;
     Delete(fd, file);
 
@@ -301,8 +271,8 @@ pub(crate) fn LruInsert(fd: &mut FdState, file: i32) -> PgResult<i32> {
         if raw < 0 {
             return Ok(-1);
         }
-        // SAFETY: `raw` is a freshly opened descriptor now owned by the VFD.
-        fd.vfd_cache[file as usize].fd = Some(unsafe { OwnedFd::from_raw_fd(raw) });
+        // SAFETY: `raw` is a freshly vfs-opened descriptor now owned by the VFD.
+        fd.vfd_cache[file as usize].fd = Some(unsafe { VfsFd::from_raw(raw) });
         fd.nfile += 1;
     }
 
@@ -408,8 +378,8 @@ pub(crate) fn FileAccessDio(fd: &mut FdState, file: i32) -> PgResult<i32> {
         }
         return Ok(-1);
     }
-    // SAFETY: freshly opened descriptor, owned by the VFD's companion slot.
-    fd.vfd_cache[file as usize].fd_dio = Some(unsafe { OwnedFd::from_raw_fd(raw) });
+    // SAFETY: freshly vfs-opened descriptor, owned by the VFD's companion slot.
+    fd.vfd_cache[file as usize].fd_dio = Some(unsafe { VfsFd::from_raw(raw) });
     set_num_external_fds(num_external_fds() + 1);
     Ok(raw)
 }
@@ -427,7 +397,7 @@ pub(crate) fn FileIsValid(fd: &FdState, file: i32) -> bool {
 pub(crate) trait RawOf {
     fn as_raw(&self) -> i32;
 }
-impl RawOf for OwnedFd {
+impl RawOf for VfsFd {
     fn as_raw(&self) -> i32 {
         use std::os::fd::AsRawFd;
         self.as_raw_fd()
@@ -470,59 +440,33 @@ fn before_shmem_exit_files_cb(code: i32, arg: datum::Datum) -> PgResult<()> {
 }
 
 pub(crate) fn count_usable_fds(max_to_probe: i32) -> PgResult<(i32, i32)> {
-    let mut opened: Vec<i32> = Vec::with_capacity(1024);
-    let mut used: i32 = 0;
-    let mut highestfd: i32 = 0;
+    // The getrlimit + dup(2) probe runs inside the VFS (SimVfs: fixed pinned
+    // budget, no real fds touched); this function keeps the C-shaped
+    // diagnostics. The two WARNINGs now surface after the probe loop rather
+    // than mid-loop — same lines, same errnos, diagnostics-only paths.
+    let probe = vfs::fd_budget_probe_report(max_to_probe.max(0) as usize);
 
-    let mut rlim = libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
-    };
-    // SAFETY: getrlimit writes the out-param struct.
-    let getrlimit_status = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) };
-    if getrlimit_status != 0 {
+    if probe.getrlimit_failed {
         ereport(WARNING)
-            .with_saved_errno(get_errno())
+            .with_saved_errno(probe.getrlimit_errno)
             .errmsg("getrlimit failed: %m")
             .finish(loc("count_usable_fds"))?;
     }
 
-    loop {
-        if getrlimit_status == 0 && highestfd as u64 >= (rlim.rlim_cur as u64).wrapping_sub(1) {
-            break;
-        }
-
-        // SAFETY: dup(2) of stderr; yields a fresh fd or -1.
-        let thisfd = unsafe { libc::dup(2) };
-        if thisfd < 0 {
-            let en = get_errno();
-            if en != libc::EMFILE && en != libc::ENFILE {
-                ereport(WARNING)
-                    .with_saved_errno(en)
-                    .errmsg_internal(format!(
-                        "duplicating stderr file descriptor failed after {used} successes: %m"
-                    ))
-                    .finish(loc("count_usable_fds"))?;
-            }
-            break;
-        }
-
-        opened.push(thisfd);
-        used += 1;
-        if highestfd < thisfd {
-            highestfd = thisfd;
-        }
-        if used >= max_to_probe {
-            break;
-        }
+    if probe.stop_errno != 0
+        && probe.stop_errno != libc::EMFILE
+        && probe.stop_errno != libc::ENFILE
+    {
+        let used = probe.used;
+        ereport(WARNING)
+            .with_saved_errno(probe.stop_errno)
+            .errmsg_internal(format!(
+                "duplicating stderr file descriptor failed after {used} successes: %m"
+            ))
+            .finish(loc("count_usable_fds"))?;
     }
 
-    for &thisfd in &opened {
-        // SAFETY: each entry is a live fd dup'd above.
-        unsafe { libc::close(thisfd) };
-    }
-
-    Ok((used, highestfd + 1 - used))
+    Ok((probe.used, probe.highest_fd + 1 - probe.used))
 }
 
 pub fn set_max_safe_fds() -> PgResult<()> {
@@ -569,27 +513,11 @@ pub(crate) fn BasicOpenFilePermInternal(
     let path = cpath(file_name);
 
     loop {
-        #[cfg(target_os = "macos")]
-        // SAFETY: NUL-terminated path; PG_O_DIRECT is a synthetic bit masked off.
-        let raw = unsafe {
-            libc::open(path.as_ptr(), file_flags & !PG_O_DIRECT, file_mode as libc::c_uint)
-        };
-        #[cfg(not(target_os = "macos"))]
-        // SAFETY: NUL-terminated path.
-        let raw = unsafe { libc::open(path.as_ptr(), file_flags, file_mode as libc::c_uint) };
-
+        // The open(2) chokepoint. PG_O_DIRECT handling (macOS: mask +
+        // F_NOCACHE) is PosixVfs's platform split; the EMFILE-retry LRU dance
+        // below stays here.
+        let raw = vfs::open(&path, file_flags, file_mode as libc::mode_t);
         if raw >= 0 {
-            #[cfg(target_os = "macos")]
-            if file_flags & PG_O_DIRECT != 0 {
-                // SAFETY: `raw` is live; F_NOCACHE is macOS's O_DIRECT analogue.
-                if unsafe { libc::fcntl(raw, libc::F_NOCACHE, 1) } < 0 {
-                    let save_errno = get_errno();
-                    // SAFETY: closing the fd we just opened.
-                    unsafe { libc::close(raw) };
-                    set_errno(save_errno);
-                    return Ok(-1);
-                }
-            }
             return Ok(raw);
         }
 
@@ -633,9 +561,10 @@ pub fn ReleaseExternalFD() {
 }
 
 pub fn MakePGDirectory(directory_name: &str) -> i32 {
+    // mkdir(2) with the configured directory mode (composite policy stays
+    // here; the syscall is the VFS's).
     let path = cpath(directory_name);
-    // SAFETY: NUL-terminated path; mkdir(2) with the configured directory mode.
-    unsafe { libc::mkdir(path.as_ptr(), pg_dir_create_mode() as libc::mode_t) }
+    vfs::mkdir(&path, pg_dir_create_mode() as libc::mode_t)
 }
 
 pub fn data_sync_elevel(elevel: ErrorLevel) -> ErrorLevel {

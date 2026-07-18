@@ -1,0 +1,18 @@
+[package]
+name = "pg_clock"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+# LEAF CRATE (DST P2 contract §1.1): libc + plain types only. No backend deps,
+# ever — elog, adt_timestamp, transam_xlog, and waiter all take plain cargo
+# deps on this crate, so any backend dep added here would create a cycle
+# (the pg_strong_random placement precedent).
+[dependencies]
+libc = "0.2"
+
+# `pgrust_sim` is the non-default cfg selecting SimClock (contract §0.1, the
+# VFS dispatch mechanism verbatim). It is set exclusively by the sim harness's
+# RUSTFLAGS — never in .cargo/config, any product profile, or fleet submit envs.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)', 'cfg(loom)'] }

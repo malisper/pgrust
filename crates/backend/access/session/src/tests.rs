@@ -421,7 +421,17 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      KnownAssignedXids bookkeeping.
     //   33. contrib/pgoutput/src/lib.rs — pgoutput per-decoder context on
     //      the walsender thread.
-    assert_eq!(count_tree(crates), 493, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 494, re-pinned at dst/p1-vfs-integrated (DST-P1 WS-C simulated VFS;
+    // renumbered to slot 34 over the t26 simplecache+recovery slots at the
+    // train-27 merge):
+    //   34. storage/file/vfs/src/sim.rs SIM — the deterministic simulated
+    //      filesystem's state cell (one simulated universe per harness
+    //      thread). The entire sim.rs module is `cfg(pgrust_sim)`-gated —
+    //      ABSENT from product codegen (integration-record TLS census:
+    //      fd thread_local counts identical to main; vfs product code adds
+    //      zero TLS). DST test infrastructure only: no session identity,
+    //      no state movement, never compiled into a shipped binary.
+    assert_eq!(count_tree(crates), 494, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

@@ -9,6 +9,7 @@ name = "transam_xlog"
 path = "src/lib.rs"
 
 [dependencies]
+pg_clock = { path = "../../../../port/pg_clock" }
 s_lock_seams = { path = "../../../storage/lmgr/s_lock_seams" }
 snapmgr_seams = { path = "../../../utils/time/snapmgr_seams" }
 types_core = { path = "../../../../_support/types/types_core" }

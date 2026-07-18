@@ -9,6 +9,7 @@ bench-internals = []
 
 [dependencies]
 libc = "0.2"
+vfs = { path = "../../storage/file/vfs" }
 lz4_flex = "0.11"
 mcx = { path = "../../../_support/mcx" }
 datum = { path = "../../../_support/types/datum" }
@@ -35,3 +36,6 @@ mbutils_seams = { path = "../../utils/mb/mbutils_seams" }
 [dev-dependencies]
 laneexec = { path = "../../executor/laneexec" }
 tuplesort = { path = "../../utils/sort/tuplesort" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)'] }

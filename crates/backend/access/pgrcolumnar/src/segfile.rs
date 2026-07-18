@@ -1,9 +1,21 @@
 //! md.c-compatible segment fan-out for the part's byte stream: logical byte
 //! offsets over 1 GiB segment files (`path`, `path.1`, ...) so smgr's
 //! mdnblocks/mdunlink stay valid on pgrcolumnar relations.
+//!
+//! DST P1 (WS-B): every CbIo entry point here fronts the `vfs` boundary —
+//! opens via `vfs::open`, the pread/pwrite data plane, fstat sizing,
+//! ftruncate padding, fdatasync durability, fadvise hints, and fd lifecycle
+//! (`SegFd` closes via the `vfs::VfsFd` guard — same close code path as
+//! `vfs::close`, TLS-teardown-safe under sim). Semantics are byte-identical to the
+//! pre-P1 `std::fs` path by construction: same open flags (O_CLOEXEC, mode
+//! 0o666, no O_TRUNC on the create arm), same syscall order, the same
+//! EINTR-retry loops `std::os::unix::fs::FileExt` ran, and the same error
+//! text (errno rendered through `io::Error::from_raw_os_error`). The ONE
+//! carve-out is `SegMap::map_segs`: the mmap read arm stays raw libc until
+//! the segmap pread arm lands (contract §3 item 5, allowlist rows tagged
+//! `# pending: segmap-pread-arm`).
 
-use std::fs::{File, OpenOptions};
-use std::os::unix::fs::FileExt;
+use std::ffi::CString;
 
 use ::types_error::{PgError, PgResult};
 
@@ -14,6 +26,25 @@ fn io_err(path: &str, e: std::io::Error) -> Box<PgError> {
     Box::new(PgError::error(format!("cbstore io error on \"{path}\": {e}")))
 }
 
+/// The errno of the vfs op that just failed, rendered exactly as the old
+/// std::fs path rendered it (io::Error Display for raw OS errors).
+fn io_err_errno(path: &str) -> Box<PgError> {
+    io_err(path, std::io::Error::from_raw_os_error(vfs::get_errno()))
+}
+
+fn cpath(path: &str) -> PgResult<CString> {
+    CString::new(path).map_err(|_| {
+        // std::fs parity: the message std returns for NUL-bearing paths.
+        io_err(
+            path,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "file name contained an unexpected NUL byte",
+            ),
+        )
+    })
+}
+
 pub fn seg_path(base: &str, segno: usize) -> String {
     if segno == 0 {
         base.to_string()
@@ -22,22 +53,67 @@ pub fn seg_path(base: &str, segno: usize) -> String {
     }
 }
 
+/// RAII segment descriptor: opened via `vfs::open`, closed by the
+/// [`vfs::VfsFd`] guard on Drop — the whole fd lifecycle travels through the
+/// Vfs boundary. The guard's drop arm is the same close code path as
+/// `vfs::close` while the thread's vfs universe is alive (posix arm: literally
+/// `close(2)`, identical to the direct `vfs::close` Drop this replaces), and
+/// is additionally safe if a SegFile/SegFd drops during thread-exit TLS
+/// teardown under `--cfg pgrust_sim`, where a direct `vfs::close` would hit
+/// the panicking `SIM.with` arm inside a TLS destructor.
+struct SegFd(vfs::VfsFd);
+
+impl SegFd {
+    #[inline]
+    fn raw(&self) -> libc::c_int {
+        use std::os::fd::AsRawFd;
+        self.0.as_raw_fd()
+    }
+}
+
+/// std::fs::OpenOptions parity: O_CLOEXEC always, mode 0o666 (umask
+/// applies), open(2) EINTR-retried (std's cvt_r); callers add O_CREAT
+/// (never O_TRUNC — `truncate(false)`).
+fn open_fd(path: &str, flags: libc::c_int) -> PgResult<SegFd> {
+    let c = cpath(path)?;
+    loop {
+        let fd = vfs::open(&c, flags | libc::O_CLOEXEC, 0o666);
+        if fd >= 0 {
+            // SAFETY: fresh descriptor minted by the active vfs on this
+            // thread, exclusively owned by the guard.
+            return Ok(SegFd(unsafe { vfs::VfsFd::from_raw(fd) }));
+        }
+        if vfs::get_errno() != libc::EINTR {
+            return Err(io_err_errno(path));
+        }
+    }
+}
+
+/// std File::sync_data parity through the Vfs boundary: fdatasync, EINTR
+/// retried. (Linux — the official substrate — is instruction-identical;
+/// on macOS this is fdatasync(2), the fd-crate pg_fsync posture, where std
+/// used F_FULLFSYNC.)
+fn sync_fd(fd: libc::c_int, path: &str) -> PgResult<()> {
+    while vfs::fdatasync(fd) < 0 {
+        if vfs::get_errno() != libc::EINTR {
+            return Err(io_err_errno(path));
+        }
+    }
+    Ok(())
+}
+
 pub struct SegFile {
     base: String,
-    segs: Vec<File>,
+    segs: Vec<SegFd>,
 }
 
 impl SegFile {
     pub fn open_rw(base: &str) -> PgResult<SegFile> {
-        let f = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(base)
-            .map_err(|e| io_err(base, e))?;
+        let f = open_fd(base, libc::O_RDWR)?;
         let mut sf = SegFile { base: base.to_string(), segs: vec![f] };
         loop {
             let p = seg_path(&sf.base, sf.segs.len());
-            match OpenOptions::new().read(true).write(true).open(&p) {
+            match open_fd(&p, libc::O_RDWR) {
                 Ok(f) => sf.segs.push(f),
                 Err(_) => break,
             }
@@ -45,23 +121,13 @@ impl SegFile {
         Ok(sf)
     }
 
-    fn seg_for(&mut self, segno: usize, create: bool) -> PgResult<&File> {
+    fn seg_for(&mut self, segno: usize, create: bool) -> PgResult<libc::c_int> {
         while self.segs.len() <= segno {
             let p = seg_path(&self.base, self.segs.len());
-            let f = if create {
-                OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create(true)
-                    .truncate(false)
-                    .open(&p)
-                    .map_err(|e| io_err(&p, e))?
-            } else {
-                OpenOptions::new().read(true).write(true).open(&p).map_err(|e| io_err(&p, e))?
-            };
-            self.segs.push(f);
+            let flags = if create { libc::O_RDWR | libc::O_CREAT } else { libc::O_RDWR };
+            self.segs.push(open_fd(&p, flags)?);
         }
-        Ok(&self.segs[segno])
+        Ok(self.segs[segno].raw())
     }
 
     pub fn write_all_at(&mut self, mut buf: &[u8], mut off: u64) -> PgResult<()> {
@@ -69,9 +135,30 @@ impl SegFile {
             let segno = (off / SEG_BYTES) as usize;
             let seg_off = off % SEG_BYTES;
             let take = ((SEG_BYTES - seg_off) as usize).min(buf.len());
-            let base = self.base.clone();
-            let f = self.seg_for(segno, true)?;
-            f.write_all_at(&buf[..take], seg_off).map_err(|e| io_err(&base, e))?;
+            let fd = self.seg_for(segno, true)?;
+            // FileExt::write_all_at parity: pwrite loop, EINTR retried,
+            // zero-progress write => WriteZero with std's message text.
+            let mut done = 0usize;
+            while done < take {
+                let n =
+                    vfs::pwrite(fd, &buf[done..take], (seg_off + done as u64) as libc::off_t);
+                if n < 0 {
+                    if vfs::get_errno() == libc::EINTR {
+                        continue;
+                    }
+                    return Err(io_err_errno(&self.base));
+                }
+                if n == 0 {
+                    return Err(io_err(
+                        &self.base,
+                        std::io::Error::new(
+                            std::io::ErrorKind::WriteZero,
+                            "failed to write whole buffer",
+                        ),
+                    ));
+                }
+                done += n as usize;
+            }
             buf = &buf[take..];
             off += take as u64;
         }
@@ -83,9 +170,30 @@ impl SegFile {
             let segno = (off / SEG_BYTES) as usize;
             let seg_off = off % SEG_BYTES;
             let take = ((SEG_BYTES - seg_off) as usize).min(buf.len());
-            let base = self.base.clone();
-            let f = self.seg_for(segno, false)?;
-            f.read_exact_at(&mut buf[..take], seg_off).map_err(|e| io_err(&base, e))?;
+            let fd = self.seg_for(segno, false)?;
+            // FileExt::read_exact_at parity: pread loop, EINTR retried, EOF
+            // before the span fills => UnexpectedEof with std's message text.
+            let mut done = 0usize;
+            while done < take {
+                let n =
+                    vfs::pread(fd, &mut buf[done..take], (seg_off + done as u64) as libc::off_t);
+                if n < 0 {
+                    if vfs::get_errno() == libc::EINTR {
+                        continue;
+                    }
+                    return Err(io_err_errno(&self.base));
+                }
+                if n == 0 {
+                    return Err(io_err(
+                        &self.base,
+                        std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "failed to fill whole buffer",
+                        ),
+                    ));
+                }
+                done += n as usize;
+            }
             buf = &mut buf[take..];
             off += take as u64;
         }
@@ -95,7 +203,12 @@ impl SegFile {
     pub fn total_len(&self) -> u64 {
         let mut total = 0u64;
         for f in &self.segs {
-            total += f.metadata().map(|m| m.len()).unwrap_or(0);
+            // metadata().len() parity: fstat; an fstat failure contributes 0
+            // (the old unwrap_or(0)).
+            let mut fi = vfs::FileInfo::zeroed();
+            if vfs::fstat(f.raw(), &mut fi) == 0 {
+                total += fi.size as u64;
+            }
         }
         total
     }
@@ -105,26 +218,21 @@ impl SegFile {
     /// `read_exact_at` sequence overlaps its later ranges' disk fetches
     /// with the earlier ranges' synchronous reads. Purely advisory —
     /// kernel errors ignored, missing segments end the walk, no-op off
-    /// Linux (cold-readahead lane).
+    /// Linux (cold-readahead lane). The cfg gate stays HERE (not just in
+    /// PosixVfs) so the off-Linux no-op keeps its exact pre-P1 shape:
+    /// no lazy segment opens either.
     pub fn advise_willneed(&mut self, off: u64, len: u64) {
         #[cfg(target_os = "linux")]
         {
-            use std::os::unix::io::AsRawFd;
             let (mut off, mut len) = (off, len);
             while len > 0 {
                 let segno = (off / SEG_BYTES) as usize;
                 let seg_off = off % SEG_BYTES;
                 let take = (SEG_BYTES - seg_off).min(len);
-                let Ok(f) = self.seg_for(segno, false) else { return };
-                // SAFETY: plain libc call on a live fd; advisory only.
-                unsafe {
-                    libc::posix_fadvise(
-                        f.as_raw_fd(),
-                        seg_off as libc::off_t,
-                        take as libc::off_t,
-                        libc::POSIX_FADV_WILLNEED,
-                    );
-                }
+                let Ok(fd) = self.seg_for(segno, false) else { return };
+                // Hint via the Vfs boundary; same spans, same order (the
+                // binding no-reorder/no-coalesce rule), errors ignored.
+                vfs::fadvise_willneed(fd, seg_off as libc::off_t, take as libc::off_t);
                 off += take;
                 len -= take;
             }
@@ -145,20 +253,25 @@ impl SegFile {
             } else {
                 (logical_end - segno as u64 * SEG_BYTES).div_ceil(BLCKSZ) * BLCKSZ
             };
-            let base = self.base.clone();
-            let f = self.seg_for(segno, true)?;
-            let cur = f.metadata().map(|m| m.len()).unwrap_or(0);
+            let fd = self.seg_for(segno, true)?;
+            let mut fi = vfs::FileInfo::zeroed();
+            let cur = if vfs::fstat(fd, &mut fi) == 0 { fi.size as u64 } else { 0 };
             if cur < want {
-                f.set_len(want).map_err(|e| io_err(&base, e))?;
+                // std File::set_len parity: ftruncate, EINTR retried.
+                while vfs::ftruncate(fd, want as libc::off_t) < 0 {
+                    if vfs::get_errno() != libc::EINTR {
+                        return Err(io_err_errno(&self.base));
+                    }
+                }
             }
-            f.sync_data().map_err(|e| io_err(&base, e))?;
+            sync_fd(fd, &self.base)?;
         }
         Ok(())
     }
 
     pub fn sync_data(&mut self) -> PgResult<()> {
         for f in &self.segs {
-            f.sync_data().map_err(|e| io_err(&self.base, e))?;
+            sync_fd(f.raw(), &self.base)?;
         }
         Ok(())
     }
@@ -210,15 +323,17 @@ fn shared_map_enabled() -> bool {
 impl SegMap {
     // Stat pass shared by open/open_shared: the segment files plus the
     // reservation length ((nsegs-1)*SEG_BYTES + last seg len). None = empty.
-    fn stat_segs(base: &str) -> PgResult<Option<(Vec<File>, Vec<u64>, usize)>> {
-        let mut files: Vec<File> = Vec::new();
+    // Fronted (DST P1): opens via vfs::open (O_RDONLY|O_CLOEXEC — the
+    // File::open flags), sizes via vfs::fstat, close via SegFd/vfs::close.
+    fn stat_segs(base: &str) -> PgResult<Option<(Vec<SegFd>, Vec<u64>, usize)>> {
+        let mut files: Vec<SegFd> = Vec::new();
         loop {
             let p = seg_path(base, files.len());
-            match File::open(&p) {
+            match open_fd(&p, libc::O_RDONLY) {
                 Ok(f) => files.push(f),
                 Err(e) => {
                     if files.is_empty() {
-                        return Err(io_err(&p, e));
+                        return Err(e);
                     }
                     break;
                 }
@@ -227,9 +342,12 @@ impl SegMap {
         let mut lens = Vec::with_capacity(files.len());
         let mut total = 0u64;
         for f in &files {
-            let l = f.metadata().map_err(|e| io_err(base, e))?.len();
-            lens.push(l);
-            total += l;
+            let mut fi = vfs::FileInfo::zeroed();
+            if vfs::fstat(f.raw(), &mut fi) < 0 {
+                return Err(io_err_errno(base));
+            }
+            lens.push(fi.size as u64);
+            total += fi.size as u64;
         }
         if total == 0 {
             return Ok(None);
@@ -271,7 +389,13 @@ impl SegMap {
         Ok(Some(SegMap::map_segs(&files, &lens, maplen)?))
     }
 
-    fn map_segs(files: &[File], lens: &[u64], maplen: usize) -> PgResult<SegMap> {
+    // CARVE-OUT (DST P1 contract §3 item 5): the mmap read arm stays RAW
+    // libc — mmap/madvise/munmap are out of Vfs scope until the segmap
+    // pread arm lands. P0 allowlist rows retained, tagged
+    // "# pending: segmap-pread-arm". The mapping-mode kill switch above and
+    // the coldio SegMap registry are untouched. Sim-scope callers must not
+    // reach this arm (SimVfs fds cannot back a MAP_SHARED mapping).
+    fn map_segs(files: &[SegFd], lens: &[u64], maplen: usize) -> PgResult<SegMap> {
         unsafe {
             let reserve = libc::mmap(
                 std::ptr::null_mut(),
@@ -294,7 +418,7 @@ impl SegMap {
                     lens[i] as usize,
                     libc::PROT_READ,
                     libc::MAP_SHARED | libc::MAP_FIXED,
-                    std::os::fd::AsRawFd::as_raw_fd(f),
+                    f.raw(),
                     0,
                 );
                 if p == libc::MAP_FAILED {

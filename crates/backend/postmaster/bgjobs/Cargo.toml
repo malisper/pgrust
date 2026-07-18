@@ -9,6 +9,7 @@ name = "bgjobs"
 path = "src/lib.rs"
 
 [dependencies]
+pg_clock = { path = "../../../port/pg_clock" }
 elog = { path = "../../utils/error/elog" }
 runtime = { path = "../../executor/runtime" }
 types_error = { path = "../../../_support/types/types_error" }
