@@ -4,6 +4,7 @@
 
 // Not from wait_error.c: a system(3) wrapper colocated here since every
 // caller immediately feeds its raw wait status into wait_result_to_str et al.
+#[cfg(not(target_family = "wasm"))]
 pub fn system(command: &str) -> i32 {
     use std::os::unix::process::ExitStatusExt;
     match std::process::Command::new("/bin/sh").arg("-c").arg(command).status() {
@@ -12,22 +13,53 @@ pub fn system(command: &str) -> i32 {
     }
 }
 
+// wasm32: WASI p1 has no processes; system(3) fails as C's would when
+// fork/exec is unavailable (-1, errno path).
+#[cfg(target_family = "wasm")]
+pub fn system(_command: &str) -> i32 {
+    -1
+}
+
+// wasm32 arms: the libc crate for wasi exposes no W* macros; these are the
+// classic POSIX bit forms (identical to glibc/wasi-libc definitions), pure
+// arithmetic on the status word.
+#[cfg(not(target_family = "wasm"))]
 pub fn WIFEXITED(status: i32) -> bool {
     libc::WIFEXITED(status)
 }
+#[cfg(target_family = "wasm")]
+pub fn WIFEXITED(status: i32) -> bool {
+    status & 0x7f == 0
+}
 
+#[cfg(not(target_family = "wasm"))]
 pub fn WEXITSTATUS(status: i32) -> i32 {
     libc::WEXITSTATUS(status)
 }
+#[cfg(target_family = "wasm")]
+pub fn WEXITSTATUS(status: i32) -> i32 {
+    (status >> 8) & 0xff
+}
 
+#[cfg(not(target_family = "wasm"))]
 pub fn WIFSIGNALED(status: i32) -> bool {
     libc::WIFSIGNALED(status)
 }
+#[cfg(target_family = "wasm")]
+pub fn WIFSIGNALED(status: i32) -> bool {
+    ((status & 0x7f) + 1) >> 1 > 0
+}
 
+#[cfg(not(target_family = "wasm"))]
 pub fn WTERMSIG(status: i32) -> i32 {
     libc::WTERMSIG(status)
 }
+#[cfg(target_family = "wasm")]
+pub fn WTERMSIG(status: i32) -> i32 {
+    status & 0x7f
+}
 
+#[cfg(not(target_family = "wasm"))]
 pub fn pg_strsignal(signum: i32) -> String {
     // SAFETY: strsignal returns a process-lifetime static string (or NULL).
     let p = unsafe { libc::strsignal(signum) };
@@ -36,6 +68,12 @@ pub fn pg_strsignal(signum: i32) -> String {
     }
     // SAFETY: non-NULL NUL-terminated string from libc.
     unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().into_owned()
+}
+
+// wasm32: no strsignal in the wasi libc crate; C's NULL fallback string.
+#[cfg(target_family = "wasm")]
+pub fn pg_strsignal(_signum: i32) -> String {
+    "unrecognized signal".to_string()
 }
 
 fn strerror_now() -> String {
