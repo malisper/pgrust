@@ -1318,8 +1318,12 @@ impl SimState {
                 Some(p) => (classify_path(p), p.display().to_string()),
                 None => (PathClass::Other, "-".to_string()),
             };
+            // inc-5: offset rides the diagnostic trace so harness stratifiers
+            // can identify page REWRITES (the FPW-red selector); `-` when the
+            // op has no offset. Purely diagnostic — plans never read it.
+            let off = op.offset.map(|o| o.to_string()).unwrap_or_else(|| "-".into());
             self.trace.push(format!(
-                "OP seq={} kind={:?} class={class:?} path={path}",
+                "OP seq={} kind={:?} class={class:?} off={off} path={path}",
                 self.op_seq, op.kind
             ));
         }
