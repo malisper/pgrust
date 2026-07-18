@@ -940,13 +940,22 @@ impl ParCopyShared {
         }
         let sort = self.sort.as_ref().expect("spill without sort mode");
         // MakePGDirectory, EEXIST-tolerant: "base" always exists, so the one
-        // missing component is pgsql_tmp itself (DST P1 inc-4 fence).
+        // missing component is pgsql_tmp itself (DST P1 inc-4 fence). EEXIST
+        // is only usable when the existing path really is a directory
+        // (pre-fence create_dir_all errored on a plain file here).
         let dir = std::path::Path::new("base/pgsql_tmp");
-        if fd::MakePGDirectory("base/pgsql_tmp") < 0 && fd::get_errno() != libc::EEXIST {
-            let e = std::io::Error::from_raw_os_error(fd::get_errno());
-            return Err(Box::new(PgError::error(format!(
-                "parallel load-sort temp dir: {e}"
-            ))));
+        if fd::MakePGDirectory("base/pgsql_tmp") < 0 {
+            let en = fd::get_errno();
+            let mut fi = fd::FileInfo::zeroed();
+            let usable_dir = en == libc::EEXIST
+                && fd::pg_stat("base/pgsql_tmp", &mut fi) == 0
+                && fi.is_dir();
+            if !usable_dir {
+                let e = std::io::Error::from_raw_os_error(en);
+                return Err(Box::new(PgError::error(format!(
+                    "parallel load-sort temp dir: {e}"
+                ))));
+            }
         }
         let seq = self.sort_run_seq.fetch_add(1, Ordering::SeqCst);
         let path = dir.join(format!(

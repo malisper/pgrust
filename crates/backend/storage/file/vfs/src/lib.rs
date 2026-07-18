@@ -105,10 +105,13 @@ const _: () = assert!(
 /// Stat result, plain-typed. `mode` is `st_mode` widened to u32 (mode_t is u16
 /// on macOS).
 ///
-/// Contract v1.1 (additive revisions): `dev`/`ino` carry the (st_dev, st_ino)
-/// identity vocabulary the part-cache staleness rule and the
-/// SegMap::open_shared registry key speak (WS-B request); `uid`/`gid` carry
-/// the ownership words basebackup's tar headers stamp (WS-A inc-3).
+/// Contract v1.1 (additive revision, WS-B request, tag `vfs-trait-v1.1`):
+/// `dev`/`ino` carry the (st_dev, st_ino) identity vocabulary the part-cache
+/// staleness rule and the SegMap::open_shared registry key speak.
+///
+/// Contract v1.2 (additive revision, WS-A inc-3, tag `vfs-trait-v1.2`):
+/// `uid`/`gid` carry the ownership words basebackup's tar headers stamp.
+///
 /// Construct via [`FileInfo::zeroed`] (or struct-update from it) so additive
 /// revisions stay non-breaking. SimVfs fills synthetic stable values.
 #[derive(Clone, Copy, Debug, Default)]

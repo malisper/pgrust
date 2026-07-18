@@ -139,6 +139,14 @@ fn read_link(path: &str) -> PgResult<String> {
             .finish(loc("read_link"))?;
         unreachable!()
     }
+    // As in C's sendDir: a target that fills the whole buffer may have been
+    // truncated -- error out rather than emit a truncated link target.
+    if n as usize >= buf.len() {
+        ereport(ERROR)
+            .errmsg(format!("symbolic link \"{path}\" target is too long"))
+            .finish(loc("read_link"))?;
+        unreachable!()
+    }
     Ok(String::from_utf8_lossy(&buf[..n as usize]).into_owned())
 }
 
