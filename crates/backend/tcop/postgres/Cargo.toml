@@ -31,6 +31,9 @@ pqformat = { path = "../../libpq/pqformat" }
 fastpath = { path = "../fastpath" }
 init_small = { path = "../../utils/init/init_small" }
 lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+lock = { path = "../../storage/lmgr/lock" }
+bufmgr = { path = "../../storage/buffer/bufmgr" }
+types_storage = { path = "../../../_support/types/types_storage" }
 latch = { path = "../../storage/ipc/latch" }
 pmsignal = { path = "../../storage/ipc/pmsignal" }
 commands_async = { path = "../../commands/commands_async" }

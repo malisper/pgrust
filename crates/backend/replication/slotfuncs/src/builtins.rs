@@ -519,11 +519,9 @@ pub fn fc_pg_copy_logical_replication_slot_c(
     fc_copy_replication_slot(flinfo, fcinfo, true, None, None)
 }
 
-// pg_sync_replication_slots (slotfuncs.c): the permission and not-a-standby
-// pre-checks are live (byte-parity error shape on a primary); everything past
-// them is loud — SyncReplicationSlots / ValidateSlotSyncParams /
-// walrcv_connect (libpqwalreceiver) and the slotsync.c worker machinery are
-// all unported (no walreceiver-conn crate exists in this repo yet).
+// pg_sync_replication_slots (slotfuncs.c): pre-checks here, everything past
+// them (parameter validation, primary connection, SyncReplicationSlots) in
+// the slotsync crate.
 pub fn fc_pg_sync_replication_slots(
     _flinfo: Option<&mut FmgrInfo>,
     _fcinfo: &mut Fcinfo,
@@ -538,11 +536,9 @@ pub fn fc_pg_sync_replication_slots(
         unreachable!("ereport(ERROR) returns Err");
     }
 
-    panic!(
-        "pg_sync_replication_slots not ported past its pre-checks: \
-         SyncReplicationSlots / ValidateSlotSyncParams / walrcv_connect \
-         substrate unported (slotsync.c, libpqwalreceiver)"
-    );
+    slotsync::sync_replication_slots_sql_body()?;
+
+    Ok(Datum::from_usize(0))
 }
 
 const fn b(foid: ::types_core::Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {

@@ -174,7 +174,7 @@ fn xlog_archive_check_done(xlog: &str) -> PgResult<bool> {
     xlogarchive_seams::xlog_archive_check_done::call(xlog)
 }
 
-fn xlog_archive_cleanup(xlog: &str) {
+pub(crate) fn xlog_archive_cleanup(xlog: &str) {
     if xlogarchive_seams::xlog_archive_cleanup::is_installed() {
         return xlogarchive_seams::xlog_archive_cleanup::call(xlog);
     }
@@ -208,6 +208,40 @@ pub(crate) fn RemoveOldXlogFiles(
         if fname[8..] <= lastoff[8..] && xlog_archive_check_done(fname)? {
             UpdateLastRemovedPtr(fname);
             RemoveXlogFile(&de, recycle_seg_no, &mut endlog_seg_no, insert_tli)?;
+        }
+    }
+    Ok(())
+}
+
+// After a timeline switch: drop old-timeline segments past the switch point.
+pub fn RemoveNonParentXlogFiles(
+    switchpoint: XLogRecPtr,
+    new_tli: TimeLineID,
+) -> PgResult<()> {
+    let wal_segsz = wal_segment_size();
+    let switch_seg_no = XLByteToPrevSeg(switchpoint, wal_segsz);
+    let mut endlog_seg_no = XLByteToSeg(switchpoint, wal_segsz);
+    let recycle_seg_no = endlog_seg_no + 10;
+
+    let switchseg = XLogFileName(new_tli, switch_seg_no, wal_segsz);
+    let _ = elog::elog(
+        types_error::DEBUG2,
+        format!("attempting to remove WAL segments newer than log file {switchseg}"),
+    );
+
+    let Ok(dir) = std::fs::read_dir(XLOGDIR) else {
+        return Ok(());
+    };
+    for de in dir.flatten() {
+        let fname_os = de.file_name();
+        let Some(fname) = fname_os.to_str() else { continue };
+        if !IsXLogFileName(fname) {
+            continue;
+        }
+        if fname[..8] < switchseg[..8] && fname[8..] > switchseg[8..] {
+            if !xlogarchive_seams::xlog_archive_is_ready::call(fname) {
+                RemoveXlogFile(&de, recycle_seg_no, &mut endlog_seg_no, new_tli)?;
+            }
         }
     }
     Ok(())
