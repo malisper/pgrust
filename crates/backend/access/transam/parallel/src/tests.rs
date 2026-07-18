@@ -146,3 +146,38 @@ fn parallel_context_requires_parallel_mode_and_lists() {
     DestroyParallelContext(id).unwrap();
     assert!(!ParallelContextActive());
 }
+
+// PHASE3-CLOSE WS-WIDTH §2.2 clamp-seam unit (band 99001; fence
+// escalation EX-WIDTH-1, notes/se-p3close-width.md §1.5 — addition-only,
+// this crate's product code is untouched): the width lease clamps launch
+// counts ONLY through C's own lower-the-launch mechanism. Plan width N,
+// grant k<N ⇒ nworkers_to_launch == k while pcxt.nworkers (the DSM/queue
+// sizing input) stays N; grant 0 ⇒ launch count 0; a grant ABOVE plan
+// width never raises the launch (ReinitializeParallelWorkers mins with
+// nworkers); a fresh startup (ExecParallelReinitialize path) restores
+// plan width before the next lease clamps.
+#[test]
+fn reinitialize_clamps_launch_count_only() {
+    let _s = serial();
+    xact_seams_boot();
+    let _g = ParallelModeGuard::enter();
+    let id = CreateParallelContext("postgres", "substrate_test_entry", 4).unwrap();
+    assert_eq!(nworkers(id), 4);
+    assert_eq!(nworkers_to_launch(id), 4, "launch count starts at plan width");
+
+    // Grant k < N: launched < planned, DSM sizing (nworkers) untouched.
+    ReinitializeParallelWorkers(id, 2);
+    assert_eq!(nworkers_to_launch(id), 2, "clamped to the grant");
+    assert_eq!(nworkers(id), 4, "DSM/queue sizing stays at plan width");
+
+    // Grant 0: launches NOTHING (the leader-local serial path serves).
+    ReinitializeParallelWorkers(id, 0);
+    assert_eq!(nworkers_to_launch(id), 0);
+    assert_eq!(nworkers(id), 4);
+
+    // A grant above plan width never raises the launch (min with plan).
+    ReinitializeParallelWorkers(id, 9);
+    assert_eq!(nworkers_to_launch(id), 4, "never above plan width");
+
+    DestroyParallelContext(id).unwrap();
+}

@@ -1215,20 +1215,26 @@ fn ledger_blocking_section_donation_liveness() {
     });
 }
 
-/// WS-O (wave 2) external-face model: a ParallelWidthLease lifecycle
-/// (admit_external → settle → drop/retire) runs CONCURRENTLY with a pool
-/// drive on a 2-core box. Oracles: (a) the pool RG completes under every
-/// interleaving — the external charge can zero the pool budget mid-drive
-/// and the liveness floor (target ≥ 1) plus the retire wake must keep the
-/// driver live (a lost widening wake or a floor bug deadlocks the model);
-/// (b) the external grant respects the core budget (headroom-only, single
-/// leaser: granted ≤ cores); (c) accounting drains to zero — entry retired,
-/// every pool grant returned. Lock-order soundness (membership → inner;
-/// the external face takes inner ALONE) is exercised by the concurrent
+/// PHASE3-CLOSE WS-WIDTH unified-face model — the REPLACEMENT of WS-O's
+/// external-face lease-liveness model (removed in the same W4 commit that
+/// removed the external face; this successor landed at W1 and carries the
+/// oracles): a ParallelWidthLease backed by a UNIFIED GANG ENTRY
+/// (admit_gang → settle → drop/retire, all through the pool face's ONE
+/// recompute) runs CONCURRENTLY with a pool drive on a 2-core box —
+/// gang-and-pool interleavings in ONE model (contract §2.1).
+/// Oracles: (a) the pool RG completes under every interleaving — the
+/// frozen gang charge can zero the pool budget mid-drive and the liveness
+/// floor (target ≥ 1) plus the retire wake must keep the driver live (a
+/// lost widening wake or a floor bug deadlocks the model — FM-2's bound);
+/// (b) the gang grant respects the core budget (headroom-only, single
+/// leaser: granted ≤ cores); (c) accounting drains to zero — gang entry
+/// retired, every pool grant returned. Lock-order soundness (membership →
+/// inner; admit_gang takes inner ALONE) is exercised by the concurrent
 /// submit + lease: an inversion would deadlock under loom.
-/// LOOM-FAST SIZING (≤5min law): pb 1, one lease thread + one driver.
+/// LOOM-FAST SIZING (≤5min law): pb 1, one lease thread + one driver —
+/// the external model's exact budget.
 #[test]
-fn ledger_external_lease_liveness() {
+fn ledger_unified_gang_lease_liveness() {
     let mut b = loom::model::Builder::new();
     b.preemption_bound = Some(1);
     b.max_branches = 200_000;
@@ -1252,7 +1258,7 @@ fn ledger_external_lease_liveness() {
                 assert!(lease.granted() <= 2, "headroom-only: never above cores");
                 lease.settle(lease.granted().min(1));
             }
-            // Drop retires the entry (widening wake rides retire).
+            // Drop retires the gang entry (widening wake rides retire).
         });
 
         drive_all(&rt, 0, &[waiter.clone()]);
@@ -1263,8 +1269,8 @@ fn ledger_external_lease_liveness() {
         let snap = rt.ledger_snapshot();
         assert_eq!(snap.admitted, 0);
         assert_eq!(snap.granted_total, 0, "every pool grant returned");
-        assert_eq!(snap.external_admitted, 0, "lease drop retired the entry");
-        assert_eq!(snap.external_active, 0);
+        assert_eq!(snap.gang_admitted, 0, "lease drop retired the gang entry");
+        assert_eq!(snap.gang_active, 0);
     });
 }
 
