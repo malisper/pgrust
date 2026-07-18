@@ -545,6 +545,17 @@ pub fn PostgresSimNetMain(argv: &[String], username: &str) -> ! {
         .and_then(|v| v.parse().ok())
         .unwrap_or(1);
 
+    // ---- PERMIT-S2 F2: the wpool 2-worker demo. Needs the boot half (the
+    // standby prelude restores the postmaster GUC snapshot) but no wire
+    // session; never returns.
+    if std::env::var("PGRUST_PERMIT_WPOOL").is_ok_and(|v| v == "1") {
+        if let Err(err) = crate::stdio_wire::stdio_wire_boot_half(argv, username) {
+            elog::emit_error_report_for(&err);
+            std::process::exit(1);
+        }
+        crate::sim_sched_demo::run_wpool_demo();
+    }
+
     if sessions <= 1 {
         // ---- The single-session path (stdio_wire's inner, verbatim).
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
