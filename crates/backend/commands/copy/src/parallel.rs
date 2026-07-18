@@ -946,7 +946,7 @@ impl ParCopyShared {
         let seq = self.sort_run_seq.fetch_add(1, Ordering::SeqCst);
         let path = dir.join(format!(
             "pgsql_tmp{}.parcopysort.{:x}.{}.run",
-            std::process::id(),
+            init_small::globals::process_id(),
             sort.nonce,
             seq
         ));

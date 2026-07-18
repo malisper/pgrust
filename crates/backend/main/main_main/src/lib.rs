@@ -110,7 +110,7 @@ pub fn pg_main(argv: &[String]) -> PgResult<()> {
 
     ps_status::save_ps_display_args();
 
-    init_small::globals::SetMyProcPid(std::process::id() as i32);
+    init_small::globals::SetMyProcPid(init_small::globals::process_id() as i32);
     // MemoryContextInit: top-level contexts are owner-created here; ErrorContext is PgResult.
 
     stack_depth::set_stack_base();

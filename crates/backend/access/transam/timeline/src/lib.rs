@@ -285,7 +285,7 @@ pub fn findNewestTimeLine(
 }
 
 fn xlog_temp_path() -> String {
-    format!("{XLOGDIR}/xlogtemp.{}", std::process::id())
+    format!("{XLOGDIR}/xlogtemp.{}", init_small::globals::process_id())
 }
 
 fn create_temp_history_file(tmppath: &str, func: &'static str) -> PgResult<i32> {

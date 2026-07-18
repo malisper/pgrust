@@ -16572,6 +16572,7 @@ version = "0.0.0"
 dependencies = [
  "elog",
  "fd",
+ "init_small",
  "init_small_seams",
  "ipc_seams",
  "libc",

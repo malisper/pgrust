@@ -9,6 +9,7 @@ name = "timeline"
 path = "src/lib.rs"
 
 [dependencies]
+init_small = { path = "../../../utils/init/init_small" }
 libc = "0.2"
 mcx = { path = "../../../../_support/mcx" }
 types_core = { path = "../../../../_support/types/types_core" }

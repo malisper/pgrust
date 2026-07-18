@@ -32,7 +32,7 @@ thread_local! {
 }
 
 fn my_pid() -> i32 {
-    std::process::id() as i32
+    init_small::globals::process_id() as i32
 }
 
 pub fn UnlinkLockFiles(_status: i32, _arg: usize) {

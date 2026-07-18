@@ -24,7 +24,7 @@ const ARCHIVE_MODE_OFF: i32 = 0;
 pub fn InitProcessGlobals() {
     // miscinit's InitProcessGlobals carries C's whole body, including the
     // strong-seed of the (thread-local) global PRNG.
-    miscinit::InitProcessGlobals(std::process::id() as i32);
+    miscinit::InitProcessGlobals(init_small::globals::process_id() as i32);
 }
 
 fn getInstallationPaths(argv0: &str) {
