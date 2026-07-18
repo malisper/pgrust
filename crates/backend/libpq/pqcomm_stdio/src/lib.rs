@@ -27,10 +27,12 @@
 //!      scheduler installs into these SAME slots — deterministic delivery,
 //!      no raw I/O — giving multi-connection scenarios replay identity.
 //!
-//! Determinism ledger: the libc::read/write/poll sites below are the raw-IO
+//! Determinism ledger: the libc::read/write sites below are the raw-IO
 //! surface OF the transport provider, exactly like be_secure's libc::recv/
 //! send rows — they live BEHIND the seam, so the sim consumer never executes
-//! them.
+//! them. The noblock EMULATION (poll probe + capped write) lives in the
+//! shared `fdnb` crate — the wasm-net-seam ledger's N1/N2 MUST-FIX items
+//! are fixed THERE, once, with red-scenario tests (P4 sim-net increment).
 //!
 //! Single-threaded by construction: one process, one session (the wasm
 //! lifecycle — signals/threads do not exist on WASI p1). Blocking semantics
@@ -91,41 +93,28 @@ fn noblock() -> bool {
     STATE.get().unwrap_or(false)
 }
 
-// Zero-timeout readiness probe for the emulated noblock mode. On
-// wasm32-wasip1, wasi-libc implements poll(2) over poll_oneoff.
-fn poll_ready(fd: i32, events: i16) -> bool {
-    let mut pfd = libc::pollfd {
-        fd,
-        events,
-        revents: 0,
-    };
-    // SAFETY: pfd is a valid pollfd for the duration of the call; nfds = 1.
-    let rc = unsafe { libc::poll(&mut pfd, 1, 0) };
-    // Error/timeout = not ready; POLLHUP/POLLERR count as ready so the
-    // subsequent read observes EOF / the write observes EPIPE, as a socket
-    // would.
-    rc > 0 && (pfd.revents & (events | libc::POLLHUP | libc::POLLERR)) != 0
-}
-
 /// secure_read over fd 0. Same interrupt-processing shape as the socket
 /// provider's be_secure::secure_read: process-before, process-after, and a
 /// blocked-flavored process on EINTR (the stdio stand-in for the latch arm —
-/// a pipe read has no wait set to fall back to).
+/// a pipe read has no wait set to fall back to). The noblock arm delegates
+/// to the shared fdnb emulation (N2-fixed readiness: a dead fd surfaces
+/// EBADF/EOF instead of eternal EWOULDBLOCK).
 pub fn secure_read(buf: &mut [u8]) -> PgResult<Result<usize, i32>> {
     postgres_seams::process_client_read_interrupt::call(false)?;
 
     let (n, e) = loop {
-        if noblock() && !poll_ready(STDIN_FD, libc::POLLIN) {
-            break (-1, libc::EWOULDBLOCK);
-        }
-        // SAFETY: buf is valid writable memory of buf.len() bytes.
-        let n = unsafe { libc::read(STDIN_FD, buf.as_mut_ptr().cast(), buf.len()) };
-        let e = errno();
+        let (n, e) = if noblock() {
+            fdnb::read_noblock(STDIN_FD, buf)
+        } else {
+            // SAFETY: buf is valid writable memory of buf.len() bytes.
+            let n = unsafe { libc::read(STDIN_FD, buf.as_mut_ptr().cast(), buf.len()) };
+            (n as isize, errno())
+        };
         if n < 0 && e == libc::EINTR {
             postgres_seams::process_client_read_interrupt::call(true)?;
             continue;
         }
-        break (n as isize, e);
+        break (n, e);
     };
 
     postgres_seams::process_client_read_interrupt::call(false)?;
@@ -134,22 +123,27 @@ pub fn secure_read(buf: &mut [u8]) -> PgResult<Result<usize, i32>> {
 }
 
 /// secure_write over fd 1. Partial writes are the caller's loop
-/// (pqcomm::internal_flush_buffer), as with the socket provider.
+/// (pqcomm::internal_flush_buffer), as with the socket provider. The
+/// noblock arm delegates to the shared fdnb emulation — N1-fixed: the write
+/// is capped at fdnb::NB_WRITE_CAP so POLLOUT actually licenses it (the old
+/// poll-then-BLOCKING-write of the full unsent buffer could park forever,
+/// making pq_flush_if_writable/pq_putmessage_noblock not non-blocking).
 pub fn secure_write(buf: &[u8]) -> PgResult<Result<usize, i32>> {
     postgres_seams::process_client_write_interrupt::call(false)?;
 
     let (n, e) = loop {
-        if noblock() && !poll_ready(STDOUT_FD, libc::POLLOUT) {
-            break (-1, libc::EWOULDBLOCK);
-        }
-        // SAFETY: buf is valid readable memory of buf.len() bytes.
-        let n = unsafe { libc::write(STDOUT_FD, buf.as_ptr().cast(), buf.len()) };
-        let e = errno();
+        let (n, e) = if noblock() {
+            fdnb::write_noblock(STDOUT_FD, buf)
+        } else {
+            // SAFETY: buf is valid readable memory of buf.len() bytes.
+            let n = unsafe { libc::write(STDOUT_FD, buf.as_ptr().cast(), buf.len()) };
+            (n as isize, errno())
+        };
         if n < 0 && e == libc::EINTR {
             postgres_seams::process_client_write_interrupt::call(true)?;
             continue;
         }
-        break (n as isize, e);
+        break (n, e);
     };
 
     postgres_seams::process_client_write_interrupt::call(false)?;
