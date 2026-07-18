@@ -64,7 +64,7 @@ pub const DOPSCALE_W1: u64 = 191; // full multiplier at or above this width
 pub const DOPSCALE_MAX_X: f64 = 2.5; // t_max multiplier at W1
 
 pub fn dopscale_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static ON: crate::sync::OnceLock<bool> = crate::sync::OnceLock::new();
     *ON.get_or_init(|| {
         std::env::var("PGRUST_RUNTIME_TMAX_DOPSCALE").is_ok_and(|v| v.trim() == "1")
     })

@@ -23,6 +23,13 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // PgStartTime's writer arm for the no-postmaster entries: C's standalone
+    // backend assigns the global directly (postgres.c:4155); the storage
+    // lives with the postmaster crate here.
+    pub fn set_pg_start_time(ts: i64)
+);
+
+seam_core::seam!(
     // §3.1 P-pool claim: hand a just-registered BGWORKER_CLASS_PARALLEL slot
     // to a parked standby thread, bypassing the postmaster round-trip and
     // thread spawn. Returns the standby's reserved MyProcPid, or 0 when no
@@ -39,4 +46,23 @@ seam_core::seam!(
     // postmaster fallback spawn path (InitProcess freelist exhaustion) and
     // hold POPULATION at target so maintain() never replenishes fresh ones.
     pub fn parallel_pool_retire_db(dboid: types_core::Oid)
+);
+
+seam_core::seam!(
+    // PERMIT-S2 F2 (sim wpool demo): postmaster-thread pool replenish —
+    // spawn standbys up to target. The tcop sim corpus drives the REAL
+    // wpool through this seam (a direct launch_backend dep would be a
+    // package cycle through autovacuum -> commands_vacuum -> explain).
+    pub fn wpool_maintain()
+);
+
+seam_core::seam!(
+    // PERMIT-S2 F2 (sim wpool demo): retire every parked standby.
+    pub fn wpool_flush()
+);
+
+seam_core::seam!(
+    // PERMIT-S2 F2 (sim wpool demo): live standby-thread count (the demo's
+    // drain probe).
+    pub fn wpool_population() -> i32
 );

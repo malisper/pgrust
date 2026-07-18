@@ -385,6 +385,10 @@ fn crash_recovery_property_sweep() {
     for k in 1..=workload_ops {
         SimVfs::reset();
         bootstrap();
+        // inc-3 whole-node kill: the cut freezes ALL vfs mutation, so the
+        // workload's post-cut error-path ops (closes, late writes) cannot
+        // touch the crash image; revive() is the recovery boot.
+        SimVfs::set_kill_on_cut(true);
         SeededFaultPlan::install(per_point_seed(1, k), vec![FaultRule::crash_at_op(k)]);
         let out = run_workload(TXNS, false);
         if SimVfs::cut_count() == 0 {
@@ -392,6 +396,7 @@ fn crash_recovery_property_sweep() {
             continue;
         }
         arm_a_cuts += 1;
+        SimVfs::revive();
         match recover() {
             Ok(rec) => check_properties(&format!("armA k={k}"), &out.acked, &rec, &mut failures),
             Err(e) => failures.push(format!("armA k={k}: RECOVERY FAILED: {e}")),
@@ -405,6 +410,7 @@ fn crash_recovery_property_sweep() {
     for j in 1.. {
         SimVfs::reset();
         bootstrap();
+        SimVfs::set_kill_on_cut(true);
         SeededFaultPlan::install(
             per_point_seed(2, j),
             vec![FaultRule::nth_matching(
@@ -426,6 +432,7 @@ fn crash_recovery_property_sweep() {
         if SimVfs::cut_count() == 0 {
             SimVfs::cut(); // the PANIC-induced node death
         }
+        SimVfs::revive();
         match recover() {
             Ok(rec) => check_properties(&format!("armB j={j}"), &out.acked, &rec, &mut failures),
             Err(e) => failures.push(format!("armB j={j}: RECOVERY FAILED: {e}")),
@@ -438,6 +445,7 @@ fn crash_recovery_property_sweep() {
     for m in 1..=TXNS {
         SimVfs::reset();
         bootstrap();
+        SimVfs::set_kill_on_cut(true);
         let pp = (137 * m as usize) % 600; // strict prefix: < MIN_REC + min pad
         SeededFaultPlan::install(
             per_point_seed(3, m),
@@ -459,6 +467,7 @@ fn crash_recovery_property_sweep() {
         if out.acked.iter().any(|a| a.txid == m) {
             failures.push(format!("armC m={m}: txn with torn WAL record was acked"));
         }
+        SimVfs::revive();
         match recover() {
             Ok(rec) => {
                 if rec.horizon() >= m {
@@ -494,11 +503,13 @@ fn sweep_replay_same_seed_byte_identical() {
     fn one() -> (Vec<String>, Vec<u8>, Vec<(u64, usize, u64)>, u64) {
         SimVfs::reset();
         bootstrap();
+        SimVfs::set_kill_on_cut(true);
         SeededFaultPlan::install(SEED ^ 0x1234, vec![FaultRule::crash_at_op(57)]);
         let _ = run_workload(TXNS, false);
         if SimVfs::cut_count() == 0 {
             SimVfs::cut();
         }
+        SimVfs::revive();
         let rec = recover().expect("recovery after replayed cut");
         (SimVfs::fault_log(), rec.heap, rec.replayed, rec.ckpt_txid)
     }
@@ -627,6 +638,12 @@ fn red_fsyncgate_retry_believer_is_caught() {
             FaultDecision::Errno(libc::EIO),
         )],
     );
+    // Pin the ADVERSARIAL disk. Under the inc-2 N2 model the doomed epoch
+    // routes through the CrashImage policy, so on a kind (seeded-lucky) disk
+    // the believer's record can genuinely survive — exactly why the bug
+    // class is insidious on real hardware. The red arm asserts the catch on
+    // the disk that loses it.
+    SimVfs::set_crash_image(CrashImage::DropAll);
     let out = run_workload(4, true /* the believer retries and trusts the OK */);
     assert!(out.completed, "the believer never notices anything wrong");
     assert!(

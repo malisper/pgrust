@@ -1,0 +1,27 @@
+[package]
+name = "pqcomm_simnet"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pqcomm_simnet"
+path = "src/lib.rs"
+
+[dependencies]
+types_error = { path = "../../../_support/types/types_error" }
+types_startup = { path = "../../../_support/types/types_startup" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_core = { path = "../../../_support/types/types_core" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+pqcomm = { path = "../pqcomm" }
+pqcomm_seams = { path = "../pqcomm_seams" }
+be_secure_seams = { path = "../be_secure_seams" }
+elog = { path = "../../utils/error/elog" }
+libc = "0.2"
+ip = { path = "../../../common/ip" }
+
+# `pgrust_sim` is the non-default cfg selecting the sim providers (contract
+# §1.2); this crate is EMPTY without it (law 0.1 — no product codegen).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)'] }

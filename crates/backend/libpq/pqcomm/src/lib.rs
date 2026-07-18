@@ -755,46 +755,17 @@ pub fn pq_putmessage_noblock(msgtype: u8, s: &[u8]) -> PgResult<()> {
     (PQ_COMM_METHODS.with(Cell::get).putmessage_noblock)(msgtype, s)
 }
 
+/// Transport-BLIND message-layer installs only: pq_putmessage/pq_flush
+/// delegate through `PQ_COMM_METHODS` whatever byte provider sits under
+/// them. The listen/accept half moved to [`socket::init_socket_seams`]
+/// (P4 sim-net pin, wasm-net-seam worklog §8): those slots are set-once
+/// and PROVIDER-owned, so installing the socket arms unconditionally here
+/// locked every other transport (sim-net) out of them. Mirrors the
+/// init_socket_seams → init_socket_gucs split.
 pub fn init_seams() {
-    pqcomm_seams::accept_connection::set(|server_fd| {
-        let mut cs = types_startup::ClientSocket {
-            sock: types_core::PGINVALID_SOCKET,
-            raddr: ip::SockAddr::zeroed(),
-        };
-        if socket::AcceptConnection(server_fd, &mut cs) == types_core::STATUS_OK {
-            Ok(cs)
-        } else {
-            Err(Box::new(types_error::PgError::new(
-                types_error::LOG,
-                "could not accept new connection",
-            )))
-        }
-    });
     pqcomm_seams::pq_putmessage::set(pq_putmessage);
     pqcomm_seams::pq_putmessage_v2::set(pq_putmessage_v2);
     pqcomm_seams::pq_flush::set(pq_flush);
-    pqcomm_seams::listen_server_port::set(
-        |hostname, port, unix_socket_dir, listen_sockets, max_listen| {
-            let family =
-                if unix_socket_dir.is_some() { libc::AF_UNIX } else { libc::AF_UNSPEC };
-            let status = socket::ListenServerPort(
-                family,
-                hostname,
-                port,
-                unix_socket_dir,
-                listen_sockets,
-                max_listen,
-            )?;
-            if status == types_core::STATUS_OK {
-                Ok(())
-            } else {
-                Err(Box::new(types_error::PgError::new(
-                    types_error::WARNING,
-                    "could not create listen socket",
-                )))
-            }
-        },
-    );
 }
 
 pub mod socket;

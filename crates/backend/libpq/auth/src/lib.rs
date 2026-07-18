@@ -258,6 +258,14 @@ fn deferred_arm(method: &str, what: &str) -> i32 {
     panic!("ClientAuthentication: \"{method}\" arm deferred — {what} unported");
 }
 
+// wasm32: no peer sockets and no credential surface on WASI; ENOSYS routes
+// auth_peer to C's "peer authentication is not supported on this platform".
+#[cfg(target_family = "wasm")]
+fn getpeereid(_sock: i32) -> Result<(libc::uid_t, libc::gid_t), i32> {
+    Err(libc::ENOSYS)
+}
+
+#[cfg(not(target_family = "wasm"))]
 fn getpeereid(sock: i32) -> Result<(libc::uid_t, libc::gid_t), i32> {
     #[cfg(target_os = "linux")]
     {
@@ -287,6 +295,20 @@ fn getpeereid(sock: i32) -> Result<(libc::uid_t, libc::gid_t), i32> {
     }
 }
 
+// wasm32: getpeereid always ENOSYSes above (no passwd db exists either);
+// the twin stops at the same "not supported" report as the native ENOSYS arm.
+#[cfg(target_family = "wasm")]
+fn auth_peer(port: &Port) -> PgResult<i32> {
+    let errnum = getpeereid(port.sock).expect_err("wasm getpeereid always fails");
+    debug_assert_eq!(errnum, libc::ENOSYS);
+    ereport(LOG)
+        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .errmsg("peer authentication is not supported on this platform")
+        .finish(loc(1874, "auth_peer"))?;
+    Ok(STATUS_ERROR)
+}
+
+#[cfg(not(target_family = "wasm"))]
 fn auth_peer(port: &Port) -> PgResult<i32> {
     let (uid, _gid) = match getpeereid(port.sock) {
         Ok(v) => v,
@@ -347,7 +369,7 @@ fn auth_peer(port: &Port) -> PgResult<i32> {
 
 fn reject_arm(port: &Port, explicit_reject: bool) -> PgResult<()> {
     let mut hostinfo = String::new();
-    ip::pg_getnameinfo_all(&port.raddr, Some(&mut hostinfo), None, libc::NI_NUMERICHOST);
+    ip::pg_getnameinfo_all(&port.raddr, Some(&mut hostinfo), None, ip::sys::NI_NUMERICHOST);
 
     let encryption_state = if port.ssl_in_use {
         "SSL encryption"
@@ -600,7 +622,7 @@ pub(crate) fn port_auth_method(port: &Port) -> UserAuth {
 fn gai_strerror(errcode: i32) -> String {
     // SAFETY: gai_strerror returns a static NUL-terminated C string.
     unsafe {
-        let p = libc::gai_strerror(errcode);
+        let p = ip::sys::gai_strerror(errcode);
         if p.is_null() {
             return String::new();
         }

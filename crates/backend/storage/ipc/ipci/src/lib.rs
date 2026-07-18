@@ -104,7 +104,7 @@ pub fn CreateSharedMemoryAndSemaphores(fastpath_lock_groups_per_backend: i32) ->
     // The C shim is PGSharedMemoryCreate's segment header; ipci owns it here.
     let shim = Box::leak(Box::new(PGShmemHeader {
         magic: PGShmemMagic,
-        creatorPID: std::process::id() as _,
+        creatorPID: init_small::globals::process_id() as _,
         totalsize: size,
         freeoffset: 0,
         dsm_control: 0,
