@@ -237,6 +237,15 @@ impl<T: ?Sized + fmt::Debug> fmt::Debug for MutexGuard<'_, T> {
     }
 }
 
+/// std parity (S1 papering, permit-s3): `std::sync::MutexGuard` forwards
+/// `Display`; call sites (e.g. xlogrecovery targets.rs restore-point
+/// formatting) rely on it.
+impl<T: ?Sized + fmt::Display> fmt::Display for MutexGuard<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        (**self).fmt(f)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Condvar
 // ---------------------------------------------------------------------------
@@ -647,6 +656,14 @@ macro_rules! rw_guard {
         }
 
         impl<T: ?Sized + fmt::Debug> fmt::Debug for $name<'_, T> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                (**self).fmt(f)
+            }
+        }
+
+        /// std parity (S1 papering, permit-s3): std's rwlock guards forward
+        /// `Display`.
+        impl<T: ?Sized + fmt::Display> fmt::Display for $name<'_, T> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 (**self).fmt(f)
             }

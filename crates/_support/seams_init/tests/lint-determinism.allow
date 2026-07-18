@@ -611,15 +611,12 @@ rawsync	crates/backend/access/transam/xlogprefetcher/src/lib.rs	1
 rawsync	crates/backend/access/transam/xlogrecovery/src/lib.rs	1
 rawsync	crates/backend/catalog/pg_constraint/src/lib.rs	1
 rawsync	crates/backend/commands/analyze/src/lib.rs	2
-rawsync	crates/backend/access/transam/xlogrecovery/src/targets.rs	2	DST-REVIEW(t28-compose): t28 fold reconciliation — site landed on main via the t26 recovery/metalfix re-board (post-dates the permit-s1 rawsync census seed on the dst lineage); migration onto pgsync rides the permit step-2/3 breadth queue
 rawsync	crates/backend/commands/commands_async/src/queue.rs	1
 rawsync	crates/backend/commands/copy/src/parallel.rs	3
 rawsync	crates/backend/commands/seclabel/src/lib.rs	1
 rawsync	crates/backend/commands/vacuum/src/lib.rs	1
 rawsync	crates/backend/commands/vacuumparallel/src/lib.rs	1
-rawsync	crates/backend/executor/execgrouping/src/lib.rs	1	DST-REVIEW(t28-compose): t28 fold reconciliation — site landed on main via the t26 recovery/metalfix re-board (post-dates the permit-s1 rawsync census seed on the dst lineage); migration onto pgsync rides the permit step-2/3 breadth queue
 rawsync	crates/backend/executor/execexpr/src/jit.rs	3
-rawsync	crates/backend/executor/execmain/src/execmain.rs	2	DST-REVIEW(t28-compose): t28 fold reconciliation — OnceLock knob memo landed on main via the procperf-p2 (spi-compile-residual) car (post-dates the permit-s1 rawsync census seed on the dst lineage); migration onto pgsync rides the permit step-2/3 breadth queue
 rawsync	crates/backend/executor/execmain/src/execparallel.rs	1
 rawsync	crates/backend/executor/execmain/src/lanev2.rs	3
 rawsync	crates/backend/executor/execmain/src/lanev2/exprkey.rs	2
@@ -676,12 +673,7 @@ rawsync	crates/backend/postmaster/postmaster/src/lib.rs	2
 rawsync	crates/backend/postmaster/syslogger/src/lib.rs	1
 rawsync	crates/backend/postmaster/walsummarizer/src/lib.rs	1
 rawsync	crates/backend/postmaster/walwriter/src/job.rs	1
-rawsync	crates/backend/replication/launcher/src/lib.rs	1	DST-REVIEW(t28-compose): t28 fold reconciliation — site landed on main via the t26 recovery/metalfix re-board (post-dates the permit-s1 rawsync census seed on the dst lineage); migration onto pgsync rides the permit step-2/3 breadth queue
-rawsync	crates/backend/replication/origin/src/lib.rs	1	DST-REVIEW(t28-compose): t28 fold reconciliation — site landed on main via the t26 recovery/metalfix re-board (post-dates the permit-s1 rawsync census seed on the dst lineage); migration onto pgsync rides the permit step-2/3 breadth queue
 rawsync	crates/backend/replication/slot/src/lib.rs	1
-rawsync	crates/backend/replication/slotsync/src/lib.rs	1	DST-REVIEW(t28-compose): t28 fold reconciliation — site landed on main via the t26 recovery/metalfix re-board (post-dates the permit-s1 rawsync census seed on the dst lineage); migration onto pgsync rides the permit step-2/3 breadth queue
-rawsync	crates/backend/replication/syncrep/src/lib.rs	1	DST-REVIEW(t28-compose): t28 fold reconciliation — site landed on main via the t26 recovery/metalfix re-board (post-dates the permit-s1 rawsync census seed on the dst lineage); migration onto pgsync rides the permit step-2/3 breadth queue
-rawsync	crates/backend/replication/walreceiverfuncs/src/lib.rs	1	DST-REVIEW(t28-compose): t28 fold reconciliation — site landed on main via the t26 recovery/metalfix re-board (post-dates the permit-s1 rawsync census seed on the dst lineage); migration onto pgsync rides the permit step-2/3 breadth queue
 rawsync	crates/backend/replication/walsender/src/lib.rs	1
 rawsync	crates/backend/storage/aio/aio_uring/src/lib.rs	1
 rawsync	crates/backend/storage/buffer/bufmgr/src/freelist.rs	1
@@ -738,7 +730,6 @@ rawsync	crates/backend/utils/misc/tzparser/src/lib.rs	1
 rawsync	crates/backend/utils/sort/sharedtuplestore/src/lib.rs	1
 rawsync	crates/contrib/pg_stat_statements/src/lib.rs	1
 rawsync	crates/contrib/pgcrypto/src/crypt/cryptdes.rs	1
-rawsync	crates/pl/plpgsql/src/handler.rs	1	DST-REVIEW(t28-compose): t28 fold reconciliation — OnceLock knob memo landed on main via the procperf-p2 (spi-compile-residual) car (post-dates the permit-s1 rawsync census seed on the dst lineage); migration onto pgsync rides the permit step-2/3 breadth queue
 rawsync	crates/port/crc32c/src/lib.rs	1
 rawsync	crates/port/pg_clock/src/sim.rs	1
 rawsync	crates/port/pg_strong_random/src/sim.rs	1

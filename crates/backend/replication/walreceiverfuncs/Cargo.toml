@@ -9,6 +9,7 @@ name = "walreceiverfuncs"
 path = "src/lib.rs"
 
 [dependencies]
+pgsync = { path = "../../../_support/pgsync" }
 adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
 condition_variable = { path = "../../storage/lmgr/condition_variable" }
 latch = { path = "../../storage/ipc/latch" }

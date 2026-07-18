@@ -777,7 +777,7 @@ thread_local! {
 // GetConfigOption behavior (the snapshot is then rebuilt on every read).
 // Latched once per process.
 fn guc_snapshot_disabled() -> bool {
-    static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static DISABLED: pgsync::OnceLock<bool> = pgsync::OnceLock::new();
     *DISABLED.get_or_init(|| {
         matches!(std::env::var("PGRUST_PLPGSQL_GUC_SNAPSHOT").as_deref(), Ok("0") | Ok("off"))
     })

@@ -6,7 +6,7 @@
 #![allow(clippy::result_large_err)]
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use pgsync::{Mutex, MutexGuard, OnceLock};
 
 use condition_variable::{
     ConditionVariable, ConditionVariableBroadcast, ConditionVariableCancelSleep,
@@ -369,7 +369,7 @@ mod tests {
     use super::*;
 
     fn init_once() {
-        static ONCE: std::sync::Once = std::sync::Once::new();
+        static ONCE: pgsync::Once = pgsync::Once::new();
         ONCE.call_once(WalRcvShmemInit);
     }
 

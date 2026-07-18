@@ -7,7 +7,7 @@ use std::cell::Cell;
 use std::sync::atomic::{
     AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, Ordering::Relaxed,
 };
-use std::sync::Mutex;
+use pgsync::Mutex;
 
 use condition_variable::{
     ConditionVariable, ConditionVariableBroadcast, ConditionVariableCancelSleep,
@@ -147,7 +147,7 @@ pub(crate) fn set_recovery_target_action_shutdown() {
 }
 
 pub fn recovery_wakeup_latch() -> LatchHandle {
-    static INITED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    static INITED: pgsync::OnceLock<()> = pgsync::OnceLock::new();
     let h = LatchHandle::recovery_wakeup();
     INITED.get_or_init(|| latch::InitSharedLatch(h));
     h
