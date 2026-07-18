@@ -22,6 +22,134 @@ fn software_crc32cx_parity() {
     }
 }
 
+/// Small-N walk of every unsafe path for the miri UB gate (tuplesort's
+/// `miri_scale_unsafe_paths` pattern — the full suite runs production-N
+/// workloads that are TOO-SLOW under interpretation). Covers: the config
+/// matrix (both hash kinds x both entry layouts) with growth; multi-chunk
+/// row storage (bases[c > 0] addressing, miri F8); a pre-split two-level
+/// table (capacity_hint > TWO_LEVEL_THRESHOLD); the hoisted batch and fold
+/// drivers (row_ptr_raw); bytes and i128 key reprs; reset/reuse (the
+/// clear() base re-capture). NOT covered here (native-only, needs >100k
+/// members): two-level CONVERSION and salted probes past
+/// SALT_DISABLE_MAX_ENTRIES.
+#[test]
+fn miri_scale_unsafe_paths() {
+    // (a) config matrix, growth from 64 slots, per-row probe + read-back.
+    int_roundtrip(600, 96, false);
+
+    // (b) multi-chunk rows: a 4096-byte state makes stride 513 words, so
+    // rows_per_chunk clamps to 64 and ~200 groups span 4 chunks.
+    let mut t = LaneAggTable::new(KeyRepr::Int, 4096, 64);
+    for i in 0..600i64 {
+        let k = i % 200;
+        let pr = t.probe_int(k, t.hash_key_int(k as u64));
+        // SAFETY: zeroed 4096-byte states.
+        unsafe { *states_i64(pr.states) += 1 };
+    }
+    assert_eq!(t.len(), 200);
+    for i in 0..t.nrows() {
+        // SAFETY: live row.
+        assert_eq!(unsafe { *states_i64(t.row_states(i)) }, 3);
+    }
+    // reset() exercises RowStore::clear's zero + base re-capture (F8).
+    t.reset();
+    assert_eq!(t.len(), 0);
+    let pr = t.probe_int(7, t.hash_key_int(7));
+    assert!(pr.is_new);
+    // SAFETY: reset re-zeroes retained chunks.
+    assert_eq!(unsafe { *states_i64(pr.states) }, 0);
+
+    // (c) born-two-level table: bucketed probe/insert without the (too slow
+    // under miri) conversion crossing.
+    let mut t2 = LaneAggTable::new(KeyRepr::Int, 16, TWO_LEVEL_THRESHOLD + 1);
+    assert!(t2.is_two_level());
+    for i in 0..300i64 {
+        let k = i % 100;
+        let pr = t2.probe_int(k, t2.hash_key_int(k as u64));
+        // SAFETY: zeroed 16-byte states.
+        unsafe { *states_i64(pr.states) += 1 };
+    }
+    assert_eq!(t2.len(), 100);
+
+    // (d) hoisted batch driver (row_ptr_raw), all three prefetch modes.
+    let keys: Vec<i64> = (0..1500)
+        .map(|i| ((i as u64 * 48271 % 300).wrapping_mul(0x9E37_79B9_7F4A_7C15)) as i64)
+        .collect();
+    let mut results: Vec<Vec<(i64, i64)>> = Vec::new();
+    for mode in [PrefetchMode::None, PrefetchMode::PreTouch, PrefetchMode::Adaptive] {
+        let mut tb = LaneAggTable::new(KeyRepr::Int, 16, 64);
+        let (mut hashes, mut out, mut new_out) = (Vec::new(), Vec::new(), Vec::new());
+        for chunk in keys.chunks(512) {
+            out.clear();
+            new_out.clear();
+            tb.probe_int_batch(chunk, mode, &mut hashes, &mut out, &mut new_out);
+            for &s in out.iter() {
+                // SAFETY: state pointers live for the table's life.
+                unsafe { *states_i64(s) += 1 };
+            }
+        }
+        let mut rows: Vec<(i64, i64)> = (0..tb.nrows())
+            // SAFETY: live rows.
+            .map(|i| (tb.row_key_int(i).unwrap(), unsafe { *states_i64(tb.row_states(i)) }))
+            .collect();
+        rows.sort();
+        results.push(rows);
+    }
+    assert_eq!(results[0], results[1]);
+    assert_eq!(results[1], results[2]);
+
+    // (e) fused fold driver over the config matrix.
+    for hash in [HashKind::Fmix, HashKind::Crc] {
+        for layout in [EntryLayout::Salt8, EntryLayout::Inline16] {
+            let mut tf = LaneAggTable::with_config(KeyRepr::Int, 16, 64, hash, layout);
+            let mut news = 0usize;
+            tf.probe_fold_int(&keys, |s, _i, is_new| {
+                if is_new {
+                    news += 1;
+                }
+                // SAFETY: zeroed 16-byte states.
+                unsafe { *states_i64(s) += 1 };
+            });
+            assert_eq!(news, 300);
+            assert_eq!(tf.len(), 300);
+        }
+    }
+
+    // (f) bytes keys: short (packed) and long (arena) forms + read-back.
+    let mut tby = LaneAggTable::new(KeyRepr::Bytes, 8, 16);
+    let corpus: Vec<Vec<u8>> = (0..300)
+        .map(|i| {
+            let s =
+                format!("k-{}{}", i % 70, if i % 3 == 0 { "-with-a-long-suffix" } else { "" });
+            s.into_bytes()
+        })
+        .collect();
+    let mut reference: HashMap<Vec<u8>, i64> = HashMap::new();
+    for k in &corpus {
+        let pr = tby.probe_bytes(k, tby.hash_key_bytes(k));
+        // SAFETY: zeroed 8-byte states.
+        unsafe { *states_i64(pr.states) += 1 };
+        *reference.entry(k.clone()).or_insert(0) += 1;
+    }
+    assert_eq!(tby.len(), reference.len());
+    let mut scratch = [0u8; 8];
+    for i in 0..tby.nrows() {
+        let k = tby.row_key_bytes(i, &mut scratch).unwrap().to_vec();
+        // SAFETY: live row.
+        assert_eq!(unsafe { *states_i64(tby.row_states(i)) }, reference[&k]);
+    }
+
+    // (g) i128 keys across word boundaries.
+    let mut t128 = LaneAggTable::new(KeyRepr::Int128, 8, 16);
+    for i in 0..300u64 {
+        let k = [i % 60, (i % 60) << 1];
+        let pr = t128.probe_i128(k, t128.hash_key_i128(k));
+        // SAFETY: zeroed 8-byte states.
+        unsafe { *states_i64(pr.states) += 1 };
+    }
+    assert_eq!(t128.len(), 60);
+}
+
 /// Reference-checked int build: fold (sum, count) per key across the salt
 /// enable threshold, growth, and (optionally) two-level conversion — over
 /// the full (hash kind × entry layout) config matrix.
