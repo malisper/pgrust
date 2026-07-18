@@ -32,6 +32,7 @@ pmsignal = { path = "../../storage/ipc/pmsignal" }
 pgarch = { path = "../pgarch" }
 procsignal = { path = "../../storage/ipc/procsignal" }
 fd = { path = "../../storage/file/fd" }
+vfs = { path = "../../storage/file/vfs" }
 ipc = { path = "../../storage/ipc/ipc" }
 lwlock = { path = "../../storage/lmgr/lwlock" }
 dsm_core = { path = "../../storage/ipc/dsm_core" }

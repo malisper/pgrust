@@ -7,10 +7,14 @@
 //! battery with `RUSTFLAGS='--cfg pgrust_sim' cargo test -p vfs sim::`.
 //!
 //! Shape (frozen surface, lib.rs): SimVfs is a ZST with `pub const fn new()`
-//! — `ACTIVE` is a const — and ALL state lives in a thread-local. The sim
-//! harness runs the whole simulated process single-threaded; a thread is a
-//! universe. [`SimVfs::reset`] tears the universe down (fresh disk, fd
-//! counter back to base, NoFaults plan) for back-to-back runs on one thread.
+//! — `ACTIVE` is a const. State homing has two modes (provider seam,
+//! dst-p3-scheduler §9): the DEFAULT keeps ALL state in a thread-local (a
+//! thread is a universe — every harness battery relies on that isolation);
+//! a whole-server sim boot re-homes to ONE process-shared universe via the
+//! boot installer [`SimVfs::install_process_universe`], because the server's
+//! real OS threads must all see the same simulated disk. [`SimVfs::reset`]
+//! tears the (thread-local) universe down (fresh disk, fd counter back to
+//! base, NoFaults plan) for back-to-back runs on one thread.
 //!
 //! DETERMINISM RULES (binding, contract §4.1):
 //! - BTree ordering ONLY — no HashMap/HashSet anywhere in this module.
@@ -81,8 +85,10 @@
 //! post-crash image before the harness packs it. Default off: the
 //! model-level batteries deliberately recover in the same universe.
 //!
-//! Namespace model: rooted at "/". Relative paths resolve against the root
-//! (the sim harness addresses data dirs absolutely; there is no cwd). Entry
+//! Namespace model: rooted at "/". Relative paths resolve against the boot
+//! cwd, which defaults to the root (harness batteries address data dirs
+//! absolutely or mint them at "/"; a whole-server boot sets it to the
+//! datadir via [`SimVfs::set_boot_cwd`]). Entry
 //! names must be UTF-8 (EINVAL otherwise). No symlinks: `lstat` ≡ `stat`,
 //! `read_link` fails EINVAL like readlink(2) on a non-symlink. Where
 //! platforms disagree on an errno, SimVfs speaks the Linux dialect (e.g.
@@ -92,6 +98,8 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::CStr;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use crate::{c_int, mode_t, off_t, set_errno, FileInfo, Vfs, VfsDirIter, VfsResult, PG_O_DIRECT};
 
@@ -188,7 +196,10 @@ pub enum FaultDecision {
 }
 
 /// Consulted before every op. Mutable so plans can count/schedule.
-pub trait FaultPlan {
+pub trait FaultPlan: Send {
+    // Send: the process-shared universe mode (provider seam §9) homes
+    // SimState — plan included — behind a process-global Mutex. Plans are
+    // seeded POD state machines; Send is structural for every implementor.
     fn before_op(&mut self, op: &OpDesc<'_>) -> FaultDecision;
 
     /// Drain human-readable notes the plan wants appended to the fault log
@@ -639,8 +650,43 @@ thread_local! {
     static SIM: RefCell<SimState> = RefCell::new(SimState::fresh());
 }
 
+// ---------------------------------------------------------------------------
+// Universe homing (provider seam, dst-p3-scheduler §9). Two modes:
+//
+// - THREAD-LOCAL (default): a thread is a universe. Every existing harness
+//   battery (vfs units, fd crash_sweep, the recovery sweeps) relies on this
+//   isolation — nothing changes for them.
+// - PROCESS-SHARED: one universe for the whole process, installed exactly
+//   once by the sim BOOT INSTALLER ([`SimVfs::install_process_universe`])
+//   before any secondary thread performs a vfs op. A whole-server sim boot
+//   spawns real OS threads (checkpointer, walwriter, backends) that must all
+//   see the SAME simulated disk; thread-local homing would hand each an
+//   empty namespace. Mutex serialization here is beneath the DST model (the
+//   P3 scheduler serializes execution above it; until then, cross-thread fs
+//   op interleaving is only as deterministic as the thread schedule).
+//
+// This is sim-internal state homing, not provider selection: `ActiveVfs`
+// stays a compile-time alias (P1 §1.2). Product builds do not compile this
+// module at all.
+// ---------------------------------------------------------------------------
+
+static SHARED_MODE: AtomicBool = AtomicBool::new(false);
+static SHARED: OnceLock<Mutex<SimState>> = OnceLock::new();
+
 fn with<R>(f: impl FnOnce(&mut SimState) -> R) -> R {
-    SIM.with(|cell| f(&mut cell.borrow_mut()))
+    if SHARED_MODE.load(Ordering::Acquire) {
+        // Poison recovery: a panic inside a closure (an unwinding elog ERROR
+        // crossing a vfs op is a bug, but sim must stay diagnosable) leaves
+        // the state as-of the last completed mutation; keep serving.
+        let mut guard = SHARED
+            .get()
+            .expect("SHARED_MODE set without SHARED state")
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        f(&mut guard)
+    } else {
+        SIM.with(|cell| f(&mut cell.borrow_mut()))
+    }
 }
 
 /// The deterministic simulated filesystem. ZST; state is thread-local (one
@@ -658,6 +704,114 @@ impl SimVfs {
     /// NOT a crash (crash keeps durable state).
     pub fn reset() {
         SIM.with(|cell| *cell.borrow_mut() = SimState::fresh());
+    }
+
+    /// BOOT INSTALLER (provider seam, dst-p3-scheduler §9): re-home the sim
+    /// universe from thread-local to PROCESS-SHARED. One-shot, irreversible
+    /// for the process lifetime; call before any secondary thread performs a
+    /// vfs op (the whole-server boot calls it from PostmasterMain before the
+    /// first datadir access). Panics if called twice — two installers in one
+    /// process is a harness bug.
+    pub fn install_process_universe() {
+        assert!(
+            SHARED.set(Mutex::new(SimState::fresh())).is_ok(),
+            "install_process_universe: shared sim universe already installed"
+        );
+        SHARED_MODE.store(true, Ordering::Release);
+    }
+
+    /// BOOT INSTALLER companion: set the sim cwd relative paths resolve
+    /// against (the product chdir()s into the datadir and addresses it
+    /// relatively). One-shot; must be an absolute path. Panics on a second
+    /// call with a DIFFERENT path.
+    pub fn set_boot_cwd(dir: &Path) {
+        assert!(dir.is_absolute(), "set_boot_cwd: path must be absolute");
+        let mut norm = PathBuf::from("/");
+        for comp in dir.components() {
+            match comp {
+                Component::RootDir | Component::CurDir => {}
+                Component::Prefix(_) => panic!("set_boot_cwd: prefix component"),
+                Component::ParentDir => {
+                    norm.pop();
+                }
+                Component::Normal(name) => norm.push(name),
+            }
+        }
+        if let Err(_already) = BOOT_CWD.set(norm.clone()) {
+            assert_eq!(
+                BOOT_CWD.get(),
+                Some(&norm),
+                "set_boot_cwd: called twice with different paths"
+            );
+        }
+    }
+
+    /// ASSET-INGEST API (§9.3): create a directory in the namespace with its
+    /// dirent already DURABLE (both entry images). Idempotent for an
+    /// existing directory (shared ancestor prefixes of asset roots). The
+    /// ingest precedes fault-plan installation and the schedule by
+    /// construction, so it consults no plan and emits no events. Parent must
+    /// already exist (asset walks are top-down).
+    pub fn ingest_dir(path: &CStr, mode: u32) -> Result<(), i32> {
+        let p = norm_path(path)?;
+        with(|st| {
+            if let Some(id) = st.lookup(&p) {
+                return match st.nodes[id].node {
+                    Node::Dir(_) => Ok(()),
+                    _ => Err(libc::ENOTDIR),
+                };
+            }
+            let (parent, name) = split_parent(&p)?;
+            let pid = st.dir_id(&parent)?;
+            let id = st.nodes.len();
+            st.nodes.push(NodeSlot {
+                node: Node::Dir(SimDir {
+                    entries: BTreeMap::new(),
+                    durable_entries: BTreeMap::new(),
+                    mode: mode & 0o7777,
+                }),
+                open_count: 0,
+            });
+            if let Node::Dir(d) = &mut st.nodes[pid].node {
+                d.entries.insert(name.clone(), id);
+                d.durable_entries.insert(name, id);
+            }
+            st.namespace.insert(p.clone(), id);
+            Ok(())
+        })
+    }
+
+    /// ASSET-INGEST API (§9.3): install a file whose content is DURABLE from
+    /// birth (volatile == durable, empty journal) — the host snapshot is the
+    /// pre-history no fault plan may cut into. Fails EEXIST on collision
+    /// (one manifest entry per path; overlapping roots are a manifest bug).
+    pub fn ingest_file(path: &CStr, data: &[u8], mode: u32) -> Result<(), i32> {
+        let p = norm_path(path)?;
+        with(|st| {
+            if st.lookup(&p).is_some() {
+                return Err(libc::EEXIST);
+            }
+            let (parent, name) = split_parent(&p)?;
+            let pid = st.dir_id(&parent)?;
+            let id = st.nodes.len();
+            st.nodes.push(NodeSlot {
+                node: Node::File(SimFile {
+                    volatile: data.to_vec(),
+                    durable: data.to_vec(),
+                    unsynced: Vec::new(),
+                    mode: mode & 0o7777,
+                    nlink: 1,
+                    o_direct_seen: false,
+                }),
+                open_count: 0,
+            });
+            if let Node::Dir(d) = &mut st.nodes[pid].node {
+                d.entries.insert(name.clone(), id);
+                d.durable_entries.insert(name, id);
+            }
+            st.namespace.insert(p.clone(), id);
+            Ok(())
+        })
     }
 
     /// Harness API: install a fault plan.
@@ -1012,7 +1166,16 @@ fn crash_locked(st: &mut SimState, forced: Option<(NodeId, JournalOp)>) {
 // path helpers
 // ---------------------------------------------------------------------------
 
-/// Lexically normalize. Relative paths resolve against "/" (no cwd in sim).
+/// The sim boot cwd (provider seam §9): relative paths resolve against it.
+/// Defaults to "/" (harness batteries address data dirs absolutely or mint
+/// them at the root); set at most once, by the boot installer, to the
+/// datadir the product `ChangeToDataDir`'d into — the REAL chdir happens
+/// too (conffile reads are vfs-EXCLUDED host stdio and need the host cwd),
+/// so this keeps the sim view and the host view pointing at the same tree.
+static BOOT_CWD: OnceLock<PathBuf> = OnceLock::new();
+
+/// Lexically normalize. Relative paths resolve against [`BOOT_CWD`]
+/// (default "/": no cwd unless a sim boot installed one).
 fn norm_path(path: &CStr) -> Result<PathBuf, i32> {
     let bytes = path.to_bytes();
     if bytes.is_empty() {
@@ -1022,7 +1185,11 @@ fn norm_path(path: &CStr) -> Result<PathBuf, i32> {
         Ok(s) => s,
         Err(_) => return Err(libc::EINVAL), // String-keyed namespace: UTF-8 only
     };
-    let mut out = PathBuf::from("/");
+    let mut out = if s.starts_with('/') {
+        PathBuf::from("/")
+    } else {
+        BOOT_CWD.get().cloned().unwrap_or_else(|| PathBuf::from("/"))
+    };
     for comp in Path::new(s).components() {
         match comp {
             Component::RootDir | Component::CurDir => {}

@@ -541,18 +541,17 @@ fn read_relmap_file(
         }
 
         waitevent_seams::pgstat_report_wait_start::call(WAIT_EVENT_RELATION_MAP_READ);
-        // The data plane rides the Vfs (P4 finding, dst/p4-simnet — the raw
-        // read(2) EBADF'd on the vfs-minted transient fd under sim, the
-        // loadsort/alter_system dataplane class): fd::pg_pread at offset 0
-        // == read(2) on the just-opened descriptor, one code path both cfgs.
-        // SAFETY: map is a padding-free POD of const-asserted size;
-        // SIZEOF_RELMAPFILE bytes are written into it at most.
-        let r = {
-            let dst = unsafe {
+        // SAFETY: map is a padding-free POD of const-asserted size; the
+        // pread writes at most SIZEOF_RELMAPFILE bytes into it. vfs-routed
+        // at offset 0 (DST reroute: the whole file is one positioned read;
+        // raw libc::read on a sim fd is EBADF at the kernel).
+        let r = fd::pg_pread(
+            fd,
+            unsafe {
                 std::slice::from_raw_parts_mut(map as *mut RelMapFile as *mut u8, SIZEOF_RELMAPFILE)
-            };
-            fd::pg_pread(fd, dst, 0)
-        };
+            },
+            0,
+        );
         let read_errno = errno();
         waitevent_seams::pgstat_report_wait_end::call();
 
@@ -670,16 +669,16 @@ fn write_relmap_file(
     }
 
     waitevent_seams::pgstat_report_wait_start::call(WAIT_EVENT_RELATION_MAP_WRITE);
-    // Vfs data plane (P4 finding, dst/p4-simnet; see read_relmap_file):
-    // fd::pg_pwrite at offset 0 == write(2) on the just-opened O_TRUNC fd.
-    // SAFETY: newmap is a padding-free POD; exactly its SIZEOF_RELMAPFILE
-    // bytes are read.
-    let w = {
-        let src = unsafe {
+    // SAFETY: newmap is a padding-free POD; the pwrite reads exactly its
+    // SIZEOF_RELMAPFILE bytes. vfs-routed at offset 0 (DST reroute: the
+    // whole file is one positioned write on a freshly-created fd).
+    let w = fd::pg_pwrite(
+        fd,
+        unsafe {
             std::slice::from_raw_parts(newmap as *const RelMapFile as *const u8, SIZEOF_RELMAPFILE)
-        };
-        fd::pg_pwrite(fd, src, 0)
-    };
+        },
+        0,
+    );
     let write_errno = errno();
     waitevent_seams::pgstat_report_wait_end::call();
     if w != SIZEOF_RELMAPFILE as isize {
