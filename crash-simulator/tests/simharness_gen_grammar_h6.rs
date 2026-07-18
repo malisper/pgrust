@@ -142,7 +142,7 @@ fn h6_merge_dml_emits_key_addressed_guarded_form() {
     let mut found = None;
     for _ in 0..5_000 {
         let mut trace = Vec::new();
-        if let Some(sql) = noise::gen_dml(&mut schema, &mut rng, &mut trace) {
+        if let Some(sql) = noise::gen_dml(&mut schema, &mut rng, &profile, &mut trace) {
             if trace.first().map(String::as_str) == Some(pr::DML_MERGE) {
                 found = Some(sql);
                 break;
