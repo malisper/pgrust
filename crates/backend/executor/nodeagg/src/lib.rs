@@ -1695,6 +1695,11 @@ fn collect_base_var_cols(node: Node<'_>, out: &mut PgVec<'_, bool>) {
                 collect_base_var_cols(a, out);
             }
         }
+        NodeTag::T_NullIfExpr => {
+            for a in node.as_null_if_expr().unwrap().args.iter() {
+                collect_base_var_cols(a, out);
+            }
+        }
         NodeTag::T_Param
         | NodeTag::T_CaseTestExpr
         | NodeTag::T_SQLValueFunction
