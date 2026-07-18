@@ -129,6 +129,12 @@ pub struct GenProfile {
     /// determinism is preserved honestly. Never set in battery profiles.
     #[serde(default)]
     pub test_disable_productions: Vec<String>,
+    /// H6 planner-knob swarm block (see `gen::knobs`): when present, the
+    /// generator samples per-seed planner-GUC sets and appends them to the
+    /// arm-set pool. Sampling reads the generator's one seeded stream, so
+    /// determinism law A3 holds: same seed + profile => same knobs.
+    #[serde(default)]
+    pub planner_knobs: Option<crate::gen::knobs::PlannerKnobs>,
 }
 
 impl GenProfile {
