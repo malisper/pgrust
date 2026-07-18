@@ -578,7 +578,7 @@ fn copy_boundinfo_for_planner<'mcx>(
                 if hash { (true, 4i16) } else { (key.parttypbyval[j], key.parttyplen[j]) };
             let d = bi.datum(i, j);
             if byval {
-                row.push(DatumImage::ByVal(d.as_usize()));
+                row.push(DatumImage::ByVal(d.as_u64()));
             } else {
                 let p = d.as_usize() as *const u8;
                 // SAFETY: byref bound datums are live inline images owned by

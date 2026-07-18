@@ -69,7 +69,7 @@ impl BoundInfo for types_pathnodes::PartitionBoundInfoData<'_> {
     }
     fn datum_at(&self, i: i32, j: i32) -> Datum {
         match &self.datums[i as usize][j as usize] {
-            types_pathnodes::DatumImage::ByVal(w) => Datum::from_usize(*w),
+            types_pathnodes::DatumImage::ByVal(w) => Datum::from_u64(*w),
             types_pathnodes::DatumImage::Bytes(b) => Datum::from_usize(b.as_ptr() as usize),
         }
     }
