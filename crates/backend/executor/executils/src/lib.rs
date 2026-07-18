@@ -810,6 +810,19 @@ pub struct EStateData<'mcx> {
     /// structurally unaffected. Default false (EPQ/worker estates stay on
     /// the slow path).
     pub es_lane_leaf_fast: bool,
+    /// wave-9 WS-AI (forward-pull cursors inc-1, contract §3 / lane-cursors.md
+    /// §1): the per-run emission budget of a count-limited forward SELECT
+    /// run — `Some(count)` iff `PGRUST_LANE_V2_CURSORS` is ON and this
+    /// ExecutorRun is the §3.1 count-exact suspension shape (knob-ON,
+    /// count != 0, forward, SELECT, serial). Written UNCONDITIONALLY at
+    /// every `execute_plan` entry (compute = `lanev2::cursor_run_budget_
+    /// install`), so it is per-run by construction, nested-run-safe (each
+    /// run owns its estate) and unwind-safe with no guard. Estate-resident
+    /// rather than TLS by the TLS-census-zero law (wave-9 contract §8 law
+    /// 8); the `es_processed`/`es_direction` per-run-state precedent.
+    /// Knob-OFF and count-0 runs always read None. First consumer = the
+    /// inc-1b park/settle walker (lanev2/batch_source.rs glue).
+    pub es_cursor_run_budget: Option<u64>,
 }
 
 /// One worker's instrumentation snapshot: `instrument` is indexed by
@@ -1063,6 +1076,7 @@ impl<'mcx> EStateData<'mcx> {
             es_top_eflags: 0,
             es_instrument: 0,
             es_lane_leaf_fast: false,
+            es_cursor_run_budget: None,
             es_instrumentation: PgVec::new_in(mcx),
             es_runtime_ea_refusals: PgVec::new_in(mcx),
             es_runtime_ea_pipelines: PgVec::new_in(mcx),
@@ -1563,7 +1577,7 @@ mcx::forget_safe_struct!(
         es_param_subplans, es_per_tuple_exprcontext,
         es_sourceText, es_use_parallel_mode, es_parallel_workers_to_launch,
         es_parallel_workers_launched, es_jit_flags, es_jit_instr, es_epq,
-        es_epq_active, es_lane_leaf_fast, es_rowmarks;
+        es_epq_active, es_lane_leaf_fast, es_cursor_run_budget, es_rowmarks;
         es_jit_blocks,
         es_snapshot, es_crosscheck_snapshot, es_relations, es_junkFilter,
         es_tupleTable, es_exprcontexts, es_cte_shared, es_worktable_shared,

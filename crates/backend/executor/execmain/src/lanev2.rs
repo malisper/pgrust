@@ -14639,5 +14639,15 @@ pub(crate) use indexsource::{agg_indexfeed_set_for_tests, AGG_INDEXFEED_OWNED_FO
 pub(crate) use dml::rowchain_insert_prog_for_mask;
 // --- end WS-AG (wave-9) ---
 // --- WS-AH (wave-9): reserved ---
-// --- WS-AI (wave-9): reserved ---
+// --- WS-AI wave-9 (forward-pull cursors inc-1; contract §3, band 92001+) -------
+// The budget substrate is push.rs-local (the §6 freeze-lift grant surface);
+// this EOF append is the module-scope re-export only — the WS-AA wave-7 /
+// WS-AE wave-8 EOF-append precedent (touches no existing code line). The
+// run seam (`execmain.rs::execute_plan`) installs the per-run emission
+// budget through this export; the inc-1b park walker will consume
+// `push::cursor_run_budget` lanev2-locally (no re-export until it exists).
+pub(crate) use push::cursor_run_budget_install;
+#[cfg(test)]
+pub(crate) use push::{cursor_run_budget, cursors_set_for_tests};
+// --- end WS-AI wave-9 -----------------------------------------------------------
 // --- WS-AJ (wave-9): reserved ---
