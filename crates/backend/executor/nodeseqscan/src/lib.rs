@@ -3696,6 +3696,12 @@ pub fn seq_scan_end_claim_release(node: &mut SeqScanState<'_>) {
 /// * the VOLCANO scan's own cross-FETCH `rs_cbuf` pin (`lane_n == 0`) — C
 ///   parity, untouched (design §2's stated divergence prices LANE claims
 ///   only);
+/// * CURSOR-FILL-OWNED scans (`lane_hold_pin`, SE-R41 v2) — the cursor
+///   store batch fill adopts the same C-parity posture as the Volcano row
+///   chain it replaces: the staged page batch and its one pin survive the
+///   suspension and the next fill continues in place (killing the
+///   per-fill park→restage ceremony the SE12 B4 letter priced at ~19k
+///   instr on deficit-1 fills); notes/se-r41-v2.md §3;
 /// * pgrcolumnar staged windows — the park-point probe answers None below
 ///   the AM dispatch (R4 decode scratch is Arc/mmap-backed, holds no
 ///   bufmgr pins, and is node-resident by design §1);
