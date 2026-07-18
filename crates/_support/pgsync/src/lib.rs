@@ -86,7 +86,6 @@ pub mod sim;
 /// Poison-tolerant lock (matches the repo's `unwrap_or_else(e.into_inner)`
 /// discipline; loom's Mutex never poisons in models but keeps the API; the
 /// sim wrapper propagates std poisoning).
-#[inline]
 pub fn lock<T: ?Sized>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -108,7 +107,6 @@ impl Semaphore {
         Semaphore { permits: Mutex::new(permits), cv: Condvar::new() }
     }
 
-    #[inline]
     pub fn acquire(&self) {
         let mut g = lock(&self.permits);
         while *g == 0 {
@@ -117,7 +115,6 @@ impl Semaphore {
         *g -= 1;
     }
 
-    #[inline]
     pub fn try_acquire(&self) -> bool {
         let mut g = lock(&self.permits);
         if *g == 0 {
@@ -127,7 +124,6 @@ impl Semaphore {
         true
     }
 
-    #[inline]
     pub fn release(&self) {
         let mut g = lock(&self.permits);
         *g += 1;
@@ -135,7 +131,6 @@ impl Semaphore {
         self.cv.notify_one();
     }
 
-    #[inline]
     pub fn available(&self) -> usize {
         *lock(&self.permits)
     }
@@ -188,12 +183,10 @@ impl ParkLot {
         ParkLot { epoch: atomic::AtomicU64::new(0), m: Mutex::new(()), cv: Condvar::new() }
     }
 
-    #[inline]
     pub fn epoch(&self) -> u64 {
         self.epoch.load(atomic::Ordering::SeqCst)
     }
 
-    #[inline]
     pub fn park(&self, seen: u64) {
         let mut g = lock(&self.m);
         while self.epoch.load(atomic::Ordering::SeqCst) == seen {
@@ -201,7 +194,6 @@ impl ParkLot {
         }
     }
 
-    #[inline]
     pub fn wake_all(&self) {
         // Bump BEFORE the mutex (see the struct doc's lost-wakeup argument).
         self.epoch.fetch_add(1, atomic::Ordering::SeqCst);
