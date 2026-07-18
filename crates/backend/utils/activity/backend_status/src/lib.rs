@@ -394,14 +394,14 @@ pub fn pgstat_bestart_initial() -> PgResult<()> {
     Ok(())
 }
 
-// USE_SSL arm live; no ENABLE_GSS arm in this build (gss stays false, as C
-// built without gssapi).
-pub fn pgstat_bestart_security() -> PgResult<()> {
-    let beentry = my_beentry();
-    assert!(g::HaveMyProcPort());
-
+// USE_SSL arm live when the `ssl` feature is on and the target builds
+// vendored OpenSSL (everything but wasm32); the !USE_SSL arm leaves the SSL
+// block zeroed as C does. No ENABLE_GSS arm in this build (gss stays false,
+// as C built without gssapi).
+#[cfg(all(feature = "ssl", not(target_family = "wasm")))]
+fn read_ssl_status() -> (bool, PgBackendSSLStatus) {
     let mut ssl = false;
-    let mut lssl = PgBackendSSLStatus::zeroed();
+    let lssl = PgBackendSSLStatus::zeroed();
     if g::WithMyProcPort(|p| p.ssl_in_use) {
         ssl = true;
         lssl.ssl_bits.set(be_secure_openssl::be_tls_get_cipher_bits());
@@ -419,6 +419,21 @@ pub fn pgstat_bestart_security() -> PgResult<()> {
             &be_secure_openssl::be_tls_get_peer_issuer_name().unwrap_or_default(),
         ));
     }
+    (ssl, lssl)
+}
+
+#[cfg(not(all(feature = "ssl", not(target_family = "wasm"))))]
+fn read_ssl_status() -> (bool, PgBackendSSLStatus) {
+    // C parity: !USE_SSL pgstat_bestart — st_ssl false, SSL block zeroed.
+    // ssl_in_use can never be true without SSL support.
+    (false, PgBackendSSLStatus::zeroed())
+}
+
+pub fn pgstat_bestart_security() -> PgResult<()> {
+    let beentry = my_beentry();
+    assert!(g::HaveMyProcPort());
+
+    let (ssl, lssl) = read_ssl_status();
 
     begin_write_activity(beentry);
     beentry.st_ssl.set(ssl);

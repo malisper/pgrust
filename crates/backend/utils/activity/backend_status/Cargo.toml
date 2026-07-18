@@ -8,13 +8,19 @@ publish.workspace = true
 name = "backend_status"
 path = "src/lib.rs"
 
+[features]
+# `ssl` (default ON) = C's USE_SSL arm of pgstat_bestart_security; see
+# be_secure/Cargo.toml for the fencing rationale (wasm32 cannot build
+# vendored OpenSSL).
+default = ["ssl"]
+ssl = ["dep:be_secure_openssl"]
+
 [dependencies]
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_storage = { path = "../../../../_support/types/types_storage" }
 ip = { path = "../../../../common/ip" }
 init_small = { path = "../../init/init_small" }
-be_secure_openssl = { path = "../../../libpq/be_secure_openssl" }
 miscinit = { path = "../../init/miscinit" }
 guc_tables = { path = "../../misc/guc_tables" }
 mbutils = { path = "../../mb/mbutils" }
@@ -27,6 +33,9 @@ shmem = { path = "../../../storage/ipc/shmem" }
 ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
 superuser_seams = { path = "../../misc/superuser_seams" }
 backend_status_seams = { path = "../backend_status_seams" }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+be_secure_openssl = { path = "../../../libpq/be_secure_openssl", optional = true }
 
 [dev-dependencies]
 guc_seams = { path = "../../misc/guc_seams" }
