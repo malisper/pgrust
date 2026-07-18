@@ -21,15 +21,24 @@
 //!   it). A would-block READ with an empty peer buffer and NO LIVE WRITER is
 //!   a clean session end (Ok(0) EOF), never a hang; a stalled pump (no state
 //!   change) is a deterministic panic, never a spin.
-//! - EVERY transport op consults an op-sequence counter and appends one line
-//!   to the op log — format aligned with the SimVfs fault-plan engine's
-//!   fault_log (dst/p4-faults-inc1: `KIND seq=N key=value ...`, op_seq
-//!   incremented per consult, log byte-stable across same-seed replays). The
-//!   fault-plan engine targets these op numbers in increment 2:
+//! - EVERY transport op consults an op-sequence counter AND the installed
+//!   transport fault plan (inc-2), and appends one line to the op log —
+//!   format aligned with the SimVfs fault-plan engine's fault_log
+//!   (dst/p4-faults-inc1/2: `KIND seq=N key=value ...`, op_seq incremented
+//!   per consult, first-rule-wins seeded rule plans, SUPPRESSED notes, log
+//!   byte-stable across same-seed replays):
 //!
 //!   ```text
 //!   NETOP seq=N op=Read end=S want=8192 got=54 c2s=54 s2c=0 decision=Proceed
+//!   NETFAULT seq=N op=Read end=S want=8192 decision=Drop { keep: 2 }
 //!   ```
+//!
+//!   The fault menu (`NetFaultDecision`): ShortRead / ShortWrite (partial
+//!   recv/send), Delay (delayed delivery — a reorder within the
+//!   deterministic schedule, head-of-line order preserved), Drop
+//!   (connection drop mid-message, keeping N in-flight bytes), Reset (hard
+//!   reset: ECONNRESET/EPIPE). A session under any plan either recovers or
+//!   fails cleanly — never a hang, never nondeterministic.
 //!
 //! The wire bring-up above the slots (backend_startup::wire_session_initialize,
 //! PostgresMain) is already transport-blind; the sim consumer never executes
