@@ -588,6 +588,87 @@ fn allocate_file_stdio_free_closes_posix_side_not_vfs() {
 }
 
 
+// DST P4 finding F1b: every RAII holder of a vfs-minted fd must release
+// through the SAME Vfs provider that minted it. Pre-guard, the holders were
+// plain OwnedFd, whose Drop closes posix-side: any unwind or thread exit with
+// a live holder EBADF'd inside the kernel (the sim fd is foreign there), the
+// sim fd LEAKED in the sim table, and under debug std's IO-safety check
+// aborted the whole test process. P4 fault injection unwinds through exactly
+// these states.
+//
+// Same-thread arm: drop live holders (the FdState-teardown shape, without
+// leaving the thread) and prove the fds were released INTO THE SIM NAMESPACE.
+#[cfg(pgrust_sim)]
+#[test]
+fn dropped_holders_release_into_sim_namespace_not_posix() {
+    use std::os::fd::AsRawFd;
+
+    setup();
+    let dir = scratch_dir("f1b_guard");
+
+    // Holder 1: AllocatedHandle::RawFd (transient desc), vfs-minted.
+    let tpath = format!("{dir}/t");
+    vfs_write_file(&tpath, b"x");
+    let tfd = crate::desc::OpenTransientFile(&tpath, libc::O_RDWR).unwrap();
+    assert!(tfd >= vfs::sim::SIM_FD_BASE, "transient fd must be sim-minted");
+
+    // Holder 2: Vfd.fd (VFD cache), vfs-minted.
+    let f = open_rw(&format!("{dir}/v"));
+    let vraw = with_fd(|fd| {
+        fd.vfd_cache[f.0 as usize].fd.as_ref().map(|h| h.as_raw_fd()).unwrap()
+    });
+    assert!(vraw >= vfs::sim::SIM_FD_BASE, "vfd fd must be sim-minted");
+
+    // Both live sim-side right now.
+    let mut info = vfs::FileInfo::zeroed();
+    assert_eq!(vfs::fstat(tfd, &mut info), 0);
+    assert_eq!(vfs::fstat(vraw, &mut info), 0);
+
+    // The unwind/teardown shape: the holders drop WITHOUT the deliberate
+    // close paths (FreeDesc / FileClose) running.
+    with_fd(|fd| {
+        fd.allocated_descs.clear();
+        fd.vfd_cache.clear();
+        fd.nfile = 0;
+    });
+
+    // Pre-guard this point was unreachable (debug IO-safety abort) or, with
+    // ub-checks off, both fds were still open sim-side (leaked). The guard
+    // must have released them in the SIM fd table.
+    assert_eq!(
+        vfs::fstat(tfd, &mut info),
+        -1,
+        "transient-desc holder leaked its sim fd on drop"
+    );
+    assert_eq!(vfd::get_errno(), libc::EBADF);
+    assert_eq!(vfs::fstat(vraw, &mut info), -1, "Vfd.fd holder leaked its sim fd on drop");
+    assert_eq!(vfd::get_errno(), libc::EBADF);
+}
+
+// Thread-exit arm — the exact F1 chain: a panic unwinds out of fd code with
+// live holders, the thread dies, and the FdState TLS destructor drops them.
+// Pre-guard (debug) this aborted the WHOLE test process ("fatal runtime
+// error: IO Safety violation"); the guard must keep the abort machinery out
+// of the picture regardless of TLS destructor ordering.
+#[cfg(pgrust_sim)]
+#[test]
+fn thread_exit_with_live_vfs_fd_holders_does_not_abort_process() {
+    setup();
+    let joined = std::thread::spawn(|| {
+        setup(); // fresh TLS in this thread: its own FdState + sim universe
+        vfs_mkdir_p("f1b_thread");
+        vfs_write_file("f1b_thread/t", b"x");
+        let tfd = crate::desc::OpenTransientFile("f1b_thread/t", libc::O_RDWR).unwrap();
+        assert!(tfd >= vfs::sim::SIM_FD_BASE);
+        let f = open_rw("f1b_thread/v");
+        assert!(f.0 > 0);
+        // P4 fault-injection shape: unwind with both holders live.
+        panic!("simulated fault-injection unwind");
+    })
+    .join();
+    assert!(joined.is_err(), "the spawned thread must have panicked");
+}
+
 // Test-process-global: resowner seams install once (seam_core forbids
 // reinstall); every test that needs an owner goes through here.
 fn install_resowner_seams_once() {
