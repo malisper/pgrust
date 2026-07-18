@@ -39,6 +39,8 @@ fn profile_dir() -> PathBuf {
 struct Db {
     tables: BTreeSet<String>,
     indexes: BTreeSet<String>,
+    /// H6: file_fdw foreign tables (read-only relations; SELECT-able only).
+    foreign_tables: BTreeSet<String>,
     guc_set: bool,
 }
 
@@ -50,10 +52,12 @@ struct RefServer {
     savepoints: Vec<(String, Db)>,
 }
 
-/// First identifier token starting at `rest` (ends at space, '(' or ';').
+/// First identifier token starting at `rest` (ends at space, '(', ')', ','
+/// or ';' — ')' and ',' close H6 subquery/CTE bodies, e.g.
+/// `... (SELECT id FROM t1)`).
 fn ident_prefix(rest: &str) -> Result<&str, String> {
     let end = rest
-        .find(|c: char| c == ' ' || c == '(' || c == ';')
+        .find(|c: char| c == ' ' || c == '(' || c == ')' || c == ',' || c == ';')
         .ok_or_else(|| format!("cannot find identifier end in '{rest}'"))?;
     let id = &rest[..end];
     if id.is_empty() {
@@ -76,8 +80,36 @@ impl RefServer {
         }
     }
 
+    fn require_readable(&self, name: &str, text: &str) -> Result<(), String> {
+        if self.db.tables.contains(name) || self.db.foreign_tables.contains(name) {
+            Ok(())
+        } else {
+            Err(format!("42P01: relation '{name}' does not exist at: {text}"))
+        }
+    }
+
     fn apply_sql(&mut self, text: &str) -> Result<(), String> {
-        if let Ok(rest) = after(text, "CREATE TABLE ") {
+        if let Ok(rest) = after(text, "CREATE FOREIGN TABLE ") {
+            // H6 fdw chain tail. Transactional like all DDL; SELECT-only.
+            let name = ident_prefix(rest)?;
+            if !self.db.foreign_tables.insert(name.to_string()) {
+                return Err(format!("42P07: foreign table '{name}' already exists at: {text}"));
+            }
+        } else if text.starts_with("CREATE EXTENSION IF NOT EXISTS ")
+            || text.starts_with("CREATE SERVER IF NOT EXISTS ")
+        {
+            // Idempotent database-global fdw setup (H6); nothing to model.
+        } else if text.starts_with("COPY (SELECT ") {
+            // H6 deterministic CSV writer; references no user relation.
+        } else if text.starts_with("ANALYZE ") {
+            let name = ident_prefix(after(text, "ANALYZE ")?)?;
+            self.require_table(name, text)?;
+        } else if let Ok(rest) = after(text, "DROP INDEX ") {
+            let iname = ident_prefix(rest)?;
+            if !self.db.indexes.remove(iname) {
+                return Err(format!("42P01: index '{iname}' does not exist at: {text}"));
+            }
+        } else if let Ok(rest) = after(text, "CREATE TABLE ") {
             let name = ident_prefix(rest)?;
             if !self.db.tables.insert(name.to_string()) {
                 return Err(format!("42P07: relation '{name}' already exists at: {text}"));
@@ -102,6 +134,13 @@ impl RefServer {
             let name = ident_prefix(rest)?;
             self.require_table(name, text)?;
             self.db.tables.remove(name);
+        } else if text.starts_with("MERGE INTO ") {
+            // H6 dml:merge — key-addressed MERGE; only the target must exist
+            // (the USING source is a constant VALUES list). Checked BEFORE
+            // the substring-matched UPDATE/DELETE branches: the WHEN MATCHED
+            // action text contains "UPDATE SET".
+            let rest = after(text, "MERGE INTO ")?;
+            self.require_table(ident_prefix(rest)?, text)?;
         } else if let Ok(rest) = after(text, "INSERT INTO ") {
             self.require_table(ident_prefix(rest)?, text)?;
         } else if let Ok(rest) = after(text, "UPDATE ") {
@@ -110,19 +149,35 @@ impl RefServer {
             self.require_table(ident_prefix(rest)?, text)?;
         } else if let Ok(rest) = after(text, "TRUNCATE ") {
             self.require_table(ident_prefix(rest)?, text)?;
-        } else if text.starts_with("SELECT ") {
+        } else if text.starts_with("SELECT ") || text.starts_with("WITH ") {
             // Every FROM/JOIN relation target must exist. SRF calls
-            // (unnest/generate_series — H4 function-call grammar) and
-            // pg_catalog relations always exist; subquery parens recurse via
-            // their own inner FROM occurrence.
+            // (unnest/generate_series — H4 function-call grammar),
+            // json_table (H6 table-function grammar), and pg_catalog
+            // relations always exist; subquery parens recurse via their own
+            // inner FROM occurrence; CTE names (H6 WITH grammar) are
+            // statement-local relations.
+            let mut cte_names: BTreeSet<String> = BTreeSet::new();
+            if let Ok(rest) = after(text, "WITH ") {
+                // Our grammar emits exactly one CTE per statement:
+                // `WITH [RECURSIVE] <name>[(cols)] AS ...`.
+                let rest = rest.strip_prefix("RECURSIVE ").unwrap_or(rest);
+                cte_names.insert(ident_prefix(rest)?.to_string());
+            }
             let mut checked_any = false;
             for kw in [" FROM ", " JOIN "] {
                 let mut hay = text;
                 while let Ok(rest) = after(hay, kw) {
                     if !rest.starts_with('(') {
                         let id = ident_prefix(rest)?;
-                        if id != "unnest" && id != "generate_series" && !id.starts_with("pg_") {
-                            self.require_table(id, text)?;
+                        if id != "unnest"
+                            && id != "generate_series"
+                            && id != "json_table"
+                            && !id.starts_with("pg_")
+                            && !cte_names.contains(id)
+                        {
+                            // H6-state: foreign tables are readable relations
+                            // too, so route through require_readable.
+                            self.require_readable(id, text)?;
                         }
                         checked_any = true;
                     } else {
@@ -131,8 +186,11 @@ impl RefServer {
                     hay = rest;
                 }
             }
-            if !checked_any {
-                return Err(format!("SELECT without FROM target: {text}"));
+            // H6 res:no-from — a FROM-less constant SELECT is valid; only a
+            // statement that HAS a FROM the scanner failed to check is a
+            // parse-model gap.
+            if !checked_any && text.contains(" FROM ") {
+                return Err(format!("SELECT with unparsed FROM target: {text}"));
             }
         } else {
             return Err(format!("unrecognized statement shape: {text}"));
@@ -249,7 +307,7 @@ fn generated_plans_are_tx_coherent_400_seeds_all_profiles() {
         .filter(|p| p.extension().is_some_and(|x| x == "json"))
         .collect();
     profiles.sort();
-    assert_eq!(profiles.len(), 6, "expected 6 gen profiles");
+    assert_eq!(profiles.len(), 7, "expected 7 gen profiles");
     let mut plans = 0u64;
     for ppath in &profiles {
         let bytes = fs::read(ppath).unwrap();
@@ -268,7 +326,7 @@ fn generated_plans_are_tx_coherent_400_seeds_all_profiles() {
             plans += 1;
         }
     }
-    assert_eq!(plans, 2400);
+    assert_eq!(plans, 2800);
 }
 
 // ---------------------------------------------------------------------------

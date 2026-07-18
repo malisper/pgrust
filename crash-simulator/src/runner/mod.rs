@@ -7,5 +7,6 @@ pub mod faultdriver;
 pub mod planface;
 pub mod profile;
 pub mod runloop;
+pub mod schedule;
 pub mod shrink;
 pub mod verdict;

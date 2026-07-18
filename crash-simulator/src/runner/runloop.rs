@@ -208,6 +208,7 @@ pub fn run_campaign(
     cli: &[String],
     replay_times: u32,
     repros_path: Option<&Path>,
+    sched_cfg: &crate::runner::schedule::ScheduleConfig,
 ) -> Result<CampaignOutcome, String> {
     let bb = BugBase::new(bugbase_dir);
     let mut census = Census::default();
@@ -225,12 +226,20 @@ pub fn run_campaign(
         census.add("floor-skipped-no-instrument", 1);
     }
 
-    for i in 0..seed_count {
-        let seed = seed_base + i;
+    // H6 QPG-lite scheduling: OFF by default (blind arm — the seed sequence
+    // is then exactly seed_base..seed_base+seed_count, byte-identical to the
+    // H5 loop). When enabled, seeds that mint a NEW plan species earn
+    // follow-on neighbor seeds; see runner/schedule.rs for the policy and the
+    // FSE'21 blind-arm law (U suppressed on guided arms).
+    let mut sched =
+        crate::runner::schedule::SpeciesScheduler::new(sched_cfg.clone(), seed_base, seed_count);
+
+    while let Some(seed) = sched.next_seed() {
         let (gen_plan, ctx, traces) = gen_plan_ctx_traced(seed, lp, &generator_version());
         kacc.add(&traces);
         let plan_text = gen_plan.render();
         let report = run_plan_ctx(&gen_plan, cfg, Some(&ctx))?;
+        let species_before = species.distinct();
         for fp in &report.plan_fingerprints {
             species.add_sighting(fp);
         }
@@ -241,6 +250,10 @@ pub fn run_campaign(
             }
         }
         species.checkpoint();
+        // Productive = this seed's statements minted at least one fingerprint
+        // the campaign had never seen (novelty signal, keyed on the exact
+        // canonical species string).
+        sched.report(species.distinct() > species_before);
         let run = SeedRun { seed, report, plan_text };
         census.merge(&run.report.class_counts);
         for r in &run.report.records {
@@ -304,6 +317,7 @@ pub fn run_campaign(
         profile_name: &lp.profile.name,
         seed_base,
         seed_count,
+        schedule: Some(&sched.stats),
     };
     metrics.write(out_dir)?;
     metrics.emit_stdout();

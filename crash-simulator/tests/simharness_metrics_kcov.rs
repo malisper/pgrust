@@ -38,12 +38,14 @@ fn battery_gen_profile(name: &str) -> GenProfile {
             min_cols: 3,
             max_cols: 3,
             col_types: ColTypeWeights::default(),
+            rows_max: 200,
         },
         iso_mix: IsoMix { rc: 60, rr: 30, ser: 10 },
         arm_sets: vec![vec![], vec![("work_mem".into(), "4MB".into())]],
         property_weights: BTreeMap::new(),
         float_lenient: false,
         test_disable_productions: Vec::new(),
+        planner_knobs: None,
     }
 }
 
@@ -211,16 +213,16 @@ fn kcov_math_on_synthetic_accum() {
     assert!(!r.k1.uncovered.contains(&prodreg::Q_FLOAT_AGG.to_string()));
     // epsilon exclusion is explicit.
     assert!(r.epsilon_excluded.contains(&prodreg::LJC_NO_QUAL.to_string()));
-    // H5 find: the disconnect fault PAIR is structurally dead under battery
-    // weights (fault budget never reaches 2 at any plan length) — the gate
-    // must say so honestly instead of minting a false reach-gap RED.
-    let fault_gate = r
-        .gated_unreachable
-        .iter()
-        .find(|(n, _)| n == prodreg::STMT_FAULT)
-        .expect("stmt:fault gated-unreachable under battery weights");
-    assert!(fault_gate.1.contains("fault budget"), "reason: {}", fault_gate.1);
-    assert!(!r.reach_gap.contains(&prodreg::STMT_FAULT.to_string()));
+    // H6 fix of H5 find 1: the disconnect PAIR floor in Budgets::allocate
+    // guarantees any profile with fault weight > 0 a fault budget of >= 2,
+    // so stmt:fault is now reachable-by-default under battery weights — IN
+    // the k=1 denominator (and in the reach gap here, since the accumulator
+    // never saw it).
+    assert!(
+        !r.gated_unreachable.iter().any(|(n, _)| n == prodreg::STMT_FAULT),
+        "stmt:fault must be reachable under the pair floor"
+    );
+    assert!(r.k1.uncovered.contains(&prodreg::STMT_FAULT.to_string()));
 }
 
 // ------------------------------------------------------------- reach gate

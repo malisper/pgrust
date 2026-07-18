@@ -155,6 +155,9 @@ pub struct SpeciesCensus {
     /// species-accumulation curve: (sightings, distinct species) checkpoints
     /// (one per seed in campaign use).
     pub curve: Vec<(u64, u64)>,
+    /// H6: singleton counts at the same checkpoints (parallel to `curve`),
+    /// so U(n) = f1/n can be plotted OVER TIME, not just at campaign end.
+    pub curve_f1: Vec<u64>,
     /// EXPLAIN statements that errored (counted here, never in the outcome
     /// census — metrics must not perturb the pinned verdict vocabulary).
     pub explain_errors: u64,
@@ -171,6 +174,17 @@ impl SpeciesCensus {
 
     pub fn checkpoint(&mut self) {
         self.curve.push((self.n, self.distinct() as u64));
+        self.curve_f1.push(self.f1());
+    }
+
+    /// U-over-time: (n, f1/n) per checkpoint (n = 0 checkpoints skipped).
+    pub fn u_curve(&self) -> Vec<(u64, f64)> {
+        self.curve
+            .iter()
+            .zip(self.curve_f1.iter())
+            .filter(|((n, _), _)| *n > 0)
+            .map(|((n, _), f1)| (*n, *f1 as f64 / *n as f64))
+            .collect()
     }
 
     pub fn distinct(&self) -> usize {
@@ -233,6 +247,10 @@ pub struct MetricsArtifact<'a> {
     pub profile_name: &'a str,
     pub seed_base: u64,
     pub seed_count: u64,
+    /// H6: QPG-lite scheduling stats. `enabled` inside decides the arm kind:
+    /// a GUIDED arm gets its Good-Turing U suppressed (FSE'21 adaptive bias —
+    /// U is only sound on blind arms).
+    pub schedule: Option<&'a crate::runner::schedule::ScheduleStats>,
 }
 
 impl MetricsArtifact<'_> {
@@ -245,8 +263,24 @@ impl MetricsArtifact<'_> {
             v.truncate(20);
             v
         };
+        let guided = self.schedule.map(|st| st.enabled).unwrap_or(false);
+        // FSE'21 blind-arm law: a guided arm's U is UNSOUND (adaptive bias,
+        // underestimates by up to 4 orders of magnitude). Suppress the value
+        // outright so nobody quotes it, and say why in-band.
+        let (u_value, u_note) = if guided {
+            (
+                serde_json::Value::Null,
+                Some(
+                    "SUPPRESSED: guided (species-scheduled) arm. Good-Turing U=f1/n \
+                     is only sound on BLIND arms (FSE 2021 adaptive-bias result); \
+                     run a flag-off arm to estimate U.",
+                ),
+            )
+        } else {
+            (serde_json::json!(self.species.good_turing_u()), None)
+        };
         serde_json::json!({
-            "blind_arms_only": true,
+            "blind_arm": !guided,
             "estimator_notes": {
                 "soundness": "Good-Turing U=f1/n is sound for BLACKBOX campaigns only \
                     (Böhme/Liyanage/Wüstholz, FSE 2021: blackbox fuzzing is not subject \
@@ -268,14 +302,32 @@ impl MetricsArtifact<'_> {
                 "distinct": s.distinct(),
                 "f1": s.f1(),
                 "f2": s.f2(),
-                "good_turing_u": s.good_turing_u(),
+                "good_turing_u": u_value,
+                "good_turing_u_note": u_note,
                 "chao1_richness_lower_bound": s.chao1(),
                 "curve": s.curve,
+                // H6 over-time views: S(n) is `curve` verbatim; U(n)=f1/n at
+                // the same checkpoints. On guided arms the u curve carries
+                // the same unsoundness as the endpoint U — the note above
+                // governs both.
+                "u_curve": s.u_curve(),
                 "explain_sample_every": self.explain_sample_every,
                 "explain_errors": s.explain_errors,
                 "explain_error_samples": s.explain_error_samples,
                 "top_species": top,
             },
+            "schedule": self.schedule.map(|st| serde_json::json!({
+                "enabled": st.enabled,
+                "neighbors": st.neighbors,
+                "decay": st.decay,
+                "seeds_total": st.seeds_total,
+                "fresh_seeds": st.fresh_seeds,
+                "guided_seeds": st.guided_seeds,
+                "productive_seeds": st.productive_seeds,
+                "productive_guided": st.productive_guided,
+                "productive_fraction": st.productive_fraction(),
+                "decays": st.decays,
+            })),
             "campaign": {
                 "profile": self.profile_name,
                 "seed_base": self.seed_base,
@@ -318,14 +370,35 @@ impl MetricsArtifact<'_> {
             k.reach_gap.len()
         );
         let s = self.species;
+        let guided = self.schedule.map(|st| st.enabled).unwrap_or(false);
+        let u_str = if guided {
+            // FSE'21: guided arms must never quote U.
+            "UNSOUND-guided-arm".to_string()
+        } else {
+            s.good_turing_u().map(|u| format!("{u:.6}")).unwrap_or_else(|| "-".into())
+        };
         println!(
             "SIMHARNESS-METRICS|species|n={}|distinct={}|f1={}|f2={}|U={}",
             s.n,
             s.distinct(),
             s.f1(),
             s.f2(),
-            s.good_turing_u().map(|u| format!("{u:.6}")).unwrap_or_else(|| "-".into())
+            u_str
         );
+        if let Some(st) = self.schedule {
+            println!(
+                "SIMHARNESS-METRICS|schedule|enabled={}|fresh={}|guided={}|productive={}|productive-guided={}|fraction={}|decays={}",
+                st.enabled,
+                st.fresh_seeds,
+                st.guided_seeds,
+                st.productive_seeds,
+                st.productive_guided,
+                st.productive_fraction()
+                    .map(|f| format!("{f:.4}"))
+                    .unwrap_or_else(|| "-".into()),
+                st.decays
+            );
+        }
         if !k.reach_gap.is_empty() {
             println!("SIMHARNESS-METRICS|reach-gap|{}", k.reach_gap.join(","));
         }

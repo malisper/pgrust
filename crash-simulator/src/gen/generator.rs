@@ -17,7 +17,7 @@ use crate::gen::budget::{Budgets, Kind};
 use crate::gen::noise;
 use crate::gen::prodreg::{self as pr, GenTraces, ProdPath};
 use crate::gen::profile::GenProfile;
-use crate::gen::schema::{SchemaState, Table};
+use crate::gen::schema::{SchemaSnapshot, SchemaState};
 use crate::gen::weights::{range_incl, weighted_index};
 use crate::plan::{
     ArmCtl, FaultPoint, IsoLevel, Plan, PlanHeader, PlanItem, Sql, Step, TxCtl,
@@ -73,10 +73,12 @@ impl NoiseSource for NoiseCtx<'_> {
 
 /// Transaction-visible model state captured at BEGIN / SAVEPOINT and restored
 /// on ROLLBACK / ROLLBACK TO / aborting disconnect. DDL and (non-LOCAL) SET
-/// are both transactional in PostgreSQL, so both revert with the tx.
+/// are both transactional in PostgreSQL, so both revert with the tx. The
+/// schema snapshot covers tables AND the H6 fdw state (extension/server/
+/// foreign tables are transactional too).
 #[derive(Clone)]
 struct TxSnapshot {
-    tables: Vec<Table>,
+    schema: SchemaSnapshot,
     gucs_set: bool,
 }
 
@@ -104,6 +106,14 @@ pub struct Generator<'a> {
     schema: SchemaState,
     budgets: Budgets,
     session: SessionModel,
+    /// H6 planner-knob swarm: per-seed sampled GUC sets (see `gen::knobs`),
+    /// appended after `profile.arm_sets` in the arm-set pool. Sampled once
+    /// at construction from the SAME seeded stream (draws happen before the
+    /// first statement draw, so determinism law A3 is untouched: same seed +
+    /// profile => same knob sets => byte-identical plan). Empty when the
+    /// profile has no `planner_knobs` block — zero extra draws, so plans for
+    /// knob-less profiles are byte-identical to pre-H6 plans.
+    sampled_arm_sets: Vec<Vec<(String, String)>>,
     /// Queued items that must follow the current one (fault pairing, tail).
     pending: VecDeque<PlanItem>,
     next_seq: u32,
@@ -123,13 +133,24 @@ impl<'a> Generator<'a> {
         let total = range_incl(&mut rng, profile.plan_len.min, profile.plan_len.max);
         let budgets =
             Budgets::allocate(&profile.statement_weights, total, !registry.is_empty());
+        let mut schema = SchemaState::default();
+        // Seed tag for foreign-table CSV paths (part of plan identity, so
+        // plan bytes stay a pure function of seed+profile+generator).
+        schema.set_plan_seed(seed);
+        // H6-GUC: knob sampling draws from the SAME seeded stream; knob-less
+        // profiles take the None arm and consume zero draws.
+        let sampled_arm_sets = match &profile.planner_knobs {
+            Some(cfg) => crate::gen::knobs::sample_knob_sets(&mut rng, cfg),
+            None => Vec::new(),
+        };
         Generator {
             rng,
             profile,
             registry,
-            schema: SchemaState::default(),
+            schema,
             budgets,
             session: SessionModel::default(),
+            sampled_arm_sets,
             pending: VecDeque::new(),
             next_seq: 1,
             emitted_first: false,
@@ -154,7 +175,7 @@ impl<'a> Generator<'a> {
             // whether RESET ALL is still owed is decided by the snapshot's
             // GUC state, not the in-tx state.
             let snap = self.session.tx_snapshot.take().expect("in_tx implies tx snapshot");
-            self.schema.restore_tables(snap.tables);
+            self.schema.restore(snap.schema);
             self.session.gucs_set = snap.gucs_set;
             self.session.in_tx = false;
             self.session.savepoints.clear();
@@ -176,7 +197,11 @@ impl<'a> Generator<'a> {
             if has_table { self.budgets.remaining(Kind::Dml) } else { 0 },
             if has_table { self.budgets.remaining(Kind::Query) } else { 0 },
             self.budgets.remaining(Kind::Tx),
-            if self.profile.arm_sets.is_empty() { 0 } else { self.budgets.remaining(Kind::Arm) },
+            if self.profile.arm_sets.is_empty() && self.sampled_arm_sets.is_empty() {
+                0
+            } else {
+                self.budgets.remaining(Kind::Arm)
+            },
             // Disconnect/Reconnect are emitted as a pair: need >= 2.
             if self.budgets.remaining(Kind::Fault) >= 2 {
                 self.budgets.remaining(Kind::Fault)
@@ -222,7 +247,7 @@ impl<'a> Generator<'a> {
             self.session.savepoints.clear();
             self.session.sp_snapshots.clear();
             self.session.tx_snapshot = Some(TxSnapshot {
-                tables: self.schema.snapshot_tables(),
+                schema: self.schema.snapshot(),
                 gucs_set: self.session.gucs_set,
             });
             return Step::Tx(TxCtl::Begin(level));
@@ -248,7 +273,7 @@ impl<'a> Generator<'a> {
                 // (transactional-DDL law; without this the rest of the plan
                 // addresses tables the server rolled away).
                 let snap = self.session.tx_snapshot.take().expect("in_tx implies tx snapshot");
-                self.schema.restore_tables(snap.tables);
+                self.schema.restore(snap.schema);
                 self.session.gucs_set = snap.gucs_set;
                 self.session.in_tx = false;
                 self.session.savepoints.clear();
@@ -260,7 +285,7 @@ impl<'a> Generator<'a> {
                 let name = format!("sp{}", self.session.next_savepoint);
                 self.session.savepoints.push(name.clone());
                 self.session.sp_snapshots.push(TxSnapshot {
-                    tables: self.schema.snapshot_tables(),
+                    schema: self.schema.snapshot(),
                     gucs_set: self.session.gucs_set,
                 });
                 Step::Tx(TxCtl::Savepoint(name))
@@ -274,7 +299,7 @@ impl<'a> Generator<'a> {
                 // statement, and the snapshot stays live for repeated
                 // ROLLBACK TO.
                 let snap = self.session.sp_snapshots[i].clone();
-                self.schema.restore_tables(snap.tables);
+                self.schema.restore(snap.schema);
                 self.session.gucs_set = snap.gucs_set;
                 self.session.savepoints.truncate(i + 1);
                 self.session.sp_snapshots.truncate(i + 1);
@@ -295,9 +320,18 @@ impl<'a> Generator<'a> {
             self.commit_path(pr::STMT_ARM, vec![pr::ARM_RESET_ALL.into()]);
             return Step::Arm(ArmCtl::ResetAll);
         }
-        let i = range_incl(&mut self.rng, 0, self.profile.arm_sets.len() as u64 - 1) as usize;
+        // Pool = profile arm sets ++ per-seed sampled planner-knob sets
+        // (H6). Trace indexes address the combined pool: indexes >=
+        // profile.arm_sets.len() are sampled sets (whose CONTENT varies per
+        // seed; the index SPACE is stable per profile).
+        let pool_len = self.profile.arm_sets.len() + self.sampled_arm_sets.len();
+        let i = range_incl(&mut self.rng, 0, pool_len as u64 - 1) as usize;
         self.trace.borrow_mut().arm_set_hits.push(i);
-        let set = self.profile.arm_sets[i].clone();
+        let set = if i < self.profile.arm_sets.len() {
+            self.profile.arm_sets[i].clone()
+        } else {
+            self.sampled_arm_sets[i - self.profile.arm_sets.len()].clone()
+        };
         let mut it = set.into_iter();
         let Some((k, v)) = it.next() else {
             // Empty set = the profile's base-clean control arm: defaults.
@@ -385,17 +419,29 @@ impl<'a> Generator<'a> {
             };
             match kind_i {
                 0 => {
-                    let mut sub = Vec::new();
-                    let sql =
-                        noise::gen_ddl(&mut self.schema, &mut self.rng, self.profile, &mut sub);
+                    // H6: a DDL decision may emit a short chain of consecutive
+                    // statements (the fdw setup); each emitted statement gets
+                    // its own trace path and one unit of DDL budget.
+                    let stmts =
+                        noise::gen_ddl(&mut self.schema, &mut self.rng, self.profile);
+                    self.budgets.consume(Kind::Ddl, stmts.len() as u64);
+                    let mut it = stmts.into_iter();
+                    let (sub, sql) = it.next().expect("gen_ddl emits at least one stmt");
                     self.commit_path(pr::STMT_DDL, sub);
-                    self.budgets.consume(Kind::Ddl, 1);
+                    for (sub2, sql2) in it {
+                        self.commit_path(pr::STMT_DDL, sub2);
+                        self.pending.push_back(PlanItem::Step(Step::Ddl(sql2)));
+                    }
                     return Some(PlanItem::Step(Step::Ddl(sql)));
                 }
                 1 => {
                     let mut sub = Vec::new();
-                    if let Some(sql) = noise::gen_dml(&mut self.schema, &mut self.rng, &mut sub)
-                    {
+                    if let Some(sql) = noise::gen_dml(
+                        &mut self.schema,
+                        &mut self.rng,
+                        self.profile,
+                        &mut sub,
+                    ) {
                         self.commit_path(pr::STMT_DML, sub);
                         self.budgets.consume(Kind::Dml, 1);
                         return Some(PlanItem::Step(Step::Dml(sql)));
@@ -432,7 +478,7 @@ impl<'a> Generator<'a> {
                     self.budgets.consume(Kind::Fault, 2);
                     self.commit_path(pr::STMT_FAULT, vec![pr::FAULT_DISCONNECT_PAIR.into()]);
                     if let Some(snap) = self.session.tx_snapshot.take() {
-                        self.schema.restore_tables(snap.tables);
+                        self.schema.restore(snap.schema);
                     }
                     self.session.in_tx = false;
                     self.session.savepoints.clear();
