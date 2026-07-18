@@ -20,6 +20,7 @@ pub(crate) fn has_pgstat_permissions(userid: Oid) -> PgResult<bool> {
 
 // C: sockaddr_storage ss_family; on both linux and macos targets the libc
 // sockaddr_storage layout starts with (len,) family.
+#[cfg(not(target_family = "wasm"))]
 pub(crate) fn ss_family(addr: &[u8]) -> i32 {
     let mut ss: libc::sockaddr_storage = unsafe { core::mem::zeroed() };
     let n = core::mem::size_of::<libc::sockaddr_storage>().min(addr.len());
@@ -28,6 +29,27 @@ pub(crate) fn ss_family(addr: &[u8]) -> i32 {
     }
     ss.ss_family as i32
 }
+
+// wasm32: no sockaddr_storage in the wasi libc crate; musl's layout puts
+// sa_family_t (u16) at offset 0 (same shape as ip::sockaddr_family's arm).
+// Sessions are socketless on WASI, so the stored address is always zeroed.
+#[cfg(target_family = "wasm")]
+pub(crate) fn ss_family(addr: &[u8]) -> i32 {
+    if addr.len() < 2 {
+        return 0;
+    }
+    u16::from_ne_bytes([addr[0], addr[1]]) as i32
+}
+
+// wasm32: the wasi libc crate exposes no AF_*; musl values (ip::sys shape).
+#[cfg(not(target_family = "wasm"))]
+pub(crate) use libc::{AF_INET, AF_INET6, AF_UNIX};
+#[cfg(target_family = "wasm")]
+pub(crate) const AF_INET: i32 = 2;
+#[cfg(target_family = "wasm")]
+pub(crate) const AF_INET6: i32 = 10;
+#[cfg(target_family = "wasm")]
+pub(crate) const AF_UNIX: i32 = 1;
 
 pub(crate) fn aux_pid_get_proc(pid: i32) -> Option<&'static types_storage::storage::PGPROC> {
     let procs = &lmgr_proc::ProcGlobal().allProcs;
@@ -193,10 +215,10 @@ pub fn fc_pg_stat_get_activity(
             } else {
                 match ss_family(&be.st_clientaddr.addr) {
                     // unported: inet client_addr datum — adt network lane.
-                    f if f == libc::AF_INET as i32 || f == libc::AF_INET6 as i32 => {
+                    f if f == AF_INET as i32 || f == AF_INET6 as i32 => {
                         return Err(inet_datum_unported("pg_stat_get_activity"))
                     }
-                    f if f == libc::AF_UNIX as i32 => {
+                    f if f == AF_UNIX as i32 => {
                         nulls[12] = true;
                         nulls[13] = true;
                         values[14] = Datum::from_i32(-1);

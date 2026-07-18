@@ -3,6 +3,22 @@
 use mcx::Mcx;
 use types_error::{ErrorLocation, PgResult, FATAL};
 
+// wasm32: no LC_* names in the wasi libc crate; musl numbering (the
+// pg_locale wasm arm's convention, matching the linked wasi-libc).
+#[cfg(not(target_family = "wasm"))]
+use libc::{LC_COLLATE, LC_CTYPE, LC_MESSAGES, LC_MONETARY, LC_NUMERIC, LC_TIME};
+#[cfg(target_family = "wasm")]
+mod wasm_lc {
+    pub const LC_CTYPE: i32 = 0;
+    pub const LC_NUMERIC: i32 = 1;
+    pub const LC_TIME: i32 = 2;
+    pub const LC_COLLATE: i32 = 3;
+    pub const LC_MONETARY: i32 = 4;
+    pub const LC_MESSAGES: i32 = 5;
+}
+#[cfg(target_family = "wasm")]
+use wasm_lc::*;
+
 pub const PG_BACKEND_VERSIONSTR: &str = "postgres (PostgreSQL) 18.3\n";
 
 const SRC: &str = "src/backend/main/main.c";
@@ -18,6 +34,16 @@ pub enum DispatchOption {
     Forkchild,
     DescribeConfig,
     Single,
+    // pgrust extension (no C counterpart): one wire-protocol session over
+    // the boot-installed stdio transport provider (§2.4 seam). The
+    // wasm32-wasip1 client-server mode — WASI p1 has no socket(); native
+    // --stdio-wire is the differential arm.
+    StdioWire,
+    // pgrust extension (P4 sim-net, `--cfg pgrust_sim` builds only): one
+    // deterministic wire-protocol session over the in-memory sim-net
+    // transport pair, driven by the in-process scripted client.
+    #[cfg(pgrust_sim)]
+    SimNet,
     Postmaster,
 }
 
@@ -27,6 +53,9 @@ const DISPATCH_OPTION_NAMES: &[(DispatchOption, &str)] = &[
     (DispatchOption::Forkchild, "forkchild"),
     (DispatchOption::DescribeConfig, "describe-config"),
     (DispatchOption::Single, "single"),
+    (DispatchOption::StdioWire, "stdio-wire"),
+    #[cfg(pgrust_sim)]
+    (DispatchOption::SimNet, "sim-net"),
 ];
 
 pub fn parse_dispatch_option(name: &str) -> DispatchOption {
@@ -60,6 +89,12 @@ fn init_locale(mcx: Mcx<'_>, categoryname: &str, category: i32, locale: &str) ->
         .finish(loc(407, "init_locale"))
 }
 
+// wasm32: WASI has no uids — root cannot exist and there is nothing to
+// refuse (C's WIN32 arm skips the check the same way).
+#[cfg(target_family = "wasm")]
+fn check_root(_progname: &str) {}
+
+#[cfg(not(target_family = "wasm"))]
 fn check_root(progname: &str) {
     // SAFETY: geteuid/getuid have no preconditions and never fail.
     let (uid, euid) = unsafe { (libc::getuid(), libc::geteuid()) };
@@ -88,7 +123,7 @@ pub fn pg_main(argv: &[String]) -> PgResult<()> {
 
     ps_status::save_ps_display_args();
 
-    init_small::globals::SetMyProcPid(std::process::id() as i32);
+    init_small::globals::SetMyProcPid(init_small::globals::process_id() as i32);
     // MemoryContextInit: top-level contexts are owner-created here; ErrorContext is PgResult.
 
     stack_depth::set_stack_base();
@@ -97,12 +132,12 @@ pub fn pg_main(argv: &[String]) -> PgResult<()> {
 
     let main_context = mcx::MemoryContext::new("Main");
     let mcx = main_context.mcx();
-    init_locale(mcx, "LC_COLLATE", libc::LC_COLLATE, "")?;
-    init_locale(mcx, "LC_CTYPE", libc::LC_CTYPE, "")?;
-    init_locale(mcx, "LC_MESSAGES", libc::LC_MESSAGES, "")?;
-    init_locale(mcx, "LC_MONETARY", libc::LC_MONETARY, "C")?;
-    init_locale(mcx, "LC_NUMERIC", libc::LC_NUMERIC, "C")?;
-    init_locale(mcx, "LC_TIME", libc::LC_TIME, "C")?;
+    init_locale(mcx, "LC_COLLATE", LC_COLLATE, "")?;
+    init_locale(mcx, "LC_CTYPE", LC_CTYPE, "")?;
+    init_locale(mcx, "LC_MESSAGES", LC_MESSAGES, "")?;
+    init_locale(mcx, "LC_MONETARY", LC_MONETARY, "C")?;
+    init_locale(mcx, "LC_NUMERIC", LC_NUMERIC, "C")?;
+    init_locale(mcx, "LC_TIME", LC_TIME, "C")?;
     // SAFETY: single-threaded process startup; no concurrent getenv.
     unsafe {
         libc::unsetenv(c"LC_ALL".as_ptr());
@@ -147,22 +182,89 @@ pub fn pg_main(argv: &[String]) -> PgResult<()> {
             panic!("GucInfoMain unported: unit backend-utils-misc-help-config")
         }
         DispatchOption::Single => {
-            // PostgresSingleUserMain is unported (backend-tcop-postgres
-            // single-user arm). --single is the documented disaster-recovery
-            // entry point, so refuse cleanly at startup instead of
-            // panicking: an operator mid-recovery must see a message and
-            // exit(1), not an abort with a backtrace (panicfix-bgaudit).
-            elog::write_stderr(
-                "single-user mode (--single) is not supported yet by this server.\n\
-                 Start the server normally and connect with a client instead.\n",
-            );
-            std::process::exit(1);
+            // main.c:222: PostgresSingleUserMain(argc, argv,
+            // strdup(get_user_name_or_exit(progname))). Exits the process.
+            let username = get_user_name_or_exit(&progname);
+            postgres_seams::postgres_single_user_main::call(argv, &username)
+        }
+        DispatchOption::StdioWire => {
+            // pgrust extension: identity ultimately comes from the startup
+            // packet; the OS/env user is the single-user-style fallback.
+            let username = get_user_name_or_exit(&progname);
+            postgres_seams::postgres_stdio_wire_main::call(argv, &username)
+        }
+        #[cfg(pgrust_sim)]
+        DispatchOption::SimNet => {
+            // P4 sim-net (sim builds only): same identity story as the
+            // stdio wire mode.
+            let username = get_user_name_or_exit(&progname);
+            postgres_seams::postgres_sim_net_main::call(argv, &username)
         }
         DispatchOption::Postmaster => postmaster::PostmasterMain(argv),
     }
 }
 
 fn startup_hacks(_progname: &str) {}
+
+// get_user_name_or_exit (src/common/username.c:74): effective user's
+// pw_name, or print the lookup error and exit(1).
+// wasm32: no uids and no passwd db on WASI; the operator supplies the
+// identity through the environment (wasmtime --env USER=<name>, matching
+// the role the datadir was initdb'd with). Absent that, C's exit(1) shape.
+#[cfg(target_family = "wasm")]
+fn get_user_name_or_exit(progname: &str) -> String {
+    match std::env::var("USER") {
+        Ok(u) if !u.is_empty() => u,
+        _ => {
+            elog::write_stderr(&format!(
+                "{progname}: could not determine the effective user name: \
+                 set the USER environment variable\n"
+            ));
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn get_user_name_or_exit(progname: &str) -> String {
+    // SAFETY: geteuid never fails; getpwuid returns a static-storage struct
+    // (single-threaded startup, per C's use) or NULL with errno set.
+    let (user_id, pw) = unsafe {
+        let uid = libc::geteuid();
+        set_errno_zero();
+        (uid, libc::getpwuid(uid))
+    };
+    if pw.is_null() {
+        let err = std::io::Error::last_os_error();
+        let detail = if err.raw_os_error().unwrap_or(0) != 0 {
+            err.to_string()
+        } else {
+            "user does not exist".to_string()
+        };
+        elog::write_stderr(&format!(
+            "{progname}: could not look up effective user ID {user_id}: {detail}\n"
+        ));
+        std::process::exit(1);
+    }
+    // SAFETY: non-NULL passwd from getpwuid has a NUL-terminated pw_name.
+    unsafe { std::ffi::CStr::from_ptr((*pw).pw_name) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[cfg(not(target_family = "wasm"))] // wasm32: only the native getpwuid path clears errno
+fn set_errno_zero() {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    // SAFETY: __error returns this thread's valid errno location.
+    unsafe {
+        *libc::__error() = 0;
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    // SAFETY: __errno_location returns this thread's valid errno location.
+    unsafe {
+        *libc::__errno_location() = 0;
+    }
+}
 
 pub fn help(progname: &str) -> String {
     let mut s = String::with_capacity(2048);
@@ -226,6 +328,7 @@ mod tests {
         assert_eq!(parse_dispatch_option("boot"), DispatchOption::Boot);
         assert_eq!(parse_dispatch_option("describe-config"), DispatchOption::DescribeConfig);
         assert_eq!(parse_dispatch_option("single"), DispatchOption::Single);
+        assert_eq!(parse_dispatch_option("stdio-wire"), DispatchOption::StdioWire);
         assert_eq!(parse_dispatch_option("forkchild"), DispatchOption::Postmaster);
         assert_eq!(parse_dispatch_option("nonsense"), DispatchOption::Postmaster);
         assert_eq!(parse_dispatch_option(""), DispatchOption::Postmaster);

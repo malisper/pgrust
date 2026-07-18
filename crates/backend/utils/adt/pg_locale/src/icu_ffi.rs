@@ -205,6 +205,7 @@ fn load() -> Result<&'static IcuApi, String> {
     Ok(Box::leak(Box::new(api)))
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn open_lib() -> Result<(*mut c_void, Option<i32>), String> {
     for major in (MAJOR_MIN..=MAJOR_MAX).rev() {
         let name = format!("libicui18n.so.{major}\0");
@@ -224,6 +225,15 @@ fn open_lib() -> Result<(*mut c_void, Option<i32>), String> {
     ))
 }
 
+// wasm32: no dynamic loading on wasm32-wasip1 (wasi-libc ships no dlopen);
+// ICU is unavailable, like a C build without --with-icu. The Err surfaces
+// only if an ICU-provider locale is actually requested at runtime.
+#[cfg(target_family = "wasm")]
+fn open_lib() -> Result<(*mut c_void, Option<i32>), String> {
+    Err("ICU is not supported on wasm32-wasip1 (no dynamic loading)".to_string())
+}
+
+#[cfg(not(target_family = "wasm"))]
 fn sym(handle: *mut c_void, name: &str, suffix: i32) -> *mut c_void {
     let full = if suffix == 0 {
         format!("{name}\0")
@@ -232,6 +242,12 @@ fn sym(handle: *mut c_void, name: &str, suffix: i32) -> *mut c_void {
     };
     // SAFETY: full is NUL-terminated; handle is a live dlopen handle.
     unsafe { libc::dlsym(handle, full.as_ptr() as *const c_char) }
+}
+
+// wasm32: unreachable — open_lib never yields a handle (no dlopen on WASI).
+#[cfg(target_family = "wasm")]
+fn sym(_handle: *mut c_void, _name: &str, _suffix: i32) -> *mut c_void {
+    core::ptr::null_mut()
 }
 
 // suffix 0 encodes unrenamed symbols (--disable-renaming builds).

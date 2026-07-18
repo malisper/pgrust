@@ -1623,13 +1623,26 @@ fn pg_file_create_mode() -> u32 {
 fn pg_dir_create_mode() -> u32 {
     fd::vfd::pg_dir_create_mode()
 }
+#[cfg(not(target_family = "wasm"))]
 fn geteuid() -> u32 {
     // SAFETY: geteuid never fails.
     unsafe { libc::geteuid() }
 }
+#[cfg(not(target_family = "wasm"))]
 fn getegid() -> u32 {
     // SAFETY: getegid never fails.
     unsafe { libc::getegid() }
+}
+// wasm32: WASI has no uids/gids; 0 is the tar-header owner word C would
+// emit on a credential-less platform (base backups are postmaster-only —
+// unreachable from --single).
+#[cfg(target_family = "wasm")]
+fn geteuid() -> u32 {
+    0
+}
+#[cfg(target_family = "wasm")]
+fn getegid() -> u32 {
+    0
 }
 fn time_now() -> i64 {
     // SAFETY: time(NULL) returns the current unix time.

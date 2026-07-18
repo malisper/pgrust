@@ -14,8 +14,6 @@ path = "src/bin/postgres.rs"
 
 [dependencies]
 libc = "0.2"
-mimalloc = "0.1"
-libmimalloc-sys = { version = "0.1", features = ["extended"] }
 mcx = { path = "../../../_support/mcx" }
 types_error = { path = "../../../_support/types/types_error" }
 elog = { path = "../../utils/error/elog" }
@@ -24,4 +22,16 @@ stack_depth = { path = "../../utils/misc/stack_depth" }
 ps_status = { path = "../../utils/misc/ps_status" }
 pg_locale = { path = "../../utils/adt/pg_locale" }
 postmaster = { path = "../../postmaster/postmaster" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
 seams_init = { path = "../../../_support/seams_init" }
+
+# mimalloc is a C allocator; wasm32 std already defaults to dlmalloc, and
+# bin/postgres.rs cfg-outs the global-alloc + release hook there.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+mimalloc = "0.1"
+libmimalloc-sys = { version = "0.1", features = ["extended"] }
+
+# `pgrust_sim` (non-default cfg): P4 sim arms live behind it; empty/absent
+# in product builds (law 0.1).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)'] }

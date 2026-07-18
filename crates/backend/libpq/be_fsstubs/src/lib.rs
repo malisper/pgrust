@@ -375,17 +375,22 @@ pub fn be_lo_export<'mcx>(mcx: Mcx<'mcx>, lobjId: Oid, filename: &[u8]) -> PgRes
     // C reduces the backend's normal 077 umask to 022 for the duration of the
     // open so exported files aren't world-writable; restored via a guard so
     // an early return still resets it.
-    struct UmaskGuard(libc::mode_t);
+    struct UmaskGuard(#[allow(dead_code)] libc::mode_t);
     impl Drop for UmaskGuard {
         fn drop(&mut self) {
             // SAFETY: process-wide umask restore, single-threaded backend.
+            // wasm32: no umask on WASI (files carry no mode bits) — no-op.
+            #[cfg(not(target_family = "wasm"))]
             unsafe {
                 libc::umask(self.0);
             }
         }
     }
     // SAFETY: process-wide umask swap, single-threaded backend.
+    #[cfg(not(target_family = "wasm"))]
     let oumask = unsafe { libc::umask(libc::S_IWGRP | libc::S_IWOTH) };
+    #[cfg(target_family = "wasm")]
+    let oumask = 0;
     let _restore = UmaskGuard(oumask);
     let fd = fd::desc::OpenTransientFilePerm(
         &fnamebuf,

@@ -9,6 +9,17 @@ use types_core::STATUS_ERROR;
 use types_error::{ErrorLocation, PgResult, DEBUG2, ERROR, LOG};
 use types_storage::waiteventset::{WL_LATCH_SET, WL_SOCKET_READABLE, WL_SOCKET_WRITEABLE};
 
+// USE_SSL selector: the OpenSSL backend when the `ssl` feature is on and the
+// target can build vendored OpenSSL (everything but wasm32); otherwise C's
+// !USE_SSL shape — the be_tls_* entry points don't exist in C, and every
+// caller is gated on LoadedSSL / port->ssl_in_use, which never become true.
+#[cfg(all(feature = "ssl", not(target_family = "wasm")))]
+use be_secure_openssl as tls_impl;
+#[cfg(not(all(feature = "ssl", not(target_family = "wasm"))))]
+mod no_ssl_stub;
+#[cfg(not(all(feature = "ssl", not(target_family = "wasm"))))]
+use no_ssl_stub as tls_impl;
+
 // WAIT_EVENT_CLIENT_READ / WAIT_EVENT_CLIENT_WRITE: PG_WAIT_CLIENT | 0 / 1.
 const WAIT_EVENT_CLIENT_READ: u32 = 0x0600_0000;
 const WAIT_EVENT_CLIENT_WRITE: u32 = 0x0600_0000 | 1;
@@ -46,15 +57,15 @@ fn ssize_result(n: isize, e: i32) -> Result<usize, i32> {
 }
 
 pub fn secure_initialize(is_server_start: bool) -> PgResult<i32> {
-    be_secure_openssl::be_tls_init(is_server_start)
+    tls_impl::be_tls_init(is_server_start)
 }
 
 pub fn secure_destroy() {
-    be_secure_openssl::be_tls_destroy()
+    tls_impl::be_tls_destroy()
 }
 
 pub fn secure_loaded_verify_locations() -> bool {
-    be_secure_openssl::ssl_loaded_verify_locations()
+    tls_impl::ssl_loaded_verify_locations()
 }
 
 pub fn secure_open_server() -> PgResult<i32> {
@@ -71,7 +82,7 @@ pub fn secure_open_server() -> PgResult<i32> {
     debug_assert_eq!(pqcomm::pq_buffer_remaining_data(), 0);
 
     let (sock, _, _) = my_port_state();
-    let open = be_secure_openssl::be_tls_open_server(sock, raw_buf)?;
+    let open = tls_impl::be_tls_open_server(sock, raw_buf)?;
 
     if open.raw_remaining > 0 {
         ereport(LOG)
@@ -107,26 +118,26 @@ pub fn secure_open_server() -> PgResult<i32> {
 pub fn secure_close() {
     if let Some((_, _, ssl_in_use)) = pqcomm::client_socket_state() {
         if ssl_in_use {
-            be_secure_openssl::be_tls_close();
+            tls_impl::be_tls_close();
             pqcomm::set_ssl_in_use(false);
         }
     }
 }
 
 pub fn be_tls_get_certificate_hash() -> PgResult<Option<Vec<u8>>> {
-    be_secure_openssl::be_tls_get_certificate_hash()
+    tls_impl::be_tls_get_certificate_hash()
 }
 
 pub fn be_tls_get_version() -> Option<String> {
-    be_secure_openssl::be_tls_get_version()
+    tls_impl::be_tls_get_version()
 }
 
 pub fn be_tls_get_cipher() -> Option<String> {
-    be_secure_openssl::be_tls_get_cipher()
+    tls_impl::be_tls_get_cipher()
 }
 
 pub fn be_tls_get_cipher_bits() -> i32 {
-    be_secure_openssl::be_tls_get_cipher_bits()
+    tls_impl::be_tls_get_cipher_bits()
 }
 
 pub fn secure_raw_read(sock: i32, buf: &mut [u8]) -> isize {
@@ -142,14 +153,14 @@ pub fn secure_raw_write(sock: i32, buf: &[u8]) -> isize {
 #[cold]
 #[inline(never)]
 fn tls_read_arm(buf: &mut [u8]) -> PgResult<(isize, i32, u32)> {
-    let io = be_secure_openssl::be_tls_read(buf)?;
+    let io = tls_impl::be_tls_read(buf)?;
     Ok((io.n, io.errno, io.waitfor))
 }
 
 #[cold]
 #[inline(never)]
 fn tls_write_arm(buf: &[u8]) -> PgResult<(isize, i32, u32)> {
-    let io = be_secure_openssl::be_tls_write(buf)?;
+    let io = tls_impl::be_tls_write(buf)?;
     Ok((io.n, io.errno, io.waitfor))
 }
 

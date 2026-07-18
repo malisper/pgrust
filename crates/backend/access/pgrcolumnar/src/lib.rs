@@ -5,6 +5,10 @@
 //! stays owned by the ordinary smgr create/unlink machinery.
 
 #![allow(non_snake_case)]
+// wasm32: positioned file I/O (FileExt) and dev/ino identity (MetadataExt)
+// live behind std's unstable wasi_ext; the wasm build runs on the pinned
+// nightly (wasm/wasm-build.sh), native stable builds never see this.
+#![cfg_attr(target_family = "wasm", feature(wasi_ext))]
 
 pub mod bloom;
 pub mod condcache;
