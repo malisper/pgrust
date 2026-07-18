@@ -353,7 +353,6 @@ fn exec_make_function_result_set<'mcx>(
         return Ok((Datum::null(), true, ExprDoneCond::ExprEndResult));
     }
 
-    srf.fcinfo.resultinfo = srf.rsinfo.as_fmnode_ptr();
     // SAFETY: Rc keeps the desc image stable while the rsinfo aliases it for
     // this call.
     srf.rsinfo.expectedDesc = srf
@@ -375,6 +374,12 @@ fn exec_make_function_result_set<'mcx>(
     srf.fcinfo.isnull = false;
     srf.rsinfo.returnMode = SetFunctionReturnMode::ValuePerCall;
     srf.rsinfo.isDone = ExprDoneCond::ExprSingleResult;
+    // Arm resultinfo LAST, after every direct rsinfo field write above: each
+    // safe `&mut srf.rsinfo` access invalidates a previously armed pointer's
+    // provenance, and the callee re-derives through it (rsinfo_mut). C's
+    // contract is the same — execSRF.c re-arms per ExecMakeFunctionResultSet
+    // call. (Miri F6, notes/miri-pilot-lane.md.)
+    srf.fcinfo.resultinfo = srf.rsinfo.as_fmnode_ptr();
     let result = srf.flinfo.invoke(&mut srf.fcinfo)?;
     if let Some(fcu) = &fcu {
         ::pgstat::function::pgstat_end_function_usage(
