@@ -39,6 +39,11 @@ pub enum DispatchOption {
     // wasm32-wasip1 client-server mode — WASI p1 has no socket(); native
     // --stdio-wire is the differential arm.
     StdioWire,
+    // pgrust extension (P4 sim-net, `--cfg pgrust_sim` builds only): one
+    // deterministic wire-protocol session over the in-memory sim-net
+    // transport pair, driven by the in-process scripted client.
+    #[cfg(pgrust_sim)]
+    SimNet,
     Postmaster,
 }
 
@@ -49,6 +54,8 @@ const DISPATCH_OPTION_NAMES: &[(DispatchOption, &str)] = &[
     (DispatchOption::DescribeConfig, "describe-config"),
     (DispatchOption::Single, "single"),
     (DispatchOption::StdioWire, "stdio-wire"),
+    #[cfg(pgrust_sim)]
+    (DispatchOption::SimNet, "sim-net"),
 ];
 
 pub fn parse_dispatch_option(name: &str) -> DispatchOption {
@@ -185,6 +192,13 @@ pub fn pg_main(argv: &[String]) -> PgResult<()> {
             // packet; the OS/env user is the single-user-style fallback.
             let username = get_user_name_or_exit(&progname);
             postgres_seams::postgres_stdio_wire_main::call(argv, &username)
+        }
+        #[cfg(pgrust_sim)]
+        DispatchOption::SimNet => {
+            // P4 sim-net (sim builds only): same identity story as the
+            // stdio wire mode.
+            let username = get_user_name_or_exit(&progname);
+            postgres_seams::postgres_sim_net_main::call(argv, &username)
         }
         DispatchOption::Postmaster => postmaster::PostmasterMain(argv),
     }

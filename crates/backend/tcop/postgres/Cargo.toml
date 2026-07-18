@@ -80,6 +80,9 @@ stack_depth = { path = "../../utils/misc/stack_depth" }
 fd = { path = "../../storage/file/fd" }
 libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
 backend_startup = { path = "../backend_startup" }
+# P4 sim-net harness (cfg pgrust_sim; both crates are empty/off-path otherwise)
+pqcomm_simnet = { path = "../../libpq/pqcomm_simnet" }
+vfs = { path = "../../storage/file/vfs" }
 types_guc = { path = "../../../_support/types/types_guc" }
 
 event_trigger_seams = { path = "../../commands/event_trigger_seams" }
@@ -156,3 +159,8 @@ pg_sema_seams = { path = "../../port/pg_sema_seams" }
 types_storage = { path = "../../../_support/types/types_storage" }
 pgstat_seams = { path = "../../utils/activity/pgstat_seams" }
 init_small_seams = { path = "../../utils/init/init_small_seams" }
+
+# `pgrust_sim` (non-default cfg): P4 sim arms live behind it; empty/absent
+# in product builds (law 0.1).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)'] }

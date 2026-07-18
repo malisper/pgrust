@@ -43,8 +43,8 @@ fn c_atoi(s: &str) -> i32 {
 fn is_dispatch_option(name: &str) -> bool {
     // DispatchOptionNames (main.c) minus forkchild (EXEC_BACKEND only).
     let bare = name.split('=').next().unwrap_or(name);
-    // + the pgrust-extension stdio-wire mode (main_main dispatch).
-    matches!(bare, "check" | "boot" | "describe-config" | "single" | "stdio-wire")
+    // + the pgrust-extension stdio-wire / sim-net modes (main_main dispatch).
+    matches!(bare, "check" | "boot" | "describe-config" | "single" | "stdio-wire" | "sim-net")
 }
 
 pub fn process_postgres_switches(argv: &[String], gucctx: u8) -> PgResult<()> {
@@ -75,9 +75,13 @@ fn process_postgres_switches_inner(
 
     let mut errs = 0usize;
     let mut i = 1usize;
-    // Ignore the initial --single (or pgrust --stdio-wire) argument, if
-    // present.
-    if secure && argv.get(1).is_some_and(|a| a == "--single" || a == "--stdio-wire") {
+    // Ignore the initial --single (or pgrust --stdio-wire / --sim-net)
+    // argument, if present.
+    if secure
+        && argv
+            .get(1)
+            .is_some_and(|a| a == "--single" || a == "--stdio-wire" || a == "--sim-net")
+    {
         i = 2;
     }
     let mut bad: Option<&str> = None;

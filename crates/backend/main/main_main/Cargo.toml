@@ -30,3 +30,8 @@ seams_init = { path = "../../../_support/seams_init" }
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 mimalloc = "0.1"
 libmimalloc-sys = { version = "0.1", features = ["extended"] }
+
+# `pgrust_sim` (non-default cfg): P4 sim arms live behind it; empty/absent
+# in product builds (law 0.1).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)'] }

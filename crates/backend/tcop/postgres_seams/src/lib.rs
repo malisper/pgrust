@@ -98,3 +98,13 @@ seam_core::seam!(
     // get_stats_option_name(optarg) (postgres.c); None = invalid.
     pub fn get_stats_option_name(arg: &str) -> Option<&'static str>
 );
+
+#[cfg(pgrust_sim)]
+seam_core::seam!(
+    // PostgresSimNetMain (P4 sim-net; pgrust extension, cfg pgrust_sim
+    // only): the wire-session boot ladder over the sim-net transport
+    // provider — one deterministic in-process pgwire session driven by the
+    // scripted client pump. argv[1] == "--sim-net"; username is the
+    // fallback identity. Exits the process; never returns.
+    pub fn postgres_sim_net_main(argv: &[String], username: &str) -> !
+);

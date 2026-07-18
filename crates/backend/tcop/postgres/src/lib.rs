@@ -14,6 +14,8 @@ pub mod main_loop;
 pub mod simple_query;
 pub mod single_user;
 pub mod stdio_wire;
+#[cfg(pgrust_sim)]
+mod sim_net;
 pub mod stmt_trace;
 pub mod switches;
 #[cfg(test)]
@@ -29,6 +31,8 @@ pub use extended_query::{
 pub use main_loop::PostgresMain;
 pub use single_user::PostgresSingleUserMain;
 pub use stdio_wire::PostgresStdioWireMain;
+#[cfg(pgrust_sim)]
+pub use sim_net::PostgresSimNetMain;
 pub use simple_query::{
     exec_simple_query, finish_xact_command, pg_analyze_and_rewrite_fixedparams, pg_parse_query,
     pg_plan_queries, pg_plan_query, pg_rewrite_query, start_xact_command,
@@ -38,6 +42,8 @@ pub fn init_seams() {
     postgres_seams::postgres_main::set(postgres_main_seam);
     postgres_seams::postgres_single_user_main::set(PostgresSingleUserMain);
     postgres_seams::postgres_stdio_wire_main::set(PostgresStdioWireMain);
+    #[cfg(pgrust_sim)]
+    postgres_seams::postgres_sim_net_main::set(PostgresSimNetMain);
     postgres_seams::check_for_interrupts::set(check_for_interrupts);
     postgres_seams::die::set(die);
     postgres_seams::statement_cancel_handler::set(StatementCancelHandler);
