@@ -477,6 +477,31 @@ impl<'a> Dispatcher<'a> {
     }
 }
 
+/// DUT-side panic escalation (see `vocab::is_panic_signature`): Some(P1
+/// failure) when the DUT outcome is a SqlError carrying a contained-panic
+/// signature. The pinned triage classification of the same statement is
+/// emitted by the caller as usual — this is an additional escalation record,
+/// so the G-O2 parity gate never sees a changed class.
+fn panic_escalation(idx: usize, dut_out: &ExecOutcome, stmt: &str) -> Option<Failure> {
+    let ExecOutcome::SqlError { sqlstate, message } = dut_out else {
+        return None;
+    };
+    if !crate::vocab::is_panic_signature(sqlstate, message) {
+        return None;
+    }
+    Some(Failure {
+        step_idx: idx,
+        signature: Signature {
+            class: "panic-signature".into(),
+            sqlstate: sqlstate.clone(),
+            site: normalize_site(stmt),
+        },
+        class: "panic-signature".into(),
+        sev: "P1".into(),
+        detail: format!("contained backend panic surfaced as SQL error: {}", message),
+    })
+}
+
 pub fn tx_sql(tx: &TxCtl) -> String {
     match tx {
         TxCtl::Begin(IsoLevel::ReadCommitted) => "BEGIN ISOLATION LEVEL READ COMMITTED".into(),
@@ -608,6 +633,26 @@ pub fn execute_plan<'a>(
                                 return report;
                             }
                             continue;
+                        }
+                        // Panic escalation (H3 finding 1): a CONTAINED backend
+                        // panic surfaces as XX000 + panic-payload message and
+                        // the pinned ladder files it P2 (rust-err-c-ok) — the
+                        // campaign verdict would PASS over a panicking DUT.
+                        // Mint the harness-mechanics `panic-signature` P1
+                        // ALONGSIDE (never instead of) the pinned class.
+                        if let Some(f) = panic_escalation(idx, &dut_out, &sql.text) {
+                            report.count("panic-signature");
+                            report.records.push(StepRecord {
+                                idx,
+                                class: f.class.clone(),
+                                sev: f.sev.clone(),
+                                detail: f.detail.clone(),
+                                stmt_head: head.clone(),
+                            });
+                            report.failure = Some(f);
+                            if opts.stop_on_failure {
+                                return report;
+                            }
                         }
                         // Oracle model step (ledger apply + reconcile, slot
                         // capture) for statements inside a property block.
@@ -1091,6 +1136,22 @@ fn run_ctl_step(
             return true;
         }
         c_err = Some(c_out.is_error());
+    }
+    // Panic escalation on control statements too (COMMIT is the classic
+    // engine-bug site); same additional-record posture as the Sql arm.
+    if let Some(f) = panic_escalation(idx, &dut_out, sql) {
+        report.count("panic-signature");
+        report.records.push(StepRecord {
+            idx,
+            class: f.class.clone(),
+            sev: f.sev.clone(),
+            detail: f.detail.clone(),
+            stmt_head: sql.chars().take(60).collect(),
+        });
+        report.failure = Some(f);
+        if opts.stop_on_failure {
+            return true;
+        }
     }
     // Oracle model step (ledger tx bookkeeping) inside property blocks.
     if let Some(h) = hook {

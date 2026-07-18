@@ -176,12 +176,22 @@ pub fn wart_counter(id: &str) -> String {
 ///   - `fault-restart-noop`       restart_cmd exited 0 but the DUT survived
 ///   - `fault-armed`              a FaultDriver mapped+armed a reserved tag
 ///                                (H2 seam; only a non-NoOp driver mints it)
+///   - `panic-signature`          the DUT converted a CONTAINED backend panic
+///                                into a SQL error (XX000 + panic-payload
+///                                grammar). H3 finding 1: the triage-pinned
+///                                ladder files this rust-err-c-ok P2 and the
+///                                campaign PASSes over a panicking backend.
+///                                This is an ADDITIONAL census class minted
+///                                alongside the pinned classification (parity
+///                                gate untouched) so the verdict FAILs — no
+///                                campaign can PASS over a panic again.
 pub fn harness_class_severity(class: &str) -> Option<Severity> {
     if class.starts_with("wart:") {
         return Some(Severity::Fine);
     }
     Some(match class {
-        "dispatch-refusal" | "fault-reserved-refused" | "fault-restart-noop" => Severity::P1,
+        "dispatch-refusal" | "fault-reserved-refused" | "fault-restart-noop"
+        | "panic-signature" => Severity::P1,
         "err-uncompared"
         | "fault-skipped-no-restart-cmd"
         | "fault-restart-cmd-failed"
@@ -190,6 +200,43 @@ pub fn harness_class_severity(class: &str) -> Option<Severity> {
         | "skipped-no-hook" => Severity::Fine,
         _ => return None,
     })
+}
+
+/// Census class for a contained backend panic surfaced as a SQL error
+/// (severity P1 via `harness_class_severity`).
+pub const PANIC_SIGNATURE: &str = "panic-signature";
+
+/// A contained backend panic reaching the client is `PgError::new(ERROR, msg)`
+/// with msg = the PANIC PAYLOAD verbatim and the ERROR-level default SQLSTATE
+/// XX000 (tcop/postgres main_loop.rs `pg_error_from_panic`). Match the
+/// std-library panic-payload grammar, TIGHT by design: XX000 alone is also
+/// minted by legitimate elog(ERROR) internal-error ports (staying P2 per the
+/// pinned ladder), and coverage messages ("not ported") stay coverage.
+/// Custom `panic!("...")` payloads are NOT matchable from the message side —
+/// the battery's DUT-log "panicked at" grep (smoke-1k) is the backstop.
+pub fn is_panic_signature(sqlstate: &str, message: &str) -> bool {
+    if sqlstate != "XX000" {
+        return false;
+    }
+    const PANIC_HEADS: &[&str] = &["assertion", "panicked at", "not yet implemented"];
+    const PANIC_ANY: &[&str] = &[
+        "called `Option::unwrap()`",
+        "called `Result::unwrap()`",
+        "called `Option::expect()`",
+        "called `Result::expect()`",
+        "index out of bounds",
+        "entered unreachable code",
+        "with overflow",
+        "capacity overflow",
+        "slice index starts at",
+        "range end index",
+        "range start index",
+        "is not a char boundary",
+        "already borrowed",
+        "already mutably borrowed",
+    ];
+    PANIC_HEADS.iter().any(|h| message.starts_with(h))
+        || PANIC_ANY.iter().any(|p| message.contains(p))
 }
 
 /// Severity for ANY census class string (pinned Class first, then the
@@ -227,5 +274,34 @@ mod tests {
         assert_eq!(Class::ErrTimeoutOneSide.severity(), Severity::P3);
         assert_eq!(Class::PropertyViolation.severity(), Severity::P1);
         assert_eq!(Class::PropertySkipped.severity(), Severity::Fine);
+    }
+
+    #[test]
+    fn panic_signature_grammar() {
+        // The p6 witness shape: staged-parity assert surfaced as XX000.
+        assert!(is_panic_signature("XX000", "assertion failed: staged parity"));
+        assert!(is_panic_signature("XX000", "assertion `left == right` failed"));
+        assert!(is_panic_signature(
+            "XX000",
+            "called `Option::unwrap()` on a `None` value"
+        ));
+        assert!(is_panic_signature("XX000", "index out of bounds: the len is 3"));
+        assert!(is_panic_signature(
+            "XX000",
+            "internal error: entered unreachable code"
+        ));
+        assert!(is_panic_signature("XX000", "attempt to add with overflow"));
+        // NOT panics: coverage / legit internal errors / non-XX states.
+        assert!(!is_panic_signature("XX000", "not yet ported: brin"));
+        assert!(!is_panic_signature("XX000", "cache lookup failed for type 42"));
+        assert!(!is_panic_signature("23505", "assertion failed: never (unique)"));
+        assert!(!is_panic_signature("22012", "division by zero"));
+    }
+
+    #[test]
+    fn panic_signature_class_is_p1() {
+        assert_eq!(severity_of(PANIC_SIGNATURE), Severity::P1);
+        // ...and the pinned ladder class it accompanies stays P2 (parity).
+        assert_eq!(severity_of("rust-err-c-ok"), Severity::P2);
     }
 }
