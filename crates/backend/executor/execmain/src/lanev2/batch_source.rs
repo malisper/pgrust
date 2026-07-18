@@ -228,9 +228,27 @@ fn k1_sel_estimate(plan_rows: f64, tuples: f64) -> Option<f64> {
 ///   — the planner used the plancat data-width density fallback this seam
 ///   cannot reach — an empty estimate, or the size seam errored). Unknown
 ///   fails CLOSED: an unproven selectivity keeps today's full-staging bytes.
+/// - `k1-latemat-parallel` — parallel-aware scan (N1: the numerator is the
+///   PER-WORKER plan estimate; a whole-relation denominator would deflate
+///   the quotient ~divisor×). Fails CLOSED; see the in-body note.
 pub(super) fn k1_latemat_sel_admits(
     ss: &::nodeseqscan::SeqScanState<'_>,
 ) -> Result<(), &'static str> {
+    // N1 flip-gate obligation (k1-f2 review §7, fixed in the k1-latemat
+    // lane): under a parallel-aware scan `plan_rows()` is the planner's
+    // PER-WORKER estimate (rows / the parallel divisor) while `tuples`
+    // below is the FULL-relation count — the quotient deflates ~divisor×
+    // and would admit above the intended threshold. The divisor is not
+    // reconstructible at this seam (num_workers lives on the Gather node,
+    // and the launched count differs from the planned divisor anyway), so
+    // parallel builds refuse fail-closed: every ADMITTED build is serial,
+    // where the numerator and denominator agree in denomination (the
+    // per-worker estimate IS the whole-scan estimate). If a parallel heap
+    // grouped feed ever becomes a target, the honest fix is threading the
+    // planner's divisor onto the plan node — not guessing here.
+    if ss.is_parallel() {
+        return Err("k1-latemat-parallel");
+    }
     let Some(rel) = ss.ss.ss_currentRelation.as_ref() else {
         return Err("k1-latemat-sel-unknown");
     };
@@ -268,6 +286,43 @@ pub(super) fn k1_latemat_sel_admits(
         Some(sel) if sel <= k1_sel_threshold() => Ok(()),
         Some(_) => Err("k1-latemat-selectivity"),
         None => Err("k1-latemat-sel-unknown"),
+    }
+}
+
+/// K1 inc-3 needed-set split (pure half, unit corpus): partition the armed
+/// narrowing's deferred completion set into
+/// - `now`   = `deferred ∩ needed` — completed right after staging, BEFORE
+///   every whole-batch consumer (probes, folds, spill replays read only
+///   agg-needed columns: `plan.cols ⊆ colnos_needed` is `agg_fold_staged`'s
+///   documented contract and the K2 spill-miss replay fills `shape.needed`
+///   cells only), and
+/// - `publish` = `deferred \ needed` — columns NO whole-batch consumer
+///   reads; they complete ONLY when a batch leaves the kernel legs for a
+///   per-row route, whose emit (`soa_store_prefix`) publishes every prefix
+///   cell of a selected row (rail B: never a stale published cell).
+///
+/// `needed` must be the agg's `colnos_needed` census over SCAN column
+/// numbers. Callers that cannot state `needed` for the build pass `None`
+/// and get the pre-inc-3 behavior (`now` = the whole deferred set,
+/// `publish` empty) — strictly the landed wave-9 completion bytes.
+pub(super) fn k1_latemat_split(
+    deferred: Vec<u16>,
+    needed: Option<&[u16]>,
+) -> (Vec<u16>, Vec<u16>) {
+    match needed {
+        None => (deferred, Vec::new()),
+        Some(nd) => {
+            let mut now = Vec::with_capacity(deferred.len());
+            let mut publish = Vec::new();
+            for c in deferred {
+                if nd.contains(&c) {
+                    now.push(c);
+                } else {
+                    publish.push(c);
+                }
+            }
+            (now, publish)
+        }
     }
 }
 
@@ -1019,6 +1074,28 @@ mod tests {
         fn assert_defaulted<'mcx, S: BatchGranuleSource<'mcx>>(_s: &S) {}
         let src = StubSource(caps(false, false));
         assert_defaulted(&src);
+    }
+
+    /// Inc-3 needed-set split (pure half): `now` keeps deferred∩needed in
+    /// deferred order, `publish` gets the rest; `None` needed = the landed
+    /// wave-9 behavior (everything completes now, publish empty).
+    #[test]
+    fn k1_latemat_split_partition() {
+        // No census: pre-inc-3 bytes.
+        assert_eq!(k1_latemat_split(vec![0, 2, 4], None), (vec![0, 2, 4], vec![]));
+        // Census: agg-needed completes now, the rest defers to publish legs.
+        assert_eq!(
+            k1_latemat_split(vec![0, 2, 4], Some(&[1, 2, 3, 4])),
+            (vec![2, 4], vec![0])
+        );
+        // Nothing needed beyond the staged set: everything is publish-only.
+        assert_eq!(k1_latemat_split(vec![0, 2], Some(&[1, 3])), (vec![], vec![0, 2]));
+        // Needed covers the whole deferred set: publish empty (kernel legs
+        // complete everything — behavior == pre-inc-3 with one fewer pass).
+        assert_eq!(k1_latemat_split(vec![5, 6], Some(&[5, 6, 7])), (vec![5, 6], vec![]));
+        // Empty deferred set never arms (the arm refuses all-staged), but
+        // the pure half stays total.
+        assert_eq!(k1_latemat_split(vec![], Some(&[1])), (vec![], vec![]));
     }
 
     // --- end WS-AH wave-9 sub-region ----------------------------------------

@@ -915,8 +915,10 @@ pub fn soa_deform_columns(
 /// completion fills the deferred columns for `sel`-selected rows only.
 ///
 /// Selection discipline (`sel` = 64-row selection words, LSB-first like
-/// the kernel qual bitmaps): all-zero words skip whole (word-skip), full
-/// words take the dense row loop, partial words walk their set bits. Rows
+/// the kernel qual bitmaps): all-zero words skip whole (word-skip),
+/// words at or above [`DENSE_WORD_CUTOVER`] set bits take the dense row
+/// loop (over-filling unselected kind-0 cells — idempotent value movement
+/// into cells no reader consumes), sparser words walk their set bits. Rows
 /// past `nrows` are masked off here, so a caller may pass the staged
 /// bitmap verbatim. Kind discipline is `soa_deform_columns`'s: only
 /// kind-0 rows fill (kind-1 hasnulls rows deformed fully at classify —
@@ -930,6 +932,15 @@ pub fn soa_deform_columns(
 /// `soa_deform_columns`' JIT path; this pass exists for qual-armed
 /// narrowed stagings and survivor completion only). Idempotent per
 /// (column, row): re-filling a cell rewrites the identical value.
+/// Per-word set-bit count at which `soa_deform_columns_set`'s selected
+/// pass switches from the bit-walk to the dense row loop (K1 inc-3). 48/64
+/// keeps the cutover on the clear-win side: the dense loop's wasted fills
+/// (≤ 16 cells) are cheaper than 48+ iterations of bit-extraction, and the
+/// letter's high-selectivity loss lived at ~58-set words. Correctness does
+/// not depend on the value (over-fill is idempotent; no reader consumes
+/// unselected cells) — it is a speed dial only.
+const DENSE_WORD_CUTOVER: u32 = 48;
+
 pub fn soa_deform_columns_set(
     soa: &mut SoaBatch<'_>,
     plan: &SoaDeformPlan<'_>,
@@ -987,8 +998,20 @@ pub fn soa_deform_columns_set(
                             continue; // word-skip: 64 rejected rows, zero work
                         }
                         let base = w * 64;
-                        if bits == word_mask {
-                            // Dense fill: every row of the word selected.
+                        if bits == word_mask || bits.count_ones() >= DENSE_WORD_CUTOVER {
+                            // Dense fill: every (or nearly every) row of the
+                            // word selected. Inc-3 density cutover: at high
+                            // density the branch-free row loop beats the
+                            // bit-walk below, and filling the few UNSELECTED
+                            // kind-0 cells is idempotent value movement into
+                            // cells no reader consumes (qual-dead rows never
+                            // emit, fold, or spill — the wave-9 AH letter's
+                            // high-selectivity Ir loss was exactly this
+                            // bit-walk at ~58/64-set words).
+                            // SAFETY: every kind-0 row of the batch parked
+                            // its `tps` pointer at classify off the
+                            // still-pinned page, selected or not — the same
+                            // bound as the unselected `sel == None` pass.
                             let hi = (base + 64).min(n);
                             for i in base..hi {
                                 if dense || *kinds.get_unchecked(i) == 0 {
