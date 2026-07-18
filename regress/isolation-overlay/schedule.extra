@@ -10,3 +10,9 @@ test: epq-storm-joinsource
 test: epq-interplay-rowmark
 test: epq-interplay-oc
 test: epq-interplay-merge
+# WS-Y wave-7 census-delta exercising specs (Y3 gate-delta shapes inside
+# rechecks: Material / ValuesScan / CteScan / FunctionScan join sources).
+test: epq-short-material
+test: epq-short-valuesscan
+test: epq-short-ctescan
+test: epq-short-functionscan
