@@ -829,6 +829,16 @@ strip = "symbols"
 lto = "thin"
 codegen-units = 1
 
+# Optimized wasm artifact for the web demo (wasm). NATIVE-INERT:
+# nothing native selects this profile; only wasm/wasm-build.sh's optional
+# PGRUST_WASM_PROFILE=wasm-release leg uses it. Size-first (opt-level=s,
+# symbols stripped, no LTO tail) so the module fits browser/iOS budgets.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "s"
+lto = false
+codegen-units = 16
+
 # The official benchmark artifact.
 [profile.dist]
 inherits = "release"

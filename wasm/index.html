@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pgrust — postgres, rewritten in rust</title>
+<meta name="description" content="pgrust is an experimental rewrite of PostgreSQL in Rust, compiled to WebAssembly and running in your browser. Run real SQL in an interactive session — no server.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='10' fill='%230e1117'/%3E%3Ctext x='32' y='46' text-anchor='middle' font-family='monospace' font-size='42' font-weight='bold' fill='%23e0794a'%3Ep%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; padding: 0; background: #0c0e12; height: 100%; }
+  * { box-sizing: border-box; }
+  ::selection { background: rgba(224,121,74,0.30); }
+  ::-webkit-scrollbar { width: 11px; height: 11px; }
+  ::-webkit-scrollbar-thumb { background: #262c36; border-radius: 6px; border: 2px solid #0c0e12; }
+  ::-webkit-scrollbar-thumb:hover { background: #323a47; }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  /* hover states ported from the design's style-hover attributes */
+  .gh-link:hover { border-color: var(--accent, #e0794a); color: #ffffff; }
+  .updates-link:hover { border-color: var(--accent, #e0794a); color: #ffffff; background: rgba(224,121,74,0.20); }
+  .term-btn:hover { border-color: var(--accent, #e0794a); color: #c6ccd6; }
+  .example-btn:hover { background: rgba(255,255,255,0.035); border-left-color: var(--accent, #e0794a); }
+  .more-link:hover { color: var(--accent, #e0794a); }
+  .mobile-sidebar-toggle,
+  .mobile-sidebar-head { display: none !important; }
+  #boot-screen {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 28px;
+    background: #0c0e12;
+    color: #c6ccd6;
+    font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  #boot-screen.boot-hidden {
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 180ms ease;
+  }
+  .boot-panel {
+    width: min(520px, 100%);
+    display: grid;
+    gap: 18px;
+  }
+  .boot-brand {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid #1c212b;
+  }
+  .boot-logo {
+    color: var(--accent, #e0794a);
+    font-size: 20px;
+    font-weight: 600;
+  }
+  .boot-subtitle {
+    color: #6f7785;
+    font-size: 12px;
+  }
+  .boot-loader {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    min-height: 48px;
+  }
+  .boot-spinner {
+    width: 34px;
+    height: 34px;
+    flex: none;
+    border-radius: 50%;
+    border: 2px solid #242b36;
+    border-top-color: var(--accent, #e0794a);
+    animation: boot-spin 0.8s linear infinite;
+  }
+  .boot-status-wrap {
+    min-width: 0;
+  }
+  #boot-status {
+    color: #d6dae1;
+    font-size: 13px;
+    line-height: 1.45;
+  }
+  .boot-hint {
+    margin-top: 4px;
+    color: #6f7785;
+    font-family: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
+    font-size: 12.5px;
+    line-height: 1.45;
+  }
+  .boot-link {
+    width: fit-content;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: #c6ccd6;
+    text-decoration: none;
+    padding: 8px 13px;
+    border: 1px solid #2a323d;
+    border-radius: 7px;
+    background: #161b22;
+    font-size: 12.5px;
+  }
+  .boot-link:hover {
+    border-color: var(--accent, #e0794a);
+    color: #fff;
+  }
+  .boot-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .updates-dialog {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    display: grid;
+    place-items: center;
+    padding: 20px;
+  }
+  .updates-dialog[hidden] { display: none; }
+  .updates-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(5, 7, 10, 0.78);
+    -webkit-backdrop-filter: blur(4px);
+    backdrop-filter: blur(4px);
+  }
+  .updates-panel {
+    position: relative;
+    width: min(460px, 100%);
+    padding: 24px;
+    color: #c6ccd6;
+    background: #10141b;
+    border: 1px solid #2a323d;
+    border-radius: 8px;
+    box-shadow: 0 24px 70px rgba(0,0,0,0.5);
+    font-family: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
+  }
+  .updates-close {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    color: #8b93a1;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    cursor: pointer;
+    font: 20px/1 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
+  }
+  .updates-close:hover { color: #fff; border-color: #2a323d; }
+  .updates-eyebrow {
+    color: var(--accent, #e0794a);
+    font-family: 'IBM Plex Mono', ui-monospace, monospace;
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0;
+    text-transform: uppercase;
+  }
+  .updates-title {
+    margin: 8px 40px 7px 0;
+    color: #f0f2f5;
+    font-family: 'IBM Plex Mono', ui-monospace, monospace;
+    font-size: 21px;
+    line-height: 1.3;
+  }
+  .updates-copy {
+    margin: 0 0 18px;
+    color: #939ba8;
+    font-size: 13.5px;
+    line-height: 1.55;
+  }
+  .updates-form-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+  }
+  .updates-email {
+    min-width: 0;
+    height: 40px;
+    padding: 0 12px;
+    color: #e6e9ee;
+    background: #0b0f14;
+    border: 1px solid #323a47;
+    border-radius: 6px;
+    outline: none;
+    font: 13px 'IBM Plex Mono', ui-monospace, monospace;
+  }
+  .updates-email:focus { border-color: var(--accent, #e0794a); box-shadow: 0 0 0 2px rgba(224,121,74,0.14); }
+  .updates-submit {
+    height: 40px;
+    padding: 0 15px;
+    color: #fff1eb;
+    background: #a84f2a;
+    border: 1px solid #c36338;
+    border-radius: 6px;
+    cursor: pointer;
+    font: 600 12.5px 'IBM Plex Mono', ui-monospace, monospace;
+    white-space: nowrap;
+  }
+  .updates-submit:hover { background: #bc5b32; }
+  .updates-submit:disabled { cursor: wait; opacity: 0.7; }
+  .updates-note,
+  .updates-status {
+    margin: 10px 0 0;
+    color: #7e8794;
+    font-size: 11.5px;
+    line-height: 1.5;
+  }
+  .updates-status { min-height: 18px; color: #9fb89a; }
+  .updates-status[data-state="error"] { color: #e58073; }
+  .updates-form[data-complete="true"] .updates-form-row,
+  .updates-form[data-complete="true"] .updates-note { display: none; }
+  @keyframes boot-spin {
+    to { transform: rotate(360deg); }
+  }
+  #app.app-loading {
+    visibility: hidden;
+  }
+  .query-runner {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 32px;
+    padding: 6px 11px;
+    overflow: hidden;
+    color: #ffd8c8;
+    background: rgba(224,121,74,0.16);
+    border: 1px solid rgba(224,121,74,0.46);
+    border-radius: 6px;
+    box-shadow: 0 0 0 1px rgba(224,121,74,0.08), 0 8px 24px rgba(224,121,74,0.08);
+    font-weight: 600;
+    white-space: pre;
+  }
+  .query-runner::after {
+    content: "";
+    position: absolute;
+    left: -45%;
+    right: auto;
+    bottom: 0;
+    width: 45%;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--accent, #e0794a), transparent);
+    animation: query-runner-sweep 1.1s ease-in-out infinite;
+  }
+  .query-runner-dot {
+    width: 8px;
+    height: 8px;
+    flex: none;
+    border-radius: 50%;
+    background: var(--accent, #e0794a);
+    box-shadow: 0 0 12px rgba(224,121,74,0.7);
+    animation: query-runner-pulse 1.1s ease-in-out infinite;
+  }
+  @keyframes query-runner-sweep {
+    0% { transform: translateX(0); opacity: 0.3; }
+    50% { opacity: 1; }
+    100% { transform: translateX(320%); opacity: 0.3; }
+  }
+  @keyframes query-runner-pulse {
+    0%, 100% { transform: scale(0.82); opacity: 0.62; }
+    50% { transform: scale(1); opacity: 1; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .boot-spinner,
+    .query-runner::after,
+    .query-runner-dot { animation: none; }
+  }
+
+  @media (max-width: 720px) {
+    html, body { height: 100dvh; overflow: hidden; }
+    #app { height: 100dvh !important; font-size: 12.5px !important; }
+    .topbar { height: 48px !important; padding: 0 12px !important; gap: 10px !important; }
+    .brand-wrap { gap: 8px !important; min-width: 0; }
+    .brand-tagline,
+    .status-pill,
+    .version-badge,
+    .gh-link { display: none !important; }
+    .topbar-actions { gap: 8px !important; }
+    .updates-link { padding: 6px 10px !important; font-size: 11.5px !important; white-space: nowrap; }
+    .updates-dialog { align-items: end; padding: 12px 12px max(12px, env(safe-area-inset-bottom)); }
+    .updates-panel { padding: 22px 18px; }
+    .updates-form-row { grid-template-columns: 1fr; }
+    .updates-submit { width: 100%; }
+    #boot-screen { align-items: flex-start; padding: 44px 20px; }
+    .boot-brand { display: block; }
+    .boot-subtitle { margin-top: 6px; }
+    .boot-loader { align-items: flex-start; }
+    .app-layout { position: relative; width: 100%; overflow: hidden; }
+    .main-pane { flex: 1 1 auto !important; width: 100% !important; min-width: 0 !important; }
+    .session-bar { height: 42px !important; padding: 0 10px !important; gap: 8px !important; }
+    .session-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .term-actions { flex: none; gap: 6px !important; }
+    .term-btn { padding: 4px 8px !important; font-size: 10.5px !important; }
+    .mobile-sidebar-toggle {
+      display: inline-flex !important;
+      align-items: center;
+      min-height: 30px;
+      padding: 5px 11px !important;
+      border-color: rgba(224,121,74,0.8) !important;
+      background: rgba(224,121,74,0.18) !important;
+      color: #ffd8c8 !important;
+      font-size: 11.5px !important;
+      font-weight: 600 !important;
+      box-shadow: 0 0 0 1px rgba(224,121,74,0.08), 0 0 18px rgba(224,121,74,0.12);
+      white-space: nowrap;
+    }
+    .query-runner {
+      min-height: 34px;
+      padding: 7px 12px;
+      font-size: 12px;
+    }
+    #scroll { padding: 12px 12px 76px !important; }
+    .side-panel {
+      display: none !important;
+      position: absolute;
+      inset: 0;
+      z-index: 20;
+      width: 100% !important;
+      border-left: none !important;
+      border-top: 1px solid #1c212b;
+      box-shadow: none;
+    }
+    #app.sidebar-open .side-panel { display: flex !important; }
+    #app.sidebar-open .main-pane { visibility: hidden; }
+    .mobile-sidebar-head {
+      display: flex !important;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      height: 42px;
+      padding: 0 12px;
+      border-bottom: 1px solid #1c212b;
+      color: #8b93a1;
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+  }
+</style>
+</head>
+<body>
+<div id="boot-screen" style="--accent: #e0794a;" role="status" aria-live="polite">
+  <div class="boot-panel">
+    <div class="boot-brand">
+      <div class="boot-logo">pgrust</div>
+      <div class="boot-subtitle">postgres, rewritten in rust</div>
+    </div>
+    <div class="boot-loader">
+      <div class="boot-spinner" aria-hidden="true"></div>
+      <div class="boot-status-wrap">
+        <div id="boot-status">Starting wasm engine...</div>
+        <div id="boot-hint" class="boot-hint">First load compiles PostgreSQL in your browser. Queries are warmed before the session opens.</div>
+      </div>
+    </div>
+    <div class="boot-actions">
+      <button class="boot-link" type="button" data-update-link="boot" style="cursor: pointer; font: inherit;">Get pgrust updates</button>
+      <a class="boot-link" href="https://github.com/malisper/pgrust" target="_blank" rel="noopener">Open GitHub ↗</a>
+    </div>
+  </div>
+</div>
+<div id="app" class="app-loading" style="--accent: #e0794a; height: 100vh; width: 100%; display: flex; flex-direction: column; background: #0c0e12; color: #c6ccd6; font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; overflow: hidden;">
+
+  <header class="topbar" style="display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 0 22px; height: 54px; flex: none; background: #0e1117; border-bottom: 1px solid #1c212b;">
+    <div class="brand-wrap" style="display: flex; align-items: baseline; gap: 13px;">
+      <span style="font-weight: 600; font-size: 15.5px; letter-spacing: 0.02em; color: var(--accent, #e0794a);">pgrust</span>
+      <span class="brand-tagline" style="font-size: 12.5px; color: #6f7785; letter-spacing: 0.01em;">postgres, rewritten in rust</span>
+    </div>
+    <div class="topbar-actions" style="display: flex; align-items: center; gap: 14px;">
+      <span class="status-pill" style="display: inline-flex; align-items: center; gap: 7px; font-size: 11.5px; color: #8b93a1; padding: 5px 11px; border: 1px solid #232a35; border-radius: 6px;">
+        <span style="width: 7px; height: 7px; border-radius: 50%; background: #6cc06c; box-shadow: 0 0 6px rgba(108,192,108,0.7);"></span>
+        PostgreSQL regression suite&nbsp;·&nbsp;byte-identical&nbsp;vs&nbsp;C&nbsp;18.3
+      </span>
+      <span id="version-badge" class="version-badge" style="font-size: 11.5px; color: #555c69;">wasm32-wasip1</span>
+      <button class="updates-link" type="button" data-update-link="header" style="display: inline-flex; align-items: center; font: inherit; font-size: 12.5px; font-weight: 600; color: #ffd8c8; padding: 7px 13px; border: 1px solid rgba(224,121,74,0.55); border-radius: 7px; background: rgba(224,121,74,0.13); cursor: pointer;">Get updates</button>
+      <a class="gh-link" href="https://github.com/malisper/pgrust" target="_blank" rel="noopener" style="display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: #c6ccd6; text-decoration: none; padding: 7px 14px; border: 1px solid #2a323d; border-radius: 7px; background: #161b22;">GitHub ↗</a>
+    </div>
+  </header>
+
+  <div class="app-layout" style="flex: 1; min-height: 0; display: flex;">
+
+    <main class="main-pane" style="flex: 1; min-width: 0; display: flex; flex-direction: column;">
+      <div class="session-bar" style="display: flex; align-items: center; justify-content: space-between; height: 38px; flex: none; padding: 0 16px; border-bottom: 1px solid #161b22; color: #555c69; font-size: 11.5px; letter-spacing: 0.02em;">
+        <span class="session-title">pgrust · interactive session</span>
+        <div class="term-actions" style="display: flex; gap: 8px;">
+          <button id="btn-sidebar-toggle" class="term-btn mobile-sidebar-toggle" type="button" aria-label="Open example queries" style="background: transparent; border: 1px solid #232a35; color: #8b93a1; border-radius: 5px; padding: 3px 11px; cursor: pointer; font: inherit; font-size: 11px;">Try example</button>
+          <button id="btn-clear" class="term-btn" style="background: transparent; border: 1px solid #232a35; color: #8b93a1; border-radius: 5px; padding: 3px 11px; cursor: pointer; font: inherit; font-size: 11px;">clear ^L</button>
+          <button id="btn-reset" class="term-btn" style="background: transparent; border: 1px solid #232a35; color: #8b93a1; border-radius: 5px; padding: 3px 11px; cursor: pointer; font: inherit; font-size: 11px;">reset</button>
+        </div>
+      </div>
+
+      <div id="scroll" style="flex: 1; min-height: 0; overflow: auto; padding: 16px 18px 90px; line-height: 1.5; cursor: text;">
+        <div id="lines"></div>
+        <div style="display: flex; align-items: flex-start;">
+          <span id="prompt" style="color: var(--accent, #e0794a); white-space: pre; flex: none;">pgrust=# </span>
+          <input id="input" value="" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" style="flex: 1; min-width: 0; background: transparent; border: none; outline: none; color: #e6e9ee; font: inherit; padding: 0; margin: 0; caret-color: var(--accent, #e0794a);" />
+        </div>
+      </div>
+    </main>
+
+    <aside class="side-panel" style="width: 366px; flex: none; border-left: 1px solid #1c212b; background: #0e1117; overflow: auto; display: flex; flex-direction: column;">
+      <div class="mobile-sidebar-head">
+        <span>Examples</span>
+        <button id="btn-sidebar-close" class="term-btn" type="button" style="background: transparent; border: 1px solid #232a35; color: #8b93a1; border-radius: 5px; padding: 4px 10px; cursor: pointer; font: inherit; font-size: 10.5px; text-transform: none; letter-spacing: 0;">repl</button>
+      </div>
+
+      <div style="padding: 16px 0 6px;">
+        <div style="font-size: 10.5px; letter-spacing: 0.16em; text-transform: uppercase; color: #5a626f; padding: 0 16px 2px;">Examples</div>
+        <div style="font-size: 11.5px; color: #6f7785; padding: 0 16px 4px; font-family: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;">Click to run it in the session.</div>
+        <div id="build-note" style="display: none; margin: 8px 16px 4px; padding: 8px 10px; border: 1px solid #2a323d; border-radius: 6px; background: #10151c; color: #8b93a1; font-family: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif; font-size: 12px; line-height: 1.45;"></div>
+        <div id="examples"></div>
+      </div>
+
+      <div style="border-top: 1px solid #1c212b; padding: 16px 16px 8px; font-family: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;">
+        <div style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; letter-spacing: 0.16em; text-transform: uppercase; color: #5a626f;">About</div>
+        <p style="font-size: 12.5px; line-height: 1.62; color: #9aa2ae; margin: 11px 0;">pgrust is an experimental rewrite of PostgreSQL in Rust — not a toy clone, but an attempt to track Postgres behavior closely enough to become a base for deeper experiments.</p>
+        <p style="font-size: 12.5px; line-height: 1.62; color: #9aa2ae; margin: 11px 0;">It already passes all of PostgreSQL's default regression suite. The current focus is stability, bug-bashing, and closing the performance gap.</p>
+        <button class="updates-link" type="button" data-update-link="sidebar" style="display: inline-flex; align-items: center; margin: 3px 0 12px; color: #ffd8c8; padding: 7px 11px; border: 1px solid rgba(224,121,74,0.55); border-radius: 6px; background: rgba(224,121,74,0.13); font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11.5px; font-weight: 600; cursor: pointer;">Get pgrust updates</button>
+        <div style="display: inline-flex; align-items: center; gap: 8px; margin: 4px 0 12px; padding: 5px 11px; border: 1px solid #233140; border-radius: 6px; background: #0b0f14; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: #9fb89a;">
+          <span style="width: 6px; height: 6px; border-radius: 50%; background: #6cc06c;"></span>
+          PostgreSQL regression suite: byte-identical output vs C 18.3
+        </div>
+
+        <div style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; letter-spacing: 0.16em; text-transform: uppercase; color: #5a626f; margin-top: 8px;">Roadmap</div>
+        <div style="font-family: 'IBM Plex Mono', ui-monospace, monospace; margin-top: 8px;">
+          <div style="font-size: 12px; color: #7e8794; padding: 2px 0;"><span style="color: var(--accent, #e0794a);">›</span>&nbsp; multithreaded server internals</div>
+          <div style="font-size: 12px; color: #7e8794; padding: 2px 0;"><span style="color: var(--accent, #e0794a);">›</span>&nbsp; built-in connection pooling</div>
+          <div style="font-size: 12px; color: #7e8794; padding: 2px 0;"><span style="color: var(--accent, #e0794a);">›</span>&nbsp; better statistics for JSON workloads</div>
+          <div style="font-size: 12px; color: #7e8794; padding: 2px 0;"><span style="color: var(--accent, #e0794a);">›</span>&nbsp; fast forking &amp; branching</div>
+          <div style="font-size: 12px; color: #7e8794; padding: 2px 0;"><span style="color: var(--accent, #e0794a);">›</span>&nbsp; vacuum / storage experiments</div>
+        </div>
+
+        <p style="font-size: 12px; line-height: 1.5; color: #6f7785; margin: 14px 0 4px;">By Michael Malis &amp; Jason Seibel · Licensed AGPL-3.0</p>
+      </div>
+
+      <div style="border-top: 1px solid #1c212b; padding: 14px 16px 22px; margin-top: auto;">
+        <div style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; letter-spacing: 0.16em; text-transform: uppercase; color: #5a626f; padding-bottom: 8px;">More</div>
+        <a class="more-link" href="https://github.com/malisper/pgrust" target="_blank" rel="noopener" style="display: block; font-size: 12.5px; color: #aeb6c2; text-decoration: none; padding: 4px 0;">github.com/malisper/pgrust ↗</a>
+        <a class="more-link" href="https://malisper.me/pgrust-rebuilding-postgres-in-rust-with-ai/" target="_blank" rel="noopener" style="display: block; font-size: 12.5px; color: #aeb6c2; text-decoration: none; padding: 4px 0;">Launch: rebuilding Postgres in Rust ↗</a>
+        <a class="more-link" href="https://malisper.me/pgrust-update-at-67-postgres-compatibility-and-accelerating/" target="_blank" rel="noopener" style="display: block; font-size: 12.5px; color: #aeb6c2; text-decoration: none; padding: 4px 0;">Update: 67% compatibility &amp; accelerating ↗</a>
+      </div>
+
+    </aside>
+  </div>
+</div>
+
+<div id="updates-dialog" class="updates-dialog" style="--accent: #e0794a;" hidden>
+  <div class="updates-backdrop" data-updates-close></div>
+  <section class="updates-panel" role="dialog" aria-modal="true" aria-labelledby="updates-title">
+    <button class="updates-close" type="button" aria-label="Close updates signup" data-updates-close>&times;</button>
+    <div class="updates-eyebrow">pgrust updates</div>
+    <h2 id="updates-title" class="updates-title">Follow the rewrite</h2>
+    <p class="updates-copy">Get release notes, compatibility milestones, and architecture experiments from pgrust.</p>
+    <form id="updates-form" class="updates-form" action="https://app.loops.so/api/newsletter-form/cmre2lpv203td0jyd7o4wk2bq" method="post">
+      <div class="updates-form-row">
+        <label style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0);" for="updates-email">Email address</label>
+        <input id="updates-email" class="updates-email" type="email" name="email" placeholder="you@example.com" autocomplete="email" required>
+        <button id="updates-submit" class="updates-submit" type="submit">Get updates</button>
+      </div>
+      <p class="updates-note">Confirm by email. Unsubscribe anytime.</p>
+      <p id="updates-status" class="updates-status" role="status" aria-live="polite"></p>
+    </form>
+  </section>
+</div>
+
+<script>
+  (() => {
+    const app = document.getElementById('app');
+    const toggle = document.getElementById('btn-sidebar-toggle');
+    const close = document.getElementById('btn-sidebar-close');
+    const setSidebar = (open) => {
+      app.classList.toggle('sidebar-open', open);
+      toggle.setAttribute('aria-expanded', String(open));
+    };
+    toggle.addEventListener('click', () => setSidebar(!app.classList.contains('sidebar-open')));
+    close.addEventListener('click', () => setSidebar(false));
+    document.getElementById('examples').addEventListener('click', (event) => {
+      if (event.target.closest('.example-btn') && window.matchMedia('(max-width: 720px)').matches) {
+        setSidebar(false);
+      }
+    });
+    setSidebar(false);
+  })();
+</script>
+<!-- Analytics (PostHog) — same setup as the original pgrust.com wasm demo. -->
+<script>
+  window.__PGRUST_ANALYTICS__ = {
+    posthogKey: "phc_pShx8jpdxg92kob8f5UncCwLiBNE4BXVdBhLqGhtxebj",
+    posthogHost: "https://us.i.posthog.com",
+  };
+</script>
+<script>
+  !(function (t, e) {
+    var o, n, p, r;
+    if (!e.__SV) {
+      window.posthog = e;
+      e._i = [];
+      e.init = function (i, s, a) {
+        function g(t, e) {
+          var o = e.split(".");
+          if (o.length === 2) {
+            t = t[o[0]];
+            e = o[1];
+          }
+          t[e] = function () {
+            t.push([e].concat(Array.prototype.slice.call(arguments, 0)));
+          };
+        }
+        p = t.createElement("script");
+        p.type = "text/javascript";
+        p.async = true;
+        p.src =
+          s.api_host.replace(".i.posthog.com", "-assets.i.posthog.com") +
+          "/static/array.js";
+        r = t.getElementsByTagName("script")[0];
+        r.parentNode.insertBefore(p, r);
+        var u = e;
+        if (a !== undefined) {
+          u = e[a] = [];
+        } else {
+          a = "posthog";
+        }
+        u.people = u.people || [];
+        u.toString = function (t) {
+          var e = "posthog";
+          if (a !== "posthog") {
+            e += "." + a;
+          }
+          if (!t) {
+            e += " (stub)";
+          }
+          return e;
+        };
+        u.people.toString = function () {
+          return u.toString(1) + ".people (stub)";
+        };
+        o =
+          "capture identify alias people.set people.set_once reset group set_config set_person_properties set_person_properties_for_flags"
+            .split(" ");
+        for (n = 0; n < o.length; n++) {
+          g(u, o[n]);
+        }
+        e._i.push([i, s, a]);
+      };
+      e.__SV = 1;
+    }
+  })(document, window.posthog || []);
+
+  const analyticsConfig = window.__PGRUST_ANALYTICS__;
+  if (analyticsConfig?.posthogKey) {
+    window.posthog.init(analyticsConfig.posthogKey, {
+      api_host: analyticsConfig.posthogHost,
+      person_profiles: "identified_only",
+    });
+  }
+</script>
+<script type="module" src="./repl.js"></script>
+</body>
+</html>

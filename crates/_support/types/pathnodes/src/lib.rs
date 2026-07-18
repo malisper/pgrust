@@ -353,9 +353,13 @@ pub type PartitionScheme<'mcx> = Option<PgBox<'mcx, PartitionSchemeData<'mcx>>>;
 
 /// Raw datum image for `datumIsEqual`-only comparisons (partition bounds are
 /// never compared through an operator at this layer).
+///
+/// ByVal carries the full 8-byte Datum word (SIZEOF_DATUM is pinned to 8 on
+/// every target): a usize image on wasm32 truncated int8-class partition
+/// bounds, so pruning/partitionwise comparisons ran on the low half only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DatumImage<'mcx> {
-    ByVal(usize),
+    ByVal(u64),
     Bytes(PgVec<'mcx, u8>),
 }
 

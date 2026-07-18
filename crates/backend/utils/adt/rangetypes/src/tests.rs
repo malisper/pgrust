@@ -34,6 +34,55 @@ fn inf_bound(lower: bool) -> RangeBound {
     RangeBound { val: Datum::from_usize(0), infinite: true, inclusive: false, lower }
 }
 
+fn fc_i64_cmp(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let (a, b) = (fcinfo.arg(0).as_i64(), fcinfo.arg(1).as_i64());
+    Ok(Datum::from_i32(a.cmp(&b) as i32))
+}
+
+const INT8RANGE: Oid = 3926;
+
+fn int8_ri() -> RangeInfo {
+    RangeInfo {
+        pin: None,
+        rngtypid: INT8RANGE,
+        collation: InvalidOid,
+        elem_typid: 20,
+        elem: ElemInfo { typlen: 8, typbyval: true, typalign: b'd', typstorage: b'p' },
+        cmp: FmgrInfo::new(fc_i64_cmp, 351, 2, true, false),
+        canonical_oid: InvalidOid,
+        elem_hash: None,
+        elem_hash_extended: None,
+        own_typlen: -1,
+        own_typbyval: false,
+        own_typalign: b'd',
+    }
+}
+
+// WASM-SUBPLANFIX regression: datum_write's byval arm copies `typlen` bytes
+// from the FULL 8-byte Datum word (C store_att_byval; SIZEOF_DATUM pinned to
+// 8 on every target). A usize image on wasm32 holds only 4 bytes, so 8-byte
+// byval range subtypes panicked at `bytes[..8]` and high-word bound values
+// could never serialize.
+#[test]
+fn int8_bounds_serialize_full_datum_word() {
+    let cx = MemoryContext::new("t");
+    let mcx = cx.mcx();
+    let mut ri = int8_ri();
+    let lo_v: i64 = 0x1_0000_0001; // > 2^32: the high word is load-bearing
+    let up_v: i64 = 0x2_0000_0007;
+    let mut lo = RangeBound { val: Datum::from_i64(lo_v), infinite: false, inclusive: true, lower: true };
+    let mut up = RangeBound { val: Datum::from_i64(up_v), infinite: false, inclusive: false, lower: false };
+    let img = range_serialize(mcx, &mut ri, &mut lo, &mut up, false, None).unwrap().unwrap();
+    // vl(4) + oid(4) + 8 + 8 + flags(1) = 25
+    assert_eq!(img.len(), 25);
+    assert_eq!(i64::from_ne_bytes(img[8..16].try_into().unwrap()), lo_v);
+    assert_eq!(i64::from_ne_bytes(img[16..24].try_into().unwrap()), up_v);
+    let (lo2, up2, empty) = range_deserialize(&ri.elem, &img);
+    assert!(!empty);
+    assert_eq!(lo2.val.as_i64(), lo_v);
+    assert_eq!(up2.val.as_i64(), up_v);
+}
+
 #[test]
 fn serialize_layout_is_byte_exact() {
     let cx = MemoryContext::new("t");

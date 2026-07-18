@@ -12,7 +12,7 @@ fn static_mcx() -> Mcx<'static> {
 }
 
 fn img(v: i64) -> DatumImage<'static> {
-    DatumImage::ByVal(v as usize)
+    DatumImage::ByVal(v as u64)
 }
 
 fn img_val(d: &DatumImage<'static>) -> i64 {

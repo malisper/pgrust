@@ -1372,7 +1372,7 @@ fn compute_partition_bounds<'mcx>(
                 collations.push(scheme.partcollation[i]);
             }
             let image_datum = |img: &types_pathnodes::DatumImage<'_>| match img {
-                types_pathnodes::DatumImage::ByVal(w) => datum::Datum::from_usize(*w),
+                types_pathnodes::DatumImage::ByVal(w) => datum::Datum::from_u64(*w),
                 types_pathnodes::DatumImage::Bytes(b) => {
                     datum::Datum::from_usize(b.as_ptr() as usize)
                 }

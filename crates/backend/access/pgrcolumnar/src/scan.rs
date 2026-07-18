@@ -2623,7 +2623,8 @@ fn analyze_extract_task(
                 out.bytes.extend_from_slice(unsafe { core::slice::from_raw_parts(p, len) });
                 out.words.push(off);
             } else {
-                out.words.push(d.as_usize() as u64);
+                // Full Datum word; as_usize() truncates byval 8-byte values on wasm32.
+                out.words.push(d.as_u64());
             }
         }
     }
@@ -2919,7 +2920,8 @@ mod analyze_gather_tests {
                     let len = unsafe { ::types_tuple::varatt::varsize_any(p) };
                     vals.push(unsafe { core::slice::from_raw_parts(p, len) }.to_vec());
                 } else {
-                    vals.push(d.as_usize().to_le_bytes().to_vec());
+                    // Full 8-byte Datum word (as_usize() is 4 bytes on wasm32).
+                    vals.push(d.as_u64().to_le_bytes().to_vec());
                 }
             }
             out.push(vals);
