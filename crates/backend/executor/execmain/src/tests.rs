@@ -9895,15 +9895,27 @@ mod epq_seams_w5 {
         scanfix::quiesced();
     }
 
-    /// `check_epq_plan` is the FUTURE LOUD ADMISSION LIST (contract §6.2c):
-    /// listed shapes pass silently; an unexercised shape panics LOUDLY. It
-    /// admits nothing new this wave — Agg stays outside the list.
+    /// `check_epq_plan` is THE LOUD ADMISSION LIST (wave-5 contract §6.2c;
+    /// wave-7 rung Y2): listed shapes pass silently; an unexercised shape
+    /// panics LOUDLY. It admits nothing new at wave-7 — Agg stays outside
+    /// the list. Wave-7 extension: the positive arm carries a REAL
+    /// scanrelid (1) because scanrelid == 0 pushed-down-join scans now
+    /// refuse loudly on their own arm (see
+    /// `epq_w7_scanrelid_zero_refused_loudly`).
     #[test]
     #[should_panic(expected = "recheck plan")]
     fn epq_w5_check_epq_plan_is_the_loud_admission_list() {
+        use ::types_nodes::plannodes::{Plan, Scan, SeqScan};
         let mcx = leaked_mcx();
         // Positive arm first: a whitelist shape passes without panic.
-        let seq = Node::build::<::types_nodes::plannodes::SeqScan>(mcx).unwrap().seal();
+        let seq = Node::mk(
+            mcx,
+            SeqScan {
+                cb_scan_cols: None,
+                scan: Scan { plan: Plan::default(), scanrelid: 1 },
+            },
+        )
+        .unwrap();
         crate::epq::check_epq_plan(seq);
         // Negative arm: Agg is not exercised for EPQ rescan — LOUD refuse.
         let agg = Node::build::<::types_nodes::plannodes::Agg>(mcx).unwrap().seal();
@@ -11234,5 +11246,58 @@ mod epq_capture_w7 {
         scanfix::quiesced();
     }
 
+    /// Y2: `scanrelid == 0` pushed-down-join scans refuse LOUDLY until a
+    /// spec exercises them (lane-epq.md §2's recorded FDW gap, now pinned
+    /// for every ADMITTED scan tag as well).
+    #[test]
+    #[should_panic(expected = "scanrelid == 0")]
+    fn epq_w7_scanrelid_zero_refused_loudly() {
+        use ::types_nodes::plannodes::{Plan, Scan, SeqScan};
+        let mcx = leaked_mcx();
+        let seq = Node::mk(
+            mcx,
+            SeqScan { cb_scan_cols: None, scan: Scan { plan: Plan::default(), scanrelid: 0 } },
+        )
+        .unwrap();
+        crate::epq::check_epq_plan(seq);
+    }
+
+    /// Y2: the loud list recurses into SubqueryScan.subplan — an admitted
+    /// SubqueryScan can no longer silently admit an unexercised shape
+    /// underneath (honesty gap closed; positive arm proves the admitted
+    /// composition still passes).
+    #[test]
+    #[should_panic(expected = "recheck plan")]
+    fn epq_w7_subqueryscan_subplan_recursed_loudly() {
+        use ::types_nodes::plannodes::{Plan, Scan, SeqScan, SubqueryScan};
+        let mcx = leaked_mcx();
+        let seq = Node::mk(
+            mcx,
+            SeqScan { cb_scan_cols: None, scan: Scan { plan: Plan::default(), scanrelid: 1 } },
+        )
+        .unwrap();
+        let ok = Node::mk(
+            mcx,
+            SubqueryScan {
+                scan: Scan { plan: Plan::default(), scanrelid: 1 },
+                subplan: Some(seq),
+                scanstatus: 0,
+            },
+        )
+        .unwrap();
+        crate::epq::check_epq_plan(ok);
+        // Negative arm: an Agg UNDER an admitted SubqueryScan now refuses.
+        let agg = Node::build::<::types_nodes::plannodes::Agg>(mcx).unwrap().seal();
+        let bad = Node::mk(
+            mcx,
+            SubqueryScan {
+                scan: Scan { plan: Plan::default(), scanrelid: 1 },
+                subplan: Some(agg),
+                scanstatus: 0,
+            },
+        )
+        .unwrap();
+        crate::epq::check_epq_plan(bad);
+    }
 }
 // --- end WS-Y wave-7 ------------------------------------------------------------
