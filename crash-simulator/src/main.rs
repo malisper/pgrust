@@ -94,6 +94,19 @@ enum Cmd {
         /// Distillation target (band 95001+). Off unless given.
         #[arg(long)]
         repros: Option<PathBuf>,
+        /// H6 QPG-lite species-guided scheduling. OFF by default and off for
+        /// every estimation arm: guided campaigns bias Good-Turing U (FSE'21
+        /// adaptive-bias result), so U is suppressed whenever this is on.
+        /// Flag off = seed sequence byte-identical to the H5 loop.
+        #[arg(long, default_value_t = false)]
+        species_sched: bool,
+        /// Guided mode: neighbor seeds a productive seed earns.
+        #[arg(long, default_value_t = 4)]
+        sched_neighbors: u32,
+        /// Guided mode: consecutive unproductive seeds before the neighbor
+        /// queue decays back to pure sequential scheduling.
+        #[arg(long, default_value_t = 8)]
+        sched_decay: u32,
         #[command(flatten)]
         engine: EngineArgs,
     },
@@ -175,10 +188,27 @@ fn real_main() -> Result<i32, String> {
             println!("profile '{}' OK sha256={}", lp.profile.name, lp.sha256);
             Ok(0)
         }
-        Cmd::Run { profile, seed_base, seeds, bugbase, out, replay_times, repros, engine } => {
+        Cmd::Run {
+            profile,
+            seed_base,
+            seeds,
+            bugbase,
+            out,
+            replay_times,
+            repros,
+            species_sched,
+            sched_neighbors,
+            sched_decay,
+            engine,
+        } => {
             let lp = load_profile(&profile)?;
             let cfg = engine.config();
             let cli_words: Vec<String> = std::env::args().collect();
+            let sched_cfg = runner::schedule::ScheduleConfig {
+                enabled: species_sched,
+                neighbors: sched_neighbors,
+                decay: sched_decay,
+            };
             let outcome = runloop::run_campaign(
                 &lp,
                 &cfg,
@@ -189,6 +219,7 @@ fn real_main() -> Result<i32, String> {
                 &cli_words,
                 replay_times,
                 repros.as_deref(),
+                &sched_cfg,
             )?;
             emit_verdict(&outcome.census);
             Ok(if outcome.census.p1_classes().is_empty() { 0 } else { 1 })
