@@ -20,9 +20,9 @@ types_tuple = { path = "../../_support/types/types_tuple" }
 dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
 relation = { path = "../../backend/access/common/relation" }
 bufmgr = { path = "../../backend/storage/buffer/bufmgr" }
-bufmgr_seams = { path = "../../backend/storage/buffer/bufmgr_seams" }
 xloginsert = { path = "../../backend/access/transam/xloginsert" }
 transam_xlog = { path = "../../backend/access/transam/transam_xlog" }
+transam_xlog_seams = { path = "../../backend/access/transam/transam_xlog_seams" }
 visibilitymap = { path = "../../backend/access/heap/visibilitymap" }
 arrayfuncs = { path = "../../backend/utils/adt/arrayfuncs" }
 arrayutils = { path = "../../backend/utils/adt/arrayutils" }
@@ -32,3 +32,6 @@ miscinit = { path = "../../backend/utils/init/miscinit" }
 init_small = { path = "../../backend/utils/init/init_small" }
 elog_seams = { path = "../../backend/utils/error/elog_seams" }
 tableam_vocab = { path = "../../backend/access/table/tableam_vocab" }
+postgres_seams = { path = "../../backend/tcop/postgres_seams" }
+types_nodes = { path = "../../_support/types/nodes" }
+pg_class = { path = "../../backend/catalog/pg_class" }
