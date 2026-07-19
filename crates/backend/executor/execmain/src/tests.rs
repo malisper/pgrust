@@ -7900,110 +7900,12 @@ mod dml_ab {
     }
 
     // --- WS-AA wave-7 sub-region (fusion inc-1a): rowchain admission A/B ---
-    // Fake-oid band 85001+ (wave-7 contract law 3). The trigger-BEARING
-    // end-to-end leg cannot run in this harness: `init_result_rel` sources
-    // trigdesc through the GLOBAL relcache (`RelationGetTriggerDesc` ->
-    // `RelationIdGetRelation`), which the scanfix fixture does not seed —
-    // so trigger-firing identity rides the dualexec corpus
-    // (scripts/dualexec/corpus-dml-rowchain.sql, acceptance leg 2) and the
-    // unit layer pins (a) the pure trigger-arm truth table, (b) the
-    // nested-knob inertness, (c) the chain-dispatch guard keeping
-    // non-trigger statements off the chain.
-
-    /// (a) The pure trigger-arm verdict truth table
-    /// (`nodemodifytable::mt_rowchain_trigger_admission`): admitted iff
-    /// knob && INSERT && ONCONFLICT_NONE — UD/OC/MERGE shapes keep the
-    /// "triggers" refusal even knob-ON.
-    #[test]
-    fn rowchain_trigger_admission_truth_table() {
-        use ::types_nodes::primnodes::OnConflictAction;
-        use ::types_nodes::CmdType;
-        let admit = ::nodemodifytable::mt_rowchain_trigger_admission;
-        let none = OnConflictAction::ONCONFLICT_NONE as u32;
-        let nothing = OnConflictAction::ONCONFLICT_NOTHING as u32;
-        let update = OnConflictAction::ONCONFLICT_UPDATE as u32;
-        // The ONE chartered shape.
-        assert!(admit(true, CmdType::CMD_INSERT, none));
-        // Knob OFF: byte-identical refusal.
-        assert!(!admit(false, CmdType::CMD_INSERT, none));
-        // ON CONFLICT shapes never admit triggers (S10 interplay unchartered).
-        assert!(!admit(true, CmdType::CMD_INSERT, nothing));
-        assert!(!admit(true, CmdType::CMD_INSERT, update));
-        // Non-INSERT operations never admit triggers.
-        assert!(!admit(true, CmdType::CMD_UPDATE, none));
-        assert!(!admit(true, CmdType::CMD_DELETE, none));
-        assert!(!admit(true, CmdType::CMD_MERGE, none));
-    }
-
-    /// (b) The rowchain knob alone flips NOTHING (nested-knob law): host
-    /// knob OFF + rowchain ON = zero ticks, Volcano statements.
-    #[test]
-    fn dml_ab_rowchain_knob_alone_is_inert() {
-        install_seams();
-        scanfix::install();
-        install_replica_identity_seam();
-        let target: u32 = 85001; // WS-AA band
-        let source: u32 = 85002;
-        scanfix::register_table_2col(target, &[]);
-        scanfix::register_table_2col(source, &[]);
-        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let guard = KNOB.lock().unwrap_or_else(|p| p.into_inner());
-
-        crate::lanev2::dml_set_for_tests(false);
-        crate::lanev2::dml_rowchain_set_for_tests(true);
-        let (owned0, refused0) = probes();
-        let n = run_insert(mk_insert_select_pstmt(leaked_mcx(), target, source, false));
-        let (owned1, refused1) = probes();
-        crate::lanev2::dml_rowchain_set_for_tests(false);
-        assert_eq!(n, 0);
-        assert_eq!(owned1, owned0, "_ROWCHAIN alone must not own");
-        assert_eq!(refused1, refused0, "_ROWCHAIN alone must tick NOTHING");
-
-        drop(guard);
-        scanfix::quiesced();
-    }
-
-    /// (c) The chain-dispatch guard: a TRIGGER-LESS admitted INSERT under
-    /// rowchain ON stays on the DmlInsertOp host (the chain is strictly the
-    /// trigger family) — owned ticks, zero chain drives, es_processed
-    /// identical to the rowchain-OFF arm, and no refusal delta.
-    #[test]
-    fn dml_ab_rowchain_non_trigger_shape_stays_off_the_chain() {
-        install_seams();
-        scanfix::install();
-        install_replica_identity_seam();
-        let target: u32 = 85003; // WS-AA band
-        let source: u32 = 85004;
-        scanfix::register_table_2col(target, &[]);
-        scanfix::register_table_2col(source, &[]);
-        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let guard = KNOB.lock().unwrap_or_else(|p| p.into_inner());
-
-        crate::lanev2::dml_set_for_tests(true);
-        crate::lanev2::dml_rowchain_set_for_tests(false);
-        let (owned0, refused0) = probes();
-        let off = run_insert(mk_insert_select_pstmt(leaked_mcx(), target, source, false));
-        let (owned1, refused1) = probes();
-        assert!(owned1 > owned0, "admitted shape must be owned");
-        assert_eq!(refused1, refused0);
-
-        crate::lanev2::dml_rowchain_set_for_tests(true);
-        let drives0 = crate::lanev2::DML_ROWCHAIN_DRIVES_FOR_TESTS
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let on = run_insert(mk_insert_select_pstmt(leaked_mcx(), target, source, false));
-        let (owned2, refused2) = probes();
-        let drives1 = crate::lanev2::DML_ROWCHAIN_DRIVES_FOR_TESTS
-            .load(std::sync::atomic::Ordering::Relaxed);
-        crate::lanev2::dml_rowchain_set_for_tests(false);
-        crate::lanev2::dml_set_for_tests(false);
-        assert_eq!(on, off, "es_processed identical across rowchain arms");
-        assert!(owned2 > owned1, "still owned under rowchain ON");
-        assert_eq!(refused2, refused1, "no refusal delta under rowchain ON");
-        assert_eq!(drives1, drives0, "trigger-less shapes never take the chain");
-
-        drop(guard);
-        scanfix::quiesced();
-    }
+    // DELETED at RB-R1 (SE18) with the stitched trigger-INSERT chain: the
+    // trigger-arm truth table, the nested-knob inertness A/B, and the
+    // chain-dispatch guard pins died with the machinery they pinned
+    // (`mt_rowchain_trigger_admission` / the dml.rs chain dispatch).
+    // Trigger-bearing DML now refuses the lane unconditionally again —
+    // pinned by the shape-refusal probes above (the "triggers" arm).
     // --- end WS-AA wave-7 sub-region ---------------------------------------
 }
 
@@ -11526,76 +11428,9 @@ mod epq_capture_w7 {
 // ===== WAVE-9 SHARED TEST REGION (contract §7) — sub-regions in AG, AH, AI,
 // AJ order; each WS fills ONLY its own block; integration splices verbatim.
 // ============================================================================
-// --- WS-AG (wave-9): the fusion D1a per-mask chain-program pins ------------
-// The engagement/refusal A/B units stay the wave-7 dml_ab set (levers
-// unchanged); the trigger-fixture blocker (wave-7 D3: relcache-sourced
-// trigdesc) still stands, so seam-drive identity rides the dualexec corpus
-// (scripts/dualexec/corpus-dml-rowchain.sql, the E2 gate re-ride). These
-// pins own what IS unit-decidable: every shape mask's program is a
-// well-formed admitted chain (lanestitch classification), with the BR/RET
-// steps present exactly per mask and the loop-top law structural.
-mod rowchain_wave9_ag {
-    use ::lanestitch::Step;
-
-    #[test]
-    fn rowchain_mask_programs_are_admitted_chain_shapes() {
-        for mask in 0..::nodemodifytable::MT_ROWCHAIN_MASKS as u8 {
-            let p = crate::lanev2::rowchain_insert_prog_for_mask(mask);
-            // Admitted by the stitcher's classification (NAMED refusals).
-            assert_eq!(
-                ::lanestitch::rowchain_plan_refusal(&p),
-                None,
-                "mask {mask} program must be an admitted chain shape"
-            );
-            // Shape: [PROLOGUE, NextRow, STAGE, (BR), WRITE, EPILOGUE, (RET)].
-            let want_len = 5
-                + usize::from(mask & ::nodemodifytable::MT_ROWCHAIN_BR != 0)
-                + usize::from(mask & ::nodemodifytable::MT_ROWCHAIN_RET != 0);
-            assert_eq!(p.steps.len(), want_len, "mask {mask}");
-            assert!(matches!(p.steps[0], Step::ProtocolCall { .. }), "loop-top prologue");
-            assert!(matches!(p.steps[1], Step::NextRow), "single pull at position 1");
-            for (i, s) in p.steps.iter().enumerate().skip(2) {
-                assert!(
-                    matches!(s, Step::ProtocolCall { .. }),
-                    "mask {mask} step {i} must be a protocol call"
-                );
-            }
-            // Call ids unique within the program (verdict dispatch sanity).
-            let mut ids: Vec<u16> = p
-                .steps
-                .iter()
-                .filter_map(|s| match s {
-                    Step::ProtocolCall { call } => Some(*call),
-                    _ => None,
-                })
-                .collect();
-            ids.sort_unstable();
-            let n = ids.len();
-            ids.dedup();
-            assert_eq!(ids.len(), n, "mask {mask}: duplicate protocol call ids");
-        }
-        // Mask monotonicity: BR adds exactly one step after STAGE; RET
-        // appends exactly one step at the end (the emit-pause position).
-        let base = crate::lanev2::rowchain_insert_prog_for_mask(0);
-        let br = crate::lanev2::rowchain_insert_prog_for_mask(::nodemodifytable::MT_ROWCHAIN_BR);
-        let ret = crate::lanev2::rowchain_insert_prog_for_mask(::nodemodifytable::MT_ROWCHAIN_RET);
-        assert_eq!(br.steps.len(), base.steps.len() + 1);
-        assert_eq!(ret.steps.len(), base.steps.len() + 1);
-        let last_ret = match ret.steps.last() {
-            Some(Step::ProtocolCall { call }) => *call,
-            other => panic!("RET program must end in a protocol call, got {other:?}"),
-        };
-        let base_ids: Vec<u16> = base
-            .steps
-            .iter()
-            .filter_map(|s| match s {
-                Step::ProtocolCall { call } => Some(*call),
-                _ => None,
-            })
-            .collect();
-        assert!(!base_ids.contains(&last_ret), "RET step must be mask-only");
-    }
-}
+// --- WS-AG (wave-9): the fusion D1a per-mask chain-program pins — DELETED
+// at RB-R1 (SE18) with the stitched trigger-INSERT chain (the per-mask
+// program builder and lanestitch chain classification no longer exist).
 // --- end WS-AG (wave-9) ------------------------------------------------------
 // --- WS-AH (wave-9): reserved ---
 // --- WS-AI wave-9 (forward-pull cursors inc-1; contract §3, band 92001+) -------

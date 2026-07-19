@@ -458,8 +458,8 @@ pub(crate) fn plan_clauses(prog: &Program, ncols: usize) -> Option<Plan> {
                         // outs in its params block).
                         Step::StoreOut { .. } => return None,
                         // WS-AA wave-7: RowOp chain steps never stitch into a
-                        // qual body (fail closed — the row-chain tier is
-                        // rowchain.rs's own planner).
+                        // qual body (fail closed — the row-chain tier hosts on
+                        // the interp walker; its compiled body deleted at RB-R1).
                         Step::NextRow | Step::ProtocolCall { .. } => return None,
                     }
                 }
@@ -1309,8 +1309,8 @@ fn emit_step(e: &mut Emitter, ctx: &Ctx<'_>, prog: &Program, step: &Step) {
             e.strb_idx(10, 8, ROW);
         }
         // WS-AA wave-7: both planners refuse RowOp steps, so no qual or
-        // projection body ever reaches these arms (the row-chain tier emits
-        // its own body in rowchain.rs).
+        // projection body ever reaches these arms (the row-chain tier hosts
+        // on the interp walker; its compiled body deleted at RB-R1).
         Step::NextRow | Step::ProtocolCall { .. } => {
             unreachable!("RowOp step in a qual/projection body (planner refuses)")
         }
@@ -2130,7 +2130,8 @@ pub(crate) fn plan_project(prog: &Program, ncols: usize, nouts: usize) -> Option
             // Projection segments carry no filter clauses (fail closed).
             Step::Qual { .. } => return None,
             // WS-AA wave-7: RowOp chain steps never stitch into a projection
-            // body (fail closed — the row-chain tier is rowchain.rs's own).
+            // body (fail closed — the row-chain tier hosts on the interp
+            // walker; its compiled body deleted at RB-R1).
             Step::NextRow | Step::ProtocolCall { .. } => return None,
         }
     }

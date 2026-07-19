@@ -36,9 +36,9 @@ fn out_of_range(width: u8) -> Box<PgError> {
 
 // Loud fail-closed error for a RowOp step reaching a non-chain walker (and
 // for chain-shape violations): the interpreter is the spec, so an illegal
-// program errors rather than silently misbehaving. pub(crate): the stitched
-// chain body (rowchain.rs) raises the IDENTICAL error for the loop-top-law
-// violation so a non-conforming host diverges on neither engine.
+// program errors rather than silently misbehaving. (The compiled stitched
+// chain body that shared these error strings was DELETED at RB-R1/SE18 —
+// this walker is now the row-chain vocabulary's only engine.)
 #[cold]
 #[inline(never)]
 pub(crate) fn rowop_misuse(what: &str) -> Box<PgError> {
@@ -279,10 +279,10 @@ pub fn eval_qual(prog: &Program, batch: &Batch<'_>, sel: &mut SelVec) -> PgResul
 /// exactly one `NextRow`, and every step BEFORE it (the loop-top segment,
 /// the loop_top_owed LAW's structural placement) is a `ProtocolCall` —
 /// pure steps have no staged row to read at the loop top. Returns the
-/// `NextRow` position, or None for an ill-formed chain (the stitched tier
-/// refuses; the twin errors loudly).
-/// The loop-top law's violation text — ONE string, shared by the twin and
-/// the stitched body (rowchain.rs) so error identity is by construction.
+/// `NextRow` position, or None for an ill-formed chain (this walker
+/// errors loudly).
+/// The loop-top law's violation text (formerly shared with the stitched
+/// chain body, deleted at RB-R1/SE18).
 pub(crate) const LOOP_TOP_MISUSE: &str =
     "loop-top protocol call answered a row verdict with no current row";
 
