@@ -184,6 +184,7 @@ pub fn init_all_with_transport(transport: Transport) {
     adt_formatting::init_seams();
     citext::init_seams();
     uuid_ossp::init_seams();
+    dblink::init_seams();
     pg_prewarm::init_seams();
     file_fdw::init_seams();
     postgres_fdw::init_seams();
