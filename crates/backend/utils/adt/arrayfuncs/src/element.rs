@@ -842,8 +842,14 @@ fn insert_slice(
 }
 
 // array_set_element over a detoasted flat image; the replacement datum (if
-// by-ref) must already be detoasted. Returns a new image (C never updates the
-// source in the flat-array case).
+// by-ref) must already be detoasted. C does that detoast inside
+// array_set_element itself (arrayfuncs.c:2269-2271, before the expanded/flat
+// branch); our callers own it instead — audited 2026-07-18: the executor
+// subscript-assign step detoasts via datum_array_image's varatt_is_4b_u gate
+// (execexpr arrayops.rs) and array_append/prepend via arg_array_bytes
+// (array_userfuncs builtins.rs); both expand external, compressed, AND short
+// images, matching PG_DETOAST_DATUM. Returns a new image (C never updates
+// the source in the flat-array case).
 #[allow(clippy::too_many_arguments)]
 pub fn array_set_element<'mcx>(
     mcx: Mcx<'mcx>,
