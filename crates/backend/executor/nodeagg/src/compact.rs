@@ -447,6 +447,11 @@ pub fn agg_hash_compact_sink_would_refuse(node: &AggStateData<'_>, cap: u32) -> 
     let Some(ph) = node.perhash.as_ref() else {
         return true;
     };
+    // Mirror the arms' extra-column refusal (fdgroup-wr): a worker build
+    // with stored non-key columns refuses KeyKind.
+    if ph.hash_grp_col_idx_input.len() > ph.num_cols {
+        return true;
+    }
     single_word_spillrisk(ph, numgroups)
 }
 
@@ -475,6 +480,11 @@ pub fn agg_hash_compact_sink_admissible(node: &AggStateData<'_>, cap: u32, spill
     let Some(ph) = node.perhash.as_ref() else {
         return false;
     };
+    // Mirror the arms' extra-column refusal (fdgroup-wr): every worker
+    // would KeyKind-refuse a shape whose hash rows store non-key columns.
+    if ph.hash_grp_col_idx_input.len() > ph.num_cols {
+        return false;
+    }
     // M3.5 spill-armed admission (the q33@100M hmm=2 cliff): with a live
     // spill arm on a word-keyed engagement the WORKER gates vacate the
     // estimate refusal (compact_single_word_gates / try_arm / mk_admit_n
@@ -512,6 +522,14 @@ pub fn agg_hash_compact_try_arm(node: &mut AggStateData<'_>) -> CompactArm {
     let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
     if ph.compact.is_some() {
         return CompactArm::Armed;
+    }
+    // The compact table stores the packed key + agg states ONLY; its
+    // read-back reconstructs just the grouping key. A stored extra column
+    // (a functionally-dependent tlist Var riding the hash entry after the
+    // planner reduced GROUP BY to the PK — fdgroup-wr, compat-matrix B4)
+    // would emit NULL: refuse, keep the C tuplehash (full-image entries).
+    if ph.hash_grp_col_idx_input.len() > ph.num_cols {
+        return CompactArm::KeyKind;
     }
     let Some(width) = ph.hashtable.staged_probe_int_width() else {
         return CompactArm::KeyKind;
@@ -769,6 +787,12 @@ fn mk_admit_n(
     if key_cols.len() < min_keys {
         return Err(CompactArm::KeyKind);
     }
+    // As the single-key arm: packed tables reconstruct only the grouping
+    // key — a stored extra column (functionally-dependent tlist Var,
+    // fdgroup-wr) has no read-back and would emit NULL. Refuse.
+    if ph.hash_grp_col_idx_input.len() > key_cols.len() {
+        return Err(CompactArm::KeyKind);
+    }
     // Component kinds first; offsets are laid out per numeric width below
     // (numeric components try the roomy 8-byte encoding, shrinking to 4
     // bytes when the image would exceed 16 — the Q19 shape's budget:
@@ -862,6 +886,12 @@ fn compact_single_word_gates(node: &AggStateData<'_>) -> Result<u64, CompactArm>
     };
     let mut numgroups = (node.plan.numGroups.max(1) as u64 / divisor).max(1);
     let ph = node.perhash.as_ref().expect("hashed Agg has perhash");
+    // Compact tables reconstruct only the grouping key at read-back; a
+    // stored extra column (functionally-dependent tlist Var, fdgroup-wr)
+    // would emit NULL. Refuse both single-word modes (Single/Reduced).
+    if ph.hash_grp_col_idx_input.len() > ph.num_cols {
+        return Err(CompactArm::KeyKind);
+    }
     // M2 sink worker builds: the cap bounds the table (flush-at-cap), so the
     // spill gate and sizing work off the cap — the exchange-cap discipline.
     if let Some(cap) = ph.sink_cap {
