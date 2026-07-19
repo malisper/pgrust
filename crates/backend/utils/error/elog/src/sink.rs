@@ -140,3 +140,47 @@ pub(crate) fn call_frontend_redirect(error: &PgError) -> bool {
         None => false,
     })
 }
+
+// ---------------------------------------------------------------------------
+// debug_query_string (C: tcop/postgres.c global). C stores a bare
+// `const char *` armed by exec_simple_query / exec_parse_message /
+// exec_bind_message / exec_execute_message and cleared when the statement
+// frame ends (tail assignment, plus the sigsetjmp `debug_query_string =
+// NULL` on error recovery); current_query() reads it. The (ptr, len) pair
+// here carries the identical lifetime contract, made structural by the RAII
+// scope: armed from a &str that outlives the statement frame, restored to
+// the previous value when the frame drops — Err-unwind included.
+// ---------------------------------------------------------------------------
+thread_local! {
+    static DEBUG_QUERY_STRING: Cell<Option<(*const u8, usize)>> = const { Cell::new(None) };
+}
+
+pub struct DebugQueryStringScope {
+    prev: Option<(*const u8, usize)>,
+}
+
+pub fn debug_query_string_scope(query: &str) -> DebugQueryStringScope {
+    let prev =
+        DEBUG_QUERY_STRING.with(|c| c.replace(Some((query.as_ptr(), query.len()))));
+    DebugQueryStringScope { prev }
+}
+
+impl Drop for DebugQueryStringScope {
+    fn drop(&mut self) {
+        DEBUG_QUERY_STRING.with(|c| c.set(self.prev));
+    }
+}
+
+// current_query()'s read: the borrowed text is handed to `f` so the raw
+// parts never escape this module.
+pub fn with_debug_query_string<R>(f: impl FnOnce(Option<&str>) -> R) -> R {
+    match DEBUG_QUERY_STRING.with(Cell::get) {
+        // SAFETY: scope contract above — a Some slot points at a live str
+        // (its owning frame encloses every reader's frame on this thread)
+        // minted from a valid &str, so the bytes are utf8.
+        Some((p, len)) => f(Some(unsafe {
+            core::str::from_utf8_unchecked(core::slice::from_raw_parts(p, len))
+        })),
+        None => f(None),
+    }
+}

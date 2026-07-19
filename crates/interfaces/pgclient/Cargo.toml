@@ -1,0 +1,24 @@
+[package]
+name = "pgclient"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pgclient"
+path = "src/lib.rs"
+
+[dependencies]
+init_small = { path = "../../backend/utils/init/init_small" }
+latch = { path = "../../backend/storage/ipc/latch" }
+libc = "0.2"
+mcx = { path = "../../_support/mcx" }
+pg_b64 = { path = "../../common/base64" }
+pg_hmac = { path = "../../common/hmac" }
+pg_md5 = { path = "../../common/md5" }
+postgres_seams = { path = "../../backend/tcop/postgres_seams" }
+saslprep = { path = "../../common/saslprep" }
+scram_common = { path = "../../common/scram_common" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+types_storage = { path = "../../_support/types/types_storage" }
