@@ -319,6 +319,9 @@ fn fc_dblink_record(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
     let res = match res {
         Ok(r) => r,
         Err(e) => {
+            // PG_CATCH parity: clear pending data so the connection stays
+            // usable, then rethrow (interrupt or conversion error mid-stream).
+            let _ = with_target(&mut target, |c| c.drain());
             terminate_transient(&mut target);
             return Err(e);
         }
@@ -330,7 +333,7 @@ fn fc_dblink_record(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
         // fail=false: return the (empty) result the sink already holds.
         Ok(sink.finish(unsafe { &mut *fcinfo_ptr }))
     } else if res.status == ExecStatus::CommandOk {
-        materialize::materialize_result(mcx, flinfo, unsafe { &mut *fcinfo_ptr }, &res)
+        materialize::materialize_command_status(mcx, unsafe { &mut *fcinfo_ptr }, &res.cmd_tag)
     } else {
         Ok(sink.finish(unsafe { &mut *fcinfo_ptr }))
     };
@@ -376,8 +379,13 @@ fn fc_dblink_get_result(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
     if !registry::named_present(&name)? {
         return Err(registry::conn_not_avail(Some(&name)));
     }
-    let res = registry::with_named(&name, |rc| rc.expect("present").conn.get_result())??;
-    let Some(res) = res else {
+    let (res, gucs) = registry::with_named(&name, |rc| {
+        let rc = rc.expect("present");
+        let res = rc.conn.get_result();
+        let gucs = materialize::RemoteIoGucs::capture(&rc.conn);
+        (res, gucs)
+    })?;
+    let Some(res) = res? else {
         return Ok(Datum::from_usize(0)); // NULL: async results exhausted
     };
     if res.status != ExecStatus::CommandOk && res.status != ExecStatus::TuplesOk {
@@ -386,7 +394,7 @@ fn fc_dblink_get_result(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
         })??;
         return Ok(Datum::from_usize(0));
     }
-    materialize::materialize_result(mcx, flinfo, fcinfo, &res)
+    materialize::materialize_result(mcx, flinfo, fcinfo, &gucs, &res)
 }
 
 // --- cursor family ---
@@ -468,7 +476,12 @@ fn fc_dblink_fetch(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
         return Err(registry::conn_not_avail(conname.as_deref()));
     }
     let sql = format!("FETCH {howmany} FROM {curname}");
-    let res = on_conn(&conname, |rc| rc.conn.exec(&sql))??;
+    let (res, gucs) = on_conn(&conname, |rc| {
+        let res = rc.conn.exec(&sql);
+        let gucs = materialize::RemoteIoGucs::capture(&rc.conn);
+        (res, gucs)
+    })?;
+    let res = res?;
     if res.status != ExecStatus::CommandOk && res.status != ExecStatus::TuplesOk {
         on_conn(&conname, |rc| {
             res_error(&rc.conn, conname.as_deref(), &res, fail, &format!("while fetching from cursor \"{curname}\""))
@@ -481,7 +494,7 @@ fn fc_dblink_fetch(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
             .errmsg(format!("cursor \"{curname}\" does not exist"))
             .finish(loc("dblink_fetch")));
     }
-    materialize::materialize_result(mcx, flinfo, fcinfo, &res)
+    materialize::materialize_result(mcx, flinfo, fcinfo, &gucs, &res)
 }
 
 fn fc_dblink_get_notify(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
