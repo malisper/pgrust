@@ -14,7 +14,17 @@
 #![allow(clippy::result_large_err)]
 
 use std::cell::RefCell;
-use std::sync::Mutex;
+
+// PERMIT (dst-multibackend): the bgworker registry + static-pending lists are
+// pgsync — THE single lock library. `RegisterDynamicBackgroundWorker` holds
+// the registry lock across `parallel_pool_dispatch` (a hooked pool send), so
+// a warm standby claimed inside that critical section can be granted the
+// permit and reach `BackgroundWorkerMain -> with_registry` while the leader
+// still holds the lock; a raw std mutex there is a park-holding-a-raw-lock
+// wedge the sim watchdog caught at pool=4 (notes/dst-multibackend.md §2). The
+// native arm is the identical std re-export (zero cost); under sim the
+// contended lock is a hooked block_on that hands off to the leader.
+use pgsync::Mutex;
 
 use elog::{elog as report, ereport};
 use init_small::globals as g;
@@ -858,7 +868,7 @@ fn fatal_exit(e: &PgError) -> ! {
 // Launch-path phase timestamp, PGRUST_GATHER_TRACE-gated (duplicated from
 // parallel::gtrace — this crate sits below parallel in the dep graph).
 pub fn gtrace(phase: &str) {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static ON: pgsync::OnceLock<bool> = pgsync::OnceLock::new();
     if !*ON.get_or_init(|| std::env::var_os("PGRUST_GATHER_TRACE").is_some()) {
         return;
     }

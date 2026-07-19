@@ -21,6 +21,7 @@ libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
 lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
 mcx = { path = "../../../_support/mcx" }
 miscinit = { path = "../../utils/init/miscinit" }
+pgsync = { path = "../../../_support/pgsync" }
 pmchild_seams = { path = "../pmchild_seams" }
 pmsignal = { path = "../../storage/ipc/pmsignal" }
 postmaster_seams = { path = "../postmaster_seams" }
