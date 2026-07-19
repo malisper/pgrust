@@ -1268,4 +1268,91 @@ fn k1_latemat_deform_split_matches_full_deform() {
     exec_clear_tuple(&mut slot, mcx);
 }
 
+// K1 inc-3 density-cutover pin (`soa_deform_columns_set` selected pass):
+// a partial word at or above DENSE_WORD_CUTOVER set bits takes the dense
+// row loop — every SELECTED kind-0 cell must equal the full-deform oracle
+// (the observable contract; unselected kind-0 cells MAY over-fill, which
+// is idempotent value movement no reader consumes), kind-1 rows stay live
+// from classify, and kind-2 fallback rows never fill even inside a dense
+// word. A sparse control word on the same call proves the bit-walk arm
+// still skips its unselected cells.
+#[test]
+fn k1_latemat_dense_cutover_matches_full_deform() {
+    use ::types_tuple::TYPALIGN_SHORT;
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    let desc = make_desc(
+        mcx,
+        &[
+            col(1, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN),
+            col(2, 2, true, TYPALIGN_SHORT, TYPSTORAGE_PLAIN),
+            col(3, 8, true, TYPALIGN_DOUBLE, TYPSTORAGE_PLAIN),
+        ],
+    );
+    let plan = SoaDeformPlan::try_new(mcx, &desc.compact_attrs, 3).unwrap();
+    let n = 128usize; // 2 full words: dense-cutover word + sparse control
+    let null_row = 9usize; // kind-1 inside the dense word
+    let narrow_row = 17usize; // kind-2 inside the dense word
+    let narrow = make_desc(mcx, &[col(1, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN)]);
+    let mut tuples = Vec::new();
+    for i in 0..n {
+        if i == narrow_row {
+            tuples.push(
+                heap_form_tuple(mcx, &narrow, &[Datum::from_i32(91001)], &[false]).unwrap(),
+            );
+            continue;
+        }
+        let values = [
+            Datum::from_i32(91001 + i as i32),
+            Datum::from_i16((i % 5) as i16 - 2),
+            Datum::from_i64(91003i64 * (i as i64 + 1)),
+        ];
+        let isnull = [false, i == null_row, false];
+        tuples.push(heap_form_tuple(mcx, &desc, &values, &isnull).unwrap());
+    }
+    let mut full = SoaBatch::new_in(mcx, plan.ncols());
+    full.begin(n as u32);
+    for (i, t) in tuples.iter().enumerate() {
+        soa_classify_row(&mut full, &plan, &desc.compact_attrs, i as u32, t);
+    }
+    soa_deform_columns(&mut full, &plan, &desc.compact_attrs, None);
+    let mut lm = SoaBatch::new_in(mcx, plan.ncols());
+    lm.begin(n as u32);
+    for (i, t) in tuples.iter().enumerate() {
+        soa_classify_row(&mut lm, &plan, &desc.compact_attrs, i as u32, t);
+    }
+    soa_deform_columns_set(&mut lm, &plan, &desc.compact_attrs, &[0], None);
+    // Word 0: 58 set bits (>= the 48 cutover — dense row loop; 6 holes).
+    // Word 1: 3 set bits (bit-walk control).
+    let dense_word: u64 = !0u64 & !(1 << 3) & !(1 << 21) & !(1 << 33) & !(1 << 40) & !(1 << 55) & !(1 << 63);
+    assert!(dense_word.count_ones() >= 48 && dense_word != u64::MAX);
+    let sel = [dense_word, (1u64 << 2) | (1u64 << 40) | (1u64 << 63)];
+    soa_deform_columns_set(&mut lm, &plan, &desc.compact_attrs, &[1, 2], Some(&sel));
+    for i in 0..n {
+        if lm.is_fallback(i as u32) {
+            // Kind-2 never fills, dense word or not (fresh null-Datum cell).
+            assert_eq!(lm.col_values(2)[i].as_i64(), 0, "kind-2 filled row {i}");
+            continue;
+        }
+        let selected = sel[i / 64] & (1u64 << (i % 64)) != 0;
+        if selected || i == null_row {
+            for c in [1usize, 2] {
+                assert_eq!(lm.col_isnull(c)[i], full.col_isnull(c)[i], "col{c} isnull row {i}");
+                if !full.col_isnull(c)[i] {
+                    assert_eq!(
+                        lm.col_values(c)[i].as_i64(),
+                        full.col_values(c)[i].as_i64(),
+                        "col{c} row {i}"
+                    );
+                }
+            }
+        } else if i >= 64 {
+            // The sparse control word keeps the bit-walk's skip discipline.
+            assert_eq!(lm.col_values(2)[i].as_i64(), 0, "sparse word over-fill row {i}");
+        }
+        // Dense-word holes (i < 64, unselected): over-fill is PERMITTED —
+        // no assertion either way (the cells are unread by contract).
+    }
+}
+
 // --- end WS-AH wave-9 sub-region --------------------------------------------
