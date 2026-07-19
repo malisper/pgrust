@@ -2,7 +2,7 @@ use super::*;
 use ::mcx::MemoryContext;
 use ::types_core::{InvalidBuffer, Oid, BLCKSZ, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT};
 use ::types_rel::{FormData_pg_class, LockInfoData, LockRelId, RELKIND_RELATION};
-use ::types_scan::sdir::{BackwardScanDirection, ForwardScanDirection};
+use ::types_scan::sdir::ForwardScanDirection;
 use ::types_snapshot::SnapshotType;
 use ::types_storage::bufpage::{
     ItemIdData, SizeOfPageHeaderData, LP_DEAD, LP_NORMAL, LP_REDIRECT, LP_UNUSED,
@@ -451,7 +451,7 @@ fn kernel_page_borrow() {
 }
 
 #[test]
-fn seqscan_pagemode_forward_backward_rescan() {
+fn seqscan_pagemode_forward_rescan() {
     install_seams();
     let _serial = serial();
     let ctx = MemoryContext::new("test");
@@ -486,9 +486,11 @@ fn seqscan_pagemode_forward_backward_rescan() {
     assert_eq!(scan.rs_pgstat_getnext, 4);
     assert_eq!(scan.rs_pgstat_numscans, 1);
 
+    // Rescan replays the same forward walk. (Backward-execution wave B7:
+    // the backward collect leg - 4,3,2,1 - retired with the stepping arms.)
     heap_rescan(&mut scan, None, false, false, false, false).unwrap();
-    let vals = collect_vals(&mut scan, BackwardScanDirection);
-    assert_eq!(vals, vec![(1, 3, 4), (1, 1, 3), (0, 2, 2), (0, 1, 1)]);
+    let vals = collect_vals(&mut scan, ForwardScanDirection);
+    assert_eq!(vals, vec![(0, 1, 1), (0, 2, 2), (1, 1, 3), (1, 3, 4)]);
 
     heap_endscan(scan).unwrap();
     quiesced();
@@ -622,24 +624,22 @@ fn advance_block_wraps_and_honors_scanlimits() {
 
     // wraparound from a nonzero start block
     scan.rs_startblock = 2;
-    assert_eq!(heapgettup_initial_block(&mut scan, ForwardScanDirection), 2);
+    assert_eq!(heapgettup_initial_block(&mut scan), 2);
     scan.rs_inited = true;
-    assert_eq!(heapgettup_advance_block(&mut scan, 2, ForwardScanDirection).unwrap(), 3);
-    assert_eq!(heapgettup_advance_block(&mut scan, 3, ForwardScanDirection).unwrap(), 0);
-    assert_eq!(heapgettup_advance_block(&mut scan, 1, ForwardScanDirection).unwrap(), InvalidBlockNumber);
+    assert_eq!(heapgettup_advance_block(&mut scan, 2).unwrap(), 3);
+    assert_eq!(heapgettup_advance_block(&mut scan, 3).unwrap(), 0);
+    assert_eq!(heapgettup_advance_block(&mut scan, 1).unwrap(), InvalidBlockNumber);
 
-    // backward from startblock 2 → 1, 0, wrap to 3, done at startblock
-    assert_eq!(heapgettup_advance_block(&mut scan, 1, BackwardScanDirection).unwrap(), 0);
-    assert_eq!(heapgettup_advance_block(&mut scan, 0, BackwardScanDirection).unwrap(), 3);
-    assert_eq!(heapgettup_advance_block(&mut scan, 2, BackwardScanDirection).unwrap(), InvalidBlockNumber);
+    // (backward-execution wave B7: the backward walk legs - 1, 0, wrap to 3,
+    // done at startblock - retired with the backward stepping arms.)
 
     // setscanlimits: numblocks counts down to InvalidBlockNumber
     scan.rs_inited = false;
     scan.rs_base.rs_flags &= !SO_ALLOW_SYNC;
     heap_setscanlimits(&mut scan, 1, 2);
-    assert_eq!(heapgettup_initial_block(&mut scan, ForwardScanDirection), 1);
-    assert_eq!(heapgettup_advance_block(&mut scan, 1, ForwardScanDirection).unwrap(), 2);
-    assert_eq!(heapgettup_advance_block(&mut scan, 2, ForwardScanDirection).unwrap(), InvalidBlockNumber);
+    assert_eq!(heapgettup_initial_block(&mut scan), 1);
+    assert_eq!(heapgettup_advance_block(&mut scan, 1).unwrap(), 2);
+    assert_eq!(heapgettup_advance_block(&mut scan, 2).unwrap(), InvalidBlockNumber);
 
     heap_endscan(scan).unwrap();
     quiesced();
