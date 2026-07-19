@@ -120,6 +120,9 @@ pub static show_in_hot_standby: GucShowHook = GucSlot::new("show_in_hot_standby"
 pub static show_log_file_mode: GucShowHook = GucSlot::new("show_log_file_mode");
 pub static show_log_timezone: GucShowHook = GucSlot::new("show_log_timezone");
 pub static show_random_seed: GucShowHook = GucSlot::new("show_random_seed");
+// pgrust-only (no C symbol): computed SHOW for pgrust.resource_counters —
+// the simharness F8 resource-baseline hook channel; owner = the fd crate.
+pub static show_resource_counters: GucShowHook = GucSlot::new("show_resource_counters");
 pub static show_role: GucShowHook = GucSlot::new("show_role");
 pub static show_tcp_keepalives_count: GucShowHook = GucSlot::new("show_tcp_keepalives_count");
 pub static show_tcp_keepalives_idle: GucShowHook = GucSlot::new("show_tcp_keepalives_idle");
