@@ -152,9 +152,10 @@ pub(crate) fn apply_dispatch(mcx: Mcx<'static>, conn: &mut PgConn, buf: &[u8]) -
         | MSG_STREAM_PREPARE => {
             panic!("unported: streamed transaction apply (phase-2); message '{}'", action as char)
         }
-        MSG_BEGIN_PREPARE | MSG_PREPARE | MSG_COMMIT_PREPARED | MSG_ROLLBACK_PREPARED => {
-            panic!("unported: two-phase apply (phase-2); message '{}'", action as char)
-        }
+        MSG_BEGIN_PREPARE => apply_handle_begin_prepare(&mut r),
+        MSG_PREPARE => apply_handle_prepare(mcx, conn, &mut r),
+        MSG_COMMIT_PREPARED => apply_handle_commit_prepared(mcx, conn, &mut r),
+        MSG_ROLLBACK_PREPARED => apply_handle_rollback_prepared(mcx, conn, &mut r),
         other => {
             ereport(ERROR)
                 .errcode(ERRCODE_PROTOCOL_VIOLATION)
@@ -210,6 +211,147 @@ fn apply_handle_commit(mcx: Mcx<'static>, conn: &mut PgConn, r: &mut Reader<'_>)
     IN_REMOTE_TRANSACTION.set(false);
     crate::tablesync::process_syncing_tables(mcx, conn, commit.end_lsn)?;
     Ok(())
+}
+
+// apply_handle_begin_prepare (worker.c:1036).
+fn apply_handle_begin_prepare(r: &mut Reader<'_>) -> PgResult<()> {
+    // Tablesync should never receive prepare.
+    if crate::tablesync::AM_TABLESYNC_WORKER.with(std::cell::Cell::get) {
+        ereport(ERROR)
+            .errcode(ERRCODE_PROTOCOL_VIOLATION)
+            .errmsg("tablesync worker received a BEGIN PREPARE message")
+            .finish(loc("apply_handle_begin_prepare"))?;
+    }
+
+    let begin = logicalproto::logicalrep_read_begin_prepare(r)?;
+    REMOTE_FINAL_LSN.set(begin.prepare_lsn);
+    IN_REMOTE_TRANSACTION.set(true);
+    Ok(())
+}
+
+// apply_handle_prepare_internal (worker.c:1065).
+fn apply_handle_prepare_internal(
+    prepare_data: &logicalproto::LogicalRepPreparedTxnData,
+) -> PgResult<()> {
+    // Compute a unique GID for the two_phase transaction; the publisher's own
+    // GID could deadlock with multiple subscriptions from the same node (see
+    // comments atop worker.c).
+    let gid = twophase::TwoPhaseTransactionGid(my_sub(|s| s.oid), prepare_data.xid)?;
+
+    // BeginTransactionBlock is necessary to balance the EndTransactionBlock
+    // called within the PrepareTransactionBlock below.
+    if !xact::IsTransactionBlock() {
+        xact::BeginTransactionBlock()?;
+        xact::CommitTransactionCommand()?; // Completes the preceding Begin command.
+    }
+
+    // Update origin state so we can restart streaming from the correct
+    // position in case of a crash.
+    origin::set_replorigin_session_origin_lsn(prepare_data.end_lsn);
+    origin::set_replorigin_session_origin_timestamp(prepare_data.prepare_time);
+
+    xact::PrepareTransactionBlock(&gid)?;
+    Ok(())
+}
+
+// apply_handle_prepare (worker.c:1102).
+fn apply_handle_prepare(mcx: Mcx<'static>, conn: &mut PgConn, r: &mut Reader<'_>) -> PgResult<()> {
+    let prepare_data = logicalproto::logicalrep_read_prepare(r)?;
+
+    if prepare_data.prepare_lsn != REMOTE_FINAL_LSN.get() {
+        ereport(ERROR)
+            .errcode(ERRCODE_PROTOCOL_VIOLATION)
+            .errmsg(format!(
+                "incorrect prepare LSN {:X}/{:X} in prepare message (expected {:X}/{:X})",
+                (prepare_data.prepare_lsn >> 32) as u32,
+                prepare_data.prepare_lsn as u32,
+                (REMOTE_FINAL_LSN.get() >> 32) as u32,
+                REMOTE_FINAL_LSN.get() as u32,
+            ))
+            .finish(loc("apply_handle_prepare"))?;
+    }
+
+    // Unlike commit, we always prepare the transaction even if nothing
+    // changed in it: at commit prepared time we won't know whether we skipped
+    // preparing.
+    begin_replication_step(mcx)?;
+    apply_handle_prepare_internal(&prepare_data)?;
+    end_replication_step()?;
+    xact::CommitTransactionCommand()?;
+
+    // The prepare record is always flushed, so acknowledging the remote_end
+    // LSN with an invalid local LSN is fine (worker.c:1131).
+    crate::store_flush_position(prepare_data.end_lsn, types_core::InvalidXLogRecPtr);
+
+    IN_REMOTE_TRANSACTION.set(false);
+
+    // Process any tables that are being synchronized in parallel.
+    crate::tablesync::process_syncing_tables(mcx, conn, prepare_data.end_lsn)
+}
+
+// apply_handle_commit_prepared (worker.c:1173).
+fn apply_handle_commit_prepared(
+    mcx: Mcx<'static>,
+    conn: &mut PgConn,
+    r: &mut Reader<'_>,
+) -> PgResult<()> {
+    let prepare_data = logicalproto::logicalrep_read_commit_prepared(r)?;
+
+    let gid = twophase::TwoPhaseTransactionGid(my_sub(|s| s.oid), prepare_data.xid)?;
+
+    // There is no transaction when COMMIT PREPARED is called.
+    begin_replication_step(mcx)?;
+
+    // Update origin state so we can restart streaming from the correct
+    // position in case of a crash.
+    origin::set_replorigin_session_origin_lsn(prepare_data.end_lsn);
+    origin::set_replorigin_session_origin_timestamp(prepare_data.commit_time);
+
+    twophase::FinishPreparedTransaction(&gid, true)?;
+    end_replication_step()?;
+    xact::CommitTransactionCommand()?;
+
+    let local_end = transam_xlog_seams::xact_last_commit_end::call();
+    crate::store_flush_position(prepare_data.end_lsn, local_end);
+    IN_REMOTE_TRANSACTION.set(false);
+
+    crate::tablesync::process_syncing_tables(mcx, conn, prepare_data.end_lsn)
+}
+
+// apply_handle_rollback_prepared (worker.c:1222).
+fn apply_handle_rollback_prepared(
+    mcx: Mcx<'static>,
+    conn: &mut PgConn,
+    r: &mut Reader<'_>,
+) -> PgResult<()> {
+    let rollback_data = logicalproto::logicalrep_read_rollback_prepared(r)?;
+
+    let gid = twophase::TwoPhaseTransactionGid(my_sub(|s| s.oid), rollback_data.xid)?;
+
+    // It is possible that we haven't received the prepare because it occurred
+    // before the walsender reached a consistent point or two_phase was not
+    // yet enabled; skip the rollback in that case.
+    if twophase::LookupGXact(&gid, rollback_data.prepare_end_lsn, rollback_data.prepare_time)? {
+        // Update origin state so we can restart streaming from the correct
+        // position in case of a crash.
+        origin::set_replorigin_session_origin_lsn(rollback_data.rollback_end_lsn);
+        origin::set_replorigin_session_origin_timestamp(rollback_data.rollback_time);
+
+        // There is no transaction when ROLLBACK PREPARED is called.
+        begin_replication_step(mcx)?;
+        twophase::FinishPreparedTransaction(&gid, false)?;
+        end_replication_step()?;
+        xact::CommitTransactionCommand()?;
+    }
+
+    // The rollback WAL record is always flushed (worker.c:1259).
+    crate::store_flush_position(
+        rollback_data.rollback_end_lsn,
+        types_core::InvalidXLogRecPtr,
+    );
+    IN_REMOTE_TRANSACTION.set(false);
+
+    crate::tablesync::process_syncing_tables(mcx, conn, rollback_data.rollback_end_lsn)
 }
 
 // apply_handle_relation (worker.c:2318).

@@ -52,6 +52,7 @@ tableam_vocab = { path = "../../../access/table/tableam_vocab" }
 timestamp_seams = { path = "../../../utils/adt/timestamp_seams" }
 transam_xlog = { path = "../../../access/transam/transam_xlog" }
 transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
+twophase = { path = "../../../access/transam/twophase" }
 typcache = { path = "../../../utils/cache/typcache" }
 walreceiver = { path = "../../walreceiver" }
 xact = { path = "../../../access/transam/xact" }

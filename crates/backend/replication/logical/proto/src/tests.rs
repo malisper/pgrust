@@ -240,3 +240,123 @@ fn truncated_message_errors_not_panics() {
     let mut r2 = Reader::new(b"no-nul-terminator");
     assert!(r2.get_string().is_err());
 }
+
+// --- two-phase (prepare family) ---
+
+#[test]
+fn begin_prepare_roundtrip_and_layout() {
+    let mut out = Vec::new();
+    logicalrep_write_begin_prepare(&mut out, 0x0102030405060708, 0x0102030405060710, 987654321, 42, "gid_1");
+    // Byte layout per proto.c logicalrep_write_begin_prepare: type byte,
+    // prepare_lsn, end_lsn, prepare_time, xid, gid + NUL.
+    assert_eq!(out[0], LOGICAL_REP_MSG_BEGIN_PREPARE);
+    assert_eq!(out.len(), 1 + 8 + 8 + 8 + 4 + 5 + 1);
+    assert_eq!(&out[1..9], &0x0102030405060708u64.to_be_bytes());
+    assert_eq!(&out[9..17], &0x0102030405060710u64.to_be_bytes());
+    assert_eq!(&out[17..25], &987654321u64.to_be_bytes());
+    assert_eq!(&out[25..29], &42u32.to_be_bytes());
+    assert_eq!(&out[29..], b"gid_1\0");
+
+    let mut r = Reader::new(&out[1..]);
+    let b = logicalrep_read_begin_prepare(&mut r).unwrap();
+    assert_eq!(b.prepare_lsn, 0x0102030405060708);
+    assert_eq!(b.end_lsn, 0x0102030405060710);
+    assert_eq!(b.prepare_time, 987654321);
+    assert_eq!(b.xid, 42);
+    assert_eq!(b.gid, "gid_1");
+}
+
+#[test]
+fn begin_prepare_rejects_invalid_lsns() {
+    let mut out = Vec::new();
+    logicalrep_write_begin_prepare(&mut out, InvalidXLogRecPtr, 5, 1, 2, "g");
+    let mut r = Reader::new(&out[1..]);
+    assert!(logicalrep_read_begin_prepare(&mut r).is_err());
+
+    let mut out = Vec::new();
+    logicalrep_write_begin_prepare(&mut out, 5, InvalidXLogRecPtr, 1, 2, "g");
+    let mut r = Reader::new(&out[1..]);
+    assert!(logicalrep_read_begin_prepare(&mut r).is_err());
+}
+
+#[test]
+fn prepare_roundtrip_and_layout() {
+    let mut out = Vec::new();
+    logicalrep_write_prepare(&mut out, 0xDEAD, 0xBEEF, -5, 77, "two_gid");
+    // type byte, flags 0, prepare_lsn, end_lsn, prepare_time, xid, gid + NUL.
+    assert_eq!(out[0], LOGICAL_REP_MSG_PREPARE);
+    assert_eq!(out[1], 0);
+    assert_eq!(out.len(), 1 + 1 + 8 + 8 + 8 + 4 + 7 + 1);
+    let mut r = Reader::new(&out[1..]);
+    let p = logicalrep_read_prepare(&mut r).unwrap();
+    assert_eq!(p.prepare_lsn, 0xDEAD);
+    assert_eq!(p.end_lsn, 0xBEEF);
+    assert_eq!(p.prepare_time, -5);
+    assert_eq!(p.xid, 77);
+    assert_eq!(p.gid, "two_gid");
+}
+
+#[test]
+fn prepare_rejects_bad_flags_and_invalid_xid() {
+    let mut out = Vec::new();
+    logicalrep_write_prepare(&mut out, 1, 2, 3, 4, "g");
+    out[1] = 9;
+    let mut r = Reader::new(&out[1..]);
+    assert!(logicalrep_read_prepare(&mut r).is_err());
+
+    // Hand-encode an invalid-xid message (the writer debug_asserts on it).
+    let mut buf = vec![0u8]; // flags
+    buf.extend_from_slice(&1u64.to_be_bytes());
+    buf.extend_from_slice(&2u64.to_be_bytes());
+    buf.extend_from_slice(&3u64.to_be_bytes());
+    buf.extend_from_slice(&InvalidTransactionId.to_be_bytes());
+    buf.extend_from_slice(b"g\0");
+    let mut r = Reader::new(&buf);
+    assert!(logicalrep_read_prepare(&mut r).is_err());
+}
+
+#[test]
+fn commit_prepared_roundtrip_and_layout() {
+    let mut out = Vec::new();
+    logicalrep_write_commit_prepared(&mut out, 0x10, 0x20, 999, 88, "cp_gid");
+    assert_eq!(out[0], LOGICAL_REP_MSG_COMMIT_PREPARED);
+    assert_eq!(out[1], 0);
+    assert_eq!(out.len(), 1 + 1 + 8 + 8 + 8 + 4 + 6 + 1);
+    let mut r = Reader::new(&out[1..]);
+    let c = logicalrep_read_commit_prepared(&mut r).unwrap();
+    assert_eq!(c.commit_lsn, 0x10);
+    assert_eq!(c.end_lsn, 0x20);
+    assert_eq!(c.commit_time, 999);
+    assert_eq!(c.xid, 88);
+    assert_eq!(c.gid, "cp_gid");
+}
+
+#[test]
+fn rollback_prepared_roundtrip_and_layout() {
+    let mut out = Vec::new();
+    logicalrep_write_rollback_prepared(&mut out, 0x11, 0x22, 111, 222, 99, "rb_gid");
+    // type byte, flags 0, prepare_end_lsn, rollback_end_lsn, prepare_time,
+    // rollback_time, xid, gid + NUL.
+    assert_eq!(out[0], LOGICAL_REP_MSG_ROLLBACK_PREPARED);
+    assert_eq!(out[1], 0);
+    assert_eq!(out.len(), 1 + 1 + 8 + 8 + 8 + 8 + 4 + 6 + 1);
+    let mut r = Reader::new(&out[1..]);
+    let rp = logicalrep_read_rollback_prepared(&mut r).unwrap();
+    assert_eq!(rp.prepare_end_lsn, 0x11);
+    assert_eq!(rp.rollback_end_lsn, 0x22);
+    assert_eq!(rp.prepare_time, 111);
+    assert_eq!(rp.rollback_time, 222);
+    assert_eq!(rp.xid, 99);
+    assert_eq!(rp.gid, "rb_gid");
+}
+
+#[test]
+fn prepared_gid_truncates_at_gidsize() {
+    // C reads the gid with strlcpy into a GIDSIZE buffer: 199 bytes survive.
+    let long = "g".repeat(GIDSIZE + 50);
+    let mut out = Vec::new();
+    logicalrep_write_prepare(&mut out, 1, 2, 3, 4, &long);
+    let mut r = Reader::new(&out[1..]);
+    let p = logicalrep_read_prepare(&mut r).unwrap();
+    assert_eq!(p.gid.len(), GIDSIZE - 1);
+}

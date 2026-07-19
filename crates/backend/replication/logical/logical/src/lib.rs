@@ -16,8 +16,8 @@ use slot::{
 };
 use snapbuild::SnapBuild;
 use types_core::{
-    InvalidOid, InvalidTransactionId, RepOriginId, TransactionId, TransactionIdIsValid,
-    TransactionIdPrecedes, XLogRecPtr,
+    InvalidOid, InvalidTransactionId, RepOriginId, TimestampTz, TransactionId,
+    TransactionIdIsValid, TransactionIdPrecedes, XLogRecPtr,
 };
 use types_error::{
     ErrorLocation, PgResult, ERRCODE_ACTIVE_SQL_TRANSACTION,
@@ -87,6 +87,20 @@ pub type MessageCB = fn(
     &[u8],
 ) -> PgResult<()>;
 pub type FilterByOriginCB = fn(&mut OutputPluginContext, RepOriginId) -> PgResult<bool>;
+// Two-phase family (logical.h): begin_prepare shares BeginCB's shape and
+// prepare/commit_prepared share CommitCB's (opc, rb, txn, lsn).
+pub type BeginPrepareCB = BeginCB;
+pub type PrepareCB = CommitCB;
+pub type CommitPreparedCB = CommitCB;
+pub type RollbackPreparedCB = fn(
+    &mut OutputPluginContext,
+    &mut ReorderBuffer,
+    TxnId,
+    XLogRecPtr,   // prepare_end_lsn
+    TimestampTz,  // prepare_time
+) -> PgResult<()>;
+pub type FilterPrepareCB =
+    fn(&mut OutputPluginContext, TransactionId, &str) -> PgResult<bool>;
 
 #[derive(Default)]
 pub struct OutputPluginCallbacks {
@@ -96,11 +110,15 @@ pub struct OutputPluginCallbacks {
     pub truncate_cb: Option<TruncateCB>,
     pub commit_cb: Option<CommitCB>,
     pub message_cb: Option<MessageCB>,
+    pub filter_prepare_cb: Option<FilterPrepareCB>,
+    pub begin_prepare_cb: Option<BeginPrepareCB>,
+    pub prepare_cb: Option<PrepareCB>,
+    pub commit_prepared_cb: Option<CommitPreparedCB>,
+    pub rollback_prepared_cb: Option<RollbackPreparedCB>,
     pub filter_by_origin_cb: Option<FilterByOriginCB>,
     pub shutdown_cb: Option<ShutdownCB>,
-    // Two-phase and streaming callback families are unported; a plugin that
-    // needs them sets these so the wrappers can fail loudly.
-    pub two_phase_requested: bool,
+    // The streaming callback family is unported; a plugin that needs it sets
+    // this so the wrappers can fail loudly.
     pub streaming_requested: bool,
 }
 
@@ -291,7 +309,13 @@ fn StartupDecodingContext(
     );
 
     let streaming = callbacks.streaming_requested;
-    let twophase = callbacks.two_phase_requested;
+    // To support two-phase logical decoding we require the whole prepare
+    // family; enabling on any one of them makes a missing member fail loudly
+    // in its wrapper (logical.c:246).
+    let twophase = callbacks.begin_prepare_cb.is_some()
+        || callbacks.prepare_cb.is_some()
+        || callbacks.commit_prepared_cb.is_some()
+        || callbacks.rollback_prepared_cb.is_some();
 
     let opc = Box::into_raw(Box::new(OutputPluginContext {
         slot,
@@ -325,6 +349,10 @@ fn StartupDecodingContext(
         apply_truncate: truncate_cb_wrapper,
         commit: commit_cb_wrapper,
         message: message_cb_wrapper,
+        begin_prepare: begin_prepare_cb_wrapper,
+        prepare: prepare_cb_wrapper,
+        commit_prepared: commit_prepared_cb_wrapper,
+        rollback_prepared: rollback_prepared_cb_wrapper,
         update_progress_txn: update_progress_txn_cb_wrapper,
         ..ReorderBufferCallbacks::unset()
     };
@@ -539,15 +567,25 @@ pub fn CreateDecodingContext(
 
     startup_cb_maybe(&ctx, false)?;
 
-    let receive_rewrites = {
+    let (receive_rewrites, mark_two_phase) = {
         let opc = ctx.opc();
         opc.twophase &= slot.data.get().two_phase || opc.twophase_opt_given;
-        if opc.twophase && !slot.data.get().two_phase {
-            unported("CreateDecodingContext: enabling two_phase on slot");
-        }
-        opc.options.receive_rewrites
+        (opc.options.receive_rewrites, opc.twophase && !slot.data.get().two_phase)
     };
     let mut ctx = ctx;
+    // Mark slot to allow two_phase decoding if not already marked
+    // (logical.c:597).
+    if mark_two_phase {
+        slot.with_mutex(|| {
+            let mut d = slot.data.get();
+            d.two_phase = true;
+            d.two_phase_at = start_lsn;
+            slot.data.set(d);
+        });
+        ReplicationSlotMarkDirty();
+        ReplicationSlotSave()?;
+        ctx.snapshot_builder.set_two_phase_at(start_lsn);
+    }
     ctx.reorder.output_rewrites = receive_rewrites;
 
     let name = String::from_utf8_lossy(slot.data.get().name.name_str()).into_owned();
@@ -709,6 +747,99 @@ fn commit_cb_wrapper(rb: &mut ReorderBuffer, txn: TxnId, commit_lsn: XLogRecPtr)
     opc.end_xact = true;
     let cb = opc.callbacks.commit_cb.expect("commit callback registered");
     cb(opc, rb, txn, commit_lsn)
+}
+
+#[cold]
+fn missing_prepare_family_cb(which: &str) -> PgResult<()> {
+    ereport(ERROR)
+        .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+        .errmsg(format!(
+            "logical replication at prepare time requires a {which} callback"
+        ))
+        .finish(loc("prepare_cb_wrapper"))?;
+    unreachable!();
+}
+
+fn begin_prepare_cb_wrapper(rb: &mut ReorderBuffer, txn: TxnId) -> PgResult<()> {
+    let opc = opc_from_rb(rb);
+    debug_assert!(!opc.fast_forward);
+    debug_assert!(opc.twophase);
+    opc.accept_writes = true;
+    opc.write_xid = rb.txn(txn).xid;
+    opc.write_location = rb.txn(txn).first_lsn;
+    opc.end_xact = false;
+    // If the plugin supports two-phase commits then the begin prepare
+    // callback is mandatory (logical.c:900).
+    let Some(cb) = opc.callbacks.begin_prepare_cb else {
+        return missing_prepare_family_cb("begin_prepare_cb");
+    };
+    cb(opc, rb, txn)
+}
+
+fn prepare_cb_wrapper(rb: &mut ReorderBuffer, txn: TxnId, prepare_lsn: XLogRecPtr) -> PgResult<()> {
+    let opc = opc_from_rb(rb);
+    debug_assert!(!opc.fast_forward);
+    debug_assert!(opc.twophase);
+    opc.accept_writes = true;
+    opc.write_xid = rb.txn(txn).xid;
+    opc.write_location = rb.txn(txn).end_lsn; // points to the end of the record
+    opc.end_xact = true;
+    let Some(cb) = opc.callbacks.prepare_cb else {
+        return missing_prepare_family_cb("prepare_cb");
+    };
+    cb(opc, rb, txn, prepare_lsn)
+}
+
+fn commit_prepared_cb_wrapper(
+    rb: &mut ReorderBuffer,
+    txn: TxnId,
+    commit_lsn: XLogRecPtr,
+) -> PgResult<()> {
+    let opc = opc_from_rb(rb);
+    debug_assert!(!opc.fast_forward);
+    debug_assert!(opc.twophase);
+    opc.accept_writes = true;
+    opc.write_xid = rb.txn(txn).xid;
+    opc.write_location = rb.txn(txn).end_lsn; // points to the end of the record
+    opc.end_xact = true;
+    let Some(cb) = opc.callbacks.commit_prepared_cb else {
+        return missing_prepare_family_cb("commit_prepared_cb");
+    };
+    cb(opc, rb, txn, commit_lsn)
+}
+
+fn rollback_prepared_cb_wrapper(
+    rb: &mut ReorderBuffer,
+    txn: TxnId,
+    prepare_end_lsn: XLogRecPtr,
+    prepare_time: TimestampTz,
+) -> PgResult<()> {
+    let opc = opc_from_rb(rb);
+    debug_assert!(!opc.fast_forward);
+    debug_assert!(opc.twophase);
+    opc.accept_writes = true;
+    opc.write_xid = rb.txn(txn).xid;
+    opc.write_location = rb.txn(txn).end_lsn; // points to the end of the record
+    opc.end_xact = true;
+    let Some(cb) = opc.callbacks.rollback_prepared_cb else {
+        return missing_prepare_family_cb("rollback_prepared_cb");
+    };
+    cb(opc, rb, txn, prepare_end_lsn, prepare_time)
+}
+
+pub fn filter_prepare_cb_wrapper(
+    opc: &mut OutputPluginContext,
+    xid: TransactionId,
+    gid: &str,
+) -> PgResult<bool> {
+    debug_assert!(!opc.fast_forward);
+    opc.accept_writes = false;
+    opc.end_xact = false;
+    let cb = opc
+        .callbacks
+        .filter_prepare_cb
+        .expect("filter_prepare callback registered");
+    cb(opc, xid, gid)
 }
 
 fn change_cb_wrapper(
