@@ -46,7 +46,9 @@ struct PgFdwScanState {
     eof_reached: bool,
 }
 
-// C AttInMetadata over the foreign table's descriptor (dblink's port shape).
+// C AttInMetadata over the foreign table's descriptor (dblink's port shape),
+// plus typlen/typbyval so retained datums can be copied out of the fmgr
+// per-call scratch (see retain_datum).
 struct AttInMeta {
     natts: usize,
     relname: String,
@@ -54,6 +56,8 @@ struct AttInMeta {
     in_funcs: Vec<FmgrInfo>,
     typioparams: Vec<Oid>,
     typmods: Vec<i32>,
+    typlens: Vec<i16>,
+    typbyvals: Vec<bool>,
 }
 
 impl AttInMeta {
@@ -63,6 +67,8 @@ impl AttInMeta {
         let mut in_funcs = Vec::with_capacity(natts);
         let mut typioparams = Vec::with_capacity(natts);
         let mut typmods = Vec::with_capacity(natts);
+        let mut typlens = Vec::with_capacity(natts);
+        let mut typbyvals = Vec::with_capacity(natts);
         for i in 0..natts {
             let att = tupdesc.attr(i);
             attnames.push(String::from_utf8_lossy(att.attname.name_str()).into_owned());
@@ -72,12 +78,17 @@ impl AttInMeta {
                 in_funcs.push(FmgrInfo::unresolved());
                 typioparams.push(InvalidOid);
                 typmods.push(-1);
+                typlens.push(0);
+                typbyvals.push(true);
                 continue;
             }
             let (infunc, typioparam) = lsyscache::getTypeInputInfo(att.atttypid)?;
             in_funcs.push(fmgr_seams::fmgr_info::call(infunc)?);
             typioparams.push(typioparam);
             typmods.push(att.atttypmod);
+            let (typlen, typbyval) = lsyscache::get_typlenbyval(att.atttypid)?;
+            typlens.push(typlen);
+            typbyvals.push(typbyval);
         }
         Ok(AttInMeta {
             natts,
@@ -86,6 +97,8 @@ impl AttInMeta {
             in_funcs,
             typioparams,
             typmods,
+            typlens,
+            typbyvals,
         })
     }
 }
@@ -329,8 +342,21 @@ fn make_tuple_from_result_row(
         );
         match r {
             Ok(d) => {
-                values[idx] = d;
                 nulls[idx] = cell.is_none();
+                if !nulls[idx] {
+                    // fmgr results are PER-CALL: input functions may return a
+                    // pointer into the FmgrInfo's reused out-scratch (textin
+                    // does). Retaining across calls requires a copy — this is
+                    // C's heap_form_tuple materialization, done per datum
+                    // (fleet r2 find: every retained text datum aliased the
+                    // batch's last row; a use-after-free on Linux).
+                    values[idx] = retain_datum(
+                        batch,
+                        d,
+                        attin.typlens[idx],
+                        attin.typbyvals[idx],
+                    )?;
+                }
             }
             Err(e) => return Err(conversion_error(e, &state.attin, i)),
         }
@@ -343,6 +369,32 @@ fn make_tuple_from_result_row(
         )));
     }
     Ok((values, nulls))
+}
+
+// Deep-copy a byref datum image into the batch context (datumCopy shape;
+// evaluate_expr's byref-image precedent).
+fn retain_datum(batch: mcx::Mcx<'_>, d: Datum, typlen: i16, typbyval: bool) -> PgResult<Datum> {
+    if typbyval {
+        return Ok(d);
+    }
+    let p = d.as_usize() as *const u8;
+    // SAFETY: non-null byref datum fresh from the input function: typlen
+    // bytes readable, or a live varlena/cstring image for -1/-2; copied
+    // before the fmgr scratch is touched again.
+    let bytes = unsafe {
+        match typlen {
+            -1 => core::slice::from_raw_parts(p, types_tuple::varatt::varsize_any(p)),
+            -2 => {
+                let mut n = 0usize;
+                while *p.add(n) != 0 {
+                    n += 1;
+                }
+                core::slice::from_raw_parts(p, n + 1)
+            }
+            l => core::slice::from_raw_parts(p, l as usize),
+        }
+    };
+    Ok(Datum::from_usize(mcx::slice_borrow_in(batch, bytes)?.as_ptr() as usize))
 }
 
 // conversion_error_callback: C's errcontext line for a failed conversion.
