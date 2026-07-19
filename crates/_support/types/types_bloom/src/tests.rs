@@ -2,7 +2,7 @@
 //! by compiling blutils.c's myRand/mySrand/signValue verbatim (C, this
 //! machine) — see the lane worklog.
 
-use crate::layout::*;
+use crate::*;
 
 #[test]
 fn meta_layout_constants_match_c() {

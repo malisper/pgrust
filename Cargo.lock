@@ -2082,6 +2082,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "bloom"
+version = "0.0.0"
+dependencies = [
+ "bufmgr",
+ "bufmgr_seams",
+ "datum",
+ "dfmgr",
+ "execindexing",
+ "fmgr_core",
+ "fmgr_seams",
+ "freespace",
+ "generic_xlog",
+ "init_small",
+ "lsyscache",
+ "mcx",
+ "nbtree",
+ "postgres_seams",
+ "tidbitmap",
+ "types_bloom",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nbtree",
+ "types_rel",
+ "types_relscan",
+ "types_scan",
+ "types_storage",
+ "types_tuple",
+ "vacuum_seams",
+ "xact",
+]
+
+[[package]]
 name = "bloomfilter"
 version = "0.1.0"
 dependencies = [
@@ -14727,6 +14760,7 @@ dependencies = [
  "be_secure",
  "bgworker",
  "bgwriter",
+ "bloom",
  "brin_bloom",
  "brin_build",
  "brin_funcs",
@@ -17848,6 +17882,14 @@ name = "types_array"
 version = "0.1.0"
 dependencies = [
  "types_core",
+]
+
+[[package]]
+name = "types_bloom"
+version = "0.1.0"
+dependencies = [
+ "types_core",
+ "types_fmgr",
 ]
 
 [[package]]

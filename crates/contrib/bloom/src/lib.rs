@@ -12,10 +12,7 @@
 //! bloom.h. Crash safety rides generic WAL (GenericXLogStart/Register/Finish)
 //! exactly as in C.
 
-pub mod layout;
-
-#[cfg(test)]
-mod tests;
+pub use types_bloom as layout;
 
 use types_fmgr::PGFunction;
 
