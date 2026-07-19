@@ -46,3 +46,7 @@ pg_proc = { path = "../../catalog/pg_proc" }
 collationcmds = { path = "../collationcmds" }
 opclasscmds = { path = "../opclasscmds" }
 schemacmds = { path = "../schemacmds" }
+alter_seams = { path = "../alter_seams" }
+tablecmds = { path = "../tablecmds" }
+typecmds = { path = "../typecmds" }
+relation_seams = { path = "../../access/common/relation_seams" }

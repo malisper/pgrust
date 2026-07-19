@@ -45,6 +45,7 @@ varlena = { path = "../../utils/adt/varlena" }
 adt_bool = { path = "../../utils/adt/bool" }
 adt_acl = { path = "../../utils/adt/acl" }
 aclchk = { path = "../../catalog/aclchk" }
+alter_seams = { path = "../alter_seams" }
 pg_path = { path = "../../../port/pg_path" }
 fmgr_seams = { path = "../../utils/fmgr/fmgr_seams" }
 funcapi = { path = "../../utils/fmgr/funcapi" }
