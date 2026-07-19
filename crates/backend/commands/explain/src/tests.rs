@@ -601,25 +601,25 @@ fn option_errors_match_c_sqlstates() {
 
     let mut es = NewExplainState(mcx).unwrap();
     let opts = NodeList::make1(mcx, opt(mcx, "bogus", None)).unwrap();
-    let err = ParseExplainOptionList(&mut es, mcx, &opts).unwrap_err();
+    let err = ParseExplainOptionList(&mut es, mcx, &opts, "").unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_SYNTAX_ERROR);
 
     let mut es = NewExplainState(mcx).unwrap();
     let opts = NodeList::make1(mcx, opt(mcx, "timing", None)).unwrap();
-    let err = ParseExplainOptionList(&mut es, mcx, &opts).unwrap_err();
+    let err = ParseExplainOptionList(&mut es, mcx, &opts, "").unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_INVALID_PARAMETER_VALUE);
 
     let mut es = NewExplainState(mcx).unwrap();
     let bogus = Node::mk_string(mcx, "bogus").unwrap();
     let opts = NodeList::make1(mcx, opt(mcx, "format", Some(bogus))).unwrap();
-    let err = ParseExplainOptionList(&mut es, mcx, &opts).unwrap_err();
+    let err = ParseExplainOptionList(&mut es, mcx, &opts, "").unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_INVALID_PARAMETER_VALUE);
 
     let mut es = NewExplainState(mcx).unwrap();
     let opts =
         NodeList::from_slice(mcx, &[opt(mcx, "generic_plan", None), opt(mcx, "analyze", None)])
             .unwrap();
-    let err = ParseExplainOptionList(&mut es, mcx, &opts).unwrap_err();
+    let err = ParseExplainOptionList(&mut es, mcx, &opts, "").unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_INVALID_PARAMETER_VALUE);
 }
 
@@ -629,7 +629,7 @@ fn option_defaults_match_c() {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     let mut es = NewExplainState(mcx).unwrap();
-    ParseExplainOptionList(&mut es, mcx, &NodeList::nil()).unwrap();
+    ParseExplainOptionList(&mut es, mcx, &NodeList::nil(), "").unwrap();
     assert!(es.costs);
     assert!(!es.verbose && !es.analyze && !es.timing && !es.summary && !es.buffers);
     assert_eq!(es.format, EXPLAIN_FORMAT_TEXT);
@@ -638,7 +638,7 @@ fn option_defaults_match_c() {
     // ANALYZE defaults timing/buffers/summary on.
     let mut es = NewExplainState(mcx).unwrap();
     let opts = NodeList::make1(mcx, opt(mcx, "analyze", None)).unwrap();
-    ParseExplainOptionList(&mut es, mcx, &opts).unwrap();
+    ParseExplainOptionList(&mut es, mcx, &opts, "").unwrap();
     assert!(es.analyze && es.timing && es.buffers && es.summary);
 }
 
@@ -653,23 +653,23 @@ fn engine_option_parses_and_requires_analyze() {
 
     // Default absent — and stays absent under bare ANALYZE.
     let mut es = NewExplainState(mcx).unwrap();
-    ParseExplainOptionList(&mut es, mcx, &NodeList::nil()).unwrap();
+    ParseExplainOptionList(&mut es, mcx, &NodeList::nil(), "").unwrap();
     assert!(!es.engine);
     let mut es = NewExplainState(mcx).unwrap();
     let opts = NodeList::make1(mcx, opt(mcx, "analyze", None)).unwrap();
-    ParseExplainOptionList(&mut es, mcx, &opts).unwrap();
+    ParseExplainOptionList(&mut es, mcx, &opts, "").unwrap();
     assert!(!es.engine);
 
     // ENGINE without ANALYZE errors with the requires-ANALYZE sqlstate.
     let mut es = NewExplainState(mcx).unwrap();
     let opts = NodeList::make1(mcx, opt(mcx, "engine", None)).unwrap();
-    let err = ParseExplainOptionList(&mut es, mcx, &opts).unwrap_err();
+    let err = ParseExplainOptionList(&mut es, mcx, &opts, "").unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_INVALID_PARAMETER_VALUE);
 
     // ENGINE OFF without ANALYZE is fine (matches WAL/TIMING-off semantics).
     let mut es = NewExplainState(mcx).unwrap();
     let opts = NodeList::make1(mcx, off(mcx, "engine")).unwrap();
-    ParseExplainOptionList(&mut es, mcx, &opts).unwrap();
+    ParseExplainOptionList(&mut es, mcx, &opts, "").unwrap();
     assert!(!es.engine);
 
     // ENGINE + ANALYZE parses.
@@ -677,7 +677,7 @@ fn engine_option_parses_and_requires_analyze() {
     let opts =
         NodeList::from_slice(mcx, &[opt(mcx, "engine", None), opt(mcx, "analyze", None)])
             .unwrap();
-    ParseExplainOptionList(&mut es, mcx, &opts).unwrap();
+    ParseExplainOptionList(&mut es, mcx, &opts, "").unwrap();
     assert!(es.engine && es.analyze);
 }
 
