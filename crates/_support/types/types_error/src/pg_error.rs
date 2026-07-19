@@ -48,6 +48,12 @@ pub struct PgError {
     pub level: ErrorLevel,
     pub sqlstate: SqlState,
     pub message: String,
+    // Exact wire bytes for the primary message when C's message is not valid
+    // UTF-8 (C error messages are byte strings — e.g. elog's %c of a high
+    // "char" byte). When set, the frontend 'E'/'N' message sends these bytes
+    // (cstring-truncated at the first NUL) instead of `message`; `message`
+    // stays the lossy rendering for Rust-side consumers and the server log.
+    pub message_raw: Option<alloc::vec::Vec<u8>>,
     pub detail: Option<String>,
     pub detail_log: Option<String>,
     pub hint: Option<String>,
@@ -83,6 +89,7 @@ impl PgError {
             level,
             sqlstate: default_sqlstate_for_level(level),
             message: message.into(),
+            message_raw: None,
             detail: None,
             detail_log: None,
             hint: None,
@@ -110,6 +117,21 @@ impl PgError {
     #[cold]
     pub fn error(message: impl Into<String>) -> Self {
         Self::new(ERROR, message)
+    }
+
+    /// C elog/ereport with a message that is raw bytes (not guaranteed
+    /// UTF-8): the wire sends `bytes` verbatim (NUL-truncated, like the
+    /// cstring C builds); `message` carries the lossy rendering for
+    /// Rust-side display.
+    #[cold]
+    pub fn error_raw_message(bytes: alloc::vec::Vec<u8>) -> Self {
+        let truncated = match bytes.iter().position(|&b| b == 0) {
+            Some(n) => &bytes[..n],
+            None => &bytes[..],
+        };
+        let mut e = Self::new(ERROR, String::from_utf8_lossy(truncated).into_owned());
+        e.message_raw = Some(bytes);
+        e
     }
 
     #[cold]

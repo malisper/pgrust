@@ -705,6 +705,19 @@ std::thread_local! {
 // startup) and a conversion failure both fall back to the raw
 // server-encoding bytes instead of re-entering ereport.
 pub fn err_sendstring(buf: &mut Vec<u8>, s: &str) {
+    err_sendbytes(buf, s.as_bytes());
+}
+
+// Byte-level body shared with the raw-message lane. C's error fields are
+// cstrings, so bytes past the first NUL can never reach the wire — a Rust
+// String CAN carry an embedded NUL (e.g. a formatted '\0' char), and sending
+// it verbatim breaks 'E'-message framing ("message contents do not agree
+// with length"); truncate exactly where C's cstring would end.
+pub fn err_sendbytes(buf: &mut Vec<u8>, s: &[u8]) {
+    let s = match s.iter().position(|&b| b == 0) {
+        Some(n) => &s[..n],
+        None => s,
+    };
     let converted = !stack::in_error_recursion_trouble()
         && ::mbutils_seams::pg_server_to_client::is_installed()
         && ERR_CONVERT_CX.with(|cell| {
@@ -712,7 +725,7 @@ pub fn err_sendstring(buf: &mut Vec<u8>, s: &str) {
                 return false;
             };
             let done = {
-                match ::mbutils_seams::pg_server_to_client::call(cx.mcx(), s.as_bytes()) {
+                match ::mbutils_seams::pg_server_to_client::call(cx.mcx(), s) {
                     Ok(Some(conv)) => {
                         buf.extend_from_slice(&conv);
                         true
@@ -724,7 +737,7 @@ pub fn err_sendstring(buf: &mut Vec<u8>, s: &str) {
             done
         });
     if !converted {
-        buf.extend_from_slice(s.as_bytes());
+        buf.extend_from_slice(s);
     }
     buf.push(0);
 }
@@ -732,6 +745,11 @@ pub fn err_sendstring(buf: &mut Vec<u8>, s: &str) {
 fn send_field(buf: &mut Vec<u8>, code: ::types_error::ErrorField, value: &str) {
     buf.push(code.0 as u8);
     err_sendstring(buf, value);
+}
+
+fn send_field_bytes(buf: &mut Vec<u8>, code: ::types_error::ErrorField, value: &[u8]) {
+    buf.push(code.0 as u8);
+    err_sendbytes(buf, value);
 }
 
 #[cold]
@@ -761,7 +779,11 @@ pub fn send_message_to_frontend(edata: &PgError) {
         send_field(&mut body, PG_DIAG_SEVERITY_NONLOCALIZED, sev);
         send_field(&mut body, PG_DIAG_SQLSTATE, &unpack_sql_state(edata.sqlstate));
 
-        if !edata.message.is_empty() {
+        if let Some(raw) = &edata.message_raw {
+            // C messages are byte strings; this carries C's exact bytes when
+            // they are not valid UTF-8 (e.g. elog %c of a high "char" byte).
+            send_field_bytes(&mut body, PG_DIAG_MESSAGE_PRIMARY, raw);
+        } else if !edata.message.is_empty() {
             send_field(&mut body, PG_DIAG_MESSAGE_PRIMARY, &edata.message);
         } else {
             send_field(&mut body, PG_DIAG_MESSAGE_PRIMARY, "missing error text");
