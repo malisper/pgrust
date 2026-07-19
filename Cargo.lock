@@ -6323,6 +6323,7 @@ dependencies = [
  "miscinit",
  "nbtree",
  "pg_prng",
+ "pglz",
  "postgres_seams",
  "predicate_seams",
  "procarray_seams",

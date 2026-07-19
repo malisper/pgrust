@@ -46,3 +46,6 @@ vacuum_seams = { path = "../../../commands/vacuum_seams" }
 varsup_seams = { path = "../../transam/varsup_seams" }
 procarray_seams = { path = "../../../storage/ipc/procarray_seams" }
 miscinit = { path = "../../../utils/init/miscinit" }
+
+[dev-dependencies]
+pglz = { path = "../../../../common/pglz" }

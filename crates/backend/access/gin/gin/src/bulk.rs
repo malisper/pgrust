@@ -91,7 +91,13 @@ fn key_value_bytes(col: &GinColState, key: Datum) -> (*const u8, u32) {
         // SAFETY: non-null varlena key datum.
         unsafe {
             let p = key.as_usize() as *const u8;
-            if varatt::varatt_is_1b(p) {
+            if !crate::opclass::inline_image(key) {
+                // Compressed keys (pending-list cleanup re-accumulates keys
+                // that GinFormTuple stored compressed) hash by their whole
+                // image; identical keys compress identically, so grouping is
+                // unchanged, and the dump-order sort compares detoasted.
+                (p, varatt::varsize_any(p) as u32)
+            } else if varatt::varatt_is_1b(p) {
                 (
                     p.add(varatt::VARHDRSZ_SHORT),
                     (varatt::varsize_1b(p) - varatt::VARHDRSZ_SHORT) as u32,
