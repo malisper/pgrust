@@ -138,13 +138,24 @@ pub fn pg_get_encoding_from_locale(ctype: Option<&str>, write_message: bool) -> 
     let ctype = match ctype {
         Some(c) => c,
         None => {
-            // SAFETY: setlocale(cat, NULL) only reads; result copied before
-            // any other locale call.
-            let p = unsafe { libc::setlocale(crate::lc::LC_CTYPE, core::ptr::null()) };
-            active = if p.is_null() {
-                String::new()
-            } else {
-                unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+            // This backend's permanent LC_CTYPE. After the global-locale
+            // freeze, per-thread pg_perm_setlocale records replace C's
+            // per-process global (our backends are threads); fall back to
+            // reading the global, which is safe: it is only written during
+            // single-threaded boot.
+            active = match crate::setup::thread_locale(crate::lc::LC_CTYPE) {
+                Some(v) => v,
+                None => {
+                    // SAFETY: setlocale(cat, NULL) only reads; result copied
+                    // before any other locale call.
+                    let p =
+                        unsafe { libc::setlocale(crate::lc::LC_CTYPE, core::ptr::null()) };
+                    if p.is_null() {
+                        String::new()
+                    } else {
+                        unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+                    }
+                }
             };
             &active
         }
