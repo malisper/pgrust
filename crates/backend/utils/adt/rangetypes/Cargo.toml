@@ -25,3 +25,8 @@ types_error = { path = "../../../../_support/types/types_error" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
 types_nodes = { path = "../../../../_support/types/nodes" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
+
+[dev-dependencies]
+detoast = { path = "../../../access/common/detoast" }
+toast_internals_seams = { path = "../../../access/common/toast_internals_seams" }
+pglz = { path = "../../../../common/pglz" }
