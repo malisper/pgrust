@@ -6026,6 +6026,26 @@ pub fn try_own_sort<'mcx>(
         return Ok(None);
     }
     if !sort_lane_fusible_memo(s, estate)? {
+        // SORTFEED-RA shave (the AD2 flip letter's documented follow-up —
+        // notes/sortfeed-diffprof-lane.md "Named follow-up shave"): once
+        // the sort is DONE, every path in this refused-memo branch returns
+        // `Ok(None)` with no side effects — an RA-admitted node's feed
+        // already happened and its read-back is the caller's bare drain
+        // leg (the FEED-ONLY contract below); a refused node returns
+        // `None` regardless. So exit on one `sort_Done` load BEFORE the
+        // knob OnceLock + `sort_randomaccess_memo` probe: that pair was
+        // the ledgered ~29 Ir/pull post-done exit ceremony behind the
+        // AD2 letter's +0.72% residual (pgrust-corpus-pairs-1784356345).
+        // The ONLY skipped side effect is first-time RA side-memo
+        // computation on a node that reached `sort_Done` via the row/
+        // fused path before its first forward lane pull (e.g. a
+        // backward-first scroll cursor) — a stats-tick/trace delta only,
+        // never a behavior one; the chain-shared memo above still
+        // computes (and ticks) exactly as before. Unit pin:
+        // `sortfeed_ra_postdone_pull_exits_before_ra_memo`.
+        if s.state.sort_done() {
+            return Ok(None);
+        }
         // WS-AD wave-8: the chain-shared memo refuses ALL randomAccess
         // sorts (the policy line). The bare hook alone re-checks knob-ON:
         // an admitted randomAccess sort runs the RA-vanilla feed and
@@ -6060,16 +6080,16 @@ pub fn try_own_sort<'mcx>(
         // under randomAccess), so the row drain serves it verbatim; the
         // lane-served drain modes (refsort/runtime_full) exist only on
         // non-RA nodes, which keep the pull_step emit below. Post-done
-        // pulls exit here in a handful of loads — the same cost class as
-        // the knob-OFF refusal they replace.
-        if !s.state.sort_done() {
-            // C's CHECK_FOR_INTERRUPTS at ExecSort entry (the feed call).
-            ::postgres_seams::check_for_interrupts::call()?;
-            let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
-            // A feed-time refuse (Ok(false)) needs no distinct arm:
-            // ownership is refused either way, before any sort-side effect.
-            let _ = sort_feed_if_needed(state, &mut **outer, outer_desc, None, estate)?;
-        }
+        // pulls never reach here — the `sort_Done` head check on this
+        // branch exits them in a handful of loads, the same cost class
+        // as the knob-OFF refusal they replace (the SORTFEED-RA shave).
+        debug_assert!(!s.state.sort_done());
+        // C's CHECK_FOR_INTERRUPTS at ExecSort entry (the feed call).
+        ::postgres_seams::check_for_interrupts::call()?;
+        let crate::procnode::SortNode { state, outer, outer_desc, .. } = s;
+        // A feed-time refuse (Ok(false)) needs no distinct arm:
+        // ownership is refused either way, before any sort-side effect.
+        let _ = sort_feed_if_needed(state, &mut **outer, outer_desc, None, estate)?;
         return Ok(None);
     }
     // C's CHECK_FOR_INTERRUPTS at ExecSort entry.
@@ -6166,10 +6186,11 @@ fn sort_lane_fusible_memo<'mcx>(
 /// FEED-ONLY fix (0d4bf241c — RA-admitted ownership feeds once, the
 /// bare exec_sort drain serves all read-back) closed the letter to
 /// B/A = 1.0072 PASS (pgrust-corpus-pairs-1784356345-4d78, bar <=1.02,
-/// the same spelling SE8 refused at 1.027). Remaining +0.72% = the
-/// RA-branch post-done per-pull exit ceremony (~29 Ir/pull),
-/// named-and-ledgered with a documented 3-line shave (check sort_done
-/// before the RA memo probe) if a future bar needs it. Flips never
+/// the same spelling SE8 refused at 1.027). The remaining +0.72% (the
+/// RA-branch post-done per-pull exit ceremony, ~29 Ir/pull) is now
+/// shaved by the SORTFEED-RA increment: `try_own_sort`'s refused-memo
+/// branch checks `sort_Done` before the knob OnceLock + RA memo probe
+/// (letter re-read in notes/sortfeed-ra-lane.md). Flips never
 /// delete knobs (rowmode FLIP idiom; the AE2/K2 precedents).
 fn sort_randomaccess_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
