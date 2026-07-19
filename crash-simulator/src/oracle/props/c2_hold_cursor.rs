@@ -88,10 +88,38 @@ pub fn generate(
     // COMMIT: the held portal materializes into its tuplestore here.
     steps.push(PStep::Tx(TxCtl::Commit));
 
-    // Post-commit walk over the holdStore (backward fetches read the
-    // tuplestore backward; ABSOLUTE triggers DoPortalRewind + forward skips).
-    let n_ops = rng.gen_range(3usize..=5);
+    // Post-commit walk over the holdStore. FETCH BACKWARD reads the
+    // tuplestore backward (gettuple); MOVE repositions via skiptuples — and
+    // MOVE BACKWARD *from EOF* is exactly the p7 audit-B1 arm (tuplestore.c
+    // 1213-1227: the first backward step from EOF re-reads without moving,
+    // `ntuples--`; the fix ba950e7cd changed the landing position by 1).
+    // ABSOLUTE triggers DoPortalRewind + forward skiptuples.
+    //
+    // Deterministic p7 pin: drive the cursor to EOF (FORWARD ALL), then a
+    // MOVE BACKWARD — the reachable half of the fix — before the random arms.
     let n_i = n as i64;
+    {
+        let op = CursorOp::All; // land after-last (EOF observed)
+        let expected = model.apply(op);
+        steps.extend(fetch_step(&cur, op, &expected, slot));
+        slot += 1;
+        // MOVE BACKWARD from EOF: exercises skiptuples(backward) from
+        // eof_reached over the holdStore tuplestore.
+        let mv = CursorOp::Backward(rng.gen_range(1..=(n as u32)));
+        let moved = model.apply(mv);
+        steps.push(PStep::Sql(SqlStep {
+            sql: format!("MOVE {} IN {cur}", mv.sql()),
+            mark: Mark::Read,
+            meta: SqlMeta::default(),
+            ledger_op: None,
+            probe: Some(ProbeSpec::KnownCommand { count: moved.len() as u64 }),
+            stackref: Some(slot),
+        }));
+        steps.push(PStep::Assert(Check::CmdCountEq { slot, value: moved.len() as u64 }));
+        slot += 1;
+    }
+
+    let n_ops = rng.gen_range(3usize..=5);
     for _ in 0..n_ops {
         let op = match rng.gen_range(0u32..6) {
             0 => CursorOp::Backward(rng.gen_range(1..=(n as u32 + 2))),
@@ -102,7 +130,21 @@ pub fn generate(
             _ => CursorOp::All,
         };
         let expected = model.apply(op);
-        steps.extend(fetch_step(&cur, op, &expected, slot));
+        // Half the arms as MOVE (skiptuples reposition), half FETCH
+        // (gettuple) — both compared vs C and model-asserted.
+        if rng.gen_range(0u32..2) == 0 {
+            steps.push(PStep::Sql(SqlStep {
+                sql: format!("MOVE {} IN {cur}", op.sql()),
+                mark: Mark::Read,
+                meta: SqlMeta::default(),
+                ledger_op: None,
+                probe: Some(ProbeSpec::KnownCommand { count: expected.len() as u64 }),
+                stackref: Some(slot),
+            }));
+            steps.push(PStep::Assert(Check::CmdCountEq { slot, value: expected.len() as u64 }));
+        } else {
+            steps.extend(fetch_step(&cur, op, &expected, slot));
+        }
         slot += 1;
     }
 
