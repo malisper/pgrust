@@ -1768,8 +1768,23 @@ fn RestoreSlotFromDisk(name: &str) -> PgResult<()> {
                 .errhint("Change \"wal_level\" to be \"logical\" or higher.")
                 .finish(loc("RestoreSlotFromDisk"));
         }
-        // C's StandbyMode && !EnableHotStandby check: standby mode is
-        // unreachable in this binary (xlogrecovery panics on standby legs).
+        // slot.c:2656: in standby mode, hot standby must be enabled, else
+        // logical slots could survive a primary wal_level downgrade and
+        // remain valid after promotion. (Uninstalled seam = substrate test
+        // binaries with no recovery machinery — never standby mode.)
+        if xlogrecovery_seams::standby_mode::is_installed()
+            && xlogrecovery_seams::standby_mode::call()
+            && !guc_tables::vars::EnableHotStandby.read()
+        {
+            return ereport(FATAL)
+                .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                .errmsg(format!(
+                    "logical replication slot \"{}\" exists on the standby, but \"hot_standby\" = \"off\"",
+                    name_string(&slotdata.name)
+                ))
+                .errhint("Change \"hot_standby\" to be \"on\".")
+                .finish(loc("RestoreSlotFromDisk"));
+        }
     } else if transam_xlog::wal_level() < transam_xlog::WAL_LEVEL_REPLICA {
         return ereport(FATAL)
             .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
