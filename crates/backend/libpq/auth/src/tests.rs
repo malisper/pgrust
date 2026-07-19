@@ -710,3 +710,52 @@ fn password_auth_end_to_end() {
     client.join().unwrap();
     sa.cleanup();
 }
+
+#[test]
+fn interpret_ident_response_cases() {
+    // RFC 1413 USERID happy path (the RFC's own example).
+    assert_eq!(
+        interpret_ident_response(b"6193, 23 : USERID : UNIX : stjohns\r\n").as_deref(),
+        Some("stjohns")
+    );
+    // No blanks around the separators.
+    assert_eq!(
+        interpret_ident_response(b"123,456:USERID:OTHER:foo\r\n").as_deref(),
+        Some("foo")
+    );
+    // User names keep interior blanks.
+    assert_eq!(
+        interpret_ident_response(b"123,456:USERID:UNIX:foo bar\r\n").as_deref(),
+        Some("foo bar")
+    );
+    // ERROR responses carry no user name.
+    assert_eq!(
+        interpret_ident_response(b"6195, 23 : ERROR : NO-USER\r\n"),
+        None
+    );
+    // Not terminated with CRLF.
+    assert_eq!(
+        interpret_ident_response(b"6193, 23 : USERID : UNIX : stjohns"),
+        None
+    );
+    // Too short / degenerate.
+    assert_eq!(interpret_ident_response(b""), None);
+    assert_eq!(interpret_ident_response(b"x"), None);
+    assert_eq!(interpret_ident_response(b"\r\n"), None);
+    // No colon before the final CR.
+    assert_eq!(interpret_ident_response(b"garbage\r\n"), None);
+    // Missing the OS-field colon.
+    assert_eq!(interpret_ident_response(b"123,456:USERID:UNIX\r\n"), None);
+    // A NUL truncates the scan like C's strlen (no CRLF before it -> None).
+    assert_eq!(
+        interpret_ident_response(b"123,456:USERID:UNIX:foo\0trailing\r\n"),
+        None
+    );
+    // User name is capped at IDENT_USERNAME_MAX bytes.
+    let mut long = b"1,2:USERID:UNIX:".to_vec();
+    long.extend(std::iter::repeat(b'a').take(IDENT_USERNAME_MAX + 50));
+    long.extend(b"\r\n");
+    let got = interpret_ident_response(&long).unwrap();
+    assert_eq!(got.len(), IDENT_USERNAME_MAX);
+    assert!(got.bytes().all(|b| b == b'a'));
+}

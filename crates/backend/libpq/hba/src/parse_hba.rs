@@ -14,7 +14,7 @@ use crate::check::{ipaddr_to_sockaddr, ss_family};
 use crate::token::{copy_auth_token, regcomp_auth_token};
 use crate::{report_config, token_is_keyword, TokenizedAuthLine};
 
-// Build flags of this tree: no SSL / GSS / SSPI / PAM / BSD / LDAP.
+// Build flags of this tree: SSL on; no GSS / SSPI / PAM / BSD / LDAP.
 pub(crate) const fn use_ssl() -> bool {
     true
 }
@@ -343,13 +343,14 @@ pub fn parse_hba_line(
         "reject" => parsedline.auth_method = uaReject,
         "md5" => parsedline.auth_method = uaMD5,
         "scram-sha-256" => parsedline.auth_method = uaSCRAM,
-        // Build-flag rejections, faithful to a no-optional-features C build.
+        // cert is compiled in whenever SSL is (USE_SSL), which this build has.
+        "cert" => parsedline.auth_method = uaCert,
+        // Build-flag rejections, faithful to a no-GSS/SSPI/PAM/BSD/LDAP C build.
         "gss" => unsupauth = Some("gss"),
         "sspi" => unsupauth = Some("sspi"),
         "pam" => unsupauth = Some("pam"),
         "bsd" => unsupauth = Some("bsd"),
         "ldap" => unsupauth = Some("ldap"),
-        "cert" => unsupauth = Some("cert"),
         // C accepts these in every build; their handlers are unported.
         "radius" | "oauth" => panic!(
             "parse_hba_line: auth method \"{ts}\" ({file_name} line {line_num}) — \
@@ -364,7 +365,7 @@ pub fn parse_hba_line(
             );
         }
     }
-    let _ = (uaGSS, uaSSPI, uaPAM, uaBSD, uaLDAP, uaCert, uaRADIUS, uaOAuth);
+    let _ = (uaGSS, uaSSPI, uaPAM, uaBSD, uaLDAP, uaRADIUS, uaOAuth);
 
     if let Some(ua) = unsupauth {
         parse_error!(
@@ -389,8 +390,20 @@ pub fn parse_hba_line(
         );
     }
 
-    // (local+gss and non-hostssl+cert combination checks: those methods are
-    // rejected above in this build.)
+    // (local+gss combination check: gss is rejected at method parse in this
+    // build.)
+
+    // SSPI authentication can never be enabled on ctLocal connections,
+    // because it's only supported on Windows, where ctLocal isn't supported.
+
+    if parsedline.conntype != ctHostSSL && parsedline.auth_method == uaCert {
+        parse_error!(
+            elevel,
+            1822,
+            tok_line,
+            "cert authentication is only supported on hostssl connections".to_string()
+        );
+    }
 
     // Parse remaining arguments.
     field += 1;
@@ -419,8 +432,15 @@ pub fn parse_hba_line(
         field += 1;
     }
 
-    // (Per-method mandatory-argument checks and enforced parameters: ldap /
-    // radius / cert / oauth are unreachable in this build.)
+    // (Per-method mandatory-argument checks: ldap / radius / oauth are
+    // unreachable in this build.)
+
+    // Enforce any parameters implied by other settings.
+    if parsedline.auth_method == uaCert {
+        // For auth method cert, client certificate validation is mandatory,
+        // and it implies the level of verify-full.
+        parsedline.clientcert = clientCertFull;
+    }
 
     Ok(Some(parsedline))
 }
@@ -469,10 +489,11 @@ pub(crate) fn parse_hba_auth_opt(
 
     match name {
         "map" => {
-            // valid for ident/peer/gss/sspi/cert/oauth; only peer and (local)
-            // ident survive method parse here.
+            // valid for ident/peer/gss/sspi/cert/oauth; only ident, peer, and
+            // cert survive method parse in this build.
             if hbaline.auth_method != types_core::init::uaIdent
                 && hbaline.auth_method != types_core::init::uaPeer
+                && hbaline.auth_method != types_core::init::uaCert
             {
                 invalid_auth_option!("map", "ident, peer, gssapi, sspi, cert, and oauth");
             }
@@ -488,6 +509,25 @@ pub(crate) fn parse_hba_auth_opt(
             if val == "verify-full" {
                 hbaline.clientcert = clientCertFull;
             } else if val == "verify-ca" {
+                if hbaline.auth_method == types_core::init::uaCert {
+                    // C's ereport and *err_msg wordings differ at this site;
+                    // keep both faithful.
+                    report_config(
+                        elevel,
+                        2129,
+                        "parse_hba_auth_opt",
+                        "clientcert only accepts \"verify-full\" when using \"cert\" authentication"
+                            .to_string(),
+                        None,
+                        line_num,
+                        &file_name,
+                    )?;
+                    *err_msg = Some(
+                        "clientcert can only be set to \"verify-full\" when using \"cert\" authentication"
+                            .to_string(),
+                    );
+                    return Ok(false);
+                }
                 hbaline.clientcert = clientCertCA;
             } else {
                 report_config(

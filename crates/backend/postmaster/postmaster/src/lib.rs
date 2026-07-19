@@ -317,10 +317,27 @@ pub fn process_pm_reload_request() -> PgResult<()> {
         }
 
         if !auth_seams::load_hba::call() {
-            report(LOG, "pg_hba.conf was not reloaded".into(), 2010, "process_pm_reload_request");
+            // translator: %s is a configuration file (C prints HbaFileName)
+            report(
+                LOG,
+                format!(
+                    "{} was not reloaded",
+                    guc_tables::vars::HbaFileName.read().unwrap_or_default()
+                ),
+                2012,
+                "process_pm_reload_request",
+            );
         }
         if !auth_seams::load_ident::call() {
-            report(LOG, "pg_ident.conf was not reloaded".into(), 2015, "process_pm_reload_request");
+            report(
+                LOG,
+                format!(
+                    "{} was not reloaded",
+                    guc_tables::vars::IdentFileName.read().unwrap_or_default()
+                ),
+                2016,
+                "process_pm_reload_request",
+            );
         }
 
         if guc_tables::vars::EnableSSL.read() {

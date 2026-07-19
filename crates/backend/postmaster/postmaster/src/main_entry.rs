@@ -567,9 +567,13 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
     autovacuum_seams::autovac_init::call();
 
     if !auth_seams::load_hba::call() {
+        // translator: %s is a configuration file (C prints HbaFileName)
         return elog::ereport(FATAL)
-            .errmsg("could not load pg_hba.conf")
-            .finish(loc(1339, "PostmasterMain"));
+            .errmsg(format!(
+                "could not load {}",
+                guc_tables::vars::HbaFileName.read().unwrap_or_default()
+            ))
+            .finish(loc(1336, "PostmasterMain"));
     }
     let _ = auth_seams::load_ident::call();
 
