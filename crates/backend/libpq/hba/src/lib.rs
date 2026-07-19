@@ -1,10 +1,11 @@
 //! hba.c: pg_hba.conf / pg_ident.conf tokenizing, parsing, and connection
 //! matching. Scope: the line-parse/match engine with the trust / reject /
-//! password-family keywords live. Deferred loud: regex auth tokens (no regex
-//! engine yet), +role / samerole membership (acl.c), samehost/samenet
-//! (ifaddr enumeration), radius / oauth method parse. gss / sspi / pam /
-//! bsd / ldap / cert are rejected as "not supported by this build",
-//! faithful to a no-optional-features C build.
+//! password-family / peer / ident / cert keywords live (cert is hostssl-only
+//! and forces clientcert=verify-full, as in C's USE_SSL build). Regex auth
+//! tokens compile and match via the house regex engine. Deferred loud:
+//! radius / oauth method parse. gss / sspi / pam / bsd / ldap are rejected
+//! as "not supported by this build", faithful to a no-GSS/SSPI/PAM/BSD/LDAP
+//! C build.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]

@@ -1,8 +1,13 @@
 use std::sync::{Mutex, Once};
 
-use types_core::init::{uaImplicitReject, uaMD5, uaPassword, uaPeer, uaReject, uaSCRAM, uaTrust};
+use types_core::init::{
+    uaCert, uaImplicitReject, uaMD5, uaPassword, uaPeer, uaReject, uaSCRAM, uaTrust,
+};
 use types_error::LOG;
-use types_startup::{ctHost, ctHostSSL, ctLocal, ipCmpAll, ipCmpMask, ClientSocket, Port};
+use types_startup::{
+    clientCertCA, clientCertFull, clientCertOff, ctHost, ctHostSSL, ctLocal, ipCmpAll, ipCmpMask,
+    ClientSocket, Port,
+};
 
 use crate::token::FileHandle;
 use crate::*;
@@ -296,6 +301,45 @@ fn parse_map_option() {
         parse_one("local all all trust map=mymap").unwrap_err(),
         "authentication option \"map\" is only valid for authentication methods ident, peer, gssapi, sspi, cert, and oauth"
     );
+}
+
+#[test]
+fn parse_cert_method() {
+    // cert parses on hostssl and forces clientcert=verify-full (C hba.c:2043).
+    let h = parse_one("hostssl all all all cert").unwrap();
+    assert_eq!(h.auth_method, uaCert);
+    assert_eq!(h.clientcert, clientCertFull);
+
+    // map= is a valid option for cert.
+    let h = parse_one("hostssl all all all cert map=certmap").unwrap();
+    assert_eq!(h.usermap.as_deref(), Some("certmap"));
+
+    // Explicit clientcert=verify-full is accepted (and implied anyway).
+    let h = parse_one("hostssl all all all cert clientcert=verify-full").unwrap();
+    assert_eq!(h.clientcert, clientCertFull);
+
+    // cert is hostssl-only: host and local rows fail with C's wording.
+    assert_eq!(
+        parse_one("host all all all cert").unwrap_err(),
+        "cert authentication is only supported on hostssl connections"
+    );
+    assert_eq!(
+        parse_one("local all all cert").unwrap_err(),
+        "cert authentication is only supported on hostssl connections"
+    );
+
+    // clientcert=verify-ca conflicts with the cert method; the recorded
+    // err_msg is C's *err_msg wording (differs from its ereport wording).
+    assert_eq!(
+        parse_one("hostssl all all all cert clientcert=verify-ca").unwrap_err(),
+        "clientcert can only be set to \"verify-full\" when using \"cert\" authentication"
+    );
+
+    // Non-cert methods still take verify-ca; default stays off.
+    let h = parse_one("hostssl all all all trust clientcert=verify-ca").unwrap();
+    assert_eq!(h.clientcert, clientCertCA);
+    let h = parse_one("hostssl all all all trust").unwrap();
+    assert_eq!(h.clientcert, clientCertOff);
 }
 
 #[test]
