@@ -1404,6 +1404,24 @@ fn ri_ExtractValues(
     }
 }
 
+// C errtableconstraint(rel, conname): the schema/table/constraint
+// ErrorResponse fields that constraint-mapping clients (diesel's
+// constraint_name(), sequel's pg_auto_constraint_validations) read.
+fn errtableconstraint<'mcx>(
+    e: PgError,
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    conname: &str,
+) -> PgError {
+    let mut e = e
+        .with_table_name(rel.name().to_owned())
+        .with_constraint_name(conname.to_owned());
+    if let Ok(Some(nsp)) = lsyscache::get_namespace_name(mcx, rel.rd_rel.relnamespace) {
+        e = e.with_schema_name(nsp.as_str().to_owned());
+    }
+    e
+}
+
 #[cold]
 #[inline(never)]
 fn match_full_mixing_error<'mcx>(
@@ -1411,8 +1429,8 @@ fn match_full_mixing_error<'mcx>(
     fk_rel: &Relation<'mcx>,
     riinfo: &RiConstraintInfo,
 ) -> Box<PgError> {
-    let conname = conname_str(riinfo).to_string();
-    let mut e = PgError::new(
+    let conname = conname_str(riinfo);
+    let e = PgError::new(
         ERROR,
         format!(
             "insert or update on table \"{}\" violates foreign key constraint \"{conname}\"",
@@ -1420,13 +1438,8 @@ fn match_full_mixing_error<'mcx>(
         ),
     )
     .with_sqlstate(ERRCODE_FOREIGN_KEY_VIOLATION)
-    .with_detail("MATCH FULL does not allow mixing of null and nonnull key values.")
-    .with_table_name(fk_rel.name().to_owned())
-    .with_constraint_name(conname);
-    if let Ok(Some(nsp)) = lsyscache::get_namespace_name(mcx, fk_rel.rd_rel.relnamespace) {
-        e = e.with_schema_name(nsp.as_str().to_owned());
-    }
-    Box::new(e)
+    .with_detail("MATCH FULL does not allow mixing of null and nonnull key values.");
+    Box::new(errtableconstraint(e, mcx, fk_rel, conname))
 }
 
 // aclchk.c ACLCHECK_OK.
@@ -1515,8 +1528,10 @@ fn ri_ReportViolation<'mcx>(
     }
 
     let conname = conname_str(riinfo);
+    // C attaches errtableconstraint(fk_rel, conname) on every branch below
+    // (ri_triggers.c ri_ReportViolation).
     if partgone {
-        let mut e = PgError::new(
+        let e = PgError::new(
             ERROR,
             format!(
                 "removing partition \"{}\" violates foreign key constraint \"{conname}\"",
@@ -1527,75 +1542,67 @@ fn ri_ReportViolation<'mcx>(
         .with_detail(format!(
             "Key ({key_names})=({key_values}) is still referenced from table \"{}\".",
             fk_rel.name()
-        ))
-        .with_table_name(fk_rel.name().to_owned())
-        .with_constraint_name(conname.to_string());
-        if let Ok(Some(nsp)) = lsyscache::get_namespace_name(mcx, fk_rel.rd_rel.relnamespace) {
-            e = e.with_schema_name(nsp.as_str().to_owned());
-        }
-        return Box::new(e);
+        ));
+        return Box::new(errtableconstraint(e, mcx, fk_rel, conname));
     }
     if onfk {
-        Box::new(
-            PgError::new(
-                ERROR,
-                format!(
-                    "insert or update on table \"{}\" violates foreign key constraint \"{conname}\"",
-                    fk_rel.name()
-                ),
-            )
-            .with_sqlstate(ERRCODE_FOREIGN_KEY_VIOLATION)
-            .with_detail(if has_perm {
-                format!(
-                    "Key ({key_names})=({key_values}) is not present in table \"{}\".",
-                    pk_rel.name()
-                )
-            } else {
-                format!("Key is not present in table \"{}\".", pk_rel.name())
-            }),
+        let e = PgError::new(
+            ERROR,
+            format!(
+                "insert or update on table \"{}\" violates foreign key constraint \"{conname}\"",
+                fk_rel.name()
+            ),
         )
+        .with_sqlstate(ERRCODE_FOREIGN_KEY_VIOLATION)
+        .with_detail(if has_perm {
+            format!(
+                "Key ({key_names})=({key_values}) is not present in table \"{}\".",
+                pk_rel.name()
+            )
+        } else {
+            format!("Key is not present in table \"{}\".", pk_rel.name())
+        });
+        Box::new(errtableconstraint(e, mcx, fk_rel, conname))
     } else if is_restrict {
-        Box::new(
-            PgError::new(
-                ERROR,
-                format!(
-                    "update or delete on table \"{}\" violates RESTRICT setting of foreign key \
-                     constraint \"{conname}\" on table \"{}\"",
-                    pk_rel.name(),
-                    fk_rel.name()
-                ),
-            )
-            .with_sqlstate(ERRCODE_RESTRICT_VIOLATION)
-            .with_detail(if has_perm {
-                format!(
-                    "Key ({key_names})=({key_values}) is referenced from table \"{}\".",
-                    fk_rel.name()
-                )
-            } else {
-                format!("Key is referenced from table \"{}\".", fk_rel.name())
-            }),
+        let e = PgError::new(
+            ERROR,
+            format!(
+                "update or delete on table \"{}\" violates RESTRICT setting of foreign key \
+                 constraint \"{conname}\" on table \"{}\"",
+                pk_rel.name(),
+                fk_rel.name()
+            ),
         )
+        .with_sqlstate(ERRCODE_RESTRICT_VIOLATION)
+        .with_detail(if has_perm {
+            format!(
+                "Key ({key_names})=({key_values}) is referenced from table \"{}\".",
+                fk_rel.name()
+            )
+        } else {
+            format!("Key is referenced from table \"{}\".", fk_rel.name())
+        });
+        Box::new(errtableconstraint(e, mcx, fk_rel, conname))
     } else {
-        Box::new(
-            PgError::new(
-                ERROR,
-                format!(
-                    "update or delete on table \"{}\" violates foreign key constraint \
-                     \"{conname}\" on table \"{}\"",
-                    pk_rel.name(),
-                    fk_rel.name()
-                ),
-            )
-            .with_sqlstate(ERRCODE_FOREIGN_KEY_VIOLATION)
-            .with_detail(if has_perm {
-                format!(
-                    "Key ({key_names})=({key_values}) is still referenced from table \"{}\".",
-                    fk_rel.name()
-                )
-            } else {
-                format!("Key is still referenced from table \"{}\".", fk_rel.name())
-            }),
+        let e = PgError::new(
+            ERROR,
+            format!(
+                "update or delete on table \"{}\" violates foreign key constraint \
+                 \"{conname}\" on table \"{}\"",
+                pk_rel.name(),
+                fk_rel.name()
+            ),
         )
+        .with_sqlstate(ERRCODE_FOREIGN_KEY_VIOLATION)
+        .with_detail(if has_perm {
+            format!(
+                "Key ({key_names})=({key_values}) is still referenced from table \"{}\".",
+                fk_rel.name()
+            )
+        } else {
+            format!("Key is still referenced from table \"{}\".", fk_rel.name())
+        });
+        Box::new(errtableconstraint(e, mcx, fk_rel, conname))
     }
 }
 

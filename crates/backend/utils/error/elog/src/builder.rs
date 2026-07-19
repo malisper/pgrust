@@ -21,8 +21,10 @@ pub struct ErrorBuilder {
 }
 
 impl ErrorBuilder {
+    // track_caller so the F/L capture lands on the ereport() call site, not
+    // this constructor (C's ereport macro records the report site).
     #[cold]
-    #[inline(never)]
+    #[track_caller]
     pub fn new(level: ErrorLevel) -> Self {
         Self {
             level,
@@ -335,6 +337,7 @@ fn format_message(error: &PgError, message: String) -> String {
 }
 
 #[inline]
+#[track_caller]
 pub fn ereport(level: ErrorLevel) -> ErrorBuilder {
     if level < ERROR && !policy::message_level_is_interesting(level) {
         return ErrorBuilder::suppressed(level);
@@ -343,7 +346,11 @@ pub fn ereport(level: ErrorLevel) -> ErrorBuilder {
 }
 
 #[inline]
+#[track_caller]
 pub fn elog(level: ErrorLevel, message: impl Into<String>) -> PgResult<()> {
+    // The empty location merges away in with_error_location: the F/L capture
+    // from this call site (via ereport's track_caller) stands, like C's
+    // elog macro recording __FILE__/__LINE__.
     ereport(level).errmsg_internal(message).finish(ErrorLocation {
         filename: None,
         lineno: 0,
