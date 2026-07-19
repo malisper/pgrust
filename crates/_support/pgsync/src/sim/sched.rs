@@ -1227,7 +1227,7 @@ pub fn global() -> Option<&'static Arc<Scheduler>> {
                 preempt_p: config::preempt_p(),
                 log_cap: DEFAULT_LOG_CAP,
                 stream_log: config::stream_schedlog(),
-                virtual_ceiling_ns: None,
+                virtual_ceiling_ns: config::virtual_ceiling_ns(),
                 clock: ClockMode::PgClock,
                 fail: FailAction::DumpAbort,
                 watchdog_timeout_ms: config::watchdog_timeout_ms(),

@@ -289,6 +289,9 @@ fn dump_artifacts_env(transcript_env: &str, oplog_env: &str) {
 // registration hook lands — this snapshot is the scaffold stand-in.
 macro_rules! sim_inherited {
     ($($field:ident : $ty:ty = $get:ident / $set:ident;)+) => {
+        // Clone: the N-session corpus applies one pristine postmaster
+        // capture to EVERY spawned session (scalars + a &'static str).
+        #[derive(Clone)]
         struct SimInherited {
             data_dir: Option<&'static str>,
             $($field: $ty,)+
@@ -366,6 +369,143 @@ fn run_session_on_this_thread(transcript_env: &str, oplog_env: &str) -> i32 {
     }
 }
 
+/// DST-PMCHILD: one under-PM harness session's identity — the env-name
+/// triple (scripted SQL in, artifacts out), the synthetic-pid offset, and
+/// (when the corpus registers it) the parent-assigned pmchild Backend slot.
+/// `child_slot: None` is the pre-lane anonymous-thread shape, byte-identical
+/// (the sessions=2 P1/P3 corpus rides it unchanged).
+#[derive(Clone, Copy)]
+struct SessionSpec {
+    thread_name: &'static str,
+    sql_env: &'static str,
+    transcript_env: &'static str,
+    oplog_env: &'static str,
+    /// MyProcPid = process_id() + pid_offset (the sim pid pin gives every
+    /// thread the same ambient pid; sessions must differ).
+    pid_offset: i32,
+    /// Some(slot) = this session is a REGISTERED pmchild Backend: the
+    /// thread claims the slot via SetMyPMChildSlot (the slot-active
+    /// protocol keys off it in InitProcess) and announces its exit so the
+    /// reaper's Backend arm releases it — real child accounting.
+    child_slot: Option<i32>,
+}
+
+impl SessionSpec {
+    /// The historical session-2 identity (P1/P3 and the parquery leader).
+    fn second(child_slot: Option<i32>) -> SessionSpec {
+        SessionSpec {
+            thread_name: "sim-session-2",
+            sql_env: "PGRUST_SIMNET_SQL2",
+            transcript_env: "PGRUST_SIMNET_TRANSCRIPT2",
+            oplog_env: "PGRUST_SIMNET_OPLOG2",
+            pid_offset: 1,
+            child_slot,
+        }
+    }
+
+    /// The N-session corpus's third session.
+    fn third(child_slot: Option<i32>) -> SessionSpec {
+        SessionSpec {
+            thread_name: "sim-session-3",
+            sql_env: "PGRUST_SIMNET_SQL3",
+            transcript_env: "PGRUST_SIMNET_TRANSCRIPT3",
+            oplog_env: "PGRUST_SIMNET_OPLOG3",
+            pid_offset: 2,
+            child_slot,
+        }
+    }
+}
+
+/// DST-PMCHILD: register an under-PM harness session as a REAL pmchild
+/// Backend — the BackendStartup shape (assign the slot, then publish the
+/// pid), parent-side BEFORE the spawn so the pid is registry-visible before
+/// the session can register bgworkers. This kills the multibackend §1
+/// zeroed-notify deviation: BackgroundWorkerStateChange's
+/// find_postmaster_child_by_pid validity check now PASSES for the leader's
+/// bgw_notify_pid, so ReportBackgroundWorkerPID's SIGUSR1 notify flow runs
+/// exactly as in C instead of liveness riding the waiter cadence.
+fn register_session_backend(pid: i32) -> i32 {
+    let slot = pmchild_seams::assign_postmaster_child_slot::call(
+        types_core::init::BackendType::Backend,
+    )
+    .expect("no free pmchild Backend slot for a harness session");
+    pmchild_seams::set_child_pid::call(slot, pid);
+    slot
+}
+
+/// DST-PMCHILD: the boot thread's virtual-time drain budget (quanta of the
+/// 1 ms service cadence). Default matches the old blind poll bound.
+fn drain_budget() -> u32 {
+    std::env::var("PGRUST_SIM_DRAIN_BUDGET")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60_000)
+}
+
+/// DST-PMCHILD: the shutdown-hang red's catcher — a child that never exits
+/// must produce a NAMED watchdog verdict, not a hang. Grep-stable
+/// "SHUTDOWNDRAIN:" line + abort (exit 134, the watchdog convention); the
+/// SCHEDCEILING virtual-time bound (PGRUST_SIM_VCEIL_S) is the safety net
+/// underneath this (it names the parked site from the scheduler side).
+fn shutdown_drain_check(quanta: u32, budget: u32, what: &str, detail: impl Fn() -> String) {
+    if quanta >= budget {
+        eprintln!(
+            "SHUTDOWNDRAIN: {what} never exited after {budget} virtual-ms drain quanta ({})",
+            detail()
+        );
+        std::process::abort();
+    }
+}
+
+/// DST-PMCHILD drain phase A: service the postmaster surrogate until the
+/// reaper has processed EVERY registered session's exit announce. The loop
+/// condition is the pmchild registry — boot-thread-local modeled state
+/// mutated by process_pm_child_exit's Backend arm ON this thread — so the
+/// iteration count is a pure function of the seeded schedule; the OS
+/// teardown fact (`is_finished()`) the old drain polled is out of the loop
+/// (the §7 row-3 wall-coupling retired). The caller then joins through the
+/// pgsync JoinHandle (hooked Join parks until the exit hook wakes joiners;
+/// the residual raw join is bounded teardown — the NB-2 shape).
+fn drain_until_reaped(pids: &[i32], budget: u32) -> u32 {
+    let mut quanta = 0u32;
+    let live = |pids: &[i32]| -> Vec<i32> {
+        pids.iter()
+            .copied()
+            .filter(|p| pmchild_seams::find_postmaster_child_by_pid::call(*p).is_some())
+            .collect()
+    };
+    while !live(pids).is_empty() {
+        postmaster_seams::pm_service_pending::call();
+        postmaster_seams::wpool_maintain::call();
+        pgsync::thread::sleep(std::time::Duration::from_millis(1));
+        quanta += 1;
+        shutdown_drain_check(quanta, budget, "registered session backend(s)", || {
+            format!("unreaped pids {:?}", live(pids))
+        });
+    }
+    quanta
+}
+
+/// DST-PMCHILD drain phase B: the pool drain (P5 teardown shape) with the
+/// blind poll bound replaced by the named verdict. POPULATION is modeled
+/// state here: the charge drops inside each standby's final quantum
+/// (PopulationCharge is declared after the door guard, so it drops before
+/// the exit hook), and the reaper's join of rotation announces is the
+/// hooked NB-2 join.
+fn drain_pool(budget: u32) -> u32 {
+    postmaster_seams::wpool_flush::call();
+    let mut quanta = 0u32;
+    while postmaster_seams::wpool_population::call() > 0 {
+        pgsync::thread::sleep(std::time::Duration::from_millis(1));
+        postmaster_seams::pm_service_pending::call();
+        quanta += 1;
+        shutdown_drain_check(quanta, budget, "wpool standbys", || {
+            format!("population={}", postmaster_seams::wpool_population::call())
+        });
+    }
+    quanta
+}
+
 /// Session 2's session half: stdio_wire_session_half's shape for an
 /// under-postmaster-style thread — same connection-first order, two
 /// deliberate deltas: (1) wedge-ledger W6: the under-postmaster arm runs
@@ -405,7 +545,7 @@ fn run_second_session_inner() -> ::types_error::PgResult<core::convert::Infallib
     crate::PostgresMain(&dbname, &username)
 }
 
-fn run_second_session() -> i32 {
+fn run_second_session(spec: &SessionSpec) -> i32 {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
         || -> core::convert::Infallible {
             let err = match run_second_session_inner() {
@@ -428,7 +568,22 @@ fn run_second_session() -> i32 {
                 ipc::run_deferred_exit_callbacks(p.code)
             }))
             .unwrap_or(101);
-            dump_artifacts_env("PGRUST_SIMNET_TRANSCRIPT2", "PGRUST_SIMNET_OPLOG2");
+            dump_artifacts_env(spec.transcript_env, spec.oplog_env);
+            // DST-PMCHILD: a REGISTERED session backend reports its exit
+            // through the postmaster's waitpid channel — the closure's last
+            // act, after the deferred exit drain (C's moment: waitpid sees
+            // the child only once fully dead; the shmem-exit callbacks that
+            // MarkPostmasterChildInactive have already run above). The
+            // reaper's Backend arm releases the pmchild slot; the boot
+            // thread's modeled drain keys on that release.
+            if spec.child_slot.is_some()
+                && postmaster_seams::announce_child_exit::is_installed()
+            {
+                postmaster_seams::announce_child_exit::call(
+                    init_small::globals::MyProcPid(),
+                    code << 8,
+                );
+            }
             code
         }
         None => std::panic::resume_unwind(payload),
@@ -452,6 +607,10 @@ fn second_session_thread(
     // setup session wrote — one filesystem per simulated process). None =
     // the sessions=2 private-universe behavior, byte-identical.
     adopt: Option<u64>,
+    // DST-PMCHILD: which session this thread IS (env triple, pid offset,
+    // optional pmchild Backend registration). SessionSpec::second(None) is
+    // the historical behavior, op-for-op.
+    spec: SessionSpec,
 ) -> pgsync::thread::JoinHandle<i32> {
     // PERMIT-S1 compose wiring: pgsync spawn — under PGRUST_SIM_SCHED=1 the
     // child registers in-model (synthetic vpid, parent-side spawn fence) so
@@ -459,7 +618,7 @@ fn second_session_thread(
     // stream is a seeded function of PGRUST_SIM_SEED; plain std passthrough
     // when the scheduler is off (the pre-compose behavior).
     pgsync::thread::Builder::new()
-        .name("sim-session-2".into())
+        .name(spec.thread_name.into())
         .stack_size(64 * 1024 * 1024)
         .spawn(move || {
             snap.apply();
@@ -508,9 +667,19 @@ fn second_session_thread(
             {
                 return 1;
             }
-            miscinit::InitPostmasterChild(init_small::globals::process_id() as i32 + 1)
-                .expect("s2 InitPostmasterChild");
+            miscinit::InitPostmasterChild(
+                init_small::globals::process_id() as i32 + spec.pid_offset,
+            )
+            .expect("s2 InitPostmasterChild");
             miscinit::SetMyBackendType(types_core::init::BackendType::Backend);
+            // DST-PMCHILD: claim the parent-assigned pmchild Backend slot
+            // BEFORE InitProcess — the slot-active protocol
+            // (RegisterPostmasterChildActive / MarkPostmasterChildInactive)
+            // keys off MyPMChildSlot, exactly as run_child_task does for
+            // postmaster-launched children.
+            if let Some(slot) = spec.child_slot {
+                init_small::globals::SetMyPMChildSlot(slot);
+            }
             // Wedge-ledger W5: the postmaster launches backends only after
             // recovery; here the boot thread runs StartupXLOG inside SESSION
             // 1's InitPostgres, so an early second backend reads snapshots
@@ -525,10 +694,10 @@ fn second_session_thread(
                 waited_ms += 1;
                 assert!(waited_ms < 60_000, "s2: recovery never completed (W5 gate)");
             }
-            install_pump_for("PGRUST_SIMNET_SQL2");
-            run_second_session()
+            install_pump_for(spec.sql_env);
+            run_second_session(&spec)
         })
-        .expect("spawn sim-session-2")
+        .expect("spawn sim-session thread")
 }
 
 #[allow(non_snake_case)]
@@ -677,9 +846,38 @@ pub fn PostgresSimNetMain(argv: &[String], username: &str) -> ! {
         let snap = SimInherited::capture();
         let code1 =
             run_session_on_this_thread("PGRUST_SIMNET_TRANSCRIPT", "PGRUST_SIMNET_OPLOG");
+        // DST-MULTIBACKEND: the pool-miss deferral corpus
+        // (PGRUST_SIMNET_POOLMISS, run with PGRUST_NO_WORKER_POOL so every
+        // parallel registration misses the pool and defers to "postmaster
+        // start"). "defer" = run the startup-exit promotion the PM_INIT
+        // surrogate never ran (PM_RUN + conns_allowed + the postmaster
+        // environment) — C's moment is the startup child's clean exit, and
+        // session 1 (which owned recovery) just completed on this thread —
+        // so pm_service_pending's maybe_start_bgworkers arm actually STARTS
+        // the deferred worker through postmaster_child_launch's existing
+        // spawn door (capture/adopt already on that path). Anything else
+        // (the red) leaves the surrogate at PM_INIT: the deferred worker
+        // can never start (the simcorpus §7 boundary resurrected) and the
+        // virtual-time ceiling (PGRUST_SIM_VCEIL_S) names the hang
+        // deterministically instead of a wall-clock timeout.
+        if std::env::var("PGRUST_SIMNET_POOLMISS").as_deref() == Ok("defer") {
+            postmaster_seams::pm_promote_run::call();
+        }
         let adopt = vfs::sim::SimVfs::current_universe_id();
         assert!(adopt.is_some(), "parquery: boot thread lost its universe binding");
-        let s2 = second_session_thread(argv.to_vec(), datadir.clone(), snap, adopt);
+        // DST-PMCHILD: the leader is a REGISTERED pmchild Backend now — the
+        // multibackend §1 zeroed-notify deviation is dead (the notify-pid
+        // validity check passes; ReportBackgroundWorkerPID's SIGUSR1s reach
+        // the leader instead of liveness riding the waiter cadence).
+        let leader_pid = init_small::globals::process_id() as i32 + 1;
+        let leader_slot = register_session_backend(leader_pid);
+        let s2 = second_session_thread(
+            argv.to_vec(),
+            datadir.clone(),
+            snap,
+            adopt,
+            SessionSpec::second(Some(leader_slot)),
+        );
         // The reaper service loop: virtual-time quanta between reap polls
         // (a raw sleep here would hold the permit and starve the leader).
         // ServerLoop parity, both halves per iteration: reap child exits,
@@ -691,23 +889,112 @@ pub fn PostgresSimNetMain(argv: &[String], username: &str) -> ! {
         // Gather-leader hang on NOT_YET_STARTED slots).
         // At target population (the green arm: retention re-parks the
         // standbys) maintain is an atomic-read no-op.
-        while !s2.is_finished() {
-            postmaster_seams::pm_service_pending::call();
-            postmaster_seams::wpool_maintain::call();
-            pgsync::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        // DST-PMCHILD: the loop runs until the reaper has processed the
+        // leader's exit announce (modeled state; the old `s2.is_finished()`
+        // OS-teardown poll — the multibackend §7 row-3 wall coupling — is
+        // retired), then the hooked join.
+        let budget = drain_budget();
+        let qa = drain_until_reaped(&[leader_pid], budget);
+        eprintln!("PMDRAIN sessions-reaped quanta={qa}");
         let code2 = s2.join().unwrap_or(101);
         // Any announce racing the leader's exit, then the pool drain.
         postmaster_seams::pm_service_pending::call();
-        postmaster_seams::wpool_flush::call();
-        let mut polls = 0u32;
-        while postmaster_seams::wpool_population::call() > 0 {
-            pgsync::thread::sleep(std::time::Duration::from_millis(1));
-            postmaster_seams::pm_service_pending::call();
-            polls += 1;
-            assert!(polls < 60_000, "parquery: standbys never drained");
-        }
+        let qb = drain_pool(budget);
+        eprintln!("PMDRAIN pool-drained population=0 quanta={qb}");
         std::process::exit(code1.max(code2))
+    }
+
+    // ---- DST-PMCHILD P13: the first N-SESSION corpus — two full SQL
+    // sessions CONCURRENT under the permit scheduler over ONE shared
+    // universe, both REGISTERED pmchild Backends (real child accounting).
+    // This is the sim-side mirror of the H8 harness lane's client-side
+    // multi-session plans; the convergence point is simharness multi-session
+    // plans driven UNDER sim — the Antithesis-class end state. Roles: the
+    // boot thread plays postmaster + session 1 (setup script, owns recovery
+    // inside its InitPostgres), is then PROMOTED (pm_promote_run — C's
+    // startup-exit moment: PM_RUN + conns_allowed + the postmaster
+    // environment; backends launch under a RUNNING postmaster), registers
+    // sessions 2 and 3 as pmchild Backends and spawns them CONCURRENT; the
+    // scripts (PGRUST_SIMNET_SQL2 / SQL3) interleave at scheduler touches
+    // only, so the whole corpus is a seeded function of PGRUST_SIM_SEED.
+    // Teardown is the modeled drain (both announces reaped, hooked joins,
+    // pool drain, SHUTDOWNDRAIN verdict on a stuck child).
+    // PGRUST_SIM_NOREG=1 (the red) resurrects the multibackend §1 deviation:
+    // anonymous session threads, no registration, no announces —
+    // BackgroundWorkerStateChange zeroes the leader's bgw_notify_pid again
+    // ("worker notification PID … is not valid", DEBUG1) and the drain falls
+    // back to the wall-coupled is_finished polls (the pre-lane shape,
+    // resurrected honestly). Requires PGRUST_SIMVFS_SHARED=1 (one filesystem
+    // per simulated process — the sessions see each other's tables).
+    if std::env::var("PGRUST_SIMNET_NSESSION").is_ok_and(|v| v == "1") {
+        assert!(
+            vfs::sim::SimVfs::shared_universe_active(),
+            "PGRUST_SIMNET_NSESSION requires PGRUST_SIMVFS_SHARED=1 \
+             (the sessions share one universe)"
+        );
+        if let Err(err) = crate::stdio_wire::stdio_wire_boot_half(argv, username) {
+            elog::emit_error_report_for(&err);
+            std::process::exit(1);
+        }
+        // PostmasterMain parity (the parquery pair): bgworker registry +
+        // the warm pool — session 2's script includes a real Gather, so the
+        // notify flow this corpus proves is exercised end-to-end.
+        postmaster_seams::bgworker_shmem_init::call();
+        postmaster_seams::wpool_maintain::call();
+        let snap = SimInherited::capture();
+        let code1 =
+            run_session_on_this_thread("PGRUST_SIMNET_TRANSCRIPT", "PGRUST_SIMNET_OPLOG");
+        // The startup-exit promotion: session 1 owned recovery and just
+        // completed on this thread — C's moment for PM_RUN.
+        postmaster_seams::pm_promote_run::call();
+        let adopt = vfs::sim::SimVfs::current_universe_id();
+        assert!(adopt.is_some(), "nsession: boot thread lost its universe binding");
+        let noreg = std::env::var("PGRUST_SIM_NOREG").as_deref() == Ok("1");
+        let base_pid = init_small::globals::process_id() as i32;
+        let (slot2, slot3, pids) = if noreg {
+            (None, None, Vec::new())
+        } else {
+            let p2 = base_pid + 1;
+            let p3 = base_pid + 2;
+            (
+                Some(register_session_backend(p2)),
+                Some(register_session_backend(p3)),
+                vec![p2, p3],
+            )
+        };
+        let s2 = second_session_thread(
+            argv.to_vec(),
+            datadir.clone(),
+            snap.clone(),
+            adopt,
+            SessionSpec::second(slot2),
+        );
+        let s3 = second_session_thread(
+            argv.to_vec(),
+            datadir.clone(),
+            snap,
+            adopt,
+            SessionSpec::third(slot3),
+        );
+        let budget = drain_budget();
+        if noreg {
+            // The resurrected pre-lane drain (the red rides it): OS-fact
+            // polling on cadence — no announces exist to wait for.
+            while !s2.is_finished() || !s3.is_finished() {
+                postmaster_seams::pm_service_pending::call();
+                postmaster_seams::wpool_maintain::call();
+                pgsync::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        } else {
+            let qa = drain_until_reaped(&pids, budget);
+            eprintln!("PMDRAIN sessions-reaped quanta={qa}");
+        }
+        let code2 = s2.join().unwrap_or(101);
+        let code3 = s3.join().unwrap_or(101);
+        postmaster_seams::pm_service_pending::call();
+        let qb = drain_pool(budget);
+        eprintln!("PMDRAIN pool-drained population=0 quanta={qb}");
+        std::process::exit(code1.max(code2).max(code3))
     }
 
     if sessions <= 1 {
@@ -774,10 +1061,22 @@ pub fn PostgresSimNetMain(argv: &[String], username: &str) -> ! {
     let serial = std::env::var("PGRUST_SIMNET_DUO_SERIAL").is_ok_and(|v| v == "1");
     let (code1, code2) = if serial {
         let code1 = run_session_on_this_thread("PGRUST_SIMNET_TRANSCRIPT", "PGRUST_SIMNET_OPLOG");
-        let s2 = second_session_thread(argv.to_vec(), datadir.clone(), snap, None);
+        let s2 = second_session_thread(
+            argv.to_vec(),
+            datadir.clone(),
+            snap,
+            None,
+            SessionSpec::second(None),
+        );
         (code1, s2.join().unwrap_or(101))
     } else {
-        let s2 = second_session_thread(argv.to_vec(), datadir.clone(), snap, None);
+        let s2 = second_session_thread(
+            argv.to_vec(),
+            datadir.clone(),
+            snap,
+            None,
+            SessionSpec::second(None),
+        );
         let code1 = run_session_on_this_thread("PGRUST_SIMNET_TRANSCRIPT", "PGRUST_SIMNET_OPLOG");
         (code1, s2.join().unwrap_or(101))
     };

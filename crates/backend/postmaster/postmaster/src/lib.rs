@@ -841,9 +841,36 @@ fn pm_service_pending() {
     }
 }
 
+/// pm_promote_run seam impl (DST-MULTIBACKEND): the startup-exit promotion
+/// for harness boot threads that play the postmaster — the arm of
+/// process_pm_child_exit's startup case a PM_INIT surrogate never runs
+/// (the surrogate owns recovery inside session 1's InitPostgres, so
+/// "startup finished" is its state by construction once that session
+/// completes). PostmasterMain parity first: claim the postmaster
+/// environment (main_entry.rs sets it before any child spawns; the
+/// standalone boot ladder never does), thread-local like every "C
+/// per-process global" — session 1 already ran, and children capture it
+/// at spawn through `Inherited`. Then the startup-exit trio: PM_RUN,
+/// connections allowed (PostmasterStateMachine treats PM_RUN with
+/// conns_allowed=false as the smart-shutdown STOP_BACKENDS trigger), and
+/// the deferred-bgworker sweep request. With this state,
+/// pm_service_pending's maybe_start_bgworkers arm can actually START a
+/// pool-miss deferral (bgworker_should_start_now: ConsistentState needs
+/// PM_RUN) through postmaster_child_launch (which asserts
+/// IsPostmasterEnvironment) — the simcorpus §7 named boundary, closed.
+fn pm_promote_run() {
+    init_small::globals::SetIsPostmasterEnvironment(true);
+    statemachine::UpdatePMState(PMState::PM_RUN);
+    with_pm(|pm| {
+        pm.conns_allowed = true;
+        pm.start_worker_needed = true;
+    });
+}
+
 pub fn init_seams() {
     postmaster_seams::announce_child_exit::set(announce_child_exit);
     postmaster_seams::bgworker_shmem_init::set(bgworker::BackgroundWorkerShmemInit);
+    postmaster_seams::pm_promote_run::set(pm_promote_run);
     postmaster_seams::pm_service_pending::set(pm_service_pending);
     postmaster_seams::signal_postmaster_sigusr1::set(|| handle_pm_pmsignal_signal(procsignal::signums::SIGUSR1));
     postmaster_seams::signal_postmaster_sighup::set(|| handle_pm_reload_request_signal(procsignal::signums::SIGHUP));

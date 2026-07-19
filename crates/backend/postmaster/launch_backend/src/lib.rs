@@ -990,6 +990,21 @@ pub mod wpool {
                     break;
                 }
                 Err(_) => {
+                    // DST-PMCHILD shutdown-drain RED fixture (sim-only,
+                    // PGRUST_SIM_STUCKCHILD=1): the FIRST standby to be
+                    // retired refuses to exit — it parks forever on hooked
+                    // sleeps (the scheduler keeps advancing virtual time, so
+                    // the boot thread's drain must produce the NAMED
+                    // SHUTDOWNDRAIN verdict, never a hang; the SCHEDCEILING
+                    // bound is the net that would name the parked site).
+                    // POPULATION stays charged — exactly the observable a
+                    // real never-exiting child would leave.
+                    #[cfg(pgrust_sim)]
+                    if stuck_child_take_once() {
+                        loop {
+                            pgsync::thread::sleep(std::time::Duration::from_millis(1));
+                        }
+                    }
                     // Retired while parked (maintain shrink / reload flush /
                     // cross-db miss) or never claimed: release any retained
                     // identity, drop our reaper entry (nothing announced this
@@ -1107,6 +1122,31 @@ pub mod wpool {
                 }
             }
         }
+    }
+
+    /// DST-PMCHILD (sim-only): one-shot arming of the shutdown-drain red —
+    /// returns true exactly once process-wide, and only when
+    /// PGRUST_SIM_STUCKCHILD=1. Plain atomics for the armed memo (the
+    /// schedule-invisible pattern — the multibackend §3 pgsync-OnceLock
+    /// lesson: a hooked memo on this path would perturb every corpus); the
+    /// env read itself happens at most once per thread on the cold retire
+    /// arm, never on a task path.
+    #[cfg(pgrust_sim)]
+    fn stuck_child_take_once() -> bool {
+        use std::sync::atomic::{AtomicBool, AtomicU8};
+        static ARMED: AtomicU8 = AtomicU8::new(0); // 0 unknown, 1 armed, 2 off
+        static TAKEN: AtomicBool = AtomicBool::new(false);
+        let mut armed = ARMED.load(Relaxed);
+        if armed == 0 {
+            armed = if std::env::var("PGRUST_SIM_STUCKCHILD").as_deref() == Ok("1") {
+                1
+            } else {
+                2
+            };
+            // Racing initializers compute the same value: benign.
+            ARMED.store(armed, Relaxed);
+        }
+        armed == 1 && !TAKEN.swap(true, Relaxed)
     }
 
     fn rekey_child_thread(old_pid: pid_t, new_pid: pid_t) {

@@ -14,7 +14,17 @@
 #![allow(clippy::result_large_err)]
 
 use std::cell::RefCell;
-use std::sync::Mutex;
+
+// PERMIT (dst-multibackend): the bgworker registry + static-pending lists are
+// pgsync — THE single lock library. `RegisterDynamicBackgroundWorker` holds
+// the registry lock across `parallel_pool_dispatch` (a hooked pool send), so
+// a warm standby claimed inside that critical section can be granted the
+// permit and reach `BackgroundWorkerMain -> with_registry` while the leader
+// still holds the lock; a raw std mutex there is a park-holding-a-raw-lock
+// wedge the sim watchdog caught at pool=4 (notes/dst-multibackend.md §2). The
+// native arm is the identical std re-export (zero cost); under sim the
+// contended lock is a hooked block_on that hands off to the leader.
+use pgsync::Mutex;
 
 use elog::{elog as report, ereport};
 use init_small::globals as g;
@@ -116,7 +126,43 @@ struct Registry {
 
 static REGISTRY: Mutex<Option<Registry>> = Mutex::new(None);
 
+/// DST-MULTIBACKEND red battery (sim-only, env-armed): resurrect the pool=4
+/// wedge deliberately — `PGRUST_SIM_RAWREG=1` routes every registry acquire
+/// through a RAW std::sync::Mutex gate the permit scheduler cannot see,
+/// restoring the exact pre-conversion blocking structure (a claimed standby
+/// granted the permit blocks raw on the gate the Gather leader holds across
+/// parallel_pool_dispatch). THE watchdog must catch it as
+/// permit-holder-blocked-outside-interception; the rawness IS the fixture
+/// (the sim_sched_demo P4-red discipline — never converts). Registry access
+/// never nests (single-closure discipline), so the non-reentrant gate is
+/// safe when armed; native builds compile none of this.
+#[cfg(pgrust_sim)]
+fn raw_registry_gate() -> Option<std::sync::MutexGuard<'static, ()>> {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Plain-atomic armed memo (0 unknown / 1 off / 2 armed) — deliberately
+    // NOT a pgsync OnceLock: this check runs on EVERY registry acquire, and
+    // a hooked-lock memo emits scheduler ops per call, perturbing every
+    // corpus's schedule (P9's x3 identity broke on exactly that — the memo
+    // ops shifted its teardown into the wall-timing window of the harness
+    // drain poll). Atomics are deliberately unintercepted (pgsync design
+    // §1: one runnable thread totally orders them), so the disarmed fast
+    // path is schedule-invisible.
+    static ARMED: AtomicU8 = AtomicU8::new(0);
+    let armed = match ARMED.load(Ordering::Relaxed) {
+        0 => {
+            let v = if std::env::var_os("PGRUST_SIM_RAWREG").is_some() { 2 } else { 1 };
+            ARMED.store(v, Ordering::Relaxed);
+            v
+        }
+        v => v,
+    };
+    (armed == 2).then(|| GATE.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
 fn with_registry<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
+    #[cfg(pgrust_sim)]
+    let _raw_gate = raw_registry_gate();
     let mut guard = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
     let reg = guard
         .as_mut()
@@ -858,7 +904,7 @@ fn fatal_exit(e: &PgError) -> ! {
 // Launch-path phase timestamp, PGRUST_GATHER_TRACE-gated (duplicated from
 // parallel::gtrace — this crate sits below parallel in the dep graph).
 pub fn gtrace(phase: &str) {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static ON: pgsync::OnceLock<bool> = pgsync::OnceLock::new();
     if !*ON.get_or_init(|| std::env::var_os("PGRUST_GATHER_TRACE").is_some()) {
         return;
     }
