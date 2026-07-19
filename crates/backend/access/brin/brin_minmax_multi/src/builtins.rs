@@ -246,12 +246,11 @@ fn fc_summary_out(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<D
     ))
 }
 
-// unported: brin_minmax_multi_summary_send (binary-copy lane).
-fn fc_summary_send(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    Err(Box::new(
-        PgError::error("binary output of type brin_minmax_multi_summary is not supported")
-            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
-    ))
+// brin_minmax_multi.c brin_minmax_multi_summary_send: `return byteasend(fcinfo);`
+// — the summary is serialized as a bytea, so binary output is plain byteasend
+// (varlena.c). Mirrors the bloom sibling's fc_summary_send.
+fn fc_summary_send(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    varlena::builtins::fc_byteasend(None, fcinfo)
 }
 
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: ::fmgr::PGFunction) -> FmgrBuiltin {
@@ -297,3 +296,33 @@ pub const MINMAX_MULTI_BUILTINS: &[FmgrBuiltin] = &[
     b(4640, "brin_minmax_multi_summary_recv", 1, fc_summary_recv),
     b(4641, "brin_minmax_multi_summary_send", 1, fc_summary_send),
 ];
+
+#[cfg(test)]
+mod send_tests {
+    use super::*;
+    use ::mcx::MemoryContext;
+
+    // C brin_minmax_multi.c brin_minmax_multi_summary_send is exactly
+    // `return byteasend(fcinfo);` — the wire image is the bytea payload
+    // unchanged. Red at base: the stub errored 0A000 "binary output of type
+    // brin_minmax_multi_summary is not supported" where C sends bytes
+    // (inspect-audit residual F-send). The value has no in/recv constructor
+    // on this tree, so the binary-COPY path is pinned as a direct unit.
+    #[test]
+    fn summary_send_is_byteasend() {
+        let ctx = MemoryContext::new("t");
+        let payload: &[u8] = &[0x01, 0x02, 0xff, 0x00, 0x7f];
+        let mut image = Vec::with_capacity(payload.len() + 4);
+        image.extend_from_slice(&::datum::varlena::set_varsize_4b(payload.len() + 4));
+        image.extend_from_slice(payload);
+
+        let mut fci = ::fmgr::LocalFcinfo::<1>::new(0);
+        // SAFETY: ctx outlives the call.
+        unsafe { fci.set_result_mcx(ctx.mcx()) };
+        fci.set_arg(0, Datum::from_usize(image.as_ptr() as usize));
+        let d = fc_summary_send(None, &mut fci).unwrap();
+        // SAFETY: byteasend returns an inline bytea image.
+        let v = unsafe { ::fmgr::PackedVarlena::from_ptr(d.as_usize() as *const u8) };
+        assert_eq!(v.data(), payload);
+    }
+}

@@ -2261,6 +2261,7 @@ dependencies = [
  "types_scan",
  "types_storage",
  "types_tuple",
+ "varlena",
 ]
 
 [[package]]
