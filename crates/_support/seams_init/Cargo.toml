@@ -306,6 +306,9 @@ hstore = { path = "../../contrib/hstore" }
 pg_trgm = { path = "../../contrib/pg_trgm" }
 btree_gist = { path = "../../contrib/btree_gist" }
 btree_gin = { path = "../../contrib/btree_gin" }
+contrib_cube = { path = "../../contrib/cube" }
+contrib_earthdistance = { path = "../../contrib/earthdistance" }
+contrib_seg = { path = "../../contrib/seg" }
 unaccent = { path = "../../contrib/unaccent" }
 pg_walinspect = { path = "../../contrib/pg_walinspect" }
 injection_points = { path = "../../contrib/injection_points" }
