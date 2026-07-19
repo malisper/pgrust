@@ -46,3 +46,11 @@ seam_core::seam!(
     // dbase_redo's XLOG_DBASE_DROP arm drop the database's slots.
     pub fn replication_slots_drop_db_slots(dboid: types_core::Oid) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    // ReplicationSlotsComputeLogicalRestartLSN (slot.c): oldest restart_lsn
+    // across in-use logical slots; InvalidXLogRecPtr when none. The logical
+    // rewrite-mapping checkpoint GC uses it as its removal cutoff.
+    pub fn replication_slots_compute_logical_restart_lsn(
+    ) -> types_error::PgResult<types_core::XLogRecPtr>
+);
