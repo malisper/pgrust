@@ -1,0 +1,37 @@
+[package]
+name = "pg_surgery"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pg_surgery"
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../_support/types/datum" }
+mcx = { path = "../../_support/mcx" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+types_fmgr = { path = "../../_support/types/fmgr" }
+types_rel = { path = "../../_support/types/rel" }
+types_storage = { path = "../../_support/types/types_storage" }
+types_tuple = { path = "../../_support/types/types_tuple" }
+dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
+relation = { path = "../../backend/access/common/relation" }
+bufmgr = { path = "../../backend/storage/buffer/bufmgr" }
+xloginsert = { path = "../../backend/access/transam/xloginsert" }
+transam_xlog = { path = "../../backend/access/transam/transam_xlog" }
+transam_xlog_seams = { path = "../../backend/access/transam/transam_xlog_seams" }
+visibilitymap = { path = "../../backend/access/heap/visibilitymap" }
+arrayfuncs = { path = "../../backend/utils/adt/arrayfuncs" }
+arrayutils = { path = "../../backend/utils/adt/arrayutils" }
+detoast_seams = { path = "../../backend/access/common/detoast_seams" }
+aclchk = { path = "../../backend/catalog/aclchk" }
+miscinit = { path = "../../backend/utils/init/miscinit" }
+init_small = { path = "../../backend/utils/init/init_small" }
+elog_seams = { path = "../../backend/utils/error/elog_seams" }
+tableam_vocab = { path = "../../backend/access/table/tableam_vocab" }
+postgres_seams = { path = "../../backend/tcop/postgres_seams" }
+types_nodes = { path = "../../_support/types/nodes" }
+pg_class = { path = "../../backend/catalog/pg_class" }
