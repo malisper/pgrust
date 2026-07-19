@@ -4,9 +4,9 @@ use core::ptr::NonNull;
 use mcx::{Mcx, PgVec};
 use types_core::Oid;
 use types_nodes::list::NodeList;
-use types_nodes::JoinType;
 use types_pathnodes::{
-    NodeId, QualCost, RelId, Relids, RinfoId, UpperRelationKind, UPPERREL_SETOP,
+    JoinType, NodeId, QualCost, RelId, Relids, RinfoId, UpperRelationKind, JOIN_INNER,
+    UPPERREL_SETOP,
 };
 
 // PgFdwRelationInfo (postgres_fdw.h). Divergence: the C struct caches the
@@ -97,7 +97,7 @@ impl<'mcx> PgFdwRelationInfo<'mcx> {
             relation_name: "",
             outerrel: None,
             innerrel: None,
-            jointype: JoinType::JOIN_INNER,
+            jointype: JOIN_INNER,
             joinclauses: PgVec::new_in(mcx),
             stage: UPPERREL_SETOP,
             grouped_tlist: NodeList::nil(),

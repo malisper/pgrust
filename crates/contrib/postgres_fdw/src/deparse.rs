@@ -1055,7 +1055,7 @@ fn deparse_array_expr<'mcx>(
 
 fn deparse_aggref<'mcx>(
     ctx: &mut DeparseCtx<'_, 'mcx>,
-    node: &types_nodes::primnodes::Aggref<'mcx>,
+    node: &'mcx types_nodes::primnodes::Aggref<'mcx>,
 ) -> PgResult<()> {
     debug_assert_eq!(node.aggsplit, types_nodes::primnodes::AGGSPLIT_SIMPLE);
     let use_variadic = node.aggvariadic;
