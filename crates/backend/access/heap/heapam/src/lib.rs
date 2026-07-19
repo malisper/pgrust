@@ -98,10 +98,13 @@ fn elog_error(message: impl Into<std::string::String>) -> Box<PgError> {
     Box::new(PgError::error(message))
 }
 
-// CheckXidAlive (logical decoding only, unported): const-false like C's unlikely().
+// CheckXidAlive (xact.c) is set while logical decoding replays a prepared
+// (or, phase-2, streamed) transaction; direct heap access outside the
+// systable_* wrappers (which set bsysscan) is a decode-path bug. Mirrors
+// heapam.c:1361's `unlikely(TransactionIdIsValid(CheckXidAlive) && !bsysscan)`.
+#[inline]
 fn unexpected_during_logical_decoding() -> bool {
-    const CHECK_XID_ALIVE: TransactionId = InvalidTransactionId;
-    TransactionIdIsValid(CHECK_XID_ALIVE)
+    TransactionIdIsValid(xact::CheckXidAlive()) && !xact::bsysscan()
 }
 
 #[cold]
