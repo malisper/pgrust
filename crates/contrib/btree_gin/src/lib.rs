@@ -30,7 +30,6 @@ fn unrecognized_strategy(strategy: u16) -> Box<PgError> {
     Box::new(PgError::error(format!("unrecognized strategy number: {strategy}")))
 }
 
-// GIN entry keys are inline, never external/compressed.
 fn var_payload<'a>(d: Datum) -> &'a [u8] {
     let p = d.as_usize() as *const u8;
     // SAFETY: non-null inline varlena image readable through its header.
@@ -119,9 +118,8 @@ fn name_ref<'a>(d: Datum) -> &'a NameData {
     unsafe { &*(d.as_usize() as *const NameData) }
 }
 
-// Short-header index keys pack digits at odd addresses (numeric headers are
-// 2/4 bytes, so digit parity == payload parity); realign by copy
-// (C DatumGetNumeric's unpacking copy; short payloads are <= 125 bytes).
+// Short-header keys pack digits at odd addresses (headers are 2/4B, so digit
+// parity == payload parity); realign by copy (C DatumGetNumeric; short <= 125B).
 fn aligned_num<'a>(payload: &'a [u8], buf: &'a mut [u16; 64]) -> adt_numeric::Num<'a> {
     let num = adt_numeric::Num::from_payload(payload);
     if num.is_special() || payload.as_ptr() as usize % 2 == 0 {
@@ -136,23 +134,41 @@ fn aligned_num<'a>(payload: &'a [u8], buf: &'a mut [u16; 64]) -> adt_numeric::Nu
     adt_numeric::Num::from_payload(dst)
 }
 
-fn numeric_sentinel_cmp(a: Datum, b: Datum) -> i32 {
-    // gin_numeric_cmp: PointerGetDatum(NULL) is the leftmost sentinel.
-    if a.as_usize() == 0 {
-        if b.as_usize() == 0 {
-            0
-        } else {
-            -1
+fn inline_image(d: Datum) -> bool {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: non-null varlena datum readable through its header.
+    unsafe { (varatt::varatt_is_1b(p) && !varatt::varatt_is_1b_e(p)) || varatt::varatt_is_4b_u(p) }
+}
+
+fn payload_cmp(ty: GinBtreeType, pa: &[u8], pb: &[u8], collation: Oid) -> PgResult<i32> {
+    use GinBtreeType as T;
+    Ok(match ty {
+        T::Inet => adt_network::network_cmp_internal(
+            adt_network::InetRef::from_payload(pa),
+            adt_network::InetRef::from_payload(pb),
+        ),
+        T::Text => varlena::varstr_cmp(pa, pb, collation)?,
+        T::Bpchar => adt_varchar::bpcharcmp(pa, pb, collation)?,
+        T::Bytea => varlena::bytea::byteacmp(pa, pb),
+        T::Bit => adt_varbit::bit_cmp_payload(pa, pb),
+        T::Numeric => {
+            let (mut ba, mut bb) = ([0u16; 64], [0u16; 64]);
+            adt_numeric::cmp_numerics(aligned_num(pa, &mut ba), aligned_num(pb, &mut bb))
         }
-    } else if b.as_usize() == 0 {
-        1
-    } else {
-        let (mut ba, mut bb) = ([0u16; 64], [0u16; 64]);
-        adt_numeric::cmp_numerics(
-            aligned_num(var_payload(a), &mut ba),
-            aligned_num(var_payload(b), &mut bb),
-        )
+        _ => unreachable!("non-varlena type in payload_cmp"),
+    })
+}
+
+// index_form_tuple inline-compresses varlena keys > 2040B (TOAST_INDEX_HACK);
+// C's typecmp fns detoast per compare. The scratch context is cold.
+fn varlena_cmp(ty: GinBtreeType, a: Datum, b: Datum, collation: Oid) -> PgResult<i32> {
+    if inline_image(a) && inline_image(b) {
+        return payload_cmp(ty, var_payload(a), var_payload(b), collation);
     }
+    let cx = mcx::MemoryContext::new("btree_gin key detoast");
+    let pa = &detoasted_image(cx.mcx(), a)?[VARHDRSZ..];
+    let pb = &detoasted_image(cx.mcx(), b)?[VARHDRSZ..];
+    payload_cmp(ty, pa, pb, collation)
 }
 
 fn enum_sentinel_cmp(a: Oid, b: Oid) -> PgResult<i32> {
@@ -188,15 +204,21 @@ fn compare(ty: GinBtreeType, a: Datum, b: Datum, collation: Oid) -> PgResult<i32
         T::Uuid => cmp_ord(fixed_bytes(a, 16), fixed_bytes(b, 16)),
         T::Name => name::btnamecmp(name_ref(a), name_ref(b), collation)?,
         T::Bool | T::Char => a.as_u8() as i32 - b.as_u8() as i32,
-        T::Inet => adt_network::network_cmp_internal(
-            adt_network::InetRef::from_payload(var_payload(a)),
-            adt_network::InetRef::from_payload(var_payload(b)),
-        ),
-        T::Text => varlena::varstr_cmp(var_payload(a), var_payload(b), collation)?,
-        T::Bpchar => adt_varchar::bpcharcmp(var_payload(a), var_payload(b), collation)?,
-        T::Bytea => varlena::bytea::byteacmp(var_payload(a), var_payload(b)),
-        T::Bit => adt_varbit::bit_cmp_payload(var_payload(a), var_payload(b)),
-        T::Numeric => numeric_sentinel_cmp(a, b),
+        T::Inet | T::Text | T::Bpchar | T::Bytea | T::Bit => varlena_cmp(ty, a, b, collation)?,
+        // gin_numeric_cmp: PointerGetDatum(NULL) is the leftmost sentinel.
+        T::Numeric => {
+            if a.as_usize() == 0 {
+                if b.as_usize() == 0 {
+                    0
+                } else {
+                    -1
+                }
+            } else if b.as_usize() == 0 {
+                1
+            } else {
+                varlena_cmp(ty, a, b, collation)?
+            }
+        }
         T::Enum => enum_sentinel_cmp(a.as_oid(), b.as_oid())?,
     })
 }
@@ -320,13 +342,9 @@ fn fc_internal_stub(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult
 }
 
 fn fc_gin_numeric_cmp(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    // SAFETY: strict fn — non-null numeric varlenas (sentinels are
-    // opclass-internal).
-    let (a, b) = unsafe { (fcinfo.arg_varlena_packed(0)?, fcinfo.arg_varlena_packed(1)?) };
-    Ok(Datum::from_i32(adt_numeric::cmp_numerics(
-        adt_numeric::Num::from_payload(a.data()),
-        adt_numeric::Num::from_payload(b.data()),
-    )))
+    // SAFETY: strict fn — non-null numeric varlenas.
+    let (a, b) = unsafe { (adt_numeric::builtins::num_arg(fcinfo, 0)?, adt_numeric::builtins::num_arg(fcinfo, 1)?) };
+    Ok(Datum::from_i32(adt_numeric::cmp_numerics(a, b)))
 }
 
 fn fc_gin_enum_cmp(mut f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
