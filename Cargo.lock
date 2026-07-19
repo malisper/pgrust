@@ -14978,6 +14978,7 @@ dependencies = [
  "table",
  "tableam",
  "tablecmds",
+ "tablefunc",
  "tablesample",
  "tcop_dest",
  "test_decoding",
@@ -16830,6 +16831,30 @@ dependencies = [
  "seam_core",
  "types_core",
  "types_error",
+]
+
+[[package]]
+name = "tablefunc"
+version = "0.0.0"
+dependencies = [
+ "adt_quote",
+ "datum",
+ "dfmgr",
+ "fmgr_core",
+ "format_type",
+ "funcapi",
+ "heaptuple",
+ "lsyscache",
+ "mcx",
+ "pg_prng",
+ "rustc-hash",
+ "spi",
+ "tupdesc",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_tuple",
+ "varlena",
 ]
 
 [[package]]
