@@ -306,6 +306,7 @@ pg_walinspect = { path = "../../contrib/pg_walinspect" }
 pg_visibility = { path = "../../contrib/pg_visibility" }
 pgrowlocks = { path = "../../contrib/pgrowlocks" }
 pg_logicalinspect = { path = "../../contrib/pg_logicalinspect" }
+pg_overexplain = { path = "../../contrib/pg_overexplain" }
 adt_formatting = { path = "../../backend/utils/adt/formatting" }
 session = { path = "../../backend/access/session" }
 relpath = { path = "../../common/relpath" }

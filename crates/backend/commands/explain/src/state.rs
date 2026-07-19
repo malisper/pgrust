@@ -41,8 +41,6 @@ pub struct WorkersState<'mcx> {
     pub worker_state_save: PgVec<'mcx, i32>,
 }
 
-// Omitted vs C's ExplainState: extension_state (no extension options
-// registered in this build; ApplyExtensionExplainOption always misses).
 pub struct ExplainState<'mcx> {
     pub str: StringInfo<'mcx>,
     pub verbose: bool,
@@ -69,6 +67,8 @@ pub struct ExplainState<'mcx> {
     pub rtable_names: PgVec<'mcx, Option<&'mcx str>>,
     pub hide_workers: bool,
     pub workers_state: Option<WorkersState<'mcx>>,
+    /// C's void*-per-extension slot array, indexed by GetExplainExtensionId.
+    pub extension_state: PgVec<'mcx, Option<&'mcx (dyn core::any::Any + 'static)>>,
     /// plan_ids already displayed (C printed_subplans).
     pub printed_subplans: types_nodes::bitmapset::Bitmapset<'mcx>,
     pub deparse_cxt: Option<ruleutils::PlanDeparse<'mcx>>,
@@ -99,18 +99,124 @@ pub fn NewExplainState(mcx: Mcx<'_>) -> PgResult<ExplainState<'_>> {
         rtable_names: PgVec::new_in(mcx),
         hide_workers: false,
         workers_state: None,
+        extension_state: PgVec::new_in(mcx),
         deparse_cxt: None,
     })
 }
 
+// explain_state.c extension surface. C keeps these in per-backend statics;
+// one backend = one thread here.
+pub type ExplainOptionHandler =
+    for<'a> fn(&mut ExplainState<'a>, &types_nodes::parsenodes::DefElem<'a>, Mcx<'a>) -> PgResult<()>;
+pub type ExplainPerNodeHook = for<'a> fn(
+    types_nodes::Node<'a>,
+    Option<&str>,
+    Option<&str>,
+    &mut ExplainState<'a>,
+) -> PgResult<()>;
+pub type ExplainPerPlanHook =
+    for<'a> fn(&'a PlannedStmt<'a>, &mut ExplainState<'a>, &str) -> PgResult<()>;
+
+thread_local! {
+    static EXTENSION_NAMES: std::cell::RefCell<Vec<&'static str>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    static EXTENSION_OPTIONS: std::cell::RefCell<Vec<(&'static str, ExplainOptionHandler)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    static PER_NODE_HOOK: std::cell::Cell<Option<ExplainPerNodeHook>> =
+        const { std::cell::Cell::new(None) };
+    static PER_PLAN_HOOK: std::cell::Cell<Option<ExplainPerPlanHook>> =
+        const { std::cell::Cell::new(None) };
+}
+
+pub fn GetExplainExtensionId(extension_name: &'static str) -> usize {
+    EXTENSION_NAMES.with_borrow_mut(|names| {
+        if let Some(i) = names.iter().position(|n| *n == extension_name) {
+            return i;
+        }
+        names.push(extension_name);
+        names.len() - 1
+    })
+}
+
+pub fn GetExplainExtensionState<'mcx>(
+    es: &ExplainState<'mcx>,
+    extension_id: usize,
+) -> Option<&'mcx (dyn core::any::Any + 'static)> {
+    es.extension_state.get(extension_id).copied().flatten()
+}
+
+pub fn SetExplainExtensionState<'mcx>(
+    es: &mut ExplainState<'mcx>,
+    extension_id: usize,
+    opaque: &'mcx (dyn core::any::Any + 'static),
+) {
+    while es.extension_state.len() <= extension_id {
+        es.extension_state.push(None);
+    }
+    es.extension_state[extension_id] = Some(opaque);
+}
+
+pub fn RegisterExtensionExplainOption(option_name: &'static str, handler: ExplainOptionHandler) {
+    EXTENSION_OPTIONS.with_borrow_mut(|opts| {
+        if let Some(e) = opts.iter_mut().find(|(n, _)| *n == option_name) {
+            e.1 = handler;
+        } else {
+            opts.push((option_name, handler));
+        }
+    });
+}
+
+fn ApplyExtensionExplainOption<'mcx>(
+    es: &mut ExplainState<'mcx>,
+    opt: &types_nodes::parsenodes::DefElem<'mcx>,
+    mcx: Mcx<'mcx>,
+) -> PgResult<bool> {
+    let handler = EXTENSION_OPTIONS.with_borrow(|opts| {
+        opts.iter()
+            .find(|(n, _)| Some(*n) == opt.defname)
+            .map(|(_, h)| *h)
+    });
+    match handler {
+        Some(h) => h(es, opt, mcx).map(|()| true),
+        None => Ok(false),
+    }
+}
+
+pub fn explain_per_node_hook() -> Option<ExplainPerNodeHook> {
+    PER_NODE_HOOK.get()
+}
+
+pub fn set_explain_per_node_hook(hook: Option<ExplainPerNodeHook>) {
+    PER_NODE_HOOK.set(hook);
+}
+
+pub fn explain_per_plan_hook() -> Option<ExplainPerPlanHook> {
+    PER_PLAN_HOOK.get()
+}
+
+pub fn set_explain_per_plan_hook(hook: Option<ExplainPerPlanHook>) {
+    PER_PLAN_HOOK.set(hook);
+}
+
 #[cold]
-fn bad_option_value(defname: &str, value: &str) -> types_error::PgError {
+fn bad_option_value(defname: &str, value: &str, pos: i32) -> types_error::PgError {
     ereport(ERROR)
         .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
         .errmsg(format!(
             "unrecognized value for EXPLAIN option \"{defname}\": \"{value}\""
         ))
+        .errposition(pos)
         .into_error()
+}
+
+// parser_errposition over the utility statement's query string (C passes the
+// ParseState down; only its p_sourcetext is needed here).
+fn opt_errposition(query_string: &str, location: i32) -> i32 {
+    parser_small1::parser_errposition_source(
+        Some(query_string.as_bytes()),
+        location,
+        mbutils::GetDatabaseEncoding(),
+    )
 }
 
 #[cold]
@@ -121,12 +227,13 @@ fn requires_analyze(option: &str) -> types_error::PgError {
         .into_error()
 }
 
-// C signature also takes a ParseState for error cursor positions; positions
-// are omitted repo-wide in ereports today.
+// C signature takes a ParseState; only its p_sourcetext feeds the error
+// cursor positions, so the query string stands in for it.
 pub fn ParseExplainOptionList<'mcx>(
     es: &mut ExplainState<'mcx>,
     mcx: Mcx<'mcx>,
     options: &NodeList<'mcx>,
+    query_string: &str,
 ) -> PgResult<()> {
     let mut timing_set = false;
     let mut buffers_set = false;
@@ -161,7 +268,14 @@ pub fn ParseExplainOptionList<'mcx>(
                         "off" | "none" => EXPLAIN_SERIALIZE_NONE,
                         "text" => EXPLAIN_SERIALIZE_TEXT,
                         "binary" => EXPLAIN_SERIALIZE_BINARY,
-                        other => return Err(bad_option_value(defname, other).into()),
+                        other => {
+                            return Err(bad_option_value(
+                                defname,
+                                other,
+                                opt_errposition(query_string, opt.location),
+                            )
+                            .into())
+                        }
                     };
                 } else {
                     es.serialize = EXPLAIN_SERIALIZE_TEXT;
@@ -173,16 +287,25 @@ pub fn ParseExplainOptionList<'mcx>(
                     "xml" => EXPLAIN_FORMAT_XML,
                     "json" => EXPLAIN_FORMAT_JSON,
                     "yaml" => EXPLAIN_FORMAT_YAML,
-                    other => return Err(bad_option_value(defname, other).into()),
+                    other => {
+                        return Err(bad_option_value(
+                            defname,
+                            other,
+                            opt_errposition(query_string, opt.location),
+                        )
+                        .into())
+                    }
                 };
             }
-            // ApplyExtensionExplainOption: no extension options registered.
             other => {
-                return Err(ereport(ERROR)
-                    .errcode(ERRCODE_SYNTAX_ERROR)
-                    .errmsg(format!("unrecognized EXPLAIN option \"{other}\""))
-                    .into_error()
-                    .into())
+                if !ApplyExtensionExplainOption(es, opt, mcx)? {
+                    return Err(ereport(ERROR)
+                        .errcode(ERRCODE_SYNTAX_ERROR)
+                        .errmsg(format!("unrecognized EXPLAIN option \"{other}\""))
+                        .errposition(opt_errposition(query_string, opt.location))
+                        .into_error()
+                        .into());
+                }
             }
         }
     }

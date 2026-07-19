@@ -9,3 +9,11 @@ name = "pg_overexplain"
 path = "src/lib.rs"
 
 [dependencies]
+mcx = { path = "../../_support/mcx" }
+types_error = { path = "../../_support/types/types_error" }
+types_nodes = { path = "../../_support/types/nodes" }
+dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
+explain = { path = "../../backend/commands/explain" }
+lsyscache = { path = "../../backend/utils/cache/lsyscache" }
+format_type = { path = "../../backend/utils/adt/format_type" }
+lock = { path = "../../backend/storage/lmgr/lock" }

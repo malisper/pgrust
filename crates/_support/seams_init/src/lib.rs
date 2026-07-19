@@ -199,6 +199,7 @@ pub fn init_all_with_transport(transport: Transport) {
     pg_visibility::init_seams();
     pgrowlocks::init_seams();
     pg_logicalinspect::init_seams();
+    pg_overexplain::init_seams();
     session::init_seams();
     relpath::init_seams();
     rewrite_handler::init_seams();

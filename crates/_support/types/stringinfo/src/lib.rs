@@ -173,6 +173,10 @@ impl<'mcx> StringInfo<'mcx> {
     }
 
     #[inline]
+    pub fn mcx(&self) -> Mcx<'mcx> {
+        *self.data.allocator()
+    }
+
     pub fn append_str(&mut self, s: &str) -> PgResult<()> {
         self.append_bytes(s.as_bytes())
     }
