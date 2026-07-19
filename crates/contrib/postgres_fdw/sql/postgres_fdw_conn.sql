@@ -8,6 +8,9 @@ CREATE EXTENSION postgres_fdw;
 \set SHOW_CONTEXT always
 SET timezone = 'UTC';
 
+-- user= is explicit: the harness initdb's the superuser as 'postgres', so
+-- the client's OS-username default would pick a role that does not exist
+-- (the dblink_conn precedent).
 DO $d$
     BEGIN
         EXECUTE $$CREATE SERVER loopback FOREIGN DATA WRAPPER postgres_fdw
@@ -15,9 +18,10 @@ DO $d$
                      port '$$||current_setting('port')||$$',
                      dbname '$$||current_database()||$$'
             )$$;
+        EXECUTE $$CREATE USER MAPPING FOR CURRENT_USER SERVER loopback
+            OPTIONS (user '$$||current_user||$$')$$;
     END;
 $d$;
-CREATE USER MAPPING FOR CURRENT_USER SERVER loopback;
 
 CREATE TYPE user_enum AS ENUM ('foo', 'bar', 'buz');
 CREATE SCHEMA "S 1";
@@ -160,10 +164,14 @@ DO $d$
 $d$;
 SELECT c3, c4 FROM ft1 ORDER BY c3, c1 LIMIT 1;  -- should work again
 ALTER USER MAPPING FOR CURRENT_USER SERVER loopback
-  OPTIONS (ADD user 'no such user');
+  OPTIONS (SET user 'no such user');
 SELECT c3, c4 FROM ft1 ORDER BY c3, c1 LIMIT 1;  -- should fail
-ALTER USER MAPPING FOR CURRENT_USER SERVER loopback
-  OPTIONS (DROP user);
+DO $d$
+    BEGIN
+        EXECUTE $$ALTER USER MAPPING FOR CURRENT_USER SERVER loopback
+            OPTIONS (SET user '$$||current_user||$$')$$;
+    END;
+$d$;
 SELECT c3, c4 FROM ft1 ORDER BY c3, c1 LIMIT 1;  -- should work again
 \set VERBOSITY default
 

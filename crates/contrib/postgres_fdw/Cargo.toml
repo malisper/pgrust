@@ -57,3 +57,4 @@ execexpr = { path = "../../backend/executor/execexpr" }
 execscan = { path = "../../backend/executor/execscan" }
 exectuples = { path = "../../backend/executor/exectuples" }
 dbcommands_seams = { path = "../../backend/commands/dbcommands_seams" }
+funcapi = { path = "../../backend/utils/fmgr/funcapi" }

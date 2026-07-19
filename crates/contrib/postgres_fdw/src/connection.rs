@@ -931,6 +931,206 @@ fn pgfdw_exec_cleanup_query(
     }
 }
 
+// ---------- SQL introspection functions (connection.c:2134-2460) ----------
+
+// Snapshot of one cache entry, taken under the map borrow; the catalog
+// lookups (server/user names) run after release (RefCell discipline).
+struct ConnRow {
+    umid: Oid,
+    serverid: Oid,
+    invalidated: bool,
+    xact_depth: i32,
+    be_pid: i32,
+}
+
+fn server_name_missing_ok(serverid: Oid) -> PgResult<Option<String>> {
+    let Some(tp) = cache_syscache::SearchSysCache1(
+        cache_syscache::cacheinfo::FOREIGNSERVEROID,
+        cache_syscache::SysCacheKey::Value(Datum::from_oid(serverid)),
+    )?
+    else {
+        return Ok(None);
+    };
+    let d = cache_syscache::SysCacheGetAttrNotNull(
+        cache_syscache::cacheinfo::FOREIGNSERVEROID,
+        &tp,
+        foreigncmds::foreign::Anum_pg_foreign_server_srvname,
+    )?;
+    // SAFETY: name attribute — NUL-terminated NameData image.
+    let s = unsafe { core::ffi::CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) }
+        .to_string_lossy()
+        .into_owned();
+    cache_syscache::ReleaseSysCache(tp);
+    Ok(Some(s))
+}
+
+// MappingUserName over the mapping row (NULL when the mapping was dropped).
+fn mapping_user_name(umid: Oid) -> PgResult<Option<String>> {
+    let Some(tp) = cache_syscache::SearchSysCache1(
+        cache_syscache::cacheinfo::USERMAPPINGOID,
+        cache_syscache::SysCacheKey::Value(Datum::from_oid(umid)),
+    )?
+    else {
+        return Ok(None);
+    };
+    let umuser = cache_syscache::SysCacheGetAttrNotNull(
+        cache_syscache::cacheinfo::USERMAPPINGOID,
+        &tp,
+        foreigncmds::foreign::Anum_pg_user_mapping_umuser,
+    )?
+    .as_oid();
+    cache_syscache::ReleaseSysCache(tp);
+    if umuser == types_core::InvalidOid {
+        return Ok(Some("public".to_string()));
+    }
+    let scratch = mcx::MemoryContext::new("pgfdw user name");
+    let name = {
+        let m = scratch.mcx();
+        miscinit::GetUserNameFromId(m, umuser, false)?.map(|n| n.as_str().to_string())
+    };
+    Ok(name)
+}
+
+fn get_connections_internal(
+    flinfo: &mut types_fmgr::FmgrInfo,
+    fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+    v1_2: bool,
+) -> PgResult<Datum> {
+    let fcinfo_ptr: *mut types_fmgr::FunctionCallInfoBaseData = fcinfo;
+    // SAFETY: single-threaded fmgr call; the result context outlives it
+    // (materialize.rs TupleSink precedent for the aliasing shape).
+    let mcx = unsafe { &*fcinfo_ptr }.result_mcx();
+    let mut srf = funcapi::InitMaterializedSRF(mcx, flinfo, fcinfo, 0)?;
+    let expected = if v1_2 { 6 } else { 2 };
+    if srf.tupdesc.natts != expected {
+        return Err(Box::new(PgError::error("incorrect number of output arguments")));
+    }
+    let rows: Vec<ConnRow> = CONNECTIONS.with(|c| {
+        c.borrow()
+            .iter()
+            .filter(|(_, e)| e.conn.is_some())
+            .map(|(&umid, e)| ConnRow {
+                umid,
+                serverid: e.serverid,
+                invalidated: e.invalidated,
+                xact_depth: e.xact_depth,
+                be_pid: e.conn.as_ref().map(|c| c.backend_pid()).unwrap_or(0),
+            })
+            .collect()
+    });
+    for row in rows {
+        let server_name = server_name_missing_ok(row.serverid)?;
+        let mut values = vec![Datum::null(); expected as usize];
+        let mut nulls = vec![true; expected as usize];
+        if let Some(n) = &server_name {
+            values[0] = types_fmgr::varlena_result(varlena::cstring_to_text(mcx, n.as_bytes())?);
+            nulls[0] = false;
+        }
+        if v1_2 {
+            if let Some(u) = mapping_user_name(row.umid)? {
+                values[1] =
+                    types_fmgr::varlena_result(varlena::cstring_to_text(mcx, u.as_bytes())?);
+                nulls[1] = false;
+            }
+            values[2] = Datum::from_bool(!row.invalidated);
+            nulls[2] = false;
+            values[3] = Datum::from_bool(row.xact_depth > 0);
+            nulls[3] = false;
+            // closed: C answers only when check_conn && pgfdw_conn_checkable()
+            // (POLLRDHUP); the probe is unported — always NULL (divergence:
+            // check_conn=true would answer t/f on C/Linux).
+            values[5] = Datum::from_i32(row.be_pid);
+            nulls[5] = false;
+        } else {
+            values[1] = Datum::from_bool(!row.invalidated);
+            nulls[1] = false;
+        }
+        srf.putvalues(&values, &nulls)?;
+    }
+    // SAFETY: fcinfo_ptr is the same borrow InitMaterializedSRF released.
+    Ok(srf.finish(unsafe { &mut *fcinfo_ptr }))
+}
+
+pub(crate) fn fc_postgres_fdw_get_connections(
+    flinfo: Option<&mut types_fmgr::FmgrInfo>,
+    fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+) -> PgResult<Datum> {
+    get_connections_internal(flinfo.expect("srf needs flinfo"), fcinfo, false)
+}
+
+pub(crate) fn fc_postgres_fdw_get_connections_1_2(
+    flinfo: Option<&mut types_fmgr::FmgrInfo>,
+    fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+) -> PgResult<Datum> {
+    get_connections_internal(flinfo.expect("srf needs flinfo"), fcinfo, true)
+}
+
+// disconnect_cached_connections: close idle cached connections (to one
+// server, or all); in-use connections get C's WARNINGs and stay.
+fn disconnect_cached_connections(server: Option<Oid>) -> PgResult<bool> {
+    // (key decisions under the borrow; warnings + name lookups after.)
+    let mut closed_any = false;
+    let mut in_use: Vec<Oid> = Vec::new(); // serverids to warn about
+    let mut in_use_dropped = 0usize;
+    CONNECTIONS.with(|c| {
+        for entry in c.borrow_mut().values_mut() {
+            if entry.conn.is_none() {
+                continue;
+            }
+            if let Some(sid) = server {
+                if entry.serverid != sid {
+                    continue;
+                }
+            }
+            if entry.xact_depth > 0 {
+                in_use.push(entry.serverid);
+            } else {
+                disconnect_entry(entry);
+                closed_any = true;
+            }
+        }
+    });
+    for sid in in_use {
+        match server_name_missing_ok(sid)? {
+            Some(name) => {
+                let _ = ereport(WARNING)
+                    .errmsg(format!(
+                        "cannot close connection for server \"{name}\" because it is still in use"
+                    ))
+                    .finish(loc("disconnect_cached_connections"));
+            }
+            None => in_use_dropped += 1,
+        }
+    }
+    for _ in 0..in_use_dropped {
+        let _ = ereport(WARNING)
+            .errmsg("cannot close dropped server connection because it is still in use")
+            .finish(loc("disconnect_cached_connections"));
+    }
+    Ok(closed_any)
+}
+
+pub(crate) fn fc_postgres_fdw_disconnect(
+    _flinfo: Option<&mut types_fmgr::FmgrInfo>,
+    fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+) -> PgResult<Datum> {
+    // SAFETY: strict text arg.
+    let name = {
+        let v = unsafe { fcinfo.arg_varlena_packed(0)? };
+        String::from_utf8_lossy(v.data()).into_owned()
+    };
+    let serverid = foreigncmds::foreign::get_foreign_server_oid(&name, false)?;
+    Ok(Datum::from_bool(disconnect_cached_connections(Some(serverid))?))
+}
+
+pub(crate) fn fc_postgres_fdw_disconnect_all(
+    _flinfo: Option<&mut types_fmgr::FmgrInfo>,
+    fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
+) -> PgResult<Datum> {
+    let _ = fcinfo;
+    Ok(Datum::from_bool(disconnect_cached_connections(None)?))
+}
+
 enum CleanupResult {
     TimedOut,
     Failed,

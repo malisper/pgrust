@@ -32,6 +32,12 @@ fn lookup(function: &str) -> Option<PGFunction> {
     Some(match function {
         "postgres_fdw_handler" => fc_postgres_fdw_handler,
         "postgres_fdw_validator" => crate::option::fc_postgres_fdw_validator,
+        "postgres_fdw_get_connections" => crate::connection::fc_postgres_fdw_get_connections,
+        "postgres_fdw_get_connections_1_2" => {
+            crate::connection::fc_postgres_fdw_get_connections_1_2
+        }
+        "postgres_fdw_disconnect" => crate::connection::fc_postgres_fdw_disconnect,
+        "postgres_fdw_disconnect_all" => crate::connection::fc_postgres_fdw_disconnect_all,
         _ => return None,
     })
 }
