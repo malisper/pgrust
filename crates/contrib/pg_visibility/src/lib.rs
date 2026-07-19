@@ -331,7 +331,7 @@ fn collect_corrupt_items(
         for offnum in 1..=maxoff {
             let itemid = page_item_id(b, offnum);
 
-                if itemid.flags == LP_UNUSED as u8 && itemid.len == 0 {
+            if itemid.flags == LP_UNUSED as u8 && itemid.len == 0 {
                 continue;
             }
             if itemid.flags == LP_REDIRECT as u8 {
