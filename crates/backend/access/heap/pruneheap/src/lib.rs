@@ -1108,7 +1108,7 @@ fn heap_log_freeze_plan(
 /// Scribbles on `frozen` (C contract).
 #[allow(clippy::too_many_arguments)]
 pub fn log_heap_prune_and_freeze(
-    _relation: &RelationData<'_>,
+    relation: &RelationData<'_>,
     buffer: Buffer,
     conflict_xid: TransactionId,
     cleanup_lock: bool,
@@ -1167,7 +1167,11 @@ pub fn log_heap_prune_and_freeze(
         n += 1;
     }
 
-    // RelationIsAccessibleInLogicalDecoding const-false (heapam DML divergence): no XLHP_IS_CATALOG_REL.
+    // XLHP_IS_CATALOG_REL: a standby uses it to invalidate logical slots
+    // whose catalog_xmin the pruning overtook (pruneheap.c:2139).
+    if ::heapam::relation_is_accessible_in_logical_decoding(relation) {
+        flags |= XLHP_IS_CATALOG_REL;
+    }
     if TransactionIdIsValid(conflict_xid) {
         flags |= XLHP_HAS_CONFLICT_HORIZON;
     }
