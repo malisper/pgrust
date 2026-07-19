@@ -117,10 +117,25 @@ pub fn for_each_live_onebody<E>(
 }
 
 /// Fixed-width prefix plan: every column below `ncols` has `attlen > 0`.
+///
+/// WALK-TAIL VARIANT (AGGSEQ-STAGE, the heap grouped staging seam): a plan
+/// built by [`SoaDeformPlan::try_new_walk`] additionally carries
+/// `walk_from = Some(w)` — columns `0..w` (the maximal fixed-width HEAD)
+/// keep the static offset chain and deform column-major exactly as today,
+/// and columns `w..ncols` (`w` = the first `attlen <= 0` attribute) deform
+/// per row via [`soa_deform_walk_tail`], because a column PAST a varlena
+/// has a row-dependent offset (the varlena's length varies per row) and no
+/// static-offset deform exists for it. For walk plans `end_off` is the
+/// HEAD end (the walk pass's start offset), not the row end — the walk
+/// writes the per-row `end_off`.
 pub struct SoaDeformPlan<'mcx> {
     ncols: u16,
     end_off: u32,
     offs: PgVec<'mcx, u32>,
+    /// `Some(w)` = walk-tail plan: `offs` covers `0..w` only and columns
+    /// `w..ncols` deform per row. `None` = every plan shipped before
+    /// AGGSEQ-STAGE (fixed-width prefix / columnar / varkey-unused).
+    walk_from: Option<u16>,
     // Deform-JIT batch kernel (docs/optimizations/jit-deform.md): replaces
     // the AOT column pass on dense full-prefix batches when armed.
     jit: Option<alloc::rc::Rc<jit_deform::DeformKernel>>,
@@ -145,7 +160,56 @@ impl<'mcx> SoaDeformPlan<'mcx> {
             offs.push(off as u32);
             off += att.attlen as usize;
         }
-        Some(SoaDeformPlan { ncols: ncols as u16, end_off: off as u32, offs, jit: None })
+        Some(SoaDeformPlan {
+            ncols: ncols as u16,
+            end_off: off as u32,
+            offs,
+            walk_from: None,
+            jit: None,
+        })
+    }
+
+    /// Walk-tail plan (AGGSEQ-STAGE): host a heap prefix that CROSSES a
+    /// varlena column — the shape [`SoaDeformPlan::try_new`] refuses.
+    /// Callers try `try_new` FIRST; this returns None when `try_new` would
+    /// have succeeded (all fixed-width — no walk needed), when the prefix
+    /// carries a cstring (`attlen == -2`, the varkey plan's own refusal —
+    /// `att_addlength_pointer` on cstrings strlen-walks and no live shape
+    /// needs it) or any other non-positive `attlen != -1`, or when the ask
+    /// is empty/oversized.
+    pub fn try_new_walk(
+        mcx: Mcx<'mcx>,
+        atts: &[CompactAttribute],
+        ncols: usize,
+    ) -> Option<SoaDeformPlan<'mcx>> {
+        if ncols == 0 || ncols > atts.len() || ncols > u16::MAX as usize {
+            return None;
+        }
+        let wf = atts[..ncols].iter().position(|a| a.attlen <= 0)?;
+        if atts[wf..ncols].iter().any(|a| a.attlen <= 0 && a.attlen != -1) {
+            return None; // cstring (or unknown non-varlena) inside the prefix
+        }
+        let mut offs = ::mcx::vec_with_capacity_in_infallible(mcx, wf);
+        let mut off = 0usize;
+        for att in &atts[..wf] {
+            debug_assert!(att.attlen > 0);
+            off = att_nominal_alignby(off, att.attalignby);
+            offs.push(off as u32);
+            off += att.attlen as usize;
+        }
+        Some(SoaDeformPlan {
+            ncols: ncols as u16,
+            end_off: off as u32,
+            offs,
+            walk_from: Some(wf as u16),
+            jit: None,
+        })
+    }
+
+    /// `Some(w)` for walk-tail plans (columns `w..ncols` deform per row).
+    #[inline]
+    pub fn walk_from(&self) -> Option<u16> {
+        self.walk_from
     }
 
     #[inline]
@@ -155,14 +219,17 @@ impl<'mcx> SoaDeformPlan<'mcx> {
 
     /// Arm the JIT batch kernel; layout identity with this plan is required
     /// (same ncols and offset chain) so batch output is bit-identical.
+    /// Walk-tail plans never arm (the kernel deforms the WHOLE prefix at
+    /// static offsets; a walk tail has none).
     pub fn arm_jit(&mut self, k: alloc::rc::Rc<jit_deform::DeformKernel>) {
+        debug_assert!(self.walk_from.is_none(), "walk-tail plans never arm the JIT kernel");
         debug_assert!(k.ncols() == self.ncols && k.end_off() == self.end_off);
         self.jit = Some(k);
     }
 
     /// Placeholder for varkey-mode batches; the varkey pass never reads it.
     pub fn unused(mcx: Mcx<'mcx>) -> SoaDeformPlan<'mcx> {
-        SoaDeformPlan { ncols: 0, end_off: 0, offs: PgVec::new_in(mcx), jit: None }
+        SoaDeformPlan { ncols: 0, end_off: 0, offs: PgVec::new_in(mcx), walk_from: None, jit: None }
     }
 
     /// Columnar-AM plan: `ncols` only, NO offset chain — usable exclusively
@@ -176,7 +243,13 @@ impl<'mcx> SoaDeformPlan<'mcx> {
         if ncols == 0 || ncols > u16::MAX as usize {
             return None;
         }
-        Some(SoaDeformPlan { ncols: ncols as u16, end_off: 0, offs: PgVec::new_in(mcx), jit: None })
+        Some(SoaDeformPlan {
+            ncols: ncols as u16,
+            end_off: 0,
+            offs: PgVec::new_in(mcx),
+            walk_from: None,
+            jit: None,
+        })
     }
 
     /// Alias of [`SoaDeformPlan::columnar`] (likeband's name for the same
@@ -186,10 +259,12 @@ impl<'mcx> SoaDeformPlan<'mcx> {
     }
 
     /// True for `columnar`/`virtual_prefix` plans (no offset chain despite
-    /// `ncols > 0`).
+    /// `ncols > 0`). A walk-tail plan whose head is empty (`walk_from == 0`,
+    /// a varlena at column 0) also has an empty chain but is NOT virtual —
+    /// the explicit `walk_from` disambiguates.
     #[inline]
     pub fn is_virtual(&self) -> bool {
-        self.ncols > 0 && self.offs.is_empty()
+        self.ncols > 0 && self.offs.is_empty() && self.walk_from.is_none()
     }
 }
 
@@ -809,10 +884,20 @@ pub fn soa_classify_row(
         if tuple.has_nulls() {
             *soa.kinds.get_unchecked_mut(idx) = 1;
             soa.kinds_or |= 1;
+            // Walk-tail plans need the varlena-aware nulls walk (the fixed
+            // twin advances by `attlen` and cannot cross an `attlen <= 0`
+            // column); one predictable branch, kind-1 rows only.
+            if plan.walk_from.is_some() {
+                return soa_deform_tuple_nulls_walk(soa, atts, idx, ncols, tuple);
+            }
             return soa_deform_tuple_nulls(soa, atts, idx, ncols, tuple);
         }
         *soa.kinds.get_unchecked_mut(idx) = 0;
         *soa.tps.get_unchecked_mut(idx) = tuple.getstruct();
+        // Walk-tail plans: this is the HEAD end (a stale intermediate) —
+        // the walk pass overwrites both cells per row before any publish
+        // (a head-only qual ask skips the walk, but that shape never
+        // publishes: `publish = false` on qual-only stagings).
         *soa.end_off.get_unchecked_mut(idx) = plan.end_off;
         *soa.slow.get_unchecked_mut(idx) = false;
     }
@@ -829,9 +914,17 @@ pub fn soa_deform_columns(
     debug_assert!(!plan.is_virtual(), "virtual prefix plans are cbstore-only (no offset chain)");
     let n = soa.nrows as usize;
     let ncols = plan.ncols as usize;
+    // Walk-tail plans (AGGSEQ-STAGE): the static column-major pass covers
+    // the fixed HEAD only; the tail deforms per row below. A single-column
+    // ask resident in the tail runs the walk alone (the walk fills the
+    // whole tail — including the asked column); a head-resident ask keeps
+    // today's single static column and skips the walk (bitmap-only
+    // consumer: qual-only stagings never publish).
+    let wf = plan.walk_from.map_or(ncols, |w| w as usize);
     let (first, last) = match qual_col_only {
-        Some(c) => (c as usize, c as usize + 1),
-        None => (0, ncols),
+        Some(c) if (c as usize) < wf => (c as usize, c as usize + 1),
+        Some(_) => (0, 0),
+        None => (0, wf),
     };
     // Dense lane: every staged row is kind 0, so the per-row kind test drops
     // and the isnull column becomes one vectorizable fill.
@@ -906,6 +999,70 @@ pub fn soa_deform_columns(
             }
         }
     }
+    // Walk-tail pass (AGGSEQ-STAGE): columns at/past the first varlena
+    // deform per row. Skipped only for a head-resident single-column ask
+    // (see the (first, last) derivation above).
+    if plan.walk_from.is_some() && !matches!(qual_col_only, Some(c) if (c as usize) < wf) {
+        soa_deform_walk_tail(soa, plan, atts);
+    }
+}
+
+/// Per-row sequential walk deform of a walk-tail plan's tail columns
+/// (`walk_from..ncols`) for kind-0 rows — the varlena-crossing half of the
+/// AGGSEQ-STAGE staging seam. Each row walks its attributes once, exactly
+/// `deform_internal`'s slow-lane discipline: `att_pointer_alignby` for
+/// varlena (the staged cell is the same in-page pointer Datum the per-row
+/// slot deform stores — pin-holding ABI R3v), `att_nominal_alignby` +
+/// `fetch_att` for fixed-width, `att_addlength_pointer` advance. Writes
+/// the per-row resume state the per-row path itself would leave in the
+/// slot: `end_off` = the offset after the last prefix column and
+/// `slow = true` (`deform_internal` sets slow after any `attlen <= 0`
+/// attribute, and the tail's first column IS one). `attcacheoff` is
+/// deliberately never written here — post-varlena columns are never
+/// cacheable and the produced offsets/values are identical either way.
+///
+/// Kind discipline is `soa_deform_columns`'s: kind-1 hasnulls rows were
+/// fully deformed at classify (`soa_deform_tuple_nulls_walk`), kind-2
+/// narrow rows carry the fallback bit and no reader consumes their cells.
+fn soa_deform_walk_tail(
+    soa: &mut SoaBatch<'_>,
+    plan: &SoaDeformPlan<'_>,
+    atts: &[CompactAttribute],
+) {
+    let wf = plan.walk_from.expect("walk pass on a walk-tail plan") as usize;
+    let n = soa.nrows as usize;
+    let ncols = plan.ncols as usize;
+    debug_assert!(soa.ncols as usize == ncols && wf < ncols && ncols <= atts.len());
+    let start_off = plan.end_off as usize; // head end (0 when wf == 0)
+    let dense = soa.kinds_or == 0;
+    for i in 0..n {
+        // SAFETY: kind-0 rows are null-free with natts >= ncols (the
+        // classify contract) and parked their tuple pointer off the
+        // still-pinned page — the walk visits attributes present in the
+        // tuple, as deform_internal's slow lane.
+        unsafe {
+            if !dense && *soa.kinds.get_unchecked(i) != 0 {
+                continue;
+            }
+            let tp = *soa.tps.get_unchecked(i);
+            let mut off = start_off;
+            for c in wf..ncols {
+                let att = atts.get_unchecked(c);
+                let attlen = att.attlen as i32;
+                if attlen == -1 {
+                    off = att_pointer_alignby(off, att.attalignby, -1, tp.add(off));
+                } else {
+                    off = att_nominal_alignby(off, att.attalignby);
+                }
+                *soa.values.get_unchecked_mut(c * SOA_MAX_ROWS + i) =
+                    fetch_att(tp.add(off), att.attbyval, attlen);
+                *soa.isnull.get_unchecked_mut(c * SOA_MAX_ROWS + i) = false;
+                off = att_addlength_pointer(off, attlen, tp.add(off));
+            }
+            *soa.end_off.get_unchecked_mut(i) = off as u32;
+            *soa.slow.get_unchecked_mut(i) = true;
+        }
+    }
 }
 
 /// `soa_deform_columns` generalized to an explicit column SET with an
@@ -949,6 +1106,13 @@ pub fn soa_deform_columns_set(
     sel: Option<&[u64]>,
 ) {
     debug_assert!(!plan.is_virtual(), "virtual prefix plans are cbstore-only (no offset chain)");
+    // AGGSEQ-STAGE: the K1-latemat split never arms over a walk-tail plan
+    // (`seq_scan_k1_latemat_arm` refuses NAMED `k1-latemat-varwalk`) — this
+    // pass indexes the static offset chain, which covers the head only.
+    debug_assert!(
+        plan.walk_from.is_none(),
+        "column-set deform over a walk-tail plan (latemat must refuse varwalk stagings)"
+    );
     let n = soa.nrows as usize;
     if n == 0 {
         return;
@@ -1044,6 +1208,54 @@ pub fn soa_deform_columns_set(
     }
 }
 
+/// Kind-1 (hasnulls) row deform for WALK-TAIL plans (AGGSEQ-STAGE): the
+/// varlena-aware twin of [`soa_deform_tuple_nulls`] — `deform_internal`'s
+/// slow-lane discipline over the whole prefix (nulls consume no space;
+/// varlena cells stage in-page pointer Datums; `slow` mirrors the per-row
+/// path: true once a null OR an `attlen <= 0` attribute was seen inside
+/// the prefix).
+#[inline(never)]
+fn soa_deform_tuple_nulls_walk(
+    soa: &mut SoaBatch<'_>,
+    atts: &[CompactAttribute],
+    idx: usize,
+    ncols: usize,
+    tuple: &HeapTupleData<'_>,
+) {
+    let tp = tuple.getstruct();
+    // SAFETY: hasnulls tuples carry a bitmap covering natts >= ncols bits.
+    let bp = unsafe { tuple.header_ptr().add(SizeofHeapTupleHeader) };
+    let mut off = 0usize;
+    let mut slow = false;
+    for c in 0..ncols {
+        // SAFETY: c < ncols <= natts; deform_internal's slow lane.
+        unsafe {
+            if att_isnull(c, bp) {
+                soa.values[c * SOA_MAX_ROWS + idx] = Datum::null();
+                soa.isnull[c * SOA_MAX_ROWS + idx] = true;
+                slow = true;
+                continue;
+            }
+            let att = &atts[c];
+            let attlen = att.attlen as i32;
+            if attlen == -1 {
+                off = att_pointer_alignby(off, att.attalignby, -1, tp.add(off));
+            } else {
+                off = att_nominal_alignby(off, att.attalignby);
+            }
+            soa.values[c * SOA_MAX_ROWS + idx] =
+                fetch_att(tp.add(off), att.attbyval, attlen);
+            soa.isnull[c * SOA_MAX_ROWS + idx] = false;
+            off = att_addlength_pointer(off, attlen, tp.add(off));
+            if attlen <= 0 {
+                slow = true;
+            }
+        }
+    }
+    soa.end_off[idx] = off as u32;
+    soa.slow[idx] = slow;
+}
+
 #[inline(never)]
 fn soa_deform_tuple_nulls(
     soa: &mut SoaBatch<'_>,
@@ -1122,6 +1334,6 @@ mcx::forget_safe_nodrop!(SoaTextSpan);
 
 // jit exempt: released in exec_end_seq_scan (the bloom-filter Rc precedent).
 mcx::forget_safe_struct!(
-    SoaDeformPlan<'_> { ncols, end_off, offs; jit },
+    SoaDeformPlan<'_> { ncols, end_off, offs, walk_from; jit },
     SoaBatch<'_> { ncols, nrows, values, isnull, end_off, slow, fallback, tps, kinds, kinds_or, dict_want, dict_lanes, dict_any, lane_read, lane_read_any, text_spans, text_any, len_want, len_any },
 );

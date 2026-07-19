@@ -635,3 +635,21 @@ fn bloom_selective_scan_stays_armed() {
         teardown(state, &mut estate);
     });
 }
+
+// --- AGGSEQ-STAGE sub-region ------------------------------------------------
+
+/// `PGRUST_LANE_V2_STAGE_VARWALK` A/B lever (AtomicU8 idiom): both states
+/// resolvable in one process; restored to OFF (the default the rest of the
+/// suite assumes — knob-OFF = the fixed-width-prefix refusal, today's
+/// bytes). The admission conjunction (`force && multi && heap && knob`)
+/// gets its teeth from the dualexec corpus + the engagement probe (the
+/// unit harness here stages int-only fixtures).
+#[test]
+fn stage_varwalk_knob_ab() {
+    stage_varwalk_set_for_tests(true);
+    assert!(stage_varwalk_enabled());
+    stage_varwalk_set_for_tests(false);
+    assert!(!stage_varwalk_enabled());
+}
+
+// --- end AGGSEQ-STAGE sub-region ---------------------------------------------
