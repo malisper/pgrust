@@ -70,6 +70,16 @@ pub fn runner_profile_to_gen(p: &crate::runner::profile::Profile) -> GenProfile 
     for k in &p.kill_switches {
         property_weights.insert(k.clone(), 0);
     }
+    // H8: session-gated properties (M2/S1) are weighted 0 unless the profile
+    // opts into the multi-session estate — the reach gate then treats them as
+    // gated-unreachable (no reach-gap), matching the hook-gated F7/F8 pattern.
+    if !p.multi_session {
+        for id in crate::oracle::props::v1_set() {
+            if id.needs_sessions() {
+                property_weights.insert(id.as_str().to_string(), 0);
+            }
+        }
+    }
     GenProfile {
         name: p.name.clone(),
         plan_len: PlanLen { min: p.steps_min.max(1) as u64, max: p.steps_max.max(1) as u64 },
@@ -116,6 +126,7 @@ pub fn runner_profile_to_gen(p: &crate::runner::profile::Profile) -> GenProfile 
         float_lenient: p.float_lenient,
         test_disable_productions: p.test_disable_productions.clone(),
         planner_knobs: p.planner_knobs.clone(),
+        multi_session: p.multi_session,
     }
 }
 
@@ -284,6 +295,13 @@ fn footprint_of(id: props::PropertyId) -> Footprint {
         P::X2IndexInvariance => Footprint { ddl: 3, dml: 1, query: 2, ..Default::default() },
         P::X4StatementForm => Footprint { ddl: 2, dml: 1, query: 3, ..Default::default() },
         P::M1ReadYourWrites => Footprint { ddl: 2, dml: 2, query: 5, tx: 4, ..Default::default() },
+        // H8: cursor walks (DECLARE + FETCH/MOVE reads inside a tx) and the
+        // multi-session estate. Footprints steer budget only; the FETCH/MOVE
+        // reads are Query-classified, session choreography adds tx budget.
+        P::C1CursorWalk => Footprint { ddl: 2, dml: 1, query: 8, tx: 2, ..Default::default() },
+        P::C2HoldCursor => Footprint { ddl: 2, dml: 1, query: 8, tx: 2, ..Default::default() },
+        P::M2CrossSession => Footprint { ddl: 2, dml: 1, query: 6, tx: 4, ..Default::default() },
+        P::S1SpecConflict => Footprint { ddl: 3, dml: 1, query: 6, tx: 3, ..Default::default() },
     }
 }
 

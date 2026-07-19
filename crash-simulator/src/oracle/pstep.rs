@@ -104,6 +104,12 @@ pub enum ProbeSpec {
     SelectColAll { table: String, col: usize, doubled: bool },
     /// Engine-hook scalar probe (F7/F8); sim answers a constant.
     HookScalar { hook: crate::oracle::check::HookKind },
+    /// H8 cursor walks: the generator computed this step's expected rows
+    /// from the cursor position model; the sim answers them verbatim (a
+    /// well-behaved portal), keeping RowsEq asserts sim-green.
+    KnownRows { rows: Vec<crate::oracle::check::Row> },
+    /// H8 MOVE steps: known command-tag count (`MOVE n`).
+    KnownCommand { count: u64 },
     /// Anything the oracle does not model (noise, PREPARE/DEALLOCATE, index
     /// DDL). Sim answers Command{0}.
     Opaque,
