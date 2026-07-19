@@ -197,10 +197,14 @@ fn fc_pg_prewarm(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
             }
         }
         PrewarmType::Read => {
-            let mut blockbuffer = vec![0u8; BLCKSZ];
+            // pg_prewarm.c: static PGIOAlignedBlock blockbuffer — I/O-aligned
+            // (4096) so smgrread works on an O_DIRECT fd (debug_io_direct=data).
+            #[repr(align(4096))]
+            struct BlockBuffer([u8; BLCKSZ]);
+            let mut blockbuffer = BlockBuffer([0u8; BLCKSZ]);
             for block in first_block..=last_block {
                 postgres_seams::check_for_interrupts::call()?;
-                smgr::smgrread(smgr_key, fork_number, block as BlockNumber, &mut blockbuffer)?;
+                smgr::smgrread(smgr_key, fork_number, block as BlockNumber, &mut blockbuffer.0)?;
                 blocks_done += 1;
             }
         }

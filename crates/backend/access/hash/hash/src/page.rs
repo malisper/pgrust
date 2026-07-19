@@ -649,7 +649,9 @@ fn _hash_alloc_buckets(rel: &Relation<'_>, firstblock: BlockNumber, nblocks: u32
         return Ok(false);
     }
 
-    #[repr(align(8))]
+    // hashpage.c: PGIOAlignedBlock zerobuf — I/O-aligned (4096) so the
+    // smgrextend below can hand it to an O_DIRECT fd (debug_io_direct=data).
+    #[repr(align(4096))]
     struct ZeroBuf([u8; BLCKSZ]);
     let mut zerobuf = ZeroBuf([0u8; BLCKSZ]);
     // SAFETY: owned, aligned BLCKSZ scratch.
