@@ -20,7 +20,10 @@
 //!   const-constructible); all modeled state is instance-owned.
 //!   `OnceLock`-mediated init is the sanctioned pattern for unavoidable
 //!   globals — which is exactly why the loom arm's `OnceLock`/`Once` are
-//!   std-backed (papering row L3 below), NOT loom composites.
+//!   std-backed (papering row L3 below), NOT loom composites. For
+//!   process-global MODELED state (const-init static slabs/registries) the
+//!   sanctioned exception is [`process_global!`] (`global` module): plain
+//!   static native/sim, per-iteration lazy state under loom.
 //! - Poison-tolerant acquisition goes through [`lock`] (the repo's
 //!   `unwrap_or_else(e.into_inner())` discipline; loom's Mutex never poisons
 //!   but keeps the API; the sim wrapper propagates std poisoning).
@@ -80,6 +83,19 @@ pub use sim_world::*;
 /// first commit; the scheduler itself (WS-CORE) lives under this module.
 #[cfg(pgrust_sim)]
 pub mod sim;
+
+/// The `process_global!` shim (LATCH-LOOM): const-init process-global sync
+/// state that is a plain static native/sim and per-iteration lazy state under
+/// loom. The sanctioned exception to the "no statics hold loom types" law —
+/// see the module doc for the exact contract.
+pub mod global;
+
+/// The loom crate, for `process_global!`'s expansion in consumer crates
+/// (macro hygiene: `$crate::__loom` keeps the loom dependency HERE — callers
+/// need no loom dep of their own to use the shim).
+#[cfg(loom)]
+#[doc(hidden)]
+pub use loom as __loom;
 
 // --- all-worlds helpers (compiled over the dispatched types) ----------------
 
