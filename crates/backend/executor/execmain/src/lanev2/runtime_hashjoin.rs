@@ -948,7 +948,13 @@ impl runtime::ParallelSink for JoinBuildSink {
         // space never happens — PARTITIONS is fixed — but a fully-refused
         // plan slot can be absent after refuse_budget).
         let Some(plan) = self.plan_for(locals) else { return };
-        *lockm(&self.table) = Some(Arc::new(freeze(plan, locals)));
+        let table = freeze(plan, locals);
+        // HJPROBE-V2 engagement witness (e2e-grepped; the trace can only
+        // ever fire with the knob ON — no armed Local exists otherwise).
+        if table.has_seat() {
+            lane_trace("runtime-hashjoin: dense-seat");
+        }
+        *lockm(&self.table) = Some(Arc::new(table));
     }
 }
 
