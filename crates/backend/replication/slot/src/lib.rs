@@ -1054,7 +1054,6 @@ fn CanInvalidateIdleSlot(s: &ReplicationSlot) -> bool {
 
 // DetermineSlotInvalidationCause (slot.c:1740). Sequentially checks the
 // possible causes, returning the first the slot is eligible for.
-// (USE_INJECTION_POINTS slot-timeout-inval arm elided: substrate unported.)
 #[allow(clippy::too_many_arguments)]
 fn DetermineSlotInvalidationCause(
     possible_causes: u32,
@@ -1103,15 +1102,21 @@ fn DetermineSlotInvalidationCause(
 
     if possible_causes & RS_INVAL_IDLE_TIMEOUT.0 as u32 != 0 {
         debug_assert!(now > 0);
-        if CanInvalidateIdleSlot(s)
-            && adt_timestamp::TimestampDifferenceExceedsSeconds(
+        if CanInvalidateIdleSlot(s) {
+            // slot.c:1794 (USE_INJECTION_POINTS): tests force the idle-
+            // timeout invalidation instead of idling for a real minute.
+            if injection_point::is_attached("slot-timeout-inval") {
+                *inactive_since = 0; // since the beginning of time
+                return RS_INVAL_IDLE_TIMEOUT;
+            }
+            if adt_timestamp::TimestampDifferenceExceedsSeconds(
                 s.inactive_since.get(),
                 now,
                 idle_replication_slot_timeout_secs(),
-            )
-        {
-            *inactive_since = s.inactive_since.get();
-            return RS_INVAL_IDLE_TIMEOUT;
+            ) {
+                *inactive_since = s.inactive_since.get();
+                return RS_INVAL_IDLE_TIMEOUT;
+            }
         }
     }
 

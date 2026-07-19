@@ -7379,6 +7379,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "injection_point"
+version = "0.0.0"
+dependencies = [
+ "condition_variable",
+ "elog",
+ "types_error",
+ "waitevent",
+]
+
+[[package]]
+name = "injection_points"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "dfmgr",
+ "injection_point",
+ "types_error",
+ "types_fmgr",
+]
+
+[[package]]
 name = "inout"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8022,6 +8043,7 @@ dependencies = [
  "dfmgr",
  "elog",
  "init_small",
+ "injection_point",
  "logical_seams",
  "lwlock",
  "mcx",
@@ -14802,6 +14824,7 @@ dependencies = [
  "indexam",
  "indexcmds",
  "init_small",
+ "injection_points",
  "interrupt",
  "inval",
  "ipc",
@@ -15372,6 +15395,7 @@ dependencies = [
  "guc",
  "guc_tables",
  "init_small",
+ "injection_point",
  "ipc_seams",
  "libc",
  "lmgr_proc",
@@ -16102,6 +16126,7 @@ dependencies = [
  "fd",
  "guc_tables",
  "init_small",
+ "injection_point",
  "inval",
  "lmgr_proc",
  "lock",
@@ -17215,6 +17240,7 @@ dependencies = [
  "guc_seams",
  "guc_tables",
  "init_small",
+ "injection_point",
  "ipc_seams",
  "latch",
  "libc",

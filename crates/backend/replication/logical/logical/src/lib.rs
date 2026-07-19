@@ -857,6 +857,10 @@ pub fn LogicalConfirmReceivedLocation(lsn: XLogRecPtr) -> PgResult<()> {
         let mut updated_xmin = false;
         let mut updated_restart = false;
 
+        // logical.c:1824: remember the old restart lsn (consumed by the
+        // logical-replication-slot-advance-segment injection point below).
+        let old_restart_lsn = slot.data.get().restart_lsn;
+
         slot.with_mutex(|| {
             if lsn > slot.data.get().confirmed_flush {
                 let mut d = slot.data.get();
@@ -892,6 +896,18 @@ pub fn LogicalConfirmReceivedLocation(lsn: XLogRecPtr) -> PgResult<()> {
         });
 
         if updated_xmin || updated_restart {
+            // logical.c:1901 (USE_INJECTION_POINTS): trigger only when the
+            // slot's restart_lsn crossed into a new WAL segment.
+            if injection_point::is_attached("logical-replication-slot-advance-segment") {
+                let segsz = transam_xlog::wal_segment_size();
+                let seg1 = transam_xlog::XLByteToSeg(old_restart_lsn, segsz);
+                let seg2 = transam_xlog::XLByteToSeg(slot.data.get().restart_lsn, segsz);
+                if seg1 != seg2 {
+                    injection_point::injection_point(
+                        "logical-replication-slot-advance-segment",
+                    )?;
+                }
+            }
             ReplicationSlotMarkDirty();
             ReplicationSlotSave()?;
         }
