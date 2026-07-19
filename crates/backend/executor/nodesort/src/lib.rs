@@ -10,7 +10,7 @@ use ::executils::{EStateData, ExecSlotId};
 use ::tuplesort::{Tuplesort, TUPLESORT_ALLOWBOUNDED, TUPLESORT_NONE, TUPLESORT_RANDOMACCESS};
 use ::types_error::PgResult;
 use ::types_nodes::plannodes::Sort;
-use ::types_scan::sdir::{ForwardScanDirection, ScanDirectionIsForward};
+use ::types_scan::sdir::ScanDirectionIsForward;
 use ::types_slot::{TupleSlotKind, EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
 use ::types_tuple::TupleDescData;
 
@@ -121,6 +121,13 @@ impl SortState<'_> {
 
 
 /// `ExecSort`: sort the subplan on first fetch, then feed from tuplesort.
+/// Forward-only (backward-execution wave B6): C nodeSort.c's direction-aware
+/// drain (`ScanDirectionIsForward(dir)` into tuplesort_gettupleslot/
+/// getdatum) and its feed-time es_direction save/pin/restore dance exist so
+/// a backward pull can read the finished sort backwards; the run seam
+/// refuses backward entry (deletion-prep B1), so the drain reads forward
+/// unconditionally. C RETAINS backward sort reads; ratified strategy
+/// divergence (Michael's 2026-07-17 SCROLL/WITH-HOLD decision).
 pub fn exec_sort<'mcx, F>(
     node: &mut SortState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -131,13 +138,14 @@ where
     F: FnMut(&mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>,
 {
     cfi()?;
-    let dir = estate.es_direction;
+    debug_assert!(
+        ScanDirectionIsForward(estate.es_direction),
+        "backward drive below the forward-only run seam (deletion-prep B1)"
+    );
     let mcx = estate.es_query_cxt;
     debug_assert!(node.datumSort == (outer_desc.natts == 1));
 
     if !node.sort_Done {
-        estate.es_direction = ForwardScanDirection;
-
         let mut tuplesortopts = TUPLESORT_NONE;
         if node.randomAccess {
             tuplesortopts |= TUPLESORT_RANDOMACCESS;
@@ -206,7 +214,6 @@ where
             None => estate.es_sort_instrumentation.push((id, stats)),
         }
 
-        estate.es_direction = dir;
         node.sort_Done = true;
         node.bounded_Done = node.bounded;
         node.bound_Done = node.bound;
@@ -216,16 +223,14 @@ where
     // Lane refsort fallback drain (the fused batched-feed twin arm was
     // deleted with fused arm #5, se/deletion-prep C1).
     if node.refsort {
-        debug_assert!(ScanDirectionIsForward(dir), "refsort never arms with randomAccess");
         return Ok(refsort_pop(node, estate));
     }
     let ts = node.tuplesortstate.as_mut().expect("sort_Done without tuplesortstate");
     let slot_id = node.ps_ResultTupleSlot;
     let slot = estate.slot_mut(slot_id);
-    let forward = ScanDirectionIsForward(dir);
     let got = if node.datumSort {
         exectuples::exec_clear_tuple(slot, mcx);
-        match ts.getdatum(forward)? {
+        match ts.getdatum(true)? {
             Some(nd) => {
                 let base = slot.base_mut();
                 base.tts_values[0] = if nd.isnull { Datum::null() } else { nd.value };
@@ -236,7 +241,7 @@ where
             None => false,
         }
     } else {
-        ts.gettupleslot(forward, false, slot, mcx)?
+        ts.gettupleslot(true, false, slot, mcx)?
     };
     Ok(if got { Some(slot_id) } else { None })
 }
@@ -316,10 +321,10 @@ pub fn sort_lane_ra_fusible_set(node: &mut SortState<'_>, v: bool) {
 /// Delegation probe (WS-AD acceptance ladder 2): true iff the node's
 /// read-back face is the row-path `Tuplesort` itself — a finished sort
 /// with NO lane-substituted emit face (refsort winner buffer / adopted
-/// runtime output). randomAccess read-back (backward pulls, rescan
-/// replay via `tuplesort_rescan`, mark/restore) is sound exactly when
-/// this holds, because every one of those paths operates on
-/// `tuplesortstate` directly.
+/// runtime output). randomAccess read-back (rescan replay via
+/// `tuplesort_rescan`, mark/restore; backward pulls retired with the
+/// backward-execution wave B6) is sound exactly when this holds, because
+/// every one of those paths operates on `tuplesortstate` directly.
 pub fn sort_lane_readback_delegated(node: &SortState<'_>) -> bool {
     node.sort_Done && node.tuplesortstate.is_some() && !node.refsort && node.runtime_full.is_none()
 }
