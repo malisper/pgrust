@@ -369,6 +369,38 @@ pub fn connect(
         Stream::Unix(s) => s.set_nonblocking(true).expect("set_nonblocking"),
     }
 
+    // libpq's emitHostIdentityInfo (fe-connect.c), emitted SPECULATIVELY into
+    // conn->errorMessage the moment the target address is identified
+    // (PQconnectPoll, "all errors ... should be prefixed with host-identity
+    // information"): every later failure of this attempt — the startup-packet
+    // send, a server-sent FATAL during auth (role/database does not exist),
+    // fe_sendauth, a SCRAM failure — carries the prefix. Dial failures above
+    // already build it inline.
+    let host_identity = match &target {
+        DialTarget::Unix(path) => {
+            format!("connection to server on socket \"{path}\" failed: ")
+        }
+        DialTarget::Tcp(disp_host, disp_port) => {
+            // C: a CHT_HOST_ADDRESS target (hostaddr=) displays bare; a host
+            // NAME whose looked-up address differs textually displays
+            // "name" (addr) (emitHostIdentityInfo's strcmp arm).
+            let peer_ip = match &stream {
+                Stream::Tcp(s) => {
+                    s.peer_addr().map(|a| a.ip().to_string()).unwrap_or_default()
+                }
+                #[cfg(not(target_family = "wasm"))]
+                Stream::Unix(_) => String::new(),
+            };
+            if !hostaddr.is_empty() || peer_ip.is_empty() || peer_ip == *disp_host {
+                format!("connection to server at \"{disp_host}\", port {disp_port} failed: ")
+            } else {
+                format!(
+                    "connection to server at \"{disp_host}\" ({peer_ip}), port {disp_port} failed: "
+                )
+            }
+        }
+    };
+
     let mut conn = PgConn {
         _stream: stream,
         fd,
@@ -406,12 +438,12 @@ pub fn connect(
     pkt.extend_from_slice(&((body.len() as u32 + 4).to_be_bytes()));
     pkt.extend_from_slice(&body);
     if let Err(e) = conn.send_all(&pkt) {
-        return Ok(Err(e));
+        return Ok(Err(format!("{host_identity}{e}")));
     }
 
     match auth::handshake(&mut conn, &user, password.as_deref())? {
         Ok(()) => Ok(Ok(conn)),
-        Err(e) => Ok(Err(e)),
+        Err(e) => Ok(Err(format!("{host_identity}{e}"))),
     }
 }
 
