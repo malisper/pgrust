@@ -9,6 +9,7 @@ name = "logical"
 path = "src/lib.rs"
 
 [dependencies]
+injection_point = { path = "../../../utils/misc/injection_point" }
 datum = { path = "../../../../_support/types/datum" }
 mcx = { path = "../../../../_support/mcx" }
 types_core = { path = "../../../../_support/types/types_core" }
