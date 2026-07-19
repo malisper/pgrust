@@ -527,3 +527,29 @@ pub fn fc_dblink_build_sql_update(
     table::table_close(rel, AccessShareLock)?;
     Ok(crate::text_result(mcx, &sql)?)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quote_literal_matches_c() {
+        assert_eq!(quote_literal_str("plain"), "'plain'");
+        assert_eq!(quote_literal_str("O'Brien"), "'O''Brien'");
+        // backslash forces the E'' prefix and doubled backslash.
+        assert_eq!(quote_literal_str("a\\b"), "E'a\\\\b'");
+        assert_eq!(quote_literal_str("x'\\y"), "E'x''\\\\y'");
+    }
+
+    #[test]
+    fn int2vector_decode() {
+        // header: vl_len_, ndim=1, dataoffset=0, elemtype=INT2, dim1=3,
+        // lbound1=0, then i16[3] = {2, 4, 6}.
+        let mut buf = vec![0u8; 24 + 6];
+        buf[16..20].copy_from_slice(&3i32.to_ne_bytes()); // dim1
+        buf[24..26].copy_from_slice(&2i16.to_ne_bytes());
+        buf[26..28].copy_from_slice(&4i16.to_ne_bytes());
+        buf[28..30].copy_from_slice(&6i16.to_ne_bytes());
+        assert_eq!(int2vector_values(buf.as_ptr()), vec![2, 4, 6]);
+    }
+}

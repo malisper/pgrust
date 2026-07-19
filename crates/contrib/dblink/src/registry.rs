@@ -264,3 +264,25 @@ pub fn escape_param_str(s: &str) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connstr_pw_detection() {
+        assert!(connstr_has_pw("dbname=x password=secret"));
+        assert!(connstr_has_pw("password='s e c'"));
+        assert!(!connstr_has_pw("dbname=x port=5432"));
+        assert!(!connstr_has_pw("password="));
+        assert!(!connstr_has_pw("password=''"));
+    }
+
+    #[test]
+    fn escape_param() {
+        assert_eq!(escape_param_str("plain"), "plain");
+        assert_eq!(escape_param_str("a'b"), "a\\'b");
+        assert_eq!(escape_param_str("a\\b"), "a\\\\b");
+        assert_eq!(escape_param_str("both'\\"), "both\\'\\\\");
+    }
+}

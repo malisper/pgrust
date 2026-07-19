@@ -87,6 +87,37 @@ fn invalid_option_error(mcx: mcx::Mcx<'_>, name: &str, context: Oid) -> PgResult
     Ok(Box::new(e))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn option_context_rules() {
+        // secure ('*') + "user" belong only in USER MAPPING.
+        assert!(is_valid_dblink_option("password", USER_MAPPING_CONTEXT));
+        assert!(!is_valid_dblink_option("password", SERVER_CONTEXT));
+        assert!(is_valid_dblink_option("user", USER_MAPPING_CONTEXT));
+        assert!(!is_valid_dblink_option("user", SERVER_CONTEXT));
+        // ordinary options belong only in FOREIGN SERVER.
+        assert!(is_valid_dblink_option("dbname", SERVER_CONTEXT));
+        assert!(!is_valid_dblink_option("dbname", USER_MAPPING_CONTEXT));
+        assert!(is_valid_dblink_option("host", SERVER_CONTEXT));
+        // banned everywhere.
+        assert!(!is_valid_dblink_option("client_encoding", SERVER_CONTEXT));
+        assert!(!is_valid_dblink_option("client_encoding", USER_MAPPING_CONTEXT));
+        assert!(!is_valid_dblink_option("replication", SERVER_CONTEXT)); // debug 'D'
+        assert!(!is_valid_dblink_option("oauth_issuer", SERVER_CONTEXT));
+        assert!(!is_valid_dblink_option("oauth_client_id", USER_MAPPING_CONTEXT));
+        assert!(!is_valid_dblink_option("bogus", SERVER_CONTEXT));
+    }
+
+    #[test]
+    fn fdw_specific_option() {
+        assert!(is_valid_dblink_fdw_option("use_scram_passthrough", SERVER_CONTEXT));
+        assert!(!is_valid_dblink_option("use_scram_passthrough", SERVER_CONTEXT));
+    }
+}
+
 pub fn fc_dblink_fdw_validator(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let mcx = fcinfo.result_mcx();
     let options = foreigncmds::options::untransform_options(mcx, Some(fcinfo.arg(0)))?;
