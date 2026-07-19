@@ -137,6 +137,40 @@ fn varchar_cast_coercion() {
     );
 }
 
+// fnconf batch-1, OID 669: C computes `maxlen = typmod - VARHDRSZ` under
+// -fwrapv, so typmod = INT32_MIN wraps positive and the source is returned
+// unchanged (C 18.3: SELECT "varchar"('é'::varchar, -2147483648, true) → é).
+// Red at base: debug subtract-with-overflow panic at the maxlen computation.
+#[test]
+fn varchar_int_min_typmod_returns_source() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    assert!(varchar(mcx, "é".as_bytes(), i32::MIN, true).unwrap().is_none());
+    assert!(varchar(mcx, "é".as_bytes(), i32::MIN, false).unwrap().is_none());
+    // The whole invalid range behaves alike in C (maxlen < 0 or wrapped huge).
+    assert!(varchar(mcx, b"abc", i32::MIN + 1, true).unwrap().is_none());
+}
+
+// fnconf batch-1, OID 668: C's bpchar pads to `maxlen + VARHDRSZ` bytes
+// computed in int arithmetic under -fwrapv; for typmod = INT32_MAX the
+// request wraps negative and palloc's Size (u64) conversion sign-extends,
+// so C 18.3 errors `invalid memory alloc request size 18446744071562067969`
+// for SELECT bpchar('多'::bpchar, 2147483647, false).
+// Red at base: pgrust printed the unwrapped size 2147483649.
+#[test]
+fn bpchar_huge_typmod_reports_c_wrapped_alloc_size() {
+    // Multibyte charlen < byte len is what makes C's `len + (maxlen -
+    // charlen) + VARHDRSZ` wrap past INT32_MAX.
+    mbutils::SetDatabaseEncoding(wchar::PG_UTF8).unwrap();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let err = bpchar(mcx, "多".as_bytes(), i32::MAX, false).unwrap_err();
+    assert_eq!(
+        err.message(),
+        "invalid memory alloc request size 18446744071562067969"
+    );
+}
+
 #[test]
 fn eq_cmp_ignore_trailing_blanks() {
     assert!(bpchareq(b"abc   ", b"abc", C).unwrap());
