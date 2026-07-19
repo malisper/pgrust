@@ -20,7 +20,7 @@ struct DomainIOData {
     proc: FmgrInfo,
 }
 
-fn domain_state_setup(domainType: Oid) -> PgResult<DomainIOData> {
+fn domain_state_setup(domainType: Oid, binary: bool) -> PgResult<DomainIOData> {
     let Some(base) = syscache_seams::pg_type_base_shape::call(domainType)? else {
         return Err(Box::new(PgError::error(format!(
             "cache lookup failed for type {domainType}"
@@ -35,8 +35,14 @@ fn domain_state_setup(domainType: Oid) -> PgResult<DomainIOData> {
     }
     let mut typtypmod = -1;
     let baseType = lsyscache::getBaseTypeAndTypmod(domainType, &mut typtypmod)?;
-    let (typinput, typioparam) = lsyscache::getTypeInputInfo(baseType)?;
-    let proc = fmgr_seams::fmgr_info::call(typinput)?;
+    // C domain_state_setup(binary): the base type's typreceive for the wire
+    // lane, typinput for the text lane.
+    let (typiofunc, typioparam) = if binary {
+        lsyscache::getTypeBinaryInputInfo(baseType)?
+    } else {
+        lsyscache::getTypeInputInfo(baseType)?
+    };
+    let proc = fmgr_seams::fmgr_info::call(typiofunc)?;
     Ok(DomainIOData { domain_type: domainType, typioparam, typtypmod, proc })
 }
 
@@ -61,7 +67,7 @@ pub fn fc_domain_in(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
         None => true,
     };
     if stale {
-        flinfo.set_fn_extra(domain_state_setup(domainType)?);
+        flinfo.set_fn_extra(domain_state_setup(domainType, false)?);
     }
 
     let mcx = fcinfo.result_mcx();
@@ -98,13 +104,47 @@ pub fn fc_domain_in(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
     Ok(value)
 }
 
-pub fn fc_domain_recv(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    // unported: domain_recv (domains.c) binary input lane — unit
-    // backend-utils-adt-misc2.
-    Err(Box::new(
-        PgError::error("binary input for domain types is not yet implemented")
-            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-    ))
+// C domain_recv (domains.c): the base type's typreceive converts the wire
+// bytes, then the domain's constraints are checked — hard errors only (no
+// soft-error lane on the binary side, matching C).
+pub fn fc_domain_recv(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // domain_recv is non-strict; NULL-ness of arg 0 is the pointer (C's
+    // ReceiveFunctionCall passes a NULL buf for a NULL wire value).
+    let buf_is_null = fcinfo.args[0].isnull || fcinfo.arg(0).as_usize() == 0;
+    if fcinfo.args[1].isnull {
+        fcinfo.isnull = true;
+        return Ok(Datum::null());
+    }
+    let domainType = fcinfo.arg(1).as_oid();
+
+    let flinfo = flinfo.expect("domain_recv: NULL flinfo");
+    let stale = match flinfo.fn_extra_ref::<DomainIOData>() {
+        Some(d) => d.domain_type != domainType,
+        None => true,
+    };
+    if stale {
+        flinfo.set_fn_extra(domain_state_setup(domainType, true)?);
+    }
+
+    let mcx = fcinfo.result_mcx();
+    let my = flinfo.fn_extra_mut::<DomainIOData>().expect("just installed");
+    let buf = if buf_is_null {
+        None
+    } else {
+        // SAFETY: non-null recv arg 0 is the live StringInfo pointer per the
+        // recv ABI.
+        Some(unsafe { fcinfo.arg_stringinfo(0) })
+    };
+    let value =
+        types_fmgr::receive_function_call(&mut my.proc, buf, my.typioparam, my.typtypmod, mcx)?;
+
+    typcache_seams::domain_check_input::call(value, buf_is_null, domainType, None)?;
+
+    if buf_is_null {
+        fcinfo.isnull = true;
+        return Ok(Datum::null());
+    }
+    Ok(value)
 }
 
 // C's extra/mcxt per-callsite memo collapses into the engine's per-domain memo.

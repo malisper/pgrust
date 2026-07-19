@@ -430,7 +430,8 @@ const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrB
 }
 
 // pg_proc.dat rows for int.c. Not present: int2vectorrecv/send (2410/2411)
-// ride the binary-wire fmgr frame (types_fmgr::wire).
+// live with the oidvector pair in arrayfuncs::builtins (array_recv/array_send
+// delegations need the array io meta cache).
 pub const INT_BUILTINS: &[FmgrBuiltin] = &[
     b(2404, "int2recv", 1, fc_int2recv),
     b(2405, "int2send", 1, fc_int2send),

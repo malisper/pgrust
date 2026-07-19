@@ -78,7 +78,7 @@ fn void_send_fmgr_wrapper_sends_empty_payload() {
 #[test]
 fn builtins_table_is_oid_ascending() {
     let t = builtins::PSEUDOTYPES_BUILTINS;
-    assert_eq!(t.len(), 50);
+    assert_eq!(t.len(), 51);
     for w in t.windows(2) {
         assert!(w[0].foid < w[1].foid, "{} !< {}", w[0].foid, w[1].foid);
     }

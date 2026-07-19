@@ -128,6 +128,11 @@ pub fn fc_pg_node_tree_out(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -
     varlena::builtins::fc_textout(flinfo, fcinfo)
 }
 
+// C pg_node_tree_send is `return textsend(fcinfo)` (pseudotypes.c).
+pub fn fc_pg_node_tree_send(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    varlena::builtins::fc_textsend(flinfo, fcinfo)
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, strict: bool, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -149,6 +154,7 @@ pub const PSEUDOTYPES_BUILTINS: &[FmgrBuiltin] = &[
     b(195, "pg_node_tree_in", 1, true, fc_pg_node_tree_in),
     b(196, "pg_node_tree_out", 1, true, fc_pg_node_tree_out),
     b(197, "pg_node_tree_recv", 1, true, fc_pg_node_tree_recv),
+    b(198, "pg_node_tree_send", 1, true, fc_pg_node_tree_send),
     b(267, "table_am_handler_in", 1, false, fc_table_am_handler_in),
     b(268, "table_am_handler_out", 1, true, fc_table_am_handler_out),
     b(326, "index_am_handler_in", 1, false, fc_index_am_handler_in),
