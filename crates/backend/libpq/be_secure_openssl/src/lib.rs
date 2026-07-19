@@ -933,6 +933,7 @@ pub fn be_tls_open_server(sock: i32, raw_buf: Vec<u8>) -> PgResult<TlsOpen> {
     // write (and socket_close's secure_close) through the TLS arms from here.
     pqcomm::set_ssl_in_use(true);
 
+    clear_err_queue();
     let mut result = ssl.accept(stream);
     let stream = loop {
         match result {
@@ -952,6 +953,7 @@ pub fn be_tls_open_server(sock: i32, raw_buf: Vec<u8>) -> PgResult<TlsOpen> {
                 if events & WL_LATCH_SET != 0 {
                     latch_seams::reset_latch_my_latch::call();
                 }
+                clear_err_queue();
                 result = mid.handshake();
             }
             Err(HandshakeError::Failure(mid)) => {
@@ -1153,12 +1155,25 @@ fn classify_io(res: Result<usize, openssl::ssl::Error>, is_read: bool) -> PgResu
     }
 }
 
+// C clears the thread-local OpenSSL error queue before every SSL_accept /
+// SSL_read / SSL_write (be-secure-openssl.c: "Prepare to call SSL_get_error()
+// by clearing thread's OpenSSL error queue"): a stale error pushed by some
+// OTHER libcrypto caller in this backend (e.g. sslinfo's OBJ_txt2nid on an
+// invalid field name) would otherwise make SSL_get_error misclassify the next
+// I/O — including turning a clean WANT_READ into a fatal "SSL error" that
+// kills the connection.
+fn clear_err_queue() {
+    // SAFETY: clears this thread's OpenSSL error queue; no preconditions.
+    unsafe { openssl_sys::ERR_clear_error() }
+}
+
 pub fn be_tls_read(buf: &mut [u8]) -> PgResult<TlsIo> {
     CONN.with(|c| {
         let mut conn = c.borrow_mut();
         let conn = conn
             .as_mut()
             .expect("be_tls_read: no TLS connection on this backend");
+        clear_err_queue();
         classify_io(conn.stream.ssl_read(buf), true)
     })
 }
@@ -1169,6 +1184,7 @@ pub fn be_tls_write(buf: &[u8]) -> PgResult<TlsIo> {
         let conn = conn
             .as_mut()
             .expect("be_tls_write: no TLS connection on this backend");
+        clear_err_queue();
         classify_io(conn.stream.ssl_write(buf), false)
     })
 }
