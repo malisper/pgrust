@@ -6,10 +6,10 @@
 #![allow(clippy::too_many_arguments)]
 
 pub(crate) mod insert;
-pub(crate) mod ovfl;
+pub mod ovfl;
 pub(crate) mod page;
 pub(crate) mod search;
-pub(crate) mod util;
+pub mod util;
 pub(crate) mod wal;
 
 use ::datum::Datum;
