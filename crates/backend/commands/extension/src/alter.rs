@@ -86,26 +86,19 @@ pub fn ExecAlterExtensionStmt<'mcx>(
         panic!("extversion is null");
     }
     let old_version_name = text_datum_str(mcx, version_d)?;
-    // SAFETY: extowner is a fixed NOT NULL pg_extension column.
-    let extowner = unsafe {
-        types_tuple::heap_getattr(tup, crate::Anum_pg_extension_extowner, desc, &mut isnull)
-    }
-    .as_oid();
 
     genam::systable_endscan(mcx, scan)?;
     ext_rel.close(AccessShareLock)?;
 
-    // C: object_ownercheck(ExtensionRelationId, extensionOid, GetUserId())
-    // — superuser fast path, then privileges-of-owner (aclchk.c reads the
-    // same extowner attribute we already have in hand). On failure,
-    // aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_EXTENSION, extname).
-    if !superuser::superuser()?
-        && !adt_acl::has_privs_of_role(miscinit::GetUserId(), extowner)?
-    {
-        return Err(Box::new(
-            types_error::PgError::error(format!("must be owner of extension {extname}"))
-                .with_sqlstate(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE),
-        ));
+    // C (extension.c:3471): object_ownercheck(ExtensionRelationId,
+    // extensionOid, GetUserId()); on failure aclcheck_error(ACLCHECK_NOT_OWNER,
+    // OBJECT_EXTENSION, stmt->extname) => "must be owner of extension %s".
+    if !aclchk::object_ownercheck(EXTENSION_RELATION_ID, extension_oid, miscinit::GetUserId())? {
+        aclchk::aclcheck_error(
+            aclchk::ACLCHECK_NOT_OWNER,
+            types_nodes::parsenodes::ObjectType::OBJECT_EXTENSION,
+            extname,
+        )?;
     }
 
     let control = read_extension_control_file(extname)?;
