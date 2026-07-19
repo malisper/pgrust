@@ -823,8 +823,71 @@ pub fn getObjectDescription(
                 format_type::format_type_be(trftype)?
             )))
         }
-        other => unported(&format!("getObjectDescription object class {other}")),
+        other => {
+            // C getObjectDescription's default arm (objectaddress.c REL_18_3:
+            // `elog(ERROR, "unsupported object class: %u")`) for any classId
+            // outside its switch — sqlsmith reaches it with arbitrary OIDs
+            // (pg_describe_object(16384, 1, 0), the baseline census site).
+            // Classes C DOES describe but this port has not implemented yet
+            // stay loud below (a coverage gap is not an unsupported class).
+            if !c_described_classes(other) {
+                return Err(crate::err(
+                    ::types_error::ERRCODE_INTERNAL_ERROR,
+                    format!("unsupported object class: {other}"),
+                ));
+            }
+            unported(&format!("getObjectDescription object class {other}"))
+        }
     }
+}
+
+// The classId set C's getObjectDescription switch handles (objectaddress.c
+// REL_18_3 case list; OIDs from the CATALOG() lines in the pg_*.h headers).
+fn c_described_classes(class_id: types_core::Oid) -> bool {
+    matches!(
+        class_id,
+        826    // pg_default_acl (DefaultAclRelationId)
+        | 1213 // pg_tablespace (TableSpaceRelationId)
+        | 1247 // pg_type (TypeRelationId)
+        | 1255 // pg_proc (ProcedureRelationId)
+        | 1259 // pg_class (RelationRelationId)
+        | 1260 // pg_authid (AuthIdRelationId)
+        | 1261 // pg_auth_members (AuthMemRelationId)
+        | 1262 // pg_database (DatabaseRelationId)
+        | 1417 // pg_foreign_server (ForeignServerRelationId)
+        | 1418 // pg_user_mapping (UserMappingRelationId)
+        | 2328 // pg_foreign_data_wrapper (ForeignDataWrapperRelationId)
+        | 2601 // pg_am (AccessMethodRelationId)
+        | 2602 // pg_amop (AccessMethodOperatorRelationId)
+        | 2603 // pg_amproc (AccessMethodProcedureRelationId)
+        | 2604 // pg_attrdef (AttrDefaultRelationId)
+        | 2605 // pg_cast (CastRelationId)
+        | 2606 // pg_constraint (ConstraintRelationId)
+        | 2607 // pg_conversion (ConversionRelationId)
+        | 2612 // pg_language (LanguageRelationId)
+        | 2613 // pg_largeobject (LargeObjectRelationId)
+        | 2615 // pg_namespace (NamespaceRelationId)
+        | 2616 // pg_opclass (OperatorClassRelationId)
+        | 2617 // pg_operator (OperatorRelationId)
+        | 2618 // pg_rewrite (RewriteRelationId)
+        | 2620 // pg_trigger (TriggerRelationId)
+        | 2753 // pg_opfamily (OperatorFamilyRelationId)
+        | 3079 // pg_extension (ExtensionRelationId)
+        | 3256 // pg_policy (PolicyRelationId)
+        | 3381 // pg_statistic_ext (StatisticExtRelationId)
+        | 3456 // pg_collation (CollationRelationId)
+        | 3466 // pg_event_trigger (EventTriggerRelationId)
+        | 3576 // pg_transform (TransformRelationId)
+        | 3600 // pg_ts_dict (TSDictionaryRelationId)
+        | 3601 // pg_ts_parser (TSParserRelationId)
+        | 3602 // pg_ts_config (TSConfigRelationId)
+        | 3764 // pg_ts_template (TSTemplateRelationId)
+        | 6100 // pg_subscription (SubscriptionRelationId)
+        | 6104 // pg_publication (PublicationRelationId)
+        | 6106 // pg_publication_rel (PublicationRelRelationId)
+        | 6237 // pg_publication_namespace (PublicationNamespaceRelationId)
+        | 6243 // pg_parameter_acl (ParameterAclRelationId)
+    )
 }
 
 // getPublicationSchemaInfo (objectaddress.c): (pubname, nspname) for a
