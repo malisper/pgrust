@@ -27,7 +27,7 @@ mod typefromtl;
 #[cfg(test)]
 mod tests;
 
-pub use execami::{exec_re_scan, exec_re_scan_result, exec_supports_backward_scan};
+pub use execami::{exec_re_scan, exec_re_scan_result, plan_implicit_scroll_ok};
 pub use execmain::{
     exec_check_one_rel_perms, standard_executor_end, standard_executor_finish,
     standard_executor_run, standard_executor_start, tap_executor_end, tap_executor_finish,

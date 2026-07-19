@@ -144,10 +144,13 @@ pub fn SPI_cursor_open(
             p.cursorOptions = cursor_options;
             if p.cursorOptions & (CURSOR_OPT_SCROLL | CURSOR_OPT_NO_SCROLL) == 0 {
                 // C's default-scrollability probe (spi.c SPI_cursor_open_internal).
+                // The probe is a POLICY oracle since the backward-execution
+                // wave (B10): it decides which cursors accept FETCH BACKWARD
+                // by default (C parity); the reads themselves are store-served.
                 if stmt_slice.len() == 1
                     && stmt_slice[0].commandType != types_nodes::nodes_enums::CmdType::CMD_UTILITY
                     && stmt_slice[0].rowMarks.is_nil()
-                    && execmain::exec_supports_backward_scan(stmt_slice[0].planTree)
+                    && execmain::plan_implicit_scroll_ok(stmt_slice[0].planTree)
                 {
                     p.cursorOptions |= CURSOR_OPT_SCROLL;
                 } else {

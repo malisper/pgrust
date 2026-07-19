@@ -164,8 +164,12 @@ pub fn PerformCursorOpen(
         let mut p = portal.borrow_mut();
         p.cursorOptions = cstmt.options;
         if p.cursorOptions & (CURSOR_OPT_SCROLL | CURSOR_OPT_NO_SCROLL) == 0 {
+            // C's default-scrollability probe (portalcmds.c PerformCursorOpen).
+            // A POLICY oracle since the backward-execution wave (B10): it
+            // decides which cursors accept FETCH BACKWARD by default (C
+            // parity); the reads themselves are store-served.
             if plan.rowMarks.is_nil()
-                && execmain::exec_supports_backward_scan(plan.planTree)
+                && execmain::plan_implicit_scroll_ok(plan.planTree)
             {
                 p.cursorOptions |= CURSOR_OPT_SCROLL;
             } else {

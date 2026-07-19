@@ -6,10 +6,23 @@ use ::types_nodes::NodeTag;
 use crate::noderesult::ResultState;
 use crate::procnode::PlanStateNode;
 
-/// `ExecSupportsBackwardScan` (execAmi.c). Unlanded node types take C's
-/// default-false arms. Material/CteScan match C's `true`; their runtime
-/// backward gaps are loud panics, never silent reads.
-pub fn exec_supports_backward_scan(node: Option<Node<'_>>) -> bool {
+/// C's `ExecSupportsBackwardScan` (execAmi.c:503+), DEMOTED to a
+/// scroll-POLICY oracle (backward-execution wave B10, cursors inc-2 §6
+/// rider row 3 "execami demotion + rename").
+///
+/// What changed: in C this predicate answers "can the EXECUTOR run this
+/// plan backwards?" and gates both the planner's Material wrap (deleted,
+/// B3) and the implicit-SCROLL default for cursors declared without
+/// SCROLL/NO SCROLL. Our executor NEVER runs backwards (the run seam
+/// refuses backward entry - deletion-prep B1; backward cursor reads are
+/// served by the portal tuplestore). What remains is the POLICY use: which
+/// cursors get CURSOR_OPT_SCROLL by default - a user-visible SQL contract
+/// (whether FETCH BACKWARD on an undeclared cursor succeeds or raises the
+/// no-scroll error) that must stay byte-identical to C. So the plan-shape
+/// walk below mirrors C's answer set EXACTLY and is consulted only by the
+/// two cursor-open policy probes (portalcmds PerformCursorOpen, SPI
+/// SPI_cursor_open_internal), never by the executor.
+pub fn plan_implicit_scroll_ok(node: Option<Node<'_>>) -> bool {
     let Some(node) = node else { return false };
     let plan = node.as_plan().expect("plan-tree node has a Plan prefix");
     if plan.parallel_aware {
@@ -17,7 +30,7 @@ pub fn exec_supports_backward_scan(node: Option<Node<'_>>) -> bool {
     }
     match node.node_tag() {
         NodeTag::T_Result => match plan.lefttree {
-            Some(outer) => exec_supports_backward_scan(Some(outer)),
+            Some(outer) => plan_implicit_scroll_ok(Some(outer)),
             None => false,
         },
         // amcanbackward: the only live index AM is btree (plancat.c port
@@ -35,12 +48,12 @@ pub fn exec_supports_backward_scan(node: Option<Node<'_>>) -> bool {
             let a = node.as_append().expect("T_Append");
             // With async, tuples may be interleaved, so can't back up.
             a.nasyncplans == 0
-                && a.appendplans.iter().all(|p| exec_supports_backward_scan(Some(p)))
+                && a.appendplans.iter().all(|p| plan_implicit_scroll_ok(Some(p)))
         }
         NodeTag::T_SubqueryScan => {
-            exec_supports_backward_scan(node.as_subquery_scan().expect("T_SubqueryScan").subplan)
+            plan_implicit_scroll_ok(node.as_subquery_scan().expect("T_SubqueryScan").subplan)
         }
-        NodeTag::T_LockRows | NodeTag::T_Limit => exec_supports_backward_scan(plan.lefttree),
+        NodeTag::T_LockRows | NodeTag::T_Limit => plan_implicit_scroll_ok(plan.lefttree),
         _ => false,
     }
 }
