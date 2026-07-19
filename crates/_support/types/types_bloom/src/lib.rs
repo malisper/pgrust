@@ -1,10 +1,15 @@
-//! bloom.h on-disk layouts and signature math (C contrib/bloom, 18.3),
-//! byte-for-byte. Pages carry no line pointers: tuples are fixed-size cells
-//! laid end-to-end from PageGetContents, addressed by offset arithmetic, with
-//! pd_lower tracking the end of the used area (the metapage does the same
-//! with its single BloomMetaPageData blob).
+//! bloom.h on-disk layouts, signature math, and scan/state vocabulary
+//! (C contrib/bloom, 18.3), byte-for-byte. Pages carry no line pointers:
+//! tuples are fixed-size cells laid end-to-end from PageGetContents,
+//! addressed by offset arithmetic, with pd_lower tracking the end of the
+//! used area (the metapage does the same with its single BloomMetaPageData
+//! blob). Lives under _support/types so relscan's IndexScanOpaque can carry
+//! the scan opaque without a cycle through the contrib crate.
 
-use types_core::{BlockNumber, BLCKSZ};
+use types_core::{BlockNumber, Oid, BLCKSZ};
+
+#[cfg(test)]
+mod tests;
 
 pub type BloomSignatureWord = u16;
 
@@ -375,4 +380,28 @@ pub fn signature_matches(tuple_sign: &[u8], scan_sign: &[BloomSignatureWord]) ->
         }
     }
     true
+}
+
+// ---------------------------------------------------------------------------
+// BloomState / scan opaque (bloom.h BloomState, BloomScanOpaqueData).
+// ---------------------------------------------------------------------------
+
+/// C BloomState: per-index scratch built by initBloomState. `opts` always
+/// comes from the METAPAGE (frozen at build), never current reloptions —
+/// that's why ALTER INDEX ... SET (length=...) doesn't change a live index.
+pub struct BloomState {
+    /// BLOOM_HASH_PROC FmgrInfo per key column.
+    pub hash_fn: Vec<types_fmgr::FmgrInfo>,
+    pub collations: Vec<Oid>,
+    pub opts: BloomOptions,
+    pub ncolumns: usize,
+    /// Precomputed BLOOMTUPLEHDRSZ + 2 * opts.bloom_length.
+    pub size_of_bloom_tuple: usize,
+}
+
+/// C BloomScanOpaqueData: the scan signature is built lazily on the first
+/// blgetbitmap call (None until then; reset by blrescan).
+pub struct BloomScanOpaqueData {
+    pub sign: Option<Vec<BloomSignatureWord>>,
+    pub state: BloomState,
 }

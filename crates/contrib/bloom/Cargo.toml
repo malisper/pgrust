@@ -18,6 +18,12 @@ types_tuple = { path = "../../_support/types/types_tuple" }
 types_rel = { path = "../../_support/types/rel" }
 types_storage = { path = "../../_support/types/types_storage" }
 types_relscan = { path = "../../backend/access/index/relscan" }
+types_bloom = { path = "../../_support/types/types_bloom" }
+types_nbtree = { path = "../../_support/types/types_nbtree" }
+nbtree = { path = "../../backend/access/nbtree/nbtree" }
+xact = { path = "../../backend/access/transam/xact" }
+execindexing = { path = "../../backend/executor/execindexing" }
+postgres_seams = { path = "../../backend/tcop/postgres_seams" }
 types_scan = { path = "../../_support/types/types_scan" }
 bufmgr = { path = "../../backend/storage/buffer/bufmgr" }
 bufmgr_seams = { path = "../../backend/storage/buffer/bufmgr_seams" }
