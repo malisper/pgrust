@@ -7565,6 +7565,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "isn"
+version = "0.0.0"
+dependencies = [
+ "adt_bool",
+ "datum",
+ "dfmgr",
+ "guc",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_guc",
+]
+
+[[package]]
 name = "jit_deform"
 version = "0.1.0"
 dependencies = [
@@ -11639,6 +11654,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_surgery"
+version = "0.0.0"
+dependencies = [
+ "aclchk",
+ "arrayfuncs",
+ "arrayutils",
+ "bufmgr",
+ "bufmgr_seams",
+ "datum",
+ "detoast_seams",
+ "dfmgr",
+ "elog_seams",
+ "init_small",
+ "mcx",
+ "miscinit",
+ "relation",
+ "tableam_vocab",
+ "transam_xlog",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_rel",
+ "types_storage",
+ "types_tuple",
+ "visibilitymap",
+ "xloginsert",
+]
+
+[[package]]
 name = "pg_trgm"
 version = "0.0.0"
 dependencies = [
@@ -14806,6 +14850,7 @@ dependencies = [
  "inval",
  "ipc",
  "ipci",
+ "isn",
  "large_object",
  "latch",
  "launch_backend",
@@ -14876,6 +14921,7 @@ dependencies = [
  "pg_stat_statements",
  "pg_string",
  "pg_subscription",
+ "pg_surgery",
  "pg_trgm",
  "pg_upgrade_support",
  "pg_walinspect",

@@ -15,9 +15,9 @@ use cache_syscache::{
 };
 use datum::Datum;
 use types_core::catalog::{
-    FirstUnpinnedObjectId, BOOTSTRAP_SUPERUSERID, DATABASE_RELATION_ID, LANGUAGE_RELATION_ID,
-    NAMESPACE_RELATION_ID, PG_TOAST_NAMESPACE, PROCEDURE_RELATION_ID, RELATION_RELATION_ID,
-    TYPE_RELATION_ID,
+    FirstUnpinnedObjectId, BOOTSTRAP_SUPERUSERID, DATABASE_RELATION_ID, EXTENSION_RELATION_ID,
+    LANGUAGE_RELATION_ID, NAMESPACE_RELATION_ID, PG_TOAST_NAMESPACE, PROCEDURE_RELATION_ID,
+    RELATION_RELATION_ID, TYPE_RELATION_ID,
 };
 use types_core::Oid;
 use types_error::{
@@ -850,6 +850,24 @@ pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<b
             };
             let owner =
                 SysCacheGetAttrNotNull(RELOID, &tuple, ANUM_PG_CLASS_RELOWNER)?.as_oid();
+            ReleaseSysCache(tuple);
+            owner
+        }
+        EXTENSION_RELATION_ID => {
+            // C's object_ownercheck has no extension syscache and systable-scans
+            // pg_extension by OID; pgrust exposes EXTENSIONOID, so use it. Anum
+            // 3 = pg_extension.extowner (fixed NOT NULL).
+            let Some(tuple) = SearchSysCache1(
+                cache_syscache::cacheinfo::EXTENSIONOID,
+                SysCacheKey::Value(Datum::from_oid(objectid)),
+            )?
+            else {
+                return Err(Box::new(PgError::error(format!(
+                    "cache lookup failed for extension {objectid}"
+                ))));
+            };
+            let owner =
+                SysCacheGetAttrNotNull(cache_syscache::cacheinfo::EXTENSIONOID, &tuple, 3)?.as_oid();
             ReleaseSysCache(tuple);
             owner
         }
