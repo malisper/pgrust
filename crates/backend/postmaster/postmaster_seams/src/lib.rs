@@ -101,3 +101,34 @@ seam_core::seam!(
     // first engagement).
     pub fn rtgang_install()
 );
+
+seam_core::seam!(
+    // SIMCORPUS (sim parallel-query corpus): PostmasterMain parity — the
+    // bgworker registry init (main_entry.rs calls it after shared memory;
+    // the single-user/stdio boot ladder never does, because standalone C
+    // has no bgworkers). A harness whose boot thread plays the postmaster
+    // must run it before any RegisterDynamicBackgroundWorker, or the
+    // leader dies at "BackgroundWorkerData accessed before
+    // BackgroundWorkerShmemInit". Seam-routed (tcop cannot depend on
+    // bgworker: bgworker depends on tcop).
+    pub fn bgworker_shmem_init()
+);
+
+seam_core::seam!(
+    // SIMCORPUS (sim parallel-query corpus): one postmaster SERVICE
+    // quantum — the ServerLoop slice a harness boot thread needs while it
+    // PLAYS the postmaster and a session runs on a child thread:
+    // (1) pending child-exit announces (process_pm_child_exit: join
+    // announced threads, clear bgworker slot pids,
+    // ReportBackgroundWorkerExit -> the leader's BGWH_STOPPED wake —
+    // without a reaper, DestroyParallelContext's
+    // WaitForBackgroundWorkerShutdown waits forever);
+    // (2) the PMSIGNAL_BACKGROUND_WORKER_CHANGE arm + deferred bgworker
+    // starts (maybe_start_bgworkers) — a pool-miss registration defers to
+    // "postmaster start", and only this arm ever starts it (found by the
+    // P9 red's Gather-leader hang on NOT_YET_STARTED slots).
+    // No-op when nothing is pending. Seam-routed for the same
+    // package-cycle reason as the wpool/rtpool/rtgang trios (tcop cannot
+    // depend on postmaster).
+    pub fn pm_service_pending()
+);

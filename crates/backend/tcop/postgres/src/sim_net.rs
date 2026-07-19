@@ -447,6 +447,11 @@ fn second_session_thread(
     argv: Vec<String>,
     datadir: String,
     snap: SimInherited,
+    // SIMCORPUS P9: Some(id) = ADOPT the shared process universe instead of
+    // seeding a private copy (the parquery leader must see the tables its
+    // setup session wrote — one filesystem per simulated process). None =
+    // the sessions=2 private-universe behavior, byte-identical.
+    adopt: Option<u64>,
 ) -> pgsync::thread::JoinHandle<i32> {
     // PERMIT-S1 compose wiring: pgsync spawn — under PGRUST_SIM_SCHED=1 the
     // child registers in-model (synthetic vpid, parent-side spawn fence) so
@@ -472,8 +477,16 @@ fn second_session_thread(
             // same ambient pid; sessions must differ.
             // Wedge-ledger W4: seed THIS thread's universe before any GUC
             // processing — timezone validation walks the tz database through
-            // the (thread-local) vfs plane.
-            seed_universe(&datadir);
+            // the (thread-local) vfs plane. SIMCORPUS P9: with sharing on,
+            // ADOPT the process universe instead (the two-line spawn-door
+            // pattern's child half; the pgsync::thread wrapper registered
+            // this thread, so the adoption runs inside its quantum) — the
+            // shared universe already carries the seeded image plus
+            // everything session 1 wrote.
+            match adopt {
+                Some(id) => vfs::sim::SimVfs::adopt_universe(id),
+                None => seed_universe(&datadir),
+            }
             // Thread-local GUC store: defaults, then argv -c options, then
             // the config files — the EXEC_BACKEND-shaped restore. Wedge-
             // ledger W3: this must run BEFORE InitPostmasterChild flips
@@ -560,6 +573,15 @@ pub fn PostgresSimNetMain(argv: &[String], username: &str) -> ! {
             }
             _ => {}
         }
+        // SIMCORPUS: optional red SCOPE (thread-name substring) — sabotage
+        // only the matching class of adopting children (e.g. "pg:standby:"
+        // = the wpool parallel workers), so the P9 red breaks the WORKERS
+        // while the leader session adopts honestly.
+        if let Ok(scope) = std::env::var("PGRUST_SIMVFS_RED_SCOPE") {
+            if !scope.is_empty() {
+                vfs::sim::SimVfs::arm_red_adoption_scope(Some(&scope));
+            }
+        }
         vfs::sim::SimVfs::set_shared_access_probe(pgsync::sim::current_thread_holds_permit);
         vfs::sim::SimVfs::share_universe_as(1);
     }
@@ -618,6 +640,74 @@ pub fn PostgresSimNetMain(argv: &[String], username: &str) -> ! {
             std::process::exit(1);
         }
         crate::sim_sched_demo::run_rtpool_demo();
+    }
+
+    // ---- SIMCORPUS P9: the PARALLEL-QUERY corpus (legacy Gather workers
+    // over the shared universe). Three roles, one simulated process:
+    //   * the BOOT thread plays postmaster + session 1 (standalone arm —
+    //     it owns recovery inside its InitPostgres and runs the SETUP
+    //     script), then the postmaster's REAPER while the leader runs
+    //     (pm_service_pending — without it, DestroyParallelContext waits
+    //     forever on slot pids only the reaper clears), then the pool
+    //     drain (the P5 teardown shape);
+    //   * SESSION 2 is the under-postmaster LEADER (the planner's
+    //     parallel gate requires IsUnderPostmaster) — it ADOPTS the
+    //     process universe and runs the parallel-query script
+    //     (PGRUST_SIMNET_SQL2 / TRANSCRIPT2 / OPLOG2);
+    //   * the wpool STANDBYS (ServerLoop-parity maintain from the boot
+    //     thread, pristine postmaster capture, BEFORE session 1 runs) are
+    //     the Gather workers: registered at their doors, adopted into the
+    //     universe, claimed by the leader's LaunchParallelWorkers through
+    //     the ordinary pool dispatch.
+    if std::env::var("PGRUST_SIMNET_PARQUERY").is_ok_and(|v| v == "1") {
+        assert!(
+            vfs::sim::SimVfs::shared_universe_active(),
+            "PGRUST_SIMNET_PARQUERY requires PGRUST_SIMVFS_SHARED=1 \
+             (the workers read the leader's tables through the shared universe)"
+        );
+        if let Err(err) = crate::stdio_wire::stdio_wire_boot_half(argv, username) {
+            elog::emit_error_report_for(&err);
+            std::process::exit(1);
+        }
+        // PostmasterMain parity: the bgworker registry (main_entry.rs runs
+        // it after shared memory; the standalone ladder never does) — the
+        // leader's RegisterDynamicBackgroundWorker needs it.
+        postmaster_seams::bgworker_shmem_init::call();
+        postmaster_seams::wpool_maintain::call();
+        let snap = SimInherited::capture();
+        let code1 =
+            run_session_on_this_thread("PGRUST_SIMNET_TRANSCRIPT", "PGRUST_SIMNET_OPLOG");
+        let adopt = vfs::sim::SimVfs::current_universe_id();
+        assert!(adopt.is_some(), "parquery: boot thread lost its universe binding");
+        let s2 = second_session_thread(argv.to_vec(), datadir.clone(), snap, adopt);
+        // The reaper service loop: virtual-time quanta between reap polls
+        // (a raw sleep here would hold the permit and starve the leader).
+        // ServerLoop parity, both halves per iteration: reap child exits,
+        // then REPLENISH the pool (serverloop.rs runs wpool::maintain every
+        // iteration) — a worker that error-rotates (the red arm's shape)
+        // must be replaced. A registration that still misses defers to
+        // "postmaster start": the service seam's BACKGROUND_WORKER_CHANGE +
+        // maybe_start_bgworkers arms honor it (found by the P9 red's
+        // Gather-leader hang on NOT_YET_STARTED slots).
+        // At target population (the green arm: retention re-parks the
+        // standbys) maintain is an atomic-read no-op.
+        while !s2.is_finished() {
+            postmaster_seams::pm_service_pending::call();
+            postmaster_seams::wpool_maintain::call();
+            pgsync::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let code2 = s2.join().unwrap_or(101);
+        // Any announce racing the leader's exit, then the pool drain.
+        postmaster_seams::pm_service_pending::call();
+        postmaster_seams::wpool_flush::call();
+        let mut polls = 0u32;
+        while postmaster_seams::wpool_population::call() > 0 {
+            pgsync::thread::sleep(std::time::Duration::from_millis(1));
+            postmaster_seams::pm_service_pending::call();
+            polls += 1;
+            assert!(polls < 60_000, "parquery: standbys never drained");
+        }
+        std::process::exit(code1.max(code2))
     }
 
     if sessions <= 1 {
@@ -684,10 +774,10 @@ pub fn PostgresSimNetMain(argv: &[String], username: &str) -> ! {
     let serial = std::env::var("PGRUST_SIMNET_DUO_SERIAL").is_ok_and(|v| v == "1");
     let (code1, code2) = if serial {
         let code1 = run_session_on_this_thread("PGRUST_SIMNET_TRANSCRIPT", "PGRUST_SIMNET_OPLOG");
-        let s2 = second_session_thread(argv.to_vec(), datadir.clone(), snap);
+        let s2 = second_session_thread(argv.to_vec(), datadir.clone(), snap, None);
         (code1, s2.join().unwrap_or(101))
     } else {
-        let s2 = second_session_thread(argv.to_vec(), datadir.clone(), snap);
+        let s2 = second_session_thread(argv.to_vec(), datadir.clone(), snap, None);
         let code1 = run_session_on_this_thread("PGRUST_SIMNET_TRANSCRIPT", "PGRUST_SIMNET_OPLOG");
         (code1, s2.join().unwrap_or(101))
     };

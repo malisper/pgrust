@@ -715,6 +715,26 @@ static PERMIT_PROBE: AtomicUsize = AtomicUsize::new(0);
 /// RED-battery adoption sabotage (0 = off; see [`SimVfs::arm_red_adoption`]).
 static RED_ADOPTION: AtomicUsize = AtomicUsize::new(0);
 
+/// RED-battery adoption-sabotage SCOPE (0 = unscoped: every adoption is
+/// sabotaged). Non-zero = a leaked `*mut String` thread-name substring:
+/// only adopting threads whose OS thread name contains it are sabotaged.
+/// Lets a corpus break exactly ONE class of children (e.g. the wpool
+/// standbys, thread names `pg:standby:<pid>`) while the rest of the spawn
+/// tree adopts honestly — the parallel-query red needs the WORKERS broken,
+/// not the leader session that would otherwise die first and mask them.
+static RED_SCOPE: AtomicUsize = AtomicUsize::new(0);
+
+/// Does the red-adoption sabotage apply to THIS (adopting) thread?
+fn red_applies_here() -> bool {
+    let scope = RED_SCOPE.load(Ordering::Acquire);
+    if scope == 0 {
+        return true;
+    }
+    // SAFETY: only ever stored as a leaked Box<String> in arm_red_adoption_scope.
+    let scope: &String = unsafe { &*(scope as *const String) };
+    std::thread::current().name().is_some_and(|n| n.contains(scope.as_str()))
+}
+
 /// Deliberately broken sharing shapes for the red battery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RedAdoption {
@@ -1000,7 +1020,7 @@ impl SimVfs {
     /// wiring bug). Subject to [`SimVfs::arm_red_adoption`] sabotage.
     pub fn adopt_universe(id: u64) {
         assert_permit("adopt_universe");
-        match RED_ADOPTION.load(Ordering::Acquire) {
+        match if red_applies_here() { RED_ADOPTION.load(Ordering::Acquire) } else { 0 } {
             1 => return, // RedAdoption::Empty: the pre-lane bug, resurrected
             2 => {
                 // RedAdoption::Stale: a frozen deep copy instead of a bind.
@@ -1038,6 +1058,18 @@ impl SimVfs {
             Some(RedAdoption::Stale) => 2,
         };
         RED_ADOPTION.store(v, Ordering::Release);
+    }
+
+    /// RED battery: scope the adoption sabotage to threads whose OS thread
+    /// name contains `scope` (`None` = unscoped, the default). Harness-only;
+    /// set once at boot, before any spawn door runs (the leaked string is
+    /// never freed — one arming per red process, like the mode itself).
+    pub fn arm_red_adoption_scope(scope: Option<&str>) {
+        let v = match scope {
+            None => 0,
+            Some(s) => Box::leak(Box::new(s.to_string())) as *mut String as usize,
+        };
+        RED_SCOPE.store(v, Ordering::Release);
     }
 
     /// Harness API: what survives of the unsynced set at a cut.
