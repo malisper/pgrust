@@ -12768,6 +12768,7 @@ dependencies = [
  "fmgr_seams",
  "foreigncmds",
  "format_type",
+ "funcapi",
  "guc",
  "init_small",
  "inval",
