@@ -14936,6 +14936,7 @@ dependencies = [
  "portalcmds",
  "portalmem",
  "postgres",
+ "postgres_fdw",
  "postmaster",
  "postmaster_startup",
  "pqcomm",
