@@ -188,10 +188,19 @@ fn init_pergroup(mcx: Mcx<'_>, kind: LaneKind) -> AggPerGroup {
         | LaneKind::StrMin
         | LaneKind::StrMax
         | LaneKind::BpMin
-        | LaneKind::BpMax => AggPerGroup {
+        | LaneKind::BpMax
+        // sum(float4/float8): strict + NULL catalog initval, same discipline.
+        | LaneKind::FSum => AggPerGroup {
             trans_value: Datum::null(),
             trans_value_is_null: true,
             no_trans_value: true,
+        },
+        // float4/float8_accum: strict with the NON-null '{0,0,0}' float8[3]
+        // catalog initval — the transarray is live from the first row.
+        LaneKind::FAccum => AggPerGroup {
+            trans_value: new_float8_transarray(mcx),
+            trans_value_is_null: false,
+            no_trans_value: false,
         },
     }
 }
@@ -2294,6 +2303,11 @@ fn fold_oid_set_matches_lanereg_census() {
         (459, R::Min),
         (1063, R::Max),
         (1064, R::Min),
+        // fold-trans float tier (lane-v2-lanefold-trans, knob-gated):
+        (204, R::FSum),
+        (218, R::FSum),
+        (208, R::FAccum),
+        (222, R::FAccum),
     ];
     for &(oid, kind) in expect {
         assert_eq!(::lanereg::fold_desc(oid), Some(kind), "fold oid {oid} census mismatch");
