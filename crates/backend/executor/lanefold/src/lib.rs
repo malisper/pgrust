@@ -155,7 +155,8 @@ const F_BPCHAR_LARGER: Oid = 1063;
 const F_BPCHAR_SMALLER: Oid = 1064;
 
 // Fold-trans tier (lane-v2-lanefold-trans, knob PGRUST_LANE_V2_FOLD_TRANS,
-// default OFF): the AGG_SEQ fused arm's residual transition class
+// default ON since SE18-GATES — `=0`/`off` = permanent kill): the AGG_SEQ
+// fused arm's residual transition class
 // (notes/se-aggseq-adjudication.md §4's owed increment). Unlike every prior
 // tier, these transitions are ORDER-SENSITIVE (float addition does not
 // reassociate), so their kernels are order-preserving sequential folds: the
@@ -245,18 +246,26 @@ const F_INT8GE: Oid = 472;
 //    manifest.
 
 /// Process-constant knob for the fold-trans tier (R-KNOBS discipline:
-/// `PGRUST_LANE_V2_FOLD_TRANS`, default OFF — the branch convention for
-/// unproven increments). OFF = the new classify arms refuse and every plan
-/// is byte-identical to base. AtomicU8 (not OnceLock) so units can A/B
-/// in-process via [`fold_trans_set_for_tests`] — the k1_latemat idiom.
+/// `PGRUST_LANE_V2_FOLD_TRANS`, default ON since the SE18-GATES flip;
+/// explicit `=0`/`off` = permanent kill restoring the classify-refuse world).
+/// OFF = the fold-trans classify arms refuse and every plan is
+/// byte-identical to the pre-tier base. AtomicU8 (not OnceLock) so units can
+/// A/B in-process via [`fold_trans_set_for_tests`] — the k1_latemat idiom.
 pub fn fold_trans_enabled() -> bool {
     match FOLD_TRANS.load(core::sync::atomic::Ordering::Relaxed) {
         1 => false,
         2 => true,
         _ => {
-            let on = matches!(
+            // SE18-GATES flip (default OFF -> ON): the AE2/INDEXSOURCE resolve
+            // idiom — bare/unset/other reads ON, explicit `=0`/`off` = permanent
+            // kill. Flip evidence: the SE17 combined aggseq letter (§5a,
+            // corpus-pairs-1784449336) — FOLD_TRANS+STAGE_VARWALK cut the
+            // AGG_SEQ arm-OFF penalty +13.41% -> +1.37% (flat-or-better
+            // tolerance MET); dualexec strict byte-identity on both knob arms
+            // and both engine postures is banked on the lane branches.
+            let on = !matches!(
                 std::env::var("PGRUST_LANE_V2_FOLD_TRANS").as_deref(),
-                Ok("1") | Ok("on")
+                Ok("0") | Ok("off")
             );
             FOLD_TRANS.store(
                 if on { 2 } else { 1 },
