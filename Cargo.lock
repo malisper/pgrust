@@ -18665,6 +18665,7 @@ name = "visibilitymap"
 version = "0.1.0"
 dependencies = [
  "bufmgr_seams",
+ "catalog_seams",
  "guc_tables",
  "init_small",
  "inval",
@@ -19483,6 +19484,7 @@ dependencies = [
  "waitevent_seams",
  "walreceiverfuncs_seams",
  "walsender_config",
+ "walsender_seams",
  "walsummarizer_seams",
  "xact",
  "xlogarchive",

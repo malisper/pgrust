@@ -1786,8 +1786,19 @@ fn apply_wal_record(rec: &mut Recovery, replay_tli: &mut TimeLineID) -> PgResult
     LAST_REPLAYED_END_REC_PTR.store(rec.reader.v.EndRecPtr, Relaxed);
     LAST_REPLAYED_TLI.store(*replay_tli, Relaxed);
 
-    // WalSndWakeup(switchedTLI, true): cascade replication only; no cascading
-    // walsenders exist until walreceiver+cascading is ported.
+    // Wakeup walsenders (xlogrecovery.c:2056): on the standby the WAL is
+    // flushed first (waking only physical walsenders, from the walreceiver)
+    // and then applied, which wakes only logical walsenders — standby logical
+    // decoding can only proceed once a record has been replayed. Physical
+    // walsenders need a replay-side wakeup only on a timeline switch.
+    // AllowCascadeReplication() = EnableHotStandby && max_wal_senders > 0.
+    if guc_tables::vars::EnableHotStandby.read()
+        && guc_tables::vars::max_wal_senders.read() > 0
+        && walsender_seams::wal_snd_wakeup::is_installed()
+    {
+        walsender_seams::wal_snd_wakeup::call(switched_tli, true);
+    }
+
     if DO_REQUEST_WALRCV_REPLY.get() {
         DO_REQUEST_WALRCV_REPLY.set(false);
         if walreceiverfuncs_seams::wal_rcv_force_reply::is_installed() {
