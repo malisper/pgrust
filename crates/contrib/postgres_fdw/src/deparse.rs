@@ -56,6 +56,25 @@ const FIRST_LOW_INVALID_HEAP_ATTNUM: i32 =
 
 const REL_ALIAS_PREFIX: &str = "r";
 
+// StringInfo-shaped append over PgString. Divergence: OOM on these cold
+// deparse appends is dropped (buffer truncates) rather than raised, matching
+// the `write!`-discards pattern used elsewhere on cold formatting paths; the
+// deparse buffer is small and per-plan.
+trait Push {
+    fn push_str(&mut self, s: &str);
+    fn push(&mut self, c: char);
+}
+impl Push for PgString<'_> {
+    #[inline]
+    fn push_str(&mut self, s: &str) {
+        let _ = self.try_push_str(s);
+    }
+    #[inline]
+    fn push(&mut self, c: char) {
+        let _ = self.try_push(c);
+    }
+}
+
 // ---------- shippability walker (is_foreign_expr / foreign_expr_walker) ----------
 
 #[derive(Clone, Copy, PartialEq)]
@@ -144,7 +163,7 @@ pub fn is_foreign_expr<'mcx>(
 }
 
 fn is_upper_rel(run: &PlannerRun<'_>, rel: RelId) -> bool {
-    matches!(run.root.rel(rel).reloptkind, types_pathnodes::RELOPT_UPPER_REL)
+    run.root.rel(rel).reloptkind == types_pathnodes::RELOPT_UPPER_REL
 }
 
 fn collation_result(inner: &LocCxt, collation: Oid) -> FdwCollateState {
@@ -266,11 +285,11 @@ fn foreign_expr_walker<'mcx>(
             if sr.refassgnexpr.is_some() {
                 return Ok(false);
             }
-            if !walk_list(glob, &sr.refupperindexpr.to_list(), &mut inner, case_arg_cxt)? {
+            if !walk_opt_list(glob, &sr.refupperindexpr, &mut inner, case_arg_cxt)? {
                 return Ok(false);
             }
             inner = LocCxt::empty();
-            if !walk_list(glob, &sr.reflowerindexpr.to_list(), &mut inner, case_arg_cxt)? {
+            if !walk_opt_list(glob, &sr.reflowerindexpr, &mut inner, case_arg_cxt)? {
                 return Ok(false);
             }
             inner = LocCxt::empty();
@@ -445,7 +464,7 @@ fn foreign_expr_walker<'mcx>(
             if !is_upper_rel(glob.run, glob.foreignrel) {
                 return Ok(false);
             }
-            if agg.aggsplit != types_nodes::AGGSPLIT_SIMPLE {
+            if agg.aggsplit != types_nodes::primnodes::AGGSPLIT_SIMPLE {
                 return Ok(false);
             }
             if !is_shippable_obj(glob, agg.aggfnoid, PROCEDURE_RELATION_ID)? {
@@ -518,6 +537,22 @@ fn walk_list<'mcx>(
     for n in list.iter() {
         if !foreign_expr_walker(glob, n, inner, case_arg_cxt)? {
             return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn walk_opt_list<'mcx>(
+    glob: &GlobCxt<'_, 'mcx>,
+    list: &types_nodes::list::OptNodeList<'mcx>,
+    inner: &mut LocCxt,
+    case_arg_cxt: Option<&LocCxt>,
+) -> PgResult<bool> {
+    for cell in list.iter() {
+        if let Some(n) = cell {
+            if !foreign_expr_walker(glob, n, inner, case_arg_cxt)? {
+                return Ok(false);
+            }
         }
     }
     Ok(true)
@@ -618,11 +653,11 @@ impl<'a, 'mcx> DeparseCtx<'a, 'mcx> {
 
 fn deparse_expr<'mcx>(ctx: &mut DeparseCtx<'_, 'mcx>, node: Node<'mcx>) -> PgResult<()> {
     match node.node_tag() {
-        NodeTag::T_Var => deparse_var(ctx, node.as_var().unwrap()),
+        NodeTag::T_Var => deparse_var(ctx, node),
         NodeTag::T_Const => deparse_const(ctx, node.as_const().unwrap(), 0),
         NodeTag::T_Param => deparse_param(ctx, node),
         NodeTag::T_SubscriptingRef => deparse_subscripting_ref(ctx, node),
-        NodeTag::T_FuncExpr => deparse_func_expr(ctx, node.as_func_expr().unwrap()),
+        NodeTag::T_FuncExpr => deparse_func_expr(ctx, node),
         NodeTag::T_OpExpr => deparse_op_expr(ctx, node),
         NodeTag::T_DistinctExpr => deparse_distinct_expr(ctx, node),
         NodeTag::T_ScalarArrayOpExpr => deparse_scalar_array_op_expr(ctx, node),
@@ -638,29 +673,21 @@ fn deparse_expr<'mcx>(ctx: &mut DeparseCtx<'_, 'mcx>, node: Node<'mcx>) -> PgRes
     }
 }
 
-fn deparse_var<'mcx>(
-    ctx: &mut DeparseCtx<'_, 'mcx>,
-    var: &types_nodes::Var<'mcx>,
-) -> PgResult<()> {
+fn deparse_var<'mcx>(ctx: &mut DeparseCtx<'_, 'mcx>, node: Node<'mcx>) -> PgResult<()> {
+    let var = node.as_var().unwrap();
     let relids = ctx.scanrel_relids();
-    let qualify_col =
-        types_pathnodes::relids::relids_membership(&relids) == types_pathnodes::BMS_MULTIPLE;
+    let qualify_col = types_pathnodes::relids::relids_num_members(&relids) > 1;
 
     if types_pathnodes::relids::relids_is_member(var.varno, &relids) && var.varlevelsup == 0 {
         let rte = ctx.run.rte(var.varno as usize);
         deparse_column_ref(ctx, var.varno, var.varattno, rte, qualify_col)?;
     } else if ctx.params_list.is_some() {
-        let node = wrap_var(ctx.mcx, var)?;
         let pindex = param_index(ctx, node)?;
         print_remote_param(ctx, pindex, var.vartype, var.vartypmod)?;
     } else {
         print_remote_placeholder(ctx, var.vartype, var.vartypmod)?;
     }
     Ok(())
-}
-
-fn wrap_var<'mcx>(mcx: Mcx<'mcx>, var: &types_nodes::Var<'mcx>) -> PgResult<Node<'mcx>> {
-    Node::mk(mcx, types_nodes::Var { ..*var })
 }
 
 fn param_index<'mcx>(ctx: &mut DeparseCtx<'_, 'mcx>, node: Node<'mcx>) -> PgResult<usize> {
@@ -766,36 +793,39 @@ fn deparse_subscripting_ref<'mcx>(
         deparse_expr(ctx, refexpr)?;
         ctx.buf.push(')');
     }
-    let lower = sr.reflowerindexpr.to_list();
-    let upper = sr.refupperindexpr.to_list();
-    for (i, up) in upper.iter().enumerate() {
+    let lower = &sr.reflowerindexpr;
+    let has_lower = !lower.is_nil();
+    for (i, up) in sr.refupperindexpr.iter().enumerate() {
         ctx.buf.push('[');
-        if !lower.is_nil() {
-            deparse_expr(ctx, lower.nth(i))?;
+        if has_lower {
+            if let Some(low) = lower.nth(i) {
+                deparse_expr(ctx, low)?;
+            }
             ctx.buf.push(':');
         }
-        deparse_expr(ctx, up)?;
+        if let Some(up) = up {
+            deparse_expr(ctx, up)?;
+        }
         ctx.buf.push(']');
     }
     ctx.buf.push(')');
     Ok(())
 }
 
-fn deparse_func_expr<'mcx>(
-    ctx: &mut DeparseCtx<'_, 'mcx>,
-    node: &types_nodes::FuncExpr<'mcx>,
-) -> PgResult<()> {
-    if node.funcformat == CoercionForm::COERCE_IMPLICIT_CAST {
-        return deparse_expr(ctx, node.args.nth(0));
+fn deparse_func_expr<'mcx>(ctx: &mut DeparseCtx<'_, 'mcx>, node: Node<'mcx>) -> PgResult<()> {
+    let f = node.as_func_expr().unwrap();
+    if f.funcformat == CoercionForm::COERCE_IMPLICIT_CAST {
+        return deparse_expr(ctx, f.args.nth(0));
     }
-    if node.funcformat == CoercionForm::COERCE_EXPLICIT_CAST {
-        let rettype = node.funcresulttype;
-        let coerced_typmod = expr_typmod(wrap_func(ctx.mcx, node)?);
-        deparse_expr(ctx, node.args.nth(0))?;
+    if f.funcformat == CoercionForm::COERCE_EXPLICIT_CAST {
+        let rettype = f.funcresulttype;
+        let coerced_typmod = expr_typmod(node);
+        deparse_expr(ctx, f.args.nth(0))?;
         let ty = deparse_type_name(rettype, coerced_typmod)?;
         let _ = write!(ctx.buf, "::{ty}");
         return Ok(());
     }
+    let node = f;
     let use_variadic = node.funcvariadic;
     append_function_name(ctx, node.funcid)?;
     ctx.buf.push('(');
@@ -811,23 +841,6 @@ fn deparse_func_expr<'mcx>(
     }
     ctx.buf.push(')');
     Ok(())
-}
-
-fn wrap_func<'mcx>(mcx: Mcx<'mcx>, f: &types_nodes::FuncExpr<'mcx>) -> PgResult<Node<'mcx>> {
-    Node::mk(
-        mcx,
-        types_nodes::FuncExpr {
-            funcid: f.funcid,
-            funcresulttype: f.funcresulttype,
-            funcretset: f.funcretset,
-            funcvariadic: f.funcvariadic,
-            funcformat: f.funcformat,
-            funccollid: f.funccollid,
-            inputcollid: f.inputcollid,
-            args: f.args,
-            location: f.location,
-        },
-    )
 }
 
 fn is_plain_foreign_var(ctx: &DeparseCtx<'_, '_>, node: Node<'_>) -> bool {
@@ -1028,15 +1041,15 @@ fn deparse_aggref<'mcx>(
     ctx: &mut DeparseCtx<'_, 'mcx>,
     node: &types_nodes::Aggref<'mcx>,
 ) -> PgResult<()> {
-    debug_assert_eq!(node.aggsplit, types_nodes::AGGSPLIT_SIMPLE);
+    debug_assert_eq!(node.aggsplit, types_nodes::primnodes::AGGSPLIT_SIMPLE);
     let use_variadic = node.aggvariadic;
     append_function_name(ctx, node.aggfnoid)?;
     ctx.buf.push('(');
     if !node.aggdistinct.is_nil() {
         ctx.buf.push_str("DISTINCT ");
     }
-    let ordered_set = node.aggkind == types_nodes::AGGKIND_ORDERED_SET
-        || node.aggkind == types_nodes::AGGKIND_HYPOTHETICAL;
+    let ordered_set = node.aggkind == types_nodes::primnodes::AGGKIND_ORDERED_SET
+        || node.aggkind == types_nodes::primnodes::AGGKIND_HYPOTHETICAL;
     if ordered_set {
         for (i, arg) in node.aggdirectargs.iter().enumerate() {
             if i > 0 {
@@ -1255,7 +1268,7 @@ fn deparse_column_ref<'mcx>(
         }
         ctx.buf.push_str("ROW(");
         let mut attrs_used = types_nodes::Bitmapset::empty();
-        attrs_used = attrs_used.add_member(ctx.mcx, (0 - FIRST_LOW_INVALID_HEAP_ATTNUM) as usize)?;
+        attrs_used.add_member(ctx.mcx, 0 - FIRST_LOW_INVALID_HEAP_ATTNUM)?;
         let mut retrieved = PgVec::new_in(ctx.mcx);
         deparse_target_list(
             &mut ctx.buf,
@@ -1316,7 +1329,7 @@ pub fn deparse_relation<'mcx>(
     }
     let nspname = match nspname {
         Some(n) => n,
-        None => lsyscache::get_namespace_name(mcx, rel.rd_rel_relnamespace())?
+        None => lsyscache::get_namespace_name(mcx, rel.namespace())?
             .expect("namespace")
             .as_str()
             .to_string(),
@@ -1346,18 +1359,15 @@ fn deparse_target_list<'mcx>(
 ) -> PgResult<()> {
     let _ = run;
     let tupdesc = &rel.rd_att;
-    let natts = tupdesc.natts;
-    let have_wholerow =
-        attrs_used.is_member((0 - FIRST_LOW_INVALID_HEAP_ATTNUM) as usize);
+    let natts = tupdesc.natts as i32;
+    let have_wholerow = attrs_used.is_member(0 - FIRST_LOW_INVALID_HEAP_ATTNUM);
     let mut first = true;
     for i in 1..=natts {
         let attr = tupdesc.attr(i as usize - 1);
         if attr.attisdropped {
             continue;
         }
-        if have_wholerow
-            || attrs_used.is_member((i - FIRST_LOW_INVALID_HEAP_ATTNUM) as usize)
-        {
+        if have_wholerow || attrs_used.is_member(i - FIRST_LOW_INVALID_HEAP_ATTNUM) {
             if !first {
                 buf.push_str(", ");
             } else if is_returning {
@@ -1369,8 +1379,7 @@ fn deparse_target_list<'mcx>(
         }
     }
     // ctid, if needed.
-    if attrs_used.is_member((SELF_ITEM_POINTER_ATTNUM as i32 - FIRST_LOW_INVALID_HEAP_ATTNUM) as usize)
-    {
+    if attrs_used.is_member(SELF_ITEM_POINTER_ATTNUM as i32 - FIRST_LOW_INVALID_HEAP_ATTNUM) {
         if !first {
             buf.push_str(", ");
         } else if is_returning {
@@ -1458,14 +1467,15 @@ pub fn deparse_select_stmt_for_rel<'mcx>(
     // SELECT clause.
     ctx.buf.push_str("SELECT ");
     {
-        let attrs_used = fpinfo(run.root.rel(rel)).borrow().attrs_used;
+        let fp = fpinfo(run.root.rel(rel)).borrow();
         let rte = run.rte(run.root.rel(rel).relid as usize);
         let opened = table::table_open(mcx, rte.relid, types_rel::lock::NoLock)?;
         let mut buf = core::mem::replace(&mut ctx.buf, PgString::new_in(mcx));
         deparse_target_list(
             &mut buf, mcx, run, run.root.rel(rel).relid as i32, &opened, rte, false,
-            &attrs_used, false, &mut retrieved_attrs,
+            &fp.attrs_used, false, &mut retrieved_attrs,
         )?;
+        drop(fp);
         ctx.buf = buf;
         table::table_close(opened, types_rel::lock::NoLock)?;
     }
