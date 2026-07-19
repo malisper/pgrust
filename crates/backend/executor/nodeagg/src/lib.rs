@@ -4422,6 +4422,14 @@ pub fn batch_emit_resolve(node: &AggStateData<'_>) -> Option<BatchEmitPlan> {
                     .hash_grp_col_idx_input
                     .iter()
                     .position(|&a| i32::from(a) == i32::from(v.varattno))?;
+                // Only the grouping-key components are reconstructable from
+                // the compact table; a stored EXTRA column (a functionally-
+                // dependent tlist Var beyond the key, fdgroup-wr) has no
+                // compact read-back — refuse (the arming gates already
+                // refuse such shapes; this keeps the resolve honest).
+                if j >= ph.num_cols {
+                    return None;
+                }
                 cols.push(BatchEmitCol::Key(j as u16));
             }
             NodeTag::T_Const => {
@@ -5970,12 +5978,22 @@ pub fn agg_sorted_group_key(node: &mut AggStateData<'_>, out: &mut [(Datum, bool
 // ===========================================================================
 
 /// K2 admission: a single grouping-key column whose tuplehash probe kernel is
-/// batch-hostable (Int4/Int8/Text — `staged_probe_supported`). Returns the
-/// key's 0-based column number in the agg's OUTER (input) tuple. `None` =
-/// keep the per-row arrival probe.
+/// batch-hostable (Int4/Int8/Text — `staged_probe_supported`), and NO extra
+/// stored columns beyond the key (`hash_grp_col_idx_input` len 1). Extra
+/// columns exist exactly when a functionally-dependent output column rides
+/// the hash entry (the planner reduced GROUP BY to the PK,
+/// remove_useless_groupby_columns): the group's representative row must then
+/// carry the dependent values, which the key-only staged probe cannot
+/// present at insert (fdgroup-wr, compat-matrix B4) — those shapes keep the
+/// per-row arrival probe (`prepare_hash_slot` presents the full image).
+/// Returns the key's 0-based column number in the agg's OUTER (input)
+/// tuple. `None` = keep the per-row arrival probe.
 pub fn agg_hash_staged_probe_col(node: &AggStateData<'_>) -> Option<u16> {
     let ph = node.perhash.as_ref()?;
-    if ph.num_cols == 1 && ph.hashtable.staged_probe_supported() {
+    if ph.num_cols == 1
+        && ph.hash_grp_col_idx_input.len() == 1
+        && ph.hashtable.staged_probe_supported()
+    {
         Some((ph.hash_grp_col_idx_input[0] - 1) as u16)
     } else {
         None
@@ -6052,6 +6070,15 @@ pub fn agg_hash_probe_staged<'mcx>(
     let AggStateData { perhash, trans_init, trans_typ, agg_node, .. } = node;
     let ph = perhash.as_mut().expect("hashed Agg has perhash");
     debug_assert_eq!(ph.num_cols, 1);
+    // The miss leg below presents ONLY the key in the hashslot; a stored
+    // extra column (a functionally-dependent tlist Var — hash entries carry
+    // it as the group's representative value) would be inserted NULL, a
+    // silent wrong result. `agg_hash_staged_probe_col` refuses those shapes.
+    debug_assert_eq!(
+        ph.hash_grp_col_idx_input.len(),
+        1,
+        "staged probe requires key-only hash rows (extra dependent columns must refuse K2)"
+    );
     // Fast path — the overwhelmingly common found-existing-group case: the
     // slot-free kernel find (no hashslot presentation, no slot deform).
     let ix = match ph.hashtable.find_staged(key, isnull, hash)? {
