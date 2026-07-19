@@ -236,6 +236,12 @@ fn fc_dblink_get_connections(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo
     let mcx = fcinfo.result_mcx();
     let names = registry::all_named_names();
     if names.is_empty() {
+        // C: `PG_RETURN_NULL()` (dblink.c dblink_get_connections, the
+        // `else` of `if (astate)`). A bare `Ok(Datum::null())` without
+        // isnull=true hands the executor a "non-null" zero pointer datum —
+        // detoasting it aborted the server mid-corpus (fleet gate
+        // pgrust-fast-tests-601a9800c4-1784439279-28fc).
+        fcinfo.isnull = true;
         return Ok(Datum::null());
     }
     let mut elems = Vec::with_capacity(names.len());
