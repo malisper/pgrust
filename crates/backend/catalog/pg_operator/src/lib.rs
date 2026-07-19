@@ -675,8 +675,9 @@ pub fn makeOperatorDependencies(
 
     pg_depend::recordDependencyOnOwner(mcx, OPERATOR_RELATION_ID, oper.oid, oper.oprowner)?;
 
-    // recordDependencyOnCurrentExtension: no-op — CREATE EXTENSION unported.
-    let _ = makeExtensionDep;
+    if makeExtensionDep {
+        pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, isUpdate)?;
+    }
 
     Ok(myself)
 }

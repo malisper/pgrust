@@ -68,8 +68,6 @@ fn get_relkind_objtype(relkind: u8) -> ObjectType {
     }
 }
 
-/// `sanity_check_tid_array` + `PG_GETARG_ARRAYTYPE_P_COPY`: validate and copy
-/// the tid[] argument out of the (detoasted) array image.
 fn read_tid_array<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     ta: &[u8],
@@ -93,7 +91,6 @@ fn read_tid_array<'mcx>(
     let mut tids = mcx::vec_with_capacity_in(mcx, ntids)?;
     let mut off = arrayfuncs::arr_data_offset(ta);
     for _ in 0..ntids {
-        // ItemPointerData on disk: bi_hi, bi_lo, ip_posid — three native u16s.
         let word = |o: usize| u16::from_ne_bytes([ta[o], ta[o + 1]]);
         tids.push(ItemPointerData {
             ip_blkid: types_tuple::BlockIdData {
@@ -107,8 +104,6 @@ fn read_tid_array<'mcx>(
     Ok(tids)
 }
 
-/// `find_tids_one_page`: the tids slice is sorted; returns the block of
-/// `tids[*next_start_ptr]` and advances the pointer past that block's tids.
 fn find_tids_one_page(tids: &[ItemPointerData], next_start_ptr: &mut usize) -> BlockNumber {
     let mut prev_blkno = types_core::InvalidBlockNumber;
     let mut i = *next_start_ptr;
@@ -143,7 +138,6 @@ unsafe fn header_mut_at<'a>(
     unsafe { &mut *(ptr.cast_mut().cast::<HeapTupleHeaderData>()) }
 }
 
-/// `heap_force_common`: the shared body of heap_force_kill/heap_force_freeze.
 fn heap_force_common(fcinfo: &mut Fcinfo, opt: ForceOption) -> PgResult<Datum> {
     if transam_xlog::RecoveryInProgress() {
         return Err(Box::new(
@@ -180,7 +174,6 @@ fn heap_force_common(fcinfo: &mut Fcinfo, opt: ForceOption) -> PgResult<Datum> {
         ));
     }
 
-    // Must be owner of the table or superuser.
     if !aclchk::object_ownercheck(RELATION_RELATION_ID, relid, miscinit::GetUserId())? {
         aclchk::aclcheck_error(
             aclchk::ACLCHECK_NOT_OWNER,
@@ -221,7 +214,6 @@ fn heap_force_common(fcinfo: &mut Fcinfo, opt: ForceOption) -> PgResult<Datum> {
         let page = unsafe { PageRef::from_raw(page_ptr) };
         let maxoffset = page.max_offset_number();
 
-        // Which TIDs process, which skip (with C's NOTICE per skip).
         let mut include_this_tid = [false; MaxHeapTuplesPerPage + 1];
         for tid in &tids[curr_start_ptr..next_start_ptr] {
             let offno = ItemPointerGetOffsetNumberNoCheck(tid);
@@ -263,8 +255,6 @@ fn heap_force_common(fcinfo: &mut Fcinfo, opt: ForceOption) -> PgResult<Datum> {
             include_this_tid[offno as usize] = true;
         }
 
-        // Pin the visibility map page before the critical section if we may
-        // need to clear its bit.
         let mut vmbuf = VmBuffer::new();
         if opt == ForceOption::Kill && page.is_all_visible() {
             visibilitymap::visibilitymap_pin(&rel, blkno, &mut vmbuf)?;
@@ -273,7 +263,6 @@ fn heap_force_common(fcinfo: &mut Fcinfo, opt: ForceOption) -> PgResult<Datum> {
         let mut did_modify_page = false;
         let mut did_modify_vm = false;
 
-        // No ereport(ERROR) from here until all the changes are logged.
         init_small::globals::StartCriticalSection();
 
         for curoff in 1..=maxoffset {
@@ -291,7 +280,6 @@ fn heap_force_common(fcinfo: &mut Fcinfo, opt: ForceOption) -> PgResult<Datum> {
                     let mut pm = unsafe { PageMut::from_raw(page_ptr) };
                     pm.set_item_id(curoff, itemid);
 
-                    // An all-visible page loses PD_ALL_VISIBLE and its VM bits.
                     if page.is_all_visible() {
                         pm.clear_all_visible();
                         visibilitymap::visibilitymap_clear(
@@ -328,7 +316,6 @@ fn heap_force_common(fcinfo: &mut Fcinfo, opt: ForceOption) -> PgResult<Datum> {
         }
 
         if did_modify_page {
-            // Mark buffer dirty before we write WAL.
             bufmgr::MarkBufferDirty(buf)?;
             if relation_needs_wal(&rel) {
                 xloginsert::log_newpage_buffer(buf, true)?;
@@ -360,13 +347,10 @@ fn lookup(function: &str) -> Option<PGFunction> {
     })
 }
 
-/// Install this unit's inward seam: register the `pg_surgery` module with the
-/// dynamic-loader's builtin-library registry.
 pub fn init_seams() {
     dfmgr::register_builtin_library(dfmgr::BuiltinLibraryEntry {
         name: LIBRARY,
         lookup,
-        // heap_surgery.c's PG_MODULE_MAGIC_EXT has no _PG_init.
         pg_init: None,
     });
 }
