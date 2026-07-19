@@ -38,15 +38,13 @@ fn lookup(function: &str) -> Option<PGFunction> {
 
 // ---------- option application ----------
 
-fn apply_server_options<'mcx>(fp: &mut PgFdwRelationInfo<'mcx>, mcx: Mcx<'mcx>) -> PgResult<()> {
-    let opts: Vec<(String, String)> = fp
-        .server
-        .as_ref()
-        .expect("server set")
-        .options
-        .iter()
-        .map(|o| (o.name.to_string(), o.value.to_string()))
-        .collect();
+fn apply_server_options<'mcx>(
+    fp: &mut PgFdwRelationInfo<'mcx>,
+    mcx: Mcx<'mcx>,
+    server: &foreigncmds::foreign::ForeignServer<'mcx>,
+) -> PgResult<()> {
+    let opts: Vec<(String, String)> =
+        server.options.iter().map(|o| (o.name.to_string(), o.value.to_string())).collect();
     for (name, value) in opts {
         match name.as_str() {
             "use_remote_estimate" => fp.use_remote_estimate = parse_bool(&value)?,
@@ -75,15 +73,12 @@ fn apply_server_options<'mcx>(fp: &mut PgFdwRelationInfo<'mcx>, mcx: Mcx<'mcx>) 
     Ok(())
 }
 
-fn apply_table_options(fp: &mut PgFdwRelationInfo<'_>) -> PgResult<()> {
-    let opts: Vec<(String, String)> = fp
-        .table
-        .as_ref()
-        .expect("table set")
-        .options
-        .iter()
-        .map(|o| (o.name.to_string(), o.value.to_string()))
-        .collect();
+fn apply_table_options<'mcx>(
+    fp: &mut PgFdwRelationInfo<'mcx>,
+    table: &foreigncmds::foreign::ForeignTable<'mcx>,
+) -> PgResult<()> {
+    let opts: Vec<(String, String)> =
+        table.options.iter().map(|o| (o.name.to_string(), o.value.to_string())).collect();
     for (name, value) in opts {
         match name.as_str() {
             "use_remote_estimate" => fp.use_remote_estimate = parse_bool(&value)?,
@@ -118,23 +113,22 @@ fn postgres_get_foreign_rel_size<'mcx>(
     let mcx = run.mcx;
     let mut fp = PgFdwRelationInfo::new(mcx);
     fp.pushdown_safe = true;
-    fp.table = Some(foreigncmds::foreign::GetForeignTable(mcx, foreigntableid)?);
-    let serverid = fp.table.as_ref().unwrap().serverid;
-    fp.server = Some(foreigncmds::foreign::GetForeignServer(mcx, serverid)?);
+    let table = foreigncmds::foreign::GetForeignTable(mcx, foreigntableid)?;
+    fp.serverid = table.serverid;
+    let server = foreigncmds::foreign::GetForeignServer(mcx, table.serverid)?;
 
     fp.use_remote_estimate = false;
     fp.fdw_startup_cost = DEFAULT_FDW_STARTUP_COST;
     fp.fdw_tuple_cost = DEFAULT_FDW_TUPLE_COST;
     fp.fetch_size = 100;
     fp.async_capable = false;
-    apply_server_options(&mut fp, mcx)?;
-    apply_table_options(&mut fp)?;
+    apply_server_options(&mut fp, mcx, &server)?;
+    apply_table_options(&mut fp, &table)?;
 
     if fp.use_remote_estimate {
         // Remote-estimate mode needs a live connection at plan time (phase 2).
         return Err(remote_estimate_unported());
     }
-    fp.user = None;
 
     // classifyConditions over baserestrictinfo.
     let baserestrict: Vec<RinfoId> =
@@ -161,7 +155,7 @@ fn postgres_get_foreign_rel_size<'mcx>(
         run,
         &local_conds,
         run.root.rel(rel_id).relid as i32,
-        JoinType::JOIN_INNER,
+        types_pathnodes::JOIN_INNER,
         None,
     )?;
     let mut local_cost = types_pathnodes::QualCost::default();
@@ -187,8 +181,12 @@ fn postgres_get_foreign_rel_size<'mcx>(
     }
     planner::costsize::set_baserel_size_estimates(run, rel_id)?;
 
+    let (fdw_startup_cost, fdw_tuple_cost) = {
+        let fp = fpinfo(run.root.rel(rel_id)).borrow();
+        (fp.fdw_startup_cost, fp.fdw_tuple_cost)
+    };
     let (rows, width, startup_cost, total_cost) =
-        estimate_base_cost_size(run, rel_id, &fpinfo_snapshot(run, rel_id));
+        estimate_base_cost_size(run, rel_id, local_conds_sel, fdw_startup_cost, fdw_tuple_cost);
 
     {
         let fpc = fpinfo(run.root.rel(rel_id));
@@ -211,62 +209,39 @@ fn postgres_get_foreign_rel_size<'mcx>(
     Ok(())
 }
 
-// A cheap snapshot of the scalars estimate_base_cost_size reads, so it can run
-// without holding the fpinfo RefCell borrow across the &mut run cost calls.
-struct CostInputs {
-    tuples: f64,
-    pages: types_core::BlockNumber,
-    rel_rows: f64,
-    width: i32,
-    baserestrict_startup: f64,
-    baserestrict_per_tuple: f64,
-    local_conds_sel: f64,
-    fdw_startup_cost: f64,
-    fdw_tuple_cost: f64,
-}
-
-fn fpinfo_snapshot(run: &PlannerRun<'_>, rel_id: RelId) -> CostInputs {
-    let r = run.root.rel(rel_id);
-    let width = run.pathtarget(run.rel_reltarget_id(rel_id)).width;
-    let fp = fpinfo(r).borrow();
-    CostInputs {
-        tuples: r.tuples,
-        pages: r.pages,
-        rel_rows: r.rows,
-        width,
-        baserestrict_startup: r.baserestrictcost.startup,
-        baserestrict_per_tuple: r.baserestrictcost.per_tuple,
-        local_conds_sel: fp.local_conds_sel,
-        fdw_startup_cost: fp.fdw_startup_cost,
-        fdw_tuple_cost: fp.fdw_tuple_cost,
-    }
-}
-
 // estimate_path_cost_size, base-relation local branch (no remote estimate,
 // no pathkeys/LIMIT): seqscan-shaped run cost + FDW network/startup factors.
 fn estimate_base_cost_size(
     run: &PlannerRun<'_>,
-    _rel_id: RelId,
-    ci: &CostInputs,
+    rel_id: RelId,
+    local_conds_sel: f64,
+    fdw_startup_cost: f64,
+    fdw_tuple_cost: f64,
 ) -> (f64, i32, f64, f64) {
-    let _ = run;
-    let rows = ci.rel_rows;
-    let width = ci.width;
-    let mut retrieved_rows = planner::costsize::clamp_row_est(rows / ci.local_conds_sel.max(1e-9));
-    if retrieved_rows > ci.tuples {
-        retrieved_rows = ci.tuples;
+    let r = run.root.rel(rel_id);
+    let rows = r.rows;
+    let width = run.pathtarget(run.rel_reltarget_id(rel_id)).width;
+    let tuples = r.tuples;
+    let pages = r.pages;
+    let baserestrict_startup = r.baserestrictcost.startup;
+    let baserestrict_per_tuple = r.baserestrictcost.per_tuple;
+
+    let mut retrieved_rows =
+        planner::costsize::clamp_row_est(rows / local_conds_sel.max(1e-9));
+    if retrieved_rows > tuples {
+        retrieved_rows = tuples;
     }
     let mut startup_cost = 0.0;
-    let mut run_cost = planner::costsize::gucs::seq_page_cost() * ci.pages as f64;
-    startup_cost += ci.baserestrict_startup;
-    let cpu_per_tuple = planner::costsize::gucs::cpu_tuple_cost() + ci.baserestrict_per_tuple;
-    run_cost += cpu_per_tuple * ci.tuples;
+    let mut run_cost = planner::costsize::gucs::seq_page_cost() * pages as f64;
+    startup_cost += baserestrict_startup;
+    let cpu_per_tuple = planner::costsize::gucs::cpu_tuple_cost() + baserestrict_per_tuple;
+    run_cost += cpu_per_tuple * tuples;
     let mut total_cost = startup_cost + run_cost;
 
     // FDW factors.
-    startup_cost += ci.fdw_startup_cost;
-    total_cost += ci.fdw_startup_cost;
-    total_cost += ci.fdw_tuple_cost * retrieved_rows;
+    startup_cost += fdw_startup_cost;
+    total_cost += fdw_startup_cost;
+    total_cost += fdw_tuple_cost * retrieved_rows;
     total_cost += planner::costsize::gucs::cpu_tuple_cost() * retrieved_rows;
     (rows, width, startup_cost, total_cost)
 }
@@ -367,7 +342,7 @@ fn postgres_get_foreign_plan<'mcx>(
     let mut fdw_exprs: NodeList<'mcx> = NodeList::nil();
     if let Some(params) = params {
         for p in params.iter() {
-            fdw_exprs.lappend(mcx, p)?;
+            fdw_exprs.lappend(mcx, *p)?;
         }
     }
 

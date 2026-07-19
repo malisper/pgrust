@@ -1,7 +1,6 @@
 use core::cell::RefCell;
 use core::ptr::NonNull;
 
-use foreigncmds::foreign::{ForeignServer, ForeignTable, UserMapping};
 use mcx::{Mcx, PgVec};
 use types_core::Oid;
 use types_nodes::list::NodeList;
@@ -10,6 +9,11 @@ use types_pathnodes::{
     NodeId, QualCost, RelId, Relids, RinfoId, UpperRelationKind, UPPERREL_SETOP,
 };
 
+// PgFdwRelationInfo (postgres_fdw.h). Divergence: the C struct caches the
+// ForeignTable/Server/UserMapping catalog rows; here only `serverid` (the
+// shippability cache key) is retained — table/server options are re-fetched
+// via Get* where needed (deparse re-opens the table anyway), which keeps the
+// carrier ForgetSafe (arena-leaked, never dropped; att_stats_memo discipline).
 pub struct PgFdwRelationInfo<'mcx> {
     pub pushdown_safe: bool,
     pub remote_conds: PgVec<'mcx, RinfoId>,
@@ -33,9 +37,7 @@ pub struct PgFdwRelationInfo<'mcx> {
     pub fdw_tuple_cost: f64,
     pub shippable_extensions: PgVec<'mcx, Oid>,
     pub async_capable: bool,
-    pub table: Option<ForeignTable<'mcx>>,
-    pub server: Option<ForeignServer<'mcx>>,
-    pub user: Option<UserMapping<'mcx>>,
+    pub serverid: Oid,
     pub fetch_size: i32,
     pub relation_name: &'mcx str,
     pub outerrel: Option<RelId>,
@@ -51,11 +53,21 @@ pub struct PgFdwRelationInfo<'mcx> {
     pub relation_index: i32,
 }
 
-const _: () = assert!(!core::mem::needs_drop::<PgFdwRelationInfo<'static>>());
+mcx::forget_safe_struct!(
+    PgFdwRelationInfo<'_> {
+        pushdown_safe, remote_conds, local_conds, final_remote_exprs, attrs_used,
+        qp_is_pushdown_safe, local_conds_cost, local_conds_sel, joinclause_sel,
+        rows, width, disabled_nodes, startup_cost, total_cost, retrieved_rows,
+        rel_startup_cost, rel_total_cost, use_remote_estimate, fdw_startup_cost,
+        fdw_tuple_cost, shippable_extensions, async_capable, serverid, fetch_size,
+        relation_name, outerrel, innerrel, jointype, joinclauses, stage,
+        grouped_tlist, make_outerrel_subquery, make_innerrel_subquery,
+        lower_subquery_rels, hidden_subquery_rels, relation_index
+    },
+);
 
 impl<'mcx> PgFdwRelationInfo<'mcx> {
-    // palloc0(sizeof(PgFdwRelationInfo)) shape: zeroes everywhere C relies
-    // on them (retrieved_rows/rel_*_cost sentinels are set by callers).
+    // palloc0(sizeof(PgFdwRelationInfo)) shape.
     pub fn new(mcx: Mcx<'mcx>) -> Self {
         PgFdwRelationInfo {
             pushdown_safe: false,
@@ -80,9 +92,7 @@ impl<'mcx> PgFdwRelationInfo<'mcx> {
             fdw_tuple_cost: 0.0,
             shippable_extensions: PgVec::new_in(mcx),
             async_capable: false,
-            table: None,
-            server: None,
-            user: None,
+            serverid: types_core::InvalidOid,
             fetch_size: 0,
             relation_name: "",
             outerrel: None,
@@ -100,7 +110,7 @@ impl<'mcx> PgFdwRelationInfo<'mcx> {
     }
 
     pub fn serverid(&self) -> Oid {
-        self.server.as_ref().expect("fpinfo.server set by GetForeignRelSize").serverid
+        self.serverid
     }
 }
 
@@ -109,7 +119,7 @@ pub(crate) fn attach_fpinfo<'mcx>(
     rel: &mut types_pathnodes::RelOptInfo<'mcx>,
     fpinfo: PgFdwRelationInfo<'mcx>,
 ) -> types_error::PgResult<()> {
-    let cell = mcx::leak_in(mcx::alloc_in(mcx, RefCell::new(fpinfo))?);
+    let cell = mcx::forget_box_in(mcx, RefCell::new(fpinfo))?;
     rel.fdw_state = Some(NonNull::from(cell).cast());
     Ok(())
 }
@@ -122,9 +132,6 @@ pub(crate) fn fpinfo<'mcx>(
     rel: &types_pathnodes::RelOptInfo<'mcx>,
 ) -> &'mcx RefCell<PgFdwRelationInfo<'mcx>> {
     let p = rel.fdw_state.expect("postgres_fdw fpinfo attached");
+    // SAFETY: see item doc.
     unsafe { p.cast::<RefCell<PgFdwRelationInfo<'mcx>>>().as_ref() }
-}
-
-pub(crate) fn has_fpinfo(rel: &types_pathnodes::RelOptInfo<'_>) -> bool {
-    rel.fdw_state.is_some()
 }
