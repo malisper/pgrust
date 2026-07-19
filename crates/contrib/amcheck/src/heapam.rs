@@ -209,7 +209,7 @@ fn full_xid_from_xid_and_ctx(xid: TransactionId, ctx: &HeapCheckContext) -> Full
     fxid
 }
 
-// update_cached_xid_range: DIVERGENCE — C reads nextXid/oldestXid under
+// DIVERGENCE: C reads nextXid/oldestXid under XidGenLock; here relaxed unlocked atomics (advisory; the caller rechecks the range).
 fn update_cached_xid_range(ctx: &mut HeapCheckContext) {
     let tv = varsup::TransamVariables();
     ctx.next_fxid = FullTransactionId::from_u64(tv.nextXid.load(Relaxed));
@@ -254,7 +254,7 @@ fn check_mxid_valid_in_rel(mxid: MultiXactId, ctx: &mut HeapCheckContext) -> PgR
     Ok(check_mxid_in_range(mxid, ctx))
 }
 
-// DIVERGENCE — C reads oldestClogXid under XactTruncationLock LW_SHARED; here it
+// DIVERGENCE: C reads oldestClogXid under XactTruncationLock; here a relaxed unlocked atomic read (see update_cached_xid_range).
 fn get_xid_status(
     xid: TransactionId,
     ctx: &mut HeapCheckContext,
@@ -952,7 +952,7 @@ fn param_err(msg: impl Into<String>) -> Box<PgError> {
     Box::new(PgError::error(msg.into()).with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE))
 }
 
-// DIVERGENCE from verify_heapam.c: C's read_stream is replaced by a plain
+// DIVERGENCE from verify_heapam.c: C's read_stream is replaced by a per-block ReadBufferExtended loop; skippability is checked per block against the visibility map.
 pub(crate) fn verify_heapam(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let flinfo = flinfo.expect("verify_heapam: resolved FmgrInfo required");
 
