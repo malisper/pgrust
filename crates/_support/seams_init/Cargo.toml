@@ -291,6 +291,7 @@ pgoutput = { path = "../../contrib/pgoutput" }
 test_decoding = { path = "../../contrib/test_decoding" }
 citext = { path = "../../contrib/citext" }
 uuid_ossp = { path = "../../contrib/uuid_ossp" }
+dblink = { path = "../../contrib/dblink" }
 pg_prewarm = { path = "../../contrib/pg_prewarm" }
 file_fdw = { path = "../../contrib/file_fdw" }
 ltree = { path = "../../contrib/ltree" }

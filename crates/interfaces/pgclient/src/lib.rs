@@ -417,6 +417,42 @@ pub fn connect(
     }
 }
 
+// Standard SQL connection (libpq PQconnectdb shape): resolve conninfo, build
+// the usual startup params, force client_encoding to `encoding` when given
+// (dblink pins the remote to the local database encoding). Ok(Err(msg)) is
+// libpq's CONNECTION_BAD-with-errorMessage arm.
+pub fn connect_db(
+    conninfo: &str,
+    encoding: Option<&str>,
+    we: WaitEvents,
+) -> PgResult<Result<PgConn, String>> {
+    let opts = match resolve_conninfo(conninfo) {
+        Ok(o) => o,
+        Err(e) => return Ok(Err(e)),
+    };
+    let user = resolve_user(&opts);
+    let dbname = opt(&opts, "dbname").filter(|s| !s.is_empty()).unwrap_or(&user).to_string();
+    let appname = opt(&opts, "application_name").unwrap_or("").to_string();
+    let options = opt(&opts, "options").unwrap_or("").to_string();
+    let enc = encoding
+        .map(|s| s.to_string())
+        .or_else(|| opt(&opts, "client_encoding").map(|s| s.to_string()));
+
+    let mut params: Vec<(&str, &str)> = vec![("user", user.as_str()), ("database", dbname.as_str())];
+    if !appname.is_empty() {
+        params.push(("application_name", appname.as_str()));
+    }
+    if let Some(e) = enc.as_deref() {
+        if !e.is_empty() {
+            params.push(("client_encoding", e));
+        }
+    }
+    if !options.is_empty() {
+        params.push(("options", options.as_str()));
+    }
+    connect(opts, &params, we)
+}
+
 impl PgConn {
     pub fn error_message(&self) -> String {
         self.err.clone()
@@ -879,7 +915,6 @@ impl PgConn {
         if !self.send_query_raw(query) {
             return Ok(QueryResult::error(self.err.clone()));
         }
-        let mut cols: Vec<Option<&[u8]>> = Vec::new();
         let mut nfields = 0usize;
         let mut started = false;
         let mut result = QueryResult::status_only(ExecStatus::CommandOk);
@@ -900,7 +935,7 @@ impl PgConn {
                         sink.result_start(nfields)?;
                         started = true;
                     }
-                    cols.clear();
+                    let mut cols: Vec<Option<&[u8]>> = Vec::new();
                     parse_data_row_borrowed(&body, &mut cols);
                     sink.row(&cols)?;
                 }
