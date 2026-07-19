@@ -2,10 +2,10 @@
 // CREATE PUBLICATION/SUBSCRIPTION), registered as a builtin library like
 // test_decoding.
 //
-// Ported for the non-streaming, non-two-phase protocol (the callbacks C
-// registers for streaming and prepared transactions are deliberately not
-// registered — the decode stack refuses those paths loudly; a subscriber
-// requesting streaming gets C's own "not supported by output plugin" error).
+// Ported for the non-streaming protocol, including two-phase (prepare-family
+// callbacks). The stream_* callbacks C registers are deliberately not
+// registered — the decode stack refuses streaming loudly; a subscriber
+// requesting streaming gets C's own "not supported by output plugin" error.
 // Row-filter publications and partition attribute-remapping refuse loudly;
 // column lists, FOR ALL TABLES, schema publications and identical-descriptor
 // partition routing are ported.
@@ -26,12 +26,14 @@ use logical::{
     OutputPluginUpdateProgress, OutputPluginWrite,
 };
 use logicalproto::{
-    logicalrep_should_publish_column, logicalrep_write_begin, logicalrep_write_commit,
-    logicalrep_write_delete, logicalrep_write_insert, logicalrep_write_message,
-    logicalrep_write_rel, logicalrep_write_truncate, logicalrep_write_typ,
-    logicalrep_write_update, LOGICALREP_PROTO_MAX_VERSION_NUM, LOGICALREP_PROTO_MIN_VERSION_NUM,
-    LOGICALREP_PROTO_STREAM_PARALLEL_VERSION_NUM, LOGICALREP_PROTO_STREAM_VERSION_NUM,
-    LOGICALREP_PROTO_TWOPHASE_VERSION_NUM, PUBLISH_GENCOLS_NONE, PUBLISH_GENCOLS_STORED,
+    logicalrep_should_publish_column, logicalrep_write_begin, logicalrep_write_begin_prepare,
+    logicalrep_write_commit, logicalrep_write_commit_prepared, logicalrep_write_delete,
+    logicalrep_write_insert, logicalrep_write_message, logicalrep_write_prepare,
+    logicalrep_write_rel, logicalrep_write_rollback_prepared, logicalrep_write_truncate,
+    logicalrep_write_typ, logicalrep_write_update, LOGICALREP_PROTO_MAX_VERSION_NUM,
+    LOGICALREP_PROTO_MIN_VERSION_NUM, LOGICALREP_PROTO_STREAM_PARALLEL_VERSION_NUM,
+    LOGICALREP_PROTO_STREAM_VERSION_NUM, LOGICALREP_PROTO_TWOPHASE_VERSION_NUM,
+    PUBLISH_GENCOLS_NONE, PUBLISH_GENCOLS_STORED,
 };
 use mcx::MemoryContext;
 use reorderbuffer::{ReorderBuffer, ReorderBufferChange, ReorderBufferChangeData, TxnId};
@@ -172,11 +174,15 @@ fn fc__pg_output_plugin_init(
     cb.truncate_cb = Some(pgoutput_truncate);
     cb.message_cb = Some(pgoutput_message);
     cb.commit_cb = Some(pgoutput_commit_txn);
+    cb.begin_prepare_cb = Some(pgoutput_begin_prepare_txn);
+    cb.prepare_cb = Some(pgoutput_prepare_txn);
+    cb.commit_prepared_cb = Some(pgoutput_commit_prepared_txn);
+    cb.rollback_prepared_cb = Some(pgoutput_rollback_prepared_txn);
     cb.filter_by_origin_cb = Some(pgoutput_origin_filter);
     cb.shutdown_cb = Some(pgoutput_shutdown);
-    // C also registers the prepare family and stream_* callbacks; the decode
-    // stack refuses streaming/two-phase loudly, and a subscriber that asks
-    // for them is rejected in pgoutput_startup with C's own errors.
+    // C also registers the stream_* callbacks; the decode stack refuses
+    // streaming loudly, and a subscriber that asks for it is rejected in
+    // pgoutput_startup with C's own error.
     Ok(Datum::from_usize(0))
 }
 
@@ -431,7 +437,7 @@ fn pgoutput_startup(opc: &mut OutputPluginContext, is_init: bool) -> PgResult<()
                 .finish(loc("pgoutput_startup"))?;
         }
 
-        // Two-phase: same shape; the decoding context doesn't support it.
+        // Two-phase (pgoutput.c:518).
         if !data.two_phase {
             opc.twophase_opt_given = false;
         } else if data.protocol_version < LOGICALREP_PROTO_TWOPHASE_VERSION_NUM {
@@ -551,6 +557,112 @@ fn pgoutput_commit_txn(
 
     OutputPluginPrepareWrite(opc, true)?;
     logicalrep_write_commit(opc.out.as_mut_vec(), commit_lsn, end_lsn, commit_time);
+    OutputPluginWrite(opc, true)
+}
+
+// pgoutput_begin_prepare_txn (pgoutput.c:660).
+fn pgoutput_begin_prepare_txn(
+    opc: &mut OutputPluginContext,
+    rb: &mut ReorderBuffer,
+    txn: TxnId,
+) -> PgResult<()> {
+    let t = rb.txn(txn);
+    let send_replication_origin = t.origin_id != InvalidRepOriginId;
+    let (final_lsn, end_lsn, prepare_time, xid) = (t.final_lsn, t.end_lsn, t.xact_time, t.xid);
+    let (origin_id, origin_lsn) = (t.origin_id, t.origin_lsn);
+    let gid = t.gid.clone().expect("prepared txn carries a gid");
+
+    OutputPluginPrepareWrite(opc, !send_replication_origin)?;
+    logicalrep_write_begin_prepare(
+        opc.out.as_mut_vec(),
+        final_lsn,
+        end_lsn,
+        prepare_time,
+        xid,
+        &gid,
+    );
+
+    send_repl_origin(opc, origin_id, origin_lsn, send_replication_origin)?;
+
+    OutputPluginWrite(opc, true)
+}
+
+// pgoutput_prepare_txn (pgoutput.c:678).
+fn pgoutput_prepare_txn(
+    opc: &mut OutputPluginContext,
+    rb: &mut ReorderBuffer,
+    txn: TxnId,
+    prepare_lsn: XLogRecPtr,
+) -> PgResult<()> {
+    OutputPluginUpdateProgress(opc, false)?;
+
+    let t = rb.txn(txn);
+    let (end_lsn, prepare_time, xid) = (t.end_lsn, t.xact_time, t.xid);
+    let gid = t.gid.clone().expect("prepared txn carries a gid");
+
+    OutputPluginPrepareWrite(opc, true)?;
+    logicalrep_write_prepare(
+        opc.out.as_mut_vec(),
+        prepare_lsn,
+        end_lsn,
+        prepare_time,
+        xid,
+        &gid,
+    );
+    OutputPluginWrite(opc, true)
+}
+
+// pgoutput_commit_prepared_txn (pgoutput.c:692).
+fn pgoutput_commit_prepared_txn(
+    opc: &mut OutputPluginContext,
+    rb: &mut ReorderBuffer,
+    txn: TxnId,
+    commit_lsn: XLogRecPtr,
+) -> PgResult<()> {
+    OutputPluginUpdateProgress(opc, false)?;
+
+    let t = rb.txn(txn);
+    let (end_lsn, commit_time, xid) = (t.end_lsn, t.xact_time, t.xid);
+    let gid = t.gid.clone().expect("prepared txn carries a gid");
+
+    OutputPluginPrepareWrite(opc, true)?;
+    logicalrep_write_commit_prepared(
+        opc.out.as_mut_vec(),
+        commit_lsn,
+        end_lsn,
+        commit_time,
+        xid,
+        &gid,
+    );
+    OutputPluginWrite(opc, true)
+}
+
+// pgoutput_rollback_prepared_txn (pgoutput.c:706).
+fn pgoutput_rollback_prepared_txn(
+    opc: &mut OutputPluginContext,
+    rb: &mut ReorderBuffer,
+    txn: TxnId,
+    prepare_end_lsn: XLogRecPtr,
+    prepare_time: types_core::TimestampTz,
+) -> PgResult<()> {
+    OutputPluginUpdateProgress(opc, false)?;
+
+    let t = rb.txn(txn);
+    // txn->end_lsn / txn->xact_time.commit_time carry the rollback record's
+    // positions here (set by ReorderBufferFinishPrepared).
+    let (rollback_end_lsn, rollback_time, xid) = (t.end_lsn, t.xact_time, t.xid);
+    let gid = t.gid.clone().expect("prepared txn carries a gid");
+
+    OutputPluginPrepareWrite(opc, true)?;
+    logicalrep_write_rollback_prepared(
+        opc.out.as_mut_vec(),
+        prepare_end_lsn,
+        rollback_end_lsn,
+        prepare_time,
+        rollback_time,
+        xid,
+        &gid,
+    );
     OutputPluginWrite(opc, true)
 }
 

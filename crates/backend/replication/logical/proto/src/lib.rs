@@ -845,29 +845,274 @@ pub fn logicalrep_write_stream_abort(_out: &mut Vec<u8>) -> ! {
 pub fn logicalrep_read_stream_abort(_r: &mut Reader<'_>) -> ! {
     unported("logicalrep_read_stream_abort (streaming)")
 }
-pub fn logicalrep_write_begin_prepare(_out: &mut Vec<u8>) -> ! {
-    unported("logicalrep_write_begin_prepare (two-phase)")
+// --- two-phase (prepare family) messages ---
+
+/// GIDSIZE (xact.h): the on-wire gid is read into a 200-byte buffer in C
+/// (strlcpy truncation); readers mirror the cap.
+pub const GIDSIZE: usize = 200;
+
+fn gid_truncate(s: String) -> String {
+    if s.len() < GIDSIZE {
+        return s;
+    }
+    // strlcpy keeps the first GIDSIZE-1 bytes; stay on a char boundary.
+    let mut end = GIDSIZE - 1;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut s = s;
+    s.truncate(end);
+    s
 }
-pub fn logicalrep_read_begin_prepare(_r: &mut Reader<'_>) -> ! {
-    unported("logicalrep_read_begin_prepare (two-phase)")
+
+/// LogicalRepPreparedTxnData (logicalproto.h): BEGIN PREPARE / PREPARE.
+#[derive(Clone)]
+pub struct LogicalRepPreparedTxnData {
+    pub prepare_lsn: XLogRecPtr,
+    pub end_lsn: XLogRecPtr,
+    pub prepare_time: TimestampTz,
+    pub xid: TransactionId,
+    pub gid: String,
 }
-pub fn logicalrep_write_prepare(_out: &mut Vec<u8>) -> ! {
-    unported("logicalrep_write_prepare (two-phase)")
+
+/// LogicalRepCommitPreparedTxnData (logicalproto.h).
+#[derive(Clone)]
+pub struct LogicalRepCommitPreparedTxnData {
+    pub commit_lsn: XLogRecPtr,
+    pub end_lsn: XLogRecPtr,
+    pub commit_time: TimestampTz,
+    pub xid: TransactionId,
+    pub gid: String,
 }
-pub fn logicalrep_read_prepare(_r: &mut Reader<'_>) -> ! {
-    unported("logicalrep_read_prepare (two-phase)")
+
+/// LogicalRepRollbackPreparedTxnData (logicalproto.h).
+#[derive(Clone)]
+pub struct LogicalRepRollbackPreparedTxnData {
+    pub prepare_end_lsn: XLogRecPtr,
+    pub rollback_end_lsn: XLogRecPtr,
+    pub prepare_time: TimestampTz,
+    pub rollback_time: TimestampTz,
+    pub xid: TransactionId,
+    pub gid: String,
 }
-pub fn logicalrep_write_commit_prepared(_out: &mut Vec<u8>) -> ! {
-    unported("logicalrep_write_commit_prepared (two-phase)")
+
+/// logicalrep_write_begin_prepare (proto.c:116): fields are C's
+/// txn->final_lsn, txn->end_lsn, txn->xact_time.prepare_time, txn->xid,
+/// txn->gid.
+pub fn logicalrep_write_begin_prepare(
+    out: &mut Vec<u8>,
+    prepare_lsn: XLogRecPtr,
+    end_lsn: XLogRecPtr,
+    prepare_time: TimestampTz,
+    xid: TransactionId,
+    gid: &str,
+) {
+    send_byte(out, LOGICAL_REP_MSG_BEGIN_PREPARE);
+    send_int64(out, prepare_lsn);
+    send_int64(out, end_lsn);
+    send_int64(out, prepare_time as u64);
+    send_int32(out, xid);
+    send_string(out, gid);
 }
-pub fn logicalrep_read_commit_prepared(_r: &mut Reader<'_>) -> ! {
-    unported("logicalrep_read_commit_prepared (two-phase)")
+
+pub fn logicalrep_read_begin_prepare(
+    r: &mut Reader<'_>,
+) -> PgResult<LogicalRepPreparedTxnData> {
+    let prepare_lsn = r.get_int64()?;
+    if prepare_lsn == InvalidXLogRecPtr {
+        elog(ERROR, "prepare_lsn not set in begin prepare message".to_string())?;
+    }
+    let end_lsn = r.get_int64()?;
+    if end_lsn == InvalidXLogRecPtr {
+        elog(ERROR, "end_lsn not set in begin prepare message".to_string())?;
+    }
+    Ok(LogicalRepPreparedTxnData {
+        prepare_lsn,
+        end_lsn,
+        prepare_time: r.get_int64()? as TimestampTz,
+        xid: r.get_int32()?,
+        gid: gid_truncate(r.get_string()?),
+    })
 }
-pub fn logicalrep_write_rollback_prepared(_out: &mut Vec<u8>) -> ! {
-    unported("logicalrep_write_rollback_prepared (two-phase)")
+
+/// logicalrep_write_prepare_common (proto.c:155).
+fn logicalrep_write_prepare_common(
+    out: &mut Vec<u8>,
+    msgtype: u8,
+    prepare_lsn: XLogRecPtr,
+    end_lsn: XLogRecPtr,
+    prepare_time: TimestampTz,
+    xid: TransactionId,
+    gid: &str,
+) {
+    send_byte(out, msgtype);
+    debug_assert!(xid != InvalidTransactionId);
+    send_byte(out, 0); // flags
+    send_int64(out, prepare_lsn);
+    send_int64(out, end_lsn);
+    send_int64(out, prepare_time as u64);
+    send_int32(out, xid);
+    send_string(out, gid);
 }
-pub fn logicalrep_read_rollback_prepared(_r: &mut Reader<'_>) -> ! {
-    unported("logicalrep_read_rollback_prepared (two-phase)")
+
+/// logicalrep_write_prepare (proto.c:187): prepare_lsn is the caller's,
+/// end_lsn/prepare_time/xid/gid are C's txn fields.
+pub fn logicalrep_write_prepare(
+    out: &mut Vec<u8>,
+    prepare_lsn: XLogRecPtr,
+    end_lsn: XLogRecPtr,
+    prepare_time: TimestampTz,
+    xid: TransactionId,
+    gid: &str,
+) {
+    logicalrep_write_prepare_common(
+        out,
+        LOGICAL_REP_MSG_PREPARE,
+        prepare_lsn,
+        end_lsn,
+        prepare_time,
+        xid,
+        gid,
+    );
+}
+
+fn logicalrep_read_prepare_common(
+    r: &mut Reader<'_>,
+    msgtype: &str,
+) -> PgResult<LogicalRepPreparedTxnData> {
+    let flags = r.get_byte()?;
+    if flags != 0 {
+        elog(ERROR, format!("unrecognized flags {flags} in {msgtype} message"))?;
+    }
+    let prepare_lsn = r.get_int64()?;
+    if prepare_lsn == InvalidXLogRecPtr {
+        elog(ERROR, format!("prepare_lsn is not set in {msgtype} message"))?;
+    }
+    let end_lsn = r.get_int64()?;
+    if end_lsn == InvalidXLogRecPtr {
+        elog(ERROR, format!("end_lsn is not set in {msgtype} message"))?;
+    }
+    let prepare_time = r.get_int64()? as TimestampTz;
+    let xid = r.get_int32()?;
+    if xid == InvalidTransactionId {
+        elog(
+            ERROR,
+            format!("invalid two-phase transaction ID in {msgtype} message"),
+        )?;
+    }
+    Ok(LogicalRepPreparedTxnData {
+        prepare_lsn,
+        end_lsn,
+        prepare_time,
+        xid,
+        gid: gid_truncate(r.get_string()?),
+    })
+}
+
+pub fn logicalrep_read_prepare(r: &mut Reader<'_>) -> PgResult<LogicalRepPreparedTxnData> {
+    logicalrep_read_prepare_common(r, "prepare")
+}
+
+/// logicalrep_write_commit_prepared (proto.c:237): end_lsn/commit_time/xid/gid
+/// are C's txn fields.
+pub fn logicalrep_write_commit_prepared(
+    out: &mut Vec<u8>,
+    commit_lsn: XLogRecPtr,
+    end_lsn: XLogRecPtr,
+    commit_time: TimestampTz,
+    xid: TransactionId,
+    gid: &str,
+) {
+    send_byte(out, LOGICAL_REP_MSG_COMMIT_PREPARED);
+    send_byte(out, 0); // flags
+    send_int64(out, commit_lsn);
+    send_int64(out, end_lsn);
+    send_int64(out, commit_time as u64);
+    send_int32(out, xid);
+    send_string(out, gid);
+}
+
+pub fn logicalrep_read_commit_prepared(
+    r: &mut Reader<'_>,
+) -> PgResult<LogicalRepCommitPreparedTxnData> {
+    let flags = r.get_byte()?;
+    if flags != 0 {
+        elog(
+            ERROR,
+            format!("unrecognized flags {flags} in commit prepared message"),
+        )?;
+    }
+    let commit_lsn = r.get_int64()?;
+    if commit_lsn == InvalidXLogRecPtr {
+        elog(ERROR, "commit_lsn is not set in commit prepared message".to_string())?;
+    }
+    let end_lsn = r.get_int64()?;
+    if end_lsn == InvalidXLogRecPtr {
+        elog(ERROR, "end_lsn is not set in commit prepared message".to_string())?;
+    }
+    Ok(LogicalRepCommitPreparedTxnData {
+        commit_lsn,
+        end_lsn,
+        commit_time: r.get_int64()? as TimestampTz,
+        xid: r.get_int32()?,
+        gid: gid_truncate(r.get_string()?),
+    })
+}
+
+/// logicalrep_write_rollback_prepared (proto.c:293): rollback_end_lsn and
+/// rollback_time are C's txn->end_lsn / txn->xact_time.commit_time.
+#[allow(clippy::too_many_arguments)]
+pub fn logicalrep_write_rollback_prepared(
+    out: &mut Vec<u8>,
+    prepare_end_lsn: XLogRecPtr,
+    rollback_end_lsn: XLogRecPtr,
+    prepare_time: TimestampTz,
+    rollback_time: TimestampTz,
+    xid: TransactionId,
+    gid: &str,
+) {
+    send_byte(out, LOGICAL_REP_MSG_ROLLBACK_PREPARED);
+    send_byte(out, 0); // flags
+    send_int64(out, prepare_end_lsn);
+    send_int64(out, rollback_end_lsn);
+    send_int64(out, prepare_time as u64);
+    send_int64(out, rollback_time as u64);
+    send_int32(out, xid);
+    send_string(out, gid);
+}
+
+pub fn logicalrep_read_rollback_prepared(
+    r: &mut Reader<'_>,
+) -> PgResult<LogicalRepRollbackPreparedTxnData> {
+    let flags = r.get_byte()?;
+    if flags != 0 {
+        elog(
+            ERROR,
+            format!("unrecognized flags {flags} in rollback prepared message"),
+        )?;
+    }
+    let prepare_end_lsn = r.get_int64()?;
+    if prepare_end_lsn == InvalidXLogRecPtr {
+        elog(
+            ERROR,
+            "prepare_end_lsn is not set in rollback prepared message".to_string(),
+        )?;
+    }
+    let rollback_end_lsn = r.get_int64()?;
+    if rollback_end_lsn == InvalidXLogRecPtr {
+        elog(
+            ERROR,
+            "rollback_end_lsn is not set in rollback prepared message".to_string(),
+        )?;
+    }
+    Ok(LogicalRepRollbackPreparedTxnData {
+        prepare_end_lsn,
+        rollback_end_lsn,
+        prepare_time: r.get_int64()? as TimestampTz,
+        rollback_time: r.get_int64()? as TimestampTz,
+        xid: r.get_int32()?,
+        gid: gid_truncate(r.get_string()?),
+    })
 }
 pub fn logicalrep_write_stream_prepare(_out: &mut Vec<u8>) -> ! {
     unported("logicalrep_write_stream_prepare (streaming two-phase)")
