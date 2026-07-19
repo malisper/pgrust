@@ -235,7 +235,8 @@ fn CreateOpFamily(
     )?;
     // dependency on owner
     recordDependencyOnOwner(mcx, OPERATOR_FAMILY_RELATION_ID, opfamilyoid, miscinit::GetUserId())?;
-    // dependency on extension: no-op (CREATE EXTENSION unported)
+    // dependency on extension
+    pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
 
     // C: EventTriggerCollectSimpleCommand(myself, Invalid, stmt) — the tag is
     // the opfamily statement's, also when called from DefineOpClass.
@@ -553,6 +554,8 @@ pub fn DefineOpClass<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateOpClassStmt<'mcx>) -> Pg
         )?;
     }
     recordDependencyOnOwner(mcx, OPERATOR_CLASS_RELATION_ID, opclassoid, miscinit::GetUserId())?;
+    // dependency on extension
+    pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
 
     // C: EventTriggerCollectCreateOpClass (SCT_CreateOpClass) also retains the
     // operators/procedures lists — extension-deparse-only surface; the SRF
