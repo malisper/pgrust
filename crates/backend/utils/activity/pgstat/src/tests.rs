@@ -457,6 +457,15 @@ fn checkpointer_slru_written_counter() {
 }
 
 #[test]
+fn checkpointer_buffers_written_counter() {
+    let _lock = setup();
+    checkpointer::pgstat_count_checkpointer_buffers_written();
+    checkpointer::pgstat_count_checkpointer_buffers_written();
+    checkpointer::pgstat_count_checkpointer_buffers_written();
+    assert_eq!(checkpointer::pending_checkpointer_stats().buffers_written, 3);
+}
+
+#[test]
 fn session_end_cause_fatal_only_upgrades_normal() {
     let _lock = setup();
     assert_eq!(

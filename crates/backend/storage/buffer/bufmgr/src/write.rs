@@ -576,7 +576,12 @@ pub fn BufferSync(flags: i32) -> PgResult<()> {
             num_processed += 1;
 
             if desc.state.load(Ordering::Acquire) & BM_CHECKPOINT_NEEDED != 0 {
-                SyncOneBuffer(buf_id, false, &mut wb)?;
+                // bufmgr.c BufferSync: PendingCheckpointerStats.
+                // buffers_written++ per buffer the checkpoint wrote (feeds
+                // pg_stat_checkpointer.buffers_written).
+                if SyncOneBuffer(buf_id, false, &mut wb)? & BUF_WRITTEN != 0 {
+                    pgstat::checkpointer::pgstat_count_checkpointer_buffers_written();
+                }
             }
 
             let ts = &mut scratch.per_ts[ts_i];
@@ -598,7 +603,10 @@ pub fn BufferSync(flags: i32) -> PgResult<()> {
         }
 
         IssuePendingWritebacks(&mut wb, IOContext::IOCONTEXT_NORMAL)?;
-        // CheckpointStats.ckpt_bufs_written pends the stats unit.
+        // CheckpointStats (the log-line struct: ckpt_bufs_written and the
+        // write=/sync= phase timestamps that also feed
+        // pg_stat_checkpointer.write_time/sync_time) pends the stats unit;
+        // buffers_written above is counted directly.
         Ok(())
     })
 }
