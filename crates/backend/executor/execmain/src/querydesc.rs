@@ -506,6 +506,7 @@ pub(crate) fn query_desc_foreign_explain_seam(
     h: QueryDescHandle,
     plan_node_id: i32,
     costs: bool,
+    verbose: bool,
     emit: &mut dyn FnMut(&str, types_nodes::FdwExplainProp<'_>) -> types_error::PgResult<()>,
 ) -> types_error::PgResult<()> {
     with_qd(h, |qd| {
@@ -518,6 +519,7 @@ pub(crate) fn query_desc_foreign_explain_seam(
                     estate,
                     plan_node_id,
                     costs,
+                    verbose,
                     emit,
                 ) {
                     return x;
@@ -536,6 +538,7 @@ pub(crate) fn query_desc_foreign_explain_seam(
                         estate,
                         plan_node_id,
                         costs,
+                        verbose,
                         emit,
                     ) {
                         return x;

@@ -287,6 +287,7 @@ seam_core::seam!(
         query_desc: QueryDescHandle,
         plan_node_id: i32,
         costs: bool,
+        verbose: bool,
         emit: &'e mut dyn FnMut(&str, types_nodes::FdwExplainProp<'_>) -> PgResult<()>,
     ) -> PgResult<()>
 );

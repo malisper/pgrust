@@ -37,11 +37,13 @@ pub struct FdwExecRoutine {
     pub rescan:
         for<'mcx> fn(&mut ForeignScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<()>,
     pub end: for<'mcx> fn(&mut ForeignScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<()>,
-    /// Emits FdwExplainProp, not ExplainState; the `bool` is C's es->costs.
+    /// Emits FdwExplainProp, not ExplainState; the bools are C's es->costs
+    /// and es->verbose (postgres_fdw gates Remote SQL on the latter).
     pub explain: Option<
         for<'mcx> fn(
             &mut ForeignScanState<'mcx>,
             &mut EStateData<'mcx>,
+            bool,
             bool,
             &mut dyn FnMut(&str, FdwExplainProp<'_>) -> PgResult<()>,
         ) -> PgResult<()>,
@@ -222,10 +224,11 @@ pub fn explain_foreign_scan<'mcx>(
     node: &mut ForeignScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     costs: bool,
+    verbose: bool,
     emit: &mut dyn FnMut(&str, FdwExplainProp<'_>) -> PgResult<()>,
 ) -> PgResult<()> {
     match fdw_exec_routine(node.fdwroutine).explain {
-        Some(f) => f(node, estate, costs, emit),
+        Some(f) => f(node, estate, costs, verbose, emit),
         None => Ok(()),
     }
 }
