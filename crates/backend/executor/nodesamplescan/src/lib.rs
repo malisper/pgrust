@@ -1,4 +1,5 @@
-// nodeSamplescan.c over the closed in-core TSM enum (tablesample crate).
+// nodeSamplescan.c over the TSM dispatch enum (tablesample crate; in-core
+// bernoulli/system plus the contrib system_rows/system_time extension arms).
 #![allow(non_snake_case)]
 
 use ::datum::Datum;
@@ -143,7 +144,7 @@ pub fn exec_init_sample_scan<'mcx>(
         0
     };
 
-    let tsm = Tsm::get(tsc.tsmhandler);
+    let tsm = Tsm::get(mcx, tsc.tsmhandler)?;
     Ok(SampleScanState {
         ss,
         args,
@@ -262,7 +263,7 @@ impl<'mcx> SampleScanState<'mcx> {
         loop {
             let scan = ss.ss_currentScanDesc.as_mut().expect("sample scan begun");
             if !*haveblock {
-                if !table_scan_sample_next_block(mcx, scan, tsm_state)? {
+                if !table_scan_sample_next_block(mcx, scan, tsm_state, *donetuples)? {
                     *haveblock = false;
                     *done = true;
                     return Ok(false);
@@ -270,7 +271,7 @@ impl<'mcx> SampleScanState<'mcx> {
                 *haveblock = true;
             }
             let slot = estate.slot_mut(ss.ss_ScanTupleSlot);
-            if !table_scan_sample_next_tuple(mcx, scan, tsm_state, slot)? {
+            if !table_scan_sample_next_tuple(mcx, scan, tsm_state, *donetuples, slot)? {
                 *haveblock = false;
                 continue;
             }

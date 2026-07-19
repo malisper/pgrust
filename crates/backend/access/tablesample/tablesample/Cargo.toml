@@ -14,3 +14,6 @@ types_tuple = { path = "../../../../_support/types/types_tuple" }
 hashfn = { path = "../../../../common/hashfn" }
 clauses = { path = "../../../optimizer/util/clauses" }
 tableam_vocab = { path = "../../table/tableam_vocab" }
+syscache_seams = { path = "../../../utils/cache/syscache_seams" }
+tsm_system_rows = { path = "../../../../contrib/tsm_system_rows" }
+tsm_system_time = { path = "../../../../contrib/tsm_system_time" }

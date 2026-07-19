@@ -218,6 +218,8 @@ pub fn init_all_with_transport(transport: Transport) {
     pgstattuple::init_seams();
     pg_freespacemap::init_seams();
     amcheck::init_seams();
+    tsm_system_rows::init_seams();
+    tsm_system_time::init_seams();
     session::init_seams();
     relpath::init_seams();
     rewrite_handler::init_seams();

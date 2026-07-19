@@ -15588,6 +15588,8 @@ dependencies = [
  "transam_xlog",
  "trigger",
  "ts_cache",
+ "tsm_system_rows",
+ "tsm_system_time",
  "tuplesort",
  "tuplestore",
  "twophase",
@@ -17487,7 +17489,10 @@ dependencies = [
  "datum",
  "hashfn",
  "mcx",
+ "syscache_seams",
  "tableam_vocab",
+ "tsm_system_rows",
+ "tsm_system_time",
  "types_core",
  "types_error",
  "types_nodes",
@@ -18169,6 +18174,35 @@ dependencies = [
  "types_tuple",
  "varlena",
  "xact",
+]
+
+[[package]]
+name = "tsm_system_rows"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "dfmgr",
+ "mcx",
+ "pg_prng",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_tuple",
+]
+
+[[package]]
+name = "tsm_system_time"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "dfmgr",
+ "mcx",
+ "pg_clock",
+ "pg_prng",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_tuple",
 ]
 
 [[package]]
