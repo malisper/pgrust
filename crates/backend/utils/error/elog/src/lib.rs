@@ -31,8 +31,9 @@ pub use report::{
     vwrite_stderr, write_console, write_pipe_chunks, write_stderr, DebugFileOpen,
 };
 pub use sink::{
-    backend_log_context, set_backend_log_context, set_emit_log_hook, set_frontend_redirect,
-    BackendLogContext, EmitLogHook, FrontendRedirect,
+    backend_log_context, debug_query_string_scope, set_backend_log_context, set_emit_log_hook,
+    set_frontend_redirect, with_debug_query_string, BackendLogContext, DebugQueryStringScope,
+    EmitLogHook, FrontendRedirect,
 };
 pub use stack::{
     emit_error_report_for, ereport_msg, err_generic_string, errbacktrace, errcode,

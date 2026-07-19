@@ -224,6 +224,11 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
         }
     }
 
+    // C: `debug_query_string = query_string;` (exec_simple_query top); the
+    // scope's drop is the tail `debug_query_string = NULL` plus the
+    // sigsetjmp reset on the error path. current_query() reads it.
+    let _debug_query = elog::debug_query_string_scope(query_string);
+
     let dest = elog::config::where_to_send_output();
     let save_log_statement_stats = log_statement_stats();
     let mut was_logged = false;
