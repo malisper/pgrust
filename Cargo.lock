@@ -8901,6 +8901,7 @@ dependencies = [
  "exectuples",
  "executils",
  "fd",
+ "hashfn",
  "init_small",
  "instrument",
  "lsyscache",

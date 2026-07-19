@@ -1233,6 +1233,150 @@ mod tests {
         assert_eq!(frozen_chains(&t), reference_chains(&ds.all_rows(), l2));
     }
 
+    // ---- HJPROBE-V2 probe-economics census (notes/se-hjprobe-v2.md §4) ----
+    //
+    // Replays the K2 letter corpora's EXACT key distributions
+    // (corpus-k2win-q13/q18: deterministic multiplicative-hash mixes, no
+    // random()) against a real FrozenJoinTable using the engine's real
+    // int4 join hash (hashfn::hash_bytes_uint32 — the nodehash build-hash
+    // kernel's function), and counts what the probe walk actually does:
+    //
+    //   probes        : outer rows probed
+    //   walk_entered  : probes whose tag-prefiltered chain yielded >=1
+    //                   candidate (the complement was killed by ONE
+    //                   bucket-word read — empty bucket or tag miss)
+    //   candidates    : chain tuples yielded across all probes
+    //   hash_eq       : candidates surviving the hashvalue prefilter
+    //   matches       : candidates whose KEY equals the probe key (what
+    //                   the hashclauses exec_qual recheck would pass)
+    //
+    // The dead-probe rows adjudicate the bloom increment: a Bloom filter
+    // consulted before the bucket lookup can only save work on probes the
+    // tag word did NOT already kill. The candidate/match ratios bound the
+    // dense-seat increment's chain-walk savings. Numbers are pinned
+    // exactly (everything is deterministic); the full-scale twins are
+    // #[ignore]d census runs whose numbers ride the worklog.
+
+    struct ProbeCensus {
+        probes: u64,
+        walk_entered: u64,
+        candidates: u64,
+        hash_eq: u64,
+        matches: u64,
+    }
+
+    fn probe_census(
+        build_keys: impl Iterator<Item = i32>,
+        probe_keys: impl Iterator<Item = i32>,
+    ) -> ProbeCensus {
+        let budget = JoinBudget::unlimited();
+        let mut l = JoinBuildLocal::new(0, Arc::clone(&budget));
+        l.begin_run(0);
+        for k in build_keys {
+            l.push(::hashfn::hash_bytes_uint32(k as u32), &k.to_le_bytes()).unwrap();
+        }
+        l.end_run();
+        let t = plan_combine_freeze(vec![l], &budget, false);
+        let mut c = ProbeCensus { probes: 0, walk_entered: 0, candidates: 0, hash_eq: 0, matches: 0 };
+        for k in probe_keys {
+            let h = ::hashfn::hash_bytes_uint32(k as u32);
+            c.probes += 1;
+            let mut any = false;
+            for cand in t.chain(h) {
+                any = true;
+                c.candidates += 1;
+                if cand.hashvalue() != h {
+                    continue;
+                }
+                c.hash_eq += 1;
+                if cand.payload() == k.to_le_bytes() {
+                    c.matches += 1;
+                }
+            }
+            if any {
+                c.walk_entered += 1;
+            }
+        }
+        c
+    }
+
+    /// corpus-k2win-q13's fact key stream (o_ckey): dead_mod'th rows point
+    /// past the dim (the LEFT-join null tail), the rest spread over the
+    /// low `live_span` dim keys. `dim_rows`/`dead_span` per the corpus.
+    fn q13_probe_keys(
+        fact_rows: i64,
+        dim_rows: i64,
+        live_span: i64,
+        dead_span: i64,
+        dead_mod: i64,
+    ) -> impl Iterator<Item = i32> {
+        (1..=fact_rows).map(move |g| {
+            if g % dead_mod == 0 {
+                (dim_rows + (g % dead_span) + 1) as i32
+            } else {
+                ((g * 48271) % live_span + 1) as i32
+            }
+        })
+    }
+
+    #[test]
+    fn probe_census_q13_channel_scale() {
+        // The CORPUS=hj hj13* fixture exactly (10k dim, 300k fact, 1/3
+        // dead keys over 10001..15001, live spread 1..9000).
+        let c = probe_census(1..=10_000i32, q13_probe_keys(300_000, 10_000, 9_000, 5_000, 3));
+        assert_eq!(c.probes, 300_000);
+        assert_eq!(c.matches, 200_000, "every live probe matches its unique dim row");
+        // Pinned census (deterministic: real hash, fixed streams). The
+        // adjudication ratios ride notes/se-hjprobe-v2.md §4:
+        //   dead probes = 100_000; dead walks entered = walk_entered -
+        //   live_walks; live probes always enter (their match is chained).
+        let (dead, dead_walks) = (100_000u64, c.walk_entered - 200_000);
+        assert_eq!(c.walk_entered, 203_540, "pinned: only 3.54% of dead probes survive tag+empty");
+        assert_eq!(c.candidates, 327_180, "pinned: 1.09 candidates/probe — chains are short");
+        assert_eq!(c.hash_eq, 200_000, "pinned: hashvalue prefilter rejects EVERY non-match candidate here");
+        assert!(dead_walks * 20 < dead, "tag word + empty buckets eat >95% of dead probes");
+    }
+
+    #[test]
+    fn probe_census_q18_channel_scale() {
+        // The CORPUS=hj hj18* fixture exactly (125k orders build, 500k
+        // lineitem probe, 1/50 dead keys, live spread 1..125000).
+        let c = probe_census(
+            1..=125_000i32,
+            q13_probe_keys(500_000, 125_000, 125_000, 10_000, 50),
+        );
+        assert_eq!(c.probes, 500_000);
+        assert_eq!(c.matches, 490_000);
+        assert_eq!(c.walk_entered, 490_700, "pinned: dead-probe walks are 7.0% of dead probes");
+        assert_eq!(c.candidates, 956_008, "pinned: 1.91 candidates/probe at 0.954 load factor");
+        assert_eq!(c.hash_eq, 490_016, "pinned: 16 full-hash collisions — the exec_qual recheck earns its keep 16 times in 500k probes");
+    }
+
+    #[test]
+    #[ignore = "letter-scale census (3M/5M probes): numbers ride notes/se-hjprobe-v2.md §4"]
+    fn probe_census_q13_letter_scale() {
+        let c = probe_census(1..=100_000i32, q13_probe_keys(3_000_000, 100_000, 90_000, 50_000, 3));
+        eprintln!(
+            "q13 letter census: probes={} walk_entered={} candidates={} hash_eq={} matches={}",
+            c.probes, c.walk_entered, c.candidates, c.hash_eq, c.matches
+        );
+        assert_eq!(c.matches, 2_000_000);
+    }
+
+    #[test]
+    #[ignore = "letter-scale census (5M probes): numbers ride notes/se-hjprobe-v2.md §4"]
+    fn probe_census_q18_letter_scale() {
+        let c = probe_census(
+            1..=1_250_000i32,
+            q13_probe_keys(5_000_000, 1_250_000, 1_250_000, 100_000, 50),
+        );
+        eprintln!(
+            "q18 letter census: probes={} walk_entered={} candidates={} hash_eq={} matches={}",
+            c.probes, c.walk_entered, c.candidates, c.hash_eq, c.matches
+        );
+        assert_eq!(c.matches, 4_900_000);
+    }
+
     // ---- soak: larger randomized run vs the oracle ----
 
     #[test]
