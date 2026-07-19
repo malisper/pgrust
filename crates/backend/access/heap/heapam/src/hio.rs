@@ -1,5 +1,7 @@
-// hio.c write lane. Deferred: HEAP_INSERT_FROZEN vm pinning and all-visible
-// vm lanes (visibilitymap.c).
+// hio.c write lane. C's in-here vm pinning (hio.c:618-627 all-visible probe,
+// 774-789 frozen-extend) is done at use time in dml.rs instead (pin-at-use
+// divergence); heap_multi_insert's FROZEN path sets PD_ALL_VISIBLE + VM bits
+// there, mirroring heapam.c:2460-2654.
 use ::bufmgr_seams::{BufferPin, BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_UNLOCK, EB_LOCK_FIRST};
 use ::tableam_vocab::BulkInsertStateData;
 use ::types_core::{BlockNumber, ForkNumber, InvalidBlockNumber, BLCKSZ};
@@ -247,9 +249,10 @@ pub fn RelationGetBufferForTuple<'mcx>(
     if len > MaxHeapTupleSize {
         return Err(row_too_big(len));
     }
-    // C divergence: HEAP_INSERT_FROZEN's visibilitymap pin + all-visible page
-    // marking are elided (VM writes unported repo-wide; conservative — pages
-    // stay unmarked, tuples still get frozen xmin in heap_prepare_insert).
+    // C divergence: the vm pins C takes here before the content lock
+    // (hio.c:618-627, 774-789 — C can't do VM-fork I/O while x-locked) happen
+    // at use time in dml.rs heap_multi_insert instead, which owns the FROZEN
+    // all-visible marking + visibilitymap_set (heapam.c:2460-2654).
 
     let save_free_space = relation.get_target_page_free_space(HEAP_DEFAULT_FILLFACTOR) as usize;
     let nearly_empty_free_space =

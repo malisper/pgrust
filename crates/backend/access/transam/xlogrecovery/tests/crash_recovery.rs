@@ -50,11 +50,13 @@ const REL2_OID: Oid = 61001;
 const REL3_OID: Oid = 61002;
 const IDX_OID: Oid = 61003;
 const REL5_OID: Oid = 61005;
+const REL6_OID: Oid = 61006;
 const RLOC: RelFileLocator = RelFileLocator::new(1663, 5, REL_OID);
 const RLOC2: RelFileLocator = RelFileLocator::new(1663, 5, REL2_OID);
 const RLOC3: RelFileLocator = RelFileLocator::new(1663, 5, REL3_OID);
 const RLOC4: RelFileLocator = RelFileLocator::new(1663, 5, IDX_OID);
 const RLOC5: RelFileLocator = RelFileLocator::new(1663, 5, REL5_OID);
+const RLOC6: RelFileLocator = RelFileLocator::new(1663, 5, REL6_OID);
 const WIDE: usize = 1536;
 // evens then odds: forces rightmost and interior leaf splits (SPLIT_R,
 // SPLIT_L + right-sibling arm, INSERT_UPPER) plus NEWROOT.
@@ -132,6 +134,9 @@ fn install_stub_seams() {
     spi_seams::at_eoxact_spi::set(|_| Ok(()));
     // No shmem sinval segment in this rig (single backend).
     sinval_seams::receive_shared_invalid_messages::set(|_, _| Ok(()));
+    // vm_extend's CacheInvalidateSmgr (immediate smgr inval, C
+    // visibilitymap.c) — single-process rig, nobody to notify.
+    sinval_seams::send_shared_invalid_messages::set(|_| Ok(()));
     spi_seams::spi_inside_nonatomic_context::set(|| false);
     be_fsstubs_seams::at_eoxact_large_object::set(|_| Ok(()));
     namespace_seams::at_eoxact_namespace::set(|_, _| {});
@@ -690,6 +695,44 @@ fn crash_recovery_child() {
     bufmgr::ReleaseBuffer(vmbuf).unwrap();
     assert_eq!(vm_byte, 0, "replay cleared the VM all-visible bit");
 
+    // The COPY FREEZE replay lane (rel6): MULTI_INSERT+INIT_PAGE with
+    // XLH_INSERT_ALL_FROZEN_SET rebuilds the page all-visible with the frozen
+    // rows; the following XLOG_HEAP2_VISIBLE record rebuilds the VM bits —
+    // all through the live buffer manager. A VM bit without its heap rows
+    // would be a wrong-results class (index-only scans trust the VM).
+    let rel6 = test_relation(mcx, REL6_OID);
+    let buf6 = bufmgr::ReadBuffer(&rel6, 0).unwrap();
+    {
+        // SAFETY: pinned page image.
+        let page = unsafe { PageRef::from_raw(bufmgr::BufferGetPagePtr(buf6)) };
+        assert!(page.is_all_visible(), "replay kept PD_ALL_VISIBLE on the frozen page");
+        assert_eq!(page.max_offset_number(), 3, "replay re-added the frozen rows");
+        for off in 1..=3u16 {
+            let id = page.item_id(off);
+            let (ptr, len) = page.item_raw(id);
+            // SAFETY: in-page image under the pin.
+            let t = unsafe {
+                HeapTupleData::from_raw_parts(ptr, len, ItemPointerData::new(0, off), REL6_OID)
+            };
+            assert!(t.t_data().xmin_frozen(), "replayed row {off} keeps its frozen xmin");
+        }
+    }
+    bufmgr::ReleaseBuffer(buf6).unwrap();
+    let vmbuf6 = bufmgr::ReadBufferExtended(
+        &rel6,
+        ForkNumber::VISIBILITYMAP_FORKNUM,
+        0,
+        types_storage::ReadBufferMode::Normal,
+        None,
+    )
+    .unwrap();
+    // SAFETY: pinned page image.
+    let vm_byte6 = unsafe {
+        *bufmgr::BufferGetPagePtr(vmbuf6).as_ptr().add(VM_FIRST_MAP_BYTE)
+    };
+    bufmgr::ReleaseBuffer(vmbuf6).unwrap();
+    assert_eq!(vm_byte6, 0x03, "replay set the VM all-visible|all-frozen bits");
+
     // btree_redo replay: chain-walk the rebuilt leaf level through the live
     // buffer manager and assert the full ordered key set survives.
     let idx = index_rel(mcx);
@@ -828,8 +871,9 @@ fn crash_recovery_replays_dml_to_precrash_state() {
     let rel = test_relation(mcx, REL_OID);
     let rel3 = test_relation(mcx, REL3_OID);
     let rel5 = test_relation(mcx, REL5_OID);
+    let rel6 = test_relation(mcx, REL6_OID);
     let tupdesc = int4_tupdesc(mcx);
-    for rloc in [RLOC, RLOC3, RLOC5] {
+    for rloc in [RLOC, RLOC3, RLOC5, RLOC6] {
         smgr::smgropen(rloc, INVALID_PROC_NUMBER).unwrap();
         smgr::smgrcreate(
             types_storage::RelFileLocatorBackend { locator: rloc, backend: INVALID_PROC_NUMBER },
@@ -942,12 +986,74 @@ fn crash_recovery_replays_dml_to_precrash_state() {
         assert_eq!(tup.t_self, ItemPointerData::new(1, 1));
     }
 
+    // rel6 COPY FREEZE lane: heap_multi_insert with HEAP_INSERT_FROZEN onto a
+    // page started empty sets PD_ALL_VISIBLE + the VM all-visible|all-frozen
+    // bits at insert time (heapam.c:2460-2654), emitting two records —
+    // MULTI_INSERT+INIT_PAGE carrying XLH_INSERT_ALL_FROZEN_SET, then
+    // XLOG_HEAP2_VISIBLE from visibilitymap_set. Neither the heap page nor
+    // the VM page is ever flushed pre-crash: replay must rebuild both.
+    {
+        let mk_slot = |val: i32| {
+            let mut slot = exectuples::make_tuple_table_slot(
+                mcx,
+                types_slot::TupleSlotKind::HeapTuple,
+                Some(tupdesc.clone()),
+            );
+            let tup = heaptuple::heap_form_tuple(
+                mcx,
+                &tupdesc,
+                &[datum::Datum::from_i32(val)],
+                &[false],
+            )
+            .unwrap();
+            exectuples::exec_store_heap_tuple_owned(&mut slot, mcx, tup);
+            slot
+        };
+        let mut s1 = mk_slot(61);
+        let mut s2 = mk_slot(62);
+        let mut s3 = mk_slot(63);
+        let mut slots = [&mut s1, &mut s2, &mut s3];
+        heapam::heap_multi_insert(
+            mcx,
+            &rel6,
+            &mut slots,
+            0,
+            heapam::hio::HEAP_INSERT_FROZEN,
+            None,
+        )
+        .unwrap();
+
+        let buf6 = bufmgr::ReadBuffer(&rel6, 0).unwrap();
+        {
+            // SAFETY: pinned page image.
+            let page = unsafe { PageRef::from_raw(bufmgr::BufferGetPagePtr(buf6)) };
+            assert!(page.is_all_visible(), "COPY FREEZE marked the buffered page all-visible");
+            assert_eq!(page.max_offset_number(), 3);
+        }
+        bufmgr::ReleaseBuffer(buf6).unwrap();
+        let vmbuf = bufmgr::ReadBufferExtended(
+            &rel6,
+            ForkNumber::VISIBILITYMAP_FORKNUM,
+            0,
+            types_storage::ReadBufferMode::Normal,
+            None,
+        )
+        .unwrap();
+        // SAFETY: pinned page image.
+        let byte = unsafe {
+            *bufmgr::BufferGetPagePtr(vmbuf).as_ptr().add(VM_FIRST_MAP_BYTE)
+        };
+        bufmgr::ReleaseBuffer(vmbuf).unwrap();
+        assert_eq!(byte, 0x03, "COPY FREEZE set the buffered VM all-visible|all-frozen bits");
+    }
+
     xact::CommitTransactionCommand().unwrap();
     assert!(transam::TransactionIdDidCommit(xid1).unwrap());
 
-    // Vacuum's outcome by hand (heap_xlog_visible replay is unported, so the
-    // all-visible state must predate the WAL under test): PD_ALL_VISIBLE on
-    // rel3's flushed page and a VM fork file with block 0 all-visible.
+    // Vacuum's outcome by hand (the CLEAR direction needs pre-existing
+    // all-visible state on disk; the SET direction is WAL-driven and covered
+    // by the rel6 COPY FREEZE lane): PD_ALL_VISIBLE on rel3's flushed page
+    // and a VM fork file with block 0 all-visible.
     // Read-only xact: buffer pins need a live resource owner; no xid taken.
     {
         xact::StartTransactionCommand().unwrap();
@@ -1063,6 +1169,7 @@ fn crash_recovery_replays_dml_to_precrash_state() {
     std::fs::write(base.join("expected_page3.bin"), expected_page3).unwrap();
     let expected_page5: Vec<[u8; BLCKSZ]> =
         (0..2).map(|b| read_page_from_buffer(&rel5, b)).collect();
+    let expected_page6 = read_page_from_buffer(&rel6, 0);
 
     // Clean(-shutdown) control for the VM: the buffered map byte is cleared.
     {
@@ -1110,6 +1217,27 @@ fn crash_recovery_replays_dml_to_precrash_state() {
         assert_eq!(r.max_offset_number(), 1, "second insert never flushed");
         let vm = std::fs::read(dd2.join("base/5").join(format!("{REL3_OID}_vm"))).unwrap();
         assert_eq!(vm[VM_FIRST_MAP_BYTE], 0x01, "pre-crash disk VM bit set");
+    }
+
+    // rel6 crash-state: neither the heap page nor the VM bit was ever
+    // flushed — post-crash they must come back from WAL replay alone. The
+    // dangerous direction (a VM bit on disk covering rows that only exist in
+    // lost buffers) must be impossible: the bit is WAL-first.
+    {
+        let disk6 = std::fs::read(dd2.join("base/5").join(REL6_OID.to_string())).unwrap();
+        assert!(
+            disk6.iter().all(|b| *b == 0),
+            "rel6 heap page must not be flushed pre-crash"
+        );
+        if let Ok(vm6) = std::fs::read(dd2.join("base/5").join(format!("{REL6_OID}_vm"))) {
+            if vm6.len() > VM_FIRST_MAP_BYTE {
+                assert_eq!(
+                    vm6[VM_FIRST_MAP_BYTE] & 0x03,
+                    0,
+                    "rel6 VM bit must not be flushed pre-crash"
+                );
+            }
+        }
     }
 
     // Phase 2 in a fresh process (fresh shmem/TLS): the real recovery boot.
@@ -1189,6 +1317,17 @@ fn crash_recovery_replays_dml_to_precrash_state() {
     }
     let vm3 = std::fs::read(dd2.join("base/5").join(format!("{REL3_OID}_vm"))).unwrap();
     assert_eq!(vm3[VM_FIRST_MAP_BYTE], 0, "replay cleared the VM bit");
+
+    // The COPY FREEZE lane: the replayed heap page is byte-equal to the
+    // pre-crash buffered truth (PD_ALL_VISIBLE included), and the VM bits
+    // reached disk via the end-of-recovery checkpoint.
+    let replayed6 = std::fs::read(dd2.join("base/5").join(REL6_OID.to_string())).unwrap();
+    assert_eq!(replayed6, expected_page6.to_vec(), "COPY FREEZE heap page is byte-exact");
+    let vm6 = std::fs::read(dd2.join("base/5").join(format!("{REL6_OID}_vm"))).unwrap();
+    assert_eq!(
+        vm6[VM_FIRST_MAP_BYTE], 0x03,
+        "replay set the VM all-visible|all-frozen bits on disk"
+    );
 
     // The btree replay: every index block byte-equal to the pre-crash buffer
     // images (none of which had been flushed).
