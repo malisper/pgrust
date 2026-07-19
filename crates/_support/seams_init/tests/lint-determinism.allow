@@ -670,7 +670,6 @@ rawsync	crates/backend/storage/aio/aio_uring/src/lib.rs	1
 rawsync	crates/backend/storage/buffer/bufmgr/src/freelist.rs	1
 rawsync	crates/backend/storage/ipc/dsm_core/src/dsm_impl.rs	1
 rawsync	crates/backend/storage/ipc/dsm_registry/src/lib.rs	1
-rawsync	crates/backend/storage/ipc/latch/src/lib.rs	1
 rawsync	crates/backend/storage/ipc/pmsignal/src/lib.rs	1
 rawsync	crates/backend/storage/ipc/procarray/src/lib.rs	1
 rawsync	crates/backend/storage/ipc/procsignal/src/lib.rs	1
