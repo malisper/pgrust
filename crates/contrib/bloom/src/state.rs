@@ -179,15 +179,17 @@ pub fn bloom_init_metapage<'mcx>(
     index: &Relation<'mcx>,
     forknum: ForkNumber,
 ) -> PgResult<()> {
-    // First page => block 0. No extension lock needed (no concurrent inserters).
-    let meta_buffer = bufmgr::ReadBufferExtended(
+    // First page => block 0. No extension lock needed (no concurrent
+    // inserters). C uses ReadBufferExtended(P_NEW); the port's extend path is
+    // ExtendBufferedRel(EB_LOCK_FIRST), which returns the buffer locked.
+    let (meta_buffer, extended_by) = bufmgr_seams::extend_buffered_rel_by::call(
         index,
         forknum,
-        types_core::InvalidBlockNumber, // P_NEW
-        types_storage::storage::ReadBufferMode::Normal,
         None,
+        bufmgr_seams::EB_LOCK_FIRST,
+        1,
     )?;
-    LockBuffer(meta_buffer, BUFFER_LOCK_EXCLUSIVE)?;
+    debug_assert_eq!(extended_by, 1);
     debug_assert_eq!(bufmgr::BufferGetBlockNumber(meta_buffer), BLOOM_METAPAGE_BLKNO);
 
     let opts = index_options_or_default(index);
