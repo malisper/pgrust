@@ -294,11 +294,12 @@ seam_core::seam!(
     // show_foreignscan_info (explain.c): drive the ForeignScan node's
     // provider ExplainForeignScan; properties cross as (label, value) pairs
     // (types_nodes::FdwExplainProp — C passes ExplainState, which would
-    // cycle the crate graph).
+    // cycle the crate graph; FdwExplainFlags marshals the ExplainState bits
+    // the hooks read: es->costs, es->verbose).
     pub fn query_desc_foreign_explain<'e>(
         query_desc: QueryDescHandle,
         plan_node_id: i32,
-        costs: bool,
+        flags: types_nodes::FdwExplainFlags,
         emit: &'e mut dyn FnMut(&str, types_nodes::FdwExplainProp<'_>) -> PgResult<()>,
     ) -> PgResult<()>
 );

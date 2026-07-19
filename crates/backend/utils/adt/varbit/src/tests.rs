@@ -234,3 +234,50 @@ fn recv_roundtrip() {
     let e = bits_recv(mcx, &mut buf, 4, false).unwrap_err();
     assert!(format!("{e:?}").contains("too long for type bit varying(4)"));
 }
+
+// fnconf campaign-2, OID 1685 bit(varbit,int4,bool): the base-binary replay
+// abort was attributed to "a 752 MB bit-string length allocation" (harness
+// int4 draw 752915532 at call 73). Static audit + live byte-compare vs C 18.3
+// found no bounds gap: C varbit.c bit() returns the arg unchanged when
+// (len <= 0 || len > VARBITMAXLEN || len == VARBITLEN(arg)), bit_coerce
+// carries the same guard, and the huge text-out class fails C-identically at
+// the MaxAllocSize gate (both engines: "invalid memory alloc request size
+// 2109372046" for draw 2109372045; draw 752915532 succeeds on both). These
+// pins freeze the adversarial-length behavior deterministically.
+#[test]
+fn bit_coerce_c_bounds_guards() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let a = img(mcx, "b101");
+    // len <= 0: source returned unchanged (no error, no allocation).
+    assert!(bit_coerce(mcx, &a[4..], 0, true).unwrap().is_none());
+    assert!(bit_coerce(mcx, &a[4..], -1, true).unwrap().is_none());
+    assert!(bit_coerce(mcx, &a[4..], i32::MIN, true).unwrap().is_none());
+    // len > VARBITMAXLEN (INT_MAX-7): unchanged — i32::MAX must NOT allocate.
+    assert!(bit_coerce(mcx, &a[4..], i32::MAX, true).unwrap().is_none());
+    assert!(bit_coerce(mcx, &a[4..], (VARBITMAXLEN + 1) as i32, true).unwrap().is_none());
+    // len == VARBITLEN(arg): unchanged.
+    assert!(bit_coerce(mcx, &a[4..], 3, true).unwrap().is_none());
+    // in-range explicit cast still widens with zero padding.
+    let some = bit_coerce(mcx, &a[4..], 11, true).unwrap().unwrap();
+    assert_eq!(s(mcx, &some[4..]), "10100000000");
+    // implicit cast at a mismatched length errors like C.
+    let e = bit_coerce(mcx, &a[4..], 11, false).unwrap_err();
+    assert!(format!("{e:?}").contains("bit string length 3 does not match type bit(11)"));
+}
+
+#[test]
+fn bits_out_huge_length_clean_error_like_c() {
+    // Payload header claiming the >MaxAllocSize harness class (draw
+    // 2109372045): text-out must fail at the alloc gate BEFORE touching the
+    // (absent) body — C 18.3 bit_out pallocs len+1 and errors
+    // "invalid memory alloc request size 2109372046" (verified live on both
+    // engines, byte-identical). Clean PgError; no panic, no abort.
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut payload = alloc::vec::Vec::new();
+    payload.extend_from_slice(&2109372045i32.to_ne_bytes());
+    payload.extend_from_slice(&[0u8; 4]);
+    let e = bits_out(mcx, &payload).unwrap_err();
+    assert!(format!("{e:?}").contains("invalid memory alloc request size 2109372046"));
+}

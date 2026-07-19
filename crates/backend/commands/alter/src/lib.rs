@@ -30,6 +30,7 @@ use pg_publication::{Anum_pg_publication_puballtables, PublicationRelationId};
 use pg_subscription::{Anum_pg_subscription_subpasswordrequired, SubscriptionRelationId};
 
 const CollationRelationId: Oid = 3456;
+const OperatorRelationId: Oid = 2617;
 const ConversionRelationId: Oid = 2607;
 const ProcedureRelationId: Oid = 1255;
 const OperatorClassRelationId: Oid = 2616;
@@ -50,6 +51,7 @@ const Anum_pg_opfamily_opfmethod: i32 = 2;
 
 pub fn init_seams() {
     pg_shdepend::alter_object_owner_internal::set(AlterObjectOwner_internal);
+    alter_seams::alter_object_namespace_oid::set(AlterObjectNamespace_oid);
 }
 
 fn eq_key(attno: AttrNumber, arg: Datum) -> ScanKeyData {
@@ -482,6 +484,58 @@ pub fn AlterObjectNamespace_internal<'mcx>(
     }
 
     Ok(old_nsp_oid)
+}
+
+// AlterObjectNamespace_oid (alter.c): change the schema of ONE object of
+// any class, as part of a bulk move (only ALTER EXTENSION SET SCHEMA reaches
+// this today). Returns the object's old namespace OID, or InvalidOid for
+// object types that do not have schema-qualified names ("ignore object
+// types that don't have schema-qualified names" — C's default arm).
+pub fn AlterObjectNamespace_oid<'mcx>(
+    mcx: Mcx<'mcx>,
+    class_id: Oid,
+    objid: Oid,
+    nsp_oid: Oid,
+    objs_moved: &mut PgVec<'mcx, ObjectAddress>,
+) -> PgResult<Oid> {
+    const RELATION_RELATION_ID: Oid = 1259;
+    const TYPE_RELATION_ID: Oid = 1247;
+    match class_id {
+        RELATION_RELATION_ID => {
+            let rel = relation_seams::relation_open::call(mcx, objid, AccessExclusiveLock)?;
+            let old_nsp_oid = rel.rd_rel.relnamespace;
+            tablecmds::AlterTableNamespaceInternal(
+                mcx,
+                &rel,
+                old_nsp_oid,
+                nsp_oid,
+                objs_moved,
+            )?;
+            rel.close(types_rel::lock::NoLock)?;
+            Ok(old_nsp_oid)
+        }
+        TYPE_RELATION_ID => {
+            typecmds::AlterTypeNamespace_oid(mcx, objid, nsp_oid, true, objs_moved)
+        }
+        ProcedureRelationId
+        | CollationRelationId
+        | ConversionRelationId
+        | OperatorRelationId
+        | OperatorClassRelationId
+        | OperatorFamilyRelationId
+        | StatisticExtRelationId
+        | TSParserRelationId
+        | TSDictionaryRelationId
+        | TSTemplateRelationId
+        | TSConfigRelationId => {
+            let catalog_rel = table::table_open(mcx, class_id, RowExclusiveLock)?;
+            let old_nsp_oid = AlterObjectNamespace_internal(mcx, &catalog_rel, objid, nsp_oid)?;
+            catalog_rel.close(RowExclusiveLock)?;
+            Ok(old_nsp_oid)
+        }
+        // C: Assert(get_object_attnum_namespace(classId) == InvalidAttrNumber).
+        _ => Ok(InvalidOid),
+    }
 }
 
 // ExecAlterObjectSchemaStmt (alter.c), generic catalog arm.

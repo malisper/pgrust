@@ -3492,12 +3492,12 @@ pub fn planstate_foreign_explain<'mcx>(
     node: &mut PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
     plan_node_id: i32,
-    costs: bool,
+    flags: ::types_nodes::FdwExplainFlags,
     emit: &mut dyn FnMut(&str, ::types_nodes::FdwExplainProp<'_>) -> PgResult<()>,
 ) -> Option<PgResult<()>> {
     macro_rules! walk {
         ($($child:expr),+) => {{
-            $(if let Some(x) = planstate_foreign_explain($child, estate, plan_node_id, costs, emit) {
+            $(if let Some(x) = planstate_foreign_explain($child, estate, plan_node_id, flags, emit) {
                 return Some(x);
             })+
             None
@@ -3505,9 +3505,9 @@ pub fn planstate_foreign_explain<'mcx>(
     }
     match node {
         PlanStateNode::ForeignScan(fs) => (fs.plan.scan.plan.plan_node_id == plan_node_id)
-            .then(|| ::nodeforeignscan::explain_foreign_scan(fs, estate, costs, emit)),
+            .then(|| ::nodeforeignscan::explain_foreign_scan(fs, estate, flags, emit)),
         PlanStateNode::Instrumented(w) => {
-            planstate_foreign_explain(&mut w.inner, estate, plan_node_id, costs, emit)
+            planstate_foreign_explain(&mut w.inner, estate, plan_node_id, flags, emit)
         }
         PlanStateNode::Agg(aps) => walk!(&mut aps.outer),
         PlanStateNode::ProjectSet(ps) => walk!(&mut ps.outer),
@@ -3528,7 +3528,7 @@ pub fn planstate_foreign_explain<'mcx>(
         PlanStateNode::BitmapHeapScan(b) => walk!(&mut b.bitmapqual),
         PlanStateNode::BitmapAnd(bc) | PlanStateNode::BitmapOr(bc) => {
             for sub in bc.substates.iter_mut() {
-                if let Some(x) = planstate_foreign_explain(sub, estate, plan_node_id, costs, emit) {
+                if let Some(x) = planstate_foreign_explain(sub, estate, plan_node_id, flags, emit) {
                     return Some(x);
                 }
             }
@@ -3536,7 +3536,7 @@ pub fn planstate_foreign_explain<'mcx>(
         }
         PlanStateNode::Append(a) => {
             for sub in a.substates.iter_mut() {
-                if let Some(x) = planstate_foreign_explain(sub, estate, plan_node_id, costs, emit) {
+                if let Some(x) = planstate_foreign_explain(sub, estate, plan_node_id, flags, emit) {
                     return Some(x);
                 }
             }
@@ -3544,7 +3544,7 @@ pub fn planstate_foreign_explain<'mcx>(
         }
         PlanStateNode::MergeAppend(m) => {
             for sub in m.substates.iter_mut() {
-                if let Some(x) = planstate_foreign_explain(sub, estate, plan_node_id, costs, emit) {
+                if let Some(x) = planstate_foreign_explain(sub, estate, plan_node_id, flags, emit) {
                     return Some(x);
                 }
             }

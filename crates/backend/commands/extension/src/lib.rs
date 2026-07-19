@@ -23,7 +23,7 @@ pub mod funcs;
 pub mod graph;
 pub mod script;
 
-pub use alter::ExecAlterExtensionStmt;
+pub use alter::{AlterExtensionNamespace, ExecAlterExtensionStmt};
 pub use contents::ExecAlterExtensionContentsStmt;
 pub use control::{extension_file_exists, read_extension_control_file, ExtensionControlFile};
 pub use create::{CreateExtension, InsertExtensionTuple, RemoveExtensionById};
