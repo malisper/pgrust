@@ -11280,6 +11280,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_logicalinspect"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "dfmgr",
+ "funcapi",
+ "heaptuple",
+ "mcx",
+ "snapbuild",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_tuple",
+ "varlena",
+]
+
+[[package]]
 name = "pg_md5"
 version = "0.1.0"
 
@@ -11334,6 +11351,10 @@ dependencies = [
  "types_tuple",
  "xact",
 ]
+
+[[package]]
+name = "pg_overexplain"
+version = "0.0.0"
 
 [[package]]
 name = "pg_parameter_acl"
@@ -11725,6 +11746,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_visibility"
+version = "0.0.0"
+dependencies = [
+ "bufmgr",
+ "bufmgr_seams",
+ "datum",
+ "dfmgr",
+ "funcapi",
+ "heapam",
+ "heapam_visibility",
+ "heaptuple",
+ "init_small",
+ "lmgr_proc",
+ "lwlock",
+ "mcx",
+ "pg_class_seams",
+ "postgres_seams",
+ "procarray",
+ "relation",
+ "smgr",
+ "storage_xlog",
+ "transam_xlog",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_rel",
+ "types_snapshot",
+ "types_storage",
+ "types_tuple",
+ "varsup",
+ "visibilitymap",
+ "xloginsert_seams",
+]
+
+[[package]]
 name = "pg_walinspect"
 version = "0.0.0"
 dependencies = [
@@ -11888,6 +11944,42 @@ dependencies = [
  "vfs",
  "xact_seams",
  "zstd",
+]
+
+[[package]]
+name = "pgrowlocks"
+version = "0.0.0"
+dependencies = [
+ "aclchk",
+ "adt_acl",
+ "bufmgr",
+ "datum",
+ "dfmgr",
+ "funcapi",
+ "heapam",
+ "heapam_visibility",
+ "mbutils_seams",
+ "mcx",
+ "miscinit",
+ "multixact",
+ "procarray",
+ "rel_vocab",
+ "relation",
+ "snapmgr",
+ "tableam",
+ "tableam_vocab",
+ "tablecmds",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_storage",
+ "types_tuple",
+ "varlena",
+ "wchar",
+ "xact",
 ]
 
 [[package]]
@@ -14868,6 +14960,7 @@ dependencies = [
  "pg_enum",
  "pg_inherits",
  "pg_locale",
+ "pg_logicalinspect",
  "pg_prewarm",
  "pg_prng",
  "pg_proc",
@@ -14878,10 +14971,12 @@ dependencies = [
  "pg_subscription",
  "pg_trgm",
  "pg_upgrade_support",
+ "pg_visibility",
  "pg_walinspect",
  "pgarch",
  "pgcrypto",
  "pgoutput",
+ "pgrowlocks",
  "pgstat",
  "pgtz",
  "pgvector",

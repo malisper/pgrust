@@ -303,6 +303,9 @@ pg_trgm = { path = "../../contrib/pg_trgm" }
 btree_gist = { path = "../../contrib/btree_gist" }
 unaccent = { path = "../../contrib/unaccent" }
 pg_walinspect = { path = "../../contrib/pg_walinspect" }
+pg_visibility = { path = "../../contrib/pg_visibility" }
+pgrowlocks = { path = "../../contrib/pgrowlocks" }
+pg_logicalinspect = { path = "../../contrib/pg_logicalinspect" }
 adt_formatting = { path = "../../backend/utils/adt/formatting" }
 session = { path = "../../backend/access/session" }
 relpath = { path = "../../common/relpath" }

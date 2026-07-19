@@ -567,6 +567,29 @@ pub fn BackendPidGetProc(pid: i32) -> Option<&'static PGPROC> {
     result
 }
 
+// BackendXidGetPid (procarray.c): the pid of the backend whose current xid
+// is `xid`, or 0 if none. Used by pgrowlocks to name a tuple's locker.
+pub fn BackendXidGetPid(xid: TransactionId) -> i32 {
+    if !TransactionIdIsValid(xid) {
+        return 0; // never match invalid xid
+    }
+    let arrayP = procArray();
+    let hdr = ProcGlobal();
+    let myprocno = MyProc().expect("BackendXidGetPid requires MyProc");
+
+    LWLockAcquire(ProcArrayLock(), LW_SHARED, myprocno).expect("ProcArrayLock");
+    let mut result = 0;
+    for index in 0..arrayP.numProcs.get() as usize {
+        if hdr.xids[index].read() == xid {
+            let proc = &hdr.allProcs[arrayP.pgprocnos[index].get() as usize];
+            result = proc.pid.load(Relaxed);
+            break;
+        }
+    }
+    LWLockRelease(ProcArrayLock()).expect("ProcArrayLock release");
+    result
+}
+
 pub fn ProcArrayEndTransaction(procno: ProcNumber, latestXid: TransactionId) -> PgResult<()> {
     let proc = GetPGProcByNumber(procno);
 
