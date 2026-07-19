@@ -3762,6 +3762,91 @@ mod caller_c2_tests {
         assert!(local.drive.granules >= 16, "all granules ran through the caller");
         assert_eq!(caller.lane_ordinal(), ordinal, "lane identity stable across the drive");
     }
+
+    // -----------------------------------------------------------------------
+    // CALLER-C2 LEDGER HANG regression arms (the global-knob configuration
+    // as standing tests). Pre-fix, running these shapes with the WS-B
+    // ledger ON hung: the sole granted worker's STARVED leave tripped the
+    // ledger's joinable-again wake hint every step (granted == target == 1
+    // — leave() sees before == t), the wake_all bumped the park epoch, the
+    // C2 epoch pre-check (`rt.park_epoch() == epoch`) skipped the bounded
+    // idle park forever, and the drive busy-spun: starve → leave-hint →
+    // wake_all → epoch moved → re-step → starve → …  The park closure —
+    // the producer in the pumps shape, the error source in the abort
+    // shape — never ran, so the whole runtime suite under global
+    // PGRUST_RUNTIME_LEDGER_V2=1 wedged in run_task_admitted. The fix
+    // gates the leave hint's wake on the task NOT ending Starved (nothing
+    // was claimable — the producer's publish carries its own wake).
+    // These arms force the knob ON per instance so the coverage holds in
+    // BOTH suite postures, mirroring ledger_off_is_inert's forced-off arm.
+    // -----------------------------------------------------------------------
+
+    /// Ledger-ON arm of `caller_parked_drive_pumps_idle_park_and_completes`:
+    /// the bounded idle park must RUN (parks >= 1) — pre-fix it never did.
+    #[test]
+    fn caller_parked_drive_pumps_idle_park_ledger_on() {
+        let rt = rt4();
+        rt.set_ledger(true);
+        let work = SyntheticWork::new(8, None, 0);
+        let source = Arc::new(StreamSource::new());
+        let (h, waiter) =
+            rt.submit_pinned(spec_one(&work, Arc::clone(&source) as Arc<dyn MorselSource>));
+        let mut caller = CallerWorker::enter(&rt).expect("lane available");
+        let mut parks = 0u64;
+        let outcome = caller
+            .drive_with_duties_parked(
+                &rt,
+                &h,
+                &mut || Ok(()),
+                &mut || true,
+                &mut || {
+                    parks += 1;
+                    source.publish(8);
+                    source.close();
+                    rt.notify_source_progress();
+                    Ok(())
+                },
+            )
+            .expect("duty and park never fail");
+        assert_eq!(outcome, RgOutcome::Completed);
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Completed));
+        assert!(parks >= 1, "the bounded idle park must run under ledger ON");
+        work.assert_all_executed_once();
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0, "entry retired at completion");
+        assert_eq!(snap.granted_total, 0, "every grant returned");
+    }
+
+    /// Ledger-ON arm of `caller_parked_drive_park_error_aborts_and_drains`
+    /// — the exact configuration the global-knob suite run wedged in:
+    /// the park error must be RAISED (pre-fix the park never ran, so the
+    /// abort never happened and the drive spun forever), then the drain
+    /// completes through the ordinary protocol with drained accounting.
+    #[test]
+    fn caller_parked_drive_park_error_aborts_and_drains_ledger_on() {
+        let rt = rt4();
+        rt.set_ledger(true);
+        let work = SyntheticWork::new(8, None, 0);
+        let source = Arc::new(StreamSource::new());
+        let (h, waiter) =
+            rt.submit_pinned(spec_one(&work, Arc::clone(&source) as Arc<dyn MorselSource>));
+        let mut caller = CallerWorker::enter(&rt).expect("lane available");
+        let err = caller
+            .drive_with_duties_parked(
+                &rt,
+                &h,
+                &mut || Ok(()),
+                &mut || true,
+                &mut || Err(PgError::new(ERROR, "latch cancel").into()),
+            )
+            .expect_err("failing park must surface");
+        assert_eq!(err.message(), "latch cancel");
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Aborted), "drained before returning");
+        assert_eq!(work.finalizes.load(Ordering::SeqCst), 0, "aborted RGs skip finalize");
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0);
+        assert_eq!(snap.granted_total, 0);
+    }
 }
 
 // ---------------------------------------------------------------------------

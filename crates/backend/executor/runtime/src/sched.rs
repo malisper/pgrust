@@ -1363,7 +1363,27 @@ impl Scheduler {
         if ledger_on {
             // WORKER-FREED RE-PICK: this worker re-picks on its own; the
             // hint covers PARKED peers when the slot turned joinable again.
-            if self.ledger.leave(ts.slot) > 0 {
+            //
+            // STARVED ends never wake (CALLER-C2 LEDGER HANG fix): a
+            // Starved end means this worker's own claim just proved
+            // nothing is claimable — a joinable-again wake re-offers
+            // peers a slot they can only starve on, and the wake bumps
+            // the park epoch, so every park (the pool eventcount AND the
+            // caller-C2 bounded idle park's epoch pre-check) returns
+            // immediately. With granted == target (any sole-worker slot:
+            // cores=1, or the pinned caller-C2 drive) that is a
+            // SELF-WAKE busy-loop: starve → leave-hint → wake_all →
+            // epoch moved → re-step → starve → …, the idle park never
+            // entered, 100% CPU until a publish arrives (never, if the
+            // producer IS the parked duty — the observed suite hang
+            // under global PGRUST_RUNTIME_LEDGER_V2=1). Claimable work
+            // is never stranded by the gate: a publish that lands
+            // mid-task bumps the epoch itself (notify_source_progress →
+            // wake_all), this worker's own pre-captured park epoch has
+            // therefore moved, and it re-picks the slot; parked peers
+            // ride that publish wake or the bounded re-nudge. The leave
+            // ACCOUNTING stays unconditional — only the wake is gated.
+            if self.ledger.leave(ts.slot) > 0 && !matches!(end, TaskEnd::Starved) {
                 self.park.wake_all();
             }
         }
