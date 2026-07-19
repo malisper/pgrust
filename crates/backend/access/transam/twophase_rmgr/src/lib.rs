@@ -14,17 +14,12 @@ pub const TWOPHASE_RM_MAX_ID: u8 = TWOPHASE_RM_PREDICATELOCK_ID;
 
 pub const NUM_TWOPHASE_RM: usize = TWOPHASE_RM_MAX_ID as usize + 1;
 
-// Stub SSI never writes PREDICATELOCK records; a recovered one is a loud gap.
-fn predicatelock_twophase_recover(_xid: TransactionId, _info: u16, _recdata: &[u8]) -> PgResult<()> {
-    panic!("predicatelock_twophase_recover: SSI 2PC recovery unported (predicate.c)");
-}
-
 pub static twophase_recover_callbacks: [Option<TwoPhaseCallback>; NUM_TWOPHASE_RM] = [
     None,
     Some(lock::lock_twophase_recover),
     None,
     Some(multixact::multixact_twophase_recover),
-    Some(predicatelock_twophase_recover),
+    Some(predicate::predicatelock_twophase_recover),
 ];
 
 pub static twophase_postcommit_callbacks: [Option<TwoPhaseCallback>; NUM_TWOPHASE_RM] = [
