@@ -742,6 +742,18 @@ static TOPKFIN_DEMOTED: AtomicU64 = AtomicU64::new(0);
 /// any output escaped).
 static REFSORT_OWNED: AtomicU64 = AtomicU64::new(0);
 static REFSORT_DEMOTED: AtomicU64 = AtomicU64::new(0);
+/// SE-HASHOFF census counters (informational `counter` dump lines; lane
+/// deletion-prep arms #6/#7, notes/se-hashoff-letters.md): one tick per
+/// `HashBuildInput::multi_exec` call (a hash-build event, rescans included)
+/// classified at the fused-arm chokepoint in procnode.rs.
+/// `ENGAGED_*` = the fused page-batch drive ran (bare / projected build
+/// source); `PERTUPLE_SEQ` = a SeqScan build child fell to the per-tuple
+/// feed (arm knob off or `hash_build_fusible`/batch-support refused);
+/// `PERTUPLE_OTHER` = non-SeqScan build child (never arm surface).
+static FUSED_HASH_BUILD_ENGAGED_BARE: AtomicU64 = AtomicU64::new(0);
+static FUSED_HASH_BUILD_ENGAGED_PROJ: AtomicU64 = AtomicU64::new(0);
+static FUSED_HASH_BUILD_PERTUPLE_SEQ: AtomicU64 = AtomicU64::new(0);
+static FUSED_HASH_BUILD_PERTUPLE_OTHER: AtomicU64 = AtomicU64::new(0);
 #[allow(clippy::declare_interior_mutable_const)]
 static REFUSED: [[AtomicU64; N_REASONS]; N_CLASSES] =
     [const { [const { AtomicU64::new(0) }; N_REASONS] }; N_CLASSES];
@@ -899,6 +911,35 @@ pub(super) fn tick_refsort_demoted() {
         return;
     }
     REFSORT_DEMOTED.fetch_add(1, Relaxed);
+    arm_dump_on_thread_exit();
+}
+
+/// SE-HASHOFF census tick (deletion-prep arms #6/#7): one hash-build event
+/// classified at the fused-arm chokepoint. `engaged` = the fused page-batch
+/// drive runs this build; `proj` = projected build source (arm
+/// HASH_BUILD_PROJ) vs bare (arm HASH_BUILD). `engaged=false` = a SeqScan
+/// build child taking the per-tuple feed.
+#[inline]
+pub(super) fn tick_fused_hash_build_seq(engaged: bool, proj: bool) {
+    if stats_dir().is_none() {
+        return;
+    }
+    match (engaged, proj) {
+        (true, false) => FUSED_HASH_BUILD_ENGAGED_BARE.fetch_add(1, Relaxed),
+        (true, true) => FUSED_HASH_BUILD_ENGAGED_PROJ.fetch_add(1, Relaxed),
+        (false, _) => FUSED_HASH_BUILD_PERTUPLE_SEQ.fetch_add(1, Relaxed),
+    };
+    arm_dump_on_thread_exit();
+}
+
+/// SE-HASHOFF census tick: a hash-build event over a non-SeqScan build
+/// child (outside both fused hash-build arms' surface by construction).
+#[inline]
+pub(super) fn tick_fused_hash_build_other() {
+    if stats_dir().is_none() {
+        return;
+    }
+    FUSED_HASH_BUILD_PERTUPLE_OTHER.fetch_add(1, Relaxed);
     arm_dump_on_thread_exit();
 }
 
@@ -1083,6 +1124,23 @@ fn dump() {
     out.push_str(&format!(
         "counter\trefsort-demoted\t{}\n",
         REFSORT_DEMOTED.load(Relaxed)
+    ));
+    // SE-HASHOFF census rows (deletion-prep arms #6/#7).
+    out.push_str(&format!(
+        "counter\tfused-hash-build-engaged-bare\t{}\n",
+        FUSED_HASH_BUILD_ENGAGED_BARE.load(Relaxed)
+    ));
+    out.push_str(&format!(
+        "counter\tfused-hash-build-engaged-proj\t{}\n",
+        FUSED_HASH_BUILD_ENGAGED_PROJ.load(Relaxed)
+    ));
+    out.push_str(&format!(
+        "counter\tfused-hash-build-pertuple-seq\t{}\n",
+        FUSED_HASH_BUILD_PERTUPLE_SEQ.load(Relaxed)
+    ));
+    out.push_str(&format!(
+        "counter\tfused-hash-build-pertuple-other\t{}\n",
+        FUSED_HASH_BUILD_PERTUPLE_OTHER.load(Relaxed)
     ));
     // --- WS-CB wave-10 (cursors inc-2 §6 staging; worklog EX-CB-2): the
     // run-seam backward-drive evidence counter — the post-flip deletion

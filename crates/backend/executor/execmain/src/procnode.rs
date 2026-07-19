@@ -1919,11 +1919,21 @@ fn agg_arm<'mcx>(
                 // --- end WS-AE (wave-8) ---
             }
             // P2 gate (flip-ladder §5 arm #2): PGRUST_FUSED_ARM_AGG_INDEX.
+            // AGGIDX-PAR refuse-parity leg: `iss_OrderBy.is_none()` is
+            // PROVABLY DEAD given the btree leg below — the planner builds
+            // order-by-op (KNN) pathkeys only behind `amcanorderbyop`
+            // (indxpath.rs), which plancat.rs grants to gist/spgist/hnsw
+            // and NEVER btree — but it makes the deletion-prep caller
+            // re-trace textual: the tidrun drive ignores the reorder queue,
+            // so an OrderBy shape must land on per-tuple
+            // (`index_next_with_reorder`), the same NAMED route the lane
+            // feed's OrderByReorder refusal takes.
             if fused_arm_enabled(FusedArm::AggIndex)
                 && agg_fusible_common(agg, estate)
                 && is.ss.qual.is_none()
                 && is.ss.ps_ProjInfo.is_none()
                 && is.iss_Runtime.is_none()
+                && is.iss_OrderBy.is_none()
                 && ::types_scan::sdir::ScanDirectionIsForward(is.iss_OrderDir)
                 && is
                     .iss_RelationDesc
@@ -1989,6 +1999,20 @@ fn agg_arm<'mcx>(
                 {
                     return Ok(r);
                 }
+                // --- SE-AGGBITMAP: AGG_BITMAP arm re-host (deletion-prep
+                // arm #4). The fused drive below, hosted at the lane
+                // chokepoint — behind PGRUST_LANE_V2_AGG_BITMAP (default
+                // OFF; knob-OFF cost = one cached-bool test). Serial AND
+                // parallel-aware (the shared-iterator setup runs below the
+                // seam). Refuses fall through to the UNCHANGED
+                // fused/per-tuple paths, byte-identically (the WS-AE
+                // agg-over-IndexScan hook's posture, two arms up).
+                if let Some(r) =
+                    crate::lanev2::try_own_agg_over_bitmap_feed(agg, b, estate)?
+                {
+                    return Ok(r);
+                }
+                // --- end SE-AGGBITMAP ---
             }
             // P2 gate (flip-ladder §5 arm #4): PGRUST_FUSED_ARM_AGG_BITMAP.
             if fused_arm_enabled(FusedArm::AggBitmap)
@@ -4065,10 +4089,15 @@ impl<'mcx> ::nodehash::HashBuildInput<'mcx> for PlanStateNode<'mcx> {
                 Some(_) => fused_arm_enabled(FusedArm::HashBuildProj),
                 None => fused_arm_enabled(FusedArm::HashBuild),
             };
-            if arm_on
+            let engaged = arm_on
                 && hash_build_fusible(ss, estate)
-                && ::nodeseqscan::seq_scan_batch_supported(ss, estate)?
-            {
+                && ::nodeseqscan::seq_scan_batch_supported(ss, estate)?;
+            // SE-HASHOFF census tick (stats-armed runs only): classify this
+            // build event at the arm chokepoint before any drive-side
+            // effect. Accounting only — the engage decision above is
+            // untouched.
+            crate::lanev2::fused_hash_build_census_seq(engaged, proj_slot.is_some());
+            if engaged {
                 ::nodeseqscan::seq_scan_batch_soa_prepare(
                     ss,
                     estate,
@@ -4089,6 +4118,10 @@ impl<'mcx> ::nodehash::HashBuildInput<'mcx> for PlanStateNode<'mcx> {
                     }
                 }
             }
+        } else {
+            // SE-HASHOFF census: non-SeqScan build child — outside both
+            // fused hash-build arms' surface by construction.
+            crate::lanev2::fused_hash_build_census_other();
         }
         ::nodehash::multi_exec_hash(hs, self, estate)
     }

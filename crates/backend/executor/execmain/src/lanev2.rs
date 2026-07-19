@@ -1429,6 +1429,23 @@ fn index_scan_refuse_reason<'mcx>(
     is: &::nodeindexscan::IndexScanState<'mcx>,
     estate: &EStateData<'mcx>,
 ) -> Option<RefuseReason> {
+    index_scan_refuse_reason_ex(is, estate, false)
+}
+
+/// `allow_parallel`: the AGGIDX-PAR agg-over-index feed admits parallel-aware
+/// scans (each worker's feed drives the SAME `index_scan_next_tidrun`
+/// primitive over the shared parallel scan descriptor the DSM initializers
+/// opened — page claims coordinate inside the AM, exactly the fused arm #2
+/// drive, which never had a parallel check). Every OTHER gate applies
+/// identically (the `seq_scan_refuse_reason_ex` rule: a widening flag may
+/// never skip any row but its own). The tidrun pull path and the sorted-agg
+/// hook keep `allow_parallel = false` — their drives were never priced under
+/// workers.
+fn index_scan_refuse_reason_ex<'mcx>(
+    is: &::nodeindexscan::IndexScanState<'mcx>,
+    estate: &EStateData<'mcx>,
+    allow_parallel: bool,
+) -> Option<RefuseReason> {
     if estate.es_epq_active {
         return Some(RefuseReason::Epq);
     }
@@ -1438,7 +1455,7 @@ fn index_scan_refuse_reason<'mcx>(
     if !is.batch_allowed() {
         return Some(RefuseReason::ScrollMark);
     }
-    if is.iss_ParallelAware {
+    if is.iss_ParallelAware && !allow_parallel {
         return Some(RefuseReason::ParallelGate);
     }
     if is.ss.instr_idx.is_some() {
@@ -2023,6 +2040,15 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
     if ::nodeagg::agg_plain_fold_admissible(agg)
         || (::nodeagg::agg_plain_perrow_admissible(agg)
             && ::nodeseqscan::seq_scan_is_pgrcolumnar(ss))
+        // SE-AGGPOLY (band 101001, knob-gated default OFF): heap plain
+        // shapes with NO fold plan but a poly export manifest (numeric
+        // states) must reach the plain walk so the RUNTIME scan arm can
+        // offer (the serial heap decide still Refuses them — the fused
+        // incumbent keeps the serial drive byte-identically; only the
+        // runtime engagement path is new).
+        || (agg_poly_enabled()
+            && ::nodeagg::agg_plain_perrow_admissible(agg)
+            && ::nodeagg::runtime_partial::agg_poly_partial_admissible(agg))
     {
         return try_own_plain_agg_over_seq_scan(agg, ss, choice, estate);
     }
@@ -8880,6 +8906,26 @@ fn distincthash_textbatch_enabled() -> bool {
     })
 }
 
+/// `PGRUST_LANE_V2_AGG_POLY` (SE-AGGPOLY, band 101001; DEFAULT OFF): admit
+/// the poly export manifest — plain-agg shapes whose transitions the fold
+/// plan does not fully cover but whose remainder is exactly the
+/// sum/avg(numeric) NumericAggState family — to the runtime scan arm's
+/// per-row drive (DriveMode::PerRowPoly: the real checked transition
+/// program per row; numeric end states relocated as self-contained exact
+/// digit snapshots for the cross-worker export/combine/absorb). The m5
+/// suppression probe keys the matching plan shapes under the SAME env
+/// spelling (knob coherence — a keyed-but-disarmed shape would land on
+/// serial). Off = today's refusals, byte-identical.
+pub(crate) fn agg_poly_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("PGRUST_LANE_V2_AGG_POLY").as_deref(),
+            Ok("1") | Ok("on")
+        )
+    })
+}
+
 /// `PGRUST_LANE_V2_DISTINCTHASH_FORCE=1`: skip the planner-estimate
 /// economics (e2e harness lever — small tables would otherwise refuse and
 /// never exercise the arm; the runtime degrade still bounds memory).
@@ -14875,6 +14921,20 @@ pub use push::cursor_store_fill_set_for_tests;
 pub(crate) use push::{
     cursor_store_batch_fill, run_seam_backward_evidence, run_seam_backward_evidence_count,
 };
+
+// SE-HASHOFF census face (deletion-prep arms #6/#7; notes/
+// se-hashoff-letters.md): procnode's fused hash-build chokepoint ticks the
+// stats-armed census counters through these crate-visible wrappers — dump
+// rows `fused-hash-build-*` in the PGRUST_LANE_V2_STATS TSV. Measurement
+// accounting only; no admission decision reads them.
+#[inline]
+pub(crate) fn fused_hash_build_census_seq(engaged: bool, proj: bool) {
+    stats::tick_fused_hash_build_seq(engaged, proj);
+}
+#[inline]
+pub(crate) fn fused_hash_build_census_other() {
+    stats::tick_fused_hash_build_other();
+}
 #[cfg(test)]
 pub(crate) use push::{cursor_fill_step_seqscan_for_tests, cursor_store_ever_armed};
 // --- end WS-CB wave-10 ------------------------------------------------------------
@@ -14978,3 +15038,15 @@ pub(crate) use lane_mergejoin::{
     MJ_NATIVE_REFUSED_FOR_TESTS, MJ_NATIVE_RESTORES_FOR_TESTS,
 };
 // --- end WS-MJ (LANE-MERGEJOIN inc-1) -------------------------------------------
+// --- SE-AGGBITMAP (deletion-prep arm #4 re-host): the lane batch feed for
+// aggregation over BitmapHeapScan, behind PGRUST_LANE_V2_AGG_BITMAP
+// (default OFF). Feed logic + refuse-set are agg_bitmap.rs-local; this EOF
+// append is the module mount + re-export only and touches no existing code
+// line (the WS-AE wave-8 EOF-append precedent). Mounted here because the
+// vocabulary it reuses (ShapeClass/RefuseReason, lane_trace, the engine
+// mirror) is lanev2-private.
+mod agg_bitmap;
+pub(crate) use agg_bitmap::try_own_agg_over_bitmap_feed;
+#[cfg(test)]
+pub(crate) use agg_bitmap::{agg_bitmap_set_for_tests, AGG_BITMAP_OWNED_FOR_TESTS};
+// --- end SE-AGGBITMAP -----------------------------------------------------------

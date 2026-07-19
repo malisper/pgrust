@@ -63,8 +63,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use ::executils::{EStateData, ExecSlotId};
 use ::nodeagg::runtime_partial::{
+    agg_poly_export_partial_into, agg_poly_partial_admissible, agg_poly_runtime_combine,
     agg_runtime_combine, agg_runtime_export_partial_into, agg_runtime_partial_admissible,
-    exec_agg_runtime_partials, RuntimePartial,
+    exec_agg_poly_runtime_partials, exec_agg_runtime_partials, RuntimePartial,
 };
 use ::types_error::{PgError, PgResult, ERROR};
 use ::types_nodes::node_tree::Node;
@@ -230,6 +231,29 @@ enum DriveMode {
     /// UNCHANGED serial fetch+recheck+qual+projection path over a claimed
     /// window of the frozen shared bitmap (runtime_bitmap::drain_claim).
     BitmapPerRow,
+    /// SE-AGGPOLY (band 101001, PGRUST_LANE_V2_AGG_POLY default OFF): heap
+    /// plain-agg shapes whose transitions the fold plan does NOT fully
+    /// cover but whose remainder is exactly the sum/avg(numeric)
+    /// NumericAggState family (the poly export manifest,
+    /// `nodeagg::agg_poly_manifest`). The DRIVE is PerRowFold's verbatim
+    /// (RowFeed staging + `seq_scan_batch_emit` + `agg_plain_build_accept`
+    /// — C's checked per-row program, arbitrary agg argument expressions
+    /// included); only the EXPORT differs: the manifest-classified
+    /// self-contained partials (`agg_poly_export_partial_into`), numeric
+    /// states relocated as exact digit snapshots. Fail-closed everywhere
+    /// the plan path is (`agg_poly_partial_admissible`).
+    PerRowPoly,
+}
+
+/// SE-AGGPOLY: whether this node takes the poly manifest path. Derived
+/// identically by the leader (admission + combine) and every worker (exec
+/// build) from the plan + the process-constant knob — the worker-congruence
+/// discipline; no payload flag needed. Plan-path admissibility WINS when it
+/// holds (the existing arms stay byte-untouched knob-ON).
+fn poly_mode(agg: &::nodeagg::AggStateData<'_>) -> bool {
+    super::agg_poly_enabled()
+        && !agg_runtime_partial_admissible(agg)
+        && agg_poly_partial_admissible(agg)
 }
 
 struct WorkerExec {
@@ -516,10 +540,17 @@ impl RuntimeScanShared {
                     let slot = worker - self.pins_base;
                     let mut g =
                         self.partials[slot].lock().unwrap_or_else(|p| p.into_inner());
-                    agg_runtime_export_partial_into(
-                        &aps.agg,
-                        g.get_or_insert_with(Default::default),
-                    )?;
+                    if mode == DriveMode::PerRowPoly {
+                        agg_poly_export_partial_into(
+                            &aps.agg,
+                            g.get_or_insert_with(Default::default),
+                        )?;
+                    } else {
+                        agg_runtime_export_partial_into(
+                            &aps.agg,
+                            g.get_or_insert_with(Default::default),
+                        )?;
+                    }
                     Ok(())
                 })
             })
@@ -1395,13 +1426,20 @@ fn build_worker_exec_inner(payload: &RuntimeScanShared) -> PgResult<()> {
                             "runtime scan worker outer node is not a SeqScan",
                         )));
                     };
-                    if !agg_runtime_partial_admissible(&aps.agg) {
+                    // SE-AGGPOLY: the poly verdict re-derives here from the
+                    // identical plan + process-constant knob (worker
+                    // congruence); a divergence from the leader's verdict is
+                    // therefore impossible-by-determinism, and the check
+                    // below stays as the defensive error it always was.
+                    let poly = poly_mode(&aps.agg);
+                    if !poly && !agg_runtime_partial_admissible(&aps.agg) {
                         return Err(Box::new(PgError::new(
                             ERROR,
                             "runtime scan worker fold plan diverged from the leader's",
                         )));
                     }
-                    let mut mode = drive_mode(&aps.agg, ss);
+                    let mut mode =
+                        if poly { DriveMode::PerRowPoly } else { drive_mode(&aps.agg, ss) };
                     match mode {
                         DriveMode::Fold => {
                             // The serial fold feed's arm/init half, once per
@@ -1500,6 +1538,22 @@ fn build_worker_exec_inner(payload: &RuntimeScanShared) -> PgResult<()> {
                                     "runtime scan worker count-star shape diverged from the leader's",
                                 )));
                             }
+                        }
+                        // SE-AGGPOLY: the per-row drive's staging verbatim
+                        // (kernel-qual selection bitmap when the qual has
+                        // kernel shape; the per-row emit re-checks the rest
+                        // — same rows, same order, same errors). Heap-only
+                        // admission (the leader's gate; re-checked by the
+                        // SeqScan destructure above).
+                        DriveMode::PerRowPoly => {
+                            super::arm_scan_staging(
+                                ss,
+                                estate,
+                                super::ScanFeedShape::RowFeed {
+                                    ctx: "runtime scan aggpoly feed",
+                                    stitch: true,
+                                },
+                            )?;
                         }
                         // Derived above from a failed Fold prefix arm, never
                         // by drive_mode.
@@ -1686,7 +1740,9 @@ where
             // the segmentation loop degenerates to one positioned range
             // for these arms and no tally is ever needed.
             DriveMode::StorelessCount => storeless_count_drain(agg, src, estate)?,
-            DriveMode::PerRowFold => perrow_fold_drain(agg, src, estate)?,
+            DriveMode::PerRowFold | DriveMode::PerRowPoly => {
+                perrow_fold_drain(agg, src, estate)?
+            }
             // Dispatched to runtime_bitmap::drain_claim before this
             // helper's call site (BitmapHeapScan outer).
             DriveMode::BitmapPerRow => {
@@ -1876,7 +1932,9 @@ fn perrow_fold_drain<'mcx, S: BatchGranuleSource<'mcx>>(
     src: &mut S,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    debug_assert!(agg_runtime_partial_admissible(agg));
+    // SE-AGGPOLY: the poly manifest shapes ride this same drain (the drive
+    // is the serial row path either way; only the export differs).
+    debug_assert!(agg_runtime_partial_admissible(agg) || agg_poly_partial_admissible(agg));
     let clear_inline = !heapfeed_v2_enabled();
     loop {
         let n = src.next_batch(estate)?;
@@ -2210,9 +2268,35 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     if ea && !is_cb {
         return ea_refused(estate, true, node_id, "heap-not-instrumented");
     }
+    // SE-AGGPOLY (knob-gated, default OFF): where the plan-based partial
+    // admission refuses, the poly manifest may admit — heap only (v1; the
+    // pgrcolumnar plain shapes stay exactly as refused today), non-EA (the
+    // ea && !is_cb gate above already refused every heap EA shape), and
+    // with the AGG node's own expressions proven parallel-safe below (its
+    // transition programs run on helpers; the fold vocab's bare-Var args
+    // made that vacuous, arbitrary numeric arg expressions do not).
+    let poly = poly_mode(agg);
     if !agg_runtime_partial_admissible(agg) {
-        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
-        return ea_refused(estate, ea, node_id, "partials-not-order-insensitive-exact");
+        if !(poly && !is_cb) {
+            stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
+            return ea_refused(estate, ea, node_id, "partials-not-order-insensitive-exact");
+        }
+        if ss.ss.ps_ProjInfo.is_some() {
+            return ea_refused(estate, ea, node_id, "projected-scan");
+        }
+        // The helper-side surface is the aggregates' ARGUMENT expressions
+        // (transition programs run on helpers); finalize + HAVING +
+        // projection run on the leader after absorb, and the SCAN's own
+        // exprs are checked with everything else below. Checking the Agg
+        // tlist wholesale would see the Aggref node itself (parallel-
+        // restricted by classification) and refuse every shape.
+        let args_safe = match ::nodeagg::agg_poly_arg_exprs(agg) {
+            Some(args) => exprs_parallel_safe(args.into_iter())?,
+            None => false,
+        };
+        if !args_safe {
+            return ea_refused(estate, ea, node_id, "exprs-not-parallel-safe");
+        }
     }
     // Census shapes (fold plan reads no columns) engage only with a qual:
     // pgrcolumnar's bare count(*) is the Meta/footer arm's, heap's is the fused
@@ -2224,7 +2308,8 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     // block-range claim (DriveMode::StorelessCount) — engages above a block
     // floor. Fail-closed: anything short of the exact shape refuses here as
     // before (the serial fused drive owns it).
-    if ::nodeagg::agg_lanefold_plan(agg).is_some_and(|p| p.cols.is_empty())
+    if !poly
+        && ::nodeagg::agg_lanefold_plan(agg).is_some_and(|p| p.cols.is_empty())
         && ss.ss.qual.is_none()
     {
         if is_cb
@@ -2251,7 +2336,7 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     // (emit + accept) N-wide per claim. Projected scans stay refused
     // (fail-closed); pgrcolumnar keeps its decide-time verdicts.
     let mut perrow = false;
-    if drive_mode(agg, ss) == DriveMode::Fold {
+    if !poly && drive_mode(agg, ss) == DriveMode::Fold {
         if ss.ss.ps_ProjInfo.is_some() {
             return ea_refused(estate, ea, node_id, "projected-scan");
         }
@@ -2366,7 +2451,7 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     }
     // Direct storeless-count drive: its own (higher) floor — the serial
     // fused advance is O(pages); parallel pays only on a big heap.
-    let rowdrive = drive_mode(agg, ss) == DriveMode::StorelessCount;
+    let rowdrive = !poly && drive_mode(agg, ss) == DriveMode::StorelessCount;
     if rowdrive && total_granules < rowdrive_min_blocks() {
         return Ok(None);
     }
@@ -2382,6 +2467,10 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
         lane_trace(&format!(
             "runtime-scan: rowdrive admit perrow blocks={total_granules}"
         ));
+    } else if poly {
+        // SE-AGGPOLY observability: the poly manifest admitted this
+        // engagement (per-row drive + numeric-state export).
+        lane_trace(&format!("runtime-scan: aggpoly admit blocks={total_granules}"));
     }
 
     // --- Engage.
@@ -2763,7 +2852,16 @@ fn engage_ceremony<'mcx>(
                 .iter()
                 .filter_map(|m| m.lock().unwrap_or_else(|p| p.into_inner()).take())
                 .collect();
-            let combined = agg_runtime_combine(agg, &parts)?;
+            // SE-AGGPOLY: the poly verdict re-derives from the plan + the
+            // process-constant knob — the same pure derivation every worker
+            // ran (bitmap engagements require plan admissibility upstream,
+            // so poly is always false there).
+            let poly = poly_mode(agg);
+            let combined = if poly {
+                agg_poly_runtime_combine(agg, &parts)?
+            } else {
+                agg_runtime_combine(agg, &parts)?
+            };
             stats::tick_owned(ShapeClass::AggBuild);
             // EA-on-morsels merge (clean Completed outcomes ONLY — the same
             // invariant as the result partials): fold every worker's final
@@ -2803,7 +2901,11 @@ fn engage_ceremony<'mcx>(
                 "runtime-scan: complete, partials={} ",
                 parts.len()
             ));
-            Ok(Some(exec_agg_runtime_partials(agg, estate, &combined)?))
+            if poly {
+                Ok(Some(exec_agg_poly_runtime_partials(agg, estate, &combined)?))
+            } else {
+                Ok(Some(exec_agg_runtime_partials(agg, estate, &combined)?))
+            }
         }
     }
 }
