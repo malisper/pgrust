@@ -301,6 +301,9 @@ pgvector_hnsw = { path = "../../contrib/pgvector_hnsw" }
 hstore = { path = "../../contrib/hstore" }
 pg_trgm = { path = "../../contrib/pg_trgm" }
 btree_gist = { path = "../../contrib/btree_gist" }
+contrib_cube = { path = "../../contrib/cube" }
+contrib_earthdistance = { path = "../../contrib/earthdistance" }
+contrib_seg = { path = "../../contrib/seg" }
 unaccent = { path = "../../contrib/unaccent" }
 pg_walinspect = { path = "../../contrib/pg_walinspect" }
 adt_formatting = { path = "../../backend/utils/adt/formatting" }

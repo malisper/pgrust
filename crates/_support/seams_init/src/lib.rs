@@ -194,6 +194,9 @@ pub fn init_all_with_transport(transport: Transport) {
     hstore::init_seams();
     pg_trgm::init_seams();
     btree_gist::init_seams();
+    contrib_cube::init_seams();
+    contrib_earthdistance::init_seams();
+    contrib_seg::init_seams();
     unaccent::init_seams();
     pg_walinspect::init_seams();
     session::init_seams();
