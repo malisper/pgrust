@@ -8025,6 +8025,7 @@ dependencies = [
 name = "lanefold"
 version = "0.0.0"
 dependencies = [
+ "adt_float",
  "adt_numeric",
  "datum",
  "execexpr",
