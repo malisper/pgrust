@@ -64,19 +64,19 @@ fn decode_varbyte(p: &[u8], pos: &mut usize) -> u64 {
 
 
 #[inline]
-pub(crate) fn seg_first(seg: &[u8]) -> ItemPointerData {
+pub fn seg_first(seg: &[u8]) -> ItemPointerData {
     debug_assert!(seg.len() >= SizeOfGinPostingListHeader);
     // SAFETY: bounds asserted; ItemPointerData tolerates unaligned reads.
     unsafe { seg.as_ptr().cast::<ItemPointerData>().read_unaligned() }
 }
 
 #[inline]
-pub(crate) fn seg_nbytes(seg: &[u8]) -> usize {
+pub fn seg_nbytes(seg: &[u8]) -> usize {
     u16::from_ne_bytes([seg[6], seg[7]]) as usize
 }
 
 #[inline]
-pub(crate) fn seg_size(seg: &[u8]) -> usize {
+pub fn seg_size(seg: &[u8]) -> usize {
     size_of_gin_posting_list(seg_nbytes(seg))
 }
 
@@ -133,7 +133,7 @@ pub(crate) fn ginCompressPostingList<'mcx>(
 
 /// ginPostingListDecodeAllSegments: append every item of the consecutive
 /// segments in `data` to `out`.
-pub(crate) fn ginPostingListDecodeAllSegments(
+pub fn ginPostingListDecodeAllSegments(
     data: &[u8],
     out: &mut PgVec<'_, ItemPointerData>,
 ) -> PgResult<()> {

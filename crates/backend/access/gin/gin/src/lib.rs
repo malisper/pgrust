@@ -16,7 +16,7 @@ pub(crate) mod get;
 pub(crate) mod insert;
 pub(crate) mod logic;
 pub(crate) mod opclass;
-pub(crate) mod postinglist;
+pub mod postinglist;
 pub(crate) mod scan;
 pub(crate) mod util;
 pub(crate) mod vacuum;

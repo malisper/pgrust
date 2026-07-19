@@ -208,7 +208,7 @@ pub(crate) fn _hash_checkpage(rel: &Relation<'_>, buf: types_core::Buffer, flags
 /// # Safety
 /// `itup` is a live index-tuple image.
 #[inline]
-pub(crate) unsafe fn _hash_get_indextuple_hashkey(itup: nbtree::itup::ITup) -> u32 {
+pub unsafe fn _hash_get_indextuple_hashkey(itup: nbtree::itup::ITup) -> u32 {
     unsafe {
         let off = nbtree::itup::index_info_find_data_offset(nbtree::itup::t_info(itup));
         itup.add(off).cast::<u32>().read_unaligned()
