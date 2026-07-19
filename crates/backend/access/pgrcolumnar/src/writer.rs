@@ -225,14 +225,14 @@ pub(crate) struct CodecCtx {
 
 // Write-side sub-granule dict-frame arm (see CHUNK_FLAG_DICT_FRAMED).
 pub(crate) fn dict_frames_env() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static ON: pgsync::OnceLock<bool> = pgsync::OnceLock::new();
     *ON.get_or_init(|| {
         matches!(std::env::var("PGRUST_CBSTORE_DICT_FRAMES").as_deref(), Ok("1") | Ok("on"))
     })
 }
 
 pub(crate) fn dict_frame_target_env() -> usize {
-    static KB: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    static KB: pgsync::OnceLock<usize> = pgsync::OnceLock::new();
     *KB.get_or_init(|| {
         std::env::var("PGRUST_CBSTORE_DICT_FRAME_KB")
             .ok()
@@ -444,7 +444,12 @@ struct StitchPool {
     // owning thread drains remaining messages and exits (drain-then-exit =
     // mpsc disconnect semantics), and only then is it joined.
     txs: Vec<pgsync::MailboxSender<StitchMsg>>,
-    handles: Vec<std::thread::JoinHandle<Vec<(usize, u64, Vec<Vec<u8>>)>>>,
+    // permit-s5 row 16: pgsync::thread handles — under the permit scheduler
+    // the pool threads are door-registered (child-side synthetic vpids,
+    // spawn-fenced) and BOTH close-then-join sites (drop path + finalize
+    // path, the census D1 pair) become hooked Join parks woken by the
+    // target's exit. Native arm = the std re-export, byte-identical.
+    handles: Vec<pgsync::thread::JoinHandle<Vec<(usize, u64, Vec<Vec<u8>>)>>>,
     /// col -> owning thread index (None = int column / no stitch).
     assign: Vec<Option<usize>>,
 }
@@ -500,7 +505,7 @@ fn stitch_pool_thread(
 // FxHash-style multiply-mix byte hasher (dedup-grade quality is sufficient;
 // a collision only costs a memcmp probe).
 fn fasthash_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static ON: pgsync::OnceLock<bool> = pgsync::OnceLock::new();
     *ON.get_or_init(|| {
         matches!(std::env::var("PGRUST_CBSTORE_FASTHASH").as_deref(), Ok("1") | Ok("on"))
     })
@@ -578,7 +583,7 @@ impl std::hash::BuildHasher for DictBuild {
 // Writer-side stitch kill switch (byte-identity-preserving A/B: stitch
 // tables are additive metadata; consumers fail open without them).
 fn stitch_write_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static ON: pgsync::OnceLock<bool> = pgsync::OnceLock::new();
     *ON.get_or_init(|| {
         !matches!(std::env::var("PGRUST_CBSTORE_STITCH").as_deref(), Ok("0") | Ok("off"))
     })
@@ -1598,7 +1603,9 @@ impl CbWriter {
         let mut handles = Vec::with_capacity(n);
         for owned in per_thread {
             let (tx, rx) = pgsync::mailbox::<StitchMsg>(None);
-            let h = std::thread::Builder::new()
+            // permit-s5 row 16: spawn through the pgsync::thread wrapper
+            // (the spawn door for identity-less utility threads).
+            let h = pgsync::thread::Builder::new()
                 .name("cb-stitch".into())
                 .spawn(move || stitch_pool_thread(owned, rx))
                 .map_err(|e| {
