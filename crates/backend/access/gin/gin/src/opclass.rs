@@ -72,8 +72,8 @@ pub(crate) fn detoast_image<'m>(mcx: Mcx<'m>, d: Datum) -> PgResult<&'m [u8]> {
 #[inline]
 fn text_payload<'x>(d: Datum) -> &'x [u8] {
     let p = d.as_usize() as *const u8;
-    // SAFETY: gin keys are inline text images built by make_text_key or
-    // deformed (possibly short) index-tuple values; pin/scratch keeps them
+    // SAFETY: callers gate on inline_image, so this is an uncompressed
+    // non-external image (short or 4-byte header); pin/scratch keeps it
     // live for the compare.
     unsafe {
         if varatt::varatt_is_1b(p) {
@@ -88,17 +88,55 @@ fn text_payload<'x>(d: Datum) -> &'x [u8] {
     }
 }
 
+/// True for an uncompressed, non-external varlena image — the only shapes
+/// text_payload may read directly.
+#[inline]
+pub(crate) fn inline_image(d: Datum) -> bool {
+    let p = d.as_usize() as *const u8;
+    // SAFETY: non-null varlena datum readable through its header.
+    unsafe {
+        (varatt::varatt_is_1b(p) && !varatt::varatt_is_1b_e(p)) || varatt::varatt_is_4b_u(p)
+    }
+}
+
+// index_form_tuple inline-compresses varlena index keys above the size
+// target (TOAST_INDEX_HACK, indextuple.c:104-137), so stored GIN entry keys
+// can be compressed images. C detoasts them in every compare support proc
+// (PG_GETARG_TEXT_PP: tsginidx.c:26-27/42-43 gin_cmp_tslexeme/gin_cmp_prefix,
+// varlena.c:1944-1945 bttextcmp, jsonb_gin.c:205-206 gin_compare_jsonb); a
+// raw read would order/match compressed bytes as if they were the value.
+// Cold: only compares that see a compressed (or external) key take it.
+#[cold]
+#[inline(never)]
+fn cmp_detoasted(a: Datum, b: Datum, f: &dyn Fn(&[u8], &[u8]) -> i32) -> i32 {
+    let cx = ::mcx::MemoryContext::new("gin key detoast");
+    let pa = detoast_payload(cx.mcx(), a).expect("gin compare key detoast");
+    let pb = detoast_payload(cx.mcx(), b).expect("gin compare key detoast");
+    f(pa, pb)
+}
+
+/// Compare two text-flavored GIN keys through `f`, detoasting any side that
+/// is not an inline image (C's per-compare PG_GETARG_TEXT_PP convention).
+#[inline]
+fn cmp_text_keys(a: Datum, b: Datum, f: impl Fn(&[u8], &[u8]) -> i32) -> i32 {
+    if inline_image(a) && inline_image(b) {
+        f(text_payload(a), text_payload(b))
+    } else {
+        cmp_detoasted(a, b, &f)
+    }
+}
+
 /// compareFn: total order on two non-null key datums.
 pub(crate) fn compare(col: &GinColState, a: Datum, b: Datum) -> i32 {
     match col.opclass {
         GinOpclass::JsonbOps => {
-            ::adt_jsonb::gin::gin_compare_jsonb(text_payload(a), text_payload(b))
+            cmp_text_keys(a, b, ::adt_jsonb::gin::gin_compare_jsonb)
         }
         // bttextcmp under the support collation (hstore FUNCTION 1).
-        GinOpclass::HstoreOps => {
-            varlena::varstr_cmp(text_payload(a), text_payload(b), col.support_collation)
+        GinOpclass::HstoreOps => cmp_text_keys(a, b, |x, y| {
+            varlena::varstr_cmp(x, y, col.support_collation)
                 .expect("bttextcmp: varstr_cmp failed")
-        }
+        }),
         GinOpclass::JsonbPathOps | GinOpclass::TrgmOps => {
             // btint4cmp over uint32 path hashes stored via UInt32GetDatum
             // (trgm keys: trgm2int int4, always >= 0, same comparator).
@@ -109,9 +147,7 @@ pub(crate) fn compare(col: &GinColState, a: Datum, b: Datum) -> i32 {
                 (x > y) as i32
             }
         }
-        GinOpclass::TsvectorOps => {
-            ::adt_tsginidx::gin_cmp_tslexeme(text_payload(a), text_payload(b))
-        }
+        GinOpclass::TsvectorOps => cmp_text_keys(a, b, ::adt_tsginidx::gin_cmp_tslexeme),
         // Element-type default btree comparator (initGinState typcache
         // fallback), closed set resolved to state.elem_cmp.
         GinOpclass::ArrayOps => match col.elem_cmp {
@@ -147,12 +183,12 @@ pub(crate) fn compare(col: &GinColState, a: Datum, b: Datum) -> i32 {
                     (x > y) as i32
                 }
             }
-            GinElemCmp::Text => {
+            GinElemCmp::Text => cmp_text_keys(a, b, |x, y| {
                 // bttextcmp; the collation is resolved by the time an index
                 // key is compared, so the PgResult never fires here.
-                ::varlena::varstr_cmp(text_payload(a), text_payload(b), col.support_collation)
+                ::varlena::varstr_cmp(x, y, col.support_collation)
                     .expect("collation resolved for gin array_ops key compare")
-            }
+            }),
             GinElemCmp::None => unreachable!("array_ops compare without elem_cmp"),
         },
     }
@@ -167,7 +203,7 @@ pub(crate) fn compare_partial(
 ) -> i32 {
     match col.opclass {
         GinOpclass::TsvectorOps => {
-            ::adt_tsginidx::gin_cmp_prefix(text_payload(partial_key), text_payload(key))
+            cmp_text_keys(partial_key, key, ::adt_tsginidx::gin_cmp_prefix)
         }
         _ => unreachable!("comparePartialFn on a non-partial-match opclass"),
     }
