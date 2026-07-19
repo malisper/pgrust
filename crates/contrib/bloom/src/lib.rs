@@ -14,6 +14,17 @@
 
 pub use types_bloom as layout;
 
+pub mod insert;
+pub mod scan;
+pub mod state;
+pub mod vacuum;
+pub mod validate;
+
+pub use insert::blinsert;
+pub use scan::{blbeginscan, blendscan, blgetbitmap, blrescan};
+pub use vacuum::{blbulkdelete, blbulkdelete_collect, blvacuumcleanup};
+pub use validate::blvalidate;
+
 use types_fmgr::PGFunction;
 
 const LIBRARY: &str = "bloom";

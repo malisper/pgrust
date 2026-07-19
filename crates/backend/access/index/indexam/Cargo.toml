@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+bloom = { path = "../../../../contrib/bloom" }
 bufmgr = { path = "../../../storage/buffer/bufmgr" }
 snapmgr = { path = "../../../utils/time/snapmgr" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }

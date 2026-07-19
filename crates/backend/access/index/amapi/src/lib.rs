@@ -44,6 +44,9 @@ fn resolve_extension_handler(amhandler: Oid) -> IndexAmKind {
         if name.name_str() == b"hnswhandler" {
             return IndexAmKind::Hnsw;
         }
+        if name.name_str() == b"blhandler" {
+            return IndexAmKind::Bloom;
+        }
     }
     unported_handler(amhandler)
 }
@@ -114,6 +117,8 @@ pub fn IndexAmTranslateStrategy(
         // amtranslatestrategy == NULL.
         IndexAmKind::Brin => COMPARE_INVALID,
         IndexAmKind::Hnsw => COMPARE_INVALID,
+        // amtranslatestrategy == NULL (contrib/bloom blhandler).
+        IndexAmKind::Bloom => COMPARE_INVALID,
         #[allow(unreachable_patterns)]
         _ => unported_translate(amoid),
     };
@@ -156,6 +161,8 @@ pub fn IndexAmTranslateCompareType(
         // amtranslatecmptype == NULL.
         IndexAmKind::Brin => InvalidStrategy,
         IndexAmKind::Hnsw => InvalidStrategy,
+        // amtranslatecmptype == NULL (contrib/bloom blhandler).
+        IndexAmKind::Bloom => InvalidStrategy,
         #[allow(unreachable_patterns)]
         _ => unported_translate(amoid),
     };
@@ -201,6 +208,7 @@ pub fn amvalidate(opclassoid: Oid) -> PgResult<bool> {
         IndexAmKind::Gist => gist_validate::gistvalidate(opclassoid),
         IndexAmKind::Gin => gin_validate::ginvalidate(opclassoid),
         IndexAmKind::Hnsw => pgvector_hnsw::hnswvalidate(opclassoid),
+        IndexAmKind::Bloom => bloom::blvalidate(opclassoid),
         #[allow(unreachable_patterns)]
         other => panic!("unported: amvalidate for index AM {other:?}"),
     }
@@ -229,6 +237,8 @@ pub fn am_adjust_members(
         // C brinhandler sets amadjustmembers = NULL.
         IndexAmKind::Brin => Ok(()),
         IndexAmKind::Hnsw => Ok(()),
+        // C blhandler sets amadjustmembers = NULL.
+        IndexAmKind::Bloom => Ok(()),
         #[allow(unreachable_patterns)]
         other => panic!("unported: amadjustmembers for index AM {other:?}"),
     }
@@ -351,7 +361,10 @@ pub fn amparallelvacuumoptions(kind: IndexAmKind) -> u8 {
             VACUUM_OPTION_PARALLEL_BULKDEL | VACUUM_OPTION_PARALLEL_COND_CLEANUP
         }
         IndexAmKind::Hash | IndexAmKind::Hnsw => VACUUM_OPTION_PARALLEL_BULKDEL,
-        IndexAmKind::Gin => VACUUM_OPTION_PARALLEL_BULKDEL | VACUUM_OPTION_PARALLEL_CLEANUP,
+        // gin and bloom: BULKDEL | CLEANUP (blutils.c blhandler).
+        IndexAmKind::Gin | IndexAmKind::Bloom => {
+            VACUUM_OPTION_PARALLEL_BULKDEL | VACUUM_OPTION_PARALLEL_CLEANUP
+        }
         IndexAmKind::Brin => VACUUM_OPTION_PARALLEL_CLEANUP,
         #[allow(unreachable_patterns)]
         _ => VACUUM_OPTION_NO_PARALLEL,
@@ -423,6 +436,7 @@ fn resolve_index_am_kind(amoid: Oid) -> Option<IndexAmKind> {
         let name = syscache_seams::pg_proc_proname::call(amhandler).ok()??;
         return match name.name_str() {
             b"hnswhandler" => Some(IndexAmKind::Hnsw),
+            b"blhandler" => Some(IndexAmKind::Bloom),
             _ => None,
         };
     }

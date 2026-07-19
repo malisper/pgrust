@@ -184,6 +184,23 @@ fn am_flags(amoid: Oid) -> Option<&'static AmFlags> {
         has_amproperty: false,
         has_ambuildphasename: false,
     };
+    // contrib/bloom blhandler flags: multicolumn yes, everything else no;
+    // bitmap-only (no amgettuple), amcanreturn/amproperty/ambuildphasename NULL.
+    const BLOOM: AmFlags = AmFlags {
+        amcanorder: false,
+        amcanorderbyop: false,
+        amcanbackward: false,
+        amcanunique: false,
+        amcanmulticol: true,
+        amsearcharray: false,
+        amsearchnulls: false,
+        amclusterable: false,
+        amcaninclude: false,
+        has_amgettuple: false,
+        has_amcanreturn: false,
+        has_amproperty: false,
+        has_ambuildphasename: false,
+    };
     const HNSW: AmFlags = AmFlags {
         amcanorder: false,
         amcanorderbyop: true,
@@ -206,24 +223,18 @@ fn am_flags(amoid: Oid) -> Option<&'static AmFlags> {
         GIN_AM_OID => Some(&GIN),
         SPGIST_AM_OID => Some(&SPGIST),
         BRIN_AM_OID => Some(&BRIN),
-        other => {
-            if extension_am_is_hnsw(other) {
-                Some(&HNSW)
-            } else {
-                None
-            }
-        }
+        other => match extension_am_handler(other).as_deref() {
+            Some(b"hnswhandler") => Some(&HNSW),
+            Some(b"blhandler") => Some(&BLOOM),
+            _ => None,
+        },
     }
 }
 
-fn extension_am_is_hnsw(amoid: Oid) -> bool {
-    let Ok(Some(handler)) = syscache_seams::pg_am_amhandler::call(amoid) else {
-        return false;
-    };
-    matches!(
-        syscache_seams::pg_proc_proname::call(handler),
-        Ok(Some(name)) if name.name_str() == b"hnswhandler"
-    )
+fn extension_am_handler(amoid: Oid) -> Option<Vec<u8>> {
+    let handler = syscache_seams::pg_am_amhandler::call(amoid).ok()??;
+    let name = syscache_seams::pg_proc_proname::call(handler).ok()??;
+    Some(name.name_str().to_vec())
 }
 
 // pg_am.amhandler -> the handler's builtin AM (C reads the IndexAmRoutine, so

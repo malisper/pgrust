@@ -109,6 +109,10 @@ pub struct HnswOptions {
     pub ef_construction: i32,
 }
 
+/// contrib/bloom's parsed reloptions: types_bloom::BloomOptions (length already
+/// converted bits -> words, C bloptions contract).
+pub use types_bloom::BloomOptions;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BrinOptions {
     pub pages_per_range: i32,
@@ -204,6 +208,7 @@ pub enum RdOptions {
     Brin(BrinOptions),
     Pgrcolumnar(PgrcolumnarOptions),
     Hnsw(HnswOptions),
+    Bloom(BloomOptions),
 }
 
 impl RdOptions {
@@ -242,7 +247,7 @@ impl RdOptions {
             RdOptions::Gist(o) => Some(o.fillfactor),
             RdOptions::SpGist(o) => Some(o.fillfactor),
             RdOptions::View(_) | RdOptions::Gin(_) | RdOptions::Brin(_)
-            | RdOptions::Pgrcolumnar(_) | RdOptions::Hnsw(_) => None,
+            | RdOptions::Pgrcolumnar(_) | RdOptions::Hnsw(_) | RdOptions::Bloom(_) => None,
         }
     }
 
@@ -290,6 +295,14 @@ impl RdOptions {
     pub fn brin(&self) -> Option<&BrinOptions> {
         match self {
             RdOptions::Brin(o) => Some(o),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub fn bloom(&self) -> Option<BloomOptions> {
+        match self {
+            RdOptions::Bloom(o) => Some(*o),
             _ => None,
         }
     }
