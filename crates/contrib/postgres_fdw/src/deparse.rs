@@ -1541,6 +1541,318 @@ fn append_conditions<'mcx>(
     Ok(())
 }
 
+// ---------- DML deparse (INSERT / UPDATE / DELETE + direct modify) ----------
+//
+// These are the plan-time deparse entry points that postgresPlanForeignModify /
+// postgresPlanDirectModify call in C (deparse.c:2081-2445). They are ported and
+// self-contained here; the executor + planner wiring that CALLS them is the
+// phase-4 DML-executor substrate (FdwModifyRoutine seam + createplan
+// PlanForeignModify + preptlist AddForeignUpdateTargets + the nodemodifytable /
+// nodeforeignscan branches). See notes/contrib-pgfdw-p3.md for the blueprint.
+// `rebuild_insert_sql` is the one exec-time deparse (batch-size re-expansion).
+
+/// deparseReturningList: append a RETURNING clause (if any), collecting the
+/// attnums retrieved by WITH CHECK OPTION or RETURNING into `retrieved_attrs`.
+/// `trig_after_row` = the target relation has an AFTER ROW trigger for the op,
+/// which forces a whole-row retrieval (C: bms_make_singleton).
+#[allow(clippy::too_many_arguments)]
+pub fn deparse_returning_list<'mcx>(
+    buf: &mut PgString<'mcx>,
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
+    rte: &types_nodes::parsenodes::RangeTblEntry<'mcx>,
+    rtindex: i32,
+    rel: &types_rel::Relation<'mcx>,
+    trig_after_row: bool,
+    wco_list: &[Node<'mcx>],
+    returning_list: &[Node<'mcx>],
+    retrieved_attrs: &mut PgVec<'mcx, i32>,
+) -> PgResult<()> {
+    let mut attrs_used = types_nodes::Bitmapset::empty();
+    if trig_after_row {
+        // whole-row reference acquires all non-system columns.
+        attrs_used.add_member(mcx, 0 - FIRST_LOW_INVALID_HEAP_ATTNUM)?;
+    }
+    for &node in wco_list {
+        vars::pull_varattnos(mcx, node, rtindex, &mut attrs_used)?;
+    }
+    for &node in returning_list {
+        vars::pull_varattnos(mcx, node, rtindex, &mut attrs_used)?;
+    }
+    if !attrs_used.is_empty() {
+        deparse_target_list(
+            buf, mcx, run, rtindex, rel, rte, true, &attrs_used, false, retrieved_attrs,
+        )?;
+    }
+    // else: *retrieved_attrs stays NIL (empty), matching C.
+    Ok(())
+}
+
+/// deparseInsertSql. Appends
+///   INSERT INTO rel (cols...) VALUES ($1, $2, DEFAULT, ...) [ON CONFLICT DO
+///   NOTHING] [RETURNING ...]
+/// Generated columns emit DEFAULT (no param). Returns `values_end_len`, the
+/// byte offset of the end of the first row's VALUES clause (batch-insert reuses
+/// it via `rebuild_insert_sql`).
+#[allow(clippy::too_many_arguments)]
+pub fn deparse_insert_sql<'mcx>(
+    buf: &mut PgString<'mcx>,
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
+    rte: &types_nodes::parsenodes::RangeTblEntry<'mcx>,
+    rtindex: i32,
+    rel: &types_rel::Relation<'mcx>,
+    target_attrs: &[i32],
+    do_nothing: bool,
+    trig_after_row: bool,
+    wco_list: &[Node<'mcx>],
+    returning_list: &[Node<'mcx>],
+    retrieved_attrs: &mut PgVec<'mcx, i32>,
+) -> PgResult<i32> {
+    let tupdesc = &rel.rd_att;
+    buf.push_str("INSERT INTO ");
+    deparse_relation(buf, mcx, rel)?;
+
+    if !target_attrs.is_empty() {
+        buf.push('(');
+        let mut first = true;
+        for &attnum in target_attrs {
+            if !first {
+                buf.push_str(", ");
+            }
+            first = false;
+            deparse_column_ref_buf(buf, mcx, rtindex, attnum as i16, rte, false)?;
+        }
+        buf.push_str(") VALUES (");
+
+        let mut pindex = 1;
+        let mut first = true;
+        for &attnum in target_attrs {
+            let attr = tupdesc.attr(attnum as usize - 1);
+            if !first {
+                buf.push_str(", ");
+            }
+            first = false;
+            if attr.attgenerated != 0 {
+                buf.push_str("DEFAULT");
+            } else {
+                let _ = write!(buf, "${pindex}");
+                pindex += 1;
+            }
+        }
+        buf.push(')');
+    } else {
+        buf.push_str(" DEFAULT VALUES");
+    }
+    let values_end_len = buf.as_str().len() as i32;
+
+    if do_nothing {
+        buf.push_str(" ON CONFLICT DO NOTHING");
+    }
+
+    deparse_returning_list(
+        buf, mcx, run, rte, rtindex, rel, trig_after_row, wco_list, returning_list,
+        retrieved_attrs,
+    )?;
+    Ok(values_end_len)
+}
+
+/// rebuildInsertSql: given a single-row INSERT template (`orig_query`) and its
+/// `values_end_len`, rebuild an INSERT with `num_rows` VALUES tuples for batch
+/// insert. `num_params` = params already emitted for the first row. Exec-time.
+pub fn rebuild_insert_sql<'mcx>(
+    buf: &mut PgString<'mcx>,
+    rel: &types_rel::Relation<'mcx>,
+    orig_query: &str,
+    target_attrs: &[i32],
+    values_end_len: i32,
+    num_params: i32,
+    num_rows: i32,
+) {
+    let tupdesc = &rel.rd_att;
+    let end = values_end_len as usize;
+    debug_assert!(end > 0 && end <= orig_query.len());
+    // Copy up to the end of the first record from the original query.
+    buf.push_str(&orig_query[..end]);
+
+    // Add the extra rows; params for the first row already exist, so continue.
+    let mut pindex = num_params + 1;
+    for _ in 0..num_rows {
+        buf.push_str(", (");
+        let mut first = true;
+        for &attnum in target_attrs {
+            let attr = tupdesc.attr(attnum as usize - 1);
+            if !first {
+                buf.push_str(", ");
+            }
+            first = false;
+            if attr.attgenerated != 0 {
+                buf.push_str("DEFAULT");
+            } else {
+                let _ = write!(buf, "${pindex}");
+                pindex += 1;
+            }
+        }
+        buf.push(')');
+    }
+    // Copy the stuff after the VALUES clause (RETURNING, ON CONFLICT, ...).
+    buf.push_str(&orig_query[end..]);
+}
+
+/// deparseUpdateSql: UPDATE rel SET col = $n, gen = DEFAULT, ... WHERE ctid = $1
+/// [RETURNING ...]. ctid is always param $1; SET params start at $2.
+#[allow(clippy::too_many_arguments)]
+pub fn deparse_update_sql<'mcx>(
+    buf: &mut PgString<'mcx>,
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
+    rte: &types_nodes::parsenodes::RangeTblEntry<'mcx>,
+    rtindex: i32,
+    rel: &types_rel::Relation<'mcx>,
+    target_attrs: &[i32],
+    trig_after_row: bool,
+    wco_list: &[Node<'mcx>],
+    returning_list: &[Node<'mcx>],
+    retrieved_attrs: &mut PgVec<'mcx, i32>,
+) -> PgResult<()> {
+    let tupdesc = &rel.rd_att;
+    buf.push_str("UPDATE ");
+    deparse_relation(buf, mcx, rel)?;
+    buf.push_str(" SET ");
+
+    let mut pindex = 2; // ctid is always the first param
+    let mut first = true;
+    for &attnum in target_attrs {
+        let attr = tupdesc.attr(attnum as usize - 1);
+        if !first {
+            buf.push_str(", ");
+        }
+        first = false;
+        deparse_column_ref_buf(buf, mcx, rtindex, attnum as i16, rte, false)?;
+        if attr.attgenerated != 0 {
+            buf.push_str(" = DEFAULT");
+        } else {
+            let _ = write!(buf, " = ${pindex}");
+            pindex += 1;
+        }
+    }
+    buf.push_str(" WHERE ctid = $1");
+
+    deparse_returning_list(
+        buf, mcx, run, rte, rtindex, rel, trig_after_row, wco_list, returning_list,
+        retrieved_attrs,
+    )
+}
+
+/// deparseDeleteSql: DELETE FROM rel WHERE ctid = $1 [RETURNING ...].
+#[allow(clippy::too_many_arguments)]
+pub fn deparse_delete_sql<'mcx>(
+    buf: &mut PgString<'mcx>,
+    mcx: Mcx<'mcx>,
+    run: &PlannerRun<'mcx>,
+    rte: &types_nodes::parsenodes::RangeTblEntry<'mcx>,
+    rtindex: i32,
+    rel: &types_rel::Relation<'mcx>,
+    trig_after_row: bool,
+    returning_list: &[Node<'mcx>],
+    retrieved_attrs: &mut PgVec<'mcx, i32>,
+) -> PgResult<()> {
+    buf.push_str("DELETE FROM ");
+    deparse_relation(buf, mcx, rel)?;
+    buf.push_str(" WHERE ctid = $1");
+
+    deparse_returning_list(
+        buf, mcx, run, rte, rtindex, rel, trig_after_row, &[], returning_list, retrieved_attrs,
+    )
+}
+
+/// deparseDirectUpdateSql, base-relation case only. The join case
+/// (foreignrel is a RELOPT_JOINREL, needing deparseFromExprForRel + the
+/// FROM/alias machinery) is phase-4 join pushdown; reaching it raises a loud
+/// FEATURE_NOT_SUPPORTED.
+#[allow(clippy::too_many_arguments)]
+pub fn deparse_direct_update_sql<'mcx>(
+    ctx: &mut DeparseCtx<'_, 'mcx>,
+    rtindex: i32,
+    rel: &types_rel::Relation<'mcx>,
+    rte: &types_nodes::parsenodes::RangeTblEntry<'mcx>,
+    targetlist: &[Node<'mcx>],
+    target_attrs: &[i32],
+    remote_conds: &[types_pathnodes::RinfoId],
+    returning_list: &[Node<'mcx>],
+    retrieved_attrs: &mut PgVec<'mcx, i32>,
+) -> PgResult<()> {
+    if ctx.run.root.rel(ctx.foreignrel).reloptkind == types_pathnodes::RELOPT_JOINREL {
+        return Err(direct_modify_join_unported());
+    }
+    let mcx = ctx.mcx;
+    ctx.buf.push_str("UPDATE ");
+    deparse_relation(&mut ctx.buf, mcx, rel)?;
+    ctx.buf.push_str(" SET ");
+
+    // Make sure any constants in the exprs are printed portably.
+    let nestlevel = crate::transmission::set_transmission_modes();
+    let mut first = true;
+    for (i, &tle_node) in targetlist.iter().enumerate() {
+        let tle = tle_node.as_target_entry().expect("direct-update tlist is TargetEntry");
+        let attnum = target_attrs[i];
+        debug_assert!(!tle.resjunk);
+        if !first {
+            ctx.buf.push_str(", ");
+        }
+        first = false;
+        deparse_column_ref_buf(&mut ctx.buf, mcx, rtindex, attnum as i16, rte, false)?;
+        ctx.buf.push_str(" = ");
+        deparse_expr(ctx, tle.expr)?;
+    }
+    crate::transmission::reset_transmission_modes(nestlevel);
+
+    // base-rel: no FROM clause, additional_conds is NIL.
+    append_where_clause(ctx, remote_conds)?;
+
+    deparse_returning_list(
+        &mut ctx.buf, mcx, ctx.run, rte, rtindex, rel, false, &[], returning_list,
+        retrieved_attrs,
+    )
+}
+
+/// deparseDirectDeleteSql, base-relation case only (join case is phase-4).
+#[allow(clippy::too_many_arguments)]
+pub fn deparse_direct_delete_sql<'mcx>(
+    ctx: &mut DeparseCtx<'_, 'mcx>,
+    rtindex: i32,
+    rel: &types_rel::Relation<'mcx>,
+    rte: &types_nodes::parsenodes::RangeTblEntry<'mcx>,
+    remote_conds: &[types_pathnodes::RinfoId],
+    returning_list: &[Node<'mcx>],
+    retrieved_attrs: &mut PgVec<'mcx, i32>,
+) -> PgResult<()> {
+    if ctx.run.root.rel(ctx.foreignrel).reloptkind == types_pathnodes::RELOPT_JOINREL {
+        return Err(direct_modify_join_unported());
+    }
+    let mcx = ctx.mcx;
+    ctx.buf.push_str("DELETE FROM ");
+    deparse_relation(&mut ctx.buf, mcx, rel)?;
+
+    // base-rel: no USING clause, additional_conds is NIL.
+    append_where_clause(ctx, remote_conds)?;
+
+    deparse_returning_list(
+        &mut ctx.buf, mcx, ctx.run, rte, rtindex, rel, false, &[], returning_list,
+        retrieved_attrs,
+    )
+}
+
+#[cold]
+fn direct_modify_join_unported() -> Box<PgError> {
+    Box::new(
+        PgError::error(
+            "postgres_fdw: direct modify over a foreign join is phase-4 join pushdown",
+        )
+        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
