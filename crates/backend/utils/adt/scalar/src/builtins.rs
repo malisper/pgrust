@@ -21,6 +21,20 @@ fc_oid2! {
     fc_oidge: oidge;
 }
 
+macro_rules! fc_oid2_oid {
+    ($($fc:ident: $core:ident;)*) => {$(
+        pub fn $fc(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+            let [a, b] = fcinfo.args_n::<2>();
+            Ok(Datum::from_oid(crate::$core(a.value.as_oid(), b.value.as_oid())))
+        }
+    )*};
+}
+
+fc_oid2_oid! {
+    fc_oidlarger: oidlarger;
+    fc_oidsmaller: oidsmaller;
+}
+
 // Result Datum aliases the scratch: consume before the next out call.
 std::thread_local! {
     static OUT_SCRATCH: core::cell::UnsafeCell<[u8; 16]> =
@@ -575,6 +589,8 @@ pub const SCALAR_BUILTINS: &[FmgrBuiltin] = &[
     b(457, "hashoidvector", 1, fc_hashoidvector),
     b(776, "hashoidvectorextended", 2, fc_hashoidvectorextended),
     b(716, "oidlt", 2, fc_oidlt),
+    b(1965, "oidlarger", 2, fc_oidlarger),
+    b(1966, "oidsmaller", 2, fc_oidsmaller),
     b(717, "oidle", 2, fc_oidle),
     b(1638, "oidgt", 2, fc_oidgt),
     b(1639, "oidge", 2, fc_oidge),
