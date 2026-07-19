@@ -15469,6 +15469,7 @@ dependencies = [
  "seam_core",
  "slot",
  "snapbuild",
+ "timeout",
  "timestamp_seams",
  "transam_xlog",
  "types_core",
