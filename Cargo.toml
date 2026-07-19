@@ -665,6 +665,8 @@ members = [
     "crates/contrib/pg_prewarm",
     "crates/contrib/file_fdw",
     "crates/contrib/ltree",
+    "crates/contrib/intarray",
+    "crates/backend/access/gin/gin_int4_seams",
     "crates/contrib/pgcrypto",
     "crates/contrib/pg_stat_statements",
     "crates/contrib/pgvector",
