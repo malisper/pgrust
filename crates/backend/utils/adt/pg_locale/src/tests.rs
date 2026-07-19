@@ -284,6 +284,38 @@ fn database_ctype_flag_round_trips() {
     assert!(database_ctype_is_c());
 }
 
+// Regression pin for the diesel-parallel-suite SIGABRT: concurrent GUC
+// locale checks (SET lc_messages on every diesel connection) ran C's
+// setlocale save/set/restore dance on many backend threads at once;
+// setlocale mutates process-global storage, and the race corrupted libc's
+// locale heap (malloc abort, whole-server SIGABRT — no Rust panic). The
+// dance is now a private newlocale probe, so this hammering must be safe.
+// At the pre-fix code this test aborts the test process on macOS.
+#[test]
+fn concurrent_locale_checks_are_threadsafe() {
+    let threads: Vec<_> = (0..8)
+        .map(|t| {
+            std::thread::spawn(move || {
+                for i in 0..2000 {
+                    // Alternate names so every check is a genuine
+                    // transition in the pre-fix save/set/restore dance.
+                    let name = if (t + i) % 2 == 0 { "en_US.UTF-8" } else { "C" };
+                    let _ = check_locale_messages(name, false).unwrap();
+                    assert!(check_locale_monetary("C").unwrap());
+                    let _ = check_locale_time(name).unwrap();
+                    assert!(!check_locale_numeric("bogus_locale.nope").unwrap());
+                    let (ok, canon) = check_locale(libc::LC_MONETARY, "POSIX").unwrap();
+                    assert!(ok);
+                    assert_eq!(canon.as_deref(), Some("POSIX"));
+                }
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().expect("locale-check thread panicked");
+    }
+}
+
 #[test]
 fn seams_install_and_dispatch() {
     static ONCE: Once = Once::new();

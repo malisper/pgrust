@@ -10,8 +10,9 @@
 
 #[cfg(not(target_family = "wasm"))]
 pub(crate) use libc::{
-    LC_ALL_MASK, LC_COLLATE, LC_COLLATE_MASK, LC_CTYPE, LC_CTYPE_MASK, LC_MESSAGES, LC_MONETARY,
-    LC_NUMERIC, LC_TIME,
+    LC_ALL_MASK, LC_COLLATE, LC_COLLATE_MASK, LC_CTYPE, LC_CTYPE_MASK, LC_MESSAGES,
+    LC_MESSAGES_MASK, LC_MONETARY, LC_MONETARY_MASK, LC_NUMERIC, LC_NUMERIC_MASK, LC_TIME,
+    LC_TIME_MASK,
 };
 
 #[cfg(target_family = "wasm")]
@@ -26,7 +27,11 @@ mod wasm_lc {
     pub(crate) const LC_MESSAGES: c_int = 5;
     // musl newlocale masks: 1 << category; ALL is the musl catch-all word.
     pub(crate) const LC_CTYPE_MASK: c_int = 1 << LC_CTYPE;
+    pub(crate) const LC_NUMERIC_MASK: c_int = 1 << LC_NUMERIC;
+    pub(crate) const LC_TIME_MASK: c_int = 1 << LC_TIME;
     pub(crate) const LC_COLLATE_MASK: c_int = 1 << LC_COLLATE;
+    pub(crate) const LC_MONETARY_MASK: c_int = 1 << LC_MONETARY;
+    pub(crate) const LC_MESSAGES_MASK: c_int = 1 << LC_MESSAGES;
     pub(crate) const LC_ALL_MASK: c_int = 0x7fffffff;
 }
 
