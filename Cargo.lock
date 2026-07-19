@@ -6306,6 +6306,7 @@ dependencies = [
  "freespace_seams",
  "gin_btree_seams",
  "gin_hstore_seams",
+ "gin_int4_seams",
  "gin_trgm_seams",
  "gin_vocab",
  "guc_tables",
@@ -6372,6 +6373,14 @@ dependencies = [
 
 [[package]]
 name = "gin_hstore_seams"
+version = "0.1.0"
+dependencies = [
+ "seam_core",
+ "types_error",
+]
+
+[[package]]
+name = "gin_int4_seams"
 version = "0.1.0"
 dependencies = [
  "seam_core",
@@ -7493,6 +7502,24 @@ dependencies = [
  "fd",
  "transam_xlog_seams",
  "types_core",
+]
+
+[[package]]
+name = "intarray"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "detoast",
+ "dfmgr",
+ "gin_int4_seams",
+ "mcx",
+ "reloptions",
+ "stack_depth",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_gist",
+ "types_tuple",
 ]
 
 [[package]]
@@ -14938,6 +14965,7 @@ dependencies = [
  "indexcmds",
  "init_small",
  "injection_points",
+ "intarray",
  "interrupt",
  "inval",
  "ipc",

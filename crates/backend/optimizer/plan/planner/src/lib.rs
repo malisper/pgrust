@@ -32,6 +32,7 @@ pub mod m5_suppress;
 pub mod multirangetypes_selfuncs;
 pub mod network_selfuncs;
 pub mod array_selfuncs;
+pub mod intarray_selfuncs;
 pub mod rangetypes_selfuncs;
 pub mod selfuncs;
 pub(crate) mod syscache_memo;
