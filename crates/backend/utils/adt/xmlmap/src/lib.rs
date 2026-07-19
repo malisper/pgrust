@@ -47,6 +47,18 @@ fn rel_name(relid: Oid) -> PgResult<String> {
     })
 }
 
+// C xml.c table_to_xml_internal passes get_rel_name(relid) through
+// unchecked: a user-supplied bogus relid yields a NULL tablename
+// (query_to_xml_internal substitutes "table") and the "SELECT * FROM <oid>"
+// query then fails inside SPI with C's syntax error. The panicking rel_name
+// above turned that into a contained backend panic (fnconf campaign-2
+// ledger, OID 2923, xmlmap:44).
+fn rel_name_opt(relid: Oid) -> PgResult<Option<String>> {
+    with_scratch(|mcx, _| {
+        Ok(lsyscache::relation::get_rel_name(mcx, relid)?.map(|n| n.as_str().to_owned()))
+    })
+}
+
 fn namespace_name(nspid: Oid) -> PgResult<String> {
     with_scratch(|mcx, _| {
         Ok(lsyscache::misc::get_namespace_name(mcx, nspid)?
@@ -253,8 +265,16 @@ fn table_to_xml_internal(
             core::str::from_utf8(&name).expect("regclassout is UTF-8").trim_end_matches('\0')
         ))
     })?;
-    let tablename = rel_name(relid)?;
-    query_to_xml_internal(&query, Some(&tablename), xmlschema, nulls, tableforest, targetns, top_level)
+    let tablename = rel_name_opt(relid)?;
+    query_to_xml_internal(
+        &query,
+        tablename.as_deref(),
+        xmlschema,
+        nulls,
+        tableforest,
+        targetns,
+        top_level,
+    )
 }
 
 pub fn table_to_xml(relid: Oid, nulls: bool, tableforest: bool, targetns: &str) -> PgResult<String> {
