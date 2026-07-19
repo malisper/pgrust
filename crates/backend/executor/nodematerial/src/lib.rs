@@ -30,20 +30,25 @@ pub struct MaterialState<'mcx> {
 pub fn exec_init_material<'mcx>(
     node: &'mcx Material<'mcx>,
     estate: &mut EStateData<'mcx>,
-    mut eflags: i32,
+    eflags: i32,
     result_desc: Rc<TupleDescData<'static>>,
 ) -> PgResult<MaterialState<'mcx>> {
-    // BACKWARD without REWIND would let tuplestore_trim discard too much.
-    if eflags & EXEC_FLAG_BACKWARD != 0 {
-        eflags |= EXEC_FLAG_REWIND;
-    }
+    // C nodeMaterial.c couples BACKWARD to REWIND here ("BACKWARD without
+    // REWIND would let tuplestore_trim discard too much"). DELETED
+    // (backward-execution wave B5): no executor-eflags producer of
+    // EXEC_FLAG_BACKWARD remains (PortalStart's scroll arm died in B2),
+    // and the backward read arm below is gone with it.
+    debug_assert!(eflags & EXEC_FLAG_BACKWARD == 0);
     let ps_ResultTupleSlot =
         estate.exec_init_extra_tuple_slot(Some(result_desc.clone()), TupleSlotKind::MinimalTuple);
     Ok(MaterialState {
         plan: node,
         ps_ResultTupleDesc: Some(result_desc),
         ps_ResultTupleSlot,
-        eflags: eflags & (EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK),
+        // B5: BACKWARD dropped from the retained mask (no producer; the
+        // backward read arm is deleted). REWIND/MARK stay - rescan replay
+        // and merge-join mark/restore are forward machinery.
+        eflags: eflags & (EXEC_FLAG_REWIND | EXEC_FLAG_MARK),
         tuplestorestate: None,
         eof_underlying: false,
     })
@@ -60,14 +65,23 @@ pub fn storage_stats(
     node.tuplestorestate.as_mut().map(Tuplestore::get_stats)
 }
 
+/// Forward-only (backward-execution wave B5): C nodeMaterial.c's backward
+/// read arms - the `!forward && eof_tuplestore` skip-back
+/// (nodeMaterial.c:88-101) and the backward-EOF return under
+/// tuplestore_gettupleslot (nodeMaterial.c:110-113) - are deleted. The run
+/// seam refuses backward entry (deletion-prep B1), so this node never sees
+/// a backward pull; backward cursor reads are served by the PORTAL
+/// tuplestore, not the Material node's.
 pub fn exec_material<'mcx, C: MaterialChild<'mcx>>(
     node: &mut MaterialState<'mcx>,
     child: &mut C,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
     let mcx = estate.es_query_cxt;
-    let forward =
-        matches!(estate.es_direction, ::types_scan::ScanDirection::ForwardScanDirection);
+    debug_assert!(
+        ::types_scan::sdir::ScanDirectionIsForward(estate.es_direction),
+        "backward drive below the forward-only run seam (deletion-prep B1)"
+    );
     if node.tuplestorestate.is_none() && node.eflags != 0 {
         let mut ts = Tuplestore::begin_heap(true, false, init_small::globals::work_mem());
         ts.set_eflags(node.eflags);
@@ -78,27 +92,13 @@ pub fn exec_material<'mcx, C: MaterialChild<'mcx>>(
         node.tuplestorestate = Some(ts);
     }
 
-    let mut eof_tuplestore = node.tuplestorestate.as_ref().is_none_or(Tuplestore::ateof);
-
-    if !forward && eof_tuplestore {
-        if !node.eof_underlying {
-            // C: skip one back so gettupleslot yields the pre-EOF tuple's predecessor.
-            let ts = node.tuplestorestate.as_mut().expect("backward read requires a store");
-            if !ts.advance(forward)? {
-                return Ok(None);
-            }
-        }
-        eof_tuplestore = false;
-    }
+    let eof_tuplestore = node.tuplestorestate.as_ref().is_none_or(Tuplestore::ateof);
 
     if !eof_tuplestore {
         let ts = node.tuplestorestate.as_mut().expect("checked above");
         let slot = node.ps_ResultTupleSlot;
-        if ts.gettupleslot(forward, false, &mut estate.es_tupleTable[slot.0 as usize], mcx)? {
+        if ts.gettupleslot(true, false, &mut estate.es_tupleTable[slot.0 as usize], mcx)? {
             return Ok(Some(slot));
-        }
-        if !forward {
-            return Ok(None);
         }
     }
     if node.eof_underlying {
