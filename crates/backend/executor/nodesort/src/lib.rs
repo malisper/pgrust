@@ -119,179 +119,6 @@ impl SortState<'_> {
     }
 }
 
-/// Page-batched outer feed for the fused sort drive; `emit` must yield rows in
-/// the leaf's per-tuple emission order (line-pointer order for heap batches —
-/// tie order and abbrev conversion order depend on it).
-pub trait SortFeedSource<'mcx> {
-    fn next_batch(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<u32>;
-    /// None = qual-filtered; Some = the leaf's output slot (post-projection).
-    fn emit(
-        &mut self,
-        i: u32,
-        estate: &mut EStateData<'mcx>,
-    ) -> PgResult<Option<ExecSlotId>>;
-    /// True arms `emit_key`: outer column 0 is served straight from the
-    /// leaf's staged column array — value/null identical to `emit` +
-    /// slot_getsomeattrs(1), no qual, same row order.
-    fn key_direct(&mut self, _estate: &mut EStateData<'mcx>) -> bool {
-        false
-    }
-    /// None = staged row not covered (fallback); take the `emit` path.
-    fn emit_key(&mut self, _i: u32) -> Option<(Datum, bool)> {
-        None
-    }
-}
-
-/// `ExecSort` over a page-batched leaf (exec-batching rung 3): identical put
-/// sequence to `exec_sort`'s pull-one-slot feed, per-tuple node recursion
-/// elided. Callers route here only while the sort is unbuilt and the outer
-/// shape is fusible; the drain leg matches `exec_sort`.
-pub fn exec_sort_batched<'mcx, S: SortFeedSource<'mcx>>(
-    node: &mut SortState<'mcx>,
-    estate: &mut EStateData<'mcx>,
-    outer_desc: Rc<TupleDescData<'static>>,
-    mut src: S,
-) -> PgResult<Option<ExecSlotId>> {
-    cfi()?;
-    let dir = estate.es_direction;
-    let mcx = estate.es_query_cxt;
-    debug_assert!(node.datumSort == (outer_desc.natts == 1));
-
-    if !node.sort_Done {
-        estate.es_direction = ForwardScanDirection;
-
-        let mut tuplesortopts = TUPLESORT_NONE;
-        if node.randomAccess {
-            tuplesortopts |= TUPLESORT_RANDOMACCESS;
-        }
-        if node.bounded {
-            tuplesortopts |= TUPLESORT_ALLOWBOUNDED;
-        }
-        let work_mem = init_small::globals::work_mem();
-        let mut ts = if node.datumSort {
-            Tuplesort::begin_datum(
-                outer_desc.attr(0).atttypid,
-                node.plan.sortOperators[0],
-                node.plan.collations[0],
-                node.plan.nullsFirst[0],
-                work_mem,
-                tuplesortopts,
-            )?
-        } else {
-            Tuplesort::begin_heap(
-                outer_desc,
-                node.plan.sortColIdx,
-                node.plan.sortOperators,
-                node.plan.collations,
-                node.plan.nullsFirst,
-                work_mem,
-                tuplesortopts,
-            )?
-        };
-        if node.bounded {
-            ts.set_bound(node.bound);
-        }
-
-        if node.datumSort {
-            let direct = src.key_direct(estate);
-            if ts.datum_sort_is_byref() {
-                loop {
-                    let n = src.next_batch(estate)?;
-                    if n == 0 {
-                        break;
-                    }
-                    for i in 0..n {
-                        if direct {
-                            if let Some((val, isnull)) = src.emit_key(i) {
-                                ts.putdatum(val, isnull)?;
-                                continue;
-                            }
-                        }
-                        let Some(id) = src.emit(i, estate)? else { continue };
-                        let slot = estate.slot_mut(id);
-                        exectuples::slot_getsomeattrs(slot, 1);
-                        let base = slot.base();
-                        ts.putdatum(base.tts_values[0], base.tts_isnull[0])?;
-                    }
-                }
-            } else {
-                ts.putdatum_batch(|p| loop {
-                    let n = src.next_batch(estate)?;
-                    if n == 0 {
-                        return Ok(());
-                    }
-                    for i in 0..n {
-                        if direct {
-                            if let Some((val, isnull)) = src.emit_key(i) {
-                                p.put(val, isnull)?;
-                                continue;
-                            }
-                        }
-                        let Some(id) = src.emit(i, estate)? else { continue };
-                        let slot = estate.slot_mut(id);
-                        exectuples::slot_getsomeattrs(slot, 1);
-                        let base = slot.base();
-                        p.put(base.tts_values[0], base.tts_isnull[0])?;
-                    }
-                })?;
-            }
-        } else {
-            loop {
-                let n = src.next_batch(estate)?;
-                if n == 0 {
-                    break;
-                }
-                for i in 0..n {
-                    let Some(id) = src.emit(i, estate)? else { continue };
-                    ts.puttupleslot(estate.slot_mut(id), mcx)?;
-                }
-            }
-        }
-
-        ts.performsort()?;
-
-        let id = node.plan.plan.plan_node_id;
-        let stats = ts.get_stats();
-        match estate.es_sort_instrumentation.iter_mut().find(|(i, _)| *i == id) {
-            Some((_, s)) => *s = stats,
-            None => estate.es_sort_instrumentation.push((id, stats)),
-        }
-
-        estate.es_direction = dir;
-        node.sort_Done = true;
-        node.bounded_Done = node.bounded;
-        node.bound_Done = node.bound;
-        node.tuplesortstate = Some(ts);
-    }
-
-    // Lane refsort: the tuplesort is the narrow (key, ref) sort — the node's
-    // output is the gathered-winner buffer (a lane feed built it; a fallback
-    // to this drain leg at a later call boundary must stay byte-safe).
-    if node.refsort {
-        debug_assert!(ScanDirectionIsForward(dir), "refsort never arms with randomAccess");
-        return Ok(refsort_pop(node, estate));
-    }
-    let ts = node.tuplesortstate.as_mut().expect("sort_Done without tuplesortstate");
-    let slot_id = node.ps_ResultTupleSlot;
-    let slot = estate.slot_mut(slot_id);
-    let forward = ScanDirectionIsForward(dir);
-    let got = if node.datumSort {
-        exectuples::exec_clear_tuple(slot, mcx);
-        match ts.getdatum(forward)? {
-            Some(nd) => {
-                let base = slot.base_mut();
-                base.tts_values[0] = if nd.isnull { Datum::null() } else { nd.value };
-                base.tts_isnull[0] = nd.isnull;
-                exectuples::exec_store_virtual_tuple(slot);
-                true
-            }
-            None => false,
-        }
-    } else {
-        ts.gettupleslot(forward, false, slot, mcx)?
-    };
-    Ok(if got { Some(slot_id) } else { None })
-}
 
 /// `ExecSort`: sort the subplan on first fetch, then feed from tuplesort.
 pub fn exec_sort<'mcx, F>(
@@ -386,7 +213,8 @@ where
         node.tuplesortstate = Some(ts);
     }
 
-    // Lane refsort fallback drain (see `exec_sort_batched`'s twin arm).
+    // Lane refsort fallback drain (the fused batched-feed twin arm was
+    // deleted with fused arm #5, se/deletion-prep C1).
     if node.refsort {
         debug_assert!(ScanDirectionIsForward(dir), "refsort never arms with randomAccess");
         return Ok(refsort_pop(node, estate));
@@ -835,7 +663,8 @@ pub fn sort_lane_put_slot<'mcx>(
 
 /// True when this sort's outer shape sorts bare datums (single-column
 /// outer). Callers use it to gate the direct-key feed probe — the arming
-/// mirror of `exec_sort_batched`, which probes `key_direct` only inside its
+/// mirror of the deleted fused `exec_sort_batched` feed, which probed
+/// `key_direct` only inside its
 /// `node.datumSort` arm.
 #[inline(always)]
 pub fn sort_lane_is_datum(node: &SortState<'_>) -> bool {
@@ -843,7 +672,7 @@ pub fn sort_lane_is_datum(node: &SortState<'_>) -> bool {
 }
 
 /// Per-row feed face for `sort_lane_put_batch` — the batch-positioned
-/// analogue of `SortFeedSource`'s `emit`/`emit_key` pair (one face so both
+/// analogue of the deleted `SortFeedSource`'s `emit`/`emit_key` pair (one face so both
 /// legs share the caller's emit state).
 pub trait SortLaneBatchFeed<'mcx> {
     /// Produce staged row `i`'s output slot; `None` = qual-filtered.
@@ -898,7 +727,7 @@ fn for_each_put(
 /// row `emit` yields for staged positions `pos..n`. Row-for-row this is
 /// `sort_lane_put` over the same emit stream in the same order — the
 /// dispatch-granularity change only — with the per-put invariants hoisted
-/// out of the loop, exactly as `exec_sort_batched`'s feed arms hoist them:
+/// out of the loop, exactly as the deleted fused feed's arms hoisted them:
 ///   * the tuplesort handle is resolved once per batch, not per put;
 ///   * by-val datum sorts hold the batch putter open across the batch
 ///     (`putdatum_batch` — the same `puttuple_common` accounting as
@@ -907,7 +736,7 @@ fn for_each_put(
 ///   * by-ref datum sorts keep `putdatum` (its datumCopy arm — the batch
 ///     putter parks raw slot pointers the next emit would recycle).
 ///
-/// Direct key feed (`exec_sort_batched`'s `key_direct`/`emit_key` arms,
+/// Direct key feed (the deleted fused feed's `key_direct`/`emit_key` arms,
 /// verbatim): when `direct` is armed (datum sort, key served straight from
 /// the leaf's staged column — value/null identical to `emit` +
 /// `slot_getsomeattrs(1)`, no qual, same row order), rows `emit_key` covers

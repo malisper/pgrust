@@ -1507,13 +1507,15 @@ type ProcResult = PgResult<Option<ExecSlotId>>;
 // Fused-arm retirement P2 force knobs (docs/design/flip-ladder.md §5; wave-4
 // tierA A4 commit 1 — the contractual FIRST commit of the retirement track).
 //
-// Each of the seven M-era fused batched drives gets a default-ON
+// Each surviving M-era fused batched drive gets a default-ON
 // `PGRUST_FUSED_ARM_<NAME>` env gate: `=0`/`off` forces THAT arm off (the P1
 // A/B measurement lever AND the post-retirement revert lever; OQ3 one
 // purpose per knob). Default (env absent or any other value) = ON —
 // behavior-identical to today at default config by construction. These
-// knobs die only at P3, each with its arm's body (flip-ladder §5); none die
-// in wave 4. Registry: notes/se-phase0-integration.md R-KNOBS
+// knobs die only at P3, each with its arm's body (flip-ladder §5) — arm #5
+// SORT_FEED passed P3 (se/deletion-prep C1: knob + body deleted; the
+// `PGRUST_FUSED_ARM_SORT_FEED` spelling is now inert env). Registry:
+// notes/se-phase0-integration.md R-KNOBS
 // (`PGRUST_FUSED_ARM_<NAME>` family, WS-P).
 //
 // Cost discipline (se2-cost law): one relaxed byte load + compare on the
@@ -1521,17 +1523,17 @@ type ProcResult = PgResult<Option<ExecSlotId>>;
 // process.
 // ===========================================================================
 
-/// The seven fused arms, flip-ladder §5 table order. Discriminant = the
-/// per-arm cell index.
+/// The surviving fused arms, flip-ladder §5 table order (arm #5 SORT_FEED
+/// deleted at P3 — se/deletion-prep C1; the knob died with the body).
+/// Discriminant = the per-arm cell index.
 #[derive(Clone, Copy)]
 enum FusedArm {
     AggSeq = 0,
     AggIndex = 1,
     AggIos = 2,
     AggBitmap = 3,
-    SortFeed = 4,
-    HashBuildProj = 5,
-    HashBuild = 6,
+    HashBuildProj = 4,
+    HashBuild = 5,
 }
 
 impl FusedArm {
@@ -1542,7 +1544,6 @@ impl FusedArm {
             FusedArm::AggIndex => "AGG_INDEX",
             FusedArm::AggIos => "AGG_IOS",
             FusedArm::AggBitmap => "AGG_BITMAP",
-            FusedArm::SortFeed => "SORT_FEED",
             FusedArm::HashBuildProj => "HASH_BUILD_PROJ",
             FusedArm::HashBuild => "HASH_BUILD",
         }
@@ -1553,8 +1554,8 @@ impl FusedArm {
 /// forced OFF (`=0`/`off`), 2 = ON (the default). The rowmode.rs AtomicU8
 /// idiom, one cell per arm so a forced-off arm never perturbs another's
 /// resolve.
-static FUSED_ARMS: [core::sync::atomic::AtomicU8; 7] =
-    [const { core::sync::atomic::AtomicU8::new(0) }; 7];
+static FUSED_ARMS: [core::sync::atomic::AtomicU8; 6] =
+    [const { core::sync::atomic::AtomicU8::new(0) }; 6];
 
 /// The P2 gate read: `true` = the fused arm may engage (today's behavior).
 #[inline]
@@ -1588,7 +1589,6 @@ pub(crate) fn fused_arm_set_for_tests(env_suffix: &str, on: bool) {
         FusedArm::AggIndex,
         FusedArm::AggIos,
         FusedArm::AggBitmap,
-        FusedArm::SortFeed,
         FusedArm::HashBuildProj,
         FusedArm::HashBuild,
     ]
@@ -2511,84 +2511,18 @@ fn sort_arm<'mcx>(s: &mut SortNode<'mcx>, estate: &mut EStateData<'mcx>) -> Proc
             return Ok(r);
         }
     }
+    // Arm #5 SORT_FEED is DELETED (se/deletion-prep C1): with AD2
+    // (`PGRUST_LANE_V2_SORT_RANDOMACCESS`) default ON and the FEED-ONLY fix
+    // (0d4bf241c) the lane sort surface is an admission SUPERSET of the old
+    // fused gate (child gate admits all qual/projection variants over the
+    // parallel-admitting page-batch probe; randomAccess sorts feed through
+    // the breaker sink and drain on the row-path tuplesort below). Shapes
+    // the lane refuses fall through to the per-tuple drive here —
+    // byte-identical by the sortfeed-ra letter (arm C == arm B, −0.04% vs
+    // the fused world; notes/se-deletion-prep.md §1 arm #5).
     let SortNode { state, outer, outer_desc, .. } = s;
     let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
-    if !state.sort_done() {
-        if let PlanStateNode::SeqScan(ss) = &mut **outer {
-            // P2 gate (flip-ladder §5 arm #5): PGRUST_FUSED_ARM_SORT_FEED.
-            if fused_arm_enabled(FusedArm::SortFeed)
-                && sort_seq_fusible(ss, estate)
-                && ::nodeseqscan::seq_scan_batch_supported(ss, estate)?
-            {
-                let src = SeqScanSortSource { ss };
-                return ::nodesort::exec_sort_batched(state, estate, outer_desc, src);
-            }
-        }
-    }
     ::nodesort::exec_sort(state, estate, outer_desc, |es| exec_proc_node(outer, es))
-}
-
-// Fused sort-over-seqscan page-batch feed: same tuples, same put order
-// (line-pointer emission), per-tuple node recursion elided. Instrumented
-// children never match the SeqScan arm, so EXPLAIN ANALYZE keeps the
-// per-tuple drive and its filter counters.
-fn sort_seq_fusible<'mcx>(
-    ss: &::nodeseqscan::SeqScanState<'mcx>,
-    estate: &EStateData<'mcx>,
-) -> bool {
-    use ::execexpr::{Kernel, SlotSrc};
-    if estate.es_epq_active || ss.ss.instr_idx.is_some() {
-        return false;
-    }
-    match ss.variant() {
-        ::nodeseqscan::SeqScanVariant::Plain | ::nodeseqscan::SeqScanVariant::WithProject => {}
-        ::nodeseqscan::SeqScanVariant::WithQual
-        | ::nodeseqscan::SeqScanVariant::WithQualProject => {
-            // Only allocation-free kernel quals run under the fused drive.
-            match ss.ss.qual.as_deref().map(|q| q.kernel()) {
-                Some(Kernel::QualScanVarCmpConst { .. }) => {}
-                Some(Kernel::QualVarCmpVar { a_src, b_src, .. })
-                    if a_src == SlotSrc::Scan && b_src == SlotSrc::Scan => {}
-                _ => return false,
-            }
-        }
-        ::nodeseqscan::SeqScanVariant::PlainBloom | ::nodeseqscan::SeqScanVariant::Epq => {
-            return false
-        }
-    }
-    match ss.ss.ps_ProjInfo.as_ref() {
-        None => true,
-        Some(p) => !p.pi_state.has_subplan() && p.pi_state.param_exec_deps().is_empty(),
-    }
-}
-
-struct SeqScanSortSource<'a, 'mcx> {
-    ss: &'a mut ::nodeseqscan::SeqScanState<'mcx>,
-}
-
-impl<'mcx> ::nodesort::SortFeedSource<'mcx> for SeqScanSortSource<'_, 'mcx> {
-    #[inline]
-    fn next_batch(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<u32> {
-        ::nodeseqscan::seq_scan_next_pagebatch(self.ss, estate)
-    }
-
-    #[inline]
-    fn emit(
-        &mut self,
-        i: u32,
-        estate: &mut EStateData<'mcx>,
-    ) -> PgResult<Option<ExecSlotId>> {
-        ::nodeseqscan::seq_scan_batch_emit(self.ss, estate, i)
-    }
-
-    fn key_direct(&mut self, estate: &mut EStateData<'mcx>) -> bool {
-        ::nodeseqscan::seq_scan_sortkey_direct(self.ss, estate)
-    }
-
-    #[inline(always)]
-    fn emit_key(&mut self, i: u32) -> Option<(::datum::Datum, bool)> {
-        ::nodeseqscan::seq_scan_batch_key(self.ss, i)
-    }
 }
 
 #[inline(never)]
@@ -4271,18 +4205,18 @@ pub(crate) fn with_eval_slots_outer<'mcx, R>(
 mod fused_arm_tests {
     use super::*;
 
-    /// P2 knob semantics (flip-ladder §5): every arm resolves ON by default
-    /// (env absent in the test process), the test lever flips a single arm
-    /// without perturbing the others, and the spellings are the seven
-    /// flip-ladder names exactly.
+    /// P2 knob semantics (flip-ladder §5): every SURVIVING arm resolves ON
+    /// by default (env absent in the test process), the test lever flips a
+    /// single arm without perturbing the others, and the spellings are the
+    /// six surviving flip-ladder names exactly (SORT_FEED deleted at P3 —
+    /// se/deletion-prep C1).
     #[test]
     fn fused_arm_knobs_default_on_and_isolate() {
-        const ARMS: [FusedArm; 7] = [
+        const ARMS: [FusedArm; 6] = [
             FusedArm::AggSeq,
             FusedArm::AggIndex,
             FusedArm::AggIos,
             FusedArm::AggBitmap,
-            FusedArm::SortFeed,
             FusedArm::HashBuildProj,
             FusedArm::HashBuild,
         ];
@@ -4294,7 +4228,6 @@ mod fused_arm_tests {
                 "AGG_INDEX",
                 "AGG_IOS",
                 "AGG_BITMAP",
-                "SORT_FEED",
                 "HASH_BUILD_PROJ",
                 "HASH_BUILD"
             ]
@@ -4306,12 +4239,12 @@ mod fused_arm_tests {
                 arm.env_suffix()
             );
         }
-        fused_arm_set_for_tests("SORT_FEED", false);
-        assert!(!fused_arm_enabled(FusedArm::SortFeed));
+        fused_arm_set_for_tests("AGG_IOS", false);
+        assert!(!fused_arm_enabled(FusedArm::AggIos));
         for arm in [FusedArm::AggSeq, FusedArm::HashBuild, FusedArm::AggBitmap] {
             assert!(fused_arm_enabled(arm), "force-off must not leak across arms");
         }
-        fused_arm_set_for_tests("SORT_FEED", true);
-        assert!(fused_arm_enabled(FusedArm::SortFeed));
+        fused_arm_set_for_tests("AGG_IOS", true);
+        assert!(fused_arm_enabled(FusedArm::AggIos));
     }
 }
