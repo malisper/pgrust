@@ -75,7 +75,9 @@ static STOP_AFTER: AtomicBool = AtomicBool::new(false);
 static STOP_XID: AtomicU32 = AtomicU32::new(0);
 static STOP_TIME: AtomicI64 = AtomicI64::new(0);
 static STOP_LSN: AtomicU64 = AtomicU64::new(0);
-static STOP_NAME: Mutex<String> = Mutex::new(String::new());
+pgsync::process_global! {
+    static STOP_NAME: Mutex<String> = Mutex::new(String::new());
+}
 
 static RECOVERY_PAUSE_STATE: AtomicI32 = AtomicI32::new(RECOVERY_NOT_PAUSED);
 static RECOVERY_NOT_PAUSED_CV: ConditionVariable = ConditionVariable::new();
@@ -482,7 +484,7 @@ pub(crate) fn getRecoveryStopReason() -> String {
             format!("{pos} LSN {}\n", lsn_fmt(STOP_LSN.load(Relaxed)))
         }
         RecoveryTargetType::Name => {
-            format!("at restore point \"{}\"", STOP_NAME.lock().unwrap())
+            format!("at restore point \"{}\"", &*STOP_NAME.lock().unwrap())
         }
         RecoveryTargetType::Immediate => "reached consistency".to_string(),
         RecoveryTargetType::Unset => "no recovery target specified".to_string(),

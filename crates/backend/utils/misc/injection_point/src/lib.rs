@@ -44,7 +44,9 @@ static N_ATTACHED: AtomicUsize = AtomicUsize::new(0);
 
 // name -> action. Cold: touched only by attach/detach and by call sites
 // after the N_ATTACHED gate says something is attached.
-static REGISTRY: Mutex<Vec<(String, Action)>> = Mutex::new(Vec::new());
+pgsync::process_global! {
+    static REGISTRY: Mutex<Vec<(String, Action)>> = Mutex::new(Vec::new());
+}
 
 // Wait machinery, mirroring the C module's InjectionPointSharedState:
 // fixed wait slots (name + wakeup counter) plus one condition variable.
@@ -56,8 +58,10 @@ struct WaitSlot {
     wait_count: u32,
 }
 
-static WAIT_SLOTS: Mutex<[WaitSlot; INJ_MAX_WAIT]> =
-    Mutex::new([const { WaitSlot { name: String::new(), wait_count: 0 } }; INJ_MAX_WAIT]);
+pgsync::process_global! {
+    static WAIT_SLOTS: Mutex<[WaitSlot; INJ_MAX_WAIT]> =
+        Mutex::new([const { WaitSlot { name: String::new(), wait_count: 0 } }; INJ_MAX_WAIT]);
+}
 
 static WAIT_POINT: ConditionVariable = ConditionVariable::new();
 

@@ -84,8 +84,10 @@ const QUERY_TASK_PENDING_INVALS: u8 = 1 << 4;
 // registration order is correct by construction. Registration is append-only
 // and idempotent (fn-pointer dedup via fn_addr_eq); the lists are tiny,
 // written once per arm per process, read per worker task.
-static POST_TASK_PARK: Mutex<Vec<fn(&ParallelShared)>> = Mutex::new(Vec::new());
-static PRIVATE_SHUTDOWN: Mutex<Vec<fn(&(dyn Any + Send + Sync))>> = Mutex::new(Vec::new());
+pgsync::process_global! {
+    static POST_TASK_PARK: Mutex<Vec<fn(&ParallelShared)>> = Mutex::new(Vec::new());
+    static PRIVATE_SHUTDOWN: Mutex<Vec<fn(&(dyn Any + Send + Sync))>> = Mutex::new(Vec::new());
+}
 
 pub fn register_parallel_post_task_park(f: fn(&ParallelShared)) {
     let mut v = POST_TASK_PARK.lock().unwrap_or_else(|p| p.into_inner());
@@ -218,11 +220,15 @@ thread_local! {
 }
 
 // The dsm-handle analog: bgw_main_arg keys the leader's Arc for the worker.
-static SHARED_REGISTRY: Mutex<Vec<(u64, Arc<ParallelShared>)>> = Mutex::new(Vec::new());
+pgsync::process_global! {
+    static SHARED_REGISTRY: Mutex<Vec<(u64, Arc<ParallelShared>)>> = Mutex::new(Vec::new());
+}
 static NEXT_SHARED_KEY: AtomicU64 = AtomicU64::new(1);
 
-static REGISTERED_ENTRYPOINTS: Mutex<Vec<(&'static str, ParallelWorkerEntry)>> =
-    Mutex::new(Vec::new());
+pgsync::process_global! {
+    static REGISTERED_ENTRYPOINTS: Mutex<Vec<(&'static str, ParallelWorkerEntry)>> =
+        Mutex::new(Vec::new());
+}
 
 const UNPORTED_INTERNAL_WORKERS: &[&str] = &[
     "ParallelQueryMain",

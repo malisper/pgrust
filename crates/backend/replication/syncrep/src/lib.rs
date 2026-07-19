@@ -52,7 +52,9 @@ const WAIT_EVENT_SYNC_REP: u32 = 0x0800_0000 | 52;
 // SyncRepConfig (the parsed synchronous_standby_names). C is per-process via
 // the GUC assign hook; the process-shared RwLock matches the thread model
 // (the GUC itself is PGC_SIGHUP, one value per cluster).
-static SYNC_REP_CONFIG: RwLock<Option<SyncRepConfigData>> = RwLock::new(None);
+pgsync::process_global! {
+    static SYNC_REP_CONFIG: RwLock<Option<SyncRepConfigData>> = RwLock::new(None);
+}
 
 pub fn sync_rep_config() -> Option<SyncRepConfigData> {
     SYNC_REP_CONFIG.read().expect("SYNC_REP_CONFIG poisoned").clone()
@@ -706,7 +708,9 @@ fn assign_synchronous_standby_names(
 // synchronous_standby_names' backing storage (C: the SyncRepStandbyNames
 // char* owned by syncrep). PGC_SIGHUP — one cluster-wide value, so a
 // process-shared static matches the thread model.
-static STANDBY_NAMES: RwLock<Option<String>> = RwLock::new(None);
+pgsync::process_global! {
+    static STANDBY_NAMES: RwLock<Option<String>> = RwLock::new(None);
+}
 
 fn standby_names_get() -> Option<String> {
     STANDBY_NAMES.read().expect("STANDBY_NAMES poisoned").clone()

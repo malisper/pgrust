@@ -1931,10 +1931,12 @@ struct BtVacInfo {
     vacuums: Vec<(::types_core::Oid, ::types_core::Oid, ::types_nbtree::BTCycleId)>,
 }
 
-static BTVACINFO: pgsync::Mutex<BtVacInfo> = pgsync::Mutex::new(BtVacInfo {
-    cycle_ctr: 0,
-    vacuums: Vec::new(),
-});
+pgsync::process_global! {
+    static BTVACINFO: pgsync::Mutex<BtVacInfo> = pgsync::Mutex::new(BtVacInfo {
+        cycle_ctr: 0,
+        vacuums: Vec::new(),
+    });
+}
 
 fn vac_key(rel: &Relation<'_>) -> (::types_core::Oid, ::types_core::Oid) {
     (rel.rd_locator.get().dbOid, rel.rd_id)

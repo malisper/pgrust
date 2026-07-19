@@ -134,7 +134,9 @@ struct LogicalRepCtx {
     last_start_times: HashMap<Oid, TimestampTz>,
 }
 
-static CTX: Mutex<Option<LogicalRepCtx>> = Mutex::new(None);
+pgsync::process_global! {
+    static CTX: Mutex<Option<LogicalRepCtx>> = Mutex::new(None);
+}
 
 fn with_ctx<R>(f: impl FnOnce(&mut LogicalRepCtx) -> R) -> R {
     let mut guard = CTX.lock().unwrap_or_else(|e| e.into_inner());

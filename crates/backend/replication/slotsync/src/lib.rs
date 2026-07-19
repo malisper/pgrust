@@ -62,12 +62,14 @@ struct SlotSyncCtx {
     last_start_time: i64,
 }
 
-static SLOT_SYNC_CTX: Mutex<SlotSyncCtx> = Mutex::new(SlotSyncCtx {
-    pid: InvalidPid,
-    stop_signaled: false,
-    syncing: false,
-    last_start_time: 0,
-});
+pgsync::process_global! {
+    static SLOT_SYNC_CTX: Mutex<SlotSyncCtx> = Mutex::new(SlotSyncCtx {
+        pid: InvalidPid,
+        stop_signaled: false,
+        syncing: false,
+        last_start_time: 0,
+    });
+}
 
 fn with_ctx<R>(f: impl FnOnce(&mut SlotSyncCtx) -> R) -> R {
     let mut guard = SLOT_SYNC_CTX.lock().unwrap_or_else(|e| e.into_inner());

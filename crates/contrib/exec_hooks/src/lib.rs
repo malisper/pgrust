@@ -44,7 +44,9 @@ pub struct ExecutorHooks {
     pub end: Option<Hook>,
 }
 
-static REGISTRY: Mutex<Vec<ExecutorHooks>> = Mutex::new(Vec::new());
+pgsync::process_global! {
+    static REGISTRY: Mutex<Vec<ExecutorHooks>> = Mutex::new(Vec::new());
+}
 
 // Published snapshot of the registry for lock-free dispatch. Written only
 // during the single-threaded boot window; backend threads spawn afterwards,
