@@ -170,3 +170,43 @@ pub fn init_seams() {
         pg_init: None,
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_filename_roundtrip() {
+        // C parse_snapshot_filename: sscanf("%X-%X.snap") + strict re-format
+        // comparison. The corpus's reject set plus the canonical accept.
+        assert_eq!(parse_snapshot_filename("0-40796E18.snap").unwrap(), 0x40796E18);
+        assert_eq!(
+            parse_snapshot_filename("A-1.snap").unwrap(),
+            (0xA_u64 << 32) | 1
+        );
+        for bad in [
+            "0-40796E18.foo",
+            "0-40796E18.foo.snap",
+            "0--40796E18.snap",
+            "-1--40796E18.snap",
+            "0/40796E18.snap",
+            "",
+            "../snapshots",
+            "../snapshots/0-40796E18.snap",
+            "0-abc.snap",          // lowercase can't round-trip through %X
+            "00-1.snap",           // leading zeros can't round-trip
+            "1-123456789.snap",    // >8 hex digits can't round-trip
+        ] {
+            assert!(parse_snapshot_filename(bad).is_err(), "{bad} should be rejected");
+        }
+    }
+
+    #[test]
+    fn snapbuild_state_desc() {
+        assert_eq!(get_snapbuild_state_desc(-1), "start");
+        assert_eq!(get_snapbuild_state_desc(0), "building");
+        assert_eq!(get_snapbuild_state_desc(1), "full");
+        assert_eq!(get_snapbuild_state_desc(2), "consistent");
+        assert_eq!(get_snapbuild_state_desc(7), "unknown state");
+    }
+}

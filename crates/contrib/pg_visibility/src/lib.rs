@@ -703,3 +703,32 @@ pub fn init_seams() {
         pg_init: None,
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tid_image_layout() {
+        // ItemPointerData wire image: bi_hi, bi_lo, ip_posid (native-endian).
+        let img = tid_image(0x0001_0002, 7);
+        assert_eq!(img.len(), 6);
+        assert_eq!(u16::from_ne_bytes(img[0..2].try_into().unwrap()), 1);
+        assert_eq!(u16::from_ne_bytes(img[2..4].try_into().unwrap()), 2);
+        assert_eq!(u16::from_ne_bytes(img[4..6].try_into().unwrap()), 7);
+    }
+
+    #[test]
+    fn item_id_clamps_beyond_buffer() {
+        let b = [0u8; 64];
+        let id = page_item_id(&b, 4096);
+        assert_eq!(id.flags, LP_UNUSED as u8);
+        assert_eq!(id.len, 0);
+    }
+
+    #[test]
+    fn vm_bit_positions() {
+        assert_eq!(VISIBILITYMAP_ALL_VISIBLE, 0x01);
+        assert_eq!(VISIBILITYMAP_ALL_FROZEN, 0x02);
+    }
+}

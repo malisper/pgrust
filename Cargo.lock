@@ -5462,12 +5462,14 @@ dependencies = [
  "lsyscache",
  "lsyscache_seams",
  "lwlock",
+ "mbutils",
  "mbutils_seams",
  "mcx",
  "miscinit_seams",
  "namespace_seams",
  "nodes_core",
  "parser_analyze",
+ "parser_small1",
  "pg_sema_seams",
  "planner",
  "pmsignal_seams",
@@ -11357,6 +11359,16 @@ dependencies = [
 [[package]]
 name = "pg_overexplain"
 version = "0.0.0"
+dependencies = [
+ "dfmgr",
+ "explain",
+ "format_type",
+ "lock",
+ "lsyscache",
+ "mcx",
+ "types_error",
+ "types_nodes",
+]
 
 [[package]]
 name = "pg_parameter_acl"
@@ -14963,6 +14975,7 @@ dependencies = [
  "pg_inherits",
  "pg_locale",
  "pg_logicalinspect",
+ "pg_overexplain",
  "pg_prewarm",
  "pg_prng",
  "pg_proc",

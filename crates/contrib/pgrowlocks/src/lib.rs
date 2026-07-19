@@ -27,6 +27,29 @@ const LIBRARY: &str = "pgrowlocks";
 // pg_authid.dat ROLE_PG_STAT_SCAN_TABLES.
 const ROLE_PG_STAT_SCAN_TABLES: types_core::Oid = 3377;
 
+fn single_locker_mode(infomask: u16, infomask2: u16) -> &'static str {
+    if infomask & HEAP_XMAX_LOCK_ONLY != 0 {
+        if HEAP_XMAX_IS_SHR_LOCKED(infomask) {
+            "For Share"
+        } else if HEAP_XMAX_IS_KEYSHR_LOCKED(infomask) {
+            "For Key Share"
+        } else if HEAP_XMAX_IS_EXCL_LOCKED(infomask) {
+            if infomask2 & HEAP_KEYS_UPDATED != 0 {
+                "For Update"
+            } else {
+                "For No Key Update"
+            }
+        } else {
+            // neither keyshare nor exclusive bit is set
+            "transient upgrade status"
+        }
+    } else if infomask2 & HEAP_KEYS_UPDATED != 0 {
+        "Update"
+    } else {
+        "No Key Update"
+    }
+}
+
 fn mode_name(status: MultiXactStatus) -> &'static str {
     match status {
         MultiXactStatus::MultiXactStatusUpdate => "Update",
@@ -221,26 +244,7 @@ fn fc_pgrowlocks(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult
                 (xid_array(mcx, &xids)?, text_array(mcx, &modes)?, int4_array(mcx, &pids)?)
             }
         } else {
-            let mode = if infomask & HEAP_XMAX_LOCK_ONLY != 0 {
-                if HEAP_XMAX_IS_SHR_LOCKED(infomask) {
-                    "For Share"
-                } else if HEAP_XMAX_IS_KEYSHR_LOCKED(infomask) {
-                    "For Key Share"
-                } else if HEAP_XMAX_IS_EXCL_LOCKED(infomask) {
-                    if infomask2 & HEAP_KEYS_UPDATED != 0 {
-                        "For Update"
-                    } else {
-                        "For No Key Update"
-                    }
-                } else {
-                    // neither keyshare nor exclusive bit is set
-                    "transient upgrade status"
-                }
-            } else if infomask2 & HEAP_KEYS_UPDATED != 0 {
-                "Update"
-            } else {
-                "No Key Update"
-            };
+            let mode = single_locker_mode(infomask, infomask2);
             (
                 xid_array(mcx, &[xmax])?,
                 text_array(mcx, &[mode])?,
@@ -279,4 +283,42 @@ pub fn init_seams() {
         lookup,
         pg_init: None,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use types_tuple::htup::{HEAP_XMAX_EXCL_LOCK, HEAP_XMAX_KEYSHR_LOCK, HEAP_XMAX_SHR_LOCK};
+
+    #[test]
+    fn single_locker_mode_arms() {
+        // pgrowlocks.c lock-mode decode over the C infomask combinations.
+        assert_eq!(single_locker_mode(HEAP_XMAX_LOCK_ONLY | HEAP_XMAX_SHR_LOCK, 0), "For Share");
+        assert_eq!(
+            single_locker_mode(HEAP_XMAX_LOCK_ONLY | HEAP_XMAX_KEYSHR_LOCK, 0),
+            "For Key Share"
+        );
+        assert_eq!(
+            single_locker_mode(HEAP_XMAX_LOCK_ONLY | HEAP_XMAX_EXCL_LOCK, HEAP_KEYS_UPDATED),
+            "For Update"
+        );
+        assert_eq!(
+            single_locker_mode(HEAP_XMAX_LOCK_ONLY | HEAP_XMAX_EXCL_LOCK, 0),
+            "For No Key Update"
+        );
+        assert_eq!(single_locker_mode(HEAP_XMAX_LOCK_ONLY, 0), "transient upgrade status");
+        assert_eq!(single_locker_mode(0, HEAP_KEYS_UPDATED), "Update");
+        assert_eq!(single_locker_mode(0, 0), "No Key Update");
+    }
+
+    #[test]
+    fn multixact_mode_names() {
+        use MultiXactStatus::*;
+        assert_eq!(mode_name(MultiXactStatusUpdate), "Update");
+        assert_eq!(mode_name(MultiXactStatusNoKeyUpdate), "No Key Update");
+        assert_eq!(mode_name(MultiXactStatusForUpdate), "For Update");
+        assert_eq!(mode_name(MultiXactStatusForNoKeyUpdate), "For No Key Update");
+        assert_eq!(mode_name(MultiXactStatusForShare), "For Share");
+        assert_eq!(mode_name(MultiXactStatusForKeyShare), "For Key Share");
+    }
 }
