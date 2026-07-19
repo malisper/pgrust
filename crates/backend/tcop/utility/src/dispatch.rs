@@ -1623,6 +1623,22 @@ fn slow_switch<'mcx>(
                     collect_gap("ALTER SET SCHEMA");
                     tablecmds::AlterTableNamespace(mcx, stmt)?;
                 }
+                // ExecAlterObjectSchemaStmt (alter.c) OBJECT_EXTENSION arm:
+                // AlterExtensionNamespace moves the member objects too.
+                types_nodes::parsenodes::ObjectType::OBJECT_EXTENSION => {
+                    collect_gap("ALTER SET SCHEMA");
+                    let name = stmt
+                        .object
+                        .expect("AlterObjectSchemaStmt.object")
+                        .as_string()
+                        .expect("extension name String")
+                        .sval;
+                    extension::AlterExtensionNamespace(
+                        mcx,
+                        name,
+                        stmt.newschema.expect("newschema"),
+                    )?;
+                }
                 // unported: ExecAlterObjectSchemaStmt object types without a
                 // ported lane — 0A000.
                 other => {

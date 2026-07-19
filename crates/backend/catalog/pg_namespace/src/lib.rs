@@ -13,7 +13,7 @@ pub const NamespaceOidIndexId: Oid = 2685;
 pub const Anum_pg_namespace_oid: AttrNumber = 1;
 pub const Natts_pg_namespace: usize = 4;
 
-// isTemp-only skips (extension dep, hook) are unported no-ops.
+// InvokeObjectPostCreateHook: object-access hooks are elided repo-wide.
 pub fn NamespaceCreate<'mcx>(
     mcx: Mcx<'mcx>,
     nspName: &str,
@@ -67,6 +67,14 @@ pub fn NamespaceCreate<'mcx>(
             ownerId,
             img,
         )?;
+    }
+    // C pg_namespace.c NamespaceCreate: "dependency on extension ... but not
+    // for magic temp schemas". Without this row a schema created by an
+    // extension script is not a member (it survives DROP EXTENSION and the
+    // AlterExtensionNamespace contains-the-schema loop check never fires).
+    if !isTemp {
+        let myself = pg_depend::ObjectAddress::set(NAMESPACE_RELATION_ID, nspoid);
+        pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
     }
     Ok(nspoid)
 }

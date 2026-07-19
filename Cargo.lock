@@ -1312,6 +1312,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "alter_seams"
+version = "0.0.0"
+dependencies = [
+ "mcx",
+ "pg_depend",
+ "seam_core",
+ "types_core",
+ "types_error",
+]
+
+[[package]]
 name = "amapi"
 version = "0.1.0"
 dependencies = [
@@ -3284,6 +3295,7 @@ version = "0.0.0"
 dependencies = [
  "aclchk",
  "adt_acl",
+ "alter_seams",
  "cache_syscache",
  "catalog",
  "catalog_indexing",
@@ -3308,10 +3320,13 @@ dependencies = [
  "pg_publication",
  "pg_shdepend",
  "pg_subscription",
+ "relation_seams",
  "schemacmds",
  "subscriptioncmds",
  "superuser",
  "table",
+ "tablecmds",
+ "typecmds",
  "types_core",
  "types_error",
  "types_nodes",
@@ -5542,6 +5557,7 @@ dependencies = [
  "adt_acl",
  "adt_bool",
  "adt_quote",
+ "alter_seams",
  "analyze_seams",
  "arrayfuncs",
  "cache_syscache",

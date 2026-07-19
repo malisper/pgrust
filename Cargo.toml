@@ -362,6 +362,7 @@ members = [
     "crates/backend/commands/publicationcmds",
     "crates/backend/commands/publicationcmds_seams",
     "crates/backend/commands/alter",
+    "crates/backend/commands/alter_seams",
     "crates/backend/commands/subscriptioncmds",
     "crates/backend/commands/sequence",
     "crates/backend/commands/sequence_xlog",
