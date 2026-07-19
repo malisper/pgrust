@@ -49,6 +49,12 @@ pub fn pgstat_count_checkpointer_slru_written() {
     with_pending_checkpointer_stats(|s| s.slru_written += 1);
 }
 
+// bufmgr.c BufferSync's PendingCheckpointerStats.buffers_written++: one bump
+// per buffer a checkpoint actually wrote.
+pub fn pgstat_count_checkpointer_buffers_written() {
+    with_pending_checkpointer_stats(|s| s.buffers_written += 1);
+}
+
 pub fn pending_checkpointer_stats() -> PgStat_CheckpointerStats {
     PENDING_CHECKPOINTER_STATS.with(|s| *s.borrow())
 }
