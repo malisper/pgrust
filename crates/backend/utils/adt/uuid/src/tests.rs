@@ -531,3 +531,16 @@ fn uuidv7_interval_shifts_timestamp() {
     let now = wall_clock_us();
     assert!((now - ts - 3_600_000_000).abs() < 60_000_000, "{ts} vs {now}");
 }
+
+// fnconf batch-1, OID 6430 crash family: an infinite interval shift makes
+// timestamptz_pl_interval return DT_NOEND/DT_NOBEGIN and C's epoch re-base
+// wraps under -fwrapv, still producing a version-7 UUID
+// (C 18.3: SELECT uuidv7('infinity'::interval) → a UUID, no error).
+// Red at base: debug add-with-overflow panic in uuidv7_interval.
+#[test]
+fn uuidv7_infinite_interval_returns_uuid() {
+    let u = uuidv7_interval(&adt_datetime::Interval::NOEND).unwrap();
+    assert_eq!(uuid_extract_version(&u), Some(7));
+    let u = uuidv7_interval(&adt_datetime::Interval::NOBEGIN).unwrap();
+    assert_eq!(uuid_extract_version(&u), Some(7));
+}
