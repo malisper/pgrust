@@ -15,6 +15,21 @@ use brin_pageops::{brinSetHeapBlockItemptr, brin_metapage_init, brin_page_init};
 
 const XLR_INFO_MASK: u8 = 0x0F;
 
+/// DST fault-sweep RED hook (sim-cfg only, zero native surface): when armed,
+/// `brin_xlog_samepage_update` keeps the OLD summary tuple instead of
+/// applying the record's widened replacement — a deliberately weakened redo
+/// that NARROWS a BRIN range relative to the heap. The crash sweep's brin
+/// red leg arms this and must CATCH it through its query-level
+/// consistent-or-wider coverage property (never through a replay failure).
+#[cfg(pgrust_sim)]
+pub mod sim_red {
+    use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
+    pub static KEEP_STALE_SUMMARY: AtomicBool = AtomicBool::new(false);
+    pub fn armed() -> bool {
+        KEEP_STALE_SUMMARY.load(Relaxed)
+    }
+}
+
 fn main_data<'a>(record: &'a XLogReaderState) -> &'a [u8] {
     let rec = record.record.as_ref().expect("brin redo with no decoded record");
     // SAFETY: points into the reader's decode buffer, valid for the redo
@@ -144,6 +159,18 @@ fn brin_xlog_samepage_update(record: &XLogReaderState) -> PgResult<()> {
     let offnum = decode_samepage_update(main_data(record));
 
     let (action, buffer) = XLogReadBufferForRedo(record, 0)?;
+    // DST RED (sim-cfg only): the deliberately weakened redo — keep the OLD
+    // (narrower) summary tuple, advance only the LSN. See sim_red.
+    #[cfg(pgrust_sim)]
+    if action == BLK_NEEDS_REDO && crate::sim_red::armed() {
+        // SAFETY: pinned + exclusively locked.
+        unsafe { page_mut(buffer) }.set_lsn(lsn);
+        bufmgr_seams::mark_buffer_dirty::call(buffer)?;
+        if buffer != InvalidBuffer {
+            unlock_release(buffer)?;
+        }
+        return Ok(());
+    }
     if action == BLK_NEEDS_REDO {
         let brintuple = block_data(record, 0);
         // SAFETY: pinned + exclusively locked.
