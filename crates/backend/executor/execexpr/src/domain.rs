@@ -49,8 +49,12 @@ fn with_state<R>(f: impl FnOnce(&mut EngineState) -> R) -> R {
         let mut slot = cell.borrow_mut();
         let st = slot.get_or_insert_with(|| {
             let mcx = ::mcx::session_root("DomainCheckEngine").mcx();
+            // The scratch NonNull must carry WRITE provenance: depth-0 calls
+            // reset() through it (as_mut below). session_root's shared
+            // &'static only grants SharedReadOnly — the _mut variant is the
+            // reset-per-use scratch-holder shape (regexp's RegexpExecScratch).
             let scratch =
-                NonNull::from(::mcx::session_root("DomainCheckScratch"));
+                NonNull::from(::mcx::session_root_mut(MemoryContext::new("DomainCheckScratch")));
             ManuallyDrop::new(EngineState {
                 mcx,
                 scratch,
