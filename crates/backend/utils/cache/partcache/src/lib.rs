@@ -87,7 +87,16 @@ fn with_state<R>(f: impl FnOnce(&mut PartCacheState) -> R) -> R {
     STATE.with(|cell| {
         let mut slot = cell.borrow_mut();
         let st = slot.get_or_insert_with(|| {
-            let mcx = Box::leak(Box::new(MemoryContext::new("PartCacheContext"))).mcx();
+            let mcx = ::mcx::session_root("PartCacheContext").mcx();
+            // LIFO: drop the state properly before the context free (any
+            // global-heap entry contents are released by the drop glue).
+            ::mcx::register_session_cleanup(Box::new(|| {
+                STATE.with(|cell| {
+                    if let Some(st) = cell.borrow_mut().take() {
+                        drop(ManuallyDrop::into_inner(st));
+                    }
+                });
+            }));
             ManuallyDrop::new(PartCacheState {
                 mcx,
                 keys: PgHashMap::with_capacity_in(8, mcx),

@@ -907,7 +907,7 @@ fn lookup_proof_cache<'mcx>(
             // Backend-lifetime table (C: hash_create at first use); flushed
             // wholesale on pg_amop changes.
             let cache_mcx =
-                Box::leak(Box::new(MemoryContext::new("Btree proof lookup cache"))).mcx();
+                ::mcx::session_root("Btree proof lookup cache").mcx();
             inval::invalidate::CacheRegisterSyscacheCallback(
                 cache_syscache::cacheinfo::AMOPOPID,
                 invalidate_opr_proof_cache_callback,

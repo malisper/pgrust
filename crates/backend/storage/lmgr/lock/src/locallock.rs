@@ -47,7 +47,7 @@ thread_local! {
 }
 
 pub fn InitLockManagerAccess() {
-    let cx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("LOCALLOCK hash")));
+    let cx: &'static MemoryContext = ::mcx::session_root("LOCALLOCK hash");
     let mcx = cx.mcx();
     // SAFETY: no with_local borrow is live (single-threaded backend entry).
     LOCAL.with(|slot| unsafe {

@@ -395,7 +395,7 @@ unsafe fn regress_va_slice<'a>(d: Datum) -> &'a [u8] {
 fn indirect_target_mcx() -> ::mcx::Mcx<'static> {
     thread_local! {
         static TCX: ::mcx::Mcx<'static> =
-            Box::leak(Box::new(::mcx::MemoryContext::new("MakeTupleIndirectTargets"))).mcx();
+            ::mcx::session_root("MakeTupleIndirectTargets").mcx();
     }
     TCX.with(|m| *m)
 }

@@ -109,7 +109,28 @@ fn send_active_guard() -> SendActiveGuard {
 fn send_init_cold(
     slot: &mut Option<ManuallyDrop<McxOwned<SendBufTy>>>,
 ) -> PgResult<&mut ManuallyDrop<McxOwned<SendBufTy>>> {
+    register_send_teardown();
     Ok(slot.insert(ManuallyDrop::new(new_send_buf()?)))
+}
+
+// Session-memory teardown (FPBUDGET-1): the PqComm send buffer is freed at
+// clean task end (after the exit-callback stack; nothing sends afterwards).
+// Idempotent per thread: both init paths call it, only the first registers.
+fn register_send_teardown() {
+    thread_local! {
+        static REGISTERED: Cell<bool> = const { Cell::new(false) };
+    }
+    if !REGISTERED.replace(true) {
+        ::mcx::register_session_cleanup(Box::new(|| {
+            SEND.with(|cell| {
+                // SAFETY: same single-thread slot ownership as with_send; no
+                // send routine is live at task-end teardown.
+                if let Some(old) = unsafe { &mut *cell.get() }.take() {
+                    drop(ManuallyDrop::into_inner(old));
+                }
+            });
+        }));
+    }
 }
 
 fn with_send<R>(
@@ -138,6 +159,7 @@ fn with_send<R>(
 pub fn pq_init_buffers() -> PgResult<()> {
     #[cfg(debug_assertions)]
     let _active = send_active_guard();
+    register_send_teardown();
     let fresh = ManuallyDrop::new(new_send_buf()?);
     SEND.with(|cell| {
         // SAFETY: same single-thread slot ownership as with_send; no send
