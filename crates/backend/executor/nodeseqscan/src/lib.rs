@@ -873,8 +873,7 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
     });
 }
 
-/// `PGRUST_LANE_V2_STAGE_VARWALK` (default ON since the SE18-GATES flip;
-/// explicit `=0`/`off` = permanent kill; AGGSEQ-STAGE — the heap
+/// `PGRUST_LANE_V2_STAGE_VARWALK` (default OFF; AGGSEQ-STAGE — the heap
 /// grouped staging seam, R-KNOBS registry spelling): allow the lane
 /// fold/gagg staging asks (`force && multi` callers only — the incumbent
 /// fused drives pass `multi = false` and keep their exact refusal, so the
@@ -895,15 +894,9 @@ fn stage_varwalk_enabled() -> bool {
         1 => false,
         2 => true,
         _ => {
-            // SE18-GATES flip (default OFF -> ON): the AE2/INDEXSOURCE resolve
-            // idiom — bare/unset/other reads ON, explicit `=0`/`off` = permanent
-            // kill (restores the fixed-width-prefix refusal world). Flip
-            // evidence: the SE17 combined aggseq letter (corpus-pairs-1784449336,
-            // +13.41% -> +1.37% arm-OFF with FOLD_TRANS) + the AGGSEQ-STAGE
-            // 16/16 dualexec matrix + engagement census (se-aggseq-stage §3).
-            let on = !matches!(
+            let on = matches!(
                 std::env::var("PGRUST_LANE_V2_STAGE_VARWALK").as_deref(),
-                Ok("0") | Ok("off")
+                Ok("1") | Ok("on")
             );
             STAGE_VARWALK.store(if on { 2 } else { 1 }, Relaxed);
             on
