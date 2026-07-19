@@ -155,8 +155,14 @@ pub fn fc_tsvector_setweight_by_filter(
 ) -> PgResult<Datum> {
     let v = arg_tsvector(fcinfo, 0)?;
     let cw = fcinfo.arg_char(1) as u8;
-    let w = weight_code(cw)
-        .map_err(|_| PgError::error(format!("unrecognized weight: {}", cw as char)))?;
+    // C (tsvector_op.c tsvector_setweight_by_filter): elog(ERROR,
+    // "unrecognized weight: %c", char_weight) — the raw byte lands in the
+    // message (invalid UTF-8 for high bytes; a NUL byte ends the cstring).
+    let w = weight_code(cw).map_err(|_| {
+        let mut m = b"unrecognized weight: ".to_vec();
+        m.push(cw);
+        PgError::error_raw_message(m)
+    })?;
     // SAFETY: the armed result mcx outlives this call.
     let mcx = unsafe { fcinfo.result_mcx_detached() };
     let (elems, nulls) = arg_text_array(mcx, fcinfo, 2)?;
