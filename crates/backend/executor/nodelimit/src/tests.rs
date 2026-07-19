@@ -3,7 +3,6 @@ use ::executils::{EStateData, ExecSlotId};
 use ::mcx::{Mcx, MemoryContext};
 use ::types_nodes::node_tree::Node;
 use ::types_nodes::plannodes::Limit;
-use ::types_scan::sdir::BackwardScanDirection;
 
 use crate::*;
 
@@ -33,29 +32,22 @@ fn mk_limit_plan(
     limit.seal().as_limit().unwrap()
 }
 
-// Child yielding 0..n as positions in a single reused slot id; supports
-// backward stepping like a materialized node would.
+// Child yielding 0..n as positions in a single reused slot id. Forward-only
+// (backward-execution wave B4: exec_limit's backward legs are deleted; the
+// run seam refuses backward entry since deletion-prep B1).
 struct Counter {
     n: i64,
     pos: i64,
     slot: ExecSlotId,
     bound: Option<i64>,
-    forward: bool,
 }
 
 impl<'mcx> LimitChild<'mcx> for Counter {
     fn exec_proc(&mut self, _estate: &mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>> {
-        if self.forward {
-            if self.pos >= self.n {
-                return Ok(None);
-            }
-            self.pos += 1;
-        } else {
-            if self.pos <= 1 {
-                return Ok(None);
-            }
-            self.pos -= 1;
+        if self.pos >= self.n {
+            return Ok(None);
         }
+        self.pos += 1;
         Ok(Some(self.slot))
     }
 
@@ -77,7 +69,7 @@ fn setup(
         count.map(|v| mk_i64_const(mcx, v)),
     );
     let node = exec_init_limit(plan, &mut estate, 0, None).unwrap();
-    let child = Counter { n, pos: 0, slot: ExecSlotId(0), bound: None, forward: true };
+    let child = Counter { n, pos: 0, slot: ExecSlotId(0), bound: None };
     (node, child, estate)
 }
 
@@ -134,7 +126,7 @@ fn null_count_means_limit_all() {
     let mut estate = EStateData::new_in(mcx);
     let plan = mk_limit_plan(mcx, None, Some(mk_null_i64_const(mcx)));
     let mut node = exec_init_limit(plan, &mut estate, 0, None).unwrap();
-    let mut child = Counter { n: 4, pos: 0, slot: ExecSlotId(0), bound: None, forward: true };
+    let mut child = Counter { n: 4, pos: 0, slot: ExecSlotId(0), bound: None };
     let out = drain(&mut node, &mut child, &mut estate);
     assert_eq!(out, vec![1, 2, 3, 4]);
     assert_eq!(child.bound, Some(-1));
@@ -161,22 +153,11 @@ fn rescan_recomputes_and_replays() {
     assert_eq!(drain(&mut node, &mut child, &mut estate), vec![2, 3]);
 }
 
-#[test]
-fn backward_within_window_and_windowstart() {
-    let (mut node, mut child, mut estate) = setup(Some(2), Some(3), 10);
-    assert_eq!(drain(&mut node, &mut child, &mut estate), vec![3, 4, 5]);
-    // Back up: WINDOWEND re-returns last tuple, then in-window backward.
-    estate.es_direction = BackwardScanDirection;
-    child.forward = false;
-    assert!(exec_limit(&mut node, &mut child, &mut estate).unwrap().is_some());
-    assert_eq!(child.pos, 5);
-    assert!(exec_limit(&mut node, &mut child, &mut estate).unwrap().is_some());
-    assert_eq!(child.pos, 4);
-    assert!(exec_limit(&mut node, &mut child, &mut estate).unwrap().is_some());
-    assert_eq!(child.pos, 3);
-    assert!(exec_limit(&mut node, &mut child, &mut estate).unwrap().is_none());
-    assert_eq!(node.lstate, LimitStateCond::LIMIT_WINDOWSTART);
-}
+// (backward_within_window_and_windowstart retired with the B4 deletion: the
+// backward walk it pinned — WINDOWEND re-return, in-window backward steps,
+// the LIMIT_WINDOWSTART parking state — is unreachable behind the forward-
+// only run seam, deletion-prep B1. The default-world cursor reads it modeled
+// are store-served and pinned by the portalcmds/pquery cursor suites.)
 
 // WITH TIES over sorted int4 rows: the window extends across duplicates of
 // the boundary tuple's key.
