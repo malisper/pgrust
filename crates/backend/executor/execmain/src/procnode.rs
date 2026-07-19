@@ -1981,6 +1981,20 @@ fn agg_arm<'mcx>(
                 {
                     return Ok(r);
                 }
+                // --- SE-AGGBITMAP: AGG_BITMAP arm re-host (deletion-prep
+                // arm #4). The fused drive below, hosted at the lane
+                // chokepoint — behind PGRUST_LANE_V2_AGG_BITMAP (default
+                // OFF; knob-OFF cost = one cached-bool test). Serial AND
+                // parallel-aware (the shared-iterator setup runs below the
+                // seam). Refuses fall through to the UNCHANGED
+                // fused/per-tuple paths, byte-identically (the WS-AE
+                // agg-over-IndexScan hook's posture, two arms up).
+                if let Some(r) =
+                    crate::lanev2::try_own_agg_over_bitmap_feed(agg, b, estate)?
+                {
+                    return Ok(r);
+                }
+                // --- end SE-AGGBITMAP ---
             }
             // P2 gate (flip-ladder §5 arm #4): PGRUST_FUSED_ARM_AGG_BITMAP.
             if fused_arm_enabled(FusedArm::AggBitmap)
