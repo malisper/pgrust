@@ -104,6 +104,12 @@ pub enum ProbeSpec {
     SelectColAll { table: String, col: usize, doubled: bool },
     /// Engine-hook scalar probe (F7/F8); sim answers a constant.
     HookScalar { hook: crate::oracle::check::HookKind },
+    /// H8 cursor walks: the generator computed this step's expected rows
+    /// from the cursor position model; the sim answers them verbatim (a
+    /// well-behaved portal), keeping RowsEq asserts sim-green.
+    KnownRows { rows: Vec<crate::oracle::check::Row> },
+    /// H8 MOVE steps: known command-tag count (`MOVE n`).
+    KnownCommand { count: u64 },
     /// Anything the oracle does not model (noise, PREPARE/DEALLOCATE, index
     /// DDL). Sim answers Command{0}.
     Opaque,
@@ -280,10 +286,29 @@ pub enum PStep {
     Assert(Check),
     /// Placeholder for WS-GEN's constrained noise substitution.
     NoiseSlot(NoiseConstraint),
+    /// H8 multi-session estate (plan-format v2). `Session` switches the
+    /// active session for the following steps (0 = primary); `AsyncSql`
+    /// dispatches without waiting (the statement is expected to block);
+    /// `Join` collects a session's outstanding statement — its outcome
+    /// lands in `slot` for slot-addressed checks; `WaitUntil` polls the
+    /// active session until the query returns scalar 't'.
+    ///
+    /// Oracle alignment law: the runner reports NO outcome for `Session` /
+    /// `AsyncSql` / `WaitUntil` (silent steps) and reports the joined
+    /// outcome for `Join` — `bridge::OracleCheckEval` advances its cursor
+    /// past silent steps symmetrically. The ledger is single-session: while
+    /// the model session is non-zero, `Tx` steps do NOT touch the ledger
+    /// (multi-session properties assert through slots, never the ledger).
+    Session(u32),
+    AsyncSql(SqlStep),
+    Join { session: u32, slot: Option<u32> },
+    WaitUntil(SqlStep),
 }
 
-/// A property instance compiled to steps (the serial subset — no
-/// SessionSwitch exists in this IR by construction, per contract §0 A1).
+/// A property instance compiled to steps. Serial properties never contain
+/// session-family steps (§0 A1 posture preserved); H8 multi-session
+/// properties (M2/S1 class) do, and must return to session 0 before their
+/// last step.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PropertyInstance {
     pub property: PropertyId,

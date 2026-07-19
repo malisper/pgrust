@@ -86,6 +86,7 @@ struct Census {
     property_blocks: u64,
     order_underdetermined: u64,
     float_lenient: u64,
+    session: u64,
 }
 
 impl Census {
@@ -107,6 +108,10 @@ impl Census {
             Step::Assumption(_) => self.assume += 1,
             Step::Assertion(_) => self.assert_ += 1,
             Step::Fault(_) => self.fault += 1,
+            // H8 session-family steps (multi-session properties).
+            Step::Session(_) | Step::AsyncDml(_) | Step::Join(_) | Step::WaitUntil(_) => {
+                self.session += 1
+            }
         }
     }
 

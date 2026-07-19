@@ -18,15 +18,26 @@
 //!     property's touched-table set in BIRTH-ID space (rename-chase is thereby
 //!     automatic for the shrinker: birth ids never change across RENAME).
 //! Reserved tags:
-//!   - `-- SESSION ...` parse = hard error "reserved: multi-session" (§0 A1).
+//!   - `-- SESSION ...` (H8): the multi-session estate. A plan that uses any
+//!     session-family step (`Session`/`AsyncDml`/`Join`/`WaitUntil`) renders
+//!     under the v2 header; a plan without them renders BYTE-IDENTICAL v1
+//!     (all pre-H8 records stay stable). Parsing a session-family step under
+//!     a v1 header stays the old hard error (the §0 A1 guarantee for v1
+//!     files is preserved verbatim).
 //!   - `Fault(Crash|TornWrite|Env)` render+parse OK; `FaultPoint::executable_v1`
 //!     is false — the runner must refuse execution (H4 tags).
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 const HEADER_LINE_1: &str = "-- simharness plan v1 (serial single-session)";
+const HEADER_LINE_2V: &str = "-- simharness plan v2 (multi-session)";
+
+/// Highest addressable session id (session 0 = the primary pair). The p3
+/// collision shape needs 4 sessions (ctrl + horizon-pin + two inserters);
+/// the cap leaves headroom without inviting unbounded fan-out.
+pub const MAX_SESSION_ID: u32 = 5;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -203,7 +214,31 @@ pub enum Step {
     Assumption(Check),
     Assertion(Check),
     Fault(FaultPoint),
-    // SessionSwitch: reserved tag; parse of `-- SESSION` is a hard error (§0 A1).
+    /// H8: switch the active session (0 = the primary pair; workers are
+    /// connected lazily). Part of plan bytes — the interleaving schedule IS
+    /// serialized, so replay is deterministic.
+    Session(u32),
+    /// H8: dispatch a DML on the active session WITHOUT waiting for its
+    /// completion (the statement is expected to block; a later `Join`
+    /// collects the outcome). Only valid on a worker session (id >= 1).
+    AsyncDml(Sql),
+    /// H8: collect session k's outstanding async statement (bounded wait);
+    /// the joined outcome flows through the normal classification.
+    Join(u32),
+    /// H8: poll the active session with this query until it returns the
+    /// single scalar 't' (bounded) — the observable-state gate the isolation
+    /// choreography needs (never fixed sleeps; the specconflict-e2e lesson).
+    WaitUntil(Sql),
+}
+
+impl Step {
+    /// Session-family steps force the v2 header.
+    pub fn is_v2(&self) -> bool {
+        matches!(
+            self,
+            Step::Session(_) | Step::AsyncDml(_) | Step::Join(_) | Step::WaitUntil(_)
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -272,6 +307,11 @@ fn validate_step(s: &Step) -> Result<(), PlanError> {
         Step::Fault(FaultPoint::Crash(p)) | Step::Fault(FaultPoint::Env(p)) => {
             if !no_ws(p) {
                 return err(0, "fault payload must be non-empty, no whitespace");
+            }
+        }
+        Step::Session(id) | Step::Join(id) => {
+            if *id > MAX_SESSION_ID {
+                return err(0, format!("session id {id} exceeds MAX_SESSION_ID {MAX_SESSION_ID}"));
             }
         }
         _ => {}
@@ -364,14 +404,59 @@ fn render_step(out: &mut String, step: &Step) {
             };
             let _ = writeln!(out, "-- FAULT {t}");
         }
+        Step::Session(id) => {
+            let _ = writeln!(out, "-- SESSION switch {id}");
+        }
+        Step::Join(id) => {
+            let _ = writeln!(out, "-- SESSION join {id}");
+        }
+        Step::AsyncDml(sql) => {
+            // Async DML carries the same MARK line as a synchronous statement
+            // (mutation), so the round-trip law reuses the marked-SQL parser.
+            let _ = writeln!(out, "-- SESSION async-dml");
+            let mut mark = format!("-- MARK {}", sql.mark.as_str());
+            if sql.flags.order_underdetermined {
+                mark.push_str(" order-underdetermined");
+            }
+            if sql.flags.float_lenient {
+                mark.push_str(" float-lenient");
+            }
+            let _ = writeln!(out, "{mark}");
+            let _ = writeln!(out, "{}", sql.text);
+        }
+        Step::WaitUntil(sql) => {
+            let _ = writeln!(out, "-- SESSION wait-until");
+            let mut mark = format!("-- MARK {}", sql.mark.as_str());
+            if sql.flags.order_underdetermined {
+                mark.push_str(" order-underdetermined");
+            }
+            if sql.flags.float_lenient {
+                mark.push_str(" float-lenient");
+            }
+            let _ = writeln!(out, "{mark}");
+            let _ = writeln!(out, "{}", sql.text);
+        }
     }
+}
+
+/// True when any step forces the v2 (multi-session) header. A plan built
+/// entirely from serial steps stays byte-identical to a pre-H8 v1 render.
+pub fn plan_is_v2(plan: &Plan) -> bool {
+    plan.items.iter().any(|item| match item {
+        PlanItem::Step(s) => s.is_v2(),
+        PlanItem::Property { steps, .. } => steps.iter().any(Step::is_v2),
+    })
 }
 
 /// Render a plan to its annotated-SQL `.plan` text. Deterministic: identical
 /// plans render to identical bytes (G-G3 rides on this).
 pub fn render(plan: &Plan) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "{HEADER_LINE_1}");
+    if plan_is_v2(plan) {
+        let _ = writeln!(out, "{HEADER_LINE_2V}");
+    } else {
+        let _ = writeln!(out, "{HEADER_LINE_1}");
+    }
     let _ = writeln!(
         out,
         "-- seed: {} profile: {} profile-sha256: {} generator: {}",
@@ -423,9 +508,13 @@ impl<'a> Lines<'a> {
     }
 }
 
-fn parse_header(lx: &mut Lines) -> Result<PlanHeader, PlanError> {
+/// Parse the header, returning the plan header plus whether the file declared
+/// the v2 (multi-session) format. A v1 header keeps every v1 guarantee: the
+/// SESSION-family tags stay hard errors under it (§0 A1).
+fn parse_header(lx: &mut Lines) -> Result<(PlanHeader, bool), PlanError> {
     let l1 = lx.next().ok_or(PlanError { line: 1, msg: "empty plan".into() })?;
-    if l1 != HEADER_LINE_1 {
+    let is_v2 = l1 == HEADER_LINE_2V;
+    if l1 != HEADER_LINE_1 && !is_v2 {
         // Version discipline: any other version line is a hard, named error.
         if l1.starts_with("-- simharness plan ") {
             return err(1, format!("unsupported plan format version line: '{l1}'"));
@@ -455,7 +544,7 @@ fn parse_header(lx: &mut Lines) -> Result<PlanHeader, PlanError> {
         generator: toks[6].to_string(),
     };
     validate_header(&header).map_err(|e| PlanError { line: ln, msg: e.msg })?;
-    Ok(header)
+    Ok((header, is_v2))
 }
 
 fn parse_marked_sql(lx: &mut Lines, kind: &str) -> Result<Step, PlanError> {
@@ -515,13 +604,71 @@ fn parse_marked_sql(lx: &mut Lines, kind: &str) -> Result<Step, PlanError> {
     })
 }
 
+/// Parse a `-- MARK`/SQL pair (already consumed the annotation line above it):
+/// the shared body of async-dml and wait-until session steps.
+fn parse_mark_and_sql(lx: &mut Lines) -> Result<Sql, PlanError> {
+    let ln = lx.lineno();
+    let mark_line = lx
+        .next()
+        .ok_or(PlanError { line: ln, msg: "expected '-- MARK' after '-- SESSION'".into() })?;
+    let rest = mark_line
+        .strip_prefix("-- MARK ")
+        .ok_or(PlanError { line: ln, msg: format!("expected '-- MARK ...', got '{mark_line}'") })?;
+    let mut toks = rest.split(' ');
+    let mark = match toks.next() {
+        Some("read") => Mark::Read,
+        Some("mutation") => Mark::Mutation,
+        Some("passthrough") => Mark::Passthrough,
+        other => return err(ln, format!("bad mark '{}'", other.unwrap_or(""))),
+    };
+    let mut flags = SqlFlags::default();
+    for t in toks {
+        match t {
+            "order-underdetermined" => flags.order_underdetermined = true,
+            "float-lenient" => flags.float_lenient = true,
+            other => return err(ln, format!("unknown mark flag '{other}'")),
+        }
+    }
+    let ln = lx.lineno();
+    let sql_line = lx
+        .next()
+        .ok_or(PlanError { line: ln, msg: "expected SQL line after '-- MARK'".into() })?;
+    if sql_line.starts_with("--") || sql_line.is_empty() {
+        return err(ln, format!("expected SQL statement line, got '{sql_line}'"));
+    }
+    Sql::new(sql_line, mark, flags).map_err(|e| PlanError { line: ln, msg: e.msg })
+}
+
 /// Parse one step whose first line is already known to start with `-- `.
 /// Returns Ok(None) if the line is a property begin/end marker (caller's job).
-fn parse_step(lx: &mut Lines) -> Result<Step, PlanError> {
+fn parse_step(lx: &mut Lines, is_v2: bool) -> Result<Step, PlanError> {
     let ln = lx.lineno();
     let line = lx.next().expect("caller checked");
     if line == "-- SESSION" || line.starts_with("-- SESSION ") {
-        return err(ln, "reserved: multi-session (SessionSwitch is not in plan-format v1)");
+        if !is_v2 {
+            // v1 files keep the §0 A1 guarantee verbatim: SESSION is refused.
+            return err(ln, "reserved: multi-session (SessionSwitch is not in plan-format v1)");
+        }
+        let body = line.strip_prefix("-- SESSION ").unwrap_or("");
+        if let Some(id) = body.strip_prefix("switch ") {
+            let id: u32 =
+                id.parse().map_err(|_| PlanError { line: ln, msg: format!("bad session id '{id}'") })?;
+            let step = Step::Session(id);
+            validate_step(&step).map_err(|e| PlanError { line: ln, msg: e.msg })?;
+            return Ok(step);
+        }
+        if let Some(id) = body.strip_prefix("join ") {
+            let id: u32 =
+                id.parse().map_err(|_| PlanError { line: ln, msg: format!("bad session id '{id}'") })?;
+            let step = Step::Join(id);
+            validate_step(&step).map_err(|e| PlanError { line: ln, msg: e.msg })?;
+            return Ok(step);
+        }
+        return match body {
+            "async-dml" => Ok(Step::AsyncDml(parse_mark_and_sql(lx)?)),
+            "wait-until" => Ok(Step::WaitUntil(parse_mark_and_sql(lx)?)),
+            other => err(ln, format!("unknown session op '{other}'")),
+        };
     }
     if let Some(kind) = line.strip_prefix("-- STEP ") {
         return match kind {
@@ -631,7 +778,7 @@ fn parse_begin_property(line: &str, ln: usize) -> Result<(String, u32, BTreeSet<
 /// malformed headers, and unsorted tables lists are hard errors.
 pub fn parse(text: &str) -> Result<Plan, PlanError> {
     let mut lx = Lines { lines: text.lines().collect(), pos: 0 };
-    let header = parse_header(&mut lx)?;
+    let (header, is_v2) = parse_header(&mut lx)?;
     let mut items: Vec<PlanItem> = Vec::new();
     loop {
         // Skip blank separator lines.
@@ -668,11 +815,11 @@ pub fn parse(text: &str) -> Result<Plan, PlanError> {
                 if !inner.starts_with("--") {
                     return err(ln2, format!("bare SQL without '-- STEP' annotation: '{inner}'"));
                 }
-                steps.push(parse_step(&mut lx)?);
+                steps.push(parse_step(&mut lx, is_v2)?);
             }
             items.push(PlanItem::Property { name, seq, tables, steps });
         } else if line.starts_with("--") {
-            items.push(PlanItem::Step(parse_step(&mut lx)?));
+            items.push(PlanItem::Step(parse_step(&mut lx, is_v2)?));
         } else {
             return err(ln, format!("bare SQL without '-- STEP' annotation: '{line}'"));
         }

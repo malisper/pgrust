@@ -70,6 +70,16 @@ pub fn runner_profile_to_gen(p: &crate::runner::profile::Profile) -> GenProfile 
     for k in &p.kill_switches {
         property_weights.insert(k.clone(), 0);
     }
+    // H8: session-gated properties (M2/S1) are weighted 0 unless the profile
+    // opts into the multi-session estate — the reach gate then treats them as
+    // gated-unreachable (no reach-gap), matching the hook-gated F7/F8 pattern.
+    if !p.multi_session {
+        for id in crate::oracle::props::v1_set() {
+            if id.needs_sessions() {
+                property_weights.insert(id.as_str().to_string(), 0);
+            }
+        }
+    }
     GenProfile {
         name: p.name.clone(),
         plan_len: PlanLen { min: p.steps_min.max(1) as u64, max: p.steps_max.max(1) as u64 },
@@ -116,6 +126,7 @@ pub fn runner_profile_to_gen(p: &crate::runner::profile::Profile) -> GenProfile 
         float_lenient: p.float_lenient,
         test_disable_productions: p.test_disable_productions.clone(),
         planner_knobs: p.planner_knobs.clone(),
+        multi_session: p.multi_session,
     }
 }
 
@@ -284,6 +295,13 @@ fn footprint_of(id: props::PropertyId) -> Footprint {
         P::X2IndexInvariance => Footprint { ddl: 3, dml: 1, query: 2, ..Default::default() },
         P::X4StatementForm => Footprint { ddl: 2, dml: 1, query: 3, ..Default::default() },
         P::M1ReadYourWrites => Footprint { ddl: 2, dml: 2, query: 5, tx: 4, ..Default::default() },
+        // H8: cursor walks (DECLARE + FETCH/MOVE reads inside a tx) and the
+        // multi-session estate. Footprints steer budget only; the FETCH/MOVE
+        // reads are Query-classified, session choreography adds tx budget.
+        P::C1CursorWalk => Footprint { ddl: 2, dml: 1, query: 8, tx: 2, ..Default::default() },
+        P::C2HoldCursor => Footprint { ddl: 2, dml: 1, query: 8, tx: 2, ..Default::default() },
+        P::M2CrossSession => Footprint { ddl: 2, dml: 1, query: 6, tx: 4, ..Default::default() },
+        P::S1SpecConflict => Footprint { ddl: 3, dml: 1, query: 6, tx: 3, ..Default::default() },
     }
 }
 
@@ -345,6 +363,36 @@ impl PropertyGen for OraclePropGen {
                 PStep::Assert(c) => {
                     steps.push(Step::Assertion(Check::new(check_to_json(&c)).ok()?));
                     lowered.push(PStep::Assert(c));
+                }
+                PStep::Session(id) => {
+                    steps.push(Step::Session(id));
+                    lowered.push(PStep::Session(id));
+                }
+                PStep::AsyncSql(s) => {
+                    // Async statements are always mutations by construction
+                    // (a blocked SELECT has no choreography role yet).
+                    let sql = Sql::new(
+                        format!("{};", s.sql),
+                        lower_mark(s.mark),
+                        SqlFlags::default(),
+                    )
+                    .ok()?;
+                    steps.push(Step::AsyncDml(sql));
+                    lowered.push(PStep::AsyncSql(s));
+                }
+                PStep::Join { session, slot } => {
+                    steps.push(Step::Join(session));
+                    lowered.push(PStep::Join { session, slot });
+                }
+                PStep::WaitUntil(s) => {
+                    let sql = Sql::new(
+                        format!("{};", s.sql),
+                        lower_mark(s.mark),
+                        SqlFlags::default(),
+                    )
+                    .ok()?;
+                    steps.push(Step::WaitUntil(sql));
+                    lowered.push(PStep::WaitUntil(s));
                 }
                 PStep::NoiseSlot(constraint) => {
                     let protected: BTreeSet<String> = match &constraint {
@@ -493,6 +541,31 @@ struct OracleEvalState {
     cur: Option<(u32, usize)>,
     /// Alignment lost (harness bug or ctx-less block): checks skip, counted.
     dead: bool,
+    /// H8: the model's view of the active session inside the current
+    /// property. The ledger is single-session — while non-zero, Tx steps do
+    /// not touch it (multi-session properties assert through slots).
+    model_session: u32,
+}
+
+impl OracleEvalState {
+    /// Advance the cursor past H8 silent steps (Session/AsyncSql/WaitUntil):
+    /// the runner reports no outcome for them, so the model consumes them
+    /// here, tracking the session switch as it passes.
+    fn skip_silent(&mut self) {
+        let Some((seq, mut idx)) = self.cur else { return };
+        let Some(inst) = self.by_seq.get(&seq) else { return };
+        while let Some(step) = inst.steps.get(idx) {
+            match step {
+                PStep::Session(k) => {
+                    self.model_session = *k;
+                    idx += 1;
+                }
+                PStep::AsyncSql(_) | PStep::WaitUntil(_) => idx += 1,
+                _ => break,
+            }
+        }
+        self.cur = Some((seq, idx));
+    }
 }
 
 /// Engine-hook capability set, probed against the LIVE DUT session at
@@ -556,6 +629,7 @@ impl OracleCheckEval {
                 stack: OracleStack::new(),
                 cur: None,
                 dead: false,
+                model_session: 0,
             }),
             hooks,
         }
@@ -565,12 +639,16 @@ impl OracleCheckEval {
 impl CheckEval for OracleCheckEval {
     fn eval(&self, check_json: &str, _stack: &crate::runner::driver::ResultStack) -> CheckVerdict {
         let mut st = self.inner.borrow_mut();
-        let Some((seq, idx)) = st.cur else {
+        if st.cur.is_none() {
             return CheckVerdict::Skip("no-oracle-ctx".into());
         };
         if st.dead {
             return CheckVerdict::Skip("oracle-ctx-misaligned".into());
         }
+        st.skip_silent();
+        let Some((seq, idx)) = st.cur else {
+            return CheckVerdict::Skip("no-oracle-ctx".into());
+        };
         // Alignment: current instance step must be this check.
         let aligned = st
             .by_seq
@@ -605,20 +683,24 @@ impl CheckEval for OracleCheckEval {
         st.stack.clear();
         st.dead = !st.by_seq.contains_key(&seq);
         st.cur = Some((seq, 0));
+        st.model_session = 0;
     }
 
     fn on_property_end(&self, _seq: u32) {
         let mut st = self.inner.borrow_mut();
         st.cur = None;
         st.dead = false;
+        st.model_session = 0;
     }
 
     fn on_step_outcome(&self, outcome: &ExecOutcome) -> Option<String> {
         let mut st = self.inner.borrow_mut();
-        let (seq, idx) = st.cur?;
+        st.cur?;
         if st.dead {
             return None;
         }
+        st.skip_silent();
+        let (seq, idx) = st.cur?;
         let step = match st.by_seq.get(&seq).and_then(|inst| inst.steps.get(idx)) {
             Some(s) => s.clone(),
             None => {
@@ -650,6 +732,12 @@ impl CheckEval for OracleCheckEval {
                 None
             }
             PStep::Tx(ctl) => {
+                // H8: the ledger models SESSION 0's view only. A worker
+                // session's tx (horizon pin, RR-snapshot arm) never touches
+                // it — multi-session properties assert through slots.
+                if st.model_session != 0 {
+                    return None;
+                }
                 match ctl {
                     PTxCtl::Begin(iso) => st.ledger.begin(iso),
                     PTxCtl::Commit => st.ledger.commit(),
@@ -664,6 +752,22 @@ impl CheckEval for OracleCheckEval {
                 None
             }
             PStep::Arm(_) => None,
+            PStep::Join { slot, .. } => {
+                // The joined async outcome lands in the Join's slot.
+                if let Some(slot) = slot {
+                    st.stack.put(slot, to_stmt_result(outcome));
+                }
+                None
+            }
+            PStep::Session(_) | PStep::AsyncSql(_) | PStep::WaitUntil(_) => {
+                // Silent steps are consumed by skip_silent; reaching one here
+                // means the runner reported an outcome for a silent step.
+                st.dead = true;
+                eprintln!(
+                    "simharness: oracle ctx misaligned at property seq={seq} step {idx} (silent-vs-outcome)"
+                );
+                None
+            }
             PStep::Assume(_) | PStep::Assert(_) | PStep::NoiseSlot(_) => {
                 st.dead = true;
                 eprintln!(

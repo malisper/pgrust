@@ -1,6 +1,7 @@
 {
-  "name": "default",
-  "connections": 1,
+  "name": "multi-session",
+  "connections": 4,
+  "multi_session": true,
   "iso_mix": {
     "read-committed": 60,
     "repeatable-read": 30,
@@ -8,12 +9,12 @@
   },
   "statement_weights": {
     "ddl": 10,
-    "dml": 24,
-    "query": 30,
+    "dml": 20,
+    "query": 26,
     "tx": 10,
     "arm": 4,
     "fault": 2,
-    "property": 20
+    "property": 28
   },
   "table_shape": {
     "tables_min": 1,
@@ -26,31 +27,27 @@
     [],
     [
       "work_mem=4MB"
-    ],
-    [
-      "enable_hashagg=off"
-    ],
-    [
-      "enable_seqscan=off"
     ]
   ],
   "property_weights": {
-    "F1-InsertSelect": 2,
+    "F1-InsertSelect": 1,
     "F2-UpdateVisibility": 1,
     "F3-DeleteAbsence": 1,
     "F4-ConstraintError": 1,
     "F5-DdlEffects": 1,
     "F6-AggConsistency": 1,
-    "F7-MemoryBaseline": 1,
-    "F8-ResourceBaseline": 1,
-    "L1-Tlp": 2,
-    "L2-NoRec": 2,
+    "F7-MemoryBaseline": 0,
+    "F8-ResourceBaseline": 0,
+    "L1-Tlp": 1,
+    "L2-NoRec": 1,
     "X1-ArmEquivalence": 1,
     "X2-IndexInvariance": 1,
     "X4-StatementForm": 1,
-    "M1-ReadYourWrites": 2,
-    "C1-CursorWalk": 2,
-    "C2-HoldCursor": 2
+    "M1-ReadYourWrites": 1,
+    "C1-CursorWalk": 3,
+    "C2-HoldCursor": 3,
+    "M2-CrossSession": 4,
+    "S1-SpecConflict": 4
   },
   "kill_switches": [],
   "float_lenient": false,

@@ -11,6 +11,9 @@ use rand::Rng;
 
 use crate::oracle::pstep::{IsoLevel, PropertyInstance};
 
+pub mod cursor;
+pub mod c1_cursor_walk;
+pub mod c2_hold_cursor;
 pub mod f1_insert_select;
 pub mod f2_update_visibility;
 pub mod f3_delete_absence;
@@ -22,6 +25,8 @@ pub mod f8_resource_baseline;
 pub mod l1_tlp;
 pub mod l2_norec;
 pub mod m1_read_your_writes;
+pub mod m2_cross_session;
+pub mod s1_spec_conflict;
 pub mod x1_arm_equivalence;
 pub mod x2_index_invariance;
 pub mod x4_statement_form;
@@ -42,6 +47,14 @@ pub enum PropertyId {
     X2IndexInvariance,
     X4StatementForm,
     M1ReadYourWrites,
+    /// H8 (plan-format v2). C1/C2 are single-session cursor/backward-scan
+    /// properties (the p7 surface); M2/S1 are the multi-session estate
+    /// (the p3 surface). All four are gated on `needs_sessions()` for the
+    /// multi-session pair.
+    C1CursorWalk,
+    C2HoldCursor,
+    M2CrossSession,
+    S1SpecConflict,
 }
 
 impl PropertyId {
@@ -61,6 +74,10 @@ impl PropertyId {
             PropertyId::X2IndexInvariance => "X2-IndexInvariance",
             PropertyId::X4StatementForm => "X4-StatementForm",
             PropertyId::M1ReadYourWrites => "M1-ReadYourWrites",
+            PropertyId::C1CursorWalk => "C1-CursorWalk",
+            PropertyId::C2HoldCursor => "C2-HoldCursor",
+            PropertyId::M2CrossSession => "M2-CrossSession",
+            PropertyId::S1SpecConflict => "S1-SpecConflict",
         }
     }
 
@@ -68,6 +85,14 @@ impl PropertyId {
     /// hook => auto-skip with a counted line, never a silent pass.
     pub fn hook_gated(&self) -> bool {
         matches!(self, PropertyId::F7MemoryBaseline | PropertyId::F8ResourceBaseline)
+    }
+
+    /// True when the property emits H8 session-family steps (plan-format
+    /// v2). These are offered only under a profile with `multi_session:
+    /// true` (the pool must be configured — the reach gate exempts them
+    /// otherwise, exactly like the hook-gated pair).
+    pub fn needs_sessions(&self) -> bool {
+        matches!(self, PropertyId::M2CrossSession | PropertyId::S1SpecConflict)
     }
 }
 
@@ -88,11 +113,18 @@ pub fn v1_set() -> Vec<PropertyId> {
         PropertyId::X2IndexInvariance,
         PropertyId::X4StatementForm,
         PropertyId::M1ReadYourWrites,
+        PropertyId::C1CursorWalk,
+        PropertyId::C2HoldCursor,
+        PropertyId::M2CrossSession,
+        PropertyId::S1SpecConflict,
     ]
 }
 
 pub fn unconditional_v1() -> Vec<PropertyId> {
-    v1_set().into_iter().filter(|p| !p.hook_gated()).collect()
+    v1_set()
+        .into_iter()
+        .filter(|p| !p.hook_gated() && !p.needs_sessions())
+        .collect()
 }
 
 /// Schema view passed by WS-GEN. Most v1 properties are self-local (they
@@ -182,6 +214,10 @@ pub fn generate(
         PropertyId::X2IndexInvariance => x2_index_invariance::generate(rng, schema, profile),
         PropertyId::X4StatementForm => x4_statement_form::generate(rng, schema, profile),
         PropertyId::M1ReadYourWrites => m1_read_your_writes::generate(rng, schema, profile),
+        PropertyId::C1CursorWalk => c1_cursor_walk::generate(rng, schema, profile),
+        PropertyId::C2HoldCursor => c2_hold_cursor::generate(rng, schema, profile),
+        PropertyId::M2CrossSession => m2_cross_session::generate(rng, schema, profile),
+        PropertyId::S1SpecConflict => s1_spec_conflict::generate(rng, schema, profile),
     }
 }
 
@@ -389,13 +425,14 @@ mod tests {
 
     #[test]
     fn v1_counts_match_contract() {
-        // Contract §3.1.1 enumerates F1–F6, L1/L2, X1/X2/X4, M1 (+F7/F8
-        // hook-gated) and captions it "13 properties (11 unconditional)".
-        // The enumerated list actually counts 6+2+3+1 = 12 unconditional,
-        // 14 total (spec's 15-property H1 v1 minus the A1-dropped M2). We
-        // implement the enumerated LIST; the caption's off-by-one is flagged
-        // in the worklog (notes/h1-ws-oracle.md) as a contract erratum.
-        assert_eq!(v1_set().len(), 14);
-        assert_eq!(unconditional_v1().len(), 12);
+        // Contract §3.1.1 enumerated F1–F6, L1/L2, X1/X2/X4, M1 (+F7/F8
+        // hook-gated) = 14 total / 12 unconditional at H1. H8 adds the
+        // cursor pair (C1/C2, unconditional) and the multi-session estate
+        // (M2/S1, session-gated — A1's dropped M2 reinstated on the v2
+        // format): 18 total, 14 unconditional (C1/C2 join), F7/F8 hook-
+        // gated + M2/S1 session-gated excluded.
+        assert_eq!(v1_set().len(), 18);
+        assert_eq!(unconditional_v1().len(), 14);
+        assert_eq!(v1_set().iter().filter(|p| p.needs_sessions()).count(), 2);
     }
 }
