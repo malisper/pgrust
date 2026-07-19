@@ -191,6 +191,13 @@ struct SimWireClient {
     /// cross-session interleaving. A session whose id is absent from the
     /// schedule (boot / noise) is never gated (sends its script freely).
     turn_gated: bool,
+    /// SIM-CONVERGE inc-2: this client sent a script statement whose turn is
+    /// still HELD — the cursor advances only when the statement's response
+    /// cycle completes (ReadyForQuery observed), because the live driver's
+    /// synchronous dispatch is COMPLETION-ordered: statement k fully
+    /// completes before step k+1 runs. A held turn also spans the driver-law
+    /// recovery ROLLBACK (statement + its recovery = one dispatch step).
+    turn_held: bool,
 }
 
 // SIM-CONVERGE: what this session's wire client actually SENT, in order —
@@ -270,6 +277,7 @@ impl SimWireClient {
             turn_id,
             turn_order,
             turn_gated,
+            turn_held: false,
         }
     }
 
@@ -325,17 +333,27 @@ impl SimWireClient {
                 self.last_injected = true;
                 return pqcomm_simnet::PumpStatus::Progress;
             }
-            // SIM-CONVERGE inc-2: cross-session turn gate. A gated client may
-            // send its next SCRIPT statement only when the global cursor points
-            // at its turn-id; otherwise it parks on the scheduler (a TimedPark
-            // = a legal decision point that lets the other session take its
-            // turn and advance the cursor) and reports Yielded — no byte
-            // progress, but a legal turn-wait, not a protocol stall. The
-            // recovery-injection ROLLBACK above and the Terminate below are
-            // session-local reactions and stay turn-free (the cursor counts
-            // script statements only). Schedule-exhausted (pos past the end)
-            // falls through to an ungated send — defensive against a schedule
-            // shorter than the script.
+            // SIM-CONVERGE inc-2, turn RELEASE (completion-ordered): reaching
+            // here means every sent statement's response cycle has completed
+            // (zseen > sent) and no recovery injection is pending — the held
+            // turn (statement + any driver-law ROLLBACK) is done, so advance
+            // the shared cursor and release the session owning the next turn.
+            // Completion-order is the live driver's synchronous-dispatch
+            // semantics: statement k fully completes before step k+1 runs —
+            // release-at-SEND would let two statements execute concurrently
+            // and break the plan's serialized-interleaving contract.
+            if self.turn_held {
+                self.turn_held = false;
+                TURN_POS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            // Turn WAIT: a gated client may send its next SCRIPT statement
+            // only when the global cursor points at its turn-id; otherwise it
+            // parks on the scheduler (a TimedPark = a legal decision point)
+            // and reports Yielded — no byte progress, but a legal turn-wait,
+            // not a protocol stall. The Terminate below is a session-local
+            // reaction and stays turn-free. Schedule-exhausted (pos past the
+            // end) falls through to an ungated send — defensive against a
+            // schedule shorter than the script.
             if self.turn_gated && !self.stmts.is_empty() {
                 let pos = TURN_POS.load(std::sync::atomic::Ordering::SeqCst);
                 if pos < self.turn_order.len() && self.turn_order[pos] != self.turn_id {
@@ -349,11 +367,10 @@ impl SimWireClient {
                     sent_log_push(&sql);
                     self.sent += 1;
                     self.last_injected = false;
-                    // SIM-CONVERGE inc-2: this script statement consumed a
-                    // global turn — advance the shared cursor so the session
-                    // owning the next turn is released.
+                    // The turn stays HELD until this statement's cycle
+                    // completes (see the release above).
                     if self.turn_gated {
-                        TURN_POS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        self.turn_held = true;
                     }
                 }
                 None => {
