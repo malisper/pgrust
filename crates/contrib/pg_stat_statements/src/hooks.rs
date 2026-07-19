@@ -157,9 +157,11 @@ pub(crate) fn pgss_executor_start(h: QueryDescHandle) {
             let mut instr = Box::new(Instrumentation::default());
             instrument::instr_init(&mut instr, INSTRUMENT_ALL);
             qd.totaltime = Some(instr);
-        } else {
-            qd.totaltime = None;
         }
+        // Not tracked: leave qd.totaltime alone. C's if-NULL alloc never
+        // clears, and another exec_hooks consumer (auto_explain) may have
+        // armed it this execution; a stale rearm leftover is harmless — every
+        // consumer's end hook re-checks its own enablement.
     });
 }
 

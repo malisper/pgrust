@@ -290,7 +290,7 @@ pub(crate) fn GetVictimBuffer(
     }
 }
 
-fn InvalidateVictimBuffer(desc: &BufferDesc) -> PgResult<bool> {
+pub(crate) fn InvalidateVictimBuffer(desc: &BufferDesc) -> PgResult<bool> {
     debug_assert!(desc.state.load(Ordering::Acquire) & BM_TAG_VALID != 0);
     let tag = desc.tag();
     let hash = BufTableHashCode(&tag);

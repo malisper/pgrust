@@ -1,0 +1,30 @@
+[package]
+name = "auto_explain"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "auto_explain"
+path = "src/lib.rs"
+
+[dependencies]
+mcx = { path = "../../_support/mcx" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+types_portal = { path = "../../_support/types/portal" }
+types_fmgr = { path = "../../_support/types/fmgr" }
+dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
+guc = { path = "../../backend/utils/misc/guc" }
+guc_tables = { path = "../../backend/utils/misc/guc_tables" }
+elog = { path = "../../backend/utils/error/elog" }
+execmain = { path = "../../backend/executor/execmain" }
+exec_hooks = { path = "../exec_hooks" }
+explain = { path = "../../backend/commands/explain" }
+instrument = { path = "../../backend/executor/instrument" }
+miscinit = { path = "../../backend/utils/init/miscinit" }
+parallel = { path = "../../backend/access/transam/parallel" }
+nodes_params = { path = "../../backend/nodes/params" }
+pg_prng = { path = "../../common/pg_prng" }
+types_slot = { path = "../../_support/types/types_slot" }
+types_nodes = { path = "../../_support/types/nodes" }

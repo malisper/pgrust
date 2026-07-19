@@ -29,4 +29,6 @@ detoast_seams = { path = "../../access/common/detoast_seams" }
 tuplestore = { path = "../../utils/sort/tuplestore" }
 exectuples = { path = "../exectuples" }
 
-[dev-dependencies]
+aclchk_seams = { path = "../../catalog/aclchk_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+lsyscache = { path = "../../utils/cache/lsyscache" }
