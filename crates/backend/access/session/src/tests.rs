@@ -468,7 +468,28 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      userDoption analog (postgres.c:106): -D switch storage consumed
     //      by SelectConfigFiles at single-user/stdio-wire boot. Boot-time
     //      argv plumbing on the main thread; dead after startup.
-    assert_eq!(count_tree(crates), 500, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 505, train-29 merge (fix/ddl-churn-rss FPBUDGET-1 session-cleanup
+    // registry meets the census; all five are that car's machinery):
+    //   41. utils/mmgr/mcxt_stats/src/lib.rs SESSION_CLEANUPS — THE
+    //      session-cleanup registry itself: the per-thread LIFO of teardown
+    //      closures run_session_teardown drains at ProcExitThread (C's
+    //      on_proc_exit table analog). Deliberately non-session TLS: it
+    //      holds cleanup CODE for this thread's current session estate,
+    //      never session state — binding a different session re-registers
+    //      through the same idempotent flags below; the drain empties it.
+    //   42. executor/execmain/src/execmain.rs TEARDOWN_REGISTERED —
+    //      once-per-thread registration guard for the parked exec-ctx
+    //      skeleton's cleanup. A bool latch, no session identity.
+    //   43. libpq/pqcomm/src/lib.rs REGISTERED — once-per-thread
+    //      registration guard for the send-buffer cleanup. Same class.
+    //   44. utils/init/postinit/src/lib.rs FUNDAMENTALS_REGISTERED —
+    //      once-per-thread registration guard for xact/resowner/globals
+    //      teardown. Same class.
+    //   45. main/main_main/src/bin/postgres.rs (alloc_track IN_HOOK +
+    //      TRACKED, one block) — debug_assertions-only allocation-tracker
+    //      reentrancy/thread-filter bits (PGRUST_ALLOC_TRACK diagnostics);
+    //      absent from dist codegen, never session state.
+    assert_eq!(count_tree(crates), 505, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
