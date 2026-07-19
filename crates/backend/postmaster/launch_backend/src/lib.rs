@@ -340,6 +340,15 @@ fn run_child_task(
     // at the thread top, in C's order. Crash payloads (exit_thread_raw,
     // PanicExitThread, raw panics) never defer and skip the drain like C's
     // _exit. A panic escaping the drain is announced SIGABRT below.
+    // Clean-exit marker (FPBUDGET-1 v2): TRUE only for a real proc_exit()
+    // (callback drain owed). quickdie's exit_thread_raw also unwinds
+    // ProcExitThread but never defers callbacks — the payload alone cannot
+    // tell the two apart, which is exactly how the t29 bounce happened (the
+    // estate drain ran after a quickdie that skipped the abort ceremony and
+    // dropped a FAILED portal into freed memory). Read BEFORE the drain
+    // consumes the flag.
+    let clean_proc_exit =
+        payload.is::<ipc::ProcExitThread>() && ipc::exit_callbacks_pending();
     let payload = match payload.downcast_ref::<ipc::ProcExitThread>() {
         Some(p) => {
             let code = p.code;
@@ -367,11 +376,54 @@ fn run_child_task(
     // Park in flight (wretain): the reaper must treat this announce as a
     // task end, not a thread end. Marked before the announce so the reaper
     // can never observe the announce without the marker.
-    if exitstatus == 0
+    let parks = exitstatus == 0
         && init_small::wretain::parking()
         && init_small::wretain::proc_retained()
-        && init_small::wretain::sinval_retained()
+        && init_small::wretain::sinval_retained();
+    // Session-memory teardown (FPBUDGET-1): C's process model frees the
+    // backend's whole TopMemoryContext estate at process exit; the thread
+    // model must do it explicitly or every session leaks its cache estate
+    // into the shared process (~2.2 MiB/seed under DDL/session churn).
+    // GATE (v2): clean proc_exit exits ONLY — the callback ceremony
+    // (ShutdownPostgres -> AbortOutOfAnyTransaction -> portal cleanup) must
+    // have run first, with every context alive, or leftover portals reach
+    // the drain holding Rc's into estates the drain frees (the t29 SIGABRT:
+    // FAILED-portal drop -> dealloc into a dead arena -> panic in Drop ->
+    // process abort). quickdie/kill-class exits skip the drain entirely and
+    // leak their estate, exactly as C's _exit(2) leaves cleanup to process
+    // death; the postmaster's crash cycle follows anyway. Parked standbys
+    // keep their retained caches by design. The payload re-check drops the
+    // clean claim if a deferred callback crashed mid-drain.
+    if !parks && clean_proc_exit && payload.downcast_ref::<ipc::ProcExitThread>().is_some()
     {
+        mcxt_stats::run_session_teardown();
+        // Hand freed-but-retained segments back before the thread dies
+        // (mi_collect(force) via the installed hook): without it the dead
+        // thread's heap pages sit abandoned-but-committed in RSS.
+        mcx::release_retained();
+    }
+    // FPBUDGET-1 debug instrument (PGRUST_MCXT_CENSUS): process-global live
+    // context census at task end. Growth across successive dumps = context
+    // nodes leaked by already-dead session threads.
+    if mcx::debug_census::on() {
+        let rows = mcx::debug_census::snapshot();
+        let mut line = String::from("MCXT-CENSUS");
+        for (name, n) in rows.iter().take(48) {
+            line.push_str(&format!(" [{}]={}", name, n));
+        }
+        eprintln!("{} (pid {})", line, child_pid);
+        // This thread's own live roots with sizes: anything still here after
+        // teardown is the ledgered tail (bytes attribution for the census).
+        let mut forest = String::from("MCXT-FOREST");
+        for t in mcxt_stats::backend_context_forest() {
+            forest.push_str(&format!(
+                " [{}]=used{}/fp{}",
+                t.name, t.subtree_used, t.arena_footprint
+            ));
+        }
+        eprintln!("{} (pid {})", forest, child_pid);
+    }
+    if parks {
         wpool::mark_parked_announce(child_pid);
     }
     if postmaster_seams::announce_child_exit::is_installed() {

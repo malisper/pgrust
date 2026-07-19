@@ -454,7 +454,7 @@ pub fn CreateFakeRelcacheEntry(rlocator: RelFileLocator) -> FakeRelcacheEntry {
     thread_local! {
         // Backs the entry's empty PgVecs only; nothing is ever allocated in it.
         static FAKE_REL_CX: &'static ::mcx::MemoryContext =
-            Box::leak(Box::new(::mcx::MemoryContext::new("fake relcache")));
+            ::mcx::session_root("fake relcache");
     }
     let mcx = FAKE_REL_CX.with(|cx| cx.mcx());
 
