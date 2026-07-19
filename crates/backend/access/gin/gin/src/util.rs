@@ -52,7 +52,31 @@ fn init_gin_col(rel: &Relation<'_>, i: usize) -> PgResult<GinColState> {
         opclass::F_GIN_EXTRACT_JSONB => GinOpclass::JsonbOps,
         opclass::F_GIN_EXTRACT_JSONB_PATH => GinOpclass::JsonbPathOps,
         opclass::F_GIN_EXTRACT_TSVECTOR => GinOpclass::TsvectorOps,
-        opclass::F_GINARRAYEXTRACT => GinOpclass::ArrayOps,
+        // intarray's gin__int_ops also registers ginarrayextract as proc 2;
+        // the extractQuery proc tells the two opclasses apart.
+        opclass::F_GINARRAYEXTRACT => {
+            let extract_query = lsyscache::get_opfamily_proc(
+                opfamily,
+                opcintype,
+                opcintype,
+                GIN_EXTRACTQUERY_PROC as i16,
+            )?;
+            if extract_query == opclass::F_GINQUERYARRAYEXTRACT {
+                GinOpclass::ArrayOps
+            } else {
+                let cx = ::mcx::MemoryContext::new("gin ext opclass probe");
+                let name = lsyscache::get_func_name(cx.mcx(), extract_query)?
+                    .map(|n| n.as_str().to_string());
+                match name.as_deref() {
+                    Some("ginint4_queryextract") => GinOpclass::IntArrayOps,
+                    _ => {
+                        return Err(crate::unsupported(format!(
+                            "GIN operator class with extractQuery support function {extract_query} is not supported"
+                        )))
+                    }
+                }
+            }
+        }
         // Extension opclasses carry dynamic oids; match by proname.
         other => {
             let cx = ::mcx::MemoryContext::new("gin ext opclass probe");
@@ -100,6 +124,7 @@ fn init_gin_col(rel: &Relation<'_>, i: usize) -> PgResult<GinColState> {
                 GinOpclass::TsvectorOps => opclass::F_GIN_CMP_TSLEXEME,
                 GinOpclass::TrgmOps => opclass::F_BTINT4CMP,
                 GinOpclass::HstoreOps => opclass::F_BTTEXTCMP,
+                GinOpclass::IntArrayOps => opclass::F_BTINT4CMP,
                 GinOpclass::ArrayOps => InvalidOid,
             }
     );

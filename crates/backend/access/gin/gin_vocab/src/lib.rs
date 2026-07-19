@@ -222,6 +222,10 @@ pub enum GinOpclass {
     // contrib gin_hstore_ops: same proname scheme; bodies through
     // gin_hstore_seams (text keys, shimmed triconsistent).
     HstoreOps,
+    // contrib gin__int_ops (intarray): shares ginarrayextract as proc 2, so
+    // it is disambiguated from ArrayOps by the extractQuery proc; bodies
+    // through gin_int4_seams (int4 keys, shimmed triconsistent).
+    IntArrayOps,
 }
 
 /// array_ops has no GIN_COMPARE_PROC; C falls back to the element type's
