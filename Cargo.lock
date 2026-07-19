@@ -4214,6 +4214,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "contrib_cube"
+version = "0.0.0"
+dependencies = [
+ "adt_float",
+ "arrayfuncs",
+ "datum",
+ "dfmgr",
+ "mcx",
+ "pqformat",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_gist",
+ "types_tuple",
+ "varlena",
+]
+
+[[package]]
+name = "contrib_earthdistance"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "dfmgr",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+]
+
+[[package]]
+name = "contrib_seg"
+version = "0.0.0"
+dependencies = [
+ "adt_float",
+ "datum",
+ "dfmgr",
+ "mcx",
+ "types_error",
+ "types_fmgr",
+ "types_gist",
+]
+
+[[package]]
 name = "controldata_utils"
 version = "0.0.0"
 dependencies = [
@@ -14762,6 +14804,9 @@ dependencies = [
  "commit_ts",
  "condition_variable",
  "conffiles",
+ "contrib_cube",
+ "contrib_earthdistance",
+ "contrib_seg",
  "copy_cmd",
  "costsize",
  "crypt",
