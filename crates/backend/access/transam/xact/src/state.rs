@@ -357,6 +357,16 @@ pub(crate) fn xs<R>(f: impl FnOnce(&mut XactState) -> R) -> R {
     xs_ptr().with(f)
 }
 
+/// Session-memory teardown (FPBUDGET-1): free the transaction contexts at
+/// clean task end. Contexts only — the state shell stays in TLS untouched
+/// (nothing runs xact code after teardown; the thread is exiting).
+pub fn session_mem_teardown() {
+    xs(|s| {
+        drop(s.top_transaction_context.take());
+        drop(s.transaction_abort_context.take());
+    });
+}
+
 /// The state's TLS address, resolved once per transaction phase and threaded
 /// through the phase's helpers (C reads plain globals). Callouts between
 /// `with` blocks may re-enter `xs`; only the brief `&mut` inside `with` must

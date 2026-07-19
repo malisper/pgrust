@@ -485,6 +485,26 @@ pub fn InitPostgres(
 
     ereport(DEBUG3).errmsg_internal("InitPostgres").finish(loc(723, "InitPostgres"))?;
 
+    // Session-memory teardown (FPBUDGET-1): the fundamentals — transaction
+    // contexts, resource-owner arena, Port copy — freed at clean task end.
+    // Registered before any catalog access so cache teardowns (registered
+    // lazily during boot lookups) drain FIRST in the LIFO order. Once per
+    // thread: a wretain standby re-enters InitPostgres per claim but parks
+    // without draining, and must not stack duplicates.
+    {
+        use std::cell::Cell;
+        thread_local! {
+            static FUNDAMENTALS_REGISTERED: Cell<bool> = const { Cell::new(false) };
+        }
+        if !FUNDAMENTALS_REGISTERED.replace(true) {
+            ::mcx::register_session_cleanup(Box::new(|| {
+                xact::session_mem_teardown();
+                resowner::session_mem_teardown();
+                init_small::globals::SessionMemTeardownPort();
+            }));
+        }
+    }
+
     gtrace("p.enter");
     lmgr_proc::InitProcessPhase2()?;
     gtrace("p.proc2");
