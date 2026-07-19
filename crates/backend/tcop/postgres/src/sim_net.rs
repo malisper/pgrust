@@ -161,10 +161,38 @@ struct SimWireClient {
     zseen: usize,
     /// Queries sent.
     sent: usize,
+    /// SIM-CONVERGE: mirror the harness driver's symmetric error-recovery
+    /// law (Dispatcher::dispatch / run_ctl_step: any errored statement is
+    /// followed by a ROLLBACK) so a simharness plan executed as a scripted
+    /// corpus produces the same statement stream a live driver would.
+    /// Opt-in (PGRUST_SIMNET_RECOVER=1); default off = pre-lane behavior,
+    /// byte-identical.
+    recover: bool,
+    /// Per-completed-cycle "carried an ErrorResponse" flags (cycle 0 = the
+    /// startup exchange; statement k completes in cycle k+1).
+    cycle_err: Vec<bool>,
+    /// Error seen in the (not yet Z-terminated) current cycle.
+    cur_err: bool,
+    /// The previously sent statement was an injected ROLLBACK (never chain
+    /// injections off an injected statement).
+    last_injected: bool,
+}
+
+// SIM-CONVERGE: what this session's wire client actually SENT, in order —
+// the alignment artifact the harness bridge uses to consume the transcript
+// (script statements + injected ROLLBACKs). One session per thread; dumped
+// with the other determinism artifacts.
+thread_local! {
+    static SENT_LOG: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn sent_log_push(sql: &str) {
+    SENT_LOG.with(|l| l.borrow_mut().push(sql.to_string()));
 }
 
 impl SimWireClient {
-    fn new(stmts: Vec<String>) -> Self {
+    fn new(stmts: Vec<String>, recover: bool) -> Self {
         SimWireClient {
             stmts: stmts.into(),
             started: false,
@@ -173,6 +201,10 @@ impl SimWireClient {
             cursor: 0,
             zseen: 0,
             sent: 0,
+            recover,
+            cycle_err: Vec::new(),
+            cur_err: false,
+            last_injected: false,
         }
     }
 
@@ -185,8 +217,13 @@ impl SimWireClient {
             if self.cursor + 1 + len > self.rx.len() {
                 break; // incomplete frame
             }
+            if ty == b'E' {
+                self.cur_err = true;
+            }
             if ty == b'Z' {
                 self.zseen += 1;
+                self.cycle_err.push(self.cur_err);
+                self.cur_err = false;
             }
             self.cursor += 1 + len;
         }
@@ -208,10 +245,27 @@ impl SimWireClient {
             return pqcomm_simnet::PumpStatus::Finished;
         }
         if self.zseen > self.sent {
+            // SIM-CONVERGE recovery injection: the just-completed statement
+            // (index sent-1, cycle index == sent) errored — send the
+            // driver-law ROLLBACK before the next script statement. An
+            // injected ROLLBACK never triggers another injection.
+            if self.recover
+                && self.sent >= 1
+                && !self.last_injected
+                && self.cycle_err.get(self.sent).copied().unwrap_or(false)
+            {
+                pqcomm_simnet::client_send(&query_message("ROLLBACK"));
+                sent_log_push("ROLLBACK");
+                self.sent += 1;
+                self.last_injected = true;
+                return pqcomm_simnet::PumpStatus::Progress;
+            }
             match self.stmts.pop_front() {
                 Some(sql) => {
                     pqcomm_simnet::client_send(&query_message(&sql));
+                    sent_log_push(&sql);
                     self.sent += 1;
+                    self.last_injected = false;
                 }
                 None => {
                     pqcomm_simnet::client_send(&terminate_message());
@@ -248,6 +302,24 @@ fn seed_universe(datadir: &str) {
             mirror_into_simvfs(std::path::Path::new(d), d);
         }
     }
+    // SIM-HARNESS-CONVERGE (PGRUST_SIMVFS_SEED_DURABLE=1): make the seeded
+    // image DURABLE (files fold their journals, dirs promote their entry
+    // images) — the sweep's sim_fsync_tree discipline. Without this, a
+    // whole-node kill reverts every never-fsynced seeded file to durable
+    // NOTHING and the at-cut pack is empty. Opt-in and set by the fault
+    // harness on BOTH the probe and writer legs (the two op streams must
+    // stay op-for-op aligned for the cut-point rebasing); every existing
+    // corpus is byte-unaffected.
+    if std::env::var("PGRUST_SIMVFS_SEED_DURABLE").as_deref() == Ok("1") {
+        for (path, entry) in vfs::sim::SimVfs::new().image_dump() {
+            let p = path.to_str().expect("utf8 sim paths").to_string();
+            let fd = vfs::open(&cpath(&p), libc::O_RDONLY, 0);
+            assert!(fd >= 0, "seed fsync open({p}): errno {}", vfs::get_errno());
+            assert_eq!(vfs::fsync(fd), 0, "seed fsync({p})");
+            assert_eq!(vfs::close(fd), 0);
+            let _ = entry;
+        }
+    }
 }
 
 fn read_script(env_name: &str) -> Vec<String> {
@@ -263,12 +335,17 @@ fn read_script(env_name: &str) -> Vec<String> {
 }
 
 fn install_pump_for(env_sql: &str) {
-    let mut client = SimWireClient::new(read_script(env_sql));
+    // SIM-CONVERGE: PGRUST_SIMNET_RECOVER=1 arms the driver-law recovery
+    // injection (see SimWireClient::pump); default off, byte-identical.
+    let recover = std::env::var("PGRUST_SIMNET_RECOVER").as_deref() == Ok("1");
+    let mut client = SimWireClient::new(read_script(env_sql), recover);
     pqcomm_simnet::install_client_pump(move || client.pump());
 }
 
 /// Dump THIS thread's session artifacts (transcript + op log are provider
 /// thread-locals — one session per thread, one artifact pair per session).
+/// SIM-CONVERGE adds the sent-log (statements actually sent, injected
+/// ROLLBACKs included) under the TRANSCRIPT→SENTLOG env-name twin.
 fn dump_artifacts_env(transcript_env: &str, oplog_env: &str) {
     let (_, received) = pqcomm_simnet::client_transcript();
     if let Ok(path) = std::env::var(transcript_env) {
@@ -276,6 +353,12 @@ fn dump_artifacts_env(transcript_env: &str, oplog_env: &str) {
     }
     if let Ok(path) = std::env::var(oplog_env) {
         let mut out = pqcomm_simnet::op_log().join("\n");
+        out.push('\n');
+        let _ = std::fs::write(path, out);
+    }
+    let sent_env = transcript_env.replace("TRANSCRIPT", "SENTLOG");
+    if let Ok(path) = std::env::var(&sent_env) {
+        let mut out = SENT_LOG.with(|l| l.borrow().join("\n"));
         out.push('\n');
         let _ = std::fs::write(path, out);
     }
@@ -506,6 +589,454 @@ fn drain_pool(budget: u32) -> u32 {
     quanta
 }
 
+// ===========================================================================
+// SIM-HARNESS-CONVERGE: the fault-plan delivery reader (the t28 activation
+// step the harness's runner/faultdriver.rs documents), the at-cut pack
+// exporter, and the vfs-op progress report. All opt-in via env; every
+// existing corpus is byte-unaffected.
+// ===========================================================================
+
+/// Minimal JSON reader for the harness `FaultPlanSpec` wire format
+/// (crash-simulator/src/runner/faultdriver.rs — serde_json on the client
+/// side; the product side must not grow a serde dependency, so this is a
+/// hand-rolled reader for exactly that schema, loud on anything else).
+mod fault_spec_json {
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum J {
+        Null,
+        Bool(bool),
+        Num(i128),
+        Str(String),
+        Arr(Vec<J>),
+        Obj(Vec<(String, J)>),
+    }
+
+    pub struct P<'a> {
+        b: &'a [u8],
+        i: usize,
+    }
+
+    impl<'a> P<'a> {
+        pub fn new(s: &'a str) -> Self {
+            P { b: s.as_bytes(), i: 0 }
+        }
+        fn ws(&mut self) {
+            while self.i < self.b.len() && self.b[self.i].is_ascii_whitespace() {
+                self.i += 1;
+            }
+        }
+        fn peek(&mut self) -> Result<u8, String> {
+            self.ws();
+            self.b.get(self.i).copied().ok_or_else(|| "unexpected end".into())
+        }
+        fn eat(&mut self, c: u8) -> Result<(), String> {
+            if self.peek()? == c {
+                self.i += 1;
+                Ok(())
+            } else {
+                Err(format!("expected '{}' at byte {}", c as char, self.i))
+            }
+        }
+        fn string(&mut self) -> Result<String, String> {
+            self.eat(b'"')?;
+            let mut out = String::new();
+            loop {
+                let c = *self.b.get(self.i).ok_or("unterminated string")?;
+                self.i += 1;
+                match c {
+                    b'"' => return Ok(out),
+                    b'\\' => {
+                        let e = *self.b.get(self.i).ok_or("unterminated escape")?;
+                        self.i += 1;
+                        match e {
+                            b'"' => out.push('"'),
+                            b'\\' => out.push('\\'),
+                            b'/' => out.push('/'),
+                            b'n' => out.push('\n'),
+                            b't' => out.push('\t'),
+                            b'r' => out.push('\r'),
+                            other => {
+                                return Err(format!(
+                                    "unsupported escape '\\{}' (fault-spec strings are plain)",
+                                    other as char
+                                ))
+                            }
+                        }
+                    }
+                    _ => out.push(c as char),
+                }
+            }
+        }
+        pub fn value(&mut self) -> Result<J, String> {
+            match self.peek()? {
+                b'{' => {
+                    self.eat(b'{')?;
+                    let mut kv = Vec::new();
+                    if self.peek()? == b'}' {
+                        self.eat(b'}')?;
+                        return Ok(J::Obj(kv));
+                    }
+                    loop {
+                        let k = self.string()?;
+                        self.eat(b':')?;
+                        let v = self.value()?;
+                        kv.push((k, v));
+                        match self.peek()? {
+                            b',' => self.eat(b',')?,
+                            b'}' => {
+                                self.eat(b'}')?;
+                                return Ok(J::Obj(kv));
+                            }
+                            c => return Err(format!("expected ',' or '}}', got '{}'", c as char)),
+                        }
+                    }
+                }
+                b'[' => {
+                    self.eat(b'[')?;
+                    let mut a = Vec::new();
+                    if self.peek()? == b']' {
+                        self.eat(b']')?;
+                        return Ok(J::Arr(a));
+                    }
+                    loop {
+                        a.push(self.value()?);
+                        match self.peek()? {
+                            b',' => self.eat(b',')?,
+                            b']' => {
+                                self.eat(b']')?;
+                                return Ok(J::Arr(a));
+                            }
+                            c => return Err(format!("expected ',' or ']', got '{}'", c as char)),
+                        }
+                    }
+                }
+                b'"' => Ok(J::Str(self.string()?)),
+                b't' => {
+                    self.lit("true")?;
+                    Ok(J::Bool(true))
+                }
+                b'f' => {
+                    self.lit("false")?;
+                    Ok(J::Bool(false))
+                }
+                b'n' => {
+                    self.lit("null")?;
+                    Ok(J::Null)
+                }
+                _ => self.number(),
+            }
+        }
+        fn lit(&mut self, s: &str) -> Result<(), String> {
+            self.ws();
+            if self.b[self.i..].starts_with(s.as_bytes()) {
+                self.i += s.len();
+                Ok(())
+            } else {
+                Err(format!("expected literal {s}"))
+            }
+        }
+        fn number(&mut self) -> Result<J, String> {
+            self.ws();
+            let start = self.i;
+            if self.b.get(self.i) == Some(&b'-') {
+                self.i += 1;
+            }
+            while self.i < self.b.len() && self.b[self.i].is_ascii_digit() {
+                self.i += 1;
+            }
+            if self.i == start {
+                return Err(format!("expected a value at byte {start}"));
+            }
+            if matches!(self.b.get(self.i), Some(b'.') | Some(b'e') | Some(b'E')) {
+                return Err("floats are not in the fault-spec schema".into());
+            }
+            std::str::from_utf8(&self.b[start..self.i])
+                .ok()
+                .and_then(|s| s.parse::<i128>().ok())
+                .map(J::Num)
+                .ok_or_else(|| "bad number".into())
+        }
+    }
+
+    impl J {
+        pub fn get<'j>(&'j self, key: &str) -> Option<&'j J> {
+            match self {
+                J::Obj(kv) => kv.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+                _ => None,
+            }
+        }
+        pub fn num(&self) -> Option<i128> {
+            match self {
+                J::Num(n) => Some(*n),
+                _ => None,
+            }
+        }
+        pub fn strv(&self) -> Option<&str> {
+            match self {
+                J::Str(s) => Some(s),
+                _ => None,
+            }
+        }
+    }
+}
+
+/// Map the spec's OpKind name → the engine's. Loud on unknown names
+/// (vocab law: never guessed).
+fn fault_op_kind(name: &str) -> vfs::sim::OpKind {
+    use vfs::sim::OpKind::*;
+    match name {
+        "Open" => Open,
+        "Close" => Close,
+        "PReadV" => PReadV,
+        "PWriteV" => PWriteV,
+        "Fsync" => Fsync,
+        "Fdatasync" => Fdatasync,
+        "FlushRange" => FlushRange,
+        "Ftruncate" => Ftruncate,
+        "TruncatePath" => TruncatePath,
+        "Fallocate" => Fallocate,
+        "FileSize" => FileSize,
+        "FadviseWillneed" => FadviseWillneed,
+        "Stat" => Stat,
+        "Fstat" => Fstat,
+        "Lstat" => Lstat,
+        "ReadLink" => ReadLink,
+        "Unlink" => Unlink,
+        "Rename" => Rename,
+        "Mkdir" => Mkdir,
+        "Rmdir" => Rmdir,
+        "ReadDir" => ReadDir,
+        other => panic!("PGRUST_SIM_FAULT_PLAN: unknown OpKind '{other}'"),
+    }
+}
+
+fn fault_path_class(name: &str) -> vfs::sim::PathClass {
+    use vfs::sim::PathClass::*;
+    match name {
+        "Wal" => Wal,
+        "Config" => Config,
+        "Temp" => Temp,
+        "Heap" => Heap,
+        "Other" => Other,
+        other => panic!("PGRUST_SIM_FAULT_PLAN: unknown PathClass '{other}'"),
+    }
+}
+
+fn fault_action(j: &fault_spec_json::J) -> vfs::sim::FaultDecision {
+    use fault_spec_json::J;
+    use vfs::sim::FaultDecision as D;
+    match j {
+        J::Str(s) if s == "Crash" => D::Crash,
+        J::Obj(kv) if kv.len() == 1 => {
+            let (k, v) = &kv[0];
+            match (k.as_str(), v) {
+                ("Errno", J::Num(n)) => D::Errno(*n as i32),
+                ("ShortRead", J::Num(n)) => D::ShortRead(*n as usize),
+                ("ShortWrite", J::Num(n)) => D::ShortWrite(*n as usize),
+                ("TornWrite", obj) => D::TornWrite {
+                    persist_prefix: obj
+                        .get("persist_prefix")
+                        .and_then(|n| n.num())
+                        .expect("TornWrite.persist_prefix")
+                        as usize,
+                },
+                (other, _) => panic!("PGRUST_SIM_FAULT_PLAN: unknown action '{other}'"),
+            }
+        }
+        other => panic!("PGRUST_SIM_FAULT_PLAN: malformed action {other:?}"),
+    }
+}
+
+/// SIM-HARNESS-CONVERGE: the DUT-side reader of the harness FaultDriver's
+/// delivery channel (PGRUST_SIM_FAULT_PLAN = FaultPlanSpec JSON) — installs
+/// the engine fault plan on THIS corpus's universe (call it after the
+/// shared-universe setup so every session's ops consult it) and arms the
+/// whole-node kill so the at-cut image is pure (no unwind residue — the
+/// inc-3 exposure). `SeededFaultPlan::install` also arms
+/// `CrashImage::SeededSubset(seed)`, the documented common harness shape.
+fn install_fault_plan_from_env() {
+    let Ok(json) = std::env::var("PGRUST_SIM_FAULT_PLAN") else { return };
+    if json.trim().is_empty() {
+        return;
+    }
+    let top = fault_spec_json::P::new(&json)
+        .value()
+        .unwrap_or_else(|e| panic!("PGRUST_SIM_FAULT_PLAN parse: {e}"));
+    let seed = top.get("seed").and_then(|n| n.num()).expect("fault spec: seed") as u64;
+    let rules_j = match top.get("rules") {
+        Some(fault_spec_json::J::Arr(a)) => a,
+        _ => panic!("fault spec: rules array"),
+    };
+    let mut rules = Vec::new();
+    for r in rules_j {
+        let m = r.get("matcher").expect("rule.matcher");
+        let kinds = match m.get("kinds") {
+            None | Some(fault_spec_json::J::Null) => None,
+            Some(fault_spec_json::J::Arr(a)) => Some(
+                a.iter()
+                    .map(|k| fault_op_kind(k.strv().expect("kind name")))
+                    .collect::<Vec<_>>(),
+            ),
+            other => panic!("rule.matcher.kinds malformed: {other:?}"),
+        };
+        let class = match m.get("class") {
+            None | Some(fault_spec_json::J::Null) => None,
+            Some(j) => Some(fault_path_class(j.strv().expect("class name"))),
+        };
+        let path_contains = match m.get("path_contains") {
+            None | Some(fault_spec_json::J::Null) => None,
+            Some(j) => Some(j.strv().expect("path_contains").to_string()),
+        };
+        rules.push(vfs::sim::FaultRule {
+            matcher: vfs::sim::OpMatch { kinds, class, path_contains },
+            nth: r.get("nth").and_then(|n| n.num()).expect("rule.nth") as u64,
+            action: fault_action(r.get("action").expect("rule.action")),
+            sticky: matches!(r.get("sticky"), Some(fault_spec_json::J::Bool(true))),
+        });
+    }
+    let n = rules.len();
+    vfs::sim::SeededFaultPlan::install(seed, rules);
+    vfs::sim::SimVfs::set_kill_on_cut(true);
+    eprintln!("SIMFAULT installed seed={seed} rules={n} kill_on_cut=1");
+}
+
+/// SIM-HARNESS-CONVERGE: vfs-op progress evidence for the harness's cut-point
+/// selection (opt-in: PGRUST_SIMVFS_OPS_REPORT=1). Grep-stable.
+fn ops_report(tag: &str) {
+    if std::env::var("PGRUST_SIMVFS_OPS_REPORT").as_deref() == Ok("1") {
+        eprintln!("SIMVFS-OPS {tag}={}", vfs::sim::SimVfs::op_seq());
+    }
+}
+
+/// SIM-HARNESS-CONVERGE: export the universe's DURABLE images to a host-fs
+/// pack dir (PGRUST_SIMVFS_PACK) — the at-cut image the reboot leg recovers
+/// over. The port keeps TWO addressing conventions for the same datadir
+/// (post-chdir RELATIVE and DataDir-joined ABSOLUTE; see seed_universe), so
+/// each logical file may have a stale seeded twin. Freshness rule: a twin
+/// whose bytes CHANGED from the host seed image is the written (fresh) one;
+/// if both changed, the ABSOLUTE plane wins (controldata's convention — the
+/// only known abs-plane writer) and the conflict is counted + logged.
+fn export_pack_if_requested(datadir: &str) -> Option<(usize, usize)> {
+    let dst = std::env::var("PGRUST_SIMVFS_PACK").ok()?;
+    if dst.trim().is_empty() {
+        return None;
+    }
+    let dstp = std::path::Path::new(&dst);
+    let dd = datadir.trim_end_matches('/');
+    // rel path -> (relative-plane bytes, absolute-plane bytes, is_dir)
+    #[derive(Default)]
+    struct Twin {
+        rel: Option<Vec<u8>>,
+        abs: Option<Vec<u8>>,
+        dir: bool,
+    }
+    let mut twins: std::collections::BTreeMap<std::path::PathBuf, Twin> =
+        std::collections::BTreeMap::new();
+    let image = vfs::sim::SimVfs::new().image_dump();
+    if std::env::var("PGRUST_SIMVFS_PACK_DEBUG").as_deref() == Ok("1") {
+        eprintln!("SIMPACK-DEBUG entries={} dd={dd}", image.len());
+        for (p, e) in image.iter() {
+            let s = p.to_string_lossy();
+            if s.contains("pg_wal") || s.contains("pg_control") {
+                eprintln!(
+                    "SIMPACK-DEBUG key={} file={} dlen={}",
+                    p.display(),
+                    e.is_some(),
+                    e.as_ref().map(|(_, d)| d.len()).unwrap_or(0)
+                );
+            }
+        }
+    }
+    // Seed-dir prefixes (tz share): host-absolute planes that are NOT
+    // datadir state — never packed.
+    let skip_prefixes: Vec<String> = std::env::var("PGRUST_SIMNET_SEED_DIRS")
+        .map(|v| v.split(':').filter(|d| !d.is_empty()).map(String::from).collect())
+        .unwrap_or_default();
+    for (path, entry) in image {
+        // Universe key planes (seed_universe's two mirrors, normalized by
+        // the vfs against "/"): "<dd>/<rel>" = the DataDir-joined ABSOLUTE
+        // convention (controldata); "/<rel>" = the post-chdir RELATIVE
+        // convention (md.c/xlog — the plane the data-path writes land on).
+        let (key, is_abs) = if let Ok(rel) = path.strip_prefix(dd) {
+            (rel.to_path_buf(), true)
+        } else {
+            let s = path.to_string_lossy();
+            if skip_prefixes.iter().any(|p| s.starts_with(p.as_str())) {
+                continue; // tz share plane: not datadir state
+            }
+            match path.strip_prefix("/") {
+                Ok(rel) => (rel.to_path_buf(), false),
+                Err(_) => (path.clone(), false),
+            }
+        };
+        if key.as_os_str().is_empty() {
+            continue; // the datadir root itself
+        }
+        if key.file_name().is_some_and(|f| f == "postmaster.pid") {
+            continue;
+        }
+        let t = twins.entry(key).or_default();
+        match entry {
+            None => t.dir = true,
+            Some((_volatile, durable)) => {
+                if is_abs {
+                    t.abs = Some(durable);
+                } else {
+                    t.rel = Some(durable);
+                }
+            }
+        }
+    }
+    let mut files = 0usize;
+    let mut conflicts = 0usize;
+    for (rel, t) in &twins {
+        let out = dstp.join(rel);
+        if t.dir && t.rel.is_none() && t.abs.is_none() {
+            let _ = std::fs::create_dir_all(&out);
+            continue;
+        }
+        let chosen: &Vec<u8> = match (&t.rel, &t.abs) {
+            (Some(r), None) => r,
+            (None, Some(a)) => a,
+            (Some(r), Some(a)) if r == a => r,
+            (Some(r), Some(a)) => {
+                // Twins differ: prefer the one that changed from the host
+                // seed; both-changed prefers the absolute plane, counted.
+                let host = std::fs::read(std::path::Path::new(dd).join(rel)).ok();
+                match &host {
+                    Some(h) if r == h && a != h => a,
+                    Some(h) if a == h && r != h => r,
+                    _ => {
+                        conflicts += 1;
+                        eprintln!("SIMPACK-CONFLICT {} (abs plane wins)", rel.display());
+                        a
+                    }
+                }
+            }
+            (None, None) => continue,
+        };
+        if let Some(parent) = out.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&out, chosen);
+        files += 1;
+    }
+    Some((files, conflicts))
+}
+
+/// SIM-HARNESS-CONVERGE: at-cut evidence + pack, called on the corpus exit
+/// paths. Grep-stable SIMCUT line only when the whole-node kill fired.
+fn simcut_pack_and_report(datadir: &str) {
+    if vfs::sim::SimVfs::killed() {
+        let (files, conflicts) = export_pack_if_requested(datadir).unwrap_or((0, 0));
+        eprintln!(
+            "SIMCUT cuts={} frozen={} packed={files} conflicts={conflicts}",
+            vfs::sim::SimVfs::cut_count(),
+            vfs::sim::SimVfs::frozen_op_count(),
+        );
+    }
+}
+
 /// Session 2's session half: stdio_wire_session_half's shape for an
 /// under-postmaster-style thread — same connection-first order, two
 /// deliberate deltas: (1) wedge-ledger W6: the under-postmaster arm runs
@@ -579,14 +1110,43 @@ fn run_second_session(spec: &SessionSpec) -> i32 {
             if spec.child_slot.is_some()
                 && postmaster_seams::announce_child_exit::is_installed()
             {
+                // SIM-HARNESS-CONVERGE fault mode: announce CLEAN. A
+                // nonzero status makes the reaper run the C crash-restart
+                // cycle (terminate-all + reinitialize), which reads
+                // pg_control through the KILLED vfs and dies before the
+                // at-cut pack. The SIMCUT line is the crash evidence; the
+                // reaper's only needed act here is the slot release.
+                let status =
+                    if std::env::var("PGRUST_SIM_FAULT_PLAN").is_ok() { 0 } else { code << 8 };
                 postmaster_seams::announce_child_exit::call(
                     init_small::globals::MyProcPid(),
-                    code << 8,
+                    status,
                 );
             }
             code
         }
-        None => std::panic::resume_unwind(payload),
+        None => {
+            // SIM-HARNESS-CONVERGE fault mode: a session that PANICS after
+            // the whole-node kill (e.g. a WAL-flush PANIC at the cut) must
+            // still dump its artifacts and announce its exit — otherwise
+            // the modeled drain waits on a corpse and SHUTDOWNDRAIN aborts
+            // before the pack. Gated on the fault plan being armed: byte-
+            // zero movement for every existing corpus.
+            if std::env::var("PGRUST_SIM_FAULT_PLAN").is_ok() {
+                dump_artifacts_env(spec.transcript_env, spec.oplog_env);
+                if spec.child_slot.is_some()
+                    && postmaster_seams::announce_child_exit::is_installed()
+                {
+                    postmaster_seams::announce_child_exit::call(
+                        init_small::globals::MyProcPid(),
+                        0, // clean announce: see the fault-mode note above
+                    );
+                }
+                134
+            } else {
+                std::panic::resume_unwind(payload)
+            }
+        }
     }
 }
 
@@ -621,6 +1181,50 @@ fn second_session_thread(
         .name(spec.thread_name.into())
         .stack_size(64 * 1024 * 1024)
         .spawn(move || {
+            // SIM-HARNESS-CONVERGE fault mode: after the whole-node kill,
+            // even the PRELUDE below can panic (its expects read config
+            // files through the killed vfs -> EIO). Contain the whole
+            // body so the thread still announces its exit and the boot
+            // thread's modeled drain + at-cut pack proceed. Gated on the
+            // fault plan env: zero movement for every existing corpus.
+            if !std::env::var("PGRUST_SIM_FAULT_PLAN").is_ok() {
+                return second_session_body(argv, datadir, snap, adopt, spec);
+            }
+            let body = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                second_session_body(argv, datadir, snap, adopt, spec)
+            }));
+            match body {
+                Ok(code) => code,
+                Err(_) => {
+                    dump_artifacts_env(spec.transcript_env, spec.oplog_env);
+                    if spec.child_slot.is_some()
+                        && postmaster_seams::announce_child_exit::is_installed()
+                    {
+                        postmaster_seams::announce_child_exit::call(
+                            init_small::globals::process_id() as i32 + spec.pid_offset,
+                            0, // clean announce (fault mode): a nonzero
+                               // status would run the crash-restart cycle
+                               // over the killed vfs before the pack
+                        );
+                    }
+                    134
+                }
+            }
+        })
+        .expect("spawn sim-session thread")
+}
+
+/// The session thread's body (prelude + wire session) — split out so the
+/// fault-mode containment above can wrap it whole.
+fn second_session_body(
+    argv: Vec<String>,
+    datadir: String,
+    snap: SimInherited,
+    adopt: Option<u64>,
+    spec: SessionSpec,
+) -> i32 {
+    {
+        {
             snap.apply();
             // The child-init sequence, the launch_backend way: the second
             // session is an UNDER-POSTMASTER-style backend thread (the boot
@@ -667,6 +1271,24 @@ fn second_session_thread(
             {
                 return 1;
             }
+            // SIM-HARNESS-CONVERGE (PGRUST_SIMNET_LOCALSYNC=1): the corpus
+            // runs NO checkpointer, so an under-PM session's forwarded sync
+            // requests can never be absorbed (ForwardSyncRequest:
+            // checkpointer_pid==0 -> false) and mdunlink's FORGET retry
+            // loop (C sync.c's 10-ms WaitLatch) wedges any DROP-carrying
+            // script — found by the first bridge plan (statement 17, DROP
+            // TABLE). Fix = the C STANDALONE topology: give the session its
+            // own pending-ops table so RegisterSyncRequest takes the local
+            // RememberSyncRequest branch. InitSync's standalone gate reads
+            // the thread-local IsUnderPostmaster, so the call must sit
+            // BEFORE InitPostmasterChild flips it. Durability inside the
+            // corpus rides WAL flush alone (no checkpoint runs while
+            // sessions live), so never-processed local tables are correct
+            // for the fault leg too. Opt-in: default off, every existing
+            // corpus is op-for-op untouched.
+            if std::env::var("PGRUST_SIMNET_LOCALSYNC").as_deref() == Ok("1") {
+                sync_seams::init_sync::call().expect("session-local InitSync");
+            }
             miscinit::InitPostmasterChild(
                 init_small::globals::process_id() as i32 + spec.pid_offset,
             )
@@ -696,8 +1318,8 @@ fn second_session_thread(
             }
             install_pump_for(spec.sql_env);
             run_second_session(&spec)
-        })
-        .expect("spawn sim-session thread")
+        }
+    }
 }
 
 #[allow(non_snake_case)]
@@ -754,6 +1376,17 @@ pub fn PostgresSimNetMain(argv: &[String], username: &str) -> ! {
         vfs::sim::SimVfs::set_shared_access_probe(pgsync::sim::current_thread_holds_permit);
         vfs::sim::SimVfs::share_universe_as(1);
     }
+
+    // SIM-HARNESS-CONVERGE: the harness FaultDriver delivery channel
+    // (PGRUST_SIM_FAULT_PLAN) — after the shared-universe setup so every
+    // session's ops consult the installed plan. No-op when the env is
+    // absent; existing corpora are byte-unaffected. The "armed" op report
+    // gives the harness the rule counter's base: a FaultRule counts
+    // matches from THIS point, while op_seq also counted the ~thousands
+    // of universe-seeding writes above — the probe run reads `armed` and
+    // rebases its cut choice onto the rule counter's frame.
+    ops_report("armed");
+    install_fault_plan_from_env();
 
     // SIMVFS-SHARED P8: the loadsort-prefetch corpus (no server boot —
     // pure loadsort machinery over the shared universe); never returns.
@@ -947,6 +1580,7 @@ pub fn PostgresSimNetMain(argv: &[String], username: &str) -> ! {
         // The startup-exit promotion: session 1 owned recovery and just
         // completed on this thread — C's moment for PM_RUN.
         postmaster_seams::pm_promote_run::call();
+        ops_report("promote");
         let adopt = vfs::sim::SimVfs::current_universe_id();
         assert!(adopt.is_some(), "nsession: boot thread lost its universe binding");
         let noreg = std::env::var("PGRUST_SIM_NOREG").as_deref() == Ok("1");
@@ -994,6 +1628,10 @@ pub fn PostgresSimNetMain(argv: &[String], username: &str) -> ! {
         postmaster_seams::pm_service_pending::call();
         let qb = drain_pool(budget);
         eprintln!("PMDRAIN pool-drained population=0 quanta={qb}");
+        // SIM-HARNESS-CONVERGE: at-cut pack + evidence (no-op unless the
+        // whole-node kill fired), then the op-progress report (opt-in).
+        simcut_pack_and_report(&datadir);
+        ops_report("final");
         std::process::exit(code1.max(code2).max(code3))
     }
 
@@ -1039,6 +1677,8 @@ pub fn PostgresSimNetMain(argv: &[String], username: &str) -> ! {
                 // inline during the unwind; the session is complete — dump the
                 // determinism artifacts, then take the exit.
                 dump_artifacts_env("PGRUST_SIMNET_TRANSCRIPT", "PGRUST_SIMNET_OPLOG");
+                simcut_pack_and_report(&datadir);
+                ops_report("final");
                 std::process::exit(p.code)
             }
             None => std::panic::resume_unwind(payload),

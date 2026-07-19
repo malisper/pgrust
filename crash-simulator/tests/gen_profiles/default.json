@@ -1,0 +1,9 @@
+{
+  "name": "default",
+  "connections": 1,
+  "plan_len": {"min": 40, "max": 80},
+  "statement_weights": {"ddl": 6, "dml": 30, "query": 40, "tx": 12, "arm": 4, "fault": 2, "property": 6},
+  "iso_mix": {"rc": 70, "rr": 20, "ser": 10},
+  "arm_sets": [[["work_mem", "4MB"]], [["enable_hashjoin", "off"]], [["enable_seqscan", "off"]], [["enable_hashagg", "off"]]],
+  "float_lenient": false
+}

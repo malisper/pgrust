@@ -12649,6 +12649,7 @@ dependencies = [
  "stringinfo",
  "subtrans_seams",
  "superuser_seams",
+ "sync_seams",
  "syncrep_seams",
  "syscache_seams",
  "tablecmds_seams",

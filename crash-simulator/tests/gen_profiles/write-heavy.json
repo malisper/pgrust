@@ -1,0 +1,9 @@
+{
+  "name": "write-heavy",
+  "connections": 1,
+  "plan_len": {"min": 60, "max": 120},
+  "statement_weights": {"ddl": 8, "dml": 55, "query": 20, "tx": 12, "arm": 2, "fault": 2, "property": 1},
+  "iso_mix": {"rc": 80, "rr": 15, "ser": 5},
+  "arm_sets": [[["work_mem", "4MB"]]],
+  "float_lenient": false
+}
