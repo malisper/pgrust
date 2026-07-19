@@ -14861,13 +14861,8 @@ pub(crate) use dml::dml_oc_set_for_tests;
 // this wave — census gate not met; see notes/se-wave7-epq.md (Y3 CARRIED).
 pub(crate) mod epq;
 // --- end WS-Y wave-7 ------------------------------------------------------------
-// --- WS-AA (wave-7): rowchain admission test levers (the admission entry and
-// chain dispatch are dml.rs-local per the wave-7 contract §3; this is the
-// unit-corpus re-export only — the WS-W wave-5 dml_oc precedent verbatim.
-// Contract-deviation note: §5 marks lanev2.rs "WS-AA: no edits"; this EOF
-// append touches no code line (recorded in notes/se-wave7-fusion.md).)
-#[cfg(test)]
-pub(crate) use dml::{dml_rowchain_set_for_tests, DML_ROWCHAIN_DRIVES_FOR_TESTS};
+// --- WS-AA (wave-7): rowchain admission test levers — DELETED at RB-R1
+// (SE18) with the stitched trigger-INSERT chain (dml.rs region tombstone).
 // --- end WS-AA (wave-7) ---
 // --- WS-AE (wave-8): agg-over-IndexScan feed re-exports (AGG_INDEX arm
 // re-earn, contract §3 AE0). The feed itself is indexsource.rs-local (the
@@ -14882,10 +14877,8 @@ pub(crate) use indexsource::{agg_indexfeed_set_for_tests, AGG_INDEXFEED_OWNED_FO
 // ===== WAVE-9 SHARED EOF REGION (contract §7) — sub-regions in AG, AH, AI,
 // AJ order; each WS fills ONLY its own block; integration splices verbatim.
 // ============================================================================
-// --- WS-AG (wave-9): per-mask chain-program test re-export (the wave-7
-// WS-AA lever precedent verbatim; zero code lines touched above).
-#[cfg(test)]
-pub(crate) use dml::rowchain_insert_prog_for_mask;
+// --- WS-AG (wave-9): per-mask chain-program test re-export — DELETED at
+// RB-R1 (SE18) with the stitched trigger-INSERT chain.
 // --- end WS-AG (wave-9) ---
 // --- WS-AH (wave-9): reserved ---
 // --- WS-AI wave-9 (forward-pull cursors inc-1; contract §3, band 92001+) -------

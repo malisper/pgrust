@@ -77,7 +77,9 @@ pub enum Tier {
     StitchSaop,
     /// `lanestitch` RowOp row-chain tier (WS-AA wave-7 fusion inc-0,
     /// docs/design/rowmode-endgame.md §2): pure steps admitted INSIDE a
-    /// forever-row operator chain (`eval_row_chain` / `StitchedRowChain`).
+    /// forever-row operator chain (`eval_row_chain`; the compiled
+    /// `StitchedRowChain` twin was deleted at RB-R1/SE18 — the interp
+    /// walker is the surviving engine).
     /// Coverage rows are EMPTY at inc-1a by conformance law — the shipped
     /// consumer (the trigger-DML chain) carries no OID-backed steps; rows
     /// land in the same edit as the first chain family whose junk-filter /
