@@ -83,6 +83,10 @@
 use core::ptr::NonNull;
 
 use ::adt_numeric::aggregates::{do_int128_accum, Int128AggState};
+use ::adt_float::aggregates::{
+    check_float8_array, float4_accum, float8_accum, write_float8_transarray, FLOAT8_ARRAY_HDRSZ,
+};
+use ::adt_float::{float4_pl, float8_pl};
 use ::datum::Datum;
 use ::execexpr::{AggPerGroup, AggTransSpec, OUTER_VAR};
 use ::exectuples::{SoaBatch, SoaDictLane};
@@ -148,6 +152,75 @@ const F_TEXT_LARGER: Oid = 458;
 const F_TEXT_SMALLER: Oid = 459;
 const F_BPCHAR_LARGER: Oid = 1063;
 const F_BPCHAR_SMALLER: Oid = 1064;
+
+// Fold-trans tier (lane-v2-lanefold-trans, knob PGRUST_LANE_V2_FOLD_TRANS,
+// default OFF): the AGG_SEQ fused arm's residual transition class
+// (notes/se-aggseq-adjudication.md §4's owed increment). Unlike every prior
+// tier, these transitions are ORDER-SENSITIVE (float addition does not
+// reassociate), so their kernels are order-preserving sequential folds: the
+// per-row C arithmetic (adt_float's accum_kernel / float8_pl /
+// float8_regr_accum, adt_numeric's do_numeric_accum — fp-contract parity
+// included) applied row by row in row order into C's own state. No batch
+// reassociation, no SIMD tree-sum: the win is the elided per-row executor
+// ceremony, not different math.
+// v1 (this increment) admits the FLOAT SUM and FLOAT AVG/VAR/STDDEV family —
+// the order-sensitive core: sum(float4/float8) rides float4pl/float8pl over a
+// byval float transvalue; avg/var_samp/var_pop/stddev_samp/stddev_pop over
+// float4/float8 all ride float4_accum/float8_accum over ONE float8[3]
+// Youngs-Cramer transarray. Both are strict with the aggregate's catalog
+// initval (SUM: NULL; ACCUM: the '{0,0,0}' float8[3]).
+const F_FLOAT4PL: Oid = 204;
+const F_FLOAT8PL: Oid = 218;
+const F_FLOAT4_ACCUM: Oid = 208;
+const F_FLOAT8_ACCUM: Oid = 222;
+//
+// NAMED REFUSALS (documented follow-ups, NOT wrong folds — the profit-bar
+// law: anything not byte-exact refuses to the arm/per-row path):
+//  * numeric_avg_accum (2858, sum/avg(numeric)): the INTERNAL NumericAggState
+//    the se/agg-poly relocation substrate ships. Refused THIS increment —
+//    the per-row expand of 1B-short numeric images (misaligned digits) needs
+//    a scratch-context detour the float lanes never touch; folded next off
+//    the agg-poly NumericAgg manifest.
+//  * numeric_accum (1834) + int2/4/8_accum (stddev/variance over numeric/int
+//    args, sum_x2-carrying): out of the proven envelope, matching the
+//    agg-poly car's own named refusal.
+//  * float8_regr_accum (2806, corr/covar/regr — TWO-arg): needs a second lane
+//    column (X) beyond LaneTrans's single `col`; refused pending the
+//    side-column carrier.
+//  * FILTER'd transitions (spec.aggfilter): the per-row predicate mask is a
+//    cross-cutting driver change; refused this increment (classify_trans's
+//    aggfilter gate still fires).
+
+/// Process-constant knob for the fold-trans tier (R-KNOBS discipline:
+/// `PGRUST_LANE_V2_FOLD_TRANS`, default OFF — the branch convention for
+/// unproven increments). OFF = the new classify arms refuse and every plan
+/// is byte-identical to base. AtomicU8 (not OnceLock) so units can A/B
+/// in-process via [`fold_trans_set_for_tests`] — the k1_latemat idiom.
+pub fn fold_trans_enabled() -> bool {
+    match FOLD_TRANS.load(core::sync::atomic::Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let on = matches!(
+                std::env::var("PGRUST_LANE_V2_FOLD_TRANS").as_deref(),
+                Ok("1") | Ok("on")
+            );
+            FOLD_TRANS.store(
+                if on { 2 } else { 1 },
+                core::sync::atomic::Ordering::Relaxed,
+            );
+            on
+        }
+    }
+}
+
+/// Test-only override (any caller may flip it; production code never does).
+pub fn fold_trans_set_for_tests(on: bool) {
+    FOLD_TRANS.store(if on { 2 } else { 1 }, core::sync::atomic::Ordering::Relaxed);
+}
+
+// 0 = unresolved (read env on first use), 1 = off, 2 = on.
+static FOLD_TRANS: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 
 // String-length fold inputs (lane-v2-strlenfold): the textlen pg_proc family
 // (varlena.c textlen — length/char_length over text, plus the varchar
@@ -340,6 +413,26 @@ pub enum LaneKind {
     // differing only in trailing blanks — the survivor keeps ITS padding.
     BpMin,
     BpMax,
+    // Fold-trans tier (lane-v2-lanefold-trans; ORDER-SENSITIVE). float4pl /
+    // float8pl (float.c): sum(float4)/sum(float8). Strict, NULL init, byval
+    // float transvalue. The first non-null selected row STORES its value raw
+    // (C's strict-transfn null-state special case — no float_pl on call 1),
+    // every later row does `state = float_pl(state, v)?` — which raises C's
+    // overflow-to-infinity error at C's exact row. NOT commutative: the fold
+    // walks selected rows in row order and applies float_pl one at a time
+    // (no batch reassociation), so the bytes match C's per-row sum. `width`
+    // and `res_width` are F32 for float4, F64 for float8.
+    FSum,
+    // float4_accum / float8_accum (float.c): avg/var_samp/var_pop/
+    // stddev_samp/stddev_pop over float4/float8. Strict, NON-null initval
+    // (the catalog '{0,0,0}' float8[3]), so the transvalue is a live
+    // float8[3] Youngs-Cramer transarray from the first row — never
+    // no_trans_value. Per non-null row `[n,sx,sxx] = accum([n,sx,sxx], v)?`
+    // (float4_accum widens v: f32->f64 before accumulate), written back in
+    // place. ORDER-SENSITIVE (Youngs-Cramer sxx term): the fold walks row
+    // order, no reassociation. `width` = F32/F64 (how to read the input
+    // Var); the transvalue is always the float8[3] array.
+    FAccum,
 }
 
 impl LaneWidth {
@@ -848,6 +941,23 @@ pub fn classify_trans(
         F_TEXT_SMALLER => mk(LaneKind::StrMin, varg(TEXTOID)?),
         F_BPCHAR_LARGER => mk(LaneKind::BpMax, varg(BPCHAROID)?),
         F_BPCHAR_SMALLER => mk(LaneKind::BpMin, varg(BPCHAROID)?),
+        // Fold-trans tier (knob-gated OFF): the AGG_SEQ residual FLOAT
+        // family. sum(float*) needs a NULL initval (byval float state); the
+        // accum family needs the non-null '{0,0,0}' float8[3] initval.
+        // Float args admit only a bare Var (classify_arg's OpExpr path is
+        // int4-only), so no transform, no integer guard, no CSE.
+        F_FLOAT4PL if fold_trans_enabled() && spec.init_value_is_null => {
+            mk(LaneKind::FSum, arg(FLOAT4OID)?)
+        }
+        F_FLOAT8PL if fold_trans_enabled() && spec.init_value_is_null => {
+            mk(LaneKind::FSum, arg(FLOAT8OID)?)
+        }
+        F_FLOAT4_ACCUM if fold_trans_enabled() && !spec.init_value_is_null => {
+            mk(LaneKind::FAccum, arg(FLOAT4OID)?)
+        }
+        F_FLOAT8_ACCUM if fold_trans_enabled() && !spec.init_value_is_null => {
+            mk(LaneKind::FAccum, arg(FLOAT8OID)?)
+        }
         _ => None,
     }
 }
@@ -1323,6 +1433,32 @@ pub fn new_int8_transarray(mcx: Mcx<'_>) -> Datum {
     d
 }
 
+/// One `{0,0,0}` float8[3] Youngs-Cramer transarray in `mcx`, header shaped
+/// exactly as C's `construct_array_builtin(FLOAT8OID)` produces the aggregate
+/// initcond `'{0,0,0}'` — the FAccum pergroup's NON-null initval (avg / var /
+/// stddev over float4/float8). The consuming node must install this into
+/// every FAccum pergroup before the first fold touches it (the drive's
+/// initialize_aggregates copies the catalog byref initval; the grouped
+/// install seeds new groups with THIS image). `faccum_advance` validates the
+/// shape, so a mis-shaped install louds rather than corrupts.
+pub fn new_float8_transarray(mcx: Mcx<'_>) -> Datum {
+    // 24-byte header + 3×8 float8 = 48 bytes = 6 u64 words.
+    let mut buf: PgVec<'_, u64> = ::mcx::vec_from_elem_in(mcx, 0u64, 6);
+    let p = buf.as_mut_ptr().cast::<u8>();
+    // SAFETY: 48 in-bounds bytes, 8-aligned; leaked into the mcx arena below.
+    // write_float8_transarray fills the header + three 0.0 words exactly as
+    // C's initcond image (identical to what a per-row float8_accum first
+    // call reads).
+    let n = unsafe {
+        let sl = core::slice::from_raw_parts_mut(p, 48);
+        write_float8_transarray(&[0.0, 0.0, 0.0], sl)
+    };
+    debug_assert_eq!(n, 48);
+    let d = Datum::from_usize(p as usize);
+    core::mem::forget(buf);
+    d
+}
+
 // (count, Σv') over selected non-null rows with v' = v/divk — the shared
 // base accumulator every SumBase member derives from.
 #[inline(always)]
@@ -1573,15 +1709,19 @@ fn meta_delta(t: &LaneTrans, rows: i64, s: i128) -> i64 {
 /// selected rows of the staged batch, CSE groups first, then the ungrouped
 /// per-trans kernels. `aggcxt` is the agg (transvalue) memory context — where
 /// C's ExecAggCopyTransValue copies by-ref transvalues; only the str kinds
-/// allocate (their datumCopy on a strict install/replace), and only they can
-/// fail (OOM), so integer/float/bool plans never see the Err path.
+/// allocate (their datumCopy on a strict install/replace). Fallible arms:
+/// the str kinds (OOM) and the fold-trans float kinds (FSum/FAccum raise C's
+/// exact overflow ereport at C's row — see try_for_each_row); every other
+/// kind never sees the Err path.
 ///
 /// # Safety
 /// `pergroup_base` is the node's once-allocated pergroup array covering every
 /// transno in the plan; rows selected by `rows` carry valid lane values in
 /// `cols` for every plan column (`rows` has one bit per staged row,
 /// `nrows <= rows.len() * 64`); AvgAccum pergroups hold a live
-/// `new_int8_transarray`-shaped transvalue; Int128AvgAccum pergroups are
+/// `new_int8_transarray`-shaped transvalue; FAccum pergroups hold a live
+/// aggcontext float8[3] transarray (`new_float8_transarray` / the drive's
+/// byref '{0,0,0}' initval copy); Int128AvgAccum pergroups are
 /// either NULL or hold a live aggcontext `Int128AggState` pointer, and
 /// `aggcxt` IS that aggcontext (the arena the per-row transfn reaches via
 /// fcinfo->context); str-kind (Var-width) lanes carry live varlena datum
@@ -1880,6 +2020,33 @@ pub unsafe fn fold_batch(
                     unsafe { str_advance(t, pg, d, aggcxt)? };
                 }
             }
+            // Fold-trans tier: ORDER-PRESERVING sequential float folds. No
+            // batch pre-fold, no reassociation — try_for_each_row walks the
+            // selected rows in ascending row order and every advance applies
+            // C's exact per-row arithmetic against the running transvalue,
+            // so the state bits (and an overflow error's row position) match
+            // the per-row program.
+            LaneKind::FSum => {
+                try_for_each_row(rows, |i| {
+                    if !isnull[i] {
+                        fsum_advance(t, pg, values[i])
+                    } else {
+                        Ok(())
+                    }
+                })?;
+            }
+            LaneKind::FAccum => {
+                try_for_each_row(rows, |i| {
+                    if !isnull[i] {
+                        // SAFETY: FAccum pergroups hold a live aggcontext
+                        // float8[3] transarray (caller contract); sole
+                        // reference during the fold.
+                        unsafe { faccum_advance(t, pg, values[i]) }
+                    } else {
+                        Ok(())
+                    }
+                })?;
+            }
         }
     }
     Ok(())
@@ -2114,6 +2281,79 @@ fn fmm_advance(t: &LaneTrans, pg: &mut AggPerGroup, d: Datum, want_max: bool) {
     }
 }
 
+// ORDER-PRESERVING float SUM advance (float4pl/float8pl). Strict, NULL init:
+// the first non-null selected row STORES its input datum's bits raw (C's
+// strict-transfn null-state special case — advance_transition_function skips
+// the transfn on the first call), every later row does the checked float_pl
+// which raises C's overflow-to-infinity error. NOT commutative — the caller
+// walks selected rows in row order and calls this one at a time, so the
+// running state's bits equal C's per-row `state = float_pl(state, v)`
+// sequence. `t.res_width` selects f32 (float4) vs f64 (float8) arithmetic.
+#[inline]
+fn fsum_advance(t: &LaneTrans, pg: &mut AggPerGroup, d: Datum) -> PgResult<()> {
+    if pg.no_trans_value {
+        // First non-null input: store the argument datum's exact bits (C
+        // stores the input, never a recomputed value — load-bearing for
+        // -0.0 and the exact float4/float8 bit pattern).
+        pg.trans_value = d;
+        pg.trans_value_is_null = false;
+        pg.no_trans_value = false;
+    } else if !pg.trans_value_is_null {
+        match t.res_width {
+            LaneWidth::F32 => {
+                let s = float4_pl(pg.trans_value.as_f32(), d.as_f32())?;
+                pg.trans_value = Datum::from_f32(s);
+            }
+            LaneWidth::F64 => {
+                let s = float8_pl(pg.trans_value.as_f64(), d.as_f64())?;
+                pg.trans_value = Datum::from_f64(s);
+            }
+            _ => unreachable!("FSum res_width is F32 or F64"),
+        }
+    }
+    Ok(())
+}
+
+// ORDER-PRESERVING float AVG/VAR/STDDEV advance (float4_accum/float8_accum).
+// Strict with the non-null '{0,0,0}' float8[3] initval: the transvalue is a
+// live Youngs-Cramer transarray from the first row (never no_trans_value),
+// so this reads [n,sx,sxx] in place, applies C's accum kernel for ONE
+// non-null input in row order, and writes the three words back. float4_accum
+// widens the f32 input to f64 exactly as C. Order-sensitive (the sxx term
+// depends on the running mean) — the caller walks row order, no batch
+// reassociation. The accum kernel raises C's overflow error at C's row.
+//
+// # Safety
+// `pg.trans_value` is a live aggcontext float8[3] transarray
+// (`new_float8_transarray` / the drive's byref initval copy); sole reference
+// during the call.
+#[inline]
+unsafe fn faccum_advance(t: &LaneTrans, pg: &mut AggPerGroup, d: Datum) -> PgResult<()> {
+    debug_assert!(!pg.trans_value_is_null, "FAccum transarray is never NULL");
+    let arr = pg.trans_value.as_usize() as *mut u8;
+    // SAFETY: aggcontext-lived transarray; validate the shape (as avg_apply)
+    // before reading/writing the three data words.
+    let trans = unsafe {
+        let image = core::slice::from_raw_parts(arr, ::types_tuple::varatt::varsize_4b(arr));
+        check_float8_array::<3>(image, "float8_accum")?
+    };
+    let out = match t.width {
+        LaneWidth::F32 => float4_accum(trans, d.as_f32())?,
+        LaneWidth::F64 => float8_accum(trans, d.as_f64())?,
+        _ => unreachable!("FAccum width is F32 or F64"),
+    };
+    // SAFETY: the agg frame owns this transarray as a mutable image (the
+    // per-row float8_accum writes the same three words in place); shape
+    // verified above.
+    unsafe {
+        let data = arr.add(FLOAT8_ARRAY_HDRSZ);
+        for (k, v) in out.iter().enumerate() {
+            data.add(8 * k).cast::<[u8; 8]>().write(v.to_ne_bytes());
+        }
+    }
+    Ok(())
+}
+
 // Strict booland/boolor_statefunc advance. C recomputes the canonical bool
 // datum every transition (arg1 && arg2), and the first strict install copies
 // the input's canonical bool datum, so from_bool is byte-identical either
@@ -2243,6 +2483,22 @@ fn for_each_row(rows: &[u64], mut f: impl FnMut(usize)) {
             bits &= bits - 1;
         }
     }
+}
+
+// Fallible row walk for the ORDER-SENSITIVE fold-trans kernels: same
+// ascending row order as `for_each_row`, short-circuiting on the first Err —
+// which is exactly C's raise-at-row discipline (no row after the raising one
+// ever accumulates).
+#[inline(always)]
+fn try_for_each_row(rows: &[u64], mut f: impl FnMut(usize) -> PgResult<()>) -> PgResult<()> {
+    for (w, &word) in rows.iter().enumerate() {
+        let mut bits = word;
+        while bits != 0 {
+            f(w * 64 + bits.trailing_zeros() as usize)?;
+            bits &= bits - 1;
+        }
+    }
+    Ok(())
 }
 
 /// Per-(group, transition) memo for the grouped str MIN/MAX dict-code path:
@@ -2431,7 +2687,8 @@ unsafe fn str_advance_coded(
 /// `groups[k]` is the live pergroup array the hash lookup installed for row
 /// `idxs[k]` of this batch (entries are never moved or freed within a batch;
 /// spill mode only redirects NEW groups); `idxs` rows carry valid lane values
-/// for every plan column; AvgAccum pergroups hold a live transarray;
+/// for every plan column; AvgAccum pergroups hold a live transarray; FAccum
+/// pergroups hold a live aggcontext float8[3] transarray;
 /// Int128AvgAccum pergroups are NULL or hold a live aggcontext
 /// `Int128AggState` pointer, with `aggcxt` that same aggcontext; str-kind
 /// lanes and pergroups as in `fold_batch`. Guarded plans require a prior
@@ -2581,6 +2838,15 @@ pub unsafe fn fold_rows_grouped_mm(
                         _ => unsafe { str_advance(t, pg, values[i], aggcxt)? },
                     }
                 }
+                // Fold-trans tier: per-row ORDER-PRESERVING float advances.
+                // This loop already visits rows in batch order per
+                // transition, which is exactly the discipline the
+                // non-commutative float kernels need — each group's state
+                // sees its rows in C's row order.
+                LaneKind::FSum => fsum_advance(t, pg, values[i])?,
+                // SAFETY: FAccum pergroups hold a live aggcontext float8[3]
+                // transarray (caller contract); sole reference here.
+                LaneKind::FAccum => unsafe { faccum_advance(t, pg, values[i])? },
             }
         }
     }
