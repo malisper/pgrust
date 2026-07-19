@@ -21,6 +21,22 @@ use std::time::Duration;
 
 use super::driver::{ExecOutcome, PgSession, Session};
 
+/// SIM-CONVERGE inc-3: what the dispatcher needs from a pooled worker —
+/// synchronous execution (the `Session` supertrait) plus the async
+/// dispatch/join pair. Two implementors: the live thread-backed
+/// [`WorkerSession`] and the sim bridge's replay twin
+/// (`runner::simbridge::ReplayWorker`), which serves recorded outcomes so
+/// `execute_plan` can walk v2 multi-session plans NATIVELY over sim
+/// artifacts.
+pub trait PoolSession: Session {
+    /// Dispatch without waiting — the statement is expected to block.
+    fn dispatch_async(&mut self, sql: &str) -> Result<(), String>;
+    /// Collect the outstanding async statement (bounded).
+    fn join_pending(&mut self) -> ExecOutcome;
+    /// Explicit supertrait view (avoids relying on dyn upcasting).
+    fn as_session(&mut self) -> &mut dyn Session;
+}
+
 /// Everything the pool needs to mint a worker connection. Mirrors the
 /// primary pair's connect discipline (same session_setup, same SET replay).
 #[derive(Debug, Clone)]
@@ -115,8 +131,16 @@ impl WorkerSession {
         self.pending
     }
 
+    fn cancel_backend(&self) {
+        if let Some(tok) = &self.cancel {
+            let _ = tok.cancel_query(postgres::NoTls);
+        }
+    }
+}
+
+impl PoolSession for WorkerSession {
     /// Dispatch without waiting — the statement is expected to block.
-    pub fn dispatch_async(&mut self, sql: &str) -> Result<(), String> {
+    fn dispatch_async(&mut self, sql: &str) -> Result<(), String> {
         if self.pending {
             return Err(format!(
                 "{}: async dispatch while a statement is outstanding",
@@ -131,7 +155,7 @@ impl WorkerSession {
     }
 
     /// Collect the outstanding async statement (bounded).
-    pub fn join_pending(&mut self) -> ExecOutcome {
+    fn join_pending(&mut self) -> ExecOutcome {
         if !self.pending {
             // "client:" prefix => harness-fetch (P2) territory: a join
             // without an outstanding statement is a plan-construction bug,
@@ -164,10 +188,8 @@ impl WorkerSession {
         }
     }
 
-    fn cancel_backend(&self) {
-        if let Some(tok) = &self.cancel {
-            let _ = tok.cancel_query(postgres::NoTls);
-        }
+    fn as_session(&mut self) -> &mut dyn Session {
+        self
     }
 }
 
@@ -222,59 +244,93 @@ impl Drop for WorkerSession {
 
 /// Lazy worker pool, one slot per (leg, session id >= 1). Slot 0 is the
 /// primary pair and never lives here.
+///
+/// SIM-CONVERGE inc-3: the pool now holds `dyn PoolSession` workers so a
+/// PREPARED pool (the sim bridge's replay twin — `ReplayWorker`s built from
+/// per-session sim artifacts) can stand in for the live thread-backed
+/// workers. Prepared pools never spawn: `ensure` only verifies presence.
 pub struct SessionPool {
     cfg: Option<SessionPoolConfig>,
-    dut: Vec<Option<WorkerSession>>,
-    cpg: Vec<Option<WorkerSession>>,
+    prepared: bool,
+    dut: Vec<Option<Box<dyn PoolSession>>>,
+    cpg: Vec<Option<Box<dyn PoolSession>>>,
 }
 
 impl SessionPool {
     pub fn new(cfg: Option<SessionPoolConfig>) -> Self {
-        SessionPool { cfg, dut: Vec::new(), cpg: Vec::new() }
+        SessionPool { cfg, prepared: false, dut: Vec::new(), cpg: Vec::new() }
+    }
+
+    /// SIM-CONVERGE inc-3: a pre-populated replay pool — index 0 = session
+    /// id 1 (the primary pair never lives here). No cpg legs (diff-c is N/A
+    /// inside the sim).
+    pub fn prepared(dut: Vec<Option<Box<dyn PoolSession>>>) -> Self {
+        SessionPool { cfg: None, prepared: true, dut, cpg: Vec::new() }
     }
 
     /// Spawn (if needed) the workers for session `id` (>= 1). `diff` mirrors
     /// whether the primary pair runs diff-c. Errors only on missing config
-    /// (harness routing bug); connect failures surface as outcomes.
+    /// (harness routing bug); connect failures surface as outcomes. On a
+    /// PREPARED pool this only verifies the session was provisioned.
     pub fn ensure(&mut self, id: u32, diff: bool) -> Result<(), String> {
+        let ix = (id - 1) as usize;
+        if self.prepared {
+            return if self.dut.get(ix).map(|w| w.is_some()).unwrap_or(false) {
+                Ok(())
+            } else {
+                Err(format!("replay pool has no session {id} (plan uses an unprovisioned id)"))
+            };
+        }
         let cfg = self
             .cfg
             .as_ref()
             .ok_or("session pool not configured (routing bug: v2 plan without pool config)")?;
-        let ix = (id - 1) as usize;
         while self.dut.len() <= ix {
             self.dut.push(None);
             self.cpg.push(None);
         }
         if self.dut[ix].is_none() {
-            self.dut[ix] = Some(WorkerSession::spawn(
+            self.dut[ix] = Some(Box::new(WorkerSession::spawn(
                 &format!("pgrust-s{id}"),
                 &cfg.dut_conninfo,
                 &cfg.session_sql,
-            ));
+            )));
         }
         if diff && self.cpg[ix].is_none() {
             if let Some(ci) = &cfg.cpg_conninfo {
-                self.cpg[ix] =
-                    Some(WorkerSession::spawn(&format!("cpg-s{id}"), ci, &cfg.session_sql));
+                self.cpg[ix] = Some(Box::new(WorkerSession::spawn(
+                    &format!("cpg-s{id}"),
+                    ci,
+                    &cfg.session_sql,
+                )));
             }
         }
         Ok(())
     }
 
     /// Both legs of session `id` (>= 1); `ensure` must have run.
-    pub fn pair(&mut self, id: u32) -> (&mut WorkerSession, Option<&mut WorkerSession>) {
+    #[allow(clippy::type_complexity)]
+    pub fn pair(&mut self, id: u32) -> (&mut dyn PoolSession, Option<&mut dyn PoolSession>) {
         let ix = (id - 1) as usize;
-        let dut = self.dut[ix].as_mut().expect("ensure() ran");
-        let cpg = self.cpg.get_mut(ix).and_then(|c| c.as_mut());
+        let dut: &mut dyn PoolSession = self.dut[ix].as_mut().expect("ensure() ran").as_mut();
+        let cpg = match self.cpg.get_mut(ix) {
+            Some(Some(w)) => Some(w.as_mut() as &mut dyn PoolSession),
+            _ => None,
+        };
         (dut, cpg)
     }
 
-    pub fn dut_of(&mut self, id: u32) -> Option<&mut WorkerSession> {
-        self.dut.get_mut((id - 1) as usize).and_then(|w| w.as_mut())
+    pub fn dut_of(&mut self, id: u32) -> Option<&mut dyn PoolSession> {
+        match self.dut.get_mut((id - 1) as usize) {
+            Some(Some(w)) => Some(w.as_mut()),
+            _ => None,
+        }
     }
 
-    pub fn cpg_of(&mut self, id: u32) -> Option<&mut WorkerSession> {
-        self.cpg.get_mut((id - 1) as usize).and_then(|w| w.as_mut())
+    pub fn cpg_of(&mut self, id: u32) -> Option<&mut dyn PoolSession> {
+        match self.cpg.get_mut((id - 1) as usize) {
+            Some(Some(w)) => Some(w.as_mut()),
+            _ => None,
+        }
     }
 }
