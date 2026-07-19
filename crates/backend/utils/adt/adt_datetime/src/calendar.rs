@@ -16,19 +16,23 @@ pub const fn isleap(y: i32) -> bool {
     y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
 }
 
+// C (datetime.c date2j) computes in plain int arithmetic and PostgreSQL
+// builds with -fwrapv: out-of-Julian-range years (to_char over huge interval
+// year counts routes here through date2isoyear) must WRAP exactly as C does,
+// not panic (fnconf batch-1, to_char(interval) crash family).
 pub const fn date2j(mut year: i32, mut month: i32, day: i32) -> i32 {
     if month > 2 {
         month += 1;
-        year += 4800;
+        year = year.wrapping_add(4800);
     } else {
         month += 13;
-        year += 4799;
+        year = year.wrapping_add(4799);
     }
 
     let century = year / 100;
-    let mut julian = year * 365 - 32167;
-    julian += year / 4 - century + century / 4;
-    julian += 7834 * month / 256 + day;
+    let mut julian = year.wrapping_mul(365).wrapping_sub(32167);
+    julian = julian.wrapping_add(year / 4 - century + century / 4);
+    julian = julian.wrapping_add(7834 * month / 256 + day);
 
     julian
 }
@@ -51,7 +55,7 @@ pub fn j2date(jd: i32, year: &mut i32, month: &mut i32, day: &mut i32) {
 }
 
 pub const fn j2day(mut date: i32) -> i32 {
-    date += 1;
+    date = date.wrapping_add(1);
     date %= 7;
     if date < 0 {
         date += 7;
@@ -59,10 +63,13 @@ pub const fn j2day(mut date: i32) -> i32 {
     date
 }
 
+// The isoweek family below mirrors C (timestamp.c/date.c helpers) which is
+// compiled with -fwrapv; every add/sub on julian-day values must wrap, since
+// date2j legitimately returns wrapped values for out-of-range years.
 pub fn isoweek2j(year: i32, week: i32) -> i32 {
     let day4 = date2j(year, 1, 4);
-    let day0 = j2day(day4 - 1);
-    ((week - 1) * 7) + (day4 - day0)
+    let day0 = j2day(day4.wrapping_sub(1));
+    (week - 1).wrapping_mul(7).wrapping_add(day4.wrapping_sub(day0))
 }
 
 pub fn isoweek2date(woy: i32, year: &mut i32, mon: &mut i32, mday: &mut i32) {
@@ -72,9 +79,9 @@ pub fn isoweek2date(woy: i32, year: &mut i32, mon: &mut i32, mday: &mut i32) {
 pub fn isoweekdate2date(isoweek: i32, wday: i32, year: &mut i32, mon: &mut i32, mday: &mut i32) {
     let mut jday = isoweek2j(*year, isoweek);
     if wday > 1 {
-        jday += wday - 2;
+        jday = jday.wrapping_add(wday - 2);
     } else {
-        jday += 6;
+        jday = jday.wrapping_add(6);
     }
     j2date(jday, year, mon, mday);
 }
@@ -82,20 +89,20 @@ pub fn isoweekdate2date(isoweek: i32, wday: i32, year: &mut i32, mon: &mut i32, 
 pub fn date2isoweek(year: i32, mon: i32, mday: i32) -> i32 {
     let dayn = date2j(year, mon, mday);
     let mut day4 = date2j(year, 1, 4);
-    let mut day0 = j2day(day4 - 1);
+    let mut day0 = j2day(day4.wrapping_sub(1));
 
-    if dayn < day4 - day0 {
-        day4 = date2j(year - 1, 1, 4);
-        day0 = j2day(day4 - 1);
+    if dayn < day4.wrapping_sub(day0) {
+        day4 = date2j(year.wrapping_sub(1), 1, 4);
+        day0 = j2day(day4.wrapping_sub(1));
     }
 
-    let mut result = (dayn - (day4 - day0)) / 7 + 1;
+    let mut result = dayn.wrapping_sub(day4.wrapping_sub(day0)) / 7 + 1;
 
     if result >= 52 {
-        day4 = date2j(year + 1, 1, 4);
-        day0 = j2day(day4 - 1);
-        if dayn >= day4 - day0 {
-            result = (dayn - (day4 - day0)) / 7 + 1;
+        day4 = date2j(year.wrapping_add(1), 1, 4);
+        day0 = j2day(day4.wrapping_sub(1));
+        if dayn >= day4.wrapping_sub(day0) {
+            result = dayn.wrapping_sub(day4.wrapping_sub(day0)) / 7 + 1;
         }
     }
 
@@ -105,22 +112,22 @@ pub fn date2isoweek(year: i32, mon: i32, mday: i32) -> i32 {
 pub fn date2isoyear(year: i32, mon: i32, mday: i32) -> i32 {
     let dayn = date2j(year, mon, mday);
     let mut day4 = date2j(year, 1, 4);
-    let mut day0 = j2day(day4 - 1);
+    let mut day0 = j2day(day4.wrapping_sub(1));
     let mut year = year;
 
-    if dayn < day4 - day0 {
-        day4 = date2j(year - 1, 1, 4);
-        day0 = j2day(day4 - 1);
-        year -= 1;
+    if dayn < day4.wrapping_sub(day0) {
+        day4 = date2j(year.wrapping_sub(1), 1, 4);
+        day0 = j2day(day4.wrapping_sub(1));
+        year = year.wrapping_sub(1);
     }
 
-    let result = (dayn - (day4 - day0)) / 7 + 1;
+    let result = dayn.wrapping_sub(day4.wrapping_sub(day0)) / 7 + 1;
 
     if result >= 52 {
-        day4 = date2j(year + 1, 1, 4);
-        day0 = j2day(day4 - 1);
-        if dayn >= day4 - day0 {
-            year += 1;
+        day4 = date2j(year.wrapping_add(1), 1, 4);
+        day0 = j2day(day4.wrapping_sub(1));
+        if dayn >= day4.wrapping_sub(day0) {
+            year = year.wrapping_add(1);
         }
     }
 
@@ -128,5 +135,7 @@ pub fn date2isoyear(year: i32, mon: i32, mday: i32) -> i32 {
 }
 
 pub fn date2isoyearday(year: i32, mon: i32, mday: i32) -> i32 {
-    date2j(year, mon, mday) - isoweek2j(date2isoyear(year, mon, mday), 1) + 1
+    date2j(year, mon, mday)
+        .wrapping_sub(isoweek2j(date2isoyear(year, mon, mday), 1))
+        .wrapping_add(1)
 }

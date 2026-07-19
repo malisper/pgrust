@@ -778,6 +778,29 @@ mod tests {
         assert_eq!(to_char_str(b"YYYY\"y\""), "1997y");
     }
 
+    // fnconf batch-1, OID 1768 (to_char(interval)) crash family: huge month
+    // counts route ISO-week codes through date2j, whose int math C compiles
+    // with -fwrapv (datetime.c date2j). C 18.3:
+    //   to_char('2147483647 months'::interval, 'IYYY') → 178956970
+    //   to_char('2147483647 months'::interval, 'MM')   → 07
+    // Red at base: debug multiply-with-overflow panic in date2j.
+    #[test]
+    fn to_char_interval_huge_months_wraps_like_c() {
+        let ctx = MemoryContext::new("dch-test");
+        let it = ::adt_datetime::Interval { time: 0, day: 0, month: i32::MAX };
+        let fmt = |f: &[u8]| {
+            let v =
+                interval_to_char(ctx.mcx(), ::types_core::InvalidOid, &it, f).unwrap();
+            String::from_utf8_lossy(v.data()).into_owned()
+        };
+        assert_eq!(fmt(b"IYYY"), "178956970");
+        assert_eq!(fmt(b"MM"), "07");
+        assert_eq!(fmt(b"YYYY"), "178956970");
+        // Wrapped-arithmetic pins (values from C's -fwrapv evaluation).
+        assert_eq!(::adt_datetime::calendar::date2j(178956970, 7, 0), 939902916);
+        assert_eq!(::adt_datetime::calendar::date2isoyear(178956970, 7, 0), 178956970);
+    }
+
     #[test]
     fn to_char_hh12_ampm() {
         assert_eq!(to_char_str(b"HH12:MI AM"), "07:37 AM");
