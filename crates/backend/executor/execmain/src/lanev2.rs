@@ -1429,6 +1429,23 @@ fn index_scan_refuse_reason<'mcx>(
     is: &::nodeindexscan::IndexScanState<'mcx>,
     estate: &EStateData<'mcx>,
 ) -> Option<RefuseReason> {
+    index_scan_refuse_reason_ex(is, estate, false)
+}
+
+/// `allow_parallel`: the AGGIDX-PAR agg-over-index feed admits parallel-aware
+/// scans (each worker's feed drives the SAME `index_scan_next_tidrun`
+/// primitive over the shared parallel scan descriptor the DSM initializers
+/// opened — page claims coordinate inside the AM, exactly the fused arm #2
+/// drive, which never had a parallel check). Every OTHER gate applies
+/// identically (the `seq_scan_refuse_reason_ex` rule: a widening flag may
+/// never skip any row but its own). The tidrun pull path and the sorted-agg
+/// hook keep `allow_parallel = false` — their drives were never priced under
+/// workers.
+fn index_scan_refuse_reason_ex<'mcx>(
+    is: &::nodeindexscan::IndexScanState<'mcx>,
+    estate: &EStateData<'mcx>,
+    allow_parallel: bool,
+) -> Option<RefuseReason> {
     if estate.es_epq_active {
         return Some(RefuseReason::Epq);
     }
@@ -1438,7 +1455,7 @@ fn index_scan_refuse_reason<'mcx>(
     if !is.batch_allowed() {
         return Some(RefuseReason::ScrollMark);
     }
-    if is.iss_ParallelAware {
+    if is.iss_ParallelAware && !allow_parallel {
         return Some(RefuseReason::ParallelGate);
     }
     if is.ss.instr_idx.is_some() {
