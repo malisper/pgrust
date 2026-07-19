@@ -159,6 +159,22 @@ pub enum CoverClass {
     /// floored under BOTH the groupby_high boundary and the export-cap
     /// headroom.
     CbHashJoinGroupedAgg,
+    /// SE-AGGPOLY row flip (band 101001, knob-gated `PGRUST_LANE_V2_AGG_POLY`
+    /// — the probe keys this class ONLY when the executor arm is armed, the
+    /// GROUPSINK coherence law): PLAIN (ungrouped) aggregation over ONE
+    /// UNINDEXED plain heap relation, quals allowed, where every tlist entry
+    /// is a whitelisted bare-int-Var aggregate (PLAIN_FOLD_AGGS) or a plain
+    /// sum/avg(NUMERIC) over ANY parallel-safe single-argument expression
+    /// (the poly export manifest's NumericAvg class — the runtime scan
+    /// arm's per-row drive runs C's checked transition program, so the arg
+    /// shape is free; helper-side evaluation safety is the planner's own
+    /// `is_parallel_safe`, applied to the quals too), with at least one
+    /// numeric aggregate (all-int shapes keep their existing rows). No
+    /// sort/limit/offset (the Agg must be the plan ROOT — a Limit/Sort
+    /// above it is an agg-not-plan-root walk refusal, the
+    /// suppress-then-refuse direction); unindexed keeps the suppressed
+    /// serial plan shape certain (Agg over SeqScan). tpch q06 class.
+    AggPolyHeapPlain,
     /// M5-5 Meta-over-Gather (the band-2a q30 handoff): plain (ungrouped)
     /// FOOTER-ANSWERABLE aggregation over one plain pgrcolumnar rel with NO
     /// quals — count(*)/count(col), min/max over bare int-family Vars,
@@ -254,6 +270,11 @@ pub const BOOTSTRAP_MATRIX: &[MatrixRow] = &[
         class: CoverClass::CbMetaFooterAgg,
         covered: true,
         qualifiers: "no quals; footer-answerable aggs incl. affine int2/int4 sum/avg (divk==1, lanefold classify_arg forms); Meta lane answers, runtime scan fold is the engagement fallback",
+    },
+    MatrixRow {
+        class: CoverClass::AggPolyHeapPlain,
+        covered: true,
+        qualifiers: "se-aggpoly (band 101001): keyed ONLY under PGRUST_LANE_V2_AGG_POLY (knob coherence); one unindexed heap rel; quals allowed, is_parallel_safe; tlist = PLAIN_FOLD_AGGS bare-int OR plain sum/avg(numeric) w/ parallel-safe arg exprs, >=1 numeric; Agg-root only (no sort/limit/offset); floor reused from HeapCmpFoldPrefix (provisional — GL-AGGPOLY-1 letter owed)",
     },
 ];
 
@@ -355,6 +376,14 @@ fn class_guard(class: CoverClass) -> FloorGuard {
         CoverClass::CbHashJoinGroupedAgg => FloorGuard { max_rows: 2_000_000.0, ..NO_GUARD },
         // Footer answers are O(1) — never floored.
         CoverClass::CbMetaFooterAgg => NO_GUARD,
+        // SE-AGGPOLY: PROVISIONAL reuse of the HeapCmpFoldPrefix guard (the
+        // same heap per-row parallel drive; the numeric transition is
+        // STRICTLY more per-row work than the int fold it was measured on,
+        // which only widens the parallel win region — the reuse errs
+        // conservative on the min side). GL-AGGPOLY-1 owns re-measuring.
+        CoverClass::AggPolyHeapPlain => {
+            FloorGuard { min_rows: 1_000_000.0, min_dop: 12, low_dop_max_rows: 0.0, ..NO_GUARD }
+        }
     }
 }
 
@@ -430,6 +459,53 @@ const GROUPED_SINK_AGGS: &[u32] = &[
     F_MIN_INT4,
     F_MIN_INT2,
 ];
+
+// SE-AGGPOLY (band 101001): sum/avg over NUMERIC — aggregate OIDs of record
+// (vendored REL 18.3 pg_proc/pg_aggregate, verified): both ride transfn
+// numeric_avg_accum (2858, NOT strict) over an INTERNAL NumericAggState
+// without sum_x2. The stddev/variance family (numeric_accum 1834, sum_x2)
+// stays a named refusal.
+const F_AVG_NUMERIC: u32 = 2103;
+const F_SUM_NUMERIC: u32 = 2114;
+// avg(int2)/avg(int4) — the runtime distinct sink's AvgInt vocab entries
+// (pardistinct::vocab_kind); admitted as CbDistinctIntKeys passengers under
+// the AGG_POLY knob below.
+// (F_AVG_INT2/F_AVG_INT4 already defined above with the fold whitelist.)
+
+/// SE-AGGPOLY knob coherence (the GROUPSINK precedent): the executor arm's
+/// `PGRUST_LANE_V2_AGG_POLY` (execmain lanev2, default OFF) must also gate
+/// the probe keyings this lane adds — a keyed shape whose arm is disarmed
+/// would suppress Gather and land on the serial path (risk P1's
+/// suppress-then-refuse direction). Same env spelling in both crates.
+fn agg_poly_probe_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("PGRUST_LANE_V2_AGG_POLY").as_deref(),
+            Ok("1") | Ok("on")
+        )
+    })
+}
+
+/// CbDistinctIntKeys PASSENGER whitelist = the runtime distinct sink's
+/// EXACT vocabulary (`pardistinct::vocab_kind`: count(*)/count(any)/
+/// sum(int2/int4), plus avg(int2/int4) — the (acc,count) transarray pair —
+/// keyed only under the AGG_POLY knob until its fleet letter lands).
+/// HISTORY (se-aggpoly fix): this branch previously consulted
+/// GROUPED_SINK_AGGS, which also lists min/max(int2/4/8) — aggregates the
+/// distinct sink's spec derivation REFUSES ("vocab transfn outside the
+/// exact-integer whitelist", nodeagg lib.rs pd_derive), so a
+/// count(DISTINCT)+min/max shape keyed, suppressed its Gather, and landed
+/// on the serial arm — the latent suppress-then-refuse channel. The
+/// min/max removal is UNCONDITIONAL (fail-closed regardless of the knob);
+/// the e2e pins the shape NOT-KEYED.
+const DISTINCT_PASSENGER_AGGS: &[u32] = &[F_COUNT_STAR, F_COUNT_ANY, F_SUM_INT4, F_SUM_INT2];
+const DISTINCT_PASSENGER_AGGS_POLY: &[u32] =
+    &[F_COUNT_STAR, F_COUNT_ANY, F_SUM_INT4, F_SUM_INT2, F_AVG_INT4, F_AVG_INT2];
+
+fn distinct_passenger_aggs() -> &'static [u32] {
+    if agg_poly_probe_enabled() { DISTINCT_PASSENGER_AGGS_POLY } else { DISTINCT_PASSENGER_AGGS }
+}
 
 /// Heap CMP fold prefix whitelist (M1-b): count(col)/min(int)/max(int).
 const HEAP_CMP_AGGS: &[u32] = &[
@@ -713,6 +789,29 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             }
             return Ok(false);
         }
+        // SE-AGGPOLY (band 101001, knob-gated): plain heap aggregation with
+        // sum/avg(numeric) states, quals ALLOWED (the per-row drive runs
+        // them verbatim; helper-side safety = the planner's own
+        // is_parallel_safe over quals + numeric agg args). Unindexed keeps
+        // the suppressed serial plan an Agg-over-SeqScan; no sort/limit
+        // keeps the Agg the plan root (both are walk refusals — the
+        // suppress-then-refuse direction). tpch q06 class.
+        if agg_poly_probe_enabled()
+            && parse.sortClause.is_nil()
+            && parse.limitCount.is_none()
+            && parse.limitOffset.is_none()
+            && heap_poly_indexes_admit(run, parse, top.quals, rti, rel_id)?
+            && crate::is_parallel_safe_opt(run, top.quals)?
+            && heap_poly_tlist_admits(run, parse, rti)?
+        {
+            // Floor denominator: the RAW tuple estimate, not the post-qual
+            // rows — the per-row drive scans the WHOLE relation and runs the
+            // qual per row, so the engagement's work (and the parallel win)
+            // is scan-shaped. Using rel_rows here floored a 1.5M-row scan
+            // out at 23% selectivity (live finding, worklog §3).
+            let scan_tuples = run.root.rel(rel_id).tuples.max(rel_rows);
+            return finish(run, CoverClass::AggPolyHeapPlain, rte.relid, 1.0, scan_tuples, rel_pages);
+        }
         // Heap rows are no-qual only (LIKE-qual folds are walk refusals;
         // the qualed LIKE census is deliberately not keyed in bootstrap).
         if has_quals || !parse.sortClause.is_nil() {
@@ -760,6 +859,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     // count(DISTINCT <int Var>) — the runtime distinct sink's class
     // (CbDistinctIntKeys; int GROUP keys only, checked below).
     let mut n_count_distinct = 0usize;
+    let mut passengers: Vec<Node<'_>> = Vec::new();
     for tle_node in &parse.targetList {
         let Some(tle) = tle_node.as_target_entry() else { return Ok(false) };
         if tle.ressortgroupref != 0 && key_refs.contains(&tle.ressortgroupref) {
@@ -772,14 +872,26 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             n_count_distinct += 1;
             continue;
         }
-        if !is_whitelisted_agg(tle.expr, rti, GROUPED_SINK_AGGS) {
-            return Ok(false);
-        }
+        // Deferred: the passenger discipline depends on the CLASS (the
+        // distinct sink's vocabulary vs the grouped sink's whitelist),
+        // known only once the whole tlist was scanned.
+        passengers.push(tle.expr);
     }
     // The distinct sink's class: int-family GROUP keys only (text grouped
     // distinct stays the refused distinct-text row).
     if n_count_distinct > 0 && n_text > 0 {
         return Ok(false);
+    }
+    // Passenger discipline per class (se-aggpoly): the DISTINCT class
+    // consults the distinct sink's exact vocabulary (min/max REMOVED — the
+    // latent suppress-then-refuse channel; avg(int2/4) ADDED under the
+    // AGG_POLY knob); everything else keeps GROUPED_SINK_AGGS verbatim.
+    let passenger_list =
+        if n_count_distinct > 0 { distinct_passenger_aggs() } else { GROUPED_SINK_AGGS };
+    for e in &passengers {
+        if !is_whitelisted_agg(*e, rti, passenger_list) {
+            return Ok(false);
+        }
     }
 
     // Sort/limit composition: none at all (plain grouped emit), or the
@@ -799,7 +911,10 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         let Some(tle) = tle_by_sortgroupref(parse, sc.tleSortGroupRef) else {
             return Ok(false);
         };
-        if !is_whitelisted_agg(tle.expr, rti, GROUPED_SINK_AGGS)
+        // The sort key rides the same class-dependent vocabulary as the
+        // passengers (se-aggpoly): a distinct-class sort key outside the
+        // sink vocab would key a shape the sink refuses.
+        if !is_whitelisted_agg(tle.expr, rti, passenger_list)
             && !is_count_distinct_int(tle.expr, rti)
         {
             return Ok(false);
@@ -1725,6 +1840,118 @@ fn is_whitelisted_agg_2rti(expr: Node<'_>, rti_l: usize, rti_r: usize, whitelist
 
 fn aggref_plain(agg: &Aggref<'_>, rti: usize) -> bool {
     aggref_plain_typed(agg, rti, is_int_family)
+}
+
+/// SE-AGGPOLY (band 101001): the single-rel plain-agg INDEX guard —
+/// strictly narrower than the join classes' blanket "unindexed" rule
+/// (which refused tpch q06 outright: lineitem carries its PRIMARY KEY, a
+/// live census finding). With ONE baserel and no join, an index can steer
+/// the suppressed serial plan away from Agg-over-SeqScan only when:
+///   (a) a QUAL references the index's KEY columns (an index path becomes
+///       electable — the walk would refuse the IndexScan outer, the
+///       suppress-then-refuse direction), or
+///   (b) the index COVERS every column the query references (an
+///       index-only scan can cost below the seqscan even qual-free).
+/// Expression or partial indexes refuse outright (their matching is the
+/// planner's own — not re-derived here), as do whole-row references.
+/// q06's lineitem_pkey (l_orderkey, l_linenumber) triggers neither arm.
+fn heap_poly_indexes_admit(
+    run: &PlannerRun<'_>,
+    parse: &Query<'_>,
+    quals: Option<Node<'_>>,
+    rti: usize,
+    rel_id: types_pathnodes::RelId,
+) -> PgResult<bool> {
+    let rel = run.root.rel(rel_id);
+    if rel.indexlist.is_empty() {
+        return Ok(true);
+    }
+    use types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
+    let mut qual_bm = types_nodes::Bitmapset::empty();
+    if let Some(q) = quals {
+        vars::pull_varattnos(run.mcx, q, rti as i32, &mut qual_bm)?;
+    }
+    let mut all_bm = types_nodes::Bitmapset::empty();
+    if let Some(q) = quals {
+        vars::pull_varattnos(run.mcx, q, rti as i32, &mut all_bm)?;
+    }
+    for tle_node in &parse.targetList {
+        let Some(tle) = tle_node.as_target_entry() else { return Ok(false) };
+        vars::pull_varattnos(run.mcx, tle.expr, rti as i32, &mut all_bm)?;
+    }
+    let raw = |m: i32| m + FirstLowInvalidHeapAttributeNumber;
+    // Whole-row or system-column references: refuse (nothing the coverage
+    // arm can reason about).
+    for m in all_bm.iter() {
+        if raw(m) <= 0 {
+            return Ok(false);
+        }
+    }
+    for index in rel.indexlist.iter() {
+        if !index.indexprs.is_empty() || !index.indpred.is_empty() {
+            return Ok(false);
+        }
+        let keys = &index.indexkeys;
+        let nkey = (index.nkeycolumns as usize).min(keys.len());
+        // (a) qual vars on the index's key columns.
+        for m in qual_bm.iter() {
+            let a = raw(m);
+            if keys[..nkey].iter().any(|&k| k == a) {
+                return Ok(false);
+            }
+        }
+        // (b) every referenced column inside the index (key + INCLUDE) —
+        // index-only-scan coverable.
+        let covers_all = all_bm
+            .iter()
+            .all(|m| keys.iter().any(|&k| k == raw(m)));
+        if covers_all {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// SE-AGGPOLY (band 101001): the plain-heap-poly tlist discipline — every
+/// entry is a whitelisted bare-int-Var aggregate (PLAIN_FOLD_AGGS) or a
+/// structurally plain sum/avg(NUMERIC) (no ORDER BY/DISTINCT/FILTER/
+/// variadic/ordered-set/levelsup) whose single argument expression the
+/// planner's own `is_parallel_safe` admits (it runs on helpers through the
+/// per-row transition program; the arg SHAPE is otherwise free — the poly
+/// manifest classifies by state, not argument). At least one numeric
+/// aggregate required (all-int shapes keep their existing rows), and
+/// nothing else in the tlist (consts and bare Vars refuse — narrow probe).
+fn heap_poly_tlist_admits(
+    run: &PlannerRun<'_>,
+    parse: &Query<'_>,
+    rti: usize,
+) -> PgResult<bool> {
+    let mut n_numeric = 0usize;
+    for tle_node in &parse.targetList {
+        let Some(tle) = tle_node.as_target_entry() else { return Ok(false) };
+        if is_whitelisted_agg(tle.expr, rti, PLAIN_FOLD_AGGS) {
+            continue;
+        }
+        let Some(agg) = tle.expr.as_aggref() else { return Ok(false) };
+        if !matches!(agg.aggfnoid, F_AVG_NUMERIC | F_SUM_NUMERIC)
+            || agg.agglevelsup != 0
+            || agg.aggkind != AGGKIND_NORMAL
+            || agg.aggvariadic
+            || !agg.aggorder.is_nil()
+            || !agg.aggdistinct.is_nil()
+            || agg.aggfilter.is_some()
+            || !agg.aggdirectargs.is_nil()
+            || agg.args.len() != 1
+        {
+            return Ok(false);
+        }
+        let Some(arg_tle) = agg.args.nth(0).as_target_entry() else { return Ok(false) };
+        if !crate::is_parallel_safe_opt(run, Some(arg_tle.expr))? {
+            return Ok(false);
+        }
+        n_numeric += 1;
+    }
+    Ok(n_numeric > 0)
 }
 
 /// `aggref_plain` with a caller-supplied single-arg type predicate: a

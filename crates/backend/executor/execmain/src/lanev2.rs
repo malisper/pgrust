@@ -2040,6 +2040,15 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
     if ::nodeagg::agg_plain_fold_admissible(agg)
         || (::nodeagg::agg_plain_perrow_admissible(agg)
             && ::nodeseqscan::seq_scan_is_pgrcolumnar(ss))
+        // SE-AGGPOLY (band 101001, knob-gated default OFF): heap plain
+        // shapes with NO fold plan but a poly export manifest (numeric
+        // states) must reach the plain walk so the RUNTIME scan arm can
+        // offer (the serial heap decide still Refuses them — the fused
+        // incumbent keeps the serial drive byte-identically; only the
+        // runtime engagement path is new).
+        || (agg_poly_enabled()
+            && ::nodeagg::agg_plain_perrow_admissible(agg)
+            && ::nodeagg::runtime_partial::agg_poly_partial_admissible(agg))
     {
         return try_own_plain_agg_over_seq_scan(agg, ss, choice, estate);
     }
@@ -8893,6 +8902,26 @@ fn distincthash_textbatch_enabled() -> bool {
         !matches!(
             std::env::var("PGRUST_LANE_V2_DISTINCTHASH_TEXTBATCH").as_deref(),
             Ok("0") | Ok("off")
+        )
+    })
+}
+
+/// `PGRUST_LANE_V2_AGG_POLY` (SE-AGGPOLY, band 101001; DEFAULT OFF): admit
+/// the poly export manifest — plain-agg shapes whose transitions the fold
+/// plan does not fully cover but whose remainder is exactly the
+/// sum/avg(numeric) NumericAggState family — to the runtime scan arm's
+/// per-row drive (DriveMode::PerRowPoly: the real checked transition
+/// program per row; numeric end states relocated as self-contained exact
+/// digit snapshots for the cross-worker export/combine/absorb). The m5
+/// suppression probe keys the matching plan shapes under the SAME env
+/// spelling (knob coherence — a keyed-but-disarmed shape would land on
+/// serial). Off = today's refusals, byte-identical.
+pub(crate) fn agg_poly_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("PGRUST_LANE_V2_AGG_POLY").as_deref(),
+            Ok("1") | Ok("on")
         )
     })
 }
