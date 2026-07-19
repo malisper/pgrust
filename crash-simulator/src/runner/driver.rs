@@ -68,6 +68,12 @@ impl PgSession {
         s.reconnect()?;
         Ok(s)
     }
+
+    /// Wire cancel token for this connection (H8 worker teardown hygiene:
+    /// a blocked worker statement is cancelled, never orphaned).
+    pub fn cancel_token(&self) -> Option<postgres::CancelToken> {
+        self.client.as_ref().map(|c| c.cancel_token())
+    }
 }
 
 impl Session for PgSession {
@@ -467,6 +473,9 @@ pub struct ExecOptions {
     /// state-neutral; an EXPLAIN error triggers the symmetric resync
     /// (`recover_both`) so it can never fork diff-c state.
     pub explain_every: u32,
+    /// H8: connection recipe for worker sessions (multi-session plans).
+    /// None => any session-family step is a `session-refusal` P1.
+    pub session_pool: Option<super::sessions::SessionPoolConfig>,
 }
 
 impl Default for ExecOptions {
@@ -477,21 +486,74 @@ impl Default for ExecOptions {
             post_reset_sql: Vec::new(),
             fault_driver: Box::new(super::faultdriver::NoOpFaultDriver),
             explain_every: 0,
+            session_pool: None,
         }
     }
 }
 
 /// Mark-honoring dispatcher. Tracks executed MUTATION step indexes and
 /// refuses double execution (G-R1 unit target).
+///
+/// H8: the dispatcher owns the worker-session pool and the ACTIVE session
+/// index. Session 0 is the primary pair passed in (pre-H8 behavior,
+/// byte-identical when no session steps appear); sessions >= 1 are lazy
+/// thread-backed workers. Every statement path resolves through `active`.
 pub struct Dispatcher<'a> {
     pub dut: &'a mut dyn Session,
     pub cpg: Option<&'a mut dyn Session>,
     executed_mutations: std::collections::BTreeSet<usize>,
+    pub pool: super::sessions::SessionPool,
+    pub active: u32,
 }
 
 impl<'a> Dispatcher<'a> {
     pub fn new(dut: &'a mut dyn Session, cpg: Option<&'a mut dyn Session>) -> Self {
-        Dispatcher { dut, cpg, executed_mutations: std::collections::BTreeSet::new() }
+        Dispatcher {
+            dut,
+            cpg,
+            executed_mutations: std::collections::BTreeSet::new(),
+            pool: super::sessions::SessionPool::new(None),
+            active: 0,
+        }
+    }
+
+    pub fn with_pool(
+        dut: &'a mut dyn Session,
+        cpg: Option<&'a mut dyn Session>,
+        cfg: Option<super::sessions::SessionPoolConfig>,
+    ) -> Self {
+        Dispatcher {
+            dut,
+            cpg,
+            executed_mutations: std::collections::BTreeSet::new(),
+            pool: super::sessions::SessionPool::new(cfg),
+            active: 0,
+        }
+    }
+
+    /// Switch the active session, lazily spawning workers. Errors only on a
+    /// missing pool config or an out-of-range id (harness bug class).
+    pub fn set_active(&mut self, id: u32) -> Result<(), String> {
+        if id > crate::plan::MAX_SESSION_ID {
+            return Err(format!("session id {id} out of range"));
+        }
+        if id > 0 {
+            self.pool.ensure(id, self.cpg.is_some())?;
+        }
+        self.active = id;
+        Ok(())
+    }
+
+    /// The active session's legs. Session 0 = the primary pair; workers
+    /// otherwise (already ensured by `set_active`).
+    #[allow(clippy::type_complexity)]
+    fn legs(&mut self) -> (&mut (dyn Session + 'a), Option<&mut (dyn Session + 'a)>) {
+        if self.active == 0 {
+            (&mut *self.dut, self.cpg.as_deref_mut())
+        } else {
+            let (d, c) = self.pool.pair(self.active);
+            (d as &mut (dyn Session + 'a), c.map(|w| w as &mut (dyn Session + 'a)))
+        }
     }
 
     /// Execute one marked statement. Returns (dut outcome, optional C outcome).
@@ -509,8 +571,9 @@ impl<'a> Dispatcher<'a> {
                 ));
             }
         }
-        let dut_out = self.dut.execute(&sql.text);
-        let cpg_out = match (&mut self.cpg, sql.mark) {
+        let (dut, cpg) = self.legs();
+        let dut_out = dut.execute(&sql.text);
+        let cpg_out = match (cpg, sql.mark) {
             (Some(c), Mark::Read) | (Some(c), Mark::Mutation) | (Some(c), Mark::Passthrough) => {
                 // All marks run on both engines in diff mode (state lockstep);
                 // only READ outcomes are *compared*, PASSTHROUGH never.
@@ -530,13 +593,14 @@ impl<'a> Dispatcher<'a> {
         Ok((dut_out, cpg_out))
     }
 
-    /// Post-error resync: ROLLBACK on every leg (no-op warning outside a tx,
-    /// aborts the poisoned/healthy txs symmetrically inside one). Outcomes
-    /// deliberately ignored — a dead leg is detected by the caller's crash
-    /// classification, not here.
+    /// Post-error resync: ROLLBACK on every leg OF THE ACTIVE SESSION (no-op
+    /// warning outside a tx, aborts the poisoned/healthy txs symmetrically
+    /// inside one). Outcomes deliberately ignored — a dead leg is detected
+    /// by the caller's crash classification, not here.
     pub fn recover_both(&mut self) {
-        let _ = self.dut.execute("ROLLBACK");
-        if let Some(c) = self.cpg.as_deref_mut() {
+        let (dut, cpg) = self.legs();
+        let _ = dut.execute("ROLLBACK");
+        if let Some(c) = cpg {
             let _ = c.execute("ROLLBACK");
         }
     }
@@ -597,7 +661,7 @@ pub fn execute_plan<'a>(
 ) -> RunReport {
     let mut report = RunReport::default();
     let mut stack = ResultStack::new();
-    let mut disp = Dispatcher::new(dut, cpg);
+    let mut disp = Dispatcher::with_pool(dut, cpg, opts.session_pool.clone());
     let mut in_skipped_property: Option<u32> = None;
     let mut in_property: Option<u32> = None;
     // H5 rung B: count of successfully-executed Query steps (sampling base).
@@ -617,6 +681,11 @@ pub fn execute_plan<'a>(
                     }
                 }
                 in_property = None;
+                // H8 invariant: properties leave the plan on session 0 by
+                // construction; enforce mechanically so a skipped/failed
+                // multi-session property can never leak its active session
+                // into the noise stream.
+                disp.active = 0;
                 checks.on_property_end(*seq);
             }
             _ if in_skipped_property.is_some() => {
@@ -731,7 +800,10 @@ pub fn execute_plan<'a>(
                             }
                             _ => false,
                         };
-                        if explainable && !dut_out.is_error() {
+                        // H8: sample only on session 0 (worker sessions may
+                        // hold open RR snapshots; EXPLAIN there is not
+                        // state-neutral for the choreography).
+                        if explainable && !dut_out.is_error() && disp.active == 0 {
                             query_seen += 1;
                             if opts.explain_every > 0
                                 && (query_seen - 1) % opts.explain_every as u64 == 0
@@ -1217,6 +1289,21 @@ pub fn execute_plan<'a>(
                     }
                 }
             },
+            // H8 session-family steps (plan-format v2). Execution requires a
+            // configured session pool; without one every arm below reports a
+            // loud `session-refusal` P1 — never a silent skip.
+            Step::Session(_) | Step::AsyncDml(_) | Step::Join(_) | Step::WaitUntil(_) => {
+                if run_session_step(
+                    &mut disp,
+                    &mut report,
+                    idx,
+                    step,
+                    if in_property.is_some() { Some(checks) } else { None },
+                    opts,
+                ) {
+                    return report;
+                }
+            }
         }
     }
     report
@@ -1239,7 +1326,9 @@ fn run_ctl_step(
     opts: &ExecOptions,
 ) -> bool {
     let head: String = sql.chars().take(60).collect();
-    let dut_out = disp.dut.execute(sql);
+    let (dut_leg, cpg_leg) = disp.legs();
+    let dut_out = dut_leg.execute(sql);
+    let cpg_out = cpg_leg.map(|c| c.execute(sql));
     if let ExecOutcome::ConnectionLost { message } = &dut_out {
         let class = if message.starts_with("client:") { "harness-fetch" } else { "rust-crash" };
         let sev = if class == "rust-crash" { "P1" } else { "P2" };
@@ -1265,8 +1354,7 @@ fn run_ctl_step(
         return true; // control-statement stream broken either way: stop.
     }
     let mut c_err = None;
-    if let Some(c) = disp.cpg.as_deref_mut() {
-        let c_out = c.execute(sql);
+    if let Some(c_out) = cpg_out {
         if let ExecOutcome::ConnectionLost { message } = &c_out {
             let class = if message.starts_with("client:") { "harness-fetch" } else { "c-crash" };
             let sev = if class == "c-crash" { "P1" } else { "P2" };
@@ -1372,6 +1460,303 @@ fn run_ctl_step(
         report.count("ok");
     }
     false
+}
+
+/// H8 session-family step execution. Returns true when the plan must stop.
+///
+/// Semantics (all loud, never silent):
+///   * Session(k): switch the active session (lazy worker spawn). Missing
+///     pool config / out-of-range id => `session-refusal` P1.
+///   * AsyncDml: dispatch on the ACTIVE session without waiting — refused on
+///     session 0 (the primary pair is the plan walker's own leg; a blocked
+///     statement there would wedge the walk) and when a statement is already
+///     outstanding.
+///   * Join(k): collect session k's outstanding statement on both legs;
+///     panic escalation + oracle hook + mutation-style outcome-parity
+///     comparison (divergence = state fork = HALT).
+///   * WaitUntil: poll the active session (each leg independently) until
+///     the query returns the single scalar 't'; bounded — timeout is a
+///     `wait-timeout` P1 (a choreography gate that never cleared).
+fn run_session_step(
+    disp: &mut Dispatcher,
+    report: &mut RunReport,
+    idx: usize,
+    step: &Step,
+    hook: Option<&dyn CheckEval>,
+    opts: &ExecOptions,
+) -> bool {
+    let refuse = |report: &mut RunReport, site: &str, detail: String| -> bool {
+        report.count("session-refusal");
+        report.failure = Some(Failure {
+            step_idx: idx,
+            signature: Signature {
+                class: "session-refusal".into(),
+                sqlstate: "".into(),
+                site: site.into(),
+            },
+            class: "session-refusal".into(),
+            sev: "P1".into(),
+            detail,
+        });
+        true
+    };
+    match step {
+        Step::Session(id) => {
+            if let Err(e) = disp.set_active(*id) {
+                return refuse(report, "session:switch", e);
+            }
+            report.count("ok");
+            false
+        }
+        Step::AsyncDml(sql) => {
+            if disp.active == 0 {
+                return refuse(
+                    report,
+                    "session:async",
+                    "async dispatch on session 0 (would wedge the plan walker)".into(),
+                );
+            }
+            if sql.mark == Mark::Mutation && !disp.executed_mutations.insert(idx) {
+                report.count("dispatch-refusal");
+                report.failure = Some(Failure {
+                    step_idx: idx,
+                    signature: Signature {
+                        class: "dispatch-refusal".into(),
+                        sqlstate: "".into(),
+                        site: normalize_site(&sql.text),
+                    },
+                    class: "dispatch-refusal".into(),
+                    sev: "P1".into(),
+                    detail: format!(
+                        "dispatch refusal: MUTATION step {} would execute twice (mutation-split law)",
+                        idx
+                    ),
+                });
+                return true;
+            }
+            let active = disp.active;
+            let has_cpg = disp.cpg.is_some();
+            let dut_res = disp
+                .pool
+                .dut_of(active)
+                .map(|w| w.dispatch_async(&sql.text))
+                .unwrap_or(Err("no worker for active session".into()));
+            let cpg_res = if has_cpg {
+                disp.pool
+                    .cpg_of(active)
+                    .map(|w| w.dispatch_async(&sql.text))
+                    .unwrap_or(Err("no C worker for active session".into()))
+            } else {
+                Ok(())
+            };
+            if let Err(e) = dut_res.and(cpg_res) {
+                return refuse(report, "session:async", e);
+            }
+            report.count("async-dispatched");
+            false
+        }
+        Step::Join(id) => {
+            let dut_out = match disp.pool.dut_of(*id) {
+                Some(w) => w.join_pending(),
+                None => {
+                    return refuse(report, "session:join", format!("join {id}: no such worker"))
+                }
+            };
+            let cpg_out = disp.pool.cpg_of(*id).map(|w| w.join_pending());
+            let head = format!("join {id}");
+            // Crash classification mirrors the Sql arm: a dead DUT worker is
+            // rust-crash P1 (the whole threaded server died — the p3 plant's
+            // SIGABRT shape); "client:"-prefixed = harness-fetch P2.
+            if let ExecOutcome::ConnectionLost { message } = &dut_out {
+                let class =
+                    if message.starts_with("client:") { "harness-fetch" } else { "rust-crash" };
+                let sev = if class == "rust-crash" { "P1" } else { "P2" };
+                report.count(class);
+                report.records.push(StepRecord {
+                    idx,
+                    class: class.into(),
+                    sev: sev.into(),
+                    detail: message.clone(),
+                    stmt_head: head.clone(),
+                });
+                report.failure = Some(Failure {
+                    step_idx: idx,
+                    signature: Signature {
+                        class: class.into(),
+                        sqlstate: "".into(),
+                        site: format!("session:join:{id}"),
+                    },
+                    class: class.into(),
+                    sev: sev.into(),
+                    detail: message.clone(),
+                });
+                return true;
+            }
+            if let Some(ExecOutcome::ConnectionLost { message }) = &cpg_out {
+                let class =
+                    if message.starts_with("client:") { "harness-fetch" } else { "c-crash" };
+                let sev = if class == "c-crash" { "P1" } else { "P2" };
+                report.count(class);
+                report.failure = Some(Failure {
+                    step_idx: idx,
+                    signature: Signature {
+                        class: class.into(),
+                        sqlstate: "".into(),
+                        site: format!("session:join:{id}"),
+                    },
+                    class: class.into(),
+                    sev: sev.into(),
+                    detail: format!("C leg: {message}"),
+                });
+                return true;
+            }
+            // Panic escalation (the COMMIT-site posture applies to joins).
+            if let Some(f) = panic_escalation(idx, &dut_out, &head) {
+                report.count("panic-signature");
+                report.records.push(StepRecord {
+                    idx,
+                    class: f.class.clone(),
+                    sev: f.sev.clone(),
+                    detail: f.detail.clone(),
+                    stmt_head: head.clone(),
+                });
+                report.failure = Some(f);
+                if opts.stop_on_failure {
+                    return true;
+                }
+            }
+            // Oracle model step: the joined outcome lands in the instance's
+            // Join slot (bridge advances past the silent session steps).
+            if let Some(h) = hook {
+                if let Some(why) = h.on_step_outcome(&dut_out) {
+                    report.count("property-violation");
+                    report.failure = Some(Failure {
+                        step_idx: idx,
+                        signature: Signature {
+                            class: "property-violation".into(),
+                            sqlstate: dut_out.sqlstate().unwrap_or("").into(),
+                            site: format!("session:join:{id}"),
+                        },
+                        class: "property-violation".into(),
+                        sev: "P1".into(),
+                        detail: why,
+                    });
+                    if opts.stop_on_failure {
+                        return true;
+                    }
+                }
+            }
+            // Mutation-style outcome-class parity (state forked = HALT).
+            if let Some(c_out) = &cpg_out {
+                let dut_err = dut_out.is_error();
+                let c_err = c_out.is_error();
+                let diverged = dut_err != c_err
+                    || (dut_err
+                        && dut_out.sqlstate().map(|s| s.get(..2).map(|p| p.to_string()))
+                            != c_out.sqlstate().map(|s| s.get(..2).map(|p| p.to_string())));
+                if diverged {
+                    let class = if dut_err && !c_err {
+                        "rust-err-c-ok"
+                    } else if !dut_err && c_err {
+                        "c-err-rust-ok"
+                    } else {
+                        "err-state-mismatch"
+                    };
+                    report.count(class);
+                    report.halted_at = Some(idx);
+                    report.failure = Some(Failure {
+                        step_idx: idx,
+                        signature: Signature {
+                            class: class.into(),
+                            sqlstate: dut_out.sqlstate().unwrap_or("").into(),
+                            site: format!("session:join:{id}"),
+                        },
+                        class: class.into(),
+                        sev: "P2".into(),
+                        detail: format!(
+                            "async-join outcome divergence at step {idx} — HALT (state forked)"
+                        ),
+                    });
+                    return true;
+                }
+            }
+            report.count("ok");
+            false
+        }
+        Step::WaitUntil(sql) => {
+            // Poll each leg independently until the gate clears ('t').
+            // 400 x 25ms = 10s cap per leg (statement_timeout resolves any
+            // genuinely wedged blocker at 5s, flipping the gate or erroring).
+            let (dut_leg, cpg_leg) = disp.legs();
+            let mut legs: Vec<&mut dyn Session> = vec![dut_leg];
+            if let Some(c) = cpg_leg {
+                legs.push(c);
+            }
+            for leg in legs {
+                let mut cleared = false;
+                for _ in 0..400 {
+                    match leg.execute(&sql.text) {
+                        ExecOutcome::Rows { rows }
+                            if rows.len() == 1
+                                && rows[0].len() == 1
+                                && rows[0][0].as_deref() == Some("t") =>
+                        {
+                            cleared = true;
+                            break;
+                        }
+                        ExecOutcome::ConnectionLost { message } => {
+                            let is_dut = leg.engine().starts_with("pgrust");
+                            let class = if message.starts_with("client:") {
+                                "harness-fetch"
+                            } else if is_dut {
+                                "rust-crash"
+                            } else {
+                                "c-crash"
+                            };
+                            let sev = if class == "harness-fetch" { "P2" } else { "P1" };
+                            report.count(class);
+                            report.failure = Some(Failure {
+                                step_idx: idx,
+                                signature: Signature {
+                                    class: class.into(),
+                                    sqlstate: "".into(),
+                                    site: format!("session:wait:{}", normalize_site(&sql.text)),
+                                },
+                                class: class.into(),
+                                sev: sev.into(),
+                                detail: message,
+                            });
+                            return true;
+                        }
+                        _ => {}
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                if !cleared {
+                    report.count("wait-timeout");
+                    report.failure = Some(Failure {
+                        step_idx: idx,
+                        signature: Signature {
+                            class: "wait-timeout".into(),
+                            sqlstate: "".into(),
+                            site: format!("session:wait:{}", normalize_site(&sql.text)),
+                        },
+                        class: "wait-timeout".into(),
+                        sev: "P1".into(),
+                        detail: format!(
+                            "observable-state gate never cleared on {}: {}",
+                            leg.engine(),
+                            sql.text.chars().take(120).collect::<String>()
+                        ),
+                    });
+                    return true;
+                }
+            }
+            report.count("ok");
+            false
+        }
+        _ => unreachable!("run_session_step called with a non-session step"),
+    }
 }
 
 fn enclosing_property_seq(plan: &Plan, idx: usize) -> Option<u32> {

@@ -267,6 +267,10 @@ impl RefServer {
             Step::Fault(FaultPoint::ReconnectServer) => Ok(()),
             Step::Fault(f) => Err(format!("reserved fault tag emitted by generator: {f:?}")),
             Step::Assumption(_) | Step::Assertion(_) => Ok(()),
+            // H8 session-family steps: property-internal choreography. The
+            // single-session coherence model does not track cross-session
+            // state; steps are structurally valid by property construction.
+            Step::Session(_) | Step::AsyncDml(_) | Step::Join(_) | Step::WaitUntil(_) => Ok(()),
         }
     }
 }
