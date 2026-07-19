@@ -313,6 +313,10 @@ unaccent = { path = "../../contrib/unaccent" }
 pg_walinspect = { path = "../../contrib/pg_walinspect" }
 injection_points = { path = "../../contrib/injection_points" }
 sslinfo = { path = "../../contrib/sslinfo" }
+fuzzystrmatch = { path = "../../contrib/fuzzystrmatch" }
+tablefunc = { path = "../../contrib/tablefunc" }
+contrib_lo = { path = "../../contrib/lo" }
+tcn = { path = "../../contrib/tcn" }
 adt_formatting = { path = "../../backend/utils/adt/formatting" }
 session = { path = "../../backend/access/session" }
 relpath = { path = "../../common/relpath" }

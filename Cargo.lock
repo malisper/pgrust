@@ -4273,6 +4273,7 @@ dependencies = [
 ]
 
 [[package]]
+<<<<<<< HEAD
 name = "contrib_cube"
 version = "0.0.0"
 dependencies = [
@@ -4312,6 +4313,22 @@ dependencies = [
  "types_error",
  "types_fmgr",
  "types_gist",
+=======
+name = "contrib_lo"
+version = "0.0.0"
+dependencies = [
+ "be_fsstubs",
+ "datum",
+ "dfmgr",
+ "spi",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_trigger",
+ "types_trigger_call",
+ "types_tuple",
+>>>>>>> origin/feat/contrib-smallkit
 ]
 
 [[package]]
@@ -6170,6 +6187,22 @@ dependencies = [
  "utility_seams",
  "var_seams",
  "varlena",
+]
+
+[[package]]
+name = "fuzzystrmatch"
+version = "0.0.0"
+dependencies = [
+ "arrayfuncs",
+ "datum",
+ "dfmgr",
+ "mbutils",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "varlena",
+ "wchar",
 ]
 
 [[package]]
@@ -15003,9 +15036,13 @@ dependencies = [
  "commit_ts",
  "condition_variable",
  "conffiles",
+<<<<<<< HEAD
  "contrib_cube",
  "contrib_earthdistance",
  "contrib_seg",
+=======
+ "contrib_lo",
+>>>>>>> origin/feat/contrib-smallkit
  "copy_cmd",
  "costsize",
  "crypt",
@@ -15030,6 +15067,7 @@ dependencies = [
  "format_type",
  "freespace",
  "funcapi",
+ "fuzzystrmatch",
  "genam",
  "genfile",
  "gin",
@@ -15210,7 +15248,9 @@ dependencies = [
  "table",
  "tableam",
  "tablecmds",
+ "tablefunc",
  "tablesample",
+ "tcn",
  "tcop_dest",
  "test_decoding",
  "timeline",
@@ -17087,6 +17127,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "tablefunc"
+version = "0.0.0"
+dependencies = [
+ "adt_quote",
+ "datum",
+ "dfmgr",
+ "fmgr_core",
+ "format_type",
+ "funcapi",
+ "heaptuple",
+ "lsyscache",
+ "mcx",
+ "pg_prng",
+ "rustc-hash",
+ "spi",
+ "tupdesc",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_tuple",
+ "varlena",
+]
+
+[[package]]
 name = "tablesample"
 version = "0.1.0"
 dependencies = [
@@ -17111,6 +17175,24 @@ dependencies = [
  "types_error",
  "types_tuple",
  "xlogreader_seams",
+]
+
+[[package]]
+name = "tcn"
+version = "0.0.0"
+dependencies = [
+ "commands_async",
+ "datum",
+ "dfmgr",
+ "mcx",
+ "relcache",
+ "spi",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_trigger",
+ "types_trigger_call",
+ "types_tuple",
 ]
 
 [[package]]

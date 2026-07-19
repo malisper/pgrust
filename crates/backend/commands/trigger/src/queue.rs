@@ -54,6 +54,10 @@ struct AfterTriggerEvent {
     dst_part: Oid,
     // C ats_rolid: role to execute the trigger (trigger.c:3699, 6535).
     rolid: Oid,
+    // C ats_modifiedcols: the UPDATE's changed columns (offset-encoded, as
+    // ExecGetAllUpdatedCols), owned so it survives to deferred firing time.
+    // None for INSERT/DELETE (tg_updatedcols is NULL there).
+    modifiedcols: Option<Box<[i32]>>,
 }
 
 pub(crate) struct TransTable {
@@ -464,6 +468,8 @@ fn mark_events(sel: EvList, immediate_only: bool, move_deferred: bool) -> PgResu
                         src_part: ev.src_part,
                         dst_part: ev.dst_part,
                         rolid: ev.rolid,
+                        // Source is marked DONE; the deferred copy owns the set.
+                        modifiedcols: ev.modifiedcols.take(),
                     });
                     ev.flags |= AFTER_TRIGGER_DONE;
                 }
@@ -507,19 +513,22 @@ fn invoke_events(sel: EvList, firing_id: CommandId, delete_ok: bool) -> PgResult
                     return Some((
                         ev.ctid1, ev.ctid2, ev.event, ev.tgoid, ev.relid, ev.table_idx,
                         ev.src_part, ev.dst_part, ev.rolid,
+                        ev.modifiedcols.clone(),
                     ));
                 }
                 i += 1;
             }
             None
         });
-        let Some((ctid1, ctid2, event, tgoid, relid, table_idx, src_part, dst_part, rolid)) =
-            next
+        let Some((
+            ctid1, ctid2, event, tgoid, relid, table_idx, src_part, dst_part, rolid, modifiedcols,
+        )) = next
         else {
             break;
         };
         AfterTriggerExecute(
             mcx, ctid1, ctid2, event, tgoid, relid, table_idx, src_part, dst_part, rolid,
+            modifiedcols.as_deref(),
         )?;
         with_list(sel, |evs| {
             let ev = &mut evs[i];
@@ -753,9 +762,23 @@ fn AfterTriggerExecute<'mcx>(
     src_part: Oid,
     dst_part: Oid,
     rolid: Oid,
+    modifiedcols: Option<&[i32]>,
 ) -> PgResult<()> {
     let Some(trigdesc) = relcache::RelationGetTriggerDesc(relid)? else {
         return Ok(());
+    };
+    // Rebuild the UPDATE's ats_modifiedcols in the firing mcx; the pointer
+    // rides tg_updatedcols for the trigger's bms_is_member tests. Empty for
+    // INSERT/DELETE (tg_updatedcols = NULL).
+    let mut updatedcols = types_nodes::Bitmapset::empty();
+    let updatedcols_ptr = match modifiedcols {
+        Some(members) => {
+            for &m in members {
+                updatedcols.add_member(mcx, m)?;
+            }
+            &updatedcols as *const _ as usize
+        }
+        None => 0,
     };
     let Some(trigger) = trigdesc.triggers.iter().find(|t| t.tgoid == tgoid) else {
         return Ok(());
@@ -876,6 +899,7 @@ fn AfterTriggerExecute<'mcx>(
         );
         tdata.tg_oldtable = tg_oldtable.0;
         tdata.tg_newtable = tg_newtable.0;
+        tdata.tg_updatedcols = updatedcols_ptr;
         // AFTER ROW triggers: the returned tuple is ignored (C frees it).
         crate::exec::ExecCallTriggerFunc(mcx, &mut tdata, &mut finfo).map(|_| ())
     } else {
@@ -925,6 +949,9 @@ fn after_trigger_save_event<'mcx>(
     // ExecCrossPartitionUpdateForeignKey (cp_parts = source/dest leaf oids).
     is_crosspart_update: bool,
     cp_parts: Option<(Oid, Oid)>,
+    // C ats_modifiedcols: the row's changed columns for an UPDATE event, saved
+    // onto each queued event so tg_updatedcols is exact at (deferred) firing.
+    modified_cols: Option<&types_nodes::Bitmapset<'mcx>>,
 ) -> PgResult<()> {
     let depth = QUERY_DEPTH.with(|c| c.get());
     if depth < 0 {
@@ -1037,6 +1064,8 @@ fn after_trigger_save_event<'mcx>(
                 src_part,
                 dst_part,
                 rolid: miscinit::GetUserId(),
+                modifiedcols: modified_cols
+                    .map(|b| b.iter().collect::<Vec<i32>>().into_boxed_slice()),
             });
         });
     }
@@ -1147,6 +1176,8 @@ fn save_stmt_event<'mcx>(
                 src_part: Oid::default(),
                 dst_part: Oid::default(),
                 rolid: miscinit::GetUserId(),
+                // Statement-level arm keeps tg_updatedcols unset (see fn doc).
+                modifiedcols: None,
             });
         });
     }
@@ -1262,6 +1293,7 @@ pub fn ExecARInsertTriggers<'mcx>(
         when,
         false,
         None,
+        None, // INSERT: tg_updatedcols is NULL
     )
 }
 
@@ -1323,6 +1355,7 @@ pub fn ExecARDeleteTriggers<'mcx>(
         when,
         is_crosspart_update,
         None,
+        None, // DELETE: tg_updatedcols is NULL
     )
 }
 
@@ -1350,6 +1383,8 @@ pub fn ExecARUpdateTriggers<'mcx>(
     // root CP event passes the source/destination leaf maps.
     src_conv: Option<&ChildToRoot<'_, 'mcx>>,
     dst_conv: Option<&ChildToRoot<'_, 'mcx>>,
+    // C ExecGetAllUpdatedCols → each event's ats_modifiedcols → tg_updatedcols.
+    modified_cols: Option<&types_nodes::Bitmapset<'mcx>>,
 ) -> PgResult<()> {
     let after_row = trigdesc.is_some_and(|td| td.trig_update_after_row);
     let capture = transition_capture
@@ -1420,6 +1455,7 @@ pub fn ExecARUpdateTriggers<'mcx>(
         when,
         is_crosspart_update,
         src_rel.zip(dst_rel).map(|(s, d)| (s.rd_id, d.rd_id)),
+        modified_cols,
     )
 }
 
@@ -1461,4 +1497,45 @@ fn fetch_failed(which: u32) -> Box<PgError> {
         PgError::error(format!("failed to fetch tuple{which} for AFTER trigger"))
             .with_sqlstate(ERRCODE_INTERNAL_ERROR),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ats_modifiedcols pin: a deferred UPDATE event moved to the xact list
+    // at query end keeps its modified-column set (red before the
+    // tg_updatedcols fix — the queue dropped the set and deferred triggers
+    // saw tg_updatedcols = NULL; contrib/lo's deferred legs are the e2e).
+    #[test]
+    fn deferred_move_carries_modifiedcols() {
+        const TGOID: Oid = 424_242;
+        AfterTriggerBeginXact().unwrap();
+        AfterTriggerBeginQuery();
+        with_list(EvList::Query(0), |evs| {
+            evs.push(AfterTriggerEvent {
+                flags: 0,
+                ctid1: ItemPointerData::default(),
+                ctid2: ItemPointerData::default(),
+                event: TRIGGER_EVENT_UPDATE
+                    | TRIGGER_EVENT_ROW
+                    | AFTER_TRIGGER_DEFERRABLE
+                    | AFTER_TRIGGER_INITDEFERRED,
+                tgoid: TGOID,
+                relid: 424_243,
+                firing_id: 0,
+                table_idx: u32::MAX,
+                src_part: Oid::default(),
+                dst_part: Oid::default(),
+                rolid: 10,
+                modifiedcols: Some(vec![9, 11].into_boxed_slice()),
+            });
+        });
+        AfterTriggerEndQuery().unwrap();
+        let carried = XACT_EVENTS.with(|s| {
+            s.borrow().iter().find(|e| e.tgoid == TGOID).map(|e| e.modifiedcols.clone())
+        });
+        assert_eq!(carried, Some(Some(vec![9, 11].into_boxed_slice())));
+        XACT_EVENTS.with(|s| s.borrow_mut().retain(|e| e.tgoid != TGOID));
+    }
 }
