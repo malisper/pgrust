@@ -1142,6 +1142,8 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
         crate::removal::UpdateCheckPointDistanceEstimate(check_point.redo - prior_redo_ptr);
     }
 
+    injection_point::injection_point("checkpoint-before-old-wal-removal")?;
+
     let mut log_seg_no = XLByteToSeg(check_point.redo, wal_segment_size());
     let _ = crate::removal::KeepLogSeg(recptr, &mut log_seg_no)?;
     // xlog.c:7383: invalidate slots whose reserved WAL is about to go away
@@ -1255,6 +1257,10 @@ pub fn CreateRestartPoint(flags: i32) -> PgResult<bool> {
 
     CheckPointGuts(last_ckpt.redo, flags)?;
 
+    // xlog.c:7737: after CheckPointGuts so some restartpoint work has
+    // already happened when a test parks the checkpointer here.
+    injection_point::injection_point("create-restart-point")?;
+
     let prior_redo_ptr = control_file().checkPointCopy.redo;
 
     // Skip pg_control unless it still shows an older checkpoint (racing
@@ -1299,6 +1305,7 @@ pub fn CreateRestartPoint(flags: i32) -> PgResult<bool> {
     let (replay_ptr, mut replay_tli) = xlogrecovery_seams::get_xlog_replay_rec_ptr::call();
     let endptr = if receive_ptr < replay_ptr { replay_ptr } else { receive_ptr };
     let _ = crate::removal::KeepLogSeg(endptr, &mut log_seg_no)?;
+    injection_point::injection_point("restartpoint-before-slot-invalidation")?;
     // xlog.c:7841 (CreateRestartPoint): same sweep + horizon recompute.
     if slot_seams::invalidate_obsolete_replication_slots::is_installed()
         && slot_seams::invalidate_obsolete_replication_slots::call(
