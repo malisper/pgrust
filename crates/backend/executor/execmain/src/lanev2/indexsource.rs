@@ -450,11 +450,14 @@ fn indexsource_misuse(why: &str) -> Box<PgError> {
 // Accounting (mirrors the WS-F contract §7 posture): knob OFF this feed
 // ticks NOTHING (the fused arm owns the shape exactly as today; an OFF tick
 // would drift the default floors). Knob ON: one OWNED tick under
-// `ShapeClass::IndexScan` per lane-owned feed event; child refusals per
-// offered pull under `IndexScan` (`index_scan_refuse_reason` VERBATIM — the
-// class's per-pull cadence). The agg-side gate falls through SILENTLY: the
-// sorted-agg hook ahead of this one already ticked AggBuild/AggNotDrainable
-// for this offer. R-VOCAB untouched: no new ShapeClass, no new RefuseReason.
+// `ShapeClass::IndexScan` per lane-owned feed event (under a parallel-aware
+// scan: one per WORKER feed — N feed events exist); child refusals per
+// offered pull under `IndexScan` (`index_scan_refuse_reason_ex` — the AE2
+// set with the parallel-aware row admitted under the AGGIDX-PAR increment;
+// the class's per-pull cadence). The agg-side gate falls through SILENTLY:
+// the sorted-agg hook ahead of this one already ticked
+// AggBuild/AggNotDrainable for this offer. R-VOCAB untouched: no new
+// ShapeClass, no new RefuseReason.
 //
 // No admission floor in inc-1, RECORDED: `IndexScanState` retains no
 // planner row estimate (the IOS floor reads `plan_rows`, a field
@@ -503,6 +506,78 @@ fn agg_indexfeed_resolve() -> bool {
 #[cfg(test)]
 pub(crate) fn agg_indexfeed_set_for_tests(on: bool) {
     AGG_INDEXFEED.store(if on { 2 } else { 1 }, Relaxed);
+}
+
+/// `PGRUST_LANE_V2_AGG_INDEXFEED_PAR` (default ON, matching the feed's
+/// AE2-flipped default; explicit `=0`/`off` is the increment kill switch):
+/// the AGGIDX-PAR increment gate, layered UNDER [`AGG_INDEXFEED`] (a dead
+/// read when the feed itself is off). Gates the two admission widenings this
+/// increment adds — BOTH restore the exact AE2 feed surface when killed:
+///
+/// 1. **Parallel-aware scans** (`iss_ParallelAware`): the fused arm #2 gate
+///    never had a parallel check, so a stock `Partial Aggregate ← Parallel
+///    Index Scan` worker fragment was FUSED-ARM-driven at defaults — the
+///    SE-DELETION-PREP audit's loudest blocker row (the AE2 deletion clock
+///    was running toward a deletion whose caller re-trace fails). Coverage
+///    is byte-identical by construction: each worker's feed drives the SAME
+///    `index_scan_next_tidrun` over the shared parallel scan descriptor the
+///    DSM initializers opened (`index_beginscan_parallel`) — page claims
+///    coordinate inside the AM; the seam ceremony stays dop-1-per-worker
+///    (one whole-range claim, drain to the AM's own exhaustion — the
+///    tail-drain-to-Done law; the granule map is a pacing upper bound and
+///    correctness never rides on it).
+/// 2. **Zero-block index geometry**: the AE2 feed refused `nblocks == 0`
+///    (fail-closed `granule_map` None) while the fused gate admits it —
+///    audit residual row 4. Covered by publishing the degenerate empty map
+///    (total 0; `validate_serial_claim` accepts exactly the empty
+///    whole-range claim) and driving to the AM's own exhaustion — the same
+///    primitives the fused arm would run, byte-identical including any
+///    AM error surface. (Defensive: a built btree always has a metapage,
+///    so this row is SQL-unreachable today — covered so the deletion
+///    re-trace closes on admission, not on a reachability argument.)
+static AGG_INDEXFEED_PAR: AtomicU8 = AtomicU8::new(0);
+
+fn agg_indexfeed_par_enabled() -> bool {
+    match AGG_INDEXFEED_PAR.load(Relaxed) {
+        1 => false,
+        2 => true,
+        _ => agg_indexfeed_par_resolve(),
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn agg_indexfeed_par_resolve() -> bool {
+    // Default ON (the charter: increments default-match the feed's AE2
+    // default; the AGGIDX-PAR letter prices the widened surface before the
+    // SE16 board). The explicit `=0`/`off` spelling is the increment kill
+    // switch and restores the AE2 feed's exact admission set (rowmode
+    // FLIP-1/FLIP-2 idiom; knobs never delete).
+    let on = !matches!(
+        std::env::var("PGRUST_LANE_V2_AGG_INDEXFEED_PAR").as_deref(),
+        Ok("0") | Ok("off")
+    );
+    AGG_INDEXFEED_PAR.store(if on { 2 } else { 1 }, Relaxed);
+    on
+}
+
+/// Same-process A/B lever for the unit corpus (`crate::tests`).
+#[cfg(test)]
+pub(crate) fn agg_indexfeed_par_set_for_tests(on: bool) {
+    AGG_INDEXFEED_PAR.store(if on { 2 } else { 1 }, Relaxed);
+}
+
+/// Geometry verdict for the IndexScan feed, factored pure for the unit
+/// corpus: `None` = refuse fail-closed (the fused arm owns the shape),
+/// `Some(total)` = publish a granule map with this total. The zero-block
+/// row is covered only under the AGGIDX-PAR increment (see
+/// [`AGG_INDEXFEED_PAR`] point 2); killed, the AE2 refusal returns.
+#[inline]
+fn index_feed_geometry(nblocks: u64, empty_covered: bool) -> Option<u64> {
+    if nblocks == 0 && !empty_covered {
+        return None;
+    }
+    Some(nblocks)
 }
 
 /// Test-only engagement probe: lane-owned agg-over-IndexScan feed events.
@@ -562,11 +637,16 @@ impl<'mcx> BatchGranuleSource<'mcx> for IndexScanFeedSource<'_, 'mcx> {
             index_rel,
             ::types_core::ForkNumber::MAIN_FORKNUM,
         )?;
-        if nblocks == 0 {
+        // AGGIDX-PAR increment point 2: zero-block geometry publishes the
+        // degenerate empty map (one empty whole-range claim; drain runs to
+        // the AM's own exhaustion — byte-identical to the fused drive on
+        // this shape, error surface included). Increment killed = the AE2
+        // fail-closed refusal.
+        let Some(total) = index_feed_geometry(nblocks as u64, agg_indexfeed_par_enabled()) else {
             return Ok(None);
-        }
-        self.total = Some(nblocks as u64);
-        Ok(Some(runtime::GranuleMap::unbounded(nblocks as u64, IOS_STARTUP_C0)))
+        };
+        self.total = Some(total);
+        Ok(Some(runtime::GranuleMap::unbounded(total, IOS_STARTUP_C0)))
     }
 
     fn position(
@@ -670,10 +750,13 @@ impl<'mcx> ::nodeagg::AggBatchSource<'mcx> for SeamIndexAggSource<'_, '_, 'mcx> 
 /// Refuse-set, in order: the knob (silent — accounting doc above); the
 /// fused arm's agg gate (`agg_batch_drainable`, silent — its estate legs
 /// are re-checked in the child refuse-set); the child refuse-set
-/// `index_scan_refuse_reason` VERBATIM (EPQ / backward / scroll-mark /
-/// parallel-aware / instrumented / non-MVCC / qual-proj / runtime-keys /
-/// order-by-reorder / non-btree); the seam geometry probe (`granule_map`
-/// `None` = fail-closed fall-through).
+/// `index_scan_refuse_reason_ex` (EPQ / backward / scroll-mark /
+/// instrumented / non-MVCC / qual-proj / runtime-keys / order-by-reorder /
+/// non-btree, with the parallel-aware row admitted under the AGGIDX-PAR
+/// increment — see [`AGG_INDEXFEED_PAR`] point 1; increment killed, the
+/// AE2-verbatim set returns); the seam geometry probe (`granule_map`
+/// `None` = fail-closed fall-through; zero-block geometry covered under
+/// the increment, point 2).
 #[inline]
 pub fn try_own_agg_over_index_source<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
@@ -690,9 +773,10 @@ pub fn try_own_agg_over_index_source<'mcx>(
     if !::nodeagg::agg_batch_drainable(agg) {
         return Ok(None);
     }
-    // Child refuse-set VERBATIM (per-pull cadence, the IndexScan class's
-    // documented tick semantics).
-    if let Some(r) = super::index_scan_refuse_reason(is, estate) {
+    // Child refuse-set (per-pull cadence, the IndexScan class's documented
+    // tick semantics). AGGIDX-PAR: parallel-aware admitted when the
+    // increment is armed — every other row applies identically.
+    if let Some(r) = super::index_scan_refuse_reason_ex(is, estate, agg_indexfeed_par_enabled()) {
         stats::tick_refused(ShapeClass::IndexScan, r);
         engine_mirror_is(is, estate, Some(r));
         return Ok(None);
@@ -706,9 +790,13 @@ pub fn try_own_agg_over_index_source<'mcx>(
         return Ok(Some(None));
     }
     let outer_slot = is.ss.ss_ScanTupleSlot;
+    let parallel_aware = is.iss_ParallelAware;
     let mut src = IndexScanFeedSource::new(is);
     if !hashed_emit {
-        // The feed event: geometry + one whole-range claim (dop-1).
+        // The feed event: geometry + one whole-range claim. Under a
+        // parallel-aware scan this runs ONCE PER WORKER (each worker's node
+        // is its own feed; the claim is worker-local bookkeeping — the
+        // shared page cursor lives inside the AM's parallel scan state).
         let Some(map) = src.granule_map(estate)? else {
             // Cannot express granules (no open index relation): fail closed
             // to the fused arm — byte-identical drive, nothing lost.
@@ -716,15 +804,17 @@ pub fn try_own_agg_over_index_source<'mcx>(
             return Ok(None);
         };
         src.position(estate, 0..map.total())?;
-        // OWNED: one tick per lane-owned feed event (accounting doc).
+        // OWNED: one tick per lane-owned feed event (accounting doc; under
+        // parallel that is one tick per worker feed — N feed events exist).
         stats::tick_owned(ShapeClass::IndexScan);
         engine_mirror_is(src.is, estate, None);
         #[cfg(test)]
         AGG_INDEXFEED_OWNED_FOR_TESTS.fetch_add(1, Relaxed);
         if super::lane_trace_enabled() {
             super::lane_trace(&format!(
-                "aggindexfeed: owned agg-over-indexscan feed (granules={})",
-                map.total()
+                "aggindexfeed: owned agg-over-indexscan feed (granules={}, parallel={})",
+                map.total(),
+                parallel_aware
             ));
         }
     }
@@ -836,4 +926,46 @@ mod tests {
     }
 
     // --- end WS-AE (wave-8) ---
+
+    // --- AGGIDX-PAR increment ---
+
+    /// The increment knob lever, independent from BOTH parent knobs
+    /// (flipping the increment must never arm/disarm the feed or the WS-F
+    /// cell — the kill switch restores the AE2 admission set only).
+    #[test]
+    fn aggindexfeed_par_knob_set_for_tests_flips() {
+        agg_indexfeed_par_set_for_tests(false);
+        assert!(!agg_indexfeed_par_enabled());
+        agg_indexfeed_par_set_for_tests(true);
+        assert!(agg_indexfeed_par_enabled());
+        // Independence both ways.
+        agg_indexfeed_set_for_tests(false);
+        assert!(agg_indexfeed_par_enabled());
+        assert!(!agg_indexfeed_enabled());
+        indexsource_set_for_tests(false);
+        assert!(agg_indexfeed_par_enabled());
+        agg_indexfeed_par_set_for_tests(false);
+        assert!(!agg_indexfeed_par_enabled());
+    }
+
+    /// The geometry verdict: the zero-block row is covered only under the
+    /// increment (killed = the AE2 fail-closed refusal); non-zero geometry
+    /// is unaffected by the lever. The degenerate empty map composes with
+    /// the claim discipline (`serial_claim_discipline`'s Some(0)/0..0 row).
+    #[test]
+    fn index_feed_geometry_verdicts() {
+        // AE2 behavior (increment killed): zero blocks refuse fail-closed.
+        assert_eq!(index_feed_geometry(0, false), None);
+        // Increment armed: the empty map publishes (total 0 — exactly one
+        // empty whole-range claim is legal, validated by the shared
+        // discipline unit).
+        assert_eq!(index_feed_geometry(0, true), Some(0));
+        // Non-degenerate geometry: lever-invariant.
+        assert_eq!(index_feed_geometry(1, false), Some(1));
+        assert_eq!(index_feed_geometry(1, true), Some(1));
+        assert_eq!(index_feed_geometry(4096, false), Some(4096));
+        assert_eq!(index_feed_geometry(4096, true), Some(4096));
+    }
+
+    // --- end AGGIDX-PAR increment ---
 }
