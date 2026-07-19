@@ -97,6 +97,13 @@ impl Session for PgSession {
                             }
                             rows.push(row);
                         }
+                        // A RowDescription marks a row-returning statement
+                        // even when ZERO rows follow: an empty SELECT must be
+                        // Rows{[]} — never Command (an empty TLP/NoREC
+                        // partition arm is a routine, legitimate result).
+                        postgres::SimpleQueryMessage::RowDescription(_) => {
+                            saw_rows = true;
+                        }
                         postgres::SimpleQueryMessage::CommandComplete(n) => {
                             tag = n.to_string();
                         }
@@ -141,6 +148,48 @@ impl Session for PgSession {
             }
         }
         Ok(())
+    }
+}
+
+/// TEETH INSTRUMENT (metamorphic-oracle validation only — never in battery
+/// configs): a synthetic wrong-DUT that mis-evaluates NULL predicates in
+/// WHERE clauses. Every `IS NULL` AFTER the first `WHERE` of a SELECT is
+/// rewritten to `IS NULL AND false` before reaching the wrapped session —
+/// modeling an engine whose filter-side IS NULL evaluation is broken
+/// ("predicates are never NULL in a WHERE") while projection-side evaluation
+/// stays correct. A correct TLP oracle MUST fire on this (the `(p) IS NULL`
+/// partition arm loses its rows while the whole query keeps them), and a
+/// correct NoREC oracle MUST fire when the predicate carries an IS NULL leaf
+/// (optimized WHERE loses rows; the non-optimizable projection keeps them) —
+/// exactly the filter/projection asymmetry NoREC exists to catch. Enabled by
+/// `--test-null-bug`.
+pub struct NullBugShim<S: Session> {
+    pub inner: S,
+}
+
+impl<S: Session> Session for NullBugShim<S> {
+    fn engine(&self) -> &str {
+        self.inner.engine()
+    }
+
+    fn execute(&mut self, sql: &str) -> ExecOutcome {
+        let head = sql.trim_start();
+        let is_select = head.get(..7).is_some_and(|h| h.eq_ignore_ascii_case("SELECT "));
+        if is_select {
+            if let Some(pos) = sql.find(" WHERE ") {
+                let (pre, tail) = sql.split_at(pos);
+                if tail.contains(" IS NULL") {
+                    let doctored =
+                        format!("{pre}{}", tail.replace(" IS NULL", " IS NULL AND false"));
+                    return self.inner.execute(&doctored);
+                }
+            }
+        }
+        self.inner.execute(sql)
+    }
+
+    fn reconnect(&mut self) -> Result<(), String> {
+        self.inner.reconnect()
     }
 }
 

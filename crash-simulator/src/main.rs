@@ -44,6 +44,12 @@ struct EngineArgs {
     /// query (measured overhead < 10 percent — see notes/h5-metrics.md).
     #[arg(long, default_value_t = 1)]
     explain_sample: u32,
+    /// TEETH INSTRUMENT (metamorphic-oracle validation): wrap the DUT in a
+    /// planted wrong-DUT that mis-evaluates NULL predicates (`IS NULL` =>
+    /// `IS NULL AND false` on SELECTs). TLP/NoREC must fire; never use in
+    /// battery configs.
+    #[arg(long, default_value_t = false)]
+    test_null_bug: bool,
 }
 
 impl EngineArgs {
@@ -58,6 +64,7 @@ impl EngineArgs {
             ],
             per_seed_reset: EngineConfig::default_reset(),
             explain_every: self.explain_sample,
+            test_null_bug: self.test_null_bug,
         }
     }
 }

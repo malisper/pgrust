@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use crate::oracle::check::Check;
 use crate::oracle::props::{helpers as h, ProfileView, PropertyId, SchemaView};
 use crate::oracle::pstep::{
-    Mark, PredSpec, ProbeSpec, PropertyInstance, PStep, SqlMeta, SqlStep, TriSel,
+    partition_sql, Mark, PredSpec, ProbeSpec, PropertyInstance, PStep, SqlMeta, SqlStep, TriSel,
 };
 
 pub fn generate(
@@ -29,11 +29,9 @@ pub fn generate(
     let sum_probe = |slot: u32, filter: Option<(PredSpec, TriSel)>| {
         let where_clause = match &filter {
             None => String::new(),
-            Some((PredSpec::ColModEq { m, r, .. }, sel)) => match sel {
-                TriSel::True => format!(" WHERE (k % {m}) = {r}"),
-                TriSel::False => format!(" WHERE NOT ((k % {m}) = {r})"),
-                TriSel::Null => format!(" WHERE ((k % {m}) = {r}) IS NULL"),
-            },
+            Some((pred, sel)) => {
+                format!(" WHERE {}", partition_sql(pred, *sel, &h::KVS_COL_NAMES))
+            }
         };
         SqlStep {
             sql: format!("SELECT sum(v) FROM {table}{where_clause}"),

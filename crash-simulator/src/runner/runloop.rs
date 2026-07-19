@@ -22,6 +22,10 @@ pub struct EngineConfig {
     pub per_seed_reset: Vec<String>,
     /// H5 rung B: fingerprint every Nth executed query via EXPLAIN (0 = off).
     pub explain_every: u32,
+    /// TEETH INSTRUMENT (`--test-null-bug`): wrap the DUT session in the
+    /// NULL-predicate-bug shim (planted wrong-DUT for metamorphic-oracle
+    /// validation). Never set in battery configs.
+    pub test_null_bug: bool,
 }
 
 impl EngineConfig {
@@ -79,8 +83,14 @@ pub struct SeedRun {
 
 fn connect_legs(
     cfg: &EngineConfig,
-) -> Result<(PgSession, Option<PgSession>), String> {
+) -> Result<(Box<dyn Session>, Option<PgSession>), String> {
     let dut = PgSession::connect("pgrust", &cfg.dut_conninfo, &cfg.session_setup)?;
+    let dut: Box<dyn Session> = if cfg.test_null_bug {
+        // Planted wrong-DUT (teeth): mis-evaluates NULL predicates.
+        Box::new(super::driver::NullBugShim { inner: dut })
+    } else {
+        Box::new(dut)
+    };
     let cpg = match &cfg.cpg_conninfo {
         Some(ci) => Some(PgSession::connect("cpg", ci, &cfg.session_setup)?),
         None => None,
@@ -118,7 +128,7 @@ pub fn run_plan_ctx(
     ctx: Option<&OracleCtx>,
 ) -> Result<RunReport, String> {
     let (mut dut, mut cpg) = connect_legs(cfg)?;
-    reset_leg(&mut dut, &cfg.per_seed_reset)?;
+    reset_leg(dut.as_mut(), &cfg.per_seed_reset)?;
     if let Some(c) = cpg.as_mut() {
         reset_leg(c, &cfg.per_seed_reset)?;
     }
@@ -144,7 +154,7 @@ pub fn run_plan_ctx(
             // Engine-hook capability probe against the live DUT session
             // (contract §0 A5): one uncompared read per channel. Presence
             // un-gates F7 (Memory); absence keeps the counted skip.
-            let hooks = bridge::probe_hooks(&mut dut);
+            let hooks = bridge::probe_hooks(dut.as_mut());
             oracle_checks = OracleCheckEval::with_hooks(c, hooks);
             &oracle_checks
         }
@@ -152,7 +162,7 @@ pub fn run_plan_ctx(
     };
     Ok(execute_plan(
         plan,
-        &mut dut,
+        dut.as_mut(),
         cpg.as_mut().map(|c| c as &mut dyn Session),
         checks,
         &classifier,

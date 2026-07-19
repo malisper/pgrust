@@ -296,6 +296,36 @@ fn profile_validator_rejects_unknown_disable_names() {
     assert!(err.contains("q:no-such-production"), "got: {err}");
 }
 
+/// H5 review F1 pin: a REGISTERED production whose emission site does not
+/// consult the teeth knob must be rejected at validation — otherwise the
+/// knob silently disables nothing while a teeth test believes otherwise
+/// (live repro: dml:update validated fine, kept emitting, no reach-gap).
+/// Honored names (gen_query variants) still validate.
+#[test]
+fn profile_validator_rejects_unhonored_disable_names() {
+    let mut p = serde_json::from_str::<simharness::runner::profile::Profile>(
+        &std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("profiles/default.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    // Registered (DML_UPDATE is in the registry) but not honored at any
+    // emission site — must fail with the honored-set message.
+    p.test_disable_productions = vec![prodreg::DML_UPDATE.into()];
+    let err = simharness::runner::profile::validate(&p).unwrap_err();
+    assert!(
+        err.contains(prodreg::DML_UPDATE) && err.contains("not honored"),
+        "got: {err}"
+    );
+    // Honored entries (query variants) still pass validation.
+    p.test_disable_productions = vec![prodreg::Q_SRF_UNNEST.into(), prodreg::Q_INNER_JOIN.into()];
+    simharness::runner::profile::validate(&p).expect("honored names must validate");
+    // The honored-set predicate itself: exactly the gen_query variants.
+    assert!(simharness::gen::noise::teeth_knob_honored(prodreg::Q_OJ_NEST_COALESCE));
+    assert!(!simharness::gen::noise::teeth_knob_honored(prodreg::STMT_FAULT));
+}
+
 /// Battery-profile reach pin: every checked-in profile, at the smoke run-tier
 /// seed budget (500 seeds, FIXED base 1000 — deterministic, no sampling
 /// flake), is gate-green. Catches weight changes that silently starve a

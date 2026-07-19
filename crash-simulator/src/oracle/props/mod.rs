@@ -95,18 +95,40 @@ pub fn unconditional_v1() -> Vec<PropertyId> {
     v1_set().into_iter().filter(|p| !p.hook_gated()).collect()
 }
 
-/// Schema view passed by WS-GEN (v1 properties are self-local — they create
-/// and drop their own property-local tables — so this is currently only a
-/// forward surface for noise/table reuse).
+/// Schema view passed by WS-GEN. Most v1 properties are self-local (they
+/// create and drop their own property-local tables); the metamorphic
+/// properties (L1 TLP / L2 NoREC) ALSO target live generator tables through
+/// this view — the typed-generator surface (joins, mutated data, indexes) is
+/// where the bug-finding power lives. Empty view (unit/sim tests) => the
+/// live arms simply never generate.
 #[derive(Debug, Clone, Default)]
 pub struct SchemaView {
     pub tables: Vec<SchemaTable>,
 }
 
+/// Predicate-relevant column kind (the metamorphic predicate grammar only
+/// compares int-family and text columns; everything else is Other).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PredColKind {
+    Int,
+    Text,
+    Other,
+}
+
+#[derive(Debug, Clone)]
+pub struct SchemaCol {
+    pub name: String,
+    pub kind: PredColKind,
+}
+
 #[derive(Debug, Clone)]
 pub struct SchemaTable {
+    /// Current SQL-visible name (valid at this plan position).
     pub name: String,
-    pub cols: Vec<String>,
+    /// Stable birth id (`t<N>`) — the table-dependency / shrinker key space.
+    pub birth_id: String,
+    /// `id` (always first, Int, NOT NULL unique) + payload columns.
+    pub cols: Vec<SchemaCol>,
 }
 
 /// Profile knobs the oracle-side generation consumes (profiles/*.json schema
@@ -242,6 +264,79 @@ pub(crate) mod helpers {
             .collect();
         SqlStep {
             sql: format!("INSERT INTO {table} (k, v) VALUES {}", vals.join(", ")),
+            mark: Mark::Mutation,
+            meta: SqlMeta::default(),
+            ledger_op: Some(LedgerOp::InsertValues { table: table.into(), rows: rows.to_vec() }),
+            probe: None,
+            stackref: None,
+        }
+    }
+
+    /// Metamorphic-property local shape: k bigint PRIMARY KEY, v bigint
+    /// (nullable), s text (nullable) — two nullable payload columns so both
+    /// int and text predicates get genuine 3VL exercise.
+    pub fn kvs_cols() -> Vec<ColumnDef> {
+        vec![
+            ColumnDef { name: "k".into(), not_null: true },
+            ColumnDef { name: "v".into(), not_null: false },
+            ColumnDef { name: "s".into(), not_null: false },
+        ]
+    }
+
+    /// SQL column names of the kvs shape, index-aligned with `kvs_cols` (the
+    /// PredSpec col-index -> name mapping for property-local predicates).
+    pub const KVS_COL_NAMES: [&str; 3] = ["k", "v", "s"];
+
+    pub fn create_kvs(table: &str) -> SqlStep {
+        SqlStep {
+            sql: format!("CREATE TABLE {table} (k bigint PRIMARY KEY, v bigint, s text)"),
+            mark: Mark::Mutation,
+            meta: SqlMeta::default(),
+            ledger_op: Some(LedgerOp::CreateTable {
+                table: table.into(),
+                cols: kvs_cols(),
+                key: Some(0),
+            }),
+            probe: None,
+            stackref: None,
+        }
+    }
+
+    /// Deterministic kvs rows: distinct non-negative keys; v in 0..100 with
+    /// ~1/4 NULLs; s in 's00'..'s49' with ~1/4 NULLs (3VL fodder — the
+    /// IS NULL partition must be genuinely populated, not decoration).
+    pub fn gen_rows_kvs(rng: &mut impl Rng, n: usize) -> Vec<Row> {
+        let mut keys = BTreeSet::new();
+        while keys.len() < n {
+            keys.insert(rng.gen_range(0i64..1_000_000));
+        }
+        keys.into_iter()
+            .map(|k| {
+                let v = if rng.gen_range(0u32..4) == 0 {
+                    Value::Null
+                } else {
+                    Value::Int(rng.gen_range(0i64..100))
+                };
+                let s = if rng.gen_range(0u32..4) == 0 {
+                    Value::Null
+                } else {
+                    Value::Text(format!("s{:02}", rng.gen_range(0u32..50)))
+                };
+                Row(vec![Value::Int(k), v, s])
+            })
+            .collect()
+    }
+
+    pub fn insert_rows_kvs(table: &str, rows: &[Row]) -> SqlStep {
+        let vals: Vec<String> = rows
+            .iter()
+            .map(|r| {
+                let cols: Vec<String> = r.0.iter().map(|v| v.sql()).collect();
+                format!("({})", cols.join(", "))
+            })
+            .collect();
+        SqlStep {
+            sql: format!("INSERT INTO {table} (k, v, s) VALUES {}", vals.join(", ")),
             mark: Mark::Mutation,
             meta: SqlMeta::default(),
             ledger_op: Some(LedgerOp::InsertValues { table: table.into(), rows: rows.to_vec() }),
