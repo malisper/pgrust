@@ -797,8 +797,37 @@ fn handle_child_crash(procname: &str, pid: pid_t, exitstatus: i32) -> PgResult<(
     statemachine::HandleFatalError(pmsignal::QuitSignalReason::PMQUIT_FOR_CRASH, true)
 }
 
+/// pm_service_pending seam impl (SIMCORPUS): one postmaster service quantum
+/// for harness boot threads that play the postmaster — the ServerLoop slice
+/// a parallel-query corpus needs, in ServerLoop's order: child exits, then
+/// the BACKGROUND_WORKER_CHANGE pmsignal arm, then deferred bgworker starts
+/// (LaunchMissingBackgroundProcesses' maybe_start half). On the postmaster's
+/// OWN thread-local PM state; with no shutdown/crash in flight the trailing
+/// PostmasterStateMachine inside process_pm_child_exit is state-gated to a
+/// no-op (PM_INIT), and maybe_start_bgworkers walks only pid-0 registered
+/// entries — so this is exactly the ServerLoop's service arms and nothing
+/// else.
+fn pm_service_pending() {
+    if PENDING_PM_CHILD_EXIT.load(Ordering::Acquire) {
+        process_pm_child_exit().unwrap_or_else(|e| panic!("pm_service_pending: {e:?}"));
+    }
+    if PENDING_PM_PMSIGNAL.swap(false, Ordering::AcqRel)
+        && pmsignal::CheckPostmasterSignal(pmsignal::PMSignalReason::PMSIGNAL_BACKGROUND_WORKER_CHANGE)
+    {
+        bgworker::BackgroundWorkerStateChange(with_pm(|pm| {
+            pm.pm_state < PMState::PM_STOP_BACKENDS
+        }));
+        with_pm(|pm| pm.start_worker_needed = true);
+    }
+    if with_pm(|pm| pm.start_worker_needed || pm.have_crashed_worker) {
+        statemachine::maybe_start_bgworkers();
+    }
+}
+
 pub fn init_seams() {
     postmaster_seams::announce_child_exit::set(announce_child_exit);
+    postmaster_seams::bgworker_shmem_init::set(bgworker::BackgroundWorkerShmemInit);
+    postmaster_seams::pm_service_pending::set(pm_service_pending);
     postmaster_seams::signal_postmaster_sigusr1::set(|| handle_pm_pmsignal_signal(procsignal::signums::SIGUSR1));
     postmaster_seams::signal_postmaster_sighup::set(|| handle_pm_reload_request_signal(procsignal::signums::SIGHUP));
     postmaster_seams::pg_start_time::set(main_entry::pg_start_time);
