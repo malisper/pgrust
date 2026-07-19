@@ -7,3 +7,37 @@ publish.workspace = true
 [lib]
 name = "postgres_fdw"
 path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../_support/types/datum" }
+mcx = { path = "../../_support/mcx" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+types_fmgr = { path = "../../_support/types/fmgr" }
+types_nodes = { path = "../../_support/types/nodes" }
+types_pathnodes = { path = "../../_support/types/pathnodes" }
+types_rel = { path = "../../_support/types/rel" }
+types_tuple = { path = "../../_support/types/types_tuple" }
+types_slot = { path = "../../_support/types/types_slot" }
+elog = { path = "../../backend/utils/error/elog" }
+dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
+foreigncmds = { path = "../../backend/commands/foreigncmds" }
+commands_define = { path = "../../backend/commands/commands_define" }
+extension = { path = "../../backend/commands/extension" }
+pg_depend = { path = "../../backend/catalog/pg_depend" }
+inval = { path = "../../backend/utils/cache/inval" }
+cache_syscache = { path = "../../backend/utils/cache/cache_syscache" }
+lsyscache = { path = "../../backend/utils/cache/lsyscache" }
+typcache = { path = "../../backend/utils/cache/typcache" }
+guc = { path = "../../backend/utils/misc/guc" }
+superuser = { path = "../../backend/utils/misc/superuser" }
+mbutils = { path = "../../backend/utils/mb/mbutils" }
+varlena = { path = "../../backend/utils/adt/varlena" }
+adt_quote = { path = "../../backend/utils/adt/quote" }
+format_type = { path = "../../backend/utils/adt/format_type" }
+table = { path = "../../backend/access/table/table" }
+executils = { path = "../../backend/executor/executils" }
+nodeforeignscan = { path = "../../backend/executor/nodeforeignscan" }
+planner = { path = "../../backend/optimizer/plan/planner" }
+vars = { path = "../../backend/optimizer/util/vars" }
+clauses = { path = "../../backend/optimizer/util/clauses" }

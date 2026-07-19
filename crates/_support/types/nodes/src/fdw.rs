@@ -16,9 +16,10 @@ use crate::tags::NodeTag;
 #[repr(u32)]
 pub enum FdwKind {
     FileFdw = 0,
+    PostgresFdw = 1,
 }
 
-pub const NUM_FDW_KINDS: usize = 1;
+pub const NUM_FDW_KINDS: usize = 2;
 
 mcx::forget_safe_nodrop!(FdwKind);
 
