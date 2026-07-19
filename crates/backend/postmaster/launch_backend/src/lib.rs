@@ -1414,6 +1414,23 @@ pub mod rtgang {
 
     static BOOT: OnceLock<Boot> = OnceLock::new();
 
+    /// SIMCORPUS RED (sim builds only, env-armed by the sim harness):
+    /// spawn gang workers WITHOUT their spawn door — the "new spawn site
+    /// forgot the door" wiring bug (the simvfs-shared worklog's named
+    /// census trap), deliberately resurrected. The un-doored thread is
+    /// invisible to the permit scheduler, so its FIRST shared-universe
+    /// touch (the adoption right after spawn) dies loudly at the strict
+    /// access probe — the deterministic catch the P10 red asserts.
+    /// Env-armed (`PGRUST_SIM_DOORSKIP=rtgang`) because the sim harness
+    /// (tcop) cannot call this crate directly (package cycle — the
+    /// wpool/rtpool seam reason); cfg(pgrust_sim) keeps it native-inert.
+    #[cfg(pgrust_sim)]
+    fn doorskip_red_armed() -> bool {
+        static ARMED: OnceLock<bool> = OnceLock::new();
+        *ARMED
+            .get_or_init(|| std::env::var("PGRUST_SIM_DOORSKIP").as_deref() == Ok("rtgang"))
+    }
+
     /// PGPROCs to boot-reserve for the gang: PGRUST_RUNTIME=1 (+ the
     /// PGRUST_RUNTIME_POOLBIND=0 kill) gates it; PGRUST_RUNTIME_GANG
     /// overrides the size (default = the runtime's worker count = cores).
@@ -1468,10 +1485,17 @@ pub mod rtgang {
         // any backend thread (first engagement / respawn); parent-side
         // registration needs no spawn fence (spawn_door module doc).
         #[cfg(pgrust_sim)]
-        let sim_sched_slot = pgsync::sim::spawn_door::register_child(
-            child_pid as u32,
-            &format!("rtgang{ordinal}:{child_pid}"),
-        );
+        let sim_sched_slot = if doorskip_red_armed() {
+            // RED: the forgotten door. enter_child(None) below is a no-op,
+            // so the child runs unregistered — and dies at the adoption's
+            // access probe (the catch).
+            None
+        } else {
+            pgsync::sim::spawn_door::register_child(
+                child_pid as u32,
+                &format!("rtgang{ordinal}:{child_pid}"),
+            )
+        };
         // SIMVFS-SHARED: parent-side universe capture (fd-table
         // inheritance). The gang spawner may run on any BACKEND thread at
         // first engagement — that thread is bound to the process universe,
