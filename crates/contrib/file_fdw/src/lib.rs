@@ -770,7 +770,7 @@ fn file_end_foreign_scan<'mcx>(
 fn file_explain_foreign_scan<'mcx>(
     node: &mut ForeignScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
-    costs: bool,
+    flags: types_nodes::FdwExplainFlags,
     emit: &mut dyn FnMut(&str, types_nodes::FdwExplainProp<'_>) -> PgResult<()>,
 ) -> PgResult<()> {
     let mcx = estate.es_query_cxt;
@@ -780,7 +780,9 @@ fn file_explain_foreign_scan<'mcx>(
     let label = if is_program { "Foreign Program" } else { "Foreign File" };
     emit(label, types_nodes::FdwExplainProp::Text(filename))?;
 
-    if costs && !is_program {
+    // C file_fdw.c fileExplainForeignScan: "Suppress file size if we're not
+    // showing cost details" — costs-gated; file_fdw reads no verbose bit.
+    if flags.costs && !is_program {
         if let Ok(md) = std::fs::metadata(filename) {
             emit(
                 "Foreign File Size",
