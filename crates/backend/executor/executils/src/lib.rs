@@ -264,6 +264,15 @@ pub fn exec_qual_with_subplans<'mcx>(
     // (jsonb @> ...) scribble scratch through the frame's result mcx.
     // SAFETY: the per-tuple context object outlives the plan (reset-only).
     unsafe { state.arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx()) };
+    // C ExecEvalParamExec's pending-initplan arm: an expression can reference
+    // an initplan's output param without carrying any SubPlan step of its own
+    // (hash/merge keys, runtime index keys — the t30 sqlsmith interp.rs:84
+    // site), so the suspension pump alone cannot cover it. Run the owed
+    // initplans before evaluation, exactly like the per-node hoists.
+    let deps = state.param_exec_deps();
+    if !deps.is_empty() {
+        exec_eval_param_exec_params(estate, deps)?;
+    }
     let mut resume: Option<execexpr::Resume> = None;
     loop {
         let outcome = {
@@ -308,6 +317,12 @@ pub fn exec_recheck_qual_and_reset<'mcx>(
     let passes = if qual.has_subplan() {
         exec_qual_with_subplans(Some(qual), estate, ecxt)?
     } else {
+        // Pending-initplan arm for the plain path too: initplan params need
+        // no SubPlan step in the qual (see the with_subplans entry points).
+        let deps = qual.param_exec_deps();
+        if !deps.is_empty() {
+            exec_eval_param_exec_params(estate, deps)?;
+        }
         let mut slots = execexpr::EvalSlots {
             scan: Some(estate.slot_mut(slot)),
             inner: None,
@@ -332,6 +347,15 @@ pub fn exec_qual_with_subplans_outer<'mcx>(
     };
     // SAFETY: the per-tuple context object outlives the plan (reset-only).
     unsafe { state.arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx()) };
+    // C ExecEvalParamExec's pending-initplan arm: an expression can reference
+    // an initplan's output param without carrying any SubPlan step of its own
+    // (hash/merge keys, runtime index keys — the t30 sqlsmith interp.rs:84
+    // site), so the suspension pump alone cannot cover it. Run the owed
+    // initplans before evaluation, exactly like the per-node hoists.
+    let deps = state.param_exec_deps();
+    if !deps.is_empty() {
+        exec_eval_param_exec_params(estate, deps)?;
+    }
     let mut resume: Option<execexpr::Resume> = None;
     loop {
         let outcome = {
@@ -359,6 +383,15 @@ pub fn exec_eval_expr_with_subplans_outer<'mcx>(
     estate: &mut EStateData<'mcx>,
     ecxt: EcxtId,
 ) -> PgResult<::datum::NullableDatum> {
+    // C ExecEvalParamExec's pending-initplan arm: an expression can reference
+    // an initplan's output param without carrying any SubPlan step of its own
+    // (hash/merge keys, runtime index keys — the t30 sqlsmith interp.rs:84
+    // site), so the suspension pump alone cannot cover it. Run the owed
+    // initplans before evaluation, exactly like the per-node hoists.
+    let deps = state.param_exec_deps();
+    if !deps.is_empty() {
+        exec_eval_param_exec_params(estate, deps)?;
+    }
     let mut resume: Option<execexpr::Resume> = None;
     loop {
         let outcome = {
@@ -389,6 +422,15 @@ pub fn exec_project_with_subplans_outer<'mcx>(
     let mcx = estate.es_query_cxt;
     state.arm_result_mcx(mcx);
     exectuples::exec_clear_tuple(estate.slot_mut(result), mcx);
+    // C ExecEvalParamExec's pending-initplan arm: an expression can reference
+    // an initplan's output param without carrying any SubPlan step of its own
+    // (hash/merge keys, runtime index keys — the t30 sqlsmith interp.rs:84
+    // site), so the suspension pump alone cannot cover it. Run the owed
+    // initplans before evaluation, exactly like the per-node hoists.
+    let deps = state.param_exec_deps();
+    if !deps.is_empty() {
+        exec_eval_param_exec_params(estate, deps)?;
+    }
     let mut resume: Option<execexpr::Resume> = None;
     loop {
         let suspended = {
@@ -449,6 +491,15 @@ pub fn exec_eval_expr_with_subplans<'mcx>(
     estate: &mut EStateData<'mcx>,
     ecxt: EcxtId,
 ) -> PgResult<::datum::NullableDatum> {
+    // C ExecEvalParamExec's pending-initplan arm: an expression can reference
+    // an initplan's output param without carrying any SubPlan step of its own
+    // (hash/merge keys, runtime index keys — the t30 sqlsmith interp.rs:84
+    // site), so the suspension pump alone cannot cover it. Run the owed
+    // initplans before evaluation, exactly like the per-node hoists.
+    let deps = state.param_exec_deps();
+    if !deps.is_empty() {
+        exec_eval_param_exec_params(estate, deps)?;
+    }
     let mut resume: Option<execexpr::Resume> = None;
     loop {
         let outcome = {
@@ -504,6 +555,15 @@ pub fn exec_eval_expr_with_subplans_inner_slot<'mcx>(
     ecxt: EcxtId,
     inner: ExecSlotId,
 ) -> PgResult<::datum::NullableDatum> {
+    // C ExecEvalParamExec's pending-initplan arm: an expression can reference
+    // an initplan's output param without carrying any SubPlan step of its own
+    // (hash/merge keys, runtime index keys — the t30 sqlsmith interp.rs:84
+    // site), so the suspension pump alone cannot cover it. Run the owed
+    // initplans before evaluation, exactly like the per-node hoists.
+    let deps = state.param_exec_deps();
+    if !deps.is_empty() {
+        exec_eval_param_exec_params(estate, deps)?;
+    }
     let mut resume: Option<execexpr::Resume> = None;
     loop {
         let outcome = {
@@ -532,6 +592,15 @@ pub fn exec_project_with_subplans<'mcx>(
     let mcx = estate.es_query_cxt;
     state.arm_result_mcx(mcx);
     exectuples::exec_clear_tuple(estate.slot_mut(result), mcx);
+    // C ExecEvalParamExec's pending-initplan arm: an expression can reference
+    // an initplan's output param without carrying any SubPlan step of its own
+    // (hash/merge keys, runtime index keys — the t30 sqlsmith interp.rs:84
+    // site), so the suspension pump alone cannot cover it. Run the owed
+    // initplans before evaluation, exactly like the per-node hoists.
+    let deps = state.param_exec_deps();
+    if !deps.is_empty() {
+        exec_eval_param_exec_params(estate, deps)?;
+    }
     let mut resume: Option<execexpr::Resume> = None;
     loop {
         let suspended = {
