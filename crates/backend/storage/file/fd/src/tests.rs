@@ -512,6 +512,22 @@ fn pipe_stream_round_trip() {
 }
 
 #[test]
+fn pwrite_zeros_buffer_is_io_aligned() {
+    // O_DIRECT contract (c.h PGIOAlignedBlock, common/file_utils.c
+    // pg_pwrite_zeros): the zero buffer handed to pwritev must be
+    // PG_IO_ALIGN_SIZE-aligned or the kernel EINVALs every FileZero-backed
+    // zero-extension under debug_io_direct=data. macOS has no O_DIRECT, so
+    // the EINVAL itself is Linux-only; the alignment property is testable
+    // everywhere.
+    let addr = crate::io::ZBUFFER.0.as_ptr() as usize;
+    assert_eq!(addr % ::types_storage::bufpage::PG_IO_ALIGN_SIZE, 0);
+    assert_eq!(
+        core::mem::align_of::<crate::io::IoAlignedBlock>(),
+        ::types_storage::bufpage::PG_IO_ALIGN_SIZE
+    );
+}
+
+#[test]
 fn file_zero_and_fallocate_extend() {
     setup();
     let dir = scratch_dir("zero");

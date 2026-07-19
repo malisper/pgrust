@@ -455,10 +455,24 @@ pub fn FileZero(file: File, offset: i64, amount: i64, wait_event_info: u32) -> P
     }
 }
 
+// c.h PGIOAlignedBlock: a BLCKSZ block aligned to PG_IO_ALIGN_SIZE so it can
+// be handed to an O_DIRECT descriptor (debug_io_direct), which rejects
+// unaligned buffer addresses with EINVAL.
+#[repr(align(4096))]
+pub(crate) struct IoAlignedBlock(pub(crate) [u8; BLCKSZ]);
+const _: () = assert!(
+    core::mem::align_of::<IoAlignedBlock>() == ::types_storage::bufpage::PG_IO_ALIGN_SIZE
+);
+
+// common/file_utils.c pg_pwrite_zeros' `static const PGIOAlignedBlock zbuffer`:
+// I/O-aligned, or FileZero-backed zero-extension EINVALs under
+// debug_io_direct=data (and mdzeroextend fails with "could not extend file").
+pub(crate) static ZBUFFER: IoAlignedBlock = IoAlignedBlock([0u8; BLCKSZ]);
+
 // common/file_utils.c pg_pwrite_zeros: fd.c's FileZero is its only backend
 // caller so far, so it lives here until the common unit lands.
 pub fn pg_pwrite_zeros(fd: RawFd, size: usize, mut offset: i64) -> isize {
-    let zbuffer = [0u8; BLCKSZ];
+    let zbuffer = &ZBUFFER.0;
     let mut remaining = size;
     let mut total_written: isize = 0;
     let mut iov: Vec<IoSlice<'_>> = Vec::with_capacity(PG_IOV_MAX);
