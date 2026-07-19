@@ -227,3 +227,85 @@ fn UpdateLogicalMappings(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod mapping_tests {
+    use super::*;
+    use types_core::InvalidCommandId;
+
+    fn locator(spc: u32, db: u32, rel: u32) -> RelFileLocator {
+        RelFileLocator { spcOid: spc, dbOid: db, relNumber: rel }
+    }
+
+    // One LogicalRewriteMappingData entry in the C on-disk layout (the same
+    // bytes rewriteheap's writer and heap_xlog_logical_rewrite produce).
+    fn entry(old_loc: RelFileLocator, old_tid: (u32, u16), new_loc: RelFileLocator, new_tid: (u32, u16)) -> [u8; 36] {
+        let mut b = [0u8; 36];
+        for (off, l) in [(0usize, old_loc), (12, new_loc)] {
+            b[off..off + 4].copy_from_slice(&l.spcOid.to_ne_bytes());
+            b[off + 4..off + 8].copy_from_slice(&l.dbOid.to_ne_bytes());
+            b[off + 8..off + 12].copy_from_slice(&l.relNumber.to_ne_bytes());
+        }
+        for (off, (blk, pos)) in [(24usize, old_tid), (30, new_tid)] {
+            b[off..off + 2].copy_from_slice(&((blk >> 16) as u16).to_ne_bytes());
+            b[off + 2..off + 4].copy_from_slice(&(blk as u16).to_ne_bytes());
+            b[off + 4..off + 6].copy_from_slice(&pos.to_ne_bytes());
+        }
+        b
+    }
+
+    #[test]
+    fn apply_logical_mapping_file_remaps_known_tuples() {
+        let dir = std::env::temp_dir().join(format!("rb-maptest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = locator(1663, 5, 1259);
+        let new = locator(1663, 5, 99999);
+        let mut bytes = Vec::new();
+        // Entry 1: old tid we know about -> must be remapped.
+        bytes.extend_from_slice(&entry(old, (0, 1), new, (7, 3)));
+        // Entry 2: old tid we do NOT know about -> must be skipped.
+        bytes.extend_from_slice(&entry(old, (0, 2), new, (7, 4)));
+        let fname = "map-5-4eb-3_28-2f1-2f2";
+        std::fs::write(dir.join(fname), &bytes).unwrap();
+
+        let hash: RefCell<TupleCidHash> =
+            RefCell::new(PgFxHashMap::with_hasher_in(Default::default(), crate::rb_mcx()));
+        let known = ReorderBufferTupleCidKey {
+            rlocator: old,
+            tid: ItemPointerData::new(0, 1),
+        };
+        hash.borrow_mut().insert(
+            known,
+            ReorderBufferTupleCidEnt { cmin: 4, cmax: InvalidCommandId, combocid: InvalidCommandId },
+        );
+
+        ApplyLogicalMappingFile(&hash, &dir, fname).unwrap();
+
+        let h = hash.borrow();
+        let remapped = h
+            .get(&ReorderBufferTupleCidKey { rlocator: new, tid: ItemPointerData::new(7, 3) })
+            .expect("known old tuple remapped to its new location");
+        assert_eq!(remapped.cmin, 4);
+        assert_eq!(remapped.cmax, InvalidCommandId);
+        assert!(
+            h.get(&ReorderBufferTupleCidKey { rlocator: new, tid: ItemPointerData::new(7, 4) })
+                .is_none(),
+            "unknown old tuple must not create a mapping"
+        );
+        // The old key stays valid (C keeps both).
+        assert!(h.get(&known).is_some());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn apply_logical_mapping_file_rejects_torn_entry() {
+        let dir = std::env::temp_dir().join(format!("rb-maptest-torn-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fname = "map-5-4eb-3_28-2f1-2f3";
+        std::fs::write(dir.join(fname), [0u8; 20]).unwrap(); // torn: 20 < 36
+        let hash: RefCell<TupleCidHash> =
+            RefCell::new(PgFxHashMap::with_hasher_in(Default::default(), crate::rb_mcx()));
+        assert!(ApplyLogicalMappingFile(&hash, &dir, fname).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
