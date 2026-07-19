@@ -280,10 +280,29 @@ pub enum PStep {
     Assert(Check),
     /// Placeholder for WS-GEN's constrained noise substitution.
     NoiseSlot(NoiseConstraint),
+    /// H8 multi-session estate (plan-format v2). `Session` switches the
+    /// active session for the following steps (0 = primary); `AsyncSql`
+    /// dispatches without waiting (the statement is expected to block);
+    /// `Join` collects a session's outstanding statement — its outcome
+    /// lands in `slot` for slot-addressed checks; `WaitUntil` polls the
+    /// active session until the query returns scalar 't'.
+    ///
+    /// Oracle alignment law: the runner reports NO outcome for `Session` /
+    /// `AsyncSql` / `WaitUntil` (silent steps) and reports the joined
+    /// outcome for `Join` — `bridge::OracleCheckEval` advances its cursor
+    /// past silent steps symmetrically. The ledger is single-session: while
+    /// the model session is non-zero, `Tx` steps do NOT touch the ledger
+    /// (multi-session properties assert through slots, never the ledger).
+    Session(u32),
+    AsyncSql(SqlStep),
+    Join { session: u32, slot: Option<u32> },
+    WaitUntil(SqlStep),
 }
 
-/// A property instance compiled to steps (the serial subset — no
-/// SessionSwitch exists in this IR by construction, per contract §0 A1).
+/// A property instance compiled to steps. Serial properties never contain
+/// session-family steps (§0 A1 posture preserved); H8 multi-session
+/// properties (M2/S1 class) do, and must return to session 0 before their
+/// last step.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PropertyInstance {
     pub property: PropertyId,

@@ -211,6 +211,17 @@ pub fn evaluate_instance(
             },
             // WS-GEN substitutes noise; standalone oracle evaluation skips it.
             PStep::NoiseSlot(_) => {}
+            // H8: the sim/ledger executor is single-session by construction;
+            // a multi-session property is not evaluable here — counted
+            // property-skip (the live runner owns these), never a false
+            // verdict either way.
+            PStep::Session(_) | PStep::AsyncSql(_) | PStep::Join { .. } | PStep::WaitUntil(_) => {
+                return PropertyReport {
+                    property: inst.property,
+                    outcome: PropertyOutcome::AssumptionFailed,
+                    detail: None,
+                };
+            }
         }
     }
     PropertyReport { property: inst.property, outcome: PropertyOutcome::Pass, detail: None }

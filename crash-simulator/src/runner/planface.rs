@@ -68,8 +68,13 @@ pub enum Step {
     Assumption(String), // single-line check JSON
     Assertion(String),  // single-line check JSON
     Fault(FaultPoint),
-    // SessionSwitch: reserved tag, parse = hard error (contract §0 A1) —
-    // enforced by core::parse.
+    /// H8 multi-session estate (plan-format v2). Switch the active session,
+    /// dispatch a non-blocking DML, join a session's outstanding statement,
+    /// or poll a session until a scalar-'t' gate clears.
+    Session(u32),
+    AsyncDml(Sql),
+    Join(u32),
+    WaitUntil(Sql),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,6 +156,10 @@ fn flat_step(s: &core::Step) -> Step {
         core::Step::Assumption(c) => Step::Assumption(c.json().to_string()),
         core::Step::Assertion(c) => Step::Assertion(c.json().to_string()),
         core::Step::Fault(f) => Step::Fault(flat_fault(f)),
+        core::Step::Session(id) => Step::Session(*id),
+        core::Step::AsyncDml(q) => Step::AsyncDml(flat_sql(q)),
+        core::Step::Join(id) => Step::Join(*id),
+        core::Step::WaitUntil(q) => Step::WaitUntil(flat_sql(q)),
     }
 }
 
@@ -168,6 +177,10 @@ fn core_step(s: &Step) -> Result<core::Step, String> {
             core::Step::Assertion(core::Check::new(j.clone()).map_err(|e| e.to_string())?)
         }
         Step::Fault(f) => core::Step::Fault(core_fault(f)),
+        Step::Session(id) => core::Step::Session(*id),
+        Step::AsyncDml(q) => core::Step::AsyncDml(core_sql(q)?),
+        Step::Join(id) => core::Step::Join(*id),
+        Step::WaitUntil(q) => core::Step::WaitUntil(core_sql(q)?),
         Step::BeginProperty { .. } | Step::EndProperty { .. } => {
             return Err("property markers nest via to_core, not core_step".into())
         }
