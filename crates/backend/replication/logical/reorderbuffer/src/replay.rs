@@ -34,6 +34,50 @@ pub(crate) fn execute_invalidations(msgs: &[SharedInvalidationMessage]) -> PgRes
     Ok(())
 }
 
+// SetupCheckXidLive (reorderbuffer.c:2048). While decoding a prepared (or,
+// phase-2, streamed in-progress) transaction, its changes are replayed
+// against the catalog using that transaction's own snapshot. If the
+// transaction aborts concurrently (ROLLBACK PREPARED from another session),
+// catalog rows it created can be vacuumed away mid-decode and the replay
+// would read a wrong catalog version. Publishing the xid in CheckXidAlive
+// makes every systable scan (genam handle_concurrent_abort) re-check that
+// the xid is still alive and raise ERRCODE_TRANSACTION_ROLLBACK
+// ("transaction aborted during system catalog scan") when it is not — the
+// error process_txn's concurrent-abort arm converts into a clean stop.
+pub(crate) fn setup_check_xid_live(xid: TransactionId) -> PgResult<()> {
+    // Already set to this xid: nothing to do.
+    if xact::CheckXidAlive() == xid {
+        return Ok(());
+    }
+
+    // Set CheckXidAlive if the xid is not committed yet. We don't check
+    // whether it aborted; that happens during catalog access.
+    if !transam_seams::transaction_id_did_commit::call(xid)? {
+        xact::SetCheckXidAlive(xid);
+    } else {
+        xact::SetCheckXidAlive(InvalidTransactionId);
+    }
+    Ok(())
+}
+
+// Unwind safety for the per-thread CheckXidAlive/bsysscan state. C needs no
+// guard: its error unwind always funnels through AbortTransaction /
+// AbortSubTransaction, which call ResetLogicalStreamingState (xact.c:2902,
+// :5297). Our Err path takes the same route (process_txn's error arm calls
+// xact::AbortCurrentTransaction), but a Rust panic unwinds past it — and in
+// the threaded server the thread outlives a caught panic, so a leaked xid
+// would poison every later catalog scan on that thread with spurious
+// "transaction aborted during system catalog scan" errors. Dropping this
+// guard re-runs the reset; it is idempotent when the state is already clean.
+pub(crate) struct CheckXidLiveGuard;
+
+impl Drop for CheckXidLiveGuard {
+    fn drop(&mut self) {
+        xact::SetCheckXidAlive(InvalidTransactionId);
+        xact::SetBsysscan(false);
+    }
+}
+
 impl ReorderBuffer {
     pub fn change_size(&self, id: ChangeId) -> usize {
         let change = self.change(id);
@@ -366,6 +410,13 @@ impl ReorderBuffer {
         let mut command_id = command_id;
         let mut curtxn: Option<TxnId> = None;
 
+        // Reset CheckXidAlive/bsysscan even if a panic unwinds out of the
+        // replay (see the guard's comment). Both normal exits already leave
+        // the state clean: the success tail resets CheckXidAlive after
+        // truncating a prepared txn (reorderbuffer.c:2718), and the Err arm's
+        // AbortCurrentTransaction resets both via ResetLogicalStreamingState.
+        let _check_xid_guard = CheckXidLiveGuard;
+
         let result = self.process_txn_guts(
             txn,
             commit_lsn,
@@ -402,10 +453,12 @@ impl ReorderBuffer {
                 // the transaction being prepared; clean up and return
                 // gracefully so the caller (ReorderBufferPrepare) can still
                 // send the prepare (reorderbuffer.c:2777). The streaming leg
-                // of this arm is phase-2. C's CheckXidAlive machinery (which
-                // raises this code from catalog scans) is not ported; the
-                // arm fires only for plugin-raised errors (recorded
-                // divergence).
+                // of this arm is phase-2. The error reaches us either from a
+                // catalog scan that tripped on CheckXidAlive (genam
+                // handle_concurrent_abort) or from the plugin itself, exactly
+                // C's two sources. By this point AbortCurrentTransaction has
+                // already reset CheckXidAlive (ResetLogicalStreamingState),
+                // matching C's PG_CATCH ordering.
                 if e.sqlstate == types_error::ERRCODE_TRANSACTION_ROLLBACK
                     && self.txn(txn).is_prepared()
                 {
@@ -471,10 +524,16 @@ impl ReorderBuffer {
             debug_assert!(prev_lsn == InvalidXLogRecPtr || prev_lsn <= self.change(cur).lsn);
             prev_lsn = self.change(cur).lsn;
 
-            // C tracks curtxn (the change's own (sub)txn) for the
-            // concurrent-abort arm; SetupCheckXidLive itself is unported
-            // (CheckXidAlive divergence, see process_txn).
-            *curtxn = Some(self.change(cur).txn);
+            // Set the current xid to detect concurrent aborts, required when
+            // changes are decoded before the COMMIT record is processed
+            // (reorderbuffer.c:2300). C's condition is
+            // `streaming || rbtxn_is_prepared(change->txn)`; streaming is
+            // phase-2 (asserted off in process_txn), leaving the prepared arm.
+            let change_txn = self.change(cur).txn;
+            if self.txn(change_txn).is_prepared() {
+                *curtxn = Some(change_txn);
+                setup_check_xid_live(self.txn(change_txn).xid)?;
+            }
 
             let action = self.change(cur).action;
             match action {
@@ -640,6 +699,8 @@ impl ReorderBuffer {
 
         if self.txn(txn).is_prepared() {
             self.truncate_txn(txn, true);
+            // Reset the CheckXidAlive (reorderbuffer.c:2718).
+            xact::SetCheckXidAlive(InvalidTransactionId);
         } else {
             self.cleanup_txn(txn);
         }

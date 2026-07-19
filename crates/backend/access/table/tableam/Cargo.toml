@@ -22,6 +22,7 @@ smgr = { path = "../../../storage/smgr/smgr" }
 procarray = { path = "../../../storage/ipc/procarray" }
 multixact = { path = "../../transam/multixact" }
 catalog_storage = { path = "../../../catalog/catalog_storage" }
+xact = { path = "../../transam/xact" }
 xact_seams = { path = "../../transam/xact_seams" }
 guc_seams = { path = "../../../utils/misc/guc_seams" }
 elog_seams = { path = "../../../utils/error/elog_seams" }
