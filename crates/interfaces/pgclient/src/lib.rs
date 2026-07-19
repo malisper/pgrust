@@ -55,6 +55,9 @@ pub struct PgConn {
     // A query was sent and ReadyForQuery not yet consumed (libpq asyncStatus
     // != IDLE); get_result on an idle connection returns None immediately.
     pending_results: bool,
+    // libpq conn->xactStatus: the status byte of the last ReadyForQuery
+    // ('I' idle / 'T' in transaction / 'E' failed transaction).
+    txn_status: u8,
     err: String,
     opts: Vec<(String, String)>,
     display_host: String,
@@ -412,6 +415,7 @@ pub fn connect(
         copy_server_done: false,
         copy_client_done: false,
         pending_results: false,
+        txn_status: b'I',
         err: String::new(),
         opts,
         display_host,
@@ -483,9 +487,41 @@ pub fn connect_db(
     connect(opts, &params, we)
 }
 
+/// libpq PGTransactionStatusType (PQtransactionStatus).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransactionStatus {
+    /// 'I' — connection idle, no transaction open.
+    Idle,
+    /// A command is in flight (libpq: asyncStatus != PGASYNC_IDLE).
+    Active,
+    /// 'T' — idle, inside a transaction block.
+    InTrans,
+    /// 'E' — idle, inside a FAILED transaction block.
+    InError,
+    /// Bad connection or unrecognized status byte.
+    Unknown,
+}
+
 impl PgConn {
     pub fn error_message(&self) -> String {
         self.err.clone()
+    }
+
+    // PQtransactionStatus (fe-exec.c): UNKNOWN on a bad connection, ACTIVE
+    // while a query is pending, else the last ReadyForQuery status byte.
+    pub fn transaction_status(&self) -> TransactionStatus {
+        if !self.conn_ok {
+            return TransactionStatus::Unknown;
+        }
+        if self.pending_results {
+            return TransactionStatus::Active;
+        }
+        match self.txn_status {
+            b'I' => TransactionStatus::Idle,
+            b'T' => TransactionStatus::InTrans,
+            b'E' => TransactionStatus::InError,
+            _ => TransactionStatus::Unknown,
+        }
     }
 
     pub fn connection_bad(&self) -> bool {
@@ -719,6 +755,13 @@ impl PgConn {
     // the last resultset. CopyBothResponse/CopyOutResponse return immediately
     // with the stream open.
     pub fn exec(&mut self, query: &str) -> PgResult<QueryResult> {
+        // PQexecStart (fe-exec.c): "Silently discard any prior query result"
+        // — a local error can abandon an earlier result stream mid-flight
+        // (dblink's storeRow unwind), and PQexec is what makes the connection
+        // usable again for the next command.
+        if self.pending_results {
+            self.drain();
+        }
         if !self.send_query_raw(query) {
             return Ok(QueryResult::error(self.err.clone()));
         }
@@ -772,6 +815,7 @@ impl PgConn {
                 }
                 b'S' | b'N' | b'A' => self.note_async(t, &mbody),
                 b'Z' => {
+                    self.txn_status = mbody.first().copied().unwrap_or(b'I');
                     self.pending_results = false;
                     break;
                 }
@@ -919,6 +963,7 @@ impl PgConn {
                 b'c' => self.copy_server_done = true,
                 b'S' | b'N' | b'A' => self.note_async(t, &body),
                 b'Z' => {
+                    self.txn_status = body.first().copied().unwrap_or(b'I');
                     self.in_copy = false;
                     self.pending_results = false;
                     return Ok(None);
@@ -995,6 +1040,7 @@ impl PgConn {
                 }
                 b'S' | b'N' | b'A' => self.note_async(t, &body),
                 b'Z' => {
+                    self.txn_status = body.first().copied().unwrap_or(b'I');
                     self.pending_results = false;
                     break;
                 }
@@ -1023,7 +1069,8 @@ impl PgConn {
         }
         loop {
             match self.read_message(self.we.receive) {
-                Ok(Ok((b'Z', _))) => {
+                Ok(Ok((b'Z', body))) => {
+                    self.txn_status = body.first().copied().unwrap_or(b'I');
                     self.pending_results = false;
                     self.in_copy = false;
                     return;

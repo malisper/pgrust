@@ -75,7 +75,10 @@ pub(crate) fn handshake(
             }
             b'S' | b'K' | b'N' | b'A' => conn.note_async(t, &mbody),
             b'E' => return Ok(Err(parse_error_fields(&mbody))),
-            b'Z' => return Ok(Ok(())),
+            b'Z' => {
+                conn.txn_status = mbody.first().copied().unwrap_or(b'I');
+                return Ok(Ok(()));
+            }
             other => {
                 return Ok(Err(format!(
                     "unexpected message type \"{}\" during connection startup",
