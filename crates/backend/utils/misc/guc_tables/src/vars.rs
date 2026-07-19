@@ -313,6 +313,10 @@ pub static pgrust_runtime_dop: GucIntVar = GucSlot::new("pgrust_runtime_dop");
 // pattern-program fast tier under the auto RE2 dispatch — regexp_alt owns
 // the backing and installs the accessors).
 pub static pgrust_regex_pattern_program: GucBoolVar = GucSlot::new("pgrust_regex_pattern_program");
+// pgrust-only: pgrust.resource_counters (no C symbol; PGC_INTERNAL,
+// value computed by hooks::show_resource_counters — the simharness F8
+// resource-baseline hook channel; the fd crate owns backing + hook).
+pub static pgrust_resource_counters: GucStringVar = GucSlot::new("pgrust_resource_counters");
 // pg_stat_statements custom GUCs (pg_stat_statements.c _PG_init), statically
 // defined: this port has no DefineCustomXxxVariable machinery.
 pub static pgss_max: GucIntVar = GucSlot::new("pgss_max");

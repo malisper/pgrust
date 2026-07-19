@@ -666,3 +666,28 @@ pub mod resowner {
 pub(crate) fn occupied_descs(fd: &FdState) -> i32 {
     fd.allocated_descs.iter().flatten().count() as i32
 }
+
+/// `SHOW pgrust.resource_counters` (the simharness F8 resource-baseline hook
+/// channel). Reports the ABOVE-VFD-CACHE counters — the class that must
+/// return to baseline between statements (spec §2.1 "vfd-aware by
+/// definition": LRU-cached vfds legitimately stay open, so they are exactly
+/// what this string must NOT count):
+///   allocated  = live AllocateFile/AllocateDir/OpenTransientFile descs
+///                (0 between statements; leaks/holds move it)
+///   maxdescs   = the allocated-desc cap (max_safe_fds/3 once scaled; a
+///                backend thread stranded at the FD_MINFREE boot default
+///                freezes it at 16 — the max_safe_fds-inheritance bug class)
+///   safe       = this thread's max_safe_fds
+///   maxfiles   = max_files_per_process (context for the numbers above)
+/// Per-thread state only: single-session campaigns read it deterministically.
+pub fn show_resource_counters() -> String {
+    with_fd(|fd| {
+        format!(
+            "allocated={} maxdescs={} safe={} maxfiles={}",
+            occupied_descs(fd),
+            fd.max_allocated_descs,
+            max_safe_fds(),
+            max_files_per_process(),
+        )
+    })
+}

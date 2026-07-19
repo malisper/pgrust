@@ -630,10 +630,38 @@ fn scalar_call(rng: &mut dyn RngCore, t: &Table, trace: &mut ProdTrace) -> Strin
     }
 }
 
+/// H7 boundary-typmod pool for the typmod-probe arms. Witness values first
+/// (H3-verified live-contact typmods for the p9 panic class — every one is a
+/// clean deterministic ERROR on C and on the fixed engine), then random
+/// compositions of (range_mask << 16) | precision: invalid range masks (the
+/// error/panic path) and valid masks (the formatting path — parity coverage).
+fn boundary_typmod(rng: &mut dyn RngCore) -> i64 {
+    match range_incl(rng, 0, 7) {
+        0 => 0x50002,     // H3 witness (notes/h3-planted-bugs.md p9)
+        1 => 0x50003,     // H3 witness
+        2 => 0x50006,     // H3 witness
+        3 => 0x7FFF0000,  // H3 witness (2147418112)
+        4 => 0x10000,     // fix-commit red statement (65536)
+        5 => {
+            // Invalid range masks: not a recognized INTERVAL field set.
+            const BAD: [i64; 6] = [1, 3, 5, 7, 9, 0x123];
+            let r = BAD[range_incl(rng, 0, BAD.len() as u64 - 1) as usize];
+            (r << 16) | range_incl(rng, 0, 6) as i64
+        }
+        6 => {
+            // Valid masks: YEAR, MONTH, Y|M, DAY, HOUR, SECOND, full range.
+            const OK: [i64; 7] = [4, 2, 6, 8, 0x400, 0x1000, 0x7FFF];
+            let r = OK[range_incl(rng, 0, OK.len() as u64 - 1) as usize];
+            (r << 16) | range_incl(rng, 0, 6) as i64
+        }
+        _ => range_incl(rng, 0, i32::MAX as u64) as i64,
+    }
+}
+
 /// Query variant nodes, index-aligned with the weight array in `gen_query`.
 /// The `[&str; N]`-tied weight array is the anti-staleness coupling: adding a
 /// variant arm without registering its `prodreg` name is a compile error.
-const QUERY_VARIANTS: [&str; 42] = [
+const QUERY_VARIANTS: [&str; 44] = [
     pr::Q_FULL_ORDERED,
     pr::Q_COUNT_STAR,
     pr::Q_EXACT_AGG,
@@ -682,6 +710,10 @@ const QUERY_VARIANTS: [&str; 42] = [
     pr::Q_TWO_COL_EQ,
     pr::Q_COVERED_SELECT,
     pr::Q_FOREIGN_SCAN,
+    // H7 feature-surface probes (42..43): constant typed-expression reads —
+    // typmod-carrying casts/catalog paths and geometric literals/operators.
+    pr::Q_TYPMOD_PROBE,
+    pr::Q_GEO_PROBE,
 ];
 
 /// Weighted read-query choice over one table (plus join/SRF classes drawing
@@ -762,6 +794,12 @@ pub fn gen_query(
         // the merged 42-variant pool weight 2 starved it on the 300-seed
         // teeth corpus (reach pin), so it carries 4.
         if foreign_ok { 4 } else { 0 },
+        // H7 probes (42..43): 5 weight each — both carry 5-6 sub-arms that
+        // must all reach k=1 in the query-scarce write-heavy battery profile
+        // at the pinned 500-seed budget (the sc:numeric-abs starvation
+        // lesson: sub-arm-heavy variants need weight >= 5 in this pool).
+        5,
+        5,
     ];
     // H5 reach-gate teeth knob: suppress emission of named productions
     // (weights zeroed) while the reach gate still expects them (see
@@ -1428,6 +1466,156 @@ pub fn gen_query(
                 Mark::Read,
                 flags,
             )
+        }
+        42 => {
+            // H7 typmod-probe: typed casts WITH typmods + boundary-typmod
+            // probes of the typmod-carrying catalog paths (p9 class: the t26
+            // soak's dominant panic surface was exactly these functions fed
+            // arbitrary ints by sqlsmith). All constant expressions —
+            // deterministic single-row reads; invalid typmods are clean
+            // ERRORs on C and must be clean PgErrors (err-match) on the DUT.
+            const TPM: [&str; 6] = [
+                pr::TPM_INTERVAL_OUT,
+                pr::TPM_INTERVAL_SCALE,
+                pr::TPM_FORMAT_TYPE,
+                pr::TPM_INTERVAL_CAST,
+                pr::TPM_VARCHAR_CAST,
+                pr::TPM_NUMERIC_CAST,
+            ];
+            let arm = range_incl(rng, 0, 5) as usize;
+            trace.push(TPM[arm].to_string());
+            match arm {
+                0 => {
+                    let t = boundary_typmod(rng);
+                    sql(format!("SELECT intervaltypmodout({t});"), Mark::Read, flags)
+                }
+                1 => {
+                    // interval scale/truncation (fc_interval_support /
+                    // intervaltypmodleastfield path) under a boundary typmod.
+                    let t = boundary_typmod(rng);
+                    sql(
+                        format!(
+                            "SELECT pg_catalog.\"interval\"(interval '1 day 02:03:04.567891', {t});"
+                        ),
+                        Mark::Read,
+                        flags,
+                    )
+                }
+                2 => {
+                    let t = boundary_typmod(rng);
+                    sql(
+                        format!("SELECT format_type('interval'::regtype, {t});"),
+                        Mark::Read,
+                        flags,
+                    )
+                }
+                3 => {
+                    // Parser-built interval typmod: precision 0..6 valid,
+                    // 7 = the out-of-range error path (err-match both legs).
+                    let p = range_incl(rng, 0, 7);
+                    sql(
+                        format!("SELECT interval '3 day 04:05:06.789012'::interval({p});"),
+                        Mark::Read,
+                        flags,
+                    )
+                }
+                4 => {
+                    // varchar(n) length coercion (explicit cast truncates).
+                    let n = range_incl(rng, 1, 14);
+                    sql(format!("SELECT 'abcdefghijkl'::varchar({n});"), Mark::Read, flags)
+                }
+                _ => {
+                    // numeric(p,s): valid shapes mostly; small p sometimes
+                    // overflows the value — a clean 22003 on both legs.
+                    let p = range_incl(rng, 1, 8);
+                    let s = range_incl(rng, 0, p);
+                    let a = range_incl(rng, 0, 999);
+                    let b = range_incl(rng, 0, 99);
+                    sql(
+                        format!("SELECT {a}.{b:02}::numeric({p},{s});"),
+                        Mark::Read,
+                        flags,
+                    )
+                }
+            }
+        }
+        43 => {
+            // H7 geo-probe: geometric typed literals + the operator/function
+            // family over them (p5 class: pg_hypot last-ulp parity — float8
+            // printing makes every row a byte-level parity check against C).
+            // Constant integer coordinates: deterministic on both engines.
+            const GEO: [&str; 5] = [
+                pr::GEO_SERIES_DISTANCE,
+                pr::GEO_CIRCLE_BOX,
+                pr::GEO_PATH_LENGTH,
+                pr::GEO_BOX_CONTAIN,
+                pr::GEO_AREA,
+            ];
+            // series-distance dominates: one statement evaluates 40-80
+            // distinct hypots, so a single draw is a near-certain last-ulp
+            // parity sweep (single-value probes diverge on only ~5 percent
+            // of inputs — the fix-commit measured 160/3378 boxes).
+            let arm = weighted_index(rng, &[4u64, 2, 2, 1, 1]).expect("static weights");
+            trace.push(GEO[arm].to_string());
+            match arm {
+                0 => {
+                    let m = range_incl(rng, 3, 17);
+                    let k = range_incl(rng, 50, 999);
+                    let n = range_incl(rng, 40, 80);
+                    sql(
+                        format!(
+                            "SELECT g, point '(0,0)' <-> point(g, (g * {m}) % {k}) FROM generate_series(1, {n}) AS g;"
+                        ),
+                        Mark::Read,
+                        flags,
+                    )
+                }
+                1 => {
+                    let (x1, y1) = (range_incl(rng, 0, 999), range_incl(rng, 0, 999));
+                    let (x2, y2) = (range_incl(rng, 0, 999), range_incl(rng, 0, 999));
+                    sql(
+                        format!("SELECT circle(box '({x1},{y1}),({x2},{y2})');"),
+                        Mark::Read,
+                        flags,
+                    )
+                }
+                2 => {
+                    let mut pts = Vec::new();
+                    for _ in 0..range_incl(rng, 3, 6) {
+                        pts.push(format!(
+                            "({},{})",
+                            range_incl(rng, 0, 999),
+                            range_incl(rng, 0, 999)
+                        ));
+                    }
+                    sql(
+                        format!("SELECT @-@ path '[{}]';", pts.join(",")),
+                        Mark::Read,
+                        flags,
+                    )
+                }
+                3 => {
+                    let (x1, y1) = (range_incl(rng, 0, 999), range_incl(rng, 0, 999));
+                    let (x2, y2) = (range_incl(rng, 0, 999), range_incl(rng, 0, 999));
+                    let (px, py) = (range_incl(rng, 0, 999), range_incl(rng, 0, 999));
+                    sql(
+                        format!(
+                            "SELECT box '({x1},{y1}),({x2},{y2})' @> point '({px},{py})';"
+                        ),
+                        Mark::Read,
+                        flags,
+                    )
+                }
+                _ => {
+                    let (x1, y1) = (range_incl(rng, 0, 999), range_incl(rng, 0, 999));
+                    let (x2, y2) = (range_incl(rng, 0, 999), range_incl(rng, 0, 999));
+                    sql(
+                        format!("SELECT area(box '({x1},{y1}),({x2},{y2})');"),
+                        Mark::Read,
+                        flags,
+                    )
+                }
+            }
         }
         41 => {
             // Foreign Scan shape: read a file_fdw foreign table.

@@ -187,6 +187,54 @@ pub struct CampaignOutcome {
     pub failures_banked: u64,
 }
 
+/// H7: DUT server-log scrape for `panicked at` lines — the other half of H3
+/// finding 1. A CONTAINED backend panic reaches the client as XX000 with the
+/// PANIC PAYLOAD as the message; when the payload is a custom
+/// `panic!("...")` string that is byte-identical to C's elog(ERROR) text on
+/// the same path (the p9 interval-typmod class), the diff ladder sees
+/// err-match and the client-side panic-signature grammar cannot match — the
+/// server log's `panicked at` line is the ONLY witness. Each scraped hit
+/// mints the existing `panic-signature` P1 census class, so the campaign
+/// VERDICT fails, not just the census (the zero-panic ratchet's grammar).
+/// Scanning starts at the log's size at campaign start, so earlier legs
+/// sharing the same server log are never re-counted. Single-campaign-per-
+/// server discipline: concurrent campaigns against one DUT would
+/// cross-attribute lines (the validate rig runs legs sequentially).
+struct DutLogScraper {
+    path: std::path::PathBuf,
+    offset: u64,
+}
+
+impl DutLogScraper {
+    fn new(path: &Path) -> Self {
+        let offset = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        DutLogScraper { path: path.to_path_buf(), offset }
+    }
+
+    /// `panicked at` lines appended since the last scan.
+    fn scan(&mut self) -> Vec<String> {
+        use std::io::{Read as _, Seek as _};
+        let Ok(mut f) = std::fs::File::open(&self.path) else {
+            return Vec::new();
+        };
+        if f.seek(std::io::SeekFrom::Start(self.offset)).is_err() {
+            return Vec::new();
+        }
+        let mut buf = String::new();
+        if f.read_to_string(&mut buf).is_err() {
+            // Non-UTF8 window: skip past it rather than wedging the scraper.
+            self.offset =
+                std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(self.offset);
+            return Vec::new();
+        }
+        self.offset += buf.len() as u64;
+        buf.lines()
+            .filter(|l| l.contains("panicked at"))
+            .map(|l| l.to_string())
+            .collect()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run_campaign(
     lp: &LoadedProfile,
@@ -199,11 +247,13 @@ pub fn run_campaign(
     replay_times: u32,
     repros_path: Option<&Path>,
     sched_cfg: &crate::runner::schedule::ScheduleConfig,
+    dut_log: Option<&Path>,
 ) -> Result<CampaignOutcome, String> {
     let bb = BugBase::new(bugbase_dir);
     let mut census = Census::default();
     let mut artifacts = ArtifactWriter::new(out_dir)?;
     let mut failures_banked = 0u64;
+    let mut log_scraper = dut_log.map(DutLogScraper::new);
 
     // H5 metrics accumulators (rung A: k-path over production traces; rung
     // B: plan-species census — blind arms only, see src/metrics.rs).
@@ -244,6 +294,23 @@ pub fn run_campaign(
         // the campaign had never seen (novelty signal, keyed on the exact
         // canonical species string).
         sched.report(species.distinct() > species_before);
+        // H7 dut-log scrape: attribute any fresh `panicked at` lines to this
+        // seed (P1 — verdict-failing, see DutLogScraper).
+        if let Some(s) = log_scraper.as_mut() {
+            let hits = s.scan();
+            if !hits.is_empty() {
+                census.add(crate::vocab::PANIC_SIGNATURE, hits.len() as u64);
+                for l in hits.iter().take(3) {
+                    artifacts.record(
+                        seed,
+                        crate::vocab::PANIC_SIGNATURE,
+                        "P1",
+                        &format!("dut-log: {}", l.chars().take(200).collect::<String>()),
+                        "dut-log-scrape",
+                    );
+                }
+            }
+        }
         let run = SeedRun { seed, report, plan_text };
         census.merge(&run.report.class_counts);
         for r in &run.report.records {
@@ -282,6 +349,15 @@ pub fn run_campaign(
             if let Some(rp) = repros_path {
                 distill(rp, seed, &lp.profile.name, failure, shrunk.as_ref().unwrap_or(&plan))?;
             }
+        }
+    }
+
+    // Final scrape: a panic line whose write straddled the last per-seed
+    // scan window is still counted (census-only; no seed to attribute).
+    if let Some(s) = log_scraper.as_mut() {
+        let hits = s.scan();
+        if !hits.is_empty() {
+            census.add(crate::vocab::PANIC_SIGNATURE, hits.len() as u64);
         }
     }
 

@@ -107,6 +107,12 @@ enum Cmd {
         /// queue decays back to pure sequential scheduling.
         #[arg(long, default_value_t = 8)]
         sched_decay: u32,
+        /// H7: DUT server-log path to scrape for `panicked at` lines after
+        /// every seed. Each hit mints a `panic-signature` P1 (verdict FAIL)
+        /// — the only witness for contained panics whose payload matches
+        /// C's error text byte-for-byte (the p9 interval-typmod class).
+        #[arg(long)]
+        dut_log: Option<PathBuf>,
         #[command(flatten)]
         engine: EngineArgs,
     },
@@ -199,6 +205,7 @@ fn real_main() -> Result<i32, String> {
             species_sched,
             sched_neighbors,
             sched_decay,
+            dut_log,
             engine,
         } => {
             let lp = load_profile(&profile)?;
@@ -220,6 +227,7 @@ fn real_main() -> Result<i32, String> {
                 replay_times,
                 repros.as_deref(),
                 &sched_cfg,
+                dut_log.as_deref(),
             )?;
             emit_verdict(&outcome.census);
             Ok(if outcome.census.p1_classes().is_empty() { 0 } else { 1 })
