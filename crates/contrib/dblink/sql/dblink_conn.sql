@@ -13,15 +13,21 @@ INSERT INTO foo VALUES (7,'h','{"a7","b7","c7"}');
 INSERT INTO foo VALUES (8,'i','{"a8","b8","c8"}');
 INSERT INTO foo VALUES (9,'j','{"a9","b9","c9"}');
 
--- loopback over the server's own unix socket; engine-agnostic
+-- loopback over the server's own unix socket; engine-agnostic. user= is
+-- explicit: the harness initdb's the superuser as 'postgres', so libpq's
+-- OS-username default would pick a role that does not exist in-pod.
 CREATE FUNCTION connection_parameters() RETURNS text LANGUAGE SQL AS $f$
-       SELECT $$host='$$||current_setting('unix_socket_directories')||$$' dbname='$$||current_database()||$$' port=$$||current_setting('port');
+       SELECT $$host='$$||current_setting('unix_socket_directories')||$$' user='$$||current_user||$$' dbname='$$||current_database()||$$' port=$$||current_setting('port');
 $f$;
 
 -- transient-connection query
 SELECT *
 FROM dblink(connection_parameters(),'SELECT * FROM foo') AS t(a int, b text, c text[])
 WHERE t.a > 7;
+
+-- connect failure: the server-sent FATAL rides libpq's host-identity prefix
+-- ("connection to server on socket ... failed: FATAL: ...")
+SELECT dblink_connect('cfail', $$user=regress_dblink_no_such_user host='$$||current_setting('unix_socket_directories')||$$' dbname='$$||current_database()||$$' port=$$||current_setting('port'));
 
 -- "connection not available"
 SELECT *
