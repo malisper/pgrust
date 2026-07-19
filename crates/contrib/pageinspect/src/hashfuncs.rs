@@ -275,10 +275,10 @@ fn checked_rel_hash_page(
     if flags == LH_META_PAGE {
         let metap = read_meta(b);
         if metap.hashm_magic != HASH_MAGIC {
+            // C _hash_checkpage's magic error carries no errhint.
             return Err(Box::new(
                 PgError::error(format!("index \"{}\" is not a hash index", rel.name()))
-                    .with_sqlstate(ERRCODE_INDEX_CORRUPTED)
-                    .with_hint("Please REINDEX it."),
+                    .with_sqlstate(ERRCODE_INDEX_CORRUPTED),
             ));
         }
         if metap.hashm_version != HASH_VERSION {
