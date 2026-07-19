@@ -636,12 +636,19 @@ fn float_agg_fmgr_frames() {
 // fnconf batch-1, OID 2467 (atanh): C calls platform libm atanh; Rust std's
 // 0.5*ln_1p(2x/(1-x)) formula is one ulp off on some inputs, which the
 // shortest-round-trip float8out then renders as different bytes.
-// C 18.3: atanh(-1.3990760221756862e-5) → -1.399076022266972e-05
-// (bits 0xbeed573b717ae3ff). Red at base: 0xbeed573b717ae400 → 17 digits.
+// The exact bits differ per libm (macOS 0x...3ff, glibc-aarch64 0x...3fe),
+// so the pin is the CALL: bit-equality vs this platform's own atanh — C on
+// the same box returns the same bits by the same call.
 #[test]
 fn datanh_matches_platform_libm() {
-    let r = funcs::datanh(-1.3990760221756862e-5).unwrap();
-    assert_eq!(r.to_bits(), 0xbeed573b717ae3ffu64);
+    extern "C" {
+        fn atanh(x: f64) -> f64;
+    }
+    let x = -1.3990760221756862e-5;
+    // SAFETY: pure libm function, no preconditions.
+    let expect = unsafe { atanh(x) };
+    let r = funcs::datanh(x).unwrap();
+    assert_eq!(r.to_bits(), expect.to_bits());
     // Endpoints and out-of-range behavior unchanged.
     assert_eq!(funcs::datanh(1.0).unwrap(), f64::INFINITY);
     assert_eq!(funcs::datanh(-1.0).unwrap(), f64::NEG_INFINITY);
