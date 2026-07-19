@@ -12249,6 +12249,7 @@ dependencies = [
  "partdesc",
  "partprune",
  "pathnode",
+ "pg_depend",
  "pg_inherits",
  "pg_locale",
  "pgvector_hnsw",

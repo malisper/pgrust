@@ -143,13 +143,16 @@ fn fc_bqarr_in(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum
     let s = unsafe { fcinfo.arg_cstring(0) };
     match boolquery::parse_query(s.to_bytes()) {
         Ok(img) => image_result(fcinfo, &img),
-        Err(e) => {
+        // Only C's four ereturn sites are soft; stack-depth exhaustion stays
+        // a hard error even under pg_input_error_info.
+        Err(pe) if pe.soft => {
             // SAFETY: context, if set, rides per the ErrorSaveNode contract
             // for this call (pg_input_error_info path).
             let esc = unsafe { fcinfo.soft_error_context() };
-            types_error::ereturn(esc, (), *e)?;
+            types_error::ereturn(esc, (), *pe.err)?;
             Ok(fcinfo.return_null())
         }
+        Err(pe) => Err(pe.err),
     }
 }
 
@@ -344,8 +347,8 @@ fn fc_idx(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
 
 fn fc_subarray(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let a = unsafe { arg_array(fcinfo, 0)? };
-    let mut start = fcinfo.arg(1).as_i32() as i64;
-    let len = if fcinfo.nargs() == 3 { fcinfo.arg(2).as_i32() as i64 } else { 0 };
+    let mut start = fcinfo.arg(1).as_i32();
+    let len = if fcinfo.nargs() == 3 { fcinfo.arg(2).as_i32() } else { 0 };
 
     start = if start > 0 { start - 1 } else { start };
 
@@ -353,16 +356,17 @@ fn fc_subarray(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum
     if a.is_empty() {
         return ret_array(fcinfo, &IntArray::empty());
     }
-    let c = a.nelems() as i64;
+    // All the range arithmetic wraps in int32 (C is built with -fwrapv).
+    let c = a.nelems() as i32;
     if start < 0 {
-        start += c;
+        start = c.wrapping_add(start);
     }
     let mut end = if len < 0 {
-        c + len
+        c.wrapping_add(len)
     } else if len == 0 {
         c
     } else {
-        start + len
+        start.wrapping_add(len)
     };
     if end > c {
         end = c;

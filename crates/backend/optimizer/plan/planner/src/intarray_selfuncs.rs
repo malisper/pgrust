@@ -47,6 +47,7 @@ pub(crate) fn int_matchsel<'mcx>(
     run: &mut PlannerRun<'mcx>,
     args: &[NodeId],
     varrelid: i32,
+    estimator_procid: Oid,
 ) -> PgResult<f64> {
     let Some((vardata, other, _varonleft)) = get_restriction_variable(run, args, varrelid)?
     else {
@@ -63,13 +64,24 @@ pub(crate) fn int_matchsel<'mcx>(
     if c.constisnull {
         return Ok(0.0);
     }
-    // C verifies consttype is the estimator's sibling query_int type via a
-    // pg_depend walk (get_function_sibling_type); the type-name check keeps
-    // the same wrong-operator guard. DIVERGENCE: a same-named type from an
-    // unrelated extension would pass it.
+    // get_function_sibling_type: consttype must be a type named query_int
+    // belonging to the estimator proc's own extension (uncached pg_depend
+    // walk; C caches per (funcoid, typname) in a syscache-invalidated list).
     match syscache_seams::pg_type_name_namespace::call(c.consttype)? {
         Some((name, _)) if name.name_str() == b"query_int" => {}
         _ => return Ok(DEFAULT_EQ_SEL),
+    }
+    {
+        const PROCEDURE_RELATION_ID: Oid = 1255;
+        const TYPE_RELATION_ID: Oid = 1247;
+        let cx = ::mcx::MemoryContext::new("intarray matchsel sibling probe");
+        let fext =
+            pg_depend::getExtensionOfObject(cx.mcx(), PROCEDURE_RELATION_ID, estimator_procid)?;
+        if fext == 0
+            || pg_depend::getExtensionOfObject(cx.mcx(), TYPE_RELATION_ID, c.consttype)? != fext
+        {
+            return Ok(DEFAULT_EQ_SEL);
+        }
     }
 
     let image = crate::selfuncs::varlena_image_any(run.mcx, c.constvalue)?;
