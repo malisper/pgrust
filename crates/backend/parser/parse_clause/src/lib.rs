@@ -884,7 +884,7 @@ fn transformRangeTableSample<'mcx>(
         return Err(tablesample_wrong_rettype(pstate, &parts, rts.location));
     }
 
-    let tsm = tablesample::Tsm::get(handler_oid);
+    let tsm = tablesample::Tsm::get(mcx, handler_oid)?;
     let param_types = tsm.parameter_types();
 
     if rts.args.len() != param_types.len() {

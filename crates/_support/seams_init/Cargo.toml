@@ -325,6 +325,8 @@ pageinspect = { path = "../../contrib/pageinspect" }
 pgstattuple = { path = "../../contrib/pgstattuple" }
 pg_freespacemap = { path = "../../contrib/pg_freespacemap" }
 amcheck = { path = "../../contrib/amcheck" }
+tsm_system_rows = { path = "../../contrib/tsm_system_rows" }
+tsm_system_time = { path = "../../contrib/tsm_system_time" }
 adt_formatting = { path = "../../backend/utils/adt/formatting" }
 session = { path = "../../backend/access/session" }
 relpath = { path = "../../common/relpath" }

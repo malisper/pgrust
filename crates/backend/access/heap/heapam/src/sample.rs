@@ -17,6 +17,7 @@ use ::types_tuple::{HeapTupleData, ItemPointerData};
 pub fn heap_scan_sample_next_block<'mcx>(
     scan: &mut HeapScanDescData<'mcx>,
     scanstate: &mut dyn SampleScanDriver,
+    donetuples: i64,
 ) -> PgResult<bool> {
     if scan.rs_nblocks == 0 {
         return Ok(false);
@@ -27,7 +28,7 @@ pub fn heap_scan_sample_next_block<'mcx>(
     }
 
     let blockno = if scanstate.has_next_sample_block() {
-        scanstate.next_sample_block(scan.rs_nblocks)
+        scanstate.next_sample_block(scan.rs_nblocks, donetuples)
     } else if scan.rs_cblock == InvalidBlockNumber {
         debug_assert!(!scan.rs_inited);
         scan.rs_startblock
@@ -79,6 +80,7 @@ pub fn heap_scan_sample_next_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut HeapScanDescData<'mcx>,
     scanstate: &mut dyn SampleScanDriver,
+    donetuples: i64,
     slot: &mut SlotData<'mcx>,
 ) -> PgResult<bool> {
     let blockno = scan.rs_cblock;
@@ -103,7 +105,7 @@ pub fn heap_scan_sample_next_tuple<'mcx>(
         let mut found = None;
         loop {
             check_for_interrupts()?;
-            let tupoffset = scanstate.next_sample_tuple(blockno, maxoffset);
+            let tupoffset = scanstate.next_sample_tuple(blockno, maxoffset, donetuples);
             if tupoffset == types_tuple::itemptr::InvalidOffsetNumber {
                 break;
             }
