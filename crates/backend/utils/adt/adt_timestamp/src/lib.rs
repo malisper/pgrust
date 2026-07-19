@@ -923,8 +923,10 @@ pub fn make_timestamp_internal(
     }
     #[cold]
     fn ts_out_of_range(y: i32, m: i32, d: i32, h: i32, mi: i32, s: f64) -> Box<PgError> {
+        // C (timestamp.c make_timestamp_internal): "%d-%02d-%02d %d:%02d:%02g".
+        let s = adt_datetime::errors::fmt_sec_g02(s);
         Box::new(
-            PgError::error(format!("timestamp out of range: {y}-{m:02}-{d:02} {h}:{mi:02}:{s:02}"))
+            PgError::error(format!("timestamp out of range: {y}-{m:02}-{d:02} {h}:{mi:02}:{s}"))
                 .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
         )
     }
@@ -952,7 +954,10 @@ pub fn make_timestamp_internal(
     #[cold]
     fn time_field_out_of_range(h: i32, m: i32, s: f64) -> Box<PgError> {
         Box::new(
-            PgError::error(format!("time field value out of range: {h}:{m:02}:{s:02}"))
+            PgError::error(format!(
+                "time field value out of range: {h}:{m:02}:{}",
+                adt_datetime::errors::fmt_sec_g02(s)
+            ))
                 .with_sqlstate(ERRCODE_DATETIME_FIELD_OVERFLOW),
         )
     }

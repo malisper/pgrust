@@ -586,3 +586,41 @@ fn time_support_simplifies_widening_casts_only() {
     assert_eq!(run(-1, Some(2)), None);
     assert_eq!(run(2, None), None);
 }
+
+// fnconf batch-1, OID 3846: C's make_date errors print the CURRENT tm
+// values — BC years are already folded to the internal convention
+// (1 BC = year 0) when a later field fails.
+// C 18.3: SELECT make_date(-1,-1,-1) → date field value out of range: 0--1--1
+// Red at base: pgrust printed the original year (-1--1--1).
+#[test]
+fn make_date_error_prints_bc_folded_year() {
+    let err = make_date(-1, -1, -1).unwrap_err();
+    assert_eq!(err.message(), "date field value out of range: 0--1--1");
+    // Positive-year failures are unchanged.
+    let err = make_date(2024, 2, 30).unwrap_err();
+    assert_eq!(err.message(), "date field value out of range: 2024-02-30");
+}
+
+// fnconf batch-1, OID 3847: C's make_time renders the seconds with PG's
+// snprintf %02g — "Infinity"/"NaN" spellings, precision-6 %g for finites,
+// zero-padded to width 2.
+// C 18.3: make_time(0,0,'Infinity') → time field value out of range: 0:00:Infinity
+//         make_time(0,0,1.5e300)    → ... 0:00:1.5e+300
+//         make_time(25,0,5)         → ... 25:00:05
+// Red at base: pgrust printed Rust Display ("inf", 300-digit expansions).
+#[test]
+fn make_time_error_seconds_render_like_c_percent_g() {
+    let msg = |h, m, s: f64| make_time(h, m, s).unwrap_err().message().to_string();
+    assert_eq!(msg(0, 0, f64::INFINITY), "time field value out of range: 0:00:Infinity");
+    assert_eq!(msg(0, 0, f64::NEG_INFINITY), "time field value out of range: 0:00:-Infinity");
+    assert_eq!(msg(0, 0, f64::NAN), "time field value out of range: 0:00:NaN");
+    assert_eq!(msg(0, 0, 1.5e300), "time field value out of range: 0:00:1.5e+300");
+    assert_eq!(msg(0, 0, f64::MAX), "time field value out of range: 0:00:1.79769e+308");
+    assert_eq!(msg(25, 0, 5.0), "time field value out of range: 25:00:05");
+    assert_eq!(msg(25, 0, 0.5), "time field value out of range: 25:00:0.5");
+    assert_eq!(msg(25, 0, -5.0), "time field value out of range: 25:00:-5");
+    assert_eq!(msg(25, 0, 1e-7), "time field value out of range: 25:00:1e-07");
+    assert_eq!(msg(25, 0, 123456789.0), "time field value out of range: 25:00:1.23457e+08");
+    assert_eq!(msg(25, 0, 999999.5), "time field value out of range: 25:00:1e+06");
+    assert_eq!(msg(25, 0, 0.000123456789), "time field value out of range: 25:00:0.000123457");
+}

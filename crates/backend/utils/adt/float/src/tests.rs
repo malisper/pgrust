@@ -632,3 +632,19 @@ fn float_agg_fmgr_frames() {
     let err = fc_float8_regr_sxx(None, &mut fci).unwrap_err();
     assert_eq!(err.message(), "float8_regr_sxx: expected 6-element float8 array");
 }
+
+// fnconf batch-1, OID 2467 (atanh): C calls platform libm atanh; Rust std's
+// 0.5*ln_1p(2x/(1-x)) formula is one ulp off on some inputs, which the
+// shortest-round-trip float8out then renders as different bytes.
+// C 18.3: atanh(-1.3990760221756862e-5) → -1.399076022266972e-05
+// (bits 0xbeed573b717ae3ff). Red at base: 0xbeed573b717ae400 → 17 digits.
+#[test]
+fn datanh_matches_platform_libm() {
+    let r = funcs::datanh(-1.3990760221756862e-5).unwrap();
+    assert_eq!(r.to_bits(), 0xbeed573b717ae3ffu64);
+    // Endpoints and out-of-range behavior unchanged.
+    assert_eq!(funcs::datanh(1.0).unwrap(), f64::INFINITY);
+    assert_eq!(funcs::datanh(-1.0).unwrap(), f64::NEG_INFINITY);
+    assert!(funcs::datanh(1.5).is_err());
+    assert_eq!(funcs::datanh(0.0).unwrap(), 0.0);
+}

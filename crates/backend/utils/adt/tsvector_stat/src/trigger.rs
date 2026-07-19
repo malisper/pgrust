@@ -107,7 +107,9 @@ fn tsvector_update_trigger(fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let cfg_id: Oid = ::ts_cache::get_ts_config_oid(&name_refs, false)?;
 
     let mut prs = ParsedText::with_capacity(mcx, 32)?;
-    let mut env = CacheEnv::new(mcx, cfg_id)?;
+    // Lazy env: resolution happens at parsetext (C ts_parse.c), same as C's
+    // tsvector_update_trigger which passes cfg_id straight to parsetext.
+    let mut env = CacheEnv::new(mcx, cfg_id);
 
     for k in 2..trigger.tgnargs as usize {
         let colname = trigger.tgargs[k].as_str();

@@ -158,10 +158,23 @@ pub fn bpchar<'mcx>(
         if !is_explicit && source[maxmblen..].iter().any(|&b| b != b' ') {
             return Err(value_too_long_bpchar(maxchars as i32).into());
         }
-        (maxmblen, maxmblen)
+        (maxmblen, maxmblen as i32)
     } else {
-        (len, len + (maxchars - charlen))
+        // C (varchar.c bpchar): `maxlen = len + (maxlen - charlen)` in int
+        // arithmetic under -fwrapv.
+        (
+            len,
+            (len as i32).wrapping_add(maxchars as i32 - charlen as i32),
+        )
     };
+    // C pallocs `maxlen + VARHDRSZ` — int arithmetic that wraps for typmods
+    // near INT32_MAX; palloc's Size (u64) parameter then sign-extends, and
+    // the alloc guard reports that wrapped size (e.g. 18446744071562067969
+    // for typmod = INT32_MAX). Reproduce the exact request C makes.
+    let request = (total as i32).wrapping_add(VARHDRSZ as i32) as i64 as u64;
+    mcx::check_alloc_size(request as usize)?;
+    // Guard passed → the C int arithmetic did not wrap; safe as usize.
+    let total = total as usize;
     let mut image = varlena::image_with_header(mcx, total)?;
     mcx::vec_append_bytes(&mut image, &source[..copy])?;
     pad_spaces(&mut image, total - copy)?;
@@ -335,7 +348,10 @@ pub fn varchar<'mcx>(
     is_explicit: bool,
 ) -> PgResult<Option<Varlena<'mcx>>> {
     let len = source.len() as i32;
-    let maxlen = typmod - VARHDRSZ as i32;
+    // C (varchar.c varchar): `maxlen = typmod - VARHDRSZ` in int arithmetic
+    // under -fwrapv, so typmod = INT32_MIN wraps to a huge positive maxlen
+    // and falls into the "supplied data fits" return of the source datum.
+    let maxlen = typmod.wrapping_sub(VARHDRSZ as i32);
     if maxlen < 0 || len <= maxlen {
         return Ok(None);
     }

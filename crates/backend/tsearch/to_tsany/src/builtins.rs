@@ -18,7 +18,9 @@ use crate::{OP_AND, OP_PHRASE, P_TSQ_PLAIN, P_TSQ_WEB};
 const F_TS_MATCH_VQ: Oid = 3634;
 
 fn to_tsvector_image<'mcx>(mcx: Mcx<'mcx>, cfg: Oid, data: &[u8]) -> PgResult<Datum> {
-    let mut env = CacheEnv::new(mcx, cfg)?;
+    // Config resolution happens inside parsetext (prs_start), which C's
+    // to_tsvector reaches unconditionally — even for empty text.
+    let mut env = CacheEnv::new(mcx, cfg);
     let cap = (data.len() / 6).clamp(2, 1 << 20);
     let mut prs = ParsedText::with_capacity(mcx, cap)?;
     parsetext(mcx, &mut env, &mut prs, data)?;
@@ -175,12 +177,11 @@ fn ts_headline_common(fcinfo: &mut Fcinfo, cfg: Option<Oid>, has_opts: bool) -> 
     let qimage = tsquery_image(mcx, fcinfo, base + 1)?;
     let query = ::adt_tsvector_core::query::TsQueryRef { payload: &qimage[4..] };
 
-    let opts = if has_opts {
-        Some(::ts_cache::deserialize_deflist(mcx, text_data(fcinfo, base + 2)?)?)
-    } else {
-        None
-    };
-
+    // C (wparser.c ts_headline_byid_opt): the config and parser are resolved
+    // BEFORE the options list is parsed — a bogus config must win over bogus
+    // options (fnconf batch-1 ts-config family: cfg 0 + 'bogus' options →
+    // 'cache lookup failed for text search configuration 0', not the
+    // deflist error).
     let map = cache_bind::config_map(mcx, cfg)?;
     let prsentry = ::ts_cache::lookup_ts_parser_cache(map.prs_id)?;
     if prsentry.headline_oid == InvalidOid {
@@ -192,8 +193,14 @@ fn ts_headline_common(fcinfo: &mut Fcinfo, cfg: Option<Oid>, has_opts: bool) -> 
         ));
     }
 
+    let opts = if has_opts {
+        Some(::ts_cache::deserialize_deflist(mcx, text_data(fcinfo, base + 2)?)?)
+    } else {
+        None
+    };
+
     let mut prs = HeadlineParsedText::new(mcx);
-    let mut env = CacheEnv::new(mcx, cfg)?;
+    let mut env = CacheEnv::new(mcx, cfg);
     hlparsetext(mcx, &mut env, &mut prs, query, text)?;
 
     let opts_datum = match &opts {

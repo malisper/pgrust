@@ -11,7 +11,25 @@ const TEXTOID: Oid = 25;
 
 pub struct OptionPair<'mcx> {
     pub name: &'mcx str,
-    pub value: &'mcx str,
+    // C untransformRelOptions builds a DefElem with a NULL arg for a text
+    // element without '=' (reachable via a direct postgresql_fdw_validator
+    // call on an arbitrary text[]); None mirrors that NULL.
+    pub value: Option<&'mcx str>,
+}
+
+impl<'mcx> OptionPair<'mcx> {
+    /// C defGetString (define.c) over the untransformed pair: a DefElem with
+    /// a NULL arg raises `%s requires a parameter`.
+    pub fn require_value(&self) -> PgResult<&'mcx str> {
+        match self.value {
+            Some(v) => Ok(v),
+            None => Err(::elog::ereport(ERROR)
+                .errcode(ERRCODE_SYNTAX_ERROR)
+                .errmsg(format!("{} requires a parameter", self.name))
+                .into_error()
+                .into()),
+        }
+    }
 }
 
 /// Borrow the flat varlena image behind a text[]/text datum. Catalog option
@@ -58,9 +76,11 @@ pub fn untransform_options<'mcx>(
         let s = mcx::slice_borrow_in(mcx, body)?;
         // SAFETY: catalog text in server encoding; written by this module.
         let s = unsafe { core::str::from_utf8_unchecked(s) };
+        // C (reloptions.c untransformRelOptions): text without '=' becomes a
+        // DefElem with the whole string as name and a NULL value.
         match s.split_once('=') {
-            Some((name, value)) => result.push(OptionPair { name, value }),
-            None => panic!("foreigncmds option without '=' separator: {s}"),
+            Some((name, value)) => result.push(OptionPair { name, value: Some(value) }),
+            None => result.push(OptionPair { name: s, value: None }),
         }
     }
     Ok(result)
@@ -131,12 +151,14 @@ fn option_list_to_array<'mcx>(
                 .into_error()
                 .into());
         }
-        let total = 4 + opt.name.len() + 1 + opt.value.len();
+        // C's optionListToArray reads the value via defGetString (define.c).
+        let value = opt.require_value()?;
+        let total = 4 + opt.name.len() + 1 + value.len();
         let mut buf: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
         mcx::vec_append_bytes(&mut buf, &datum::varlena::set_varsize_4b(total))?;
         mcx::vec_append_bytes(&mut buf, opt.name.as_bytes())?;
         mcx::vec_append_bytes(&mut buf, b"=")?;
-        mcx::vec_append_bytes(&mut buf, opt.value.as_bytes())?;
+        mcx::vec_append_bytes(&mut buf, value.as_bytes())?;
         // Leaked: the element must outlive this loop for construct_array.
         elems.push(Datum::from_usize(buf.leak().as_ptr() as usize));
     }
@@ -170,7 +192,7 @@ pub fn transformGenericOptions<'mcx>(
                 let Some(i) = pos else {
                     return Err(option_not_found(odname));
                 };
-                result_options[i].value = commands_define::defGetString(mcx, od)?;
+                result_options[i].value = Some(commands_define::defGetString(mcx, od)?);
             }
             DefElemAction::DEFELEM_ADD | DefElemAction::DEFELEM_UNSPEC => {
                 if pos.is_some() {
@@ -183,8 +205,10 @@ pub fn transformGenericOptions<'mcx>(
                 let name = mcx::slice_borrow_in(mcx, odname.as_bytes())?;
                 // SAFETY: bytes copied verbatim from a &str.
                 let name = unsafe { core::str::from_utf8_unchecked(name) };
-                result_options
-                    .push(OptionPair { name, value: commands_define::defGetString(mcx, od)? });
+                result_options.push(OptionPair {
+                    name,
+                    value: Some(commands_define::defGetString(mcx, od)?),
+                });
             }
         }
     }

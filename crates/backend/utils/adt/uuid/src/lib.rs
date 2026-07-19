@@ -114,10 +114,16 @@ pub fn uuidv7_interval(shift: &adt_datetime::Interval) -> PgResult<PgUuid> {
             * SECS_PER_DAY as i64
             * USECS_PER_SEC;
     let ts = adt_timestamp::interval::timestamptz_pl_interval_internal(ts, shift, None)?;
-    let us = ts
-        + (POSTGRES_EPOCH_JDATE as i64 - UNIX_EPOCH_JDATE as i64)
+    // C (uuid.c uuidv7_interval): an infinite interval shift makes
+    // timestamptz_pl_interval return DT_NOEND/DT_NOBEGIN (INT64_MAX/MIN + 1)
+    // and the epoch re-base below overflows int64; PostgreSQL builds with
+    // -fwrapv so the arithmetic WRAPS and a UUID is still produced
+    // (C 18.3: SELECT uuidv7('infinity'::interval) returns a UUID).
+    let us = ts.wrapping_add(
+        (POSTGRES_EPOCH_JDATE as i64 - UNIX_EPOCH_JDATE as i64)
             * SECS_PER_DAY as i64
-            * USECS_PER_SEC;
+            * USECS_PER_SEC,
+    );
 
     generate_uuidv7(
         (us / US_PER_MS) as u64,
