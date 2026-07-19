@@ -28,10 +28,6 @@ pub struct WaitEvents {
     pub receive: u32,
 }
 
-pub(crate) fn pchomp(s: &str) -> String {
-    s.trim_end_matches('\n').to_string()
-}
-
 enum Stream {
     Tcp(std::net::TcpStream),
     // wasm32: std::os::unix is absent on wasi (no AF_UNIX on WASI p1); the
@@ -142,10 +138,12 @@ pub enum CopyData {
 
 // Sink for row-streamed execution (libpq single-row mode's shape): one
 // result_start per resultset (dblink recreates its tuplestore there), one
-// row per DataRow. Errors unwind through exec_streaming; the caller is
-// expected to drain() the connection on the error path.
+// row per DataRow. result_start sees the connection read-only at
+// first-row-in-hand — after any ParameterStatus messages, which dblink's
+// remote-GUC mirroring depends on. Errors unwind through exec_streaming;
+// the caller is expected to drain() the connection on the error path.
 pub trait RowSink {
-    fn result_start(&mut self, nfields: usize) -> PgResult<()>;
+    fn result_start(&mut self, conn: &PgConn, nfields: usize) -> PgResult<()>;
     fn row(&mut self, cols: &[Option<&[u8]>]) -> PgResult<()>;
 }
 
@@ -932,7 +930,7 @@ impl PgConn {
                 b'D' => {
                     postgres_seams::check_for_interrupts::call()?;
                     if !started {
-                        sink.result_start(nfields)?;
+                        sink.result_start(&*self, nfields)?;
                         started = true;
                     }
                     let mut cols: Vec<Option<&[u8]>> = Vec::new();
@@ -944,7 +942,7 @@ impl PgConn {
                     if nfields > 0 && !started {
                         // Empty resultset still announces its shape (C's
                         // "if empty resultset, fill tuplestore header").
-                        sink.result_start(nfields)?;
+                        sink.result_start(&*self, nfields)?;
                     }
                     result = QueryResult {
                         status: if nfields > 0 { ExecStatus::TuplesOk } else { ExecStatus::CommandOk },

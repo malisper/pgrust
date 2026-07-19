@@ -44,6 +44,63 @@ impl AttInMeta {
     }
 }
 
+// applyRemoteGucs: mirror the remote's DateStyle/IntervalStyle (from
+// ParameterStatus) into a local GUC nest level so datatype input parses the
+// remote's output formats. Captured as values because the connection lives
+// inside the thread-local registry. -1 == no nest level opened.
+pub(crate) struct RemoteIoGucs {
+    datestyle: Option<String>,
+    intervalstyle: Option<String>,
+}
+
+impl RemoteIoGucs {
+    pub(crate) fn capture(conn: &pgclient::PgConn) -> RemoteIoGucs {
+        RemoteIoGucs {
+            datestyle: conn.parameter_status("DateStyle").map(str::to_string),
+            intervalstyle: conn.parameter_status("IntervalStyle").map(str::to_string),
+        }
+    }
+
+    pub(crate) fn apply(&self) -> PgResult<i32> {
+        let mut nestlevel = -1i32;
+        for (name, remote) in [
+            ("DateStyle", &self.datestyle),
+            ("IntervalStyle", &self.intervalstyle),
+        ] {
+            let Some(remote) = remote else {
+                continue;
+            };
+            let local = guc::GetConfigOption(name, false, false)?
+                .expect("IO GUCs always have a value");
+            if *remote == local {
+                continue;
+            }
+            if nestlevel < 0 {
+                nestlevel = guc::NewGUCNestLevel();
+            }
+            guc::set_config_option(
+                name,
+                Some(remote),
+                types_guc::PGC_USERSET,
+                types_guc::PGC_S_SESSION,
+                guc::GUC_ACTION_SAVE,
+                true,
+                types_error::ErrorLevel(0),
+                false,
+            )?;
+        }
+        Ok(nestlevel)
+    }
+}
+
+// restoreLocalGucs: success path only; error unwinds leave it to the
+// transaction's GUC machinery, as C does.
+pub(crate) fn restore_local_gucs(nestlevel: i32) {
+    if nestlevel > 0 {
+        guc::AtEOXact_GUC(true, nestlevel);
+    }
+}
+
 fn rowtype_mismatch() -> Box<PgError> {
     Box::new(
         PgError::error(
@@ -92,6 +149,7 @@ pub struct TupleSink<'m, 'f> {
     srf: Option<funcapi::MaterializedSRF<'m>>,
     attinmeta: Option<AttInMeta>,
     scratch: mcx::MemoryContext,
+    guc_nestlevel: i32,
 }
 
 impl<'m, 'f> TupleSink<'m, 'f> {
@@ -106,10 +164,12 @@ impl<'m, 'f> TupleSink<'m, 'f> {
             srf: None,
             attinmeta: None,
             scratch: mcx::MemoryContext::new("dblink temporary context"),
+            guc_nestlevel: -1,
         }
     }
 
     pub fn finish(self, fcinfo: &mut Fcinfo) -> Datum {
+        restore_local_gucs(self.guc_nestlevel);
         match self.srf {
             Some(srf) => srf.finish(fcinfo),
             None => Datum::from_usize(0),
@@ -118,7 +178,10 @@ impl<'m, 'f> TupleSink<'m, 'f> {
 }
 
 impl RowSink for TupleSink<'_, '_> {
-    fn result_start(&mut self, nfields: usize) -> PgResult<()> {
+    fn result_start(&mut self, conn: &pgclient::PgConn, nfields: usize) -> PgResult<()> {
+        if self.guc_nestlevel < 0 {
+            self.guc_nestlevel = RemoteIoGucs::capture(conn).apply()?;
+        }
         // SAFETY: constructor contract; no other live borrow of fcinfo here.
         let fcinfo = unsafe { &mut *self.fcinfo_ptr };
         let srf = funcapi::InitMaterializedSRF(self.mcx, self.flinfo, fcinfo, 0)?;
@@ -146,6 +209,7 @@ pub fn materialize_result(
     mcx: mcx::Mcx<'_>,
     flinfo: &mut FmgrInfo,
     fcinfo: &mut Fcinfo,
+    gucs: &RemoteIoGucs,
     res: &QueryResult,
 ) -> PgResult<Datum> {
     if res.status == ExecStatus::CommandOk {
@@ -157,6 +221,7 @@ pub fn materialize_result(
     if res.nfields != attinmeta.natts {
         return Err(rowtype_mismatch());
     }
+    let nestlevel = if res.rows.is_empty() { -1 } else { gucs.apply()? };
     let mut scratch = mcx::MemoryContext::new("dblink temporary context");
     let mut cols: Vec<Option<&[u8]>> = Vec::with_capacity(res.nfields);
     for row in &res.rows {
@@ -165,12 +230,17 @@ pub fn materialize_result(
         build_row(&mut srf, &mut attinmeta, scratch.mcx(), &cols)?;
         scratch.reset();
     }
+    restore_local_gucs(nestlevel);
     // SAFETY: fcinfo_ptr is the same borrow InitMaterializedSRF released.
     Ok(srf.finish(unsafe { &mut *fcinfo_ptr }))
 }
 
 // One TEXT column named "status" holding the CommandComplete tag.
-fn materialize_command_status(mcx: mcx::Mcx<'_>, fcinfo: &mut Fcinfo, tag: &str) -> PgResult<Datum> {
+pub(crate) fn materialize_command_status(
+    mcx: mcx::Mcx<'_>,
+    fcinfo: &mut Fcinfo,
+    tag: &str,
+) -> PgResult<Datum> {
     let tupdesc = crate::single_text_tupdesc(mcx, "status")?;
     let mut store =
         tuplestore::Tuplestore::begin_heap(false, false, init_small::globals::work_mem());
