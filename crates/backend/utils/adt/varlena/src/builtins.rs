@@ -655,11 +655,21 @@ pub fn fc_unicode_version(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -
     Ok(varlena_result(crate::unicode::unicode_version(mcx)?))
 }
 
-// C returns U_UNICODE_VERSION under USE_ICU only; this build has no ICU.
+// C icu_unicode_version (varlena.c): U_UNICODE_VERSION under USE_ICU, else
+// NULL. pgrust's USE_ICU analog is "libicu is loadable" (pg_locale icu_ffi);
+// the seam owner reports the loaded library's Unicode version, which equals
+// the C constant for the same ICU major. Seam uninstalled (substrate test
+// binaries without pg_locale) or ICU unloadable = C-without-ICU NULL.
 pub fn fc_icu_unicode_version(
     _flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
 ) -> PgResult<Datum> {
+    if pg_locale_seams::icu_unicode_version::is_installed() {
+        if let Some(v) = pg_locale_seams::icu_unicode_version::call() {
+            let mcx = fcinfo.result_mcx();
+            return Ok(varlena_result(crate::cstring_to_text(mcx, v.as_bytes())?));
+        }
+    }
     Ok(fcinfo.return_null())
 }
 
