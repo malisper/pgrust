@@ -663,6 +663,7 @@ members = [
     "crates/contrib/citext",
     "crates/contrib/uuid_ossp",
     "crates/contrib/dblink",
+    "crates/interfaces/pgclient",
     "crates/contrib/pg_prewarm",
     "crates/contrib/file_fdw",
     "crates/contrib/ltree",
