@@ -554,10 +554,10 @@ pub fn DefineOpClass<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateOpClassStmt<'mcx>) -> Pg
         )?;
     }
     recordDependencyOnOwner(mcx, OPERATOR_CLASS_RELATION_ID, opclassoid, miscinit::GetUserId())?;
-    // dependency on extension
-    pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
-
-    // dependency on extension
+    // dependency on extension (C opclasscmds.c: ONE recordDependencyOnCurrentExtension;
+    // t31 fold fix: the extowner x surgery-isn merge keep-both'd identical arms,
+    // double-inserting DEPENDENCY_EXTENSION pg_depend rows for CREATE OPERATOR
+    // CLASS inside extension scripts)
     pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
 
     // C: EventTriggerCollectCreateOpClass (SCT_CreateOpClass) also retains the
