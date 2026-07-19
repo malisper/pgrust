@@ -183,3 +183,158 @@ fn compare_entries_category_order() {
         0
     );
 }
+
+// --- compressed stored-key compares (TOAST_INDEX_HACK class) ---------------
+// index_form_tuple inline-compresses varlena keys above the size target, so
+// entry-tree compares can see pglz images; C detoasts per compare
+// (PG_GETARG_TEXT_PP). These units drive opclass::compare/compare_partial and
+// the build accumulator with both flat and compressed forms of the same key.
+
+fn flat_key(mcx: ::mcx::Mcx<'_>, s: &[u8]) -> ::datum::Datum {
+    let total = 4 + s.len();
+    let mut v: ::mcx::PgVec<'_, u8> = mcx::vec_with_capacity_in(mcx, total).unwrap();
+    mcx::vec_append_bytes(
+        &mut v,
+        &::types_tuple::varatt::set_varsize_4b_word(total as u32).to_ne_bytes(),
+    )
+    .unwrap();
+    mcx::vec_append_bytes(&mut v, s).unwrap();
+    let p = v.as_ptr();
+    core::mem::forget(v);
+    ::datum::Datum::from_usize(p as usize)
+}
+
+/// Inline pglz image of `payload` (4B_C header + tcinfo + compressed data),
+/// the exact shape index_form_tuple stores for keys above the target.
+fn pglz_key(mcx: ::mcx::Mcx<'_>, payload: &[u8]) -> ::datum::Datum {
+    use core::mem::MaybeUninit;
+    let mut dst: Vec<MaybeUninit<u8>> =
+        vec![MaybeUninit::uninit(); pglz::pglz_max_output(payload.len())];
+    let clen = pglz::pglz_compress_into(payload, &mut dst, &pglz::PGLZ_STRATEGY_DEFAULT)
+        .expect("test payload must compress");
+    let total = 8 + clen;
+    let mut v: ::mcx::PgVec<'_, u8> = mcx::vec_with_capacity_in(mcx, total).unwrap();
+    mcx::vec_append_bytes(
+        &mut v,
+        &::types_tuple::varatt::set_varsize_4b_c_word(total as u32).to_ne_bytes(),
+    )
+    .unwrap();
+    // va_tcinfo: raw data size | compression method (pglz = 0) in the top bits.
+    mcx::vec_append_bytes(&mut v, &(payload.len() as u32).to_ne_bytes()).unwrap();
+    // SAFETY: the first clen bytes were initialized by pglz_compress_into.
+    let cbytes = unsafe { core::slice::from_raw_parts(dst.as_ptr().cast::<u8>(), clen) };
+    mcx::vec_append_bytes(&mut v, cbytes).unwrap();
+    let p = v.as_ptr();
+    core::mem::forget(v);
+    ::datum::Datum::from_usize(p as usize)
+}
+
+fn ts_col() -> GinColState {
+    GinColState {
+        opclass: GinOpclass::TsvectorOps,
+        elem_cmp: GinElemCmp::None,
+        support_collation: ::types_core::catalog::C_COLLATION_OID,
+        can_partial_match: true,
+        key_byval: false,
+        key_len: -1,
+    }
+}
+
+#[test]
+fn compare_detoasts_compressed_keys() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    // Two big lexemes distinct only in the tail, sized like real stored keys.
+    let mut la = b"ab".repeat(1020);
+    let mut lb = la.clone();
+    la.extend_from_slice(b"zzz0");
+    lb.extend_from_slice(b"zzz1");
+    // Round-trip sanity: the built image detoasts back to the payload.
+    assert_eq!(crate::opclass::detoast_payload(mcx, pglz_key(mcx, &la)).unwrap(), &la[..]);
+
+    let col = ts_col();
+    for (a, b, want) in [(&la, &la, 0), (&la, &lb, -1), (&lb, &la, 1)] {
+        let flat = crate::opclass::compare(&col, flat_key(mcx, a), flat_key(mcx, b));
+        assert_eq!(flat.signum(), want, "flat/flat baseline");
+        // Any mix of compressed sides must agree with the flat baseline.
+        for (da, db) in [
+            (pglz_key(mcx, a), flat_key(mcx, b)),
+            (flat_key(mcx, a), pglz_key(mcx, b)),
+            (pglz_key(mcx, a), pglz_key(mcx, b)),
+        ] {
+            assert_eq!(crate::opclass::compare(&col, da, db).signum(), want);
+        }
+    }
+
+    // array_ops text and hstore arms take the same detoast gate.
+    for opclass in [GinOpclass::ArrayOps, GinOpclass::HstoreOps] {
+        let col = GinColState {
+            opclass,
+            elem_cmp: if opclass == GinOpclass::ArrayOps {
+                GinElemCmp::Text
+            } else {
+                GinElemCmp::None
+            },
+            support_collation: ::types_core::catalog::C_COLLATION_OID,
+            can_partial_match: false,
+            key_byval: false,
+            key_len: -1,
+        };
+        assert_eq!(crate::opclass::compare(&col, pglz_key(mcx, &la), flat_key(mcx, &la)), 0);
+        assert_eq!(
+            crate::opclass::compare(&col, pglz_key(mcx, &la), pglz_key(mcx, &lb)).signum(),
+            -1
+        );
+    }
+}
+
+#[test]
+fn compare_partial_detoasts_compressed_keys() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    let prefix = b"ab".repeat(1020);
+    let mut full = prefix.clone();
+    full.extend_from_slice(b"zzz2");
+    let col = ts_col();
+    // Stored key carries the prefix: gin_cmp_prefix must say "match" (0)
+    // whether the stored key is flat or compressed.
+    let want = crate::opclass::compare_partial(&col, flat_key(mcx, &prefix), flat_key(mcx, &full), 0);
+    assert_eq!(want, 0);
+    assert_eq!(
+        crate::opclass::compare_partial(&col, flat_key(mcx, &prefix), pglz_key(mcx, &full), 0),
+        0
+    );
+    // A stored key past the prefix range stops the scan (> 0) in both forms.
+    let other = b"zz".repeat(1030);
+    let stop = crate::opclass::compare_partial(&col, flat_key(mcx, &prefix), flat_key(mcx, &other), 0);
+    assert!(stop > 0);
+    assert_eq!(
+        crate::opclass::compare_partial(&col, flat_key(mcx, &prefix), pglz_key(mcx, &other), 0),
+        stop
+    );
+}
+
+#[test]
+fn build_accumulator_compressed_keys_group_and_sort_detoasted() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    let mut acc = crate::bulk::BuildAccumulator::new(mcx, one_col_state(ts_col()));
+    // Raw-image order and detoasted order disagree on purpose: the pglz
+    // image of "yyy..." starts with a header byte above b'z', so a raw-byte
+    // sort would put the flat "zz" key first; the detoasted order is y < z.
+    let big = b"y".repeat(2100);
+    let ka1 = pglz_key(mcx, &big);
+    let ka2 = pglz_key(mcx, &big); // separate copy, identical image bytes
+    let kb = flat_key(mcx, b"zz");
+    acc.insert_entries(&tid(1, 1), 1, &[ka1, kb], &[GIN_CAT_NORM_KEY, GIN_CAT_NORM_KEY])
+        .unwrap();
+    acc.insert_entries(&tid(2, 1), 1, &[ka2], &[GIN_CAT_NORM_KEY]).unwrap();
+    acc.begin_scan().unwrap();
+    // Identical compressed images grouped into one entry; "y..." dumps first.
+    let (_, _, l1) = acc.next_entry().map(|(_, k, c, l)| (k, c, l.to_vec())).unwrap();
+    assert_eq!(l1, vec![tid(1, 1), tid(2, 1)], "compressed key groups + sorts detoasted-first");
+    let (_, _, l2) = acc.next_entry().map(|(_, k, c, l)| (k, c, l.to_vec())).unwrap();
+    assert_eq!(l2, vec![tid(1, 1)]);
+    assert!(acc.next_entry().is_none());
+    assert_eq!(acc.nentries(), 2);
+}
