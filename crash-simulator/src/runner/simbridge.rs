@@ -52,9 +52,11 @@ use crate::bridge::{self, OracleCheckEval, OracleDiffClassifier};
 use crate::oracle::check::StmtResult;
 use crate::oracle::ledger::check_table_multiset;
 use crate::runner::driver::{
-    arm_sql, execute_plan, tx_sql, ExecOptions, ExecOutcome, RunReport, Session,
+    arm_sql, execute_plan, execute_plan_pooled, tx_sql, ExecOptions, ExecOutcome, RunReport,
+    Session,
 };
 use crate::runner::planface::{ArmCtl, Plan, Step};
+use crate::runner::sessions::{PoolSession, SessionPool};
 use crate::runner::profile::LoadedProfile;
 use crate::runner::runloop::{class_is_p1, gen_plan_ctx, generator_version};
 
@@ -271,6 +273,183 @@ pub fn synthesize_two_session(plan: &Plan, null_bug: bool) -> Result<TwoSessionS
     }
     debug_assert_eq!(turns.len(), session_a.len() + session_b.len());
     Ok(TwoSessionScripts { setup, session_a, session_b, turns })
+}
+
+// ---------------------------------------------------------------------------
+// SIM-CONVERGE inc-3: the N-session plan split with typed turns
+// ---------------------------------------------------------------------------
+
+/// A cross-session turn-schedule entry (the PGRUST_SIMNET_TURNS vocabulary).
+/// The id is the SIM turn-id (plan session k rides sim session k+2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnTok {
+    /// Completion-ordered statement turn (the inc-2 kind): the owner sends
+    /// its next script statement and the turn is released only when the
+    /// statement's response cycle completes. Rendered as the bare id.
+    Stmt(u32),
+    /// inc-3 async split, dispatch half ("dN"): the owner sends its next
+    /// script statement and the turn releases AT SEND — the statement is
+    /// EXPECTED to block, and holding the turn to completion would deadlock
+    /// the schedule (the async-deadlock red proves exactly that).
+    Dispatch(u32),
+    /// inc-3 async split, join half ("jN"): no statement moves; the turn
+    /// releases when session N's outstanding async statement completes.
+    Join(u32),
+    /// WaitUntil poll turn ("pN"): the owner sends the probe, and on every
+    /// completed cycle whose scalar is not 't' resends the SAME probe; the
+    /// turn releases when the gate reads 't'. The resend count is a seeded
+    /// function of the schedule (deterministic per (plan, sched seed)).
+    Poll(u32),
+}
+
+impl TurnTok {
+    pub fn render(&self) -> String {
+        match self {
+            TurnTok::Stmt(id) => id.to_string(),
+            TurnTok::Dispatch(id) => format!("d{id}"),
+            TurnTok::Join(id) => format!("j{id}"),
+            TurnTok::Poll(id) => format!("p{id}"),
+        }
+    }
+}
+
+/// Plan session 0 rides sim session s2 (turn-id 2); the corpus supports plan
+/// sessions 0..=3 (sim s2..s5 — the S1-SpecConflict fanout).
+const SIM_TURN_BASE: u32 = 2;
+pub const MAX_PLAN_SESSIONS: u32 = 4;
+
+/// The inc-3 generalization of [`TwoSessionScripts`]: per-session scripts +
+/// a TYPED global turn order over up to [`MAX_PLAN_SESSIONS`] sessions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultiSessionScripts {
+    /// s1 (boot, turn-free): the reset prologue + the plan's
+    /// pre-interleaving DDL prefix, run to completion before workers spawn.
+    pub setup: Vec<String>,
+    /// Per plan-session statement streams (index = plan session id; sim
+    /// session id+2). Each starts with its `SET search_path` prologue.
+    pub sessions: Vec<Vec<String>>,
+    /// The global turn order, prologue turns first.
+    pub turns: Vec<TurnTok>,
+}
+
+/// Split a v2 plan into per-session scripts + the typed turn order. Extends
+/// the inc-2 split with the shapes it refused (Tx steps, AsyncDml/Join via
+/// the dispatch/join turn split, WaitUntil via poll turns, up to 4 sessions,
+/// late DDL on the active session). On the inc-2 two-session synchronous
+/// shape this produces byte-identical scripts and the identical rendered
+/// turn string — asserted by the two-session campaign's agreement leg.
+///
+/// Remaining refusals (counted, never silent):
+/// - `bridge-refused-v2-fanout`  session id > 3 (sim corpus provisions s2..s5);
+/// - `bridge-refused-v2-async0`  AsyncDml dispatched on session 0 / Join(0)
+///   (the primary session is the plan walker's own leg — the driver refuses
+///   the same shape at execution);
+/// - `bridge-refused-fault` / `bridge-refused-unscriptable` as for v1.
+pub fn synthesize_multi_session(
+    plan: &Plan,
+    doctor: Option<fn(&str) -> String>,
+) -> Result<MultiSessionScripts, String> {
+    // Provisioned session count: 1 + the highest session id the plan touches.
+    let mut max_id: u32 = 0;
+    for step in &plan.steps {
+        match step {
+            Step::Session(id) | Step::Join(id) => max_id = max_id.max(*id),
+            _ => {}
+        }
+    }
+    if max_id >= MAX_PLAN_SESSIONS {
+        return Err("bridge-refused-v2-fanout".into());
+    }
+    let n = (max_id + 1) as usize;
+    let doc = |sql: &str| -> String {
+        match doctor {
+            Some(f) => f(sql),
+            None => sql.to_string(),
+        }
+    };
+    let sim = |k: u32| k + SIM_TURN_BASE;
+    let mut setup: Vec<String> = RESET_STMTS.iter().map(|s| s.to_string()).collect();
+    // Each worker is its OWN connection: per-session SET search_path
+    // prologues, the first n global turns (session-id order).
+    let mut sessions: Vec<Vec<String>> = vec![vec![POST_RESET_STMTS[0].to_string()]; n];
+    let mut turns: Vec<TurnTok> =
+        (0..n as u32).map(|k| TurnTok::Stmt(sim(k))).collect();
+    let mut active: u32 = 0;
+    let mut interleaving_began = false;
+    for step in &plan.steps {
+        match step {
+            Step::Session(id) => active = *id,
+            Step::Ddl(sql) => {
+                if interleaving_began {
+                    // inc-3: LATE DDL rides the active session's connection
+                    // (one threaded server, shared catalogs — the hoist was
+                    // only ever needed for the pre-worker setup prefix).
+                    sessions[active as usize].push(sql.text.clone());
+                    turns.push(TurnTok::Stmt(sim(active)));
+                } else {
+                    setup.push(sql.text.clone());
+                }
+            }
+            Step::Dml(sql) | Step::Query(sql) => {
+                interleaving_began = true;
+                sessions[active as usize].push(doc(&sql.text));
+                turns.push(TurnTok::Stmt(sim(active)));
+            }
+            Step::Tx(t) => {
+                // inc-3: Tx steps are per-connection statements now that the
+                // native replay walk is session-aware (the inc-2 refusal was
+                // a MERGED-walk limitation, not a wire one).
+                interleaving_began = true;
+                sessions[active as usize].push(tx_sql(t));
+                turns.push(TurnTok::Stmt(sim(active)));
+            }
+            Step::Arm(a) => {
+                interleaving_began = true;
+                sessions[active as usize].push(arm_sql(a));
+                turns.push(TurnTok::Stmt(sim(active)));
+                if matches!(a, ArmCtl::ResetAll) {
+                    // Mirror the DRIVER, not the connection: execute_plan
+                    // replays post_reset_sql on the PRIMARY dut (session 0)
+                    // whatever session the RESET ALL ran on.
+                    sessions[0].push(POST_RESET_STMTS[0].to_string());
+                    turns.push(TurnTok::Stmt(sim(0)));
+                }
+            }
+            Step::AsyncDml(sql) => {
+                if active == 0 {
+                    return Err("bridge-refused-v2-async0".into());
+                }
+                interleaving_began = true;
+                sessions[active as usize].push(doc(&sql.text));
+                turns.push(TurnTok::Dispatch(sim(active)));
+            }
+            Step::Join(id) => {
+                if *id == 0 {
+                    return Err("bridge-refused-v2-async0".into());
+                }
+                interleaving_began = true;
+                turns.push(TurnTok::Join(sim(*id)));
+            }
+            Step::WaitUntil(sql) => {
+                interleaving_began = true;
+                sessions[active as usize].push(doc(&sql.text));
+                turns.push(TurnTok::Poll(sim(active)));
+            }
+            Step::BeginProperty { .. } | Step::Assumption(_) | Step::Assertion(_) => {}
+            Step::EndProperty { .. } => {
+                // H8 invariant, mirrored from execute_plan's mechanical
+                // reset: properties leave the plan on session 0.
+                active = 0;
+            }
+            Step::Fault(_) => return Err("bridge-refused-fault".into()),
+        }
+    }
+    for s in setup.iter().chain(sessions.iter().flatten()) {
+        if s.contains('\n') || s.trim().is_empty() || s.trim_start().starts_with("--") {
+            return Err("bridge-refused-unscriptable".into());
+        }
+    }
+    Ok(MultiSessionScripts { setup, sessions, turns })
 }
 
 // ---------------------------------------------------------------------------
@@ -542,7 +721,7 @@ pub struct CorpusRun {
     pub sentlog: Vec<String>,
     pub oplog: Vec<u8>,
     pub schedlog: String,
-    /// SIM-CONVERGE inc-2 (two-session mode only; empty otherwise): session
+    /// SIM-CONVERGE inc-2 (multi-session mode only; empty otherwise): session
     /// B's artifacts (sim s3) and the boot session's (s1 — the setup script's
     /// acks, which the merged model walk consumes first).
     pub transcript_b: Vec<u8>,
@@ -550,18 +729,27 @@ pub struct CorpusRun {
     pub oplog_b: Vec<u8>,
     pub transcript_s1: Vec<u8>,
     pub sentlog_s1: Vec<String>,
+    /// SIM-CONVERGE inc-3: artifacts for sim sessions s4/s5 (plan sessions
+    /// 2/3), in order — (transcript, sentlog, oplog). Empty unless the env
+    /// provisioned them.
+    pub extra: Vec<(Vec<u8>, Vec<String>, Vec<u8>)>,
 }
 
-/// SIM-CONVERGE inc-2: the two-session corpus shape — s1 runs `setup` to
-/// completion (boot session), then s2 (`spec.script` = session A) and s3
-/// (`script_b` = session B) interleave under the cross-session turn gate
-/// (`turns`, completion-ordered; see sim_net.rs). `gate=false` resurrects the
-/// pre-lane RACE (no PGRUST_SIMNET_TURNS) — the order-red arm.
+/// SIM-CONVERGE inc-2/inc-3: the multi-session corpus shape — s1 runs
+/// `setup` to completion (boot session), then s2 (`spec.script` = plan
+/// session 0) and s3..s5 (`rest` = plan sessions 1..) interleave under the
+/// cross-session turn gate (`turns`, rendered tokens; see sim_net.rs).
+/// `gate=false` resurrects the pre-lane RACE (no PGRUST_SIMNET_TURNS) — the
+/// order-red arm. Two sessions (rest.len()==1) is the inc-2 shape,
+/// byte-identical env (no SQL4/SQL5, same turn string for all-sync plans).
 #[derive(Clone, Copy)]
-pub struct TwoSessionEnv<'a> {
+pub struct MultiSessionEnv<'a> {
     pub setup: &'a [String],
-    pub script_b: &'a [String],
-    pub turns: &'a [u32],
+    /// Scripts for plan sessions 1.. (sim s3, s4, s5 — at most three).
+    pub rest: &'a [Vec<String>],
+    /// Rendered turn tokens (plain number = completion-ordered statement;
+    /// dN/jN/pN = dispatch/join/poll — the inc-3 async split), plan order.
+    pub turns: &'a [String],
     pub gate: bool,
 }
 
@@ -583,9 +771,9 @@ pub struct CorpusSpec<'a> {
     /// Fsync the seeded image (fault legs: probe AND writer, so their op
     /// streams stay aligned for the cut-point rebasing).
     pub seed_durable: bool,
-    /// SIM-CONVERGE inc-2: two-session mode (requires `nsession`). None =
-    /// every existing leg, byte-identical.
-    pub two_session: Option<TwoSessionEnv<'a>>,
+    /// SIM-CONVERGE inc-2/inc-3: multi-session mode (requires `nsession`).
+    /// None = every existing leg, byte-identical.
+    pub multi: Option<MultiSessionEnv<'a>>,
     /// Virtual-time ceiling (PGRUST_SIM_VCEIL_S) — the wedge red's named-
     /// verdict bound (SCHEDCEILING instead of a wall-clock kill). None =
     /// existing legs unchanged.
@@ -669,18 +857,22 @@ pub fn run_corpus(world: &SimWorld, dir: &Path, spec: &CorpusSpec) -> Result<Cor
         .env("PGRUST_PGSHAREDIR", &world.share_dir);
     let (transcript_p, sentlog_p, oplog_p);
     if spec.nsession {
-        // SIM-CONVERGE inc-2 (two-session mode): s1 = the setup script, s3 =
-        // session B's script, and the serialized interleaving rides the turn
-        // gate (PGRUST_SIMNET_TURNS; gate=false = the order-red race arm).
-        // Single-plan mode keeps the historical noise-s3 shape byte-for-byte.
-        let (s1_text, s3_text) = match &spec.two_session {
-            Some(ts) => {
-                let mut a = ts.setup.join("\n");
-                a.push('\n');
-                let mut b = ts.script_b.join("\n");
-                b.push('\n');
-                (a, b)
-            }
+        // SIM-CONVERGE inc-2/inc-3 (multi-session mode): s1 = the setup
+        // script, s3..s5 = plan sessions 1.., and the serialized interleaving
+        // rides the turn gate (PGRUST_SIMNET_TURNS; gate=false = the order-red
+        // race arm). Single-plan mode keeps the historical noise-s3 shape
+        // byte-for-byte; two sessions keep the inc-2 env byte-for-byte
+        // (SQL4/SQL5 never set).
+        let join_script = |lines: &[String]| -> String {
+            let mut t = lines.join("\n");
+            t.push('\n');
+            t
+        };
+        let (s1_text, s3_text) = match &spec.multi {
+            Some(ms) => (
+                join_script(ms.setup),
+                ms.rest.first().map(|s| join_script(s)).unwrap_or_else(|| "\n".to_string()),
+            ),
             None => ("SELECT 1\n".to_string(), "SELECT 'sim-noise'\n".to_string()),
         };
         let s1 = wf("s1.sql", &s1_text)?;
@@ -706,12 +898,20 @@ pub fn run_corpus(world: &SimWorld, dir: &Path, spec: &CorpusSpec) -> Result<Cor
             .env("PGRUST_SIMNET_OPLOG2", &oplog_p)
             .env("PGRUST_SIMNET_OPLOG3", dir.join("s3.oplog"))
             .env("PGRUST_SIMNET_SENTLOG2", &sentlog_p);
-        if let Some(ts) = &spec.two_session {
+        if let Some(ms) = &spec.multi {
             cmd.env("PGRUST_SIMNET_SENTLOG", dir.join("s1.sentlog"))
                 .env("PGRUST_SIMNET_SENTLOG3", dir.join("s3.sentlog"));
-            if ts.gate {
-                let turns: Vec<String> = ts.turns.iter().map(|t| t.to_string()).collect();
-                cmd.env("PGRUST_SIMNET_TURNS", turns.join(" "));
+            // inc-3: sessions beyond two (sim s4/s5 — plan sessions 2/3).
+            for (i, script) in ms.rest.iter().enumerate().skip(1) {
+                let n = i + 3; // rest[1] = sim s4
+                let sf = wf(&format!("s{n}.sql"), &join_script(script))?;
+                cmd.env(format!("PGRUST_SIMNET_SQL{n}"), &sf)
+                    .env(format!("PGRUST_SIMNET_TRANSCRIPT{n}"), dir.join(format!("s{n}.transcript")))
+                    .env(format!("PGRUST_SIMNET_OPLOG{n}"), dir.join(format!("s{n}.oplog")))
+                    .env(format!("PGRUST_SIMNET_SENTLOG{n}"), dir.join(format!("s{n}.sentlog")));
+            }
+            if ms.gate {
+                cmd.env("PGRUST_SIMNET_TURNS", ms.turns.join(" "));
             }
         }
     } else {
@@ -778,7 +978,8 @@ pub fn run_corpus(world: &SimWorld, dir: &Path, spec: &CorpusSpec) -> Result<Cor
     let read_lines = |p: &Path| -> Vec<String> {
         std::fs::read_to_string(p).unwrap_or_default().lines().map(String::from).collect()
     };
-    let two = spec.two_session.is_some();
+    let two = spec.multi.is_some();
+    let n_extra = spec.multi.map(|ms| ms.rest.len().saturating_sub(1)).unwrap_or(0);
     Ok(CorpusRun {
         dir: dir.to_path_buf(),
         exit_code,
@@ -805,6 +1006,16 @@ pub fn run_corpus(world: &SimWorld, dir: &Path, spec: &CorpusSpec) -> Result<Cor
             Vec::new()
         },
         sentlog_s1: if two { read_lines(&dir.join("s1.sentlog")) } else { Vec::new() },
+        extra: (0..n_extra)
+            .map(|i| {
+                let n = i + 4; // sim s4, s5
+                (
+                    std::fs::read(dir.join(format!("s{n}.transcript"))).unwrap_or_default(),
+                    read_lines(&dir.join(format!("s{n}.sentlog"))),
+                    std::fs::read(dir.join(format!("s{n}.oplog"))).unwrap_or_default(),
+                )
+            })
+            .collect(),
     })
 }
 
@@ -850,6 +1061,10 @@ pub struct CheckedRun {
     pub committed: Vec<(String, Vec<String>, Vec<crate::oracle::check::Row>)>,
     /// Ledger tx open at the stopping point (indeterminacy input).
     pub model_in_tx: bool,
+    /// SIM-CONVERGE inc-3 (native walk only; 0 on the merged path, which has
+    /// its own strict sent-stream law): recorded entries the walk did NOT
+    /// consume — nonzero on a passing walk is itself a divergence.
+    pub leftover: usize,
 }
 
 pub fn check_entries(
@@ -881,6 +1096,7 @@ pub fn check_entries(
                         consumed: replay.consumed(),
                         committed: Vec::new(),
                         model_in_tx: false,
+                        leftover: 0,
                     });
                 }
                 return Err(format!("reset '{s}': {message}"))
@@ -907,6 +1123,7 @@ pub fn check_entries(
         consumed: replay.consumed(),
         committed,
         model_in_tx,
+        leftover: 0,
     })
 }
 
@@ -968,7 +1185,7 @@ pub fn run_bridge_campaign(a: &BridgeArgs) -> i32 {
             fsync_off: false,
             ops_report: false,
             seed_durable: false,
-            two_session: None,
+            multi: None,
             vceil_s: None,
         };
         let run = match run_corpus(&a.world, &seed_dir.join("r1"), &spec) {
@@ -1145,7 +1362,7 @@ fn spec_clone<'a>(spec: &CorpusSpec<'a>, script: &'a [String]) -> CorpusSpec<'a>
         fsync_off: spec.fsync_off,
         ops_report: spec.ops_report,
         seed_durable: spec.seed_durable,
-        two_session: spec.two_session,
+        multi: spec.multi,
         vceil_s: spec.vceil_s,
     }
 }
@@ -1247,7 +1464,7 @@ pub fn run_fault_campaign(a: &FaultArgs) -> i32 {
             fsync_off: false,
             ops_report: true,
             seed_durable: true,
-            two_session: None,
+            multi: None,
             vceil_s: None,
         };
         let probe = match run_corpus(&a.world, &seed_dir.join("probe"), &probe_spec) {
@@ -1304,7 +1521,7 @@ pub fn run_fault_campaign(a: &FaultArgs) -> i32 {
             fsync_off: a.red,
             ops_report: false,
             seed_durable: true,
-            two_session: None,
+            multi: None,
             vceil_s: None,
         };
         let writer = match run_corpus(&a.world, &seed_dir.join("writer"), &writer_spec) {
@@ -1386,7 +1603,7 @@ pub fn run_fault_campaign(a: &FaultArgs) -> i32 {
             fsync_off: false,
             ops_report: false,
             seed_durable: false,
-            two_session: None,
+            multi: None,
             vceil_s: None,
         };
         let reboot = match run_corpus(&reboot_world, &seed_dir.join("reboot"), &reboot_spec) {
@@ -1634,6 +1851,216 @@ pub fn strip_session_steps(plan: &Plan) -> Plan {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SIM-CONVERGE inc-3: the session-aware replay pool (execute_plan walks v2
+// plans NATIVELY over per-session recorded streams)
+// ---------------------------------------------------------------------------
+
+/// The replay twin of the live `WorkerSession`: one plan-session's recorded
+/// (sent, outcome) stream behind the `PoolSession` interface. `execute` is
+/// the live worker's sync path; `dispatch_async` consumes the recorded entry
+/// immediately (replay already knows the outcome — the live semantics'
+/// "expected to block" is the SIM corpus's business, enforced there by the
+/// dispatch/join turn split) and parks the outcome for `join_pending`.
+///
+/// The core is Rc-shared so the campaign can inspect desync/consumption
+/// AFTER the walk (the pool itself moves into the dispatcher).
+pub struct ReplayWorker {
+    core: std::rc::Rc<std::cell::RefCell<ReplaySession>>,
+    engine: String,
+    pending: Option<ExecOutcome>,
+}
+
+impl Session for ReplayWorker {
+    fn engine(&self) -> &str {
+        &self.engine
+    }
+
+    fn execute(&mut self, sql: &str) -> ExecOutcome {
+        if self.pending.is_some() {
+            // Mirror WorkerSession: never interleave a sync statement with
+            // an outstanding async one on one connection.
+            return ExecOutcome::ConnectionLost {
+                message: "client: sync exec while async statement outstanding".into(),
+            };
+        }
+        self.core.borrow_mut().execute(sql)
+    }
+
+    fn reconnect(&mut self) -> Result<(), String> {
+        Err("simbridge: no client reconnect inside the sim world".into())
+    }
+}
+
+impl PoolSession for ReplayWorker {
+    fn dispatch_async(&mut self, sql: &str) -> Result<(), String> {
+        if self.pending.is_some() {
+            return Err(format!(
+                "{}: async dispatch while a statement is outstanding",
+                self.engine
+            ));
+        }
+        let out = self.core.borrow_mut().execute(sql);
+        self.pending = Some(out);
+        Ok(())
+    }
+
+    fn join_pending(&mut self) -> ExecOutcome {
+        self.pending.take().unwrap_or(ExecOutcome::ConnectionLost {
+            message: "client: join without outstanding async statement".into(),
+        })
+    }
+
+    fn as_session(&mut self) -> &mut dyn Session {
+        self
+    }
+}
+
+/// The per-session replay streams a native walk consumes: session 0's is the
+/// boot session's entries (reset prologue + hoisted DDL) followed by its own
+/// statement stream; workers are plan sessions 1.. . Every participating
+/// session's `SET search_path` prologue is verified and dropped here (it is
+/// per-connection plumbing, not a plan step).
+pub struct NativeStreams {
+    pub primary: Vec<(String, ExecOutcome)>,
+    pub workers: Vec<Vec<(String, ExecOutcome)>>,
+}
+
+pub fn native_streams(
+    ms: &MultiSessionScripts,
+    run: &CorpusRun,
+) -> Result<NativeStreams, String> {
+    let s1 = entries_from_parts(&run.sentlog_s1, &run.transcript_s1)?;
+    let mut per: Vec<Vec<(String, ExecOutcome)>> = Vec::new();
+    per.push(entries_from_parts(&run.sentlog, &run.transcript)?);
+    if ms.sessions.len() > 1 {
+        per.push(entries_from_parts(&run.sentlog_b, &run.transcript_b)?);
+    }
+    for i in 2..ms.sessions.len() {
+        let (t, s, _) = run
+            .extra
+            .get(i - 2)
+            .ok_or_else(|| format!("no corpus artifacts for plan session {i}"))?;
+        per.push(entries_from_parts(s, t)?);
+    }
+    for (k, entries) in per.iter_mut().enumerate() {
+        if entries.is_empty() {
+            return Err(format!("session {k}: empty stream (no SET prologue)"));
+        }
+        let (sent, out) = entries.remove(0);
+        if sent != POST_RESET_STMTS[0] {
+            return Err(format!("session {k}: expected SET prologue, got '{sent}'"));
+        }
+        if out.is_error() {
+            return Err(format!("session {k}: SET prologue errored"));
+        }
+    }
+    let mut it = per.into_iter();
+    let mut primary = s1;
+    primary.extend(it.next().expect("session 0 stream present"));
+    Ok(NativeStreams { primary, workers: it.collect() })
+}
+
+/// The NATIVE model-oracle walk: the ORIGINAL v2 plan (Session steps intact)
+/// through the REAL `execute_plan`, with a PREPARED replay pool standing in
+/// for the live worker sessions. This is what unlocks Tx steps (per-session
+/// streams — a tx open on one connection never leaks into another's walk),
+/// AsyncDml/Join (the worker's pending outcome), WaitUntil (the walker's
+/// poll loop consumes exactly the probes the sim sent), and GENERATED
+/// multi-session plans.
+pub fn check_entries_native(
+    plan: &Plan,
+    ctx: &bridge::OracleCtx,
+    streams: NativeStreams,
+    rewrite: Option<fn(&str) -> String>,
+) -> Result<CheckedRun, String> {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let mk = |entries: Vec<(String, ExecOutcome)>| -> ReplaySession {
+        let mut rs = ReplaySession::new(entries);
+        if let Some(f) = rewrite {
+            rs = rs.with_rewrite(f);
+        }
+        rs
+    };
+    let total_primary = streams.primary.len();
+    let mut primary = mk(streams.primary);
+    // The reset prologue (reset_leg's shape): consumed OUTSIDE the plan walk.
+    for s in RESET_STMTS {
+        match primary.execute(s) {
+            ExecOutcome::SqlError { sqlstate, message } => {
+                return Err(format!("reset '{s}' failed: {sqlstate} {message}"))
+            }
+            ExecOutcome::ConnectionLost { message } => {
+                return Err(format!("reset '{s}': {message}"))
+            }
+            _ => {}
+        }
+    }
+    let mut totals: Vec<usize> = vec![total_primary];
+    let mut cores: Vec<Rc<RefCell<ReplaySession>>> = Vec::new();
+    let mut workers: Vec<Option<Box<dyn PoolSession>>> = Vec::new();
+    for (i, entries) in streams.workers.into_iter().enumerate() {
+        totals.push(entries.len());
+        let core = Rc::new(RefCell::new(mk(entries)));
+        cores.push(core.clone());
+        workers.push(Some(Box::new(ReplayWorker {
+            core,
+            engine: format!("pgrust-sim-s{}", i + 1),
+            pending: None,
+        })));
+    }
+    let pool = SessionPool::prepared(workers);
+    let checks = OracleCheckEval::new(ctx);
+    let classifier = OracleDiffClassifier::new(bridge::load_warts());
+    let opts = ExecOptions {
+        stop_on_failure: true,
+        post_reset_sql: POST_RESET_STMTS.iter().map(|s| s.to_string()).collect(),
+        ..Default::default()
+    };
+    let report =
+        execute_plan_pooled(plan, &mut primary, None, &checks, &classifier, &opts, pool);
+    let committed = checks.crash_committed_tables();
+    let model_in_tx = checks.model_in_open_tx();
+    let mut desync = primary.desync.clone();
+    let mut consumed = primary.consumed();
+    let mut leftover = totals[0].saturating_sub(primary.consumed());
+    for (i, core) in cores.iter().enumerate() {
+        let c = core.borrow();
+        if desync.is_none() {
+            if let Some(d) = &c.desync {
+                desync = Some(format!("session {}: {d}", i + 1));
+            }
+        }
+        consumed += c.consumed();
+        leftover += totals[i + 1].saturating_sub(c.consumed());
+    }
+    Ok(CheckedRun {
+        report,
+        desync,
+        cut_hit: false,
+        consumed,
+        committed,
+        model_in_tx,
+        leftover,
+    })
+}
+
+/// TEETH instrument for the S1-SpecConflict red: doctor the choreography's
+/// DETECTOR read (the seq scan whose exact rows the property pins) into an
+/// empty result — the RowsEq slot assert MUST fire. Applied at script
+/// synthesis AND replay alignment, the NullBug pattern.
+pub fn s1_detector_rewrite(sql: &str) -> String {
+    let t = sql.trim();
+    // The detector's exact shape (s1_spec_conflict::generate): a bare
+    // two-column scan of the fresh "s1t"-family table (helpers::fresh_table
+    // prefixes "shp_"), no WHERE.
+    if t.starts_with("SELECT key, data FROM ") && t.contains("s1t") && !t.contains("WHERE") {
+        return format!("{sql} WHERE false");
+    }
+    sql.to_string()
+}
+
 /// The built-in inc-2 milestone plan + its oracle context: a v2 TWO-session
 /// cross-session choreography whose assertions are ORDER-SENSITIVE — session
 /// B reads what session A wrote at exact points of the serialized
@@ -1770,11 +2197,15 @@ pub struct TwoArgs {
     pub red_wedge: bool,
     /// Planted red: the NullBug TEETH instrument on the cross-session read.
     pub test_null_bug: bool,
+    /// SIM-CONVERGE inc-3 planted red: perturb the NATIVE replay pool's
+    /// session-B stream (order swap) — the native-walk-vs-re-zip agreement
+    /// check MUST catch the divergence (named verdict, STOP).
+    pub red_pool: bool,
 }
 
 fn two_session_spec<'a>(
     script_a: &'a [String],
-    ts_env: TwoSessionEnv<'a>,
+    ts_env: MultiSessionEnv<'a>,
     sched_seed: u64,
     vceil_s: Option<u64>,
 ) -> CorpusSpec<'a> {
@@ -1787,7 +2218,7 @@ fn two_session_spec<'a>(
         fsync_off: false,
         ops_report: false,
         seed_durable: false,
-        two_session: Some(ts_env),
+        multi: Some(ts_env),
         vceil_s,
     }
 }
@@ -1850,6 +2281,11 @@ pub fn run_two_session_campaign(a: &TwoArgs) -> i32 {
         }
     };
     let stripped = strip_session_steps(&plan);
+    // The rest-scripts vec + rendered turn tokens (the multi-session env
+    // shape; plain numeric tokens = the inc-2 completion-ordered string,
+    // byte-identical PGRUST_SIMNET_TURNS).
+    let rest: Vec<Vec<String>> = vec![ts.session_b.clone()];
+    let turn_toks: Vec<String> = ts.turns.iter().map(|t| t.to_string()).collect();
 
     // --- The wedge red: a turn schedule with one extra B-turn planted where
     //     A's first turn was — B exhausts its script, the cursor parks on a
@@ -1860,10 +2296,11 @@ pub fn run_two_session_campaign(a: &TwoArgs) -> i32 {
         if let Some(first_a) = wedged.iter().position(|t| *t == 2) {
             wedged[first_a] = 3;
         }
-        let env = TwoSessionEnv {
+        let wedged_toks: Vec<String> = wedged.iter().map(|t| t.to_string()).collect();
+        let env = MultiSessionEnv {
             setup: &ts.setup,
-            script_b: &ts.session_b,
-            turns: &wedged,
+            rest: &rest,
+            turns: &wedged_toks,
             gate: true,
         };
         let spec = two_session_spec(&ts.session_a, env, a.sched_seed, Some(10));
@@ -1888,10 +2325,10 @@ pub fn run_two_session_campaign(a: &TwoArgs) -> i32 {
         };
     }
 
-    let env = TwoSessionEnv {
+    let env = MultiSessionEnv {
         setup: &ts.setup,
-        script_b: &ts.session_b,
-        turns: &ts.turns,
+        rest: &rest,
+        turns: &turn_toks,
         gate: !a.red_order,
     };
 
@@ -2046,6 +2483,98 @@ pub fn run_two_session_campaign(a: &TwoArgs) -> i32 {
     for (k, v) in &checked.report.class_counts {
         bump(&mut census, k, *v);
     }
+    // --- SIM-CONVERGE inc-3 need 1: the NATIVE session-aware walk must
+    //     byte-agree with the re-zip oracle above on this plan (the re-zip
+    //     path IS the oracle for the new path's first proof). --red-pool
+    //     perturbs the native streams and the agreement MUST catch it.
+    if !null_bug && checked.report.failure.is_none() {
+        let ms = match synthesize_multi_session(&plan, None) {
+            Ok(m) => m,
+            Err(class) => {
+                println!("SIMBRIDGE-TWO-VERDICT|FAIL:native-synth-{class}");
+                return 1;
+            }
+        };
+        // The two synthesizers must agree on the corpus bytes — the corpus
+        // run above is the SHARED evidence both walks consume.
+        let toks: Vec<String> = ms.turns.iter().map(|t| t.render()).collect();
+        if ms.setup != ts.setup
+            || ms.sessions.len() != 2
+            || ms.sessions[0] != ts.session_a
+            || ms.sessions[1] != ts.session_b
+            || toks != turn_toks
+        {
+            println!("SIMBRIDGE-TWO-VERDICT|FAIL:native-synth-drift");
+            return 1;
+        }
+        let mut streams = match native_streams(&ms, &run) {
+            Ok(s) => s,
+            Err(e) => {
+                println!("SIMBRIDGE-TWO-VERDICT|FAIL:native-streams ({e})");
+                return 1;
+            }
+        };
+        if a.red_pool {
+            // Planted divergence: swap session B's last two recorded
+            // entries — the native walk must desync where the re-zip
+            // path (already checked above) passed.
+            if let Some(w) = streams.workers.first_mut() {
+                let n = w.len();
+                if n >= 2 {
+                    w.swap(n - 1, n - 2);
+                }
+            }
+        }
+        let native = match check_entries_native(&plan, &ctx, streams, None) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("SIMBRIDGE-TWO-VERDICT|FAIL:native-check ({e})");
+                return 1;
+            }
+        };
+        // Byte-agreement: identical class censuses once the native walk's
+        // counted session switches (an "ok" per Session step — steps the
+        // stripped merged walk never sees) are discounted.
+        let n_session_steps =
+            plan.steps.iter().filter(|s| matches!(s, Step::Session(_))).count() as u64;
+        let mut native_counts = native.report.class_counts.clone();
+        if let Some(okc) = native_counts.get_mut("ok") {
+            *okc = okc.saturating_sub(n_session_steps);
+            if *okc == 0 {
+                native_counts.remove("ok");
+            }
+        }
+        let divergence = native.report.failure.is_some()
+            || native.desync.is_some()
+            || native.leftover != 0
+            || native_counts != checked.report.class_counts;
+        if a.red_pool {
+            for (k, v) in &census {
+                println!("SIMHARNESS|{k}|{v}");
+            }
+            if divergence {
+                println!("SIMBRIDGE-TWO-VERDICT|RED-CAUGHT|pool-divergence");
+                return 0;
+            }
+            println!("SIMBRIDGE-TWO-VERDICT|FAIL:pool-red-not-caught");
+            return 1;
+        }
+        if divergence {
+            println!(
+                "SIMBRIDGE-TWO-VERDICT|FAIL:native-vs-rezip-divergence (failure={:?} desync={:?} leftover={} counts-native={:?} counts-rezip={:?})",
+                native.report.failure.as_ref().map(|f| f.class.clone()),
+                native.desync,
+                native.leftover,
+                native_counts,
+                checked.report.class_counts
+            );
+            return 1;
+        }
+        bump(&mut census, "native-agree", 1);
+    } else if a.red_pool {
+        println!("SIMBRIDGE-TWO-VERDICT|FAIL:pool-red-needs-green-leg");
+        return 1;
+    }
     for (k, v) in &census {
         println!("SIMHARNESS|{k}|{v}");
     }
@@ -2064,4 +2593,428 @@ pub fn run_two_session_campaign(a: &TwoArgs) -> i32 {
     }
     println!("SIMBRIDGE-TWO-VERDICT|PASS");
     0
+}
+
+// ---------------------------------------------------------------------------
+// SIM-CONVERGE inc-3: the multi-session campaign (native walk; async +
+// specconflict fixtures; generated v2 plans)
+// ---------------------------------------------------------------------------
+
+/// The built-in inc-3 ASYNC milestone plan + its oracle instance: session 0
+/// takes a table lock inside an open transaction, session 1 dispatches an
+/// INSERT that BLOCKS on it (AsyncDml — the dispatch turn releases at send,
+/// which is exactly why session 0 can still run), session 0 commits (the
+/// release), the join collects the unblocked INSERT (its outcome slot-
+/// asserted), and a final cross-session read pins the row count. Under a
+/// completion-ordered turn for the async statement the schedule DEADLOCKS —
+/// the `--red-asyncturn` arm proves the named SCHEDCEILING verdict.
+pub fn fixture_async_plan() -> (Plan, bridge::OracleCtx) {
+    use crate::oracle::pstep::{
+        IsoLevel as PIso, Mark as PMark, PStep, PropertyInstance, SqlMeta as PSqlMeta, SqlStep,
+        TxCtl as PTxCtl,
+    };
+    use crate::oracle::props::PropertyId;
+    use crate::runner::planface::{IsoLevel, Mark, PlanHeader, Sql, SqlMeta, TxCtl};
+    let sql = |text: &str, mark: Mark| Sql {
+        text: text.to_string(),
+        mark,
+        meta: SqlMeta::default(),
+    };
+    let pstmt = |text: &str, mark: PMark, stackref: Option<u32>| {
+        PStep::Sql(SqlStep {
+            sql: text.to_string(),
+            mark,
+            meta: PSqlMeta::default(),
+            ledger_op: None,
+            probe: None,
+            stackref,
+        })
+    };
+    let plan_steps = vec![
+        Step::Ddl(sql("CREATE TABLE at (k int)", Mark::Mutation)),
+        Step::BeginProperty {
+            name: "M2-CrossSession".into(),
+            seq: 0,
+            tables: vec!["at".into()],
+        },
+        Step::Session(0),
+        Step::Tx(TxCtl::Begin(IsoLevel::ReadCommitted)),
+        Step::Dml(sql("LOCK TABLE at IN ACCESS EXCLUSIVE MODE", Mark::Passthrough)),
+        Step::Session(1),
+        Step::AsyncDml(sql("INSERT INTO at VALUES (1)", Mark::Mutation)),
+        Step::Session(0),
+        Step::Dml(sql("INSERT INTO at VALUES (2)", Mark::Mutation)),
+        Step::Tx(TxCtl::Commit),
+        Step::Join(1),
+        Step::Assertion("{\"kind\":\"stmt-ok\",\"slot\":0}".to_string()),
+        Step::Session(1),
+        Step::Query(sql("SELECT count(*) FROM at", Mark::Read)), // slot 1
+        Step::Assertion("{\"kind\":\"scalar-eq\",\"slot\":1,\"value\":2}".to_string()),
+        Step::Session(0),
+        Step::EndProperty { seq: 0 },
+    ];
+    let inst = PropertyInstance {
+        property: PropertyId::M2CrossSession,
+        steps: vec![
+            PStep::Session(0),
+            PStep::Tx(PTxCtl::Begin(PIso::ReadCommitted)),
+            pstmt("LOCK TABLE at IN ACCESS EXCLUSIVE MODE", PMark::Passthrough, None),
+            PStep::Session(1),
+            PStep::AsyncSql(SqlStep {
+                sql: "INSERT INTO at VALUES (1)".to_string(),
+                mark: PMark::Mutation,
+                meta: PSqlMeta::default(),
+                ledger_op: None,
+                probe: None,
+                stackref: None,
+            }),
+            PStep::Session(0),
+            pstmt("INSERT INTO at VALUES (2)", PMark::Mutation, None),
+            PStep::Tx(PTxCtl::Commit),
+            PStep::Join { session: 1, slot: Some(0) },
+            PStep::Assert(crate::oracle::check::Check::StmtOk { slot: 0 }),
+            PStep::Session(1),
+            pstmt("SELECT count(*) FROM at", PMark::Read, Some(1)),
+            PStep::Assert(crate::oracle::check::Check::ScalarEq {
+                slot: 1,
+                value: crate::oracle::check::Value::Int(2),
+            }),
+            PStep::Session(0),
+        ],
+        tables: ["at".to_string()].into_iter().collect(),
+    };
+    let plan = Plan {
+        header: PlanHeader {
+            seed: 0,
+            profile: "sim-async-fixture".into(),
+            profile_sha256: "0".repeat(64),
+            generator: "sim-converge-inc3".into(),
+        },
+        steps: plan_steps,
+    };
+    let mut by_seq = std::collections::BTreeMap::new();
+    by_seq.insert(0, inst);
+    (plan, bridge::OracleCtx { by_seq })
+}
+
+pub struct MultiArgs {
+    /// v2 plan file to drive natively; None = fixture/profile modes.
+    pub plan_path: Option<PathBuf>,
+    /// Built-in fixture when neither plan nor profile is given: "async".
+    pub fixture: String,
+    /// Generated mode: one v2 plan per workload seed from this profile.
+    pub lp: Option<LoadedProfile>,
+    pub seed_base: u64,
+    pub seeds: u64,
+    pub sched_seed: u64,
+    pub world: SimWorld,
+    pub out: PathBuf,
+    /// First N plans also get the x3 byte-identity proof (every session's
+    /// transcript/sentlog/oplog + s1 + the SCHEDOP stream).
+    pub x3: u64,
+    /// Planted red: demote every DISPATCH turn to a completion-ordered
+    /// statement turn — the async statement blocks by design, so the
+    /// schedule deadlocks and MUST die as the named SCHEDCEILING verdict.
+    pub red_asyncturn: bool,
+    /// Planted red: doctor the S1-SpecConflict detector read (synthesis +
+    /// alignment) — the RowsEq slot assert MUST fire.
+    pub red_detector: bool,
+    /// Planted red: the NullBug TEETH instrument.
+    pub test_null_bug: bool,
+}
+
+fn same_run_bytes(x: &CorpusRun, y: &CorpusRun) -> bool {
+    x.transcript == y.transcript
+        && x.sentlog == y.sentlog
+        && x.oplog == y.oplog
+        && x.schedlog == y.schedlog
+        && x.transcript_b == y.transcript_b
+        && x.sentlog_b == y.sentlog_b
+        && x.oplog_b == y.oplog_b
+        && x.transcript_s1 == y.transcript_s1
+        && x.sentlog_s1 == y.sentlog_s1
+        && x.extra == y.extra
+}
+
+/// Drive v2 multi-session plans NATIVELY under the sim: split into
+/// per-session scripts + typed turns, run the N-session registered-backend
+/// corpus, then model-check through the session-aware replay pool
+/// (`check_entries_native`). Verdict: `SIMBRIDGE-MULTI-VERDICT|PASS` /
+/// `|FAIL:<why>` / `|RED-CAUGHT|<name>`.
+pub fn run_multi_campaign(a: &MultiArgs) -> i32 {
+    let mut census: BTreeMap<String, u64> = BTreeMap::new();
+    println!(
+        "SIMBRIDGE-MULTI|mode|v2 multi-session plans NATIVELY under sim (session-aware \
+         replay pool; model-oracle only, diff-c N/A in-sim; determinism law: same \
+         (plan, sched seed) => identical bytes; different sched seeds may legally \
+         change interleaving-visible results — serial semantics are NOT asserted \
+         across schedule seeds for multi-session plans, per the inc-2 law)"
+    );
+    let _ = std::fs::create_dir_all(&a.out);
+    let doctor: Option<fn(&str) -> String> = if a.red_detector {
+        Some(s1_detector_rewrite)
+    } else if a.test_null_bug {
+        Some(null_bug_rewrite)
+    } else {
+        None
+    };
+    let expect_violation = a.red_detector || a.test_null_bug;
+
+    let gv = generator_version();
+    let mut plans: Vec<(u64, Plan, bridge::OracleCtx)> = Vec::new();
+    if let Some(lp) = &a.lp {
+        for i in 0..a.seeds {
+            let w = a.seed_base + i;
+            let (p, c) = gen_plan_ctx(w, lp, &gv);
+            plans.push((w, p, c));
+        }
+    } else if let Some(pp) = &a.plan_path {
+        match std::fs::read_to_string(pp)
+            .map_err(|e| e.to_string())
+            .and_then(|t| Plan::parse(&t))
+        {
+            Ok(p) => plans.push((0, p, bridge::OracleCtx::default())),
+            Err(e) => {
+                println!("SIMBRIDGE-MULTI-VERDICT|FAIL:plan-load ({e})");
+                return 1;
+            }
+        }
+    } else {
+        match a.fixture.as_str() {
+            "async" => {
+                let (p, c) = fixture_async_plan();
+                plans.push((0, p, c));
+            }
+            other => {
+                println!("SIMBRIDGE-MULTI-VERDICT|FAIL:unknown-fixture ({other})");
+                return 1;
+            }
+        }
+    }
+    let single = plans.len() == 1;
+
+    let mut hard_fail = false;
+    let mut red_caught: Option<String> = None;
+    for (idx, (w, plan, ctx)) in plans.iter().enumerate() {
+        // The artifact is plan-format v2 bytes through the real round trip.
+        let rendered = plan.render();
+        match Plan::parse(&rendered) {
+            Ok(back) if &back == plan => {}
+            _ => {
+                bump(&mut census, "plan-roundtrip-drift", 1);
+                hard_fail = true;
+                continue;
+            }
+        }
+        let ms = match synthesize_multi_session(plan, doctor) {
+            Ok(m) => m,
+            Err(class) => {
+                bump(&mut census, &class, 1);
+                if single {
+                    hard_fail = true;
+                }
+                continue;
+            }
+        };
+        let seed_dir = if single {
+            a.out.clone()
+        } else {
+            a.out.join(format!("w{w}-s{}", a.sched_seed))
+        };
+        let _ = std::fs::create_dir_all(&seed_dir);
+        let _ = std::fs::write(seed_dir.join("plan.plan"), &rendered);
+        let turn_toks: Vec<String> = ms
+            .turns
+            .iter()
+            .map(|t| match (a.red_asyncturn, t) {
+                // The async-deadlock red: dispatch demoted to completion-order.
+                (true, TurnTok::Dispatch(id)) => TurnTok::Stmt(*id).render(),
+                (_, t) => t.render(),
+            })
+            .collect();
+        let rest: Vec<Vec<String>> = ms.sessions.iter().skip(1).cloned().collect();
+        let env = MultiSessionEnv {
+            setup: &ms.setup,
+            rest: &rest,
+            turns: &turn_toks,
+            gate: true,
+        };
+        let spec = CorpusSpec {
+            script: &ms.sessions[0],
+            sched_seed: a.sched_seed,
+            nsession: true,
+            fault_plan_json: None,
+            pack_dir: None,
+            fsync_off: false,
+            ops_report: false,
+            seed_durable: false,
+            multi: Some(env),
+            vceil_s: if a.red_asyncturn { Some(20) } else { None },
+        };
+        let run = match run_corpus(&a.world, &seed_dir.join("r1"), &spec) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("sim-multi: seed {w}: {e}");
+                bump(&mut census, "sim-run-failed", 1);
+                hard_fail = true;
+                continue;
+            }
+        };
+        if a.red_asyncturn {
+            let named = run.stderr.contains("SCHEDCEILING");
+            let panics = scrape_panics(&run.stderr);
+            let died = run.exit_code != Some(0);
+            println!(
+                "SIMBRIDGE-MULTI|asyncturn|exit={:?} named={named} panics={panics}",
+                run.exit_code
+            );
+            if named && died && panics == 0 {
+                red_caught = Some("SCHEDCEILING".into());
+            } else {
+                hard_fail = true;
+            }
+            continue;
+        }
+        if run.timed_out || run.exit_code != Some(0) {
+            eprintln!(
+                "sim-multi: seed {w}: corpus exit={:?} timed_out={} (see {})",
+                run.exit_code,
+                run.timed_out,
+                run.dir.display()
+            );
+            bump(&mut census, "sim-run-failed", 1);
+            hard_fail = true;
+            continue;
+        }
+        let panics = scrape_panics(&run.stderr);
+        if panics > 0 {
+            bump(&mut census, "panic-signature", panics);
+            hard_fail = true;
+            eprintln!(
+                "sim-multi: seed {w}: {panics} panic line(s) in sim stderr ({})",
+                run.dir.display()
+            );
+        }
+        // x3 byte-identity (the first `x3` plans): EVERY artifact.
+        if (idx as u64) < a.x3 {
+            let mut identical = true;
+            for rep in ["r2", "r3"] {
+                match run_corpus(&a.world, &seed_dir.join(rep), &spec) {
+                    Ok(r) => {
+                        if !same_run_bytes(&r, &run) {
+                            identical = false;
+                        }
+                    }
+                    Err(_) => identical = false,
+                }
+            }
+            if identical {
+                bump(&mut census, "x3-identical", 1);
+            } else {
+                bump(&mut census, "x3-DIVERGED", 1);
+                hard_fail = true;
+                eprintln!(
+                    "sim-multi: seed {w}: x3 artifacts DIVERGED ({})",
+                    seed_dir.display()
+                );
+            }
+        }
+        // The native model-oracle walk.
+        let streams = match native_streams(&ms, &run) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("sim-multi: seed {w}: native streams: {e}");
+                bump(&mut census, "native-streams-failed", 1);
+                hard_fail = true;
+                continue;
+            }
+        };
+        match check_entries_native(plan, ctx, streams, doctor) {
+            Ok(native) => {
+                if let Some(d) = &native.desync {
+                    bump(&mut census, "bridge-desync", 1);
+                    hard_fail = true;
+                    eprintln!("sim-multi: seed {w}: DESYNC {d}");
+                    continue;
+                }
+                for (k, v) in &native.report.class_counts {
+                    bump(&mut census, k, *v);
+                }
+                if let Some(f) = &native.report.failure {
+                    if expect_violation && f.class == "property-violation" {
+                        red_caught = Some("property-violation".into());
+                    } else {
+                        let _ = std::fs::write(
+                            seed_dir.join("failure.txt"),
+                            format!(
+                                "seed {w} class {} sev {} step {} site {}\n{}\n",
+                                f.class, f.sev, f.step_idx, f.signature.site, f.detail
+                            ),
+                        );
+                    }
+                } else if native.leftover != 0 {
+                    // A passing walk that left recorded statements unconsumed
+                    // is itself a divergence (the native strictness law).
+                    bump(&mut census, "native-leftover", 1);
+                    hard_fail = true;
+                    eprintln!(
+                        "sim-multi: seed {w}: {} unconsumed entries after a passing walk",
+                        native.leftover
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!("sim-multi: seed {w}: check failed: {e}");
+                bump(&mut census, "bridge-check-failed", 1);
+                hard_fail = true;
+            }
+        }
+    }
+    for (k, v) in &census {
+        println!("SIMHARNESS|{k}|{v}");
+    }
+    if expect_violation || a.red_asyncturn {
+        return match (&red_caught, hard_fail) {
+            (Some(name), false) => {
+                println!("SIMBRIDGE-MULTI-VERDICT|RED-CAUGHT|{name}");
+                0
+            }
+            _ => {
+                println!(
+                    "SIMBRIDGE-MULTI-VERDICT|FAIL:red-not-caught (caught={red_caught:?} hard_fail={hard_fail})"
+                );
+                1
+            }
+        };
+    }
+    let p1: Vec<String> = census
+        .iter()
+        .filter(|(k, v)| **v > 0 && (class_is_p1(k) || k.as_str() == "panic-signature"))
+        .map(|(k, _)| k.clone())
+        .collect();
+    let fail = hard_fail || !p1.is_empty();
+    if fail {
+        let mut why = p1;
+        for k in [
+            "sim-run-failed",
+            "x3-DIVERGED",
+            "plan-roundtrip-drift",
+            "native-streams-failed",
+            "native-leftover",
+            "bridge-desync",
+            "bridge-check-failed",
+        ] {
+            if census.get(k).copied().unwrap_or(0) > 0 && !why.iter().any(|w| w == k) {
+                why.push(k.to_string());
+            }
+        }
+        if why.is_empty() {
+            why.push("hard-fail".into());
+        }
+        println!("SIMBRIDGE-MULTI-VERDICT|FAIL:{}", why.join(","));
+        1
+    } else {
+        println!("SIMBRIDGE-MULTI-VERDICT|PASS");
+        0
+    }
 }

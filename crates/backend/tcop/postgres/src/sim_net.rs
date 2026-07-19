@@ -177,18 +177,16 @@ struct SimWireClient {
     /// injections off an injected statement).
     last_injected: bool,
     /// SIM-CONVERGE inc-2: this session's turn-id in the cross-session turn
-    /// schedule (2 = s2, 3 = s3; the boot session 1 and any noise session are
-    /// not part of the schedule).
+    /// schedule (2 = s2 … 5 = s5; the boot session 1 and any noise session
+    /// are not part of the schedule).
     turn_id: u32,
-    /// SIM-CONVERGE inc-2: the global turn order (session turn-id per global
-    /// statement, in plan order) — each client parses the same
-    /// PGRUST_SIMNET_TURNS (set once before the session threads spawn) into
-    /// its own copy; the only shared mutable state is the [`TURN_POS`] cursor.
-    /// Empty ⇒ no schedule active.
-    turn_order: Vec<u32>,
-    /// SIM-CONVERGE inc-2: precomputed `!turn_order.is_empty() &&
-    /// turn_order.contains(&turn_id)` — this client participates in the
-    /// cross-session interleaving. A session whose id is absent from the
+    /// SIM-CONVERGE inc-2: the global turn order (typed turns in plan order)
+    /// — each client parses the same PGRUST_SIMNET_TURNS (set once before
+    /// the session threads spawn) into its own copy; the only shared mutable
+    /// state is the [`TURN_POS`] cursor. Empty ⇒ no schedule active.
+    turn_order: Vec<Turn>,
+    /// SIM-CONVERGE inc-2: precomputed "this client participates in the
+    /// cross-session interleaving". A session whose id is absent from the
     /// schedule (boot / noise) is never gated (sends its script freely).
     turn_gated: bool,
     /// SIM-CONVERGE inc-2: this client sent a script statement whose turn is
@@ -198,6 +196,26 @@ struct SimWireClient {
     /// completes before step k+1 runs. A held turn also spans the driver-law
     /// recovery ROLLBACK (statement + its recovery = one dispatch step).
     turn_held: bool,
+    /// SIM-CONVERGE inc-3: the LAST sent statement is exempt from the
+    /// recovery injection (async-dispatched statements are JOINED, never
+    /// recovered — mirroring run_session_step — and WaitUntil probes are
+    /// resent, never recovered).
+    sent_norec: bool,
+    /// SIM-CONVERGE inc-3: a Poll turn is being served — the probe text to
+    /// resend until its cycle completes with scalar 't'.
+    poll_stmt: Option<String>,
+    /// SIM-CONVERGE inc-3: first DataRow's first column of the CURRENT
+    /// (un-Z-terminated) cycle — poll-result capture.
+    cur_first: Option<Option<String>>,
+    /// Per-completed-cycle first-column capture (index-aligned with
+    /// `cycle_err`; cycle 0 = the startup exchange).
+    cycle_first: Vec<Option<String>>,
+    /// SIM-CONVERGE inc-3: turns this client has RELEASED, against the
+    /// precomputed total of its turns in the schedule — a gated client must
+    /// not Terminate while it still owns future turns (the early-Terminate
+    /// wedge: an async session that quit before its join turn).
+    my_turns_done: usize,
+    my_turns_total: usize,
 }
 
 // SIM-CONVERGE: what this session's wire client actually SENT, in order —
@@ -235,24 +253,62 @@ fn sent_log_push(sql: &str) {
 // a session that never runs) parks forever and reaches the scheduler's
 // virtual-time ceiling (SCHEDCEILING) — a named verdict, never a panic.
 //
+// SIM-CONVERGE inc-3: TYPED turns. A bare id ("2") stays the inc-2
+// completion-ordered statement turn. Three new kinds:
+//   * "dN" DISPATCH — the owner sends its next script statement and the
+//     turn releases AT SEND. Async statements (plan AsyncDml) block by
+//     design; a completion-ordered turn there would deadlock the schedule
+//     (the released session can only be unblocked by a LATER turn's
+//     statement). The deadlock red proves the SCHEDCEILING verdict.
+//   * "jN" JOIN — no statement moves; session N releases the turn when its
+//     outstanding (async-dispatched) statement's response cycle completes.
+//     Send-ordered dispatch turns + completion-ordered join turns together
+//     restore the live driver's async semantics.
+//   * "pN" POLL — the owner sends its next script statement (a WaitUntil
+//     probe) and, each time the cycle completes with a scalar other than
+//     't', RESENDS the same probe (the turn stays held); the first 't'
+//     releases it. The resend count is a seeded function of the schedule.
+//
 // Opt-in: absent PGRUST_SIMNET_TURNS = the pre-lane independent-pump behavior,
 // byte-identical for every existing corpus. Each fresh sim PROCESS starts the
 // cursor at 0 (the ×3 determinism reruns are separate processes), so no reset
 // across runs is needed.
 static TURN_POS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// Parse PGRUST_SIMNET_TURNS into the global turn order (a session turn-id per
-/// global statement). Absent/empty ⇒ no turn gate. Loud on a malformed token
-/// (harness domain: a bad schedule is a bug, not a silent no-gate).
-fn read_turn_order() -> Vec<u32> {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TurnKind {
+    Stmt,
+    Dispatch,
+    Join,
+    Poll,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Turn {
+    kind: TurnKind,
+    sid: u32,
+}
+
+/// Parse PGRUST_SIMNET_TURNS into the global turn order (one typed turn per
+/// global statement/join). Absent/empty ⇒ no turn gate. Loud on a malformed
+/// token (harness domain: a bad schedule is a bug, not a silent no-gate).
+fn read_turn_order() -> Vec<Turn> {
     std::env::var("PGRUST_SIMNET_TURNS")
         .ok()
         .map(|s| {
             s.split(|c: char| c == ',' || c.is_whitespace())
                 .filter(|t| !t.is_empty())
                 .map(|t| {
-                    t.parse::<u32>()
-                        .unwrap_or_else(|_| panic!("bad PGRUST_SIMNET_TURNS token {t:?}"))
+                    let (kind, rest) = match t.as_bytes()[0] {
+                        b'd' => (TurnKind::Dispatch, &t[1..]),
+                        b'j' => (TurnKind::Join, &t[1..]),
+                        b'p' => (TurnKind::Poll, &t[1..]),
+                        _ => (TurnKind::Stmt, t),
+                    };
+                    let sid = rest
+                        .parse::<u32>()
+                        .unwrap_or_else(|_| panic!("bad PGRUST_SIMNET_TURNS token {t:?}"));
+                    Turn { kind, sid }
                 })
                 .collect()
         })
@@ -260,8 +316,9 @@ fn read_turn_order() -> Vec<u32> {
 }
 
 impl SimWireClient {
-    fn new(stmts: Vec<String>, recover: bool, turn_id: u32, turn_order: Vec<u32>) -> Self {
-        let turn_gated = !turn_order.is_empty() && turn_order.contains(&turn_id);
+    fn new(stmts: Vec<String>, recover: bool, turn_id: u32, turn_order: Vec<Turn>) -> Self {
+        let my_turns_total = turn_order.iter().filter(|t| t.sid == turn_id).count();
+        let turn_gated = !turn_order.is_empty() && my_turns_total > 0;
         SimWireClient {
             stmts: stmts.into(),
             started: false,
@@ -278,6 +335,12 @@ impl SimWireClient {
             turn_order,
             turn_gated,
             turn_held: false,
+            sent_norec: false,
+            poll_stmt: None,
+            cur_first: None,
+            cycle_first: Vec::new(),
+            my_turns_done: 0,
+            my_turns_total,
         }
     }
 
@@ -293,10 +356,35 @@ impl SimWireClient {
             if ty == b'E' {
                 self.cur_err = true;
             }
+            if ty == b'D' && self.cur_first.is_none() {
+                // SIM-CONVERGE inc-3: capture the cycle's FIRST DataRow's
+                // first column (poll-result evidence; pure client-local
+                // parsing — no behavior change without poll turns).
+                let body = &self.rx[self.cursor + 5..self.cursor + 1 + len];
+                let col = if body.len() >= 6 {
+                    let ncols = u16::from_be_bytes(body[..2].try_into().expect("2 bytes"));
+                    if ncols >= 1 {
+                        let l = i32::from_be_bytes(body[2..6].try_into().expect("4 bytes"));
+                        if l >= 0 && 6 + l as usize <= body.len() {
+                            Some(
+                                String::from_utf8_lossy(&body[6..6 + l as usize]).into_owned(),
+                            )
+                        } else {
+                            None // SQL NULL (or truncated): never 't'
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                self.cur_first = Some(col);
+            }
             if ty == b'Z' {
                 self.zseen += 1;
                 self.cycle_err.push(self.cur_err);
                 self.cur_err = false;
+                self.cycle_first.push(self.cur_first.take().flatten());
             }
             self.cursor += 1 + len;
         }
@@ -321,10 +409,14 @@ impl SimWireClient {
             // SIM-CONVERGE recovery injection: the just-completed statement
             // (index sent-1, cycle index == sent) errored — send the
             // driver-law ROLLBACK before the next script statement. An
-            // injected ROLLBACK never triggers another injection.
+            // injected ROLLBACK never triggers another injection. inc-3:
+            // async-dispatched statements and WaitUntil probes are exempt
+            // (`sent_norec`) — the driver JOINS asyncs (run_session_step has
+            // no recovery arm) and re-polls probes; neither recovers.
             if self.recover
                 && self.sent >= 1
                 && !self.last_injected
+                && !self.sent_norec
                 && self.cycle_err.get(self.sent).copied().unwrap_or(false)
             {
                 pqcomm_simnet::client_send(&query_message("ROLLBACK"));
@@ -333,32 +425,86 @@ impl SimWireClient {
                 self.last_injected = true;
                 return pqcomm_simnet::PumpStatus::Progress;
             }
+            // SIM-CONVERGE inc-3, POLL continuation: the just-completed
+            // cycle was a WaitUntil probe. Scalar 't' releases the held poll
+            // turn (fall through to the release below); anything else — 'f',
+            // NULL, no row, even an error — resends the SAME probe with the
+            // turn still held. A gate that can never read 't' therefore
+            // wedges the schedule deterministically and dies as the named
+            // SCHEDCEILING verdict (never a hang, never a panic).
+            if let Some(probe) = self.poll_stmt.clone() {
+                let is_t = self
+                    .cycle_first
+                    .get(self.sent)
+                    .map(|v| v.as_deref() == Some("t"))
+                    .unwrap_or(false);
+                if !is_t {
+                    pqcomm_simnet::client_send(&query_message(&probe));
+                    sent_log_push(&probe);
+                    self.sent += 1;
+                    self.sent_norec = true;
+                    return pqcomm_simnet::PumpStatus::Progress;
+                }
+                self.poll_stmt = None;
+            }
             // SIM-CONVERGE inc-2, turn RELEASE (completion-ordered): reaching
             // here means every sent statement's response cycle has completed
             // (zseen > sent) and no recovery injection is pending — the held
-            // turn (statement + any driver-law ROLLBACK) is done, so advance
-            // the shared cursor and release the session owning the next turn.
-            // Completion-order is the live driver's synchronous-dispatch
-            // semantics: statement k fully completes before step k+1 runs —
-            // release-at-SEND would let two statements execute concurrently
-            // and break the plan's serialized-interleaving contract.
+            // turn (statement + any driver-law ROLLBACK, or a whole poll
+            // sequence) is done, so advance the shared cursor and release the
+            // session owning the next turn. Completion-order is the live
+            // driver's synchronous-dispatch semantics: statement k fully
+            // completes before step k+1 runs — release-at-SEND would let two
+            // statements execute concurrently and break the plan's
+            // serialized-interleaving contract (dispatch turns release at
+            // send DELIBERATELY: that is the async statement's contract).
             if self.turn_held {
                 self.turn_held = false;
+                self.my_turns_done += 1;
                 TURN_POS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            // SIM-CONVERGE inc-3, JOIN turns: with nothing outstanding on
+            // this connection (zseen > sent), any of MY join turns at the
+            // cursor are release events — the async statement they wait on
+            // has completed. Consecutive joins all release here.
+            if self.turn_gated {
+                loop {
+                    let pos = TURN_POS.load(std::sync::atomic::Ordering::SeqCst);
+                    match self.turn_order.get(pos) {
+                        Some(t) if t.sid == self.turn_id && t.kind == TurnKind::Join => {
+                            self.my_turns_done += 1;
+                            TURN_POS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        _ => break,
+                    }
+                }
             }
             // Turn WAIT: a gated client may send its next SCRIPT statement
             // only when the global cursor points at its turn-id; otherwise it
             // parks on the scheduler (a TimedPark = a legal decision point)
             // and reports Yielded — no byte progress, but a legal turn-wait,
-            // not a protocol stall. The Terminate below is a session-local
-            // reaction and stays turn-free. Schedule-exhausted (pos past the
-            // end) falls through to an ungated send — defensive against a
-            // schedule shorter than the script.
-            if self.turn_gated && !self.stmts.is_empty() {
+            // not a protocol stall. inc-3: a gated client whose script AND
+            // turns are both exhausted falls through to Terminate (leaving
+            // the schedule); one with turns still owed keeps parking (the
+            // early-Terminate wedge: an async session must survive to its
+            // join turn). Schedule-exhausted (pos past the end) falls through
+            // to an ungated send — defensive against a schedule shorter than
+            // the script.
+            let mut kind = TurnKind::Stmt;
+            if self.turn_gated {
                 let pos = TURN_POS.load(std::sync::atomic::Ordering::SeqCst);
-                if pos < self.turn_order.len() && self.turn_order[pos] != self.turn_id {
-                    pgsync::thread::sleep(std::time::Duration::from_millis(1));
-                    return pqcomm_simnet::PumpStatus::Yielded;
+                if pos < self.turn_order.len() {
+                    let t = self.turn_order[pos];
+                    if t.sid != self.turn_id {
+                        let fully_done =
+                            self.stmts.is_empty() && self.my_turns_done >= self.my_turns_total;
+                        if !fully_done {
+                            pgsync::thread::sleep(std::time::Duration::from_millis(1));
+                            return pqcomm_simnet::PumpStatus::Yielded;
+                        }
+                    } else {
+                        kind = t.kind;
+                    }
                 }
             }
             match self.stmts.pop_front() {
@@ -367,10 +513,28 @@ impl SimWireClient {
                     sent_log_push(&sql);
                     self.sent += 1;
                     self.last_injected = false;
-                    // The turn stays HELD until this statement's cycle
-                    // completes (see the release above).
+                    self.sent_norec = false;
                     if self.turn_gated {
-                        self.turn_held = true;
+                        match kind {
+                            // Held until this statement's cycle completes.
+                            TurnKind::Stmt => self.turn_held = true,
+                            // Released AT SEND: the statement is expected to
+                            // block; later turns unblock it.
+                            TurnKind::Dispatch => {
+                                self.my_turns_done += 1;
+                                self.sent_norec = true;
+                                TURN_POS
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            }
+                            // Held across the whole probe sequence.
+                            TurnKind::Poll => {
+                                self.poll_stmt = Some(sql);
+                                self.turn_held = true;
+                                self.sent_norec = true;
+                            }
+                            // Unreachable: my join turns were consumed above.
+                            TurnKind::Join => self.turn_held = true,
+                        }
                     }
                 }
                 None => {
@@ -612,6 +776,34 @@ impl SessionSpec {
             pid_offset: 2,
             child_slot,
             turn_id: 3,
+        }
+    }
+
+    /// SIM-CONVERGE inc-3: the fourth/fifth sessions (the pmchild
+    /// registration pattern generalizes — the S1-SpecConflict choreography
+    /// needs 4 concurrent plan sessions). Spawned only when their SQL env
+    /// is present; every existing corpus is byte-identical.
+    fn fourth(child_slot: Option<i32>) -> SessionSpec {
+        SessionSpec {
+            thread_name: "sim-session-4",
+            sql_env: "PGRUST_SIMNET_SQL4",
+            transcript_env: "PGRUST_SIMNET_TRANSCRIPT4",
+            oplog_env: "PGRUST_SIMNET_OPLOG4",
+            pid_offset: 3,
+            child_slot,
+            turn_id: 4,
+        }
+    }
+
+    fn fifth(child_slot: Option<i32>) -> SessionSpec {
+        SessionSpec {
+            thread_name: "sim-session-5",
+            sql_env: "PGRUST_SIMNET_SQL5",
+            transcript_env: "PGRUST_SIMNET_TRANSCRIPT5",
+            oplog_env: "PGRUST_SIMNET_OPLOG5",
+            pid_offset: 4,
+            child_slot,
+            turn_id: 5,
         }
     }
 }
@@ -1722,36 +1914,41 @@ pub fn PostgresSimNetMain(argv: &[String], username: &str) -> ! {
         assert!(adopt.is_some(), "nsession: boot thread lost its universe binding");
         let noreg = std::env::var("PGRUST_SIM_NOREG").as_deref() == Ok("1");
         let base_pid = init_small::globals::process_id() as i32;
-        let (slot2, slot3, pids) = if noreg {
-            (None, None, Vec::new())
-        } else {
-            let p2 = base_pid + 1;
-            let p3 = base_pid + 2;
-            (
-                Some(register_session_backend(p2)),
-                Some(register_session_backend(p3)),
-                vec![p2, p3],
-            )
-        };
-        let s2 = second_session_thread(
-            argv.to_vec(),
-            datadir.clone(),
-            snap.clone(),
-            adopt,
-            SessionSpec::second(slot2),
-        );
-        let s3 = second_session_thread(
-            argv.to_vec(),
-            datadir.clone(),
-            snap,
-            adopt,
-            SessionSpec::third(slot3),
-        );
+        // SIM-CONVERGE inc-3: the session roster generalizes to N (s4/s5
+        // spawn only when their SQL env is present — the S1-SpecConflict
+        // choreography's 4 plan sessions; SQL4/SQL5 absent = the exact
+        // two-session P13 shape, byte-identical).
+        let mut mk_specs: Vec<fn(Option<i32>) -> SessionSpec> =
+            vec![SessionSpec::second, SessionSpec::third];
+        if std::env::var("PGRUST_SIMNET_SQL4").is_ok() {
+            mk_specs.push(SessionSpec::fourth);
+            if std::env::var("PGRUST_SIMNET_SQL5").is_ok() {
+                mk_specs.push(SessionSpec::fifth);
+            }
+        }
+        let mut pids: Vec<i32> = Vec::new();
+        let mut handles: Vec<pgsync::thread::JoinHandle<i32>> = Vec::new();
+        for (i, mk) in mk_specs.iter().enumerate() {
+            let slot = if noreg {
+                None
+            } else {
+                let pid = base_pid + 1 + i as i32;
+                pids.push(pid);
+                Some(register_session_backend(pid))
+            };
+            handles.push(second_session_thread(
+                argv.to_vec(),
+                datadir.clone(),
+                snap.clone(),
+                adopt,
+                mk(slot),
+            ));
+        }
         let budget = drain_budget();
         if noreg {
             // The resurrected pre-lane drain (the red rides it): OS-fact
             // polling on cadence — no announces exist to wait for.
-            while !s2.is_finished() || !s3.is_finished() {
+            while handles.iter().any(|h| !h.is_finished()) {
                 postmaster_seams::pm_service_pending::call();
                 postmaster_seams::wpool_maintain::call();
                 pgsync::thread::sleep(std::time::Duration::from_millis(1));
@@ -1760,8 +1957,10 @@ pub fn PostgresSimNetMain(argv: &[String], username: &str) -> ! {
             let qa = drain_until_reaped(&pids, budget);
             eprintln!("PMDRAIN sessions-reaped quanta={qa}");
         }
-        let code2 = s2.join().unwrap_or(101);
-        let code3 = s3.join().unwrap_or(101);
+        let mut worst = code1;
+        for h in handles {
+            worst = worst.max(h.join().unwrap_or(101));
+        }
         postmaster_seams::pm_service_pending::call();
         let qb = drain_pool(budget);
         eprintln!("PMDRAIN pool-drained population=0 quanta={qb}");
@@ -1769,7 +1968,7 @@ pub fn PostgresSimNetMain(argv: &[String], username: &str) -> ! {
         // whole-node kill fired), then the op-progress report (opt-in).
         simcut_pack_and_report(&datadir);
         ops_report("final");
-        std::process::exit(code1.max(code2).max(code3))
+        std::process::exit(worst)
     }
 
     if sessions <= 1 {
