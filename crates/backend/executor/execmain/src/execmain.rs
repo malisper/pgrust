@@ -1201,17 +1201,32 @@ pub(crate) fn execute_plan<'m, 'mcx>(
     // --- WS-CA wave-10 sub-region (reserved) ------------------------------------
     // --- end WS-CA wave-10 --------------------------------------------------------
     // --- WS-CB wave-10 (cursors inc-2: batch store fill + §6 staging; band 95001+) ---
-    // §6 deletion-clock staging (a): the forward-only run seam. Every
-    // backward drive ticks the release-mode evidence counter (the
-    // post-flip physical-deletion bake reads it at zero across all
-    // corpora); the debug assert (direction ∈ {Forward, NoMovement}) arms
-    // once a cursor store has been armed in this process (WS-CA's
-    // `cursor_store_armed_note` — a store-served world never legally
-    // drives the executor backward). NoMovement never enters this
-    // function (standard_executor_run gates), so the backward test is the
-    // whole check.
+    // §6 deletion rider row 4 EXECUTED (se/deletion-prep B1): the run seam
+    // is FORWARD-ONLY. The §6 staging (a) evidence counter still ticks
+    // FIRST (the bake instrument keeps counting every refused attempt —
+    // `counter run-seam-backward` must read 0 across all corpora at
+    // defaults, where the portal tuplestore serves every backward fetch),
+    // then the drive errors loudly (0A000). This is the keystone of the
+    // backward-execution deletion wave: with backward entry refused at
+    // this one seam, every node-level backward arm below it (heapam
+    // stepping, nodelimit/nodematerial/nodesort backward reads, the
+    // tuplestore-scan backward arms, the lanev2 per-pull direction
+    // chokepoints) is unreachable dead code. Reaching this error requires
+    // a kill-switch world (`PGRUST_LANE_V2_CURSORS=0` / `PGRUST_LANE_V2=0`
+    // scroll cursors — pquery's non-store backward leg); the default world
+    // cannot reach it (SE13 flip + the D-row retirement). NoMovement never
+    // enters this function (standard_executor_run gates), so the backward
+    // test is the whole check.
     if ::types_scan::sdir::ScanDirectionIsBackward(direction) {
         crate::lanev2::run_seam_backward_evidence();
+        return Err(Box::new(
+            PgError::error(
+                "backward scan is not supported: the executor's backward drive was \
+                 deleted (single-executor migration, cursors inc-2 §6 deletion rider); \
+                 backward cursor reads are served by the portal tuplestore",
+            )
+            .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
     }
     // §2.1/§2.3 batch store fill: a budgeted (cursor-FETCH-cadence) run
     // whose receiver is the portal store may be driven as a lane batch
