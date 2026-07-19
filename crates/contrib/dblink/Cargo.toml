@@ -1,0 +1,9 @@
+[package]
+name = "dblink"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "dblink"
+path = "src/lib.rs"

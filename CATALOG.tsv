@@ -865,7 +865,7 @@ contrib-citext	contrib/citext/citext.c	ported	citext	cold: no bench-crate lane (
 contrib-cube-cube-bitfields	contrib/cube/cube.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
 contrib-cube-cube-nightly-unsafe	contrib/cube/cube.c	combined-into:contrib-cube-cube-bitfields			fabled:duplicate-of
 contrib-cube-parser	contrib/cube/cubescan.l,contrib/cube/cubeparse.y	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
-contrib-dblink	contrib/dblink/dblink.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
+contrib-dblink	contrib/dblink/dblink.c	in-progress	crates/contrib/dblink		2026-07-19 contrib re-scope per Michael (queue rank 11, effort L, docs/design/contrib-porting-plan.md); CONTRIB-DBLINK lane: builds the outbound pgwire-client seam postgres_fdw rides
 contrib-dict-int-batch1	contrib/dict_int/dict_int.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
 contrib-dict-xsyn-batch1	contrib/dict_xsyn/dict_xsyn.c	non-core			2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
 contrib-earthdistance	contrib/earthdistance/earthdistance.c	non-core			fabled:contrib-earthdistance; 2026-07-03 scoped non-core per Michael: not needed to run the core backend server; re-scope explicitly if wanted
