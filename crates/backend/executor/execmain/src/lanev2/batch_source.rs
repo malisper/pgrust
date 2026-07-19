@@ -12,7 +12,8 @@
 //! (`batch_soa` / `qual_sel` / `skip_sel` / `lane_sel` / `emit`) plus the
 //! transitional `seq_scan_bridge` (the inc-1 columnar-only escape hatch,
 //! deleted by WS-A inc-2), and the dedicated heap implementor
-//! [`HeapBatchSource`] behind `PGRUST_LANE_V2_HEAPFEED` (default OFF;
+//! [`HeapBatchSource`] behind `PGRUST_LANE_V2_HEAPFEED` (default ON since
+//! the SE15 coupling flip; explicit `=0`/`off` = the kill switch;
 //! knob-OFF paths construct [`SeqScanSource`] and run today's bytes).
 //! Columnar claim-time readahead stays BELOW `position()` (the AM's
 //! `set_granule_range` claim-window advise) and passes through untouched;
@@ -86,13 +87,17 @@ use std::sync::{Arc, OnceLock};
 use ::executils::{EStateData, ExecSlotId};
 use ::types_error::{PgError, PgResult, ERROR};
 
-/// `PGRUST_LANE_V2_HEAPFEED` (default OFF; R-KNOBS registry spelling): the
-/// Phase-1 heap batch-source gate. OFF = every consumption site constructs
-/// [`SeqScanSource`] and the drains keep their inline end-of-claim clear —
-/// today's bytes AND today's accounting. ON = heap scans at the two
-/// consumption sites (serial plain fold feed, runtime `morsel_body`) ride
-/// [`HeapBatchSource`] and `end_claim` ownership moves to the source
-/// (single-owner; see the trait doc). AtomicU8 + `_set_for_tests` idiom
+/// `PGRUST_LANE_V2_HEAPFEED` (**default ON since the SE15-GATES coupling
+/// flip** — all three SE11 item-5 re-open conditions met and re-lettered at
+/// the SE15 composed tip, notes/se15-gates.md §5; R-KNOBS registry
+/// spelling): the Phase-1 heap batch-source gate. The explicit `=0`/`off`
+/// spelling is the kill switch and byte-restores the pre-flip world: every
+/// consumption site constructs [`SeqScanSource`] and the drains keep their
+/// inline end-of-claim clear. ON = heap scans at the two consumption sites
+/// (serial plain fold feed, runtime `morsel_body`) ride [`HeapBatchSource`]
+/// and `end_claim` ownership moves to the source (single-owner; see the
+/// trait doc) — and K2 (`PGRUST_LANE_V2_K2_PROBE`, default ON since SE9)
+/// engages through its dual gate. AtomicU8 + `_set_for_tests` idiom
 /// (rowmode.rs precedent) so units can A/B both paths in one process.
 static HEAPFEED: AtomicU8 = AtomicU8::new(0);
 
@@ -101,9 +106,9 @@ pub(super) fn heapfeed_v2_enabled() -> bool {
         1 => false,
         2 => true,
         _ => {
-            let on = matches!(
+            let on = !matches!(
                 std::env::var("PGRUST_LANE_V2_HEAPFEED").as_deref(),
-                Ok("1") | Ok("on")
+                Ok("0") | Ok("off")
             );
             HEAPFEED.store(if on { 2 } else { 1 }, Relaxed);
             on
