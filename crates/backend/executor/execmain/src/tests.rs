@@ -1835,22 +1835,27 @@ fn limit_pushes_bound_into_sort_state() {
 // randomAccess sort is DONE, `try_own_sort`'s refused-memo branch must exit
 // on the `sort_Done` load BEFORE the RA knob OnceLock + the
 // `sort_randomaccess_memo` probe. Two arms over identical Sort-over-SeqScan
-// plans inited with EXEC_FLAG_REWIND|EXEC_FLAG_BACKWARD (randomAccess):
-//   * control (forward-first): the first pull reaches the RA branch
+// plans inited with EXEC_FLAG_REWIND (randomAccess):
+//   * control (plain-first): the first pull reaches the RA branch
 //     pre-done and computes the RA side memo — proves the RA admission
 //     path is live in this test world, so the pin arm cannot pass
 //     vacuously (e.g. under a knob-OFF environment).
-//   * pin (backward-first): the first pull refuses at the direction gate
-//     (before any memo) and the row-path `exec_sort` feeds the tuplesort,
-//     so the node reaches sort_Done with the RA side memo still unset.
-//     Every later FORWARD pull is post-done and must leave the side memo
-//     UNSET while rows flow from the bare drain leg. If the policy
-//     regresses (the sort_Done check moves back below the memo probe),
-//     those pulls compute the memo and the final assert fails.
+//   * pin (EPQ-first): the first pull refuses at the EPQ gate (before any
+//     memo) and the row-path `exec_sort` feeds the tuplesort, so the node
+//     reaches sort_Done with the RA side memo still unset. Every later
+//     non-EPQ pull is post-done and must leave the side memo UNSET while
+//     rows flow from the bare drain leg. If the policy regresses (the
+//     sort_Done check moves back below the memo probe), those pulls
+//     compute the memo and the final assert fails.
+//     (Backward-execution wave B6 re-spell, runbook RB-B1 item 4: the
+//     original pin arm drove the first pull BACKWARD to hit the lane's
+//     direction gate — the row-path backward feed it exercised died with
+//     B6, and the direction gate itself dies with B11. The EPQ gate is
+//     the surviving refuse-before-memo trigger; the policy under pin is
+//     unchanged.)
 #[test]
 fn sortfeed_ra_postdone_pull_exits_before_ra_memo() {
-    use ::types_scan::sdir::BackwardScanDirection;
-    use ::types_slot::{EXEC_FLAG_BACKWARD, EXEC_FLAG_REWIND};
+    use ::types_slot::EXEC_FLAG_REWIND;
     install_seams();
     scanfix::install();
     let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1865,7 +1870,7 @@ fn sortfeed_ra_postdone_pull_exits_before_ra_memo() {
         }
     };
 
-    let drive = |relid: u32, backward_first: bool| {
+    let drive = |relid: u32, epq_first: bool| {
         scanfix::register_table(relid, &[&[3, 1, 2], &[5, 4]]);
         let pstmt = mk_sort_limit_pstmt(mcx, relid, true, None, None);
         let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
@@ -1876,29 +1881,28 @@ fn sortfeed_ra_postdone_pull_exits_before_ra_memo() {
             ));
         with_exec_data(pstmt, |data, pstmt| {
             data.estate.es_snapshot = Some(snapshot);
-            crate::execmain::init_plan(
-                data,
-                pstmt,
-                CmdType::CMD_SELECT,
-                EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD,
-            )
-            .unwrap();
+            crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, EXEC_FLAG_REWIND)
+                .unwrap();
             let ExecData { estate, planstate } = data;
             let ps = planstate.as_mut().unwrap();
 
-            if backward_first {
-                // Row-path feed: the direction gate refuses before any
-                // memo; exec_sort builds + finalizes the tuplesort and a
-                // backward read from the start position yields no row.
-                estate.es_direction = BackwardScanDirection;
-                assert!(exec_proc_node(ps, estate).unwrap().is_none());
+            let mut vals = Vec::new();
+            if epq_first {
+                // Row-path feed: the EPQ gate refuses before any memo;
+                // exec_sort builds + finalizes the tuplesort and serves the
+                // first sorted row from its own drain leg.
+                estate.es_epq_active = true;
+                let slot_id = exec_proc_node(ps, estate).unwrap().expect("first sorted row");
+                let mut isnull = false;
+                let v = exectuples::slot_getattr(estate.slot_mut(slot_id), 1, &mut isnull);
+                assert!(!isnull);
+                vals.push(v.as_i32());
                 let (done, memo) = ra_memo_of(ps);
-                assert!(done, "backward-first pull must feed the sort");
+                assert!(done, "EPQ-first pull must feed the sort");
                 assert_eq!(memo, None, "row-path feed must not touch the RA side memo");
-                estate.es_direction = ForwardScanDirection;
+                estate.es_epq_active = false;
             }
 
-            let mut vals = Vec::new();
             while let Some(slot_id) = exec_proc_node(ps, estate).unwrap() {
                 let mut isnull = false;
                 let v = exectuples::slot_getattr(estate.slot_mut(slot_id), 1, &mut isnull);
@@ -1916,7 +1920,7 @@ fn sortfeed_ra_postdone_pull_exits_before_ra_memo() {
         })
     };
 
-    // Control arm: pre-done forward pull computes the RA side memo.
+    // Control arm: pre-done plain pull computes the RA side memo.
     let control = drive(70061, false);
     assert!(
         control.is_some(),

@@ -710,56 +710,10 @@ fn lane_feed_random_access_mark_restore_delegates() {
     assert_eq!(lane_next_row(&mut node, &mut estate, 1), None);
 }
 
-#[test]
-fn lane_feed_random_access_backward_matches_row_path() {
-    use ::types_scan::sdir::{BackwardScanDirection, ForwardScanDirection};
-    let rows = vec![vec![Some(3)], vec![Some(1)], vec![Some(2)]];
-    // Lane-fed node: forward reads on the lane face, backward reads on the
-    // row-path fallback (exactly production: the direction gate refuses
-    // non-forward pulls and exec_sort drains the same tuplesort).
-    let (mut lane, mut lane_es, desc, mut lane_feed_rows) =
-        setup(1, rows.clone(), EXEC_FLAG_REWIND);
-    lane_feed(&mut lane, &mut lane_es, &desc, &mut lane_feed_rows);
-    // Control node: built and read entirely by exec_sort.
-    let (mut ctl, mut ctl_es, ctl_desc, mut ctl_feed) = setup(1, rows, EXEC_FLAG_REWIND);
-
-    // Script: F F F B B F — no EOF crossing, so every step returns a row.
-    let script = [
-        (ForwardScanDirection, true),
-        (ForwardScanDirection, true),
-        (ForwardScanDirection, true),
-        (BackwardScanDirection, false),
-        (BackwardScanDirection, false),
-        (ForwardScanDirection, true),
-    ];
-    let mut lane_out = Vec::new();
-    let mut ctl_out = Vec::new();
-    for (dir, forward) in script {
-        let lane_row = if forward {
-            lane_next_row(&mut lane, &mut lane_es, 1)
-        } else {
-            row_path_read(&mut lane, &mut lane_es, &desc, dir, 1)
-        };
-        lane_out.push(lane_row);
-        ctl_es.es_direction = dir;
-        let got = exec_sort(&mut ctl, &mut ctl_es, ctl_desc.clone(), |es| {
-            ctl_feed.fetch(es)
-        })
-        .unwrap();
-        ctl_out.push(got.map(|id| slot_row(&mut ctl_es, id, 1)));
-        ctl_es.es_direction = ForwardScanDirection;
-    }
-    // Differential: the mixed-face lane read script byte-matches the pure
-    // row-path control at every step.
-    assert_eq!(lane_out, ctl_out);
-    // And the concrete C semantics, pinned: 1,2,3 then back to 2,1, then 2.
-    let expect: Vec<Option<Vec<Option<i32>>>> = vec![
-        Some(vec![Some(1)]),
-        Some(vec![Some(2)]),
-        Some(vec![Some(3)]),
-        Some(vec![Some(2)]),
-        Some(vec![Some(1)]),
-        Some(vec![Some(2)]),
-    ];
-    assert_eq!(lane_out, expect);
-}
+// (lane_feed_random_access_backward_matches_row_path retired with the
+// backward-execution wave B6: it pinned the mixed-face F F F B B F script
+// where BACKWARD reads fell to the row-path drain — that drain is deleted;
+// the run seam refuses backward entry since deletion-prep B1, and backward
+// cursor reads are served by the portal tuplestore. Forward lane/row-path
+// parity, rescan replay, and mark/restore delegation keep their own pins
+// above.)
