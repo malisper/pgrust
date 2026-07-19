@@ -5768,12 +5768,14 @@ dependencies = [
  "lsyscache",
  "lsyscache_seams",
  "lwlock",
+ "mbutils",
  "mbutils_seams",
  "mcx",
  "miscinit_seams",
  "namespace_seams",
  "nodes_core",
  "parser_analyze",
+ "parser_small1",
  "pg_sema_seams",
  "planner",
  "pmsignal_seams",
@@ -11779,6 +11781,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_logicalinspect"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "dfmgr",
+ "funcapi",
+ "heaptuple",
+ "mcx",
+ "snapbuild",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_tuple",
+ "varlena",
+]
+
+[[package]]
 name = "pg_md5"
 version = "0.1.0"
 
@@ -11832,6 +11851,20 @@ dependencies = [
  "types_rel",
  "types_tuple",
  "xact",
+]
+
+[[package]]
+name = "pg_overexplain"
+version = "0.0.0"
+dependencies = [
+ "dfmgr",
+ "explain",
+ "format_type",
+ "lock",
+ "lsyscache",
+ "mcx",
+ "types_error",
+ "types_nodes",
 ]
 
 [[package]]
@@ -12257,6 +12290,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_visibility"
+version = "0.0.0"
+dependencies = [
+ "bufmgr",
+ "bufmgr_seams",
+ "datum",
+ "dfmgr",
+ "funcapi",
+ "heapam",
+ "heapam_visibility",
+ "heaptuple",
+ "init_small",
+ "lmgr_proc",
+ "lwlock",
+ "mcx",
+ "pg_class_seams",
+ "postgres_seams",
+ "procarray",
+ "relation",
+ "smgr",
+ "storage_xlog",
+ "transam_xlog",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_rel",
+ "types_snapshot",
+ "types_storage",
+ "types_tuple",
+ "varsup",
+ "visibilitymap",
+ "xloginsert_seams",
+]
+
+[[package]]
 name = "pg_walinspect"
 version = "0.0.0"
 dependencies = [
@@ -12439,6 +12507,42 @@ dependencies = [
  "vfs",
  "xact_seams",
  "zstd",
+]
+
+[[package]]
+name = "pgrowlocks"
+version = "0.0.0"
+dependencies = [
+ "aclchk",
+ "adt_acl",
+ "bufmgr",
+ "datum",
+ "dfmgr",
+ "funcapi",
+ "heapam",
+ "heapam_visibility",
+ "mbutils_seams",
+ "mcx",
+ "miscinit",
+ "multixact",
+ "procarray",
+ "rel_vocab",
+ "relation",
+ "snapmgr",
+ "tableam",
+ "tableam_vocab",
+ "tablecmds",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_storage",
+ "types_tuple",
+ "varlena",
+ "wchar",
+ "xact",
 ]
 
 [[package]]
@@ -15553,6 +15657,8 @@ dependencies = [
  "pg_freespacemap",
  "pg_inherits",
  "pg_locale",
+ "pg_logicalinspect",
+ "pg_overexplain",
  "pg_prewarm",
  "pg_prng",
  "pg_proc",
@@ -15564,10 +15670,12 @@ dependencies = [
  "pg_surgery",
  "pg_trgm",
  "pg_upgrade_support",
+ "pg_visibility",
  "pg_walinspect",
  "pgarch",
  "pgcrypto",
  "pgoutput",
+ "pgrowlocks",
  "pgstat",
  "pgstattuple",
  "pgtz",

@@ -1745,6 +1745,10 @@ pub fn ExplainNode<'mcx>(
     }
     es.workers_state = save_workers_state;
 
+    if let Some(hook) = crate::state::explain_per_node_hook() {
+        hook(node, relationship, plan_name, es)?;
+    }
+
     // ExplainMissingMembers: subplans removed by initial runtime pruning.
     let append_children = match node.as_append() {
         Some(a) => Some((&a.appendplans, a.part_prune_index)),
