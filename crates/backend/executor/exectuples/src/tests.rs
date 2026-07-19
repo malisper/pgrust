@@ -1356,3 +1356,294 @@ fn k1_latemat_dense_cutover_matches_full_deform() {
 }
 
 // --- end WS-AH wave-9 sub-region --------------------------------------------
+
+// --- AGGSEQ-STAGE sub-region (walk-tail plans: heap prefixes crossing a
+// varlena column) --------------------------------------------------------
+
+// Shape contract of `try_new_walk`: refuses what `try_new` hosts (all
+// fixed-width — callers try that first), hosts what `try_new` refuses
+// (varlena inside the prefix), refuses cstrings anywhere in the prefix
+// (the varkey plan's own refusal), and a varlena at column 0 is a legal
+// empty-head walk plan that is NOT virtual (the explicit `walk_from`
+// disambiguates the empty offset chain).
+#[test]
+fn varwalk_plan_shape_contract() {
+    use ::types_tuple::TYPALIGN_SHORT;
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    let fixed = make_desc(
+        mcx,
+        &[
+            col(1, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN),
+            col(2, 8, true, TYPALIGN_DOUBLE, TYPSTORAGE_PLAIN),
+        ],
+    );
+    assert!(SoaDeformPlan::try_new(mcx, &fixed.compact_attrs, 2).is_some());
+    assert!(SoaDeformPlan::try_new_walk(mcx, &fixed.compact_attrs, 2).is_none());
+
+    let crossing = make_desc(
+        mcx,
+        &[
+            col(1, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN),
+            col(2, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED),
+            col(3, 2, true, TYPALIGN_SHORT, TYPSTORAGE_PLAIN),
+        ],
+    );
+    assert!(SoaDeformPlan::try_new(mcx, &crossing.compact_attrs, 3).is_none());
+    let plan = SoaDeformPlan::try_new_walk(mcx, &crossing.compact_attrs, 3).unwrap();
+    assert_eq!(plan.walk_from(), Some(1));
+    assert_eq!(plan.ncols(), 3);
+    assert!(!plan.is_virtual());
+    // A prefix that stops BEFORE the varlena needs no walk.
+    assert!(SoaDeformPlan::try_new_walk(mcx, &crossing.compact_attrs, 1).is_none());
+
+    // cstring (attlen == -2) anywhere in the prefix refuses.
+    let cstr = make_desc(
+        mcx,
+        &[
+            col(1, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN),
+            col(2, -2, false, ::types_tuple::TYPALIGN_CHAR, TYPSTORAGE_PLAIN),
+            col(3, 2, true, TYPALIGN_SHORT, TYPSTORAGE_PLAIN),
+        ],
+    );
+    assert!(SoaDeformPlan::try_new_walk(mcx, &cstr.compact_attrs, 3).is_none());
+
+    // Varlena at column 0: empty head, walk_from == 0, NOT virtual.
+    let v0 = make_desc(
+        mcx,
+        &[
+            col(1, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED),
+            col(2, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN),
+        ],
+    );
+    let p0 = SoaDeformPlan::try_new_walk(mcx, &v0.compact_attrs, 2).unwrap();
+    assert_eq!(p0.walk_from(), Some(0));
+    assert!(!p0.is_virtual());
+
+    // Degenerate asks refuse.
+    assert!(SoaDeformPlan::try_new_walk(mcx, &crossing.compact_attrs, 0).is_none());
+    assert!(SoaDeformPlan::try_new_walk(mcx, &crossing.compact_attrs, 4).is_none());
+}
+
+// THE walk-deform oracle pin: every staged cell of a walk-tail batch —
+// head, varlena (in-page pointer Datums), and post-varlena tail whose
+// offsets vary PER ROW — equals the per-row slot deform of the same tuple
+// image, for kind-0 dense rows, kind-1 hasnulls rows (nulls ON and PAST
+// the varlena), and short/long/empty varlena headers; kind-2 narrow rows
+// keep the fallback discipline. The prefix publish (`soa_store_prefix`)
+// leaves EXACTLY `slot_getsomeattrs(ncols)`'s resume state (values,
+// isnull, nvalid, byte offset, SLOW flag) so lazy deform PAST the prefix
+// — through the varlena — reads back identical cells.
+#[test]
+fn varwalk_deform_matches_per_row_oracle() {
+    use ::types_slot::TTS_FLAG_SLOW;
+    use ::types_tuple::TYPALIGN_SHORT;
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    // int4 head | text | int2, int8 (double-align re-derived per row), int4
+    // = the 5-column staged prefix; int4 + text PAST the prefix exercise
+    // the store_prefix resume.
+    let desc = make_desc(
+        mcx,
+        &[
+            col(1, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN),
+            col(2, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED),
+            col(3, 2, true, TYPALIGN_SHORT, TYPSTORAGE_PLAIN),
+            col(4, 8, true, TYPALIGN_DOUBLE, TYPSTORAGE_PLAIN),
+            col(5, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN),
+            col(6, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN),
+            col(7, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED),
+        ],
+    );
+    let ncols = 5usize;
+    let plan = SoaDeformPlan::try_new_walk(mcx, &desc.compact_attrs, ncols).unwrap();
+    assert_eq!(plan.walk_from(), Some(1));
+    let n = 67usize; // 2 words, tail-masked second word
+    let null_varlena_row = 3usize; // kind-1: NULL ON the varlena
+    let null_tail_row = 9usize; // kind-1: NULL past the varlena (int8)
+    let narrow_row = 41usize; // kind-2: pre-ALTER image, fallback bit
+    let long_row = 17usize; // 4-byte-header varlena (aligned form)
+    let narrow = make_desc(mcx, &[col(1, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN)]);
+    let long_text = "y".repeat(211);
+    let mut texts = Vec::new();
+    for i in 0..n {
+        // Varying lengths (0..=10) so every row's post-varlena offsets
+        // differ — the load-bearing property the static chain cannot host.
+        let short = "x".repeat(i % 11);
+        texts.push(text_varlena(if i == long_row { &long_text } else { &short }));
+    }
+    let tail_txt = text_varlena("past-prefix");
+    let mut tuples = Vec::new();
+    for i in 0..n {
+        if i == narrow_row {
+            tuples.push(
+                heap_form_tuple(mcx, &narrow, &[Datum::from_i32(91001)], &[false]).unwrap(),
+            );
+            continue;
+        }
+        let values = [
+            Datum::from_i32(91001 + i as i32),
+            text_datum(&texts[i]),
+            Datum::from_i16((i % 7) as i16 - 3),
+            Datum::from_i64(91003i64 * (i as i64 + 1)),
+            Datum::from_i32(-(i as i32)),
+            Datum::from_i32(7 * i as i32),
+            text_datum(&tail_txt),
+        ];
+        let isnull = [
+            false,
+            i == null_varlena_row,
+            false,
+            i == null_tail_row,
+            false,
+            false,
+            false,
+        ];
+        tuples.push(heap_form_tuple(mcx, &desc, &values, &isnull).unwrap());
+    }
+    let mut soa = SoaBatch::new_in(mcx, plan.ncols());
+    soa.begin(n as u32);
+    for (i, t) in tuples.iter().enumerate() {
+        soa_classify_row(&mut soa, &plan, &desc.compact_attrs, i as u32, t);
+    }
+    soa_deform_columns(&mut soa, &plan, &desc.compact_attrs, None);
+    assert!(soa.is_fallback(narrow_row as u32));
+
+    // Per-row oracle + resume-state compare, over the SAME tuple images.
+    let mut oracle = make_tuple_table_slot(mcx, TupleSlotKind::HeapTuple, Some(desc.clone()));
+    let mut published = make_tuple_table_slot(mcx, TupleSlotKind::HeapTuple, Some(desc.clone()));
+    for (i, t) in tuples.iter().enumerate() {
+        if i == narrow_row {
+            exec_clear_tuple(&mut published, mcx);
+            // SAFETY: alias of the live formed image (mcx outlives the slot use).
+            let alias = unsafe {
+                HeapTupleData::from_raw_parts(t.header_ptr(), t.t_len, t.t_self, t.t_tableOid)
+            };
+            exec_store_heap_tuple(&mut published, mcx, alias);
+            assert!(!soa_store_prefix(&mut published, &soa, i as u32), "kind-2 must not publish");
+            continue;
+        }
+        // SAFETY: as above — both slots alias the same live image, so text
+        // cells compare by POINTER (the pin-holding/aliasing contract).
+        let (a1, a2) = unsafe {
+            (
+                HeapTupleData::from_raw_parts(t.header_ptr(), t.t_len, t.t_self, t.t_tableOid),
+                HeapTupleData::from_raw_parts(t.header_ptr(), t.t_len, t.t_self, t.t_tableOid),
+            )
+        };
+        exec_clear_tuple(&mut oracle, mcx);
+        exec_store_heap_tuple(&mut oracle, mcx, a1);
+        slot_getsomeattrs(&mut oracle, ncols as i32);
+        {
+            let ob = oracle.base();
+            for c in 0..ncols {
+                assert_eq!(
+                    soa.col_isnull(c)[i],
+                    ob.tts_isnull[c],
+                    "isnull col {c} row {i}"
+                );
+                if !ob.tts_isnull[c] {
+                    assert_eq!(
+                        soa.col_values(c)[i].as_i64(),
+                        ob.tts_values[c].as_i64(),
+                        "value col {c} row {i} (varlena cells compare by pointer)"
+                    );
+                }
+            }
+        }
+        // Staged varlena cells alias the tuple image (R3v pin-holding).
+        if !soa.col_isnull(1)[i] {
+            let p = soa.col_values(1)[i].as_usize();
+            let base = t.getstruct() as usize;
+            assert!(p >= base && p < base + t.t_len as usize, "text cell outside image row {i}");
+        }
+        // Publish parity: store_prefix == slot_getsomeattrs(ncols) state.
+        exec_clear_tuple(&mut published, mcx);
+        exec_store_heap_tuple(&mut published, mcx, a2);
+        assert!(soa_store_prefix(&mut published, &soa, i as u32));
+        {
+            let (ob, pb) = (oracle.base(), published.base());
+            assert_eq!(pb.tts_nvalid, ncols as i16, "nvalid row {i}");
+            assert_eq!(
+                pb.tts_flags & TTS_FLAG_SLOW,
+                ob.tts_flags & TTS_FLAG_SLOW,
+                "SLOW flag row {i}"
+            );
+        }
+        let (SlotData::Heap(oh), SlotData::Heap(ph)) = (&oracle, &published) else {
+            unreachable!("heap slots")
+        };
+        assert_eq!(ph.off, oh.off, "resume byte offset row {i}");
+        // Lazy deform PAST the prefix, THROUGH the varlena, off the
+        // published resume state: identical to the whole-row oracle.
+        slot_getsomeattrs(&mut oracle, 7);
+        slot_getsomeattrs(&mut published, 7);
+        let (ob, pb) = (oracle.base(), published.base());
+        for c in ncols..7 {
+            assert_eq!(pb.tts_isnull[c], ob.tts_isnull[c], "resumed isnull col {c} row {i}");
+            if !ob.tts_isnull[c] {
+                assert_eq!(
+                    pb.tts_values[c].as_i64(),
+                    ob.tts_values[c].as_i64(),
+                    "resumed value col {c} row {i}"
+                );
+            }
+        }
+    }
+    exec_clear_tuple(&mut oracle, mcx);
+    exec_clear_tuple(&mut published, mcx);
+}
+
+// The (first, last)/walk split under a single-column ask: a HEAD-resident
+// ask keeps today's static single-column pass and skips the walk (tail
+// cells stay the fresh batch's null Datums — bitmap-only consumers, and
+// qual-only stagings never publish); a TAIL-resident ask runs the walk
+// alone (whole tail filled, head cells stay stale).
+#[test]
+fn varwalk_qual_col_only_split() {
+    use ::types_tuple::TYPALIGN_SHORT;
+    let ctx = MemoryContext::new("test");
+    let mcx = ctx.mcx();
+    let desc = make_desc(
+        mcx,
+        &[
+            col(1, 4, true, TYPALIGN_INT, TYPSTORAGE_PLAIN),
+            col(2, -1, false, TYPALIGN_INT, TYPSTORAGE_EXTENDED),
+            col(3, 2, true, TYPALIGN_SHORT, TYPSTORAGE_PLAIN),
+        ],
+    );
+    let plan = SoaDeformPlan::try_new_walk(mcx, &desc.compact_attrs, 3).unwrap();
+    let txt = text_varlena("walk");
+    let n = 5usize;
+    let mut tuples = Vec::new();
+    for i in 0..n {
+        let values =
+            [Datum::from_i32(91001 + i as i32), text_datum(&txt), Datum::from_i16(i as i16)];
+        tuples.push(heap_form_tuple(mcx, &desc, &values, &[false, false, false]).unwrap());
+    }
+    // Head ask: col 0 filled, tail untouched.
+    let mut head = SoaBatch::new_in(mcx, plan.ncols());
+    head.begin(n as u32);
+    for (i, t) in tuples.iter().enumerate() {
+        soa_classify_row(&mut head, &plan, &desc.compact_attrs, i as u32, t);
+    }
+    soa_deform_columns(&mut head, &plan, &desc.compact_attrs, Some(0));
+    for i in 0..n {
+        assert_eq!(head.col_values(0)[i].as_i64(), 91001 + i as i64);
+        assert_eq!(head.col_values(2)[i].as_i64(), 0, "tail filled under a head ask");
+    }
+    // Tail ask: the walk fills the whole tail; head col stays stale.
+    let mut tail = SoaBatch::new_in(mcx, plan.ncols());
+    tail.begin(n as u32);
+    for (i, t) in tuples.iter().enumerate() {
+        soa_classify_row(&mut tail, &plan, &desc.compact_attrs, i as u32, t);
+    }
+    soa_deform_columns(&mut tail, &plan, &desc.compact_attrs, Some(2));
+    for i in 0..n {
+        assert_eq!(tail.col_values(2)[i].as_i64(), i as i64, "tail ask row {i}");
+        assert_eq!(tail.col_values(0)[i].as_i64(), 0, "head filled under a tail ask");
+        assert_eq!(datum_text_bytes(tail.col_values(1)[i]), b"walk", "varlena in the walked tail");
+    }
+}
+
+// --- end AGGSEQ-STAGE sub-region ------------------------------------------

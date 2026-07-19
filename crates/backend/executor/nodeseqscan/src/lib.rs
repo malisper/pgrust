@@ -801,12 +801,31 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
         node.batch_soa = None;
         return;
     }
-    node.batch_soa = ::exectuples::SoaDeformPlan::try_new(mcx, atts, prefix as usize).map(|plan| {
+    // AGGSEQ-STAGE walk-tail admission (fail-closed at every step): only
+    // when the fixed-width proof refused, only for the lane fold/gagg
+    // staging asks (`force && multi` — the incumbent fused drives pass
+    // multi=false and keep their exact refusal), only on heap scans
+    // (pgrcolumnar keeps its virtual/dict-group arms), only under the
+    // default-OFF knob.
+    let varwalk = force && multi && stage_varwalk_enabled() && seq_scan_is_heap(node);
+    node.batch_soa = ::exectuples::SoaDeformPlan::try_new(mcx, atts, prefix as usize)
+        .or_else(|| {
+            if !varwalk {
+                return None;
+            }
+            let p = ::exectuples::SoaDeformPlan::try_new_walk(mcx, atts, prefix as usize);
+            if p.is_some() {
+                lane_trace("seqscan varwalk staging armed (prefix crosses varlena; per-row walk tail)");
+            }
+            p
+        })
+        .map(|plan| {
         // Rung 2 (dense batch pass): the JIT batch kernel replaces the AOT
         // column loops on dense full-prefix deforms; col-only passes and
-        // mixed batches keep the AOT/interpreted paths.
+        // mixed batches keep the AOT/interpreted paths. Walk-tail plans
+        // never arm (the kernel deforms the whole prefix at static offsets).
         let mut plan = plan;
-        if plan.ncols() as usize >= JIT_DEFORM_BATCH_MIN_COLS {
+        if plan.walk_from().is_none() && plan.ncols() as usize >= JIT_DEFORM_BATCH_MIN_COLS {
             if let Some(sd) = node.ss.ss_currentScanDesc.as_ref() {
                 let rel = node.ss.ss_currentRelation.as_ref().expect("seqscan has a relation");
                 if let Some(k) = jit_deform_kernel(
@@ -852,6 +871,50 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
             mcx,
         )
     });
+}
+
+/// `PGRUST_LANE_V2_STAGE_VARWALK` (default ON since the SE18-GATES flip;
+/// explicit `=0`/`off` = permanent kill; AGGSEQ-STAGE — the heap
+/// grouped staging seam, R-KNOBS registry spelling): allow the lane
+/// fold/gagg staging asks (`force && multi` callers only — the incumbent
+/// fused drives pass `multi = false` and keep their exact refusal, so the
+/// AGG_SEQ arm's own staging is byte-untouched) to stage a HEAP prefix
+/// that CROSSES a varlena column, via the walk-tail plan
+/// (`SoaDeformPlan::try_new_walk`): the maximal fixed-width head keeps
+/// today's static column-major deform and columns at/past the first
+/// varlena deform per row (`soa_deform_walk_tail` — deform_internal's
+/// slow-lane discipline; varlena cells stage the same in-page pointer
+/// Datums the per-row slot deform stores). OFF = the fixed-width-prefix
+/// refusal stands byte-for-byte. AtomicU8 + `_set_for_tests` idiom
+/// (rowmode.rs precedent) so units can A/B both worlds in one process.
+static STAGE_VARWALK: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn stage_varwalk_enabled() -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    match STAGE_VARWALK.load(Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            // SE18-GATES flip (default OFF -> ON): the AE2/INDEXSOURCE resolve
+            // idiom — bare/unset/other reads ON, explicit `=0`/`off` = permanent
+            // kill (restores the fixed-width-prefix refusal world). Flip
+            // evidence: the SE17 combined aggseq letter (corpus-pairs-1784449336,
+            // +13.41% -> +1.37% arm-OFF with FOLD_TRANS) + the AGGSEQ-STAGE
+            // 16/16 dualexec matrix + engagement census (se-aggseq-stage §3).
+            let on = !matches!(
+                std::env::var("PGRUST_LANE_V2_STAGE_VARWALK").as_deref(),
+                Ok("0") | Ok("off")
+            );
+            STAGE_VARWALK.store(if on { 2 } else { 1 }, Relaxed);
+            on
+        }
+    }
+}
+
+/// Same-process A/B lever for the unit corpus (`crate::tests`).
+#[cfg(test)]
+pub(crate) fn stage_varwalk_set_for_tests(on: bool) {
+    STAGE_VARWALK.store(if on { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Exact scan-column-set kill switch (A/B tooling): `PGRUST_CB_SCANCOLS=0`/
@@ -1387,6 +1450,9 @@ pub fn seq_scan_batch_dictgroup_col(node: &SeqScanState<'_>) -> Option<u16> {
 /// - `k1-latemat-shape` — the staging is not the plain heap kernel-qual
 ///   prefix shape (varkey / contains / PREWHERE lane / key-col redirect /
 ///   stitched projection / bits-only census / virtual plan / non-heap AM);
+/// - `k1-latemat-varwalk` — walk-tail staging (AGGSEQ-STAGE): the
+///   completion pass indexes the static offset chain (head-only on walk
+///   plans); survivor-only tail completion is the recorded follow-up;
 /// - `k1-latemat-all-staged` — the staged set already covers the prefix
 ///   (narrowing must defer something).
 ///
@@ -1412,6 +1478,14 @@ pub fn seq_scan_k1_latemat_arm(
     }
     if !b.qual_armed || b.lane_requal || b.qual_only || b.nquals == 0 {
         return Err("k1-latemat-no-qual");
+    }
+    // AGGSEQ-STAGE: walk-tail stagings refuse the latemat split — the
+    // completion machinery (`soa_deform_columns_set`) indexes the static
+    // offset chain, which covers only a walk plan's fixed head, and the
+    // walk tail is one sequential pass per row anyway (nothing narrows).
+    // Survivor-only tail completion is the recorded follow-up.
+    if b.plan.walk_from().is_some() {
+        return Err("k1-latemat-varwalk");
     }
     let ncols = b.plan.ncols();
     if key_cols.iter().any(|&c| c >= ncols) {

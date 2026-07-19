@@ -1657,6 +1657,24 @@ fn index_only_scan_refuse_reason<'mcx>(
     ios: &::nodeindexonlyscan::IndexOnlyScanState<'mcx>,
     estate: &EStateData<'mcx>,
 ) -> Option<RefuseReason> {
+    index_only_scan_refuse_reason_ex(ios, estate, false)
+}
+
+/// `allow_parallel`: the SE-AGGIOS agg-over-IOS feed admits parallel-aware
+/// scans (each worker's feed drives the SAME `index_only_scan_batch_next`
+/// primitive over the shared parallel scan descriptor the DSM initializers
+/// opened — page claims coordinate inside the AM, exactly the fused arm #3
+/// drive, which never had a parallel check; the VM probe and heap fallback
+/// run per TID against worker-local buffers either way). Every OTHER gate
+/// applies identically (the `seq_scan_refuse_reason_ex` /
+/// `index_scan_refuse_reason_ex` rule: a widening flag may never skip any
+/// row but its own). The standalone pull path keeps `allow_parallel =
+/// false` — its drive was never priced under workers.
+fn index_only_scan_refuse_reason_ex<'mcx>(
+    ios: &::nodeindexonlyscan::IndexOnlyScanState<'mcx>,
+    estate: &EStateData<'mcx>,
+    allow_parallel: bool,
+) -> Option<RefuseReason> {
     if estate.es_epq_active {
         return Some(RefuseReason::Epq);
     }
@@ -1666,7 +1684,7 @@ fn index_only_scan_refuse_reason<'mcx>(
     if !ios.batch_allowed() {
         return Some(RefuseReason::ScrollMark);
     }
-    if ios.ioss_ParallelAware {
+    if ios.ioss_ParallelAware && !allow_parallel {
         return Some(RefuseReason::ParallelGate);
     }
     if ios.ss.instr_idx.is_some() {

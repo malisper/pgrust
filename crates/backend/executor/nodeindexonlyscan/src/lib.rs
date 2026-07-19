@@ -786,6 +786,9 @@ pub fn index_only_scan_plan_rows(node: &IndexOnlyScanState<'_>) -> f64 {
 /// (pacing only; the drive runs to the AM's own exhaustion), so the smgr
 /// snapshot being stale against concurrent extension is fine. `None` = no
 /// open index relation (parked skeleton) — the caller refuses, fail-closed.
+/// Zero blocks passes through as `Some(0)` (SE-AGGIOS: geometry POLICY —
+/// whether the degenerate empty map is covered or refused — lives with the
+/// lane's `index_feed_geometry`, not here; this helper purely reports).
 pub fn index_only_scan_leaf_estimate(node: &IndexOnlyScanState<'_>) -> PgResult<Option<u64>> {
     let Some(index_rel) = node.ioss_RelationDesc.as_ref() else {
         return Ok(None);
@@ -794,7 +797,7 @@ pub fn index_only_scan_leaf_estimate(node: &IndexOnlyScanState<'_>) -> PgResult<
         index_rel,
         ::types_core::ForkNumber::MAIN_FORKNUM,
     )?;
-    Ok((nblocks > 0).then_some(nblocks as u64))
+    Ok(Some(nblocks as u64))
 }
 
 /// End-of-claim slot hygiene for the lane source (ownership ABI R3:

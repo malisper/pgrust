@@ -141,6 +141,10 @@ pub enum GuardTier {
     /// Batch runs unchecked; on any detected trap the rows 0..k replay per-row
     /// via fmgr so the error fires on C's row (JIT overflow branch).
     ReplayOnErr,
+    /// The fold IS C's checked per-row op, applied one row at a time in row
+    /// order (the fold-trans float tier): errors fire inline on C's exact
+    /// row — no guard interval, no demote, no replay.
+    ExactOp,
 }
 
 /// Collation gate (design §3a: collation baked per call site).
@@ -267,6 +271,22 @@ pub enum FoldKind {
     BoolOr,
     BitAnd,
     BitOr,
+    // fold-trans tier (lane-v2-lanefold-trans, knob PGRUST_LANE_V2_FOLD_TRANS
+    // default ON since SE18-GATES; `=0`/`off` = permanent kill):
+    // ORDER-PRESERVING float folds — sum(float4/float8)
+    // (float4pl/float8pl) and the float8[3] Youngs-Cramer accum family
+    // (float4_accum/float8_accum: avg/var/stddev over floats).
+    FSum,
+    FAccum,
+    // fold-trans increment 2 (lane aggseq-fold2, same knob): sum/avg(numeric)
+    // — numeric_avg_accum's INTERNAL NumericAggState, C's exact per-row
+    // do_numeric_accum in row order over a vguarded varlena lane.
+    NumAccum,
+    // corr/covar/regr family — float8_regr_accum's float8[6] bivariate
+    // Youngs-Cramer state, two lane columns, row-order updates.
+    FRegrAccum,
+    // regr_count — int8inc_float8_float8, the strict two-arg counter.
+    Count2,
 }
 
 /// The shape/realizer payload — determines the family and carries the neutral
@@ -536,6 +556,15 @@ pub static ENTRIES: &[BatchFn] = &[
     fold_str(459, "text_smaller", FoldKind::Min),
     fold_str(1063, "bpchar_larger", FoldKind::Max),
     fold_str(1064, "bpchar_smaller", FoldKind::Min),
+    // === aggregate transition folds — fold-trans float tier (lane-v2-lanefold-trans; knob-gated default OFF) ===
+    fold_trans(204, "float4pl", FoldKind::FSum),
+    fold_trans(218, "float8pl", FoldKind::FSum),
+    fold_trans(208, "float4_accum", FoldKind::FAccum),
+    fold_trans(222, "float8_accum", FoldKind::FAccum),
+    // === aggregate transition folds — fold-trans increment 2 (lane aggseq-fold2; same knob) ===
+    fold_trans(2858, "numeric_avg_accum", FoldKind::NumAccum),
+    fold_trans(2806, "float8_regr_accum", FoldKind::FRegrAccum),
+    fold_trans(2805, "int8inc_float8_float8", FoldKind::Count2),
 ];
 
 const fn arith(oid: Oid, name: &'static str, width: ArithWidth, op: ArithKind, cov: &'static [TierCov]) -> BatchFn {
@@ -564,6 +593,18 @@ const fn fold_cov2(oid: Oid, name: &'static str, kind: FoldKind) -> BatchFn {
 
 const fn fold_str(oid: Oid, name: &'static str, kind: FoldKind) -> BatchFn {
     BatchFn { oid, name, shape: Shape::Fold(kind), cov: COV_FOLD_TEXTFOLD }
+}
+
+// fold-trans tier (lane-v2-lanefold-trans, knob-gated default ON since
+// SE18-GATES; `=0`/`off` = permanent kill):
+// ORDER-PRESERVING float folds. The kernel applies C's exact checked per-row
+// op in row order (no reassociation), so overflow ereports fire inline on
+// C's row — no guard interval, no demote, no replay.
+const COV_FOLD_TRANS: &[TierCov] =
+    &[TierCov::intree(Tier::Fold, GuardTier::ExactOp, CollGate::NotApplicable)];
+
+const fn fold_trans(oid: Oid, name: &'static str, kind: FoldKind) -> BatchFn {
+    BatchFn { oid, name, shape: Shape::Fold(kind), cov: COV_FOLD_TRANS }
 }
 
 // ---------------------------------------------------------------------------
