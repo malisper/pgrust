@@ -90,7 +90,9 @@ pub fn SPI_execute_extended(
     }
 
     let mut plan = plan::prepare_oneshot_args(src, CURSOR_OPT_PARALLEL_OK, argtypes)?;
-    let params = convert_params(argtypes, values, nulls)?;
+    // C SPI_execute_extended: caller-materialized params, no paramFetch hook
+    // (plpgsql EXECUTE ... USING builds a plain list there too).
+    let params = convert_params(argtypes, values, nulls, false)?;
     let options = SpiExecuteOptions {
         params,
         read_only,
@@ -114,20 +116,49 @@ pub fn SPI_execute_plan(
     read_only: bool,
     tcount: i64,
 ) -> PgResult<i32> {
-    execute_plan_common(ptr, values, nulls, read_only, false, tcount, None, None, true)
+    execute_plan_common(ptr, values, nulls, false, read_only, false, tcount, None, None, true)
 }
 
-// SPI_execute_plan_extended's allow_nonatomic leg (spi.c); params ride the
-// values/nulls arrays like SPI_execute_plan.
-pub fn SPI_execute_plan_extended(
+// SPI_execute_plan_with_paramlist (spi.c): C's entry for a PL-built
+// ParamListInfo carrying a paramFetch hook (plpgsql setup_param_list). This
+// port materializes PL variables into value arrays, so the shape matches
+// SPI_execute_plan; the surviving C-observable difference is the hooked
+// provenance bit on the registered params (params.c BuildParamLogString
+// suppression — auto_explain's Query Parameters line).
+pub fn SPI_execute_plan_with_paramlist(
     ptr: SpiPlanPtr,
     values: &[Datum],
     nulls: &[bool],
     read_only: bool,
+    tcount: i64,
+) -> PgResult<i32> {
+    execute_plan_common(ptr, values, nulls, true, read_only, false, tcount, None, None, true)
+}
+
+// SPI_execute_plan_extended's allow_nonatomic leg (spi.c); params ride the
+// values/nulls arrays like SPI_execute_plan. The only in-tree caller is
+// plpgsql (C: options.params = a hooked PL paramLI), hence params_hooked.
+pub fn SPI_execute_plan_extended(
+    ptr: SpiPlanPtr,
+    values: &[Datum],
+    nulls: &[bool],
+    params_hooked: bool,
+    read_only: bool,
     allow_nonatomic: bool,
     tcount: i64,
 ) -> PgResult<i32> {
-    execute_plan_common(ptr, values, nulls, read_only, allow_nonatomic, tcount, None, None, true)
+    execute_plan_common(
+        ptr,
+        values,
+        nulls,
+        params_hooked,
+        read_only,
+        allow_nonatomic,
+        tcount,
+        None,
+        None,
+        true,
+    )
 }
 
 pub fn SPI_execp(ptr: SpiPlanPtr, values: &[Datum], nulls: &[bool], tcount: i64) -> PgResult<i32> {
@@ -148,6 +179,7 @@ pub fn SPI_execute_snapshot(
         ptr,
         values,
         nulls,
+        false,
         read_only,
         false,
         tcount,
@@ -162,6 +194,7 @@ fn execute_plan_common(
     ptr: SpiPlanPtr,
     values: &[Datum],
     nulls: &[bool],
+    params_hooked: bool,
     read_only: bool,
     allow_nonatomic: bool,
     tcount: i64,
@@ -183,7 +216,7 @@ fn execute_plan_common(
         return Ok(res);
     }
 
-    let params = convert_params(&state.argtypes, values, nulls)?;
+    let params = convert_params(&state.argtypes, values, nulls, params_hooked)?;
     let options = SpiExecuteOptions {
         params,
         read_only,
@@ -203,7 +236,12 @@ fn execute_plan_common(
 
 // C _SPI_convert_params: the ParamExternData array lives in the SPI exec
 // context (address-stable until _SPI_end_call resets it, after params::free).
-pub(crate) fn convert_params(argtypes: &[types_core::Oid], values: &[Datum], nulls: &[bool]) -> PgResult<ParamListHandle> {
+pub(crate) fn convert_params(
+    argtypes: &[types_core::Oid],
+    values: &[Datum],
+    nulls: &[bool],
+    hooked: bool,
+) -> PgResult<ParamListHandle> {
     if argtypes.is_empty() {
         return Ok(ParamListHandle::NULL);
     }
@@ -220,7 +258,13 @@ pub(crate) fn convert_params(argtypes: &[types_core::Oid], values: &[Datum], nul
     let slice = mcx::vec_borrow_in(mcx, v)?;
     // SAFETY: slice outlives free() — freed in execute_plan_common before the
     // exec-context reset.
-    Ok(unsafe { types_portal::params::register(slice) })
+    Ok(unsafe {
+        if hooked {
+            types_portal::params::register_hooked(slice)
+        } else {
+            types_portal::params::register(slice)
+        }
+    })
 }
 
 pub(crate) fn command_tag_of(stmt: &PlannedStmt<'_>) -> types_core::CommandTag {

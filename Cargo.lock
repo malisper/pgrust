@@ -1528,6 +1528,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "auto_explain"
+version = "0.0.0"
+dependencies = [
+ "dfmgr",
+ "elog",
+ "exec_hooks",
+ "execmain",
+ "explain",
+ "guc",
+ "guc_tables",
+ "instrument",
+ "mcx",
+ "miscinit",
+ "nodes_params",
+ "parallel",
+ "pg_prng",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_portal",
+ "types_slot",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4898,6 +4923,15 @@ dependencies = [
  "seam_core",
  "types_error",
  "types_nodes",
+]
+
+[[package]]
+name = "exec_hooks"
+version = "0.0.0"
+dependencies = [
+ "execmain",
+ "seam_core",
+ "types_portal",
 ]
 
 [[package]]
@@ -9012,6 +9046,7 @@ dependencies = [
 name = "nodefunctionscan"
 version = "0.1.0"
 dependencies = [
+ "aclchk_seams",
  "coerce",
  "datum",
  "detoast_seams",
@@ -9023,7 +9058,9 @@ dependencies = [
  "format_type",
  "funcapi",
  "init_small",
+ "lsyscache",
  "mcx",
+ "miscinit_seams",
  "pgstat",
  "tupdesc",
  "tuplestore",
@@ -10925,6 +10962,26 @@ name = "pg_bitutils"
 version = "0.1.0"
 
 [[package]]
+name = "pg_buffercache"
+version = "0.0.0"
+dependencies = [
+ "bufmgr",
+ "datum",
+ "dfmgr",
+ "funcapi",
+ "heaptuple",
+ "mcx",
+ "postgres_seams",
+ "relation",
+ "superuser",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_rel",
+ "types_storage",
+]
+
+[[package]]
 name = "pg_cast"
 version = "0.0.0"
 dependencies = [
@@ -11603,6 +11660,7 @@ dependencies = [
  "datum",
  "dfmgr",
  "elog",
+ "exec_hooks",
  "execmain",
  "executils",
  "funcapi",
@@ -14752,6 +14810,7 @@ dependencies = [
  "amapi",
  "auth",
  "auth_scram",
+ "auto_explain",
  "autovacuum",
  "auxprocess",
  "backend_progress",
@@ -14895,6 +14954,7 @@ dependencies = [
  "parser_driver",
  "partbounds",
  "partitionfuncs",
+ "pg_buffercache",
  "pg_class",
  "pg_config",
  "pg_constraint",
