@@ -6,7 +6,7 @@ use types_error::{
 };
 use types_fmgr::{FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
 use types_nodes::list::{IntList, NodeList};
-use types_nodes::{FdwKind, FdwRoutine, JoinType, Node};
+use types_nodes::{FdwKind, FdwRoutine, Node};
 use types_pathnodes::{PathId, RelId, RinfoId};
 use types_tuple::{SizeofHeapTupleHeader, MAXALIGN};
 
@@ -372,25 +372,14 @@ fn postgres_get_foreign_plan<'mcx>(
     )
 }
 
-// ---------- execution stubs (phase 2: crates/interfaces/pgclient) ----------
-
-#[cold]
-#[inline(never)]
-fn connection_pending() -> Box<PgError> {
-    Box::new(
-        PgError::error(
-            "postgres_fdw: remote execution is not yet available \
-             (connection layer pending: crates/interfaces/pgclient)",
-        )
-        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
-    )
-}
+// ---------- execution (phase 2: src/exec.rs over src/connection.rs) ----------
 
 #[cold]
 fn remote_estimate_unported() -> Box<PgError> {
     Box::new(
         PgError::error(
-            "postgres_fdw: use_remote_estimate requires the connection layer (phase 2)",
+            "postgres_fdw: use_remote_estimate is not yet supported (phase 3: \
+             plan-time remote EXPLAIN)",
         )
         .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
     )
@@ -399,43 +388,9 @@ fn remote_estimate_unported() -> Box<PgError> {
 #[cold]
 fn join_upper_unported() -> Box<PgError> {
     Box::new(
-        PgError::error("postgres_fdw: foreign join/aggregate pushdown is phase 2")
+        PgError::error("postgres_fdw: foreign join/aggregate pushdown is phase 3")
             .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
     )
-}
-
-fn begin_foreign_scan<'mcx>(
-    _node: &mut ForeignScanState<'mcx>,
-    _estate: &mut EStateData<'mcx>,
-    eflags: i32,
-) -> PgResult<()> {
-    // EXPLAIN (no ANALYZE) sets up no connection; the plan/Remote SQL is
-    // already in fdw_private. Only real execution needs the client.
-    if eflags & types_slot::EXEC_FLAG_EXPLAIN_ONLY != 0 {
-        return Ok(());
-    }
-    Err(connection_pending())
-}
-
-fn iterate_foreign_scan<'mcx>(
-    _node: &mut ForeignScanState<'mcx>,
-    _estate: &mut EStateData<'mcx>,
-) -> PgResult<bool> {
-    Err(connection_pending())
-}
-
-fn rescan_foreign_scan<'mcx>(
-    _node: &mut ForeignScanState<'mcx>,
-    _estate: &mut EStateData<'mcx>,
-) -> PgResult<()> {
-    Err(connection_pending())
-}
-
-fn end_foreign_scan<'mcx>(
-    _node: &mut ForeignScanState<'mcx>,
-    _estate: &mut EStateData<'mcx>,
-) -> PgResult<()> {
-    Ok(())
 }
 
 // postgresExplainForeignScan: "Remote SQL" from fdw_private, gated on
@@ -465,10 +420,10 @@ static PLAN_ROUTINE: FdwPlanRoutine = FdwPlanRoutine {
 };
 
 static EXEC_ROUTINE: FdwExecRoutine = FdwExecRoutine {
-    begin: begin_foreign_scan,
-    iterate: iterate_foreign_scan,
-    rescan: rescan_foreign_scan,
-    end: end_foreign_scan,
+    begin: crate::exec::begin_foreign_scan,
+    iterate: crate::exec::iterate_foreign_scan,
+    rescan: crate::exec::rescan_foreign_scan,
+    end: crate::exec::end_foreign_scan,
     explain: Some(explain_foreign_scan),
 };
 

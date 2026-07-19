@@ -45,3 +45,15 @@ nodes_core = { path = "../../backend/nodes/nodes_core" }
 fmgr_seams = { path = "../../backend/utils/fmgr/fmgr_seams" }
 syscache_seams = { path = "../../backend/utils/cache/syscache_seams" }
 types_guc = { path = "../../_support/types/types_guc" }
+# phase 2: connection layer + executor data flow
+rustc-hash = "2"
+pgclient = { path = "../../interfaces/pgclient" }
+xact = { path = "../../backend/access/transam/xact" }
+waitevent = { path = "../../backend/utils/activity/waitevent" }
+miscinit = { path = "../../backend/utils/init/miscinit" }
+init_small = { path = "../../backend/utils/init/init_small" }
+tupdesc = { path = "../../backend/access/common/tupdesc" }
+execexpr = { path = "../../backend/executor/execexpr" }
+execscan = { path = "../../backend/executor/execscan" }
+exectuples = { path = "../../backend/executor/exectuples" }
+dbcommands_seams = { path = "../../backend/commands/dbcommands_seams" }
