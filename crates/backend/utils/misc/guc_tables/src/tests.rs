@@ -23,12 +23,14 @@ fn table_counts_match_compiled_backend_shape() {
     // statically here).
     // M5-0 (pgrust-only, docs/design/m5-planner.md §2.2): Enum +1
     // pgrust.parallel_engine, Int +1 pgrust.runtime_dop.
-    assert_eq!(ConfigureNamesBool.len(), 121);
-    assert_eq!(ConfigureNamesInt.len(), 152);
-    assert_eq!(ConfigureNamesReal.len(), 27);
+    // auto_explain.* (statically defined custom GUCs, like pg_stat_statements):
+    // Bool +8, Int +2, Real +1, Enum +2.
+    assert_eq!(ConfigureNamesBool.len(), 129);
+    assert_eq!(ConfigureNamesInt.len(), 154);
+    assert_eq!(ConfigureNamesReal.len(), 28);
     assert_eq!(ConfigureNamesString.len(), 76);
-    assert_eq!(ConfigureNamesEnum.len(), 45);
-    assert_eq!(all_settings().count(), 421);
+    assert_eq!(ConfigureNamesEnum.len(), 47);
+    assert_eq!(all_settings().count(), 434);
     assert_eq!(GucContext_Names.len(), PGC_USERSET as usize + 1);
     assert_eq!(GucSource_Names.len(), PGC_S_SESSION as usize + 1);
     assert_eq!(config_group_names.len(), DEVELOPER_OPTIONS as usize + 1);
