@@ -1,8 +1,3 @@
-//! contrib/amcheck/verify_gin.c: gin_index_check. Verifies GIN entry-tree and
-//! posting-tree key/graph invariants (consistency, ordering, downlink match,
-//! line-pointer sanity). Corruption is returned as an INDEX_CORRUPTED Err at
-//! the first violation (C ereport(ERROR)); DEBUG1/2/3 traces are omitted.
-
 use ::bufmgr::{
     buffer_page_ref, GetAccessStrategy, LockBuffer, ReadBufferExtended, ReleaseBuffer,
     UnlockReleaseBuffer, BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK,

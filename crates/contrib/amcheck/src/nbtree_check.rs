@@ -1,9 +1,3 @@
-//! contrib/amcheck/verify_nbtree.c — B-tree index verification.
-//!
-//! Walks an nbtree index in logical order verifying every structural invariant
-//! (per-page item ordering / tuple shape, cross-page high-key boundaries,
-//! parent/child downlink and sibling-link consistency) and, optionally,
-//! heapallindexed (Bloom-filter fingerprinting), checkunique, and rootdescend.
 #![allow(non_snake_case)]
 #![allow(clippy::too_many_arguments)]
 
@@ -67,7 +61,7 @@ use ::bufmgr::{
 const INVALID_BTREE_LEVEL: u32 = InvalidBlockNumber;
 const INTERVAL_BTREE_FAM_OID: Oid = 1982;
 const OPAQUE_MAXALIGN: usize = 16;
-// 8160/4). C divergence: C's TOAST_INDEX_TARGET is MaxHeapTupleSize/16.
+// C divergence: C's TOAST_INDEX_TARGET is MaxHeapTupleSize/16; here 8160/4 to match nbtree::itup's index_form_tuple.
 const TOAST_INDEX_TARGET: usize = 8160 / 4;
 const IMK: usize = INDEX_MAX_KEYS as usize;
 
@@ -109,7 +103,7 @@ impl PageImage {
         self.words.as_mut_ptr().cast()
     }
 
-    /// A read view over this owned image. SAFETY: 8-aligned + `BLCKSZ` bytes,
+    // SAFETY: the owned image is 8-aligned and BLCKSZ bytes, so the PageRef is valid.
     #[inline]
     fn page(&self) -> PageRef<'_> {
         unsafe { PageRef::from_raw(NonNull::new_unchecked(self.ptr() as *mut u8)) }
@@ -314,7 +308,7 @@ fn bt_check_every_level<'mcx>(
             RelationGetNumberOfBlocksInFork(&state.rel, ForkNumber::MAIN_FORKNUM)? as i64;
         let total_elems = (total_pages * (MaxTIDsPerBTreePage as i64 / 3))
             .max(state.rel.rd_rel.reltuples as i64);
-        // C divergence: a fixed seed (C draws pg_prng_uint64). Correctness does
+        // C divergence: a fixed seed (C draws pg_prng_uint64); correctness does not depend on the seed within a single add-then-probe pass.
         let seed: u64 = 0;
         let work_mem = ::init_small::globals::maintenance_work_mem();
         state.filter = Some(BloomFilter::create_in(state.mcx, total_elems, work_mem, seed)?);
@@ -322,7 +316,7 @@ fn bt_check_every_level<'mcx>(
 
         let snap = GetTransactionSnapshot()?;
         state.snapshot = RegisterSnapshot(Some(&snap))?;
-        // C divergence: the IsolationUsesXactSnapshot / indcheckxmin
+        // C divergence: the IsolationUsesXactSnapshot / indcheckxmin serialization guard is not enforced; behaviour-preserving for READ COMMITTED.
     }
 
     if state.checkunique {
@@ -384,7 +378,7 @@ fn bt_check_every_level<'mcx>(
         let heaptuplespresent = &mut state.heaptuplespresent;
         let scratch = &mut state.scratch;
 
-        // builds/tears down its own heap scan. C divergence: it therefore does
+        // C divergence: table_index_build_scan builds its own heap scan and does not read our registered snapshot (acceptable for committed data).
         table_index_build_scan(
             scan_mcx,
             &heaprel_alias,
@@ -405,7 +399,7 @@ fn bt_check_every_level<'mcx>(
                 )
             },
         )?;
-        // C divergence: the DEBUG1 "finished verifying presence" report is
+        // C divergence: the DEBUG1 "finished verifying presence" report is omitted.
     }
 
     if let Some(snap) = state.snapshot.as_ref() {
@@ -595,7 +589,7 @@ fn bt_target_page_check(state: &mut BtreeCheckState<'_>) -> PgResult<()> {
         let itemid =
             page_get_item_id_careful(state, state.targetblock, &state.target_page(), offset)?;
         let itup = page_item(&state.target_page(), itemid);
-        // SAFETY: itup is a live tuple on the target copy (alive for the loop);
+        // SAFETY: itup is a live tuple on the target copy (alive for the loop); the raw pointer survives &mut state calls.
         let tupsize = unsafe { index_tuple_size(itup) };
 
         if tupsize != itemid.lp_len() as usize {
@@ -647,7 +641,7 @@ fn bt_target_page_check(state: &mut BtreeCheckState<'_>) -> PgResult<()> {
         }
 
         if state.rootdescend && is_leaf {
-            // SAFETY: guarded by heapkeyspace (checked in bt_check_every_level);
+            // SAFETY: guarded by heapkeyspace (checked in bt_check_every_level); itup is a live non-pivot leaf tuple.
             let found = unsafe { bt_rootdescend(&state.rel, itup)? };
             if !found {
                 let tid = unsafe { btree_tuple_points_to_tid(itup) };
@@ -1412,7 +1406,7 @@ fn bt_downlink_missing_check(
     ))
 }
 
-/// block number)? SAFETY: both ITups are live tuple images.
+// SAFETY: both ITups are live tuple images.
 unsafe fn bt_pivot_tuple_identical(heapkeyspace: bool, itup1: ITup, itup2: ITup) -> bool {
     let s1 = index_tuple_size(itup1);
     if s1 != index_tuple_size(itup2) {
@@ -1993,7 +1987,7 @@ fn btree_tuple_get_heap_tid_careful(
     Ok(htid)
 }
 
-/// mode. SAFETY-free surface: `itup` is a live index tuple.
+// SAFETY-free surface: itup is a live index tuple.
 fn bt_mkscankey_pivotsearch(rel: &Relation<'_>, itup: ITup) -> PgResult<BtScanInsert> {
     let mut skey = bt_mkscankey(rel, Some(itup))?;
     skey.backward = true;
