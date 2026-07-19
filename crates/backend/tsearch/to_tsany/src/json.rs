@@ -86,7 +86,10 @@ fn jsonb_variant(fcinfo: &mut Fcinfo, cfg: Option<Oid>, flags_arg: Option<usize>
         Some(c) => c,
         None => cache_bind::current_config()?,
     };
-    let mut env = CacheEnv::new(mcx, cfg)?;
+    // C (to_tsany.c jsonb_to_tsvector_worker): the config is only resolved
+    // when a json value actually reaches parsetext — '{}'::jsonb with a
+    // bogus config succeeds with an empty tsvector (fnconf batch-1).
+    let mut env = CacheEnv::new(mcx, cfg);
     let img = jsonb_to_tsvector_worker(mcx, &mut env, jb.as_bytes(), flags)?;
     Ok(varlena_result(Varlena::from_image(img)))
 }
@@ -113,7 +116,8 @@ fn json_variant(fcinfo: &mut Fcinfo, cfg: Option<Oid>, flags_arg: Option<usize>)
         Some(c) => c,
         None => cache_bind::current_config()?,
     };
-    let mut env = CacheEnv::new(mcx, cfg)?;
+    // Same laziness as the jsonb lane (C json_to_tsvector_worker).
+    let mut env = CacheEnv::new(mcx, cfg);
     let img = json_to_tsvector_worker(mcx, &mut env, json, flags)?;
     Ok(varlena_result(Varlena::from_image(img)))
 }
@@ -191,14 +195,9 @@ impl<'mcx> HeadlineJsonState<'mcx> {
             None => (cache_bind::current_config()?, 0usize),
         };
         let qimage = tsquery_image(mcx, fcinfo, base + 1)?;
-        let opts = if has_opts {
-            Some(::ts_cache::deserialize_deflist(
-                mcx,
-                text_data(fcinfo, base + 2)?,
-            )?)
-        } else {
-            None
-        };
+        // C (wparser.c ts_headline_jsonb_byid_opt): config + parser resolve
+        // BEFORE the options list is parsed (fnconf batch-1 ts-config
+        // family — a bogus config must win over bogus options).
         let map = cache_bind::config_map(mcx, cfg)?;
         let prsentry = ::ts_cache::lookup_ts_parser_cache(map.prs_id)?;
         if prsentry.headline_oid == InvalidOid {
@@ -209,9 +208,17 @@ impl<'mcx> HeadlineJsonState<'mcx> {
                 .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
             ));
         }
+        let opts = if has_opts {
+            Some(::ts_cache::deserialize_deflist(
+                mcx,
+                text_data(fcinfo, base + 2)?,
+            )?)
+        } else {
+            None
+        };
         Ok(HeadlineJsonState {
             mcx,
-            env: CacheEnv::new(mcx, cfg)?,
+            env: CacheEnv::new(mcx, cfg),
             prs: HeadlineParsedText::new(mcx),
             opts,
             headline_fi: ::fmgr_seams::fmgr_info::call(prsentry.headline_oid)?,
