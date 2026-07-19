@@ -55,7 +55,6 @@ fn check_relation_relkind(rel: &types_rel::RelationData<'_>) -> PgResult<()> {
     Ok(())
 }
 
-// ------------------------------------------------------------- result glue
 
 fn composite_tupdesc<'m>(mcx: Mcx<'m>, flinfo: &FmgrInfo) -> PgResult<TupleDescData<'m>> {
     let resolved = funcapi::get_call_result_type(mcx, flinfo, None)?;
@@ -87,8 +86,6 @@ fn tuple_image(
     Ok(tup.image().to_vec())
 }
 
-// Cross-call SRF state must be 'static (no multi_call_memory_ctx): rows are
-// pre-formed images (tuple images or bare byref images), one per call.
 struct RowSet {
     rows: Vec<Vec<u8>>,
 }
@@ -128,7 +125,6 @@ fn tid_image(blkno: BlockNumber, offnum: u16) -> Vec<u8> {
     out
 }
 
-// ------------------------------------------------------- raw page decoding
 
 fn r_u16(b: &[u8], off: usize) -> u16 {
     u16::from_ne_bytes(b[off..off + 2].try_into().unwrap())
@@ -170,7 +166,6 @@ fn page_item_id(b: &[u8], offnum: usize) -> ItemIdView {
     }
 }
 
-// --------------------------------------------------------------- collectors
 
 struct VBits {
     bits: Vec<u8>,
@@ -300,8 +295,6 @@ fn collect_corrupt_items(
 
     let mut items: Vec<Vec<u8>> = Vec::with_capacity(64);
     let nblocks = bufmgr::RelationGetNumberOfBlocksInFork(&rel, ForkNumber::MAIN_FORKNUM)?;
-    // C keeps two VM buffers: the block-filter one (read-stream callback) and
-    // the under-lock recheck one.
     let mut filter_vmbuf = VmBuffer::new();
     let mut vmbuffer = VmBuffer::new();
 
@@ -323,7 +316,6 @@ fn collect_corrupt_items(
         )?;
         bufmgr::LockBuffer(buf, bufmgr::BUFFER_LOCK_SHARE)?;
 
-        // The VM bits might have changed while acquiring the page lock.
         let check_frozen = want_frozen && vm_all_frozen(&rel, blkno, &mut vmbuffer)?;
         let check_visible = want_visible && vm_all_visible(&rel, blkno, &mut vmbuffer)?;
         if !check_visible && !check_frozen {
@@ -339,14 +331,12 @@ fn collect_corrupt_items(
         for offnum in 1..=maxoff {
             let itemid = page_item_id(b, offnum);
 
-            // Unused or redirect line pointers are of no interest.
-            if itemid.flags == LP_UNUSED as u8 && itemid.len == 0 {
+                if itemid.flags == LP_UNUSED as u8 && itemid.len == 0 {
                 continue;
             }
             if itemid.flags == LP_REDIRECT as u8 {
                 continue;
             }
-            // Dead line pointers are neither all-visible nor frozen.
             if itemid.flags == LP_DEAD as u8 {
                 items.push(tid_image(blkno, offnum as u16));
                 continue;
@@ -401,7 +391,6 @@ fn collect_corrupt_items(
     Ok(items)
 }
 
-// --------------------------------------------------------------- functions
 
 fn fc_pg_visibility_map(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let flinfo = flinfo.expect("pg_visibility_map: resolved FmgrInfo required");
@@ -612,10 +601,8 @@ fn fc_pg_truncate_visibility_map(
     let rlocator = bufmgr_seams::relation_smgr_locator::call(&rel);
     smgr::smgropen(rlocator.locator, rlocator.backend)?;
 
-    // Forcibly reset the cached VM fork size.
     smgr::smgr_set_cached_nblocks(rlocator, ForkNumber::VISIBILITYMAP_FORKNUM, InvalidBlockNumber)?;
 
-    // New and old sizes before entering the critical section.
     let block = visibilitymap_prepare_truncate(&rel, 0)?;
     let old_block = if block != InvalidBlockNumber {
         smgr::smgrnblocks(rlocator, ForkNumber::VISIBILITYMAP_FORKNUM)?
@@ -680,7 +667,6 @@ fn fc_pg_truncate_visibility_map(
     Ok(Datum::from_i32(0)) // PG_RETURN_VOID
 }
 
-// ------------------------------------------------------------------ lookup
 
 fn lookup(function: &str) -> Option<PGFunction> {
     Some(match function {
