@@ -7692,6 +7692,8 @@ dependencies = [
  "init_small",
  "latch_seams",
  "lmgr_proc_seams",
+ "loom",
+ "pgsync",
  "procsignal_seams",
  "timeout_seams",
  "types_core",
@@ -14560,6 +14562,7 @@ dependencies = [
  "pgsync",
  "postgres_seams",
  "types_error",
+ "types_relscan",
  "waiter",
 ]
 
@@ -18078,6 +18081,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "mcx",
+ "pgsync",
  "types_core",
  "types_error",
 ]
