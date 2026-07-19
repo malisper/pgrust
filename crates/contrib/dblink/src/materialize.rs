@@ -142,6 +142,11 @@ fn build_row(
 // The RowSink for exec_streaming (dblink's synchronous, single-row-mode path).
 // One InitMaterializedSRF per resultset — a re-`result_start` discards the
 // previous store (C's storeRow throw-away-all-but-last).
+// The per-row scratch is a BUMP context: C's tmpcontext is reset after every
+// row with the row's palloc'd datums still live (storeRow), and the bump
+// backend is the one whose reset releases charges wholesale — an
+// exact-accounting context debug-asserts "reset with N bytes still charged"
+// on exactly this pattern (caught by the fleet gate at 0bbbb7970f).
 pub struct TupleSink<'m, 'f> {
     mcx: mcx::Mcx<'m>,
     flinfo: &'f mut FmgrInfo,
@@ -163,7 +168,7 @@ impl<'m, 'f> TupleSink<'m, 'f> {
             fcinfo_ptr: fcinfo,
             srf: None,
             attinmeta: None,
-            scratch: mcx::MemoryContext::new("dblink temporary context"),
+            scratch: mcx::MemoryContext::new_bump("dblink temporary context"),
             guc_nestlevel: -1,
         }
     }
@@ -222,7 +227,7 @@ pub fn materialize_result(
         return Err(rowtype_mismatch());
     }
     let nestlevel = if res.rows.is_empty() { -1 } else { gucs.apply()? };
-    let mut scratch = mcx::MemoryContext::new("dblink temporary context");
+    let mut scratch = mcx::MemoryContext::new_bump("dblink temporary context");
     let mut cols: Vec<Option<&[u8]>> = Vec::with_capacity(res.nfields);
     for row in &res.rows {
         cols.clear();
