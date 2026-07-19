@@ -177,8 +177,6 @@ mod tests {
 
     #[test]
     fn snapshot_filename_roundtrip() {
-        // C parse_snapshot_filename: sscanf("%X-%X.snap") + strict re-format
-        // comparison. The corpus's reject set plus the canonical accept.
         assert_eq!(parse_snapshot_filename("0-40796E18.snap").unwrap(), 0x40796E18);
         assert_eq!(
             parse_snapshot_filename("A-1.snap").unwrap(),
