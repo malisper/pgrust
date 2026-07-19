@@ -260,6 +260,17 @@ fn check_constant_qual(qual: &::types_nodes::list::NodeList<'_>, is_const_false:
     true
 }
 
+// The two ExecMergeJoin sort-order guards (NEXTINNER compare>0,
+// nodeMergejoin.c:902; TESTOUTER compare<0, nodeMergejoin.c:1145) port as
+// ERRORS, not can't-happen panics: `elog(ERROR, "mergejoin input data is out
+// of order")` is user-reachable on misdeclared collations/opfamilies
+// (LANE-MERGEJOIN contract §2.1).
+#[cold]
+#[inline(never)]
+fn mergejoin_out_of_order() -> Box<PgError> {
+    Box::new(PgError::error("mergejoin input data is out of order".to_string()))
+}
+
 #[cold]
 #[inline(never)]
 fn non_mergeable_join_cond(jointype: JoinType) -> Box<PgError> {
@@ -768,9 +779,8 @@ where
                         } else if cmp < 0 {
                             node.mj_JoinState = EXEC_MJ_NEXTOUTER;
                         } else {
-                            panic!(
-                                "ExecMergeJoin (nodeMergejoin.c): mergejoin input data is out of order"
-                            );
+                            // nodeMergejoin.c:902 — ERROR, not panic (§2.1).
+                            return Err(mergejoin_out_of_order());
                         }
                     }
                     MJEvalResult::NonMatchable => node.mj_JoinState = EXEC_MJ_NEXTOUTER,
@@ -828,7 +838,8 @@ where
                         }
                     }
                 } else {
-                    panic!("ExecMergeJoin (nodeMergejoin.c): mergejoin input data is out of order");
+                    // nodeMergejoin.c:1145 — ERROR, not panic (§2.1).
+                    return Err(mergejoin_out_of_order());
                 }
             }
             // EXEC_MJ_ENDOUTER: outer exhausted; null-fill remaining inners.

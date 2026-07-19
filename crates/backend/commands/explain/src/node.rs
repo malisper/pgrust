@@ -1667,6 +1667,66 @@ pub fn ExplainNode<'mcx>(
         }
     }
 
+    // EXPLAIN (ENGINE) (single-executor migration Phase 0.2): per-node
+    // engine attribution. Total by construction — an engaged runtime
+    // pipeline is derived from the already-fetched runtime_ea_pipes
+    // (root/member match), lane/spine verdicts come from the capture
+    // records, and an event-less node is the row spine (the default truth,
+    // zero extra capture). Double-gated: display needs the option AND the
+    // records exist only under EXEC_FLAG_ENGINE_REPORT, so default output
+    // stays byte-identical.
+    if es.engine && !es.qd.is_null() {
+        use ::types_core::instrument::EngineKindWire;
+        let runtime = runtime_ea_pipes
+            .as_ref()
+            .and_then(|ps| ps.first())
+            .map(|p| (p.arm, p.root_node_id == plan.plan_node_id));
+        let (engine_txt, detail): (&str, String) = if let Some((arm, is_root)) = runtime {
+            let d = if is_root {
+                format!("{arm} arm")
+            } else {
+                format!("member of {arm} pipeline")
+            };
+            ("runtime", d)
+        } else {
+            let ev = execmain_seams::query_desc_engine_events::call(es.qd, plan.plan_node_id)
+                .and_then(|v| v.first().copied());
+            match ev {
+                Some((EngineKindWire::Lane, class, _)) => ("lane", class.to_string()),
+                Some((EngineKindWire::FusedArm, class, _)) => {
+                    ("spine/fused-arm", class.to_string())
+                }
+                Some((EngineKindWire::Runtime, class, _)) => ("runtime", class.to_string()),
+                // "instrumented" = RefuseReason::Instrumented.name()
+                // (lanev2/stats.rs): the fused serial pipelines record their
+                // observed refusal in inc-1; only this reason means "the
+                // production verdict was not evaluated", hence the suffix.
+                Some((EngineKindWire::Spine, class, "instrumented")) => (
+                    "spine",
+                    format!("{class}: refused instrumented; production engine may differ"),
+                ),
+                Some((EngineKindWire::Spine, class, d)) if !d.is_empty() => {
+                    ("spine", format!("{class}: {d}"))
+                }
+                Some((EngineKindWire::Spine, class, _)) => ("spine", class.to_string()),
+                None => ("spine", String::new()),
+            }
+        };
+        if es.format == EXPLAIN_FORMAT_TEXT {
+            crate::format::ExplainIndentText(es);
+            if detail.is_empty() {
+                append!(es, "Engine: {engine_txt}\n");
+            } else {
+                append!(es, "Engine: {engine_txt} ({detail})\n");
+            }
+        } else {
+            crate::format::ExplainPropertyText("Engine", engine_txt, es);
+            if !detail.is_empty() {
+                crate::format::ExplainPropertyText("Engine Detail", &detail, es);
+            }
+        }
+    }
+
     // Per-worker buffer usage, then flush the worker
     // sections and pop the set-aside state.
     if es.workers_state.is_some() && es.buffers && es.verbose {

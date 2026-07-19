@@ -1,0 +1,18 @@
+# WS-U wave-5 overlay specs — appended after the vendor isolation_schedule
+# by the shadow-inputdir builder (scripts/lane-epq-inc1-e2e.sh). One test
+# per line, serial (each spec owns its tables; keep them isolated from the
+# vendor schedule's own groups).
+test: epq-storm-seqscan
+test: epq-storm-indexscan
+test: epq-storm-bitmapscan
+test: epq-storm-tid
+test: epq-storm-joinsource
+test: epq-interplay-rowmark
+test: epq-interplay-oc
+test: epq-interplay-merge
+# WS-Y wave-7 census-delta exercising specs (Y3 gate-delta shapes inside
+# rechecks: Material / ValuesScan / CteScan / FunctionScan join sources).
+test: epq-short-material
+test: epq-short-valuesscan
+test: epq-short-ctescan
+test: epq-short-functionscan

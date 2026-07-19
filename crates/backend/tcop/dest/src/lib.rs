@@ -168,6 +168,33 @@ pub fn SetTuplestoreDestReceiverParams(
     }
 }
 
+/// SE-R41 (notes/se-r41-retire.md §3.3): arm the tuplestore receiver with
+/// the §4.2 row-identity capture sidecar of a capture-batchable eligible
+/// cursor-store fill (no C counterpart — the sidecar itself is the ported
+/// D-CA-1 hidden-trailing-columns design). Set only by
+/// `fill_portal_store_to`'s capture-batch arm.
+pub fn SetTuplestoreCaptureSidecar(
+    receiver: &mut DestReceiver<'_>,
+    sidecar: types_portal::TuplestoreHandle,
+) {
+    match receiver {
+        DestReceiver::Tuplestore(dr) => tstore_receiver::set_capture_sidecar(dr, sidecar),
+        _ => panic!("SetTuplestoreCaptureSidecar: not a tuplestore receiver"),
+    }
+}
+
+impl DestReceiver<'_> {
+    /// SE-R41: the capture sidecar of a capture-armed tuplestore receiver;
+    /// None for every other receiver and every unarmed fill. Read once per
+    /// RUN at the run seam (never per tuple).
+    pub fn tuplestore_capture_sidecar(&self) -> Option<types_portal::TuplestoreHandle> {
+        match self {
+            DestReceiver::Tuplestore(dr) => tstore_receiver::capture_sidecar(dr),
+            _ => None,
+        }
+    }
+}
+
 // DestReceiver *None_Receiver: C's shared static donothingDR.
 pub const NONE_RECEIVER: DestReceiver<'static> = DestReceiver::DoNothing;
 

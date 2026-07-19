@@ -748,6 +748,36 @@ fn update_delete_commit_select_wal_roundtrip() {
         assert!(f.locks.iter().all(|l| *l == 0), "leaked locks: {:?}", f.locks);
     });
 
+    // Wave-2 WS-N knob-ON leg (notes/se-ws-n-dml-inc1.md): under
+    // PGRUST_LANE_V2_DML=1 + PGRUST_LANE_V2_COVERAGE=1 the seed INSERTs
+    // above must have been lane-owned while every UPDATE/DELETE refused
+    // loudly as dml-shape and ran the unchanged Volcano arm (whose WAL
+    // stream the decode below pins record-for-record).
+    if std::env::var("PGRUST_LANE_V2_DML").as_deref() == Ok("1")
+        && std::env::var("PGRUST_LANE_V2_COVERAGE").as_deref() == Ok("1")
+    {
+        let count = |counter: &str, detail: Option<&str>| -> i64 {
+            execmain::coverage_snapshot()
+                .iter()
+                .filter(|r| {
+                    r.surface == "lane"
+                        && r.class == "modifytable"
+                        && r.counter == counter
+                        && detail.is_none_or(|d| r.detail == d)
+                })
+                .map(|r| r.value)
+                .sum()
+        };
+        assert!(
+            count("owned", None) >= 1,
+            "PGRUST_LANE_V2_DML=1 but the seed INSERTs were not lane-owned"
+        );
+        assert!(
+            count("refused", Some("dml-shape")) >= 3,
+            "UPDATE/DELETE must refuse as dml-shape"
+        );
+    }
+
     // --- WAL decode: every record off disk with the real xlogreader. ---
     transam_xlog::XLogFlush(transam_xlog_seams::xact_last_rec_end::call()).unwrap();
     let reader_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("reader")));

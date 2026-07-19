@@ -628,6 +628,119 @@ mod spill {
         ts.end();
     }
 
+    /// WAVE-2 WS-M INC-2 OPENER (integration contract §6 WS-M amendment 3):
+    /// the SPILLED store in the WINDOW BUFFER'S EXACT CONFIGURATION —
+    /// `begin_heap(false, ..)` + `set_eflags(0)` (emit pointer 0
+    /// FORWARD-ONLY) + extra pointers allocated per nodewindowagg's
+    /// `prepare_tuplestore`: BACKWARD-capable agg + per-func pointers,
+    /// forward-only frame-head/tail pointers — five pointers at
+    /// independent file positions, interleaved forward reads, mid-stream
+    /// BACKWARD steps and backward `skiptuples` on the capable pointers,
+    /// and EOF-then-backward (C tuplestore.c:1213-1227). This resolves the
+    /// audit-note-vs-source contradiction the wave-2 contract adjudicated
+    /// ("spill status — resolve by unit test at inc-2 start; audit note
+    /// presumed stale"): the ported TSS_WRITEFILE/READFILE arms fully
+    /// support the window's multi-read-pointer + backward configuration,
+    /// so T2-B giant-partition work may proceed. Access patterns mirror
+    /// the proven C-parity idioms of the three tests above; any failure
+    /// here is a genuine source divergence, not fixture drift.
+    #[test]
+    fn spill_window_buffer_multi_pointer_backward_config() {
+        setup();
+        let (_cwd, dir) = enter_datadir("winbuf");
+        let mcx = leaked_mcx();
+        let desc = int4_desc(mcx, 1);
+        let mut slot =
+            exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc.clone()));
+
+        // prepare_tuplestore's shape: non-random-access store, pointer 0
+        // re-flagged forward-only, then the window's pointer family.
+        let mut ts = Tuplestore::begin_heap(false, false, 64);
+        ts.set_eflags(0);
+        let agg = ts.alloc_read_pointer(EXEC_FLAG_BACKWARD);
+        let func = ts.alloc_read_pointer(EXEC_FLAG_BACKWARD);
+        let head = ts.alloc_read_pointer(0);
+        let tail = ts.alloc_read_pointer(0);
+        for v in 0..N {
+            put_i32(&mut ts, &desc, v);
+        }
+        assert!(!ts.in_memory(), "200k tuples must spill at 64KB");
+        assert!(temp_files(&dir) > 0);
+
+        // Emit pointer (0) drains a prefix — the per-row emit walk.
+        for v in 0..1_000 {
+            assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+            assert_eq!(read_i32(&mut slot), v);
+        }
+
+        // The frame-tail pointer skips deep into the file; the frame-head
+        // pointer advances a little — both forward-only, both positioned
+        // independently of pointer 0.
+        ts.select_read_pointer(tail).unwrap();
+        assert!(ts.skiptuples(5_000, true).unwrap());
+        assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+        assert_eq!(read_i32(&mut slot), 5_000);
+        ts.select_read_pointer(head).unwrap();
+        assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+        assert_eq!(read_i32(&mut slot), 0);
+
+        // The agg pointer reads a frame forward, then BACKWARD-skips to
+        // re-read it (the moving-frame restart cascade's access shape) —
+        // mid-file, while three other pointers sit at distant positions.
+        ts.select_read_pointer(agg).unwrap();
+        assert!(ts.skiptuples(500, true).unwrap());
+        for v in 500..510 {
+            assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+            assert_eq!(read_i32(&mut slot), v);
+        }
+        assert!(ts.skiptuples(10, false).unwrap());
+        for v in 500..510 {
+            assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+            assert_eq!(read_i32(&mut slot), v);
+        }
+        // Single-step backward reads (tuplestore_gettuple(false)): each
+        // returns the tuple before the last one returned.
+        assert!(ts.gettupleslot(false, false, &mut slot, mcx).unwrap());
+        assert_eq!(read_i32(&mut slot), 508);
+        assert!(ts.gettupleslot(false, false, &mut slot, mcx).unwrap());
+        assert_eq!(read_i32(&mut slot), 507);
+        // Forward resumes from just after the last returned tuple.
+        assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+        assert_eq!(read_i32(&mut slot), 508);
+
+        // Pointer-switch seek dance: every pointer kept its own position.
+        ts.select_read_pointer(0).unwrap();
+        assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+        assert_eq!(read_i32(&mut slot), 1_000);
+        ts.select_read_pointer(tail).unwrap();
+        assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+        assert_eq!(read_i32(&mut slot), 5_001);
+        ts.select_read_pointer(head).unwrap();
+        assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+        assert_eq!(read_i32(&mut slot), 1);
+
+        // The per-func pointer: forward to EOF then the first backward
+        // step returns the LAST tuple (the C EOF special case).
+        ts.select_read_pointer(func).unwrap();
+        assert!(ts.skiptuples(i64::from(N), true).unwrap());
+        assert!(!ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+        assert!(ts.gettupleslot(false, false, &mut slot, mcx).unwrap());
+        assert_eq!(read_i32(&mut slot), N - 1);
+        assert!(ts.gettupleslot(false, false, &mut slot, mcx).unwrap());
+        assert_eq!(read_i32(&mut slot), N - 2);
+
+        // copy_read_pointer across spilled positions (the window mark
+        // bookkeeping face): agg jumps to pointer 0's position.
+        ts.copy_read_pointer(0, agg).unwrap();
+        ts.select_read_pointer(agg).unwrap();
+        assert!(ts.gettupleslot(true, false, &mut slot, mcx).unwrap());
+        assert_eq!(read_i32(&mut slot), 1_001);
+
+        exectuples::exec_clear_tuple(&mut slot, mcx);
+        ts.end();
+        assert_eq!(temp_files(&dir), 0, "temp file must be removed at end");
+    }
+
     #[test]
     fn spill_clear_returns_to_memory() {
         setup();

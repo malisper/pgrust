@@ -3902,6 +3902,12 @@ pub fn agg_is_done(node: &AggStateData<'_>) -> bool {
     node.agg_done
 }
 
+/// Strategy read for dispatchers outside this crate (SE-AGGJOIN: the runtime
+/// hash-join arm's grouped/plain divert).
+pub fn agg_is_hashed(node: &AggStateData<'_>) -> bool {
+    node.plan.aggstrategy == AGG_HASHED
+}
+
 /// Build→Probe phase flag for the breaker: the hash table's `table_filled`
 /// IS the phase (exactly C's cross-call state; no new field).
 pub fn agg_hash_table_filled(node: &AggStateData<'_>) -> bool {
@@ -3974,6 +3980,258 @@ pub fn agg_hash_retrieve<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
     agg_retrieve_hash_table(node, estate, None)
+}
+
+// ===========================================================================
+// SE-AGGJOIN (band 87001) — the GROUPED runtime seam: per-worker hashed
+// builds (the breaker's own `agg_hash_build_accept` per row — C's checked
+// transition program, spill-mode-free by refusal) exported into
+// SELF-CONTAINED grouped partials (runtime_partial::GroupedRuntimePartial),
+// combined order-insensitive-exactly across workers, and absorbed into the
+// LEADER's hash table entry-by-entry so the canonical retrieve (finalize +
+// HAVING + projection, C's iteration) emits them. The runtime hash-join
+// multibuild walk is the one caller.
+// ===========================================================================
+
+/// Byval word-equality group-key types the grouped export/absorb admits:
+/// bool, "char", int2/4/8, oid, date — types whose grouping equality IS
+/// datum-word equality at the attribute width (NULLs group together, matching
+/// the (word, isnull) key representation).
+fn grouped_key_type_exportable(att: &::types_tuple::FormData_pg_attribute) -> bool {
+    att.attbyval
+        && matches!(att.attlen, 1 | 2 | 4 | 8)
+        && matches!(att.atttypid, 16 | 18 | 20 | 21 | 23 | 26 | 1082)
+}
+
+/// Fail-closed admission for the grouped runtime sink: a serial simple-split
+/// hashed Agg (single set, param-free — the breaker gate), untouched by any
+/// lane arm (no compact/sink/merge state), whose fold plan covers EVERY
+/// transition with order-insensitive-exact kinds (the runtime_partial
+/// whitelist — AvgAccum/Int128 numeric-family states included) and whose
+/// grouping keys are all byval int-family word-equality types.
+pub fn agg_grouped_runtime_admissible(node: &AggStateData<'_>) -> bool {
+    if node.plan.aggstrategy != AGG_HASHED
+        || node.plan.aggsplit != AGGSPLIT_SIMPLE
+        || !agg_hash_breaker_admissible(node)
+        || node.gsets.is_some()
+        || node.merge.is_some()
+        || node.persort.is_some()
+    {
+        return false;
+    }
+    let Some(ph) = node.perhash.as_ref() else { return false };
+    if ph.compact.is_some() || ph.sink_cap.is_some() || node.sink_emit.is_some() {
+        return false;
+    }
+    if !runtime_partial::agg_runtime_partial_admissible(node) {
+        return false;
+    }
+    let base = ph.hashslot.base();
+    let Some(desc) = base.tts_tupleDescriptor.as_ref() else { return false };
+    let nkeys = ph.hash_grp_col_idx_input.len();
+    if desc.attrs.len() < nkeys || nkeys == 0 {
+        return false;
+    }
+    desc.attrs[..nkeys].iter().all(grouped_key_type_exportable)
+}
+
+/// Width-normalized key word of one stored key datum (canonical value form:
+/// two equal group keys always normalize to the same word; NULL = 0).
+fn grouped_key_word(att: &::types_tuple::FormData_pg_attribute, d: Datum, isnull: bool) -> i64 {
+    if isnull {
+        return 0;
+    }
+    match att.attlen {
+        1 => (d.as_usize() as u8) as i64,
+        2 => d.as_i16() as i64,
+        4 => d.as_i32() as i64,
+        _ => d.as_i64(),
+    }
+}
+
+/// The inverse: rebuild the canonical datum from a normalized key word.
+fn grouped_key_datum(att: &::types_tuple::FormData_pg_attribute, w: i64) -> Datum {
+    match att.attlen {
+        1 => Datum::from_usize((w as u8) as usize),
+        2 => Datum::from_i16(w as i16),
+        4 => Datum::from_i32(w as i32),
+        _ => Datum::from_i64(w),
+    }
+}
+
+/// WORKER side (per morsel, cumulative-overwrite discipline — the M1 partial
+/// export's grouped twin): export the node's whole hash table into `out`.
+/// `Ok(false)` = the build left the exportable envelope (spill mode entered /
+/// ever spilled, or more than `max_groups` groups) — the caller refuses the
+/// engagement to the serial arm (fail-closed; no wrong results, the table is
+/// simply not exportable).
+pub fn agg_hash_export_grouped_into<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    max_groups: usize,
+    out: &mut runtime_partial::GroupedRuntimePartial,
+) -> PgResult<bool> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_HASHED);
+    let mcx = estate.es_query_cxt;
+    out.groups.clear();
+    out.scratch_ptrs.clear();
+    {
+        let ph = node.perhash.as_mut().expect("hashed Agg has perhash");
+        if ph.spill.mode || ph.spill.ever_spilled || ph.compact.is_some() {
+            return Ok(false);
+        }
+        if ph.hash_ngroups_current > max_groups as u64 {
+            return Ok(false);
+        }
+        let nkeys = ph.hash_grp_col_idx_input.len();
+        let mut it = 0u64;
+        while let Some(ix) = ph.hashtable.iterate(&mut it) {
+            let tup = ph.hashtable.entry_tuple(ix);
+            // SAFETY: entry images live in the node's table context for the
+            // table's lifetime (the retrieve path's identical store).
+            unsafe {
+                exectuples::exec_store_minimal_tuple_ptr(&mut ph.retrieve_slot, mcx, tup)
+            };
+            exectuples::slot_getallattrs(&mut ph.retrieve_slot);
+            let base = ph.retrieve_slot.base();
+            let desc = base
+                .tts_tupleDescriptor
+                .as_ref()
+                .expect("hash retrieve slot has a descriptor");
+            let mut key: runtime_partial::GroupKeyWords = Vec::with_capacity(nkeys);
+            for i in 0..nkeys {
+                let isnull = base.tts_isnull[i];
+                key.push((grouped_key_word(&desc.attrs[i], base.tts_values[i], isnull), isnull));
+            }
+            let pg = ph
+                .hashtable
+                .entry_additional(ix)
+                .expect("numtrans > 0 tables carry additional space");
+            out.groups.push((key, runtime_partial::RuntimePartial::default()));
+            out.scratch_ptrs.push(pg.as_ptr() as usize);
+        }
+    }
+    let runtime_partial::GroupedRuntimePartial { groups, scratch_ptrs } = out;
+    for (i, (_key, partial)) in groups.iter_mut().enumerate() {
+        let base = NonNull::new(scratch_ptrs[i] as *mut AggPerGroup)
+            .expect("entry pergroup pointer is non-null");
+        runtime_partial::export_partial_from(node, base, partial)?;
+    }
+    Ok(true)
+}
+
+/// Failure-path reset for a half-absorbed leader table (the rescan reset's
+/// perhash arm): the caller refuses to the serial arm, which must find the
+/// node exactly as ExecInitAgg left it.
+fn grouped_absorb_reset(node: &mut AggStateData<'_>) {
+    let numgroups = node.plan.numGroups as f64;
+    if let Some(ph) = node.perhash.as_mut() {
+        ph.table_filled = false;
+        ph.hashiter = 0;
+        ph.hash_ngroups_current = 0;
+        hashagg_reset_spill_state(ph, numgroups);
+        ph.spill.ever_spilled = false;
+        ph.spill.mode = false;
+        ph.hashtable.reset();
+        ph.table_ctx.reset();
+    }
+    // SAFETY: sole access path to the node during the reset (the rescan
+    // reset's own discipline); frees the entries' aggcontext initval copies.
+    unsafe { node.agg_node.as_mut() }.reset();
+}
+
+/// LEADER side: absorb the combined grouped partial into the node's OWN hash
+/// table — one entry per group (key datums rebuilt canonically, pergroup
+/// states written byte-for-byte via the runtime_partial absorb) — then flip
+/// the table to its filled phase so the canonical retrieve emits it.
+/// `Ok(false)` = refused fail-closed (touched table, group count at the
+/// spill limit, or a limit crossing mid-absorb); the table is reset and the
+/// serial arm proceeds as if nothing happened.
+pub fn exec_agg_grouped_runtime_partials<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    combined: &[(runtime_partial::GroupKeyWords, runtime_partial::RuntimePartial)],
+) -> PgResult<bool> {
+    debug_assert_eq!(node.plan.aggstrategy, AGG_HASHED);
+    let mcx = estate.es_query_cxt;
+    {
+        let Some(ph) = node.perhash.as_ref() else { return Ok(false) };
+        if ph.table_filled
+            || ph.hash_ngroups_current != 0
+            || ph.spill.mode
+            || ph.spill.ever_spilled
+            || ph.compact.is_some()
+        {
+            return Ok(false);
+        }
+        // Group count must sit clear of the spill threshold: an absorb that
+        // enters spill mode would drop groups (fail-closed pre-guard).
+        if combined.len() as u64 >= ph.hash_ngroups_limit.max(1) {
+            return Ok(false);
+        }
+    }
+    for (key, partial) in combined {
+        let pergroup = {
+            let AggStateData { perhash, trans_init, trans_typ, agg_node, .. } = &mut *node;
+            let ph = perhash.as_mut().expect("hashed Agg has perhash");
+            exectuples::exec_clear_tuple(&mut ph.hashslot, mcx);
+            {
+                let base = ph.hashslot.base_mut();
+                let desc = base
+                    .tts_tupleDescriptor
+                    .as_ref()
+                    .expect("hashslot has a descriptor")
+                    .clone();
+                if key.len() > base.tts_values.len() {
+                    None
+                } else {
+                    for (i, &(w, isnull)) in key.iter().enumerate() {
+                        base.tts_isnull[i] = isnull;
+                        base.tts_values[i] = if isnull {
+                            Datum::null()
+                        } else {
+                            grouped_key_datum(&desc.attrs[i], w)
+                        };
+                    }
+                    Some(())
+                }
+            }
+            .and_then(|()| {
+                exectuples::exec_store_virtual_tuple(&mut ph.hashslot);
+                let hash = ph.hashtable.hash_slot(&mut ph.hashslot).ok()?;
+                let table_mcx = ph.table_ctx.mcx();
+                let (ix, isnew) = ph
+                    .hashtable
+                    .lookup(&mut ph.hashslot, hash, Some(table_mcx), mcx)
+                    .ok()?;
+                let ix = ix?;
+                // Combined keys are deduplicated; a non-new entry means the
+                // key round-trip diverged — refuse, never miscombine.
+                if !isnew {
+                    return None;
+                }
+                initialize_hash_entry(ph, trans_init, trans_typ, *agg_node, ix, mcx).ok()?;
+                if ph.spill.mode {
+                    return None;
+                }
+                Some(
+                    ph.hashtable
+                        .entry_additional(ix)
+                        .expect("numtrans > 0 tables carry additional space")
+                        .cast::<AggPerGroup>(),
+                )
+            })
+        };
+        match pergroup {
+            Some(pg) => runtime_partial::absorb_partial_states_at(node, pg, partial)?,
+            None => {
+                grouped_absorb_reset(node);
+                return Ok(false);
+            }
+        }
+    }
+    agg_hash_build_finish(node, estate)?;
+    Ok(true)
 }
 
 /// Emit-side top-N boundary spec (lane-v2 topnemit): the resolved pergroup

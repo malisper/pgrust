@@ -43,8 +43,16 @@
 //!     node per (re)init, like the seqscan class); structural child refusals
 //!     once per memoized verdict, dynamic EPQ/backward/parallel gates per
 //!     offered call.
-//!   * `ProjectSet` — never owned (a documented wholesale refuse, design §4);
-//!     one REFUSED tick per offered call.
+//!   * `ProjectSet` — at default config never owned (the documented
+//!     wholesale refuse, design §4): one REFUSED tick per offered call,
+//!     unchanged. With the default-OFF `PGRUST_LANE_V2_ROWMODE` knob ON
+//!     (Phase-0 row-mode facility, rowmode.rs), the admitted
+//!     `ProjectSet ← childless Result` shape ticks OWNED once per offered
+//!     pull the row-mode drive owns (the per-pull decision cadence of the
+//!     index classes); refusals stay per offered call. NOTE for a future
+//!     default flip: ProjectSet compositions then bypass `result_arm`, so
+//!     the `result` class's owned floor must be reseeded alongside the
+//!     `projectset` one (see notes/ws-e-rowmode-ledger.md).
 //!
 //! Overhead: with the lane OFF nothing here ever runs (the dispatch hooks gate
 //! on `lanev2::enabled()` before any lane code). With the lane ON but
@@ -123,9 +131,109 @@ pub(super) enum ShapeClass {
     /// unfiltered). Group-level effect is reported by the `counter` dump
     /// lines (`topnemit-groups-seen` / `topnemit-groups-cut`).
     TopnEmit = 18,
+    /// MergeJoin hosted as a row-mode LEAF (Phase-1 WS-G, rowmode.rs
+    /// `try_own_merge_join` behind the default-OFF `PGRUST_LANE_V2_ROWMODE`
+    /// knob; the ported FSM drives both children Volcano inside the leaf).
+    /// OWNED once per drive start (the Group cadence; each owned PG pull
+    /// starts one `pull_step_rows` drive here). Ticks fire ONLY knob-ON:
+    /// knob-OFF ticks NOTHING — there is no pre-existing MergeJoin wholesale
+    /// refuse (unlike ProjectSet), so default-config accounting is
+    /// byte-identical by construction and the class stays silent until a
+    /// flip seeds its floors (integration contract §2d).
+    MergeJoin = 19,
+    /// WindowAgg lane hosting (Phase-1 WS-H, lanev2/windows.rs behind the
+    /// default-OFF `PGRUST_LANE_V2_WINDOWS` knob). OWNED once per drive
+    /// start (the Group cadence). Ticks fire ONLY knob-ON: knob-OFF ticks
+    /// NOTHING (silent at default config, zero floor drift — integration
+    /// contract §2d; floor seeding is flip-time work).
+    WindowAgg = 20,
+    // -----------------------------------------------------------------------
+    // Wave-2 vocabulary (THE one wave-2 vocab commit, integration contract
+    // §1 — WS-L authors, everyone consumes; nobody edits discriminants after
+    // this commit; later needs go through a reconciler amendment).
+    //
+    // Classes 21-36 are the WS-L row-mode read-side tail (rowmode_tail.rs
+    // behind the default-OFF `PGRUST_LANE_V2_ROWMODE` knob): pure delegation
+    // leaves through the row-mode host template. Tick cadence for ALL of
+    // them = the MergeJoin/WindowAgg cadence: OWNED once per drive start
+    // (each owned PG pull starts one `pull_step_rows` drive); dynamic
+    // per-call EPQ/backward/instrumented refusals only. Ticks fire ONLY
+    // knob-ON — none of these shapes has a pre-existing wholesale refuse, so
+    // knob-OFF ticks NOTHING and default-config accounting stays
+    // byte-identical by construction (§2d); floors seed at flip time.
+    //
+    // SubqueryScan REUSES class 10 (§1: mechanism attribution goes in the
+    // EngineEvent detail string, never a second class). LockRows class 36 is
+    // SHARED by WS-L's delegation hosting and WS-N's later TupleOp hosting
+    // (same rule). WindowAgg T2 REUSES class 20.
+    // -----------------------------------------------------------------------
+    FunctionScan = 21,
+    TableFuncScan = 22,
+    ValuesScan = 23,
+    SampleScan = 24,
+    TidScan = 25,
+    TidRangeScan = 26,
+    NamedTuplestoreScan = 27,
+    Material = 28,
+    CteScan = 29,
+    /// RecursiveUnion + its WorkTableScan leaves (classes 30/31) follow the
+    /// same delegation cadence; the iteration protocol stays inside the
+    /// ported `exec_recursive_union` body (the shared-slot law binds the
+    /// RowSource: es_worktable_shared take-use-put-back per call, no cached
+    /// handles or read positions across `next_row` calls — contract §3.8).
+    RecursiveUnion = 30,
+    WorkTableScan = 31,
+    Memoize = 32,
+    SetOp = 33,
+    MergeAppend = 34,
+    Unique = 35,
+    /// SHARED class (contract §1): WS-L's LockRows-without-EPQ delegation
+    /// hosting now, WS-N inc-2b's TupleOp hosting later — mechanism
+    /// attribution via the EngineEvent detail string, never a second class.
+    LockRows = 36,
+    /// RESERVED for WS-N (lanev2/dml.rs behind `PGRUST_LANE_V2_DML`):
+    /// authored here per contract §1/§6-WS-L(1) so the wave-2 vocabulary is
+    /// one commit. Ticks NOTHING until dml.rs lands.
+    ModifyTable = 37,
+    // -----------------------------------------------------------------------
+    // Wave-9.5 cursor-admission vocabulary (WS-AI inc-1b,
+    // `se/wave95-cursors-1b`, band 92001+; chartered append — the registry
+    // is APPEND-ONLY, nobody edits discriminants above this line; the
+    // wave-9 §5 zero-mint expectation is superseded by the inc-1b charter,
+    // recorded in notes/se-wave9-ai.md).
+    // -----------------------------------------------------------------------
+    /// Forward-pull cursor admission (lane-cursors.md §1-§3, contract §3):
+    /// the WHOLE-RUN refusal classes of the budgeted (FETCH-cadence) emit
+    /// sink. Cadence = once per budgeted `execute_plan` run (never per
+    /// tuple); ticks fire only with `PGRUST_LANE_V2_CURSORS` ON (knob-OFF
+    /// never reaches the classifier), so default-config accounting is
+    /// byte-identical by construction. A cursor refusal NEVER changes
+    /// output bytes: the run rides Volcano exactly as today (fail-open law).
+    Cursor = 38,
+    // -----------------------------------------------------------------------
+    // Wave-9.5 SPI-admission class (WS-AJ Stage-A seam, `se/spi-stage-a`;
+    // APPEND-ONLY chartered mint, recorded in notes/se-spi-stage-a.md; the
+    // wave-9 §5 placeholder in notes/se-phase0-integration.md names this
+    // landing).
+    // -----------------------------------------------------------------------
+    /// Count-limited SPI-statement admission (docs/design/lane-spi.md §1/§3
+    /// Stage A): the WHOLE-RUN refusal classes of a budgeted tcount-limited
+    /// `CommandDest::Spi` run — `_SPI_pquery`'s STOP-then-END shape and the
+    /// portal-fetch (SPI cursor / plpgsql FOR loop) resumable shape alike
+    /// (notes/se-spi-stage-a.md §8). Cadence = once per budget-eligible
+    /// `execute_plan` run (never per tuple); ticks fire only with
+    /// `PGRUST_LANE_V2_SPI` ON (knob-OFF never reaches the classifier), so
+    /// default-config accounting is byte-identical by construction. An SPI
+    /// refusal NEVER changes output bytes: the statement rides Volcano
+    /// exactly as today (fail-open law; refusal-not-error). Seam-visibility
+    /// honesty (the `CursorWithHold` precedent): an SPI-entered run with a
+    /// caller-supplied non-SPI receiver (`SPI_execute_extended` dest
+    /// option) is NOT seam-visible below `executor_run` — it installs no
+    /// budget and ticks nothing; no RESERVED variant is minted for it.
+    Spi = 39,
 }
 
-const N_CLASSES: usize = 19;
+const N_CLASSES: usize = 40;
 
 impl ShapeClass {
     pub(super) const ALL: [ShapeClass; N_CLASSES] = [
@@ -148,6 +256,27 @@ impl ShapeClass {
         ShapeClass::Gather,
         ShapeClass::AdaptiveTopk,
         ShapeClass::TopnEmit,
+        ShapeClass::MergeJoin,
+        ShapeClass::WindowAgg,
+        ShapeClass::FunctionScan,
+        ShapeClass::TableFuncScan,
+        ShapeClass::ValuesScan,
+        ShapeClass::SampleScan,
+        ShapeClass::TidScan,
+        ShapeClass::TidRangeScan,
+        ShapeClass::NamedTuplestoreScan,
+        ShapeClass::Material,
+        ShapeClass::CteScan,
+        ShapeClass::RecursiveUnion,
+        ShapeClass::WorkTableScan,
+        ShapeClass::Memoize,
+        ShapeClass::SetOp,
+        ShapeClass::MergeAppend,
+        ShapeClass::Unique,
+        ShapeClass::LockRows,
+        ShapeClass::ModifyTable,
+        ShapeClass::Cursor,
+        ShapeClass::Spi,
     ];
 
     pub(super) fn name(self) -> &'static str {
@@ -171,6 +300,27 @@ impl ShapeClass {
             ShapeClass::Gather => "gather",
             ShapeClass::AdaptiveTopk => "adaptivetopk",
             ShapeClass::TopnEmit => "topnemit",
+            ShapeClass::MergeJoin => "mergejoin",
+            ShapeClass::WindowAgg => "windowagg",
+            ShapeClass::FunctionScan => "functionscan",
+            ShapeClass::TableFuncScan => "tablefuncscan",
+            ShapeClass::ValuesScan => "valuesscan",
+            ShapeClass::SampleScan => "samplescan",
+            ShapeClass::TidScan => "tidscan",
+            ShapeClass::TidRangeScan => "tidrangescan",
+            ShapeClass::NamedTuplestoreScan => "namedtuplestorescan",
+            ShapeClass::Material => "material",
+            ShapeClass::CteScan => "ctescan",
+            ShapeClass::RecursiveUnion => "recursiveunion",
+            ShapeClass::WorkTableScan => "worktablescan",
+            ShapeClass::Memoize => "memoize",
+            ShapeClass::SetOp => "setop",
+            ShapeClass::MergeAppend => "mergeappend",
+            ShapeClass::Unique => "unique",
+            ShapeClass::LockRows => "lockrows",
+            ShapeClass::ModifyTable => "modifytable",
+            ShapeClass::Cursor => "cursor",
+            ShapeClass::Spi => "spi",
         }
     }
 }
@@ -331,9 +481,124 @@ pub(super) enum RefuseReason {
     /// domain, or an unarmable staging prefix). Ticked once per memoized
     /// agg-lane choice; the build keeps the per-row feed byte-identically.
     RedKeyShape = 34,
+    /// The ONE new wave-2 refusal variant (integration contract §1; part of
+    /// the one wave-2 vocab commit, authored by WS-L for WS-N): DML shapes
+    /// the lane-v2 dml hosting (lanev2/dml.rs, `PGRUST_LANE_V2_DML`)
+    /// declines — triggers, cross-partition specifics, MERGE arms outside
+    /// the admitted set. RESERVED: ticks NOTHING until WS-N's dml.rs lands
+    /// (WS-L, WS-M, WS-P add ZERO reasons; the Layer-A assert reads reasons,
+    /// never adds them).
+    DmlShape = 35,
+    // -----------------------------------------------------------------------
+    // Wave-9.5 cursor-admission refusal taxonomy (WS-AI inc-1b,
+    // `se/wave95-cursors-1b`; APPEND-ONLY — chartered mint, recorded in
+    // notes/se-wave9-ai.md; the wave-9 §5 zero-mint expectation is
+    // superseded by the inc-1b charter). All five tick ONLY under the
+    // `ShapeClass::Cursor` class, once per budgeted run, knob-ON only; a
+    // cursor refusal lands the WHOLE portal on Volcano byte-identically
+    // (the fail-open law) — these rows are observability, never semantics.
+    // -----------------------------------------------------------------------
+    /// TOMBSTONE (SUNSET EXECUTED — se/seam-wiring, SE10-GATES item 1;
+    /// notes/se-seam-wiring.md §5): the inc-1b scrollable-portal refusal.
+    /// The tick site (the classifier's eflags arm,
+    /// `cursor_admission_refusal`) and the `cursor cursor-scroll`
+    /// allowlist row were REMOVED together once lane fill owned scroll
+    /// stores — the audited shrink the wave-9.5 SUNSET note scheduled.
+    /// Store-served SCROLL/HOLD portals are lane-ADMITTED; the eflags a
+    /// run still carries (CURRENT-OF-eligible row-chain fills, D-CA-2's
+    /// fence) refuse per-scan via `batch_allowed` and roll up as
+    /// `cursor-plan-refused`. NEVER-TICKING; the variant stays because the
+    /// registry is append-only and discriminants never move.
+    CursorScroll = 36,
+    /// Non-forward demand on a budgeted run (backward FETCH reaching the
+    /// run seam). Reachable only through scroll-capable portals (NO SCROLL
+    /// backward errors above the seam, pquery.rs no_scroll arm), but named
+    /// apart from `CursorScroll` because the corpus's explicit-backward
+    /// cells assert the direction demand, not the portal capability.
+    CursorBackward = 37,
+    /// SUNSET (wave-10 REMOVES this class, same ratification as
+    /// `CursorScroll` — the two are named consistently so the wave-10
+    /// removal is one audited shrink): WITH HOLD portal. RESERVED tick
+    /// site: holdability is portal-level state (`CURSOR_OPT_HOLD`,
+    /// portalcmds) and is NOT visible below the `executor_run` seam —
+    /// today's structural posture already satisfies §5 (the persist drive
+    /// is a count-0 run, which never installs a budget; pre-COMMIT FETCHes
+    /// are ordinary forward budgeted runs and resume-forward is the
+    /// DECIDED §5 shape). Ticks NOTHING until a seam-visible holdability
+    /// signal exists or wave-10 removes it, whichever lands first
+    /// (`DmlShape` reserved-row precedent).
+    CursorWithHold = 38,
+    /// `PersistHoldablePortal`'s COMMIT-time persist drive over an engaged
+    /// lane pipeline. RESERVED tick site, same seam-visibility argument as
+    /// `CursorWithHold` (the persist drive arrives as a plain count-0
+    /// forward/NoMovement run); its wave-10 disposition rides the WITH-HOLD
+    /// lazy-materialized-store contract (not marked SUNSET here — wave-10
+    /// decides whether the persist path keeps a named class).
+    CursorPersistHoldable = 39,
+    /// The budgeted run's top plan carried no lane engagement — the whole
+    /// portal rides Volcano (exactly as today). The plan's SPECIFIC refusal
+    /// reasons tick under their own classes at the per-pull gates; this is
+    /// the cursor-level roll-up. inc-1b detection breadth: scan-class
+    /// engagement (seqscan/cbscan memoized verdicts + settled parks) —
+    /// breaker-lane engagement (agg/sort/join builds) widens the detector
+    /// in inc-1c (recorded in notes/se-wave9-ai.md; over-ticking on
+    /// breaker-engaged plans is armed-accounting-only, never semantics).
+    CursorPlanRefused = 40,
+    // -----------------------------------------------------------------------
+    // Wave-10 cursors inc-2 (WS-CB, `se/wave10-ws-cb`; APPEND-ONLY —
+    // contract §3.3, the increment's SINGLE vocabulary mint; allowlist row
+    // in the same commit; worklog notes/se-wave10-cb.md).
+    // -----------------------------------------------------------------------
+    /// A store fill over a CURRENT-OF-eligible plan (contract §4.1) uses
+    /// the ROW-CHAIN fill: the v1 tid capture reads the scan state per
+    /// row, so the lane batch fill declines. A mode choice inside a
+    /// still-store-served cursor (fetch-invisible). ARMED (SEAM-WIRING,
+    /// SE10-GATES item 1): the tick face is
+    /// `push::cursor_fill_tid_capture_refused`, called through the
+    /// execmain_seams face from `fill_portal_store_to`'s eligible branch —
+    /// where the eligibility answer lives. CADENCE HONESTY (the
+    /// aj-allowlist-honesty family): once per fill_to CALL that drives the
+    /// executor, i.e. per FETCH-with-deficit on an eligible portal — an
+    /// UNBOUNDED-cadence row (fwd corpus: ~99k ticks/run), never per row.
+    /// Named follow-up (chartered, not inc-2): lane fill supplies per-row
+    /// `(tableoid, ctid)` from batch rowref identity, retiring this
+    /// reason. Contract note: authored as "next free discriminant, 36"
+    /// before inc-1b's chartered mint landed 36..40; next free is 41
+    /// (worklog §1 drift record).
+    CursorCurrentOfTidCapture = 41,
+    // Wave-9.5 SPI-admission refusal (WS-AJ Stage-A seam, `se/spi-stage-a`;
+    // APPEND-ONLY chartered mint, recorded in notes/se-spi-stage-a.md). ONE
+    // new variant: the classifier's shape arms REUSE the generic vocabulary
+    // (`Backward` / `ScrollMark` / `ParallelGate` — the WS-AI ParallelGate
+    // precedent). REACHABILITY, corrected by the review re-baseline
+    // (notes/se-spi-stage-a.md §8; the original "all three structurally
+    // unreachable from `_SPI_pquery`" record was falsified live):
+    // `ScrollMark` ticks per fetch for every auto-SCROLL SPI portal (plain
+    // plpgsql FOR loops whose plan supports backward scan —
+    // SPI_cursor_open picks CURSOR_OPT_SCROLL, PortalStart passes
+    // REWIND|BACKWARD eflags); `Backward` ticks via SPI_scroll_cursor_fetch
+    // (plpgsql FETCH BACKWARD); both carry allowlist rows. `ParallelGate`
+    // stays the fail-closed serial-law pin (count-limited runs serial by
+    // the ported execmain.rs use_parallel_mode gate; no row). Ticks ONLY
+    // under `ShapeClass::Spi`, once per budgeted run, knob-ON only; a
+    // refusal lands the WHOLE statement on Volcano byte-identically
+    // (fail-open law) — observability, never semantics.
+    // -----------------------------------------------------------------------
+    /// The budgeted SPI run's plan carried no lane engagement — the whole
+    /// statement rides Volcano (exactly as today). The plan's SPECIFIC
+    /// refusal reasons tick under their own classes at the per-pull gates;
+    /// this is the SPI-level roll-up, ticked at the settle walk.
+    /// Detection breadth = the WS-AI inc-1b scan-class detector (seqscan /
+    /// cbscan memoized verdicts + settled claims); the same inc-1c breaker
+    /// widening rides for both classes.
+    /// Board-act drift record (the WS-CB "authored as 36" precedent
+    /// above): authored as "next free discriminant, 41" on the branch
+    /// before wave-10's `CursorCurrentOfTidCapture` landed 41; renumbered
+    /// at the SE-BOARD-SPI merge — next free is 43.
+    SpiPlanRefused = 42,
 }
 
-const N_REASONS: usize = 35;
+const N_REASONS: usize = 43;
 
 impl RefuseReason {
     pub(super) fn name(self) -> &'static str {
@@ -373,6 +638,14 @@ impl RefuseReason {
             RefuseReason::MultiKeyShape => "multikey-shape",
             RefuseReason::ExprKeyShape => "exprkey-shape",
             RefuseReason::RedKeyShape => "redkey-shape",
+            RefuseReason::DmlShape => "dml-shape",
+            RefuseReason::CursorScroll => "cursor-scroll",
+            RefuseReason::CursorBackward => "cursor-backward",
+            RefuseReason::CursorWithHold => "cursor-with-hold",
+            RefuseReason::CursorPersistHoldable => "cursor-persist-holdable",
+            RefuseReason::CursorPlanRefused => "cursor-plan-refused",
+            RefuseReason::CursorCurrentOfTidCapture => "cursor-currentof-tidcapture",
+            RefuseReason::SpiPlanRefused => "spi-plan-refused",
         }
     }
 
@@ -414,6 +687,14 @@ impl RefuseReason {
             MultiKeyShape,
             ExprKeyShape,
             RedKeyShape,
+            DmlShape,
+            CursorScroll,
+            CursorBackward,
+            CursorWithHold,
+            CursorPersistHoldable,
+            CursorPlanRefused,
+            CursorCurrentOfTidCapture,
+            SpiPlanRefused,
         ][i]
     }
 }
@@ -474,11 +755,23 @@ pub(super) fn stats_dir() -> Option<&'static PathBuf> {
         .as_ref()
 }
 
+/// The no-dump-dir arming env for the pgrust_lane_coverage view (WS-C,
+/// single-executor Phase 0.2): `PGRUST_LANE_V2_COVERAGE=1` arms the ticks
+/// without arming the TSV dump-on-exit (which still requires the dir).
+/// Counters stay opt-in because the index/IOS/bitmap classes tick per pull;
+/// always-on is a ledgered measurement (WS-C inc-2).
+pub(super) fn coverage_armed() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_LANE_V2_COVERAGE").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
 /// Record an OWNED decision for `class`. One cached load + branch when
-/// accounting is disarmed.
+/// accounting is disarmed (`armed()` memoizes the arm-switch disjunction).
 #[inline]
 pub(super) fn tick_owned(class: ShapeClass) {
-    if stats_dir().is_none() {
+    if !armed() {
         return;
     }
     OWNED[class as usize].fetch_add(1, Relaxed);
@@ -488,18 +781,81 @@ pub(super) fn tick_owned(class: ShapeClass) {
 /// Record a REFUSED decision for `class` with its reason.
 #[inline]
 pub(super) fn tick_refused(class: ShapeClass, reason: RefuseReason) {
-    if stats_dir().is_none() {
+    if !armed() {
         return;
     }
     REFUSED[class as usize][reason as usize].fetch_add(1, Relaxed);
     arm_dump_on_thread_exit();
+    // Layer-A assert-mode cold tail (WS-P inc-2; wave-2 contract §4: WS-P's
+    // ONLY stats.rs edit). Reads the (class, reason) vocabulary, never adds
+    // to it. Default config never reaches this line (the `armed()` early
+    // return above fires first — refusal-path cost byte-identical); with
+    // accounting armed it is one memoized-bool load + branch unless
+    // PGRUST_LANE_V2_ASSERT_COVERED is set (diagnostics channels only), in
+    // which case a manifest-covered class refusing an unallowed reason
+    // raises `volcano-unreachable:` (census.rs module doc, OQ10).
+    super::census::assert_covered_tail(class, reason);
 }
 
-/// Accounting armed? Callers may gate row-counting work (a per-batch
-/// popcount) on this before calling `tick_topkcut_rows`.
+/// Accounting armed (either the TSV dump dir or the coverage-view env)?
+/// Callers may gate row-counting work (a per-batch popcount) on this before
+/// calling `tick_topkcut_rows`.
+///
+/// MEMOIZED disjunction (se-entrycost): both arming sources are
+/// process-static envs, and `tick_owned` sits on the select1/prepared hot
+/// path (`try_own_result` ticks once per execution). Testing the two
+/// OnceLocks separately here cost the entry-cost pair measurable
+/// instructions per query; one cached bool restores the pre-coverage cost
+/// (exactly one OnceLock fast path + branch).
 #[inline]
 pub(super) fn armed() -> bool {
-    stats_dir().is_some()
+    static ARMED: OnceLock<bool> = OnceLock::new();
+    *ARMED.get_or_init(|| stats_dir().is_some() || coverage_armed())
+}
+
+// ---------------------------------------------------------------------------
+// Coverage-view snapshot accessors (lanev2/coverage.rs): relaxed loads of the
+// process-cumulative counters, enumerated from the vocabulary tables above —
+// the classifier source of truth, never a hand-written list. Counts derive
+// from N_CLASSES/N_REASONS (integration contract R-VOCAB: no literals).
+// ---------------------------------------------------------------------------
+
+pub(super) const fn n_classes() -> usize {
+    N_CLASSES
+}
+
+#[cfg(test)]
+pub(super) const fn n_reasons() -> usize {
+    N_REASONS
+}
+
+/// Every refusal-reason display name, by index (the full frozen vocabulary;
+/// the derived-count tests' enumeration source).
+#[cfg(test)]
+pub(super) fn reason_names() -> Vec<&'static str> {
+    (0..N_REASONS).map(|i| RefuseReason::from_index(i).name()).collect()
+}
+
+/// Every (class, owned-count) cell, zeros included.
+pub(super) fn owned_snapshot() -> Vec<(ShapeClass, u64)> {
+    ShapeClass::ALL
+        .iter()
+        .map(|&c| (c, OWNED[c as usize].load(Relaxed)))
+        .collect()
+}
+
+/// Every nonzero (class, reason, count) refusal cell.
+pub(super) fn refused_snapshot() -> Vec<(ShapeClass, RefuseReason, u64)> {
+    let mut v = Vec::new();
+    for class in ShapeClass::ALL {
+        for (i, cell) in REFUSED[class as usize].iter().enumerate() {
+            let n = cell.load(Relaxed);
+            if n > 0 {
+                v.push((class, RefuseReason::from_index(i), n));
+            }
+        }
+    }
+    v
 }
 
 /// Record one zone-adaptive top-N demotion (ambiguous boundary tie →
@@ -728,6 +1084,15 @@ fn dump() {
         "counter\trefsort-demoted\t{}\n",
         REFSORT_DEMOTED.load(Relaxed)
     ));
+    // --- WS-CB wave-10 (cursors inc-2 §6 staging; worklog EX-CB-2): the
+    // run-seam backward-drive evidence counter — the post-flip deletion
+    // bake reads this at zero across all corpora. Static lives in push.rs
+    // (the WS-CB grant surface); this is the dump row only.
+    out.push_str(&format!(
+        "counter\trun-seam-backward\t{}\n",
+        super::run_seam_backward_evidence_count()
+    ));
+    // --- end WS-CB wave-10 ---
     let pid = init_small::globals::process_id();
     let final_path = dir.join(format!("lane-v2-stats.{pid}.tsv"));
     let tmp_path = dir.join(format!(

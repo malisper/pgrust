@@ -275,6 +275,14 @@ pub fn CreatePortal(name: &str, allowDup: bool, dupSilent: bool) -> PgResult<Por
             portalPos: 0,
             creation_time,
             visible: true,
+            // WS-CA wave-10 (cursors inc-2): store fields idle until
+            // PortalStart's arming decision.
+            cursorStoreArmed: false,
+            cursorStore: TuplestoreHandle::NULL,
+            cursorFillExhausted: false,
+            currentOfEligible: None,
+            cursorCaptureBatch: false,
+            cursorTidStore: TuplestoreHandle::NULL,
         };
         // Portal-slot reuse: overwrite a parked slot no clone can still see
         // (is_unique); otherwise a fresh allocation. The overwrite drops the
@@ -399,6 +407,19 @@ pub fn PortalCreateHoldStore(portal: &Portal<'static>) -> PgResult<()> {
     Ok(())
 }
 
+// --- WS-CA wave-10 (cursors inc-2, contract §7.3) --------------------------
+//
+// RETIRED (SEAM-WIRING, SE10-GATES item 1 — CB review F1(a)): the portal
+// layer's duplicate `PGRUST_LANE_V2_CURSORS` memo cell (`CURSOR_STORE` +
+// `cursor_store_enabled` + `cursor_store_set_for_tests`) lived here between
+// the CA landing and the seam wiring. THE single knob cell is
+// lanev2/push.rs `CURSORS`; the portal layer reads it through the
+// `execmain_seams::cursor_store_fill_enabled` seam (pquery PortalStart),
+// and unit batteries flip it through the execmain crate-root re-export
+// `cursor_store_fill_set_for_tests`. Two cells parsing one env var could
+// skew under the two independent test levers — closed by construction.
+// --- end WS-CA wave-10 ------------------------------------------------------
+
 pub fn PinPortal(portal: &Portal<'static>) -> PgResult<()> {
     let mut p = portal.borrow_mut();
     if p.portalPinned {
@@ -504,6 +525,27 @@ pub fn PortalDrop(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<()> {
             PortalName::new(&p.name),
         )
     };
+    // WS-CA wave-10: the cursor store + tid sidecar die with the portal
+    // (contract §1.1 "dies at PortalDrop"; §2.5 "the store is discarded at
+    // portal cleanup"). Freed ahead of holdStore below; tuplestore_end closes
+    // any spill file.
+    let (cursor_store, cursor_tid_store) = {
+        let mut p = portal.borrow_mut();
+        p.cursorStoreArmed = false;
+        p.cursorFillExhausted = false;
+        p.currentOfEligible = None;
+        p.cursorCaptureBatch = false;
+        (
+            core::mem::replace(&mut p.cursorStore, TuplestoreHandle::NULL),
+            core::mem::replace(&mut p.cursorTidStore, TuplestoreHandle::NULL),
+        )
+    };
+    if !cursor_store.is_null() {
+        tuplestore_hold_seams::tuplestore_end::call(cursor_store);
+    }
+    if !cursor_tid_store.is_null() {
+        tuplestore_hold_seams::tuplestore_end::call(cursor_tid_store);
+    }
 
     // C frees a leftover QueryDesc with the portal context (failed portals
     // skip ExecutorEnd); the owning registry entry must drop explicitly.
@@ -637,6 +679,11 @@ fn try_park(portal: &Portal<'static>, isTopCommit: bool) -> PgResult<bool> {
             || p.cleanup != PortalCleanupHook::PortalCleanup
             || !p.holdStore.is_null()
             || p.holdContext.is_some()
+            // WS-CA wave-10: a store-armed cursor portal never parks (its
+            // store/sidecar are position-carrying per-portal state).
+            || p.cursorStoreArmed
+            || !p.cursorStore.is_null()
+            || !p.cursorTidStore.is_null()
             || p.autoHeld
             || !p.queryEnv.is_null()
             || !p.planContext.is_null()
@@ -922,7 +969,15 @@ pub fn PortalHashTableDeleteAll() -> PgResult<()> {
 }
 
 fn HoldPortal(portal: &Portal<'static>) -> PgResult<()> {
-    PortalCreateHoldStore(portal)?;
+    // WS-CA wave-10 (contract §1.1): a store-armed SCROLL+HOLD portal created
+    // its holdStore at first fill demand; commit persists THAT store
+    // (fill_to(EOF) inside PersistHoldablePortal) instead of minting a new
+    // one. Everything else (incl. the knob-OFF world) keeps C's shape.
+    if portal.borrow().holdStore.is_null() {
+        PortalCreateHoldStore(portal)?;
+    } else {
+        debug_assert!(portal.borrow().cursorStoreArmed);
+    }
     portalcmds_seams::persist_holdable_portal::call(portal)?;
     PortalReleaseCachedPlan(portal);
     let mut p = portal.borrow_mut();

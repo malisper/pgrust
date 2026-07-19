@@ -515,6 +515,12 @@ fn ExplainOnePlanRef<'mcx>(
     if es.generic {
         eflags |= EXEC_FLAG_EXPLAIN_GENERIC;
     }
+    // pgrust-only EXPLAIN (ENGINE): arm per-node engine attribution capture.
+    // Absent (the default), the flag never sets and es_engine_events stays
+    // empty — default EXPLAIN output is byte-identical.
+    if es.engine {
+        eflags |= types_slot::EXEC_FLAG_ENGINE_REPORT;
+    }
     if let Some(ic) = into_clause {
         eflags |= createas_seams::get_into_rel_eflags::call(ic.skipData);
     }

@@ -76,6 +76,10 @@ impl Drop for BlockingIoSection {
             // whose unsafe constructor's contract makes the semaphore
             // outlive every section; !Send keeps us on the donating thread.
             unsafe { (*self.sem).acquire() }
+            // Grant follows permit (§2.8 × ledger composition): retake the
+            // width grant only once the permit is back (no-op under knob
+            // OFF / off-task).
+            crate::sched::ledger_restore_current();
         }
     }
 }
@@ -86,6 +90,10 @@ impl Drop for BlockingIoSection {
 pub fn blocking_io_section() -> BlockingIoSection {
     let sem = PERMIT_SEM.with(Cell::get);
     if !sem.is_null() {
+        // Grant follows permit (§2.8 × ledger composition): donate the
+        // width grant FIRST so a standby woken by the permit release finds
+        // the slot joinable (no-op under knob OFF / off-task).
+        crate::sched::ledger_donate_current();
         // SAFETY: as in Drop.
         unsafe { (*sem).release() }
     }

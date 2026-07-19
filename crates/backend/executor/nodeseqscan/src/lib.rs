@@ -42,6 +42,10 @@ pub struct SeqScanState<'mcx> {
     pub ss: ScanState<'mcx>,
     variant: SeqScanVariant,
     plan_node_id: i32,
+    // The planner's output-row estimate for this scan (Plan.plan_rows,
+    // retained at init like plan_node_id): plan-time admission floors read
+    // it without a plan-tree walk (K1 heap grouped small-N floor).
+    plan_rows: f64,
     parallel_aware: bool,
     // Keeps the scan desc's NonNull target alive for the scan's lifetime.
     parallel: Option<std::sync::Arc<ParallelTableScanDescShared>>,
@@ -82,9 +86,37 @@ pub struct SeqScanState<'mcx> {
     // per-pull refusal accounting ticks tiny-input-floor instead of
     // admission-economics. Reset with cb_standalone on park.
     cb_tiny: bool,
+    // Cursor-suspension park record (WS-AI wave-9.5, lane-cursors.md §2):
+    // (b0, b1, pos, n) — the settled lane-staged page batch's block b0, the
+    // remainder window end b1 (forward walk [b0, b1), no wrap — the
+    // park-point probe refuses wrap-capable walks), and the consume cursor
+    // at suspension. Written by `seq_scan_cursor_settle` (which released
+    // the staged claim's pin — R3 zero-pins-at-settle), consumed by
+    // `seq_scan_cursor_resume` (restage + cursor restore). Reset on
+    // rescan/skeleton-park (a rebound or rescanned scan restarts; a stale
+    // park record must never reposition it).
+    lane_park: Option<SeqScanCursorPark>,
+    // SE-R41 v2 cursor-fill pin posture (see `lane_hold_pin()`): true once a
+    // cursor store batch fill engaged this scan — the staged page batch and
+    // its pin survive suspension (C-parity Volcano posture), and
+    // `seq_scan_cursor_settle` refuses to park. Reset on rescan (the next
+    // engagement re-establishes it).
+    lane_hold_pin: bool,
     // pgrcolumnar relations only: plan-derived column need-set + zone-mappable
     // conjuncts, installed on the scan desc at open (pgrcolumnar-impl.md §7.3).
     cb_scan: Option<std::boxed::Box<CbScanInfo>>,
+}
+
+/// Cursor-suspension park record (WS-AI wave-9.5; the `lane_park` field's
+/// payload): the settled lane-staged batch's block `b0`, remainder window
+/// end `b1` (forward walk `[b0, b1)`, no wrap), and the consume cursor
+/// `(pos, n)` at suspension.
+#[derive(Clone, Copy)]
+struct SeqScanCursorPark {
+    b0: u64,
+    b1: u64,
+    pos: u32,
+    n: u32,
 }
 
 /// Plan-derived pgrcolumnar scan settings (built once at init, applied to every
@@ -226,6 +258,16 @@ struct BatchSoa<'mcx> {
     // the fingerprint+entry state; this flag gates the pagebatch drive's
     // lookup/store calls and the end-of-scan stats line.
     cond_armed: bool,
+    // K1 inc-2 late materialization (wave-9 WS-AH): when armed, the heap
+    // staging deform narrows its kind-0 column-major pass to exactly this
+    // set ({qual clause cols ∪ the grouped feed's key cols}, sorted); the
+    // deferred prefix columns fill for qual survivors only, through
+    // `seq_scan_batch_complete_deform` (the storage seam's
+    // `complete_deform`). Classification is UNCHANGED (kind-1 hasnulls rows
+    // still full-deform at classify; kind-2 rows keep the fallback bit).
+    // None = today's full staging bytes. Armed per BUILD by the grouped
+    // drains (`seq_scan_k1_latemat_arm`), heap kernel-qual stagings only.
+    stage_cols: Option<Vec<u16>>,
     sel: [u64; ::exectuples::SOA_BM_WORDS],
     nwords: u32,
     cur_word: u32,
@@ -384,6 +426,12 @@ impl<'mcx> SeqScanState<'mcx> {
         self.plan_node_id
     }
 
+    /// The planner's output-row estimate for this scan (Plan.plan_rows —
+    /// an ESTIMATE, only ever an admission-floor input, never semantics).
+    pub fn plan_rows(&self) -> f64 {
+        self.plan_rows
+    }
+
     pub fn parallel_aware(&self) -> bool {
         self.parallel_aware
     }
@@ -421,6 +469,28 @@ impl<'mcx> SeqScanState<'mcx> {
 
     pub fn set_lane_verdict(&mut self, v: bool) {
         self.lane_verdict = Some(v);
+    }
+
+    /// SE-R41 v2 cursor-fill pin posture (notes/se-r41-v2.md §3): the
+    /// C-parity Volcano posture — the staged page batch and its `rs_cbuf`
+    /// pin SURVIVE a budgeted-run suspension, exactly as C keeps a cursor's
+    /// heap page pinned across FETCHes (and exactly as our own row-chain
+    /// per-tuple walk already does mid-page). Set at `cursor_store_batch_fill`
+    /// engagement; `seq_scan_cursor_settle` then refuses to park (the
+    /// documented not-settleable C-parity class, widened deliberately to
+    /// cursor-fill-owned scans), so the park→release→restage
+    /// (`page_collect_tuples` re-walk) cycle — the measured ~19k-instr
+    /// per-fill ceremony on deficit-1 fills — never runs. R3
+    /// zero-pins-at-settle continues to bind for every LANE claim the walker
+    /// parks (join-pipeline scans, SPI-flavor claims): this posture is
+    /// scoped to the serial cursor store fill that owns its scan for the
+    /// portal's lifetime.
+    pub fn lane_hold_pin(&self) -> bool {
+        self.lane_hold_pin
+    }
+
+    pub fn set_lane_hold_pin(&mut self) {
+        self.lane_hold_pin = true;
     }
 
     /// Memoized standalone pgrcolumnar ownership verdict (see the field doc).
@@ -773,6 +843,7 @@ pub fn seq_scan_batch_soa_prepare<'mcx>(
                 bits_only: false,
                 dict_group: None,
                 cond_armed: false,
+                stage_cols: None,
                 sel: [0; ::exectuples::SOA_BM_WORDS],
                 nwords: 0,
                 cur_word: 0,
@@ -906,6 +977,7 @@ pub fn seq_scan_cb_prewhere_arm<'mcx>(
                         bits_only: false,
                         dict_group: None,
                         cond_armed: false,
+                        stage_cols: None,
                         sel: [0; ::exectuples::SOA_BM_WORDS],
                         nwords: 0,
                         cur_word: 0,
@@ -1079,6 +1151,7 @@ pub fn seq_scan_cb_columnar_arm<'mcx>(
             bits_only: false,
             dict_group: dict_key,
             cond_armed: false,
+            stage_cols: None,
             sel: [0; ::exectuples::SOA_BM_WORDS],
             nwords: 0,
             cur_word: 0,
@@ -1295,6 +1368,98 @@ pub fn seq_scan_batch_dictgroup_col(node: &SeqScanState<'_>) -> Option<u16> {
     node.batch_soa.as_deref().and_then(|b| b.dict_group)
 }
 
+/// Arm K1 inc-2 late-materialization staging (wave-9 WS-AH) on this node's
+/// armed heap batch: narrow the staging deform's kind-0 column pass to
+/// {qual clause cols ∪ `key_cols`} and return the DEFERRED column set
+/// (`[0, prefix) \ staged` — the completion set the drain passes to
+/// `seq_scan_batch_complete_deform` per batch, over the qual-survivor
+/// bitmap). The deferred set is the FULL remaining prefix, not just the
+/// fold's needed columns: the per-row emit publishes every prefix cell of a
+/// selected row (`soa_store_prefix`), so anything less would publish stale
+/// cells on the arrival/fallback legs (rail B: value movement only).
+///
+/// Admission (each refusal NAMED for the M5-1 funnel, returned to the
+/// caller to tick):
+/// - `k1-latemat-no-qual` — no armed whole-qual kernel bitmap (rail J: the
+///   no-qual all-columns shapes keep today's single JIT full deform), a
+///   hybrid requal tail, or a qual-col-only staging (nothing to defer past
+///   the qual's own column selection);
+/// - `k1-latemat-shape` — the staging is not the plain heap kernel-qual
+///   prefix shape (varkey / contains / PREWHERE lane / key-col redirect /
+///   stitched projection / bits-only census / virtual plan / non-heap AM);
+/// - `k1-latemat-all-staged` — the staged set already covers the prefix
+///   (narrowing must defer something).
+///
+/// The narrowing is per-BUILD state: callers disarm + re-decide every build
+/// (`seq_scan_k1_latemat_disarm`); rescans rebuild through the same drains.
+pub fn seq_scan_k1_latemat_arm(
+    node: &mut SeqScanState<'_>,
+    key_cols: &[u16],
+) -> Result<Vec<u16>, &'static str> {
+    if !seq_scan_is_heap(node) {
+        return Err("k1-latemat-shape");
+    }
+    let Some(b) = node.batch_soa.as_deref_mut() else { return Err("k1-latemat-shape") };
+    if b.plan.is_virtual()
+        || b.key_col.is_some()
+        || b.varkey.is_some()
+        || b.contains.is_some()
+        || b.lane.is_some()
+        || b.proj.is_some()
+        || b.bits_only
+    {
+        return Err("k1-latemat-shape");
+    }
+    if !b.qual_armed || b.lane_requal || b.qual_only || b.nquals == 0 {
+        return Err("k1-latemat-no-qual");
+    }
+    let ncols = b.plan.ncols();
+    if key_cols.iter().any(|&c| c >= ncols) {
+        return Err("k1-latemat-shape");
+    }
+    let mut staged: Vec<u16> =
+        b.quals[..b.nquals as usize].iter().map(|&(c, _, _)| c).collect();
+    for &k in key_cols {
+        if !staged.contains(&k) {
+            staged.push(k);
+        }
+    }
+    let complete: Vec<u16> = (0..ncols).filter(|c| !staged.contains(c)).collect();
+    if complete.is_empty() {
+        return Err("k1-latemat-all-staged");
+    }
+    staged.sort_unstable();
+    b.stage_cols = Some(staged);
+    Ok(complete)
+}
+
+/// Drop the K1 late-materialization narrowing (per-build re-decision; also
+/// the unit levers' reset). The NEXT staged batch returns to the full
+/// staging deform; the CURRENT batch's cells are untouched.
+pub fn seq_scan_k1_latemat_disarm(node: &mut SeqScanState<'_>) {
+    if let Some(b) = node.batch_soa.as_deref_mut() {
+        b.stage_cols = None;
+    }
+}
+
+/// Whether the K1 late-materialization narrowing is armed (unit pins).
+pub fn seq_scan_k1_latemat_armed(node: &SeqScanState<'_>) -> bool {
+    node.batch_soa.as_deref().is_some_and(|b| b.stage_cols.is_some())
+}
+
+/// K1 inc-2 completion (pass B): fill `cols` for `sel`-selected kind-0 rows
+/// of the CURRENT staged batch off the still-pinned page (ownership ABI R3
+/// — valid until the next batch advance/reposition/settle). Word-skips
+/// all-zero 64-row selection words; kind-1 rows were deformed at classify
+/// and kind-2 fallback rows never fill (their bits, if OR'd into the qual
+/// bitmap, are harmless). Value movement only — idempotent per (col, row).
+pub fn seq_scan_batch_complete_deform(node: &mut SeqScanState<'_>, cols: &[u16], sel: &[u64]) {
+    let SeqScanState { ss, batch_soa, .. } = node;
+    let Some(b) = batch_soa.as_deref_mut() else { return };
+    let Some(sd) = ss.ss_currentScanDesc.as_mut() else { return };
+    ::tableam::table_scan_batch_complete_deform(sd, &b.plan, &mut b.soa, cols, sel);
+}
+
 /// Arm the fused-sort direct key feed: output column 0 must be exactly one
 /// scan Var (bare single-column scan or a lone `JustAssignVar` projection)
 /// the fixed-width SoA plan covers, no qual. False leaves the per-row path.
@@ -1389,6 +1554,7 @@ fn arm_key_soa<'mcx>(
             bits_only: false,
                 dict_group: None,
             cond_armed: false,
+            stage_cols: None,
             sel: [0; ::exectuples::SOA_BM_WORDS],
             nwords: 0,
             cur_word: 0,
@@ -1622,6 +1788,7 @@ pub fn seq_scan_batch_soa_prepare_varlane<'mcx>(
             bits_only: false,
             dict_group: None,
             cond_armed: false,
+            stage_cols: None,
             sel: [0; ::exectuples::SOA_BM_WORDS],
             nwords: 0,
             cur_word: 0,
@@ -1688,6 +1855,7 @@ pub fn seq_scan_batch_soa_prepare_contains<'mcx>(
             bits_only: false,
                 dict_group: None,
             cond_armed: false,
+            stage_cols: None,
             sel: [0; ::exectuples::SOA_BM_WORDS],
             nwords: 0,
             cur_word: 0,
@@ -2232,16 +2400,28 @@ pub fn seq_scan_next_pagebatch<'mcx>(
                 }
                 return Ok(n);
             }
-            // Single-clause qual-only staging deforms just the qual column;
-            // a multi-clause qual needs every clause column, so it stages
-            // the full (fixed-width) prefix. An armed stitched projection
-            // reads its tlist columns from the lanes too, so it also forces
-            // the full prefix.
-            let qual_col_only =
-                (b.qual_only && b.qual_armed && b.nquals == 1 && b.proj.is_none())
-                    .then_some(b.quals[0].0)
-                    .or(b.key_col);
-            ::tableam::table_scan_batch_deform(scandesc, &b.plan, &mut b.soa, qual_col_only);
+            // K1 inc-2 late-materialization staging (wave-9 WS-AH): an armed
+            // grouped heap feed narrows the kind-0 column pass to
+            // {qual clause cols ∪ key cols}; the deferred columns fill for
+            // qual survivors only, AFTER the bitmap below, through the
+            // drain's `seq_scan_batch_complete_deform` call. Arming
+            // (`seq_scan_k1_latemat_arm`) guarantees the shape this branch
+            // assumes: a heap kernel-qual staging that OWNS the whole qual
+            // (no requal tail), no varkey/proj/lane/key_col co-arm.
+            if let Some(sc) = b.stage_cols.as_deref() {
+                ::tableam::table_scan_batch_deform_cols(scandesc, &b.plan, &mut b.soa, sc);
+            } else {
+                // Single-clause qual-only staging deforms just the qual
+                // column; a multi-clause qual needs every clause column, so
+                // it stages the full (fixed-width) prefix. An armed stitched
+                // projection reads its tlist columns from the lanes too, so
+                // it also forces the full prefix.
+                let qual_col_only =
+                    (b.qual_only && b.qual_armed && b.nquals == 1 && b.proj.is_none())
+                        .then_some(b.quals[0].0)
+                        .or(b.key_col);
+                ::tableam::table_scan_batch_deform(scandesc, &b.plan, &mut b.soa, qual_col_only);
+            }
             if b.qual_armed {
                 let nwords = (n as usize).div_ceil(64);
                 // Tier ladder (design §3a): tier 2 = the stitched body over
@@ -3383,6 +3563,7 @@ pub fn exec_init_seq_scan_rel<'mcx>(
         ss,
         variant,
         plan_node_id: node.scan.plan.plan_node_id,
+        plan_rows: node.scan.plan.plan_rows,
         parallel_aware: node.scan.plan.parallel_aware,
         parallel: None,
         batch_soa: None,
@@ -3395,6 +3576,8 @@ pub fn exec_init_seq_scan_rel<'mcx>(
         cb_standalone: None,
         cb_prewhere_refused: false,
         cb_tiny: false,
+        lane_park: None,
+        lane_hold_pin: false,
         cb_scan,
     })
 }
@@ -3484,6 +3667,180 @@ pub fn seq_scan_cb_set_granule_range<'mcx>(
         g0,
         g1,
     )
+}
+
+/// End-of-claim release seam (single-executor wave 2, WS-O inc-2,
+/// append-only): drop the heap scan's current page pin and reset it to the
+/// drained state (the R3 zero-pins-at-settle law; pgrcolumnar no-op below
+/// the AM dispatch). Never OPENS the scan — a scan that never opened holds
+/// nothing. Called by the knob-ON batch sources' `end_claim`, INCLUDING on
+/// error paths, so a failed claim never carries its pin into the abort
+/// drain (pin-lifetime under stealing: a re-split claim remainder changes
+/// hands with no pin left behind).
+pub fn seq_scan_end_claim_release(node: &mut SeqScanState<'_>) {
+    if let Some(scan) = node.ss.ss_currentScanDesc.as_mut() {
+        ::tableam::table_scan_end_claim_release(scan);
+    }
+}
+
+/// Cursor-suspension settle (WS-AI wave-9.5, lane-cursors.md §2; the
+/// claim-release chain's cursor arm): if this scan holds a LANE-STAGED page
+/// batch (`lane_n > 0` — the standalone lane pipeline's node-resident
+/// consume cursor; drain-site claims never span a suspension), record its
+/// reposition point and retire the claim through
+/// `table_scan_end_claim_release` → `heap_end_claim_release`. Returns true
+/// iff a park record was written (the caller then clears the scan/result
+/// slots and arms the estate resume flag).
+///
+/// What deliberately does NOT settle here:
+/// * the VOLCANO scan's own cross-FETCH `rs_cbuf` pin (`lane_n == 0`) — C
+///   parity, untouched (design §2's stated divergence prices LANE claims
+///   only);
+/// * CURSOR-FILL-OWNED scans (`lane_hold_pin`, SE-R41 v2) — the cursor
+///   store batch fill adopts the same C-parity posture as the Volcano row
+///   chain it replaces: the staged page batch and its one pin survive the
+///   suspension and the next fill continues in place (killing the
+///   per-fill park→restage ceremony the SE12 B4 letter priced at ~19k
+///   instr on deficit-1 fills); notes/se-r41-v2.md §3;
+/// * pgrcolumnar staged windows — the park-point probe answers None below
+///   the AM dispatch (R4 decode scratch is Arc/mmap-backed, holds no
+///   bufmgr pins, and is node-resident by design §1);
+/// * wrap-capable heap walks (syncscan-started) — the probe refuses them
+///   and the pin-held C-parity posture stands (production standalone lane
+///   admission is pgrcolumnar-only today; the heap arm is exercised by the
+///   unit fixture).
+///
+/// R3 ZERO-PINS-AT-SETTLE is debug-asserted: a settled claim holds no pin.
+pub fn seq_scan_cursor_settle(node: &mut SeqScanState<'_>) -> bool {
+    if node.lane_n == 0 {
+        return false;
+    }
+    // SE-R41 v2 (notes/se-r41-v2.md §3): a cursor-fill-owned scan keeps the
+    // C-parity Volcano posture — the staged page batch and its pin survive
+    // the suspension (exactly the pin C's cursor, and our own row-chain
+    // per-tuple walk, hold across FETCHes), and the next fill continues
+    // emitting from the node-resident consume cursor with ZERO restage.
+    // This joins the settle doc's existing not-settleable C-parity class
+    // (wrap-capable walks); R3 zero-pins-at-settle continues to bind for
+    // every LANE claim this walker parks.
+    if node.lane_hold_pin {
+        return false;
+    }
+    let Some(scan) = node.ss.ss_currentScanDesc.as_mut() else {
+        return false;
+    };
+    let Some((b0, b1)) = ::tableam::table_scan_cursor_park_point(scan) else {
+        return false;
+    };
+    node.lane_park =
+        Some(SeqScanCursorPark { b0, b1, pos: node.lane_pos, n: node.lane_n });
+    node.lane_pos = 0;
+    node.lane_n = 0;
+    ::tableam::table_scan_end_claim_release(scan);
+    debug_assert!(
+        !::tableam::table_scan_holds_claim_pin(scan),
+        "R3 zero-pins-at-settle: cursor settle left a claim pin behind"
+    );
+    true
+}
+
+/// True iff this scan carries an unconsumed cursor park record (unit face).
+pub fn seq_scan_cursor_parked(node: &SeqScanState<'_>) -> bool {
+    node.lane_park.is_some()
+}
+
+/// Settle PROBE (shared-borrow twin of [`seq_scan_cursor_settle`]'s gate):
+/// true iff a settle call would write a park record — a lane-staged batch
+/// (`lane_n > 0`) on an open scan with a park point. The settle walker
+/// calls this BEFORE the claim-release so it can run its slot hygiene
+/// (materialize — the emitted slots must survive the page pin going away)
+/// while the staged page is still pinned; the subsequent settle call then
+/// releases. Probe and settle read the same state and cannot disagree
+/// between the two calls (both run under the walker's exclusive borrow) —
+/// so the probe mirrors EVERY settle gate, including the SE-R41 v2
+/// `lane_hold_pin` refusal (SE14 boarding composition): a cursor-fill-owned
+/// scan keeps its page pin across the suspension, so settle writes no park
+/// record AND the materialize hygiene is unnecessary — the emitted slots'
+/// backing page stays pinned for exactly as long as the suspension lasts.
+pub fn seq_scan_cursor_park_pending(node: &SeqScanState<'_>) -> bool {
+    !node.lane_hold_pin
+        && node.lane_n != 0
+        && node
+            .ss
+            .ss_currentScanDesc
+            .as_ref()
+            .is_some_and(|s| ::tableam::table_scan_cursor_park_point(s).is_some())
+}
+
+/// Mid-page batch adoption (SE-R41 v2, the page-remainder defect fix): the
+/// lane batch source calls this BEFORE staging a fresh page. If the
+/// per-tuple row walk left this scan mid-page with unreturned visible
+/// tuples, adopt the remainder window `[start, n)` over the pinned page's
+/// already-collected `rs_vistuples` (the AM parks its per-tuple cursor at
+/// page end — the batch consumption convention); the caller sets the lane
+/// consume cursor to `(start, n)`. None = nothing to adopt (fresh, drained,
+/// batch-owned, or page-exhausted scan): stage the next page as before.
+/// Self-limiting: after batch staging or adoption the per-tuple cursor sits
+/// at page end, so the probe fires at most once per row-walk→batch handoff.
+pub fn seq_scan_adopt_midpage_batch(node: &mut SeqScanState<'_>) -> Option<(u32, u32)> {
+    // Adoption serves the PLAIN staging shape only (the cursor fill's:
+    // batch_soa unarmed, scalar emit walk). A qual-kernel-armed SoA drive
+    // keeps its own selection-bitmap cursor — its staged state cannot be
+    // reconstructed from the AM's per-tuple cursor, and a stale bitmap must
+    // never be applied to an adopted page. (Those drives' ownership is
+    // memoized-sticky from scan start, so they never see a row-walked
+    // mid-page scan; this gate makes the invariant local rather than
+    // global.)
+    if node.batch_soa.as_deref().is_some_and(|b| b.qual_armed) {
+        return None;
+    }
+    let scan = node.ss.ss_currentScanDesc.as_mut()?;
+    ::tableam::table_scan_adopt_midpage_batch(scan)
+}
+
+/// True iff the ROW drive's own page-batch mode (`scan_batch_probe`) owns
+/// this scan's staging (SE-R41 v2 engagement gate): a lane cursor fill must
+/// not engage over it — the row-batch drive's position lives in its SoA
+/// selection cursor, not the AM per-tuple cursor, so neither fresh staging
+/// nor mid-page adoption can continue it correctly. Structurally
+/// unreachable today (verdicts on both sides are memoized-sticky from scan
+/// start); the gate makes the exclusion local and floor-proof.
+pub fn seq_scan_row_batch_mode_on(node: &SeqScanState<'_>) -> bool {
+    matches!(node.scan_batch, ScanBatchMode::On)
+}
+
+/// Cursor-suspension resume (the §2 "repossess on resume" half): reposition
+/// the scan on the parked remainder window (`heap_set_block_range`'s
+/// reset-half shape, through the AM dispatch), restage the suspended page
+/// batch, and restore the consume cursor. Under the run's MVCC snapshot the
+/// restaged visible set is the suspended one (same page, same snapshot —
+/// same `page_collect_tuples` answer; pruning removes only all-dead tuples
+/// and line-pointer numbering is stable), so the resumed emission is
+/// byte-identical; a count mismatch fails LOUD rather than emitting a
+/// shifted remainder. Ok(false) = nothing parked.
+pub fn seq_scan_cursor_resume<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    let Some(SeqScanCursorPark { b0, b1, pos, n }) = node.lane_park.take() else {
+        return Ok(false);
+    };
+    node.ensure_scandesc(estate)?;
+    ::tableam::table_scan_set_morsel_range(
+        node.ss.ss_currentScanDesc.as_mut().unwrap(),
+        b0,
+        b1,
+    )?;
+    let restaged = seq_scan_next_pagebatch(node, estate)?;
+    if restaged != n {
+        return Err(::types_error::PgError::error(format!(
+            "cursor resume restaged a different visible set (block {b0}: {restaged} rows, suspended with {n})"
+        ))
+        .into());
+    }
+    node.lane_pos = pos;
+    node.lane_n = n;
+    Ok(true)
 }
 
 /// Position the scan on the morsel claim [g0, g1) (the runtime's
@@ -3845,6 +4202,8 @@ pub fn skeleton_park(node: &mut SeqScanState<'_>) -> PgResult<()> {
     node.cb_standalone = None;
     node.cb_prewhere_refused = false;
     node.cb_tiny = false;
+    node.lane_park = None;
+    node.lane_hold_pin = false;
     if let Some(scandesc) = node.ss.ss_currentScanDesc.take() {
         table_endscan(scandesc)?;
     }
@@ -3881,6 +4240,8 @@ pub fn exec_rescan_seq_scan<'mcx>(
     }
     node.lane_pos = 0;
     node.lane_n = 0;
+    node.lane_park = None;
+    node.lane_hold_pin = false;
     if let Some(b) = node.batch_soa.as_deref_mut() {
         b.reset_staged();
     }
@@ -3942,19 +4303,23 @@ mcx::forget_safe_nodrop!(SeqScanVariant);
 
 mcx::forget_safe_nodrop!(ScanBatchMode);
 
+mcx::forget_safe_nodrop!(SeqScanCursorPark);
+
 // bloom/parallel exempt: released in exec_end_seq_scan / release_parallel.
 mcx::forget_safe_struct!(
     SeqScanState<'_> {
-        ss, variant, plan_node_id, parallel_aware, batch_soa, scan_batch, batch_allowed,
-        lane_pos, lane_n, lane_verdict, cb_standalone, cb_prewhere_refused, cb_tiny;
+        ss, variant, plan_node_id, plan_rows, parallel_aware, batch_soa, scan_batch, batch_allowed,
+        lane_pos, lane_n, lane_verdict, cb_standalone, cb_prewhere_refused, cb_tiny, lane_park,
+        lane_hold_pin;
         bloom, parallel, cb_scan
     },
     // stitch/proj exempt: the stitched programs (heap Vecs + the W^X code
     // blocks) are released in exec_end_seq_scan / skeleton_park via
-    // `batch_soa = None` (the deform-JIT kernel Rc precedent).
+    // `batch_soa = None` (the deform-JIT kernel Rc precedent); stage_cols
+    // (K1 late-mat narrowed column set, a heap Vec) releases the same way.
     BatchSoa<'_> {
         plan, soa, qual_armed, qual_only, key_col, varkey, key_read_col, publish, quals,
-        nquals, lane_requal, bits_only, dict_group, contains, cond_armed, sel, nwords, cur_word, cur_bits; stitch, proj, lane,
+        nquals, lane_requal, bits_only, dict_group, contains, cond_armed, sel, nwords, cur_word, cur_bits; stitch, proj, lane, stage_cols,
     },
     BloomScan<'_> { plan, soa, col, sel, nwords, cur_word, cur_bits, seen, kept; filter },
 );

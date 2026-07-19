@@ -386,6 +386,53 @@ pub(super) fn sink_probe_complete(class: ArmClass, probe: &runtime::SinkProbe) {
 }
 
 // ---------------------------------------------------------------------------
+// Coverage-view snapshot accessors (lanev2/coverage.rs): relaxed loads,
+// enumerated from the ALL tables — the router source of truth, never a
+// hand-written list.
+// ---------------------------------------------------------------------------
+
+pub(super) const fn n_arm_counter_cells() -> usize {
+    N_ARMS * N_COUNTERS
+}
+
+/// The query-level routing counters followed by every arm × counter cell
+/// (zeros kept): (class, counter, count).
+pub(super) fn arm_counter_snapshot() -> Vec<(&'static str, &'static str, u64)> {
+    let mut v = Vec::with_capacity(N_GLOBALS + N_ARMS * N_COUNTERS);
+    v.push((
+        "query",
+        "routed-legacy-parallel",
+        GLOBALS[GlobalCounter::RoutedLegacyParallel as usize].load(Relaxed),
+    ));
+    v.push((
+        "query",
+        "routed-serial-shaped",
+        GLOBALS[GlobalCounter::RoutedSerialShaped as usize].load(Relaxed),
+    ));
+    for class in ArmClass::ALL {
+        for c in ArmCounter::ALL {
+            v.push((class.name(), c.name(), ARM[class as usize][c as usize].load(Relaxed)));
+        }
+    }
+    v
+}
+
+/// Every recorded (arm, reason, count) refusal — the open static-string
+/// taxonomy, sorted for stable output.
+pub(super) fn refused_snapshot() -> Vec<(&'static str, &'static str, u64)> {
+    let map = match REFUSED.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let mut rows: Vec<(&'static str, &'static str, u64)> = map
+        .iter()
+        .map(|((class, reason), n)| (ArmClass::ALL[*class].name(), *reason, *n))
+        .collect();
+    rows.sort();
+    rows
+}
+
+// ---------------------------------------------------------------------------
 // Dump (the refusal-rate report substrate): <dir>/m5-router-stats.<pid>.tsv
 // ---------------------------------------------------------------------------
 

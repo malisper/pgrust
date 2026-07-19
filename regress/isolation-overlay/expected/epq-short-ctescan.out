@@ -1,0 +1,62 @@
+Parsed test spec with 3 sessions
+
+starting permutation: expl s1u upd s1c sel
+step expl: EXPLAIN (COSTS OFF) WITH src AS MATERIALIZED (SELECT k, d FROM cs) UPDATE st SET v = st.v + src.d FROM src WHERE st.k = src.k AND st.k = 1;
+QUERY PLAN                                
+------------------------------------------
+Update on st                              
+  CTE src                                 
+    ->  Seq Scan on cs                    
+  ->  Nested Loop                         
+        ->  Index Scan using st_pkey on st
+              Index Cond: (k = 1)         
+        ->  CTE Scan on src               
+              Filter: (k = 1)             
+(8 rows)
+
+step s1u: UPDATE st SET v = v + 100 WHERE k = 1;
+step upd: WITH src AS MATERIALIZED (SELECT k, d FROM cs) UPDATE st SET v = st.v + src.d FROM src WHERE st.k = src.k AND st.k = 1 RETURNING st.k, st.v; <waiting ...>
+step s1c: COMMIT;
+step upd: <... completed>
+k|  v
+-+---
+1|115
+(1 row)
+
+step sel: SELECT k, v FROM st ORDER BY k;
+k|  v
+-+---
+1|115
+2| 20
+(2 rows)
+
+
+starting permutation: expl s1k upd s1c sel
+step expl: EXPLAIN (COSTS OFF) WITH src AS MATERIALIZED (SELECT k, d FROM cs) UPDATE st SET v = st.v + src.d FROM src WHERE st.k = src.k AND st.k = 1;
+QUERY PLAN                                
+------------------------------------------
+Update on st                              
+  CTE src                                 
+    ->  Seq Scan on cs                    
+  ->  Nested Loop                         
+        ->  Index Scan using st_pkey on st
+              Index Cond: (k = 1)         
+        ->  CTE Scan on src               
+              Filter: (k = 1)             
+(8 rows)
+
+step s1k: UPDATE st SET k = 3 WHERE k = 1;
+step upd: WITH src AS MATERIALIZED (SELECT k, d FROM cs) UPDATE st SET v = st.v + src.d FROM src WHERE st.k = src.k AND st.k = 1 RETURNING st.k, st.v; <waiting ...>
+step s1c: COMMIT;
+step upd: <... completed>
+k|v
+-+-
+(0 rows)
+
+step sel: SELECT k, v FROM st ORDER BY k;
+k| v
+-+--
+2|20
+3|10
+(2 rows)
+

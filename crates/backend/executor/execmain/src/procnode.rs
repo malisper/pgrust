@@ -193,6 +193,23 @@ pub struct AggPlanState<'mcx> {
 pub struct WindowAggNode<'mcx> {
     pub state: ::nodewindowagg::WindowAggStateData<'mcx>,
     pub outer: PlanStateNode<'mcx>,
+    /// Lane-executor-v2 structural admission verdict, memoized at the first
+    /// offered pull (the SortNode::lane_fusible precedent); the dynamic
+    /// EPQ/direction gates stay per-call in `lanev2::windows`.
+    pub lane_admit: Option<bool>,
+    /// Lane-v2 window drive (lanev2/windows.rs behind PGRUST_LANE_V2_WINDOWS).
+    /// `Some` = STICKY lane ownership for the node's whole (re)scan life —
+    /// the buffered partition machine cannot hand back mid-stream.
+    pub lane: Option<::nodewindowagg::lane::LaneWindowDrive>,
+    // --- WS-R T2-B (wave-3) ---
+    /// T2-B framed-drive structural admission verdict, memoized like
+    /// `lane_admit` (an independent census: W1 and T2-B admit different
+    /// shape sets over the same child gates).
+    pub lane_framed_admit: Option<bool>,
+    /// T2-B sealed framed drive (lanev2/windows.rs behind
+    /// PGRUST_LANE_V2_WINDOWS_T2B). `Some` = STICKY, exactly `lane`'s law.
+    pub lane_framed: Option<::nodewindowagg::lane::LaneFramedDrive>,
+    // --- end WS-R T2-B ---
 }
 
 pub struct MaterialNode<'mcx> {
@@ -875,6 +892,7 @@ pub fn exec_init_node<'mcx>(
                 plan: lr_plan.plan.lefttree,
                 recheck: None,
                 result_rti: state.lr_arowMarks.first().map_or(0, |a| a.rti),
+                lane_verdicts: None,
             };
             PlanStateNode::LockRows(::mcx::alloc_in(
                 estate.es_query_cxt,
@@ -916,7 +934,17 @@ pub fn exec_init_node<'mcx>(
                 &outer_desc,
                 result_desc,
             )?;
-            PlanStateNode::WindowAgg(::mcx::alloc_in(mcx, WindowAggNode { state, outer })?)
+            PlanStateNode::WindowAgg(::mcx::alloc_in(
+                mcx,
+                WindowAggNode {
+                    state,
+                    outer,
+                    lane_admit: None,
+                    lane: None,
+                    lane_framed_admit: None,
+                    lane_framed: None,
+                },
+            )?)
         }
         NodeTag::T_NestLoop => {
             let mcx = estate.es_query_cxt;
@@ -1287,6 +1315,7 @@ pub fn exec_init_node<'mcx>(
                 recheck: None,
                 // Set per-row by the dispatch closure (multi-resultrel).
                 result_rti: 0,
+                lane_verdicts: None,
             };
             PlanStateNode::ModifyTable(::mcx::alloc_in(
                 mcx,
@@ -1474,6 +1503,101 @@ fn gather_merge_arm<'mcx>(
 
 type ProcResult = PgResult<Option<ExecSlotId>>;
 
+// ===========================================================================
+// Fused-arm retirement P2 force knobs (docs/design/flip-ladder.md §5; wave-4
+// tierA A4 commit 1 — the contractual FIRST commit of the retirement track).
+//
+// Each of the seven M-era fused batched drives gets a default-ON
+// `PGRUST_FUSED_ARM_<NAME>` env gate: `=0`/`off` forces THAT arm off (the P1
+// A/B measurement lever AND the post-retirement revert lever; OQ3 one
+// purpose per knob). Default (env absent or any other value) = ON —
+// behavior-identical to today at default config by construction. These
+// knobs die only at P3, each with its arm's body (flip-ladder §5); none die
+// in wave 4. Registry: notes/se-phase0-integration.md R-KNOBS
+// (`PGRUST_FUSED_ARM_<NAME>` family, WS-P).
+//
+// Cost discipline (se2-cost law): one relaxed byte load + compare on the
+// gate line; the env resolve is `#[cold]`-outlined and runs once per arm per
+// process.
+// ===========================================================================
+
+/// The seven fused arms, flip-ladder §5 table order. Discriminant = the
+/// per-arm cell index.
+#[derive(Clone, Copy)]
+enum FusedArm {
+    AggSeq = 0,
+    AggIndex = 1,
+    AggIos = 2,
+    AggBitmap = 3,
+    SortFeed = 4,
+    HashBuildProj = 5,
+    HashBuild = 6,
+}
+
+impl FusedArm {
+    /// The `PGRUST_FUSED_ARM_<NAME>` env suffix (flip-ladder §5 spelling).
+    fn env_suffix(self) -> &'static str {
+        match self {
+            FusedArm::AggSeq => "AGG_SEQ",
+            FusedArm::AggIndex => "AGG_INDEX",
+            FusedArm::AggIos => "AGG_IOS",
+            FusedArm::AggBitmap => "AGG_BITMAP",
+            FusedArm::SortFeed => "SORT_FEED",
+            FusedArm::HashBuildProj => "HASH_BUILD_PROJ",
+            FusedArm::HashBuild => "HASH_BUILD",
+        }
+    }
+}
+
+/// Per-arm tri-state cells: 0 = unresolved (read env on first use), 1 =
+/// forced OFF (`=0`/`off`), 2 = ON (the default). The rowmode.rs AtomicU8
+/// idiom, one cell per arm so a forced-off arm never perturbs another's
+/// resolve.
+static FUSED_ARMS: [core::sync::atomic::AtomicU8; 7] =
+    [const { core::sync::atomic::AtomicU8::new(0) }; 7];
+
+/// The P2 gate read: `true` = the fused arm may engage (today's behavior).
+#[inline]
+fn fused_arm_enabled(arm: FusedArm) -> bool {
+    use core::sync::atomic::Ordering::Relaxed;
+    match FUSED_ARMS[arm as usize].load(Relaxed) {
+        1 => false,
+        2 => true,
+        _ => fused_arm_resolve(arm),
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn fused_arm_resolve(arm: FusedArm) -> bool {
+    use core::sync::atomic::Ordering::Relaxed;
+    let forced_off = matches!(
+        std::env::var(format!("PGRUST_FUSED_ARM_{}", arm.env_suffix())).as_deref(),
+        Ok("0") | Ok("off")
+    );
+    FUSED_ARMS[arm as usize].store(if forced_off { 1 } else { 2 }, Relaxed);
+    !forced_off
+}
+
+/// Same-process A/B lever for the unit corpus.
+#[cfg(test)]
+pub(crate) fn fused_arm_set_for_tests(env_suffix: &str, on: bool) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let arm = [
+        FusedArm::AggSeq,
+        FusedArm::AggIndex,
+        FusedArm::AggIos,
+        FusedArm::AggBitmap,
+        FusedArm::SortFeed,
+        FusedArm::HashBuildProj,
+        FusedArm::HashBuild,
+    ]
+    .into_iter()
+    .find(|a| a.env_suffix() == env_suffix)
+    .unwrap_or_else(|| panic!("unknown fused arm: {env_suffix}"));
+    FUSED_ARMS[arm as usize].store(if on { 2 } else { 1 }, Relaxed);
+}
+
 #[inline(never)]
 fn result_arm<'mcx>(rs: &mut ResultState<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
     // Lane-executor-v2 dispatch hook (wave-4 glue: the no-FROM row / the
@@ -1492,12 +1616,15 @@ fn project_set_arm<'mcx>(
     ps: &mut PgBox<'mcx, ProjectSetState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    // Lane-executor-v2: ProjectSet is REFUSED wholesale — a documented
-    // refuse-set entry (the SRF multi-call protocol is per-tuple stateful and
-    // has no lane-owned child shape to chain onto; see the ProjectSet section
-    // of `lanev2.rs`). Accounting tick only; always the unchanged body.
+    // Lane-executor-v2 dispatch hook (row-mode facility, Phase 0): the
+    // default-OFF `PGRUST_LANE_V2_ROWMODE` shape (`ProjectSet ← childless
+    // Result`, the no-FROM SRF tlist) — knob OFF this ticks the documented
+    // wholesale refuse exactly as before and falls through to the UNCHANGED
+    // exec_project_set. Lane logic + refuse-set in `lanev2` (rowmode.rs).
     if crate::lanev2::enabled() {
-        crate::lanev2::refuse_project_set();
+        if let Some(r) = crate::lanev2::try_own_project_set(ps, estate)? {
+            return Ok(r);
+        }
     }
     exec_project_set(ps, estate)
 }
@@ -1523,6 +1650,16 @@ fn sample_scan_arm<'mcx>(
     ss: &mut PgBox<'mcx, ::nodesamplescan::SampleScanState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook: wave-2 row-mode tail delegation behind
+    // PGRUST_LANE_V2_ROWMODE, and (wave-3 WS-Q) the T3 SOURCE form behind
+    // PGRUST_LANE_V2_SCANS_T3 — source form probes first inside try_own_*.
+    // Falls through to the UNCHANGED per-tuple path on refuse. Lane logic +
+    // refuse-set live in `lanev2` (rowmode_tail.rs / tail_source.rs).
+    if crate::lanev2::rowmode_tail_active() || crate::lanev2::scans_t3_active() {
+        if let Some(r) = crate::lanev2::try_own_sample_scan(ss, estate)? {
+            return Ok(r);
+        }
+    }
     ::nodesamplescan::exec_sample_scan(ss, estate)
 }
 
@@ -1531,6 +1668,16 @@ fn function_scan_arm<'mcx>(
     fs: &mut PgBox<'mcx, ::nodefunctionscan::FunctionScanState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook: wave-2 row-mode tail delegation behind
+    // PGRUST_LANE_V2_ROWMODE, and (wave-3 WS-Q) the T3 SOURCE form behind
+    // PGRUST_LANE_V2_SCANS_T3 — source form probes first inside try_own_*.
+    // Falls through to the UNCHANGED per-tuple path on refuse. Lane logic +
+    // refuse-set live in `lanev2` (rowmode_tail.rs / tail_source.rs).
+    if crate::lanev2::rowmode_tail_active() || crate::lanev2::scans_t3_active() {
+        if let Some(r) = crate::lanev2::try_own_function_scan(fs, estate)? {
+            return Ok(r);
+        }
+    }
     ::nodefunctionscan::exec_function_scan(fs, estate)
 }
 
@@ -1539,6 +1686,16 @@ fn table_func_scan_arm<'mcx>(
     ts: &mut PgBox<'mcx, ::nodetablefuncscan::TableFuncScanState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook: wave-2 row-mode tail delegation behind
+    // PGRUST_LANE_V2_ROWMODE, and (wave-3 WS-Q) the T3 SOURCE form behind
+    // PGRUST_LANE_V2_SCANS_T3 — source form probes first inside try_own_*.
+    // Falls through to the UNCHANGED per-tuple path on refuse. Lane logic +
+    // refuse-set live in `lanev2` (rowmode_tail.rs / tail_source.rs).
+    if crate::lanev2::rowmode_tail_active() || crate::lanev2::scans_t3_active() {
+        if let Some(r) = crate::lanev2::try_own_table_func_scan(ts, estate)? {
+            return Ok(r);
+        }
+    }
     ::nodetablefuncscan::exec_table_func_scan(ts, estate)
 }
 
@@ -1547,6 +1704,14 @@ fn values_scan_arm<'mcx>(
     vs: &mut PgBox<'mcx, ::nodevaluesscan::ValuesScanState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
+    // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
+    // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
+    if crate::lanev2::rowmode_tail_active() {
+        // SH-E ownership verdict: accounting only — the call below IS the
+        // delegated body (tail-call shape preserved on both knob arms).
+        crate::lanev2::values_scan_pull_verdict(estate);
+    }
     ::nodevaluesscan::exec_values_scan(vs, estate)
 }
 
@@ -1563,6 +1728,13 @@ fn cte_scan_arm<'mcx>(
     cs: &mut PgBox<'mcx, ::nodectescan::CteScanState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
+    // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
+    // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
+    if crate::lanev2::rowmode_tail_active() {
+        // SH-E ownership verdict (accounting only; single body below).
+        crate::lanev2::cte_scan_pull_verdict(estate);
+    }
     ::nodectescan::exec_cte_scan(cs, estate)
 }
 
@@ -1586,6 +1758,16 @@ fn tid_scan_arm<'mcx>(
     ts: &mut ::nodetidscan::TidScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook: wave-2 row-mode tail delegation behind
+    // PGRUST_LANE_V2_ROWMODE, and (wave-3 WS-Q) the T3 SOURCE form behind
+    // PGRUST_LANE_V2_SCANS_T3 — source form probes first inside try_own_*.
+    // Falls through to the UNCHANGED per-tuple path on refuse. Lane logic +
+    // refuse-set live in `lanev2` (rowmode_tail.rs / tail_source.rs).
+    if crate::lanev2::rowmode_tail_active() || crate::lanev2::scans_t3_active() {
+        if let Some(r) = crate::lanev2::try_own_tid_scan(ts, estate)? {
+            return Ok(r);
+        }
+    }
     ::nodetidscan::exec_tid_scan(ts, estate)
 }
 
@@ -1594,6 +1776,16 @@ fn tid_range_scan_arm<'mcx>(
     ts: &mut ::nodetidrangescan::TidRangeScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook: wave-2 row-mode tail delegation behind
+    // PGRUST_LANE_V2_ROWMODE, and (wave-3 WS-Q) the T3 SOURCE form behind
+    // PGRUST_LANE_V2_SCANS_T3 — source form probes first inside try_own_*.
+    // Falls through to the UNCHANGED per-tuple path on refuse. Lane logic +
+    // refuse-set live in `lanev2` (rowmode_tail.rs / tail_source.rs).
+    if crate::lanev2::rowmode_tail_active() || crate::lanev2::scans_t3_active() {
+        if let Some(r) = crate::lanev2::try_own_tid_range_scan(ts, estate)? {
+            return Ok(r);
+        }
+    }
     ::nodetidrangescan::exec_tid_range_scan(ts, estate)
 }
 
@@ -1677,7 +1869,9 @@ fn agg_arm<'mcx>(
                     return Ok(r);
                 }
             }
-            if seq_agg_fusible(agg, ss, estate)
+            // P2 gate (flip-ladder §5 arm #1): PGRUST_FUSED_ARM_AGG_SEQ.
+            if fused_arm_enabled(FusedArm::AggSeq)
+                && seq_agg_fusible(agg, ss, estate)
                 && ::nodeseqscan::seq_scan_batch_supported(ss, estate)?
             {
                 // Outer-read-free drains (count(*)) stage the qual column
@@ -1708,8 +1902,25 @@ fn agg_arm<'mcx>(
                 {
                     return Ok(r);
                 }
+                // --- WS-AE (wave-8): AGG_INDEX arm re-earn ---
+                // The fused drive below, routed through the
+                // BatchGranuleSource storage seam — behind
+                // PGRUST_LANE_V2_AGG_INDEXFEED (default ON since the
+                // SE8-GATES AE2 flip; `=0`/`off` = permanent kill switch;
+                // knob-OFF cost = one cached-bool test). Refuses fall
+                // through to the UNCHANGED fused/per-tuple paths,
+                // byte-identically (the WS-F IndexOnlyScan hook's posture,
+                // one arm up).
+                if let Some(r) =
+                    crate::lanev2::try_own_agg_over_index_source(agg, is, estate)?
+                {
+                    return Ok(r);
+                }
+                // --- end WS-AE (wave-8) ---
             }
-            if agg_fusible_common(agg, estate)
+            // P2 gate (flip-ladder §5 arm #2): PGRUST_FUSED_ARM_AGG_INDEX.
+            if fused_arm_enabled(FusedArm::AggIndex)
+                && agg_fusible_common(agg, estate)
                 && is.ss.qual.is_none()
                 && is.ss.ps_ProjInfo.is_none()
                 && is.iss_Runtime.is_none()
@@ -1733,8 +1944,22 @@ fn agg_arm<'mcx>(
                 {
                     return Ok(r);
                 }
+                // WS-F (single-executor Phase 1): the fused drive below,
+                // routed through the BatchGranuleSource storage seam —
+                // behind PGRUST_LANE_V2_INDEXSOURCE (default OFF; knob-OFF
+                // cost = one cached-bool test). Refuses fall through to the
+                // UNCHANGED fused/per-tuple paths, byte-identically.
+                if let Some(r) =
+                    crate::lanev2::try_own_agg_over_index_only_source(agg, &mut **ios, estate)?
+                {
+                    return Ok(r);
+                }
             }
-            if agg_fusible_common(agg, estate)
+            // P2 gate (flip-ladder §5 arm #3): PGRUST_FUSED_ARM_AGG_IOS.
+            // P3 note: this knob can never take `exec_agg_batched` with it —
+            // the WS-F seam re-drives the same kernel (indexsource.rs:387).
+            if fused_arm_enabled(FusedArm::AggIos)
+                && agg_fusible_common(agg, estate)
                 && ios.ss.qual.is_none()
                 && ios.ss.ps_ProjInfo.is_none()
                 && ios.ioss_Runtime.is_none()
@@ -1765,7 +1990,9 @@ fn agg_arm<'mcx>(
                     return Ok(r);
                 }
             }
-            if agg_fusible_common(agg, estate)
+            // P2 gate (flip-ladder §5 arm #4): PGRUST_FUSED_ARM_AGG_BITMAP.
+            if fused_arm_enabled(FusedArm::AggBitmap)
+                && agg_fusible_common(agg, estate)
                 && b.scan.ss.qual.is_none()
                 && b.scan.ss.ps_ProjInfo.is_none()
             {
@@ -2210,6 +2437,27 @@ fn window_agg_arm<'mcx>(
     w: &mut PgBox<'mcx, WindowAggNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hooks (all default-OFF; on refuse each
+    // falls through — ultimately to the UNCHANGED path below). First the
+    // Phase-1 W1 batch lane (PGRUST_LANE_V2_WINDOWS, sticky owner of its
+    // admitted shapes), then the wave-3 WS-R T2-B framed batch drive
+    // (PGRUST_LANE_V2_WINDOWS_T2B, sticky, hosts the framed remainder over
+    // admitted sort feeds), then the wave-2 WS-M T2-A row-mode delegation
+    // (PGRUST_LANE_V2_WINDOWS_T2, per-pull, hosts everything both batch
+    // lanes refused). Lane logic + refuse-sets live in `lanev2::windows`.
+    if crate::lanev2::enabled() {
+        if let Some(r) = crate::lanev2::try_own_window_agg(w, estate)? {
+            return Ok(r);
+        }
+        // --- WS-R T2-B (wave-3) ---
+        if let Some(r) = crate::lanev2::try_own_window_agg_t2b(w, estate)? {
+            return Ok(r);
+        }
+        // --- end WS-R T2-B ---
+        if let Some(r) = crate::lanev2::try_own_window_agg_t2(w, estate)? {
+            return Ok(r);
+        }
+    }
     let w = &mut **w;
     let outer = &mut w.outer;
     ::nodewindowagg::exec_window_agg(&mut w.state, estate, |e| exec_proc_node(outer, e))
@@ -2233,7 +2481,9 @@ fn sort_arm<'mcx>(s: &mut SortNode<'mcx>, estate: &mut EStateData<'mcx>) -> Proc
     let outer_desc = outer_desc.as_ref().expect("Sort already ended").clone();
     if !state.sort_done() {
         if let PlanStateNode::SeqScan(ss) = &mut **outer {
-            if sort_seq_fusible(ss, estate)
+            // P2 gate (flip-ladder §5 arm #5): PGRUST_FUSED_ARM_SORT_FEED.
+            if fused_arm_enabled(FusedArm::SortFeed)
+                && sort_seq_fusible(ss, estate)
                 && ::nodeseqscan::seq_scan_batch_supported(ss, estate)?
             {
                 let src = SeqScanSortSource { ss };
@@ -2324,6 +2574,15 @@ fn material_arm<'mcx>(
     m: &mut PgBox<'mcx, MaterialNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
+    // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
+    // on refuse. Mark/restore enters through execami directly, never through
+    // this hosting. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
+    if crate::lanev2::rowmode_tail_active() {
+        // SH-E ownership verdict: accounting only — the call below IS the
+        // delegated body (tail-call shape preserved on both knob arms).
+        crate::lanev2::material_pull_verdict(m, estate);
+    }
     let m = &mut **m;
     ::nodematerial::exec_material(&mut m.state, &mut *m.outer, estate)
 }
@@ -2333,16 +2592,26 @@ fn memoize_arm<'mcx>(
     m: &mut PgBox<'mcx, MemoizeNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
+    // PGRUST_LANE_V2_ROWMODE; delegation leaf per the WS-L OQ ruling —
+    // lane-owned-child composition is a ledgered later increment): falls
+    // through to the UNCHANGED per-tuple path on refuse.
+    if crate::lanev2::rowmode_tail_active() {
+        // SH-E ownership verdict (accounting only; single body below).
+        crate::lanev2::memoize_pull_verdict(m, estate);
+    }
     let m = &mut **m;
     let plan = m.state.plan.plan.lefttree.expect("Memoize outer plan");
     let mut outer = MemoizeOuter { node: &mut m.outer, plan, chg: &mut m.outer_chg };
     ::nodememoize::exec_memoize(&mut m.state, &mut outer, estate)
 }
 
-struct MemoizeOuter<'a, 'mcx> {
-    node: &'a mut PlanStateNode<'mcx>,
-    plan: Node<'mcx>,
-    chg: &'a mut ::types_nodes::bitmapset::Bitmapset<'mcx>,
+// pub(crate) fields: the lanev2 rowmode_tail Memoize delegation leaf
+// rebuilds this exact view per pull (memoize-arm-scoped infrastructure).
+pub(crate) struct MemoizeOuter<'a, 'mcx> {
+    pub(crate) node: &'a mut PlanStateNode<'mcx>,
+    pub(crate) plan: Node<'mcx>,
+    pub(crate) chg: &'a mut ::types_nodes::bitmapset::Bitmapset<'mcx>,
 }
 
 impl<'a, 'mcx> ::nodememoize::MemoizeChild<'mcx> for MemoizeOuter<'a, 'mcx> {
@@ -2413,6 +2682,26 @@ fn lockrows_arm<'mcx>(
     l: &mut PgBox<'mcx, LockRowsNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
+    // PGRUST_LANE_V2_ROWMODE; LockRows-without-EPQ — es_epq_active refuses
+    // inside; the RowSource closure boundary is the pinned WS-N inc-2b seam,
+    // docs/design/rowmode-tail.md §4): falls through to the UNCHANGED
+    // per-tuple path on refuse.
+    let rowmode_admitted = crate::lanev2::rowmode_tail_active()
+        && crate::lanev2::lock_rows_pull_verdict(l, estate);
+    // --- WS-T wave-3 inc-2b (LockRows TupleOp behind PGRUST_LANE_V2_DML;
+    // lanev2/dml.rs). Offered only when the rowmode-tail verdict did NOT
+    // admit — exactly the pulls the retired delegation hook fell through
+    // on, so hook priority and the ROWMODE knob's behavior are unchanged
+    // at both of its arms; knob-OFF cost is the same one-byte dml_active()
+    // gate the modify_table arm carries. Falls through to the UNCHANGED
+    // exec_lock_rows on refuse. ---
+    if !rowmode_admitted && crate::lanev2::dml_active() {
+        if let Some(r) = crate::lanev2::try_own_lock_rows_dml(l, estate)? {
+            return Ok(r);
+        }
+    }
+    // --- end WS-T wave-3 inc-2b ---
     let LockRowsNode { state, outer, epq } = &mut **l;
     ::nodelockrows::exec_lock_rows(state, &mut **outer, estate, |subs, e, inputslot| {
         crate::epq::eval_plan_qual(epq, subs, e, inputslot)
@@ -2464,6 +2753,16 @@ fn modify_table_arm<'mcx>(
     mps: &mut PgBox<'mcx, ModifyTablePlanState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (wave-2 WS-N inc-1: INSERT-no-triggers
+    // hosting behind PGRUST_LANE_V2_DML — a delegation over the SAME mt_*
+    // seams the fallback below drives): falls through to the UNCHANGED
+    // exec_modify_table on refuse. Lane logic + refuse-set live in
+    // `lanev2::dml` (the merge_join_arm pattern).
+    if crate::lanev2::dml_active() {
+        if let Some(r) = crate::lanev2::try_own_modify_table(mps, estate)? {
+            return Ok(r);
+        }
+    }
     let mps = &mut **mps;
     let subplan = &mut mps.subplan;
     let epq = &mut mps.epq;
@@ -2509,6 +2808,13 @@ fn merge_append_arm<'mcx>(
     m: &mut PgBox<'mcx, MergeAppendNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
+    // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
+    // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
+    if crate::lanev2::rowmode_tail_active() {
+        // SH-E ownership verdict (accounting only; single body below).
+        crate::lanev2::merge_append_pull_verdict(m, estate);
+    }
     let MergeAppendNode { state, substates, subplan_origin: _ } = &mut **m;
     ::nodemergeappend::exec_merge_append(state, estate, |e, i| {
         exec_proc_node(&mut substates[i], e)
@@ -2536,6 +2842,13 @@ fn set_op_arm<'mcx>(
     s: &mut PgBox<'mcx, SetOpNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
+    // PGRUST_LANE_V2_ROWMODE): falls through to the UNCHANGED per-tuple path
+    // on refuse. Lane logic + refuse-set live in `lanev2` (rowmode_tail.rs).
+    if crate::lanev2::rowmode_tail_active() {
+        // SH-E ownership verdict (accounting only; single body below).
+        crate::lanev2::set_op_pull_verdict(s, estate);
+    }
     let SetOpNode { state, outer, inner } = &mut **s;
     ::nodesetop::exec_set_op(
         state,
@@ -2550,6 +2863,14 @@ fn recursive_union_arm<'mcx>(
     ru: &mut PgBox<'mcx, RecursiveUnionNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
+    // PGRUST_LANE_V2_ROWMODE; the iteration protocol stays inside the ported
+    // body — docs/design/rowmode-tail.md §3): falls through to the UNCHANGED
+    // per-tuple path on refuse.
+    if crate::lanev2::rowmode_tail_active() {
+        // SH-E ownership verdict (accounting only; single body below).
+        crate::lanev2::recursive_union_pull_verdict(ru, estate);
+    }
     let RecursiveUnionNode { state, outer, inner } = &mut **ru;
     ::noderecursiveunion::exec_recursive_union(state, outer, inner, estate)
 }
@@ -2559,6 +2880,14 @@ fn work_table_scan_arm<'mcx>(
     wts: &mut PgBox<'mcx, ::nodeworktablescan::WorkTableScanState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook (wave-2 row-mode tail delegation behind
+    // PGRUST_LANE_V2_ROWMODE; shared-slot law — the body resolves rustate
+    // from the estate per call): falls through to the UNCHANGED per-tuple
+    // path on refuse.
+    if crate::lanev2::rowmode_tail_active() {
+        // SH-E ownership verdict (accounting only; single body below).
+        crate::lanev2::work_table_scan_pull_verdict(estate);
+    }
     ::nodeworktablescan::exec_work_table_scan(wts, estate)
 }
 
@@ -2567,6 +2896,16 @@ fn named_tuplestore_scan_arm<'mcx>(
     nts: &mut PgBox<'mcx, ::nodenamedtuplestorescan::NamedTuplestoreScanState<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
+    // Lane-executor-v2 dispatch hook: wave-2 row-mode tail delegation behind
+    // PGRUST_LANE_V2_ROWMODE, and (wave-3 WS-Q) the T3 SOURCE form behind
+    // PGRUST_LANE_V2_SCANS_T3 — source form probes first inside try_own_*.
+    // Falls through to the UNCHANGED per-tuple path on refuse. Lane logic +
+    // refuse-set live in `lanev2` (rowmode_tail.rs / tail_source.rs).
+    if crate::lanev2::rowmode_tail_active() || crate::lanev2::scans_t3_active() {
+        if let Some(r) = crate::lanev2::try_own_named_tuplestore_scan(nts, estate)? {
+            return Ok(r);
+        }
+    }
     ::nodenamedtuplestorescan::exec_named_tuplestore_scan(nts, estate)
 }
 
@@ -2793,7 +3132,25 @@ fn merge_join_arm<'mcx>(
     mj: &mut PgBox<'mcx, MergeJoinNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
-    let MergeJoinNode { state, outer, inner } = &mut **mj;
+    let mj = &mut **mj;
+    // WS-MJ1 lane-NATIVE dispatch hook (LANE-MERGEJOIN inc-1, contract §4.1:
+    // "one relaxed cached-bool load + compare at the head of the mergejoin
+    // dispatch arm" — PGRUST_LANE_V2_MERGEJOIN_NATIVE, default OFF): on
+    // refuse this falls through byte-identically to the verdict + Volcano
+    // body below (worklog notes/mergejoin-ws-mj1.md §1.5).
+    if let Some(r) = crate::lanev2::try_own_merge_join(mj, estate)? {
+        return Ok(r);
+    }
+    // Lane-executor-v2 dispatch hook (Phase-1 row-mode LEAF hosting behind
+    // PGRUST_LANE_V2_ROWMODE; both children stay Volcano inside the ported
+    // FSM): falls through to the UNCHANGED exec_merge_join on refuse. Lane
+    // logic + refuse-set live in `lanev2` (the nest_loop_arm pattern).
+    // SH-E ownership verdict: accounting only — the call below IS the
+    // delegated body (tail-call shape preserved on both knob arms). SH-F:
+    // no arm-level enabled() gate — the MERGEJOIN knob heads the verdict,
+    // the GUC rides the fast-admit byte / slow-path head.
+    crate::lanev2::merge_join_pull_verdict(mj, estate);
+    let MergeJoinNode { state, outer, inner } = mj;
     ::nodemergejoin::exec_merge_join(state, &mut **outer, &mut **inner, estate)
 }
 
@@ -3320,6 +3677,9 @@ fn exec_end_node_inner<'mcx>(
             exec_end_node(&mut aps.outer, estate)
         }
         PlanStateNode::WindowAgg(w) => {
+            // Release the lane drive's Tuplestore (fd guard on the spill
+            // arm) before the forget path reclaims the bundle.
+            w.lane = None;
             ::nodewindowagg::exec_end_window_agg(&mut w.state);
             exec_end_node(&mut w.outer, estate)
         }
@@ -3694,7 +4054,19 @@ impl<'mcx> ::nodehash::HashBuildInput<'mcx> for PlanStateNode<'mcx> {
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<()> {
         if let PlanStateNode::SeqScan(ss) = self {
-            if hash_build_fusible(ss, estate)
+            // P2 gates (flip-ladder §5 arms #6/#7):
+            // PGRUST_FUSED_ARM_HASH_BUILD_PROJ (projected build source) /
+            // PGRUST_FUSED_ARM_HASH_BUILD (bare build source). The gate is
+            // read BEFORE any drive-side effect (the SoA prepare below runs
+            // only for an armed drive), so a forced-off arm takes the
+            // per-tuple multi_exec_hash exactly as an unfused shape would.
+            let proj_slot = ss.ss.ps_ProjInfo.as_ref().map(|p| p.pi_result_slot);
+            let arm_on = match proj_slot {
+                Some(_) => fused_arm_enabled(FusedArm::HashBuildProj),
+                None => fused_arm_enabled(FusedArm::HashBuild),
+            };
+            if arm_on
+                && hash_build_fusible(ss, estate)
                 && ::nodeseqscan::seq_scan_batch_supported(ss, estate)?
             {
                 ::nodeseqscan::seq_scan_batch_soa_prepare(
@@ -3705,7 +4077,7 @@ impl<'mcx> ::nodehash::HashBuildInput<'mcx> for PlanStateNode<'mcx> {
                     false,
                     false,
                 );
-                match ss.ss.ps_ProjInfo.as_ref().map(|p| p.pi_result_slot) {
+                match proj_slot {
                     Some(result_slot) => {
                         let src = SeqScanProjBatchSource { ss, result_slot };
                         return ::nodehash::multi_exec_hash_batched(hs, src, estate);
@@ -3817,7 +4189,7 @@ pub(crate) fn with_eval_slots_outer<'mcx, R>(
     BitmapHeapPlanState<'_> { scan, bitmapqual },
     BitmapCombineState<'_> { substates },
     AggPlanState<'_> { agg, outer, lane_choice, lane_stage_slot; lane_exprkey },
-    WindowAggNode<'_> { state, outer },
+    WindowAggNode<'_> { state, outer, lane_admit, lane_framed_admit, lane_framed; lane },
     MaterialNode<'_> { state, outer },
     MemoizeNode<'_> { state, outer, outer_chg },
     SortNode<'_> { state, outer, lane_fusible, pd_state, rd_shape_refused; outer_desc },
@@ -3851,3 +4223,52 @@ pub(crate) fn with_eval_slots_outer<'mcx, R>(
         Gather(x), GatherMerge(x), Instrumented(x),
     },
 );
+
+#[cfg(test)]
+mod fused_arm_tests {
+    use super::*;
+
+    /// P2 knob semantics (flip-ladder §5): every arm resolves ON by default
+    /// (env absent in the test process), the test lever flips a single arm
+    /// without perturbing the others, and the spellings are the seven
+    /// flip-ladder names exactly.
+    #[test]
+    fn fused_arm_knobs_default_on_and_isolate() {
+        const ARMS: [FusedArm; 7] = [
+            FusedArm::AggSeq,
+            FusedArm::AggIndex,
+            FusedArm::AggIos,
+            FusedArm::AggBitmap,
+            FusedArm::SortFeed,
+            FusedArm::HashBuildProj,
+            FusedArm::HashBuild,
+        ];
+        let names: Vec<&str> = ARMS.iter().map(|a| a.env_suffix()).collect();
+        assert_eq!(
+            names,
+            [
+                "AGG_SEQ",
+                "AGG_INDEX",
+                "AGG_IOS",
+                "AGG_BITMAP",
+                "SORT_FEED",
+                "HASH_BUILD_PROJ",
+                "HASH_BUILD"
+            ]
+        );
+        for arm in ARMS {
+            assert!(
+                fused_arm_enabled(arm),
+                "PGRUST_FUSED_ARM_{} must default ON (behavior-identical at default)",
+                arm.env_suffix()
+            );
+        }
+        fused_arm_set_for_tests("SORT_FEED", false);
+        assert!(!fused_arm_enabled(FusedArm::SortFeed));
+        for arm in [FusedArm::AggSeq, FusedArm::HashBuild, FusedArm::AggBitmap] {
+            assert!(fused_arm_enabled(arm), "force-off must not leak across arms");
+        }
+        fused_arm_set_for_tests("SORT_FEED", true);
+        assert!(fused_arm_enabled(FusedArm::SortFeed));
+    }
+}

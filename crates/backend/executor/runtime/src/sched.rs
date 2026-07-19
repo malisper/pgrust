@@ -87,6 +87,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::clock::Clock;
+use crate::ledger::{AdmissionLedger, ClaimVerdict, LedgerBudgets, WidthRequest};
 use crate::morsel::MorselRange;
 use crate::rg::{QuerySpec, ResourceGroup, RgClass, RgOutcome};
 use crate::sizing::{SizingDecision, SizingParams, TaskSizer};
@@ -110,6 +111,100 @@ const PASS_SHIFT: u32 = 16;
 
 pub(crate) fn stride_for(priority: u32) -> u64 {
     STRIDE1 / priority.max(1) as u64
+}
+
+thread_local! {
+    /// (scheduler, slot) while THIS thread is inside a ledger-JOINED
+    /// `run_task` (set by `run_task_admitted`, cleared by [`GrantCtx`]'s
+    /// drop — unwind-safe). Consulted by the declared-blocking-section
+    /// entry points (io.rs permit seams, blocking.rs facade) so the width
+    /// grant is donated and retaken ALONGSIDE the execution permit; empty
+    /// on non-worker threads and under knob OFF, where both entry points
+    /// no-op. Plain per-thread state (same pattern as blocking.rs's
+    /// PERMIT_SEM), sound under loom.
+    static LEDGER_GRANT: std::cell::Cell<Option<(*const Scheduler, usize)>> =
+        const { std::cell::Cell::new(None) };
+    /// WS-O C1 (wave 2): the caller-as-worker CLAIM-BOUNDARY duty hook —
+    /// a LIGHT duty pumped inside run_task's claim loop while the SESSION
+    /// thread drives its own RG (installed for the drive's extent by
+    /// [`crate::CallerWorker::drive_with_duties`], RAII-cleared by
+    /// [`CallerDutyCtx`]). Returning false ends the current task at the
+    /// boundary (the TaskEnd::Budget path — the ledger-Yield shape) and
+    /// control returns to the caller's STEP loop, where the full
+    /// error-carrying duty runs. The light hook is where the gang
+    /// all-stopped detection lives (contract adjudication: duty cadence
+    /// alone is insufficient for C2 liveness — claim cadence bounds
+    /// detection latency to one claim, not one task). Empty on pool
+    /// workers and non-caller externals: one TL read per claim boundary.
+    /// Same thread_local! block as LEDGER_GRANT (no TLS-census delta).
+    static CALLER_DUTY: std::cell::Cell<Option<*mut dyn FnMut() -> bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// RAII for CALLER_DUTY: cleared even if the drive frame unwinds (the
+/// GrantCtx pattern).
+pub(crate) struct CallerDutyCtx;
+
+impl CallerDutyCtx {
+    /// SAFETY contract (upheld by caller.rs): `duty` must outlive the
+    /// returned guard, the guard must not escape the caller's drive frame,
+    /// and the pointer is dereferenced only from THIS thread inside
+    /// run_task's claim loop while the guard lives.
+    pub(crate) fn set(duty: *mut dyn FnMut() -> bool) -> CallerDutyCtx {
+        CALLER_DUTY.with(|c| c.set(Some(duty)));
+        CallerDutyCtx
+    }
+}
+
+impl Drop for CallerDutyCtx {
+    fn drop(&mut self) {
+        CALLER_DUTY.with(|c| c.set(None));
+    }
+}
+
+/// RAII for LEDGER_GRANT: cleared even if the task body unwinds.
+struct GrantCtx;
+
+impl GrantCtx {
+    fn set(sched: &Scheduler, slot: usize) -> GrantCtx {
+        LEDGER_GRANT.with(|c| c.set(Some((sched as *const Scheduler, slot))));
+        GrantCtx
+    }
+}
+
+impl Drop for GrantCtx {
+    fn drop(&mut self) {
+        LEDGER_GRANT.with(|c| c.set(None));
+    }
+}
+
+/// Blocking-section entry (§2.8 composition): donate the current task's
+/// width grant along with the execution permit — the standby absorbing the
+/// freed core must be joinable or a width-saturated slot deadlocks the
+/// donation (ledger.rs `donate` doc). Called by io.rs `io_permit_release`
+/// and blocking.rs `blocking_io_section` BEFORE the permit release; no-op
+/// unless this thread is inside a ledger-joined task.
+pub(crate) fn ledger_donate_current() {
+    if let Some((sched, slot)) = LEDGER_GRANT.with(std::cell::Cell::get) {
+        // SAFETY: set only for the extent of run_task_admitted on this
+        // thread; the scheduler (owned by the Runtime the worker loop
+        // holds) outlives every task run.
+        let sched = unsafe { &*sched };
+        if sched.ledger.donate(slot) > 0 {
+            sched.park.wake_all();
+        }
+    }
+}
+
+/// Blocking-section exit: retake the grant (permit already reacquired by
+/// the caller — grant follows permit, in both directions). Transient
+/// overshoot over target resolves via Yield at the next claim boundary.
+pub(crate) fn ledger_restore_current() {
+    if let Some((sched, slot)) = LEDGER_GRANT.with(std::cell::Cell::get) {
+        // SAFETY: as in ledger_donate_current.
+        let sched = unsafe { &*sched };
+        sched.ledger.rejoin(slot);
+    }
 }
 
 /// M5-4 kill switch: `PGRUST_RUNTIME_STRIDE=0` restores the M0 FIFO
@@ -179,6 +274,19 @@ fn decay_quantum_default() -> u64 {
             .filter(|q| *q > 0)
             .map(|us| us.saturating_mul(1000))
             .unwrap_or(DECAY_QUANTUM_NS_DEFAULT)
+    })
+}
+
+/// WS-B admission-ledger switch (single-executor Phase 0.1):
+/// `PGRUST_RUNTIME_LEDGER_V2=1` (or `on`) activates the ledger width policy.
+/// DEFAULT OFF — off is today's scheduler, byte-identical (every touch point
+/// is one cached-bool branch, zero new atomics on the hot paths). Read once;
+/// tests toggle per instance via [`crate::Runtime::set_ledger`]. (The
+/// stride/dag/decay switch pattern above.)
+fn ledger_default() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_RUNTIME_LEDGER_V2").as_deref(), Ok("1") | Ok("on"))
     })
 }
 
@@ -257,7 +365,9 @@ enum TaskEnd {
 /// the thread-local cache).
 struct Membership {
     owned: Vec<Option<SlotEntry>>,
-    waitq: VecDeque<Arc<ResourceGroup>>,
+    /// Queued RGs with the width request they were submitted with (consumed
+    /// by the ledger admit when a slot frees; None = unbounded).
+    waitq: VecDeque<(Arc<ResourceGroup>, Option<WidthRequest>)>,
 }
 
 /// Per-drive observability accumulators (the WFIN marker channel —
@@ -584,6 +694,14 @@ pub(crate) struct Scheduler {
     /// admitted RG's slot pass starts here — standard stride join, no
     /// credit for queue wait, no monopoly for late arrivals.
     global_pass: AtomicU64,
+    /// WS-B admission ledger (single-executor Phase 0.1): the width
+    /// authority behind `ledger_on`. Inert (policy words never read on any
+    /// hot path) while the switch is off.
+    pub(crate) ledger: AdmissionLedger,
+    /// PGRUST_RUNTIME_LEDGER_V2 switch (env default OFF; tests toggle per
+    /// instance via [`crate::Runtime::set_ledger`]). OFF ⇒ today's
+    /// scheduler, byte-identical.
+    ledger_on: AtomicBool,
     clock: Arc<dyn Clock>,
     params: SizingParams,
     pub(crate) stats: RuntimeStats,
@@ -629,6 +747,8 @@ impl Scheduler {
             decay_quantum_ns: AtomicU64::new(decay_quantum_default()),
             p_min: AtomicU32::new(p_min_default()),
             global_pass: AtomicU64::new(0),
+            ledger: AdmissionLedger::new(nslots, LedgerBudgets::from_env(permits as u32)),
+            ledger_on: AtomicBool::new(ledger_default()),
             clock,
             params,
             stats: RuntimeStats::default(),
@@ -731,6 +851,55 @@ impl Scheduler {
         self.p_min.load(Ordering::Relaxed)
     }
 
+    /// WS-B: per-instance ledger toggle (tests / A-B; production reads the
+    /// PGRUST_RUNTIME_LEDGER_V2 default once at construction — default OFF
+    /// this increment). Toggle BEFORE submitting: join/leave accounting
+    /// assumes the switch is stable across a task.
+    pub(crate) fn set_ledger(&self, on: bool) {
+        self.ledger_on.store(on, Ordering::SeqCst);
+    }
+
+    pub(crate) fn ledger_enabled(&self) -> bool {
+        self.ledger_on.load(Ordering::Relaxed)
+    }
+
+    /// Unified gang width lease (ledger.rs "Unified gang entries"): admit
+    /// a non-pool parallel gang as a frozen non-shedding POOL-face entry.
+    /// None ⇔ ledger OFF or [`crate::ledger::MAX_GANG_ENTRIES`] — FAIL-OPEN,
+    /// the caller keeps today's uncapped path. The grant may be 0 (the
+    /// caller must have a serial path). Takes ledger.inner ALONE — never
+    /// called under the membership lock (lock-order note in the ledger
+    /// module doc; same law as the external face).
+    pub(crate) fn lease_gang_width(&self, requested: u32) -> Option<(usize, u32)> {
+        if !self.ledger_on.load(Ordering::Relaxed) {
+            return None;
+        }
+        self.ledger.admit_gang(requested)
+    }
+
+    /// Settle a gang entry to its ACTIVE width; widened pool targets wake
+    /// parked workers (the retire wake discipline). NOT gated on
+    /// ledger_on: a live entry must stay settleable across a test toggle.
+    pub(crate) fn settle_gang_width(&self, id: usize, active: u32) {
+        if self.ledger.settle_gang(id, active) > 0 {
+            self.park.wake_all();
+        }
+    }
+
+    /// Retire a gang entry (lease drop), waking parked workers when pool
+    /// targets widen. NOT gated on ledger_on (as settle).
+    pub(crate) fn retire_gang_width(&self, id: usize) {
+        if self.ledger.retire_gang(id) > 0 {
+            self.park.wake_all();
+        }
+    }
+
+    /// WS-O inc-2 debug accessor: worker `worker`'s pin-board entry is
+    /// settled (see PinBoard::is_settled — asserts/diagnostics only).
+    pub(crate) fn pin_settled(&self, worker: usize) -> bool {
+        self.pins.is_settled(worker)
+    }
+
     /// Scheduler clock read (WFIN leader marks share the workers' domain).
     pub(crate) fn clock_now_ns(&self) -> u64 {
         self.clock.now_ns()
@@ -764,6 +933,7 @@ impl Scheduler {
         pinned: bool,
         class: RgClass,
         session_token: u64,
+        width: Option<WidthRequest>,
     ) -> Arc<ResourceGroup> {
         assert!(
             !(pinned && class == RgClass::Maintenance),
@@ -791,11 +961,11 @@ impl Scheduler {
                 // FIFO admission: never overtake queued RGs.
                 if m.waitq.is_empty() {
                     if let Some(slot) = m.owned.iter().position(Option::is_none) {
-                        self.start_rg_locked(&mut m, Arc::clone(&rg), slot);
+                        self.start_rg_locked(&mut m, Arc::clone(&rg), slot, width);
                         return rg;
                     }
                 }
-                m.waitq.push_back(Arc::clone(&rg));
+                m.waitq.push_back((Arc::clone(&rg), width));
             }
             RgClass::Maintenance => {
                 // Starvation floor (§3.5): a due job cycle takes any free
@@ -803,10 +973,10 @@ impl Scheduler {
                 // slot is busy it goes to the FRONT of the queue (the
                 // handful of jobs never meaningfully reorders the FIFO).
                 if let Some(slot) = m.owned.iter().position(Option::is_none) {
-                    self.start_rg_locked(&mut m, Arc::clone(&rg), slot);
+                    self.start_rg_locked(&mut m, Arc::clone(&rg), slot, width);
                     return rg;
                 }
-                m.waitq.push_front(Arc::clone(&rg));
+                m.waitq.push_front((Arc::clone(&rg), width));
             }
         }
         rg
@@ -821,7 +991,25 @@ impl Scheduler {
     /// caller's free pick) takes the deepest; extras fan out into remaining
     /// free slots; capacity shortfalls defer (the deferred pipeline
     /// re-publishes when one of the query's own pipelines finishes).
-    fn start_rg_locked(&self, m: &mut Membership, rg: Arc<ResourceGroup>, slot: usize) {
+    fn start_rg_locked(
+        &self,
+        m: &mut Membership,
+        rg: Arc<ResourceGroup>,
+        slot: usize,
+        width: Option<WidthRequest>,
+    ) {
+        // WS-B ledger admission (knob-gated; lock order membership →
+        // ledger.inner, this caller holds membership). Entries are
+        // slot-keyed: under DAG dispatch only the RG's FIRST slot is
+        // managed this increment — fan-out siblings fail open (unmanaged)
+        // through every ledger entry point. The arrival's wake half rides
+        // publish_taskset_locked's existing wake_all, which the advertises
+        // flag suppresses for sub-JOIN_THRESHOLD admissions.
+        if self.ledger_on.load(Ordering::Relaxed) {
+            let req = width
+                .unwrap_or_else(|| WidthRequest::unbounded(self.ledger.budgets().cores));
+            let _nudge = self.ledger.admit(slot, req);
+        }
         // Stride join (M5-4, refined at M5-5): a newly-admitted RG starts at
         // the stride VIRTUAL TIME — the minimum pass among currently-active
         // slots — falling back to the M5-4 global-pass watermark when
@@ -962,16 +1150,25 @@ impl Scheduler {
         }
         m.owned[slot] = Some(SlotEntry { seq, ts });
         self.slots[slot].word.store((seq << 1) | 1, Ordering::SeqCst);
+        // WS-B JOIN_THRESHOLD (knob-gated; OFF ⇒ advert is true and the
+        // path below is byte-identical): a sub-threshold admission never
+        // sets the active bit and never wakes the pool — the submitter
+        // executes alone (caller-as-worker; inert unless a submitter opts
+        // in with an est_work_ns under the threshold).
+        let advert =
+            !self.ledger_on.load(Ordering::Relaxed) || self.ledger.advertises(slot);
         // Pinned RGs are invisible to the pool's pick: only external
         // participants (drive_pinned) may execute them — pool workers have
         // no session binding for the query (M1; §2.3 retires this in M2+).
-        if !pinned {
+        if !pinned && advert {
             self.set_active(slot, class);
         }
         RuntimeStats::tick(&self.stats.tasksets_published);
         // Wake parked workers: new work exists (external pinned drivers
         // park on the same epoch eventcount).
-        self.park.wake_all();
+        if advert {
+            self.park.wake_all();
+        }
     }
 
     fn set_active(&self, slot: usize, class: RgClass) {
@@ -987,6 +1184,13 @@ impl Scheduler {
     }
 
     fn pick_slot(&self, local: &WorkerLocal) -> Option<usize> {
+        // WS-B ledger filter switch: one cached-bool branch when OFF (the
+        // byte-identity contract). ON composes wants_workers into the
+        // active-slot scans; the maintenance preference and the FIFO kill-
+        // switch path stay unfiltered (maintenance cycles are single-morsel
+        // and few; PGRUST_RUNTIME_STRIDE=0 is a diagnostics configuration —
+        // both recorded in notes/se-ws-b-ledger.md).
+        let ledger_on = self.ledger_on.load(Ordering::Relaxed);
         // M4 preference: any Maintenance-class slot first (§3.5 starvation
         // floor; mask is usually zero — two loads on the foreground path).
         // Evaluated BEFORE the stride pick (m5-planner §3.2 reconciliation):
@@ -1009,11 +1213,21 @@ impl Scheduler {
         }
         // ONE active RG: the pick is forced — no pass reads, exactly the M0
         // lowest-index pick (the single-query bit-identity anchor: stride
-        // and FIFO provably agree on this path).
+        // and FIFO provably agree on this path). Ledger ON: a full slot
+        // (granted == target) parks the surplus worker instead of handing
+        // it a claim it would be refused (try_join) — with an unbounded
+        // width request target = full width and the filter is a no-op, the
+        // same identity anchor.
         if m0.count_ones() + m1.count_ones() == 1 {
             let (i, mask) = if m0 != 0 { (0usize, m0) } else { (1, m1) };
             let slot = i * 64 + mask.trailing_zeros() as usize;
-            return (slot < self.slots.len()).then_some(slot);
+            if slot >= self.slots.len() {
+                return None;
+            }
+            if ledger_on && !self.ledger.wants_workers(slot) {
+                return None;
+            }
+            return Some(slot);
         }
         if !self.stride.load(Ordering::Relaxed) {
             // Kill switch (PGRUST_RUNTIME_STRIDE=0): the M0 FIFO pick.
@@ -1042,6 +1256,15 @@ impl Scheduler {
                 let slot = i * 64 + b;
                 if slot >= self.slots.len() {
                     break;
+                }
+                // WS-B pick filter: skip saturated / non-advertising
+                // entries — freed capacity flows to under-target slots in
+                // pass order (the ledger consumes stride via this filter;
+                // it never duplicates pass accounting). Advisory like every
+                // pick input: a stale hit resolves through try_join into
+                // Retry.
+                if ledger_on && !self.ledger.wants_workers(slot) {
+                    continue;
                 }
                 let pass = self.slots[slot].pass.load(Ordering::Relaxed);
                 match best {
@@ -1110,23 +1333,72 @@ impl Scheduler {
 
         let step = match self.resolve(local, slot) {
             None => Step::Retry,
-            Some(ts) => match self.run_task(local, &ts) {
-                TaskEnd::Exhausted => {
-                    // Protocol step 2: exhausted → invalidate (coordinator
-                    // election by slot-word CAS).
-                    self.coordinate(&ts);
-                    Step::Ran
-                }
-                TaskEnd::Budget => Step::Ran,
-                // Starved stream: park (epoch captured before this step, so
-                // a publish that landed mid-task wakes the park at once).
-                TaskEnd::Starved => Step::Idle,
-            },
+            Some(ts) => self.run_task_admitted(local, &ts),
         };
 
         // Protocol step 4: settle own pin; pay any marker debt.
         self.settle(local.worker);
         step
+    }
+
+    /// [`Scheduler::run_task`] wrapped in the WS-B ledger's join/leave
+    /// accounting (knob-gated; OFF = one cached-bool branch, no other
+    /// change). A refused grant maps to [`Step::Retry`]: the worker
+    /// re-picks — the filter now skips the saturated slot — and the drive
+    /// loops' bounded-Retry discipline parks it on the epoch captured
+    /// BEFORE the step, so the leave/renudge/admit wakes are
+    /// lost-wakeup-free. The refused worker is still pinned; the caller's
+    /// settle pays any marker debt exactly as on the invalidated-slot
+    /// Retry.
+    fn run_task_admitted(&self, local: &mut WorkerLocal, ts: &Arc<TaskSetRt>) -> Step {
+        let ledger_on = self.ledger_on.load(Ordering::Relaxed);
+        if ledger_on && !self.ledger.try_join(ts.slot) {
+            return Step::Retry;
+        }
+        // Publish the grant for the declared-blocking-section entry points
+        // (§2.8 composition): a task body that donates its execution permit
+        // must donate its width grant with it (ledger_donate_current).
+        let _grant = if ledger_on { Some(GrantCtx::set(self, ts.slot)) } else { None };
+        let end = self.run_task(local, ts);
+        if ledger_on {
+            // WORKER-FREED RE-PICK: this worker re-picks on its own; the
+            // hint covers PARKED peers when the slot turned joinable again.
+            //
+            // STARVED ends never wake (CALLER-C2 LEDGER HANG fix): a
+            // Starved end means this worker's own claim just proved
+            // nothing is claimable — a joinable-again wake re-offers
+            // peers a slot they can only starve on, and the wake bumps
+            // the park epoch, so every park (the pool eventcount AND the
+            // caller-C2 bounded idle park's epoch pre-check) returns
+            // immediately. With granted == target (any sole-worker slot:
+            // cores=1, or the pinned caller-C2 drive) that is a
+            // SELF-WAKE busy-loop: starve → leave-hint → wake_all →
+            // epoch moved → re-step → starve → …, the idle park never
+            // entered, 100% CPU until a publish arrives (never, if the
+            // producer IS the parked duty — the observed suite hang
+            // under global PGRUST_RUNTIME_LEDGER_V2=1). Claimable work
+            // is never stranded by the gate: a publish that lands
+            // mid-task bumps the epoch itself (notify_source_progress →
+            // wake_all), this worker's own pre-captured park epoch has
+            // therefore moved, and it re-picks the slot; parked peers
+            // ride that publish wake or the bounded re-nudge. The leave
+            // ACCOUNTING stays unconditional — only the wake is gated.
+            if self.ledger.leave(ts.slot) > 0 && !matches!(end, TaskEnd::Starved) {
+                self.park.wake_all();
+            }
+        }
+        match end {
+            TaskEnd::Exhausted => {
+                // Protocol step 2: exhausted → invalidate (coordinator
+                // election by slot-word CAS).
+                self.coordinate(ts);
+                Step::Ran
+            }
+            TaskEnd::Budget => Step::Ran,
+            // Starved stream: park (epoch captured before this step, so
+            // a publish that landed mid-task wakes the park at once).
+            TaskEnd::Starved => Step::Idle,
+        }
     }
 
     /// One scheduling step of an EXTERNAL participant restricted to ONE
@@ -1213,14 +1485,11 @@ impl Scheduler {
                 // revalidation; not ours to run.
                 Step::Retry
             }
-            Some(ts) => match self.run_task(local, &ts) {
-                TaskEnd::Exhausted => {
-                    self.coordinate(&ts);
-                    Step::Ran
-                }
-                TaskEnd::Budget => Step::Ran,
-                TaskEnd::Starved => Step::Idle,
-            },
+            // Ledger ON: external pinned drivers consult the same
+            // join/leave/should_continue words as pool workers — this is
+            // where cross-query narrowing between concurrent pinned gangs
+            // becomes real (integration contract 1c ruling 4).
+            Some(ts) => self.run_task_admitted(local, &ts),
         };
 
         // Protocol step 4: settle own pin; pay any marker debt.
@@ -1413,6 +1682,40 @@ impl Scheduler {
                     if ts.rg.is_aborted() {
                         end = TaskEnd::Exhausted;
                         break;
+                    }
+                    // WS-O C1 claim-boundary duty hook (None on every pool
+                    // worker: one TL read). False = end this task at the
+                    // boundary (`end` is already TaskEnd::Budget) and fall
+                    // back to the caller's step loop, where the full
+                    // error-carrying duty runs.
+                    if let Some(duty) = CALLER_DUTY.with(std::cell::Cell::get) {
+                        // SAFETY: installed only for the extent of the
+                        // caller's drive frame on this thread (CallerDutyCtx
+                        // RAII; see its SAFETY contract).
+                        if !unsafe { (*duty)() } {
+                            break;
+                        }
+                    }
+                    // WS-B ledger claim-boundary verdict (knob-gated; OFF =
+                    // one cached-bool branch). Yield — an arrival narrowed
+                    // this entry below its live grants — rides the EXISTING
+                    // TaskEnd::Budget path: the finalization protocol (slot
+                    // word / pin board / fin counter) never sees the ledger.
+                    if self.ledger_on.load(Ordering::Relaxed) {
+                        match self.ledger.should_continue(ts.slot) {
+                            ClaimVerdict::Yield => {
+                                // `end` is already TaskEnd::Budget.
+                                break;
+                            }
+                            ClaimVerdict::Continue => {
+                                // BOUNDED RE-NUDGE: an under-target entry
+                                // may request one wake per boundary, capped
+                                // by the per-recompute budget.
+                                if self.ledger.renudge(ts.slot) {
+                                    self.park.wake_all();
+                                }
+                            }
+                        }
                     }
                     let range = match self.claim_morsel(
                         ts,
@@ -1968,12 +2271,22 @@ impl Scheduler {
             "releasing a slot we do not own"
         );
         m.owned[slot] = None;
-        while let Some(rg) = m.waitq.pop_front() {
+        // WS-B ledger retirement (knob-gated): both completion paths — the
+        // sequential last-out and the DAG release — funnel here, BEFORE the
+        // waitq pop can admit the next RG into the slot. The wake hint
+        // covers workers parked under the old, narrower targets (their
+        // entries just widened). Queued-abort completions never reach a
+        // slot and have nothing to retire (retire on a never-admitted slot
+        // is a no-op).
+        if self.ledger_on.load(Ordering::Relaxed) && self.ledger.retire(slot) > 0 {
+            self.park.wake_all();
+        }
+        while let Some((rg, width)) = m.waitq.pop_front() {
             if rg.is_aborted() {
                 complete_aborted.push(rg);
                 continue;
             }
-            self.start_rg_locked(m, rg, slot);
+            self.start_rg_locked(m, rg, slot, width);
             break;
         }
         complete_aborted
@@ -2007,7 +2320,7 @@ impl Scheduler {
     pub(crate) fn reap_queued_abort(&self, rg: &Arc<ResourceGroup>) {
         let removed = {
             let mut m = lock(&self.membership);
-            match m.waitq.iter().position(|q| Arc::ptr_eq(q, rg)) {
+            match m.waitq.iter().position(|(q, _)| Arc::ptr_eq(q, rg)) {
                 Some(i) => {
                     m.waitq.remove(i);
                     true

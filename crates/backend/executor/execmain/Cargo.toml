@@ -103,10 +103,16 @@ miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
 datum = { path = "../../../_support/types/datum" }
 types_rel = { path = "../../../_support/types/rel" }
+# WS-K heap batch-source readahead: execmain sees bufmgr ONLY through the
+# seam crate (prefetch_buffer, advisory).
+bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
 nodelockrows = { path = "../nodelockrows" }
 types_snapshot = { path = "../../../_support/types/snapshot" }
 pgstat = { path = "../../utils/activity/pgstat" }
 tableam = { path = "../../access/table/tableam" }
+# SEAM-WIRING (SE10-GATES item 1): relam_is_pgrcolumnar for the §4.1
+# CURRENT-OF eligibility probe's AM narrowing (execcurrent.rs).
+reloptions = { path = "../../access/common/reloptions" }
 [dev-dependencies]
 adt_timestamp = { path = "../../utils/adt/adt_timestamp" }
 adt_numeric = { path = "../../utils/adt/numeric" }
@@ -196,3 +202,11 @@ heapam_visibility_seams = { path = "../../access/heap/heapam_visibility_seams" }
 predicate_seams = { path = "../../storage/lmgr/predicate_seams" }
 pruneheap_seams = { path = "../../access/heap/pruneheap_seams" }
 procarray_seams = { path = "../../storage/ipc/procarray_seams" }
+# WS-J express-lane A/B corpus (tests::express_ab): fake btree pages + the
+# xlog-active probe the nbtree read path consults.
+types_nbtree = { path = "../../../_support/types/types_nbtree" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+# WS-N dml A/B corpus (tests::dml_ab): CheckValidResultRel's replica-identity
+# probe on the fake result relation.
+execreplication_seams = { path = "../execreplication_seams" }
+lmgr_seams = { path = "../../storage/lmgr/lmgr_seams" }

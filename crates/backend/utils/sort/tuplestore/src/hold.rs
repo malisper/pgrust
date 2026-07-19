@@ -150,10 +150,122 @@ fn skiptuples_hold(h: TuplestoreHandle, ntuples: i64, forward: bool) -> PgResult
     with_store(h, |store| store.skiptuples(ntuples, forward))
 }
 
+// --- WS-CA wave-10 (cursors inc-2): the portal cursor-store seams + the §4.2
+// row-identity sidecar. The sidecar rows are 2x int8 (tableoid,
+// block<<16|offset) formed/deformed with a locally-built minimal tupdesc —
+// internal layout, never client-visible; ~16 B payload + minimal-tuple
+// framing per FETCHED row of a CURRENT-OF-eligible plan (worklog D-CA-1
+// records the delta vs the contract's ~10 B/row trailing-column estimate).
+
+fn begin_heap_cursor(random_access: bool, inter_xact: bool) -> PgResult<TuplestoreHandle> {
+    let work_mem = init_small::globals::work_mem();
+    Ok(register(Tuplestore::begin_heap(random_access, inter_xact, work_mem)))
+}
+
+fn tuple_count_hold(h: TuplestoreHandle) -> i64 {
+    with_store(h, |store| store.tuple_count())
+}
+
+/// The sidecar row schema: 2x not-null int8, double-aligned, plain storage.
+/// Built per call in a throwaway bump arena (the desc is only read during
+/// form/deform; per-row build cost is a named perf lever, not contract
+/// scope — eligible fills are already per-row executor drives).
+fn with_tid_desc<R>(
+    f: impl for<'m> FnOnce(::mcx::Mcx<'m>, std::rc::Rc<::types_tuple::TupleDescData<'m>>) -> PgResult<R>,
+) -> PgResult<R> {
+    use ::types_tuple::{
+        CompactAttribute, FormData_pg_attribute, TYPALIGN_DOUBLE, TYPSTORAGE_PLAIN,
+    };
+    let ctx = ::mcx::MemoryContext::new_bump("cursor tidstore desc");
+    let mcx = ctx.mcx();
+    let mut compact_attrs = ::mcx::PgVec::new_in(mcx);
+    let mut attrs = ::mcx::PgVec::new_in(mcx);
+    for attnum in 1..=2i16 {
+        let att = FormData_pg_attribute {
+            atttypid: 20, // INT8OID
+            attlen: 8,
+            attnum,
+            atttypmod: -1,
+            attbyval: true,
+            attalign: TYPALIGN_DOUBLE,
+            attstorage: TYPSTORAGE_PLAIN,
+            attnotnull: true,
+            attislocal: true,
+            ..FormData_pg_attribute::default()
+        };
+        compact_attrs.push(CompactAttribute::populate_from(&att));
+        attrs.push(att);
+    }
+    let desc = std::rc::Rc::new(::types_tuple::TupleDescData {
+        natts: 2,
+        tdtypeid: 2249, // RECORDOID
+        tdtypmod: -1,
+        tdrefcount: -1,
+        constr: None,
+        compact_attrs,
+        attrs,
+    });
+    f(mcx, desc)
+}
+
+/// §4.2 sidecar append. Plain pub fn AND the seam impl: the seam serves
+/// pquery's row-chain capture loop; execmain's in-run capture surfaces
+/// (SE-R41 batch sink + capture row loop) link tuplestore directly — the
+/// `tidstore_get` precedent below.
+pub fn tidstore_put(h: TuplestoreHandle, tableoid: u32, tid_packed: u64) -> PgResult<()> {
+    with_tid_desc(|_mcx, desc| {
+        let values = [
+            ::datum::Datum::from_i64(tableoid as i64),
+            ::datum::Datum::from_i64(tid_packed as i64),
+        ];
+        with_store(h, |store| store.putvalues(&desc, &values, &[false, false]))
+    })
+}
+
+/// §4.2 resolution read (execCurrentOf on a store-armed portal): row
+/// `row_index` (0-based) of the sidecar, as (tableoid, packed tid). Seeks
+/// the sidecar's own ptr0 — the sidecar has no other reader. Plain pub fn
+/// (not a seam): the caller is execmain, which links tuplestore directly.
+pub fn tidstore_get(h: TuplestoreHandle, row_index: i64) -> PgResult<Option<(u32, u64)>> {
+    with_tid_desc(|mcx, desc| {
+        let taken = with_store(h, |store| -> PgResult<bool> {
+            store.rescan()?;
+            if row_index > 0 && !store.skiptuples(row_index, true)? {
+                return Ok(false);
+            }
+            Ok(true)
+        })?;
+        if !taken {
+            return Ok(None);
+        }
+        // The desc lives exactly as long as the slot (same arena, same scope).
+        let mut slot = exectuples::make_tuple_table_slot(
+            mcx,
+            ::types_slot::TupleSlotKind::MinimalTuple,
+            Some(desc),
+        );
+        let got = with_store(h, |store| store.gettupleslot(true, true, &mut slot, mcx))?;
+        if !got {
+            return Ok(None);
+        }
+        let mut isnull = false;
+        let tableoid = exectuples::slot_getattr(&mut slot, 1, &mut isnull).as_i64() as u32;
+        debug_assert!(!isnull);
+        let tid = exectuples::slot_getattr(&mut slot, 2, &mut isnull).as_i64() as u64;
+        debug_assert!(!isnull);
+        drop(slot);
+        Ok(Some((tableoid, tid)))
+    })
+}
+
 pub(crate) fn install_seams() {
     tuplestore_hold_seams::tuplestore_begin_heap_hold::set(begin_heap_hold);
     tuplestore_hold_seams::tuplestore_end::set(end);
     tuplestore_hold_seams::tuplestore_gettupleslot::set(gettupleslot_hold);
     tuplestore_hold_seams::tuplestore_rescan::set(rescan_hold);
     tuplestore_hold_seams::tuplestore_skiptuples::set(skiptuples_hold);
+    // WS-CA wave-10 (cursors inc-2):
+    tuplestore_hold_seams::tuplestore_begin_heap_cursor::set(begin_heap_cursor);
+    tuplestore_hold_seams::tuplestore_tuple_count::set(tuple_count_hold);
+    tuplestore_hold_seams::tuplestore_tidstore_put::set(tidstore_put);
 }

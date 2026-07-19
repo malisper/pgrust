@@ -55,6 +55,15 @@ pub struct ExplainState<'mcx> {
     pub memory: bool,
     pub settings: bool,
     pub generic: bool,
+    /// pgrust-only EXPLAIN (ENGINE) (single-executor Phase 0.2): annotate
+    /// each node with the engine that owns it (lane / spine / fused-arm /
+    /// runtime) and the lane RefuseReason for spine nodes. Requires ANALYZE
+    /// in increment 1 (the static preview is inc-2). NOTE the PG18
+    /// BUFFERS-defaults-to-ANALYZE footgun: bare EXPLAIN (ENGINE, ANALYZE)
+    /// carries INSTRUMENT_TIMER|BUFFERS, which the runtime arms refuse —
+    /// runtime attribution needs EXPLAIN (ENGINE, ANALYZE, TIMING OFF,
+    /// BUFFERS OFF).
+    pub engine: bool,
     pub serialize: ExplainSerializeOption,
     pub format: ExplainFormat,
     pub indent: i32,
@@ -87,6 +96,7 @@ pub fn NewExplainState(mcx: Mcx<'_>) -> PgResult<ExplainState<'_>> {
         memory: false,
         settings: false,
         generic: false,
+        engine: false,
         serialize: EXPLAIN_SERIALIZE_NONE,
         format: EXPLAIN_FORMAT_TEXT,
         indent: 0,
@@ -155,6 +165,8 @@ pub fn ParseExplainOptionList<'mcx>(
                 es.summary = defGetBoolean(opt)?;
             }
             "memory" => es.memory = defGetBoolean(opt)?,
+            // pgrust-only (no C counterpart): per-node engine attribution.
+            "engine" => es.engine = defGetBoolean(opt)?,
             "serialize" => {
                 if opt.arg.is_some() {
                     es.serialize = match defGetString(mcx, opt)? {
@@ -197,6 +209,13 @@ pub fn ParseExplainOptionList<'mcx>(
     }
     if es.serialize != EXPLAIN_SERIALIZE_NONE && !es.analyze {
         return Err(requires_analyze("SERIALIZE").into());
+    }
+    // Increment-1 scope (integration contract, WS-C amendment 1): the
+    // ENGINE attribution is observed at the executor's admission
+    // chokepoints, which need a real execution; the side-effect-free static
+    // preview is a ledgered inc-2 item.
+    if es.engine && !es.analyze {
+        return Err(requires_analyze("ENGINE").into());
     }
     if es.generic && es.analyze {
         return Err(ereport(ERROR)

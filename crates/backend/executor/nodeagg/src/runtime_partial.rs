@@ -159,7 +159,7 @@ pub fn agg_sorted_export_partial_into(
     export_partial_from(node, crate::agg_sorted_pergroup_base(node), partial)
 }
 
-fn export_partial_from(
+pub(crate) fn export_partial_from(
     node: &AggStateData<'_>,
     base: core::ptr::NonNull<::execexpr::AggPerGroup>,
     partial: &mut RuntimePartial,
@@ -368,6 +368,21 @@ fn absorb_partial_states(
     node: &mut AggStateData<'_>,
     combined: &RuntimePartial,
 ) -> PgResult<()> {
+    let base = node.pergroup_base;
+    absorb_partial_states_at(node, base, combined)
+}
+
+/// SE-AGGJOIN (band 87001): the absorb loop over an EXPLICIT pergroup base —
+/// the grouped runtime sink writes each combined group's states into its
+/// hash-table ENTRY's pergroup array (the plain/sorted arms pass the node's
+/// fixed current-group array through the wrapper above). Same byte-for-byte
+/// end-state contract; Int128 states allocate in the aggcontext exactly as
+/// the transfn's first call would.
+pub(crate) fn absorb_partial_states_at(
+    node: &mut AggStateData<'_>,
+    base: core::ptr::NonNull<::execexpr::AggPerGroup>,
+    combined: &RuntimePartial,
+) -> PgResult<()> {
     {
         let plan = crate::agg_lanefold_plan(node)
             .ok_or_else(|| PgError::error("runtime partial absorb without a fold plan".to_string()))?;
@@ -376,7 +391,6 @@ fn absorb_partial_states(
                 "runtime partial: combined layout mismatch".to_string(),
             )));
         }
-        let base = node.pergroup_base;
         let mut int128_fixups: Vec<(u16, i64, i128)> = Vec::new();
         for (t, &(transno, p)) in plan.trans.iter().zip(combined.trans.iter()) {
             debug_assert_eq!(t.transno, transno);
@@ -437,7 +451,6 @@ fn absorb_partial_states(
             unsafe {
                 ptr.write(Int128AggState { calc_sum_x2: false, n, sum_x: sum, sum_x2: 0 });
             }
-            let base = node.pergroup_base;
             // SAFETY: transno bound as above.
             let pg = unsafe { &mut *base.as_ptr().add(transno as usize) };
             pg.trans_value = Datum::from_usize(ptr as usize);
@@ -446,4 +459,71 @@ fn absorb_partial_states(
         }
     }
     Ok(())
+}
+
+// ===========================================================================
+// SE-AGGJOIN (band 87001) — GROUPED runtime partials: the grouped-agg-over-
+// join sink's cross-worker state. One entry per hash group: the group's key
+// datums in a SELF-CONTAINED representation (width-normalized i64 word +
+// null flag per grouping column, in hash-key order — admission restricts
+// keys to byval int-family types, where word equality IS group equality and
+// NULLs group together exactly as C's grouping does) plus the group's
+// RuntimePartial (the SAME per-transno representation and combine rules as
+// the plain arm above — order-insensitive-exact kinds only).
+// ===========================================================================
+
+/// One group's self-contained key: (normalized datum word, isnull) per
+/// grouping column, in the hash table's key-column order.
+pub type GroupKeyWords = Vec<(i64, bool)>;
+
+/// A worker's (or the combined) grouped partial. `scratch_ptrs` is export
+/// scratch (entry pergroup pointers gathered under the perhash borrow, read
+/// back outside it) — capacity reused across morsels, never read across
+/// calls (m2-integration std-collections audit discipline).
+#[derive(Default)]
+pub struct GroupedRuntimePartial {
+    pub groups: Vec<(GroupKeyWords, RuntimePartial)>,
+    pub scratch_ptrs: Vec<usize>,
+}
+
+/// Combine worker grouped partials into one deduplicated group list
+/// (order-insensitive-exact per-transno combines; group order is the
+/// first-seen order across the worker list — the leader's absorb order,
+/// immaterial to results: the canonical retrieve re-iterates its own table).
+pub fn agg_grouped_runtime_combine(
+    node: &AggStateData<'_>,
+    parts: &[GroupedRuntimePartial],
+) -> PgResult<Vec<(GroupKeyWords, RuntimePartial)>> {
+    let plan = crate::agg_lanefold_plan(node)
+        .ok_or_else(|| PgError::error("grouped runtime combine without a fold plan".to_string()))?;
+    let mut index: std::collections::HashMap<GroupKeyWords, usize> =
+        std::collections::HashMap::new();
+    let mut out: Vec<(GroupKeyWords, RuntimePartial)> = Vec::new();
+    for part in parts {
+        for (key, p) in &part.groups {
+            if p.trans.len() != plan.trans.len()
+                || p.trans
+                    .iter()
+                    .zip(plan.trans.iter())
+                    .any(|(&(no, _), t)| no != t.transno)
+            {
+                return Err(Box::new(PgError::error(
+                    "grouped runtime partial: transno layout mismatch".to_string(),
+                )));
+            }
+            match index.get(key) {
+                Some(&i) => {
+                    for (j, t) in plan.trans.iter().enumerate() {
+                        out[i].1.trans[j].1 =
+                            combine_two(t.kind, out[i].1.trans[j].1, p.trans[j].1);
+                    }
+                }
+                None => {
+                    index.insert(key.clone(), out.len());
+                    out.push((key.clone(), p.clone()));
+                }
+            }
+        }
+    }
+    Ok(out)
 }

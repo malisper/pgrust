@@ -908,6 +908,142 @@ pub fn soa_deform_columns(
     }
 }
 
+/// `soa_deform_columns` generalized to an explicit column SET with an
+/// optional selection (K1 inc-2 late materialization, wave-9 WS-AH):
+/// the interpreter (first,last) loop over a caller-stated `cols` list —
+/// staging narrows to {qual clause cols ∪ key cols}, and survivor
+/// completion fills the deferred columns for `sel`-selected rows only.
+///
+/// Selection discipline (`sel` = 64-row selection words, LSB-first like
+/// the kernel qual bitmaps): all-zero words skip whole (word-skip),
+/// words at or above [`DENSE_WORD_CUTOVER`] set bits take the dense row
+/// loop (over-filling unselected kind-0 cells — idempotent value movement
+/// into cells no reader consumes), sparser words walk their set bits. Rows
+/// past `nrows` are masked off here, so a caller may pass the staged
+/// bitmap verbatim. Kind discipline is `soa_deform_columns`'s: only
+/// kind-0 rows fill (kind-1 hasnulls rows deformed fully at classify —
+/// their cells are already live and their `tps` was never parked; kind-2
+/// narrow rows carry the fallback bit and no reader consumes their
+/// cells), so forced-fallback bits OR'd into a qual bitmap are harmless
+/// here.
+///
+/// The deform-JIT batch kernel is deliberately NOT consulted: it deforms
+/// the whole prefix in one pass (rail J — no-qual/all-columns shapes keep
+/// `soa_deform_columns`' JIT path; this pass exists for qual-armed
+/// narrowed stagings and survivor completion only). Idempotent per
+/// (column, row): re-filling a cell rewrites the identical value.
+/// Per-word set-bit count at which `soa_deform_columns_set`'s selected
+/// pass switches from the bit-walk to the dense row loop (K1 inc-3). 48/64
+/// keeps the cutover on the clear-win side: the dense loop's wasted fills
+/// (≤ 16 cells) are cheaper than 48+ iterations of bit-extraction, and the
+/// letter's high-selectivity loss lived at ~58-set words. Correctness does
+/// not depend on the value (over-fill is idempotent; no reader consumes
+/// unselected cells) — it is a speed dial only.
+const DENSE_WORD_CUTOVER: u32 = 48;
+
+pub fn soa_deform_columns_set(
+    soa: &mut SoaBatch<'_>,
+    plan: &SoaDeformPlan<'_>,
+    atts: &[CompactAttribute],
+    cols: &[u16],
+    sel: Option<&[u64]>,
+) {
+    debug_assert!(!plan.is_virtual(), "virtual prefix plans are cbstore-only (no offset chain)");
+    let n = soa.nrows as usize;
+    if n == 0 {
+        return;
+    }
+    let ncols = plan.ncols as usize;
+    let dense = soa.kinds_or == 0;
+    let nwords = n.div_ceil(64);
+    let tail_mask = if n % 64 == 0 { u64::MAX } else { (1u64 << (n % 64)) - 1 };
+    for &c in cols {
+        let c = c as usize;
+        debug_assert!(c < ncols && ncols <= atts.len());
+        let att = &atts[c];
+        let off = plan.offs[c] as usize;
+        let attbyval = att.attbyval;
+        let attlen = att.attlen as i32;
+        // SAFETY: kind-0 rows are null-free with natts >= ncols (the
+        // classify contract), so tp + off is inside the tuple data area
+        // for every prefix column — exactly `soa_deform_columns`' bound.
+        unsafe {
+            let values = &mut soa.values[c * SOA_MAX_ROWS..c * SOA_MAX_ROWS + n];
+            let isnull = &mut soa.isnull[c * SOA_MAX_ROWS..c * SOA_MAX_ROWS + n];
+            let tps = &soa.tps[..n];
+            let kinds = &soa.kinds[..n];
+            match sel {
+                None => {
+                    if dense {
+                        isnull.fill(false);
+                        for i in 0..n {
+                            *values.get_unchecked_mut(i) =
+                                fetch_att((*tps.get_unchecked(i)).add(off), attbyval, attlen);
+                        }
+                    } else {
+                        for i in 0..n {
+                            if *kinds.get_unchecked(i) == 0 {
+                                *values.get_unchecked_mut(i) =
+                                    fetch_att((*tps.get_unchecked(i)).add(off), attbyval, attlen);
+                                *isnull.get_unchecked_mut(i) = false;
+                            }
+                        }
+                    }
+                }
+                Some(sel) => {
+                    for w in 0..nwords {
+                        let word_mask = if w == nwords - 1 { tail_mask } else { u64::MAX };
+                        let mut bits = sel.get(w).copied().unwrap_or(0) & word_mask;
+                        if bits == 0 {
+                            continue; // word-skip: 64 rejected rows, zero work
+                        }
+                        let base = w * 64;
+                        if bits == word_mask || bits.count_ones() >= DENSE_WORD_CUTOVER {
+                            // Dense fill: every (or nearly every) row of the
+                            // word selected. Inc-3 density cutover: at high
+                            // density the branch-free row loop beats the
+                            // bit-walk below, and filling the few UNSELECTED
+                            // kind-0 cells is idempotent value movement into
+                            // cells no reader consumes (qual-dead rows never
+                            // emit, fold, or spill — the wave-9 AH letter's
+                            // high-selectivity Ir loss was exactly this
+                            // bit-walk at ~58/64-set words).
+                            // SAFETY: every kind-0 row of the batch parked
+                            // its `tps` pointer at classify off the
+                            // still-pinned page, selected or not — the same
+                            // bound as the unselected `sel == None` pass.
+                            let hi = (base + 64).min(n);
+                            for i in base..hi {
+                                if dense || *kinds.get_unchecked(i) == 0 {
+                                    *values.get_unchecked_mut(i) = fetch_att(
+                                        (*tps.get_unchecked(i)).add(off),
+                                        attbyval,
+                                        attlen,
+                                    );
+                                    *isnull.get_unchecked_mut(i) = false;
+                                }
+                            }
+                        } else {
+                            while bits != 0 {
+                                let i = base + bits.trailing_zeros() as usize;
+                                bits &= bits - 1;
+                                if dense || *kinds.get_unchecked(i) == 0 {
+                                    *values.get_unchecked_mut(i) = fetch_att(
+                                        (*tps.get_unchecked(i)).add(off),
+                                        attbyval,
+                                        attlen,
+                                    );
+                                    *isnull.get_unchecked_mut(i) = false;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[inline(never)]
 fn soa_deform_tuple_nulls(
     soa: &mut SoaBatch<'_>,

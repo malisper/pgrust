@@ -14,6 +14,7 @@
 //! [`SyntheticMorselSource`].
 
 use std::ops::Range;
+use std::sync::Arc;
 
 pub trait MorselSource: Send + Sync {
     /// Total granules in the source (fixed for the pipeline's lifetime).
@@ -206,3 +207,176 @@ impl MorselSource for SyntheticMorselSource {
 
 /// A claimed morsel: a whole-granule half-open range, boundary-clamped.
 pub type MorselRange = Range<u64>;
+
+/// AM-private granule geometry, fixed at engagement — the DEFINITION point
+/// of the whole-boundary dict-epoch law (rules 1+2 above): a columnar hard
+/// boundary is a row-group edge, which is exactly a dictionary-epoch edge;
+/// heap block ranges have no interior boundaries. Immutable; Arc-shared by
+/// the scheduler-facing source ([`GranuleMapSource`]), the engagement
+/// payload, and every worker's claim segmentation — ONE copy of the
+/// boundary prefix sums.
+pub struct GranuleMap {
+    total: u64,
+    /// Hard-boundary prefix sums: first == 0, last == total, expected
+    /// strictly increasing (duplicate entries — zero-granule row groups —
+    /// are tolerated defensively and answer [`GranuleMap::boundary_after`]
+    /// exactly as the pre-extraction sources did). Empty ⇒ no interior
+    /// boundaries (heap).
+    starts: Arc<Vec<u64>>,
+    /// Startup-ramp seed (per-AM data, not policy: columnar granules are
+    /// 8,192 rows each — seed 2; heap granules are single blocks — seed 16).
+    c0: u64,
+}
+
+impl GranuleMap {
+    /// Columnar geometry over `Part::granule_starts`-shaped prefix sums
+    /// (len = nrgs+1, first 0, last = total granules).
+    pub fn with_boundaries(starts: Arc<Vec<u64>>, c0: u64) -> GranuleMap {
+        debug_assert!(starts.first() == Some(&0), "boundary prefix sums start at 0");
+        debug_assert!(
+            starts.windows(2).all(|w| w[0] <= w[1]),
+            "boundary prefix sums are non-decreasing"
+        );
+        let total = starts.last().copied().unwrap_or(0);
+        GranuleMap { total, starts, c0 }
+    }
+
+    /// Boundary-free geometry (heap: granule = one block, no dictionary
+    /// epochs).
+    pub fn unbounded(total: u64, c0: u64) -> GranuleMap {
+        GranuleMap { total, starts: Arc::new(Vec::new()), c0 }
+    }
+
+    pub fn total(&self) -> u64 {
+        self.total
+    }
+
+    pub fn c0(&self) -> u64 {
+        self.c0
+    }
+
+    /// Interior hard-boundary count (columnar: nrgs; heap: 0) — the
+    /// WFIN/LFIN diagnostic channel's `nrgs`.
+    pub fn nbounds(&self) -> usize {
+        self.starts.len().saturating_sub(1)
+    }
+
+    /// First hard boundary strictly after `start` (the [`MorselSource`]
+    /// contract: `start < result <= total` for `start < total`). The
+    /// guarded form of the boundary binary search — for boundary-free maps
+    /// this is `total`, the trait default.
+    #[inline]
+    pub fn boundary_after(&self, start: u64) -> u64 {
+        match self.starts.binary_search(&start) {
+            Ok(i) => self.starts.get(i + 1).copied().unwrap_or(self.total),
+            Err(i) => self.starts.get(i).copied().unwrap_or(self.total),
+        }
+    }
+
+    /// Epoch-integral segmentation of one (possibly COALESCED) claim:
+    /// yields consecutive subranges of `claim`, each within one boundary
+    /// span, so a positioned range never crosses a dictionary epoch.
+    /// Boundary-free maps yield `claim` once.
+    #[inline]
+    pub fn segments(&self, claim: MorselRange) -> Segments<'_> {
+        Segments { starts: &self.starts, next: claim.start, end: claim.end }
+    }
+}
+
+/// Iterator over the epoch-integral segments of one claim (see
+/// [`GranuleMap::segments`]). [`Segments::whole`] is the boundary-free
+/// degenerate for consumers whose payload carries no map.
+pub struct Segments<'a> {
+    /// Hard-boundary prefix sums (empty = boundary-free).
+    starts: &'a [u64],
+    next: u64,
+    end: u64,
+}
+
+impl Segments<'static> {
+    /// Boundary-free segmentation: yields `claim` once.
+    #[inline]
+    pub fn whole(claim: MorselRange) -> Segments<'static> {
+        Segments { starts: &[], next: claim.start, end: claim.end }
+    }
+}
+
+impl Segments<'_> {
+    /// Unyielded work remains. A consumer's between-segment abort check
+    /// fires only while this is true — an abort observed between segments
+    /// stops the claim; a fully consumed claim never re-checks.
+    #[inline]
+    pub fn more(&self) -> bool {
+        self.next < self.end
+    }
+}
+
+impl Iterator for Segments<'_> {
+    type Item = MorselRange;
+
+    #[inline]
+    fn next(&mut self) -> Option<MorselRange> {
+        if self.next >= self.end {
+            return None;
+        }
+        // The guarded form of the boundary search; falling back to `end`
+        // (instead of total-then-min) is identical for claims within
+        // [0, total], which boundary-clamped claims are by construction.
+        let seg_end = match self.starts.binary_search(&self.next) {
+            Ok(i) => self.starts.get(i + 1).copied(),
+            Err(i) => self.starts.get(i).copied(),
+        }
+        .unwrap_or(self.end)
+        .min(self.end);
+        let seg = self.next..seg_end;
+        self.next = seg_end;
+        Some(seg)
+    }
+}
+
+/// THE scheduler-facing [`MorselSource`] over a [`GranuleMap`]. Claim
+/// posture is EXPLICIT per consuming arm — never inferred from the AM or
+/// the geometry: the arms genuinely differ (the scan arm claims whole
+/// boundaries per its env kill switch AND coalesces because its work body
+/// subdivides multi-epoch claims; sink drains feed claims straight to the
+/// AM positioning — whole-boundary, never coalesced; the hash-agg arm's
+/// claims are sizer-truncated within a row group). Inferring posture would
+/// silently change claim shapes.
+pub struct GranuleMapSource {
+    map: Arc<GranuleMap>,
+    whole_boundary: bool,
+    coalesce: bool,
+}
+
+impl GranuleMapSource {
+    /// Posture flags per the consuming arm (see
+    /// [`MorselSource::whole_boundary_claims`] and
+    /// [`MorselSource::coalesce_claims`] for what each entails — notably a
+    /// boundary-free map must not set `whole_boundary`: one claim would
+    /// take the whole pipeline).
+    pub fn new(map: Arc<GranuleMap>, whole_boundary: bool, coalesce: bool) -> GranuleMapSource {
+        GranuleMapSource { map, whole_boundary, coalesce }
+    }
+}
+
+impl MorselSource for GranuleMapSource {
+    fn total_granules(&self) -> u64 {
+        self.map.total()
+    }
+
+    fn next_boundary_after(&self, start: u64) -> u64 {
+        self.map.boundary_after(start)
+    }
+
+    fn startup_c0(&self) -> u64 {
+        self.map.c0()
+    }
+
+    fn whole_boundary_claims(&self) -> bool {
+        self.whole_boundary
+    }
+
+    fn coalesce_claims(&self) -> bool {
+        self.coalesce
+    }
+}
