@@ -4031,3 +4031,859 @@ fn fold_trans_side_arm_refusals() {
     assert!(agg_meta_cols(&plan).is_none(), "footer-metadata arm refuses");
     assert!(granule_meta_len_cols(&plan).is_none(), "granule length-stats arm refuses");
 }
+
+// ===========================================================================
+// Fold-trans increment 2 (lane aggseq-fold2, same knob): numeric sum/avg
+// (NumAccum), corr/covar/regr (FRegrAccum + Count2), F64 cast reads, and
+// per-transition FILTER masks. Same knob discipline as the block above.
+// ===========================================================================
+
+const NUMV: Oid = ::types_core::catalog::NUMERICOID;
+
+fn arg_list2(mcx: Mcx<'static>, e1: Node<'static>, e2: Node<'static>) -> NodeList<'static> {
+    let t1 = Node::mk_target_entry(mcx, e1, 1, None, false).unwrap();
+    let t2 = Node::mk_target_entry(mcx, e2, 2, None, false).unwrap();
+    NodeList::make2(mcx, t1, t2).unwrap()
+}
+
+// A float8 cast FuncExpr (i2tod/i4tod/i8tod/ftod) over `arg`.
+fn mk_f64_cast(mcx: Mcx<'static>, funcid: Oid, arg: Node<'static>) -> Node<'static> {
+    let mut f = Node::build::<::types_nodes::primnodes::FuncExpr>(mcx).unwrap();
+    f.funcid = funcid;
+    f.funcresulttype = F64V;
+    f.args = NodeList::make1(mcx, arg).unwrap();
+    f.seal()
+}
+
+// A comparison OpExpr for FILTER shapes: Var(attno, vartype) OP Const, with
+// the Const's type/width picked by `ktype`; var_first=false commutes.
+fn mk_cmp(
+    mcx: Mcx<'static>,
+    attno: i16,
+    vartype: Oid,
+    k: i64,
+    ktype: Oid,
+    opfuncid: Oid,
+    var_first: bool,
+) -> Node<'static> {
+    let var = mk_var(mcx, attno, vartype);
+    let (klen, kd) = match ktype {
+        INT2OID => (2, Datum::from_i16(k as i16)),
+        INT4OID => (4, Datum::from_i32(k as i32)),
+        _ => (8, Datum::from_i64(k)),
+    };
+    let konst = Node::mk_const(mcx, ktype, -1, 0, klen, kd, false, true).unwrap();
+    let mut op = Node::build::<OpExpr>(mcx).unwrap();
+    op.opfuncid = opfuncid;
+    op.opresulttype = BOOLV;
+    op.args = if var_first {
+        NodeList::make2(mcx, var, konst).unwrap()
+    } else {
+        NodeList::make2(mcx, konst, var).unwrap()
+    };
+    op.seal()
+}
+
+// NOT (expr) BoolExpr.
+fn mk_not(mcx: Mcx<'static>, arg: Node<'static>) -> Node<'static> {
+    let mut b = Node::build::<::types_nodes::primnodes::BoolExpr>(mcx).unwrap();
+    b.boolop = ::types_nodes::primnodes::BoolExprType::NOT_EXPR;
+    b.args = NodeList::make1(mcx, arg).unwrap();
+    b.seal()
+}
+
+// A numeric datum from its text form, in either inline varlena header form.
+fn num_datum(s: &str, short: bool) -> Datum {
+    let img = ::adt_numeric::numeric_in(s, -1, None).expect("parse").expect("value");
+    let payload = img.payload().to_vec();
+    if short {
+        vl_short(&payload)
+    } else {
+        vl_4b(&payload)
+    }
+}
+
+// Per-row C reference for numeric_avg_accum: NOT strict (state allocates on
+// the first selected row, NULL inputs included), non-null inputs accumulate
+// through the REAL do_numeric_accum in row order.
+fn ref_numaccum(
+    mcx: Mcx<'static>,
+    rows: &[Option<Datum>],
+    sel: impl Fn(usize) -> bool,
+) -> Option<&'static mut NumericAggState> {
+    let mut st: Option<&'static mut NumericAggState> = None;
+    for (i, d) in rows.iter().enumerate() {
+        if !sel(i) {
+            continue;
+        }
+        if st.is_none() {
+            st = Some(Box::leak(Box::new(NumericAggState::new(false))));
+        }
+        if let Some(d) = d {
+            let payload = vl_payload(*d); // heap Vec: ≥2-aligned base
+            let num = ::adt_numeric::Num::from_payload(&payload);
+            ::adt_numeric::aggregates::do_numeric_accum(st.as_mut().unwrap(), mcx, num)
+                .expect("reference accum");
+        }
+    }
+    st
+}
+
+fn num_state_of(pg: &AggPerGroup) -> Option<&'static mut NumericAggState> {
+    if pg.trans_value_is_null {
+        return None;
+    }
+    // SAFETY: state installed by the fold's numeric_state (arena-lived) or a
+    // leaked reference Box; exclusive for the test's lifetime.
+    Some(unsafe { &mut *(pg.trans_value.as_usize() as *mut NumericAggState) })
+}
+
+// The parity surface of a NumericAggState: scalar fields + the finalized
+// sum(numeric) and avg(numeric) output IMAGES (full varlena bytes — dscale/
+// weight/digit representation included).
+fn num_state_surface(
+    st: Option<&mut NumericAggState>,
+) -> (Option<(i64, i32, i64, i64, i64, i64)>, Option<Vec<u8>>, Option<Vec<u8>>) {
+    let Some(st) = st else { return (None, None, None) };
+    let fields =
+        (st.n, st.max_scale, st.max_scale_count, st.nan_count, st.pinf_count, st.ninf_count);
+    let sum = ::adt_numeric::aggregates::numeric_sum(Some(st))
+        .expect("sum finalize")
+        .map(|img| img.as_bytes().to_vec());
+    let avg = ::adt_numeric::aggregates::numeric_avg(Some(st))
+        .expect("avg finalize")
+        .map(|img| img.as_bytes().to_vec());
+    (Some(fields), sum, avg)
+}
+
+fn read_f8_transarray6(pg: &AggPerGroup) -> [f64; 6] {
+    assert!(!pg.trans_value_is_null);
+    let p = pg.trans_value.as_usize() as *const u8;
+    // SAFETY: new_float8_regr_transarray image, arena-lived for the test.
+    unsafe {
+        let img = core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_4b(p));
+        ::adt_float::aggregates::check_float8_array::<6>(img, "test").expect("shape")
+    }
+}
+
+// Per-row C reference for float8_regr_accum: strict two-arg (both non-null),
+// '{0,0,0,0,0,0}' start, row order.
+fn ref_fregr(
+    rows: &[(Option<f64>, Option<f64>)],
+    sel: impl Fn(usize) -> bool,
+) -> PgResult<[f64; 6]> {
+    let mut t = [0.0f64; 6];
+    for (i, (y, x)) in rows.iter().enumerate() {
+        if !sel(i) {
+            continue;
+        }
+        if let (Some(y), Some(x)) = (y, x) {
+            t = ::adt_float::aggregates::float8_regr_accum(t, *y, *x)?;
+        }
+    }
+    Ok(t)
+}
+
+#[test]
+fn fold_trans2_admission_matrix() {
+    let _g = ft_guard();
+    let mcx = leaked_mcx();
+    let anum = arg_list(mcx, mk_var(mcx, 1, NUMV));
+    let a2 = arg_list2(mcx, mk_var(mcx, 1, F64V), mk_var(mcx, 2, F64V));
+    // Knob OFF: every increment-2 oid refuses.
+    fold_trans_set_for_tests(false);
+    assert!(classify_trans(&mk_spec(2858, true, &anum), 0).is_none(), "knob off: numeric");
+    assert!(classify_trans(&mk_spec(2806, false, &a2), 0).is_none(), "knob off: regr");
+    assert!(classify_trans(&mk_spec(2805, false, &a2), 0).is_none(), "knob off: regr_count");
+    fold_trans_set_for_tests(true);
+    // numeric_avg_accum: NULL initval, bare numeric Var, varlena lane.
+    let (t, g, f) = classify_trans(&mk_spec(2858, true, &anum), 0).expect("numeric admits");
+    assert_eq!((t.kind, t.width, t.res_width), (LaneKind::NumAccum, LaneWidth::Var, LaneWidth::Var));
+    assert!(g.is_none() && f.is_none());
+    assert!(classify_trans(&mk_spec(2858, false, &anum), 0).is_none(), "needs NULL init");
+    let af8 = arg_list(mcx, mk_var(mcx, 1, F64V));
+    assert!(classify_trans(&mk_spec(2858, true, &af8), 0).is_none(), "needs numeric Var");
+    // The classified plan carries the vguard obligation (inline-form proof).
+    let specs = [mk_spec(2858, true, &anum)];
+    let plan = classify(mcx, &specs).expect("plan");
+    assert_eq!(&plan.vguards[..], &[0u16]);
+    assert!(plan.guarded, "varlena lane => guarded plan");
+    assert_eq!(&plan.cols[..], &[0u16]);
+    // float8_regr_accum: non-null initval, two args, col/col2.
+    let (t, g, _) = classify_trans(&mk_spec(2806, false, &a2), 0).expect("regr admits");
+    assert_eq!((t.kind, t.col, t.col2), (LaneKind::FRegrAccum, 0, 1));
+    assert_eq!((t.fconv, t.fconv2), (FloatConv::None, FloatConv::None));
+    assert!(g.is_none());
+    assert!(classify_trans(&mk_spec(2806, true, &a2), 0).is_none(), "regr needs non-null init");
+    assert!(classify_trans(&mk_spec(2806, false, &af8), 0).is_none(), "regr needs two args");
+    // regr_count: Count2 over the same arg shape.
+    let (t, _, _) = classify_trans(&mk_spec(2805, false, &a2), 0).expect("regr_count admits");
+    assert_eq!((t.kind, t.col, t.col2, t.res_width), (LaneKind::Count2, 0, 1, LaneWidth::I64));
+    // F64 cast reads: corr(f8, v4::float8) — the corpus corr leg's shape.
+    let acast = arg_list2(
+        mcx,
+        mk_var(mcx, 1, F64V),
+        mk_f64_cast(mcx, 316, mk_var(mcx, 2, INT4OID)),
+    );
+    let (t, _, _) = classify_trans(&mk_spec(2806, false, &acast), 0).expect("cast X admits");
+    assert_eq!((t.col, t.col2, t.fconv, t.fconv2), (0, 1, FloatConv::None, FloatConv::I4));
+    // Casts on the one-arg F64 kinds: sum(v8::float8), avg(v2::float8),
+    // avg(f4::float8) — width = SOURCE lane width, res F64 for FSum.
+    let ai8 = arg_list(mcx, mk_f64_cast(mcx, 482, mk_var(mcx, 1, INT8OID)));
+    let (t, _, _) = classify_trans(&mk_spec(218, true, &ai8), 0).expect("i8tod sum admits");
+    assert_eq!((t.kind, t.width, t.res_width, t.fconv), (LaneKind::FSum, LaneWidth::I64, LaneWidth::F64, FloatConv::I8));
+    let ai2 = arg_list(mcx, mk_f64_cast(mcx, 235, mk_var(mcx, 1, INT2OID)));
+    let (t, _, _) = classify_trans(&mk_spec(222, false, &ai2), 0).expect("i2tod accum admits");
+    assert_eq!((t.kind, t.width, t.fconv), (LaneKind::FAccum, LaneWidth::I16, FloatConv::I2));
+    let aftod = arg_list(mcx, mk_f64_cast(mcx, 311, mk_var(mcx, 1, F32V)));
+    let (t, _, _) = classify_trans(&mk_spec(222, false, &aftod), 0).expect("ftod accum admits");
+    assert_eq!((t.width, t.fconv), (LaneWidth::F32, FloatConv::F4));
+    // Bare float4_accum carries the F4 widening tag (kernel reads f32→f64).
+    let af4 = arg_list(mcx, mk_var(mcx, 1, F32V));
+    let (t, _, _) = classify_trans(&mk_spec(208, false, &af4), 0).expect("f4 accum");
+    assert_eq!((t.width, t.fconv), (LaneWidth::F32, FloatConv::F4));
+    // A cast over a MISMATCHED Var type refuses (i4tod over int8 Var).
+    let abad = arg_list(mcx, mk_f64_cast(mcx, 316, mk_var(mcx, 1, INT8OID)));
+    assert!(classify_trans(&mk_spec(218, true, &abad), 0).is_none());
+    // float4pl stays bare-Var-only (no casts to float4 exist in the tier).
+    let a4cast = arg_list(mcx, mk_f64_cast(mcx, 311, mk_var(mcx, 1, F32V)));
+    assert!(classify_trans(&mk_spec(204, true, &a4cast), 0).is_none());
+}
+
+#[test]
+fn fold_trans2_filter_classify_matrix() {
+    let _g = ft_guard();
+    let mcx = leaked_mcx();
+    let ai4 = arg_list(mcx, mk_var(mcx, 1, INT4OID));
+    let admit = |pred: Node<'static>| -> Option<FilterEntry> {
+        let mut spec = mk_spec(1841, true, &ai4); // int4_sum
+        spec.aggfilter = Some(pred);
+        classify_trans(&spec, 0).map(|(_, _, f)| f.expect("filtered admission carries entry"))
+    };
+    // bool Var / NOT bool Var.
+    let f = admit(mk_var(mcx, 2, BOOLV)).expect("bool var");
+    assert_eq!((f.pred, f.col), (FilterPred::BoolVar, 1));
+    let f = admit(mk_not(mcx, mk_var(mcx, 3, BOOLV))).expect("not bool var");
+    assert_eq!((f.pred, f.col), (FilterPred::NotBoolVar, 2));
+    // Same-width comparisons, both operand orders (mirrored op).
+    let f = admit(mk_cmp(mcx, 2, INT4OID, 500, INT4OID, 147, true)).expect("v4 > 500");
+    assert_eq!((f.pred, f.col, f.width, f.konst), (FilterPred::Cmp(FilterOp::Gt), 1, LaneWidth::I32, 500));
+    let f = admit(mk_cmp(mcx, 2, INT4OID, 500, INT4OID, 147, false)).expect("500 > v4");
+    assert_eq!((f.pred, f.konst), (FilterPred::Cmp(FilterOp::Lt), 500), "const-first mirrors");
+    let f = admit(mk_cmp(mcx, 2, INT2OID, -3, INT2OID, 148, true)).expect("v2 <= -3");
+    assert_eq!((f.pred, f.width, f.konst), (FilterPred::Cmp(FilterOp::Le), LaneWidth::I16, -3));
+    let f = admit(mk_cmp(mcx, 2, INT8OID, 1 << 40, INT8OID, 467, true)).expect("v8 = 2^40");
+    assert_eq!((f.pred, f.width, f.konst), (FilterPred::Cmp(FilterOp::Eq), LaneWidth::I64, 1 << 40));
+    // Refusals: non-bool Var, cross-width const type, unlisted opfunc,
+    // function-call predicate, NOT over a non-Var.
+    assert!(admit(mk_var(mcx, 2, INT4OID)).is_none(), "int Var alone");
+    assert!(admit(mk_cmp(mcx, 2, INT8OID, 5, INT4OID, 467, true)).is_none(), "int8 cmp int4 const");
+    assert!(admit(mk_cmp(mcx, 2, INT4OID, 5, INT4OID, 177, true)).is_none(), "int4pl is not a cmp");
+    assert!(admit(mk_f64_cast(mcx, 316, mk_var(mcx, 2, INT4OID))).is_none(), "func predicate");
+    assert!(admit(mk_not(mcx, mk_cmp(mcx, 2, INT4OID, 5, INT4OID, 65, true))).is_none(), "NOT(cmp)");
+    // guard×FILTER named refusal: int4+5 Sum carries a data guard — adding a
+    // classifiable filter refuses the WHOLE transition.
+    let aguard = arg_list(mcx, mk_int_op(mcx, 2, INT4OID, 5, 177, true));
+    let mut spec = mk_spec(1841, true, &aguard);
+    assert!(classify_trans(&spec, 0).is_some(), "guarded shape admits unfiltered");
+    spec.aggfilter = Some(mk_var(mcx, 3, BOOLV));
+    assert!(classify_trans(&spec, 0).is_none(), "guard × FILTER refuses");
+    // The type-proven int2+5 sibling (no guard) + filter ADMITS.
+    let atype = arg_list(mcx, mk_int_op(mcx, 2, INT2OID, 5, 178, true));
+    let mut spec = mk_spec(1841, true, &atype);
+    spec.aggfilter = Some(mk_var(mcx, 3, BOOLV));
+    assert!(classify_trans(&spec, 0).is_some(), "type-proven + FILTER admits");
+    // classify() wiring: dedup + filter col staged + CSE exclusion.
+    let mut s1 = mk_spec(1841, true, &ai4);
+    s1.aggfilter = Some(mk_var(mcx, 3, BOOLV));
+    let mut s2 = mk_spec(1963, false, &ai4);
+    s2.aggfilter = Some(mk_var(mcx, 3, BOOLV));
+    let s3 = mk_spec(1841, true, &ai4);
+    let specs = [s1, s2, s3];
+    let plan = classify(mcx, &specs).expect("plan");
+    assert_eq!(plan.filters.len(), 1, "identical predicates dedup");
+    assert_eq!(plan.trans[0].filter, 0);
+    assert_eq!(plan.trans[1].filter, 0);
+    assert_eq!(plan.trans[2].filter, NO_FILTER);
+    assert!(plan.cols.contains(&2), "filter col staged");
+    assert!(plan.cse.is_empty(), "filtered Sum/AvgAccum never join CSE");
+}
+
+#[test]
+fn fold_trans2_filter_parity() {
+    let _g = ft_guard();
+    let mcx = leaked_mcx();
+    // Columns: 0 = int4 value, 1 = bool filter, 2 = int8 value, 3 = int2 cmp
+    // column (with NULLs in every lane — NULL filter rows must skip).
+    let n = 97usize;
+    let data: Vec<Vec<Option<Datum>>> = (0..n)
+        .map(|i| {
+            vec![
+                (i % 7 != 3).then(|| Datum::from_i32(i as i32 * 3 - 40)),
+                (i % 5 != 2).then(|| Datum::from_bool(i % 2 == 0)),
+                (i % 6 != 1).then(|| Datum::from_i64((i as i64) << 33)),
+                (i % 4 != 0).then(|| Datum::from_i16((i % 20) as i16)),
+            ]
+        })
+        .collect();
+    let fbool = |row: &Vec<Option<Datum>>| row[1].map(|d| d.as_bool()).unwrap_or(false);
+    let fnot = |row: &Vec<Option<Datum>>| row[1].map(|d| !d.as_bool()).unwrap_or(false);
+    let fcmp = |row: &Vec<Option<Datum>>| row[3].map(|d| d.as_i16() < 9).unwrap_or(false);
+    let ai4 = arg_list(mcx, mk_var(mcx, 1, INT4OID));
+    let ai8 = arg_list(mcx, mk_var(mcx, 3, INT8OID));
+    // count(*) FILTER b | count(v4) FILTER NOT b | sum(v4) FILTER (v2cmp<9)
+    // | avg(v4) FILTER b | min(v4) FILTER b | sum/avg(v8 int128) FILTER b |
+    // unfiltered sum(v4) control.
+    let nil = NodeList::default();
+    let mut s0 = mk_spec(F_INT8INC, false, &nil);
+    s0.aggfilter = Some(mk_var(mcx, 2, BOOLV));
+    let mut s1 = mk_spec(F_INT8INC_ANY, false, &ai4);
+    s1.aggfilter = Some(mk_not(mcx, mk_var(mcx, 2, BOOLV)));
+    let mut s2 = mk_spec(1841, true, &ai4);
+    s2.aggfilter = Some(mk_cmp(mcx, 4, INT2OID, 9, INT2OID, 64, true));
+    let mut s3 = mk_spec(1963, false, &ai4);
+    s3.aggfilter = Some(mk_var(mcx, 2, BOOLV));
+    let mut s4 = mk_spec(F_INT4SMALLER, true, &ai4);
+    s4.aggfilter = Some(mk_var(mcx, 2, BOOLV));
+    let mut s5 = mk_spec(2746, true, &ai8);
+    s5.aggfilter = Some(mk_var(mcx, 2, BOOLV));
+    let s6 = mk_spec(1841, true, &ai4);
+    let specs = [s0, s1, s2, s3, s4, s5, s6];
+    let plan = classify(mcx, &specs).expect("plan");
+    assert_eq!(plan.resid.len(), 0);
+    let cols = TestCols::from_datum_rows(4, &data);
+    for sel in [(|_: usize| true) as fn(usize) -> bool, |i| i % 3 != 1] {
+        let rows = selmask(n, sel);
+        let mut pgs = pergroups_for(mcx, &plan, specs.len());
+        // SAFETY: pgs covers every transno; lanes cover every plan col/row.
+        unsafe {
+            fold_batch(&plan, &cols, &rows, n, NonNull::new(pgs.as_mut_ptr()).unwrap(), mcx)
+                .expect("fold");
+        }
+        // Reference: per-transition data reduced to i64 rows, sel ∧ filter.
+        let idata: Vec<Vec<Option<i64>>> = data
+            .iter()
+            .map(|r| {
+                vec![
+                    r[0].map(|d| d.as_i32() as i64),
+                    r[1].map(|d| d.as_bool() as i64),
+                    r[2].map(|d| d.as_i64()),
+                    r[3].map(|d| d.as_i16() as i64),
+                ]
+            })
+            .collect();
+        for (transno, filt) in [
+            (0usize, &fbool as &dyn Fn(&Vec<Option<Datum>>) -> bool),
+            (1, &fnot),
+            (2, &fcmp),
+            (3, &fbool),
+            (4, &fbool),
+            (5, &fbool),
+            (6, &|_: &Vec<Option<Datum>>| true),
+        ] {
+            let sub = plan_subset(mcx, &plan, &[transno]);
+            let want = reference_fold(
+                mcx,
+                &sub,
+                &idata,
+                |i| sel(i) && filt(&data[i]),
+                specs.len(),
+            );
+            assert_parity(&sub, &pgs, &want);
+        }
+    }
+}
+
+#[test]
+fn fold_trans2_filter_grouped_parity() {
+    let _g = ft_guard();
+    let mcx = leaked_mcx();
+    let n = 120usize;
+    let ngroups = 3usize;
+    let data: Vec<Vec<Option<Datum>>> = (0..n)
+        .map(|i| {
+            vec![
+                (i % 9 != 4).then(|| Datum::from_i32(i as i32 - 17)),
+                (i % 7 != 5).then(|| Datum::from_bool(i % 3 == 0)),
+                Some(Datum::from_f64((i as f64) * 1.25 - 30.0)),
+            ]
+        })
+        .collect();
+    let fbool = |i: usize| data[i][1].map(|d| d.as_bool()).unwrap_or(false);
+    let ai4 = arg_list(mcx, mk_var(mcx, 1, INT4OID));
+    let af8 = arg_list(mcx, mk_var(mcx, 3, F64V));
+    // Filtered count(*), filtered sum(v4), filtered ORDER-SENSITIVE
+    // sum(float8) — the mask must compose with the row-order discipline.
+    let nil = NodeList::default();
+    let mut s0 = mk_spec(F_INT8INC, false, &nil);
+    s0.aggfilter = Some(mk_var(mcx, 2, BOOLV));
+    let mut s1 = mk_spec(1841, true, &ai4);
+    s1.aggfilter = Some(mk_var(mcx, 2, BOOLV));
+    let mut s2 = mk_spec(218, true, &af8);
+    s2.aggfilter = Some(mk_var(mcx, 2, BOOLV));
+    let specs = [s0, s1, s2];
+    let plan = classify(mcx, &specs).expect("plan");
+    let cols = TestCols::from_datum_rows(3, &data);
+    let mut group_pgs: Vec<Vec<AggPerGroup>> =
+        (0..ngroups).map(|_| pergroups_for(mcx, &plan, specs.len())).collect();
+    let idxs: Vec<u32> = (0..n as u32).collect();
+    let groups: Vec<NonNull<AggPerGroup>> = (0..n)
+        .map(|i| NonNull::new(group_pgs[i % ngroups].as_mut_ptr()).unwrap())
+        .collect();
+    // SAFETY: group arrays cover every transno and stay pinned.
+    unsafe { fold_rows_grouped(&plan, &cols, &idxs, &groups, mcx).expect("fold") };
+    for g in 0..ngroups {
+        let grows = |i: &usize| i % ngroups == g && fbool(*i);
+        let want_count = (0..n).filter(|i| grows(i)).count() as i64;
+        assert_eq!(group_pgs[g][0].trans_value.as_i64(), want_count, "group {g} count");
+        let want_sum: i64 = (0..n)
+            .filter(|i| grows(i))
+            .filter_map(|i| data[i][0].map(|d| d.as_i32() as i64))
+            .sum();
+        if want_sum != 0 || (0..n).filter(|i| grows(i)).any(|i| data[i][0].is_some()) {
+            assert_eq!(group_pgs[g][1].trans_value.as_i64(), want_sum, "group {g} sum");
+        }
+        let gvals: Vec<Option<f64>> = (0..n)
+            .filter(|i| grows(i))
+            .map(|i| data[i][2].map(|d| d.as_f64()))
+            .collect();
+        let want_f = ref_fsum_f64(&gvals).unwrap();
+        match want_f {
+            Some(v) => assert_eq!(
+                group_pgs[g][2].trans_value.as_f64().to_bits(),
+                v.to_bits(),
+                "group {g} fsum bits"
+            ),
+            None => assert!(group_pgs[g][2].no_trans_value),
+        }
+    }
+}
+
+// Numeric corpus: dscale edges (trailing zeros, high scale), NaN, ±Infinity,
+// sign cancellation, both inline header forms, NULLs.
+fn num_corpus() -> Vec<Option<Datum>> {
+    vec![
+        Some(num_datum("1.00", true)),
+        Some(num_datum("2.5", false)),
+        None,
+        Some(num_datum("-3.500", true)),
+        Some(num_datum("0.001", false)),
+        Some(num_datum("123456789012345.678901", false)),
+        Some(num_datum("NaN", true)),
+        Some(num_datum("Infinity", false)),
+        Some(num_datum("-Infinity", true)),
+        None,
+        Some(num_datum("-123456789012345.678901", true)),
+        Some(num_datum("0", true)),
+        Some(num_datum("99999999999999999999.9999", false)),
+    ]
+}
+
+#[test]
+fn fold_trans2_numaccum_parity() {
+    let _g = ft_guard();
+    let mcx = leaked_mcx();
+    let vals = num_corpus();
+    let anum = arg_list(mcx, mk_var(mcx, 1, NUMV));
+    for sel in [(|_: usize| true) as fn(usize) -> bool, |i| i % 3 != 1] {
+        let specs = [mk_spec(2858, true, &anum)];
+        let plan = classify(mcx, &specs).expect("plan");
+        let data: Vec<Vec<Option<Datum>>> = vals.iter().map(|v| vec![*v]).collect();
+        let cols = TestCols::from_datum_rows(1, &data);
+        let rows = selmask(vals.len(), sel);
+        let mut pgs = pergroups_for(mcx, &plan, 1);
+        // SAFETY: vguard holds by construction (inline varlenas only).
+        unsafe {
+            fold_batch(&plan, &cols, &rows, vals.len(), NonNull::new(pgs.as_mut_ptr()).unwrap(), mcx)
+                .expect("fold");
+        }
+        let want = ref_numaccum(mcx, &vals, sel);
+        let (wf, ws, wa) = num_state_surface(want);
+        let (gf, gs, ga) = num_state_surface(num_state_of(&pgs[0]));
+        assert_eq!(gf, wf, "state fields");
+        assert_eq!(gs, ws, "sum(numeric) image bytes");
+        assert_eq!(ga, wa, "avg(numeric) image bytes");
+    }
+    // All-NULL selected rows: the NOT-strict transfn still allocates (state
+    // present, n = 0) — observable exactly as Int128AvgAccum.
+    let nulls: Vec<Option<Datum>> = vec![None; 9];
+    let specs = [mk_spec(2858, true, &anum)];
+    let plan = classify(mcx, &specs).expect("plan");
+    let data: Vec<Vec<Option<Datum>>> = nulls.iter().map(|v| vec![*v]).collect();
+    let cols = TestCols::from_datum_rows(1, &data);
+    let rows = selmask(nulls.len(), |_| true);
+    let mut pgs = pergroups_for(mcx, &plan, 1);
+    // SAFETY: as above.
+    unsafe {
+        fold_batch(&plan, &cols, &rows, nulls.len(), NonNull::new(pgs.as_mut_ptr()).unwrap(), mcx)
+            .expect("fold");
+    }
+    let st = num_state_of(&pgs[0]).expect("state allocated for all-NULL group");
+    assert_eq!((st.n, st.total_count()), (0, 0));
+    // Nothing selected: the transfn never ran; state stays NULL.
+    let mut pgs = pergroups_for(mcx, &plan, 1);
+    let rows = selmask(nulls.len(), |_| false);
+    // SAFETY: as above.
+    unsafe {
+        fold_batch(&plan, &cols, &rows, nulls.len(), NonNull::new(pgs.as_mut_ptr()).unwrap(), mcx)
+            .expect("fold");
+    }
+    assert!(pgs[0].trans_value_is_null, "empty selection leaves no state");
+}
+
+// THE NUMERIC REPRESENTATION PIN. Honest finding, stated precisely: for
+// numeric_avg_accum, NO input ORDER can change the finalized bytes — the
+// state is (exact sum, n, max-dscale bookkeeping) and every component is a
+// commutative monoid (exact addition; max; count-of-max), so sum/avg
+// finalize to identical images under every permutation. This test PROVES
+// that over a dscale-edge multiset (all 24 permutations byte-identical),
+// and pins the fold to those per-row-chain bytes — the row-order walk is
+// still load-bearing for ERROR POSITIONS (OOM raise-at-row) and keeps the
+// per-row path's exact state, but a reassociation-divergence dataset does
+// not exist for this transition (unlike the float kernels above).
+#[test]
+fn fold_trans2_numeric_ordering_pin() {
+    let _g = ft_guard();
+    let mcx = leaked_mcx();
+    // dscale edges: mixed scales, trailing zeros, cancellation to 0.
+    let base = ["1.100", "-1.1", "0.00007", "2000000"];
+    let mut perms: Vec<Vec<usize>> = Vec::new();
+    for a in 0..4 {
+        for b in 0..4 {
+            for c in 0..4 {
+                for d in 0..4 {
+                    let p = vec![a, b, c, d];
+                    let mut q = p.clone();
+                    q.sort();
+                    if q == vec![0, 1, 2, 3] {
+                        perms.push(p);
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(perms.len(), 24);
+    let surface = |order: &[usize]| {
+        let vals: Vec<Option<Datum>> =
+            order.iter().map(|&k| Some(num_datum(base[k], k % 2 == 0))).collect();
+        let st = ref_numaccum(mcx, &vals, |_| true);
+        num_state_surface(st)
+    };
+    let want = surface(&[0, 1, 2, 3]);
+    for p in &perms {
+        assert_eq!(surface(p), want, "order-insensitive under permutation {p:?}");
+    }
+    // The fold reproduces the forward chain bit-for-bit.
+    let vals: Vec<Option<Datum>> =
+        (0..4).map(|k| Some(num_datum(base[k], k % 2 == 0))).collect();
+    let anum = arg_list(mcx, mk_var(mcx, 1, NUMV));
+    let specs = [mk_spec(2858, true, &anum)];
+    let plan = classify(mcx, &specs).expect("plan");
+    let data: Vec<Vec<Option<Datum>>> = vals.iter().map(|v| vec![*v]).collect();
+    let cols = TestCols::from_datum_rows(1, &data);
+    let rows = selmask(vals.len(), |_| true);
+    let mut pgs = pergroups_for(mcx, &plan, 1);
+    // SAFETY: as fold_trans2_numaccum_parity.
+    unsafe {
+        fold_batch(&plan, &cols, &rows, vals.len(), NonNull::new(pgs.as_mut_ptr()).unwrap(), mcx)
+            .expect("fold");
+    }
+    assert_eq!(num_state_surface(num_state_of(&pgs[0])), want, "fold == row-order bytes");
+    // The cancellation edge renders with the max input dscale (sum image =
+    // '0.00007 + ...' family — dscale 5 here), pinning the trailing-zero
+    // rendering the charter names.
+    let (_, sum, _) = &want;
+    let img = sum.as_ref().expect("non-empty sum");
+    let num = ::adt_numeric::Num::from_payload(&img[4..]);
+    assert_eq!(num.dscale(), 5, "sum dscale = max input dscale");
+}
+
+#[test]
+fn fold_trans2_numaccum_grouped_parity() {
+    let _g = ft_guard();
+    let mcx = leaked_mcx();
+    let vals = num_corpus();
+    let n = vals.len();
+    let ngroups = 3usize;
+    let anum = arg_list(mcx, mk_var(mcx, 1, NUMV));
+    let specs = [mk_spec(2858, true, &anum)];
+    let plan = classify(mcx, &specs).expect("plan");
+    let data: Vec<Vec<Option<Datum>>> = vals.iter().map(|v| vec![*v]).collect();
+    let cols = TestCols::from_datum_rows(1, &data);
+    let mut group_pgs: Vec<Vec<AggPerGroup>> =
+        (0..ngroups).map(|_| pergroups_for(mcx, &plan, 1)).collect();
+    let idxs: Vec<u32> = (0..n as u32).collect();
+    let groups: Vec<NonNull<AggPerGroup>> = (0..n)
+        .map(|i| NonNull::new(group_pgs[i % ngroups].as_mut_ptr()).unwrap())
+        .collect();
+    // SAFETY: as the grouped tests above; vguard holds by construction.
+    unsafe { fold_rows_grouped(&plan, &cols, &idxs, &groups, mcx).expect("fold") };
+    for g in 0..ngroups {
+        let want = ref_numaccum(mcx, &vals, |i| i % ngroups == g);
+        assert_eq!(
+            num_state_surface(num_state_of(&group_pgs[g][0])),
+            num_state_surface(want),
+            "group {g}"
+        );
+    }
+}
+
+// Bivariate pool with NaN/±inf/one-sided NULLs — strictness spans BOTH args.
+fn regr_pool() -> Vec<(Option<f64>, Option<f64>)> {
+    vec![
+        (Some(1.0), Some(2.0)),
+        (Some(-3.5), Some(0.25)),
+        (None, Some(7.0)),
+        (Some(4.0), None),
+        (None, None),
+        (Some(f64::NAN), Some(1.0)),
+        (Some(2.0), Some(f64::INFINITY)),
+        (Some(-0.0), Some(0.0)),
+        (Some(1e-300), Some(-1e-300)),
+        (Some(1e15), Some(-2.75)),
+        (Some(8.125), Some(8.125)),
+    ]
+}
+
+#[test]
+fn fold_trans2_regr_parity() {
+    let _g = ft_guard();
+    let mcx = leaked_mcx();
+    let pool = regr_pool();
+    let n = pool.len();
+    let a2 = arg_list2(mcx, mk_var(mcx, 1, F64V), mk_var(mcx, 2, F64V));
+    for sel in [(|_: usize| true) as fn(usize) -> bool, |i| i % 4 != 2] {
+        // FRegrAccum + Count2 over the same two columns.
+        let specs = [mk_spec(2806, false, &a2), mk_spec(2805, false, &a2)];
+        let plan = classify(mcx, &specs).expect("plan");
+        assert_eq!(&plan.cols[..], &[0u16, 1]);
+        let data: Vec<Vec<Option<Datum>>> = pool
+            .iter()
+            .map(|(y, x)| vec![y.map(Datum::from_f64), x.map(Datum::from_f64)])
+            .collect();
+        let cols = TestCols::from_datum_rows(2, &data);
+        let rows = selmask(n, sel);
+        let mut pgs = pergroups_for(mcx, &plan, 2);
+        // SAFETY: FRegr pergroup holds a live new_float8_regr_transarray.
+        unsafe {
+            fold_batch(&plan, &cols, &rows, n, NonNull::new(pgs.as_mut_ptr()).unwrap(), mcx)
+                .expect("fold");
+        }
+        let want = ref_fregr(&pool, sel).unwrap();
+        let got = read_f8_transarray6(&pgs[0]);
+        for k in 0..6 {
+            assert_eq!(got[k].to_bits(), want[k].to_bits(), "regr word {k}");
+        }
+        let want_n = pool
+            .iter()
+            .enumerate()
+            .filter(|(i, (y, x))| sel(*i) && y.is_some() && x.is_some())
+            .count() as i64;
+        assert_eq!(pgs[1].trans_value.as_i64(), want_n, "regr_count");
+    }
+    // Cast carrier: corr(f8, v4::float8) — X arrives via the I4 conversion.
+    let acast = arg_list2(
+        mcx,
+        mk_var(mcx, 1, F64V),
+        mk_f64_cast(mcx, 316, mk_var(mcx, 2, INT4OID)),
+    );
+    let specs = [mk_spec(2806, false, &acast)];
+    let plan = classify(mcx, &specs).expect("plan");
+    let ints: Vec<Option<i32>> = vec![Some(3), Some(-7), None, Some(1_000_000), Some(0)];
+    let ys: Vec<Option<f64>> = vec![Some(0.5), Some(2.25), Some(1.0), None, Some(-9.75)];
+    let data: Vec<Vec<Option<Datum>>> = ys
+        .iter()
+        .zip(ints.iter())
+        .map(|(y, x)| vec![y.map(Datum::from_f64), x.map(Datum::from_i32)])
+        .collect();
+    let cols = TestCols::from_datum_rows(2, &data);
+    let rows = selmask(data.len(), |_| true);
+    let mut pgs = pergroups_for(mcx, &plan, 1);
+    // SAFETY: as above.
+    unsafe {
+        fold_batch(&plan, &cols, &rows, data.len(), NonNull::new(pgs.as_mut_ptr()).unwrap(), mcx)
+            .expect("fold");
+    }
+    let pairs: Vec<(Option<f64>, Option<f64>)> = ys
+        .iter()
+        .zip(ints.iter())
+        .map(|(y, x)| (*y, x.map(|v| v as f64)))
+        .collect();
+    let want = ref_fregr(&pairs, |_| true).unwrap();
+    let got = read_f8_transarray6(&pgs[0]);
+    for k in 0..6 {
+        assert_eq!(got[k].to_bits(), want[k].to_bits(), "cast-carrier word {k}");
+    }
+    // i8tod rounding pin: a >2^53 int8 sums through C's exact cast rounding.
+    let ai8 = arg_list(mcx, mk_f64_cast(mcx, 482, mk_var(mcx, 1, INT8OID)));
+    let specs = [mk_spec(218, true, &ai8)];
+    let plan = classify(mcx, &specs).expect("plan");
+    let big = (1i64 << 53) + 1; // rounds to 2^53 under ties-to-even
+    let data: Vec<Vec<Option<Datum>>> = vec![vec![Some(Datum::from_i64(big))]];
+    let cols = TestCols::from_datum_rows(1, &data);
+    let rows = selmask(1, |_| true);
+    let mut pgs = pergroups_for(mcx, &plan, 1);
+    // SAFETY: as above.
+    unsafe {
+        fold_batch(&plan, &cols, &rows, 1, NonNull::new(pgs.as_mut_ptr()).unwrap(), mcx)
+            .expect("fold");
+    }
+    assert_eq!(
+        pgs[0].trans_value.as_f64().to_bits(),
+        (big as f64).to_bits(),
+        "i8tod = C's (float8) cast rounding"
+    );
+}
+
+// THE BIVARIATE ORDERING PIN: float8_regr_accum's sxx/syy/sxy terms depend
+// on the running means, so forward vs reversed arrival diverge on a
+// magnitude-ladder dataset; the fold must match FORWARD — the FAccum pin
+// extended to the two-argument case.
+#[test]
+fn fold_trans2_regr_ordering_pin() {
+    let _g = ft_guard();
+    let mcx = leaked_mcx();
+    let pool: Vec<(Option<f64>, Option<f64>)> = vec![
+        (Some(1.0), Some(1000.0)),
+        (Some(10.0), Some(0.1)),
+        (None, Some(5.0)),
+        (Some(100.0), Some(10.0)),
+        (Some(1000.0), Some(1.0)),
+        (Some(0.1), Some(100.0)),
+    ];
+    let fwd = ref_fregr(&pool, |_| true).unwrap();
+    let mut rpool = pool.clone();
+    rpool.reverse();
+    let bwd = ref_fregr(&rpool, |_| true).unwrap();
+    assert!(
+        (2..6).any(|k| fwd[k].to_bits() != bwd[k].to_bits()),
+        "dataset is order-sensitive in at least one second-moment word"
+    );
+    let a2 = arg_list2(mcx, mk_var(mcx, 1, F64V), mk_var(mcx, 2, F64V));
+    let specs = [mk_spec(2806, false, &a2)];
+    let plan = classify(mcx, &specs).expect("plan");
+    let data: Vec<Vec<Option<Datum>>> = pool
+        .iter()
+        .map(|(y, x)| vec![y.map(Datum::from_f64), x.map(Datum::from_f64)])
+        .collect();
+    let cols = TestCols::from_datum_rows(2, &data);
+    let rows = selmask(pool.len(), |_| true);
+    let mut pgs = pergroups_for(mcx, &plan, 1);
+    // SAFETY: as fold_trans2_regr_parity.
+    unsafe {
+        fold_batch(&plan, &cols, &rows, pool.len(), NonNull::new(pgs.as_mut_ptr()).unwrap(), mcx)
+            .expect("fold");
+    }
+    let got = read_f8_transarray6(&pgs[0]);
+    for k in 0..6 {
+        assert_eq!(got[k].to_bits(), fwd[k].to_bits(), "word {k} == forward row-order bits");
+    }
+}
+
+#[test]
+fn fold_trans2_regr_overflow_raises() {
+    let _g = ft_guard();
+    let mcx = leaked_mcx();
+    let pool: Vec<(Option<f64>, Option<f64>)> =
+        vec![(Some(f64::MAX), Some(1.0)), (Some(f64::MAX), Some(1.0)), (Some(1.0), Some(1.0))];
+    let want = ref_fregr(&pool, |_| true).unwrap_err();
+    let a2 = arg_list2(mcx, mk_var(mcx, 1, F64V), mk_var(mcx, 2, F64V));
+    let specs = [mk_spec(2806, false, &a2)];
+    let plan = classify(mcx, &specs).expect("plan");
+    let data: Vec<Vec<Option<Datum>>> = pool
+        .iter()
+        .map(|(y, x)| vec![y.map(Datum::from_f64), x.map(Datum::from_f64)])
+        .collect();
+    let cols = TestCols::from_datum_rows(2, &data);
+    let rows = selmask(pool.len(), |_| true);
+    let mut pgs = pergroups_for(mcx, &plan, 1);
+    // SAFETY: as fold_trans2_regr_parity.
+    let got = unsafe {
+        fold_batch(&plan, &cols, &rows, pool.len(), NonNull::new(pgs.as_mut_ptr()).unwrap(), mcx)
+    }
+    .expect_err("sy overflows");
+    assert_eq!(got.message(), want.message(), "C's exact ereport");
+}
+
+#[test]
+fn fold_trans2_regr_grouped_parity() {
+    let _g = ft_guard();
+    let mcx = leaked_mcx();
+    let n = 90usize;
+    let ngroups = 3usize;
+    let pool: Vec<(Option<f64>, Option<f64>)> = (0..n)
+        .map(|i| {
+            let y = (i % 8 != 5).then(|| (i as f64) * 1.5 - 20.0);
+            let x = (i % 6 != 2).then(|| 1000.0 / (i as f64 + 1.0));
+            (y, x)
+        })
+        .collect();
+    let a2 = arg_list2(mcx, mk_var(mcx, 1, F64V), mk_var(mcx, 2, F64V));
+    let specs = [mk_spec(2806, false, &a2), mk_spec(2805, false, &a2)];
+    let plan = classify(mcx, &specs).expect("plan");
+    let data: Vec<Vec<Option<Datum>>> = pool
+        .iter()
+        .map(|(y, x)| vec![y.map(Datum::from_f64), x.map(Datum::from_f64)])
+        .collect();
+    let cols = TestCols::from_datum_rows(2, &data);
+    let mut group_pgs: Vec<Vec<AggPerGroup>> =
+        (0..ngroups).map(|_| pergroups_for(mcx, &plan, 2)).collect();
+    let idxs: Vec<u32> = (0..n as u32).collect();
+    let groups: Vec<NonNull<AggPerGroup>> = (0..n)
+        .map(|i| NonNull::new(group_pgs[i % ngroups].as_mut_ptr()).unwrap())
+        .collect();
+    // SAFETY: as the grouped tests above.
+    unsafe { fold_rows_grouped(&plan, &cols, &idxs, &groups, mcx).expect("fold") };
+    for g in 0..ngroups {
+        let want = ref_fregr(&pool, |i| i % ngroups == g).unwrap();
+        let got = read_f8_transarray6(&group_pgs[g][0]);
+        for k in 0..6 {
+            assert_eq!(got[k].to_bits(), want[k].to_bits(), "group {g} word {k}");
+        }
+        let want_n = pool
+            .iter()
+            .enumerate()
+            .filter(|(i, (y, x))| i % ngroups == g && y.is_some() && x.is_some())
+            .count() as i64;
+        assert_eq!(group_pgs[g][1].trans_value.as_i64(), want_n, "group {g} regr_count");
+    }
+}
+
+// Side arms must refuse every increment-2 shape: order-sensitive/varlena/
+// two-arg kinds AND filtered plans (a filtered int plan would otherwise
+// wrongly footer-answer over unfiltered rows — the correctness pins for the
+// admissibility gates).
+#[test]
+fn fold_trans2_side_arm_refusals() {
+    let _g = ft_guard();
+    let mcx = leaked_mcx();
+    let anum = arg_list(mcx, mk_var(mcx, 1, NUMV));
+    let a2 = arg_list2(mcx, mk_var(mcx, 1, F64V), mk_var(mcx, 2, F64V));
+    let specs = [mk_spec(2858, true, &anum)];
+    let plan = classify(mcx, &specs).expect("plan");
+    assert!(classify_meta(mcx, &specs).is_none());
+    assert!(plan_code_hostable(&plan).is_none());
+    assert!(agg_meta_cols(&plan).is_none());
+    assert!(granule_meta_len_cols(&plan).is_none());
+    let specs = [mk_spec(2806, false, &a2), mk_spec(2805, false, &a2)];
+    let plan = classify(mcx, &specs).expect("plan");
+    assert!(plan.cse.is_empty());
+    assert!(classify_meta(mcx, &specs).is_none());
+    assert!(plan_code_hostable(&plan).is_none());
+    assert!(agg_meta_cols(&plan).is_none());
+    assert!(granule_meta_len_cols(&plan).is_none());
+    // Filtered PLAIN-int plan (kinds the meta arms would otherwise answer).
+    let ai4 = arg_list(mcx, mk_var(mcx, 1, INT4OID));
+    let mut s0 = mk_spec(1841, true, &ai4);
+    s0.aggfilter = Some(mk_var(mcx, 2, BOOLV));
+    let nil = NodeList::default();
+    let mut s1 = mk_spec(F_INT8INC, false, &nil);
+    s1.aggfilter = Some(mk_var(mcx, 2, BOOLV));
+    let specs = [s0, s1];
+    let plan = classify(mcx, &specs).expect("plan");
+    assert!(!plan.filters.is_empty());
+    assert!(classify_meta(mcx, &specs).is_none(), "meta refuses filtered");
+    assert!(plan_code_hostable(&plan).is_none(), "code arm refuses filtered");
+    assert!(agg_meta_cols(&plan).is_none(), "footer arm refuses filtered");
+    assert!(granule_meta_len_cols(&plan).is_none(), "granule arm refuses filtered");
+}
