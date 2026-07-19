@@ -64,6 +64,17 @@ seam_core::seam!(
     pub fn pgstat_count_checkpointer_restartpoints_performed()
 );
 
+// LogCheckpointEnd (xlog.c): PendingCheckpointerStats.write_time +=
+// write_msecs / .sync_time += sync_msecs — unconditional, not gated on
+// log_checkpoints.
+seam_core::seam!(
+    pub fn pgstat_count_checkpointer_write_time(msecs: i64)
+);
+
+seam_core::seam!(
+    pub fn pgstat_count_checkpointer_sync_time(msecs: i64)
+);
+
 // Returns C's rel->pgstat_enabled; pgstat keys pgstat_info by relid.
 seam_core::seam!(
     pub fn pgstat_init_relation(relid: types_core::Oid, relkind: u8) -> bool

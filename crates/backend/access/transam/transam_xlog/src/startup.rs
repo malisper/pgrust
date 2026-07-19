@@ -35,6 +35,40 @@ thread_local! {
     static CKPT_SEGS_REMOVED: Cell<u64> = const { Cell::new(0) };
     static CKPT_SEGS_RECYCLED: Cell<u64> = const { Cell::new(0) };
     static CKPT_SLRU_WRITTEN: Cell<u64> = const { Cell::new(0) };
+    // CheckpointStats.ckpt_write_t / ckpt_sync_t / ckpt_sync_end_t (xlog.c):
+    // set in CheckPointGuts, consumed by the LogCheckpointEnd analog.
+    static CKPT_WRITE_T: Cell<i64> = const { Cell::new(0) };
+    static CKPT_SYNC_T: Cell<i64> = const { Cell::new(0) };
+    static CKPT_SYNC_END_T: Cell<i64> = const { Cell::new(0) };
+}
+
+// TimestampDifferenceMilliseconds (utils/adt/timestamp.c): clamp negatives to
+// 0, ceiling-divide microseconds, saturate at INT32_MAX seconds' worth.
+fn timestamp_difference_milliseconds(start_time: i64, stop_time: i64) -> i64 {
+    if start_time >= stop_time {
+        return 0;
+    }
+    let diff = stop_time - start_time;
+    if diff >= i32::MAX as i64 * 1000 - 999 {
+        i32::MAX as i64 * 1000
+    } else {
+        (diff + 999) / 1000
+    }
+}
+
+// LogCheckpointEnd's unconditional arm (xlog.c:6730-6738): accumulate the
+// write and sync phase durations into PendingCheckpointerStats, in
+// milliseconds, regardless of log_checkpoints. The seams are uninstalled in
+// substrate test binaries without pgstat; skipping there loses only stats.
+fn accumulate_checkpoint_timing() {
+    let write_msecs = timestamp_difference_milliseconds(CKPT_WRITE_T.get(), CKPT_SYNC_T.get());
+    let sync_msecs = timestamp_difference_milliseconds(CKPT_SYNC_T.get(), CKPT_SYNC_END_T.get());
+    if pgstat_seams::pgstat_count_checkpointer_write_time::is_installed() {
+        pgstat_seams::pgstat_count_checkpointer_write_time::call(write_msecs);
+    }
+    if pgstat_seams::pgstat_count_checkpointer_sync_time::is_installed() {
+        pgstat_seams::pgstat_count_checkpointer_sync_time::call(sync_msecs);
+    }
 }
 
 pub(crate) fn count_ckpt_slru_written() {
@@ -908,6 +942,9 @@ fn CheckPointGuts(check_point_redo: XLogRecPtr, flags: i32) -> PgResult<()> {
         origin_seams::check_point_replication_origin::call()?;
     }
 
+    // xlog.c CheckPointGuts: "Write out all dirty data in SLRUs and the main
+    // buffer pool" — ckpt_write_t opens the write phase here.
+    CKPT_WRITE_T.set(timestamp_seams::get_current_timestamp::call());
     clog::CheckPointCLOG()?;
     if commit_ts_seams::check_point_commit_ts::is_installed() {
         commit_ts_seams::check_point_commit_ts::call()?;
@@ -923,9 +960,14 @@ fn CheckPointGuts(check_point_redo: XLogRecPtr, flags: i32) -> PgResult<()> {
     }
     bufmgr_seams::check_point_buffers::call(flags)?;
 
+    // ckpt_sync_t / ckpt_sync_end_t bracket the fsync phase (xlog.c).
+    CKPT_SYNC_T.set(timestamp_seams::get_current_timestamp::call());
+
     // Unconditional (loud panic if uninstalled): a checkpoint that skips
     // ProcessSyncRequests fsyncs nothing yet still updates pg_control.
     sync_seams::process_sync_requests::call()?;
+
+    CKPT_SYNC_END_T.set(timestamp_seams::get_current_timestamp::call());
 
     if twophase_seams::check_point_two_phase::is_installed() {
         twophase_seams::check_point_two_phase::call(check_point_redo)?;
@@ -1208,6 +1250,10 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
         )?;
     }
 
+    // LogCheckpointEnd (xlog.c): timing accumulation is unconditional; only
+    // the log line below is gated on log_checkpoints.
+    accumulate_checkpoint_timing();
+
     if guc_tables::vars::log_checkpoints.read() {
         let _ = elog(
             LOG,
@@ -1360,6 +1406,9 @@ pub fn CreateRestartPoint(flags: i32) -> PgResult<bool> {
             procarray_seams::get_oldest_transaction_id_considered_running::call(),
         )?;
     }
+
+    // LogCheckpointEnd(true) (xlog.c): timing accumulation is unconditional.
+    accumulate_checkpoint_timing();
 
     if guc_tables::vars::log_checkpoints.read() {
         let _ = elog(
