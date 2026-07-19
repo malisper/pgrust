@@ -1915,7 +1915,10 @@ pub fn coerce_to_target_type<'mcx>(
     let result = coerce_type(
         mcx, pstate, inner, exprtype, targettype, targettypmod, ccontext, cformat, location,
     )?;
-    let hide = exprtype != targettype && result.as_variant::<Const>().is_none();
+    // Hide only nodes coerce_type generated: it can return the input unchanged
+    // (unknown Params are retyped in place), and hide_coercion_node must never
+    // run on a node it did not wrap — identity, not type inequality.
+    let hide = !result.ptr_eq(inner) && result.as_variant::<Const>().is_none();
     let result = coerce_type_typmod(
         mcx, result, targettype, targettypmod, ccontext, cformat, location, hide,
     )?;
