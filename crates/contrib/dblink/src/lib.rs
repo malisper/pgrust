@@ -417,7 +417,13 @@ fn fc_dblink_open(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
         _ => (Some(arg_text(fcinfo, 0)?), arg_text(fcinfo, 1)?, arg_text(fcinfo, 2)?, fcinfo.arg_bool(3)),
     };
     let ok = cursor_op(&conname, |rc| {
-        if !rc.new_xact_for_cursor {
+        // C: `if (PQtransactionStatus(conn) == PQTRANS_IDLE)` — the REMOTE
+        // xact state, not our bookkeeping flag: when the user opened their
+        // own transaction via dblink_exec('BEGIN'), C starts none and never
+        // auto-COMMITs it (newXactForCursor stays false). Gating on the flag
+        // double-BEGAN and then committed the user's transaction at close
+        // (fleet gate r2: the myconn cursor-transactions corpus section).
+        if rc.conn.transaction_status() == pgclient::TransactionStatus::Idle {
             let res = rc.conn.exec("BEGIN")?;
             if res.status != ExecStatus::CommandOk {
                 return internal_err(&rc.conn, "begin error");
@@ -425,7 +431,10 @@ fn fc_dblink_open(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
             rc.new_xact_for_cursor = true;
             rc.open_cursor_count = 0;
         }
-        rc.open_cursor_count += 1;
+        // C: `if (rconn->newXactForCursor) (rconn->openCursorCount)++;`
+        if rc.new_xact_for_cursor {
+            rc.open_cursor_count += 1;
+        }
         let res = rc.conn.exec(&format!("DECLARE {curname} CURSOR FOR {sql}"))?;
         if res.status != ExecStatus::CommandOk {
             res_error(&rc.conn, conname.as_deref(), &res, fail, &format!("while opening cursor \"{curname}\""))?;
