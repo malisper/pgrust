@@ -12682,6 +12682,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "postgres_fdw"
+version = "0.0.0"
+dependencies = [
+ "adt_quote",
+ "cache_syscache",
+ "clauses",
+ "commands_define",
+ "datum",
+ "dfmgr",
+ "elog",
+ "executils",
+ "extension",
+ "fmgr_seams",
+ "foreigncmds",
+ "format_type",
+ "guc",
+ "inval",
+ "lsyscache",
+ "mbutils",
+ "mcx",
+ "nodeforeignscan",
+ "nodes_core",
+ "pg_depend",
+ "planner",
+ "superuser",
+ "syscache_seams",
+ "table",
+ "typcache",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_guc",
+ "types_nodes",
+ "types_pathnodes",
+ "types_rel",
+ "types_slot",
+ "types_tuple",
+ "varlena",
+ "vars",
+]
+
+[[package]]
 name = "postgres_seams"
 version = "0.0.0"
 dependencies = [
