@@ -52,6 +52,8 @@ lock_seams = { path = "../../../storage/lmgr/lock_seams" }
 
 [dev-dependencies]
 miscinit_seams = { path = "../../../utils/init/miscinit_seams" }
+smgr_seams = { path = "../../../storage/smgr/smgr_seams" }
+xlogutils_seams = { path = "../../transam/xlogutils_seams" }
 heapam_visibility = { path = "../heapam_visibility" }
 xact = { path = "../../transam/xact" }
 xlogreader = { path = "../../transam/xlogreader" }
