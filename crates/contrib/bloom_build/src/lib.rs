@@ -1,6 +1,5 @@
-//! blinsert.c (build half): blbuild + blbuildempty. Split from the bloom
-//! crate so indexam -> bloom doesn't cycle through execindexing (same shape
-//! as pgvector_hnsw_build).
+//! blinsert.c (build half). Split from the bloom crate so indexam -> bloom
+//! doesn't cycle through execindexing (pgvector_hnsw_build shape).
 
 use bloom::state::{
     bloom_form_tuple, bloom_init_metapage, bloom_new_buffer, init_bloom_state,
@@ -15,13 +14,11 @@ use types_core::{ForkNumber, BLCKSZ};
 use types_error::{PgError, PgResult};
 use types_rel::Relation;
 
-/// C IndexBuildResult (matches every AM's shape in this port).
 pub struct IndexBuildResult {
     pub heap_tuples: f64,
     pub index_tuples: f64,
 }
 
-// BloomBuildState: one page image accumulated before flushing.
 struct BloomBuildState {
     blstate: BloomState,
     indtuples: f64,
@@ -29,7 +26,6 @@ struct BloomBuildState {
     count: i32,
 }
 
-// flushCachedPage.
 fn flush_cached_page<'mcx>(
     mcx: Mcx<'mcx>,
     index: &Relation<'mcx>,
@@ -43,13 +39,11 @@ fn flush_cached_page<'mcx>(
     UnlockReleaseBuffer(buffer)
 }
 
-// initCachedPage.
 fn init_cached_page(buildstate: &mut BloomBuildState) {
     bloom_init_page(&mut buildstate.data[..], 0);
     buildstate.count = 0;
 }
 
-/// blbuild.
 pub fn blbuild<'mcx>(
     mcx: Mcx<'mcx>,
     heap: &Relation<'mcx>,
@@ -64,7 +58,6 @@ pub fn blbuild<'mcx>(
         .into());
     }
 
-    // Initialize the meta page.
     bloom_init_metapage(mcx, index, ForkNumber::MAIN_FORKNUM)?;
 
     let mut buildstate = BloomBuildState {
@@ -75,7 +68,6 @@ pub fn blbuild<'mcx>(
     };
     init_cached_page(&mut buildstate);
 
-    // Do the heap scan.
     let bs = &mut buildstate;
     let reltuples = table_index_build_scan(
         mcx,
@@ -84,14 +76,12 @@ pub fn blbuild<'mcx>(
         index_info,
         true,
         |_index, tid, values, isnull, _tuple_is_alive| {
-            // bloomBuildCallback (C's tmpCtx reset per tuple: the tuple image
-            // here is an owned Vec dropped at the end of the closure).
+            // C's per-tuple tmpCtx reset == the owned tuple Vec dropping here.
             let itup = bloom_form_tuple(&mut bs.blstate, tid, values, isnull)?;
             let size = bs.blstate.size_of_bloom_tuple;
             if page_add_item(&mut bs.data[..], size, &itup) {
                 bs.count += 1;
             } else {
-                // Cached page full: flush and start a new one.
                 flush_cached_page(mcx, index, bs)?;
                 postgres_seams::check_for_interrupts::call()?;
                 init_cached_page(bs);
@@ -108,7 +98,7 @@ pub fn blbuild<'mcx>(
         },
     )?;
 
-    // Flush last page if needed (it will be, unless heap was empty).
+    // The last page still needs a flush unless the heap was empty.
     if buildstate.count > 0 {
         flush_cached_page(mcx, index, &mut buildstate)?;
     }
@@ -119,7 +109,6 @@ pub fn blbuild<'mcx>(
     })
 }
 
-/// blbuildempty: metapage into the init fork.
 pub fn blbuildempty(index: &Relation<'_>) -> PgResult<()> {
     let ctx = mcx::MemoryContext::new_bump("bloom buildempty");
     bloom_init_metapage(ctx.mcx(), index, ForkNumber::INIT_FORKNUM)

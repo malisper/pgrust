@@ -1,5 +1,4 @@
-//! blvacuum.c: blbulkdelete (page-compacting rewrite + notFullPage rebuild)
-//! and blvacuumcleanup (deleted/new pages into the FSM).
+//! blvacuum.c: page-compacting bulkdelete + notFullPage rebuild; cleanup.
 
 use crate::state::{buf_page_bytes, init_bloom_state};
 use bufmgr::{LockBuffer, UnlockReleaseBuffer, BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_SHARE};
@@ -24,7 +23,6 @@ fn tid_cmp(a: &ItemPointerData, b: &ItemPointerData) -> core::cmp::Ordering {
         ))
 }
 
-// The C callback: vacuum's dead-TID list membership.
 fn tid_reaped(dead_items: &[ItemPointerData], tid: &ItemPointerData) -> bool {
     dead_items
         .binary_search_by(|probe| tid_cmp(probe, tid))
@@ -38,8 +36,7 @@ fn tuple_heap_ptr(tuple: &[u8]) -> ItemPointerData {
     ItemPointerData::new((hi << 16) | lo, off)
 }
 
-/// blbulkdelete with the reaped-set shape shared by this port's AMs
-/// (dead_items replaces C's callback; same membership test).
+/// dead_items replaces C's callback (this port's shared reaped-set shape).
 pub fn blbulkdelete<'mcx>(
     info: &IndexVacuumInfo<'_, 'mcx>,
     istat: Option<IndexBulkDeleteResult>,
@@ -48,8 +45,7 @@ pub fn blbulkdelete<'mcx>(
     bulkdelete_common(info, istat, &mut |tid| Ok(tid_reaped(dead_items, tid)))
 }
 
-/// blbulkdelete with C's collect-only callback shape (validate_index):
-/// report every TID, delete nothing.
+/// validate_index's collect-only shape: report every TID, delete nothing.
 pub fn blbulkdelete_collect<'mcx>(
     info: &IndexVacuumInfo<'_, 'mcx>,
     callback: &mut (dyn FnMut(&ItemPointerData) -> PgResult<()> + '_),
@@ -73,11 +69,9 @@ fn bulkdelete_common<'mcx>(
     let scratch = mcx::MemoryContext::new_bump("blbulkdelete xlog");
     let smcx = scratch.mcx();
 
-    // notFullPage accumulator (C: FreeBlockNumberArray on the stack).
     let mut not_full_page: Vec<BlockNumber> = Vec::new();
 
-    // Iterate over the pages; concurrently-added pages can't hold deletable
-    // tuples, so a start-of-scan block count is enough.
+    // Concurrently-added pages can't hold deletable tuples.
     let npages = bufmgr::RelationGetNumberOfBlocksInFork(index, ForkNumber::MAIN_FORKNUM)?;
     for blkno in BLOOM_HEAD_BLKNO..npages {
         vacuum_seams::vacuum_delay_point::call(false)?;
@@ -93,14 +87,14 @@ fn bulkdelete_common<'mcx>(
         let mut gxlog = GenericXLogStart(smcx, index)?;
         let page = gxlog.register_buffer(buffer, 0)?;
 
-        // Ignore empty/deleted pages until blvacuumcleanup().
+        // Empty/deleted pages wait for blvacuumcleanup().
         if page_is_new(page) || page_is_deleted(page) {
             UnlockReleaseBuffer(buffer)?;
             GenericXLogAbort(gxlog);
             continue;
         }
 
-        // Compact live tuples in place: itup scans, itup_ptr receives.
+        // Compact live tuples in place: offset scans, itup_ptr receives.
         let maxoff = opaque_maxoff(page);
         let mut itup_ptr: u16 = 1; // next slot to save a surviving tuple into
         let mut deleted_here = false;
@@ -108,7 +102,6 @@ fn bulkdelete_common<'mcx>(
             let src = tuple_off(size, offset);
             let tid = tuple_heap_ptr(&page[src..src + size]);
             if callback(&tid)? {
-                // Deleted: don't advance itup_ptr; maxoff shrinks at the end.
                 stats.tuples_removed += 1.0;
                 deleted_here = true;
             } else {
@@ -122,8 +115,6 @@ fn bulkdelete_common<'mcx>(
         let new_maxoff = itup_ptr - 1;
         set_opaque_maxoff(page, new_maxoff);
 
-        // Add page to the new notFullPage list if we won't mark it deleted
-        // and it has free space.
         if new_maxoff != 0
             && page_free_space(size, new_maxoff) >= size as isize
             && not_full_page.len() < BLOOM_META_BLOCK_N
@@ -132,22 +123,18 @@ fn bulkdelete_common<'mcx>(
         }
 
         if deleted_here {
-            // Now-empty page is marked deleted.
             if new_maxoff == 0 {
                 page_set_deleted(page);
             }
-            // Adjust pd_lower.
             set_pd_lower(page, tuple_off(size, new_maxoff + 1) as u16);
             GenericXLogFinish(gxlog)?;
         } else {
-            // Nothing changed: abort WAL-logging.
             GenericXLogAbort(gxlog);
         }
         UnlockReleaseBuffer(buffer)?;
     }
 
-    // Rewrite the metapage's notFullPage list with what we found. Our info
-    // may already be stale, but blinsert() copes.
+    // The rebuilt notFullPage list may already be stale; blinsert() copes.
     let buffer = bufmgr::ReadBuffer(index, BLOOM_METAPAGE_BLKNO)?;
     LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE)?;
     let mut gxlog = GenericXLogStart(smcx, index)?;
@@ -163,7 +150,6 @@ fn bulkdelete_common<'mcx>(
     Ok(stats)
 }
 
-/// blvacuumcleanup.
 pub fn blvacuumcleanup<'mcx>(
     info: &IndexVacuumInfo<'_, 'mcx>,
     istat: Option<IndexBulkDeleteResult>,
@@ -176,7 +162,6 @@ pub fn blvacuumcleanup<'mcx>(
 
     let mut stats = istat.unwrap_or_default();
 
-    // Iterate over the pages: deleted pages go to the FSM; count the rest.
     let npages = bufmgr::RelationGetNumberOfBlocksInFork(index, ForkNumber::MAIN_FORKNUM)?;
     stats.num_pages = npages;
     stats.pages_free = 0;
