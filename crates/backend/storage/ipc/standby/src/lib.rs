@@ -42,6 +42,13 @@ mod tests;
 pub fn LogStandbySnapshot() -> PgResult<XLogRecPtr> {
     debug_assert!(transam_xlog::XLogStandbyInfoActive());
 
+    // standby.c:1292 (USE_INJECTION_POINTS): tests suppress the
+    // xl_running_xacts record, whose replay could move a slot's xmin
+    // forward during decoding and make results unpredictable.
+    if injection_point::is_attached("skip-log-running-xacts") {
+        return Ok(transam_xlog::GetInsertRecPtr());
+    }
+
     let locks = lock::GetRunningTransactionLocks()?;
     if !locks.is_empty() {
         LogAccessExclusiveLocks(&locks)?;
