@@ -57,6 +57,8 @@ timeline = { path = "../timeline" }
 crc32c = { path = "../../../../port/crc32c" }
 relpath = { path = "../../../../common/relpath" }
 heapam = { path = "../../heap/heapam" }
+exectuples = { path = "../../../executor/exectuples" }
+types_slot = { path = "../../../../_support/types/types_slot" }
 nbtree = { path = "../../nbtree/nbtree" }
 types_nbtree = { path = "../../../../_support/types/types_nbtree" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
