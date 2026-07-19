@@ -62,9 +62,20 @@ pub(crate) fn StartLogicalReplication(cmd: &StartReplicationCmd) -> PgResult<()>
     debug_assert!(slot::MyReplicationSlot().is_none());
     slot::ReplicationSlotAcquire(cmd.slotname.as_deref().unwrap_or(""), true, true)?;
 
-    // am_cascading_walsender && !RecoveryInProgress() (post-promotion
-    // disconnect): logical decoding on standby is refused upstream, so a
-    // logical walsender is never cascading here.
+    // Force a disconnect if we were connected during recovery and the server
+    // has been promoted since, so the decoding code doesn't need to care
+    // about a mid-stream switch out of recovery (walsender.c:1462). Client
+    // code is expected to handle reconnects.
+    if crate::am_cascading_walsender_now() && !transam_xlog::RecoveryInProgress() {
+        let _ = ereport(types_error::LOG)
+            .errmsg("terminating walsender process after promotion")
+            .finish(ErrorLocation::new(
+                "src/backend/replication/walsender.c",
+                1466,
+                "StartLogicalReplication",
+            ));
+        crate::GOT_STOPPING.with(|c| c.set(true));
+    }
 
     // Create our decoding context, starting from the previously ack'ed
     // position. Before CopyBothResponse so errors are reported early.
@@ -162,8 +173,16 @@ fn XLogSendLogical(
     let end = ctx.reader.v.EndRecPtr;
     let mut flush_ptr = LOGICAL_FLUSH_PTR.with(Cell::get);
     if flush_ptr == InvalidXLogRecPtr || end >= flush_ptr {
-        // Cascading (standby) logical walsenders would use the replay LSN.
-        flush_ptr = transam_xlog::GetFlushRecPtr(None);
+        // For cascading (standby) logical walsenders we use the replay LSN
+        // instead of the flush LSN: standby decoding only processes WAL that
+        // has been replayed. This matters especially at shutdown, when no
+        // more WAL gets replayed and the last replayed LSN is the furthest
+        // point decoding can reach (walsender.c:3461).
+        flush_ptr = if crate::am_cascading_walsender_now() {
+            xlogrecovery_seams::get_xlog_replay_rec_ptr::call().0
+        } else {
+            transam_xlog::GetFlushRecPtr(None)
+        };
         LOGICAL_FLUSH_PTR.with(|c| c.set(flush_ptr));
     }
 
@@ -215,14 +234,24 @@ impl XLogReaderRoutine for LogicalWalSndPageRead {
             return Ok(-1);
         }
 
-        // Non-cascading: the current insertion timeline. (Logical decoding on
-        // standby is refused upstream.) A slot restarting before a promotion
-        // reads pages from a HISTORIC timeline: XLogReadDetermineTimeline
-        // picks it, the read is clamped to the switch point, and the read
-        // goes to the old timeline's segment (C delegates the same decision
-        // to WalSndSegmentOpen via state->currTLI; the local-read guts here
-        // mirror read_local_xlog_page, which 010's SQL path already proves).
-        let curr_tli = transam_xlog::ctl::GetWALInsertionTimeLine();
+        // Logical decoding is also permitted on a standby, so re-check
+        // whether the server is in recovery to decide how to get the current
+        // timeline ID — covering promotion and timeline-change cases. This
+        // must happen AFTER waiting for the required WAL so it is correct
+        // when the walsender wakes up after a promotion (walsender.c:1060).
+        let am_cascading = transam_xlog::RecoveryInProgress();
+        crate::AM_CASCADING_WALSENDER.set(am_cascading);
+        // A slot restarting before a promotion reads pages from a HISTORIC
+        // timeline: XLogReadDetermineTimeline picks it, the read is clamped
+        // to the switch point, and the read goes to the old timeline's
+        // segment (C delegates the same decision to WalSndSegmentOpen via
+        // state->currTLI; the local-read guts here mirror
+        // read_local_xlog_page, which 010's SQL path already proves).
+        let curr_tli = if am_cascading {
+            xlogrecovery_seams::get_xlog_replay_rec_ptr::call().1
+        } else {
+            transam_xlog::ctl::GetWALInsertionTimeLine()
+        };
         xlogutils::XLogReadDetermineTimeline(v, target_page_ptr, req_len as u32, curr_tli)?;
         let read_tli = if v.currTLI != curr_tli {
             // Historical timeline: read only up to the switch point.
@@ -312,7 +341,15 @@ fn WalSndWaitForWal(loc_: XLogRecPtr) -> PgResult<XLogRecPtr> {
             WAL_FLUSH_PACING.with(|c| c.set(pacing));
         }
 
-        let recent_flush = transam_xlog::GetFlushRecPtr(None);
+        // Update our idea of the currently flushed position: on a standby
+        // WAL is decodable only once REPLAYED, so the wait target is the
+        // replay pointer, not the (local, stale-in-recovery) flush pointer
+        // (walsender.c:1869).
+        let recent_flush = if !transam_xlog::RecoveryInProgress() {
+            transam_xlog::GetFlushRecPtr(None)
+        } else {
+            xlogrecovery_seams::get_xlog_replay_rec_ptr::call().0
+        };
         RECENT_FLUSH_PTR.with(|c| c.set(recent_flush));
 
         // If postmaster asked us to stop and the standby slots have caught

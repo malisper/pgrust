@@ -176,6 +176,7 @@ pub fn init_all_with_transport(transport: Transport) {
     slot::init_seams();
     reorderbuffer::init_seams();
     snapbuild::init_seams();
+    rewriteheap::init_seams();
     logical::init_seams();
     origin::init_seams();
     logicalworker::init_seams();

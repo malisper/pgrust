@@ -81,9 +81,17 @@ fn setup_n(pages: Vec<Box<AlignedPage>>, fork_exists: bool, fork_nblocks: BlockN
     });
 }
 
+thread_local! {
+    // Per-test switches for RelationIsAccessibleInLogicalDecoding's inputs.
+    static LOGICAL_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static IS_CATALOG_REL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn install_seams() {
     INIT.call_once(|| {
         transam_xlog_seams::xlog_standby_info_active::set(|| false);
+        transam_xlog_seams::xlog_logical_info_active::set(|| LOGICAL_ACTIVE.with(|c| c.get()));
+        catalog_seams::is_catalog_relation::set(|_rel| IS_CATALOG_REL.with(|c| c.get()));
         bufmgr_seams::relation_smgr_locator::set(|rel| RelFileLocatorBackend {
             locator: RelFileLocator { spcOid: 1663, dbOid: 5, relNumber: rel.rd_id },
             backend: INVALID_PROC_NUMBER,
@@ -661,4 +669,36 @@ fn map_geometry_matches_c() {
     assert_eq!(HEAPBLK_TO_MAPBYTE(32671), 8167);
     assert_eq!(HEAPBLK_TO_OFFSET(32671), 6);
     assert_eq!(HEAPBLK_TO_OFFSET(4), 0);
+}
+
+#[test]
+fn set_bits_catalog_rel_flags_wal_record() {
+    // A catalog relation under wal_level=logical stamps
+    // VISIBILITYMAP_XLOG_CATALOG_REL into xl_heap_visible.flags — the bit a
+    // standby uses to invalidate logical slots the cutoff overtook.
+    let _s = serial();
+    let ctx = MemoryContext::new("test");
+    let rel = test_relation(ctx.mcx(), 1259);
+    let (vm, heap) = heap_pages();
+    setup_n(vec![vm, heap], true, 1);
+    LOGICAL_ACTIVE.with(|c| c.set(true));
+    IS_CATALOG_REL.with(|c| c.set(true));
+
+    let heap_buf: Buffer = 2;
+    let heap_blk: BlockNumber = 1;
+    let mut vmbuf = VmBuffer::new();
+    visibilitymap_pin(&rel, heap_blk, &mut vmbuf).unwrap();
+    visibilitymap_set(&rel, heap_blk, heap_buf, 0, &vmbuf, 57, VISIBILITYMAP_ALL_VISIBLE)
+        .unwrap();
+    LOGICAL_ACTIVE.with(|c| c.set(false));
+    IS_CATALOG_REL.with(|c| c.set(false));
+
+    with_fake(|f| {
+        let rec = f.wal.last().expect("visible record logged");
+        assert_eq!(rec.info, 0x40);
+        // flags byte = VM bits | VISIBILITYMAP_XLOG_CATALOG_REL; the map
+        // itself must NOT carry the xlog-only bit.
+        assert_eq!(rec.main[4], VISIBILITYMAP_ALL_VISIBLE | 0x04);
+    });
+    assert_eq!(map_byte(0), 0b0100);
 }
