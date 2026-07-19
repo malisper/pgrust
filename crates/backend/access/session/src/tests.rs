@@ -515,7 +515,28 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //   50. access/heap/visibilitymap/src/tests.rs — cfg(test) rig TLS
     //      (standby-logical car's catalog-cleanup-flag tests); never in
     //      dist.
-    assert_eq!(count_tree(crates), 511, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // t31 fold deltas (517 = 511 + 6), all C-parity per-backend statics
+    // from the contrib wave (one backend = one thread, rule 10):
+    //   51. commands/explain/src/state.rs — EXPLAIN extension-option state
+    //      (the pg_overexplain hook surface; C's static becomes per-thread
+    //      hook bookkeeping; no session identity).
+    //   52. utils/error/elog/src/sink.rs — debug_query_string (C's global;
+    //      the dblink car's current_query() fix): per-backend CURRENT
+    //      STATEMENT text, set/cleared at tcop's dispatch points;
+    //      statement-scoped, no session identity.
+    //   53. contrib/dblink/src/registry.rs — C dblink.c remoteConnHash:
+    //      per-backend named-connection registry (session-lifetime state
+    //      owned by the backend thread; close/cleanup per the lane's
+    //      lifecycle audit).
+    //   54. contrib/pg_overexplain/src/lib.rs — per-backend option state
+    //      (C static parity beside 51).
+    //   55. contrib/postgres_fdw/src/connection.rs — C connection.c
+    //      ConnectionHash: per-backend FDW connection cache (same class
+    //      as 53).
+    //   56. contrib/postgres_fdw/src/shippable.rs — C shippable.c
+    //      ShippableCacheHash: per-backend memo, syscache-inval driven,
+    //      no session identity.
+    assert_eq!(count_tree(crates), 517, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
