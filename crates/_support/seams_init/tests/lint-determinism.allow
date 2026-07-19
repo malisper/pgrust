@@ -354,8 +354,8 @@ env	crates/backend/optimizer/plan/planner/src/syscache_memo.rs	1
 env	crates/backend/postmaster/autovacuum/src/launcher.rs	1
 env	crates/backend/postmaster/autovacuum/src/worker.rs	1
 env	crates/backend/postmaster/bgjobs/src/lib.rs	2
-env	crates/backend/postmaster/bgworker/src/lib.rs	1
-env	crates/backend/postmaster/launch_backend/src/lib.rs	5	DST-REVIEW(simcorpus): +1 = PGRUST_SIM_DOORSKIP, the P10 door-skip RED knob — cfg(pgrust_sim)-fenced (native-inert), env-armed because the sim harness (tcop) cannot call this crate (the wpool/rtpool seam package-cycle reason); base 4 = the pre-existing production knobs
+env	crates/backend/postmaster/bgworker/src/lib.rs	2	DST-REVIEW(multibackend): +1 = PGRUST_SIM_RAWREG red-knob memo (the resurrected pool=4 registry-wedge fixture; cfg(pgrust_sim)-fenced, no product reader)
+env	crates/backend/postmaster/launch_backend/src/lib.rs	6	DST-REVIEW(simcorpus): +1 = PGRUST_SIM_DOORSKIP, the P10 door-skip RED knob — cfg(pgrust_sim)-fenced (native-inert), env-armed because the sim harness (tcop) cannot call this crate (the wpool/rtpool seam package-cycle reason); base 4 = the pre-existing production knobs ; DST-REVIEW(pmchild): +1 = PGRUST_SIM_STUCKCHILD, the P14 shutdown-drain RED knob (first retired standby refuses to exit) — cfg(pgrust_sim)-fenced (native-inert), env-armed for the same package-cycle reason as DOORSKIP; memo is plain atomics (the multibackend §3 lesson). Prior: DST-REVIEW(simcorpus): +1 = PGRUST_SIM_DOORSKIP, the P10 door-skip RED knob; base 4 = the pre-existing production knobs
 env	crates/backend/postmaster/postmaster/src/main_entry.rs	2	DST-REVIEW(provider-seam): +1 = the cfg(pgrust_sim) §9 boot installer reading PGDATA exactly the way SelectConfigFiles does (same -D-else-PGDATA resolution; sim cfg only, dead in product builds)
 env	crates/backend/storage/aio/aio_uring/src/lib.rs	1
 env	crates/backend/storage/ipc/procarray/src/lib.rs	1
@@ -363,7 +363,7 @@ env	crates/backend/storage/ipc/shm_mq/src/stall.rs	2
 env	crates/backend/storage/ipc/waiter/src/lib.rs	2
 env	crates/backend/storage/lmgr/condition_variable/src/lib.rs	1
 env	crates/backend/tcop/postgres/src/simple_query.rs	2
-env	crates/backend/tcop/postgres/src/sim_net.rs	15	DST-REVIEW(simcorpus): SIM-HARNESS knobs, all lanes' additions coexist on the merged tree — base 4 (PGRUST_SIMNET_SQL/TRANSCRIPT/OPLOG/SEED_DIRS) + inc-2 FAULTS plan spec + permit-s1-demo SESSIONS/DUO_SERIAL two-backend corpus knobs + permit-s2 PERMIT_WPOOL wpool-demo gate + permit-s5 PERMIT_RTPOOL rtpool-demo gate + simvfs-shared SIMVFS_SHARED enable / SIMVFS_RED red-battery / PERMIT_LOADSORT P8 gate / RUNTIME postmaster-parity gate (P7) + simcorpus SIMVFS_RED_SCOPE scoped-red / SIMNET_PARQUERY P9 gate; cfg(pgrust_sim)-only via the mod decl (no product reader) — pg_clock/sim.rs precedent; absorbed by the s2.5 knobs-registry charter
+env	crates/backend/tcop/postgres/src/sim_net.rs	19	DST-REVIEW(pmchild): +3 = SIMNET_NSESSION (P13 N-session corpus gate) / SIM_NOREG (P13 red: sessions unregistered, the multibackend §1 deviation resurrected) / SIM_DRAIN_BUDGET (SHUTDOWNDRAIN named-verdict bound, default 60000 = the old blind poll bound). Prior: DST-REVIEW(simcorpus): SIM-HARNESS knobs, all lanes' additions coexist on the merged tree — base 4 (PGRUST_SIMNET_SQL/TRANSCRIPT/OPLOG/SEED_DIRS) + inc-2 FAULTS plan spec + permit-s1-demo SESSIONS/DUO_SERIAL two-backend corpus knobs + permit-s2 PERMIT_WPOOL wpool-demo gate + permit-s5 PERMIT_RTPOOL rtpool-demo gate + simvfs-shared SIMVFS_SHARED enable / SIMVFS_RED red-battery / PERMIT_LOADSORT P8 gate / RUNTIME postmaster-parity gate (P7) + simcorpus SIMVFS_RED_SCOPE scoped-red / SIMNET_PARQUERY P9 gate + multibackend SIMNET_POOLMISS deferral-corpus gate (P12); cfg(pgrust_sim)-only via the mod decl (no product reader) — pg_clock/sim.rs precedent; absorbed by the s2.5 knobs-registry charter
 env	crates/backend/tcop/postgres/src/stmt_trace.rs	1
 env	crates/backend/test_regress/src/lib.rs	2
 env	crates/backend/timezone/pgtz/src/lib.rs	1
@@ -417,7 +417,7 @@ blocking	crates/backend/postmaster/autovacuum/src/worker.rs	1
 blocking	crates/backend/postmaster/bgworker/src/lib.rs	1
 blocking	crates/backend/postmaster/bgwriter/src/lib.rs	1
 blocking	crates/backend/postmaster/checkpointer/src/lib.rs	2
-blocking	crates/backend/postmaster/launch_backend/src/lib.rs	5	P3: standby handoff channels, BOTH pairs incl. lines 759/760 uncited by the doc (s3.3)
+blocking	crates/backend/postmaster/launch_backend/src/lib.rs	6	DST-REVIEW(pmchild): +1 = the STUCKCHILD red fixture's forever-sleep (pgsync::thread::sleep = hooked TimedPark; the scanner sees the textual sleep, not the pgsync routing; cfg(pgrust_sim)-fenced). Prior P3: standby handoff channels, BOTH pairs incl. lines 759/760 uncited by the doc (s3.3)
 blocking	crates/backend/postmaster/pgarch/src/lib.rs	2
 blocking	crates/backend/postmaster/syslogger/src/lib.rs	1
 blocking	crates/backend/postmaster/walwriter/src/lib.rs	1
@@ -656,7 +656,7 @@ rawsync	crates/backend/optimizer/plan/planner/src/syscache_memo.rs	3
 rawsync	crates/backend/port/pg_sema/src/lib.rs	1
 rawsync	crates/backend/postmaster/autovacuum/src/shmem.rs	1
 rawsync	crates/backend/postmaster/auxjob/src/lib.rs	1
-rawsync	crates/backend/postmaster/bgworker/src/lib.rs	2
+rawsync	crates/backend/postmaster/bgworker/src/lib.rs	1	DST-REVIEW(multibackend): registry/static-pending/gtrace CONVERTED to pgsync (the pool=4 wedge fix); the 1 surviving site = raw_registry_gate's std::sync::Mutex — the rawness IS the red fixture (sim-only, env-armed; the sim_sched_demo P4-red discipline, never converts)
 rawsync	crates/backend/postmaster/bgwriter/src/job.rs	1
 rawsync	crates/backend/postmaster/checkpointer/src/lib.rs	1
 rawsync	crates/backend/postmaster/pgarch/src/lib.rs	1
@@ -735,8 +735,8 @@ rawsync	crates/port/pg_strong_random/src/sim.rs	1
 # implementation of the interception layer, not sites to intercept.
 blocking	crates/_support/pgsync/src/sim/sched.rs	4	DST-REVIEW(ws-core): the permit machinery itself — state Condvar (grant park/notify + spawn-fence) is HOW threads park under the scheduler; sim-only
 blocking	crates/_support/pgsync/src/sim/watchdog.rs	1	DST-REVIEW(ws-core): the monitor's poll sleep — THE watchdog is deliberately OUTSIDE the model (permit-holder-blocked-outside-interception needs a wall observer); sim-only
-env	crates/_support/pgsync/src/sim/config.rs	7	DST-REVIEW(ws-core): the scheduler knobs (PGRUST_SIM_SCHED/PREEMPT_P/WATCHDOG_S/SCHEDLOG + permit-s2 PGRUST_SIM_SCHED_ALGO/PCT_D/PCT_K), R-KNOBS idiom (OnceLock + pure parse fns + unit corpus); pgrust_sim-cfg-only, no product reader; retires onto the s2.5 knobs-registry charter
-once	crates/_support/pgsync/src/sim/config.rs	7	DST-REVIEW(ws-core): knob-read OnceLocks — pure env-read closures (P3 row-19 benign class), one per knob (permit-s2 adds the 3 PCT knob cells)
+env	crates/_support/pgsync/src/sim/config.rs	8	DST-REVIEW(ws-core): the scheduler knobs (PGRUST_SIM_SCHED/PREEMPT_P/WATCHDOG_S/SCHEDLOG + permit-s2 PGRUST_SIM_SCHED_ALGO/PCT_D/PCT_K + multibackend PGRUST_SIM_VCEIL_S virtual-time ceiling), R-KNOBS idiom (OnceLock + pure parse fns + unit corpus); pgrust_sim-cfg-only, no product reader; retires onto the s2.5 knobs-registry charter
+once	crates/_support/pgsync/src/sim/config.rs	8	DST-REVIEW(ws-core): knob-read OnceLocks — pure env-read closures (P3 row-19 benign class), one per knob (permit-s2 adds the 3 PCT knob cells; multibackend adds the VCEIL_S cell)
 once	crates/_support/pgsync/src/sim/sched.rs	1	DST-REVIEW(ws-core): the ONE global-scheduler init (seed fill + watchdog start + hooks install); runs on first spawn-door touch, before any governed thread exists — cannot wedge a permit holder
 once	crates/_support/pgsync/src/sim/watchdog.rs	1	DST-REVIEW(ws-core): wall-epoch Instant OnceLock (pure closure); watchdog-only
 once	crates/backend/executor/execmain/src/lanev2/batch_source.rs	3	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
@@ -755,8 +755,8 @@ time	crates/backend/executor/lanestitch/src/rowchain.rs	2	DST-REVIEW(t30-train):
 # std::sync/std::thread surface is DELIBERATE — the P4 red fixture's rawness
 # IS the fixture (the watchdog must catch it); the P2 plant's ops flip to
 # pgsync when dst/permit-s1-sync lands (wiring point in the file header).
-blocking	crates/backend/tcop/postgres/src/sim_net.rs	3	DST-REVIEW(simcorpus): W5 recovery-done gate (permit-s1-demo, 1ms poll until recovery clears) + the P9 parquery boot thread's reaper-service and pool-drain sleeps — all pgsync::thread::sleep = TimedParks under the scheduler (the P5/s2 precedent: the scanner sees the textual sleep, not the pgsync routing)
-join	crates/backend/tcop/postgres/src/sim_net.rs	3	DST-REVIEW(simcorpus): session-2 JoinHandle joins (serial + concurrent arms, permit-s1-demo) + the P9 parquery leader join; ALL join-bounded-after-wake (the sessions exit on their own Terminate; the parquery join runs only after is_finished()) — hooked joins via pgsync
+blocking	crates/backend/tcop/postgres/src/sim_net.rs	4	DST-REVIEW(pmchild): 4 = W5 recovery-done gate + drain_until_reaped/drain_pool service cadences (the MODELED drain: loop conditions are pmchild-registry/POPULATION state, the is_finished OS fact retired) + the P13 noreg-red's resurrected legacy poll — all pgsync::thread::sleep = TimedParks under the scheduler (the P5/s2 precedent: the scanner sees the textual sleep, not the pgsync routing)
+join	crates/backend/tcop/postgres/src/sim_net.rs	5	DST-REVIEW(pmchild): +2 = the P13 N-session s2/s3 joins; ALL 5 sites are pgsync JoinHandle::join (hooked Join parks until the exit hook wakes joiners; residual raw join = bounded OS teardown — the NB-2 shape) and join-bounded-after-wake: the parquery/nsession joins now run only after the reaper has processed the session's exit announce (the modeled drain), the P1/P3 sessions exit on their own Terminate. Prior: DST-REVIEW(simcorpus) session-2 joins (serial + concurrent arms) + the P9 parquery leader join
 spawn	crates/backend/tcop/postgres/src/sim_net.rs	1	DST-REVIEW(permit-s1-demo, hand-back DISCHARGED at compose): session-2 spawns via the pgsync::thread child-registering door (scanner sees the textual thread::Builder, not the pgsync routing) — annotation refreshed at permit-s5
 blocking	crates/backend/tcop/postgres/src/sim_sched_demo.rs	7	DST-REVIEW(permit-s1-demo): P4 red fixture cv-wait pair + fallback timer sleep — the INTENTIONALLY unshimmed watchdog-red corpus; red-battery discipline, never converts. +2 DST-REVIEW(permit-s2): the wpool demo's pgsync::thread::sleep rendezvous + drain poll — HOOKED TimedParks (scanner sees the textual sleep, not the pgsync routing). +2 DST-REVIEW(permit-s5): the rtpool demo's rendezvous + drain poll, same HOOKED TimedPark class
 rawsync	crates/backend/tcop/postgres/src/sim_sched_demo.rs	1	DST-REVIEW(permit-s1-compose): THE P4 red fixture's raw std::sync::Mutex — the rawness IS the fixture (watchdog must catch it); never migrates to pgsync. The PLANT/gate ops flipped to pgsync at compose (the file's designed wiring point)
