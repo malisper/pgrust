@@ -272,3 +272,14 @@ mod datum_ops_tests {
         assert_eq!(datum_transfer(mcx, Datum::from_i32(3), true, 4).unwrap().as_i32(), 3);
     }
 }
+
+#[test]
+fn oidlarger_oidsmaller_match_c() {
+    // oid.c: PG_RETURN_OID((arg1 > arg2) ? arg1 : arg2) / (arg1 < arg2).
+    assert_eq!(oidlarger(10, 20), 20);
+    assert_eq!(oidlarger(20, 10), 20);
+    assert_eq!(oidlarger(7, 7), 7);
+    assert_eq!(oidsmaller(10, 20), 10);
+    assert_eq!(oidsmaller(20, 10), 10);
+    assert_eq!(oidsmaller(7, 7), 7);
+}
