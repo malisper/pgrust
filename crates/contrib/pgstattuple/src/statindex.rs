@@ -5,7 +5,7 @@ use types_core::{BlockNumber, BTREE_AM_OID, GIN_AM_OID, HASH_AM_OID};
 use types_error::{ERRCODE_INDEX_CORRUPTED, ERRCODE_WRONG_OBJECT_TYPE};
 use types_hash::hashpage::{
     HashMetaPageData, HashPageOpaqueData, HASH_MAGIC, HASH_VERSION, LH_BITMAP_PAGE,
-    LH_BUCKET_PAGE, LH_OVERFLOW_PAGE, LH_PAGE_TYPE, LH_UNUSED_PAGE,
+    LH_BUCKET_PAGE, LH_META_PAGE, LH_OVERFLOW_PAGE, LH_PAGE_TYPE, LH_UNUSED_PAGE,
 };
 use types_nbtree::page::{P_IGNORE, P_ISDELETED, P_ISLEAF, P_NONE};
 use types_rel::pg_class::{RELKIND_HAS_STORAGE, RELKIND_INDEX};
@@ -354,10 +354,31 @@ pub(crate) fn fc_pgstathashindex(
     let mut stats = HashIndexStat::default();
     {
         let meta_page = read_rel_page(&rel, 0, &None)?;
-        if page_is_new(&meta_page)
-            || page_special_size(&meta_page) as usize
-                != maxalign(core::mem::size_of::<HashPageOpaqueData>())
+        // _hash_checkpage(LH_META_PAGE): all-zero page, then special-area size,
+        // then the page-type flag bit, before magic/version.
+        if page_is_new(&meta_page) {
+            return Err(Box::new(
+                PgError::error(format!(
+                    "index \"{}\" contains unexpected zero page at block 0",
+                    rel.name()
+                ))
+                .with_sqlstate(ERRCODE_INDEX_CORRUPTED)
+                .with_hint("Please REINDEX it."),
+            ));
+        }
+        if page_special_size(&meta_page) as usize
+            != maxalign(core::mem::size_of::<HashPageOpaqueData>())
         {
+            return Err(Box::new(
+                PgError::error(format!(
+                    "index \"{}\" contains corrupted page at block 0",
+                    rel.name()
+                ))
+                .with_sqlstate(ERRCODE_INDEX_CORRUPTED)
+                .with_hint("Please REINDEX it."),
+            ));
+        }
+        if r_u16(&meta_page, pd_special(&meta_page) as usize + 12) & LH_META_PAGE == 0 {
             return Err(Box::new(
                 PgError::error(format!(
                     "index \"{}\" contains corrupted page at block 0",
@@ -378,8 +399,7 @@ pub(crate) fn fc_pgstathashindex(
         if metap.hashm_magic != HASH_MAGIC {
             return Err(Box::new(
                 PgError::error(format!("index \"{}\" is not a hash index", rel.name()))
-                    .with_sqlstate(ERRCODE_INDEX_CORRUPTED)
-                    .with_hint("Please REINDEX it."),
+                    .with_sqlstate(ERRCODE_INDEX_CORRUPTED),
             ));
         }
         if metap.hashm_version != HASH_VERSION {
