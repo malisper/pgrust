@@ -2777,7 +2777,9 @@ pub fn PreCommit_CheckForSerializationFailure() -> PgResult<()> {
 }
 
 // ===========================================================================
-// Two-phase commit — loud beyond the no-sxact fast exit.
+// Two-phase commit support (predicate.c AtPrepare_PredicateLocks,
+// PostPrepare_PredicateLocks, PredicateLockTwoPhaseFinish,
+// predicatelock_twophase_recover).
 // ===========================================================================
 
 // Test-only sxact acquisition: GetSerializableTransactionSnapshotInt's
@@ -2831,18 +2833,264 @@ pub(crate) fn test_my_sxact() -> *mut SERIALIZABLEXACT {
     MySerializableXact()
 }
 
-pub fn AtPrepare_PredicateLocks() -> PgResult<()> {
-    if MySerializableXact() == InvalidSerializableXact {
-        return Ok(());
-    }
-    panic!("predicate.c AtPrepare_PredicateLocks: 2PC predicate-lock transfer not ported");
+// TwoPhasePredicateRecord (predicate_internals.h): a 4-byte type tag followed
+// by a union sized to the larger member (the 20-byte lock record). The whole
+// 24-byte struct is written by RegisterTwoPhaseRecord for BOTH record kinds;
+// predicatelock_twophase_recover asserts len == sizeof(record) == 24.
+const TWOPHASEPREDICATERECORD_XACT: u32 = 0;
+const TWOPHASEPREDICATERECORD_LOCK: u32 = 1;
+const SIZEOF_TWOPHASE_PREDICATE_RECORD: usize = 24;
+
+// twophase_rmgr's TWOPHASE_RM_PREDICATELOCK_ID, mirrored locally to avoid a
+// predicate -> twophase_rmgr -> predicate dependency cycle (lock/twophase.rs
+// mirrors TWOPHASE_RM_LOCK_ID for the same reason).
+const TWOPHASE_RM_PREDICATELOCK_ID: u8 = 4;
+
+#[cold]
+fn recover_out_of_shared_memory() -> Box<PgError> {
+    // predicatelock_twophase_recover's plain form (no per-xact-locks hint).
+    Box::new(PgError::error("out of shared memory").with_sqlstate(ERRCODE_OUT_OF_MEMORY))
 }
 
-pub fn PostPrepare_PredicateLocks(_xid: TransactionId) -> PgResult<()> {
-    if MySerializableXact() == InvalidSerializableXact {
-        return Ok(());
+// AtPrepare_PredicateLocks: write 2PC statefile records for the current
+// SERIALIZABLEXACT and each predicate lock it holds, so a post-crash recovery
+// can rebuild the SSI state. The in-memory sxact itself is NOT torn down here;
+// it lives on (unowned) for the no-crash COMMIT/ROLLBACK PREPARED path.
+pub fn AtPrepare_PredicateLocks() -> PgResult<()> {
+    unsafe {
+        let sxact = MySerializableXact();
+        if sxact == InvalidSerializableXact {
+            return Ok(());
+        }
+
+        // Per-transaction record. Conflicts (in/out lists) are deliberately not
+        // serialized: new conflicts can still form after PREPARE, so recovery
+        // makes the conservative summary-conflict assumption instead.
+        let mut record = [0u8; SIZEOF_TWOPHASE_PREDICATE_RECORD];
+        record[0..4].copy_from_slice(&TWOPHASEPREDICATERECORD_XACT.to_ne_bytes());
+        record[4..8].copy_from_slice(&(*sxact).xmin.to_ne_bytes());
+        record[8..12].copy_from_slice(&(*sxact).flags.to_ne_bytes());
+        twophase_seams::register_two_phase_record::call(
+            TWOPHASE_RM_PREDICATELOCK_ID,
+            0,
+            &record,
+        )?;
+
+        // One lock record per predicate lock. Walk the sxact's own lock list
+        // (the local lock table is not authoritative). No perXactPredicateListLock
+        // needed: no parallel worker can run while we PREPARE.
+        let procno = my_procno();
+        LWLockAcquire(SerializablePredicateListLock(), LW_SHARED, procno)?;
+        debug_assert!(!is_parallel_worker() && !in_parallel_mode());
+
+        let head = &raw const (*sxact).predicateLocks;
+        let mut cur = (*head).head.next;
+        let mut register_err: PgResult<()> = Ok(());
+        while cur != (&raw const (*head).head) as *mut dlist_node {
+            let predlock = dlist_container!(PREDICATELOCK, xactLink, cur);
+            let target = (*predlock).tag.myTarget;
+            let targettag = (*target).tag;
+
+            let mut lrec = [0u8; SIZEOF_TWOPHASE_PREDICATE_RECORD];
+            lrec[0..4].copy_from_slice(&TWOPHASEPREDICATERECORD_LOCK.to_ne_bytes());
+            lrec[4..8].copy_from_slice(&targettag.locktag_field1.to_ne_bytes());
+            lrec[8..12].copy_from_slice(&targettag.locktag_field2.to_ne_bytes());
+            lrec[12..16].copy_from_slice(&targettag.locktag_field3.to_ne_bytes());
+            lrec[16..20].copy_from_slice(&targettag.locktag_field4.to_ne_bytes());
+            // bytes 20..24 = filler, left zero.
+
+            if let Err(e) = twophase_seams::register_two_phase_record::call(
+                TWOPHASE_RM_PREDICATELOCK_ID,
+                0,
+                &lrec,
+            ) {
+                register_err = Err(e);
+                break;
+            }
+            cur = (*cur).next;
+        }
+
+        LWLockRelease(SerializablePredicateListLock())?;
+        register_err
     }
-    panic!("predicate.c PostPrepare_PredicateLocks: 2PC predicate-lock transfer not ported");
+}
+
+// PostPrepare_PredicateLocks: clean up local state after a successful PREPARE.
+// Unlike the heavyweight lock manager we do NOT transfer locks to a dummy proc
+// — the SERIALIZABLEXACT stays around anyway (now unowned: pid/pgprocno cleared)
+// and its shared predicate locks keep pointing at it so conflicts still fire.
+pub fn PostPrepare_PredicateLocks(_xid: TransactionId) -> PgResult<()> {
+    unsafe {
+        let sxact = MySerializableXact();
+        if sxact == InvalidSerializableXact {
+            return Ok(());
+        }
+        debug_assert!(SxactIsPrepared(sxact));
+
+        (*sxact).pid = 0;
+        (*sxact).pgprocno = types_core::INVALID_PROC_NUMBER;
+
+        // hash_destroy(LocalPredicateLockHash) + clear MySerializableXact/MyXactDidWrite.
+        ReleasePredicateLocksLocal();
+        Ok(())
+    }
+}
+
+// PredicateLockTwoPhaseFinish: release a prepared transaction's predicate locks
+// once it commits or aborts. Finds the recovered/handed-off SERIALIZABLEXACT by
+// xid and routes it through ReleasePredicateLocks. The finishing backend's own
+// MySerializableXact is clobbered (COMMIT/ROLLBACK PREPARED runs outside any
+// serializable transaction, so it is Invalid), exactly as C does.
+pub fn PredicateLockTwoPhaseFinish(xid: TransactionId, isCommit: bool) -> PgResult<()> {
+    unsafe {
+        let sxidtag = SERIALIZABLEXIDTAG { xid };
+        let procno = my_procno();
+
+        LWLockAcquire(SerializableXactHashLock(), LW_SHARED, procno)?;
+        let p = hash_search(
+            shared().xid_hash,
+            &raw const sxidtag as *const u8,
+            HASH_FIND,
+            None,
+        )?;
+        LWLockRelease(SerializableXactHashLock())?;
+
+        // Not found = it wasn't a serializable transaction; nothing to do.
+        if p.is_null() {
+            return Ok(());
+        }
+        let sxid = p as *mut SERIALIZABLEXID;
+
+        set_MySerializableXact((*sxid).myXact);
+        set_MyXactDidWrite(true); // conservatively assume it wrote something
+        ReleasePredicateLocks(isCommit, false)
+    }
+}
+
+// predicatelock_twophase_recover: the TWOPHASE_RM_PREDICATELOCK_ID rmgr callback.
+// Rebuilds a SERIALIZABLEXACT (per-xact record) and re-acquires each predicate
+// lock (per-lock record) at recovery / COMMIT PREPARED / ROLLBACK PREPARED time.
+pub fn predicatelock_twophase_recover(
+    xid: TransactionId,
+    _info: u16,
+    recdata: &[u8],
+) -> PgResult<()> {
+    unsafe {
+        debug_assert_eq!(recdata.len(), SIZEOF_TWOPHASE_PREDICATE_RECORD);
+        let rtype = u32::from_ne_bytes(recdata[0..4].try_into().unwrap());
+        debug_assert!(
+            rtype == TWOPHASEPREDICATERECORD_XACT || rtype == TWOPHASEPREDICATERECORD_LOCK
+        );
+        let procno = my_procno();
+
+        if rtype == TWOPHASEPREDICATERECORD_XACT {
+            // Per-transaction record: set up a SERIALIZABLEXACT.
+            let xmin = u32::from_ne_bytes(recdata[4..8].try_into().unwrap());
+            let flags = u32::from_ne_bytes(recdata[8..12].try_into().unwrap());
+
+            LWLockAcquire(SerializableXactHashLock(), LW_EXCLUSIVE, procno)?;
+            let sxact = CreatePredXact();
+            if sxact.is_null() {
+                LWLockRelease(SerializableXactHashLock())?;
+                return Err(recover_out_of_shared_memory());
+            }
+
+            // A prepared xact has an invalid vxid (proc gone) but keeps its xid.
+            (*sxact).vxid.procNumber = types_core::INVALID_PROC_NUMBER;
+            (*sxact).vxid.localTransactionId = xid;
+            (*sxact).pid = 0;
+            (*sxact).pgprocno = types_core::INVALID_PROC_NUMBER;
+
+            // Hasn't committed yet.
+            (*sxact).prepareSeqNo = RecoverySerCommitSeqNo;
+            (*sxact).commitSeqNo = InvalidSerCommitSeqNo;
+            (*sxact).finishedBefore = InvalidTransactionId;
+            (*sxact).SeqNo.lastCommitBeforeSnapshot = RecoverySerCommitSeqNo;
+
+            // No need to track possible-unsafe conflicts across recovery.
+            dlist_init(&raw mut (*sxact).possibleUnsafeConflicts);
+            dlist_init(&raw mut (*sxact).predicateLocks);
+            dlist_node_init(&raw mut (*sxact).finishedLink);
+
+            (*sxact).topXid = xid;
+            (*sxact).xmin = xmin;
+            (*sxact).flags = flags;
+            debug_assert!(SxactIsPrepared(sxact));
+
+            let px = shared().pred_xact;
+            if !SxactIsReadOnly(sxact) {
+                (*px).WritableSxactCount += 1;
+                debug_assert!(
+                    (*px).WritableSxactCount as i64
+                        <= init_small::globals::MaxBackends() as i64
+                            + shared().max_prepared_xacts as i64
+                );
+            }
+
+            // We don't know the real conflict lists; assume both a conflict in
+            // and a conflict out via the summary flags.
+            dlist_init(&raw mut (*sxact).outConflicts);
+            dlist_init(&raw mut (*sxact).inConflicts);
+            (*sxact).flags |= SXACT_FLAG_SUMMARY_CONFLICT_IN;
+            (*sxact).flags |= SXACT_FLAG_SUMMARY_CONFLICT_OUT;
+
+            // Register the xid.
+            let sxidtag = SERIALIZABLEXIDTAG { xid };
+            let mut found = false;
+            let sp = hash_search(
+                shared().xid_hash,
+                &raw const sxidtag as *const u8,
+                HASH_ENTER,
+                Some(&mut found),
+            )?;
+            debug_assert!(!sp.is_null());
+            debug_assert!(!found);
+            let sxid = sp as *mut SERIALIZABLEXID;
+            (*sxid).myXact = sxact;
+
+            // Update global xmin. This is the one case where it may go backwards
+            // (recovery installs prepared xacts before any new ones start), which
+            // is fine — nothing completes or is thrown away until recovery ends.
+            if !TransactionIdIsValid((*px).SxactGlobalXmin)
+                || TransactionIdFollows((*px).SxactGlobalXmin, (*sxact).xmin)
+            {
+                (*px).SxactGlobalXmin = (*sxact).xmin;
+                (*px).SxactGlobalXminCount = 1;
+                SerialSetActiveSerXmin((*sxact).xmin)?;
+            } else if TransactionIdEquals((*sxact).xmin, (*px).SxactGlobalXmin) {
+                debug_assert!((*px).SxactGlobalXminCount > 0);
+                (*px).SxactGlobalXminCount += 1;
+            }
+
+            LWLockRelease(SerializableXactHashLock())?;
+        } else {
+            // Per-lock record: recreate the PREDICATELOCK.
+            let mut target = ZERO_TARGET_TAG;
+            target.locktag_field1 = u32::from_ne_bytes(recdata[4..8].try_into().unwrap());
+            target.locktag_field2 = u32::from_ne_bytes(recdata[8..12].try_into().unwrap());
+            target.locktag_field3 = u32::from_ne_bytes(recdata[12..16].try_into().unwrap());
+            target.locktag_field4 = u32::from_ne_bytes(recdata[16..20].try_into().unwrap());
+            let targettaghash = PredicateLockTargetTagHashCode(&target);
+
+            LWLockAcquire(SerializableXactHashLock(), LW_SHARED, procno)?;
+            let sxidtag = SERIALIZABLEXIDTAG { xid };
+            let sp = hash_search(
+                shared().xid_hash,
+                &raw const sxidtag as *const u8,
+                HASH_FIND,
+                None,
+            )?;
+            LWLockRelease(SerializableXactHashLock())?;
+
+            debug_assert!(!sp.is_null());
+            let sxid = sp as *mut SERIALIZABLEXID;
+            let sxact = (*sxid).myXact;
+            debug_assert!(sxact != InvalidSerializableXact);
+
+            CreatePredicateLock(&target, targettaghash, sxact)?;
+        }
+        Ok(())
+    }
 }
 
 pub struct PredicateLockStatusEntry {

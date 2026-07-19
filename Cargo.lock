@@ -13736,6 +13736,7 @@ dependencies = [
  "timeout_seams",
  "timestamp_seams",
  "transam_xlog_seams",
+ "twophase_seams",
  "types_core",
  "types_error",
  "types_guc",
@@ -18492,6 +18493,7 @@ dependencies = [
  "lock",
  "multixact",
  "pgstat",
+ "predicate",
  "types_core",
  "types_error",
 ]
