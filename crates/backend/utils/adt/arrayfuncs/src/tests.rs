@@ -744,16 +744,7 @@ mod ops_tests {
     }
 
     fn install_identity_detoast() {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
-            ::detoast_seams::detoast_attr::set(identity_detoast);
-        });
-    }
-
-    fn identity_detoast<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-        let mut out = vec_with_capacity_in(mcx, image.len())?;
-        out.extend_from_slice(image);
-        Ok(out)
+        crate::tests::detoast_construct::install_test_detoast();
     }
 
     fn float8_arr<'m>(mcx: Mcx<'m>, vals: &[f64]) -> PgVec<'m, u8> {
@@ -1063,5 +1054,176 @@ mod bitmap_copy_bounds {
         array_bitmap_copy(&mut dest, 0, 3, Some((&src, 0)), 0, 10);
         assert_eq!(dest[0], 0b0011_0000);
         assert_eq!(dest[1], 0b0000_1011);
+    }
+}
+
+// Hand-built toasted element images proving the construct_md_array detoast
+// law (C arrayfuncs.c:3534-3538): an external toast pointer, an inline
+// compressed image, and a short-header varlena must each be expanded to a
+// plain 4B-header value before being packed into the array — the built image
+// must be byte-identical to one built from already-flat elements. The detoast
+// seam gets the REAL detoast crate; on-disk pointers resolve against a canned
+// in-test toast store keyed on va_valueid.
+pub(crate) mod detoast_construct {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    static TOAST_STORE: Mutex<Option<HashMap<u32, std::vec::Vec<u8>>>> = Mutex::new(None);
+
+    pub(crate) fn install_test_detoast() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            ::detoast_seams::detoast_attr::set(::detoast::detoast_attr);
+            ::toast_internals_seams::toast_fetch_datum::set(test_toast_fetch);
+        });
+    }
+
+    fn test_toast_fetch<'mcx>(mcx: Mcx<'mcx>, attr: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+        // On-disk pointer image: 0x01, tag 0x12, va_rawsize i32, va_extinfo
+        // u32, va_valueid Oid, va_toastrelid Oid — 18 bytes.
+        assert_eq!((attr[0], attr[1], attr.len()), (0x01, 0x12, 18));
+        let valueid = u32::from_ne_bytes(attr[10..14].try_into().unwrap());
+        let store = TOAST_STORE.lock().unwrap();
+        let payload = store
+            .as_ref()
+            .and_then(|m| m.get(&valueid))
+            .expect("test toast store: unknown va_valueid");
+        let mut out = vec_with_capacity_in(mcx, payload.len())?;
+        out.extend_from_slice(payload);
+        Ok(out)
+    }
+
+    // 1B short-header image — the shape a small text column value has when
+    // read straight out of a heap tuple, so ARRAY[col] sees exactly this.
+    fn short(mcx: Mcx<'_>, payload: &[u8]) -> Datum {
+        assert!(payload.len() <= 126);
+        let total = 1 + payload.len();
+        let mut v: PgVec<u8> = vec_with_capacity_in(mcx, total).unwrap();
+        v.push(((total as u8) << 1) | 1);
+        v.extend_from_slice(payload);
+        let p = v.as_ptr();
+        core::mem::forget(v);
+        Datum::from_usize(p as usize)
+    }
+
+    // Inline pglz image (4B_C header + va_tcinfo + compressed bytes).
+    fn pglz_img(mcx: Mcx<'_>, payload: &[u8]) -> Datum {
+        use core::mem::MaybeUninit;
+        let mut dst: std::vec::Vec<MaybeUninit<u8>> =
+            std::vec![MaybeUninit::uninit(); pglz::pglz_max_output(payload.len())];
+        let clen = pglz::pglz_compress_into(payload, &mut dst, &pglz::PGLZ_STRATEGY_DEFAULT)
+            .expect("test payload must compress");
+        let total = 8 + clen;
+        let mut v: PgVec<u8> = vec_with_capacity_in(mcx, total).unwrap();
+        v.extend_from_slice(&(((total as u32) << 2) | 0x02).to_ne_bytes());
+        // va_tcinfo: raw payload size | compression method (pglz = 0) in the
+        // top bits.
+        v.extend_from_slice(&(payload.len() as u32).to_ne_bytes());
+        // SAFETY: pglz_compress_into initialized the first clen bytes.
+        v.extend_from_slice(unsafe {
+            core::slice::from_raw_parts(dst.as_ptr().cast::<u8>(), clen)
+        });
+        let p = v.as_ptr();
+        core::mem::forget(v);
+        Datum::from_usize(p as usize)
+    }
+
+    // Hand-built ON-DISK external toast pointer whose value lives in the
+    // canned store — the exact 18-byte image that dangles in the field bug.
+    fn ondisk(mcx: Mcx<'_>, valueid: u32, payload: &[u8]) -> Datum {
+        {
+            let mut full = std::vec::Vec::with_capacity(4 + payload.len());
+            full.extend_from_slice(&::datum::varlena::set_varsize_4b(4 + payload.len()));
+            full.extend_from_slice(payload);
+            let mut store = TOAST_STORE.lock().unwrap();
+            store.get_or_insert_with(HashMap::new).insert(valueid, full);
+        }
+        let rawsize = (4 + payload.len()) as u32;
+        let mut v: PgVec<u8> = vec_with_capacity_in(mcx, 18).unwrap();
+        v.push(0x01);
+        v.push(0x12); // VARTAG_ONDISK
+        v.extend_from_slice(&rawsize.to_ne_bytes()); // va_rawsize
+        v.extend_from_slice(&(rawsize - 4).to_ne_bytes()); // va_extinfo
+        v.extend_from_slice(&valueid.to_ne_bytes()); // va_valueid
+        v.extend_from_slice(&0u32.to_ne_bytes()); // va_toastrelid
+        let p = v.as_ptr();
+        core::mem::forget(v);
+        Datum::from_usize(p as usize)
+    }
+
+    #[test]
+    fn construct_array_detoasts_every_extended_element_shape() {
+        install_test_detoast();
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let a = b"plain element".to_vec();
+        let b = b"short header element".to_vec();
+        let c: std::vec::Vec<u8> =
+            b"compressible ".iter().copied().cycle().take(300).collect();
+        let d: std::vec::Vec<u8> =
+            b"external payload ".iter().copied().cycle().take(2900).collect();
+
+        let toasted = [
+            build_varlena(mcx, &a).unwrap(),
+            short(mcx, &b),
+            pglz_img(mcx, &c),
+            ondisk(mcx, 7001, &d),
+        ];
+        let flats = [
+            build_varlena(mcx, &a).unwrap(),
+            build_varlena(mcx, &b).unwrap(),
+            build_varlena(mcx, &c).unwrap(),
+            build_varlena(mcx, &d).unwrap(),
+        ];
+
+        let got = construct_array(mcx, &toasted, TEXTOID, -1, false, TYPALIGN_INT).unwrap();
+        let want = construct_array(mcx, &flats, TEXTOID, -1, false, TYPALIGN_INT).unwrap();
+        assert_eq!(&got[..], &want[..], "toasted-element build must equal all-flat build");
+
+        // Every element in the image is a plain 4B header now.
+        let (elems, _nulls) = deconstruct_array(mcx, &got, -1, false, TYPALIGN_INT, true).unwrap();
+        for (i, want_payload) in [&a, &b, &c, &d].into_iter().enumerate() {
+            let p = elems[i].as_usize() as *const u8;
+            // SAFETY: element datum points into the live array image.
+            let img = unsafe { core::slice::from_raw_parts(p, varsize_any(p)) };
+            assert_eq!(img[0] & 0x03, 0, "element {i} must be 4B uncompressed");
+            assert_eq!(&img[4..], &want_payload[..], "element {i} payload");
+        }
+    }
+
+    #[test]
+    fn construct_md_array_detoasts_with_nulls_multidim() {
+        install_test_detoast();
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let c: std::vec::Vec<u8> = b"md compressible ".iter().copied().cycle().take(400).collect();
+        let d: std::vec::Vec<u8> = b"md external ".iter().copied().cycle().take(1500).collect();
+
+        let toasted = [
+            ondisk(mcx, 7002, &d),
+            Datum::null(),
+            pglz_img(mcx, &c),
+            short(mcx, b"tail"),
+        ];
+        let flats = [
+            build_varlena(mcx, &d).unwrap(),
+            Datum::null(),
+            build_varlena(mcx, &c).unwrap(),
+            build_varlena(mcx, b"tail").unwrap(),
+        ];
+        let nulls = [false, true, false, false];
+        let dims = [2, 2];
+        let lbs = [1, 1];
+
+        let got = construct_md_array(
+            mcx, &toasted, Some(&nulls), 2, &dims, &lbs, TEXTOID, -1, false, TYPALIGN_INT,
+        )
+        .unwrap();
+        let want = construct_md_array(
+            mcx, &flats, Some(&nulls), 2, &dims, &lbs, TEXTOID, -1, false, TYPALIGN_INT,
+        )
+        .unwrap();
+        assert_eq!(&got[..], &want[..], "toasted md build must equal all-flat md build");
     }
 }

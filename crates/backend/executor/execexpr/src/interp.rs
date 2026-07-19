@@ -2721,6 +2721,14 @@ fn eval_convert_rowtype(
                 }
             }
             let out_tuple = ::heaptuple::heap_form_tuple(mcx, outdesc, &outvalues, &outnulls)?;
+            // C finishes through HeapTupleHeaderGetDatum (execTuples.c:2413),
+            // which re-flattens if any field is an external toast pointer. We
+            // skip that check: the input here is a composite DATUM, and the
+            // composite-datum law (fill_val's HEAP_HASEXTERNAL + the flatten
+            // in heap_copy_tuple_as_datum / eval_row_expr) guarantees its
+            // fields are already flat, so the remapped tuple can't be
+            // external either.
+            debug_assert!(!out_tuple.as_tuple().has_external());
             let d = Datum::from_usize(out_tuple.image().as_ptr() as usize);
             core::mem::forget(out_tuple);
             d

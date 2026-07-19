@@ -60,7 +60,13 @@ pub fn accum_array_result<'mcx>(
         };
         // SAFETY: by-ref datum points at n live bytes.
         let bytes = unsafe { core::slice::from_raw_parts(p, n) };
-        // C accumArrayResult PG_DETOAST_DATUMs varlena elements before copy.
+        // C accumArrayResult detoasts varlena elements before the copy
+        // (PG_DETOAST_DATUM_COPY, arrayfuncs.c:5392-5402) so the build state
+        // never holds a toast pointer the finalfn would pack. We detoast
+        // external and compressed images here but keep short headers as-is
+        // (C expands them too): construct_md_array expands shorts at
+        // finalize, so the final array image is byte-identical to C's while
+        // the build state stores the smaller short copy.
         if astate.typlen == -1 && (bytes[0] == 0x01 || (bytes[0] & 0x03) == 0x02) {
             let flat = ::detoast_seams::detoast_attr::call(mcx, bytes)?;
             astate.copy_byref(&flat)?
