@@ -2133,3 +2133,45 @@ unsafe fn bt_pgaddtup(
     )
     .is_some()
 }
+
+/// amcheck bt_rootdescend (verify_nbtree.c): search for `itup` (a non-pivot
+/// tuple) starting from the fast root; returns whether an exact match exists.
+/// Requires a heapkeyspace index. `itup` must be a live index-tuple image.
+///
+/// # Safety
+/// `itup` points at a valid on-page non-pivot IndexTuple for `rel`.
+pub unsafe fn bt_rootdescend<'mcx>(
+    rel: &Relation<'mcx>,
+    itup: ITup,
+) -> PgResult<bool> {
+    let mut key = crate::utils::bt_mkscankey(rel, Some(itup))?;
+    debug_assert!(key.heapkeyspace && key.scantid.is_some());
+
+    let mut frame = OrderProcFrame::new();
+    let Some(leaf) = crate::search::bt_search(rel, &mut key, &mut frame)? else {
+        return Ok(false);
+    };
+
+    let mut insertstate = InsertState {
+        itup,
+        itemsz: maxalign(index_tuple_size(itup)),
+        itup_key: &mut key,
+        buf: Some(leaf),
+        bounds_valid: false,
+        low: InvalidOffsetNumber,
+        stricthigh: InvalidOffsetNumber,
+        postingoff: 0,
+    };
+
+    // SAFETY: insertstate.buf is the pinned+locked leaf from bt_search.
+    let offnum = unsafe { bt_binsrch_insert(rel, &mut insertstate, &mut frame)? };
+    let pin = insertstate.buf.as_ref().expect("pinned leaf");
+    let page = pin.page();
+
+    let exists = offnum <= page.max_offset_number()
+        && insertstate.postingoff <= 0
+        && crate::search::bt_compare(rel, insertstate.itup_key, &page, offnum, &mut frame)? == 0;
+
+    bt_relbuf(rel, insertstate.buf.take().expect("pinned leaf"))?;
+    Ok(exists)
+}

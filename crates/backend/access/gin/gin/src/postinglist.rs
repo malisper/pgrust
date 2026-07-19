@@ -76,7 +76,7 @@ pub(crate) fn seg_nbytes(seg: &[u8]) -> usize {
 }
 
 #[inline]
-pub(crate) fn seg_size(seg: &[u8]) -> usize {
+pub fn seg_size(seg: &[u8]) -> usize {
     size_of_gin_posting_list(seg_nbytes(seg))
 }
 
@@ -133,7 +133,7 @@ pub(crate) fn ginCompressPostingList<'mcx>(
 
 /// ginPostingListDecodeAllSegments: append every item of the consecutive
 /// segments in `data` to `out`.
-pub(crate) fn ginPostingListDecodeAllSegments(
+pub fn ginPostingListDecodeAllSegments(
     data: &[u8],
     out: &mut PgVec<'_, ItemPointerData>,
 ) -> PgResult<()> {
