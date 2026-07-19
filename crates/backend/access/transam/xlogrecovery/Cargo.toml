@@ -144,3 +144,18 @@ walsummarizer_seams = { path = "../../../postmaster/walsummarizer_seams" }
 transam_seams = { path = "../transam_seams" }
 resowner = { path = "../../../utils/resowner/resowner" }
 types_resowner = { path = "../../../../_support/types/types_resowner" }
+# inc-6 fault arms: gin pending-list lane, brin summarization lane,
+# LP-reuse/pagedel vacuum-content lane (test-only surface).
+gin = { path = "../../gin/gin" }
+gin_vocab = { path = "../../gin/gin_vocab" }
+gin_xlog = { path = "../../gin/gin_xlog" }
+brin = { path = "../../brin/brin" }
+brin_build = { path = "../../brin/brin_build" }
+brin_pageops = { path = "../../brin/brin_pageops" }
+brin_tuple = { path = "../../brin/brin_tuple" }
+brin_xlog = { path = "../../brin/brin_xlog" }
+types_brin = { path = "../../../../_support/types/types_brin" }
+nbtree_xlog = { path = "../../nbtree/nbtree_xlog" }
+pruneheap = { path = "../../heap/pruneheap" }
+arrayfuncs = { path = "../../../utils/adt/arrayfuncs" }
+execindexing = { path = "../../../executor/execindexing" }
