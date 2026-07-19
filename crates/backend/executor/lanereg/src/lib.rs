@@ -274,8 +274,7 @@ pub enum FoldKind {
     BitAnd,
     BitOr,
     // fold-trans tier (lane-v2-lanefold-trans, knob PGRUST_LANE_V2_FOLD_TRANS
-    // default ON since SE18-GATES; `=0`/`off` = permanent kill):
-    // ORDER-PRESERVING float folds — sum(float4/float8)
+    // default OFF): ORDER-PRESERVING float folds — sum(float4/float8)
     // (float4pl/float8pl) and the float8[3] Youngs-Cramer accum family
     // (float4_accum/float8_accum: avg/var/stddev over floats).
     FSum,
@@ -597,8 +596,7 @@ const fn fold_str(oid: Oid, name: &'static str, kind: FoldKind) -> BatchFn {
     BatchFn { oid, name, shape: Shape::Fold(kind), cov: COV_FOLD_TEXTFOLD }
 }
 
-// fold-trans tier (lane-v2-lanefold-trans, knob-gated default ON since
-// SE18-GATES; `=0`/`off` = permanent kill):
+// fold-trans tier (lane-v2-lanefold-trans, knob-gated default OFF):
 // ORDER-PRESERVING float folds. The kernel applies C's exact checked per-row
 // op in row order (no reassociation), so overflow ereports fire inline on
 // C's row — no guard interval, no demote, no replay.
