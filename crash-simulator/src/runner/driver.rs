@@ -522,11 +522,21 @@ impl<'a> Dispatcher<'a> {
         cpg: Option<&'a mut dyn Session>,
         cfg: Option<super::sessions::SessionPoolConfig>,
     ) -> Self {
+        Self::with_session_pool(dut, cpg, super::sessions::SessionPool::new(cfg))
+    }
+
+    /// SIM-CONVERGE inc-3: a caller-built pool (the sim bridge's PREPARED
+    /// replay pool — per-session `ReplayWorker`s over recorded artifacts).
+    pub fn with_session_pool(
+        dut: &'a mut dyn Session,
+        cpg: Option<&'a mut dyn Session>,
+        pool: super::sessions::SessionPool,
+    ) -> Self {
         Dispatcher {
             dut,
             cpg,
             executed_mutations: std::collections::BTreeSet::new(),
-            pool: super::sessions::SessionPool::new(cfg),
+            pool,
             active: 0,
         }
     }
@@ -547,12 +557,14 @@ impl<'a> Dispatcher<'a> {
     /// The active session's legs. Session 0 = the primary pair; workers
     /// otherwise (already ensured by `set_active`).
     #[allow(clippy::type_complexity)]
-    fn legs(&mut self) -> (&mut (dyn Session + 'a), Option<&mut (dyn Session + 'a)>) {
+    fn legs(&mut self) -> (&mut dyn Session, Option<&mut dyn Session>) {
         if self.active == 0 {
-            (&mut *self.dut, self.cpg.as_deref_mut())
+            let d: &mut dyn Session = &mut *self.dut;
+            let c = self.cpg.as_deref_mut().map(|x| x as &mut dyn Session);
+            (d, c)
         } else {
             let (d, c) = self.pool.pair(self.active);
-            (d as &mut (dyn Session + 'a), c.map(|w| w as &mut (dyn Session + 'a)))
+            (d.as_session(), c.map(|w| w.as_session()))
         }
     }
 
@@ -659,9 +671,27 @@ pub fn execute_plan<'a>(
     classifier: &dyn DiffClassifier,
     opts: &ExecOptions,
 ) -> RunReport {
+    let pool = super::sessions::SessionPool::new(opts.session_pool.clone());
+    execute_plan_pooled(plan, dut, cpg, checks, classifier, opts, pool)
+}
+
+/// SIM-CONVERGE inc-3: `execute_plan` with a caller-provided session pool.
+/// The sim bridge passes a PREPARED replay pool (per-session recorded
+/// streams) so v2 multi-session plans are walked NATIVELY — Session
+/// switches, Tx steps, AsyncDml/Join, and WaitUntil all route through the
+/// same code the live driver runs.
+pub fn execute_plan_pooled<'a>(
+    plan: &Plan,
+    dut: &'a mut dyn Session,
+    cpg: Option<&'a mut dyn Session>,
+    checks: &dyn CheckEval,
+    classifier: &dyn DiffClassifier,
+    opts: &ExecOptions,
+    pool: super::sessions::SessionPool,
+) -> RunReport {
     let mut report = RunReport::default();
     let mut stack = ResultStack::new();
-    let mut disp = Dispatcher::with_pool(dut, cpg, opts.session_pool.clone());
+    let mut disp = Dispatcher::with_session_pool(dut, cpg, pool);
     let mut in_skipped_property: Option<u32> = None;
     let mut in_property: Option<u32> = None;
     // H5 rung B: count of successfully-executed Query steps (sampling base).

@@ -270,6 +270,55 @@ enum Cmd {
         red_wedge: bool,
         #[arg(long, default_value_t = false)]
         test_null_bug: bool,
+        /// SIM-CONVERGE inc-3 planted red: perturb the NATIVE replay pool's
+        /// session-B stream — the native-vs-re-zip agreement MUST catch it.
+        #[arg(long, default_value_t = false)]
+        red_pool: bool,
+    },
+    /// SIM-CONVERGE inc-3: drive v2 multi-session plans NATIVELY inside the
+    /// sim — per-session scripts + TYPED turns (dispatch/join split for
+    /// async, poll turns for WaitUntil, up to 4 sessions = sim s2..s5), then
+    /// the model-oracle walk through the session-aware replay pool (the real
+    /// execute_plan over the ORIGINAL v2 plan). Sources: --plan file,
+    /// --profile (generated campaign, one plan per seed), or the built-in
+    /// --fixture. Reds: --red-asyncturn (completion-ordered async turn =
+    /// schedule deadlock -> named SCHEDCEILING), --red-detector (doctored S1
+    /// detector read -> RowsEq property-violation), --test-null-bug.
+    SimMulti {
+        /// v2 plan file; see also --profile and --fixture.
+        #[arg(long)]
+        plan: Option<PathBuf>,
+        /// Built-in fixture when neither --plan nor --profile: "async".
+        #[arg(long, default_value = "async")]
+        fixture: String,
+        /// Generated mode: profile path (one v2 plan per workload seed).
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long, default_value_t = 1)]
+        seed_base: u64,
+        #[arg(long, default_value_t = 1)]
+        seeds: u64,
+        #[arg(long, default_value_t = 7)]
+        sched_seed: u64,
+        #[arg(long)]
+        sim_bin: PathBuf,
+        #[arg(long)]
+        datadir: PathBuf,
+        #[arg(long)]
+        share_dir: PathBuf,
+        #[arg(long, default_value = "simmulti-out")]
+        out: PathBuf,
+        /// First N plans also get the x3 byte-identity proof.
+        #[arg(long, default_value_t = 2)]
+        x3: u64,
+        #[arg(long, default_value_t = 180)]
+        timeout_s: u64,
+        #[arg(long, default_value_t = false)]
+        red_asyncturn: bool,
+        #[arg(long, default_value_t = false)]
+        red_detector: bool,
+        #[arg(long, default_value_t = false)]
+        test_null_bug: bool,
     },
 }
 
@@ -527,6 +576,7 @@ fn real_main() -> Result<i32, String> {
             red_order,
             red_wedge,
             test_null_bug,
+            red_pool,
         } => {
             let args = simbridge::TwoArgs {
                 plan_path: plan,
@@ -538,8 +588,46 @@ fn real_main() -> Result<i32, String> {
                 red_order,
                 red_wedge,
                 test_null_bug,
+                red_pool,
             };
             Ok(simbridge::run_two_session_campaign(&args))
+        }
+        Cmd::SimMulti {
+            plan,
+            fixture,
+            profile,
+            seed_base,
+            seeds,
+            sched_seed,
+            sim_bin,
+            datadir,
+            share_dir,
+            out,
+            x3,
+            timeout_s,
+            red_asyncturn,
+            red_detector,
+            test_null_bug,
+        } => {
+            let lp = match &profile {
+                Some(p) => Some(load_profile(p)?),
+                None => None,
+            };
+            let args = simbridge::MultiArgs {
+                plan_path: plan,
+                fixture,
+                lp,
+                seed_base,
+                seeds,
+                sched_seed,
+                world: simbridge::SimWorld { sim_bin, datadir, share_dir, timeout_s },
+                out,
+                x3,
+                red_asyncturn,
+                red_detector,
+                test_null_bug,
+            };
+            Ok(simbridge::run_multi_campaign(&args))
         }
     }
 }
