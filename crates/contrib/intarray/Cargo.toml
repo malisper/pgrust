@@ -20,3 +20,4 @@ detoast = { path = "../../backend/access/common/detoast" }
 reloptions = { path = "../../backend/access/common/reloptions" }
 dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
 gin_int4_seams = { path = "../../backend/access/gin/gin_int4_seams" }
+stack_depth = { path = "../../backend/utils/misc/stack_depth" }

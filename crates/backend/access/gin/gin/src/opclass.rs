@@ -99,9 +99,10 @@ pub(crate) fn compare(col: &GinColState, a: Datum, b: Datum) -> i32 {
             varlena::varstr_cmp(text_payload(a), text_payload(b), col.support_collation)
                 .expect("bttextcmp: varstr_cmp failed")
         }
-        GinOpclass::JsonbPathOps | GinOpclass::TrgmOps => {
+        GinOpclass::JsonbPathOps | GinOpclass::TrgmOps | GinOpclass::IntArrayOps => {
             // btint4cmp over uint32 path hashes stored via UInt32GetDatum
-            // (trgm keys: trgm2int int4, always >= 0, same comparator).
+            // (trgm keys: trgm2int int4, always >= 0, same comparator;
+            // intarray keys: signed int4 elements, btint4cmp per its SQL).
             let (x, y) = (a.as_usize() as u32 as i32, b.as_usize() as u32 as i32);
             if x < y {
                 -1
@@ -200,7 +201,8 @@ pub(crate) fn extract_value<'m>(
                 no_nulls,
             ))
         }
-        GinOpclass::ArrayOps => ginarrayextract(mcx, value),
+        // gin__int_ops registers core ginarrayextract as its proc 2 too.
+        GinOpclass::ArrayOps | GinOpclass::IntArrayOps => ginarrayextract(mcx, value),
         GinOpclass::TrgmOps => {
             let payload = detoast_payload(mcx, value)?;
             let keys = gin_trgm_seams::trgm_extract_value::call(payload)?;
@@ -376,6 +378,22 @@ pub(crate) fn extract_query<'m>(
                 trgm_graph: None,
             })
         }
+        GinOpclass::IntArrayOps => {
+            let (keys, search_mode) = gin_int4_seams::int4_extract_query::call(image, strategy)?;
+            let mut entries: PgVec<'m, Datum> = mcx::vec_with_capacity_in(mcx, keys.len())?;
+            for k in keys {
+                entries.push(Datum::from_i32(k));
+            }
+            Ok(ExtractedQuery {
+                entries,
+                search_mode,
+                jsp_ops: mcx::vec_new_in(mcx),
+                partial_match: mcx::vec_new_in(mcx),
+                map_item_operand: mcx::vec_new_in(mcx),
+                null_flags: mcx::vec_new_in(mcx),
+                trgm_graph: None,
+            })
+        }
     }
 }
 
@@ -441,6 +459,12 @@ pub(crate) fn consistent(
         }
         GinOpclass::HstoreOps => {
             let (res, rc) = gin_hstore_seams::hstore_consistent::call(check, strategy, nkeys)?;
+            *recheck = rc;
+            Ok(res)
+        }
+        GinOpclass::IntArrayOps => {
+            let image = detoast_image(mcx, query)?;
+            let (res, rc) = gin_int4_seams::int4_consistent::call(check, strategy, nkeys, image)?;
             *recheck = rc;
             Ok(res)
         }
@@ -522,19 +546,28 @@ pub(crate) fn tri_consistent(
         GinOpclass::TrgmOps => {
             gin_trgm_seams::trgm_triconsistent::call(check, strategy, nkeys, trgm_graph)
         }
-        // hstore has no C triconsistent; mirror ginlogic.c shimTriConsistentFn
-        // over the bool consistent core, collapsing TRUE+recheck to MAYBE
-        // (identical scan outcome to C's recheckCurItem propagation).
-        GinOpclass::HstoreOps => hstore_shim_tri_consistent(check, strategy, nkeys),
+        // hstore and gin__int_ops have no C triconsistent; mirror ginlogic.c
+        // shimTriConsistentFn over the bool consistent core, collapsing
+        // TRUE+recheck to MAYBE (identical scan outcome to C's
+        // recheckCurItem propagation).
+        GinOpclass::HstoreOps => shim_tri_consistent(check, nkeys, &|local| {
+            gin_hstore_seams::hstore_consistent::call(local, strategy, nkeys)
+        }),
+        GinOpclass::IntArrayOps => {
+            let image = detoast_image(mcx, query)?;
+            shim_tri_consistent(check, nkeys, &|local| {
+                gin_int4_seams::int4_consistent::call(local, strategy, nkeys, image)
+            })
+        }
     }
 }
 
 const MAX_MAYBE_ENTRIES: usize = 4;
 
-fn hstore_shim_tri_consistent(
+fn shim_tri_consistent(
     check: &[GinTernaryValue],
-    strategy: StrategyNumber,
     nkeys: usize,
+    call: &dyn Fn(&[i8]) -> PgResult<(bool, bool)>,
 ) -> PgResult<GinTernaryValue> {
     let mut maybe_entries = [0usize; MAX_MAYBE_ENTRIES];
     let mut nmaybe = 0usize;
@@ -547,10 +580,6 @@ fn hstore_shim_tri_consistent(
             nmaybe += 1;
         }
     }
-
-    let call = |local: &[i8]| -> PgResult<(bool, bool)> {
-        gin_hstore_seams::hstore_consistent::call(local, strategy, nkeys)
-    };
 
     if nmaybe == 0 {
         let (res, rc) = call(check)?;
@@ -623,6 +652,7 @@ pub fn gincost_extract_query(
             match name.as_deref() {
                 Some("gin_extract_query_trgm") => (GinOpclass::TrgmOps, false),
                 Some("gin_extract_hstore_query") => (GinOpclass::HstoreOps, false),
+                Some("ginint4_queryextract") => (GinOpclass::IntArrayOps, false),
                 // unported: opclasses beyond the closed set (user-reachable
                 // via planning a scan over a custom-opclass GIN index).
                 _ => {

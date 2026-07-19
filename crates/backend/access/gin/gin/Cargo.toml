@@ -29,6 +29,7 @@ guc_tables = { path = "../../../utils/misc/guc_tables" }
 lsyscache = { path = "../../../utils/cache/lsyscache" }
 gin_trgm_seams = { path = "../gin_trgm_seams" }
 gin_hstore_seams = { path = "../gin_hstore_seams" }
+gin_int4_seams = { path = "../gin_int4_seams" }
 nbtree = { path = "../../nbtree/nbtree" }
 detoast = { path = "../../common/detoast" }
 adt_jsonb = { path = "../../../utils/adt/jsonb" }
