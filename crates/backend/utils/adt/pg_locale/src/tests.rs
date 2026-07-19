@@ -231,6 +231,25 @@ fn collation_actual_versions_match_c() {
     assert!(icu_ver.is_some_and(|v| !v.is_empty() && v.contains('.')));
 }
 
+// icu_unicode_version (varlena.c): C returns the header constant
+// U_UNICODE_VERSION ("16.0", "15.1", ... — always dotted-numeric) under
+// USE_ICU, else NULL. Ours reports the loaded library's u_getUnicodeVersion
+// rendered by ICU's own u_versionToString; assert the C constant's shape.
+// None = no loadable libicu, the C-without---with-icu arm.
+#[test]
+fn icu_unicode_version_str_has_c_constant_shape() {
+    if let Some(v) = crate::icu_unicode_version_str() {
+        let parts: Vec<&str> = v.split('.').collect();
+        assert!(parts.len() >= 2, "U_UNICODE_VERSION is dotted: {v:?}");
+        assert!(
+            parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())),
+            "numeric fields: {v:?}"
+        );
+        // Stable across calls (OnceLock) — the fmgr result must not move.
+        assert_eq!(crate::icu_unicode_version_str(), Some(v));
+    }
+}
+
 #[test]
 fn builtin_validators_match_c() {
     assert_eq!(builtin_locale_encoding("C").unwrap(), -1);
