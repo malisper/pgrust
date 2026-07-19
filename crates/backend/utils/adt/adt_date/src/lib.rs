@@ -303,18 +303,22 @@ pub fn make_date(year: i32, month: i32, day: i32) -> PgResult<DateADT> {
         tm.tm_year = neg;
     }
 
+    // C (date.c make_date) prints the CURRENT tm values in every error below
+    // — ValidateDate has already folded BC years into the internal
+    // convention by the time a later field fails, so e.g. make_date(-1,-1,-1)
+    // reports "0--1--1" (1 BC = internal year 0), not "-1--1--1".
     if ValidateDate(DTK_DATE_M, false, false, bc, &mut tm) != 0 {
-        return Err(field_out_of_range(year, month, day));
+        return Err(field_out_of_range(tm.tm_year, tm.tm_mon, tm.tm_mday));
     }
 
     if !IS_VALID_JULIAN(tm.tm_year, tm.tm_mon, tm.tm_mday) {
-        return Err(date_out_of_range_ymd(year, month, day));
+        return Err(date_out_of_range_ymd(tm.tm_year, tm.tm_mon, tm.tm_mday));
     }
 
     let date = date2j(tm.tm_year, tm.tm_mon, tm.tm_mday) - POSTGRES_EPOCH_JDATE;
 
     if !IS_VALID_DATE(date) {
-        return Err(date_out_of_range_ymd(year, month, day));
+        return Err(date_out_of_range_ymd(tm.tm_year, tm.tm_mon, tm.tm_mday));
     }
 
     Ok(date)
@@ -618,8 +622,11 @@ pub fn time_out(time: TimeADT, buf: &mut DateBuf) -> usize {
 
 pub fn make_time(hour: i32, min: i32, sec: f64) -> PgResult<TimeADT> {
     if float_time_overflows(hour, min, sec) {
+        // C (date.c make_time): "%d:%02d:%02g" — the seconds render through
+        // PG's snprintf %g (Infinity/NaN spellings, precision 6).
+        let sec = adt_datetime::errors::fmt_sec_g02(sec);
         return Err(Box::new(
-            PgError::error(format!("time field value out of range: {hour}:{min:02}:{sec:02}"))
+            PgError::error(format!("time field value out of range: {hour}:{min:02}:{sec}"))
                 .with_sqlstate(ERRCODE_DATETIME_FIELD_OVERFLOW),
         ));
     }
