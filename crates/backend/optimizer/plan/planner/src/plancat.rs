@@ -999,7 +999,7 @@ pub fn restriction_selectivity<'mcx>(
                 crate::array_selfuncs::arraycontsel(run, 2752, args, varrelid)?
             }
             Some("_int_matchsel") => {
-                crate::intarray_selfuncs::int_matchsel(run, args, varrelid)?
+                crate::intarray_selfuncs::int_matchsel(run, args, varrelid, other)?
             }
             _ => panic!(
                 "restriction_selectivity (plancat.c): oprrest {other}; M2 selfuncs lane"

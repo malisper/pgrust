@@ -31,6 +31,24 @@ pub struct Item {
     pub val: i32,
 }
 
+/// bqarr_in error: `soft` marks C's four ereturn sites (reportable through an
+/// ErrorSaveContext); stack-depth exhaustion stays hard.
+#[derive(Debug)]
+pub struct ParseError {
+    pub err: Box<PgError>,
+    pub soft: bool,
+}
+
+impl ParseError {
+    fn soft(err: PgError) -> ParseError {
+        ParseError { err: Box::new(err), soft: true }
+    }
+
+    fn hard(err: Box<PgError>) -> ParseError {
+        ParseError { err, soft: false }
+    }
+}
+
 /// ITEMs of a QUERYTYPE image (on-disk: i16 type, i16 left, i32 val).
 pub fn parse_items(image: &[u8]) -> Vec<Item> {
     let size = (i32::from_ne_bytes(image[4..8].try_into().unwrap()).max(0) as usize)
@@ -176,8 +194,8 @@ impl WorkState<'_> {
         self.items.push((typ, val));
     }
 
-    fn makepol(&mut self) -> PgResult<()> {
-        stack_depth::check_stack_depth()?;
+    fn makepol(&mut self) -> Result<(), ParseError> {
+        stack_depth::check_stack_depth().map_err(ParseError::hard)?;
         let mut stack = [0i32; STACKDEPTH];
         let mut lenstack = 0usize;
         loop {
@@ -198,9 +216,10 @@ impl WorkState<'_> {
                         self.push(OPR, val);
                     } else {
                         if lenstack == STACKDEPTH {
-                            return Err(PgError::error("statement too complex")
-                                .with_sqlstate(ERRCODE_STATEMENT_TOO_COMPLEX)
-                                .into());
+                            return Err(ParseError::soft(
+                                PgError::error("statement too complex")
+                                    .with_sqlstate(ERRCODE_STATEMENT_TOO_COMPLEX),
+                            ));
                         }
                         stack[lenstack] = val;
                         lenstack += 1;
@@ -223,9 +242,9 @@ impl WorkState<'_> {
                     return Ok(());
                 }
                 _ => {
-                    return Err(PgError::error("syntax error")
-                        .with_sqlstate(ERRCODE_SYNTAX_ERROR)
-                        .into())
+                    return Err(ParseError::soft(
+                        PgError::error("syntax error").with_sqlstate(ERRCODE_SYNTAX_ERROR),
+                    ))
                 }
             }
         }
@@ -237,12 +256,14 @@ impl WorkState<'_> {
     }
 }
 
-fn findoprnd(items: &mut [Item], pos: &mut i32) -> PgResult<()> {
-    stack_depth::check_stack_depth()?;
+fn findoprnd(items: &mut [Item], pos: &mut i32) -> Result<(), ParseError> {
+    stack_depth::check_stack_depth().map_err(ParseError::hard)?;
     if *pos < 0 {
         // Unreachable from the parser (operand/operator states pair up);
         // C reads out of bounds here.
-        return Err(PgError::error("syntax error").with_sqlstate(ERRCODE_SYNTAX_ERROR).into());
+        return Err(ParseError::hard(
+            PgError::error("syntax error").with_sqlstate(ERRCODE_SYNTAX_ERROR).into(),
+        ));
     }
     let p = *pos as usize;
     if items[p].typ == VAL as i16 {
@@ -263,22 +284,23 @@ fn findoprnd(items: &mut [Item], pos: &mut i32) -> PgResult<()> {
 }
 
 /// bqarr_in core: cstring -> QUERYTYPE image.
-pub fn parse_query(buf: &[u8]) -> PgResult<Vec<u8>> {
+pub fn parse_query(buf: &[u8]) -> Result<Vec<u8>, ParseError> {
     let mut ws = WorkState { buf, pos: 0, state: WAITOPERAND, count: 0, items: Vec::new() };
     ws.makepol()?;
     if ws.items.is_empty() {
-        return Err(PgError::error("empty query")
-            .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
-            .into());
+        return Err(ParseError::soft(
+            PgError::error("empty query").with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE),
+        ));
     }
     if ws.items.len() > QUERYTYPEMAXITEMS {
-        return Err(PgError::error(format!(
-            "number of query items ({}) exceeds the maximum allowed ({})",
-            ws.items.len(),
-            QUERYTYPEMAXITEMS
-        ))
-        .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
-        .into());
+        return Err(ParseError::soft(
+            PgError::error(format!(
+                "number of query items ({}) exceeds the maximum allowed ({})",
+                ws.items.len(),
+                QUERYTYPEMAXITEMS
+            ))
+            .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+        ));
     }
     let mut items: Vec<Item> = ws
         .items
