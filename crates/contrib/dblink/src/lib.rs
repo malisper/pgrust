@@ -116,7 +116,7 @@ fn connect_failed(msg: &str) -> Box<PgError> {
     Box::new(
         PgError::error("could not establish connection")
             .with_sqlstate(ERRCODE_SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION)
-            .with_detail_internal(pchomp(msg)),
+            .with_detail(pchomp(msg)),
     )
 }
 
@@ -160,7 +160,7 @@ fn with_target<R>(target: &mut ConnTarget, f: impl FnOnce(&mut PgConn) -> R) -> 
         ConnTarget::Unnamed => registry::with_unnamed(|rc| match rc {
             Some(rc) => Ok(f(&mut rc.conn)),
             None => Err(registry::conn_not_avail(None)),
-        })?,
+        }),
     }
 }
 
@@ -171,7 +171,7 @@ fn with_target_ref<R>(target: &ConnTarget, f: impl FnOnce(&PgConn) -> R) -> PgRe
         ConnTarget::Unnamed => registry::with_unnamed(|rc| match rc {
             Some(rc) => Ok(f(&rc.conn)),
             None => Err(registry::conn_not_avail(None)),
-        })?,
+        }),
     }
 }
 
@@ -556,7 +556,7 @@ fn on_conn<R>(conname: &Option<String>, f: impl FnOnce(&mut RemoteConn) -> R) ->
         None => registry::with_unnamed(|rc| match rc {
             Some(rc) => Ok(f(rc)),
             None => Err(registry::conn_not_avail(None)),
-        })?,
+        }),
     }
 }
 

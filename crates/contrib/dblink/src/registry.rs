@@ -40,7 +40,7 @@ fn we_lazy(cell: &'static std::thread::LocalKey<Cell<u32>>, name: &str) -> PgRes
     if v != 0 {
         return Ok(v);
     }
-    let id = waitevent::WaitEventExtensionNew(name)?;
+    let id = waitevent::custom::WaitEventExtensionNew(name)?;
     cell.with(|c| c.set(id));
     Ok(id)
 }
