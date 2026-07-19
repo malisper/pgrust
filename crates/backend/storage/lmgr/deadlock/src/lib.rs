@@ -93,7 +93,12 @@ fn backend_mcx() -> Mcx<'static> {
         Some(m) => m.mcx(),
         None => {
             let m: &'static MemoryContext =
-                Box::leak(Box::new(MemoryContext::new("DeadLockChecking")));
+                ::mcx::session_root("DeadLockChecking");
+            // LIFO: empty the droppy workspace TLS before its context is
+            // freed (all workspace vecs allocate from this context).
+            ::mcx::register_session_cleanup(Box::new(|| {
+                WORKSPACE.with(|w| drop(w.borrow_mut().take()));
+            }));
             c.set(Some(m));
             m.mcx()
         }

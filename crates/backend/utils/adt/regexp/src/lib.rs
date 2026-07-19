@@ -44,7 +44,7 @@ fn with_cache<R>(f: impl FnOnce(&mut ReCache) -> R) -> R {
         let mut slot = cell.borrow_mut();
         let cache = slot.get_or_insert_with(|| {
             let mcx =
-                Box::leak(Box::new(MemoryContext::new("RegexpCacheMemoryContext"))).mcx();
+                ::mcx::session_root("RegexpCacheMemoryContext").mcx();
             ManuallyDrop::new(ReCache { mcx, entries: PgVec::new_in(mcx) })
         });
         f(cache)

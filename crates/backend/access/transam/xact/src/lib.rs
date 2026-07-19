@@ -35,6 +35,7 @@ mod wal;
 mod tests;
 
 pub(crate) use state::{xs, xs_ptr, TransactionNode, XsPtr};
+pub use state::session_mem_teardown;
 
 pub use engine::{
     AbortCurrentTransaction, AbortOutOfAnyTransaction, BeginImplicitTransactionBlock,

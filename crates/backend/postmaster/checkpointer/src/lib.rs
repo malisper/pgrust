@@ -833,7 +833,11 @@ pub fn AbsorbSyncRequests() -> PgResult<()> {
         let mut slot = cell.borrow_mut();
         let buf = slot.get_or_insert_with(|| {
             let cx: &'static mcx::MemoryContext =
-                Box::leak(Box::new(mcx::MemoryContext::new("AbsorbSyncRequests scratch")));
+                mcx::session_root("AbsorbSyncRequests scratch");
+            // LIFO: empty the droppy TLS slot before its context is freed.
+            mcx::register_session_cleanup(Box::new(|| {
+                ABSORB_SCRATCH.with(|c| drop(c.borrow_mut().take()));
+            }));
             mcx::PgVec::new_in(cx.mcx())
         });
         buf.clear();

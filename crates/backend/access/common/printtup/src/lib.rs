@@ -73,7 +73,12 @@ fn scratch_mcx() -> Mcx<'static> {
         Some(m) => m.mcx(),
         None => {
             let m: &'static MemoryContext =
-                Box::leak(Box::new(MemoryContext::new("PrinttupScratch")));
+                ::mcx::session_root("PrinttupScratch");
+            // LIFO: drop the pooled wire buffer before its context is freed
+            // (Cell<Option<StringInfo>> is a droppy TLS payload).
+            ::mcx::register_session_cleanup(Box::new(|| {
+                WIRE_BUF.with(|c| drop(c.take()));
+            }));
             c.set(Some(m));
             m.mcx()
         }

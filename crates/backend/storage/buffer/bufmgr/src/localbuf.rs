@@ -96,7 +96,7 @@ fn init_local_buffers(slot: &mut Option<LocalBufs>) {
     for i in 0..nbufs {
         descs.push(BufferDesc::initial(-(i as i32) - 2, 0));
     }
-    let cx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("LocalBufferLookup")));
+    let cx: &'static MemoryContext = ::mcx::session_root("LocalBufferLookup");
     slot.replace(LocalBufs {
         descs: Box::leak(descs.into_boxed_slice()),
         blocks: Box::leak(vec![Cell::new(core::ptr::null_mut()); nbufs].into_boxed_slice()),
