@@ -13,25 +13,38 @@ use crate::cache_bind::{self, ConfigMap, ParserFns};
 
 pub struct CacheEnv<'mcx> {
     mcx: Mcx<'mcx>,
-    map: ConfigMap<'mcx>,
-    prs: ParserFns,
+    cfg: Oid,
+    // C looks the configuration up inside parsetext/hlparsetext (ts_parse.c),
+    // NOT at the SQL entry point: to_tsquery(0::regconfig, '') never pushes a
+    // value, so the bogus config is never resolved and the call succeeds with
+    // an empty result + NOTICE (fnconf batch-1 ts-config-laziness family).
+    // Resolved on first parser use (prs_start = C's parsetext entry).
+    loaded: Option<(ConfigMap<'mcx>, ParserFns)>,
     prsdata: Datum,
     buf: (*const u8, usize),
     dicts: PgVec<'mcx, (Oid, Datum, FmgrInfo)>,
 }
 
 impl<'mcx> CacheEnv<'mcx> {
-    pub fn new(mcx: Mcx<'mcx>, cfg: Oid) -> PgResult<Self> {
-        let map = cache_bind::config_map(mcx, cfg)?;
-        let prs = cache_bind::parser_fns(map.prs_id)?;
-        Ok(CacheEnv {
+    pub fn new(mcx: Mcx<'mcx>, cfg: Oid) -> Self {
+        CacheEnv {
             mcx,
-            map,
-            prs,
+            cfg,
+            loaded: None,
             prsdata: Datum::null(),
             buf: (core::ptr::null(), 0),
             dicts: PgVec::new_in(mcx),
-        })
+        }
+    }
+
+    // C: parsetext's lookup_ts_config_cache(cfgId) + lookup_ts_parser_cache.
+    fn ensure(&mut self) -> PgResult<&mut (ConfigMap<'mcx>, ParserFns)> {
+        if self.loaded.is_none() {
+            let map = cache_bind::config_map(self.mcx, self.cfg)?;
+            let prs = cache_bind::parser_fns(map.prs_id)?;
+            self.loaded = Some((map, prs));
+        }
+        Ok(self.loaded.as_mut().expect("just resolved"))
     }
 
     fn dict_at(&mut self, dict: Oid) -> PgResult<usize> {
@@ -47,27 +60,36 @@ impl<'mcx> CacheEnv<'mcx> {
 impl<'mcx> ::ts_parse::TsParseEnv<'mcx> for CacheEnv<'mcx> {
     fn prs_start(&mut self, buf: &[u8]) -> PgResult<()> {
         self.buf = (buf.as_ptr(), buf.len());
-        self.prsdata = function_call2_coll_in(
-            &mut self.prs.start,
-            InvalidOid,
-            self.mcx,
-            Datum::from_usize(buf.as_ptr() as usize),
-            Datum::from_i32(buf.len() as i32),
-        )?;
+        let mcx = self.mcx;
+        let prsdata = {
+            let (_, prs) = self.ensure()?;
+            function_call2_coll_in(
+                &mut prs.start,
+                InvalidOid,
+                mcx,
+                Datum::from_usize(buf.as_ptr() as usize),
+                Datum::from_i32(buf.len() as i32),
+            )?
+        };
+        self.prsdata = prsdata;
         Ok(())
     }
 
     fn prs_next(&mut self) -> PgResult<(i32, u32, u32)> {
         let mut lemm: *const u8 = core::ptr::null();
         let mut lenlemm: i32 = 0;
-        let typ = function_call3_coll(
-            &mut self.prs.token,
-            InvalidOid,
-            self.prsdata,
-            Datum::from_usize(core::ptr::from_mut(&mut lemm) as usize),
-            Datum::from_usize(core::ptr::from_mut(&mut lenlemm) as usize),
-        )?
-        .as_i32();
+        let prsdata = self.prsdata;
+        let typ = {
+            let (_, prs) = self.ensure()?;
+            function_call3_coll(
+                &mut prs.token,
+                InvalidOid,
+                prsdata,
+                Datum::from_usize(core::ptr::from_mut(&mut lemm) as usize),
+                Datum::from_usize(core::ptr::from_mut(&mut lenlemm) as usize),
+            )?
+            .as_i32()
+        };
         if typ <= 0 {
             return Ok((typ, 0, 0));
         }
@@ -80,22 +102,22 @@ impl<'mcx> ::ts_parse::TsParseEnv<'mcx> for CacheEnv<'mcx> {
     }
 
     fn prs_end(&mut self) -> PgResult<()> {
-        function_call1_coll(&mut self.prs.end, InvalidOid, self.prsdata).map(|_| ())
+        let prsdata = self.prsdata;
+        let (_, prs) = self.ensure()?;
+        function_call1_coll(&mut prs.end, InvalidOid, prsdata).map(|_| ())
     }
 
     fn map_len(&mut self, toktype: i32) -> PgResult<usize> {
         if toktype <= 0 {
             return Ok(0);
         }
-        Ok(self
-            .map
-            .map
-            .get(toktype as usize)
-            .map_or(0, |dicts| dicts.len()))
+        let (map, _) = self.ensure()?;
+        Ok(map.map.get(toktype as usize).map_or(0, |dicts| dicts.len()))
     }
 
     fn map_dict(&mut self, toktype: i32, i: usize) -> PgResult<Oid> {
-        Ok(self.map.map[toktype as usize][i])
+        let (map, _) = self.ensure()?;
+        Ok(map.map[toktype as usize][i])
     }
 
     fn lexize(

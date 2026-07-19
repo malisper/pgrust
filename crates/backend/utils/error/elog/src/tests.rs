@@ -677,3 +677,32 @@ fn frontend_message_requires_seam_owner() {
     });
     assert!(result.is_err());
 }
+
+// fnconf batch-1, OID 3320 (protocol-framing class): C error fields are
+// cstrings, so bytes past the first NUL can never reach the wire. A Rust
+// String CAN carry an embedded NUL — sending it verbatim broke 'E'-message
+// framing ("message contents do not agree with length in message type E").
+// Red at base: err_sendstring wrote the NUL plus trailing bytes.
+#[test]
+fn err_sendstring_truncates_at_embedded_nul() {
+    let mut buf = Vec::new();
+    report::err_sendstring(&mut buf, "unrecognized weight: \0tail");
+    assert_eq!(buf, b"unrecognized weight: \0");
+}
+
+// fnconf batch-1, OID 3320: raw-byte primary messages carry C's exact
+// bytes even when not valid UTF-8 (C 18.3 setweight with '多'::"char"
+// sends `unrecognized weight: ` + raw 0xE5).
+#[test]
+fn err_sendbytes_passes_raw_high_bytes() {
+    let mut buf = Vec::new();
+    report::err_sendbytes(&mut buf, b"unrecognized weight: \xE5");
+    assert_eq!(buf, b"unrecognized weight: \xE5\0");
+
+    let e = ::types_error::PgError::error_raw_message(b"unrecognized weight: \xE5".to_vec());
+    assert_eq!(e.message(), "unrecognized weight: \u{FFFD}");
+    assert_eq!(e.message_raw.as_deref(), Some(&b"unrecognized weight: \xE5"[..]));
+    // The NUL variant: lossy message ends where C's cstring would.
+    let e = ::types_error::PgError::error_raw_message(b"unrecognized weight: \0".to_vec());
+    assert_eq!(e.message(), "unrecognized weight: ");
+}

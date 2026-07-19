@@ -15,7 +15,11 @@ pub fn morph_to_tsquery<'mcx>(
     flags: i32,
     qoperator: i8,
 ) -> PgResult<Datum> {
-    let mut env = CacheEnv::new(mcx, cfg)?;
+    // C (to_tsany.c to_tsquery_byid + ts_parse.c): the config is looked up
+    // per pushed value inside pushval_morph→parsetext, so a query with no
+    // lexemes (e.g. '') never validates the config — lazy CacheEnv mirrors
+    // that (fnconf batch-1: to_tsquery(0::regconfig, '') must return empty).
+    let mut env = CacheEnv::new(mcx, cfg);
 
     let mut pushval = |p: &mut QueryParser<'_, '_, 'mcx>,
                        val: &[u8],

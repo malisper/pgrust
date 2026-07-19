@@ -14,12 +14,18 @@ use crate::{
 
 // erf/erfc/tgamma are absent from Rust std; C's own libm is the parity
 // reference, so bind it directly. lgamma_r avoids libm's signgam global.
+// atanh rides here too: Rust std computes it as 0.5*ln_1p(2x/(1-x)), which
+// lands one ulp off libm's atanh on some inputs — C calls libm directly and
+// the fnconf byte-diff caught the drift (OID 2467; e.g. C 18.3
+// atanh(-1.3990760221756862e-5) → -1.399076022266972e-05, the formula gives
+// ...669721e-05).
 mod libm {
     extern "C" {
         pub fn erf(x: f64) -> f64;
         pub fn erfc(x: f64) -> f64;
         pub fn tgamma(x: f64) -> f64;
         pub fn lgamma_r(x: f64, signp: *mut core::ffi::c_int) -> f64;
+        pub fn atanh(x: f64) -> f64;
     }
 }
 
@@ -750,7 +756,10 @@ pub fn datanh(arg1: f64) -> PgResult<f64> {
     } else if arg1 == 1.0 {
         f64::INFINITY
     } else {
-        arg1.atanh()
+        // C (float.c datanh): atanh(arg1) — platform libm, not Rust std's
+        // ln_1p formula (one-ulp drift, fnconf OID 2467).
+        // SAFETY: pure libm function, no preconditions.
+        unsafe { libm::atanh(arg1) }
     })
 }
 
