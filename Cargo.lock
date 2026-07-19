@@ -4562,6 +4562,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "dblink"
+version = "0.0.0"
+dependencies = [
+ "aclchk",
+ "adt_acl",
+ "adt_misc",
+ "adt_quote",
+ "arrayfuncs",
+ "catalog_namespace",
+ "datum",
+ "dfmgr",
+ "elog",
+ "fmgr_core",
+ "fmgr_seams",
+ "foreigncmds",
+ "funcapi",
+ "genam",
+ "heaptuple",
+ "init_small",
+ "lsyscache",
+ "mbutils",
+ "mcx",
+ "miscinit",
+ "parser_small1",
+ "pgclient",
+ "rel_vocab",
+ "ruleutils",
+ "rustc-hash",
+ "spi",
+ "superuser",
+ "table",
+ "tablecmds",
+ "tupdesc",
+ "tuplestore",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_rel",
+ "types_scan",
+ "types_tuple",
+ "varlena",
+ "waitevent",
+]
+
+[[package]]
 name = "dbsize"
 version = "0.1.0"
 dependencies = [
@@ -11790,6 +11836,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "pgclient"
+version = "0.0.0"
+dependencies = [
+ "init_small",
+ "latch",
+ "libc",
+ "mcx",
+ "pg_b64",
+ "pg_hmac",
+ "pg_md5",
+ "postgres_seams",
+ "saslprep",
+ "scram_common",
+ "types_core",
+ "types_error",
+ "types_storage",
+]
+
+[[package]]
 name = "pgcrypto"
 version = "0.0.0"
 dependencies = [
@@ -14766,6 +14831,7 @@ dependencies = [
  "costsize",
  "crypt",
  "dbcommands",
+ "dblink",
  "deadlock",
  "detoast",
  "dsm_core",
@@ -18777,16 +18843,12 @@ dependencies = [
  "mbutils_seams",
  "mcx",
  "miscinit",
- "pg_b64",
- "pg_hmac",
- "pg_md5",
+ "pgclient",
  "pgstat",
  "postgres_seams",
  "procarray",
  "procsignal",
  "ps_status_seams",
- "saslprep",
- "scram_common",
  "timeline",
  "timestamp_seams",
  "transam_xlog",
