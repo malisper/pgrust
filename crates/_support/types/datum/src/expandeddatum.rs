@@ -1,5 +1,7 @@
 use crate::datum::Datum;
-use core::mem::{offset_of, size_of};
+#[cfg(not(target_family = "wasm"))]
+use core::mem::offset_of;
+use core::mem::size_of;
 use mcx::MemoryContext;
 
 pub const VARTAG_EXPANDED_RO: u8 = 2;
@@ -31,6 +33,10 @@ pub struct ExpandedObjectHeader {
     eoh_ro_ptr: [u8; EXPANDED_POINTER_SIZE],
 }
 
+// 64-bit layout pin. On wasm32 (ILP32 pointers) the two Rust pointer fields
+// shrink and the layout differs; it stays internally consistent within the
+// target, and the port's SIZEOF_DATUM==8 invariant is unaffected (datum.rs).
+#[cfg(not(target_family = "wasm"))]
 const _: () = {
     assert!(size_of::<ExpandedObjectHeader>() == 48);
     assert!(offset_of!(ExpandedObjectHeader, eoh_rw_ptr) == 24);

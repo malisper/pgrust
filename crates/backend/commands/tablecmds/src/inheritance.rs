@@ -11,7 +11,6 @@ use types_rel::{
     NoLock, Relation, RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
 };
 
-use crate::unported;
 
 const MaxHeapAttributeNumber: usize = 1600;
 
@@ -539,7 +538,7 @@ fn coldef_type(def: &ColumnDef<'_>) -> (Oid, i32) {
 fn mcx_dummy() -> Mcx<'static> {
     thread_local! {
         static CTX: &'static mcx::MemoryContext =
-            Box::leak(Box::new(mcx::MemoryContext::new("coldef-type-scratch")));
+            mcx::session_root("coldef-type-scratch");
     }
     CTX.with(|c| c.mcx())
 }
@@ -1022,7 +1021,13 @@ pub(crate) fn ATExecAddInherit<'mcx>(
     if parent_rel.rd_rel.relkind != RELKIND_RELATION
         && parent_rel.rd_rel.relkind != RELKIND_PARTITIONED_TABLE
     {
-        unported("ATExecAddInherit: parent relkind outside table/partitioned");
+        // unported: ATExecAddInherit parent relkinds outside table/partitioned
+        return Err(Box::new(
+            PgError::error(
+                "ALTER TABLE ... INHERIT for this type of parent relation is not supported yet",
+            )
+            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
     }
     let parent_name = parent_rel.name().to_string();
     let child_name = child_rel.name().to_string();
@@ -1748,7 +1753,7 @@ mod tests {
     use super::*;
 
     fn ctx() -> &'static mcx::MemoryContext {
-        Box::leak(Box::new(mcx::MemoryContext::new("merge-test")))
+        mcx::session_root("merge-test")
     }
 
     fn coldef<'m>(mcx: Mcx<'m>, name: &'m str, from_type: bool, not_null: bool) -> Node<'m> {

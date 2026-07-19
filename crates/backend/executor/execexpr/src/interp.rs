@@ -3,7 +3,7 @@ use alloc::format;
 
 use ::datum::{Datum, NullableDatum};
 use ::mcx::Allocator;
-use ::types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH};
+use ::types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_FEATURE_NOT_SUPPORTED};
 use ::types_slot::SlotData;
 
 use crate::steps::{
@@ -2614,7 +2614,13 @@ fn eval_field_select(
     let p = value.as_usize() as *const u8;
     // SAFETY: non-null composite datum per the FieldSelect contract.
     if unsafe { ::types_tuple::varatt::varatt_is_external_expanded(p) } {
-        panic!("ExecEvalFieldSelect (execExprInterp.c): expanded-record fastpath unported");
+        // unported: ExecEvalFieldSelect (execExprInterp.c) expanded-record
+        // fastpath (the expandeddatum unit is not ported).
+        return Err(PgError::error(
+            "field selection from an expanded record is not yet implemented",
+        )
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+        .into());
     }
     // SAFETY: a live varlena-headed composite image.
     let total = unsafe { ::types_tuple::varatt::varsize_any(p) };
@@ -2715,6 +2721,14 @@ fn eval_convert_rowtype(
                 }
             }
             let out_tuple = ::heaptuple::heap_form_tuple(mcx, outdesc, &outvalues, &outnulls)?;
+            // C finishes through HeapTupleHeaderGetDatum (execTuples.c:2413),
+            // which re-flattens if any field is an external toast pointer. We
+            // skip that check: the input here is a composite DATUM, and the
+            // composite-datum law (fill_val's HEAP_HASEXTERNAL + the flatten
+            // in heap_copy_tuple_as_datum / eval_row_expr) guarantees its
+            // fields are already flat, so the remapped tuple can't be
+            // external either.
+            debug_assert!(!out_tuple.as_tuple().has_external());
             let d = Datum::from_usize(out_tuple.image().as_ptr() as usize);
             core::mem::forget(out_tuple);
             d

@@ -2,16 +2,22 @@
 #![allow(non_upper_case_globals)]
 
 use std::cell::Cell;
-use std::sync::atomic::{
-    fence, AtomicUsize,
-    Ordering::{Acquire, Relaxed, Release, SeqCst},
+
+// pgsync = THE single lock library (permit-s1 contract §0): native these are
+// std re-exports (zero cost, identical types — asm letter in
+// notes/dst-latch-loom.md); under --cfg loom they are loom's checked
+// primitives, which is what makes WaitLatch/SetLatch directly loom-modelable
+// (tests/loom.rs drives THIS code, not a mirror).
+use pgsync::atomic::{
+    AtomicUsize,
+    Ordering::{Acquire, Relaxed, Release},
 };
-use std::sync::Mutex;
+use pgsync::Mutex;
 
 use init_small::globals::{IsUnderPostmaster, MyLatch, MyProcPid};
 use types_core::{pgsocket, PGINVALID_SOCKET};
 use types_error::{PgError, PgResult, PANIC};
-use types_storage::latch::{Latch, LatchHandle, LatchKind};
+use types_storage::latch::{pg_memory_barrier, Latch, LatchHandle, LatchKind};
 use types_storage::waiteventset::{
     WaitEventSetHandle, WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_POSTMASTER_DEATH, WL_SOCKET_MASK,
     WL_TIMEOUT,
@@ -25,14 +31,39 @@ const LatchWaitSetPostmasterDeathPos: i32 = 1;
 // aux-process statics); here that storage is this fixed slab, handed out by
 // allocate_local_latch. Const-init statics keep handle resolution a plain
 // index — SetLatch stays lock- and allocation-free (signal-handler-reachable).
+//
+// Under --cfg loom the slab shrinks: models allocate 1-2 latches, and every
+// Latch is 5 loom-tracked atomic cells created per model iteration.
+#[cfg(not(loom))]
 const LOCAL_LATCH_CAP: usize = 4096;
-static LOCAL_LATCHES: [Latch; LOCAL_LATCH_CAP] = [const { Latch::new(false, 0) }; LOCAL_LATCH_CAP];
-static LOCAL_LATCH_NEXT: AtomicUsize = AtomicUsize::new(0);
-// C's LocalLatchData is per-process storage reclaimed by process death; the
-// thread model reclaims explicitly: backend teardown pushes its slot here and
-// later backends pop before bumping LOCAL_LATCH_NEXT. Startup/teardown paths
-// only — set_latch never touches this lock.
-static LOCAL_LATCH_FREE: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+#[cfg(loom)]
+const LOCAL_LATCH_CAP: usize = 4;
+
+// Slab initializer: const on native/sim (the statics below are plain
+// const-init statics there — pgsync::process_global!'s zero-cost arm); under
+// loom, Latch::new is non-const (loom atomics) and this runs per model
+// iteration inside the shim's lazy arm.
+#[cfg(not(loom))]
+const fn local_latch_slab() -> [Latch; LOCAL_LATCH_CAP] {
+    [const { Latch::new(false, 0) }; LOCAL_LATCH_CAP]
+}
+#[cfg(loom)]
+fn local_latch_slab() -> [Latch; LOCAL_LATCH_CAP] {
+    core::array::from_fn(|_| Latch::new(false, 0))
+}
+
+pgsync::process_global! {
+    static LOCAL_LATCHES: [Latch; LOCAL_LATCH_CAP] = local_latch_slab();
+    static LOCAL_LATCH_NEXT: AtomicUsize = AtomicUsize::new(0);
+    // C's LocalLatchData is per-process storage reclaimed by process death; the
+    // thread model reclaims explicitly: backend teardown pushes its slot here and
+    // later backends pop before bumping LOCAL_LATCH_NEXT. Startup/teardown paths
+    // only — set_latch never touches this lock.
+    static LOCAL_LATCH_FREE: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+    // C latch.c: the single static recovery-wakeup latch (was a fn-local
+    // static in latch_ref; hoisted to module scope for the shim).
+    static RECOVERY_WAKEUP: Latch = Latch::new(true, 0);
+}
 
 pub fn allocate_local_latch() -> LatchHandle {
     let recycled = LOCAL_LATCH_FREE
@@ -73,9 +104,7 @@ pub fn latch_ref(latch: LatchHandle) -> &'static Latch {
             &LOCAL_LATCHES[id - 1]
         }
         LatchKind::Proc(procno) => lmgr_proc_seams::proc_latch::call(procno),
-        LatchKind::RecoveryWakeup => {
-            panic!("latch_ref: recoveryWakeupLatch owner (xlogrecovery) is not ported")
-        }
+        LatchKind::RecoveryWakeup => &RECOVERY_WAKEUP,
     }
 }
 
@@ -340,23 +369,32 @@ pub fn SetLatch(latch: LatchHandle) {
 // Signal-handler-reachable: no allocation, no unbounded locks, no errors
 // (waiter::unpark takes one uncontended per-slot mutex, the same class of
 // section the old registry mutex was).
+//
+// The field accesses ride the Latch protocol-edge methods (types_storage):
+// native bodies are exactly the loads/stores previously open-coded here
+// (asm letter); the cfg(loom) arms carry the RMW dialect that makes this
+// REAL function loom-modelable (tests/loom.rs; dialect rationale at the
+// method docs + waiter/tests/loom_litmus.rs).
 pub fn set_latch(latch: &Latch) {
     // pg_memory_barrier(): flag stores by this backend must be globally
     // visible before is_set is checked/set. Full fence, matching C — the
     // store->load edge is beyond Release/Acquire (notes/latch-atomics.md).
-    fence(SeqCst);
+    // (No-op under loom: the protocol-edge RMWs carry it — dialect law,
+    // types_storage latch.rs.)
+    pg_memory_barrier();
 
-    if latch.is_set.load(Relaxed) != 0 {
+    if latch.set_path_probe_is_set() {
         return;
     }
-    latch.is_set.store(1, Relaxed);
+    latch.set_path_mark_set();
 
-    fence(SeqCst);
-    // Acquire is load-bearing (loom model latch_dekker_over_waiter): it
+    pg_memory_barrier();
+    // The Acquire inside set_path_sleeping_armed is load-bearing (loom model
+    // latch_dekker_over_waiter, now the direct models in tests/loom.rs): it
     // pairs with the waiter's SeqCst maybe_sleeping store, ordering the
-    // waker word published before it. With a Relaxed load here a stale
+    // waker word published before it. With a Relaxed load there a stale
     // waker (0 on a first wait) can be read and the wake lost.
-    if latch.maybe_sleeping.load(Acquire) == 0 {
+    if !latch.set_path_sleeping_armed() {
         return;
     }
 
@@ -371,11 +409,11 @@ pub fn ResetLatch(latch: LatchHandle) {
     debug_assert_eq!(l.owner_pid.load(Acquire), MyProcPid());
     debug_assert_eq!(l.maybe_sleeping.load(Acquire), 0);
 
-    l.is_set.store(0, Relaxed);
+    l.reset_clear_is_set();
 
     // pg_memory_barrier(): the is_set clear must reach memory before we read
     // any flag variables, or a concurrent SetLatch could skip the wake.
-    fence(SeqCst);
+    pg_memory_barrier();
 }
 
 fn set_latch_my_latch() {

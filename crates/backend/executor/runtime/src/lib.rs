@@ -145,7 +145,7 @@ pub use parallel::{
 /// process exactly); any other value (or unset) enables. Read once.
 #[cfg(not(loom))]
 pub fn runtime_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static ENABLED: crate::sync::OnceLock<bool> = crate::sync::OnceLock::new();
     *ENABLED.get_or_init(|| !std::env::var("PGRUST_RUNTIME").is_ok_and(|v| v == "0"))
 }
 
@@ -154,7 +154,7 @@ pub fn runtime_enabled() -> bool {
 /// reach the runtime without depending on the postmaster crates. None until
 /// (and unless) the kill switch spawned the pool.
 #[cfg(not(loom))]
-static GLOBAL: std::sync::OnceLock<Arc<Runtime>> = std::sync::OnceLock::new();
+static GLOBAL: crate::sync::OnceLock<Arc<Runtime>> = crate::sync::OnceLock::new();
 
 #[cfg(not(loom))]
 pub fn install_global(rt: Arc<Runtime>) -> &'static Arc<Runtime> {
@@ -237,7 +237,7 @@ pub struct Runtime {
     /// ring — uring unavailable, aio_uring not linked, or worker exited).
     /// Written by the worker loop at enter/exit; diagnostics + tests read.
     #[cfg(not(loom))]
-    rings: std::sync::Mutex<Vec<Option<u32>>>,
+    rings: crate::sync::Mutex<Vec<Option<u32>>>,
 }
 
 impl Runtime {
@@ -258,7 +258,7 @@ impl Runtime {
             )),
             config,
             #[cfg(not(loom))]
-            rings: std::sync::Mutex::new(vec![None; nthreads]),
+            rings: crate::sync::Mutex::new(vec![None; nthreads]),
         })
     }
 
@@ -486,7 +486,7 @@ impl Runtime {
         // is skipped; a CAS failure retries the same word.
         for (wi, mask) in self.sched.external_lanes.iter().enumerate() {
             loop {
-                let cur = mask.load(std::sync::atomic::Ordering::SeqCst);
+                let cur = mask.load(crate::sync::atomic::Ordering::SeqCst);
                 let free = !cur;
                 if free == 0 {
                     break; // word full — try the next word
@@ -496,8 +496,8 @@ impl Runtime {
                     .compare_exchange(
                         cur,
                         cur | (1u64 << bit),
-                        std::sync::atomic::Ordering::SeqCst,
-                        std::sync::atomic::Ordering::SeqCst,
+                        crate::sync::atomic::Ordering::SeqCst,
+                        crate::sync::atomic::Ordering::SeqCst,
                     )
                     .is_ok()
                 {
@@ -829,6 +829,6 @@ impl Drop for ExternalLane {
         // worker_step_pinned settles before returning), so the next lessee
         // starts from a clean pin.
         self.rt.sched.external_lanes[self.ordinal / 64]
-            .fetch_and(!(1u64 << (self.ordinal % 64)), std::sync::atomic::Ordering::SeqCst);
+            .fetch_and(!(1u64 << (self.ordinal % 64)), crate::sync::atomic::Ordering::SeqCst);
     }
 }

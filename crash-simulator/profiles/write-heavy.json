@@ -1,0 +1,52 @@
+{
+  "name": "write-heavy",
+  "connections": 1,
+  "iso_mix": {
+    "read-committed": 70,
+    "repeatable-read": 20,
+    "serializable": 10
+  },
+  "statement_weights": {
+    "ddl": 10,
+    "dml": 40,
+    "query": 12,
+    "tx": 12,
+    "arm": 2,
+    "fault": 2,
+    "property": 22
+  },
+  "table_shape": {
+    "tables_min": 2,
+    "tables_max": 5,
+    "cols_min": 3,
+    "cols_max": 3,
+    "rows_max": 2000
+  },
+  "arm_sets": [
+    []
+  ],
+  "property_weights": {
+    "F1-InsertSelect": 3,
+    "F2-UpdateVisibility": 2,
+    "F3-DeleteAbsence": 2,
+    "F4-ConstraintError": 1,
+    "F5-DdlEffects": 1,
+    "F6-AggConsistency": 1,
+    "F7-MemoryBaseline": 1,
+    "F8-ResourceBaseline": 1,
+    "L1-Tlp": 2,
+    "L2-NoRec": 2,
+    "X1-ArmEquivalence": 1,
+    "X2-IndexInvariance": 1,
+    "X4-StatementForm": 1,
+    "M1-ReadYourWrites": 2
+  },
+  "kill_switches": [],
+  "float_lenient": false,
+  "engagement_floors": {},
+  "background_policy": {
+    "autovacuum": "off"
+  },
+  "steps_min": 40,
+  "steps_max": 96
+}

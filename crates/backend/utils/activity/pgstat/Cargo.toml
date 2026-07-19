@@ -22,6 +22,8 @@ transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
 guc_tables = { path = "../../misc/guc_tables" }
 init_small = { path = "../../init/init_small" }
 miscinit = { path = "../../init/miscinit" }
+fd = { path = "../../../storage/file/fd" }
+libc = "0.2"
 datum = { path = "../../../../_support/types/datum" }
 ipc_seams = { path = "../../../storage/ipc/ipc_seams" }
 slot_seams = { path = "../../../replication/slot_seams" }

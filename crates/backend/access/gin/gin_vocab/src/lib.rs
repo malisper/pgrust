@@ -222,6 +222,131 @@ pub enum GinOpclass {
     // contrib gin_hstore_ops: same proname scheme; bodies through
     // gin_hstore_seams (text keys, shimmed triconsistent).
     HstoreOps,
+    // contrib gin__int_ops (intarray): shares ginarrayextract as proc 2, so
+    // it is disambiguated from ArrayOps by the extractQuery proc; bodies
+    // through gin_int4_seams (int4 keys, shimmed triconsistent).
+    IntArrayOps,
+    // contrib btree_gin scalar opclasses: same proname scheme; bodies
+    // through gin_btree_seams.
+    BtreeOps(GinBtreeType),
+}
+
+/// contrib/btree_gin per-type tag, one per C GIN_SUPPORT expansion.
+/// timestamptz/cidr/varbit collapse onto Timestamp/Inet/Bit — identical
+/// leftmost values and comparators.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GinBtreeType {
+    Int2,
+    Int4,
+    Int8,
+    Float4,
+    Float8,
+    Money,
+    Oid,
+    Timestamp,
+    Time,
+    Timetz,
+    Date,
+    Interval,
+    Macaddr,
+    Macaddr8,
+    Inet,
+    Text,
+    Bpchar,
+    Char,
+    Bytea,
+    Bit,
+    Numeric,
+    Enum,
+    Uuid,
+    Name,
+    Bool,
+}
+
+impl GinBtreeType {
+    /// Stable tag order for the rd_amcache round-trip.
+    pub const ALL: [GinBtreeType; 25] = [
+        GinBtreeType::Int2,
+        GinBtreeType::Int4,
+        GinBtreeType::Int8,
+        GinBtreeType::Float4,
+        GinBtreeType::Float8,
+        GinBtreeType::Money,
+        GinBtreeType::Oid,
+        GinBtreeType::Timestamp,
+        GinBtreeType::Time,
+        GinBtreeType::Timetz,
+        GinBtreeType::Date,
+        GinBtreeType::Interval,
+        GinBtreeType::Macaddr,
+        GinBtreeType::Macaddr8,
+        GinBtreeType::Inet,
+        GinBtreeType::Text,
+        GinBtreeType::Bpchar,
+        GinBtreeType::Char,
+        GinBtreeType::Bytea,
+        GinBtreeType::Bit,
+        GinBtreeType::Numeric,
+        GinBtreeType::Enum,
+        GinBtreeType::Uuid,
+        GinBtreeType::Name,
+        GinBtreeType::Bool,
+    ];
+
+    pub fn tag(self) -> u8 {
+        GinBtreeType::ALL.iter().position(|&t| t == self).unwrap() as u8
+    }
+
+    pub fn from_tag(tag: u8) -> Option<GinBtreeType> {
+        GinBtreeType::ALL.get(tag as usize).copied()
+    }
+
+    /// C type-name suffix of the module's gin_extract_{value,query}_<name>
+    /// support procs (extension oids are dynamic; initGinState resolves by
+    /// proname).
+    pub fn from_type_name(name: &str) -> Option<GinBtreeType> {
+        Some(match name {
+            "int2" => GinBtreeType::Int2,
+            "int4" => GinBtreeType::Int4,
+            "int8" => GinBtreeType::Int8,
+            "float4" => GinBtreeType::Float4,
+            "float8" => GinBtreeType::Float8,
+            "money" => GinBtreeType::Money,
+            "oid" => GinBtreeType::Oid,
+            "timestamp" | "timestamptz" => GinBtreeType::Timestamp,
+            "time" => GinBtreeType::Time,
+            "timetz" => GinBtreeType::Timetz,
+            "date" => GinBtreeType::Date,
+            "interval" => GinBtreeType::Interval,
+            "macaddr" => GinBtreeType::Macaddr,
+            "macaddr8" => GinBtreeType::Macaddr8,
+            "inet" | "cidr" => GinBtreeType::Inet,
+            "text" => GinBtreeType::Text,
+            "bpchar" => GinBtreeType::Bpchar,
+            "char" => GinBtreeType::Char,
+            "bytea" => GinBtreeType::Bytea,
+            "bit" | "varbit" => GinBtreeType::Bit,
+            "numeric" => GinBtreeType::Numeric,
+            "anyenum" => GinBtreeType::Enum,
+            "uuid" => GinBtreeType::Uuid,
+            "name" => GinBtreeType::Name,
+            "bool" => GinBtreeType::Bool,
+            _ => return None,
+        })
+    }
+
+    /// C's per-type is_varlena flag (detoast on extract).
+    pub const fn is_varlena(self) -> bool {
+        matches!(
+            self,
+            GinBtreeType::Inet
+                | GinBtreeType::Text
+                | GinBtreeType::Bpchar
+                | GinBtreeType::Bytea
+                | GinBtreeType::Bit
+                | GinBtreeType::Numeric
+        )
+    }
 }
 
 /// array_ops has no GIN_COMPARE_PROC; C falls back to the element type's
@@ -391,6 +516,10 @@ pub struct GinScanKeyData {
 
 pub struct GinScanEntryData {
     pub queryKey: Datum,
+    // btree_gin's original query datum (C QueryInfo.datum in extra_data):
+    // for the < / <= strategies queryKey is the type's leftmost value and
+    // comparePartial compares against this instead. Null elsewhere.
+    pub queryOrig: Datum,
     pub queryCategory: GinNullCategory,
     pub isPartialMatch: bool,
     pub strategy: StrategyNumber,
@@ -426,6 +555,7 @@ impl GinScanEntryData {
             mcx::vec_from_elem_in(mcx, 0 as OffsetNumber, TBM_MAX_TUPLES_PER_PAGE);
         Ok(GinScanEntryData {
             queryKey: Datum::null(),
+            queryOrig: Datum::null(),
             queryCategory: GIN_CAT_NORM_KEY,
             isPartialMatch: false,
             strategy: 0,

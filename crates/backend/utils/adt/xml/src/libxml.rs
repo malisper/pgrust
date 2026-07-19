@@ -284,6 +284,7 @@ pub fn xml2() -> &'static LibXml2 {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn open_lib() -> Result<*mut c_void, String> {
     for name in [c"libxml2.so.2", c"libxml2.so", c"libxml2.2.dylib"] {
         // SAFETY: literal is NUL-terminated.
@@ -295,6 +296,17 @@ fn open_lib() -> Result<*mut c_void, String> {
     Err("could not dlopen libxml2.so.2 / libxml2.so / libxml2.2.dylib".to_string())
 }
 
+// wasm32: no dynamic loading on wasm32-wasip1 (wasi-libc ships no dlopen),
+// so libxml2 can never be resolved; every xml entry point that touches the
+// table panics with this message — same shape as the native no-.so
+// environment. A functional wasm xml arm needs a statically linked libxml2
+// (later increment; xml is not on the P5 --single serial subset).
+#[cfg(target_family = "wasm")]
+fn load() -> Result<&'static LibXml2, String> {
+    Err("xml is not supported on wasm32-wasip1 (no dynamic loading for libxml2)".to_string())
+}
+
+#[cfg(not(target_family = "wasm"))]
 fn load() -> Result<&'static LibXml2, String> {
     let handle = open_lib()?;
     macro_rules! resolve {

@@ -22,7 +22,7 @@ const PQMSG_EMPTY_QUERY_RESPONSE: u8 = b'I';
 // (rule 4): receive_slot is per-row hot at M1 and each arm is a direct call.
 pub enum DestReceiver<'mcx> {
     DoNothing,                             // donothingDR (DestNone); fully functional
-    DebugTup,                              // debugtupDR shell; callbacks in printtup.c
+    DebugTup(printtup::debugtup::DrDebugtup), // debugtupDR (printtup.c debugStartup/debugtup)
     PrintTup(printtup::DrPrinttup<'mcx>),  // printtup_create_DR(Remote|RemoteExecute)
     PrintSimple(printtup::printsimple::DrPrintsimple), // printsimpleDR (DestRemoteSimple)
     SpiPrintTup,                           // spi_printtupDR shell; callbacks in spi.c
@@ -41,6 +41,7 @@ impl<'mcx> DestReceiver<'mcx> {
     pub fn receive_slot(&mut self, slot: &mut SlotData<'mcx>) -> PgResult<bool> {
         match self {
             DestReceiver::DoNothing => Ok(true),
+            DestReceiver::DebugTup(dr) => dr.receive_slot(slot),
             DestReceiver::PrintTup(dr) => dr.receive_slot(slot),
             DestReceiver::PrintSimple(dr) => dr.receive_slot(slot),
             DestReceiver::SpiPrintTup => spi_seams::spi_printtup::call(slot),
@@ -62,6 +63,7 @@ impl<'mcx> DestReceiver<'mcx> {
     pub fn startup(&mut self, operation: i32, typeinfo: &TupleDescData<'_>) -> PgResult<()> {
         match self {
             DestReceiver::DoNothing => Ok(()),
+            DestReceiver::DebugTup(dr) => dr.startup(operation, typeinfo),
             DestReceiver::PrintTup(dr) => dr.startup(operation, typeinfo),
             DestReceiver::PrintSimple(dr) => dr.startup(operation, typeinfo),
             DestReceiver::SpiPrintTup => spi_seams::spi_dest_startup::call(operation, typeinfo),
@@ -86,10 +88,13 @@ impl<'mcx> DestReceiver<'mcx> {
     pub fn shutdown(&mut self) -> PgResult<()> {
         match self {
             DestReceiver::DoNothing
-            | DestReceiver::DebugTup
             | DestReceiver::SpiPrintTup
             | DestReceiver::CopyOut(_)
             | DestReceiver::SqlFunction(_) => Ok(()),
+            DestReceiver::DebugTup(dr) => {
+                dr.shutdown();
+                Ok(())
+            }
             DestReceiver::PrintTup(dr) => {
                 dr.shutdown();
                 Ok(())
@@ -118,7 +123,7 @@ impl<'mcx> DestReceiver<'mcx> {
     pub fn mydest(&self) -> CommandDest {
         match self {
             DestReceiver::DoNothing => CommandDest::None,
-            DestReceiver::DebugTup => CommandDest::Debug,
+            DestReceiver::DebugTup(_) => CommandDest::Debug,
             DestReceiver::PrintTup(dr) => dr.mydest,
             DestReceiver::PrintSimple(_) => CommandDest::RemoteSimple,
             DestReceiver::SpiPrintTup => CommandDest::Spi,
@@ -206,7 +211,7 @@ pub fn CreateDestReceiver<'mcx>(dest: CommandDest) -> DestReceiver<'mcx> {
             DestReceiver::PrintSimple(printtup::printsimple::printsimple_create_DR())
         }
         CommandDest::None => DestReceiver::DoNothing,
-        CommandDest::Debug => DestReceiver::DebugTup,
+        CommandDest::Debug => DestReceiver::DebugTup(printtup::debugtup::debugtup_create_DR()),
         CommandDest::Spi => DestReceiver::SpiPrintTup,
         CommandDest::Tuplestore => DestReceiver::Tuplestore(tstore_receiver::tstore_create_DR()),
         // Constructors owned by unported units or built directly by their

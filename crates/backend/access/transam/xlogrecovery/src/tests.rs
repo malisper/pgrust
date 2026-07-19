@@ -1,3 +1,8 @@
+//! NATIVE ARM ONLY: these units build fixtures through std::fs, which under
+//! `--cfg pgrust_sim` would split across the real disk and the SimVfs
+//! namespace; the sim-cfg recovery battery is tests/sim_crash_sweep.rs.
+#![cfg(not(pgrust_sim))]
+
 use super::*;
 use controldata_utils::{CheckPoint, ControlFileData, SIZEOF_CHECKPOINT};
 use transam_xlog::control_file::{
@@ -89,7 +94,12 @@ fn write_segment_with_checkpoint(dir: &std::path::Path, ckpt_loc: XLogRecPtr, ck
 
 fn install_timeline_seams() {
     static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(timeline::init_seams);
+    ONCE.call_once(|| {
+        timeline::init_seams();
+        if !timestamp_seams::get_current_timestamp::is_installed() {
+            timestamp_seams::get_current_timestamp::set(|| 0);
+        }
+    });
 }
 
 #[test]

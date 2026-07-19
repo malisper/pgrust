@@ -37,8 +37,18 @@
 //! the job envelope bind, which owns ResetLatch and signal drains.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+// pgsync by crate law (permit-s5, riding the dispatcher spawn door): the
+// jobs registry is locked by the REGISTERED dispatcher thread and by
+// registering backends — a raw std lock here would be the
+// permit-holder-blocks-raw watchdog wedge shape under the scheduler (the
+// s2 AVAILABLE-registry precedent). Native arm = identical std re-exports.
+use std::sync::Arc;
+
+use pgsync::{Mutex, OnceLock};
+use std::time::Duration;
+
+// DST P2 (contract §1.3): dispatcher deadlines in pg_clock's mono domain.
+use pg_clock::{Deadline, MonoStamp};
 
 use runtime::{MorselRange, QuerySpec, RgHandle, RgOutcome, Runtime, TaskSetSpec, TaskSetWork};
 use types_storage::latch::Latch;
@@ -154,10 +164,10 @@ pub type JobId = usize;
 
 enum Phase {
     /// Waiting for `due` (or a latch wake).
-    Idle { due: Instant },
+    Idle { due: Deadline },
     /// Cycle RG submitted; single-flight until its completion is seen.
     InFlight {
-        submitted: Instant,
+        submitted: MonoStamp,
         handle: RgHandle,
         waiter: runtime::CompletionWaiter,
         outcome: Arc<Mutex<Option<CycleOutcome>>>,
@@ -252,7 +262,7 @@ impl Dispatcher {
             jobs.push(JobEntry {
                 job,
                 // Due immediately; the dispatcher submits the Startup cycle.
-                phase: Phase::Idle { due: Instant::now() },
+                phase: Phase::Idle { due: Deadline::after(Duration::ZERO) },
                 never_ran: true,
                 wake_pending: false,
             });
@@ -346,11 +356,15 @@ fn submit_cycle(shared: &Arc<Shared>, id: JobId, job: Arc<dyn BgJob>, reason: Cy
     // finalize in last-out — registering there is the only race-free edge).
     // Already-complete => no wake will follow; self-unpark so the next park
     // falls through to the harvest.
+    // cfg(loom): register_waker_word does not exist on the loom arm (nothing
+    // parks a leader in the models — runtime rg.rs convention); the
+    // dispatcher's recheck cadence covers the harvest there.
+    #[cfg(not(loom))]
     if waiter.register_waker_word(shared.waker.load(Ordering::Acquire)) {
         shared.unpark_dispatcher();
     }
     Phase::InFlight {
-        submitted: Instant::now(),
+        submitted: MonoStamp::now(),
         handle,
         waiter,
         outcome,
@@ -362,7 +376,7 @@ fn submit_cycle(shared: &Arc<Shared>, id: JobId, job: Arc<dyn BgJob>, reason: Cy
 /// run the watchdog. Returns the park bound (None = nothing scheduled,
 /// untimed park with recheck cadence).
 fn dispatcher_pass(shared: &Arc<Shared>) -> Option<Duration> {
-    let now = Instant::now();
+    let now = MonoStamp::now();
     let mut nearest: Option<Duration> = None;
     let wd = Duration::from_millis(watchdog_ms());
 
@@ -376,7 +390,7 @@ fn dispatcher_pass(shared: &Arc<Shared>) -> Option<Duration> {
                 let cycle_outcome = outcome.lock().unwrap().take();
                 match (rg_outcome, cycle_outcome) {
                     (RgOutcome::Completed, Some(CycleOutcome::Sleep(d))) => {
-                        Phase::Idle { due: now + d }
+                        Phase::Idle { due: now.deadline_after(d) }
                     }
                     (RgOutcome::Completed, Some(CycleOutcome::Exit)) => {
                         jobs_teardown.push(id);
@@ -454,7 +468,7 @@ fn dispatcher_pass(shared: &Arc<Shared>) -> Option<Duration> {
                 // Latch wake: an is_set latch dispatches NOW.
                 if job.latch().is_some_and(|l| l.is_set()) {
                     Act::Dispatch(CycleReason::Wake)
-                } else if *due <= now || jobs[id].wake_pending {
+                } else if due.as_ns() <= now.as_ns() || jobs[id].wake_pending {
                     Act::Dispatch(CycleReason::Deadline)
                 } else {
                     // Stay idle: (re-)publish our waker as the latch's wake
@@ -468,16 +482,16 @@ fn dispatcher_pass(shared: &Arc<Shared>) -> Option<Duration> {
                         if l.is_set() {
                             Act::Dispatch(CycleReason::Wake)
                         } else {
-                            Act::IdleFor(*due - now)
+                            Act::IdleFor(Duration::from_nanos(due.as_ns().saturating_sub(now.as_ns())))
                         }
                     } else {
-                        Act::IdleFor(*due - now)
+                        Act::IdleFor(Duration::from_nanos(due.as_ns().saturating_sub(now.as_ns())))
                     }
                 }
             }
             Phase::InFlight { submitted, handle, stall_logged, .. } => Act::InFlightTick {
                 stall: !*stall_logged
-                    && now.duration_since(*submitted) >= wd
+                    && Duration::from_nanos(now.since_ns(*submitted)) >= wd
                     && handle.stats().tasks_claimed == 0,
             },
             Phase::Exited => Act::None,
@@ -530,7 +544,7 @@ fn dispatcher_pass(shared: &Arc<Shared>) -> Option<Duration> {
                         &mut jobs[id].phase
                     {
                         *stall_logged = true;
-                        let waited = now.duration_since(*submitted).as_millis();
+                        let waited = now.since_ns(*submitted) / 1_000_000;
                         elog_report(&format!(
                             "bgjobs: job \"{name}\" cycle not started {waited}ms after \
                              submission (pool saturated or wedged); deadline class is \

@@ -9,6 +9,7 @@ name = "timeline"
 path = "src/lib.rs"
 
 [dependencies]
+init_small = { path = "../../../utils/init/init_small" }
 libc = "0.2"
 mcx = { path = "../../../../_support/mcx" }
 types_core = { path = "../../../../_support/types/types_core" }
@@ -21,6 +22,7 @@ xlogrecovery_seams = { path = "../xlogrecovery_seams" }
 waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
 
 [dev-dependencies]
+guc_tables = { path = "../../../utils/misc/guc_tables" }
 xact_seams = { path = "../xact_seams" }
 pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
 ipc_seams = { path = "../../../storage/ipc/ipc_seams" }

@@ -341,6 +341,10 @@ pub struct PROCLOCKTAG {
     pub pad: u32,
 }
 
+// 64-bit layout pin (8-byte myLock pointer). On wasm32 (ILP32) the pointer
+// is 4 bytes and the blob key is 12 bytes; callers key on
+// size_of::<PROCLOCKTAG>() so the key stays internally consistent.
+#[cfg(not(target_family = "wasm"))]
 const _: () = assert!(core::mem::size_of::<PROCLOCKTAG>() == 16);
 
 impl PROCLOCKTAG {

@@ -718,7 +718,8 @@ fn datum_image_cmp<'mcx>(
     attlen: i16,
 ) -> PgResult<i32> {
     if attbyval {
-        let (x, y) = (a.as_usize() as u64, b.as_usize() as u64);
+        // Full 8-byte Datum words; as_usize() truncates byval values on wasm32.
+        let (x, y) = (a.as_u64(), b.as_u64());
         return Ok(if x == y {
             0
         } else if x < y {
@@ -840,7 +841,8 @@ fn datum_image_eq<'mcx>(
     attlen: i16,
 ) -> PgResult<bool> {
     if attbyval {
-        let (x, y) = (a.as_usize() as u64, b.as_usize() as u64);
+        // Full 8-byte Datum words; as_usize() truncates byval values on wasm32.
+        let (x, y) = (a.as_u64(), b.as_u64());
         return Ok(match attlen {
             1 => x as u8 == y as u8,
             2 => x as u16 == y as u16,

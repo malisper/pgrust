@@ -396,6 +396,9 @@ impl Drop for AcctRc {
             }
             {
                 let val = (*inner).val.assume_init_ref();
+                if debug_census::on() {
+                    debug_census::dropped(val.name.get());
+                }
                 let mut children = val.children.borrow_mut();
                 children.clear();
                 child_vec_give(core::mem::take(&mut *children));
@@ -487,6 +490,207 @@ fn notify_root_observer(acct: &AcctRc) {
         let f: fn(RootWeak) = unsafe { core::mem::transmute(p) };
         f(RootWeak(acct.downgrade()));
     }
+}
+
+/// Debug census of LIVE context nodes by name (FPBUDGET-1 instrumentation):
+/// process-global and thread-safe (atomics only), so a sampler on any thread
+/// sees contexts created — and never dropped — by dead session threads. OFF
+/// unless the owning binary calls [`debug_census_enable`] (env-gated there);
+/// when off the cost is one relaxed load per context create/destroy, both
+/// cold paths.
+pub mod debug_census {
+    use core::sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, AtomicUsize, Ordering::Relaxed};
+
+    static ENABLED: AtomicBool = AtomicBool::new(false);
+    const SLOTS: usize = 1024;
+    // Open-addressed by name POINTER (each &'static str literal site is one
+    // identity); snapshot merges equal strings from different sites.
+    static NAME_PTR: [AtomicPtr<u8>; SLOTS] = [const { AtomicPtr::new(core::ptr::null_mut()) }; SLOTS];
+    static NAME_LEN: [AtomicUsize; SLOTS] = [const { AtomicUsize::new(0) }; SLOTS];
+    static LIVE: [AtomicI64; SLOTS] = [const { AtomicI64::new(0) }; SLOTS];
+
+    pub fn enable() {
+        ENABLED.store(true, Relaxed);
+    }
+
+    #[inline]
+    pub fn on() -> bool {
+        ENABLED.load(Relaxed)
+    }
+
+    fn slot(name: &'static str) -> Option<usize> {
+        let p = name.as_ptr() as *mut u8;
+        let mut i = (p as usize >> 3) % SLOTS;
+        for _ in 0..SLOTS {
+            let cur = NAME_PTR[i].load(Relaxed);
+            if cur == p {
+                return Some(i);
+            }
+            if cur.is_null() {
+                match NAME_PTR[i].compare_exchange(core::ptr::null_mut(), p, Relaxed, Relaxed) {
+                    Ok(_) => {
+                        NAME_LEN[i].store(name.len(), Relaxed);
+                        return Some(i);
+                    }
+                    Err(existing) if existing == p => return Some(i),
+                    Err(_) => {}
+                }
+            }
+            i = (i + 1) % SLOTS;
+        }
+        None // table full: drop the sample (debug instrument, never fail)
+    }
+
+    #[cold]
+    pub(crate) fn created(name: &'static str) {
+        if let Some(i) = slot(name) {
+            LIVE[i].fetch_add(1, Relaxed);
+        }
+    }
+
+    #[cold]
+    pub(crate) fn dropped(name: &'static str) {
+        if let Some(i) = slot(name) {
+            LIVE[i].fetch_sub(1, Relaxed);
+        }
+    }
+
+    /// (name, live-count) rows with nonzero counts, merged by string equality.
+    pub fn snapshot() -> alloc::vec::Vec<(&'static str, i64)> {
+        let mut rows: alloc::vec::Vec<(&'static str, i64)> = alloc::vec::Vec::new();
+        for i in 0..SLOTS {
+            let p = NAME_PTR[i].load(Relaxed);
+            if p.is_null() {
+                continue;
+            }
+            let n = LIVE[i].load(Relaxed);
+            if n == 0 {
+                continue;
+            }
+            // SAFETY: p/len came from one &'static str literal.
+            let name: &'static str = unsafe {
+                core::str::from_utf8_unchecked(core::slice::from_raw_parts(
+                    p,
+                    NAME_LEN[i].load(Relaxed),
+                ))
+            };
+            match rows.iter_mut().find(|(rn, _)| *rn == name) {
+                Some(r) => r.1 += n,
+                None => rows.push((name, n)),
+            }
+        }
+        rows.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        rows
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Session-lifetime roots (FPBUDGET-1). C's process-per-backend model frees a
+// backend's TopMemoryContext estate at process exit for free; the thread model
+// must free it explicitly or every session leaks its whole cache estate into
+// the shared process (measured ~2.2 MiB RSS per seed under the simharness
+// DDL/session-churn campaign, C flat on the identical stream). The sink is a
+// thread-local phased LIFO owned by mcxt_stats (std side); the backend runner
+// drains it at clean task end. TLS payloads stay ManuallyDrop / !needs_drop —
+// no hot-path TLS state machine is introduced; registration is once per root
+// per thread (cold).
+//
+// PHASES (v2, the train-29 bounce fix). C's exit runs in a strict documented
+// order: before_shmem_exit callbacks (ShutdownPostgres ->
+// AbortOutOfAnyTransaction -> AtAbort_Portals/AtCleanup_Portals, "now safe to
+// release portal memory") run FIRST, with every memory context still alive;
+// memory itself dies LAST, all at once at process exit, with no per-object
+// destructors at all. A single flat LIFO cannot express that: cleanup order
+// then depends on lazy first-use registration order, and a cleanup that drops
+// an object graph (a portal) can run after the context owning that graph's
+// allocations was already freed — drop glue then deallocates through a dead
+// arena, panics inside a destructor, and a panic in Drop is process-fatal in
+// a threaded server (the t29 SIGABRT). The port of C's order:
+//   Portals — object-graph teardown that must see EVERY context alive
+//             (portal manager; C's AtCleanup_Portals slot).
+//   State   — TLS state clears releasing global-heap Rc estates
+//             (caches, scratch holders; C's exit-callback slot).
+//   Roots   — session-root context frees, wholesale, no per-entry glue
+//             (C's memory-dies-at-process-exit slot). Always last.
+// Within a phase the order stays LIFO (C's callback discipline).
+// ---------------------------------------------------------------------------
+
+type SessionCleanup = alloc::boxed::Box<dyn FnOnce()>;
+
+/// Teardown phase (drain order: Portals, then State, then Roots).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionCleanupPhase {
+    /// Object-graph teardown needing every context alive (portal manager).
+    Portals,
+    /// TLS state clears (caches, scratch holders). The default.
+    State,
+    /// Session-root context frees; run only after all of the above.
+    Roots,
+}
+
+static SESSION_CLEANUP_SINK: core::sync::atomic::AtomicPtr<()> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+/// Install the per-thread cleanup-list push (mcxt_stats owns the lists).
+pub fn set_session_cleanup_sink(f: fn(SessionCleanupPhase, SessionCleanup)) {
+    SESSION_CLEANUP_SINK.store(f as *mut (), core::sync::atomic::Ordering::Release);
+}
+
+/// Register a cleanup to run at this thread's session teardown (State phase,
+/// LIFO within the phase). With no sink installed (unit tests, wasm
+/// single-shot) the closure is dropped unrun — exactly the old
+/// leak-at-thread-exit behavior.
+pub fn register_session_cleanup(f: SessionCleanup) {
+    register_session_cleanup_phase(SessionCleanupPhase::State, f);
+}
+
+/// [`register_session_cleanup`] with an explicit phase.
+pub fn register_session_cleanup_phase(phase: SessionCleanupPhase, f: SessionCleanup) {
+    let p = SESSION_CLEANUP_SINK.load(core::sync::atomic::Ordering::Acquire);
+    if !p.is_null() {
+        // SAFETY: only set_session_cleanup_sink stores here, always from
+        // fn(SessionCleanupPhase, SessionCleanup).
+        let sink: fn(SessionCleanupPhase, SessionCleanup) = unsafe { core::mem::transmute(p) };
+        sink(phase, f);
+    }
+}
+
+/// Session-lifetime root context: the `Box::leak(Box::new(MemoryContext))`
+/// shape (stable `&'static` handle, no TLS dtor state machine) plus a
+/// registered teardown that frees the context — and everything in it,
+/// wholesale, without running per-entry drop glue — when the session ends.
+/// Holders are per-thread statics that are never touched after teardown (the
+/// thread is exiting), so the dangling `&'static` is unreachable by
+/// construction.
+pub fn session_root(name: &'static str) -> &'static MemoryContext {
+    session_root_from(MemoryContext::new(name))
+}
+
+/// [`session_root`] for pre-built contexts (bump/limit variants).
+pub fn session_root_from(ctx: MemoryContext) -> &'static MemoryContext {
+    session_root_mut(ctx)
+}
+
+/// [`session_root_from`] with a `&'static mut` handle (reset-per-use
+/// scratch holders). The cleanup closure holds only the address, never a
+/// reference, so the exclusive borrow stays unique until teardown.
+pub fn session_root_mut(ctx: MemoryContext) -> &'static mut MemoryContext {
+    let raw: *mut MemoryContext = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(ctx));
+    let addr = raw as usize;
+    // Roots phase: the arena dies only after every Portals/State cleanup has
+    // dropped the object graphs whose allocations live in it (C: memory dies
+    // at process exit, after all exit callbacks).
+    register_session_cleanup_phase(
+        SessionCleanupPhase::Roots,
+        alloc::boxed::Box::new(move || {
+            // SAFETY: sole owner (from Box::into_raw above); runs at most
+            // once, on the owning thread, after which nothing dereferences
+            // the handle.
+            drop(unsafe { alloc::boxed::Box::from_raw(addr as *mut MemoryContext) });
+        }),
+    );
+    // SAFETY: heap allocation, freed only by the closure above.
+    unsafe { &mut *raw }
 }
 
 // Allocator-retention release hook (mimalloc mi_collect shape); installed by
@@ -661,6 +865,9 @@ impl MemoryContext {
             children.push(acct.downgrade());
         } else {
             notify_root_observer(&acct);
+        }
+        if debug_census::on() {
+            debug_census::created(name);
         }
         MemoryContext {
             acct,

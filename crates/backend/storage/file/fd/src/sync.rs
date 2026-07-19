@@ -24,23 +24,51 @@ pub fn pg_fsync(fd: RawFd) -> i32 {
     {
         // fsync portability assert: files must be opened writable, directories
         // read-only (fd.c:391-424). fstat failure is ignored.
-        let mut st: libc::stat = unsafe { std::mem::zeroed() };
-        // SAFETY: st is a valid out-param; fd may be any descriptor.
-        if unsafe { libc::fstat(fd, &mut st) } == 0 {
-            // SAFETY: F_GETFL reads the descriptor flags.
-            let desc_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) } & libc::O_ACCMODE;
-            if st.st_mode & libc::S_IFMT == libc::S_IFDIR {
-                debug_assert!(desc_flags == libc::O_RDONLY);
-            } else {
-                debug_assert!(desc_flags != libc::O_RDONLY);
+        let mut st = vfs::FileInfo::zeroed();
+        if vfs::fstat(fd, &mut st) == 0 {
+            // DST P4 finding F1 (Ruling 3 Class C mirror): this introspection
+            // must not run raw against a vfs-minted fd. Under sim the fd is
+            // foreign to the kernel, fcntl returns -1, and `-1 & O_ACCMODE`
+            // reads as O_ACCMODE — the directory arm then debug-panicked on
+            // EVERY dir fsync (fsync_parent_path), and the unwind leaked the
+            // transient desc into the FdState TLS teardown, whose posix-side
+            // OwnedFd drop aborted the process (Rust IO-safety EBADF check).
+            // Posix-only until the Vfs grows an accmode probe; the sim domain
+            // loses only this debug assert.
+            //
+            // t28-train recurrence of the SAME class on wasm32: F_GETFL is
+            // emulated from fd_fdstat_get RIGHTS, and a WASI shim may grant
+            // blanket rights (the web harness's pgrust-wasi.js returns
+            // ALL_RIGHTS for every fd) — a directory fd then reads O_RDWR and
+            // the dir arm panics in the shutdown checkpoint's dir fsyncs
+            // (wasmtime reports honest rights, which is why wasm-boot-e2e
+            // never tripped it). Kernel-posix fds only.
+            #[cfg(not(any(pgrust_sim, target_family = "wasm")))]
+            {
+                // SAFETY: F_GETFL reads the descriptor flags. Debug-only
+                // fd-state introspection, not IO — stays raw (vfs carve-out,
+                // posix-minted fds only).
+                let desc_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) } & libc::O_ACCMODE;
+                if st.is_dir() {
+                    debug_assert!(desc_flags == libc::O_RDONLY);
+                } else {
+                    debug_assert!(desc_flags != libc::O_RDONLY);
+                }
             }
+            #[cfg(any(pgrust_sim, target_family = "wasm"))]
+            let _ = &st;
         }
         set_errno(0);
     }
 
-    // HAVE_FSYNC_WRITETHROUGH platforms only (macOS here).
+    // HAVE_FSYNC_WRITETHROUGH platforms only (macOS here). Before the GUC
+    // machinery installs the slot (early startup, unit tests), behave as the
+    // default: wal_sync_method != fsync_writethrough (C's macOS default is
+    // fsync), i.e. fall through to pg_fsync_no_writethrough.
     #[cfg(target_os = "macos")]
-    if guc_tables::vars::wal_sync_method.read() == WAL_SYNC_METHOD_FSYNC_WRITETHROUGH {
+    if guc_tables::vars::wal_sync_method.installed()
+        && guc_tables::vars::wal_sync_method.read() == WAL_SYNC_METHOD_FSYNC_WRITETHROUGH
+    {
         return pg_fsync_writethrough(fd);
     }
     #[cfg(not(target_os = "macos"))]
@@ -54,8 +82,7 @@ pub fn pg_fsync_no_writethrough(fd: RawFd) -> i32 {
         return 0;
     }
     loop {
-        // SAFETY: fsync(2) on a caller-owned descriptor.
-        let rc = unsafe { libc::fsync(fd) };
+        let rc = vfs::fsync(fd);
         if rc == -1 && get_errno() == libc::EINTR {
             continue;
         }
@@ -67,38 +94,17 @@ pub fn pg_fsync_writethrough(fd: RawFd) -> i32 {
     if !enable_fsync() {
         return 0;
     }
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    {
-        // SAFETY: F_FULLFSYNC on a caller-owned descriptor.
-        if unsafe { libc::fcntl(fd, libc::F_FULLFSYNC, 0) } == -1 {
-            -1
-        } else {
-            0
-        }
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-    {
-        let _ = fd;
-        set_errno(libc::ENOSYS);
-        -1
-    }
+    // F_FULLFSYNC-where-available is PosixVfs's platform split; ENOSYS/-1
+    // elsewhere, exactly as before.
+    vfs::fsync_writethrough(fd)
 }
-
-// The libc crate doesn't declare fdatasync for apple targets; macOS has it.
-#[cfg(target_os = "macos")]
-extern "C" {
-    fn fdatasync(fd: libc::c_int) -> libc::c_int;
-}
-#[cfg(not(target_os = "macos"))]
-use libc::fdatasync;
 
 pub fn pg_fdatasync(fd: RawFd) -> i32 {
     if !enable_fsync() {
         return 0;
     }
     loop {
-        // SAFETY: fdatasync(2) on a caller-owned descriptor.
-        let rc = unsafe { fdatasync(fd) };
+        let rc = vfs::fdatasync(fd);
         if rc == -1 && get_errno() == libc::EINTR {
             continue;
         }
@@ -106,12 +112,133 @@ pub fn pg_fdatasync(fd: RawFd) -> i32 {
     }
 }
 
+// Thin C-shaped raw-fd/path helpers for the fenced callers (DST P1 inc-3):
+// the xlog/SLRU/COPY clusters hold raw kernel fds from BasicOpenFile /
+// OpenTransientFile or do fire-and-forget namespace ops; these are their
+// fd-crate front onto the VFS. Errno stays visible, no retry policy added.
+
+/// unlink(2) shape: 0 or -1/errno. NOT durable_unlink — no parent fsync.
+#[inline]
+pub fn pg_unlink(path: &str) -> i32 {
+    vfs::unlink(&vfd::cpath(path))
+}
+
+/// close(2) shape for raw descriptors owned by the caller.
+#[inline]
+pub fn pg_close(fd: RawFd) -> i32 {
+    vfs::close(fd)
+}
+
+/// stat(2)/lstat(2) shape: 0 with `out` filled, or -1/errno.
+#[inline]
+pub fn pg_stat(path: &str, out: &mut vfs::FileInfo) -> i32 {
+    vfs::stat(&vfd::cpath(path), out)
+}
+
+#[inline]
+pub fn pg_lstat(path: &str, out: &mut vfs::FileInfo) -> i32 {
+    vfs::lstat(&vfd::cpath(path), out)
+}
+
+/// fstat(2) shape on a caller-owned raw descriptor.
+#[inline]
+pub fn pg_fstat(fd: RawFd, out: &mut vfs::FileInfo) -> i32 {
+    vfs::fstat(fd, out)
+}
+
+/// readlink(2) shape: bytes written (no NUL) or -1/errno.
+#[inline]
+pub fn pg_readlink(path: &str, buf: &mut [u8]) -> isize {
+    vfs::read_link(&vfd::cpath(path), buf)
+}
+
+/// rename(2) shape: 0 or -1/errno. NOT durable_rename — no fsyncs.
+#[inline]
+pub fn pg_rename(from: &str, to: &str) -> i32 {
+    vfs::rename(&vfd::cpath(from), &vfd::cpath(to))
+}
+
+/// Whole-file read through the VFS (provider-seam reroutes: C sites whose
+/// shape is "read the whole small file" — relcache init files, pgstat
+/// snapshots, postmaster.opts — but whose DOMAIN is the datadir, so std::fs
+/// would bypass the sim namespace). Err(errno); the short-transfer loop is
+/// fd-layer retry policy, per the vfs contract.
+pub fn read_whole_file(path: &str) -> Result<Vec<u8>, i32> {
+    let cp = vfd::cpath(path);
+    let fd = vfs::open(&cp, libc::O_RDONLY, 0);
+    if fd < 0 {
+        return Err(get_errno());
+    }
+    let size = vfs::file_size(fd);
+    if size < 0 {
+        let e = get_errno();
+        vfs::close(fd);
+        return Err(e);
+    }
+    let mut buf = vec![0u8; size as usize];
+    let mut off: usize = 0;
+    while off < buf.len() {
+        let n = vfs::pread(fd, &mut buf[off..], off as libc::off_t);
+        if n < 0 {
+            let e = get_errno();
+            if e == libc::EINTR {
+                continue;
+            }
+            vfs::close(fd);
+            return Err(e);
+        }
+        if n == 0 {
+            buf.truncate(off); // shrank underneath us: return what exists
+            break;
+        }
+        off += n as usize;
+    }
+    vfs::close(fd);
+    Ok(buf)
+}
+
+/// Whole-file create/replace through the VFS (the write-side twin of
+/// [`read_whole_file`]): O_CREAT|O_TRUNC|O_WRONLY at pg_file_create_mode,
+/// optional fsync before close. Err(errno).
+pub fn write_whole_file(path: &str, data: &[u8], do_sync: bool) -> Result<(), i32> {
+    let cp = vfd::cpath(path);
+    let fd = vfs::open(
+        &cp,
+        libc::O_CREAT | libc::O_TRUNC | libc::O_WRONLY,
+        vfd::pg_file_create_mode() as libc::mode_t,
+    );
+    if fd < 0 {
+        return Err(get_errno());
+    }
+    let mut off: usize = 0;
+    while off < data.len() {
+        let n = vfs::pwrite(fd, &data[off..], off as libc::off_t);
+        if n < 0 && get_errno() == libc::EINTR {
+            continue;
+        }
+        if n <= 0 {
+            let e = if get_errno() == 0 { libc::ENOSPC } else { get_errno() };
+            vfs::close(fd);
+            return Err(e);
+        }
+        off += n as usize;
+    }
+    if do_sync && pg_fsync(fd) != 0 {
+        let e = get_errno();
+        vfs::close(fd);
+        return Err(e);
+    }
+    if vfs::close(fd) < 0 {
+        return Err(get_errno());
+    }
+    Ok(())
+}
+
 pub fn pg_file_exists(name: &str) -> PgResult<bool> {
     let path = vfd::cpath(name);
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: NUL-terminated path; st is a valid out-param.
-    if unsafe { libc::stat(path.as_ptr(), &mut st) } == 0 {
-        return Ok(st.st_mode & libc::S_IFMT != libc::S_IFDIR);
+    let mut st = vfs::FileInfo::zeroed();
+    if vfs::stat(&path, &mut st) == 0 {
+        return Ok(!st.is_dir());
     }
     let en = get_errno();
     if !(en == libc::ENOENT || en == libc::ENOTDIR || en == libc::EACCES) {
@@ -138,10 +265,7 @@ pub fn pg_flush_data(fd: RawFd, offset: i64, nbytes: i64) -> PgResult<()> {
     }
 
     loop {
-        // SAFETY: sync_file_range(2) on a caller-owned descriptor.
-        let rc = unsafe {
-            libc::sync_file_range(fd, offset, nbytes, libc::SYNC_FILE_RANGE_WRITE)
-        };
+        let rc = vfs::flush_range(fd, offset, nbytes);
         if rc != 0 {
             if rc == libc::EINTR {
                 continue;
@@ -165,7 +289,19 @@ pub fn pg_flush_data(fd: RawFd, offset: i64, nbytes: i64) -> PgResult<()> {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+// wasm32: pg_flush_data is a writeback HINT (fd.c commentary); WASI has no
+// mmap/msync/sync_file_range, and C built with none of the HAVE_* flush
+// mechanisms compiles this to a no-op — same arm here.
+#[cfg(target_family = "wasm")]
+pub fn pg_flush_data(_fd: RawFd, _offset: i64, _nbytes: i64) -> PgResult<()> {
+    Ok(())
+}
+
+// DST P1 carve-out (contract §2 inc-2): this non-Linux writeback hint is an
+// mmap/msync arm — mmap is permanently out of Vfs scope, so the arm stays
+// cfg'd and raw (allowlist row retained; already cfg-out for wasm per the
+// blocker table). Only the size probe goes through the VFS.
+#[cfg(not(any(target_os = "linux", target_family = "wasm")))]
 pub fn pg_flush_data(fd: RawFd, offset: i64, mut nbytes: i64) -> PgResult<()> {
     use ::types_error::FATAL;
 
@@ -179,8 +315,7 @@ pub fn pg_flush_data(fd: RawFd, offset: i64, mut nbytes: i64) -> PgResult<()> {
     }
 
     if offset == 0 && nbytes == 0 {
-        // SAFETY: lseek(2) on a caller-owned descriptor.
-        nbytes = unsafe { libc::lseek(fd, 0, libc::SEEK_END) } as i64;
+        nbytes = vfs::file_size(fd) as i64;
         if nbytes < 0 {
             ereport(WARNING)
                 .with_saved_errno(get_errno())
@@ -244,8 +379,7 @@ pub fn pg_flush_data(fd: RawFd, offset: i64, mut nbytes: i64) -> PgResult<()> {
 
 pub(crate) fn pg_ftruncate(fd: RawFd, length: i64) -> i32 {
     loop {
-        // SAFETY: ftruncate(2) on a caller-owned descriptor.
-        let ret = unsafe { libc::ftruncate(fd, length as libc::off_t) };
+        let ret = vfs::ftruncate(fd, length as libc::off_t);
         if ret == -1 && get_errno() == libc::EINTR {
             continue;
         }
@@ -256,8 +390,7 @@ pub(crate) fn pg_ftruncate(fd: RawFd, length: i64) -> i32 {
 pub fn pg_truncate(path: &str, length: i64) -> i32 {
     let cpath = vfd::cpath(path);
     loop {
-        // SAFETY: truncate(2) on a NUL-terminated path.
-        let ret = unsafe { libc::truncate(cpath.as_ptr(), length as libc::off_t) };
+        let ret = vfs::truncate_path(&cpath, length as libc::off_t);
         if ret == -1 && get_errno() == libc::EINTR {
             continue;
         }
@@ -314,8 +447,7 @@ pub fn durable_rename(oldfile: &str, newfile: &str, elevel: ErrorLevel) -> PgRes
 
     let cold = vfd::cpath(oldfile);
     let cnew = vfd::cpath(newfile);
-    // SAFETY: both paths are NUL-terminated.
-    if unsafe { libc::rename(cold.as_ptr(), cnew.as_ptr()) } < 0 {
+    if vfs::rename(&cold, &cnew) < 0 {
         ereport(elevel)
             .with_saved_errno(get_errno())
             .errcode_for_file_access()
@@ -337,8 +469,7 @@ pub fn durable_rename(oldfile: &str, newfile: &str, elevel: ErrorLevel) -> PgRes
 
 pub fn durable_unlink(fname: &str, elevel: ErrorLevel) -> PgResult<i32> {
     let cpath = vfd::cpath(fname);
-    // SAFETY: NUL-terminated path.
-    if unsafe { libc::unlink(cpath.as_ptr()) } < 0 {
+    if vfs::unlink(&cpath) < 0 {
         ereport(elevel)
             .with_saved_errno(get_errno())
             .errcode_for_file_access()
@@ -445,18 +576,20 @@ pub(crate) fn walkdir(
         }
         let subpath = format!("{path}/{}", de.d_name);
 
-        let meta = if process_symlinks {
-            std::fs::metadata(&subpath)
+        let csub = vfd::cpath(&subpath);
+        let mut info = vfs::FileInfo::zeroed();
+        let rc = if process_symlinks {
+            vfs::stat(&csub, &mut info)
         } else {
-            std::fs::symlink_metadata(&subpath)
+            vfs::lstat(&csub, &mut info)
         };
-        match meta {
-            Ok(m) if m.is_file() => action.apply(&subpath, false, elevel)?,
-            Ok(m) if m.is_dir() => walkdir(&subpath, action, false, elevel)?,
-            // lstat failure was reported by ReadDir's helpers at elevel in C;
-            // non-file non-dir entries are skipped.
-            _ => {}
+        if rc == 0 && info.is_file() {
+            action.apply(&subpath, false, elevel)?;
+        } else if rc == 0 && info.is_dir() {
+            walkdir(&subpath, action, false, elevel)?;
         }
+        // lstat failure was reported by ReadDir's helpers at elevel in C;
+        // non-file non-dir entries are skipped.
     }
 
     let dir_present = dir.is_some();
@@ -505,10 +638,11 @@ fn datadir_fsync_fname(fname: &str, isdir: bool, elevel: ErrorLevel) -> PgResult
 
 fn unlink_if_exists_fname(fname: &str, isdir: bool, elevel: ErrorLevel) -> PgResult<()> {
     if isdir {
-        if let Err(e) = std::fs::remove_dir(fname) {
-            if e.raw_os_error() != Some(libc::ENOENT) {
+        if vfs::rmdir(&vfd::cpath(fname)) != 0 {
+            let en = get_errno();
+            if en != libc::ENOENT {
                 ereport(elevel)
-                    .with_saved_errno(e.raw_os_error().unwrap_or(0))
+                    .with_saved_errno(en)
                     .errcode_for_file_access()
                     .errmsg(format!("could not remove directory \"{fname}\": %m"))
                     .finish(loc("unlink_if_exists_fname"))?;
@@ -521,6 +655,9 @@ fn unlink_if_exists_fname(fname: &str, isdir: bool, elevel: ErrorLevel) -> PgRes
 }
 
 // do_syncfs (fd.c:3563, HAVE_SYNCFS): failures logged at LOG, never fatal.
+// DST P1 carve-out: syncfs(2) is a whole-filesystem sync with no Vfs op
+// (Linux-only, recovery_init_sync_method=syncfs boot path); stays raw with
+// its allowlist row retained. The open/close around it are fd-mediated.
 #[cfg(target_os = "linux")]
 fn do_syncfs(path: &str) -> PgResult<()> {
     let fd = OpenTransientFile(path, libc::O_RDONLY)?;
@@ -557,11 +694,13 @@ pub fn SyncDataDirectory() -> PgResult<()> {
         return Ok(());
     }
 
-    let xlog_is_symlink = match std::fs::symlink_metadata("pg_wal") {
-        Ok(meta) => meta.file_type().is_symlink(),
-        Err(e) => {
+    let xlog_is_symlink = {
+        let mut info = vfs::FileInfo::zeroed();
+        if vfs::lstat(&vfd::cpath("pg_wal"), &mut info) == 0 {
+            info.is_symlink()
+        } else {
             ereport(LOG)
-                .with_saved_errno(e.raw_os_error().unwrap_or(0))
+                .with_saved_errno(get_errno())
                 .errcode_for_file_access()
                 .errmsg("could not stat file \"pg_wal\": %m")
                 .finish(loc("SyncDataDirectory"))?;
@@ -643,27 +782,26 @@ pub fn RemovePgTempFilesInDir(tmpdirname: &str, missing_ok: bool, unlink_all: bo
         let rm_path = format!("{tmpdirname}/{}", temp_de.d_name);
 
         if unlink_all || temp_de.d_name.starts_with(PG_TEMP_FILE_PREFIX) {
-            match std::fs::symlink_metadata(&rm_path) {
-                Err(_) => continue,
-                Ok(meta) if meta.is_dir() => {
-                    RemovePgTempFilesInDir(&rm_path, false, true)?;
-                    if let Err(e) = std::fs::remove_dir(&rm_path) {
-                        ereport(LOG)
-                            .with_saved_errno(e.raw_os_error().unwrap_or(0))
-                            .errcode_for_file_access()
-                            .errmsg(format!("could not remove directory \"{rm_path}\": %m"))
-                            .finish(loc("RemovePgTempFilesInDir"))?;
-                    }
+            let crm = vfd::cpath(&rm_path);
+            let mut info = vfs::FileInfo::zeroed();
+            if vfs::lstat(&crm, &mut info) != 0 {
+                continue;
+            }
+            if info.is_dir() {
+                RemovePgTempFilesInDir(&rm_path, false, true)?;
+                if vfs::rmdir(&crm) != 0 {
+                    ereport(LOG)
+                        .with_saved_errno(get_errno())
+                        .errcode_for_file_access()
+                        .errmsg(format!("could not remove directory \"{rm_path}\": %m"))
+                        .finish(loc("RemovePgTempFilesInDir"))?;
                 }
-                Ok(_) => {
-                    if let Err(e) = std::fs::remove_file(&rm_path) {
-                        ereport(LOG)
-                            .with_saved_errno(e.raw_os_error().unwrap_or(0))
-                            .errcode_for_file_access()
-                            .errmsg(format!("could not remove file \"{rm_path}\": %m"))
-                            .finish(loc("RemovePgTempFilesInDir"))?;
-                    }
-                }
+            } else if vfs::unlink(&crm) != 0 {
+                ereport(LOG)
+                    .with_saved_errno(get_errno())
+                    .errcode_for_file_access()
+                    .errmsg(format!("could not remove file \"{rm_path}\": %m"))
+                    .finish(loc("RemovePgTempFilesInDir"))?;
             }
         } else {
             ereport(LOG)
@@ -696,9 +834,9 @@ fn RemovePgTempRelationFilesInDbspace(dbspacedirname: &str) -> PgResult<()> {
             continue;
         }
         let rm_path = format!("{dbspacedirname}/{}", de.d_name);
-        if let Err(e) = std::fs::remove_file(&rm_path) {
+        if vfs::unlink(&vfd::cpath(&rm_path)) != 0 {
             ereport(LOG)
-                .with_saved_errno(e.raw_os_error().unwrap_or(0))
+                .with_saved_errno(get_errno())
                 .errcode_for_file_access()
                 .errmsg(format!("could not remove file \"{rm_path}\": %m"))
                 .finish(loc("RemovePgTempRelationFilesInDbspace"))?;

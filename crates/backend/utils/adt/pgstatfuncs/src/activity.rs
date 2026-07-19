@@ -1,12 +1,12 @@
 use ::datum::Datum;
 use ::types_core::{BackendType, Oid, ProcNumber, INVALID_PROC_NUMBER};
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use ::types_fmgr::{varlena_result, FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 
 use backend_status_seams::BackendState;
 
 const PG_STAT_GET_ACTIVITY_COLS: usize = 31;
-const ROLE_PG_READ_ALL_STATS: Oid = 3375;
+pub(crate) const ROLE_PG_READ_ALL_STATS: Oid = 3375;
 
 pub(crate) fn text_datum(fcinfo: &Fcinfo, s: &str) -> PgResult<Datum> {
     Ok(varlena_result(varlena::cstring_to_text(fcinfo.result_mcx(), s.as_bytes())?))
@@ -20,6 +20,7 @@ pub(crate) fn has_pgstat_permissions(userid: Oid) -> PgResult<bool> {
 
 // C: sockaddr_storage ss_family; on both linux and macos targets the libc
 // sockaddr_storage layout starts with (len,) family.
+#[cfg(not(target_family = "wasm"))]
 pub(crate) fn ss_family(addr: &[u8]) -> i32 {
     let mut ss: libc::sockaddr_storage = unsafe { core::mem::zeroed() };
     let n = core::mem::size_of::<libc::sockaddr_storage>().min(addr.len());
@@ -29,11 +30,61 @@ pub(crate) fn ss_family(addr: &[u8]) -> i32 {
     ss.ss_family as i32
 }
 
+// wasm32: no sockaddr_storage in the wasi libc crate; musl's layout puts
+// sa_family_t (u16) at offset 0 (same shape as ip::sockaddr_family's arm).
+// Sessions are socketless on WASI, so the stored address is always zeroed.
+#[cfg(target_family = "wasm")]
+pub(crate) fn ss_family(addr: &[u8]) -> i32 {
+    if addr.len() < 2 {
+        return 0;
+    }
+    u16::from_ne_bytes([addr[0], addr[1]]) as i32
+}
+
+// wasm32: the wasi libc crate exposes no AF_*; musl values (ip::sys shape).
+#[cfg(not(target_family = "wasm"))]
+pub(crate) use libc::{AF_INET, AF_INET6, AF_UNIX};
+#[cfg(target_family = "wasm")]
+pub(crate) const AF_INET: i32 = 2;
+#[cfg(target_family = "wasm")]
+pub(crate) const AF_INET6: i32 = 10;
+#[cfg(target_family = "wasm")]
+pub(crate) const AF_UNIX: i32 = 1;
+
 pub(crate) fn aux_pid_get_proc(pid: i32) -> Option<&'static types_storage::storage::PGPROC> {
     let procs = &lmgr_proc::ProcGlobal().allProcs;
     procs
         .iter()
         .find(|p| p.pid.load(core::sync::atomic::Ordering::Relaxed) == pid && pid != 0)
+}
+
+// C pgstatfuncs.c:528-541 / 947-956 / 992-997 shared shape: numeric host and
+// service strings for the stored client sockaddr via pg_getnameinfo_all
+// (NI_NUMERICHOST | NI_NUMERICSERV), the host cleaned of any IPv6 '%zone'
+// (network.c clean_ipv6_addr, exported by builtins.h for exactly these
+// callers). None mirrors C's ret != 0 arm (columns go NULL).
+pub(crate) fn client_addr_port(sa: &::ip::SockAddr) -> Option<(String, String)> {
+    let mut remote_host = String::new();
+    let mut remote_port = String::new();
+    let ret = ::ip::pg_getnameinfo_all(
+        sa,
+        Some(&mut remote_host),
+        Some(&mut remote_port),
+        ::ip::sys::NI_NUMERICHOST | ::ip::sys::NI_NUMERICSERV,
+    );
+    if ret != 0 {
+        return None;
+    }
+    adt_network::builtins::clean_ipv6_addr(ss_family(&sa.addr), &mut remote_host);
+    Some((remote_host, remote_port))
+}
+
+// C pgstatfuncs.c:542-543 / 958-959: DirectFunctionCall1(inet_in,
+// CStringGetDatum(remote_host)) — a numeric-host string always parses.
+pub(crate) fn inet_datum(fcinfo: &Fcinfo, host: &str) -> PgResult<Datum> {
+    let v = adt_network::network_in(host, false, None)?.expect("hard-error path returns Err");
+    let (img, len) = v.image();
+    types_fmgr::byref_result(fcinfo.result_mcx(), &img[..len])
 }
 
 pub fn fc_pg_stat_get_activity(
@@ -175,21 +226,45 @@ pub fn fc_pg_stat_get_activity(
                 nulls[11] = true;
             }
 
-            if be.st_clientaddr.addr.iter().all(|&b| b == 0) {
+            // C pgstatfuncs.c:515-577: "A zeroed client addr means we don't
+            // know" — no-socket (background) backends leave all three NULL.
+            if ::ip::sockaddr_is_all_zeros(&be.st_clientaddr) {
                 nulls[12] = true;
                 nulls[13] = true;
                 nulls[14] = true;
             } else {
                 match ss_family(&be.st_clientaddr.addr) {
-                    f if f == libc::AF_INET as i32 || f == libc::AF_INET6 as i32 => panic!(
-                        "pg_stat_get_activity (pgstatfuncs.c): inet client_addr \
-                         datum unported — adt network lane"
-                    ),
-                    f if f == libc::AF_UNIX as i32 => {
+                    // C:525-556 — inet datum of the numeric remote host,
+                    // st_clienthostname only when log_hostname captured one,
+                    // client_port = atoi(remote_port).
+                    f if f == AF_INET as i32 || f == AF_INET6 as i32 => {
+                        match client_addr_port(&be.st_clientaddr) {
+                            Some((remote_host, remote_port)) => {
+                                values[12] = inet_datum(fcinfo, &remote_host)?;
+                                if !be.st_clienthostname.is_empty() {
+                                    values[13] = text_datum(fcinfo, &be.st_clienthostname)?;
+                                } else {
+                                    nulls[13] = true;
+                                }
+                                // C:549 atoi() — NI_NUMERICSERV is all digits.
+                                values[14] =
+                                    Datum::from_i32(remote_port.parse().unwrap_or(0));
+                            }
+                            None => {
+                                nulls[12] = true;
+                                nulls[13] = true;
+                                nulls[14] = true;
+                            }
+                        }
+                    }
+                    // C:558-569 — unix sockets report NULL host and -1 port,
+                    // distinguishable from no-permission / error rows.
+                    f if f == AF_UNIX as i32 => {
                         nulls[12] = true;
                         nulls[13] = true;
                         values[14] = Datum::from_i32(-1);
                     }
+                    // C:570-576 — unknown address type, should never happen.
                     _ => {
                         nulls[12] = true;
                         nulls[13] = true;
@@ -241,10 +316,16 @@ pub fn fc_pg_stat_get_activity(
             }
 
             if be.st_gss {
-                panic!(
-                    "pg_stat_get_activity (pgstatfuncs.c): PgBackendGSSStatus \
-                     unported — gssapi lane"
-                );
+                // unported: PgBackendGSSStatus — gssapi lane. Defensive
+                // only: every bestart site sets st_gss = false (no-GSS
+                // build), so this arm is unreachable today.
+                return Err(Box::new(
+                    PgError::error(
+                        "pg_stat_get_activity over a GSSAPI-authenticated backend \
+                         is not yet implemented",
+                    )
+                    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+                ));
             }
             values[25] = Datum::from_bool(false);
             nulls[26] = true;
@@ -274,4 +355,90 @@ pub fn fc_pg_stat_get_activity(
     }
 
     Ok(srf.finish(fcinfo))
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod tests {
+    use super::*;
+
+    fn sockaddr_in4(ip: [u8; 4], port: u16) -> ::ip::SockAddr {
+        // SAFETY: zeroed sockaddr_in is a valid all-defaults value.
+        let mut sin: libc::sockaddr_in = unsafe { core::mem::zeroed() };
+        sin.sin_family = libc::AF_INET as libc::sa_family_t;
+        sin.sin_port = port.to_be();
+        // s_addr is network byte order: the array is already big-endian.
+        sin.sin_addr.s_addr = u32::from_ne_bytes(ip);
+        let mut sa = ::ip::SockAddr::zeroed();
+        let n = core::mem::size_of::<libc::sockaddr_in>();
+        // SAFETY: n <= sizeof(sockaddr_storage) == sa.addr.len().
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                core::ptr::from_ref(&sin).cast::<u8>(),
+                sa.addr.as_mut_ptr(),
+                n,
+            );
+        }
+        sa.salen = n as u32;
+        sa
+    }
+
+    fn sockaddr_in6(ip: [u8; 16], port: u16, scope_id: u32) -> ::ip::SockAddr {
+        // SAFETY: zeroed sockaddr_in6 is a valid all-defaults value.
+        let mut sin6: libc::sockaddr_in6 = unsafe { core::mem::zeroed() };
+        sin6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+        sin6.sin6_port = port.to_be();
+        sin6.sin6_addr.s6_addr = ip;
+        sin6.sin6_scope_id = scope_id;
+        let mut sa = ::ip::SockAddr::zeroed();
+        let n = core::mem::size_of::<libc::sockaddr_in6>();
+        // SAFETY: n <= sizeof(sockaddr_storage) == sa.addr.len().
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                core::ptr::from_ref(&sin6).cast::<u8>(),
+                sa.addr.as_mut_ptr(),
+                n,
+            );
+        }
+        sa.salen = n as u32;
+        sa
+    }
+
+    #[test]
+    fn client_addr_port_renders_ipv4() {
+        let (host, port) = client_addr_port(&sockaddr_in4([192, 0, 2, 5], 45678)).unwrap();
+        assert_eq!(host, "192.0.2.5");
+        assert_eq!(port, "45678");
+        assert_eq!(port.parse::<i32>().unwrap(), 45678);
+    }
+
+    #[test]
+    fn client_addr_port_renders_ipv6_loopback() {
+        let mut ip6 = [0u8; 16];
+        ip6[15] = 1;
+        let (host, port) = client_addr_port(&sockaddr_in6(ip6, 40001, 0)).unwrap();
+        assert_eq!(host, "::1");
+        assert_eq!(port, "40001");
+    }
+
+    #[test]
+    fn client_addr_port_strips_the_ipv6_zone() {
+        // fe80::1 with a scope id: getnameinfo appends %<zone>; the
+        // clean_ipv6_addr pass (C pgstatfuncs.c:541) truncates it.
+        let mut ip6 = [0u8; 16];
+        ip6[0] = 0xfe;
+        ip6[1] = 0x80;
+        ip6[15] = 1;
+        let (host, port) = client_addr_port(&sockaddr_in6(ip6, 40002, 1)).unwrap();
+        assert_eq!(host, "fe80::1");
+        assert_eq!(port, "40002");
+    }
+
+    #[test]
+    fn inet_datum_input_parses_for_numeric_hosts() {
+        // The DirectFunctionCall1(inet_in, ...) leg: the numeric-host strings
+        // client_addr_port produces are always valid inet input.
+        for host in ["192.0.2.5", "::1", "fe80::1", "::ffff:192.0.2.5"] {
+            assert!(adt_network::network_in(host, false, None).unwrap().is_some());
+        }
+    }
 }

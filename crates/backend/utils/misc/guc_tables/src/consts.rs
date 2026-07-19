@@ -14,6 +14,12 @@ pub const COMPUTE_QUERY_ID_REGRESS: i32 = 3;
 pub const PGSS_TRACK_NONE: i32 = 0;
 pub const PGSS_TRACK_TOP: i32 = 1;
 pub const PGSS_TRACK_ALL: i32 = 2;
+// explain_state.h ExplainFormat (pinned; the explain crate's enum repr
+// matches — auto_explain.log_format stores these directly).
+pub const EXPLAIN_FORMAT_TEXT: i32 = 0;
+pub const EXPLAIN_FORMAT_XML: i32 = 1;
+pub const EXPLAIN_FORMAT_JSON: i32 = 2;
+pub const EXPLAIN_FORMAT_YAML: i32 = 3;
 pub const CONSTRAINT_EXCLUSION_OFF: i32 = 0;
 pub const CONSTRAINT_EXCLUSION_ON: i32 = 1;
 pub const CONSTRAINT_EXCLUSION_PARTITION: i32 = 2;

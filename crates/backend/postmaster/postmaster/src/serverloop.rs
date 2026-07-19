@@ -42,9 +42,8 @@ pub fn ConfigurePostmasterWaitSet(accept_connections: bool) -> PgResult<()> {
     })
 }
 
-/// DetermineSleepTime. Crashed-worker wakeup scheduling is unreachable this
-/// phase (registration rejects bgw_restart_time >= 0), leaving the C scan's
-/// forget-only arms.
+/// DetermineSleepTime (postmaster.c): with crashed restartable workers, sleep
+/// just long enough that they restart on schedule.
 pub fn DetermineSleepTime() -> i64 {
     let (shutdown, abort_start_time, start_worker_needed, have_crashed_worker) = with_pm(|pm| {
         (pm.shutdown, pm.abort_start_time, pm.start_worker_needed, pm.have_crashed_worker)
@@ -61,6 +60,7 @@ pub fn DetermineSleepTime() -> i64 {
         return 0;
     }
 
+    let mut next_wakeup: i64 = 0;
     for idx in bgworker::registered_indexes() {
         if bgworker::rw_crashed_at(idx) == 0 {
             continue;
@@ -71,17 +71,26 @@ pub fn DetermineSleepTime() -> i64 {
             bgworker::ForgetBackgroundWorker(idx);
             continue;
         }
-        panic!("DetermineSleepTime: bgworker restart scheduling unported (bgw_restart_time >= 0)");
+        let this_wakeup =
+            bgworker::rw_crashed_at(idx) + (bgworker::rw_restart_time(idx) as i64) * 1000 * 1000;
+        if next_wakeup == 0 || this_wakeup < next_wakeup {
+            next_wakeup = this_wakeup;
+        }
+    }
+
+    if next_wakeup != 0 {
+        // Microsecond TimestampTz difference, clamped like C (0 .. 60s), in ms.
+        let now = timestamp_seams::get_current_timestamp::call();
+        let ms = (next_wakeup - now).max(0) / 1000;
+        return ms.min(60 * 1000);
     }
 
     60 * 1000
 }
 
 fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    // DST P2 (contract §1.2): crash-loop window stamps on pg_clock.
+    pg_clock::wall_secs()
 }
 
 pub fn ServerLoop() -> PgResult<i32> {
@@ -145,7 +154,7 @@ pub fn ServerLoop() -> PgResult<i32> {
             with_pm(|pm| pm.avlauncher_needs_signal = false);
             let launcher = with_pm(|pm| pm.autovac_launcher);
             if let Some(launcher) = launcher {
-                signal_child(&launcher, libc::SIGUSR2);
+                signal_child(&launcher, procsignal::signums::SIGUSR2);
             }
         }
 
@@ -166,7 +175,7 @@ pub fn ServerLoop() -> PgResult<i32> {
                 1758,
                 "ServerLoop",
             );
-            TerminateChildren(if send_abort { libc::SIGABRT } else { libc::SIGKILL });
+            TerminateChildren(if send_abort { procsignal::signums::SIGABRT } else { procsignal::signums::SIGKILL });
             with_pm(|pm| pm.abort_start_time = 0);
         }
 
@@ -179,7 +188,7 @@ pub fn ServerLoop() -> PgResult<i32> {
                     1779,
                     "ServerLoop",
                 );
-                crate::handle_pm_shutdown_request_signal(libc::SIGQUIT);
+                crate::handle_pm_shutdown_request_signal(procsignal::signums::SIGQUIT);
             }
             last_lockfile_recheck_time = now;
         }
@@ -381,6 +390,8 @@ pub fn LaunchMissingBackgroundProcesses() {
     if with_pm(|pm| pm.slotsync_worker.is_none() && pm.pm_state == PMState::PM_HOT_STANDBY)
         && with_pm(|pm| pm.shutdown <= crate::SmartShutdown)
         && guc_tables::vars::sync_replication_slots.read()
+        && slotsync::ValidateSlotSyncParams(false).unwrap_or(false)
+        && slotsync::SlotSyncWorkerCanRestart()
     {
         let c = StartChildProcess(BackendType::SlotsyncWorker);
         with_pm(|pm| pm.slotsync_worker = c);

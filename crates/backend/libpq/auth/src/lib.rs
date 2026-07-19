@@ -1,9 +1,9 @@
 //! auth.c: ClientAuthentication and the per-method handlers. Live end-to-end:
-//! trust, reject / implicit-reject (SQLSTATE 28000 exact), peer, and the
+//! trust, reject / implicit-reject (SQLSTATE 28000 exact), peer, ident
+//! (RFC 1413 ident_inet), cert (CheckCertAuth, hostssl-only), and the
 //! password family — password / md5 / scram-sha-256 via CheckPWChallengeAuth +
-//! CheckSASLAuth. Loud: ident / radius / oauth. gss / sspi / pam /
-//! bsd / ldap / cert never reach dispatch — hba rejects those methods in
-//! this build.
+//! CheckSASLAuth. Loud: radius / oauth. gss / sspi / pam / bsd / ldap never
+//! reach dispatch — hba rejects those methods in this build.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -13,6 +13,7 @@
 mod tests;
 
 use elog::{elog, ereport};
+use hba::pg_isblank;
 use mcx::MemoryContext;
 use types_core::init::{
     uaBSD, uaCert, uaGSS, uaIdent, uaImplicitReject, uaLDAP, uaMD5, uaOAuth, uaPAM, uaPassword,
@@ -207,7 +208,7 @@ pub fn ClientAuthentication(port: &mut Port) -> PgResult<()> {
         m if m == uaReject => return reject_arm(port, true),
         m if m == uaImplicitReject => return reject_arm(port, false),
         m if m == uaPeer => auth_peer(port)?,
-        m if m == uaIdent => deferred_arm("ident", "ident_inet"),
+        m if m == uaIdent => ident_inet(port)?,
         m if m == uaMD5 || m == uaSCRAM => CheckPWChallengeAuth(port, &mut logdetail)?,
         m if m == uaPassword => CheckPasswordAuth(port, &mut logdetail)?,
         m if m == uaRADIUS => deferred_arm("radius", "CheckRADIUSAuth"),
@@ -258,6 +259,328 @@ fn deferred_arm(method: &str, what: &str) -> i32 {
     panic!("ClientAuthentication: \"{method}\" arm deferred — {what} unported");
 }
 
+pub const IDENT_USERNAME_MAX: usize = 512;
+#[cfg(not(target_family = "wasm"))]
+const IDENT_PORT: u16 = 113;
+
+// interpret_ident_response (auth.c:1590): parse the reply to an RFC 1413
+// Ident query. A normal "USERID" response yields Some(user name); anything
+// else is None. Byte-walk with a NUL-past-end cursor, matching C's string
+// scan; C's out-of-string scans (only reachable when blank-skipping consumes
+// the final CR) become bounded failure arms here.
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
+fn interpret_ident_response(ident_response: &[u8]) -> Option<String> {
+    // C reads a NUL-terminated buffer; stop at the first NUL like strlen.
+    let nul = ident_response
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(ident_response.len());
+    let resp = &ident_response[..nul];
+    let len = resp.len();
+    let at = |i: usize| resp.get(i).copied().unwrap_or(0);
+
+    // Ident's response, in the telnet tradition, should end in crlf (\r\n).
+    if len < 2 || resp[len - 2] != b'\r' {
+        return None;
+    }
+
+    let mut cursor = 0usize;
+    while at(cursor) != b':' && at(cursor) != b'\r' {
+        cursor += 1; // skip port field
+    }
+    if at(cursor) != b':' {
+        return None;
+    }
+
+    // We're positioned to colon before response type field.
+    cursor += 1; // Go over colon
+    while pg_isblank(at(cursor)) {
+        cursor += 1; // skip blanks
+    }
+    let mut response_type: Vec<u8> = Vec::with_capacity(79);
+    while at(cursor) != b':'
+        && at(cursor) != b'\r'
+        && !pg_isblank(at(cursor))
+        && response_type.len() < 79
+    {
+        if cursor >= len {
+            return None;
+        }
+        response_type.push(at(cursor));
+        cursor += 1;
+    }
+    while pg_isblank(at(cursor)) {
+        cursor += 1; // skip blanks
+    }
+    if response_type != b"USERID" {
+        return None;
+    }
+
+    // It's a USERID response.  Good.  "cursor" should be pointing to the
+    // colon that precedes the operating system type.
+    if at(cursor) != b':' {
+        return None;
+    }
+    cursor += 1; // Go over colon
+    // Skip over operating system field.
+    while at(cursor) != b':' && at(cursor) != b'\r' {
+        if cursor >= len {
+            return None;
+        }
+        cursor += 1;
+    }
+    if at(cursor) != b':' {
+        return None;
+    }
+    cursor += 1; // Go over colon
+    while pg_isblank(at(cursor)) {
+        cursor += 1; // skip blanks
+    }
+    // Rest of line is user name.  Copy it over.
+    let mut ident_user: Vec<u8> = Vec::new();
+    while cursor < len && at(cursor) != b'\r' && ident_user.len() < IDENT_USERNAME_MAX {
+        ident_user.push(at(cursor));
+        cursor += 1;
+    }
+    Some(String::from_utf8_lossy(&ident_user).into_owned())
+}
+
+// Closes the Ident socket on every exit path (C's ident_inet_done label).
+#[cfg(not(target_family = "wasm"))]
+struct SocketGuard(i32);
+#[cfg(not(target_family = "wasm"))]
+impl Drop for SocketGuard {
+    fn drop(&mut self) {
+        // SAFETY: the guard owns the fd; closed exactly once.
+        unsafe { libc::close(self.0) };
+    }
+}
+
+// wasm32: WASI has no resolver and no TCP sockets; pg_getaddrinfo_all always
+// fails there, which is C's silent "we don't expect this to happen" arm.
+#[cfg(target_family = "wasm")]
+fn ident_inet(_port: &Port) -> PgResult<i32> {
+    Ok(STATUS_ERROR)
+}
+
+// Talk to the ident server on "remote_addr" and find out who owns the tcp
+// connection to "local_addr". If the username is successfully retrieved,
+// check the usermap.
+#[cfg(not(target_family = "wasm"))]
+fn ident_inet(port: &Port) -> PgResult<i32> {
+    use ip::{pg_getaddrinfo_all, pg_getnameinfo_all, AddrInfoHint, PgAddrInfo};
+
+    // Might look a little weird to first convert it to text and then back to
+    // sockaddr, but it's protocol independent.
+    let mut remote_addr_s = String::new();
+    let mut remote_port = String::new();
+    let mut local_addr_s = String::new();
+    let mut local_port = String::new();
+    pg_getnameinfo_all(
+        &port.raddr,
+        Some(&mut remote_addr_s),
+        Some(&mut remote_port),
+        ip::sys::NI_NUMERICHOST | ip::sys::NI_NUMERICSERV,
+    );
+    pg_getnameinfo_all(
+        &port.laddr,
+        Some(&mut local_addr_s),
+        Some(&mut local_port),
+        ip::sys::NI_NUMERICHOST | ip::sys::NI_NUMERICSERV,
+    );
+
+    let ident_port = IDENT_PORT.to_string();
+    let hints = AddrInfoHint {
+        flags: ip::sys::AI_NUMERICHOST,
+        family: ip::sockaddr_family(&port.raddr),
+        socktype: ip::sys::SOCK_STREAM,
+    };
+    let mut ident_serv: Vec<PgAddrInfo> = Vec::new();
+    let rc = pg_getaddrinfo_all(Some(&remote_addr_s), Some(&ident_port), &hints, &mut ident_serv);
+    if rc != 0 || ident_serv.is_empty() {
+        return Ok(STATUS_ERROR); // we don't expect this to happen
+    }
+
+    let hints = AddrInfoHint {
+        flags: ip::sys::AI_NUMERICHOST,
+        family: ip::sockaddr_family(&port.laddr),
+        socktype: ip::sys::SOCK_STREAM,
+    };
+    let mut la: Vec<PgAddrInfo> = Vec::new();
+    let rc = pg_getaddrinfo_all(Some(&local_addr_s), None, &hints, &mut la);
+    if rc != 0 || la.is_empty() {
+        return Ok(STATUS_ERROR); // we don't expect this to happen
+    }
+
+    let serv = ident_serv[0];
+    // SAFETY: family/socktype/protocol come straight from the resolver.
+    let sock_fd = unsafe { libc::socket(serv.family, serv.socktype, serv.protocol) };
+    if sock_fd < 0 {
+        let errnum = elog::errno::current_errno();
+        ereport(LOG)
+            .with_saved_errno(errnum)
+            .errcode_for_socket_access()
+            .errmsg("could not create socket for Ident connection: %m")
+            .finish(loc(1742, "ident_inet"))?;
+        return Ok(STATUS_ERROR);
+    }
+    let _guard = SocketGuard(sock_fd);
+
+    let ident_user = ident_inet_exchange(
+        sock_fd,
+        &la[0],
+        &serv,
+        &remote_addr_s,
+        &local_addr_s,
+        &remote_port,
+        &local_port,
+        &ident_port,
+    )?;
+
+    if let Some(ident_user) = ident_user {
+        // Success!  Store the identity, then check the usermap. Note that
+        // setting the authenticated identity is done before checking the
+        // usermap, because at this point authentication has succeeded.
+        set_authn_id(port, &ident_user)?;
+        let hba = port.hba.as_ref().expect("ident_inet: port->hba is NULL");
+        return hba::check_usermap(
+            hba.usermap.as_deref(),
+            port.user_name.as_deref().unwrap_or(""),
+            &ident_user,
+            false,
+        );
+    }
+    Ok(STATUS_ERROR)
+}
+
+// The bind/connect/query/response body of C's ident_inet; the caller holds
+// the SocketGuard so every `?`/early return closes the socket.
+#[cfg(not(target_family = "wasm"))]
+#[allow(clippy::too_many_arguments)]
+fn ident_inet_exchange(
+    sock_fd: i32,
+    la: &ip::PgAddrInfo,
+    ident_serv: &ip::PgAddrInfo,
+    remote_addr_s: &str,
+    local_addr_s: &str,
+    remote_port: &str,
+    local_port: &str,
+    ident_port: &str,
+) -> PgResult<Option<String>> {
+    // Bind to the address which the client originally contacted, otherwise
+    // the ident server won't be able to match up the right connection. This
+    // is necessary if the PostgreSQL server is running on an IP alias.
+    // SAFETY: la.addr holds salen valid sockaddr bytes.
+    let rc = unsafe { libc::bind(sock_fd, la.addr.addr.as_ptr().cast(), la.addr.salen) };
+    if rc != 0 {
+        let errnum = elog::errno::current_errno();
+        ereport(LOG)
+            .with_saved_errno(errnum)
+            .errcode_for_socket_access()
+            .errmsg(format!(
+                "could not bind to local address \"{local_addr_s}\": %m"
+            ))
+            .finish(loc(1755, "ident_inet"))?;
+        return Ok(None);
+    }
+
+    // SAFETY: ident_serv.addr holds salen valid sockaddr bytes.
+    let rc = unsafe {
+        libc::connect(
+            sock_fd,
+            ident_serv.addr.addr.as_ptr().cast(),
+            ident_serv.addr.salen,
+        )
+    };
+    if rc != 0 {
+        let errnum = elog::errno::current_errno();
+        ereport(LOG)
+            .with_saved_errno(errnum)
+            .errcode_for_socket_access()
+            .errmsg(format!(
+                "could not connect to Ident server at address \"{remote_addr_s}\", port {ident_port}: %m"
+            ))
+            .finish(loc(1767, "ident_inet"))?;
+        return Ok(None);
+    }
+
+    // The query we send to the Ident server.
+    let ident_query = format!("{remote_port},{local_port}\r\n");
+
+    // loop in case send is interrupted
+    let (rc, errnum) = loop {
+        postgres_seams::check_for_interrupts::call()?;
+        // SAFETY: the query buffer is valid for its length.
+        let rc = unsafe { libc::send(sock_fd, ident_query.as_ptr().cast(), ident_query.len(), 0) };
+        let errnum = if rc < 0 { elog::errno::current_errno() } else { 0 };
+        if rc < 0 && errnum == libc::EINTR {
+            continue;
+        }
+        break (rc, errnum);
+    };
+    if rc < 0 {
+        ereport(LOG)
+            .with_saved_errno(errnum)
+            .errcode_for_socket_access()
+            .errmsg(format!(
+                "could not send query to Ident server at address \"{remote_addr_s}\", port {ident_port}: %m"
+            ))
+            .finish(loc(1789, "ident_inet"))?;
+        return Ok(None);
+    }
+
+    let mut ident_response = [0u8; 80 + IDENT_USERNAME_MAX];
+    let (rc, errnum) = loop {
+        postgres_seams::check_for_interrupts::call()?;
+        // SAFETY: the buffer is valid for len-1 bytes (C keeps a NUL slot).
+        let rc = unsafe {
+            libc::recv(
+                sock_fd,
+                ident_response.as_mut_ptr().cast(),
+                ident_response.len() - 1,
+                0,
+            )
+        };
+        let errnum = if rc < 0 { elog::errno::current_errno() } else { 0 };
+        if rc < 0 && errnum == libc::EINTR {
+            continue;
+        }
+        break (rc, errnum);
+    };
+    if rc < 0 {
+        ereport(LOG)
+            .with_saved_errno(errnum)
+            .errcode_for_socket_access()
+            .errmsg(format!(
+                "could not receive response from Ident server at address \"{remote_addr_s}\", port {ident_port}: %m"
+            ))
+            .finish(loc(1806, "ident_inet"))?;
+        return Ok(None);
+    }
+
+    let response = &ident_response[..rc as usize];
+    let ident_user = interpret_ident_response(response);
+    if ident_user.is_none() {
+        // C prints the NUL-terminated buffer with %s.
+        let printable = &response[..response.iter().position(|&b| b == 0).unwrap_or(response.len())];
+        ereport(LOG)
+            .errmsg(format!(
+                "invalidly formatted response from Ident server: \"{}\"",
+                String::from_utf8_lossy(printable)
+            ))
+            .finish(loc(1817, "ident_inet"))?;
+    }
+    Ok(ident_user)
+}
+
+// wasm32: no peer sockets and no credential surface on WASI; ENOSYS routes
+// auth_peer to C's "peer authentication is not supported on this platform".
+#[cfg(target_family = "wasm")]
+fn getpeereid(_sock: i32) -> Result<(libc::uid_t, libc::gid_t), i32> {
+    Err(libc::ENOSYS)
+}
+
+#[cfg(not(target_family = "wasm"))]
 fn getpeereid(sock: i32) -> Result<(libc::uid_t, libc::gid_t), i32> {
     #[cfg(target_os = "linux")]
     {
@@ -287,6 +610,20 @@ fn getpeereid(sock: i32) -> Result<(libc::uid_t, libc::gid_t), i32> {
     }
 }
 
+// wasm32: getpeereid always ENOSYSes above (no passwd db exists either);
+// the twin stops at the same "not supported" report as the native ENOSYS arm.
+#[cfg(target_family = "wasm")]
+fn auth_peer(port: &Port) -> PgResult<i32> {
+    let errnum = getpeereid(port.sock).expect_err("wasm getpeereid always fails");
+    debug_assert_eq!(errnum, libc::ENOSYS);
+    ereport(LOG)
+        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .errmsg("peer authentication is not supported on this platform")
+        .finish(loc(1874, "auth_peer"))?;
+    Ok(STATUS_ERROR)
+}
+
+#[cfg(not(target_family = "wasm"))]
 fn auth_peer(port: &Port) -> PgResult<i32> {
     let (uid, _gid) = match getpeereid(port.sock) {
         Ok(v) => v,
@@ -347,7 +684,7 @@ fn auth_peer(port: &Port) -> PgResult<i32> {
 
 fn reject_arm(port: &Port, explicit_reject: bool) -> PgResult<()> {
     let mut hostinfo = String::new();
-    ip::pg_getnameinfo_all(&port.raddr, Some(&mut hostinfo), None, libc::NI_NUMERICHOST);
+    ip::pg_getnameinfo_all(&port.raddr, Some(&mut hostinfo), None, ip::sys::NI_NUMERICHOST);
 
     let encryption_state = if port.ssl_in_use {
         "SSL encryption"
@@ -600,7 +937,7 @@ pub(crate) fn port_auth_method(port: &Port) -> UserAuth {
 fn gai_strerror(errcode: i32) -> String {
     // SAFETY: gai_strerror returns a static NUL-terminated C string.
     unsafe {
-        let p = libc::gai_strerror(errcode);
+        let p = ip::sys::gai_strerror(errcode);
         if p.is_null() {
             return String::new();
         }

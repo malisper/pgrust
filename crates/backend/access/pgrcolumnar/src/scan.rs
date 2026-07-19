@@ -2293,7 +2293,9 @@ impl<'mcx> CbScanDescData<'mcx> {
             return None;
         }
         let row = self.granule * GRANULE_ROWS + self.staged_lo;
-        debug_assert!(row + self.staged_rows <= u32::MAX as usize + 1);
+        // u64 arithmetic: `u32::MAX as usize + 1` overflows on 32-bit
+        // (wasm32) usize; identical bound on 64-bit targets.
+        debug_assert!(row as u64 + self.staged_rows as u64 <= u32::MAX as u64 + 1);
         Some(((self.rg as u64) << 32) | row as u64)
     }
 
@@ -2621,7 +2623,8 @@ fn analyze_extract_task(
                 out.bytes.extend_from_slice(unsafe { core::slice::from_raw_parts(p, len) });
                 out.words.push(off);
             } else {
-                out.words.push(d.as_usize() as u64);
+                // Full Datum word; as_usize() truncates byval 8-byte values on wasm32.
+                out.words.push(d.as_u64());
             }
         }
     }
@@ -2917,7 +2920,8 @@ mod analyze_gather_tests {
                     let len = unsafe { ::types_tuple::varatt::varsize_any(p) };
                     vals.push(unsafe { core::slice::from_raw_parts(p, len) }.to_vec());
                 } else {
-                    vals.push(d.as_usize().to_le_bytes().to_vec());
+                    // Full 8-byte Datum word (as_usize() is 4 bytes on wasm32).
+                    vals.push(d.as_u64().to_le_bytes().to_vec());
                 }
             }
             out.push(vals);

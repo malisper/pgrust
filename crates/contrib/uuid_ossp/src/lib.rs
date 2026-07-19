@@ -100,10 +100,9 @@ std::thread_local! {
 const GREGORIAN_TO_UNIX_100NS: u64 = 0x01B2_1DD2_1381_4000;
 
 fn now_uuid_ticks() -> u64 {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    now.as_secs() * 10_000_000 + (now.subsec_nanos() as u64) / 100 + GREGORIAN_TO_UNIX_100NS
+    // DST P2 (contract §1.2): SystemTime -> pg_clock::wall_ns() (pre-epoch
+    // clamps to 0, as duration_since().unwrap_or_default() did).
+    pg_clock::wall_ns().max(0) as u64 / 100 + GREGORIAN_TO_UNIX_100NS
 }
 
 fn v1_state() -> PgResult<V1State> {

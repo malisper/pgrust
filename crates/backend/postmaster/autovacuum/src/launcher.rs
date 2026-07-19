@@ -77,21 +77,21 @@ pub fn AutoVacLauncherMain(startup_data: &StartupData) -> ! {
 
     {
         use procsignal::ThreadSignalHandler::{Fallible, Ignore, Simple};
-        procsignal::pqsignal_thread(libc::SIGHUP, Simple(interrupt::SignalHandlerForConfigReload));
-        procsignal::pqsignal_thread(libc::SIGINT, Simple(postgres::StatementCancelHandler));
+        procsignal::pqsignal_thread(procsignal::signums::SIGHUP, Simple(interrupt::SignalHandlerForConfigReload));
+        procsignal::pqsignal_thread(procsignal::signums::SIGINT, Simple(postgres::StatementCancelHandler));
         procsignal::pqsignal_thread(
-            libc::SIGTERM,
+            procsignal::signums::SIGTERM,
             Simple(interrupt::SignalHandlerForShutdownRequest),
         );
         timeout_seams::initialize_timeouts::call();
-        procsignal::pqsignal_thread(libc::SIGPIPE, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGPIPE, Ignore);
         procsignal::pqsignal_thread(
-            libc::SIGUSR1,
+            procsignal::signums::SIGUSR1,
             Simple(procsignal::procsignal_sigusr1_handler),
         );
-        procsignal::pqsignal_thread(libc::SIGUSR2, Simple(avl_sigusr2_handler));
-        procsignal::pqsignal_thread(libc::SIGFPE, Fallible(postgres::FloatExceptionHandler));
-        procsignal::pqsignal_thread(libc::SIGCHLD, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGUSR2, Simple(avl_sigusr2_handler));
+        procsignal::pqsignal_thread(procsignal::signums::SIGFPE, Fallible(postgres::FloatExceptionHandler));
+        procsignal::pqsignal_thread(procsignal::signums::SIGCHLD, Ignore);
     }
 
     let init = (|| -> PgResult<()> {
@@ -107,14 +107,27 @@ pub fn AutoVacLauncherMain(startup_data: &StartupData) -> ! {
 
     miscinit::SetProcessingMode(ProcessingMode::NormalProcessing);
 
-    // sigsetjmp(local_sigjmp_buf) equivalent.
+    // sigsetjmp(local_sigjmp_buf) equivalent. Loud panics (unported callees
+    // reached from rebuild_database_list / do_start_worker / catalog scans)
+    // must convert to ERROR here, exactly like the worker's boundaries
+    // (worker.rs AutoVacWorkerMain): an escaped panic reaches
+    // launch_backend's SIGABRT mapping and the reaper's launcher arm treats
+    // any non-zero exit as a crash -> HandleChildCrash cycles the whole
+    // cluster, re-fired on every relaunch. proc_exit / elog-PANIC payloads
+    // re-raise inside pg_error_from_panic and keep their semantics.
     let mut first = true;
     loop {
         if !first {
             std::thread::sleep(std::time::Duration::from_secs(1));
         }
         first = false;
-        match launcher_body() {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(launcher_body))
+            .unwrap_or_else(|payload| {
+                Err(Box::new(crate::worker::pg_error_from_panic(
+                    payload,
+                    "autovacuum launcher panicked",
+                )))
+            }) {
             Ok(never) => match never {},
             Err(err) => abort_cleanup(&err),
         }
@@ -140,7 +153,14 @@ fn abort_cleanup(err: &PgError) {
         aio_seams::pgaio_error_cleanup::call();
     }
     bufmgr::UnlockBuffers();
-    let _ = resowner::ReleaseAuxProcessResources(false);
+    // C guards this call ("this is probably dead code, but let's be safe:"):
+    // the launcher is not an aux process and never creates the owner, and an
+    // error raised outside any transaction reaches here with it null —
+    // unguarded, the callee's !owner.is_null() assertion is a panic INSIDE
+    // the recovery path, which escapes every catch and cycles the cluster.
+    if !resowner::AuxProcessResourceOwner().is_null() {
+        let _ = resowner::ReleaseAuxProcessResources(false);
+    }
     bufmgr::AtEOXact_Buffers(false);
     let _ = smgr::AtEOXact_SMgr();
     let _ = fd::AtEOXact_Files(false);
@@ -216,6 +236,24 @@ fn launcher_body() -> PgResult<Never> {
     }
 
     shmem::set_launcher_pid(g::MyProcPid());
+
+    // Debug-only containment probe (autovacuum-e2e.sh probe 5): panic once
+    // inside the launcher's sigsetjmp-equivalent region; the boundary in
+    // AutoVacLauncherMain must convert it to a reported ERROR and retry —
+    // never a cluster crash-restart.
+    #[cfg(debug_assertions)]
+    {
+        // Process-global one-shot (NOT a thread_local: fires once per
+        // postmaster lifetime so a relaunched launcher doesn't re-panic,
+        // and the pinned session TLS census stays untouched).
+        static LAUNCHER_PANIC_FIRED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if std::env::var("PGRUST_TEST_AUTOVAC_PANIC_LAUNCHER").is_ok()
+            && !LAUNCHER_PANIC_FIRED.swap(true, Relaxed)
+        {
+            panic!("injected autovacuum launcher panic for containment test");
+        }
+    }
 
     rebuild_database_list(InvalidOid)?;
 

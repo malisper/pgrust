@@ -85,10 +85,17 @@ fn detoast_datum<'mcx>(mcx: Mcx<'mcx>, d: Datum) -> PgResult<mcx::PgVec<'mcx, u8
     detoast::detoast_attr(mcx, raw)
 }
 
+// C: TextDatumGetCString — the element datum is a full varlena (header
+// included); open_image strips the 1B/4B header or detoasts, yielding the
+// payload alone. Routing the full detoast_attr image into text_to_cstring
+// (which takes a post-VARDATA_ANY payload) prepended the 4-byte header to
+// every option name/value ('option "@\0\0\0include-xids" is unknown').
 fn text_datum_to_string(mcx: Mcx<'_>, d: Datum) -> PgResult<String> {
-    let img = detoast_datum(mcx, d)?;
-    let bytes = varlena::text_to_cstring(mcx, &img)?;
-    Ok(String::from_utf8_lossy(&bytes[..bytes.len().saturating_sub(1)]).into_owned())
+    let ptr = d.as_usize() as *const u8;
+    // SAFETY: a live varlena readable through its full VARSIZE_ANY.
+    let raw = unsafe { core::slice::from_raw_parts(ptr, types_tuple::varatt::varsize_any(ptr)) };
+    let payload = varlena::open_image(mcx, raw)?;
+    Ok(String::from_utf8_lossy(payload.as_bytes()).into_owned())
 }
 
 fn pg_logical_slot_get_changes_guts(
@@ -97,6 +104,16 @@ fn pg_logical_slot_get_changes_guts(
     confirm: bool,
     binary: bool,
 ) -> PgResult<Datum> {
+    // C captures CurrentResourceOwner at entry (logicalfuncs.c old_resowner):
+    // decoding replays each transaction inside an internal subtransaction
+    // (reorderbuffer.c BeginInternalSubTransaction/Rollback...), whose exit
+    // resets CurrentResourceOwner to the transaction owner. A caller that
+    // runs us under a portal-owned resowner (CTAS, INSERT ... SELECT) then
+    // unregisters its executor snapshot against the wrong owner at
+    // ExecutorEnd ("snapshot reference ... is not owned by resource owner
+    // TopTransaction"). decode_loop restores this value after the loop.
+    let old_resowner = resowner_seams::current_resource_owner::call();
+
     CheckSlotPermissions()?;
     CheckLogicalDecodingRequirements()?;
 
@@ -168,10 +185,13 @@ fn pg_logical_slot_get_changes_guts(
 
     let mut srf = InitMaterializedSRF(mcx, flinfo, fcinfo, 0)?;
 
-    if transam_xlog::RecoveryInProgress() {
-        panic!("unported callee reached from logicalfuncs.c: recovery end-of-wal");
-    }
-    let end_of_wal = transam_xlog::write::GetFlushRecPtr(None);
+    // Compute the current end-of-wal (logicalfuncs.c): flush position on a
+    // primary, replay position in recovery (logical decoding on standby).
+    let end_of_wal = if transam_xlog::RecoveryInProgress() {
+        xlogrecovery_seams::get_xlog_replay_rec_ptr::call().0
+    } else {
+        transam_xlog::write::GetFlushRecPtr(None)
+    };
 
     ReplicationSlotAcquire(&name, true, true)?;
 
@@ -191,6 +211,7 @@ fn pg_logical_slot_get_changes_guts(
         end_of_wal,
         confirm,
         binary,
+        old_resowner,
     );
 
     match result {
@@ -219,6 +240,7 @@ fn decode_loop(
     end_of_wal: XLogRecPtr,
     confirm: bool,
     binary: bool,
+    old_resowner: types_resowner::ResourceOwner,
 ) -> PgResult<()> {
     let mut ctx = CreateDecodingContext(
         InvalidXLogRecPtr,
@@ -275,6 +297,12 @@ fn decode_loop(
             break;
         }
     }
+
+    // Logical decoding could have clobbered CurrentResourceOwner during
+    // transaction management, so restore the executor's value
+    // (logicalfuncs.c: "This is a kluge, but it's not worth cleaning up
+    // right now"). Same restore as LogicalSlotAdvanceAndCheckSnapState.
+    resowner_seams::set_current_resource_owner::call(old_resowner);
 
     if ctx.reader.v.EndRecPtr != InvalidXLogRecPtr && confirm {
         LogicalConfirmReceivedLocation(ctx.reader.v.EndRecPtr)?;
@@ -396,3 +424,25 @@ pub const LOGICALFUNCS_BUILTINS: &[FmgrBuiltin] = &[
         fc_pg_logical_slot_peek_binary_changes,
     ),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The option-array elements arrive as full varlenas; the payload must
+    // exclude the header (006_logical_decoding: 'option "@\0\0\0include-xids"
+    // is unknown' when the 4B header leaked into the option name).
+    #[test]
+    fn text_datum_payload_excludes_varlena_header() {
+        let ctx = mcx::MemoryContext::new("t");
+        let mcx = ctx.mcx();
+        // 4B-header form, as deconstruct_array yields for "include-xids".
+        let t = varlena::cstring_to_text(mcx, b"include-xids").unwrap();
+        let d = Datum::from_usize(t.as_bytes().as_ptr() as usize);
+        assert_eq!(text_datum_to_string(mcx, d).unwrap(), "include-xids");
+        // 1B short form for a 1-byte value like "0".
+        let short = [((2usize << 1) | 1) as u8, b'0'];
+        let d = Datum::from_usize(short.as_ptr() as usize);
+        assert_eq!(text_datum_to_string(mcx, d).unwrap(), "0");
+    }
+}

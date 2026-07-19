@@ -69,10 +69,6 @@ pub(crate) fn create_logical_replication_slot(
 ) -> PgResult<()> {
     assert!(slot::MyReplicationSlot().is_none());
 
-    if two_phase {
-        panic!("unported callee reached from slotfuncs.c: two_phase logical slot");
-    }
-
     slot::ReplicationSlotCreate(
         name,
         true,
@@ -488,4 +484,20 @@ fn snapshot(s: &ReplicationSlot) -> SlotSnapshot {
 
 fn name_matches(s: &ReplicationSlot, name: &str) -> bool {
     s.data.get().name.name_str() == name.as_bytes()
+}
+
+// Seam glue: slotsync's update_local_synced_slot advances slots through
+// LogicalSlotAdvanceAndCheckSnapState (hosted here beside
+// pg_replication_slot_advance); slotfuncs depends on slotsync, so the
+// entry point is injected at init.
+fn logical_slot_advance_for_slotsync(
+    moveto: XLogRecPtr,
+) -> types_error::PgResult<(XLogRecPtr, bool)> {
+    let mut found_consistent_snapshot = false;
+    let retlsn = LogicalSlotAdvanceAndCheckSnapState(moveto, Some(&mut found_consistent_snapshot))?;
+    Ok((retlsn, found_consistent_snapshot))
+}
+
+pub fn init_seams() {
+    slotsync::logical_slot_advance_and_check_snap_state::set(logical_slot_advance_for_slotsync);
 }

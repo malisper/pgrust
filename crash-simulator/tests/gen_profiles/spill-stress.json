@@ -1,0 +1,9 @@
+{
+  "name": "spill-stress",
+  "connections": 1,
+  "plan_len": {"min": 50, "max": 100},
+  "statement_weights": {"ddl": 5, "dml": 35, "query": 40, "tx": 8, "arm": 8, "fault": 2, "property": 2},
+  "iso_mix": {"rc": 70, "rr": 20, "ser": 10},
+  "arm_sets": [[["work_mem", "64kB"]], [["work_mem", "128kB"]], [["enable_hashagg", "off"]]],
+  "float_lenient": false
+}

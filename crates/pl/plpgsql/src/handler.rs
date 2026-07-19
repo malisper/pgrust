@@ -747,6 +747,75 @@ fn add_dummy_return(action: &mut PlBlock, out_param_varno: Dno, nstatements: &mu
     }
 }
 
+// PROCPERF P2: the runtime extra-check levels and the print_strict_params /
+// check_asserts flags are consulted per statement execution (too_many_rows,
+// pl_exec.c:4217), per row move (strict_multi_assignment) and per ASSERT —
+// measured 16K Ir/call of by-name GetConfigOption on TPROC-C NEWORD. C binds
+// these GUCs to process globals via DefineCustom*Variable hooks
+// (pl_handler.c:61-149) and reads them for free; this port carries them as
+// SET-created placeholders with no hook lane, so the PARSED values are
+// snapshotted per backend thread, keyed by the GUC store's mutation counter
+// (the guc::layers cache pattern: every value mutation — SET / RESET / xact
+// revert / reload / session bind — goes through with_store_mut, which bumps
+// the counter). NOT session state in itself: a session rebinding onto this
+// thread mutates the thread's store and thereby invalidates the snapshot.
+#[derive(Clone, Copy)]
+struct PlGucValues {
+    mutations: u64,
+    extra_errors: u32,
+    extra_warnings: u32,
+    print_strict_params: bool,
+    check_asserts: bool,
+}
+
+thread_local! {
+    static PL_GUC_VALUES: core::cell::Cell<Option<PlGucValues>> =
+        const { core::cell::Cell::new(None) };
+}
+
+// Kill switch: PGRUST_PLPGSQL_GUC_SNAPSHOT=0 restores the per-read by-name
+// GetConfigOption behavior (the snapshot is then rebuilt on every read).
+// Latched once per process.
+fn guc_snapshot_disabled() -> bool {
+    static DISABLED: pgsync::OnceLock<bool> = pgsync::OnceLock::new();
+    *DISABLED.get_or_init(|| {
+        matches!(std::env::var("PGRUST_PLPGSQL_GUC_SNAPSHOT").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+fn pl_guc_values() -> PgResult<PlGucValues> {
+    let mutations = guc::store::store_mutation_count();
+    if !guc_snapshot_disabled() {
+        if let Some(v) = PL_GUC_VALUES.with(core::cell::Cell::get) {
+            if v.mutations == mutations {
+                return Ok(v);
+            }
+        }
+    }
+    let v = PlGucValues {
+        mutations,
+        extra_errors: plpgsql_extra_checks("plpgsql.extra_errors")?,
+        extra_warnings: plpgsql_extra_checks("plpgsql.extra_warnings")?,
+        print_strict_params: print_strict_params_uncached()?,
+        check_asserts: check_asserts_uncached()?,
+    };
+    PL_GUC_VALUES.with(|c| c.set(Some(v)));
+    Ok(v)
+}
+
+// plpgsql_check_asserts: DefineCustomBoolVariable is the extension-GUC lane;
+// the SET-created placeholder carries the session value and an unset name
+// means C's default (true). (Moved here from exec_stmt_assert; parse
+// semantics byte-preserved.)
+fn check_asserts_uncached() -> PgResult<bool> {
+    Ok(guc::GetConfigOption("plpgsql.check_asserts", true, false)?
+        .map_or(true, |v| !matches!(v.as_str(), "off" | "false" | "no" | "0" | "f" | "n")))
+}
+
+pub(crate) fn check_asserts_enabled() -> PgResult<bool> {
+    Ok(pl_guc_values()?.check_asserts)
+}
+
 // plpgsql_extra_checks_check_hook (pl_handler.c:61-104) applied to the
 // SET-created placeholder at compile time; an unset name is C's default
 // "none". Invalid tokens were accepted by the placeholder SET, so they
@@ -778,12 +847,13 @@ fn plpgsql_extra_checks(guc_name: &str) -> PgResult<u32> {
 
 // The runtime extra-check level for one PLPGSQL_XCHECK bit: extra_errors
 // wins over extra_warnings (pl_exec.c:4217-4220, 7196-7202); None means the
-// check is off.
+// check is off. Reads the mutation-keyed snapshot (PROCPERF P2, above).
 pub(crate) fn extra_checks_level(mask: u32) -> PgResult<Option<types_error::ErrorLevel>> {
-    if plpgsql_extra_checks("plpgsql.extra_errors")? & mask != 0 {
+    let v = pl_guc_values()?;
+    if v.extra_errors & mask != 0 {
         return Ok(Some(ERROR));
     }
-    if plpgsql_extra_checks("plpgsql.extra_warnings")? & mask != 0 {
+    if v.extra_warnings & mask != 0 {
         return Ok(Some(types_error::WARNING));
     }
     Ok(None)
@@ -791,10 +861,14 @@ pub(crate) fn extra_checks_level(mask: u32) -> PgResult<Option<types_error::Erro
 
 // plpgsql_print_strict_params: bool GUC via the placeholder lane
 // (check_asserts precedent); C's default is false.
-fn print_strict_params_guc() -> PgResult<bool> {
+fn print_strict_params_uncached() -> PgResult<bool> {
     Ok(guc::GetConfigOption("plpgsql.print_strict_params", true, false)?.is_some_and(|v| {
         matches!(v.trim().to_ascii_lowercase().as_str(), "on" | "true" | "yes" | "1" | "t" | "y")
     }))
+}
+
+fn print_strict_params_guc() -> PgResult<bool> {
+    Ok(pl_guc_values()?.print_strict_params)
 }
 
 struct EmitCbGuard(u64);

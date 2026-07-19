@@ -1,0 +1,27 @@
+[package]
+name = "pgsync"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+# THE single lock library (permit-s1 contract §0, docs/design/permit-scheduler.md §2):
+# the ONLY crate where any world-selection cfg for synchronization appears.
+# Call sites import pgsync types UNCONDITIONALLY.
+#
+# The loom dependency lives HERE and here only; consumer crates that still
+# carry [target.'cfg(loom)'] loom rows do so solely for their own tests/loom.rs
+# model Builders (loom-breadth reconciliation migrates those).
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
+# PERMIT-S1 WS-CORE (contract §5 shared-file exception, mechanical dep rows):
+# the scheduler's SimClock lever (pg_clock::sim::advance_ns, driven mode) and
+# the sanctioned SimEntropy funnel (picker seed = one pg_strong_random fill).
+# Both are leaf port crates — no cycle risk. Only the cfg(pgrust_sim) arm
+# references them; native/loom builds compile them away.
+[dependencies]
+pg_clock = { path = "../../port/pg_clock" }
+pg_strong_random = { path = "../../port/pg_strong_random" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(pgrust_sim)"] }

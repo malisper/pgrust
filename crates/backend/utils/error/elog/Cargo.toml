@@ -9,6 +9,7 @@ name = "elog"
 path = "src/lib.rs"
 
 [dependencies]
+pg_clock = { path = "../../../../port/pg_clock" }
 guc_tables = { path = "../../misc/guc_tables" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
@@ -23,3 +24,8 @@ pqcomm_seams = { path = "../../../libpq/pqcomm_seams" }
 libc = "0.2"
 mcx = { path = "../../../../_support/mcx" }
 mbutils_seams = { path = "../../mb/mbutils_seams" }
+
+# `pgrust_sim` (non-default cfg): P4 sim arms live behind it; empty/absent
+# in product builds (law 0.1).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)'] }

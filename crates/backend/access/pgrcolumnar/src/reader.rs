@@ -541,7 +541,16 @@ pub struct Part {
 impl Part {
     // None: empty table (no committed footer yet).
     pub fn open(path: &str, ncols: usize) -> PgResult<Option<Part>> {
-        let ident_stat = std::fs::metadata(path).ok();
+        // Identity stat via the Vfs boundary (DST P1 WS-B, contract v1.1
+        // FileInfo dev+ino): same single stat(2), same fields consumed —
+        // (st_dev, st_ino, st_size), the part-cache identity vocabulary.
+        let ident_stat = {
+            let mut fi = vfs::FileInfo::zeroed();
+            match std::ffi::CString::new(path) {
+                Ok(c) if vfs::stat(&c, &mut fi) == 0 => Some(fi),
+                _ => None,
+            }
+        };
         let mut file = SegFile::open_rw(path)?;
         if file.total_len() < CB_HEADER_LEN {
             return Ok(None);
@@ -559,10 +568,7 @@ impl Part {
         // dev/ino + mapped length); the unstat-able fallback keeps the
         // historical private mapping (same posture as the null identity).
         let map = match ident_stat.as_ref() {
-            Some(md) => {
-                use std::os::unix::fs::MetadataExt;
-                SegMap::open_shared(path, md.dev(), md.ino())?
-            }
+            Some(md) => SegMap::open_shared(path, md.dev, md.ino)?,
             None => SegMap::open(path)?.map(std::sync::Arc::new),
         };
         let Some(map) = map else { return Ok(None) };
@@ -618,12 +624,11 @@ impl Part {
             .unwrap_or(footer_off)
             .min(footer_off);
         let identity = {
-            use std::os::unix::fs::MetadataExt;
             match ident_stat {
                 Some(md) => crate::condcache::PartIdent {
-                    dev: md.dev(),
-                    ino: md.ino(),
-                    len: md.len(),
+                    dev: md.dev,
+                    ino: md.ino,
+                    len: md.size as u64,
                     footer_off,
                 },
                 // Unstat-able path (should be unreachable past open_rw):
@@ -909,6 +914,11 @@ impl Part {
 // One page-aligned madvise(MADV_WILLNEED) over bytes[start..end); advisory
 // (errors ignored). Bounds are the caller's business; start/end are only
 // page-rounded here.
+//
+// RAW libc carve-out (DST-P1): this madvise runs over SegMap's mmap'd
+// bytes and travels with the segfile map_segs mmap cluster — it stays raw
+// until the segmap pread arm lands. Allowlist row retained, tagged
+// `# pending: segmap-pread-arm`.
 #[cfg(unix)]
 fn advise_extent(bytes: &[u8], start: u64, end: u64) -> bool {
     static PAGE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
@@ -947,12 +957,21 @@ pub(crate) fn decompress_frame_into(codec: Codec, src: &[u8], dst: &mut [u8], ra
             crate::lz4dec::decompress_padded(src, dst, raw_len)
                 .unwrap_or_else(|e| panic!("cbstore: corrupt LZ4 frame: {e}"));
         }
+        #[cfg(not(target_family = "wasm"))]
         Codec::Zstd => {
             let got = zstd::bulk::Decompressor::new()
                 .expect("cbstore: zstd decompressor init failed")
                 .decompress_to_buffer(src, &mut dst[..raw_len])
                 .expect("cbstore: corrupt ZSTD frame");
             assert_eq!(got, raw_len, "cbstore: ZSTD frame length mismatch");
+        }
+        // wasm32: zstd-sys links C and has no wasm build; cbstore tables
+        // carrying ZSTD frames are unreadable on this target (documented
+        // ledger out until a pure-Rust decoder is adopted).
+        #[cfg(target_family = "wasm")]
+        Codec::Zstd => {
+            let _ = (src, raw_len);
+            panic!("cbstore: ZSTD frames are not supported on wasm32-wasip1");
         }
         Codec::None => unreachable!("cbstore: decompress with Codec::None"),
     }
@@ -2278,7 +2297,10 @@ mod tests {
     // privately; the Weak registry never keeps a dead mapping alive.
     #[test]
     fn shared_segmap_identity() {
-        use std::os::unix::fs::MetadataExt;
+        #[cfg(not(target_family = "wasm"))]
+use std::os::unix::fs::MetadataExt;
+#[cfg(target_family = "wasm")]
+use std::os::wasi::fs::MetadataExt;
         let path = test_part("cb_sharedmap_test.part", &[100, 100], 2);
         let md = std::fs::metadata(&path).unwrap();
         let a = SegMap::open_shared(&path, md.dev(), md.ino()).unwrap().unwrap();

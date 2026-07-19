@@ -1931,10 +1931,12 @@ struct BtVacInfo {
     vacuums: Vec<(::types_core::Oid, ::types_core::Oid, ::types_nbtree::BTCycleId)>,
 }
 
-static BTVACINFO: std::sync::Mutex<BtVacInfo> = std::sync::Mutex::new(BtVacInfo {
-    cycle_ctr: 0,
-    vacuums: Vec::new(),
-});
+pgsync::process_global! {
+    static BTVACINFO: pgsync::Mutex<BtVacInfo> = pgsync::Mutex::new(BtVacInfo {
+        cycle_ctr: 0,
+        vacuums: Vec::new(),
+    });
+}
 
 fn vac_key(rel: &Relation<'_>) -> (::types_core::Oid, ::types_core::Oid) {
     (rel.rd_locator.get().dbOid, rel.rd_id)
@@ -1955,10 +1957,8 @@ pub(crate) fn bt_start_vacuum(rel: &Relation<'_>) -> PgResult<::types_nbtree::BT
     let mut info = BTVACINFO.lock().unwrap();
     if info.cycle_ctr == 0 {
         // C seeds from time() at shmem init; any nonzero start works.
-        info.cycle_ctr = (std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(1, |d| d.as_secs()) as ::types_nbtree::BTCycleId)
-            | 1;
+        // DST P2 (contract §1.2): seed from pg_clock::wall_secs().
+        info.cycle_ctr = (pg_clock::wall_secs().max(1) as ::types_nbtree::BTCycleId) | 1;
     }
     info.cycle_ctr = info.cycle_ctr.wrapping_add(1);
     if info.cycle_ctr == 0 || info.cycle_ctr > ::types_nbtree::MAX_BT_CYCLE_ID {

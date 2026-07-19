@@ -13,7 +13,7 @@ use ::types_scan::scankey::{
 };
 use ::types_tuple::varatt::varsize_any;
 
-fn lock(shared: &BTParallelScanShared) -> std::sync::MutexGuard<'_, BtParallelScanState> {
+fn lock(shared: &BTParallelScanShared) -> pgsync::MutexGuard<'_, BtParallelScanState> {
     shared.state.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -76,7 +76,15 @@ pub(crate) fn bt_parallel_seize(
                 so.oppositeDirCheck = false;
             }
             BtPsState::Advancing => {
-                g = shared.cv.wait(g).unwrap_or_else(|e| e.into_inner());
+                // permit-s4 row 2: eventcount discipline — capture the
+                // epoch UNDER the state lock (any later out-of-Advancing
+                // transition bumps it strictly after its own state change),
+                // release the lock, park. Spurious/early returns are safe:
+                // the loop re-reads page_status under the re-taken lock.
+                let seen = shared.lot.epoch();
+                drop(g);
+                shared.lot.park(seen);
+                g = lock(shared);
                 continue;
             }
             _ => {
@@ -113,7 +121,9 @@ pub(crate) fn bt_parallel_release(
         g.last_curr_page = curr_page;
         g.page_status = BtPsState::Idle;
     }
-    shared.cv.notify_one();
+    // Wake EVERY parked seizer (row-2 v1: no notify_one — see the
+    // BTParallelScanShared doc); losers re-observe Advancing and re-park.
+    shared.lot.wake_all();
 }
 
 /// _bt_parallel_done. The serial (None) fast path stays inlinable; the
@@ -148,7 +158,7 @@ fn bt_parallel_done_shared(so: &BTScanOpaqueData<'_>, shared: &BTParallelScanSha
         }
     };
     if status_changed {
-        shared.cv.notify_all();
+        shared.lot.wake_all();
     }
 }
 

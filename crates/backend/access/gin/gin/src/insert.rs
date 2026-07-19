@@ -65,7 +65,11 @@ pub(crate) fn cached_gin_state(rel: &Relation<'_>) -> PgResult<GinState> {
                     3 => GinOpclass::ArrayOps,
                     4 => GinOpclass::TrgmOps,
                     5 => GinOpclass::HstoreOps,
-                    other => unported(&format!("rd_amcache gin opclass tag {other}")),
+                    31 => GinOpclass::IntArrayOps,
+                    other => match GinBtreeType::from_tag(other - 6) {
+                        Some(ty) => GinOpclass::BtreeOps(ty),
+                        None => unported(&format!("rd_amcache gin opclass tag {other}")),
+                    },
                 },
                 elem_cmp: match c.elem_cmp {
                     0 => GinElemCmp::None,
@@ -106,6 +110,8 @@ pub(crate) fn cached_gin_state(rel: &Relation<'_>) -> PgResult<GinState> {
                 GinOpclass::ArrayOps => 3,
                 GinOpclass::TrgmOps => 4,
                 GinOpclass::HstoreOps => 5,
+                GinOpclass::BtreeOps(ty) => 6 + ty.tag(),
+                GinOpclass::IntArrayOps => 31,
             },
             elem_cmp: match col.elem_cmp {
                 GinElemCmp::None => 0,

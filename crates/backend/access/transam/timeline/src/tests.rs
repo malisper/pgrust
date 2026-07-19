@@ -1,8 +1,14 @@
 use super::*;
 use std::cell::RefCell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Mutex, Once};
 use types_error::PgError;
+
+// DST P1: writeTimeLineHistoryFile now rides fd's durable path, whose
+// pg_fsync consults the wal_sync_method GUC slot (fd sync.rs). Install the
+// same test accessor fd's own setup uses (fd/src/tests.rs).
+static WAL_SYNC_METHOD: AtomicI32 = AtomicI32::new(0);
 
 thread_local! {
     static CAPTURED: RefCell<Vec<PgError>> = const { RefCell::new(Vec::new()) };
@@ -27,6 +33,11 @@ fn setup() {
         ipc_seams::proc_exit::set(|code, _pid| panic!("proc_exit({code})"));
         init_small_seams::my_proc_pid::set(|| 4242);
         xact_seams::get_current_sub_transaction_id::set(|| 1);
+        guc_tables::init_seams();
+        guc_tables::vars::wal_sync_method.install(guc_tables::GucVarAccessors {
+            get: || WAL_SYNC_METHOD.load(Ordering::Relaxed),
+            set: |v| WAL_SYNC_METHOD.store(v, Ordering::Relaxed),
+        });
     });
 }
 

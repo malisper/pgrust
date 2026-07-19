@@ -1456,6 +1456,21 @@ impl<'mcx> Node<'mcx> {
     pub fn as_multi_assign_ref(self) -> Option<&'mcx MultiAssignRef<'mcx>> {
         self.as_variant()
     }
+
+    #[inline]
+    pub fn as_into_clause(self) -> Option<&'mcx IntoClause<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_column_def(self) -> Option<&'mcx ColumnDef<'mcx>> {
+        self.as_variant()
+    }
+
+    #[inline]
+    pub fn as_index_elem(self) -> Option<&'mcx IndexElem<'mcx>> {
+        self.as_variant()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]

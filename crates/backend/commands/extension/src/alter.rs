@@ -19,7 +19,7 @@ use crate::create::{conflicting_def_elem, get_required_extension};
 use crate::graph::identify_update_path;
 use crate::script::execute_extension_script;
 use crate::{
-    check_valid_version_name, get_extension_schema, unported, Anum_pg_extension_extname,
+    check_valid_version_name, get_extension_schema, Anum_pg_extension_extname,
     Anum_pg_extension_extnamespace, Anum_pg_extension_extrelocatable,
     Anum_pg_extension_extversion, Anum_pg_extension_oid, ExtensionNameIndexId,
     ExtensionOidIndexId, Natts_pg_extension,
@@ -86,14 +86,26 @@ pub fn ExecAlterExtensionStmt<'mcx>(
         panic!("extversion is null");
     }
     let old_version_name = text_datum_str(mcx, version_d)?;
+    // SAFETY: extowner is a fixed NOT NULL pg_extension column.
+    let extowner = unsafe {
+        types_tuple::heap_getattr(tup, crate::Anum_pg_extension_extowner, desc, &mut isnull)
+    }
+    .as_oid();
 
     genam::systable_endscan(mcx, scan)?;
     ext_rel.close(AccessShareLock)?;
 
-    // object_ownercheck (aclchk.c): superuser fast path; role ACL walks are
-    // the aclchk lane.
-    if !superuser::superuser()? {
-        unported("ExecAlterExtensionStmt: object_ownercheck for non-superusers");
+    // C: object_ownercheck(ExtensionRelationId, extensionOid, GetUserId())
+    // — superuser fast path, then privileges-of-owner (aclchk.c reads the
+    // same extowner attribute we already have in hand). On failure,
+    // aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_EXTENSION, extname).
+    if !superuser::superuser()?
+        && !adt_acl::has_privs_of_role(miscinit::GetUserId(), extowner)?
+    {
+        return Err(Box::new(
+            types_error::PgError::error(format!("must be owner of extension {extname}"))
+                .with_sqlstate(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE),
+        ));
     }
 
     let control = read_extension_control_file(extname)?;

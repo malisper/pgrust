@@ -35,6 +35,25 @@ macro_rules! scalar_global {
     };
 }
 
+// C `int data_directory_mode` (globals.c): set once by checkDataDir() in the
+// postmaster before any children exist, constant afterwards, fork-inherited.
+// PROCESS-GLOBAL here — a thread-local (even one copied at child launch) can
+// go stale for worker-pool threads spawned before checkDataDir ran, leaving
+// `SHOW data_directory_mode` at 0700 on a group-access (0750) cluster
+// (pg_basebackup/010 group-permission leg).
+static DATA_DIRECTORY_MODE: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(PG_DIR_MODE_OWNER as i32);
+
+#[inline]
+pub fn data_directory_mode() -> i32 {
+    DATA_DIRECTORY_MODE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[inline]
+pub fn set_data_directory_mode(mode: i32) {
+    DATA_DIRECTORY_MODE.store(mode, std::sync::atomic::Ordering::Relaxed);
+}
+
 scalar_global! {
     FRONTEND_PROTOCOL, FrontendProtocol, SetFrontendProtocol, ProtocolVersion, 0;
 
@@ -71,8 +90,6 @@ scalar_global! {
         [0; MAX_CANCEL_KEY_LENGTH];
     MY_CANCEL_KEY_LENGTH, MyCancelKeyLength, SetMyCancelKeyLength, i32, 0;
     MY_PM_CHILD_SLOT, MyPMChildSlot, SetMyPMChildSlot, i32, 0;
-
-    DATA_DIRECTORY_MODE, data_directory_mode, set_data_directory_mode, i32, PG_DIR_MODE_OWNER;
 
     OUTPUT_FILE_NAME, OutputFileName, SetOutputFileName, [u8; MAXPGPATH], [0; MAXPGPATH];
     MY_EXEC_PATH, my_exec_path, set_my_exec_path, [u8; MAXPGPATH], [0; MAXPGPATH];
@@ -208,6 +225,17 @@ pub fn HaveMyProcPort() -> bool {
     MY_PROC_PORT.with(|p| p.borrow().is_some())
 }
 
+/// Session-memory teardown (FPBUDGET-1): free the Port copy at clean task
+/// end (C's TopMemoryContext copy dies with the backend process). Nothing
+/// reads MyProcPort after teardown; the thread is exiting.
+pub fn SessionMemTeardownPort() {
+    MY_PROC_PORT.with(|p| {
+        if let Some(port) = p.borrow_mut().take() {
+            drop(ManuallyDrop::into_inner(port));
+        }
+    });
+}
+
 pub fn SetMyProcPort(port: types_startup::Port) {
     MY_PROC_PORT.with(|p| *p.borrow_mut() = Some(ManuallyDrop::new(Box::new(port))));
 }
@@ -299,4 +327,27 @@ pub fn EndCriticalSection() {
 #[inline]
 pub fn InterruptsCanBeProcessed() -> bool {
     InterruptHoldoffCount() == 0 && CritSectionCount() == 0 && QueryCancelHoldoffCount() == 0
+}
+
+/// `getpid()` / `std::process::id()` with wasm and sim arms. WASI has no
+/// process ids (std::process::id PANICS there); the instance is the only
+/// process that can exist, so a fixed synthetic pid stands in. 1 is C's
+/// classic "the only process" number; nonzero matters (0/negative are
+/// sentinel words in the lockfile/procsignal vocabularies).
+///
+/// Under `--cfg pgrust_sim` the OS pid is ambient entropy: it reaches the
+/// wire (BackendKeyData) and file names (xlogtemp), and the P4 sim-net
+/// determinism gate byte-compares both across runs — the sim node is one
+/// process, so the same fixed synthetic pid stands in (P2 seeded-RNG law
+/// applied to the one non-RNG identity source).
+#[inline]
+pub fn process_id() -> u32 {
+    #[cfg(not(any(target_family = "wasm", pgrust_sim)))]
+    {
+        std::process::id()
+    }
+    #[cfg(any(target_family = "wasm", pgrust_sim))]
+    {
+        1
+    }
 }

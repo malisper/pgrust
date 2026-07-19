@@ -65,6 +65,8 @@ unsafe impl<'mcx, F: ListFlavor> mcx::ArenaSafe for List<'mcx, F> {}
 unsafe impl<'mcx, F: ListFlavor> mcx::ForgetSafe for List<'mcx, F> {}
 
 const _: () = assert!(!core::mem::needs_drop::<NodeList<'static>>());
+// 64-bit layout pin (fat pointer); wasm32 (ILP32) shrinks it.
+#[cfg(not(target_family = "wasm"))]
 const _: () = assert!(core::mem::size_of::<NodeList<'static>>() == 16);
 
 // list.c LIST_HEADER_OVERHEAD: 24-byte header / 8-byte ListCell on 64-bit.
@@ -276,6 +278,21 @@ impl<'mcx, F: ListFlavor> List<'mcx, F> {
             core::ptr::copy_nonoverlapping(cells.as_ptr(), list.elements.as_ptr(), cells.len());
         }
         list.length = cells.len() as i32;
+        Ok(list)
+    }
+
+    /// Empty list with room for `n` cells (C new_list sizing): a builder that
+    /// knows its final length (copyfuncs list copies) allocates once instead
+    /// of riding the lappend growth curve. Gated to n > FIRST_CAP(5): the
+    /// first lappend already covers <= 5 cells in ONE allocation via the
+    /// cheaper constant-size first_cell_alloc fast path (measured: routing
+    /// small lists through enlarge here COST more than it saved — exact-Ir
+    /// A/B 2026-07-16).
+    pub fn with_capacity(mcx: Mcx<'mcx>, n: usize) -> PgResult<Self> {
+        let mut list = Self::nil();
+        if n > 5 {
+            list.enlarge(mcx, n as i32)?;
+        }
         Ok(list)
     }
 

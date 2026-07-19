@@ -93,7 +93,7 @@ fn with_state<R>(f: impl FnOnce(&mut SeqState) -> R) -> R {
     STATE.with(|cell| {
         let mut slot = cell.borrow_mut();
         let st = slot.get_or_insert_with(|| {
-            let mcx = Box::leak(Box::new(mcx::MemoryContext::new("SeqTable"))).mcx();
+            let mcx = mcx::session_root("SeqTable").mcx();
             std::mem::ManuallyDrop::new(SeqState {
                 tab: PgFxHashMap::with_capacity_and_hasher_in(16, Default::default(), mcx),
                 last_used: None,
@@ -1020,7 +1020,12 @@ fn process_owned_by<'mcx>(
         }
     } else {
         if nnames > 3 {
-            unported("OWNED BY with catalog-qualified name");
+            // unported: OWNED BY with a catalog-qualified name
+            // (makeRangeVarFromNameList catalog arm)
+            return Err(err(
+                "OWNED BY with a catalog-qualified table name is not supported yet".to_string(),
+                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+            ));
         }
         let mut parts = [""; 3];
         for (i, n) in owned_by.iter().enumerate() {
@@ -1130,7 +1135,7 @@ fn pgs_form(relid: Oid) -> PgResult<syscache_seams::PgSequenceForm> {
 fn fc_mcx() -> Mcx<'static> {
     thread_local! {
         static CTX: &'static mcx::MemoryContext =
-            Box::leak(Box::new(mcx::MemoryContext::new("SequenceFmgr")));
+            mcx::session_root("SequenceFmgr");
     }
     CTX.with(|c| c.mcx())
 }
@@ -1473,7 +1478,7 @@ mod tests {
     use super::*;
 
     fn ctx() -> &'static mcx::MemoryContext {
-        Box::leak(Box::new(mcx::MemoryContext::new("seq-test")))
+        mcx::session_root("seq-test")
     }
 
     fn defel<'mcx>(mcx: Mcx<'mcx>, name: &'mcx str, arg: Option<Node<'mcx>>) -> Node<'mcx> {

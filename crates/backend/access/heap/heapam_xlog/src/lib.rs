@@ -1107,9 +1107,83 @@ pub fn heap2_redo(record: &mut XLogReaderState) -> PgResult<()> {
         XLOG_HEAP2_LOCK_UPDATED => heap_xlog_lock_common(record, true),
         // Logical decoding only; nothing to do on a real replay.
         XLOG_HEAP2_NEW_CID => Ok(()),
-        XLOG_HEAP2_REWRITE => panic!("heap2_redo arm not ported: heap_xlog_logical_rewrite"),
+        XLOG_HEAP2_REWRITE => heap_xlog_logical_rewrite(record),
         other => Err(panic_err(format!("heap2_redo: unknown op code {other}"))),
     }
+}
+
+// heap_xlog_logical_rewrite (rewriteheap.c:1073): recreate the logical
+// rewrite mapping file on the standby — truncate to the record's offset
+// (bytes past it were not guaranteed durable at the primary), rewrite the
+// tail, fsync. xl_heap_rewrite_mapping layout (with C alignment holes):
+// xid(0..4) db(4..8) rel(8..12) pad offset(16..24) num_mappings(24..28) pad
+// start_lsn(32..40), then the raw LogicalRewriteMappingData entries.
+fn heap_xlog_logical_rewrite(record: &mut XLogReaderState) -> PgResult<()> {
+    const LOGICAL_REWRITE_MAPPING_SIZE: usize = 36;
+    let md = main_data(record);
+    let mapped_xid = u32::from_ne_bytes(md[0..4].try_into().unwrap());
+    let mapped_db = u32::from_ne_bytes(md[4..8].try_into().unwrap());
+    let mapped_rel = u32::from_ne_bytes(md[8..12].try_into().unwrap());
+    let offset = i64::from_ne_bytes(md[16..24].try_into().unwrap()) as u64;
+    let num_mappings = u32::from_ne_bytes(md[24..28].try_into().unwrap());
+    let start_lsn = u64::from_ne_bytes(md[32..40].try_into().unwrap());
+    let create_xid = record_xid(record);
+
+    let datadir = init_small::globals::DataDir().expect("heap_xlog_logical_rewrite: DataDir unset");
+    let dir = std::path::PathBuf::from(datadir).join("pg_logical/mappings");
+    let path = dir.join(format!(
+        "map-{:x}-{:x}-{:X}_{:X}-{:x}-{:x}",
+        mapped_db,
+        mapped_rel,
+        (start_lsn >> 32) as u32,
+        start_lsn as u32,
+        mapped_xid,
+        create_xid,
+    ));
+
+    let file_err = |what: &str, e: std::io::Error| {
+        elog::ereport(types_error::ERROR)
+            .errcode_for_file_access()
+            .errmsg(format!("could not {what} file \"{}\": {e}", path.display()))
+            .finish(types_error::ErrorLocation::new(
+                "src/backend/access/heap/rewriteheap.c",
+                1073,
+                "heap_xlog_logical_rewrite",
+            ))
+    };
+
+    let file = match std::fs::OpenOptions::new().create(true).write(true).open(&path) {
+        Ok(f) => f,
+        Err(e) => return file_err("create", e),
+    };
+    // Truncate all data that's not guaranteed to have been safely fsynced
+    // (by a previous record or by the last checkpoint).
+    if let Err(e) = file.set_len(offset) {
+        return file_err("truncate", e);
+    }
+    let len = num_mappings as usize * LOGICAL_REWRITE_MAPPING_SIZE;
+    let data = &md[40..40 + len];
+    // Write out the tail end of the mapping file (again).
+    // positional write; on non-unix (wasm) targets the FileExt trait is
+    // unstable, so seek+write_all — equivalent here (nothing reads the
+    // cursor after; sync_all follows).
+    #[cfg(unix)]
+    let write_res = std::os::unix::fs::FileExt::write_all_at(&file, data, offset);
+    #[cfg(not(unix))]
+    let write_res = (|| {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = &file;
+        f.seek(SeekFrom::Start(offset))?;
+        f.write_all(data)
+    })();
+    if let Err(e) = write_res {
+        return file_err("write to", e);
+    }
+    // fsync all previously written data.
+    if let Err(e) = file.sync_all() {
+        return file_err("fsync", e);
+    }
+    Ok(())
 }
 
 pub fn init_seams() {}

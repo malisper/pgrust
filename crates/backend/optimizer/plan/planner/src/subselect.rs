@@ -698,6 +698,7 @@ fn convert_exists_sublink_to_join<'mcx>(
                     | RTEKind::RTE_SUBQUERY
                     | RTEKind::RTE_JOIN
                     | RTEKind::RTE_FUNCTION
+                    | RTEKind::RTE_CTE
             ),
             "convert_EXISTS_sublink_to_join (subselect.c): {:?} RTE in EXISTS body",
             srte.rtekind
@@ -708,6 +709,17 @@ fn convert_exists_sublink_to_join<'mcx>(
             srte.perminfoindex
         };
         let copy = crate::prepjointree::rte_copy_with_perminfoindex(mcx, srte, new_index)?;
+        if srte.rtekind == RTEKind::RTE_CTE && srte.ctelevelsup >= 1 {
+            // IncrementVarSublevelsUp(-1, 1): the merged RTE now sits one
+            // query level closer to the CTE it references (cteList pullup is
+            // rejected above, so ctelevelsup >= 1 here).
+            // SAFETY: exclusive pre-seal fixup of the fresh copy.
+            unsafe {
+                copy.with_mut::<types_nodes::parsenodes::RangeTblEntry, _>(|r| {
+                    r.ctelevelsup -= 1
+                })
+            };
+        }
         if srte.rtekind == RTEKind::RTE_JOIN {
             // Offset joinaliasvars into the copy; shared list stays unwritten.
             let mut aliasvars = NodeList::nil();

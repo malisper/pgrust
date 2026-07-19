@@ -44,6 +44,7 @@ adt_timestamp = { path = "../../adt/adt_timestamp" }
 adt_datetime = { path = "../../adt/adt_datetime" }
 
 [dev-dependencies]
+vfs = { path = "../../../storage/file/vfs" }
 mbutils_seams = { path = "../../mb/mbutils_seams" }
 pqcomm_seams = { path = "../../../libpq/pqcomm_seams" }
 scalar_seams = { path = "../../adt/scalar_seams" }
@@ -54,3 +55,6 @@ xact_seams = { path = "../../../access/transam/xact_seams" }
 pgtz = { path = "../../../timezone/pgtz" }
 types_dest = { path = "../../../../_support/types/types_dest" }
 mbutils = { path = "../../mb/mbutils" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)'] }

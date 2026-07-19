@@ -28,25 +28,11 @@ fn loc(func: &'static str) -> ErrorLocation {
     ErrorLocation::new("timeline.c", 0, func)
 }
 
-fn set_errno(value: i32) {
-    // SAFETY: writing the thread-local errno slot, as C does before syscalls
-    // whose error reporting relies on errno staying 0 on success.
-    unsafe {
-        #[cfg(target_os = "macos")]
-        {
-            *libc::__error() = value;
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            *libc::__errno_location() = value;
-        }
-    }
-}
+// The shared errno TLS cell + unlink, through the fd-crate front (DST P1).
+use fd::set_errno;
 
 fn unlink_path(path: &str) {
-    let c = std::ffi::CString::new(path).unwrap();
-    // SAFETY: NUL-terminated path.
-    unsafe { libc::unlink(c.as_ptr()) };
+    let _ = fd::pg_unlink(path);
 }
 
 pub fn TLHistoryFileName(tli: TimeLineID) -> String {
@@ -285,7 +271,7 @@ pub fn findNewestTimeLine(
 }
 
 fn xlog_temp_path() -> String {
-    format!("{XLOGDIR}/xlogtemp.{}", std::process::id())
+    format!("{XLOGDIR}/xlogtemp.{}", init_small::globals::process_id())
 }
 
 fn create_temp_history_file(tmppath: &str, func: &'static str) -> PgResult<i32> {
@@ -305,14 +291,19 @@ fn create_temp_history_file(tmppath: &str, func: &'static str) -> PgResult<i32> 
 fn write_all_or_unlink(
     fd_: i32,
     bytes: &[u8],
+    write_off: &mut i64,
     tmppath: &str,
     wait_event: u32,
     func: &'static str,
 ) -> PgResult<()> {
     set_errno(0);
     waitevent_seams::pgstat_report_wait_start::call(wait_event);
-    // SAFETY: fd_ is a live transient fd; bytes is a live slice.
-    let written = unsafe { libc::write(fd_, bytes.as_ptr().cast(), bytes.len()) };
+    // Positional write at the tracked append offset (fresh temp file opened
+    // by this module; pwrite moves the same bytes C's write did).
+    let written = fd::pg_pwrite(fd_, bytes, *write_off);
+    if written == bytes.len() as isize {
+        *write_off += written as i64;
+    }
     if written != bytes.len() as isize {
         let save_errno = current_errno();
         // If we fail to make the file, delete it to release disk space
@@ -371,6 +362,7 @@ pub fn writeTimeLineHistory(
 
     let tmppath = xlog_temp_path();
     let fd_ = create_temp_history_file(&tmppath, "writeTimeLineHistory")?;
+    let mut write_off: i64 = 0;
 
     // If a history file exists for the parent, copy it verbatim
     let path = if archive_recovery_requested {
@@ -391,11 +383,15 @@ pub fn writeTimeLineHistory(
         // Not there, so assume parent has no parents
     } else {
         let mut buffer = [0u8; BLCKSZ];
+        let mut src_off: i64 = 0;
         loop {
             set_errno(0);
             waitevent_seams::pgstat_report_wait_start::call(WAIT_EVENT_TIMELINE_HISTORY_READ);
-            // SAFETY: srcfd is a live transient fd; buffer is a live stack array.
-            let nbytes = unsafe { libc::read(srcfd, buffer.as_mut_ptr().cast(), buffer.len()) };
+            // Positional read at the tracked offset (regular history file).
+            let nbytes = fd::pg_pread(srcfd, &mut buffer, src_off);
+            if nbytes > 0 {
+                src_off += nbytes as i64;
+            }
             waitevent_seams::pgstat_report_wait_end::call();
             if nbytes < 0 || current_errno() != 0 {
                 ereport(ERROR)
@@ -410,6 +406,7 @@ pub fn writeTimeLineHistory(
             write_all_or_unlink(
                 fd_,
                 &buffer[..nbytes as usize],
+                &mut write_off,
                 &tmppath,
                 WAIT_EVENT_TIMELINE_HISTORY_WRITE,
                 "writeTimeLineHistory",
@@ -438,6 +435,7 @@ pub fn writeTimeLineHistory(
     write_all_or_unlink(
         fd_,
         line.as_bytes(),
+        &mut write_off,
         &tmppath,
         WAIT_EVENT_TIMELINE_HISTORY_WRITE,
         "writeTimeLineHistory",
@@ -451,7 +449,10 @@ pub fn writeTimeLineHistory(
     )?;
 
     let path = TLHistoryFilePath(newTLI);
-    debug_assert!(!std::path::Path::new(&path).exists());
+    debug_assert!({
+        let mut fi = fd::FileInfo::zeroed();
+        fd::pg_stat(&path, &mut fi) != 0
+    });
     fd::durable_rename(&tmppath, &path, ERROR)?;
 
     // The history file can be archived immediately.
@@ -467,9 +468,11 @@ pub fn writeTimeLineHistoryFile(tli: TimeLineID, content: &[u8]) -> PgResult<()>
     let tmppath = xlog_temp_path();
     let fd_ = create_temp_history_file(&tmppath, "writeTimeLineHistoryFile")?;
 
+    let mut write_off: i64 = 0;
     write_all_or_unlink(
         fd_,
         content,
+        &mut write_off,
         &tmppath,
         WAIT_EVENT_TIMELINE_HISTORY_FILE_WRITE,
         "writeTimeLineHistoryFile",
@@ -550,6 +553,9 @@ pub fn init_seams() {
     s::restore_timeline_history_files::set(restoreTimeLineHistoryFiles);
     s::find_newest_timeline::set(|start_tli| {
         findNewestTimeLine(start_tli, archive_recovery_requested())
+    });
+    s::exists_timeline_history::set(|probe_tli| {
+        existsTimeLineHistory(probe_tli, archive_recovery_requested())
     });
     s::write_timeline_history::set(|new_tli, parent_tli, switchpoint, reason| {
         writeTimeLineHistory(

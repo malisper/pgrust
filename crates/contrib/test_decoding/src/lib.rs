@@ -70,11 +70,16 @@ fn fc__pg_output_plugin_init(
     cb.change_cb = Some(pg_decode_change);
     cb.truncate_cb = Some(pg_decode_truncate);
     cb.commit_cb = Some(pg_decode_commit_txn);
+    cb.filter_prepare_cb = Some(pg_decode_filter_prepare);
+    cb.begin_prepare_cb = Some(pg_decode_begin_prepare_txn);
+    cb.prepare_cb = Some(pg_decode_prepare_txn);
+    cb.commit_prepared_cb = Some(pg_decode_commit_prepared_txn);
+    cb.rollback_prepared_cb = Some(pg_decode_rollback_prepared_txn);
     cb.filter_by_origin_cb = Some(pg_decode_filter);
     cb.shutdown_cb = Some(pg_decode_shutdown);
     cb.message_cb = Some(pg_decode_message);
-    // C also registers filter_prepare/2PC and stream_* callbacks; those
-    // families are unported (two_phase slots and streaming panic loudly).
+    // C also registers the stream_* callbacks; streaming is unported and
+    // panics loudly if requested.
     Ok(Datum::from_usize(0))
 }
 
@@ -254,7 +259,140 @@ fn pg_decode_filter(opc: &mut OutputPluginContext, origin_id: RepOriginId) -> Pg
     Ok(data.only_local && origin_id != 0)
 }
 
-fn print_literal(s: &mut String, typid: Oid, outputstr: &str) {
+// quote_literal_cstr (quote.c): single-quote, doubling ' and \, with an E
+// prefix when a backslash is present.
+fn quote_literal_str(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() * 2 + 4);
+    if raw.contains('\\') {
+        out.push('E');
+    }
+    out.push('\'');
+    for ch in raw.chars() {
+        if ch == '\'' || ch == '\\' {
+            out.push(ch);
+        }
+        out.push(ch);
+    }
+    out.push('\'');
+    out
+}
+
+// pg_decode_begin_prepare_txn (test_decoding.c:349).
+fn pg_decode_begin_prepare_txn(
+    opc: &mut OutputPluginContext,
+    rb: &mut ReorderBuffer,
+    txn: TxnId,
+) -> PgResult<()> {
+    let data = data_from(opc);
+    let txndata = Box::new(TestDecodingTxnData {
+        xact_wrote_changes: false,
+    });
+    rb.txn_mut(txn).output_plugin_private = Box::into_raw(txndata) as usize;
+
+    // If asked to skip empty transactions, BEGIN is emitted at the first
+    // operation instead.
+    if data.skip_empty_xacts {
+        return Ok(());
+    }
+    pg_output_begin(opc, rb, txn, true)
+}
+
+// pg_decode_prepare_txn (test_decoding.c:370).
+fn pg_decode_prepare_txn(
+    opc: &mut OutputPluginContext,
+    rb: &mut ReorderBuffer,
+    txn: TxnId,
+    _prepare_lsn: XLogRecPtr,
+) -> PgResult<()> {
+    let data = data_from(opc);
+
+    // PREPARE ends this transaction's output: reclaim the begin-prepare
+    // allocation now (C leaves it to the decoding context's teardown). An
+    // empty prepared txn skips ProcessTXN entirely, so begin_prepare never
+    // ran and there is nothing to reclaim.
+    let p = rb.txn(txn).output_plugin_private;
+    rb.txn_mut(txn).output_plugin_private = 0;
+    let xact_wrote_changes = if p != 0 {
+        // SAFETY: exclusive owner of the begin-prepare-callback allocation.
+        let txndata = unsafe { Box::from_raw(p as *mut TestDecodingTxnData) };
+        txndata.xact_wrote_changes
+    } else {
+        false
+    };
+
+    if data.skip_empty_xacts && !xact_wrote_changes {
+        return Ok(());
+    }
+
+    let gid = rb.txn(txn).gid.clone().expect("prepared txn carries a gid");
+    OutputPluginPrepareWrite(opc, true)?;
+    let _ = write!(opc.out, "PREPARE TRANSACTION {}", quote_literal_str(&gid));
+    if data.include_xids {
+        let _ = write!(opc.out, ", txid {}", rb.txn(txn).xid);
+    }
+    if data.include_timestamp {
+        let ts = timestamptz_str(rb.txn(txn).xact_time)?;
+        let _ = write!(opc.out, " (at {ts})");
+    }
+    OutputPluginWrite(opc, true)
+}
+
+// pg_decode_commit_prepared_txn (test_decoding.c:400).
+fn pg_decode_commit_prepared_txn(
+    opc: &mut OutputPluginContext,
+    rb: &mut ReorderBuffer,
+    txn: TxnId,
+    _commit_lsn: XLogRecPtr,
+) -> PgResult<()> {
+    let data = data_from(opc);
+    let gid = rb.txn(txn).gid.clone().expect("prepared txn carries a gid");
+
+    OutputPluginPrepareWrite(opc, true)?;
+    let _ = write!(opc.out, "COMMIT PREPARED {}", quote_literal_str(&gid));
+    if data.include_xids {
+        let _ = write!(opc.out, ", txid {}", rb.txn(txn).xid);
+    }
+    if data.include_timestamp {
+        let ts = timestamptz_str(rb.txn(txn).xact_time)?;
+        let _ = write!(opc.out, " (at {ts})");
+    }
+    OutputPluginWrite(opc, true)
+}
+
+// pg_decode_rollback_prepared_txn (test_decoding.c:422).
+fn pg_decode_rollback_prepared_txn(
+    opc: &mut OutputPluginContext,
+    rb: &mut ReorderBuffer,
+    txn: TxnId,
+    _prepare_end_lsn: XLogRecPtr,
+    _prepare_time: types_core::TimestampTz,
+) -> PgResult<()> {
+    let data = data_from(opc);
+    let gid = rb.txn(txn).gid.clone().expect("prepared txn carries a gid");
+
+    OutputPluginPrepareWrite(opc, true)?;
+    let _ = write!(opc.out, "ROLLBACK PREPARED {}", quote_literal_str(&gid));
+    if data.include_xids {
+        let _ = write!(opc.out, ", txid {}", rb.txn(txn).xid);
+    }
+    if data.include_timestamp {
+        let ts = timestamptz_str(rb.txn(txn).xact_time)?;
+        let _ = write!(opc.out, " (at {ts})");
+    }
+    OutputPluginWrite(opc, true)
+}
+
+// pg_decode_filter_prepare (test_decoding.c:452): filter out gids containing
+// "_nodecode" (they decode as regular transactions at COMMIT PREPARED).
+fn pg_decode_filter_prepare(
+    _opc: &mut OutputPluginContext,
+    _xid: TransactionId,
+    gid: &str,
+) -> PgResult<bool> {
+    Ok(gid.contains("_nodecode"))
+}
+
+fn print_literal(s: &mut logical::OutBuf, typid: Oid, outputstr: &str) {
     match typid {
         INT2OID | INT4OID | INT8OID | OIDOID | FLOAT4OID | FLOAT8OID | NUMERICOID => {
             s.push_str(outputstr);
@@ -297,7 +435,7 @@ fn varatt_is_external_ondisk(val: Datum) -> bool {
 }
 
 fn tuple_to_stringinfo(
-    s: &mut String,
+    s: &mut logical::OutBuf,
     mcx: Mcx<'_>,
     tupdesc: &TupleDescData<'static>,
     tuple: &HeapTupleData<'_>,

@@ -4,6 +4,24 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // PostgresSingleUserMain (tcop/postgres.c:4055) + the process-exit frame
+    // (main.c DISPATCH_SINGLE). argv is the FULL server argv (argv[1] ==
+    // "--single"); username per main.c's get_user_name_or_exit. Exits the
+    // process; never returns.
+    pub fn postgres_single_user_main(argv: &[String], username: &str) -> !
+);
+
+seam_core::seam!(
+    // PostgresStdioWireMain (pgrust extension, no C counterpart): the
+    // single-user boot ladder + BackendInitialize's connection half, one
+    // wire-protocol session over the boot-installed stdio transport
+    // provider (§2.4 seam). argv[1] == "--stdio-wire"; username is the
+    // fallback identity (the startup packet's user wins). Exits the
+    // process; never returns.
+    pub fn postgres_stdio_wire_main(argv: &[String], username: &str) -> !
+);
+
+seam_core::seam!(
     // ProcessClientReadInterrupt(blocked) (tcop/postgres.c); Err is the
     // ereport(FATAL) "terminating connection" path.
     pub fn process_client_read_interrupt(blocked: bool) -> types_error::PgResult<()>
@@ -79,4 +97,14 @@ seam_core::seam!(
 seam_core::seam!(
     // get_stats_option_name(optarg) (postgres.c); None = invalid.
     pub fn get_stats_option_name(arg: &str) -> Option<&'static str>
+);
+
+#[cfg(pgrust_sim)]
+seam_core::seam!(
+    // PostgresSimNetMain (P4 sim-net; pgrust extension, cfg pgrust_sim
+    // only): the wire-session boot ladder over the sim-net transport
+    // provider — one deterministic in-process pgwire session driven by the
+    // scripted client pump. argv[1] == "--sim-net"; username is the
+    // fallback identity. Exits the process; never returns.
+    pub fn postgres_sim_net_main(argv: &[String], username: &str) -> !
 );

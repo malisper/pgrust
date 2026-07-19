@@ -143,7 +143,7 @@ fn new_static_snapshot(mcx: Mcx<'static>) -> Snapshot {
 #[cold]
 #[inline(never)]
 fn init_state(slot: &mut Option<ManuallyDrop<SnapMgrState>>) {
-    let cx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("SnapMgr")));
+    let cx: &'static MemoryContext = ::mcx::session_root("SnapMgr");
     let mcx = cx.mcx();
     *slot = Some(ManuallyDrop::new(SnapMgrState {
         mcx,
@@ -786,9 +786,12 @@ pub fn AtEOXact_Snapshot(is_commit: bool, reset_xmin: bool) -> PgResult<()> {
             registered_remove(s, &first_xact);
         }
         for esnap in core::mem::take(&mut s.exported) {
-            if let Err(e) = std::fs::remove_file(&esnap.snapfile) {
+            // fd-routed (the P4 inc-4/inc-5 dataplane reroute): the export
+            // file is DATADIR-RELATIVE and must unlink in the server's world
+            // (boot cwd under --cfg pgrust_sim), not the ambient process cwd.
+            if fd::pg_unlink(&esnap.snapfile) < 0 {
                 let _ = ereport(types_error::WARNING)
-                    .with_saved_errno(e.raw_os_error().unwrap_or(0))
+                    .with_saved_errno(fd::get_errno())
                     .errmsg(format!("could not unlink file \"{}\": %m", esnap.snapfile))
                     .finish(loc("AtEOXact_Snapshot"));
             }
@@ -838,9 +841,9 @@ pub fn XactHasExportedSnapshots() -> bool {
 
 #[cold]
 #[inline(never)]
-fn export_file_err(e: &std::io::Error, msg: String) -> Box<types_error::PgError> {
+fn export_file_err(errno: i32, msg: String) -> Box<types_error::PgError> {
     ereport(ERROR)
-        .with_saved_errno(e.raw_os_error().unwrap_or(0))
+        .with_saved_errno(errno)
         .errcode_for_file_access()
         .errmsg(msg)
         .into_error()
@@ -918,42 +921,80 @@ pub fn ExportSnapshot(snapshot: &Snapshot) -> PgResult<String> {
     }
     let _ = writeln!(w, "rec:{}", snapshot.takenDuringRecovery as u32);
 
+    // fd-routed (the P4 inc-4/inc-5 dataplane reroute): pg_snapshots/ is
+    // DATADIR-RELATIVE — the write must land in the server's world (boot cwd
+    // under --cfg pgrust_sim), not the ambient process cwd. C parity is
+    // snapmgr.c ExportSnapshot's AllocateFile+fwrite+FreeFile+rename tail
+    // (same messages, same "no fsync — the file need not survive a crash");
+    // the choke here is the OpenTransientFile family, the relcache-initfile
+    // reroute precedent.
     let pathtmp = format!("{path}.tmp");
-    let mut f = std::fs::File::create(&pathtmp)
-        .map_err(|e| export_file_err(&e, format!("could not create file \"{pathtmp}\": %m")))?;
-    std::io::Write::write_all(&mut f, buf.as_bytes())
-        .map_err(|e| export_file_err(&e, format!("could not write to file \"{pathtmp}\": %m")))?;
-    drop(f);
-    std::fs::rename(&pathtmp, &path).map_err(|e| {
-        export_file_err(&e, format!("could not rename file \"{pathtmp}\" to \"{path}\": %m"))
-    })?;
+    let tmpfd = fd::OpenTransientFile(&pathtmp, libc::O_CREAT | libc::O_TRUNC | libc::O_WRONLY)?;
+    if tmpfd < 0 {
+        return Err(export_file_err(
+            fd::get_errno(),
+            format!("could not create file \"{pathtmp}\": %m"),
+        ));
+    }
+    let bytes = buf.as_bytes();
+    let mut off: usize = 0;
+    while off < bytes.len() {
+        let n = fd::pg_pwrite(tmpfd, &bytes[off..], off as i64);
+        if n <= 0 {
+            let errno = fd::get_errno();
+            fd::CloseTransientFile(tmpfd);
+            return Err(export_file_err(
+                errno,
+                format!("could not write to file \"{pathtmp}\": %m"),
+            ));
+        }
+        off += n as usize;
+    }
+    if fd::CloseTransientFile(tmpfd) != 0 {
+        return Err(export_file_err(
+            fd::get_errno(),
+            format!("could not write to file \"{pathtmp}\": %m"),
+        ));
+    }
+    if fd::pg_rename(&pathtmp, &path) < 0 {
+        return Err(export_file_err(
+            fd::get_errno(),
+            format!("could not rename file \"{pathtmp}\" to \"{path}\": %m"),
+        ));
+    }
 
     Ok(path[SNAPSHOT_EXPORT_DIR.len() + 1..].to_string())
 }
 
 // Startup-time cleanup of crashed backends' export files; failures stay LOG.
+//
+// fd-routed over the vfs data plane (the provider-seam/relmapper
+// dataplane-class fix, found by the P4 inc-4 real-initdb cut sweep): the
+// export dir is DATADIR-RELATIVE and must resolve in the server's world
+// (the boot cwd under --cfg pgrust_sim), not the ambient process cwd — the
+// raw std::fs walk made this crash-boot cleanup silently target the wrong
+// world under sim. C parity: AllocateDir + ReadDirExtended(LOG) + unlink,
+// all failures LOG-level (snapmgr.c DeleteAllExportedSnapshotFiles).
 pub fn DeleteAllExportedSnapshotFiles() {
-    let dir = match std::fs::read_dir(SNAPSHOT_EXPORT_DIR) {
+    let s_dir = match fd::AllocateDir(SNAPSHOT_EXPORT_DIR) {
         Ok(d) => d,
-        Err(e) => {
-            let _ = ereport(types_error::LOG)
-                .with_saved_errno(e.raw_os_error().unwrap_or(0))
-                .errcode_for_file_access()
-                .errmsg(format!("could not open directory \"{SNAPSHOT_EXPORT_DIR}\": %m"))
-                .finish(loc("DeleteAllExportedSnapshotFiles"));
-            return;
-        }
+        Err(_) => return, // descriptor-pressure path has already reported
     };
-    for entry in dir.flatten() {
-        let buf = format!("{SNAPSHOT_EXPORT_DIR}/{}", entry.file_name().to_string_lossy());
-        if let Err(e) = std::fs::remove_file(&buf) {
-            let _ = ereport(types_error::LOG)
-                .with_saved_errno(e.raw_os_error().unwrap_or(0))
-                .errcode_for_file_access()
-                .errmsg(format!("could not remove file \"{buf}\": %m"))
-                .finish(loc("DeleteAllExportedSnapshotFiles"));
+    loop {
+        match fd::ReadDirExtended(s_dir, SNAPSHOT_EXPORT_DIR, types_error::LOG) {
+            Ok(Some(de)) => {
+                let buf = format!("{SNAPSHOT_EXPORT_DIR}/{}", de.d_name);
+                if fd::pg_unlink(&buf) < 0 {
+                    let _ = ereport(types_error::LOG)
+                        .with_saved_errno(fd::get_errno())
+                        .errmsg(format!("could not unlink file \"{buf}\": %m"))
+                        .finish(loc("DeleteAllExportedSnapshotFiles"));
+                }
+            }
+            Ok(None) | Err(_) => break,
         }
     }
+    let _ = fd::FreeDir(s_dir);
 }
 
 // SNAPSHOT_EXPORT_DIR (snapmgr.c), relative to the data directory (the
@@ -998,21 +1039,34 @@ pub fn ImportSnapshot(idstr: &str) -> PgResult<()> {
             .into());
     }
 
+    // fd-routed (the P4 inc-5 dataplane reroute, closing the inc-4 ledger's
+    // "ImportSnapshot read surface" rows): pg_snapshots/ is DATADIR-RELATIVE
+    // and must resolve in the server's world (boot cwd under
+    // --cfg pgrust_sim), not the ambient process cwd. C parity: snapmgr.c
+    // ImportSnapshot's AllocateFile probe — errno != ENOENT complains about
+    // the open, ENOENT means the snapshot identifier names nothing.
     let path = format!("{SNAPSHOT_EXPORT_DIR}/{idstr}");
-    match std::fs::read(&path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ereport(ERROR)
+    let snapfd = fd::OpenTransientFile(&path, libc::O_RDONLY)?;
+    if snapfd < 0 {
+        let errno = fd::get_errno();
+        if errno != libc::ENOENT {
+            return Err(ereport(ERROR)
+                .with_saved_errno(errno)
+                .errcode_for_file_access()
+                .errmsg(format!("could not open file \"{path}\" for reading: %m"))
+                .into_error()
+                .with_error_location(loc("ImportSnapshot"))
+                .into());
+        }
+        return Err(ereport(ERROR)
             .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
             .errmsg(format!("snapshot \"{idstr}\" does not exist"))
             .into_error()
             .with_error_location(loc("ImportSnapshot"))
-            .into()),
-        Err(e) => Err(ereport(ERROR)
-            .errmsg(format!("could not open file \"{path}\" for reading: {e}"))
-            .into_error()
-            .with_error_location(loc("ImportSnapshot"))
-            .into()),
-        Ok(_) => unported("ImportSnapshot parse/install (ExportSnapshot phase 2)"),
+            .into());
     }
+    fd::CloseTransientFile(snapfd);
+    unported("ImportSnapshot parse/install (ExportSnapshot phase 2)")
 }
 
 pub fn ThereAreNoPriorRegisteredSnapshots() -> bool {

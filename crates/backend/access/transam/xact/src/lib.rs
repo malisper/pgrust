@@ -35,6 +35,7 @@ mod wal;
 mod tests;
 
 pub(crate) use state::{xs, xs_ptr, TransactionNode, XsPtr};
+pub use state::session_mem_teardown;
 
 pub use engine::{
     AbortCurrentTransaction, AbortOutOfAnyTransaction, BeginImplicitTransactionBlock,
@@ -46,8 +47,8 @@ pub use engine::{
     SaveTransactionCharacteristics, SerializeTransactionState, StartParallelWorkerTransaction,
     StartTransactionCommand, UserAbortTransactionBlock,
 };
-pub use redo::{parse_abort_record, parse_commit_record, xact_redo, ParsedAbort, ParsedCommit,
-    XactRedoInfo};
+pub use redo::{parse_abort_record, parse_commit_record, parse_prepare_record, xact_redo,
+    ParsedAbort, ParsedCommit, ParsedPrepare, XactRedoInfo};
 pub use wal::{XactLogAbortRecord, XactLogCommitRecord};
 
 // Verified against access/xact.h / xlogrecord.h / xloginsert.h / rmgrlist.h.

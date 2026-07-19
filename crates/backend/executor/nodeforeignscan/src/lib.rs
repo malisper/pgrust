@@ -11,7 +11,7 @@ use ::execscan::{exec_scan, exec_scan_extended, ScanNode, ScanState};
 use ::executils::{EStateData, ExecSlotId};
 use ::mcx::{Mcx, PgBox};
 use ::types_core::{InvalidOid, Oid};
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use ::types_nodes::plannodes::ForeignScan;
 use ::types_nodes::{CmdType, FdwExplainProp, FdwKind, NUM_FDW_KINDS};
 use ::types_slot::{TupleSlotKind, EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
@@ -123,6 +123,15 @@ pub fn exec_foreign_scan<'mcx>(
     }
 }
 
+#[cold]
+#[inline(never)]
+fn foreign_scan_unported(what: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("{what} is not yet implemented"))
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
+}
+
 pub fn exec_init_foreign_scan<'mcx>(
     mcx: Mcx<'mcx>,
     node: &'mcx ForeignScan<'mcx>,
@@ -130,18 +139,17 @@ pub fn exec_init_foreign_scan<'mcx>(
     eflags: i32,
 ) -> PgResult<ForeignScanState<'mcx>> {
     debug_assert!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0);
-    assert!(
-        node.operation == CmdType::CMD_SELECT && node.resultRelation == 0,
-        "ExecInitForeignScan (nodeForeignscan.c): direct modify unported"
-    );
-    assert!(
-        node.scan.plan.lefttree.is_none(),
-        "ExecInitForeignScan (nodeForeignscan.c): FDW outer plan unported"
-    );
-    assert!(
-        node.scan.scanrelid > 0 && node.fdw_scan_tlist.is_nil(),
-        "ExecInitForeignScan (nodeForeignscan.c): fdw_scan_tlist unported"
-    );
+    // unported: ExecInitForeignScan (nodeForeignscan.c) direct-modify, FDW
+    // outer-plan, and fdw_scan_tlist lanes raise clean feature errors.
+    if node.operation != CmdType::CMD_SELECT || node.resultRelation != 0 {
+        return Err(foreign_scan_unported("direct modification of a foreign table"));
+    }
+    if node.scan.plan.lefttree.is_some() {
+        return Err(foreign_scan_unported("a foreign scan with an outer subplan"));
+    }
+    if node.scan.scanrelid == 0 || !node.fdw_scan_tlist.is_nil() {
+        return Err(foreign_scan_unported("a foreign scan with a custom scan tuple list"));
+    }
 
     let ps_ExprContext = estate.exec_assign_expr_context();
     let rel = estate.exec_get_range_table_relation(node.scan.scanrelid, false)?.alias();

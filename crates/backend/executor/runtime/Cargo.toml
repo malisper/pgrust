@@ -16,6 +16,9 @@ path = "src/lib.rs"
 # src/sync.rs; the heavy binder re-export (`parallel`) is cfg(not(loom)) so
 # the loom build cone stays small.
 [dependencies]
+# THE single lock library (permit-s1): src/sync.rs is a facade over it.
+pgsync = { path = "../../../_support/pgsync" }
+pg_clock = { path = "../../../port/pg_clock" }
 types_error = { path = "../../../_support/types/types_error" }
 init_small = { path = "../../utils/init/init_small" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
@@ -36,6 +39,11 @@ aio_seams = { path = "../../storage/aio/aio_seams" }
 # Loom is cfg-gated, not feature-gated, so release binaries can never link
 # it: build the models with
 #   RUSTFLAGS="--cfg loom" cargo test -p runtime --test loom --release
+# Post-pgsync note: sync-TYPE selection lives in pgsync, but this row is
+# still LOAD-BEARING FOR src/: rg.rs keeps its pre-existing cfg(loom) wait()
+# polyfill (loom::thread::yield_now; outside the s1 §2.4 migration scope).
+# tests/loom.rs model Builders also use it; the loom-breadth reconciliation
+# migrates the fenced models (tests/loom.rs is fenced).
 [target.'cfg(loom)'.dependencies]
 loom = "0.7"
 
@@ -44,6 +52,13 @@ loom = "0.7"
 # set this dual-declaration precedent). Dev-deps never reach release builds.
 [dev-dependencies]
 loom = "0.7"
+# permit-s4: the bitmapheap phase-mirror loom model drives the waiter Slot
+# core directly (dev-dep = codegen-inert, the loom-breadth inc-2 ruling).
+waiter = { path = "../../storage/ipc/waiter" }
+# latch-loom: types_relscan became loom-buildable (the latch conversion), so
+# the relscan seize model now constructs the REAL BTParallelScanShared
+# (dev-dep = codegen-inert, same ruling).
+types_relscan = { path = "../../access/index/relscan" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }

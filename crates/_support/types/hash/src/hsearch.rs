@@ -184,7 +184,12 @@ pub const DEF_SEGSIZE: i64 = 256;
 pub const DEF_SEGSIZE_SHIFT: i32 = 8;
 pub const DEF_DIRSIZE: i64 = 256;
 
+// 64-bit layout pins (embedded pointers). wasm32 (ILP32) shrinks both; all
+// dynahash arithmetic derives from size_of per target, so they stay
+// internally consistent.
+#[cfg(not(target_family = "wasm"))]
 const _: () = assert!(core::mem::size_of::<HASHELEMENT>() == 16);
+#[cfg(not(target_family = "wasm"))]
 const _: () = assert!(core::mem::size_of::<FreeListData>() == 24);
 
 #[cfg(test)]

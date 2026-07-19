@@ -59,6 +59,7 @@ fn install_seams() {
     static INSTALL: OnceLock<()> = OnceLock::new();
     INSTALL.get_or_init(|| {
         transam_xlog_seams::xlog_standby_info_active::set(|| false);
+        transam_xlog_seams::xlog_logical_info_active::set(|| false);
         postgres_seams::check_for_interrupts::set(|| Ok(()));
         bufmgr_seams::buffer_get_page::set(|buf| {
             let addr = with_fake(|f| {
@@ -266,6 +267,7 @@ fn vacrel<'a, 'mcx>(rel: &'a RelationData<'mcx>, mcx: Mcx<'mcx>) -> LVRelState<'
         nindexes: 1,
         bstrategy: None,
         aggressive: false,
+        verbose: false,
         skipwithvm: true,
         consider_bypass_optimization: false,
         do_index_vacuuming: true,
@@ -283,6 +285,7 @@ fn vacrel<'a, 'mcx>(rel: &'a RelationData<'mcx>, mcx: Mcx<'mcx>) -> LVRelState<'
         skippedallvis: false,
         coverage_hole: false,
         rel_pages: 1,
+        removed_pages: 0,
         folds: {
             // Seed = (OldestXmin, OldestMxact), as heap_vacuum_rel.
             let mut counters = ::vacuum_morsels::ScanCounters::seed(1000, 1);

@@ -55,6 +55,11 @@ fn setup() {
                 p.to_path_buf()
             } else if let Some(calling) = calling_file {
                 calling.parent().unwrap_or(std::path::Path::new(".")).join(p)
+            } else if let Some(dd) = init_small::globals::DataDir() {
+                // C AbsoluteConfigLocation: a relative name with no calling
+                // file resolves against DataDir (how postgresql.auto.conf is
+                // found).
+                std::path::Path::new(&dd).join(p)
             } else {
                 p.to_path_buf()
             }
@@ -516,6 +521,61 @@ fn process_config_file_applies_and_reverts() {
             .unwrap();
     assert!(!clean);
     assert_eq!(get_int("work_mem"), Some(4096));
+}
+
+// gucdup corpus: C's ProcessConfigFileInternal is LAST-wins for duplicate
+// entries within one pass (earlier occurrences are marked ignorable), across
+// include files, and postgresql.auto.conf — parsed after the main file — must
+// override it all. Byte-verified against C 18.3 twin boots by
+// scripts/gucdup-repro-e2e.sh.
+#[test]
+fn process_config_file_duplicate_orderings_last_wins() {
+    setup();
+    let _guard = APPLICATION_NAME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("guc_dup_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let conf = dir.join("postgresql.conf");
+    let auto_conf = dir.join("postgresql.auto.conf");
+    init_small::globals::SetDataDir(dir.to_str().unwrap());
+    SetConfigOption("config_file", Some(conf.to_str().unwrap()), PGC_POSTMASTER, PGC_S_OVERRIDE)
+        .unwrap();
+
+    let reload = || {
+        crate::process_config::process_config_file_internal(PGC_SIGHUP, true, types_error::LOG)
+            .unwrap()
+    };
+
+    // Inline duplicate: the later entry wins.
+    std::fs::write(&conf, "work_mem = 2MB\nwork_mem = 8MB\n").unwrap();
+    assert!(reload());
+    assert_eq!(get_int("work_mem"), Some(8192));
+
+    // Duplicate via an include placed after the inline entry: include wins.
+    std::fs::write(dir.join("extra.conf"), "work_mem = 16MB\n").unwrap();
+    std::fs::write(&conf, "work_mem = 2MB\ninclude 'extra.conf'\n").unwrap();
+    assert!(reload());
+    assert_eq!(get_int("work_mem"), Some(16384));
+
+    // Include first, inline later: the inline entry wins.
+    std::fs::write(&conf, "include 'extra.conf'\nwork_mem = 2MB\n").unwrap();
+    assert!(reload());
+    assert_eq!(get_int("work_mem"), Some(2048));
+
+    // postgresql.auto.conf is parsed after the main file: the ALTER SYSTEM
+    // value wins over the main file, even over a later main-file duplicate.
+    std::fs::write(&conf, "work_mem = 2MB\nwork_mem = 8MB\n").unwrap();
+    std::fs::write(&auto_conf, "work_mem = 32MB\n").unwrap();
+    assert!(reload());
+    assert_eq!(get_int("work_mem"), Some(32768));
+
+    // Case-variant duplicate: find_option matches case-insensitively, but dup
+    // pruning compares exact spellings (C strcmp); both entries survive and
+    // apply in file order, so the later spelling still wins.
+    std::fs::remove_file(&auto_conf).unwrap();
+    std::fs::write(&conf, "work_mem = 2MB\nWORK_MEM = 8MB\n").unwrap();
+    assert!(reload());
+    assert_eq!(get_int("work_mem"), Some(8192));
 }
 
 #[test]

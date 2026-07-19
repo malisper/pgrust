@@ -547,9 +547,12 @@ pub fn fmgr_sql(
                 Ok(())
             })?;
             if !s.params_buf.is_empty() && s.params_h.is_null() {
+                // C functions.c: paramLI->paramFetch = sql_fn_param_fetch —
+                // a hooked PL-owned list (params.c BuildParamLogString bails
+                // on it; auto_explain's Query Parameters suppression).
                 // SAFETY: freed in release_execution_state before the buffer
                 // is next reallocated.
-                s.params_h = unsafe { types_portal::params::register(&s.params_buf) };
+                s.params_h = unsafe { types_portal::params::register_hooked(&s.params_buf) };
             }
             s.lazy_eval_ok = lazy_eval_ok;
             s.lazy_eval = false;

@@ -106,8 +106,82 @@ fn log_tree(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Session-memory teardown (FPBUDGET-1): the thread-local phased LIFO behind
+// mcx::register_session_cleanup / mcx::session_root. The backend runner
+// (launch_backend) drains it once at clean task end — C's
+// process-exit-frees-TopMemoryContext, made explicit for the thread model.
+//
+// v2 (train-29 bounce fix): three phases drained in order — Portals, State,
+// Roots — porting C's exit order (portal cleanup inside the exit-callback
+// ceremony; memory dies last, see the phase doc in mcx). Every cleanup runs
+// under catch_unwind: cleanup paths must be panic-free by construction
+// (tolerate absent state), and if one still panics we degrade to a stderr
+// WARNING and keep draining rather than letting the panic cross Drop glue
+// and abort the whole threaded server (the ipc::run_callback_guarded
+// discipline). The guard is defense in depth, not the fix: the phase order
+// plus the launch_backend crash-exit gate are what remove the t29 abort.
+// ---------------------------------------------------------------------------
+
+use ::mcx::SessionCleanupPhase;
+
+thread_local! {
+    static SESSION_CLEANUPS: [RefCell<Vec<Box<dyn FnOnce()>>>; 3] =
+        const { [RefCell::new(Vec::new()), RefCell::new(Vec::new()), RefCell::new(Vec::new())] };
+}
+
+fn phase_index(phase: SessionCleanupPhase) -> usize {
+    match phase {
+        SessionCleanupPhase::Portals => 0,
+        SessionCleanupPhase::State => 1,
+        SessionCleanupPhase::Roots => 2,
+    }
+}
+
+fn session_cleanup_push(phase: SessionCleanupPhase, f: Box<dyn FnOnce()>) {
+    SESSION_CLEANUPS.with(|c| c[phase_index(phase)].borrow_mut().push(f));
+}
+
+/// Drain this thread's session cleanups: Portals, then State, then Roots;
+/// newest first within each phase (C's callback LIFO discipline). Idempotent;
+/// a cleanup registering further cleanups extends the drain — including into
+/// an earlier phase, which the outer loop re-visits before finishing.
+pub fn run_session_teardown() {
+    loop {
+        // Re-derive the first non-empty phase after EVERY cleanup: a
+        // mid-drain registration into an earlier phase runs before any
+        // later-phase work, so no Roots free can ever precede an owed
+        // Portals/State cleanup.
+        let next = SESSION_CLEANUPS.with(|c| {
+            for (i, list) in c.iter().enumerate() {
+                if let Some(f) = list.borrow_mut().pop() {
+                    return Some((i, f));
+                }
+            }
+            None
+        });
+        let Some((i, f)) = next else { return };
+        // Absent-state tolerance is each cleanup's contract; the guard
+        // keeps one bad cleanup from aborting the server.
+        if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+            let msg = e
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| e.downcast_ref::<&str>().copied())
+                .unwrap_or("non-string panic payload");
+            eprintln!("WARNING: session-teardown cleanup panicked (phase {i}): {msg}");
+        }
+    }
+}
+
+/// Registered-cleanup count across all phases (leak-guard probes).
+pub fn session_cleanup_count() -> usize {
+    SESSION_CLEANUPS.with(|c| c.iter().map(|v| v.borrow().len()).sum())
+}
+
 pub fn init_seams() {
     mcx::set_root_observer(observe_root);
+    mcx::set_session_cleanup_sink(session_cleanup_push);
     mcxt_seams::handle_log_memory_context_interrupt::set(handle_log_memory_context_interrupt);
     mcxt_seams::log_memory_context_pending::set(log_memory_context_pending);
     mcxt_seams::process_log_memory_context_interrupt::set(process_log_memory_context_interrupt);

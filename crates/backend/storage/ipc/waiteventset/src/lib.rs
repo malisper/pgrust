@@ -24,8 +24,13 @@ use types_storage::waiteventset::{
 #[cfg(target_os = "linux")]
 #[path = "epoll.rs"]
 mod backend;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_family = "wasm")))]
 #[path = "kqueue.rs"]
+mod backend;
+// wasm32: compile-clean stub; the functional WASI poll_oneoff backend is the
+// P5 boot increment (docs/design/dst-and-wasm.md §5).
+#[cfg(target_family = "wasm")]
+#[path = "wasm_stub.rs"]
 mod backend;
 
 #[cfg(test)]
@@ -53,6 +58,8 @@ thread_local! {
 // registry (SendPostmasterSignal's kill(PostmasterPid, SIGUSR1) analog).
 static POSTMASTER_WAKER: AtomicU64 = AtomicU64::new(0);
 
+// Only the epoll/kqueue backends raise OS errors; the wasm stub never does.
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
 #[cold]
 #[inline(never)]
 fn os_error(level: ErrorLevel, msg: &str) -> Box<PgError> {
@@ -88,14 +95,19 @@ pub fn InitializeWaitEventSupport() -> PgResult<()> {
 
     // The waiter wake pipe replaces C's self-pipe (created eagerly here to
     // keep the per-backend fd accounting where it always was).
-    if let Err(errno) = waiter::ensure_wake_pipe() {
-        return Err(Box::new(PgError::new(
-            FATAL,
-            format!("waiter wake pipe creation failed: errno {errno}"),
-        )));
+    // wasm32: no pipe(2) on WASI; the wasm backend blocks on time alone
+    // (single thread — no cross-thread wakes exist to route).
+    #[cfg(not(target_family = "wasm"))]
+    {
+        if let Err(errno) = waiter::ensure_wake_pipe() {
+            return Err(Box::new(PgError::new(
+                FATAL,
+                format!("waiter wake pipe creation failed: errno {errno}"),
+            )));
+        }
+        fd::ReserveExternalFD()?;
+        fd::ReserveExternalFD()?;
     }
-    fd::ReserveExternalFD()?;
-    fd::ReserveExternalFD()?;
 
     // The postmaster publishes its well-known waker (children have
     // IsUnderPostmaster set before they reach this in InitPostmasterChild).
@@ -122,8 +134,16 @@ pub fn WakeupPostmaster() {
     waiter::unpark_word(POSTMASTER_WAKER.load(Ordering::Acquire));
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn wakeup_read_fd() -> i32 {
     waiter::wake_read_fd()
+}
+
+// wasm32: no wake pipe exists; latch events carry no fd (the wasm backend
+// blocks on time alone and the generic loop re-checks latch.is_set).
+#[cfg(target_family = "wasm")]
+fn wakeup_read_fd() -> i32 {
+    PGINVALID_SOCKET
 }
 
 pub fn CreateWaitEventSet(nevents: i32) -> PgResult<WaitEventSetHandle> {
@@ -459,11 +479,10 @@ pub(crate) fn drain() -> PgResult<()> {
 }
 
 fn now_millis() -> i64 {
-    // SAFETY: clock_gettime(CLOCK_MONOTONIC) into a zeroed timespec.
-    let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
-    // SAFETY: valid pointer to ts.
-    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
-    ts.tv_sec as i64 * 1000 + ts.tv_nsec as i64 / 1_000_000
+    // DST P2 (contract §1.3): the named waiteventset gap — timeout math on
+    // the one monotonic authority. The epoll block itself stays; scheduler
+    // visibility of the fd-park is P3.
+    pg_clock::mono_ms()
 }
 
 fn wait_event_set_wait_one(

@@ -142,7 +142,7 @@ fn newlocale(mask: c_int, locale: &str, base: locale_t) -> Option<locale_t> {
 
 // cache_locale_time's newlocale(LC_ALL_MASK, ...) leg (pg_locale.c:752).
 pub(crate) fn newlocale_all(locale: &str) -> PgResult<locale_t> {
-    newlocale(libc::LC_ALL_MASK, locale, core::ptr::null_mut())
+    newlocale(crate::lc::LC_ALL_MASK, locale, core::ptr::null_mut())
         .ok_or_else(|| report_newlocale_failure(locale))
 }
 
@@ -157,20 +157,20 @@ pub(crate) fn make_libc_collator(collate: &str, ctype: &str) -> PgResult<LibcLoc
         if is_c_or_posix(ctype) {
             return Ok(LibcLocale::NONE);
         }
-        let loc = newlocale(libc::LC_COLLATE_MASK | libc::LC_CTYPE_MASK, collate, core::ptr::null_mut())
+        let loc = newlocale(crate::lc::LC_COLLATE_MASK | crate::lc::LC_CTYPE_MASK, collate, core::ptr::null_mut())
             .ok_or_else(|| report_newlocale_failure(collate))?;
         return Ok(LibcLocale(loc as usize));
     }
 
     let loc1 = if !is_c_or_posix(collate) {
-        Some(newlocale(libc::LC_COLLATE_MASK, collate, core::ptr::null_mut())
+        Some(newlocale(crate::lc::LC_COLLATE_MASK, collate, core::ptr::null_mut())
             .ok_or_else(|| report_newlocale_failure(collate))?)
     } else {
         None
     };
 
     if !is_c_or_posix(ctype) {
-        match newlocale(libc::LC_CTYPE_MASK, ctype, loc1.unwrap_or(core::ptr::null_mut())) {
+        match newlocale(crate::lc::LC_CTYPE_MASK, ctype, loc1.unwrap_or(core::ptr::null_mut())) {
             Some(loc) => Ok(LibcLocale(loc as usize)),
             None => {
                 let err = report_newlocale_failure(ctype);

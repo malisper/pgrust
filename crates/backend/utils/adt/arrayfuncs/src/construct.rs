@@ -205,7 +205,17 @@ pub fn construct_md_array<'mcx>(
     }
     let nelems = nelems as usize;
 
-    // Pass 1: compute data space.
+    // Pass 1: compute data space. C detoasts every varlena element here
+    // ("make sure data is not toasted", arrayfuncs.c:3534-3538): an array
+    // image must never contain an external TOAST pointer (it would dangle
+    // once the source relation's toast data goes away), a compressed image,
+    // or a short-header varlena — PG_DETOAST_DATUM expands all three to a
+    // plain 4B-header value. C mutates the caller's elems[] in place; we
+    // substitute a lazily-built scratch copy instead so callers' element
+    // arrays are never damaged (the hazard C documents at accumArrayResult,
+    // arrayfuncs.c:5393-5397: construct_md_array modifying the array_agg
+    // build state would corrupt later finalfn calls).
+    let mut detoasted: Option<PgVec<'mcx, Datum>> = None;
     let mut nbytes = 0usize;
     let mut hasnulls = false;
     for i in 0..nelems {
@@ -215,13 +225,33 @@ pub fn construct_md_array<'mcx>(
                 continue;
             }
         }
-        let p = elems[i].as_usize() as *const u8;
-        nbytes = att_addlength_datum_offset(nbytes, elmlen, elems[i], p);
+        let mut d = elems[i];
+        if elmlen == -1 {
+            let p = d.as_usize() as *const u8;
+            // SAFETY: non-null by-ref varlena datum addresses at least its
+            // header byte. Tag & 0x03 != 0 = VARATT_IS_EXTENDED (external
+            // 0x01 / compressed ..10 / short-header xxx1).
+            if unsafe { *p } & 0x03 != 0 {
+                d = detoast_element(mcx, p)?;
+                let dv = match detoasted.as_mut() {
+                    Some(v) => v,
+                    None => {
+                        let mut v: PgVec<'mcx, Datum> = vec_with_capacity_in(mcx, nelems)?;
+                        v.extend_from_slice(&elems[..nelems]);
+                        detoasted.insert(v)
+                    }
+                };
+                dv[i] = d;
+            }
+        }
+        let p = d.as_usize() as *const u8;
+        nbytes = att_addlength_datum_offset(nbytes, elmlen, d, p);
         nbytes = att_align_nominal(nbytes, elmalign);
         if nbytes > MAX_ALLOC_SIZE {
             return Err(array_alloc_exceeded());
         }
     }
+    let elems: &[Datum] = detoasted.as_deref().unwrap_or(elems);
 
     let dataoffset = if hasnulls {
         let d = arr_overhead_withnulls(ndims, nelems as i32);
@@ -238,6 +268,20 @@ pub fn construct_md_array<'mcx>(
     write_dims_lbounds(&mut out, ndims, dims, lbs);
     copy_array_els(&mut out, elems, nulls, nelems, elmlen, elmbyval, elmalign);
     Ok(out)
+}
+
+// One toasted element found: replace it with a plain 4B-header copy in mcx.
+// C construct_md_array's PG_DETOAST_DATUM (arrayfuncs.c:3536-3538) — fetch
+// external, decompress, expand short headers. Cold: only arrays actually
+// built from toasted/short datums pay it.
+#[cold]
+#[inline(never)]
+fn detoast_element<'mcx>(mcx: Mcx<'mcx>, p: *const u8) -> PgResult<Datum> {
+    // SAFETY: caller guarantees p addresses a live varlena image;
+    // varsize_any reads only the header bytes it needs.
+    let raw = unsafe { core::slice::from_raw_parts(p, varsize_any(p)) };
+    let flat = ::detoast_seams::detoast_attr::call(mcx, raw)?;
+    Ok(Datum::from_usize(flat.leak().as_ptr() as usize))
 }
 
 // att_addlength for a Datum whose by-ref payload is at p (fixed-len by-val is

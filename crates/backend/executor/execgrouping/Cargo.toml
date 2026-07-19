@@ -7,6 +7,7 @@ edition = "2021"
 path = "src/lib.rs"
 
 [dependencies]
+pgsync = { path = "../../../_support/pgsync" }
 datum = { path = "../../../_support/types/datum" }
 execexpr = { path = "../execexpr" }
 exectuples = { path = "../exectuples" }
@@ -18,6 +19,7 @@ hashbrown = { version = "0.14", default-features = false, features = ["allocator
 hashfn = { path = "../../../common/hashfn" }
 lsyscache = { path = "../../utils/cache/lsyscache" }
 mcx = { path = "../../../_support/mcx" }
+parallel_seams = { path = "../../access/transam/parallel_seams" }
 types_core = { path = "../../../_support/types/types_core" }
 types_error = { path = "../../../_support/types/types_error" }
 types_fmgr = { path = "../../../_support/types/fmgr" }

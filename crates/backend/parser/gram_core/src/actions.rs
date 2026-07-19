@@ -104,10 +104,6 @@ const CAS_NOT_ENFORCED: i32 = 0x40;
 const CAS_ENFORCED: i32 = 0x80;
 
 // Which pointers C's processCASbits caller passes (NULL target + bit = error).
-// not_valid_exec: the executor path for this production handles NOT VALID
-// (domain constraints); the table lanes stay loud until notvalid lands.
-// enforced_exec: the executor path handles NOT ENFORCED (ALTER TABLE ..
-// ALTER CONSTRAINT plus CHECK/FOREIGN KEY creation).
 #[derive(Default)]
 struct CasTargets {
     deferrable: bool,
@@ -115,8 +111,6 @@ struct CasTargets {
     is_enforced: bool,
     not_valid: bool,
     no_inherit: bool,
-    not_valid_exec: bool,
-    enforced_exec: bool,
 }
 
 struct CasBits {
@@ -1179,7 +1173,7 @@ impl<'mcx> Parser<'mcx> {
                     view.v(5).ival(),
                     view.l(5),
                     "CHECK",
-                    CasTargets { not_valid: true, no_inherit: true, not_valid_exec: true, ..Default::default() },
+                    CasTargets { not_valid: true, no_inherit: true, ..Default::default() },
                 )?;
                 n.skip_validation = cas.not_valid;
                 n.is_no_inherit = cas.no_inherit;
@@ -1197,7 +1191,7 @@ impl<'mcx> Parser<'mcx> {
                     view.v(3).ival(),
                     view.l(3),
                     "NOT NULL",
-                    CasTargets { deferrable: false, initdeferred: false, is_enforced: false, not_valid: false, no_inherit: false, not_valid_exec: false, enforced_exec: false },
+                    CasTargets { deferrable: false, initdeferred: false, is_enforced: false, not_valid: false, no_inherit: false },
                 )?;
                 n.initially_valid = true;
                 *yyval = YYSTYPE::Node(Some(n.seal()));
@@ -1286,7 +1280,7 @@ impl<'mcx> Parser<'mcx> {
                     view.v(5).ival(),
                     view.l(5),
                     "CHECK",
-                    CasTargets { deferrable: false, initdeferred: false, is_enforced: true, not_valid: true, no_inherit: true, not_valid_exec: true, enforced_exec: true },
+                    CasTargets { deferrable: false, initdeferred: false, is_enforced: true, not_valid: true, no_inherit: true },
                 )?;
                 n.is_enforced = cas.is_enforced;
                 n.skip_validation = cas.not_valid;
@@ -1304,7 +1298,7 @@ impl<'mcx> Parser<'mcx> {
                     view.v(4).ival(),
                     view.l(4),
                     "NOT NULL",
-                    CasTargets { deferrable: false, initdeferred: false, is_enforced: false, not_valid: true, no_inherit: true, not_valid_exec: true, enforced_exec: false },
+                    CasTargets { deferrable: false, initdeferred: false, is_enforced: false, not_valid: true, no_inherit: true },
                 )?;
                 n.skip_validation = cas.not_valid;
                 n.is_no_inherit = cas.no_inherit;
@@ -1328,7 +1322,7 @@ impl<'mcx> Parser<'mcx> {
                     view.v(10).ival(),
                     view.l(10),
                     "UNIQUE",
-                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false, not_valid_exec: false, enforced_exec: false },
+                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false },
                 )?;
                 n.deferrable = cas.deferrable;
                 n.initdeferred = cas.initdeferred;
@@ -1348,7 +1342,7 @@ impl<'mcx> Parser<'mcx> {
                     view.v(3).ival(),
                     view.l(3),
                     "UNIQUE",
-                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false, not_valid_exec: false, enforced_exec: false },
+                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false },
                 )?;
                 n.deferrable = cas.deferrable;
                 n.initdeferred = cas.initdeferred;
@@ -1368,7 +1362,7 @@ impl<'mcx> Parser<'mcx> {
                     view.v(4).ival(),
                     view.l(4),
                     "PRIMARY KEY",
-                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false, not_valid_exec: false, enforced_exec: false },
+                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false },
                 )?;
                 n.deferrable = cas.deferrable;
                 n.initdeferred = cas.initdeferred;
@@ -1390,7 +1384,7 @@ impl<'mcx> Parser<'mcx> {
                     view.v(10).ival(),
                     view.l(10),
                     "PRIMARY KEY",
-                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false, not_valid_exec: false, enforced_exec: false },
+                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false },
                 )?;
                 n.deferrable = cas.deferrable;
                 n.initdeferred = cas.initdeferred;
@@ -1414,7 +1408,7 @@ impl<'mcx> Parser<'mcx> {
                     view.v(10).ival(),
                     view.l(10),
                     "EXCLUDE",
-                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false, not_valid_exec: false, enforced_exec: false },
+                    CasTargets { deferrable: true, initdeferred: true, is_enforced: false, not_valid: false, no_inherit: false },
                 )?;
                 n.deferrable = cas.deferrable;
                 n.initdeferred = cas.initdeferred;
@@ -1478,7 +1472,7 @@ impl<'mcx> Parser<'mcx> {
                     view.v(12).ival(),
                     view.l(12),
                     "FOREIGN KEY",
-                    CasTargets { deferrable: true, initdeferred: true, is_enforced: true, not_valid: true, no_inherit: false, not_valid_exec: true, enforced_exec: true },
+                    CasTargets { deferrable: true, initdeferred: true, is_enforced: true, not_valid: true, no_inherit: false },
                 )?;
                 n.deferrable = cas.deferrable;
                 n.initdeferred = cas.initdeferred;
@@ -2044,8 +2038,7 @@ impl<'mcx> Parser<'mcx> {
             }
             // AlterExtensionContentsStmt: ALTER EXTENSION name add_drop
             // {object_type_name name | object_type_any_name any_name |
-            //  FUNCTION function_with_argtypes} (cast/opclass/opfamily/
-            // aggregate/operator/domain/transform/type forms stay loud).
+            //  FUNCTION function_with_argtypes} (all 13 gram.y forms ported).
             697 => {
                 let mut n = Node::build::<AlterExtensionContentsStmt>(mcx)?;
                 n.extname = Some(view.v(3).str_val());
@@ -2072,6 +2065,72 @@ impl<'mcx> Parser<'mcx> {
                     _ => ObjectType::OBJECT_ROUTINE,
                 };
                 n.object = view.v(6).node();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // ... add_drop {AGGREGATE aggregate_with_argtypes | DOMAIN_P
+            // Typename | OPERATOR operator_with_argtypes | TYPE_P Typename}:
+            // object is the $6 node directly.
+            699 | 701 | 703 | 709 => {
+                let mut n = Node::build::<AlterExtensionContentsStmt>(mcx)?;
+                n.extname = Some(view.v(3).str_val());
+                n.action = view.v(4).ival();
+                n.objtype = match rule {
+                    699 => ObjectType::OBJECT_AGGREGATE,
+                    701 => ObjectType::OBJECT_DOMAIN,
+                    703 => ObjectType::OBJECT_OPERATOR,
+                    _ => ObjectType::OBJECT_TYPE,
+                };
+                n.object = view.v(6).node();
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // ... add_drop CAST '(' Typename AS Typename ')':
+            // C: object = list_make2($7, $9).
+            700 => {
+                let mut n = Node::build::<AlterExtensionContentsStmt>(mcx)?;
+                n.extname = Some(view.v(3).str_val());
+                n.action = view.v(4).ival();
+                n.objtype = ObjectType::OBJECT_CAST;
+                n.object = Some(Node::mk_list(
+                    mcx,
+                    NodeList::make2(
+                        mcx,
+                        view.v(7).node().expect("Typename"),
+                        view.v(9).node().expect("Typename"),
+                    )?,
+                )?);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // ... add_drop OPERATOR {CLASS|FAMILY} any_name USING name:
+            // C: object = lcons(makeString($9), $7).
+            704 | 705 => {
+                let mut n = Node::build::<AlterExtensionContentsStmt>(mcx)?;
+                n.extname = Some(view.v(3).str_val());
+                n.action = view.v(4).ival();
+                n.objtype = if rule == 704 {
+                    ObjectType::OBJECT_OPCLASS
+                } else {
+                    ObjectType::OBJECT_OPFAMILY
+                };
+                let mut names = view.v(7).list();
+                names.lcons(mcx, Node::mk_string(mcx, view.v(9).str_val())?)?;
+                n.object = Some(Node::mk_list(mcx, names)?);
+                *yyval = YYSTYPE::Node(Some(n.seal()));
+            }
+            // ... add_drop TRANSFORM FOR Typename LANGUAGE name:
+            // C: object = list_make2($7, makeString($9)).
+            708 => {
+                let mut n = Node::build::<AlterExtensionContentsStmt>(mcx)?;
+                n.extname = Some(view.v(3).str_val());
+                n.action = view.v(4).ival();
+                n.objtype = ObjectType::OBJECT_TRANSFORM;
+                n.object = Some(Node::mk_list(
+                    mcx,
+                    NodeList::make2(
+                        mcx,
+                        view.v(7).node().expect("Typename"),
+                        Node::mk_string(mcx, view.v(9).str_val())?,
+                    )?,
+                )?);
                 *yyval = YYSTYPE::Node(Some(n.seal()));
             }
             1710 => {
@@ -6187,7 +6246,6 @@ impl<'mcx> Parser<'mcx> {
                         initdeferred: true,
                         is_enforced: true,
                         no_inherit: true,
-                        enforced_exec: true,
                         ..Default::default()
                     },
                 )?;
@@ -7199,7 +7257,7 @@ impl<'mcx> Parser<'mcx> {
                         initdeferred: true,
                         is_enforced: false,
                         not_valid: false,
-                        no_inherit: false, not_valid_exec: false, enforced_exec: false },
+                        no_inherit: false },
                 )?;
                 n.deferrable = cas.deferrable;
                 n.initdeferred = cas.initdeferred;
@@ -7665,7 +7723,7 @@ impl<'mcx> Parser<'mcx> {
                 let arg = Node::mk_string(mcx, view.v(2).str_val())?;
                 *yyval = def_elem(mcx, "parallel", Some(arg), view.l(1))?;
             }
-            // createfunc_opt_item (TRANSFORM 1197 stays loud).
+            // createfunc_opt_item
             1195 => {
                 let arg = Node::mk_list(mcx, view.v(2).list())?;
                 *yyval = def_elem(mcx, "as", Some(arg), view.l(1))?;
@@ -7674,8 +7732,24 @@ impl<'mcx> Parser<'mcx> {
                 let arg = Node::mk_string(mcx, view.v(2).str_val())?;
                 *yyval = def_elem(mcx, "language", Some(arg), view.l(1))?;
             }
+            // createfunc_opt_item: TRANSFORM transform_type_list
+            1197 => {
+                let arg = Node::mk_list(mcx, view.v(2).list())?;
+                *yyval = def_elem(mcx, "transform", Some(arg), view.l(1))?;
+            }
             1198 => {
                 *yyval = def_elem(mcx, "window", Some(Node::mk_boolean(mcx, true)?), view.l(1))?;
+            }
+            // transform_type_list: FOR TYPE_P Typename
+            //                    | transform_type_list ',' FOR TYPE_P Typename
+            1210 => {
+                *yyval =
+                    YYSTYPE::List(NodeList::make1(mcx, view.v(3).node().expect("Typename"))?);
+            }
+            1211 => {
+                let mut list = view.v(1).list();
+                list.lappend(mcx, view.v(5).node().expect("Typename"))?;
+                *yyval = YYSTYPE::List(list);
             }
             // func_as
             1200 => {
@@ -11039,12 +11113,6 @@ impl<'mcx> Parser<'mcx> {
             }
             out.is_enforced = true;
         }
-        if out.not_valid && !t.not_valid_exec {
-            panic!("gram_core: NOT VALID {constr_type} constraints unported");
-        }
-        if !out.is_enforced && !t.enforced_exec {
-            panic!("gram_core: NOT ENFORCED {constr_type} constraints unported");
-        }
         Ok(out)
     }
 
@@ -11668,7 +11736,9 @@ fn expr_location_list(l: &NodeList<'_>) -> i32 {
 }
 
 // exprLocation (nodeFuncs.c), the raw-node arms this grammar can produce;
-// anything else is a loud gap, not a silent -1.
+// C's default arm returns -1 ("just unknown"), and so does this — the only
+// caller builds error cursor positions, where a panic on an exotic ORDER BY
+// expression (e.g. CASE) would out-crash the real error.
 fn expr_location(n: Node<'_>) -> i32 {
     if let Some(sb) = n.as_sort_by() {
         expr_location_opt(sb.node)
@@ -11692,8 +11762,26 @@ fn expr_location(n: Node<'_>) -> i32 {
         leftmost_loc(loc, tc.location)
     } else if let Some(t) = n.as_type_name() {
         t.location
+    } else if let Some(ce) = n.as_case_expr() {
+        ce.location
+    } else if let Some(ce) = n.as_coalesce_expr() {
+        ce.location
+    } else if let Some(mm) = n.as_min_max_expr() {
+        mm.location
+    } else if let Some(sv) = n.as_sql_value_function() {
+        sv.location
+    } else if let Some(re) = n.as_row_expr() {
+        re.location
+    } else if let Some(ae) = n.as_a_array_expr() {
+        ae.location
+    } else if let Some(sl) = n.as_sub_link() {
+        leftmost_loc(expr_location_opt(sl.testexpr), sl.location)
+    } else if let Some(bt) = n.as_boolean_test() {
+        leftmost_loc(bt.location, expr_location_opt(bt.arg))
+    } else if let Some(cc) = n.as_collate_clause() {
+        expr_location_opt(cc.arg)
     } else {
-        panic!("gram_core: exprLocation arm unported for tag {:?}", n.node_tag())
+        -1
     }
 }
 

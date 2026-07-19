@@ -104,6 +104,8 @@ be_secure = { path = "../../backend/libpq/be_secure" }
 hba = { path = "../../backend/libpq/hba" }
 libpq_pqsignal = { path = "../../backend/libpq/libpq_pqsignal" }
 pqcomm = { path = "../../backend/libpq/pqcomm" }
+pqcomm_simnet = { path = "../../backend/libpq/pqcomm_simnet" }
+pqcomm_stdio = { path = "../../backend/libpq/pqcomm_stdio" }
 pqformat = { path = "../../backend/libpq/pqformat" }
 vars = { path = "../../backend/optimizer/util/vars" }
 parser_driver = { path = "../../backend/parser/parser_driver" }
@@ -271,28 +273,46 @@ syslogger = { path = "../../backend/postmaster/syslogger" }
 launcher = { path = "../../backend/replication/launcher" }
 walsender_config = { path = "../../backend/replication/walsender_config" }
 walsender = { path = "../../backend/replication/walsender" }
+syncrep = { path = "../../backend/replication/syncrep" }
+walreceiver = { path = "../../backend/replication/walreceiver" }
+walreceiverfuncs = { path = "../../backend/replication/walreceiverfuncs" }
 basebackup = { path = "../../backend/backup/basebackup" }
 slot = { path = "../../backend/replication/slot" }
 reorderbuffer = { path = "../../backend/replication/logical/reorderbuffer" }
 snapbuild = { path = "../../backend/replication/logical/snapbuild" }
+rewriteheap = { path = "../../backend/access/heap/rewriteheap" }
 logical = { path = "../../backend/replication/logical/logical" }
+origin = { path = "../../backend/replication/origin" }
+logicalworker = { path = "../../backend/replication/logical/worker" }
+logicalrelation = { path = "../../backend/replication/logical/relation" }
 slotfuncs = { path = "../../backend/replication/slotfuncs" }
+slotsync = { path = "../../backend/replication/slotsync" }
 logicalfuncs = { path = "../../backend/replication/logical/logicalfuncs" }
+pgoutput = { path = "../../contrib/pgoutput" }
 test_decoding = { path = "../../contrib/test_decoding" }
 citext = { path = "../../contrib/citext" }
 uuid_ossp = { path = "../../contrib/uuid_ossp" }
 pg_prewarm = { path = "../../contrib/pg_prewarm" }
 file_fdw = { path = "../../contrib/file_fdw" }
 ltree = { path = "../../contrib/ltree" }
+intarray = { path = "../../contrib/intarray" }
 pgcrypto = { path = "../../contrib/pgcrypto" }
 pg_stat_statements = { path = "../../contrib/pg_stat_statements" }
+pg_buffercache = { path = "../../contrib/pg_buffercache" }
+auto_explain = { path = "../../contrib/auto_explain" }
 pgvector = { path = "../../contrib/pgvector" }
 pgvector_hnsw = { path = "../../contrib/pgvector_hnsw" }
 hstore = { path = "../../contrib/hstore" }
 pg_trgm = { path = "../../contrib/pg_trgm" }
 btree_gist = { path = "../../contrib/btree_gist" }
+btree_gin = { path = "../../contrib/btree_gin" }
+contrib_cube = { path = "../../contrib/cube" }
+contrib_earthdistance = { path = "../../contrib/earthdistance" }
+contrib_seg = { path = "../../contrib/seg" }
 unaccent = { path = "../../contrib/unaccent" }
 pg_walinspect = { path = "../../contrib/pg_walinspect" }
+injection_points = { path = "../../contrib/injection_points" }
+sslinfo = { path = "../../contrib/sslinfo" }
 adt_formatting = { path = "../../backend/utils/adt/formatting" }
 session = { path = "../../backend/access/session" }
 relpath = { path = "../../common/relpath" }
@@ -308,3 +328,8 @@ ts_cache = { path = "../../backend/utils/cache/ts_cache" }
 statistics = { path = "../../backend/statistics/statistics" }
 stats_import = { path = "../../backend/statistics/stats_import" }
 typecmds = { path = "../../backend/commands/typecmds" }
+
+# `pgrust_sim` (non-default cfg): P4 sim arms live behind it; empty/absent
+# in product builds (law 0.1).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)'] }

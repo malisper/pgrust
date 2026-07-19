@@ -27,17 +27,24 @@ pub use desc::{
     OpenTransientFilePerm, PipeStreamGets, ReadDir, ReadDirExtended, TransientFileRawFd,
 };
 pub use io::{
-    FileClose, FileFallocate, FileGetRawDesc, FileGetRawFlags, FileGetRawMode, FilePathName,
-    FilePrefetch, FileRead, FileReadV, FileSize, FileStartBufferRead, FileStartReadV, FileSync, FileTruncate,
-    FileWrite, FileWriteV, FileWriteback, FileZero, PathNameOpenFile, PathNameOpenFilePerm,
+    pg_file_size_raw, pg_pread, pg_pwrite, FileClose, FileFallocate, FileGetRawDesc, FileGetRawFlags,
+    FileGetRawMode, FilePathName, FilePrefetch, FileRead, FileReadV, FileSize,
+    FileStartBufferRead, FileStartReadV, FileSync, FileTruncate, FileWrite, FileWriteV,
+    FileWriteback, FileZero, PathNameOpenFile, PathNameOpenFilePerm,
 };
 pub use sync::{
     data_sync_elevel, durable_rename, durable_unlink, fsync_fname, fsync_fname_ext,
-    looks_like_temp_rel_name, pg_fdatasync, pg_file_exists, pg_flush_data, pg_fsync,
-    pg_fsync_no_writethrough, pg_fsync_writethrough, pg_truncate, AtEOSubXact_Files,
+    looks_like_temp_rel_name, pg_close, pg_fdatasync, pg_file_exists, pg_flush_data, pg_fstat,
+    pg_fsync, pg_fsync_no_writethrough, pg_fsync_writethrough, pg_lstat, pg_readlink, pg_rename,
+    pg_stat, pg_truncate, pg_unlink, read_whole_file, write_whole_file, AtEOSubXact_Files,
     AtEOXact_Files, BeforeShmemExit_Files, RemovePgTempFiles, RemovePgTempFilesInDir,
     SyncDataDirectory,
 };
+// The VFS's plain stat carrier, for the pg_stat/pg_lstat callers.
+pub use ::vfs::FileInfo;
+// The shared errno TLS cell (DST P1 errno contract): fenced callers read the
+// raw errno after fd-crate calls through these, not via std::io::Error.
+pub use ::vfs::{get_errno, set_errno};
 pub use temp::{
     GetNextTempTableSpace, GetTempTablespaces, OpenTemporaryFile, PathNameCreateTemporaryDir,
     PathNameCreateTemporaryFile, PathNameDeleteTemporaryDir, PathNameDeleteTemporaryFile,
@@ -105,6 +112,16 @@ pub fn init_seams() {
                 .expect("assign_debug_io_direct requires check_debug_io_direct's extra");
             vfd::assign_debug_io_direct(flags);
         });
+
+        // pgrust.resource_counters (PGC_INTERNAL, computed): the value shown
+        // comes from the show hook; the stored string is never consulted, so
+        // the backing is a constant empty and SETs (only the boot-default
+        // write can reach it) are dropped.
+        vars::pgrust_resource_counters.install(GucVarAccessors {
+            get: || Some(String::new()),
+            set: |_| {},
+        });
+        hooks::show_resource_counters.install(vfd::show_resource_counters);
     }
 }
 

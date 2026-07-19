@@ -25,6 +25,30 @@ fn table_matches_canonical_and_is_sorted() {
     }
 }
 
+// SDK-matrix wirefmt lane: binary send/recv functions clients reach through
+// pg_type's typsend/typreceive must resolve to real ports, not the
+// not-yet-implemented stub (matrix gaps M2/M4/M5/M8/M10, 2026-07-18).
+#[test]
+fn binary_wire_send_recv_holes_stay_ported() {
+    for (oid, name) in [
+        (198 as Oid, "pg_node_tree_send"),
+        (2410, "int2vectorrecv"),
+        (2411, "int2vectorsend"),
+        (2416, "unknownrecv"),
+        (2417, "unknownsend"),
+        (2492, "cash_recv"),
+        (2493, "cash_send"),
+        (3121, "void_send"),
+    ] {
+        let b = fmgr_isbuiltin(oid).unwrap_or_else(|| panic!("{name} missing from canonical"));
+        assert_eq!(b.name, name);
+        assert!(
+            b.func as usize != builtin_not_ported as usize,
+            "{name} (OID {oid}) resolves to the not-ported stub"
+        );
+    }
+}
+
 #[test]
 fn oid_index_round_trips_every_entry() {
     for b in FMGR_BUILTINS.iter() {
@@ -86,22 +110,24 @@ fn fmgr_info_non_builtin_reads_pg_proc() {
 }
 
 #[test]
-#[should_panic(expected = "not ported")]
-fn unported_builtin_invocation_panics() {
+fn unported_builtin_invocation_is_clean_feature_error() {
     // Any still-unported canonical entry; a pinned oid goes stale the moment
     // some lane ports it (1294 did).
-    let oid = FMGR_BUILTINS
+    let b = FMGR_BUILTINS
         .iter()
         .find(|b| {
             b.func as usize == builtin_not_ported as usize
                 && late_builtin(b.foid).is_none()
                 && extra_builtin(b.foid).is_none()
         })
-        .expect("no unported canonical builtin left")
-        .foid;
+        .expect("no unported canonical builtin left");
+    let (oid, name) = (b.foid, b.name);
     let mut f = fmgr_info(oid).unwrap();
     let mut fci = LocalFcinfo::<0>::new(InvalidOid);
-    let _ = f.invoke(&mut fci);
+    let err = f.invoke(&mut fci).unwrap_err();
+    assert_eq!(err.sqlstate(), ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+    assert!(err.message().contains(name), "{}", err.message());
+    assert!(err.message().contains("not yet implemented"), "{}", err.message());
 }
 
 #[test]

@@ -2959,6 +2959,8 @@ enum StandingWait {
 /// an unclaimed engagement after this long means the gang is dead/busy —
 /// fall back to the launched path (correctness never depends on this).
 fn standing_claim_deadline() -> std::time::Duration {
+    // DST P2 (contract §1.3, census erratum (a)): this deadline is
+    // BEHAVIORAL (changes execution path) — its clock is pg_clock, below.
     static MS: OnceLock<u64> = OnceLock::new();
     std::time::Duration::from_millis(*MS.get_or_init(|| {
         std::env::var("PGRUST_RUNTIME_GANG_CLAIM_MS")
@@ -2998,7 +3000,7 @@ fn standing_wait(
             .unwrap_or_else(|p| p.into_inner())
             .take();
     };
-    let t0 = std::time::Instant::now();
+    let t0 = pg_clock::MonoStamp::now();
     let mut traced = false;
     loop {
         if let Some(o) = waiter.try_wait() {
@@ -3053,7 +3055,7 @@ fn standing_wait(
         // participant's) — close_and_await bounds on its drive.
         if started == 0
             && entry.detached() >= claimed
-            && t0.elapsed() > standing_claim_deadline()
+            && std::time::Duration::from_nanos(t0.elapsed_ns()) > standing_claim_deadline()
         {
             lane_trace("runtime-scan: standing claim deadline — launched fallback");
             take_slot();

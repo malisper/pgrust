@@ -497,7 +497,7 @@ fn dump() {
             ));
         }
     }
-    let pid = std::process::id();
+    let pid = init_small::globals::process_id();
     let final_path = dir.join(format!("m5-router-stats.{pid}.tsv"));
     let tmp_path = dir.join(format!(
         ".m5-router-stats.{pid}.{:?}.tmp",

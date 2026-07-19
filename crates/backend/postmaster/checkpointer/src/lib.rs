@@ -210,10 +210,8 @@ pub fn CheckpointerShmemResetAfterCrash() {
 }
 
 fn time_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    // DST P2 (contract §1.2): SystemTime -> pg_clock::wall_secs().
+    pg_clock::wall_secs()
 }
 
 fn am_checkpointer() -> bool {
@@ -244,13 +242,13 @@ pub fn CheckpointerMain(startup_data: &StartupData) -> ! {
 
     {
         use procsignal::ThreadSignalHandler::{Ignore, Simple};
-        procsignal::pqsignal_thread(libc::SIGHUP, Simple(interrupt::SignalHandlerForConfigReload));
-        procsignal::pqsignal_thread(libc::SIGINT, Simple(ReqShutdownXLOG));
-        procsignal::pqsignal_thread(libc::SIGTERM, Ignore);
-        procsignal::pqsignal_thread(libc::SIGALRM, Ignore);
-        procsignal::pqsignal_thread(libc::SIGPIPE, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGHUP, Simple(interrupt::SignalHandlerForConfigReload));
+        procsignal::pqsignal_thread(procsignal::signums::SIGINT, Simple(ReqShutdownXLOG));
+        procsignal::pqsignal_thread(procsignal::signums::SIGTERM, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGALRM, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGPIPE, Ignore);
         procsignal::pqsignal_thread(
-            libc::SIGUSR2,
+            procsignal::signums::SIGUSR2,
             Simple(interrupt::SignalHandlerForShutdownRequest),
         );
     }
@@ -461,7 +459,7 @@ fn checkpointer_main_loop() -> PgResult<()> {
             let ckpt_performed = if !do_restartpoint {
                 transam_xlog::CreateCheckPoint(flags)?
             } else {
-                panic!("CreateRestartPoint unported (transam_xlog; needs the replay path)");
+                transam_xlog::CreateRestartPoint(flags)?
             };
 
             smgr::smgrdestroyall()?;
@@ -650,11 +648,11 @@ fn IsCheckpointOnSchedule(progress: f64) -> bool {
         return false;
     }
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let elapsed_time = ((now.as_secs() as i64 - CKPT_START_TIME.get()) as f64
-        + f64::from(now.subsec_micros()) / 1_000_000.0)
+    // DST P2 (contract §1.2): only the raw read moves — IsCheckpointOnSchedule
+    // keeps its wall-fraction semantics (CKPT_START_TIME is a wall stamp).
+    let (now_sec, now_usec) = pg_clock::wall_timeval();
+    let elapsed_time = ((now_sec - CKPT_START_TIME.get()) as f64
+        + f64::from(now_usec) / 1_000_000.0)
         / CheckPointTimeout() as f64;
 
     if progress < elapsed_time {
@@ -835,7 +833,11 @@ pub fn AbsorbSyncRequests() -> PgResult<()> {
         let mut slot = cell.borrow_mut();
         let buf = slot.get_or_insert_with(|| {
             let cx: &'static mcx::MemoryContext =
-                Box::leak(Box::new(mcx::MemoryContext::new("AbsorbSyncRequests scratch")));
+                mcx::session_root("AbsorbSyncRequests scratch");
+            // LIFO: empty the droppy TLS slot before its context is freed.
+            mcx::register_session_cleanup(Box::new(|| {
+                ABSORB_SCRATCH.with(|c| drop(c.borrow_mut().take()));
+            }));
             mcx::PgVec::new_in(cx.mcx())
         });
         buf.clear();

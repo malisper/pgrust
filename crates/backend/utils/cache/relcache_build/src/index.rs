@@ -205,7 +205,7 @@ fn lookup_opclass_info(opc: Oid, amsupport: usize) -> PgResult<OpClassEnt> {
     OPCLASS_CACHE.with(|c| {
         let mut slot = c.borrow_mut();
         let m = slot.get_or_insert_with(|| {
-            let mcx = Box::leak(Box::new(MemoryContext::new("OpClassCache"))).mcx();
+            let mcx = ::mcx::session_root("OpClassCache").mcx();
             ManuallyDrop::new(PgHashMap::with_capacity_in(64, mcx))
         });
         m.insert(opc, ent);

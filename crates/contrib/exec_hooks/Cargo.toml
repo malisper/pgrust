@@ -1,0 +1,15 @@
+[package]
+name = "exec_hooks"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "exec_hooks"
+path = "src/lib.rs"
+
+[dependencies]
+pgsync = { path = "../../_support/pgsync" }
+seam_core = { path = "../../_support/seam_core" }
+execmain = { path = "../../backend/executor/execmain" }
+types_portal = { path = "../../_support/types/portal" }

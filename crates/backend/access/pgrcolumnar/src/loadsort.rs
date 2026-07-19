@@ -26,6 +26,104 @@ fn io_err(what: &str, e: std::io::Error) -> Box<PgError> {
     Box::new(PgError::error(format!("parallel load-sort {what}: {e}")))
 }
 
+/// DST P4 dataplane arm (was DST P1 WS-B's "until the sim read arm lands"
+/// carve-out): run files are vfs descriptors END TO END. Open, pread/pwrite
+/// and close all go through the same provider (`vfs::*`), so under
+/// `--cfg pgrust_sim` the whole spill/merge data plane lands in SimVfs and
+/// P4 fault plans gate every step (Open / PWriteV / PReadV / Close).
+///
+/// Off-sim this is what the `std::fs::File` it replaces did, at the syscall
+/// level: open(2) with the same parity flags (O_CLOEXEC always, mode 0o666,
+/// umask applies); pread(2)/pwrite(2) at an owned cursor instead of
+/// read(2)/write(2) on the kernel file offset (same syscall count, and the
+/// descriptors are exclusively owned, so positional-vs-offset IO is
+/// behaviorally identical — one register add per buffered-IO call is the
+/// whole delta); close(2) from the [`vfs::VfsFd`] guard's drop, the same
+/// single ignored-result close File's drop made.
+///
+/// C provenance / durability: spill runs are statement-scoped temp files
+/// (the PG temp-file contract — see the lz4 corruption note below): no
+/// fsync, no rename. Create/write/read/close IS the whole sequence, so
+/// routing these four ops is the complete sim arm for this site.
+struct RunFile {
+    fd: vfs::VfsFd,
+    /// Sequential cursor (the file offset std's read/write used to advance).
+    pos: u64,
+}
+
+impl std::os::fd::AsRawFd for RunFile {
+    #[inline]
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        std::os::fd::AsRawFd::as_raw_fd(&self.fd)
+    }
+}
+
+impl Read for RunFile {
+    #[inline]
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use std::os::fd::AsRawFd;
+        let n = vfs::pread(self.fd.as_raw_fd(), buf, self.pos as vfs::off_t);
+        if n < 0 {
+            return Err(std::io::Error::from_raw_os_error(vfs::get_errno()));
+        }
+        self.pos += n as u64;
+        Ok(n as usize)
+    }
+}
+
+impl Write for RunFile {
+    #[inline]
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        use std::os::fd::AsRawFd;
+        let n = vfs::pwrite(self.fd.as_raw_fd(), buf, self.pos as vfs::off_t);
+        if n < 0 {
+            return Err(std::io::Error::from_raw_os_error(vfs::get_errno()));
+        }
+        self.pos += n as u64;
+        Ok(n as usize)
+    }
+
+    #[inline]
+    fn flush(&mut self) -> std::io::Result<()> {
+        // No userspace buffer here — std::fs::File's flush was the same no-op.
+        Ok(())
+    }
+}
+
+fn vfs_open_file(
+    path: &std::path::Path,
+    flags: libc::c_int,
+    what: &str,
+) -> PgResult<RunFile> {
+    #[cfg(not(target_family = "wasm"))]
+    use std::os::unix::ffi::OsStrExt;
+    // wasm32: same as_bytes surface, wasi's spelling of the trait home.
+    #[cfg(target_family = "wasm")]
+    use std::os::wasi::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        io_err(
+            what,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "file name contained an unexpected NUL byte",
+            ),
+        )
+    })?;
+    // std parity: open(2) EINTR-retried (cvt_r), O_CLOEXEC, mode 0o666.
+    let fd = loop {
+        let fd = vfs::open(&c, flags | libc::O_CLOEXEC, 0o666);
+        if fd >= 0 {
+            break fd;
+        }
+        if vfs::get_errno() != libc::EINTR {
+            return Err(io_err(what, std::io::Error::from_raw_os_error(vfs::get_errno())));
+        }
+    };
+    // SAFETY: fresh descriptor minted by vfs::open above, exclusively owned
+    // by the returned guard.
+    Ok(RunFile { fd: unsafe { vfs::VfsFd::from_raw(fd) }, pos: 0 })
+}
+
 // ---- row codec -------------------------------------------------------------
 
 pub struct RowCodec {
@@ -194,7 +292,8 @@ impl SortBatch {
     /// reassembles a byte stream identical to the raw format, so the
     /// merge is unaffected by construction.
     pub fn spill_run_opts(&mut self, path: &std::path::Path, lz4: bool) -> PgResult<u64> {
-        let f = std::fs::File::create(path).map_err(|e| io_err("run create", e))?;
+        let f =
+            vfs_open_file(path, libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC, "run create")?;
         let mut w = BufWriter::with_capacity(1 << 20, f);
         let mut written: u64 = 0;
         if !lz4 {
@@ -242,7 +341,7 @@ const RUN_FRAME_CAP: usize = 1 << 30;
 /// Compress + write `chunk` as one frame, clearing it; returns file bytes.
 /// Empty chunk = no frame (0 bytes).
 fn write_lz4_frame(
-    w: &mut BufWriter<std::fs::File>,
+    w: &mut BufWriter<RunFile>,
     chunk: &mut Vec<u8>,
     comp: &mut Vec<u8>,
 ) -> PgResult<u64> {
@@ -327,22 +426,15 @@ fn check_run_magic(r: &mut impl Read) -> std::io::Result<()> {
 // ---- run reader + k-way merge ----------------------------------------------
 
 /// loadcommit C2a: non-blocking kernel readahead hint for a run file's
-/// upcoming window (pure hint — zero effect on the bytes read). Linux
-/// only; a no-op elsewhere.
-#[cfg(target_os = "linux")]
-fn fadvise_willneed(f: &std::fs::File, off: u64, len: u64) {
-    use std::os::unix::io::AsRawFd;
-    unsafe {
-        libc::posix_fadvise(
-            f.as_raw_fd(),
-            off as libc::off_t,
-            len as libc::off_t,
-            libc::POSIX_FADV_WILLNEED,
-        );
-    }
+/// upcoming window (pure hint — zero effect on the bytes read). Routed
+/// through the Vfs boundary (DST P1); the platform split lives inside
+/// PosixVfs (posix_fadvise WILLNEED on Linux). Errors ignored, as before.
+fn fadvise_willneed(f: &RunFile, off: u64, len: u64) {
+    // std::os::fd is the portable trait home (present on wasi; unix::io
+    // merely re-exports it) — wasm-port-t26 census row 1 precedent.
+    use std::os::fd::AsRawFd;
+    vfs::fadvise_willneed(f.as_raw_fd(), off as libc::off_t, len as libc::off_t);
 }
-#[cfg(not(target_os = "linux"))]
-fn fadvise_willneed(_f: &std::fs::File, _off: u64, _len: u64) {}
 
 // ---- loadcommit C2b: explicit bounded run prefetch --------------------------
 //
@@ -355,13 +447,15 @@ fn fadvise_willneed(_f: &std::fs::File, _off: u64, _len: u64) {}
 // the read() changes. Peak buffered memory ~= runs x 2.5 chunks (~360 MB
 // at 290 runs), replacing the per-run 1 MB BufReader.
 
-/// Prefetched chunk size.
+/// Prefetched chunk size. (SIMVFS-SHARED: the C2b feeder machinery is now
+/// sim-REACHABLE — feeders adopt the pump's shared SimVfs universe; the old
+/// compile fence became `open_prefetch`'s runtime shared-universe branch.)
 const PRE_CHUNK: usize = 512 << 10;
 
 /// loadcommit RUNLZ4: pump-side decode source (no prefetch) — frames are
 /// read + decompressed on demand, one bounded chunk resident per reader.
 struct Lz4Source {
-    r: BufReader<std::fs::File>,
+    r: BufReader<RunFile>,
     raw: Vec<u8>,
     pos: usize,
     comp: Vec<u8>,
@@ -399,8 +493,11 @@ impl std::io::Read for Lz4Source {
 }
 
 /// Consumer side of one run's prefetch channel: a plain byte stream.
+/// (Row 8, SIMVFS-SHARED: the raw `std::sync::mpsc` channel converted to
+/// the sanctioned `pgsync::mailbox` — under the permit scheduler the pump's
+/// recv is a hooked park, native arm is the same protocol class.)
 struct PrefetchSource {
-    rx: std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>,
+    rx: pgsync::MailboxReceiver<std::io::Result<Vec<u8>>>,
     cur: Vec<u8>,
     pos: usize,
     eof: bool,
@@ -413,15 +510,15 @@ impl std::io::Read for PrefetchSource {
                 return Ok(0);
             }
             match self.rx.recv() {
-                Ok(Ok(chunk)) => {
+                Some(Ok(chunk)) => {
                     self.cur = chunk;
                     self.pos = 0;
                 }
-                Ok(Err(e)) => {
+                Some(Err(e)) => {
                     self.eof = true;
                     return Err(e);
                 }
-                Err(_) => {
+                None => {
                     // feeder dropped the sender = clean EOF
                     self.eof = true;
                     return Ok(0);
@@ -437,8 +534,8 @@ impl std::io::Read for PrefetchSource {
 
 /// One run's feeder-side state (owned by a pool thread).
 struct FeedRun {
-    f: BufReader<std::fs::File>,
-    tx: Option<std::sync::mpsc::SyncSender<std::io::Result<Vec<u8>>>>,
+    f: BufReader<RunFile>,
+    tx: Option<pgsync::MailboxSender<std::io::Result<Vec<u8>>>>,
     /// Chunk read but not yet accepted by the (full) channel.
     pending: Option<std::io::Result<Vec<u8>>>,
     eof: bool,
@@ -450,9 +547,18 @@ struct FeedRun {
 }
 
 /// Pool of prefetch threads; joined (after `stop`) on drop.
+///
+/// permit-s5 row 16: pgsync::thread handles — the feeder spawns route
+/// through the pgsync::thread wrapper (the spawn door for identity-less
+/// utility threads; native arm = the std re-export, byte-identical), so the
+/// feeders are door-registered and the drop-path join is a hooked Join
+/// park. SIMVFS-SHARED discharged the old fence: feeders now ADOPT the
+/// pump's shared SimVfs universe (captured parent-side in `open_prefetch`),
+/// so a feeder-side `vfs::pread` reads the same simulated disk the pump
+/// writes — one fd table per simulated process, the C thread semantics.
 pub struct PrefetchPool {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    threads: Vec<std::thread::JoinHandle<()>>,
+    threads: Vec<pgsync::thread::JoinHandle<()>>,
 }
 
 impl Drop for PrefetchPool {
@@ -537,11 +643,11 @@ fn prefetch_feed(mut runs: Vec<FeedRun>, stop: std::sync::Arc<std::sync::atomic:
                             break;
                         }
                     }
-                    Err(std::sync::mpsc::TrySendError::Full(p)) => {
+                    Err(pgsync::TrySend::Full(p)) => {
                         r.pending = Some(p);
                         break;
                     }
-                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    Err(pgsync::TrySend::Disconnected(_)) => {
                         r.tx = None;
                         break;
                     }
@@ -552,7 +658,11 @@ fn prefetch_feed(mut runs: Vec<FeedRun>, stop: std::sync::Arc<std::sync::atomic:
             return;
         }
         if !progress {
-            std::thread::sleep(std::time::Duration::from_micros(300));
+            // Row 8 (SIMVFS-SHARED): pgsync sleep — a TimedPark on virtual
+            // time under the permit scheduler (a raw std sleep would hold
+            // the permit across the poll and starve the pump); the native
+            // arm is the std re-export, byte-identical.
+            pgsync::thread::sleep(std::time::Duration::from_micros(300));
         }
     }
 }
@@ -560,7 +670,7 @@ fn prefetch_feed(mut runs: Vec<FeedRun>, stop: std::sync::Arc<std::sync::atomic:
 /// Byte source for a run: direct buffered file reads (default) or the
 /// C2b prefetch channel.
 enum RunSrc {
-    Buf(BufReader<std::fs::File>),
+    Buf(BufReader<RunFile>),
     Lz4(Lz4Source),
     Pre(PrefetchSource),
 }
@@ -594,7 +704,7 @@ struct RunReader {
 
 impl RunReader {
     fn open(path: &std::path::Path, key_w: usize) -> PgResult<RunReader> {
-        let f = std::fs::File::open(path).map_err(|e| io_err("run open", e))?;
+        let f = vfs_open_file(path, libc::O_RDONLY, "run open")?;
         Self::from_src(RunSrc::Buf(BufReader::with_capacity(1 << 20, f)), key_w)
     }
 
@@ -841,7 +951,7 @@ impl RunMergeV2 {
         let mut readers = Vec::with_capacity(paths.len());
         for p in paths {
             if lz4 {
-                let f = std::fs::File::open(p).map_err(|e| io_err("run open", e))?;
+                let f = vfs_open_file(p, libc::O_RDONLY, "run open")?;
                 let mut r = BufReader::with_capacity(1 << 20, f);
                 check_run_magic(&mut r).map_err(|e| io_err("run magic", e))?;
                 let src = RunSrc::Lz4(Lz4Source {
@@ -871,18 +981,37 @@ impl RunMergeV2 {
         threads: usize,
         lz4: bool,
     ) -> PgResult<RunMergeV2> {
+        // Sim arm (SIMVFS-SHARED — the old compile fence, now a RUNTIME
+        // branch): prefetch under sim requires the pump to be bound to a
+        // SHARED SimVfs universe (feeders adopt it below; the fd table and
+        // the run bytes are then process-shared, C thread semantics). An
+        // unbound pump (scheduler-off sim runs, unit batteries) degrades to
+        // the direct pump-thread source exactly as before — the byte stream
+        // is identical by the C2b construction (only WHO issues the read
+        // changes; `v2_matches_heap_reference` is the standing oracle).
+        #[cfg(pgrust_sim)]
+        if !vfs::sim::SimVfs::shared_universe_active() {
+            return Self::open_opts(paths, key_w, lz4);
+        }
+        // Parent-side universe capture (the spawn-door inheritance shape:
+        // process identity flows down the spawn tree like an inherited fd
+        // table); each feeder adopts it as its first act below.
+        #[cfg(pgrust_sim)]
+        let sim_universe = vfs::sim::SimVfs::current_universe_id();
         let threads = threads.clamp(1, 16);
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let disk = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let mut buckets: Vec<Vec<FeedRun>> = (0..threads).map(|_| Vec::new()).collect();
         let mut sources = Vec::with_capacity(paths.len());
         for (i, p) in paths.iter().enumerate() {
-            let f = std::fs::File::open(p).map_err(|e| io_err("run open", e))?;
+            let f = vfs_open_file(p, libc::O_RDONLY, "run open")?;
             let mut f = BufReader::with_capacity(if lz4 { 64 << 10 } else { 8 << 10 }, f);
             if lz4 {
                 check_run_magic(&mut f).map_err(|e| io_err("run magic", e))?;
             }
-            let (tx, rx) = std::sync::mpsc::sync_channel::<std::io::Result<Vec<u8>>>(2);
+            // Row 8 (SIMVFS-SHARED): pgsync mailbox, sync_channel(2)
+            // semantics — hooked parks under the permit scheduler.
+            let (tx, rx) = pgsync::mailbox::<std::io::Result<Vec<u8>>>(Some(2));
             buckets[i % threads].push(FeedRun {
                 f,
                 tx: Some(tx),
@@ -900,9 +1029,18 @@ impl RunMergeV2 {
                 continue;
             }
             let stop2 = std::sync::Arc::clone(&stop);
-            let h = std::thread::Builder::new()
+            // permit-s5 row 16: door-routed via the pgsync::thread wrapper.
+            let h = pgsync::thread::Builder::new()
                 .name("cb-run-prefetch".into())
-                .spawn(move || prefetch_feed(runs, stop2))
+                .spawn(move || {
+                    // SIMVFS-SHARED: adopt the pump's universe FIRST — every
+                    // later vfs op on this thread reads the process's disk.
+                    #[cfg(pgrust_sim)]
+                    if let Some(id) = sim_universe {
+                        vfs::sim::SimVfs::adopt_universe(id);
+                    }
+                    prefetch_feed(runs, stop2)
+                })
                 .map_err(|e| io_err("prefetch spawn", e))?;
             handles.push(h);
         }
@@ -912,6 +1050,13 @@ impl RunMergeV2 {
             readers.push(RunReader::from_src(RunSrc::Pre(src), key_w)?);
         }
         Self::from_readers(readers, Some(pool), disk)
+    }
+
+    /// Is this merge actually prefetch-fed (feeder pool live)? Harness
+    /// probe: the sim corpus asserts the prefetch path was structurally
+    /// taken, not silently degraded.
+    pub fn is_prefetching(&self) -> bool {
+        self._pool.is_some()
     }
 
     fn from_readers(
@@ -1003,6 +1148,191 @@ impl RunMergeV2 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SIMVFS-SHARED corpus body (permit-sched e2e P8): sim-only, no product
+// surface. Proves the loadsort-prefetch unlock: run files written by the
+// pump land in the SHARED SimVfs universe; door-registered feeder threads
+// ADOPT that universe and read real bytes back through vfs; the prefetch-fed
+// merge byte-matches the direct merge; and a bidirectional share-proof
+// (child writes a file the pump reads back, and vice versa AFTER the child's
+// adoption) catches both deliberately-broken sharing shapes
+// (`SimVfs::arm_red_adoption`: Empty = the pre-lane bug, Stale = a frozen
+// snapshot).
+// ---------------------------------------------------------------------------
+
+#[cfg(pgrust_sim)]
+pub mod sim_demo {
+    use super::*;
+
+    fn cpath(p: &str) -> std::ffi::CString {
+        std::ffi::CString::new(p).expect("no NUL in demo paths")
+    }
+
+    fn sim_mkdir_p(path: &str) {
+        let mut acc = String::new();
+        for comp in path.split('/').filter(|c| !c.is_empty()) {
+            acc.push('/');
+            acc.push_str(comp);
+            let _ = vfs::mkdir(&cpath(&acc), 0o700);
+        }
+    }
+
+    fn sim_write(path: &str, bytes: &[u8]) -> Result<(), String> {
+        let c = cpath(path);
+        let fd = vfs::open(&c, libc::O_CREAT | libc::O_TRUNC | libc::O_WRONLY, 0o600);
+        if fd < 0 {
+            return Err(format!("write open {path}: errno {}", vfs::get_errno()));
+        }
+        let mut off = 0usize;
+        while off < bytes.len() {
+            let n = vfs::pwrite(fd, &bytes[off..], off as libc::off_t);
+            if n <= 0 {
+                vfs::close(fd);
+                return Err(format!("pwrite {path}: errno {}", vfs::get_errno()));
+            }
+            off += n as usize;
+        }
+        vfs::close(fd);
+        Ok(())
+    }
+
+    fn sim_read(path: &str) -> Result<Vec<u8>, String> {
+        let c = cpath(path);
+        let fd = vfs::open(&c, libc::O_RDONLY, 0);
+        if fd < 0 {
+            return Err(format!("read open {path}: errno {}", vfs::get_errno()));
+        }
+        let mut out = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = vfs::pread(fd, &mut buf, out.len() as libc::off_t);
+            if n < 0 {
+                vfs::close(fd);
+                return Err(format!("pread {path}: errno {}", vfs::get_errno()));
+            }
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..n as usize]);
+        }
+        vfs::close(fd);
+        Ok(out)
+    }
+
+    /// The P8 corpus. Returns the grep-stable PASS line, or `Err` with the
+    /// property that failed (the red arms assert on the failure text).
+    pub fn run_prefetch_corpus() -> Result<String, String> {
+        if !vfs::sim::SimVfs::shared_universe_active() {
+            return Err("pump thread is not bound to a shared universe".into());
+        }
+        let uni = vfs::sim::SimVfs::current_universe_id()
+            .ok_or_else(|| "bound thread has no universe id".to_string())?;
+
+        // --- 1. spill 3 runs into the SHARED universe (LCG rows, seeded:
+        //        the printed line is byte-stable across same-seed replays).
+        const KW: usize = 4;
+        const RUNS: usize = 3;
+        const ROWS_PER_RUN: usize = 200;
+        sim_mkdir_p("/loadsort-demo");
+        let mut paths = Vec::new();
+        let mut lcg: u64 = 0x5EED_1234_ABCD_0001;
+        let mut total_rows = 0usize;
+        for r in 0..RUNS {
+            let mut batch = SortBatch::new(KW);
+            for _ in 0..ROWS_PER_RUN {
+                lcg = lcg.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let key = ((lcg >> 32) as u32).to_be_bytes();
+                let rowlen = 8 + (lcg % 48) as usize;
+                let mut row = Vec::with_capacity(rowlen);
+                while row.len() < rowlen {
+                    row.push((lcg >> (row.len() % 8)) as u8);
+                }
+                batch.push(&key, &row);
+                total_rows += 1;
+            }
+            batch.sort();
+            let p = std::path::PathBuf::from(format!("/loadsort-demo/run-{r}"));
+            batch.spill_run(&p).map_err(|e| format!("spill run-{r}: {}", e.message()))?;
+            paths.push(p);
+        }
+
+        // --- 2. direct merge = the reference stream.
+        let mut direct = RunMergeV2::open(&paths, KW)
+            .map_err(|e| format!("direct open: {}", e.message()))?;
+        let mut ref_arena = Vec::new();
+        let mut ref_lens = Vec::new();
+        while let Some(l) = direct
+            .next_row_into(&mut ref_arena)
+            .map_err(|e| format!("direct merge: {}", e.message()))?
+        {
+            ref_lens.push(l);
+        }
+
+        // --- 3. prefetch-fed merge: 2 door-registered feeders ADOPT the
+        //        pump's universe and read the run bytes through vfs.
+        let mut pre = RunMergeV2::open_prefetch(&paths, KW, 2, false)
+            .map_err(|e| format!("prefetch open: {}", e.message()))?;
+        if !pre.is_prefetching() {
+            return Err("prefetch path silently degraded to the direct source".into());
+        }
+        let mut arena = Vec::new();
+        let mut lens = Vec::new();
+        while let Some(l) = pre
+            .next_row_into(&mut arena)
+            .map_err(|e| format!("prefetch merge: {}", e.message()))?
+        {
+            lens.push(l);
+        }
+        if lens != ref_lens || arena != ref_arena {
+            return Err(format!(
+                "prefetch stream diverges from direct: {}x{} vs {}x{} bytes",
+                lens.len(),
+                arena.len(),
+                ref_lens.len(),
+                ref_arena.len()
+            ));
+        }
+        drop(pre); // joins the feeder pool (hooked Join parks)
+
+        // --- 4. bidirectional share-proof: the child's post-adoption view
+        //        must be LIVE, not a snapshot. The go-signal orders the
+        //        pump's write strictly after the child's adoption, so a
+        //        Stale adoption cannot contain /main-proof; and the pump
+        //        reading /child-proof catches both Stale and Empty (the
+        //        child wrote into a private copy).
+        let (go_tx, go_rx) = pgsync::mailbox::<()>(Some(1));
+        let helper = pgsync::thread::Builder::new()
+            .name("simvfs-share-proof".into())
+            .spawn(move || -> Result<(), String> {
+                vfs::sim::SimVfs::adopt_universe(uni);
+                if go_rx.recv().is_none() {
+                    return Err("go channel closed early".into());
+                }
+                let got = sim_read("/loadsort-demo/main-proof")
+                    .map_err(|e| format!("child cannot see the pump's post-adoption write ({e})"))?;
+                if got != b"written-by-pump" {
+                    return Err("child read stale bytes for /main-proof".into());
+                }
+                sim_write("/loadsort-demo/child-proof", b"written-by-child")
+            })
+            .map_err(|e| format!("share-proof spawn: {e}"))?;
+        sim_write("/loadsort-demo/main-proof", b"written-by-pump")?;
+        let _ = go_tx.send(());
+        let child_verdict = helper.join().map_err(|_| "share-proof helper panicked".to_string())?;
+        child_verdict.map_err(|e| format!("share-proof(child): {e}"))?;
+        let got = sim_read("/loadsort-demo/child-proof")
+            .map_err(|e| format!("share-proof(pump): child's write invisible ({e})"))?;
+        if got != b"written-by-child" {
+            return Err("share-proof(pump): wrong bytes in /child-proof".into());
+        }
+
+        Ok(format!(
+            "LOADSORT runs={RUNS} threads=2 rows={total_rows} bytes={} prefetch=1 identical=1 shareproof=ok",
+            ref_arena.len()
+        ))
+    }
+}
+
 // ---- tests -------------------------------------------------------------------
 
 #[cfg(test)]
@@ -1021,9 +1351,148 @@ mod tests {
 
     fn tmpdir(name: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("cb-loadsort-{}-{}", std::process::id(), name));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        #[cfg(not(pgrust_sim))]
+        {
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).unwrap();
+        }
+        #[cfg(pgrust_sim)]
+        {
+            // The run-file data plane lands in the thread's SimVfs universe
+            // (fresh per test thread, no cwd, empty namespace): create the
+            // directory chain through the same provider.
+            let mut cur = std::path::PathBuf::new();
+            for comp in d.components() {
+                cur.push(comp);
+                if cur.as_os_str().len() > 1 {
+                    let rc = vfs::mkdir(&cpath(&cur), 0o700);
+                    assert!(
+                        rc == 0 || vfs::get_errno() == libc::EEXIST,
+                        "vfs mkdir {cur:?} failed: errno {}",
+                        vfs::get_errno()
+                    );
+                }
+            }
+        }
         d
+    }
+
+    fn cpath(p: &std::path::Path) -> std::ffi::CString {
+        use std::os::unix::ffi::OsStrExt;
+        std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap()
+    }
+
+    // Cfg-split file helpers: run files live on the real filesystem off-sim
+    // and in the thread's SimVfs universe under --cfg pgrust_sim — the tests
+    // must look where the data plane wrote.
+    fn file_len(p: &std::path::Path) -> u64 {
+        #[cfg(not(pgrust_sim))]
+        {
+            std::fs::metadata(p).unwrap().len()
+        }
+        #[cfg(pgrust_sim)]
+        {
+            let mut fi = vfs::FileInfo::zeroed();
+            assert_eq!(vfs::stat(&cpath(p), &mut fi), 0, "vfs stat {p:?}");
+            fi.size as u64
+        }
+    }
+
+    fn read_file(p: &std::path::Path) -> Vec<u8> {
+        #[cfg(not(pgrust_sim))]
+        {
+            std::fs::read(p).unwrap()
+        }
+        #[cfg(pgrust_sim)]
+        {
+            let fd = vfs::open(&cpath(p), libc::O_RDONLY, 0);
+            assert!(fd >= 0, "vfs open {p:?}: errno {}", vfs::get_errno());
+            let mut out = vec![0u8; file_len(p) as usize];
+            let mut got = 0usize;
+            while got < out.len() {
+                let n = vfs::pread(fd, &mut out[got..], got as vfs::off_t);
+                assert!(n > 0, "vfs pread {p:?}: errno {}", vfs::get_errno());
+                got += n as usize;
+            }
+            vfs::close(fd);
+            out
+        }
+    }
+
+    fn write_file(p: &std::path::Path, bytes: &[u8]) {
+        #[cfg(not(pgrust_sim))]
+        {
+            std::fs::write(p, bytes).unwrap();
+        }
+        #[cfg(pgrust_sim)]
+        {
+            let fd =
+                vfs::open(&cpath(p), libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC, 0o666);
+            assert!(fd >= 0, "vfs open {p:?}: errno {}", vfs::get_errno());
+            let mut off = 0usize;
+            while off < bytes.len() {
+                let n = vfs::pwrite(fd, &bytes[off..], off as vfs::off_t);
+                assert!(n > 0, "vfs pwrite {p:?}: errno {}", vfs::get_errno());
+                off += n as usize;
+            }
+            vfs::close(fd);
+        }
+    }
+
+    /// DST P4 dataplane arm (site: loadsort run files). The spill data plane
+    /// must land in the SAME provider that minted the fd: write a run
+    /// through `SortBatch::spill_run` under sim, prove the bytes live in
+    /// SimVfs (read back through `vfs::*`) and never touched the real
+    /// filesystem, then consume them back through the merge read arm.
+    /// RED at base: `vfs::open` minted a sim fd but the data plane was
+    /// `std::fs::File` — kernel write(2)/close(2) on an fd >= SIM_FD_BASE.
+    #[cfg(pgrust_sim)]
+    #[test]
+    fn sim_spill_data_plane_lands_in_simvfs() {
+        let dir = tmpdir("simarm");
+        let codec = RowCodec::new(vec![ColType::I32, ColType::I64, ColType::Text]);
+        let keys = [(0u16, CbSortKeyKind::Int32), (1, CbSortKeyKind::Int64)];
+        let kw = fixed_key_width(&keys).unwrap();
+        let mut keep = Vec::new();
+        let mut batch = SortBatch::new(kw);
+        let rows: [(i32, i64, &[u8]); 2] = [(7, 1, b"alpha"), (3, 2, b"beta")];
+        for r in &rows {
+            let vals = [Datum::from_i32(r.0), Datum::from_i64(r.1), text_datum(r.2, &mut keep)];
+            let mut key = Vec::with_capacity(kw);
+            encode_sort_key(&keys, &vals, &mut key);
+            let mut img = Vec::new();
+            codec.serialize_row(&vals, &mut img).unwrap();
+            batch.push(&key, &img);
+        }
+        batch.sort();
+        let p = dir.join("run-0");
+        batch.spill_run(&p).unwrap();
+
+        // (a) The bytes are in the sim universe, readable through vfs, and
+        // structurally a run: entries of [key: kw][rowlen: u32 le][row].
+        let bytes = read_file(&p);
+        assert!(bytes.len() > kw + 4);
+        let rowlen = u32::from_le_bytes(bytes[kw..kw + 4].try_into().unwrap()) as usize;
+        assert!(kw + 4 + rowlen <= bytes.len(), "corrupt first run entry");
+        // (b) The real filesystem never saw the file.
+        assert!(std::fs::metadata(&p).is_err(), "run file leaked to the real fs");
+        // (c) The read arm consumes it back through the same provider, in
+        // key order (the (3,2) row sorts first).
+        let mut m = RunMerge::open(&[p], kw).unwrap();
+        let (mut key, mut row) = (Vec::new(), Vec::new());
+        let mut arena = Vec::new();
+        let mut vals = vec![Datum::null(); 3];
+        let mut got = Vec::new();
+        while m.next_entry(&mut key, &mut row).unwrap() {
+            arena.clear();
+            codec.deserialize_row(&row, &mut arena, &mut vals).unwrap();
+            got.push((
+                vals[0].as_i32(),
+                vals[1].as_i64(),
+                varlena_bytes(vals[2]).unwrap().to_vec(),
+            ));
+        }
+        assert_eq!(got, vec![(3, 2, b"beta".to_vec()), (7, 1, b"alpha".to_vec())]);
     }
 
     #[test]
@@ -1294,10 +1763,8 @@ mod tests {
             while let Some(l) = r.next_row_into(&mut ref_arena).unwrap() {
                 ref_lens.push(l);
             }
-            let raw_disk: u64 =
-                raw_paths.iter().map(|p| std::fs::metadata(p).unwrap().len()).sum();
-            let lz_disk: u64 =
-                lz_paths.iter().map(|p| std::fs::metadata(p).unwrap().len()).sum();
+            let raw_disk: u64 = raw_paths.iter().map(|p| file_len(p)).sum();
+            let lz_disk: u64 = lz_paths.iter().map(|p| file_len(p)).sum();
             assert!(
                 lz_disk < raw_disk,
                 "lz4 runs not smaller: {lz_disk} vs {raw_disk}"
@@ -1333,7 +1800,7 @@ mod tests {
     fn lz4_truncation_and_corruption_error() {
         let d = tmpdir("lztrunc");
         let (paths, kw) = spill_random_runs_opts(&d, 1, 400, false, 5, true);
-        let whole = std::fs::read(&paths[0]).unwrap();
+        let whole = read_file(&paths[0]);
         let consume = |paths: &[std::path::PathBuf], prefetch: usize| -> PgResult<u64> {
             let mut m = if prefetch == 0 {
                 RunMergeV2::open_opts(paths, kw, true)?
@@ -1352,7 +1819,7 @@ mod tests {
         assert_eq!(consume(&paths, 0).unwrap(), 400);
         for cut in [2usize, 7, 40, whole.len() - 3] {
             let p = d.join(format!("cut{cut}"));
-            std::fs::write(&p, &whole[..cut]).unwrap();
+            write_file(&p, &whole[..cut]);
             let ps = vec![p];
             for prefetch in [0usize, 2] {
                 match consume(&ps, prefetch) {
@@ -1369,7 +1836,7 @@ mod tests {
         let mut bad = whole.clone();
         bad[4] ^= 0x40;
         let p = d.join("corrupt");
-        std::fs::write(&p, &bad).unwrap();
+        write_file(&p, &bad);
         for prefetch in [0usize, 2] {
             assert!(
                 consume(&[p.clone()], prefetch).is_err(),

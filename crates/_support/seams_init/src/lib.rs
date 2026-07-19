@@ -1,5 +1,32 @@
+/// The transport provider for this process's client byte path (§2.4 seam,
+/// docs/design/dst-and-wasm.md): which implementations get installed into
+/// be_secure_seams::{secure_read,secure_write,secure_close,set_port_noblock}
+/// and pqcomm_seams::{pq_init,modify_fe_be_wait_set_latch}. Resolved ONCE
+/// here, during single-threaded boot — the hot path pays the same one
+/// relaxed-load + indirect-call it always did, no per-byte branch. P4
+/// sim-net is the third provider (in-memory duplex under the sim scheduler)
+/// and installs into the SAME slots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transport {
+    /// Existing socket code (libc::recv/send + listen/accept): the default,
+    /// byte-identical native arm.
+    Socket,
+    /// pgwire over stdin/stdout (pqcomm_stdio): --stdio-wire on any target;
+    /// the wasm32-wasip1 client-server story (WASI p1 has no socket()).
+    StdioWire,
+    /// The deterministic in-memory duplex pair (pqcomm_simnet): --sim-net,
+    /// `--cfg pgrust_sim` builds only (P4; the variant does not exist on
+    /// product builds).
+    #[cfg(pgrust_sim)]
+    SimNet,
+}
+
 // One line per crate: the full seam-install closure for the postgres binary.
 pub fn init_all() {
+    init_all_with_transport(Transport::Socket)
+}
+
+pub fn init_all_with_transport(transport: Transport) {
     install_panic_hook();
     detoast::init_seams();
     ruleutils::init_seams();
@@ -92,11 +119,26 @@ pub fn init_all() {
     auth::init_seams();
     auth_scram::init_seams();
     crypt::init_seams();
-    be_secure::init_seams();
     hba::init_seams();
     libpq_pqsignal::init_seams();
     pqcomm::init_seams();
-    pqcomm::init_socket_seams();
+    match transport {
+        Transport::Socket => {
+            be_secure::init_seams();
+            pqcomm::init_socket_seams();
+        }
+        Transport::StdioWire => {
+            pqcomm_stdio::init_transport_seams();
+            pqcomm::init_socket_gucs();
+        }
+        // P4 sim-net: the third provider into the same slots, incl. the
+        // virtual listen/accept pair the init_seams split freed.
+        #[cfg(pgrust_sim)]
+        Transport::SimNet => {
+            pqcomm_simnet::init_transport_seams();
+            pqcomm::init_socket_gucs();
+        }
+    }
     pqformat::init_seams();
     vars::init_seams();
     parser_driver::init_seams();
@@ -127,27 +169,43 @@ pub fn init_all() {
     launcher::init_seams();
     walsender_config::init_seams();
     walsender::init_seams();
+    syncrep::init_seams();
+    walreceiverfuncs::init_seams();
+    walreceiver::init_seams();
     basebackup::init_seams();
     slot::init_seams();
     reorderbuffer::init_seams();
     snapbuild::init_seams();
+    rewriteheap::init_seams();
     logical::init_seams();
+    origin::init_seams();
+    logicalworker::init_seams();
     test_decoding::init_seams();
+    pgoutput::init_seams();
     adt_formatting::init_seams();
     citext::init_seams();
     uuid_ossp::init_seams();
     pg_prewarm::init_seams();
     file_fdw::init_seams();
     ltree::init_seams();
+    intarray::init_seams();
     pgcrypto::init_seams();
     pg_stat_statements::init_seams();
+    pg_buffercache::init_seams();
+    auto_explain::init_seams();
     pgvector::init_seams();
     pgvector_hnsw::init_seams();
     hstore::init_seams();
     pg_trgm::init_seams();
     btree_gist::init_seams();
+    btree_gin::init_seams();
+    contrib_cube::init_seams();
+    contrib_earthdistance::init_seams();
+    contrib_seg::init_seams();
     unaccent::init_seams();
     pg_walinspect::init_seams();
+    injection_points::init_seams();
+    sslinfo::init_seams();
     session::init_seams();
     relpath::init_seams();
     rewrite_handler::init_seams();
@@ -235,6 +293,8 @@ pub fn init_all() {
     fmgr_core::register_late_builtins(adt_acl::builtins::ACL_BUILTINS);
     fmgr_core::register_late_builtins(adt_tsvector_stat::TS_STAT_BUILTINS);
     fmgr_core::register_late_builtins(slotfuncs::builtins::SLOTFUNCS_BUILTINS);
+    slotfuncs::init_seams();
+    slotsync::init_seams();
     fmgr_core::register_late_builtins(waitevent::funcs::WAITEVENT_BUILTINS);
     fmgr_core::register_late_builtins(logicalfuncs::LOGICALFUNCS_BUILTINS);
     fmgr_core::register_late_builtins(rls::RLS_BUILTINS);
@@ -280,7 +340,8 @@ pub fn init_all() {
     fmgr_core::register_late_builtins(pg_config::PG_CONFIG_BUILTINS);
     fmgr_core::register_late_builtins(shmem::SHMEM_BUILTINS);
     fmgr_core::register_late_builtins(aio_funcs::AIO_FUNCS_BUILTINS);
-    fmgr_core::register_late_builtins(subscriptioncmds::ORIGIN_BUILTINS);
+    fmgr_core::register_late_builtins(origin::ORIGIN_BUILTINS);
+    fmgr_core::register_late_builtins(logicalrelation::LOGICALRELATION_BUILTINS);
     funcapi::init_seams();
     init_small::init_seams();
     miscinit::init_seams();

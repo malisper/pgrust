@@ -237,12 +237,21 @@ fn fc_summary_recv(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<
     Err(cannot_accept().into())
 }
 
+// unported: brin_minmax_multi_summary_out (pageinspect lane). Clean 0A000
+// like the in/recv pair above; no such value can be constructed today.
 fn fc_summary_out(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!("unported: brin_minmax_multi_summary_out (pageinspect lane)")
+    Err(Box::new(
+        PgError::error("output of type brin_minmax_multi_summary is not supported")
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+    ))
 }
 
+// unported: brin_minmax_multi_summary_send (binary-copy lane).
 fn fc_summary_send(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    panic!("unported: brin_minmax_multi_summary_send (binary-copy lane)")
+    Err(Box::new(
+        PgError::error("binary output of type brin_minmax_multi_summary is not supported")
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+    ))
 }
 
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: ::fmgr::PGFunction) -> FmgrBuiltin {

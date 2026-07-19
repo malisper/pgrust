@@ -185,7 +185,7 @@ fn merge_clause<'mcx>(
             }
         };
         if ok {
-            match lsyscache::get_oprrest(op.opno)? {
+            match crate::syscache_memo::get_oprrest(run, op.opno)? {
                 F_SCALARLTSEL | F_SCALARLESEL => {
                     add_range_clause(rqlist, clause, varonleft, true, s2)?
                 }

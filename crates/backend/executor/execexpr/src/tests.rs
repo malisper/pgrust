@@ -1645,6 +1645,97 @@ fn fused_func_chain_evaluates_like_unfused() {
     });
 }
 
+// PROCPERF P2 compile economy: under the window the pair-fusion peephole and
+// the lane-v2 censuses are skipped, the thin-ABI single rewrite is kept, and
+// evaluation results are identical to the fused program.
+#[test]
+fn economy_window_skips_fusion_keeps_thin_and_results() {
+    with_mcx(|mcx| {
+        let build = |mcx| {
+            let mut expr = mk_scan_var(mcx, 1, INT4OID);
+            for k in 1..=8 {
+                let args = NodeList::make2(mcx, expr, mk_int4_const(mcx, Some(k))).unwrap();
+                expr = mk_opexpr(mcx, 177, INT4OID, args);
+            }
+            expr
+        };
+        let mut economy_state = {
+            let _w = crate::compile::economy_window(true);
+            exec_init_expr(mcx, Some(build(mcx)), ParamBind::NONE).unwrap().unwrap()
+        };
+        // Window restored: a post-window compile fuses again.
+        let fused_state = exec_init_expr(mcx, Some(build(mcx)), ParamBind::NONE).unwrap().unwrap();
+        assert!(fused_state
+            .steps()
+            .iter()
+            .any(|s| matches!(s, Step::ScanVarFuncStrict2Thin { .. } | Step::FuncFuncStrict2Thin { .. })));
+        // Economy program: no pair-fused variants, thin singles retained.
+        assert!(!economy_state
+            .steps()
+            .iter()
+            .any(|s| matches!(s, Step::ScanVarFuncStrict2Thin { .. } | Step::FuncFuncStrict2Thin { .. })));
+        assert!(economy_state
+            .steps()
+            .iter()
+            .any(|s| matches!(s, Step::FuncExprStrict2Thin { .. })));
+        for v in [Some(5), Some(-1000), None] {
+            let mut slot = virtual_slot(mcx, &[v]);
+            let mut slots = EvalSlots { scan: Some(&mut slot), inner: None, outer: None };
+            let r = exec_eval_expr(&mut economy_state, &mut slots).unwrap();
+            match v {
+                Some(x) => {
+                    assert!(!r.isnull);
+                    assert_eq!(r.value.as_i32(), x + 36);
+                }
+                None => assert!(r.isnull),
+            }
+        }
+    });
+}
+
+// Economy skips the lane-v2 qual censuses (scan_cmp_clauses stays None) and
+// the fused-qual rewrite, while the qual still evaluates correctly.
+#[test]
+fn economy_window_skips_qual_census() {
+    with_mcx(|mcx| {
+        let build_qual = |mcx| {
+            let a_lt0 = {
+                let args =
+                    NodeList::make2(mcx, mk_scan_var(mcx, 1, INT4OID), mk_int4_const(mcx, Some(0)))
+                        .unwrap();
+                mk_opexpr(mcx, 66, BOOLOID, args)
+            };
+            let b_gt5 = {
+                let args =
+                    NodeList::make2(mcx, mk_scan_var(mcx, 2, INT4OID), mk_int4_const(mcx, Some(5)))
+                        .unwrap();
+                mk_opexpr(mcx, 147, BOOLOID, args)
+            };
+            NodeList::make2(mcx, a_lt0, b_gt5).unwrap()
+        };
+        let control = exec_init_qual(mcx, &build_qual(mcx), ParamBind::NONE).unwrap().unwrap();
+        assert!(control.scan_cmp_const_clauses().is_some());
+        let mut state = {
+            let _w = crate::compile::economy_window(true);
+            exec_init_qual(mcx, &build_qual(mcx), ParamBind::NONE).unwrap().unwrap()
+        };
+        assert!(state.scan_cmp_const_clauses().is_none());
+        assert!(!state
+            .steps()
+            .iter()
+            .any(|s| matches!(s, Step::ScanVarFuncStrict2Thin { .. })));
+        for (a, b, want) in [
+            (Some(-1), Some(6), true),
+            (Some(-1), Some(5), false),
+            (Some(1), Some(6), false),
+            (None, Some(6), false),
+            (Some(-1), None, false),
+        ] {
+            assert_eq!(run_qual(mcx, &mut state, &[a, b]), want, "a={a:?} b={b:?}");
+        }
+    });
+}
+
 #[test]
 fn fused_two_clause_qual_matches() {
     with_mcx(|mcx| {
@@ -1800,12 +1891,17 @@ fn thin_agg_count_star_kernel() {
         assert_eq!(pergroup[0].trans_value.as_i64(), 294);
 
         // In-batch overflow refuses the advance (per-row walk owns the error).
-        pergroup[0].trans_value = Datum::from_i64(i64::MAX - 2);
+        // Seed through `base`: a safe `pergroup[0]` write would invalidate
+        // the kernel's pointer, which shares base's provenance (miri F3).
+        // SAFETY: base points at the live local above; no other reference is
+        // active across these writes.
+        unsafe { (*base.as_ptr()).trans_value = Datum::from_i64(i64::MAX - 2) };
         assert!(!crate::steps::agg_count_star_advance(pg, strict, 3));
         assert_eq!(pergroup[0].trans_value.as_i64(), i64::MAX - 2);
 
         // Strict + null transvalue: all n calls are skipped.
-        pergroup[0].trans_value_is_null = true;
+        // SAFETY: as above (miri F3).
+        unsafe { (*base.as_ptr()).trans_value_is_null = true };
         assert!(crate::steps::agg_count_star_advance(pg, true, 7));
         assert!(pergroup[0].trans_value_is_null);
         // Non-strict + null: refused (per-row resolves it).
@@ -2400,15 +2496,26 @@ mod json {
     }
 
     #[test]
-    #[should_panic(expected = "EEOP_CASE_TESTVAL_EXT")]
-    fn ext_case_test_without_permission_stays_loud() {
+    fn ext_case_test_without_permission_is_clean_feature_error() {
         with_mcx(|mcx| {
             let ct = Node::mk(
                 mcx,
                 CaseTestExpr { typeId: INT4OID, typeMod: -1, collation: 0 },
             )
             .unwrap();
-            let _ = exec_init_expr(mcx, Some(ct), ParamBind::NONE);
+            let err = match exec_init_expr(mcx, Some(ct), ParamBind::NONE) {
+                Ok(_) => panic!("expected a feature error"),
+                Err(e) => e,
+            };
+            assert_eq!(
+                err.sqlstate(),
+                ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED
+            );
+            assert!(
+                err.message().contains("not yet implemented"),
+                "{}",
+                err.message()
+            );
         });
     }
 }
@@ -4073,9 +4180,13 @@ fn qual_bitmap_contains_matches_perrow_like_oracle() {
                 0 => isnull[i] = true,
                 1 if round % 2 == 0 => {
                     // Undecidable: 1B_E toast-pointer header (0x01 tag byte).
+                    // Push BEFORE taking the pointer: moving the Box after
+                    // the ptr→int cast invalidates the exposed tag under
+                    // Stacked Borrows (miri F1).
                     let raw: Box<[u8]> = vec![0x01, 18, 0, 0].into_boxed_slice();
-                    values[i] = Datum::from_usize(raw.as_ptr() as usize);
                     owners.push(raw);
+                    values[i] =
+                        Datum::from_usize(owners.last().unwrap().as_ptr() as usize);
                 }
                 _ => {
                     let len = (lcg() as usize) % 40;
@@ -4087,9 +4198,11 @@ fn qual_bitmap_contains_matches_perrow_like_oracle() {
                         ::types_tuple::varatt::set_varsize_4b_word((4 + b.len()) as u32);
                     v[..4].copy_from_slice(&word.to_ne_bytes());
                     v[4..].copy_from_slice(b);
+                    // As above: push before exposing the pointer (miri F1).
                     let raw = v.into_boxed_slice();
-                    values[i] = Datum::from_usize(raw.as_ptr() as usize);
                     owners.push(raw);
+                    values[i] =
+                        Datum::from_usize(owners.last().unwrap().as_ptr() as usize);
                 }
             }
         }

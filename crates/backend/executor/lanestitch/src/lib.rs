@@ -182,6 +182,9 @@ const _: () = assert!(core::mem::size_of::<datum::Datum>() == 8);
 const _: () = assert!(core::mem::size_of::<bool>() == 1);
 const _: () = assert!(core::mem::offset_of!(JitParams, lanes) == 0);
 const _: () = assert!(core::mem::offset_of!(ProjJitParams, lanes) == 0);
+// 64-bit layout pin (two pointers); wasm32 shrinks it. The stitcher JIT is
+// aarch64-only anyway — params_layout() derives strides per target.
+#[cfg(not(target_family = "wasm"))]
 const _: () = assert!(core::mem::size_of::<LaneParam>() == 16);
 
 fn params_layout() -> stitch::ParamsLayout {

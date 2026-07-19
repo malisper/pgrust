@@ -68,7 +68,7 @@ static CHILD_PROCESS_KINDS: [ChildProcessKind; BACKEND_NUM_TYPES] = [
     ChildProcessKind { name: "wal sender", main_fn: Main::None, shmem_attach: true },
     ChildProcessKind {
         name: "slot sync worker",
-        main_fn: Main::Unported("ReplSlotSyncWorkerMain (backend-replication-slotsync)"),
+        main_fn: Main::Ported(slotsync::ReplSlotSyncWorkerMain),
         shmem_attach: true,
     },
     ChildProcessKind { name: "standalone backend", main_fn: Main::None, shmem_attach: false },
@@ -99,7 +99,7 @@ static CHILD_PROCESS_KINDS: [ChildProcessKind; BACKEND_NUM_TYPES] = [
     },
     ChildProcessKind {
         name: "wal_receiver",
-        main_fn: Main::Unported("WalReceiverMain (backend-replication-walreceiver)"),
+        main_fn: Main::Ported(walreceiver::WalReceiverMain),
         shmem_attach: true,
     },
     ChildProcessKind {
@@ -148,8 +148,30 @@ static NEXT_CHILD_PID: AtomicI32 = AtomicI32::new(1000);
 /// PGRUST_TEST_CHILD_PID_BELOW_PM=N (test-only): first reservation restarts
 /// the counter N below PostmasterPid(), so an e2e crosses the collision
 /// point within a few worker launches instead of never/late.
+/// SIMVFS-SHARED (s2 §6 item 1): parent-side capture of the spawning
+/// thread's shared-universe id — taken next to every spawn-door
+/// registration so the simulated process's filesystem follows its threads
+/// (a fork inherits the fd table). `None` when sharing is off (scheduler-off
+/// sim runs, the sessions=2 corpus): the child keeps its private universe,
+/// byte-identical to the pre-lane behavior.
+#[cfg(pgrust_sim)]
+fn sim_universe_capture() -> Option<u64> {
+    vfs::sim::SimVfs::current_universe_id()
+}
+
+/// SIMVFS-SHARED: child-side adoption, called as the FIRST act after the
+/// spawn door's `enter_child` (before any prelude that could touch files).
+#[cfg(pgrust_sim)]
+fn sim_universe_adopt(id: Option<u64>) {
+    if let Some(id) = id {
+        vfs::sim::SimVfs::adopt_universe(id);
+    }
+}
+
 fn reserve_child_pid() -> pid_t {
-    static TEST_INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    // pgsync by crate law (permit-s5; test-only env-knob memo, hygiene —
+    // the walreceiverfuncs cfg(test) Once precedent).
+    static TEST_INIT: pgsync::OnceLock<()> = pgsync::OnceLock::new();
     TEST_INIT.get_or_init(|| {
         if let Some(n) = std::env::var("PGRUST_TEST_CHILD_PID_BELOW_PM")
             .ok()
@@ -173,8 +195,13 @@ fn reserve_child_pid() -> pid_t {
 // fires before this thread's TLS destructors run, so the reaper must join
 // here or a parallel leader can free leader-owned state (execparallel's
 // pstmt/param_extern contract) while the worker thread is still tearing down.
-static CHILD_THREADS: std::sync::Mutex<Vec<(pid_t, std::thread::JoinHandle<()>)>> =
-    std::sync::Mutex::new(Vec::new());
+// pgsync (permit-s5, the s2 §6 item-3 row): the reaper registry is locked by
+// the postmaster AND by standby threads (standby_loop retire arm, rekey), all
+// registered under scheduler-on corpora — a raw std lock here was safe only
+// while no pgsync op sat inside its guards. Native arm = the identical std
+// re-export (zero cost).
+static CHILD_THREADS: pgsync::Mutex<Vec<(pid_t, std::thread::JoinHandle<()>)>> =
+    pgsync::Mutex::new(Vec::new());
 
 /// Joins the announced child's thread (TLS destructors included). Announce is
 /// the closure's last act, so this blocks only for teardown, as waitpid does.
@@ -190,6 +217,22 @@ pub fn join_announced_child(pid: pid_t) {
         let Some(idx) = t.iter().position(|(p, _)| *p == pid) else { return };
         t.swap_remove(idx).1
     };
+    // NB-2 (permit-s2 review, closed at permit-s5): under the permit
+    // scheduler a registered reaper must not RAW-join a registered child
+    // that still needs the permit to reach exit (announce fires before the
+    // child's final quantum runs its guards' drops). Hooked Join parks
+    // until the child's exit hook wakes joiners; the residual raw join
+    // below is then bounded OS teardown — the pgsync::thread wrapper's
+    // exact join shape, applied to the door's std handle.
+    #[cfg(pgrust_sim)]
+    if let Some(h) = pgsync::sim::hooks::installed() {
+        while !handle.is_finished() {
+            h.block_on(
+                core::panic::Location::caller(),
+                pgsync::sim::hooks::OpClass::Join,
+            );
+        }
+    }
     let _ = handle.join();
 }
 
@@ -199,12 +242,22 @@ macro_rules! inherited {
     ($($field:ident : $ty:ty = $get:ident / $set:ident;)+) => {
         struct Inherited {
             data_dir: Option<&'static str>,
+            // fd.c's max_safe_fds: a process static in C, computed once by
+            // PostmasterMain's set_max_safe_fds() pre-fork and inherited by
+            // every child via fork. Without this snapshot a backend thread
+            // boots at the FD_MINFREE (48) default, freezing
+            // maxAllocatedDescs at FD_MINFREE/3 = 16 ("exceeded
+            // maxAllocatedDescs (16)" on pg_subtrans SLRU opens under
+            // high-VU OLTP) and LRU-thrashing the VFD cache at 48 fds
+            // instead of ~max_files_per_process.
+            max_safe_fds: i32,
             $($field: $ty,)+
         }
         impl Inherited {
             fn capture() -> Self {
                 Self {
                     data_dir: init_small::globals::DataDir(),
+                    max_safe_fds: fd::max_safe_fds(),
                     $($field: init_small::globals::$get(),)+
                 }
             }
@@ -212,6 +265,7 @@ macro_rules! inherited {
                 if let Some(dd) = self.data_dir {
                     init_small::globals::SetDataDir(dd);
                 }
+                fd::vfd::set_max_safe_fds_value(self.max_safe_fds);
                 $(init_small::globals::$set(self.$field);)+
             }
         }
@@ -222,7 +276,9 @@ inherited! {
     is_postmaster_environment: bool = IsPostmasterEnvironment / SetIsPostmasterEnvironment;
     is_binary_upgrade: bool = IsBinaryUpgrade / SetIsBinaryUpgrade;
     postmaster_pid: pid_t = PostmasterPid / SetPostmasterPid;
-    data_directory_mode: i32 = data_directory_mode / set_data_directory_mode;
+    // data_directory_mode is process-global (set once by checkDataDir); it is
+    // deliberately NOT in this list — a stale captured copy applied by a
+    // pooled standby thread would reset the fixed value.
     output_file_name: [u8; types_core::MAXPGPATH] = OutputFileName / SetOutputFileName;
     my_exec_path: [u8; types_core::MAXPGPATH] = my_exec_path / set_my_exec_path;
     pkglib_path: [u8; types_core::MAXPGPATH] = pkglib_path / set_pkglib_path;
@@ -306,7 +362,7 @@ fn run_child_task(
             .unwrap_or_else(|e| panic!("InitPostmasterChild failed: {e:?}"));
         // InitPostmasterChild's SIGQUIT default; miscinit can't reach interrupt.
         procsignal::pqsignal_thread(
-            libc::SIGQUIT,
+            procsignal::signums::SIGQUIT,
             procsignal::ThreadSignalHandler::Simple(default_sigquit_handler),
         );
     }
@@ -327,6 +383,15 @@ fn run_child_task(
     // at the thread top, in C's order. Crash payloads (exit_thread_raw,
     // PanicExitThread, raw panics) never defer and skip the drain like C's
     // _exit. A panic escaping the drain is announced SIGABRT below.
+    // Clean-exit marker (FPBUDGET-1 v2): TRUE only for a real proc_exit()
+    // (callback drain owed). quickdie's exit_thread_raw also unwinds
+    // ProcExitThread but never defers callbacks — the payload alone cannot
+    // tell the two apart, which is exactly how the t29 bounce happened (the
+    // estate drain ran after a quickdie that skipped the abort ceremony and
+    // dropped a FAILED portal into freed memory). Read BEFORE the drain
+    // consumes the flag.
+    let clean_proc_exit =
+        payload.is::<ipc::ProcExitThread>() && ipc::exit_callbacks_pending();
     let payload = match payload.downcast_ref::<ipc::ProcExitThread>() {
         Some(p) => {
             let code = p.code;
@@ -350,15 +415,58 @@ fn run_child_task(
         .downcast_ref::<ipc::ProcExitThread>()
         .map(|p| p.code << 8)
         .or_else(|| payload.downcast_ref::<ipc::KilledBySignal>().map(|k| k.signo))
-        .unwrap_or(libc::SIGABRT);
+        .unwrap_or(procsignal::signums::SIGABRT);
     // Park in flight (wretain): the reaper must treat this announce as a
     // task end, not a thread end. Marked before the announce so the reaper
     // can never observe the announce without the marker.
-    if exitstatus == 0
+    let parks = exitstatus == 0
         && init_small::wretain::parking()
         && init_small::wretain::proc_retained()
-        && init_small::wretain::sinval_retained()
+        && init_small::wretain::sinval_retained();
+    // Session-memory teardown (FPBUDGET-1): C's process model frees the
+    // backend's whole TopMemoryContext estate at process exit; the thread
+    // model must do it explicitly or every session leaks its cache estate
+    // into the shared process (~2.2 MiB/seed under DDL/session churn).
+    // GATE (v2): clean proc_exit exits ONLY — the callback ceremony
+    // (ShutdownPostgres -> AbortOutOfAnyTransaction -> portal cleanup) must
+    // have run first, with every context alive, or leftover portals reach
+    // the drain holding Rc's into estates the drain frees (the t29 SIGABRT:
+    // FAILED-portal drop -> dealloc into a dead arena -> panic in Drop ->
+    // process abort). quickdie/kill-class exits skip the drain entirely and
+    // leak their estate, exactly as C's _exit(2) leaves cleanup to process
+    // death; the postmaster's crash cycle follows anyway. Parked standbys
+    // keep their retained caches by design. The payload re-check drops the
+    // clean claim if a deferred callback crashed mid-drain.
+    if !parks && clean_proc_exit && payload.downcast_ref::<ipc::ProcExitThread>().is_some()
     {
+        mcxt_stats::run_session_teardown();
+        // Hand freed-but-retained segments back before the thread dies
+        // (mi_collect(force) via the installed hook): without it the dead
+        // thread's heap pages sit abandoned-but-committed in RSS.
+        mcx::release_retained();
+    }
+    // FPBUDGET-1 debug instrument (PGRUST_MCXT_CENSUS): process-global live
+    // context census at task end. Growth across successive dumps = context
+    // nodes leaked by already-dead session threads.
+    if mcx::debug_census::on() {
+        let rows = mcx::debug_census::snapshot();
+        let mut line = String::from("MCXT-CENSUS");
+        for (name, n) in rows.iter().take(48) {
+            line.push_str(&format!(" [{}]={}", name, n));
+        }
+        eprintln!("{} (pid {})", line, child_pid);
+        // This thread's own live roots with sizes: anything still here after
+        // teardown is the ledgered tail (bytes attribution for the census).
+        let mut forest = String::from("MCXT-FOREST");
+        for t in mcxt_stats::backend_context_forest() {
+            forest.push_str(&format!(
+                " [{}]=used{}/fp{}",
+                t.name, t.subtree_used, t.arena_footprint
+            ));
+        }
+        eprintln!("{} (pid {})", forest, child_pid);
+    }
+    if parks {
         wpool::mark_parked_announce(child_pid);
     }
     if postmaster_seams::announce_child_exit::is_installed() {
@@ -425,10 +533,37 @@ pub fn postmaster_child_launch(
         guc::store::capture_nondefault_variables()
     };
 
+    // PERMIT-S1 (WS-CORE, contract §3.1): the spawn door registers the
+    // child's permit-scheduler slot BEFORE the OS spawn, keyed by the
+    // reserved vpid (reserve_child_pid pids are positive: the u32 cast is
+    // lossless and stays below the synthetic ranges). No-op unless
+    // PGRUST_SIM_SCHED=1 under `pgrust_sim`.
+    #[cfg(pgrust_sim)]
+    let sim_sched_slot =
+        pgsync::sim::spawn_door::register_child(child_pid as u32, kind.name);
+    // SIMVFS-SHARED: parent-side universe capture — the simulated process's
+    // filesystem follows its threads (a fork inherits the fd table). None
+    // when sharing is off: the child keeps its private universe, exactly
+    // the pre-lane behavior.
+    #[cfg(pgrust_sim)]
+    let sim_universe = sim_universe_capture();
+
     let spawned = std::thread::Builder::new()
         .name(format!("pg:{}:{}", kind.name, child_pid))
         .stack_size(child_thread_stack_size())
         .spawn(move || {
+            // PERMIT-S1: bind this thread to its slot and park until the
+            // first permit grant. Declared FIRST so its Drop — the teardown
+            // epilogue (teardown hooks inside the final quantum, deregister,
+            // join-wake, handoff) — runs LAST, after every TLS-owning guard
+            // below has dropped inside the final quantum (TLS-teardown
+            // rule 1, design §3).
+            #[cfg(pgrust_sim)]
+            let _sim_sched_permit = pgsync::sim::spawn_door::enter_child(sim_sched_slot);
+            // SIMVFS-SHARED: adopt the parent's universe FIRST — before any
+            // guard or prelude that could touch the filesystem.
+            #[cfg(pgrust_sim)]
+            sim_universe_adopt(sim_universe);
             // Thread-scoped (a retained thread reuses its slot across tasks):
             // the local latch slab slot returns on every thread exit —
             // announce fallthrough and panic unwind alike.
@@ -467,7 +602,14 @@ pub fn postmaster_child_launch(
                 .push((child_pid, handle));
             child_pid
         }
-        Err(_) => -1,
+        Err(_) => {
+            // F3 ledger row (fixed at PERMIT-S2, taken while dooring the
+            // wpool site): retire the never-entered slot so the failed
+            // spawn cannot leak a Runnable ghost into the schedule.
+            #[cfg(pgrust_sim)]
+            pgsync::sim::spawn_door::cancel_child(sim_sched_slot);
+            -1
+        }
     }
 }
 
@@ -493,6 +635,30 @@ fn child_thread_stack_size() -> usize {
 pub fn init_seams() {
     postmaster_seams::parallel_pool_dispatch::set(wpool::dispatch);
     postmaster_seams::parallel_pool_retire_db::set(retire_db_all_pools);
+    // PERMIT-S2 F2: the sim wpool demo drives the real pool through seams
+    // (tcop cannot depend on this crate — package cycle via autovacuum).
+    postmaster_seams::wpool_maintain::set(wpool::maintain);
+    postmaster_seams::wpool_flush::set(wpool::flush);
+    postmaster_seams::wpool_population::set(wpool::population);
+    // PERMIT-S5: the sim rtpool demo drives the REAL runtime pool through
+    // its (now-doored) spawn sites — same package-cycle reason as wpool.
+    postmaster_seams::rtpool_start::set(rtpool_start_for_demo);
+    postmaster_seams::rtpool_stop::set(rtpool::demo_stop);
+    postmaster_seams::rtpool_population::set(rtpool::population);
+    // SIMVFS-SHARED: the sim rtgang corpus needs postmaster parity in the
+    // sim-net harness (sizing before InitializeMaxBackends, install after
+    // shared memory) — same package-cycle reason as the trios above.
+    postmaster_seams::rtgang_procs_wanted::set(rtgang::gang_procs_wanted);
+    postmaster_seams::rtgang_install::set(rtgang::install_if_enabled);
+}
+
+/// rtpool_start seam impl: start the pool if `PGRUST_RUNTIME` enables it;
+/// returns the live pool-thread count (-1 = runtime disabled).
+fn rtpool_start_for_demo() -> i32 {
+    if rtpool::start_if_enabled().is_none() {
+        return -1;
+    }
+    rtpool::population()
 }
 
 /// DROP DATABASE rider for BOTH db-pinned pools: wpool's parked standbys
@@ -522,8 +688,18 @@ pub mod wpool {
     //! — one task per standby — exactly as phase 1 shipped.
 
     use std::sync::atomic::{AtomicI32, AtomicU64, Ordering::Relaxed};
-    use std::sync::mpsc::{Receiver, SyncSender};
-    use std::sync::Mutex;
+
+    // PERMIT-S2 (F2, the SECOND spawn door): the standby handoff channels
+    // and the pool registries are pgsync types. Native arm = the identical
+    // std re-exports (zero cost, no semantics change); under the sim permit
+    // scheduler the standby's recv() park, the claim's send, and the
+    // retire-drop wakes are hooked ops — pooled workers are schedulable.
+    // (AVAILABLE must be pgsync too: retire/flush drop Standby channels
+    // INSIDE its guard, and a preemption at that drop-wake touch would let
+    // another registered thread block raw on the registry mutex while
+    // holding the permit — the watchdog wedge shape.)
+    use pgsync::mpsc::{Receiver, SyncSender};
+    use pgsync::Mutex;
 
     use types_core::{init::BackendType, pid_t, InvalidOid, Oid};
     use types_startup::{BgWorkerStartupData, StartupData};
@@ -566,8 +742,14 @@ pub mod wpool {
     // prelude snapshot predates the reload; on crash the pool is dead).
     static FLUSH_EPOCH: AtomicU64 = AtomicU64::new(0);
 
-    fn available() -> std::sync::MutexGuard<'static, Vec<Standby>> {
+    fn available() -> pgsync::MutexGuard<'static, Vec<Standby>> {
         AVAILABLE.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Live standby-thread count (POPULATION discipline above). Public for
+    /// the sim wpool demo's drain probe; harmless elsewhere.
+    pub fn population() -> i32 {
+        POPULATION.load(Relaxed)
     }
 
     fn target() -> i32 {
@@ -656,12 +838,32 @@ pub mod wpool {
         } else {
             guc::store::capture_nondefault_variables()
         };
-        let (tx, rx) = std::sync::mpsc::sync_channel::<StandbyTask>(1);
-        let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let (tx, rx) = pgsync::mpsc::sync_channel::<StandbyTask>(1);
+        let (ack_tx, ack_rx) = pgsync::mpsc::sync_channel::<()>(1);
+        // PERMIT-S2 (F2): the wpool spawn door — pooled standbys register
+        // parent-side BEFORE the OS spawn, exactly like the
+        // postmaster_child_launch door above. No-op unless PGRUST_SIM_SCHED=1.
+        #[cfg(pgrust_sim)]
+        let sim_sched_slot = pgsync::sim::spawn_door::register_child(
+            spawn_pid as u32,
+            &format!("wpool-standby:{spawn_pid}"),
+        );
+        // SIMVFS-SHARED: parent-side universe capture (fd-table inheritance).
+        #[cfg(pgrust_sim)]
+        let sim_universe = super::sim_universe_capture();
         let spawned = std::thread::Builder::new()
             .name(format!("pg:standby:{spawn_pid}"))
             .stack_size(super::child_thread_stack_size())
             .spawn(move || {
+                // PERMIT-S1 door discipline: bind + gate FIRST, so this
+                // guard's Drop (the teardown epilogue) runs LAST — after
+                // the population charge and every TLS-owning guard below
+                // has dropped inside the final quantum.
+                #[cfg(pgrust_sim)]
+                let _sim_sched_permit = pgsync::sim::spawn_door::enter_child(sim_sched_slot);
+                // SIMVFS-SHARED: adopt the parent's universe FIRST.
+                #[cfg(pgrust_sim)]
+                super::sim_universe_adopt(sim_universe);
                 // Any exit — rotation, retire, or a prelude panic — drops the
                 // population charge exactly once.
                 struct PopulationCharge;
@@ -706,7 +908,13 @@ pub mod wpool {
                 });
                 true
             }
-            Err(_) => false,
+            Err(_) => {
+                // F3 shape: retire the never-entered slot so the failed
+                // spawn cannot leak a Runnable ghost into the schedule.
+                #[cfg(pgrust_sim)]
+                pgsync::sim::spawn_door::cancel_child(sim_sched_slot);
+                false
+            }
         }
     }
 
@@ -723,6 +931,12 @@ pub mod wpool {
                 Ok(task) => {
                     bgworker::gtrace("w.pool.task");
                     rekey_child_thread(thread_key, task.child_pid);
+                    // PERMIT-S2 (F2): the model identity follows the task
+                    // pid — sim waiter slots key off current_vpid (rule 2),
+                    // so a retained standby's slot renames at every claim.
+                    // No-op with the scheduler off.
+                    #[cfg(pgrust_sim)]
+                    pgsync::sim::spawn_door::rekey_self(task.child_pid as u32);
                     thread_key = task.child_pid;
                     let pre_flush = FLUSH_EPOCH.load(Relaxed);
                     let pre_crash = CRASH_EPOCH.load(Relaxed);
@@ -756,8 +970,8 @@ pub mod wpool {
                             types_core::init::ProcessingMode::InitProcessing,
                         );
                         ipc::reset_exit_state_for_retained_park();
-                        let (tx2, rx2) = std::sync::mpsc::sync_channel::<StandbyTask>(1);
-                        let (ack_tx2, ack_rx2) = std::sync::mpsc::sync_channel::<()>(1);
+                        let (tx2, rx2) = pgsync::mpsc::sync_channel::<StandbyTask>(1);
+                        let (ack_tx2, ack_rx2) = pgsync::mpsc::sync_channel::<()>(1);
                         parked_crash_epoch = pre_crash;
                         available().push(Standby {
                             pid: task.child_pid,
@@ -929,11 +1143,34 @@ pub mod rtpool {
     //!   threads ever take latch waits (M1+), they must follow the
     //!   `waiteventset_seams::rekey_wakeup_registry` discipline wpool uses.
 
-    use std::sync::{Arc, OnceLock};
+    use std::sync::atomic::{AtomicI32, Ordering::Relaxed};
+    use std::sync::Arc;
 
+    use pgsync::OnceLock;
     use types_core::pid_t;
 
     static RUNTIME: OnceLock<Arc<runtime::Runtime>> = OnceLock::new();
+
+    // Live pool-thread count (wpool POPULATION discipline): bumped at spawn
+    // success, dropped by the thread itself on any exit (the pool is
+    // process-lifetime in production, so this only ever falls under an
+    // explicit request_stop — the sim rtpool demo's drain probe).
+    static POPULATION: AtomicI32 = AtomicI32::new(0);
+
+    /// Live pool-thread count. Public for the sim rtpool demo's drain
+    /// probe (postmaster_seams::rtpool_population); harmless elsewhere.
+    pub fn population() -> i32 {
+        POPULATION.load(Relaxed)
+    }
+
+    /// Sim rtpool demo (permit-s5): ask the started pool's workers to exit
+    /// their loops (stop flag + wake_all). No-op if the pool never started.
+    /// Production never calls this — the pool is process-lifetime.
+    pub fn demo_stop() {
+        if let Some(rt) = RUNTIME.get() {
+            rt.request_stop();
+        }
+    }
 
     /// The process runtime, if the kill switch enabled it. M0: called by
     /// nothing in production; tests and (later) M1 postmaster startup.
@@ -976,14 +1213,57 @@ pub mod rtpool {
     ) -> std::io::Result<std::thread::JoinHandle<()>> {
         let pid: pid_t = super::reserve_child_pid();
         let inherited = super::Inherited::capture();
-        std::thread::Builder::new()
+        // PERMIT-S5 (s2 §6 item 3 / review NB-1): the rtpool worker spawn
+        // door — parent-side registration BEFORE the OS spawn, exactly the
+        // postmaster_child_launch/wpool pattern. Symbolic watchdog naming:
+        // dumps show "rtworker<ordinal>:<vpid>". No-op unless
+        // PGRUST_SIM_SCHED=1 under `pgrust_sim`.
+        #[cfg(pgrust_sim)]
+        let sim_sched_slot = pgsync::sim::spawn_door::register_child(
+            pid as u32,
+            &format!("rtworker{ordinal}:{pid}"),
+        );
+        // SIMVFS-SHARED: parent-side universe capture (fd-table inheritance).
+        #[cfg(pgrust_sim)]
+        let sim_universe = super::sim_universe_capture();
+        let spawned = std::thread::Builder::new()
             .name(format!("pg:rtworker{ordinal}:{pid}"))
             .stack_size(super::child_thread_stack_size())
             .spawn(move || {
+                // Door discipline: bind + gate FIRST, so this guard's Drop
+                // (the teardown epilogue) runs LAST — after the population
+                // charge below has dropped inside the final quantum.
+                #[cfg(pgrust_sim)]
+                let _sim_sched_permit = pgsync::sim::spawn_door::enter_child(sim_sched_slot);
+                // SIMVFS-SHARED: adopt the parent's universe FIRST.
+                #[cfg(pgrust_sim)]
+                super::sim_universe_adopt(sim_universe);
+                // Any exit (only a request_stop can cause one — the pool is
+                // process-lifetime) drops the population charge exactly once.
+                struct PopulationCharge;
+                impl Drop for PopulationCharge {
+                    fn drop(&mut self) {
+                        POPULATION.fetch_sub(1, Relaxed);
+                    }
+                }
+                let _charge = PopulationCharge;
                 inherited.apply();
                 let _ = stack_depth::set_stack_base();
                 body();
-            })
+            });
+        match spawned {
+            Ok(h) => {
+                POPULATION.fetch_add(1, Relaxed);
+                Ok(h)
+            }
+            Err(e) => {
+                // F3 shape: retire the never-entered slot so the failed
+                // spawn cannot leak a Runnable ghost into the schedule.
+                #[cfg(pgrust_sim)]
+                pgsync::sim::spawn_door::cancel_child(sim_sched_slot);
+                Err(e)
+            }
+        }
     }
 
     fn spawn_dispatcher(
@@ -994,20 +1274,74 @@ pub mod rtpool {
         // ProcessConfigFile), so it gets the full child GUC prelude — the
         // fork-inherited nondefault values (command-line -c and config
         // file), exactly as postmaster_child_launch's thread body.
-        let guc_snapshot = guc::store::capture_nondefault_variables();
-        std::thread::Builder::new()
+        // PERMIT-S5: that now includes the BASE-SHARE arm postmaster_child_
+        // launch uses (one typed capture per config change; the child
+        // adopts postmaster-validated values without re-running check
+        // hooks). The dispatcher previously always took the string
+        // capture/restore path, whose re-run check hooks re-read e.g. the
+        // timezone database from THIS thread — under sim that is a read in
+        // the dispatcher's empty thread-local SimVfs universe (the L1
+        // wedge-ledger class) and the prelude dies. PGRUST_NO_GUC_BASE
+        // reverts to the string path for A/B, exactly as on the spawn path.
+        let guc_base = guc::layers::ensure_base_current();
+        let guc_snapshot = if guc::layers::base_share_enabled() {
+            Vec::new()
+        } else {
+            guc::store::capture_nondefault_variables()
+        };
+        // PERMIT-S5: the dispatcher spawn door. The dispatcher has no
+        // product pid identity; its model vpid is minted from the SAME
+        // guarded counter as every child (sim-only — the native pid stream
+        // is untouched).
+        #[cfg(pgrust_sim)]
+        let sim_sched_slot = {
+            let vpid = super::reserve_child_pid();
+            pgsync::sim::spawn_door::register_child(
+                vpid as u32,
+                &format!("bgjobs-dispatcher:{vpid}"),
+            )
+        };
+        // SIMVFS-SHARED: parent-side universe capture (fd-table inheritance).
+        #[cfg(pgrust_sim)]
+        let sim_universe = super::sim_universe_capture();
+        let spawned = std::thread::Builder::new()
             .name("pg-bgjobs-dispatcher".into())
             .stack_size(super::child_thread_stack_size())
             .spawn(move || {
+                // Door discipline: bind + gate FIRST (drop = epilogue LAST).
+                #[cfg(pgrust_sim)]
+                let _sim_sched_permit = pgsync::sim::spawn_door::enter_child(sim_sched_slot);
+                // SIMVFS-SHARED: adopt the parent's universe FIRST — with a
+                // shared universe the dispatcher's GUC prelude can read the
+                // timezone db even on the string-restore arm (the s5 §6.2
+                // kill class dies here, not at the base-share workaround).
+                #[cfg(pgrust_sim)]
+                super::sim_universe_adopt(sim_universe);
                 inherited.apply();
                 let _ = stack_depth::set_stack_base();
-                guc::store::initialize_guc_options_for_child(&guc_snapshot)
-                    .and_then(|()| guc::store::restore_nondefault_variables(&guc_snapshot))
-                    .unwrap_or_else(|e| {
-                        panic!("bgjobs dispatcher GUC prelude failed: {e:?}")
-                    });
+                if guc::layers::base_share_enabled() {
+                    guc::store::initialize_guc_options_for_child_base(&guc_base)
+                        .and_then(|()| guc::layers::bind_base(&guc_base))
+                        .unwrap_or_else(|e| {
+                            panic!("bgjobs dispatcher GUC base bind failed: {e:?}")
+                        });
+                } else {
+                    guc::store::initialize_guc_options_for_child(&guc_snapshot)
+                        .and_then(|()| guc::store::restore_nondefault_variables(&guc_snapshot))
+                        .unwrap_or_else(|e| {
+                            panic!("bgjobs dispatcher GUC prelude failed: {e:?}")
+                        });
+                }
                 body();
-            })
+            });
+        match spawned {
+            Ok(h) => Ok(h),
+            Err(e) => {
+                #[cfg(pgrust_sim)]
+                pgsync::sim::spawn_door::cancel_child(sim_sched_slot);
+                Err(e)
+            }
+        }
     }
 
     /// M4 bgjobs increment 4 (docs/design/m4-bgjobs.md §3.6, the virtual
@@ -1069,8 +1403,7 @@ pub mod rtgang {
     //! receive SIGTERM (they die with the process; DROP DATABASE and
     //! crash reinit ride parallel::standing's retire/epoch paths).
 
-    use std::sync::OnceLock;
-
+    use pgsync::OnceLock;
     use types_core::pid_t;
 
     struct Boot {
@@ -1080,6 +1413,23 @@ pub mod rtgang {
     }
 
     static BOOT: OnceLock<Boot> = OnceLock::new();
+
+    /// SIMCORPUS RED (sim builds only, env-armed by the sim harness):
+    /// spawn gang workers WITHOUT their spawn door — the "new spawn site
+    /// forgot the door" wiring bug (the simvfs-shared worklog's named
+    /// census trap), deliberately resurrected. The un-doored thread is
+    /// invisible to the permit scheduler, so its FIRST shared-universe
+    /// touch (the adoption right after spawn) dies loudly at the strict
+    /// access probe — the deterministic catch the P10 red asserts.
+    /// Env-armed (`PGRUST_SIM_DOORSKIP=rtgang`) because the sim harness
+    /// (tcop) cannot call this crate directly (package cycle — the
+    /// wpool/rtpool seam reason); cfg(pgrust_sim) keeps it native-inert.
+    #[cfg(pgrust_sim)]
+    fn doorskip_red_armed() -> bool {
+        static ARMED: OnceLock<bool> = OnceLock::new();
+        *ARMED
+            .get_or_init(|| std::env::var("PGRUST_SIM_DOORSKIP").as_deref() == Ok("rtgang"))
+    }
 
     /// PGPROCs to boot-reserve for the gang: PGRUST_RUNTIME=1 (+ the
     /// PGRUST_RUNTIME_POOLBIND=0 kill) gates it; PGRUST_RUNTIME_GANG
@@ -1129,11 +1479,54 @@ pub mod rtgang {
     fn spawn_gang_worker(ordinal: usize) -> bool {
         let Some(boot) = BOOT.get() else { return false };
         let child_pid: pid_t = super::reserve_child_pid();
-        std::thread::Builder::new()
+        // PERMIT-S5 (s2 §6 item 3 / review NB-1): the rtgang spawn door —
+        // parent-side registration keyed by the reserved pid, symbolic
+        // watchdog naming ("rtgang<ordinal>:<vpid>"). The spawner may run on
+        // any backend thread (first engagement / respawn); parent-side
+        // registration needs no spawn fence (spawn_door module doc).
+        #[cfg(pgrust_sim)]
+        let sim_sched_slot = if doorskip_red_armed() {
+            // RED: the forgotten door. enter_child(None) below is a no-op,
+            // so the child runs unregistered — and dies at the adoption's
+            // access probe (the catch).
+            None
+        } else {
+            pgsync::sim::spawn_door::register_child(
+                child_pid as u32,
+                &format!("rtgang{ordinal}:{child_pid}"),
+            )
+        };
+        // SIMVFS-SHARED: parent-side universe capture (fd-table
+        // inheritance). The gang spawner may run on any BACKEND thread at
+        // first engagement — that thread is bound to the process universe,
+        // so the capture inherits correctly from wherever the gang is born.
+        #[cfg(pgrust_sim)]
+        let sim_universe = super::sim_universe_capture();
+        let spawned = std::thread::Builder::new()
             .name(format!("pg:rtgang{ordinal}:{child_pid}"))
             .stack_size(super::child_thread_stack_size())
-            .spawn(move || gang_thread(ordinal, child_pid, boot))
-            .is_ok()
+            .spawn(move || {
+                // Door discipline: the guard is declared BEFORE gang_thread
+                // runs, so every guard inside it drops first and this drop —
+                // the teardown epilogue — runs LAST.
+                #[cfg(pgrust_sim)]
+                let _sim_sched_permit = pgsync::sim::spawn_door::enter_child(sim_sched_slot);
+                // SIMVFS-SHARED: adopt the engagement's universe FIRST —
+                // the gang's bring-up (database bind, catalog reads) and its
+                // scan reads all go through vfs.
+                #[cfg(pgrust_sim)]
+                super::sim_universe_adopt(sim_universe);
+                gang_thread(ordinal, child_pid, boot)
+            });
+        match spawned {
+            Ok(_) => true,
+            Err(_) => {
+                // F3 shape: retire the never-entered slot.
+                #[cfg(pgrust_sim)]
+                pgsync::sim::spawn_door::cancel_child(sim_sched_slot);
+                false
+            }
+        }
     }
 
     fn gang_thread(ordinal: usize, child_pid: pid_t, boot: &'static Boot) {
@@ -1168,7 +1561,7 @@ pub mod rtgang {
             return;
         }
         procsignal::pqsignal_thread(
-            libc::SIGQUIT,
+            procsignal::signums::SIGQUIT,
             procsignal::ThreadSignalHandler::Simple(super::default_sigquit_handler),
         );
         miscinit::SetMyBackendType(types_core::init::BackendType::BgWorker);

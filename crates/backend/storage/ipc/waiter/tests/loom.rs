@@ -152,6 +152,19 @@ fn poison_on_owner_death_races_unpark_safely() {
 // ---------------------------------------------------------------------------
 // Latch-over-Waiter Dekker equivalence.
 //
+// SUPERSEDED-BUT-KEPT (LATCH-LOOM lane): the latch crate is now
+// loom-buildable and latch/tests/loom.rs drives the REAL
+// WaitLatch/SetLatch/ResetLatch code directly — those direct models are the
+// authoritative latch lost-wakeup oracle. This mirror stays as belt and
+// suspenders for the SLOT-CORE composition it also exercises, FROZEN in the
+// coarser all-SeqCst-RMW dialect it was written in. Caveat discovered by
+// the direct models' red battery (notes/dst-latch-loom.md): that coarse
+// dialect over-synchronizes through phantom RMW writes (a SeqCst RMW on a
+// WRITE edge acquire-chains the other side's recheck clock), so THIS mirror
+// cannot catch wake-route ORDERING bugs (e.g. publish-after-arm); the
+// direct models' refined dialect (read edges SC-RMW, write edges Release
+// swap, fences elided) can, and does.
+//
 // Mirror of the 4-atomic latch protocol as reimplemented over the Waiter
 // (latch/src/lib.rs set_latch + WaitLatch): the model must show that for a
 // concurrent set_latch / wait_latch pair, the waiter always terminates
@@ -178,7 +191,15 @@ impl ModelLatch {
     /// maybe_sleeping check; waker-word unpark.
     fn set(&self, slot: &Slot) {
         fence(Ordering::SeqCst);
-        if self.is_set.load(Ordering::Relaxed) != 0 {
+        // Early-return recheck as an RMW (LOOM-BREADTH inc-1; production is
+        // fence + Relaxed load): once reset() joins the protocol this edge
+        // is load-bearing — a stale 1 read here after a concurrent clear
+        // skips the wake, the exact pairing C's ResetLatch fence comment
+        // names ("or a concurrent SetLatch could skip the wake"). The RMW
+        // carries the fences' recency in loom's dialect (see the big
+        // comment below + loom_litmus.rs); the red battery demotes it back
+        // to Relaxed and latch_reset_recheck_no_lost_wake must fail.
+        if self.is_set.fetch_add(0, Ordering::SeqCst) != 0 {
             return;
         }
         // Dekker flag edges as RMWs (swap/fetch_add). The REAL code uses
@@ -235,6 +256,14 @@ impl ModelLatch {
             debug_assert!(matches!(r, ParkResult::Notified | ParkResult::Recheck));
         }
     }
+
+    /// latch.rs ResetLatch: clear is_set, then pg_memory_barrier() — "the
+    /// is_set clear must reach memory before we read any flag variables, or
+    /// a concurrent SetLatch could skip the wake". Store + fence rendered as
+    /// a SeqCst swap, the module's RMW translation.
+    fn reset(&self) {
+        self.is_set.swap(0, Ordering::SeqCst);
+    }
 }
 
 #[test]
@@ -271,6 +300,65 @@ fn latch_dekker_set_before_wait_short_circuits() {
         // No sleeper was armed: wait must return without parking forever.
         latch.wait(&slot, token);
         assert_eq!(latch.is_set.load(Ordering::SeqCst), 1);
+    });
+}
+
+/// The RESET race surface (LOOM-BREADTH inc-1): C's canonical latch loop
+/// `for(;;){ if (work) break; WaitLatch(); ResetLatch(); }` with a STRAY
+/// prior set (any signal-shaped SetLatch — rendered as a deterministic
+/// pre-set so the model stays 2 threads) racing the real work setter. The
+/// owner wakes on the stray set and resets: the work setter's set_latch
+/// racing that reset must still deliver — either its early-return check
+/// sees the cleared is_set (full Dekker set follows) or, having seen 1,
+/// the SC order puts its work-flag store before the owner's post-reset
+/// flag re-read. The flag edges carry ResetLatch's fence strength (RMW
+/// translation, see set() / reset()). A lost wake parks the owner forever
+/// — loom's deadlock detector fails the model.
+#[test]
+fn latch_reset_recheck_no_lost_wake() {
+    loom::model(|| {
+        let slot = fresh_slot();
+        let token = slot.issue_token();
+        let latch = Arc::new(ModelLatch::new());
+        let work = Arc::new(AtomicI32::new(0));
+
+        // Stray set, deterministic prefix: is_set = 1, no work posted.
+        latch.set(&slot);
+
+        // Work setter: post the flag, then set — the C discipline.
+        let worker = {
+            let latch = Arc::clone(&latch);
+            let slot = Arc::clone(&slot);
+            let work = Arc::clone(&work);
+            thread::spawn(move || {
+                // Plain SC store, NOT an RMW: the work flag is a plain
+                // fence-ordered write in production, and an RMW here would
+                // chain-acquire the owner's reset through the flag cell,
+                // causally protecting set()'s early-return check and making
+                // the model vacuous for the reset race (its red battery
+                // then passes). The is_set/maybe_sleeping edges stay RMWs
+                // per the module dialect; the flag edges stay plain so the
+                // stale-read window the fences must close remains open for
+                // loom to drive through.
+                work.store(1, Ordering::SeqCst);
+                latch.set(&slot);
+            })
+        };
+
+        // Owner: the canonical wait loop. The first wait short-circuits on
+        // the stray set; the reset then races the worker's set. Terminates
+        // in EVERY interleaving (a reset eating the work wake deadlocks).
+        loop {
+            // Plain SC load (see the worker's comment): no RMW causal
+            // bridge through the flag cell.
+            if work.load(Ordering::SeqCst) != 0 {
+                break;
+            }
+            latch.wait(&slot, token);
+            latch.reset();
+        }
+
+        worker.join().unwrap();
     });
 }
 

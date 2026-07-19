@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/backend/replication/origin",
+    "crates/backend/replication/slotsync",
+    "crates/backend/replication/logical/proto",
+    "crates/backend/replication/logical/relation",
+    "crates/backend/replication/logical/worker",
+    "crates/contrib/pgoutput",
     "crates/backend/backup/sink",
     "crates/backend/backup/sink_support",
     "crates/backend/backup/backup_copy",
@@ -16,6 +22,7 @@ members = [
     "crates/_support/jit_deform",
     "crates/_support/types/datum",
     "crates/_support/seam_core",
+    "crates/_support/pgsync",
     "crates/_support/test_boot",
     "crates/_support/types/types_tuple",
     "crates/_support/types/types_trigger",
@@ -105,6 +112,7 @@ members = [
     "crates/backend/storage/ipc/shmem_seams",
     "crates/backend/storage/lmgr/lwlock",
     "crates/backend/storage/file/file_seams",
+    "crates/backend/storage/file/vfs",
     "crates/backend/storage/sync/sync_seams",
     "crates/backend/storage/sync/sync",
     "crates/backend/access/transam/transam_xlog_seams",
@@ -132,6 +140,9 @@ members = [
     "crates/backend/libpq/be_secure_common",
     "crates/backend/libpq/be_secure_openssl",
     "crates/backend/libpq/pqcomm",
+    "crates/backend/libpq/pqcomm_stdio",
+    "crates/backend/libpq/fdnb",
+    "crates/backend/libpq/pqcomm_simnet",
     "crates/backend/storage/large_object",
     "crates/backend/catalog/pg_largeobject",
     "crates/backend/libpq/be_fsstubs",
@@ -157,6 +168,7 @@ members = [
     "crates/backend/storage/lmgr/lock_seams",
     "crates/backend/utils/misc/timeout_seams",
     "crates/backend/utils/misc/timeout",
+    "crates/backend/utils/misc/injection_point",
     "crates/backend/utils/misc/stack_depth",
     "crates/backend/utils/misc/pg_rusage",
     "crates/backend/utils/misc/ps_status_seams",
@@ -316,6 +328,7 @@ members = [
     "crates/backend/commands/cluster",
     "crates/backend/commands/cluster_seams",
     "crates/backend/access/heap/rewriteheap",
+    "crates/backend/access/heap/rewriteheap_seams",
     "crates/backend/commands/vacuum",
     "crates/backend/commands/vacuum_morsels",
     "crates/backend/commands/vacuumparallel",
@@ -371,9 +384,13 @@ members = [
     "crates/backend/replication/launcher_seams",
     "crates/backend/replication/launcher",
     "crates/backend/replication/walsender_config",
+    "crates/backend/replication/walreceiver",
+    "crates/backend/replication/walreceiverfuncs",
+    "crates/backend/replication/walreceiverfuncs_seams",
     "crates/backend/replication/repl_scanner",
     "crates/backend/replication/repl_gram",
     "crates/backend/replication/walsender",
+    "crates/backend/replication/syncrep",
     "crates/backend/replication/walsender_seams",
     "crates/backend/replication/logical_worker_seams",
     "crates/backend/storage/ipc/standby",
@@ -402,6 +419,7 @@ members = [
     "crates/backend/utils/activity/backend_progress",
     "crates/backend/utils/resowner/resowner_seams",
     "crates/port/pg_prng_seams",
+    "crates/port/pg_clock",
     "crates/backend/storage/ipc/shmem",
     "crates/backend/catalog/catalog",
     "crates/backend/catalog/catalog_namespace",
@@ -598,6 +616,7 @@ members = [
     "crates/backend/access/gin/gin",
     "crates/backend/access/gin/gin_trgm_seams",
     "crates/backend/access/gin/gin_hstore_seams",
+    "crates/backend/access/gin/gin_btree_seams",
     "crates/backend/executor/hstore_subs_seams",
     "crates/backend/access/gin/gin_xlog",
     "crates/backend/access/gin/ginbuild",
@@ -649,17 +668,28 @@ members = [
     "crates/contrib/pg_prewarm",
     "crates/contrib/file_fdw",
     "crates/contrib/ltree",
+    "crates/contrib/intarray",
+    "crates/backend/access/gin/gin_int4_seams",
     "crates/contrib/pgcrypto",
     "crates/contrib/pg_stat_statements",
+    "crates/contrib/pg_buffercache",
+    "crates/contrib/auto_explain",
+    "crates/contrib/exec_hooks",
     "crates/contrib/pgvector",
     "crates/contrib/pgvector_hnsw",
     "crates/contrib/pgvector_hnsw_build",
     "crates/_support/types/types_hnsw",
     "crates/contrib/hstore",
     "crates/contrib/pg_trgm",
+    "crates/contrib/btree_gin",
     "crates/contrib/btree_gist",
     "crates/contrib/unaccent",
     "crates/contrib/pg_walinspect",
+    "crates/contrib/injection_points",
+    "crates/contrib/sslinfo",
+    "crates/contrib/cube",
+    "crates/contrib/earthdistance",
+    "crates/contrib/seg",
     "crates/backend/catalog/pg_db_role_setting_seams",
     "crates/backend/utils/init/postinit",
     "crates/backend/postmaster/pmchild_seams",
@@ -812,6 +842,16 @@ debug = 0
 strip = "symbols"
 lto = "thin"
 codegen-units = 1
+
+# Optimized wasm artifact for the web demo (wasm). NATIVE-INERT:
+# nothing native selects this profile; only wasm/wasm-build.sh's optional
+# PGRUST_WASM_PROFILE=wasm-release leg uses it. Size-first (opt-level=s,
+# symbols stripped, no LTO tail) so the module fits browser/iOS budgets.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "s"
+lto = false
+codegen-units = 16
 
 # The official benchmark artifact.
 [profile.dist]

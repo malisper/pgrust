@@ -1580,6 +1580,183 @@ fn multi_insert_toast_copy_survives_to_placement() {
     quiesced();
 }
 
+// --- COPY FREEZE visibility-map side (heapam.c:2460-2654) ---
+
+// Registered VM "tables" live at rel oid + this offset in the shared fake.
+const VM_OID_OFFSET: Oid = 1_000_000;
+// MAXALIGN(SizeOfPageHeaderData): first VM map byte; heap block 0's
+// all-visible bit is its low bit, all-frozen the next (visibilitymap.c).
+const VM_FIRST_MAP_BYTE: usize = 24;
+// XLOG_HEAP2_VISIBLE (heapam_xlog.h) — emitted by visibilitymap_set.
+const XLOG_HEAP2_VISIBLE: u8 = 0x40;
+
+static VM_INIT: Once = Once::new();
+
+fn install_vm_seams() {
+    VM_INIT.call_once(|| {
+        bufmgr_seams::relation_smgr_locator::set(|rel| ::types_storage::RelFileLocatorBackend {
+            locator: ::types_storage::RelFileLocator {
+                spcOid: 1663,
+                dbOid: 5,
+                relNumber: rel.rd_id,
+            },
+            backend: ::types_core::INVALID_PROC_NUMBER,
+        });
+        smgr_seams::smgr_cached_nblocks::set(|rloc, _fork| {
+            with_fake(|f| {
+                f.tables
+                    .get(&(rloc.locator.relNumber + VM_OID_OFFSET))
+                    .map_or(0, |t| t.len()) as ::types_core::BlockNumber
+            })
+        });
+        smgr_seams::smgr_exists::set(|_rloc, _fork| Ok(true));
+        smgr_seams::smgr_nblocks::set(|rloc, fork| {
+            Ok(smgr_seams::smgr_cached_nblocks::call(rloc, fork))
+        });
+        smgr_seams::smgr_set_cached_nblocks::set(|_rloc, _fork, _v| Ok(()));
+        bufmgr_seams::read_buffer_extended::set(|rel, fork, blkno, _mode, _strategy| {
+            assert_eq!(fork, ::types_core::ForkNumber::VISIBILITYMAP_FORKNUM);
+            with_fake(|f| {
+                let buf = f.tables[&(rel.rd_id + VM_OID_OFFSET)][blkno as usize];
+                f.pins[(buf - 1) as usize] += 1;
+                Ok(buf)
+            })
+        });
+        xlogutils_seams::in_recovery::set(|| false);
+        transam_xlog_seams::data_checksums_enabled::set(|| false);
+        guc_tables::vars::wal_log_hints
+            .install(guc_tables::GucVarAccessors { get: || false, set: |_| {} });
+        // visibilitymap's WAL goes through the xloginsert seam (not this
+        // crate's direct wal.rs hook); capture into the same record log so
+        // take_xlog sees both records in emission order.
+        xloginsert_seams::xlog_insert_record::set(|_rmid, info, _flags, main_data, bufs| {
+            let main = main_data.concat();
+            let regs = bufs.iter().map(|b| (b.flags, b.bufdata.concat())).collect();
+            XLOG_RECS.lock().unwrap().push((info, main, bufs.len(), regs));
+            Ok(NEXT_LSN.fetch_add(8, Ordering::Relaxed) as u64)
+        });
+    });
+}
+
+fn vm_test_page(first_byte: u8) -> Box<TestPage> {
+    let mut page = Box::new(TestPage([0u8; BLCKSZ]));
+    // SAFETY: aligned, exclusively owned test page.
+    unsafe { PageMut::from_raw(NonNull::new(page.0.as_mut_ptr()).unwrap()) }.init(0);
+    page.0[VM_FIRST_MAP_BYTE] = first_byte;
+    page
+}
+
+fn heap_page_flags_check(oid: Oid, page_idx: usize) -> bool {
+    let buf = with_fake(|f| f.tables[&oid][page_idx]);
+    let addr = with_fake(|f| f.pages[(buf - 1) as usize]);
+    // SAFETY: leaked test page, always live.
+    let page = unsafe { PageRef::from_raw(NonNull::new(addr as *mut u8).unwrap()) };
+    page.is_all_visible()
+}
+
+fn vm_first_byte(oid: Oid) -> u8 {
+    let buf = with_fake(|f| f.tables[&(oid + VM_OID_OFFSET)][0]);
+    let addr = with_fake(|f| f.pages[(buf - 1) as usize]);
+    // SAFETY: leaked test page, always live.
+    unsafe { *(addr as *const u8).add(VM_FIRST_MAP_BYTE) }
+}
+
+// COPY FREEZE onto pages started empty: PD_ALL_VISIBLE + VM all-visible|
+// all-frozen at insert time, two WAL records (MULTI_INSERT+INIT carrying
+// XLH_INSERT_ALL_FROZEN_SET, then HEAP2_VISIBLE) — heapam.c:2460-2654.
+#[test]
+fn multi_insert_frozen_sets_vm_bits_and_logs_both_records() {
+    install_dml_seams();
+    install_vm_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    register_table(oid, vec![]);
+    register_table(oid + VM_OID_OFFSET, vec![vm_test_page(0)]);
+    let rel = test_relation(mcx, oid);
+    let _ = take_xlog();
+
+    let mut s1 = heap_slot_with(mcx, &tuple_image(0, 0, 41));
+    let mut s2 = heap_slot_with(mcx, &tuple_image(0, 0, 42));
+    let mut slots = [&mut s1, &mut s2];
+    dml::heap_multi_insert(mcx, &rel, &mut slots, 7, crate::hio::HEAP_INSERT_FROZEN, None)
+        .unwrap();
+
+    for off in [1u16, 2] {
+        let stored = page_tuple_at(oid, 0, off);
+        assert!(stored.t_data().xmin_frozen(), "tuple {off} frozen at insert");
+    }
+    assert!(heap_page_flags_check(oid, 0), "PD_ALL_VISIBLE set at insert time");
+    assert_eq!(vm_first_byte(oid), 0x03, "VM all-visible|all-frozen for block 0");
+
+    let recs = take_xlog();
+    assert_eq!(recs.len(), 2, "MULTI_INSERT then HEAP2_VISIBLE");
+    assert_eq!(recs[0].0, dml::XLOG_HEAP2_MULTI_INSERT | dml::XLOG_HEAP_INIT_PAGE);
+    assert_ne!(recs[0].1[0] & dml::XLH_INSERT_ALL_FROZEN_SET, 0, "ALL_FROZEN_SET flag");
+    assert_eq!(recs[0].1[0] & dml::XLH_INSERT_ALL_VISIBLE_CLEARED, 0);
+    assert_eq!(recs[1].0, XLOG_HEAP2_VISIBLE);
+    assert_eq!(recs[1].1[4], 0x03, "xl_heap_visible.flags = ALL_VISIBLE|ALL_FROZEN");
+    assert_eq!(&recs[1].1[0..4], &[0u8; 4], "InvalidTransactionId cutoff");
+    quiesced();
+}
+
+// Frozen rows appended to a partially-filled all-visible page keep the bit
+// (the !HEAP_INSERT_FROZEN guard, heapam.c:2503); no VM traffic, no flags.
+#[test]
+fn multi_insert_frozen_keeps_all_visible_bit_on_nonempty_page() {
+    install_dml_seams();
+    install_vm_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    register_table(oid, vec![build_page(&[Item::Tuple(tuple_image(9, 0, 1))], true)]);
+    register_table(oid + VM_OID_OFFSET, vec![vm_test_page(0x03)]);
+    let rel = test_relation(mcx, oid);
+    let _ = take_xlog();
+
+    let mut s1 = heap_slot_with(mcx, &tuple_image(0, 0, 43));
+    let mut slots = [&mut s1];
+    dml::heap_multi_insert(mcx, &rel, &mut slots, 7, crate::hio::HEAP_INSERT_FROZEN, None)
+        .unwrap();
+
+    assert!(heap_page_flags_check(oid, 0), "PD_ALL_VISIBLE survives frozen append");
+    assert_eq!(vm_first_byte(oid), 0x03, "VM bits survive frozen append");
+    let recs = take_xlog();
+    assert_eq!(recs.len(), 1, "no HEAP2_VISIBLE for a page not started empty");
+    assert_eq!(recs[0].1[0] & dml::XLH_INSERT_ALL_VISIBLE_CLEARED, 0);
+    assert_eq!(recs[0].1[0] & dml::XLH_INSERT_ALL_FROZEN_SET, 0);
+    quiesced();
+}
+
+// Non-frozen rows onto an all-visible page clear PD_ALL_VISIBLE + the VM bits
+// and stamp XLH_INSERT_ALL_VISIBLE_CLEARED (heapam.c:2503-2510).
+#[test]
+fn multi_insert_nonfrozen_clears_all_visible() {
+    install_dml_seams();
+    install_vm_seams();
+    let _serial = serial();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let oid = fresh_oid();
+    register_table(oid, vec![build_page(&[Item::Tuple(tuple_image(9, 0, 1))], true)]);
+    register_table(oid + VM_OID_OFFSET, vec![vm_test_page(0x03)]);
+    let rel = test_relation(mcx, oid);
+    let _ = take_xlog();
+
+    let mut s1 = heap_slot_with(mcx, &tuple_image(0, 0, 44));
+    let mut slots = [&mut s1];
+    dml::heap_multi_insert(mcx, &rel, &mut slots, 7, 0, None).unwrap();
+
+    assert!(!heap_page_flags_check(oid, 0), "PD_ALL_VISIBLE cleared");
+    assert_eq!(vm_first_byte(oid), 0, "VM bits cleared");
+    let recs = take_xlog();
+    assert_eq!(recs.len(), 1);
+    assert_ne!(recs[0].1[0] & dml::XLH_INSERT_ALL_VISIBLE_CLEARED, 0);
+    quiesced();
+}
+
 // --- logical decoding write side ---
 
 const KEEP_DATA: u8 = ::xloginsert_seams::REGBUF_KEEP_DATA;

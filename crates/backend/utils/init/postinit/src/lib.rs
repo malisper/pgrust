@@ -20,6 +20,20 @@ use types_error::{
 use types_guc::{GucContext, GucSource};
 use types_storage::lock::{AccessShareLock, RowExclusiveLock, USER_LOCKMETHOD};
 
+// wasm32: the wasi libc crate exposes no LC_*/SIG* names. LC values are
+// musl's (the numbering the linked wasi-libc and pg_locale's wasm arm use);
+// SIG values are the thread-signal emulation's Linux-numbered space.
+#[cfg(not(target_family = "wasm"))]
+use libc::{LC_COLLATE, LC_CTYPE, SIGINT, SIGTERM};
+#[cfg(target_family = "wasm")]
+const LC_CTYPE: i32 = 0;
+#[cfg(target_family = "wasm")]
+const LC_COLLATE: i32 = 3;
+#[cfg(target_family = "wasm")]
+const SIGINT: i32 = 2;
+#[cfg(target_family = "wasm")]
+const SIGTERM: i32 = 15;
+
 #[cfg(test)]
 mod tests;
 
@@ -212,7 +226,7 @@ fn CheckMyDatabase(
     let collate = dbform.datcollate.as_str();
     let ctype = dbform.datctype.as_str();
 
-    if pg_locale_seams::pg_perm_setlocale::call(mcx, libc::LC_COLLATE, collate)?.is_none() {
+    if pg_locale_seams::pg_perm_setlocale::call(mcx, LC_COLLATE, collate)?.is_none() {
         return ereport(FATAL)
             .errmsg("database locale is incompatible with operating system")
             .errdetail(format!(
@@ -222,7 +236,7 @@ fn CheckMyDatabase(
             .finish(loc(421, "CheckMyDatabase"));
     }
 
-    if pg_locale_seams::pg_perm_setlocale::call(mcx, libc::LC_CTYPE, ctype)?.is_none() {
+    if pg_locale_seams::pg_perm_setlocale::call(mcx, LC_CTYPE, ctype)?.is_none() {
         return ereport(FATAL)
             .errmsg("database locale is incompatible with operating system")
             .errdetail(format!(
@@ -470,6 +484,26 @@ pub fn InitPostgres(
     let mut dbname = String::new();
 
     ereport(DEBUG3).errmsg_internal("InitPostgres").finish(loc(723, "InitPostgres"))?;
+
+    // Session-memory teardown (FPBUDGET-1): the fundamentals — transaction
+    // contexts, resource-owner arena, Port copy — freed at clean task end.
+    // Registered before any catalog access so cache teardowns (registered
+    // lazily during boot lookups) drain FIRST in the LIFO order. Once per
+    // thread: a wretain standby re-enters InitPostgres per claim but parks
+    // without draining, and must not stack duplicates.
+    {
+        use std::cell::Cell;
+        thread_local! {
+            static FUNDAMENTALS_REGISTERED: Cell<bool> = const { Cell::new(false) };
+        }
+        if !FUNDAMENTALS_REGISTERED.replace(true) {
+            ::mcx::register_session_cleanup(Box::new(|| {
+                xact::session_mem_teardown();
+                resowner::session_mem_teardown();
+                init_small::globals::SessionMemTeardownPort();
+            }));
+        }
+    }
 
     gtrace("p.enter");
     lmgr_proc::InitProcessPhase2()?;
@@ -1019,6 +1053,17 @@ fn shutdown_postgres_cb(code: i32, arg: datum::Datum) -> PgResult<()> {
 }
 
 fn shutdown_xlog_cb(_code: i32, _arg: datum::Datum) -> PgResult<()> {
+    // ShutdownXLOG's entry arm (xlog.c:6740): the shutdown checkpoint's
+    // buffer pins need the aux-process resource owner. C reinstates it
+    // inside ShutdownXLOG; hosted at this standalone-only callback here
+    // (registered solely on the !IsUnderPostmaster path — the checkpointer's
+    // ShutdownXLOG call site already runs under its own aux owner).
+    debug_assert!(!resowner::AuxProcessResourceOwner().is_null());
+    debug_assert!(
+        resowner::CurrentResourceOwner().is_null()
+            || resowner::CurrentResourceOwner() == resowner::AuxProcessResourceOwner()
+    );
+    resowner::SetCurrentResourceOwner(resowner::AuxProcessResourceOwner());
     transam_xlog_seams::shutdown_xlog::call()
 }
 
@@ -1036,15 +1081,15 @@ fn datum_null() -> datum::Datum {
 /// kill(-MyProcPid) process-group leg has no thread analog (no children).
 pub fn StatementTimeoutHandler() {
     let sig = if elog::config::client_auth_in_progress() {
-        libc::SIGTERM
+        SIGTERM
     } else {
-        libc::SIGINT
+        SIGINT
     };
     procsignal::SendThreadSignal(init_small::globals::MyProcPid(), sig);
 }
 
 pub fn LockTimeoutHandler() {
-    procsignal::SendThreadSignal(init_small::globals::MyProcPid(), libc::SIGINT);
+    procsignal::SendThreadSignal(init_small::globals::MyProcPid(), SIGINT);
 }
 
 fn set_latch_on_my_latch() {
