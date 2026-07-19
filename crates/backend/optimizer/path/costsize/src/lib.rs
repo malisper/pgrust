@@ -764,7 +764,7 @@ pub fn cost_samplescan(
         .expect("sampled rel has a tablesample clause")
         .as_table_sample_clause()
         .expect("tablesample is a TableSampleClause");
-    let tsm = ::tablesample::Tsm::get(tsc.tsmhandler);
+    let tsm = ::tablesample::Tsm::get(run.mcx, tsc.tsmhandler)?;
 
     let rows = match &run.root.path(path_id).base().param_info {
         Some(pi) => pi.ppi_rows,

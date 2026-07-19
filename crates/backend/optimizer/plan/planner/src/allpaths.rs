@@ -466,7 +466,7 @@ fn set_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResul
                 if rte.relkind == types_rel::RELKIND_FOREIGN_TABLE {
                     set_foreign_pathlist(run, rel, rti)?;
                 } else if rte.tablesample.is_some() {
-                    set_tablesample_rel_pathlist(run, rel)?;
+                    set_tablesample_rel_pathlist(run, rel, rti)?;
                 } else {
                     set_plain_rel_pathlist(run, rel)?;
                 }
@@ -1365,10 +1365,18 @@ fn set_tablesample_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) ->
         .expect("sampled rel has a tablesample clause")
         .as_table_sample_clause()
         .expect("tablesample is a TableSampleClause");
-    let tsm = ::tablesample::Tsm::get(tsc.tsmhandler);
+    let tsm = ::tablesample::Tsm::get(run.mcx, tsc.tsmhandler)?;
     let (pages, tuples) = {
         let r = run.root.rel(rel);
-        tsm.sample_scan_get_sample_size(run.mcx, &tsc.args, r.pages, r.tuples)?
+        let (spc_random_page_cost, _) =
+            crate::costsize::get_tablespace_page_costs(r.reltablespace);
+        tsm.sample_scan_get_sample_size(
+            run.mcx,
+            &tsc.args,
+            r.pages,
+            r.tuples,
+            spc_random_page_cost,
+        )?
     };
     {
         let r = run.root.rel_mut(rel);
@@ -1379,12 +1387,31 @@ fn set_tablesample_rel_size(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) ->
     Ok(())
 }
 
-// set_tablesample_rel_pathlist (allpaths.c). C wraps the path in Material
-// when the TSM lacks repeatable_across_scans and a join/subquery could rescan
-// it; both in-core TSMs are repeatable, so the wrap is unreachable here.
-fn set_tablesample_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
+// set_tablesample_rel_pathlist (allpaths.c).
+fn set_tablesample_rel_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgResult<()> {
     let required_outer = crate::relnode::relids_copy(run.mcx, &run.root.rel(rel).lateral_relids);
-    let path = crate::pathnode::create_samplescan_path(run, rel, &required_outer)?;
+    let mut path = crate::pathnode::create_samplescan_path(run, rel, &required_outer)?;
+
+    // A TSM without repeatable_across_scans must not be scanned twice: if the
+    // query could join (not a singleton rel set) or we are in a subquery
+    // (outer join unknowable), wrap the SampleScan in Material. The rel-count
+    // tests run first — GetTsmRoutine is the expensive check (as C).
+    // bms_membership != BMS_SINGLETON.
+    let join_possible = run.root.query_level > 1
+        || crate::relnode::relids_num_members(&run.root.all_query_rels) != 1;
+    if join_possible {
+        let tsc = run
+            .rte(rti)
+            .tablesample
+            .expect("sampled rel has a tablesample clause")
+            .as_table_sample_clause()
+            .expect("tablesample is a TableSampleClause");
+        let tsm = ::tablesample::Tsm::get(run.mcx, tsc.tsmhandler)?;
+        if !tsm.repeatable_across_scans() {
+            path = crate::pathnode::create_material_path(run, rel, path);
+        }
+    }
+
     add_path(run, rel, path);
     Ok(())
 }

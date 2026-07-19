@@ -196,6 +196,8 @@ pub fn init_all_with_transport(transport: Transport) {
     btree_gist::init_seams();
     unaccent::init_seams();
     pg_walinspect::init_seams();
+    tsm_system_rows::init_seams();
+    tsm_system_time::init_seams();
     session::init_seams();
     relpath::init_seams();
     rewrite_handler::init_seams();

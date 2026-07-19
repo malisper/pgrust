@@ -171,12 +171,18 @@ pub struct BulkInsertStateData {
     pub already_extended_by: u32,
 }
 
-// tsmapi.h sample capability; an OPEN extension point in C, so dyn is faithful.
+// tsmapi.h sample capability; an OPEN extension point in C, so dyn is
+// faithful. `donetuples` is the scan's returned-tuple count — C's callbacks
+// read it off the SampleScanState they are handed (tsm_system_rows does).
 pub trait SampleScanDriver {
     fn has_next_sample_block(&self) -> bool;
-    fn next_sample_block(&mut self, nblocks: BlockNumber) -> BlockNumber;
-    fn next_sample_tuple(&mut self, blockno: BlockNumber, maxoffset: OffsetNumber)
-        -> OffsetNumber;
+    fn next_sample_block(&mut self, nblocks: BlockNumber, donetuples: i64) -> BlockNumber;
+    fn next_sample_tuple(
+        &mut self,
+        blockno: BlockNumber,
+        maxoffset: OffsetNumber,
+        donetuples: i64,
+    ) -> OffsetNumber;
 }
 
 pub const HEAP_TABLE_AM_OID: Oid = 2;

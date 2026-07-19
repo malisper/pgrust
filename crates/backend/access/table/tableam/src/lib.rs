@@ -725,17 +725,19 @@ mod heap {
         _mcx: Mcx<'mcx>,
         scan: &mut HeapScanDescData<'mcx>,
         scanstate: &mut dyn SampleScanDriver,
+        donetuples: i64,
     ) -> PgResult<bool> {
-        heapam::sample::heap_scan_sample_next_block(scan, scanstate)
+        heapam::sample::heap_scan_sample_next_block(scan, scanstate, donetuples)
     }
 
     pub(super) fn scan_sample_next_tuple<'mcx>(
         mcx: Mcx<'mcx>,
         scan: &mut HeapScanDescData<'mcx>,
         scanstate: &mut dyn SampleScanDriver,
+        donetuples: i64,
         slot: &mut SlotData<'mcx>,
     ) -> PgResult<bool> {
-        heapam::sample::heap_scan_sample_next_tuple(mcx, scan, scanstate, slot)
+        heapam::sample::heap_scan_sample_next_tuple(mcx, scan, scanstate, donetuples, slot)
     }
 }
 
@@ -2329,6 +2331,7 @@ pub fn table_scan_sample_next_block<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut TableScanDesc<'mcx>,
     scanstate: &mut dyn SampleScanDriver,
+    donetuples: i64,
 ) -> PgResult<bool> {
     if unexpected_during_logical_decoding() {
         return Err(elog_error(
@@ -2336,7 +2339,7 @@ pub fn table_scan_sample_next_block<'mcx>(
         ));
     }
     match scan {
-        TableScanDesc::Heap(h) => heap::scan_sample_next_block(mcx, h, scanstate),
+        TableScanDesc::Heap(h) => heap::scan_sample_next_block(mcx, h, scanstate, donetuples),
         TableScanDesc::Pgrcolumnar(_) => Err(::pgrcolumnar::unsupported("TABLESAMPLE")),
     }
 }
@@ -2345,6 +2348,7 @@ pub fn table_scan_sample_next_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut TableScanDesc<'mcx>,
     scanstate: &mut dyn SampleScanDriver,
+    donetuples: i64,
     slot: &mut SlotData<'mcx>,
 ) -> PgResult<bool> {
     if unexpected_during_logical_decoding() {
@@ -2353,7 +2357,9 @@ pub fn table_scan_sample_next_tuple<'mcx>(
         ));
     }
     match scan {
-        TableScanDesc::Heap(h) => heap::scan_sample_next_tuple(mcx, h, scanstate, slot),
+        TableScanDesc::Heap(h) => {
+            heap::scan_sample_next_tuple(mcx, h, scanstate, donetuples, slot)
+        }
         TableScanDesc::Pgrcolumnar(_) => Err(::pgrcolumnar::unsupported("TABLESAMPLE")),
     }
 }
