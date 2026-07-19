@@ -265,6 +265,32 @@ fn byte_silent_op_consulting_pump_panics() {
     assert!(r.is_err(), "byte-silent op-consulting pump must panic deterministically");
 }
 
+/// SIM-CONVERGE inc-2: a pump that YIELDS (no byte progress, not finished) is
+/// a LEGAL cross-session turn-wait — NOT the stall panic. The blocking read
+/// re-evaluates until the pump makes real progress and never panics on the
+/// no-progress yields. In the real corpus each yield is preceded by a
+/// scheduler TimedPark (so a wedged turn reaches SCHEDCEILING, a named
+/// verdict); here the bounded yield counter stands in for that park.
+#[test]
+fn yielded_pump_is_a_legal_turn_wait_not_a_stall() {
+    session_init();
+    let mut yields_left = 3u32;
+    install_client_pump(move || {
+        if yields_left > 0 {
+            yields_left -= 1;
+            // Not my turn: no byte moved, not done. Without the Yielded
+            // exemption this is exactly the byte_silent stall panic.
+            return PumpStatus::Yielded;
+        }
+        client_send(b"go");
+        PumpStatus::Finished
+    });
+    let mut buf = [0u8; 8];
+    // Must NOT panic on the three yields; resolves to the 2-byte send.
+    let n = secure_read(&mut buf).unwrap().unwrap();
+    assert_eq!(&buf[..n], b"go", "yields must resolve to real progress, never panic");
+}
+
 // ===========================================================================
 // INC-2: the transport fault menu.
 // ===========================================================================
