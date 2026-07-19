@@ -188,10 +188,19 @@ fn init_pergroup(mcx: Mcx<'_>, kind: LaneKind) -> AggPerGroup {
         | LaneKind::StrMin
         | LaneKind::StrMax
         | LaneKind::BpMin
-        | LaneKind::BpMax => AggPerGroup {
+        | LaneKind::BpMax
+        // sum(float4/float8): strict + NULL catalog initval, same discipline.
+        | LaneKind::FSum => AggPerGroup {
             trans_value: Datum::null(),
             trans_value_is_null: true,
             no_trans_value: true,
+        },
+        // float4/float8_accum: strict with the NON-null '{0,0,0}' float8[3]
+        // catalog initval — the transarray is live from the first row.
+        LaneKind::FAccum => AggPerGroup {
+            trans_value: new_float8_transarray(mcx),
+            trans_value_is_null: false,
+            no_trans_value: false,
         },
     }
 }
@@ -2294,6 +2303,11 @@ fn fold_oid_set_matches_lanereg_census() {
         (459, R::Min),
         (1063, R::Max),
         (1064, R::Min),
+        // fold-trans float tier (lane-v2-lanefold-trans, knob-gated):
+        (204, R::FSum),
+        (218, R::FSum),
+        (208, R::FAccum),
+        (222, R::FAccum),
     ];
     for &(oid, kind) in expect {
         assert_eq!(::lanereg::fold_desc(oid), Some(kind), "fold oid {oid} census mismatch");
@@ -3560,4 +3574,426 @@ fn fold_agg_meta_parity_with_fold_batch() {
         }
     }
     assert_parity(&plan, &got2, &want2);
+}
+
+// ===========================================================================
+// Fold-trans float tier (lane-v2-lanefold-trans, knob-gated): FSum / FAccum.
+//
+// The kernels are ORDER-PRESERVING — the whole game is that the fold applies
+// C's per-row arithmetic in C's row order. The reference model below is an
+// independent per-row loop (install-then-float_pl for SUM, accum from
+// {0,0,0} for ACCUM); the ordering PIN then proves the datasets have teeth:
+// a reassociated (smalls-first) evaluation of the same rows produces
+// DIFFERENT bits, so bit-equality with the reference is only reachable by
+// folding in row order.
+//
+// Knob discipline: the knob is a process-wide AtomicU8; every test here
+// serializes on FOLD_TRANS_TEST_LOCK and leaves the knob ON (no other test
+// in this binary classifies a float SUM/ACCUM oid, so the cached ON state
+// cannot leak into unrelated assertions).
+// ===========================================================================
+
+static FOLD_TRANS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn ft_guard() -> std::sync::MutexGuard<'static, ()> {
+    let g = FOLD_TRANS_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    fold_trans_set_for_tests(true);
+    g
+}
+
+// Per-row C reference for sum(float8)/sum(float4): strict + NULL init —
+// install the first non-null input's bits, then state = float_pl(state, v).
+fn ref_fsum_f64(rows: &[Option<f64>]) -> PgResult<Option<f64>> {
+    let mut st: Option<f64> = None;
+    for v in rows.iter().flatten() {
+        st = Some(match st {
+            None => *v,
+            Some(s) => ::adt_float::float8_pl(s, *v)?,
+        });
+    }
+    Ok(st)
+}
+
+fn ref_fsum_f32(rows: &[Option<f32>]) -> PgResult<Option<f32>> {
+    let mut st: Option<f32> = None;
+    for v in rows.iter().flatten() {
+        st = Some(match st {
+            None => *v,
+            Some(s) => ::adt_float::float4_pl(s, *v)?,
+        });
+    }
+    Ok(st)
+}
+
+// Per-row C reference for the accum family: '{0,0,0}' start, one
+// float8_accum/float4_accum per non-null row in row order.
+fn ref_faccum_f64(rows: &[Option<f64>]) -> PgResult<[f64; 3]> {
+    let mut t = [0.0f64; 3];
+    for v in rows.iter().flatten() {
+        t = ::adt_float::aggregates::float8_accum(t, *v)?;
+    }
+    Ok(t)
+}
+
+fn ref_faccum_f32(rows: &[Option<f32>]) -> PgResult<[f64; 3]> {
+    let mut t = [0.0f64; 3];
+    for v in rows.iter().flatten() {
+        t = ::adt_float::aggregates::float4_accum(t, *v)?;
+    }
+    Ok(t)
+}
+
+fn read_f8_transarray(pg: &AggPerGroup) -> [f64; 3] {
+    assert!(!pg.trans_value_is_null);
+    let p = pg.trans_value.as_usize() as *const u8;
+    // SAFETY: new_float8_transarray image, arena-lived for the test.
+    unsafe {
+        let img = core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_4b(p));
+        ::adt_float::aggregates::check_float8_array::<3>(img, "test").expect("shape")
+    }
+}
+
+fn f64_rows(vals: &[Option<f64>]) -> Vec<Vec<Option<Datum>>> {
+    vals.iter().map(|v| vec![v.map(Datum::from_f64)]).collect()
+}
+
+fn f32_rows(vals: &[Option<f32>]) -> Vec<Vec<Option<Datum>>> {
+    vals.iter().map(|v| vec![v.map(Datum::from_f32)]).collect()
+}
+
+#[test]
+fn fold_trans_knob_and_admission() {
+    let _g = ft_guard();
+    let mcx = leaked_mcx();
+    let af8 = arg_list(mcx, mk_var(mcx, 1, F64V));
+    let af4 = arg_list(mcx, mk_var(mcx, 1, F32V));
+    // Knob OFF: every fold-trans oid refuses (byte-identical estate).
+    fold_trans_set_for_tests(false);
+    for (oid, null_init) in [(218, true), (204, true), (222, false), (208, false)] {
+        let a = if oid == 218 || oid == 222 { &af8 } else { &af4 };
+        assert!(classify_trans(&mk_spec(oid, null_init, a), 0).is_none(), "knob off: {oid}");
+    }
+    fold_trans_set_for_tests(true);
+    // sum(float8/float4): NULL init, byval float state at the lane width.
+    let (t, g) = classify_trans(&mk_spec(218, true, &af8), 0).expect("float8pl admits");
+    assert_eq!((t.kind, t.width, t.res_width), (LaneKind::FSum, LaneWidth::F64, LaneWidth::F64));
+    assert!(g.is_none(), "fold-trans lanes carry no integer guard");
+    let (t, _) = classify_trans(&mk_spec(204, true, &af4), 0).expect("float4pl admits");
+    assert_eq!((t.kind, t.width, t.res_width), (LaneKind::FSum, LaneWidth::F32, LaneWidth::F32));
+    // accum family: NON-null '{0,0,0}' initval.
+    let (t, g) = classify_trans(&mk_spec(222, false, &af8), 0).expect("float8_accum admits");
+    assert_eq!((t.kind, t.width), (LaneKind::FAccum, LaneWidth::F64));
+    assert!(g.is_none());
+    let (t, _) = classify_trans(&mk_spec(208, false, &af4), 0).expect("float4_accum admits");
+    assert_eq!((t.kind, t.width), (LaneKind::FAccum, LaneWidth::F32));
+    // Initval-polarity gates (the catalog contract this classify encodes).
+    assert!(classify_trans(&mk_spec(218, false, &af8), 0).is_none(), "sum needs NULL init");
+    assert!(classify_trans(&mk_spec(222, true, &af8), 0).is_none(), "accum needs non-null init");
+    // Wrong Var width refuses; OpExpr args refuse (bare Var only).
+    assert!(classify_trans(&mk_spec(218, true, &af4), 0).is_none(), "f4 var for float8pl");
+    let a_op = arg_list(mcx, mk_int_op(mcx, 1, INT4OID, 5, 177, true));
+    assert!(classify_trans(&mk_spec(218, true, &a_op), 0).is_none(), "OpExpr for float8pl");
+    assert!(classify_trans(&mk_spec(222, false, &a_op), 0).is_none(), "OpExpr for float8_accum");
+    // FILTER stays refused (named refusal this increment).
+    let mut fspec = mk_spec(218, true, &af8);
+    fspec.aggfilter = Some(mk_var(mcx, 2, BOOLV));
+    assert!(classify_trans(&fspec, 0).is_none(), "aggfilter refuses");
+    // combine phase refuses.
+    let mut cspec = mk_spec(218, true, &af8);
+    cspec.combine = true;
+    assert!(classify_trans(&cspec, 0).is_none(), "combine refuses");
+}
+
+// THE ORDERING PIN: a dataset where reassociation CHANGES the float8 sum.
+// Row order: 1e16 absorbs each +1.0 (spacing at 1e16 is 2.0), so
+// ((1e16+1)+1) + (-1e16) = 0.0. Smalls-first reassociation: (1.0+1.0) = 2.0
+// IS representable at 1e16 spacing, so (1e16+2) - 1e16 = 2.0. The fold must
+// produce the ROW-ORDER bits (0.0), proving it never reassociates.
+#[test]
+fn fold_trans_ordering_pin_fsum() {
+    let _g = ft_guard();
+    let mcx = leaked_mcx();
+    let vals: Vec<Option<f64>> = vec![Some(1e16), Some(1.0), Some(1.0), Some(-1e16)];
+    // Teeth: the reassociated evaluation genuinely diverges on these rows.
+    let seq = ref_fsum_f64(&vals).unwrap().unwrap();
+    let reassoc: f64 = (1e16 + (1.0 + 1.0)) + -1e16;
+    assert_eq!(seq.to_bits(), 0.0f64.to_bits(), "row order: +1s absorbed");
+    assert_eq!(reassoc.to_bits(), 2.0f64.to_bits(), "smalls-first: +2 survives");
+    assert_ne!(seq.to_bits(), reassoc.to_bits(), "dataset is reassociation-sensitive");
+    // The fold folds in row order.
+    let af8 = arg_list(mcx, mk_var(mcx, 1, F64V));
+    let specs = [mk_spec(218, true, &af8)];
+    let plan = classify(mcx, &specs).expect("admits");
+    let data = f64_rows(&vals);
+    let cols = TestCols::from_datum_rows(1, &data);
+    let selm = selmask(vals.len(), |_| true);
+    let mut pgs = pergroups_for(mcx, &plan, 1);
+    // SAFETY: pergroups cover the transno; lanes cover every row.
+    unsafe {
+        fold_batch(&plan, &cols, &selm, vals.len(), NonNull::new(pgs.as_mut_ptr()).unwrap(), mcx)
+            .expect("fold");
+    }
+    assert!(!pgs[0].trans_value_is_null);
+    assert_eq!(pgs[0].trans_value.as_f64().to_bits(), seq.to_bits(), "fold == row-order bits");
+}
+
+// FAccum ordering pin: Youngs-Cramer sxx depends on the arrival order.
+// Forward vs reversed row order produce different sxx bits on this dataset;
+// the fold matches FORWARD.
+#[test]
+fn fold_trans_ordering_pin_faccum() {
+    let _g = ft_guard();
+    let mcx = leaked_mcx();
+    // Magnitude ladder: the sxx rounding under Youngs-Cramer differs between
+    // forward and reversed arrival on these values (last-bit divergence —
+    // verified: fwd 0x41274A70BC6A7EFA vs bwd ...EF9).
+    let vals: Vec<Option<f64>> =
+        vec![Some(1.0), Some(10.0), None, Some(100.0), Some(1000.0), Some(0.1)];
+    let fwd = ref_faccum_f64(&vals).unwrap();
+    let mut rev = vals.clone();
+    rev.reverse();
+    let bwd = ref_faccum_f64(&rev).unwrap();
+    assert_ne!(fwd[2].to_bits(), bwd[2].to_bits(), "sxx is order-sensitive on this dataset");
+    let af8 = arg_list(mcx, mk_var(mcx, 1, F64V));
+    let specs = [mk_spec(222, false, &af8)];
+    let plan = classify(mcx, &specs).expect("admits");
+    let data = f64_rows(&vals);
+    let cols = TestCols::from_datum_rows(1, &data);
+    let selm = selmask(vals.len(), |_| true);
+    let mut pgs = pergroups_for(mcx, &plan, 1);
+    // SAFETY: FAccum pergroup holds a live new_float8_transarray.
+    unsafe {
+        fold_batch(&plan, &cols, &selm, vals.len(), NonNull::new(pgs.as_mut_ptr()).unwrap(), mcx)
+            .expect("fold");
+    }
+    let got = read_f8_transarray(&pgs[0]);
+    for k in 0..3 {
+        assert_eq!(got[k].to_bits(), fwd[k].to_bits(), "word {k} == forward row-order bits");
+    }
+}
+
+// Boundary parity (no-error datasets): NaN payloads, ±0, ±inf, denormals,
+// NULLs, and a selection mask — ungrouped fold vs the per-row reference,
+// bit-for-bit, f64 and f32, SUM and ACCUM.
+#[test]
+fn fold_trans_boundary_parity() {
+    let _g = ft_guard();
+    let mcx = leaked_mcx();
+    let nan2 = f64::from_bits(0x7FF8_0000_0000_0001);
+    let vals8: Vec<Option<f64>> = vec![
+        Some(0.0),
+        Some(-0.0),
+        None,
+        Some(1.5),
+        Some(-1.5),
+        Some(1e-300),
+        Some(-1e-300),
+        Some(f64::NAN),
+        Some(nan2),
+        Some(f64::INFINITY),
+        Some(f64::NEG_INFINITY),
+        None,
+        Some(3.25),
+    ];
+    let vals4: Vec<Option<f32>> = vec![
+        Some(0.0),
+        Some(-0.0),
+        None,
+        Some(2.25),
+        Some(-2.25),
+        Some(1e-38),
+        Some(f32::NAN),
+        Some(f32::from_bits(0x7FC0_0001)),
+        Some(f32::INFINITY),
+        Some(f32::NEG_INFINITY),
+        Some(-7.75),
+    ];
+    for sel in [(|_: usize| true) as fn(usize) -> bool, |i| i % 3 != 1] {
+        // f64 SUM + ACCUM share one classify (two transitions, one column).
+        let af8 = arg_list(mcx, mk_var(mcx, 1, F64V));
+        let specs = [mk_spec(218, true, &af8), mk_spec(222, false, &af8)];
+        let plan = classify(mcx, &specs).expect("admits");
+        assert!(plan.resid.is_empty() && !plan.guarded);
+        let data = f64_rows(&vals8);
+        let cols = TestCols::from_datum_rows(1, &data);
+        let selm = selmask(vals8.len(), sel);
+        let mut pgs = pergroups_for(mcx, &plan, 2);
+        // SAFETY: as the pins above.
+        unsafe {
+            fold_batch(&plan, &cols, &selm, vals8.len(), NonNull::new(pgs.as_mut_ptr()).unwrap(), mcx)
+                .expect("fold");
+        }
+        let picked: Vec<Option<f64>> =
+            vals8.iter().enumerate().filter(|(i, _)| sel(*i)).map(|(_, v)| *v).collect();
+        let want_sum = ref_fsum_f64(&picked).unwrap().unwrap();
+        assert_eq!(pgs[0].trans_value.as_f64().to_bits(), want_sum.to_bits(), "f64 sum bits");
+        let want_acc = ref_faccum_f64(&picked).unwrap();
+        let got_acc = read_f8_transarray(&pgs[1]);
+        for k in 0..3 {
+            assert_eq!(got_acc[k].to_bits(), want_acc[k].to_bits(), "f64 accum word {k}");
+        }
+        // f32 SUM + ACCUM.
+        let af4 = arg_list(mcx, mk_var(mcx, 1, F32V));
+        let specs4 = [mk_spec(204, true, &af4), mk_spec(208, false, &af4)];
+        let plan4 = classify(mcx, &specs4).expect("admits");
+        let data4 = f32_rows(&vals4);
+        let cols4 = TestCols::from_datum_rows(1, &data4);
+        let selm4 = selmask(vals4.len(), sel);
+        let mut pgs4 = pergroups_for(mcx, &plan4, 2);
+        // SAFETY: as above.
+        unsafe {
+            fold_batch(&plan4, &cols4, &selm4, vals4.len(), NonNull::new(pgs4.as_mut_ptr()).unwrap(), mcx)
+                .expect("fold");
+        }
+        let picked4: Vec<Option<f32>> =
+            vals4.iter().enumerate().filter(|(i, _)| sel(*i)).map(|(_, v)| *v).collect();
+        let want_sum4 = ref_fsum_f32(&picked4).unwrap().unwrap();
+        assert_eq!(pgs4[0].trans_value.as_f32().to_bits(), want_sum4.to_bits(), "f32 sum bits");
+        let want_acc4 = ref_faccum_f32(&picked4).unwrap();
+        let got_acc4 = read_f8_transarray(&pgs4[1]);
+        for k in 0..3 {
+            assert_eq!(got_acc4[k].to_bits(), want_acc4[k].to_bits(), "f32 accum word {k}");
+        }
+    }
+    // All-NULL: SUM stays in the strict no-trans-value state; ACCUM keeps
+    // the untouched {0,0,0} initval image (C: zero transfn calls).
+    let nulls: Vec<Option<f64>> = vec![None; 17];
+    let af8 = arg_list(mcx, mk_var(mcx, 1, F64V));
+    let specs = [mk_spec(218, true, &af8), mk_spec(222, false, &af8)];
+    let plan = classify(mcx, &specs).expect("admits");
+    let data = f64_rows(&nulls);
+    let cols = TestCols::from_datum_rows(1, &data);
+    let selm = selmask(nulls.len(), |_| true);
+    let mut pgs = pergroups_for(mcx, &plan, 2);
+    // SAFETY: as above.
+    unsafe {
+        fold_batch(&plan, &cols, &selm, nulls.len(), NonNull::new(pgs.as_mut_ptr()).unwrap(), mcx)
+            .expect("fold");
+    }
+    assert!(pgs[0].no_trans_value && pgs[0].trans_value_is_null, "sum: strict install never ran");
+    let acc = read_f8_transarray(&pgs[1]);
+    assert_eq!(acc, [0.0, 0.0, 0.0], "accum: initval image untouched");
+}
+
+// -0.0 install: the first strict input's exact bits are the state (C stores
+// the argument datum). -0.0 then +0.0 goes through float8_pl and produces
+// +0.0 (IEEE), which differs from the installed -0.0 — both directions
+// pinned bitwise.
+#[test]
+fn fold_trans_fsum_signed_zero_install() {
+    let _g = ft_guard();
+    let mcx = leaked_mcx();
+    let af8 = arg_list(mcx, mk_var(mcx, 1, F64V));
+    let run = |vals: &[Option<f64>]| -> u64 {
+        let specs = [mk_spec(218, true, &af8)];
+        let plan = classify(mcx, &specs).expect("admits");
+        let data = f64_rows(vals);
+        let cols = TestCols::from_datum_rows(1, &data);
+        let selm = selmask(vals.len(), |_| true);
+        let mut pgs = pergroups_for(mcx, &plan, 1);
+        // SAFETY: as above.
+        unsafe {
+            fold_batch(&plan, &cols, &selm, vals.len(), NonNull::new(pgs.as_mut_ptr()).unwrap(), mcx)
+                .expect("fold");
+        }
+        pgs[0].trans_value.as_f64().to_bits()
+    };
+    assert_eq!(run(&[Some(-0.0)]), (-0.0f64).to_bits(), "install keeps -0.0 bits");
+    assert_eq!(run(&[Some(-0.0), Some(0.0)]), 0.0f64.to_bits(), "-0.0 + 0.0 = +0.0");
+    assert_eq!(run(&[Some(-0.0), Some(-0.0)]), (-0.0f64).to_bits(), "-0.0 + -0.0 = -0.0");
+}
+
+// Overflow raises C's exact ereport at C's row: rows AFTER the raising row
+// must not accumulate (short-circuit), and the error matches the per-row
+// reference's.
+#[test]
+fn fold_trans_overflow_raises() {
+    let _g = ft_guard();
+    let mcx = leaked_mcx();
+    let af8 = arg_list(mcx, mk_var(mcx, 1, F64V));
+    let vals: Vec<Option<f64>> = vec![Some(f64::MAX), Some(f64::MAX), Some(1.0)];
+    let want = ref_fsum_f64(&vals).unwrap_err();
+    for (oid, null_init) in [(218, true), (222, false)] {
+        let specs = [mk_spec(oid, null_init, &af8)];
+        let plan = classify(mcx, &specs).expect("admits");
+        let data = f64_rows(&vals);
+        let cols = TestCols::from_datum_rows(1, &data);
+        let selm = selmask(vals.len(), |_| true);
+        let mut pgs = pergroups_for(mcx, &plan, 1);
+        // SAFETY: as above.
+        let got = unsafe {
+            fold_batch(&plan, &cols, &selm, vals.len(), NonNull::new(pgs.as_mut_ptr()).unwrap(), mcx)
+        };
+        let got = got.expect_err("MAX + MAX overflows");
+        assert_eq!(got.message(), want.message(), "C's exact ereport ({oid})");
+    }
+}
+
+// Grouped fold parity: interleaved groups, FSum + FAccum together, each
+// group's state must equal the per-row reference over ITS rows in row order.
+#[test]
+fn fold_trans_grouped_parity() {
+    let _g = ft_guard();
+    let mcx = leaked_mcx();
+    let af8 = arg_list(mcx, mk_var(mcx, 1, F64V));
+    let specs = [mk_spec(218, true, &af8), mk_spec(222, false, &af8)];
+    let plan = classify(mcx, &specs).expect("admits");
+    let n = 120usize;
+    let ngroups = 3usize;
+    // Mix magnitudes so per-group order sensitivity has teeth, plus NULLs.
+    let vals: Vec<Option<f64>> = (0..n)
+        .map(|i| {
+            if i % 7 == 5 {
+                None
+            } else if i % 11 == 0 {
+                Some(1e15)
+            } else if i % 11 == 1 {
+                Some(-1e15)
+            } else {
+                Some((i as f64) * 1.375 - 40.0)
+            }
+        })
+        .collect();
+    let data = f64_rows(&vals);
+    let cols = TestCols::from_datum_rows(1, &data);
+    let mut group_pgs: Vec<Vec<AggPerGroup>> =
+        (0..ngroups).map(|_| pergroups_for(mcx, &plan, specs.len())).collect();
+    let idxs: Vec<u32> = (0..n as u32).collect();
+    let groups: Vec<NonNull<AggPerGroup>> = (0..n)
+        .map(|i| NonNull::new(group_pgs[i % ngroups].as_mut_ptr()).unwrap())
+        .collect();
+    // SAFETY: each group's pergroup array covers every transno; FAccum slots
+    // hold live transarrays; arrays not moved while pointers live.
+    unsafe { fold_rows_grouped(&plan, &cols, &idxs, &groups, mcx).expect("fold") };
+    for g in 0..ngroups {
+        let gvals: Vec<Option<f64>> =
+            (0..n).filter(|i| i % ngroups == g).map(|i| vals[i]).collect();
+        let want_sum = ref_fsum_f64(&gvals).unwrap().unwrap();
+        assert_eq!(
+            group_pgs[g][0].trans_value.as_f64().to_bits(),
+            want_sum.to_bits(),
+            "group {g} sum bits"
+        );
+        let want_acc = ref_faccum_f64(&gvals).unwrap();
+        let got_acc = read_f8_transarray(&group_pgs[g][1]);
+        for k in 0..3 {
+            assert_eq!(got_acc[k].to_bits(), want_acc[k].to_bits(), "group {g} accum word {k}");
+        }
+    }
+}
+
+// The metadata / CSE / code-histogram arms must all refuse fold-trans plans:
+// footer stats cannot answer an order-sensitive fold.
+#[test]
+fn fold_trans_side_arm_refusals() {
+    let _g = ft_guard();
+    let mcx = leaked_mcx();
+    let af8 = arg_list(mcx, mk_var(mcx, 1, F64V));
+    let specs = [mk_spec(218, true, &af8), mk_spec(222, false, &af8)];
+    let plan = classify(mcx, &specs).expect("admits");
+    assert!(plan.cse.is_empty(), "fold-trans kinds never join CSE groups");
+    assert!(classify_meta(mcx, &specs).is_none(), "meta arm refuses");
+    assert!(plan_code_hostable(&plan).is_none(), "code-histogram arm refuses");
+    assert!(agg_meta_cols(&plan).is_none(), "footer-metadata arm refuses");
+    assert!(granule_meta_len_cols(&plan).is_none(), "granule length-stats arm refuses");
 }

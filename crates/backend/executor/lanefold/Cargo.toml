@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 adt_numeric = { path = "../../utils/adt/numeric" }
+adt_float = { path = "../../utils/adt/float" }
 mcx = { path = "../../../_support/mcx" }
 types_error = { path = "../../../_support/types/types_error" }
 datum = { path = "../../../_support/types/datum" }
