@@ -14,3 +14,4 @@ types_error = { path = "../../../../_support/types/types_error" }
 lock = { path = "../../../storage/lmgr/lock" }
 multixact = { path = "../multixact" }
 pgstat = { path = "../../../utils/activity/pgstat" }
+predicate = { path = "../../../storage/lmgr/predicate" }
