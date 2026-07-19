@@ -814,11 +814,13 @@ fn check_default_table_access_method(
 
 // --- Shared helpers ---
 
-// CheckXidAlive (xact.c) is set only during logical decoding, unported; the
-// statically-invalid xid computes the same `unlikely()` false as C.
+// CheckXidAlive (xact.c) is set while logical decoding replays a prepared
+// (or, phase-2, streamed) transaction; any table access then must go through
+// the systable_* wrappers (which set bsysscan). Mirrors the tableam.h
+// `unlikely(TransactionIdIsValid(CheckXidAlive) && !bsysscan)` checks.
+#[inline]
 fn unexpected_during_logical_decoding() -> bool {
-    const CHECK_XID_ALIVE: TransactionId = ::types_core::xact::InvalidTransactionId;
-    TransactionIdIsValid(CHECK_XID_ALIVE)
+    TransactionIdIsValid(xact::CheckXidAlive()) && !xact::bsysscan()
 }
 
 fn elog_error(message: impl Into<String>) -> Box<PgError> {

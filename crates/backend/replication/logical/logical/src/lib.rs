@@ -1047,9 +1047,15 @@ pub fn LogicalConfirmReceivedLocation(lsn: XLogRecPtr) -> PgResult<()> {
     Ok(())
 }
 
-// C resets CheckXidAlive/bsysscan; neither global exists in this port yet, so
-// the reset is vacuously complete.
-pub fn ResetLogicalStreamingState() {}
+// Clear logical streaming state during (sub)transaction abort (logical.c:1944).
+// Called from AbortTransaction/AbortSubTransaction via the
+// reset_logical_streaming_state seam, C's xact.c:2902/:5297 sites; this is
+// what clears CheckXidAlive when a concurrent-abort error (or any other
+// error) unwinds a prepared/streamed replay.
+pub fn ResetLogicalStreamingState() {
+    xact::SetCheckXidAlive(types_core::InvalidTransactionId);
+    xact::SetBsysscan(false);
+}
 
 pub fn UpdateDecodingStats(ctx: &mut LogicalDecodingContext) {
     let rb = &mut ctx.reorder;
