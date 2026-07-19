@@ -13026,6 +13026,67 @@ mod cursors_wave10_cb {
         crate::lanev2::cursor_store_fill_set_for_tests(false);
         assert!(!crate::lanev2::cursor_store_fill_enabled());
     }
+
+    /// §6 deletion rider row 4 EXECUTED (se/deletion-prep B1): the run
+    /// seam is FORWARD-ONLY. A backward drive into `execute_plan` ticks
+    /// the bake counter, then errors 0A000 BEFORE any plan work. At
+    /// defaults this state is unreachable (the portal store serves every
+    /// backward fetch — the SE13 flip); the error is the kill-switch
+    /// worlds' loud degradation, replacing their old backward plan drive.
+    /// Knob forced OFF here for the same reason as the staging-faces pin:
+    /// the push.rs debug assert is knob-scoped, and the world that can
+    /// reach this seam backward IS the knob-OFF world.
+    #[test]
+    fn run_seam_backward_errors_forward_only_b1() {
+        use ::types_scan::sdir::BackwardScanDirection;
+        install_seams();
+        scanfix::install();
+        let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mcx = leaked_mcx();
+        crate::lanev2::cursors_set_for_tests(false);
+        let relid = 96101u32;
+        scanfix::register_table(relid, &[&[1, 2, 3]]);
+        let pstmt = mk_seqscan_pstmt(mcx, relid);
+        let snap_ctx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("snap")));
+        let snapshot: snapmgr::Snapshot =
+            std::rc::Rc::new(::types_snapshot::SnapshotData::sentinel(
+                snap_ctx.mcx(),
+                ::types_snapshot::SnapshotType::SNAPSHOT_MVCC,
+            ));
+        with_exec_data(pstmt, |data, pstmt| {
+            data.estate.es_snapshot = Some(snapshot);
+            crate::execmain::init_plan(data, pstmt, CmdType::CMD_SELECT, 0).unwrap();
+            let (h, mut dest) = mk_store_dest();
+            let before = crate::lanev2::run_seam_backward_evidence_count();
+            let err = crate::execmain::execute_plan(
+                data,
+                CmdType::CMD_SELECT,
+                true,
+                0,
+                BackwardScanDirection,
+                false,
+                &mut dest,
+            )
+            .unwrap_err();
+            assert!(
+                err.message().contains("backward scan is not supported"),
+                "unexpected error: {}",
+                err.message()
+            );
+            assert_eq!(
+                crate::lanev2::run_seam_backward_evidence_count(),
+                before + 1,
+                "the bake counter must still tick on every refused attempt"
+            );
+            assert_eq!(data.estate.es_processed, 0, "no plan work before the refusal");
+            tuplestore::hold::end(h);
+            let ExecData { estate, planstate } = data;
+            crate::exec_end_node(planstate.as_mut().unwrap(), estate).unwrap();
+            estate.exec_reset_tuple_table(false);
+            estate.exec_close_range_table_relations().unwrap();
+        });
+        scanfix::quiesced();
+    }
 }
 // --- end WS-CB wave-10 --------------------------------------------------------
 

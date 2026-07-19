@@ -452,13 +452,22 @@ fn cursor_name_errors_match_c_sqlstates() {
     assert_eq!(err.sqlstate(), types_error::ERRCODE_INVALID_CURSOR_NAME);
 }
 
-// SCROLL cursor over a live seqscan executor: the FETCH/MOVE sequence pins
-// C's cursor semantics, with FETCH_ABSOLUTE's rewind leg and MOVE BACKWARD
-// ALL driving ExecutorRewind → ExecReScan through the real plan tree.
+// SCROLL cursor over a live seqscan executor with the store knob OFF: the
+// FETCH/MOVE sequence pins C's cursor semantics, with FETCH_ABSOLUTE's
+// rewind leg and MOVE BACKWARD ALL driving ExecutorRewind → ExecReScan
+// through the real plan tree. Backward-FETCH legs were retired by the
+// backward-execution deletion (se/deletion-prep B1: the run seam is
+// forward-only; in this knob-OFF world a backward FETCH now errors 0A000 —
+// pinned separately below; the store-armed world's backward reads are the
+// w10ca 94001 pins). Rewind is NOT backward (rescan machinery) and stays.
 #[test]
 fn live_seqscan_cursor_full_fetch_sequence() {
     install_fixtures();
     let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // Pin the knob-OFF world explicitly (the cell is process-global and the
+    // SE13 flip made the env-absent default ON; without the pin this test's
+    // world depends on sibling-test order — the KnobGuard precedent).
+    execmain::cursor_store_fill_set_for_tests(false);
     let mcx = leaked_mcx();
 
     let relid: u32 = 71001;
@@ -494,11 +503,6 @@ fn live_seqscan_cursor_full_fetch_sequence() {
     assert_eq!(rows, ["1", "2"]);
     assert_eq!(pos("lc"), (false, false, 2));
 
-    let (qc, rows) = fetch("lc", FETCH_BACKWARD, 1, false);
-    assert_eq!((qc.commandTag, qc.nprocessed), (CMDTAG_FETCH, 1));
-    assert_eq!(rows, ["1"]);
-    assert_eq!(pos("lc"), (false, false, 1));
-
     let (qc, rows) = fetch("lc", FETCH_ABSOLUTE, 3, true);
     assert_eq!((qc.commandTag, qc.nprocessed), (CMDTAG_MOVE, 1));
     assert!(rows.is_empty(), "MOVE sends no rows");
@@ -520,13 +524,11 @@ fn live_seqscan_cursor_full_fetch_sequence() {
     assert_eq!(rows, ["4"]);
     assert_eq!(pos("lc"), (false, false, 4));
 
-    let (qc, rows) = fetch("lc", FETCH_BACKWARD, FETCH_ALL, false);
-    assert_eq!((qc.commandTag, qc.nprocessed), (CMDTAG_FETCH, 3));
-    assert_eq!(rows, ["3", "2", "1"]);
-    assert_eq!(pos("lc"), (true, false, 0));
-
+    // (B1: the FETCH BACKWARD ALL leg that walked 3,2,1 here retired with
+    // the backward drive — pos continues from 4, so MOVE FORWARD ALL now
+    // traverses the single remaining row.)
     let (qc, _) = fetch("lc", FETCH_FORWARD, FETCH_ALL, true);
-    assert_eq!((qc.commandTag, qc.nprocessed), (CMDTAG_MOVE, 5));
+    assert_eq!((qc.commandTag, qc.nprocessed), (CMDTAG_MOVE, 1));
     assert_eq!(pos("lc"), (false, true, 5));
 
     // MOVE BACKWARD ALL = rewind (second live ExecutorRewind).
@@ -547,6 +549,79 @@ fn live_seqscan_cursor_full_fetch_sequence() {
         1,
         "PortalCleanup shut down the executor and closed the scan relation"
     );
+    scanfix::quiesced();
+}
+
+// se/deletion-prep B1 degradation pin: with the cursor store knob OFF (the
+// kill-switch world), a backward FETCH on a SCROLL cursor reaches the
+// forward-only run seam and errors 0A000 BEFORE any plan work (the seam
+// refusal is entry-first, so no pins are held and the portal still closes
+// cleanly). At defaults this path is unreachable — the store serves every
+// backward read (w10ca 94001).
+#[test]
+fn live_seqscan_cursor_backward_errors_without_store_b1() {
+    install_fixtures();
+    let _fixture = scanfix::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // The kill-switch world under test: store knob explicitly OFF (the
+    // process-global cell would otherwise resolve to the flipped default).
+    execmain::cursor_store_fill_set_for_tests(false);
+    let mcx = leaked_mcx();
+
+    let relid: u32 = 71002;
+    scanfix::register_table(relid, &[&[1, 2, 3]]);
+    let pstmt = mk_seqscan_pstmt(mcx, relid);
+    // SAFETY: pstmt is arena-backed by the leaked mcx.
+    let stmts = unsafe { pquery::stmt_list::register(core::slice::from_ref(pstmt)) };
+    let portal = portalmem::CreatePortal("lcb", false, false).unwrap();
+    portalmem::PortalDefineQuery(
+        &portal,
+        None,
+        "DECLARE lcb SCROLL CURSOR FOR SELECT a FROM t",
+        types_portal::CMDTAG_SELECT,
+        stmts,
+        CachedPlanHandle::NULL,
+    )
+    .unwrap();
+    portal.borrow_mut().cursorOptions = CURSOR_OPT_SCROLL;
+    push_snapshot();
+    pquery::PortalStart(&portal, ParamListHandle::NULL, 0, Some(snapmgr::GetActiveSnapshot()))
+        .unwrap();
+    snapmgr::PopActiveSnapshot().unwrap();
+    drop(portal);
+
+    // Drain to the end first: the exhausted scan released its page pin, so
+    // the seam refusal below happens with ZERO pins held (the unit fixture
+    // has no abort-side resowner release; a mid-scan error would park the
+    // pin on machinery this fixture cannot run).
+    let (qc, rows) = fetch("lcb", FETCH_FORWARD, FETCH_ALL, false);
+    assert_eq!((qc.commandTag, qc.nprocessed), (CMDTAG_FETCH, 3));
+    assert_eq!(rows, ["1", "2", "3"]);
+
+    // The backward fetch: seam-refused, loudly.
+    SENT.with(|s| s.borrow_mut().clear());
+    let stmt = FetchStmt {
+        direction: FETCH_BACKWARD,
+        howMany: 1,
+        portalname: Some("lcb"),
+        ismove: false,
+    };
+    let p = portalmem::GetPortalByName(Some("lcb")).expect("portal exists");
+    let mut dest = tcop_dest::CreateDestReceiver(CommandDest::RemoteExecute);
+    tcop_dest::SetRemoteDestReceiverParams(&mut dest, p);
+    let mut qc = QueryCompletion::default();
+    let err = PerformPortalFetch(&stmt, &mut dest, Some(&mut qc)).unwrap_err();
+    assert_eq!(err.sqlstate(), types_error::ERRCODE_FEATURE_NOT_SUPPORTED);
+    assert!(
+        err.message().contains("backward scan is not supported"),
+        "unexpected error: {}",
+        err.message()
+    );
+
+    // The failed portal still drops (abort-parity: MarkPortalFailed already
+    // detached the executor; production pin release rides the resowner at
+    // abort — here the exhausted scan holds none, proven by quiesced).
+    PerformPortalClose(Some("lcb")).unwrap();
+    assert!(portalmem::GetPortalByName(Some("lcb")).is_none());
     scanfix::quiesced();
 }
 
