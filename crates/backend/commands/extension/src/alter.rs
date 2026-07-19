@@ -90,16 +90,15 @@ pub fn ExecAlterExtensionStmt<'mcx>(
     genam::systable_endscan(mcx, scan)?;
     ext_rel.close(AccessShareLock)?;
 
-    // object_ownercheck (aclchk.c): superuser fast path; role ACL walks are
-    // the aclchk lane.
-    if !superuser::superuser()? {
-        // unported: ExecAlterExtensionStmt object_ownercheck for non-superusers
-        return Err(Box::new(
-            types_error::PgError::error(
-                "ALTER EXTENSION as a non-superuser is not supported yet",
-            )
-            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
-        ));
+    // C (extension.c:3471): object_ownercheck(ExtensionRelationId,
+    // extensionOid, GetUserId()); on failure aclcheck_error(ACLCHECK_NOT_OWNER,
+    // OBJECT_EXTENSION, stmt->extname) => "must be owner of extension %s".
+    if !aclchk::object_ownercheck(EXTENSION_RELATION_ID, extension_oid, miscinit::GetUserId())? {
+        aclchk::aclcheck_error(
+            aclchk::ACLCHECK_NOT_OWNER,
+            types_nodes::parsenodes::ObjectType::OBJECT_EXTENSION,
+            extname,
+        )?;
     }
 
     let control = read_extension_control_file(extname)?;

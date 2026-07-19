@@ -7,7 +7,7 @@ use adt_acl::{
     ACL_INSERT, ACL_MAINTAIN, ACL_SELECT, ACL_SET, ACL_TRUNCATE, ACL_UPDATE, ACL_USAGE,
 };
 use cache_syscache::cacheinfo::{
-    ATTNUM, AUTHOID, DATABASEOID, FOREIGNDATAWRAPPEROID, FOREIGNSERVEROID, LANGOID, PARAMETERACLNAME, PARAMETERACLOID, PROCOID, RELOID, TYPEOID,
+    ATTNUM, AUTHOID, DATABASEOID, EXTENSIONOID, FOREIGNDATAWRAPPEROID, FOREIGNSERVEROID, LANGOID, PARAMETERACLNAME, PARAMETERACLOID, PROCOID, RELOID, TYPEOID,
 };
 use cache_syscache::{
     ReleaseSysCache, SearchSysCache1, SearchSysCache2, SysCacheGetAttr, SysCacheGetAttrNotNull,
@@ -15,9 +15,9 @@ use cache_syscache::{
 };
 use datum::Datum;
 use types_core::catalog::{
-    FirstUnpinnedObjectId, BOOTSTRAP_SUPERUSERID, DATABASE_RELATION_ID, LANGUAGE_RELATION_ID,
-    NAMESPACE_RELATION_ID, PG_TOAST_NAMESPACE, PROCEDURE_RELATION_ID, RELATION_RELATION_ID,
-    TYPE_RELATION_ID,
+    FirstUnpinnedObjectId, BOOTSTRAP_SUPERUSERID, DATABASE_RELATION_ID, EXTENSION_RELATION_ID,
+    LANGUAGE_RELATION_ID, NAMESPACE_RELATION_ID, PG_TOAST_NAMESPACE, PROCEDURE_RELATION_ID,
+    RELATION_RELATION_ID, TYPE_RELATION_ID,
 };
 use types_core::Oid;
 use types_error::{
@@ -1066,6 +1066,11 @@ pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<b
             objectid,
             "event trigger",
         )?,
+        // C object_ownercheck: extension owner is pg_extension.extowner, read
+        // via the EXTENSIONOID syscache (get_object_catcache_oid returns it).
+        EXTENSION_RELATION_ID => {
+            syscache_owner(EXTENSIONOID, ANUM_PG_EXTENSION_EXTOWNER, objectid, "extension")?
+        }
         other => panic!("object_ownercheck (aclchk.c): object class {other} arm unported"),
     };
     has_privs_of_role(roleid, owner_id)
@@ -1095,6 +1100,7 @@ const TSConfigRelationId_own: Oid = 3602;
 const FOREIGN_DATA_WRAPPER_RELATION_ID_own: Oid = 2328;
 const FOREIGN_SERVER_RELATION_ID_own: Oid = 1417;
 const EventTriggerRelationId_own: Oid = 3466;
+const ANUM_PG_EXTENSION_EXTOWNER: i32 = 3;
 const ANUM_PG_CONVERSION_CONOWNER: i32 = 4;
 const PublicationRelationId: Oid = 6104;
 const SubscriptionRelationId: Oid = 6100;
