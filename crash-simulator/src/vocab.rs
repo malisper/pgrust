@@ -197,13 +197,20 @@ pub fn harness_class_severity(class: &str) -> Option<Severity> {
         return Some(Severity::Fine);
     }
     Some(match class {
+        // H8 additions: `wait-timeout` = a WaitUntil observable-state gate
+        // never cleared (choreography wedge — engine lock defect or harness
+        // bug, loud either way); `session-refusal` = a session-family step
+        // was structurally invalid at execution (async on session 0, join
+        // with nothing outstanding, missing pool config — harness bug class,
+        // same posture as dispatch-refusal).
         "dispatch-refusal" | "fault-reserved-refused" | "fault-restart-noop"
-        | "panic-signature" | "reach-gap" => Severity::P1,
+        | "panic-signature" | "reach-gap" | "wait-timeout" | "session-refusal" => Severity::P1,
         "err-uncompared"
         | "fault-skipped-no-restart-cmd"
         | "fault-restart-cmd-failed"
         | "fault-armed"
         | "floor-skipped-no-instrument"
+        | "async-dispatched"
         | "skipped-no-hook" => Severity::Fine,
         _ => return None,
     })

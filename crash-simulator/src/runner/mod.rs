@@ -8,5 +8,6 @@ pub mod planface;
 pub mod profile;
 pub mod runloop;
 pub mod schedule;
+pub mod sessions;
 pub mod shrink;
 pub mod verdict;

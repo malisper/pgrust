@@ -35,6 +35,7 @@ fn test_profile(weights: StatementWeights, len: u64) -> GenProfile {
         float_lenient: false,
         test_disable_productions: Vec::new(),
         planner_knobs: None,
+        multi_session: false,
     }
 }
 
@@ -59,6 +60,9 @@ fn census(plan: &Plan) -> Counts {
         Step::Arm(_) => c.arm += 1,
         Step::Fault(_) => c.fault += 1,
         Step::Assumption(_) | Step::Assertion(_) => {}
+        // H8 session-family steps are property-internal choreography; they
+        // draw no statement-kind budget.
+        Step::Session(_) | Step::AsyncDml(_) | Step::Join(_) | Step::WaitUntil(_) => {}
     };
     for item in &plan.items {
         match item {

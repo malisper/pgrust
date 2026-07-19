@@ -135,6 +135,14 @@ pub struct GenProfile {
     /// determinism law A3 holds: same seed + profile => same knobs.
     #[serde(default)]
     pub planner_knobs: Option<crate::gen::knobs::PlannerKnobs>,
+    /// H8: opt in to the multi-session estate (M2/S1 properties + the worker
+    /// pool). OFF by default — session-gated properties are weighted 0 when
+    /// false (the reach gate then treats them as gated-unreachable, exactly
+    /// like the hook-gated F7/F8 pair off a hookless engine). The single-
+    /// session cursor properties (C1/C2) are NOT gated by this: they always
+    /// generate.
+    #[serde(default)]
+    pub multi_session: bool,
 }
 
 impl GenProfile {

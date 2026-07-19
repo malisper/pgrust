@@ -134,17 +134,31 @@ pub fn run_plan_ctx(
     }
     // reconnect() restores session_setup (incl. search_path); ARM reset-all
     // replays post_reset_sql so generated unqualified names keep resolving.
+    let session_sql: Vec<String> = cfg
+        .session_setup
+        .iter()
+        .chain(cfg.per_seed_reset.iter())
+        .filter(|s| s.to_ascii_uppercase().trim_start().starts_with("SET "))
+        .cloned()
+        .collect();
     let opts = ExecOptions {
         restart_cmd: cfg.restart_cmd.clone(),
         stop_on_failure: true,
-        post_reset_sql: cfg
-            .session_setup
-            .iter()
-            .chain(cfg.per_seed_reset.iter())
-            .filter(|s| s.to_ascii_uppercase().trim_start().starts_with("SET "))
-            .cloned()
-            .collect(),
+        post_reset_sql: session_sql.clone(),
         explain_every: cfg.explain_every,
+        // H8: worker sessions mirror the primary pair's connect discipline
+        // (same conninfo, session_setup, and the per-seed SET replay so
+        // unqualified names resolve in the simharness schema).
+        session_pool: Some(crate::runner::sessions::SessionPoolConfig {
+            dut_conninfo: cfg.dut_conninfo.clone(),
+            cpg_conninfo: cfg.cpg_conninfo.clone(),
+            session_sql: cfg
+                .session_setup
+                .iter()
+                .cloned()
+                .chain(session_sql.iter().cloned())
+                .collect(),
+        }),
         ..ExecOptions::default()
     };
     let classifier = OracleDiffClassifier::new(bridge::load_warts());

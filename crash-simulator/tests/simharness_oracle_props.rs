@@ -43,6 +43,8 @@ fn first_asserted_slot(inst: &PropertyInstance) -> Option<u32> {
                 Check::UnionDoubling { single, .. } => *single,
                 Check::HookBaseline { before, .. } => *before,
                 Check::HookPresent { .. } => continue,
+                // H8 cursor checks.
+                Check::RowsEq { slot, .. } | Check::CmdCountEq { slot, .. } => *slot,
             };
             return Some(slot);
         }
@@ -136,6 +138,55 @@ fn x4_statement_form() {
 #[test]
 fn m1_read_your_writes() {
     green_red(PropertyId::M1ReadYourWrites);
+}
+
+#[test]
+fn c1_cursor_walk() {
+    green_red(PropertyId::C1CursorWalk);
+}
+#[test]
+fn c2_hold_cursor() {
+    green_red(PropertyId::C2HoldCursor);
+}
+
+#[test]
+fn multi_session_props_are_sim_inapplicable_but_wellformed() {
+    // M2/S1 emit H8 session-family steps the single-session sim executor
+    // cannot drive: it reports a counted skip (AssumptionFailed), never a
+    // false pass or violation. They must still be well-formed instances
+    // that return to session 0 by their last step (the estate invariant).
+    use simharness::oracle::pstep::PStep;
+    for id in [PropertyId::M2CrossSession, PropertyId::S1SpecConflict] {
+        for seed in [1u64, 7, 42] {
+            let inst = gen_instance(id, seed);
+            // Session balance: the last Session step must return to 0.
+            let mut last_session = 0u32;
+            let mut saw_session = false;
+            for s in &inst.steps {
+                if let PStep::Session(k) = s {
+                    last_session = *k;
+                    saw_session = true;
+                }
+            }
+            assert!(saw_session, "{} emits no Session step", id.as_str());
+            assert_eq!(
+                last_session,
+                0,
+                "{} seed {seed} does not return to session 0",
+                id.as_str()
+            );
+            // Sim executor: counted skip, not a verdict.
+            let mut exec = LedgerSimExecutor::new();
+            let mut ledger = Ledger::new();
+            let report = evaluate_instance(&inst, &mut exec, &mut ledger, &AllHooks);
+            assert_eq!(
+                report.outcome,
+                PropertyOutcome::AssumptionFailed,
+                "{} must be sim-inapplicable (counted skip)",
+                id.as_str()
+            );
+        }
+    }
 }
 
 #[test]

@@ -148,6 +148,13 @@ pub enum Check {
     HookPresent { hook: HookKind },
     /// F7/F8 watermark equality between two hook-probe scalars.
     HookBaseline { hook: HookKind, before: u32, after: u32 },
+    /// H8 cursor-walk expectation: the slot's rows equal `rows` EXACTLY,
+    /// in order (FETCH output order is cursor semantics — part of the law,
+    /// never relaxed to multiset).
+    RowsEq { slot: u32, rows: Vec<Row> },
+    /// H8 MOVE expectation: the slot is a command outcome whose count (the
+    /// trailing integer of the tag, e.g. `MOVE 3`) equals `value`.
+    CmdCountEq { slot: u32, value: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -286,6 +293,39 @@ fn eval_inner(
                 Err(format!("slot {slot}: scalar {got:?} != expected {value:?}"))
             }
         }
+        Check::RowsEq { slot, rows } => {
+            let got = rows_of(stack, *slot)?;
+            if got == rows.as_slice() {
+                Ok(Some(()))
+            } else {
+                let first = got
+                    .iter()
+                    .zip(rows.iter())
+                    .position(|(a, b)| a != b)
+                    .unwrap_or(got.len().min(rows.len()));
+                Err(format!(
+                    "slot {slot}: rows differ from cursor-model expectation \
+                     (got {} rows, want {}, first divergence at row {first})",
+                    got.len(),
+                    rows.len()
+                ))
+            }
+        }
+        Check::CmdCountEq { slot, value } => match slot_res(stack, *slot)? {
+            StmtResult::Command { affected } => {
+                if affected == value {
+                    Ok(Some(()))
+                } else {
+                    Err(format!("slot {slot}: command count {affected} != expected {value}"))
+                }
+            }
+            StmtResult::Rows { .. } => {
+                Err(format!("slot {slot}: rows result where a command tag was expected"))
+            }
+            StmtResult::Error { sqlstate } => {
+                Err(format!("slot {slot}: errored ({sqlstate}) where a command was expected"))
+            }
+        },
         Check::ScalarPairEq { a, b } => {
             let va = scalar(stack, *a)?;
             let vb = scalar(stack, *b)?;

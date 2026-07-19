@@ -43,6 +43,11 @@ pub struct Profile {
     /// (same seed + profile bytes = same knob sets).
     #[serde(default)]
     pub planner_knobs: Option<crate::gen::knobs::PlannerKnobs>,
+    /// H8: opt in to the multi-session estate (M2/S1). Default false keeps a
+    /// profile byte-identical in behavior to pre-H8 for the session-gated
+    /// pair (the cursor pair C1/C2 always generates).
+    #[serde(default)]
+    pub multi_session: bool,
     pub background_policy: BackgroundPolicy,
     pub steps_min: u32,
     pub steps_max: u32,
@@ -95,9 +100,22 @@ pub fn validate(p: &Profile) -> Result<(), String> {
     if p.name.is_empty() {
         return Err("profile: name must be non-empty".into());
     }
-    if p.connections != 1 {
+    // H1 pinned `connections` to 1 (serial single-session, §0 A1). H8 lifts
+    // that pin ONLY for a profile that opts into the multi-session estate,
+    // and only within the addressable session range (session 0 = primary
+    // pair, workers 1..=MAX_SESSION_ID). A non-multi_session profile is
+    // still serial-only.
+    let max_conns = crate::plan::MAX_SESSION_ID + 1;
+    if !p.multi_session && p.connections != 1 {
         return Err(format!(
-            "profile '{}': connections={} rejected — H1 is serial single-session (contract §0 A1); connections is pinned to 1",
+            "profile '{}': connections={} rejected — serial single-session (contract §0 A1); \
+             set multi_session=true for the H8 estate, or pin connections to 1",
+            p.name, p.connections
+        ));
+    }
+    if p.multi_session && (p.connections < 2 || p.connections > max_conns) {
+        return Err(format!(
+            "profile '{}': multi_session connections={} out of range (2..={max_conns})",
             p.name, p.connections
         ));
     }
