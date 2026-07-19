@@ -25,6 +25,14 @@
 //!                               points per run; default 3).
 //!  - `PGRUST_SIM_PCT_K`       — PCT estimated step budget k the change
 //!                               points are drawn over (default 4096).
+//!  - `PGRUST_SIM_VCEIL_S`     — plain-run bound on VIRTUAL time, in whole
+//!                               virtual seconds (design §4: "a config line,
+//!                               not a detector"); unset/malformed = no
+//!                               ceiling. Catches never-satisfied-predicate
+//!                               advance loops deterministically (the
+//!                               DST-MULTIBACKEND pool-miss deferral red: a
+//!                               leader waiting forever on a worker a
+//!                               PM_INIT surrogate can never start).
 //!
 //! NOTE: `PGRUST_SIM_SEED` is deliberately NOT read here. The picker seed is
 //! one 8-byte fill drawn through `pg_strong_random` — the sanctioned
@@ -101,6 +109,16 @@ pub(crate) fn pct_steps() -> u64 {
             .ok()
             .and_then(|v| parse_pct_steps(&v))
             .unwrap_or(DEFAULT_PCT_STEPS)
+    })
+}
+
+pub(crate) fn virtual_ceiling_ns() -> Option<u64> {
+    static V: OnceLock<Option<u64>> = OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("PGRUST_SIM_VCEIL_S")
+            .ok()
+            .and_then(|v| parse_seconds(&v))
+            .map(|s| s.saturating_mul(1_000_000_000))
     })
 }
 

@@ -115,6 +115,23 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // DST-MULTIBACKEND (sim pool-miss deferral corpus): the startup-exit
+    // PROMOTION a harness boot thread that plays the postmaster never runs
+    // (process_pm_child_exit's startup arm): claim the postmaster
+    // environment (IsPostmasterEnvironment — main_entry parity; the boot
+    // thread ran the STANDALONE ladder, whose identity is not-postmaster)
+    // and enter PM_RUN with connections allowed + the deferred-bgworker
+    // sweep requested. Without it a pool-miss registration defers to
+    // "postmaster start" forever: bgworker_should_start_now gates
+    // ConsistentState workers on PM_RUN, and postmaster_child_launch
+    // asserts IsPostmasterEnvironment — the simcorpus §7 named boundary.
+    // Call AFTER the surrogate's recovery owner (session 1) completes —
+    // C's moment is the startup child's clean exit. Seam-routed for the
+    // same package-cycle reason as pm_service_pending.
+    pub fn pm_promote_run()
+);
+
+seam_core::seam!(
     // SIMCORPUS (sim parallel-query corpus): one postmaster SERVICE
     // quantum — the ServerLoop slice a harness boot thread needs while it
     // PLAYS the postmaster and a session runs on a child thread:
