@@ -437,8 +437,11 @@ fn executor_rewind_seam_rescans_plan() {
     execmain_seams::free_query_desc::call(qd);
 }
 
+// B10: the predicate is a scroll-POLICY oracle now (which cursors get
+// implicit SCROLL - C's ExecSupportsBackwardScan answer set, byte-identical);
+// the executor itself never scans backward (deletion-prep B1).
 #[test]
-fn exec_supports_backward_scan_arms() {
+fn plan_implicit_scroll_ok_arms() {
     use ::types_nodes::plannodes::{Limit, Plan, Scan, SeqScan};
 
     let mcx = leaked_mcx();
@@ -446,27 +449,27 @@ fn exec_supports_backward_scan_arms() {
         Node::mk(mcx, SeqScan { scan: Scan { plan: Plan::default(), scanrelid: 1 }, cb_scan_cols: None }).unwrap()
     };
 
-    assert!(!crate::exec_supports_backward_scan(None));
-    assert!(crate::exec_supports_backward_scan(Some(seqscan())));
+    assert!(!crate::plan_implicit_scroll_ok(None));
+    assert!(crate::plan_implicit_scroll_ok(Some(seqscan())));
 
     // Result forwards to its outer plan; without one it can't back up.
     let bare_result = Node::build::<ResultPlan>(mcx).unwrap().seal();
-    assert!(!crate::exec_supports_backward_scan(Some(bare_result)));
+    assert!(!crate::plan_implicit_scroll_ok(Some(bare_result)));
     let mut over_scan = Node::build::<ResultPlan>(mcx).unwrap();
     over_scan.plan.lefttree = Some(seqscan());
-    assert!(crate::exec_supports_backward_scan(Some(over_scan.seal())));
+    assert!(crate::plan_implicit_scroll_ok(Some(over_scan.seal())));
 
     let mut limit = Node::build::<Limit>(mcx).unwrap();
     limit.plan.lefttree = Some(seqscan());
-    assert!(crate::exec_supports_backward_scan(Some(limit.seal())));
+    assert!(crate::plan_implicit_scroll_ok(Some(limit.seal())));
 
     let mut parallel = Node::build::<SeqScan>(mcx).unwrap();
     parallel.scan.plan.parallel_aware = true;
-    assert!(!crate::exec_supports_backward_scan(Some(parallel.seal())));
+    assert!(!crate::plan_implicit_scroll_ok(Some(parallel.seal())));
 
     // Agg: C's default arm.
     let agg = Node::build::<::types_nodes::plannodes::Agg>(mcx).unwrap().seal();
-    assert!(!crate::exec_supports_backward_scan(Some(agg)));
+    assert!(!crate::plan_implicit_scroll_ok(Some(agg)));
 }
 
 fn with_exec_data<R>(
