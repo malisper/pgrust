@@ -509,9 +509,10 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //   48. transam/xlogrecovery/tests/sim_crash_sweep.rs — DST sim-corpus
     //      test-rig TLS (integration test only, absent from product
     //      codegen; same class as the loom/e2e rig statics).
-    //   49. replication/logical/reorderbuffer/src/tests.rs (+1) —
-    //      cfg(test) rig TLS beside the existing slot; never in dist.
-    assert_eq!(count_tree(crates), 509, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    //   49. replication/logical/reorderbuffer/src/tests.rs (+2, the
+    //      second from the checkxid-alive car) — cfg(test) rig TLS beside
+    //      the existing slot; never in dist.
+    assert_eq!(count_tree(crates), 510, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

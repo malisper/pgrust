@@ -356,6 +356,10 @@ fn submit_cycle(shared: &Arc<Shared>, id: JobId, job: Arc<dyn BgJob>, reason: Cy
     // finalize in last-out — registering there is the only race-free edge).
     // Already-complete => no wake will follow; self-unpark so the next park
     // falls through to the harvest.
+    // cfg(loom): register_waker_word does not exist on the loom arm (nothing
+    // parks a leader in the models — runtime rg.rs convention); the
+    // dispatcher's recheck cadence covers the harvest there.
+    #[cfg(not(loom))]
     if waiter.register_waker_word(shared.waker.load(Ordering::Acquire)) {
         shared.unpark_dispatcher();
     }

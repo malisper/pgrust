@@ -10,8 +10,69 @@
 //! C's ssl_extension_info is a value-per-call SRF; this port materializes
 //! (the pg_walinspect precedent) — same rows, same first-error ereport.
 
+#[cfg(not(target_family = "wasm"))]
 use be_secure_openssl as tls;
+#[cfg(target_family = "wasm")]
+use tls_stub as tls;
 use datum::Datum;
+
+/// wasm arm: there is no OpenSSL and no SSL transport at all, so the no-SSL
+/// answers (None / false / zero extensions) are the TRUE answers — every
+/// entry point already guards on `ssl_in_use()` (always false here) or on
+/// these accessors. Mirrors the be_tls_* surface of be_secure_openssl.
+#[cfg(target_family = "wasm")]
+#[allow(dead_code)]
+mod tls_stub {
+    /// Mirror of be_secure_openssl::DnFieldLookup.
+    pub enum DnFieldLookup {
+        InvalidFieldName,
+        NotPresent,
+        BioFailure,
+        Value(Vec<u8>),
+    }
+
+    /// Mirror of be_secure_openssl::X509ExtensionInfo.
+    pub struct X509ExtensionInfo {
+        pub name: String,
+        pub value: Vec<u8>,
+        pub critical: bool,
+    }
+
+    /// Mirror of be_secure_openssl::X509ExtensionsError.
+    pub enum X509ExtensionsError {
+        BioFailure,
+        UnknownExtension(i32),
+        PrintFailed(i32),
+    }
+
+    pub fn be_tls_get_version() -> Option<String> {
+        None
+    }
+    pub fn be_tls_get_cipher() -> Option<String> {
+        None
+    }
+    pub fn be_tls_get_peer_subject_name() -> Option<String> {
+        None
+    }
+    pub fn be_tls_get_peer_issuer_name() -> Option<String> {
+        None
+    }
+    pub fn be_tls_get_peer_serial() -> Option<String> {
+        None
+    }
+    pub fn be_tls_has_peer_certificate() -> bool {
+        false
+    }
+    pub fn be_tls_get_peer_dn_field(
+        _field: &std::ffi::CStr,
+        _issuer: bool,
+    ) -> Option<DnFieldLookup> {
+        None
+    }
+    pub fn be_tls_get_peer_extensions() -> Result<Vec<X509ExtensionInfo>, X509ExtensionsError> {
+        Ok(Vec::new())
+    }
+}
 use init_small::globals as g;
 use mcx::Mcx;
 use tls::{DnFieldLookup, X509ExtensionsError};

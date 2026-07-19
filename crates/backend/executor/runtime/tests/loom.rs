@@ -898,7 +898,8 @@ fn stream_source_handshake() {
     });
 }
 
-// ====================================================================// ParkLot (the idle-worker epoch eventcount) — DIRECT protocol models
+// ===========================================================================
+// ParkLot (the idle-worker epoch eventcount) — DIRECT protocol models
 // (LOOM-BREADTH inc-1, absorbed at PERMIT-S2). Until now the eventcount was
 // only exercised through the whole-runtime models above; these pin ITS
 // invariant in isolation: with the capture-epoch -> check-work -> park(seen)
@@ -1621,7 +1622,9 @@ fn timeout_timer_arm_fire_never_lost() {
 
         timer_t.join().unwrap();
         assert!(sh.state.lock().unwrap().1, "the armed timeout fired");
-=======
+    });
+}
+
 // ---- WS-B admission-ledger models (single-executor Phase 0.1) --------------
 // Three models sized for the loom-fast ≤5min train gate (2 threads, 1-3
 // granules, preemption bound 2 — the standing budget law): the ledger is

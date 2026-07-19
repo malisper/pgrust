@@ -298,18 +298,18 @@ fn compare_partial_detoasts_compressed_keys() {
     let col = ts_col();
     // Stored key carries the prefix: gin_cmp_prefix must say "match" (0)
     // whether the stored key is flat or compressed.
-    let want = crate::opclass::compare_partial(&col, flat_key(mcx, &prefix), flat_key(mcx, &full), 0);
+    let want = crate::opclass::compare_partial(&col, flat_key(mcx, &prefix), flat_key(mcx, &full), 0, ::datum::Datum::null());
     assert_eq!(want, 0);
     assert_eq!(
-        crate::opclass::compare_partial(&col, flat_key(mcx, &prefix), pglz_key(mcx, &full), 0),
+        crate::opclass::compare_partial(&col, flat_key(mcx, &prefix), pglz_key(mcx, &full), 0, ::datum::Datum::null()),
         0
     );
     // A stored key past the prefix range stops the scan (> 0) in both forms.
     let other = b"zz".repeat(1030);
-    let stop = crate::opclass::compare_partial(&col, flat_key(mcx, &prefix), flat_key(mcx, &other), 0);
+    let stop = crate::opclass::compare_partial(&col, flat_key(mcx, &prefix), flat_key(mcx, &other), 0, ::datum::Datum::null());
     assert!(stop > 0);
     assert_eq!(
-        crate::opclass::compare_partial(&col, flat_key(mcx, &prefix), pglz_key(mcx, &other), 0),
+        crate::opclass::compare_partial(&col, flat_key(mcx, &prefix), pglz_key(mcx, &other), 0, ::datum::Datum::null()),
         stop
     );
 }
