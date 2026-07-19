@@ -12,6 +12,17 @@ const DIGIT_TABLE: &[u8; 200] = b"\
 
 pub const MAXINT8LEN: usize = 20;
 
+// C numutils.c's __func__ for the width. Client-keyed: pg8000's
+// error-field test pins F="numutils.c" and R in the pg_strtoint*_safe
+// family on integer-input errors (the errorMissingColumn precedent).
+fn strtoint_funcname(typname: &str) -> &'static str {
+    match typname {
+        "smallint" => "pg_strtoint16_safe",
+        "bigint" => "pg_strtoint64_safe",
+        _ => "pg_strtoint32_safe",
+    }
+}
+
 #[cold]
 #[inline(never)]
 fn invalid_syntax_err(input: &str, typname: &'static str) -> PgError {
@@ -19,6 +30,7 @@ fn invalid_syntax_err(input: &str, typname: &'static str) -> PgError {
         "invalid input syntax for type {typname}: \"{input}\""
     ))
     .with_sqlstate(ERRCODE_INVALID_TEXT_REPRESENTATION)
+    .with_location("numutils.c", 0, strtoint_funcname(typname))
 }
 
 #[cold]
@@ -28,6 +40,7 @@ fn out_of_range_err(input: &str, typname: &'static str) -> PgError {
         "value \"{input}\" is out of range for type {typname}"
     ))
     .with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
+    .with_location("numutils.c", 0, strtoint_funcname(typname))
 }
 
 fn is_space(byte: u8) -> bool {

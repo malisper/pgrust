@@ -190,6 +190,9 @@ pub fn errstart(elevel: ErrorLevel, domain: Option<&str>) -> bool {
         }
 
         let mut error = PgError::new(elevel, String::new());
+        // The C-shaped stack API takes its location from errfinish's
+        // arguments; drop the constructor's capture (it would point here).
+        error.location = None;
         // Save errno immediately so error parameter eval can't change it.
         error.saved_errno = Some(errno::current_errno());
         let domain = domain.unwrap_or("postgres");
