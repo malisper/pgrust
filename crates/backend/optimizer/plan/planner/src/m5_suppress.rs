@@ -671,6 +671,17 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             }
             return finish(run, CoverClass::CbTopnBoundedIntKeys, rte.relid, 0.0, rel_rows, rel_pages);
         }
+        // SE-SCANPASS (band 86001, se/scan-passthrough): the row-returning
+        // passthrough shape (bare filtered SELECT, no agg / group / top-N /
+        // DISTINCT) keeps its Gather — no `parallel_engine=runtime` arm
+        // emits rows (they all fold). Behind PGRUST_LANE_V2_SCANPASS
+        // (default OFF) this NAMES the refusal (§3.3 "no class routed by
+        // accident") instead of the silent generic fall-through, and is the
+        // seam a future row-emit arm engages from. INERT at default: OFF
+        // takes the identical `Ok(false)` below (byte-identical plan-time).
+        if scanpass_enabled() {
+            return classify_scanpass(parse, rti, is_cb, has_quals);
+        }
         return Ok(false);
     }
 
@@ -887,6 +898,70 @@ fn refuse_join(why: &str) -> PgResult<bool> {
     Ok(false)
 }
 
+/// SE-SCANPASS named-refusal diagnostics. Same discipline as `refuse_join`:
+/// the `m5-suppress-refuse:` prefix (NOT `m5-suppress:`, which the
+/// conformance leg's M5CENSUS counts as a SUPPRESSION), so naming a
+/// passthrough refusal never inflates the suppression count. Always returns
+/// None (keeps Gather). Reached only when `scanpass_enabled()` — knob-OFF
+/// never recognizes the shape, so the diagnostic is inert at default.
+fn refuse_scanpass(why: &str) -> PgResult<bool> {
+    if trace_armed() {
+        eprintln!("m5-suppress-refuse: scan-passthrough ({why})");
+    }
+    Ok(false)
+}
+
+/// The passthrough-shape recognizer (SE-SCANPASS, band 86001). Called ONLY
+/// under `scanpass_enabled()` for a single-relation `!hasAggs` SELECT that
+/// is neither the bounded-top-N shape (keyed above) nor DISTINCT. It NAMES
+/// the specific reason the shape is uncovered — one refusal per uncovered
+/// expr/shape class — and always returns None (Gather stands). Naming, not
+/// flipping: there is no `parallel_engine=runtime` row-emit arm, so every
+/// arm of this recognizer keeps Gather; the reasons are the endgame §3.3
+/// "no class routed by accident" surface and the future arm's admission
+/// gates in embryo.
+fn classify_scanpass(parse: &Query<'_>, rti: usize, is_cb: bool, has_quals: bool) -> PgResult<bool> {
+    // Heap rels: the incumbent per-row drive owns them
+    // (STANDALONE_SCAN_NO_UPSIDE — the row loop carries the identical
+    // kernels; lanev2.rs:867). Not this arm's estate even if it existed.
+    if !is_cb {
+        return refuse_scanpass("heap rel — incumbent row drive owns it (STANDALONE_SCAN_NO_UPSIDE)");
+    }
+    // Full sort with no LIMIT (the bounded shape was keyed above): the
+    // uncovered fullsort-shape-b row, owned by the sort-arm program.
+    if !parse.sortClause.is_nil() {
+        return refuse_scanpass("ordered passthrough (fullsort-shape-b) — sort-arm program owns it");
+    }
+    // Projection that is not a bare column reference: no vectorized
+    // projection kernel is wired on a row-returning passthrough (the future
+    // arm's covered-expr gate). Bare-Var tlists are the covered projection
+    // class (the cb-q20 `SELECT UserID ...` shape).
+    for tle_node in &parse.targetList {
+        let Some(tle) = tle_node.as_target_entry() else {
+            return refuse_scanpass("non-TargetEntry tlist");
+        };
+        if tle.resjunk {
+            continue;
+        }
+        if key_var(tle.expr, rti).is_none() {
+            return refuse_scanpass("projection expr not covered (bare-Var tlist only)");
+        }
+    }
+    // A bare filtered (or unfiltered) row-returning pgrcolumnar passthrough
+    // — the covered SHAPE (the cb-q20 class). Still refused: there is no
+    // `parallel_engine=runtime` row-emit boundary to hand the suppressed
+    // Gather to (every runtime arm folds). Owning enabler: the parallel
+    // row-emit-boundary subsystem (notes/se-scanpass.md §4). The serial
+    // lane executor (`pgrust.lane_executor`) already row-emits this exact
+    // shape through `try_own_seq_scan`'s admitted standalone-cbstore path —
+    // that is the World-A reuse, not a World-B Gather suppression.
+    if has_quals {
+        refuse_scanpass("bare filtered pgrcolumnar passthrough — no parallel row-emit arm (owning car: parallel-row-emit-boundary)")
+    } else {
+        refuse_scanpass("bare unfiltered pgrcolumnar passthrough — no parallel row-emit arm (owning car: parallel-row-emit-boundary)")
+    }
+}
+
 /// The join classifier's shared body (both FROM forms of row flip 2: one
 /// explicit JoinExpr, or the flat two-RangeTblRef FromExpr the planner
 /// carries for INNER joins — `a JOIN b ON q` == `a, b WHERE q` by probe
@@ -1099,6 +1174,34 @@ fn multibuild_enabled() -> bool {
     *ON.get_or_init(|| {
         std::env::var("PGRUST_RUNTIME_HASHJOIN_MULTIBUILD").map_or(true, |v| v.trim() != "0")
     })
+}
+
+/// SE-SCANPASS (band 86001, branch se/scan-passthrough): the passthrough
+/// lane knob, `PGRUST_LANE_V2_SCANPASS`, **default OFF** (the K1-latemat
+/// idiom, batch_source.rs:152 — any spelling but `1`/`on` fails safe to
+/// today's behaviour). Default OFF because there is no covered arm to hand a
+/// suppressed passthrough Gather to: every `parallel_engine=runtime` arm
+/// FOLDS to a small result, so a row-RETURNING parallel scan has no emit
+/// boundary today (the census `gap:scan-passthrough` row; notes/se-scanpass.md
+/// §2). When OFF the probe never even recognizes the shape — it hits the
+/// generic `return Ok(false)` exactly as before, so the plan-time bytes,
+/// the census, and every regress leg are byte-identical. When ON the probe
+/// RECOGNIZES the passthrough shape and emits a NAMED refusal
+/// (`classify_scanpass`) instead of the silent fall-through — the §3.3
+/// endgame "no class routed by accident" surface and the seam a future
+/// row-emit arm engages from. It still returns None (keeps Gather): naming
+/// a refusal is not the same as flipping route_to (that needs the arm + a
+/// measured win — see notes/se-scanpass.md §4).
+fn scanpass_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| scanpass_spelling_on(std::env::var("PGRUST_LANE_V2_SCANPASS").as_deref().ok()))
+}
+
+/// The default-OFF spelling rule, factored pure for exhaustive unit tests:
+/// ON iff the value is exactly `1` or `on`; every other spelling (incl.
+/// unset, `0`, `off`, typos) fails safe to OFF.
+fn scanpass_spelling_on(v: Option<&str>) -> bool {
+    matches!(v, Some("1") | Some("on"))
 }
 
 fn classify_multibuild<'mcx>(
@@ -1848,6 +1951,44 @@ fn tle_by_sortgroupref<'mcx>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SE-SCANPASS knob (band 86001): `PGRUST_LANE_V2_SCANPASS` is default
+    /// OFF and only `1`/`on` arm it — every other spelling fails safe to
+    /// today's behaviour (the K1-latemat idiom). This pins the default-OFF
+    /// guarantee that makes the change inert at default.
+    #[test]
+    fn scanpass_knob_is_default_off() {
+        assert!(!scanpass_spelling_on(None), "unset must be OFF (default)");
+        assert!(!scanpass_spelling_on(Some("0")));
+        assert!(!scanpass_spelling_on(Some("off")));
+        assert!(!scanpass_spelling_on(Some("")));
+        assert!(!scanpass_spelling_on(Some("true")), "typos fail safe to OFF");
+        assert!(!scanpass_spelling_on(Some("ON")), "case-sensitive, like the arm knobs");
+        assert!(scanpass_spelling_on(Some("1")));
+        assert!(scanpass_spelling_on(Some("on")));
+        // The live getter memoizes the process env; in the test binary the
+        // var is unset, so it resolves OFF — the default-OFF invariant.
+        assert!(!scanpass_enabled(), "test process has no knob set => OFF");
+    }
+
+    /// Naming a passthrough refusal is NEVER a suppression: every arm of the
+    /// recognizer keeps Gather (returns None). Pins the "naming != flipping
+    /// route_to" contract — a suppression without a covered arm would land
+    /// on serial (risk P1's false-positive direction).
+    #[test]
+    fn scanpass_refusals_keep_gather() {
+        assert_eq!(refuse_scanpass("x").unwrap(), false);
+        // Both filtered and unfiltered pgrcolumnar passthrough refuse; heap
+        // and non-Var-projection refuse. Every reason path returns None.
+        for why in [
+            "heap rel",
+            "ordered passthrough",
+            "projection expr not covered",
+            "bare filtered pgrcolumnar passthrough",
+        ] {
+            assert_eq!(refuse_scanpass(why).unwrap(), false);
+        }
+    }
 
     /// The living-matrix discipline (§4.1, reconciled at m5-integration):
     /// the routing table the probe consults and the ONE checked-in living
