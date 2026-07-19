@@ -236,6 +236,7 @@ fs	crates/backend/replication/walreceiver/src/client.rs	1	DST-REVIEW(t27-train):
 fs	crates/backend/replication/walreceiver/src/lib.rs	3	DST-REVIEW(t27-train): t27-train merge reconciliation — site landed in the t26 recovery/metalfix re-board (post-dates the DST census seed @ 3fee87ff0); routing onto the fd/vfd Vfs choke (s2.1) chartered to the DST program (t28)
 fs	crates/backend/replication/walsender/src/streaming.rs	1	DST-REVIEW(t27-train): t27-train merge reconciliation — site landed in the t26 recovery/metalfix re-board (post-dates the DST census seed @ 3fee87ff0); routing onto the fd/vfd Vfs choke (s2.1) chartered to the DST program (t28)
 fs	crates/backend/libpq/auth/src/lib.rs	1	DST-REVIEW(t30-train): auth-cert-peer-reload car — libc::close in the ident_inet (RFC 1413) probe-socket fd guard Drop; socket lifecycle, not file IO — sim-net absorbs when auth probes are simulated
+fs	crates/backend/executor/execmain/src/lanev2/census.rs	2	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
 
 # ==== time ====
 time	crates/backend/access/common/tidstore/bench/rig/src/main.rs	7	BENCH-RIG: bench-rig crate, not server prod
@@ -312,19 +313,19 @@ env	crates/backend/executor/execexpr/src/compile.rs	1
 env	crates/backend/executor/execexpr/src/jit.rs	2
 env	crates/backend/executor/execmain/src/execmain.rs	2	DST-REVIEW(t27-train): budget 1->2 — spi-compile-residual car (PROCPERF P2) PGRUST_* knob gate landed post-census; routing onto the knobs registry (s2.5) chartered to the DST program (t28)
 env	crates/backend/executor/execmain/src/execparallel.rs	3
-env	crates/backend/executor/execmain/src/lanev2.rs	30
+env	crates/backend/executor/execmain/src/lanev2.rs	34	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
 env	crates/backend/executor/execmain/src/lanev2/exprkey.rs	6
 env	crates/backend/executor/execmain/src/lanev2/runtime_agg.rs	29
 env	crates/backend/executor/execmain/src/lanev2/runtime_agg_sorted.rs	2
 env	crates/backend/executor/execmain/src/lanev2/runtime_bitmap.rs	3
 env	crates/backend/executor/execmain/src/lanev2/runtime_distinct.rs	7
-env	crates/backend/executor/execmain/src/lanev2/runtime_hashjoin.rs	5
+env	crates/backend/executor/execmain/src/lanev2/runtime_hashjoin.rs	9	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
 env	crates/backend/executor/execmain/src/lanev2/runtime_plaindistinct.rs	1
-env	crates/backend/executor/execmain/src/lanev2/runtime_scan.rs	10
+env	crates/backend/executor/execmain/src/lanev2/runtime_scan.rs	13	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
 env	crates/backend/executor/execmain/src/lanev2/runtime_sort.rs	3
-env	crates/backend/executor/execmain/src/lanev2/stats.rs	1
+env	crates/backend/executor/execmain/src/lanev2/stats.rs	2	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
 env	crates/backend/executor/laneexec/src/dicteval.rs	1
-env	crates/backend/executor/lanestitch/src/lib.rs	1
+env	crates/backend/executor/lanestitch/src/lib.rs	2	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
 env	crates/backend/executor/lanestitch/src/stitch.rs	2
 env	crates/backend/executor/lanetable/src/lib.rs	2
 env	crates/backend/executor/nodeagg/src/codedgroup.rs	3
@@ -337,15 +338,15 @@ env	crates/backend/executor/nodeagg/src/pardistinct.rs	4
 env	crates/backend/executor/nodeagg/src/sink.rs	4
 env	crates/backend/executor/nodeagg/src/spankey.rs	2
 env	crates/backend/executor/nodeseqscan/src/lib.rs	5
-env	crates/backend/executor/runtime/src/lib.rs	3
-env	crates/backend/executor/runtime/src/sched.rs	11
+env	crates/backend/executor/runtime/src/lib.rs	4	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
+env	crates/backend/executor/runtime/src/sched.rs	12	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
 env	crates/backend/executor/runtime/src/sizing.rs	1
 env	crates/backend/executor/tqueue/src/lib.rs	1
 env	crates/backend/libpq/auth_scram/src/lib.rs	1
 env	crates/backend/main/main_main/src/bin/postgres.rs	2	DST-REVIEW(t29-driver): FPBUDGET-1 debug-only alloc-track gates (PGRUST_MCXT_CENSUS / PGRUST_ALLOC_TRACK), debug_assertions-only default-OFF diagnostics; knobs-registry charter absorbs (s2.5)
 env	crates/backend/main/main_main/src/lib.rs	2	DST-REVIEW(p4-simnet): +1 = wasm/p5-boot USER fallback probe (wasm has no uids); knobs-registry charter absorbs it (s2.5)
 env	crates/backend/optimizer/path/costsize/src/gucs.rs	3
-env	crates/backend/optimizer/plan/planner/src/m5_suppress.rs	3
+env	crates/backend/optimizer/plan/planner/src/m5_suppress.rs	5	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
 env	crates/backend/optimizer/plan/planner/src/selfuncs.rs	1
 env	crates/backend/optimizer/plan/planner/src/syscache_memo.rs	1
 env	crates/backend/postmaster/autovacuum/src/launcher.rs	1
@@ -477,21 +478,21 @@ once	crates/backend/catalog/pg_constraint/src/lib.rs	1
 once	crates/backend/commands/copy/src/parallel.rs	15
 once	crates/backend/executor/execexpr/src/jit.rs	3
 once	crates/backend/executor/execmain/src/execmain.rs	2	DST-REVIEW(t27-train): budget 1->2 — spi-compile-residual car (PROCPERF P2) OnceLock knob memo landed post-census; P3 row-19 once-ledger classification chartered to the DST program (t28)
-once	crates/backend/executor/execmain/src/lanev2.rs	30	P3 row 19: lanev2 runtime knobs (design-cited class)
+once	crates/backend/executor/execmain/src/lanev2.rs	32	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
 once	crates/backend/executor/execmain/src/lanev2/exprkey.rs	6
 once	crates/backend/executor/execmain/src/lanev2/router.rs	1
 once	crates/backend/executor/execmain/src/lanev2/runtime_agg_sorted.rs	3
 once	crates/backend/executor/execmain/src/lanev2/runtime_agg.rs	30	P3 row 19: lanev2 runtime knobs (design-cited class)
 once	crates/backend/executor/execmain/src/lanev2/runtime_bitmap.rs	3
 once	crates/backend/executor/execmain/src/lanev2/runtime_distinct.rs	8
-once	crates/backend/executor/execmain/src/lanev2/runtime_hashjoin.rs	6
+once	crates/backend/executor/execmain/src/lanev2/runtime_hashjoin.rs	9	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
 once	crates/backend/executor/execmain/src/lanev2/runtime_plaindistinct.rs	2
-once	crates/backend/executor/execmain/src/lanev2/runtime_scan.rs	10
+once	crates/backend/executor/execmain/src/lanev2/runtime_scan.rs	13	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
 once	crates/backend/executor/execmain/src/lanev2/runtime_sort.rs	5
-once	crates/backend/executor/execmain/src/lanev2/stats.rs	1
+once	crates/backend/executor/execmain/src/lanev2/stats.rs	3	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
 once	crates/backend/executor/instrument/src/lib.rs	1
 once	crates/backend/executor/laneexec/src/dicteval.rs	1
-once	crates/backend/executor/lanestitch/src/lib.rs	1
+once	crates/backend/executor/lanestitch/src/lib.rs	2	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
 once	crates/backend/executor/lanestitch/src/stitch.rs	1
 once	crates/backend/executor/lanetable/src/lib.rs	3
 once	crates/backend/executor/nodeagg/src/codedgroup.rs	3
@@ -505,12 +506,12 @@ once	crates/backend/executor/nodeagg/src/sink.rs	4
 once	crates/backend/executor/nodeagg/src/spankey.rs	2
 once	crates/backend/executor/nodeseqscan/src/lib.rs	5
 once	crates/backend/executor/runtime/src/io.rs	1
-once	crates/backend/executor/runtime/src/lib.rs	2
-once	crates/backend/executor/runtime/src/sched.rs	11
+once	crates/backend/executor/runtime/src/lib.rs	3	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
+once	crates/backend/executor/runtime/src/sched.rs	12	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
 once	crates/backend/executor/runtime/src/sizing.rs	1
 once	crates/backend/lib/dshash/bench/rig/src/main.rs	1
 once	crates/backend/optimizer/path/costsize/src/gucs.rs	3
-once	crates/backend/optimizer/plan/planner/src/m5_suppress.rs	3
+once	crates/backend/optimizer/plan/planner/src/m5_suppress.rs	5	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
 once	crates/backend/optimizer/plan/planner/src/selfuncs.rs	1
 once	crates/backend/optimizer/plan/planner/src/syscache_memo.rs	3
 once	crates/backend/postmaster/autovacuum/src/shmem.rs	1
@@ -623,7 +624,7 @@ rawsync	crates/backend/executor/execmain/src/lanev2/runtime_sort.rs	1
 rawsync	crates/backend/executor/execmain/src/lanev2/stats.rs	1
 rawsync	crates/backend/executor/instrument/src/lib.rs	1
 rawsync	crates/backend/executor/laneexec/src/dicteval.rs	1
-rawsync	crates/backend/executor/lanestitch/src/lib.rs	1
+rawsync	crates/backend/executor/lanestitch/src/lib.rs	2	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
 rawsync	crates/backend/executor/lanestitch/src/stitch.rs	1
 rawsync	crates/backend/executor/lanetable/src/lib.rs	3
 rawsync	crates/backend/executor/nodeagg/src/codedgroup.rs	3
@@ -647,7 +648,7 @@ rawsync	crates/backend/main/main_main/src/bin/postgres.rs	1	DST-REVIEW(t29-drive
 rawsync	crates/backend/nodes/tidbitmap/src/lib.rs	1
 rawsync	crates/backend/optimizer/path/costsize/src/gucs.rs	3
 rawsync	crates/backend/optimizer/plan/planner/src/fdwplan.rs	1
-rawsync	crates/backend/optimizer/plan/planner/src/m5_suppress.rs	3
+rawsync	crates/backend/optimizer/plan/planner/src/m5_suppress.rs	5	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
 rawsync	crates/backend/optimizer/plan/planner/src/selfuncs.rs	1
 rawsync	crates/backend/optimizer/plan/planner/src/syscache_memo.rs	3
 rawsync	crates/backend/port/pg_sema/src/lib.rs	1
@@ -736,8 +737,15 @@ env	crates/_support/pgsync/src/sim/config.rs	7	DST-REVIEW(ws-core): the schedule
 once	crates/_support/pgsync/src/sim/config.rs	7	DST-REVIEW(ws-core): knob-read OnceLocks — pure env-read closures (P3 row-19 benign class), one per knob (permit-s2 adds the 3 PCT knob cells)
 once	crates/_support/pgsync/src/sim/sched.rs	1	DST-REVIEW(ws-core): the ONE global-scheduler init (seed fill + watchdog start + hooks install); runs on first spawn-door touch, before any governed thread exists — cannot wedge a permit holder
 once	crates/_support/pgsync/src/sim/watchdog.rs	1	DST-REVIEW(ws-core): wall-epoch Instant OnceLock (pure closure); watchdog-only
+once	crates/backend/executor/execmain/src/lanev2/batch_source.rs	3	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
+once	crates/backend/executor/execmain/src/lanev2/census.rs	2	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
+once	crates/backend/executor/execmain/src/lanev2/dml.rs	1	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
+once	crates/backend/executor/execmain/src/lanev2/indexsource.rs	1	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
+once	crates/backend/executor/execmain/src/nodegather.rs	1	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
+once	crates/backend/executor/runtime/src/ledger.rs	1	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
 spawn	crates/_support/pgsync/src/sim/watchdog.rs	1	DST-REVIEW(ws-core): THE watchdog monitor thread — deliberately UNREGISTERED and outside the spawn door (it must observe a wedged schedule from outside the model); design s4
 time	crates/_support/pgsync/src/sim/watchdog.rs	3	DST-REVIEW(ws-core): heartbeat wall stamps + stall arithmetic (std Instant) — the watchdog measures WALL stalls of the virtualized world by definition; never logged into SCHEDOP lines
+time	crates/backend/executor/lanestitch/src/rowchain.rs	2	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
 # ================== end PERMIT-S1-CORE ==================
 # PERMIT-S1-DEMO — WS-DEMO corpus/harness rows (contract notes/permit-s1-demo.md
 # band discipline). All sim-harness domain: both files sit behind
@@ -750,6 +758,27 @@ join	crates/backend/tcop/postgres/src/sim_net.rs	3	DST-REVIEW(simcorpus): sessio
 spawn	crates/backend/tcop/postgres/src/sim_net.rs	1	DST-REVIEW(permit-s1-demo, hand-back DISCHARGED at compose): session-2 spawns via the pgsync::thread child-registering door (scanner sees the textual thread::Builder, not the pgsync routing) — annotation refreshed at permit-s5
 blocking	crates/backend/tcop/postgres/src/sim_sched_demo.rs	7	DST-REVIEW(permit-s1-demo): P4 red fixture cv-wait pair + fallback timer sleep — the INTENTIONALLY unshimmed watchdog-red corpus; red-battery discipline, never converts. +2 DST-REVIEW(permit-s2): the wpool demo's pgsync::thread::sleep rendezvous + drain poll — HOOKED TimedParks (scanner sees the textual sleep, not the pgsync routing). +2 DST-REVIEW(permit-s5): the rtpool demo's rendezvous + drain poll, same HOOKED TimedPark class
 rawsync	crates/backend/tcop/postgres/src/sim_sched_demo.rs	1	DST-REVIEW(permit-s1-compose): THE P4 red fixture's raw std::sync::Mutex — the rawness IS the fixture (watchdog must catch it); never migrates to pgsync. The PLANT/gate ops flipped to pgsync at compose (the file's designed wiring point)
+rawsync	crates/backend/executor/execmain/src/lanev2/batch_source.rs	1	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
+rawsync	crates/backend/executor/execmain/src/lanev2/census.rs	1	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
+rawsync	crates/backend/executor/execmain/src/lanev2/dml.rs	5	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
+rawsync	crates/backend/executor/execmain/src/lanev2/indexsource.rs	1	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
+rawsync	crates/backend/executor/execmain/src/nodegather.rs	1	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
+rawsync	crates/backend/executor/runtime/src/ledger.rs	1	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
+rawsync	crates/backend/executor/runtime/src/lib.rs	1	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
+rawsync	crates/backend/executor/runtime/src/sched.rs	1	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
 env	crates/backend/tcop/postgres/src/sim_sched_demo.rs	3	DST-REVIEW(permit-s1-demo): corpus knobs PGRUST_PERMIT_PLANT/RED/RED_FALLBACK_S, sim-harness domain (sim_net.rs knob precedent)
+env	crates/backend/executor/execmain/src/lanev2/batch_source.rs	5	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
+env	crates/backend/executor/execmain/src/lanev2/census.rs	2	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
+env	crates/backend/executor/execmain/src/lanev2/dml.rs	4	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
+env	crates/backend/executor/execmain/src/lanev2/express.rs	1	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
+env	crates/backend/executor/execmain/src/lanev2/indexsource.rs	3	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
+env	crates/backend/executor/execmain/src/lanev2/lane_mergejoin.rs	1	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
+env	crates/backend/executor/execmain/src/lanev2/push.rs	2	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
+env	crates/backend/executor/execmain/src/lanev2/rowmode.rs	2	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
+env	crates/backend/executor/execmain/src/lanev2/tail_source.rs	2	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
+env	crates/backend/executor/execmain/src/lanev2/windows.rs	3	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
+env	crates/backend/executor/execmain/src/nodegather.rs	1	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
+env	crates/backend/executor/execmain/src/procnode.rs	1	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
+env	crates/backend/executor/runtime/src/ledger.rs	1	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
 join	crates/backend/tcop/postgres/src/sim_sched_demo.rs	1	DST-REVIEW(permit-s1-demo): plant thread joins (bounded: fixed iteration count, no run token); flips to pgsync join with the plant
 spawn	crates/backend/tcop/postgres/src/sim_sched_demo.rs	3	DST-REVIEW(permit-s1-demo): plant pair + red holder + red fallback-timer spawns (no-boot corpora; the fallback timer is outside the model BY DESIGN, the watchdog's own pattern)
