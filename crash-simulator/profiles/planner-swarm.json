@@ -1,0 +1,78 @@
+{
+  "name": "planner-swarm",
+  "connections": 1,
+  "iso_mix": {
+    "read-committed": 80,
+    "repeatable-read": 15,
+    "serializable": 5
+  },
+  "statement_weights": {
+    "ddl": 10,
+    "dml": 26,
+    "query": 32,
+    "tx": 6,
+    "arm": 14,
+    "fault": 1,
+    "property": 11
+  },
+  "table_shape": {
+    "tables_min": 1,
+    "tables_max": 3,
+    "cols_min": 3,
+    "cols_max": 3,
+    "rows_max": 2000
+  },
+  "arm_sets": [
+    [
+      "parallel_setup_cost=0",
+      "parallel_tuple_cost=0",
+      "min_parallel_table_scan_size=0",
+      "max_parallel_workers_per_gather=2"
+    ],
+    []
+  ],
+  "planner_knobs": {
+    "sets_per_seed": 2,
+    "off_percent": 45,
+    "knobs": [
+      "enable_seqscan",
+      "enable_indexscan",
+      "enable_indexonlyscan",
+      "enable_bitmapscan",
+      "enable_hashjoin",
+      "enable_mergejoin",
+      "enable_nestloop",
+      "enable_hashagg",
+      "enable_sort",
+      "enable_incremental_sort",
+      "enable_material",
+      "enable_memoize",
+      "enable_gathermerge"
+    ],
+    "parallel_percent": 35
+  },
+  "property_weights": {
+    "F1-InsertSelect": 2,
+    "F2-UpdateVisibility": 1,
+    "F3-DeleteAbsence": 1,
+    "F4-ConstraintError": 1,
+    "F5-DdlEffects": 1,
+    "F6-AggConsistency": 2,
+    "F7-MemoryBaseline": 1,
+    "F8-ResourceBaseline": 1,
+    "L1-Tlp": 2,
+    "L2-NoRec": 2,
+    "X1-ArmEquivalence": 4,
+    "X2-IndexInvariance": 1,
+    "X4-StatementForm": 1,
+    "M1-ReadYourWrites": 2
+  },
+  "kill_switches": [],
+  "float_lenient": false,
+  "engagement_floors": {},
+  "background_policy": {
+    "autovacuum": "off"
+  },
+  "steps_min": 32,
+  "steps_max": 80
+}

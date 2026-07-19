@@ -79,6 +79,9 @@ transam_xlog = { path = "../../access/transam/transam_xlog" }
 transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
 pmchild_seams = { path = "../../postmaster/pmchild_seams" }
 postmaster_seams = { path = "../../postmaster/postmaster_seams" }
+# SIM-HARNESS-CONVERGE: session-local InitSync for the no-checkpointer
+# corpus topology (sim_net.rs, cfg(pgrust_sim)-only use).
+sync_seams = { path = "../../storage/sync/sync_seams" }
 timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
 stack_depth = { path = "../../utils/misc/stack_depth" }
 fd = { path = "../../storage/file/fd" }
