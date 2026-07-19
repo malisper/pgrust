@@ -1879,9 +1879,42 @@ pub fn amcostestimate(
         types_relscan::IndexAmKind::Spgist => spgcostestimate(run, path_id, loop_count),
         types_relscan::IndexAmKind::Brin => brincostestimate(run, path_id, loop_count),
         types_relscan::IndexAmKind::Hnsw => hnswcostestimate(run, path_id, loop_count),
+        types_relscan::IndexAmKind::Bloom => blcostestimate(run, path_id, loop_count),
         #[allow(unreachable_patterns)]
         other => panic!("amcostestimate (selfuncs.c): {other:?}; M2 index-AM lane"),
     }
+}
+
+// blcostestimate (contrib/bloom blcost.c): every index tuple is visited, so
+// numIndexTuples = index->tuples; the rest is the generic estimate.
+fn blcostestimate(
+    run: &mut PlannerRun<'_>,
+    path_id: types_pathnodes::PathId,
+    loop_count: f64,
+) -> PgResult<AmCostEstimate> {
+    let index_tuples = {
+        let PathNode::IndexPath(ip) = run.root.path(path_id) else {
+            panic!("blcostestimate: not an IndexPath")
+        };
+        ip.indexinfo.as_ref().expect("indexinfo set").tuples
+    };
+    let mut costs = GenericCosts {
+        num_index_tuples: index_tuples,
+        num_sa_scans: 1.0,
+        index_startup_cost: 0.0,
+        index_total_cost: 0.0,
+        index_selectivity: 0.0,
+        index_correlation: 0.0,
+        num_index_pages: 0.0,
+    };
+    genericcostestimate(run, path_id, loop_count, &mut costs)?;
+    Ok(AmCostEstimate {
+        index_startup_cost: costs.index_startup_cost,
+        index_total_cost: costs.index_total_cost,
+        index_selectivity: costs.index_selectivity,
+        index_correlation: costs.index_correlation,
+        index_pages: costs.num_index_pages,
+    })
 }
 
 // hnswcostestimate (pgvector hnsw.c).

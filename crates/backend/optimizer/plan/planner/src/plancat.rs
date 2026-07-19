@@ -136,6 +136,7 @@ pub fn get_relation_info<'mcx>(
             let am_is_brin = am_kind == types_relscan::IndexAmKind::Brin;
             let am_is_spgist = am_kind == types_relscan::IndexAmKind::Spgist;
             let am_is_hnsw = am_kind == types_relscan::IndexAmKind::Hnsw;
+            let am_is_bloom = am_kind == types_relscan::IndexAmKind::Bloom;
             let ncolumns = ind.indnatts as i32;
             let nkeycolumns = ind.indnkeyatts as i32;
             let mut info = IndexOptInfo::new(mcx);
@@ -176,11 +177,12 @@ pub fn get_relation_info<'mcx>(
                     || am_is_gist
                     || am_is_spgist
                     || am_is_brin
-                    || am_is_hnsw;
+                    || am_is_hnsw
+                    || am_is_bloom;
                 info.amsearcharray = am_is_btree;
                 info.amsearchnulls = am_is_btree || am_is_gist || am_is_spgist || am_is_brin;
                 info.amcanparallel = am_is_btree;
-                info.amhasgettuple = !am_is_gin && !am_is_brin;
+                info.amhasgettuple = !am_is_gin && !am_is_brin && !am_is_bloom;
                 info.amhasgetbitmap = !am_is_hnsw;
                 info.amcanmarkpos = am_is_btree;
 

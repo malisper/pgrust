@@ -307,6 +307,8 @@ fn index_am_flags(kind: types_relscan::IndexAmKind) -> (bool, bool, bool, bool) 
         Gist => (false, false, true, true),
         Spgist => (false, false, false, true),
         Brin => (false, false, true, false),
+        // contrib/bloom blhandler: multicolumn only.
+        Bloom => (false, false, true, false),
         #[allow(unreachable_patterns)]
         _ => (false, false, false, false),
     }
@@ -477,7 +479,12 @@ pub fn DefineIndex<'mcx>(
     }
     // C: exclusion requires amRoutine->amgettuple (gin and brin lack it).
     if exclusion
-        && matches!(am.kind, types_relscan::IndexAmKind::Gin | types_relscan::IndexAmKind::Brin)
+        && matches!(
+            am.kind,
+            types_relscan::IndexAmKind::Gin
+                | types_relscan::IndexAmKind::Brin
+                | types_relscan::IndexAmKind::Bloom
+        )
     {
         return Err(err(
             format!("access method \"{amname}\" does not support exclusion constraints"),

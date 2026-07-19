@@ -523,6 +523,13 @@ fn put_options(buf: &mut Buf<'_>, o: &Option<RdOptions>) {
             put_i32(buf, o.m);
             put_i32(buf, o.ef_construction);
         }
+        Some(RdOptions::Bloom(o)) => {
+            put_u8(buf, 11);
+            put_i32(buf, o.bloom_length);
+            for b in o.bit_size.iter() {
+                put_i32(buf, *b);
+            }
+        }
     }
 }
 
@@ -623,6 +630,17 @@ fn parse_options(rd: &mut Rd<'_>) -> Option<Option<RdOptions>> {
             m: rd.i32()?,
             ef_construction: rd.i32()?,
         }))),
+        11 => {
+            let bloom_length = rd.i32()?;
+            let mut bit_size = [0i32; 32];
+            for b in bit_size.iter_mut() {
+                *b = rd.i32()?;
+            }
+            Some(Some(RdOptions::Bloom(types_rel::reloptions::BloomOptions {
+                bloom_length,
+                bit_size,
+            })))
+        }
         _ => None,
     }
 }

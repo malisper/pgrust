@@ -1318,6 +1318,7 @@ dependencies = [
 name = "amapi"
 version = "0.1.0"
 dependencies = [
+ "bloom",
  "brin_validate",
  "cache_syscache",
  "catcache",
@@ -2167,6 +2168,58 @@ dependencies = [
 ]
 
 [[package]]
+name = "bloom"
+version = "0.0.0"
+dependencies = [
+ "adt_regproc",
+ "bufmgr",
+ "bufmgr_seams",
+ "datum",
+ "dfmgr",
+ "elog",
+ "fmgr_core",
+ "fmgr_seams",
+ "freespace",
+ "generic_xlog",
+ "index_amvalidate",
+ "init_small",
+ "lsyscache",
+ "mcx",
+ "nbtree",
+ "postgres_seams",
+ "syscache_seams",
+ "tidbitmap",
+ "types_bloom",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nbtree",
+ "types_rel",
+ "types_relscan",
+ "types_scan",
+ "types_storage",
+ "types_tuple",
+ "vacuum_seams",
+ "xact",
+]
+
+[[package]]
+name = "bloom_build"
+version = "0.0.0"
+dependencies = [
+ "bloom",
+ "bufmgr",
+ "execindexing",
+ "generic_xlog",
+ "mcx",
+ "postgres_seams",
+ "types_bloom",
+ "types_core",
+ "types_error",
+ "types_rel",
+]
+
+[[package]]
 name = "bloomfilter"
 version = "0.1.0"
 dependencies = [
@@ -2743,6 +2796,7 @@ name = "catalog_index"
 version = "0.1.0"
 dependencies = [
  "autovacuum_seams",
+ "bloom_build",
  "brin_build",
  "bufmgr",
  "cache_syscache",
@@ -7472,6 +7526,7 @@ dependencies = [
 name = "indexam"
 version = "0.1.0"
 dependencies = [
+ "bloom",
  "brin",
  "bufmgr",
  "datum",
@@ -15270,6 +15325,7 @@ dependencies = [
  "be_secure",
  "bgworker",
  "bgwriter",
+ "bloom",
  "brin_bloom",
  "brin_build",
  "brin_funcs",
@@ -18480,6 +18536,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "types_bloom"
+version = "0.1.0"
+dependencies = [
+ "types_core",
+ "types_fmgr",
+]
+
+[[package]]
 name = "types_brin"
 version = "0.1.0"
 dependencies = [
@@ -18614,6 +18678,7 @@ name = "types_rel"
 version = "0.1.0"
 dependencies = [
  "mcx",
+ "types_bloom",
  "types_core",
  "types_error",
  "types_fmgr",
@@ -18635,6 +18700,7 @@ dependencies = [
  "pgsync",
  "snapmgr",
  "tableam",
+ "types_bloom",
  "types_brin",
  "types_core",
  "types_error",

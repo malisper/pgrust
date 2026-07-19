@@ -198,6 +198,7 @@ pub fn init_all_with_transport(transport: Transport) {
     auto_explain::init_seams();
     pgvector::init_seams();
     pgvector_hnsw::init_seams();
+    bloom::init_seams();
     hstore::init_seams();
     pg_trgm::init_seams();
     btree_gist::init_seams();
