@@ -214,6 +214,7 @@ pub fn init_all_with_transport(transport: Transport) {
     pageinspect::init_seams();
     pgstattuple::init_seams();
     pg_freespacemap::init_seams();
+    amcheck::init_seams();
     session::init_seams();
     relpath::init_seams();
     rewrite_handler::init_seams();

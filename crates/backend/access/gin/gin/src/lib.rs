@@ -67,6 +67,21 @@ pub mod sim_rig {
     }
 }
 
+/// Surface for contrib/amcheck's verify_gin.c (gin_index_check). Read-only
+/// entry/posting-tree internals reachable under a share lock; no bodies added.
+pub mod amcheck {
+    pub use crate::datapage::{
+        data_page_right_bound, gin_data_leaf_page_get_items, posting_item_at,
+    };
+    pub use crate::entrypage::{
+        gin_get_downlink, gin_get_nposting, gin_get_posting_offset, gin_get_posting_tree,
+        gin_is_posting_tree, gin_itup_is_compressed, gintuple_get_attrnum, gintuple_get_key, ITup,
+    };
+    pub use crate::postinglist::{ginPostingListDecodeAllSegments, seg_size};
+    pub use crate::util::{ginCompareAttEntries, ginCompareEntries};
+    pub use crate::{opaque_of, page_bytes};
+}
+
 #[cold]
 #[inline(never)]
 pub(crate) fn unported(what: &str) -> ! {
@@ -127,7 +142,7 @@ const OPAQUE_OFF: usize = BLCKSZ - SIZEOF_OPAQUE;
 // GIN page opaque accessors work over raw images too (temp pages, redo).
 
 #[inline]
-pub(crate) fn opaque_of(bytes: &[u8]) -> GinPageOpaqueData {
+pub fn opaque_of(bytes: &[u8]) -> GinPageOpaqueData {
     debug_assert!(bytes.len() == BLCKSZ);
     // SAFETY: in-bounds 4-aligned special area of a BLCKSZ page image.
     unsafe { bytes.as_ptr().add(OPAQUE_OFF).cast::<GinPageOpaqueData>().read() }
@@ -167,7 +182,7 @@ pub(crate) fn write_opaque(page: &mut PageMut<'_>, opaque: &GinPageOpaqueData) {
 }
 
 #[inline]
-pub(crate) fn page_bytes<'p>(page: &PageRef<'p>) -> &'p [u8] {
+pub fn page_bytes<'p>(page: &PageRef<'p>) -> &'p [u8] {
     // SAFETY: a page is a BLCKSZ image; lifetime rides the PageRef contract.
     unsafe { core::slice::from_raw_parts(page.as_ptr(), BLCKSZ) }
 }

@@ -368,3 +368,13 @@ pub mod bench_internals {
     pub use crate::page::{bt_relbuf, page_item, page_opaque};
     pub use crate::search::{bt_binsrch, bt_compare, bt_search, order_procinfo};
 }
+
+/// Internals reachable only by contrib/amcheck's verifier (verify_nbtree.c),
+/// which reads local page copies and re-searches the live tree.
+pub mod amcheck {
+    pub use crate::fcframe::OrderProcFrame;
+    pub use crate::insert::bt_rootdescend;
+    pub use crate::page::{bt_checkpage_ref, page_item, page_meta, page_opaque};
+    pub use crate::search::bt_compare;
+    pub use crate::utils::{bt_allequalimage, bt_check_natts};
+}

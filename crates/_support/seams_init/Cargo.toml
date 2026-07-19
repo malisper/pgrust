@@ -321,6 +321,7 @@ tcn = { path = "../../contrib/tcn" }
 pageinspect = { path = "../../contrib/pageinspect" }
 pgstattuple = { path = "../../contrib/pgstattuple" }
 pg_freespacemap = { path = "../../contrib/pg_freespacemap" }
+amcheck = { path = "../../contrib/amcheck" }
 adt_formatting = { path = "../../backend/utils/adt/formatting" }
 session = { path = "../../backend/access/session" }
 relpath = { path = "../../common/relpath" }

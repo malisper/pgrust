@@ -30,7 +30,7 @@ const MinTuplesPerSegment: usize = (GinPostingListSegmentMaxSize - 2) / 6;
 
 
 #[inline]
-pub(crate) fn data_page_right_bound(bytes: &[u8]) -> ItemPointerData {
+pub fn data_page_right_bound(bytes: &[u8]) -> ItemPointerData {
     // SAFETY: right bound at PageGetContents (offset 24) of a BLCKSZ image.
     unsafe { bytes.as_ptr().add(24).cast::<ItemPointerData>().read_unaligned() }
 }
@@ -67,7 +67,7 @@ pub(crate) fn set_data_page_data_size(bytes: &mut [u8], size: usize) {
 }
 
 #[inline]
-pub(crate) fn posting_item_at(bytes: &[u8], off: OffsetNumber) -> PostingItem {
+pub fn posting_item_at(bytes: &[u8], off: OffsetNumber) -> PostingItem {
     let p = GinDataPageDataOffset + (off as usize - 1) * 10;
     // SAFETY: PostingItem is 10-byte POD within the image (caller bounds).
     unsafe { bytes.as_ptr().add(p).cast::<PostingItem>().read_unaligned() }
@@ -135,7 +135,7 @@ pub(crate) fn gin_page_delete_posting_item(bytes: &mut [u8], offset: OffsetNumbe
 }
 
 /// GinDataLeafPageGetItems: append page TIDs (segments past advancePast).
-pub(crate) fn gin_data_leaf_page_get_items(
+pub fn gin_data_leaf_page_get_items(
     bytes: &[u8],
     advance_past: &ItemPointerData,
     out: &mut PgVec<'_, ItemPointerData>,

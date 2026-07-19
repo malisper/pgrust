@@ -1,0 +1,58 @@
+[package]
+name = "amcheck"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "amcheck"
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../_support/types/datum" }
+mcx = { path = "../../_support/mcx" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+types_fmgr = { path = "../../_support/types/fmgr" }
+types_rel = { path = "../../_support/types/rel" }
+types_storage = { path = "../../_support/types/types_storage" }
+types_nbtree = { path = "../../_support/types/types_nbtree" }
+types_tuple = { path = "../../_support/types/types_tuple" }
+types_scan = { path = "../../_support/types/types_scan" }
+table = { path = "../../backend/access/table/table" }
+tableam = { path = "../../backend/access/table/tableam" }
+indexam = { path = "../../backend/access/index/indexam" }
+genam = { path = "../../backend/access/index/genam" }
+catalog_index = { path = "../../backend/catalog/catalog_index" }
+pg_class_seams = { path = "../../backend/catalog/pg_class_seams" }
+miscinit = { path = "../../backend/utils/init/miscinit" }
+init_small = { path = "../../backend/utils/init/init_small" }
+guc = { path = "../../backend/utils/misc/guc" }
+transam_xlog = { path = "../../backend/access/transam/transam_xlog" }
+transam = { path = "../../backend/access/transam/transam" }
+varsup = { path = "../../backend/access/transam/varsup" }
+multixact = { path = "../../backend/access/transam/multixact" }
+xact = { path = "../../backend/access/transam/xact" }
+elog_seams = { path = "../../backend/utils/error/elog_seams" }
+syscache_seams = { path = "../../backend/utils/cache/syscache_seams" }
+bufmgr = { path = "../../backend/storage/buffer/bufmgr" }
+smgr = { path = "../../backend/storage/smgr/smgr" }
+procarray = { path = "../../backend/storage/ipc/procarray" }
+nbtree = { path = "../../backend/access/nbtree/nbtree" }
+gin = { path = "../../backend/access/gin/gin" }
+gin_vocab = { path = "../../backend/access/gin/gin_vocab" }
+bloomfilter = { path = "../../backend/lib/bloomfilter" }
+postgres_seams = { path = "../../backend/tcop/postgres_seams" }
+dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
+funcapi = { path = "../../backend/utils/fmgr/funcapi" }
+relation = { path = "../../backend/access/common/relation" }
+detoast = { path = "../../backend/access/common/detoast" }
+toastdesc = { path = "../../backend/access/common/toastdesc" }
+snapmgr = { path = "../../backend/utils/time/snapmgr" }
+visibilitymap = { path = "../../backend/access/heap/visibilitymap" }
+heapam = { path = "../../backend/access/heap/heapam" }
+heaptoast = { path = "../../backend/access/heap/heaptoast" }
+adt_scalar = { path = "../../backend/utils/adt/scalar" }
+varlena = { path = "../../backend/utils/adt/varlena" }
+exectuples = { path = "../../backend/executor/exectuples" }
+execindexing = { path = "../../backend/executor/execindexing" }
