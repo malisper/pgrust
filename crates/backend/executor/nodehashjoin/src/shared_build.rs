@@ -153,6 +153,17 @@ impl JoinBudget {
         prev.saturating_add(n) <= self.limit
     }
 
+    /// Optional charge (HJPROBE-V2 dense seat): on a crossing the charge is
+    /// BACKED OUT and the caller simply forgoes the optional structure —
+    /// never a refusal (the seat is an accelerator, not a table half).
+    fn try_charge_optional(&self, n: usize) -> bool {
+        if self.try_charge(n) {
+            return true;
+        }
+        self.used.fetch_sub(n, Ordering::Relaxed);
+        false
+    }
+
     pub fn used(&self) -> usize {
         self.used.load(Ordering::Relaxed)
     }
@@ -226,6 +237,18 @@ struct RunHeader {
     ends: Box<[u32]>,
 }
 
+/// HJPROBE-V2 dense-seat key sentinel: a NULL build key (never matches any
+/// probe — C parity — so it is simply left out of every seat chain).
+pub const NULL_KEY: i64 = i64::MIN;
+
+/// Per-Local dense-key tracking (HJPROBE-V2, notes/se-hjprobe-v2.md §4.3
+/// increment 1 — the legacy nodehash `KeyTrack` idiom on the lane Local):
+/// `part_keys[p]` is in EXACT lockstep with `part_refs[p]`, so the seat
+/// build can enumerate (ref, key) pairs in the combine walk's order.
+struct DenseKeys {
+    part_keys: Vec<Vec<i64>>,
+}
+
 pub struct JoinBuildLocal {
     ordinal: u16,
     /// Arc so the frozen table can adopt the storage by reference while the
@@ -243,6 +266,8 @@ pub struct JoinBuildLocal {
     /// Chunk growth ceiling in words (M3.5 leaf builds cap this so the
     /// PLAN-BATCHES capacity model's last-chunk waste term stays small).
     chunk_cap_words: usize,
+    /// HJPROBE-V2: armed dense-key tracking (None = v1, byte-identical).
+    dense_keys: Option<DenseKeys>,
 }
 
 impl JoinBuildLocal {
@@ -272,11 +297,48 @@ impl JoinBuildLocal {
             tuples: 0,
             budget,
             chunk_cap_words: cap_words.clamp(CHUNK_MIN_WORDS, CHUNK_MAX_WORDS),
+            dense_keys: None,
         }
     }
 
     pub fn ordinal(&self) -> usize {
         self.ordinal as usize
+    }
+
+    /// HJPROBE-V2: arm dense-key tracking. Idempotent; must run before the
+    /// Local's first push (asserted) — the runtime arms on the Local's
+    /// FIRST build morsel, so a Local with tuples is armed-or-never.
+    pub fn arm_dense_keys(&mut self) {
+        if self.dense_keys.is_some() {
+            return;
+        }
+        assert!(self.tuples == 0, "dense-key arming after pushes");
+        self.dense_keys = Some(DenseKeys {
+            part_keys: (0..PARTITIONS).map(|_| Vec::new()).collect(),
+        });
+    }
+
+    /// Whether this Local tracks dense keys (the accept site's dispatch).
+    #[inline(always)]
+    pub fn dense_armed(&self) -> bool {
+        self.dense_keys.is_some()
+    }
+
+    /// [`JoinBuildLocal::push`] + the dense-key record (lockstep with the
+    /// pushed ref; `NULL_KEY` = SQL NULL, kept out of seat chains).
+    pub fn push_keyed(
+        &mut self,
+        hashvalue: u32,
+        payload: &[u8],
+        key: i64,
+    ) -> Result<(), BudgetExceeded> {
+        self.push(hashvalue, payload)?;
+        self.dense_keys
+            .as_mut()
+            .expect("push_keyed on an unarmed Local")
+            .part_keys[partition_of(hashvalue)]
+            .push(key);
+        Ok(())
     }
 
     /// Visit every materialized tuple as `(hashvalue, payload)` — the M3.5
@@ -312,6 +374,11 @@ impl JoinBuildLocal {
         self.cur_used = 0;
         for refs in &mut self.part_refs {
             refs.clear();
+        }
+        if let Some(dk) = &mut self.dense_keys {
+            for keys in &mut dk.part_keys {
+                keys.clear();
+            }
         }
         self.runs.clear();
         self.tuples = 0;
@@ -517,13 +584,137 @@ impl CombinePlan {
     }
 }
 
+// ---------------------------------------------------------------------------
+// HJPROBE-V2 dense seat (notes/se-hjprobe-v2.md §4.3 increment 1): the
+// legacy nodehash DenseTable's direct-address idea on the frozen table, as
+// CSR per-key candidate lists — key k's candidates are CONTIGUOUS packed
+// refs in EXACTLY the v1 bucket-chain candidate order for that key (the
+// same-key subsequence of the head-inserted chain = reverse insertion
+// order; the legacy order-parity proof verbatim). The seat probe therefore
+// emits byte-identically to the v1 walk while skipping the probe hash
+// eval, the bucket/tag lookup, every hashvalue compare, and the
+// hashclauses key recheck (int4 key equality == seat identity).
+// ---------------------------------------------------------------------------
+
+pub struct DenseSeat {
+    min: i32,
+    /// CSR offsets: key k's refs are `refs[offs[k-min] .. offs[k-min+1]]`.
+    offs: Box<[u32]>,
+    /// Packed tuple refs (NOT +1 encoded), per-key chain order.
+    refs: Box<[u64]>,
+}
+
+impl DenseSeat {
+    /// Key k's candidates in v1 probe emission order; out-of-range keys
+    /// (and every key when the seat never built) answer the empty slice.
+    #[inline(always)]
+    pub(crate) fn candidates(&self, key: i32) -> &[u64] {
+        let off = key as i64 - self.min as i64;
+        if (off as u64) < (self.offs.len() as u64 - 1) {
+            let o = off as usize;
+            &self.refs[self.offs[o] as usize..self.offs[o + 1] as usize]
+        } else {
+            &[]
+        }
+    }
+}
+
+/// Seat construction at freeze (single-threaded — the finalize caller).
+/// All-or-nothing: every tuple-bearing Local must be armed (a Local that
+/// accepted zero morsels never armed and contributes nothing). Range and
+/// budget gates mirror the legacy seat_dense laws (range ≤ 4×rows; the
+/// arrays charge the envelope OPTIONALLY — a crossing forgoes the seat,
+/// never refuses the build).
+fn build_seat(plan: &CombinePlan, locals: &[JoinBuildLocal]) -> Option<DenseSeat> {
+    let bearing: Vec<&JoinBuildLocal> = locals.iter().filter(|l| l.tuples > 0).collect();
+    if bearing.is_empty() || !bearing.iter().all(|l| l.dense_keys.is_some()) {
+        debug_assert!(
+            bearing.iter().all(|l| l.dense_keys.is_none())
+                || bearing.iter().all(|l| l.dense_keys.is_some()),
+            "mixed dense-key arming across tuple-bearing Locals"
+        );
+        return None;
+    }
+    // Pass 0: min/max/any over non-NULL keys (order-free).
+    let (mut min, mut max, mut seated) = (i32::MAX, i32::MIN, 0u64);
+    for l in &bearing {
+        for keys in &l.dense_keys.as_ref().expect("armed").part_keys {
+            for &k in keys {
+                if k == NULL_KEY {
+                    continue;
+                }
+                let k = k as i32;
+                min = min.min(k);
+                max = max.max(k);
+                seated += 1;
+            }
+        }
+    }
+    if seated == 0 {
+        return None;
+    }
+    let range = max as i64 - min as i64 + 1;
+    if range as u64 > seated.saturating_mul(4) {
+        return None; // sparse keys: the seat would be mostly holes
+    }
+    let bytes = (range as usize + 1) * size_of::<u32>() + seated as usize * size_of::<u64>();
+    if !bearing[0].budget.try_charge_optional(bytes) {
+        return None;
+    }
+    // Pass 1: per-key counts -> exclusive prefix offs (offs[k+1] = end).
+    let mut offs = vec![0u32; range as usize + 1].into_boxed_slice();
+    for l in &bearing {
+        for keys in &l.dense_keys.as_ref().expect("armed").part_keys {
+            for &k in keys {
+                if k != NULL_KEY {
+                    offs[(k as i32 as i64 - min as i64) as usize + 1] += 1;
+                }
+            }
+        }
+    }
+    for i in 1..offs.len() {
+        offs[i] += offs[i - 1];
+    }
+    // Pass 2: fill each key's slice BACKWARD while walking the exact
+    // combine enumeration (partition-major, runs ascending by range_start,
+    // materialization order within a run) — the final slice order is
+    // reverse insertion order = the head-inserted bucket chain's same-key
+    // subsequence = the v1 probe's candidate order. `cursor` decrements
+    // from each key's slice end.
+    let mut cursor: Vec<u32> = offs[1..].to_vec(); // cursor[k] = slice end
+    let mut refs = vec![0u64; seated as usize].into_boxed_slice();
+    for part in 0..PARTITIONS {
+        for &(_, li, ri) in &plan.run_order {
+            let l = &locals[li as usize];
+            let Some(dk) = l.dense_keys.as_ref() else { continue };
+            let ri = ri as usize;
+            let start = if ri == 0 { 0 } else { l.runs[ri - 1].ends[part] as usize };
+            let end = l.runs[ri].ends[part] as usize;
+            for idx in start..end {
+                let k = dk.part_keys[part][idx];
+                if k == NULL_KEY {
+                    continue;
+                }
+                let slot = (k as i32 as i64 - min as i64) as usize;
+                cursor[slot] -= 1;
+                refs[cursor[slot] as usize] = l.part_refs[part][idx];
+            }
+        }
+    }
+    debug_assert!(cursor.iter().zip(offs.iter()).all(|(c, o)| c == o));
+    Some(DenseSeat { min, offs, refs })
+}
+
 /// Publish (§4 finalize): freeze — adopt the Locals' chunk Arcs (dense
 /// order, matching `by_ordinal`) and the finished plan. The Locals then
-/// drop with the sink plumbing; the storage survives in the table.
+/// drop with the sink plumbing; the storage survives in the table. When
+/// the Locals tracked dense keys (HJPROBE-V2 armed), the seat builds here
+/// — or silently doesn't (range/budget gates), leaving the v1 probe.
 pub fn freeze(plan: Arc<CombinePlan>, locals: &[JoinBuildLocal]) -> FrozenJoinTable {
     let chunk_lists: Vec<Box<[Arc<Chunk>]>> =
         locals.iter().map(|l| l.chunks.clone().into_boxed_slice()).collect();
-    FrozenJoinTable { plan, chunk_lists }
+    let seat = build_seat(&plan, locals);
+    FrozenJoinTable { plan, chunk_lists, seat }
 }
 
 // ---------------------------------------------------------------------------
@@ -534,11 +725,33 @@ pub struct FrozenJoinTable {
     plan: Arc<CombinePlan>,
     /// Dense (by_ordinal order) adopted chunk storage.
     chunk_lists: Vec<Box<[Arc<Chunk>]>>,
+    /// HJPROBE-V2 dense seat (None = v1 probe, always).
+    seat: Option<DenseSeat>,
 }
 
 impl FrozenJoinTable {
     pub fn nbuckets(&self) -> usize {
         self.plan.buckets.len()
+    }
+
+    /// HJPROBE-V2: the dense seat, when it built (knob-armed build + the
+    /// range/budget gates passed). Its presence IS the probe dispatch.
+    #[inline(always)]
+    pub(crate) fn seat(&self) -> Option<&DenseSeat> {
+        self.seat.as_ref()
+    }
+
+    /// Whether the dense probe will engage (the runtime's dispatch probe).
+    #[inline(always)]
+    pub fn has_seat(&self) -> bool {
+        self.seat.is_some()
+    }
+
+    /// A [`TupleRef`] view of a packed ref OBTAINED FROM THIS TABLE's seat
+    /// or chains (the seat probe's candidate materializer).
+    #[inline(always)]
+    pub(crate) fn tuple_ref(&self, r: u64) -> TupleRef<'_> {
+        TupleRef { table: self, r }
     }
 
     pub fn total_tuples(&self) -> u64 {
@@ -1231,6 +1444,345 @@ mod tests {
         let l2 = (t.nbuckets() as u64).trailing_zeros();
         assert_eq!(t.total_tuples(), ds.granules * ds.rows_per_granule);
         assert_eq!(frozen_chains(&t), reference_chains(&ds.all_rows(), l2));
+    }
+
+    // ---- HJPROBE-V2 dense seat (notes/se-hjprobe-v2.md §4.3 inc 1) ----
+    //
+    // THE CHAIN-ORDER PIN: for every key, the seat's CSR candidate slice
+    // must equal the v1 probe's candidate sequence (the tag-prefiltered
+    // bucket-chain walk filtered by hashvalue + key) EXACTLY, element for
+    // element, over adversarial claim schedules and parallel combines —
+    // the byte-identity argument for skipping the recheck rides on it.
+
+    /// Keyed dataset row stream: key ∈ 0..key_space, hash = f(key) via the
+    /// engine-shaped mix (same key ⇒ same hash, always), payload embeds
+    /// the key + global row id so sequences compare exactly.
+    fn keyed_rows_of(seed: u64, key_space: u64, rows_per_granule: u64, g: u64) -> Vec<(i32, u32, Vec<u8>)> {
+        (0..rows_per_granule)
+            .map(|i| {
+                let id = g * rows_per_granule + i;
+                let key = (mix(seed ^ id) % key_space) as i32;
+                let h = mix((key as u64).wrapping_mul(0x517c_c1b7_2722_0a95)) as u32;
+                let mut payload = (key as i64).to_le_bytes().to_vec();
+                payload.extend(id.to_le_bytes());
+                (key, h, payload)
+            })
+            .collect()
+    }
+
+    fn build_keyed_from_schedule(
+        seed: u64,
+        key_space: u64,
+        rows_per_granule: u64,
+        schedule: &Schedule,
+        budget: &Arc<JoinBudget>,
+        null_every: Option<u64>, // Some(n): every n-th row records NULL_KEY
+    ) -> Vec<JoinBuildLocal> {
+        let mut locals = Vec::new();
+        for (w, claims) in schedule.iter().enumerate() {
+            let mut l = JoinBuildLocal::new(w, Arc::clone(budget));
+            l.arm_dense_keys();
+            assert!(l.dense_armed());
+            for range in claims {
+                l.begin_run(range.start);
+                for g in range.clone() {
+                    for (key, h, p) in keyed_rows_of(seed, key_space, rows_per_granule, g) {
+                        let id = u64::from_le_bytes(p[8..16].try_into().unwrap());
+                        let k = match null_every {
+                            Some(n) if id % n == 0 => NULL_KEY,
+                            _ => key as i64,
+                        };
+                        l.push_keyed(h, &p, k).unwrap();
+                    }
+                }
+                l.end_run();
+            }
+            locals.push(l);
+        }
+        locals
+    }
+
+    /// The v1 probe's candidate sequence for `key`: the tag-prefiltered
+    /// chain walk with the hashvalue prefilter + key recheck — exactly
+    /// what probe_after_hash yields to the arms.
+    fn v1_candidates(t: &FrozenJoinTable, key: i32) -> Vec<(u32, Vec<u8>)> {
+        let h = mix((key as u64).wrapping_mul(0x517c_c1b7_2722_0a95)) as u32;
+        t.chain(h)
+            .filter(|c| c.hashvalue() == h)
+            .filter(|c| i64::from_le_bytes(c.payload()[..8].try_into().unwrap()) == key as i64)
+            .map(|c| (c.hashvalue(), c.payload().to_vec()))
+            .collect()
+    }
+
+    fn seat_candidates(t: &FrozenJoinTable, key: i32) -> Vec<(u32, Vec<u8>)> {
+        let seat = t.seat().expect("seat must be present");
+        seat.candidates(key)
+            .iter()
+            .map(|&r| {
+                let tr = t.tuple_ref(r);
+                (tr.hashvalue(), tr.payload().to_vec())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn dense_seat_candidates_match_v1_chain_walk_exactly() {
+        // Duplicate-heavy keys, adversarial schedules, parallel combine.
+        let (seed, key_space, rpg, granules) = (0xDE5E, 97u64, 37u64, 64u64);
+        for sched_seed in 0..8u64 {
+            let sizes = (0..).map(|i| (mix(sched_seed ^ i) % 7) + 1);
+            let sched = deal(
+                ranges_of_sizes(granules, sizes.take(64)),
+                1 + (sched_seed as usize % 5),
+                sched_seed,
+            );
+            let budget = JoinBudget::unlimited();
+            let locals =
+                build_keyed_from_schedule(seed, key_space, rpg, &sched, &budget, None);
+            let t = plan_combine_freeze(locals, &budget, sched_seed % 2 == 0);
+            assert!(t.has_seat(), "dense keys over a dense range must seat");
+            for key in 0..key_space as i32 {
+                assert_eq!(
+                    seat_candidates(&t, key),
+                    v1_candidates(&t, key),
+                    "seat order diverges from the v1 walk (key {key}, sched {sched_seed})"
+                );
+                assert!(!seat_candidates(&t, key).is_empty(), "every key occurs at this scale");
+            }
+            // Out-of-range probes answer empty (the v1 walk finds nothing).
+            for key in [-1, key_space as i32, i32::MAX, i32::MIN] {
+                assert!(t.seat().unwrap().candidates(key).is_empty());
+                assert!(v1_candidates(&t, key).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn dense_seat_null_keys_stay_out_of_seat_but_in_chains() {
+        let (seed, key_space, rpg, granules) = (0xA11u64, 50u64, 20u64, 32u64);
+        let sched = deal(ranges_of_sizes(granules, std::iter::repeat(3)), 4, 7);
+        let budget = JoinBudget::unlimited();
+        // Every 5th row records NULL_KEY (SQL NULL build key).
+        let locals =
+            build_keyed_from_schedule(seed, key_space, rpg, &sched, &budget, Some(5));
+        let t = plan_combine_freeze(locals, &budget, true);
+        assert!(t.has_seat());
+        let mut seated = 0usize;
+        for key in 0..key_space as i32 {
+            let sc = seat_candidates(&t, key);
+            seated += sc.len();
+            // Seat = the v1 candidates whose row id is NOT null-keyed.
+            let v1_nonnull: Vec<(u32, Vec<u8>)> = v1_candidates(&t, key)
+                .into_iter()
+                .filter(|(_, p)| u64::from_le_bytes(p[8..16].try_into().unwrap()) % 5 != 0)
+                .collect();
+            assert_eq!(sc, v1_nonnull, "NULL-keyed rows must be absent, order intact");
+        }
+        let total = (granules * rpg) as usize;
+        assert_eq!(seated, total - total.div_ceil(5), "exactly the non-NULL rows seat");
+        assert_eq!(t.total_tuples(), total as u64, "chains keep every row (fill walk parity)");
+    }
+
+    #[test]
+    fn dense_seat_refuses_sparse_range() {
+        let budget = JoinBudget::unlimited();
+        let mut l = JoinBuildLocal::new(0, Arc::clone(&budget));
+        l.arm_dense_keys();
+        l.begin_run(0);
+        // Two keys a mile apart: range >> 4x rows.
+        for (key, id) in [(0i64, 1u64), (50_000_000, 2)] {
+            let h = mix((key as u64).wrapping_mul(0x517c_c1b7_2722_0a95)) as u32;
+            let mut p = key.to_le_bytes().to_vec();
+            p.extend(id.to_le_bytes());
+            l.push_keyed(h, &p, key).unwrap();
+        }
+        l.end_run();
+        let t = plan_combine_freeze(vec![l], &budget, false);
+        assert!(!t.has_seat(), "sparse key range must not seat");
+        // The v1 probe still answers.
+        assert_eq!(v1_candidates(&t, 0).len(), 1);
+    }
+
+    #[test]
+    fn dense_seat_budget_crossing_forgoes_seat_not_build() {
+        // Enough for chunks + refs + buckets, NOT for the seat arrays.
+        let (seed, key_space, rpg, granules) = (7u64, 40u64, 10u64, 16u64);
+        let rows = granules * rpg; // 160 tuples, payload 16B -> ~1 chunk
+        let need_build = CHUNK_MIN_WORDS * 8 + rows as usize * 8 + 1024 * 8;
+        let budget = JoinBudget::new(need_build + 64); // seat won't fit
+        let sched = vec![vec![0..granules]];
+        let locals = build_keyed_from_schedule(seed, key_space, rpg, &sched, &budget, None);
+        let t = plan_combine_freeze(locals, &budget, false);
+        assert!(!t.has_seat(), "seat must yield to the envelope");
+        let total: usize = (0..key_space as i32).map(|k| v1_candidates(&t, k).len()).sum();
+        assert_eq!(total, rows as usize, "build survives seat refusal — every row probeable");
+    }
+
+    #[test]
+    fn dense_seat_ignores_empty_unarmed_locals() {
+        // An armed bearing Local + an UNARMED EMPTY Local: the empty one
+        // must not veto the seat (all-or-none applies to tuple-bearing).
+        let budget = JoinBudget::unlimited();
+        let mut a = JoinBuildLocal::new(0, Arc::clone(&budget));
+        a.arm_dense_keys();
+        a.begin_run(0);
+        for (key, id) in [(3i64, 1u64), (4, 2), (3, 3)] {
+            let h = mix((key as u64).wrapping_mul(0x517c_c1b7_2722_0a95)) as u32;
+            let mut p = key.to_le_bytes().to_vec();
+            p.extend(id.to_le_bytes());
+            a.push_keyed(h, &p, key).unwrap();
+        }
+        a.end_run();
+        let empty = JoinBuildLocal::new(1, Arc::clone(&budget)); // never armed, no tuples
+        let t = plan_combine_freeze(vec![a, empty], &budget, false);
+        assert!(t.has_seat(), "an empty unarmed Local must not veto the seat");
+        assert_eq!(seat_candidates(&t, 3), v1_candidates(&t, 3));
+        assert_eq!(seat_candidates(&t, 3).len(), 2);
+        assert_eq!(seat_candidates(&t, 4).len(), 1);
+    }
+
+    // ---- HJPROBE-V2 probe-economics census (notes/se-hjprobe-v2.md §4) ----
+    //
+    // Replays the K2 letter corpora's EXACT key distributions
+    // (corpus-k2win-q13/q18: deterministic multiplicative-hash mixes, no
+    // random()) against a real FrozenJoinTable using the engine's real
+    // int4 join hash (hashfn::hash_bytes_uint32 — the nodehash build-hash
+    // kernel's function), and counts what the probe walk actually does:
+    //
+    //   probes        : outer rows probed
+    //   walk_entered  : probes whose tag-prefiltered chain yielded >=1
+    //                   candidate (the complement was killed by ONE
+    //                   bucket-word read — empty bucket or tag miss)
+    //   candidates    : chain tuples yielded across all probes
+    //   hash_eq       : candidates surviving the hashvalue prefilter
+    //   matches       : candidates whose KEY equals the probe key (what
+    //                   the hashclauses exec_qual recheck would pass)
+    //
+    // The dead-probe rows adjudicate the bloom increment: a Bloom filter
+    // consulted before the bucket lookup can only save work on probes the
+    // tag word did NOT already kill. The candidate/match ratios bound the
+    // dense-seat increment's chain-walk savings. Numbers are pinned
+    // exactly (everything is deterministic); the full-scale twins are
+    // #[ignore]d census runs whose numbers ride the worklog.
+
+    struct ProbeCensus {
+        probes: u64,
+        walk_entered: u64,
+        candidates: u64,
+        hash_eq: u64,
+        matches: u64,
+    }
+
+    fn probe_census(
+        build_keys: impl Iterator<Item = i32>,
+        probe_keys: impl Iterator<Item = i32>,
+    ) -> ProbeCensus {
+        let budget = JoinBudget::unlimited();
+        let mut l = JoinBuildLocal::new(0, Arc::clone(&budget));
+        l.begin_run(0);
+        for k in build_keys {
+            l.push(::hashfn::hash_bytes_uint32(k as u32), &k.to_le_bytes()).unwrap();
+        }
+        l.end_run();
+        let t = plan_combine_freeze(vec![l], &budget, false);
+        let mut c = ProbeCensus { probes: 0, walk_entered: 0, candidates: 0, hash_eq: 0, matches: 0 };
+        for k in probe_keys {
+            let h = ::hashfn::hash_bytes_uint32(k as u32);
+            c.probes += 1;
+            let mut any = false;
+            for cand in t.chain(h) {
+                any = true;
+                c.candidates += 1;
+                if cand.hashvalue() != h {
+                    continue;
+                }
+                c.hash_eq += 1;
+                if cand.payload() == k.to_le_bytes() {
+                    c.matches += 1;
+                }
+            }
+            if any {
+                c.walk_entered += 1;
+            }
+        }
+        c
+    }
+
+    /// corpus-k2win-q13's fact key stream (o_ckey): dead_mod'th rows point
+    /// past the dim (the LEFT-join null tail), the rest spread over the
+    /// low `live_span` dim keys. `dim_rows`/`dead_span` per the corpus.
+    fn q13_probe_keys(
+        fact_rows: i64,
+        dim_rows: i64,
+        live_span: i64,
+        dead_span: i64,
+        dead_mod: i64,
+    ) -> impl Iterator<Item = i32> {
+        (1..=fact_rows).map(move |g| {
+            if g % dead_mod == 0 {
+                (dim_rows + (g % dead_span) + 1) as i32
+            } else {
+                ((g * 48271) % live_span + 1) as i32
+            }
+        })
+    }
+
+    #[test]
+    fn probe_census_q13_channel_scale() {
+        // The CORPUS=hj hj13* fixture exactly (10k dim, 300k fact, 1/3
+        // dead keys over 10001..15001, live spread 1..9000).
+        let c = probe_census(1..=10_000i32, q13_probe_keys(300_000, 10_000, 9_000, 5_000, 3));
+        assert_eq!(c.probes, 300_000);
+        assert_eq!(c.matches, 200_000, "every live probe matches its unique dim row");
+        // Pinned census (deterministic: real hash, fixed streams). The
+        // adjudication ratios ride notes/se-hjprobe-v2.md §4:
+        //   dead probes = 100_000; dead walks entered = walk_entered -
+        //   live_walks; live probes always enter (their match is chained).
+        let (dead, dead_walks) = (100_000u64, c.walk_entered - 200_000);
+        assert_eq!(c.walk_entered, 203_540, "pinned: only 3.54% of dead probes survive tag+empty");
+        assert_eq!(c.candidates, 327_180, "pinned: 1.09 candidates/probe — chains are short");
+        assert_eq!(c.hash_eq, 200_000, "pinned: hashvalue prefilter rejects EVERY non-match candidate here");
+        assert!(dead_walks * 20 < dead, "tag word + empty buckets eat >95% of dead probes");
+    }
+
+    #[test]
+    fn probe_census_q18_channel_scale() {
+        // The CORPUS=hj hj18* fixture exactly (125k orders build, 500k
+        // lineitem probe, 1/50 dead keys, live spread 1..125000).
+        let c = probe_census(
+            1..=125_000i32,
+            q13_probe_keys(500_000, 125_000, 125_000, 10_000, 50),
+        );
+        assert_eq!(c.probes, 500_000);
+        assert_eq!(c.matches, 490_000);
+        assert_eq!(c.walk_entered, 490_700, "pinned: dead-probe walks are 7.0% of dead probes");
+        assert_eq!(c.candidates, 956_008, "pinned: 1.91 candidates/probe at 0.954 load factor");
+        assert_eq!(c.hash_eq, 490_016, "pinned: 16 full-hash collisions — the exec_qual recheck earns its keep 16 times in 500k probes");
+    }
+
+    #[test]
+    #[ignore = "letter-scale census (3M/5M probes): numbers ride notes/se-hjprobe-v2.md §4"]
+    fn probe_census_q13_letter_scale() {
+        let c = probe_census(1..=100_000i32, q13_probe_keys(3_000_000, 100_000, 90_000, 50_000, 3));
+        eprintln!(
+            "q13 letter census: probes={} walk_entered={} candidates={} hash_eq={} matches={}",
+            c.probes, c.walk_entered, c.candidates, c.hash_eq, c.matches
+        );
+        assert_eq!(c.matches, 2_000_000);
+    }
+
+    #[test]
+    #[ignore = "letter-scale census (5M probes): numbers ride notes/se-hjprobe-v2.md §4"]
+    fn probe_census_q18_letter_scale() {
+        let c = probe_census(
+            1..=1_250_000i32,
+            q13_probe_keys(5_000_000, 1_250_000, 1_250_000, 100_000, 50),
+        );
+        eprintln!(
+            "q18 letter census: probes={} walk_entered={} candidates={} hash_eq={} matches={}",
+            c.probes, c.walk_entered, c.candidates, c.hash_eq, c.matches
+        );
+        assert_eq!(c.matches, 4_900_000);
     }
 
     // ---- soak: larger randomized run vs the oracle ----

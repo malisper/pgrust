@@ -28,8 +28,9 @@ use ::types_error::PgResult;
 use ::types_nodes::JoinType;
 use ::types_tuple::MinimalTupleData;
 
-use crate::shared_build::{BudgetExceeded, FrozenJoinTable, JoinBuildLocal};
+use crate::shared_build::{BudgetExceeded, FrozenJoinTable, JoinBuildLocal, TupleRef, NULL_KEY};
 use crate::{eval_probe_qual, project_result, HashJoinState};
+use ::executils::EcxtId;
 use ::nodehash::HashState;
 
 /// Runtime-join admission: all eight hash-join types (inc-3 added the
@@ -91,6 +92,42 @@ pub fn shared_build_accept<'mcx>(
     shared_build_hash_tuple(hs, estate, slot_id, |hashvalue, bytes| {
         Ok(local.push(hashvalue, bytes))
     })
+}
+
+/// [`shared_build_accept`] + the HJPROBE-V2 dense-key record: reads the
+/// int4 build key off the slot (0-based `key_col`, the
+/// [`dense_seat_build_col`] gate's answer; ~one `slot_getattr` — the attr
+/// is already deformed for the hash eval) and pushes it in lockstep. SQL
+/// NULL records [`NULL_KEY`] (kept out of every seat chain — a NULL key
+/// never matches, C parity).
+pub fn shared_build_accept_keyed<'mcx>(
+    hs: &mut HashState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    slot_id: ExecSlotId,
+    local: &mut JoinBuildLocal,
+    key_col: u16,
+) -> PgResult<Result<(), BudgetExceeded>> {
+    let mut isnull = false;
+    let v = ::exectuples::slot_getattr(
+        &mut estate.es_tupleTable[slot_id.0 as usize],
+        key_col as i32 + 1,
+        &mut isnull,
+    );
+    let key = if isnull { NULL_KEY } else { v.as_i32() as i64 };
+    shared_build_hash_tuple(hs, estate, slot_id, |hashvalue, bytes| {
+        Ok(local.push_keyed(hashvalue, bytes, key))
+    })
+}
+
+/// HJPROBE-V2 dense-seat gate: `Some(build-side key col, 0-based)` iff the
+/// join's hash-match semantics reduce to int4 key equality — the legacy
+/// dense introspection (`dense_cols`: a single Int4Eq var=var hashclause
+/// whose columns are exactly the low-32-hashed keys on both sides) plus
+/// the build hash expr covering the inner column. Deterministic per plan:
+/// every worker computes the same answer from its own executor state.
+pub fn dense_seat_build_col(node: &HashJoinState<'_>, hs: &HashState<'_>) -> Option<u16> {
+    let dc = node.dense_cols?;
+    (hs.build_hash_col() == Some(dc.i)).then_some(dc.i)
 }
 
 /// Probe one outer row against the frozen table: `exec_hash_join`'s
@@ -218,67 +255,117 @@ fn probe_after_hash<'mcx>(
         if !key_eq {
             continue;
         }
-        // RIGHT_SEMI: an already-emitted build tuple is skipped BEFORE the
-        // joinqual (HJ_SCAN_BUCKET's has-match skip; racy-stale reads are
-        // fine — the authoritative claim is the test_and_set below).
-        if jointype == JoinType::JOIN_RIGHT_SEMI && cand.matched() {
-            continue;
+        match probe_candidate_matched(
+            node,
+            estate,
+            cand,
+            hslot,
+            ecxt,
+            jointype,
+            &mut matched_outer,
+            emit,
+        )? {
+            CandStep::NextCandidate => {}
+            CandStep::StopChain => break,
         }
-        // joinqual (HJ_SCAN_BUCKET's arm, verbatim order).
-        let matched = eval_probe_qual(node.joinqual.as_deref_mut(), ecxt, hslot, estate)?;
-        if !matched {
-            estate.instr_count_filtered1(node.js_instr);
-            continue;
+    }
+    probe_fill_outer(node, estate, ecxt, matched_outer, emit)
+}
+
+/// The extracted per-candidate arm walk after KEY EQUALITY is established
+/// (v1: hashvalue prefilter + hashclauses recheck; dense seat: identity by
+/// construction). RIGHT_SEMI has-match skip, joinqual, match flags, the
+/// per-jointype emission arm — HJ_SCAN_BUCKET's order verbatim; shared by
+/// both walks so the arms can never drift.
+enum CandStep {
+    NextCandidate,
+    StopChain,
+}
+
+#[expect(clippy::too_many_arguments)]
+#[inline(always)]
+fn probe_candidate_matched<'mcx>(
+    node: &mut HashJoinState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    cand: TupleRef<'_>,
+    hslot: ExecSlotId,
+    ecxt: EcxtId,
+    jointype: JoinType,
+    matched_outer: &mut bool,
+    emit: &mut dyn FnMut(&mut HashJoinState<'mcx>, &mut EStateData<'mcx>, ExecSlotId) -> PgResult<()>,
+) -> PgResult<CandStep> {
+    // RIGHT_SEMI: an already-emitted build tuple is skipped BEFORE the
+    // joinqual (HJ_SCAN_BUCKET's has-match skip; racy-stale reads are
+    // fine — the authoritative claim is the test_and_set below).
+    if jointype == JoinType::JOIN_RIGHT_SEMI && cand.matched() {
+        return Ok(CandStep::NextCandidate);
+    }
+    // joinqual (HJ_SCAN_BUCKET's arm, verbatim order).
+    let matched = eval_probe_qual(node.joinqual.as_deref_mut(), ecxt, hslot, estate)?;
+    if !matched {
+        estate.instr_count_filtered1(node.js_instr);
+        return Ok(CandStep::NextCandidate);
+    }
+    *matched_outer = true;
+    // Match flag (C sets it for every joinqual match): the fill phase
+    // (RIGHT/FULL/RIGHT_ANTI) reads it after the probe barrier;
+    // RIGHT_SEMI claims it exactly-once here.
+    match jointype {
+        JoinType::JOIN_RIGHT_SEMI => {
+            if !cand.test_and_set_matched() {
+                return Ok(CandStep::NextCandidate); // another probe task won this build tuple
+            }
+            // otherqual is None by admission; project + emit once.
+            let out = project_result(node, hslot, estate)?;
+            emit(node, estate, out)?;
+            return Ok(CandStep::NextCandidate); // keep scanning this chain
         }
-        matched_outer = true;
-        // Match flag (C sets it for every joinqual match): the fill phase
-        // (RIGHT/FULL/RIGHT_ANTI) reads it after the probe barrier;
-        // RIGHT_SEMI claims it exactly-once here.
-        match jointype {
-            JoinType::JOIN_RIGHT_SEMI => {
-                if !cand.test_and_set_matched() {
-                    continue; // another probe task won this build tuple
-                }
-                // otherqual is None by admission; project + emit once.
+        JoinType::JOIN_RIGHT | JoinType::JOIN_FULL | JoinType::JOIN_RIGHT_ANTI => {
+            cand.set_matched();
+        }
+        _ => {}
+    }
+    match jointype {
+        JoinType::JOIN_ANTI => Ok(CandStep::StopChain), // matched anti-outer emits nothing
+        JoinType::JOIN_RIGHT_ANTI => Ok(CandStep::NextCandidate), // mark-only probe
+        JoinType::JOIN_SEMI => {
+            let pass = eval_probe_qual(node.otherqual.as_deref_mut(), ecxt, hslot, estate)?;
+            if pass {
                 let out = project_result(node, hslot, estate)?;
                 emit(node, estate, out)?;
-                continue; // keep scanning: other build tuples in this chain
+            } else {
+                estate.instr_count_filtered2(node.js_instr);
             }
-            JoinType::JOIN_RIGHT | JoinType::JOIN_FULL | JoinType::JOIN_RIGHT_ANTI => {
-                cand.set_matched();
-            }
-            _ => {}
+            Ok(CandStep::StopChain) // js_single_match: first joinqual match ends the walk
         }
-        match jointype {
-            JoinType::JOIN_ANTI => break, // matched anti-outer emits nothing
-            JoinType::JOIN_RIGHT_ANTI => continue, // mark-only probe
-            JoinType::JOIN_SEMI => {
-                let pass = eval_probe_qual(node.otherqual.as_deref_mut(), ecxt, hslot, estate)?;
-                if pass {
-                    let out = project_result(node, hslot, estate)?;
-                    emit(node, estate, out)?;
-                } else {
-                    estate.instr_count_filtered2(node.js_instr);
-                }
-                break; // js_single_match: first joinqual match ends the walk
+        JoinType::JOIN_RIGHT_SEMI => unreachable!("handled above"),
+        _ => {
+            let pass = eval_probe_qual(node.otherqual.as_deref_mut(), ecxt, hslot, estate)?;
+            if pass {
+                let out = project_result(node, hslot, estate)?;
+                emit(node, estate, out)?;
+            } else {
+                estate.instr_count_filtered2(node.js_instr);
             }
-            JoinType::JOIN_RIGHT_SEMI => unreachable!("handled above"),
-            _ => {
-                let pass = eval_probe_qual(node.otherqual.as_deref_mut(), ecxt, hslot, estate)?;
-                if pass {
-                    let out = project_result(node, hslot, estate)?;
-                    emit(node, estate, out)?;
-                } else {
-                    estate.instr_count_filtered2(node.js_instr);
-                }
-                if node.js_single_match {
-                    break; // inner_unique INNER/LEFT
-                }
+            if node.js_single_match {
+                Ok(CandStep::StopChain) // inner_unique INNER/LEFT
+            } else {
+                Ok(CandStep::NextCandidate)
             }
         }
     }
-    // HJ_FILL_OUTER_TUPLE: LEFT/FULL/ANTI null-fill unmatched outers
-    // (hj_fill_outer covers all three).
+}
+
+/// HJ_FILL_OUTER_TUPLE: LEFT/FULL/ANTI null-fill unmatched outers
+/// (hj_fill_outer covers all three) — shared tail of both probe walks.
+#[inline(always)]
+fn probe_fill_outer<'mcx>(
+    node: &mut HashJoinState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    ecxt: EcxtId,
+    matched_outer: bool,
+    emit: &mut dyn FnMut(&mut HashJoinState<'mcx>, &mut EStateData<'mcx>, ExecSlotId) -> PgResult<()>,
+) -> PgResult<()> {
     if !matched_outer && node.hj_fill_outer {
         let null_inner = node.hj_NullInnerTupleSlot.expect("null inner slot");
         estate.ecxt_mut(ecxt).ecxt_innertuple = Some(null_inner);
@@ -291,6 +378,79 @@ fn probe_after_hash<'mcx>(
         }
     }
     Ok(())
+}
+
+/// HJPROBE-V2 seat probe (notes/se-hjprobe-v2.md §4.3 increment 1): the
+/// dense-key direct-address walk. Callers dispatch here iff
+/// `table.has_seat()`; a seat exists only for builds whose hash-match
+/// semantics reduce to int4 key equality on `dense_cols` (the legacy
+/// introspection), so skipping the probe hash eval, the bucket/tag
+/// lookup, the hashvalue prefilter AND the hashclauses recheck is exact —
+/// and the seat's CSR slices carry candidates in the v1 chain order
+/// (shared_build.rs order proof), so emission is byte-identical.
+pub fn shared_probe_outer_dense<'mcx>(
+    node: &mut HashJoinState<'mcx>,
+    hs: &mut HashState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    table: &FrozenJoinTable,
+    outer_slot: ExecSlotId,
+    emit: &mut dyn FnMut(&mut HashJoinState<'mcx>, &mut EStateData<'mcx>, ExecSlotId) -> PgResult<()>,
+) -> PgResult<()> {
+    debug_assert!(shared_join_admissible(node, hs), "runtime probe on refused shape");
+    let seat = table.seat().expect("dense probe without a seat");
+    let dc = node.dense_cols.expect("dense probe without dense cols");
+    let ecxt = node.ps_ExprContext;
+    {
+        let e = estate.ecxt_mut(ecxt);
+        e.reset();
+        e.ecxt_outertuple = Some(outer_slot);
+    }
+    let jointype = node.plan.join.jointype;
+    let hslot = hs.hash_tuple_slot;
+    let mcx = estate.es_query_cxt;
+    estate.ecxt_mut(ecxt).ecxt_innertuple = Some(hslot);
+
+    // The probe key, read directly (no hash eval). SQL NULL never equals
+    // any build key (the v1 recheck rejects every candidate) — zero seat
+    // candidates is the identical outcome, and the fill arm follows.
+    let mut isnull = false;
+    let key = ::exectuples::slot_getattr(
+        &mut estate.es_tupleTable[outer_slot.0 as usize],
+        dc.o as i32 + 1,
+        &mut isnull,
+    );
+    let mut matched_outer = false;
+    if !isnull {
+        for &r in seat.candidates(key.as_i32()) {
+            let cand = table.tuple_ref(r);
+            let payload = cand.payload();
+            // SAFETY: the frozen chunk image is a live minimal tuple
+            // readable for t_len bytes for the table's lifetime
+            // (word-aligned storage) — the v1 probe's argument verbatim.
+            unsafe {
+                let mtup = NonNull::new_unchecked(payload.as_ptr() as *mut MinimalTupleData);
+                exectuples::exec_store_minimal_tuple_ptr(
+                    &mut estate.es_tupleTable[hslot.0 as usize],
+                    mcx,
+                    mtup,
+                );
+            }
+            match probe_candidate_matched(
+                node,
+                estate,
+                cand,
+                hslot,
+                ecxt,
+                jointype,
+                &mut matched_outer,
+                emit,
+            )? {
+                CandStep::NextCandidate => {}
+                CandStep::StopChain => break,
+            }
+        }
+    }
+    probe_fill_outer(node, estate, ecxt, matched_outer, emit)
 }
 
 /// The right-fill walk (HJ_FILL_INNER_TUPLES over one frozen partition):

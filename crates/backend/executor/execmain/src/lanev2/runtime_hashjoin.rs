@@ -91,8 +91,9 @@ use ::nodehashjoin::shared_build::{
     freeze, BudgetExceeded, CombinePlan, FrozenJoinTable, JoinBudget, JoinBuildLocal, PARTITIONS,
 };
 use ::nodehashjoin::shared_exec::{
-    shared_build_accept, shared_build_hash_tuple, shared_fill_partition, shared_join_admissible,
-    shared_probe_outer, shared_probe_outer_hash, shared_probe_outer_hashed,
+    shared_build_accept, shared_build_accept_keyed, shared_build_hash_tuple,
+    shared_fill_partition, shared_join_admissible, shared_probe_outer, shared_probe_outer_dense,
+    shared_probe_outer_hash, shared_probe_outer_hashed,
     shared_saved_outer_slot,
 };
 use ::types_error::{PgError, PgResult, ERROR};
@@ -281,6 +282,47 @@ fn k2_probe_resolve() -> bool {
 #[cfg(test)]
 pub(crate) fn k2_probe_set_for_tests(on: bool) {
     K2_PROBE.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+}
+
+// ---------------------------------------------------------------------------
+// HJPROBE-V2 (notes/se-hjprobe-v2.md §4.3 increment 1): the dense-key seat
+// on the lane hash-join kernel. Default OFF; `=1`/`on` arms key tracking at
+// build accept + the seat probe (skips the probe hash eval, bucket/tag
+// lookup, hashvalue prefilter and hashclauses recheck on int4eq-keyed
+// unbatched single-join engagements — the legacy hj-dense lever's lane
+// twin). The kill spelling restores the v1 probe bytes and ticks exactly:
+// with the knob OFF no Local ever arms, no seat ever builds, and the probe
+// dispatch reads `has_seat() == false` down the identical v1 path.
+// ---------------------------------------------------------------------------
+
+static HJPROBE_V2: AtomicU8 = AtomicU8::new(0);
+
+fn hjprobe_v2_enabled() -> bool {
+    match HJPROBE_V2.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => hjprobe_v2_resolve(),
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn hjprobe_v2_resolve() -> bool {
+    let on = matches!(
+        std::env::var("PGRUST_LANE_V2_HJPROBE_V2").as_deref(),
+        Ok("1") | Ok("on")
+    );
+    HJPROBE_V2.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+    on
+}
+
+/// Same-process A/B lever for the unit corpus (the K2_PROBE idiom; the
+/// dualexec-style in-process A/B units arm it when they land — until then
+/// the fleet arms ride the env spelling).
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn hjprobe_v2_set_for_tests(on: bool) {
+    HJPROBE_V2.store(if on { 2 } else { 1 }, Ordering::Relaxed);
 }
 
 /// K2 inc-1 join-type envelope (hard): the heap feed takes only the four
@@ -906,7 +948,13 @@ impl runtime::ParallelSink for JoinBuildSink {
         // space never happens — PARTITIONS is fixed — but a fully-refused
         // plan slot can be absent after refuse_budget).
         let Some(plan) = self.plan_for(locals) else { return };
-        *lockm(&self.table) = Some(Arc::new(freeze(plan, locals)));
+        let table = freeze(plan, locals);
+        // HJPROBE-V2 engagement witness (e2e-grepped; the trace can only
+        // ever fire with the knob ON — no armed Local exists otherwise).
+        if table.has_seat() {
+            lane_trace("runtime-hashjoin: dense-seat");
+        }
+        *lockm(&self.table) = Some(Arc::new(table));
     }
 }
 
@@ -1015,6 +1063,7 @@ fn build_claim_heap_seam<'mcx>(
     hstate: &mut ::nodehash::HashState<'mcx>,
     local: &mut JoinBuildLocal,
     range: &runtime::MorselRange,
+    dense_col: Option<u16>,
 ) -> PgResult<bool> {
     src.position(estate, range.clone())?;
     loop {
@@ -1042,10 +1091,14 @@ fn build_claim_heap_seam<'mcx>(
                 let Some(slot_id) = src.emit(estate, i).map_err(Some)? else {
                     return Ok(());
                 };
-                if shared_build_accept(hstate, estate, slot_id, local)
-                    .map_err(Some)?
-                    .is_err()
-                {
+                let accepted = match dense_col {
+                    // HJPROBE-V2: key-tracked accept (the dense-seat feed).
+                    Some(col) => {
+                        shared_build_accept_keyed(hstate, estate, slot_id, local, col)
+                    }
+                    None => shared_build_accept(hstate, estate, slot_id, local),
+                };
+                if accepted.map_err(Some)?.is_err() {
                     return Err(None);
                 }
                 Ok(())
@@ -1098,9 +1151,17 @@ fn probe_claim_heap_seam<'mcx>(
             let Some(slot_id) = src.emit(estate, i)? else {
                 return Ok(());
             };
-            shared_probe_outer(hj, hstate, estate, table, slot_id, &mut |_hj, estate, out| {
-                ::nodeagg::agg_plain_build_accept(agg, estate, out)
-            })
+            // HJPROBE-V2 dispatch: the seat's existence IS the toggle
+            // (knob OFF ⇒ no seat ⇒ the v1 walk, bytes and ticks intact).
+            if table.has_seat() {
+                shared_probe_outer_dense(hj, hstate, estate, table, slot_id, &mut |_hj, estate, out| {
+                    ::nodeagg::agg_plain_build_accept(agg, estate, out)
+                })
+            } else {
+                shared_probe_outer(hj, hstate, estate, table, slot_id, &mut |_hj, estate, out| {
+                    ::nodeagg::agg_plain_build_accept(agg, estate, out)
+                })
+            }
         })?;
     }
 }
@@ -1118,7 +1179,23 @@ fn build_morsel_body(
     let spill = shared.spill.clone();
     let slot = shared.worker_slot(worker);
     with_worker_exec("runtime hash-join build morsel without a bound executor", |es, ps| {
-        with_join_tree(es, ps, |estate, _agg, _hj, _outer_ss, hstate, inner_ss| {
+        with_join_tree(es, ps, |estate, _agg, hj, _outer_ss, hstate, inner_ss| {
+            // HJPROBE-V2 dense-seat arming (knob default OFF; single-join
+            // UNBATCHED engagements only): every worker computes the same
+            // deterministic gate from its own executor state, so all
+            // tuple-bearing Locals arm identically (the seat's all-or-none
+            // law). Armed accepts record the int4 build key in lockstep.
+            let dense_col = if spill.is_none()
+                && shared.chain.get().is_none()
+                && hjprobe_v2_enabled()
+            {
+                ::nodehashjoin::shared_exec::dense_seat_build_col(hj, hstate)
+            } else {
+                None
+            };
+            if dense_col.is_some() {
+                local.arm_dense_keys();
+            }
             // K2 inc-1 invariant: this arm admits pgrcolumnar scans and —
             // behind PGRUST_LANE_V2_HEAPFEED + PGRUST_LANE_V2_K2_PROBE —
             // heap scans. Heap claims ride the storage seam
@@ -1136,7 +1213,8 @@ fn build_morsel_body(
                 // end_claim runs on the ERROR path too — a failed claim
                 // must not carry its page pin into the abort drain; the
                 // drive error wins the report.
-                let drove = build_claim_heap_seam(&mut src, estate, hstate, local, &range);
+                let drove =
+                    build_claim_heap_seam(&mut src, estate, hstate, local, &range, dense_col);
                 let settled = src.end_claim(estate);
                 let crossed = drove?;
                 settled?;
@@ -1220,10 +1298,14 @@ fn build_morsel_body(
                                 .map_err(Some)?;
                             }
                             _ => {
-                                if shared_build_accept(hstate, estate, slot_id, local)
-                                    .map_err(Some)?
-                                    .is_err()
-                                {
+                                let accepted = match dense_col {
+                                    // HJPROBE-V2: key-tracked accept.
+                                    Some(col) => shared_build_accept_keyed(
+                                        hstate, estate, slot_id, local, col,
+                                    ),
+                                    None => shared_build_accept(hstate, estate, slot_id, local),
+                                };
+                                if accepted.map_err(Some)?.is_err() {
                                     return Err(None);
                                 }
                             }
@@ -1415,16 +1497,32 @@ fn probe_morsel_body(
                             }
                         }
                         _ => {
-                            shared_probe_outer(
-                                hj,
-                                hstate,
-                                estate,
-                                table.as_ref().expect("unbatched probe requires the table"),
-                                slot_id,
-                                &mut |_hj, estate, out| {
-                                    ::nodeagg::agg_plain_build_accept(agg, estate, out)
-                                },
-                            )?;
+                            let t = table.as_ref().expect("unbatched probe requires the table");
+                            // HJPROBE-V2 dispatch: seat existence IS the
+                            // toggle (knob OFF ⇒ no seat ⇒ v1 verbatim).
+                            if t.has_seat() {
+                                shared_probe_outer_dense(
+                                    hj,
+                                    hstate,
+                                    estate,
+                                    t,
+                                    slot_id,
+                                    &mut |_hj, estate, out| {
+                                        ::nodeagg::agg_plain_build_accept(agg, estate, out)
+                                    },
+                                )?;
+                            } else {
+                                shared_probe_outer(
+                                    hj,
+                                    hstate,
+                                    estate,
+                                    t,
+                                    slot_id,
+                                    &mut |_hj, estate, out| {
+                                        ::nodeagg::agg_plain_build_accept(agg, estate, out)
+                                    },
+                                )?;
+                            }
                         }
                     }
                     Ok(())

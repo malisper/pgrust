@@ -20,3 +20,8 @@ types_error = { path = "../../../_support/types/types_error" }
 types_nodes = { path = "../../../_support/types/nodes" }
 types_slot = { path = "../../../_support/types/types_slot" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
+
+[dev-dependencies]
+# The real int4 join hash (hash_bytes_uint32) for the probe-economics
+# census tests — the HJPROBE-V2 adjudication input (notes/se-hjprobe-v2.md).
+hashfn = { path = "../../../common/hashfn" }
