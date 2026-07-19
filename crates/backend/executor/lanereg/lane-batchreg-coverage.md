@@ -148,10 +148,13 @@ Generated from `lanereg::ENTRIES` (`lanereg::coverage_report`).
 | 218 | float8pl | - | - | IN | - | - | - | - |  |
 | 208 | float4_accum | - | - | IN | - | - | - | - |  |
 | 222 | float8_accum | - | - | IN | - | - | - | - |  |
+| 2858 | numeric_avg_accum | - | - | IN | - | - | - | - |  |
+| 2806 | float8_regr_accum | - | - | IN | - | - | - | - |  |
+| 2805 | int8inc_float8_float8 | - | - | IN | - | - | - | - |  |
 
 ## Summary
 
-- registered OIDs: 142
+- registered OIDs: 145
 - stencil-but-no-census: 0 (stitch comparator stencils with no AOT qual census)
 - fold-affine-but-no-jit: 0 (fold affine ops the JIT does not inline)
 - jit-but-no-fold-affine: 0 (JIT-inlined arith unknown to the fold affine admission)
