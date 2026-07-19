@@ -94,6 +94,12 @@ pub(crate) fn compare(col: &GinColState, a: Datum, b: Datum) -> i32 {
         GinOpclass::JsonbOps => {
             ::adt_jsonb::gin::gin_compare_jsonb(text_payload(a), text_payload(b))
         }
+        // Per-type btree comparators; failures are corruption/lookup-class
+        // (collation resolved, enum catalog rows exist by construction).
+        GinOpclass::BtreeOps(ty) => {
+            gin_btree_seams::btree_compare::call(ty, a, b, col.support_collation)
+                .expect("btree_gin compare failed")
+        }
         // bttextcmp under the support collation (hstore FUNCTION 1).
         GinOpclass::HstoreOps => {
             varlena::varstr_cmp(text_payload(a), text_payload(b), col.support_collation)
@@ -158,17 +164,27 @@ pub(crate) fn compare(col: &GinColState, a: Datum, b: Datum) -> i32 {
     }
 }
 
-/// comparePartialFn (tsvector_ops gin_cmp_prefix; only partial-match opclass).
+/// comparePartialFn. `orig` is btree_gin's original query datum (the entry's
+/// queryOrig; C passes it via extra_data's QueryInfo).
 pub(crate) fn compare_partial(
     col: &GinColState,
     partial_key: Datum,
     key: Datum,
-    _strategy: StrategyNumber,
+    strategy: StrategyNumber,
+    orig: Datum,
 ) -> i32 {
     match col.opclass {
         GinOpclass::TsvectorOps => {
             ::adt_tsginidx::gin_cmp_prefix(text_payload(partial_key), text_payload(key))
         }
+        GinOpclass::BtreeOps(ty) => gin_btree_seams::btree_compare_prefix::call(
+            ty,
+            orig,
+            key,
+            strategy,
+            col.support_collation,
+        )
+        .expect("btree_gin comparePartial failed"),
         _ => unreachable!("comparePartialFn on a non-partial-match opclass"),
     }
 }
@@ -215,6 +231,12 @@ pub(crate) fn extract_value<'m>(
             let keys = gin_hstore_seams::hstore_extract_value::call(image)?;
             Ok((text_key_datums(mcx, keys)?, no_nulls))
         }
+        GinOpclass::BtreeOps(ty) => {
+            let d = gin_btree_seams::btree_extract_value::call(mcx, ty, value)?;
+            let mut entries: PgVec<'m, Datum> = mcx::vec_with_capacity_in(mcx, 1)?;
+            entries.push(d);
+            Ok((entries, no_nulls))
+        }
     }
 }
 
@@ -260,6 +282,9 @@ pub struct ExtractedQuery<'m> {
     pub null_flags: PgVec<'m, bool>,
     /// gin_trgm_ops ~ / ~* only (C's extra_data[0] regexp graph).
     pub trgm_graph: Option<TrgmPackedGraph>,
+    /// btree_gin only: the original (detoasted) query datum comparePartial
+    /// compares against (C's extra_data[0] QueryInfo.datum).
+    pub btree_orig: Datum,
 }
 
 pub(crate) fn extract_query<'m>(
@@ -268,8 +293,29 @@ pub(crate) fn extract_query<'m>(
     query: Datum,
     strategy: StrategyNumber,
 ) -> PgResult<ExtractedQuery<'m>> {
+    // btree_gin first: by-value query datums must not hit the varlena
+    // detoast below.
+    if let GinOpclass::BtreeOps(ty) = col.opclass {
+        let (entry, partial, orig) =
+            gin_btree_seams::btree_extract_query::call(mcx, ty, query, strategy)?;
+        let mut entries: PgVec<'m, Datum> = mcx::vec_with_capacity_in(mcx, 1)?;
+        entries.push(entry);
+        let mut partial_match: PgVec<'m, bool> = mcx::vec_with_capacity_in(mcx, 1)?;
+        partial_match.push(partial);
+        return Ok(ExtractedQuery {
+            entries,
+            search_mode: GIN_SEARCH_MODE_DEFAULT,
+            jsp_ops: mcx::vec_new_in(mcx),
+            partial_match,
+            map_item_operand: mcx::vec_new_in(mcx),
+            null_flags: mcx::vec_new_in(mcx),
+            trgm_graph: None,
+            btree_orig: orig,
+        });
+    }
     let image = detoast_image(mcx, query)?;
     match col.opclass {
+        GinOpclass::BtreeOps(_) => unreachable!("handled above"),
         GinOpclass::JsonbOps | GinOpclass::JsonbPathOps => {
             let (entries, search_mode, jsp_ops) = match col.opclass {
                 GinOpclass::JsonbOps => {
@@ -285,6 +331,7 @@ pub(crate) fn extract_query<'m>(
                 map_item_operand: mcx::vec_new_in(mcx),
                 null_flags: mcx::vec_new_in(mcx),
                 trgm_graph: None,
+                btree_orig: Datum::null(),
             })
         }
         GinOpclass::TsvectorOps => {
@@ -298,6 +345,7 @@ pub(crate) fn extract_query<'m>(
                 map_item_operand: out.map_item_operand,
                 null_flags: mcx::vec_new_in(mcx),
                 trgm_graph: None,
+                btree_orig: Datum::null(),
             })
         }
         GinOpclass::ArrayOps => {
@@ -341,6 +389,7 @@ pub(crate) fn extract_query<'m>(
                 map_item_operand: mcx::vec_new_in(mcx),
                 null_flags,
                 trgm_graph: None,
+                btree_orig: Datum::null(),
             })
         }
         GinOpclass::TrgmOps => {
@@ -361,6 +410,7 @@ pub(crate) fn extract_query<'m>(
                 map_item_operand: mcx::vec_new_in(mcx),
                 null_flags: mcx::vec_new_in(mcx),
                 trgm_graph,
+                btree_orig: Datum::null(),
             })
         }
         GinOpclass::HstoreOps => {
@@ -374,6 +424,7 @@ pub(crate) fn extract_query<'m>(
                 map_item_operand: mcx::vec_new_in(mcx),
                 null_flags: mcx::vec_new_in(mcx),
                 trgm_graph: None,
+                btree_orig: Datum::null(),
             })
         }
     }
@@ -443,6 +494,11 @@ pub(crate) fn consistent(
             let (res, rc) = gin_hstore_seams::hstore_consistent::call(check, strategy, nkeys)?;
             *recheck = rc;
             Ok(res)
+        }
+        // gin_btree_consistent: the single entry's match already decided.
+        GinOpclass::BtreeOps(_) => {
+            *recheck = false;
+            Ok(true)
         }
     }
 }
@@ -526,6 +582,8 @@ pub(crate) fn tri_consistent(
         // over the bool consistent core, collapsing TRUE+recheck to MAYBE
         // (identical scan outcome to C's recheckCurItem propagation).
         GinOpclass::HstoreOps => hstore_shim_tri_consistent(check, strategy, nkeys),
+        // ginlogic.c shim over gin_btree_consistent's constant true/no-recheck.
+        GinOpclass::BtreeOps(_) => Ok(GIN_TRUE),
     }
 }
 
@@ -620,9 +678,14 @@ pub fn gincost_extract_query(
             let cx = ::mcx::MemoryContext::new("gincost ext opclass probe");
             let name = lsyscache::get_func_name(cx.mcx(), other)?
                 .map(|n| n.as_str().to_string());
-            match name.as_deref() {
-                Some("gin_extract_query_trgm") => (GinOpclass::TrgmOps, false),
-                Some("gin_extract_hstore_query") => (GinOpclass::HstoreOps, false),
+            let btree_ty = name
+                .as_deref()
+                .and_then(|n| n.strip_prefix("gin_extract_query_"))
+                .and_then(GinBtreeType::from_type_name);
+            match (name.as_deref(), btree_ty) {
+                (Some("gin_extract_query_trgm"), _) => (GinOpclass::TrgmOps, false),
+                (Some("gin_extract_hstore_query"), _) => (GinOpclass::HstoreOps, false),
+                (_, Some(ty)) => (GinOpclass::BtreeOps(ty), true),
                 // unported: opclasses beyond the closed set (user-reachable
                 // via planning a scan over a custom-opclass GIN index).
                 _ => {
