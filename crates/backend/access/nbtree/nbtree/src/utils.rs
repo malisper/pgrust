@@ -2049,3 +2049,103 @@ pub fn bt_mkscankey(rel: &Relation<'_>, itup: Option<ITup>) -> PgResult<BtScanIn
     key.set_keysz((indnkeyatts as usize).min(tupnatts as usize));
     Ok(key)
 }
+
+/// _bt_check_natts (nbtutils.c).
+pub fn bt_check_natts(
+    rel: &Relation<'_>,
+    heapkeyspace: bool,
+    page: &PageRef<'_>,
+    offnum: OffsetNumber,
+) -> bool {
+    let natts = rel.indnatts();
+    let nkeyatts = rel.indnkeyatts();
+    let opaque = page_opaque(page);
+
+    // Deleted/half-dead pages have dummy high keys; cannot be tested reliably.
+    if ::types_nbtree::P_IGNORE(&opaque) {
+        return true;
+    }
+
+    debug_assert!(offnum >= 1 && offnum <= page.max_offset_number());
+
+    // SAFETY: offnum is a live offset on this page image (caller contract).
+    let (itup, tupnatts) = unsafe {
+        let itup = page_item(page, page.item_id_unchecked(offnum));
+        (itup, bt_tuple_get_natts(itup, natts))
+    };
+    // SAFETY: itup points at a live index tuple on the page image.
+    unsafe {
+        if !heapkeyspace && bt_tuple_is_posting(itup) {
+            return false;
+        }
+        if bt_tuple_is_posting(itup)
+            && (crate::itup::t_tid(itup).ip_posid & ::types_nbtree::BT_PIVOT_HEAP_TID_ATTR) != 0
+        {
+            return false;
+        }
+        if natts != nkeyatts && bt_tuple_is_posting(itup) {
+            return false;
+        }
+
+        if ::types_nbtree::P_ISLEAF(&opaque) {
+            if offnum >= P_FIRSTDATAKEY(&opaque) {
+                if bt_tuple_is_pivot(itup) {
+                    return false;
+                }
+                return tupnatts == natts;
+            }
+            debug_assert!(!::types_nbtree::P_RIGHTMOST(&opaque));
+            if !heapkeyspace {
+                return tupnatts == nkeyatts;
+            }
+        } else if offnum == P_FIRSTDATAKEY(&opaque) {
+            if heapkeyspace {
+                return tupnatts == 0;
+            }
+            // Pre-v11 negative-infinity tuples had P_HIKEY as their offset.
+            return tupnatts == 0 || crate::itup::t_tid(itup).ip_posid == ::types_nbtree::P_HIKEY;
+        } else if !heapkeyspace {
+            return tupnatts == nkeyatts;
+        }
+
+        debug_assert!(heapkeyspace);
+        if !bt_tuple_is_pivot(itup) {
+            return false;
+        }
+        if bt_tuple_is_posting(itup) {
+            return false;
+        }
+        if bt_tuple_get_heap_tid(itup).is_some() && tupnatts != nkeyatts {
+            return false;
+        }
+        tupnatts > 0 && tupnatts <= nkeyatts
+    }
+}
+
+/// _bt_allequalimage (nbtutils.c), sans the DEBUG1 message.
+pub fn bt_allequalimage(rel: &Relation<'_>) -> PgResult<bool> {
+    if rel.indnatts() != rel.indnkeyatts() {
+        return Ok(false);
+    }
+    for i in 0..rel.indnkeyatts() as usize {
+        let opfamily = rel.rd_opfamily[i];
+        let opcintype = rel.rd_opcintype[i];
+        let collation = rel.rd_indcollation[i];
+        let equalimageproc = lsyscache::get_opfamily_proc(
+            opfamily,
+            opcintype,
+            opcintype,
+            ::types_nbtree::BTEQUALIMAGE_PROC as i16,
+        )?;
+        if equalimageproc == ::types_core::InvalidOid {
+            return Ok(false);
+        }
+        let mut finfo = fmgr_core::fmgr_info(equalimageproc)?;
+        let mut fcinfo = ::types_fmgr::LocalFcinfo::<1>::fresh(collation);
+        fcinfo.set_arg(0, Datum::from_oid(opcintype));
+        if !finfo.invoke(&mut fcinfo)?.as_bool() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}

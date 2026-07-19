@@ -268,7 +268,7 @@ pub(crate) fn set_meta_pd_lower(bytes: &mut [u8]) {
 }
 
 /// ginCompareEntries.
-pub(crate) fn ginCompareEntries(
+pub fn ginCompareEntries(
     state: &GinState,
     attnum: OffsetNumber,
     a: Datum,
@@ -286,7 +286,7 @@ pub(crate) fn ginCompareEntries(
 }
 
 /// ginCompareAttEntries: attribute number dominates.
-pub(crate) fn ginCompareAttEntries(
+pub fn ginCompareAttEntries(
     state: &GinState,
     attnum_a: OffsetNumber,
     a: Datum,

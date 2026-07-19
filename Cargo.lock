@@ -1340,6 +1340,59 @@ dependencies = [
 ]
 
 [[package]]
+name = "amcheck"
+version = "0.0.0"
+dependencies = [
+ "adt_scalar",
+ "bloomfilter",
+ "bufmgr",
+ "catalog_index",
+ "datum",
+ "detoast",
+ "dfmgr",
+ "elog_seams",
+ "execindexing",
+ "exectuples",
+ "funcapi",
+ "genam",
+ "gin",
+ "gin_vocab",
+ "guc",
+ "heapam",
+ "heaptoast",
+ "indexam",
+ "init_small",
+ "mcx",
+ "miscinit",
+ "multixact",
+ "nbtree",
+ "pg_class_seams",
+ "postgres_seams",
+ "procarray",
+ "relation",
+ "smgr",
+ "snapmgr",
+ "syscache_seams",
+ "table",
+ "tableam",
+ "toastdesc",
+ "transam",
+ "transam_xlog",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nbtree",
+ "types_rel",
+ "types_scan",
+ "types_storage",
+ "types_tuple",
+ "varlena",
+ "varsup",
+ "visibilitymap",
+ "xact",
+]
+
+[[package]]
 name = "analyze_seams"
 version = "0.1.0"
 dependencies = [
@@ -14715,6 +14768,7 @@ dependencies = [
  "aio_uring",
  "allpaths",
  "amapi",
+ "amcheck",
  "auth",
  "auth_scram",
  "autovacuum",
