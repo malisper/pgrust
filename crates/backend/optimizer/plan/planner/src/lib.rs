@@ -65,7 +65,7 @@ use types_nodes::nodes_enums::CmdType;
 use types_nodes::parsenodes::Query;
 use types_nodes::plannodes::PlannedStmt;
 use types_nodes::Node;
-use types_portal::{ParamListHandle, CURSOR_OPT_FAST_PLAN, CURSOR_OPT_PARALLEL_OK, CURSOR_OPT_SCROLL};
+use types_portal::{ParamListHandle, CURSOR_OPT_FAST_PLAN, CURSOR_OPT_PARALLEL_OK};
 use types_pathnodes::PtId;
 
 use crate::createplan::create_plan;
@@ -315,11 +315,15 @@ pub fn standard_planner<'mcx>(
     let best_path = get_cheapest_fractional_path(&run, final_rel, tuple_fraction);
     let mut top_plan = create_plan(&mut run, best_path)?;
 
-    if (cursor_options & CURSOR_OPT_SCROLL) != 0
-        && !execmain::exec_supports_backward_scan(Some(top_plan))
-    {
-        top_plan = crate::subselect::materialize_finished_plan(mcx, top_plan)?;
-    }
+    // C planner.c:444-451 wraps a SCROLL cursor's plan in Material when
+    // !ExecSupportsBackwardScan, so the EXECUTOR can run backwards on demand.
+    // DELETED (backward-execution wave B3, cursors inc-2 §6 rider row 2):
+    // the executor never runs backwards — every backward cursor read is
+    // served by the portal tuplestore (SE13 CURSORS flip), and the run seam
+    // refuses backward entry outright (deletion-prep B1). The store gives
+    // the same re-read stability the Material wrap existed to provide.
+    // Ratified strategy divergence from C: Michael's 2026-07-17
+    // SCROLL/WITH-HOLD decision (notes/se-wave10-integration.md §5 item 2).
     // debug_parallel_query test wrap: a single-copy Gather over the whole
     // plan. Under =regress with initPlans present the wrap is skipped (moving
     // the initPlans to the Gather would change EXPLAIN output; C skips too).
