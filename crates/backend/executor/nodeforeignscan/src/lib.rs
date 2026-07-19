@@ -13,7 +13,7 @@ use ::mcx::{Mcx, PgBox};
 use ::types_core::{InvalidOid, Oid};
 use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use ::types_nodes::plannodes::ForeignScan;
-use ::types_nodes::{CmdType, FdwExplainProp, FdwKind, NUM_FDW_KINDS};
+use ::types_nodes::{CmdType, FdwExplainFlags, FdwExplainProp, FdwKind, NUM_FDW_KINDS};
 use ::types_slot::{TupleSlotKind, EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
 
 pub fn init_seams() {}
@@ -37,12 +37,13 @@ pub struct FdwExecRoutine {
     pub rescan:
         for<'mcx> fn(&mut ForeignScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<()>,
     pub end: for<'mcx> fn(&mut ForeignScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<()>,
-    /// Emits FdwExplainProp, not ExplainState; the `bool` is C's es->costs.
+    /// Emits FdwExplainProp, not ExplainState; FdwExplainFlags carries the
+    /// ExplainState bits C's hooks read (es->costs, es->verbose).
     pub explain: Option<
         for<'mcx> fn(
             &mut ForeignScanState<'mcx>,
             &mut EStateData<'mcx>,
-            bool,
+            FdwExplainFlags,
             &mut dyn FnMut(&str, FdwExplainProp<'_>) -> PgResult<()>,
         ) -> PgResult<()>,
     >,
@@ -221,11 +222,11 @@ pub fn exec_rescan_foreign_scan<'mcx>(
 pub fn explain_foreign_scan<'mcx>(
     node: &mut ForeignScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
-    costs: bool,
+    flags: FdwExplainFlags,
     emit: &mut dyn FnMut(&str, FdwExplainProp<'_>) -> PgResult<()>,
 ) -> PgResult<()> {
     match fdw_exec_routine(node.fdwroutine).explain {
-        Some(f) => f(node, estate, costs, emit),
+        Some(f) => f(node, estate, flags, emit),
         None => Ok(()),
     }
 }

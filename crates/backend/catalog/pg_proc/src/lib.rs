@@ -15,8 +15,9 @@ use types_core::{
     TYPE_RELATION_ID,
 };
 use types_error::{
-    PgError, PgResult, ERRCODE_DUPLICATE_FUNCTION, ERRCODE_INVALID_FUNCTION_DEFINITION,
-    ERRCODE_TOO_MANY_ARGUMENTS, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
+    PgError, PgResult, ERRCODE_DUPLICATE_FUNCTION, ERRCODE_INSUFFICIENT_PRIVILEGE,
+    ERRCODE_INVALID_FUNCTION_DEFINITION, ERRCODE_TOO_MANY_ARGUMENTS,
+    ERRCODE_UNDEFINED_FUNCTION, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 use types_rel::RowExclusiveLock;
 use types_tuple::NameData;
@@ -1045,21 +1046,70 @@ fn utf8_len(b: u8) -> usize {
     }
 }
 
-// fmgr_c_validator (pg_proc.c). DIVERGENCE: CheckFunctionValidatorAccess is
-// unported (as in fmgr_sql_validator); the load runs regardless of
-// check_function_bodies, exactly as C.
+// CheckFunctionValidatorAccess (fmgr.c), the two catalog gates: validators
+// are called with user-specified OIDs, so a bad OID must be a user-facing
+// error, and a function of another language is rejected against that
+// language's lanvalidator. DIVERGENCE (pre-existing scope): the two
+// object_aclcheck permission gates (language USAGE, function EXECUTE) stay
+// unported; they only bite non-superuser callers.
+fn check_function_validator_access(validator_oid: Oid, funcoid: Oid) -> PgResult<()> {
+    let Some(proc_shape) = syscache_seams::lookup_pg_proc_fmgr::call(funcoid)? else {
+        return Err(PgError::error(format!("function with OID {funcoid} does not exist"))
+            .with_sqlstate(ERRCODE_UNDEFINED_FUNCTION)
+            .into());
+    };
+    let Some(lang) = syscache_seams::lookup_pg_language_fmgr::call(proc_shape.prolang)? else {
+        return Err(PgError::error(format!(
+            "cache lookup failed for language {}",
+            proc_shape.prolang
+        ))
+        .into());
+    };
+    if lang.lanvalidator != validator_oid {
+        return Err(PgError::error(format!(
+            "language validation function {validator_oid} called for language {} instead of {}",
+            proc_shape.prolang, lang.lanvalidator
+        ))
+        .with_sqlstate(ERRCODE_INSUFFICIENT_PRIVILEGE)
+        .into());
+    }
+    Ok(())
+}
+
+// fmgr_c_validator (pg_proc.c). The load runs regardless of
+// check_function_bodies, exactly as C ("for pg_dump loading it's much
+// better if we *do* check").
 fn fc_fmgr_c_validator(
-    _flinfo: Option<&mut types_fmgr::FmgrInfo>,
+    flinfo: Option<&mut types_fmgr::FmgrInfo>,
     fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,
 ) -> PgResult<Datum> {
     let funcoid = fcinfo.arg(0).as_oid();
+    // C reads the validator's own OID off flinfo->fn_oid; a builtin carrier
+    // always has it, but fall back to this function's catalog OID.
+    let validator_oid = flinfo.as_deref().map_or(FMGR_C_VALIDATOR_OID, |f| f.fn_oid);
+    check_function_validator_access(validator_oid, funcoid)?;
     let cx = mcx::MemoryContext::new("fmgr_c_validator");
+    // Past the gate the function IS a C-language function; pg_proc rows for
+    // those always carry prosrc+probin. C's SysCacheGetAttrNotNull turns a
+    // corrupt NULL into ERROR, not a crash — mirror that (was a panic:
+    // fnconf campaign-2 ledger, OID 2247, pg_proc:1058).
     let prosrc = syscache_seams::lookup_pg_proc_prosrc::call(cx.mcx(), funcoid)?
-        .unwrap_or_else(|| panic!("null prosrc for C function {funcoid}"));
+        .ok_or_else(|| null_proc_column_err("prosrc"))?;
     let probin = syscache_seams::lookup_pg_proc_probin::call(cx.mcx(), funcoid)?
-        .unwrap_or_else(|| panic!("null probin for C function {funcoid}"));
+        .ok_or_else(|| null_proc_column_err("probin"))?;
     dfmgr::load_external_function(&probin, &prosrc, true)?;
     Ok(Datum::null())
+}
+
+const FMGR_C_VALIDATOR_OID: Oid = 2247;
+
+// C SysCacheGetAttrNotNull's elog text (syscache.c).
+#[cold]
+fn null_proc_column_err(column: &str) -> Box<PgError> {
+    PgError::error(format!(
+        "unexpected null value in cached tuple for catalog pg_proc column {column}"
+    ))
+    .into()
 }
 
 static PG_PROC_BUILTINS: &[types_fmgr::FmgrBuiltin] = &[types_fmgr::FmgrBuiltin {

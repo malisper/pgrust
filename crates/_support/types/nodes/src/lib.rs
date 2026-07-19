@@ -26,7 +26,7 @@ mod tags;
 
 pub use bitmapset::{bitmapword, Bitmapset, BmsComparison, BmsMembership, BITS_PER_BITMAPWORD};
 pub use equal::{equal, equal_opt, NodeEqual};
-pub use fdw::{FdwExplainProp, FdwKind, FdwRoutine, NUM_FDW_KINDS};
+pub use fdw::{FdwExplainFlags, FdwExplainProp, FdwKind, FdwRoutine, NUM_FDW_KINDS};
 pub use jointype::JoinType;
 // pg_stat_statements scribbles PlannedStmt.queryId in place (C parity);
 // re-exported so constructors need no direct types_storage edge.
