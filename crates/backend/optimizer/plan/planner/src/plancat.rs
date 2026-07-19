@@ -902,6 +902,18 @@ pub fn has_unique_index(run: &PlannerRun<'_>, rel: RelId, attno: i16) -> bool {
     false
 }
 
+// Proname of a dynamic-oid (extension) estimator proc; None for builtins.
+#[cold]
+fn dynamic_estimator_name(procid: Oid) -> PgResult<Option<String>> {
+    const FIRST_NORMAL_OBJECT_ID: Oid = 16384;
+    if procid < FIRST_NORMAL_OBJECT_ID {
+        return Ok(None);
+    }
+    let cx = ::mcx::MemoryContext::new("plancat estimator probe");
+    let name = lsyscache::get_func_name(cx.mcx(), procid)?.map(|n| n.as_str().to_string());
+    Ok(name)
+}
+
 // restriction_selectivity (plancat.c): closed-set oprrest dispatch.
 pub fn restriction_selectivity<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -973,9 +985,26 @@ pub fn restriction_selectivity<'mcx>(
         3560 => crate::network_selfuncs::networksel(run, operatorid, args, varrelid)?,
         3686 => crate::ts_selfuncs::tsmatchsel(run, args, varrelid)?,
         3817 => crate::array_selfuncs::arraycontsel(run, operatorid, args, varrelid)?,
-        other => panic!(
-            "restriction_selectivity (plancat.c): oprrest {other}; M2 selfuncs lane"
-        ),
+        // Extension estimators carry dynamic oids; match by proname. The
+        // intarray _sel wrappers substitute the built-in operator OID and
+        // call arraycontsel, exactly as their C bodies do.
+        other => match dynamic_estimator_name(other)?.as_deref() {
+            Some("_int_overlap_sel") => {
+                crate::array_selfuncs::arraycontsel(run, 2750, args, varrelid)?
+            }
+            Some("_int_contains_sel") => {
+                crate::array_selfuncs::arraycontsel(run, 2751, args, varrelid)?
+            }
+            Some("_int_contained_sel") => {
+                crate::array_selfuncs::arraycontsel(run, 2752, args, varrelid)?
+            }
+            Some("_int_matchsel") => {
+                crate::intarray_selfuncs::int_matchsel(run, args, varrelid)?
+            }
+            _ => panic!(
+                "restriction_selectivity (plancat.c): oprrest {other}; M2 selfuncs lane"
+            ),
+        },
     };
     if !(0.0..=1.0).contains(&result) {
         panic!("invalid restriction selectivity: {result}");
@@ -1027,7 +1056,14 @@ pub fn join_selectivity<'mcx>(
         3687 => crate::ts_selfuncs::DEFAULT_TS_MATCH_SEL,
         // arraycontjoinsel (array_selfuncs.c) is a C stub.
         3818 => crate::array_selfuncs::arraycontjoinsel(operatorid),
-        other => panic!("join_selectivity (plancat.c): oprjoin {other}; M2 selfuncs lane"),
+        // intarray _joinsel wrappers: built-in operator OID substituted into
+        // the arraycontjoinsel stub (matches the C wrappers).
+        other => match dynamic_estimator_name(other)?.as_deref() {
+            Some("_int_overlap_joinsel") => crate::array_selfuncs::arraycontjoinsel(2750),
+            Some("_int_contains_joinsel") => crate::array_selfuncs::arraycontjoinsel(2751),
+            Some("_int_contained_joinsel") => crate::array_selfuncs::arraycontjoinsel(2752),
+            _ => panic!("join_selectivity (plancat.c): oprjoin {other}; M2 selfuncs lane"),
+        },
     };
     if !(0.0..=1.0).contains(&result) {
         panic!("invalid join selectivity: {result}");

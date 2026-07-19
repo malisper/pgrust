@@ -187,6 +187,7 @@ pub fn init_all_with_transport(transport: Transport) {
     pg_prewarm::init_seams();
     file_fdw::init_seams();
     ltree::init_seams();
+    intarray::init_seams();
     pgcrypto::init_seams();
     pg_stat_statements::init_seams();
     pg_buffercache::init_seams();
