@@ -1,0 +1,9 @@
+[package]
+name = "postgres_fdw"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "postgres_fdw"
+path = "src/lib.rs"
