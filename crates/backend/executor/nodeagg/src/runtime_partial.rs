@@ -718,8 +718,20 @@ pub fn agg_poly_manifest(node: &AggStateData<'_>) -> Option<Vec<PolyTrans>> {
     let mut kinds: Vec<Option<PolyTransKind>> = vec![None; numtrans];
     if let Some(plan) = crate::agg_lanefold_plan(node) {
         for t in plan.trans.iter() {
+            // A classified-but-not-exportable kind is NOT a refusal here:
+            // skip it and let the peragg inspection below decide. Before the
+            // fold-trans inc-2 tier (lane aggseq-fold2), sum/avg(numeric)
+            // never classified, so the NumericAvg inspection owned those
+            // transnos; now classify() returns a NumAccum LaneTrans for the
+            // same shape (knob-gated) and a fail-closed `return None` here
+            // would kill the poly arm under FOLD_TRANS=1 + AGG_POLY=1 — a
+            // keyed-then-refused serial landing (the suppress-then-refuse
+            // defect class). Skipping restores the pre-classification
+            // behavior exactly: numeric transnos re-classify as NumericAvg;
+            // every other unexportable kind still refuses in the loop below
+            // (its aggfnoid is not sum/avg(numeric)).
             if !kind_admits(t.kind) {
-                return None;
+                continue;
             }
             kinds[t.transno as usize] = Some(PolyTransKind::Lane(*t));
         }
@@ -972,6 +984,25 @@ fn absorb_poly_partial_states(
 #[cfg(test)]
 mod poly_tests {
     use super::*;
+
+    // Fold-trans kinds are SERIAL-ONLY: kind_admits must refuse them all, so
+    // (a) the plan-based export path falls through to the poly path, and
+    // (b) agg_poly_manifest's classified-transno seeding SKIPS them (the
+    // skip-not-refuse arm above — a NumAccum transno re-classifies as
+    // NumericAvg by peragg inspection, keeping the poly arm alive under
+    // FOLD_TRANS=1 + AGG_POLY=1; composition fix, lane aggseq-fold2).
+    #[test]
+    fn fold_trans_kinds_never_export() {
+        for k in [
+            LaneKind::FSum,
+            LaneKind::FAccum,
+            LaneKind::NumAccum,
+            LaneKind::FRegrAccum,
+            LaneKind::Count2,
+        ] {
+            assert!(!kind_admits(k), "{k:?} is serial-only (fold-trans tier)");
+        }
+    }
 
     fn snap(digits: Vec<::adt_numeric::NumericDigit>, weight: i32, dscale: i32) -> NumericSnapshot {
         NumericSnapshot { ndigits: digits.len() as i32, weight, sign: 0, dscale, digits }
