@@ -677,6 +677,23 @@ pub fn PostgresSimNetMain(argv: &[String], username: &str) -> ! {
         let snap = SimInherited::capture();
         let code1 =
             run_session_on_this_thread("PGRUST_SIMNET_TRANSCRIPT", "PGRUST_SIMNET_OPLOG");
+        // DST-MULTIBACKEND: the pool-miss deferral corpus
+        // (PGRUST_SIMNET_POOLMISS, run with PGRUST_NO_WORKER_POOL so every
+        // parallel registration misses the pool and defers to "postmaster
+        // start"). "defer" = run the startup-exit promotion the PM_INIT
+        // surrogate never ran (PM_RUN + conns_allowed + the postmaster
+        // environment) — C's moment is the startup child's clean exit, and
+        // session 1 (which owned recovery) just completed on this thread —
+        // so pm_service_pending's maybe_start_bgworkers arm actually STARTS
+        // the deferred worker through postmaster_child_launch's existing
+        // spawn door (capture/adopt already on that path). Anything else
+        // (the red) leaves the surrogate at PM_INIT: the deferred worker
+        // can never start (the simcorpus §7 boundary resurrected) and the
+        // virtual-time ceiling (PGRUST_SIM_VCEIL_S) names the hang
+        // deterministically instead of a wall-clock timeout.
+        if std::env::var("PGRUST_SIMNET_POOLMISS").as_deref() == Ok("defer") {
+            postmaster_seams::pm_promote_run::call();
+        }
         let adopt = vfs::sim::SimVfs::current_universe_id();
         assert!(adopt.is_some(), "parquery: boot thread lost its universe binding");
         let s2 = second_session_thread(argv.to_vec(), datadir.clone(), snap, adopt);

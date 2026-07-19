@@ -126,7 +126,30 @@ struct Registry {
 
 static REGISTRY: Mutex<Option<Registry>> = Mutex::new(None);
 
+/// DST-MULTIBACKEND red battery (sim-only, env-armed): resurrect the pool=4
+/// wedge deliberately — `PGRUST_SIM_RAWREG=1` routes every registry acquire
+/// through a RAW std::sync::Mutex gate the permit scheduler cannot see,
+/// restoring the exact pre-conversion blocking structure (a claimed standby
+/// granted the permit blocks raw on the gate the Gather leader holds across
+/// parallel_pool_dispatch). THE watchdog must catch it as
+/// permit-holder-blocked-outside-interception; the rawness IS the fixture
+/// (the sim_sched_demo P4-red discipline — never converts). Registry access
+/// never nests (single-closure discipline), so the non-reentrant gate is
+/// safe when armed; native builds compile none of this.
+#[cfg(pgrust_sim)]
+fn raw_registry_gate() -> Option<std::sync::MutexGuard<'static, ()>> {
+    static ARMED: pgsync::OnceLock<bool> = pgsync::OnceLock::new();
+    static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    if *ARMED.get_or_init(|| std::env::var_os("PGRUST_SIM_RAWREG").is_some()) {
+        Some(GATE.lock().unwrap_or_else(|e| e.into_inner()))
+    } else {
+        None
+    }
+}
+
 fn with_registry<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
+    #[cfg(pgrust_sim)]
+    let _raw_gate = raw_registry_gate();
     let mut guard = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
     let reg = guard
         .as_mut()
