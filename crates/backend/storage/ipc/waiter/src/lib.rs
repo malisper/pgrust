@@ -688,5 +688,201 @@ pub use global::{
     unpark_word, wake_read_fd,
 };
 
+// ===========================================================================
+// Loom-world global layer (LATCH-LOOM lane): the minimal analog of `global`
+// that makes latch (and any waiter consumer) loom-BUILDABLE, so loom models
+// drive the REAL wait/set paths instead of mirrors. Slots live in a
+// per-iteration slab (`pgsync::process_global!` — loom's lazy_static resets
+// every `loom::model` iteration); the current thread's slot rides
+// loom::thread_local (also per-iteration). No fd-park, no cadence, no time:
+// * cadence is DISABLED (parks prove the primitive, not the recheck
+//   backstop — the waiter/tests/loom.rs convention);
+// * the clock reads 0 forever and waits are untimed condvar waits, so a
+//   timed park blocks until a real unpark — a model must always deliver the
+//   wake it is proving (pgsync papering row L4: no model depends on real
+//   time passing); `sleep` is yield_now for the same reason.
+// ===========================================================================
+
+#[cfg(loom)]
+mod model_global {
+    use super::*;
+    use std::cell::Cell;
+
+    /// Model slab bound: loom::MAX_THREADS is 4, one slot per thread.
+    pub const MODEL_WAITER_CAP: usize = 4;
+
+    pgsync::process_global! {
+        static SLOTS: [Slot; MODEL_WAITER_CAP] =
+            model_slot_slab();
+        static SLOT_NEXT: sync::atomic::AtomicUsize = sync::atomic::AtomicUsize::new(0);
+    }
+
+    fn model_slot_slab() -> [Slot; MODEL_WAITER_CAP] {
+        core::array::from_fn(|_| Slot::new_for_model())
+    }
+
+    pgsync::__loom::thread_local! {
+        static CURRENT: Cell<Option<usize>> = Cell::new(None);
+    }
+
+    struct LoomClock;
+
+    impl clock::WaiterClock for LoomClock {
+        fn now_ms(&self) -> i64 {
+            0
+        }
+        fn wait<'a>(
+            &self,
+            slot: &'a Slot,
+            guard: MutexGuard<'a, SlotInner>,
+            _timeout_ms: Option<i64>,
+        ) -> (MutexGuard<'a, SlotInner>, bool) {
+            (slot.wait_for_model(guard), false)
+        }
+    }
+
+    // Zero-sized and stateless: a plain static holds no loom types.
+    static CLOCK: LoomClock = LoomClock;
+
+    fn current_slot() -> usize {
+        CURRENT.with(|c| {
+            if let Some(idx) = c.get() {
+                return idx;
+            }
+            let idx = SLOT_NEXT.fetch_add(1, sync::atomic::Ordering::Relaxed);
+            assert!(idx < MODEL_WAITER_CAP, "model waiter slab exhausted");
+            SLOTS[idx].issue_token();
+            c.set(Some(idx));
+            idx
+        })
+    }
+
+    /// See `global::current_handle` — publish BEFORE the final predicate
+    /// re-check that precedes the park (the Dekker discipline of the latch).
+    pub fn current_handle() -> WakerHandle {
+        let idx = current_slot();
+        let token = SLOTS[idx].lock().token;
+        WakerHandle::new(idx, token)
+    }
+
+    /// Park until unparked. Cadence disabled: the models prove the wake
+    /// protocol, never the debug backstop.
+    pub fn park() -> ParkResult {
+        let idx = current_slot();
+        SLOTS[idx].park_core(None, None, &CLOCK)
+    }
+
+    /// Timed park under a clock with no time: blocks until a real unpark
+    /// (the deadline never advances). Models must deliver the wake.
+    pub fn park_timeout(timeout: core::time::Duration) -> ParkResult {
+        let _ = timeout;
+        let idx = current_slot();
+        SLOTS[idx].park_core(None, None, &CLOCK)
+    }
+
+    /// Papering row L4 semantics: no model may depend on real time passing.
+    pub fn sleep(_timeout: core::time::Duration) {
+        pgsync::thread::yield_now();
+    }
+
+    /// Monotonic ms of the model clock (constant 0 — deadline math is inert
+    /// under loom; see the module comment).
+    pub fn now_ms() -> i64 {
+        0
+    }
+
+    pub fn unpark(handle: WakerHandle) -> Unparked {
+        let (idx, token) = handle.unpack();
+        if idx >= MODEL_WAITER_CAP {
+            return Unparked::Stale;
+        }
+        SLOTS[idx].unpark_token(token)
+    }
+
+    pub fn unpark_word(word: u64) -> Unparked {
+        match WakerHandle::from_u64(word) {
+            Some(h) => unpark(h),
+            None => Unparked::Stale,
+        }
+    }
+
+    /// Pooled-thread reuse boundary, real semantics over the model slab
+    /// (outstanding handles go Stale).
+    pub fn reissue_current_token() {
+        let idx = current_slot();
+        SLOTS[idx].reissue_token();
+    }
+
+    // -- fd-park surface (waiteventset consumers must COMPILE under loom;
+    //    models never drive epoll paths — wasm-precedent stubs + real mode
+    //    bookkeeping where the slot core carries it) -----------------------
+
+    /// No pipe(2) in a loom model (wasm precedent: fd-park is unavailable;
+    /// callers see ENOSYS).
+    pub fn ensure_wake_pipe() -> Result<i32, i32> {
+        Err(libc::ENOSYS)
+    }
+
+    /// A model has no wake pipe to hand out — reaching this is a model bug.
+    pub fn wake_read_fd() -> i32 {
+        panic!("waiter::wake_read_fd: no wake pipe exists under loom models")
+    }
+
+    /// Mode bookkeeping identical to the global layer's (the slot core owns
+    /// the state machine); there is no pipe to register.
+    pub fn begin_fd_park() -> bool {
+        let idx = current_slot();
+        let mut g = SLOTS[idx].lock();
+        match g.mode {
+            Mode::Notified => {
+                g.mode = Mode::Idle;
+                false
+            }
+            Mode::Idle => {
+                g.mode = Mode::ParkedFd;
+                true
+            }
+            m => panic!("begin_fd_park in mode {m:?}"),
+        }
+    }
+
+    pub fn end_fd_park() {
+        let idx = current_slot();
+        let mut g = SLOTS[idx].lock();
+        match g.mode {
+            Mode::ParkedFd | Mode::Notified => g.mode = Mode::Idle,
+            m => panic!("end_fd_park in mode {m:?}"),
+        }
+    }
+
+    /// Nothing can be queued on a pipe that does not exist.
+    pub fn drain_wake_fd() -> Result<(), i32> {
+        Ok(())
+    }
+
+    /// Stall diagnostics over the model slab (same routing states as the
+    /// global layer, minus fd modes' pipe detail).
+    pub fn describe_word(word: u64) -> String {
+        let Some(h) = WakerHandle::from_u64(word) else {
+            return "MISSING".into();
+        };
+        let (idx, token) = h.unpack();
+        if idx >= MODEL_WAITER_CAP {
+            return format!("INVALID(slot:{idx})");
+        }
+        let g = SLOTS[idx].lock();
+        if g.token != token || g.mode == Mode::Free {
+            return format!("STALE(slot:{idx} tok:{token} cur:{})", g.token);
+        }
+        format!("waiter:slot={idx} tok={token} state={:?}", g.mode)
+    }
+}
+
+#[cfg(loom)]
+pub use model_global::{
+    begin_fd_park, current_handle, describe_word, drain_wake_fd, end_fd_park, ensure_wake_pipe,
+    now_ms, park, park_timeout, reissue_current_token, sleep, unpark, unpark_word, wake_read_fd,
+};
+
 #[cfg(all(test, not(loom)))]
 mod tests;
