@@ -4057,10 +4057,15 @@ impl<'mcx> ::nodehash::HashBuildInput<'mcx> for PlanStateNode<'mcx> {
                 Some(_) => fused_arm_enabled(FusedArm::HashBuildProj),
                 None => fused_arm_enabled(FusedArm::HashBuild),
             };
-            if arm_on
+            let engaged = arm_on
                 && hash_build_fusible(ss, estate)
-                && ::nodeseqscan::seq_scan_batch_supported(ss, estate)?
-            {
+                && ::nodeseqscan::seq_scan_batch_supported(ss, estate)?;
+            // SE-HASHOFF census tick (stats-armed runs only): classify this
+            // build event at the arm chokepoint before any drive-side
+            // effect. Accounting only — the engage decision above is
+            // untouched.
+            crate::lanev2::fused_hash_build_census_seq(engaged, proj_slot.is_some());
+            if engaged {
                 ::nodeseqscan::seq_scan_batch_soa_prepare(
                     ss,
                     estate,
@@ -4081,6 +4086,10 @@ impl<'mcx> ::nodehash::HashBuildInput<'mcx> for PlanStateNode<'mcx> {
                     }
                 }
             }
+        } else {
+            // SE-HASHOFF census: non-SeqScan build child — outside both
+            // fused hash-build arms' surface by construction.
+            crate::lanev2::fused_hash_build_census_other();
         }
         ::nodehash::multi_exec_hash(hs, self, estate)
     }
