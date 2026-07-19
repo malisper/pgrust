@@ -14875,6 +14875,20 @@ pub use push::cursor_store_fill_set_for_tests;
 pub(crate) use push::{
     cursor_store_batch_fill, run_seam_backward_evidence, run_seam_backward_evidence_count,
 };
+
+// SE-HASHOFF census face (deletion-prep arms #6/#7; notes/
+// se-hashoff-letters.md): procnode's fused hash-build chokepoint ticks the
+// stats-armed census counters through these crate-visible wrappers — dump
+// rows `fused-hash-build-*` in the PGRUST_LANE_V2_STATS TSV. Measurement
+// accounting only; no admission decision reads them.
+#[inline]
+pub(crate) fn fused_hash_build_census_seq(engaged: bool, proj: bool) {
+    stats::tick_fused_hash_build_seq(engaged, proj);
+}
+#[inline]
+pub(crate) fn fused_hash_build_census_other() {
+    stats::tick_fused_hash_build_other();
+}
 #[cfg(test)]
 pub(crate) use push::{cursor_fill_step_seqscan_for_tests, cursor_store_ever_armed};
 // --- end WS-CB wave-10 ------------------------------------------------------------
