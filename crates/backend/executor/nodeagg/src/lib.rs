@@ -4549,6 +4549,29 @@ pub fn batch_emit_resolve(node: &AggStateData<'_>) -> Option<BatchEmitPlan> {
     Some(BatchEmitPlan { cols, idx: Vec::new(), keyvals: Vec::new(), vals: Vec::new() })
 }
 
+/// SE-AGGPOLY (band 101001): every aggregate's ARGUMENT expressions (and
+/// FILTER, belt-and-braces — the poly manifest refuses filters anyway) —
+/// the helper-side evaluation surface of a poly runtime engagement: the
+/// per-row transition programs run on helpers, while finalize + HAVING +
+/// projection run on the leader. `None` = a non-TargetEntry argument form
+/// (refuse fail-closed). The caller applies its parallel-safety walker to
+/// every returned node.
+pub fn agg_poly_arg_exprs<'mcx>(
+    node: &AggStateData<'mcx>,
+) -> Option<Vec<::types_nodes::node_tree::Node<'mcx>>> {
+    let mut out = Vec::new();
+    for pa in node.peragg.iter() {
+        for a in pa.aggref.args.iter() {
+            let tle = a.as_target_entry()?;
+            out.push(tle.expr);
+        }
+        if let Some(f) = pa.aggref.aggfilter {
+            out.push(f);
+        }
+    }
+    Some(out)
+}
+
 /// Lane-v2 fold plan classified at init; None = the lane is off, the shape
 /// can never engage the breaker, or no transition admits (`lanefold::classify`
 /// returned None).
