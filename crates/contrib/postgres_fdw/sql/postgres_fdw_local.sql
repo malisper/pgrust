@@ -118,11 +118,12 @@ ALTER USER MAPPING FOR public SERVER testserver1
 ALTER SERVER testserver1 OPTIONS (ADD use_remote_estimates 'false');
 ALTER FOREIGN TABLE ft1 OPTIONS (ADD table_nam 'x');
 
--- per-type value checks
-ALTER SERVER testserver1 OPTIONS (ADD fdw_startup_cost '-1');
-ALTER SERVER testserver1 OPTIONS (ADD fetch_size '0');
-ALTER SERVER testserver1 OPTIONS (ADD fetch_size 'nonint');
-ALTER SERVER testserver1 OPTIONS (ADD use_remote_estimate 'not_a_bool');
+-- per-type value checks (loopback carries none of these options yet, so
+-- these reach the validator, not the duplicate-option core check)
+ALTER SERVER loopback OPTIONS (ADD fdw_startup_cost '-1');
+ALTER SERVER loopback OPTIONS (ADD fetch_size '0');
+ALTER SERVER loopback OPTIONS (ADD fetch_size 'nonint');
+ALTER SERVER loopback OPTIONS (ADD use_remote_estimate 'not_a_bool');
 
 \det+
 
