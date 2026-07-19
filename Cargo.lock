@@ -12796,6 +12796,7 @@ dependencies = [
  "miscinit",
  "miscinit_seams",
  "pg_clock",
+ "pg_locale",
  "pg_path",
  "pg_prng",
  "pg_sema_seams",

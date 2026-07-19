@@ -37,7 +37,8 @@ pub use libc_locale::{pg_tolower, pg_toupper, WcClass};
 pub use setup::{
     assign_locale_messages, assign_locale_monetary, assign_locale_numeric, assign_locale_time,
     check_locale, check_locale_messages, check_locale_monetary, check_locale_numeric,
-    check_locale_time, database_ctype_is_c, pg_perm_setlocale, set_database_ctype_is_c,
+    check_locale_time, database_ctype_is_c, freeze_global_locale, pg_perm_setlocale,
+    set_database_ctype_is_c,
 };
 
 pub use pg_database_seams::{COLLPROVIDER_BUILTIN, COLLPROVIDER_ICU, COLLPROVIDER_LIBC};

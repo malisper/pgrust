@@ -585,6 +585,13 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
     // deferred contrib load (hook-surface.md's `tap!` boot-phase gate).
     seam_core::close_tap_boot_phase();
 
+    // Same instant: the process-global libc locale is now final. setlocale()
+    // is process-global and not thread-safe — a concurrent transition frees
+    // locale storage other threads may be mid-read on (the diesel parallel
+    // suite SIGABRT). From here on pg_locale validates with newlocale() and
+    // keeps per-thread records instead of touching the global.
+    pg_locale::freeze_global_locale();
+
     UpdatePMState(PMState::PM_STARTUP);
 
     crate::serverloop::maybe_adjust_io_workers();
