@@ -280,7 +280,7 @@ rand	crates/port/pg_strong_random/src/os.rs	4	DST-REVIEW(ws-rng): SANCTIONED ent
 rand	crates/backend/replication/walreceiver/src/client.rs	1	DST-REVIEW(t27-train): t27-train merge reconciliation — site landed in the t26 recovery/metalfix re-board (post-dates the DST census seed @ 3fee87ff0); routing onto the pg_strong_random funnel (s2.3) chartered to the DST program (t28)
 
 # ==== spawn ====
-spawn	crates/backend/access/pgrcolumnar/src/loadsort.rs	1	DST-REVIEW(permit-s5): row 16 CONVERTED — door-routed via the pgsync::thread child-registering wrapper (scanner sees the textual thread::Builder, not the pgsync routing); sim-UNREACHABLE today (open_prefetch sim arm degrades: feeders would EBADF in thread-local SimVfs universes — shared-universe SimVfs, s2 #6 item 1, is the remaining blocker; row 8 defers with it)
+spawn	crates/backend/access/pgrcolumnar/src/loadsort.rs	2	DST-REVIEW(simvfs-shared): row 16 CONVERTED + sim-REACHABLE — feeder pool AND the sim_demo share-proof helper spawn via the pgsync::thread child-registering wrapper (scanner sees the textual thread::Builder, not the pgsync routing); feeders adopt the pump's shared universe (s2 #6 item 1 DISCHARGED; row 8 converted with it)
 spawn	crates/backend/access/pgrcolumnar/src/writer.rs	1	DST-REVIEW(permit-s5): row 16 CONVERTED — stitch pool door-routed via the pgsync::thread wrapper (scanner sees the textual thread::Builder, not the pgsync routing); pure in-memory interning, schedulable once a corpus reaches install_stitch_pool
 spawn	crates/backend/executor/runtime/src/pool.rs	1	default-spawner arm; production uses spawn_with via launch_backend rtpool
 spawn	crates/backend/lib/dshash/bench/rig/src/main.rs	1	bench-rig crate, not server prod
@@ -359,7 +359,7 @@ env	crates/backend/storage/ipc/shm_mq/src/stall.rs	2
 env	crates/backend/storage/ipc/waiter/src/lib.rs	2
 env	crates/backend/storage/lmgr/condition_variable/src/lib.rs	1
 env	crates/backend/tcop/postgres/src/simple_query.rs	2
-env	crates/backend/tcop/postgres/src/sim_net.rs	9	DST-REVIEW(t28-compose): SIM-HARNESS knobs, all three lanes' additions coexist on the merged tree — base 4 (PGRUST_SIMNET_SQL/TRANSCRIPT/OPLOG/SEED_DIRS) + inc-2 FAULTS plan spec + permit-s1-demo SESSIONS/DUO_SERIAL two-backend corpus knobs + permit-s2 PERMIT_WPOOL wpool-demo gate + permit-s5 PERMIT_RTPOOL rtpool-demo gate; cfg(pgrust_sim)-only via the mod decl (no product reader) — pg_clock/sim.rs precedent; absorbed by the s2.5 knobs-registry charter
+env	crates/backend/tcop/postgres/src/sim_net.rs	13	DST-REVIEW(simvfs-shared): SIM-HARNESS knobs, all lanes' additions coexist on the merged tree — base 4 (PGRUST_SIMNET_SQL/TRANSCRIPT/OPLOG/SEED_DIRS) + inc-2 FAULTS plan spec + permit-s1-demo SESSIONS/DUO_SERIAL two-backend corpus knobs + permit-s2 PERMIT_WPOOL wpool-demo gate + permit-s5 PERMIT_RTPOOL rtpool-demo gate + simvfs-shared SIMVFS_SHARED enable / SIMVFS_RED red-battery / PERMIT_LOADSORT P8 gate / RUNTIME postmaster-parity gate (P7); cfg(pgrust_sim)-only via the mod decl (no product reader) — pg_clock/sim.rs precedent; absorbed by the s2.5 knobs-registry charter
 env	crates/backend/tcop/postgres/src/stmt_trace.rs	1
 env	crates/backend/test_regress/src/lib.rs	2
 env	crates/backend/timezone/pgtz/src/lib.rs	1
@@ -388,7 +388,7 @@ env	crates/pl/plpgsql/src/handler.rs	1	DST-REVIEW(t27-train): spi-compile-residu
 # ==== blocking ====
 blocking	crates/backend/access/heap/vacuumlazy/src/lib.rs	1
 blocking	crates/backend/access/heap/vacuumlazy/src/morsels.rs	1
-blocking	crates/backend/access/pgrcolumnar/src/loadsort.rs	6	P3: readahead channels (s3.3)
+blocking	crates/backend/access/pgrcolumnar/src/loadsort.rs	1	DST-REVIEW(simvfs-shared): row 8 CONVERTED — prefetch channels are pgsync::mailbox now; the 1 surviving site is the feeder's no-progress pgsync::thread::sleep (a TimedPark under the scheduler; scanner sees the textual sleep, not the pgsync routing — the permit-s5 P6-demo precedent)
 blocking	crates/backend/access/pgrcolumnar/src/scan.rs	2
 blocking	crates/backend/access/transam/parallel/src/standing.rs	4	CONVERTED (permit-s3): gang Condvar/Mutex/OnceLock = pgsync types; leader join = the modeled detach-count cv join (loom standing_gang_detach_count_join_no_lost_wake); SCHED-VISIBLE under sim
 blocking	crates/backend/access/transam/transam_xlog/src/startup.rs	1
@@ -432,7 +432,7 @@ blocking	crates/backend/replication/walsender/src/lib.rs	1	DST-REVIEW(t27-train)
 # 2026-07-17d @ dst/substrate e1a7e7b47 (P3-CENSUS). Zero-arg .join()
 # call shape. Exit criterion: every row converted, proof-ledgered, or
 # annotated as a non-thread name collision.
-join	crates/backend/access/pgrcolumnar/src/loadsort.rs	1	P3 row 14: prefetch-pool drop-path join (bounded — after stop flag + channel drop); permit-s5: now a pgsync::thread hooked Join park under the scheduler (row 14 v2 shape)
+join	crates/backend/access/pgrcolumnar/src/loadsort.rs	2	DST-REVIEW(simvfs-shared): P3 row 14 — prefetch-pool drop-path join (bounded — after stop flag + channel drop) + the sim_demo share-proof helper join (bounded — the helper exits after its go-signal handshake); both pgsync::thread hooked Join parks under the scheduler (row 14 v2 shape)
 join	crates/backend/access/pgrcolumnar/src/writer.rs	2	P3 row 14: stitch-pool close-then-join pair (drop + finalize, census D1); permit-s5: both are pgsync::thread hooked Join parks under the scheduler (row 14 v2 shape)
 join	crates/backend/commands/copy/src/parallel.rs	1	P3 row 15: explicit scoped pump join L1506 inside the row-5 gang (design row 14 called scope-gang joins "implicit")
 join	crates/backend/executor/nodeagg/src/merge.rs	2	P3 rows 15/18: scoped claimer joins L2692/L2922, gang-bounded
@@ -585,7 +585,6 @@ rawsync	crates/backend/access/common/syncscan/src/lib.rs	1
 rawsync	crates/backend/access/common/tidstore/src/lib.rs	1
 rawsync	crates/backend/access/heap/vacuumlazy/src/morsels.rs	1
 rawsync	crates/backend/access/pgrcolumnar/src/condcache.rs	1
-rawsync	crates/backend/access/pgrcolumnar/src/loadsort.rs	5
 rawsync	crates/backend/access/pgrcolumnar/src/part_cache.rs	1
 rawsync	crates/backend/access/pgrcolumnar/src/reader.rs	9
 rawsync	crates/backend/access/pgrcolumnar/src/scan.rs	4
