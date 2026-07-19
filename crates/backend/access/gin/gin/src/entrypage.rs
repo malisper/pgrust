@@ -25,36 +25,36 @@ use crate::{page_mut, page_opaque, page_ref};
 pub(crate) const GIN_TREE_POSTING: OffsetNumber = 0xffff;
 pub(crate) const GIN_ITUP_COMPRESSED: u32 = 1 << 31;
 
-pub(crate) type ITup = *const u8;
+pub type ITup = *const u8;
 
 
 #[inline]
-pub(crate) unsafe fn gin_get_nposting(itup: ITup) -> OffsetNumber {
+pub unsafe fn gin_get_nposting(itup: ITup) -> OffsetNumber {
     gin_item_pointer_offset(&itup::t_tid(itup))
 }
 
 #[inline]
-pub(crate) unsafe fn gin_is_posting_tree(itup: ITup) -> bool {
+pub unsafe fn gin_is_posting_tree(itup: ITup) -> bool {
     gin_get_nposting(itup) == GIN_TREE_POSTING
 }
 
 #[inline]
-pub(crate) unsafe fn gin_get_posting_tree(itup: ITup) -> BlockNumber {
+pub unsafe fn gin_get_posting_tree(itup: ITup) -> BlockNumber {
     gin_item_pointer_block(&itup::t_tid(itup))
 }
 
 #[inline]
-pub(crate) unsafe fn gin_get_posting_offset(itup: ITup) -> usize {
+pub unsafe fn gin_get_posting_offset(itup: ITup) -> usize {
     (gin_item_pointer_block(&itup::t_tid(itup)) & !GIN_ITUP_COMPRESSED) as usize
 }
 
 #[inline]
-pub(crate) unsafe fn gin_itup_is_compressed(itup: ITup) -> bool {
+pub unsafe fn gin_itup_is_compressed(itup: ITup) -> bool {
     gin_item_pointer_block(&itup::t_tid(itup)) & GIN_ITUP_COMPRESSED != 0
 }
 
 #[inline]
-pub(crate) unsafe fn gin_get_downlink(itup: ITup) -> BlockNumber {
+pub unsafe fn gin_get_downlink(itup: ITup) -> BlockNumber {
     gin_item_pointer_block(&itup::t_tid(itup))
 }
 
@@ -93,7 +93,7 @@ pub(crate) unsafe fn gin_get_null_category(state: &GinState, itup: ITup) -> GinN
 /// gintuple_get_attrnum. The multicolumn attnum is the first attribute (int2,
 /// never null): raw native-endian read at the data offset.
 #[inline]
-pub(crate) unsafe fn gintuple_get_attrnum(state: &GinState, itup: ITup) -> OffsetNumber {
+pub unsafe fn gintuple_get_attrnum(state: &GinState, itup: ITup) -> OffsetNumber {
     if state.one_col {
         return FirstOffsetNumber;
     }
@@ -143,7 +143,7 @@ pub(crate) fn gin_col_tupdesc<'s>(
 
 /// gintuple_get_key: borrowed datum into the page image. `mcx` is scratch for
 /// the transient multicolumn tupdesc only.
-pub(crate) unsafe fn gintuple_get_key(
+pub unsafe fn gintuple_get_key(
     mcx: Mcx<'_>,
     rel: &Relation<'_>,
     state: &GinState,

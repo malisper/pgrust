@@ -699,6 +699,7 @@ members = [
     "crates/contrib/pageinspect",
     "crates/contrib/pgstattuple",
     "crates/contrib/pg_freespacemap",
+    "crates/contrib/amcheck",
     "crates/backend/catalog/pg_db_role_setting_seams",
     "crates/backend/utils/init/postinit",
     "crates/backend/postmaster/pmchild_seams",

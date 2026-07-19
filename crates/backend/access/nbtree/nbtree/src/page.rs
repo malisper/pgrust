@@ -47,7 +47,7 @@ pub fn page_item(page: &PageRef<'_>, id: ItemIdData) -> crate::itup::ITup {
 }
 
 // BTPageGetMeta: contents start at MAXALIGN(SizeOfPageHeaderData).
-pub(crate) fn page_meta(page: &PageRef<'_>) -> BTMetaPageData {
+pub fn page_meta(page: &PageRef<'_>) -> BTMetaPageData {
     // SAFETY: metapage contents at +24, 8-aligned, 48B in-bounds.
     unsafe {
         page.as_ptr()
@@ -90,20 +90,32 @@ fn bt_getmeta(rel: &Relation<'_>, metapin: &BufferPin) -> PgResult<BTMetaPageDat
 
 /// _bt_checkpage.
 pub(crate) fn bt_checkpage(rel: &Relation<'_>, pin: &BufferPin) -> PgResult<()> {
-    let page = pin.page();
+    bt_checkpage_ref(rel, &pin.page(), pin.block_number())
+}
+
+/// _bt_checkpage over a page image (amcheck reads local page copies).
+pub fn bt_checkpage_ref(
+    rel: &Relation<'_>,
+    page: &PageRef<'_>,
+    blkno: BlockNumber,
+) -> PgResult<()> {
     if page.is_new() {
         return Err(index_corrupted(format!(
             "index \"{}\" contains unexpected zero page at block {}",
             rel.name(),
-            pin.block_number()
+            blkno
         )));
     }
-    let special_size = BLCKSZ - page_special_off(&page);
+    // Raw pd_special, NOT page_special_off: its corruption clamp would mask
+    // exactly the damage this check exists to report.
+    // SAFETY: pd_special lives at a 2-aligned in-page offset (PageRef contract).
+    let raw_special = unsafe { page.as_ptr().add(PD_SPECIAL_OFF).cast::<u16>().read() } as usize;
+    let special_size = BLCKSZ.wrapping_sub(raw_special);
     if special_size != core::mem::size_of::<BTPageOpaqueData>() {
         return Err(index_corrupted(format!(
             "index \"{}\" contains corrupted page at block {}",
             rel.name(),
-            pin.block_number()
+            blkno
         )));
     }
     Ok(())
