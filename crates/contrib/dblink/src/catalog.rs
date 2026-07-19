@@ -129,8 +129,7 @@ fn generate_relation_name<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResul
     } else {
         get_namespace_name(mcx, rel.namespace())?
     };
-    let q = ruleutils::quote_qualified_identifier(mcx, nspname.as_deref(), rel.name())?;
-    Ok(String::from_utf8_lossy(q.as_bytes()).into_owned())
+    Ok(ruleutils::quote_qualified_identifier(nspname.as_deref(), rel.name()))
 }
 
 fn get_namespace_name(mcx: Mcx<'_>, nspid: types_core::Oid) -> PgResult<Option<String>> {
@@ -239,7 +238,7 @@ fn get_tuple_of_interest<'mcx>(
     rel: &Relation<'mcx>,
     pkattnums: &[usize],
     src_pkattvals: &[Option<String>],
-) -> PgResult<Option<types_tuple::HeapTupleData<'mcx>>> {
+) -> PgResult<Option<heaptuple::HeapTuple<'mcx>>> {
     spi::SPI_connect()?;
     let tupdesc = rel.descr();
     let natts = tupdesc.natts as usize;
@@ -286,7 +285,7 @@ fn get_tuple_of_interest<'mcx>(
         None
     };
     spi::SPI_finish()?;
-    Ok(copied.map(|ht| (*ht).clone()))
+    Ok(copied)
 }
 
 fn tuple_value(
@@ -453,16 +452,13 @@ pub fn fc_dblink_get_pkey(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
     Ok(srf.finish(fcinfo))
 }
 
-fn build_args<'mcx>(
-    mcx: Mcx<'mcx>,
-    fcinfo: &Fcinfo,
-    rel: &Relation<'mcx>,
-) -> PgResult<(Vec<usize>, i32)> {
+fn build_args<'mcx>(fcinfo: &Fcinfo, rel: &Relation<'mcx>) -> PgResult<(Vec<usize>, i32)> {
     // SAFETY: int2vector by-ref arg 1.
     let pkattnums = int2vector_values(unsafe { fcinfo.arg_ptr(1) });
     let pknumatts_arg = fcinfo.arg_i32(2);
     let physical = validate_pkattnums(rel, &pkattnums, pknumatts_arg)?;
-    Ok((physical, physical.len() as i32))
+    let n = physical.len() as i32;
+    Ok((physical, n))
 }
 
 pub fn fc_dblink_build_sql_insert(
@@ -473,7 +469,7 @@ pub fn fc_dblink_build_sql_insert(
     // SAFETY: strict text arg 0; text[] args 3,4.
     let relname = unsafe { fcinfo.arg_varlena_packed(0)? };
     let rel = get_rel_from_relname(mcx, &String::from_utf8_lossy(relname.data()), AccessShareLock, adt_acl::ACL_SELECT)?;
-    let (pkattnums, pknumatts) = build_args(mcx, fcinfo, &rel)?;
+    let (pkattnums, pknumatts) = build_args(fcinfo, &rel)?;
     let src = get_text_array_contents(mcx, unsafe { fcinfo.arg_varlena_packed(3)? }.image())?;
     if src.len() as i32 != pknumatts {
         table::table_close(rel, AccessShareLock)?;
@@ -497,7 +493,7 @@ pub fn fc_dblink_build_sql_delete(
     // SAFETY: strict text arg 0; text[] arg 3.
     let relname = unsafe { fcinfo.arg_varlena_packed(0)? };
     let rel = get_rel_from_relname(mcx, &String::from_utf8_lossy(relname.data()), AccessShareLock, adt_acl::ACL_SELECT)?;
-    let (pkattnums, pknumatts) = build_args(mcx, fcinfo, &rel)?;
+    let (pkattnums, pknumatts) = build_args(fcinfo, &rel)?;
     let tgt = get_text_array_contents(mcx, unsafe { fcinfo.arg_varlena_packed(3)? }.image())?;
     if tgt.len() as i32 != pknumatts {
         table::table_close(rel, AccessShareLock)?;
@@ -516,7 +512,7 @@ pub fn fc_dblink_build_sql_update(
     // SAFETY: strict text arg 0; text[] args 3,4.
     let relname = unsafe { fcinfo.arg_varlena_packed(0)? };
     let rel = get_rel_from_relname(mcx, &String::from_utf8_lossy(relname.data()), AccessShareLock, adt_acl::ACL_SELECT)?;
-    let (pkattnums, pknumatts) = build_args(mcx, fcinfo, &rel)?;
+    let (pkattnums, pknumatts) = build_args(fcinfo, &rel)?;
     let src = get_text_array_contents(mcx, unsafe { fcinfo.arg_varlena_packed(3)? }.image())?;
     if src.len() as i32 != pknumatts {
         table::table_close(rel, AccessShareLock)?;

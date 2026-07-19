@@ -157,7 +157,7 @@ pub fn materialize_result(
     if res.nfields != attinmeta.natts {
         return Err(rowtype_mismatch());
     }
-    let scratch = mcx::MemoryContext::new("dblink temporary context");
+    let mut scratch = mcx::MemoryContext::new("dblink temporary context");
     let mut cols: Vec<Option<&[u8]>> = Vec::with_capacity(res.nfields);
     for row in &res.rows {
         cols.clear();
