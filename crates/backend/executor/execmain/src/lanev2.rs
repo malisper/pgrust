@@ -13230,9 +13230,10 @@ pub fn try_own_limit<'mcx>(
         }
         LIMIT_INWINDOW => {}
         LIMIT_INITIAL => unreachable!("prologue recomputed"),
-        // Backward-only states — unreachable under the forward gate + the
-        // non-scrollable admitted children; refuse defensively.
-        LIMIT_WINDOWEND_TIES | LIMIT_WINDOWSTART => return Ok(None),
+        // WITH TIES boundary walk in progress — the lane's COUNT-only shape
+        // gate refuses TIES plans, so refuse defensively. (LIMIT_WINDOWSTART
+        // deleted with the backward-execution wave B4 — it was backward-only.)
+        LIMIT_WINDOWEND_TIES => return Ok(None),
     }
     // Run the owned chain: child pipeline → LimitOp → root adapter.
     let r = match &mut *l.outer {

@@ -48,7 +48,11 @@ pub enum LimitStateCond {
     LIMIT_WINDOWEND_TIES,
     LIMIT_SUBPLANEOF,
     LIMIT_WINDOWEND,
-    LIMIT_WINDOWSTART,
+    // LIMIT_WINDOWSTART deleted (backward-execution wave B4): the state was
+    // reachable only by walking the window backwards, which the run seam
+    // refuses since deletion-prep B1 (C execnodes.h keeps it for the
+    // backward arms C retains; ratified strategy divergence, Michael's
+    // 2026-07-17 SCROLL/WITH-HOLD decision).
 }
 use LimitStateCond::*;
 
@@ -144,21 +148,22 @@ fn save_last_slot<'mcx>(
     Ok(())
 }
 
-#[cold]
-#[inline(never)]
-fn backwards_failed() -> Box<PgError> {
-    Box::new(PgError::error("LIMIT subplan failed to run backwards"))
-}
-
 /// `ExecLimit`; C's switch fall-throughs become `continue` re-dispatch.
+/// Forward-only (backward-execution wave B4): C nodeLimit.c's backward arms
+/// (the `!ScanDirectionIsForward` legs and their "LIMIT subplan failed to
+/// run backwards" errors, nodeLimit.c:211/269/286/305) are deleted — the
+/// run seam refuses backward entry (deletion-prep B1), so this node never
+/// sees a backward pull.
 pub fn exec_limit<'mcx, C: LimitChild<'mcx>>(
     node: &mut LimitState<'mcx>,
     child: &mut C,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<ExecSlotId>> {
     cfi()?;
-    let direction = estate.es_direction;
-    let forward = ScanDirectionIsForward(direction);
+    debug_assert!(
+        ScanDirectionIsForward(estate.es_direction),
+        "backward drive below the forward-only run seam (deletion-prep B1)"
+    );
 
     loop {
         match node.lstate {
@@ -167,9 +172,6 @@ pub fn exec_limit<'mcx, C: LimitChild<'mcx>>(
                 continue;
             }
             LIMIT_RESCAN => {
-                if !forward {
-                    return Ok(None);
-                }
                 if node.count <= 0 && !node.noCount {
                     node.lstate = LIMIT_EMPTY;
                     return Ok(None);
@@ -195,117 +197,58 @@ pub fn exec_limit<'mcx, C: LimitChild<'mcx>>(
             }
             LIMIT_EMPTY => return Ok(None),
             LIMIT_INWINDOW => {
-                if forward {
-                    if !node.noCount && node.position - node.offset >= node.count {
-                        if node.limitOption == LimitOption::LIMIT_OPTION_COUNT {
-                            node.lstate = LIMIT_WINDOWEND;
-                            return Ok(None);
-                        }
-                        node.lstate = LIMIT_WINDOWEND_TIES;
-                        continue;
-                    }
-                    let Some(slot) = child.exec_proc(estate)? else {
-                        node.lstate = LIMIT_SUBPLANEOF;
+                if !node.noCount && node.position - node.offset >= node.count {
+                    if node.limitOption == LimitOption::LIMIT_OPTION_COUNT {
+                        node.lstate = LIMIT_WINDOWEND;
                         return Ok(None);
-                    };
-                    if node.limitOption == LimitOption::LIMIT_OPTION_WITH_TIES
-                        && node.position - node.offset == node.count - 1
-                    {
-                        save_last_slot(node, estate, slot)?;
                     }
+                    node.lstate = LIMIT_WINDOWEND_TIES;
+                    continue;
+                }
+                let Some(slot) = child.exec_proc(estate)? else {
+                    node.lstate = LIMIT_SUBPLANEOF;
+                    return Ok(None);
+                };
+                if node.limitOption == LimitOption::LIMIT_OPTION_WITH_TIES
+                    && node.position - node.offset == node.count - 1
+                {
+                    save_last_slot(node, estate, slot)?;
+                }
+                node.subSlot = Some(slot);
+                node.position += 1;
+                break;
+            }
+            LIMIT_WINDOWEND_TIES => {
+                // Advance until the first row whose ORDER BY keys differ
+                // from the retained boundary tuple.
+                let Some(slot) = child.exec_proc(estate)? else {
+                    node.lstate = LIMIT_SUBPLANEOF;
+                    return Ok(None);
+                };
+                let eq = node.eq.as_mut().expect("WITH TIES has an eq program");
+                // SAFETY: the per-tuple context outlives this evaluation
+                // and is reset right after (C: ExecQualAndReset;
+                // packed-capable eq procs detoast-expand into it).
+                unsafe { eq.arm_result_mcx_raw(estate.ecxt(node.ps_ExprContext).per_tuple_mcx()) };
+                let last = node.last_slot.as_mut().expect("WITH TIES has a last slot");
+                let new_slot = estate.slot_mut(slot);
+                // C: ecxt_innertuple = incoming, ecxt_outertuple = last_slot.
+                let mut slots = EvalSlots {
+                    scan: None,
+                    inner: Some(&mut *new_slot),
+                    outer: Some(last),
+                };
+                let matched = exec_qual(Some(&mut **eq), &mut slots)?;
+                estate.reset_expr_context(node.ps_ExprContext);
+                if matched {
                     node.subSlot = Some(slot);
                     node.position += 1;
                     break;
                 }
-                if node.position <= node.offset + 1 {
-                    node.lstate = LIMIT_WINDOWSTART;
-                    return Ok(None);
-                }
-                let Some(slot) = child.exec_proc(estate)? else {
-                    return Err(backwards_failed());
-                };
-                node.subSlot = Some(slot);
-                node.position -= 1;
-                break;
+                node.lstate = LIMIT_WINDOWEND;
+                return Ok(None);
             }
-            LIMIT_WINDOWEND_TIES => {
-                if forward {
-                    // Advance until the first row whose ORDER BY keys differ
-                    // from the retained boundary tuple.
-                    let Some(slot) = child.exec_proc(estate)? else {
-                        node.lstate = LIMIT_SUBPLANEOF;
-                        return Ok(None);
-                    };
-                    let eq = node.eq.as_mut().expect("WITH TIES has an eq program");
-                    // SAFETY: the per-tuple context outlives this evaluation
-                    // and is reset right after (C: ExecQualAndReset;
-                    // packed-capable eq procs detoast-expand into it).
-                    unsafe {
-                        eq.arm_result_mcx_raw(estate.ecxt(node.ps_ExprContext).per_tuple_mcx())
-                    };
-                    let last = node.last_slot.as_mut().expect("WITH TIES has a last slot");
-                    let new_slot = estate.slot_mut(slot);
-                    // C: ecxt_innertuple = incoming, ecxt_outertuple = last_slot.
-                    let mut slots = EvalSlots {
-                        scan: None,
-                        inner: Some(&mut *new_slot),
-                        outer: Some(last),
-                    };
-                    let matched = exec_qual(Some(&mut **eq), &mut slots)?;
-                    estate.reset_expr_context(node.ps_ExprContext);
-                    if matched {
-                        node.subSlot = Some(slot);
-                        node.position += 1;
-                        break;
-                    }
-                    node.lstate = LIMIT_WINDOWEND;
-                    return Ok(None);
-                }
-                if node.position <= node.offset + 1 {
-                    node.lstate = LIMIT_WINDOWSTART;
-                    return Ok(None);
-                }
-                let Some(slot) = child.exec_proc(estate)? else {
-                    return Err(backwards_failed());
-                };
-                node.subSlot = Some(slot);
-                node.position -= 1;
-                node.lstate = LIMIT_INWINDOW;
-                break;
-            }
-            LIMIT_SUBPLANEOF => {
-                if forward {
-                    return Ok(None);
-                }
-                let Some(slot) = child.exec_proc(estate)? else {
-                    return Err(backwards_failed());
-                };
-                node.subSlot = Some(slot);
-                node.lstate = LIMIT_INWINDOW;
-                break;
-            }
-            LIMIT_WINDOWEND => {
-                if forward {
-                    return Ok(None);
-                }
-                if node.limitOption == LimitOption::LIMIT_OPTION_WITH_TIES {
-                    // We advanced one past the window to detect ties, so
-                    // re-fetch the previous tuple from the subplan.
-                    let Some(slot) = child.exec_proc(estate)? else {
-                        return Err(backwards_failed());
-                    };
-                    node.subSlot = Some(slot);
-                }
-                node.lstate = LIMIT_INWINDOW;
-                break;
-            }
-            LIMIT_WINDOWSTART => {
-                if !forward {
-                    return Ok(None);
-                }
-                node.lstate = LIMIT_INWINDOW;
-                break;
-            }
+            LIMIT_SUBPLANEOF | LIMIT_WINDOWEND => return Ok(None),
         }
     }
 
