@@ -531,3 +531,29 @@ fn drop_with_live_plan_reference_defers_source_free() {
     assert!(!CachedPlanStmtList(p).is_empty());
     ReleaseCachedPlan(p);
 }
+
+// The t30 sqlsmith strict-count site (plancache lib.rs:173, "stale
+// CachedPlanHandle ... (released)"): launch_backend runs the on_proc_exit
+// ceremony (which reclaims this registry) BEFORE the session-teardown phases
+// that drop the parked executor skeleton and parked portal shells — so their
+// pins release after the reclaim. C abandons outstanding refcounts at process
+// death (CacheMemoryContext dies with the process); post-reclaim releases
+// must be no-ops, not stale-handle panics. Red at base: panicked at the
+// plan_mut stale guard. Repro shape: PREPARE p AS SELECT 1; EXECUTE p; \q.
+#[test]
+fn release_after_exit_reclaim_is_abandoned_not_stale() {
+    install();
+    push_snapshot();
+    let h = make_saved_source(true);
+    let p = GetCachedPlan(h, ParamListHandle::NULL, None, QueryEnvHandle::NULL).unwrap();
+    ReleaseAllCachedPlansAtExit(0, 0);
+    ReleaseCachedPlan(p);
+    DropCachedPlan(h);
+    // A fresh session on a reused thread must get a live registry back.
+    with_cache(|pc| assert!(pc.torn_down));
+    with_cache(|pc| pc.torn_down = false);
+    let h2 = make_saved_source(true);
+    let p2 = GetCachedPlan(h2, ParamListHandle::NULL, None, QueryEnvHandle::NULL).unwrap();
+    ReleaseCachedPlan(p2);
+    DropCachedPlan(h2);
+}
