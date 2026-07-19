@@ -776,6 +776,7 @@ fn attribute_notation_func_call<'mcx>(
         None,
         last_srf,
         false,
+        true,
         location,
     ) {
         Ok(node) => Ok(Some(node)),
@@ -3430,6 +3431,7 @@ fn transformFuncCall<'mcx>(
         fc,
         agg_filter,
         last_srf,
+        false,
         false,
         fc.location,
     )
