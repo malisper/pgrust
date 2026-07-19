@@ -339,9 +339,22 @@ pub(super) enum RefuseReason {
     EnvOff = 0,
     /// EvalPlanQual re-check active (model-incompatible, §4).
     Epq = 1,
-    /// Non-forward scan direction / backward index order.
+    /// TOMBSTONE (backward-execution wave B11, cursors inc-2 §6 rider row
+    /// 11): the runtime-direction refusal. Every per-pull
+    /// `es_direction`-driven tick site was DELETED together with its
+    /// allowlist rows — the run seam refuses backward entry outright
+    /// (deletion-prep B1), so no pull below it can be backward. The
+    /// backward-INDEX-ORDER meaning this row used to share moved to its
+    /// own `DescOrder` row (the B11 re-vocab; DESC plans stay). NEVER-
+    /// TICKING; the variant stays because the registry is append-only and
+    /// discriminants never move (the CursorScroll precedent).
     Backward = 2,
-    /// Scrollable/backward/mark cursor eflags (`!batch_allowed`).
+    /// Random-access/mark eflags on the scan (`!batch_allowed`). NARROWED
+    /// TO MARK (backward-execution wave, rider row 11): B2 deleted the
+    /// PortalStart scroll arm — the only REWIND|BACKWARD eflags producer —
+    /// so the eflags a node can still see at init are the merge-join
+    /// EXEC_FLAG_MARK family (and the name stays for the append-only
+    /// serialized vocabulary).
     ScrollMark = 3,
     /// EXPLAIN ANALYZE instrumentation (§4: refused by policy).
     Instrumented = 4,
@@ -596,9 +609,21 @@ pub(super) enum RefuseReason {
     /// before wave-10's `CursorCurrentOfTidCapture` landed 41; renumbered
     /// at the SE-BOARD-SPI merge — next free is 43.
     SpiPlanRefused = 42,
+    // -----------------------------------------------------------------------
+    // Backward-execution wave B11 (cursors inc-2 §6 rider row 11; APPEND-
+    // ONLY chartered mint — the `Backward` row-retirement re-vocab).
+    // -----------------------------------------------------------------------
+    /// DESC-ordered index/IOS PLAN (indexorderdir backward — the planner's
+    /// descending-scan shape, e.g. ORDER BY x DESC over a btree). Split out
+    /// of the retired `Backward` row, which used to carry BOTH the runtime
+    /// direction (now impossible below the forward-only run seam, B1) and
+    /// this plan-shape refusal (still live: the lane's sequential tidrun
+    /// drive is forward-only over the index). Ticks under the index/IOS
+    /// classes at their admission gates; allowlist rows in the same commit.
+    DescOrder = 43,
 }
 
-const N_REASONS: usize = 43;
+const N_REASONS: usize = 44;
 
 impl RefuseReason {
     pub(super) fn name(self) -> &'static str {
@@ -646,6 +671,7 @@ impl RefuseReason {
             RefuseReason::CursorPlanRefused => "cursor-plan-refused",
             RefuseReason::CursorCurrentOfTidCapture => "cursor-currentof-tidcapture",
             RefuseReason::SpiPlanRefused => "spi-plan-refused",
+            RefuseReason::DescOrder => "desc-order",
         }
     }
 
@@ -695,6 +721,7 @@ impl RefuseReason {
             CursorPlanRefused,
             CursorCurrentOfTidCapture,
             SpiPlanRefused,
+            DescOrder,
         ][i]
     }
 }

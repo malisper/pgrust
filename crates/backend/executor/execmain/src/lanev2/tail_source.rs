@@ -501,12 +501,9 @@ impl<'a, 'mcx, S: RowSource<'mcx>> Operator<'mcx> for T3Emit<'a, 'mcx, S> {
 /// work beyond the compares.
 #[inline]
 fn t3_gates(class: ShapeClass, estate: &EStateData<'_>) -> bool {
+    // (The backward gate retired with the backward-execution wave B11.)
     if estate.es_epq_active {
         t3_refuse(class, RefuseReason::Epq);
-        return false;
-    }
-    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        t3_refuse(class, RefuseReason::Backward);
         return false;
     }
     if !estate.es_instrumentation.is_empty() {

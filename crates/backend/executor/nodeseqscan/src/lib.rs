@@ -444,7 +444,7 @@ impl<'mcx> SeqScanState<'mcx> {
     }
 
     /// Forward, non-mark eflags at init (`ExecInitSeqScan`). False for a
-    /// scrollable/backward or mergejoin-mark cursor — the lane-v2 page-batch
+    /// mergejoin-mark-armed scan (the scroll/backward eflags producer retired with the backward-execution wave, B2) — the lane-v2 page-batch
     /// drive is forward-only, so it refuses these.
     pub fn batch_allowed(&self) -> bool {
         self.batch_allowed

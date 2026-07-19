@@ -96,7 +96,7 @@ pub struct IndexScanState<'mcx> {
     // while parked).
     pub iss_IndexOid: ::types_core::Oid,
     // Lane-executor-v2 (`execmain::lanev2`): forward, non-mark eflags at init.
-    // False for a scrollable/backward or mergejoin-mark cursor — the lane's
+    // False for a mergejoin-mark-armed scan (the scroll/backward eflags producer retired with the backward-execution wave, B2) — the lane's
     // sequential tidrun drive can't survive backward fetch or mark/restore, so
     // it refuses these. Default false (refuse); set by `exec_init_index_scan`.
     batch_allowed: bool,
@@ -208,7 +208,7 @@ impl<'mcx> ScanNode<'mcx> for IndexScanState<'mcx> {
 
 impl<'mcx> IndexScanState<'mcx> {
     /// Lane-executor-v2: forward, non-mark eflags at init (false for a
-    /// scrollable/backward or mergejoin-mark cursor).
+    /// mergejoin-mark-armed scan (the scroll/backward eflags producer retired with the backward-execution wave, B2)).
     #[inline]
     pub fn batch_allowed(&self) -> bool {
         self.batch_allowed
@@ -524,7 +524,7 @@ pub fn exec_init_index_scan<'mcx>(
     let index_rel = indexam::index_open(mcx, node.indexid, index_lockmode(estate, node.scan.scanrelid))?;
     let mut state = exec_init_index_scan_rel(mcx, node, estate, rel, index_rel)?;
     // Lane-executor-v2: the batched tidrun drive is forward-only and can't
-    // survive mark/restore, so forbid it for a scrollable/backward or
+    // survive mark/restore, so forbid it for a mark-armed (B2 retired the scroll-eflags producer) or
     // mergejoin-mark cursor. Byte-identity-safe (the lane just refuses).
     state.batch_allowed = eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0;
     Ok(state)

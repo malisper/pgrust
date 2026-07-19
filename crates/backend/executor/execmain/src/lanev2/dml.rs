@@ -395,10 +395,7 @@ pub fn try_own_modify_table<'mcx>(
         stats::tick_refused(ShapeClass::ModifyTable, RefuseReason::Epq);
         return Ok(None);
     }
-    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        stats::tick_refused(ShapeClass::ModifyTable, RefuseReason::Backward);
-        return Ok(None);
-    }
+    // (The backward gate retired with the backward-execution wave B11.)
     if !estate.es_instrumentation.is_empty() {
         stats::tick_refused(ShapeClass::ModifyTable, RefuseReason::Instrumented);
         return Ok(None);
@@ -560,10 +557,7 @@ pub fn try_own_lock_rows_dml<'mcx>(
         stats::tick_refused(ShapeClass::LockRows, RefuseReason::Epq);
         return Ok(None);
     }
-    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        stats::tick_refused(ShapeClass::LockRows, RefuseReason::Backward);
-        return Ok(None);
-    }
+    // (The backward gate retired with the backward-execution wave B11.)
     if !estate.es_instrumentation.is_empty() {
         stats::tick_refused(ShapeClass::LockRows, RefuseReason::Instrumented);
         return Ok(None);

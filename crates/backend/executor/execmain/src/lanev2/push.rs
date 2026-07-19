@@ -1447,33 +1447,34 @@ pub(crate) fn spi_set_for_tests(on: bool) {
 /// this budgeted run may carry the SPI count-seam machinery (forward, no
 /// random-access eflags demand, serial); `Some(reason)` = the WHOLE
 /// statement refuses to Volcano exactly as today (refusal-not-error).
-/// REACHABILITY (review re-baseline, notes/se-spi-stage-a.md §8 — the
-/// original "all three structurally unreachable" record was falsified by
-/// the portal-fetch producer):
-///   * `ScrollMark` TICKS in the most common plpgsql shape — a plain
-///     `FOR r IN SELECT ...` auto-selects CURSOR_OPT_SCROLL in
-///     `SPI_cursor_open` (spi/src/cursor.rs:150) whenever the plan
-///     supports backward scan, and PortalStart then passes
-///     EXEC_FLAG_REWIND|BACKWARD (pquery/src/lib.rs:391-392) — once per
-///     fetch. Allowlist row `spi scroll-mark`.
-///   * `Backward` TICKS via plpgsql FETCH BACKWARD
-///     (`SPI_scroll_cursor_fetch`, exec.rs:4070). Allowlist row
-///     `spi backward`.
+/// REACHABILITY (re-baselined by the backward-execution wave; the wave-9.5
+/// record — notes/se-spi-stage-a.md §8 — described the pre-B1/B2 world):
+///   * `Backward` arm DELETED (wave B11): a backward demand cannot reach a
+///     budgeted run anymore — at defaults the portal store serves every
+///     backward fetch above this seam (SE13 flip), and any kill-switch
+///     backward run dies 0A000 at the forward-only run seam (deletion-prep
+///     B1) immediately after budget install; the seam error is the single
+///     authority. Allowlist row `spi backward` retired with the arm.
+///   * `ScrollMark` arm KEPT but its wave-9.5 producer is GONE: PortalStart
+///     no longer passes REWIND|BACKWARD for auto-SCROLL portals (B2 deleted
+///     the eflags arm), so the once-per-fetch plpgsql FOR-loop tick cadence
+///     (the aj-allowlist-honesty record) STOPS. The arm stays as the
+///     defensive random-access-eflags fence (MARK-narrowed vocabulary);
+///     its allowlist row stays legal-but-quiet.
 ///   * `ParallelGate` remains the FAIL-CLOSED serial-law pin: count-limited
 ///     runs are serial by the ported use_parallel_mode gate; the arm
 ///     refuses loudly (corpus-visible) if that gate ever regressed, and
 ///     keeps NO allowlist row.
-/// The generic vocabulary is deliberately REUSED (Backward / ScrollMark /
-/// ParallelGate; the WS-AI ParallelGate precedent) — no new variant minted.
 pub(crate) fn spi_admission_refusal(
-    forward: bool,
+    // Kept in the signature (SUNSET, the cursor classifier's _top_eflags
+    // precedent): the backward arm is gone but the seam passes the value
+    // and the taxonomy pins name it; a future arm reading it again must go
+    // through R-VOCAB.
+    _forward: bool,
     top_eflags: i32,
     use_parallel_mode: bool,
 ) -> Option<super::stats::RefuseReason> {
     use ::types_slot::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
-    if !forward {
-        return Some(super::stats::RefuseReason::Backward);
-    }
     if top_eflags & (EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) != 0 {
         return Some(super::stats::RefuseReason::ScrollMark);
     }
