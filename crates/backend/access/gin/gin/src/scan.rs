@@ -51,6 +51,7 @@ fn fill_scan_entry(
     strategy: StrategyNumber,
     search_mode: i32,
     query_key: Datum,
+    query_orig: Datum,
     query_category: GinNullCategory,
     is_partial_match: bool,
 ) -> PgResult<u32> {
@@ -79,6 +80,7 @@ fn fill_scan_entry(
     // SAFETY: as above.
     let mut entry = unsafe { GinScanEntryData::new(kcx)? };
     entry.queryKey = query_key;
+    entry.queryOrig = query_orig;
     entry.queryCategory = query_category;
     entry.isPartialMatch = is_partial_match;
     entry.strategy = strategy;
@@ -110,6 +112,7 @@ fn add_hidden_entry(
         InvalidStrategy,
         search_mode,
         Datum::null(),
+        Datum::null(),
         category,
         false,
     )?;
@@ -130,6 +133,7 @@ fn fill_scan_key(
     search_mode: i32,
     query: Datum,
     query_values: &[Datum],
+    btree_orig: Datum,
     query_categories: &[GinNullCategory],
     partial_match: &[bool],
     jsp_ops: PgVec<'static, JspGinOp>,
@@ -189,6 +193,7 @@ fn fill_scan_key(
             strategy,
             search_mode,
             query_values[i],
+            btree_orig,
             query_categories[i],
             partial_match.get(i).copied().unwrap_or(false),
         )?;
@@ -253,6 +258,7 @@ pub(crate) fn ginNewScanKey(
             map_item_operand,
             null_flags,
             trgm_graph,
+            btree_orig,
         } = extracted;
 
         if !(GIN_SEARCH_MODE_DEFAULT..=GIN_SEARCH_MODE_ALL).contains(&search_mode) {
@@ -285,6 +291,7 @@ pub(crate) fn ginNewScanKey(
             search_mode,
             skey.sk_argument,
             query_values.as_slice(),
+            btree_orig,
             &categories,
             partial_match.as_slice(),
             jsp_ops,
@@ -333,6 +340,7 @@ pub(crate) fn ginNewScanKey(
             GIN_SEARCH_MODE_EVERYTHING,
             Datum::null(),
             &[],
+            Datum::null(),
             &[],
             &[],
             empty_ops,

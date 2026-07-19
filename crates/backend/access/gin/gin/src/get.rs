@@ -154,6 +154,7 @@ fn collect_match_bitmap(
                 entry.queryKey,
                 idatum,
                 entry.strategy,
+                entry.queryOrig,
             );
             if cmp > 0 {
                 return Ok(true);
@@ -1014,6 +1015,7 @@ fn match_partial_in_pending_list(
             entry.queryKey,
             datum[mi],
             entry.strategy,
+            entry.queryOrig,
         );
         if cmp == 0 {
             return Ok(true);
