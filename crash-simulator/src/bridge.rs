@@ -244,7 +244,9 @@ fn footprint_of(id: props::PropertyId) -> Footprint {
         P::F5DdlEffects => Footprint { ddl: 3, dml: 1, query: 2, ..Default::default() },
         P::F6AggConsistency => Footprint { ddl: 2, dml: 1, query: 4, ..Default::default() },
         P::F7MemoryBaseline => Footprint { ddl: 2, dml: 1, query: 2, ..Default::default() },
-        P::F8ResourceBaseline => Footprint { ddl: 2, dml: 1, query: 2, tx: 2, ..Default::default() },
+        // H7: fd-pressure workload — extension/server/foreign-table DDL, the
+        // COPY (Dml), 2 pressure reads + 3 SHOW probes (Query-classified).
+        P::F8ResourceBaseline => Footprint { ddl: 4, dml: 1, query: 5, ..Default::default() },
         P::L1Tlp => Footprint { ddl: 2, dml: 1, query: 5, ..Default::default() },
         P::L2NoRec => Footprint { ddl: 2, dml: 1, query: 3, ..Default::default() },
         P::X1ArmEquivalence => Footprint { ddl: 2, dml: 1, query: 4, arm: 2, ..Default::default() },
@@ -464,8 +466,9 @@ struct OracleEvalState {
 /// connect (contract §0 A5). H1 shipped the `NoHooks` posture — both
 /// hook-gated properties (F7/F8) were structurally vacuous (h3: 107 loud
 /// `skipped-no-hook` per campaign). H4 wires the Memory channel: presence =
-/// the DUT answers `f7_memory_baseline::WATERMARK_SQL`. Resource (F8) stays
-/// unprobed pending the fd-budget knob (h3 queue #6).
+/// the DUT answers `f7_memory_baseline::WATERMARK_SQL`. H7 wires Resource:
+/// presence = the DUT answers `f8_resource_baseline::COUNTER_SQL` (the
+/// `pgrust.resource_counters` computed GUC; h3 queue #6).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ProbedHooks {
     pub memory: bool,
@@ -495,7 +498,11 @@ pub fn probe_hooks(dut: &mut dyn crate::runner::driver::Session) -> ProbedHooks 
         dut.execute(crate::oracle::props::f7_memory_baseline::WATERMARK_SQL),
         ExecOutcome::SqlError { .. } | ExecOutcome::ConnectionLost { .. }
     );
-    ProbedHooks { memory, resource: false }
+    let resource = !matches!(
+        dut.execute(crate::oracle::props::f8_resource_baseline::COUNTER_SQL),
+        ExecOutcome::SqlError { .. } | ExecOutcome::ConnectionLost { .. }
+    );
+    ProbedHooks { memory, resource }
 }
 
 pub struct OracleCheckEval {

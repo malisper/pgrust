@@ -154,6 +154,34 @@ pub const Q_FULL_JOIN: &str = "q:full-join";
 pub const Q_OR_QUAL: &str = "q:or-qual";
 pub const Q_FOR_UPDATE: &str = "q:for-update";
 
+// H7 feature-surface probe variants (the H6 replant escapes were FEATURE
+// gaps, not plan-shape gaps — notes/h6-reach.md escape structure). Both are
+// plain differential reads over CONSTANT typed expressions (H4 join pattern:
+// no ledger modeling; the model oracle never sees these forms).
+/// Typed casts with typmods + boundary-typmod probes of typmod-carrying
+/// catalog paths (interval(p), varchar(n), numeric(p,s), intervaltypmodout,
+/// format_type) — the p9/sqlsmith panic-surface class.
+pub const Q_TYPMOD_PROBE: &str = "q:typmod-probe";
+/// Geometric typed literals + the operator/function family over them
+/// (distance, circle(box), path length, containment, area) — the p5
+/// float-parity class; every row is byte-compared against C.
+pub const Q_GEO_PROBE: &str = "q:geo-probe";
+
+// typmod-probe arms
+pub const TPM_INTERVAL_OUT: &str = "tpm:interval-out";
+pub const TPM_INTERVAL_SCALE: &str = "tpm:interval-scale";
+pub const TPM_FORMAT_TYPE: &str = "tpm:format-type";
+pub const TPM_INTERVAL_CAST: &str = "tpm:interval-cast";
+pub const TPM_VARCHAR_CAST: &str = "tpm:varchar-cast";
+pub const TPM_NUMERIC_CAST: &str = "tpm:numeric-cast";
+
+// geo-probe arms
+pub const GEO_SERIES_DISTANCE: &str = "geo:series-distance";
+pub const GEO_CIRCLE_BOX: &str = "geo:circle-box";
+pub const GEO_PATH_LENGTH: &str = "geo:path-length";
+pub const GEO_BOX_CONTAIN: &str = "geo:box-contain";
+pub const GEO_AREA: &str = "geo:area";
+
 // scalar-subquery arms
 pub const SSQ_CORRELATED_COUNT: &str = "ssq:correlated-count";
 pub const SSQ_INITPLAN_MAX: &str = "ssq:initplan-max";
@@ -363,6 +391,20 @@ pub fn registry(property_names: &[&str]) -> Vec<ProdDef> {
         def(Q_FULL_JOIN, Some(STMT_QUERY), WQuery, false),
         def(Q_OR_QUAL, Some(STMT_QUERY), WQuery, false),
         def(Q_FOR_UPDATE, Some(STMT_QUERY), WQuery, false),
+        // H7 feature-surface probe variants + arms
+        def(Q_TYPMOD_PROBE, Some(STMT_QUERY), WQuery, false),
+        def(Q_GEO_PROBE, Some(STMT_QUERY), WQuery, false),
+        def(TPM_INTERVAL_OUT, Some(Q_TYPMOD_PROBE), WQuery, false),
+        def(TPM_INTERVAL_SCALE, Some(Q_TYPMOD_PROBE), WQuery, false),
+        def(TPM_FORMAT_TYPE, Some(Q_TYPMOD_PROBE), WQuery, false),
+        def(TPM_INTERVAL_CAST, Some(Q_TYPMOD_PROBE), WQuery, false),
+        def(TPM_VARCHAR_CAST, Some(Q_TYPMOD_PROBE), WQuery, false),
+        def(TPM_NUMERIC_CAST, Some(Q_TYPMOD_PROBE), WQuery, false),
+        def(GEO_SERIES_DISTANCE, Some(Q_GEO_PROBE), WQuery, false),
+        def(GEO_CIRCLE_BOX, Some(Q_GEO_PROBE), WQuery, false),
+        def(GEO_PATH_LENGTH, Some(Q_GEO_PROBE), WQuery, false),
+        def(GEO_BOX_CONTAIN, Some(Q_GEO_PROBE), WQuery, false),
+        def(GEO_AREA, Some(Q_GEO_PROBE), WQuery, false),
         // scalar-subquery arms
         def(SSQ_CORRELATED_COUNT, Some(Q_SCALAR_SUBQ), WQuery, false),
         def(SSQ_INITPLAN_MAX, Some(Q_SCALAR_SUBQ), WQuery, false),
