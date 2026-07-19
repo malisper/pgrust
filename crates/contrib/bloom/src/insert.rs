@@ -1,6 +1,5 @@
-//! blinsert.c (insert half): blinsert. The build half lives in the
-//! bloom_build crate (execindexing sits above indexam in the crate graph;
-//! same split as pgvector_hnsw_build).
+//! blinsert.c (insert half). The build half lives in bloom_build: execindexing
+//! sits above indexam in the crate graph (pgvector_hnsw_build split).
 
 use crate::state::{
     bloom_form_tuple, bloom_new_buffer, buf_page_bytes, init_bloom_state,
@@ -28,7 +27,6 @@ pub fn blinsert<'mcx>(
     ht_ctid: &ItemPointerData,
     _heap_rel: &Relation<'mcx>,
 ) -> PgResult<bool> {
-    // C's insertCtx: per-insert scratch, deleted on exit.
     let insert_ctx = mcx::MemoryContext::new_bump("Bloom insert temporary context");
     let imcx = insert_ctx.mcx();
 
@@ -36,8 +34,6 @@ pub fn blinsert<'mcx>(
     let itup = bloom_form_tuple(&mut blstate, ht_ctid, values, isnull)?;
     let size = blstate.size_of_bloom_tuple;
 
-    // At first, try to insert to the first page in the notFullPage array.
-    // If successful the meta page stays untouched.
     let meta_buffer = bufmgr::ReadBuffer(index, BLOOM_METAPAGE_BLKNO)?;
     LockBuffer(meta_buffer, BUFFER_LOCK_SHARE)?;
     let mut blkno: BlockNumber = InvalidBlockNumber;
@@ -52,7 +48,7 @@ pub fn blinsert<'mcx>(
     if n_end_snap > n_start_snap {
         blkno = first_blkno;
         debug_assert!(blkno != InvalidBlockNumber);
-        // Don't hold the metabuffer lock while inserting.
+        // Don't hold the metabuffer lock while doing the insert.
         LockBuffer(meta_buffer, BUFFER_LOCK_UNLOCK)?;
 
         let buffer = bufmgr::ReadBuffer(index, blkno)?;
@@ -61,35 +57,28 @@ pub fn blinsert<'mcx>(
         let mut state = GenericXLogStart(imcx, index)?;
         let page = state.register_buffer(buffer, 0)?;
 
-        // A page recently deleted by VACUUM can be reused; reinitialize it.
         if page_is_new(page) || page_is_deleted(page) {
             bloom_init_page(page, 0);
         }
 
         if page_add_item(page, size, &itup) {
-            // Success: apply the change, clean up, and exit.
             GenericXLogFinish(state)?;
             UnlockReleaseBuffer(buffer)?;
             ReleaseBuffer(meta_buffer)?;
             return Ok(false);
         }
 
-        // Didn't fit; try other pages.
         GenericXLogAbort(state);
         UnlockReleaseBuffer(buffer)?;
     } else {
-        // No entries in notFullPage.
         LockBuffer(meta_buffer, BUFFER_LOCK_UNLOCK)?;
     }
 
-    // Try other pages in the notFullPage array; nStart will change, so hold
-    // the metapage exclusively.
     LockBuffer(meta_buffer, BUFFER_LOCK_EXCLUSIVE)?;
 
-    // nStart might have changed while we didn't have lock.
+    // nStart might have changed while the lock was released.
     let mut n_start = meta_nstart(buf_page_bytes(meta_buffer));
 
-    // Skip the first page if we already tried it above.
     {
         let meta_page = buf_page_bytes(meta_buffer);
         if n_start < meta_nend(meta_page)
@@ -99,16 +88,14 @@ pub fn blinsert<'mcx>(
         }
     }
 
-    // Each iteration tries one notFullPage entry with its own
-    // GenericXLogState; the loop leaves a live state registered over the
-    // metapage for the fallback new-page case (C's for(;;) shape).
+    // One GenericXLogState per attempt; the final iteration's state (metapage
+    // registered at block_id 0) carries the fallback new-page case, C's for(;;).
     loop {
         let mut state = GenericXLogStart(imcx, index)?;
         let meta_page = state.register_buffer(meta_buffer, 0)?;
 
         if n_start >= meta_nend(meta_page) {
-            // No more entries in notFullPage: allocate a new page.
-            // (Same XXX as C: holds ex-lock on metapage across the extend.)
+            // Same XXX as C: holds ex-lock on the metapage across the extend.
             let buffer = bloom_new_buffer(index)?;
             let new_blkno = BufferGetBlockNumber(buffer);
 
@@ -121,7 +108,6 @@ pub fn blinsert<'mcx>(
                 .into());
             }
 
-            // Reset the notFullPage array to contain just this new page.
             let meta_page = state.page_image_mut(0);
             meta_set_nstart(meta_page, 0);
             meta_set_nend(meta_page, 1);
@@ -140,13 +126,11 @@ pub fn blinsert<'mcx>(
         LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE)?;
         let page = state.register_buffer(buffer, 0)?;
 
-        // Basically same logic as above.
         if page_is_new(page) || page_is_deleted(page) {
             bloom_init_page(page, 0);
         }
 
         if page_add_item(page, size, &itup) {
-            // Success: update nStart in the registered metapage image.
             let meta_page = state.page_image_mut(0);
             meta_set_nstart(meta_page, n_start);
             GenericXLogFinish(state)?;
@@ -155,7 +139,6 @@ pub fn blinsert<'mcx>(
             return Ok(false);
         }
 
-        // Didn't fit; drop this attempt and move to the next page.
         GenericXLogAbort(state);
         UnlockReleaseBuffer(buffer)?;
         n_start += 1;

@@ -1,16 +1,6 @@
-//! contrib/bloom (18.3): the signature-file index access method.
-//!
-//! Plain terms: instead of storing column values, a bloom index stores one
-//! small bit-signature per heap row; each indexed column sets a few
-//! pseudo-random bits. A search builds the same signature from its keys and
-//! returns every row whose stored bits cover it — sometimes wrongly ("maybe",
-//! when bits collide), never missing a real match. So the scan is a lossy
-//! bitmap scan (every hit rechecked against the heap) and equality is the
-//! only supported operator.
-//!
-//! C sources: blutils.c blinsert.c blscan.c blvacuum.c blcost.c blvalidate.c
-//! bloom.h. Crash safety rides generic WAL (GenericXLogStart/Register/Finish)
-//! exactly as in C.
+//! contrib/bloom (18.3): the signature-file index AM. Lossy by contract:
+//! amgetbitmap only, every hit rechecked against the heap, equality the only
+//! operator. Crash safety rides generic WAL exactly as in C.
 
 pub use types_bloom as layout;
 
@@ -37,7 +27,7 @@ fn lookup(function: &str) -> Option<PGFunction> {
 }
 
 // CREATE FUNCTION validation target only; the closed AM set dispatches via
-// IndexAmKind, never through fmgr (same shape as pgvector's fc_hnswhandler).
+// IndexAmKind, never through fmgr (fc_hnswhandler precedent).
 fn fc_blhandler(
     _f: Option<&mut types_fmgr::FmgrInfo>,
     _fcinfo: &mut types_fmgr::FunctionCallInfoBaseData,

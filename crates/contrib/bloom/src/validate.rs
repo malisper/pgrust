@@ -1,5 +1,4 @@
-//! blvalidate.c: opclass validator for bloom. Message texts are C's exactly
-//! (bloom's differ from the core AMs': "bloom opfamily %s contains ...").
+//! blvalidate.c. Message texts are C's exactly (they differ from core AMs').
 
 use elog::ereport;
 use index_amvalidate::{
@@ -41,10 +40,7 @@ pub fn blvalidate(opclassoid: Oid) -> PgResult<bool> {
     let (oprlist, opr_ordered) = syscache_seams::lookup_pg_amop_rows::call(mcx, opfamilyoid)?;
     let (proclist, proc_ordered) = syscache_seams::lookup_pg_amproc_rows::call(mcx, opfamilyoid)?;
 
-    // Check individual support functions.
     for procform in proclist.iter() {
-        // All bloom support functions should be registered with matching
-        // left/right types.
         if procform.amproclefttype != procform.amprocrighttype {
             info(format!(
                 "bloom opfamily {} contains support procedure {} with cross-type registration",
@@ -54,13 +50,11 @@ pub fn blvalidate(opclassoid: Oid) -> PgResult<bool> {
             result = false;
         }
 
-        // We can't check signatures except within the specific opclass, since
-        // we need to know the associated opckeytype in many cases.
+        // Signatures are only checkable within the specific opclass (opckeytype).
         if procform.amproclefttype != opcintype {
             continue;
         }
 
-        // Check procedure numbers and function signatures.
         let ok = match procform.amprocnum as u16 {
             BLOOM_HASH_PROC => {
                 check_amproc_signature(procform.amproc, INT4OID, false, 1, 1, &[opckeytype])?
@@ -89,9 +83,7 @@ pub fn blvalidate(opclassoid: Oid) -> PgResult<bool> {
         }
     }
 
-    // Check individual operators.
     for oprform in oprlist.iter() {
-        // Check it's allowed strategy for bloom.
         if oprform.amopstrategy < 1 || oprform.amopstrategy > BLOOM_NSTRATEGIES as i16 {
             info(format!(
                 "bloom opfamily {} contains operator {} with invalid strategy number {}",
@@ -102,7 +94,6 @@ pub fn blvalidate(opclassoid: Oid) -> PgResult<bool> {
             result = false;
         }
 
-        // bloom doesn't support ORDER BY operators.
         if oprform.amoppurpose != AMOP_SEARCH || oprform.amopsortfamily != InvalidOid {
             info(format!(
                 "bloom opfamily {} contains invalid ORDER BY specification for operator {}",
@@ -112,7 +103,6 @@ pub fn blvalidate(opclassoid: Oid) -> PgResult<bool> {
             result = false;
         }
 
-        // Check operator signature --- same for all bloom strategies.
         if !check_amop_signature(
             oprform.amopopr,
             BOOLOID,
@@ -128,19 +118,17 @@ pub fn blvalidate(opclassoid: Oid) -> PgResult<bool> {
         }
     }
 
-    // Now check for inconsistent groups of operators/functions.
     let grouplist = identify_opfamily_groups(mcx, &oprlist, opr_ordered, &proclist, proc_ordered)?;
     let mut opclassgroup = None;
     for thisgroup in grouplist.iter() {
-        // Remember the group exactly matching the test opclass.
+        // Last group matching the test opclass wins; empty operator sets can
+        // be OK (each bloom opclass is a law unto itself — C comment).
         if thisgroup.lefttype == opcintype && thisgroup.righttype == opcintype {
             opclassgroup = Some(*thisgroup);
         }
-        // Each bloom opclass is more or less a law unto itself; empty
-        // operator sets can be OK (see C comment).
     }
 
-    // Check that the originally-named opclass is complete.
+    // The originally-named opclass must be complete.
     for i in 1..=BLOOM_NPROC {
         if let Some(g) = opclassgroup {
             if g.functionset & (1u64 << i) != 0 {

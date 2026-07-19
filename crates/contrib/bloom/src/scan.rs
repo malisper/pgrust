@@ -11,7 +11,6 @@ use types_relscan::{relation_get_index_scan, IndexScanDescData, IndexScanOpaque}
 use types_scan::scankey::{ScanKeyData, SK_ISNULL};
 use types_storage::buf::BufferAccessStrategyType;
 
-/// blbeginscan.
 pub fn blbeginscan<'mcx>(
     mcx: Mcx<'mcx>,
     index: &Relation<'mcx>,
@@ -32,8 +31,7 @@ pub fn blbeginscan<'mcx>(
     )
 }
 
-/// blrescan: drop the computed signature; the dispatcher already copied the
-/// new scan keys into scan.keyData (C memcpy).
+/// Drops the computed signature; new keys arrive from the dispatcher.
 pub fn blrescan(
     scan: &mut IndexScanDescData<'_>,
     keys: Option<&[ScanKeyData]>,
@@ -53,7 +51,6 @@ pub fn blrescan(
     Ok(())
 }
 
-/// blendscan.
 pub fn blendscan(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
     let IndexScanOpaque::Bloom(so) = &mut scan.opaque else {
         unreachable!("blendscan on non-bloom opaque")
@@ -62,8 +59,7 @@ pub fn blendscan(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
     Ok(())
 }
 
-/// blgetbitmap: whole-index sweep; every stored signature containing the scan
-/// signature contributes its TID, always with recheck (lossy).
+/// Whole-index sweep; every hit is added with recheck=true (lossy contract).
 pub fn blgetbitmap(
     scan: &mut IndexScanDescData<'_>,
     tbm: &mut tidbitmap::TIDBitmap<'_>,
@@ -73,9 +69,7 @@ pub fn blgetbitmap(
 
     let mut ntids: i64 = 0;
 
-    // New search: compute the search signature from the scan keys.
     {
-        // Split borrows: keys from scan.keyData, opaque state mutably.
         let (keys, so) = {
             let IndexScanOpaque::Bloom(so) = &mut scan.opaque else {
                 unreachable!("blgetbitmap on non-bloom opaque")
@@ -85,8 +79,7 @@ pub fn blgetbitmap(
         if so.sign.is_none() {
             let mut sign = vec![0 as BloomSignatureWord; so.state.opts.bloom_length as usize];
             for skey in keys.iter().take(nkeys) {
-                // Bloom-indexable operators are assumed strict: nothing can
-                // match a NULL key.
+                // Bloom-indexable operators are assumed strict: NULL matches nothing.
                 if skey.sk_flags & SK_ISNULL != 0 {
                     so.sign = None;
                     return Ok(0);
@@ -102,7 +95,6 @@ pub fn blgetbitmap(
         }
     }
 
-    // Whole-index read: bulk-read strategy, like C.
     let bas = GetAccessStrategy(BufferAccessStrategyType::BasBulkread);
     let npages = bufmgr::RelationGetNumberOfBlocksInFork(&index, ForkNumber::MAIN_FORKNUM)?;
     if index.pgstat_enabled.get() {
@@ -131,9 +123,8 @@ pub fn blgetbitmap(
             for offset in 1..=max_offset {
                 let toff = tuple_off(size, offset);
                 let tuple = &page[toff..toff + size];
-                // Check index signature with scan signature.
                 if signature_matches(&tuple[BLOOM_TUPLE_HDR_SZ..], sign) {
-                    // heapPtr: 3 bare u16 words (block hi, block lo, offset).
+                    // heapPtr: 3 bare u16s (block hi, block lo, offset).
                     let hi = u16::from_ne_bytes([tuple[0], tuple[1]]) as u32;
                     let lo = u16::from_ne_bytes([tuple[2], tuple[3]]) as u32;
                     let off = u16::from_ne_bytes([tuple[4], tuple[5]]);

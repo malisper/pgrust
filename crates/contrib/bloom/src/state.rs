@@ -1,5 +1,4 @@
-//! blutils.c: BloomState construction, signValue, BloomFormTuple,
-//! BloomNewBuffer, BloomInitMetapage, and the shared page/buffer helpers.
+//! blutils.c: BloomState, signValue, BloomFormTuple, page/buffer helpers.
 
 use bufmgr::{
     ConditionalLockBuffer, LockBuffer, ReleaseBuffer, UnlockReleaseBuffer, BUFFER_LOCK_EXCLUSIVE,
@@ -13,8 +12,7 @@ use types_core::{BlockNumber, Buffer, ForkNumber, BLCKSZ};
 use types_error::{PgError, PgResult};
 use types_rel::Relation;
 
-/// bloom's amsupport (rd_support is nkey x amsupport, row-major).
-const BLOOM_AMSUPPORT: usize = BLOOM_NPROC as usize;
+const BLOOM_AMSUPPORT: usize = BLOOM_NPROC as usize; // rd_support row width
 
 /// PageGetContents pointer; caller holds the needed content lock.
 #[inline]
@@ -39,7 +37,6 @@ pub fn buf_page_bytes_mut<'a>(buffer: Buffer) -> &'a mut [u8] {
     }
 }
 
-// index_getprocinfo(index, attno+1, BLOOM_HASH_PROC) OID via rd_support.
 fn hash_proc_oid(index: &Relation<'_>, attno_0based: usize) -> types_core::Oid {
     index
         .rd_support
@@ -48,11 +45,9 @@ fn hash_proc_oid(index: &Relation<'_>, attno_0based: usize) -> types_core::Oid {
         .unwrap_or(0)
 }
 
-/// initBloomState. C caches the metapage options in rd_amcache; our Relation
-/// has no bloom amcache slot, so we read the metapage's frozen options on each
-/// construction (one shared-locked buffer read). Behaviorally identical — the
-/// options are always the metapage's, never current reloptions (that's why
-/// ALTER INDEX ... SET (length=...) never changes a live index).
+/// initBloomState. C caches the metapage options in rd_amcache; this Relation
+/// has no bloom amcache slot, so each construction re-reads the metapage's
+/// frozen options (one shared-locked buffer read; behaviorally identical).
 pub fn init_bloom_state(index: &Relation<'_>) -> PgResult<BloomState> {
     let ncolumns = index.rd_att.natts as usize;
     let mut hash_fn = Vec::with_capacity(ncolumns);
@@ -88,9 +83,6 @@ fn read_metapage_options(index: &Relation<'_>) -> PgResult<BloomOptions> {
     Ok(opts)
 }
 
-/// signValue: set this attribute's bits in `sign`. Invokes the column's hash
-/// support proc (FunctionCall1Coll) for the value, then seeds the private
-/// generator and draws bitSize[attno] bit positions.
 pub fn sign_value(
     state: &mut BloomState,
     sign: &mut [BloomSignatureWord],
@@ -98,8 +90,6 @@ pub fn sign_value(
     attno: usize,
 ) -> PgResult<()> {
     let collation = state.collations[attno];
-    // mySrand(attno) then hashVal = hash(value); the C order is preserved
-    // inside add_value_bits (which re-seeds with attno before mixing).
     let hash_val = types_fmgr::function_call1_coll(&mut state.hash_fn[attno], collation, value)?.as_i32()
         as u32;
     add_value_bits(
@@ -112,7 +102,6 @@ pub fn sign_value(
     Ok(())
 }
 
-/// BloomFormTuple: heapPtr + signature image, size_of_bloom_tuple bytes.
 pub fn bloom_form_tuple(
     state: &mut BloomState,
     iptr: &types_tuple::itemptr::ItemPointerData,
@@ -120,14 +109,12 @@ pub fn bloom_form_tuple(
     isnull: &[bool],
 ) -> PgResult<Vec<u8>> {
     let mut tuple = vec![0u8; state.size_of_bloom_tuple];
-    // heapPtr: ItemPointerData is 3 bare u16 (block hi, block lo, offset).
     let blk = types_tuple::itemptr::ItemPointerGetBlockNumberNoCheck(iptr);
     let off = types_tuple::itemptr::ItemPointerGetOffsetNumberNoCheck(iptr);
     tuple[0..2].copy_from_slice(&((blk >> 16) as u16).to_ne_bytes());
     tuple[2..4].copy_from_slice(&((blk & 0xFFFF) as u16).to_ne_bytes());
     tuple[4..6].copy_from_slice(&off.to_ne_bytes());
 
-    // Build the signature into a word view, then splice back into the image.
     let mut sign = vec![0u16; state.opts.bloom_length as usize];
     for i in 0..state.ncolumns {
         if isnull[i] {
@@ -142,8 +129,7 @@ pub fn bloom_form_tuple(
     Ok(tuple)
 }
 
-/// BloomNewBuffer: recycle a deleted/new page from the FSM, else extend.
-/// Returns a pinned, exclusive-locked buffer; caller must BloomInitPage it.
+/// Returns a pinned, exclusive-locked buffer; caller must bloom_init_page it.
 pub fn bloom_new_buffer(index: &Relation<'_>) -> PgResult<Buffer> {
     loop {
         let blkno = freespace::GetFreeIndexPage(index)?;
@@ -151,7 +137,6 @@ pub fn bloom_new_buffer(index: &Relation<'_>) -> PgResult<Buffer> {
             break;
         }
         let buffer = bufmgr::ReadBuffer(index, blkno)?;
-        // Someone may have recycled this page already; the buffer may be locked.
         if ConditionalLockBuffer(buffer)? {
             let page = buf_page_bytes(buffer);
             if page_is_new(page) || page_is_deleted(page) {
@@ -161,7 +146,6 @@ pub fn bloom_new_buffer(index: &Relation<'_>) -> PgResult<Buffer> {
         }
         ReleaseBuffer(buffer)?;
     }
-    // Extend the file (ExtendBufferedRel(EB_LOCK_FIRST)).
     let (buffer, extended_by) = bufmgr_seams::extend_buffered_rel_by::call(
         index,
         ForkNumber::MAIN_FORKNUM,
@@ -173,15 +157,13 @@ pub fn bloom_new_buffer(index: &Relation<'_>) -> PgResult<Buffer> {
     Ok(buffer)
 }
 
-/// BloomInitMetapage: allocate block 0, fill it, WAL-log a full image.
 pub fn bloom_init_metapage<'mcx>(
     mcx: Mcx<'mcx>,
     index: &Relation<'mcx>,
     forknum: ForkNumber,
 ) -> PgResult<()> {
-    // First page => block 0. No extension lock needed (no concurrent
-    // inserters). C uses ReadBufferExtended(P_NEW); the port's extend path is
-    // ExtendBufferedRel(EB_LOCK_FIRST), which returns the buffer locked.
+    // C's ReadBufferExtended(P_NEW) + LockBuffer becomes
+    // ExtendBufferedRel(EB_LOCK_FIRST): same new zeroed block 0, locked.
     let (meta_buffer, extended_by) = bufmgr_seams::extend_buffered_rel_by::call(
         index,
         forknum,
@@ -204,7 +186,6 @@ pub fn bloom_init_metapage<'mcx>(
     Ok(())
 }
 
-/// BloomFillMetapage's option choice: reloptions if assigned, else defaults.
 pub fn index_options_or_default(index: &Relation<'_>) -> BloomOptions {
     index
         .rd_options
