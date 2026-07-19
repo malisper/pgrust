@@ -1,16 +1,20 @@
 //! fmgr wrappers (`fc_*`) + `PSEUDOTYPES_BUILTINS` for fmgr-core. Registered:
-//! every ereport-only stub, void_in/void_out/void_recv, cstring_in/cstring_out
-//! (fn_extra scratch / cstring_result frame, the varlena unknownin
-//! precedent), pg_node_tree_out (varlena fc_textout delegate). Not
-//! registrable: cstring_recv/cstring_send/void_send/pg_node_tree_send (wire)
-//! and the *_out/*_send delegates whose target unit is unported
+//! every ereport-only stub, void_in/void_out/void_recv/void_send,
+//! cstring_in/cstring_out (fn_extra scratch / cstring_result frame, the
+//! varlena unknownin precedent), pg_node_tree_out (varlena fc_textout
+//! delegate), pg_node_tree_send (varlena textsend delegate). Not registrable:
+//! cstring_recv/cstring_send (wire, no pg_proc callers) and the *_out/*_send
+//! delegates whose target unit is unported
 //! (anyarray/anycompatiblearray/anyenum/anyrange/anycompatiblerange/
 //! anymultirange/anycompatiblemultirange).
 
 use datum::Datum;
 use types_core::Oid;
 use types_error::PgResult;
-use types_fmgr::{cstring_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo, PGFunction};
+use types_fmgr::{
+    cstring_result, varlena_result, FmgrBuiltin, FmgrInfo, FunctionCallInfoBaseData as Fcinfo,
+    PGFunction,
+};
 
 macro_rules! fc_stub {
     ($($fc:ident: $core:ident;)*) => {$(
@@ -72,6 +76,12 @@ pub fn fc_void_in(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgRes
 
 pub fn fc_void_recv(_flinfo: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     Ok(crate::void_recv())
+}
+
+// C void_send: an empty bytea payload on the binary wire (pseudotypes.c).
+pub fn fc_void_send(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::void_send(mcx)?))
 }
 
 // C pstrdup("")s per call; the empty cstring is immutable, so one static.
@@ -166,6 +176,7 @@ pub const PSEUDOTYPES_BUILTINS: &[FmgrBuiltin] = &[
     b(3116, "fdw_handler_in", 1, false, fc_fdw_handler_in),
     b(3117, "fdw_handler_out", 1, true, fc_fdw_handler_out),
     b(3120, "void_recv", 1, true, fc_void_recv),
+    b(3121, "void_send", 1, true, fc_void_send),
     b(3311, "tsm_handler_in", 1, false, fc_tsm_handler_in),
     b(3312, "tsm_handler_out", 1, true, fc_tsm_handler_out),
     b(3504, "anyenum_in", 1, true, fc_anyenum_in),

@@ -61,9 +61,24 @@ fn unported_delegates_are_loud() {
 }
 
 #[test]
+fn void_send_fmgr_wrapper_sends_empty_payload() {
+    use types_fmgr::LocalFcinfo;
+
+    let ctx = MemoryContext::new("t");
+    let mut fcinfo = LocalFcinfo::<1>::new(0);
+    // SAFETY: ctx outlives the call.
+    unsafe { fcinfo.set_result_mcx(ctx.mcx()) };
+    fcinfo.set_arg(0, datum::Datum::null());
+    let d = builtins::fc_void_send(None, &mut fcinfo).unwrap();
+    // SAFETY: fc_void_send returns a live 4B-header varlena in ctx.
+    let v = unsafe { datum::VarlenaRef::from_ptr(d.as_usize() as *const u8) };
+    assert_eq!(v.data(), b"", "C void_send: zero payload bytes on the wire");
+}
+
+#[test]
 fn builtins_table_is_oid_ascending() {
     let t = builtins::PSEUDOTYPES_BUILTINS;
-    assert_eq!(t.len(), 49);
+    assert_eq!(t.len(), 50);
     for w in t.windows(2) {
         assert!(w[0].foid < w[1].foid, "{} !< {}", w[0].foid, w[1].foid);
     }
