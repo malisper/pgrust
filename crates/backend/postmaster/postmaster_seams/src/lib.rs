@@ -86,3 +86,18 @@ seam_core::seam!(
     // PERMIT-S5 (sim rtpool demo): live pool-thread count (the drain probe).
     pub fn rtpool_population() -> i32
 );
+
+seam_core::seam!(
+    // SIMVFS-SHARED (sim rtgang corpus): the standing gang's PGPROC
+    // boot-reserve sizing (main_entry parity — the sim session harness must
+    // call it BEFORE the ladder's InitializeMaxBackends). Seam-routed for
+    // the same package-cycle reason as the wpool/rtpool trios.
+    pub fn rtgang_procs_wanted() -> i32
+);
+
+seam_core::seam!(
+    // SIMVFS-SHARED (sim rtgang corpus): install the standing-gang spawner
+    // (serverloop parity — after shared memory exists; threads spawn at
+    // first engagement).
+    pub fn rtgang_install()
+);

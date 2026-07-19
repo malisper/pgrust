@@ -18,7 +18,7 @@
 //! the one server process, and no test in our suite uses set_local.
 
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
-use std::sync::Mutex;
+use pgsync::Mutex;
 
 use condition_variable::{
     ConditionVariable, ConditionVariableBroadcast, ConditionVariableCancelSleep,

@@ -20,7 +20,7 @@
 //! finish_leave — C's PG_FINALLY unwind) run them in registration order.
 
 use std::sync::atomic::{AtomicPtr, Ordering};
-use std::sync::Mutex;
+use pgsync::Mutex;
 
 use types_portal::QueryDescHandle;
 

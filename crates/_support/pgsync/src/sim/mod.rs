@@ -51,3 +51,14 @@ pub use sched::{ClockMode, FailAction, Scheduler, SchedulerConfig, SlotId, Watch
 pub fn current_vpid() -> Option<hooks::Vpid> {
     sched::current_vpid()
 }
+
+/// STRICT permit probe (the shared-universe SimVfs access assert): true only
+/// when the GLOBAL permit scheduler exists AND the calling thread's slot
+/// currently holds the permit. False when the scheduler is off (sharing is
+/// only legal under it), when the thread never entered a door, and when a
+/// registered thread is somehow executing outside its quantum. Injected into
+/// vfs as a plain fn pointer (`SimVfs::set_shared_access_probe`) — vfs is a
+/// frozen leaf crate and cannot depend on pgsync.
+pub fn current_thread_holds_permit() -> bool {
+    sched::current_thread_holds_permit()
+}

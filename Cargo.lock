@@ -4958,6 +4958,7 @@ name = "exec_hooks"
 version = "0.0.0"
 dependencies = [
  "execmain",
+ "pgsync",
  "seam_core",
  "types_portal",
 ]
@@ -7470,6 +7471,7 @@ version = "0.0.0"
 dependencies = [
  "condition_variable",
  "elog",
+ "pgsync",
  "types_error",
  "waitevent",
 ]
@@ -7881,6 +7883,7 @@ dependencies = [
  "types_guc",
  "types_startup",
  "types_storage",
+ "vfs",
  "waiteventset",
  "waiteventset_seams",
  "walreceiver",
@@ -12761,6 +12764,7 @@ dependencies = [
  "pg_enum_seams",
  "pg_sema_seams",
  "pg_strong_random",
+ "pgrcolumnar",
  "pgstat",
  "pgstat_seams",
  "pgsync",
