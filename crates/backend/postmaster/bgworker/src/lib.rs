@@ -138,13 +138,26 @@ static REGISTRY: Mutex<Option<Registry>> = Mutex::new(None);
 /// safe when armed; native builds compile none of this.
 #[cfg(pgrust_sim)]
 fn raw_registry_gate() -> Option<std::sync::MutexGuard<'static, ()>> {
-    static ARMED: pgsync::OnceLock<bool> = pgsync::OnceLock::new();
+    use std::sync::atomic::{AtomicU8, Ordering};
     static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    if *ARMED.get_or_init(|| std::env::var_os("PGRUST_SIM_RAWREG").is_some()) {
-        Some(GATE.lock().unwrap_or_else(|e| e.into_inner()))
-    } else {
-        None
-    }
+    // Plain-atomic armed memo (0 unknown / 1 off / 2 armed) — deliberately
+    // NOT a pgsync OnceLock: this check runs on EVERY registry acquire, and
+    // a hooked-lock memo emits scheduler ops per call, perturbing every
+    // corpus's schedule (P9's x3 identity broke on exactly that — the memo
+    // ops shifted its teardown into the wall-timing window of the harness
+    // drain poll). Atomics are deliberately unintercepted (pgsync design
+    // §1: one runnable thread totally orders them), so the disarmed fast
+    // path is schedule-invisible.
+    static ARMED: AtomicU8 = AtomicU8::new(0);
+    let armed = match ARMED.load(Ordering::Relaxed) {
+        0 => {
+            let v = if std::env::var_os("PGRUST_SIM_RAWREG").is_some() { 2 } else { 1 };
+            ARMED.store(v, Ordering::Relaxed);
+            v
+        }
+        v => v,
+    };
+    (armed == 2).then(|| GATE.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
 fn with_registry<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
