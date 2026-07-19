@@ -1153,39 +1153,150 @@ impl ReorderBuffer {
         }
     }
 
+    // ReorderBufferRememberPrepareInfo (reorderbuffer.c:2897): record the
+    // prepare information and mark the transaction prepared. Returns false
+    // for an unknown transaction.
     pub fn remember_prepare_info(
         &mut self,
-        _xid: TransactionId,
-        _prepare_lsn: XLogRecPtr,
-        _end_lsn: XLogRecPtr,
-        _prepare_time: TimestampTz,
-        _origin_id: RepOriginId,
-        _origin_lsn: XLogRecPtr,
+        xid: TransactionId,
+        prepare_lsn: XLogRecPtr,
+        end_lsn: XLogRecPtr,
+        prepare_time: TimestampTz,
+        origin_id: RepOriginId,
+        origin_lsn: XLogRecPtr,
     ) -> bool {
-        unported("ReorderBufferRememberPrepareInfo (two-phase): phase-2")
+        let Some(txn) = self.txn_by_xid(xid, false, InvalidXLogRecPtr, false).0 else {
+            return false;
+        };
+
+        // Remember the prepare information to be later used by commit
+        // prepared in case we skip doing prepare.
+        let t = self.txn_mut(txn);
+        t.final_lsn = prepare_lsn;
+        t.end_lsn = end_lsn;
+        t.xact_time = prepare_time;
+        t.origin_id = origin_id;
+        t.origin_lsn = origin_lsn;
+
+        debug_assert_eq!(t.txn_flags & RBTXN_PREPARE_STATUS_MASK, 0);
+        t.txn_flags |= RBTXN_IS_PREPARED;
+        true
     }
 
-    pub fn skip_prepare(&mut self, _xid: TransactionId) {
-        unported("ReorderBufferSkipPrepare (two-phase): phase-2")
+    // ReorderBufferSkipPrepare (reorderbuffer.c:2929).
+    pub fn skip_prepare(&mut self, xid: TransactionId) {
+        let Some(txn) = self.txn_by_xid(xid, false, InvalidXLogRecPtr, false).0 else {
+            return;
+        };
+        let t = self.txn_mut(txn);
+        debug_assert_eq!(t.txn_flags & RBTXN_PREPARE_STATUS_MASK, RBTXN_IS_PREPARED);
+        t.txn_flags |= RBTXN_SKIPPED_PREPARE;
     }
 
-    pub fn prepare(&mut self, _xid: TransactionId, _gid: &str) -> PgResult<()> {
-        unported("ReorderBufferPrepare (two-phase): phase-2")
+    // ReorderBufferPrepare (reorderbuffer.c:2950): replay the transaction at
+    // PREPARE time and send the prepare callback.
+    pub fn prepare(&mut self, xid: TransactionId, gid: &str) -> PgResult<()> {
+        let Some(txn) = self.txn_by_xid(xid, false, InvalidXLogRecPtr, false).0 else {
+            return Ok(());
+        };
+
+        debug_assert_eq!(
+            self.txn(txn).txn_flags & RBTXN_PREPARE_STATUS_MASK,
+            RBTXN_IS_PREPARED
+        );
+        debug_assert!(self.txn(txn).final_lsn != InvalidXLogRecPtr);
+
+        self.txn_mut(txn).gid = Some(gid.to_string());
+
+        let (final_lsn, end_lsn, prepare_time, origin_id, origin_lsn) = {
+            let t = self.txn(txn);
+            (t.final_lsn, t.end_lsn, t.xact_time, t.origin_id, t.origin_lsn)
+        };
+        self.replay(txn, final_lsn, end_lsn, prepare_time, origin_id, origin_lsn)?;
+
+        // Send a prepare if not already done so. This might occur if we have
+        // detected a concurrent abort while replaying the non-streaming
+        // transaction.
+        if !self.txn(txn).sent_prepare() {
+            let cb = self.callbacks.prepare;
+            cb(self, txn, final_lsn)?;
+            self.txn_mut(txn).txn_flags |= RBTXN_SENT_PREPARE;
+        }
+        Ok(())
     }
 
+    // ReorderBufferFinishPrepared (reorderbuffer.c:3007): handle
+    // COMMIT/ROLLBACK PREPARED, replaying the transaction first when its
+    // prepare predates two_phase_at (skipped-prepare arm, reorderbuffer.c:3025).
+    #[allow(clippy::too_many_arguments)]
     pub fn finish_prepared(
         &mut self,
-        _xid: TransactionId,
-        _commit_lsn: XLogRecPtr,
-        _end_lsn: XLogRecPtr,
-        _two_phase_at: XLogRecPtr,
-        _commit_time: TimestampTz,
-        _origin_id: RepOriginId,
-        _origin_lsn: XLogRecPtr,
-        _gid: &str,
-        _is_commit: bool,
+        xid: TransactionId,
+        commit_lsn: XLogRecPtr,
+        end_lsn: XLogRecPtr,
+        two_phase_at: XLogRecPtr,
+        commit_time: TimestampTz,
+        origin_id: RepOriginId,
+        origin_lsn: XLogRecPtr,
+        gid: &str,
+        is_commit: bool,
     ) -> PgResult<()> {
-        unported("ReorderBufferFinishPrepared (two-phase): phase-2")
+        let Some(txn) = self.txn_by_xid(xid, false, commit_lsn, false).0 else {
+            return Ok(());
+        };
+
+        // By this time the txn has the prepare record information; remember
+        // it to be later used for rollback.
+        let prepare_end_lsn = self.txn(txn).end_lsn;
+        let prepare_time = self.txn(txn).xact_time;
+
+        self.txn_mut(txn).gid = Some(gid.to_string());
+
+        // It is possible that this transaction is not decoded at prepare
+        // time, either because by that time we didn't have a consistent
+        // snapshot, or two_phase was not enabled, or it was decoded earlier
+        // but we have restarted. We only need to send the prepare if it was
+        // not decoded earlier. We don't need to decode the xact for aborts if
+        // it is not done already.
+        if self.txn(txn).final_lsn < two_phase_at && is_commit {
+            debug_assert_eq!(
+                self.txn(txn).txn_flags & RBTXN_PREPARE_STATUS_MASK,
+                RBTXN_IS_PREPARED | RBTXN_SKIPPED_PREPARE
+            );
+            debug_assert!(self.txn(txn).final_lsn != InvalidXLogRecPtr);
+
+            // Use the prepare record's information for the replay so the
+            // downstream gets accurate positions (not the commit record's).
+            let (final_lsn, p_end_lsn, p_time, p_origin_id, p_origin_lsn) = {
+                let t = self.txn(txn);
+                (t.final_lsn, t.end_lsn, t.xact_time, t.origin_id, t.origin_lsn)
+            };
+            self.replay(txn, final_lsn, p_end_lsn, p_time, p_origin_id, p_origin_lsn)?;
+        }
+
+        {
+            let t = self.txn_mut(txn);
+            t.final_lsn = commit_lsn;
+            t.end_lsn = end_lsn;
+            t.xact_time = commit_time;
+            t.origin_id = origin_id;
+            t.origin_lsn = origin_lsn;
+        }
+
+        if is_commit {
+            let cb = self.callbacks.commit_prepared;
+            cb(self, txn, commit_lsn)?;
+        } else {
+            let cb = self.callbacks.rollback_prepared;
+            cb(self, txn, prepare_end_lsn, prepare_time)?;
+        }
+
+        // cleanup: make sure there's no cache pollution.
+        let invals = std::mem::take(&mut self.txn_mut(txn).invalidations);
+        replay::execute_invalidations(&invals)?;
+        self.txn_mut(txn).invalidations = invals;
+        self.cleanup_txn(txn);
+        Ok(())
     }
 
     pub(crate) fn tuplecid_hash_any(&self, txn: TxnId) -> Option<Rc<dyn Any>> {

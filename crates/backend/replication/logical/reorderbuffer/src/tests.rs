@@ -715,3 +715,176 @@ fn queued_change_to_aborted_txn_is_dropped() {
     assert_eq!(rb.txn(txn).nentries, 0);
     assert_eq!(rb.size, 0);
 }
+
+// --- two-phase (prepared transaction) machinery ---
+
+thread_local! {
+    static TWOPC_EVENTS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+fn twopc_events() -> Vec<String> {
+    TWOPC_EVENTS.with(|e| e.borrow().clone())
+}
+
+fn rec_prepare_cb(rb: &mut ReorderBuffer, txn: TxnId, lsn: XLogRecPtr) -> types_error::PgResult<()> {
+    let gid = rb.txn(txn).gid.clone().unwrap_or_default();
+    TWOPC_EVENTS.with(|e| e.borrow_mut().push(format!("prepare:{gid}:{lsn}")));
+    Ok(())
+}
+
+fn rec_commit_prepared_cb(
+    rb: &mut ReorderBuffer,
+    txn: TxnId,
+    lsn: XLogRecPtr,
+) -> types_error::PgResult<()> {
+    let gid = rb.txn(txn).gid.clone().unwrap_or_default();
+    TWOPC_EVENTS.with(|e| e.borrow_mut().push(format!("commit_prepared:{gid}:{lsn}")));
+    Ok(())
+}
+
+fn rec_rollback_prepared_cb(
+    rb: &mut ReorderBuffer,
+    txn: TxnId,
+    prepare_end_lsn: XLogRecPtr,
+    prepare_time: types_core::TimestampTz,
+) -> types_error::PgResult<()> {
+    let gid = rb.txn(txn).gid.clone().unwrap_or_default();
+    TWOPC_EVENTS.with(|e| {
+        e.borrow_mut()
+            .push(format!("rollback_prepared:{gid}:{prepare_end_lsn}:{prepare_time}"))
+    });
+    Ok(())
+}
+
+#[test]
+fn remember_prepare_info_marks_prepared() {
+    let mut rb = rb();
+    assert!(!rb.remember_prepare_info(21, 100, 110, 777, 3, 55)); // unknown xid
+
+    rb.process_xid(21, 90);
+    assert!(rb.remember_prepare_info(21, 100, 110, 777, 3, 55));
+    let txn = rb.txn_by_xid(21, false, 0, false).0.unwrap();
+    let t = rb.txn(txn);
+    assert_eq!(t.final_lsn, 100);
+    assert_eq!(t.end_lsn, 110);
+    assert_eq!(t.xact_time, 777);
+    assert_eq!(t.origin_id, 3);
+    assert_eq!(t.origin_lsn, 55);
+    assert!(t.is_prepared());
+    assert!(!t.sent_prepare());
+    assert_eq!(t.txn_flags & RBTXN_PREPARE_STATUS_MASK, RBTXN_IS_PREPARED);
+}
+
+#[test]
+fn skip_prepare_marks_skipped() {
+    let mut rb = rb();
+    rb.process_xid(22, 90);
+    assert!(rb.remember_prepare_info(22, 100, 110, 777, 0, 0));
+    rb.skip_prepare(22);
+    let txn = rb.txn_by_xid(22, false, 0, false).0.unwrap();
+    assert_eq!(
+        rb.txn(txn).txn_flags & RBTXN_PREPARE_STATUS_MASK,
+        RBTXN_IS_PREPARED | RBTXN_SKIPPED_PREPARE
+    );
+}
+
+#[test]
+fn prepare_sends_prepare_callback_for_changeless_txn() {
+    let mut rb = rb();
+    rb.callbacks.prepare = rec_prepare_cb;
+    TWOPC_EVENTS.with(|e| e.borrow_mut().clear());
+
+    rb.process_xid(23, 90);
+    assert!(rb.remember_prepare_info(23, 100, 110, 777, 0, 0));
+    rb.prepare(23, "gid_23").unwrap();
+
+    // A txn with no base snapshot skips ProcessTXN; ReorderBufferPrepare's
+    // trailing arm must still send the prepare with the prepare-record LSN.
+    assert_eq!(twopc_events(), ["prepare:gid_23:100".to_string()]);
+
+    // The prepared txn stays alive until COMMIT/ROLLBACK PREPARED.
+    let txn = rb.txn_by_xid(23, false, 0, false).0.unwrap();
+    assert!(rb.txn(txn).sent_prepare());
+}
+
+#[test]
+fn finish_prepared_replays_skipped_txn_then_sends_commit_prepared() {
+    let mut rb = rb();
+    rb.callbacks.prepare = rec_prepare_cb;
+    rb.callbacks.commit_prepared = rec_commit_prepared_cb;
+    TWOPC_EVENTS.with(|e| e.borrow_mut().clear());
+
+    // Decoded-before-two_phase_at shape: prepare at LSN 100 was skipped,
+    // two_phase_at is 200, COMMIT PREPARED arrives at LSN 500.
+    rb.process_xid(24, 90);
+    assert!(rb.remember_prepare_info(24, 100, 110, 777, 0, 0));
+    rb.skip_prepare(24);
+    rb.finish_prepared(24, 500, 510, 200, 888, 0, 0, "gid_24", true)
+        .unwrap();
+
+    // final_lsn (100) < two_phase_at (200) and is_commit: the replay arm runs
+    // first. With no base snapshot there is nothing to decode, so replay
+    // returns without sending prepare (C's ReorderBufferReplay early-return;
+    // the trailing send-prepare arm lives only in ReorderBufferPrepare) and
+    // only commit_prepared goes out, with the commit record's LSN. A txn
+    // with changes replays begin_prepare/changes/prepare here first.
+    assert_eq!(twopc_events(), ["commit_prepared:gid_24:500".to_string()]);
+
+    // The txn is fully cleaned up afterwards.
+    assert!(rb.txn_by_xid(24, false, 0, false).0.is_none());
+}
+
+#[test]
+fn finish_prepared_already_sent_goes_straight_to_commit_prepared() {
+    let mut rb = rb();
+    rb.callbacks.prepare = rec_prepare_cb;
+    rb.callbacks.commit_prepared = rec_commit_prepared_cb;
+    TWOPC_EVENTS.with(|e| e.borrow_mut().clear());
+
+    // Decoded-at-prepare-time shape: prepare at LSN 300 >= two_phase_at 200.
+    rb.process_xid(25, 290);
+    assert!(rb.remember_prepare_info(25, 300, 310, 777, 0, 0));
+    rb.prepare(25, "gid_25").unwrap();
+    rb.finish_prepared(25, 500, 510, 200, 888, 0, 0, "gid_25", true)
+        .unwrap();
+
+    assert_eq!(
+        twopc_events(),
+        [
+            "prepare:gid_25:300".to_string(),
+            "commit_prepared:gid_25:500".to_string()
+        ]
+    );
+    assert!(rb.txn_by_xid(25, false, 0, false).0.is_none());
+}
+
+#[test]
+fn finish_prepared_rollback_uses_prepare_record_info() {
+    let mut rb = rb();
+    rb.callbacks.prepare = rec_prepare_cb;
+    rb.callbacks.rollback_prepared = rec_rollback_prepared_cb;
+    TWOPC_EVENTS.with(|e| e.borrow_mut().clear());
+
+    rb.process_xid(26, 290);
+    assert!(rb.remember_prepare_info(26, 300, 310, 777, 0, 0));
+    rb.prepare(26, "gid_26").unwrap();
+    rb.finish_prepared(26, 600, 610, 200, 999, 0, 0, "gid_26", false)
+        .unwrap();
+
+    // rollback_prepared carries the PREPARE record's end LSN and time.
+    assert_eq!(
+        twopc_events(),
+        [
+            "prepare:gid_26:300".to_string(),
+            "rollback_prepared:gid_26:310:777".to_string()
+        ]
+    );
+    assert!(rb.txn_by_xid(26, false, 0, false).0.is_none());
+}
+
+#[test]
+fn finish_prepared_unknown_xid_is_noop() {
+    let mut rb = rb();
+    rb.finish_prepared(27, 500, 510, 200, 888, 0, 0, "gid_27", true)
+        .unwrap();
+}

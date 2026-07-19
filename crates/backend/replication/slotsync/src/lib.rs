@@ -1074,6 +1074,25 @@ fn repl_slot_sync_worker_inner() -> PgResult<()> {
     lmgr_proc::InitProcess(types_core::BackendType::SlotsyncWorker)?;
     postinit::BaseInit()?;
 
+    // Record the GUC values this worker runs with NOW — the thread-model
+    // rendering of C's fork-time process image. slotsync_reread_config diffs
+    // future reloads against these (hazard class 1). Capturing any later
+    // loses reloads that land mid-startup: 040's GUC test flips
+    // hot_standby_feedback within milliseconds of the "slot sync worker
+    // started" line (logged before InitPostgres), so a post-InitPostgres
+    // capture reads the post-flip value and the diff stays silent forever —
+    // the 040 subtest-20 wait_for_log timeout on main (2026-07-18 triage,
+    // notes/2pc-decode-lane.md). The capture precedes the SIGHUP handler
+    // registration below, so any reload processed before this point simply
+    // becomes this worker's baseline, exactly like C's fork inheritance.
+    STARTED_WITH.with(|sw| {
+        *sw.borrow_mut() = Some(StartedWith {
+            primary_conninfo: guc_tables::vars::PrimaryConnInfo.read().unwrap_or_default(),
+            primary_slotname: guc_tables::vars::PrimarySlotName.read().unwrap_or_default(),
+            hot_standby_feedback: guc_tables::vars::hot_standby_feedback.read(),
+        });
+    });
+
     // Signal handling (C: SIGHUP config reload, SIGINT cancel, SIGTERM die,
     // SIGUSR1 procsignal).
     {
@@ -1096,6 +1115,10 @@ fn repl_slot_sync_worker_inner() -> PgResult<()> {
     // Register as soon as SlotSyncCtx->pid is initialized.
     ipc::before_shmem_exit(slotsync_worker_onexit_cb, datum::Datum::from_usize(0))?;
 
+    // Establishes the timeout module for this thread; InitPostgres registers
+    // timeouts (slotsync.c:1434).
+    timeout::InitializeTimeouts();
+
     let dbname = CheckAndGetDbnameFromConninfo()?;
 
     // Database connection: walrcv_exec-equivalent queries need syscache.
@@ -1110,16 +1133,14 @@ fn repl_slot_sync_worker_inner() -> PgResult<()> {
         "slotsync worker".to_string()
     };
 
-    let conninfo = guc_tables::vars::PrimaryConnInfo.read().unwrap_or_default();
-
-    // Record the GUC values this worker runs with; slotsync_reread_config
-    // diffs future reloads against these (hazard class 1, see above).
-    STARTED_WITH.with(|sw| {
-        *sw.borrow_mut() = Some(StartedWith {
-            primary_conninfo: conninfo.clone(),
-            primary_slotname: guc_tables::vars::PrimarySlotName.read().unwrap_or_default(),
-            hot_standby_feedback: guc_tables::vars::hot_standby_feedback.read(),
-        });
+    // Connect with the baseline conninfo (captured at entry); a conninfo
+    // that changed since then triggers the reread-restart path anyway.
+    let conninfo = STARTED_WITH.with(|sw| {
+        sw.borrow()
+            .as_ref()
+            .expect("slot sync worker recorded its GUCs at entry")
+            .primary_conninfo
+            .clone()
     });
 
     let mut conn = match client::connect_extended(&conninfo, false, false, false, &app_name)? {

@@ -311,7 +311,7 @@ impl ReorderBuffer {
         self.replay(txn, commit_lsn, end_lsn, commit_time, origin_id, origin_lsn)
     }
 
-    fn replay(
+    pub(crate) fn replay(
         &mut self,
         txn: TxnId,
         commit_lsn: XLogRecPtr,
@@ -364,6 +364,7 @@ impl ReorderBuffer {
         let mut specinsert: Option<ChangeId> = None;
         let mut snapshot_now = snapshot_now;
         let mut command_id = command_id;
+        let mut curtxn: Option<TxnId> = None;
 
         let result = self.process_txn_guts(
             txn,
@@ -373,6 +374,7 @@ impl ReorderBuffer {
             using_subtxn,
             &mut iterstate,
             &mut specinsert,
+            &mut curtxn,
         );
 
         match result {
@@ -396,8 +398,33 @@ impl ReorderBuffer {
                     xact::RollbackAndReleaseCurrentSubTransaction()?;
                 }
 
-                // C's ERRCODE_TRANSACTION_ROLLBACK graceful arm applies only
-                // to streaming/prepared decoding: phase-2.
+                // ERRCODE_TRANSACTION_ROLLBACK signals a concurrent abort of
+                // the transaction being prepared; clean up and return
+                // gracefully so the caller (ReorderBufferPrepare) can still
+                // send the prepare (reorderbuffer.c:2777). The streaming leg
+                // of this arm is phase-2. C's CheckXidAlive machinery (which
+                // raises this code from catalog scans) is not ported; the
+                // arm fires only for plugin-raised errors (recorded
+                // divergence).
+                if e.sqlstate == types_error::ERRCODE_TRANSACTION_ROLLBACK
+                    && self.txn(txn).is_prepared()
+                {
+                    // curtxn must be set for prepared transactions.
+                    let cur = curtxn.expect("current txn tracked for prepared replay");
+                    debug_assert!(!self.txn(cur).is_committed());
+                    self.txn_mut(cur).txn_flags |= crate::RBTXN_IS_ABORTED;
+
+                    // ReorderBufferResetTXN: discard the decoded changes so
+                    // the txn can carry its prepared identity to the finish.
+                    self.truncate_txn(txn, true);
+                    self.toast_reset(txn);
+                    if let Some(si) = specinsert.take() {
+                        self.free_change(si, true);
+                    }
+                    debug_assert_eq!(self.txn(txn).size, 0);
+                    return Ok(());
+                }
+
                 self.cleanup_txn(txn);
                 Err(e)
             }
@@ -414,6 +441,7 @@ impl ReorderBuffer {
         using_subtxn: bool,
         iterstate: &mut Option<IterState>,
         specinsert: &mut Option<ChangeId>,
+        curtxn: &mut Option<TxnId>,
     ) -> PgResult<()> {
         let mut prev_lsn = InvalidXLogRecPtr;
         let mut changes_count = 0u32;
@@ -443,7 +471,10 @@ impl ReorderBuffer {
             debug_assert!(prev_lsn == InvalidXLogRecPtr || prev_lsn <= self.change(cur).lsn);
             prev_lsn = self.change(cur).lsn;
 
-            // SetupCheckXidLive is streaming/prepared-only: phase-2.
+            // C tracks curtxn (the change's own (sub)txn) for the
+            // concurrent-abort arm; SetupCheckXidLive itself is unported
+            // (CheckXidAlive divergence, see process_txn).
+            *curtxn = Some(self.change(cur).txn);
 
             let action = self.change(cur).action;
             match action {

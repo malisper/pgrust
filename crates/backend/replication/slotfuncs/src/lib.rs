@@ -69,10 +69,6 @@ pub(crate) fn create_logical_replication_slot(
 ) -> PgResult<()> {
     assert!(slot::MyReplicationSlot().is_none());
 
-    if two_phase {
-        panic!("unported callee reached from slotfuncs.c: two_phase logical slot");
-    }
-
     slot::ReplicationSlotCreate(
         name,
         true,
