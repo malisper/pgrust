@@ -112,6 +112,16 @@ pub fn init_seams() {
                 .expect("assign_debug_io_direct requires check_debug_io_direct's extra");
             vfd::assign_debug_io_direct(flags);
         });
+
+        // pgrust.resource_counters (PGC_INTERNAL, computed): the value shown
+        // comes from the show hook; the stored string is never consulted, so
+        // the backing is a constant empty and SETs (only the boot-default
+        // write can reach it) are dropped.
+        vars::pgrust_resource_counters.install(GucVarAccessors {
+            get: || Some(String::new()),
+            set: |_| {},
+        });
+        hooks::show_resource_counters.install(vfd::show_resource_counters);
     }
 }
 

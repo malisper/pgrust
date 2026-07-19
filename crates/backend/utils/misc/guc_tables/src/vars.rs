@@ -330,6 +330,10 @@ pub static aex_log_nested_statements: GucBoolVar =
 pub static aex_log_format: GucEnumVar = GucSlot::new("auto_explain_log_format");
 pub static aex_log_level: GucEnumVar = GucSlot::new("auto_explain_log_level");
 pub static aex_sample_rate: GucRealVar = GucSlot::new("auto_explain_sample_rate");
+// pgrust-only: pgrust.resource_counters (no C symbol; PGC_INTERNAL,
+// value computed by hooks::show_resource_counters — the simharness F8
+// resource-baseline hook channel; the fd crate owns backing + hook).
+pub static pgrust_resource_counters: GucStringVar = GucSlot::new("pgrust_resource_counters");
 // pg_stat_statements custom GUCs (pg_stat_statements.c _PG_init), statically
 // defined: this port has no DefineCustomXxxVariable machinery.
 pub static pgss_max: GucIntVar = GucSlot::new("pgss_max");

@@ -204,13 +204,36 @@ fn swarm_plans_contain_enable_knob_sets() {
 
 /// A knob-less profile must take ZERO extra RNG draws: adding the H6 field
 /// as None changes nothing (guards against accidental draw-order skew for
-/// every pre-H6 profile).
+/// every pre-H6 profile). The default profile's OWN arm sets legitimately
+/// carry enable_hashagg/enable_seqscan (an arm draw can emit them at any
+/// seed — the original single-seed "no `set enable_`" assertion was seed
+/// luck, broken by the H7 grammar's draw-order shift), so the pin is on the
+/// SAMPLER-ONLY knobs: no swarm-family knob outside the profile's arm sets
+/// may ever appear without a planner_knobs block.
 #[test]
 fn knobless_profiles_unaffected() {
     let p = profiles_dir().join("default.json");
     let lp = load_profile(p.to_str().unwrap()).unwrap();
     assert!(lp.profile.planner_knobs.is_none());
+    let profile_arm_gucs: std::collections::BTreeSet<String> = lp
+        .profile
+        .arm_sets
+        .iter()
+        .flatten()
+        .filter_map(|arm| arm.split_once('=').map(|(k, _)| k.to_string()))
+        .collect();
     let gp = bridge::runner_profile_to_gen(&lp.profile);
-    let (p1, _) = bridge::generate_plan_with_ctx(7, &gp, "00", "t");
-    assert!(!render(&p1).contains("set enable_"));
+    for seed in 1..=20u64 {
+        let (p1, _) = bridge::generate_plan_with_ctx(seed, &gp, "00", "t");
+        let rendered = render(&p1);
+        for knob in SCAN_GROUP.iter().chain(JOIN_GROUP.iter()) {
+            if profile_arm_gucs.contains(*knob) {
+                continue;
+            }
+            assert!(
+                !rendered.contains(&format!("SET {knob}")),
+                "seed {seed}: sampler-only knob {knob} appeared without a planner_knobs block"
+            );
+        }
+    }
 }
