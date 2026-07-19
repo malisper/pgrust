@@ -1160,12 +1160,12 @@ fn standing_gang_detach_count_join_no_lost_wake() {
 //     row-10 (pgrcolumnar writer stitch channel) conversions consume. The
 //     call-site glue (pump/encoder/leader topology) is production-only; the
 //     shared protocol is entirely this type.
-//   * relscan_seize_* — MIRROR over the REAL primitive: the converted
-//     `BTParallelScanShared` rides `pgsync::ParkLot`, driven here directly,
-//     but `types_relscan` itself is NOT loom-buildable on this base (its
-//     dep tree pulls `latch`, which fails under --cfg loom), so the
-//     page_status state machine is mirrored 1:1 from
-//     nbtree/src/parallel.rs. Discharged the moment the tree composes.
+//   * relscan_seize_* — REAL SHARED TYPE, transcribed driver: the model
+//     constructs the production `BTParallelScanShared` (types_relscan is
+//     loom-buildable since the LATCH-LOOM latch conversion — the old
+//     "mirror struct" disclosure is DISCHARGED); the seize/release loop
+//     remains transcribed 1:1 from nbtree/src/parallel.rs, whose real
+//     `_bt_parallel_seize` needs Relation machinery outside model reach.
 //   * bitmapheap_phase_* — MIRROR over the REAL waiter Slot core (the
 //     waiter crate's loom surface): nodebitmapheapscan is not
 //     loom-buildable (executor dep tree); the BmShared waker-list phase
@@ -1249,83 +1249,77 @@ fn mailbox_mpmc_close_wakes_every_receiver() {
     });
 }
 
-/// Row 2 (MIRROR over the real ParkLot): the converted _bt_parallel_seize
-/// wait. State machine mirrored from nbtree/src/parallel.rs: a seizer that
-/// observes `Advancing` captures the lot epoch UNDER the state lock, drops
-/// the lock, parks; release (`Advancing -> Idle`) and done
-/// (`* -> Done`) bump-then-notify via `wake_all`. One advancing winner, one
-/// waiting seizer: in every interleaving the waiter terminates, having
-/// seized the released page or observed Done.
+/// Row 2 — now over the REAL `types_relscan::parallel::BTParallelScanShared`
+/// (LATCH-LOOM lane: the latch conversion made types_relscan loom-buildable,
+/// discharging this model's "mirror struct" disclosure — the shared TYPE is
+/// production; the seize/release DRIVER below remains transcribed from
+/// nbtree/src/parallel.rs, whose `_bt_parallel_seize` needs Relation
+/// machinery no model can construct). A seizer that observes `Advancing`
+/// captures the lot epoch UNDER the state lock, drops the lock, parks;
+/// release (`Advancing -> Idle`) and done (`* -> Done`) bump-then-notify via
+/// `wake_all`. One advancing winner, one waiting seizer: in every
+/// interleaving the waiter terminates, having seized the released page or
+/// observed Done.
 ///
 /// RED: swap `release` for `release_naked` (state change WITHOUT the
 /// wake_all — the pre-conversion notify-dropped shape): the waiter parks
 /// forever — loom deadlock, CAUGHT.
 #[test]
 fn relscan_seize_release_wake_never_lost() {
-    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-    enum Ps {
-        Advancing,
-        Idle,
-        Done,
-    }
-
-    struct Shared {
-        state: Mutex<Ps>,
-        lot: pgsync::ParkLot,
-    }
+    use types_relscan::parallel::{BTParallelScanShared, BtPsState};
 
     // The converted release: state change under the lock, then bump+notify.
-    fn release(sh: &Shared) {
-        *sh.state.lock().unwrap() = Ps::Idle;
+    fn release(sh: &BTParallelScanShared) {
+        sh.state.lock().unwrap().page_status = BtPsState::Idle;
         sh.lot.wake_all();
     }
 
     // RED helper (one-line swap in the winner thread): the naked state
     // change the conversion outlaws.
     #[allow(dead_code)]
-    fn release_naked(sh: &Shared) {
-        *sh.state.lock().unwrap() = Ps::Idle;
+    fn release_naked(sh: &BTParallelScanShared) {
+        sh.state.lock().unwrap().page_status = BtPsState::Idle;
     }
 
     // The converted seize wait loop (nbtree bt_parallel_seize, Advancing
     // arm): epoch captured UNDER the state lock, park OUTSIDE it.
-    fn seize_wait(sh: &Shared) -> Ps {
+    fn seize_wait(sh: &BTParallelScanShared) -> BtPsState {
         loop {
             let (st, seen) = {
                 let g = sh.state.lock().unwrap();
-                (*g, sh.lot.epoch())
+                (g.page_status, sh.lot.epoch())
             };
             match st {
-                Ps::Advancing => {
+                BtPsState::Advancing => {
                     sh.lot.park(seen);
                 }
-                Ps::Idle => {
+                BtPsState::Idle => {
                     // Seize it: Idle -> Advancing (the caller now owns the
                     // scan advance).
                     let mut g = sh.state.lock().unwrap();
-                    if *g == Ps::Idle {
-                        *g = Ps::Advancing;
-                        return Ps::Idle;
+                    if g.page_status == BtPsState::Idle {
+                        g.page_status = BtPsState::Advancing;
+                        return BtPsState::Idle;
                     }
                 }
-                Ps::Done => return Ps::Done,
+                BtPsState::Done => return BtPsState::Done,
+                other => unreachable!("model never enters {other:?}"),
             }
         }
     }
 
     loom::model(|| {
-        let sh = Arc::new(Shared {
-            state: Mutex::new(Ps::Advancing), // winner already advancing
-            lot: pgsync::ParkLot::new(),
-        });
+        let sh = Arc::new(BTParallelScanShared::new());
+        // Winner already advancing (the model's precondition).
+        sh.state.lock().unwrap().page_status = BtPsState::Advancing;
 
         let waiter_t = {
             let sh = Arc::clone(&sh);
             thread::spawn(move || {
                 let got = seize_wait(&sh);
-                if got == Ps::Idle {
+                if got == BtPsState::Idle {
                     // The waiter seized the scan; finish it: -> Done + wake.
-                    *sh.state.lock().unwrap() = Ps::Done;
+                    sh.state.lock().unwrap().page_status = BtPsState::Done;
                     sh.lot.wake_all();
                 }
                 got
@@ -1337,10 +1331,10 @@ fn relscan_seize_release_wake_never_lost() {
 
         let got = waiter_t.join().unwrap();
         assert!(
-            got == Ps::Idle || got == Ps::Done,
+            got == BtPsState::Idle || got == BtPsState::Done,
             "waiter terminated through seize or done"
         );
-        assert_eq!(*sh.state.lock().unwrap(), Ps::Done);
+        assert_eq!(sh.state.lock().unwrap().page_status, BtPsState::Done);
     });
 }
 

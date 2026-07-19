@@ -152,6 +152,19 @@ fn poison_on_owner_death_races_unpark_safely() {
 // ---------------------------------------------------------------------------
 // Latch-over-Waiter Dekker equivalence.
 //
+// SUPERSEDED-BUT-KEPT (LATCH-LOOM lane): the latch crate is now
+// loom-buildable and latch/tests/loom.rs drives the REAL
+// WaitLatch/SetLatch/ResetLatch code directly — those direct models are the
+// authoritative latch lost-wakeup oracle. This mirror stays as belt and
+// suspenders for the SLOT-CORE composition it also exercises, FROZEN in the
+// coarser all-SeqCst-RMW dialect it was written in. Caveat discovered by
+// the direct models' red battery (notes/dst-latch-loom.md): that coarse
+// dialect over-synchronizes through phantom RMW writes (a SeqCst RMW on a
+// WRITE edge acquire-chains the other side's recheck clock), so THIS mirror
+// cannot catch wake-route ORDERING bugs (e.g. publish-after-arm); the
+// direct models' refined dialect (read edges SC-RMW, write edges Release
+// swap, fences elided) can, and does.
+//
 // Mirror of the 4-atomic latch protocol as reimplemented over the Waiter
 // (latch/src/lib.rs set_latch + WaitLatch): the model must show that for a
 // concurrent set_latch / wait_latch pair, the waiter always terminates
