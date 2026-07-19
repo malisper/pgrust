@@ -1581,6 +1581,24 @@ pub fn PostgresSimNetMain(argv: &[String], username: &str) -> ! {
         // completed on this thread — C's moment for PM_RUN.
         postmaster_seams::pm_promote_run::call();
         ops_report("promote");
+        // SIM-HARNESS-CONVERGE (PGRUST_SIMNET_KEEP_INPRODUCTION=1): session
+        // 1 is the STANDALONE arm, so its exit just wrote a SHUTDOWN
+        // checkpoint and marked pg_control DB_SHUTDOWNED — but this corpus
+        // keeps SERVING (sessions 2/3 run next), which is C's
+        // under-postmaster topology where the state stays DB_IN_PRODUCTION
+        // until the real shutdown. Without the flip, a mid-session
+        // crash-cut image reads as cleanly shut down and the reboot SKIPS
+        // crash recovery — silently losing every acked commit (found by
+        // fault seeds 21/53: committed CREATE+INSERT gone, no "redo
+        // starts" line in the reboot log). Lock-free by quiescence: the
+        // session threads are not spawned yet. Opt-in, fault legs only.
+        if std::env::var("PGRUST_SIMNET_KEEP_INPRODUCTION").as_deref() == Ok("1") {
+            transam_xlog::control_file::control_file_update(|cf| {
+                cf.state = transam_xlog::DB_IN_PRODUCTION;
+            });
+            transam_xlog::control_file::UpdateControlFile()
+                .expect("keep-inproduction control update");
+        }
         let adopt = vfs::sim::SimVfs::current_universe_id();
         assert!(adopt.is_some(), "nsession: boot thread lost its universe binding");
         let noreg = std::env::var("PGRUST_SIM_NOREG").as_deref() == Ok("1");
@@ -1726,4 +1744,58 @@ pub fn PostgresSimNetMain(argv: &[String], username: &str) -> ! {
 #[allow(dead_code)]
 fn _progname_used() -> &'static str {
     PROGNAME
+}
+
+#[cfg(test)]
+mod fault_spec_tests {
+    //! The DUT-side FaultPlanSpec reader against the EXACT shapes the
+    //! harness's serde_json serialization emits (runner/faultdriver.rs).
+
+    use super::fault_spec_json::{J, P};
+
+    #[test]
+    fn parses_the_crash_at_op_shape() {
+        let j = r#"{"seed":42,"rules":[{"matcher":{"kinds":null,"class":null,"path_contains":null},"nth":17,"action":"Crash","sticky":false}]}"#;
+        let v = P::new(j).value().expect("parse");
+        assert_eq!(v.get("seed").and_then(|n| n.num()), Some(42));
+        let J::Arr(rules) = v.get("rules").unwrap() else { panic!("rules array") };
+        assert_eq!(rules.len(), 1);
+        let r = &rules[0];
+        assert_eq!(r.get("nth").and_then(|n| n.num()), Some(17));
+        assert_eq!(r.get("action").and_then(|a| a.strv()), Some("Crash"));
+        assert_eq!(r.get("sticky"), Some(&J::Bool(false)));
+        assert_eq!(r.get("matcher").unwrap().get("kinds"), Some(&J::Null));
+    }
+
+    #[test]
+    fn parses_kinds_class_and_nested_actions() {
+        let j = r#"{"seed":7,"rules":[
+            {"matcher":{"kinds":["Fsync","Fdatasync"],"class":"Wal","path_contains":"pg_wal"},
+             "nth":3,"action":{"Errno":5},"sticky":true},
+            {"matcher":{"kinds":["PWriteV"],"class":null,"path_contains":null},
+             "nth":1,"action":{"TornWrite":{"persist_prefix":128}},"sticky":false}]}"#;
+        let v = P::new(j).value().expect("parse");
+        let J::Arr(rules) = v.get("rules").unwrap() else { panic!() };
+        let m = rules[0].get("matcher").unwrap();
+        let J::Arr(kinds) = m.get("kinds").unwrap() else { panic!() };
+        assert_eq!(kinds.iter().filter_map(|k| k.strv()).collect::<Vec<_>>(), ["Fsync", "Fdatasync"]);
+        assert_eq!(m.get("class").and_then(|c| c.strv()), Some("Wal"));
+        assert_eq!(rules[0].get("action").unwrap().get("Errno").and_then(|n| n.num()), Some(5));
+        assert_eq!(
+            rules[1]
+                .get("action")
+                .unwrap()
+                .get("TornWrite")
+                .and_then(|t| t.get("persist_prefix"))
+                .and_then(|n| n.num()),
+            Some(128)
+        );
+    }
+
+    #[test]
+    fn rejects_floats_and_truncation_loudly() {
+        assert!(P::new("{\"seed\":1.5}").value().is_err());
+        assert!(P::new("{\"seed\":1,").value().is_err());
+        assert!(P::new("{\"seed\"").value().is_err());
+    }
 }

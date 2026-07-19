@@ -428,8 +428,45 @@ pub struct CorpusSpec<'a> {
     pub seed_durable: bool,
 }
 
+/// Recursive copy (skipping the boot-owned raw-plane lockfiles). The sim
+/// mutates its HOST datadir through the raw plane (postmaster.pid,
+/// pgrust_internal.init), so every corpus run gets a hermetic copy — two
+/// concurrent runs on one datadir collide on the lockfile, and a shared
+/// datadir drifts across runs (the first boot writes the relcache init
+/// file the next seed then mirrors).
+fn copy_tree(src: &Path, dst: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dst).map_err(|e| format!("mkdir {}: {e}", dst.display()))?;
+    let mut entries: Vec<_> = std::fs::read_dir(src)
+        .map_err(|e| format!("read_dir {}: {e}", src.display()))?
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())?;
+    entries.sort_by_key(|e| e.file_name());
+    for e in entries {
+        let name = e.file_name();
+        if name == "postmaster.pid" || name == "postmaster.opts" {
+            continue;
+        }
+        let ft = e.file_type().map_err(|e| e.to_string())?;
+        let to = dst.join(&name);
+        if ft.is_dir() {
+            copy_tree(&e.path(), &to)?;
+        } else {
+            std::fs::copy(e.path(), &to).map_err(|er| format!("copy {:?}: {er}", e.path()))?;
+        }
+    }
+    Ok(())
+}
+
 pub fn run_corpus(world: &SimWorld, dir: &Path, spec: &CorpusSpec) -> Result<CorpusRun, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    // Hermetic per-run datadir (see copy_tree).
+    let run_dd = dir.join("dd");
+    copy_tree(&world.datadir, &run_dd)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&run_dd, std::fs::Permissions::from_mode(0o700));
+    }
     let wf = |name: &str, content: &str| -> Result<PathBuf, String> {
         let p = dir.join(name);
         std::fs::write(&p, content).map_err(|e| format!("write {}: {e}", p.display()))?;
@@ -453,7 +490,7 @@ pub fn run_corpus(world: &SimWorld, dir: &Path, spec: &CorpusSpec) -> Result<Cor
     if spec.fsync_off {
         cmd.arg("-c").arg("fsync=off");
     }
-    cmd.arg("-D").arg(&world.datadir);
+    cmd.arg("-D").arg(&run_dd);
     cmd.env("USER", "postgres")
         .env("PGRUST_RUNTIME", "0")
         .env("RUST_MIN_STACK", "67108864")
@@ -512,14 +549,17 @@ pub fn run_corpus(world: &SimWorld, dir: &Path, spec: &CorpusSpec) -> Result<Cor
         cmd.env("PGRUST_SIMVFS_OPS_REPORT", "1");
     }
     if spec.seed_durable {
-        cmd.env("PGRUST_SIMVFS_SEED_DURABLE", "1");
+        // The fault-leg topology envelope (probe AND writer, identically —
+        // op-stream alignment): durable seed + the DB_IN_PRODUCTION
+        // re-flip after session 1's standalone-arm shutdown checkpoint
+        // (without it the at-cut image reads as cleanly shut down and the
+        // reboot skips crash recovery).
+        cmd.env("PGRUST_SIMVFS_SEED_DURABLE", "1")
+            .env("PGRUST_SIMNET_KEEP_INPRODUCTION", "1");
     }
     let out_f = std::fs::File::create(dir.join("stdout")).map_err(|e| e.to_string())?;
     let err_f = std::fs::File::create(dir.join("stderr")).map_err(|e| e.to_string())?;
     cmd.stdout(out_f).stderr(err_f).stdin(std::process::Stdio::null());
-    // The datadir is read-only for the sim (the universe is in-memory), but
-    // a stale postmaster.pid in a packed image would wedge the boot ladder.
-    let _ = std::fs::remove_file(world.datadir.join("postmaster.pid"));
     let mut child = cmd.spawn().map_err(|e| format!("spawn sim: {e}"))?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(world.timeout_s);
     let mut timed_out = false;
@@ -537,6 +577,9 @@ pub fn run_corpus(world: &SimWorld, dir: &Path, spec: &CorpusSpec) -> Result<Cor
             }
         }
     };
+    // Reclaim the hermetic datadir copy (disk-reclaim law) — the run's
+    // evidence lives in the artifact files, never in the copy.
+    let _ = std::fs::remove_dir_all(&run_dd);
     let stderr = std::fs::read_to_string(dir.join("stderr")).unwrap_or_default();
     let schedlog: String = stderr
         .lines()
@@ -622,6 +665,18 @@ pub fn check_entries(
                 return Err(format!("reset '{s}' failed: {sqlstate} {message}"))
             }
             ExecOutcome::ConnectionLost { message } => {
+                if replay.cut_hit {
+                    // Fault leg: the cut landed before the prologue even
+                    // acked — a legitimate (empty-model) cut point.
+                    return Ok(CheckedRun {
+                        report: RunReport::default(),
+                        desync: None,
+                        cut_hit: true,
+                        consumed: replay.consumed(),
+                        committed: Vec::new(),
+                        model_in_tx: false,
+                    });
+                }
                 return Err(format!("reset '{s}': {message}"))
             }
             _ => {}
@@ -925,6 +980,25 @@ fn ops_from_stderr(stderr: &str, tag: &str) -> Option<u64> {
 /// recovery may legitimately keep or lose. Autocommit mutations and COMMIT
 /// are indeterminate; anything inside a still-open tx (rolled back by
 /// recovery either way) and any read is determinate.
+fn step_kind_name(s: &Step) -> &'static str {
+    match s {
+        Step::BeginProperty { .. } => "BeginProperty",
+        Step::EndProperty { .. } => "EndProperty",
+        Step::Ddl(_) => "Ddl",
+        Step::Dml(_) => "Dml",
+        Step::Query(_) => "Query",
+        Step::Tx(_) => "Tx",
+        Step::Arm(_) => "Arm",
+        Step::Assumption(_) => "Assumption",
+        Step::Assertion(_) => "Assertion",
+        Step::Fault(_) => "Fault",
+        Step::Session(_) => "Session",
+        Step::AsyncDml(_) => "AsyncDml",
+        Step::Join(_) => "Join",
+        Step::WaitUntil(_) => "WaitUntil",
+    }
+}
+
 fn cut_indeterminate(plan: &Plan, checked: &CheckedRun) -> bool {
     let Some(f) = &checked.report.failure else { return false };
     let Some(step) = plan.steps.get(f.step_idx) else { return false };
@@ -1163,6 +1237,23 @@ pub fn run_fault_campaign(a: &FaultArgs) -> i32 {
         match mismatch {
             None => bump(&mut census, "fault-verified", 1),
             Some(why) => {
+                // Adjudication evidence: what was in flight at the cut.
+                if let Some(f) = &checked.report.failure {
+                    eprintln!(
+                        "simbridge-fault: seed {wseed}: cut boundary at plan step {} kind {:?} class {} detail '{}' model_in_tx={} consumed={}",
+                        f.step_idx,
+                        plan.steps.get(f.step_idx).map(step_kind_name),
+                        f.class,
+                        f.detail,
+                        checked.model_in_tx,
+                        checked.consumed,
+                    );
+                } else {
+                    eprintln!(
+                        "simbridge-fault: seed {wseed}: verify mismatch with NO failure record (walk completed?) consumed={}",
+                        checked.consumed
+                    );
+                }
                 if cut_indeterminate(&plan, &checked) {
                     // The in-flight statement's effects are legitimately
                     // either-way; increment-1 verifies the determinate cuts
