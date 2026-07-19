@@ -20,7 +20,7 @@ use ::types_error::{PgError, PgResult};
 use ::types_nodes::plannodes::IndexOnlyScan;
 use ::types_rel::{NoLock, Relation};
 use ::types_scan::scankey::ScanKeyData;
-use ::types_scan::sdir::{ScanDirection, ScanDirectionCombine};
+use ::types_scan::sdir::ScanDirection;
 use ::types_slot::{SlotData, TupleSlotKind, EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
 use ::types_tuple::itemptr::ItemPointerGetBlockNumber;
 use ::types_tuple::TupleDescData;
@@ -84,7 +84,16 @@ impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
     /// `IndexOnlyNext`.
     fn scan_next(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
         let mcx = estate.es_query_cxt;
-        let direction = ScanDirectionCombine(estate.es_direction, self.ioss_OrderDir);
+        // Backward-execution wave B8: C's ScanDirectionCombine(es_direction,
+        // indexorderdir) narrows to indexorderdir alone - es_direction is
+        // forward-invariant below the run seam (deletion-prep B1), and
+        // Forward is the combine's identity. indexorderdir KEEPS its
+        // backward value: planner DESC index-only scans stay.
+        debug_assert!(
+            ::types_scan::sdir::ScanDirectionIsForward(estate.es_direction),
+            "backward drive below the forward-only run seam (deletion-prep B1)"
+        );
+        let direction = self.ioss_OrderDir;
 
         if self.ioss_ScanDesc.is_none() {
             self.open_scandesc(estate)?;
@@ -250,7 +259,8 @@ pub fn index_only_scan_batch_next<'mcx>(
         node.open_scandesc(estate)?;
     }
     let mcx = estate.es_query_cxt;
-    let direction = ScanDirectionCombine(estate.es_direction, node.ioss_OrderDir);
+    // B8: es_direction combine narrowed to indexorderdir (see scan_next).
+    let direction = node.ioss_OrderDir;
     let table_slot_id = node.ioss_TableSlot;
     let IndexOnlyScanState { ss, ioss_ScanDesc, ioss_VMBuffer, .. } = node;
     loop {
