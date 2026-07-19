@@ -124,6 +124,16 @@ struct PlanCache {
     plan_free: Vec<u32>,
     saved_plan_list: Vec<CachedPlanSourceHandle>,
     handle_gen: u32,
+    // TRUE once ReleaseAllCachedPlansAtExit reclaimed the registry. C never
+    // unpins at process death — CacheMemoryContext just dies with the process
+    // and outstanding refcounts are abandoned. The thread model reclaims the
+    // estate in an on_proc_exit callback, which runs BEFORE the session
+    // teardown phases (launch_backend: run_deferred_exit_callbacks, then
+    // mcxt_stats::run_session_teardown), so late pin holders — the parked
+    // executor skeleton (execmain, State phase) and parked portal shells
+    // (portalmem, Portals phase) — still release their handles afterwards.
+    // Those releases are C's abandoned refcounts: no-ops, never staleness.
+    torn_down: bool,
 }
 
 thread_local! {
@@ -135,6 +145,7 @@ thread_local! {
             plan_free: Vec::new(),
             saved_plan_list: Vec::new(),
             handle_gen: 0,
+            torn_down: false,
         })
     };
 }
@@ -240,6 +251,7 @@ fn ReleaseAllCachedPlansAtExit(_code: i32, _arg: usize) {
         pc.sources.clear();
         pc.source_free.clear();
         pc.saved_plan_list.clear();
+        pc.torn_down = true;
         ctxs
     });
     for ctx in ctxs {
@@ -248,6 +260,8 @@ fn ReleaseAllCachedPlansAtExit(_code: i32, _arg: usize) {
 }
 
 pub fn InitPlanCache() -> PgResult<()> {
+    // A fresh session on a reused thread starts with a live registry.
+    with_cache(|pc| pc.torn_down = false);
     // installed() guard: unit-test rigs call InitPlanCache without ipc.
     if ipc_seams::on_proc_exit::is_installed() {
         ipc_seams::on_proc_exit::call(ReleaseAllCachedPlansAtExit, 0);
@@ -444,6 +458,11 @@ pub fn SaveCachedPlan(h: CachedPlanSourceHandle) -> PgResult<()> {
 }
 
 pub fn DropCachedPlan(h: CachedPlanSourceHandle) {
+    // Post-exit-reclaim drops (e.g. a cache teardown running after the
+    // on_proc_exit ceremony) are C's process-death abandonment: no-ops.
+    if with_cache(|pc| pc.torn_down) {
+        return;
+    }
     if plancache_portal_seams::discard_parked_portal::is_installed() {
         plancache_portal_seams::discard_parked_portal::call(types_portal::PlanSourceHandle(h.0));
     }
@@ -482,6 +501,13 @@ fn ReleaseGenericPlan(h: CachedPlanSourceHandle) {
 
 pub fn ReleaseCachedPlan(cplan: CachedPlanHandle) {
     let freed = with_cache(|pc| {
+        // A release arriving after ReleaseAllCachedPlansAtExit reclaimed the
+        // registry (parked executor skeleton / parked portal shells, whose
+        // session-teardown cleanups run after the exit-callback ceremony) is
+        // an abandoned refcount in C's process model: drop it silently.
+        if pc.torn_down {
+            return Vec::new();
+        }
         let plan = plan_mut(pc, cplan);
         assert!(plan.refcount > 0, "ReleaseCachedPlan: refcount underflow");
         plan.refcount -= 1;

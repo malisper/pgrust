@@ -30,6 +30,18 @@ oid_cmp_ops! {
     oidgt: >;  oidge: >=;
 }
 
+/// `oidlarger` (oid.c): the greater of two OIDs.
+#[inline]
+pub fn oidlarger(arg1: Oid, arg2: Oid) -> Oid {
+    if arg1 > arg2 { arg1 } else { arg2 }
+}
+
+/// `oidsmaller` (oid.c): the lesser of two OIDs.
+#[inline]
+pub fn oidsmaller(arg1: Oid, arg2: Oid) -> Oid {
+    if arg1 < arg2 { arg1 } else { arg2 }
+}
+
 /// `xidout` (xid.c) into a caller buffer; returns the byte length.
 #[inline]
 pub fn xidout(xid: u32, buf: &mut [u8]) -> usize {

@@ -128,6 +128,19 @@ pub fn fc_jsonb_typeof(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
     )?))
 }
 
+// C jsonb_gin.c gin_compare_jsonb: varstr_cmp(a, b, C_COLLATION_OID) over
+// the two text keys — byte compare + length tiebreak (SQL-callable; the GIN
+// opclass dispatch calls the core directly).
+pub fn fc_gin_compare_jsonb(
+    _flinfo: Option<&mut FmgrInfo>,
+    fcinfo: &mut Fcinfo,
+) -> PgResult<Datum> {
+    // SAFETY: catalog args of gin_compare_jsonb are non-null text (strict fn).
+    let a = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let b = unsafe { fcinfo.arg_varlena_packed(1)? };
+    Ok(Datum::from_i32(crate::gin::gin_compare_jsonb(a.data(), b.data())))
+}
+
 pub fn fc_jsonb_object_field(
     _flinfo: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
@@ -945,6 +958,7 @@ pub fn fc_jsonb_strip_nulls(
 
 // pg_proc.dat: all listed entries proisstrict except jsonb_set_lax; none retset.
 pub const JSONB_BUILTINS: &[FmgrBuiltin] = &[
+    b(3480, "gin_compare_jsonb", 2, fc_gin_compare_jsonb),
     b(3207, "jsonb_array_length", 1, fc_jsonb_array_length),
     b(3262, "jsonb_strip_nulls", 2, fc_jsonb_strip_nulls),
     b(3263, "jsonb_object", 1, fc_jsonb_object),
