@@ -58,6 +58,21 @@ pub struct ParsedAbort {
     pub origin_timestamp: TimestampTz,
 }
 
+/// `xl_xact_parsed_prepare` (the fields two-phase decoding consumes; the
+/// delete-on-commit/abort rel and stats arrays stay unparsed as decode.c
+/// never reads them from a PREPARE record).
+#[derive(Clone, Debug, Default)]
+pub struct ParsedPrepare {
+    pub xact_time: TimestampTz,
+    pub db_id: Oid,
+    pub subxacts: Vec<TransactionId>,
+    pub twophase_xid: TransactionId,
+    /// GID bytes without the on-disk NUL terminator.
+    pub twophase_gid: Vec<u8>,
+    pub origin_lsn: XLogRecPtr,
+    pub origin_timestamp: TimestampTz,
+}
+
 fn truncated() -> Box<PgError> {
     Box::new(PgError::error("truncated transaction WAL record"))
 }
@@ -271,6 +286,81 @@ pub fn parse_abort_record(info: u8, data: &[u8]) -> PgResult<ParsedAbort> {
     }
 
     Ok(parsed)
+}
+
+/// `ParsePrepareRecord` (xactdesc.c): decode the xl_xact_prepare header plus
+/// the GID and subxact array that follow it. The on-disk header layout
+/// (twophase.c's TwoPhaseFileHeader) is fixed:
+///   magic@0 total_len@4 xid@8 database@12 prepared_at@16 owner@24
+///   nsubxacts@28 ncommitrels@32 nabortrels@36 ncommitstats@40
+///   nabortstats@44 ninvalmsgs@48 initfileinval@52 gidlen@54
+///   origin_lsn@56 origin_timestamp@64  -> 72 bytes = MAXALIGN(72).
+/// Payload: gid (gidlen bytes incl. NUL), MAXALIGNed; subxacts; then the
+/// commit/abort rels, stats and inval arrays (unread here).
+pub fn parse_prepare_record(_info: u8, data: &[u8]) -> PgResult<ParsedPrepare> {
+    const HDR: usize = 72;
+    const MAXALIGN: usize = 8;
+    fn maxalign(n: usize) -> usize {
+        (n + (MAXALIGN - 1)) & !(MAXALIGN - 1)
+    }
+
+    let mut c = Cursor::new(data);
+    let _magic = c.u32()?;
+    let _total_len = c.u32()?;
+    let xid = c.u32()?;
+    let database = c.u32()?;
+    let prepared_at = c.i64()?;
+    let _owner = c.u32()?;
+    let nsubxacts = c.i32()?;
+    let _ncommitrels = c.i32()?;
+    let _nabortrels = c.i32()?;
+    let _ncommitstats = c.i32()?;
+    let _nabortstats = c.i32()?;
+    let _ninvalmsgs = c.i32()?;
+    let _initfileinval = c.take(1)?;
+    let _pad = c.take(1)?;
+    let gidlen = {
+        let b = c.take(2)?;
+        u16::from_ne_bytes(b.try_into().unwrap()) as usize
+    };
+    let origin_lsn = c.u64()?;
+    let origin_timestamp = c.i64()?;
+    debug_assert_eq!(c.pos, HDR);
+
+    if nsubxacts < 0 {
+        return Err(Box::new(PgError::error(
+            "negative subxact count in prepare WAL record",
+        )));
+    }
+
+    let mut off = HDR;
+    let gid_bytes = data.get(off..off + gidlen).ok_or_else(truncated)?;
+    // gidlen counts the NUL terminator (twophase.c: strlen(gid) + 1).
+    let twophase_gid = gid_bytes
+        .split(|&b| b == 0)
+        .next()
+        .unwrap_or(&[])
+        .to_vec();
+    off = maxalign(off + gidlen);
+
+    let mut subxacts = Vec::new();
+    subxacts
+        .try_reserve(nsubxacts as usize)
+        .map_err(|_| PgError::error("out of memory parsing prepare WAL record"))?;
+    for i in 0..nsubxacts as usize {
+        let b = data.get(off + i * 4..off + i * 4 + 4).ok_or_else(truncated)?;
+        subxacts.push(u32::from_ne_bytes(b.try_into().unwrap()));
+    }
+
+    Ok(ParsedPrepare {
+        xact_time: prepared_at,
+        db_id: database,
+        subxacts,
+        twophase_xid: xid,
+        twophase_gid,
+        origin_lsn,
+        origin_timestamp,
+    })
 }
 
 fn xact_redo_commit(
