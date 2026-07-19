@@ -212,6 +212,26 @@ impl Ledger {
         Ok(())
     }
 
+    /// SIM-HARNESS-CONVERGE (fault leg): the crash-committed view — the
+    /// state a correct engine must expose after crash recovery if the node
+    /// died NOW: an open transaction rolls back (crash semantics), committed
+    /// multisets remain. Returns (table, column names in order, committed
+    /// rows — sorted, the multiset canonical form) for every tracked table.
+    pub fn crash_committed(&self) -> Vec<(String, Vec<String>, Vec<Row>)> {
+        let mut l = self.clone();
+        l.rollback(); // no-op outside a tx
+        l.tables
+            .iter()
+            .map(|(name, ts)| {
+                (
+                    name.clone(),
+                    ts.cols.iter().map(|c| c.name.clone()).collect(),
+                    ts.expanded_rows(),
+                )
+            })
+            .collect()
+    }
+
     /// Apply a ledger op to working state; returns what the ENGINE is
     /// expected to do. State changes only on Ok (statement-level rollback:
     /// an expected-error op leaves the ledger untouched).
