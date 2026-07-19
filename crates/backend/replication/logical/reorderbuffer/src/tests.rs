@@ -888,3 +888,72 @@ fn finish_prepared_unknown_xid_is_noop() {
     rb.finish_prepared(27, 500, 510, 200, 888, 0, 0, "gid_27", true)
         .unwrap();
 }
+
+// --- CheckXidAlive (concurrent-abort detection during prepared decode) ---
+
+thread_local! {
+    static DID_COMMIT_ANSWER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+// Seams are set-once per process; every test that needs the stub funnels
+// through this. The stub answers from a thread-local so parallel tests
+// cannot see each other's value.
+fn install_did_commit_stub() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        transam_seams::transaction_id_did_commit::set(|_| {
+            Ok(DID_COMMIT_ANSWER.with(|c| c.get()))
+        });
+    });
+}
+
+#[test]
+fn setup_check_xid_live_matches_c_arms() {
+    install_did_commit_stub();
+    xact::SetCheckXidAlive(types_core::InvalidTransactionId);
+
+    // Uncommitted xid: published for the catalog-scan guards.
+    DID_COMMIT_ANSWER.with(|c| c.set(false));
+    crate::replay::setup_check_xid_live(501).unwrap();
+    assert_eq!(xact::CheckXidAlive(), 501);
+
+    // Same xid again: the TransactionIdEquals early-return arm — no re-probe
+    // (the commit status is not consulted; flipping it must not matter).
+    DID_COMMIT_ANSWER.with(|c| c.set(true));
+    crate::replay::setup_check_xid_live(501).unwrap();
+    assert_eq!(xact::CheckXidAlive(), 501);
+
+    // A different, already-committed xid resets to invalid.
+    crate::replay::setup_check_xid_live(502).unwrap();
+    assert_eq!(xact::CheckXidAlive(), types_core::InvalidTransactionId);
+
+    xact::SetCheckXidAlive(types_core::InvalidTransactionId);
+}
+
+#[test]
+fn check_xid_guard_clears_state_on_panic_unwind() {
+    xact::SetCheckXidAlive(777);
+    xact::SetBsysscan(true);
+
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = crate::replay::CheckXidLiveGuard;
+        panic!("simulated replay panic");
+    }));
+    assert!(unwound.is_err());
+
+    // The thread survives a caught panic in the threaded server; a leaked
+    // CheckXidAlive would poison every later catalog scan on this thread.
+    assert_eq!(xact::CheckXidAlive(), types_core::InvalidTransactionId);
+    assert!(!xact::bsysscan());
+}
+
+#[test]
+fn check_xid_guard_is_idempotent_when_clean() {
+    xact::SetCheckXidAlive(types_core::InvalidTransactionId);
+    xact::SetBsysscan(false);
+    {
+        let _guard = crate::replay::CheckXidLiveGuard;
+    }
+    assert_eq!(xact::CheckXidAlive(), types_core::InvalidTransactionId);
+    assert!(!xact::bsysscan());
+}
