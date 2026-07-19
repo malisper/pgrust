@@ -422,10 +422,6 @@ pub fn try_own_window_agg<'mcx>(
         stats::tick_refused(ShapeClass::WindowAgg, RefuseReason::Epq);
         return Ok(None);
     }
-    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        stats::tick_refused(ShapeClass::WindowAgg, RefuseReason::Backward);
-        return Ok(None);
-    }
     // Structural admission, memoized on the node; refusal accounting ticks
     // exactly here — once per memoized verdict (the sortfeed precedent).
     // Either verdict is final: fresh + admitted ⇒ the lane owns from THIS
@@ -671,10 +667,6 @@ pub fn try_own_window_agg_t2<'mcx>(
         stats::tick_refused(ShapeClass::WindowAgg, RefuseReason::Epq);
         return Ok(None);
     }
-    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        stats::tick_refused(ShapeClass::WindowAgg, RefuseReason::Backward);
-        return Ok(None);
-    }
     if !estate.es_instrumentation.is_empty() {
         stats::tick_refused(ShapeClass::WindowAgg, RefuseReason::Instrumented);
         // EXPLAIN (ENGINE) mirror (E4): ENGINE requires ANALYZE, so every
@@ -866,10 +858,6 @@ pub fn try_own_window_agg_t2b<'mcx>(
     // attribution rides the detail string, never the counters).
     if estate.es_epq_active {
         stats::tick_refused(ShapeClass::WindowAgg, RefuseReason::Epq);
-        return Ok(None);
-    }
-    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        stats::tick_refused(ShapeClass::WindowAgg, RefuseReason::Backward);
         return Ok(None);
     }
     // Structural admission, memoized on the node (T2-B's own memo — W1's

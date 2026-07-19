@@ -12253,13 +12253,14 @@ mod spi_stage_a_aj_w95 {
     }
 
     /// The NAMED admission taxonomy (`ShapeClass::Spi`), reusing the
-    /// GENERIC registry vocabulary (backward / scroll-mark /
-    /// parallel-gate). Reachability (review re-baseline, worklog §8):
-    /// scroll-mark ticks for every auto-SCROLL SPI portal fetch (plain
-    /// plpgsql FOR loops) and backward via SPI_scroll_cursor_fetch — both
-    /// carry allowlist rows; parallel-gate stays the fail-closed
-    /// serial-law pin. A refusal refuses the WHOLE statement to Volcano
-    /// (refusal-not-error).
+    /// GENERIC registry vocabulary (scroll-mark / parallel-gate).
+    /// Backward-execution wave B11: the classifier's backward arm is
+    /// DELETED — a backward demand cannot reach a budgeted run (the store
+    /// serves backward fetches above the seam; kill-world backward runs
+    /// die 0A000 at the forward-only run seam, B1). scroll-mark stays as
+    /// the defensive random-access-eflags fence (its wave-9.5 producer
+    /// died in B2); parallel-gate stays the fail-closed serial-law pin. A
+    /// refusal refuses the WHOLE statement to Volcano (refusal-not-error).
     #[test]
     fn spi_w95_admission_taxonomy_named_classes() {
         use ::types_slot::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
@@ -12269,7 +12270,9 @@ mod spi_stage_a_aj_w95 {
         // Admit: forward, no random-access demand, serial.
         assert_eq!(name(true, 0, false), None, "the _SPI_pquery shape admits");
 
-        assert_eq!(name(false, 0, false), Some("backward"));
+        // B11: the direction argument is SUNSET-kept in the signature; a
+        // backward value no longer classifies (the seam error owns it).
+        assert_eq!(name(false, 0, false), None);
         assert_eq!(name(true, EXEC_FLAG_REWIND, false), Some("scroll-mark"));
         assert_eq!(name(true, EXEC_FLAG_BACKWARD, false), Some("scroll-mark"));
         assert_eq!(name(true, EXEC_FLAG_MARK, false), Some("scroll-mark"));

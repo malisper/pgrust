@@ -106,25 +106,23 @@ pub(crate) fn tail_owned_probe_for_tests(name: &str) -> u64 {
 /// original §3.2 priority order — refusal set and tick cadence identical.
 #[inline]
 fn tail_gates(class: ShapeClass, estate: &EStateData<'_>) -> Option<RefuseReason> {
-    if estate.es_epq_active
-        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
-        || !estate.es_instrumentation.is_empty()
-    {
+    // (The backward compare retired with the backward-execution wave B11:
+    // pulls are forward-invariant below the run seam, deletion-prep B1.)
+    if estate.es_epq_active || !estate.es_instrumentation.is_empty() {
         return Some(tail_gate_refused(class, estate));
     }
     None
 }
 
 /// Cold refuse tail: re-derive the first failing gate in §3.2 priority
-/// order (EPQ → backward → instrumented), tick it, return it. Reached only
-/// when `tail_gates`'s OR-fold fired, so one of the three holds.
+/// order (EPQ → instrumented; the backward arm retired with the
+/// backward-execution wave B11), tick it, return it. Reached only when
+/// `tail_gates`'s OR-fold fired, so one of the two holds.
 #[cold]
 #[inline(never)]
 fn tail_gate_refused(class: ShapeClass, estate: &EStateData<'_>) -> RefuseReason {
     let r = if estate.es_epq_active {
         RefuseReason::Epq
-    } else if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        RefuseReason::Backward
     } else {
         RefuseReason::Instrumented
     };
@@ -173,14 +171,12 @@ fn verdict<F: FnOnce() -> Option<i32>>(
     estate: &mut EStateData<'_>,
 ) -> bool {
     // SH-F fast path: the per-execution-static byte (GUC on, no
-    // instrumentation, no capture, diag disarmed) + the two
-    // per-pull-dynamic gates inline (es_epq_active shares the byte's cache
-    // line). byte==true means the slow path below would admit AND tick
-    // nothing, so the fast admit is decision- and accounting-identical.
-    if estate.es_lane_leaf_fast
-        && !estate.es_epq_active
-        && ::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
-    {
+    // instrumentation, no capture, diag disarmed) + the per-pull-dynamic
+    // EPQ gate inline (es_epq_active shares the byte's cache line).
+    // byte==true means the slow path below would admit AND tick nothing,
+    // so the fast admit is decision- and accounting-identical. (The
+    // backward compare retired with the backward-execution wave B11.)
+    if estate.es_lane_leaf_fast && !estate.es_epq_active {
         #[cfg(test)]
         ROWMODE_TAIL_OWNED_FOR_TESTS[class as usize].fetch_add(1, Relaxed);
         return true;
@@ -189,7 +185,7 @@ fn verdict<F: FnOnce() -> Option<i32>>(
 }
 
 /// The full verdict (outlined): every diagnostics-armed, instrumented,
-/// EPQ, backward, or GUC-off pull lands here — the exact pre-SH-F body,
+/// EPQ, or GUC-off pull lands here — the exact pre-SH-F body,
 /// with the lane-executor GUC gate at its head (it rode the arms'
 /// `rowmode_tail_active` before SH-F made that knob-only). GUC-off admits
 /// nothing and ticks nothing, matching the retired arm-gate short-circuit.

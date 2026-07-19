@@ -1020,12 +1020,10 @@ fn seq_scan_fusible<'mcx>(
         ShapeClass::SeqScan
     };
     // Dynamic per-call gates: these may legitimately vary call to call.
+    // (The backward gate retired with the backward-execution wave B11:
+    // es_direction is forward-invariant below the run seam, deletion-prep B1.)
     if estate.es_epq_active {
         stats::tick_refused(class, RefuseReason::Epq);
-        return Ok(false);
-    }
-    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        stats::tick_refused(class, RefuseReason::Backward);
         return Ok(false);
     }
     // Static verdict, memoized on the node at first evaluation: (a) stability
@@ -1069,9 +1067,7 @@ pub(super) fn seq_scan_fusible_runtime_ea<'mcx>(
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
-    if estate.es_epq_active
-        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
-    {
+    if estate.es_epq_active {
         return Ok(false);
     }
     Ok(seq_scan_refuse_reason_ex(ss, estate, true)?.is_none())
@@ -1449,9 +1445,6 @@ fn index_scan_refuse_reason_ex<'mcx>(
     if estate.es_epq_active {
         return Some(RefuseReason::Epq);
     }
-    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        return Some(RefuseReason::Backward);
-    }
     if !is.batch_allowed() {
         return Some(RefuseReason::ScrollMark);
     }
@@ -1480,7 +1473,10 @@ fn index_scan_refuse_reason_ex<'mcx>(
         return Some(RefuseReason::OrderByReorder);
     }
     if !::types_scan::sdir::ScanDirectionIsForward(is.iss_OrderDir) {
-        return Some(RefuseReason::Backward);
+        // A DESC-ordered index scan PLAN (indexorderdir backward) - a live
+        // planner shape, distinct from the retired runtime-direction row
+        // (backward-execution wave B11 re-vocab).
+        return Some(RefuseReason::DescOrder);
     }
     if !is
         .iss_RelationDesc
@@ -1678,9 +1674,6 @@ fn index_only_scan_refuse_reason_ex<'mcx>(
     if estate.es_epq_active {
         return Some(RefuseReason::Epq);
     }
-    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        return Some(RefuseReason::Backward);
-    }
     if !ios.batch_allowed() {
         return Some(RefuseReason::ScrollMark);
     }
@@ -1707,7 +1700,9 @@ fn index_only_scan_refuse_reason_ex<'mcx>(
         return Some(RefuseReason::OrderByReorder);
     }
     if !::types_scan::sdir::ScanDirectionIsForward(ios.ioss_OrderDir) {
-        return Some(RefuseReason::Backward);
+        // DESC-ordered IOS plan (indexorderdir backward) - live planner
+        // shape; B11 re-vocab (see index_scan_refuse_reason).
+        return Some(RefuseReason::DescOrder);
     }
     if !ios
         .ioss_RelationDesc
@@ -1855,9 +1850,6 @@ fn bitmap_heap_scan_refuse_reason<'mcx>(
 ) -> Option<RefuseReason> {
     if estate.es_epq_active {
         return Some(RefuseReason::Epq);
-    }
-    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        return Some(RefuseReason::Backward);
     }
     if bhs.parallel_aware || bhs.pstate.is_some() {
         return Some(RefuseReason::ParallelGate);
@@ -4178,7 +4170,7 @@ pub fn try_own_plain_distinct_agg_over_sort<'mcx>(
         return Ok(None);
     }
     // Dynamic per-call gates (mirror the sorted-agg-over-sort arm).
-    if estate.es_epq_active || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
+    if estate.es_epq_active {
         return Ok(None);
     }
     // Sort-side structural verdict — the sort arms' shared memo (covers
@@ -6059,14 +6051,10 @@ pub fn try_own_sort<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     // Dynamic gates, every call (cheap): EPQ can engage between calls on the
-    // same node tree, and only forward pulls keep the tuplesort read-back
-    // cursor in step.
+    // same node tree. (The backward gate retired with the backward-execution
+    // wave B11: pulls are forward-invariant below the run seam, B1.)
     if estate.es_epq_active {
         stats::tick_refused(ShapeClass::SortFeed, RefuseReason::Epq);
-        return Ok(None);
-    }
-    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        stats::tick_refused(ShapeClass::SortFeed, RefuseReason::Backward);
         return Ok(None);
     }
     if !sort_lane_fusible_memo(s, estate)? {
@@ -9920,9 +9908,7 @@ pub fn try_own_sorted_distinct_runtime_ea<'mcx>(
     }
     // Dynamic per-call gates (serial arm verbatim; no stat ticks — the EA
     // walk never perturbs the serial cadence).
-    if estate.es_epq_active
-        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
-    {
+    if estate.es_epq_active {
         return Ok(None);
     }
     // The grouped narrow-distinct decision (serial arm verbatim).
@@ -10007,10 +9993,6 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
     // Dynamic per-call gates (mirror the bare-sort breaker).
     if estate.es_epq_active {
         stats::tick_refused(ShapeClass::SortFeed, RefuseReason::Epq);
-        return Ok(None);
-    }
-    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        stats::tick_refused(ShapeClass::SortFeed, RefuseReason::Backward);
         return Ok(None);
     }
     // Agg-side admission (static shape; ticked per offered call, the hashed
@@ -11550,10 +11532,6 @@ pub fn try_own_hash_join<'mcx>(
         stats::tick_refused(ShapeClass::Join, RefuseReason::Epq);
         return Ok(None);
     }
-    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        stats::tick_refused(ShapeClass::Join, RefuseReason::Backward);
-        return Ok(None);
-    }
     if !hash_join_lane_fusible(hj, estate)? {
         return Ok(None);
     }
@@ -11855,10 +11833,6 @@ pub fn try_own_nest_loop<'mcx>(
         stats::tick_refused(ShapeClass::NestLoop, RefuseReason::Epq);
         return Ok(None);
     }
-    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        stats::tick_refused(ShapeClass::NestLoop, RefuseReason::Backward);
-        return Ok(None);
-    }
     if !nest_loop_lane_fusible(nl, estate)? {
         return Ok(None);
     }
@@ -11887,10 +11861,6 @@ pub fn try_own_agg_over_nest_loop<'mcx>(
     // composition's feed pipeline hangs off the join's drive).
     if estate.es_epq_active {
         stats::tick_refused(ShapeClass::NestLoop, RefuseReason::Epq);
-        return Ok(None);
-    }
-    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        stats::tick_refused(ShapeClass::NestLoop, RefuseReason::Backward);
         return Ok(None);
     }
     if !::nodeagg::agg_hash_breaker_admissible(agg) {
@@ -12877,10 +12847,6 @@ pub fn try_own_agg_over_hash_join<'mcx>(
         stats::tick_refused(ShapeClass::Join, RefuseReason::Epq);
         return Ok(None);
     }
-    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        stats::tick_refused(ShapeClass::Join, RefuseReason::Backward);
-        return Ok(None);
-    }
     // M3 runtime hash-join arm (FORCED engagement under PGRUST_RUNTIME=1 +
     // pgrust.runtime_hashjoin_pool; serial plan surface unchanged). Owns the
     // plain-agg-over-join probe tails; None = not engaged/refused — fall
@@ -13198,10 +13164,7 @@ pub fn try_own_limit<'mcx>(
     use ::nodelimit::LimitStateCond::*;
     // Dynamic per-call gates + the limit-side shape gate (COUNT only; the
     // option is init-stable so this refuse is stable too).
-    if estate.es_epq_active
-        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
-        || !::nodelimit::lane_limit_admissible(&l.state)
-    {
+    if estate.es_epq_active || !::nodelimit::lane_limit_admissible(&l.state) {
         return Ok(None);
     }
     // Child admission BEFORE any state effect (a refuse must leave the node
@@ -13477,14 +13440,11 @@ pub fn try_own_group<'mcx>(
     g: &mut ::mcx::PgBox<'mcx, crate::procnode::GroupNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
-    // Dynamic per-call gates (Group init asserts !BACKWARD && !MARK, so a
-    // non-forward pull should be impossible — gate anyway, like the sort).
+    // Dynamic per-call gates. (The defensive backward gate retired with the
+    // backward-execution wave B11 — pulls are forward-invariant below the
+    // run seam, B1; Group init already asserts !BACKWARD && !MARK.)
     if estate.es_epq_active {
         stats::tick_refused(ShapeClass::Group, RefuseReason::Epq);
-        return Ok(None);
-    }
-    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        stats::tick_refused(ShapeClass::Group, RefuseReason::Backward);
         return Ok(None);
     }
     let g = &mut **g;
@@ -13586,10 +13546,6 @@ pub fn try_own_result<'mcx>(
     // Dynamic per-call gates.
     if estate.es_epq_active {
         stats::tick_refused(ShapeClass::ResultNode, RefuseReason::Epq);
-        return Ok(None);
-    }
-    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        stats::tick_refused(ShapeClass::ResultNode, RefuseReason::Backward);
         return Ok(None);
     }
     // EXPLAIN ANALYZE refuses by policy (§4). The no-FROM arm has no child
@@ -13770,10 +13726,6 @@ fn try_own_subquery_scan_glue<'mcx>(
         stats::tick_refused(ShapeClass::SubqueryScan, RefuseReason::Epq);
         return Ok(None);
     }
-    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        stats::tick_refused(ShapeClass::SubqueryScan, RefuseReason::Backward);
-        return Ok(None);
-    }
     let s = &mut **s;
     if s.ss.instr_idx.is_some() {
         stats::tick_refused(ShapeClass::SubqueryScan, RefuseReason::Instrumented);
@@ -13886,10 +13838,6 @@ pub fn try_own_agg_over_subquery_scan<'mcx>(
     // composition's feed hangs off the subquery's drive).
     if estate.es_epq_active {
         stats::tick_refused(ShapeClass::SubqueryScan, RefuseReason::Epq);
-        return Ok(None);
-    }
-    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        stats::tick_refused(ShapeClass::SubqueryScan, RefuseReason::Backward);
         return Ok(None);
     }
     if !::nodeagg::agg_hash_breaker_admissible(agg) {
@@ -14077,10 +14025,6 @@ pub fn try_own_agg_over_gather<'mcx>(
         stats::tick_refused(ShapeClass::Gather, RefuseReason::Epq);
         return Ok(None);
     }
-    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        stats::tick_refused(ShapeClass::Gather, RefuseReason::Backward);
-        return Ok(None);
-    }
     if !::nodeagg::agg_hash_breaker_admissible(agg) {
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AggNotDrainable);
         return Ok(None);
@@ -14212,15 +14156,12 @@ pub fn try_own_append<'mcx>(
     a: &mut ::mcx::PgBox<'mcx, crate::procnode::AppendNode<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
-    // Dynamic per-call gates (mirror the sort/join breakers). Backward local
-    // Append pulls exist in C only under BACKWARD eflags, which the children
-    // refuse structurally (ScrollMark) — gate anyway.
+    // Dynamic per-call gates (mirror the sort/join breakers). (The backward
+    // gate retired with the backward-execution wave B11: pulls are forward-
+    // invariant below the run seam, B1, and B2 deleted the BACKWARD-eflags
+    // producer C's backward Append pulls rode.)
     if estate.es_epq_active {
         stats::tick_refused(ShapeClass::Append, RefuseReason::Epq);
-        return Ok(None);
-    }
-    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        stats::tick_refused(ShapeClass::Append, RefuseReason::Backward);
         return Ok(None);
     }
     let a = &mut **a;
@@ -15005,17 +14946,13 @@ pub fn try_own_merge_join<'mcx>(
         return Ok(None);
     }
     // Dynamic per-call gates, the mj_verdict_slow priority order
-    // (EPQ -> backward -> instrumented), each a NAMED refusal per pull.
+    // (EPQ -> instrumented), each a NAMED refusal per pull. (The backward
+    // gate - probe id 1 - retired with the backward-execution wave B11;
+    // probe ids keep their historical numbering.)
     if estate.es_epq_active {
         stats::tick_refused(ShapeClass::MergeJoin, RefuseReason::Epq);
         #[cfg(test)]
         lane_mergejoin::mj_native_refusal_probe(0);
-        return Ok(None);
-    }
-    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        stats::tick_refused(ShapeClass::MergeJoin, RefuseReason::Backward);
-        #[cfg(test)]
-        lane_mergejoin::mj_native_refusal_probe(1);
         return Ok(None);
     }
     if !estate.es_instrumentation.is_empty() {

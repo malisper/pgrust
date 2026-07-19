@@ -585,7 +585,6 @@ pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
         ShapeClass::ProjectSet,
         &[
             RefuseReason::Epq,
-            RefuseReason::Backward,
             RefuseReason::Instrumented,
             RefuseReason::ScrollMark,
             RefuseReason::ChildNotLaneOwned,
@@ -600,7 +599,6 @@ pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
         ShapeClass::FunctionScan,
         &[
             RefuseReason::Epq,
-            RefuseReason::Backward,
             RefuseReason::Instrumented,
             RefuseReason::ScrollMark,
             RefuseReason::EnvOff,
@@ -613,7 +611,6 @@ pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
         ShapeClass::TableFuncScan,
         &[
             RefuseReason::Epq,
-            RefuseReason::Backward,
             RefuseReason::Instrumented,
             RefuseReason::ScrollMark,
             RefuseReason::EnvOff,
@@ -623,7 +620,6 @@ pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
         ShapeClass::ValuesScan,
         &[
             RefuseReason::Epq,
-            RefuseReason::Backward,
             RefuseReason::Instrumented,
             RefuseReason::ScrollMark,
         ],
@@ -635,7 +631,6 @@ pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
         ShapeClass::SampleScan,
         &[
             RefuseReason::Epq,
-            RefuseReason::Backward,
             RefuseReason::Instrumented,
             RefuseReason::ScrollMark,
             RefuseReason::EnvOff,
@@ -648,7 +643,6 @@ pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
         ShapeClass::TidScan,
         &[
             RefuseReason::Epq,
-            RefuseReason::Backward,
             RefuseReason::Instrumented,
             RefuseReason::ScrollMark,
             RefuseReason::EnvOff,
@@ -662,7 +656,6 @@ pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
         ShapeClass::TidRangeScan,
         &[
             RefuseReason::Epq,
-            RefuseReason::Backward,
             RefuseReason::Instrumented,
             RefuseReason::ScrollMark,
             RefuseReason::EnvOff,
@@ -675,7 +668,6 @@ pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
         ShapeClass::NamedTuplestoreScan,
         &[
             RefuseReason::Epq,
-            RefuseReason::Backward,
             RefuseReason::Instrumented,
             RefuseReason::ScrollMark,
             RefuseReason::EnvOff,
@@ -685,7 +677,6 @@ pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
         ShapeClass::Material,
         &[
             RefuseReason::Epq,
-            RefuseReason::Backward,
             RefuseReason::Instrumented,
             RefuseReason::ScrollMark,
         ],
@@ -694,7 +685,6 @@ pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
         ShapeClass::CteScan,
         &[
             RefuseReason::Epq,
-            RefuseReason::Backward,
             RefuseReason::Instrumented,
             RefuseReason::ScrollMark,
         ],
@@ -703,7 +693,6 @@ pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
         ShapeClass::RecursiveUnion,
         &[
             RefuseReason::Epq,
-            RefuseReason::Backward,
             RefuseReason::Instrumented,
             RefuseReason::ScrollMark,
         ],
@@ -712,7 +701,6 @@ pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
         ShapeClass::WorkTableScan,
         &[
             RefuseReason::Epq,
-            RefuseReason::Backward,
             RefuseReason::Instrumented,
             RefuseReason::ScrollMark,
         ],
@@ -721,7 +709,6 @@ pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
         ShapeClass::Memoize,
         &[
             RefuseReason::Epq,
-            RefuseReason::Backward,
             RefuseReason::Instrumented,
             RefuseReason::ScrollMark,
         ],
@@ -730,7 +717,6 @@ pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
         ShapeClass::SetOp,
         &[
             RefuseReason::Epq,
-            RefuseReason::Backward,
             RefuseReason::Instrumented,
             RefuseReason::ScrollMark,
         ],
@@ -739,7 +725,6 @@ pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
         ShapeClass::MergeAppend,
         &[
             RefuseReason::Epq,
-            RefuseReason::Backward,
             RefuseReason::Instrumented,
             RefuseReason::ScrollMark,
         ],
@@ -748,7 +733,6 @@ pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
         ShapeClass::Unique,
         &[
             RefuseReason::Epq,
-            RefuseReason::Backward,
             RefuseReason::Instrumented,
             RefuseReason::ScrollMark,
         ],
@@ -757,7 +741,6 @@ pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
         ShapeClass::LockRows,
         &[
             RefuseReason::Epq,
-            RefuseReason::Backward,
             RefuseReason::Instrumented,
             RefuseReason::ScrollMark,
         ],
@@ -765,14 +748,13 @@ pub(super) const ASSERT_MANIFEST: &[(ShapeClass, &[RefuseReason])] = &[
     // --- FLIP-2: mergejoin (rung 2) ----------------------------------------
     (
         ShapeClass::MergeJoin,
-        &[RefuseReason::Epq, RefuseReason::Backward, RefuseReason::Instrumented],
+        &[RefuseReason::Epq, RefuseReason::Instrumented],
     ),
     // --- FLIP-3: windows-w1 (rung 3) ---------------------------------------
     (
         ShapeClass::WindowAgg,
         &[
             RefuseReason::Epq,
-            RefuseReason::Backward,
             RefuseReason::Instrumented,
             RefuseReason::ChildNotLaneOwned,
             RefuseReason::ShapeQualProj,

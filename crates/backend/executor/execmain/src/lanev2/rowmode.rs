@@ -259,13 +259,10 @@ pub fn try_own_project_set<'mcx>(
         refuse(estate, RefuseReason::SrfSetExpansion);
         return Ok(None);
     }
-    // Dynamic per-call gates (the try_own_result cadence).
+    // Dynamic per-call gates (the try_own_result cadence). (The backward
+    // gate retired with the backward-execution wave B11.)
     if estate.es_epq_active {
         refuse(estate, RefuseReason::Epq);
-        return Ok(None);
-    }
-    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        refuse(estate, RefuseReason::Backward);
         return Ok(None);
     }
     if !estate.es_instrumentation.is_empty() {
@@ -332,12 +329,10 @@ pub fn merge_join_pull_verdict<'mcx>(
         return;
     }
     // SH-F fast path (see rowmode_tail::verdict): the per-execution-static
-    // byte + the two per-pull-dynamic gates inline; byte==true means the
-    // slow path would admit and tick nothing.
-    if estate.es_lane_leaf_fast
-        && !estate.es_epq_active
-        && ::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
-    {
+    // byte + the per-pull-dynamic EPQ gate inline; byte==true means the
+    // slow path would admit and tick nothing. (The backward compare retired
+    // with the backward-execution wave B11.)
+    if estate.es_lane_leaf_fast && !estate.es_epq_active {
         #[cfg(test)]
         ROWMODE_MJ_OWNED_FOR_TESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return;
@@ -356,11 +351,9 @@ fn mj_verdict_slow<'mcx>(
     if !super::enabled() {
         return;
     }
-    // Dynamic per-call gates (the try_own_result cadence), OR-folded.
-    if estate.es_epq_active
-        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
-        || !estate.es_instrumentation.is_empty()
-    {
+    // Dynamic per-call gates (the try_own_result cadence), OR-folded. (The
+    // backward compare retired with the backward-execution wave B11.)
+    if estate.es_epq_active || !estate.es_instrumentation.is_empty() {
         mj_gate_refused(mj, estate);
         return;
     }
@@ -380,9 +373,10 @@ fn mj_verdict_slow<'mcx>(
 }
 
 /// Cold refuse tail (SH-D): re-derive the first failing gate in the
-/// original priority order (EPQ → backward → instrumented), tick it, and
-/// record the G7 verdict under capture. Reached only when the OR-fold
-/// fired, so one of the three holds.
+/// original priority order (EPQ → instrumented; the backward arm retired
+/// with the backward-execution wave B11), tick it, and record the G7
+/// verdict under capture. Reached only when the OR-fold fired, so one of
+/// the two holds.
 #[cold]
 #[inline(never)]
 fn mj_gate_refused<'mcx>(
@@ -391,8 +385,6 @@ fn mj_gate_refused<'mcx>(
 ) {
     let r = if estate.es_epq_active {
         RefuseReason::Epq
-    } else if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        RefuseReason::Backward
     } else {
         RefuseReason::Instrumented
     };

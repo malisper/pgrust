@@ -153,12 +153,10 @@ fn express_refuse_reason<'mcx>(
     estate: &EStateData<'mcx>,
     ignore_instrument: bool,
 ) -> Option<RefuseReason> {
-    // Dynamic per-pull gates (the try_own_result cadence).
+    // Dynamic per-pull gates (the try_own_result cadence). (The backward
+    // gate retired with the backward-execution wave B11.)
     if estate.es_epq_active {
         return Some(RefuseReason::Epq);
-    }
-    if !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction) {
-        return Some(RefuseReason::Backward);
     }
     if !ignore_instrument && is.ss.instr_idx.is_some() {
         return Some(RefuseReason::Instrumented);
@@ -174,7 +172,8 @@ fn express_refuse_reason<'mcx>(
         return Some(RefuseReason::OrderByReorder);
     }
     if !::types_scan::sdir::ScanDirectionIsForward(is.iss_OrderDir) {
-        return Some(RefuseReason::Backward);
+        // DESC-ordered index scan plan - live shape; B11 re-vocab.
+        return Some(RefuseReason::DescOrder);
     }
     if !is
         .iss_RelationDesc

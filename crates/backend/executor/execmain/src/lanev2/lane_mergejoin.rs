@@ -105,7 +105,8 @@ pub(crate) static MJ_NATIVE_RESTORES_FOR_TESTS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 /// Test-only NAMED-refusal probes, in the surface's gate order:
-/// [epq, backward, instrumented, mergejoin-jointype, mergejoin-inner-feed].
+/// [epq, backward(RETIRED - B11; slot kept so ids stay stable),
+/// instrumented, mergejoin-jointype, mergejoin-inner-feed].
 #[cfg(test)]
 pub(crate) static MJ_NATIVE_REFUSED_FOR_TESTS: [std::sync::atomic::AtomicU64; 5] = [
     std::sync::atomic::AtomicU64::new(0),

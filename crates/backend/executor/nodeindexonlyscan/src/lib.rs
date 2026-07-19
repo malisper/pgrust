@@ -51,7 +51,7 @@ pub struct IndexOnlyScanState<'mcx> {
     // while parked).
     pub ioss_IndexOid: ::types_core::Oid,
     // Lane-executor-v2 (`execmain::lanev2`): forward, non-mark eflags at init.
-    // False for a scrollable/backward or mergejoin-mark cursor — the lane
+    // False for a mergejoin-mark-armed scan (the scroll/backward eflags producer retired with the backward-execution wave, B2) — the lane
     // refuses those. Default false (refuse); set by `exec_init_index_only_scan`.
     // No page-batch cursor is needed: the drive advances one visible tuple per
     // call (`index_only_scan_batch_next` returns 0 or 1), so it carries no
@@ -211,7 +211,7 @@ impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
 
 impl<'mcx> IndexOnlyScanState<'mcx> {
     /// Lane-executor-v2: forward, non-mark eflags at init (false for a
-    /// scrollable/backward or mergejoin-mark cursor).
+    /// mergejoin-mark-armed scan (the scroll/backward eflags producer retired with the backward-execution wave, B2)).
     #[inline]
     pub fn batch_allowed(&self) -> bool {
         self.batch_allowed
@@ -440,7 +440,7 @@ pub fn exec_init_index_only_scan<'mcx>(
         ::nodeindexscan::index_lockmode(estate, node.scan.scanrelid),
     )?;
     let mut state = exec_init_index_only_scan_rel(mcx, node, estate, rel, index_rel)?;
-    // Lane-executor-v2: refuse the batched drive for a scrollable/backward or
+    // Lane-executor-v2: refuse the batched drive for a mark-armed (B2 retired the scroll-eflags producer) or
     // mergejoin-mark cursor. Byte-identity-safe (the lane just refuses).
     state.batch_allowed = eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0;
     Ok(state)

@@ -4,7 +4,7 @@
 #     class           = stats.rs ShapeClass::name() (the lane vocabulary)
 #     allowed_reasons = comma-list of RefuseReason::name() values that stay
 #                       LEGAL for the class after its flip (the dynamic gates:
-#                       epq, backward, instrumented, ...); "-" = none.
+#                       epq, instrumented, ...; backward retired, B11); "-" = none.
 #
 # A flip commit adds its row here AND in the compiled-in ASSERT_MANIFEST
 # (lanev2/census.rs) AND reseeds the class's lane-gates floors — all in the
@@ -39,31 +39,31 @@
 #   FLIP-3 windowagg — W1 dynamic gates + the W1 structural refuses (the
 #                     sticky-batch lane owns only its admitted family)
 class	allowed_reasons
-projectset	epq,backward,instrumented,scroll-mark,child-not-lane-owned,srf-set-expansion
-functionscan	epq,backward,instrumented,scroll-mark,env-off
-tablefuncscan	epq,backward,instrumented,scroll-mark,env-off
-valuesscan	epq,backward,instrumented,scroll-mark
-samplescan	epq,backward,instrumented,scroll-mark,env-off
-tidscan	epq,backward,instrumented,scroll-mark,env-off
-tidrangescan	epq,backward,instrumented,scroll-mark,env-off
-namedtuplestorescan	epq,backward,instrumented,scroll-mark,env-off
-material	epq,backward,instrumented,scroll-mark
-ctescan	epq,backward,instrumented,scroll-mark
-recursiveunion	epq,backward,instrumented,scroll-mark
-worktablescan	epq,backward,instrumented,scroll-mark
-memoize	epq,backward,instrumented,scroll-mark
-setop	epq,backward,instrumented,scroll-mark
-mergeappend	epq,backward,instrumented,scroll-mark
-unique	epq,backward,instrumented,scroll-mark
-lockrows	epq,backward,instrumented,scroll-mark
-mergejoin	epq,backward,instrumented
-windowagg	epq,backward,instrumented,child-not-lane-owned,shape-qual-proj
+projectset	epq,instrumented,scroll-mark,child-not-lane-owned,srf-set-expansion
+functionscan	epq,instrumented,scroll-mark,env-off
+tablefuncscan	epq,instrumented,scroll-mark,env-off
+valuesscan	epq,instrumented,scroll-mark
+samplescan	epq,instrumented,scroll-mark,env-off
+tidscan	epq,instrumented,scroll-mark,env-off
+tidrangescan	epq,instrumented,scroll-mark,env-off
+namedtuplestorescan	epq,instrumented,scroll-mark,env-off
+material	epq,instrumented,scroll-mark
+ctescan	epq,instrumented,scroll-mark
+recursiveunion	epq,instrumented,scroll-mark
+worktablescan	epq,instrumented,scroll-mark
+memoize	epq,instrumented,scroll-mark
+setop	epq,instrumented,scroll-mark
+mergeappend	epq,instrumented,scroll-mark
+unique	epq,instrumented,scroll-mark
+lockrows	epq,instrumented,scroll-mark
+mergejoin	epq,instrumented
+windowagg	epq,instrumented,child-not-lane-owned,shape-qual-proj
 #
 # ----- wave-7 TIER-B B1 per-shape flips (se/wave7-flips-b1b2) -----
 # FLIP scans-t3 boarded as ONE COMMIT PER SHAPE (wave-7 contract §2; the
 # all-six-classes scope CONFIRMED by the wave-4 integrator,
 # notes/se-wave4-flips.md). ONE-ROW-PER-CLASS law (tierB review finding 2):
-# each shape's B1 allowed list (epq,backward,instrumented,env-off) is a
+# each shape's B1 allowed list (epq,instrumented,env-off) is a
 # subset of its FLIP-1 merged row above — B1 RIDES the existing row, no new
 # data rows. One comment line lands per per-shape flip commit; a per-shape
 # revert removes its line.
