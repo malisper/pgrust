@@ -2826,3 +2826,1267 @@ fn stream_source_abort_wakes_starved_workers() {
     work.assert_all_executed_once();
     pool.shutdown();
 }
+
+/// WS-A batchsource inc-1: deterministic equivalence of the extracted
+/// [`GranuleMap`]/[`GranuleMapSource`]/[`Segments`] geometry against the
+/// pre-extraction sources' code, ported verbatim as oracles (behavior
+/// preservation is the whole game — these tests pin the bit-for-bit claim).
+mod granule_map_tests {
+    use std::ops::Range;
+    use std::sync::Arc;
+
+    use crate::{GranuleMap, GranuleMapSource, MorselSource, Segments, SyntheticMorselSource};
+
+    /// The legacy scan-arm source's boundary search
+    /// (runtime_scan.rs `PgrcolumnarGranuleSource::next_boundary_after`),
+    /// ported verbatim as the equivalence oracle.
+    fn legacy_boundary_after(starts: &[u64], start: u64) -> u64 {
+        let total = starts.last().copied().unwrap_or(0);
+        match starts.binary_search(&start) {
+            Ok(i) => starts.get(i + 1).copied().unwrap_or(total),
+            Err(i) => starts.get(i).copied().unwrap_or(total),
+        }
+    }
+
+    /// morsel_body's open-coded coalesced-claim segmentation (the
+    /// pre-extraction loop, runtime_scan.rs), ported verbatim as the
+    /// `segments()` oracle. `None` starts = the heap path (whole range).
+    fn legacy_segments(starts: Option<&[u64]>, range: Range<u64>) -> Vec<Range<u64>> {
+        let mut out = Vec::new();
+        let mut seg = range.start;
+        while seg < range.end {
+            let seg_end = match starts {
+                Some(starts) => {
+                    let bound = match starts.binary_search(&seg) {
+                        Ok(i) => starts[i + 1],
+                        Err(i) => starts[i],
+                    };
+                    bound.min(range.end)
+                }
+                None => range.end,
+            };
+            out.push(seg..seg_end);
+            seg = seg_end;
+        }
+        out
+    }
+
+    fn map_over(starts: &[u64]) -> GranuleMap {
+        GranuleMap::with_boundaries(Arc::new(starts.to_vec()), 2)
+    }
+
+    /// Fixture with short interior RGs (reopen-append seals partial RGs):
+    /// the map is a real prefix sum, never `rg * k`.
+    const UNEVEN: &[u64] = &[0, 8, 11, 19, 24];
+
+    #[test]
+    fn boundary_after_matches_legacy_source() {
+        for starts in [&[0u64, 8][..], UNEVEN, &[0]] {
+            let map = map_over(starts);
+            let total = starts.last().copied().unwrap();
+            // Full sweep covers start-on-boundary and mid-RG starts.
+            for s in 0..total {
+                assert_eq!(
+                    map.boundary_after(s),
+                    legacy_boundary_after(starts, s),
+                    "starts={starts:?} s={s}"
+                );
+                assert!(map.boundary_after(s) > s, "MorselSource contract");
+                assert!(map.boundary_after(s) <= total, "MorselSource contract");
+            }
+        }
+    }
+
+    #[test]
+    fn boundary_after_duplicate_starts_match_legacy() {
+        // Zero-granule RGs would produce duplicate prefix-sum entries;
+        // defensively pin that the guarded form answers exactly as the
+        // legacy source did (behavior preservation, not endorsement).
+        let starts: &[u64] = &[0, 4, 4, 9];
+        let map = map_over(starts);
+        for s in 0..9 {
+            assert_eq!(map.boundary_after(s), legacy_boundary_after(starts, s), "s={s}");
+        }
+    }
+
+    #[test]
+    fn unbounded_map_is_boundary_free() {
+        let map = GranuleMap::unbounded(37, 16);
+        assert_eq!(map.total(), 37);
+        assert_eq!(map.c0(), 16);
+        assert_eq!(map.nbounds(), 0);
+        for s in 0..37 {
+            // The MorselSource trait default: no interior boundaries.
+            assert_eq!(map.boundary_after(s), 37);
+        }
+        let segs: Vec<_> = map.segments(3..20).collect();
+        assert_eq!(segs, vec![3..20], "boundary-free claims yield once");
+    }
+
+    #[test]
+    fn with_boundaries_geometry_accessors() {
+        let map = map_over(UNEVEN);
+        assert_eq!(map.total(), 24);
+        assert_eq!(map.c0(), 2);
+        assert_eq!(map.nbounds(), 4, "nrgs = len - 1 (the LFIN channel)");
+    }
+
+    #[test]
+    fn segments_match_morsel_body_oracle() {
+        let map = map_over(UNEVEN);
+        // Every legal claim shape: aligned/mid-RG starts, single-epoch,
+        // coalesced multi-epoch, claims ending mid-RG.
+        for start in 0..24u64 {
+            for end in (start + 1)..=24 {
+                let got: Vec<_> = map.segments(start..end).collect();
+                let want = legacy_segments(Some(UNEVEN), start..end);
+                assert_eq!(got, want, "claim {start}..{end}");
+            }
+        }
+        // Heap path parity: Segments::whole == the oracle's None branch.
+        let got: Vec<_> = Segments::whole(5..17).collect();
+        assert_eq!(got, legacy_segments(None, 5..17));
+    }
+
+    #[test]
+    fn segments_more_tracks_unyielded_work() {
+        let map = map_over(UNEVEN);
+        let mut segs = map.segments(2..20);
+        let mut yielded = 2u64;
+        while let Some(seg) = segs.next() {
+            yielded = seg.end;
+            assert_eq!(segs.more(), yielded < 20, "after seg {seg:?}");
+        }
+        assert_eq!(yielded, 20);
+        assert!(!Segments::whole(0..0).more(), "empty claim has no work");
+    }
+
+    /// Epoch-alignment property test over seeded pseudo-random geometry
+    /// (plain xorshift; no proptest dep — workspace law): every yielded
+    /// segment is non-empty, consecutive, covers the claim exactly, and
+    /// never crosses an interior hard boundary.
+    #[test]
+    fn segments_epoch_alignment_property() {
+        let mut state = 0x9e3779b97f4a7c15u64;
+        let mut next_rand = move |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound.max(1)
+        };
+        for _case in 0..200 {
+            let nrgs = 1 + next_rand(12) as usize;
+            let mut starts = vec![0u64];
+            for _ in 0..nrgs {
+                let rg_granules = 1 + next_rand(9);
+                starts.push(starts.last().unwrap() + rg_granules);
+            }
+            let total = *starts.last().unwrap();
+            let map = GranuleMap::with_boundaries(Arc::new(starts.clone()), 2);
+            for _claim in 0..8 {
+                let a = next_rand(total);
+                let b = a + 1 + next_rand(total - a);
+                let mut cursor = a;
+                for seg in map.segments(a..b) {
+                    assert!(seg.start < seg.end, "non-empty");
+                    assert_eq!(seg.start, cursor, "consecutive");
+                    assert!(
+                        !starts.iter().any(|&s| seg.start < s && s < seg.end),
+                        "segment {seg:?} crosses a hard boundary ({starts:?})"
+                    );
+                    cursor = seg.end;
+                }
+                assert_eq!(cursor, b, "claim covered exactly");
+            }
+        }
+    }
+
+    #[test]
+    fn granule_map_source_delegates_and_passes_posture_through() {
+        let map = Arc::new(map_over(UNEVEN));
+        // Posture is EXPLICIT and independent of geometry: all four
+        // combinations must read back exactly as constructed.
+        for (whole, coalesce) in [(false, false), (true, false), (false, true), (true, true)] {
+            let src = GranuleMapSource::new(Arc::clone(&map), whole, coalesce);
+            assert_eq!(src.whole_boundary_claims(), whole);
+            assert_eq!(src.coalesce_claims(), coalesce);
+            assert_eq!(src.total_granules(), 24);
+            assert_eq!(src.startup_c0(), 2);
+            for s in 0..24 {
+                assert_eq!(src.next_boundary_after(s), map.boundary_after(s));
+            }
+        }
+        assert!(GranuleMapSource::new(map, false, false).stream_state().is_none());
+    }
+
+    #[test]
+    fn granule_map_source_matches_synthetic_source_shape() {
+        // A regular-boundary map answers exactly like the M0 synthetic
+        // source with the same geometry (the scheduler-facing contract).
+        let starts: Vec<u64> = (0..=3).map(|i| i * 8).collect();
+        let map = Arc::new(GranuleMap::with_boundaries(Arc::new(starts), 16));
+        let src = GranuleMapSource::new(map, false, false);
+        let synth = SyntheticMorselSource::with_boundaries(24, 8);
+        assert_eq!(src.total_granules(), synth.total_granules());
+        assert_eq!(src.startup_c0(), synth.startup_c0());
+        for s in 0..24 {
+            assert_eq!(src.next_boundary_after(s), synth.next_boundary_after(s), "s={s}");
+        }
+    }
+}
+
+// ---- WS-B admission ledger (single-executor Phase 0.1) ---------------------
+// Appended module per the integration contract's shared-file rule
+// (runtime/src/tests.rs: WS-B appends `mod ledger_tests`; no edits above).
+
+mod ledger_tests {
+    use super::*;
+    use crate::ledger::AdmissionLedger;
+
+    fn budgets(cores: u32) -> LedgerBudgets {
+        LedgerBudgets { cores, cache_bytes: u64::MAX, join_threshold_ns: 0, renudge_max: 4 }
+    }
+
+    fn req(ceiling: u32) -> WidthRequest {
+        WidthRequest::unbounded(ceiling)
+    }
+
+    /// Target math: fair shares over the core budget, clamped by ceiling
+    /// and predicted optimum, remainder in slot order, liveness floor 1.
+    #[test]
+    fn target_math_fair_share_and_clamps() {
+        let l = AdmissionLedger::new(8, budgets(8));
+        let n = l.admit(0, req(16));
+        assert_eq!(n, ArrivalNudge { wake: 8, advertises: true });
+        assert_eq!(l.debug_words(0), (0, 8), "alone: fair share is the whole core budget");
+
+        l.admit(1, req(2));
+        assert_eq!(l.debug_words(0).1, 4, "incumbent narrowed to the equal share");
+        assert_eq!(l.debug_words(1).1, 2, "ceiling clamps below the fair share");
+
+        l.admit(
+            2,
+            WidthRequest { predicted: 1, ..req(8) },
+        );
+        // base = 8/3 = 2, remainder 2 in slot order => fair 3,3,2.
+        assert_eq!(l.debug_words(0).1, 3);
+        assert_eq!(l.debug_words(1).1, 2);
+        assert_eq!(l.debug_words(2).1, 1, "predicted optimum clamps the target");
+
+        // More entries than cores: every admitted entry keeps the liveness
+        // floor of one.
+        let l = AdmissionLedger::new(8, budgets(2));
+        for slot in 0..3 {
+            l.admit(slot, req(4));
+        }
+        for slot in 0..3 {
+            assert!(l.debug_words(slot).1 >= 1, "liveness floor: target >= 1");
+        }
+        let snap = l.snapshot();
+        assert_eq!(snap.admitted, 3);
+        assert!(snap.target_total <= 3, "sum bounded by max(cores, admitted)");
+    }
+
+    /// SHED-WITHIN-ONE-CLAIM: an arrival narrows the incumbent; the verdict
+    /// flips to Yield at the very next claim boundary, and exactly the
+    /// excess sheds (the verdict returns to Continue once granted meets the
+    /// new target).
+    #[test]
+    fn shed_within_one_claim() {
+        let l = AdmissionLedger::new(4, budgets(2));
+        l.admit(0, req(4));
+        assert!(l.try_join(0));
+        assert!(l.try_join(0));
+        assert!(!l.try_join(0), "grants stop at the target");
+        assert_eq!(l.should_continue(0), ClaimVerdict::Continue);
+
+        l.admit(1, req(4)); // fresh arrival: targets 1,1 — incumbent over-granted
+        assert_eq!(l.should_continue(0), ClaimVerdict::Yield, "shed at the next boundary");
+        assert_eq!(l.leave(0), 0, "still at/above target: no wake needed");
+        assert_eq!(
+            l.should_continue(0),
+            ClaimVerdict::Continue,
+            "one shed resolves the overshoot — the second incumbent keeps running"
+        );
+        let snap = l.snapshot();
+        assert_eq!(snap.yields, 1);
+        assert_eq!(snap.granted_total, 1);
+    }
+
+    /// FRESH-QUERY-WINS-PICK: with the incumbent saturated (granted >=
+    /// target after the narrowing), the pick filter steers the next free
+    /// worker to the fresh under-target entry.
+    #[test]
+    fn fresh_query_wins_pick() {
+        let l = AdmissionLedger::new(4, budgets(2));
+        l.admit(0, req(4));
+        assert!(l.try_join(0));
+        assert!(l.try_join(0));
+        l.admit(1, req(4));
+        assert!(!l.wants_workers(0), "saturated incumbent is filtered out");
+        assert!(l.wants_workers(1), "fresh under-target entry passes the filter");
+        assert!(!l.try_join(0), "stale pick of the incumbent is refused");
+        assert!(l.try_join(1), "the freed worker lands on the fresh query");
+    }
+
+    /// CACHE-BUDGET REFUSAL: Σ target × bytes/worker never exceeds the box
+    /// budget through WIDENING (the liveness floor may overshoot — the
+    /// documented floor-wins rule).
+    #[test]
+    fn cache_budget_refusal() {
+        let l = AdmissionLedger::new(
+            8,
+            LedgerBudgets { cores: 8, cache_bytes: 1000, join_threshold_ns: 0, renudge_max: 4 },
+        );
+        let wide = WidthRequest {
+            ceiling: 8,
+            predicted: u32::MAX,
+            cache_bytes_per_worker: 400,
+            est_work_ns: u64::MAX,
+        };
+        let nudge = l.admit(0, wide);
+        assert_eq!(l.debug_words(0).1, 2, "cache headroom denies widening past 2");
+        assert_eq!(nudge.wake, 2);
+        assert!(l.try_join(0));
+        assert!(l.try_join(0));
+        assert!(!l.try_join(0), "third worker refused by the cache clamp");
+        assert_eq!(l.snapshot().cache_charged_bytes, 800);
+
+        // A second footprint entry: no headroom left — the liveness floor
+        // wins (target 1), charging past the budget by design.
+        l.admit(1, wide);
+        assert_eq!(l.debug_words(0).1, 2);
+        assert_eq!(l.debug_words(1).1, 1, "liveness floor beats the cache clamp");
+        assert_eq!(l.snapshot().cache_charged_bytes, 1200);
+    }
+
+    /// WIDENING ON WORKER-FREED: a retirement recomputes survivors upward
+    /// and reports the widening as the wake hint; the freed capacity is
+    /// joinable immediately.
+    #[test]
+    fn widening_on_worker_freed() {
+        let l = AdmissionLedger::new(4, budgets(4));
+        l.admit(0, req(8));
+        l.admit(1, req(8));
+        assert_eq!(l.debug_words(0).1, 2);
+        assert!(l.try_join(0));
+        assert!(l.try_join(0));
+        assert!(!l.try_join(0));
+
+        assert_eq!(l.retire(1), 1, "one survivor widened — wake hint");
+        assert_eq!(l.debug_words(0).1, 4, "survivor widened to the full budget");
+        assert!(l.try_join(0));
+        assert!(l.try_join(0));
+        assert!(!l.try_join(0), "grants stop at the widened target");
+        assert_eq!(l.snapshot().granted_total, 4);
+
+        // Retiring a never-admitted slot is a no-op (queued-abort path).
+        assert_eq!(l.retire(3), 0);
+    }
+
+    /// JOIN_THRESHOLD: a sub-threshold entry never advertises (no active
+    /// bit, no wake) but still grants — the caller executes alone.
+    #[test]
+    fn join_threshold_sub_threshold_admit() {
+        let l = AdmissionLedger::new(
+            4,
+            LedgerBudgets { cores: 4, cache_bytes: u64::MAX, join_threshold_ns: 1000, renudge_max: 4 },
+        );
+        let n = l.admit(0, WidthRequest { est_work_ns: 999, ..req(4) });
+        assert_eq!(n, ArrivalNudge { wake: 0, advertises: false });
+        assert!(!l.wants_workers(0), "sub-threshold entries are invisible to the pick");
+        assert!(!l.advertises(0));
+        assert!(l.try_join(0), "the caller itself may still join");
+        assert_eq!(l.snapshot().sub_threshold_admits, 1);
+
+        let n = l.admit(1, WidthRequest { est_work_ns: 1000, ..req(4) });
+        assert!(n.advertises, "at-threshold work advertises (strictly-below rule)");
+    }
+
+    /// Bounded re-nudge: fires only under target, budgeted per recompute
+    /// window, refilled by membership events.
+    #[test]
+    fn renudge_bounded_by_budget() {
+        let l = AdmissionLedger::new(4, budgets(4));
+        l.admit(0, req(8)); // target 4
+        assert!(l.try_join(0)); // granted 1 < 4: under target
+        for _ in 0..4 {
+            assert!(l.renudge(0), "under-target boundary may request a wake");
+        }
+        assert!(!l.renudge(0), "budget spent: suppressed");
+        assert_eq!(l.snapshot().renudges, 4);
+        assert_eq!(l.snapshot().renudges_suppressed, 1);
+
+        l.admit(1, req(8)); // recompute refills the budget (targets 2,2)
+        assert!(l.renudge(0), "budget refilled at the membership event");
+
+        // At/above target: no nudge, no budget spend.
+        assert!(l.try_join(0));
+        assert!(!l.renudge(0));
+        assert_eq!(l.snapshot().renudges, 5);
+    }
+
+    /// Unmanaged slots (no admitted entry: DAG fan-out siblings, knob
+    /// toggle windows) fail OPEN at every entry point, and their
+    /// join/leave accounting stays balanced.
+    #[test]
+    fn unmanaged_slots_fail_open() {
+        let l = AdmissionLedger::new(4, budgets(2));
+        assert!(l.wants_workers(3));
+        assert!(l.advertises(3));
+        assert_eq!(l.should_continue(3), ClaimVerdict::Continue);
+        assert!(!l.renudge(3));
+        assert!(l.try_join(3));
+        assert_eq!(l.leave(3), 0);
+    }
+
+    /// Regression (caught by the knob-ON DAG suite): a RETIRED slot that a
+    /// DAG fan-out later publishes into WITHOUT a fresh admission must
+    /// fail open like any unmanaged slot — keying "unmanaged" off the
+    /// epoch word left the reused slot filtered/refused forever.
+    #[test]
+    fn retired_slot_reuse_fails_open() {
+        let l = AdmissionLedger::new(4, budgets(2));
+        l.admit(0, req(2));
+        assert!(l.try_join(0));
+        assert_eq!(l.leave(0), 0);
+        l.retire(0);
+        assert!(l.wants_workers(0), "retired slot must not stay filtered");
+        assert!(l.advertises(0));
+        assert!(l.try_join(0), "fan-out occupant of a retired slot must be joinable");
+        assert_eq!(l.should_continue(0), ClaimVerdict::Continue);
+        assert_eq!(l.leave(0), 0);
+    }
+
+    /// Seeded-PRNG randomized invariants (no property-test dep exists in
+    /// the workspace — ratified): single-threaded op soup over admit /
+    /// retire / join / leave against a shadow model.
+    #[test]
+    fn ledger_randomized_invariants() {
+        const NSLOTS: usize = 8;
+        const CORES: u32 = 4;
+        let l = AdmissionLedger::new(NSLOTS, budgets(CORES));
+        let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut rng = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as u32
+        };
+        let mut admitted = [false; NSLOTS];
+        let mut joined = [0u32; NSLOTS];
+        for _ in 0..20_000 {
+            let slot = rng() as usize % NSLOTS;
+            match rng() % 4 {
+                0 => {
+                    if !admitted[slot] {
+                        l.admit(slot, req(1 + rng() % 6));
+                        admitted[slot] = true;
+                    }
+                }
+                1 => {
+                    if admitted[slot] {
+                        l.retire(slot);
+                        admitted[slot] = false;
+                    }
+                }
+                2 => {
+                    if l.try_join(slot) {
+                        joined[slot] += 1;
+                    }
+                }
+                _ => {
+                    if joined[slot] > 0 {
+                        assert!(l.leave(slot) <= 1);
+                        joined[slot] -= 1;
+                    }
+                }
+            }
+            // Invariants after every op.
+            let mut target_sum = 0u32;
+            let mut n = 0u32;
+            for s in 0..NSLOTS {
+                let (granted, target) = l.debug_words(s);
+                assert_eq!(granted, joined[s], "granted mirrors live joins exactly");
+                if admitted[s] {
+                    n += 1;
+                    target_sum += target;
+                    assert!(target >= 1, "liveness floor");
+                    // Verdict consistency with the width words.
+                    let over = granted > target;
+                    assert_eq!(l.should_continue(s) == ClaimVerdict::Yield, over);
+                    assert_eq!(l.wants_workers(s), granted < target);
+                } else {
+                    assert_eq!(l.should_continue(s), ClaimVerdict::Continue);
+                }
+            }
+            assert!(
+                target_sum <= CORES.max(n),
+                "target sum bounded by max(cores, admitted)"
+            );
+            assert_eq!(l.snapshot().admitted, n);
+        }
+    }
+
+    /// Knob OFF (the default): submissions never touch the ledger — the
+    /// snapshot stays empty across a full pool run (the byte-identity
+    /// posture, observable half). Forced off per instance so the suite
+    /// stays green when additionally run under PGRUST_RUNTIME_LEDGER_V2=1.
+    #[test]
+    fn ledger_off_is_inert() {
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 2,
+            standbys: 1,
+            slots: 4,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        rt.set_ledger(false);
+        assert!(!rt.ledger_enabled());
+        let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+        let work = SyntheticWork::new(256, None, 0);
+        let (_h, waiter) =
+            rt.submit(spec_one(&work, Arc::new(SyntheticMorselSource::new(256))));
+        assert_eq!(waiter.wait(), RgOutcome::Completed);
+        work.assert_all_executed_once();
+        assert_eq!(rt.ledger_snapshot(), LedgerSnapshot::default());
+        pool.shutdown();
+    }
+
+    /// Knob ON, single unbounded RG: target = full width and the filter is
+    /// a no-op — the identity anchor. The pool run completes with clean
+    /// ledger accounting (all grants returned, entry retired).
+    #[test]
+    fn ledger_on_single_rg_identity_anchor() {
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 2,
+            standbys: 1,
+            slots: 4,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        rt.set_ledger(true);
+        let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+        let work = SyntheticWork::new(256, None, 0);
+        let (_h, waiter) =
+            rt.submit(spec_one(&work, Arc::new(SyntheticMorselSource::new(256))));
+        assert_eq!(waiter.wait(), RgOutcome::Completed);
+        work.assert_all_executed_once();
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0, "entry retired at completion");
+        assert_eq!(snap.granted_total, 0, "every grant returned");
+        pool.shutdown();
+    }
+
+    /// Knob ON, several concurrent RGs on a real pool: everything
+    /// completes, every granule exactly once, accounting drains to zero.
+    #[test]
+    fn ledger_on_pool_end_to_end() {
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 2,
+            standbys: 1,
+            slots: 4,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        rt.set_ledger(true);
+        let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+        let mut works = Vec::new();
+        let mut waiters = Vec::new();
+        for i in 0..3 {
+            let work = SyntheticWork::new(128, None, 0);
+            let (_h, waiter) = rt.submit_with_width(
+                QuerySpec {
+                    query_id: i + 1,
+                    tasksets: vec![TaskSetSpec {
+                        source: Arc::new(SyntheticMorselSource::new(128).with_c0(8)),
+                        work: Arc::clone(&work) as Arc<dyn TaskSetWork>,
+                        deps: vec![],
+                    }],
+                },
+                WidthRequest::unbounded(2),
+            );
+            works.push(work);
+            waiters.push(waiter);
+        }
+        for w in &waiters {
+            assert_eq!(w.wait(), RgOutcome::Completed);
+        }
+        for w in &works {
+            w.assert_all_executed_once();
+        }
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0);
+        assert_eq!(snap.granted_total, 0);
+        pool.shutdown();
+    }
+
+    /// Regression (the knob-ON sweep WEDGED here — the hang that stalled
+    /// inc-1's finalize; io_permit_seams_donate_core_to_standby is the
+    /// seam-path twin): a worker inside a DECLARED BLOCKING SECTION
+    /// donates its execution permit, but the ledger still counted its
+    /// grant, so the width-saturated slot (target 1 at workers=1) refused
+    /// the standby that must run the peer granule — deadlock. Grant now
+    /// follows permit (donate/rejoin): with ONE core and ONE standby,
+    /// granule 1 can only run while granule 0's holder sits inside the
+    /// section, so this test deadlocks if the composition breaks again.
+    #[test]
+    fn ledger_blocking_section_donates_grant() {
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 1, // one execution permit => ledger target 1
+            standbys: 1,
+            slots: 4,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        rt.set_ledger(true);
+
+        struct SectionWork {
+            inner: Arc<SyntheticWork>,
+            tx: Mutex<std::sync::mpsc::Sender<()>>,
+            rx: Mutex<std::sync::mpsc::Receiver<()>>,
+            blocked_once: AtomicBool,
+        }
+        impl TaskSetWork for SectionWork {
+            fn run_morsel(&self, worker: usize, range: MorselRange) {
+                if range.start == 0 && !self.blocked_once.swap(true, Ordering::SeqCst) {
+                    let section = crate::blocking_io_section();
+                    // Donated: the peer granule must be claimable by the
+                    // standby on the freed core AND joinable in the ledger.
+                    self.rx
+                        .lock()
+                        .unwrap()
+                        .recv()
+                        .expect("peer granule must run while we block");
+                    drop(section);
+                } else {
+                    self.tx.lock().unwrap().send(()).unwrap();
+                }
+                self.inner.run_morsel(worker, range);
+            }
+            fn finalize(&self) {
+                self.inner.finalize();
+            }
+        }
+
+        let inner = SyntheticWork::new(2, None, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let work = Arc::new(SectionWork {
+            inner: Arc::clone(&inner),
+            tx: Mutex::new(tx),
+            rx: Mutex::new(rx),
+            blocked_once: AtomicBool::new(false),
+        });
+        let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+        let (_h, waiter) = rt.submit(QuerySpec {
+            query_id: 77,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(2).with_c0(1)),
+                work,
+                deps: vec![],
+            }],
+        });
+        assert_eq!(waiter.wait(), RgOutcome::Completed);
+        pool.shutdown();
+        inner.assert_all_executed_once();
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0);
+        assert_eq!(snap.granted_total, 0, "donate/rejoin stayed balanced");
+    }
+
+    /// Sub-JOIN_THRESHOLD submission end-to-end: invisible to the pool
+    /// pick (Idle for a pool-local), zero wakes (park epoch unchanged),
+    /// and the CALLER drives it to completion through the CallerWorker
+    /// skeleton, duty pumping between steps.
+    #[test]
+    fn sub_threshold_rg_is_invisible_and_caller_drives_it() {
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 1,
+            standbys: 0,
+            slots: 4,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        rt.set_ledger(true);
+        rt.set_ledger_join_threshold_ns(1_000_000);
+        let work = SyntheticWork::new(32, None, 0);
+        let epoch_before = rt.park_epoch();
+        let (_h, waiter) = rt.submit_with_width(
+            spec_one(&work, Arc::new(SyntheticMorselSource::new(32))),
+            WidthRequest { est_work_ns: 1, ..WidthRequest::unbounded(1) },
+        );
+        assert_eq!(rt.park_epoch(), epoch_before, "sub-threshold publish never wakes");
+        assert_eq!(rt.ledger_snapshot().sub_threshold_admits, 1);
+        let mut pool_local = rt.worker_local(0);
+        assert_eq!(
+            rt.worker_step(&mut pool_local),
+            Step::Idle,
+            "no active bit: the pool never sees the RG"
+        );
+
+        let mut duty_calls = 0u64;
+        let mut caller = CallerWorker::enter(&rt).expect("lane available");
+        let outcome = caller
+            .drive_with_duty(&rt, &_h, &mut || {
+                duty_calls += 1;
+                Ok(())
+            })
+            .expect("duty never fails");
+        assert_eq!(outcome, RgOutcome::Completed);
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Completed));
+        assert!(duty_calls > 0, "duty pumped at step boundaries");
+        work.assert_all_executed_once();
+        assert_eq!(work.finalizes.load(Ordering::SeqCst), 1);
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0);
+        assert_eq!(snap.granted_total, 0);
+    }
+
+    /// CallerWorker duty failure: the RG aborts, the drive DRAINS it (no
+    /// stranded pin/grant), and the duty's error surfaces to the caller.
+    #[test]
+    fn caller_worker_duty_error_aborts_and_drains() {
+        use types_error::{PgError, ERROR};
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 1,
+            standbys: 0,
+            slots: 4,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        rt.set_ledger(true);
+        let work = SyntheticWork::new(32, None, 0);
+        let (h, waiter) = rt.submit_pinned(spec_one(&work, Arc::new(SyntheticMorselSource::new(32))));
+        let mut caller = CallerWorker::enter(&rt).expect("lane available");
+        let err = caller
+            .drive_with_duty(&rt, &h, &mut || {
+                Err(PgError::new(ERROR, "duty interrupt").into())
+            })
+            .expect_err("failing duty must surface");
+        assert_eq!(err.message(), "duty interrupt");
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Aborted), "drained before returning");
+        assert_eq!(work.finalizes.load(Ordering::SeqCst), 0, "aborted RGs skip finalize");
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0);
+        assert_eq!(snap.granted_total, 0);
+    }
+
+    /// Pinned gangs under the ledger: two external drivers complete a
+    /// width-capped pinned RG; grants never exceed the cap (asserted by
+    /// the ledger words after every join inside the work body via the
+    /// snapshot), and accounting drains.
+    #[test]
+    fn pinned_drive_respects_width_cap() {
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 2,
+            standbys: 0,
+            slots: 4,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        rt.set_ledger(true);
+        let work = SyntheticWork::new(64, None, 0);
+        let (h, _waiter) = rt.submit_pinned_with_width(
+            spec_one(&work, Arc::new(SyntheticMorselSource::new(64).with_c0(4))),
+            0,
+            WidthRequest::unbounded(1),
+        );
+        let mut joins = Vec::new();
+        for _ in 0..2 {
+            let rt2 = Arc::clone(&rt);
+            let h = h.clone();
+            joins.push(std::thread::spawn(move || {
+                let lane = rt2.acquire_external_lane().expect("lane available");
+                let mut local = lane.local();
+                rt2.drive_pinned(&mut local, &h)
+            }));
+        }
+        for j in joins {
+            assert_eq!(j.join().unwrap(), RgOutcome::Completed);
+        }
+        work.assert_all_executed_once();
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0);
+        assert_eq!(snap.granted_total, 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WS-S wave-3 — caller-as-worker stage C2 (append-only module per the
+// shared-file rule; nothing above is edited). Units for the C2 drive face
+// (`drive_with_duties_parked` / `drive_loop`): the C1 face is untouched by
+// construction (it IS `drive_loop(.., None)`); these pin the C2 arm's
+// bounded-idle-park pumping, the park-error abort+drain discipline, the
+// A/B outcome parity against the C1 face, and the inc-4 accessor.
+// ---------------------------------------------------------------------------
+mod caller_c2_tests {
+    use super::*;
+    use types_error::{PgError, ERROR};
+
+    fn rt4() -> Arc<Runtime> {
+        Runtime::new(RuntimeConfig {
+            workers: 1,
+            standbys: 0,
+            slots: 4,
+            sizing: SizingParams::default(),
+            trace: false,
+        })
+    }
+
+    /// inc-3: a pinned RG over an OPEN starved stream forces Step::Idle;
+    /// the C1 eventcount park would block until an external wake, but the
+    /// C2 bounded idle park runs INSTEAD — here it is the producer (it
+    /// publishes+closes on its first call), proving (a) the park runs at
+    /// Idle, (b) control returns to the step loop, which then drives the
+    /// published work to completion. Deterministic: no threads, no sleeps.
+    #[test]
+    fn caller_parked_drive_pumps_idle_park_and_completes() {
+        let rt = rt4();
+        let work = SyntheticWork::new(8, None, 0);
+        let source = Arc::new(StreamSource::new());
+        let (h, waiter) =
+            rt.submit_pinned(spec_one(&work, Arc::clone(&source) as Arc<dyn MorselSource>));
+        let mut caller = CallerWorker::enter(&rt).expect("lane available");
+        let mut duty_calls = 0u64;
+        let mut parks = 0u64;
+        let outcome = caller
+            .drive_with_duties_parked(
+                &rt,
+                &h,
+                &mut || {
+                    duty_calls += 1;
+                    Ok(())
+                },
+                &mut || true,
+                &mut || {
+                    parks += 1;
+                    // The bounded park doubles as the producer: publish
+                    // everything and close, then wake (the documented
+                    // publish-then-wake order).
+                    source.publish(8);
+                    source.close();
+                    rt.notify_source_progress();
+                    Ok(())
+                },
+            )
+            .expect("duty and park never fail");
+        assert_eq!(outcome, RgOutcome::Completed);
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Completed));
+        assert!(parks >= 1, "starved stream must reach the bounded idle park");
+        assert!(duty_calls > parks, "duties pump around the parked window");
+        work.assert_all_executed_once();
+        assert_eq!(work.finalizes.load(Ordering::SeqCst), 1);
+    }
+
+    /// inc-3 error discipline: an idle-park failure (a cancel raised at
+    /// the latch) aborts the RG and the drive DRAINS it before surfacing —
+    /// the exact duty-error discipline, from the park seam.
+    #[test]
+    fn caller_parked_drive_park_error_aborts_and_drains() {
+        let rt = rt4();
+        let work = SyntheticWork::new(8, None, 0);
+        let source = Arc::new(StreamSource::new());
+        let (h, waiter) =
+            rt.submit_pinned(spec_one(&work, Arc::clone(&source) as Arc<dyn MorselSource>));
+        let mut caller = CallerWorker::enter(&rt).expect("lane available");
+        let err = caller
+            .drive_with_duties_parked(
+                &rt,
+                &h,
+                &mut || Ok(()),
+                &mut || true,
+                &mut || Err(PgError::new(ERROR, "latch cancel").into()),
+            )
+            .expect_err("failing park must surface");
+        assert_eq!(err.message(), "latch cancel");
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Aborted), "drained before returning");
+        assert_eq!(work.finalizes.load(Ordering::SeqCst), 0, "aborted RGs skip finalize");
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0);
+        assert_eq!(snap.granted_total, 0);
+    }
+
+    /// A/B parity: the C1 face and the C2 face drive identical READY work
+    /// (no Idle window) to the same outcome with every granule exactly
+    /// once — the C2 park seam is pure Idle-arm behavior, invisible when
+    /// work is claimable.
+    #[test]
+    fn caller_parked_drive_matches_c1_on_ready_work() {
+        for c2 in [false, true] {
+            let rt = rt4();
+            let work = SyntheticWork::new(32, None, 0);
+            let (h, waiter) =
+                rt.submit_pinned(spec_one(&work, Arc::new(SyntheticMorselSource::new(32))));
+            let mut caller = CallerWorker::enter(&rt).expect("lane available");
+            let outcome = if c2 {
+                let mut parks = 0u64;
+                let o = caller
+                    .drive_with_duties_parked(
+                        &rt,
+                        &h,
+                        &mut || Ok(()),
+                        &mut || true,
+                        &mut || {
+                            parks += 1;
+                            Ok(())
+                        },
+                    )
+                    .expect("no failures");
+                assert_eq!(parks, 0, "ready work never reaches the idle park");
+                o
+            } else {
+                caller
+                    .drive_with_duties(&rt, &h, &mut || Ok(()), &mut || true)
+                    .expect("no failures")
+            };
+            assert_eq!(outcome, RgOutcome::Completed, "arm c2={c2}");
+            assert_eq!(waiter.try_wait(), Some(RgOutcome::Completed));
+            work.assert_all_executed_once();
+            assert_eq!(work.finalizes.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    /// inc-4 data source: the caller's WorkerLocal is readable after a
+    /// drive and carries the drive accumulators emit_wfin consumes.
+    #[test]
+    fn caller_worker_local_exposes_drive_stats() {
+        let rt = rt4();
+        let work = SyntheticWork::new(16, None, 0);
+        let (h, _waiter) =
+            rt.submit_pinned(spec_one(&work, Arc::new(SyntheticMorselSource::new(16))));
+        let mut caller = CallerWorker::enter(&rt).expect("lane available");
+        let ordinal = caller.lane_ordinal();
+        caller
+            .drive_with_duties_parked(&rt, &h, &mut || Ok(()), &mut || true, &mut || Ok(()))
+            .expect("no failures");
+        let local = caller.worker_local();
+        assert!(local.drive.tasks > 0, "the caller executed tasks");
+        assert!(local.drive.granules >= 16, "all granules ran through the caller");
+        assert_eq!(caller.lane_ordinal(), ordinal, "lane identity stable across the drive");
+    }
+
+    // -----------------------------------------------------------------------
+    // CALLER-C2 LEDGER HANG regression arms (the global-knob configuration
+    // as standing tests). Pre-fix, running these shapes with the WS-B
+    // ledger ON hung: the sole granted worker's STARVED leave tripped the
+    // ledger's joinable-again wake hint every step (granted == target == 1
+    // — leave() sees before == t), the wake_all bumped the park epoch, the
+    // C2 epoch pre-check (`rt.park_epoch() == epoch`) skipped the bounded
+    // idle park forever, and the drive busy-spun: starve → leave-hint →
+    // wake_all → epoch moved → re-step → starve → …  The park closure —
+    // the producer in the pumps shape, the error source in the abort
+    // shape — never ran, so the whole runtime suite under global
+    // PGRUST_RUNTIME_LEDGER_V2=1 wedged in run_task_admitted. The fix
+    // gates the leave hint's wake on the task NOT ending Starved (nothing
+    // was claimable — the producer's publish carries its own wake).
+    // These arms force the knob ON per instance so the coverage holds in
+    // BOTH suite postures, mirroring ledger_off_is_inert's forced-off arm.
+    // -----------------------------------------------------------------------
+
+    /// Ledger-ON arm of `caller_parked_drive_pumps_idle_park_and_completes`:
+    /// the bounded idle park must RUN (parks >= 1) — pre-fix it never did.
+    #[test]
+    fn caller_parked_drive_pumps_idle_park_ledger_on() {
+        let rt = rt4();
+        rt.set_ledger(true);
+        let work = SyntheticWork::new(8, None, 0);
+        let source = Arc::new(StreamSource::new());
+        let (h, waiter) =
+            rt.submit_pinned(spec_one(&work, Arc::clone(&source) as Arc<dyn MorselSource>));
+        let mut caller = CallerWorker::enter(&rt).expect("lane available");
+        let mut parks = 0u64;
+        let outcome = caller
+            .drive_with_duties_parked(
+                &rt,
+                &h,
+                &mut || Ok(()),
+                &mut || true,
+                &mut || {
+                    parks += 1;
+                    source.publish(8);
+                    source.close();
+                    rt.notify_source_progress();
+                    Ok(())
+                },
+            )
+            .expect("duty and park never fail");
+        assert_eq!(outcome, RgOutcome::Completed);
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Completed));
+        assert!(parks >= 1, "the bounded idle park must run under ledger ON");
+        work.assert_all_executed_once();
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0, "entry retired at completion");
+        assert_eq!(snap.granted_total, 0, "every grant returned");
+    }
+
+    /// Ledger-ON arm of `caller_parked_drive_park_error_aborts_and_drains`
+    /// — the exact configuration the global-knob suite run wedged in:
+    /// the park error must be RAISED (pre-fix the park never ran, so the
+    /// abort never happened and the drive spun forever), then the drain
+    /// completes through the ordinary protocol with drained accounting.
+    #[test]
+    fn caller_parked_drive_park_error_aborts_and_drains_ledger_on() {
+        let rt = rt4();
+        rt.set_ledger(true);
+        let work = SyntheticWork::new(8, None, 0);
+        let source = Arc::new(StreamSource::new());
+        let (h, waiter) =
+            rt.submit_pinned(spec_one(&work, Arc::clone(&source) as Arc<dyn MorselSource>));
+        let mut caller = CallerWorker::enter(&rt).expect("lane available");
+        let err = caller
+            .drive_with_duties_parked(
+                &rt,
+                &h,
+                &mut || Ok(()),
+                &mut || true,
+                &mut || Err(PgError::new(ERROR, "latch cancel").into()),
+            )
+            .expect_err("failing park must surface");
+        assert_eq!(err.message(), "latch cancel");
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Aborted), "drained before returning");
+        assert_eq!(work.finalizes.load(Ordering::SeqCst), 0, "aborted RGs skip finalize");
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0);
+        assert_eq!(snap.granted_total, 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PHASE3-CLOSE WS-WIDTH (band 99001) — unified gang entries on the pool
+// face + the retargeted ParallelWidthLease. These are the migrated
+// successors of the WS-O `ledger_external_tests` units (removed WITH the
+// external face at W4 — never silently dropped: every external pin has a
+// gang twin here) plus the unified-only pins: frozen grants, zero-grant
+// visibility, the FM-4 anti-double-clamp regression, and the
+// distinguishable capacity counter.
+// ---------------------------------------------------------------------------
+mod ledger_gang_tests {
+    use super::*;
+    use crate::ledger::{AdmissionLedger, MAX_GANG_ENTRIES};
+
+    fn budgets(cores: u32) -> LedgerBudgets {
+        LedgerBudgets { cores, cache_bytes: u64::MAX, join_threshold_ns: 0, renudge_max: 4 }
+    }
+
+    fn req(ceiling: u32) -> WidthRequest {
+        WidthRequest::unbounded(ceiling)
+    }
+
+    /// Invariant 1 (HEADROOM-ONLY, grant-may-be-0): an empty box grants
+    /// min(requested, cores); a second gang sees the first one's charge;
+    /// a pool-saturated box grants 0 (the serial-path law) and the zero
+    /// grant is COUNTED (FM-3 visibility).
+    #[test]
+    fn gang_grants_are_headroom_only() {
+        let l = AdmissionLedger::new(4, budgets(8));
+        let (a, granted_a) = l.admit_gang(6).unwrap();
+        assert_eq!(granted_a, 6, "empty box: min(requested, cores)");
+        let (b, granted_b) = l.admit_gang(6).unwrap();
+        assert_eq!(granted_b, 2, "second gang sees the first one's charge");
+        let snap = l.snapshot();
+        assert_eq!(snap.gang_admitted, 2);
+        assert_eq!(snap.gang_granted, 8);
+        assert_eq!(snap.gang_active, 8);
+        assert_eq!(snap.gang_zero_grants, 0);
+        l.retire_gang(a);
+        l.retire_gang(b);
+        assert_eq!(l.snapshot().gang_admitted, 0);
+
+        // Pool-saturated box: an unbounded pool entry targets the whole
+        // budget — the gang's grant is 0, the caller must go serial, and
+        // the zero grant is visible in the one stats surface.
+        let l = AdmissionLedger::new(4, budgets(8));
+        l.admit(0, req(16));
+        assert_eq!(l.debug_words(0).1, 8);
+        let (_, granted) = l.admit_gang(4).unwrap();
+        assert_eq!(granted, 0, "no headroom: grant 0, caller's serial path");
+        assert_eq!(l.snapshot().gang_zero_grants, 1, "FM-3: zero grant counted");
+    }
+
+    /// Invariant 3 (RECOMPUTE PARTICIPATION through the ONE recompute):
+    /// gang active width comes off the top of the pool budget; settle and
+    /// retire return it (and the pool target re-widens). The liveness
+    /// floor holds at zero budget (no-wedge law).
+    #[test]
+    fn gang_width_enters_the_one_recompute() {
+        let l = AdmissionLedger::new(4, budgets(8));
+        let (id, granted) = l.admit_gang(6).unwrap();
+        assert_eq!(granted, 6);
+        l.admit(0, req(16));
+        assert_eq!(l.debug_words(0).1, 2, "pool target = cores - gang active");
+        // Gang launched only 3 of its 6: settle releases the parked width.
+        assert_eq!(l.settle_gang(id, 3), 1, "pool target widened -> wake hint");
+        assert_eq!(l.debug_words(0).1, 5);
+        // Gang exits: full width back to the pool.
+        assert_eq!(l.retire_gang(id), 1);
+        assert_eq!(l.debug_words(0).1, 8);
+
+        // Zero budget still floors pool targets at 1 (no-wedge law).
+        let l = AdmissionLedger::new(4, budgets(2));
+        let (_, g) = l.admit_gang(2).unwrap();
+        assert_eq!(g, 2);
+        l.admit(0, req(4));
+        assert_eq!(l.debug_words(0).1, 1, "liveness floor beats the gang charge");
+    }
+
+    /// Invariant 2 (FROZEN after admit): pool arrivals and departures
+    /// recompute pool targets but NEVER rewrite a gang's grant; settle
+    /// moves only ACTIVE within [0, granted].
+    #[test]
+    fn gang_grant_is_frozen_across_recomputes() {
+        let l = AdmissionLedger::new(4, budgets(8));
+        let (id, granted) = l.admit_gang(5).unwrap();
+        assert_eq!(granted, 5);
+        l.admit(0, req(16)); // arrival recompute
+        l.admit(1, req(16)); // second arrival
+        l.retire(1); // departure recompute
+        let snap = l.snapshot();
+        assert_eq!(snap.gang_granted, 5, "grant frozen across pool churn");
+        assert_eq!(snap.gang_active, 5);
+        assert_eq!(l.settle_gang(id, 2), 1);
+        let snap = l.snapshot();
+        assert_eq!(snap.gang_granted, 5, "settle never touches the grant");
+        assert_eq!(snap.gang_active, 2);
+        l.retire_gang(id);
+    }
+
+    /// Invariant 8 (capacity FAIL-OPEN) + the DISTINGUISHABLE successor
+    /// counter: the 65th concurrent gang is refused (None — the caller
+    /// keeps today's launch), counted in gang_cap_refusals (a counter name
+    /// deliberately distinct from the retired WS-O one — dashboards must
+    /// never alias the two mechanisms);
+    /// retiring one entry reopens admission (gang-region index reuse).
+    #[test]
+    fn gang_cap_fails_open_distinguishably() {
+        let l = AdmissionLedger::new(4, budgets(1024));
+        let ids: Vec<usize> =
+            (0..MAX_GANG_ENTRIES).map(|_| l.admit_gang(1).unwrap().0).collect();
+        assert!(l.admit_gang(1).is_none(), "past the capacity: fail-open");
+        assert_eq!(l.snapshot().gang_cap_refusals, 1);
+        l.retire_gang(ids[7]);
+        let (reused, _) = l.admit_gang(1).expect("gang index reopened");
+        assert_eq!(reused, ids[7], "retired gang index is reused");
+        for id in ids.into_iter().filter(|&i| i != reused) {
+            l.retire_gang(id);
+        }
+        l.retire_gang(reused);
+        assert_eq!(l.snapshot().gang_admitted, 0);
+    }
+
+    /// FM-4 anti-double-clamp regression (invariant 5): the ledger clamps
+    /// WIDTH; a DOPCAP-class consumer clamps FOOTPRINT at the granted
+    /// width — never both from the same numbers. Pin: a gang admission
+    /// leaves the cache-budget algebra untouched (gangs charge CORES, not
+    /// cache bytes — cache_charged reflects pool footprints only), so a
+    /// footprint-clamped pool entry is narrowed ONCE by the cache room and
+    /// ONCE by the core charge, never by a gang-derived cache term.
+    #[test]
+    fn gang_charge_never_enters_the_cache_clamp() {
+        let l = AdmissionLedger::new(4, budgets(8));
+        let (_, granted) = l.admit_gang(4).unwrap();
+        assert_eq!(granted, 4);
+        assert_eq!(l.snapshot().cache_charged_bytes, 0, "gangs charge no cache bytes");
+        // A cache-bounded ledger: pool footprints clamp against cache room
+        // exactly as without the gang (the gang narrowed the CORE budget
+        // to 4; the cache room term is unchanged by the gang's existence).
+        let l = AdmissionLedger::new(4, LedgerBudgets {
+            cores: 8,
+            cache_bytes: 4096,
+            join_threshold_ns: 0,
+            renudge_max: 4,
+        });
+        let (_, g) = l.admit_gang(4).unwrap();
+        assert_eq!(g, 4);
+        l.admit(0, WidthRequest {
+            ceiling: 16,
+            predicted: u32::MAX,
+            cache_bytes_per_worker: 1024,
+            est_work_ns: u64::MAX,
+        });
+        // core budget after gang charge = 4; cache room = 4096/1024 = 4:
+        // target 4 — the two clamps compose, neither re-derives the other.
+        assert_eq!(l.debug_words(0).1, 4);
+        assert_eq!(l.snapshot().cache_charged_bytes, 4096, "pool footprint only");
+    }
+
+    /// Multi-gang composition (the coexistence pin's successor): every
+    /// admitted gang's charge is taken off the top before pool fair
+    /// shares split — no double-grant window between gangs.
+    #[test]
+    fn gang_charges_compose() {
+        let l = AdmissionLedger::new(4, budgets(8));
+        let (_, g1) = l.admit_gang(3).unwrap();
+        assert_eq!(g1, 3);
+        let (_, g2) = l.admit_gang(3).unwrap();
+        assert_eq!(g2, 3, "second gang sees the first one's charge (8-3)");
+        let (_, g3) = l.admit_gang(4).unwrap();
+        assert_eq!(g3, 2, "third gang sees both charges (8-3-3)");
+        l.admit(0, req(16));
+        assert_eq!(l.debug_words(0).1, 1, "pool floor under the gang charges (8-3-3-2=0 -> floor)");
+    }
+
+    /// The retargeted Runtime RAII lease: ledger OFF -> None
+    /// (fail-open); ON -> a lease backed by a GANG entry
+    /// (the one stats surface proves the routing), drop retires it; settle
+    /// tracks ACTIVE width within the frozen grant. End-to-end against a
+    /// live pool: a leased gang narrows a pool RG's target and the run
+    /// still completes.
+    #[test]
+    fn parallel_width_lease_unified_raii() {
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 2,
+            standbys: 1,
+            slots: 4,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        rt.set_ledger(false);
+        assert!(rt.lease_parallel_width(2).is_none(), "ledger OFF: fail-open, no lease");
+
+        rt.set_ledger(true);
+        {
+            let mut lease = rt.lease_parallel_width(8).expect("ledger ON grants a lease");
+            assert_eq!(lease.granted(), 2, "headroom = the whole 2-core budget");
+            assert_eq!(lease.engine(), "unified");
+            assert_eq!(rt.ledger_snapshot().gang_active, 2, "lease is a GANG entry");
+            lease.settle(1);
+            assert_eq!(rt.ledger_snapshot().gang_active, 1);
+
+            // A pool RG under the gang's charge: narrowed but live.
+            let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+            let work = SyntheticWork::new(64, None, 0);
+            let (_h, waiter) =
+                rt.submit(spec_one(&work, Arc::new(SyntheticMorselSource::new(64))));
+            assert_eq!(waiter.wait(), RgOutcome::Completed);
+            work.assert_all_executed_once();
+            pool.shutdown();
+        }
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.gang_admitted, 0, "lease drop retired the gang entry");
+        assert_eq!(snap.gang_active, 0);
+    }
+
+    /// Grant-may-be-0 through the retargeted Runtime face (unified arm):
+    /// a saturated pool yields a zero-width lease (Some, not None — the
+    /// caller must go serial, not uncapped), counted, and clean on drop.
+    #[test]
+    fn zero_grant_unified_lease_is_some() {
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 2,
+            standbys: 1,
+            slots: 4,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        rt.set_ledger(true);
+        let work = SyntheticWork::new(4, None, 0);
+        let (_h, _waiter) =
+            rt.submit(spec_one(&work, Arc::new(SyntheticMorselSource::new(4))));
+        // The admitted pool entry targets both cores: zero headroom.
+        let lease = rt.lease_parallel_width(4).expect("capacity not reached: Some");
+        assert_eq!(lease.granted(), 0, "saturated box: grant 0 (serial path law)");
+        drop(lease);
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.gang_admitted, 0);
+        assert_eq!(snap.gang_zero_grants, 1, "FM-3 visibility through the Runtime face");
+    }
+
+}

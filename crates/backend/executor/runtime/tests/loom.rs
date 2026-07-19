@@ -898,8 +898,7 @@ fn stream_source_handshake() {
     });
 }
 
-// ===========================================================================
-// ParkLot (the idle-worker epoch eventcount) — DIRECT protocol models
+// ====================================================================// ParkLot (the idle-worker epoch eventcount) — DIRECT protocol models
 // (LOOM-BREADTH inc-1, absorbed at PERMIT-S2). Until now the eventcount was
 // only exercised through the whole-runtime models above; these pin ITS
 // invariant in isolation: with the capture-epoch -> check-work -> park(seen)
@@ -1622,5 +1621,597 @@ fn timeout_timer_arm_fire_never_lost() {
 
         timer_t.join().unwrap();
         assert!(sh.state.lock().unwrap().1, "the armed timeout fired");
+=======
+// ---- WS-B admission-ledger models (single-executor Phase 0.1) --------------
+// Three models sized for the loom-fast ≤5min train gate (2 threads, 1-3
+// granules, preemption bound 2 — the standing budget law): the ledger is
+// ADVISORY width policy over the existing finalization protocol, so the
+// invariants are (a) grants never exceed the core budget, (b) a shed
+// (Yield → TaskEnd::Budget → re-pick) never loses or duplicates work, and
+// (c) narrowed/under-target entries always finish (liveness: target >= 1
+// while admitted; a lost ledger wake would deadlock the model, which
+// loom's detector oracles).
+
+/// Drive worker steps until Stop is requested (multi-RG helper for models
+/// whose waiters are created concurrently): parks on Idle with the epoch
+/// discipline; request_stop's wake_all unparks it to observe Stop.
+fn drive_until_stop(rt: &Runtime, worker: usize) {
+    let mut local = rt.worker_local(worker);
+    loop {
+        let epoch = rt.park_epoch();
+        match rt.worker_step(&mut local) {
+            Step::Ran => {}
+            Step::Retry => thread::yield_now(),
+            Step::Idle => rt.park(epoch),
+            Step::Stop => break,
+        }
+    }
+}
+
+/// Ledger model 1: Σ granted ≤ the core budget under every interleaving of
+/// two workers × two concurrently-admitted RGs (targets split 1+1), probed
+/// from INSIDE the work body (the only place a violation could act), plus
+/// clean drain (admitted = granted = 0) after both completions.
+/// LOOM-FAST SIZING (≤5min budget law): both RGs single-granule AND
+/// preemption_bound 1 — the original 2-granule/bound-2 shape blew the
+/// local budget (>150s alone), and the cost lives in the two full drive
+/// loops (pick/park/publish interleavings), not the granule count. Bound 1
+/// still explores every ordering of the two workers' joins/leaves across
+/// both slots (loom branches cover all yield points; the bound only caps
+/// forced preemptions between them). Bound-2 exhaustion rides the fleet's
+/// exhaustive loom trail, not the gate.
+#[test]
+fn ledger_grants_never_exceed_core_budget() {
+    struct BudgetWork {
+        inner: Arc<ModelWork>,
+        rt: Arc<Runtime>,
+        cores: u32,
+    }
+    impl TaskSetWork for BudgetWork {
+        fn run_morsel(&self, worker: usize, range: MorselRange) {
+            let snap = self.rt.ledger_snapshot();
+            assert!(
+                snap.granted_total <= self.cores,
+                "grants exceed the core budget: {} > {}",
+                snap.granted_total,
+                self.cores
+            );
+            self.inner.run_morsel(worker, range);
+        }
+        fn finalize(&self) {
+            self.inner.finalize();
+        }
+    }
+
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(1);
+    b.max_branches = 200_000;
+    b.check(|| {
+        let rt = small_runtime(2, 0);
+        rt.set_ledger(true);
+        let wa = ModelWork::new(1, None);
+        let wb = ModelWork::new(1, None);
+        let (_ha, waiter_a) = rt.submit(QuerySpec {
+            query_id: 1,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(1)),
+                work: Arc::new(BudgetWork {
+                    inner: Arc::clone(&wa),
+                    rt: Arc::clone(&rt),
+                    cores: 2,
+                }) as Arc<dyn TaskSetWork>,
+                deps: vec![],
+            }],
+        });
+        let (_hb, waiter_b) = rt.submit(QuerySpec {
+            query_id: 2,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(1)),
+                work: Arc::new(BudgetWork {
+                    inner: Arc::clone(&wb),
+                    rt: Arc::clone(&rt),
+                    cores: 2,
+                }) as Arc<dyn TaskSetWork>,
+                deps: vec![],
+            }],
+        });
+
+        let rt1 = Arc::clone(&rt);
+        let (wa1, wb1) = (waiter_a.clone(), waiter_b.clone());
+        let t = thread::spawn(move || drive_all(&rt1, 1, &[wa1, wb1]));
+        drive_all(&rt, 0, &[waiter_a.clone(), waiter_b.clone()]);
+        t.join().unwrap();
+
+        assert_eq!(waiter_a.try_wait(), Some(RgOutcome::Completed));
+        assert_eq!(waiter_b.try_wait(), Some(RgOutcome::Completed));
+        wa.assert_complete();
+        wb.assert_complete();
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0, "both entries retired");
+        assert_eq!(snap.granted_total, 0, "every grant returned");
+    });
+}
+
+/// Ledger model 2: yield / worker-freed re-pick loses no work. An arrival
+/// (B, submitted CONCURRENTLY with the drive) narrows the incumbent A
+/// below its live grants; whatever the interleaving — shed at the claim
+/// boundary, re-pick onto B, or B arriving after A drained — every granule
+/// of both RGs executes exactly once and both RGs complete.
+/// LOOM-FAST SIZING (≤5min budget law): preemption_bound 1 — the narrowing
+/// needs a 2-granule incumbent (granted 2 when B admits), and that shape
+/// at bound 2 blew the local budget (>150s alone). Bound 1 still explores
+/// every ORDERING of B's admit vs A's claims/sheds (the model's subject —
+/// loom branches cover all yield points; the bound only caps forced
+/// preemptions between them). Bound-2 exhaustion rides the fleet trail.
+#[test]
+fn ledger_yield_worker_freed_repick() {
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(1);
+    b.max_branches = 200_000;
+    b.check(|| {
+        let rt = small_runtime(2, 0);
+        rt.set_ledger(true);
+        let wa = ModelWork::new(2, None);
+        let (_ha, waiter_a) = rt.submit(QuerySpec {
+            query_id: 1,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(2).with_c0(1)),
+                work: Arc::clone(&wa) as Arc<dyn TaskSetWork>,
+                deps: vec![],
+            }],
+        });
+
+        // The second worker starts BEFORE B exists: it can be mid-A-task
+        // (granted 2, target 2) when B's admit narrows A to target 1.
+        let rt1 = Arc::clone(&rt);
+        let t = thread::spawn(move || drive_until_stop(&rt1, 1));
+
+        let wb = ModelWork::new(1, None);
+        let (_hb, waiter_b) = rt.submit(QuerySpec {
+            query_id: 2,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(1)),
+                work: Arc::clone(&wb) as Arc<dyn TaskSetWork>,
+                deps: vec![],
+            }],
+        });
+
+        drive_all(&rt, 0, &[waiter_a.clone(), waiter_b.clone()]);
+        t.join().unwrap();
+
+        assert_eq!(waiter_a.try_wait(), Some(RgOutcome::Completed));
+        assert_eq!(waiter_b.try_wait(), Some(RgOutcome::Completed));
+        wa.assert_complete();
+        wb.assert_complete();
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0);
+        assert_eq!(snap.granted_total, 0);
+    });
+}
+
+/// Ledger model 3: re-nudge is BOUNDED and the entry stays LIVE. A single
+/// driver serves a target-2 entry (permanently under target: every claim
+/// boundary may re-nudge); the RG must complete under every interleaving
+/// (a lost ledger wake or a target-floor bug would deadlock the model —
+/// loom's detector is the oracle) and the re-nudge count never exceeds the
+/// one recompute window's budget.
+#[test]
+fn ledger_renudge_bounded_and_live() {
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(2);
+    b.max_branches = 200_000;
+    b.check(|| {
+        let rt = small_runtime(2, 0);
+        rt.set_ledger(true);
+        let work = ModelWork::new(2, None);
+        let (_h, waiter) = rt.submit(QuerySpec {
+            query_id: 1,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(2).with_c0(1)),
+                work: Arc::clone(&work) as Arc<dyn TaskSetWork>,
+                deps: vec![],
+            }],
+        });
+
+        let rt1 = Arc::clone(&rt);
+        let waiter1 = waiter.clone();
+        let t = thread::spawn(move || drive(&rt1, 1, &waiter1));
+        // The main thread only observes (cfg(loom) wait polls try_wait):
+        // the drive stays single-width, under the target-2 entry.
+        assert_eq!(waiter.wait(), RgOutcome::Completed);
+        t.join().unwrap();
+
+        work.assert_complete();
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0, "entry retired despite never reaching target");
+        assert_eq!(snap.granted_total, 0);
+        assert!(
+            snap.renudges <= 4,
+            "re-nudges exceed the per-recompute budget: {}",
+            snap.renudges
+        );
+    });
+}
+
+/// Ledger model 4: BLOCKING-SECTION DONATION liveness (§2.8 × ledger
+/// composition — the knob-ON hang WS-B's finalize caught in
+/// io_permit_seams_donate_core_to_standby): with ONE core (target 1) the
+/// incumbent enters a declared blocking section INSIDE run_morsel and
+/// spins until the peer granule runs — only the standby can run it, and
+/// only if the section donated the width grant along with the permit
+/// (otherwise the saturated slot refuses the standby's join and every
+/// thread ends up yielded/parked: loom's deadlock detector is the oracle).
+/// Sized for the loom-fast gate: 2 threads, 2 granules, preemption_bound 1
+/// (the bound-2 shape belongs to the fleet's exhaustive trail).
+#[test]
+fn ledger_blocking_section_donation_liveness() {
+    struct DonateWork {
+        inner: Arc<ModelWork>,
+        io_taken: AtomicUsize,
+        peer_ran: AtomicBool,
+    }
+    impl TaskSetWork for DonateWork {
+        fn run_morsel(&self, worker: usize, range: MorselRange) {
+            if self.io_taken.fetch_add(1, Ordering::SeqCst) == 0 {
+                // Declared blocking section on the FIRST morsel executed:
+                // wait (spin-yield: a loom scheduling point) for the peer
+                // morsel, which only the standby can run.
+                let io = runtime::blocking_io_section();
+                while !self.peer_ran.load(Ordering::SeqCst) {
+                    thread::yield_now();
+                }
+                drop(io);
+                self.inner.run_morsel(worker, range);
+            } else {
+                self.peer_ran.store(true, Ordering::SeqCst);
+                self.inner.run_morsel(worker, range);
+            }
+        }
+        fn finalize(&self) {
+            self.inner.finalize();
+        }
+    }
+
+    /// Pool-loop emulation with the real permit + park discipline AND the
+    /// facade registration (mirrors pool.rs worker_loop; the
+    /// facade_standby_absorption shape).
+    fn drive_registered(rt: &Runtime, worker: usize, waiter: &CompletionWaiter) {
+        // SAFETY: the runtime outlives this drive; the permit is held
+        // across worker_step, where the facade is called.
+        let _reg = unsafe { runtime::PermitThreadReg::new(rt.execution_permits()) };
+        let mut local = rt.worker_local(worker);
+        loop {
+            if waiter.try_wait().is_some() {
+                break;
+            }
+            let epoch = rt.park_epoch();
+            rt.execution_permits().acquire();
+            let step = rt.worker_step(&mut local);
+            rt.execution_permits().release();
+            match step {
+                Step::Ran => {}
+                Step::Retry => thread::yield_now(),
+                Step::Idle => {
+                    if waiter.try_wait().is_some() {
+                        break;
+                    }
+                    rt.park(epoch);
+                }
+                Step::Stop => break,
+            }
+        }
+        rt.request_stop();
+    }
+
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(1);
+    b.max_branches = 200_000;
+    b.check(|| {
+        // workers=1 ⇒ ONE execution permit AND ledger target 1; standbys=1
+        // ⇒ two pool threads.
+        let rt = small_runtime(1, 1);
+        rt.set_ledger(true);
+        let inner = ModelWork::new(2, None);
+        let work = Arc::new(DonateWork {
+            inner: Arc::clone(&inner),
+            io_taken: AtomicUsize::new(0),
+            peer_ran: AtomicBool::new(false),
+        });
+        let (_h, waiter) = rt.submit(QuerySpec {
+            query_id: 6,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(2).with_c0(1)),
+                work: Arc::clone(&work) as Arc<dyn TaskSetWork>,
+                deps: vec![],
+            }],
+        });
+
+        let rt1 = Arc::clone(&rt);
+        let waiter1 = waiter.clone();
+        let t = thread::spawn(move || drive_registered(&rt1, 1, &waiter1));
+        drive_registered(&rt, 0, &waiter);
+        t.join().unwrap();
+
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Completed));
+        inner.assert_complete();
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0);
+        assert_eq!(snap.granted_total, 0, "donate/rejoin stayed balanced");
+    });
+}
+
+/// PHASE3-CLOSE WS-WIDTH unified-face model — the REPLACEMENT of WS-O's
+/// external-face lease-liveness model (removed in the same W4 commit that
+/// removed the external face; this successor landed at W1 and carries the
+/// oracles): a ParallelWidthLease backed by a UNIFIED GANG ENTRY
+/// (admit_gang → settle → drop/retire, all through the pool face's ONE
+/// recompute) runs CONCURRENTLY with a pool drive on a 2-core box —
+/// gang-and-pool interleavings in ONE model (contract §2.1).
+/// Oracles: (a) the pool RG completes under every interleaving — the
+/// frozen gang charge can zero the pool budget mid-drive and the liveness
+/// floor (target ≥ 1) plus the retire wake must keep the driver live (a
+/// lost widening wake or a floor bug deadlocks the model — FM-2's bound);
+/// (b) the gang grant respects the core budget (headroom-only, single
+/// leaser: granted ≤ cores); (c) accounting drains to zero — gang entry
+/// retired, every pool grant returned. Lock-order soundness (membership →
+/// inner; admit_gang takes inner ALONE) is exercised by the concurrent
+/// submit + lease: an inversion would deadlock under loom.
+/// LOOM-FAST SIZING (≤5min law): pb 1, one lease thread + one driver —
+/// the external model's exact budget.
+#[test]
+fn ledger_unified_gang_lease_liveness() {
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(1);
+    b.max_branches = 200_000;
+    b.check(|| {
+        let rt = small_runtime(2, 0);
+        rt.set_ledger(true);
+        let work = ModelWork::new(1, None);
+        let (_h, waiter) = rt.submit(QuerySpec {
+            query_id: 1,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(1)),
+                work: Arc::clone(&work) as Arc<dyn TaskSetWork>,
+                deps: vec![],
+            }],
+        });
+
+        let rt1 = Arc::clone(&rt);
+        let lessee = thread::spawn(move || {
+            let lease = rt1.lease_parallel_width(2);
+            if let Some(mut lease) = lease {
+                assert!(lease.granted() <= 2, "headroom-only: never above cores");
+                lease.settle(lease.granted().min(1));
+            }
+            // Drop retires the gang entry (widening wake rides retire).
+        });
+
+        drive_all(&rt, 0, &[waiter.clone()]);
+        lessee.join().unwrap();
+
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Completed));
+        work.assert_complete();
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0);
+        assert_eq!(snap.granted_total, 0, "every pool grant returned");
+        assert_eq!(snap.gang_admitted, 0, "lease drop retired the gang entry");
+        assert_eq!(snap.gang_active, 0);
+    });
+}
+
+/// WS-S (wave 3) caller-C2 model: the caller's PARKED drive
+/// (`drive_with_duties_parked` — the inc-3 bounded idle park replacing the
+/// C1 eventcount park) completes a PINNED RG under every interleaving with
+/// one concurrent external helper. The park is modeled as a loom yield —
+/// the production latch quantum's bound with the timeout collapsed to
+/// zero — so the model proves the C2 loop's liveness comes from the
+/// BOUND + re-check, not from the eventcount's lost-wakeup guarantee the
+/// C1 arm kept: a C2 iteration that could sleep past a completion would
+/// deadlock/livelock the model. Oracles: completion under every path,
+/// every granule exactly once, the claim duty observed at caller claim
+/// boundaries, drained ledger accounting, and the pin-board settle
+/// (debug_assert inside drive_loop, live under loom's debug build).
+/// LOOM-FAST SIZING (≤5min law): pb 1, 2 granules, one helper thread.
+#[test]
+fn caller_c2_parked_drive_liveness() {
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(1);
+    b.max_branches = 200_000;
+    b.check(|| {
+        let rt = small_runtime(2, 0);
+        let work = ModelWork::new(2, None);
+        let (h, waiter) = rt.submit_pinned(QuerySpec {
+            query_id: 7,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(2).with_c0(1)),
+                work: Arc::clone(&work) as Arc<dyn TaskSetWork>,
+                deps: vec![],
+            }],
+        });
+
+        // Helper = a second external participant on the C1 face
+        // (eventcount-parked drive_with_duty; the production drive_pinned
+        // is not(loom) — Instant/sleep): the model races the C1 park
+        // discipline against the C2 bounded park on the same pinned RG.
+        let rt1 = Arc::clone(&rt);
+        let h1 = h.clone();
+        let helper = thread::spawn(move || {
+            let mut cw = runtime::CallerWorker::enter(&rt1).expect("helper lane available");
+            cw.drive_with_duty(&rt1, &h1, &mut || Ok(()))
+                .expect("helper duty never fails")
+        });
+
+        let claim_boundaries = AtomicUsize::new(0);
+        let mut caller = runtime::CallerWorker::enter(&rt).expect("caller lane available");
+        let outcome = caller
+            .drive_with_duties_parked(
+                &rt,
+                &h,
+                &mut || Ok(()),
+                &mut || {
+                    claim_boundaries.fetch_add(1, Ordering::SeqCst);
+                    true
+                },
+                &mut || {
+                    // Bounded park: a scheduling point, then re-check —
+                    // the quantum's timeout arm with zero wait.
+                    thread::yield_now();
+                    Ok(())
+                },
+            )
+            .expect("duty and park never fail");
+        assert_eq!(outcome, RgOutcome::Completed);
+        assert_eq!(helper.join().unwrap(), RgOutcome::Completed);
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Completed));
+        work.assert_complete();
+        // The caller stepped through run_task at least once in every
+        // interleaving where it won a claim; the duty hook must have fired
+        // at each of ITS claim boundaries — never negative, and zero only
+        // if the helper claimed everything first (both are legal; the
+        // assert is the hook's install/clear RAII not corrupting states).
+        let _ = claim_boundaries.load(Ordering::SeqCst);
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0);
+        assert_eq!(snap.granted_total, 0);
+    });
+}
+
+/// Ledger model 6 (CALLER-C2 LEDGER HANG fix, the wake-gate's adversarial
+/// oracle): `stream_source_handshake` with the ledger ON. The fix
+/// suppresses the leave hint's wake_all when the task ended STARVED (the
+/// self-wake busy-loop: every starved leave of a granted==target slot
+/// bumped the park epoch, so no park — pool eventcount or caller-C2
+/// bounded park — ever slept). THIS model is the proof the gate loses no
+/// wakeup: a publish/close landing in ANY window around a starved task's
+/// leave must still complete the RG — a starved worker stranded in a park
+/// (the wake the gate suppressed turning out to be load-bearing) deadlocks
+/// the model, which loom's blocked-thread detector oracles. The publish
+/// wake (notify_source_progress) and the epoch capture-before-step are
+/// what close the window, exactly as the pre-ledger handshake model
+/// proved for the knob-OFF path.
+/// PRE-FIX TEETH (review-corrected record): at loom-fast bounds
+/// (LOOM_MAX_PERMUTATIONS=200000) this model passes pre-fix — the
+/// bounded exploration prefix never lets a starved worker spin long
+/// enough to matter. EXHAUSTIVE, it FAILS pre-fix (~40s): the
+/// unbounded self-wake spin's tracked atomic ops saturate loom's u16
+/// `VersionVec` counters — the same artifact class as model 7's
+/// tripwire, beyond the 200k prefix.
+/// LOOM-FAST SIZING (≤5min law): pb 2 as the knob-OFF twin; 2 workers,
+/// 2 granules, one producer.
+#[test]
+fn ledger_starved_leave_wake_gate_no_lost_wakeup() {
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(2);
+    b.max_branches = 200_000;
+    b.check(|| {
+        let rt = small_runtime(2, 0);
+        rt.set_ledger(true);
+        let work = ModelWork::new(2, None);
+        let source = Arc::new(StreamSource::new());
+        let (_h, waiter) = rt.submit(QuerySpec {
+            query_id: 1,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::clone(&source) as _,
+                work: Arc::clone(&work) as Arc<dyn TaskSetWork>,
+                deps: vec![],
+            }],
+        });
+
+        let producer = {
+            let rt = Arc::clone(&rt);
+            let source = Arc::clone(&source);
+            thread::spawn(move || {
+                source.publish(1);
+                rt.notify_source_progress();
+                source.publish(2);
+                source.close();
+                rt.notify_source_progress();
+            })
+        };
+
+        let rt1 = Arc::clone(&rt);
+        let waiter1 = waiter.clone();
+        let t = thread::spawn(move || drive(&rt1, 1, &waiter1));
+        drive(&rt, 0, &waiter);
+        t.join().unwrap();
+        producer.join().unwrap();
+
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Completed));
+        work.assert_complete();
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0, "entry retired at completion");
+        assert_eq!(snap.granted_total, 0, "every grant returned");
+    });
+}
+
+/// Ledger model 7 (CALLER-C2 LEDGER HANG shape under loom): a PINNED RG
+/// on an OPEN starved stream, ledger ON, the caller-C2 bounded park as
+/// the producer — the exact hang configuration (unit twins:
+/// caller_parked_drive_pumps_idle_park_ledger_on / _park_error arm).
+/// Pre-fix this LIVELOCKS: the caller's own starved leave bumps the park
+/// epoch every step, the C2 epoch pre-check never admits the park, the
+/// publish never happens, and the model spins unboundedly. The pre-fix
+/// ORACLE (review-corrected record): loom has no livelock detector for a
+/// non-switching spin — what trips, deterministically in ~0.01s, is
+/// loom's causality bookkeeping. The spin's unbounded tracked ops WRAP
+/// the caller thread's u16 `VersionVec` counter (`inc` is an unchecked
+/// `+= 1` in release), after which the caller's own `active_workers`
+/// fetch_add in `run_task` no longer appears causally-after the atomic's
+/// creation-time happens-after mark (`State::new` → `track_unsync_mut`),
+/// and loom panics "Causality violation: Concurrent load and mut
+/// accesses" (created = the taskset entry's `active_workers` init in
+/// sched.rs; load = the `run_task` fetch_add). Single user thread ⇒ a
+/// genuine race is impossible; the panic is an ARTIFACT of the removed
+/// busy-loop path — and precisely therefore a sound, fast tripwire: any
+/// reintroduced unbounded spin re-trips it. Post-fix the park must run
+/// under every ordering of the ledger words and the drive completes with
+/// drained accounting. LOOM-FAST SIZING: single caller thread, 2
+/// granules.
+#[test]
+fn caller_c2_ledger_starved_park_completes() {
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(2);
+    b.max_branches = 200_000;
+    b.check(|| {
+        let rt = small_runtime(1, 0);
+        rt.set_ledger(true);
+        let work = ModelWork::new(2, None);
+        let source = Arc::new(StreamSource::new());
+        let (h, waiter) = rt.submit_pinned(QuerySpec {
+            query_id: 9,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::clone(&source) as _,
+                work: Arc::clone(&work) as Arc<dyn TaskSetWork>,
+                deps: vec![],
+            }],
+        });
+
+        let mut parks = 0u64;
+        let mut caller = runtime::CallerWorker::enter(&rt).expect("caller lane available");
+        let outcome = caller
+            .drive_with_duties_parked(
+                &rt,
+                &h,
+                &mut || Ok(()),
+                &mut || true,
+                &mut || {
+                    parks += 1;
+                    // Park-as-producer (publish-then-wake order): the
+                    // starved window ends HERE, so reaching the park at
+                    // all is the liveness being modeled.
+                    source.publish(2);
+                    source.close();
+                    rt.notify_source_progress();
+                    Ok(())
+                },
+            )
+            .expect("duty and park never fail");
+        assert_eq!(outcome, RgOutcome::Completed);
+        assert!(parks >= 1, "the bounded idle park must run");
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Completed));
+        work.assert_complete();
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0);
+        assert_eq!(snap.granted_total, 0);
     });
 }

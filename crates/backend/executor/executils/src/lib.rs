@@ -777,6 +777,14 @@ pub struct EStateData<'mcx> {
     // Completed outcome. Same emission-gate law as the refusals: empty on
     // every unarmed/uninstrumented path.
     pub es_runtime_ea_pipelines: PgVec<'mcx, RuntimeEaPipeline>,
+    // EXPLAIN (ENGINE) per-node engine attribution (single-executor Phase
+    // 0.2): records exist iff ExecutorStart saw EXEC_FLAG_ENGINE_REPORT —
+    // `engine_capture()` derives that directly from `es_top_eflags` (stored
+    // unconditionally anyway), so the executor entry path never tests the
+    // flag (se-entrycost). The emission gate is identical to the EA records
+    // above — es_engine_events stays empty on every non-ENGINE path, so
+    // default EXPLAIN output is untouched.
+    pub es_engine_events: PgVec<'mcx, EngineEvent>,
     // (plan_node_id, metrics); C's AggState fields, hoisted for the Plan walk.
     pub es_agg_instrumentation: PgVec<'mcx, (i32, AggregateInstrumentation)>,
     pub es_sort_instrumentation: PgVec<'mcx, (i32, TuplesortInstrumentation)>,
@@ -825,6 +833,62 @@ pub struct EStateData<'mcx> {
     pub es_epq: Option<EpqSubs<'mcx>>,
     // C `es_epq_active != NULL`; scan nodes select their EPQ variant on it.
     pub es_epq_active: bool,
+    /// se-delegtax SH-F: the row-mode LEAF fast-admit byte — true iff the
+    /// lane master GUC is on AND no per-execution diagnostics are armed
+    /// (es_epq_active false, es_instrument == 0, no ENGINE capture, lane
+    /// stats/trace disarmed). Maintained by lanev2::refresh_lane_leaf_fast
+    /// at ExecutorStart-end and the EPQ toggle sites; every input except
+    /// EPQ is per-execution static (instr growth sites are all gated on
+    /// es_instrument != 0, set before InitPlan). When true, a leaf pull
+    /// verdict admits with ONE byte load + the inline direction check —
+    /// every tick/capture-asserting channel has diagnostics armed and
+    /// therefore runs the full slow path, so accounting fidelity is
+    /// structurally unaffected. Default false (EPQ/worker estates stay on
+    /// the slow path).
+    pub es_lane_leaf_fast: bool,
+    /// wave-9 WS-AI (forward-pull cursors inc-1, contract §3 / lane-cursors.md
+    /// §1): the per-run emission budget of a count-limited forward SELECT
+    /// run — `Some(count)` iff `PGRUST_LANE_V2_CURSORS` is ON and this
+    /// ExecutorRun is the §3.1 count-exact suspension shape (knob-ON,
+    /// count != 0, forward, SELECT, serial). Written UNCONDITIONALLY at
+    /// every `execute_plan` entry (compute = `lanev2::cursor_run_budget_
+    /// install`), so it is per-run by construction, nested-run-safe (each
+    /// run owns its estate) and unwind-safe with no guard. Estate-resident
+    /// rather than TLS by the TLS-census-zero law (wave-9 contract §8 law
+    /// 8); the `es_processed`/`es_direction` per-run-state precedent.
+    /// Knob-OFF and count-0 runs always read None. First consumer = the
+    /// inc-1b park/settle walker (lanev2/batch_source.rs glue).
+    pub es_cursor_run_budget: Option<u64>,
+    /// wave-9.5 WS-AI (cursors inc-1b, lane-cursors.md §2 — EX-AI-2, the
+    /// EX-AI-1 estate-surface shape, recorded for board ratification in
+    /// notes/se-wave9-ai.md): the previous budgeted run SETTLED a
+    /// lane-staged claim (park record node-resident); the next
+    /// `execute_plan` entry must run the resume walk before the first pull
+    /// touches staged state. Set only by the knob-ON settle walker; cleared
+    /// at every resume; knob-OFF world always reads false (one predictable
+    /// per-run branch). Estate-resident by the same TLS-census-zero
+    /// argument as `es_cursor_run_budget` above.
+    pub es_lane_cursor_parked: bool,
+    /// wave-9.5 WS-AJ (SPI Stage-A seam, docs/design/lane-spi.md §1/§3;
+    /// worklog notes/se-spi-stage-a.md): the per-run emission budget of a
+    /// tcount-limited SPI-statement run — `Some(tcount)` iff
+    /// `PGRUST_LANE_V2_SPI` is ON and this ExecutorRun is a count-limited
+    /// `CommandDest::Spi` shape (knob-ON, tcount != 0, forward, SELECT,
+    /// serial): `_SPI_pquery`'s count-exact STOP or an SPI portal fetch
+    /// (the RESUMABLE producer — notes/se-spi-stage-a.md §8). Written
+    /// UNCONDITIONALLY at every `execute_plan` entry (compute =
+    /// `lanev2::spi_run_budget_install`) — the `es_cursor_run_budget`
+    /// idiom verbatim: per-run by construction, nested-run-safe (a nested
+    /// SPI statement owns its own estate) and unwind-safe with no guard.
+    /// Consumer: the settle walk below the drive loop retires lane-staged
+    /// claims at the count-limited stop, BEFORE ExecutorFinish/End reach
+    /// the plancache release points (lane-spi.md INVARIANT 5), and its
+    /// parked result arms `es_lane_cursor_parked` (the shared WS-AI
+    /// resume signal) so the portal-fetch producer's next run
+    /// repossesses. Estate-resident by the same TLS-census-zero argument
+    /// as the two fields above. Knob-OFF and tcount-0 runs always read
+    /// None.
+    pub es_spi_run_budget: Option<u64>,
 }
 
 /// One worker's instrumentation snapshot: `instrument` is indexed by
@@ -853,6 +917,14 @@ pub enum EpqRowMarkFetch {
     Copy { whole_attno: i16 },
 }
 
+/// The ONE EPQ state store: C `EPQState`'s relsubs_* arrays, held by the
+/// EPQ owner (ModifyTable/LockRows) and swapped into `EStateData::es_epq`
+/// only for a recheck's duration — nested EPQ is safe because each owner
+/// holds its own copy (no child EState; the shared-estate capture-model
+/// decision and the field-by-field C mapping live in
+/// docs/design/lane-epq.md §3/§4). WS-U wave-5: shape FROZEN — inc-5's
+/// lane-hosted rechecks consume these same fields as captured-singleton
+/// source state; no WS extends this struct during the migration.
 pub struct EpqSubs<'mcx> {
     pub relsubs_slot: PgVec<'mcx, Option<ExecSlotId>>,
     pub relsubs_done: PgVec<'mcx, bool>,
@@ -905,6 +977,36 @@ pub struct RuntimeEaRefusal {
     pub reason: &'static str,
 }
 
+/// Which engine owned a plan node's execution (the EXPLAIN (ENGINE)
+/// vocabulary; single-executor migration Phase 0.2). No row-mode variant by
+/// integration-contract ruling 1e: row-mode-hosted nodes report `Lane` with
+/// their ShapeClass name as the class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EngineKind {
+    /// Serial lane-v2 push pipeline owns the node.
+    Lane,
+    /// Volcano row spine ran it (detail carries the refusal reason, "" if
+    /// the node was never offered to a lane).
+    Spine,
+    /// Spine refusal whose reason is admission-economics-fused-drive — the
+    /// legacy fused batch arm owns the shape (displayed "spine/fused-arm").
+    FusedArm,
+    /// Morsel-runtime arm engaged (pipeline identity via RuntimeEaPipeline).
+    Runtime,
+}
+
+/// One per-node engine attribution record (EXPLAIN (ENGINE); emission-gate
+/// law identical to RuntimeEaRefusal: empty unless EXEC_FLAG_ENGINE_REPORT).
+#[derive(Clone, Copy, Debug)]
+pub struct EngineEvent {
+    pub plan_node_id: i32,
+    pub engine: EngineKind,
+    /// ShapeClass::name() / router ArmClass name — static vocabulary only.
+    pub class: &'static str,
+    /// RefuseReason::name() or an arm refuse-string; "" for owned.
+    pub detail: &'static str,
+}
+
 impl<'mcx> EStateData<'mcx> {
     /// Record a runtime-EA refusal (cold: instrumented+armed refusals only).
     /// Dedup on (node, arm): refused shapes re-walk admission per call and
@@ -926,6 +1028,40 @@ impl<'mcx> EStateData<'mcx> {
             return;
         }
         self.es_runtime_ea_refusals.push(RuntimeEaRefusal { plan_node_id, arm, reason });
+    }
+
+    /// EXPLAIN (ENGINE) capture armed for this execution? Derived from
+    /// `es_top_eflags` (the one word ExecutorStart stores regardless), so
+    /// arming costs the default executor entry path zero instructions
+    /// (se-entrycost); the flag test runs only at the lanev2 verdict
+    /// chokepoints that gate their capture arm on this.
+    #[inline]
+    pub fn engine_capture(&self) -> bool {
+        self.es_top_eflags & ::types_slot::EXEC_FLAG_ENGINE_REPORT != 0
+    }
+
+    /// Record an engine attribution (cold: ENGINE-capture paths only).
+    /// Dedup on (plan_node_id, class); first record wins — it is the
+    /// memoized verdict / the admission walk's first failing gate, matching
+    /// `runtime_ea_record_refusal`'s determinism law. Linear dedup scan:
+    /// bounded by plan size × classes, ENGINE-diagnostics-only by the
+    /// emission gate.
+    #[cold]
+    pub fn engine_record(
+        &mut self,
+        plan_node_id: i32,
+        engine: EngineKind,
+        class: &'static str,
+        detail: &'static str,
+    ) {
+        if self
+            .es_engine_events
+            .iter()
+            .any(|e| e.plan_node_id == plan_node_id && e.class == class)
+        {
+            return;
+        }
+        self.es_engine_events.push(EngineEvent { plan_node_id, engine, class, detail });
     }
 
     /// `InstrCountFiltered1` (execnodes.h); idx is the node's
@@ -1005,9 +1141,14 @@ impl<'mcx> EStateData<'mcx> {
             es_total_processed: 0,
             es_top_eflags: 0,
             es_instrument: 0,
+            es_lane_leaf_fast: false,
+            es_cursor_run_budget: None,
+            es_lane_cursor_parked: false,
+            es_spi_run_budget: None,
             es_instrumentation: PgVec::new_in(mcx),
             es_runtime_ea_refusals: PgVec::new_in(mcx),
             es_runtime_ea_pipelines: PgVec::new_in(mcx),
+            es_engine_events: PgVec::new_in(mcx),
             es_agg_instrumentation: PgVec::new_in(mcx),
             es_sort_instrumentation: PgVec::new_in(mcx),
             es_incsort_instrumentation: PgVec::new_in(mcx),
@@ -1489,6 +1630,7 @@ const _: () = assert!(!core::mem::needs_drop::<(i32, HashInstrumentation)>());
 const _: () = assert!(!core::mem::needs_drop::<(i32, u64)>());
 const _: () = assert!(!core::mem::needs_drop::<RuntimeEaRefusal>());
 const _: () = assert!(!core::mem::needs_drop::<RuntimeEaPipeline>());
+const _: () = assert!(!core::mem::needs_drop::<EngineEvent>());
 mcx::forget_safe_struct!(
     EpqSubs<'_> { relsubs_slot, relsubs_done, relsubs_blocked, relsubs_rowmark, origslot },
     EStateData<'_> {
@@ -1503,7 +1645,8 @@ mcx::forget_safe_struct!(
         es_param_subplans, es_per_tuple_exprcontext,
         es_sourceText, es_use_parallel_mode, es_parallel_workers_to_launch,
         es_parallel_workers_launched, es_jit_flags, es_jit_instr, es_epq,
-        es_epq_active, es_rowmarks;
+        es_epq_active, es_lane_leaf_fast, es_cursor_run_budget, es_lane_cursor_parked,
+        es_spi_run_budget, es_rowmarks;
         es_jit_blocks,
         es_snapshot, es_crosscheck_snapshot, es_relations, es_junkFilter,
         es_tupleTable, es_exprcontexts, es_cte_shared, es_worktable_shared,
@@ -1511,7 +1654,7 @@ mcx::forget_safe_struct!(
         es_direction, es_part_prune_results,
         es_insert_pending_modifytables, es_auxmodifytables,
         es_param_exec_vals, es_instrumentation, es_runtime_ea_refusals,
-        es_runtime_ea_pipelines,
+        es_runtime_ea_pipelines, es_engine_events,
         es_agg_instrumentation,
         es_sort_instrumentation, es_incsort_instrumentation,
         es_hash_instrumentation, es_index_instrumentation,

@@ -696,6 +696,17 @@ fn exec_check_permissions_modified(
 /// `standard_ExecutorStart` (execMain.c).
 pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgResult<()> {
     assert!(qd.exec.is_none(), "ExecutorStart: query already started");
+    // WS-P node-census entry hook (wave-2 flip machinery, lanev2/census.rs):
+    // when PGRUST_LANE_V2_NODE_CENSUS is armed, ride WS-C's EngineEvent
+    // capture (attribution-only; emission-gate law in executils) so the
+    // ExecutorEnd census can join plan nodes to their engine verdicts.
+    // Disarmed cost: one memoized-bool load + branch (default OFF; flagged
+    // for the select1 instruction-pair fleet gate in notes/se-ws-p-flip.md).
+    // Before the skeleton probe on purpose: the flag participates in the
+    // skeleton's eflags match key like every other entry flag.
+    if crate::lanev2::census_armed() {
+        eflags |= ::types_slot::EXEC_FLAG_ENGINE_REPORT;
+    }
     #[cfg(debug_assertions)]
     if let Some(s) = &qd.snapshot {
         if snapmgr::ActiveSnapshotSet() {
@@ -850,6 +861,13 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
         es.es_crosscheck_snapshot = es_crosscheck;
         es.es_top_eflags = eflags;
         es.es_instrument = instrument;
+        // EXPLAIN (ENGINE) capture arm (single-executor Phase 0.2) costs this
+        // entry path nothing: `engine_capture()` derives from the
+        // EXEC_FLAG_ENGINE_REPORT bit in es_top_eflags (stored above
+        // regardless), tested only at the lanev2 verdict chokepoints
+        // (se-entrycost). False on every path but ExplainOnePlanRef with the
+        // ENGINE option, so es_engine_events stays empty everywhere else
+        // (the emission gate).
         es.es_jit_flags = pstmt.jitFlags;
         // PROCPERF P2 compile economy: OLTP-cheap statements recompile their
         // expression programs on every execution (SPI statements in stored
@@ -874,7 +892,7 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
         // the session collector onto the estate (C's es_jit JitContext).
         // Below the cost gate (jitFlags == 0) the window stays closed: the
         // select1/point compile path pays only this branch.
-        if pstmt.jitFlags == 0 {
+        let r = if pstmt.jitFlags == 0 {
             init_plan(data, pstmt, operation, eflags)
         } else {
             ::execexpr::jit::session_begin(pstmt.jitFlags);
@@ -883,7 +901,11 @@ pub fn standard_executor_start(qd: &mut QueryDescData, mut eflags: i32) -> PgRes
             data.estate.es_jit_blocks = jc.blocks;
             data.estate.es_jit_instr = jc.instr;
             r
-        }
+        };
+        // se-delegtax SH-F: the row-mode LEAF fast-admit byte — computed
+        // once here (all inputs per-execution static; see the refresh doc).
+        crate::lanev2::refresh_lane_leaf_fast(&mut data.estate);
+        r
     })?;
     qd.tup_desc = Some(tup_desc);
     qd.exec = Some(Box::new(exec));
@@ -1110,45 +1132,242 @@ pub(crate) fn execute_plan<'m, 'mcx>(
     let planstate = planstate.as_mut().expect("ExecutorRun without a plan state");
     estate.es_direction = direction;
     estate.es_use_parallel_mode = use_parallel_mode;
+    // === wave-9 shared-file marker (contract §7; sub-regions AG, AH, AI, AJ) ===
+    // (the execute_plan run seam — the §6 shared AI/AJ region; all four labels
+    // per the §7 protocol so the integrator splice is purely mechanical)
+    // --- WS-AG wave-9 sub-region (reserved) ------------------------------------
+    // --- end WS-AG wave-9 -------------------------------------------------------
+    // --- WS-AH wave-9 sub-region (reserved) ------------------------------------
+    // --- end WS-AH wave-9 -------------------------------------------------------
+    // --- WS-AI wave-9 (forward-pull cursors inc-1; contract §3, band 92001+) ---
+    // Per-run emission budget, written UNCONDITIONALLY like es_direction
+    // above it (None on knob-OFF and count-0 runs, which answer at the
+    // callee's first test; a None overwrite means no stale budget survives
+    // an error unwind or estate reuse). See lanev2/push.rs WS-AI region for
+    // the gate + serial law. inc-1b: the install now runs the NAMED
+    // cursor-admission classifier (forward / non-scroll eflags / serial;
+    // refusals tick the ShapeClass::Cursor taxonomy, knob-ON only) and the
+    // budgeted-run suspension SETTLES at the end of this function (the park
+    // walker below the loop); a parked pipeline repossesses at the next
+    // entry (the resume walk right here).
+    estate.es_cursor_run_budget = crate::lanev2::cursor_run_budget_install(
+        operation == CmdType::CMD_SELECT,
+        ::types_scan::sdir::ScanDirectionIsForward(direction),
+        number_tuples,
+        use_parallel_mode,
+        estate.es_top_eflags,
+    );
+    // inc-1b re-entry (lane-cursors.md §2 "repossess on resume"): one bool
+    // load per run knob-OFF/never-parked (the flag is set only by a knob-ON
+    // budgeted settle). Restages every parked scan's suspended page batch
+    // before the first pull touches staged state.
+    if estate.es_lane_cursor_parked {
+        estate.es_lane_cursor_parked = false;
+        crate::lanev2::cursor_park_resume(planstate, estate)?;
+    }
+    // --- end WS-AI wave-9 -------------------------------------------------------
+    // --- WS-AJ wave-9 sub-region (SPI Stage-A seam, se/spi-stage-a; lane-spi.md
+    // §1/§3) -----------------------------------------------------------------------
+    // Per-run SPI emission budget, written UNCONDITIONALLY like the WS-AI
+    // field above it (None on knob-OFF / tcount-0 / non-SPI-dest runs, which
+    // answer at the callee's first tests; the None overwrite means no stale
+    // budget survives an error unwind or estate reuse). TWO producers of a
+    // count-limited `CommandDest::Spi` run reach here (review re-baseline,
+    // notes/se-spi-stage-a.md §8): `_SPI_pquery`'s tcount-limited run
+    // (spi/src/execute.rs:562, STOP-then-END) AND `SPI_cursor_fetch`'s
+    // per-fetch receiver threaded through PortalRunFetch → PortalRunSelect
+    // (pquery/src/lib.rs:594-630) — the plpgsql FOR-loop cadence, which
+    // RESUMES on the same QueryDesc/estate. The dest compare IS the
+    // seam-visible SPI signal — no SPI-layer code change (design §3
+    // Stage A). The install runs the NAMED SPI-admission classifier
+    // (refusals tick the ShapeClass::Spi taxonomy, knob-ON only); the
+    // budgeted run's settle sits below the drive loop (WS-AJ block beside
+    // the WS-AI park walker) and arms the SHARED `es_lane_cursor_parked`
+    // resume signal, repossessed by the WS-AI resume walk at the next
+    // entry above. Knob-OFF cost, per RUN and never per tuple: the eager
+    // argument set (one `mydest` enum match + the direction compare) plus
+    // the callee's count/select/dest register tests; the knob cell loads
+    // only for count-limited SPI-dest SELECTs.
+    estate.es_spi_run_budget = crate::lanev2::spi_run_budget_install(
+        operation == CmdType::CMD_SELECT,
+        dest.mydest() == ::types_dest::CommandDest::Spi,
+        ::types_scan::sdir::ScanDirectionIsForward(direction),
+        number_tuples,
+        use_parallel_mode,
+        estate.es_top_eflags,
+    );
+    // --- end WS-AJ wave-9 -------------------------------------------------------
+    // === wave-10 shared-file marker (cursors inc-2 contract §8; sub-regions CA, CB, CC) ===
+    // --- WS-CA wave-10 sub-region (reserved) ------------------------------------
+    // --- end WS-CA wave-10 --------------------------------------------------------
+    // --- WS-CB wave-10 (cursors inc-2: batch store fill + §6 staging; band 95001+) ---
+    // §6 deletion-clock staging (a): the forward-only run seam. Every
+    // backward drive ticks the release-mode evidence counter (the
+    // post-flip physical-deletion bake reads it at zero across all
+    // corpora); the debug assert (direction ∈ {Forward, NoMovement}) arms
+    // once a cursor store has been armed in this process (WS-CA's
+    // `cursor_store_armed_note` — a store-served world never legally
+    // drives the executor backward). NoMovement never enters this
+    // function (standard_executor_run gates), so the backward test is the
+    // whole check.
+    if ::types_scan::sdir::ScanDirectionIsBackward(direction) {
+        crate::lanev2::run_seam_backward_evidence();
+    }
+    // §2.1/§2.3 batch store fill: a budgeted (cursor-FETCH-cadence) run
+    // whose receiver is the portal store may be driven as a lane batch
+    // pipeline into the store — batches, not the capacity-one per-row
+    // pull ceremony. Engagement is decided by the standard admission
+    // hooks inside `cursor_store_batch_fill`; refusals (and every
+    // non-store, non-budgeted run) take the per-tuple loop below,
+    // byte-identically (§2.3 fetch-invisibility). Knob-OFF/count-0 runs
+    // read one None here — per-RUN cost only, never per-tuple (the
+    // instruction-invisibility law).
+    //
+    // SE-R41 (notes/se-r41-retire.md §3): a capture-batchable eligible
+    // fill arms the receiver with the §4.2 identity sidecar; the batch
+    // fill then captures per accepted row inside the sink, and a refused
+    // capture-armed run takes the CAPTURE row loop below (per-RUN branch;
+    // the row loop captures after each accepted row) — the store and
+    // sidecar stay aligned no matter which engine drove. Knob-OFF and
+    // unarmed fills read one more None here, per RUN only.
+    let mut cursor_capture_sidecar: Option<::types_portal::TuplestoreHandle> = None;
+    let cursor_fill_engaged = if estate.es_cursor_run_budget.is_some()
+        && send_tuples
+        && estate.es_junkFilter.is_none()
+    {
+        cursor_capture_sidecar = dest.tuplestore_capture_sidecar();
+        crate::lanev2::cursor_store_batch_fill(planstate, estate, dest, cursor_capture_sidecar)?
+    } else {
+        false
+    };
+    // --- end WS-CB wave-10 ----------------------------------------------------------
+    // --- WS-CC wave-10 sub-region (reserved) ------------------------------------
+    // --- end WS-CC wave-10 --------------------------------------------------------
     if use_parallel_mode {
         enter_parallel_mode_outlined();
     }
 
     let mut current_tuple_count: u64 = 0;
-    loop {
-        estate.reset_per_tuple_expr_context();
+    // WS-CB wave-10: an engaged batch fill consumed the run's budget inside
+    // the sink — the per-tuple loop must not drive the plan again this run.
+    // One branch per RUN (hoisted out of the loop, never per tuple).
+    //
+    // SE-R41: the capture split is likewise one branch per RUN — the
+    // knob-OFF/unarmed world runs the loop below byte-identically; a
+    // capture-armed run the batch fill refused runs the capture variant
+    // (per-row identity append after each accepted row — the row-chain
+    // capture moved inside the run, notes/se-r41-retire.md §3.7).
+    if !cursor_fill_engaged {
+        if let Some(sidecar) = cursor_capture_sidecar {
+            loop {
+                estate.reset_per_tuple_expr_context();
 
-        let Some(mut slot_id) = exec_proc_node(planstate, estate)? else {
-            break;
-        };
+                let Some(slot_id) = exec_proc_node(planstate, estate)? else {
+                    break;
+                };
+                // Capture-armed fills are budgeted store fills: SELECT,
+                // junk-free (the dispatch gate above), send_tuples — the
+                // plain loop's junk/send branches degenerate accordingly.
+                debug_assert!(send_tuples && estate.es_junkFilter.is_none());
 
-        if estate.es_junkFilter.is_some() {
-            slot_id = execjunk::exec_filter_junk(estate, slot_id);
-        }
+                {
+                    let slot = estate.slot_mut(slot_id);
+                    // SAFETY: lifetime bridge at the seam boundary — the
+                    // plain loop's receive_slot arm verbatim.
+                    let slot: &mut SlotData<'m> =
+                        unsafe { &mut *(slot as *mut SlotData<'mcx>).cast::<SlotData<'m>>() };
+                    if !dest.receive_slot(slot)? {
+                        break;
+                    }
+                }
+                crate::execcurrent::capture_current_into_sidecar(planstate, estate, sidecar)?;
 
-        if send_tuples {
-            let slot = estate.slot_mut(slot_id);
-            // SAFETY: lifetime bridge at the seam boundary (C passes a raw
-            // TupleTableSlot*). The receiver only copies datums out during
-            // the call and retains no borrow of the slot (printtup keeps an
-            // address token + its own wire buffer).
-            let slot: &mut SlotData<'m> =
-                unsafe { &mut *(slot as *mut SlotData<'mcx>).cast::<SlotData<'m>>() };
-            if !dest.receive_slot(slot)? {
-                break;
+                if operation == CmdType::CMD_SELECT {
+                    estate.es_processed += 1;
+                }
+
+                current_tuple_count += 1;
+                if number_tuples != 0 && number_tuples == current_tuple_count {
+                    break;
+                }
             }
-        }
+        } else {
+            loop {
+                estate.reset_per_tuple_expr_context();
 
-        if operation == CmdType::CMD_SELECT {
-            estate.es_processed += 1;
-        }
+                let Some(mut slot_id) = exec_proc_node(planstate, estate)? else {
+                    break;
+                };
 
-        current_tuple_count += 1;
-        if number_tuples != 0 && number_tuples == current_tuple_count {
-            break;
+                if estate.es_junkFilter.is_some() {
+                    slot_id = execjunk::exec_filter_junk(estate, slot_id);
+                }
+
+                if send_tuples {
+                    let slot = estate.slot_mut(slot_id);
+                    // SAFETY: lifetime bridge at the seam boundary (C passes a raw
+                    // TupleTableSlot*). The receiver only copies datums out during
+                    // the call and retains no borrow of the slot (printtup keeps an
+                    // address token + its own wire buffer).
+                    let slot: &mut SlotData<'m> =
+                        unsafe { &mut *(slot as *mut SlotData<'mcx>).cast::<SlotData<'m>>() };
+                    if !dest.receive_slot(slot)? {
+                        break;
+                    }
+                }
+
+                if operation == CmdType::CMD_SELECT {
+                    estate.es_processed += 1;
+                }
+
+                current_tuple_count += 1;
+                if number_tuples != 0 && number_tuples == current_tuple_count {
+                    break;
+                }
+            }
         }
     }
 
+    // --- WS-AI wave-9.5 (cursors inc-1b): the §2 park shape's settle point.
+    // A budgeted (cursor-FETCH-cadence) run that stops with the pipeline
+    // suspended SETTLES here: lane-staged claims retire through the
+    // claim-release chain (HeapBatchSource-class staged page → the R3
+    // zero-pins-at-settle law), position recorded node-resident; the next
+    // run's resume walk (entry, above) repossesses. Knob-OFF / count-0 /
+    // FETCH_ALL runs read one None and skip (per-run cost only, never
+    // per-tuple). EPQ law: an EPQ recheck drive never enters execute_plan,
+    // and the walker independently refuses under es_epq_active (the budget
+    // belongs to the outer run — the inc-1a §5 design note, pinned in
+    // units).
+    if estate.es_cursor_run_budget.is_some() {
+        if crate::lanev2::cursor_run_park(planstate, estate)? {
+            estate.es_lane_cursor_parked = true;
+        }
+    }
+    // --- end WS-AI wave-9.5 -----------------------------------------------------
+    // --- WS-AJ wave-9.5 (SPI Stage-A): the settle point. A budgeted
+    // (tcount-limited SPI-dest) run that stops here retires lane-staged
+    // claims through the same claim-release chain the cursor walker owns —
+    // BEFORE executor_finish/end return control toward the plancache release
+    // points (lane-spi.md INVARIANT 5; post-t26 release-point map in
+    // notes/se-wave9-aj.md §11.3) — and ticks the spi-plan-refused roll-up
+    // when the plan carried no lane engagement. The park flag IS armed
+    // (review re-baseline, notes/se-spi-stage-a.md §8): the portal-fetch
+    // producer (SPI_cursor_fetch → PortalRunSelect, the plpgsql FOR-loop
+    // cadence) RESUMES this QueryDesc/estate, and the WS-AI resume walk at
+    // the next entry repossesses the parked position — dropping the bit
+    // would resume an un-inited scan. For a true _SPI_pquery run the flag
+    // is dead state torn down by the immediately-following ExecutorEnd
+    // (the parked-then-close path cursors already ride). Never CLEARED
+    // here: under the composed arm the WS-AI walker above may have armed
+    // it already (settle is release-only/idempotent). Knob-OFF / tcount-0
+    // / non-SPI runs read one None and skip (per-run cost only, never
+    // per-tuple). EPQ law shared with the WS-AI walker (the walk refuses
+    // under es_epq_active).
+    if estate.es_spi_run_budget.is_some() && crate::lanev2::spi_run_settle(planstate, estate)? {
+        estate.es_lane_cursor_parked = true;
+    }
+    // --- end WS-AJ wave-9.5 -----------------------------------------------------
     if estate.es_top_eflags & EXEC_FLAG_BACKWARD == 0 {
         exec_shutdown_node(planstate, estate)?;
     }
@@ -1222,6 +1441,23 @@ fn exec_postprocess_plan(estate: &mut EStateData<'_>) -> PgResult<()> {
     Ok(())
 }
 
+/// WS-P armed-path body of the ExecutorEnd census hook, outlined
+/// `#[cold]`/`#[inline(never)]` (se2-cost-fix): `standard_executor_end` is
+/// `#[inline]` into two callers, and keeping this walk (plus its `with_mut`
+/// closure) inline there perturbed the DISARMED per-query codegen the
+/// select1/prepared knob-OFF pair letters pin. Never reached at default
+/// config (`census_armed()` gates the call).
+#[cold]
+#[inline(never)]
+fn census_record_at_end(qd: &mut QueryDescData) {
+    let pstmt = qd.plannedstmt();
+    if let Some(exec) = qd.exec.as_mut() {
+        exec.with_mut(|data| {
+            crate::lanev2::census_record(pstmt, &data.estate, data.planstate.as_ref());
+        });
+    }
+}
+
 /// `standard_ExecutorEnd` (execMain.c); dropping the bundle is
 /// `FreeExecutorState` (MemoryContextDelete of es_query_cxt).
 // inline: the second caller (executor_finish_and_park's refusal arm) must not
@@ -1239,6 +1475,17 @@ pub fn standard_executor_end(qd: &mut QueryDescData) -> PgResult<()> {
                 );
             }
         });
+    }
+    // WS-P node-census exit hook (lanev2/census.rs): with the census armed,
+    // walk the plan tree and append one TSV row per plan node, joined to the
+    // execution's EngineEvents. Before the skeleton park AND before teardown
+    // (both need the estate + planstate alive); best-effort, never a query
+    // error. Disarmed cost: one memoized-byte load + branch — the armed body
+    // is `#[cold]`-outlined (se2-cost-fix): standard_executor_end inlines
+    // into two callers, and carrying the census walk inline here cost the
+    // DISARMED select1/prepared pair codegen (the +42/q history above).
+    if crate::lanev2::census_armed() {
+        census_record_at_end(qd);
     }
     // Executor-skeleton park (v2 gates mirror the reuse gates in
     // standard_executor_start; everything per-run — scan descriptors,

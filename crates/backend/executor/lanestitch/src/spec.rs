@@ -20,6 +20,7 @@
 // harmless (every consumer reads the low word).
 
 use datum::{Datum, NullableDatum};
+use types_error::PgResult;
 
 pub const MAX_ROWS: usize = 1024;
 pub const SEL_WORDS: usize = MAX_ROWS / 64;
@@ -172,6 +173,74 @@ pub enum Step {
     /// (fail closed), and a projection program carrying Qual refuses too:
     /// the two segment kinds never mix in one program.
     StoreOut { a: u8, out: u16 },
+    // ===== WS-AA wave-7 RowOp append region (fusion inc-0) — append only ====
+    /// RowOp: advance the chain to the next source row (the row-loop pull of
+    /// a forever-row operator chain, docs/design/rowmode-endgame.md §2).
+    /// Exactly one per chain program; steps BEFORE it are the loop-top
+    /// segment (protocol only — the loop_top_owed LAW in vocabulary form:
+    /// they run before EVERY pull), steps after it are the per-row body.
+    /// Legal only in row-chain programs (`eval_row_chain`): a qual or
+    /// projection program carrying it refuses fail-closed at classification
+    /// and errors loudly on the interpreter tiers.
+    NextRow,
+    /// RowOp: effectful protocol call into the chain host (BR/IO trigger
+    /// fire, heap+index write, AR-queue/transition-capture epilogue, tuple
+    /// lock, ...). `call` is the chain-family-private id the host dispatches
+    /// on. Protocol steps are the effectful half of the two-regime error
+    /// law: the target IS the node's own Rust helper, so its error path is
+    /// the normal PgError unwind — byte-identical by construction, never
+    /// refuse-and-replay.
+    ProtocolCall { call: u16 },
+}
+
+// ===== WS-AA wave-7 RowOp chain currency (fusion inc-0) =====================
+
+/// Host verdict of one `ProtocolCall` step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChainVerdict {
+    /// Protocol work done; run the next step of the row.
+    Continue,
+    /// The row is consumed without an emitted output (BR-trigger
+    /// suppression, lock skip, filtered): control returns to the loop top
+    /// (step 0) — the remaining per-row steps never run for this row.
+    SkipRow,
+    /// One row was emitted to the capacity-one boundary: the chain pauses
+    /// and the drive returns to the caller. Re-entry starts at the loop top
+    /// (the capacity-one RootAdapter cadence).
+    EmitPause,
+}
+
+/// Terminal outcome of one chain drive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChainOutcome {
+    /// The source is exhausted; the loop-top segment for the final round has
+    /// already run (mt_step's P -> pull(None) ordering).
+    Done,
+    /// A `ProtocolCall` answered `EmitPause`; drive again to resume.
+    Paused,
+}
+
+/// Row cursor persisting across `Paused` re-entries: `row` is the index the
+/// NEXT successful `NextRow` stages (0-based, monotonically increasing for
+/// the life of one chain drive sequence).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ChainCursor {
+    pub row: u32,
+}
+
+/// The chain host: owns the source pull and every effectful protocol
+/// target. The contract the parity fuzzer enforces (tests/parity.rs): the
+/// engine calls `protocol_call` strictly in program order within a row and
+/// strictly in row order across rows — call order == row order — and never
+/// for a row `next_row` did not stage.
+pub trait RowChainHost {
+    /// Stage the next source row. Ok(true) = staged; Ok(false) = exhausted
+    /// (the chain exits with [`ChainOutcome::Done`]).
+    fn next_row(&mut self) -> PgResult<bool>;
+    /// Execute protocol step `call` for the current row. Loop-top calls
+    /// (before `NextRow`) MUST answer `Continue` — a skip/pause verdict with
+    /// no current row is a host contract violation and errors loudly.
+    fn protocol_call(&mut self, call: u16) -> PgResult<ChainVerdict>;
 }
 
 pub struct Program {

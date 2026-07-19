@@ -412,6 +412,76 @@ pub fn heap_set_block_range(
     Ok(())
 }
 
+/// End-of-claim pin release (single-executor wave 2, WS-O inc-2 —
+/// append-only seam; the R3 "zero pins at claim settle" tightening the
+/// Phase-1 contract deferred at WS-K Q3): reset the scan to the drained
+/// (un-inited) state, releasing the current page pin. A claim that ended
+/// EARLY (error mid-batch, abort between segments, shed) may still hold
+/// `rs_cbuf`; a normally-drained claim is already in this state and every
+/// store below is idempotent. The body mirrors `heap_set_block_range`'s
+/// reset half exactly (deliberately duplicated, not extracted — the
+/// positioning path's code shape is untouched); the next
+/// `heap_set_block_range` positions the following claim as before.
+pub fn heap_end_claim_release(scan: &mut HeapScanDescData<'_>) {
+    scan.rs_ctup = None;
+    scan.rs_cpage = core::ptr::null_mut();
+    if let Some(pin) = scan.rs_cbuf.take() {
+        pin.release();
+    }
+    scan.rs_cblock = InvalidBlockNumber;
+    scan.rs_prefetch_block = InvalidBlockNumber;
+    scan.rs_inited = false;
+    scan.rs_ntuples = 0;
+    scan.rs_cindex = 0;
+}
+
+/// Cursor-suspension park point (WS-AI wave-9.5, lane-cursors.md §2,
+/// append-only next to `heap_end_claim_release`, its record-then-release
+/// companion): the reposition window `(b0, b1)` of a mid-claim forward
+/// scan whose staged (pinned) page is `b0` and whose unvisited remainder
+/// is exactly `[b0, b1)` under a linear no-wrap walk — the shape
+/// `heap_set_block_range(b0, b1)` restores after the release. None = not
+/// settleable:
+/// * nothing staged/pinned (`!rs_inited` / no `rs_cbuf`) — a drained or
+///   never-started claim holds nothing;
+/// * parallel scans (block order owned by the shared DSM cursor);
+/// * non-forward walks (the lane drive is forward-only; belt for the
+///   probe's remainder arithmetic);
+/// * wrap-capable walks: `SO_ALLOW_SYNC` set, or an unlimited walk
+///   (`rs_numblocks == InvalidBlockNumber`) that started mid-relation —
+///   their remainder is not a contiguous `[b0, end)` range, and the
+///   C-parity pin-held posture stands for them.
+///
+/// Remainder arithmetic (heapgettup_advance_block): on a limited walk
+/// `rs_numblocks` counts the blocks left INCLUDING the currently-staged
+/// one, so `b1 = b0 + rs_numblocks`; on an unlimited 0-started walk,
+/// `b1 = rs_nblocks`. Idempotent across settle/resume cycles: resume sets
+/// `[b0, b1)` via `heap_set_block_range`, whose walk re-reports the same
+/// end at the next suspension.
+pub fn heap_cursor_park_point(scan: &HeapScanDescData<'_>) -> Option<(u64, u64)> {
+    if scan.rs_base.rs_parallel.is_some()
+        || !scan.rs_inited
+        || scan.rs_cbuf.is_none()
+        || !ScanDirectionIsForward(scan.rs_dir)
+        || (scan.rs_base.rs_flags & SO_ALLOW_SYNC) != 0
+    {
+        return None;
+    }
+    let b0 = scan.rs_cblock as u64;
+    let b1 = if scan.rs_numblocks == InvalidBlockNumber {
+        if scan.rs_startblock != 0 {
+            // Mid-relation start on an unlimited walk wraps past the end;
+            // [b0, rs_nblocks) is not the remainder. Not settleable.
+            return None;
+        }
+        scan.rs_nblocks as u64
+    } else {
+        b0 + scan.rs_numblocks as u64
+    };
+    debug_assert!(b0 < b1 && b1 <= scan.rs_nblocks as u64);
+    Some((b0, b1))
+}
+
 // Const generics stand in for C's four constant-folded call sites.
 //
 // # Safety
@@ -1088,6 +1158,38 @@ pub fn heap_getnextpagebatch(scan: &mut HeapScanDescData<'_>) -> PgResult<u32> {
     }
 }
 
+/// Mid-page adoption for a FRESH batch engagement over a scan the PER-TUPLE
+/// pagemode walk already advanced (SE-R41 v2, the page-remainder defect fix;
+/// notes/se-r41-v2.md §2): `heap_getnextpagebatch`'s documented invariant is
+/// "no interleaving with per-tuple getnext calls" because it ADVANCES pages —
+/// a batch drive that freshly engages while the row walk sits mid-page would
+/// silently skip the current page's unconsumed remainder (the SE12
+/// budget-floor probe's es_processed 8-vs-16 loss). This probe ADOPTS that
+/// remainder instead: if the scan holds a per-tuple-walked page with
+/// unreturned visible tuples, park `rs_cindex` at the page end (the batch
+/// consumption convention — a stray per-tuple continue advances pages) and
+/// hand the batch drive the window `[start, n)` over the ALREADY-COLLECTED
+/// `rs_vistuples` of the pinned page. `rs_cindex` is the index of the tuple
+/// the per-tuple walk last RETURNED (`lineindex = rs_cindex + dir`), so the
+/// remainder starts at `rs_cindex + 1`; rows `<= rs_cindex` were already
+/// delivered to the caller's qual by the row walk. None = nothing to adopt
+/// (fresh/drained scan, or the page is fully consumed): the caller stages
+/// the NEXT page via `heap_getnextpagebatch` as before. Forward pagemode
+/// only (the batch drive's admission gates).
+pub fn heap_adopt_midpage_batch(scan: &mut HeapScanDescData<'_>) -> Option<(u32, u32)> {
+    debug_assert!((scan.rs_base.rs_flags & SO_ALLOW_PAGEMODE) != 0);
+    debug_assert!(scan.rs_base.rs_nkeys == 0);
+    if !scan.rs_inited || scan.rs_cbuf.is_none() || scan.rs_ntuples == 0 {
+        return None;
+    }
+    let start = scan.rs_cindex + 1;
+    if start >= scan.rs_ntuples {
+        return None;
+    }
+    scan.rs_cindex = scan.rs_ntuples - 1;
+    Some((start, scan.rs_ntuples))
+}
+
 pub fn heap_batch_deform_soa<'mcx>(
     scan: &mut HeapScanDescData<'mcx>,
     plan: &exectuples::SoaDeformPlan<'_>,
@@ -1129,6 +1231,74 @@ pub fn heap_batch_deform_soa<'mcx>(
         exectuples::soa_classify_row(soa, plan, atts, i, &tuple);
     }
     exectuples::soa_deform_columns(soa, plan, atts, qual_col_only);
+}
+
+/// `heap_batch_deform_soa` with the kind-0 column pass narrowed to an
+/// explicit column SET (K1 inc-2 late materialization, wave-9 WS-AH:
+/// {qual clause cols ∪ the grouped feed's key cols}). Classification is
+/// IDENTICAL — kind-1 hasnulls rows still deform fully at classify (a
+/// harmless superset), kind-2 narrow rows carry the fallback bit — only
+/// the column-major pass narrows. Survivors complete later through
+/// `heap_batch_complete_deform_soa` (value movement only: same rows,
+/// same survivor set/order, same errors as the full staging deform).
+pub fn heap_batch_deform_soa_cols<'mcx>(
+    scan: &mut HeapScanDescData<'mcx>,
+    plan: &exectuples::SoaDeformPlan<'_>,
+    soa: &mut exectuples::SoaBatch<'_>,
+    cols: &[u16],
+) {
+    let n = scan.rs_ntuples;
+    debug_assert!(!scan.rs_cpage.is_null() || n == 0);
+    soa.begin(n);
+    let relid = scan.rs_base.rs_rd.rd_id;
+    let atts: &[_] = &scan.rs_base.rs_rd.rd_att.compact_attrs;
+    if n == 0 {
+        return;
+    }
+    // SAFETY: as heap_batch_deform_soa — pinned page, offsets from
+    // page_collect_tuples under the per-page bound.
+    let page: PageRef<'_> = unsafe { PageRef::from_raw(NonNull::new_unchecked(scan.rs_cpage)) };
+    let mut i = n;
+    while i != 0 {
+        i -= 1;
+        let (ptr, len, lineoff) = unsafe {
+            let lineoff = *scan.rs_vistuples.get_unchecked(i as usize);
+            let lpp = page.item_id_unchecked(lineoff);
+            debug_assert!(lpp.is_normal());
+            let (ptr, len) = page.item_raw_unchecked(lpp);
+            (ptr, len, lineoff)
+        };
+        // SAFETY: image on the page pinned by rs_cbuf for the whole batch.
+        let tuple = unsafe {
+            HeapTupleData::from_raw_parts(
+                ptr,
+                len,
+                ItemPointerData::new(scan.rs_cblock, lineoff),
+                relid,
+            )
+        };
+        exectuples::soa_classify_row(soa, plan, atts, i, &tuple);
+    }
+    exectuples::soa_deform_columns_set(soa, plan, atts, cols, None);
+}
+
+/// Completion half of the K1 inc-2 deform split: fill `cols` for
+/// `sel`-selected kind-0 rows of the ALREADY-staged batch — no re-begin,
+/// no re-classify (the staged batch's kinds/fallback state is live and
+/// the page is still pinned by rs_cbuf, ownership ABI R3: valid from the
+/// staging `next_batch` until the next batch advance/reposition/settle).
+/// Idempotent per (column, row).
+pub fn heap_batch_complete_deform_soa<'mcx>(
+    scan: &HeapScanDescData<'mcx>,
+    plan: &exectuples::SoaDeformPlan<'_>,
+    soa: &mut exectuples::SoaBatch<'_>,
+    cols: &[u16],
+    sel: &[u64],
+) {
+    debug_assert!(!scan.rs_cpage.is_null() || soa.nrows() == 0);
+    debug_assert!(soa.nrows() <= scan.rs_ntuples, "completion outside the staged batch");
+    let atts: &[_] = &scan.rs_base.rs_rd.rd_att.compact_attrs;
+    exectuples::soa_deform_columns_set(soa, plan, atts, cols, Some(sel));
 }
 
 pub fn heap_batch_stage_varkey<'mcx>(

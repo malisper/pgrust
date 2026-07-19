@@ -34,6 +34,15 @@ pub use execmain::{
     tap_executor_finish_leave, tap_executor_run, tap_executor_run_leave, tap_executor_start,
 };
 pub use execparallel::{parallel_query_main, register_parallel_query_main};
+pub use lanev2::coverage::{coverage_snapshot, LANEV2_BUILTINS, PGRUST_FOID_RANGE};
+// WS-CB wave-10 (cursors inc-2 contract §8; worklog notes/se-wave10-cb.md
+// EX-CB-1): the CA-facing portal seam — pquery must not link lanev2
+// internals. Knob face for store arming (§7.3), the §6 assert-arming note,
+// and the §3.3 tick face; coverage-export precedent above.
+pub use lanev2::{
+    cursor_fill_tid_capture_refused, cursor_store_armed_note, cursor_store_fill_enabled,
+    cursor_store_fill_set_for_tests,
+};
 pub use nodegather::GatherState;
 pub use nodegathermerge::GatherMergeState;
 pub use noderesult::ResultState;
@@ -69,6 +78,7 @@ pub fn init_seams() {
     execmain_seams::query_desc_runtime_ea_pipeline::set(
         querydesc::query_desc_runtime_ea_pipeline_seam,
     );
+    execmain_seams::query_desc_engine_events::set(querydesc::query_desc_engine_events_seam);
     execmain_seams::query_desc_foreign_explain::set(querydesc::query_desc_foreign_explain_seam);
     execmain_seams::query_desc_prune_result::set(querydesc::query_desc_prune_result_seam);
     execmain_seams::query_desc_rti_unpruned::set(querydesc::query_desc_rti_unpruned_seam);
@@ -110,6 +120,24 @@ pub fn init_seams() {
     execmain_seams::query_desc_worker_incsort_instrument::set(
         querydesc::query_desc_worker_incsort_instrument_seam,
     );
+    // --- WS-CA wave-10 (cursors inc-2, contract §4; escalation EX-CA-1) ---
+    execmain_seams::cursor_plan_current_of_eligible::set(
+        execcurrent::cursor_plan_current_of_eligible_seam,
+    );
+    execmain_seams::cursor_capture_current::set(execcurrent::cursor_capture_current_seam);
+    // --- end WS-CA wave-10 ---
+    // --- SEAM-WIRING (SE10-GATES item 1): the EX-CB-1 faces, seam-installed
+    // for the portal layer (production pquery links execmain_seams, not
+    // execmain) — single knob cell, §6 assert arming, §3.3 tick face.
+    execmain_seams::cursor_store_fill_enabled::set(lanev2::cursor_store_fill_enabled);
+    execmain_seams::cursor_store_armed_note::set(lanev2::cursor_store_armed_note);
+    execmain_seams::cursor_fill_tid_capture_refused::set(lanev2::cursor_fill_tid_capture_refused);
+    // --- end SEAM-WIRING ---
+    // --- SE-R41 (reason-41 retirement): the §3.1 capture-batchable probe ---
+    execmain_seams::cursor_plan_capture_batch_fill::set(
+        execcurrent::cursor_plan_capture_batch_fill_seam,
+    );
+    // --- end SE-R41 ---
     execparallel::register_parallel_query_main();
     {
         guc_tables::session_guc_bool!(PLP, parallel_leader_participation_stand_in, set_parallel_leader_participation_stand_in, true);

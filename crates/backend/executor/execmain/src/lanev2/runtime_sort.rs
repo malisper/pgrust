@@ -1423,6 +1423,18 @@ pub(super) fn try_own_sort<'mcx>(
         refused("instrumented/epq");
         return Ok(false);
     }
+    // WS-AD wave-8: both runtime shapes REPLACE the node's read-back face
+    // (top-N winner buffer / adopted run partitions) — random-access reads
+    // (backward, rescan replay, mark/restore) must land on a row-path
+    // Tuplesort, so randomAccess refuses here wholesale. Previously
+    // unreachable (the breaker refused randomAccess before this probe);
+    // reachable once PGRUST_LANE_V2_SORT_RANDOMACCESS admits the bare-hook
+    // feed. (`full_spec` also refuses on its own — this is the arm-wide
+    // fail-closed gate covering the top-N shape too.)
+    if state.randomAccess {
+        refused("randomAccess (adopted emit face cannot serve random-access reads)");
+        return Ok(false);
+    }
     if parallel::IsParallelWorker() || xact::IsInParallelMode() {
         refused("already in parallel machinery");
         return Ok(false);

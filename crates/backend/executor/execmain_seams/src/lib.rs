@@ -228,6 +228,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // EXPLAIN (ENGINE) (single-executor Phase 0.2): per-node engine
+    // attribution records — (engine, class, detail) triples. None = none
+    // (records exist ONLY under EXEC_FLAG_ENGINE_REPORT — the same
+    // emission-gate law as the EA records above, keeping default EXPLAIN
+    // output byte-identical).
+    pub fn query_desc_engine_events(
+        query_desc: QueryDescHandle,
+        plan_node_id: i32,
+    ) -> Option<Vec<(types_core::instrument::EngineKindWire, &'static str, &'static str)>>
+);
+
+seam_core::seam!(
     // Gather/GatherMerge nworkers_launched (EXPLAIN's Workers Launched).
     pub fn query_desc_workers_launched(
         query_desc: QueryDescHandle,
@@ -317,3 +329,84 @@ seam_core::seam!(
         perm_infos: &'p types_nodes::NodeList<'a>,
     ) -> PgResult<()>
 );
+
+// --- WS-CA wave-10 (cursors inc-2, contract §4; escalation EX-CA-1 in
+// notes/se-wave10-ca.md §3 — appended here because production pquery reaches
+// the executor only through this crate; the exec_current_of seam above is the
+// precedent shape). -----------------------------------------------------------
+
+seam_core::seam!(
+    // §4.1 eligibility shape test, run once per SCROLL portal at PortalStart
+    // (BEFORE ExecutorStart fixes the eflags): true iff search_plan_tree's
+    // spine can ever resolve a simply-updatable scan of this plan. Eligible
+    // armed portals keep C's REWIND|BACKWARD child flags so the fill drive
+    // stays on the row chain (the contract §3.3 carve-out; the batch engine's
+    // eflags refusal is the interim mechanism until WS-CB's named
+    // cursor-currentof-tidcapture reason supersedes it). false ⇒ the
+    // per-table walk can never succeed: no capture, error arms only.
+    pub fn cursor_plan_current_of_eligible<'p, 'a>(
+        pstmt: &'p PlannedStmt<'a>,
+    ) -> bool
+);
+
+seam_core::seam!(
+    // §4.2 per-row capture after each single-row forward fill drive of a
+    // CURRENT-OF-eligible plan: the (tableoid, block<<16|offset ctid)
+    // identity of the scan-state row that produced the plan's current output
+    // row — the SAME data C's execCurrentOf reads (execCurrent.c:155-232).
+    // None = no positioned scan (the caller stores an invalid-identity row to
+    // keep sidecar/store row alignment).
+    pub fn cursor_capture_current(
+        query_desc: QueryDescHandle,
+    ) -> PgResult<Option<(types_core::Oid, u64)>>
+);
+// --- end WS-CA wave-10 ---------------------------------------------------------
+
+// --- SEAM-WIRING (SE10-GATES item 1, se/seam-wiring; notes/se-seam-wiring.md) ---
+// The CA-side consumption of WS-CB's EX-CB-1 faces. Production pquery reaches
+// the executor only through this crate (the EX-CA-1 precedent above), so the
+// three lanev2-hosted portal faces ride seams; execmain installs them in
+// init_seams onto the push.rs implementations. All three are cheap statics —
+// no PgResult ceremony needed.
+
+seam_core::seam!(
+    // §7.3 knob face — THE single knob cell (lanev2/push.rs `CURSORS`,
+    // env PGRUST_LANE_V2_CURSORS): the portal layer gates store arming on
+    // it. Replaces the retired portalmem duplicate cell (CB review F1(a)).
+    pub fn cursor_store_fill_enabled() -> bool
+);
+
+seam_core::seam!(
+    // §6 deletion-clock staging: called once per store ARMING decision at
+    // PortalStart (store_armed = true). Arms the run seam's forward-only
+    // debug assert (a store-armed knob-ON world never legally drives the
+    // executor backward) — CB review F1(b).
+    pub fn cursor_store_armed_note()
+);
+
+seam_core::seam!(
+    // §3.3 refusal accounting (`cursor cursor-currentof-tidcapture`,
+    // RefuseReason 41): ticked once per fill-engine decision that routes a
+    // CURRENT-OF-eligible plan's store fill onto the row chain (fill_to's
+    // eligible branch — where the eligibility answer lives). Arms the
+    // reason-41 vocabulary minted RESERVED by WS-CB — CB review F1(c).
+    pub fn cursor_fill_tid_capture_refused()
+);
+// --- end SEAM-WIRING -------------------------------------------------------------
+
+// --- SE-R41 (reason-41 retirement, se/r41-retire; notes/se-r41-retire.md) --------
+
+seam_core::seam!(
+    // §3.1 capture-batchable probe, run at PortalStart only for
+    // CURRENT-OF-ELIGIBLE armed portals: true iff the plan is the batch
+    // store-fill shape (bare T_SeqScan top over a tid-capable heap AM —
+    // the plan-side twin of `cursor_store_batch_fill`'s planstate gate).
+    // TRUE ⇒ the portal takes the PLAIN store-armed eflags and its fill
+    // captures §4.2 identity INSIDE the run (batch sink / capture row
+    // loop); FALSE (and uninstalled worlds) keep the D-CA-2 fence + the
+    // row-chain capture loop verbatim.
+    pub fn cursor_plan_capture_batch_fill<'p, 'a>(
+        pstmt: &'p PlannedStmt<'a>,
+    ) -> bool
+);
+// --- end SE-R41 ------------------------------------------------------------------

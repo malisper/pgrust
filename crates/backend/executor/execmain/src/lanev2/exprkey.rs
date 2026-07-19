@@ -1690,17 +1690,46 @@ pub(super) fn exprkey_build_fold_feed<'mcx>(
         m.mks.epoch = None;
         m.mks.code_ids.clear();
     }
-    loop {
-        let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
-        if n == 0 {
-            let mcx = estate.es_query_cxt;
-            ::exectuples::exec_clear_tuple(estate.slot_mut(ss.ss.ss_ScanTupleSlot), mcx);
-            break;
+    // K1 inc-1 source selection (the hashed feed's exact pattern, incl. the
+    // grouped small-N floor): knob-ON heap scans over the floor ride
+    // HeapBatchSource; everything else — and the whole knob-OFF world —
+    // constructs SeqScanSource (same monomorphized drain, same machine
+    // code). Knob-ON the serial scan is ONE claim: end_claim settles after
+    // the drain on success AND error (zero-pins-at-settle; the drain error
+    // wins the report), before the histogram flush / phase flip. Strict
+    // on-error pin release is the HeapBatchSource arm's; the below-floor
+    // SeqScanSource arm clears the slot only, matching base knob-OFF (see
+    // SeqScanSource::end_claim).
+    use super::batch_source::BatchGranuleSource as _;
+    if super::batch_source::heapfeed_v2_enabled() {
+        if super::batch_source::heap_gagg_admits(ss) {
+            // K1 inc-2 (wave-9 WS-AH): the expr-key twin engages late
+            // materialization on this arm only — HEAPFEED ∧ K1_LATEMAT ∧
+            // gagg-admits; the per-build shape admission (statically-known
+            // key input cols only) runs inside the drain.
+            let latemat = super::batch_source::k1_latemat_enabled();
+            let mut src = super::batch_source::HeapBatchSource::new(ss);
+            let drove = exprkey_fold_drain(
+                agg, &mut src, xk, stage_slot, compact, &mut coded, mk_shape.as_ref(),
+                &mut idxs, &mut groups, &mut mm, &mut ch, latemat, estate,
+            );
+            let settled = src.end_claim(estate);
+            drove?;
+            settled?;
+        } else {
+            let mut src = super::batch_source::SeqScanSource::new(ss);
+            let drove = exprkey_fold_drain(
+                agg, &mut src, xk, stage_slot, compact, &mut coded, mk_shape.as_ref(),
+                &mut idxs, &mut groups, &mut mm, &mut ch, false, estate,
+            );
+            let settled = src.end_claim(estate);
+            drove?;
+            settled?;
         }
-        ::postgres_seams::check_for_interrupts::call()?;
-        exprkey_batch(
+    } else {
+        exprkey_fold_drain(
             agg,
-            ss,
+            &mut super::batch_source::SeqScanSource::new(ss),
             xk,
             stage_slot,
             compact,
@@ -1710,13 +1739,159 @@ pub(super) fn exprkey_build_fold_feed<'mcx>(
             &mut groups,
             &mut mm,
             &mut ch,
-            n,
+            false,
             estate,
         )?;
     }
     // Pending histogram counts flush at feed end (before the phase flip).
     ch_flush(agg, xk, &mut ch, &mut mm.scratch)?;
     ::nodeagg::agg_hash_build_finish(agg, estate)
+}
+
+/// The expr-key feed's drain half (K1 inc-1; the hashed drain's exact
+/// pattern): generic over the storage seam's batch source — the staging
+/// loop only; the per-batch machinery (`exprkey_batch`) reaches the hosted
+/// scan through the transitional `seq_scan_bridge` (WS-A inc-2 deletes
+/// it). Both instantiations monomorphize to #[inline] delegation — the
+/// SeqScanSource instantiation is the pre-split machine code.
+#[allow(clippy::too_many_arguments)]
+fn exprkey_fold_drain<'mcx, S: super::batch_source::BatchGranuleSource<'mcx>>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    src: &mut S,
+    xk: &mut ExprKeyState,
+    stage_slot: &mut Option<ExecSlotId>,
+    compact: bool,
+    coded: &mut bool,
+    mk_shape: Option<&::nodeagg::MkShape>,
+    idxs: &mut Vec<u32>,
+    groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
+    mm: &mut MmState,
+    ch: &mut Option<CodeHistState>,
+    latemat: bool,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
+    // End-of-scan clear ownership is process-static (trait-doc single-owner
+    // rules): knob-OFF the drain clears inline exactly as before; knob-ON
+    // the feed wrapper's end_claim owns it.
+    let clear_inline = !super::batch_source::heapfeed_v2_enabled();
+    // K1 inc-2 late-materialization arm (wave-9 WS-AH), per build: staging
+    // narrows to {qual clause cols ∪ the key's statically-known input cols};
+    // the deferred prefix columns complete per batch for qual survivors
+    // only. Only key kinds whose input set is statically known admit
+    // (TsTrunc input / the Arith program's lane width); Multi/Reduced/Dict
+    // refuse NAMED `k1-latemat-exprkey-shape` (their per-batch machinery
+    // reads whole-batch or code-derived cells this seam cannot narrow).
+    let latemat_cols: Option<Vec<u16>> = if latemat {
+        exprkey_k1_latemat_arm(super::batch_source::require_bridge(src)?, agg, xk)
+    } else {
+        None
+    };
+    loop {
+        let n = src.next_batch(estate)?;
+        if n == 0 {
+            if clear_inline {
+                let ss = super::batch_source::require_bridge(src)?;
+                let mcx = estate.es_query_cxt;
+                ::exectuples::exec_clear_tuple(estate.slot_mut(ss.ss.ss_ScanTupleSlot), mcx);
+            }
+            break;
+        }
+        ::postgres_seams::check_for_interrupts::call()?;
+        // K1 inc-2 completion (pass B): the hashed drain's exact treatment —
+        // fill the deferred columns for the qual survivors BEFORE any
+        // consumer (the key derivation, folds, spill replays, and the
+        // per-row exits' emit publish all read completed cells; the sticky
+        // per-row exit path emits selected rows only, whose cells are
+        // completed here). Fallback bits OR'd into the bitmap are harmless
+        // (kind-0 rows only fill).
+        if let Some(cols) = &latemat_cols {
+            // WS-AH review F3 hardening: pin the arm invariant (an armed
+            // drive recomputes the whole-qual bitmap on every staged batch
+            // — qual_armed + nwords > 0) against future feed re-plumbing;
+            // a stale bitmap here would silently complete the wrong rows.
+            #[cfg(debug_assertions)]
+            {
+                let ss = super::batch_source::require_bridge(src)?;
+                debug_assert!(
+                    ::nodeseqscan::seq_scan_batch_qual_bitmap_ready(ss),
+                    "k1-latemat completion without THIS batch's whole-qual bitmap"
+                );
+            }
+            let nwords = (n as usize).div_ceil(64);
+            let mut sel = [0u64; ::exectuples::SOA_BM_WORDS];
+            match src.qual_sel() {
+                Some(s) => sel[..nwords].copy_from_slice(&s[..nwords]),
+                // Belt: no staged verdict ⇒ complete every row (never a
+                // stale cell).
+                None => sel[..nwords].fill(u64::MAX),
+            }
+            src.complete_deform(estate, cols, &sel[..nwords])?;
+        }
+        exprkey_batch(
+            agg,
+            super::batch_source::require_bridge(src)?,
+            xk,
+            stage_slot,
+            compact,
+            coded,
+            mk_shape,
+            idxs,
+            groups,
+            mm,
+            ch,
+            n,
+            estate,
+        )?;
+    }
+    Ok(())
+}
+
+/// K1 inc-2 late-materialization admission for the expr-key twin (wave-9
+/// WS-AH, contract §2 scope 3): the hashed drain's `scan_k1_latemat_arm`
+/// pattern with the key set = the kind's statically-known INPUT columns —
+/// TsTrunc's one input column, or the Arith program's whole lane width
+/// (`Lane { values: soa.col_values(c) }` for c in 0..ncols at derivation).
+/// Multi/Reduced/Dict refuse NAMED `k1-latemat-exprkey-shape`: their
+/// per-batch machinery (packability pre-checks, representative-domain
+/// guards, dict-window code paths) reads cells this seam cannot narrow
+/// soundly. Guarded/vguard plans refuse NAMED (rail G).
+fn exprkey_k1_latemat_arm<'mcx>(
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    agg: &::nodeagg::AggStateData<'mcx>,
+    xk: &ExprKeyState,
+) -> Option<Vec<u16>> {
+    // Per-build re-decision: never inherit a previous build's narrowing.
+    ::nodeseqscan::seq_scan_k1_latemat_disarm(ss);
+    let plan = ::nodeagg::agg_lanefold_plan(agg)?;
+    if plan.guarded || !plan.vguards.is_empty() {
+        ::laneexec::log_refused("k1-latemat-guard-cols");
+        return None;
+    }
+    let keys: Vec<u16> = match &xk.kind {
+        ExprKeyKind::TsTrunc { input_col, .. } => vec![*input_col],
+        ExprKeyKind::Arith { ncols, .. } => (0..*ncols as u16).collect(),
+        ExprKeyKind::Multi(_) | ExprKeyKind::Reduced { .. } | ExprKeyKind::Dict { .. } => {
+            ::laneexec::log_refused("k1-latemat-exprkey-shape");
+            return None;
+        }
+    };
+    // K1-F2 selectivity gate (SE9-GATES item 2): the hashed drain's exact
+    // admission — late-mat only inside the plan-time low-selectivity win
+    // envelope; one estimate per BUILD.
+    if let Err(reason) = super::batch_source::k1_latemat_sel_admits(ss) {
+        ::laneexec::log_refused(reason);
+        return None;
+    }
+    match ::nodeseqscan::seq_scan_k1_latemat_arm(ss, &keys) {
+        Ok(cols) => {
+            trace_feed("k1 late-mat staging engaged (expr-key twin)");
+            Some(cols)
+        }
+        Err(reason) => {
+            ::laneexec::log_refused(reason);
+            None
+        }
+    }
 }
 
 /// `PGRUST_LANE_V2_CODEHIST=0|off` kill switch (default ON inside the lane).

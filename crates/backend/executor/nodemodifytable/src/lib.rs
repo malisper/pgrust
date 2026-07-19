@@ -223,7 +223,10 @@ pub struct ModifyTableState<'mcx> {
 impl<'mcx> ModifyTableState<'mcx> {
     // The dispatch-current result relation (C: resultRelInfo cursor preloaded
     // from mt_lastResultIndex).
-    #[inline]
+    // inline(always): trivial accessor on the per-row insert path — the
+    // plain hint lost to the two-monomorphization caller context after the
+    // wave-2 seam split (se2-cost-fix round 2; +13 instr/row outlined).
+    #[inline(always)]
     fn rel(&self) -> &ResultRelExec<'mcx> {
         if self.insert_target_root {
             return self.root_rel();
@@ -1287,35 +1290,153 @@ pub fn exec_modify_table<'mcx>(
         u32,
     ) -> PgResult<Option<ExecSlotId>>,
 ) -> PgResult<Option<ExecSlotId>> {
-    if mt.mt_done {
+    if !mt_begin(mt, estate, outer_instr_idx)? {
         return Ok(None);
+    }
+    mt_step(mt, estate, &mut fetch_outer, &mut epq_eval)
+}
+
+/// The per-call head of `exec_modify_table` (wave-2 WS-N seam `mt_begin`,
+/// integration contract §3.7 — a pure code move of the pre-loop statements):
+/// the node-done check, the EXPLAIN-ANALYZE outer-instrument carry, and the
+/// once-per-statement BEFORE STATEMENT trigger firing. `Ok(false)` = the node
+/// already ran to completion (the caller returns end-of-set without touching
+/// anything else). Idempotent across pulls: `fireBSTriggers` flips off after
+/// the first call, `mt_done` short-circuits post-completion calls.
+///
+/// inline attributes on the mt_* seams (se2-cost-fix): the seam
+/// decomposition must not cost the knob-OFF Volcano arm its pre-seam
+/// codegen — the m4 fleet pair measured the outlined seams at +123
+/// instr/INSERT-statement and +55-60 instr/row (batch) against the
+/// knob-OFF==baseline letter. `#[inline(always)]` on the per-row seams
+/// restores the loop-body inlining `exec_modify_table` had when this code
+/// was its literal loop body; `#[inline]` on the per-statement seams keeps
+/// their call overhead out of the per-statement floor (±4).
+#[inline(always)]
+pub fn mt_begin<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    outer_instr_idx: Option<u32>,
+) -> PgResult<bool> {
+    if mt.mt_done {
+        return Ok(false);
     }
     mt.outer_instr_idx = outer_instr_idx;
     if mt.fireBSTriggers {
         fire_bs_triggers(mt, estate)?;
         mt.fireBSTriggers = false;
     }
+    Ok(true)
+}
 
+/// The loop-top per-row reset of `exec_modify_table` (wave-2 WS-N seam
+/// `mt_row_prologue`, contract §3.7): the per-tuple expr-context reset plus
+/// the node's index-expression eval-context reset. Contract LAW (§3.7): this
+/// runs BEFORE the child pull — the per-tuple context may hold by-ref datums
+/// the PREVIOUS row's processing produced, and the reset must not run after
+/// the next child row is fetched (the fetched slot's datums could live
+/// there). In the lane hosting the placement is structural: `MtChildSource::
+/// next_row` (lanev2/dml.rs) calls this before pulling, never `accept`.
+#[inline(always)] // per-row seam — see mt_begin's se2-cost-fix note
+pub fn mt_row_prologue<'mcx>(mt: &mut ModifyTableState<'mcx>, estate: &mut EStateData<'mcx>) {
+    estate.reset_per_tuple_expr_context();
+    mt.index_eval_cx.as_mut().expect("index_eval_cx live until ExecEndNode").reset();
+}
+
+/// Whether a deferred MERGE ... WHEN NOT MATCHED [BY TARGET] action from the
+/// previous source row is queued (wave-2 WS-N seam `mt_pending`, contract
+/// §3.7). Only `exec_merge_matched_scan`'s concurrent-flip leg sets it; a
+/// plain INSERT/UPDATE/DELETE node never reports pending.
+#[inline(always)] // per-row seam — see mt_begin's se2-cost-fix note
+pub fn mt_pending(mt: &ModifyTableState<'_>) -> bool {
+    mt.mt_merge_pending_not_matched.is_some()
+}
+
+/// Run the deferred MERGE NOT MATCHED action (wave-2 WS-N seam `mt_resume`,
+/// contract §3.7 — the loop-top pending arm of `exec_modify_table`, C
+/// nodeModifyTable.c 4200-4218, as a pure code move): it targets the node's
+/// toplevel result relation and runs BEFORE the next source row is fetched.
+/// The caller runs `mt_row_prologue` first (the C loop-top order).
+pub fn mt_resume<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    epq_eval: &mut impl FnMut(
+        &mut Option<executils::EpqSubs<'mcx>>,
+        &mut EStateData<'mcx>,
+        ExecSlotId,
+        u32,
+    ) -> PgResult<Option<ExecSlotId>>,
+) -> PgResult<Option<ExecSlotId>> {
+    let pending = mt
+        .mt_merge_pending_not_matched
+        .take()
+        .expect("mt_resume called without a pending MERGE action");
+    mt.cur = 0;
+    mt.last_result_oid = 0;
+    exec_merge_not_matched(mt, estate, pending, epq_eval)
+}
+
+/// One `exec_modify_table` call's worth of the ModifyTable loop, composed
+/// from the wave-2 WS-N seams (contract §3.7): per row, `mt_row_prologue` →
+/// the `mt_pending`/`mt_resume` deferred-MERGE arm → child pull →
+/// `mt_accept_row`; on child exhaustion, `mt_source_exhausted`. BOTH engines
+/// drive this exact function — `exec_modify_table` (the Volcano arm) above,
+/// and the lane host's `MtChildSource` delegation (lanev2/dml.rs) — so the
+/// statement stream is identical by construction.
+#[inline(always)] // loop composition — see mt_begin's se2-cost-fix note
+pub fn mt_step<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    fetch_outer: &mut impl FnMut(&mut EStateData<'mcx>) -> PgResult<Option<ExecSlotId>>,
+    epq_eval: &mut impl FnMut(
+        &mut Option<executils::EpqSubs<'mcx>>,
+        &mut EStateData<'mcx>,
+        ExecSlotId,
+        u32,
+    ) -> PgResult<Option<ExecSlotId>>,
+) -> PgResult<Option<ExecSlotId>> {
     loop {
-        estate.reset_per_tuple_expr_context();
-        mt.index_eval_cx.as_mut().expect("index_eval_cx live until ExecEndNode").reset();
+        mt_row_prologue(mt, estate);
 
-        // A deferred MERGE ... WHEN NOT MATCHED [BY TARGET] action from the
-        // previous source row runs before fetching the next one (C 4200-4218);
-        // it targets the node's toplevel result relation.
-        if let Some(pending) = mt.mt_merge_pending_not_matched.take() {
-            mt.cur = 0;
-            mt.last_result_oid = 0;
-            if let Some(rslot) = exec_merge_not_matched(mt, estate, pending, &mut epq_eval)? {
+        if mt_pending(mt) {
+            if let Some(rslot) = mt_resume(mt, estate, epq_eval)? {
                 return Ok(Some(rslot));
             }
             continue;
         }
 
         let Some(plan_slot) = fetch_outer(estate)? else {
-            break;
+            mt_source_exhausted(mt, estate)?;
+            return Ok(None);
         };
 
+        if let Some(rslot) = mt_accept_row(mt, estate, plan_slot, epq_eval)? {
+            return Ok(Some(rslot));
+        }
+    }
+}
+
+/// Process one fetched source row (wave-2 WS-N seam `mt_accept_row`,
+/// contract §3.7 — the loop body of `exec_modify_table` from the
+/// EvalPlanQualSetSlot mirror through the operation dispatch, as a pure code
+/// move). `Some` = a RETURNING row to hand to the caller; `None` = the row
+/// was consumed without producing output (the caller pulls the next one).
+#[inline(always)] // per-row seam (the former loop body) — see mt_begin's note
+pub fn mt_accept_row<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    plan_slot: ExecSlotId,
+    epq_eval: &mut impl FnMut(
+        &mut Option<executils::EpqSubs<'mcx>>,
+        &mut EStateData<'mcx>,
+        ExecSlotId,
+        u32,
+    ) -> PgResult<Option<ExecSlotId>>,
+) -> PgResult<Option<ExecSlotId>> {
+    // The 4-space-deep block below is the loop body verbatim (pure code
+    // move): a former `continue` (row consumed, pull the next) is now
+    // `return Ok(None)`, the `return Ok(Some(..))`s are unchanged.
+    {
         // C EvalPlanQualSetSlot: the EPQ rowmark fetch reads this row's junk
         // ctid/wholerow columns to re-return the source rel's tuple.
         mt.epq_origslot = Some(plan_slot);
@@ -1343,11 +1464,12 @@ pub fn exec_modify_table<'mcx>(
                     mt.cur = 0;
                     mt.last_result_oid = 0;
                     if let Some(rslot) =
-                        exec_merge(mt, estate, plan_slot, None, None, &mut epq_eval)?
+                        exec_merge(mt, estate, plan_slot, None, None, &mut *epq_eval)?
                     {
                         return Ok(Some(rslot));
                     }
-                    continue;
+                    // Former loop `continue`: the row is consumed.
+                    return Ok(None);
                 }
                 return Err(Box::new(PgError::error("tableoid is NULL".to_string())));
             }
@@ -1363,7 +1485,7 @@ pub fn exec_modify_table<'mcx>(
                     exec_init_insert_projection(mt, estate)?;
                 }
                 let slot = exec_get_insert_new_tuple(mt, estate, plan_slot)?;
-                let result = exec_insert(mt, estate, slot, &mut epq_eval)?;
+                let result = exec_insert(mt, estate, slot, &mut *epq_eval)?;
                 if let Some(rslot) = result {
                     if mt.rel().project_returning.is_some() {
                         let old = mt.oc_old_slot.take();
@@ -1461,7 +1583,7 @@ pub fn exec_modify_table<'mcx>(
                 }
                 fetch_old_row_version(mt, estate, &tupleid)?;
                 let slot = exec_get_update_new_tuple(mt, estate, plan_slot)?;
-                match exec_update(mt, estate, &mut tupleid, slot, &mut epq_eval)? {
+                match exec_update(mt, estate, &mut tupleid, slot, &mut *epq_eval)? {
                     UpdateResult::NotModified => {}
                     UpdateResult::Modified => {
                         if mt.rel().project_returning.is_some() {
@@ -1527,7 +1649,7 @@ pub fn exec_modify_table<'mcx>(
             CmdType::CMD_DELETE => {
                 let mut tupleid = fetch_row_id(mt, estate, plan_slot);
                 let modified =
-                    exec_delete(mt, estate, &mut tupleid, &mut epq_eval, false, None, None)?;
+                    exec_delete(mt, estate, &mut tupleid, &mut *epq_eval, false, None, None)?;
                 if modified && mt.rel().project_returning.is_some() {
                     let old_slot = exec_delete_fetch_old(mt, estate, &tupleid)?;
                     return Ok(Some(exec_process_returning(
@@ -1555,7 +1677,7 @@ pub fn exec_modify_table<'mcx>(
                     mt.last_result_oid = 0;
                 }
                 if let Some(rslot) =
-                    exec_merge(mt, estate, plan_slot, tupleid, oldtup, &mut epq_eval)?
+                    exec_merge(mt, estate, plan_slot, tupleid, oldtup, &mut *epq_eval)?
                 {
                     return Ok(Some(rslot));
                 }
@@ -1563,7 +1685,23 @@ pub fn exec_modify_table<'mcx>(
             other => panic!("ExecModifyTable (nodeModifyTable.c): {other:?} arm not ported"),
         }
     }
+    // The row was consumed without producing a RETURNING row (the former
+    // loop-bottom fall-through).
+    Ok(None)
+}
 
+/// The child-exhausted epilogue of `exec_modify_table` (wave-2 WS-N seam
+/// `mt_source_exhausted`, contract §3.7 — the post-loop statements as a pure
+/// code move): the pgrcolumnar statement-end flush, AFTER STATEMENT
+/// triggers, and the `mt_done` latch. Runs exactly once per statement — the
+/// latch makes every later `mt_begin` report done.
+// inline(always): the plain hint did not take (round-2 dist-prof callgrind
+// still shows both codegen copies outlined, +55/stmt) — se2-cost-fix round 3.
+#[inline(always)]
+pub fn mt_source_exhausted<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<()> {
     debug_assert!(estate.es_insert_pending_result_relations.is_empty());
     // pgrcolumnar statement-end flush: single-tuple inserts buffer in the AM's
     // per-statement ingest writer (pgrcolumnar::tuple_insert; RG-sized seals
@@ -1581,7 +1719,132 @@ pub fn exec_modify_table<'mcx>(
     }
     fire_as_triggers(mt, estate)?;
     mt.mt_done = true;
-    Ok(None)
+    Ok(())
+}
+
+/// Lane-admission shape probe (lanev2/dml.rs, behind `PGRUST_LANE_V2_DML`;
+/// wave-2 WS-N inc-1 authored it as `mt_lane_insert_refusal`, wave-3 WS-T
+/// inc-3a renamed + WIDENED it per docs/design/lane-dml-epq.md §6, wave-5
+/// WS-W widened the ON CONFLICT arm per the wave-5 contract §8.3):
+/// `None` = a shape the DML lane hosts — a single-result-relation
+/// plain-table mutation with no triggers, no partition routing / inherited
+/// root, and at most trivial (no OLD/NEW alias) RETURNING, where the
+/// operation is INSERT always, UPDATE/DELETE only when the caller passes
+/// `admit_ud` (the nested `PGRUST_LANE_V2_DML_UD` stretch knob, read by
+/// the lane AFTER the host knob — never here), and INSERT .. ON CONFLICT
+/// (DO NOTHING and DO UPDATE, the ladder-named OC arms — the four oc_*
+/// seams above compose the whole ceremony inside `exec_insert`, which
+/// both engines share) only when the caller passes `admit_oc` (the nested
+/// `PGRUST_LANE_V2_DML_OC` knob, same read discipline).
+/// `Some(detail)` = the `DmlShape` refusal with its mechanism-attribution
+/// detail string (integration contract §1: attribution rides the detail
+/// string, never a second class). MERGE stays refused EVEN under both
+/// nested knobs (blocked on the C-side trace pin); partition routing and
+/// triggers have no scheduled increment; the structural gates below are
+/// operation-agnostic, so a UD- or OC-admitted shape passes exactly the
+/// inc-1 INSERT gates (in particular `target-not-plain-table` keeps the
+/// VIEW/ir-trigger arms of `mt_accept_row` out of the admitted set, and
+/// `partition-routing` keeps the leaf-arbiter/leaf-on-conflict legs of the
+/// oc_* seams out of the OC-admitted set).
+///
+/// Lives here (not in the lane) because the verdict reads private node
+/// state; it is a read-only probe — calling it changes nothing, so a refusal
+/// falls through to the unchanged Volcano arm byte-safely. The admitted set
+/// widens in later increments (docs/design/lane-dml-epq.md ladder); every
+/// widening deletes (or knob-gates) a `Some` arm here and re-justifies its
+/// allowlist row together.
+pub fn mt_lane_shape_refusal(
+    mt: &ModifyTableState<'_>,
+    admit_ud: bool,
+    admit_oc: bool,
+    admit_row_triggers: bool,
+) -> Option<&'static str> {
+    match mt.operation {
+        CmdType::CMD_INSERT => {}
+        CmdType::CMD_UPDATE if admit_ud => {}
+        CmdType::CMD_DELETE if admit_ud => {}
+        CmdType::CMD_UPDATE => return Some("update"),
+        CmdType::CMD_DELETE => return Some("delete"),
+        CmdType::CMD_MERGE => return Some("merge"),
+        _ => return Some("unknown-operation"),
+    }
+    if mt.plan.onConflictAction
+        != types_nodes::primnodes::OnConflictAction::ONCONFLICT_NONE as u32
+        && !admit_oc
+    {
+        return Some("on-conflict");
+    }
+    // rootRelation > 0 = partitioned or inherited target: INSERT routes
+    // through the root (`root` is Some); >1 result rels never happens for
+    // INSERT but is refused defensively with the same detail.
+    if mt.root.is_some() || mt.rels.len() != 1 {
+        return Some("partition-routing");
+    }
+    let rel = &mt.rels[0];
+    // Views (INSTEAD OF triggers / auto-updatable), foreign tables,
+    // matviews, partitioned roots reached without `root`: not plain heaps.
+    if rel.relkind != RELKIND_RELATION {
+        return Some("target-not-plain-table");
+    }
+    // ANY triggers on the target: refused since inc-1 — EXCEPT the wave-7
+    // WS-AA fusion inc-1(a) chain shape (docs/design/rowmode-endgame.md
+    // §2.2: the ONE trigger-bearing chain): plain-heap INSERT (the
+    // structural gates above already passed) with ONCONFLICT_NONE, admitted
+    // only when the caller passes `admit_row_triggers` (the
+    // `PGRUST_LANESTITCH_ROWCHAIN` chain-family knob, read by the lane
+    // AFTER the host knob — never here). UD- and OC-widened operations
+    // keep refusing triggers unconditionally (S1/S10 interplay is not the
+    // chartered shape), as does MERGE above. `mt_rowchain_trigger_admission`
+    // is the pure verdict (unit-pinned truth table).
+    if rel.trigdesc.is_some()
+        && !mt_rowchain_trigger_admission(
+            admit_row_triggers,
+            mt.operation,
+            mt.plan.onConflictAction,
+        )
+    {
+        return Some("triggers");
+    }
+    // RETURNING is admitted (contract §6-WS-N(1)); the OLD/NEW-alias form
+    // (RETURNING OLD.*, NEW.*) is the non-trivial carve-out this increment.
+    if let Some(st) = rel.project_returning.as_deref() {
+        if st.has_old() || st.has_new() {
+            return Some("returning-old-new");
+        }
+    }
+    None
+}
+
+/// The wave-7 WS-AA fusion inc-1(a) trigger-arm verdict, factored PURE so
+/// the truth table is unit-pinnable without a ModifyTableState fixture:
+/// a trigdesc-bearing target is admitted iff the rowchain knob is armed,
+/// the operation is INSERT, and there is no ON CONFLICT clause (the ONE
+/// chartered chain shape — BR-row and/or AR-row INSERT triggers on a
+/// single plain-heap result relation; the structural gates live in
+/// `mt_lane_shape_refusal`). Everything else keeps the "triggers" refusal
+/// byte-for-byte.
+#[inline]
+pub fn mt_rowchain_trigger_admission(
+    admit_row_triggers: bool,
+    operation: CmdType,
+    on_conflict_action: u32,
+) -> bool {
+    admit_row_triggers
+        && operation == CmdType::CMD_INSERT
+        && on_conflict_action
+            == types_nodes::primnodes::OnConflictAction::ONCONFLICT_NONE as u32
+}
+
+/// Chain-family probe for the wave-7 WS-AA trigger-INSERT row chain
+/// (dml.rs dispatch): true = this ADMITTED statement is the trigger-bearing
+/// chain shape (trigdesc present on the single result relation). Reads
+/// private node state, so it lives here like `mt_lane_shape_refusal`;
+/// read-only, refusal falls through byte-safely.
+#[inline]
+pub fn mt_rowchain_shape(mt: &ModifyTableState<'_>) -> bool {
+    mt.operation == CmdType::CMD_INSERT
+        && mt.rels.len() == 1
+        && mt.rels[0].trigdesc.is_some()
 }
 
 // ExecGetAllUpdatedCols (execUtils.c): perminfo updatedCols unioned with the
@@ -1733,6 +1996,7 @@ fn execute_attr_map_cols<'mcx>(
 // fireBSTriggers/fireASTriggers (nodeModifyTable.c); INSERT ... ON CONFLICT
 // DO UPDATE fires both INSERT and UPDATE statement triggers (AS: UPDATE
 // first); MERGE fires per present subcommand.
+#[inline(always)] // se2-cost-fix round 3: the round-2 plain hint did not take (+40/stmt outlined)
 fn fire_bs_triggers<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -1754,6 +2018,7 @@ fn fire_bs_triggers<'mcx>(
     Ok(())
 }
 
+#[inline(always)] // se2-cost-fix round 3: rides mt_source_exhausted's always-inline chain
 fn fire_as_triggers<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -2098,6 +2363,175 @@ fn merge_join_qual_passes<'mcx>(
     }
 }
 
+// =============================================================================
+// MERGE action-dispatch seams — wave-5 WS-W §8.2.
+//
+// PURE CODE MOVES: the WHEN-qual action selection blocks of
+// `exec_merge_matched_scan` / `exec_merge_not_matched` and the NOT MATCHED
+// INSERT-action projection, relocated verbatim behind named seams so the
+// MERGE dispatch has the same reviewable joints as the OC ceremony above.
+// The action walk itself (list order, first-pass-wins, the per-action
+// TM_Result arms) is UNTOUCHED. MERGE stays REFUSAL-ONLY in the lane even
+// knob-ON (contract §8.2: the inc-3 C-side trace pin is outstanding);
+// these seams serve the Volcano arm today and give the eventual MERGE
+// increment its admission joints.
+// =============================================================================
+
+/// MERGE seam — WHEN [MATCHED | NOT MATCHED BY SOURCE] AND qual over one
+/// action of the caller-selected list (`by_source` = the sticky
+/// actionStates choice): scan = old target tuple, inner = plan row.
+/// Returns the action's command type and whether its qual passed.
+#[inline]
+fn merge_when_qual_matched<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    ai: usize,
+    by_source: bool,
+    plan_slot: ExecSlotId,
+    old_id: ExecSlotId,
+) -> PgResult<(CmdType, bool)> {
+    let node_ecxt = mt.node_ecxt;
+    {
+        let merge = mt.rel().merge.as_ref().expect("merge state");
+        let action = if by_source {
+            &merge.not_matched_by_source_actions[ai]
+        } else {
+            &merge.matched_actions[ai]
+        };
+        pre_eval_param_deps(action.when_qual.as_deref(), estate)?;
+    }
+    let merge = mt.rel_mut().merge.as_mut().expect("merge state");
+    let action = if by_source {
+        &mut merge.not_matched_by_source_actions[ai]
+    } else {
+        &mut merge.matched_actions[ai]
+    };
+    if action.when_qual.as_deref().is_some_and(|q| q.has_subplan()) {
+        let ec = node_ecxt.expect("node ecxt created with MERGE");
+        estate.reset_expr_context(ec);
+        {
+            let e = estate.ecxt_mut(ec);
+            e.ecxt_scantuple = Some(old_id);
+            e.ecxt_innertuple = Some(plan_slot);
+            e.ecxt_outertuple = None;
+        }
+        Ok((
+            action.command_type,
+            executils::exec_qual_with_subplans(
+                action.when_qual.as_deref_mut(),
+                estate,
+                ec,
+            )?,
+        ))
+    } else {
+        let EStateData { es_tupleTable, .. } = &mut *estate;
+        let (o, p) = (old_id.0 as usize, plan_slot.0 as usize);
+        assert!(o != p && o < es_tupleTable.len() && p < es_tupleTable.len());
+        let base = es_tupleTable.as_mut_ptr();
+        // SAFETY: distinct in-bounds indices of one live slice.
+        let (old_slot, plan) = unsafe { (&mut *base.add(o), &mut *base.add(p)) };
+        let mut slots =
+            EvalSlots { scan: Some(old_slot), inner: Some(plan), outer: None };
+        Ok((
+            action.command_type,
+            execexpr::exec_qual(action.when_qual.as_deref_mut(), &mut slots)?,
+        ))
+    }
+}
+
+/// MERGE seam — WHEN NOT MATCHED [BY TARGET] AND qual over one action of
+/// the not_matched list: no old tuple (scan = None), inner = plan row.
+/// Returns the action's command type and whether its qual passed.
+#[inline]
+fn merge_when_qual_not_matched<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    ai: usize,
+    plan_slot: ExecSlotId,
+) -> PgResult<(CmdType, bool)> {
+    let node_ecxt = mt.node_ecxt;
+    {
+        let merge = mt.rel().merge.as_ref().expect("merge state");
+        pre_eval_param_deps(merge.not_matched_actions[ai].when_qual.as_deref(), estate)?;
+    }
+    let merge = mt.rel_mut().merge.as_mut().expect("merge state");
+    let action = &mut merge.not_matched_actions[ai];
+    if action.when_qual.as_deref().is_some_and(|q| q.has_subplan()) {
+        let ec = node_ecxt.expect("node ecxt created with MERGE");
+        estate.reset_expr_context(ec);
+        {
+            let e = estate.ecxt_mut(ec);
+            e.ecxt_scantuple = None;
+            e.ecxt_innertuple = Some(plan_slot);
+            e.ecxt_outertuple = None;
+        }
+        Ok((
+            action.command_type,
+            executils::exec_qual_with_subplans(
+                action.when_qual.as_deref_mut(),
+                estate,
+                ec,
+            )?,
+        ))
+    } else {
+        let plan = &mut estate.es_tupleTable[plan_slot.0 as usize];
+        let mut slots = EvalSlots { scan: None, inner: Some(plan), outer: None };
+        Ok((
+            action.command_type,
+            execexpr::exec_qual(action.when_qual.as_deref_mut(), &mut slots)?,
+        ))
+    }
+}
+
+/// MERGE seam — the NOT MATCHED INSERT action's merge-action projection
+/// (the matched-side counterpart is the pre-existing
+/// `merge_project_update`): project the plan row through the action's
+/// projection into `new_id` (the root-format new slot when the target is
+/// inherited/partitioned).
+#[inline]
+fn merge_project_not_matched<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    ai: usize,
+    plan_slot: ExecSlotId,
+    new_id: ExecSlotId,
+) -> PgResult<()> {
+    let mcx = estate.es_query_cxt;
+    let node_ecxt = mt.node_ecxt;
+    {
+        let merge = mt.rel().merge.as_ref().expect("merge state");
+        pre_eval_param_deps(merge.not_matched_actions[ai].proj.as_deref(), estate)?;
+    }
+    let merge = mt.rel_mut().merge.as_mut().expect("merge state");
+    let action = &mut merge.not_matched_actions[ai];
+    if action.proj.as_deref().is_some_and(|p| p.has_subplan()) {
+        let ec = node_ecxt.expect("node ecxt created with MERGE");
+        estate.reset_expr_context(ec);
+        {
+            let e = estate.ecxt_mut(ec);
+            e.ecxt_scantuple = None;
+            e.ecxt_innertuple = Some(plan_slot);
+            e.ecxt_outertuple = None;
+        }
+        let proj =
+            action.proj.as_deref_mut().expect("INSERT action projection");
+        executils::exec_project_with_subplans(proj, estate, ec, new_id)?;
+    } else {
+        let EStateData { es_tupleTable, .. } = &mut *estate;
+        let (p, n) = (plan_slot.0 as usize, new_id.0 as usize);
+        assert!(p != n && p < es_tupleTable.len() && n < es_tupleTable.len());
+        let base = es_tupleTable.as_mut_ptr();
+        // SAFETY: distinct in-bounds indices of one live slice.
+        let (plan, new_slot) =
+            unsafe { (&mut *base.add(p), &mut *base.add(n)) };
+        let mut slots =
+            EvalSlots { scan: None, inner: Some(plan), outer: None };
+        let proj = action.proj.as_deref_mut().expect("INSERT action projection");
+        execexpr::exec_project(proj, &mut slots, new_slot, mcx)?;
+    }
+    Ok(())
+}
+
 // One pass over the MATCHED (or NOT MATCHED BY SOURCE) action list — the
 // lmerge_matched body. `use_by_source` is the caller-held actionStates
 // choice; the concurrent-update recheck leg may flip it to BY SOURCE.
@@ -2131,55 +2565,8 @@ fn exec_merge_matched_scan<'mcx>(
     };
     for ai in 0..n_actions {
         // WHEN [MATCHED] AND qual: scan = old target tuple, inner = plan row.
-        let (command_type, pass) = {
-            let node_ecxt = mt.node_ecxt;
-            {
-                let merge = mt.rel().merge.as_ref().expect("merge state");
-                let action = if by_source {
-                    &merge.not_matched_by_source_actions[ai]
-                } else {
-                    &merge.matched_actions[ai]
-                };
-                pre_eval_param_deps(action.when_qual.as_deref(), estate)?;
-            }
-            let merge = mt.rel_mut().merge.as_mut().expect("merge state");
-            let action = if by_source {
-                &mut merge.not_matched_by_source_actions[ai]
-            } else {
-                &mut merge.matched_actions[ai]
-            };
-            if action.when_qual.as_deref().is_some_and(|q| q.has_subplan()) {
-                let ec = node_ecxt.expect("node ecxt created with MERGE");
-                estate.reset_expr_context(ec);
-                {
-                    let e = estate.ecxt_mut(ec);
-                    e.ecxt_scantuple = Some(old_id);
-                    e.ecxt_innertuple = Some(plan_slot);
-                    e.ecxt_outertuple = None;
-                }
-                (
-                    action.command_type,
-                    executils::exec_qual_with_subplans(
-                        action.when_qual.as_deref_mut(),
-                        estate,
-                        ec,
-                    )?,
-                )
-            } else {
-                let EStateData { es_tupleTable, .. } = &mut *estate;
-                let (o, p) = (old_id.0 as usize, plan_slot.0 as usize);
-                assert!(o != p && o < es_tupleTable.len() && p < es_tupleTable.len());
-                let base = es_tupleTable.as_mut_ptr();
-                // SAFETY: distinct in-bounds indices of one live slice.
-                let (old_slot, plan) = unsafe { (&mut *base.add(o), &mut *base.add(p)) };
-                let mut slots =
-                    EvalSlots { scan: Some(old_slot), inner: Some(plan), outer: None };
-                (
-                    action.command_type,
-                    execexpr::exec_qual(action.when_qual.as_deref_mut(), &mut slots)?,
-                )
-            }
-        };
+        let (command_type, pass) =
+            merge_when_qual_matched(mt, estate, ai, by_source, plan_slot, old_id)?;
         if !pass {
             continue;
         }
@@ -2874,7 +3261,6 @@ fn exec_merge_not_matched<'mcx>(
         u32,
     ) -> PgResult<Option<ExecSlotId>>,
 ) -> PgResult<Option<ExecSlotId>> {
-    let mcx = estate.es_query_cxt;
     // INSERT actions project into and insert via the root relation when the
     // target is inherited/partitioned (C rootRelInfo).
     let new_id = if mt.root.is_some() {
@@ -2884,79 +3270,14 @@ fn exec_merge_not_matched<'mcx>(
     };
     let n_actions = mt.rel().merge.as_ref().expect("merge state").not_matched_actions.len();
     for ai in 0..n_actions {
-        let (command_type, pass) = {
-            let node_ecxt = mt.node_ecxt;
-            {
-                let merge = mt.rel().merge.as_ref().expect("merge state");
-                pre_eval_param_deps(merge.not_matched_actions[ai].when_qual.as_deref(), estate)?;
-            }
-            let merge = mt.rel_mut().merge.as_mut().expect("merge state");
-            let action = &mut merge.not_matched_actions[ai];
-            if action.when_qual.as_deref().is_some_and(|q| q.has_subplan()) {
-                let ec = node_ecxt.expect("node ecxt created with MERGE");
-                estate.reset_expr_context(ec);
-                {
-                    let e = estate.ecxt_mut(ec);
-                    e.ecxt_scantuple = None;
-                    e.ecxt_innertuple = Some(plan_slot);
-                    e.ecxt_outertuple = None;
-                }
-                (
-                    action.command_type,
-                    executils::exec_qual_with_subplans(
-                        action.when_qual.as_deref_mut(),
-                        estate,
-                        ec,
-                    )?,
-                )
-            } else {
-                let plan = &mut estate.es_tupleTable[plan_slot.0 as usize];
-                let mut slots = EvalSlots { scan: None, inner: Some(plan), outer: None };
-                (
-                    action.command_type,
-                    execexpr::exec_qual(action.when_qual.as_deref_mut(), &mut slots)?,
-                )
-            }
-        };
+        // WHEN NOT MATCHED AND qual: no old tuple, inner = plan row.
+        let (command_type, pass) = merge_when_qual_not_matched(mt, estate, ai, plan_slot)?;
         if !pass {
             continue;
         }
         match command_type {
             CmdType::CMD_INSERT => {
-                {
-                    let node_ecxt = mt.node_ecxt;
-                    {
-                        let merge = mt.rel().merge.as_ref().expect("merge state");
-                        pre_eval_param_deps(merge.not_matched_actions[ai].proj.as_deref(), estate)?;
-                    }
-                    let merge = mt.rel_mut().merge.as_mut().expect("merge state");
-                    let action = &mut merge.not_matched_actions[ai];
-                    if action.proj.as_deref().is_some_and(|p| p.has_subplan()) {
-                        let ec = node_ecxt.expect("node ecxt created with MERGE");
-                        estate.reset_expr_context(ec);
-                        {
-                            let e = estate.ecxt_mut(ec);
-                            e.ecxt_scantuple = None;
-                            e.ecxt_innertuple = Some(plan_slot);
-                            e.ecxt_outertuple = None;
-                        }
-                        let proj =
-                            action.proj.as_deref_mut().expect("INSERT action projection");
-                        executils::exec_project_with_subplans(proj, estate, ec, new_id)?;
-                    } else {
-                        let EStateData { es_tupleTable, .. } = &mut *estate;
-                        let (p, n) = (plan_slot.0 as usize, new_id.0 as usize);
-                        assert!(p != n && p < es_tupleTable.len() && n < es_tupleTable.len());
-                        let base = es_tupleTable.as_mut_ptr();
-                        // SAFETY: distinct in-bounds indices of one live slice.
-                        let (plan, new_slot) =
-                            unsafe { (&mut *base.add(p), &mut *base.add(n)) };
-                        let mut slots =
-                            EvalSlots { scan: None, inner: Some(plan), outer: None };
-                        let proj = action.proj.as_deref_mut().expect("INSERT action projection");
-                        execexpr::exec_project(proj, &mut slots, new_slot, mcx)?;
-                    }
-                }
+                merge_project_not_matched(mt, estate, ai, plan_slot, new_id)?;
                 mt.merge_active_cmd = Some(CmdType::CMD_INSERT);
                 mt.insert_target_root = mt.root.is_some();
                 let inserted = exec_insert(mt, estate, new_id, epq_eval);
@@ -3091,6 +3412,7 @@ pub fn exec_end_modify_table(mt: &mut ModifyTableState<'_>) {
 // ExecInitInsertProjection (nodeModifyTable.c). INSERT subplans carry no junk
 // columns on this lane (loud below), so need_projection is always false and
 // ri_newTupleSlot only exists for slot-type coercion.
+#[inline(always)] // se2-cost-fix round 3: the round-2 plain hint did not take (+139/stmt outlined)
 fn exec_init_insert_projection<'mcx>(
     mt: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -3215,6 +3537,12 @@ fn expr_type(node: Node<'_>) -> u32 {
 }
 
 // ExecGetInsertNewTuple (nodeModifyTable.c), no-projection arm.
+//
+// inline(always): the per-row new-tuple fetch (and its exec_copy_slot call
+// site) was inline in exec_modify_table at base; after the wave-2 seam
+// split it went outlined in BOTH monomorphizations (+51 instr/row named by
+// the se2-cost dist-prof attribution) — se2-cost-fix round 2.
+#[inline(always)]
 fn exec_get_insert_new_tuple<'mcx>(
     mt: &ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
@@ -5982,124 +6310,36 @@ fn exec_insert<'mcx>(
         None => mt.rel_mut().indexes.as_ref().map_or(0, |x| x.num_indices()),
     };
     if onconflict != 0 && num_indices > 0 {
-        // ExecInitPartitionInfo: a routed leaf arbitrates through its own
-        // index children of the root arbiter indexes.
-        if let Some(idx) = leaf_idx {
-            if mt.leaf_arbiters[idx].is_none() {
-                let mapped = resolve_leaf_arbiters(mt, mcx, idx)?;
-                mt.leaf_arbiters[idx] = Some(mapped);
-            }
-        }
+        // The speculative-insert (ON CONFLICT) ceremony, composed from the
+        // four named OC seams (wave-5 WS-W §8.1 — pure code moves of the
+        // former inline blocks; the statement stream is exec_insert's own,
+        // unchanged): arbiter selection → the vlock retry loop of
+        // [arbiter pre-check → committed-conflict dispatch |
+        // speculative token insert/confirm/abort].
+        oc_resolve_arbiters(mt, mcx, leaf_idx)?;
         let existing_id = resolve_existing_slot(mt, estate, leaf_idx);
         // vlock:
         loop {
             let mut conflict_tid = ItemPointerData::default();
             ItemPointerSetInvalid(&mut conflict_tid);
-            let mut invalid_tid = ItemPointerData::default();
-            ItemPointerSetInvalid(&mut invalid_tid);
 
-            let pre_ok = {
-                let ModifyTableState {
-                    rels, cur, on_conflict, index_eval_cx, router, leaf_indexes, leaf_arbiters, ..
-                } = &mut *mt;
-                let oc = on_conflict.as_ref().expect("on_conflict state");
-                let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
-                let (rel, indexes, arbiters): (_, _, &[Oid]) = match leaf_idx {
-                    Some(idx) => (
-                        router.as_ref().unwrap().leaf_rel(idx),
-                        leaf_indexes[idx].as_mut().expect("indexes opened"),
-                        leaf_arbiters[idx].as_deref().expect("just resolved"),
-                    ),
-                    None => (
-                        es_relations[(rels[*cur].rti - 1) as usize]
-                            .as_ref()
-                            .expect("result relation opened"),
-                        rels[*cur].indexes.as_mut().expect("indexes opened"),
-                        &oc.arbiters,
-                    ),
-                };
-                let (s, e) = (work_slot.0 as usize, existing_id.0 as usize);
-                assert!(s != e && s < es_tupleTable.len() && e < es_tupleTable.len());
-                let base = es_tupleTable.as_mut_ptr();
-                // SAFETY: distinct in-bounds indices of one live slice.
-                let (slot, existing) = unsafe { (&mut *base.add(s), &mut *base.add(e)) };
-                execindexing::ExecCheckIndexConstraints(
-                    mcx,
-                    index_eval_cx.as_ref().expect("index_eval_cx live until ExecEndNode").mcx(),
-                    indexes,
-                    rel,
-                    slot,
-                    existing,
-                    &invalid_tid,
-                    arbiters,
-                    &mut conflict_tid,
-                )?
-            };
+            let pre_ok = oc_check_arbiter_indexes(
+                mt, estate, work_slot, existing_id, leaf_idx, &mut conflict_tid,
+            )?;
 
             if !pre_ok {
                 // Committed conflict tuple found.
-                if onconflict == types_nodes::OnConflictAction::ONCONFLICT_UPDATE as u32 {
-                    match exec_on_conflict_update(
-                        mt, estate, conflict_tid, work_slot, leaf_idx, epq_eval,
-                    )? {
-                        OnConflictOutcome::Done(rslot) => return Ok(rslot),
-                        OnConflictOutcome::Retry => continue,
-                    }
+                match oc_conflict_dispatch(
+                    mt, estate, conflict_tid, work_slot, leaf_idx, epq_eval,
+                )? {
+                    OnConflictOutcome::Done(rslot) => return Ok(rslot),
+                    OnConflictOutcome::Retry => continue,
                 }
-                exec_check_tid_visible(mt, estate, &conflict_tid, leaf_idx)?;
-                return Ok(None);
             }
 
-            let xid = xact::GetCurrentTransactionId()?;
-            let spec_token = lmgr::SpeculativeInsertionLockAcquire(xid)?;
-            let mut spec_conflict = false;
-            {
-                let ModifyTableState {
-                    rels, cur, on_conflict, index_eval_cx, router, leaf_indexes, leaf_arbiters, ..
-                } = &mut *mt;
-                let oc = on_conflict.as_ref().expect("on_conflict state");
-                let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
-                let (rel, indexes, arbiters): (_, _, &[Oid]) = match leaf_idx {
-                    Some(idx) => (
-                        router.as_ref().unwrap().leaf_rel(idx),
-                        leaf_indexes[idx].as_mut().expect("indexes opened"),
-                        leaf_arbiters[idx].as_deref().expect("just resolved"),
-                    ),
-                    None => (
-                        es_relations[(rels[*cur].rti - 1) as usize]
-                            .as_ref()
-                            .expect("result relation opened"),
-                        rels[*cur].indexes.as_mut().expect("indexes opened"),
-                        &oc.arbiters,
-                    ),
-                };
-                let slot = &mut es_tupleTable[work_slot.0 as usize];
-                tableam::table_tuple_insert_speculative(
-                    mcx, rel, slot, output_cid, 0, None, spec_token,
-                )?;
-                recheck_indexes = execindexing::ExecInsertIndexTuples(
-                    mcx,
-                    index_eval_cx.as_ref().expect("index_eval_cx live until ExecEndNode").mcx(),
-                    indexes,
-                    rel,
-                    slot,
-                    true,
-                    Some(&mut spec_conflict),
-                    arbiters,
-                    false,
-                )?;
-                tableam::table_tuple_complete_speculative(
-                    mcx,
-                    rel,
-                    slot,
-                    spec_token,
-                    !spec_conflict,
-                )?;
-            }
-            // Wake up anyone waiting for our verdict.
-            lmgr::SpeculativeInsertionLockRelease(xid)?;
-
-            if spec_conflict {
+            if oc_speculative_insert(mt, estate, work_slot, leaf_idx, &mut recheck_indexes)? {
+                // Speculative conflict: another inserter won the race; redo
+                // from vlock (the former inline `if spec_conflict { continue }`).
                 continue;
             }
             break;
@@ -6199,6 +6439,193 @@ fn exec_insert<'mcx>(
         estate.es_processed += 1;
     }
     Ok(Some(slot_id))
+}
+
+// =============================================================================
+// ON CONFLICT (speculative insertion) seams — wave-5 WS-W §8.1.
+//
+// PURE CODE MOVES out of `exec_insert`'s former inline vlock loop; every
+// statement below is the loop's own, relocated behind a named seam so the
+// ceremony has reviewable joints (the wave-2 mt_* seam discipline). The
+// composition in `exec_insert` replays the original control flow exactly:
+// `Done` = the former `return`, `Retry`/spec-conflict = the former
+// `continue`, pre_ok fall-through = the former loop `break`. No seam is
+// lane-aware: BOTH engines (the Volcano arm and the knob-gated DML lane
+// host, lanev2/dml.rs) reach these through the SAME `mt_accept_row` →
+// `exec_insert` chain, so the statement stream is identical by
+// construction.
+// =============================================================================
+
+/// OC seam 1/4 — arbiter index selection (C ExecInitPartitionInfo's
+/// ri_onConflictArbiterIndexes leg): a routed leaf arbitrates through its
+/// own index children of the root arbiter indexes, resolved once per leaf
+/// and cached in `leaf_arbiters`. The unrouted (root) case reads
+/// `on_conflict.arbiters` directly in the pre-check seam and needs no
+/// resolution here.
+#[inline]
+fn oc_resolve_arbiters<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    mcx: mcx::Mcx<'mcx>,
+    leaf_idx: Option<usize>,
+) -> PgResult<()> {
+    // ExecInitPartitionInfo: a routed leaf arbitrates through its own
+    // index children of the root arbiter indexes.
+    if let Some(idx) = leaf_idx {
+        if mt.leaf_arbiters[idx].is_none() {
+            let mapped = resolve_leaf_arbiters(mt, mcx, idx)?;
+            mt.leaf_arbiters[idx] = Some(mapped);
+        }
+    }
+    Ok(())
+}
+
+/// OC seam 2/4 — the arbiter pre-check (C ExecCheckIndexConstraints call in
+/// ExecInsert's ON CONFLICT arm): probe the arbiter indexes for a committed
+/// conflicting tuple BEFORE inserting. `Ok(true)` = no conflict, proceed to
+/// the speculative insertion; `Ok(false)` = committed conflict found,
+/// `conflict_tid` names it (the caller dispatches DO NOTHING / DO UPDATE).
+#[inline]
+fn oc_check_arbiter_indexes<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    work_slot: ExecSlotId,
+    existing_id: ExecSlotId,
+    leaf_idx: Option<usize>,
+    conflict_tid: &mut ItemPointerData,
+) -> PgResult<bool> {
+    let mcx = estate.es_query_cxt;
+    let mut invalid_tid = ItemPointerData::default();
+    ItemPointerSetInvalid(&mut invalid_tid);
+
+    let ModifyTableState {
+        rels, cur, on_conflict, index_eval_cx, router, leaf_indexes, leaf_arbiters, ..
+    } = &mut *mt;
+    let oc = on_conflict.as_ref().expect("on_conflict state");
+    let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+    let (rel, indexes, arbiters): (_, _, &[Oid]) = match leaf_idx {
+        Some(idx) => (
+            router.as_ref().unwrap().leaf_rel(idx),
+            leaf_indexes[idx].as_mut().expect("indexes opened"),
+            leaf_arbiters[idx].as_deref().expect("just resolved"),
+        ),
+        None => (
+            es_relations[(rels[*cur].rti - 1) as usize]
+                .as_ref()
+                .expect("result relation opened"),
+            rels[*cur].indexes.as_mut().expect("indexes opened"),
+            &oc.arbiters,
+        ),
+    };
+    let (s, e) = (work_slot.0 as usize, existing_id.0 as usize);
+    assert!(s != e && s < es_tupleTable.len() && e < es_tupleTable.len());
+    let base = es_tupleTable.as_mut_ptr();
+    // SAFETY: distinct in-bounds indices of one live slice.
+    let (slot, existing) = unsafe { (&mut *base.add(s), &mut *base.add(e)) };
+    execindexing::ExecCheckIndexConstraints(
+        mcx,
+        index_eval_cx.as_ref().expect("index_eval_cx live until ExecEndNode").mcx(),
+        indexes,
+        rel,
+        slot,
+        existing,
+        &invalid_tid,
+        arbiters,
+        conflict_tid,
+    )
+}
+
+/// OC seam 3/4 — DO NOTHING vs DO UPDATE dispatch over a committed conflict
+/// tuple (the former `!pre_ok` arm): DO UPDATE delegates to
+/// `exec_on_conflict_update` (whose `Retry` = redo from vlock); DO NOTHING
+/// runs the C ExecCheckTIDVisible serialization-visibility check and
+/// consumes the row (`Done(None)` ≡ the former `return Ok(None)`).
+#[inline]
+fn oc_conflict_dispatch<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    conflict_tid: ItemPointerData,
+    work_slot: ExecSlotId,
+    leaf_idx: Option<usize>,
+    epq_eval: &mut impl FnMut(
+        &mut Option<executils::EpqSubs<'mcx>>,
+        &mut EStateData<'mcx>,
+        ExecSlotId,
+        u32,
+    ) -> PgResult<Option<ExecSlotId>>,
+) -> PgResult<OnConflictOutcome> {
+    if mt.plan.onConflictAction == types_nodes::OnConflictAction::ONCONFLICT_UPDATE as u32 {
+        return exec_on_conflict_update(mt, estate, conflict_tid, work_slot, leaf_idx, epq_eval);
+    }
+    exec_check_tid_visible(mt, estate, &conflict_tid, leaf_idx)?;
+    Ok(OnConflictOutcome::Done(None))
+}
+
+/// OC seam 4/4 — the speculative token insert/confirm/abort ceremony (C
+/// table_tuple_insert_speculative .. table_tuple_complete_speculative under
+/// the SpeculativeInsertionLock): insert the tuple speculatively, insert
+/// index tuples with the arbiters in deferred-check mode, then confirm
+/// (`!spec_conflict`) or kill (`spec_conflict`) the speculative tuple and
+/// wake waiters. `Ok(true)` = a concurrent inserter won the race (the
+/// caller redoes from vlock); `Ok(false)` = the insertion stands.
+#[inline]
+fn oc_speculative_insert<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    work_slot: ExecSlotId,
+    leaf_idx: Option<usize>,
+    recheck_indexes: &mut mcx::PgVec<'mcx, Oid>,
+) -> PgResult<bool> {
+    let mcx = estate.es_query_cxt;
+    let output_cid = estate.es_output_cid;
+    let xid = xact::GetCurrentTransactionId()?;
+    let spec_token = lmgr::SpeculativeInsertionLockAcquire(xid)?;
+    let mut spec_conflict = false;
+    {
+        let ModifyTableState {
+            rels, cur, on_conflict, index_eval_cx, router, leaf_indexes, leaf_arbiters, ..
+        } = &mut *mt;
+        let oc = on_conflict.as_ref().expect("on_conflict state");
+        let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+        let (rel, indexes, arbiters): (_, _, &[Oid]) = match leaf_idx {
+            Some(idx) => (
+                router.as_ref().unwrap().leaf_rel(idx),
+                leaf_indexes[idx].as_mut().expect("indexes opened"),
+                leaf_arbiters[idx].as_deref().expect("just resolved"),
+            ),
+            None => (
+                es_relations[(rels[*cur].rti - 1) as usize]
+                    .as_ref()
+                    .expect("result relation opened"),
+                rels[*cur].indexes.as_mut().expect("indexes opened"),
+                &oc.arbiters,
+            ),
+        };
+        let slot = &mut es_tupleTable[work_slot.0 as usize];
+        tableam::table_tuple_insert_speculative(
+            mcx, rel, slot, output_cid, 0, None, spec_token,
+        )?;
+        *recheck_indexes = execindexing::ExecInsertIndexTuples(
+            mcx,
+            index_eval_cx.as_ref().expect("index_eval_cx live until ExecEndNode").mcx(),
+            indexes,
+            rel,
+            slot,
+            true,
+            Some(&mut spec_conflict),
+            arbiters,
+            false,
+        )?;
+        tableam::table_tuple_complete_speculative(
+            mcx,
+            rel,
+            slot,
+            spec_token,
+            !spec_conflict,
+        )?;
+    }
+    // Wake up anyone waiting for our verdict.
+    lmgr::SpeculativeInsertionLockRelease(xid)?;
+    Ok(spec_conflict)
 }
 
 // ExecUpdateLockMode (execMain.c): the conflicting row takes the weaker
@@ -7757,3 +8184,339 @@ mcx::forget_safe_struct!(
         transition_capture, oc_transition_capture,
         index_eval_cx },
 );
+
+// =============================================================================
+// ===== WAVE-9 APPEND REGION (WS-AG fusion D1a) — do not edit above ==========
+//
+// The rowmode-endgame §2.2 accept-seam decomposition (wave-9 contract §1
+// rung 2): the chain-admitted trigger-INSERT shape's `mt_accept_row` →
+// `exec_insert` composition, re-exposed as five separately callable seams
+// so the stitched row chain (lanev2/dml.rs) can drive the §2.2 targets —
+// `br_row_triggers` / `table_tuple_insert`+`ExecInsertIndexTuples` /
+// `ar_insert_triggers` / `exec_process_returning` — as individual protocol
+// calls with the statement-shape checks hoisted to admission (the
+// work-removal channel: the per-row drive stops re-deciding view/partition/
+// leaf/ON-CONFLICT arms that are structurally dead for the admitted shape).
+//
+// SHAPE PRECONDITION (every seam): `mt_rowchain_shape_mask` returned Some —
+// CMD_INSERT, ONCONFLICT_NONE, single plain-heap result relation (rels[0],
+// cur == 0, root None, RELKIND_RELATION), no tableoid dispatch column
+// (result_oid_attno == 0), RETURNING absent or trivial. The chain host
+// re-probes per drive and falls to the DmlInsertOp portable host on ANY
+// mismatch (fail closed, never a wrong specialization); the seams
+// debug-assert the load-bearing facts.
+//
+// BYTE-IDENTITY ARGUMENT, per target (each statement below is
+// `mt_accept_row`'s / `exec_insert`'s own, in its original order, with
+// branches DEAD-for-the-shape removed — dead-branch elision changes no
+// executed statement and no error site):
+// * `mt_ins_stage`   ≡ mt_accept_row's EvalPlanQualSetSlot mirror (the
+//   epq_origslot/epq_subs stores) + the CMD_INSERT arm's projection-init +
+//   exec_get_insert_new_tuple statements. The multi-rel tableoid dispatch
+//   block is dead (result_oid_attno == 0, debug-pinned).
+// * `mt_ins_br_triggers` ≡ exec_insert's BR block: the IDENTICAL
+//   `br_row_triggers(.., TRIGGER_TYPE_INSERT, TRIGGER_EVENT_INSERT, None,
+//   Some(slot), None)` call (leaf = None: the shape routes nothing).
+//   false = suppression ≡ exec_insert's `return Ok(None)`.
+// * `mt_ins_write`   ≡ exec_insert's statements from the (dead) routing
+//   blocks through the physical write: last_insert_leaf/remapped resets,
+//   the generated-columns + materialize + ExecOpenIndices block, the RLS
+//   WCO_RLS_INSERT_CHECK block, the constraints + relispartition-check
+//   block, then `table_tuple_insert` + `ExecInsertIndexTuples` (the
+//   onconflict == 0 arm verbatim; the speculative vlock loop is dead by
+//   ONCONFLICT_NONE). Returns the recheck_indexes the AR epilogue consumes.
+// * `mt_ins_epilogue` ≡ exec_insert's tail: `ar_insert_triggers` (leaf =
+//   None), the post-insert WCO_VIEW_CHECK arm, and the canSetTag
+//   es_processed bump.
+// * `mt_ins_returning` ≡ mt_accept_row's CMD_INSERT RETURNING block for
+//   ONCONFLICT_NONE: oc_old_slot is None by shape (debug-pinned), so cmd =
+//   CMD_INSERT and the OC materialize/clear leg is dead; the call is the
+//   IDENTICAL `exec_process_returning(.., CMD_INSERT, None, Some(rslot),
+//   plan_slot)`.
+// Error identity: every erroring statement above IS the node's own helper
+// (the two-regime error law's effectful half) — its PgError unwind is
+// byte-identical by construction, at the same position in the per-row
+// statement stream.
+// =============================================================================
+
+/// Chain-shape mask bit: the target has BEFORE ROW INSERT triggers (the
+/// chain program carries the `mt_ins_br_triggers` protocol step).
+pub const MT_ROWCHAIN_BR: u8 = 1 << 0;
+/// Chain-shape mask bit: the target projects (trivial) RETURNING (the
+/// chain program carries the `mt_ins_returning` protocol step).
+pub const MT_ROWCHAIN_RET: u8 = 1 << 1;
+/// The closed set of chain shape variants (compile-once per mask).
+pub const MT_ROWCHAIN_MASKS: usize = 4;
+
+/// The per-statement chain-shape mask (wave-9 WS-AG rung 2): Some(mask) =
+/// this ADMITTED statement is the decomposed trigger-INSERT chain shape and
+/// the `mt_ins_*` seams' specializations hold; None = drive the DmlInsertOp
+/// portable host instead (fail closed). Reads private node state, so it
+/// lives here like `mt_lane_shape_refusal`; read-only — refusal falls
+/// through byte-safely. The structural facts are already guaranteed by the
+/// admission verdict (`mt_lane_shape_refusal` with the rowchain arm); they
+/// are re-checked here defensively because the seams SPECIALIZE on them.
+pub fn mt_rowchain_shape_mask(mt: &ModifyTableState<'_>) -> Option<u8> {
+    if mt.operation != CmdType::CMD_INSERT
+        || mt.plan.onConflictAction
+            != types_nodes::primnodes::OnConflictAction::ONCONFLICT_NONE as u32
+        || mt.root.is_some()
+        || mt.rels.len() != 1
+        || mt.cur != 0
+        || mt.result_oid_attno != 0
+    {
+        return None;
+    }
+    let r = &mt.rels[0];
+    if r.relkind != RELKIND_RELATION {
+        return None;
+    }
+    // The chain family is the trigger-bearing shape (mt_rowchain_shape's
+    // own gate — trigger-less INSERTs stay on their existing hosts).
+    let td = r.trigdesc.as_ref()?;
+    let mut mask = 0u8;
+    if td.trig_insert_before_row {
+        mask |= MT_ROWCHAIN_BR;
+    }
+    if let Some(st) = r.project_returning.as_deref() {
+        if st.has_old() || st.has_new() {
+            // Admission refuses returning-old-new; defensive re-check.
+            return None;
+        }
+        mask |= MT_ROWCHAIN_RET;
+    }
+    Some(mask)
+}
+
+/// Chain seam 1/5 — stage one source row for the insert (mt_accept_row's
+/// pre-dispatch bookkeeping + the CMD_INSERT arm's projection staging).
+/// Returns the slot the write path consumes.
+#[inline]
+pub fn mt_ins_stage<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    plan_slot: ExecSlotId,
+) -> PgResult<ExecSlotId> {
+    // C EvalPlanQualSetSlot mirror — mt_accept_row's head, verbatim.
+    mt.epq_origslot = Some(plan_slot);
+    if let Some(subs) = mt.epq_subs.as_mut() {
+        subs.origslot = Some(plan_slot);
+    }
+    // The multi-rel tableoid dispatch is dead for the chain shape.
+    debug_assert_eq!(mt.result_oid_attno, 0, "chain shape has no tableoid dispatch");
+    debug_assert_eq!(mt.cur, 0, "chain shape is single-result-relation");
+    // The CMD_INSERT arm's head, verbatim.
+    if !mt.rel().ri_projectNewInfoValid {
+        exec_init_insert_projection(mt, estate)?;
+    }
+    exec_get_insert_new_tuple(mt, estate, plan_slot)
+}
+
+/// Chain seam 2/5 — the §2.2 `br_row_triggers` target: exec_insert's BR
+/// block for the unrouted plain-heap shape. `true` = proceed; `false` = the
+/// trigger suppressed the row (≡ exec_insert's `return Ok(None)`; the chain
+/// skips back to the loop top — es_processed and the RETURNING stream see
+/// nothing, exactly the Volcano suppression).
+#[inline]
+pub fn mt_ins_br_triggers<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    slot_id: ExecSlotId,
+) -> PgResult<bool> {
+    debug_assert!(
+        mt.rel().trigdesc.as_ref().is_some_and(|td| td.trig_insert_before_row),
+        "BR seam driven without BR-row triggers (mask drift)"
+    );
+    br_row_triggers(
+        mt,
+        estate,
+        types_trigger::TRIGGER_TYPE_INSERT,
+        types_trigger::TRIGGER_EVENT_INSERT,
+        None,
+        Some(slot_id),
+        None,
+    )
+}
+
+/// Chain seam 3/5 — the §2.2 write target (`table_tuple_insert` +
+/// `ExecInsertIndexTuples`) plus exec_insert's pre-write statements for the
+/// unrouted ONCONFLICT_NONE shape, in exec_insert's own order. Returns the
+/// recheck-index list `mt_ins_epilogue` consumes.
+#[inline]
+pub fn mt_ins_write<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    slot_id: ExecSlotId,
+) -> PgResult<mcx::PgVec<'mcx, Oid>> {
+    let mcx = estate.es_query_cxt;
+    let output_cid = estate.es_output_cid;
+    let mut recheck_indexes: mcx::PgVec<'_, Oid> = mcx::PgVec::new_in(mcx);
+
+    // exec_insert's routing out-params, reset exactly as the unrouted path
+    // leaves them (exec_process_returning `take`s last_insert_remapped).
+    mt.last_insert_leaf = None;
+    mt.last_insert_remapped = None;
+
+    // Stored generated columns + materialize + index open (exec_insert's
+    // middle block; the routed/remapped arms are dead for the shape).
+    {
+        let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+        let ModifyTableState { rels, cur, .. } = &mut *mt;
+        let r = &mut rels[*cur];
+        let rel = es_relations[(r.rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        let slot = &mut es_tupleTable[slot_id.0 as usize];
+
+        slot.base_mut().tts_tableOid = rel.rd_id;
+        if rel.rd_att.constr.as_deref().is_some_and(|c| c.has_generated_stored) {
+            exec_compute_stored_generated(mcx, &mut r.generated_exprs, rel, slot)?;
+        }
+        exectuples::exec_materialize_slot(slot, mcx)?;
+        slot.base_mut().tts_tableOid = rel.rd_id;
+
+        if rel.rd_rel.relhasindex && r.indexes.is_none() {
+            // onconflict == 0 by shape: speculative = false.
+            r.indexes = Some(execindexing::ExecOpenIndices(mcx, rel, false)?);
+        }
+    }
+
+    // RLS WITH CHECK OPTIONS (exec_insert's WCO block; operation is
+    // CMD_INSERT by shape, so the kind is WCO_RLS_INSERT_CHECK).
+    {
+        let ecxt = mt.node_ecxt;
+        let ModifyTableState { rels, cur, .. } = &mut *mt;
+        let wcos = &mut rels[*cur].wco_exprs;
+        if !wcos.is_empty() {
+            exec_with_check_options(estate, ecxt, wcos, WCOKind::WCO_RLS_INSERT_CHECK, slot_id)?;
+        }
+    }
+
+    // Constraints + the direct-partition check (exec_insert's constraints
+    // block; err_root_rel is None — the unrouted arm).
+    {
+        let target_rte = estate.es_range_table[(mt.rel().rti - 1) as usize];
+        let perminfos = estate.es_rteperminfos;
+        let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+        let ModifyTableState { rels, cur, .. } = &mut *mt;
+        let r = &mut rels[*cur];
+        let rel = es_relations[(r.rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        let slot = &mut es_tupleTable[slot_id.0 as usize];
+        let mod_cols = {
+            let rte = target_rte;
+            let mut cols = types_nodes::Bitmapset::empty();
+            if rte.perminfoindex > 0 {
+                if let Some(pis) = perminfos {
+                    let pi = pis
+                        .nth(rte.perminfoindex as usize - 1)
+                        .as_rte_permission_info()
+                        .expect("permInfos cell");
+                    cols = pi.insertedCols.union(&pi.updatedCols, mcx)?;
+                }
+            }
+            cols
+        };
+        exec_constraints(
+            mcx,
+            &mut r.check_exprs,
+            &mut r.virtual_nn_exprs,
+            rel,
+            slot,
+            None,
+            Some(&mod_cols),
+        )?;
+        // Direct INSERT into a partition leaf checks the partition
+        // constraint (leaf_idx.is_none() arm of exec_insert's condition).
+        if rel.rd_rel.relispartition {
+            if !execpartition::exec_partition_check(mcx, &mut r.partition_check, rel, slot)? {
+                return Err(execpartition::partition_constraint_violation(
+                    mcx,
+                    rel,
+                    slot,
+                    Some(&mod_cols),
+                    None,
+                ));
+            }
+        }
+    }
+
+    // The physical write: exec_insert's onconflict == 0 arm, verbatim.
+    {
+        let EStateData { es_relations, es_tupleTable, .. } = &mut *estate;
+        let ModifyTableState { rels, cur, index_eval_cx, .. } = &mut *mt;
+        let r = &mut rels[*cur];
+        let rel = es_relations[(r.rti - 1) as usize]
+            .as_ref()
+            .expect("result relation opened");
+        let slot = &mut es_tupleTable[slot_id.0 as usize];
+
+        tableam::table_tuple_insert(mcx, rel, slot, output_cid, 0, None)?;
+
+        if let Some(indexes) = r.indexes.as_mut() {
+            if indexes.num_indices() > 0 {
+                recheck_indexes = execindexing::ExecInsertIndexTuples(
+                    mcx,
+                    index_eval_cx.as_ref().expect("index_eval_cx live until ExecEndNode").mcx(),
+                    indexes,
+                    rel,
+                    slot,
+                    false,
+                    None,
+                    &[],
+                    false,
+                )?;
+            }
+        }
+    }
+    Ok(recheck_indexes)
+}
+
+/// Chain seam 4/5 — the §2.2 `ar_insert_triggers` target plus exec_insert's
+/// tail (post-insert view CHECK OPTIONs, the canSetTag es_processed bump).
+#[inline]
+pub fn mt_ins_epilogue<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    slot_id: ExecSlotId,
+    recheck_indexes: &[Oid],
+) -> PgResult<()> {
+    ar_insert_triggers(mt, estate, slot_id, recheck_indexes, None)?;
+    if !mt.rel().wco_exprs.is_empty() {
+        let mcx = estate.es_query_cxt;
+        let ecxt = mt.node_ecxt;
+        let r = &mut mt.rels[mt.cur];
+        let rti = r.rti;
+        exec_view_check_options(
+            mcx,
+            estate,
+            ecxt,
+            &mut r.wco_exprs,
+            slot_id,
+            WcoRel::Rti { rti, root_rti: None },
+        )?;
+    }
+    if mt.canSetTag {
+        estate.es_processed += 1;
+    }
+    Ok(())
+}
+
+/// Chain seam 5/5 — the §2.2 `exec_process_returning` target:
+/// mt_accept_row's CMD_INSERT RETURNING block for ONCONFLICT_NONE.
+#[inline]
+pub fn mt_ins_returning<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    result_slot: ExecSlotId,
+    plan_slot: ExecSlotId,
+) -> PgResult<ExecSlotId> {
+    // ONCONFLICT_NONE never stages an OC old slot, so the `oc_old_slot
+    // .take()` in mt_accept_row reads None (cmd = CMD_INSERT, the OC
+    // materialize/clear leg dead) — debug-pinned.
+    debug_assert!(mt.oc_old_slot.is_none(), "OC old slot in an ONCONFLICT_NONE chain");
+    debug_assert!(mt.rel().project_returning.is_some(), "RETURNING seam without a projection");
+    exec_process_returning(mt, estate, CmdType::CMD_INSERT, None, Some(result_slot), plan_slot)
+}
+// --- end WS-AG (wave-9) -------------------------------------------------------

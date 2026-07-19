@@ -4,10 +4,11 @@
 //! Shape: a SERIAL-plan plain Agg over a pgrcolumnar OR heap SeqScan
 //! (COUNT/plain-agg fold shapes with optional PREWHERE/kernel quals — the
 //! lane's simplest fold pipelines), executed as ONE runtime TaskSet at DOP
-//! N. The morsel source dispatches on the table AM: pgrcolumnar granules with
-//! row-group hard boundaries ([`PgrcolumnarGranuleSource`]) or heap block
-//! ranges with none ([`HeapBlockSource`] — C's
-//! table_block_parallelscan_nextpage chunked claim, runtime-adaptive).
+//! N. The morsel source is [`runtime::GranuleMapSource`] over the geometry
+//! the storage seam publishes ([`super::batch_source::SeqScanSource`]):
+//! pgrcolumnar granules with row-group hard boundaries, or heap block
+//! ranges with none (C's table_block_parallelscan_nextpage chunked claim,
+//! runtime-adaptive).
 //! Heap visibility is per tuple inside the page batch, under the leader
 //! snapshot the task binding restores — exactly a C parallel seq scan
 //! worker's check. The plan surface
@@ -20,7 +21,7 @@
 //! Execution model (submit-and-park, §2.5):
 //!  * The LEADER creates a parallel context (vacuumparallel precedent — no
 //!    Gather node), installs the query-task binding policy, submits a
-//!    PINNED resource group (one task set: PgrcolumnarGranuleSource + the fold
+//!    PINNED resource group (one task set: the GranuleMapSource + the fold
 //!    work), launches N helpers through the ordinary wpool machinery, and
 //!    PARKS — a WaitForParallelWorkersToFinish-shaped loop (completion poll
 //!    + ProcessParallelMessages + CHECK_FOR_INTERRUPTS + latch quantum).
@@ -70,6 +71,9 @@ use ::types_nodes::node_tree::Node;
 use ::types_nodes::plannodes::PlannedStmt;
 use ::types_nodes::NodeTag;
 
+use super::batch_source::{
+    heapfeed_v2_enabled, require_bridge, BatchGranuleSource, HeapBatchSource, SeqScanSource,
+};
 use super::router::{self, ArmClass, ArmCounter};
 use super::runtime_instr::{self, EaRowTally, InstrumentPartial};
 use super::stats::{self, RefuseReason, ShapeClass};
@@ -126,13 +130,16 @@ pub(super) struct RuntimeScanShared {
     failed: AtomicBool,
     /// Per-ordinal cumulative partials, overwritten after every morsel.
     partials: Vec<Mutex<Option<RuntimePartial>>>,
-    /// Row-group start prefix sums (the morsel source's hard boundaries),
-    /// shared with [`PgrcolumnarGranuleSource`]: a COALESCED claim (sched.rs
-    /// dop1-tax fix 1 — several epochs per claim at low live width) is
-    /// segmented at these edges inside `morsel_body`, so `set_granule_range`
-    /// still sees single-RG ranges and every kernel invocation sees one
-    /// dictionary snapshot. Set once at engage, before any claim.
-    rg_starts: OnceLock<Arc<Vec<u64>>>,
+    /// The scan's granule geometry (row-group start prefix sums = the
+    /// morsel source's hard boundaries), shared with the scheduler's
+    /// [`runtime::GranuleMapSource`]: a COALESCED claim (sched.rs dop1-tax
+    /// fix 1 — several epochs per claim at low live width) is segmented at
+    /// these edges inside `morsel_body` ([`runtime::GranuleMap::segments`]),
+    /// so `set_granule_range` still sees single-RG ranges and every kernel
+    /// invocation sees one dictionary snapshot. Set once at engage, before
+    /// any claim; UNSET on the heap and bitmap paths (no interior
+    /// boundaries — nothing to segment) exactly as `rg_starts` was.
+    map: OnceLock<Arc<runtime::GranuleMap>>,
     /// inc-2 bind-once: helpers drive from the ENTRY TASK (already fully
     /// bound by parallel_worker_body — a strict superset of the query-task
     /// binder's bind) instead of re-binding at POST_TASK_PARK. The hook
@@ -403,80 +410,78 @@ impl RuntimeScanShared {
                         )));
                     };
                     // A COALESCED claim spans several row groups (sched.rs
-                    // dop1-tax fix 1): pgrcolumnar claims are segmented at the
-                    // RG edges (`rg_starts`) so every positioned range sees
-                    // a single dictionary epoch (set_morsel_range's pgrcolumnar
+                    // dop1-tax fix 1): pgrcolumnar claims are segmented at
+                    // the RG edges (`GranuleMap::segments` over the shared
+                    // engagement geometry) so every positioned range sees
+                    // a single dictionary epoch (position's pgrcolumnar
                     // single-RG contract) and every kernel batch one
                     // dictionary snapshot. Heap sources have no interior
-                    // boundaries and never coalesce (no rg_starts): the
-                    // loop degenerates to one positioned range. Cancel
-                    // observability stays at epoch grain: an abort/failure
-                    // observed between segments stops the claim (aborted
+                    // boundaries and never coalesce (no map on the
+                    // payload): the loop degenerates to one positioned
+                    // range (`Segments::whole`). Cancel observability
+                    // stays at epoch grain: an abort/failure observed
+                    // between segments stops the claim (aborted
                     // generations need not execute every granule — the RG
                     // outcome is discarded).
                     let ea = self.instr.is_some();
                     let mut tally = EaRowTally::default();
-                    let starts = self.rg_starts.get();
-                    let mut seg = range.start;
-                    while seg < range.end {
-                        let seg_end = match starts {
-                            Some(starts) => {
-                                let bound = match starts.binary_search(&seg) {
-                                    Ok(i) => starts[i + 1],
-                                    Err(i) => starts[i],
-                                };
-                                bound.min(range.end)
-                            }
-                            None => range.end,
-                        };
-                        ::nodeseqscan::seq_scan_set_morsel_range(ss, estate, seg, seg_end)?;
-                        match mode {
-                            DriveMode::Fold => {
-                                if ea {
-                                    super::agg_plain_fold_drain_ea(
-                                        &mut aps.agg,
-                                        ss,
-                                        estate,
-                                        &mut tally,
-                                    )?
-                                } else {
-                                    super::agg_plain_fold_drain(&mut aps.agg, ss, estate)?
-                                }
-                            }
-                            DriveMode::Census => census_drain(
-                                &mut aps.agg,
-                                ss,
-                                estate,
-                                ea.then_some(&mut tally),
-                            )?,
-                            // rowdrive direct-drive modes (car 1/car 2):
-                            // heap-only admission (no rg_starts; EA refuses
-                            // heap at admission), so the segmentation loop
-                            // degenerates to one positioned range for these
-                            // arms and no tally is ever needed.
-                            DriveMode::StorelessCount => {
-                                storeless_count_drain(&mut aps.agg, ss, estate)?
-                            }
-                            DriveMode::PerRowFold => {
-                                perrow_fold_drain(&mut aps.agg, ss, estate)?
-                            }
-                            // Dispatched to runtime_bitmap::drain_claim
-                            // before this match (BitmapHeapScan outer).
-                            DriveMode::BitmapPerRow => {
-                                unreachable!("bitmap arm returns above")
-                            }
-                        }
-                        seg = seg_end;
-                        if seg < range.end
-                            && (self.failed.load(Ordering::SeqCst)
-                                || self
-                                    .rg
-                                    .get()
-                                    .and_then(|w| w.upgrade())
-                                    .is_some_and(|rg| rg.is_aborted()))
-                        {
-                            break;
-                        }
+                    let map = self.map.get().map(|m| &**m);
+                    let interrupted = || {
+                        self.failed.load(Ordering::SeqCst)
+                            || self
+                                .rg
+                                .get()
+                                .and_then(|w| w.upgrade())
+                                .is_some_and(|rg| rg.is_aborted())
+                    };
+                    // Phase-1 source selection (WS-K): heap claims ride the
+                    // dedicated HeapBatchSource iff PGRUST_LANE_V2_HEAPFEED
+                    // is on (advisory readahead depth inside position());
+                    // the knob-OFF world — and every pgrcolumnar claim —
+                    // constructs SeqScanSource exactly as before. Knob-ON,
+                    // end-of-claim ownership moves to the source: ONE
+                    // end_claim per claim after the segment loop (the
+                    // drains skip their inline clear under the same
+                    // process-static knob — single owner, trait doc).
+                    // WS-O inc-2 claim-settle guard (both arms): end_claim
+                    // runs on the ERROR path too — a failed claim must not
+                    // carry its page pin into the abort drain (the R3
+                    // zero-pins-at-settle law; the drive error wins the
+                    // report, the settle error is surfaced only when the
+                    // drive itself succeeded).
+                    if heapfeed_v2_enabled() && ::nodeseqscan::seq_scan_is_heap(ss) {
+                        let mut src = HeapBatchSource::new(&mut *ss);
+                        let drove = drive_claim_segments(
+                            &mut src,
+                            &mut aps.agg,
+                            estate,
+                            mode,
+                            ea,
+                            &mut tally,
+                            map,
+                            range.start..range.end,
+                            interrupted,
+                        );
+                        let settled = src.end_claim(estate);
+                        drove?;
+                        settled?;
+                    } else {
+                        let mut src = SeqScanSource::new(&mut *ss);
+                        let drove = drive_claim_segments(
+                            &mut src,
+                            &mut aps.agg,
+                            estate,
+                            mode,
+                            ea,
+                            &mut tally,
+                            map,
+                            range.start..range.end,
+                            interrupted,
+                        );
+                        let settled =
+                            if heapfeed_v2_enabled() { src.end_claim(estate) } else { Ok(()) };
+                        drove?;
+                        settled?;
                     }
                     // EA-on-morsels: fold this claim into the worker's
                     // cumulative instrument partial and export by OVERWRITE
@@ -550,6 +555,16 @@ fn runtime_scan_worker_main(shared: &parallel::ParallelShared) -> PgResult<()> {
     if !payload.drive_at_entry {
         return Ok(());
     }
+    // WS-S C2 fault injection (test-only, default-off): the pre-hook VANISH
+    // class — exit cleanly BEFORE the ExitBump below, so this helper never
+    // bumps `exited`, never refuses, and sends no channel message (the
+    // `exited < launched` geometry c2_gang_death classifies; e2e fault legs
+    // E3/E4). The test_helper_panic sibling below cannot reach this class:
+    // it dies inside the guarded frame, where the ExitBump has already
+    // registered.
+    if super::test_helper_vanish("scan") {
+        return Ok(());
+    }
     // Every launched helper bumps `exited` exactly once, on EVERY exit path
     // — including the exit-committed resume_unwind below (the leader's
     // liveness reap counts these against `launched`; m35-spill inc-2c port).
@@ -620,6 +635,10 @@ fn helper_drive_entry(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
         return Ok(());
     }
     let _outcome = payload.rt.drive_pinned(&mut local, &rg);
+    // WS-O inc-2 pin-board assert (debug-only accessor, contract-approved):
+    // a drive that returned settled its pin — anything else is a stranded
+    // finalization obligation.
+    debug_assert!(payload.rt.debug_pin_settled(&local), "pin unsettled after entry drive");
     emit_wfin("entry", lane.ordinal(), &local, &rg);
     // Teardown mode per drive_bound: self-error takes the release path;
     // the abort discipline is the transaction-level Err below (the hook
@@ -653,6 +672,303 @@ fn entry_drive_enabled() -> bool {
     })
 }
 
+/// `PGRUST_RUNTIME_CALLER` (wave-2 R-KNOBS registry, WS-O part-4; default
+/// OFF): rollout stage C1 — the session thread drives its own LAUNCHED
+/// runtime-scan RG as a caller-worker (runtime::CallerWorker) instead of
+/// submit-and-park, deliberately reversing the §2.5 law under the
+/// admission ledger's accounting posture. C1 covers THIS arm only; C2-C4
+/// (leader counting reconciliation, liveness escalation, further arms)
+/// are one board each per the rollout ladder. Read once.
+fn caller_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_RUNTIME_CALLER").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
+/// `PGRUST_RUNTIME_CALLER_C2` (wave-3 R-KNOBS registry, WS-S; default
+/// OFF): rollout stage C2 — the design-note-gated escalations of the C1
+/// caller (docs/design/caller-c2.md): all-stopped bounded-drain + loud
+/// error (inc-2), latch-integrated idle parks (inc-3), caller WFIN
+/// emission (inc-4). NESTED under `PGRUST_RUNTIME_CALLER`: only read on
+/// the caller path, which `caller_enabled` already gates — `_C2` alone
+/// flips nothing, and at `CALLER=1, _C2 unset` the C1 drive is byte- and
+/// trace-identical to the wave-2 base. Engagement cadence, read once
+/// (the C1 idiom). Leader LEDGER counting is NOT here — it waits on the
+/// inc-1 ruling.
+fn caller_c2_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_RUNTIME_CALLER_C2").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
+/// Pure parse of the C3 knob value (the WS-X A/B-unit surface; the resolve
+/// below memoizes it). Exact spellings only — the C1/C2 idiom.
+#[inline]
+fn caller_c3_parse(v: Option<&str>) -> bool {
+    matches!(v, Some("1") | Some("on"))
+}
+
+/// `PGRUST_RUNTIME_CALLER_C3` (wave-5 R-KNOBS registry, WS-X; default
+/// OFF): rollout stage C3 — the standing_wait arm of caller-as-worker
+/// (docs/design/caller-c3.md). WAVE-5 INERT SEAM (wave-5 contract §3):
+/// resolving ON emits ONE startup-scoped log line so an armed process is
+/// identifiable, then FALLS THROUGH — the standing channel's leader
+/// posture (standing_wait's park loop) and the launched path's C1/C2
+/// caller drive stay byte- and trace-identical to knob-OFF. The live
+/// standing drive is the C3 board's own increment. NESTED under
+/// `PGRUST_RUNTIME_CALLER` like `_C2`: resolved only under
+/// `caller_enabled()`, so `_C3` alone flips nothing and CALLER-unset
+/// executes only the memoized `caller_enabled()` read already priced at
+/// this engagement chokepoint. Read once (the C1/C2 OnceLock idiom,
+/// engagement cadence — contract §0.6).
+#[cold]
+#[inline(never)]
+fn caller_c3_seam_resolve() {
+    static ON: OnceLock<bool> = OnceLock::new();
+    ON.get_or_init(|| {
+        let on = caller_c3_parse(std::env::var("PGRUST_RUNTIME_CALLER_C3").ok().as_deref());
+        if on {
+            eprintln!(
+                "[lane-v2] caller C3 (standing_wait arm) knob armed — wave-5 inert seam: \
+                 posture unchanged; live arm is the C3 board (docs/design/caller-c3.md)"
+            );
+        }
+        on
+    });
+}
+
+enum CallerDrive {
+    /// The caller drove the RG to an outcome (finish_outcome decides).
+    Outcome(runtime::RgOutcome),
+    /// A duty or teardown error; the RG is already complete (the
+    /// CallerWorker abort+drain discipline ran inside the drive).
+    Error(Box<PgError>),
+    /// Caller participation unavailable (lanes exhausted / leader exec
+    /// build failed): fall back to the submit-and-park loop, fail-closed.
+    Unavailable,
+}
+
+/// WS-O part-4 C1: drive the launched engagement's RG on the SESSION
+/// thread. The leader is one more external participant: its own worker
+/// executor (build_worker_exec on the already-bound session thread), its
+/// own leased pin-board lane, partials/instr exports keyed by that lane's
+/// ordinal — the ordinary combine picks them up. Duties carry the park
+/// loop's obligations:
+///   - STEP cadence (error-carrying): CFI + ProcessParallelMessages —
+///     helper-channel errors and cancels abort + drain through the
+///     CallerWorker discipline and surface here. HONEST LIMIT (C1): while
+///     the caller is PARKED at Idle (stragglers finishing), the duty does
+///     not pump — cancel/message latency in that window is bounded by the
+///     next publish/completion wake, not the latch. The C2 design note
+///     owns latch-integrated parking.
+///   - CLAIM cadence (the C1 claim-boundary hook, contract adjudication:
+///     all-stopped detection rides THIS hook): a payload-failed check
+///     sheds the current task at the boundary, and a BOUNDED (1-in-64)
+///     all-stopped probe traces gang death. C1 posture on detection:
+///     KEEP DRIVING — the caller itself completes the remaining granules
+///     (the launched loop's reap exists because NOBODY could step a
+///     pinned RG; with the caller driving, someone always can). C2
+///     escalates this to a liveness decision.
+fn caller_drive_launched(
+    rt: &Arc<runtime::Runtime>,
+    payload: &Arc<RuntimeScanShared>,
+    pcxt: parallel::ParallelContextId,
+    rg: &runtime::RgHandle,
+) -> CallerDrive {
+    let Some(mut cw) = runtime::CallerWorker::enter(rt) else {
+        lane_trace("runtime-scan: caller lanes exhausted, parking instead");
+        return CallerDrive::Unavailable;
+    };
+    if let Err(e) = build_worker_exec(payload) {
+        // Clean build failure (qd released inside): the helpers alone
+        // drive the RG, exactly as knob-OFF.
+        lane_trace(&format!("runtime-scan: caller exec build failed ({e}), parking instead"));
+        return CallerDrive::Unavailable;
+    }
+    // The leader participates: count it so finish_outcome's
+    // nobody-participated fallback cannot discard a leader-driven result.
+    payload.started.fetch_add(1, Ordering::SeqCst);
+    lane_trace("runtime-scan: caller-drive engaged");
+
+    let drove = if caller_c2_enabled() {
+        caller_c2_drive(rt, payload, pcxt, rg, &mut cw)
+    } else {
+        let mut duty = || -> Result<(), Box<PgError>> {
+            ::postgres_seams::check_for_interrupts::call()?;
+            parallel::ProcessParallelMessages()?;
+            Ok(())
+        };
+        let mut boundary = 0u32;
+        let mut all_stopped_traced = false;
+        let mut claim_duty = || -> bool {
+            if payload.failed.load(Ordering::SeqCst) {
+                // Shed at the boundary; the step loop observes the abort.
+                return false;
+            }
+            boundary = boundary.wrapping_add(1);
+            if boundary % 64 == 0
+                && !all_stopped_traced
+                && parallel::parallel_workers_all_stopped(pcxt)
+            {
+                all_stopped_traced = true;
+                lane_trace(
+                    "runtime-scan: caller-drive sees all helpers stopped (continuing alone)",
+                );
+            }
+            true
+        };
+        cw.drive_with_duties(rt, rg, &mut duty, &mut claim_duty)
+    };
+
+    // C2 inc-4 WFIN parity: emitted BEFORE teardown (worker_cb_counters
+    // reads the qd the teardown releases), from the caller's own local —
+    // exactly the helper drive frames' shape. C1 stays silent (the
+    // trace-identity law).
+    if caller_c2_enabled() {
+        emit_wfin("caller", cw.lane_ordinal(), cw.worker_local(), rg);
+    }
+
+    // Leader executor teardown, ALWAYS (the helper discipline: clean
+    // finish on success, release when this executor may be mid-batch).
+    let self_errored = WORKER_EXEC
+        .with(|cell| cell.borrow().as_ref().is_some_and(|ex| ex.errored.get()));
+    let teardown = teardown_worker_exec(drove.is_ok() && !self_errored);
+    match (drove, teardown) {
+        (Ok(outcome), Ok(())) => CallerDrive::Outcome(outcome),
+        (Ok(_), Err(te)) => CallerDrive::Error(te),
+        (Err(e), _) => CallerDrive::Error(e),
+    }
+}
+
+/// WS-S wave-3 C2 gang-death classifier (pure; unit corpus in
+/// execmain/src/tests.rs `caller_c2_ab`). Precondition: every launched
+/// helper's bgworker task has ENDED (`parallel_workers_all_stopped`).
+/// `exited < launched` ⇒ some helper vanished WITHOUT its ExitBump — the
+/// pre-hook death class (init-path panic-to-ERROR, post-Terminate death:
+/// no channel message, no refusal count) that the knob-OFF park loop
+/// surfaces as an ERROR. `exited >= launched` ⇒ every helper accounted
+/// for itself (refused / drove / errored-with-payload.fail), which is the
+/// C1 continue-alone posture (all-refused fail-closed non-participation
+/// is legitimate, never an error).
+pub(crate) fn c2_gang_death(exited: usize, launched: i32) -> bool {
+    exited < launched.max(0) as usize
+}
+
+/// The C2 loud error (inc-2). `#[cold]`: built only on the escalation
+/// path, never on a live drive.
+#[cold]
+#[inline(never)]
+fn c2_gang_death_error() -> Box<PgError> {
+    Box::new(PgError::new(
+        ERROR,
+        "runtime scan helpers died before completing the scan (caller-drive C2: aborting)",
+    ))
+}
+
+/// WS-S wave-3 C2 (PGRUST_RUNTIME_CALLER_C2): the escalated caller drive —
+/// the design-note-gated increments of docs/design/caller-c2.md §3, over
+/// the same CallerWorker machinery as C1:
+///   - inc-2 LIVENESS: the bounded (1-in-64) claim-boundary all-stopped
+///     probe CLASSIFIES via [`c2_gang_death`]: vanish class ⇒ shed at the
+///     boundary, the step duty raises the loud error, and the CallerWorker
+///     abort discipline drains the RG (bounded by the protocol — aborted
+///     generations refuse joins and claims); accounted class ⇒ C1's
+///     continue-alone, traced once. A duty-cadence (1-in-16) backstop
+///     covers the stranded/parked case where claim boundaries stop firing
+///     (a dead helper's unfinished work leaves the caller Idle) — inc-3's
+///     bounded park is what guarantees that cadence keeps running.
+///   - inc-3 LATCH PARKS: parked-at-Idle rides
+///     `wait_parallel_finish_quantum` (the latch/WaitEventSet wait of the
+///     submit-and-park loop; surfaces raised cancel dispositions), so
+///     duties pump while stragglers finish and cancel latency moves from
+///     next-publish-wake to the latch.
+///   - inc-4 WFIN is emitted by the caller frame (see
+///     [`caller_drive_launched`]), not here.
+fn caller_c2_drive(
+    rt: &Arc<runtime::Runtime>,
+    payload: &Arc<RuntimeScanShared>,
+    pcxt: parallel::ParallelContextId,
+    rg: &runtime::RgHandle,
+    cw: &mut runtime::CallerWorker,
+) -> Result<runtime::RgOutcome, Box<PgError>> {
+    let launched = parallel::nworkers_launched(pcxt);
+    let gang_dead = std::cell::Cell::new(false);
+    // Benign all-stopped classification is FINAL for the engagement:
+    // `exited` is monotonic and `launched` fixed, so once `exited >=
+    // launched` under all-stopped it can never later become gang death —
+    // one shared flag suppresses BOTH probes' repeat
+    // parallel_workers_all_stopped cost for the rest of a long
+    // lone-completion drive (C1's all_stopped_traced posture, restored).
+    let benign_stop = std::cell::Cell::new(false);
+    let mut duty_calls = 0u32;
+    let duty_gang = &gang_dead;
+    let duty_benign = &benign_stop;
+    let mut duty = || -> Result<(), Box<PgError>> {
+        if duty_gang.get() {
+            // Set by the claim-boundary probe (which sheds, then this
+            // step-cadence duty surfaces): the loud half of inc-2.
+            return Err(c2_gang_death_error());
+        }
+        ::postgres_seams::check_for_interrupts::call()?;
+        parallel::ProcessParallelMessages()?;
+        duty_calls = duty_calls.wrapping_add(1);
+        if duty_calls % 16 == 0
+            && !duty_benign.get()
+            && parallel::parallel_workers_all_stopped(pcxt)
+        {
+            if c2_gang_death(payload.exited.load(Ordering::SeqCst), launched) {
+                duty_gang.set(true);
+                lane_trace("runtime-scan: caller-drive C2 gang death (duty probe) — escalating");
+                return Err(c2_gang_death_error());
+            }
+            duty_benign.set(true);
+            lane_trace(
+                "runtime-scan: caller-drive sees all helpers stopped (continuing alone)",
+            );
+        }
+        Ok(())
+    };
+    let mut boundary = 0u32;
+    let claim_gang = &gang_dead;
+    let claim_benign = &benign_stop;
+    let mut claim_duty = || -> bool {
+        if payload.failed.load(Ordering::SeqCst) {
+            // Shed at the boundary; the step loop observes the abort.
+            return false;
+        }
+        boundary = boundary.wrapping_add(1);
+        if boundary % 64 == 0
+            && !claim_gang.get()
+            && !claim_benign.get()
+            && parallel::parallel_workers_all_stopped(pcxt)
+        {
+            if c2_gang_death(payload.exited.load(Ordering::SeqCst), launched) {
+                claim_gang.set(true);
+                lane_trace(
+                    "runtime-scan: caller-drive C2 gang death (claim probe) — escalating",
+                );
+                // Shed; the step duty raises the loud error and the
+                // CallerWorker drain discipline bounds the abort.
+                return false;
+            }
+            claim_benign.set(true);
+            lane_trace(
+                "runtime-scan: caller-drive sees all helpers stopped (continuing alone)",
+            );
+        }
+        true
+    };
+    let mut idle_park = || -> Result<(), Box<PgError>> {
+        // inc-3: bounded latch quantum — helper-exit SetLatch and raised
+        // cancel dispositions wake it early; runtime-internal wakes are
+        // bounded by the quantum plus the drive loop's epoch pre-check.
+        parallel::wait_parallel_finish_quantum()
+    };
+    cw.drive_with_duties_parked(rt, rg, &mut duty, &mut claim_duty, &mut idle_park)
+}
+
 /// POST_TASK_PARK hook (global; fires for EVERY successful parallel worker
 /// task): no-op unless the context's private payload is ours.
 fn runtime_scan_post_task_park(shared: &parallel::ParallelShared) {
@@ -668,6 +984,12 @@ fn runtime_scan_post_task_park(shared: &parallel::ParallelShared) {
         // inc-2: the entry task already drove this engagement — a second
         // bind+drive here would rebuild the executor against a completed
         // (or aborted) RG for nothing.
+        return;
+    }
+    // WS-S C2 fault injection: the pre-hook vanish class for the
+    // entry-drive-kill-switched mode, where THIS frame owns the ExitBump
+    // (see runtime_scan_worker_main for the geometry).
+    if super::test_helper_vanish("scan") {
         return;
     }
     // Launched-helper exit counter (see runtime_scan_worker_main): this hook
@@ -768,6 +1090,8 @@ fn helper_drive_lazy(
         });
     });
     let _outcome = payload.rt.drive_pinned(&mut local, rg);
+    // WS-O inc-2 pin-board assert (as the entry drive's).
+    debug_assert!(payload.rt.debug_pin_settled(&local), "pin unsettled after lazy drive");
     parallel::gtrace("w.qtb.body.end");
     emit_wfin("bound", lane.ordinal(), &local, rg);
     let ctx = LAZY_CTX
@@ -874,6 +1198,8 @@ fn drive_bound(
 ) -> PgResult<()> {
     build_worker_exec(payload)?;
     let _outcome = payload.rt.drive_pinned(local, rg);
+    // WS-O inc-2 pin-board assert (as the entry drive's).
+    debug_assert!(payload.rt.debug_pin_settled(local), "pin unsettled after bound drive");
     emit_wfin("bound", ordinal, local, rg);
     // Teardown mode is per-HELPER: a foreign worker's error (or a cancel)
     // leaves THIS executor consistent — finish/end/free releases resources
@@ -1314,28 +1640,97 @@ fn drive_mode(
     }
 }
 
+/// One claimed granule range through the storage seam, generic over the
+/// batch source (Phase-1 WS-K): segment the claim (epoch-integral for
+/// pgrcolumnar; heap has no interior boundaries — `Segments::whole`),
+/// position, drain per DriveMode. Monomorphizes per source type: the
+/// SeqScanSource instantiation is the pre-genericization machine code
+/// (#[inline] delegation throughout — the WS-A code-shape-neutral law).
+/// `interrupted` is the between-segments abort check (cancel observability
+/// stays at epoch grain, exactly the pre-extraction loop).
+#[allow(clippy::too_many_arguments)]
+fn drive_claim_segments<'mcx, S, F>(
+    src: &mut S,
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    mode: DriveMode,
+    ea: bool,
+    tally: &mut EaRowTally,
+    map: Option<&runtime::GranuleMap>,
+    range: runtime::MorselRange,
+    interrupted: F,
+) -> PgResult<()>
+where
+    S: BatchGranuleSource<'mcx>,
+    F: Fn() -> bool,
+{
+    let mut segs = match map {
+        Some(map) => map.segments(range.start..range.end),
+        None => runtime::Segments::whole(range.start..range.end),
+    };
+    while let Some(seg) = segs.next() {
+        src.position(estate, seg)?;
+        match mode {
+            DriveMode::Fold => {
+                if ea {
+                    super::agg_plain_fold_drain_ea(agg, src, estate, &mut *tally)?
+                } else {
+                    super::agg_plain_fold_drain(agg, src, estate)?
+                }
+            }
+            DriveMode::Census => {
+                census_drain(agg, src, estate, ea.then_some(&mut *tally))?
+            }
+            // rowdrive direct-drive modes (car 1/car 2): heap-only
+            // admission (no payload map; EA refuses heap at admission), so
+            // the segmentation loop degenerates to one positioned range
+            // for these arms and no tally is ever needed.
+            DriveMode::StorelessCount => storeless_count_drain(agg, src, estate)?,
+            DriveMode::PerRowFold => perrow_fold_drain(agg, src, estate)?,
+            // Dispatched to runtime_bitmap::drain_claim before this
+            // helper's call site (BitmapHeapScan outer).
+            DriveMode::BitmapPerRow => {
+                unreachable!("bitmap arm returns above")
+            }
+        }
+        if segs.more() && interrupted() {
+            break;
+        }
+    }
+    Ok(())
+}
+
 /// The census morsel drain: the fold drain's structure specialized to
 /// count-only plans (no residuals, no guards, no lane reads, no str-mm
 /// memos) with a graceful no-SoA/no-bitmap fallback. Byte-identity: the
 /// same rows pass the same qual — the staged bitmap IS the kernel qual's
-/// verdict (fallback rows re-check per row through `seq_scan_batch_emit`,
+/// verdict (fallback rows re-check per row through the source's `emit`,
 /// exactly the fold drain's discipline) — and a CountStar transition's
 /// whole effect is one increment per surviving row, which `fold_batch`
 /// applies as a popcount over the same selection.
-fn census_drain<'mcx>(
+fn census_drain<'mcx, S: BatchGranuleSource<'mcx>>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
-    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    src: &mut S,
     estate: &mut EStateData<'mcx>,
     mut tally: Option<&mut EaRowTally>,
 ) -> PgResult<()> {
     debug_assert!(::nodeagg::agg_lanefold_plan(agg)
         .is_some_and(|p| p.cols.is_empty() && p.resid.is_empty() && !p.guarded));
+    // Scan-invariant qual presence (a plan-fixed field), hoisted once
+    // through the bridge; the knob decides end-of-claim clear ownership
+    // (process-static — trait-doc single-owner rules).
+    let no_qual = require_bridge(src)?.ss.qual.is_none();
+    let clear_inline = !heapfeed_v2_enabled();
     loop {
-        let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
+        let n = src.next_batch(estate)?;
         if n == 0 {
-            // End of claim: drop the scan slot's pin (fold drain parity).
-            let mcx = estate.es_query_cxt;
-            ::exectuples::exec_clear_tuple(estate.slot_mut(ss.ss.ss_ScanTupleSlot), mcx);
+            if clear_inline {
+                // End of claim: drop the scan slot's pin (fold drain
+                // parity). Knob-ON this moves to the source's end_claim.
+                let ss = require_bridge(src)?;
+                let mcx = estate.es_query_cxt;
+                ::exectuples::exec_clear_tuple(estate.slot_mut(ss.ss.ss_ScanTupleSlot), mcx);
+            }
             break;
         }
         ::postgres_seams::check_for_interrupts::call()?;
@@ -1346,10 +1741,10 @@ fn census_drain<'mcx>(
         let mut rows = [0u64; ::exectuples::SOA_BM_WORDS];
         let mut fallback = [0u64; ::exectuples::SOA_BM_WORDS];
         let fast = {
-            let sel = ::nodeseqscan::seq_scan_batch_qual_sel(ss);
+            let sel = src.qual_sel();
             let bitmap_qual = sel.is_some();
-            match ::nodeseqscan::seq_scan_batch_soa(ss) {
-                Some(soa) if bitmap_qual || ss.ss.qual.is_none() => {
+            match src.batch_soa() {
+                Some(soa) if bitmap_qual || no_qual => {
                     let fb = soa.fallback_words();
                     for w in 0..nwords {
                         rows[w] = sel.map_or(!fb[w], |s| s[w] & !fb[w]);
@@ -1376,7 +1771,7 @@ fn census_drain<'mcx>(
                 while bits != 0 {
                     let i = (w as u32) * 64 + bits.trailing_zeros();
                     bits &= bits - 1;
-                    if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
+                    if let Some(slot) = src.emit(estate, i)? {
                         if let Some(t) = tally.as_deref_mut() {
                             t.survived += 1;
                         }
@@ -1386,8 +1781,7 @@ fn census_drain<'mcx>(
             }
             if rows[..nwords].iter().any(|w| *w != 0) {
                 let aggcx = ::nodeagg::agg_aggcontext(agg);
-                let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
-                    .expect("checked above: SoA staged");
+                let soa = src.batch_soa().expect("checked above: SoA staged");
                 let plan =
                     ::nodeagg::agg_lanefold_plan(agg).expect("census drain requires a plan");
                 // SAFETY: pergroup_base is the node's once-allocated
@@ -1412,13 +1806,13 @@ fn census_drain<'mcx>(
             // bits are definitive rejections).
             let skip = {
                 let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
-                ::nodeseqscan::seq_scan_batch_skip_sel(ss).map(|s| {
+                src.skip_sel().map(|s| {
                     w[..s.len()].copy_from_slice(s);
                     w
                 })
             };
             ::exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), 0, n, |i| -> PgResult<()> {
-                if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
+                if let Some(slot) = src.emit(estate, i)? {
                     if let Some(t) = tally.as_deref_mut() {
                         t.survived += 1;
                     }
@@ -1441,19 +1835,24 @@ fn census_drain<'mcx>(
 /// Byte-identity: a count's transvalue composes by addition over any claim
 /// partition (order-insensitive-exact); visibility is per tuple, identical
 /// per page regardless of which worker visits it.
-fn storeless_count_drain<'mcx>(
+fn storeless_count_drain<'mcx, S: BatchGranuleSource<'mcx>>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
-    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    src: &mut S,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     debug_assert!(::nodeagg::agg_plain_count_star_shape(agg));
-    debug_assert!(ss.ss.qual.is_none());
+    debug_assert!(src.seq_scan_bridge().is_none_or(|ss| ss.ss.qual.is_none()));
+    let clear_inline = !heapfeed_v2_enabled();
     loop {
-        let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
+        let n = src.next_batch(estate)?;
         if n == 0 {
-            // End of claim: drop the scan slot's pin (fold drain parity).
-            let mcx = estate.es_query_cxt;
-            ::exectuples::exec_clear_tuple(estate.slot_mut(ss.ss.ss_ScanTupleSlot), mcx);
+            if clear_inline {
+                // End of claim: drop the scan slot's pin (fold drain
+                // parity). Knob-ON this moves to the source's end_claim.
+                let ss = require_bridge(src)?;
+                let mcx = estate.es_query_cxt;
+                ::exectuples::exec_clear_tuple(estate.slot_mut(ss.ss.ss_ScanTupleSlot), mcx);
+            }
             break;
         }
         ::postgres_seams::check_for_interrupts::call()?;
@@ -1472,18 +1871,23 @@ fn storeless_count_drain<'mcx>(
 /// Byte-identity: identical per-row qual verdicts and transition programs
 /// per page regardless of which worker visits it; partials are the
 /// classified fold plan's order-insensitive-exact export.
-fn perrow_fold_drain<'mcx>(
+fn perrow_fold_drain<'mcx, S: BatchGranuleSource<'mcx>>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
-    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    src: &mut S,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     debug_assert!(agg_runtime_partial_admissible(agg));
+    let clear_inline = !heapfeed_v2_enabled();
     loop {
-        let n = ::nodeseqscan::seq_scan_next_pagebatch(ss, estate)?;
+        let n = src.next_batch(estate)?;
         if n == 0 {
-            // End of claim: drop the scan slot's pin (fold drain parity).
-            let mcx = estate.es_query_cxt;
-            ::exectuples::exec_clear_tuple(estate.slot_mut(ss.ss.ss_ScanTupleSlot), mcx);
+            if clear_inline {
+                // End of claim: drop the scan slot's pin (fold drain
+                // parity). Knob-ON this moves to the source's end_claim.
+                let ss = require_bridge(src)?;
+                let mcx = estate.es_query_cxt;
+                ::exectuples::exec_clear_tuple(estate.slot_mut(ss.ss.ss_ScanTupleSlot), mcx);
+            }
             break;
         }
         ::postgres_seams::check_for_interrupts::call()?;
@@ -1491,16 +1895,16 @@ fn perrow_fold_drain<'mcx>(
         // RowFeed arm staged one): a cleared skip-sel bit is a row the emit
         // rejects with no observable effect — same rows, same order, same
         // errors; the per-filtered-row emit call collapses to one word test
-        // per 64 rows. Words snapshotted (the emit re-borrows the scan).
+        // per 64 rows. Words snapshotted (the emit re-borrows the source).
         let skip = {
             let mut w = [0u64; ::exectuples::SOA_BM_WORDS];
-            ::nodeseqscan::seq_scan_batch_skip_sel(ss).map(|s| {
+            src.skip_sel().map(|s| {
                 w[..s.len()].copy_from_slice(s);
                 w
             })
         };
         ::exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), 0, n, |i| -> PgResult<()> {
-            if let Some(slot) = ::nodeseqscan::seq_scan_batch_emit(ss, estate, i)? {
+            if let Some(slot) = src.emit(estate, i)? {
                 ::nodeagg::agg_plain_build_accept(agg, estate, slot)?;
             }
             Ok(())
@@ -1518,13 +1922,19 @@ fn perrow_fold_drain<'mcx>(
 /// exactly a dictionary-epoch edge (per-RG local dictionaries), so every
 /// per-epoch memo (dict-eval, codehist, gmemo) stays worker-coherent and
 /// every kernel invocation sees a single dictionary snapshot.
+///
+/// LEGACY of the m2 SINK arms only (distinct/plain-distinct/sort/hashjoin
+/// construction sites; runtime_agg keeps its own private copy): the SCAN
+/// arm now rides [`runtime::GranuleMapSource`] over the storage seam's
+/// [`runtime::GranuleMap`]. Consolidating the sink sites onto
+/// GranuleMapSource is WS-A inc-3 (post-integrate) and MUST carry each
+/// arm's posture bit-for-bit — see notes/se-ws-a-batchsource.md.
 pub(super) struct PgrcolumnarGranuleSource {
-    /// Row-group start prefix sums (len nrgs+1; last = total). Shared with
-    /// the engagement payload (`rg_starts`): morsel_body segments coalesced
-    /// claims at the same edges the source publishes.
+    /// Row-group start prefix sums (len nrgs+1; last = total).
     pub(super) starts: Arc<Vec<u64>>,
     /// True only when the consuming work body subdivides multi-epoch claims
-    /// (the scan arm's morsel_body). See `coalesce_claims`.
+    /// (none of the remaining users: the sink drains feed claims straight
+    /// into `set_granule_range`). See `coalesce_claims`.
     pub(super) coalesce: bool,
 }
 
@@ -1559,10 +1969,7 @@ impl runtime::MorselSource for PgrcolumnarGranuleSource {
     /// cancel/photo-finish granularity the armed arm already ships.
     /// PGRUST_RUNTIME_SPLIT_CLAIMS=1 restores sizer-truncated claims (A/B).
     fn whole_boundary_claims(&self) -> bool {
-        static SPLIT: OnceLock<bool> = OnceLock::new();
-        !*SPLIT.get_or_init(|| {
-            std::env::var("PGRUST_RUNTIME_SPLIT_CLAIMS").map_or(false, |v| v.trim() == "1")
-        })
+        whole_claims()
     }
 
     /// dop1-tax fix 1: the SCAN arm's morsel_body subdivides a coalesced
@@ -1578,35 +1985,27 @@ impl runtime::MorselSource for PgrcolumnarGranuleSource {
     }
 }
 
-/// Block-range morsel source over a heap relation (M1 heap source, the
-/// parallelism redesign's "heap morsels are block ranges"): granule = ONE
-/// block, C's `table_block_parallelscan_nextpage` claim unit at its finest —
-/// the runtime's duration-adaptive sizing builds the multi-block runs C
-/// precomputes as chunks, and the last-worker photo-finish replaces C's
-/// end-of-scan chunk ramp-down. Heap has no dictionary epochs, so there are
-/// no interior hard boundaries (`next_boundary_after` = the trait default:
-/// total). Visibility is per tuple inside the page batch
-/// (`page_collect_tuples` under the task-bound leader snapshot — exactly a
-/// C parallel seq scan worker's check), not a source property.
-struct HeapBlockSource {
-    /// rs_nblocks at the leader's scan start (the C parallel-scan contract:
-    /// blocks appended after scan start are not visited; their tuples are
-    /// invisible to the scan snapshot anyway).
-    nblocks: u64,
+/// Whole-boundary claim posture of the pgrcolumnar arms — the
+/// PGRUST_RUNTIME_SPLIT_CLAIMS kill switch (1 restores sizer-truncated
+/// claims for A/B), read once per process: the OnceLock freezes the first
+/// read, so construction-time (`GranuleMapSource`) and claim-time
+/// (`PgrcolumnarGranuleSource`) reads are observationally identical.
+pub(super) fn whole_claims() -> bool {
+    static SPLIT: OnceLock<bool> = OnceLock::new();
+    !*SPLIT.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_SPLIT_CLAIMS").map_or(false, |v| v.trim() == "1")
+    })
 }
 
-impl runtime::MorselSource for HeapBlockSource {
-    fn total_granules(&self) -> u64 {
-        self.nblocks
-    }
-
-    /// A heap block stages ~50-250 tuples (vs 8,192/granule on pgrcolumnar).
-    /// Seed the ramp at 16 blocks (128KB, a few thousand rows — tens of µs
-    /// on fold shapes): same probe-morsel sizing intent as pgrcolumnar's C0=2.
-    fn startup_c0(&self) -> u64 {
-        16
-    }
-}
+// The scan arm's heap block-range source (granule = ONE block, C's
+// `table_block_parallelscan_nextpage` claim unit at its finest; no interior
+// hard boundaries — heap has no dictionary epochs) is now the boundary-free
+// `runtime::GranuleMap::unbounded` published by the storage seam
+// (`batch_source::SeqScanSource::granule_map`) under a
+// `runtime::GranuleMapSource` with sizer-truncated, non-coalescing posture
+// — exactly the deleted HeapBlockSource's behavior. Visibility stays per
+// tuple inside the page batch (`page_collect_tuples` under the task-bound
+// leader snapshot), a drive property, not a source property.
 
 // ---------------------------------------------------------------------------
 // Leader-side parallel-safety walk (executor-side, fail-closed): the scan's
@@ -1928,44 +2327,39 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
         return ea_refused(estate, ea, node_id, "binder-policy");
     }
 
-    // --- Geometry: enough granules to be worth a gang. The source is the
-    // AM's morsel geometry: pgrcolumnar absolute granules with row-group hard
-    // boundaries, heap block ranges with none. (The floor is granule-
-    // denominated, so its meaning is per-AM: ~8,192 rows/granule on
-    // pgrcolumnar, one ~8KB block on heap — both env-tunable through the same
-    // knob because the e2e floors force it anyway.)
-    // nrgs rides along for the WFIN/LFIN diagnostic channel only: pgrcolumnar
-    // row-group (= dictionary epoch) count; heap has no interior hard
-    // boundaries, so it honestly reports 0.
-    // rg_starts additionally rides to the engagement payload (pgrcolumnar only):
-    // morsel_body segments COALESCED claims at the same RG edges the source
-    // publishes (dop1-tax fix 1). Heap has no interior boundaries and no
-    // dictionary epochs — nothing to segment, nothing to coalesce.
-    let (source, nrgs, rg_starts): (
-        Arc<dyn runtime::MorselSource>,
-        usize,
-        Option<Arc<Vec<u64>>>,
-    ) = if is_cb {
-        let Some((_, starts)) = ::nodeseqscan::seq_scan_cb_granule_geometry(ss, estate)?
-        else {
-            return Ok(None);
-        };
-        let nrgs = starts.len().saturating_sub(1);
-        let starts = Arc::new(starts);
-        (
-            Arc::new(PgrcolumnarGranuleSource {
-                starts: Arc::clone(&starts),
-                coalesce: true,
-            }),
-            nrgs,
-            Some(starts),
-        )
-    } else {
-        let Some(nblocks) = ::nodeseqscan::seq_scan_heap_block_geometry(ss, estate)? else {
-            return Ok(None);
-        };
-        (Arc::new(HeapBlockSource { nblocks }), 0, None)
+    // --- Geometry: enough granules to be worth a gang. The storage seam
+    // (`SeqScanSource::granule_map`) publishes the AM's morsel geometry as
+    // ONE GranuleMap: pgrcolumnar absolute granules with row-group hard
+    // boundaries, heap block ranges with none — per-AM startup seed baked
+    // in. (The floor is granule-denominated, so its meaning is per-AM:
+    // ~8,192 rows/granule on pgrcolumnar, one ~8KB block on heap — both
+    // env-tunable through the same knob because the e2e floors force it
+    // anyway.)
+    // nbounds() rides along for the WFIN/LFIN diagnostic channel only:
+    // pgrcolumnar row-group (= dictionary epoch) count; heap has no interior
+    // hard boundaries, so it honestly reports 0.
+    // The map additionally rides to the engagement payload (pgrcolumnar
+    // only): morsel_body segments COALESCED claims at the same RG edges the
+    // source publishes (dop1-tax fix 1). Heap has no interior boundaries
+    // and no dictionary epochs — nothing to segment, nothing to coalesce.
+    let Some(map) = SeqScanSource::new(&mut *ss).granule_map(estate)? else {
+        return Ok(None);
     };
+    let map = Arc::new(map);
+    let nrgs = map.nbounds();
+    // Claim posture is EXPLICIT per arm (the GranuleMapSource contract,
+    // never AM-inferred): the scan arm's pgrcolumnar posture is
+    // whole-boundary (per the PGRUST_RUNTIME_SPLIT_CLAIMS kill switch) +
+    // coalesce (morsel_body subdivides multi-epoch claims); heap claims
+    // stay sizer-truncated with no coalescing — a boundary-free source
+    // opting into whole-boundary claims would take the pipeline in one
+    // claim.
+    let source: Arc<dyn runtime::MorselSource> = Arc::new(runtime::GranuleMapSource::new(
+        Arc::clone(&map),
+        is_cb && whole_claims(),
+        is_cb,
+    ));
+    let payload_map = is_cb.then(|| Arc::clone(&map));
     let total_granules = source.total_granules();
     if total_granules < min_granules().max(2 * dop as u64) {
         return ea_refused(estate, ea, node_id, "tiny-input-floor");
@@ -2018,7 +2412,7 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
         total_granules,
         nrgs,
         source,
-        rg_starts,
+        payload_map,
         ea_scan_node,
         ea_timer,
         None,
@@ -2064,7 +2458,7 @@ pub(super) fn engage<'mcx>(
     total_granules: u64,
     nrgs: usize,
     source: Arc<dyn runtime::MorselSource>,
-    rg_starts: Option<Arc<Vec<u64>>>,
+    map: Option<Arc<runtime::GranuleMap>>,
     ea_scan_node: Option<i32>,
     ea_timer: bool,
     bitmap_ctx: Option<Arc<super::runtime_bitmap::BitmapMorselCtx>>,
@@ -2097,7 +2491,7 @@ pub(super) fn engage<'mcx>(
         error: Mutex::new(None),
         failed: AtomicBool::new(false),
         partials: (0..runtime::MAX_EXTERNAL_LANES).map(|_| Mutex::new(None)).collect(),
-        rg_starts: OnceLock::new(),
+        map: OnceLock::new(),
         drive_at_entry: entry_drive_enabled(),
         standing: Mutex::new(None),
         instr: ea_scan_node.map(|_| {
@@ -2109,11 +2503,11 @@ pub(super) fn engage<'mcx>(
     });
     // Set BEFORE any claim can run (submit happens inside engage_ceremony):
     // morsel_body expects the edges whenever the source coalesces (pgrcolumnar).
-    if let Some(starts) = rg_starts {
+    if let Some(map) = map {
         payload
-            .rg_starts
-            .set(starts)
-            .unwrap_or_else(|_| unreachable!("rg_starts set once"));
+            .map
+            .set(map)
+            .unwrap_or_else(|_| unreachable!("map set once"));
     }
 
     // Submit-and-park ceremony. EnterParallelMode brackets the context
@@ -2190,6 +2584,19 @@ fn engage_ceremony<'mcx>(
             .unwrap_or_else(|_| unreachable!("rg set once"));
         *mut_submitted = Some(rg.clone());
 
+        // WS-X wave-5 C3 dispatch seam (PGRUST_RUNTIME_CALLER_C3, default
+        // OFF; docs/design/caller-c3.md §4): when the C3 board lands, the
+        // leader drives THIS standing engagement as participant #0
+        // (CallerWorker over the standing channel) instead of parking in
+        // standing_wait's poll loop. This wave the arm is INERT — the
+        // resolve logs once when armed and every path proceeds unchanged.
+        // Nesting law: `_C3` is resolved only under caller_enabled(), so
+        // `_C3` alone flips nothing; CALLER-unset pays one memoized bool
+        // read at this engagement chokepoint and nothing else (§0.6).
+        if caller_enabled() {
+            caller_c3_seam_resolve();
+        }
+
         // M2 pool-binding: STANDING engagement first — no worker launch,
         // no entry task, one binder bind per participant. Fallback (gang
         // unavailable/kill-switched/all-refused/claim-deadline) leaves the
@@ -2211,6 +2618,31 @@ fn engage_ceremony<'mcx>(
         lane_trace(&format!(
             "runtime-scan: engaged dop={launched} granules={total_granules}"
         ));
+
+        // WS-O part-4 C1 (PGRUST_RUNTIME_CALLER, default OFF): the leader
+        // DRIVES its own RG as a caller-worker instead of parking — it
+        // builds a worker executor on the session thread (already bound:
+        // live transaction, active snapshot) and claims granules like any
+        // participant, pumping the park loop's obligations as duties.
+        // Fail-closed on lane exhaustion or a leader exec-build failure:
+        // fall through to the submit-and-park loop below unchanged.
+        if caller_enabled() {
+            match caller_drive_launched(rt, payload, pcxt, &rg) {
+                CallerDrive::Outcome(outcome) => {
+                    emit_lfin(rt, "caller", &rg, total_granules, nrgs, payload);
+                    return finish_outcome(payload, outcome);
+                }
+                CallerDrive::Error(e) => {
+                    // The drive completed the RG (abort + drain ride the
+                    // CallerWorker discipline); abort/drain here are
+                    // idempotent no-ops kept for path symmetry.
+                    rg.abort();
+                    drain_rg(rt, payload, &rg);
+                    return Err(e);
+                }
+                CallerDrive::Unavailable => {}
+            }
+        }
 
         // Submit-and-park: completion poll + parallel-message drain + CFI +
         // bounded latch quantum (the WaitForParallelWorkersToFinish shape —
@@ -2640,4 +3072,31 @@ fn drain_rg_raw(rt: &'static Arc<runtime::Runtime>, rg: &runtime::RgHandle) -> b
         lane_trace("runtime-scan: LEAKED pinned RG (drain gave up — dead participant?)");
     }
     drained
+}
+
+// WS-X wave-5 (contract §9 item 3): A/B unit for the C3 knob's PURE parse —
+// no relation fixture is needed, so the reserved 82001+ fake-OID band stays
+// unused. The OnceLock resolve is deliberately NOT exercised here (env +
+// process-global memoization race under the parallel test harness); the
+// armed posture's proof channel is the OFF-vs-base pair/asm evidence in
+// notes/se-ws-x-cursors-design.md.
+#[cfg(test)]
+mod caller_c3_seam_tests {
+    use super::caller_c3_parse;
+
+    #[test]
+    fn caller_c3_parse_ab() {
+        // A arm: OFF — the default (unset) and every non-arming spelling
+        // (knobs-default-OFF law, wave-5 contract §0.5).
+        assert!(!caller_c3_parse(None));
+        assert!(!caller_c3_parse(Some("")));
+        assert!(!caller_c3_parse(Some("0")));
+        assert!(!caller_c3_parse(Some("off")));
+        assert!(!caller_c3_parse(Some("ON"))); // exact spellings only — the C1/C2 idiom
+        assert!(!caller_c3_parse(Some("true")));
+        assert!(!caller_c3_parse(Some("2")));
+        // B arm: ON — exactly the two registered spellings.
+        assert!(caller_c3_parse(Some("1")));
+        assert!(caller_c3_parse(Some("on")));
+    }
 }

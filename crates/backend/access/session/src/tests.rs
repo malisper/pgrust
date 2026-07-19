@@ -489,7 +489,29 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      TRACKED, one block) — debug_assertions-only allocation-tracker
     //      reentrancy/thread-filter bits (PGRUST_ALLOC_TRACK diagnostics);
     //      absent from dist codegen, never session state.
-    assert_eq!(count_tree(crates), 505, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 506, WS-B grant-donation thread_local (single-executor merge, renumbered
+    // to slot 46 over the t30 fold):
+    //   46. executor/runtime/src/sched.rs LEDGER_GRANT — per-worker
+    //      admission bookkeeping holding (scheduler, slot) while the thread
+    //      is inside a ledger-JOINED run_task (set by run_task_admitted,
+    //      cleared by GrantCtx drop — unwind-safe). Consulted by declared-
+    //      blocking-section entry points (io.rs permit seams, blocking.rs
+    //      facade) so the width grant is donated and retaken alongside the
+    //      execution permit. Deliberately non-session TLS: empty on non-
+    //      worker threads and knob-OFF, plain per-thread state owned by the
+    //      pool-loop worker (same pattern as blocking.rs's PERMIT_SEM /
+    //      slot 13).
+    // t30 fold deltas (509 = 506 + 3):
+    //   47. contrib/auto_explain/src/hooks.rs — per-backend ExecutorRun
+    //      nesting depth (C auto_explain.c static nesting_level becomes
+    //      per-THREAD state); plain executor-hook bookkeeping owned by the
+    //      backend thread, no session identity, no cross-thread access.
+    //   48. transam/xlogrecovery/tests/sim_crash_sweep.rs — DST sim-corpus
+    //      test-rig TLS (integration test only, absent from product
+    //      codegen; same class as the loom/e2e rig statics).
+    //   49. replication/logical/reorderbuffer/src/tests.rs (+1) —
+    //      cfg(test) rig TLS beside the existing slot; never in dist.
+    assert_eq!(count_tree(crates), 509, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

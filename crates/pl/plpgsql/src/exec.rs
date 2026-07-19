@@ -43,6 +43,7 @@ const UNKNOWNOID: Oid = 705;
 const RECORDOID: Oid = 2249;
 const TYPTYPE_DOMAIN: i8 = b'd' as i8;
 
+const CURSOR_OPT_NO_SCROLL: i32 = 0x0004;
 const CURSOR_OPT_PARALLEL_OK: i32 = 0x0800;
 
 pub(crate) struct Ctx(*mut MemoryContext);
@@ -2745,7 +2746,14 @@ impl<'a> Estate<'a> {
         query: &PlExpr,
         body: &'a [PlStmt],
     ) -> PgResult<i32> {
-        self.ensure_plan(query, CURSOR_OPT_PARALLEL_OK)?;
+        // C exec_run_select (pl_exec.c:5770): portal-returning runs prepare
+        // with CURSOR_OPT_NO_SCROLL and WITHOUT CURSOR_OPT_PARALLEL_OK —
+        // intra-loop user code makes parallel unsafe, and NO_SCROLL pins the
+        // portal so spi.c's default-scrollability probe never auto-upgrades a
+        // FOR-loop portal to SCROLL (which would arm the wave-10 cursor store
+        // and its per-row fill program for a strictly forward internal loop —
+        // the SE11 B1 +18.15% tax).
+        self.ensure_plan(query, CURSOR_OPT_NO_SCROLL)?;
         let (plan, paramnos, argtypes) = EXPR_PLANS.with(|t| {
             let t = t.borrow();
             let e = t.get(&query.expr_id).expect("plan ensured");
@@ -4530,7 +4538,10 @@ impl<'a> Estate<'a> {
         params: &[PlExpr],
         body: &'a [PlStmt],
     ) -> PgResult<i32> {
-        let portal = self.exec_dynquery_with_params(query, params, None, 0)?;
+        // C exec_stmt_dynfors (pl_exec.c:4635) opens the implicit cursor
+        // with CURSOR_OPT_NO_SCROLL — same FOR-loop pinning as exec_stmt_fors.
+        let portal =
+            self.exec_dynquery_with_params(query, params, None, CURSOR_OPT_NO_SCROLL)?;
         let cursor = spi::SpiCursor::from_portal(portal);
         let result = self.exec_for_query(label, var, &cursor, body, true);
         match result {

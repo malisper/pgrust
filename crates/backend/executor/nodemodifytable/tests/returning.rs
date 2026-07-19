@@ -767,4 +767,34 @@ fn returning_insert_update_delete_e2e() {
         assert!(f.pins.iter().all(|p| *p == 0), "leaked pins: {:?}", f.pins);
         assert!(f.locks.iter().all(|l| *l == 0), "leaked locks: {:?}", f.locks);
     });
+
+    // Wave-2 WS-N knob-ON leg (notes/se-ws-n-dml-inc1.md): under
+    // PGRUST_LANE_V2_DML=1 + PGRUST_LANE_V2_COVERAGE=1 the four plain
+    // INSERTs above (three trivial-RETURNING + one bare, all real writes
+    // with their RETURNING bytes asserted) must have been lane-owned, and
+    // the UPDATE/DELETE statements must have refused as dml-shape.
+    if std::env::var("PGRUST_LANE_V2_DML").as_deref() == Ok("1")
+        && std::env::var("PGRUST_LANE_V2_COVERAGE").as_deref() == Ok("1")
+    {
+        let count = |counter: &str, detail: Option<&str>| -> i64 {
+            execmain::coverage_snapshot()
+                .iter()
+                .filter(|r| {
+                    r.surface == "lane"
+                        && r.class == "modifytable"
+                        && r.counter == counter
+                        && detail.is_none_or(|d| r.detail == d)
+                })
+                .map(|r| r.value)
+                .sum()
+        };
+        assert!(
+            count("owned", None) >= 4,
+            "PGRUST_LANE_V2_DML=1 but the RETURNING inserts were not lane-owned"
+        );
+        assert!(
+            count("refused", Some("dml-shape")) >= 2,
+            "UPDATE/DELETE RETURNING must refuse as dml-shape"
+        );
+    }
 }

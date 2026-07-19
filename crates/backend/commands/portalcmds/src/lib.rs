@@ -280,25 +280,44 @@ pub fn PersistHoldablePortal(portal: &Portal<'static>) -> PgResult<()> {
             .expect("queryDesc->snapshot set while executor is active");
         snapmgr::PushActiveSnapshot(&snap)?;
 
-        // SCROLL stores the whole result (rewind first); no-scroll stores only
-        // the not-yet-fetched rows, and NoMovement if already at end (not all
-        // plan nodes tolerate another fetch after returning NULL).
         let scroll = portal.borrow().cursorOptions & CURSOR_OPT_SCROLL != 0;
-        let direction = if scroll {
-            execmain_seams::executor_rewind::call(query_desc)?;
-            ForwardScanDirection
-        } else if portal.borrow().atEnd {
-            NoMovementScanDirection
-        } else {
-            ForwardScanDirection
-        };
-
+        // WS-CA wave-10 (contract §2.4 arm 1): a store-armed SCROLL+HOLD
+        // portal's store already IS the holdStore — detoasted, interXact,
+        // holdContext-resident since first fill. Persist = resume the fill
+        // from the high-water mark to EOF; NEVER rewind (§5 D2: the fetched
+        // prefix is kept where C re-executes from scratch — same bytes for
+        // stable queries by snapshot identity). Teardown + repositioning
+        // below are shared with the C-shape arms verbatim.
         let hold_store = portal.borrow().holdStore;
-        // detoast=true: the stored rows must not depend on the snapshot.
-        let mut treceiver = tcop_dest::CreateDestReceiver(CommandDest::Tuplestore);
-        tcop_dest::SetTuplestoreDestReceiverParams(&mut treceiver, hold_store, true);
-        execmain_seams::executor_run::call(query_desc, direction, 0, &mut treceiver)?;
-        treceiver.destroy();
+        if portal.borrow().cursorStoreArmed {
+            debug_assert!(scroll);
+            pquery::fill_portal_store_to(portal, 0)?;
+            // Auto-held portals (plpgsql pin + intra-procedure COMMIT, the
+            // HoldPinnedPortals class): the filled store is the
+            // transaction-scoped cursorStore — copy it into the fresh
+            // holdStore (detoasting) and drop it. No-op when the store
+            // already IS the holdStore (DECLARE'd WITH HOLD).
+            pquery::cursor_store_persist_into_hold(portal)?;
+        } else {
+            // SCROLL stores the whole result (rewind first); no-scroll stores
+            // only the not-yet-fetched rows, and NoMovement if already at end
+            // (not all plan nodes tolerate another fetch after returning
+            // NULL).
+            let direction = if scroll {
+                execmain_seams::executor_rewind::call(query_desc)?;
+                ForwardScanDirection
+            } else if portal.borrow().atEnd {
+                NoMovementScanDirection
+            } else {
+                ForwardScanDirection
+            };
+
+            // detoast=true: the stored rows must not depend on the snapshot.
+            let mut treceiver = tcop_dest::CreateDestReceiver(CommandDest::Tuplestore);
+            tcop_dest::SetTuplestoreDestReceiverParams(&mut treceiver, hold_store, true);
+            execmain_seams::executor_run::call(query_desc, direction, 0, &mut treceiver)?;
+            treceiver.destroy();
+        }
 
         portal.borrow_mut().queryDesc = QueryDescHandle::NULL;
         let mut qd_owner = pquery::QueryDescOwner(query_desc);

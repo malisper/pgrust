@@ -65,6 +65,13 @@ pub struct SortState<'mcx> {
     // (the canonical (keys, rowref) total order) — no tuplesort exists.
     // Cleared with the refsort state on every reset/rescan/end path.
     runtime_full: Option<Box<fullsort::FullAdopted>>,
+    // WS-AD wave-8 (sort randomAccess admission): memoized BARE-hook
+    // verdict for randomAccess sorts under PGRUST_LANE_V2_SORT_RANDOMACCESS.
+    // The chain-shared `lane_fusible` memo (SortNode) keeps refusing
+    // randomAccess for every chain host this increment; only
+    // `lanev2::try_own_sort` consults/stores this. Init-stable like the
+    // chain memo (same child refuse-sets), so never cleared.
+    lane_ra_fusible: Option<bool>,
 }
 
 /// `ExecInitSort` minus child linkage: the caller (execProcnode's T_Sort arm)
@@ -97,6 +104,7 @@ pub fn exec_init_sort<'mcx>(
         refsort_refused: false,
         refsort_desc: None,
         runtime_full: None,
+        lane_ra_fusible: None,
     })
 }
 
@@ -459,6 +467,36 @@ pub fn sort_lane_begin<'mcx>(
     node.tuplesortstate = Some(ts);
     Ok(())
 }
+
+// --- WS-AD wave-8: sort-breaker randomAccess admission seam --------------
+
+/// Memoized bare-hook randomAccess verdict (`None` until the first
+/// `sort_lane_ra_fusible_set`). See the field doc: the chain-shared memo
+/// keeps refusing randomAccess; this side memo is the bare sort hook's
+/// alone.
+#[inline(always)]
+pub fn sort_lane_ra_fusible(node: &SortState<'_>) -> Option<bool> {
+    node.lane_ra_fusible
+}
+
+/// Store the bare-hook randomAccess verdict (once; init-stable inputs).
+pub fn sort_lane_ra_fusible_set(node: &mut SortState<'_>, v: bool) {
+    debug_assert!(node.lane_ra_fusible.is_none() || node.lane_ra_fusible == Some(v));
+    node.lane_ra_fusible = Some(v);
+}
+
+/// Delegation probe (WS-AD acceptance ladder 2): true iff the node's
+/// read-back face is the row-path `Tuplesort` itself — a finished sort
+/// with NO lane-substituted emit face (refsort winner buffer / adopted
+/// runtime output). randomAccess read-back (backward pulls, rescan
+/// replay via `tuplesort_rescan`, mark/restore) is sound exactly when
+/// this holds, because every one of those paths operates on
+/// `tuplesortstate` directly.
+pub fn sort_lane_readback_delegated(node: &SortState<'_>) -> bool {
+    node.sort_Done && node.tuplesortstate.is_some() && !node.refsort && node.runtime_full.is_none()
+}
+
+// --- end WS-AD wave-8 seam ------------------------------------------------
 
 /// `sort_lane_begin` with the comparator NARROWED to the first `nkeys` sort
 /// keys (the lane's grouped exact-DISTINCT order-relaxation arm: the dropped
@@ -1141,7 +1179,8 @@ pub fn sort_result_type(node: &SortState<'_>) -> Rc<TupleDescData<'static>> {
 // Exempt: released in exec_end_sort.
 mcx::forget_safe_struct!(
     SortState<'_> { plan, ps_ResultTupleSlot, randomAccess, bounded, bound,
-        sort_Done, bounded_Done, bound_Done, datumSort, refsort, refsort_refused;
+        sort_Done, bounded_Done, bound_Done, datumSort, refsort, refsort_refused,
+        lane_ra_fusible;
         ps_ResultTupleDesc, tuplesortstate, refsort_out, refsort_desc,
         runtime_full },
 );

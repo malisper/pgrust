@@ -1251,6 +1251,56 @@ pub fn table_scan_set_morsel_range(
     }
 }
 
+/// End-of-claim pin release (single-executor wave 2, WS-O inc-2,
+/// append-only seam): heap resets to the drained state, dropping the
+/// current page pin if the claim ended early (`heap_end_claim_release` —
+/// the R3 zero-pins-at-settle law); pgrcolumnar stages no page pins — no-op.
+pub fn table_scan_end_claim_release(scan: &mut TableScanDesc<'_>) {
+    match scan {
+        TableScanDesc::Heap(h) => ::heapam::heap_end_claim_release(h),
+        TableScanDesc::Pgrcolumnar(_) => {}
+    }
+}
+
+/// Cursor-suspension park point (WS-AI wave-9.5, lane-cursors.md §2,
+/// append-only seam): the staged page batch's reposition window
+/// `(b0, b1)` — restageable remainder `[b0, b1)` including the staged
+/// block — iff the scan holds a settleable mid-claim heap page
+/// (`heap_cursor_park_point`). None = nothing staged/pinned, a
+/// wrap-capable walk (syncscan-started), a parallel scan, or pgrcolumnar
+/// (whose staged windows hold no bufmgr pins — R4 decode scratch; nothing
+/// to settle, node-resident by design).
+pub fn table_scan_cursor_park_point(scan: &TableScanDesc<'_>) -> Option<(u64, u64)> {
+    match scan {
+        TableScanDesc::Heap(h) => ::heapam::heap_cursor_park_point(h),
+        TableScanDesc::Pgrcolumnar(_) => None,
+    }
+}
+
+/// Mid-page batch adoption (SE-R41 v2, the page-remainder defect fix): when
+/// a batch drive freshly engages over a scan the per-tuple walk already
+/// advanced mid-page, adopt the current page's unconsumed remainder
+/// `[start, n)` instead of advancing past it (`heap_adopt_midpage_batch`).
+/// None = nothing to adopt — a fresh/drained scan stages the next page as
+/// before. pgrcolumnar: its staged windows are not page-cursor-interleaved
+/// (different staging machinery) — always None below the AM dispatch.
+pub fn table_scan_adopt_midpage_batch(scan: &mut TableScanDesc<'_>) -> Option<(u32, u32)> {
+    match scan {
+        TableScanDesc::Heap(h) => ::heapam::heap_adopt_midpage_batch(h),
+        TableScanDesc::Pgrcolumnar(_) => None,
+    }
+}
+
+/// R3 settle probe (debug-assert face of the zero-pins-at-settle law):
+/// does this scan still hold a claim page pin? pgrcolumnar stages no page
+/// pins — always false below the AM dispatch.
+pub fn table_scan_holds_claim_pin(scan: &TableScanDesc<'_>) -> bool {
+    match scan {
+        TableScanDesc::Heap(h) => h.rs_cbuf.is_some(),
+        TableScanDesc::Pgrcolumnar(_) => false,
+    }
+}
+
 /// Drive-scaling observability counters of a pgrcolumnar scan (the runtime
 /// WFIN channel): (rg_switches, dict_builds, granules_scanned,
 /// windows_staged). None = heap.
@@ -1548,6 +1598,50 @@ pub fn table_scan_batch_deform_sel<'mcx>(
         TableScanDesc::Pgrcolumnar(c) => {
             c.batch_deform(plan.ncols() as usize, soa, qual_col_only, sel)
         }
+    }
+}
+
+/// K1 inc-2 late-materialization STAGING deform (wave-9 WS-AH): the staged
+/// page batch's kind-0 column pass narrowed to an explicit column set
+/// ({qual clause cols ∪ the grouped feed's key cols}); classification is
+/// the full deform's. Heap scans only — the pgrcolumnar staging narrows
+/// through PREWHERE's per-clause late materialization instead, so the
+/// columnar arm falls open to the full window deform (and debug-asserts:
+/// the arming seam refuses non-heap scans).
+pub fn table_scan_batch_deform_cols<'mcx>(
+    scan: &mut TableScanDesc<'mcx>,
+    plan: &::exectuples::SoaDeformPlan<'_>,
+    soa: &mut ::exectuples::SoaBatch<'_>,
+    cols: &[u16],
+) {
+    match scan {
+        TableScanDesc::Heap(h) => ::heapam::heap_batch_deform_soa_cols(h, plan, soa, cols),
+        TableScanDesc::Pgrcolumnar(c) => {
+            debug_assert!(false, "late-mat narrowed staging arms on heap scans only");
+            c.batch_deform(plan.ncols() as usize, soa, None, None)
+        }
+    }
+}
+
+/// K1 inc-2 COMPLETION deform (the sel-honoring heap arm of the staged
+/// batch deform dispatch): fill `cols` for `sel`-selected rows of the
+/// ALREADY-staged batch — all-zero 64-row selection words skip whole,
+/// full words take the dense fill. Heap = the deform split's completion
+/// half (page still pinned, ABI R3); pgrcolumnar staged everything at
+/// window fill — no-op (the storage seam default's "sources that staged
+/// everything" contract).
+pub fn table_scan_batch_complete_deform<'mcx>(
+    scan: &mut TableScanDesc<'mcx>,
+    plan: &::exectuples::SoaDeformPlan<'_>,
+    soa: &mut ::exectuples::SoaBatch<'_>,
+    cols: &[u16],
+    sel: &[u64],
+) {
+    match scan {
+        TableScanDesc::Heap(h) => {
+            ::heapam::heap_batch_complete_deform_soa(h, plan, soa, cols, sel)
+        }
+        TableScanDesc::Pgrcolumnar(_) => {}
     }
 }
 

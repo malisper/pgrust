@@ -366,13 +366,17 @@ pub fn init_all_with_transport(transport: Transport) {
     ts_cache::init_hooks();
     seclabel::init();
 
-    static EXTRA_BUILTINS: [&[types_fmgr::FmgrBuiltin]; 6] = [
+    static EXTRA_BUILTINS: [&[types_fmgr::FmgrBuiltin]; 7] = [
         adt_misc::builtins::MISC_BUILTINS,
         catalog_namespace::builtins::NAMESPACE_BUILTINS,
         format_type::builtins::FORMAT_TYPE_BUILTINS,
         ruleutils::builtins::RULEUTILS_BUILTINS,
         statistics::builtins::STATISTICS_BUILTINS,
         stats_import::STATS_IMPORT_BUILTINS,
+        // pgrust-native (reserved-range oids, no C counterpart): the lane
+        // coverage view SRF (execmain lanev2/coverage.rs; created on demand
+        // by scripts/lane-coverage-view.sql — no catalog delta by default).
+        execmain::LANEV2_BUILTINS,
     ];
     fmgr_core::install_extra_builtins(&EXTRA_BUILTINS);
 }

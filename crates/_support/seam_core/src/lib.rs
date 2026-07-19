@@ -226,15 +226,18 @@ mod tests {
     crate::tap!(pub fn counter(x: i32));
     crate::tap!(pub fn counter_empty(x: i32));
     crate::tap!(pub fn install_twice_tap(x: i32));
+    crate::tap!(pub fn never_installed_tap(x: i32));
 
     #[test]
     fn tap_default_empty_and_call_if_skips() {
-        // Own tap: tap_install_and_call_if_fires installs `counter` in the
-        // same process, so sharing it made this assert a thread-order race
-        // (fleet flake, panicfix-planner CONFIRM take-1 units).
-        assert!(!counter_empty::is_installed());
+        // Its OWN tap, which no sibling test installs on: taps are
+        // process-global and never uninstalled, so asserting emptiness of
+        // the shared `counter` tap raced `tap_install_and_call_if_fires`
+        // under the harness's intra-binary test parallelism (SE2-GATES
+        // shard-B flake, 2026-07-17 — one rerun-adjudicated failure).
+        assert!(!never_installed_tap::is_installed());
         let mut seen = None;
-        counter_empty::call_if(|f| {
+        never_installed_tap::call_if(|f| {
             seen = Some(());
             f(1);
         });

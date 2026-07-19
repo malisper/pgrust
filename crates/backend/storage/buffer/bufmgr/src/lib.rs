@@ -458,6 +458,12 @@ pub fn init_seams() {
     });
     bufmgr_seams::read_buffer_batched::set(ReadBufferBatched);
     bufmgr_seams::read_buffer_extended::set(ReadBufferExtended);
+    bufmgr_seams::prefetch_buffer::set(|rel, forknum, blkno| {
+        Ok(!matches!(
+            read::PrefetchBuffer(rel, forknum, blkno)?,
+            read::PrefetchOutcome::Skipped
+        ))
+    });
     bufmgr_seams::relation_smgr_locator::set(rel_locator_backend);
     bufmgr_seams::buffer_get_block_number::set(ops::BufferGetBlockNumber);
     bufmgr_seams::buffer_get_page::set(ops::BufferGetPagePtr);

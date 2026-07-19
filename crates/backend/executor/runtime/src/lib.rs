@@ -42,6 +42,41 @@
 
 mod blocking;
 mod clock;
+mod ledger;
+
+/// PHASE3-CLOSE WS-WIDTH: whether non-pool gangs (Gather/GatherMerge
+/// bgworker gangs now; index gangs / CREATE INDEX / vacuum's parallel
+/// index phase later, per morsel-runtime-v2 §4) lease width from the
+/// admission ledger's pool face. Resolved by [`gang_width_face`] — ONE
+/// OnceLock read (§2.6 knob-OFF budget pin: the gather startup path costs
+/// ONE OnceLock bool read knob-OFF). The WS-O external arm and its knob
+/// were retired by the W4 audited removal (the knob died with the body;
+/// see notes/se-p3close-width.md §6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GangWidthFace {
+    /// Knob off (the stock default): no lease, today's launch.
+    Off,
+    /// `PGRUST_RUNTIME_WIDTH_UNIFIED` — unified pool-face gang entries
+    /// (requires `PGRUST_RUNTIME_LEDGER_V2` downstream; the fail-open
+    /// ladder: face off / no runtime / ledger off / capacity exhausted →
+    /// stock launch byte-exactly).
+    Unified,
+}
+
+/// The one process-static gang-knob resolve (see [`GangWidthFace`]).
+pub fn gang_width_face() -> GangWidthFace {
+    static KNOB: std::sync::OnceLock<GangWidthFace> = std::sync::OnceLock::new();
+    *KNOB.get_or_init(|| {
+        if matches!(
+            std::env::var("PGRUST_RUNTIME_WIDTH_UNIFIED").as_deref(),
+            Ok("1") | Ok("on")
+        ) {
+            GangWidthFace::Unified
+        } else {
+            GangWidthFace::Off
+        }
+    })
+}
 mod lifecycle;
 mod morsel;
 mod rg;
@@ -52,6 +87,10 @@ mod stats;
 mod sync;
 mod taskset;
 
+// WS-S wave-3: caller.rs is loom-modeled from C2 on (the parked-drive
+// liveness model) — the module is loom-clean (ParkLot/Semaphore come from
+// the sync shim; the Retry yield is cfg-switched) and no longer gated.
+mod caller;
 #[cfg(not(loom))]
 mod io;
 #[cfg(not(loom))]
@@ -64,11 +103,13 @@ use std::sync::Arc;
 
 pub use blocking::{blocking_io_section, BlockingIoSection, PermitThreadReg};
 pub use clock::{Clock, MonotonicClock, VirtualClock};
+pub use ledger::{ArrivalNudge, ClaimVerdict, LedgerBudgets, LedgerSnapshot, WidthRequest};
 pub use lifecycle::{
     ForeignParticipationDisabled, Generation, LifecycleState, ParticipantOwner, QueryTaskLifecycle,
     TaskHandle, TaskLifecycle, TaskParticipant,
 };
 pub use morsel::{MorselRange, MorselSource, StreamSource, SyntheticMorselSource};
+pub use morsel::{GranuleMap, GranuleMapSource, Segments};
 pub use rg::{
     CompletionWaiter, QuerySpec, RgClass, RgHandle, RgOutcome, TaskSetSpec, TaskSetWork,
     WeakRgHandle,
@@ -82,6 +123,7 @@ pub use sizing::{Phase, SizingDecision, SizingParams, DEFAULT_T_MAX_NS, DEFAULT_
 pub use stats::{RgStatsSnapshot, RuntimeStatsSnapshot};
 pub use sync::{IoGuard, Semaphore};
 
+pub use caller::CallerWorker;
 #[cfg(not(loom))]
 pub use pool::WorkerPool;
 
@@ -233,7 +275,7 @@ impl Runtime {
     /// parking on the returned waiter (§2.5: submit-and-park; no leader
     /// execution path exists, deliberately).
     pub fn submit(&self, spec: QuerySpec) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, false, RgClass::Foreground, 0);
+        let rg = self.sched.submit(spec, false, RgClass::Foreground, 0, None);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
 
@@ -249,8 +291,85 @@ impl Runtime {
         spec: QuerySpec,
         session_token: u64,
     ) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, false, RgClass::Foreground, session_token);
+        let rg = self.sched.submit(spec, false, RgClass::Foreground, session_token, None);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
+    }
+
+    /// [`Runtime::submit`] carrying an explicit [`WidthRequest`] (WS-B
+    /// admission ledger, single-executor Phase 0.1). [`QuerySpec`] stays
+    /// literally source-compatible (the integration-train law above) — new
+    /// entries carry the width beside the spec; existing entries pass the
+    /// no-information request. The request is ledger policy only: with the
+    /// PGRUST_RUNTIME_LEDGER_V2 switch OFF (the default) it is recorded
+    /// nowhere and behavior is byte-identical to [`Runtime::submit`].
+    pub fn submit_with_width(
+        &self,
+        spec: QuerySpec,
+        width: WidthRequest,
+    ) -> (RgHandle, CompletionWaiter) {
+        let rg = self.sched.submit(spec, false, RgClass::Foreground, 0, Some(width));
+        (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
+    }
+
+    /// [`Runtime::submit_pinned_with_affinity`] carrying an explicit
+    /// [`WidthRequest`] — see [`Runtime::submit_with_width`].
+    pub fn submit_pinned_with_width(
+        &self,
+        spec: QuerySpec,
+        session_token: u64,
+        width: WidthRequest,
+    ) -> (RgHandle, CompletionWaiter) {
+        let rg = self.sched.submit(spec, true, RgClass::Foreground, session_token, Some(width));
+        (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
+    }
+
+    /// WS-B ledger-policy toggle (tests / A-B). Production default is the
+    /// PGRUST_RUNTIME_LEDGER_V2 kill switch, read once at construction —
+    /// DEFAULT OFF at this increment. Toggle before submitting.
+    pub fn set_ledger(&self, on: bool) {
+        self.sched.set_ledger(on);
+    }
+
+    pub fn ledger_enabled(&self) -> bool {
+        self.sched.ledger_enabled()
+    }
+
+    /// Admission-ledger instrument readback (tests / diagnostics).
+    pub fn ledger_snapshot(&self) -> LedgerSnapshot {
+        self.sched.ledger.snapshot()
+    }
+
+    /// Lease parallel width for a non-pool gang (Gather's bgworker
+    /// helpers) through the admission ledger. `requested` is denominated
+    /// in WORKERS — the LEADER IS NOT COUNTED (C parity;
+    /// parallel_leader_participation rides free). THE STABLE CALLER FACE
+    /// (PHASE3-CLOSE §2.1): backed by a unified pool-face gang entry
+    /// (frozen, non-shedding, charged by the ONE recompute) — the ONLY
+    /// leased path since the W4 removal of the WS-O external face.
+    ///
+    /// None = FAIL-OPEN: the ledger is OFF (`PGRUST_RUNTIME_LEDGER_V2`
+    /// unset / per-instance toggle off) or the gang capacity (64) is
+    /// exhausted — the caller keeps today's uncapped launch path exactly
+    /// (never block, never error).
+    ///
+    /// Some(lease): launch at most [`ParallelWidthLease::granted`] workers.
+    /// **The grant MAY BE 0 — the caller MUST have a serial path** (e.g.
+    /// Gather's leader-local scan). The grant is a HEADROOM-ONLY, FROZEN
+    /// ceiling (ledger.rs module doc); after launching, call
+    /// [`ParallelWidthLease::settle`] with the live worker count so parked
+    /// gang width is released (granted counts ACTIVE width — the
+    /// composition rule). Dropping the lease retires the entry.
+    pub fn lease_parallel_width(self: &Arc<Self>, requested: u32) -> Option<ParallelWidthLease> {
+        let (id, granted) = self.sched.lease_gang_width(requested)?;
+        Some(ParallelWidthLease { rt: Arc::clone(self), id, granted })
+    }
+
+    /// WS-B test hook (the set_decay_quantum_ns precedent): per-instance
+    /// JOIN threshold so deterministic tests exercise sub-threshold
+    /// admission. Production keeps PGRUST_RUNTIME_LEDGER_JOIN_US (default
+    /// 0 = inert until the calibration lane lands a measured value).
+    pub fn set_ledger_join_threshold_ns(&self, ns: u64) {
+        self.sched.ledger.set_join_threshold_ns(ns);
     }
 
     /// M5-4 stride toggle (tests / A-B arms). Production default is the
@@ -314,7 +433,7 @@ impl Runtime {
     /// deadlines. Cycle task sets are single-morsel by construction, so the
     /// preference diverts at most one worker for one cycle body.
     pub fn submit_maintenance(&self, spec: QuerySpec) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, false, RgClass::Maintenance, 0);
+        let rg = self.sched.submit(spec, false, RgClass::Maintenance, 0, None);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
 
@@ -343,7 +462,7 @@ impl Runtime {
         spec: QuerySpec,
         session_token: u64,
     ) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, true, RgClass::Foreground, session_token);
+        let rg = self.sched.submit(spec, true, RgClass::Foreground, session_token, None);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
 
@@ -563,6 +682,15 @@ impl Runtime {
         self.sched.worker_local(worker)
     }
 
+    /// WS-O inc-2 DEBUG-ONLY accessor (contract-approved "pin-board
+    /// assert"): `local`'s pin-board entry is settled. For post-drive
+    /// `debug_assert!`s — a participant that returned from its drive must
+    /// hold no pin (a violation = a stranded finalization obligation that
+    /// would wedge the protocol). Never branch production behavior on it.
+    pub fn debug_pin_settled(&self, local: &WorkerLocal) -> bool {
+        self.sched.pin_settled(local.worker_id())
+    }
+
     /// One scheduling decision + at most one task execution. Drivers: the
     /// pool worker loop, and the loom models. See the pool loop for the
     /// required epoch-capture/park discipline around `Step::Idle`.
@@ -629,6 +757,52 @@ impl Runtime {
 fn sched_park(sched: &sched::Scheduler, seen: u64) {
     stats::RuntimeStats::tick(&sched.stats.worker_parks);
     sched.park.park(seen);
+}
+
+/// RAII width lease for a non-pool parallel gang (WS-O wave 2, retargeted
+/// by PHASE3-CLOSE WS-WIDTH; see [`Runtime::lease_parallel_width`]).
+/// Holds one unified pool-face gang entry: the grant is a frozen
+/// headroom-only ceiling ([`ParallelWidthLease::granted`] may be 0 — the
+/// caller must have a serial path); [`ParallelWidthLease::settle`] tracks
+/// the ACTIVE width within it; drop retires the entry and returns the
+/// width to the pool.
+pub struct ParallelWidthLease {
+    rt: Arc<Runtime>,
+    id: usize,
+    granted: u32,
+}
+
+impl ParallelWidthLease {
+    /// The frozen grant ceiling (workers; the leader is not counted).
+    /// **May be 0 — the caller MUST have a serial path.**
+    pub fn granted(&self) -> u32 {
+        self.granted
+    }
+
+    /// Engine-of-record for the §2.4 width mirror (post-W4 there is one
+    /// leased engine; "fail-open" is the no-lease arm, printed by the
+    /// mirror itself).
+    pub fn engine(&self) -> &'static str {
+        "unified"
+    }
+
+    /// Record the gang's ACTIVE width (launched/live workers ≤ granted;
+    /// parked workers hold no grant). Callable repeatedly — launch,
+    /// rescan relaunch, partial exit.
+    pub fn settle(&mut self, active: u32) {
+        debug_assert!(
+            active <= self.granted,
+            "settling above the frozen grant ({active} > {})",
+            self.granted
+        );
+        self.rt.sched.settle_gang_width(self.id, active.min(self.granted));
+    }
+}
+
+impl Drop for ParallelWidthLease {
+    fn drop(&mut self) {
+        self.rt.sched.retire_gang_width(self.id);
+    }
 }
 
 /// RAII lease of one external pin-board lane (see

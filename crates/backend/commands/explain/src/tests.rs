@@ -433,6 +433,13 @@ fn make_portal(mcx: Mcx<'_>) -> Portal<'_> {
         portalPos: 0,
         creation_time: 0,
         visible: false,
+        // WS-CA wave-10 (cursors inc-2): mechanical literal completion only.
+        cursorStoreArmed: false,
+        cursorStore: TuplestoreHandle::NULL,
+        cursorFillExhausted: false,
+        currentOfEligible: None,
+        cursorCaptureBatch: false,
+        cursorTidStore: TuplestoreHandle::NULL,
     })
 }
 
@@ -633,6 +640,45 @@ fn option_defaults_match_c() {
     let opts = NodeList::make1(mcx, opt(mcx, "analyze", None)).unwrap();
     ParseExplainOptionList(&mut es, mcx, &opts).unwrap();
     assert!(es.analyze && es.timing && es.buffers && es.summary);
+}
+
+// pgrust-only EXPLAIN (ENGINE) (single-executor migration Phase 0.2):
+// default-absent, ordinary boolean parse, requires ANALYZE in increment 1
+// (the TIMING requires-analyze validation shape).
+#[test]
+fn engine_option_parses_and_requires_analyze() {
+    install_fixtures();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+
+    // Default absent — and stays absent under bare ANALYZE.
+    let mut es = NewExplainState(mcx).unwrap();
+    ParseExplainOptionList(&mut es, mcx, &NodeList::nil()).unwrap();
+    assert!(!es.engine);
+    let mut es = NewExplainState(mcx).unwrap();
+    let opts = NodeList::make1(mcx, opt(mcx, "analyze", None)).unwrap();
+    ParseExplainOptionList(&mut es, mcx, &opts).unwrap();
+    assert!(!es.engine);
+
+    // ENGINE without ANALYZE errors with the requires-ANALYZE sqlstate.
+    let mut es = NewExplainState(mcx).unwrap();
+    let opts = NodeList::make1(mcx, opt(mcx, "engine", None)).unwrap();
+    let err = ParseExplainOptionList(&mut es, mcx, &opts).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_INVALID_PARAMETER_VALUE);
+
+    // ENGINE OFF without ANALYZE is fine (matches WAL/TIMING-off semantics).
+    let mut es = NewExplainState(mcx).unwrap();
+    let opts = NodeList::make1(mcx, off(mcx, "engine")).unwrap();
+    ParseExplainOptionList(&mut es, mcx, &opts).unwrap();
+    assert!(!es.engine);
+
+    // ENGINE + ANALYZE parses.
+    let mut es = NewExplainState(mcx).unwrap();
+    let opts =
+        NodeList::from_slice(mcx, &[opt(mcx, "engine", None), opt(mcx, "analyze", None)])
+            .unwrap();
+    ParseExplainOptionList(&mut es, mcx, &opts).unwrap();
+    assert!(es.engine && es.analyze);
 }
 
 #[test]

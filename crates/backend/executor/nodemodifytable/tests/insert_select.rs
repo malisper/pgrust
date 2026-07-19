@@ -705,6 +705,23 @@ fn insert_commit_select_wal_roundtrip() {
     // The commit is durable in clog.
     assert!(transam::TransactionIdDidCommit(insert_xid).unwrap());
 
+    // Wave-2 WS-N knob-ON leg (notes/se-ws-n-dml-inc1.md): under
+    // PGRUST_LANE_V2_DML=1 + PGRUST_LANE_V2_COVERAGE=1 this REAL INSERT
+    // (heap write + WAL + commit, all asserted below) must have been
+    // lane-owned — every downstream assertion in this file then doubles as
+    // the real-write byte-behavior proof for the hosted drive. Both env
+    // vars are process-static, so the default (knob-off) run skips this.
+    if std::env::var("PGRUST_LANE_V2_DML").as_deref() == Ok("1")
+        && std::env::var("PGRUST_LANE_V2_COVERAGE").as_deref() == Ok("1")
+    {
+        let owned: i64 = execmain::coverage_snapshot()
+            .iter()
+            .filter(|r| r.surface == "lane" && r.class == "modifytable" && r.counter == "owned")
+            .map(|r| r.value)
+            .sum();
+        assert!(owned >= 1, "PGRUST_LANE_V2_DML=1 but the INSERT was not lane-owned");
+    }
+
     // --- Statement 2: SELECT the row back with a fresh MVCC snapshot. ---
     xact::StartTransactionCommand().unwrap();
     let (op, processed) = run_stmt("SELECT a, b FROM t");

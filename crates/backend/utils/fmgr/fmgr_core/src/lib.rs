@@ -282,8 +282,34 @@ pub fn fmgr_thin_builtin(flinfo: &FmgrInfo, nargs: i16) -> Option<::fmgr::PGFunc
 }
 
 /// C: `fmgr_lookupByName` — linear, validator/alias resolution only (cold).
+/// Extended to search the installed extra tables after the canonical table
+/// so pgrust-native internal names (e.g. pgrust_lane_coverage) resolve for
+/// CREATE FUNCTION ... LANGUAGE internal and the fmgr_info pg_proc arm —
+/// cold paths only. C behavior is unchanged for every canonical name (the
+/// canonical table is searched first and C has no extra names).
 pub fn fmgr_lookup_by_name(name: &str) -> Option<&'static FmgrBuiltin> {
-    FMGR_BUILTINS.iter().find(|b| b.name == name)
+    FMGR_BUILTINS
+        .iter()
+        .find(|b| b.name == name)
+        .or_else(|| extra_builtin_by_name(name))
+}
+
+#[cold]
+#[inline(never)]
+fn extra_builtin_by_name(name: &str) -> Option<&'static FmgrBuiltin> {
+    let ptr = EXTRA_PTR.load(core::sync::atomic::Ordering::Relaxed);
+    if ptr.is_null() {
+        return None;
+    }
+    let len = EXTRA_LEN.load(core::sync::atomic::Ordering::Relaxed);
+    // SAFETY: set-once invariant (install_extra_builtins) — (ptr,len) is the
+    // installed slice.
+    let tables = unsafe {
+        core::slice::from_raw_parts(ptr as *const &'static [FmgrBuiltin], len)
+    };
+    tables
+        .iter()
+        .find_map(|t| t.iter().find(|b| b.name == name))
 }
 
 /// C: `fmgr_internal_function` (`fmgr_internal_validator`'s lookup glue).
