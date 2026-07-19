@@ -1734,6 +1734,106 @@ fn jumble_node<'mcx>(js: J<'_, 'mcx>, n: Node<'mcx>) -> PgResult<()> {
             node(js, e.collClause)?;
             list(js, &e.constraints)?;
         }
+        // Arms below surfaced by recovery TAP 027_stream_regress, which runs
+        // the whole core regress suite with compute_query_id='regress' +
+        // pg_stat_statements (jumbling forced for EVERY statement). Field
+        // lists transcribed from C's generated queryjumblefuncs.funcs.c.
+        NodeTag::T_CreateRangeStmt => {
+            let e = cast!(r::CreateRangeStmt);
+            list(js, &e.typeName)?;
+            list(js, &e.params)?;
+        }
+        NodeTag::T_AlterTypeStmt => {
+            let e = cast!(r::AlterTypeStmt);
+            list(js, &e.typeName)?;
+            list(js, &e.options)?;
+        }
+        NodeTag::T_AlterStatsStmt => {
+            let e = cast!(r::AlterStatsStmt);
+            list(js, &e.defnames)?;
+            node(js, e.stxstattarget)?;
+            js.f_bool(e.missing_ok);
+        }
+        NodeTag::T_CreateConversionStmt => {
+            let e = cast!(q::CreateConversionStmt);
+            list(js, &e.conversion_name)?;
+            js.f_str(e.for_encoding_name);
+            js.f_str(e.to_encoding_name);
+            list(js, &e.func_name)?;
+            js.f_bool(e.def);
+        }
+        NodeTag::T_CreatePLangStmt => {
+            let e = cast!(q::CreatePLangStmt);
+            js.f_bool(e.replace);
+            js.f_str(e.plname);
+            list(js, &e.plhandler)?;
+            list(js, &e.plinline)?;
+            list(js, &e.plvalidator)?;
+            js.f_bool(e.pltrusted);
+        }
+        NodeTag::T_SecLabelStmt => {
+            let e = cast!(q::SecLabelStmt);
+            js.f_u32(e.objtype as u32);
+            node(js, e.object)?;
+            js.f_str(e.provider);
+            js.f_str(e.label);
+        }
+        NodeTag::T_ReturnStmt => {
+            let e = cast!(q::ReturnStmt);
+            node(js, e.returnval)?;
+        }
+        NodeTag::T_TableSampleClause => {
+            let e = cast!(q::TableSampleClause);
+            js.f_u32(e.tsmhandler);
+            list(js, &e.args)?;
+            node(js, e.repeatable)?;
+        }
+        NodeTag::T_RangeTableSample => {
+            let e = cast!(r::RangeTableSample);
+            node(js, e.relation)?;
+            list(js, &e.method)?;
+            list(js, &e.args)?;
+            node(js, e.repeatable)?;
+        }
+        NodeTag::T_MultiAssignRef => {
+            let e = cast!(r::MultiAssignRef);
+            node(js, e.source)?;
+            js.f_i32(e.colno);
+            js.f_i32(e.ncolumns);
+        }
+        NodeTag::T_ReturningOption => {
+            let e = cast!(r::ReturningOption);
+            js.f_u32(e.option as u32);
+            js.f_str(e.value);
+        }
+        NodeTag::T_JsonTable => {
+            let e = cast!(r::JsonTable);
+            node(js, e.context_item)?;
+            node(js, e.pathspec)?;
+            list(js, &e.passing)?;
+            list(js, &e.columns)?;
+            node(js, e.on_error)?;
+            alias(js, e.alias)?;
+            js.f_bool(e.lateral);
+        }
+        NodeTag::T_JsonTableColumn => {
+            let e = cast!(r::JsonTableColumn);
+            js.f_u32(e.coltype as u32);
+            js.f_str(e.name);
+            node(js, e.typeName)?;
+            node(js, e.pathspec)?;
+            json_format(js, e.format);
+            js.f_u32(e.wrapper as u32);
+            js.f_u32(e.quotes as u32);
+            list(js, &e.columns)?;
+            node(js, e.on_empty)?;
+            node(js, e.on_error)?;
+        }
+        NodeTag::T_JsonTablePathSpec => {
+            let e = cast!(r::JsonTablePathSpec);
+            node(js, e.string)?;
+            js.f_str(e.name);
+        }
         NodeTag::T_CreateOpClassStmt => {
             let e = cast!(q::CreateOpClassStmt);
             list(js, &e.opclassname)?;
