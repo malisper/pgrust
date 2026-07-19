@@ -1,6 +1,6 @@
 use mcx::{Mcx, MemoryContext};
 use parser_small1::{make_parsestate, ParseExprKind, ParseState};
-use types_core::catalog::{INT2OID, INT4OID, INT8OID, NUMERICOID};
+use types_core::catalog::{INT2OID, INT4OID, INT8OID, NUMERICOID, VOIDOID};
 use types_core::{InvalidOid, Oid};
 use types_error::{ERRCODE_UNDEFINED_FUNCTION, ERRCODE_WRONG_OBJECT_TYPE};
 use types_nodes::rawnodes::FuncCall;
@@ -170,7 +170,74 @@ fn call<'mcx>(
 ) -> types_error::PgResult<Node<'mcx>> {
     let fc = fc_node.as_func_call().unwrap();
     pstate.p_expr_kind = ParseExprKind::EXPR_KIND_SELECT_TARGET;
-    ParseFuncOrColumn(mcx, pstate, &fc.funcname, fargs, arg_types, fc, None, None, false, fc.location)
+    ParseFuncOrColumn(
+        mcx, pstate, &fc.funcname, fargs, arg_types, fc, None, None, false, false, fc.location,
+    )
+}
+
+fn void_param<'mcx>(mcx: Mcx<'mcx>) -> Node<'mcx> {
+    Node::mk(
+        mcx,
+        types_nodes::primnodes::Param {
+            paramkind: types_nodes::primnodes::ParamKind::PARAM_EXTERN,
+            paramid: 1,
+            paramtype: VOIDOID,
+            paramtypmod: -1,
+            paramcollid: InvalidOid,
+            location: -1,
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn void_param_is_discarded_before_lookup() {
+    install_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let fc = func_call(mcx, "foo", false, false);
+    let fargs = NodeList::make1(mcx, void_param(mcx)).unwrap();
+    let node = call(mcx, &mut pstate, fc, fargs, &[VOIDOID]).unwrap();
+
+    let f = node.as_func_expr().unwrap();
+    assert_eq!(f.funcid, 9999);
+    assert!(f.args.is_nil());
+}
+
+#[test]
+fn void_const_is_not_discarded() {
+    install_selection_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let fc = func_call(mcx, "foo", false, false);
+    let c = Node::mk_const(mcx, VOIDOID, -1, InvalidOid, 4, datum::Datum::null(), true, true)
+        .unwrap();
+    let fargs = NodeList::make1(mcx, c).unwrap();
+    let err = call(mcx, &mut pstate, fc, fargs, &[VOIDOID]).unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_FUNCTION);
+}
+
+#[test]
+fn void_param_kept_for_column_syntax_leg() {
+    install_selection_fixture();
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let mut pstate = make_parsestate(mcx, None);
+
+    let fc_node = func_call(mcx, "foo", false, false);
+    let fc = fc_node.as_func_call().unwrap();
+    let fargs = NodeList::make1(mcx, void_param(mcx)).unwrap();
+    pstate.p_expr_kind = ParseExprKind::EXPR_KIND_SELECT_TARGET;
+    let err = ParseFuncOrColumn(
+        mcx, &mut pstate, &fc.funcname, fargs, &[VOIDOID], fc, None, None, false, true,
+        fc.location,
+    )
+    .unwrap_err();
+    assert_eq!(err.sqlstate(), ERRCODE_UNDEFINED_FUNCTION);
 }
 
 #[test]
@@ -316,9 +383,10 @@ fn aggregate_in_where_kind_is_42803() {
 
     let fc_node = func_call(mcx, "count", true, false);
     let fc = fc_node.as_func_call().unwrap();
-    let err = ParseFuncOrColumn(mcx, &mut pstate, &fc.funcname, NodeList::nil(), &[], fc, None, None, false, 7)
-        .map(|_| ())
-        .unwrap_err();
+    let err =
+        ParseFuncOrColumn(mcx, &mut pstate, &fc.funcname, NodeList::nil(), &[], fc, None, None, false, false, 7)
+            .map(|_| ())
+            .unwrap_err();
     assert_eq!(err.sqlstate(), types_error::ERRCODE_GROUPING_ERROR);
     assert!(
         err.message().contains("aggregate functions are not allowed in WHERE"),
@@ -365,6 +433,26 @@ fn install_selection_fixture() {
                 typsubscript: InvalidOid,
             }))
         });
+        syscache_seams::pg_type_typrelid::set(|_| Ok(Some(InvalidOid)));
+        syscache_seams::lookup_pg_type_typcache_shape::set(|typid| {
+            let mut typname = types_tuple::NameData::default();
+            typname.namestrcpy(if typid == VOIDOID { "void" } else { "t" });
+            Ok(Some(syscache_seams::PgTypeTypcacheShape {
+                typname,
+                typlen: 4,
+                typbyval: true,
+                typalign: b'i' as i8,
+                typstorage: b'p' as i8,
+                typtype: if typid == VOIDOID { b'p' as i8 } else { b'b' as i8 },
+                typisdefined: true,
+                typrelid: InvalidOid,
+                typsubscript: InvalidOid,
+                typelem: InvalidOid,
+                typarray: InvalidOid,
+                typcollation: InvalidOid,
+            }))
+        });
+        namespace_seams::type_is_visible::set(|_| Ok(true));
         syscache_seams::lookup_pg_cast_shape::set(|src, tgt| {
             Ok(match (src, tgt) {
                 (INT4OID, FLOAT8OID) | (INT4OID, NUMERICOID) => {

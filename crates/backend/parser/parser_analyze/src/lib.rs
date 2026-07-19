@@ -412,6 +412,7 @@ fn transformCallStmt<'mcx>(
         None,
         last_srf,
         true,
+        false,
         fn_call.location,
     )?;
 
