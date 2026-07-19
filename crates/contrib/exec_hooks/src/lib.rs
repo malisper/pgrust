@@ -120,3 +120,57 @@ dispatch_leave!(dispatch_run_leave, run_leave);
 dispatch_enter!(dispatch_finish, finish);
 dispatch_leave!(dispatch_finish_leave, finish_leave);
 dispatch_enter!(dispatch_end, end);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicU32;
+
+    static ORDER: AtomicU32 = AtomicU32::new(0);
+    static FIRST_START_AT: AtomicU32 = AtomicU32::new(0);
+    static SECOND_START_AT: AtomicU32 = AtomicU32::new(0);
+    static FIRST_LEAVE_AT: AtomicU32 = AtomicU32::new(0);
+    static SECOND_LEAVE_AT: AtomicU32 = AtomicU32::new(0);
+
+    fn stamp(slot: &AtomicU32) {
+        slot.store(ORDER.fetch_add(1, Ordering::Relaxed) + 1, Ordering::Relaxed);
+    }
+
+    // One test only: registration is process-global (like the taps it owns),
+    // so the not-loaded assertion, the install-on-first-register assertion,
+    // and the C chain ordering assertion must share a process sequence.
+    #[test]
+    fn not_loaded_is_empty_then_chain_dispatches_in_c_order() {
+        // Not loaded: no consumer registered, taps stay empty — the
+        // executor's call_if pays only the null test (seam_core tap!).
+        assert!(consumers().is_empty());
+        assert!(!execmain::tap_executor_start::is_installed());
+
+        register(ExecutorHooks {
+            start: Some(|_| stamp(&FIRST_START_AT)),
+            run_leave: Some(|_| stamp(&FIRST_LEAVE_AT)),
+            ..Default::default()
+        });
+        assert!(execmain::tap_executor_start::is_installed());
+
+        register(ExecutorHooks {
+            start: Some(|_| stamp(&SECOND_START_AT)),
+            run_leave: Some(|_| stamp(&SECOND_LEAVE_AT)),
+            ..Default::default()
+        });
+
+        let h = QueryDescHandle::NULL;
+        execmain::tap_executor_start::call_if(|f| f(h));
+        execmain::tap_executor_run_leave::call_if(|f| f(h));
+
+        // C chain semantics: the later-loaded module wraps the earlier one —
+        // enter runs last-registered first, the PG_FINALLY leave runs
+        // first-registered first.
+        let (f_start, s_start) =
+            (FIRST_START_AT.load(Ordering::Relaxed), SECOND_START_AT.load(Ordering::Relaxed));
+        let (f_leave, s_leave) =
+            (FIRST_LEAVE_AT.load(Ordering::Relaxed), SECOND_LEAVE_AT.load(Ordering::Relaxed));
+        assert!(s_start < f_start, "enter: last-registered runs first");
+        assert!(f_leave < s_leave, "leave: first-registered runs first");
+    }
+}
