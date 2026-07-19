@@ -14998,6 +14998,7 @@ dependencies = [
  "tablecmds",
  "tablefunc",
  "tablesample",
+ "tcn",
  "tcop_dest",
  "test_decoding",
  "timeline",
@@ -16900,6 +16901,24 @@ dependencies = [
  "types_error",
  "types_tuple",
  "xlogreader_seams",
+]
+
+[[package]]
+name = "tcn"
+version = "0.0.0"
+dependencies = [
+ "commands_async",
+ "datum",
+ "dfmgr",
+ "mcx",
+ "relcache",
+ "spi",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_trigger",
+ "types_trigger_call",
+ "types_tuple",
 ]
 
 [[package]]
