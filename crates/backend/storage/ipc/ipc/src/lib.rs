@@ -107,6 +107,19 @@ pub fn proc_exit(code: i32, my_pid: i32) -> ! {
     std::panic::resume_unwind(Box::new(ProcExitThread { code }));
 }
 
+/// True while this thread's proc_exit callback drain is still owed (set by
+/// proc_exit under postmaster, consumed by run_deferred_exit_callbacks).
+/// The session-memory teardown gate (launch_backend, FPBUDGET-1 v2) reads it
+/// BEFORE the drain to tell a clean proc_exit apart from a quickdie-class
+/// exit_thread_raw: both unwind ProcExitThread, but only proc_exit owes the
+/// callback ceremony (ShutdownPostgres -> AbortOutOfAnyTransaction ->
+/// portal cleanup). Estate teardown without that ceremony is what aborted
+/// train-29 (a FAILED portal's drop deallocated into a freed context), so
+/// crash-class exits must skip the drain like C's _exit(2) skips atexit.
+pub fn exit_callbacks_pending() -> bool {
+    EXIT_CALLBACKS_DEFERRED.with(Cell::get)
+}
+
 /// Thread-top half of proc_exit (run_child_task): if this thread's unwind
 /// deferred the callback drain, run the exit stacks now — after every stack
 /// frame's Drop glue, in C's callback order. exit_thread_raw (quickdie)
