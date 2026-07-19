@@ -26,3 +26,7 @@ crc32c = { path = "../../port/crc32c" }
 hashfn = { path = "../../common/hashfn" }
 pqformat = { path = "../../backend/libpq/pqformat" }
 dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
+
+[dev-dependencies]
+stringinfo = { path = "../../_support/types/stringinfo" }
+mbutils_seams = { path = "../../backend/utils/mb/mbutils_seams" }
