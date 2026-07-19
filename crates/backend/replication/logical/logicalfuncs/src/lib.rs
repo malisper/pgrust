@@ -104,6 +104,16 @@ fn pg_logical_slot_get_changes_guts(
     confirm: bool,
     binary: bool,
 ) -> PgResult<Datum> {
+    // C captures CurrentResourceOwner at entry (logicalfuncs.c old_resowner):
+    // decoding replays each transaction inside an internal subtransaction
+    // (reorderbuffer.c BeginInternalSubTransaction/Rollback...), whose exit
+    // resets CurrentResourceOwner to the transaction owner. A caller that
+    // runs us under a portal-owned resowner (CTAS, INSERT ... SELECT) then
+    // unregisters its executor snapshot against the wrong owner at
+    // ExecutorEnd ("snapshot reference ... is not owned by resource owner
+    // TopTransaction"). decode_loop restores this value after the loop.
+    let old_resowner = resowner_seams::current_resource_owner::call();
+
     CheckSlotPermissions()?;
     CheckLogicalDecodingRequirements()?;
 
@@ -201,6 +211,7 @@ fn pg_logical_slot_get_changes_guts(
         end_of_wal,
         confirm,
         binary,
+        old_resowner,
     );
 
     match result {
@@ -229,6 +240,7 @@ fn decode_loop(
     end_of_wal: XLogRecPtr,
     confirm: bool,
     binary: bool,
+    old_resowner: types_resowner::ResourceOwner,
 ) -> PgResult<()> {
     let mut ctx = CreateDecodingContext(
         InvalidXLogRecPtr,
@@ -285,6 +297,12 @@ fn decode_loop(
             break;
         }
     }
+
+    // Logical decoding could have clobbered CurrentResourceOwner during
+    // transaction management, so restore the executor's value
+    // (logicalfuncs.c: "This is a kluge, but it's not worth cleaning up
+    // right now"). Same restore as LogicalSlotAdvanceAndCheckSnapState.
+    resowner_seams::set_current_resource_owner::call(old_resowner);
 
     if ctx.reader.v.EndRecPtr != InvalidXLogRecPtr && confirm {
         LogicalConfirmReceivedLocation(ctx.reader.v.EndRecPtr)?;
