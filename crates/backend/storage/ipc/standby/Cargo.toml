@@ -7,6 +7,7 @@ edition = "2021"
 path = "src/lib.rs"
 
 [dependencies]
+injection_point = { path = "../../../utils/misc/injection_point" }
 adt_timestamp = { path = "../../../utils/adt/adt_timestamp" }
 bufmgr = { path = "../../buffer/bufmgr" }
 elog = { path = "../../../utils/error/elog" }

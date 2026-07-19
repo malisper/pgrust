@@ -89,7 +89,11 @@ thread_local! {
 }
 
 fn new_lock_state() -> RecoveryLockState {
-    let cx: &'static MemoryContext = Box::leak(Box::new(MemoryContext::new("RecoveryLockHash")));
+    let cx: &'static MemoryContext = ::mcx::session_root("RecoveryLockHash");
+    // LIFO: empty the droppy TLS slot before its context is freed.
+    ::mcx::register_session_cleanup(Box::new(|| {
+        RECOVERY_LOCKS.with(|c| drop(c.borrow_mut().take()));
+    }));
     let mcx = cx.mcx();
     RecoveryLockState {
         mcx,
@@ -120,16 +124,15 @@ pub fn InitRecoveryTransactionEnvironment() -> PgResult<()> {
 }
 
 pub fn ShutdownRecoveryTransactionEnvironment() -> PgResult<()> {
+    // None = a FATAL before initialization; there is nothing to do.
     if RECOVERY_LOCKS.with(|s| s.borrow().is_none()) {
         return Ok(());
     }
 
-    // C: ExpireAllKnownAssignedTransactionIds(); StandbyReleaseAllLocks();
-    // destroy tables; VirtualXactLockTableCleanup().
-    panic!(
-        "ShutdownRecoveryTransactionEnvironment: ExpireAllKnownAssignedTransactionIds \
-         unported (procarray KnownAssignedXids, recovery phase 2)"
-    );
+    procarray::ExpireAllKnownAssignedTransactionIds()?;
+    StandbyReleaseAllLocks()?;
+    RECOVERY_LOCKS.with(|s| *s.borrow_mut() = None);
+    lock::VirtualXactLockTableCleanup()
 }
 
 // Returns 0 ("a time safely in the past") to mean wait forever, as C.

@@ -47,6 +47,7 @@
 use std::sync::Arc;
 
 use loom::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use loom::sync::{Condvar, Mutex};
 use loom::thread;
 
 use runtime::{
@@ -894,6 +895,733 @@ fn stream_source_handshake() {
         let stats = rt.stats();
         assert_eq!(stats.finalize_events, 1);
         assert_eq!(stats.rgs_completed, 1);
+    });
+}
+
+// ===========================================================================
+// ParkLot (the idle-worker epoch eventcount) — DIRECT protocol models
+// (LOOM-BREADTH inc-1, absorbed at PERMIT-S2). Until now the eventcount was
+// only exercised through the whole-runtime models above; these pin ITS
+// invariant in isolation: with the capture-epoch -> check-work -> park(seen)
+// discipline, a wake_all issued at ANY point relative to the park is never
+// lost (the agg192-contention atomic-epoch rework's lost-wakeup argument,
+// verified exhaustively). 2-3 threads, single wake — inside the fast-tier
+// budget. ABSORB DELTA (compose §1.3): the models drive `pgsync::ParkLot`
+// DIRECTLY — the type runtime's sync facade re-exports — so the loom-world
+// pgsync types are what the models check; the branch-era cfg(loom)
+// `runtime::ParkLot` export is not needed and was not absorbed.
+// ===========================================================================
+
+/// One publisher, one idle worker: the worker runs the documented protocol
+/// (epoch() BEFORE the failed work pick; park(seen) only after the pick
+/// missed). The publisher stores work then wake_all()s. In EVERY
+/// interleaving the worker must terminate having seen the work — a lost
+/// wake parks it forever and loom's deadlock detector fails the model.
+#[test]
+fn parklot_publish_wake_never_lost() {
+    // UNBOUNDED (inc-1 review disposition, 2026-07-18): the space is
+    // exhaustible in seconds, so both tiers run the full space in-tree
+    // (the fast tier's env permutation/duration caps still apply there).
+    loom::model(|| {
+        let lot = Arc::new(pgsync::ParkLot::new());
+        let work = Arc::new(AtomicBool::new(false));
+
+        let publisher = {
+            let (lot, work) = (Arc::clone(&lot), Arc::clone(&work));
+            thread::spawn(move || {
+                // Publish order is the protocol: work visible BEFORE the
+                // epoch bump + notify.
+                work.store(true, Ordering::SeqCst);
+                lot.wake_all();
+            })
+        };
+
+        loop {
+            let seen = lot.epoch();
+            if work.load(Ordering::SeqCst) {
+                break;
+            }
+            lot.park(seen);
+        }
+        publisher.join().unwrap();
+        assert!(work.load(Ordering::SeqCst));
+    });
+}
+
+/// One publisher, TWO idle workers: a single wake_all must release both
+/// parkers (notify_all + epoch bump), in every interleaving of their
+/// capture/pick/park windows against the publish.
+#[test]
+fn parklot_wake_all_reaches_every_parker() {
+    // UNBOUNDED (inc-1 review disposition, 2026-07-18): see above.
+    loom::model(|| {
+        let lot = Arc::new(pgsync::ParkLot::new());
+        let work = Arc::new(AtomicBool::new(false));
+
+        let workers: Vec<_> = (0..2)
+            .map(|_| {
+                let (lot, work) = (Arc::clone(&lot), Arc::clone(&work));
+                thread::spawn(move || loop {
+                    let seen = lot.epoch();
+                    if work.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    lot.park(seen);
+                })
+            })
+            .collect();
+
+        work.store(true, Ordering::SeqCst);
+        lot.wake_all();
+        for w in workers {
+            w.join().unwrap();
+        }
+    });
+}
+
+// ===========================================================================
+// CURSOR PARK SHAPE — settle / claim-release / R3 (LOOM-BREADTH inc-2 item 2).
+// The WS-AI forward-pull cursor park protocol (notes/se-wave9-ai.md §2 / §8
+// Item 1): at a budget-N suspension the walker SETTLES every lane-staged scan
+// claim — drops its bufmgr pins to ZERO (R3), records the reposition window,
+// and RELEASES the claim + publishes it to the runtime idle-worker path
+// (ParkLot) — so an idle pool worker may legitimately absorb the freed
+// resource while the cursor is parked; the next FETCH REPOSSESSES (re-acquires
+// the claim, re-pins at the recorded window, delivers the remainder).
+//
+// The invariant this pins: while the cursor is parked (claim released), it
+// holds ZERO pins (R3), and the park-resume race against the runtime waiter is
+// clean — the claim is always eventually repossessable (no leaked claim, no
+// lost publish), and the reposition window is idempotent across the cycle.
+//
+// MIRROR-DIALECT (notes/loom-breadth-inc2.md §2): the SYNC primitives are the
+// REAL converted target — `pgsync::Semaphore` (the exclusive scan claim) and
+// `pgsync::ParkLot` (the runtime waiter path) driven directly under --cfg
+// loom. The executor node plumbing (SeqScanState.lane_park, heapam
+// reposition, the ParkWalk recursion) is ABSTRACTED: the production cursor
+// code (execmain lanev2) lives on the single-executor lineage, NOT this DST
+// base (grep on the tree: `cursor_run_park`/`es_cursor_run_budget` absent).
+// The model verifies the park/settle/claim-release SYNC CONTRACT; the direct
+// node-driving model is inc-3 work once the cursor lane composes onto the DST
+// substrate.
+// ===========================================================================
+
+/// One cursor fetcher racing one runtime idle worker over a single-permit
+/// scan claim. The fetcher stages (pin+claim), settles at suspension (pin→0,
+/// release+publish), then resumes (repossess). The idle worker parks on the
+/// runtime lot until it can seize the freed claim, and asserts R3 (zero pins)
+/// the instant it holds the claim. Every interleaving must complete with R3
+/// intact — a held pin at settle fails the assert, an unpublished release
+/// deadlocks the parked worker.
+#[test]
+fn cursor_park_settle_releases_claim_and_pins_r3() {
+    // The reposition window (b0,b1) stand-in: settle records it, resume
+    // asserts it survived idempotently.
+    const WINDOW: usize = 0xB0B1;
+
+    loom::model(|| {
+        let claim = Arc::new(pgsync::Semaphore::new(1)); // the exclusive scan claim
+        let pins = Arc::new(AtomicUsize::new(0)); // the fetcher's bufmgr pins (R3 subject)
+        let reposition = Arc::new(AtomicUsize::new(0)); // the recorded (b0,b1) window
+        let lot = Arc::new(pgsync::ParkLot::new()); // the runtime waiter path
+
+        // Releasing a scan resource ALWAYS publishes availability to idle
+        // workers (settle AND final release) — the lost-wakeup-free pairing.
+        let release_and_publish = {
+            let (claim, lot) = (Arc::clone(&claim), Arc::clone(&lot));
+            move || {
+                claim.release();
+                lot.wake_all();
+            }
+        };
+
+        // The runtime idle worker: park on the lot until it can seize the
+        // freed claim; when it holds the claim the cursor MUST hold zero pins.
+        let worker = {
+            let (claim, pins, lot) = (Arc::clone(&claim), Arc::clone(&pins), Arc::clone(&lot));
+            thread::spawn(move || loop {
+                let seen = lot.epoch();
+                if claim.try_acquire() {
+                    assert_eq!(
+                        pins.load(Ordering::SeqCst),
+                        0,
+                        "R3: cursor holds zero pins whenever its claim is repossessable"
+                    );
+                    claim.release();
+                    return;
+                }
+                lot.park(seen);
+            })
+        };
+
+        // The cursor fetcher.
+        // STAGE (first FETCH): own the claim, take a pin, stage a batch.
+        claim.acquire();
+        pins.fetch_add(1, Ordering::SeqCst);
+        // ... deliver budget-N tuples ...
+        // SETTLE at suspension: drop pins to zero (R3), record reposition,
+        // release + publish the claim.
+        pins.fetch_sub(1, Ordering::SeqCst);
+        reposition.store(WINDOW, Ordering::SeqCst);
+        release_and_publish();
+        // RESUME (next FETCH): repossess the claim (may wait behind the idle
+        // worker), verify the reposition window is idempotent, re-pin.
+        claim.acquire();
+        assert_eq!(
+            reposition.load(Ordering::SeqCst),
+            WINDOW,
+            "reposition window idempotent across settle/resume"
+        );
+        pins.fetch_add(1, Ordering::SeqCst);
+        // ... deliver the remainder ...
+        pins.fetch_sub(1, Ordering::SeqCst);
+        release_and_publish();
+
+        worker.join().unwrap();
+        assert_eq!(pins.load(Ordering::SeqCst), 0);
+    });
+}
+
+// ===========================================================================
+// STANDING GANG detach-count JOIN — census arm (a) row 1 / §3 row 1 (the
+// "gang Condvar → rg.rs shape" conversion target), LOOM-BREADTH inc-2 item 3.
+// Mirror of transam/parallel/standing.rs close_and_await: the leader waits for
+// detached == claimed before its executor arena may unwind (the SendConst
+// join replacing DestroyParallelContext's worker-exit wait), and every worker
+// detaches UNCONDITIONALLY through the DetachGuard drop.
+//
+// MODELS THE CONVERTED SHAPE, not the std one being deleted (inc-1 policy):
+// production's leader currently POLLS via wait_parallel_finish_quantum (a
+// row-13 timed sleep, lost-wake-tolerant by construction); the P3/rg.rs
+// conversion target is a lost-wake-FREE Condvar join, which is what this pins.
+// Mirror-dialect: standing.rs is not loom-buildable (latch/lmgr/PGPROC
+// globals) — the model drives loom `Mutex`/`Condvar` + atomics directly.
+// ===========================================================================
+
+/// N workers each claim a ticket then unconditionally detach (bump `detached`
+/// + a lock-mediated wake); the leader closes the board and joins on
+/// `detached == claimed`. In every interleaving the leader completes — the
+/// detach wake is never lost (loom's deadlock detector is the oracle).
+#[test]
+fn standing_gang_detach_count_join_no_lost_wake() {
+    const N: usize = 2;
+
+    loom::model(|| {
+        let claimed = Arc::new(AtomicUsize::new(0));
+        let detached = Arc::new(AtomicUsize::new(0));
+        let m = Arc::new(Mutex::new(())); // the gang cv mutex
+        let cv = Arc::new(Condvar::new()); // the gang Condvar
+
+        let workers: Vec<_> = (0..N)
+            .map(|_| {
+                let (claimed, detached, m, cv) =
+                    (Arc::clone(&claimed), Arc::clone(&detached), Arc::clone(&m), Arc::clone(&cv));
+                thread::spawn(move || {
+                    // try_claim: take a ticket.
+                    claimed.fetch_add(1, Ordering::SeqCst);
+                    // ... run the engagement driver ...
+                    // DetachGuard drop (UNCONDITIONAL): bump detached, then a
+                    // lock-mediated wake — the barrier that makes the notify
+                    // lost-wake-free (either the leader sees the new count at
+                    // its under-lock check, or it is already parked when the
+                    // notify fires).
+                    detached.fetch_add(1, Ordering::SeqCst);
+                    {
+                        let g = m.lock().unwrap();
+                        drop(g);
+                    }
+                    cv.notify_all();
+                })
+            })
+            .collect();
+
+        // Leader: close_and_await — wait until every claimed ticket detached.
+        {
+            let mut g = m.lock().unwrap();
+            while detached.load(Ordering::SeqCst) < N {
+                g = cv.wait(g).unwrap();
+            }
+        }
+
+        for w in workers {
+            w.join().unwrap();
+        }
+        assert_eq!(claimed.load(Ordering::SeqCst), N);
+        assert_eq!(detached.load(Ordering::SeqCst), N, "detached == claimed at join");
+    });
+}
+
+// ===========================================================================
+// PERMIT-S4 — the step-4 PROTOCOL-conversion models (notes/dst-permit-s4.md).
+// Three converted sites, three models. Dialect per model, disclosed:
+//
+//   * mailbox_* — FULLY DIRECT: they drive `pgsync::mailbox`, the REAL
+//     production utility the row-5 (copy/parallel work+done channels) and
+//     row-10 (pgrcolumnar writer stitch channel) conversions consume. The
+//     call-site glue (pump/encoder/leader topology) is production-only; the
+//     shared protocol is entirely this type.
+//   * relscan_seize_* — REAL SHARED TYPE, transcribed driver: the model
+//     constructs the production `BTParallelScanShared` (types_relscan is
+//     loom-buildable since the LATCH-LOOM latch conversion — the old
+//     "mirror struct" disclosure is DISCHARGED); the seize/release loop
+//     remains transcribed 1:1 from nbtree/src/parallel.rs, whose real
+//     `_bt_parallel_seize` needs Relation machinery outside model reach.
+//   * bitmapheap_phase_* — MIRROR over the REAL waiter Slot core (the
+//     waiter crate's loom surface): nodebitmapheapscan is not
+//     loom-buildable (executor dep tree); the BmShared waker-list phase
+//     machine is mirrored 1:1 from its converted
+//     bitmap_should_initialize_shared_state, with UNTIMED parks — the
+//     production 10ms cadence is the InterruptPending poll, and removing it
+//     in the model makes a lost publish-wake a deadlock loom must catch
+//     instead of something the cadence would paper over (the pg_barrier
+//     models' discipline).
+//
+// RED battery (house law: every model catches its bug): each section names
+// its red — the pre-conversion / weakened shape — and how it fails.
+// ===========================================================================
+
+/// Row 5/10 (DIRECT): a cap-1 mailbox pipeline delivers every message in
+/// order and terminates through the drop-close. The producer parks on FULL
+/// (message 2 cannot enter until the consumer pops message 1), the consumer
+/// parks on EMPTY, and the producer's drop-close ends the consumer's drain
+/// loop — every park is against the real ParkLot pair inside the mailbox.
+///
+/// RED (verified by transient weakening, not shipped — the model drives the
+/// production type, so the red is a production weakening):
+///   * `send` not waking not_empty ⇒ consumer parked forever — loom
+///     deadlock;
+///   * `recv` parking with the state guard HELD (the row-5 recv-under-mutex
+///     shape this conversion kills) ⇒ producer blocked on the state mutex,
+///     consumer parked — loom deadlock [Blocked, Blocked].
+#[test]
+fn mailbox_bounded_pipeline_delivers_and_closes() {
+    loom::model(|| {
+        let (tx, rx) = pgsync::mailbox::<u32>(Some(1));
+
+        let consumer = thread::spawn(move || {
+            let mut got = Vec::new();
+            while let Some(v) = rx.recv() {
+                got.push(v);
+            }
+            got
+        });
+
+        tx.send(1).unwrap();
+        tx.send(2).unwrap(); // parks while the queue is at cap
+        drop(tx); // close: consumer's drain observes None and exits
+
+        let got = consumer.join().unwrap();
+        assert_eq!(got, vec![1, 2], "every message delivered, in order");
+    });
+}
+
+/// Row 8 (SIMVFS-SHARED lane, DIRECT): the loadsort feeder shape over the
+/// REAL mailbox — a producer that only ever `try_send`s (keeping a rejected
+/// chunk PENDING, the feeder's round-robin discipline: it must never park on
+/// one full channel while other runs starve), a consumer that drains, and
+/// the drop-close EOF. Every chunk arrives exactly once, in order, despite
+/// Full rejections at cap 1 (`sync_channel(2)` in production; cap 1 here
+/// maximizes the Full interleavings loom must cover).
+///
+/// RED (verified by transient weakening, not shipped — the model drives the
+/// production type): dropping the value on `TrySend::Full` instead of
+/// re-pending it (the lost-chunk shape a bespoke conversion could write) ⇒
+/// the delivered stream has a hole — assert fires on every such schedule.
+/// One-line re-arm: replace the `pending = Some(p)` arm with `continue`.
+#[test]
+fn mailbox_try_send_feeder_never_loses_a_chunk() {
+    loom::model(|| {
+        let (tx, rx) = pgsync::mailbox::<u32>(Some(1));
+
+        let consumer = thread::spawn(move || {
+            let mut got = Vec::new();
+            while let Some(v) = rx.recv() {
+                got.push(v);
+            }
+            got
+        });
+
+        // The feeder loop: chunks 1..=3, try_send with a pending slot.
+        let mut pending: Option<u32> = None;
+        let mut next = 1u32;
+        while next <= 3 || pending.is_some() {
+            let p = pending.take().unwrap_or_else(|| {
+                let v = next;
+                next += 1;
+                v
+            });
+            match tx.try_send(p) {
+                Ok(()) => {}
+                Err(pgsync::TrySend::Full(p)) => {
+                    // The feeder's re-pend discipline (the red drops this).
+                    pending = Some(p);
+                    loom::thread::yield_now();
+                }
+                Err(pgsync::TrySend::Disconnected(_)) => break,
+            }
+        }
+        drop(tx); // EOF: consumer drains then observes None
+
+        let got = consumer.join().unwrap();
+        assert_eq!(got, vec![1, 2, 3], "every chunk delivered exactly once, in order");
+    });
+}
+
+/// Row 5 MPMC leg (DIRECT): two receivers share the mailbox BY CLONING (the
+/// converted encoder pool's shape — replacing the Mutex<Receiver> wrap), one
+/// message + close. Exactly one receiver gets the message; BOTH terminate
+/// (the close-wake reaches every parked receiver, not just one).
+#[test]
+fn mailbox_mpmc_close_wakes_every_receiver() {
+    loom::model(|| {
+        let (tx, rx) = pgsync::mailbox::<u32>(Some(1));
+        let rx2 = rx.clone();
+
+        let consumers: Vec<_> = [rx, rx2]
+            .into_iter()
+            .map(|rx| {
+                thread::spawn(move || {
+                    let mut got = Vec::new();
+                    while let Some(v) = rx.recv() {
+                        got.push(v);
+                    }
+                    got
+                })
+            })
+            .collect();
+
+        tx.send(7).unwrap();
+        drop(tx);
+
+        let mut all = Vec::new();
+        for c in consumers {
+            all.extend(c.join().unwrap());
+        }
+        assert_eq!(all, vec![7], "delivered exactly once, both consumers exited");
+    });
+}
+
+/// Row 2 — now over the REAL `types_relscan::parallel::BTParallelScanShared`
+/// (LATCH-LOOM lane: the latch conversion made types_relscan loom-buildable,
+/// discharging this model's "mirror struct" disclosure — the shared TYPE is
+/// production; the seize/release DRIVER below remains transcribed from
+/// nbtree/src/parallel.rs, whose `_bt_parallel_seize` needs Relation
+/// machinery no model can construct). A seizer that observes `Advancing`
+/// captures the lot epoch UNDER the state lock, drops the lock, parks;
+/// release (`Advancing -> Idle`) and done (`* -> Done`) bump-then-notify via
+/// `wake_all`. One advancing winner, one waiting seizer: in every
+/// interleaving the waiter terminates, having seized the released page or
+/// observed Done.
+///
+/// RED: swap `release` for `release_naked` (state change WITHOUT the
+/// wake_all — the pre-conversion notify-dropped shape): the waiter parks
+/// forever — loom deadlock, CAUGHT.
+#[test]
+fn relscan_seize_release_wake_never_lost() {
+    use types_relscan::parallel::{BTParallelScanShared, BtPsState};
+
+    // The converted release: state change under the lock, then bump+notify.
+    fn release(sh: &BTParallelScanShared) {
+        sh.state.lock().unwrap().page_status = BtPsState::Idle;
+        sh.lot.wake_all();
+    }
+
+    // RED helper (one-line swap in the winner thread): the naked state
+    // change the conversion outlaws.
+    #[allow(dead_code)]
+    fn release_naked(sh: &BTParallelScanShared) {
+        sh.state.lock().unwrap().page_status = BtPsState::Idle;
+    }
+
+    // The converted seize wait loop (nbtree bt_parallel_seize, Advancing
+    // arm): epoch captured UNDER the state lock, park OUTSIDE it.
+    fn seize_wait(sh: &BTParallelScanShared) -> BtPsState {
+        loop {
+            let (st, seen) = {
+                let g = sh.state.lock().unwrap();
+                (g.page_status, sh.lot.epoch())
+            };
+            match st {
+                BtPsState::Advancing => {
+                    sh.lot.park(seen);
+                }
+                BtPsState::Idle => {
+                    // Seize it: Idle -> Advancing (the caller now owns the
+                    // scan advance).
+                    let mut g = sh.state.lock().unwrap();
+                    if g.page_status == BtPsState::Idle {
+                        g.page_status = BtPsState::Advancing;
+                        return BtPsState::Idle;
+                    }
+                }
+                BtPsState::Done => return BtPsState::Done,
+                other => unreachable!("model never enters {other:?}"),
+            }
+        }
+    }
+
+    loom::model(|| {
+        let sh = Arc::new(BTParallelScanShared::new());
+        // Winner already advancing (the model's precondition).
+        sh.state.lock().unwrap().page_status = BtPsState::Advancing;
+
+        let waiter_t = {
+            let sh = Arc::clone(&sh);
+            thread::spawn(move || {
+                let got = seize_wait(&sh);
+                if got == BtPsState::Idle {
+                    // The waiter seized the scan; finish it: -> Done + wake.
+                    sh.state.lock().unwrap().page_status = BtPsState::Done;
+                    sh.lot.wake_all();
+                }
+                got
+            })
+        };
+
+        // Winner: finishes its page read, releases the scan.
+        release(&sh); // RED: release_naked(&sh)
+
+        let got = waiter_t.join().unwrap();
+        assert!(
+            got == BtPsState::Idle || got == BtPsState::Done,
+            "waiter terminated through seize or done"
+        );
+        assert_eq!(sh.state.lock().unwrap().page_status, BtPsState::Done);
+    });
+}
+
+/// Row 3 (MIRROR over the real waiter Slot core): the converted bitmapheap
+/// build wait — `bitmap_should_initialize_shared_state`'s InProgress arm.
+/// The waiter REGISTERS its waker word in the shared state under the lock,
+/// releases, parks (untimed here — see the section header); the builder's
+/// publish (InProgress -> Finished) drains the waker list after dropping the
+/// lock and unparks every registrant. In every interleaving of
+/// register/park vs publish/unpark the waiter terminates with `false`.
+///
+/// RED: swap `publish` for `publish_naked` (state change without the
+/// drain+unpark — the shape the production 10ms cadence would paper over):
+/// waiter parked forever — loom deadlock, CAUGHT.
+#[test]
+fn bitmapheap_phase_publish_unparks_registered_waiter() {
+    use std::cell::Cell;
+
+    use waiter::clock::WaiterClock;
+    use waiter::{Slot, SlotInner};
+
+    struct ModelClock;
+    impl WaiterClock for ModelClock {
+        fn now_ms(&self) -> i64 {
+            0
+        }
+        fn wait<'a>(
+            &self,
+            slot: &'a Slot,
+            guard: pgsync::MutexGuard<'a, SlotInner>,
+            _timeout_ms: Option<i64>,
+        ) -> (pgsync::MutexGuard<'a, SlotInner>, bool) {
+            (slot.wait_for_model(guard), false)
+        }
+    }
+    static CLOCK: ModelClock = ModelClock;
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Phase {
+        InProgress,
+        Finished,
+    }
+
+    struct BmMirror {
+        state: Mutex<(Phase, Vec<u64>)>,
+    }
+
+    loom::thread_local! {
+        static MY_SLOT: Cell<Option<(usize, u32)>> = Cell::new(None);
+    }
+
+    // The converted publish: state -> Finished, TAKE the waker list, drop
+    // the lock, unpark every word (the pg_barrier discipline).
+    fn publish(sh: &BmMirror, slots: &[Arc<Slot>]) {
+        let woken = {
+            let mut g = sh.state.lock().unwrap();
+            g.0 = Phase::Finished;
+            std::mem::take(&mut g.1)
+        };
+        for w in woken {
+            let (idx, token) = ((w >> 32) as usize - 1, w as u32);
+            let _ = slots[idx].unpark_token(token);
+        }
+    }
+
+    // RED helper: the naked publish (no drain, no unpark).
+    #[allow(dead_code)]
+    fn publish_naked(sh: &BmMirror) {
+        sh.state.lock().unwrap().0 = Phase::Finished;
+    }
+
+    loom::model(|| {
+        let sh = Arc::new(BmMirror {
+            state: Mutex::new((Phase::InProgress, Vec::new())),
+        });
+        // Model-owned slot slab (the waiter global slab is production-only).
+        let slots: Arc<Vec<Arc<Slot>>> = Arc::new(vec![Arc::new(Slot::new_for_model())]);
+
+        let waiter_t = {
+            let (sh, slots) = (Arc::clone(&sh), Arc::clone(&slots));
+            thread::spawn(move || {
+                // bitmap_should_initialize_shared_state, InProgress arm.
+                loop {
+                    let word = MY_SLOT.with(|c| {
+                        if c.get().is_none() {
+                            let token = slots[0].issue_token();
+                            c.set(Some((0, token)));
+                        }
+                        let (idx, token) = c.get().unwrap();
+                        ((idx as u64 + 1) << 32) | token as u64
+                    });
+                    {
+                        let mut g = sh.state.lock().unwrap();
+                        match g.0 {
+                            Phase::Finished => return false,
+                            Phase::InProgress => {
+                                if !g.1.contains(&word) {
+                                    g.1.push(word);
+                                }
+                            }
+                        }
+                    }
+                    // Untimed park on the REAL slot core (production adds
+                    // the 10ms InterruptPending cadence).
+                    let _ = slots[0].park_core(None, None, &CLOCK);
+                }
+            })
+        };
+
+        // Builder: the bitmap is built; publish Finished.
+        publish(&sh, &slots); // RED: publish_naked(&sh)
+
+        let elected = waiter_t.join().unwrap();
+        assert!(!elected, "the waiter never becomes the builder");
+        assert_eq!(sh.state.lock().unwrap().0, Phase::Finished);
+    });
+}
+
+// ===========================================================================
+// PERMIT-S5 — the runtime-doors / row-16 tranche models
+// (notes/dst-permit-s5.md). Dialect, disclosed:
+//
+//   * timeout_timer_arm_fire_never_lost — MIRROR over the REAL waiter Slot
+//     core: the timeout crate is not loom-buildable (its dep tree pulls
+//     `latch`, which fails under --cfg loom — the standing mirror-model
+//     reason), so the timer/armer Dekker protocol is mirrored 1:1 from
+//     timeout/src/lib.rs (`timer_thread` publish-scan-park + `arm_timer`
+//     insert-then-unpark), driving the real Slot token park/unpark and a
+//     (pgsync=loom) Mutex slots registry — the registry type this lane
+//     converted from raw std::sync so the REGISTERED timer thread can
+//     never block raw while holding the permit.
+// ===========================================================================
+
+/// Row 16 (timer door): the timeout arm/fire Dekker protocol. The timer
+/// thread publishes its waker word BEFORE scanning the registry, scans
+/// under the (pgsync) mutex, drops it, parks untimed; an armer inserts its
+/// deadline under the mutex, drops it, then unparks through the published
+/// word (a 0 word = the timer has not published yet, and its first
+/// publish-then-scan must see the insert). In every interleaving the timer
+/// observes the arm.
+///
+/// RED: swap `arm` for `arm_naked` (insert WITHOUT the unpark — the lost-arm
+/// shape the Dekker discipline exists to kill): the timer parks forever with
+/// an armed deadline it never scanned — loom deadlock, CAUGHT.
+#[test]
+fn timeout_timer_arm_fire_never_lost() {
+    use loom::sync::atomic::AtomicU64;
+    use waiter::clock::WaiterClock;
+    use waiter::{Slot, SlotInner};
+
+    struct ModelClock;
+    impl WaiterClock for ModelClock {
+        fn now_ms(&self) -> i64 {
+            0
+        }
+        fn wait<'a>(
+            &self,
+            slot: &'a Slot,
+            guard: pgsync::MutexGuard<'a, SlotInner>,
+            _timeout_ms: Option<i64>,
+        ) -> (pgsync::MutexGuard<'a, SlotInner>, bool) {
+            (slot.wait_for_model(guard), false)
+        }
+    }
+    static CLOCK: ModelClock = ModelClock;
+
+    struct TimerMirror {
+        // (armed, fired) — the slots HashMap collapsed to one entry; the
+        // protocol is per-entry independent.
+        state: Mutex<(bool, bool)>,
+        // The timer thread's published waker word (0 until published) —
+        // timeout's TimerShared.timer_waker.
+        timer_waker: AtomicU64,
+    }
+
+    // arm_timer mirrored: insert under the lock, release, THEN unpark
+    // through the published word.
+    fn arm(sh: &TimerMirror, slots: &[Arc<Slot>]) {
+        {
+            let mut g = sh.state.lock().unwrap();
+            g.0 = true;
+        }
+        let w = sh.timer_waker.load(Ordering::SeqCst);
+        if w != 0 {
+            let (idx, token) = ((w >> 32) as usize - 1, w as u32);
+            let _ = slots[idx].unpark_token(token);
+        }
+    }
+
+    // RED helper (one-line swap below): the naked insert.
+    #[allow(dead_code)]
+    fn arm_naked(sh: &TimerMirror) {
+        let mut g = sh.state.lock().unwrap();
+        g.0 = true;
+    }
+
+    loom::model(|| {
+        let sh = Arc::new(TimerMirror {
+            state: Mutex::new((false, false)),
+            timer_waker: AtomicU64::new(0),
+        });
+        // Model-owned slot slab (the waiter global slab is production-only).
+        let slots: Arc<Vec<Arc<Slot>>> = Arc::new(vec![Arc::new(Slot::new_for_model())]);
+
+        let timer_t = {
+            let (sh, slots) = (Arc::clone(&sh), Arc::clone(&slots));
+            thread::spawn(move || {
+                // timer_thread mirrored: publish BEFORE scan, park outside
+                // the lock (Dekker: either the scan sees the arm, or the
+                // arm's unpark hits the published word — unparks latched).
+                let token = slots[0].issue_token();
+                let word = (1u64 << 32) | token as u64;
+                loop {
+                    sh.timer_waker.store(word, Ordering::SeqCst);
+                    {
+                        let mut g = sh.state.lock().unwrap();
+                        if g.0 {
+                            // "Fire": post + wake the owner (model: flag).
+                            g.1 = true;
+                            return;
+                        }
+                    }
+                    // No deadline armed: untimed park (production parks
+                    // timed to the nearest deadline; untimed here makes a
+                    // lost arm a deadlock loom must catch).
+                    let _ = slots[0].park_core(None, None, &CLOCK);
+                }
+            })
+        };
+
+        // The armer (a backend's arm_timer).
+        arm(&sh, &slots); // RED: arm_naked(&sh)
+
+        timer_t.join().unwrap();
+        assert!(sh.state.lock().unwrap().1, "the armed timeout fired");
     });
 }
 

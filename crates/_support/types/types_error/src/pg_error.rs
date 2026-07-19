@@ -77,8 +77,16 @@ pub struct PgError {
 }
 
 impl PgError {
+    /// C's ereport/elog capture `__FILE__`/`__LINE__` at every report site and
+    /// the wire protocol carries them as the F/L error fields (clients like
+    /// pg8000 read them). `#[track_caller]` gives the same for free: the
+    /// construction site's file/line, overridable by the explicit
+    /// `with_location`/`finish` lanes (which C-parity sites use to also carry
+    /// the routine name).
     #[cold]
+    #[track_caller]
     pub fn new(level: ErrorLevel, message: impl Into<String>) -> Self {
+        let caller = core::panic::Location::caller();
         Self {
             level,
             sqlstate: default_sqlstate_for_level(level),
@@ -93,7 +101,11 @@ impl PgError {
             context_domain: None,
             hide_statement: false,
             hide_context: false,
-            location: None,
+            location: Some(ErrorLocation {
+                filename: Some(caller.file().into()),
+                lineno: caller.line() as i32,
+                funcname: None,
+            }),
             saved_errno: None,
             cursor_position: None,
             internal_position: None,
@@ -108,16 +120,19 @@ impl PgError {
     }
 
     #[cold]
+    #[track_caller]
     pub fn error(message: impl Into<String>) -> Self {
         Self::new(ERROR, message)
     }
 
     #[cold]
+    #[track_caller]
     pub fn warning(message: impl Into<String>) -> Self {
         Self::new(WARNING, message)
     }
 
     #[cold]
+    #[track_caller]
     pub fn notice(message: impl Into<String>) -> Self {
         Self::new(NOTICE, message)
     }
@@ -311,8 +326,39 @@ impl PgError {
         self
     }
 
+    /// Merge with the construction-site capture: an explicit file/line pair
+    /// (any filename, or a positive lineno) replaces the captured pair as a
+    /// unit — never mixed — and the funcname (routine) merges independently.
+    /// An all-empty location (e.g. `elog`'s) leaves the capture standing, so
+    /// a routine-only override never erases the F/L fields on the wire.
     pub fn with_error_location(mut self, location: ErrorLocation) -> Self {
-        self.location = Some(location);
+        self.location = Some(match self.location.take() {
+            Some(captured) => {
+                let explicit_pair = location.filename.is_some() || location.lineno > 0;
+                ErrorLocation {
+                    filename: if explicit_pair { location.filename } else { captured.filename },
+                    lineno: if explicit_pair { location.lineno } else { captured.lineno },
+                    funcname: location.funcname.or(captured.funcname),
+                }
+            }
+            None => location,
+        });
+        self
+    }
+
+    /// Attach just the routine (R) error field, C's `__func__`; the F/L
+    /// capture from the construction site stands.
+    pub fn with_funcname(mut self, funcname: impl Into<String>) -> Self {
+        match &mut self.location {
+            Some(loc) => loc.funcname = Some(funcname.into()),
+            None => {
+                self.location = Some(ErrorLocation {
+                    filename: None,
+                    lineno: 0,
+                    funcname: Some(funcname.into()),
+                });
+            }
+        }
         self
     }
 
@@ -540,6 +586,54 @@ mod tests {
         assert_eq!(err.table_name(), Some("foo"));
         assert_eq!(err.context(), Some("first\nsecond"));
         assert_eq!(err.cursor_position(), None);
+    }
+
+    // C parity: every report site carries file/line (the wire F/L fields).
+    #[test]
+    fn construction_captures_caller_file_line() {
+        let before = line!();
+        let err = PgError::error("boom");
+        let loc = err.location().expect("track_caller capture");
+        assert_eq!(loc.filename.as_deref(), Some(file!()));
+        assert_eq!(loc.lineno, before as i32 + 1);
+        assert_eq!(loc.funcname, None);
+    }
+
+    #[test]
+    fn location_merge_keeps_capture_under_partial_overrides() {
+        // Routine-only override (with_funcname): F/L capture stands.
+        let err = PgError::error("x").with_funcname("RevalidateCachedQuery");
+        let loc = err.location().unwrap();
+        assert_eq!(loc.funcname.as_deref(), Some("RevalidateCachedQuery"));
+        assert_eq!(loc.filename.as_deref(), Some(file!()));
+        assert!(loc.lineno > 0);
+
+        // All-empty explicit location (elog's): capture stands.
+        let err = PgError::error("x").with_error_location(ErrorLocation {
+            filename: None,
+            lineno: 0,
+            funcname: None,
+        });
+        assert_eq!(err.location().unwrap().filename.as_deref(), Some(file!()));
+
+        // Explicit file/line pair replaces the captured pair as a unit.
+        let err = PgError::error("x").with_error_location(ErrorLocation {
+            filename: Some("pl_exec.c".into()),
+            lineno: 0,
+            funcname: Some("exec_stmt_raise".into()),
+        });
+        let loc = err.location().unwrap();
+        assert_eq!(loc.filename.as_deref(), Some("pl_exec.c"));
+        assert_eq!(loc.lineno, 0);
+        assert_eq!(loc.funcname.as_deref(), Some("exec_stmt_raise"));
+
+        // Full with_location override still wins outright.
+        let err = PgError::error("x").with_location("f.c", 7, "fn");
+        let loc = err.location().unwrap();
+        assert_eq!(
+            (loc.filename.as_deref(), loc.lineno, loc.funcname.as_deref()),
+            (Some("f.c"), 7, Some("fn"))
+        );
     }
 
     #[test]

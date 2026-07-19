@@ -52,16 +52,51 @@ fn init_gin_col(rel: &Relation<'_>, i: usize) -> PgResult<GinColState> {
         opclass::F_GIN_EXTRACT_JSONB => GinOpclass::JsonbOps,
         opclass::F_GIN_EXTRACT_JSONB_PATH => GinOpclass::JsonbPathOps,
         opclass::F_GIN_EXTRACT_TSVECTOR => GinOpclass::TsvectorOps,
-        opclass::F_GINARRAYEXTRACT => GinOpclass::ArrayOps,
+        // intarray's gin__int_ops also registers ginarrayextract as proc 2;
+        // the extractQuery proc tells the two opclasses apart.
+        opclass::F_GINARRAYEXTRACT => {
+            let extract_query = lsyscache::get_opfamily_proc(
+                opfamily,
+                opcintype,
+                opcintype,
+                GIN_EXTRACTQUERY_PROC as i16,
+            )?;
+            if extract_query == opclass::F_GINQUERYARRAYEXTRACT {
+                GinOpclass::ArrayOps
+            } else {
+                let cx = ::mcx::MemoryContext::new("gin ext opclass probe");
+                let name = lsyscache::get_func_name(cx.mcx(), extract_query)?
+                    .map(|n| n.as_str().to_string());
+                match name.as_deref() {
+                    Some("ginint4_queryextract") => GinOpclass::IntArrayOps,
+                    _ => {
+                        return Err(crate::unsupported(format!(
+                            "GIN operator class with extractQuery support function {extract_query} is not supported"
+                        )))
+                    }
+                }
+            }
+        }
         // Extension opclasses carry dynamic oids; match by proname.
         other => {
             let cx = ::mcx::MemoryContext::new("gin ext opclass probe");
             let name = lsyscache::get_func_name(cx.mcx(), other)?
                 .map(|n| n.as_str().to_string());
-            match name.as_deref() {
-                Some("gin_extract_value_trgm") => GinOpclass::TrgmOps,
-                Some("gin_extract_hstore") => GinOpclass::HstoreOps,
-                _ => unported(&format!("GIN opclass with extractValue proc {other}")),
+            let btree_ty = name
+                .as_deref()
+                .and_then(|n| n.strip_prefix("gin_extract_value_"))
+                .and_then(GinBtreeType::from_type_name);
+            match (name.as_deref(), btree_ty) {
+                (Some("gin_extract_value_trgm"), _) => GinOpclass::TrgmOps,
+                (Some("gin_extract_hstore"), _) => GinOpclass::HstoreOps,
+                (_, Some(ty)) => GinOpclass::BtreeOps(ty),
+                // unported: opclasses beyond the closed set (user-reachable
+                // via CREATE INDEX ... USING gin with a custom opclass).
+                _ => {
+                    return Err(crate::unsupported(format!(
+                        "GIN operator class with extractValue support function {other} is not supported"
+                    )))
+                }
             }
         }
     };
@@ -75,23 +110,29 @@ fn init_gin_col(rel: &Relation<'_>, i: usize) -> PgResult<GinColState> {
             ::types_core::INT8OID => GinElemCmp::Int8,
             ::types_core::OIDOID => GinElemCmp::Oid,
             ::types_core::TEXTOID | ::types_core::VARCHAROID => GinElemCmp::Text,
-            other => unported(&format!(
-                "GIN array_ops element type {other} btree comparator (typcache cmp lane)"
-            )),
+            // unported: typcache btree-comparator fallback (user-reachable
+            // via CREATE INDEX USING gin on e.g. a numeric[] column).
+            other => {
+                return Err(crate::unsupported(format!(
+                    "GIN array_ops over element type {other} is not supported (typcache comparator lane unported)"
+                )))
+            }
         }
     } else {
         GinElemCmp::None
     };
     debug_assert!(
-        lsyscache::get_opfamily_proc(opfamily, opcintype, opcintype, GIN_COMPARE_PROC as i16)?
-            == match opclass {
-                GinOpclass::JsonbOps => opclass::F_GIN_COMPARE_JSONB,
-                GinOpclass::JsonbPathOps => opclass::F_BTINT4CMP,
-                GinOpclass::TsvectorOps => opclass::F_GIN_CMP_TSLEXEME,
-                GinOpclass::TrgmOps => opclass::F_BTINT4CMP,
-                GinOpclass::HstoreOps => opclass::F_BTTEXTCMP,
-                GinOpclass::ArrayOps => InvalidOid,
-            }
+        matches!(opclass, GinOpclass::BtreeOps(_))
+            || lsyscache::get_opfamily_proc(opfamily, opcintype, opcintype, GIN_COMPARE_PROC as i16)?
+                == match opclass {
+                    GinOpclass::JsonbOps => opclass::F_GIN_COMPARE_JSONB,
+                    GinOpclass::JsonbPathOps => opclass::F_BTINT4CMP,
+                    GinOpclass::TsvectorOps => opclass::F_GIN_CMP_TSLEXEME,
+                    GinOpclass::TrgmOps => opclass::F_BTINT4CMP,
+                    GinOpclass::HstoreOps => opclass::F_BTTEXTCMP,
+                    GinOpclass::IntArrayOps => opclass::F_BTINT4CMP,
+                    GinOpclass::ArrayOps | GinOpclass::BtreeOps(_) => InvalidOid,
+                }
     );
     let partial = lsyscache::get_opfamily_proc(
         opfamily,
@@ -102,7 +143,25 @@ fn init_gin_col(rel: &Relation<'_>, i: usize) -> PgResult<GinColState> {
     let can_partial_match = match partial {
         InvalidOid => false,
         opclass::F_GIN_CMP_PREFIX if opclass == GinOpclass::TsvectorOps => true,
-        other => unported(&format!("GIN comparePartialFn {other}")),
+        // btree_gin's gin_compare_prefix_<type> (extension oids; proname).
+        other if matches!(opclass, GinOpclass::BtreeOps(_)) => {
+            let cx = ::mcx::MemoryContext::new("gin ext opclass probe");
+            let is_prefix = lsyscache::get_func_name(cx.mcx(), other)?
+                .is_some_and(|n| n.as_str().starts_with("gin_compare_prefix_"));
+            if !is_prefix {
+                return Err(crate::unsupported(format!(
+                    "GIN operator class with comparePartial support function {other} is not supported"
+                )));
+            }
+            true
+        }
+        // unported: comparePartial support beyond tsvector's prefix compare
+        // (user-reachable via a custom opclass registering proc 5).
+        other => {
+            return Err(crate::unsupported(format!(
+                "GIN operator class with comparePartial support function {other} is not supported"
+            )))
+        }
     };
 
     let attr = rel.rd_att.compact_attr(i);

@@ -3,7 +3,7 @@ use std::rc::Rc;
 use ::execexpr::{EvalSlots, ExprState};
 use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::mcx::{Mcx, PgBox, PgVec};
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use ::types_nodes::node_tree::Node;
 use ::types_nodes::plannodes::Plan;
 use ::types_nodes::NodeTag;
@@ -502,12 +502,20 @@ impl<'mcx> PlanStateNode<'mcx> {
     }
 }
 
+// unported: planner-reachable unported plan nodes raise a clean
+// ERRCODE_FEATURE_NOT_SUPPORTED error at init time (safe unwind); an
+// unrecognized tag stays a loud invariant panic.
 macro_rules! unported_nodes {
     ($tag:expr, { $($t:ident => $file:literal),+ $(,)? }) => {
         match $tag {
-            $(NodeTag::$t => panic!(concat!(
-                "ExecInitNode (execProcnode.c): ", stringify!($t), " (", $file, ") not ported"
-            )),)+
+            $(NodeTag::$t => {
+                return Err(Box::new(
+                    PgError::error(concat!(
+                        "plan node ", stringify!($t), " (", $file, ") is not yet implemented"
+                    ))
+                    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+                ))
+            })+
             other => panic!("ExecInitNode: unrecognized node type: {other:?}"),
         }
     };

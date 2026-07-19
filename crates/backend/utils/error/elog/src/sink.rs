@@ -7,7 +7,20 @@ use std::cell::Cell;
 use ::types_error::PgError;
 
 pub(crate) fn current_pid() -> u32 {
-    std::process::id()
+    // wasm32: std::process::id() PANICS on WASI (no pids); 1 is the synthetic
+    // single-process pid (init_small::globals::process_id's convention —
+    // elog sits below init_small in the crate DAG, hence the local twin).
+    // pgrust_sim (p4-simnet inc-2, review observation 1): the OS pid is
+    // ambient entropy reaching server-log line prefixes — the sim arm pins
+    // it to the same synthetic 1, mirroring globals.rs.
+    #[cfg(not(any(target_family = "wasm", pgrust_sim)))]
+    {
+        std::process::id()
+    }
+    #[cfg(any(target_family = "wasm", pgrust_sim))]
+    {
+        1
+    }
 }
 
 pub trait BackendLogContext: Sync {

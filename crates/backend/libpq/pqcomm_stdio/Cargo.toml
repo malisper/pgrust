@@ -1,0 +1,21 @@
+[package]
+name = "pqcomm_stdio"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pqcomm_stdio"
+path = "src/lib.rs"
+
+[dependencies]
+types_error = { path = "../../../_support/types/types_error" }
+types_startup = { path = "../../../_support/types/types_startup" }
+types_storage = { path = "../../../_support/types/types_storage" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+pqcomm = { path = "../pqcomm" }
+pqcomm_seams = { path = "../pqcomm_seams" }
+be_secure_seams = { path = "../be_secure_seams" }
+elog = { path = "../../utils/error/elog" }
+libc = "0.2"
+fdnb = { path = "../fdnb" }

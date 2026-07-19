@@ -204,6 +204,12 @@ impl<const N: usize> LocalFcinfo<N> {
     #[inline]
     pub fn fresh(collation: Oid) -> Self {
         const {
+            // wasm32: 4-byte pointers put fncollation at +12. The raw header
+            // writes need only the +4/+6 field relations (asserted below;
+            // the u32/u8/u16 stores are individually aligned) — the 8B-span
+            // alignment is the native store-merge optimization's
+            // precondition, not a correctness bound.
+            #[cfg(not(target_family = "wasm"))]
             assert!(core::mem::offset_of!(LocalFcinfo<N>, fncollation) % 8 == 0);
             assert!(
                 core::mem::offset_of!(LocalFcinfo<N>, isnull)
@@ -225,6 +231,12 @@ impl<const N: usize> LocalFcinfo<N> {
     #[inline]
     pub fn rearm(&mut self, collation: Oid) {
         const {
+            // wasm32: 4-byte pointers put fncollation at +12. The raw header
+            // writes need only the +4/+6 field relations (asserted below;
+            // the u32/u8/u16 stores are individually aligned) — the 8B-span
+            // alignment is the native store-merge optimization's
+            // precondition, not a correctness bound.
+            #[cfg(not(target_family = "wasm"))]
             assert!(core::mem::offset_of!(LocalFcinfo<N>, fncollation) % 8 == 0);
             assert!(
                 core::mem::offset_of!(LocalFcinfo<N>, isnull)
@@ -273,6 +285,12 @@ impl<const N: usize> LocalFcinfo<N> {
     #[inline(always)]
     pub fn init_in_place(slot: &mut core::mem::MaybeUninit<Self>, collation: Oid) -> &mut Self {
         const {
+            // wasm32: 4-byte pointers put fncollation at +12. The raw header
+            // writes need only the +4/+6 field relations (asserted below;
+            // the u32/u8/u16 stores are individually aligned) — the 8B-span
+            // alignment is the native store-merge optimization's
+            // precondition, not a correctness bound.
+            #[cfg(not(target_family = "wasm"))]
             assert!(core::mem::offset_of!(LocalFcinfo<N>, fncollation) % 8 == 0);
             assert!(
                 core::mem::offset_of!(LocalFcinfo<N>, isnull)
@@ -399,11 +417,14 @@ impl FunctionCallInfoBaseData {
     pub fn set_arg(&mut self, index: usize, value: Datum) {
         let slot = &mut self.args[index];
         // SAFETY: NullableDatum is a 16B/8-align POD; one 16B store (value +
-        // zeroed isnull/pad) where C pays a str+strb pair.
+        // zeroed isnull/pad) where C pays a str+strb pair. u64 words, NOT
+        // usize: the Datum word is 8 bytes on every target (ILP32 wasm32
+        // included), and a usize pair there would truncate the datum to its
+        // low 32 bits and leave isnull stale. Identical codegen on 64-bit.
         unsafe {
             core::ptr::from_mut(slot)
-                .cast::<[usize; 2]>()
-                .write([value.as_usize(), 0]);
+                .cast::<[u64; 2]>()
+                .write([value.as_u64(), 0]);
         }
     }
 

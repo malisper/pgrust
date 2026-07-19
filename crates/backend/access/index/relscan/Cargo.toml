@@ -8,6 +8,7 @@ publish.workspace = true
 mock = []
 
 [dependencies]
+pgsync = { path = "../../../../_support/pgsync" }
 mcx = { path = "../../../../_support/mcx" }
 datum = { path = "../../../../_support/types/datum" }
 types_storage = { path = "../../../../_support/types/types_storage" }

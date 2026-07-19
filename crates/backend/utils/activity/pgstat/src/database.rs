@@ -138,6 +138,29 @@ pub fn pgstat_drop_database(databaseid: Oid) {
     xact::pgstat_drop_transactional(PGSTAT_KIND_DATABASE, databaseid, 0);
 }
 
+/// pgstat_report_recovery_conflict (pgstat_database.c:81).
+pub fn pgstat_report_recovery_conflict(reason: ::types_storage::storage::ProcSignalReason) {
+    use ::types_storage::storage::ProcSignalReason::*;
+    if !crate::pgstat_track_counts() {
+        return;
+    }
+    pending::with_state(|st| {
+        let dbent = pgstat_prep_database_pending_in(st, MyDatabaseId());
+        match reason {
+            // The database's stats drop as soon as the drop replicates: no
+            // point counting PROCSIG_RECOVERY_CONFLICT_DATABASE.
+            PROCSIG_RECOVERY_CONFLICT_DATABASE => {}
+            PROCSIG_RECOVERY_CONFLICT_TABLESPACE => dbent.conflict_tablespace += 1,
+            PROCSIG_RECOVERY_CONFLICT_LOCK => dbent.conflict_lock += 1,
+            PROCSIG_RECOVERY_CONFLICT_SNAPSHOT => dbent.conflict_snapshot += 1,
+            PROCSIG_RECOVERY_CONFLICT_BUFFERPIN => dbent.conflict_bufferpin += 1,
+            PROCSIG_RECOVERY_CONFLICT_LOGICALSLOT => dbent.conflict_logicalslot += 1,
+            PROCSIG_RECOVERY_CONFLICT_STARTUP_DEADLOCK => dbent.conflict_startup_deadlock += 1,
+            _ => {}
+        }
+    });
+}
+
 pub fn pgstat_report_deadlock() {
     if !crate::pgstat_track_counts() {
         return;

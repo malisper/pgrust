@@ -423,6 +423,53 @@ pub fn UpdateSubscriptionRelState<'mcx>(
     rel.close(NoLock)
 }
 
+// UpdateTwoPhaseState (subscriptioncmds.c): transition
+// pg_subscription.subtwophasestate. C hosts it in subscriptioncmds.c and
+// exports it for the apply worker; it lives beside the other pg_subscription
+// catalog updaters here.
+pub fn UpdateTwoPhaseState<'mcx>(mcx: Mcx<'mcx>, suboid: Oid, new_state: u8) -> PgResult<()> {
+    debug_assert!(matches!(
+        new_state,
+        LOGICALREP_TWOPHASE_STATE_DISABLED
+            | LOGICALREP_TWOPHASE_STATE_PENDING
+            | LOGICALREP_TWOPHASE_STATE_ENABLED
+    ));
+    let rel = table::table_open(mcx, SubscriptionRelationId, RowExclusiveLock)?;
+    let Some(tup) = SearchSysCacheCopy(
+        mcx,
+        SUBSCRIPTIONOID,
+        SysCacheKey::Value(Datum::from_oid(suboid)),
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+        SysCacheKey::UNUSED,
+    )?
+    else {
+        return Err(Box::new(PgError::error(format!(
+            "cache lookup failed for subscription oid {suboid}"
+        ))));
+    };
+
+    let mut values = [Datum::null(); Natts_pg_subscription];
+    let mut nulls = [false; Natts_pg_subscription];
+    let mut replaces = [false; Natts_pg_subscription];
+    values[(Anum_pg_subscription_subtwophasestate - 1) as usize] =
+        Datum::from_char(new_state as i8);
+    replaces[(Anum_pg_subscription_subtwophasestate - 1) as usize] = true;
+
+    let mut new_tup = heaptuple::heap_modify_tuple(
+        mcx,
+        tup.as_tuple(),
+        rel.descr(),
+        &values,
+        &nulls,
+        &replaces,
+    )?;
+    let otid = tup.as_tuple().t_self;
+    catalog_indexing::CatalogTupleUpdate(mcx, &rel, &otid, &mut new_tup)?;
+
+    rel.close(RowExclusiveLock)
+}
+
 pub fn GetSubscriptionRelState<'mcx>(
     mcx: Mcx<'mcx>,
     subid: Oid,
@@ -549,6 +596,40 @@ pub fn GetSubscriptionRelations<'mcx>(
         let (d, isnull) = getattr(td, tup, Anum_pg_subscription_rel_srsublsn);
         let lsn = if isnull { InvalidXLogRecPtr } else { d.as_u64() };
         res.push(SubscriptionRelState { relid, lsn, state });
+    }
+    genam::systable_endscan(mcx, scan)?;
+    rel.close(AccessShareLock)?;
+    Ok(res)
+}
+
+// The launcher's get_subscription_list (launcher.c:111) body: the caller
+// (launcher crate) wraps this in StartTransactionCommand/Commit. Only the
+// worker-start fields are filled. Rendering divergence: a plain full
+// systable scan of pg_subscription reading attrs off each tuple (C reads the
+// fixed-layout Form struct directly).
+pub struct SubscriptionListEntry {
+    pub oid: Oid,
+    pub dbid: Oid,
+    pub owner: Oid,
+    pub enabled: bool,
+    pub name: String,
+}
+
+pub fn GetSubscriptionList<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Vec<SubscriptionListEntry>> {
+    let mut res = Vec::new();
+    let rel = table::table_open(mcx, SubscriptionRelationId, AccessShareLock)?;
+    let mut scan = genam::systable_beginscan(mcx, &rel, InvalidOid, false, None, &[])?;
+    let td = rel.descr();
+    while let Some(tup) = genam::systable_getnext(mcx, &mut scan)? {
+        let name_d = getattr(td, tup, Anum_pg_subscription_subname).0;
+        let name = name_from_datum(name_d);
+        res.push(SubscriptionListEntry {
+            oid: getattr(td, tup, Anum_pg_subscription_oid).0.as_oid(),
+            dbid: getattr(td, tup, Anum_pg_subscription_subdbid).0.as_oid(),
+            owner: getattr(td, tup, Anum_pg_subscription_subowner).0.as_oid(),
+            enabled: getattr(td, tup, Anum_pg_subscription_subenabled).0.as_bool(),
+            name: String::from_utf8_lossy(name.name_str()).into_owned(),
+        });
     }
     genam::systable_endscan(mcx, scan)?;
     rel.close(AccessShareLock)?;

@@ -19,6 +19,7 @@ use types_error::{PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE, ErrorLocation, W
 mod builtin_case;
 mod chklocale;
 mod icu;
+mod lc;
 mod locale_time;
 mod icu_ffi;
 mod lconv;
@@ -36,7 +37,8 @@ pub use libc_locale::{pg_tolower, pg_toupper, WcClass};
 pub use setup::{
     assign_locale_messages, assign_locale_monetary, assign_locale_numeric, assign_locale_time,
     check_locale, check_locale_messages, check_locale_monetary, check_locale_numeric,
-    check_locale_time, database_ctype_is_c, pg_perm_setlocale, set_database_ctype_is_c,
+    check_locale_time, database_ctype_is_c, freeze_global_locale, pg_perm_setlocale,
+    set_database_ctype_is_c,
 };
 
 pub use pg_database_seams::{COLLPROVIDER_BUILTIN, COLLPROVIDER_ICU, COLLPROVIDER_LIBC};
@@ -295,7 +297,11 @@ pub fn pg_newlocale_from_collation(collid: Oid) -> PgResult<&'static PgLocale> {
         let mut slot = cell.borrow_mut();
         let cache = slot.get_or_insert_with(|| {
             // C: CollationCacheContext, created lazily, never reset.
-            let mcx = Box::leak(Box::new(MemoryContext::new("collation cache"))).mcx();
+            let mcx = ::mcx::session_root("collation cache").mcx();
+            // LIFO: empty the droppy TLS cache before its context is freed.
+            ::mcx::register_session_cleanup(Box::new(|| {
+                COLLATION_CACHE.with(|c| drop(c.borrow_mut().take()));
+            }));
             CollationCache {
                 mcx,
                 map: PgHashMap::with_capacity_in(16, mcx),
@@ -535,7 +541,11 @@ fn default_locale_mcx() -> Mcx<'static> {
     COLLATION_CACHE.with(|cell| {
         let mut slot = cell.borrow_mut();
         let cache = slot.get_or_insert_with(|| {
-            let mcx = Box::leak(Box::new(MemoryContext::new("collation cache"))).mcx();
+            let mcx = ::mcx::session_root("collation cache").mcx();
+            // LIFO: empty the droppy TLS cache before its context is freed.
+            ::mcx::register_session_cleanup(Box::new(|| {
+                COLLATION_CACHE.with(|c| drop(c.borrow_mut().take()));
+            }));
             CollationCache {
                 mcx,
                 map: PgHashMap::with_capacity_in(16, mcx),

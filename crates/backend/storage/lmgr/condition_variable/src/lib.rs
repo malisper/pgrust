@@ -2,7 +2,10 @@
 #![allow(non_upper_case_globals)]
 
 use std::cell::Cell;
-use std::time::Instant;
+// DST P2 (contract §1.3): CV timed-sleep deadline math rides pg_clock (the
+// one monotonic authority); the wait itself stays on the waiter park
+// primitive via WaitLatch.
+use pg_clock::MonoStamp;
 
 use init_small::globals::{MyLatch, MyProcNumber};
 use latch::{set_latch, ResetLatch, WaitLatch};
@@ -173,7 +176,7 @@ pub fn ConditionVariableTimedSleep(
         return Ok(false);
     }
 
-    let start_time = Instant::now();
+    let start_time = MonoStamp::now();
     let mut cur_timeout: i64 = -1;
     let wait_events = if timeout >= 0 {
         debug_assert!(timeout <= i32::MAX as i64);
@@ -222,7 +225,7 @@ pub fn ConditionVariableTimedSleep(
         }
 
         if timeout >= 0 {
-            cur_timeout = timeout - start_time.elapsed().as_millis() as i64;
+            cur_timeout = timeout - start_time.elapsed_ms();
             if cur_timeout <= 0 {
                 return Ok(true);
             }

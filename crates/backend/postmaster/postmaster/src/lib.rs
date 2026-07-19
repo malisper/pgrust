@@ -20,7 +20,14 @@ use types_error::{ErrorLocation, PgResult, DEBUG1, DEBUG2, LOG};
 use types_storage::latch::LatchHandle;
 use types_storage::waiteventset::WaitEventSetHandle;
 
+#[cfg(not(target_family = "wasm"))]
 pub mod crash_signals;
+// wasm32: no signals on WASI — a fatal fault is a wasm trap and the runtime
+// itself reports it; there is no disposition to install or restore.
+#[cfg(target_family = "wasm")]
+pub mod crash_signals {
+    pub fn install_crash_signal_reporter() {}
+}
 pub mod main_entry;
 pub mod serverloop;
 pub mod statemachine;
@@ -196,6 +203,16 @@ pub fn with_pm<R>(f: impl FnOnce(&mut PostmasterState) -> R) -> R {
     PM.with(|pm| f(&mut pm.borrow_mut()))
 }
 
+// C reads/writes its PM-equivalent globals with no aliasing check, so a
+// FATAL raised while a `with_pm` borrow is live (e.g. from deep inside
+// listen_server_port's lock-file reclaim) and drained synchronously by
+// proc_exit's on_proc_exit callbacks can re-enter here on the same thread.
+// try_borrow_mut degrades to a no-op in that case instead of panicking the
+// exit callback (the process is exiting anyway; the OS reclaims the fds).
+pub fn try_with_pm<R>(f: impl FnOnce(&mut PostmasterState) -> R) -> Option<R> {
+    PM.with(|pm| pm.try_borrow_mut().ok().map(|mut guard| f(&mut guard)))
+}
+
 // C `volatile sig_atomic_t` pending flags: real signal handlers run on an
 // arbitrary thread under the thread model, so these are process statics.
 pub static PENDING_PM_SHUTDOWN_REQUEST: AtomicBool = AtomicBool::new(false);
@@ -229,14 +246,14 @@ pub fn handle_pm_reload_request_signal(_sig: i32) {
 
 pub fn handle_pm_shutdown_request_signal(sig: i32) {
     match sig {
-        libc::SIGTERM => {
+        procsignal::signums::SIGTERM => {
             PENDING_PM_SHUTDOWN_REQUEST.store(true, Ordering::Release);
         }
-        libc::SIGINT => {
+        procsignal::signums::SIGINT => {
             PENDING_PM_FAST_SHUTDOWN_REQUEST.store(true, Ordering::Release);
             PENDING_PM_SHUTDOWN_REQUEST.store(true, Ordering::Release);
         }
-        libc::SIGQUIT => {
+        procsignal::signums::SIGQUIT => {
             PENDING_PM_IMMEDIATE_SHUTDOWN_REQUEST.store(true, Ordering::Release);
             PENDING_PM_SHUTDOWN_REQUEST.store(true, Ordering::Release);
         }
@@ -292,18 +309,35 @@ pub fn process_pm_reload_request() -> PgResult<()> {
         // (guc::layers, parallelism-redesign §2.4).
         guc::layers::ensure_base_current();
         pmchild_seams::signal_children::call(
-            libc::SIGHUP,
+            procsignal::signums::SIGHUP,
             btmask_all_except(&[BackendType::DeadEndBackend]),
         );
         if with_pm(|pm| pm.syslogger.is_some()) {
-            syslogger::collector_kill(libc::SIGHUP);
+            syslogger::collector_kill(procsignal::signums::SIGHUP);
         }
 
         if !auth_seams::load_hba::call() {
-            report(LOG, "pg_hba.conf was not reloaded".into(), 2010, "process_pm_reload_request");
+            // translator: %s is a configuration file (C prints HbaFileName)
+            report(
+                LOG,
+                format!(
+                    "{} was not reloaded",
+                    guc_tables::vars::HbaFileName.read().unwrap_or_default()
+                ),
+                2012,
+                "process_pm_reload_request",
+            );
         }
         if !auth_seams::load_ident::call() {
-            report(LOG, "pg_ident.conf was not reloaded".into(), 2015, "process_pm_reload_request");
+            report(
+                LOG,
+                format!(
+                    "{} was not reloaded",
+                    guc_tables::vars::IdentFileName.read().unwrap_or_default()
+                ),
+                2016,
+                "process_pm_reload_request",
+            );
         }
 
         if guc_tables::vars::EnableSSL.read() {
@@ -381,10 +415,10 @@ pub fn process_pm_pmsignal() -> PgResult<()> {
     // direct poke (see syslogger::collector_kill).
     if with_pm(|pm| pm.syslogger.is_some()) {
         if syslogger_seams::check_logrotate_signal::call() {
-            syslogger::collector_kill(libc::SIGUSR1);
+            syslogger::collector_kill(procsignal::signums::SIGUSR1);
             syslogger_seams::remove_logrotate_signal_files::call();
         } else if pmsignal::CheckPostmasterSignal(PMSIGNAL_ROTATE_LOGFILE) {
-            syslogger::collector_kill(libc::SIGUSR1);
+            syslogger::collector_kill(procsignal::signums::SIGUSR1);
         }
     }
 
@@ -412,9 +446,9 @@ pub fn process_pm_pmsignal() -> PgResult<()> {
             debug_assert!(with_pm(|pm| pm.shutdown > NoShutdown));
             let pgarch = with_pm(|pm| pm.pgarch);
             if let Some(pgarch) = pgarch {
-                statemachine::signal_child(&pgarch, libc::SIGUSR2);
+                statemachine::signal_child(&pgarch, procsignal::signums::SIGUSR2);
             }
-            pmchild_seams::signal_children::call(libc::SIGUSR2, btmask(BackendType::WalSender));
+            pmchild_seams::signal_children::call(procsignal::signums::SIGUSR2, btmask(BackendType::WalSender));
             statemachine::UpdatePMState(PMState::PM_WAIT_XLOG_ARCHIVAL);
         } else if with_pm(|pm| !pm.fatal_error && pm.shutdown != ImmediateShutdown) {
             report(LOG, "WAL was shut down unexpectedly".into(), 3846, "process_pm_pmsignal");
@@ -431,6 +465,22 @@ pub fn process_pm_pmsignal() -> PgResult<()> {
 
     if request_state_update {
         statemachine::PostmasterStateMachine()?;
+    }
+
+    // pg_ctl promote: forward SIGUSR2 to the startup process while it is
+    // still recovering (postmaster.c:3883-3895); startup unlinks the file.
+    if with_pm(|pm| {
+        pm.startup.is_some()
+            && matches!(
+                pm.pm_state,
+                PMState::PM_STARTUP | PMState::PM_RECOVERY | PMState::PM_HOT_STANDBY
+            )
+    }) && xlogrecovery_seams::check_promote_signal::is_installed()
+        && xlogrecovery_seams::check_promote_signal::call()
+    {
+        if let Some(startup) = with_pm(|pm| pm.startup) {
+            statemachine::signal_child(&startup, procsignal::signums::SIGUSR2);
+        }
     }
 
     Ok(())
@@ -517,7 +567,7 @@ pub fn process_pm_child_exit() -> PgResult<()> {
                     pm.startup_status = StartupStatusEnum::NotRunning;
                     pm.shutdown = pm.shutdown.max(SmartShutdown);
                 });
-                statemachine::TerminateChildren(libc::SIGTERM);
+                statemachine::TerminateChildren(procsignal::signums::SIGTERM);
                 statemachine::UpdatePMState(PMState::PM_WAIT_BACKENDS);
                 continue;
             }
@@ -586,7 +636,7 @@ pub fn process_pm_child_exit() -> PgResult<()> {
                 statemachine::UpdatePMState(PMState::PM_WAIT_DEAD_END);
                 serverloop::ConfigurePostmasterWaitSet(false)?;
                 statemachine::SignalChildren(
-                    libc::SIGTERM,
+                    procsignal::signums::SIGTERM,
                     btmask_all_except(&[BackendType::Logger]),
                 );
             } else {
@@ -622,6 +672,17 @@ pub fn process_pm_child_exit() -> PgResult<()> {
             continue;
         }
 
+        // C treats walreceiver exit status 0 or 1 as normal (FATAL exit = 1):
+        // the startup process re-requests one when it still wants streaming.
+        if with_pm(|pm| pm.walreceiver.map(|c| c.pid)) == Some(pid) {
+            let wr = with_pm(|pm| pm.walreceiver.take()).expect("checked");
+            pmchild_seams::release_postmaster_child_slot::call(wr.child_slot);
+            if !(status0 || status1) {
+                handle_child_crash("WAL receiver process", pid, exitstatus)?;
+            }
+            continue;
+        }
+
         // C treats archiver exit status 0 or 1 as normal (FATAL exit = 1):
         // the main loop relaunches it to retry archiving remaining files.
         if with_pm(|pm| pm.pgarch.map(|c| c.pid)) == Some(pid) {
@@ -629,6 +690,18 @@ pub fn process_pm_child_exit() -> PgResult<()> {
             pmchild_seams::release_postmaster_child_slot::call(pgarch_child.child_slot);
             if !(status0 || status1) {
                 handle_child_crash("archiver process", pid, exitstatus)?;
+            }
+            continue;
+        }
+
+        // C process_pm_child_exit slot sync worker arm: status 0/1 is a
+        // normal stop (config change, promotion); the main loop relaunches
+        // it after SLOTSYNC_RESTART_INTERVAL_SEC when still applicable.
+        if with_pm(|pm| pm.slotsync_worker.map(|c| c.pid)) == Some(pid) {
+            let ss = with_pm(|pm| pm.slotsync_worker.take()).expect("checked");
+            pmchild_seams::release_postmaster_child_slot::call(ss.child_slot);
+            if !(status0 || status1) {
+                handle_child_crash("slot sync worker process", pid, exitstatus)?;
             }
             continue;
         }
@@ -648,13 +721,16 @@ pub fn process_pm_child_exit() -> PgResult<()> {
 
         match pmchild_seams::find_postmaster_child_by_pid::call(pid) {
             // C's CleanupBackend also owns autovacuum workers (B_AUTOVAC_WORKER
-            // rides the backend list).
+            // rides the backend list) and walsenders (B_WAL_SENDER — a backend
+            // that switched type at START_REPLICATION; CleanupBackend treats it
+            // exactly like a plain backend).
             Some((child_slot, btype))
                 if matches!(
                     btype,
                     BackendType::Backend
                         | BackendType::DeadEndBackend
                         | BackendType::AutovacWorker
+                        | BackendType::WalSender
                 ) =>
             {
                 pmchild_seams::release_postmaster_child_slot::call(child_slot);
@@ -738,9 +814,39 @@ fn handle_child_crash(procname: &str, pid: pid_t, exitstatus: i32) -> PgResult<(
     statemachine::HandleFatalError(pmsignal::QuitSignalReason::PMQUIT_FOR_CRASH, true)
 }
 
+/// pm_service_pending seam impl (SIMCORPUS): one postmaster service quantum
+/// for harness boot threads that play the postmaster — the ServerLoop slice
+/// a parallel-query corpus needs, in ServerLoop's order: child exits, then
+/// the BACKGROUND_WORKER_CHANGE pmsignal arm, then deferred bgworker starts
+/// (LaunchMissingBackgroundProcesses' maybe_start half). On the postmaster's
+/// OWN thread-local PM state; with no shutdown/crash in flight the trailing
+/// PostmasterStateMachine inside process_pm_child_exit is state-gated to a
+/// no-op (PM_INIT), and maybe_start_bgworkers walks only pid-0 registered
+/// entries — so this is exactly the ServerLoop's service arms and nothing
+/// else.
+fn pm_service_pending() {
+    if PENDING_PM_CHILD_EXIT.load(Ordering::Acquire) {
+        process_pm_child_exit().unwrap_or_else(|e| panic!("pm_service_pending: {e:?}"));
+    }
+    if PENDING_PM_PMSIGNAL.swap(false, Ordering::AcqRel)
+        && pmsignal::CheckPostmasterSignal(pmsignal::PMSignalReason::PMSIGNAL_BACKGROUND_WORKER_CHANGE)
+    {
+        bgworker::BackgroundWorkerStateChange(with_pm(|pm| {
+            pm.pm_state < PMState::PM_STOP_BACKENDS
+        }));
+        with_pm(|pm| pm.start_worker_needed = true);
+    }
+    if with_pm(|pm| pm.start_worker_needed || pm.have_crashed_worker) {
+        statemachine::maybe_start_bgworkers();
+    }
+}
+
 pub fn init_seams() {
     postmaster_seams::announce_child_exit::set(announce_child_exit);
-    postmaster_seams::signal_postmaster_sigusr1::set(|| handle_pm_pmsignal_signal(libc::SIGUSR1));
-    postmaster_seams::signal_postmaster_sighup::set(|| handle_pm_reload_request_signal(libc::SIGHUP));
+    postmaster_seams::bgworker_shmem_init::set(bgworker::BackgroundWorkerShmemInit);
+    postmaster_seams::pm_service_pending::set(pm_service_pending);
+    postmaster_seams::signal_postmaster_sigusr1::set(|| handle_pm_pmsignal_signal(procsignal::signums::SIGUSR1));
+    postmaster_seams::signal_postmaster_sighup::set(|| handle_pm_reload_request_signal(procsignal::signums::SIGHUP));
     postmaster_seams::pg_start_time::set(main_entry::pg_start_time);
+    postmaster_seams::set_pg_start_time::set(main_entry::set_pg_start_time);
 }

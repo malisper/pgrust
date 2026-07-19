@@ -1,5 +1,8 @@
-// nodeHash.c serial build side; skew and parallel absent (sizing still
-// reserves skew memory like C); C HashJoinTupleData layout, pointer chains.
+// nodeHash.c serial build side; skew absent (sizing still reserves skew
+// memory like C); C HashJoinTupleData layout, pointer chains. The shared
+// (Parallel Hash) table lives in `parallel`; private-vs-shared follows the
+// RUNTIME parallel_state like C, so a parallel-aware Hash without a parallel
+// context builds a private table (exec_hash_table_create).
 #![allow(non_snake_case)]
 
 use core::ptr::NonNull;
@@ -885,9 +888,10 @@ pub fn exec_init_hash<'mcx>(
         .expect("Hash without an outer plan")
         .as_plan()
         .expect("Hash outer is a plan node");
-    // C sizes a parallel-aware Hash from the undivided total row estimate;
-    // the loud not-ported panic moves to exec_hash_table_create so plain
-    // EXPLAIN (which inits but never runs the tree) still works.
+    // C sizes a parallel-aware Hash from the undivided total row estimate
+    // (nodeHash.c: rows = parallel_aware ? rows_total : plan_rows) — by the
+    // PLAN flag, even when the table ends up private because no parallel
+    // context materialized at runtime (exec_hash_table_create).
     let ntuples_est = if node.plan.parallel_aware { node.rows_total } else { child.plan_rows };
 
     Ok(HashState {
@@ -911,11 +915,19 @@ pub fn exec_hash_table_create<'mcx>(
     estate: &mut EStateData<'mcx>,
     want_filter: bool,
 ) -> PgResult<HashJoinTable<'mcx>> {
-    // A parallel-aware Hash builds the shared table via
-    // parallel::exec_parallel_hash_table_create instead.
+    // C selects private-vs-shared by `state->parallel_state != NULL` at
+    // RUNTIME (nodeHash.c ExecHashTableCreate), never by the plan flag: a
+    // parallel-aware Hash whose DSM never initialized — ExecutePlan ran with
+    // use_parallel_mode=false (partial fetch / already-executed, execMain.c),
+    // so Gather launched no parallel context — legally degrades to a PRIVATE
+    // table over the full build input (the parallel-aware child scans
+    // everything when no shared scan descriptor exists). Sizing still follows
+    // the plan flag (ntuples_est = rows_total, set in exec_init_hash), also C.
+    // The shared arm lives in parallel::exec_parallel_hash_table_create;
+    // reaching this arm with shared state attached is a dispatch bug.
     assert!(
-        !hs.parallel_aware && hs.parallel_state.is_none(),
-        "ExecHashTableCreate (nodeHash.c): parallel-aware Hash outside a parallel context"
+        hs.parallel_state.is_none(),
+        "ExecHashTableCreate (nodeHash.c): private-table arm with parallel_state attached"
     );
     let mcx = estate.es_query_cxt;
     let (nbuckets, nbatch, _num_skew_mcvs, space_allowed) =

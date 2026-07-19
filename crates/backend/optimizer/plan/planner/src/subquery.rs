@@ -48,6 +48,19 @@ pub fn subquery_planner<'mcx>(
     if run.assess_parallel && run.root.query_level == 1 {
         run.glob.max_parallel_hazard = clauses::max_parallel_hazard(&*parse)?;
         run.glob.parallel_mode_ok = run.glob.max_parallel_hazard != crate::PROPARALLEL_UNSAFE;
+        // C initializes parallelModeNeeded ONCE, in standard_planner (planner.c
+        // ~430, right after parallelModeOK): false unless debug_parallel_query,
+        // then flipped true by create_gather_plan/create_gather_merge_plan.
+        // It must run HERE (once, before any subplanning) and not per
+        // subquery_planner call: the old placement just before grouping_planner
+        // re-ran on the outer query AFTER SS_process_ctes had already planned
+        // CTE subplans, clobbering the flag their Gathers set — a Gather that
+        // lives only inside a CTE/sublink subplan then shipped with
+        // parallelModeNeeded=false and silently launched 0 workers
+        // (q15probe lane: TPC-H q15 CTE, Workers Planned 7 / Launched 0,
+        // 3.68x-of-C; notes/q15probe-lane.md).
+        run.glob.parallel_mode_needed = run.glob.parallel_mode_ok
+            && crate::gucs::debug_parallel_query() != guc_tables::consts::DEBUG_PARALLEL_OFF;
     }
     run.root.command_type = parse.commandType;
     if parse.resultRelation != 0 {
@@ -448,9 +461,6 @@ pub fn subquery_planner<'mcx>(
     if run.root.hasJoinRTEs {
         assert_no_join_alias_vars(sealed, &join_rtes)?;
     }
-
-    run.glob.parallel_mode_needed = run.glob.parallel_mode_ok
-        && crate::gucs::debug_parallel_query() != guc_tables::consts::DEBUG_PARALLEL_OFF;
 
     grouping_planner(run, tuple_fraction, setops)?;
 
@@ -902,6 +912,11 @@ fn preprocess_rte_expressions<'mcx>(
             }
             _ => {}
         }
+        // Re-derive the shared ref: the with_mut arms above invalidated the
+        // pre-match `rte` (with_mut contract, node_tree.rs — no reference
+        // derived before the mutation may be used during or after it).
+        // (Miri F5, notes/miri-pilot-lane.md.)
+        let rte = rte_node.as_range_tbl_entry().expect("rtable cell");
         if !rte.securityQuals.is_nil() {
             let mut quals = types_nodes::list::NodeList::nil();
             for sq in &rte.securityQuals {

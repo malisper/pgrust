@@ -1,0 +1,8 @@
+# Build artifacts produced by build.sh (~90 MB) — regenerate, don't commit.
+assets/postgres.wasm
+assets/postgres.wasm.br
+assets/postgres.wasm.gz
+assets/vfs.img
+assets/vfs.img.br
+assets/vfs.img.gz
+assets/vfs.json

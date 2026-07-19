@@ -850,10 +850,14 @@ fn RevalidateCachedQuery(
         // before the arena is reclaimed or its Drop scribbles a freed slab.
         drop(search_path);
         reclaim_ctx(new_qctx);
+        // routine=RevalidateCachedQuery is load-bearing: pgjdbc and
+        // postgres.js key their transparent re-prepare-after-DDL on this
+        // exact R field (C's __func__ at the equivalent report site).
         return Err(ereport(ERROR)
             .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg("cached plan must not change result type")
             .into_error()
+            .with_funcname("RevalidateCachedQuery")
             .into());
     }
 

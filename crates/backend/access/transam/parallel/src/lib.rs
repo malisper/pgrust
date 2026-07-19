@@ -3,8 +3,13 @@
 use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering::SeqCst};
-use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+// permit-s4 row 7: the per-worker error queues ride pgsync::mailbox
+// (bounded 64). Leader-detach turns worker sends into drop-and-continue
+// structurally: dropping the receiver closes the mailbox and send returns
+// Err — C's detached-mq send failure, with no bespoke flag to maintain.
+use pgsync::{Mutex, MailboxReceiver, MailboxSender, TryRecv};
 
 use elog::ereport;
 use init_small::globals as g;
@@ -79,8 +84,10 @@ const QUERY_TASK_PENDING_INVALS: u8 = 1 << 4;
 // registration order is correct by construction. Registration is append-only
 // and idempotent (fn-pointer dedup via fn_addr_eq); the lists are tiny,
 // written once per arm per process, read per worker task.
-static POST_TASK_PARK: Mutex<Vec<fn(&ParallelShared)>> = Mutex::new(Vec::new());
-static PRIVATE_SHUTDOWN: Mutex<Vec<fn(&(dyn Any + Send + Sync))>> = Mutex::new(Vec::new());
+pgsync::process_global! {
+    static POST_TASK_PARK: Mutex<Vec<fn(&ParallelShared)>> = Mutex::new(Vec::new());
+    static PRIVATE_SHUTDOWN: Mutex<Vec<fn(&(dyn Any + Send + Sync))>> = Mutex::new(Vec::new());
+}
 
 pub fn register_parallel_post_task_park(f: fn(&ParallelShared)) {
     let mut v = POST_TASK_PARK.lock().unwrap_or_else(|p| p.into_inner());
@@ -159,7 +166,7 @@ pub struct ParallelShared {
     record_registry: typcache_seams::RecordRegistryHandle,
     library_name: String,
     function_name: String,
-    error_senders: Vec<Mutex<Option<SyncSender<WorkerMessage>>>>,
+    error_senders: Vec<Mutex<Option<MailboxSender<WorkerMessage>>>>,
     worker_attached: Vec<AtomicBool>,
     private: Mutex<Option<Arc<dyn Any + Send + Sync>>>,
     query_task_binding: AtomicU8,
@@ -178,7 +185,7 @@ impl ParallelShared {
 
 struct ParallelWorkerInfo {
     bgwhandle: Option<bgworker::BackgroundWorkerHandle>,
-    error_receiver: Option<Receiver<WorkerMessage>>,
+    error_receiver: Option<MailboxReceiver<WorkerMessage>>,
 }
 
 pub struct ParallelContext {
@@ -213,11 +220,15 @@ thread_local! {
 }
 
 // The dsm-handle analog: bgw_main_arg keys the leader's Arc for the worker.
-static SHARED_REGISTRY: Mutex<Vec<(u64, Arc<ParallelShared>)>> = Mutex::new(Vec::new());
+pgsync::process_global! {
+    static SHARED_REGISTRY: Mutex<Vec<(u64, Arc<ParallelShared>)>> = Mutex::new(Vec::new());
+}
 static NEXT_SHARED_KEY: AtomicU64 = AtomicU64::new(1);
 
-static REGISTERED_ENTRYPOINTS: Mutex<Vec<(&'static str, ParallelWorkerEntry)>> =
-    Mutex::new(Vec::new());
+pgsync::process_global! {
+    static REGISTERED_ENTRYPOINTS: Mutex<Vec<(&'static str, ParallelWorkerEntry)>> =
+        Mutex::new(Vec::new());
+}
 
 const UNPORTED_INTERNAL_WORKERS: &[&str] = &[
     "ParallelQueryMain",
@@ -376,7 +387,7 @@ pub fn InitializeParallelDSM(id: ParallelContextId) -> PgResult<()> {
     let mut receivers = Vec::with_capacity(nworkers.max(0) as usize);
     let mut worker_attached = Vec::with_capacity(nworkers.max(0) as usize);
     for _ in 0..nworkers {
-        let (tx, rx) = std::sync::mpsc::sync_channel(PARALLEL_ERROR_QUEUE_MSGS);
+        let (tx, rx) = pgsync::mailbox(Some(PARALLEL_ERROR_QUEUE_MSGS));
         error_senders.push(Mutex::new(Some(tx)));
         receivers.push(rx);
         worker_attached.push(AtomicBool::new(false));
@@ -578,7 +589,7 @@ pub fn ReinitializeParallelDSM(id: ParallelContextId) -> PgResult<()> {
         p.known_attached_workers.clear();
         p.nknown_attached_workers = 0;
         for (i, w) in p.workers.iter_mut().enumerate() {
-            let (tx, rx) = std::sync::mpsc::sync_channel(PARALLEL_ERROR_QUEUE_MSGS);
+            let (tx, rx) = pgsync::mailbox(Some(PARALLEL_ERROR_QUEUE_MSGS));
             *shared.error_senders[i].lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
             shared.worker_attached[i].store(false, SeqCst);
             w.bgwhandle = None;
@@ -948,7 +959,7 @@ fn process_parallel_messages_guts() -> PgResult<()> {
                 });
                 match msg {
                     None => break,
-                    Some(Ok(m)) => {
+                    Some(TryRecv::Msg(m)) => {
                         mark_known_attached(id, i);
                         match m {
                             WorkerMessage::Error(mut e) => {
@@ -976,8 +987,8 @@ fn process_parallel_messages_guts() -> PgResult<()> {
                             }
                         }
                     }
-                    Some(Err(TryRecvError::Empty)) => break,
-                    Some(Err(TryRecvError::Disconnected)) => {
+                    Some(TryRecv::Empty) => break,
+                    Some(TryRecv::Disconnected) => {
                         return ereport(ERROR)
                             .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
                             .errmsg("lost connection to parallel worker")
@@ -1010,7 +1021,7 @@ pub fn ParallelWorkerReportLastRecEnd(last_rec_end: XLogRecPtr) -> PgResult<()> 
 }
 
 thread_local! {
-    static MY_PROGRESS_SENDER: RefCell<Option<SyncSender<WorkerMessage>>> =
+    static MY_PROGRESS_SENDER: RefCell<Option<MailboxSender<WorkerMessage>>> =
         const { RefCell::new(None) };
 }
 
@@ -1039,7 +1050,7 @@ pub fn parallel_worker_report_progress(index: i32, incr: i64) {
     );
 }
 
-fn take_my_error_sender(shared: &ParallelShared, worker_number: i32) -> SyncSender<WorkerMessage> {
+fn take_my_error_sender(shared: &ParallelShared, worker_number: i32) -> MailboxSender<WorkerMessage> {
     let mut slot = shared.error_senders[worker_number as usize]
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -1276,21 +1287,39 @@ fn parallel_worker_body(shared: &Arc<ParallelShared>, _worker_number: i32) -> Pg
     snapmgr::RestoreTransactionSnapshot(tsource, shared.parallel_leader_proc_number)?;
     snapmgr::PushActiveSnapshot(&asnapshot)?;
 
-    if init_small::wretain::warm_claim() && !shared.leader_pending_invals {
+    if init_small::wretain::warm_claim()
+        && !shared.leader_pending_invals
+        && !init_small::wretain::caches_tainted()
+    {
         // Retention warm claim: caches were drained against the shared queue
         // at InitPostgres (postinit warm arm); a second cheap drain here
         // covers messages that arrived since. C's blanket invalidation is
         // only needed for a fresh process's incidentally-mistimed cache
         // loads — or for the leader's own uncommitted DDL, which forces the
-        // fallback arm below.
+        // fallback arm below (both for THIS task's binding and, via the
+        // taint, for a PREVIOUS task's: see note_caches_tainted below).
         gtrace("w.retain.inval.begin");
         inval::local::AcceptInvalidationMessages()?;
         gtrace("w.retain.inval.drained");
     } else {
         gtrace("w.cold.inval.begin");
         inval::local::InvalidateSystemCaches()?;
+        init_small::wretain::clear_caches_taint();
     }
     gtrace("w.inval.done");
+    if shared.leader_pending_invals {
+        // This task binds a transaction with unbroadcast (uncommitted-DDL)
+        // invalidation messages: cache entries built during it hold
+        // uncommitted catalog state. If that transaction ABORTS, no sinval
+        // traffic ever corrects them — C's per-query worker process dies
+        // here, and parallel.c:1513 blankets every fresh start — so a
+        // retained thread must re-run the blanket at its next claim instead
+        // of trusting the drain. Without this, a rolled-back TRUNCATE left a
+        // parked worker's relcache pointing at the aborted relfilelocator,
+        // tripping table_beginscan_parallel's locator assert (tableam.c:172
+        // parity) on the next parallel scan of that table.
+        init_small::wretain::note_caches_tainted();
+    }
 
     // A retained thread keeps its previous task's session GUCs (a C worker
     // is a fresh process; RestoreGUCState overlays postmaster state only);
@@ -1349,6 +1378,7 @@ fn parallel_worker_body(shared: &Arc<ParallelShared>, _worker_number: i32) -> Pg
 
 pub fn init_seams() {
     parallel_seams::is_parallel_worker::set(IsParallelWorker);
+    parallel_seams::parallel_worker_number::set(ParallelWorkerNumber);
     parallel_seams::initializing_parallel_worker::set(InitializingParallelWorker);
     parallel_seams::at_eoxact_parallel::set(AtEOXact_Parallel);
     parallel_seams::at_eosubxact_parallel::set(AtEOSubXact_Parallel);

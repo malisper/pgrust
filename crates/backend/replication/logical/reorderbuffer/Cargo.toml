@@ -21,6 +21,7 @@ heaptuple = { path = "../../../access/common/heaptuple" }
 detoast = { path = "../../../access/common/detoast" }
 snapmgr = { path = "../../../utils/time/snapmgr" }
 xact = { path = "../../../access/transam/xact" }
+transam_seams = { path = "../../../access/transam/transam_seams" }
 inval = { path = "../../../utils/cache/inval" }
 relcache = { path = "../../../utils/cache/relcache" }
 catalog = { path = "../../../catalog/catalog" }

@@ -204,7 +204,7 @@ pub fn get_relation_info<'mcx>(
                 for e in list.iter() {
                     let e = clauses::eval_const_expressions(mcx, e)?;
                     if varno != 1 {
-                        change_var_nodes(e, varno as i32);
+                        change_var_nodes(e, varno as i32)?;
                     }
                     info.indexprs.push(run.intern_expr(e));
                 }
@@ -216,7 +216,7 @@ pub fn get_relation_info<'mcx>(
                 let implicit = clauses::make_ands_implicit(mcx, Some(canon))?;
                 for e in implicit.iter() {
                     if varno != 1 {
-                        change_var_nodes(e, varno as i32);
+                        change_var_nodes(e, varno as i32)?;
                     }
                     info.indpred.push(run.intern_expr(e));
                 }
@@ -578,7 +578,7 @@ fn copy_boundinfo_for_planner<'mcx>(
                 if hash { (true, 4i16) } else { (key.parttypbyval[j], key.parttyplen[j]) };
             let d = bi.datum(i, j);
             if byval {
-                row.push(DatumImage::ByVal(d.as_usize()));
+                row.push(DatumImage::ByVal(d.as_u64()));
             } else {
                 let p = d.as_usize() as *const u8;
                 // SAFETY: byref bound datums are live inline images owned by
@@ -597,7 +597,16 @@ fn copy_boundinfo_for_planner<'mcx>(
                                     >> 2
                             }
                         }
-                        other => panic!("copy_boundinfo_for_planner: typlen {other} unported"),
+                        // datumGetSize (datum.c): cstring is its NUL
+                        // terminator-inclusive strlen.
+                        -2 => {
+                            let mut l = 0usize;
+                            while *p.add(l) != 0 {
+                                l += 1;
+                            }
+                            l + 1
+                        }
+                        other => panic!("copy_boundinfo_for_planner: typlen {other} invalid"),
                     }
                 };
                 let mut buf: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, len)?;
@@ -719,7 +728,7 @@ fn set_baserel_partition_constraint<'mcx>(
     for q in partconstr.iter() {
         let folded = clauses::eval_const_expressions(mcx, q)?;
         if varno != 1 {
-            change_var_nodes(folded, varno as i32);
+            change_var_nodes(folded, varno as i32)?;
         }
         folded_ids.push(run.intern_expr(folded));
     }
@@ -746,50 +755,33 @@ pub fn index_can_return(mcx: mcx::Mcx<'_>, index_oid: Oid, attno: i32) -> PgResu
 }
 
 // ChangeVarNodes (rewriteManip.c), rt_index 1 arm over freshly parsed index
-// expression trees (exclusively owned, so in-place mutation is safe).
-pub(crate) fn change_var_nodes(node: types_nodes::Node<'_>, new_varno: i32) {
-    use types_nodes::NodeTag;
-    let walk_list = |l: &types_nodes::NodeList<'_>| {
-        for e in l {
-            change_var_nodes(e, new_varno);
-        }
-    };
-    match node.node_tag() {
-        NodeTag::T_Var => {
-            // SAFETY: tree is freshly parsed and exclusively owned here.
-            unsafe {
-                node.with_mut::<types_nodes::primnodes::Var, _>(|v| {
-                    if v.varno == 1 && v.varlevelsup == 0 {
-                        v.varno = new_varno;
-                    }
-                })
-            }
-            .expect("Var");
-        }
-        NodeTag::T_Const | NodeTag::T_Param => {}
-        NodeTag::T_OpExpr => walk_list(&node.as_op_expr().unwrap().args),
-        NodeTag::T_DistinctExpr => walk_list(&node.as_distinct_expr().unwrap().args),
-        NodeTag::T_FuncExpr => walk_list(&node.as_func_expr().unwrap().args),
-        NodeTag::T_BoolExpr => walk_list(&node.as_bool_expr().unwrap().args),
-        NodeTag::T_ScalarArrayOpExpr => {
-            walk_list(&node.as_scalar_array_op_expr().unwrap().args)
-        }
-        NodeTag::T_RelabelType => {
-            change_var_nodes(node.as_relabel_type().unwrap().arg, new_varno)
-        }
-        NodeTag::T_NullTest => {
-            change_var_nodes(node.as_null_test().unwrap().arg.expect("NullTest.arg"), new_varno)
-        }
-        NodeTag::T_BooleanTest => change_var_nodes(
-            node.as_boolean_test().unwrap().arg.expect("BooleanTest.arg"),
-            new_varno,
-        ),
-        NodeTag::T_CoalesceExpr => walk_list(&node.as_coalesce_expr().unwrap().args),
-        NodeTag::T_ArrayExpr => walk_list(&node.as_array_expr().unwrap().elements),
-        NodeTag::T_RowExpr => walk_list(&node.as_row_expr().unwrap().args),
-        NodeTag::T_List => walk_list(node.as_list().unwrap()),
-        other => panic!("ChangeVarNodes (rewriteManip.c): {other:?}; unported lane"),
+// expression trees (exclusively owned, so in-place mutation is safe). The
+// generic engine covers the full expression vocabulary; only Vars mutate.
+pub(crate) fn change_var_nodes(node: types_nodes::Node<'_>, new_varno: i32) -> PgResult<()> {
+    struct W {
+        new_varno: i32,
     }
+    impl<'mcx> nodes_core::NodeWalker<'mcx> for W {
+        fn visit(&mut self, node: types_nodes::Node<'mcx>) -> PgResult<bool> {
+            if node.node_tag() == types_nodes::NodeTag::T_Var {
+                // SAFETY: tree is freshly parsed and exclusively owned here.
+                unsafe {
+                    node.with_mut::<types_nodes::primnodes::Var, _>(|v| {
+                        if v.varno == 1 && v.varlevelsup == 0 {
+                            v.varno = self.new_varno;
+                        }
+                    })
+                }
+                .expect("Var");
+                return Ok(false);
+            }
+            nodes_core::expression_tree_walker(node, self)
+        }
+    }
+    let mut w = W { new_varno };
+    use nodes_core::NodeWalker as _;
+    w.visit(node)?;
+    Ok(())
 }
 
 const HEAP_OVERHEAD_BYTES_PER_TUPLE: usize = 24 + 4;
@@ -910,6 +902,18 @@ pub fn has_unique_index(run: &PlannerRun<'_>, rel: RelId, attno: i16) -> bool {
     false
 }
 
+// Proname of a dynamic-oid (extension) estimator proc; None for builtins.
+#[cold]
+fn dynamic_estimator_name(procid: Oid) -> PgResult<Option<String>> {
+    const FIRST_NORMAL_OBJECT_ID: Oid = 16384;
+    if procid < FIRST_NORMAL_OBJECT_ID {
+        return Ok(None);
+    }
+    let cx = ::mcx::MemoryContext::new("plancat estimator probe");
+    let name = lsyscache::get_func_name(cx.mcx(), procid)?.map(|n| n.as_str().to_string());
+    Ok(name)
+}
+
 // restriction_selectivity (plancat.c): closed-set oprrest dispatch.
 pub fn restriction_selectivity<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -919,7 +923,7 @@ pub fn restriction_selectivity<'mcx>(
     varrelid: i32,
 ) -> PgResult<f64> {
     const F_EQSEL: Oid = 101;
-    let oprrest = lsyscache::get_oprrest(operatorid)?;
+    let oprrest = crate::syscache_memo::get_oprrest(run, operatorid)?;
     if oprrest == 0 {
         return Ok(0.5);
     }
@@ -981,9 +985,26 @@ pub fn restriction_selectivity<'mcx>(
         3560 => crate::network_selfuncs::networksel(run, operatorid, args, varrelid)?,
         3686 => crate::ts_selfuncs::tsmatchsel(run, args, varrelid)?,
         3817 => crate::array_selfuncs::arraycontsel(run, operatorid, args, varrelid)?,
-        other => panic!(
-            "restriction_selectivity (plancat.c): oprrest {other}; M2 selfuncs lane"
-        ),
+        // Extension estimators carry dynamic oids; match by proname. The
+        // intarray _sel wrappers substitute the built-in operator OID and
+        // call arraycontsel, exactly as their C bodies do.
+        other => match dynamic_estimator_name(other)?.as_deref() {
+            Some("_int_overlap_sel") => {
+                crate::array_selfuncs::arraycontsel(run, 2750, args, varrelid)?
+            }
+            Some("_int_contains_sel") => {
+                crate::array_selfuncs::arraycontsel(run, 2751, args, varrelid)?
+            }
+            Some("_int_contained_sel") => {
+                crate::array_selfuncs::arraycontsel(run, 2752, args, varrelid)?
+            }
+            Some("_int_matchsel") => {
+                crate::intarray_selfuncs::int_matchsel(run, args, varrelid, other)?
+            }
+            _ => panic!(
+                "restriction_selectivity (plancat.c): oprrest {other}; M2 selfuncs lane"
+            ),
+        },
     };
     if !(0.0..=1.0).contains(&result) {
         panic!("invalid restriction selectivity: {result}");
@@ -1035,7 +1056,14 @@ pub fn join_selectivity<'mcx>(
         3687 => crate::ts_selfuncs::DEFAULT_TS_MATCH_SEL,
         // arraycontjoinsel (array_selfuncs.c) is a C stub.
         3818 => crate::array_selfuncs::arraycontjoinsel(operatorid),
-        other => panic!("join_selectivity (plancat.c): oprjoin {other}; M2 selfuncs lane"),
+        // intarray _joinsel wrappers: built-in operator OID substituted into
+        // the arraycontjoinsel stub (matches the C wrappers).
+        other => match dynamic_estimator_name(other)?.as_deref() {
+            Some("_int_overlap_joinsel") => crate::array_selfuncs::arraycontjoinsel(2750),
+            Some("_int_contains_joinsel") => crate::array_selfuncs::arraycontjoinsel(2751),
+            Some("_int_contained_joinsel") => crate::array_selfuncs::arraycontjoinsel(2752),
+            _ => panic!("join_selectivity (plancat.c): oprjoin {other}; M2 selfuncs lane"),
+        },
     };
     if !(0.0..=1.0).contains(&result) {
         panic!("invalid join selectivity: {result}");
@@ -1246,7 +1274,7 @@ pub fn infer_arbiter_indexes<'mcx>(
                 for e in node.as_list().expect("indexprs is a List").iter() {
                     let e = clauses::eval_const_expressions(mcx, e)?;
                     if varno != 1 {
-                        change_var_nodes(e, varno);
+                        change_var_nodes(e, varno)?;
                     }
                     idx_exprs.push(e);
                 }
@@ -1284,7 +1312,7 @@ pub fn infer_arbiter_indexes<'mcx>(
                 let implicit = clauses::make_ands_implicit(mcx, Some(canon))?;
                 for e in implicit.iter() {
                     if varno != 1 {
-                        change_var_nodes(e, varno);
+                        change_var_nodes(e, varno)?;
                     }
                     pred_exprs.push(e);
                 }
@@ -1399,7 +1427,7 @@ pub fn get_relation_constraints<'mcx>(
             let cexpr = clauses::eval_const_expressions(mcx, cexpr)?;
             let cexpr = crate::prepqual::canonicalize_qual(mcx, cexpr, true)?;
             if varno != 1 {
-                change_var_nodes(cexpr, varno as i32);
+                change_var_nodes(cexpr, varno as i32)?;
             }
             let implicit = clauses::make_ands_implicit(mcx, Some(cexpr))?;
             for item in implicit.iter() {

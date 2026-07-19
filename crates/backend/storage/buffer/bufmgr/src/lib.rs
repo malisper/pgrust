@@ -20,6 +20,7 @@ mod ops;
 mod pin;
 mod privref;
 mod dbcopy;
+mod evict;
 mod read;
 mod uring;
 mod write;
@@ -57,6 +58,7 @@ pub use pin::{
     UnlockBuffers,
 };
 pub use privref::{debug_all_private_pins, GetPrivateRefCount, ReservePrivateRefCountEntry};
+pub use evict::{EvictAllUnpinnedBuffers, EvictCounts, EvictRelUnpinnedBuffers, EvictUnpinnedBuffer};
 
 // Diagnostic (PGRUST_REDO_PIN_CHECK): wait out this thread's in-flight uring
 // prefetch pins so the check sees only genuine leaks.
@@ -288,8 +290,15 @@ pub use dbcopy::CreateAndCopyRelationData;
 pub use drop_buffers::DropDatabaseBuffers;
 pub use write::FlushDatabaseBuffers;
 
-unported! {
-    fn HoldingBufferPinThatDelaysRecovery() -> bool, "HoldingBufferPinThatDelaysRecovery";
+// HoldingBufferPinThatDelaysRecovery (bufmgr.c:5822): are we holding a pin on
+// the buffer the Startup process is waiting for? bufid may already be cleared
+// (slow wake / spurious interrupt): do nothing then.
+pub fn HoldingBufferPinThatDelaysRecovery() -> bool {
+    let bufid = lmgr_proc::GetStartupBufferPinWaitBufId();
+    if bufid < 0 {
+        return false;
+    }
+    privref::GetPrivateRefCount(bufid + 1) > 0
 }
 
 pub use read::{PrefetchBuffer, PrefetchBufferResult, PrefetchOutcome, PrefetchSharedBuffer};

@@ -52,7 +52,7 @@ thread_local! {
 /// for registration with the runtime worker struct (None: uring
 /// unavailable or aio_uring not linked).
 pub(crate) fn worker_enter(rt: &Arc<Runtime>) -> Option<u32> {
-    static INSTALL: std::sync::Once = std::sync::Once::new();
+    static INSTALL: crate::sync::Once = crate::sync::Once::new();
     INSTALL.call_once(|| {
         aio_seams::io_permit_release::set(io_permit_release);
         aio_seams::io_permit_reacquire::set(io_permit_reacquire);

@@ -47,6 +47,12 @@ struct Entry {
     ptr: *const ParamExternData,
     len: usize,
     generation: u32,
+    // C ParamListInfo.paramFetch != NULL: the list is PL-owned and lazily
+    // fetched there (plpgsql setup_param_list, functions.c
+    // sql_fn_param_fetch). This port materializes such lists, but consumers
+    // that mirror C's paramFetch bail-outs (params.c BuildParamLogString ->
+    // auto_explain's Query Parameters line) need the provenance bit.
+    hooked: bool,
 }
 
 thread_local! {
@@ -66,12 +72,27 @@ fn decode(h: ParamListHandle) -> (u32, u32) {
 /// # Safety
 /// `params` (with its by-ref datums) must outlive [`free`] (PortalDrop's job).
 pub unsafe fn register(params: &[ParamExternData]) -> ParamListHandle {
+    // SAFETY: forwarded caller contract.
+    unsafe { register_with_hooked(params, false) }
+}
+
+/// [`register`] for a list that C would back with a paramFetch hook (PL-owned
+/// variables). See `Entry::hooked`.
+///
+/// # Safety
+/// Same liveness contract as [`register`].
+pub unsafe fn register_hooked(params: &[ParamExternData]) -> ParamListHandle {
+    // SAFETY: forwarded caller contract.
+    unsafe { register_with_hooked(params, true) }
+}
+
+unsafe fn register_with_hooked(params: &[ParamExternData], hooked: bool) -> ParamListHandle {
     let generation = GENERATION.with(|g| {
         let v = g.get().wrapping_add(1);
         g.set(v);
         v
     });
-    let entry = Entry { ptr: params.as_ptr(), len: params.len(), generation };
+    let entry = Entry { ptr: params.as_ptr(), len: params.len(), generation, hooked };
     let idx = match FREE.with(|f| f.borrow_mut().pop()) {
         Some(i) => {
             ENTRIES.with(|e| e.borrow_mut()[i as usize] = Some(entry));
@@ -116,6 +137,14 @@ pub fn num_params(h: ParamListHandle) -> usize {
         return 0;
     }
     lookup(h).len
+}
+
+/// C's `params->paramFetch != NULL` test (see `Entry::hooked`).
+pub fn is_fetch_hooked(h: ParamListHandle) -> bool {
+    if h.is_null() {
+        return false;
+    }
+    lookup(h).hooked
 }
 
 pub fn free(h: ParamListHandle) {

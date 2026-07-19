@@ -312,3 +312,23 @@ fn rtable_name_dedup_appends_digits() {
     assert_eq!(dpns.rtable_columns[0].colnames.len(), 2);
     assert_eq!(dpns.rtable_columns[0].colnames[0].as_deref(), Some("id"));
 }
+
+// Public issue #18: pg_get_expr over pg_rewrite.ev_qual's "<>" null-node
+// marker. C's stringToNode returns NULL and get_rule_expr deparses NULL as
+// nothing, so pg_get_expr returns the EMPTY STRING (not SQL NULL) — verified
+// live on C 18.3 (146/147 fresh-catalog rows: is_null=f, is_empty=t). Base
+// pgrust panicked at readfuncs lib.rs:37 instead.
+#[test]
+fn null_node_marker_deparses_to_empty_string() {
+    install();
+    let ctx = MemoryContext::new("ruleutils test");
+    assert_eq!(
+        pg_get_expr_worker(ctx.mcx(), "<>", 0, PRETTYFLAG_INDENT).unwrap(),
+        Some(String::new())
+    );
+    // pg_get_expr_ext's pretty arm takes the same NULL-node path.
+    assert_eq!(
+        pg_get_expr_worker(ctx.mcx(), "<>", 0, get_pretty_flags(true)).unwrap(),
+        Some(String::new())
+    );
+}

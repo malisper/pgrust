@@ -120,7 +120,11 @@ pub fn BeginCopyTo<'mcx, 's>(
     let need_transcoding = !(file_encoding == mbutils::GetDatabaseEncoding()
         || file_encoding == wchar::PG_SQL_ASCII);
     if !opts.binary && file_encoding >= wchar::PG_SJIS {
-        unported("TO with a client-only encoding (pg_encoding_mblen escape walk)");
+        // unported: COPY TO with a client-only encoding (pg_encoding_mblen escape walk)
+        return Err(Box::new(
+            PgError::error("COPY TO with a client-only encoding is not supported yet".to_string())
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
     }
 
     let dest = match filename {
@@ -132,9 +136,12 @@ pub fn BeginCopyTo<'mcx, 's>(
                 ));
             }
             // SAFETY: process-global umask swap around open, as C's BeginCopyTo.
+            // wasm32: no umask on WASI (files carry no mode bits).
+            #[cfg(not(target_family = "wasm"))]
             let oumask = unsafe { libc::umask(0o022) };
             let copy_file = fd::AllocateFile(filename, "wb");
             // SAFETY: restore saved umask.
+            #[cfg(not(target_family = "wasm"))]
             unsafe { libc::umask(oumask) };
             let copy_file = copy_file?;
             if copy_file < 0 {

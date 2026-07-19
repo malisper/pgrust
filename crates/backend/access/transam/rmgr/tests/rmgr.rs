@@ -117,7 +117,12 @@ fn get_rmgr_unregistered_errors_like_rmgr_not_found() {
 }
 
 #[test]
-#[should_panic(expected = "rmgr callback not ported: replorigin_redo — land backend-replication-origin")]
+// replorigin redo is PORTED (t25 car-10, recovery-t24-merge): the rmgr row
+// routes through origin_seams::replorigin_redo, installed at boot by the
+// origin crate. In-process (seam uninstalled) the call must STILL fail loud
+// — the property this test pins is "no silent replay of an unwired rmgr",
+// now guaranteed by the seam default.
+#[should_panic(expected = "seam not installed: origin_seams::replorigin_redo")]
 fn unported_redo_panics_loudly() {
     let mut record = xlogreader_seams::XLogReaderState::default();
     let _ = (GetRmgr(RM_REPLORIGIN_ID as u8).unwrap().rm_redo)(&mut record);

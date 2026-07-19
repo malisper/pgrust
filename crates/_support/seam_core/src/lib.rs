@@ -224,6 +224,7 @@ mod tests {
     }
 
     crate::tap!(pub fn counter(x: i32));
+    crate::tap!(pub fn counter_empty(x: i32));
     crate::tap!(pub fn install_twice_tap(x: i32));
     crate::tap!(pub fn never_installed_tap(x: i32));
 

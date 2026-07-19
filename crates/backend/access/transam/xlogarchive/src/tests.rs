@@ -6,6 +6,10 @@ use crate::*;
 
 thread_local! {
     static TEST_ARCHIVE_MODE: Cell<i32> = const { Cell::new(0) };
+    // DST P1: XLogArchiveForceDone now rides fd's durable_rename, whose
+    // pg_fsync consults the wal_sync_method GUC slot (fd sync.rs); install
+    // the same test accessor fd's own setup uses (fd/src/tests.rs).
+    static TEST_WAL_SYNC_METHOD: Cell<i32> = const { Cell::new(0) };
 }
 
 fn install_vars() {
@@ -19,6 +23,10 @@ fn install_vars() {
     guc_tables::vars::XLogArchiveMode.install_if_absent(guc_tables::GucVarAccessors {
         get: || TEST_ARCHIVE_MODE.get(),
         set: |v| TEST_ARCHIVE_MODE.set(v),
+    });
+    guc_tables::vars::wal_sync_method.install_if_absent(guc_tables::GucVarAccessors {
+        get: || TEST_WAL_SYNC_METHOD.get(),
+        set: |v| TEST_WAL_SYNC_METHOD.set(v),
     });
 }
 

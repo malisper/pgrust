@@ -381,8 +381,117 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      argument as slot 15 (vacuumlazy morsels.rs WORKER_CX): full-
     //      identity parallel helpers, no cross-thread access, no retained
     //      session state.
-    // 479, WS-B grant-donation thread_local (single-executor merge):
-    //   20. executor/runtime/src/sched.rs LEDGER_GRANT — per-worker
+    // 479, simplecache lane (fix/plpgsql-simple-cache):
+    //   20. pl/plpgsql/src/exec.rs SIMPLE_EXIT_RELEASE — one-shot Cell<bool>
+    //      recording that this backend thread registered its on_proc_exit
+    //      release of function-lifetime simple-expression plan pins
+    //      (release_simple_states_at_exit; the TLS-destructor-order law).
+    //      Pure per-thread registration bookkeeping: no session identity,
+    //      no state movement, never reset — the registered callback (and
+    //      the flag's meaning) live exactly as long as the backend thread,
+    //      same class as the router DUMP guard (slot 18).
+    // +14 recovery slots (t26 car-10 re-board; renumbered after the simplecache slot): ALL
+    // one class — C per-PROCESS function-statics of the replication/
+    // recovery machinery become per-THREAD TLS on the thread model, owned
+    // by DEDICATED background threads (startup, walreceiver, walsender,
+    // logical apply/tablesync workers, slotsync) that never host a swapped
+    // session; no envelope capture/restore applies. Deliberately
+    // non-session TLS, no SESSION_ENVELOPE_MANIFEST rows:
+    //   21. transam/xlogrecovery/src/targets.rs (x2) — recovery-target
+    //      bookkeeping of the startup thread.
+    //   22. transam/xlogrecovery/src/lib.rs (+1) — startup-thread replay
+    //      state beside the existing slot.
+    //   23. replication/logical/relation/src/lib.rs — apply-worker
+    //      relation-map cache.
+    //   24. replication/logical/worker/src/lib.rs — apply-worker state
+    //      (worker.c per-process statics).
+    //   25. replication/logical/worker/src/tablesync.rs — tablesync-worker
+    //      state.
+    //   26. replication/origin/src/lib.rs — session_replication_origin
+    //      analog on the apply thread.
+    //   27. replication/slot/src/lib.rs (+1) — per-thread acquired-slot
+    //      pointer (MyReplicationSlot analog).
+    //   28. replication/slotsync/src/lib.rs — slotsync-worker state.
+    //   29. replication/syncrep/src/lib.rs — walsender syncrep queue state.
+    //   30. replication/walreceiver/src/lib.rs — walreceiver-thread state.
+    //   31. replication/walsender/src/logical_stream.rs — per-walsender
+    //      logical-stream state (incl. the WalFlushPacing analog of C's
+    //      function-static).
+    //   32. storage/ipc/procarray/src/known_assigned.rs — startup-thread
+    //      KnownAssignedXids bookkeeping.
+    //   33. contrib/pgoutput/src/lib.rs — pgoutput per-decoder context on
+    //      the walsender thread.
+    // 494, re-pinned at dst/p1-vfs-integrated (DST-P1 WS-C simulated VFS;
+    // renumbered to slot 34 over the t26 simplecache+recovery slots at the
+    // train-27 merge):
+    //   34. storage/file/vfs/src/sim.rs SIM — the deterministic simulated
+    //      filesystem's state cell (one simulated universe per harness
+    //      thread). The entire sim.rs module is `cfg(pgrust_sim)`-gated —
+    //      ABSENT from product codegen (integration-record TLS census:
+    //      fd thread_local counts identical to main; vfs product code adds
+    //      zero TLS). DST test infrastructure only: no session identity,
+    //      no state movement, never compiled into a shipped binary.
+    // 496, spi-compile-residual lane (renumbered 35/36 over the t26+DST slots at the train-27 merge)
+    // original header: 481, spi-compile-residual lane (fix/spi-compile-residual, PROCPERF P2):
+    //   35. executor/execexpr/src/compile.rs COMPILE_ECONOMY — Cell<bool>
+    //      compile-cost-policy window armed by standard_executor_start over
+    //      InitPlan of cost-gated-cheap statements and RAII-restored
+    //      (EconomyWindow) before the start seam returns; it never spans a
+    //      statement boundary, carries no session state, and only chooses
+    //      whether ready_expr runs its per-row-payoff passes — never a
+    //      result byte. Same transient-window class as execexpr's jit
+    //      session collector.
+    //   36. pl/plpgsql/src/handler.rs PL_GUC_VALUES — Cell<Option<..>>
+    //      derived cache of the parsed plpgsql.* GUC values keyed by the
+    //      GUC store's per-thread mutation counter (store_mutation_count;
+    //      the guc::layers cache-key pattern). Deliberately non-session
+    //      TLS: it caches nothing a session owns — it memoizes a pure
+    //      function of THIS thread's GUC store, and any session
+    //      bind/unbind/SET/RESET/xact-revert mutates that store through
+    //      with_store_mut, which bumps the key and invalidates the entry.
+    // 500, train-28 merge (the DST t28-set + provider-seam + wasm/t28-set
+    // cars meet the census; renumbered 37-40 over the t27 slots):
+    //   37. _support/pgsync/src/sim/sched.rs — the permit scheduler's
+    //      per-thread slot (vpid binding/current pick state). The whole
+    //      sim module is `cfg(pgrust_sim)`-gated — ABSENT from product
+    //      codegen; DST test infrastructure only (slot-34 sim.rs class).
+    //   38. backend/libpq/pqcomm_simnet/src/imp.rs — sim-net transport
+    //      provider's per-thread duplex state. Crate compiles EMPTY on
+    //      native by design (cfg pgrust_sim) — slot-34 class, never in a
+    //      shipped binary.
+    //   39. backend/libpq/pqcomm_stdio/src/lib.rs STATE — the stdio
+    //      transport provider's noblock bit: the stdio twin of
+    //      pqcomm::socket's CLIENT_STATE (already-classified transport
+    //      connection state). One session per process in stdio-wire mode
+    //      by construction; no session identity, no state movement.
+    //   40. backend/tcop/postgres/src/switches.rs USER_D_OPTION — the
+    //      userDoption analog (postgres.c:106): -D switch storage consumed
+    //      by SelectConfigFiles at single-user/stdio-wire boot. Boot-time
+    //      argv plumbing on the main thread; dead after startup.
+    // 505, train-29 merge (fix/ddl-churn-rss FPBUDGET-1 session-cleanup
+    // registry meets the census; all five are that car's machinery):
+    //   41. utils/mmgr/mcxt_stats/src/lib.rs SESSION_CLEANUPS — THE
+    //      session-cleanup registry itself: the per-thread LIFO of teardown
+    //      closures run_session_teardown drains at ProcExitThread (C's
+    //      on_proc_exit table analog). Deliberately non-session TLS: it
+    //      holds cleanup CODE for this thread's current session estate,
+    //      never session state — binding a different session re-registers
+    //      through the same idempotent flags below; the drain empties it.
+    //   42. executor/execmain/src/execmain.rs TEARDOWN_REGISTERED —
+    //      once-per-thread registration guard for the parked exec-ctx
+    //      skeleton's cleanup. A bool latch, no session identity.
+    //   43. libpq/pqcomm/src/lib.rs REGISTERED — once-per-thread
+    //      registration guard for the send-buffer cleanup. Same class.
+    //   44. utils/init/postinit/src/lib.rs FUNDAMENTALS_REGISTERED —
+    //      once-per-thread registration guard for xact/resowner/globals
+    //      teardown. Same class.
+    //   45. main/main_main/src/bin/postgres.rs (alloc_track IN_HOOK +
+    //      TRACKED, one block) — debug_assertions-only allocation-tracker
+    //      reentrancy/thread-filter bits (PGRUST_ALLOC_TRACK diagnostics);
+    //      absent from dist codegen, never session state.
+    // 506, WS-B grant-donation thread_local (single-executor merge, renumbered
+    // to slot 46 over the t30 fold):
+    //   46. executor/runtime/src/sched.rs LEDGER_GRANT — per-worker
     //      admission bookkeeping holding (scheduler, slot) while the thread
     //      is inside a ledger-JOINED run_task (set by run_task_admitted,
     //      cleared by GrantCtx drop — unwind-safe). Consulted by declared-
@@ -392,7 +501,21 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      worker threads and knob-OFF, plain per-thread state owned by the
     //      pool-loop worker (same pattern as blocking.rs's PERMIT_SEM /
     //      slot 13).
-    assert_eq!(count_tree(crates), 479, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // t30 fold deltas (509 = 506 + 3):
+    //   47. contrib/auto_explain/src/hooks.rs — per-backend ExecutorRun
+    //      nesting depth (C auto_explain.c static nesting_level becomes
+    //      per-THREAD state); plain executor-hook bookkeeping owned by the
+    //      backend thread, no session identity, no cross-thread access.
+    //   48. transam/xlogrecovery/tests/sim_crash_sweep.rs — DST sim-corpus
+    //      test-rig TLS (integration test only, absent from product
+    //      codegen; same class as the loom/e2e rig statics).
+    //   49. replication/logical/reorderbuffer/src/tests.rs (+2, the
+    //      second from the checkxid-alive car) — cfg(test) rig TLS beside
+    //      the existing slot; never in dist.
+    //   50. access/heap/visibilitymap/src/tests.rs — cfg(test) rig TLS
+    //      (standby-logical car's catalog-cleanup-flag tests); never in
+    //      dist.
+    assert_eq!(count_tree(crates), 511, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

@@ -337,7 +337,11 @@ fn datum_write(
     if typbyval {
         off = att_align_nominal(off, typalign);
         let n = typlen as usize;
-        let bytes = datum.as_usize().to_ne_bytes();
+        // C store_att_byval stores `n` low-order bytes of the full Datum
+        // word; SIZEOF_DATUM is pinned to 8 on every target. as_usize() is
+        // only 4 bytes on wasm32, so `bytes[..n]` panics for the 8-byte byval
+        // range subtypes (int8/float8/timestamp) there.
+        let bytes = datum.as_u64().to_ne_bytes();
         out[off..off + n].copy_from_slice(&bytes[..n]);
         off += n;
         return off;
@@ -392,14 +396,28 @@ fn lower_gt_upper() -> PgError {
         .with_sqlstate(ERRCODE_DATA_EXCEPTION)
 }
 
-// PG_DETOAST_DATUM_PACKED over a bound value; only the plain/short lanes are
-// live — a toast pointer or inline-compressed bound panics loudly.
-fn detoast_bound_packed(val: Datum) -> Datum {
+// PG_DETOAST_DATUM_PACKED over a bound value (C rangetypes.c:1855-1874):
+// "It is essential that we not insert an out-of-line toast value pointer
+// into a range object, for the same reasons that arrays and records can't
+// contain them" — the pointer would dangle once the source table's toast
+// data is gone. An external bound is fetched inline and a compressed bound
+// is decompressed; unlike arrays, a short-header varlena stays as-is (the
+// PACKED discipline). The previous gate here let an external pointer (tag
+// 0x01, which satisfies the 1B test) fall through to datum_write's panic
+// and rejected compressed bounds outright.
+fn detoast_bound_packed<'m>(mcx: Mcx<'m>, val: Datum) -> PgResult<Datum> {
     let p = val.as_usize() as *const u8;
-    if varatt_is_1b(p) || varatt_is_4b_u(p) {
-        val
+    // SAFETY: live varlena header byte. Compressed = 4B tag ..10.
+    let is_compressed = unsafe { *p & 0x03 == 0x02 };
+    if varatt_is_1b_e(p) || is_compressed {
+        // SAFETY: live varlena image; varsize_any reads only header bytes.
+        let raw = unsafe {
+            core::slice::from_raw_parts(p, ::types_tuple::varatt::varsize_any(p))
+        };
+        let flat = ::detoast_seams::detoast_attr::call(mcx, raw)?;
+        Ok(Datum::from_usize(flat.leak().as_ptr() as usize))
     } else {
-        panic!("range bound detoast lane unported (external/compressed varlena bound)");
+        Ok(val)
     }
 }
 
@@ -443,13 +461,13 @@ pub fn range_serialize<'m>(
     let mut msize = RANGE_HDRSZ;
     if range_has_lbound(flags) {
         if typlen == -1 {
-            lower.val = detoast_bound_packed(lower.val);
+            lower.val = detoast_bound_packed(mcx, lower.val)?;
         }
         msize = datum_compute_size(msize, lower.val, typbyval, typalign, typlen, typstorage);
     }
     if range_has_ubound(flags) {
         if typlen == -1 {
-            upper.val = detoast_bound_packed(upper.val);
+            upper.val = detoast_bound_packed(mcx, upper.val)?;
         }
         msize = datum_compute_size(msize, upper.val, typbyval, typalign, typlen, typstorage);
     }

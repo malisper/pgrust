@@ -58,7 +58,8 @@ pub(crate) fn copy_node<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Node<'d>> 
         }
         NodeTag::T_List => {
             let l = node.as_list().expect("List");
-            let mut out = types_nodes::NodeList::nil();
+            // Exact-length preallocation (C list_copy's new_list sizing).
+            let mut out = types_nodes::NodeList::with_capacity(mcx, l.len())?;
             for cell in l.iter() {
                 out.lappend(mcx, copy_node(mcx, cell)?)?;
             }
@@ -156,7 +157,9 @@ fn copy_via_out_read<'d>(mcx: Mcx<'d>, node: Node<'_>) -> PgResult<Node<'d>> {
 
 pub(crate) fn str_in<'d>(mcx: Mcx<'d>, s: &str) -> PgResult<&'d str> {
     let v = mcx::slice_in(mcx, s.as_bytes())?;
-    Ok(core::str::from_utf8(v.leak()).expect("copied str stays UTF-8"))
+    // SAFETY: the bytes are a verbatim copy of a &str (slice_in memcpy);
+    // re-validating UTF-8 per copied string was pure per-replan tax.
+    Ok(unsafe { core::str::from_utf8_unchecked(v.leak()) })
 }
 
 pub(crate) fn opt_str_in<'d>(mcx: Mcx<'d>, s: Option<&str>) -> PgResult<Option<&'d str>> {

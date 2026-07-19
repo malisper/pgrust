@@ -17,23 +17,23 @@ use crate::{
 
 pub(crate) fn ss_family(sa: &SockAddr) -> i32 {
     if sa.salen == 0 {
-        return libc::AF_UNSPEC;
+        return ip::sys::AF_UNSPEC;
     }
     ip::sockaddr_family(sa)
 }
 
 pub(crate) fn sockaddr_to_ipaddr(sa: &SockAddr) -> Option<IpAddr> {
     match ss_family(sa) {
-        f if f == libc::AF_INET => {
+        f if f == ip::sys::AF_INET => {
             // Copy the unaligned buffer bytes into an aligned local before
             // reading sin_addr — never form a & to the misaligned buffer.
             // SAFETY: family is AF_INET, so the buffer holds a sockaddr_in.
-            let sin: libc::sockaddr_in = unsafe {
-                let mut tmp = core::mem::MaybeUninit::<libc::sockaddr_in>::zeroed();
+            let sin: ip::sys::sockaddr_in = unsafe {
+                let mut tmp = core::mem::MaybeUninit::<ip::sys::sockaddr_in>::zeroed();
                 core::ptr::copy_nonoverlapping(
                     sa.addr.as_ptr(),
                     tmp.as_mut_ptr().cast::<u8>(),
-                    core::mem::size_of::<libc::sockaddr_in>(),
+                    core::mem::size_of::<ip::sys::sockaddr_in>(),
                 );
                 tmp.assume_init()
             };
@@ -41,14 +41,14 @@ pub(crate) fn sockaddr_to_ipaddr(sa: &SockAddr) -> Option<IpAddr> {
                 sin.sin_addr.s_addr,
             ))))
         }
-        f if f == libc::AF_INET6 => {
+        f if f == ip::sys::AF_INET6 => {
             // SAFETY: family is AF_INET6, so the buffer holds a sockaddr_in6.
-            let sin6: libc::sockaddr_in6 = unsafe {
-                let mut tmp = core::mem::MaybeUninit::<libc::sockaddr_in6>::zeroed();
+            let sin6: ip::sys::sockaddr_in6 = unsafe {
+                let mut tmp = core::mem::MaybeUninit::<ip::sys::sockaddr_in6>::zeroed();
                 core::ptr::copy_nonoverlapping(
                     sa.addr.as_ptr(),
                     tmp.as_mut_ptr().cast::<u8>(),
-                    core::mem::size_of::<libc::sockaddr_in6>(),
+                    core::mem::size_of::<ip::sys::sockaddr_in6>(),
                 );
                 tmp.assume_init()
             };
@@ -63,35 +63,35 @@ pub(crate) fn ipaddr_to_sockaddr(ipn: &IpAddr) -> SockAddr {
     match ipn {
         IpAddr::V4(v4) => {
             // SAFETY: zeroed sockaddr_in is a valid all-fields-init value.
-            let mut sin: libc::sockaddr_in =
+            let mut sin: ip::sys::sockaddr_in =
                 unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
-            sin.sin_family = libc::AF_INET as libc::sa_family_t;
+            sin.sin_family = ip::sys::AF_INET as ip::sys::sa_family_t;
             sin.sin_addr.s_addr = u32::from(*v4).to_be();
             // SAFETY: sizeof(sockaddr_in) bytes into the storage-sized buffer.
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     core::ptr::from_ref(&sin).cast::<u8>(),
                     sa.addr.as_mut_ptr(),
-                    core::mem::size_of::<libc::sockaddr_in>(),
+                    core::mem::size_of::<ip::sys::sockaddr_in>(),
                 );
             }
-            sa.salen = core::mem::size_of::<libc::sockaddr_in>() as u32;
+            sa.salen = core::mem::size_of::<ip::sys::sockaddr_in>() as u32;
         }
         IpAddr::V6(v6) => {
             // SAFETY: zeroed sockaddr_in6 is a valid all-fields-init value.
-            let mut sin6: libc::sockaddr_in6 =
+            let mut sin6: ip::sys::sockaddr_in6 =
                 unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
-            sin6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+            sin6.sin6_family = ip::sys::AF_INET6 as ip::sys::sa_family_t;
             sin6.sin6_addr.s6_addr = v6.octets();
             // SAFETY: sizeof(sockaddr_in6) bytes into the storage-sized buffer.
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     core::ptr::from_ref(&sin6).cast::<u8>(),
                     sa.addr.as_mut_ptr(),
-                    core::mem::size_of::<libc::sockaddr_in6>(),
+                    core::mem::size_of::<ip::sys::sockaddr_in6>(),
                 );
             }
-            sa.salen = core::mem::size_of::<libc::sockaddr_in6>() as u32;
+            sa.salen = core::mem::size_of::<ip::sys::sockaddr_in6>() as u32;
         }
     }
     sa
@@ -196,7 +196,7 @@ pub(crate) fn check_hostname(port: &mut Port, hostname: &str) -> PgResult<bool> 
 
     if port.remote_hostname.is_none() {
         let mut node = String::new();
-        let ret = ip::pg_getnameinfo_all(&port.raddr, Some(&mut node), None, libc::NI_NAMEREQD);
+        let ret = ip::pg_getnameinfo_all(&port.raddr, Some(&mut node), None, ip::sys::NI_NAMEREQD);
         if ret != 0 {
             // remember failure; don't complain in the postmaster log yet
             port.remote_hostname_resolv = -2;
@@ -316,11 +316,11 @@ pub fn check_hba(port: &mut Port) -> PgResult<()> {
         'lines: for hba in lines {
             // Check connection type.
             if hba.conntype == ctLocal {
-                if ss_family(&port.raddr) != libc::AF_UNIX {
+                if ss_family(&port.raddr) != ip::sys::AF_UNIX {
                     continue;
                 }
             } else {
-                if ss_family(&port.raddr) == libc::AF_UNIX {
+                if ss_family(&port.raddr) == ip::sys::AF_UNIX {
                     continue;
                 }
 

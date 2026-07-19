@@ -18,6 +18,8 @@ use ::xloginsert_seams::{XLogRegBuf, REGBUF_NO_IMAGE, REGBUF_STANDARD};
 pub const VISIBILITYMAP_ALL_VISIBLE: u8 = 0x01;
 pub const VISIBILITYMAP_ALL_FROZEN: u8 = 0x02;
 pub const VISIBILITYMAP_VALID_BITS: u8 = 0x03;
+// visibilitymapdefs.h: flag in xl_heap_visible only, never in the map itself.
+pub const VISIBILITYMAP_XLOG_CATALOG_REL: u8 = 0x04;
 
 const BITS_PER_HEAPBLOCK: u32 = 2;
 const CONTENTS_OFF: usize = (SizeOfPageHeaderData + 7) & !7;
@@ -206,9 +208,18 @@ fn relation_needs_wal(rel: &RelationData<'_>) -> bool {
 const XLOG_HEAP2_VISIBLE: u8 = 0x40;
 const RM_HEAP2_ID: u8 = types_core::RmgrIds::RM_HEAP2_ID as u8;
 
-// log_heap_visible (heapam.c); RelationIsAccessibleInLogicalDecoding const-false
-// (heapam DML divergence), so VISIBILITYMAP_XLOG_CATALOG_REL is never set.
+// RelationIsAccessibleInLogicalDecoding (rel.h): a standby uses the
+// VISIBILITYMAP_XLOG_CATALOG_REL bit to invalidate logical slots whose
+// catalog_xmin this all-visible cutoff overtook.
+fn relation_is_accessible_in_logical_decoding(rel: &RelationData<'_>) -> bool {
+    transam_xlog_seams::xlog_logical_info_active::call()
+        && relation_needs_wal(rel)
+        && (catalog_seams::is_catalog_relation::call(rel) || rel.is_used_as_catalog_table())
+}
+
+// log_heap_visible (heapam.c).
 fn log_heap_visible(
+    rel: &RelationData<'_>,
     heap_buffer: Buffer,
     vm_buffer: Buffer,
     snapshot_conflict_horizon: TransactionId,
@@ -217,9 +228,14 @@ fn log_heap_visible(
     debug_assert!(BufferIsValid(heap_buffer));
     debug_assert!(BufferIsValid(vm_buffer));
 
+    let mut flags = vmflags;
+    if relation_is_accessible_in_logical_decoding(rel) {
+        flags |= VISIBILITYMAP_XLOG_CATALOG_REL;
+    }
+
     let mut xlrec = [0u8; 5];
     xlrec[0..4].copy_from_slice(&snapshot_conflict_horizon.to_ne_bytes());
-    xlrec[4] = vmflags;
+    xlrec[4] = flags;
 
     let mut heap_flags = REGBUF_STANDARD;
     if !xlog_hint_bit_is_needed() {
@@ -308,7 +324,7 @@ fn set_bits_and_log(
     if relation_needs_wal(rel) {
         if recptr == InvalidXLogRecPtr {
             debug_assert!(!xlogutils_seams::in_recovery::call());
-            recptr = log_heap_visible(heapBuf, pin.buffer(), cutoff_xid, flags)?;
+            recptr = log_heap_visible(rel, heapBuf, pin.buffer(), cutoff_xid, flags)?;
 
             // Without checksums/wal_log_hints the heap FPI was omitted above,
             // so the heap LSN must not move.

@@ -8,7 +8,9 @@ use types_error::{
 
 pub const MAXDIM: i32 = 6;
 pub const MAX_ALLOC_SIZE: usize = 0x3FFF_FFFF;
-pub const MAX_ARRAY_SIZE: i64 = (MAX_ALLOC_SIZE / core::mem::size_of::<usize>()) as i64;
+// MaxAllocSize / sizeof(Datum): SIZEOF_DATUM is pinned to 8 on every target
+// (usize would halve the divisor on wasm32 and double the limit).
+pub const MAX_ARRAY_SIZE: i64 = (MAX_ALLOC_SIZE / 8) as i64;
 
 #[inline]
 fn add_s32_overflow(a: i32, b: i32, out: &mut i32) -> bool {

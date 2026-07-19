@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>pgrust verify</title></head>
+<body><pre id="out">starting…</pre>
+<script type="module">
+// Headless-verification harness: boots three queries (two succeeding, one
+// DELIBERATELY FAILING) through the SAME worker the real app uses, and writes
+// a machine-readable result to document.title + console so a headless driver
+// can scrape it. The failing statement is checked through the REPL's real
+// diagnostic parser (backend.js parseDiagnostics) so an error-rendering
+// regression — e.g. the stderr log_line_prefix mismatch that once made every
+// error invisible — fails this gate.
+import { parseDiagnostics } from './backend.js';
+const out = document.getElementById('out');
+function log(s){ out.textContent += '\n' + s; console.log('[VERIFY] ' + s); }
+
+const params = new URLSearchParams(window.location.search);
+const workerParams = new URLSearchParams();
+const assetEncoding = params.get('assetEncoding');
+if (assetEncoding) workerParams.set('assetEncoding', assetEncoding);
+const engineMode = params.get('engineMode'); // optional: force 'single'/'wire'
+if (engineMode) workerParams.set('engineMode', engineMode);
+const qs = workerParams.toString();
+const workerUrl = qs ? `./worker.js?${qs}` : './worker.js';
+const worker = new Worker(workerUrl, { type: 'module' });
+const queries = [
+  'SELECT 1;',
+  "SELECT * FROM (VALUES (1,'a'),(2,'b')) v(i,t);",
+  'SELECT 1/0;', // deliberately failing: the diagnostic parser must see it
+];
+let idx = 0;
+let engine = 'single';
+const results = [];
+
+worker.onmessage = (ev) => {
+  const m = ev.data;
+  if (m.type === 'status') log('status: ' + m.text);
+  else if (m.type === 'build') { engine = m.engine || 'single'; log('ENGINE=' + engine); }
+  else if (m.type === 'ready') { engine = m.engine || engine; log('READY engine=' + engine + ' persistAvailable=' + !!m.persistAvailable); runNext(); }
+  else if (m.type === 'result') {
+    log('RESULT q' + idx + ' engine=' + (m.engine || 'single') + ' exit=' + m.exitCode + ' ms=' + m.ms);
+    if (m.wire) log('WIRE<<<' + JSON.stringify(m.wire) + '>>>');
+    else log('STDOUT<<<' + m.stdout + '>>>');
+    results.push({ stdout: m.stdout, stderr: m.stderr, wire: m.wire });
+    idx++;
+    if (idx < queries.length) runNext();
+    else finish();
+  }
+  else if (m.type === 'error') { log('ERROR: ' + m.message); document.title = 'VERIFY_FAIL'; }
+};
+function runNext(){ log('running q' + idx + ': ' + queries[idx]); worker.postMessage({ type:'run', sql: queries[idx] }); }
+function finish(){
+  let okSelect1, okValues, okError, parsedError;
+  if (engine === 'wire') {
+    // Protocol mode: results are structured wire messages — errors are
+    // ErrorResponse frames, not stderr scrapes.
+    const w0 = results[0] && results[0].wire, w1 = results[1] && results[1].wire, w2 = results[2] && results[2].wire;
+    okSelect1 = !!w0 && w0.columns && w0.columns[0].name === '?column?' && w0.rows[0] && w0.rows[0][0] === '1';
+    okValues = !!w1 && w1.rows && w1.rows.length === 2 && w1.rows[0][0] === '1' && w1.rows[0][1] === 'a' && w1.rows[1][0] === '2' && w1.rows[1][1] === 'b';
+    parsedError = w2 && w2.error ? w2.error.message : null;
+    okError = !!parsedError && parsedError.includes('division by zero');
+  } else {
+    okSelect1 = results[0] && results[0].stdout.includes('?column? = "1"');
+    okValues = results[1] && results[1].stdout.includes('= "1"') && results[1].stdout.includes('= "a"') && results[1].stdout.includes('= "2"') && results[1].stdout.includes('= "b"');
+    parsedError = results[2] ? parseDiagnostics(results[2].stderr).error : null;
+    okError = !!parsedError && parsedError.includes('division by zero');
+  }
+  log('PARSED_ERROR<<<' + parsedError + '>>>');
+  log('CHECK engine=' + engine + ' select1=' + okSelect1 + ' values=' + okValues + ' error=' + okError);
+  document.title = (okSelect1 && okValues && okError) ? 'VERIFY_PASS' : 'VERIFY_FAIL';
+  log(document.title);
+}
+</script>
+</body></html>

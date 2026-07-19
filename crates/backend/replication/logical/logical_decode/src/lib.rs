@@ -83,7 +83,7 @@ fn unported(what: &str) -> ! {
 thread_local! {
     // Truncate relid arrays outlive the decode call inside ReorderBuffer changes.
     static DECODE_CTX: &'static MemoryContext =
-        Box::leak(Box::new(MemoryContext::new("LogicalDecode")));
+        ::mcx::session_root("LogicalDecode");
 }
 
 fn decode_mcx() -> Mcx<'static> {
@@ -222,14 +222,16 @@ fn xact_decode(ctx: &mut LogicalDecodingContext, buf: XLogRecordBuffer) -> PgRes
             }
         }
         XLOG_XACT_PREPARE => {
-            // ParsePrepareRecord's twophase_xid is xl_xact_prepare.xid at
-            // offset 8; with two-phase decoding unported, FilterPrepare always
-            // skips, matching C for plugins without 2PC callbacks.
-            let twophase_xid = u32_at(ctx.reader.XLogRecGetData(), 8);
-            if FilterPrepare(ctx, twophase_xid, &[])? {
-                ctx.reorder.process_xid(twophase_xid, buf.origptr);
+            let parsed =
+                xact::parse_prepare_record(ctx.reader.XLogRecGetInfo(), ctx.reader.XLogRecGetData())?;
+
+            // Process the transaction in a two-phase manner iff the output
+            // plugin supports two-phase commits and doesn't filter the
+            // transaction at prepare time.
+            if FilterPrepare(ctx, parsed.twophase_xid, &parsed.twophase_gid)? {
+                ctx.reorder.process_xid(parsed.twophase_xid, buf.origptr);
             } else {
-                unported("DecodePrepare (two-phase)");
+                DecodePrepare(ctx, buf, &parsed)?;
             }
         }
         _ => return elog(ERROR, format!("unexpected RM_XACT_ID record type: {info}")),
@@ -419,15 +421,29 @@ fn heap_decode(ctx: &mut LogicalDecodingContext, buf: XLogRecordBuffer) -> PgRes
     Ok(())
 }
 
+// Ask the output plugin whether we want to skip this PREPARE and send this
+// transaction as a regular commit later (decode.c:551).
 fn FilterPrepare(
     ctx: &mut LogicalDecodingContext,
-    _xid: TransactionId,
-    _gid: &[u8],
+    xid: TransactionId,
+    gid: &[u8],
 ) -> PgResult<bool> {
+    // Skip if decoding of two-phase transactions at PREPARE time is not
+    // enabled. In that case, all two-phase transactions are considered
+    // filtered out and will be applied as regular transactions at COMMIT
+    // PREPARED.
     if !ctx.opc().twophase {
         return Ok(true);
     }
-    unported("FilterPrepare with two-phase decoding enabled")
+
+    // The filter_prepare callback is optional. When not supplied, all
+    // prepared transactions should go through.
+    if ctx.opc().callbacks.filter_prepare_cb.is_none() {
+        return Ok(false);
+    }
+
+    let gid = String::from_utf8_lossy(gid).into_owned();
+    logical::filter_prepare_cb_wrapper(ctx.opc(), xid, &gid)
 }
 
 fn FilterByOrigin(ctx: &mut LogicalDecodingContext, origin_id: RepOriginId) -> PgResult<bool> {
@@ -538,8 +554,22 @@ fn DecodeCommit(
             .commit_child(xid, subxid, buf.origptr, buf.endptr);
     }
 
+    // Send the final commit record if the transaction data is already
+    // decoded, otherwise process the entire transaction.
     if two_phase {
-        unported("ReorderBufferFinishPrepared (two-phase)");
+        let two_phase_at = ctx.snapshot_builder.get_two_phase_at();
+        let gid = String::from_utf8_lossy(&parsed.twophase_gid).into_owned();
+        ctx.reorder.finish_prepared(
+            xid,
+            buf.origptr,
+            buf.endptr,
+            two_phase_at,
+            commit_time,
+            origin_id,
+            origin_lsn,
+            &gid,
+            true,
+        )?;
     } else {
         ctx.reorder.commit(
             xid,
@@ -555,6 +585,68 @@ fn DecodeCommit(
     Ok(())
 }
 
+// Decode PREPARE record (decode.c:763). Similar logic as in DecodeCommit.
+//
+// Note that we don't skip prepare even if we have detected a concurrent
+// abort, because we may have already sent some changes that the subscriber
+// must be able to roll back via prepare + rollback prepared.
+fn DecodePrepare(
+    ctx: &mut LogicalDecodingContext,
+    buf: XLogRecordBuffer,
+    parsed: &xact::ParsedPrepare,
+) -> PgResult<()> {
+    let origin_lsn = parsed.origin_lsn;
+    let mut prepare_time: TimestampTz = parsed.xact_time;
+    let origin_id = ctx.reader.XLogRecGetOrigin();
+    let xid = parsed.twophase_xid;
+
+    if parsed.origin_timestamp != 0 {
+        prepare_time = parsed.origin_timestamp;
+    }
+
+    // Remember the prepare info for the txn so that it can be used later in
+    // commit prepared if required. See ReorderBufferFinishPrepared.
+    if !ctx.reorder.remember_prepare_info(
+        xid,
+        buf.origptr,
+        buf.endptr,
+        prepare_time,
+        origin_id,
+        origin_lsn,
+    ) {
+        return Ok(());
+    }
+
+    // We can't start streaming unless a consistent state is reached.
+    if ctx.snapshot_builder.current_state() < SnapBuildState::Consistent {
+        ctx.reorder.skip_prepare(xid);
+        return Ok(());
+    }
+
+    // Check whether we need to process this transaction. We can't call
+    // ReorderBufferForget as in DecodeCommit: the txn hasn't committed yet
+    // and removing it early could produce an incorrect restart_lsn (see
+    // SnapBuildProcessRunningXacts) — but cache invalidations must run.
+    if DecodeTXNNeedSkip(ctx, buf, parsed.db_id, origin_id)? {
+        ctx.reorder.skip_prepare(xid);
+        ctx.reorder.invalidate(xid, buf.origptr)?;
+        return Ok(());
+    }
+
+    // Tell the reorderbuffer about the surviving subtransactions.
+    for &subxid in &parsed.subxacts {
+        ctx.reorder
+            .commit_child(xid, subxid, buf.origptr, buf.endptr);
+    }
+
+    // Replay actions of all transaction + subtransactions in order.
+    let gid = String::from_utf8_lossy(&parsed.twophase_gid).into_owned();
+    ctx.reorder.prepare(xid, &gid)?;
+
+    logical::UpdateDecodingStats(ctx);
+    Ok(())
+}
+
 fn DecodeAbort(
     ctx: &mut LogicalDecodingContext,
     buf: XLogRecordBuffer,
@@ -562,17 +654,32 @@ fn DecodeAbort(
     xid: TransactionId,
     two_phase: bool,
 ) -> PgResult<()> {
+    let mut origin_lsn = InvalidXLogRecPtr;
     let mut abort_time: TimestampTz = parsed.xact_time;
     let origin_id = ctx.reader.XLogRecGetOrigin();
 
     if parsed.xinfo & XACT_XINFO_HAS_ORIGIN != 0 {
+        origin_lsn = parsed.origin_lsn;
         abort_time = parsed.origin_timestamp;
     }
 
     let skip_xact = DecodeTXNNeedSkip(ctx, buf, parsed.db_id, origin_id)?;
 
+    // Send the final rollback record for a prepared transaction unless we
+    // need to skip it. For non-two-phase xacts, simply forget the xact.
     if two_phase && !skip_xact {
-        unported("ReorderBufferFinishPrepared abort (two-phase)");
+        let gid = String::from_utf8_lossy(&parsed.twophase_gid).into_owned();
+        ctx.reorder.finish_prepared(
+            xid,
+            buf.origptr,
+            buf.endptr,
+            InvalidXLogRecPtr,
+            abort_time,
+            origin_id,
+            origin_lsn,
+            &gid,
+            false,
+        )?;
     } else {
         let end = ctx.reader.v.EndRecPtr;
         for &subxid in &parsed.subxacts {

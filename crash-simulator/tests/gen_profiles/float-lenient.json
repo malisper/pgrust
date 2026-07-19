@@ -1,0 +1,10 @@
+{
+  "name": "float-lenient",
+  "connections": 1,
+  "plan_len": {"min": 40, "max": 80},
+  "statement_weights": {"ddl": 6, "dml": 30, "query": 40, "tx": 12, "arm": 4, "fault": 2, "property": 6},
+  "table_shape": {"min_cols": 2, "max_cols": 5, "col_types": {"int": 3, "bigint": 2, "text": 2, "numeric": 2, "float8": 3}},
+  "iso_mix": {"rc": 70, "rr": 20, "ser": 10},
+  "arm_sets": [[["work_mem", "4MB"]]],
+  "float_lenient": true
+}

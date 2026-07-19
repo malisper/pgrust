@@ -1,0 +1,16 @@
+# Standalone (NOT a workspace member): the panic=unwind toolchain smoke for
+# wasm32-wasip1. Built only by wasm/wasm-build.sh with the pinned nightly
+# and -Zbuild-std=std,panic_unwind; never part of native builds.
+[package]
+name = "wasm-unwind-smoke"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[profile.release]
+panic = "unwind"
+
+[profile.dev]
+panic = "unwind"

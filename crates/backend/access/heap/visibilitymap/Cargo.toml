@@ -15,6 +15,7 @@ inval = { path = "../../../utils/cache/inval" }
 xloginsert_seams = { path = "../../transam/xloginsert_seams" }
 xlogutils_seams = { path = "../../transam/xlogutils_seams" }
 transam_xlog_seams = { path = "../../transam/transam_xlog_seams" }
+catalog_seams = { path = "../../../catalog/catalog_seams" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 init_small = { path = "../../../utils/init/init_small" }
 pg_bitutils = { path = "../../../../port/pg_bitutils" }

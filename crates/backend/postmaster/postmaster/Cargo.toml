@@ -9,6 +9,7 @@ name = "postmaster"
 path = "src/lib.rs"
 
 [dependencies]
+pg_clock = { path = "../../../port/pg_clock" }
 seam_core = { path = "../../../_support/seam_core" }
 mcx = { path = "../../../_support/mcx" }
 types_core = { path = "../../../_support/types/types_core" }
@@ -21,6 +22,7 @@ init_small = { path = "../../utils/init/init_small" }
 pg_path = { path = "../../../port/pg_path" }
 miscinit = { path = "../../utils/init/miscinit" }
 postinit = { path = "../../utils/init/postinit" }
+pg_locale = { path = "../../utils/adt/pg_locale" }
 guc = { path = "../../utils/misc/guc" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 guc_file = { path = "../../utils/misc/guc_file" }
@@ -31,6 +33,7 @@ pmsignal = { path = "../../storage/ipc/pmsignal" }
 pgarch = { path = "../pgarch" }
 procsignal = { path = "../../storage/ipc/procsignal" }
 fd = { path = "../../storage/file/fd" }
+vfs = { path = "../../storage/file/vfs" }
 ipc = { path = "../../storage/ipc/ipc" }
 lwlock = { path = "../../storage/lmgr/lwlock" }
 dsm_core = { path = "../../storage/ipc/dsm_core" }
@@ -38,6 +41,7 @@ ipci = { path = "../../storage/ipc/ipci" }
 varsup = { path = "../../access/transam/varsup" }
 transam_xlog = { path = "../../access/transam/transam_xlog" }
 launch_backend = { path = "../launch_backend" }
+slotsync = { path = "../../replication/slotsync" }
 backend_startup = { path = "../../tcop/backend_startup" }
 be_secure = { path = "../../libpq/be_secure" }
 bgworker = { path = "../bgworker" }

@@ -31,7 +31,11 @@ pqformat = { path = "../../libpq/pqformat" }
 fastpath = { path = "../fastpath" }
 init_small = { path = "../../utils/init/init_small" }
 lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+lock = { path = "../../storage/lmgr/lock" }
+bufmgr = { path = "../../storage/buffer/bufmgr" }
+types_storage = { path = "../../../_support/types/types_storage" }
 latch = { path = "../../storage/ipc/latch" }
+auth_seams = { path = "../../libpq/auth_seams" }
 pmsignal = { path = "../../storage/ipc/pmsignal" }
 commands_async = { path = "../../commands/commands_async" }
 sinval = { path = "../../storage/ipc/sinval" }
@@ -67,7 +71,30 @@ ipc = { path = "../../storage/ipc/ipc" }
 ipc_seams = { path = "../../storage/ipc/ipc_seams" }
 postinit = { path = "../../utils/init/postinit" }
 miscinit = { path = "../../utils/init/miscinit" }
+# single_user.rs (PostgresSingleUserMain boot sequence)
+guc_seams = { path = "../../utils/misc/guc_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+ipci_seams = { path = "../../storage/ipc/ipci_seams" }
+transam_xlog = { path = "../../access/transam/transam_xlog" }
+transam_xlog_seams = { path = "../../access/transam/transam_xlog_seams" }
+pmchild_seams = { path = "../../postmaster/pmchild_seams" }
+postmaster_seams = { path = "../../postmaster/postmaster_seams" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+stack_depth = { path = "../../utils/misc/stack_depth" }
+fd = { path = "../../storage/file/fd" }
+libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
 backend_startup = { path = "../backend_startup" }
+# P4 sim-net harness (cfg pgrust_sim; both crates are empty/off-path otherwise)
+pqcomm_simnet = { path = "../../libpq/pqcomm_simnet" }
+# PERMIT-S1 compose wiring: the demo corpora (sim_net.rs / sim_sched_demo.rs)
+# register with the permit scheduler and use the pgsync wrappers. All uses
+# are cfg(pgrust_sim); native builds see only the std pub-use surface (the
+# dep-edge churn is covered by the WS-CORE G1 dep-graph ruling).
+pgsync = { path = "../../../_support/pgsync" }
+vfs = { path = "../../storage/file/vfs" }
+# SIMVFS-SHARED P8 corpus body (loadsort::sim_demo, cfg pgrust_sim only;
+# pgrcolumnar was already in this binary's transitive graph).
+pgrcolumnar = { path = "../../access/pgrcolumnar" }
 types_guc = { path = "../../../_support/types/types_guc" }
 
 event_trigger_seams = { path = "../../commands/event_trigger_seams" }
@@ -144,3 +171,8 @@ pg_sema_seams = { path = "../../port/pg_sema_seams" }
 types_storage = { path = "../../../_support/types/types_storage" }
 pgstat_seams = { path = "../../utils/activity/pgstat_seams" }
 init_small_seams = { path = "../../utils/init/init_small_seams" }
+
+# `pgrust_sim` (non-default cfg): P4 sim arms live behind it; empty/absent
+# in product builds (law 0.1).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)'] }

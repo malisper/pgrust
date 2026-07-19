@@ -8,8 +8,8 @@ use types_core::{AttrNumber, InvalidOid, Oid, DEFAULT_COLLATION_OID, RELATION_RE
 use types_error::{
     PgError, PgResult, ERRCODE_CHECK_VIOLATION, ERRCODE_DATATYPE_MISMATCH,
     ERRCODE_DUPLICATE_COLUMN, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_TABLE_DEFINITION,
-    ERRCODE_NOT_NULL_VIOLATION, ERRCODE_TOO_MANY_COLUMNS, ERRCODE_UNDEFINED_COLUMN, ERROR,
-    NOTICE,
+    ERRCODE_NOT_NULL_VIOLATION, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_TOO_MANY_COLUMNS,
+    ERRCODE_UNDEFINED_COLUMN, ERROR, NOTICE,
 };
 use types_nodes::parsenodes::{AlterTableCmd, AlterTableStmt, AlterTableType, ObjectType};
 use types_nodes::rawnodes::{ColumnDef, Constraint, ConstrType, TypeName};
@@ -977,7 +977,13 @@ fn ATPrepCmd<'mcx>(
         AlterTableType::AT_GenericOptions | AlterTableType::AT_AlterColumnGenericOptions => {
             AT_PASS_MISC
         }
-        other => unported(&format!("ATPrepCmd {other:?}")),
+        // unported: remaining ATPrepCmd subcommand arms
+        _ => {
+            return Err(Box::new(
+                PgError::new(ERROR, "this form of ALTER TABLE is not supported yet".to_string())
+                    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+            ))
+        }
     };
     wqueue[tabidx].subcmds[pass].lappend(mcx, cnode)?;
     Ok(())
@@ -4800,7 +4806,17 @@ fn ATExecAddConstraint<'mcx>(
             mcx, wqueue, rel, constr, recurse, &old_desc, lockmode,
         );
     }
-    unported(&format!("ATExecAddConstraint {:?}", constr.contype));
+    // unported: ATExecAddConstraint non-FOREIGN constraint types
+    // (CHECK/NOT NULL ALTER lane)
+    let _ = constr.contype;
+    Err(Box::new(
+        PgError::new(
+            ERROR,
+            "ALTER TABLE ... ADD CONSTRAINT for this constraint type is not supported yet"
+                .to_string(),
+        )
+        .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+    ))
 }
 
 // ATExecAddInherit / ATExecDropInherit exec wrappers; the catalog work lives
@@ -5486,7 +5502,17 @@ fn ATExecAlterColumnType<'mcx>(
         None
     };
 
-    debug_assert!(tn.arrayBounds.is_nil());
+    // C (ATExecAlterColumnType): attndims = list_length(typeName->arrayBounds),
+    // guarded by the PG_INT16_MAX dimension cap. typenameTypeIdAndMod above
+    // already resolved arrayBounds to the array type's OID, so an
+    // `ALTER COLUMN c TYPE text[]` lands here with one bound entry.
+    if tn.arrayBounds.len() > i16::MAX as usize {
+        return Err(Box::new(
+            PgError::new(ERROR, "too many array dimensions")
+                .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+        ));
+    }
+    let attndims = tn.arrayBounds.len() as i16;
     update_pg_attribute(
         mcx,
         rel.rd_id,
@@ -5495,7 +5521,7 @@ fn ATExecAlterColumnType<'mcx>(
             (Anum_pg_attribute_atttypid, Datum::from_oid(targettype)),
             (Anum_pg_attribute_attlen, Datum::from_i16(shape.typlen)),
             (Anum_pg_attribute_atttypmod, Datum::from_i32(targettypmod)),
-            (Anum_pg_attribute_attndims, Datum::from_i16(0)),
+            (Anum_pg_attribute_attndims, Datum::from_i16(attndims)),
             (Anum_pg_attribute_attbyval, Datum::from_bool(shape.typbyval)),
             (Anum_pg_attribute_attalign, Datum::from_i8(shape.typalign)),
             (Anum_pg_attribute_attstorage, Datum::from_i8(shape.typstorage)),

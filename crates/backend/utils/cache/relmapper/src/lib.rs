@@ -541,15 +541,17 @@ fn read_relmap_file(
         }
 
         waitevent_seams::pgstat_report_wait_start::call(WAIT_EVENT_RELATION_MAP_READ);
-        // SAFETY: map is a padding-free POD of const-asserted size; read(2)
-        // writes at most SIZEOF_RELMAPFILE bytes into it.
-        let r = unsafe {
-            libc::read(
-                fd,
-                map as *mut RelMapFile as *mut libc::c_void,
-                SIZEOF_RELMAPFILE,
-            )
-        };
+        // SAFETY: map is a padding-free POD of const-asserted size; the
+        // pread writes at most SIZEOF_RELMAPFILE bytes into it. vfs-routed
+        // at offset 0 (DST reroute: the whole file is one positioned read;
+        // raw libc::read on a sim fd is EBADF at the kernel).
+        let r = fd::pg_pread(
+            fd,
+            unsafe {
+                std::slice::from_raw_parts_mut(map as *mut RelMapFile as *mut u8, SIZEOF_RELMAPFILE)
+            },
+            0,
+        );
         let read_errno = errno();
         waitevent_seams::pgstat_report_wait_end::call();
 
@@ -667,15 +669,16 @@ fn write_relmap_file(
     }
 
     waitevent_seams::pgstat_report_wait_start::call(WAIT_EVENT_RELATION_MAP_WRITE);
-    // SAFETY: newmap is a padding-free POD; write(2) reads exactly its
-    // SIZEOF_RELMAPFILE bytes.
-    let w = unsafe {
-        libc::write(
-            fd,
-            newmap as *const RelMapFile as *const libc::c_void,
-            SIZEOF_RELMAPFILE,
-        )
-    };
+    // SAFETY: newmap is a padding-free POD; the pwrite reads exactly its
+    // SIZEOF_RELMAPFILE bytes. vfs-routed at offset 0 (DST reroute: the
+    // whole file is one positioned write on a freshly-created fd).
+    let w = fd::pg_pwrite(
+        fd,
+        unsafe {
+            std::slice::from_raw_parts(newmap as *const RelMapFile as *const u8, SIZEOF_RELMAPFILE)
+        },
+        0,
+    );
     let write_errno = errno();
     waitevent_seams::pgstat_report_wait_end::call();
     if w != SIZEOF_RELMAPFILE as isize {

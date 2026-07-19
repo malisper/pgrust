@@ -34,6 +34,55 @@ fn inf_bound(lower: bool) -> RangeBound {
     RangeBound { val: Datum::from_usize(0), infinite: true, inclusive: false, lower }
 }
 
+fn fc_i64_cmp(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let (a, b) = (fcinfo.arg(0).as_i64(), fcinfo.arg(1).as_i64());
+    Ok(Datum::from_i32(a.cmp(&b) as i32))
+}
+
+const INT8RANGE: Oid = 3926;
+
+fn int8_ri() -> RangeInfo {
+    RangeInfo {
+        pin: None,
+        rngtypid: INT8RANGE,
+        collation: InvalidOid,
+        elem_typid: 20,
+        elem: ElemInfo { typlen: 8, typbyval: true, typalign: b'd', typstorage: b'p' },
+        cmp: FmgrInfo::new(fc_i64_cmp, 351, 2, true, false),
+        canonical_oid: InvalidOid,
+        elem_hash: None,
+        elem_hash_extended: None,
+        own_typlen: -1,
+        own_typbyval: false,
+        own_typalign: b'd',
+    }
+}
+
+// WASM-SUBPLANFIX regression: datum_write's byval arm copies `typlen` bytes
+// from the FULL 8-byte Datum word (C store_att_byval; SIZEOF_DATUM pinned to
+// 8 on every target). A usize image on wasm32 holds only 4 bytes, so 8-byte
+// byval range subtypes panicked at `bytes[..8]` and high-word bound values
+// could never serialize.
+#[test]
+fn int8_bounds_serialize_full_datum_word() {
+    let cx = MemoryContext::new("t");
+    let mcx = cx.mcx();
+    let mut ri = int8_ri();
+    let lo_v: i64 = 0x1_0000_0001; // > 2^32: the high word is load-bearing
+    let up_v: i64 = 0x2_0000_0007;
+    let mut lo = RangeBound { val: Datum::from_i64(lo_v), infinite: false, inclusive: true, lower: true };
+    let mut up = RangeBound { val: Datum::from_i64(up_v), infinite: false, inclusive: false, lower: false };
+    let img = range_serialize(mcx, &mut ri, &mut lo, &mut up, false, None).unwrap().unwrap();
+    // vl(4) + oid(4) + 8 + 8 + flags(1) = 25
+    assert_eq!(img.len(), 25);
+    assert_eq!(i64::from_ne_bytes(img[8..16].try_into().unwrap()), lo_v);
+    assert_eq!(i64::from_ne_bytes(img[16..24].try_into().unwrap()), up_v);
+    let (lo2, up2, empty) = range_deserialize(&ri.elem, &img);
+    assert!(!empty);
+    assert_eq!(lo2.val.as_i64(), lo_v);
+    assert_eq!(up2.val.as_i64(), up_v);
+}
+
 #[test]
 fn serialize_layout_is_byte_exact() {
     let cx = MemoryContext::new("t");
@@ -336,4 +385,170 @@ fn short_varlena_bounds_pack_without_padding() {
     // deserialized datums point at the short headers inside the image
     assert_eq!(lo2.val.as_usize(), img[8..].as_ptr() as usize);
     assert_eq!(up2.val.as_usize(), img[10..].as_ptr() as usize);
+}
+
+// Bound-detoast law (C rangetypes.c:1855-1874 PG_DETOAST_DATUM_PACKED): an
+// external or compressed bound must be inlined/decompressed before packing —
+// never a toast pointer inside a range — while a short-header bound stays
+// as-is. Hand-built images; the detoast seam gets the real detoast crate and
+// on-disk pointers resolve against a canned in-test toast store.
+mod bound_detoast {
+    use super::*;
+    use ::mcx::{vec_with_capacity_in, PgVec};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    static TOAST_STORE: Mutex<Option<HashMap<u32, std::vec::Vec<u8>>>> = Mutex::new(None);
+
+    fn install_test_detoast() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            ::detoast_seams::detoast_attr::set(::detoast::detoast_attr);
+            ::toast_internals_seams::toast_fetch_datum::set(test_toast_fetch);
+        });
+    }
+
+    fn test_toast_fetch<'mcx>(mcx: Mcx<'mcx>, attr: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
+        assert_eq!((attr[0], attr[1], attr.len()), (0x01, 0x12, 18));
+        let valueid = u32::from_ne_bytes(attr[10..14].try_into().unwrap());
+        let store = TOAST_STORE.lock().unwrap();
+        let payload = store
+            .as_ref()
+            .and_then(|m| m.get(&valueid))
+            .expect("test toast store: unknown va_valueid");
+        let mut out = vec_with_capacity_in(mcx, payload.len())?;
+        out.extend_from_slice(payload);
+        Ok(out)
+    }
+
+    fn flat(mcx: Mcx<'_>, payload: &[u8]) -> Datum {
+        let total = 4 + payload.len();
+        let mut v: PgVec<u8> = vec_with_capacity_in(mcx, total).unwrap();
+        v.extend_from_slice(&((total as u32) << 2).to_ne_bytes());
+        v.extend_from_slice(payload);
+        let p = v.as_ptr();
+        core::mem::forget(v);
+        Datum::from_usize(p as usize)
+    }
+
+    fn pglz_img(mcx: Mcx<'_>, payload: &[u8]) -> Datum {
+        use core::mem::MaybeUninit;
+        let mut dst: std::vec::Vec<MaybeUninit<u8>> =
+            std::vec![MaybeUninit::uninit(); pglz::pglz_max_output(payload.len())];
+        let clen = pglz::pglz_compress_into(payload, &mut dst, &pglz::PGLZ_STRATEGY_DEFAULT)
+            .expect("test payload must compress");
+        let total = 8 + clen;
+        let mut v: PgVec<u8> = vec_with_capacity_in(mcx, total).unwrap();
+        v.extend_from_slice(&(((total as u32) << 2) | 0x02).to_ne_bytes());
+        v.extend_from_slice(&(payload.len() as u32).to_ne_bytes());
+        // SAFETY: pglz_compress_into initialized the first clen bytes.
+        v.extend_from_slice(unsafe {
+            core::slice::from_raw_parts(dst.as_ptr().cast::<u8>(), clen)
+        });
+        let p = v.as_ptr();
+        core::mem::forget(v);
+        Datum::from_usize(p as usize)
+    }
+
+    fn ondisk(mcx: Mcx<'_>, valueid: u32, payload: &[u8]) -> Datum {
+        {
+            let mut full = std::vec::Vec::with_capacity(4 + payload.len());
+            full.extend_from_slice(&(((4 + payload.len()) as u32) << 2).to_ne_bytes());
+            full.extend_from_slice(payload);
+            let mut store = TOAST_STORE.lock().unwrap();
+            store.get_or_insert_with(HashMap::new).insert(valueid, full);
+        }
+        let rawsize = (4 + payload.len()) as u32;
+        let mut v: PgVec<u8> = vec_with_capacity_in(mcx, 18).unwrap();
+        v.push(0x01);
+        v.push(0x12); // VARTAG_ONDISK
+        v.extend_from_slice(&rawsize.to_ne_bytes());
+        v.extend_from_slice(&(rawsize - 4).to_ne_bytes());
+        v.extend_from_slice(&valueid.to_ne_bytes());
+        v.extend_from_slice(&0u32.to_ne_bytes());
+        let p = v.as_ptr();
+        core::mem::forget(v);
+        Datum::from_usize(p as usize)
+    }
+
+    fn short(mcx: Mcx<'_>, payload: &[u8]) -> Datum {
+        assert!(payload.len() <= 126);
+        let total = 1 + payload.len();
+        let mut v: PgVec<u8> = vec_with_capacity_in(mcx, total).unwrap();
+        v.push(((total as u8) << 1) | 1);
+        v.extend_from_slice(payload);
+        let p = v.as_ptr();
+        core::mem::forget(v);
+        Datum::from_usize(p as usize)
+    }
+
+    // A text-flavored range info; cmp never runs in these tests (the upper
+    // bound is infinite, so range_cmp_bound_values shortcuts).
+    fn text_ri() -> RangeInfo {
+        fn fc_never(_f: Option<&mut FmgrInfo>, _fc: &mut Fcinfo) -> PgResult<Datum> {
+            panic!("cmp must not run: upper bound is infinite");
+        }
+        RangeInfo {
+            pin: None,
+            rngtypid: 99001,
+            collation: InvalidOid,
+            elem_typid: 25,
+            elem: ElemInfo { typlen: -1, typbyval: false, typalign: b'i', typstorage: b'x' },
+            cmp: FmgrInfo::new(fc_never, 360, 2, true, false),
+            canonical_oid: InvalidOid,
+            elem_hash: None,
+            elem_hash_extended: None,
+            own_typlen: -1,
+            own_typbyval: false,
+            own_typalign: b'i',
+        }
+    }
+
+    fn text_bound(val: Datum) -> RangeBound {
+        RangeBound { val, infinite: false, inclusive: true, lower: true }
+    }
+
+    fn serialize_lower<'m>(mcx: Mcx<'m>, val: Datum) -> PgVec<'m, u8> {
+        let mut ri = text_ri();
+        let mut lo = text_bound(val);
+        let mut up = inf_bound(false);
+        range_serialize(mcx, &mut ri, &mut lo, &mut up, false, None).unwrap().unwrap()
+    }
+
+    #[test]
+    fn external_bound_is_inlined() {
+        install_test_detoast();
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let payload: std::vec::Vec<u8> =
+            b"range external ".iter().copied().cycle().take(2400).collect();
+        let got = serialize_lower(mcx, ondisk(mcx, 8001, &payload));
+        let want = serialize_lower(mcx, flat(mcx, &payload));
+        assert_eq!(&got[..], &want[..], "external bound must serialize as the inline value");
+    }
+
+    #[test]
+    fn compressed_bound_is_decompressed() {
+        install_test_detoast();
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        let payload: std::vec::Vec<u8> =
+            b"range compressible ".iter().copied().cycle().take(500).collect();
+        let got = serialize_lower(mcx, pglz_img(mcx, &payload));
+        let want = serialize_lower(mcx, flat(mcx, &payload));
+        assert_eq!(&got[..], &want[..], "compressed bound must serialize decompressed");
+    }
+
+    #[test]
+    fn short_bound_stays_packed() {
+        install_test_detoast();
+        let ctx = MemoryContext::new_bump("t");
+        let mcx = ctx.mcx();
+        // PACKED law: a short-header bound stays short; a small flat bound is
+        // re-packed short by datum_write, so both images agree.
+        let payload = b"short bound";
+        let got = serialize_lower(mcx, short(mcx, payload));
+        let want = serialize_lower(mcx, flat(mcx, payload));
+        assert_eq!(&got[..], &want[..]);
+    }
 }

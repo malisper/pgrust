@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Once;
 
 use ::types_storage::File;
@@ -6,7 +6,6 @@ use ::types_storage::File;
 use crate::vfd::{self, with_fd};
 
 static SETUP: Once = Once::new();
-static WAL_SYNC_METHOD: AtomicI32 = AtomicI32::new(0);
 // Serializes the tests that chdir into a scratch data directory.
 static CWD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -14,7 +13,80 @@ fn enter_datadir(dir: &str) -> std::sync::MutexGuard<'static, ()> {
     let guard = CWD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     std::fs::create_dir_all(format!("{dir}/base/pgsql_tmp")).unwrap();
     std::env::set_current_dir(dir).unwrap();
+    // Sim has no cwd: relative paths resolve against "/" (sim.rs norm_path),
+    // so the datadir-relative temp tree must exist at the sim root. fd's
+    // ENOENT retry (temp.rs OpenTemporaryFileInTablespace) only mkdirs the
+    // pgsql_tmp leaf, never `base` — a real datadir always has `base`.
+    #[cfg(pgrust_sim)]
+    vfs_mkdir_p("base/pgsql_tmp");
     guard
+}
+
+// ---------------------------------------------------------------------------
+// DST P4 fixture routing (P1 Ruling 3 Class B, `# pending: sim-fixture-routing`):
+// fixtures are built and asserted through the ACTIVE vfs, so setup, ops, and
+// asserts share one filesystem domain under both cfgs. Under the default cfg
+// these helpers hit PosixVfs — byte-for-byte the same real-fs behavior the old
+// std::fs fixtures had; under `--cfg pgrust_sim` they hit the thread-local
+// SimVfs tree the fd ops actually run against.
+// ---------------------------------------------------------------------------
+
+fn cpath(path: &str) -> std::ffi::CString {
+    std::ffi::CString::new(path).unwrap()
+}
+
+/// `mkdir -p` through the active vfs (EEXIST tolerated per component).
+fn vfs_mkdir_p(path: &str) {
+    let mut prefix = String::new();
+    for comp in path.split('/') {
+        if comp.is_empty() {
+            continue;
+        }
+        if !prefix.is_empty() || path.starts_with('/') {
+            prefix.push('/');
+        }
+        prefix.push_str(comp);
+        let rc = vfs::mkdir(&cpath(&prefix), 0o700);
+        assert!(
+            rc == 0 || vfs::get_errno() == libc::EEXIST,
+            "vfs_mkdir_p({prefix}): errno {}",
+            vfs::get_errno()
+        );
+    }
+}
+
+/// Create/replace a file with `data` through the active vfs.
+fn vfs_write_file(path: &str, data: &[u8]) {
+    let fd = vfs::open(
+        &cpath(path),
+        libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+        0o600,
+    );
+    assert!(fd >= 0, "vfs_write_file open({path}): errno {}", vfs::get_errno());
+    if !data.is_empty() {
+        assert_eq!(vfs::pwrite(fd, data, 0), data.len() as isize, "{path}");
+    }
+    assert_eq!(vfs::close(fd), 0);
+}
+
+/// Whole-file read through the active vfs.
+fn vfs_read_file(path: &str) -> Vec<u8> {
+    let fd = vfs::open(&cpath(path), libc::O_RDONLY, 0);
+    assert!(fd >= 0, "vfs_read_file open({path}): errno {}", vfs::get_errno());
+    let size = vfs::file_size(fd);
+    assert!(size >= 0, "{path}");
+    let mut buf = vec![0u8; size as usize];
+    if size > 0 {
+        assert_eq!(vfs::pread(fd, &mut buf, 0), size as isize, "{path}");
+    }
+    assert_eq!(vfs::close(fd), 0);
+    buf
+}
+
+/// stat() through the active vfs — the same-domain `Path::exists`.
+fn vfs_path_exists(path: &str) -> bool {
+    let mut info = vfs::FileInfo::zeroed();
+    vfs::stat(&cpath(path), &mut info) == 0
 }
 
 fn setup() {
@@ -29,10 +101,6 @@ fn setup() {
         waitevent_seams::pgstat_report_wait_start::set(|_| {});
         waitevent_seams::pgstat_report_wait_end::set(|| {});
         pgstat_seams::pgstat_report_tempfile::set(|_| {});
-        guc_tables::vars::wal_sync_method.install(guc_tables::GucVarAccessors {
-            get: || WAL_SYNC_METHOD.load(Ordering::Relaxed),
-            set: |v| WAL_SYNC_METHOD.store(v, Ordering::Relaxed),
-        });
     });
     vfd::InitFileAccess();
 }
@@ -44,7 +112,13 @@ fn scratch_dir(tag: &str) -> String {
         "pgrust_fd_test_{}_{tag}_{n}",
         std::process::id()
     ));
+    // Real-fs side stays: the posix carve-outs (AllocateFile stdio fopen,
+    // OpenPipeStream popen) resolve scratch paths on the real filesystem
+    // under BOTH cfgs (contract §1.1 — stdio/pipes are out of Vfs scope).
     std::fs::create_dir_all(&dir).unwrap();
+    // Mirror the scratch dir into the active vfs namespace so vfs-routed
+    // fixtures and fd ops resolve; pure EEXIST no-ops under the default cfg.
+    vfs_mkdir_p(dir.to_str().unwrap());
     dir.to_str().unwrap().to_owned()
 }
 
@@ -70,7 +144,7 @@ fn vfd_open_write_read_close_roundtrip() {
     assert_eq!(crate::io::FilePathName(f), path);
 
     crate::io::FileClose(f).unwrap();
-    assert!(std::path::Path::new(&path).exists());
+    assert!(vfs_path_exists(&path));
 }
 
 #[test]
@@ -176,10 +250,10 @@ fn temp_file_deleted_at_close_and_counted() {
     let path = crate::io::FilePathName(f);
     assert_eq!(crate::io::FileWrite(f, &[7u8; 2048], 0, 0).unwrap(), 2048);
     assert_eq!(with_fd(|fd| fd.temporary_files_size), 2048);
-    assert!(std::path::Path::new(&path).exists());
+    assert!(vfs_path_exists(&path));
 
     crate::io::FileClose(f).unwrap();
-    assert!(!std::path::Path::new(&path).exists());
+    assert!(!vfs_path_exists(&path));
     assert_eq!(with_fd(|fd| fd.temporary_files_size), 0);
 }
 
@@ -220,7 +294,7 @@ fn transient_files_track_and_close() {
     setup();
     let dir = scratch_dir("transient");
     let path = format!("{dir}/t");
-    std::fs::write(&path, b"x").unwrap();
+    vfs_write_file(&path, b"x");
 
     let occupied = || with_fd(|fd| crate::vfd::occupied_descs(fd));
     let before = occupied();
@@ -242,15 +316,15 @@ fn durable_rename_and_unlink() {
     let dir = scratch_dir("durable");
     let old = format!("{dir}/old");
     let new = format!("{dir}/new");
-    std::fs::write(&old, b"payload").unwrap();
-    std::fs::write(&new, b"stale").unwrap();
+    vfs_write_file(&old, b"payload");
+    vfs_write_file(&new, b"stale");
 
     assert_eq!(crate::sync::durable_rename(&old, &new, ::types_error::LOG).unwrap(), 0);
-    assert!(!std::path::Path::new(&old).exists());
-    assert_eq!(std::fs::read(&new).unwrap(), b"payload");
+    assert!(!vfs_path_exists(&old));
+    assert_eq!(vfs_read_file(&new), b"payload");
 
     assert_eq!(crate::sync::durable_unlink(&new, ::types_error::LOG).unwrap(), 0);
-    assert!(!std::path::Path::new(&new).exists());
+    assert!(!vfs_path_exists(&new));
 
     assert_eq!(crate::sync::durable_unlink(&new, ::types_error::LOG).unwrap(), -1);
 }
@@ -260,7 +334,7 @@ fn allocate_dir_walks_entries() {
     setup();
     let dir = scratch_dir("dirwalk");
     for name in ["alpha", "beta", "gamma"] {
-        std::fs::write(format!("{dir}/{name}"), b"").unwrap();
+        vfs_write_file(&format!("{dir}/{name}"), b"");
     }
 
     let d = crate::desc::AllocateDir(&dir).unwrap();
@@ -320,7 +394,7 @@ fn subxact_reassigns_or_frees_descs() {
     setup();
     let dir = scratch_dir("subxact");
     let path = format!("{dir}/s");
-    std::fs::write(&path, b"x").unwrap();
+    vfs_write_file(&path, b"x");
 
     let td = crate::desc::OpenTransientFile(&path, libc::O_RDWR).unwrap();
     let idx = with_fd(|fd| fd.allocated_descs.iter().rposition(Option::is_some).unwrap());
@@ -381,16 +455,16 @@ fn temp_tablespace_list_round_robin() {
 fn remove_pg_temp_files_in_dir_filters_prefix() {
     setup();
     let dir = scratch_dir("rmtemp");
-    std::fs::write(format!("{dir}/pgsql_tmp123.0"), b"x").unwrap();
-    std::fs::create_dir(format!("{dir}/pgsql_tmp_sub")).unwrap();
-    std::fs::write(format!("{dir}/pgsql_tmp_sub/anything"), b"x").unwrap();
-    std::fs::write(format!("{dir}/keepme"), b"x").unwrap();
+    vfs_write_file(&format!("{dir}/pgsql_tmp123.0"), b"x");
+    vfs_mkdir_p(&format!("{dir}/pgsql_tmp_sub"));
+    vfs_write_file(&format!("{dir}/pgsql_tmp_sub/anything"), b"x");
+    vfs_write_file(&format!("{dir}/keepme"), b"x");
 
     crate::sync::RemovePgTempFilesInDir(&dir, false, false).unwrap();
 
-    assert!(!std::path::Path::new(&format!("{dir}/pgsql_tmp123.0")).exists());
-    assert!(!std::path::Path::new(&format!("{dir}/pgsql_tmp_sub")).exists());
-    assert!(std::path::Path::new(&format!("{dir}/keepme")).exists());
+    assert!(!vfs_path_exists(&format!("{dir}/pgsql_tmp123.0")));
+    assert!(!vfs_path_exists(&format!("{dir}/pgsql_tmp_sub")));
+    assert!(vfs_path_exists(&format!("{dir}/keepme")));
 
     crate::sync::RemovePgTempFilesInDir(&format!("{dir}/absent"), true, false).unwrap();
 }
@@ -470,6 +544,125 @@ fn allocate_file_stdio_modes() {
     assert_eq!(vfd::get_errno(), libc::ENOENT);
 }
 
+// DST P1 Ruling 3 Class C regression — the SIM_FD_BASE tripwire that caught
+// the FreeDesc misroute, made permanent. AllocateFile mints its fd posix-side
+// (open_stdio, the fopen carve-out of contract §1.1), so FreeDesc must close
+// it posix-side; routing it through vfs::close makes SimVfs EBADF the foreign
+// fd (below SIM_FD_BASE), FreeFile report -1, and the posix fd leak. The
+// OpenTransientFile RawFd arm is vfs-minted and correctly stays on vfs::close.
+#[cfg(pgrust_sim)]
+#[test]
+fn allocate_file_stdio_free_closes_posix_side_not_vfs() {
+    use std::os::fd::AsRawFd;
+
+    setup();
+    let dir = scratch_dir("stdio_sim_tripwire");
+    let path = format!("{dir}/s");
+
+    let idx = crate::desc::AllocateFile(&path, "w").unwrap();
+    assert!(idx >= 0);
+    let raw = crate::desc::with_allocated_stdio(idx, |f| f.as_raw_fd()).unwrap();
+    assert!(
+        raw < vfs::sim::SIM_FD_BASE,
+        "stdio fd must be posix-minted (carve-out), got sim-domain fd {raw}"
+    );
+
+    // A vfs::close misroute EBADFs inside SimVfs and surfaces here as -1.
+    assert_eq!(
+        crate::desc::FreeFile(idx).unwrap(),
+        0,
+        "FreeDesc routed a posix-minted stdio fd through vfs::close"
+    );
+
+    // And the posix-side close really happened (pre-fix the fd leaked).
+    assert_eq!(
+        unsafe { libc::fcntl(raw, libc::F_GETFD) },
+        -1,
+        "posix fd {raw} leaked: still open after FreeFile"
+    );
+}
+
+
+// DST P4 finding F1b: every RAII holder of a vfs-minted fd must release
+// through the SAME Vfs provider that minted it. Pre-guard, the holders were
+// plain OwnedFd, whose Drop closes posix-side: any unwind or thread exit with
+// a live holder EBADF'd inside the kernel (the sim fd is foreign there), the
+// sim fd LEAKED in the sim table, and under debug std's IO-safety check
+// aborted the whole test process. P4 fault injection unwinds through exactly
+// these states.
+//
+// Same-thread arm: drop live holders (the FdState-teardown shape, without
+// leaving the thread) and prove the fds were released INTO THE SIM NAMESPACE.
+#[cfg(pgrust_sim)]
+#[test]
+fn dropped_holders_release_into_sim_namespace_not_posix() {
+    use std::os::fd::AsRawFd;
+
+    setup();
+    let dir = scratch_dir("f1b_guard");
+
+    // Holder 1: AllocatedHandle::RawFd (transient desc), vfs-minted.
+    let tpath = format!("{dir}/t");
+    vfs_write_file(&tpath, b"x");
+    let tfd = crate::desc::OpenTransientFile(&tpath, libc::O_RDWR).unwrap();
+    assert!(tfd >= vfs::sim::SIM_FD_BASE, "transient fd must be sim-minted");
+
+    // Holder 2: Vfd.fd (VFD cache), vfs-minted.
+    let f = open_rw(&format!("{dir}/v"));
+    let vraw = with_fd(|fd| {
+        fd.vfd_cache[f.0 as usize].fd.as_ref().map(|h| h.as_raw_fd()).unwrap()
+    });
+    assert!(vraw >= vfs::sim::SIM_FD_BASE, "vfd fd must be sim-minted");
+
+    // Both live sim-side right now.
+    let mut info = vfs::FileInfo::zeroed();
+    assert_eq!(vfs::fstat(tfd, &mut info), 0);
+    assert_eq!(vfs::fstat(vraw, &mut info), 0);
+
+    // The unwind/teardown shape: the holders drop WITHOUT the deliberate
+    // close paths (FreeDesc / FileClose) running.
+    with_fd(|fd| {
+        fd.allocated_descs.clear();
+        fd.vfd_cache.clear();
+        fd.nfile = 0;
+    });
+
+    // Pre-guard this point was unreachable (debug IO-safety abort) or, with
+    // ub-checks off, both fds were still open sim-side (leaked). The guard
+    // must have released them in the SIM fd table.
+    assert_eq!(
+        vfs::fstat(tfd, &mut info),
+        -1,
+        "transient-desc holder leaked its sim fd on drop"
+    );
+    assert_eq!(vfd::get_errno(), libc::EBADF);
+    assert_eq!(vfs::fstat(vraw, &mut info), -1, "Vfd.fd holder leaked its sim fd on drop");
+    assert_eq!(vfd::get_errno(), libc::EBADF);
+}
+
+// Thread-exit arm — the exact F1 chain: a panic unwinds out of fd code with
+// live holders, the thread dies, and the FdState TLS destructor drops them.
+// Pre-guard (debug) this aborted the WHOLE test process ("fatal runtime
+// error: IO Safety violation"); the guard must keep the abort machinery out
+// of the picture regardless of TLS destructor ordering.
+#[cfg(pgrust_sim)]
+#[test]
+fn thread_exit_with_live_vfs_fd_holders_does_not_abort_process() {
+    setup();
+    let joined = std::thread::spawn(|| {
+        setup(); // fresh TLS in this thread: its own FdState + sim universe
+        vfs_mkdir_p("f1b_thread");
+        vfs_write_file("f1b_thread/t", b"x");
+        let tfd = crate::desc::OpenTransientFile("f1b_thread/t", libc::O_RDWR).unwrap();
+        assert!(tfd >= vfs::sim::SIM_FD_BASE);
+        let f = open_rw("f1b_thread/v");
+        assert!(f.0 > 0);
+        // P4 fault-injection shape: unwind with both holders live.
+        panic!("simulated fault-injection unwind");
+    })
+    .join();
+    assert!(joined.is_err(), "the spawned thread must have panicked");
+}
 
 // Test-process-global: resowner seams install once (seam_core forbids
 // reinstall); every test that needs an owner goes through here.
@@ -643,3 +836,162 @@ fn allocated_desc_indices_stable_across_out_of_order_free() {
     crate::desc::FreeFile(b).unwrap();
     with_fd(|fd| assert!(fd.allocated_descs.is_empty()));
 }
+
+// The TPCC wh100 vu64 finding (notes/fdcap-lane.md): many pg_subtrans SLRU
+// segment fds held open at once by one backend. A thread left at the
+// FD_MINFREE boot default (never handed the postmaster's set_max_safe_fds
+// probe) freezes maxAllocatedDescs at FD_MINFREE/3 = 16; with the probed
+// value applied, reserveAllocatedDesc scales the cap to max_safe_fds/3 and
+// the refusal only fires at the real bound (C fd.c reserveAllocatedDesc).
+// Posix-only: opens real scratch files, absent from the empty SimVfs
+// namespace (the vfs posix-battery fencing precedent).
+#[cfg(not(pgrust_sim))]
+#[test]
+fn transient_fd_cap_scales_with_max_safe_fds() {
+    setup();
+    let dir = scratch_dir("fdcap");
+
+    let saved = vfd::max_safe_fds();
+    assert_eq!(
+        saved,
+        ::types_storage::FD_MINFREE,
+        "a fresh thread boots at the FD_MINFREE default"
+    );
+
+    let path_of = |i: usize| format!("{dir}/seg{i:04}");
+    for i in 0..41 {
+        std::fs::write(path_of(i), b"x").unwrap();
+    }
+
+    let mut open_fds = Vec::new();
+    for i in 0..16 {
+        let fd = crate::desc::OpenTransientFile(&path_of(i), libc::O_RDONLY).unwrap();
+        assert!(fd >= 0, "open {i} failed");
+        open_fds.push(fd);
+    }
+
+    // 17th simultaneous open on the un-inherited default: the ladder's error.
+    let err = crate::desc::OpenTransientFile(&path_of(16), libc::O_RDONLY).unwrap_err();
+    assert!(
+        err.message()
+            .contains("exceeded maxAllocatedDescs (16) while trying to open file"),
+        "{err:?}"
+    );
+
+    // The postmaster's probed max_safe_fds arrives (launch_backend Inherited):
+    // the same open now succeeds and the cap scales to max_safe_fds/3.
+    vfd::set_max_safe_fds_value(120);
+    for i in 16..40 {
+        let fd = crate::desc::OpenTransientFile(&path_of(i), libc::O_RDONLY).unwrap();
+        assert!(fd >= 0, "open {i} failed after the cap scaled");
+        open_fds.push(fd);
+    }
+
+    // The guard still holds at the scaled bound, with C's message.
+    let err = crate::desc::OpenTransientFile(&path_of(40), libc::O_RDONLY).unwrap_err();
+    assert!(
+        err.message()
+            .contains("exceeded maxAllocatedDescs (40) while trying to open file"),
+        "{err:?}"
+    );
+
+    for fd in open_fds {
+        assert_eq!(crate::desc::CloseTransientFile(fd), 0);
+    }
+    with_fd(|fd| assert_eq!(crate::vfd::occupied_descs(fd), 0));
+    vfd::set_max_safe_fds_value(saved);
+}
+
+// DST P1 inc-4 fence assert: the spill/temp plane (tuplestore, tuplesort,
+// sharedtuplestore, sort_storage, spillset, nodehash) had ZERO raw fs sites
+// at the P1 census and must stay that way — all of its IO rides the fd File*
+// APIs (and therefore the VFS). A hit here means a raw syscall or std::fs
+// call crept into a sim-scoped spill path; route it through fd instead.
+#[test]
+fn dst_p1_spill_crates_have_zero_raw_fs_sites() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
+    let spill_crates = [
+        "backend/utils/sort/tuplestore",
+        "backend/utils/sort/tuplesort",
+        "backend/utils/sort/sharedtuplestore",
+        "backend/utils/sort/sort_storage",
+        "backend/executor/spillset",
+        "backend/executor/nodehash",
+    ];
+    let needles = [
+        "std::fs::",
+        "libc::open",
+        "libc::close",
+        "libc::read",
+        "libc::write",
+        "libc::pread",
+        "libc::pwrite",
+        "libc::preadv",
+        "libc::pwritev",
+        "libc::stat",
+        "libc::fstat",
+        "libc::lstat",
+        "libc::unlink",
+        "libc::rename",
+        "libc::mkdir",
+        "libc::rmdir",
+        "libc::lseek",
+        "libc::ftruncate",
+        "libc::truncate",
+        "libc::fsync",
+        "libc::fdatasync",
+        "libc::fallocate",
+        "libc::readlink",
+        "libc::access",
+    ];
+
+    let mut offenders: Vec<String> = Vec::new();
+    for krate in spill_crates {
+        let src = root.join(krate).join("src");
+        assert!(src.is_dir(), "spill-fence census: missing {src:?}");
+        let mut stack = vec![src];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read spill crate src") {
+                let path = entry.expect("dirent").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                // Prod sites only: test scaffolding may build fixture dirs.
+                let p = path.to_string_lossy().into_owned();
+                if p.ends_with("/tests.rs") || p.contains("/tests/") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("read source");
+                for (lineno, line) in text.lines().enumerate() {
+                    let code = line.trim_start();
+                    if code.starts_with("//") {
+                        continue;
+                    }
+                    for needle in needles {
+                        if code.contains(needle) {
+                            offenders.push(format!(
+                                "{}:{}: {}",
+                                path.display(),
+                                lineno + 1,
+                                line.trim()
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "raw fs sites appeared in the fenced spill/temp crates:\n{}",
+        offenders.join("\n")
+    );
+}
+
+// DST P4 inc-1: crash-recovery property sweep + red battery (sim-only).
+#[cfg(pgrust_sim)]
+mod crash_sweep;

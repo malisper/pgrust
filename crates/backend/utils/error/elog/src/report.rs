@@ -5,17 +5,20 @@
 
 use std::cell::RefCell;
 use std::io::Write;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use ::types_dest::CommandDest;
+#[cfg(not(target_family = "wasm"))]
+use ::types_error::LOG_DESTINATION_SYSLOG;
 use ::types_error::{
     unpack_sqlstate, ErrorLevel, PGErrorVerbosity, PgError, PgResult, SqlState, DEBUG1, DEBUG2,
     DEBUG3, DEBUG4, DEBUG5, ERROR, FATAL, INFO, LOG, LOG_DESTINATION_CSVLOG,
-    LOG_DESTINATION_JSONLOG, LOG_DESTINATION_STDERR, LOG_DESTINATION_SYSLOG, LOG_SERVER_ONLY,
-    NOTICE, PANIC, WARNING, WARNING_CLIENT_ONLY,
+    LOG_DESTINATION_JSONLOG, LOG_DESTINATION_STDERR, LOG_SERVER_ONLY, NOTICE, PANIC, WARNING,
+    WARNING_CLIENT_ONLY,
 };
 
-use crate::{config, errno, policy, sink, stack, syslog};
+#[cfg(not(target_family = "wasm"))]
+use crate::syslog;
+use crate::{config, errno, policy, sink, stack};
 
 #[derive(Default)]
 struct LogState {
@@ -43,10 +46,10 @@ pub(crate) fn reset_formatted_log_time() {
 }
 
 fn now_timeval() -> (i64, u32) {
-    match SystemTime::now().duration_since(UNIX_EPOCH) {
-        Ok(d) => (d.as_secs() as i64, d.subsec_micros()),
-        Err(_) => (0, 0),
-    }
+    // DST P2 (contract §1.2, doc-named): log-line timestamps are
+    // VIRTUALIZED rather than masked — under sim they read SimClock's wall,
+    // so the determinism smoke diffs them instead of sed-ing them out.
+    pg_clock::wall_timeval()
 }
 
 fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
@@ -557,6 +560,9 @@ pub fn send_message_to_server_log(edata: &PgError) {
         }
     }
 
+    // wasm32: !HAVE_SYSLOG shape — the destination doesn't exist (no
+    // syslogd, no LOG_* levels in the wasi libc crate); stderr remains.
+    #[cfg(not(target_family = "wasm"))]
     if config::log_destination() & LOG_DESTINATION_SYSLOG != 0 {
         let syslog_level = match edata.level {
             DEBUG5 | DEBUG4 | DEBUG3 | DEBUG2 | DEBUG1 => libc::LOG_DEBUG,
@@ -571,6 +577,11 @@ pub fn send_message_to_server_log(edata: &PgError) {
 
     // (win32 eventlog destination intentionally not ported.)
 
+    // The CSVLOG/JSONLOG writer seams are unported and UNINSTALLED — the
+    // calls below stay as loud backstops. Unreachable in production:
+    // check_log_destination rejects csvlog/jsonlog at GUC check time until
+    // the writers land (seam-audit F2). Remove the rejection there when
+    // installing these seams.
     if config::log_destination() & LOG_DESTINATION_CSVLOG != 0 {
         if config::redirection_done() || config::am_syslogger() {
             error_small_seams::write_csvlog::call(edata);
@@ -607,11 +618,16 @@ pub fn write_console(line: &[u8]) {
     let _ = std::io::stderr().write_all(line);
 }
 
+#[cfg(not(target_family = "wasm"))]
 const PIPE_CHUNK_SIZE: usize = if libc::PIPE_BUF > 65536 {
     65536
 } else {
     libc::PIPE_BUF
 };
+// wasm32: no pipes on WASI (the syslogger chunk protocol is never live);
+// POSIX's PIPE_BUF floor keeps the constants well-formed.
+#[cfg(target_family = "wasm")]
+const PIPE_CHUNK_SIZE: usize = 512;
 
 const PIPE_HEADER_SIZE: usize = 9;
 const PIPE_MAX_PAYLOAD: usize = PIPE_CHUNK_SIZE - PIPE_HEADER_SIZE;
@@ -677,11 +693,18 @@ fn write_fd2(chunk: &[u8]) {
 
 std::thread_local! {
     // C ErrorContext: backend-lifetime scratch for converting outgoing error
-    // fields to the client encoding; reset after every field.
-    static ERR_CONVERT_CX: RefCell<std::mem::ManuallyDrop<::mcx::MemoryContext>> =
-        RefCell::new(std::mem::ManuallyDrop::new(::mcx::MemoryContext::new(
-            "error conversion",
-        )));
+    // fields to the client encoding; reset after every field. Built lazily on
+    // the first client-bound send; the builder registers an mcx session
+    // cleanup (FPBUDGET-1 class: a Droppy TLS holder outside the registry
+    // leaks one live context per session) that takes the slot back to None
+    // and frees the context at backend exit. A send AFTER teardown (nothing
+    // known does one) just falls into the documented raw-server-encoding
+    // fallback rather than touching freed memory. The payload stays
+    // ManuallyDrop so the TLS slot is !needs_drop (no TLS-dtor state
+    // machine / destructor-ordering hazard); the registry closure is the
+    // only thing that ever drops the context.
+    static ERR_CONVERT_CX: RefCell<Option<std::mem::ManuallyDrop<::mcx::MemoryContext>>> =
+        const { RefCell::new(None) };
 }
 
 // C err_sendstring: pq_sendstring (client-encoding conversion) unless already
@@ -692,9 +715,24 @@ pub fn err_sendstring(buf: &mut Vec<u8>, s: &str) {
     let converted = !stack::in_error_recursion_trouble()
         && ::mbutils_seams::pg_server_to_client::is_installed()
         && ERR_CONVERT_CX.with(|cell| {
-            let Ok(mut cx) = cell.try_borrow_mut() else {
+            let Ok(mut slot) = cell.try_borrow_mut() else {
                 return false;
             };
+            let cx = slot.get_or_insert_with(|| {
+                // First client-bound send on this session: build the scratch
+                // context and schedule its teardown (runs at most once, on
+                // this thread, at clean backend exit).
+                ::mcx::register_session_cleanup(Box::new(|| {
+                    ERR_CONVERT_CX.with(|cell| {
+                        if let Ok(mut slot) = cell.try_borrow_mut() {
+                            if let Some(cx) = slot.take() {
+                                drop(std::mem::ManuallyDrop::into_inner(cx));
+                            }
+                        }
+                    });
+                }));
+                std::mem::ManuallyDrop::new(::mcx::MemoryContext::new("error conversion"))
+            });
             let done = {
                 match ::mbutils_seams::pg_server_to_client::call(cx.mcx(), s.as_bytes()) {
                     Ok(Some(conv)) => {
@@ -840,6 +878,20 @@ pub fn vwrite_stderr(message: &str) {
     let _ = stderr.flush();
 }
 
+// wasm32: WASI p1 cannot re-plumb fd 1/2 (no dup2); an OutputFileName is
+// refused cleanly rather than silently ignored.
+#[cfg(target_family = "wasm")]
+pub fn DebugFileOpen() -> PgResult<()> {
+    match config::output_file_name().filter(|n| !n.is_empty()) {
+        None => Ok(()),
+        Some(name) => fatal_file_error(
+            &format!("could not reopen file \"{name}\" as stderr: unsupported on this platform"),
+            libc::ENOSYS,
+        ),
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
 pub fn DebugFileOpen() -> PgResult<()> {
     let Some(name) = config::output_file_name().filter(|n| !n.is_empty()) else {
         return Ok(());

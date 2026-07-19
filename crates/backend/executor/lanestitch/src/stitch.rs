@@ -627,7 +627,7 @@ fn saop_match_elems(prog: &Program, op: CmpOp, arr: u16) -> Option<Vec<u16>> {
     elems
         .iter()
         .map(|d| {
-            let v = d.as_usize() as u64;
+            let v = d.as_u64();
             if v <= 0xFFFF {
                 Some(v as u16)
             } else {

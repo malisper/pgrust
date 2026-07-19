@@ -9,6 +9,8 @@ name = "transam_xlog"
 path = "src/lib.rs"
 
 [dependencies]
+injection_point = { path = "../../../utils/misc/injection_point" }
+pg_clock = { path = "../../../../port/pg_clock" }
 s_lock_seams = { path = "../../../storage/lmgr/s_lock_seams" }
 snapmgr_seams = { path = "../../../utils/time/snapmgr_seams" }
 types_core = { path = "../../../../_support/types/types_core" }
@@ -24,6 +26,7 @@ lmgr_proc_seams = { path = "../../../storage/lmgr/lmgr_proc_seams" }
 latch = { path = "../../../storage/ipc/latch" }
 procarray = { path = "../../../storage/ipc/procarray" }
 init_small = { path = "../../../utils/init/init_small" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 guc_seams = { path = "../../../utils/misc/guc_seams" }
 walsummarizer_seams = { path = "../../../postmaster/walsummarizer_seams" }
@@ -41,6 +44,7 @@ datum = { path = "../../../../_support/types/datum" }
 mcx = { path = "../../../../_support/mcx" }
 standby_seams = { path = "../../../storage/ipc/standby_seams" }
 xlogrecovery_seams = { path = "../xlogrecovery_seams" }
+walreceiverfuncs_seams = { path = "../../../replication/walreceiverfuncs_seams" }
 xlogarchive_seams = { path = "../xlogarchive_seams" }
 timeline_seams = { path = "../timeline_seams" }
 subtrans_seams = { path = "../subtrans_seams" }
@@ -58,6 +62,7 @@ origin_seams = { path = "../../../replication/origin_seams" }
 slot_seams = { path = "../../../replication/slot_seams" }
 reorderbuffer_seams = { path = "../../../replication/logical/reorderbuffer_seams" }
 snapbuild_seams = { path = "../../../replication/snapbuild_seams" }
+rewriteheap_seams = { path = "../../../access/heap/rewriteheap_seams" }
 pgstat = { path = "../../../utils/activity/pgstat" }
 pgstat_seams = { path = "../../../utils/activity/pgstat_seams" }
 procarray_seams = { path = "../../../storage/ipc/procarray_seams" }

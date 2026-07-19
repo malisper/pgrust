@@ -619,7 +619,10 @@ struct PerHashData<'mcx> {
     hash_ngroups_current: u64,
     hash_mem_limit: usize,
     table_filled: bool,
-    hashiter: usize,
+    // u64: hashtable mode holds execgrouping's packed (start,visited)
+    // cursor (high-32 packing must survive 32-bit wasm); compact mode a
+    // plain row index (cast at use).
+    hashiter: u64,
     // C hash_tablecxt: entries + pergroups (transvalues stay in aggcontext).
     table_ctx: MemoryContext,
     spill: HashSpillState<'mcx>,
@@ -738,25 +741,39 @@ fn agg_permission_denied(aggfnoid: Oid) -> Box<PgError> {
     Box::new(PgError::error(msg).with_sqlstate(::types_error::ERRCODE_INSUFFICIENT_PRIVILEGE))
 }
 
+// unported: node families this walker does not know raise a clean
+// ERRCODE_FEATURE_NOT_SUPPORTED error at ExecInitAgg time (C uses the
+// generic expression_tree_walker, which cannot miss a family).
+#[cold]
+#[inline(never)]
+fn agg_tlist_unported(tag: ::types_nodes::NodeTag) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!(
+            "aggregate target list over {tag:?} expressions is not yet implemented"
+        ))
+        .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
+}
+
 fn collect_aggrefs<'mcx>(
     node: Node<'mcx>,
     out: &mut PgVec<'mcx, (Node<'mcx>, &'mcx Aggref<'mcx>)>,
-) {
+) -> PgResult<()> {
     match node.node_tag() {
         NodeTag::T_Aggref => out.push((node, node.as_aggref().unwrap())),
         // GroupingFunc args are never evaluated (EEOP_GROUPING_FUNC reads
         // grouped_cols only).
         NodeTag::T_GroupingFunc => {}
-        NodeTag::T_TargetEntry => collect_aggrefs(node.as_target_entry().unwrap().expr, out),
+        NodeTag::T_TargetEntry => collect_aggrefs(node.as_target_entry().unwrap().expr, out)?,
         NodeTag::T_Var | NodeTag::T_Const => {}
         NodeTag::T_FuncExpr => {
             for a in node.as_func_expr().unwrap().args.iter() {
-                collect_aggrefs(a, out);
+                collect_aggrefs(a, out)?;
             }
         }
         NodeTag::T_OpExpr => {
             for a in node.as_op_expr().unwrap().args.iter() {
-                collect_aggrefs(a, out);
+                collect_aggrefs(a, out)?;
             }
         }
         NodeTag::T_Param
@@ -764,138 +781,162 @@ fn collect_aggrefs<'mcx>(
         | NodeTag::T_SQLValueFunction
         | NodeTag::T_NextValueExpr
         | NodeTag::T_CoerceToDomainValue => {}
-        NodeTag::T_RelabelType => collect_aggrefs(node.as_relabel_type().unwrap().arg, out),
-        NodeTag::T_CoerceViaIO => collect_aggrefs(node.as_coerce_via_io().unwrap().arg, out),
+        NodeTag::T_RelabelType => collect_aggrefs(node.as_relabel_type().unwrap().arg, out)?,
+        NodeTag::T_CoerceViaIO => collect_aggrefs(node.as_coerce_via_io().unwrap().arg, out)?,
         NodeTag::T_ArrayCoerceExpr => {
             let a = node.as_array_coerce_expr().unwrap();
-            collect_aggrefs(a.arg, out);
+            collect_aggrefs(a.arg, out)?;
             if let Some(e) = a.elemexpr {
-                collect_aggrefs(e, out);
+                collect_aggrefs(e, out)?;
             }
         }
         NodeTag::T_ConvertRowtypeExpr => {
-            collect_aggrefs(node.as_convert_rowtype_expr().unwrap().arg, out)
+            collect_aggrefs(node.as_convert_rowtype_expr().unwrap().arg, out)?
         }
         NodeTag::T_CoerceToDomain => {
-            collect_aggrefs(node.as_coerce_to_domain().unwrap().arg, out)
+            collect_aggrefs(node.as_coerce_to_domain().unwrap().arg, out)?
         }
         NodeTag::T_BoolExpr => {
             for a in node.as_bool_expr().unwrap().args.iter() {
-                collect_aggrefs(a, out);
+                collect_aggrefs(a, out)?;
             }
         }
         NodeTag::T_NullTest => {
             if let Some(a) = node.as_null_test().unwrap().arg {
-                collect_aggrefs(a, out);
+                collect_aggrefs(a, out)?;
             }
         }
         NodeTag::T_BooleanTest => {
             if let Some(a) = node.as_boolean_test().unwrap().arg {
-                collect_aggrefs(a, out);
+                collect_aggrefs(a, out)?;
             }
         }
         NodeTag::T_DistinctExpr => {
             for a in node.as_distinct_expr().unwrap().args.iter() {
-                collect_aggrefs(a, out);
+                collect_aggrefs(a, out)?;
             }
         }
         NodeTag::T_ScalarArrayOpExpr => {
             for a in node.as_scalar_array_op_expr().unwrap().args.iter() {
-                collect_aggrefs(a, out);
+                collect_aggrefs(a, out)?;
             }
         }
         NodeTag::T_ArrayExpr => {
             for e in node.as_array_expr().unwrap().elements.iter() {
-                collect_aggrefs(e, out);
+                collect_aggrefs(e, out)?;
             }
         }
         NodeTag::T_RowExpr => {
             for a in node.as_row_expr().unwrap().args.iter() {
-                collect_aggrefs(a, out);
+                collect_aggrefs(a, out)?;
             }
         }
         NodeTag::T_RowCompareExpr => {
             let rc = node.as_row_compare_expr().unwrap();
             for a in rc.largs.iter().chain(rc.rargs.iter()) {
-                collect_aggrefs(a, out);
+                collect_aggrefs(a, out)?;
             }
         }
         NodeTag::T_CaseExpr => {
             let c = node.as_case_expr().unwrap();
             if let Some(a) = c.arg {
-                collect_aggrefs(a, out);
+                collect_aggrefs(a, out)?;
             }
             for w in c.args.iter() {
                 let cw = w.as_case_when().expect("CaseWhen");
-                collect_aggrefs(cw.expr.expect("CaseWhen.expr"), out);
-                collect_aggrefs(cw.result.expect("CaseWhen.result"), out);
+                collect_aggrefs(cw.expr.expect("CaseWhen.expr"), out)?;
+                collect_aggrefs(cw.result.expect("CaseWhen.result"), out)?;
             }
             if let Some(d) = c.defresult {
-                collect_aggrefs(d, out);
+                collect_aggrefs(d, out)?;
             }
         }
         NodeTag::T_CoalesceExpr => {
             for a in node.as_coalesce_expr().unwrap().args.iter() {
-                collect_aggrefs(a, out);
+                collect_aggrefs(a, out)?;
             }
         }
         NodeTag::T_MinMaxExpr => {
             for a in node.as_min_max_expr().unwrap().args.iter() {
-                collect_aggrefs(a, out);
+                collect_aggrefs(a, out)?;
             }
         }
         NodeTag::T_JsonValueExpr => {
             let j = node.as_json_value_expr().unwrap();
             for e in [j.raw_expr, j.formatted_expr].into_iter().flatten() {
-                collect_aggrefs(e, out);
+                collect_aggrefs(e, out)?;
             }
         }
         NodeTag::T_JsonConstructorExpr => {
             let c = node.as_json_constructor_expr().unwrap();
             for a in c.args.iter() {
-                collect_aggrefs(a, out);
+                collect_aggrefs(a, out)?;
             }
             for e in [c.func, c.coercion].into_iter().flatten() {
-                collect_aggrefs(e, out);
+                collect_aggrefs(e, out)?;
             }
         }
         NodeTag::T_JsonIsPredicate => {
             if let Some(e) = node.as_json_is_predicate().unwrap().expr {
-                collect_aggrefs(e, out);
+                collect_aggrefs(e, out)?;
             }
         }
         NodeTag::T_SubPlan => {
             let sp = node.as_sub_plan().unwrap();
             if let Some(te) = sp.testexpr {
-                collect_aggrefs(te, out);
+                collect_aggrefs(te, out)?;
             }
             for a in sp.args.iter() {
-                collect_aggrefs(a, out);
+                collect_aggrefs(a, out)?;
             }
         }
         NodeTag::T_XmlExpr => {
             let x = node.as_xml_expr().unwrap();
             for a in x.named_args.iter().chain(x.args.iter()) {
-                collect_aggrefs(a, out);
+                collect_aggrefs(a, out)?;
             }
         }
         NodeTag::T_SubscriptingRef => {
             let sref = node.as_subscripting_ref().unwrap();
             for a in sref.refupperindexpr.iter().flatten() {
-                collect_aggrefs(a, out);
+                collect_aggrefs(a, out)?;
             }
             for a in sref.reflowerindexpr.iter().flatten() {
-                collect_aggrefs(a, out);
+                collect_aggrefs(a, out)?;
             }
             if let Some(e) = sref.refexpr {
-                collect_aggrefs(e, out);
+                collect_aggrefs(e, out)?;
             }
             if let Some(e) = sref.refassgnexpr {
-                collect_aggrefs(e, out);
+                collect_aggrefs(e, out)?;
             }
         }
-        tag => panic!("ExecInitAgg (nodeAgg.c): Agg tlist node family {tag:?} not ported"),
+        // C expression_tree_walker recursion for the OpExpr-shaped and
+        // field-access families (primnodes.h).
+        NodeTag::T_NullIfExpr => {
+            for a in node.as_null_if_expr().unwrap().args.iter() {
+                collect_aggrefs(a, out)?;
+            }
+        }
+        NodeTag::T_FieldSelect => {
+            collect_aggrefs(node.as_field_select().unwrap().arg, out)?
+        }
+        NodeTag::T_FieldStore => {
+            let fs = node.as_field_store().unwrap();
+            collect_aggrefs(fs.arg, out)?;
+            for v in fs.newvals.iter() {
+                collect_aggrefs(v, out)?;
+            }
+        }
+        NodeTag::T_NamedArgExpr => {
+            if let Some(a) = node.as_named_arg_expr().unwrap().arg {
+                collect_aggrefs(a, out)?;
+            }
+        }
+        // unported: any family this walker does not know.
+        tag => return Err(agg_tlist_unported(tag)),
     }
+    Ok(())
 }
 
 // GetAggInitVal (nodeAgg.c): initval text through the transtype's typinput.
@@ -973,10 +1014,10 @@ pub fn exec_init_agg<'mcx>(
 
     let mut aggrefs: PgVec<'mcx, (Node<'mcx>, &'mcx Aggref<'mcx>)> = PgVec::new_in(mcx);
     for tle in node.plan.targetlist.iter() {
-        collect_aggrefs(tle, &mut aggrefs);
+        collect_aggrefs(tle, &mut aggrefs)?;
     }
     for q in node.plan.qual.iter() {
-        collect_aggrefs(q, &mut aggrefs);
+        collect_aggrefs(q, &mut aggrefs)?;
     }
     // tlist and qual Aggrefs can share aggnos (find_compatible_agg);
     // numaggs == 0 is C's hashed-DISTINCT shape.
@@ -1657,6 +1698,11 @@ fn collect_base_var_cols(node: Node<'_>, out: &mut PgVec<'_, bool>) {
                 collect_base_var_cols(a, out);
             }
         }
+        NodeTag::T_NullIfExpr => {
+            for a in node.as_null_if_expr().unwrap().args.iter() {
+                collect_base_var_cols(a, out);
+            }
+        }
         NodeTag::T_Param
         | NodeTag::T_CaseTestExpr
         | NodeTag::T_SQLValueFunction
@@ -1826,10 +1872,10 @@ fn init_perhash<'mcx>(
     {
         let mut aggrefs: PgVec<'mcx, (Node<'mcx>, &'mcx Aggref<'mcx>)> = PgVec::new_in(mcx);
         for tle in node.plan.targetlist.iter() {
-            collect_aggrefs(tle, &mut aggrefs);
+            collect_aggrefs(tle, &mut aggrefs)?;
         }
         for q in node.plan.qual.iter() {
-            collect_aggrefs(q, &mut aggrefs);
+            collect_aggrefs(q, &mut aggrefs)?;
         }
         for &(_, aggref) in aggrefs.iter() {
             for a in aggref.args.iter() {
@@ -1909,7 +1955,12 @@ fn init_perhash<'mcx>(
         node.grpCollations,
         nbuckets,
         additionalsize,
-        false,
+        // C build_hash_table: DO_AGGSPLIT_SKIPFINAL(aggsplit) — partial aggs
+        // (each parallel participant, leader included) get a per-worker hash
+        // IV so their bucket-order EMISSION doesn't feed the finalize's
+        // identically-mapped table in hash order (q18fin lane: that
+        // correlation cost 104e9 probes / ~500s on TPROC-H q18's finalize).
+        node.aggsplit & AGGSPLITOP_SKIPFINAL != 0,
     )?;
     let hashslot =
         exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(hash_desc.clone()));
@@ -4033,7 +4084,7 @@ pub fn agg_hash_export_grouped_into<'mcx>(
             return Ok(false);
         }
         let nkeys = ph.hash_grp_col_idx_input.len();
-        let mut it = 0usize;
+        let mut it = 0u64;
         while let Some(ix) = ph.hashtable.iterate(&mut it) {
             let tup = ph.hashtable.entry_tuple(ix);
             // SAFETY: entry images live in the node's table context for the

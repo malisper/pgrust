@@ -9,7 +9,7 @@ use coerce::{COERCION_EXPLICIT, COERCION_IMPLICIT, COERCION_PATH_COERCEVIAIO,
 use elog::ereport;
 use mcx::{Mcx, PgVec};
 use parser_small1::{parser_errposition, ParseState};
-use types_core::catalog::{RECORDOID, UNKNOWNOID};
+use types_core::catalog::{RECORDOID, UNKNOWNOID, VOIDOID};
 use types_core::{InvalidOid, Oid, OidIsValid, ParseLoc};
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_AMBIGUOUS_FUNCTION,
@@ -94,9 +94,10 @@ impl CandidateArgs for OperCandidate {
     }
 }
 
-/// C `ParseFuncOrColumn` function-syntax path (fn always present; column
-/// syntax lands with ParseComplexProjection). Divergence: actual arg types
-/// precomputed by the caller (parse_oper::make_op precedent).
+/// C `ParseFuncOrColumn`; is_column mirrors C's fn == NULL attribute-notation
+/// leg (complex-projection column syntax itself lands with
+/// ParseComplexProjection). Divergence: actual arg types precomputed by the
+/// caller (parse_oper::make_op precedent).
 #[allow(clippy::too_many_arguments)]
 pub fn ParseFuncOrColumn<'mcx>(
     mcx: Mcx<'mcx>,
@@ -110,6 +111,7 @@ pub fn ParseFuncOrColumn<'mcx>(
     agg_filter: Option<Node<'mcx>>,
     _last_srf: Option<Node<'mcx>>,
     proc_call: bool,
+    is_column: bool,
     location: ParseLoc,
 ) -> PgResult<Node<'mcx>> {
     debug_assert_eq!(fargs.len(), actual_arg_types.len());
@@ -121,6 +123,30 @@ pub fn ParseFuncOrColumn<'mcx>(
     if fargs.len() > FUNC_MAX_ARGS {
         return Err(too_many_arguments(pstate, location));
     }
+
+    // VOID-typed Param markers are discarded before lookup (the JDBC-driver
+    // accommodation for {call ...} return placeholders) — but never for
+    // column syntax or WITHIN GROUP, where the argument count is load-bearing.
+    let mut kept_types: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
+    let (fargs, actual_arg_types) = if !is_column
+        && !fn_call.agg_within_group
+        && fargs
+            .iter()
+            .zip(actual_arg_types)
+            .any(|(a, &t)| t == VOIDOID && a.node_tag() == NodeTag::T_Param)
+    {
+        let mut kept = NodeList::nil();
+        for (arg, &t) in fargs.iter().zip(actual_arg_types) {
+            if t == VOIDOID && arg.node_tag() == NodeTag::T_Param {
+                continue;
+            }
+            kept.lappend(mcx, arg)?;
+            kept_types.push(t);
+        }
+        (kept, kept_types.as_slice())
+    } else {
+        (fargs, actual_arg_types)
+    };
 
     let mut argnames: PgVec<'mcx, &'mcx str> = PgVec::new_in(mcx);
     for arg in &fargs {

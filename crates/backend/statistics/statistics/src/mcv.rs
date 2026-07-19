@@ -336,7 +336,8 @@ pub fn statext_mcv_serialize<'mcx>(
         let di = &info[dim];
         for &v in values[dim].iter() {
             if di.typbyval {
-                let bytes = (v.as_usize() as u64).to_ne_bytes();
+                // Full 8-byte Datum word; as_usize() truncates on wasm32.
+                let bytes = v.as_u64().to_ne_bytes();
                 out.extend_from_slice(&bytes[..di.typlen as usize]);
             } else if di.typlen > 0 {
                 // SAFETY: fixed-length byref datum.

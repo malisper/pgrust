@@ -111,10 +111,8 @@ thread_local! {
 }
 
 fn time_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    // DST P2 (contract §1.2): LAST_SIGTERM_TIME on pg_clock::wall_secs().
+    pg_clock::wall_secs()
 }
 
 fn archive_library() -> String {
@@ -163,10 +161,22 @@ fn load_archive_library() -> PgResult<ArchiveModule> {
         both_archive_params_error("LoadArchiveLibrary")?;
     }
     if !lib.is_empty() {
-        panic!(
-            "archive_library \"{lib}\": loadable archive modules not ported \
-             (backend-postmaster-pgarch shell arm only)"
-        );
+        // Loadable archive modules are unported; only the shell
+        // archive_command arm exists. This must be an ERROR-channel FATAL,
+        // not a Rust panic: the caller fatal_exits (status 1), which the
+        // reaper accepts as a normal archiver exit (C CleanupBackend treats
+        // 0 and 1 alike for the archiver) — matching C, where a bad
+        // archive_library FATALs the archiver and the postmaster relaunches
+        // it. A panic here instead maps to WTERMSIG(SIGABRT) at the thread
+        // boundary and HandleChildCrash cycles the whole cluster, re-fired
+        // on every relaunch (crash loop).
+        ereport(FATAL)
+            .errmsg(format!(
+                "archive_library \"{lib}\": loadable archive modules not ported \
+                 (backend-postmaster-pgarch shell arm only)"
+            ))
+            .errdetail("Unset \"archive_library\" or use \"archive_command\" instead.")
+            .finish(loc("LoadArchiveLibrary"))?;
     }
     ipc::before_shmem_exit(pgarch_call_module_shutdown_cb, datum::Datum::null())?;
     Ok(ArchiveModule::Shell)
@@ -195,15 +205,15 @@ pub fn PgArchiverMain(startup_data: &StartupData) -> ! {
 
     {
         use procsignal::ThreadSignalHandler::{Ignore, Simple};
-        procsignal::pqsignal_thread(libc::SIGHUP, Simple(interrupt::SignalHandlerForConfigReload));
-        procsignal::pqsignal_thread(libc::SIGINT, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGHUP, Simple(interrupt::SignalHandlerForConfigReload));
+        procsignal::pqsignal_thread(procsignal::signums::SIGINT, Ignore);
         procsignal::pqsignal_thread(
-            libc::SIGTERM,
+            procsignal::signums::SIGTERM,
             Simple(interrupt::SignalHandlerForShutdownRequest),
         );
-        procsignal::pqsignal_thread(libc::SIGALRM, Ignore);
-        procsignal::pqsignal_thread(libc::SIGPIPE, Ignore);
-        procsignal::pqsignal_thread(libc::SIGUSR2, Simple(pgarch_waken_stop));
+        procsignal::pqsignal_thread(procsignal::signums::SIGALRM, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGPIPE, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGUSR2, Simple(pgarch_waken_stop));
     }
 
     libpq_pqsignal::unblock_signals();

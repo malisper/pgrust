@@ -98,7 +98,17 @@ pub fn pg_hypot(x: f64, y: f64) -> PgResult<f64> {
         return Ok(x);
     }
     let yx = y / x;
-    let result = x * (1.0 + yx * yx).sqrt();
+    // C computes `x * sqrt(1.0 + (yx * yx))` as RAW arithmetic (no float8_*
+    // checked helpers), so gcc (-ffp-contract=fast, the default) and clang
+    // (-ffp-contract=on) contract `1.0 + yx*yx` into fma(yx, yx, 1.0) on
+    // aarch64 — the C twin's radius differs in the last ulp from the
+    // uncontracted form, which float8out's shortest-round-trip then prints
+    // as a different decimal string (t25 soak P1: s101 idx 42355,
+    // circle(box) on fast_emp4000 — 160/3378 rect.data rows diverged).
+    // Rust never contracts implicitly; fuse explicitly for byte parity.
+    // (On targets without hardware FMA, mul_add is a correctly-rounded
+    // soft fma — same value.)
+    let result = x * f64::mul_add(yx, yx, 1.0).sqrt();
     if result.is_infinite() {
         return Err(Box::new(::adt_float::float_overflow_error()));
     }
@@ -470,6 +480,15 @@ mod tests {
         assert_eq!(pg_hypot(3.0, 4.0).unwrap(), 5.0);
         assert_eq!(pg_hypot(0.0, 0.0).unwrap(), 0.0);
         assert!(pg_hypot(f64::INFINITY, f64::NAN).unwrap().is_infinite());
+        // Byte-parity pin for the fp-contracted form (fma(yx,yx,1.0)): the
+        // circle(box '(137,582),(867,821)') radius from the t25 soak family.
+        // The uncontracted form gives ...886 (last-ulp high); C-on-aarch64
+        // (and thus the shipped oracle) gives ...874.
+        assert_eq!(pg_hypot(365.0, 119.5).unwrap(), 384.06412225043874_f64);
+        // rect.data witness row (box '(11003,10859),(10950,10765)'): the
+        // circle(box) radius that flipped the s101 idx 42355 md5
+        // (<(10976.5,10812),53.95600059307583>; uncontracted gives ...584).
+        assert_eq!(pg_hypot(26.5, 47.0).unwrap(), 53.95600059307583_f64);
     }
 
     #[test]

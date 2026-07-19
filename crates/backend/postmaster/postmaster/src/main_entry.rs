@@ -7,7 +7,7 @@ use types_guc::{GucContext, GucSource};
 
 use crate::statemachine::{ExitPostmaster, StartChildProcess, StartSysLogger, UpdatePMState};
 use crate::{
-    loc, report, with_pm, PMState, LOCK_FILE_LINE_LISTEN_ADDR, LOCK_FILE_LINE_PM_STATUS,
+    loc, report, try_with_pm, with_pm, PMState, LOCK_FILE_LINE_LISTEN_ADDR, LOCK_FILE_LINE_PM_STATUS,
     LOCK_FILE_LINE_SOCKET_DIR, MAXLISTEN, PM_STATUS_STARTING,
 };
 
@@ -24,7 +24,7 @@ const ARCHIVE_MODE_OFF: i32 = 0;
 pub fn InitProcessGlobals() {
     // miscinit's InitProcessGlobals carries C's whole body, including the
     // strong-seed of the (thread-local) global PRNG.
-    miscinit::InitProcessGlobals(std::process::id() as i32);
+    miscinit::InitProcessGlobals(init_small::globals::process_id() as i32);
 }
 
 fn getInstallationPaths(argv0: &str) {
@@ -91,6 +91,13 @@ extern "C" fn c_handle_pm_pmsignal(sig: i32) {
 }
 extern "C" fn c_dummy_handler(_sig: i32) {}
 
+// wasm32: WASI p1 delivers no signals; the postmaster's process-signal
+// installs are no-ops (the postmaster is unreachable on wasm anyway —
+// no listen sockets — but the crate must compile).
+#[cfg(target_family = "wasm")]
+fn pqsignal(_signum: i32, _handler: extern "C" fn(i32)) {}
+
+#[cfg(not(target_family = "wasm"))]
 fn pqsignal(signum: i32, handler: extern "C" fn(i32)) {
     // SAFETY: standard sigaction install; handlers only touch atomics + the
     // signal-safe SetLatch path.
@@ -103,6 +110,10 @@ fn pqsignal(signum: i32, handler: extern "C" fn(i32)) {
     }
 }
 
+#[cfg(target_family = "wasm")]
+fn pqsignal_ignore(_signum: i32) {}
+
+#[cfg(not(target_family = "wasm"))]
 fn pqsignal_ignore(signum: i32) {
     // SAFETY: SIG_IGN install, no handler code runs.
     unsafe {
@@ -142,6 +153,8 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
     init_small::globals::SetIsPostmasterEnvironment(true);
 
     // SAFETY: umask is async-signal-safe and process-global by design here.
+    // wasm32: no umask on WASI (files carry no mode bits) — no-op.
+    #[cfg(not(target_family = "wasm"))]
     unsafe {
         libc::umask(PG_MODE_MASK_OWNER);
     }
@@ -156,14 +169,14 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
     libpq_pqsignal::pqinitmask();
     libpq_pqsignal::block_signals();
 
-    pqsignal(libc::SIGHUP, c_handle_pm_reload);
-    pqsignal(libc::SIGINT, c_handle_pm_shutdown);
-    pqsignal(libc::SIGQUIT, c_handle_pm_shutdown);
-    pqsignal(libc::SIGTERM, c_handle_pm_shutdown);
-    pqsignal_ignore(libc::SIGALRM);
-    pqsignal_ignore(libc::SIGPIPE);
-    pqsignal(libc::SIGUSR1, c_handle_pm_pmsignal);
-    pqsignal(libc::SIGUSR2, c_dummy_handler);
+    pqsignal(procsignal::signums::SIGHUP, c_handle_pm_reload);
+    pqsignal(procsignal::signums::SIGINT, c_handle_pm_shutdown);
+    pqsignal(procsignal::signums::SIGQUIT, c_handle_pm_shutdown);
+    pqsignal(procsignal::signums::SIGTERM, c_handle_pm_shutdown);
+    pqsignal_ignore(procsignal::signums::SIGALRM);
+    pqsignal_ignore(procsignal::signums::SIGPIPE);
+    pqsignal(procsignal::signums::SIGUSR1, c_handle_pm_pmsignal);
+    pqsignal(procsignal::signums::SIGUSR2, c_dummy_handler);
     // SIGCHLD: no forked children under the thread model; child-exit
     // notification is pmchild's channel (handle_pm_child_exit_signal kept
     // for it to invoke).
@@ -174,9 +187,14 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
         crate::publish_pm_latch(l);
     }
 
-    pqsignal_ignore(libc::SIGTTIN);
-    pqsignal_ignore(libc::SIGTTOU);
-    pqsignal_ignore(libc::SIGXFSZ);
+    // Terminal/job-control signals: real-kernel-only names (the emulation
+    // never delivers them); wasm32 has no signals at all — no-op there.
+    #[cfg(not(target_family = "wasm"))]
+    {
+        pqsignal_ignore(libc::SIGTTIN);
+        pqsignal_ignore(libc::SIGTTOU);
+        pqsignal_ignore(libc::SIGXFSZ);
+    }
 
     libpq_pqsignal::unblock_signals();
 
@@ -273,6 +291,39 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
         }
     }
 
+    // §9 provider seam (dst-p3-scheduler; COMPOSE FINDING 1): under sim cfg
+    // the WHOLE binary sees SimVfs, whose namespace starts empty. Compose
+    // the world — the initdb'd datadir snapshot plus the manifest's share
+    // asset trees — BEFORE the first vfs read: SelectConfigFiles below
+    // already validates timezone GUCs through the pgtz vfs directory scan.
+    // Boot-installer shape (the pqcomm init_seams idiom): one cfg-gated
+    // call, no runtime knob; product builds compile none of this. The
+    // datadir is resolved exactly the way SelectConfigFiles resolves it
+    // (-D else PGDATA, make_absolute_path) so the sim namespace and the
+    // product's DataDir string name the same tree.
+    #[cfg(pgrust_sim)]
+    {
+        match user_d_option
+            .clone()
+            .or_else(|| std::env::var("PGDATA").ok())
+            .map(|d| miscinit::make_absolute_path(&d))
+        {
+            Some(dd) => match vfs::sim_boot::compose_boot_namespace(&dd) {
+                Ok(line) => write_stderr(format!("{line}\n")),
+                Err(e) => {
+                    write_stderr(format!("{PROGNAME}: sim asset ingest failed: {e}\n"));
+                    ExitPostmaster(2);
+                }
+            },
+            None => {
+                write_stderr(format!(
+                    "{PROGNAME}: sim boot requires -D or PGDATA (the asset-manifest datadir root)\n"
+                ));
+                ExitPostmaster(2);
+            }
+        }
+    }
+
     if !guc_seams::select_config_files::call(user_d_option.as_deref(), PROGNAME)? {
         ExitPostmaster(2);
     }
@@ -350,6 +401,9 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
     // C runs this inside CreateSharedMemoryAndSemaphores; hoisted next to the
     // slot-pool init (plain statics, no shmem placement here).
     bgworker::BackgroundWorkerShmemInit();
+    if launcher_seams::apply_launcher_shmem_init::is_installed() {
+        launcher_seams::apply_launcher_shmem_init::call();
+    }
 
     let fastpath_groups = postinit::InitializeFastPathLocks();
 
@@ -484,8 +538,16 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
     if let Some(pidfile) = guc_tables::vars::external_pid_file.read().filter(|s| !s.is_empty()) {
         match std::fs::write(&pidfile, format!("{}\n", init_small::globals::MyProcPid())) {
             Ok(()) => {
-                let perms = std::os::unix::fs::PermissionsExt::from_mode(0o644);
-                if std::fs::set_permissions(&pidfile, perms).is_err() {
+                // wasm32: no unix mode bits on WASI; the chmod is a no-op
+                // (Ok(()) keeps the C control flow: only failures report).
+                #[cfg(not(target_family = "wasm"))]
+                let perm_result = {
+                    let perms = std::os::unix::fs::PermissionsExt::from_mode(0o644);
+                    std::fs::set_permissions(&pidfile, perms)
+                };
+                #[cfg(target_family = "wasm")]
+                let perm_result: std::io::Result<()> = Ok(());
+                if perm_result.is_err() {
                     write_stderr(format!(
                         "{PROGNAME}: could not change permissions of external PID file \"{pidfile}\"\n"
                     ));
@@ -505,9 +567,13 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
     autovacuum_seams::autovac_init::call();
 
     if !auth_seams::load_hba::call() {
+        // translator: %s is a configuration file (C prints HbaFileName)
         return elog::ereport(FATAL)
-            .errmsg("could not load pg_hba.conf")
-            .finish(loc(1339, "PostmasterMain"));
+            .errmsg(format!(
+                "could not load {}",
+                guc_tables::vars::HbaFileName.read().unwrap_or_default()
+            ))
+            .finish(loc(1336, "PostmasterMain"));
     }
     let _ = auth_seams::load_ident::call();
 
@@ -522,6 +588,13 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
     // backend thread. Any tap install after this point is a bug, not a
     // deferred contrib load (hook-surface.md's `tap!` boot-phase gate).
     seam_core::close_tap_boot_phase();
+
+    // Same instant: the process-global libc locale is now final. setlocale()
+    // is process-global and not thread-safe — a concurrent transition frees
+    // locale storage other threads may be mid-read on (the diesel parallel
+    // suite SIGABRT). From here on pg_locale validates with newlocale() and
+    // keeps per-thread records instead of touching the global.
+    pg_locale::freeze_global_locale();
 
     UpdatePMState(PMState::PM_STARTUP);
 
@@ -565,7 +638,13 @@ pub fn pg_start_time() -> i64 {
 }
 
 fn close_server_ports_cb(_code: i32, _arg: usize) {
-    with_pm(|pm| {
+    // try_with_pm, not with_pm: this on_proc_exit callback can run while a
+    // with_pm borrow is still on the stack (a FATAL raised from inside
+    // listen_server_port, itself called under with_pm, drains callbacks
+    // synchronously before unwinding). C has no aliasing check here and
+    // just closes the fds; skip silently on the reentrant case instead of
+    // panicking — the process is exiting, so the OS closes the fds anyway.
+    let _ = try_with_pm(|pm| {
         for fd in pm.listen_sockets.drain(..) {
             // SAFETY: closing listen fds owned by the postmaster.
             unsafe {
@@ -601,12 +680,15 @@ fn CreateOptsFile(argv: &[String]) -> bool {
         line.push('"');
     }
     line.push('\n');
-    match std::fs::File::create("postmaster.opts").and_then(|mut f| f.write_all(line.as_bytes())) {
+    // vfs-routed (provider-seam reroute): postmaster.opts lives in the
+    // datadir domain; std::fs would bypass the sim namespace.
+    match fd::write_whole_file("postmaster.opts", line.as_bytes(), false) {
         Ok(()) => true,
-        Err(e) => {
+        Err(en) => {
             let _ = elog::ereport(LOG)
+                .with_saved_errno(en)
                 .errcode_for_file_access()
-                .errmsg(format!("could not create file \"postmaster.opts\": {e}"))
+                .errmsg("could not create file \"postmaster.opts\": %m".to_string())
                 .finish(loc(3862, "CreateOptsFile"));
             false
         }

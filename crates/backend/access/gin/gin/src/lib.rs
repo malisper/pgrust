@@ -51,10 +51,38 @@ pub mod build {
     pub use crate::{check_for_interrupts, relation_needs_wal};
 }
 
+/// DST fault-sweep rig surface (sim-cfg only, zero native surface): the
+/// raw-image page initializers the crash-sweep rig uses to MINT an empty
+/// gin index file beneath smgr (the bt_initmetapage precedent — ginbuild's
+/// empty C-shape image as durable pre-history).
+#[cfg(pgrust_sim)]
+pub mod sim_rig {
+    /// GinInitMetabuffer over a raw BLCKSZ image.
+    pub fn init_metapage_bytes(bytes: &mut [u8]) {
+        crate::util::gin_init_metapage_bytes(bytes)
+    }
+    /// GinInitPage over a raw BLCKSZ image.
+    pub fn init_page_bytes(bytes: &mut [u8], flags: u16) {
+        crate::util::gin_init_page_bytes(bytes, flags)
+    }
+}
+
 #[cold]
 #[inline(never)]
 pub(crate) fn unported(what: &str) -> ! {
     panic!("unported: gin {what}")
+}
+
+// unported: feature arms that a user can reach through plain SQL (an
+// unsupported opclass / element type at CREATE INDEX or scan setup) raise a
+// clean 0A000 instead of panicking; invariant/data-format arms stay loud.
+#[cold]
+#[inline(never)]
+pub(crate) fn unsupported(what: String) -> Box<::types_error::PgError> {
+    Box::new(
+        ::types_error::PgError::error(what)
+            .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+    )
 }
 
 #[cold]

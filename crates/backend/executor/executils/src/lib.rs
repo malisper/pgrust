@@ -283,6 +283,42 @@ pub fn exec_qual_with_subplans<'mcx>(
     }
 }
 
+/// C `ExecQualAndReset` with the tuple bound as the scan slot — the
+/// IndexRecheck / lossy-fetch recheck / BitmapHeapRecheck shape shared by
+/// nodeindexscan, nodeindexonlyscan, and nodebitmapheapscan. A qual carrying
+/// SubPlans (indexqualorig with a subquery comparison value pushed into the
+/// Index Cond) routes through the subplan driver — C's ExecQual recurses
+/// into ExecEvalSubPlan; the decomposed interpreter pumps EEOP_SUBPLAN
+/// suspensions instead.
+pub fn exec_recheck_qual_and_reset<'mcx>(
+    qual: Option<&mut execexpr::ExprState<'mcx>>,
+    estate: &mut EStateData<'mcx>,
+    ecxt: EcxtId,
+    slot: ExecSlotId,
+) -> PgResult<bool> {
+    estate.ecxt_mut(ecxt).ecxt_scantuple = Some(slot);
+    let Some(qual) = qual else {
+        estate.ecxt_mut(ecxt).reset();
+        return Ok(true);
+    };
+    // Quals evaluate in the per-tuple context (C ecxt_per_tuple_memory);
+    // arg-detoasting operators scribble scratch through the result mcx.
+    // SAFETY: the per-tuple context object outlives the plan (reset-only).
+    unsafe { qual.arm_result_mcx_raw(estate.ecxt(ecxt).per_tuple_mcx()) };
+    let passes = if qual.has_subplan() {
+        exec_qual_with_subplans(Some(qual), estate, ecxt)?
+    } else {
+        let mut slots = execexpr::EvalSlots {
+            scan: Some(estate.slot_mut(slot)),
+            inner: None,
+            outer: None,
+        };
+        execexpr::exec_qual(Some(qual), &mut slots)?
+    };
+    estate.ecxt_mut(ecxt).reset();
+    Ok(passes)
+}
+
 /// [`exec_qual_with_subplans`] over an explicit outer slot living outside
 /// es_tupleTable (grouped Agg's node-local group slot).
 pub fn exec_qual_with_subplans_outer<'mcx>(

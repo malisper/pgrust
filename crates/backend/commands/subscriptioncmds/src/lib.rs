@@ -5,9 +5,10 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+mod connect;
 mod conninfo;
 mod origin;
-pub use origin::{fc_pg_replication_origin_create, ORIGIN_BUILTINS};
+
 
 use datum::Datum;
 use mcx::{Mcx, PgString, PgVec};
@@ -663,7 +664,8 @@ pub fn CreateSubscription<'mcx>(
     origin::replorigin_create(mcx, &originname)?;
 
     if opts.connect {
-        match conninfo::walrcv_connect(mcx, conninfo) {
+        let must_use_password = opts.passwordrequired && !superuser::superuser_arg(owner)?;
+        let mut wrconn = match connect::connect(mcx, conninfo, must_use_password, subname)? {
             Err(errmsg) => {
                 return Err(err(
                     format!(
@@ -672,8 +674,80 @@ pub fn CreateSubscription<'mcx>(
                     ERRCODE_CONNECTION_FAILURE,
                 ));
             }
-            Ok(()) => unreachable!("walrcv_connect panics on any connectable conninfo"),
-        }
+            Ok(conn) => conn,
+        };
+
+        // C wraps this in PG_TRY with walrcv_disconnect in the cleanup; the
+        // connection drops (closing the socket) on both paths here.
+        let pubname_strs: Vec<&str> = pubnames.iter().copied().collect();
+        let connected = (|| -> PgResult<()> {
+            connect::check_publications(&mut wrconn, &pubname_strs)?;
+            connect::check_publications_origin(
+                &mut wrconn,
+                &pubname_strs,
+                opts.copy_data,
+                Some(opts.origin),
+                subname,
+            )?;
+
+            // Set sync state based on whether we were asked to copy data.
+            let table_state = if opts.copy_data {
+                pg_subscription::SUBREL_STATE_INIT
+            } else {
+                pg_subscription::SUBREL_STATE_READY
+            };
+
+            // Get the table list from the publisher; build local status info.
+            let tables = connect::fetch_table_list(&mut wrconn, &pubname_strs)?;
+            let ntables = tables.len();
+            for (nspname, relname) in tables {
+                let rv = rel_vocab::RangeVar {
+                    catalogname: None,
+                    schemaname: Some(nspname.as_str()),
+                    relname: relname.as_str(),
+                    inh: true,
+                    relpersistence: b'p',
+                    location: -1,
+                };
+                let relid = catalog_namespace::RangeVarGetRelid(
+                    &rv,
+                    types_rel::AccessShareLock,
+                    false,
+                )?;
+                CheckSubscriptionRelkind(
+                    lsyscache::get_rel_relkind(relid)? as u8,
+                    &nspname,
+                    &relname,
+                )?;
+                pg_subscription::AddSubscriptionRelState(
+                    mcx,
+                    subid,
+                    relid,
+                    table_state,
+                    InvalidXLogRecPtr,
+                    true,
+                )?;
+            }
+
+            // If requested, create the permanent slot for the subscription
+            // (never with an exported snapshot). two_phase is enabled up
+            // front only when it is safe (see the C comment).
+            if opts.create_slot {
+                let slot = slot_name.expect("create_slot implies slot_name");
+                let twophase_enabled = opts.twophase && !opts.copy_data && ntables > 0;
+                connect::walrcv_create_slot(&mut wrconn, slot, twophase_enabled, opts.failover)?;
+                if twophase_enabled {
+                    panic!("unported: UpdateTwoPhaseState (two-phase subscription)");
+                }
+                let _ = elog::elog(
+                    types_error::NOTICE,
+                    format!("created replication slot \"{slot}\" on publisher"),
+                );
+            }
+            Ok(())
+        })();
+        drop(wrconn);
+        connected?;
     } else {
         elog::ereport(WARNING)
             .errmsg("subscription was created, but is not connected")
@@ -687,6 +761,10 @@ pub fn CreateSubscription<'mcx>(
     rel.close(RowExclusiveLock)?;
 
     pgstat::subscription::pgstat_create_subscription(subid);
+
+    if opts.enabled {
+        launcher::ApplyLauncherWakeupAtCommit();
+    }
 
     Ok(ObjectAddress::set(SubscriptionRelationId, subid))
 }
@@ -779,6 +857,8 @@ pub fn AlterSubscription<'mcx>(
     let mut update_tuple = false;
     let mut update_failover = false;
     let mut update_two_phase = false;
+    let mut alter_failover_value = false;
+    let mut alter_two_phase_value = false;
     let mut slotname_buf = NameData::default();
     let mut pub_img_keepalive: Option<PgVec<'mcx, u8>> = None;
 
@@ -855,6 +935,7 @@ pub fn AlterSubscription<'mcx>(
 
             if is_set(opts.specified_opts, SUBOPT_TWOPHASE_COMMIT) {
                 update_two_phase = !opts.twophase;
+                alter_two_phase_value = opts.twophase;
 
                 CheckAlterSubOption(&sub, "two_phase", update_two_phase, is_top_level)?;
 
@@ -882,6 +963,7 @@ pub fn AlterSubscription<'mcx>(
 
             if is_set(opts.specified_opts, SUBOPT_FAILOVER) {
                 update_failover = true;
+                alter_failover_value = opts.failover;
 
                 CheckAlterSubOption(&sub, "failover", update_failover, is_top_level)?;
 
@@ -913,6 +995,10 @@ pub fn AlterSubscription<'mcx>(
             values[(Anum_pg_subscription_subenabled - 1) as usize] =
                 Datum::from_bool(opts.enabled);
             replaces[(Anum_pg_subscription_subenabled - 1) as usize] = true;
+
+            if opts.enabled {
+                launcher::ApplyLauncherWakeupAtCommit();
+            }
 
             update_tuple = true;
         }
@@ -973,7 +1059,8 @@ pub fn AlterSubscription<'mcx>(
 
                 xact::PreventInTransactionBlock(is_top_level, "ALTER SUBSCRIPTION with refresh")?;
 
-                panic!("unported: AlterSubscription_refresh (walrcv connect)");
+                let pubs: Vec<&str> = pubnames.iter().copied().collect();
+                connect::AlterSubscription_refresh(mcx, &sub, opts.copy_data, &pubs, Some(&pubs))?;
             }
         }
 
@@ -1032,7 +1119,19 @@ pub fn AlterSubscription<'mcx>(
 
                 xact::PreventInTransactionBlock(is_top_level, "ALTER SUBSCRIPTION with refresh")?;
 
-                panic!("unported: AlterSubscription_refresh (walrcv connect)");
+                let pubs: Vec<&str> = publist.iter().copied().collect();
+                let added: Vec<&str> = if isadd {
+                    publist_names(mcx, &stmt.publication)?.iter().copied().collect()
+                } else {
+                    Vec::new()
+                };
+                connect::AlterSubscription_refresh(
+                    mcx,
+                    &sub,
+                    opts.copy_data,
+                    &pubs,
+                    if isadd { Some(&added) } else { None },
+                )?;
             }
         }
 
@@ -1062,7 +1161,8 @@ pub fn AlterSubscription<'mcx>(
 
             xact::PreventInTransactionBlock(is_top_level, "ALTER SUBSCRIPTION ... REFRESH")?;
 
-            panic!("unported: AlterSubscription_refresh (walrcv connect)");
+            let pubs: Vec<&str> = sub.publications.iter().copied().collect();
+            connect::AlterSubscription_refresh(mcx, &sub, opts.copy_data, &pubs, None)?;
         }
 
         ALTER_SUBSCRIPTION_SKIP => {
@@ -1098,8 +1198,39 @@ pub fn AlterSubscription<'mcx>(
     }
     drop(pub_img_keepalive);
 
+    // Update the corresponding slot property on the publisher
+    // (subscriptioncmds.c: walrcv_connect + walrcv_alter_slot, disconnect in
+    // PG_FINALLY — the connection drops on both paths here).
     if update_failover || update_two_phase {
-        panic!("unported: walrcv_alter_slot (ALTER SUBSCRIPTION failover/two_phase slot update)");
+        let must_use_password = sub.passwordrequired && !sub.ownersuperuser;
+        let mut wrconn = match connect::connect(
+            mcx,
+            sub.conninfo.as_str(),
+            must_use_password,
+            sub.name.as_str(),
+        )? {
+            Err(errmsg) => {
+                return Err(err(
+                    format!(
+                        "subscription \"{}\" could not connect to the publisher: {errmsg}",
+                        sub.name.as_str()
+                    ),
+                    ERRCODE_CONNECTION_FAILURE,
+                ));
+            }
+            Ok(conn) => conn,
+        };
+        let slotname = sub
+            .slotname
+            .as_ref()
+            .expect("CheckAlterSubOption verified a slot name")
+            .as_str();
+        connect::walrcv_alter_slot(
+            &mut wrconn,
+            slotname,
+            update_failover.then_some(alter_failover_value),
+            update_two_phase.then_some(alter_two_phase_value),
+        )?;
     }
 
     rel.close(RowExclusiveLock)?;
@@ -1156,7 +1287,15 @@ pub fn DropSubscription<'mcx>(
     let tid = tup.as_tuple().t_self;
     catalog_indexing::CatalogTupleDelete(&rel, &tid)?;
 
-    // logicalrep worker shutdown + launcher bookkeeping: no workers exist.
+    // Stop all the subscription workers immediately (new ones can't start:
+    // we hold AccessExclusiveLock on the subscription till end of txn), then
+    // drop the launcher's last-start entry (subscriptioncmds.c:1739-1767).
+    for slot in launcher::logicalrep_workers_find(subid, false) {
+        if let Some(w) = launcher::worker_snapshot(slot) {
+            launcher::logicalrep_worker_stop(w.subid, w.relid)?;
+        }
+    }
+    launcher::ApplyLauncherForgetWorkerStartTime(subid);
 
     let rstates = GetSubscriptionRelations(mcx, subid, true)?;
     for rstate in rstates.iter() {
@@ -1180,7 +1319,42 @@ pub fn DropSubscription<'mcx>(
         return rel.close(NoLock);
     }
 
-    panic!("unported: libpqwalreceiver connect (DROP SUBSCRIPTION replication slot drop)");
+    // Drop the slot(s) at the publisher (subscriptioncmds.c:1810). Connection
+    // failure with a slot to drop is an ERROR with C's hint.
+    let must_use_password = sub.passwordrequired && !superuser::superuser_arg(sub.owner)?;
+    let mut wrconn = match connect::connect(mcx, sub.conninfo.as_str(), must_use_password, subname)? {
+        Ok(conn) => conn,
+        Err(errmsg) => {
+            if slotname.is_none() {
+                // Only tablesync-origin cleanup was pending; C warns and returns.
+                elog::ereport(types_error::WARNING)
+                    .errmsg(format!("could not connect to publisher when attempting to drop replication slot: {errmsg}"))
+                    .finish(loc("DropSubscription"))?;
+                return rel.close(NoLock);
+            }
+            return Err(err(
+                format!("could not connect to publisher when attempting to drop replication slot \"{}\": {errmsg}", slotname.unwrap_or("")),
+                ERRCODE_CONNECTION_FAILURE,
+            )
+            .into());
+        }
+    };
+
+    let dropped = (|| -> PgResult<()> {
+        for rstate in &rstates {
+            // Tablesync slots would be dropped here; tablesync states other
+            // than READY are refused upstream (round-4 inc E).
+            let _ = rstate;
+        }
+        if let Some(slot) = slotname {
+            connect::drop_slot_at_pub_node(&mut wrconn, slot, false)?;
+        }
+        Ok(())
+    })();
+    drop(wrconn);
+    dropped?;
+
+    rel.close(NoLock)
 }
 
 fn AlterSubscriptionOwner_internal<'mcx>(
@@ -1309,4 +1483,17 @@ pub fn AlterSubscriptionOwner_oid<'mcx>(
 
 pub fn init_seams() {
     pg_shdepend::alter_subscription_owner_oid::set(AlterSubscriptionOwner_oid);
+}
+
+// CheckSubscriptionRelkind (catalog/pg_subscription.c): logical replication
+// targets must be plain or partitioned tables.
+fn CheckSubscriptionRelkind(relkind: u8, nspname: &str, relname: &str) -> PgResult<()> {
+    // RELKIND_RELATION 'r' / RELKIND_PARTITIONED_TABLE 'p'.
+    if relkind != b'r' && relkind != b'p' {
+        return Err(err(
+            format!("cannot use relation \"{nspname}.{relname}\" as logical replication target"),
+            types_error::ERRCODE_WRONG_OBJECT_TYPE,
+        ));
+    }
+    Ok(())
 }

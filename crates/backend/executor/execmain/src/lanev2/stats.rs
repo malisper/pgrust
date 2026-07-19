@@ -1151,7 +1151,7 @@ fn dump() {
         super::run_seam_backward_evidence_count()
     ));
     // --- end WS-CB wave-10 ---
-    let pid = std::process::id();
+    let pid = init_small::globals::process_id();
     let final_path = dir.join(format!("lane-v2-stats.{pid}.tsv"));
     let tmp_path = dir.join(format!(
         ".lane-v2-stats.{pid}.{:?}.tmp",

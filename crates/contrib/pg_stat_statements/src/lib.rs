@@ -239,12 +239,17 @@ fn pg_init() -> PgResult<()> {
     parser_analyze::tap_post_parse_analyze::install(hooks::pgss_post_parse_analyze);
     planner::tap_planner_enter::install(hooks::pgss_planner_enter);
     planner::tap_planner_leave::install(hooks::pgss_planner_leave);
-    execmain::tap_executor_start::install(hooks::pgss_executor_start);
-    execmain::tap_executor_run::install(hooks::pgss_executor_run);
-    execmain::tap_executor_run_leave::install(hooks::pgss_executor_run_leave);
-    execmain::tap_executor_finish::install(hooks::pgss_executor_finish);
-    execmain::tap_executor_finish_leave::install(hooks::pgss_executor_finish_leave);
-    execmain::tap_executor_end::install(hooks::pgss_executor_end);
+    // Executor hooks go through the exec_hooks chain (not the raw taps): the
+    // taps are install-once and auto_explain shares them — C's saved-prev
+    // hook chaining, centralized.
+    exec_hooks::register(exec_hooks::ExecutorHooks {
+        start: Some(hooks::pgss_executor_start),
+        run: Some(hooks::pgss_executor_run),
+        run_leave: Some(hooks::pgss_executor_run_leave),
+        finish: Some(hooks::pgss_executor_finish),
+        finish_leave: Some(hooks::pgss_executor_finish_leave),
+        end: Some(hooks::pgss_executor_end),
+    });
     utility::dispatch::tap_process_utility_enter::install(hooks::pgss_process_utility_enter);
     utility::dispatch::tap_process_utility_leave::install(hooks::pgss_process_utility_leave);
 

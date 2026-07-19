@@ -16,8 +16,8 @@ use slot::{
 };
 use snapbuild::SnapBuild;
 use types_core::{
-    InvalidOid, InvalidTransactionId, RepOriginId, TransactionId, TransactionIdIsValid,
-    TransactionIdPrecedes, XLogRecPtr,
+    InvalidOid, InvalidTransactionId, RepOriginId, TimestampTz, TransactionId,
+    TransactionIdIsValid, TransactionIdPrecedes, XLogRecPtr,
 };
 use types_error::{
     ErrorLocation, PgResult, ERRCODE_ACTIVE_SQL_TRANSACTION,
@@ -87,6 +87,20 @@ pub type MessageCB = fn(
     &[u8],
 ) -> PgResult<()>;
 pub type FilterByOriginCB = fn(&mut OutputPluginContext, RepOriginId) -> PgResult<bool>;
+// Two-phase family (logical.h): begin_prepare shares BeginCB's shape and
+// prepare/commit_prepared share CommitCB's (opc, rb, txn, lsn).
+pub type BeginPrepareCB = BeginCB;
+pub type PrepareCB = CommitCB;
+pub type CommitPreparedCB = CommitCB;
+pub type RollbackPreparedCB = fn(
+    &mut OutputPluginContext,
+    &mut ReorderBuffer,
+    TxnId,
+    XLogRecPtr,   // prepare_end_lsn
+    TimestampTz,  // prepare_time
+) -> PgResult<()>;
+pub type FilterPrepareCB =
+    fn(&mut OutputPluginContext, TransactionId, &str) -> PgResult<bool>;
 
 #[derive(Default)]
 pub struct OutputPluginCallbacks {
@@ -96,12 +110,57 @@ pub struct OutputPluginCallbacks {
     pub truncate_cb: Option<TruncateCB>,
     pub commit_cb: Option<CommitCB>,
     pub message_cb: Option<MessageCB>,
+    pub filter_prepare_cb: Option<FilterPrepareCB>,
+    pub begin_prepare_cb: Option<BeginPrepareCB>,
+    pub prepare_cb: Option<PrepareCB>,
+    pub commit_prepared_cb: Option<CommitPreparedCB>,
+    pub rollback_prepared_cb: Option<RollbackPreparedCB>,
     pub filter_by_origin_cb: Option<FilterByOriginCB>,
     pub shutdown_cb: Option<ShutdownCB>,
-    // Two-phase and streaming callback families are unported; a plugin that
-    // needs them sets these so the wrappers can fail loudly.
-    pub two_phase_requested: bool,
+    // The streaming callback family is unported; a plugin that needs it sets
+    // this so the wrappers can fail loudly.
     pub streaming_requested: bool,
+}
+
+// C's ctx->out is a StringInfo carrying either textual (test_decoding) or
+// binary (pgoutput 'w'-payload) data. A String can't hold arbitrary bytes, so
+// the buffer is a Vec<u8> with the String-flavored methods the textual
+// plugins use; binary writers (logicalproto) reach the Vec directly.
+#[derive(Default)]
+pub struct OutBuf {
+    buf: Vec<u8>,
+}
+
+impl OutBuf {
+    pub fn clear(&mut self) {
+        self.buf.clear();
+    }
+    pub fn len(&self) -> usize {
+        self.buf.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.buf.is_empty()
+    }
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.buf
+    }
+    pub fn as_mut_vec(&mut self) -> &mut Vec<u8> {
+        &mut self.buf
+    }
+    pub fn push_str(&mut self, s: &str) {
+        self.buf.extend_from_slice(s.as_bytes());
+    }
+    pub fn push(&mut self, c: char) {
+        let mut b = [0u8; 4];
+        self.buf.extend_from_slice(c.encode_utf8(&mut b).as_bytes());
+    }
+}
+
+impl core::fmt::Write for OutBuf {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        self.buf.extend_from_slice(s.as_bytes());
+        Ok(())
+    }
 }
 
 pub type LogicalOutputPluginWriterWrite =
@@ -121,7 +180,7 @@ pub struct OutputPluginContext {
     pub prepare_write: Option<LogicalOutputPluginWriterPrepareWrite>,
     pub write: Option<LogicalOutputPluginWriterWrite>,
     pub update_progress: Option<LogicalOutputPluginWriterUpdateProgress>,
-    pub out: String,
+    pub out: OutBuf,
     pub output_plugin_private: usize,
     pub output_writer_private: usize,
     pub accept_writes: bool,
@@ -183,7 +242,20 @@ pub fn CheckLogicalDecodingRequirements() -> PgResult<()> {
     }
 
     if transam_xlog::RecoveryInProgress() {
-        unported("CheckLogicalDecodingRequirements: logical decoding on standby");
+        // Logical decoding on standby is allowed when the primary runs
+        // wal_level >= logical (GetActiveWalLevelOnStandby =
+        // ControlFile->wal_level; xlog.c). Race notes as in C: rechecked at
+        // slot creation and at decoding startup, and XLOG_PARAMETER_CHANGE
+        // invalidates existing logical slots on a wal_level drop.
+        if transam_xlog::GetActiveWalLevelOnStandby() < transam_xlog::WAL_LEVEL_LOGICAL {
+            ereport(ERROR)
+                .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                .errmsg(
+                    "logical decoding on standby requires \"wal_level\" >= \"logical\" on the primary server",
+                )
+                .finish(loc("CheckLogicalDecodingRequirements"))?;
+            unreachable!();
+        }
     }
     Ok(())
 }
@@ -216,8 +288,9 @@ fn StartupDecodingContext(
     }
 
     if !xact::IsTransactionOrTransactionBlock() {
-        // C marks MyProc PROC_IN_LOGICAL_DECODING here (walsender path).
-        unported("StartupDecodingContext outside a transaction (walsender)");
+        // Walsender path (logical.c:199): the slot enforces our xmin, so
+        // announce this backend as skippable for horizon computation.
+        procarray::ProcSetStatusFlagInLogicalDecoding()?;
     }
 
     let reader = XLogReaderState::allocate(mcx, transam_xlog::wal_segment_size())?;
@@ -236,7 +309,13 @@ fn StartupDecodingContext(
     );
 
     let streaming = callbacks.streaming_requested;
-    let twophase = callbacks.two_phase_requested;
+    // To support two-phase logical decoding we require the whole prepare
+    // family; enabling on any one of them makes a missing member fail loudly
+    // in its wrapper (logical.c:246).
+    let twophase = callbacks.begin_prepare_cb.is_some()
+        || callbacks.prepare_cb.is_some()
+        || callbacks.commit_prepared_cb.is_some()
+        || callbacks.rollback_prepared_cb.is_some();
 
     let opc = Box::into_raw(Box::new(OutputPluginContext {
         slot,
@@ -249,7 +328,7 @@ fn StartupDecodingContext(
         prepare_write,
         write: do_write,
         update_progress,
-        out: String::new(),
+        out: OutBuf::default(),
         output_plugin_private: 0,
         output_writer_private: 0,
         accept_writes: false,
@@ -270,6 +349,10 @@ fn StartupDecodingContext(
         apply_truncate: truncate_cb_wrapper,
         commit: commit_cb_wrapper,
         message: message_cb_wrapper,
+        begin_prepare: begin_prepare_cb_wrapper,
+        prepare: prepare_cb_wrapper,
+        commit_prepared: commit_prepared_cb_wrapper,
+        rollback_prepared: rollback_prepared_cb_wrapper,
         update_progress_txn: update_progress_txn_cb_wrapper,
         ..ReorderBufferCallbacks::unset()
     };
@@ -435,8 +518,23 @@ pub fn CreateDecodingContext(
         unreachable!();
     }
 
-    if transam_xlog::RecoveryInProgress() && slot.data.get().synced != 0 {
-        unported("CreateDecodingContext: synced slot on standby");
+    // Slots being synced from the primary can't be used for decoding (they
+    // are for use after failover) — but the slot sync machinery itself may
+    // advance their LSNs (update_local_synced_slot).
+    if transam_xlog::RecoveryInProgress()
+        && slot.data.get().synced != 0
+        && !slot::syncing_replication_slots()
+    {
+        let name = String::from_utf8_lossy(slot.data.get().name.name_str()).into_owned();
+        ereport(ERROR)
+            .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+            .errmsg(format!(
+                "cannot use replication slot \"{name}\" for logical decoding"
+            ))
+            .errdetail("This replication slot is being synchronized from the primary server.")
+            .errhint("Specify another replication slot.")
+            .finish(loc("CreateDecodingContext"))?;
+        unreachable!();
     }
 
     debug_assert!(slot.data.get().invalidated == RS_INVAL_NONE);
@@ -469,15 +567,25 @@ pub fn CreateDecodingContext(
 
     startup_cb_maybe(&ctx, false)?;
 
-    let receive_rewrites = {
+    let (receive_rewrites, mark_two_phase) = {
         let opc = ctx.opc();
         opc.twophase &= slot.data.get().two_phase || opc.twophase_opt_given;
-        if opc.twophase && !slot.data.get().two_phase {
-            unported("CreateDecodingContext: enabling two_phase on slot");
-        }
-        opc.options.receive_rewrites
+        (opc.options.receive_rewrites, opc.twophase && !slot.data.get().two_phase)
     };
     let mut ctx = ctx;
+    // Mark slot to allow two_phase decoding if not already marked
+    // (logical.c:597).
+    if mark_two_phase {
+        slot.with_mutex(|| {
+            let mut d = slot.data.get();
+            d.two_phase = true;
+            d.two_phase_at = start_lsn;
+            slot.data.set(d);
+        });
+        ReplicationSlotMarkDirty();
+        ReplicationSlotSave()?;
+        ctx.snapshot_builder.set_two_phase_at(start_lsn);
+    }
     ctx.reorder.output_rewrites = receive_rewrites;
 
     let name = String::from_utf8_lossy(slot.data.get().name.name_str()).into_owned();
@@ -641,6 +749,99 @@ fn commit_cb_wrapper(rb: &mut ReorderBuffer, txn: TxnId, commit_lsn: XLogRecPtr)
     cb(opc, rb, txn, commit_lsn)
 }
 
+#[cold]
+fn missing_prepare_family_cb(which: &str) -> PgResult<()> {
+    ereport(ERROR)
+        .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+        .errmsg(format!(
+            "logical replication at prepare time requires a {which} callback"
+        ))
+        .finish(loc("prepare_cb_wrapper"))?;
+    unreachable!();
+}
+
+fn begin_prepare_cb_wrapper(rb: &mut ReorderBuffer, txn: TxnId) -> PgResult<()> {
+    let opc = opc_from_rb(rb);
+    debug_assert!(!opc.fast_forward);
+    debug_assert!(opc.twophase);
+    opc.accept_writes = true;
+    opc.write_xid = rb.txn(txn).xid;
+    opc.write_location = rb.txn(txn).first_lsn;
+    opc.end_xact = false;
+    // If the plugin supports two-phase commits then the begin prepare
+    // callback is mandatory (logical.c:900).
+    let Some(cb) = opc.callbacks.begin_prepare_cb else {
+        return missing_prepare_family_cb("begin_prepare_cb");
+    };
+    cb(opc, rb, txn)
+}
+
+fn prepare_cb_wrapper(rb: &mut ReorderBuffer, txn: TxnId, prepare_lsn: XLogRecPtr) -> PgResult<()> {
+    let opc = opc_from_rb(rb);
+    debug_assert!(!opc.fast_forward);
+    debug_assert!(opc.twophase);
+    opc.accept_writes = true;
+    opc.write_xid = rb.txn(txn).xid;
+    opc.write_location = rb.txn(txn).end_lsn; // points to the end of the record
+    opc.end_xact = true;
+    let Some(cb) = opc.callbacks.prepare_cb else {
+        return missing_prepare_family_cb("prepare_cb");
+    };
+    cb(opc, rb, txn, prepare_lsn)
+}
+
+fn commit_prepared_cb_wrapper(
+    rb: &mut ReorderBuffer,
+    txn: TxnId,
+    commit_lsn: XLogRecPtr,
+) -> PgResult<()> {
+    let opc = opc_from_rb(rb);
+    debug_assert!(!opc.fast_forward);
+    debug_assert!(opc.twophase);
+    opc.accept_writes = true;
+    opc.write_xid = rb.txn(txn).xid;
+    opc.write_location = rb.txn(txn).end_lsn; // points to the end of the record
+    opc.end_xact = true;
+    let Some(cb) = opc.callbacks.commit_prepared_cb else {
+        return missing_prepare_family_cb("commit_prepared_cb");
+    };
+    cb(opc, rb, txn, commit_lsn)
+}
+
+fn rollback_prepared_cb_wrapper(
+    rb: &mut ReorderBuffer,
+    txn: TxnId,
+    prepare_end_lsn: XLogRecPtr,
+    prepare_time: TimestampTz,
+) -> PgResult<()> {
+    let opc = opc_from_rb(rb);
+    debug_assert!(!opc.fast_forward);
+    debug_assert!(opc.twophase);
+    opc.accept_writes = true;
+    opc.write_xid = rb.txn(txn).xid;
+    opc.write_location = rb.txn(txn).end_lsn; // points to the end of the record
+    opc.end_xact = true;
+    let Some(cb) = opc.callbacks.rollback_prepared_cb else {
+        return missing_prepare_family_cb("rollback_prepared_cb");
+    };
+    cb(opc, rb, txn, prepare_end_lsn, prepare_time)
+}
+
+pub fn filter_prepare_cb_wrapper(
+    opc: &mut OutputPluginContext,
+    xid: TransactionId,
+    gid: &str,
+) -> PgResult<bool> {
+    debug_assert!(!opc.fast_forward);
+    opc.accept_writes = false;
+    opc.end_xact = false;
+    let cb = opc
+        .callbacks
+        .filter_prepare_cb
+        .expect("filter_prepare callback registered");
+    cb(opc, xid, gid)
+}
+
 fn change_cb_wrapper(
     rb: &mut ReorderBuffer,
     txn: TxnId,
@@ -787,6 +988,10 @@ pub fn LogicalConfirmReceivedLocation(lsn: XLogRecPtr) -> PgResult<()> {
         let mut updated_xmin = false;
         let mut updated_restart = false;
 
+        // logical.c:1824: remember the old restart lsn (consumed by the
+        // logical-replication-slot-advance-segment injection point below).
+        let old_restart_lsn = slot.data.get().restart_lsn;
+
         slot.with_mutex(|| {
             if lsn > slot.data.get().confirmed_flush {
                 let mut d = slot.data.get();
@@ -822,6 +1027,18 @@ pub fn LogicalConfirmReceivedLocation(lsn: XLogRecPtr) -> PgResult<()> {
         });
 
         if updated_xmin || updated_restart {
+            // logical.c:1901 (USE_INJECTION_POINTS): trigger only when the
+            // slot's restart_lsn crossed into a new WAL segment.
+            if injection_point::is_attached("logical-replication-slot-advance-segment") {
+                let segsz = transam_xlog::wal_segment_size();
+                let seg1 = transam_xlog::XLByteToSeg(old_restart_lsn, segsz);
+                let seg2 = transam_xlog::XLByteToSeg(slot.data.get().restart_lsn, segsz);
+                if seg1 != seg2 {
+                    injection_point::injection_point(
+                        "logical-replication-slot-advance-segment",
+                    )?;
+                }
+            }
             ReplicationSlotMarkDirty();
             ReplicationSlotSave()?;
         }
@@ -846,9 +1063,15 @@ pub fn LogicalConfirmReceivedLocation(lsn: XLogRecPtr) -> PgResult<()> {
     Ok(())
 }
 
-// C resets CheckXidAlive/bsysscan; neither global exists in this port yet, so
-// the reset is vacuously complete.
-pub fn ResetLogicalStreamingState() {}
+// Clear logical streaming state during (sub)transaction abort (logical.c:1944).
+// Called from AbortTransaction/AbortSubTransaction via the
+// reset_logical_streaming_state seam, C's xact.c:2902/:5297 sites; this is
+// what clears CheckXidAlive when a concurrent-abort error (or any other
+// error) unwinds a prepared/streamed replay.
+pub fn ResetLogicalStreamingState() {
+    xact::SetCheckXidAlive(types_core::InvalidTransactionId);
+    xact::SetBsysscan(false);
+}
 
 pub fn UpdateDecodingStats(ctx: &mut LogicalDecodingContext) {
     let rb = &mut ctx.reorder;

@@ -56,6 +56,7 @@ copyfuncs = { path = "../../../nodes/copyfuncs" }
 fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
 lsyscache = { path = "../../../utils/cache/lsyscache" }
+pg_depend = { path = "../../../catalog/pg_depend" }
 nodememoize = { path = "../../../executor/nodememoize" }
 arrayfuncs = { path = "../../../utils/adt/arrayfuncs" }
 format_type = { path = "../../../utils/adt/format_type" }

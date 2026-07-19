@@ -120,20 +120,25 @@ pub fn exec_init_merge_join<'mcx>(
     inner_is_material: bool,
 ) -> PgResult<MergeJoinState<'mcx>> {
     debug_assert!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK) == 0);
-    assert!(
-        matches!(
-            node.join.jointype,
-            JoinType::JOIN_INNER
-                | JoinType::JOIN_LEFT
-                | JoinType::JOIN_RIGHT
-                | JoinType::JOIN_FULL
-                | JoinType::JOIN_SEMI
-                | JoinType::JOIN_ANTI
-                | JoinType::JOIN_RIGHT_ANTI
-        ),
-        "ExecInitMergeJoin (nodeMergejoin.c): jointype {:?}; RIGHT_SEMI lane unported",
-        node.join.jointype
-    );
+    if !matches!(
+        node.join.jointype,
+        JoinType::JOIN_INNER
+            | JoinType::JOIN_LEFT
+            | JoinType::JOIN_RIGHT
+            | JoinType::JOIN_FULL
+            | JoinType::JOIN_SEMI
+            | JoinType::JOIN_ANTI
+            | JoinType::JOIN_RIGHT_ANTI
+    ) {
+        // unported: ExecInitMergeJoin (nodeMergejoin.c) RIGHT_SEMI lane.
+        return Err(Box::new(
+            PgError::error(format!(
+                "merge join with join type {:?} is not yet implemented",
+                node.join.jointype
+            ))
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
     assert!(
         !node.skip_mark_restore || node.join.joinqual.is_nil(),
         "ExecInitMergeJoin (nodeMergejoin.c): skip_mark_restore with joinqual"

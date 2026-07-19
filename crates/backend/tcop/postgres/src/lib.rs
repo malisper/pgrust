@@ -8,10 +8,17 @@ use core::cell::Cell;
 
 use ::elog::ereport;
 use ::types_error::{ErrorLocation, PgResult, ERRCODE_QUERY_CANCELED, ERROR, FATAL};
+use ::types_storage::storage::ProcSignalReason;
 
 pub mod extended_query;
 pub mod main_loop;
 pub mod simple_query;
+pub mod single_user;
+pub mod stdio_wire;
+#[cfg(pgrust_sim)]
+mod sim_net;
+#[cfg(pgrust_sim)]
+mod sim_sched_demo;
 pub mod stmt_trace;
 pub mod switches;
 #[cfg(test)]
@@ -25,6 +32,10 @@ pub use extended_query::{
     pg_analyze_and_rewrite_varparams,
 };
 pub use main_loop::PostgresMain;
+pub use single_user::PostgresSingleUserMain;
+pub use stdio_wire::PostgresStdioWireMain;
+#[cfg(pgrust_sim)]
+pub use sim_net::PostgresSimNetMain;
 pub use simple_query::{
     exec_simple_query, finish_xact_command, pg_analyze_and_rewrite_fixedparams, pg_parse_query,
     pg_plan_queries, pg_plan_query, pg_rewrite_query, start_xact_command,
@@ -32,6 +43,10 @@ pub use simple_query::{
 
 pub fn init_seams() {
     postgres_seams::postgres_main::set(postgres_main_seam);
+    postgres_seams::postgres_single_user_main::set(PostgresSingleUserMain);
+    postgres_seams::postgres_stdio_wire_main::set(PostgresStdioWireMain);
+    #[cfg(pgrust_sim)]
+    postgres_seams::postgres_sim_net_main::set(PostgresSimNetMain);
     postgres_seams::check_for_interrupts::set(check_for_interrupts);
     postgres_seams::die::set(die);
     postgres_seams::statement_cancel_handler::set(StatementCancelHandler);
@@ -116,6 +131,23 @@ thread_local! {
     static DOING_EXTENDED_QUERY_MESSAGE: Cell<bool> = const { Cell::new(false) };
     static IGNORE_TILL_SYNC: Cell<bool> = const { Cell::new(false) };
     static DOING_COMMAND_READ: Cell<bool> = const { Cell::new(false) };
+    // EchoQuery / UseSemiNewlineNewline (postgres.c:154-155): the single-user
+    // -E and -j switches.
+    static ECHO_QUERY: Cell<bool> = const { Cell::new(false) };
+    static USE_SEMI_NEWLINE_NEWLINE: Cell<bool> = const { Cell::new(false) };
+}
+
+pub(crate) fn echo_query() -> bool {
+    ECHO_QUERY.with(Cell::get)
+}
+pub(crate) fn set_echo_query(v: bool) {
+    ECHO_QUERY.with(|c| c.set(v));
+}
+pub(crate) fn use_semi_newline_newline() -> bool {
+    USE_SEMI_NEWLINE_NEWLINE.with(Cell::get)
+}
+pub(crate) fn set_use_semi_newline_newline(v: bool) {
+    USE_SEMI_NEWLINE_NEWLINE.with(|c| c.set(v));
 }
 
 pub(crate) fn xact_started() -> bool {
@@ -148,11 +180,9 @@ pub(crate) fn loc(line: i32, func: &'static str) -> ErrorLocation {
 }
 
 pub(crate) fn get_current_timestamp() -> types_core::TimestampTz {
-    const PG_EPOCH_OFFSET_US: i64 = 946_684_800_000_000; // 2000-01-01 - 1970-01-01
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock before 1970");
-    now.as_micros() as i64 - PG_EPOCH_OFFSET_US
+    // DST P2 (contract §1.2, census dedupe (c)): the private SystemTime
+    // duplicate deleted; the seam is the one GetCurrentTimestamp path.
+    timestamp_seams::get_current_timestamp::call()
 }
 
 
@@ -174,6 +204,152 @@ thread_local! {
 pub fn HandleRecoveryConflictInterrupt(reason: u32) {
     RECOVERY_CONFLICT_PENDING_REASONS.with(|c| c.set(c.get() | (1 << reason)));
     init_small::globals::SetInterruptPending(true);
+}
+
+// errdetail_recovery_conflict (postgres.c:2553).
+fn errdetail_recovery_conflict(reason: ProcSignalReason) -> &'static str {
+    use ProcSignalReason::*;
+    match reason {
+        PROCSIG_RECOVERY_CONFLICT_BUFFERPIN => "User was holding shared buffer pin for too long.",
+        PROCSIG_RECOVERY_CONFLICT_LOCK => "User was holding a relation lock for too long.",
+        PROCSIG_RECOVERY_CONFLICT_TABLESPACE => {
+            "User was or might have been using tablespace that must be dropped."
+        }
+        PROCSIG_RECOVERY_CONFLICT_SNAPSHOT => {
+            "User query might have needed to see row versions that must be removed."
+        }
+        PROCSIG_RECOVERY_CONFLICT_LOGICALSLOT => {
+            "User was using a logical replication slot that must be invalidated."
+        }
+        PROCSIG_RECOVERY_CONFLICT_STARTUP_DEADLOCK => {
+            "User transaction caused buffer deadlock with recovery."
+        }
+        PROCSIG_RECOVERY_CONFLICT_DATABASE => {
+            "User was connected to a database that must be dropped."
+        }
+        _ => "",
+    }
+}
+
+// ProcessRecoveryConflictInterrupt (postgres.c:3101) — one conflict reason.
+// C's switch-with-fallthroughs rendered as sequential gates.
+fn ProcessRecoveryConflictInterrupt(reason: ProcSignalReason) -> PgResult<()> {
+    use init_small::globals as g;
+    use ProcSignalReason::*;
+
+    // STARTUP_DEADLOCK: if we aren't waiting for a lock we can never deadlock.
+    if reason == PROCSIG_RECOVERY_CONFLICT_STARTUP_DEADLOCK
+        && lock::GetAwaitedLockHashcode().is_none()
+    {
+        return Ok(());
+    }
+
+    if matches!(
+        reason,
+        PROCSIG_RECOVERY_CONFLICT_STARTUP_DEADLOCK | PROCSIG_RECOVERY_CONFLICT_BUFFERPIN
+    ) {
+        // BUFFERPIN: nothing to do unless we block the Startup process.
+        // STARTUP_DEADLOCK: if the startup process is not waiting for a
+        // buffer pin (i.e. also waiting for locks), have ProcSleep check
+        // for deadlocks.
+        if !bufmgr::HoldingBufferPinThatDelaysRecovery() {
+            if reason == PROCSIG_RECOVERY_CONFLICT_STARTUP_DEADLOCK
+                && lmgr_proc::GetStartupBufferPinWaitBufId() < 0
+            {
+                lmgr_proc::CheckDeadLockAlert();
+            }
+            return Ok(());
+        }
+        if let Some(procno) = lmgr_proc::MyProc() {
+            lmgr_proc::GetPGProcByNumber(procno)
+                .recoveryConflictPending
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        // Fall through to error handling.
+    }
+
+    if matches!(
+        reason,
+        PROCSIG_RECOVERY_CONFLICT_LOCK
+            | PROCSIG_RECOVERY_CONFLICT_TABLESPACE
+            | PROCSIG_RECOVERY_CONFLICT_SNAPSHOT
+    ) && !xact::IsTransactionOrTransactionBlock()
+    {
+        // No longer in a transaction: ignore.
+        return Ok(());
+    }
+
+    if reason != PROCSIG_RECOVERY_CONFLICT_DATABASE
+        && (reason == PROCSIG_RECOVERY_CONFLICT_LOGICALSLOT || !xact::IsSubTransaction())
+    {
+        // Not in a subtransaction (or the always-ERROR logical-slot case):
+        // an ERROR can resolve the conflict.
+        if xact::IsAbortedTransactionBlockState() {
+            // Already aborted: no cancel needed. (Aborted subtransactions
+            // must still go FATAL, hence the check placement.)
+            return Ok(());
+        }
+
+        // Idle-in-transaction sessions (DoingCommandRead) drop through to
+        // FATAL to dislodge them.
+        if !DoingCommandRead() {
+            if g::QueryCancelHoldoffCount() != 0 {
+                // Mid-message read: re-arm and defer (FE/BE sync), as in
+                // ProcessInterrupts' QueryCancelPending arm.
+                RECOVERY_CONFLICT_PENDING_REASONS.with(|c| c.set(c.get() | (1 << reason as u32)));
+                g::SetInterruptPending(true);
+                return Ok(());
+            }
+
+            lmgr_proc::LockErrorCleanup()?;
+            pgstat::database::pgstat_report_recovery_conflict(reason);
+            return Err(ereport(ERROR)
+                .errcode(types_error::ERRCODE_T_R_SERIALIZATION_FAILURE)
+                .errmsg("canceling statement due to conflict with recovery")
+                .errdetail(errdetail_recovery_conflict(reason))
+                .into_error()
+                .with_error_location(loc(3222, "ProcessRecoveryConflictInterrupt"))
+                .into());
+        }
+    }
+
+    // Retry impossible (database dropped) or ERROR could not resolve it:
+    // terminate the session.
+    pgstat::database::pgstat_report_recovery_conflict(reason);
+    Err(ereport(FATAL)
+        .errcode(if reason == PROCSIG_RECOVERY_CONFLICT_DATABASE {
+            types_error::ERRCODE_DATABASE_DROPPED
+        } else {
+            types_error::ERRCODE_T_R_SERIALIZATION_FAILURE
+        })
+        .errmsg("terminating connection due to conflict with recovery")
+        .errdetail(errdetail_recovery_conflict(reason))
+        .errhint(
+            "In a moment you should be able to reconnect to the database and repeat \
+             your command.",
+        )
+        .into_error()
+        .with_error_location(loc(3244, "ProcessRecoveryConflictInterrupt"))
+        .into())
+}
+
+// ProcessRecoveryConflictInterrupts (postgres.c:3259).
+fn ProcessRecoveryConflictInterrupts() -> PgResult<()> {
+    debug_assert!(!elog::config::proc_exit_inprogress());
+    debug_assert_eq!(init_small::globals::InterruptHoldoffCount(), 0);
+
+    let first = types_storage::storage::PROCSIG_RECOVERY_CONFLICT_FIRST as u32;
+    let last = types_storage::storage::PROCSIG_RECOVERY_CONFLICT_LAST as u32;
+    for r in first..=last {
+        let bit = 1u32 << r;
+        if RECOVERY_CONFLICT_PENDING_REASONS.with(Cell::get) & bit != 0 {
+            RECOVERY_CONFLICT_PENDING_REASONS.with(|c| c.set(c.get() & !bit));
+            // SAFETY: r is within the ProcSignalReason repr range.
+            let reason: ProcSignalReason = unsafe { std::mem::transmute(r) };
+            ProcessRecoveryConflictInterrupt(reason)?;
+        }
+    }
+    Ok(())
 }
 
 #[cold]
@@ -210,7 +386,15 @@ pub fn ProcessInterrupts() -> PgResult<()> {
                 .with_error_location(loc(3316, "ProcessInterrupts"))
                 .into());
         }
-        // C's worker-process arms are unreachable: those mains panic at launch.
+        if miscinit::GetMyBackendType() == types_core::BackendType::WalReceiver {
+            return Err(ereport(FATAL)
+                .errcode(types_error::ERRCODE_ADMIN_SHUTDOWN)
+                .errmsg("terminating walreceiver process due to administrator command")
+                .into_error()
+                .with_error_location(loc(3339, "ProcessInterrupts"))
+                .into());
+        }
+        // C's other worker-process arms are unreachable: those mains panic at launch.
         return Err(ereport(FATAL)
             .errcode(types_error::ERRCODE_ADMIN_SHUTDOWN)
             .errmsg("terminating connection due to administrator command")
@@ -296,12 +480,8 @@ pub fn ProcessInterrupts() -> PgResult<()> {
         }
     }
 
-    let conflict_reasons = RECOVERY_CONFLICT_PENDING_REASONS.with(Cell::get);
-    if conflict_reasons != 0 {
-        panic!(
-            "ProcessInterrupts: RecoveryConflictPending (reasons bitmask {conflict_reasons:#x}) \
-             but ProcessRecoveryConflictInterrupts is not ported (standby/recovery lane)"
-        );
+    if RECOVERY_CONFLICT_PENDING_REASONS.with(Cell::get) != 0 {
+        ProcessRecoveryConflictInterrupts()?;
     }
 
     if g::IdleInTransactionSessionTimeoutPending() {
@@ -365,29 +545,60 @@ pub fn ProcessInterrupts() -> PgResult<()> {
     Ok(())
 }
 
+// wasm32: the wasi libc crate exposes no SIG* names; these are the
+// thread-signal emulation's Linux-numbered space (procsignal wasm arm).
+#[cfg(not(target_family = "wasm"))]
+pub(crate) use libc::{
+    SIGCHLD, SIGFPE, SIGHUP, SIGINT, SIGKILL, SIGPIPE, SIGQUIT, SIGTERM, SIGUSR1, SIGUSR2,
+};
+#[cfg(target_family = "wasm")]
+mod wasm_signums {
+    pub const SIGHUP: i32 = 1;
+    pub const SIGINT: i32 = 2;
+    pub const SIGQUIT: i32 = 3;
+    pub const SIGFPE: i32 = 8;
+    pub const SIGKILL: i32 = 9;
+    pub const SIGUSR1: i32 = 10;
+    pub const SIGUSR2: i32 = 12;
+    pub const SIGPIPE: i32 = 13;
+    pub const SIGTERM: i32 = 15;
+    pub const SIGCHLD: i32 = 17;
+}
+#[cfg(target_family = "wasm")]
+pub(crate) use wasm_signums::*;
+
 // The C pqsignal block at PostgresMain entry (postgres.c:4217-4251), rendered
 // as pqsignal_thread dispositions drained at this thread's latch/client-IO
-// wakes. am_walsender arm (WalSndSignals: SIGUSR2 last-cycle handler) lands
-// with streaming (replication-p1 increment 3); harmless for command-only
-// walsenders, SIGUSR2 stays Ignore.
+// wakes. am_walsender arm = WalSndSignals' one delta from the regular backend
+// set: SIGUSR2 runs WalSndLastCycleHandler (drain WAL up to the shutdown
+// checkpoint, then exit) instead of Ignore.
 pub fn install_thread_signal_handlers() {
     use procsignal::ThreadSignalHandler::{Fallible, Ignore, Simple};
-    procsignal::pqsignal_thread(libc::SIGHUP, Simple(interrupt::SignalHandlerForConfigReload));
-    procsignal::pqsignal_thread(libc::SIGINT, Simple(StatementCancelHandler));
-    procsignal::pqsignal_thread(libc::SIGTERM, Fallible(die));
+    procsignal::pqsignal_thread(SIGHUP, Simple(interrupt::SignalHandlerForConfigReload));
+    procsignal::pqsignal_thread(SIGINT, Simple(StatementCancelHandler));
+    procsignal::pqsignal_thread(SIGTERM, Fallible(die));
     if init_small::globals::IsUnderPostmaster() {
-        procsignal::pqsignal_thread(libc::SIGQUIT, Simple(quickdie_handler));
+        procsignal::pqsignal_thread(SIGQUIT, Simple(quickdie_handler));
         // No C analog (SIGKILL has no handler): the crash-test injection's
         // kill-9 rendering, reachable only via procsignal::SendThreadKill.
-        procsignal::pqsignal_thread(libc::SIGKILL, Simple(kill9_handler));
+        procsignal::pqsignal_thread(SIGKILL, Simple(kill9_handler));
     } else {
-        procsignal::pqsignal_thread(libc::SIGQUIT, Fallible(die));
+        procsignal::pqsignal_thread(SIGQUIT, Fallible(die));
     }
-    procsignal::pqsignal_thread(libc::SIGPIPE, Ignore);
-    procsignal::pqsignal_thread(libc::SIGUSR1, Simple(procsignal::procsignal_sigusr1_handler));
-    procsignal::pqsignal_thread(libc::SIGUSR2, Ignore);
-    procsignal::pqsignal_thread(libc::SIGFPE, Fallible(FloatExceptionHandler));
-    procsignal::pqsignal_thread(libc::SIGCHLD, Ignore);
+    procsignal::pqsignal_thread(SIGPIPE, Ignore);
+    procsignal::pqsignal_thread(SIGUSR1, Simple(procsignal::procsignal_sigusr1_handler));
+    if walsender_seams::am_walsender()
+        && walsender_seams::wal_snd_last_cycle_handler::is_installed()
+    {
+        procsignal::pqsignal_thread(
+            SIGUSR2,
+            Simple(|| walsender_seams::wal_snd_last_cycle_handler::call()),
+        );
+    } else {
+        procsignal::pqsignal_thread(SIGUSR2, Ignore);
+    }
+    procsignal::pqsignal_thread(SIGFPE, Fallible(FloatExceptionHandler));
+    procsignal::pqsignal_thread(SIGCHLD, Ignore);
 }
 
 fn quickdie_handler() {
@@ -403,7 +614,7 @@ fn kill9_handler() {
         elog::config::set_where_to_send_output(types_dest::CommandDest::None);
     }
     elog::clear_emit_context_callbacks();
-    ipc::exit_thread_killed(libc::SIGKILL)
+    ipc::exit_thread_killed(SIGKILL)
 }
 
 pub fn die() -> PgResult<()> {
@@ -537,6 +748,7 @@ thread_local! {
     static SAVE_RUSAGE: Cell<Option<(libc::rusage, libc::timeval)>> = const { Cell::new(None) };
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn getrusage_self() -> libc::rusage {
     // SAFETY: plain libc call filling a zeroed out-struct.
     unsafe {
@@ -544,6 +756,15 @@ fn getrusage_self() -> libc::rusage {
         libc::getrusage(libc::RUSAGE_SELF, &mut r);
         r
     }
+}
+
+// wasm32: WASI has no getrusage (wasi-libc defines no symbol; calling would
+// fail at link) — zeroed snapshot, the pg_rusage wasm arm's shape.
+#[cfg(target_family = "wasm")]
+fn getrusage_self() -> libc::rusage {
+    // SAFETY: rusage is plain data; a zeroed struct is the documented
+    // "no counters on this platform" value.
+    unsafe { core::mem::zeroed() }
 }
 
 fn gettimeofday_now() -> libc::timeval {
@@ -596,6 +817,11 @@ pub fn ShowUsage(title: &str) -> PgResult<()> {
         "!\t[{}.{:06} s user, {}.{:06} s system total]\n",
         user.tv_sec, user.tv_usec, sys.tv_sec, sys.tv_usec,
     ));
+    // wasm32: WASI's rusage carries only ru_utime/ru_stime; the counters
+    // below don't exist on the type (C's own ShowUsage guards the
+    // equivalent section with !defined(WIN32)).
+    #[cfg(not(target_family = "wasm"))]
+    {
     #[cfg(target_os = "macos")]
     let maxrss = r.ru_maxrss / 1024;
     #[cfg(not(target_os = "macos"))]
@@ -633,6 +859,7 @@ pub fn ShowUsage(title: &str) -> PgResult<()> {
         r.ru_nvcsw,
         r.ru_nivcsw,
     ));
+    }
 
     if str_.ends_with('\n') {
         str_.pop();

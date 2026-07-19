@@ -43,7 +43,9 @@
 
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::Arc;
+
+use pgsync::{Condvar, Mutex, OnceLock};
 
 use types_core::{InvalidOid, Oid};
 use types_error::WARNING;
@@ -91,6 +93,15 @@ impl StandingEngagement {
             Some(t)
         } else {
             self.claimed.fetch_sub(1, SeqCst);
+            // The leader's Condvar join (close_and_await) may have observed
+            // the transient inflated `claimed` at its under-lock check and
+            // parked on it; unlike the poll it replaced, a cv join is not
+            // lost-wake-tolerant, so the settling decrement carries the same
+            // lock-mediated wake as a detach. (Never runs under the gang
+            // lock: try_claim is called after the wake scope releases it.)
+            let (lock, cv) = gang();
+            drop(pgsync::lock(lock));
+            cv.notify_all();
             None
         }
     }
@@ -107,10 +118,20 @@ struct DetachGuard<'a> {
 
 impl Drop for DetachGuard<'_> {
     fn drop(&mut self) {
+        // The modeled detach wake (loom spec: runtime/tests/loom.rs
+        // `standing_gang_detach_count_join_no_lost_wake`): bump `detached`
+        // FIRST, then a lock-mediated notify — either the leader sees the
+        // new count at its under-lock check in close_and_await, or it is
+        // already parked when the notify fires. The leader latch set stays:
+        // the lanev2 leader poll loops (runtime_scan et al.) park on the
+        // leader latch between their own completion re-polls.
         self.entry.detached.fetch_add(1, SeqCst);
         latch::SetLatch(types_storage::latch::LatchHandle::proc(
             self.entry.shared.parallel_leader_proc_number,
         ));
+        let (lock, cv) = gang();
+        drop(pgsync::lock(lock));
+        cv.notify_all();
     }
 }
 
@@ -258,24 +279,34 @@ pub fn try_engage(shared: &Arc<ParallelShared>, dop: usize) -> Option<Arc<Standi
 /// (abort the RG first — drives observe it at the next morsel boundary).
 pub fn close_and_await(entry: &Arc<StandingEngagement>) {
     entry.closed.store(true, SeqCst);
-    {
-        let (lock, cv) = gang();
-        let mut g = lock.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(cur) = &g.current {
-            if Arc::ptr_eq(cur, entry) {
-                g.current = None;
-            }
+    let (lock, cv) = gang();
+    let mut g = pgsync::lock(lock);
+    if let Some(cur) = &g.current {
+        if Arc::ptr_eq(cur, entry) {
+            g.current = None;
         }
-        // Wake ticketless workers parked on the board state.
-        cv.notify_all();
     }
+    // Wake ticketless workers parked on the board state.
+    cv.notify_all();
     // Post-close claim race: try_claim rechecks `closed` after its
     // fetch_add and returns over-claims, so `claimed` is stable once
     // closed is visible and every claimer either detaches or never held
-    // a ticket.
+    // a ticket; an over-claim's settling decrement carries its own wake
+    // (see try_claim).
+    //
+    // The detach-count Condvar join (permit step-3 conversion, census §3
+    // row 1): replaces the wait_parallel_finish_quantum latch-poll with the
+    // lost-wake-FREE shape the loom model
+    // `standing_gang_detach_count_join_no_lost_wake` pins — the condition is
+    // re-checked under the gang lock, and every counter movement notifies
+    // through the same lock, so the wait can never park past the last
+    // detach. Interrupt-opacity is unchanged (the poll discarded cancel
+    // dispositions here too; the wait stays bounded by one drive teardown
+    // because detach is Drop-guaranteed on the workers).
     while entry.detached.load(SeqCst) < entry.claimed.load(SeqCst) {
-        super::wait_parallel_finish_quantum();
+        g = cv.wait(g).unwrap_or_else(|p| p.into_inner());
     }
+    drop(g);
 }
 
 /// DROP DATABASE rider (parallel_pool_retire_db seam, alongside wpool's):

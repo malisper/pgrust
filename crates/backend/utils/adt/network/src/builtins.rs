@@ -304,6 +304,21 @@ pub fn fc_network_subset_support(
     Ok(Datum::from_usize(0))
 }
 
+// wasm32: the wasi libc crate has no netdb/socket constants; musl values.
+// Sessions on wasm are always socketless (ip::sockaddr_family reads
+// AF_UNSPEC), so the quartet below returns NULL as C's ss_family switch does.
+#[cfg(not(target_family = "wasm"))]
+use libc::{AF_INET, AF_INET6, NI_NUMERICHOST, NI_NUMERICSERV};
+#[cfg(target_family = "wasm")]
+mod wasm_netconsts {
+    pub const AF_INET: i32 = 2;
+    pub const AF_INET6: i32 = 10;
+    pub const NI_NUMERICHOST: i32 = 1;
+    pub const NI_NUMERICSERV: i32 = 2;
+}
+#[cfg(target_family = "wasm")]
+use wasm_netconsts::*;
+
 // network.c session-introspection quartet (inet_client_addr &c). Unix-socket
 // and socketless sessions return NULL, as C's ss_family switch does.
 fn session_addr(fcinfo: &mut Fcinfo, local: bool) -> PgResult<Datum> {
@@ -315,7 +330,7 @@ fn session_addr(fcinfo: &mut Fcinfo, local: bool) -> PgResult<Datum> {
         &sa,
         Some(&mut host),
         None,
-        libc::NI_NUMERICHOST | libc::NI_NUMERICSERV,
+        NI_NUMERICHOST | NI_NUMERICSERV,
     );
     if rc != 0 {
         return Ok(fcinfo.return_null());
@@ -334,7 +349,7 @@ fn session_port(fcinfo: &mut Fcinfo, local: bool) -> PgResult<Datum> {
         &sa,
         None,
         Some(&mut serv),
-        libc::NI_NUMERICHOST | libc::NI_NUMERICSERV,
+        NI_NUMERICHOST | NI_NUMERICSERV,
     );
     if rc != 0 {
         return Ok(fcinfo.return_null());
@@ -350,14 +365,16 @@ fn session_sockaddr(local: bool) -> Option<::ip::SockAddr> {
     }
     let sa = ::init_small::globals::WithMyProcPort(|p| if local { p.laddr } else { p.raddr });
     match ::ip::sockaddr_family(&sa) {
-        libc::AF_INET | libc::AF_INET6 => Some(sa),
+        AF_INET | AF_INET6 => Some(sa),
         _ => None,
     }
 }
 
-// network.c:2060 clean_ipv6_addr.
-fn clean_ipv6_addr(family: i32, addr: &mut String) {
-    if family == libc::AF_INET6 {
+// network.c:2060 clean_ipv6_addr — drop any '%zone' suffix from an IPv6
+// numeric-host string (stored inet values carry no zone). pub: C exports it
+// through builtins.h for pgstatfuncs.c's client_addr surfacing (C:541/956).
+pub fn clean_ipv6_addr(family: i32, addr: &mut String) {
+    if family == AF_INET6 {
         if let Some(pos) = addr.find('%') {
             addr.truncate(pos);
         }

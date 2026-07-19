@@ -80,13 +80,80 @@ fn setup() {
     fd::InitFileAccess();
 }
 
+// ---------------------------------------------------------------------------
+// Fixture routing through the ACTIVE vfs (the p4-fd-fixtures Class-B routing
+// precedent): PosixVfs under the default cfg (identical real-fs behavior to
+// the old std::fs fixtures), the SimVfs namespace under --cfg pgrust_sim.
+// The four former sim reds here were fixture-domain mismatches — fixtures
+// minted on the real fs while relmapper's fd-routed IO ran in the sim
+// namespace ("pg_filenode.map.tmp: No such file or directory").
+// ---------------------------------------------------------------------------
+
+fn cpath(path: &str) -> std::ffi::CString {
+    std::ffi::CString::new(path).unwrap()
+}
+
+fn vfs_mkdir_p(path: &str) {
+    let mut prefix = String::new();
+    for comp in path.split('/') {
+        if comp.is_empty() {
+            continue;
+        }
+        prefix.push('/');
+        prefix.push_str(comp);
+        let rc = vfs::mkdir(&cpath(&prefix), 0o700);
+        assert!(
+            rc == 0 || vfs::get_errno() == libc::EEXIST,
+            "vfs_mkdir_p({prefix}): errno {}",
+            vfs::get_errno()
+        );
+    }
+}
+
+fn vfs_write_file(path: &str, data: &[u8]) {
+    let fd = vfs::open(&cpath(path), libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC, 0o600);
+    assert!(fd >= 0, "vfs_write_file open({path}): errno {}", vfs::get_errno());
+    if !data.is_empty() {
+        assert_eq!(vfs::pwrite(fd, data, 0), data.len() as isize, "{path}");
+    }
+    assert_eq!(vfs::close(fd), 0);
+}
+
+fn vfs_read_file(path: &str) -> Vec<u8> {
+    let fd = vfs::open(&cpath(path), libc::O_RDONLY, 0);
+    assert!(fd >= 0, "vfs_read_file open({path}): errno {}", vfs::get_errno());
+    let mut out = Vec::new();
+    let mut buf = [0u8; 4096];
+    let mut off = 0i64;
+    loop {
+        let n = vfs::pread(fd, &mut buf, off);
+        assert!(n >= 0, "vfs_read_file pread({path}): errno {}", vfs::get_errno());
+        if n == 0 {
+            break;
+        }
+        out.extend_from_slice(&buf[..n as usize]);
+        off += n as i64;
+    }
+    assert_eq!(vfs::close(fd), 0);
+    out
+}
+
+fn vfs_remove_file(path: &str) {
+    assert_eq!(vfs::unlink(&cpath(path)), 0, "vfs_remove_file({path})");
+}
+
+/// Per-test scratch dir, present in BOTH domains: minted on the real fs (the
+/// default-cfg vfs) and mirrored into the active vfs namespace (a no-op
+/// EEXIST walk under the default cfg; the SimVfs mirror under sim).
 fn scratch_dir(tag: &str) -> String {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir =
         std::env::temp_dir().join(format!("pgrust_relmapper_{}_{tag}_{n}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    dir.to_str().unwrap().to_owned()
+    let dir = dir.to_str().unwrap().to_owned();
+    vfs_mkdir_p(&dir);
+    dir
 }
 
 fn sample_map(entries: &[(Oid, RelFileNumber)]) -> RelMapFile {
@@ -221,22 +288,22 @@ fn write_read_roundtrip_and_corruption() {
     );
 
     let path = format!("{dir}/{RELMAPPER_FILENAME}");
-    let mut bytes = std::fs::read(&path).unwrap();
+    let mut bytes = vfs_read_file(&path);
     bytes[16] ^= 0xFF;
-    std::fs::write(&path, &bytes).unwrap();
+    vfs_write_file(&path, &bytes);
     let err = read_relmap_file(&mut got, &dir, false, ERROR).unwrap_err();
     assert!(err.to_string().contains("incorrect checksum"));
 
     bytes[0..4].copy_from_slice(&0i32.to_ne_bytes());
-    std::fs::write(&path, &bytes).unwrap();
+    vfs_write_file(&path, &bytes);
     let err = read_relmap_file(&mut got, &dir, false, ERROR).unwrap_err();
     assert!(err.to_string().contains("contains invalid data"));
 
-    std::fs::write(&path, &bytes[..100]).unwrap();
+    vfs_write_file(&path, &bytes[..100]);
     let err = read_relmap_file(&mut got, &dir, false, ERROR).unwrap_err();
     assert!(err.to_string().contains("read 100 of 524"));
 
-    std::fs::remove_file(&path).unwrap();
+    vfs_remove_file(&path);
     let err = read_relmap_file(&mut got, &dir, false, ERROR).unwrap_err();
     assert!(err.to_string().contains("could not open file"));
 }
@@ -362,6 +429,20 @@ fn bootstrap_finish_writes_both_maps() {
     std::fs::create_dir_all(format!("{root}/global")).unwrap();
     std::fs::create_dir_all(format!("{root}/base_5")).unwrap();
     let _cwd = enter_dir(&root);
+    // The vfs domain's mirror of the two relative fixture dirs. Under the
+    // default cfg the relative paths resolve in the real cwd entered above
+    // (the dirs already exist: EEXIST no-op); under sim there is no cwd —
+    // relative paths resolve against the sim root, so this mints "/global"
+    // and "/base_5" in the SimVfs namespace (the fd-fixtures enter_datadir
+    // seeding shape).
+    for d in ["global", "base_5"] {
+        let rc = vfs::mkdir(&cpath(d), 0o700);
+        assert!(
+            rc == 0 || vfs::get_errno() == libc::EEXIST,
+            "fixture mkdir({d}): errno {}",
+            vfs::get_errno()
+        );
+    }
 
     miscinit::SetProcessingMode(types_core::ProcessingMode::BootstrapProcessing);
     init_small::globals::SetDatabasePath("base_5");

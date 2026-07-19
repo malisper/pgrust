@@ -29,10 +29,23 @@ use types_startup::StartupData;
 use types_storage::latch::LatchHandle;
 use types_storage::waiteventset::{WaitEvent, WL_LATCH_SET, WL_SOCKET_READABLE};
 
+// wasm32: no SIG* names in the wasi libc crate; Linux-numbered
+// thread-signal emulation space (procsignal wasm arm).
+#[cfg(not(target_family = "wasm"))]
+use libc::{SIGHUP, SIGUSR1};
+#[cfg(target_family = "wasm")]
+const SIGHUP: i32 = 1;
+#[cfg(target_family = "wasm")]
+const SIGUSR1: i32 = 10;
+
 #[cfg(test)]
 mod tests;
 
+// wasm32: no pipes on WASI; POSIX floor (512), elog's wasm arm convention.
+#[cfg(not(target_family = "wasm"))]
 pub const PIPE_CHUNK_SIZE: usize = if libc::PIPE_BUF > 65536 { 65536 } else { libc::PIPE_BUF };
+#[cfg(target_family = "wasm")]
+pub const PIPE_CHUNK_SIZE: usize = 512;
 pub const PIPE_HEADER_SIZE: usize = 9;
 pub const PIPE_MAX_PAYLOAD: usize = PIPE_CHUNK_SIZE - PIPE_HEADER_SIZE;
 const READ_BUF_SIZE: usize = 2 * PIPE_CHUNK_SIZE;
@@ -84,8 +97,8 @@ static SYSLOGGER_EXITED: AtomicBool = AtomicBool::new(false);
 
 pub fn collector_kill(signo: i32) {
     match signo {
-        libc::SIGUSR1 => ROTATION_REQUESTED.store(true, Relaxed),
-        libc::SIGHUP => CONFIG_RELOAD_PENDING.store(true, Relaxed),
+        SIGUSR1 => ROTATION_REQUESTED.store(true, Relaxed),
+        SIGHUP => CONFIG_RELOAD_PENDING.store(true, Relaxed),
         _ => return,
     }
     if let Some(l) = *SYSLOGGER_LATCH.lock().unwrap() {
@@ -393,13 +406,18 @@ pub fn SysLoggerMain(startup_data: &StartupData) -> ! {
 /// repointed at /dev/null, which is the last-writer close; then bound-wait
 /// for the collector's final flush.
 fn syslogger_drain_at_exit(_code: i32, _arg: usize) {
-    let devnull = std::ffi::CString::new("/dev/null").unwrap();
-    unsafe {
-        let fd = libc::open(devnull.as_ptr(), libc::O_WRONLY, 0);
-        if fd != -1 {
-            libc::dup2(fd, libc::STDOUT_FILENO);
-            libc::dup2(fd, libc::STDERR_FILENO);
-            libc::close(fd);
+    // wasm32: no /dev/null and no dup2 on WASI; the collector never runs
+    // (logging_collector requires pipes), so only the bound-wait remains.
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let devnull = std::ffi::CString::new("/dev/null").unwrap();
+        unsafe {
+            let fd = libc::open(devnull.as_ptr(), libc::O_WRONLY, 0);
+            if fd != -1 {
+                libc::dup2(fd, libc::STDOUT_FILENO);
+                libc::dup2(fd, libc::STDERR_FILENO);
+                libc::close(fd);
+            }
         }
     }
     for _ in 0..10_000 {
@@ -415,7 +433,13 @@ pub fn SysLogger_Start(child_slot: i32) -> PgResult<i32> {
 
     if SYSLOG_PIPE_R.load(Relaxed) < 0 {
         let mut fds = [0i32; 2];
-        if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
+        // wasm32: no pipe(2) on WASI — the logging collector cannot exist;
+        // the FATAL below is the honest outcome if it is ever requested.
+        #[cfg(not(target_family = "wasm"))]
+        let pipe_rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        #[cfg(target_family = "wasm")]
+        let pipe_rc = -1;
+        if pipe_rc < 0 {
             ereport(FATAL)
                 .with_saved_errno(last_errno())
                 .errcode_for_file_access()
@@ -472,6 +496,8 @@ pub fn SysLogger_Start(child_slot: i32) -> PgResult<i32> {
             .finish(loc("SysLogger_Start"))?;
 
         let pipe_write = SYSLOG_PIPE_W.load(Relaxed);
+        // wasm32: unreachable (pipe creation FATALed above); no dup2 on WASI.
+        #[cfg(not(target_family = "wasm"))]
         unsafe {
             use std::io::Write as _;
             let _ = std::io::stdout().flush();
@@ -492,6 +518,8 @@ pub fn SysLogger_Start(child_slot: i32) -> PgResult<i32> {
             }
             libc::close(pipe_write);
         }
+        #[cfg(target_family = "wasm")]
+        let _ = pipe_write;
         SYSLOG_PIPE_W.store(-1, Relaxed);
         elog::config::set_redirection_done(true);
         ipc::on_proc_exit(syslogger_drain_at_exit, 0);

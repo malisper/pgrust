@@ -1,0 +1,50 @@
+[package]
+name = "slotsync"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "slotsync"
+path = "src/lib.rs"
+
+[dependencies]
+timeout = { path = "../../utils/misc/timeout" }
+pgsync = { path = "../../../_support/pgsync" }
+libc = "0.2"
+mcx = { path = "../../../_support/mcx" }
+seam_core = { path = "../../../_support/seam_core" }
+types_core = { path = "../../../_support/types/types_core" }
+types_error = { path = "../../../_support/types/types_error" }
+types_storage = { path = "../../../_support/types/types_storage" }
+types_startup = { path = "../../../_support/types/types_startup" }
+elog = { path = "../../utils/error/elog" }
+guc = { path = "../../utils/misc/guc" }
+guc_tables = { path = "../../utils/misc/guc_tables" }
+init_small = { path = "../../utils/init/init_small" }
+miscinit = { path = "../../utils/init/miscinit" }
+postinit = { path = "../../utils/init/postinit" }
+interrupt = { path = "../../postmaster/interrupt" }
+postgres_tcop = { package = "postgres", path = "../../tcop/postgres" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+xact = { path = "../../access/transam/xact" }
+transam_xlog = { path = "../../access/transam/transam_xlog" }
+xlogrecovery_seams = { path = "../../access/transam/xlogrecovery_seams" }
+walreceiverfuncs_seams = { path = "../walreceiverfuncs_seams" }
+slot = { path = "../slot" }
+snapbuild = { path = "../logical/snapbuild" }
+walreceiver = { path = "../walreceiver" }
+walsender_config = { path = "../walsender_config" }
+procarray = { path = "../../storage/ipc/procarray" }
+procsignal = { path = "../../storage/ipc/procsignal" }
+ipc = { path = "../../storage/ipc/ipc" }
+latch = { path = "../../storage/ipc/latch" }
+lmgr = { path = "../../storage/lmgr/lmgr" }
+lmgr_proc = { path = "../../storage/lmgr/lmgr_proc" }
+dbcommands_seams = { path = "../../commands/dbcommands_seams" }
+ps_status_seams = { path = "../../utils/misc/ps_status_seams" }
+timestamp_seams = { path = "../../utils/adt/timestamp_seams" }
+types_tuple = { path = "../../../_support/types/types_tuple" }
+types_guc = { path = "../../../_support/types/types_guc" }
+guc_file = { path = "../../utils/misc/guc_file" }
+datum = { path = "../../../_support/types/datum" }

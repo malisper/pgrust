@@ -88,8 +88,15 @@ struct RowChainJitParams {
     protocol: unsafe extern "C" fn(*mut c_void, u64) -> i64,
 }
 
+// The JIT prologue hard-codes these offsets in emitted aarch64 loads, so
+// they are pinned for the 64-bit targets the JIT exists on. ILP32 wasm has
+// 4-byte pointers (offsets 0/4/8) and no JIT — the emitter is never
+// reached there, so the pins are gated to 64-bit.
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(core::mem::offset_of!(RowChainJitParams, ctx) == 0);
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(core::mem::offset_of!(RowChainJitParams, next_row) == 8);
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(core::mem::offset_of!(RowChainJitParams, protocol) == 16);
 
 type RowChainFn = unsafe extern "C" fn(*mut RowChainJitParams) -> i64;

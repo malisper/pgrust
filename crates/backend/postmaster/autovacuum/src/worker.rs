@@ -55,7 +55,11 @@ thread_local! {
 }
 
 // proc_exit / PANIC payloads must keep unwinding (main_loop.rs precedent).
-fn pg_error_from_panic(payload: Box<dyn std::any::Any + Send>) -> PgError {
+// Shared with the launcher (launcher.rs sigsetjmp-equivalent boundary).
+pub(crate) fn pg_error_from_panic(
+    payload: Box<dyn std::any::Any + Send>,
+    fallback_msg: &str,
+) -> PgError {
     if payload.is::<ipc::ProcExitThread>() || payload.is::<types_error::PanicExitThread>() {
         std::panic::resume_unwind(payload);
     }
@@ -66,7 +70,7 @@ fn pg_error_from_panic(payload: Box<dyn std::any::Any + Send>) -> PgError {
                 .downcast_ref::<String>()
                 .cloned()
                 .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
-                .unwrap_or_else(|| "autovacuum worker panicked".to_string());
+                .unwrap_or_else(|| fallback_msg.to_string());
             PgError::new(ERROR, msg)
         }
     }
@@ -84,15 +88,15 @@ pub fn AutoVacWorkerMain(startup_data: &StartupData) -> ! {
 
     {
         use procsignal::ThreadSignalHandler::{Fallible, Ignore, Simple};
-        procsignal::pqsignal_thread(libc::SIGHUP, Simple(interrupt::SignalHandlerForConfigReload));
-        procsignal::pqsignal_thread(libc::SIGINT, Simple(postgres::StatementCancelHandler));
-        procsignal::pqsignal_thread(libc::SIGTERM, Fallible(postgres::die));
+        procsignal::pqsignal_thread(procsignal::signums::SIGHUP, Simple(interrupt::SignalHandlerForConfigReload));
+        procsignal::pqsignal_thread(procsignal::signums::SIGINT, Simple(postgres::StatementCancelHandler));
+        procsignal::pqsignal_thread(procsignal::signums::SIGTERM, Fallible(postgres::die));
         timeout_seams::initialize_timeouts::call();
-        procsignal::pqsignal_thread(libc::SIGPIPE, Ignore);
-        procsignal::pqsignal_thread(libc::SIGUSR1, Simple(procsignal::procsignal_sigusr1_handler));
-        procsignal::pqsignal_thread(libc::SIGUSR2, Ignore);
-        procsignal::pqsignal_thread(libc::SIGFPE, Fallible(postgres::FloatExceptionHandler));
-        procsignal::pqsignal_thread(libc::SIGCHLD, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGPIPE, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGUSR1, Simple(procsignal::procsignal_sigusr1_handler));
+        procsignal::pqsignal_thread(procsignal::signums::SIGUSR2, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGFPE, Fallible(postgres::FloatExceptionHandler));
+        procsignal::pqsignal_thread(procsignal::signums::SIGCHLD, Ignore);
     }
 
     if let Err(e) = (|| -> PgResult<()> {
@@ -108,7 +112,7 @@ pub fn AutoVacWorkerMain(startup_data: &StartupData) -> ! {
     // escaped panic reaches launch_backend's SIGABRT mapping and cycles the
     // whole cluster (postgres.c run_one_iteration precedent).
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(worker_body))
-        .unwrap_or_else(|payload| Err(Box::new(pg_error_from_panic(payload))))
+        .unwrap_or_else(|payload| Err(Box::new(pg_error_from_panic(payload, "autovacuum worker panicked"))))
     {
         Ok(()) => {}
         Err(e) => {
@@ -164,7 +168,7 @@ fn worker_body() -> PgResult<()> {
 
             let launcherpid = shmem::launcher_pid();
             if launcherpid != 0 {
-                let _ = procsignal::SendThreadSignal(launcherpid, libc::SIGUSR2);
+                let _ = procsignal::SendThreadSignal(launcherpid, procsignal::signums::SIGUSR2);
             }
             dbid
         } else {
@@ -619,7 +623,7 @@ pub fn do_autovacuum() -> PgResult<()> {
                 }
                 autovacuum_do_vac_analyze(tmcx, &tab, bstrategy.clone())
             }))
-            .unwrap_or_else(|payload| Err(Box::new(pg_error_from_panic(payload))));
+            .unwrap_or_else(|payload| Err(Box::new(pg_error_from_panic(payload, "autovacuum worker panicked"))));
             match vac_result {
                 Ok(()) => {
                     g::SetQueryCancelPending(false);

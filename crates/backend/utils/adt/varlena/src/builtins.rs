@@ -1,9 +1,9 @@
 //! fmgr wrappers (`fc_*`) + the `VARLENA_BUILTINS` table for fmgr-core.
 //! bttextsortsupport is registered as a loud panic (sort lane, unrelated to
 //! aggregation); value cores live in the crate root. text/bytea recv/send
-//! ride the binary-wire fmgr frame (types_fmgr::wire). unknownrecv/unknownsend
-//! stay value-core-only (unknown is a pseudo-type; no binary wire
-//! registration in pg_proc.dat).
+//! ride the binary-wire fmgr frame (types_fmgr::wire), as do
+//! unknownrecv/unknownsend (2416/2417 — pg_type's unknown row names them as
+//! typreceive/typsend, so binary-format clients do reach them).
 
 use datum::Datum;
 use types_core::Oid;
@@ -324,6 +324,20 @@ pub fn fc_unknownin(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRe
     let s = unsafe { fcinfo.arg_cstring(0) }.to_bytes();
     let mcx = fcinfo.result_mcx();
     Ok(cstring_result(crate::unknownin(mcx, s)?))
+}
+
+pub fn fc_unknownrecv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: recv arg 0 is the live StringInfo pointer per the recv ABI.
+    let buf = unsafe { fcinfo.arg_stringinfo(0) };
+    let mcx = fcinfo.result_mcx();
+    Ok(cstring_result(crate::unknownrecv(mcx, buf)?))
+}
+
+pub fn fc_unknownsend(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 of unknownsend is a non-null cstring (strict fn).
+    let s = unsafe { fcinfo.arg_cstring(0) }.to_bytes();
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::unknownsend(mcx, s)?))
 }
 
 pub fn fc_textlen(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
@@ -904,6 +918,8 @@ pub const VARLENA_BUILTINS: &[FmgrBuiltin] = &[
     b(6414, "hashbyteaextended", 2, fc_hashvarlenaextended),
     b(109, "unknownin", 1, fc_unknownin),
     b(110, "unknownout", 1, fc_unknownout),
+    b(2416, "unknownrecv", 1, fc_unknownrecv),
+    b(2417, "unknownsend", 1, fc_unknownsend),
     b(157, "textne", 2, fc_textne),
     b(360, "bttextcmp", 2, fc_bttextcmp),
     b(458, "text_larger", 2, fc_text_larger),

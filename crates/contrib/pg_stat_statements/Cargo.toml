@@ -39,3 +39,4 @@ utility = { path = "../../backend/tcop/utility" }
 parallel = { path = "../../backend/access/transam/parallel" }
 ipc = { path = "../../backend/storage/ipc/ipc" }
 rustc-hash = "2"
+exec_hooks = { path = "../exec_hooks" }

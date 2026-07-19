@@ -112,8 +112,10 @@ fn tblspc_redo(record: &mut XLogReaderState) -> PgResult<()> {
     tablespace_seams::tblspc_redo::call(record)
 }
 
-unported_redo! {
-    replorigin_redo => "backend-replication-origin";
+// replorigin_redo (origin.c) lives in the origin crate (off the serial
+// path); installed as the origin_seams::replorigin_redo seam.
+fn replorigin_redo(record: &mut XLogReaderState) -> PgResult<()> {
+    origin_seams::replorigin_redo::call(record)
 }
 
 // btree/gin/gist/spgist rm_startup/rm_cleanup only allocate the recovery

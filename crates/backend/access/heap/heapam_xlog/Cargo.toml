@@ -10,6 +10,7 @@ types_error = { path = "../../../../_support/types/types_error" }
 types_storage = { path = "../../../../_support/types/types_storage" }
 types_tuple = { path = "../../../../_support/types/types_tuple" }
 elog = { path = "../../../utils/error/elog" }
+init_small = { path = "../../../utils/init/init_small" }
 xlogutils = { path = "../../transam/xlogutils" }
 xlogreader_seams = { path = "../../transam/xlogreader_seams" }
 bufmgr_seams = { path = "../../../storage/buffer/bufmgr_seams" }

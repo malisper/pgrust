@@ -65,7 +65,8 @@ thread_local! {
     static PARALLEL_VACUUM_WORKER_DELAY_NS: Cell<i64> = const { Cell::new(0) };
     // C's zero-initialized static last_report_time: None forces an immediate
     // first report.
-    static LAST_DELAY_REPORT: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
+    // DST P2 (contract §1.3): cost-delay pacing stamps in pg_clock's mono domain.
+    static LAST_DELAY_REPORT: Cell<Option<pg_clock::MonoStamp>> = const { Cell::new(None) };
 }
 
 const PARALLEL_VACUUM_DELAY_REPORT_INTERVAL_NS: i64 = 1_000_000_000;
@@ -1052,7 +1053,7 @@ pub fn vac_update_relstats(
     frozenxid: ::types_core::TransactionId,
     minmulti: MultiXactId,
     in_outer_xact: bool,
-) -> PgResult<()> {
+) -> PgResult<(bool, bool)> {
     let relid = relation.rd_id;
     let cx = ::mcx::MemoryContext::new("vac_update_relstats");
     let mcx = cx.mcx();
@@ -1123,6 +1124,7 @@ pub fn vac_update_relstats(
     // (corruption) is overwritten with a WARNING; same for relminmxid.
     let oldfrozenxid = getattr(old, Anum_pg_class_relfrozenxid, desc).as_u32();
     let mut futurexid = false;
+    let mut frozenxid_updated = false;
     if TransactionIdIsNormal(frozenxid) && oldfrozenxid != frozenxid {
         let mut update = false;
         if TransactionIdPrecedes(oldfrozenxid, frozenxid) {
@@ -1133,11 +1135,13 @@ pub fn vac_update_relstats(
         }
         if update {
             set(Anum_pg_class_relfrozenxid, ::datum::Datum::from_u32(frozenxid), &mut values, &mut replaces, &mut dirty);
+            frozenxid_updated = true;
         }
     }
 
     let oldminmulti = getattr(old, Anum_pg_class_relminmxid, desc).as_u32();
     let mut futuremxid = false;
+    let mut minmulti_updated = false;
     if MultiXactIdIsValid(minmulti) && oldminmulti != minmulti {
         let mut update = false;
         if MultiXactIdPrecedes(oldminmulti, minmulti) {
@@ -1148,6 +1152,7 @@ pub fn vac_update_relstats(
         }
         if update {
             set(Anum_pg_class_relminmxid, ::datum::Datum::from_u32(minmulti), &mut values, &mut replaces, &mut dirty);
+            minmulti_updated = true;
         }
     }
 
@@ -1178,7 +1183,7 @@ pub fn vac_update_relstats(
             ))
             .finish(loc("vac_update_relstats"))?;
     }
-    Ok(())
+    Ok((frozenxid_updated, minmulti_updated))
 }
 
 pub fn vac_update_datfrozenxid(mcx: Mcx<'_>) -> PgResult<()> {
@@ -1534,18 +1539,18 @@ pub fn vacuum_delay_point(is_analyze: bool) -> PgResult<()> {
         }
         let delay_start = guc_tables::vars::track_cost_delay_timing
             .read()
-            .then(std::time::Instant::now);
+            .then(pg_clock::MonoStamp::now);
         std::thread::sleep(std::time::Duration::from_micros((msec * 1000.0) as u64));
         if let Some(delay_start) = delay_start {
-            let delay_end = std::time::Instant::now();
-            let delay_ns = delay_end.duration_since(delay_start).as_nanos() as i64;
+            let delay_end = pg_clock::MonoStamp::now();
+            let delay_ns = delay_end.since_ns(delay_start) as i64;
             if parallel_seams::is_parallel_worker::call() {
                 debug_assert!(!is_analyze);
                 let accum = PARALLEL_VACUUM_WORKER_DELAY_NS.get() + delay_ns;
                 PARALLEL_VACUUM_WORKER_DELAY_NS.set(accum);
                 let since_last_report = LAST_DELAY_REPORT
                     .get()
-                    .map_or(i64::MAX, |t| delay_end.duration_since(t).as_nanos() as i64);
+                    .map_or(i64::MAX, |t| delay_end.since_ns(t) as i64);
                 if since_last_report >= PARALLEL_VACUUM_DELAY_REPORT_INTERVAL_NS {
                     pgstat_progress_parallel_incr_param(PROGRESS_VACUUM_DELAY_TIME, accum);
                     LAST_DELAY_REPORT.set(Some(delay_end));

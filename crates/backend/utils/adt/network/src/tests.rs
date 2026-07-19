@@ -456,3 +456,20 @@ fn session_addr_strips_the_ipv6_zone() {
     assert_eq!(session_addr_str(fc_inet_client_addr).as_deref(), Some("fe80::1"));
     assert_eq!(session_port_num(fc_inet_client_port), Some(40000));
 }
+
+#[test]
+fn clean_ipv6_addr_matches_c() {
+    // network.c:2060: only AF_INET6 strings lose their '%zone' suffix.
+    let mut s = "fe80::1%eth0".to_string();
+    crate::builtins::clean_ipv6_addr(libc::AF_INET6, &mut s);
+    assert_eq!(s, "fe80::1");
+
+    let mut s = "fe80::1".to_string();
+    crate::builtins::clean_ipv6_addr(libc::AF_INET6, &mut s);
+    assert_eq!(s, "fe80::1");
+
+    // AF_INET strings pass through untouched, '%' and all.
+    let mut s = "192.0.2.5%bogus".to_string();
+    crate::builtins::clean_ipv6_addr(libc::AF_INET, &mut s);
+    assert_eq!(s, "192.0.2.5%bogus");
+}

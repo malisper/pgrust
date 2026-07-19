@@ -1235,8 +1235,11 @@ pub fn pg_get_expr_worker(
     relid: Oid,
     pretty_flags: i32,
 ) -> PgResult<Option<String>> {
-    let node = readfuncs::stringToNode(mcx, expr_text)?;
-    let mut tst = Some(node);
+    // stringToNode (read.c) returns NULL for the "<>" null-node marker that
+    // pg_rewrite.ev_qual carries on every unconditional rule; every later
+    // step must tolerate the NULL node exactly as C does (public issue #18).
+    let node = readfuncs::stringToNodeNullable(mcx, expr_text)?;
+    let mut tst = node;
     while let Some(n) = tst {
         if n.node_tag() != NodeTag::T_List {
             break;
@@ -1251,29 +1254,40 @@ pub fn pg_get_expr_worker(
     }
 
     // C: bms_is_subset(pull_varnos(NULL, node), {1}) / bms_is_empty.
-    let relids = vars::pull_varnos(mcx, node)?;
-    if relid != InvalidOid {
-        if relids.iter().any(|v| v != 1) {
-            return Err(PgError::error(
-                "expression contains variables of more than one relation".to_string(),
-            )
-            .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
-            .into());
+    // pull_varnos of the NULL node is the empty set, which passes both arms.
+    if let Some(n) = node {
+        let relids = vars::pull_varnos(mcx, n)?;
+        if relid != InvalidOid {
+            if relids.iter().any(|v| v != 1) {
+                return Err(PgError::error(
+                    "expression contains variables of more than one relation".to_string(),
+                )
+                .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
+                .into());
+            }
+        } else if !relids.is_empty() {
+            return Err(PgError::error("expression contains variables".to_string())
+                .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
+                .into());
         }
-    } else if !relids.is_empty() {
-        return Err(PgError::error("expression contains variables".to_string())
-            .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
-            .into());
     }
 
     if relid != InvalidOid {
         // Divergence from C: try_relation_open existence probe without the
-        // AccessShareLock (relation_open machinery is another lane).
+        // AccessShareLock (relation_open machinery is another lane). The
+        // probe stays BEFORE deparse: C returns SQL NULL for a vanished
+        // relation even when the node itself is NULL.
         if pg_class_row(relid)?.is_none() {
             return Ok(None);
         }
     }
-    Ok(Some(deparse_expression_pretty(mcx, node, relid, false, pretty_flags)?))
+    match node {
+        Some(n) => Ok(Some(deparse_expression_pretty(mcx, n, relid, false, pretty_flags)?)),
+        // get_rule_expr (ruleutils.c): "if (node == NULL) return;" — the
+        // deparse of the NULL node is the EMPTY STRING, not SQL NULL
+        // (verified against live C 18.3: is_null=f, is_empty=t).
+        None => Ok(Some(String::new())),
+    }
 }
 
 const PARTITION_STRATEGY_HASH: i8 = b'h' as i8;

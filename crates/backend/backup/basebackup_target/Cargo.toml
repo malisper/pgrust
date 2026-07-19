@@ -9,10 +9,14 @@ name = "basebackup_target"
 path = "src/lib.rs"
 
 [dependencies]
+libc = "0.2"
 mcx = { path = "../../../_support/mcx" }
+types_core = { path = "../../../_support/types/types_core" }
 types_error = { path = "../../../_support/types/types_error" }
+types_storage = { path = "../../../_support/types/types_storage" }
 elog = { path = "../../utils/error/elog" }
 sink = { path = "../sink" }
-
-[dev-dependencies]
-types_core = { path = "../../../_support/types/types_core" }
+fd = { path = "../../storage/file/fd" }
+xact_seams = { path = "../../access/transam/xact_seams" }
+miscinit_seams = { path = "../../utils/init/miscinit_seams" }
+acl_seams = { path = "../../utils/adt/acl_seams" }

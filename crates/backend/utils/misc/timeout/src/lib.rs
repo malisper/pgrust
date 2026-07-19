@@ -7,9 +7,18 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+// pgsync by crate law (permit-s5, census row 16): the slots registry is
+// locked by the (now door-registered) timer thread AND by arming backends;
+// a raw std lock shared with a registered thread is the
+// permit-holder-blocks-raw watchdog wedge shape (s2 AVAILABLE precedent).
+// Native arm = identical std re-exports (zero cost).
+use pgsync::{Mutex, OnceLock};
+
+use pg_clock::Deadline;
 
 use init_small::globals;
 use types_core::TimestampTz;
@@ -82,7 +91,11 @@ thread_local! {
 }
 
 struct TimerSlot {
-    deadline: Option<Instant>,
+    // DST P2 (contract §1.3): deadlines live in pg_clock's monotonic domain
+    // (law §0.3 keeps them coherent with the backend's wall-domain fin_time
+    // under sim); the timer thread parks on the Waiter instead of a raw
+    // Condvar, so statement/deadlock timeouts are virtual-time-driven.
+    deadline: Option<Deadline>,
     latch: Option<LatchHandle>,
     posted: Arc<AtomicBool>,
     // The owner's InterruptPending: raised with `posted` so a CPU-bound
@@ -92,7 +105,9 @@ struct TimerSlot {
 
 struct TimerShared {
     slots: Mutex<HashMap<i32, TimerSlot>>,
-    cv: Condvar,
+    // The timer thread's packed waiter::WakerHandle word (0 until the thread
+    // publishes it). Armers unpark through this instead of a Condvar notify.
+    timer_waker: AtomicU64,
 }
 
 fn timer() -> &'static TimerShared {
@@ -100,9 +115,20 @@ fn timer() -> &'static TimerShared {
     TIMER.get_or_init(|| {
         let shared: &'static TimerShared = Box::leak(Box::new(TimerShared {
             slots: Mutex::new(HashMap::new()),
-            cv: Condvar::new(),
+            timer_waker: AtomicU64::new(0),
         }));
-        std::thread::Builder::new()
+        // PERMIT-S5 (P3 census row 16): the timer thread spawns through the
+        // pgsync::thread child-registering wrapper — under the permit
+        // scheduler it registers a slot (synthetic vpid, spawn-fenced) and
+        // gates on its first grant, so its deadline parks drive virtual
+        // time and its fire-wakes are scheduled ops instead of External
+        // (OS-timed) wakes. Native arm = the std re-export, byte-identical.
+        // wasm32: wasm32-wasip1 has no threads, so no timer can fire
+        // asynchronously (and no SIGALRM exists either) — armed timeouts
+        // are recorded but never fire. Known limitation of the boot
+        // increment: statement_timeout/lock_timeout are inert on wasm.
+        #[cfg(not(target_family = "wasm"))]
+        pgsync::thread::Builder::new()
             .name("pg-timeout-timer".into())
             .spawn(move || timer_thread(shared))
             .expect("could not spawn timeout timer thread");
@@ -111,15 +137,23 @@ fn timer() -> &'static TimerShared {
 }
 
 fn timer_thread(shared: &'static TimerShared) -> ! {
-    let mut slots = shared.slots.lock().unwrap();
     loop {
-        let now = Instant::now();
-        let mut nearest: Option<Instant> = None;
+        // Dekker discipline (waiter::current_handle doc): publish the waker
+        // handle BEFORE scanning, then scan, then park. An armer inserts its
+        // slot and THEN unparks — so either its insert is seen by this scan,
+        // or its unpark hits the just-published handle and the park below
+        // returns immediately (unparks are latched). No arm can be lost.
+        shared
+            .timer_waker
+            .store(waiter::current_handle().as_u64(), Ordering::SeqCst);
+
+        let mut slots = shared.slots.lock().unwrap();
+        let mut nearest: Option<Deadline> = None;
         let mut fired: Vec<(Arc<AtomicBool>, &'static AtomicBool, Option<LatchHandle>)> =
             Vec::new();
         for slot in slots.values_mut() {
             if let Some(dl) = slot.deadline {
-                if dl <= now {
+                if dl.expired() {
                     slot.deadline = None;
                     fired.push((Arc::clone(&slot.posted), slot.interrupt_flag, slot.latch));
                 } else if nearest.map_or(true, |n| dl < n) {
@@ -127,8 +161,8 @@ fn timer_thread(shared: &'static TimerShared) -> ! {
                 }
             }
         }
+        drop(slots);
         if !fired.is_empty() {
-            drop(slots);
             for (posted, interrupt_flag, latch) in fired {
                 // The kill(pid, SIGALRM) edge: post, then wake the backend.
                 posted.store(true, Ordering::SeqCst);
@@ -137,16 +171,24 @@ fn timer_thread(shared: &'static TimerShared) -> ! {
                     latch::SetLatch(latch);
                 }
             }
-            slots = shared.slots.lock().unwrap();
             continue;
         }
-        slots = match nearest {
+        match nearest {
             Some(dl) => {
-                let wait = dl.saturating_duration_since(now);
-                shared.cv.wait_timeout(slots, wait).unwrap().0
+                let rem = dl.remaining_ms();
+                if rem > 0 {
+                    // Timed park: deadline judged by the installed
+                    // WaiterClock, whose now_ms delegates to pg_clock (§1.1
+                    // invariant) — one timeline with `dl`.
+                    let _ = waiter::park_timeout(Duration::from_millis(rem as u64));
+                }
             }
-            None => shared.cv.wait(slots).unwrap(),
-        };
+            // Untimed park until the next arm (recheck cadence backstop
+            // applies, as for every untimed waiter park).
+            None => {
+                let _ = waiter::park();
+            }
+        }
     }
 }
 
@@ -164,13 +206,17 @@ fn arm_timer(delay: Duration) {
     slots.insert(
         globals::MyProcPid(),
         TimerSlot {
-            deadline: Some(Instant::now() + delay),
+            deadline: Some(Deadline::after(delay)),
             latch: globals::MyLatch(),
             posted,
             interrupt_flag: globals::interrupt_pending_flag(),
         },
     );
-    shared.cv.notify_one();
+    drop(slots);
+    // Insert-then-unpark (see the timer_thread Dekker note). A 0 word
+    // (thread not yet published) is a Stale no-op — the thread's first scan
+    // runs after publish and sees this slot.
+    let _ = waiter::unpark_word(shared.timer_waker.load(Ordering::SeqCst));
 }
 
 fn disable_alarm() {

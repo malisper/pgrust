@@ -171,18 +171,18 @@ pub fn WalSummarizerMain(startup_data: &StartupData) -> ! {
 
     {
         use procsignal::ThreadSignalHandler::{Ignore, Simple};
-        procsignal::pqsignal_thread(libc::SIGHUP, Simple(interrupt::SignalHandlerForConfigReload));
+        procsignal::pqsignal_thread(procsignal::signums::SIGHUP, Simple(interrupt::SignalHandlerForConfigReload));
         procsignal::pqsignal_thread(
-            libc::SIGINT,
+            procsignal::signums::SIGINT,
             Simple(interrupt::SignalHandlerForShutdownRequest),
         );
         procsignal::pqsignal_thread(
-            libc::SIGTERM,
+            procsignal::signums::SIGTERM,
             Simple(interrupt::SignalHandlerForShutdownRequest),
         );
-        procsignal::pqsignal_thread(libc::SIGALRM, Ignore);
-        procsignal::pqsignal_thread(libc::SIGPIPE, Ignore);
-        procsignal::pqsignal_thread(libc::SIGUSR2, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGALRM, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGPIPE, Ignore);
+        procsignal::pqsignal_thread(procsignal::signums::SIGUSR2, Ignore);
     }
 
     ipc::on_shmem_exit(wal_summarizer_shutdown, 0);
@@ -1059,8 +1059,9 @@ fn MaybeRemoveOldWalSummaries(mcx: Mcx<'_>) -> PgResult<()> {
     }
     REDO_POINTER_AT_LAST_SUMMARY_REMOVAL.set(redo_pointer);
 
-    let cutoff_time = unsafe { libc::time(std::ptr::null_mut()) }
-        - wal_summary_keep_time() as i64 * 60;
+    // DST P2 (contract §1.2): retention cutoff on pg_clock::wall_secs().
+    // (The file-mtime duration_since below is P1 SimVfs territory — left raw.)
+    let cutoff_time = pg_clock::wall_secs() - wal_summary_keep_time() as i64 * 60;
 
     let mut wslist = GetWalSummaries(mcx, 0, InvalidXLogRecPtr, InvalidXLogRecPtr)?;
 
@@ -1159,30 +1160,26 @@ pub fn RemoveWalSummaryIfOlderThan(ws: &WalSummaryFile, cutoff_time: i64) -> PgR
         ws.end_lsn as u32
     );
 
-    let md = match std::fs::symlink_metadata(&path) {
-        Ok(md) => md,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => {
-            ereport(ERROR)
-                .with_saved_errno(e.raw_os_error().unwrap_or(0))
-                .errcode_for_file_access()
-                .errmsg(format!("could not stat file \"{path}\": %m"))
-                .finish(loc("RemoveWalSummaryIfOlderThan"))?;
-            unreachable!();
+    let mut md = fd::FileInfo::zeroed();
+    if fd::pg_lstat(&path, &mut md) != 0 {
+        let en = fd::get_errno();
+        if en == libc::ENOENT {
+            return Ok(());
         }
-    };
-    let mtime = md
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(i64::MAX);
+        ereport(ERROR)
+            .with_saved_errno(en)
+            .errcode_for_file_access()
+            .errmsg(format!("could not stat file \"{path}\": %m"))
+            .finish(loc("RemoveWalSummaryIfOlderThan"))?;
+        unreachable!();
+    }
+    let mtime = if md.mtime_sec >= 0 { md.mtime_sec } else { i64::MAX };
     if mtime >= cutoff_time {
         return Ok(());
     }
-    if let Err(e) = std::fs::remove_file(&path) {
+    if fd::pg_unlink(&path) != 0 {
         ereport(ERROR)
-            .with_saved_errno(e.raw_os_error().unwrap_or(0))
+            .with_saved_errno(fd::get_errno())
             .errcode_for_file_access()
             .errmsg(format!("could not remove file \"{path}\": %m"))
             .finish(loc("RemoveWalSummaryIfOlderThan"))?;
