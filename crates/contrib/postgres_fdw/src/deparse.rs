@@ -1308,7 +1308,7 @@ fn deparse_column_ref<'mcx>(
         for opt in foreigncmds::foreign::GetForeignColumnOptions(ctx.mcx, rte.relid, varattno)?.iter()
         {
             if opt.name == "column_name" {
-                colname = Some(opt.value.to_string());
+                colname = Some(opt.require_value()?.to_string());
                 break;
             }
         }
@@ -1338,9 +1338,9 @@ pub fn deparse_relation<'mcx>(
     let mut relname: Option<String> = None;
     for opt in table.options.iter() {
         if opt.name == "schema_name" {
-            nspname = Some(opt.value.to_string());
+            nspname = Some(opt.require_value()?.to_string());
         } else if opt.name == "table_name" {
-            relname = Some(opt.value.to_string());
+            relname = Some(opt.require_value()?.to_string());
         }
     }
     let nspname = match nspname {
@@ -1434,7 +1434,7 @@ fn deparse_column_ref_buf<'mcx>(
     let mut colname: Option<String> = None;
     for opt in foreigncmds::foreign::GetForeignColumnOptions(mcx, rte.relid, varattno)?.iter() {
         if opt.name == "column_name" {
-            colname = Some(opt.value.to_string());
+            colname = Some(opt.require_value()?.to_string());
             break;
         }
     }

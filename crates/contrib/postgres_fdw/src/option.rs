@@ -146,11 +146,17 @@ fn invalid_option_error(mcx: Mcx<'_>, name: &str, catalog: Oid) -> PgResult<Box<
     Ok(Box::new(e))
 }
 
-fn mk_def_elem<'mcx>(mcx: Mcx<'mcx>, name: &'mcx str, value: &'mcx str) -> PgResult<DefElem<'mcx>> {
+fn mk_def_elem<'mcx>(
+    mcx: Mcx<'mcx>,
+    name: &'mcx str,
+    value: Option<&'mcx str>,
+) -> PgResult<DefElem<'mcx>> {
+    // C untransformRelOptions: a text element without '=' yields a DefElem
+    // with a NULL arg; defGetBoolean(NULL arg) is true, defGetString errors.
     Ok(DefElem {
         defnamespace: None,
         defname: Some(name),
-        arg: Some(Node::mk(mcx, types_nodes::String { sval: value })?),
+        arg: value.map(|v| Node::mk(mcx, types_nodes::String { sval: v })).transpose()?,
         defaction: DefElemAction::DEFELEM_UNSPEC,
         location: -1,
     })
@@ -183,10 +189,11 @@ pub(crate) fn fc_postgres_fdw_validator(
                 commands_define::defGetBoolean(&mk_def_elem(mcx, opt.name, opt.value)?)?;
             }
             "fdw_startup_cost" | "fdw_tuple_cost" => {
-                let real_val = match guc::units::parse_real(opt.value, 0) {
+                let sval = opt.require_value()?;
+                let real_val = match guc::units::parse_real(sval, 0) {
                     guc::units::ParseNum::Ok(v) => v,
                     guc::units::ParseNum::Err { .. } => {
-                        return Err(invalid_numeric_value("floating point", opt.name, opt.value));
+                        return Err(invalid_numeric_value("floating point", opt.name, sval));
                     }
                 };
                 if real_val < 0.0 {
@@ -200,13 +207,14 @@ pub(crate) fn fc_postgres_fdw_validator(
                 }
             }
             "extensions" => {
-                extract_extension_list(mcx, opt.value, true)?;
+                extract_extension_list(mcx, opt.require_value()?, true)?;
             }
             "fetch_size" | "batch_size" => {
-                let int_val = match guc::units::parse_int(opt.value, 0) {
+                let sval = opt.require_value()?;
+                let int_val = match guc::units::parse_int(sval, 0) {
                     guc::units::ParseNum::Ok(v) => v,
                     guc::units::ParseNum::Err { .. } => {
-                        return Err(invalid_numeric_value("integer", opt.name, opt.value));
+                        return Err(invalid_numeric_value("integer", opt.name, sval));
                     }
                 };
                 if int_val <= 0 {
@@ -246,8 +254,9 @@ pub(crate) fn fc_postgres_fdw_validator(
                 }
             }
             "analyze_sampling" => {
-                if !matches!(opt.value, "off" | "auto" | "random" | "system" | "bernoulli") {
-                    return Err(invalid_numeric_value("string", opt.name, opt.value));
+                let sval = opt.require_value()?;
+                if !matches!(sval, "off" | "auto" | "random" | "system" | "bernoulli") {
+                    return Err(invalid_numeric_value("string", opt.name, sval));
                 }
             }
             _ => {}

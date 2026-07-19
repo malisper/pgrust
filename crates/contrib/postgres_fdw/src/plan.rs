@@ -49,8 +49,10 @@ fn apply_server_options<'mcx>(
     mcx: Mcx<'mcx>,
     server: &foreigncmds::foreign::ForeignServer<'mcx>,
 ) -> PgResult<()> {
-    let opts: Vec<(String, String)> =
-        server.options.iter().map(|o| (o.name.to_string(), o.value.to_string())).collect();
+    let mut opts: Vec<(String, String)> = Vec::new();
+    for o in server.options.iter() {
+        opts.push((o.name.to_string(), o.require_value()?.to_string()));
+    }
     for (name, value) in opts {
         match name.as_str() {
             "use_remote_estimate" => fp.use_remote_estimate = parse_bool(&value)?,
@@ -83,8 +85,10 @@ fn apply_table_options<'mcx>(
     fp: &mut PgFdwRelationInfo<'mcx>,
     table: &foreigncmds::foreign::ForeignTable<'mcx>,
 ) -> PgResult<()> {
-    let opts: Vec<(String, String)> =
-        table.options.iter().map(|o| (o.name.to_string(), o.value.to_string())).collect();
+    let mut opts: Vec<(String, String)> = Vec::new();
+    for o in table.options.iter() {
+        opts.push((o.name.to_string(), o.require_value()?.to_string()));
+    }
     for (name, value) in opts {
         match name.as_str() {
             "use_remote_estimate" => fp.use_remote_estimate = parse_bool(&value)?,
