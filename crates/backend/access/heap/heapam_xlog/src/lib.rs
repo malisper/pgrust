@@ -1164,7 +1164,19 @@ fn heap_xlog_logical_rewrite(record: &mut XLogReaderState) -> PgResult<()> {
     let len = num_mappings as usize * LOGICAL_REWRITE_MAPPING_SIZE;
     let data = &md[40..40 + len];
     // Write out the tail end of the mapping file (again).
-    if let Err(e) = std::os::unix::fs::FileExt::write_all_at(&file, data, offset) {
+    // positional write; on non-unix (wasm) targets the FileExt trait is
+    // unstable, so seek+write_all — equivalent here (nothing reads the
+    // cursor after; sync_all follows).
+    #[cfg(unix)]
+    let write_res = std::os::unix::fs::FileExt::write_all_at(&file, data, offset);
+    #[cfg(not(unix))]
+    let write_res = (|| {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = &file;
+        f.seek(SeekFrom::Start(offset))?;
+        f.write_all(data)
+    })();
+    if let Err(e) = write_res {
         return file_err("write to", e);
     }
     // fsync all previously written data.

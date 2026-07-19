@@ -158,7 +158,7 @@ env	crates/backend/storage/file/vfs/src/sim_boot.rs	2	DST-REVIEW(provider-seam):
 fs	crates/backend/postmaster/syslogger/src/lib.rs	32
 # --- crates/backend/replication/logical/reorderbuffer (5 sites) ---
 fs	crates/backend/replication/logical/reorderbuffer/src/startup.rs	4
-fs	crates/backend/replication/logical/reorderbuffer/src/visibility.rs	1
+fs	crates/backend/replication/logical/reorderbuffer/src/visibility.rs	2	DST-REVIEW(t30-train): standby-logical car — logical-rewrite mapping / catalog-cleanup WAL paths do direct durable file IO exactly as C rewriteheap.c/heapam do; vfd/Vfs routing chartered to the DST program (these are crash-consistency-bearing writes the sim will want to fault)
 # --- crates/backend/replication/logical/snapbuild (7 sites) ---
 fs	crates/backend/replication/logical/snapbuild/src/lib.rs	4
 fs	crates/backend/replication/logical/snapbuild/src/ondisk.rs	3
@@ -237,6 +237,8 @@ fs	crates/backend/replication/walreceiver/src/lib.rs	3	DST-REVIEW(t27-train): t2
 fs	crates/backend/replication/walsender/src/streaming.rs	1	DST-REVIEW(t27-train): t27-train merge reconciliation — site landed in the t26 recovery/metalfix re-board (post-dates the DST census seed @ 3fee87ff0); routing onto the fd/vfd Vfs choke (s2.1) chartered to the DST program (t28)
 fs	crates/backend/libpq/auth/src/lib.rs	1	DST-REVIEW(t30-train): auth-cert-peer-reload car — libc::close in the ident_inet (RFC 1413) probe-socket fd guard Drop; socket lifecycle, not file IO — sim-net absorbs when auth probes are simulated
 fs	crates/backend/executor/execmain/src/lanev2/census.rs	2	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
+fs	crates/backend/access/heap/heapam_xlog/src/lib.rs	3	DST-REVIEW(t30-train): standby-logical car — logical-rewrite mapping / catalog-cleanup WAL paths do direct durable file IO exactly as C rewriteheap.c/heapam do; vfd/Vfs routing chartered to the DST program (these are crash-consistency-bearing writes the sim will want to fault)
+fs	crates/backend/access/heap/rewriteheap/src/lib.rs	9	DST-REVIEW(t30-train): standby-logical car — logical-rewrite mapping / catalog-cleanup WAL paths do direct durable file IO exactly as C rewriteheap.c/heapam do; vfd/Vfs routing chartered to the DST program (these are crash-consistency-bearing writes the sim will want to fault)
 
 # ==== time ====
 time	crates/backend/access/common/tidstore/bench/rig/src/main.rs	7	BENCH-RIG: bench-rig crate, not server prod
