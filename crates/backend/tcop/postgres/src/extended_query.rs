@@ -131,6 +131,10 @@ pub fn exec_parse_message<'mcx>(
 ) -> PgResult<()> {
     let save_log_statement_stats = log_statement_stats();
 
+    // C: `debug_query_string = query_string;` (exec_parse_message top),
+    // cleared at the message's end — the scope's drop.
+    let _debug_query = elog::debug_query_string_scope(query_string);
+
     backend_status_seams::pgstat_report_activity::call(
         backend_status_seams::BackendState::STATE_RUNNING,
         Some(query_string),
@@ -429,6 +433,9 @@ pub fn exec_bind_message<'mcx>(
     let psrc = lookup_plansource(stmt_name.as_str())?;
     let query_string = plancache::CachedPlanQueryString(psrc);
     let save_log_statement_stats = log_statement_stats();
+
+    // C: `debug_query_string = psrc->query_string;` (exec_bind_message).
+    let _debug_query = elog::debug_query_string_scope(query_string);
 
     backend_status_seams::pgstat_report_activity::call(
         backend_status_seams::BackendState::STATE_RUNNING,
@@ -826,6 +833,10 @@ pub fn exec_execute_message<'mcx>(
     };
     let source_text = source_text.as_str();
     let prep_stmt_name = prep_stmt_name.as_str();
+
+    // C: `debug_query_string = sourceText;` (exec_execute_message) — the
+    // MessageContext copy above outlives this frame, as C's pstrdup does.
+    let _debug_query = elog::debug_query_string_scope(source_text);
 
     backend_status_seams::pgstat_report_activity::call(
         backend_status_seams::BackendState::STATE_RUNNING,

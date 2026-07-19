@@ -227,13 +227,17 @@ pub fn fc_pg_typeof(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgRes
 }
 
 pub fn fc_current_query(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    match elog::sink::backend_log_context().and_then(|c| c.query_string()) {
+    // C current_query (utils/adt/misc.c): debug_query_string or NULL. The
+    // old read went through BackendLogContext, which no backend installs —
+    // current_query() was NULL always (pinned by the dblink_local corpus:
+    // dblink_current_query is an alias for this function).
+    elog::with_debug_query_string(|q| match q {
         Some(q) => {
             let mcx = fcinfo.result_mcx();
             text_datum(mcx, q.as_bytes())
         }
         None => Ok(fcinfo.return_null()),
-    }
+    })
 }
 
 pub fn fc_pg_basetype(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {

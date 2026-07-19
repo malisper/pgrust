@@ -1,0 +1,53 @@
+[package]
+name = "dblink"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "dblink"
+path = "src/lib.rs"
+
+[dependencies]
+rustc-hash = "2"
+datum = { path = "../../_support/types/datum" }
+mcx = { path = "../../_support/mcx" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+types_fmgr = { path = "../../_support/types/fmgr" }
+types_nodes = { path = "../../_support/types/nodes" }
+types_rel = { path = "../../_support/types/rel" }
+types_scan = { path = "../../_support/types/types_scan" }
+types_tuple = { path = "../../_support/types/types_tuple" }
+rel_vocab = { path = "../../_support/types/rel_vocab" }
+pgclient = { path = "../../interfaces/pgclient" }
+elog = { path = "../../backend/utils/error/elog" }
+dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
+fmgr_core = { path = "../../backend/utils/fmgr/fmgr_core" }
+fmgr_seams = { path = "../../backend/utils/fmgr/fmgr_seams" }
+funcapi = { path = "../../backend/utils/fmgr/funcapi" }
+varlena = { path = "../../backend/utils/adt/varlena" }
+quote = { package = "adt_quote", path = "../../backend/utils/adt/quote" }
+ruleutils = { path = "../../backend/utils/adt/ruleutils" }
+arrayfuncs = { path = "../../backend/utils/adt/arrayfuncs" }
+adt_acl = { path = "../../backend/utils/adt/acl" }
+adt_misc = { path = "../../backend/utils/adt/adt_misc" }
+tupdesc = { path = "../../backend/access/common/tupdesc" }
+heaptuple = { path = "../../backend/access/common/heaptuple" }
+tuplestore = { path = "../../backend/utils/sort/tuplestore" }
+lsyscache = { path = "../../backend/utils/cache/lsyscache" }
+mbutils = { path = "../../backend/utils/mb/mbutils" }
+waitevent = { path = "../../backend/utils/activity/waitevent" }
+guc = { path = "../../backend/utils/misc/guc" }
+types_guc = { path = "../../_support/types/types_guc" }
+superuser = { path = "../../backend/utils/misc/superuser" }
+miscinit = { path = "../../backend/utils/init/miscinit" }
+init_small = { path = "../../backend/utils/init/init_small" }
+parser_small1 = { path = "../../backend/parser/parser_small1" }
+foreigncmds = { path = "../../backend/commands/foreigncmds" }
+tablecmds = { path = "../../backend/commands/tablecmds" }
+aclchk = { path = "../../backend/catalog/aclchk" }
+catalog_namespace = { path = "../../backend/catalog/catalog_namespace" }
+genam = { path = "../../backend/access/index/genam" }
+table = { path = "../../backend/access/table/table" }
+spi = { path = "../../backend/executor/spi" }
