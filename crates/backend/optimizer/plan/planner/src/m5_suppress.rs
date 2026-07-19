@@ -671,7 +671,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             }
             return finish(run, CoverClass::CbTopnBoundedIntKeys, rte.relid, 0.0, rel_rows, rel_pages);
         }
-        // SE-SCANPASS (band 86001, se/scan-passthrough): the row-returning
+        // SE-SCANPASS (band 72001, se/scan-passthrough): the row-returning
         // passthrough shape (bare filtered SELECT, no agg / group / top-N /
         // DISTINCT) keeps its Gather — no `parallel_engine=runtime` arm
         // emits rows (they all fold). Behind PGRUST_LANE_V2_SCANPASS
@@ -911,7 +911,7 @@ fn refuse_scanpass(why: &str) -> PgResult<bool> {
     Ok(false)
 }
 
-/// The passthrough-shape recognizer (SE-SCANPASS, band 86001). Called ONLY
+/// The passthrough-shape recognizer (SE-SCANPASS, band 72001). Called ONLY
 /// under `scanpass_enabled()` for a single-relation `!hasAggs` SELECT that
 /// is neither the bounded-top-N shape (keyed above) nor DISTINCT. It NAMES
 /// the specific reason the shape is uncovered — one refusal per uncovered
@@ -1176,7 +1176,7 @@ fn multibuild_enabled() -> bool {
     })
 }
 
-/// SE-SCANPASS (band 86001, branch se/scan-passthrough): the passthrough
+/// SE-SCANPASS (band 72001, branch se/scan-passthrough): the passthrough
 /// lane knob, `PGRUST_LANE_V2_SCANPASS`, **default OFF** (the K1-latemat
 /// idiom, batch_source.rs:152 — any spelling but `1`/`on` fails safe to
 /// today's behaviour). Default OFF because there is no covered arm to hand a
@@ -1952,7 +1952,7 @@ fn tle_by_sortgroupref<'mcx>(
 mod tests {
     use super::*;
 
-    /// SE-SCANPASS knob (band 86001): `PGRUST_LANE_V2_SCANPASS` is default
+    /// SE-SCANPASS knob (band 72001): `PGRUST_LANE_V2_SCANPASS` is default
     /// OFF and only `1`/`on` arm it — every other spelling fails safe to
     /// today's behaviour (the K1-latemat idiom). This pins the default-OFF
     /// guarantee that makes the change inert at default.
