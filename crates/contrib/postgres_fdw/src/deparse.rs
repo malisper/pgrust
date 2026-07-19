@@ -99,10 +99,16 @@ impl LocCxt {
 struct GlobCxt<'a, 'mcx> {
     run: &'a PlannerRun<'mcx>,
     foreignrel: RelId,
-    relids: types_pathnodes::Relids<'mcx>,
+    relids_rel: RelId,
     serverid: Oid,
     shippable_extensions: &'a [Oid],
     mcx: Mcx<'mcx>,
+}
+
+impl<'mcx> GlobCxt<'_, 'mcx> {
+    fn relids(&self) -> &types_pathnodes::Relids<'mcx> {
+        &self.run.root.rel(self.relids_rel).relids
+    }
 }
 
 fn is_shippable_obj(glob: &GlobCxt<'_, '_>, oid: Oid, class_id: Oid) -> PgResult<bool> {
@@ -135,15 +141,15 @@ pub fn is_foreign_expr<'mcx>(
     expr: Node<'mcx>,
 ) -> PgResult<bool> {
     let fp = fpinfo(run.root.rel(baserel)).borrow();
-    let relids = if is_upper_rel(run, baserel) {
-        run.root.rel(fp.outerrel.expect("upperrel has outerrel")).relids
+    let relids_rel = if is_upper_rel(run, baserel) {
+        fp.outerrel.expect("upperrel has outerrel")
     } else {
-        run.root.rel(baserel).relids
+        baserel
     };
     let glob = GlobCxt {
         run,
         foreignrel: baserel,
-        relids,
+        relids_rel,
         serverid: fp.serverid(),
         shippable_extensions: &fp.shippable_extensions,
         mcx: run.mcx,
@@ -213,7 +219,7 @@ fn foreign_expr_walker<'mcx>(
     match node.node_tag() {
         NodeTag::T_Var => {
             let var = node.as_var().unwrap();
-            if types_pathnodes::relids::relids_is_member(var.varno, &glob.relids)
+            if types_pathnodes::relids::relids_is_member(var.varno, glob.relids())
                 && var.varlevelsup == 0
             {
                 if var.varattno < 0 && var.varattno as i16 != SELF_ITEM_POINTER_ATTNUM {
@@ -576,13 +582,16 @@ pub fn is_foreign_param<'mcx>(run: &PlannerRun<'mcx>, baserel: RelId, expr: Node
     match expr.node_tag() {
         NodeTag::T_Var => {
             let var = expr.as_var().unwrap();
-            let fp = fpinfo(run.root.rel(baserel)).borrow();
-            let relids = if is_upper_rel(run, baserel) {
-                run.root.rel(fp.outerrel.expect("upperrel outerrel")).relids
-            } else {
-                run.root.rel(baserel).relids
+            let relids_rel = {
+                let fp = fpinfo(run.root.rel(baserel)).borrow();
+                if is_upper_rel(run, baserel) {
+                    fp.outerrel.expect("upperrel outerrel")
+                } else {
+                    baserel
+                }
             };
-            !(types_pathnodes::relids::relids_is_member(var.varno, &relids)
+            let relids = &run.root.rel(relids_rel).relids;
+            !(types_pathnodes::relids::relids_is_member(var.varno, relids)
                 && var.varlevelsup == 0)
         }
         NodeTag::T_Param => true,
@@ -629,7 +638,9 @@ pub fn deparse_string_literal(buf: &mut PgString<'_>, val: &str) {
 
 fn append_quoted_identifier(buf: &mut PgString<'_>, mcx: Mcx<'_>, ident: &str) -> PgResult<()> {
     let q = quote_identifier(mcx, ident.as_bytes())?;
-    buf.push_str(q.as_str());
+    // SAFETY: quote_identifier preserves the (UTF-8) ident bytes, only adding
+    // ASCII `"` quoting.
+    buf.push_str(unsafe { core::str::from_utf8_unchecked(q.as_bytes()) });
     Ok(())
 }
 
@@ -646,8 +657,8 @@ pub struct DeparseCtx<'a, 'mcx> {
 }
 
 impl<'a, 'mcx> DeparseCtx<'a, 'mcx> {
-    fn scanrel_relids(&self) -> types_pathnodes::Relids<'mcx> {
-        self.run.root.rel(self.scanrel).relids
+    fn scanrel_relids(&self) -> &types_pathnodes::Relids<'mcx> {
+        &self.run.root.rel(self.scanrel).relids
     }
 }
 
@@ -675,10 +686,15 @@ fn deparse_expr<'mcx>(ctx: &mut DeparseCtx<'_, 'mcx>, node: Node<'mcx>) -> PgRes
 
 fn deparse_var<'mcx>(ctx: &mut DeparseCtx<'_, 'mcx>, node: Node<'mcx>) -> PgResult<()> {
     let var = node.as_var().unwrap();
-    let relids = ctx.scanrel_relids();
-    let qualify_col = types_pathnodes::relids::relids_num_members(&relids) > 1;
+    let (qualify_col, is_foreign) = {
+        let relids = ctx.scanrel_relids();
+        (
+            types_pathnodes::relids::relids_num_members(relids) > 1,
+            types_pathnodes::relids::relids_is_member(var.varno, relids) && var.varlevelsup == 0,
+        )
+    };
 
-    if types_pathnodes::relids::relids_is_member(var.varno, &relids) && var.varlevelsup == 0 {
+    if is_foreign {
         let rte = ctx.run.rte(var.varno as usize);
         deparse_column_ref(ctx, var.varno, var.varattno, rte, qualify_col)?;
     } else if ctx.params_list.is_some() {
@@ -693,7 +709,7 @@ fn deparse_var<'mcx>(ctx: &mut DeparseCtx<'_, 'mcx>, node: Node<'mcx>) -> PgResu
 fn param_index<'mcx>(ctx: &mut DeparseCtx<'_, 'mcx>, node: Node<'mcx>) -> PgResult<usize> {
     let list = ctx.params_list.as_mut().expect("param_index only with params_list");
     for (i, existing) in list.iter().enumerate() {
-        if equal(node, existing) {
+        if equal(node, *existing) {
             return Ok(i + 1);
         }
     }
@@ -855,7 +871,7 @@ fn is_plain_foreign_var(ctx: &DeparseCtx<'_, '_>, node: Node<'_>) -> bool {
     };
     if let Some(var) = node.as_var() {
         let relids = ctx.scanrel_relids();
-        return types_pathnodes::relids::relids_is_member(var.varno, &relids)
+        return types_pathnodes::relids::relids_is_member(var.varno, relids)
             && var.varlevelsup == 0;
     }
     false
@@ -990,7 +1006,7 @@ fn deparse_null_test<'mcx>(
 
 fn deparse_case_expr<'mcx>(
     ctx: &mut DeparseCtx<'_, 'mcx>,
-    node: &types_nodes::CaseExpr<'mcx>,
+    node: &types_nodes::primnodes::CaseExpr<'mcx>,
 ) -> PgResult<()> {
     ctx.buf.push_str("(CASE");
     if let Some(arg) = node.arg {
@@ -1039,7 +1055,7 @@ fn deparse_array_expr<'mcx>(
 
 fn deparse_aggref<'mcx>(
     ctx: &mut DeparseCtx<'_, 'mcx>,
-    node: &types_nodes::Aggref<'mcx>,
+    node: &types_nodes::primnodes::Aggref<'mcx>,
 ) -> PgResult<()> {
     debug_assert_eq!(node.aggsplit, types_nodes::primnodes::AGGSPLIT_SIMPLE);
     let use_variadic = node.aggvariadic;
