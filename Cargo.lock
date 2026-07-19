@@ -4214,6 +4214,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "contrib_lo"
+version = "0.0.0"
+dependencies = [
+ "be_fsstubs",
+ "datum",
+ "dfmgr",
+ "spi",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_nodes",
+ "types_trigger",
+ "types_trigger_call",
+ "types_tuple",
+]
+
+[[package]]
 name = "controldata_utils"
 version = "0.0.0"
 dependencies = [
@@ -14778,6 +14795,7 @@ dependencies = [
  "commit_ts",
  "condition_variable",
  "conffiles",
+ "contrib_lo",
  "copy_cmd",
  "costsize",
  "crypt",
