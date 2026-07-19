@@ -14995,3 +14995,15 @@ pub(crate) use lane_mergejoin::{
     MJ_NATIVE_REFUSED_FOR_TESTS, MJ_NATIVE_RESTORES_FOR_TESTS,
 };
 // --- end WS-MJ (LANE-MERGEJOIN inc-1) -------------------------------------------
+// --- SE-AGGBITMAP (deletion-prep arm #4 re-host): the lane batch feed for
+// aggregation over BitmapHeapScan, behind PGRUST_LANE_V2_AGG_BITMAP
+// (default OFF). Feed logic + refuse-set are agg_bitmap.rs-local; this EOF
+// append is the module mount + re-export only and touches no existing code
+// line (the WS-AE wave-8 EOF-append precedent). Mounted here because the
+// vocabulary it reuses (ShapeClass/RefuseReason, lane_trace, the engine
+// mirror) is lanev2-private.
+mod agg_bitmap;
+pub(crate) use agg_bitmap::try_own_agg_over_bitmap_feed;
+#[cfg(test)]
+pub(crate) use agg_bitmap::{agg_bitmap_set_for_tests, AGG_BITMAP_OWNED_FOR_TESTS};
+// --- end SE-AGGBITMAP -----------------------------------------------------------
