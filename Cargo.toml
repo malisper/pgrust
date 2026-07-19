@@ -676,6 +676,7 @@ members = [
     "crates/contrib/btree_gist",
     "crates/contrib/unaccent",
     "crates/contrib/pg_walinspect",
+    "crates/contrib/fuzzystrmatch",
     "crates/backend/catalog/pg_db_role_setting_seams",
     "crates/backend/utils/init/postinit",
     "crates/backend/postmaster/pmchild_seams",

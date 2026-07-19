@@ -6057,6 +6057,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "fuzzystrmatch"
+version = "0.0.0"
+dependencies = [
+ "arrayfuncs",
+ "datum",
+ "dfmgr",
+ "mbutils",
+ "mcx",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "varlena",
+ "wchar",
+]
+
+[[package]]
 name = "genam"
 version = "0.1.0"
 dependencies = [
@@ -14786,6 +14802,7 @@ dependencies = [
  "format_type",
  "freespace",
  "funcapi",
+ "fuzzystrmatch",
  "genam",
  "genfile",
  "gin",
