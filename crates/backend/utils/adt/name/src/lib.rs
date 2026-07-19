@@ -57,7 +57,10 @@ pub fn namesend<'mcx>(mcx: Mcx<'mcx>, s: &NameData) -> PgResult<Bytea<'mcx>> {
     Ok(pqformat::pq_endtypsend(buf))
 }
 
-// strncmp semantics, word-at-a-time like glibc's (2.9x-instr byte loop refused).
+// strncmp semantics, word-at-a-time like glibc's (2.9x-instr byte loop
+// refused). Returns the RAW byte difference at the first mismatch like libc
+// strncmp — C's btnamecmp exposes that magnitude at the SQL level (fnconf
+// batch-1 cmp-magnitude family; C 18.3: btnamecmp('a','c') → -2).
 fn strncmp_name(a: &[u8; NAMELEN], b: &[u8; NAMELEN]) -> i32 {
     const LO: u64 = 0x0101_0101_0101_0101;
     const HI: u64 = 0x8080_8080_8080_8080;
@@ -78,7 +81,7 @@ fn strncmp_name(a: &[u8; NAMELEN], b: &[u8; NAMELEN]) -> i32 {
         if zero != 0 && ((zero.trailing_zeros() >> 3) as usize) < di {
             return 0;
         }
-        return if a[i + di] < b[i + di] { -1 } else { 1 };
+        return a[i + di] as i32 - b[i + di] as i32;
     }
     0
 }

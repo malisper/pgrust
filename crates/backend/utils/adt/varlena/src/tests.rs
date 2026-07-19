@@ -352,7 +352,8 @@ fn bytea_cmp_family() {
     assert!(byteale(b"a", b"a"));
     assert!(byteagt(b"b", b"a"));
     assert!(byteage(b"b", b"b"));
-    assert_eq!(byteacmp(b"\xff", b"\x01"), 1);
+    // Raw memcmp magnitude, like C (C 18.3: byteacmp('\xff','\x01') → 254).
+    assert_eq!(byteacmp(b"\xff", b"\x01"), 254);
     assert_eq!(bytea_larger(b"a", b"b"), b"b");
     assert_eq!(bytea_smaller(b"a", b"b"), b"a");
 }
@@ -1330,4 +1331,21 @@ mod pg_column_funcs {
         let (_, isnull) = call(fc_pg_column_toast_chunk_id, &image);
         assert!(isnull);
     }
+}
+
+// fnconf batch-1, OIDs 246/253 (btnametextcmp/bttextnamecmp) and the
+// bttextcmp/bpcharcmp siblings: C's varstr_cmp returns the RAW memcmp
+// difference under C collation (varlena.c); only the equal-prefix length
+// tie-break is ±1. C 18.3: btnametextcmp('a'::name, 'c') → -2.
+// Red at base: pgrust sign-normalized every result to ±1.
+#[test]
+fn varstrfastcmp_c_returns_raw_memcmp_magnitude() {
+    assert_eq!(varstrfastcmp_c(b"a", b"c"), -2);
+    assert_eq!(varstrfastcmp_c(b"c", b"a"), 2);
+    assert_eq!(varstrfastcmp_c(b"abz", b"abd"), b'z' as i32 - b'd' as i32);
+    assert_eq!(varstrfastcmp_c(b"\x00", b"\xff"), -255);
+    // Equal-prefix length tie-break stays normalized, like C.
+    assert_eq!(varstrfastcmp_c(b"ab", b"abcd"), -1);
+    assert_eq!(varstrfastcmp_c(b"abcd", b"ab"), 1);
+    assert_eq!(varstrfastcmp_c(b"", b""), 0);
 }

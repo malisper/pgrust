@@ -100,11 +100,13 @@ fn comparisons_c_collation() {
         assert_eq!(btnamecmp(&b, &a, collid).unwrap(), 1);
         assert_eq!(btnamecmp(&a, &a, collid).unwrap(), 0);
     }
-    // Prefix sorts first; bytes compare unsigned.
-    assert_eq!(btnamecmp(&name("ab"), &name("abc"), C_COLLATION_OID).unwrap(), -1);
+    // Prefix sorts first; bytes compare unsigned. Raw strncmp magnitudes
+    // (names are NUL-padded, so the prefix case compares NUL vs the next
+    // byte). C 18.3: btnamecmp('ab','abc') → -99; 0xC3 vs 'z' → 73.
+    assert_eq!(btnamecmp(&name("ab"), &name("abc"), C_COLLATION_OID).unwrap(), -99);
     assert_eq!(
         btnamecmp(&name("a\u{ff}"), &name("az"), C_COLLATION_OID).unwrap(),
-        1
+        0xC3 - b'z' as i32
     );
 }
 
@@ -118,9 +120,9 @@ fn namestrcmp_null_and_padding() {
     assert!(namestrcmp(Some(&name("pg_am")), Some(b"pg_am2")) < 0);
     assert!(namestrcmp(Some(&name("pg_am2")), Some(b"pg_am")) > 0);
     // A 63-byte name equals its exact source; a longer C string wins at the
-    // NUL (C strncmp semantics).
+    // NUL (C strncmp semantics, raw byte difference: 0 - 'a' = -97).
     assert_eq!(namestrcmp(Some(&namein(&[b'a'; 63])), Some(&[b'a'; 63])), 0);
-    assert_eq!(namestrcmp(Some(&namein(&[b'a'; 100])), Some(&[b'a'; 80])), -1);
+    assert_eq!(namestrcmp(Some(&namein(&[b'a'; 100])), Some(&[b'a'; 80])), -97);
 }
 
 #[test]
@@ -200,4 +202,16 @@ fn fc_text_name_truncates_and_is_registered_for_both_oids() {
 
     assert!(NAME_BUILTINS.iter().any(|b| b.foid == 407 && b.func as *const () == fc_text_name as *const ()));
     assert!(NAME_BUILTINS.iter().any(|b| b.foid == 1400 && b.func as *const () == fc_text_name as *const ()));
+}
+
+// fnconf batch-1 cmp-magnitude family: C's btnamecmp is raw strncmp — the
+// byte difference at the first mismatch is byte-visible at the SQL level.
+// C 18.3: btnamecmp('a','c') → -2. Red at base: pgrust returned -1.
+#[test]
+fn btnamecmp_returns_raw_strncmp_magnitude() {
+    let a = name("a");
+    let c = name("c");
+    assert_eq!(btnamecmp(&a, &c, C_COLLATION_OID).unwrap(), -2);
+    assert_eq!(btnamecmp(&c, &a, C_COLLATION_OID).unwrap(), 2);
+    assert_eq!(btnamecmp(&a, &a, C_COLLATION_OID).unwrap(), 0);
 }

@@ -118,21 +118,24 @@ fn collation_is_deterministic(collid: Oid) -> PgResult<bool> {
 
 // C: varstrfastcmp_c — memcmp + length tiebreak; also the comparator core
 // varstr_sortsupport installs for C collations (abbreviation arms on top).
+//
+// C (varlena.c varstr_cmp / varstrfastcmp_c) returns the RAW memcmp result —
+// libc memcmp reports the difference of the first mismatching bytes (e.g.
+// 'a' vs 'c' → -2), and that magnitude is byte-visible at the SQL level
+// through bttextcmp/btnametextcmp/bttextnamecmp (fnconf batch-1, OIDs
+// 246/253). Only the equal-prefix length tie-break normalizes to ±1, as in C.
 #[inline]
 pub fn varstrfastcmp_c(a1: &[u8], a2: &[u8]) -> i32 {
     let n = a1.len().min(a2.len());
-    match a1[..n].cmp(&a2[..n]) {
-        Ordering::Less => -1,
-        Ordering::Greater => 1,
-        Ordering::Equal => {
-            if a1.len() == a2.len() {
-                0
-            } else if a1.len() < a2.len() {
-                -1
-            } else {
-                1
-            }
-        }
+    if let Some(i) = a1[..n].iter().zip(&a2[..n]).position(|(x, y)| x != y) {
+        return a1[i] as i32 - a2[i] as i32;
+    }
+    if a1.len() == a2.len() {
+        0
+    } else if a1.len() < a2.len() {
+        -1
+    } else {
+        1
     }
 }
 
