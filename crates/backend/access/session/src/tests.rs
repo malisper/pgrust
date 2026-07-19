@@ -512,7 +512,10 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //   49. replication/logical/reorderbuffer/src/tests.rs (+2, the
     //      second from the checkxid-alive car) — cfg(test) rig TLS beside
     //      the existing slot; never in dist.
-    assert_eq!(count_tree(crates), 510, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    //   50. access/heap/visibilitymap/src/tests.rs — cfg(test) rig TLS
+    //      (standby-logical car's catalog-cleanup-flag tests); never in
+    //      dist.
+    assert_eq!(count_tree(crates), 511, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

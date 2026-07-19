@@ -25,7 +25,6 @@ transam_seams = { path = "../../../access/transam/transam_seams" }
 inval = { path = "../../../utils/cache/inval" }
 relcache = { path = "../../../utils/cache/relcache" }
 catalog = { path = "../../../catalog/catalog" }
-transam_seams = { path = "../../../access/transam/transam_seams" }
 transam_xlog_seams = { path = "../../../access/transam/transam_xlog_seams" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
 init_small = { path = "../../../utils/init/init_small" }
