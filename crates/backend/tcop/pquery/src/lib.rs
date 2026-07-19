@@ -27,7 +27,7 @@ use ::types_scan::sdir::{
     BackwardScanDirection, ForwardScanDirection, NoMovementScanDirection, ScanDirection,
     ScanDirectionIsForward, ScanDirectionIsNoMovement,
 };
-use ::types_slot::{TupleSlotKind, EXEC_FLAG_BACKWARD, EXEC_FLAG_REWIND};
+use ::types_slot::TupleSlotKind;
 
 use ::cmdtag::InitializeQueryCompletion;
 use ::snapmgr::Snapshot;
@@ -434,13 +434,17 @@ pub fn PortalStart(
                 let capture_batch = current_of_eligible
                     && execmain_seams::cursor_plan_capture_batch_fill::is_installed()
                     && execmain_seams::cursor_plan_capture_batch_fill::call(&stmts[0]);
-                let myeflags = if scroll
-                    && (!store_armed || (current_of_eligible && !capture_batch))
-                {
-                    eflags | EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD
-                } else {
-                    eflags
-                };
+                // §6 deletion rider row 1 EXECUTED (se/deletion-prep B2):
+                // the SCROLL eflags arm is DELETED — no world prepares the
+                // executor for backward reads anymore. Backward fetches are
+                // store-served (store-armed worlds, incl. the D-CA-2 fence
+                // world, whose reads always were store reads) or error at
+                // the forward-only run seam (B1; the kill world). Rewind
+                // never depended on the hint: DoPortalRewind's live
+                // ExecutorRewind is plain rescan machinery, and a Sort
+                // without the flags rebuilds on rescan (the pinned
+                // rescan_without_random_access_resorts semantics).
+                let myeflags = eflags;
 
                 // Not yet reachable from the portal: owned until it is.
                 let mut qd_owner = QueryDescOwner(query_desc);
