@@ -447,10 +447,9 @@ fn fadvise_willneed(f: &RunFile, off: u64, len: u64) {
 // the read() changes. Peak buffered memory ~= runs x 2.5 chunks (~360 MB
 // at 290 runs), replacing the per-run 1 MB BufReader.
 
-/// Prefetched chunk size. (The C2b feeder machinery below is unreachable
-/// under `--cfg pgrust_sim` — `open_prefetch` degrades to the direct source
-/// there; see its sim-arm note — hence the sim-only dead_code allows.)
-#[cfg_attr(pgrust_sim, allow(dead_code))]
+/// Prefetched chunk size. (SIMVFS-SHARED: the C2b feeder machinery is now
+/// sim-REACHABLE — feeders adopt the pump's shared SimVfs universe; the old
+/// compile fence became `open_prefetch`'s runtime shared-universe branch.)
 const PRE_CHUNK: usize = 512 << 10;
 
 /// loadcommit RUNLZ4: pump-side decode source (no prefetch) — frames are
@@ -494,8 +493,11 @@ impl std::io::Read for Lz4Source {
 }
 
 /// Consumer side of one run's prefetch channel: a plain byte stream.
+/// (Row 8, SIMVFS-SHARED: the raw `std::sync::mpsc` channel converted to
+/// the sanctioned `pgsync::mailbox` — under the permit scheduler the pump's
+/// recv is a hooked park, native arm is the same protocol class.)
 struct PrefetchSource {
-    rx: std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>,
+    rx: pgsync::MailboxReceiver<std::io::Result<Vec<u8>>>,
     cur: Vec<u8>,
     pos: usize,
     eof: bool,
@@ -508,15 +510,15 @@ impl std::io::Read for PrefetchSource {
                 return Ok(0);
             }
             match self.rx.recv() {
-                Ok(Ok(chunk)) => {
+                Some(Ok(chunk)) => {
                     self.cur = chunk;
                     self.pos = 0;
                 }
-                Ok(Err(e)) => {
+                Some(Err(e)) => {
                     self.eof = true;
                     return Err(e);
                 }
-                Err(_) => {
+                None => {
                     // feeder dropped the sender = clean EOF
                     self.eof = true;
                     return Ok(0);
@@ -531,10 +533,9 @@ impl std::io::Read for PrefetchSource {
 }
 
 /// One run's feeder-side state (owned by a pool thread).
-#[cfg_attr(pgrust_sim, allow(dead_code))]
 struct FeedRun {
     f: BufReader<RunFile>,
-    tx: Option<std::sync::mpsc::SyncSender<std::io::Result<Vec<u8>>>>,
+    tx: Option<pgsync::MailboxSender<std::io::Result<Vec<u8>>>>,
     /// Chunk read but not yet accepted by the (full) channel.
     pending: Option<std::io::Result<Vec<u8>>>,
     eof: bool,
@@ -549,13 +550,12 @@ struct FeedRun {
 ///
 /// permit-s5 row 16: pgsync::thread handles — the feeder spawns route
 /// through the pgsync::thread wrapper (the spawn door for identity-less
-/// utility threads; native arm = the std re-export, byte-identical), so
-/// WHEN the prefetch path becomes sim-reachable the feeders are
-/// door-registered and the drop-path join is a hooked Join park. NOTE the
-/// path is compile-fenced OUT of sim today (`open_prefetch` sim arm):
-/// feeder-side `vfs::pread` would EBADF in a pool thread's thread-local
-/// SimVfs universe — the remaining blocker is shared-universe SimVfs
-/// (s2 §6 item 1), NOT the spawn door; row 8 (this channel) defers with it.
+/// utility threads; native arm = the std re-export, byte-identical), so the
+/// feeders are door-registered and the drop-path join is a hooked Join
+/// park. SIMVFS-SHARED discharged the old fence: feeders now ADOPT the
+/// pump's shared SimVfs universe (captured parent-side in `open_prefetch`),
+/// so a feeder-side `vfs::pread` reads the same simulated disk the pump
+/// writes — one fd table per simulated process, the C thread semantics.
 pub struct PrefetchPool {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     threads: Vec<pgsync::thread::JoinHandle<()>>,
@@ -570,7 +570,6 @@ impl Drop for PrefetchPool {
     }
 }
 
-#[cfg_attr(pgrust_sim, allow(dead_code))]
 fn prefetch_feed(mut runs: Vec<FeedRun>, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
     use std::io::Read;
     loop {
@@ -644,11 +643,11 @@ fn prefetch_feed(mut runs: Vec<FeedRun>, stop: std::sync::Arc<std::sync::atomic:
                             break;
                         }
                     }
-                    Err(std::sync::mpsc::TrySendError::Full(p)) => {
+                    Err(pgsync::TrySend::Full(p)) => {
                         r.pending = Some(p);
                         break;
                     }
-                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    Err(pgsync::TrySend::Disconnected(_)) => {
                         r.tx = None;
                         break;
                     }
@@ -659,7 +658,11 @@ fn prefetch_feed(mut runs: Vec<FeedRun>, stop: std::sync::Arc<std::sync::atomic:
             return;
         }
         if !progress {
-            std::thread::sleep(std::time::Duration::from_micros(300));
+            // Row 8 (SIMVFS-SHARED): pgsync sleep — a TimedPark on virtual
+            // time under the permit scheduler (a raw std sleep would hold
+            // the permit across the poll and starve the pump); the native
+            // arm is the std re-export, byte-identical.
+            pgsync::thread::sleep(std::time::Duration::from_micros(300));
         }
     }
 }
@@ -669,7 +672,6 @@ fn prefetch_feed(mut runs: Vec<FeedRun>, stop: std::sync::Arc<std::sync::atomic:
 enum RunSrc {
     Buf(BufReader<RunFile>),
     Lz4(Lz4Source),
-    #[cfg_attr(pgrust_sim, allow(dead_code))]
     Pre(PrefetchSource),
 }
 
@@ -979,20 +981,23 @@ impl RunMergeV2 {
         threads: usize,
         lz4: bool,
     ) -> PgResult<RunMergeV2> {
-        // Sim arm: SimVfs universes are thread-local and the prefetch pool
-        // threads are themselves a P3 spawner-seam ledger row — a feeder-side
-        // vfs::pread from a pool thread would EBADF in that thread's foreign
-        // universe. Until the P3 spawner seam gives workers the pump's
-        // universe, degrade to the direct pump-thread source: the byte
-        // stream is identical by the C2b construction (only WHO issues the
-        // read changes; `v2_matches_heap_reference` is the standing oracle).
+        // Sim arm (SIMVFS-SHARED — the old compile fence, now a RUNTIME
+        // branch): prefetch under sim requires the pump to be bound to a
+        // SHARED SimVfs universe (feeders adopt it below; the fd table and
+        // the run bytes are then process-shared, C thread semantics). An
+        // unbound pump (scheduler-off sim runs, unit batteries) degrades to
+        // the direct pump-thread source exactly as before — the byte stream
+        // is identical by the C2b construction (only WHO issues the read
+        // changes; `v2_matches_heap_reference` is the standing oracle).
         #[cfg(pgrust_sim)]
-        {
-            let _ = threads;
+        if !vfs::sim::SimVfs::shared_universe_active() {
             return Self::open_opts(paths, key_w, lz4);
         }
-        #[cfg(not(pgrust_sim))]
-        {
+        // Parent-side universe capture (the spawn-door inheritance shape:
+        // process identity flows down the spawn tree like an inherited fd
+        // table); each feeder adopts it as its first act below.
+        #[cfg(pgrust_sim)]
+        let sim_universe = vfs::sim::SimVfs::current_universe_id();
         let threads = threads.clamp(1, 16);
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let disk = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -1004,7 +1009,9 @@ impl RunMergeV2 {
             if lz4 {
                 check_run_magic(&mut f).map_err(|e| io_err("run magic", e))?;
             }
-            let (tx, rx) = std::sync::mpsc::sync_channel::<std::io::Result<Vec<u8>>>(2);
+            // Row 8 (SIMVFS-SHARED): pgsync mailbox, sync_channel(2)
+            // semantics — hooked parks under the permit scheduler.
+            let (tx, rx) = pgsync::mailbox::<std::io::Result<Vec<u8>>>(Some(2));
             buckets[i % threads].push(FeedRun {
                 f,
                 tx: Some(tx),
@@ -1022,11 +1029,18 @@ impl RunMergeV2 {
                 continue;
             }
             let stop2 = std::sync::Arc::clone(&stop);
-            // permit-s5 row 16: door-routed via the pgsync::thread wrapper
-            // (sim-unreachable today — see the PrefetchPool doc).
+            // permit-s5 row 16: door-routed via the pgsync::thread wrapper.
             let h = pgsync::thread::Builder::new()
                 .name("cb-run-prefetch".into())
-                .spawn(move || prefetch_feed(runs, stop2))
+                .spawn(move || {
+                    // SIMVFS-SHARED: adopt the pump's universe FIRST — every
+                    // later vfs op on this thread reads the process's disk.
+                    #[cfg(pgrust_sim)]
+                    if let Some(id) = sim_universe {
+                        vfs::sim::SimVfs::adopt_universe(id);
+                    }
+                    prefetch_feed(runs, stop2)
+                })
                 .map_err(|e| io_err("prefetch spawn", e))?;
             handles.push(h);
         }
@@ -1036,7 +1050,13 @@ impl RunMergeV2 {
             readers.push(RunReader::from_src(RunSrc::Pre(src), key_w)?);
         }
         Self::from_readers(readers, Some(pool), disk)
-        }
+    }
+
+    /// Is this merge actually prefetch-fed (feeder pool live)? Harness
+    /// probe: the sim corpus asserts the prefetch path was structurally
+    /// taken, not silently degraded.
+    pub fn is_prefetching(&self) -> bool {
+        self._pool.is_some()
     }
 
     fn from_readers(
@@ -1125,6 +1145,191 @@ impl RunMergeV2 {
         }
         self.winner = cur;
         Ok(Some(len))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SIMVFS-SHARED corpus body (permit-sched e2e P8): sim-only, no product
+// surface. Proves the loadsort-prefetch unlock: run files written by the
+// pump land in the SHARED SimVfs universe; door-registered feeder threads
+// ADOPT that universe and read real bytes back through vfs; the prefetch-fed
+// merge byte-matches the direct merge; and a bidirectional share-proof
+// (child writes a file the pump reads back, and vice versa AFTER the child's
+// adoption) catches both deliberately-broken sharing shapes
+// (`SimVfs::arm_red_adoption`: Empty = the pre-lane bug, Stale = a frozen
+// snapshot).
+// ---------------------------------------------------------------------------
+
+#[cfg(pgrust_sim)]
+pub mod sim_demo {
+    use super::*;
+
+    fn cpath(p: &str) -> std::ffi::CString {
+        std::ffi::CString::new(p).expect("no NUL in demo paths")
+    }
+
+    fn sim_mkdir_p(path: &str) {
+        let mut acc = String::new();
+        for comp in path.split('/').filter(|c| !c.is_empty()) {
+            acc.push('/');
+            acc.push_str(comp);
+            let _ = vfs::mkdir(&cpath(&acc), 0o700);
+        }
+    }
+
+    fn sim_write(path: &str, bytes: &[u8]) -> Result<(), String> {
+        let c = cpath(path);
+        let fd = vfs::open(&c, libc::O_CREAT | libc::O_TRUNC | libc::O_WRONLY, 0o600);
+        if fd < 0 {
+            return Err(format!("write open {path}: errno {}", vfs::get_errno()));
+        }
+        let mut off = 0usize;
+        while off < bytes.len() {
+            let n = vfs::pwrite(fd, &bytes[off..], off as libc::off_t);
+            if n <= 0 {
+                vfs::close(fd);
+                return Err(format!("pwrite {path}: errno {}", vfs::get_errno()));
+            }
+            off += n as usize;
+        }
+        vfs::close(fd);
+        Ok(())
+    }
+
+    fn sim_read(path: &str) -> Result<Vec<u8>, String> {
+        let c = cpath(path);
+        let fd = vfs::open(&c, libc::O_RDONLY, 0);
+        if fd < 0 {
+            return Err(format!("read open {path}: errno {}", vfs::get_errno()));
+        }
+        let mut out = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = vfs::pread(fd, &mut buf, out.len() as libc::off_t);
+            if n < 0 {
+                vfs::close(fd);
+                return Err(format!("pread {path}: errno {}", vfs::get_errno()));
+            }
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..n as usize]);
+        }
+        vfs::close(fd);
+        Ok(out)
+    }
+
+    /// The P8 corpus. Returns the grep-stable PASS line, or `Err` with the
+    /// property that failed (the red arms assert on the failure text).
+    pub fn run_prefetch_corpus() -> Result<String, String> {
+        if !vfs::sim::SimVfs::shared_universe_active() {
+            return Err("pump thread is not bound to a shared universe".into());
+        }
+        let uni = vfs::sim::SimVfs::current_universe_id()
+            .ok_or_else(|| "bound thread has no universe id".to_string())?;
+
+        // --- 1. spill 3 runs into the SHARED universe (LCG rows, seeded:
+        //        the printed line is byte-stable across same-seed replays).
+        const KW: usize = 4;
+        const RUNS: usize = 3;
+        const ROWS_PER_RUN: usize = 200;
+        sim_mkdir_p("/loadsort-demo");
+        let mut paths = Vec::new();
+        let mut lcg: u64 = 0x5EED_1234_ABCD_0001;
+        let mut total_rows = 0usize;
+        for r in 0..RUNS {
+            let mut batch = SortBatch::new(KW);
+            for _ in 0..ROWS_PER_RUN {
+                lcg = lcg.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let key = ((lcg >> 32) as u32).to_be_bytes();
+                let rowlen = 8 + (lcg % 48) as usize;
+                let mut row = Vec::with_capacity(rowlen);
+                while row.len() < rowlen {
+                    row.push((lcg >> (row.len() % 8)) as u8);
+                }
+                batch.push(&key, &row);
+                total_rows += 1;
+            }
+            batch.sort();
+            let p = std::path::PathBuf::from(format!("/loadsort-demo/run-{r}"));
+            batch.spill_run(&p).map_err(|e| format!("spill run-{r}: {}", e.message()))?;
+            paths.push(p);
+        }
+
+        // --- 2. direct merge = the reference stream.
+        let mut direct = RunMergeV2::open(&paths, KW)
+            .map_err(|e| format!("direct open: {}", e.message()))?;
+        let mut ref_arena = Vec::new();
+        let mut ref_lens = Vec::new();
+        while let Some(l) = direct
+            .next_row_into(&mut ref_arena)
+            .map_err(|e| format!("direct merge: {}", e.message()))?
+        {
+            ref_lens.push(l);
+        }
+
+        // --- 3. prefetch-fed merge: 2 door-registered feeders ADOPT the
+        //        pump's universe and read the run bytes through vfs.
+        let mut pre = RunMergeV2::open_prefetch(&paths, KW, 2, false)
+            .map_err(|e| format!("prefetch open: {}", e.message()))?;
+        if !pre.is_prefetching() {
+            return Err("prefetch path silently degraded to the direct source".into());
+        }
+        let mut arena = Vec::new();
+        let mut lens = Vec::new();
+        while let Some(l) = pre
+            .next_row_into(&mut arena)
+            .map_err(|e| format!("prefetch merge: {}", e.message()))?
+        {
+            lens.push(l);
+        }
+        if lens != ref_lens || arena != ref_arena {
+            return Err(format!(
+                "prefetch stream diverges from direct: {}x{} vs {}x{} bytes",
+                lens.len(),
+                arena.len(),
+                ref_lens.len(),
+                ref_arena.len()
+            ));
+        }
+        drop(pre); // joins the feeder pool (hooked Join parks)
+
+        // --- 4. bidirectional share-proof: the child's post-adoption view
+        //        must be LIVE, not a snapshot. The go-signal orders the
+        //        pump's write strictly after the child's adoption, so a
+        //        Stale adoption cannot contain /main-proof; and the pump
+        //        reading /child-proof catches both Stale and Empty (the
+        //        child wrote into a private copy).
+        let (go_tx, go_rx) = pgsync::mailbox::<()>(Some(1));
+        let helper = pgsync::thread::Builder::new()
+            .name("simvfs-share-proof".into())
+            .spawn(move || -> Result<(), String> {
+                vfs::sim::SimVfs::adopt_universe(uni);
+                if go_rx.recv().is_none() {
+                    return Err("go channel closed early".into());
+                }
+                let got = sim_read("/loadsort-demo/main-proof")
+                    .map_err(|e| format!("child cannot see the pump's post-adoption write ({e})"))?;
+                if got != b"written-by-pump" {
+                    return Err("child read stale bytes for /main-proof".into());
+                }
+                sim_write("/loadsort-demo/child-proof", b"written-by-child")
+            })
+            .map_err(|e| format!("share-proof spawn: {e}"))?;
+        sim_write("/loadsort-demo/main-proof", b"written-by-pump")?;
+        let _ = go_tx.send(());
+        let child_verdict = helper.join().map_err(|_| "share-proof helper panicked".to_string())?;
+        child_verdict.map_err(|e| format!("share-proof(child): {e}"))?;
+        let got = sim_read("/loadsort-demo/child-proof")
+            .map_err(|e| format!("share-proof(pump): child's write invisible ({e})"))?;
+        if got != b"written-by-child" {
+            return Err("share-proof(pump): wrong bytes in /child-proof".into());
+        }
+
+        Ok(format!(
+            "LOADSORT runs={RUNS} threads=2 rows={total_rows} bytes={} prefetch=1 identical=1 shareproof=ok",
+            ref_arena.len()
+        ))
     }
 }
 

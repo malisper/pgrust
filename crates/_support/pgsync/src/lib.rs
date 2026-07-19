@@ -87,7 +87,7 @@ pub mod sim;
 /// bounded/unbounded MPMC over [`ParkLot`] eventcounts — all-worlds like the
 /// other helpers in this crate.
 pub mod mailbox;
-pub use mailbox::{mailbox, MailboxReceiver, MailboxSender, TryRecv};
+pub use mailbox::{mailbox, MailboxReceiver, MailboxSender, TryRecv, TrySend};
 
 /// Poison-tolerant lock (matches the repo's `unwrap_or_else(e.into_inner)`
 /// discipline; loom's Mutex never poisons in models but keeps the API; the
