@@ -92,6 +92,9 @@ pqcomm_simnet = { path = "../../libpq/pqcomm_simnet" }
 # dep-edge churn is covered by the WS-CORE G1 dep-graph ruling).
 pgsync = { path = "../../../_support/pgsync" }
 vfs = { path = "../../storage/file/vfs" }
+# SIMVFS-SHARED P8 corpus body (loadsort::sim_demo, cfg pgrust_sim only;
+# pgrcolumnar was already in this binary's transitive graph).
+pgrcolumnar = { path = "../../access/pgrcolumnar" }
 types_guc = { path = "../../../_support/types/types_guc" }
 
 event_trigger_seams = { path = "../../commands/event_trigger_seams" }

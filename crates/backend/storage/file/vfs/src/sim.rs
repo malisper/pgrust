@@ -88,10 +88,11 @@
 //! platforms disagree on an errno, SimVfs speaks the Linux dialect (e.g.
 //! EISDIR for unlink-of-directory).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell, UnsafeCell};
 use std::collections::BTreeMap;
 use std::ffi::CStr;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::{c_int, mode_t, off_t, set_errno, FileInfo, Vfs, VfsDirIter, VfsResult, PG_O_DIRECT};
 
@@ -188,7 +189,10 @@ pub enum FaultDecision {
 }
 
 /// Consulted before every op. Mutable so plans can count/schedule.
-pub trait FaultPlan {
+/// `Send` (shared-universe increment): a universe bound to the threads of
+/// one simulated process migrates between them across scheduler quanta, so
+/// the installed plan must be plain data (all in-tree plans are).
+pub trait FaultPlan: Send {
     fn before_op(&mut self, op: &OpDesc<'_>) -> FaultDecision;
 
     /// Drain human-readable notes the plan wants appended to the fault log
@@ -476,8 +480,9 @@ fn apply_journal_op(img: &mut Vec<u8>, op: &JournalOp, keep: usize) {
     }
 }
 
-/// A regular file: two-image store + the unsynced journal.
-#[derive(Debug, Default)]
+/// A regular file: two-image store + the unsynced journal. (`Clone` is the
+/// RED-battery stale-snapshot arm only — see [`SimVfs::arm_red_adoption`].)
+#[derive(Debug, Default, Clone)]
 struct SimFile {
     /// What the process sees (the page-cache view).
     volatile: Vec<u8>,
@@ -518,7 +523,7 @@ fn apply_dirent_op(map: &mut BTreeMap<String, NodeId>, op: &DirentOp) {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct SimDir {
     /// Volatile entry image (deterministic BTree order), name → node.
     entries: BTreeMap<String, NodeId>,
@@ -535,7 +540,7 @@ struct SimDir {
     mode: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Node {
     File(SimFile),
     Dir(SimDir),
@@ -543,7 +548,7 @@ enum Node {
     Free,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct NodeSlot {
     node: Node,
     open_count: u32,
@@ -637,10 +642,128 @@ impl SimState {
 
 thread_local! {
     static SIM: RefCell<SimState> = RefCell::new(SimState::fresh());
+    /// Shared-universe binding (s2 §6 item 1): `Some` binds THIS thread to a
+    /// process-shared universe instead of its private thread-local one.
+    static BOUND: Cell<Option<&'static UniverseCell>> = const { Cell::new(None) };
+}
+
+// ===========================================================================
+// Shared universes (s2 §6 item 1) — one filesystem per SIMULATED PROCESS.
+//
+// C processes share one fd table across all their threads; pgrust's product
+// backends are threads of one server process, so C-parity for the sim is:
+// every thread of one simulated process sees ONE universe (namespace + fd
+// table + fault engine). The universe lives in a process-global registry
+// keyed by a caller-chosen u64 (the simulated-process id, minted by the
+// harness — today exactly one sim server per harness, id 1); the id reaches
+// children by parent-side capture at the spawn doors (`current_universe_id`
+// next to `register_child`, `adopt_universe` right after `enter_child`) —
+// process identity flows down the spawn tree the way fork inherits the fd
+// table.
+//
+// CONCURRENCY: no locks. Soundness rests on the permit scheduler's
+// one-runner-at-a-time invariant (exactly one registered thread executes at
+// any moment), ASSERTED on every shared access through the injected probe
+// below (vfs is a frozen leaf crate — libc + plain types, Cargo.toml §1.1 —
+// so it cannot ask pgsync itself; the enabler injects a plain fn pointer).
+// The probe is strict: true only when the global permit scheduler exists AND
+// the calling thread currently holds the permit — sharing is only legal
+// under the scheduler, and an unregistered thread touching a shared
+// universe dies loudly at the access (the F6 loud-assert precedent).
+// The RefCell stays: within a quantum it catches reentrancy exactly as the
+// thread-local always did.
+// ===========================================================================
+
+/// One shared universe. `Sync` is asserted, not derived: the permit
+/// scheduler serializes all access (see the module note above), and every
+/// touch runs the permit assert first.
+struct UniverseCell {
+    state: RefCell<SimState>,
+}
+
+// SAFETY: access is serialized by the permit scheduler (one runnable thread
+// at a time); every access path asserts the injected permit probe before
+// touching `state`. See the section comment above.
+unsafe impl Sync for UniverseCell {}
+
+/// The process-global registry of shared universes. Guarded by the SAME
+/// permit invariant as the cells (share/adopt assert the probe first);
+/// entries are leaked (`&'static`) — the simulated machine's disk outlives
+/// any thread, like a real disk.
+struct UniverseRegistry(UnsafeCell<BTreeMap<u64, &'static UniverseCell>>);
+
+// SAFETY: as for UniverseCell — permit-serialized, probe-asserted.
+unsafe impl Sync for UniverseRegistry {}
+
+static UNIVERSES: UniverseRegistry = UniverseRegistry(UnsafeCell::new(BTreeMap::new()));
+
+/// The injected permit probe (0 = none installed). Sharing REQUIRES it:
+/// `share_universe_as` refuses to run without a probe, so scheduler-off sim
+/// runs (crash-sweep, sim-net baseline, every unit battery) can never reach
+/// the shared path and stay byte-identical by construction.
+static PERMIT_PROBE: AtomicUsize = AtomicUsize::new(0);
+
+/// RED-battery adoption sabotage (0 = off; see [`SimVfs::arm_red_adoption`]).
+static RED_ADOPTION: AtomicUsize = AtomicUsize::new(0);
+
+/// Deliberately broken sharing shapes for the red battery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedAdoption {
+    /// `adopt_universe` silently does nothing: the child keeps its empty
+    /// private universe — the exact pre-lane bug, resurrected.
+    Empty,
+    /// Adoption takes a deep SNAPSHOT of the shared state instead of
+    /// binding: the child sees a plausible but frozen copy.
+    Stale,
+}
+
+fn assert_permit(what: &str) {
+    let probe = PERMIT_PROBE.load(Ordering::Acquire);
+    assert!(
+        probe != 0,
+        "SimVfs shared universe: {what} without an installed permit probe \
+         (sharing is only legal under the permit scheduler)"
+    );
+    // SAFETY: only ever stored from a `fn() -> bool` in set_shared_access_probe.
+    let probe: fn() -> bool = unsafe { std::mem::transmute(probe) };
+    assert!(
+        probe(),
+        "SimVfs shared universe: {what} from a thread that does not hold the \
+         scheduler permit (unregistered thread, or access outside a quantum)"
+    );
 }
 
 fn with<R>(f: impl FnOnce(&mut SimState) -> R) -> R {
+    if let Some(u) = BOUND.with(|b| b.get()) {
+        assert_permit("state access");
+        return f(&mut u.state.borrow_mut());
+    }
     SIM.with(|cell| f(&mut cell.borrow_mut()))
+}
+
+/// The red stale-snapshot clone: everything cloneable is cloned; the fault
+/// plan (a `Box<dyn FaultPlan>`) resets to [`NoFaults`] — red runs assert
+/// visibility properties, never fault-plan continuity.
+fn snapshot_for_red(src: &SimState) -> SimState {
+    SimState {
+        nodes: src.nodes.clone(),
+        namespace: src.namespace.clone(),
+        open: src.open.clone(),
+        next_fd: src.next_fd,
+        fd_trace: src.fd_trace.clone(),
+        plan: Box::new(NoFaults),
+        op_seq: src.op_seq,
+        fault_log: src.fault_log.clone(),
+        crash_image: src.crash_image,
+        atomic_writes: src.atomic_writes,
+        cuts: src.cuts,
+        doomed_epochs: src.doomed_epochs,
+        kill_on_cut: src.kill_on_cut,
+        killed: src.killed,
+        frozen_ops: src.frozen_ops,
+        trace_on: src.trace_on,
+        trace: src.trace.clone(),
+    }
 }
 
 /// The deterministic simulated filesystem. ZST; state is thread-local (one
@@ -655,14 +778,107 @@ impl SimVfs {
     /// Harness API: tear down the current thread's simulated disk entirely —
     /// empty tree, fd counter back to [`SIM_FD_BASE`], empty fd trace and
     /// fault log, [`NoFaults`] plan, [`CrashImage::DropAll`], floor armed.
-    /// NOT a crash (crash keeps durable state).
+    /// NOT a crash (crash keeps durable state). On a shared-universe-bound
+    /// thread this resets the SHARED universe (the whole simulated disk).
     pub fn reset() {
-        SIM.with(|cell| *cell.borrow_mut() = SimState::fresh());
+        with(|st| *st = SimState::fresh());
     }
 
     /// Harness API: install a fault plan.
     pub fn set_fault_plan(plan: Box<dyn FaultPlan>) {
         with(|st| st.plan = plan);
+    }
+
+    // --- shared universes (s2 §6 item 1; see the section comment above) ---
+
+    /// Install the permit probe (a plain fn pointer — vfs is a leaf crate
+    /// and cannot depend on pgsync; the enabler passes
+    /// `pgsync::sim::current_thread_holds_permit`). Must be installed
+    /// before [`SimVfs::share_universe_as`]; idempotent.
+    pub fn set_shared_access_probe(probe: fn() -> bool) {
+        PERMIT_PROBE.store(probe as usize, Ordering::Release);
+    }
+
+    /// Root call, on the simulated process's founding thread: MOVE this
+    /// thread's private universe (with everything already seeded into it)
+    /// into the process-global registry under `id`, and bind this thread to
+    /// it. Panics if `id` is taken, or if no permit probe is installed
+    /// (sharing is only legal under the permit scheduler), or if this
+    /// thread does not hold the permit.
+    pub fn share_universe_as(id: u64) {
+        assert_permit("share_universe_as");
+        assert!(
+            BOUND.with(|b| b.get()).is_none(),
+            "SimVfs: share_universe_as on an already-bound thread"
+        );
+        let moved = SIM.with(|cell| cell.replace(SimState::fresh()));
+        let cell: &'static UniverseCell =
+            Box::leak(Box::new(UniverseCell { state: RefCell::new(moved) }));
+        // SAFETY: permit-serialized (asserted above).
+        let reg = unsafe { &mut *UNIVERSES.0.get() };
+        let prev = reg.insert(id, cell);
+        assert!(prev.is_none(), "SimVfs: universe id {id} already shared");
+        BOUND.with(|b| b.set(Some(cell)));
+    }
+
+    /// The parent-side capture for spawn-door inheritance: the universe id
+    /// this thread is bound to, if any. `None` on unbound threads — spawn
+    /// sites pass it through unchanged, so scheduler-off / sharing-off runs
+    /// never adopt and stay byte-identical.
+    pub fn current_universe_id() -> Option<u64> {
+        let bound = BOUND.with(|b| b.get())?;
+        assert_permit("current_universe_id");
+        // SAFETY: permit-serialized (asserted above).
+        let reg = unsafe { &*UNIVERSES.0.get() };
+        reg.iter()
+            .find(|(_, c)| std::ptr::eq(**c, bound))
+            .map(|(&id, _)| id)
+    }
+
+    /// Child-side, right after the spawn-door `enter_child`: bind this
+    /// thread to the shared universe `id`. Panics if the id is unknown
+    /// (loud — a child adopting a universe its parent never shared is a
+    /// wiring bug). Subject to [`SimVfs::arm_red_adoption`] sabotage.
+    pub fn adopt_universe(id: u64) {
+        assert_permit("adopt_universe");
+        match RED_ADOPTION.load(Ordering::Acquire) {
+            1 => return, // RedAdoption::Empty: the pre-lane bug, resurrected
+            2 => {
+                // RedAdoption::Stale: a frozen deep copy instead of a bind.
+                // SAFETY: permit-serialized (asserted above).
+                let reg = unsafe { &*UNIVERSES.0.get() };
+                let cell = reg.get(&id).unwrap_or_else(|| {
+                    panic!("SimVfs: adopt_universe({id}): no such shared universe")
+                });
+                let snap = snapshot_for_red(&cell.state.borrow());
+                SIM.with(|c| *c.borrow_mut() = snap);
+                return;
+            }
+            _ => {}
+        }
+        // SAFETY: permit-serialized (asserted above).
+        let reg = unsafe { &*UNIVERSES.0.get() };
+        let cell = *reg
+            .get(&id)
+            .unwrap_or_else(|| panic!("SimVfs: adopt_universe({id}): no such shared universe"));
+        BOUND.with(|b| b.set(Some(cell)));
+    }
+
+    /// Is THIS thread bound to a shared universe? (The loadsort prefetch
+    /// runtime gate: feeders are only spawned when the pump is bound.)
+    pub fn shared_universe_active() -> bool {
+        BOUND.with(|b| b.get()).is_some()
+    }
+
+    /// RED battery: sabotage every later [`SimVfs::adopt_universe`] with a
+    /// deliberately broken sharing shape. Harness-only; `None` disarms.
+    pub fn arm_red_adoption(mode: Option<RedAdoption>) {
+        let v = match mode {
+            None => 0,
+            Some(RedAdoption::Empty) => 1,
+            Some(RedAdoption::Stale) => 2,
+        };
+        RED_ADOPTION.store(v, Ordering::Release);
     }
 
     /// Harness API: what survives of the unsynced set at a cut.
@@ -779,7 +995,25 @@ impl SimVfs {
     /// can trigger a planned `Crash`) exactly like deliberate closes — an
     /// unwind that drops N live holders advances Close-op sequencing by N vs
     /// the pre-guard behavior (where those closes went posix-side/EBADF).
+    /// Shared-universe arm: a bound thread's guard drops release into the
+    /// PROCESS fd table — but only while the thread still holds the permit
+    /// (guards declared after the spawn-door SlotGuard drop inside the
+    /// final quantum, per the door discipline). A guard dropping in OS TLS
+    /// teardown AFTER deregistration releases nothing: the fd stays open in
+    /// the process table, exactly as when a C thread dies holding a process
+    /// fd.
     pub fn close_on_drop(fd: c_int) -> c_int {
+        if let Ok(Some(u)) = BOUND.try_with(|b| b.get()) {
+            let probe = PERMIT_PROBE.load(Ordering::Acquire);
+            if probe != 0 {
+                // SAFETY: only ever stored from a fn() -> bool.
+                let probe: fn() -> bool = unsafe { std::mem::transmute(probe) };
+                if probe() {
+                    return close_locked(&mut u.state.borrow_mut(), fd);
+                }
+            }
+            return 0;
+        }
         SIM.try_with(|cell| close_locked(&mut cell.borrow_mut(), fd)).unwrap_or(0)
     }
 }

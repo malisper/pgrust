@@ -50,6 +50,9 @@ types_error = { path = "../../../_support/types/types_error" }
 # builds see an (effectively empty) support crate; only `--cfg pgrust_sim`
 # compiles the scheduler arm.
 pgsync = { path = "../../../_support/pgsync" }
+# SIMVFS-SHARED (s2 §6 item 1): shared-universe capture/adopt at the spawn
+# doors — sim-only code paths; vfs is a leaf crate (no cycle).
+vfs = { path = "../../storage/file/vfs" }
 sinval = { path = "../../storage/ipc/sinval" }
 waiteventset = { path = "../../storage/ipc/waiteventset" }
 waiteventset_seams = { path = "../../storage/ipc/waiteventset_seams" }
