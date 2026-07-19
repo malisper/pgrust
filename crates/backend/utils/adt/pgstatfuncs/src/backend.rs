@@ -1,5 +1,5 @@
 use ::datum::Datum;
-use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
+use ::types_error::PgResult;
 use ::types_fmgr::{FmgrInfo, FunctionCallInfoBaseData as Fcinfo};
 
 use backend_status::LocalPgBackendStatus;
@@ -131,6 +131,7 @@ pub fn fc_pg_stat_get_backend_start(
     beentry_tstz(fcinfo, |be| be.st_proc_start_timestamp)
 }
 
+// C pgstatfuncs.c:919-960 pg_stat_get_backend_client_addr.
 pub fn fc_pg_stat_get_backend_client_addr(
     _fl: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
@@ -141,22 +142,24 @@ pub fn fc_pg_stat_get_backend_client_addr(
     if !has_pgstat_permissions(be.st_userid)? {
         return Ok(fcinfo.return_null());
     }
-    if be.st_clientaddr.addr.iter().all(|&b| b == 0) {
+    // C:933-936 — a zeroed client addr means we don't know.
+    if ::ip::sockaddr_is_all_zeros(&be.st_clientaddr) {
         return Ok(fcinfo.return_null());
     }
+    // C:938-945 — every family but INET/INET6 (unix sockets included) is NULL.
     match ss_family(&be.st_clientaddr.addr) {
-        // unported: inet datum — adt network lane.
-        f if f == crate::activity::AF_INET as i32 || f == crate::activity::AF_INET6 as i32 => Err(Box::new(
-            PgError::error(
-                "pg_stat_get_backend_client_addr: reporting an inet client \
-                 address is not yet implemented",
-            )
-            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
-        )),
-        _ => Ok(fcinfo.return_null()),
+        f if f == crate::activity::AF_INET as i32 || f == crate::activity::AF_INET6 as i32 => {}
+        _ => return Ok(fcinfo.return_null()),
     }
+    // C:947-959 — numeric host via pg_getnameinfo_all (NULL on failure),
+    // clean_ipv6_addr, then the inet_in datum.
+    let Some((remote_host, _)) = crate::activity::client_addr_port(&be.st_clientaddr) else {
+        return Ok(fcinfo.return_null());
+    };
+    crate::activity::inet_datum(fcinfo, &remote_host)
 }
 
+// C pgstatfuncs.c:962-1003 pg_stat_get_backend_client_port.
 pub fn fc_pg_stat_get_backend_client_port(
     _fl: Option<&mut FmgrInfo>,
     fcinfo: &mut Fcinfo,
@@ -167,21 +170,23 @@ pub fn fc_pg_stat_get_backend_client_port(
     if !has_pgstat_permissions(be.st_userid)? {
         return Ok(fcinfo.return_null());
     }
-    if be.st_clientaddr.addr.iter().all(|&b| b == 0) {
+    // C:976-979 — a zeroed client addr means we don't know.
+    if ::ip::sockaddr_is_all_zeros(&be.st_clientaddr) {
         return Ok(fcinfo.return_null());
     }
     match ss_family(&be.st_clientaddr.addr) {
-        // unported: pg_getnameinfo_all port — adt network lane.
-        f if f == crate::activity::AF_INET as i32 || f == crate::activity::AF_INET6 as i32 => Err(Box::new(
-            PgError::error(
-                "pg_stat_get_backend_client_port: reporting an inet client \
-                 port is not yet implemented",
-            )
-            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
-        )),
-        f if f == crate::activity::AF_UNIX as i32 => Ok(Datum::from_i32(-1)),
-        _ => Ok(fcinfo.return_null()),
+        f if f == crate::activity::AF_INET as i32 || f == crate::activity::AF_INET6 as i32 => {}
+        // C:986-987 — unix sockets report -1.
+        f if f == crate::activity::AF_UNIX as i32 => return Ok(Datum::from_i32(-1)),
+        // C:988-989 — unknown family is NULL.
+        _ => return Ok(fcinfo.return_null()),
     }
+    // C:992-1002 — numeric service via pg_getnameinfo_all (NULL on failure);
+    // DirectFunctionCall1(int4in): a numeric service string always parses.
+    let Some((_, remote_port)) = crate::activity::client_addr_port(&be.st_clientaddr) else {
+        return Ok(fcinfo.return_null());
+    };
+    Ok(Datum::from_i32(remote_port.parse().expect("numeric service string")))
 }
 
 pub fn fc_pg_stat_get_backend_idset(

@@ -11944,6 +11944,7 @@ name = "pgstatfuncs"
 version = "0.1.0"
 dependencies = [
  "acl_seams",
+ "adt_network",
  "adt_numeric",
  "backend_progress",
  "backend_status",
@@ -11954,6 +11955,7 @@ dependencies = [
  "funcapi",
  "heaptuple",
  "init_small",
+ "ip",
  "launcher_seams",
  "libc",
  "lmgr_proc",

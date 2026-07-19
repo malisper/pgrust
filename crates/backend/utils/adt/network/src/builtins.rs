@@ -370,8 +370,10 @@ fn session_sockaddr(local: bool) -> Option<::ip::SockAddr> {
     }
 }
 
-// network.c:2060 clean_ipv6_addr.
-fn clean_ipv6_addr(family: i32, addr: &mut String) {
+// network.c:2060 clean_ipv6_addr — drop any '%zone' suffix from an IPv6
+// numeric-host string (stored inet values carry no zone). pub: C exports it
+// through builtins.h for pgstatfuncs.c's client_addr surfacing (C:541/956).
+pub fn clean_ipv6_addr(family: i32, addr: &mut String) {
     if family == AF_INET6 {
         if let Some(pos) = addr.find('%') {
             addr.truncate(pos);
