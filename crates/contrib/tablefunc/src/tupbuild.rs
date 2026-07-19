@@ -58,27 +58,32 @@ impl AttInMetadata {
         let mut out = Vec::with_capacity(natts);
         let mut isnull = Vec::with_capacity(natts);
         for (i, att) in self.atts.iter_mut().enumerate() {
-            match (values[i], att.in_func.as_mut()) {
-                (Some(bytes), Some(in_func)) => {
-                    let mut buf = Vec::with_capacity(bytes.len() + 1);
+            let Some(in_func) = att.in_func.as_mut() else {
+                out.push(Datum::null());
+                isnull.push(true);
+                continue;
+            };
+            // C calls InputFunctionCall even for NULL (non-strict input fns —
+            // domain_in — must see the NULL); isnull is values[i] == NULL.
+            let mut buf;
+            let cstr = match values[i] {
+                Some(bytes) => {
+                    buf = Vec::with_capacity(bytes.len() + 1);
                     buf.extend_from_slice(bytes);
                     buf.push(0);
-                    let cstr = CStr::from_bytes_with_nul(&buf).expect("appended single NUL");
-                    let d = types_fmgr::input_function_call(
-                        in_func,
-                        Some(cstr),
-                        att.typ_ioparam,
-                        att.atttypmod,
-                        mcx,
-                    )?;
-                    out.push(d);
-                    isnull.push(false);
+                    Some(CStr::from_bytes_with_nul(&buf).expect("appended single NUL"))
                 }
-                _ => {
-                    out.push(Datum::null());
-                    isnull.push(true);
-                }
-            }
+                None => None,
+            };
+            let d = types_fmgr::input_function_call(
+                in_func,
+                cstr,
+                att.typ_ioparam,
+                att.atttypmod,
+                mcx,
+            )?;
+            out.push(d);
+            isnull.push(values[i].is_none());
         }
         Ok((out, isnull))
     }
