@@ -213,7 +213,8 @@ fn fc_file_fdw_validator(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
                 {
                     return Err(option_permission_denied("program", "pg_execute_server_program"));
                 }
-                filename = Some(opt.value);
+                // C: defGetString(def) — errors on a value-less option.
+                filename = Some(opt.require_value()?);
             }
             // Boolean-validated here, discarded; re-fetched per column later
             // by get_file_fdw_attribute_options.
@@ -233,12 +234,13 @@ fn fc_file_fdw_validator(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) ->
                     return Err(conflicting_options(Some(hint)));
                 }
                 *seen = true;
-                let arg = Some(mk_string(mcx, opt.value)?);
+                // C keeps the DefElem's NULL arg; defGetBoolean(NULL) = true.
+                let arg = opt.value.map(|v| mk_string(mcx, v)).transpose()?;
                 let def = mk_def_elem(mcx, opt.name, arg)?;
                 commands_define::defGetBoolean(def.as_def_elem().expect("DefElem"))?;
             }
             _ => {
-                let arg = Some(mk_string(mcx, opt.value)?);
+                let arg = opt.value.map(|v| mk_string(mcx, v)).transpose()?;
                 other_options.lappend(mcx, mk_def_elem(mcx, opt.name, arg)?)?;
             }
         }
@@ -273,7 +275,8 @@ fn get_file_fdw_attribute_options<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<
             if opt.name != "force_not_null" && opt.name != "force_null" {
                 continue;
             }
-            let def = mk_def_elem(mcx, str_in(mcx, opt.name)?, Some(mk_string(mcx, opt.value)?))?;
+            let arg = opt.value.map(|v| mk_string(mcx, v)).transpose()?;
+            let def = mk_def_elem(mcx, str_in(mcx, opt.name)?, arg)?;
             if commands_define::defGetBoolean(def.as_def_elem().expect("DefElem"))? {
                 // SAFETY: catalog names are server-encoding UTF-8.
                 let attname = unsafe {
@@ -315,11 +318,12 @@ fn file_get_options<'mcx>(
     let mut options: NodeList<'mcx> = NodeList::nil();
     for opt in wrapper.options.iter().chain(server.options.iter()).chain(table.options.iter()) {
         if filename.is_none() && (opt.name == "filename" || opt.name == "program") {
-            filename = Some(opt.value);
+            // C: defGetString(def) — errors on a value-less option.
+            filename = Some(opt.require_value()?);
             is_program = opt.name == "program";
             continue;
         }
-        let arg = Some(mk_string(mcx, opt.value)?);
+        let arg = opt.value.map(|v| mk_string(mcx, v)).transpose()?;
         options.lappend(mcx, mk_def_elem(mcx, str_in(mcx, opt.name)?, arg)?)?;
     }
     for def in get_file_fdw_attribute_options(mcx, foreigntableid)?.iter() {
@@ -456,7 +460,8 @@ fn check_selective_binary_conversion<'mcx>(
     let table = GetForeignTable(mcx, foreigntableid)?;
     for opt in table.options.iter() {
         if opt.name == "format" {
-            if opt.value == "binary" {
+            // C: defGetString(def) — errors on a value-less option.
+            if opt.require_value()? == "binary" {
                 return Ok(None);
             }
             break;
