@@ -237,13 +237,98 @@ fn fc_summary_recv(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<
     Err(cannot_accept().into())
 }
 
-// unported: brin_minmax_multi_summary_out (pageinspect lane). Clean 0A000
-// like the in/recv pair above; no such value can be constructed today.
-fn fc_summary_out(_f: Option<&mut FmgrInfo>, _fcinfo: &mut Fcinfo) -> PgResult<Datum> {
-    Err(Box::new(
-        PgError::error("output of type brin_minmax_multi_summary is not supported")
-            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
-    ))
+// brin_minmax_multi_summary_out: "{nranges: N  nvalues: N  maxvalues: N
+// [ ranges: {..}][ values: {..}]}" over the deserialized summary.
+fn fc_summary_out(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: the arming context outlives this call.
+    let mcx = unsafe { fcinfo.result_mcx_detached() };
+
+    // PG_DETOAST_DATUM: rebuild the 4-byte-header image (stored values may
+    // use a short header).
+    // SAFETY: STRICT varlena arg.
+    let payload = unsafe { fcinfo.arg_varlena_packed(0)? };
+    let mut image = Vec::with_capacity(payload.data().len() + 4);
+    image.extend_from_slice(&(((payload.data().len() + 4) as u32) << 2).to_ne_bytes());
+    image.extend_from_slice(payload.data());
+
+    let hdr = crate::ranges::read_serialized_header(&image);
+    let (outfunc, _isvarlena) = ::lsyscache::getTypeOutputInfo(hdr.typid)?;
+    let mut out_fn = ::fmgr_core::fmgr_info(outfunc)?;
+    let ranges = crate::ranges::brin_range_deserialize(mcx, hdr.maxvalues, &image)?;
+
+    let mut s = format!(
+        "{{nranges: {}  nvalues: {}  maxvalues: {}",
+        ranges.nranges, ranges.nvalues, ranges.maxvalues
+    );
+
+    let call_out = |out_fn: &mut FmgrInfo, val: Datum| -> PgResult<String> {
+        let d = ::fmgr::function_call1_coll_in(out_fn, ::types_core::InvalidOid, mcx, val)?;
+        // SAFETY: output functions return NUL-terminated cstrings.
+        let cs = unsafe { core::ffi::CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) };
+        Ok(String::from_utf8_lossy(cs.to_bytes()).into_owned())
+    };
+    let text_elem = |txt: &str| -> Vec<u8> {
+        let mut img = Vec::with_capacity(txt.len() + 4);
+        img.extend_from_slice(&(((txt.len() + 4) as u32) << 2).to_ne_bytes());
+        img.extend_from_slice(txt.as_bytes());
+        img
+    };
+    let anyarray_text = |astate: &::datum::array_build::ArrayBuildState<'_>| -> PgResult<String> {
+        let (typoutput, _) = ::lsyscache::getTypeOutputInfo(::types_core::ANYARRAYOID)?;
+        let mut arr_out = ::fmgr_core::fmgr_info(typoutput)?;
+        let img = ::arrayfuncs::build::make_array_result(mcx, astate)?;
+        let val = Datum::from_usize(img.as_ptr() as usize);
+        let d = ::fmgr::function_call1_coll_in(&mut arr_out, ::types_core::InvalidOid, mcx, val)?;
+        // SAFETY: array_out returns a NUL-terminated cstring.
+        let cs = unsafe { core::ffi::CStr::from_ptr(d.as_usize() as *const core::ffi::c_char) };
+        let s = String::from_utf8_lossy(cs.to_bytes()).into_owned();
+        core::mem::forget(img); // keep the mcx image alive for the call above
+        Ok(s)
+    };
+
+    let mut idx = 0usize;
+    let mut astate: Option<::datum::array_build::ArrayBuildState<'_>> = None;
+    for _ in 0..ranges.nranges {
+        let a = call_out(&mut out_fn, ranges.values[idx])?;
+        let b = call_out(&mut out_fn, ranges.values[idx + 1])?;
+        idx += 2;
+        let elem = text_elem(&format!("{a} ... {b}"));
+        astate = Some(::arrayfuncs::build::accum_array_result(
+            mcx,
+            astate,
+            Datum::from_usize(elem.as_ptr() as usize),
+            false,
+            ::types_core::TEXTOID,
+        )?);
+    }
+    if ranges.nranges > 0 {
+        s.push_str(&format!(" ranges: {}", anyarray_text(astate.as_ref().expect("nranges > 0"))?));
+    }
+
+    let mut astate: Option<::datum::array_build::ArrayBuildState<'_>> = None;
+    for _ in 0..ranges.nvalues {
+        let a = call_out(&mut out_fn, ranges.values[idx])?;
+        idx += 1;
+        let elem = text_elem(&a);
+        astate = Some(::arrayfuncs::build::accum_array_result(
+            mcx,
+            astate,
+            Datum::from_usize(elem.as_ptr() as usize),
+            false,
+            ::types_core::TEXTOID,
+        )?);
+    }
+    if ranges.nvalues > 0 {
+        s.push_str(&format!(" values: {}", anyarray_text(astate.as_ref().expect("nvalues > 0"))?));
+    }
+
+    s.push('}');
+
+    let mut out: mcx::PgVec<'_, u8> = mcx::vec_with_capacity_in(mcx, s.len() + 1)
+        .map_err(|_| mcx.oom(s.len() + 1))?;
+    out.extend_from_slice(s.as_bytes());
+    out.push(0);
+    Ok(::fmgr::cstring_result(out))
 }
 
 // unported: brin_minmax_multi_summary_send (binary-copy lane).

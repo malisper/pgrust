@@ -28,6 +28,7 @@ fn fc_summary_out(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Da
     let s = format!("{{mode: hashed  nhashes: {nhashes}  nbits: {nbits}  nbits_set: {nbits_set}}}");
     let mut v: mcx::PgVec<'_, u8> = mcx::vec_with_capacity_in(mcx, s.len() + 1)?;
     mcx::vec_append_bytes(&mut v, s.as_bytes())?;
+    v.push(0); // cstring_result requires NUL termination
     Ok(cstring_result(v))
 }
 
