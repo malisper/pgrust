@@ -1960,11 +1960,21 @@ fn agg_arm<'mcx>(
             // P2 gate (flip-ladder §5 arm #3): PGRUST_FUSED_ARM_AGG_IOS.
             // P3 note: this knob can never take `exec_agg_batched` with it —
             // the WS-F seam re-drives the same kernel (indexsource.rs:387).
+            // SE-AGGIOS refuse-parity leg: `ioss_OrderByKeys.is_empty()` is
+            // PROVABLY DEAD given the btree leg below — the planner builds
+            // order-by-op (KNN) pathkeys only behind `amcanorderbyop`
+            // (indxpath.rs), which plancat.rs grants to gist/spgist/hnsw
+            // and NEVER btree — but it makes the AGG_IOS deletion-prep
+            // caller re-trace textual: the batch drive skips the
+            // lossy-distance check, so an OrderBy shape must land on
+            // per-tuple (`scan_next`, the reorder-checked route), the same
+            // NAMED route the lane feed's OrderByReorder refusal takes.
             if fused_arm_enabled(FusedArm::AggIos)
                 && agg_fusible_common(agg, estate)
                 && ios.ss.qual.is_none()
                 && ios.ss.ps_ProjInfo.is_none()
                 && ios.ioss_Runtime.is_none()
+                && ios.ioss_OrderByKeys.is_empty()
                 && ::types_scan::sdir::ScanDirectionIsForward(ios.ioss_OrderDir)
                 && ios
                     .ioss_RelationDesc
