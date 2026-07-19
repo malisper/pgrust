@@ -51,6 +51,8 @@ pub const RELOPT_KIND_BRIN: relopt_kind = 1 << 10;
 pub const RELOPT_KIND_PARTITIONED: relopt_kind = 1 << 11;
 // pgvector hnsw: C add_reloption_kind() at module load; static here.
 pub const RELOPT_KIND_HNSW: relopt_kind = 1 << 12;
+// contrib/bloom: C add_reloption_kind() in _PG_init; static here.
+pub const RELOPT_KIND_BLOOM: relopt_kind = 1 << 13;
 
 pub const HEAP_RELOPT_NAMESPACES: &[&str] = &["toast"];
 
@@ -172,6 +174,40 @@ static RELOPTS: &[OptDef] = &[
     ),
     i("m", RELOPT_KIND_HNSW, AEL, 16, 2, 100),
     i("ef_construction", RELOPT_KIND_HNSW, AEL, 64, 4, 1000),
+    // contrib/bloom _PG_init: "length" in bits, then col1..col32 bits-per-key.
+    i("length", RELOPT_KIND_BLOOM, AEL, 80, 1, 4096),
+    i("col1", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col2", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col3", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col4", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col5", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col6", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col7", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col8", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col9", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col10", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col11", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col12", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col13", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col14", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col15", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col16", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col17", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col18", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col19", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col20", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col21", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col22", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col23", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col24", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col25", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col26", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col27", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col28", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col29", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col30", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col31", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
+    i("col32", RELOPT_KIND_BLOOM, AEL, 2, 1, 4095),
     i("autovacuum_vacuum_threshold", HT, SUEL, -1, 0, i32::MAX),
     i("autovacuum_vacuum_max_threshold", HT, SUEL, -2, -1, i32::MAX),
     i("autovacuum_vacuum_insert_threshold", HT, SUEL, -2, -1, i32::MAX),
@@ -1001,6 +1037,7 @@ pub fn index_reloptions<'mcx>(
         BRIN_AM_OID => brinoptions(mcx, options, validate),
         other => match extension_am_handler_symbol(other).as_deref() {
             Some("hnswhandler") => hnswoptions(mcx, options, validate),
+            Some("blhandler") => bloomoptions(mcx, options, validate),
             _ => panic!("index_reloptions: no amoptions for access method {other}"),
         },
     }
@@ -1214,6 +1251,38 @@ fn hnswoptions<'mcx>(
         }
     }
     Ok(Some(RdOptions::Hnsw(out)))
+}
+
+// bloptions (contrib/bloom blutils.c): parse, then convert the signature
+// length from bits to words, rounding up.
+fn bloomoptions<'mcx>(
+    mcx: Mcx<'mcx>,
+    options: Option<&[u8]>,
+    validate: bool,
+) -> PgResult<Option<RdOptions>> {
+    let values = parseRelOptions(mcx, options, validate, RELOPT_KIND_BLOOM)?;
+    if values.is_empty() {
+        return Ok(None);
+    }
+    let mut length_bits: i32 = 80;
+    let mut bit_size = [2i32; 32];
+    for v in values.iter() {
+        match v.def.name {
+            "length" => length_bits = v.int_val(),
+            name => match name.strip_prefix("col").and_then(|n| n.parse::<usize>().ok()) {
+                Some(n) if (1..=32).contains(&n) => bit_size[n - 1] = v.int_val(),
+                _ => {
+                    if validate {
+                        panic!("reloption \"{name}\" not found in parse table");
+                    }
+                }
+            },
+        }
+    }
+    Ok(Some(RdOptions::Bloom(types_rel::reloptions::BloomOptions {
+        bloom_length: (length_bits + 15) / 16,
+        bit_size,
+    })))
 }
 
 // extractRelOptions over the already-fetched reloptions datum; the caller

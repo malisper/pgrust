@@ -22,7 +22,6 @@ types_bloom = { path = "../../_support/types/types_bloom" }
 types_nbtree = { path = "../../_support/types/types_nbtree" }
 nbtree = { path = "../../backend/access/nbtree/nbtree" }
 xact = { path = "../../backend/access/transam/xact" }
-execindexing = { path = "../../backend/executor/execindexing" }
 postgres_seams = { path = "../../backend/tcop/postgres_seams" }
 types_scan = { path = "../../_support/types/types_scan" }
 bufmgr = { path = "../../backend/storage/buffer/bufmgr" }
@@ -36,3 +35,7 @@ tidbitmap = { path = "../../backend/nodes/tidbitmap" }
 vacuum_seams = { path = "../../backend/commands/vacuum_seams" }
 init_small = { path = "../../backend/utils/init/init_small" }
 dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
+adt_regproc = { path = "../../backend/utils/adt/regproc" }
+syscache_seams = { path = "../../backend/utils/cache/syscache_seams" }
+index_amvalidate = { path = "../../backend/access/index/index_amvalidate" }
+elog = { path = "../../backend/utils/error/elog" }
