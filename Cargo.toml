@@ -664,6 +664,8 @@ members = [
     "crates/backend/replication/logical/logical_message",
     "crates/contrib/test_decoding",
     "crates/contrib/citext",
+    "crates/contrib/isn",
+    "crates/contrib/pg_surgery",
     "crates/contrib/uuid_ossp",
     "crates/contrib/dblink",
     "crates/interfaces/pgclient",

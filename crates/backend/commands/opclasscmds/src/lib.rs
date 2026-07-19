@@ -557,6 +557,9 @@ pub fn DefineOpClass<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateOpClassStmt<'mcx>) -> Pg
     // dependency on extension
     pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
 
+    // dependency on extension
+    pg_depend::recordDependencyOnCurrentExtension(mcx, &myself, false)?;
+
     // C: EventTriggerCollectCreateOpClass (SCT_CreateOpClass) also retains the
     // operators/procedures lists — extension-deparse-only surface; the SRF
     // rows (command_tag/object_type/identity) are identical via Simple.

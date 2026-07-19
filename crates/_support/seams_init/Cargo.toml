@@ -291,6 +291,8 @@ logicalfuncs = { path = "../../backend/replication/logical/logicalfuncs" }
 pgoutput = { path = "../../contrib/pgoutput" }
 test_decoding = { path = "../../contrib/test_decoding" }
 citext = { path = "../../contrib/citext" }
+isn = { path = "../../contrib/isn" }
+pg_surgery = { path = "../../contrib/pg_surgery" }
 uuid_ossp = { path = "../../contrib/uuid_ossp" }
 dblink = { path = "../../contrib/dblink" }
 pg_prewarm = { path = "../../contrib/pg_prewarm" }
