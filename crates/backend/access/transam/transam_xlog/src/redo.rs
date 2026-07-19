@@ -230,6 +230,25 @@ pub fn xlog_redo(record: &mut XLogReaderState) -> PgResult<()> {
                 panic!("CommitTsParameterChange replay not ported");
             }
 
+            // Invalidate logical slots if we are in hot standby and the
+            // primary no longer runs a WAL level sufficient for logical
+            // decoding (xlog.c:8571). No need to search when the standby's
+            // own wal_level is below logical: slot creation was disallowed
+            // or existing slots already invalidated then.
+            const RS_INVAL_WAL_LEVEL: u32 = 1 << 2;
+            if xlogutils::InHotStandby()
+                && new_wal_level < crate::WAL_LEVEL_LOGICAL
+                && crate::wal_level() >= crate::WAL_LEVEL_LOGICAL
+                && slot_seams::invalidate_obsolete_replication_slots::is_installed()
+            {
+                slot_seams::invalidate_obsolete_replication_slots::call(
+                    RS_INVAL_WAL_LEVEL,
+                    0,
+                    types_core::InvalidOid,
+                    types_core::InvalidTransactionId,
+                )?;
+            }
+
             control_file_update(|cf| {
                 cf.MaxConnections = max_connections;
                 cf.max_worker_processes = max_worker_processes;
