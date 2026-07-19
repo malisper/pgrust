@@ -1976,6 +1976,7 @@ dependencies = [
  "lmgr_proc",
  "mcx",
  "miscinit",
+ "pgsync",
  "pmchild_seams",
  "pmsignal",
  "postgres",
