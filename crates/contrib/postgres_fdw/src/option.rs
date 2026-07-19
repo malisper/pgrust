@@ -290,6 +290,74 @@ pub(crate) fn extract_extension_list<'mcx>(
     Ok(extension_oids)
 }
 
+// process_pgfdw_appname (option.c:500): expand the application_name escape
+// sequences. C reads MyProcPort's connect-time database/user names; we read
+// the live MyDatabaseId / session user (recorded divergence: a renamed
+// database or SET SESSION AUTHORIZATION shows the current identity).
+pub(crate) fn process_pgfdw_appname(appname: &str) -> PgResult<String> {
+    let mut out = String::with_capacity(appname.len());
+    let mut chars = appname.chars();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            // Invalid format sequences are ignored, including a trailing '%'.
+            None => break,
+            Some('%') => out.push('%'),
+            Some('a') => {
+                if let Ok(Some(v)) = guc::GetConfigOption("application_name", true, false) {
+                    out.push_str(&v);
+                }
+            }
+            Some('c') => {
+                let start = init_small::globals::MyStartTime();
+                let pid = init_small::globals::MyProcPid();
+                let _ = core::fmt::Write::write_fmt(
+                    &mut out,
+                    format_args!("{:x}.{:x}", start, pid),
+                );
+            }
+            Some('C') => {
+                if let Ok(Some(v)) = guc::GetConfigOption("cluster_name", true, false) {
+                    out.push_str(&v);
+                }
+            }
+            Some('d') => {
+                let dbid = init_small::globals::MyDatabaseId();
+                match dbcommands_seams::get_database_name::call(dbid) {
+                    Ok(Some(name)) => out.push_str(&name),
+                    _ => out.push_str("[unknown]"),
+                }
+            }
+            Some('p') => {
+                let _ = core::fmt::Write::write_fmt(
+                    &mut out,
+                    format_args!("{}", init_small::globals::MyProcPid()),
+                );
+            }
+            Some('u') => {
+                let scratch = mcx::MemoryContext::new("pgfdw appname");
+                let name = {
+                    let m = scratch.mcx();
+                    miscinit::GetUserNameFromId(m, miscinit::GetSessionUserId(), true)
+                        .ok()
+                        .flatten()
+                        .map(|n| n.as_str().to_string())
+                };
+                match name {
+                    Some(n) => out.push_str(&n),
+                    None => out.push_str("[unknown]"),
+                }
+            }
+            // Unrecognized escapes are format errors: ignored, as C.
+            Some(_) => {}
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

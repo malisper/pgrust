@@ -104,6 +104,13 @@ pub struct QueryResult {
 }
 
 impl QueryResult {
+    /// A connection-level failure as a result value (no server diag) —
+    /// callers shaping libpq's "PGresult == NULL" arms (pgfdw_report_error
+    /// falls back to PQerrorMessage) build these.
+    pub fn conn_error(err: String) -> Self {
+        Self::error(err)
+    }
+
     fn error(err: String) -> Self {
         QueryResult {
             status: ExecStatus::Error,
