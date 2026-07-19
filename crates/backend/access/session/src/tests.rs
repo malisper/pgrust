@@ -536,7 +536,13 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //   56. contrib/postgres_fdw/src/shippable.rs — C shippable.c
     //      ShippableCacheHash: per-backend memo, syscache-inval driven,
     //      no session identity.
-    assert_eq!(count_tree(crates), 517, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // t32 fold delta (518 = 517 + 1):
+    //   57. tcop/postgres/src/sim_net.rs — SENT_LOG (the sim-converge
+    //      sent-log artifact dump): per-wire-client-thread transcript
+    //      alignment log. Whole module is cfg(pgrust_sim) at the mod decl
+    //      — ABSENT from product codegen (same class as 48); source census
+    //      sees the text. No session identity.
+    assert_eq!(count_tree(crates), 518, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
