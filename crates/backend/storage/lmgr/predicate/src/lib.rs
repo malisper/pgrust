@@ -12,9 +12,10 @@ use types_snapshot::SnapshotData;
 use types_tuple::ItemPointerData;
 
 pub use engine::{
-    GetPredicateLockStatusData, GetSafeSnapshotBlockingPids, PredicateLockShmemInit,
-    PredicateLockShmemResetAfterCrash, PredicateLockShmemSize, PredicateLockStatusEntry,
-    ReleasePredicateLocks, SerializableXactActive,
+    predicatelock_twophase_recover, GetPredicateLockStatusData, GetSafeSnapshotBlockingPids,
+    PredicateLockShmemInit, PredicateLockShmemResetAfterCrash, PredicateLockShmemSize,
+    PredicateLockStatusEntry, PredicateLockTwoPhaseFinish, ReleasePredicateLocks,
+    SerializableXactActive,
 };
 pub use serial::CheckPointPredicate;
 
@@ -156,13 +157,6 @@ pub fn CheckForSerializableConflictIn(
         tid.map(|t| (types_tuple::itemptr::ItemPointerGetBlockNumber(t), t.ip_posid)),
         blkno,
     )
-}
-
-// No SERIALIZABLE xact can reach the prepared state: AtPrepare_PredicateLocks
-// panics loudly for any active sxact, so there is never per-xact predicate
-// state to reassign or clean up here.
-pub fn PredicateLockTwoPhaseFinish(_xid: TransactionId, _is_commit: bool) -> PgResult<()> {
-    Ok(())
 }
 
 pub fn init_seams() {
