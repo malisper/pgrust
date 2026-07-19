@@ -271,3 +271,125 @@ pub fn x509_name_slash_format(name: *mut ossl::X509_NAME) -> Option<String> {
     }
     Some(String::from_utf8_lossy(&bio.contents()).into_owned())
 }
+
+// The DN-formatting units below build X509_NAMEs directly (no TLS session)
+// and pin the RFC 2253 escaping + entry ordering that sslinfo.c's
+// ASN1_STRING_to_text / X509_NAME_to_cstring produce with
+// `(ASN1_STRFLGS_RFC2253 & ~ASN1_STRFLGS_ESC_MSB) | ASN1_STRFLGS_UTF8_CONVERT`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use foreign_types::ForeignTypeRef;
+    use openssl::x509::{X509Name, X509NameBuilder};
+
+    fn build_name(entries: &[(&str, &str)]) -> X509Name {
+        let mut b = X509NameBuilder::new().unwrap();
+        for (f, v) in entries {
+            b.append_entry_by_text(f, v).unwrap();
+        }
+        b.build()
+    }
+
+    fn field(name: &X509Name, f: &str) -> DnFieldLookup {
+        let c = std::ffi::CString::new(f).unwrap();
+        x509_name_field_utf8(name.as_ptr(), &c)
+    }
+
+    fn field_value(name: &X509Name, f: &str) -> Vec<u8> {
+        match field(name, f) {
+            DnFieldLookup::Value(v) => v,
+            DnFieldLookup::NotPresent => panic!("field {f} not present"),
+            DnFieldLookup::InvalidFieldName => panic!("field {f} invalid"),
+            DnFieldLookup::BioFailure => panic!("BIO failure"),
+        }
+    }
+
+    #[test]
+    fn dn_field_plain_value_passes_through() {
+        let n = build_name(&[("CN", "pgrust")]);
+        assert_eq!(field_value(&n, "CN"), b"pgrust");
+    }
+
+    #[test]
+    fn dn_field_long_and_short_names_resolve_to_same_entry() {
+        // OBJ_txt2nid accepts both 'CN' and 'commonName' (sslinfo docs use
+        // both spellings).
+        let n = build_name(&[("CN", "either-spelling")]);
+        assert_eq!(field_value(&n, "commonName"), b"either-spelling");
+        assert_eq!(field_value(&n, "CN"), b"either-spelling");
+    }
+
+    #[test]
+    fn dn_field_rfc2253_specials_are_backslash_escaped() {
+        // RFC 2253 special characters , + " \ < > ; each escape with a
+        // backslash (ASN1_STRFLGS_ESC_2253).
+        let n = build_name(&[("CN", "a,b+c\"d\\e<f>g;h")]);
+        assert_eq!(field_value(&n, "CN"), b"a\\,b\\+c\\\"d\\\\e\\<f\\>g\\;h");
+    }
+
+    #[test]
+    fn dn_field_edge_space_and_hash_escaped() {
+        // Leading space, trailing space, and leading '#' escape; interior
+        // spaces do not.
+        let n = build_name(&[("CN", " padded value ")]);
+        assert_eq!(field_value(&n, "CN"), b"\\ padded value\\ ");
+        let n = build_name(&[("O", "#hash")]);
+        assert_eq!(field_value(&n, "O"), b"\\#hash");
+    }
+
+    #[test]
+    fn dn_field_utf8_multibyte_passes_unescaped() {
+        // ~ASN1_STRFLGS_ESC_MSB + ASN1_STRFLGS_UTF8_CONVERT: non-ASCII comes
+        // out as raw UTF-8 bytes, not \XX escapes.
+        let n = build_name(&[("L", "Z\u{00fc}rich")]);
+        assert_eq!(field_value(&n, "L"), "Z\u{00fc}rich".as_bytes());
+    }
+
+    #[test]
+    fn dn_field_control_chars_hex_escaped() {
+        // ASN1_STRFLGS_ESC_CTRL: control characters print as \XX hex.
+        let n = build_name(&[("CN", "a\nb")]);
+        assert_eq!(field_value(&n, "CN"), b"a\\0Ab");
+    }
+
+    #[test]
+    fn dn_field_absent_and_invalid_names() {
+        let n = build_name(&[("CN", "only-cn")]);
+        assert!(matches!(field(&n, "O"), DnFieldLookup::NotPresent));
+        assert!(matches!(
+            field(&n, "not-a-field"),
+            DnFieldLookup::InvalidFieldName
+        ));
+    }
+
+    #[test]
+    fn dn_field_duplicate_rdn_returns_first() {
+        // X509_NAME_get_index_by_NID(name, nid, -1) finds the FIRST entry,
+        // as sslinfo.c does.
+        let n = build_name(&[("OU", "first"), ("OU", "second")]);
+        assert_eq!(field_value(&n, "OU"), b"first");
+    }
+
+    #[test]
+    fn slash_format_preserves_certificate_entry_order() {
+        // X509_NAME_to_cstring walks entries 0..count in certificate order
+        // ("/C=../ST=.." — NOT RFC 2253's reversed order), '/'-separating
+        // short names, with the same per-value escaping.
+        let n = build_name(&[
+            ("C", "US"),
+            ("ST", "CA"),
+            ("O", "pgrust, Inc."),
+            ("CN", "tester"),
+        ]);
+        assert_eq!(
+            x509_name_slash_format(n.as_ptr()).unwrap(),
+            "/C=US/ST=CA/O=pgrust\\, Inc./CN=tester"
+        );
+    }
+
+    #[test]
+    fn slash_format_utf8_value() {
+        let n = build_name(&[("CN", "z\u{00fc}")]);
+        assert_eq!(x509_name_slash_format(n.as_ptr()).unwrap(), "/CN=z\u{00fc}");
+    }
+}
