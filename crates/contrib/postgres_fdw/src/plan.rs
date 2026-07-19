@@ -151,18 +151,20 @@ fn postgres_get_foreign_rel_size<'mcx>(
         vars::pull_varattnos(mcx, *run.root.expr_node(clause), varno, &mut attrs_used)?;
     }
 
+    let varrelid = run.root.rel(rel_id).relid as i32;
+    let local_slice: Vec<RinfoId> = local_conds.iter().copied().collect();
     let local_conds_sel = planner::clausesel::clauselist_selectivity(
         run,
-        &local_conds,
-        run.root.rel(rel_id).relid as i32,
+        &local_slice,
+        varrelid,
         types_pathnodes::JOIN_INNER,
         None,
     )?;
     let mut local_cost = types_pathnodes::QualCost::default();
-    for &ri in local_conds.iter() {
+    for &ri in &local_slice {
         let clause = run.root.rinfo(ri).clause;
-        let c =
-            planner::costsize::cost_qual_eval_node(Some(run), *run.root.expr_node(clause))?;
+        let node = *run.root.expr_node(clause);
+        let c = planner::costsize::cost_qual_eval_node(Some(&mut *run), node)?;
         local_cost.startup += c.startup;
         local_cost.per_tuple += c.per_tuple;
     }
