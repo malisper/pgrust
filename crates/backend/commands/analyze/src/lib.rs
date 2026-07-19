@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 
 mod array_typanalyze;
+mod qsort;
 mod range_typanalyze;
 mod ts_typanalyze;
 pub mod sampling;
@@ -2122,7 +2123,17 @@ fn compute_scalar_stats<'mcx>(
         // C's compare_scalars piggybacks dup detection on the sort via
         // tupnoLink; here an explicit adjacent-equality pass replaces it
         // (identical output, N-1 extra comparisons, cold path).
-        values.sort_unstable_by(|a, b| cmp(a.0, b.0).then(a.1.cmp(&b.1)));
+        // C's qsort_interruptible, NOT std sort: user btree comparators may
+        // be intransitive (contrib cube's cube_cmp over mixed-dimension
+        // values is) — C produces an arbitrary-but-safe order where std's
+        // driver panics with "does not correctly implement a total order".
+        qsort::pg_qsort(&mut values, |a, b| {
+            match cmp(a.0, b.0) {
+                core::cmp::Ordering::Less => -1,
+                core::cmp::Ordering::Greater => 1,
+                core::cmp::Ordering::Equal => a.1 - b.1,
+            }
+        });
 
         let mut corr_xysum = 0.0f64;
         let mut ndistinct = 0i32;
