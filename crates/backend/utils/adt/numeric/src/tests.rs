@@ -1264,3 +1264,20 @@ fn float8_no_overflow_any_realigns_odd_payloads() {
         }
     }
 }
+
+// fnconf batch-1, OIDs 1840/1841: C's int2_sum/int4_sum accumulate with a
+// bare int64 `+` and PostgreSQL builds with -fwrapv, so overflow WRAPS
+// (C 18.3: SELECT int2_sum(9223372036854775807, 1) → -9223372036854775808).
+// Red at base: debug add-with-overflow panic in the accumulation.
+#[test]
+fn int_sum_transitions_wrap_like_c() {
+    use crate::builtins::{int2_sum, int4_sum};
+    assert_eq!(int2_sum(Some(i64::MAX), Some(1)), Some(i64::MIN));
+    assert_eq!(int4_sum(Some(i64::MAX), Some(1)), Some(i64::MIN));
+    assert_eq!(int4_sum(Some(i64::MIN), Some(-1)), Some(i64::MAX));
+    // Non-overflow behavior unchanged.
+    assert_eq!(int2_sum(Some(40), Some(2)), Some(42));
+    assert_eq!(int4_sum(None, Some(7)), Some(7));
+    assert_eq!(int4_sum(Some(7), None), Some(7));
+    assert_eq!(int2_sum(None, None), None);
+}

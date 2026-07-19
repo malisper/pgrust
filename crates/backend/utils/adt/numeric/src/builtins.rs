@@ -24,7 +24,11 @@ pub fn int4_sum(oldsum: Option<i64>, newval: Option<i32>) -> Option<i64> {
         (None, None) => None,
         (None, Some(v)) => Some(v as i64),
         (Some(s), None) => Some(s),
-        (Some(s), Some(v)) => Some(s + v as i64),
+        // C (numeric.c int4_sum/int2_sum): `newval = oldsum + (int64) ...`
+        // with no overflow check; PostgreSQL builds with -fwrapv, so the
+        // int64 accumulation WRAPS (C 18.3: int4_sum(INT64_MAX, 1) →
+        // -9223372036854775808).
+        (Some(s), Some(v)) => Some(s.wrapping_add(v as i64)),
     }
 }
 
