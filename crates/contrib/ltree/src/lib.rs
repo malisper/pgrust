@@ -101,11 +101,24 @@ fn fc_ltxtq_out(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datu
     ret_cstring(fcinfo, &text)
 }
 
+// C's binary wire format (ltree_io.c / ltxtquery_io.c) carries a one-byte
+// format version (currently 1): *_send prepends it, *_recv strips and checks
+// it before the textual body.
+const LTREE_WIRE_VERSION: u32 = 1;
+
 macro_rules! fc_type_recv {
-    ($($fname:ident: $parse:path;)*) => {$(
+    ($($fname:ident: $parse:path, $typname:literal;)*) => {$(
         fn $fname(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
             // SAFETY: recv arg 0 is the live StringInfo pointer per the recv ABI.
             let buf = unsafe { fcinfo.arg_stringinfo(0) };
+            let version = pqformat::pq_getmsgint(buf, 1)?;
+            if version != LTREE_WIRE_VERSION {
+                // C elog(ERROR): internal-error sqlstate.
+                return Err(Box::new(PgError::error(format!(
+                    "unsupported {} version number {version}",
+                    $typname
+                ))));
+            }
             let scratch = mcx::MemoryContext::new("ltree recv");
             let remaining = buf.len().saturating_sub(buf.cursor);
             let txt = pqformat::pq_getmsgtext(scratch.mcx(), buf, remaining)?;
@@ -116,25 +129,34 @@ macro_rules! fc_type_recv {
 }
 
 fc_type_recv! {
-    fc_ltree_recv: io::parse_ltree;
-    fc_lquery_recv: io::parse_lquery;
-    fc_ltxtq_recv: io::parse_ltxtquery;
+    fc_ltree_recv: io::parse_ltree, "ltree";
+    fc_lquery_recv: io::parse_lquery, "lquery";
+    fc_ltxtq_recv: io::parse_ltxtquery, "ltxtquery";
+}
+
+// C *_send: pq_begintypsend, pq_sendint8(version), pq_sendtext(deparsed).
+fn ret_send_versioned(fcinfo: &Fcinfo, payload: &[u8]) -> PgResult<Datum> {
+    let mcx = fcinfo.result_mcx();
+    let mut buf = pqformat::pq_begintypsend(mcx)?;
+    pqformat::pq_sendint8(&mut buf, LTREE_WIRE_VERSION as u8)?;
+    pqformat::pq_sendtext(&mut buf, payload)?;
+    Ok(varlena_result(pqformat::pq_endtypsend(buf)))
 }
 
 fn fc_ltree_send(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let img = unsafe { arg_image(fcinfo, 0)? };
-    ret_text(fcinfo, &io::deparse_ltree(&img))
+    ret_send_versioned(fcinfo, &io::deparse_ltree(&img))
 }
 
 fn fc_lquery_send(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let img = unsafe { arg_image(fcinfo, 0)? };
-    ret_text(fcinfo, &io::deparse_lquery(&img))
+    ret_send_versioned(fcinfo, &io::deparse_lquery(&img))
 }
 
 fn fc_ltxtq_send(_f: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let img = unsafe { arg_image(fcinfo, 0)? };
     let text = io::deparse_ltxtquery(&img)?;
-    ret_text(fcinfo, &text)
+    ret_send_versioned(fcinfo, &text)
 }
 
 
@@ -834,5 +856,86 @@ mod tests {
     fn syntax_error_positions() {
         let e = io::parse_ltree(b"a..b").unwrap_err();
         assert!(e.message().contains("syntax error"));
+    }
+
+    // Payload the client sees for a send result datum.
+    fn send_payload(d: Datum) -> Vec<u8> {
+        // SAFETY: send wrappers return a live 4B-header varlena.
+        unsafe { datum::VarlenaRef::from_ptr(d.as_usize() as *const u8) }
+            .data()
+            .to_vec()
+    }
+
+    fn fcinfo_with_arg<'a>(
+        ctx: &'a mcx::MemoryContext,
+        arg: Datum,
+    ) -> types_fmgr::LocalFcinfo<1> {
+        // pq_sendtext consults the client-encoding seams; identity here.
+        static SEAMS: std::sync::Once = std::sync::Once::new();
+        SEAMS.call_once(|| {
+            mbutils_seams::server_to_client_conversion_needed::set(|| false);
+            mbutils_seams::pg_server_to_client::set(|_, _| Ok(None));
+        });
+        let mut fcinfo = types_fmgr::LocalFcinfo::<1>::new(0);
+        // SAFETY: ctx outlives the call.
+        unsafe { fcinfo.set_result_mcx(ctx.mcx()) };
+        fcinfo.set_arg(0, arg);
+        fcinfo
+    }
+
+    // B3 (SDK compat matrix 2026-07-18): C's binary format carries a leading
+    // version byte in BOTH directions; dropping it silently ate the first
+    // character on output and rejected valid binary input.
+    #[test]
+    fn binary_wire_carries_version_byte_both_directions() {
+        let ctx = mcx::MemoryContext::new("t");
+
+        let tree = img("this.is.a.path");
+        let mut fcinfo = fcinfo_with_arg(&ctx, Datum::from_usize(tree.as_ptr() as usize));
+        let d = fc_ltree_send(None, &mut fcinfo).unwrap();
+        let wire = send_payload(d);
+        assert_eq!(wire[0], 1, "leading wire-format version byte");
+        assert_eq!(&wire[1..], b"this.is.a.path");
+
+        // recv accepts exactly what send produced (strips the version byte).
+        let mut si = stringinfo::StringInfo::new_in(ctx.mcx()).unwrap();
+        si.append_bytes(&wire).unwrap();
+        let mut fcinfo =
+            fcinfo_with_arg(&ctx, Datum::from_usize(core::ptr::from_mut(&mut si) as usize));
+        let d = fc_ltree_recv(None, &mut fcinfo).unwrap();
+        // SAFETY: recv returns a live 4B-header ltree varlena.
+        let payload = unsafe { datum::VarlenaRef::from_ptr(d.as_usize() as *const u8) }.data();
+        let total = payload.len() + repr::VARHDRSZ;
+        let mut full = vec![0u8; total];
+        repr::set_varsize(&mut full, total);
+        full[repr::VARHDRSZ..].copy_from_slice(payload);
+        assert_eq!(io::deparse_ltree(&full), b"this.is.a.path");
+    }
+
+    #[test]
+    fn binary_wire_lquery_ltxtquery_version_byte() {
+        let ctx = mcx::MemoryContext::new("t");
+
+        let q = io::parse_lquery(b"*.Astronomy.*").unwrap();
+        let mut fcinfo = fcinfo_with_arg(&ctx, Datum::from_usize(q.as_ptr() as usize));
+        let wire = send_payload(fc_lquery_send(None, &mut fcinfo).unwrap());
+        assert_eq!((wire[0], &wire[1..]), (1, &b"*.Astronomy.*"[..]));
+
+        let t = io::parse_ltxtquery(b"Astro* & !pictures").unwrap();
+        let mut fcinfo = fcinfo_with_arg(&ctx, Datum::from_usize(t.as_ptr() as usize));
+        let wire = send_payload(fc_ltxtq_send(None, &mut fcinfo).unwrap());
+        assert_eq!(wire[0], 1);
+        assert_eq!(&wire[1..], b"Astro* & !pictures");
+    }
+
+    #[test]
+    fn binary_wire_recv_rejects_unknown_version() {
+        let ctx = mcx::MemoryContext::new("t");
+        let mut si = stringinfo::StringInfo::new_in(ctx.mcx()).unwrap();
+        si.append_bytes(b"\x02a.b").unwrap();
+        let mut fcinfo =
+            fcinfo_with_arg(&ctx, Datum::from_usize(core::ptr::from_mut(&mut si) as usize));
+        let e = fc_ltree_recv(None, &mut fcinfo).unwrap_err();
+        assert_eq!(e.message(), "unsupported ltree version number 2");
     }
 }
