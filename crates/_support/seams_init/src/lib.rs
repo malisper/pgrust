@@ -190,6 +190,7 @@ pub fn init_all_with_transport(transport: Transport) {
     dblink::init_seams();
     pg_prewarm::init_seams();
     file_fdw::init_seams();
+    postgres_fdw::init_seams();
     ltree::init_seams();
     intarray::init_seams();
     pgcrypto::init_seams();

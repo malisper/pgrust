@@ -8,7 +8,7 @@
 // blocking syscall outside the EAGAIN wait (libpq-be-fe-helpers.h contract).
 use std::os::fd::RawFd;
 
-use types_core::pgsocket;
+use types_core::{pgsocket, Oid};
 use types_error::PgResult;
 use types_storage::waiteventset::{
     WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_SOCKET_READABLE, WL_SOCKET_WRITEABLE, WL_TIMEOUT,
@@ -104,6 +104,13 @@ pub struct QueryResult {
 }
 
 impl QueryResult {
+    /// A connection-level failure as a result value (no server diag) —
+    /// callers shaping libpq's "PGresult == NULL" arms (pgfdw_report_error
+    /// falls back to PQerrorMessage) build these.
+    pub fn conn_error(err: String) -> Self {
+        Self::error(err)
+    }
+
     fn error(err: String) -> Self {
         QueryResult {
             status: ExecStatus::Error,
@@ -852,6 +859,211 @@ impl PgConn {
         self.send_query_raw(query)
     }
 
+    // ---- extended query protocol (Parse/Bind/Describe/Execute/Sync) ----
+    //
+    // The wire shapes mirror libpq fe-exec.c: pqSendQueryGuts (PQsendQueryParams
+    // / PQsendQueryPrepared), PQsendPrepare. Params and results travel as TEXT
+    // (postgres_fdw transmits params textually and needs no binary results).
+
+    /// PQsendQueryParams: Parse(unnamed) + Bind + Describe(portal) +
+    /// Execute + Sync in one flush. `param_types` is either empty (server
+    /// infers every type, libpq's paramTypes==NULL) or one Oid per param
+    /// (0 = infer). `params` are text values, None = NULL.
+    pub fn send_query_params(
+        &mut self,
+        query: &str,
+        param_types: &[Oid],
+        params: &[Option<&str>],
+    ) -> bool {
+        debug_assert!(param_types.is_empty() || param_types.len() == params.len());
+        let mut pkt = msg(b'P', &parse_body("", query, param_types, params.len()));
+        pkt.extend_from_slice(&msg(b'B', &bind_body("", "", params)));
+        pkt.extend_from_slice(&msg(b'D', b"P\0"));
+        pkt.extend_from_slice(&msg(b'E', &execute_body("", 0)));
+        pkt.extend_from_slice(&msg(b'S', &[]));
+        if let Err(e) = self.send_all(&pkt) {
+            self.err = e;
+            return false;
+        }
+        self.pending_results = true;
+        true
+    }
+
+    /// PQsendPrepare: Parse(name) + Sync (no Describe, exactly libpq).
+    pub fn send_prepare(&mut self, stmt_name: &str, query: &str, param_types: &[Oid]) -> bool {
+        let mut pkt = msg(b'P', &parse_body(stmt_name, query, param_types, param_types.len()));
+        pkt.extend_from_slice(&msg(b'S', &[]));
+        if let Err(e) = self.send_all(&pkt) {
+            self.err = e;
+            return false;
+        }
+        self.pending_results = true;
+        true
+    }
+
+    /// PQsendQueryPrepared: Bind(stmt) + Describe(portal) + Execute + Sync.
+    pub fn send_query_prepared(&mut self, stmt_name: &str, params: &[Option<&str>]) -> bool {
+        let mut pkt = msg(b'B', &bind_body("", stmt_name, params));
+        pkt.extend_from_slice(&msg(b'D', b"P\0"));
+        pkt.extend_from_slice(&msg(b'E', &execute_body("", 0)));
+        pkt.extend_from_slice(&msg(b'S', &[]));
+        if let Err(e) = self.send_all(&pkt) {
+            self.err = e;
+            return false;
+        }
+        self.pending_results = true;
+        true
+    }
+
+    /// PQexecParams: parameterized query, text params/results, keep the last
+    /// resultset (PQexecStart discard discipline included).
+    pub fn exec_params(
+        &mut self,
+        query: &str,
+        param_types: &[Oid],
+        params: &[Option<&str>],
+    ) -> PgResult<QueryResult> {
+        if self.pending_results {
+            self.drain();
+        }
+        if !self.send_query_params(query, param_types, params) {
+            return Ok(QueryResult::error(self.err.clone()));
+        }
+        self.collect_last_result()
+    }
+
+    /// PQprepare: create a named prepared statement; CommandOk on success.
+    pub fn prepare(
+        &mut self,
+        stmt_name: &str,
+        query: &str,
+        param_types: &[Oid],
+    ) -> PgResult<QueryResult> {
+        if self.pending_results {
+            self.drain();
+        }
+        if !self.send_prepare(stmt_name, query, param_types) {
+            return Ok(QueryResult::error(self.err.clone()));
+        }
+        self.collect_last_result()
+    }
+
+    /// PQexecPrepared: execute a named prepared statement with text params.
+    pub fn exec_prepared(
+        &mut self,
+        stmt_name: &str,
+        params: &[Option<&str>],
+    ) -> PgResult<QueryResult> {
+        if self.pending_results {
+            self.drain();
+        }
+        if !self.send_query_prepared(stmt_name, params) {
+            return Ok(QueryResult::error(self.err.clone()));
+        }
+        self.collect_last_result()
+    }
+
+    // PQexec's collect loop, shared by the extended-protocol entry points:
+    // gather results until ReadyForQuery, keep the last resultset. Handles
+    // the extended-protocol acknowledgements ('1' ParseComplete, '2'
+    // BindComplete, '3' CloseComplete, 'n' NoData, 't' ParameterDescription)
+    // and PortalSuspended ('s', treated as result-complete like libpq).
+    fn collect_last_result(&mut self) -> PgResult<QueryResult> {
+        let mut nfields = 0usize;
+        let mut rows: Vec<Vec<Option<Vec<u8>>>> = Vec::new();
+        let mut result = QueryResult::status_only(ExecStatus::CommandOk);
+        let mut error: Option<(String, ErrorFields)> = None;
+        loop {
+            let (t, mbody) = match self.read_message(self.we.receive)? {
+                Ok(m) => m,
+                Err(e) => return Ok(QueryResult::error(e)),
+            };
+            match t {
+                b'T' => {
+                    nfields = u16::from_be_bytes([mbody[0], mbody[1]]) as usize;
+                    rows.clear();
+                }
+                b'D' => rows.push(parse_data_row(&mbody)),
+                b'C' | b's' => {
+                    let tag =
+                        if t == b'C' { cstr_at(&mbody, 0).0 } else { String::new() };
+                    result = QueryResult {
+                        status: if nfields > 0 {
+                            ExecStatus::TuplesOk
+                        } else {
+                            ExecStatus::CommandOk
+                        },
+                        nfields,
+                        rows: std::mem::take(&mut rows),
+                        cmd_tag: tag,
+                        diag: None,
+                        err: String::new(),
+                    };
+                    nfields = 0;
+                }
+                b'I' => result = QueryResult::status_only(ExecStatus::Empty),
+                b'E' => {
+                    let diag = parse_diag(&mbody);
+                    self.err = parse_error_fields(&mbody);
+                    error = Some((self.err.clone(), diag));
+                }
+                b'1' | b'2' | b'3' | b'n' | b't' => {}
+                b'S' | b'N' | b'A' => self.note_async(t, &mbody),
+                b'Z' => {
+                    self.txn_status = mbody.first().copied().unwrap_or(b'I');
+                    self.pending_results = false;
+                    break;
+                }
+                other => {
+                    self.conn_ok = false;
+                    return Ok(QueryResult::error(format!(
+                        "unexpected message type \"{}\" from server",
+                        other as char
+                    )));
+                }
+            }
+        }
+        if let Some((e, diag)) = error {
+            let mut r = QueryResult::error(e);
+            r.diag = Some(diag);
+            return Ok(r);
+        }
+        Ok(result)
+    }
+
+    // Deadline-bounded readable wait (postgres_fdw's abort-cleanup
+    // discipline pumps with timeouts). Ok(true) = readable; Ok(false) =
+    // timed out. Latch wakeups run CHECK_FOR_INTERRUPTS and keep waiting.
+    pub fn wait_readable_timeout(&self, timeout_ms: i64) -> PgResult<bool> {
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_millis(timeout_ms.max(0) as u64);
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return Ok(false);
+            }
+            let rc = latch::WaitLatchOrSocket(
+                init_small::globals::MyLatch(),
+                WL_LATCH_SET | WL_EXIT_ON_PM_DEATH | WL_SOCKET_READABLE | WL_TIMEOUT,
+                self.fd,
+                left.as_millis().min(i64::MAX as u128) as i64,
+                self.we.receive,
+            )?;
+            if rc & WL_LATCH_SET != 0 {
+                if let Some(l) = init_small::globals::MyLatch() {
+                    latch::ResetLatch(l);
+                }
+                postgres_seams::check_for_interrupts::call()?;
+            }
+            if rc & WL_SOCKET_READABLE != 0 {
+                return Ok(true);
+            }
+            if rc & WL_TIMEOUT != 0 {
+                return Ok(false);
+            }
+        }
+    }
+
     // PQisBusy (after a consume_input): would get_result block? Not busy once
     // a whole result's terminator (or ReadyForQuery) is buffered, or when no
     // query is pending at all.
@@ -932,8 +1144,8 @@ impl PgConn {
                     rows.clear();
                 }
                 b'D' => rows.push(parse_data_row(&body)),
-                b'C' => {
-                    let (tag, _) = cstr_at(&body, 0);
+                b'C' | b's' => {
+                    let tag = if t == b'C' { cstr_at(&body, 0).0 } else { String::new() };
                     let status =
                         if nfields > 0 { ExecStatus::TuplesOk } else { ExecStatus::CommandOk };
                     return Ok(Some(QueryResult {
@@ -945,6 +1157,7 @@ impl PgConn {
                         err: String::new(),
                     }));
                 }
+                b'1' | b'2' | b'3' | b'n' | b't' => {}
                 b'I' => return Ok(Some(QueryResult::status_only(ExecStatus::Empty))),
                 b'E' => {
                     let diag = parse_diag(&body);
@@ -1038,6 +1251,7 @@ impl PgConn {
                     self.err = parse_error_fields(&body);
                     error = Some((self.err.clone(), diag));
                 }
+                b'1' | b'2' | b'3' | b'n' | b't' => {}
                 b'S' | b'N' | b'A' => self.note_async(t, &body),
                 b'Z' => {
                     self.txn_status = body.first().copied().unwrap_or(b'I');
@@ -1215,6 +1429,57 @@ impl CancelSock {
     }
 }
 
+// Parse ('P') message body: stmt name, query, param-type OIDs (0 = infer;
+// zeros are sent for every param when the caller supplied no types, matching
+// libpq's paramTypes==NULL arm).
+fn parse_body(stmt_name: &str, query: &str, param_types: &[Oid], nparams: usize) -> Vec<u8> {
+    let mut b = Vec::with_capacity(stmt_name.len() + query.len() + 4 + 4 * nparams);
+    b.extend_from_slice(stmt_name.as_bytes());
+    b.push(0);
+    b.extend_from_slice(query.as_bytes());
+    b.push(0);
+    b.extend_from_slice(&(nparams as u16).to_be_bytes());
+    for i in 0..nparams {
+        let oid = param_types.get(i).copied().map(u32::from).unwrap_or(0);
+        b.extend_from_slice(&oid.to_be_bytes());
+    }
+    b
+}
+
+// Bind ('B') message body: all params text (0 param-format codes, libpq's
+// paramFormats==NULL), one result-format code 0 (text), exactly
+// pqSendQueryGuts with resultFormat=0.
+fn bind_body(portal: &str, stmt_name: &str, params: &[Option<&str>]) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(portal.as_bytes());
+    b.push(0);
+    b.extend_from_slice(stmt_name.as_bytes());
+    b.push(0);
+    b.extend_from_slice(&0u16.to_be_bytes()); // param format codes: none = all text
+    b.extend_from_slice(&(params.len() as u16).to_be_bytes());
+    for p in params {
+        match p {
+            None => b.extend_from_slice(&(-1i32).to_be_bytes()),
+            Some(v) => {
+                b.extend_from_slice(&(v.len() as u32).to_be_bytes());
+                b.extend_from_slice(v.as_bytes());
+            }
+        }
+    }
+    b.extend_from_slice(&1u16.to_be_bytes()); // one result-format code...
+    b.extend_from_slice(&0u16.to_be_bytes()); // ...text
+    b
+}
+
+// Execute ('E') message body.
+fn execute_body(portal: &str, maxrows: u32) -> Vec<u8> {
+    let mut b = Vec::with_capacity(portal.len() + 5);
+    b.extend_from_slice(portal.as_bytes());
+    b.push(0);
+    b.extend_from_slice(&maxrows.to_be_bytes());
+    b
+}
+
 pub(crate) fn parse_data_row(body: &[u8]) -> Vec<Option<Vec<u8>>> {
     let ncols = u16::from_be_bytes([body[0], body[1]]) as usize;
     let mut cols = Vec::with_capacity(ncols);
@@ -1306,6 +1571,43 @@ mod tests {
         let m = msg(b'Q', b"SELECT 1\0");
         assert_eq!(m[0], b'Q');
         assert_eq!(be_i32(&m[1..5]) as usize, m.len() - 1);
+    }
+
+    #[test]
+    fn parse_body_shape() {
+        // Unnamed statement, 2 params, no explicit types -> two zero OIDs
+        // (libpq paramTypes==NULL).
+        let b = parse_body("", "SELECT $1, $2", &[], 2);
+        assert_eq!(&b[..2], b"\0S");
+        let ntypes = u16::from_be_bytes([b[b.len() - 10], b[b.len() - 9]]);
+        assert_eq!(ntypes, 2);
+        assert_eq!(&b[b.len() - 8..], &[0, 0, 0, 0, 0, 0, 0, 0]);
+        // Named + explicit types (PQprepare).
+        let b = parse_body("st1", "SELECT $1", &[Oid::from(23u32)], 1);
+        assert!(b.starts_with(b"st1\0SELECT $1\0"));
+        assert_eq!(&b[b.len() - 6..], &[0, 1, 0, 0, 0, 23]);
+    }
+
+    #[test]
+    fn bind_body_shape() {
+        let b = bind_body("", "st1", &[Some("42"), None]);
+        // portal "" NUL, stmt "st1" NUL, 0 param-format codes, 2 params:
+        // "42" (len 2), NULL (-1); then 1 result-format code = 0 (text).
+        let mut want: Vec<u8> = Vec::new();
+        want.extend_from_slice(b"\0st1\0");
+        want.extend_from_slice(&0u16.to_be_bytes());
+        want.extend_from_slice(&2u16.to_be_bytes());
+        want.extend_from_slice(&2u32.to_be_bytes());
+        want.extend_from_slice(b"42");
+        want.extend_from_slice(&(-1i32).to_be_bytes());
+        want.extend_from_slice(&1u16.to_be_bytes());
+        want.extend_from_slice(&0u16.to_be_bytes());
+        assert_eq!(b, want);
+    }
+
+    #[test]
+    fn execute_body_shape() {
+        assert_eq!(execute_body("", 0), vec![0, 0, 0, 0, 0]);
     }
 
     #[test]
