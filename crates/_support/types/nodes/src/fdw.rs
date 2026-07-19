@@ -54,3 +54,12 @@ pub enum FdwExplainProp<'a> {
     Text(&'a str),
     Integer { value: i64, unit: &'static str },
 }
+
+/// The ExplainState bits C's ExplainForeignScan hooks read (same crate-cycle
+/// marshal as FdwExplainProp): file_fdw gates "Foreign File Size" on
+/// es->costs; postgres_fdw gates "Remote SQL" on es->verbose.
+#[derive(Clone, Copy, Debug)]
+pub struct FdwExplainFlags {
+    pub costs: bool,
+    pub verbose: bool,
+}
