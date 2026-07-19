@@ -7,6 +7,7 @@
 
 pub mod deparse;
 pub mod option;
+pub mod plan;
 pub mod relinfo;
 pub mod shippable;
 pub mod transmission;
@@ -19,4 +20,6 @@ pub(crate) fn loc(funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new("postgres_fdw.c", 0, funcname)
 }
 
-pub fn init_seams() {}
+pub fn init_seams() {
+    plan::install();
+}
