@@ -233,6 +233,44 @@ enum Cmd {
         #[arg(long, default_value_t = false)]
         red: bool,
     },
+    /// SIM-CONVERGE inc-2: drive ONE H8 v2 TWO-session plan inside the sim —
+    /// the plan's serialized interleaving maps onto the P13 corpus's two
+    /// registered backends via the cross-session turn gate
+    /// (PGRUST_SIMNET_TURNS, completion-ordered). Arms: green (+x3 identity
+    /// + alt-sched observation), --red-order (gate OFF: the pre-lane race —
+    /// the serialized-order model walk must catch it), --red-wedge (a wedged
+    /// schedule must die as the named SCHEDCEILING verdict, never a panic),
+    /// --test-null-bug (the TEETH instrument on the cross-session read).
+    SimTwo {
+        /// v2 plan file; omitted = the built-in cross-session fixture.
+        #[arg(long)]
+        plan: Option<PathBuf>,
+        #[arg(long, default_value_t = 7)]
+        sched_seed: u64,
+        #[arg(long)]
+        sim_bin: PathBuf,
+        #[arg(long)]
+        datadir: PathBuf,
+        #[arg(long)]
+        share_dir: PathBuf,
+        #[arg(long, default_value = "simtwo-out")]
+        out: PathBuf,
+        /// Extra identical repetitions (2 = the x3 law).
+        #[arg(long, default_value_t = 2)]
+        x3: u64,
+        /// Alternate schedule seeds to run as OBSERVATION legs (reported,
+        /// not asserted — the determinism law binds bytes to (plan, seed)).
+        #[arg(long, default_value_t = 2)]
+        alt_scheds: u64,
+        #[arg(long, default_value_t = 180)]
+        timeout_s: u64,
+        #[arg(long, default_value_t = false)]
+        red_order: bool,
+        #[arg(long, default_value_t = false)]
+        red_wedge: bool,
+        #[arg(long, default_value_t = false)]
+        test_null_bug: bool,
+    },
 }
 
 fn main() {
@@ -475,6 +513,33 @@ fn real_main() -> Result<i32, String> {
                 red,
             };
             Ok(simbridge::run_fault_campaign(&args))
+        }
+        Cmd::SimTwo {
+            plan,
+            sched_seed,
+            sim_bin,
+            datadir,
+            share_dir,
+            out,
+            x3,
+            alt_scheds,
+            timeout_s,
+            red_order,
+            red_wedge,
+            test_null_bug,
+        } => {
+            let args = simbridge::TwoArgs {
+                plan_path: plan,
+                sched_seed,
+                world: simbridge::SimWorld { sim_bin, datadir, share_dir, timeout_s },
+                out,
+                x3,
+                alt_scheds,
+                red_order,
+                red_wedge,
+                test_null_bug,
+            };
+            Ok(simbridge::run_two_session_campaign(&args))
         }
     }
 }

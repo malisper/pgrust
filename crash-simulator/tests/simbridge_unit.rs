@@ -5,7 +5,8 @@
 use simharness::runner::driver::{ExecOutcome, Session};
 use simharness::runner::planface::{FaultPoint, Plan, PlanHeader, Sql, SqlMeta, Step};
 use simharness::runner::simbridge::{
-    null_bug_rewrite, parse_transcript, synthesize_script, ReplaySession, RESET_STMTS,
+    null_bug_rewrite, parse_transcript, synthesize_script, synthesize_two_session, ReplaySession,
+    RESET_STMTS,
 };
 
 // ---------------------------------------------------------------- frames
@@ -188,6 +189,89 @@ fn synthesis_prefixes_reset_and_refuses_out_of_scope() {
 
     let p = plan_with(vec![Step::Session(1)]);
     assert_eq!(synthesize_script(&p, false).unwrap_err(), "bridge-refused-v2");
+}
+
+// ---------------------------------------------- SIM-CONVERGE inc-2: two-session
+
+#[test]
+fn two_session_split_maps_interleaving_onto_two_backends() {
+    // Setup DDL (session 0), then an alternating cross-session interleaving:
+    // s0 INSERT, s1 SELECT (reads s0's write), s0 INSERT, s1 SELECT.
+    let p = plan_with(vec![
+        Step::Ddl(sql("CREATE TABLE t (k int, v int)")),
+        Step::Session(0),
+        Step::Dml(sql("INSERT INTO t VALUES (1, 10)")),
+        Step::Session(1),
+        Step::Query(sql("SELECT count(*) FROM t")),
+        Step::Session(0),
+        Step::Dml(sql("INSERT INTO t VALUES (2, 20)")),
+        Step::Session(1),
+        Step::Query(sql("SELECT sum(v) FROM t")),
+    ]);
+    let ts = synthesize_two_session(&p, false).expect("two-session scriptable");
+
+    // s1 boot setup: DROP/CREATE SCHEMA + SET search_path + the table DDL.
+    assert_eq!(&ts.setup[..3], &RESET_STMTS.map(String::from));
+    assert_eq!(ts.setup[3], "CREATE TABLE t (k int, v int)");
+
+    // Each worker sets its own search_path, then its own statements.
+    assert_eq!(ts.session_a[0], "SET search_path = simharness");
+    assert_eq!(
+        &ts.session_a[1..],
+        &["INSERT INTO t VALUES (1, 10)", "INSERT INTO t VALUES (2, 20)"]
+    );
+    assert_eq!(ts.session_b[0], "SET search_path = simharness");
+    assert_eq!(&ts.session_b[1..], &["SELECT count(*) FROM t", "SELECT sum(v) FROM t"]);
+
+    // The global turn order: the two SET prologues (2, 3), then the plan's
+    // strict alternation (2, 3, 2, 3).
+    assert_eq!(ts.turns, vec![2, 3, 2, 3, 2, 3]);
+
+    // Turn-accounting invariant: exactly one turn per statement, and each
+    // turn's session-id owns the corresponding statement.
+    assert_eq!(ts.turns.len(), ts.session_a.len() + ts.session_b.len());
+    let (mut ia, mut ib) = (0usize, 0usize);
+    for t in &ts.turns {
+        match t {
+            2 => ia += 1,
+            3 => ib += 1,
+            other => panic!("unexpected turn-id {other}"),
+        }
+    }
+    assert_eq!(ia, ts.session_a.len());
+    assert_eq!(ib, ts.session_b.len());
+}
+
+#[test]
+fn two_session_refuses_inc3_shapes() {
+    // Session fan-out beyond two (the S1 specconflict 4-session shape).
+    let p = plan_with(vec![Step::Session(2)]);
+    assert_eq!(synthesize_two_session(&p, false).unwrap_err(), "bridge-refused-v2-fanout");
+
+    // The blocking-worker choreography (AsyncDml/Join/WaitUntil).
+    let p = plan_with(vec![Step::Session(1), Step::AsyncDml(sql("UPDATE t SET v = 1"))]);
+    assert_eq!(synthesize_two_session(&p, false).unwrap_err(), "bridge-refused-v2-async");
+    let p = plan_with(vec![Step::Join(1)]);
+    assert_eq!(synthesize_two_session(&p, false).unwrap_err(), "bridge-refused-v2-async");
+    let p = plan_with(vec![Step::WaitUntil(sql("SELECT true"))]);
+    assert_eq!(synthesize_two_session(&p, false).unwrap_err(), "bridge-refused-v2-async");
+
+    // A DDL after the interleaving has begun (setup-reorder hazard).
+    let p = plan_with(vec![
+        Step::Dml(sql("INSERT INTO t VALUES (1)")),
+        Step::Ddl(sql("CREATE TABLE u (x int)")),
+    ]);
+    assert_eq!(synthesize_two_session(&p, false).unwrap_err(), "bridge-refused-v2-lateddl");
+
+    // Fault steps (as for v1).
+    let p = plan_with(vec![Step::Fault(FaultPoint::Disconnect)]);
+    assert_eq!(synthesize_two_session(&p, false).unwrap_err(), "bridge-refused-fault");
+
+    // Tx steps: session-scoped tx modeling needs the replay pool (inc-3) —
+    // the merged single-stream model walk would put the other session's
+    // statements INSIDE this connection's transaction.
+    let p = plan_with(vec![Step::Tx(simharness::runner::planface::TxCtl::Commit)]);
+    assert_eq!(synthesize_two_session(&p, false).unwrap_err(), "bridge-refused-v2-tx");
 }
 
 #[test]

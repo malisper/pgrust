@@ -138,6 +138,142 @@ pub fn synthesize_script(plan: &Plan, null_bug: bool) -> Result<Vec<String>, Str
 }
 
 // ---------------------------------------------------------------------------
+// SIM-CONVERGE inc-2: two-session plan split (the cross-session interleaving)
+// ---------------------------------------------------------------------------
+
+/// The per-session scripts + the global turn order a v2 TWO-session plan maps
+/// onto the P13 N-session corpus (boot + two registered backends). The v2
+/// format's serialized interleaving is a cross-session statement-ORDER
+/// contract; the sim corpus drives each session's script independently, so the
+/// order is carried out-of-band as [`turns`] (a session turn-id per global
+/// statement) and enforced by the corpus's turn gate (PGRUST_SIMNET_TURNS,
+/// sim_net.rs) — a client sends its next statement only on its turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TwoSessionScripts {
+    /// s1 (boot, turn-free): the shared setup — DROP/CREATE SCHEMA + all table
+    /// DDL — run to completion before the worker sessions spawn, so both
+    /// workers see the schema through the shared universe.
+    pub setup: Vec<String>,
+    /// s2 (turn-id 2): the plan's session 0 (primary) statement stream, with a
+    /// per-connection `SET search_path` prologue.
+    pub session_a: Vec<String>,
+    /// s3 (turn-id 3): the plan's session 1 (worker) statement stream, with a
+    /// per-connection `SET search_path` prologue.
+    pub session_b: Vec<String>,
+    /// The global turn order: the session turn-id (2 or 3) that owns each
+    /// global statement, in plan order — including the two `SET search_path`
+    /// prologue statements as the first two turns. Its length equals
+    /// `(session_a.len() + session_b.len())`.
+    pub turns: Vec<u32>,
+}
+
+/// Turn-id for the plan's primary session (0) and its single worker (1).
+const TURN_A: u32 = 2; // sim s2
+const TURN_B: u32 = 3; // sim s3
+
+/// Split a v2 TWO-session plan into per-session scripts + the global turn
+/// order (see [`TwoSessionScripts`]). This is the inc-2 milestone shape:
+/// SESSION switches + synchronous statements over exactly TWO sessions (0 and
+/// 1). Counted refusals (never silent — the campaign census carries them),
+/// scoped honestly to inc-3:
+/// - `bridge-refused-v2-async`   AsyncDml/Join/WaitUntil (the blocking-worker
+///   choreography — its wire mapping + the model-oracle re-walk over a
+///   ReplaySession pool is inc-3);
+/// - `bridge-refused-v2-fanout`  a session id > 1 (the S1 specconflict shape
+///   needs 4 sessions — beyond P13's two registered backends; inc-3);
+/// - `bridge-refused-v2-lateddl` a DDL after the interleaving has begun (the
+///   setup-reorder would change semantics; the milestone shape keeps all DDL
+///   in the s1 setup prefix);
+/// - `bridge-refused-v2-tx`      Tx steps (BEGIN/COMMIT/ROLLBACK). The model
+///   walk replays the MERGED stream through the single-session driver walk;
+///   a tx open on one connection is not a tx on the other, so session-scoped
+///   tx modeling needs the session-aware replay pool — inc-3. Autocommit
+///   statements are order-equivalent under the completion-ordered turn gate
+///   (statement k fully completes before k+1 is sent), so the merged walk is
+///   exact for the tx-free shape;
+/// - `bridge-refused-fault` / `bridge-refused-unscriptable` as for v1.
+pub fn synthesize_two_session(plan: &Plan, null_bug: bool) -> Result<TwoSessionScripts, String> {
+    let mut setup: Vec<String> = RESET_STMTS.iter().map(|s| s.to_string()).collect();
+    // Each worker is its OWN connection: it must set its own search_path (the
+    // schema persists in the shared universe, but search_path is per-session).
+    // These prologues are the first two global turns.
+    let mut session_a: Vec<String> = vec![POST_RESET_STMTS[0].to_string()];
+    let mut session_b: Vec<String> = vec![POST_RESET_STMTS[0].to_string()];
+    let mut turns: Vec<u32> = vec![TURN_A, TURN_B];
+
+    let mut active: u32 = 0;
+    let mut interleaving_began = false;
+    for step in &plan.steps {
+        // Route a synchronous statement to the active session's stream + a turn.
+        let emit = |active: u32, sql: String, turns: &mut Vec<u32>,
+                    a: &mut Vec<String>, b: &mut Vec<String>| {
+            match active {
+                0 => {
+                    a.push(sql);
+                    turns.push(TURN_A);
+                }
+                _ => {
+                    b.push(sql);
+                    turns.push(TURN_B);
+                }
+            }
+        };
+        match step {
+            Step::Session(id) => {
+                if *id > 1 {
+                    return Err("bridge-refused-v2-fanout".into());
+                }
+                active = *id;
+            }
+            Step::Ddl(sql) => {
+                if interleaving_began {
+                    return Err("bridge-refused-v2-lateddl".into());
+                }
+                // Shared object: run on the boot session so both workers see
+                // it through the shared universe.
+                setup.push(sql.text.clone());
+            }
+            Step::Dml(sql) | Step::Query(sql) => {
+                interleaving_began = true;
+                let text =
+                    if null_bug { null_bug_rewrite(&sql.text) } else { sql.text.clone() };
+                emit(active, text, &mut turns, &mut session_a, &mut session_b);
+            }
+            Step::Tx(_) => return Err("bridge-refused-v2-tx".into()),
+            Step::Arm(a) => {
+                interleaving_began = true;
+                emit(active, arm_sql(a), &mut turns, &mut session_a, &mut session_b);
+                if matches!(a, ArmCtl::ResetAll) {
+                    // RESET ALL nukes search_path on the active connection.
+                    emit(
+                        active,
+                        POST_RESET_STMTS[0].to_string(),
+                        &mut turns,
+                        &mut session_a,
+                        &mut session_b,
+                    );
+                }
+            }
+            Step::BeginProperty { .. }
+            | Step::EndProperty { .. }
+            | Step::Assumption(_)
+            | Step::Assertion(_) => {}
+            Step::Fault(_) => return Err("bridge-refused-fault".into()),
+            Step::AsyncDml(_) | Step::Join(_) | Step::WaitUntil(_) => {
+                return Err("bridge-refused-v2-async".into())
+            }
+        }
+    }
+    for s in setup.iter().chain(&session_a).chain(&session_b) {
+        if s.contains('\n') || s.trim().is_empty() || s.trim_start().starts_with("--") {
+            return Err("bridge-refused-unscriptable".into());
+        }
+    }
+    debug_assert_eq!(turns.len(), session_a.len() + session_b.len());
+    Ok(TwoSessionScripts { setup, session_a, session_b, turns })
+}
+
+// ---------------------------------------------------------------------------
 // Wire-transcript parsing (server->client bytes -> per-statement outcomes)
 // ---------------------------------------------------------------------------
 
@@ -406,6 +542,27 @@ pub struct CorpusRun {
     pub sentlog: Vec<String>,
     pub oplog: Vec<u8>,
     pub schedlog: String,
+    /// SIM-CONVERGE inc-2 (two-session mode only; empty otherwise): session
+    /// B's artifacts (sim s3) and the boot session's (s1 — the setup script's
+    /// acks, which the merged model walk consumes first).
+    pub transcript_b: Vec<u8>,
+    pub sentlog_b: Vec<String>,
+    pub oplog_b: Vec<u8>,
+    pub transcript_s1: Vec<u8>,
+    pub sentlog_s1: Vec<String>,
+}
+
+/// SIM-CONVERGE inc-2: the two-session corpus shape — s1 runs `setup` to
+/// completion (boot session), then s2 (`spec.script` = session A) and s3
+/// (`script_b` = session B) interleave under the cross-session turn gate
+/// (`turns`, completion-ordered; see sim_net.rs). `gate=false` resurrects the
+/// pre-lane RACE (no PGRUST_SIMNET_TURNS) — the order-red arm.
+#[derive(Clone, Copy)]
+pub struct TwoSessionEnv<'a> {
+    pub setup: &'a [String],
+    pub script_b: &'a [String],
+    pub turns: &'a [u32],
+    pub gate: bool,
 }
 
 pub struct CorpusSpec<'a> {
@@ -426,6 +583,13 @@ pub struct CorpusSpec<'a> {
     /// Fsync the seeded image (fault legs: probe AND writer, so their op
     /// streams stay aligned for the cut-point rebasing).
     pub seed_durable: bool,
+    /// SIM-CONVERGE inc-2: two-session mode (requires `nsession`). None =
+    /// every existing leg, byte-identical.
+    pub two_session: Option<TwoSessionEnv<'a>>,
+    /// Virtual-time ceiling (PGRUST_SIM_VCEIL_S) — the wedge red's named-
+    /// verdict bound (SCHEDCEILING instead of a wall-clock kill). None =
+    /// existing legs unchanged.
+    pub vceil_s: Option<u64>,
 }
 
 /// Recursive copy (skipping the boot-owned raw-plane lockfiles). The sim
@@ -505,9 +669,23 @@ pub fn run_corpus(world: &SimWorld, dir: &Path, spec: &CorpusSpec) -> Result<Cor
         .env("PGRUST_PGSHAREDIR", &world.share_dir);
     let (transcript_p, sentlog_p, oplog_p);
     if spec.nsession {
-        let s1 = wf("s1.sql", "SELECT 1\n")?;
+        // SIM-CONVERGE inc-2 (two-session mode): s1 = the setup script, s3 =
+        // session B's script, and the serialized interleaving rides the turn
+        // gate (PGRUST_SIMNET_TURNS; gate=false = the order-red race arm).
+        // Single-plan mode keeps the historical noise-s3 shape byte-for-byte.
+        let (s1_text, s3_text) = match &spec.two_session {
+            Some(ts) => {
+                let mut a = ts.setup.join("\n");
+                a.push('\n');
+                let mut b = ts.script_b.join("\n");
+                b.push('\n');
+                (a, b)
+            }
+            None => ("SELECT 1\n".to_string(), "SELECT 'sim-noise'\n".to_string()),
+        };
+        let s1 = wf("s1.sql", &s1_text)?;
         let s2 = wf("s2.sql", &script_text)?;
-        let s3 = wf("s3.sql", "SELECT 'sim-noise'\n")?;
+        let s3 = wf("s3.sql", &s3_text)?;
         transcript_p = dir.join("s2.transcript");
         sentlog_p = dir.join("s2.sentlog");
         oplog_p = dir.join("s2.oplog");
@@ -528,6 +706,14 @@ pub fn run_corpus(world: &SimWorld, dir: &Path, spec: &CorpusSpec) -> Result<Cor
             .env("PGRUST_SIMNET_OPLOG2", &oplog_p)
             .env("PGRUST_SIMNET_OPLOG3", dir.join("s3.oplog"))
             .env("PGRUST_SIMNET_SENTLOG2", &sentlog_p);
+        if let Some(ts) = &spec.two_session {
+            cmd.env("PGRUST_SIMNET_SENTLOG", dir.join("s1.sentlog"))
+                .env("PGRUST_SIMNET_SENTLOG3", dir.join("s3.sentlog"));
+            if ts.gate {
+                let turns: Vec<String> = ts.turns.iter().map(|t| t.to_string()).collect();
+                cmd.env("PGRUST_SIMNET_TURNS", turns.join(" "));
+            }
+        }
     } else {
         let s1 = wf("s1.sql", &script_text)?;
         transcript_p = dir.join("s1.transcript");
@@ -547,6 +733,9 @@ pub fn run_corpus(world: &SimWorld, dir: &Path, spec: &CorpusSpec) -> Result<Cor
     }
     if spec.ops_report {
         cmd.env("PGRUST_SIMVFS_OPS_REPORT", "1");
+    }
+    if let Some(vceil) = spec.vceil_s {
+        cmd.env("PGRUST_SIM_VCEIL_S", vceil.to_string());
     }
     if spec.seed_durable {
         // The fault-leg topology envelope (probe AND writer, identically —
@@ -586,19 +775,36 @@ pub fn run_corpus(world: &SimWorld, dir: &Path, spec: &CorpusSpec) -> Result<Cor
         .filter(|l| l.starts_with("SCHEDOP "))
         .map(|l| format!("{l}\n"))
         .collect();
+    let read_lines = |p: &Path| -> Vec<String> {
+        std::fs::read_to_string(p).unwrap_or_default().lines().map(String::from).collect()
+    };
+    let two = spec.two_session.is_some();
     Ok(CorpusRun {
         dir: dir.to_path_buf(),
         exit_code,
         timed_out,
         stderr,
         transcript: std::fs::read(&transcript_p).unwrap_or_default(),
-        sentlog: std::fs::read_to_string(&sentlog_p)
-            .unwrap_or_default()
-            .lines()
-            .map(String::from)
-            .collect(),
+        sentlog: read_lines(&sentlog_p),
         oplog: std::fs::read(&oplog_p).unwrap_or_default(),
         schedlog,
+        transcript_b: if two {
+            std::fs::read(dir.join("s3.transcript")).unwrap_or_default()
+        } else {
+            Vec::new()
+        },
+        sentlog_b: if two { read_lines(&dir.join("s3.sentlog")) } else { Vec::new() },
+        oplog_b: if two {
+            std::fs::read(dir.join("s3.oplog")).unwrap_or_default()
+        } else {
+            Vec::new()
+        },
+        transcript_s1: if two {
+            std::fs::read(dir.join("s1.transcript")).unwrap_or_default()
+        } else {
+            Vec::new()
+        },
+        sentlog_s1: if two { read_lines(&dir.join("s1.sentlog")) } else { Vec::new() },
     })
 }
 
@@ -762,6 +968,8 @@ pub fn run_bridge_campaign(a: &BridgeArgs) -> i32 {
             fsync_off: false,
             ops_report: false,
             seed_durable: false,
+            two_session: None,
+            vceil_s: None,
         };
         let run = match run_corpus(&a.world, &seed_dir.join("r1"), &spec) {
             Ok(r) => r,
@@ -937,6 +1145,8 @@ fn spec_clone<'a>(spec: &CorpusSpec<'a>, script: &'a [String]) -> CorpusSpec<'a>
         fsync_off: spec.fsync_off,
         ops_report: spec.ops_report,
         seed_durable: spec.seed_durable,
+        two_session: spec.two_session,
+        vceil_s: spec.vceil_s,
     }
 }
 
@@ -1037,6 +1247,8 @@ pub fn run_fault_campaign(a: &FaultArgs) -> i32 {
             fsync_off: false,
             ops_report: true,
             seed_durable: true,
+            two_session: None,
+            vceil_s: None,
         };
         let probe = match run_corpus(&a.world, &seed_dir.join("probe"), &probe_spec) {
             Ok(r) if !r.timed_out && r.exit_code == Some(0) => r,
@@ -1092,6 +1304,8 @@ pub fn run_fault_campaign(a: &FaultArgs) -> i32 {
             fsync_off: a.red,
             ops_report: false,
             seed_durable: true,
+            two_session: None,
+            vceil_s: None,
         };
         let writer = match run_corpus(&a.world, &seed_dir.join("writer"), &writer_spec) {
             Ok(r) => r,
@@ -1172,6 +1386,8 @@ pub fn run_fault_campaign(a: &FaultArgs) -> i32 {
             fsync_off: false,
             ops_report: false,
             seed_durable: false,
+            two_session: None,
+            vceil_s: None,
         };
         let reboot = match run_corpus(&reboot_world, &seed_dir.join("reboot"), &reboot_spec) {
             Ok(r) => r,
@@ -1305,4 +1521,547 @@ pub fn run_fault_campaign(a: &FaultArgs) -> i32 {
             0
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// SIM-CONVERGE inc-2: the two-session campaign (one H8 v2 plan under sim)
+// ---------------------------------------------------------------------------
+
+/// Zip one session's sent-log with its parsed transcript (the
+/// [`entries_from_run`] shape over explicit parts — the two-session merge
+/// needs it per session).
+pub fn entries_from_parts(
+    sentlog: &[String],
+    transcript: &[u8],
+) -> Result<Vec<(String, ExecOutcome)>, String> {
+    let parsed = parse_transcript(transcript)?;
+    let acked = parsed.outcomes.len();
+    if acked > sentlog.len() {
+        return Err(format!(
+            "transcript has {acked} completed cycles but only {} statements were sent",
+            sentlog.len()
+        ));
+    }
+    let mut entries: Vec<(String, ExecOutcome)> =
+        sentlog.iter().take(acked).cloned().zip(parsed.outcomes).collect();
+    if let Some(err) = parsed.trailing_error {
+        if let Some(sql) = sentlog.get(acked) {
+            entries.push((sql.clone(), err));
+        }
+    }
+    Ok(entries)
+}
+
+/// Merge a two-session corpus run back into ONE globally-ordered replay
+/// stream: s1's entries first (the reset prologue + all setup DDL — the
+/// stream [`check_entries`] starts by consuming RESET_STMTS from), then the
+/// A/B statement entries interleaved by the turn order. The two worker
+/// `SET search_path` prologues (turns 0 and 1) are verified (right text,
+/// no error) and DROPPED — they are per-connection plumbing, not plan steps.
+pub fn merge_two_session_entries(
+    ts: &TwoSessionScripts,
+    run: &CorpusRun,
+) -> Result<Vec<(String, ExecOutcome)>, String> {
+    let s1 = entries_from_parts(&run.sentlog_s1, &run.transcript_s1)?;
+    let a = entries_from_parts(&run.sentlog, &run.transcript)?;
+    let b = entries_from_parts(&run.sentlog_b, &run.transcript_b)?;
+    // Strict alignment: each session must have sent EXACTLY its script (an
+    // injected recovery ROLLBACK or a shortfall is a divergence — the
+    // milestone scope is error-free plans; error-carrying two-session plans
+    // ride inc-3's session-aware replay).
+    let texts = |v: &[(String, ExecOutcome)]| -> Vec<String> {
+        v.iter().map(|(s, _)| s.clone()).collect::<Vec<_>>()
+    };
+    if texts(&s1) != ts.setup {
+        return Err(format!(
+            "s1 sent-stream != setup script ({} vs {} entries)",
+            s1.len(),
+            ts.setup.len()
+        ));
+    }
+    if texts(&a) != ts.session_a {
+        return Err(format!(
+            "session A sent-stream != script ({} vs {} entries)",
+            a.len(),
+            ts.session_a.len()
+        ));
+    }
+    if texts(&b) != ts.session_b {
+        return Err(format!(
+            "session B sent-stream != script ({} vs {} entries)",
+            b.len(),
+            ts.session_b.len()
+        ));
+    }
+    let mut ai = a.into_iter();
+    let mut bi = b.into_iter();
+    let mut merged = s1;
+    for (pos, turn) in ts.turns.iter().enumerate() {
+        let entry = match *turn {
+            2 => ai.next(),
+            3 => bi.next(),
+            other => return Err(format!("turn {pos}: unknown turn-id {other}")),
+        }
+        .ok_or_else(|| format!("turn {pos}: session {turn} stream exhausted"))?;
+        if pos < 2 {
+            // The worker SET prologues: verify, then drop from the stream.
+            if entry.0 != POST_RESET_STMTS[0] {
+                return Err(format!("turn {pos}: expected SET prologue, got '{}'", entry.0));
+            }
+            if entry.1.is_error() {
+                return Err(format!("turn {pos}: SET prologue errored"));
+            }
+            continue;
+        }
+        merged.push(entry);
+    }
+    Ok(merged)
+}
+
+/// The v2 plan with `Session` switches stripped — the SESSION-BLIND step walk
+/// whose statement order IS the serialized interleaving. Valid for the inc-2
+/// milestone shape only (synchronous, tx-free — synthesize_two_session's
+/// refusals guarantee it), where the merged single-stream walk is exact.
+pub fn strip_session_steps(plan: &Plan) -> Plan {
+    Plan {
+        header: plan.header.clone(),
+        steps: plan
+            .steps
+            .iter()
+            .filter(|s| !matches!(s, Step::Session(_)))
+            .cloned()
+            .collect(),
+    }
+}
+
+/// The built-in inc-2 milestone plan + its oracle context: a v2 TWO-session
+/// cross-session choreography whose assertions are ORDER-SENSITIVE — session
+/// B reads what session A wrote at exact points of the serialized
+/// interleaving, and each read's value is pinned by a slot-addressed
+/// `scalar-eq` assertion inside an `M2-CrossSession` property block (the H8
+/// posture: multi-session properties assert through SLOTS, never the ledger
+/// — pstep.rs's oracle-alignment law). Any cross-session order violation
+/// (the order-red arm races the clients) or a doctored read (the NullBug
+/// arm) breaks an assertion: property-violation, P1.
+///
+/// The instance is hand-built (autocommit-only — the generated M2 arms use
+/// worker-session transactions, which the merged single-stream walk refuses
+/// until inc-3's session-aware replay pool), but it runs through the REAL
+/// property machinery: OracleCheckEval alignment, silent-step skipping,
+/// SlotStack puts, eval_check.
+pub fn fixture_two_session_plan() -> (Plan, bridge::OracleCtx) {
+    use crate::oracle::pstep::{
+        Mark as PMark, PStep, PropertyInstance, SqlMeta as PSqlMeta, SqlStep,
+    };
+    use crate::oracle::props::PropertyId;
+    use crate::runner::planface::{Mark, PlanHeader, Sql, SqlMeta};
+    let sql = |text: &str, mark: Mark| Sql {
+        text: text.to_string(),
+        mark,
+        meta: SqlMeta::default(),
+    };
+    let assert_json = |slot: u32, value: i64| {
+        format!("{{\"kind\":\"scalar-eq\",\"slot\":{slot},\"value\":{value}}}")
+    };
+    let pstmt = |text: &str, mark: PMark, stackref: Option<u32>| {
+        PStep::Sql(SqlStep {
+            sql: text.to_string(),
+            mark,
+            meta: PSqlMeta::default(),
+            ledger_op: None,
+            probe: None,
+            stackref,
+        })
+    };
+    let passert = |slot: u32, value: i64| {
+        PStep::Assert(crate::oracle::check::Check::ScalarEq {
+            slot,
+            value: crate::oracle::check::Value::Int(value),
+        })
+    };
+    // The interleaved region: (plan step, instance step), kept 1:1 so the
+    // oracle's alignment cursor walks in lockstep.
+    let plan_steps = vec![
+        Step::Ddl(sql("CREATE TABLE t (k int, v int)", Mark::Mutation)),
+        Step::BeginProperty {
+            name: "M2-CrossSession".into(),
+            seq: 0,
+            tables: vec!["t".into()],
+        },
+        Step::Session(0),
+        Step::Dml(sql("INSERT INTO t VALUES (1, 10)", Mark::Mutation)),
+        Step::Session(1),
+        Step::Query(sql("SELECT count(*) FROM t", Mark::Read)), // slot 0
+        Step::Assertion(assert_json(0, 1)),
+        Step::Session(0),
+        Step::Dml(sql("INSERT INTO t VALUES (2, 20)", Mark::Mutation)),
+        Step::Session(1),
+        Step::Query(sql("SELECT sum(v) FROM t", Mark::Read)), // slot 1
+        Step::Assertion(assert_json(1, 30)),
+        Step::Session(0),
+        Step::Dml(sql("INSERT INTO t VALUES (3, NULL)", Mark::Mutation)),
+        Step::Session(1),
+        Step::Query(sql("SELECT count(*) FROM t WHERE v IS NULL", Mark::Read)), // slot 2
+        Step::Assertion(assert_json(2, 1)),
+        Step::Session(0),
+        Step::Query(sql("SELECT count(*) FROM t", Mark::Read)), // slot 3
+        Step::Assertion(assert_json(3, 3)),
+        Step::EndProperty { seq: 0 },
+    ];
+    let inst = PropertyInstance {
+        property: PropertyId::M2CrossSession,
+        steps: vec![
+            PStep::Session(0),
+            pstmt("INSERT INTO t VALUES (1, 10)", PMark::Mutation, None),
+            PStep::Session(1),
+            pstmt("SELECT count(*) FROM t", PMark::Read, Some(0)),
+            passert(0, 1),
+            PStep::Session(0),
+            pstmt("INSERT INTO t VALUES (2, 20)", PMark::Mutation, None),
+            PStep::Session(1),
+            pstmt("SELECT sum(v) FROM t", PMark::Read, Some(1)),
+            passert(1, 30),
+            PStep::Session(0),
+            pstmt("INSERT INTO t VALUES (3, NULL)", PMark::Mutation, None),
+            PStep::Session(1),
+            pstmt("SELECT count(*) FROM t WHERE v IS NULL", PMark::Read, Some(2)),
+            passert(2, 1),
+            PStep::Session(0),
+            pstmt("SELECT count(*) FROM t", PMark::Read, Some(3)),
+            passert(3, 3),
+        ],
+        tables: ["t".to_string()].into_iter().collect(),
+    };
+    let plan = Plan {
+        header: PlanHeader {
+            seed: 0,
+            profile: "sim-two-fixture".into(),
+            profile_sha256: "0".repeat(64),
+            generator: "sim-converge-inc2".into(),
+        },
+        steps: plan_steps,
+    };
+    let mut by_seq = std::collections::BTreeMap::new();
+    by_seq.insert(0, inst);
+    (plan, bridge::OracleCtx { by_seq })
+}
+
+pub struct TwoArgs {
+    /// v2 plan file to drive; None = the built-in fixture (rendered to
+    /// `<out>/plan.plan` either way — the artifact IS plan-format v2 bytes
+    /// through the real render/parse round trip).
+    pub plan_path: Option<PathBuf>,
+    pub sched_seed: u64,
+    pub world: SimWorld,
+    pub out: PathBuf,
+    /// Extra identical repetitions (2 = the x3 law).
+    pub x3: u64,
+    /// Additional schedule seeds to run (cross-seed observation legs; the
+    /// chartered assertion stays "same (plan, sched seed) => identical
+    /// bytes" ONLY — see the campaign's disclosure line).
+    pub alt_scheds: u64,
+    /// Planted red: run WITHOUT the turn gate (the pre-lane race) — the
+    /// serialized-order model walk must catch a violation on >=1 of the
+    /// probed schedule seeds (probabilistic by nature, like the fsync red).
+    pub red_order: bool,
+    /// Planted red: a WEDGED turn schedule (a turn owned by a session with
+    /// no statements left) — must produce the named SCHEDCEILING verdict,
+    /// never a panic.
+    pub red_wedge: bool,
+    /// Planted red: the NullBug TEETH instrument on the cross-session read.
+    pub test_null_bug: bool,
+}
+
+fn two_session_spec<'a>(
+    script_a: &'a [String],
+    ts_env: TwoSessionEnv<'a>,
+    sched_seed: u64,
+    vceil_s: Option<u64>,
+) -> CorpusSpec<'a> {
+    CorpusSpec {
+        script: script_a,
+        sched_seed,
+        nsession: true,
+        fault_plan_json: None,
+        pack_dir: None,
+        fsync_off: false,
+        ops_report: false,
+        seed_durable: false,
+        two_session: Some(ts_env),
+        vceil_s,
+    }
+}
+
+/// Load (or build) the plan, run it as the two-session corpus, model-check
+/// the merged stream, prove x3 byte-identity, and drive the planted reds.
+/// Verdict line: `SIMBRIDGE-TWO-VERDICT|PASS` / `|FAIL:<why>` /
+/// `|RED-CAUGHT|<n>` (red arms).
+pub fn run_two_session_campaign(a: &TwoArgs) -> i32 {
+    let mut census: BTreeMap<String, u64> = BTreeMap::new();
+    println!(
+        "SIMBRIDGE-TWO|mode|one H8 v2 two-session plan under sim (model-oracle only; \
+         determinism law: same (plan, sched seed) => identical bytes; different sched \
+         seeds may legally change interleaving-visible results — the turn gate pins \
+         STATEMENT order, in-statement scheduling still varies)"
+    );
+    let _ = std::fs::create_dir_all(&a.out);
+    // 1. The plan: file or fixture, always round-tripped through the real
+    //    v2 render/parse (the artifact is plan-format bytes, never IR).
+    // --plan mode carries no oracle context (a plan file alone has no
+    // property instances): alignment + determinism only, checks skip
+    // counted. The fixture carries its hand-built M2-CrossSession instance
+    // — the teeth path.
+    let (plan, ctx) = match &a.plan_path {
+        Some(p) => match std::fs::read_to_string(p)
+            .map_err(|e| e.to_string())
+            .and_then(|t| Plan::parse(&t))
+        {
+            Ok(pl) => (pl, bridge::OracleCtx::default()),
+            Err(e) => {
+                println!("SIMBRIDGE-TWO-VERDICT|FAIL:plan-load ({e})");
+                return 1;
+            }
+        },
+        None => fixture_two_session_plan(),
+    };
+    let rendered = plan.render();
+    if !rendered.starts_with("-- simharness plan v2 (multi-session)") {
+        println!("SIMBRIDGE-TWO-VERDICT|FAIL:plan-not-v2");
+        return 1;
+    }
+    match Plan::parse(&rendered) {
+        Ok(back) if back == plan => {}
+        Ok(_) => {
+            println!("SIMBRIDGE-TWO-VERDICT|FAIL:plan-roundtrip-drift");
+            return 1;
+        }
+        Err(e) => {
+            println!("SIMBRIDGE-TWO-VERDICT|FAIL:plan-roundtrip ({e})");
+            return 1;
+        }
+    }
+    let _ = std::fs::write(a.out.join("plan.plan"), &rendered);
+    let null_bug = a.test_null_bug;
+    let ts = match synthesize_two_session(&plan, null_bug) {
+        Ok(t) => t,
+        Err(class) => {
+            println!("SIMBRIDGE-TWO-VERDICT|FAIL:{class}");
+            return 1;
+        }
+    };
+    let stripped = strip_session_steps(&plan);
+
+    // --- The wedge red: a turn schedule with one extra B-turn planted where
+    //     A's first turn was — B exhausts its script, the cursor parks on a
+    //     turn nobody owns, A yields forever, and the scheduler's virtual
+    //     ceiling names it: SCHEDCEILING, never a panic.
+    if a.red_wedge {
+        let mut wedged = ts.turns.clone();
+        if let Some(first_a) = wedged.iter().position(|t| *t == 2) {
+            wedged[first_a] = 3;
+        }
+        let env = TwoSessionEnv {
+            setup: &ts.setup,
+            script_b: &ts.session_b,
+            turns: &wedged,
+            gate: true,
+        };
+        let spec = two_session_spec(&ts.session_a, env, a.sched_seed, Some(10));
+        return match run_corpus(&a.world, &a.out.join("wedge"), &spec) {
+            Ok(run) => {
+                let named = run.stderr.contains("SCHEDCEILING");
+                let panics = scrape_panics(&run.stderr);
+                let died = run.exit_code != Some(0);
+                println!("SIMBRIDGE-TWO|wedge|exit={:?} named={named} panics={panics}", run.exit_code);
+                if named && died && panics == 0 {
+                    println!("SIMBRIDGE-TWO-VERDICT|RED-CAUGHT|SCHEDCEILING");
+                    0
+                } else {
+                    println!("SIMBRIDGE-TWO-VERDICT|FAIL:wedge-not-named (named={named} died={died} panics={panics})");
+                    1
+                }
+            }
+            Err(e) => {
+                println!("SIMBRIDGE-TWO-VERDICT|FAIL:wedge-run ({e})");
+                1
+            }
+        };
+    }
+
+    let env = TwoSessionEnv {
+        setup: &ts.setup,
+        script_b: &ts.session_b,
+        turns: &ts.turns,
+        gate: !a.red_order,
+    };
+
+    // --- The order red: NO gate — the two clients race. Probe several
+    //     schedule seeds; the serialized-order model walk must catch >=1
+    //     violation (order divergence is seed-dependent, disclosed).
+    if a.red_order {
+        let probes = 8u64;
+        let mut caught = 0u64;
+        for k in 0..probes {
+            let seed = a.sched_seed + k;
+            let dir = a.out.join(format!("order-red-s{seed}"));
+            let spec = two_session_spec(&ts.session_a, env, seed, None);
+            let Ok(run) = run_corpus(&a.world, &dir, &spec) else {
+                bump(&mut census, "two-run-failed", 1);
+                continue;
+            };
+            if run.timed_out || run.exit_code != Some(0) {
+                bump(&mut census, "two-run-failed", 1);
+                continue;
+            }
+            match merge_two_session_entries(&ts, &run) {
+                Ok(entries) => match check_entries(&stripped, &ctx, entries, null_bug, false) {
+                    Ok(checked) => {
+                        let violated = checked
+                            .report
+                            .failure
+                            .as_ref()
+                            .is_some_and(|f| f.class == "property-violation")
+                            || checked.desync.is_some();
+                        if violated {
+                            caught += 1;
+                            bump(&mut census, "order-red-caught", 1);
+                        } else {
+                            bump(&mut census, "order-red-serialized-ok", 1);
+                        }
+                    }
+                    Err(_) => bump(&mut census, "two-check-failed", 1),
+                },
+                // A racing run can complete with a sent-stream that no longer
+                // matches the per-session scripts only via recovery injection;
+                // treat merge failure as a caught divergence too (loud).
+                Err(_) => {
+                    caught += 1;
+                    bump(&mut census, "order-red-caught-merge", 1);
+                }
+            }
+        }
+        for (k, v) in &census {
+            println!("SIMHARNESS|{k}|{v}");
+        }
+        return if caught >= 1 {
+            println!("SIMBRIDGE-TWO-VERDICT|RED-CAUGHT|{caught}");
+            0
+        } else {
+            println!("SIMBRIDGE-TWO-VERDICT|FAIL:order-red-not-caught (0/{probes})");
+            1
+        };
+    }
+
+    // --- Green (or NullBug) leg: run, merge, model-check.
+    let dir = a.out.join(format!("s{}", a.sched_seed));
+    let spec = two_session_spec(&ts.session_a, env, a.sched_seed, None);
+    let run = match run_corpus(&a.world, &dir.join("r1"), &spec) {
+        Ok(r) => r,
+        Err(e) => {
+            println!("SIMBRIDGE-TWO-VERDICT|FAIL:sim-run ({e})");
+            return 1;
+        }
+    };
+    if run.timed_out || run.exit_code != Some(0) {
+        println!(
+            "SIMBRIDGE-TWO-VERDICT|FAIL:sim-exit (exit={:?} timed_out={})",
+            run.exit_code, run.timed_out
+        );
+        return 1;
+    }
+    let panics = scrape_panics(&run.stderr);
+    if panics > 0 {
+        println!("SIMBRIDGE-TWO-VERDICT|FAIL:panic-signature ({panics})");
+        return 1;
+    }
+    // x3 determinism: EVERY artifact byte-identical (both sessions + s1 +
+    // the SCHEDOP stream).
+    let mut identical = 0u64;
+    for rep in 0..a.x3 {
+        match run_corpus(&a.world, &dir.join(format!("r{}", rep + 2)), &spec) {
+            Ok(r) => {
+                let same = r.transcript == run.transcript
+                    && r.transcript_b == run.transcript_b
+                    && r.transcript_s1 == run.transcript_s1
+                    && r.oplog == run.oplog
+                    && r.oplog_b == run.oplog_b
+                    && r.sentlog == run.sentlog
+                    && r.sentlog_b == run.sentlog_b
+                    && r.schedlog == run.schedlog;
+                if same {
+                    identical += 1;
+                } else {
+                    println!("SIMBRIDGE-TWO-VERDICT|FAIL:x3-DIVERGED (rep {})", rep + 2);
+                    return 1;
+                }
+            }
+            Err(e) => {
+                println!("SIMBRIDGE-TWO-VERDICT|FAIL:x3-run ({e})");
+                return 1;
+            }
+        }
+    }
+    bump(&mut census, "x3-identical", identical);
+    // Cross-seed observation legs (NOT an assertion — disclosed above): run
+    // alternate schedule seeds and REPORT whether the parsed outcome streams
+    // matched (under the completion-ordered gate they are expected to, but
+    // the chartered determinism law does not require it).
+    for k in 0..a.alt_scheds {
+        let seed = a.sched_seed + 1 + k;
+        let alt = two_session_spec(&ts.session_a, env, seed, None);
+        match run_corpus(&a.world, &a.out.join(format!("s{seed}")), &alt) {
+            Ok(r) if !r.timed_out && r.exit_code == Some(0) => {
+                let same = match (merge_two_session_entries(&ts, &run), merge_two_session_entries(&ts, &r)) {
+                    (Ok(x), Ok(y)) => x == y,
+                    _ => false,
+                };
+                bump(
+                    &mut census,
+                    if same { "altsched-outcomes-identical" } else { "altsched-outcomes-differ" },
+                    1,
+                );
+            }
+            _ => bump(&mut census, "altsched-run-failed", 1),
+        }
+    }
+    // The model-oracle walk over the merged stream.
+    let entries = match merge_two_session_entries(&ts, &run) {
+        Ok(e) => e,
+        Err(e) => {
+            println!("SIMBRIDGE-TWO-VERDICT|FAIL:merge ({e})");
+            return 1;
+        }
+    };
+    let checked = match check_entries(&stripped, &ctx, entries, null_bug, false) {
+        Ok(c) => c,
+        Err(e) => {
+            println!("SIMBRIDGE-TWO-VERDICT|FAIL:check ({e})");
+            return 1;
+        }
+    };
+    if let Some(d) = &checked.desync {
+        println!("SIMBRIDGE-TWO-VERDICT|FAIL:desync ({d})");
+        return 1;
+    }
+    for (k, v) in &checked.report.class_counts {
+        bump(&mut census, k, *v);
+    }
+    for (k, v) in &census {
+        println!("SIMHARNESS|{k}|{v}");
+    }
+    if let Some(f) = &checked.report.failure {
+        // Under --test-null-bug a property-violation IS the expected catch.
+        if null_bug && f.class == "property-violation" {
+            println!("SIMBRIDGE-TWO-VERDICT|RED-CAUGHT|property-violation");
+            return 0;
+        }
+        println!("SIMBRIDGE-TWO-VERDICT|FAIL:{} (step {}: {})", f.class, f.step_idx, f.detail);
+        return 1;
+    }
+    if null_bug {
+        println!("SIMBRIDGE-TWO-VERDICT|FAIL:null-bug-not-caught");
+        return 1;
+    }
+    println!("SIMBRIDGE-TWO-VERDICT|PASS");
+    0
 }

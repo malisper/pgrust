@@ -47,6 +47,24 @@ pub enum PumpStatus {
     /// The client script is exhausted: nothing more will ever be sent.
     /// Equivalent to the client half-closing its write side.
     Finished,
+    /// SIM-CONVERGE inc-2: the client made NO byte progress and is NOT
+    /// finished — it is waiting on a CROSS-SESSION turn (the plan's serialized
+    /// interleaving) that only advances when ANOTHER registered session runs.
+    /// A distinct status from [`PumpStatus::Progress`] so the stall guard
+    /// (which panics on a Progress step that moved nothing — a protocol stall)
+    /// does not mistake a legal turn-wait for a wedge.
+    ///
+    /// CONTRACT: a pump returning `Yielded` MUST first have parked on the
+    /// permit scheduler (a `pgsync::thread::sleep` = `TimedPark`), so that
+    /// re-evaluating readiness advances VIRTUAL TIME toward the turn instead
+    /// of tight-spinning. A genuinely unsatisfiable turn (a wedged schedule)
+    /// then reaches the scheduler's virtual-time ceiling and is reported as a
+    /// named `SCHEDCEILING` verdict — never this crate's deadlock panic. The
+    /// provider owns no turn counter and no scheduler dependency: the pump
+    /// (the corpus's `SimWireClient`, which holds the shared turn schedule)
+    /// decides whose turn it is and does the park; the provider only learns
+    /// that "no progress, not done" is a legal answer here.
+    Yielded,
 }
 
 type Pump = Box<dyn FnMut() -> PumpStatus>;
@@ -697,12 +715,22 @@ fn pump_once(what: &str) -> PumpStatus {
     let status = p();
     with(|st| {
         st.pump = pump;
-        if status == PumpStatus::Finished {
-            st.client_open = false;
-        } else if fingerprint(st) == before {
-            // Deterministic deadlock detection: a Progress step that moved
-            // nothing would spin forever; fail loudly and reproducibly.
-            panic!("pqcomm_simnet: client pump stalled during blocking {what} (deterministic deadlock)");
+        match status {
+            PumpStatus::Finished => st.client_open = false,
+            // SIM-CONVERGE inc-2: a Yielded step is a LEGAL no-progress turn-
+            // wait (see the PumpStatus::Yielded contract). The pump already
+            // parked on the scheduler, so re-evaluating readiness advances
+            // virtual time — a wedged turn reaches SCHEDCEILING (a named
+            // verdict), never the deadlock panic below.
+            PumpStatus::Yielded => {}
+            PumpStatus::Progress => {
+                if fingerprint(st) == before {
+                    // Deterministic deadlock detection: a Progress step that
+                    // moved nothing would spin forever; fail loudly and
+                    // reproducibly.
+                    panic!("pqcomm_simnet: client pump stalled during blocking {what} (deterministic deadlock)");
+                }
+            }
         }
     });
     status
