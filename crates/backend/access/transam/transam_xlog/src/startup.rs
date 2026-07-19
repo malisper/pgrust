@@ -945,6 +945,28 @@ fn wait_for_delay_chkpt(delay_type: i32) -> PgResult<()> {
 pub const DELAY_CHKPT_START: i32 = 1 << 0;
 pub const DELAY_CHKPT_COMPLETE: i32 = 1 << 1;
 
+// LogCheckpointStart's flag words (xlog.c:6687): the recovery TAP suite
+// greps these exact strings (041 matches "restartpoint starting: immediate
+// wait"), so the hex-flags shorthand this replaced was a conformance break.
+fn checkpoint_flag_words(flags: i32) -> String {
+    let mut s = String::new();
+    for (bit, word) in [
+        (CHECKPOINT_IS_SHUTDOWN, " shutdown"),
+        (CHECKPOINT_END_OF_RECOVERY, " end-of-recovery"),
+        (CHECKPOINT_IMMEDIATE, " immediate"),
+        (CHECKPOINT_FORCE, " force"),
+        (CHECKPOINT_WAIT, " wait"),
+        (CHECKPOINT_CAUSE_XLOG, " wal"),
+        (CHECKPOINT_CAUSE_TIME, " time"),
+        (CHECKPOINT_FLUSH_ALL, " flush-all"),
+    ] {
+        if flags & bit != 0 {
+            s.push_str(word);
+        }
+    }
+    s
+}
+
 pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
     let ctl = XLogCtl();
     let insert = &ctl.Insert;
@@ -1030,7 +1052,7 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
     ctl.info_lck.with(|| ctl.RedoRecPtr.store(check_point.redo, Relaxed));
 
     if guc_tables::vars::log_checkpoints.read() {
-        let _ = elog(LOG, format!("checkpoint starting: flags 0x{flags:x}"));
+        let _ = elog(LOG, format!("checkpoint starting:{}", checkpoint_flag_words(flags)));
     }
 
     {
@@ -1252,7 +1274,7 @@ pub fn CreateRestartPoint(flags: i32) -> PgResult<bool> {
     CKPT_SLRU_WRITTEN.set(0);
 
     if guc_tables::vars::log_checkpoints.read() {
-        let _ = elog(LOG, format!("restartpoint starting: flags 0x{flags:x}"));
+        let _ = elog(LOG, format!("restartpoint starting:{}", checkpoint_flag_words(flags)));
     }
 
     CheckPointGuts(last_ckpt.redo, flags)?;
