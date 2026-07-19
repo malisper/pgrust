@@ -43,6 +43,11 @@ pub struct Profile {
     /// (same seed + profile bytes = same knob sets).
     #[serde(default)]
     pub planner_knobs: Option<crate::gen::knobs::PlannerKnobs>,
+    /// H8: opt in to the multi-session estate (M2/S1). Default false keeps a
+    /// profile byte-identical in behavior to pre-H8 for the session-gated
+    /// pair (the cursor pair C1/C2 always generates).
+    #[serde(default)]
+    pub multi_session: bool,
     pub background_policy: BackgroundPolicy,
     pub steps_min: u32,
     pub steps_max: u32,

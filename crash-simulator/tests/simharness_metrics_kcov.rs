@@ -46,6 +46,7 @@ fn battery_gen_profile(name: &str) -> GenProfile {
         float_lenient: false,
         test_disable_productions: Vec::new(),
         planner_knobs: None,
+        multi_session: false,
     }
 }
 

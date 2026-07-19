@@ -117,6 +117,18 @@ pub fn evaluate_instance(
     ledger: &mut Ledger,
     hooks: &dyn HookProbe,
 ) -> PropertyReport {
+    // H8: the standalone/ledger sim is single-session. A multi-session
+    // property is not evaluable here — skip it WITHOUT executing any step
+    // (a mid-instance bail would leave the shared ledger tx dirty and panic
+    // the next instance's BEGIN). Counted skip, never a false verdict; the
+    // live runner owns these.
+    if inst.property.needs_sessions() {
+        return PropertyReport {
+            property: inst.property,
+            outcome: PropertyOutcome::AssumptionFailed,
+            detail: None,
+        };
+    }
     let mut stack = ResultStack::new();
     for (i, step) in inst.steps.iter().enumerate() {
         match step {
@@ -442,6 +454,10 @@ impl LedgerAnswers<'_> {
                 // A well-behaved hook channel: constant watermark.
                 StmtResult::Rows { rows: vec![Row(vec![Value::Int(0)])] }
             }
+            // H8: generator-computed cursor expectations — the sim is a
+            // well-behaved portal by definition.
+            ProbeSpec::KnownRows { rows } => StmtResult::Rows { rows: rows.clone() },
+            ProbeSpec::KnownCommand { count } => StmtResult::Command { affected: *count },
             ProbeSpec::Opaque => StmtResult::Command { affected: 0 },
         }
     }

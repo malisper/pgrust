@@ -35,6 +35,7 @@ fn test_profile(weights: StatementWeights, len: u64) -> GenProfile {
         float_lenient: false,
         test_disable_productions: Vec::new(),
         planner_knobs: None,
+        multi_session: false,
     }
 }
 
