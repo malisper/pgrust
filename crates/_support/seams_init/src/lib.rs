@@ -206,6 +206,10 @@ pub fn init_all_with_transport(transport: Transport) {
     pg_walinspect::init_seams();
     injection_points::init_seams();
     sslinfo::init_seams();
+    fuzzystrmatch::init_seams();
+    tablefunc::init_seams();
+    contrib_lo::init_seams();
+    tcn::init_seams();
     session::init_seams();
     relpath::init_seams();
     rewrite_handler::init_seams();

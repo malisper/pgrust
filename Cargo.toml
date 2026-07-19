@@ -685,11 +685,18 @@ members = [
     "crates/contrib/btree_gist",
     "crates/contrib/unaccent",
     "crates/contrib/pg_walinspect",
+<<<<<<< HEAD
     "crates/contrib/injection_points",
     "crates/contrib/sslinfo",
     "crates/contrib/cube",
     "crates/contrib/earthdistance",
     "crates/contrib/seg",
+=======
+    "crates/contrib/fuzzystrmatch",
+    "crates/contrib/tablefunc",
+    "crates/contrib/lo",
+    "crates/contrib/tcn",
+>>>>>>> origin/feat/contrib-smallkit
     "crates/backend/catalog/pg_db_role_setting_seams",
     "crates/backend/utils/init/postinit",
     "crates/backend/postmaster/pmchild_seams",

@@ -3139,9 +3139,10 @@ fn merge_update_act<'mcx>(
     }
     let ar_new_tid = slot.base().tts_tid;
     if let Some(td) = mt.rel().trigdesc.clone() {
-        if td.triggers.iter().any(|t| t.tgnattr > 0) {
-            ensure_all_updated_cols(mt, estate, false)?;
-        }
+        // Unconditional (C ExecARUpdateTriggers → ExecGetAllUpdatedCols):
+        // every queued UPDATE event carries ats_modifiedcols, not just
+        // UPDATE-OF filters.
+        ensure_all_updated_cols(mt, estate, false)?;
         let result_rti = mt.rel().rti;
         ensure_child_to_root(mt, estate)?;
         let root_rti = mt.root.as_ref().map(|rr| rr.rti);
@@ -3156,10 +3157,11 @@ fn merge_update_act<'mcx>(
         } else {
             transition_capture.as_ref()
         };
+        let modified_cols = r.all_updated_cols.as_ref();
         let mut when = ::trigger::TriggerWhenEval {
             mcx,
             cache: &mut r.trig_when,
-            modified_cols: r.all_updated_cols.as_ref(),
+            modified_cols,
         };
         let rel = estate.es_relations[(result_rti - 1) as usize]
             .as_ref()
@@ -3173,6 +3175,7 @@ fn merge_update_act<'mcx>(
         ::trigger::ExecARUpdateTriggers(
             mcx, rel, Some(&td), None, None, Some(*tupleid), Some(ar_new_tid),
             &recheck_indexes, tc, Some(&mut when), false, conv.as_ref(), conv.as_ref(),
+            modified_cols,
         )?;
     }
 
@@ -4070,12 +4073,10 @@ fn exec_update<'mcx>(
         mt.transition_capture.is_some()
     };
     if td.is_some() || tc_active {
-        if td
-            .as_ref()
-            .is_some_and(|td| td.triggers.iter().any(|t| t.tgnattr > 0))
-        {
-            ensure_all_updated_cols(mt, estate, false)?;
-        }
+        // Unconditional (C ExecARUpdateTriggers → ExecGetAllUpdatedCols):
+        // every queued UPDATE event carries ats_modifiedcols, not just
+        // UPDATE-OF filters.
+        ensure_all_updated_cols(mt, estate, false)?;
         let result_rti = mt.rel().rti;
         ensure_child_to_root(mt, estate)?;
         let root_rti = mt.root.as_ref().map(|rr| rr.rti);
@@ -4090,10 +4091,11 @@ fn exec_update<'mcx>(
         } else {
             transition_capture.as_ref()
         };
+        let modified_cols = r.all_updated_cols.as_ref();
         let mut when = ::trigger::TriggerWhenEval {
             mcx,
             cache: &mut r.trig_when,
-            modified_cols: r.all_updated_cols.as_ref(),
+            modified_cols,
         };
         let rel = estate.es_relations[(result_rti - 1) as usize]
             .as_ref()
@@ -4107,6 +4109,7 @@ fn exec_update<'mcx>(
         ::trigger::ExecARUpdateTriggers(
             mcx, rel, td.as_deref(), None, None, Some(*tupleid), Some(ar_new_tid),
             &recheck_indexes, tc, Some(&mut when), false, conv.as_ref(), conv.as_ref(),
+            modified_cols,
         )?;
     }
 
@@ -4517,6 +4520,9 @@ fn exec_cross_partition_update_foreign_key<'mcx>(
         true,
         src_conv.as_ref(),
         dst_conv.as_ref(),
+        // CP-update root: tg_updatedcols follows this path's WHEN (None) — a
+        // pre-existing partition-move limitation, not exercised by lo/tcn.
+        None,
     )
 }
 
@@ -4729,9 +4735,12 @@ fn exec_delete<'mcx>(
             modified_cols: None,
         };
         if moved_capture {
+            // New-only transition capture on a partition-move DELETE — no
+            // real UPDATE trigger fires here, so tg_updatedcols is moot.
             ::trigger::ExecARUpdateTriggers(
                 *es_query_cxt, rel, td.as_deref(), None, None, Some(*tupleid), None,
                 &[], transition_capture.as_ref(), Some(&mut when), false, conv.as_ref(), None,
+                None,
             )?;
         }
         let ar_tcs = if moved_capture { None } else { transition_capture.as_ref() };
@@ -5859,9 +5868,12 @@ fn ar_insert_triggers<'mcx>(
     if *operation == CmdType::CMD_UPDATE
         && transition_capture.as_ref().is_some_and(|tc| tc.tcs_update_new_table)
     {
+        // New-only capture (CP-update INSERT half): no row event is queued
+        // (old/new one-sided), so tg_updatedcols is moot.
         ::trigger::ExecARUpdateTriggers(
             mcx, rel, td.as_deref(), None, None, None, Some(new_tid), &[],
             transition_capture.as_ref(), Some(&mut when), false, None, conv.as_ref(),
+            None,
         )?;
         ar_tcs = None;
     }
@@ -7357,6 +7369,9 @@ fn exec_leaf_conflict_update<'mcx>(
             false,
             conv.as_ref(),
             conv.as_ref(),
+            // ON CONFLICT DO UPDATE on a routed leaf: tg_updatedcols follows
+            // this path's WHEN (None) — pre-existing limitation.
+            None,
         )?;
     }
 
