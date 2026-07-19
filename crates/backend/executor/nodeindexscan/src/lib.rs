@@ -33,7 +33,7 @@ use ::types_scan::scankey::{
     ScanKeyData, StrategyNumber, SK_ISNULL, SK_ORDER_BY, SK_ROW_END, SK_ROW_HEADER,
     SK_ROW_MEMBER, SK_SEARCHARRAY, SK_SEARCHNOTNULL, SK_SEARCHNULL,
 };
-use ::types_scan::sdir::{ScanDirection, ScanDirectionCombine};
+use ::types_scan::sdir::ScanDirection;
 use ::types_slot::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
 
 pub fn init_seams() {}
@@ -154,7 +154,18 @@ impl<'mcx> ScanNode<'mcx> for IndexScanState<'mcx> {
             return self.index_next_with_reorder(estate);
         }
         let mcx = estate.es_query_cxt;
-        let direction = ScanDirectionCombine(estate.es_direction, self.iss_OrderDir);
+        // Backward-execution wave B8: C's ScanDirectionCombine(es_direction,
+        // indexorderdir) narrows to indexorderdir alone - es_direction is
+        // forward-invariant below the run seam (deletion-prep B1), and
+        // Forward is the combine's identity. indexorderdir KEEPS its
+        // backward value: planner DESC index scans stay (C nodeIndexscan.c
+        // ExecIndexScan combines; ratified strategy divergence, Michael's
+        // 2026-07-17 SCROLL/WITH-HOLD decision).
+        debug_assert!(
+            ::types_scan::sdir::ScanDirectionIsForward(estate.es_direction),
+            "backward drive below the forward-only run seam (deletion-prep B1)"
+        );
+        let direction = self.iss_OrderDir;
 
         if self.iss_ScanDesc.is_none() {
             self.open_scandesc(estate)?;
@@ -453,7 +464,8 @@ pub fn index_scan_next_tidrun<'mcx>(
         node.open_scandesc(estate)?;
     }
     let mcx = estate.es_query_cxt;
-    let direction = ScanDirectionCombine(estate.es_direction, node.iss_OrderDir);
+    // B8: es_direction combine narrowed to indexorderdir (see scan_next).
+    let direction = node.iss_OrderDir;
     // SAFETY: written by open_scandesc when None.
     let scandesc = unsafe { node.iss_ScanDesc.as_deref_mut().unwrap_unchecked() };
     ::indexam::index_getnext_tidrun(mcx, scandesc, direction)
@@ -468,7 +480,8 @@ pub fn index_scan_batch_fetch<'mcx>(
 ) -> PgResult<bool> {
     let mcx = estate.es_query_cxt;
     let slot_id = node.ss.ss_ScanTupleSlot;
-    let direction = ScanDirectionCombine(estate.es_direction, node.iss_OrderDir);
+    // B8: es_direction combine narrowed to indexorderdir (see scan_next).
+    let direction = node.iss_OrderDir;
     let scandesc = node.iss_ScanDesc.as_deref_mut().expect("batch fetch before tidrun");
     if i > 0 && index_getnext_tid(scandesc, direction)?.is_none() {
         return Ok(false);
