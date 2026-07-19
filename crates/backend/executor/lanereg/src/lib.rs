@@ -277,6 +277,15 @@ pub enum FoldKind {
     // (float4_accum/float8_accum: avg/var/stddev over floats).
     FSum,
     FAccum,
+    // fold-trans increment 2 (lane aggseq-fold2, same knob): sum/avg(numeric)
+    // — numeric_avg_accum's INTERNAL NumericAggState, C's exact per-row
+    // do_numeric_accum in row order over a vguarded varlena lane.
+    NumAccum,
+    // corr/covar/regr family — float8_regr_accum's float8[6] bivariate
+    // Youngs-Cramer state, two lane columns, row-order updates.
+    FRegrAccum,
+    // regr_count — int8inc_float8_float8, the strict two-arg counter.
+    Count2,
 }
 
 /// The shape/realizer payload — determines the family and carries the neutral
@@ -551,6 +560,10 @@ pub static ENTRIES: &[BatchFn] = &[
     fold_trans(218, "float8pl", FoldKind::FSum),
     fold_trans(208, "float4_accum", FoldKind::FAccum),
     fold_trans(222, "float8_accum", FoldKind::FAccum),
+    // === aggregate transition folds — fold-trans increment 2 (lane aggseq-fold2; same knob) ===
+    fold_trans(2858, "numeric_avg_accum", FoldKind::NumAccum),
+    fold_trans(2806, "float8_regr_accum", FoldKind::FRegrAccum),
+    fold_trans(2805, "int8inc_float8_float8", FoldKind::Count2),
 ];
 
 const fn arith(oid: Oid, name: &'static str, width: ArithWidth, op: ArithKind, cov: &'static [TierCov]) -> BatchFn {
