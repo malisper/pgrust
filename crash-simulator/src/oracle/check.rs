@@ -119,6 +119,21 @@ pub enum Check {
     MultisetEq { a: u32, b: u32 },
     /// UNION ALL doubling: multiset(doubled) == single ⊎ single.
     UnionDoubling { single: u32, doubled: u32 },
+    /// WHERE-TLP reassembly: multiset-union of the partition slots' rows
+    /// equals the whole slot's rows (Rigger & Su, OOPSLA 2020 — the p /
+    /// NOT p / p IS NULL partitions reassembled must be the whole query).
+    PartitionUnionEq { parts: Vec<u32>, whole: u32 },
+    /// DISTINCT-TLP: the SET-union of the partition slots' rows equals the
+    /// set of the whole slot's rows (a distinct value may appear in several
+    /// partitions — set union, not multiset).
+    DistinctUnionEq { parts: Vec<u32>, whole: u32 },
+    /// MIN/MAX-TLP: extreme of the non-NULL partition scalars equals the
+    /// whole scalar (all-NULL parts iff whole NULL). Exact integers only (R7).
+    ScalarExtremeEq { parts: Vec<u32>, whole: u32, max: bool },
+    /// NoREC (Rigger & Su, ESEC/FSE 2020): row COUNT of the optimized slot
+    /// (`SELECT .. WHERE p`) equals the number of TRUE rows in the
+    /// non-optimizable slot (`SELECT (p) FROM ..`).
+    NorecRowCountEq { optimized: u32, unoptimized: u32 },
     /// Slot errored with this SQLSTATE class (compared on the 2-char class,
     /// never message text — spec §1.2).
     SqlStateClass { slot: u32, class: String },
@@ -141,6 +156,11 @@ pub enum CheckOutcome {
     Fail(String),
     /// Contract §0 A5: hook absent — counted skip, never a silent pass.
     SkipNoHook,
+    /// Metamorphic check over a slot that ERRORED (e.g. one TLP arm hit a
+    /// timeout): the law cannot be evaluated — counted skip, never a false
+    /// violation (SQLancer's ignore-erroring-queries rule). The error itself
+    /// is surfaced by the statement-level classification, not here.
+    SkipInapplicable(String),
 }
 
 fn slot_res<'a>(stack: &'a ResultStack, slot: u32) -> Result<&'a StmtResult, String> {
@@ -192,12 +212,57 @@ fn sorted(rows: &[Row]) -> Vec<Row> {
     v
 }
 
+/// First row present in one sorted multiset but not the other (finding
+/// diagnosability: the disagreeing row, not just the counts).
+fn first_diff(a: &[Row], b: &[Row]) -> Option<Row> {
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Equal => {
+                i += 1;
+                j += 1;
+            }
+            std::cmp::Ordering::Less => return Some(a[i].clone()),
+            std::cmp::Ordering::Greater => return Some(b[j].clone()),
+        }
+    }
+    a.get(i).or_else(|| b.get(j)).cloned()
+}
+
+/// Slots a metamorphic (reference-free) check reads. These checks compare
+/// engine results against engine results; an ERRORED slot means the law is
+/// inapplicable for this instance, never that it is violated.
+fn metamorphic_slots(check: &Check) -> Option<Vec<u32>> {
+    match check {
+        Check::PartitionUnionEq { parts, whole }
+        | Check::DistinctUnionEq { parts, whole }
+        | Check::ScalarExtremeEq { parts, whole, .. } => {
+            let mut v = parts.clone();
+            v.push(*whole);
+            Some(v)
+        }
+        Check::NorecRowCountEq { optimized, unoptimized } => {
+            Some(vec![*optimized, *unoptimized])
+        }
+        _ => None,
+    }
+}
+
 pub fn eval_check(
     check: &Check,
     stack: &ResultStack,
     ledger: &Ledger,
     hooks: &dyn HookProbe,
 ) -> CheckOutcome {
+    if let Some(slots) = metamorphic_slots(check) {
+        for slot in slots {
+            if let Some(StmtResult::Error { sqlstate }) = stack.get(slot) {
+                return CheckOutcome::SkipInapplicable(format!(
+                    "slot {slot} errored ({sqlstate}): metamorphic law not evaluable"
+                ));
+            }
+        }
+    }
     let r = eval_inner(check, stack, ledger, hooks);
     match r {
         Ok(Some(())) => CheckOutcome::Pass,
@@ -284,6 +349,117 @@ fn eval_inner(
                     "UNION ALL doubling violated: 2x{} rows expected, got {}",
                     s.len(),
                     d.len()
+                ))
+            }
+        }
+        Check::PartitionUnionEq { parts, whole } => {
+            let mut union: Vec<Row> = Vec::new();
+            for p in parts {
+                union.extend_from_slice(rows_of(stack, *p)?);
+            }
+            union.sort();
+            let w = sorted(rows_of(stack, *whole)?);
+            if union == w {
+                Ok(Some(()))
+            } else {
+                let sample = first_diff(&union, &w)
+                    .map(|r| format!("; first diff row: {r:?}"))
+                    .unwrap_or_default();
+                Err(format!(
+                    "TLP partition reassembly violated: parts {:?} reassemble to {} rows but whole slot {} has {}{}",
+                    parts,
+                    union.len(),
+                    whole,
+                    w.len(),
+                    sample
+                ))
+            }
+        }
+        Check::DistinctUnionEq { parts, whole } => {
+            let mut union: std::collections::BTreeSet<Row> = std::collections::BTreeSet::new();
+            for p in parts {
+                for r in rows_of(stack, *p)? {
+                    union.insert(r.clone());
+                }
+            }
+            let w: std::collections::BTreeSet<Row> =
+                rows_of(stack, *whole)?.iter().cloned().collect();
+            if union == w {
+                Ok(Some(()))
+            } else {
+                let only_whole: Vec<&Row> = w.difference(&union).take(2).collect();
+                let only_parts: Vec<&Row> = union.difference(&w).take(2).collect();
+                Err(format!(
+                    "DISTINCT-TLP violated: set-union of parts {:?} has {} values, whole slot {} has {}; only-in-whole {:?}, only-in-parts {:?}",
+                    parts,
+                    union.len(),
+                    whole,
+                    w.len(),
+                    only_whole,
+                    only_parts
+                ))
+            }
+        }
+        Check::ScalarExtremeEq { parts, whole, max } => {
+            let mut ext: Option<i64> = None;
+            for p in parts {
+                match scalar(stack, *p)? {
+                    Value::Null => {}
+                    Value::Int(v) => {
+                        ext = Some(match ext {
+                            None => v,
+                            Some(e) if *max => e.max(v),
+                            Some(e) => e.min(v),
+                        });
+                    }
+                    other => {
+                        return Err(format!(
+                            "part slot {p}: non-integer extreme {other:?} (R7: exact types only)"
+                        ))
+                    }
+                }
+            }
+            let w = match scalar(stack, *whole)? {
+                Value::Null => None,
+                Value::Int(v) => Some(v),
+                other => {
+                    return Err(format!(
+                        "whole slot {whole}: non-integer extreme {other:?} (R7: exact types only)"
+                    ))
+                }
+            };
+            if ext == w {
+                Ok(Some(()))
+            } else {
+                Err(format!(
+                    "{}-TLP violated: extreme over parts {parts:?} = {ext:?}, whole slot {whole} = {w:?}",
+                    if *max { "MAX" } else { "MIN" }
+                ))
+            }
+        }
+        Check::NorecRowCountEq { optimized, unoptimized } => {
+            let opt_n = rows_of(stack, *optimized)?.len();
+            let rows = rows_of(stack, *unoptimized)?;
+            let mut true_n = 0usize;
+            for r in rows {
+                if r.0.len() != 1 {
+                    return Err(format!(
+                        "slot {unoptimized}: NoREC projection row has {} columns, expected 1",
+                        r.0.len()
+                    ));
+                }
+                match &r.0[0] {
+                    Value::Bool(true) => true_n += 1,
+                    Value::Text(t) if t == "t" || t == "true" => true_n += 1,
+                    _ => {}
+                }
+            }
+            if opt_n == true_n {
+                Ok(Some(()))
+            } else {
+                Err(format!(
+                    "NoREC violated: optimized slot {optimized} returned {opt_n} rows but unoptimized slot {unoptimized} has {true_n} TRUE rows of {}",
+                    rows.len()
                 ))
             }
         }
@@ -380,6 +556,10 @@ mod tests {
             Check::CardLe { slot: 4, value: 10 },
             Check::MultisetEq { a: 5, b: 6 },
             Check::UnionDoubling { single: 1, doubled: 2 },
+            Check::PartitionUnionEq { parts: vec![1, 2, 3], whole: 0 },
+            Check::DistinctUnionEq { parts: vec![1, 2, 3], whole: 0 },
+            Check::ScalarExtremeEq { parts: vec![1, 2, 3], whole: 0, max: true },
+            Check::NorecRowCountEq { optimized: 0, unoptimized: 1 },
             Check::SqlStateClass { slot: 2, class: "23".into() },
             Check::StmtOk { slot: 8 },
             Check::LedgerTable { table: "t1".into(), slot: 0 },

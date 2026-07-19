@@ -34,6 +34,12 @@ fn first_asserted_slot(inst: &PropertyInstance) -> Option<u32> {
                 | Check::CountMatchesLedger { slot, .. } => *slot,
                 Check::ScalarPairEq { a, .. } | Check::MultisetEq { a, .. } => *a,
                 Check::ScalarSumEq { whole, .. } => *whole,
+                // Metamorphic checks: perturb the WHOLE (or the optimized
+                // NoREC leg) — the reassembled parts must then disagree.
+                Check::PartitionUnionEq { whole, .. }
+                | Check::DistinctUnionEq { whole, .. }
+                | Check::ScalarExtremeEq { whole, .. } => *whole,
+                Check::NorecRowCountEq { optimized, .. } => *optimized,
                 Check::UnionDoubling { single, .. } => *single,
                 Check::HookBaseline { before, .. } => *before,
                 Check::HookPresent { .. } => continue,
