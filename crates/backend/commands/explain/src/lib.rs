@@ -65,7 +65,7 @@ pub fn ExplainQuery<'mcx>(
     dest: &mut DestReceiver<'mcx>,
 ) -> PgResult<()> {
     let mut es = NewExplainState(mcx)?;
-    ParseExplainOptionList(&mut es, mcx, &stmt.options)?;
+    ParseExplainOptionList(&mut es, mcx, &stmt.options, query_string)?;
 
     let query_node = stmt.query.expect("ExplainQuery: stmt->query is NULL");
 
@@ -608,6 +608,10 @@ fn ExplainOnePlanRef<'mcx>(
 
     if es.serialize != EXPLAIN_SERIALIZE_NONE {
         ExplainPrintSerialize(es, &serializeMetrics);
+    }
+
+    if let Some(hook) = crate::state::explain_per_plan_hook() {
+        hook(pstmt, es, query_string)?;
     }
 
     starttime = instrument::instr_time_current();

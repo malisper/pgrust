@@ -328,6 +328,10 @@ pg_freespacemap = { path = "../../contrib/pg_freespacemap" }
 amcheck = { path = "../../contrib/amcheck" }
 tsm_system_rows = { path = "../../contrib/tsm_system_rows" }
 tsm_system_time = { path = "../../contrib/tsm_system_time" }
+pg_visibility = { path = "../../contrib/pg_visibility" }
+pgrowlocks = { path = "../../contrib/pgrowlocks" }
+pg_logicalinspect = { path = "../../contrib/pg_logicalinspect" }
+pg_overexplain = { path = "../../contrib/pg_overexplain" }
 adt_formatting = { path = "../../backend/utils/adt/formatting" }
 session = { path = "../../backend/access/session" }
 relpath = { path = "../../common/relpath" }

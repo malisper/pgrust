@@ -1,0 +1,41 @@
+[package]
+name = "pgrowlocks"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pgrowlocks"
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../_support/types/datum" }
+mcx = { path = "../../_support/mcx" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+types_fmgr = { path = "../../_support/types/fmgr" }
+types_nodes = { path = "../../_support/types/nodes" }
+types_rel = { path = "../../_support/types/rel" }
+types_scan = { path = "../../_support/types/types_scan" }
+types_storage = { path = "../../_support/types/types_storage" }
+types_tuple = { path = "../../_support/types/types_tuple" }
+rel_vocab = { path = "../../_support/types/rel_vocab" }
+dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
+funcapi = { path = "../../backend/utils/fmgr/funcapi" }
+relation = { path = "../../backend/access/common/relation" }
+bufmgr = { path = "../../backend/storage/buffer/bufmgr" }
+heapam = { path = "../../backend/access/heap/heapam" }
+heapam_visibility = { path = "../../backend/access/heap/heapam_visibility" }
+tableam = { path = "../../backend/access/table/tableam" }
+tableam_vocab = { path = "../../backend/access/table/tableam_vocab" }
+multixact = { path = "../../backend/access/transam/multixact" }
+xact = { path = "../../backend/access/transam/xact" }
+procarray = { path = "../../backend/storage/ipc/procarray" }
+aclchk = { path = "../../backend/catalog/aclchk" }
+adt_acl = { path = "../../backend/utils/adt/acl" }
+tablecmds = { path = "../../backend/commands/tablecmds" }
+miscinit = { path = "../../backend/utils/init/miscinit" }
+snapmgr = { path = "../../backend/utils/time/snapmgr" }
+varlena = { path = "../../backend/utils/adt/varlena" }
+mbutils_seams = { path = "../../backend/utils/mb/mbutils_seams" }
+wchar = { path = "../../common/wchar" }
