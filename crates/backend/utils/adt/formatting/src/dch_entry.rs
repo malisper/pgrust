@@ -178,6 +178,18 @@ pub fn interval_to_char<'mcx>(
     tmtc.tm.tm_mon = tt.tm_mon;
     tmtc.tm.tm_year = tt.tm_year;
 
+    // C formatting.c interval_to_char: "wday is meaningless, yday
+    // approximates the total span in days" — the DDD/WW codes read tm_yday
+    // (negative for negative intervals; C prints the signed value). C's
+    // plain-int math is compiled with -fwrapv; wrap exactly like C on
+    // extreme month counts (MONTHS_PER_YEAR = 12, DAYS_PER_MONTH = 30).
+    tmtc.tm.tm_yday = tt
+        .tm_year
+        .wrapping_mul(12)
+        .wrapping_add(tt.tm_mon)
+        .wrapping_mul(30)
+        .wrapping_add(tt.tm_mday);
+
     let out = datetime_to_char_body(mcx, &tmtc, fmt, true, collid)?;
     text_result(mcx, &out)
 }
@@ -776,6 +788,43 @@ mod tests {
     #[test]
     fn to_char_quoted_literal() {
         assert_eq!(to_char_str(b"YYYY\"y\""), "1997y");
+    }
+
+    fn interval_to_char_str(month: i32, day: i32, time: i64, fmt: &[u8]) -> String {
+        let ctx = MemoryContext::new("dch-test");
+        let it = ::adt_datetime::Interval { time, day, month };
+        let v = interval_to_char(ctx.mcx(), ::types_core::InvalidOid, &it, fmt).unwrap();
+        String::from_utf8_lossy(v.data()).into_owned()
+    }
+
+    // C formatting.c interval_to_char sets
+    //   tm_yday = (tm_year * MONTHS_PER_YEAR + tm_mon) * DAYS_PER_MONTH + tm_mday
+    // ("wday is meaningless, yday approximates the total span in days"), and
+    // the DDD/WW arms print the signed value for negative intervals. Every
+    // pin below is byte-compared to live C 18.3 (Homebrew twin, 2026-07-18).
+    // Red at base: tm_yday was never set, so all intervals printed WW as the
+    // yday=0 value "01" (fnconf campaign-2 OID 1768 residual diff).
+    #[test]
+    fn to_char_interval_yday_family_matches_c() {
+        // the campaign-2 minimized repro interval: -1121 mons -1605 days -84436.746699 s
+        assert_eq!(interval_to_char_str(-1121, -1605, -84436746699, b"WW"), "-5032");
+        assert_eq!(interval_to_char_str(-1121, -1605, -84436746699, b"DDD"), "-35235");
+        assert_eq!(interval_to_char_str(-1121, -1605, -84436746699, b"W"), "-228");
+        // ... and its exact harness format string.
+        assert_eq!(
+            interval_to_char_str(-1121, -1605, -84436746699, b"wwsqFUKCcPapl6ba3"),
+            "-5032s-1FUKCcPapl6ba3"
+        );
+        // positive span: 3 years 2 months 5 days.
+        assert_eq!(interval_to_char_str(38, 5, 0, b"WW"), "164");
+        assert_eq!(interval_to_char_str(38, 5, 0, b"DDD"), "1145");
+        // zero interval: yday = 0 -> WW = (0-1)/7+1 = 1 (C trunc-toward-zero).
+        assert_eq!(interval_to_char_str(0, 0, 0, b"WW"), "01");
+        assert_eq!(interval_to_char_str(0, 0, 0, b"DDD"), "000");
+        // 2147483647 months: (178956970*12 + 7) = INT_MAX, *30 wraps to -30
+        // under C's -fwrapv; the wrapping_* chain must reproduce it exactly.
+        assert_eq!(interval_to_char_str(i32::MAX, 0, 0, b"WW"), "-3");
+        assert_eq!(interval_to_char_str(i32::MAX, 0, 0, b"DDD"), "-30");
     }
 
     #[test]
