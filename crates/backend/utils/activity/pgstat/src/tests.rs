@@ -833,6 +833,26 @@ fn reset_of_kind_covers_all_fixed_kinds() {
     assert!(crate::io::pgstat_fetch_stat_io().stat_reset_timestamp > 0);
 }
 
+// LogCheckpointEnd (xlog.c) accumulates write_msecs/sync_msecs into
+// PendingCheckpointerStats via these seams; before they existed the fetched
+// write_time/sync_time stayed 0 forever (sqlsmith s101 idx 47176: a WHERE
+// over sync_time = write_time evaluated TRUE here, rows in C).
+#[test]
+fn checkpointer_write_sync_time_seams_accumulate() {
+    let _lock = setup();
+    let before = {
+        crate::pgstat_clear_snapshot();
+        checkpointer::pgstat_fetch_stat_checkpointer()
+    };
+    pgstat_seams::pgstat_count_checkpointer_write_time::call(120);
+    pgstat_seams::pgstat_count_checkpointer_sync_time::call(45);
+    checkpointer::pgstat_report_checkpointer();
+    crate::pgstat_clear_snapshot();
+    let after = checkpointer::pgstat_fetch_stat_checkpointer();
+    assert_eq!(after.write_time - before.write_time, 120);
+    assert_eq!(after.sync_time - before.sync_time, 45);
+}
+
 #[test]
 fn checkpointer_and_bgwriter_report_apply_pending() {
     let _lock = setup();

@@ -59,3 +59,10 @@ seam_core::seam!(
         locale: &str,
     ) -> PgResult<Option<mcx::PgString<'mcx>>>
 );
+
+seam_core::seam!(
+    // The Unicode version of the loaded ICU library — pgrust's analog of C's
+    // compile-time U_UNICODE_VERSION (icu_unicode_version, varlena.c). None =
+    // libicu not loadable, matching a C build without --with-icu.
+    pub fn icu_unicode_version() -> Option<&'static str>
+);
