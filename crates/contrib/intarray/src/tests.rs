@@ -8,7 +8,7 @@ fn q(s: &str) -> Result<String, String> {
             let items = parse_items(&img);
             Ok(String::from_utf8(boolquery::deparse(&items).unwrap()).unwrap())
         }
-        Err(e) => Err(e.message().to_string()),
+        Err(e) => Err(e.err.message().to_string()),
     }
 }
 
