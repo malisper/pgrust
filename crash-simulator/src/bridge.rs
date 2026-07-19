@@ -491,7 +491,7 @@ pub fn generate_plan_with_ctx_traced(
 // Runner-facing CheckEval backed by the oracle (ledger + slots + eval_check)
 // ---------------------------------------------------------------------------
 
-fn to_stmt_result(o: &ExecOutcome) -> StmtResult {
+pub(crate) fn to_stmt_result(o: &ExecOutcome) -> StmtResult {
     match o {
         ExecOutcome::Rows { rows } => StmtResult::Rows {
             rows: rows
@@ -633,6 +633,23 @@ impl OracleCheckEval {
             }),
             hooks,
         }
+    }
+}
+
+impl OracleCheckEval {
+    /// SIM-HARNESS-CONVERGE (fault leg): the model's crash-committed tables
+    /// at the current replay point (open tx rolled back — crash semantics).
+    pub fn crash_committed_tables(
+        &self,
+    ) -> Vec<(String, Vec<String>, Vec<crate::oracle::check::Row>)> {
+        self.inner.borrow().ledger.crash_committed()
+    }
+
+    /// SIM-HARNESS-CONVERGE (fault leg): is the model's transaction open at
+    /// the current replay point (the in-flight-statement indeterminacy
+    /// input — effects inside a still-open tx roll back either way).
+    pub fn model_in_open_tx(&self) -> bool {
+        self.inner.borrow().ledger.in_tx()
     }
 }
 

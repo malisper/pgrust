@@ -8,6 +8,7 @@
 
 use clap::{Parser, Subcommand};
 use simharness::runner;
+use runner::simbridge;
 use runner::bugbase::BugBase;
 use runner::planface::Plan;
 use runner::profile::load_profile;
@@ -165,6 +166,72 @@ enum Cmd {
         bugbase: PathBuf,
         #[command(flatten)]
         engine: EngineArgs,
+    },
+    /// SIM-HARNESS-CONVERGE: drive v1 plans INSIDE the deterministic
+    /// simulator (P13 registered-backend corpus). Model-oracle + property
+    /// checks; diff-c is N/A inside the sim (disclosed in the output).
+    SimRun {
+        #[arg(long)]
+        profile: String,
+        #[arg(long, default_value_t = 1)]
+        seed_base: u64,
+        #[arg(long, default_value_t = 100)]
+        seeds: u64,
+        /// The scheduler seed (PGRUST_SIM_SEED) — the second axis.
+        #[arg(long, default_value_t = 7)]
+        sched_seed: u64,
+        /// Sim-built postgres binary (RUSTFLAGS=--cfg pgrust_sim).
+        #[arg(long)]
+        sim_bin: PathBuf,
+        /// C-initdb datadir image the sim universe seeds from.
+        #[arg(long)]
+        datadir: PathBuf,
+        /// Dir containing timezone/ and timezonesets/ (link-resolved).
+        #[arg(long)]
+        share_dir: PathBuf,
+        #[arg(long, default_value = "simbridge-out")]
+        out: PathBuf,
+        /// First N seeds also get the x3 byte-identity proof.
+        #[arg(long, default_value_t = 2)]
+        x3: u64,
+        /// First N seeds also get the serial-semantics proof (a second
+        /// schedule seed must yield the identical parsed outcome stream).
+        #[arg(long, default_value_t = 4)]
+        serialsem: u64,
+        #[arg(long, default_value_t = 180)]
+        timeout_s: u64,
+        /// TEETH INSTRUMENT: doctor the script with the NullBug rewrite —
+        /// the model oracle MUST fire (planted-red validation of the whole
+        /// bridge stack). Never in battery configs.
+        #[arg(long, default_value_t = false)]
+        test_null_bug: bool,
+    },
+    /// SIM-HARNESS-CONVERGE fault composition: crash-cut mid-plan (whole-
+    /// node kill via the FaultDriver spec channel), pack the at-cut image,
+    /// reboot through PRODUCT crash recovery, re-verify the model's
+    /// crash-committed tables. --red weakens writer durability (fsync=off)
+    /// and must be CAUGHT.
+    SimFault {
+        #[arg(long)]
+        profile: String,
+        #[arg(long, default_value_t = 1)]
+        seed_base: u64,
+        #[arg(long, default_value_t = 100)]
+        seeds: u64,
+        #[arg(long, default_value_t = 7)]
+        sched_seed: u64,
+        #[arg(long)]
+        sim_bin: PathBuf,
+        #[arg(long)]
+        datadir: PathBuf,
+        #[arg(long)]
+        share_dir: PathBuf,
+        #[arg(long, default_value = "simfault-out")]
+        out: PathBuf,
+        #[arg(long, default_value_t = 180)]
+        timeout_s: u64,
+        #[arg(long, default_value_t = false)]
+        red: bool,
     },
 }
 
@@ -356,6 +423,58 @@ fn real_main() -> Result<i32, String> {
                 );
             }
             Ok(0)
+        }
+        Cmd::SimRun {
+            profile,
+            seed_base,
+            seeds,
+            sched_seed,
+            sim_bin,
+            datadir,
+            share_dir,
+            out,
+            x3,
+            serialsem,
+            timeout_s,
+            test_null_bug,
+        } => {
+            let lp = load_profile(&profile)?;
+            let args = simbridge::BridgeArgs {
+                lp,
+                seed_base,
+                seeds,
+                sched_seed,
+                world: simbridge::SimWorld { sim_bin, datadir, share_dir, timeout_s },
+                out,
+                x3,
+                serialsem,
+                test_null_bug,
+            };
+            Ok(simbridge::run_bridge_campaign(&args))
+        }
+        Cmd::SimFault {
+            profile,
+            seed_base,
+            seeds,
+            sched_seed,
+            sim_bin,
+            datadir,
+            share_dir,
+            out,
+            timeout_s,
+            red,
+        } => {
+            let lp = load_profile(&profile)?;
+            let args = simbridge::FaultArgs {
+                lp,
+                seed_base,
+                seeds,
+                sched_seed,
+                world: simbridge::SimWorld { sim_bin, datadir, share_dir, timeout_s },
+                out,
+                red,
+            };
+            Ok(simbridge::run_fault_campaign(&args))
         }
     }
 }

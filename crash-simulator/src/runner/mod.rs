@@ -10,4 +10,5 @@ pub mod runloop;
 pub mod schedule;
 pub mod sessions;
 pub mod shrink;
+pub mod simbridge;
 pub mod verdict;
