@@ -170,10 +170,24 @@ fn init_pergroup(mcx: Mcx<'_>, kind: LaneKind) -> AggPerGroup {
         // int8_avg_accum: INTERNAL transtype, NULL catalog initval, transfn
         // not strict (C initialize_aggregate sets both flags from
         // initValueIsNull; noTransValue is never consulted for non-strict).
-        LaneKind::Int128AvgAccum => AggPerGroup {
+        // numeric_avg_accum shares the exact discipline (fold-trans inc 2).
+        LaneKind::Int128AvgAccum | LaneKind::NumAccum => AggPerGroup {
             trans_value: Datum::null(),
             trans_value_is_null: true,
             no_trans_value: true,
+        },
+        // float8_regr_accum: strict with the NON-null '{0,0,0,0,0,0}'
+        // float8[6] catalog initval — live transarray from the first row.
+        LaneKind::FRegrAccum => AggPerGroup {
+            trans_value: new_float8_regr_transarray(mcx),
+            trans_value_is_null: false,
+            no_trans_value: false,
+        },
+        // regr_count: strict two-arg counter with the non-null '0' initval.
+        LaneKind::Count2 => AggPerGroup {
+            trans_value: Datum::from_i64(0),
+            trans_value_is_null: false,
+            no_trans_value: false,
         },
         // Every tier-2 kind is a strict NULL-init transfn, same discipline as
         // int min/max.
@@ -605,7 +619,7 @@ fn classify_admission_matrix() {
     ];
     for (i, (oid, init_null, args, kind, width)) in cases.iter().enumerate() {
         let spec = mk_spec(*oid, *init_null, args);
-        let (t, g) = classify_trans(&spec, i).unwrap_or_else(|| panic!("case {i} admits"));
+        let (t, g, _) = classify_trans(&spec, i).unwrap_or_else(|| panic!("case {i} admits"));
         assert_eq!(t.kind, *kind, "case {i}");
         assert_eq!(t.width, *width, "case {i}");
         assert_eq!(t.res_width, *width, "bare Var stores at lane width, case {i}");
@@ -634,16 +648,16 @@ fn classify_affine_opexprs() {
     for (i, (expr, coeffs)) in cases.iter().enumerate() {
         let args = arg_list(mcx, *expr);
         let spec = mk_spec(1841, true, &args); // int4_sum
-        let (t, _) = classify_trans(&spec, 0).unwrap_or_else(|| panic!("case {i} admits"));
+        let (t, _, _) = classify_trans(&spec, 0).unwrap_or_else(|| panic!("case {i} admits"));
         assert_eq!((t.addend, t.mulk, t.divk), *coeffs, "case {i}");
         assert_eq!(t.res_width, LaneWidth::I32, "OpExpr result is int4, case {i}");
     }
     // int2 admissions are TYPE-proven (no guard); int4 + const needs a guard.
     let args = arg_list(mcx, mk_int_op(mcx, 1, INT2OID, 5, 178, true));
-    let (_, g) = classify_trans(&mk_spec(1841, true, &args), 0).unwrap();
+    let (_, g, _) = classify_trans(&mk_spec(1841, true, &args), 0).unwrap();
     assert!(g.is_none(), "int2+5 is type-proven");
     let args = arg_list(mcx, mk_int_op(mcx, 2, INT4OID, 5, 177, true));
-    let (_, g) = classify_trans(&mk_spec(1841, true, &args), 0).unwrap();
+    let (_, g, _) = classify_trans(&mk_spec(1841, true, &args), 0).unwrap();
     let g = g.expect("int4+5 carries a data guard");
     assert_eq!((g.lo, g.hi), (i32::MIN as i64 - 5, i32::MAX as i64 - 5));
 }
@@ -1115,7 +1129,7 @@ fn classify_foldcov_admission() {
     ];
     for (i, (oid, args, kind, width)) in cases.iter().enumerate() {
         let spec = mk_spec(*oid, true, args);
-        let (t, g) = classify_trans(&spec, i).unwrap_or_else(|| panic!("case {i} admits"));
+        let (t, g, _) = classify_trans(&spec, i).unwrap_or_else(|| panic!("case {i} admits"));
         assert_eq!(t.kind, *kind, "case {i}");
         assert_eq!(t.width, *width, "case {i}");
         assert_eq!(t.res_width, *width, "bare Var stores at lane width, case {i}");
@@ -1140,7 +1154,7 @@ fn classify_foldcov_refusals_and_bit_opexpr() {
     // ... but int4 bitwise folds admit the affine int4 OpExpr shapes with the
     // same guard tiers as SUM/MIN/MAX (v + 5 over an int4 Var: DATA guard).
     let a_g = arg_list(mcx, mk_int_op(mcx, 2, INT4OID, 5, 177, true));
-    let (t, g) = classify_trans(&mk_spec(1898, true, &a_g), 0).expect("int4and over v+5 admits");
+    let (t, g, _) = classify_trans(&mk_spec(1898, true, &a_g), 0).expect("int4and over v+5 admits");
     assert_eq!(t.kind, LaneKind::BitAnd);
     assert_eq!(t.res_width, LaneWidth::I32);
     let g = g.expect("int4 + const carries a data guard");
@@ -1526,6 +1540,7 @@ fn plan_subset<'mcx>(
         guards: ::mcx::PgVec::new_in(mcx),
         vguards: ::mcx::PgVec::new_in(mcx),
         uguards: ::mcx::PgVec::new_in(mcx),
+        filters: ::mcx::PgVec::new_in(mcx),
         cols: ::mcx::PgVec::new_in(mcx),
         resid: ::mcx::PgVec::new_in(mcx),
         guarded: false,
@@ -1669,7 +1684,7 @@ fn classify_str_admission() {
     ];
     for (i, (oid, args, coll, kind)) in cases.iter().enumerate() {
         let spec = mk_spec_coll(*oid, args, *coll);
-        let (t, g) = classify_trans(&spec, i).unwrap_or_else(|| panic!("case {i} admits"));
+        let (t, g, _) = classify_trans(&spec, i).unwrap_or_else(|| panic!("case {i} admits"));
         assert_eq!(t.kind, *kind, "case {i}");
         assert_eq!(t.width, LaneWidth::Var, "case {i}");
         assert_eq!(t.res_width, LaneWidth::Var, "case {i}");
@@ -2129,11 +2144,11 @@ fn classify_str_collate_relabel() {
     };
     // text COLLATE "C" -> RelabelType(text -> text).
     let a = mk_rel(TEXTV, TEXTV);
-    let (t, _) = classify_trans(&mk_spec_coll(459, &a, COLL_C), 0).expect("admits");
+    let (t, _, _) = classify_trans(&mk_spec_coll(459, &a, COLL_C), 0).expect("admits");
     assert_eq!(t.kind, LaneKind::StrMin);
     // bpchar COLLATE "C" -> RelabelType(bpchar -> bpchar).
     let a = mk_rel(BPCHARV, BPCHARV);
-    let (t, _) = classify_trans(&mk_spec_coll(1063, &a, COLL_C), 0).expect("admits");
+    let (t, _, _) = classify_trans(&mk_spec_coll(1063, &a, COLL_C), 0).expect("admits");
     assert_eq!(t.kind, LaneKind::BpMax);
     // Cross-type relabel to bpchar under a text transfn still refuses.
     let a = mk_rel(TEXTV, BPCHARV);
@@ -2308,6 +2323,10 @@ fn fold_oid_set_matches_lanereg_census() {
         (218, R::FSum),
         (208, R::FAccum),
         (222, R::FAccum),
+        // fold-trans increment 2 (lane aggseq-fold2, same knob):
+        (F_NUMERIC_AVG_ACCUM, R::NumAccum),
+        (F_FLOAT8_REGR_ACCUM, R::FRegrAccum),
+        (F_INT8INC_FLOAT8_FLOAT8, R::Count2),
     ];
     for &(oid, kind) in expect {
         assert_eq!(::lanereg::fold_desc(oid), Some(kind), "fold oid {oid} census mismatch");
@@ -2454,7 +2473,7 @@ fn classify_strlen_admission() {
     for fnoid in [1257u32, 1317, 1369, 1381] {
         let args = arg_list(mcx, mk_len_fn(mcx, fnoid, mk_var(mcx, 1, TEXTV)));
         let spec = mk_spec(1963, false, &args); // avg(int4)
-        let (t, g) = classify_trans(&spec, 0).expect("admits");
+        let (t, g, _) = classify_trans(&spec, 0).expect("admits");
         assert_eq!(t.kind, LaneKind::AvgAccum);
         assert_eq!(t.width, LaneWidth::VarLenChars, "UTF-8 encoding: char-count lane");
         assert_eq!(t.res_width, LaneWidth::I32);
@@ -2463,7 +2482,7 @@ fn classify_strlen_admission() {
     }
     // octet_length: byte-count lane, encoding-independent.
     let a_oct = arg_list(mcx, mk_len_fn(mcx, F_OCTETLEN_T, mk_var(mcx, 1, TEXTV)));
-    let (t, _) = classify_trans(&mk_spec(1841, true, &a_oct), 0).expect("sum admits");
+    let (t, _, _) = classify_trans(&mk_spec(1841, true, &a_oct), 0).expect("sum admits");
     assert_eq!((t.kind, t.width), (LaneKind::Sum, LaneWidth::VarLenBytes));
     // varchar under the relabel.
     let rel = Node::mk_relabel_type(
@@ -2476,12 +2495,12 @@ fn classify_strlen_admission() {
     )
     .unwrap();
     let a_rel = arg_list(mcx, mk_len_fn(mcx, F_TEXTLEN_T, rel));
-    let (t, _) = classify_trans(&mk_spec(768, true, &a_rel), 0).expect("max admits");
+    let (t, _, _) = classify_trans(&mk_spec(768, true, &a_rel), 0).expect("max admits");
     assert_eq!((t.kind, t.width, t.col), (LaneKind::Max, LaneWidth::VarLenChars, 1));
     // MIN/MAX/bit over length admit too (the whole int4 arg family).
     for (fnoid, kind) in [(769u32, LaneKind::Min), (1898, LaneKind::BitAnd), (1899, LaneKind::BitOr)] {
         let a = arg_list(mcx, mk_len_fn(mcx, F_TEXTLEN_T, mk_var(mcx, 1, TEXTV)));
-        let (t, _) = classify_trans(&mk_spec(fnoid, true, &a), 0).expect("admits");
+        let (t, _, _) = classify_trans(&mk_spec(fnoid, true, &a), 0).expect("admits");
         assert_eq!((t.kind, t.width), (kind, LaneWidth::VarLenChars));
     }
     // Plan-level obligations: char lanes carry vguard AND uguard; octet
@@ -3675,16 +3694,16 @@ fn fold_trans_knob_and_admission() {
     }
     fold_trans_set_for_tests(true);
     // sum(float8/float4): NULL init, byval float state at the lane width.
-    let (t, g) = classify_trans(&mk_spec(218, true, &af8), 0).expect("float8pl admits");
+    let (t, g, _) = classify_trans(&mk_spec(218, true, &af8), 0).expect("float8pl admits");
     assert_eq!((t.kind, t.width, t.res_width), (LaneKind::FSum, LaneWidth::F64, LaneWidth::F64));
     assert!(g.is_none(), "fold-trans lanes carry no integer guard");
-    let (t, _) = classify_trans(&mk_spec(204, true, &af4), 0).expect("float4pl admits");
+    let (t, _, _) = classify_trans(&mk_spec(204, true, &af4), 0).expect("float4pl admits");
     assert_eq!((t.kind, t.width, t.res_width), (LaneKind::FSum, LaneWidth::F32, LaneWidth::F32));
     // accum family: NON-null '{0,0,0}' initval.
-    let (t, g) = classify_trans(&mk_spec(222, false, &af8), 0).expect("float8_accum admits");
+    let (t, g, _) = classify_trans(&mk_spec(222, false, &af8), 0).expect("float8_accum admits");
     assert_eq!((t.kind, t.width), (LaneKind::FAccum, LaneWidth::F64));
     assert!(g.is_none());
-    let (t, _) = classify_trans(&mk_spec(208, false, &af4), 0).expect("float4_accum admits");
+    let (t, _, _) = classify_trans(&mk_spec(208, false, &af4), 0).expect("float4_accum admits");
     assert_eq!((t.kind, t.width), (LaneKind::FAccum, LaneWidth::F32));
     // Initval-polarity gates (the catalog contract this classify encodes).
     assert!(classify_trans(&mk_spec(218, false, &af8), 0).is_none(), "sum needs NULL init");
@@ -3694,10 +3713,25 @@ fn fold_trans_knob_and_admission() {
     let a_op = arg_list(mcx, mk_int_op(mcx, 1, INT4OID, 5, 177, true));
     assert!(classify_trans(&mk_spec(218, true, &a_op), 0).is_none(), "OpExpr for float8pl");
     assert!(classify_trans(&mk_spec(222, false, &a_op), 0).is_none(), "OpExpr for float8_accum");
-    // FILTER stays refused (named refusal this increment).
+    // FILTER (fold-trans inc 2): a CLASSIFIABLE predicate now admits with a
+    // FilterEntry; an unclassifiable one still refuses the transition.
     let mut fspec = mk_spec(218, true, &af8);
     fspec.aggfilter = Some(mk_var(mcx, 2, BOOLV));
-    assert!(classify_trans(&fspec, 0).is_none(), "aggfilter refuses");
+    let (_, _, f) = classify_trans(&fspec, 0).expect("bool-Var FILTER admits");
+    assert_eq!(
+        f,
+        Some(FilterEntry { pred: FilterPred::BoolVar, col: 1, width: LaneWidth::Bool, konst: 0 })
+    );
+    let mut fbad = mk_spec(218, true, &af8);
+    fbad.aggfilter = Some(mk_var(mcx, 2, F64V));
+    assert!(classify_trans(&fbad, 0).is_none(), "non-bool Var FILTER refuses");
+    // Knob OFF: even a classifiable FILTER refuses (byte-identical estate).
+    fold_trans_set_for_tests(false);
+    let ai4 = arg_list(mcx, mk_var(mcx, 1, INT4OID));
+    let mut foff = mk_spec(1841, true, &ai4);
+    foff.aggfilter = Some(mk_var(mcx, 2, BOOLV));
+    assert!(classify_trans(&foff, 0).is_none(), "knob off: FILTER refuses");
+    fold_trans_set_for_tests(true);
     // combine phase refuses.
     let mut cspec = mk_spec(218, true, &af8);
     cspec.combine = true;
