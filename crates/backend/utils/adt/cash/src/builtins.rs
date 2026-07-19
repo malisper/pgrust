@@ -1,7 +1,7 @@
 //! fmgr wrappers (`fc_*`) + `CASH_BUILTINS` for fmgr-core. cash_recv/cash_send
-//! (2492/2493) need the wire convention at the frame, cash_words (935) the
-//! text-result convention (the varlena textin precedent); their value cores
-//! live in the crate root.
+//! (2492/2493) ride the binary-wire fmgr frame (types_fmgr::wire), cash_words
+//! (935) the text-result convention (the varlena textin precedent); their
+//! value cores live in the crate root.
 
 use std::borrow::Cow;
 
@@ -225,6 +225,18 @@ pub fn fc_numeric_cash(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
     Ok(Datum::from_i64(crate::numeric_cash(num)?))
 }
 
+pub fn fc_cash_recv(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: recv arg 0 is the live StringInfo pointer per the recv ABI.
+    let buf = unsafe { fcinfo.arg_stringinfo(0) };
+    Ok(Datum::from_i64(crate::cash_recv(buf)?))
+}
+
+pub fn fc_cash_send(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let [a] = fcinfo.args_n::<1>();
+    let mcx = fcinfo.result_mcx();
+    Ok(varlena_result(crate::cash_send(mcx, a.value.as_i64())?))
+}
+
 const fn b(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin {
         foid,
@@ -264,6 +276,8 @@ pub const CASH_BUILTINS: &[FmgrBuiltin] = &[
     b(899, "cashsmaller", 2, fc_cashsmaller),
     b(919, "flt8_mul_cash", 2, fc_flt8_mul_cash),
     b(935, "cash_words", 1, fc_cash_words),
+    b(2492, "cash_recv", 1, fc_cash_recv),
+    b(2493, "cash_send", 1, fc_cash_send),
     b(3344, "cash_mul_int8", 2, fc_cash_mul_int8),
     b(3345, "cash_div_int8", 2, fc_cash_div_int8),
     b(3399, "int8_mul_cash", 2, fc_int8_mul_cash),

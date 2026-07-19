@@ -935,6 +935,50 @@ pub fn fc_oidvectorsend(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> P
     Ok(varlena_result(out))
 }
 
+// int2vectorrecv/int2vectorsend (int.c): same array_recv/array_send delegation
+// shape as oidvector, with int.c's 1-D/0-based/no-null sanity checks.
+pub fn fc_int2vectorrecv(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    // SAFETY: catalog arg 0 of int2vectorrecv is internal (StringInfo).
+    let buf = unsafe { fcinfo.arg_stringinfo(0) };
+    let mcx = fcinfo.result_mcx();
+    let flinfo = flinfo.expect("int2vectorrecv: NULL flinfo");
+    let ams = cached_meta(
+        flinfo,
+        ::types_core::catalog::INT2OID,
+        IOFuncSelector::IOFunc_receive,
+        true,
+    )?;
+    let img = array_recv(mcx, buf, &ams.meta, &mut ams.proc, -1)?;
+    let ndim = i32::from_ne_bytes(img[4..8].try_into().unwrap());
+    let dataoffset = i32::from_ne_bytes(img[8..12].try_into().unwrap());
+    let elemtype = u32::from_ne_bytes(img[12..16].try_into().unwrap());
+    if ndim != 1
+        || dataoffset != 0
+        || elemtype != ::types_core::catalog::INT2OID as u32
+        || i32::from_ne_bytes(img[20..24].try_into().unwrap()) != 0
+    {
+        return Err(Box::new(
+            PgError::error("invalid int2vector data")
+                .with_sqlstate(::types_error::ERRCODE_INVALID_BINARY_REPRESENTATION),
+        ));
+    }
+    byref_result(mcx, &img)
+}
+
+pub fn fc_int2vectorsend(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
+    let mcx = fcinfo.result_mcx();
+    let array = arg_array_bytes(fcinfo, 0, mcx)?;
+    let flinfo = flinfo.expect("int2vectorsend: NULL flinfo");
+    let ams = cached_meta(
+        flinfo,
+        ::types_core::catalog::INT2OID,
+        IOFuncSelector::IOFunc_send,
+        true,
+    )?;
+    let out = array_send(mcx, &array, &ams.meta, &mut ams.proc)?;
+    Ok(varlena_result(out))
+}
+
 const fn nb(foid: Oid, name: &'static str, nargs: i16, func: PGFunction) -> FmgrBuiltin {
     FmgrBuiltin { foid, name, nargs, strict: false, retset: false, func }
 }
@@ -958,6 +1002,8 @@ pub const ARRAYFUNCS_BUILTINS: &[FmgrBuiltin] = &[
     b(383, "array_cat", 2, fc_array_cat),
     b(2400, "array_recv", 3, fc_array_recv),
     b(2401, "array_send", 1, fc_array_send),
+    b(2410, "int2vectorrecv", 1, fc_int2vectorrecv),
+    b(2411, "int2vectorsend", 1, fc_int2vectorsend),
     b(2420, "oidvectorrecv", 1, fc_oidvectorrecv),
     b(2421, "oidvectorsend", 1, fc_oidvectorsend),
     agg(2333, "array_agg_transfn", 2, fc_array_agg_transfn),
