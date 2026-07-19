@@ -58,9 +58,14 @@ fn init_gin_col(rel: &Relation<'_>, i: usize) -> PgResult<GinColState> {
             let cx = ::mcx::MemoryContext::new("gin ext opclass probe");
             let name = lsyscache::get_func_name(cx.mcx(), other)?
                 .map(|n| n.as_str().to_string());
-            match name.as_deref() {
-                Some("gin_extract_value_trgm") => GinOpclass::TrgmOps,
-                Some("gin_extract_hstore") => GinOpclass::HstoreOps,
+            let btree_ty = name
+                .as_deref()
+                .and_then(|n| n.strip_prefix("gin_extract_value_"))
+                .and_then(GinBtreeType::from_type_name);
+            match (name.as_deref(), btree_ty) {
+                (Some("gin_extract_value_trgm"), _) => GinOpclass::TrgmOps,
+                (Some("gin_extract_hstore"), _) => GinOpclass::HstoreOps,
+                (_, Some(ty)) => GinOpclass::BtreeOps(ty),
                 // unported: opclasses beyond the closed set (user-reachable
                 // via CREATE INDEX ... USING gin with a custom opclass).
                 _ => {
@@ -93,15 +98,16 @@ fn init_gin_col(rel: &Relation<'_>, i: usize) -> PgResult<GinColState> {
         GinElemCmp::None
     };
     debug_assert!(
-        lsyscache::get_opfamily_proc(opfamily, opcintype, opcintype, GIN_COMPARE_PROC as i16)?
-            == match opclass {
-                GinOpclass::JsonbOps => opclass::F_GIN_COMPARE_JSONB,
-                GinOpclass::JsonbPathOps => opclass::F_BTINT4CMP,
-                GinOpclass::TsvectorOps => opclass::F_GIN_CMP_TSLEXEME,
-                GinOpclass::TrgmOps => opclass::F_BTINT4CMP,
-                GinOpclass::HstoreOps => opclass::F_BTTEXTCMP,
-                GinOpclass::ArrayOps => InvalidOid,
-            }
+        matches!(opclass, GinOpclass::BtreeOps(_))
+            || lsyscache::get_opfamily_proc(opfamily, opcintype, opcintype, GIN_COMPARE_PROC as i16)?
+                == match opclass {
+                    GinOpclass::JsonbOps => opclass::F_GIN_COMPARE_JSONB,
+                    GinOpclass::JsonbPathOps => opclass::F_BTINT4CMP,
+                    GinOpclass::TsvectorOps => opclass::F_GIN_CMP_TSLEXEME,
+                    GinOpclass::TrgmOps => opclass::F_BTINT4CMP,
+                    GinOpclass::HstoreOps => opclass::F_BTTEXTCMP,
+                    GinOpclass::ArrayOps | GinOpclass::BtreeOps(_) => InvalidOid,
+                }
     );
     let partial = lsyscache::get_opfamily_proc(
         opfamily,
@@ -112,6 +118,18 @@ fn init_gin_col(rel: &Relation<'_>, i: usize) -> PgResult<GinColState> {
     let can_partial_match = match partial {
         InvalidOid => false,
         opclass::F_GIN_CMP_PREFIX if opclass == GinOpclass::TsvectorOps => true,
+        // btree_gin's gin_compare_prefix_<type> (extension oids; proname).
+        other if matches!(opclass, GinOpclass::BtreeOps(_)) => {
+            let cx = ::mcx::MemoryContext::new("gin ext opclass probe");
+            let is_prefix = lsyscache::get_func_name(cx.mcx(), other)?
+                .is_some_and(|n| n.as_str().starts_with("gin_compare_prefix_"));
+            if !is_prefix {
+                return Err(crate::unsupported(format!(
+                    "GIN operator class with comparePartial support function {other} is not supported"
+                )));
+            }
+            true
+        }
         // unported: comparePartial support beyond tsvector's prefix compare
         // (user-reachable via a custom opclass registering proc 5).
         other => {
