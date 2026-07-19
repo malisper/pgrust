@@ -297,6 +297,7 @@ uuid_ossp = { path = "../../contrib/uuid_ossp" }
 dblink = { path = "../../contrib/dblink" }
 pg_prewarm = { path = "../../contrib/pg_prewarm" }
 file_fdw = { path = "../../contrib/file_fdw" }
+postgres_fdw = { path = "../../contrib/postgres_fdw" }
 ltree = { path = "../../contrib/ltree" }
 intarray = { path = "../../contrib/intarray" }
 pgcrypto = { path = "../../contrib/pgcrypto" }

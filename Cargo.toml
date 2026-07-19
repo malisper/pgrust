@@ -672,6 +672,7 @@ members = [
     "crates/interfaces/pgclient",
     "crates/contrib/pg_prewarm",
     "crates/contrib/file_fdw",
+    "crates/contrib/postgres_fdw",
     "crates/contrib/ltree",
     "crates/contrib/intarray",
     "crates/backend/access/gin/gin_int4_seams",
