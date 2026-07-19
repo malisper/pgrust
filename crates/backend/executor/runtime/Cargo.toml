@@ -55,6 +55,10 @@ loom = "0.7"
 # permit-s4: the bitmapheap phase-mirror loom model drives the waiter Slot
 # core directly (dev-dep = codegen-inert, the loom-breadth inc-2 ruling).
 waiter = { path = "../../storage/ipc/waiter" }
+# latch-loom: types_relscan became loom-buildable (the latch conversion), so
+# the relscan seize model now constructs the REAL BTParallelScanShared
+# (dev-dep = codegen-inert, same ruling).
+types_relscan = { path = "../../access/index/relscan" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
