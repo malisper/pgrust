@@ -370,7 +370,29 @@ fn exec_init_table_function_result<'mcx>(
                 .expect("non-NULL arg expression"),
         );
     }
-    // init_sexpr's ACL_EXECUTE check omitted: built-ins are PUBLIC-execute.
+    // init_sexpr's ACL_EXECUTE check (execQual.c): contrib functions REVOKE
+    // PUBLIC (pg_buffercache 1.3+, pg_stat_statements), so the old
+    // "built-ins are PUBLIC-execute" shortcut no longer holds on this path.
+    {
+        const PROCEDURE_RELATION_ID: types_core::Oid = 1255;
+        const ACL_EXECUTE: u64 = 1 << 7;
+        const ACLCHECK_OK: i32 = 0;
+        let userid = miscinit_seams::get_user_id::call();
+        let aclresult = aclchk_seams::object_aclcheck::call(
+            PROCEDURE_RELATION_ID,
+            func.funcid,
+            userid,
+            ACL_EXECUTE,
+        )?;
+        if aclresult != ACLCHECK_OK {
+            let name = lsyscache::get_func_name(mcx, func.funcid)?;
+            let name = name.as_ref().map(|n| n.as_str()).unwrap_or("(unknown)");
+            return Err(Box::new(
+                PgError::error(format!("permission denied for function {name}"))
+                    .with_sqlstate(::types_error::ERRCODE_INSUFFICIENT_PRIVILEGE),
+            ));
+        }
+    }
     let mut flinfo = fmgr_core::fmgr_info(func.funcid)?;
     // C init_sexpr: fmgr_info_set_expr((Node *) sexpr->expr, &sexpr->func) —
     // variadic-"any" callees read arg types off fn_expr.

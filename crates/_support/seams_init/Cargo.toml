@@ -296,6 +296,8 @@ file_fdw = { path = "../../contrib/file_fdw" }
 ltree = { path = "../../contrib/ltree" }
 pgcrypto = { path = "../../contrib/pgcrypto" }
 pg_stat_statements = { path = "../../contrib/pg_stat_statements" }
+pg_buffercache = { path = "../../contrib/pg_buffercache" }
+auto_explain = { path = "../../contrib/auto_explain" }
 pgvector = { path = "../../contrib/pgvector" }
 pgvector_hnsw = { path = "../../contrib/pgvector_hnsw" }
 hstore = { path = "../../contrib/hstore" }

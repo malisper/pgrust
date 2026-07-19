@@ -1547,7 +1547,7 @@ impl<'a> Estate<'a> {
         });
         let (values, nulls) = self.setup_params(&paramnos, &argtypes)?;
         let _frame = FrameGuard::push_spi(&expr.query, expr.parse_mode);
-        let rc = spi::SPI_execute_plan(plan, &values, &nulls, self.readonly_func, maxtuples)
+        let rc = spi::SPI_execute_plan_with_paramlist(plan, &values, &nulls, self.readonly_func, maxtuples)
             .map_err(|e| spi_ctx_err(e, &expr.query, expr.parse_mode))?;
         self.eval_processed = spi::SPI_processed();
         if let Some(t) = self.eval_tuptable.take() {
@@ -3438,7 +3438,7 @@ impl<'a> Estate<'a> {
 
         let (values, nulls) = self.setup_params(&paramnos, &argtypes)?;
         let _frame = FrameGuard::push_spi(&expr.query, expr.parse_mode);
-        let rc = spi::SPI_execute_plan(plan, &values, &nulls, self.readonly_func, tcount)
+        let rc = spi::SPI_execute_plan_with_paramlist(plan, &values, &nulls, self.readonly_func, tcount)
             .map_err(|e| spi_ctx_err(e, &expr.query, expr.parse_mode))?;
 
         match rc {
@@ -3570,6 +3570,8 @@ impl<'a> Estate<'a> {
             plan,
             &values,
             &nulls,
+            // C exec_stmt_call: options.params = setup_param_list (hooked).
+            true,
             self.readonly_func,
             true,
             0,

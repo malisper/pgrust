@@ -20,6 +20,7 @@ mod ops;
 mod pin;
 mod privref;
 mod dbcopy;
+mod evict;
 mod read;
 mod uring;
 mod write;
@@ -57,6 +58,7 @@ pub use pin::{
     UnlockBuffers,
 };
 pub use privref::{debug_all_private_pins, GetPrivateRefCount, ReservePrivateRefCountEntry};
+pub use evict::{EvictAllUnpinnedBuffers, EvictCounts, EvictRelUnpinnedBuffers, EvictUnpinnedBuffer};
 
 // Diagnostic (PGRUST_REDO_PIN_CHECK): wait out this thread's in-flight uring
 // prefetch pins so the check sees only genuine leaks.
