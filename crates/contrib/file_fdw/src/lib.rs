@@ -771,6 +771,7 @@ fn file_explain_foreign_scan<'mcx>(
     node: &mut ForeignScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     costs: bool,
+    _verbose: bool,
     emit: &mut dyn FnMut(&str, types_nodes::FdwExplainProp<'_>) -> PgResult<()>,
 ) -> PgResult<()> {
     let mcx = estate.es_query_cxt;

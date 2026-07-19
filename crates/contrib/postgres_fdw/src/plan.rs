@@ -438,17 +438,18 @@ fn end_foreign_scan<'mcx>(
     Ok(())
 }
 
-// postgresExplainForeignScan: "Remote SQL" from fdw_private.
-// Divergence: the FdwExecRoutine.explain seam passes es->costs, not
-// es->verbose; C gates Remote SQL on VERBOSE. Until the seam carries verbose
-// (PHASE-2 handoff item), we emit Remote SQL unconditionally — a superset of
-// C's output, harmless for the plan-shape gate under EXPLAIN (VERBOSE).
+// postgresExplainForeignScan: "Remote SQL" from fdw_private, gated on
+// es->verbose exactly as C (the seam carries verbose since phase 2).
 fn explain_foreign_scan<'mcx>(
     node: &mut ForeignScanState<'mcx>,
     _estate: &mut EStateData<'mcx>,
     _costs: bool,
+    verbose: bool,
     emit: &mut dyn FnMut(&str, types_nodes::FdwExplainProp<'_>) -> PgResult<()>,
 ) -> PgResult<()> {
+    if !verbose {
+        return Ok(());
+    }
     // fdw_private[FdwScanPrivateSelectSql] = the remote SELECT.
     if let Some(sql) = node.plan.fdw_private.iter().next().and_then(|n| n.as_string()) {
         emit("Remote SQL", types_nodes::FdwExplainProp::Text(sql.sval))?;

@@ -2928,7 +2928,8 @@ fn show_foreignscan_info<'mcx>(plan_node_id: i32, es: &mut ExplainState<'mcx>) -
     }
     let qd = es.qd;
     let costs = es.costs;
-    execmain_seams::query_desc_foreign_explain::call(qd, plan_node_id, costs, &mut |label, v| {
+    let verbose = es.verbose;
+    execmain_seams::query_desc_foreign_explain::call(qd, plan_node_id, costs, verbose, &mut |label, v| {
         match v {
             types_nodes::FdwExplainProp::Text(t) => ExplainPropertyText(label, t, es),
             types_nodes::FdwExplainProp::Integer { value, unit } => {
