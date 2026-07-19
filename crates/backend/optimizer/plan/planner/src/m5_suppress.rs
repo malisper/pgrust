@@ -395,6 +395,48 @@ fn size_floors_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("PGRUST_M5_SIZE_FLOORS").map_or(true, |v| v.trim() != "0"))
 }
 
+/// SE-TEXTDISTINCT (C1 text-distinct + q36 exprkey coverage car, band
+/// 86001): the row-executor-removal WS-COVER census's `distinct-text-date-
+/// args` (7.58s/7q) + `gap:agg-expr-keys` (q36, 2.42s/1q) rows plan Gather
+/// at default because the probe cannot key text-keyed / expression-keyed
+/// DISTINCT + grouped-agg shapes — even though the runtime arms ALREADY
+/// admit them (the runtime distinct SINK keys canonical-bytes text group
+/// keys under a deterministic collation, runtime_distinct.rs module doc; the
+/// plain-distinct SINK admits int+text distinct values, runtime_plaindistinct
+/// .rs; the exprkey Reduced arm keys reduced-expr-key grouped agg,
+/// exprkey.rs decide_reduced). This knob keys those admission gaps.
+///
+/// DEFAULT OFF (`PGRUST_LANE_V2_TEXTDISTINCT=1|on` to arm). Off = the probe
+/// falls through to today's refusals byte-for-byte (the new branches are
+/// skipped), so the DEFAULT census is unchanged (41/65) and the drift guards
+/// (`bootstrap_matrix_matches_tsv`, `coverage_matrix_is_consistent`) are
+/// untouched — these are NOT BOOTSTRAP_MATRIX classes; the tsv rows stay
+/// `route_to=legacy` / `probe_key="-"` (default posture keeps Gather). The
+/// knob-ON arm suppresses directly (finish_textdistinct), proven byte-
+/// identical vs C + vs knob-OFF; the DEFAULT flip is fleet-gated future work
+/// (GL-TEXTDIST letters owed).
+fn textdistinct_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("PGRUST_LANE_V2_TEXTDISTINCT").as_deref(),
+            Ok("1") | Ok("on")
+        )
+    })
+}
+
+/// PROVISIONAL floor for the SE-TEXTDISTINCT knob-gated shapes (shared;
+/// GL-TEXTDIST fleet letters own re-measuring each shape's real economics).
+/// Mirrors the CbGroupedAggTextKey economics (text-keyed grouped, min_dop
+/// 12, low-dop win region ≤3M): the census fixture (3M rows, resolved
+/// dop≥12) suppresses; the at-scale channels (dop16) suppress; small/low-dop
+/// tables keep Gather. Text-key grouped count(DISTINCT) rides the distinct
+/// sink whose own `agg_hashgroup_economical_sink` term is the real gate — a
+/// probe refusal here only costs "legacy instead of runtime".
+fn textdistinct_guard() -> FloorGuard {
+    FloorGuard { min_dop: 12, low_dop_max_rows: 3_000_000.0, ..NO_GUARD }
+}
+
 // ---------------------------------------------------------------------------
 // Whitelists (pg_proc OIDs of record, verified against the vendored
 // REL 18.3 pg_proc.dat) and type keys.
@@ -787,6 +829,42 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             {
                 return finish(run, CoverClass::CbMetaFooterAgg, rte.relid, 1.0, rel_rows, rel_pages);
             }
+            // SE-TEXTDISTINCT (C1, band 86001): ungrouped count(DISTINCT
+            // <int|default-collation text Var>) — the census's "plain q5/q6
+            // shape unwired" gap (cb q5 count(DISTINCT UserID), q6
+            // count(DISTINCT SearchPhrase)). The runtime PLAIN-distinct SINK
+            // (runtime_plaindistinct.rs) admits int AND canonical-bytes text
+            // distinct VALUES; suppressing Gather yields the serial
+            // `Aggregate(AGG_PLAIN) <- Sort <- SeqScan(cbstore)` shape its
+            // skip-sort dispatch owns. Knob-gated (default OFF); NARROW: no
+            // quals, no sort/limit, EXACTLY the single count(DISTINCT) tlist
+            // entry (the sink stages the distinct arg as scan column 0 — a
+            // WHERE or extra projected column could move it off col 0 and the
+            // arm would land on serial). The distinct pool must be armed
+            // (runtime_distinct_pool>0, falls back to runtime_scan_pool) at
+            // engagement — the fleet runtime posture arms it; GL-TEXTDIST-2
+            // owns the default-flip win. NOT a BOOTSTRAP_MATRIX class
+            // (route_to=legacy stays; default census byte-identical).
+            if textdistinct_enabled()
+                && !has_quals
+                && parse.sortClause.is_nil()
+                && parse.limitCount.is_none()
+                && parse.targetList.len() == 1
+            {
+                if let Some(tle) = parse.targetList.nth(0).as_target_entry() {
+                    if is_count_distinct_any(tle.expr, rti) {
+                        return finish_textdistinct(
+                            run,
+                            "plain-count-distinct",
+                            textdistinct_guard(),
+                            rte.relid,
+                            1.0,
+                            rel_rows,
+                            rel_pages,
+                        );
+                    }
+                }
+            }
             return Ok(false);
         }
         // SE-AGGPOLY (band 101001, knob-gated): plain heap aggregation with
@@ -829,6 +907,17 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     // --- Grouped aggregation over pgrcolumnar ------------------------------------
     if !is_cb {
         return Ok(false);
+    }
+    // SE-TEXTDISTINCT (C1, band 86001): q36 reduced-expr-key grouped agg —
+    // keyed only knob-ON and BEFORE the bare-Var key discipline (which
+    // refuses expr keys). A shape MISS returns None and falls through
+    // unchanged.
+    if textdistinct_enabled() {
+        if let Some(verdict) =
+            classify_reduced_exprkey(run, parse, rti, rte.relid, rel_id, rel_rows, rel_pages)?
+        {
+            return Ok(verdict);
+        }
     }
     // Key discipline: all keys plain Vars on the scanned rel; int-family
     // plus at most one text/varchar key under the deterministic default
@@ -877,9 +966,20 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         // known only once the whole tlist was scanned.
         passengers.push(tle.expr);
     }
-    // The distinct sink's class: int-family GROUP keys only (text grouped
-    // distinct stays the refused distinct-text row).
-    if n_count_distinct > 0 && n_text > 0 {
+    // Text group key + grouped count(DISTINCT): the runtime distinct SINK
+    // ADMITS canonical-bytes text group keys under the deterministic default
+    // collation (pd_derive_spec(agg, desc, /*admit_text_keys=*/true) in
+    // runtime_distinct.rs try_own_sorted_distinct_runtime) — so this is an
+    // ADMISSION gap, NOT a missing kernel (SE-TEXTDISTINCT C1, band 86001;
+    // cb q11/q12/q14, the census distinct-text-date-args mass). Knob-gated
+    // (PGRUST_LANE_V2_TEXTDISTINCT default OFF): OFF keeps Gather (the
+    // route_to=legacy default posture — census byte-identical); ON falls
+    // through to the class selection, where the n_count_distinct && n_text
+    // branch routes it through finish_textdistinct. The count(DISTINCT) arg
+    // stays int-family (is_count_distinct_int — the SINK's exact-set
+    // vocabulary); the TEXT is the GROUP key. Fleet default-flip owed
+    // (GL-TEXTDIST-1).
+    if n_count_distinct > 0 && n_text > 0 && !textdistinct_enabled() {
         return Ok(false);
     }
     // Passenger discipline per class (se-aggpoly): the DISTINCT class
@@ -941,6 +1041,27 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         return Ok(false);
     }
 
+    // SE-TEXTDISTINCT (band 86001): text-keyed grouped count(DISTINCT) is
+    // reachable here ONLY knob-ON (the n_count_distinct && n_text gate above
+    // returns Ok(false) at defaults). It rides the SAME runtime distinct
+    // sink as the int-key class, with text group keys admitted (module doc);
+    // route it through the dedicated knob-path finish (own trace + provisional
+    // floor; NOT a BOOTSTRAP_MATRIX class, so the default census + drift
+    // guards are untouched). The top-N composition (cb q11/q12/q14 are all
+    // ORDER BY count DESC LIMIT) rides the sink's paremit selection — the
+    // walk composes it (named-kernels-distinct Kernel 2), so no extra probe
+    // condition is needed beyond the topn shape already validated above.
+    if n_count_distinct > 0 && n_text > 0 {
+        return finish_textdistinct(
+            run,
+            "text-grouped-count-distinct",
+            textdistinct_guard(),
+            rte.relid,
+            ngroups,
+            rel_rows,
+            rel_pages,
+        );
+    }
     let class = if n_count_distinct > 0 {
         // The sorted-distinct feed owns grouped count(DISTINCT) — with or
         // without the top-N composition (walk-admitted, e2e leg 177 class).
@@ -1675,6 +1796,52 @@ fn finish(
     Ok(covered)
 }
 
+/// SE-TEXTDISTINCT knob-path finish (band 86001). Reached ONLY from the
+/// `textdistinct_enabled()`-gated admission branches (text-keyed grouped
+/// count(DISTINCT), ungrouped count(DISTINCT), reduced-expr-key grouped
+/// agg), so the caller has already proven the shape rides an existing
+/// runtime arm. Unlike `finish`, this does NOT consult BOOTSTRAP_MATRIX /
+/// the tsv — the shape is deliberately NOT a bootstrap class (the tsv rows
+/// stay route_to=legacy / probe_key="-", so the drift guards and the DEFAULT
+/// census are untouched). Applies the shared provisional floor + its own
+/// trace prefix, then suppresses. `label` names the shape in the trace
+/// (`m5-suppress-textdistinct:` — greppable apart from the bootstrap
+/// `m5-suppress:` line).
+fn finish_textdistinct(
+    run: &mut PlannerRun<'_>,
+    label: &str,
+    guard: FloorGuard,
+    relid: u32,
+    ngroups: f64,
+    rows: f64,
+    pages: f64,
+) -> PgResult<bool> {
+    if size_floors_enabled() {
+        let dop = guc_tables::runtime_pool::runtime_dop();
+        let ok = rows >= guard.min_rows
+            && rows <= guard.max_rows
+            && pages >= guard.min_pages
+            && (dop >= guard.min_dop || rows <= guard.low_dop_max_rows);
+        if !ok {
+            if trace_armed() {
+                eprintln!(
+                    "m5-suppress-floor: textdistinct label={label} relid={relid} \
+                     rows={rows:.0} pages={pages:.0} dop={dop} => gather stands"
+                );
+            }
+            return Ok(false);
+        }
+    }
+    if trace_armed() {
+        let _ = run;
+        eprintln!(
+            "m5-suppress-textdistinct: engine=runtime label={label} relid={relid} \
+             ngroups={ngroups:.0} => gather suppressed"
+        );
+    }
+    Ok(true)
+}
+
 // ---------------------------------------------------------------------------
 // Expression helpers.
 // ---------------------------------------------------------------------------
@@ -1826,6 +1993,198 @@ fn is_count_distinct_int(expr: Node<'_>, rti: usize) -> bool {
     }
     let Some(arg_tle) = agg.args.nth(0).as_target_entry() else { return false };
     is_covered_key_var(arg_tle.expr, rti, is_int_family)
+}
+
+/// SE-TEXTDISTINCT (band 86001): `count(DISTINCT <bare Var>)` whose arg is
+/// int-family OR text/varchar under the deterministic DEFAULT collation —
+/// the plain-distinct SINK's exact-set vocabulary (runtime_plaindistinct.rs:
+/// int lanes + canonical-bytes text keys, `distinct_set_kind` gated on a
+/// deterministic collation). Same structural decoration gates as
+/// `is_count_distinct_int`; only the arg-type predicate widens. Text keys
+/// require the default collation (100) — the ONLY deterministic collation the
+/// probe recognizes at parse altitude without a catalog lookup (the sink's
+/// `get_collation_isdeterministic` gate is the walk's stricter twin; probe ⊂
+/// walk holds because default-collation IS deterministic).
+fn is_count_distinct_any(expr: Node<'_>, rti: usize) -> bool {
+    let Some(agg) = expr.as_aggref() else { return false };
+    if agg.aggfnoid != F_COUNT_ANY
+        || agg.agglevelsup != 0
+        || agg.aggkind != AGGKIND_NORMAL
+        || agg.aggvariadic
+        || !agg.aggorder.is_nil()
+        || agg.aggdistinct.len() != 1
+        || agg.aggfilter.is_some()
+        || !agg.aggdirectargs.is_nil()
+        || agg.args.len() != 1
+    {
+        return false;
+    }
+    let Some(arg_tle) = agg.args.nth(0).as_target_entry() else { return false };
+    let Some(v) = key_var(arg_tle.expr, rti) else { return false };
+    is_int_family(v.vartype)
+        || (is_text_family(v.vartype) && v.varcollid == DEFAULT_COLLATION_OID)
+}
+
+/// SE-TEXTDISTINCT (band 86001) q36 reduced-expr-key affine check: `expr`
+/// is `base ± <int4 Const>` (or `<int4 Const> ± base`) where `base` is the
+/// representative int4 Var at `base_attno` on the scanned rel. Mirrors
+/// `decide_reduced`'s per-key admission (exprkey.rs: Add2/Sub2/… over the
+/// ONE representative Var, non-null Const, same width) STRICTLY NARROWER —
+/// int4-only (decide_reduced admits any uniform int width; the probe keeps
+/// to int4, the q36 shape). Mul/Div refuse (decide_reduced refuses them too).
+fn reduced_affine_of_var(expr: Node<'_>, rti: usize, base_attno: i16) -> bool {
+    let Some(op) = expr.as_op_expr() else { return false };
+    if op.opretset || op.args.len() != 2 {
+        return false;
+    }
+    // int4 ± int4 only (F_INT4PL_FN / F_INT4MI_FN); the base Var may sit on
+    // either side for '+', but only the left for '-' (k - v is v negated,
+    // which decide_reduced does not key).
+    let (var_node, konst_node) = match op.opfuncid {
+        F_INT4PL_FN => {
+            // base + k  OR  k + base
+            let (a, b) = (op.args.nth(0), op.args.nth(1));
+            if key_var(a, rti).is_some_and(|v| v.varattno == base_attno && v.vartype == INT4OID) {
+                (a, b)
+            } else {
+                (b, a)
+            }
+        }
+        F_INT4MI_FN => (op.args.nth(0), op.args.nth(1)),
+        _ => return false,
+    };
+    let Some(v) = key_var(var_node, rti) else { return false };
+    if v.varattno != base_attno || v.vartype != INT4OID {
+        return false;
+    }
+    let Some(c) = konst_node.as_const() else { return false };
+    !c.constisnull && c.consttype == INT4OID
+}
+
+/// SE-TEXTDISTINCT (band 86001) q36 reduced-expr-key recognizer. Keys the
+/// census `gap:agg-expr-keys` shape (cb q36):
+///   SELECT ClientIP, ClientIP-1, ClientIP-2, ClientIP-3, count(*), ...
+///   FROM hits GROUP BY 1,2,3,4 ORDER BY count DESC LIMIT n
+/// — a single-rel grouped agg whose keys are ONE bare int4 Var plus affine
+/// ±Const transforms of THAT Var (2..N keys, exactly one bare Var), with a
+/// fold-admissible agg tlist and an optional `ORDER BY <agg> LIMIT` top-N.
+/// The exprkey Reduced arm (exprkey.rs `decide_reduced`, default-ON
+/// PGRUST_LANE_V2_REDKEY) owns the suppressed serial `[Limit<-Sort<-]
+/// HashAgg<-SeqScan` plan and emits full grouped output (the serial
+/// Sort+Limit consumes it) — engagement confirmed, no per-row breaker
+/// fallback for the count/sum/avg-int fold set.
+///
+/// Returns `Some(verdict)` when the shape MATCHES (`verdict` = suppress, or
+/// false when floored by groupby_high), `None` to fall through to the
+/// bare-Var key discipline. Probe ⊂ walk (STRICTLY NARROWER than
+/// decide_reduced): int4-only keys (decide_reduced admits any uniform int
+/// width), affine ±Const only (Mul/Div refuse). CAVEATS of record (fleet
+/// win owed, GL-TEXTDIST-3): decide_reduced refuses to the per-row breaker
+/// if a fold column classifies as a residual transition — avg(int) SHOULD
+/// fold via lanefold (the CbPlainAggFold avg path), but the at-scale
+/// confirmation is fleet work; the arm's admission-time canonical-domain
+/// check (empty => refuse) is non-empty for int4 ±int4 by construction.
+fn classify_reduced_exprkey<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    parse: &Query<'mcx>,
+    rti: usize,
+    relid: u32,
+    rel_id: types_pathnodes::RelId,
+    rel_rows: f64,
+    rel_pages: f64,
+) -> PgResult<Option<bool>> {
+    if parse.groupClause.len() < 2 {
+        return Ok(None);
+    }
+    // Group keys: find the single bare int4 Var representative; every other
+    // key must be an affine ±Const of it.
+    let mut key_refs: Vec<u32> = Vec::new();
+    let mut key_exprs: Vec<Node<'mcx>> = Vec::new();
+    let mut base_attno: Option<i16> = None;
+    let mut n_bare = 0usize;
+    for gc_node in &parse.groupClause {
+        let Some(gc) = gc_node.as_sort_group_clause() else { return Ok(None) };
+        let Some(tle) = tle_by_sortgroupref(parse, gc.tleSortGroupRef) else {
+            return Ok(None);
+        };
+        if let Some(v) = key_var(tle.expr, rti) {
+            if v.vartype != INT4OID {
+                return Ok(None); // a bare Var of another type is not this shape
+            }
+            n_bare += 1;
+            base_attno = Some(v.varattno);
+        }
+        key_refs.push(gc.tleSortGroupRef);
+        key_exprs.push(tle.expr);
+    }
+    if n_bare != 1 {
+        return Ok(None);
+    }
+    let base_attno = base_attno.unwrap();
+    for e in &key_exprs {
+        if key_var(*e, rti).is_some() {
+            continue; // the one representative
+        }
+        if !reduced_affine_of_var(*e, rti, base_attno) {
+            return Ok(None);
+        }
+    }
+    // Emit discipline: each tlist entry is a group-key expr (matched by
+    // ressortgroupref) or a fold-admissible agg. PLAIN_FOLD_AGGS (WIDER than
+    // GROUPED_SINK_AGGS: includes avg/sum poly-state int aggs) because the
+    // exprkey fold hosts them via lanefold — q36 has avg(ResolutionWidth).
+    for tle_node in &parse.targetList {
+        let Some(tle) = tle_node.as_target_entry() else { return Ok(None) };
+        if tle.ressortgroupref != 0 && key_refs.contains(&tle.ressortgroupref) {
+            continue;
+        }
+        if !is_whitelisted_agg(tle.expr, rti, PLAIN_FOLD_AGGS) {
+            return Ok(None);
+        }
+    }
+    // Optional top-N: ORDER BY <fold-whitelisted agg> LIMIT, no OFFSET — or a
+    // plain grouped emit (no sort/limit). Anything else is not this shape.
+    if !parse.sortClause.is_nil() || parse.limitCount.is_some() {
+        if parse.sortClause.len() != 1
+            || parse.limitCount.is_none()
+            || parse.limitOffset.is_some()
+        {
+            return Ok(None);
+        }
+        let Some(sc) = parse.sortClause.nth(0).as_sort_group_clause() else {
+            return Ok(None);
+        };
+        let Some(tle) = tle_by_sortgroupref(parse, sc.tleSortGroupRef) else {
+            return Ok(None);
+        };
+        if !is_whitelisted_agg(tle.expr, rti, PLAIN_FOLD_AGGS) {
+            return Ok(None);
+        }
+    }
+    // groupby_high hold (shared floor): matched-shape-but-floored keeps
+    // Gather (Ok(Some(false))), same as the bare-Var grouped path.
+    let ngroups = if run.root.processed_groupClause.is_empty() {
+        1.0
+    } else {
+        let clauses =
+            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.processed_groupClause);
+        let group_exprs =
+            types_pathnodes::run::sortgrouplist_exprs(run, &clauses, &parse.targetList);
+        let input_rows = run.root.rel(rel_id).rows.max(1.0);
+        crate::selfuncs::estimate_num_groups(run, &group_exprs, input_rows)?
+    };
+    if ngroups >= groupby_high_floor() {
+        return Ok(Some(false));
+    }
+    Ok(Some(finish_textdistinct(
+        run,
+        "reduced-exprkey-grouped-agg",
+        textdistinct_guard(),
+        relid,
+        ngroups,
+        rel_rows,
+        rel_pages,
+    )?))
 }
 
 /// `is_whitelisted_agg` over TWO candidate range-table indexes (the join
