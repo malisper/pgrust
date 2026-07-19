@@ -14013,6 +14013,7 @@ dependencies = [
  "relfilenumbermap_seams",
  "reorderbuffer_seams",
  "snapmgr",
+ "transam_seams",
  "transam_xlog_seams",
  "tupdesc",
  "types_core",
