@@ -18,7 +18,7 @@ use pgclient::{ExecStatus, PgConn, QueryResult};
 use registry::RemoteConn;
 use types_error::{
     make_sqlstate, ErrorLevel, ErrorLocation, PgError, PgResult, ERROR, NOTICE,
-    ERRCODE_CONNECTION_FAILURE, ERRCODE_INVALID_CURSOR_NAME,
+    ERRCODE_CONNECTION_FAILURE, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_CURSOR_NAME,
     ERRCODE_S_R_E_PROHIBITED_SQL_STATEMENT_ATTEMPTED,
     ERRCODE_SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION,
 };
@@ -55,6 +55,32 @@ fn arg_text(fcinfo: &Fcinfo, i: usize) -> PgResult<String> {
 
 fn arg_is_bool(flinfo: Option<&FmgrInfo>, i: usize) -> bool {
     funcapi::get_fn_expr_argtype(flinfo, i) == types_core::BOOLOID
+}
+
+// prepTuplestoreResult (dblink.c): every tuplestore-returning entry point
+// arms materialize mode BEFORE touching the connection, so the fail=false and
+// results-exhausted arms return an EMPTY set with setResult left None (C's
+// "caller must fill these to return a non-empty result"). Without the arming,
+// the executor's ValuePerCall arm stores the placeholder datum as a row —
+// the fleet-gate r2/r3 abort at dblink_fetch(...,false) / dblink_get_result
+// after cancel.
+fn prep_tuplestore_result(fcinfo: &mut Fcinfo) -> PgResult<()> {
+    let Some(rsi) = fcinfo.rsinfo_mut() else {
+        return Err(Box::new(
+            PgError::error("set-valued function called in context that cannot accept a set")
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    };
+    if rsi.allowedModes & types_fmgr::SFRM_Materialize == 0 {
+        return Err(Box::new(
+            PgError::error("materialize mode required, but it is not allowed in this context")
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
+    rsi.returnMode = types_fmgr::SetFunctionReturnMode::Materialize;
+    rsi.setResult = None;
+    rsi.setDesc = None;
+    Ok(())
 }
 
 pub(crate) fn single_text_tupdesc<'m>(mcx: mcx::Mcx<'m>, name: &str) -> PgResult<TupleDescData<'m>> {
@@ -314,6 +340,7 @@ fn fc_dblink_send_query(_flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> 
 
 fn fc_dblink_record(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let flinfo = flinfo.expect("dblink: resolved FmgrInfo required");
+    prep_tuplestore_result(fcinfo)?; // C: dblink_record_internal's first act
     // SAFETY: executor arms es_query_cxt pre-call; outlives this frame.
     let mcx = unsafe { fcinfo.result_mcx_detached() };
     let (sql, mut target, conname, fail) = parse_conn_sql_args(mcx, fcinfo, Some(flinfo))?;
@@ -379,9 +406,13 @@ fn fc_dblink_exec(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResul
 
 fn fc_dblink_get_result(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let flinfo = flinfo.expect("dblink_get_result: resolved FmgrInfo required");
+    prep_tuplestore_result(fcinfo)?; // C: dblink_record_internal's first act
     let mcx = unsafe { fcinfo.result_mcx_detached() };
     let name = arg_text(fcinfo, 0)?;
-    let fail = fcinfo.nargs() == 2 && fcinfo.arg_bool(1);
+    // C: `bool fail = true;` then overridden only when PG_NARGS() == 2 —
+    // the one-arg form ERRORS on a failed result (r2's cancel leg raised
+    // NOTICE where C raises ERROR).
+    let fail = if fcinfo.nargs() == 2 { fcinfo.arg_bool(1) } else { true };
     if !registry::named_present(&name)? {
         return Err(registry::conn_not_avail(Some(&name)));
     }
@@ -477,6 +508,7 @@ fn fc_dblink_close(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResu
 
 fn fc_dblink_fetch(flinfo: Option<&mut FmgrInfo>, fcinfo: &mut Fcinfo) -> PgResult<Datum> {
     let flinfo = flinfo.expect("dblink_fetch: resolved FmgrInfo required");
+    prep_tuplestore_result(fcinfo)?; // C: dblink_fetch's first act
     let mcx = unsafe { fcinfo.result_mcx_detached() };
     let flinfo_ref = Some(&*flinfo);
     let (conname, curname, howmany, fail) = match fcinfo.nargs() {
