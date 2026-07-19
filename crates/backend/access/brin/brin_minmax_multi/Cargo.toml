@@ -20,3 +20,4 @@ lsyscache = { path = "../../../utils/cache/lsyscache" }
 fmgr_core = { path = "../../../utils/fmgr/fmgr_core" }
 adt_numeric = { path = "../../../utils/adt/numeric" }
 detoast = { path = "../../common/detoast" }
+varlena = { path = "../../../utils/adt/varlena" }
