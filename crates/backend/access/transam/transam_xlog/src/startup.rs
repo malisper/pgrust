@@ -901,6 +901,9 @@ fn CheckPointGuts(check_point_redo: XLogRecPtr, flags: i32) -> PgResult<()> {
     if snapbuild_seams::check_point_snap_build::is_installed() {
         snapbuild_seams::check_point_snap_build::call()?;
     }
+    if rewriteheap_seams::check_point_logical_rewrite_heap::is_installed() {
+        rewriteheap_seams::check_point_logical_rewrite_heap::call()?;
+    }
     if origin_seams::check_point_replication_origin::is_installed() {
         origin_seams::check_point_replication_origin::call()?;
     }

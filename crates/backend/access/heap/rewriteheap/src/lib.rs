@@ -190,9 +190,14 @@ pub fn end_heap_rewrite<'mcx>(
     if let Some(buffer) = state.rs_buffer.take() {
         bulkwrite::smgr_bulk_write(&mut state.rs_bulkstate, state.rs_blockno, buffer, true)?;
     }
-    bulkwrite::smgr_bulk_finish(state.rs_bulkstate)?;
 
-    logical_end_heap_rewrite(&mut state)
+    // C runs smgr_bulk_finish first, then logical_end_heap_rewrite; the two
+    // have no ordering dependency (mapping durability is anchored to the
+    // XLOG_HEAP2_REWRITE inserts and the per-file fsyncs, not the heap
+    // sync), and bulk-finish consumes the state here.
+    logical_end_heap_rewrite(&mut state)?;
+
+    bulkwrite::smgr_bulk_finish(state.rs_bulkstate)
 }
 
 // logical_heap_rewrite_flush_mappings (rewriteheap.c:807): write the buffered
