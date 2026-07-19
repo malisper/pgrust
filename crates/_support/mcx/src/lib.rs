@@ -590,32 +590,68 @@ pub mod debug_census {
 // must free it explicitly or every session leaks its whole cache estate into
 // the shared process (measured ~2.2 MiB RSS per seed under the simharness
 // DDL/session-churn campaign, C flat on the identical stream). The sink is a
-// thread-local LIFO owned by mcxt_stats (std side); the backend runner drains
-// it at clean task end. TLS payloads stay ManuallyDrop / !needs_drop — no
-// hot-path TLS state machine is introduced; registration is once per root per
-// thread (cold).
+// thread-local phased LIFO owned by mcxt_stats (std side); the backend runner
+// drains it at clean task end. TLS payloads stay ManuallyDrop / !needs_drop —
+// no hot-path TLS state machine is introduced; registration is once per root
+// per thread (cold).
+//
+// PHASES (v2, the train-29 bounce fix). C's exit runs in a strict documented
+// order: before_shmem_exit callbacks (ShutdownPostgres ->
+// AbortOutOfAnyTransaction -> AtAbort_Portals/AtCleanup_Portals, "now safe to
+// release portal memory") run FIRST, with every memory context still alive;
+// memory itself dies LAST, all at once at process exit, with no per-object
+// destructors at all. A single flat LIFO cannot express that: cleanup order
+// then depends on lazy first-use registration order, and a cleanup that drops
+// an object graph (a portal) can run after the context owning that graph's
+// allocations was already freed — drop glue then deallocates through a dead
+// arena, panics inside a destructor, and a panic in Drop is process-fatal in
+// a threaded server (the t29 SIGABRT). The port of C's order:
+//   Portals — object-graph teardown that must see EVERY context alive
+//             (portal manager; C's AtCleanup_Portals slot).
+//   State   — TLS state clears releasing global-heap Rc estates
+//             (caches, scratch holders; C's exit-callback slot).
+//   Roots   — session-root context frees, wholesale, no per-entry glue
+//             (C's memory-dies-at-process-exit slot). Always last.
+// Within a phase the order stays LIFO (C's callback discipline).
 // ---------------------------------------------------------------------------
 
 type SessionCleanup = alloc::boxed::Box<dyn FnOnce()>;
 
+/// Teardown phase (drain order: Portals, then State, then Roots).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionCleanupPhase {
+    /// Object-graph teardown needing every context alive (portal manager).
+    Portals,
+    /// TLS state clears (caches, scratch holders). The default.
+    State,
+    /// Session-root context frees; run only after all of the above.
+    Roots,
+}
+
 static SESSION_CLEANUP_SINK: core::sync::atomic::AtomicPtr<()> =
     core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
-/// Install the per-thread cleanup-list push (mcxt_stats owns the list).
-pub fn set_session_cleanup_sink(f: fn(SessionCleanup)) {
+/// Install the per-thread cleanup-list push (mcxt_stats owns the lists).
+pub fn set_session_cleanup_sink(f: fn(SessionCleanupPhase, SessionCleanup)) {
     SESSION_CLEANUP_SINK.store(f as *mut (), core::sync::atomic::Ordering::Release);
 }
 
-/// Register a cleanup to run at this thread's session teardown (LIFO). With
-/// no sink installed (unit tests, wasm single-shot) the closure is dropped
-/// unrun — exactly the old leak-at-thread-exit behavior.
+/// Register a cleanup to run at this thread's session teardown (State phase,
+/// LIFO within the phase). With no sink installed (unit tests, wasm
+/// single-shot) the closure is dropped unrun — exactly the old
+/// leak-at-thread-exit behavior.
 pub fn register_session_cleanup(f: SessionCleanup) {
+    register_session_cleanup_phase(SessionCleanupPhase::State, f);
+}
+
+/// [`register_session_cleanup`] with an explicit phase.
+pub fn register_session_cleanup_phase(phase: SessionCleanupPhase, f: SessionCleanup) {
     let p = SESSION_CLEANUP_SINK.load(core::sync::atomic::Ordering::Acquire);
     if !p.is_null() {
         // SAFETY: only set_session_cleanup_sink stores here, always from
-        // fn(SessionCleanup).
-        let sink: fn(SessionCleanup) = unsafe { core::mem::transmute(p) };
-        sink(f);
+        // fn(SessionCleanupPhase, SessionCleanup).
+        let sink: fn(SessionCleanupPhase, SessionCleanup) = unsafe { core::mem::transmute(p) };
+        sink(phase, f);
     }
 }
 
@@ -641,11 +677,18 @@ pub fn session_root_from(ctx: MemoryContext) -> &'static MemoryContext {
 pub fn session_root_mut(ctx: MemoryContext) -> &'static mut MemoryContext {
     let raw: *mut MemoryContext = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(ctx));
     let addr = raw as usize;
-    register_session_cleanup(alloc::boxed::Box::new(move || {
-        // SAFETY: sole owner (from Box::into_raw above); runs at most once,
-        // on the owning thread, after which nothing dereferences the handle.
-        drop(unsafe { alloc::boxed::Box::from_raw(addr as *mut MemoryContext) });
-    }));
+    // Roots phase: the arena dies only after every Portals/State cleanup has
+    // dropped the object graphs whose allocations live in it (C: memory dies
+    // at process exit, after all exit callbacks).
+    register_session_cleanup_phase(
+        SessionCleanupPhase::Roots,
+        alloc::boxed::Box::new(move || {
+            // SAFETY: sole owner (from Box::into_raw above); runs at most
+            // once, on the owning thread, after which nothing dereferences
+            // the handle.
+            drop(unsafe { alloc::boxed::Box::from_raw(addr as *mut MemoryContext) });
+        }),
+    );
     // SAFETY: heap allocation, freed only by the closure above.
     unsafe { &mut *raw }
 }
