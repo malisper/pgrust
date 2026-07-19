@@ -148,6 +148,26 @@ static NEXT_CHILD_PID: AtomicI32 = AtomicI32::new(1000);
 /// PGRUST_TEST_CHILD_PID_BELOW_PM=N (test-only): first reservation restarts
 /// the counter N below PostmasterPid(), so an e2e crosses the collision
 /// point within a few worker launches instead of never/late.
+/// SIMVFS-SHARED (s2 §6 item 1): parent-side capture of the spawning
+/// thread's shared-universe id — taken next to every spawn-door
+/// registration so the simulated process's filesystem follows its threads
+/// (a fork inherits the fd table). `None` when sharing is off (scheduler-off
+/// sim runs, the sessions=2 corpus): the child keeps its private universe,
+/// byte-identical to the pre-lane behavior.
+#[cfg(pgrust_sim)]
+fn sim_universe_capture() -> Option<u64> {
+    vfs::sim::SimVfs::current_universe_id()
+}
+
+/// SIMVFS-SHARED: child-side adoption, called as the FIRST act after the
+/// spawn door's `enter_child` (before any prelude that could touch files).
+#[cfg(pgrust_sim)]
+fn sim_universe_adopt(id: Option<u64>) {
+    if let Some(id) = id {
+        vfs::sim::SimVfs::adopt_universe(id);
+    }
+}
+
 fn reserve_child_pid() -> pid_t {
     // pgsync by crate law (permit-s5; test-only env-knob memo, hygiene —
     // the walreceiverfuncs cfg(test) Once precedent).
@@ -469,6 +489,12 @@ pub fn postmaster_child_launch(
     #[cfg(pgrust_sim)]
     let sim_sched_slot =
         pgsync::sim::spawn_door::register_child(child_pid as u32, kind.name);
+    // SIMVFS-SHARED: parent-side universe capture — the simulated process's
+    // filesystem follows its threads (a fork inherits the fd table). None
+    // when sharing is off: the child keeps its private universe, exactly
+    // the pre-lane behavior.
+    #[cfg(pgrust_sim)]
+    let sim_universe = sim_universe_capture();
 
     let spawned = std::thread::Builder::new()
         .name(format!("pg:{}:{}", kind.name, child_pid))
@@ -482,6 +508,10 @@ pub fn postmaster_child_launch(
             // rule 1, design §3).
             #[cfg(pgrust_sim)]
             let _sim_sched_permit = pgsync::sim::spawn_door::enter_child(sim_sched_slot);
+            // SIMVFS-SHARED: adopt the parent's universe FIRST — before any
+            // guard or prelude that could touch the filesystem.
+            #[cfg(pgrust_sim)]
+            sim_universe_adopt(sim_universe);
             // Thread-scoped (a retained thread reuses its slot across tasks):
             // the local latch slab slot returns on every thread exit —
             // announce fallthrough and panic unwind alike.
@@ -563,6 +593,11 @@ pub fn init_seams() {
     postmaster_seams::rtpool_start::set(rtpool_start_for_demo);
     postmaster_seams::rtpool_stop::set(rtpool::demo_stop);
     postmaster_seams::rtpool_population::set(rtpool::population);
+    // SIMVFS-SHARED: the sim rtgang corpus needs postmaster parity in the
+    // sim-net harness (sizing before InitializeMaxBackends, install after
+    // shared memory) — same package-cycle reason as the trios above.
+    postmaster_seams::rtgang_procs_wanted::set(rtgang::gang_procs_wanted);
+    postmaster_seams::rtgang_install::set(rtgang::install_if_enabled);
 }
 
 /// rtpool_start seam impl: start the pool if `PGRUST_RUNTIME` enables it;
@@ -761,6 +796,9 @@ pub mod wpool {
             spawn_pid as u32,
             &format!("wpool-standby:{spawn_pid}"),
         );
+        // SIMVFS-SHARED: parent-side universe capture (fd-table inheritance).
+        #[cfg(pgrust_sim)]
+        let sim_universe = super::sim_universe_capture();
         let spawned = std::thread::Builder::new()
             .name(format!("pg:standby:{spawn_pid}"))
             .stack_size(super::child_thread_stack_size())
@@ -771,6 +809,9 @@ pub mod wpool {
                 // has dropped inside the final quantum.
                 #[cfg(pgrust_sim)]
                 let _sim_sched_permit = pgsync::sim::spawn_door::enter_child(sim_sched_slot);
+                // SIMVFS-SHARED: adopt the parent's universe FIRST.
+                #[cfg(pgrust_sim)]
+                super::sim_universe_adopt(sim_universe);
                 // Any exit — rotation, retire, or a prelude panic — drops the
                 // population charge exactly once.
                 struct PopulationCharge;
@@ -1130,6 +1171,9 @@ pub mod rtpool {
             pid as u32,
             &format!("rtworker{ordinal}:{pid}"),
         );
+        // SIMVFS-SHARED: parent-side universe capture (fd-table inheritance).
+        #[cfg(pgrust_sim)]
+        let sim_universe = super::sim_universe_capture();
         let spawned = std::thread::Builder::new()
             .name(format!("pg:rtworker{ordinal}:{pid}"))
             .stack_size(super::child_thread_stack_size())
@@ -1139,6 +1183,9 @@ pub mod rtpool {
                 // charge below has dropped inside the final quantum.
                 #[cfg(pgrust_sim)]
                 let _sim_sched_permit = pgsync::sim::spawn_door::enter_child(sim_sched_slot);
+                // SIMVFS-SHARED: adopt the parent's universe FIRST.
+                #[cfg(pgrust_sim)]
+                super::sim_universe_adopt(sim_universe);
                 // Any exit (only a request_stop can cause one — the pool is
                 // process-lifetime) drops the population charge exactly once.
                 struct PopulationCharge;
@@ -1202,6 +1249,9 @@ pub mod rtpool {
                 &format!("bgjobs-dispatcher:{vpid}"),
             )
         };
+        // SIMVFS-SHARED: parent-side universe capture (fd-table inheritance).
+        #[cfg(pgrust_sim)]
+        let sim_universe = super::sim_universe_capture();
         let spawned = std::thread::Builder::new()
             .name("pg-bgjobs-dispatcher".into())
             .stack_size(super::child_thread_stack_size())
@@ -1209,6 +1259,12 @@ pub mod rtpool {
                 // Door discipline: bind + gate FIRST (drop = epilogue LAST).
                 #[cfg(pgrust_sim)]
                 let _sim_sched_permit = pgsync::sim::spawn_door::enter_child(sim_sched_slot);
+                // SIMVFS-SHARED: adopt the parent's universe FIRST — with a
+                // shared universe the dispatcher's GUC prelude can read the
+                // timezone db even on the string-restore arm (the s5 §6.2
+                // kill class dies here, not at the base-share workaround).
+                #[cfg(pgrust_sim)]
+                super::sim_universe_adopt(sim_universe);
                 inherited.apply();
                 let _ = stack_depth::set_stack_base();
                 if guc::layers::base_share_enabled() {
@@ -1364,6 +1420,12 @@ pub mod rtgang {
             child_pid as u32,
             &format!("rtgang{ordinal}:{child_pid}"),
         );
+        // SIMVFS-SHARED: parent-side universe capture (fd-table
+        // inheritance). The gang spawner may run on any BACKEND thread at
+        // first engagement — that thread is bound to the process universe,
+        // so the capture inherits correctly from wherever the gang is born.
+        #[cfg(pgrust_sim)]
+        let sim_universe = super::sim_universe_capture();
         let spawned = std::thread::Builder::new()
             .name(format!("pg:rtgang{ordinal}:{child_pid}"))
             .stack_size(super::child_thread_stack_size())
@@ -1373,6 +1435,11 @@ pub mod rtgang {
                 // the teardown epilogue — runs LAST.
                 #[cfg(pgrust_sim)]
                 let _sim_sched_permit = pgsync::sim::spawn_door::enter_child(sim_sched_slot);
+                // SIMVFS-SHARED: adopt the engagement's universe FIRST —
+                // the gang's bring-up (database bind, catalog reads) and its
+                // scan reads all go through vfs.
+                #[cfg(pgrust_sim)]
+                super::sim_universe_adopt(sim_universe);
                 gang_thread(ordinal, child_pid, boot)
             });
         match spawned {

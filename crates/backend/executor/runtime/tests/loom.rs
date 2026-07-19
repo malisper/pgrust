@@ -1215,6 +1215,58 @@ fn mailbox_bounded_pipeline_delivers_and_closes() {
     });
 }
 
+/// Row 8 (SIMVFS-SHARED lane, DIRECT): the loadsort feeder shape over the
+/// REAL mailbox — a producer that only ever `try_send`s (keeping a rejected
+/// chunk PENDING, the feeder's round-robin discipline: it must never park on
+/// one full channel while other runs starve), a consumer that drains, and
+/// the drop-close EOF. Every chunk arrives exactly once, in order, despite
+/// Full rejections at cap 1 (`sync_channel(2)` in production; cap 1 here
+/// maximizes the Full interleavings loom must cover).
+///
+/// RED (verified by transient weakening, not shipped — the model drives the
+/// production type): dropping the value on `TrySend::Full` instead of
+/// re-pending it (the lost-chunk shape a bespoke conversion could write) ⇒
+/// the delivered stream has a hole — assert fires on every such schedule.
+/// One-line re-arm: replace the `pending = Some(p)` arm with `continue`.
+#[test]
+fn mailbox_try_send_feeder_never_loses_a_chunk() {
+    loom::model(|| {
+        let (tx, rx) = pgsync::mailbox::<u32>(Some(1));
+
+        let consumer = thread::spawn(move || {
+            let mut got = Vec::new();
+            while let Some(v) = rx.recv() {
+                got.push(v);
+            }
+            got
+        });
+
+        // The feeder loop: chunks 1..=3, try_send with a pending slot.
+        let mut pending: Option<u32> = None;
+        let mut next = 1u32;
+        while next <= 3 || pending.is_some() {
+            let p = pending.take().unwrap_or_else(|| {
+                let v = next;
+                next += 1;
+                v
+            });
+            match tx.try_send(p) {
+                Ok(()) => {}
+                Err(pgsync::TrySend::Full(p)) => {
+                    // The feeder's re-pend discipline (the red drops this).
+                    pending = Some(p);
+                    loom::thread::yield_now();
+                }
+                Err(pgsync::TrySend::Disconnected(_)) => break,
+            }
+        }
+        drop(tx); // EOF: consumer drains then observes None
+
+        let got = consumer.join().unwrap();
+        assert_eq!(got, vec![1, 2, 3], "every chunk delivered exactly once, in order");
+    });
+}
+
 /// Row 5 MPMC leg (DIRECT): two receivers share the mailbox BY CLONING (the
 /// converted encoder pool's shape — replacing the Mutex<Receiver> wrap), one
 /// message + close. Exactly one receiver gets the message; BOTH terminate

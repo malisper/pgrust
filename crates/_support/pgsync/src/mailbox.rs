@@ -70,6 +70,15 @@ pub enum TryRecv<T> {
     Disconnected,
 }
 
+/// Error of [`MailboxSender::try_send`] (`mpsc::TrySendError` shape: the
+/// caller owns the value back either way).
+pub enum TrySend<T> {
+    /// Bounded queue at capacity; nothing was enqueued.
+    Full(T),
+    /// Every receiver is gone; the message would never be consumed.
+    Disconnected(T),
+}
+
 /// Sending half of a mailbox; clone-counted (last drop closes the side).
 pub struct MailboxSender<T> {
     core: Arc<MailboxCore<T>>,
@@ -128,6 +137,25 @@ impl<T> MailboxSender<T> {
             // The mailbox law: the state lock is released; park on the lot.
             core.not_full.park(seen);
         }
+    }
+
+    /// Non-blocking send (the row-8 feeder shape: one feeder round-robins
+    /// several runs' channels and must not park on one full channel while
+    /// the others starve). Never parks; a `Full` return leaves the queue
+    /// untouched and hands the value back.
+    pub fn try_send(&self, value: T) -> Result<(), TrySend<T>> {
+        let core = &*self.core;
+        let mut g = lock(&core.state);
+        if g.receivers == 0 {
+            return Err(TrySend::Disconnected(value));
+        }
+        if core.cap.map_or(true, |c| g.queue.len() < c) {
+            g.queue.push_back(value);
+            drop(g);
+            core.not_empty.wake_all();
+            return Ok(());
+        }
+        Err(TrySend::Full(value))
     }
 }
 
@@ -304,6 +332,17 @@ mod tests {
         drop(tx2);
         assert_eq!(rx.recv(), None);
         assert_eq!(rx2.recv(), None);
+    }
+
+    #[test]
+    fn try_send_full_and_disconnected() {
+        let (tx, rx) = mailbox::<u32>(Some(1));
+        assert!(tx.try_send(1).is_ok());
+        assert!(matches!(tx.try_send(2), Err(TrySend::Full(2))));
+        assert_eq!(rx.recv(), Some(1));
+        assert!(tx.try_send(3).is_ok());
+        drop(rx);
+        assert!(matches!(tx.try_send(4), Err(TrySend::Disconnected(4))));
     }
 
     #[test]

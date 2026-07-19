@@ -539,6 +539,46 @@ pub fn PostgresSimNetMain(argv: &[String], username: &str) -> ! {
         .cloned()
         .expect("--sim-net requires -D <datadir>");
     seed_universe(&datadir);
+
+    // SIMVFS-SHARED (s2 §6 item 1): one filesystem universe per simulated
+    // process. Opt-in per corpus (PGRUST_SIMVFS_SHARED=1) so the sessions=2
+    // P1/P3 fingerprints — which DEPEND on private per-session universes —
+    // are untouched by construction. The seeded universe above (datadir +
+    // tz share) MOVES into the process registry as universe 1; every spawn
+    // door captures/adopts it (launch_backend, loadsort feeders). Requires
+    // the permit scheduler: the injected probe is the access assert, and
+    // sharing without the scheduler would be a data race by construction.
+    // PGRUST_SIMVFS_RED arms the deliberately-broken-sharing battery
+    // (empty = the pre-lane bug resurrected, stale = frozen snapshot).
+    if std::env::var("PGRUST_SIMVFS_SHARED").is_ok_and(|v| v == "1") {
+        match std::env::var("PGRUST_SIMVFS_RED").as_deref() {
+            Ok("empty") => {
+                vfs::sim::SimVfs::arm_red_adoption(Some(vfs::sim::RedAdoption::Empty))
+            }
+            Ok("stale") => {
+                vfs::sim::SimVfs::arm_red_adoption(Some(vfs::sim::RedAdoption::Stale))
+            }
+            _ => {}
+        }
+        vfs::sim::SimVfs::set_shared_access_probe(pgsync::sim::current_thread_holds_permit);
+        vfs::sim::SimVfs::share_universe_as(1);
+    }
+
+    // SIMVFS-SHARED P8: the loadsort-prefetch corpus (no server boot —
+    // pure loadsort machinery over the shared universe); never returns.
+    if std::env::var("PGRUST_PERMIT_LOADSORT").is_ok_and(|v| v == "1") {
+        match pgrcolumnar::loadsort::sim_demo::run_prefetch_corpus() {
+            Ok(line) => {
+                println!("{line}");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                println!("LOADSORT-RED {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     install_pump_for("PGRUST_SIMNET_SQL");
 
     // Transport fault plan (inc-2): PGRUST_SIMNET_FAULTS carries a
@@ -581,10 +621,30 @@ pub fn PostgresSimNetMain(argv: &[String], username: &str) -> ! {
     }
 
     if sessions <= 1 {
-        // ---- The single-session path (stdio_wire's inner, verbatim).
+        // ---- The single-session path (stdio_wire's inner, verbatim —
+        // plus, for RUNTIME corpora only, the postmaster-parity runtime
+        // wiring the serverloop would have done: gang PGPROC sizing BEFORE
+        // the ladder's InitializeMaxBackends, pool start + gang spawner
+        // install after shared memory exists (SIMVFS-SHARED P7: the gang
+        // threads then spawn at first engagement, adopt the shared
+        // universe, and read the catalog/heap through vfs). Non-runtime
+        // corpora take the exact pre-lane path, byte-identical.
+        let runtime_corpus = std::env::var("PGRUST_RUNTIME").as_deref() == Ok("1");
+        if runtime_corpus {
+            init_small::globals::SetRuntimeGangProcs(
+                postmaster_seams::rtgang_procs_wanted::call(),
+            );
+        }
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
             || -> core::convert::Infallible {
-                let err = match crate::stdio_wire::stdio_wire_main_inner(argv, username) {
+                let err = match (|| {
+                    crate::stdio_wire::stdio_wire_boot_half(argv, username)?;
+                    if runtime_corpus {
+                        let _ = postmaster_seams::rtpool_start::call();
+                        postmaster_seams::rtgang_install::call();
+                    }
+                    crate::stdio_wire::stdio_wire_session_half()
+                })() {
                     Ok(never) => match never {},
                     Err(err) => err,
                 };

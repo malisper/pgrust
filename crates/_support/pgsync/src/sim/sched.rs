@@ -282,6 +282,19 @@ fn current_sched() -> Option<(Arc<Scheduler>, usize, Vpid)> {
     })
 }
 
+/// The strict shared-universe permit probe (see `sim::current_thread_holds_
+/// permit` for the contract). Reads the slot's `granted` flag under the
+/// state lock — sim-only diagnostic cost, immaterial (the F6 precedent).
+pub(crate) fn current_thread_holds_permit() -> bool {
+    if global().is_none() {
+        return false;
+    }
+    match current_sched() {
+        None => false,
+        Some((s, idx, _)) => plock(&s.inner).slots[idx].granted,
+    }
+}
+
 /// Rename the CALLING thread's live slot to `new_vpid` — the wpool retention
 /// shape (F2): a retained standby serves every task under a fresh synthetic
 /// pid, and sim waiter-slot identity keys off `current_vpid`, so the model
