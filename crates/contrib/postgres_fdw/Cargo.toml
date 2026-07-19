@@ -41,3 +41,7 @@ nodeforeignscan = { path = "../../backend/executor/nodeforeignscan" }
 planner = { path = "../../backend/optimizer/plan/planner" }
 vars = { path = "../../backend/optimizer/util/vars" }
 clauses = { path = "../../backend/optimizer/util/clauses" }
+nodes_core = { path = "../../backend/nodes/nodes_core" }
+fmgr_seams = { path = "../../backend/utils/fmgr/fmgr_seams" }
+syscache_seams = { path = "../../backend/utils/cache/syscache_seams" }
+types_guc = { path = "../../_support/types/types_guc" }
