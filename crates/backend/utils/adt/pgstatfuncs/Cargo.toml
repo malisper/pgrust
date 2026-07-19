@@ -16,7 +16,9 @@ types_error = { path = "../../../../_support/types/types_error" }
 types_fmgr = { path = "../../../../_support/types/fmgr" }
 funcapi = { path = "../../fmgr/funcapi" }
 heaptuple = { path = "../../../access/common/heaptuple" }
+adt_network = { path = "../network" }
 adt_numeric = { path = "../numeric" }
+ip = { path = "../../../../common/ip" }
 varlena = { path = "../varlena" }
 acl_seams = { path = "../acl_seams" }
 catalog_seams = { path = "../../../catalog/catalog_seams" }
