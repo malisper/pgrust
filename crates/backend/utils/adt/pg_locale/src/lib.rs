@@ -715,6 +715,30 @@ fn get_collation_actual_version_seam<'mcx>(
         .transpose()
 }
 
+// icu_unicode_version (varlena.c): C returns the compile-time
+// U_UNICODE_VERSION string under USE_ICU, else NULL. pgrust binds libicu at
+// runtime, so the analog is the loaded library's u_getUnicodeVersion,
+// rendered by ICU's own u_versionToString — the same "major.minor" shape as
+// the header constant (trailing zero fields dropped, minimum two kept).
+pub fn icu_unicode_version_str() -> Option<&'static str> {
+    static VERSION: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    VERSION
+        .get_or_init(|| {
+            let api = icu_ffi::try_icu()?;
+            let mut ver = [0u8; 4];
+            let mut buf = [0u8; icu_ffi::U_MAX_VERSION_STRING_LENGTH];
+            // SAFETY: ver is the 4-byte UVersionInfo both entry points take;
+            // buf has the U_MAX_VERSION_STRING_LENGTH bytes the API requires.
+            unsafe {
+                (api.u_getUnicodeVersion)(ver.as_mut_ptr());
+                (api.u_versionToString)(ver.as_ptr(), buf.as_mut_ptr() as *mut core::ffi::c_char);
+            }
+            let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+            Some(String::from_utf8_lossy(&buf[..len]).into_owned())
+        })
+        .as_deref()
+}
+
 pub fn init_seams() {
     pg_locale_seams::varstr_cmp_locale::set(varstr_cmp_locale);
     pg_locale_seams::collation_is_deterministic::set(collation_is_deterministic);
@@ -723,6 +747,7 @@ pub fn init_seams() {
     pg_locale_seams::init_database_collation::set(init_database_collation);
     pg_locale_seams::get_collation_actual_version::set(get_collation_actual_version_seam);
     pg_locale_seams::varstr_nondeterministic_hash::set(varstr_nondeterministic_hash);
+    pg_locale_seams::icu_unicode_version::set(icu_unicode_version_str);
 
     setup::install_guc_hooks();
 }

@@ -172,6 +172,9 @@ pub struct IcuApi {
     pub u_isspace: unsafe extern "C" fn(c: i32) -> UBool,
     pub u_toupper: unsafe extern "C" fn(c: i32) -> i32,
     pub u_tolower: unsafe extern "C" fn(c: i32) -> i32,
+    // uchar.h: u_getUnicodeVersion(UVersionInfo) — the runtime value of the
+    // U_UNICODE_VERSION header constant (icu_unicode_version, varlena.c).
+    pub u_getUnicodeVersion: unsafe extern "C" fn(versionArray: *mut u8),
 }
 
 pub fn u_errorName_str(api: &IcuApi, status: UErrorCode) -> String {
@@ -194,6 +197,13 @@ pub fn icu() -> &'static IcuApi {
     }
 }
 
+/// Non-panicking probe: None = libicu not loadable here, the analog of a C
+/// build without --with-icu. For callers whose C counterpart is an `#ifdef
+/// USE_ICU` availability CHECK (icu_unicode_version), not a hard dependency.
+pub fn try_icu() -> Option<&'static IcuApi> {
+    ICU.get_or_init(load).as_ref().ok().copied()
+}
+
 const MAJOR_MAX: i32 = 90;
 const MAJOR_MIN: i32 = 50;
 
@@ -205,7 +215,7 @@ fn load() -> Result<&'static IcuApi, String> {
     Ok(Box::leak(Box::new(api)))
 }
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(not(any(target_family = "wasm", target_os = "macos")))]
 fn open_lib() -> Result<(*mut c_void, Option<i32>), String> {
     for major in (MAJOR_MIN..=MAJOR_MAX).rev() {
         let name = format!("libicui18n.so.{major}\0");
@@ -222,6 +232,40 @@ fn open_lib() -> Result<(*mut c_void, Option<i32>), String> {
     }
     Err(format!(
         "could not dlopen libicui18n.so(.{MAJOR_MIN}..{MAJOR_MAX})"
+    ))
+}
+
+// macOS: no system libicu with a public C API; Homebrew's keg-only icu4c is
+// the twin-rig source (the C oracle is Homebrew postgresql@18 linked against
+// it). dlsym through the i18n handle reaches libicuuc symbols via the
+// dependency chain, same as the Linux arm (verified: dyld searches dependent
+// images for dlopen handles).
+#[cfg(target_os = "macos")]
+fn open_lib() -> Result<(*mut c_void, Option<i32>), String> {
+    fn dlopen(name: &str) -> *mut c_void {
+        let name = format!("{name}\0");
+        // SAFETY: name is NUL-terminated.
+        unsafe { libc::dlopen(name.as_ptr() as *const c_char, libc::RTLD_NOW) }
+    }
+    for major in (MAJOR_MIN..=MAJOR_MAX).rev() {
+        let h = dlopen(&format!("libicui18n.{major}.dylib"));
+        if !h.is_null() {
+            return Ok((h, Some(major)));
+        }
+    }
+    // DYLD default paths, then the stable Homebrew keg symlinks (arm64, x86).
+    for path in [
+        "libicui18n.dylib",
+        "/opt/homebrew/opt/icu4c/lib/libicui18n.dylib",
+        "/usr/local/opt/icu4c/lib/libicui18n.dylib",
+    ] {
+        let h = dlopen(path);
+        if !h.is_null() {
+            return Ok((h, None));
+        }
+    }
+    Err(format!(
+        "could not dlopen libicui18n(.{MAJOR_MIN}..{MAJOR_MAX}).dylib (also probed the Homebrew icu4c kegs)"
     ))
 }
 
@@ -315,5 +359,6 @@ fn resolve_all(handle: *mut c_void, suffix: i32) -> Result<IcuApi, String> {
         u_isspace: resolve!(u_isspace),
         u_toupper: resolve!(u_toupper),
         u_tolower: resolve!(u_tolower),
+        u_getUnicodeVersion: resolve!(u_getUnicodeVersion),
     })
 }

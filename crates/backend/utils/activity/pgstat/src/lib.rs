@@ -183,6 +183,12 @@ pub fn init_seams() {
     pgstat_seams::pgstat_count_checkpointer_restartpoints_performed::set(|| {
         checkpointer::with_pending_checkpointer_stats(|s| s.restartpoints_performed += 1)
     });
+    pgstat_seams::pgstat_count_checkpointer_write_time::set(|msecs| {
+        checkpointer::with_pending_checkpointer_stats(|s| s.write_time += msecs)
+    });
+    pgstat_seams::pgstat_count_checkpointer_sync_time::set(|msecs| {
+        checkpointer::with_pending_checkpointer_stats(|s| s.sync_time += msecs)
+    });
 
     pgstat_seams::pgstat_report_checkpointer::set(checkpointer::pgstat_report_checkpointer);
     pgstat_seams::pgstat_report_bgwriter::set(bgwriter::pgstat_report_bgwriter);
