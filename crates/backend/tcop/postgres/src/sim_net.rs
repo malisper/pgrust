@@ -176,6 +176,21 @@ struct SimWireClient {
     /// The previously sent statement was an injected ROLLBACK (never chain
     /// injections off an injected statement).
     last_injected: bool,
+    /// SIM-CONVERGE inc-2: this session's turn-id in the cross-session turn
+    /// schedule (2 = s2, 3 = s3; the boot session 1 and any noise session are
+    /// not part of the schedule).
+    turn_id: u32,
+    /// SIM-CONVERGE inc-2: the global turn order (session turn-id per global
+    /// statement, in plan order) — each client parses the same
+    /// PGRUST_SIMNET_TURNS (set once before the session threads spawn) into
+    /// its own copy; the only shared mutable state is the [`TURN_POS`] cursor.
+    /// Empty ⇒ no schedule active.
+    turn_order: Vec<u32>,
+    /// SIM-CONVERGE inc-2: precomputed `!turn_order.is_empty() &&
+    /// turn_order.contains(&turn_id)` — this client participates in the
+    /// cross-session interleaving. A session whose id is absent from the
+    /// schedule (boot / noise) is never gated (sends its script freely).
+    turn_gated: bool,
 }
 
 // SIM-CONVERGE: what this session's wire client actually SENT, in order —
@@ -191,8 +206,55 @@ fn sent_log_push(sql: &str) {
     SENT_LOG.with(|l| l.borrow_mut().push(sql.to_string()));
 }
 
+// SIM-CONVERGE inc-2: the CROSS-SESSION TURN SCHEDULE — the substrate the
+// two scripted wire clients need to honor a v2 plan's serialized statement-
+// order interleaving. inc-1's blocker (worklog §7): the corpus drives each
+// session's script INDEPENDENTLY under the seeded permit scheduler, so without
+// a gate the two clients race their statement submissions and the
+// interleaving-visible results do not match the plan's cross-session order
+// contract; and a client whose turn has not come had no LEGAL way to pause —
+// the transport panics on a pump step that moves no bytes (by design).
+//
+// The gate: a process-global ordered list of session turn-ids
+// (PGRUST_SIMNET_TURNS, e.g. "2 3 2 3"), one entry per GLOBAL statement in
+// plan order, and a shared position cursor [`TURN_POS`]. A gated client sends
+// its next SCRIPT statement only when the cursor's entry is ITS turn-id;
+// otherwise it parks on the scheduler (`pgsync::thread::sleep` = a TimedPark,
+// a legal decision point) and reports `PumpStatus::Yielded` — the provider's
+// inc-2 status that says "no byte progress, not done" is legal here. The
+// SINGLE owner of each turn advances the cursor, so non-owners' reads never
+// race the owner's one advance (and the permit scheduler serializes threads
+// regardless) — plain atomics suffice, no lock. A wedged schedule (a turn for
+// a session that never runs) parks forever and reaches the scheduler's
+// virtual-time ceiling (SCHEDCEILING) — a named verdict, never a panic.
+//
+// Opt-in: absent PGRUST_SIMNET_TURNS = the pre-lane independent-pump behavior,
+// byte-identical for every existing corpus. Each fresh sim PROCESS starts the
+// cursor at 0 (the ×3 determinism reruns are separate processes), so no reset
+// across runs is needed.
+static TURN_POS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Parse PGRUST_SIMNET_TURNS into the global turn order (a session turn-id per
+/// global statement). Absent/empty ⇒ no turn gate. Loud on a malformed token
+/// (harness domain: a bad schedule is a bug, not a silent no-gate).
+fn read_turn_order() -> Vec<u32> {
+    std::env::var("PGRUST_SIMNET_TURNS")
+        .ok()
+        .map(|s| {
+            s.split(|c: char| c == ',' || c.is_whitespace())
+                .filter(|t| !t.is_empty())
+                .map(|t| {
+                    t.parse::<u32>()
+                        .unwrap_or_else(|_| panic!("bad PGRUST_SIMNET_TURNS token {t:?}"))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 impl SimWireClient {
-    fn new(stmts: Vec<String>, recover: bool) -> Self {
+    fn new(stmts: Vec<String>, recover: bool, turn_id: u32, turn_order: Vec<u32>) -> Self {
+        let turn_gated = !turn_order.is_empty() && turn_order.contains(&turn_id);
         SimWireClient {
             stmts: stmts.into(),
             started: false,
@@ -205,6 +267,9 @@ impl SimWireClient {
             cycle_err: Vec::new(),
             cur_err: false,
             last_injected: false,
+            turn_id,
+            turn_order,
+            turn_gated,
         }
     }
 
@@ -260,12 +325,36 @@ impl SimWireClient {
                 self.last_injected = true;
                 return pqcomm_simnet::PumpStatus::Progress;
             }
+            // SIM-CONVERGE inc-2: cross-session turn gate. A gated client may
+            // send its next SCRIPT statement only when the global cursor points
+            // at its turn-id; otherwise it parks on the scheduler (a TimedPark
+            // = a legal decision point that lets the other session take its
+            // turn and advance the cursor) and reports Yielded — no byte
+            // progress, but a legal turn-wait, not a protocol stall. The
+            // recovery-injection ROLLBACK above and the Terminate below are
+            // session-local reactions and stay turn-free (the cursor counts
+            // script statements only). Schedule-exhausted (pos past the end)
+            // falls through to an ungated send — defensive against a schedule
+            // shorter than the script.
+            if self.turn_gated && !self.stmts.is_empty() {
+                let pos = TURN_POS.load(std::sync::atomic::Ordering::SeqCst);
+                if pos < self.turn_order.len() && self.turn_order[pos] != self.turn_id {
+                    pgsync::thread::sleep(std::time::Duration::from_millis(1));
+                    return pqcomm_simnet::PumpStatus::Yielded;
+                }
+            }
             match self.stmts.pop_front() {
                 Some(sql) => {
                     pqcomm_simnet::client_send(&query_message(&sql));
                     sent_log_push(&sql);
                     self.sent += 1;
                     self.last_injected = false;
+                    // SIM-CONVERGE inc-2: this script statement consumed a
+                    // global turn — advance the shared cursor so the session
+                    // owning the next turn is released.
+                    if self.turn_gated {
+                        TURN_POS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
                 }
                 None => {
                     pqcomm_simnet::client_send(&terminate_message());
@@ -334,11 +423,15 @@ fn read_script(env_name: &str) -> Vec<String> {
         .collect()
 }
 
-fn install_pump_for(env_sql: &str) {
+fn install_pump_for(env_sql: &str, turn_id: u32) {
     // SIM-CONVERGE: PGRUST_SIMNET_RECOVER=1 arms the driver-law recovery
     // injection (see SimWireClient::pump); default off, byte-identical.
     let recover = std::env::var("PGRUST_SIMNET_RECOVER").as_deref() == Ok("1");
-    let mut client = SimWireClient::new(read_script(env_sql), recover);
+    // SIM-CONVERGE inc-2: the cross-session turn schedule (PGRUST_SIMNET_TURNS)
+    // — empty ⇒ no gate (existing corpora byte-identical). Each client reads
+    // the same env (set once before the session threads spawn).
+    let turn_order = read_turn_order();
+    let mut client = SimWireClient::new(read_script(env_sql), recover, turn_id, turn_order);
     pqcomm_simnet::install_client_pump(move || client.pump());
 }
 
@@ -471,6 +564,11 @@ struct SessionSpec {
     /// protocol keys off it in InitProcess) and announces its exit so the
     /// reaper's Backend arm releases it — real child accounting.
     child_slot: Option<i32>,
+    /// SIM-CONVERGE inc-2: this session's turn-id in the cross-session turn
+    /// schedule (PGRUST_SIMNET_TURNS). s2 = 2, s3 = 3; the boot session is 1
+    /// and is never part of the schedule (it runs the setup to completion
+    /// before the workers spawn).
+    turn_id: u32,
 }
 
 impl SessionSpec {
@@ -483,6 +581,7 @@ impl SessionSpec {
             oplog_env: "PGRUST_SIMNET_OPLOG2",
             pid_offset: 1,
             child_slot,
+            turn_id: 2,
         }
     }
 
@@ -495,6 +594,7 @@ impl SessionSpec {
             oplog_env: "PGRUST_SIMNET_OPLOG3",
             pid_offset: 2,
             child_slot,
+            turn_id: 3,
         }
     }
 }
@@ -1316,7 +1416,7 @@ fn second_session_body(
                 waited_ms += 1;
                 assert!(waited_ms < 60_000, "s2: recovery never completed (W5 gate)");
             }
-            install_pump_for(spec.sql_env);
+            install_pump_for(spec.sql_env, spec.turn_id);
             run_second_session(&spec)
         }
     }
@@ -1403,7 +1503,9 @@ pub fn PostgresSimNetMain(argv: &[String], username: &str) -> ! {
         }
     }
 
-    install_pump_for("PGRUST_SIMNET_SQL");
+    // The boot session (turn-id 1) runs the setup script to completion before
+    // the workers spawn; it is never part of the cross-session schedule.
+    install_pump_for("PGRUST_SIMNET_SQL", 1);
 
     // Transport fault plan (inc-2): PGRUST_SIMNET_FAULTS carries a
     // parse_fault_spec spec (e.g. "seed=0x5EED Read@12=drop:2"); rules are
