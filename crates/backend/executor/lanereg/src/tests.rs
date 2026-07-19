@@ -120,11 +120,14 @@ fn fold_in_tree_golden_set() {
     // + text/bpchar MIN/MAX (lane-v2-textfold) — the third-train landings
     // flipped the pending rows to in-tree (migration recipe step 1) — + the
     // fold-trans float tier (lane-v2-lanefold-trans, knob-gated default OFF:
-    // float4pl/float8pl sum, float4_accum/float8_accum avg/var/stddev).
+    // float4pl/float8pl sum, float4_accum/float8_accum avg/var/stddev) + the
+    // fold-trans increment 2 (lane aggseq-fold2, same knob:
+    // numeric_avg_accum 2858, float8_regr_accum 2806,
+    // int8inc_float8_float8 2805).
     let golden: &[Oid] = &[
         1219, 2804, 1840, 1841, 1962, 1963, 2746, 768, 769, 770, 771, 1236, 1237, 1138, 1139,
         2036, 2035, 1196, 1195, 209, 211, 223, 224, 2515, 2516, 1892, 1893, 1898, 1899, 1904,
-        1905, 458, 459, 1063, 1064, 204, 218, 208, 222,
+        1905, 458, 459, 1063, 1064, 204, 218, 208, 222, 2858, 2806, 2805,
     ];
     for &oid in golden {
         assert!(fold_desc(oid).is_some(), "fold oid {oid} missing in-tree");
