@@ -51,7 +51,13 @@ fn index_am_translate_strategy(strategy: i16, amoid: Oid, _opfamily: Oid) -> Com
         HASH_AM_OID | GIST_AM_OID | GIN_AM_OID | SPGIST_AM_OID | BRIN_AM_OID => COMPARE_INVALID,
         _ => match canonical_index_am(amoid) {
             c if c != amoid => index_am_translate_strategy(strategy, c, _opfamily),
-            _ => panic!("IndexAmTranslateStrategy for non-builtin AM {amoid}: amapi.c unported"),
+            // hnsw and bloom: amtranslatestrategy == NULL.
+            _ => match extension_am_handler_name(amoid).as_deref() {
+                Some(b"hnswhandler") | Some(b"blhandler") => COMPARE_INVALID,
+                _ => panic!(
+                    "IndexAmTranslateStrategy for non-builtin AM {amoid}: amapi.c unported"
+                ),
+            },
         },
     }
 }
@@ -65,7 +71,13 @@ fn index_am_translate_cmptype(cmptype: CompareType, amoid: Oid, _opfamily: Oid) 
         HASH_AM_OID | GIST_AM_OID | GIN_AM_OID | SPGIST_AM_OID | BRIN_AM_OID => InvalidStrategy,
         _ => match canonical_index_am(amoid) {
             c if c != amoid => index_am_translate_cmptype(cmptype, c, _opfamily),
-            _ => panic!("IndexAmTranslateCompareType for non-builtin AM {amoid}: amapi.c unported"),
+            // hnsw and bloom: amtranslatecmptype == NULL.
+            _ => match extension_am_handler_name(amoid).as_deref() {
+                Some(b"hnswhandler") | Some(b"blhandler") => InvalidStrategy,
+                _ => panic!(
+                    "IndexAmTranslateCompareType for non-builtin AM {amoid}: amapi.c unported"
+                ),
+            },
         },
     }
 }
@@ -78,7 +90,13 @@ fn index_am_consistent_flags(amoid: Oid) -> (bool, bool) {
         GIST_AM_OID | GIN_AM_OID | SPGIST_AM_OID | BRIN_AM_OID => (false, false),
         _ => match canonical_index_am(amoid) {
             c if c != amoid => index_am_consistent_flags(c),
-            _ => panic!("GetIndexAmRoutineByAmId for non-builtin AM {amoid}: amapi.c unported"),
+            // hnsw and bloom handlers: both consistency flags false.
+            _ => match extension_am_handler_name(amoid).as_deref() {
+                Some(b"hnswhandler") | Some(b"blhandler") => (false, false),
+                _ => panic!(
+                    "GetIndexAmRoutineByAmId for non-builtin AM {amoid}: amapi.c unported"
+                ),
+            },
         },
     }
 }
@@ -151,9 +169,22 @@ fn get_opmethod_canorder(amoid: Oid) -> bool {
         HASH_AM_OID | GIST_AM_OID | GIN_AM_OID | SPGIST_AM_OID | BRIN_AM_OID => false,
         _ => match canonical_index_am(amoid) {
             c if c != amoid => get_opmethod_canorder(c),
-            _ => panic!("get_opmethod_canorder for non-builtin AM {amoid}: amapi.c unported"),
+            // Extension AMs by handler symbol: hnsw and bloom set
+            // amcanorder = false in their handlers.
+            _ => match extension_am_handler_name(amoid).as_deref() {
+                Some(b"hnswhandler") | Some(b"blhandler") => false,
+                _ => panic!(
+                    "get_opmethod_canorder for non-builtin AM {amoid}: amapi.c unported"
+                ),
+            },
         },
     }
+}
+
+fn extension_am_handler_name(amoid: Oid) -> Option<Vec<u8>> {
+    let handler = syscache_seams::pg_am_amhandler::call(amoid).ok()??;
+    let name = syscache_seams::pg_proc_proname::call(handler).ok()??;
+    Some(name.name_str().to_vec())
 }
 
 pub fn get_ordering_op_properties(opno: Oid) -> PgResult<Option<(Oid, Oid, CompareType)>> {
