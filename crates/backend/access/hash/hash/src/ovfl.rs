@@ -41,7 +41,7 @@ fn bitno_to_blkno(metap: &HashMetaPageData, ovflbitnum: u32) -> BlockNumber {
 }
 
 /// _hash_ovflblkno_to_bitno.
-pub(crate) fn _hash_ovflblkno_to_bitno(
+pub fn _hash_ovflblkno_to_bitno(
     metap: &HashMetaPageData,
     ovflblkno: BlockNumber,
 ) -> PgResult<u32> {

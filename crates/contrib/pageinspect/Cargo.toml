@@ -1,0 +1,50 @@
+[package]
+name = "pageinspect"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pageinspect"
+path = "src/lib.rs"
+
+[dependencies]
+datum = { path = "../../_support/types/datum" }
+mcx = { path = "../../_support/mcx" }
+types_core = { path = "../../_support/types/types_core" }
+types_error = { path = "../../_support/types/types_error" }
+types_fmgr = { path = "../../_support/types/fmgr" }
+types_rel = { path = "../../_support/types/rel" }
+types_storage = { path = "../../_support/types/types_storage" }
+types_tuple = { path = "../../_support/types/types_tuple" }
+types_nbtree = { path = "../../_support/types/types_nbtree" }
+types_gist = { path = "../../_support/types/gist" }
+types_brin = { path = "../../_support/types/types_brin" }
+types_hash = { path = "../../_support/types/hash" }
+gin_vocab = { path = "../../backend/access/gin/gin_vocab" }
+rel_vocab = { path = "../../_support/types/rel_vocab" }
+dfmgr = { path = "../../backend/utils/fmgr/dfmgr" }
+funcapi = { path = "../../backend/utils/fmgr/funcapi" }
+fmgr_core = { path = "../../backend/utils/fmgr/fmgr_core" }
+heaptuple = { path = "../../backend/access/common/heaptuple" }
+tupdesc = { path = "../../backend/access/common/tupdesc" }
+relation = { path = "../../backend/access/common/relation" }
+detoast_seams = { path = "../../backend/access/common/detoast_seams" }
+varlena = { path = "../../backend/utils/adt/varlena" }
+ruleutils = { path = "../../backend/utils/adt/ruleutils" }
+arrayfuncs = { path = "../../backend/utils/adt/arrayfuncs" }
+lsyscache = { path = "../../backend/utils/cache/lsyscache" }
+superuser = { path = "../../backend/utils/misc/superuser" }
+bufmgr = { path = "../../backend/storage/buffer/bufmgr" }
+freespace = { path = "../../backend/storage/freespace/freespace" }
+nbtree = { path = "../../backend/access/nbtree/nbtree" }
+gin = { path = "../../backend/access/gin/gin" }
+hash = { path = "../../backend/access/hash/hash" }
+brin = { path = "../../backend/access/brin/brin" }
+brin_tuple = { path = "../../backend/access/brin/brin_tuple" }
+catalog_namespace = { path = "../../backend/catalog/catalog_namespace" }
+pg_class_seams = { path = "../../backend/catalog/pg_class_seams" }
+mbutils_seams = { path = "../../backend/utils/mb/mbutils_seams" }
+wchar = { path = "../../common/wchar" }
+elog_seams = { path = "../../backend/utils/error/elog_seams" }
+postgres_seams = { path = "../../backend/tcop/postgres_seams" }

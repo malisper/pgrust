@@ -2248,6 +2248,7 @@ version = "0.1.0"
 dependencies = [
  "adt_numeric",
  "adt_scalar",
+ "arrayfuncs",
  "datum",
  "detoast",
  "fmgr_core",
@@ -10103,6 +10104,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "pageinspect"
+version = "0.0.0"
+dependencies = [
+ "arrayfuncs",
+ "brin",
+ "brin_tuple",
+ "bufmgr",
+ "catalog_namespace",
+ "datum",
+ "detoast_seams",
+ "dfmgr",
+ "elog_seams",
+ "fmgr_core",
+ "freespace",
+ "funcapi",
+ "gin",
+ "gin_vocab",
+ "hash",
+ "heaptuple",
+ "lsyscache",
+ "mbutils_seams",
+ "mcx",
+ "nbtree",
+ "pg_class_seams",
+ "postgres_seams",
+ "rel_vocab",
+ "relation",
+ "ruleutils",
+ "superuser",
+ "tupdesc",
+ "types_brin",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_gist",
+ "types_hash",
+ "types_nbtree",
+ "types_rel",
+ "types_storage",
+ "types_tuple",
+ "varlena",
+ "wchar",
+]
+
+[[package]]
 name = "pairingheap"
 version = "0.1.0"
 
@@ -11181,6 +11227,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "pg_freespacemap"
+version = "0.0.0"
+dependencies = [
+ "datum",
+ "dfmgr",
+ "freespace",
+ "pg_class_seams",
+ "relation",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_rel",
+]
+
+[[package]]
 name = "pg_hmac"
 version = "0.1.0"
 dependencies = [
@@ -11963,6 +12024,47 @@ dependencies = [
  "walreceiverfuncs_seams",
  "walsender_seams",
  "xlogprefetcher_seams",
+]
+
+[[package]]
+name = "pgstattuple"
+version = "0.0.0"
+dependencies = [
+ "bufmgr",
+ "commands_vacuum",
+ "datum",
+ "dfmgr",
+ "fmgr_core",
+ "freespace",
+ "funcapi",
+ "heapam",
+ "heapam_visibility",
+ "heaptuple",
+ "lmgr",
+ "lsyscache",
+ "mbutils_seams",
+ "mcx",
+ "pg_class_seams",
+ "postgres_seams",
+ "procarray",
+ "rel_vocab",
+ "relation",
+ "superuser",
+ "tableam",
+ "types_core",
+ "types_error",
+ "types_fmgr",
+ "types_gist",
+ "types_hash",
+ "types_nbtree",
+ "types_rel",
+ "types_scan",
+ "types_snapshot",
+ "types_storage",
+ "types_tuple",
+ "varlena",
+ "visibilitymap",
+ "wchar",
 ]
 
 [[package]]
@@ -14847,6 +14949,7 @@ dependencies = [
  "operatorcmds",
  "orderedsetaggs",
  "origin",
+ "pageinspect",
  "parallel",
  "parse_clause",
  "parse_collate",
@@ -14866,6 +14969,7 @@ dependencies = [
  "pg_database",
  "pg_db_role_setting",
  "pg_enum",
+ "pg_freespacemap",
  "pg_inherits",
  "pg_locale",
  "pg_prewarm",
@@ -14883,6 +14987,7 @@ dependencies = [
  "pgcrypto",
  "pgoutput",
  "pgstat",
+ "pgstattuple",
  "pgtz",
  "pgvector",
  "pgvector_hnsw",
