@@ -1,8 +1,10 @@
 //! Index scans as lane sources — single-executor migration Phase 1, WS-F
 //! increment 1: the IndexOnlyScan hosted behind the storage seam
 //! ([`super::batch_source::BatchGranuleSource`]), SERIAL, behind
-//! `PGRUST_LANE_V2_INDEXSOURCE` (default OFF). Everything here is
-//! fail-closed to today's byte-identical paths: knob OFF, the procnode
+//! `PGRUST_LANE_V2_INDEXSOURCE` (default ON since the SE17-GATES flip; explicit
+//! `=0`/`off` = permanent kill restoring the WS-F inc-1 arm-owned world).
+//! Everything here is byte-identical between the arms (the lane's 5-arm ISO
+//! effigy + 6-cell dualexec + C-oracle proof): knob OFF, the procnode
 //! `agg_arm` hook falls straight through to the UNCHANGED fused
 //! `exec_agg_batched` drive; knob ON, the drive is the SAME
 //! `exec_agg_batched` loop over the SAME node primitives
@@ -88,9 +90,10 @@ use ::types_error::{PgError, PgResult, ERROR};
 use super::batch_source::{BatchGranuleSource, SourceCaps};
 use super::stats::{self, RefuseReason, ShapeClass};
 
-/// `PGRUST_LANE_V2_INDEXSOURCE` (default OFF): the WS-F index-source gate,
-/// layered UNDER the master `pgrust.lane_executor` gate (the procnode hook
-/// is inside `crate::lanev2::enabled()`). 0 = unresolved (read env on first
+/// `PGRUST_LANE_V2_INDEXSOURCE` (default ON since SE17-GATES; `=0`/`off` =
+/// permanent kill): the WS-F index-source gate, layered UNDER the master
+/// `pgrust.lane_executor` gate (the procnode hook is inside
+/// `crate::lanev2::enabled()`). 0 = unresolved (read env on first
 /// use), 1 = OFF, 2 = ON. AtomicU8 + `_set_for_tests` per the contract
 /// R-KNOBS idiom (rowmode.rs precedent) so the unit corpus can A/B both
 /// paths in one process; env-var (not GUC) per the standing `pg_settings`
@@ -102,9 +105,15 @@ fn indexsource_enabled() -> bool {
         1 => false,
         2 => true,
         _ => {
-            let on = matches!(
+            // SE17-GATES flip (default OFF -> ON): the AE2 agg_indexfeed_resolve
+            // idiom — bare/unset/other reads ON, explicit `=0`/`off` = permanent
+            // kill (restores the WS-F inc-1 arm-owned world). Flip evidence:
+            // se-aggios worklog §6 + the composed-tip letter (flip surface
+            // B/A 0.9998 flat-or-better; IndexScan control exact-flat). The
+            // AGG_IOS census clock starts at the first train carrying this flip.
+            let on = !matches!(
                 std::env::var("PGRUST_LANE_V2_INDEXSOURCE").as_deref(),
-                Ok("1") | Ok("on")
+                Ok("0") | Ok("off")
             );
             INDEXSOURCE.store(if on { 2 } else { 1 }, Relaxed);
             on
