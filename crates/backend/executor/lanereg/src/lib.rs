@@ -141,6 +141,10 @@ pub enum GuardTier {
     /// Batch runs unchecked; on any detected trap the rows 0..k replay per-row
     /// via fmgr so the error fires on C's row (JIT overflow branch).
     ReplayOnErr,
+    /// The fold IS C's checked per-row op, applied one row at a time in row
+    /// order (the fold-trans float tier): errors fire inline on C's exact
+    /// row — no guard interval, no demote, no replay.
+    ExactOp,
 }
 
 /// Collation gate (design §3a: collation baked per call site).
@@ -267,6 +271,12 @@ pub enum FoldKind {
     BoolOr,
     BitAnd,
     BitOr,
+    // fold-trans tier (lane-v2-lanefold-trans, knob PGRUST_LANE_V2_FOLD_TRANS
+    // default OFF): ORDER-PRESERVING float folds — sum(float4/float8)
+    // (float4pl/float8pl) and the float8[3] Youngs-Cramer accum family
+    // (float4_accum/float8_accum: avg/var/stddev over floats).
+    FSum,
+    FAccum,
 }
 
 /// The shape/realizer payload — determines the family and carries the neutral
@@ -536,6 +546,11 @@ pub static ENTRIES: &[BatchFn] = &[
     fold_str(459, "text_smaller", FoldKind::Min),
     fold_str(1063, "bpchar_larger", FoldKind::Max),
     fold_str(1064, "bpchar_smaller", FoldKind::Min),
+    // === aggregate transition folds — fold-trans float tier (lane-v2-lanefold-trans; knob-gated default OFF) ===
+    fold_trans(204, "float4pl", FoldKind::FSum),
+    fold_trans(218, "float8pl", FoldKind::FSum),
+    fold_trans(208, "float4_accum", FoldKind::FAccum),
+    fold_trans(222, "float8_accum", FoldKind::FAccum),
 ];
 
 const fn arith(oid: Oid, name: &'static str, width: ArithWidth, op: ArithKind, cov: &'static [TierCov]) -> BatchFn {
@@ -564,6 +579,17 @@ const fn fold_cov2(oid: Oid, name: &'static str, kind: FoldKind) -> BatchFn {
 
 const fn fold_str(oid: Oid, name: &'static str, kind: FoldKind) -> BatchFn {
     BatchFn { oid, name, shape: Shape::Fold(kind), cov: COV_FOLD_TEXTFOLD }
+}
+
+// fold-trans tier (lane-v2-lanefold-trans, knob-gated default OFF):
+// ORDER-PRESERVING float folds. The kernel applies C's exact checked per-row
+// op in row order (no reassociation), so overflow ereports fire inline on
+// C's row — no guard interval, no demote, no replay.
+const COV_FOLD_TRANS: &[TierCov] =
+    &[TierCov::intree(Tier::Fold, GuardTier::ExactOp, CollGate::NotApplicable)];
+
+const fn fold_trans(oid: Oid, name: &'static str, kind: FoldKind) -> BatchFn {
+    BatchFn { oid, name, shape: Shape::Fold(kind), cov: COV_FOLD_TRANS }
 }
 
 // ---------------------------------------------------------------------------
