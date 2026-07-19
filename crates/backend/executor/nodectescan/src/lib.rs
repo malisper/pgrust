@@ -55,36 +55,33 @@ impl<'mcx> ScanNode<'mcx> for CteScanState<'mcx> {
 }
 
 impl<'mcx> CteScanState<'mcx> {
+    /// Forward-only (backward-execution wave B9): C nodeCtescan.c's backward
+    /// arms - the `!forward && eof_tuplestore` skip-back and the
+    /// direction-aware tuplestore_gettupleslot - are deleted; the run seam
+    /// refuses backward entry (deletion-prep B1). The SHARED tuplestore's
+    /// own backward capability stays (rider row 12 - the store serve path;
+    /// sibling CteScans re-read it via their own read pointers, forward).
     fn next_inner(
         &mut self,
         shared: &mut CteShared,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<bool> {
-        let forward =
-            matches!(estate.es_direction, ::types_scan::ScanDirection::ForwardScanDirection);
+        debug_assert!(
+            ::types_scan::sdir::ScanDirectionIsForward(estate.es_direction),
+            "backward drive below the forward-only run seam (deletion-prep B1)"
+        );
         let mcx = estate.es_query_cxt;
         let ts = &mut shared.tuplestore;
         ts.select_read_pointer(self.readptr)?;
 
         let mut eof_tuplestore = ts.ateof();
-        if !forward && eof_tuplestore {
-            if !shared.eof_cte {
-                panic!(
-                    "CteScanNext (nodeCtescan.c): backward fetch at tuplestore EOF \
-                     (tuplestore_advance) not ported — cursor lane"
-                );
-            }
-            eof_tuplestore = false;
-        }
 
         if !eof_tuplestore {
             let slot = estate.slot_mut(self.ss.ss_ScanTupleSlot);
-            if ts.gettupleslot(forward, true, slot, mcx)? {
+            if ts.gettupleslot(true, true, slot, mcx)? {
                 return Ok(true);
             }
-            if forward {
-                eof_tuplestore = true;
-            }
+            eof_tuplestore = true;
         }
 
         if eof_tuplestore && !shared.eof_cte {
