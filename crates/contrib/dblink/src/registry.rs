@@ -232,14 +232,17 @@ pub fn get_connect_string(mcx: mcx::Mcx<'_>, servername: &str) -> PgResult<Optio
     }
 
     let mut buf = String::new();
+    // C get_connect_string reads strVal(def->arg) unconditionally; catalog
+    // options always carry values (grammar-enforced), so a NULL here is the
+    // hand-built-text[] path C would crash on — error loudly instead.
     for opt in fdw.options.iter() {
-        append_opt(&mut buf, opt.name, opt.value, crate::fdw::FDW_CONTEXT);
+        append_opt(&mut buf, opt.name, opt.require_value()?, crate::fdw::FDW_CONTEXT);
     }
     for opt in server.options.iter() {
-        append_opt(&mut buf, opt.name, opt.value, crate::fdw::SERVER_CONTEXT);
+        append_opt(&mut buf, opt.name, opt.require_value()?, crate::fdw::SERVER_CONTEXT);
     }
     for opt in mapping.options.iter() {
-        append_opt(&mut buf, opt.name, opt.value, crate::fdw::USER_MAPPING_CONTEXT);
+        append_opt(&mut buf, opt.name, opt.require_value()?, crate::fdw::USER_MAPPING_CONTEXT);
     }
     Ok(Some(buf))
 }

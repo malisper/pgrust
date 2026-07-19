@@ -404,8 +404,12 @@ fn make_new_connection<'mcx>(
     Ok(())
 }
 
-fn def_get_boolean(value: &str) -> bool {
-    matches!(value.to_ascii_lowercase().as_str(), "true" | "t" | "on" | "1" | "yes" | "y")
+fn def_get_boolean(value: Option<&str>) -> bool {
+    // C defGetBoolean: a DefElem with a NULL arg means true.
+    match value {
+        None => true,
+        Some(v) => matches!(v.to_ascii_lowercase().as_str(), "true" | "t" | "on" | "1" | "yes" | "y"),
+    }
 }
 
 // connect_pg_server: assemble libpq options (server options, then
@@ -420,12 +424,12 @@ fn connect_pg_server<'mcx>(
     let mut opts: Vec<(String, String)> = Vec::new();
     for opt in server.options.iter() {
         if crate::option::is_libpq_option(opt.name) {
-            opts.push((opt.name.to_string(), opt.value.to_string()));
+            opts.push((opt.name.to_string(), opt.require_value()?.to_string()));
         }
     }
     for opt in user.options.iter() {
         if crate::option::is_libpq_option(opt.name) {
-            opts.push((opt.name.to_string(), opt.value.to_string()));
+            opts.push((opt.name.to_string(), opt.require_value()?.to_string()));
         }
     }
     // postgres_fdw.application_name GUC overrides any connection option.
