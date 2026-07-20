@@ -328,6 +328,14 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
         ExitPostmaster(2);
     }
 
+    // pgrust public-release memory auto-tune (PGRUST_MEM_AUTOTUNE, default OFF):
+    // install machine-scaled shared_buffers / work_mem / effective_cache_size /
+    // maintenance_work_mem / parallel-worker defaults at PGC_S_DYNAMIC_DEFAULT.
+    // Runs after the config file (so an explicit setting still wins) and before
+    // shmem sizing locks in NBuffers. No-op unless PGRUST_MEM_AUTOTUNE is set,
+    // keeping the byte-identical pg_settings/SHOW ALL conformance output.
+    guc::autotune::apply_memory_autotune()?;
+
     if let Some(name) = output_config_variable.as_deref() {
         // GUC_RUNTIME_COMPUTED split: runtime-computed -C values print after
         // shmem sizing in C; the flags probe joins with the guc-funcs unit.
