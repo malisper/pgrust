@@ -5,6 +5,7 @@
 // the store uses std String/Vec on mimalloc — the same cost shape.
 
 pub mod array;
+pub mod autotune;
 pub mod cnum;
 pub mod enum_lookup;
 pub mod layers;
