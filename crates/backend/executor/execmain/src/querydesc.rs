@@ -162,7 +162,36 @@ fn register(qd: QueryDescData) -> QueryDescHandle {
 
 // The entry stays in place; nested executor runs (SQL functions) register and
 // free their own boxed entries freely. Re-entry on the SAME handle panics.
+//
+// De-monomorphization byte-shell (cf. the nodes_core walker/mutator de-monos):
+// this generic fn is now a thin ~5-line shell that type-erases the caller's
+// closure to a single `&mut dyn FnMut` and delegates to the one monomorphic
+// engine `with_qd_dyn`. The acquire/guard/release body (TLS lookup, stale +
+// re-entry asserts, the `Unuse` in-use guard) is codegen'd exactly once instead
+// of being re-stamped per distinct closure type at each of the ~60 callsites.
+// The public signature (`<R>`, `impl FnOnce(&mut QueryDescData) -> R`, `-> R`)
+// is unchanged, so every caller compiles untouched. Cold path: once per
+// ExecutorStart/Run/Finish/End and per QueryDesc accessor, never per row — the
+// extra indirect call and `Option` move are query setup/teardown, not the row
+// loop.
 pub fn with_qd<R>(h: QueryDescHandle, f: impl FnOnce(&mut QueryDescData) -> R) -> R {
+    let mut f = Some(f);
+    let mut ret: Option<R> = None;
+    // `with_qd_dyn` invokes the closure exactly once on the success path (and
+    // never on the panic paths), so `f.take()` and the final `unwrap()` cannot
+    // fail: `ret` is `Some` iff control reaches here without unwinding.
+    with_qd_dyn(h, &mut |qd| {
+        ret = Some((f.take().unwrap())(qd));
+    });
+    ret.unwrap()
+}
+
+// Monomorphic engine: the caller's closure is type-erased to `&mut dyn FnMut`,
+// so this body is emitted a single time. Statement-for-statement identical to
+// the former `with_qd` body (same asserts, same messages, same TLS access, same
+// `Unuse` guard, `f` called exactly once at the same point); only the closure's
+// type-erasure and the result-return move up into the shell above.
+fn with_qd_dyn(h: QueryDescHandle, f: &mut dyn FnMut(&mut QueryDescData)) {
     assert!(!h.is_null(), "execmain: NULL QueryDescHandle dereferenced");
     let (idx, generation) = decode(h);
     let ptr: *mut Entry = ENTRIES.with(|e| {
@@ -188,7 +217,7 @@ pub fn with_qd<R>(h: QueryDescHandle, f: impl FnOnce(&mut QueryDescData) -> R) -
     let _guard = Unuse(ptr);
     // SAFETY: boxed entry is address-stable across nested register/free; the
     // in_use flag excludes re-entry and remove(), so this is the only &mut.
-    f(unsafe { &mut (*ptr).qd })
+    f(unsafe { &mut (*ptr).qd });
 }
 
 pub fn registry_len() -> usize {
