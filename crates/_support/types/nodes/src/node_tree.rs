@@ -1,7 +1,8 @@
+use core::alloc::Layout;
 use core::marker::PhantomData;
 use core::ptr::NonNull;
 
-use mcx::{alloc_in, leak_in, Mcx};
+use mcx::Mcx;
 use types_error::PgResult;
 
 use crate::bitmapset::Bitmapset;
@@ -13,6 +14,20 @@ use crate::tags::NodeTag;
 pub(crate) struct NodeRep<T> {
     tag: NodeTag,
     pub(crate) payload: T,
+}
+
+// Thin generic shell over the non-generic `alloc_uninit_bytes`: only the const
+// layout and the single init write are emitted per T; the backend alloc
+// dispatch is shared. Callers assert `!needs_drop::<T>()`.
+#[inline]
+fn mk_rep<'mcx, T>(mcx: Mcx<'mcx>, tag: NodeTag, payload: T) -> PgResult<NonNull<NodeRep<T>>> {
+    let rep = mcx
+        .alloc_uninit_bytes(Layout::new::<NodeRep<T>>())
+        .map_err(|_| mcx.oom(core::mem::size_of::<NodeRep<T>>()))?
+        .cast::<NodeRep<T>>();
+    // SAFETY: fresh uninit arena bytes sized/aligned for `NodeRep<T>`; one init write.
+    unsafe { rep.as_ptr().write(NodeRep { tag, payload }) };
+    Ok(rep)
 }
 
 /// Opaque tagged node handle: one arena pointer, inspected via `node_tag()` /
@@ -109,9 +124,9 @@ unsafe impl<'mcx> NodeVariant<'mcx> for Bitmapset<'mcx> {
 impl<'mcx> Node<'mcx> {
     pub fn mk<T: NodeVariant<'mcx>>(mcx: Mcx<'mcx>, payload: T) -> PgResult<Node<'mcx>> {
         const { assert!(!core::mem::needs_drop::<T>()) };
-        // `&mut`, not `&`: `p` must retain write provenance for `with_mut`.
-        let rep = leak_in(alloc_in(mcx, NodeRep { tag: T::TAG, payload })?);
-        Ok(Node { p: NonNull::from(rep).cast(), _arena: PhantomData })
+        // `p` retains write provenance for `with_mut` (came from a `&mut` slot).
+        let rep = mk_rep(mcx, T::TAG, payload)?;
+        Ok(Node { p: rep.cast(), _arena: PhantomData })
     }
 
     /// C `makeNode(T)` (palloc0 + tag): zeroed payload, mutable until sealed.
@@ -121,8 +136,9 @@ impl<'mcx> Node<'mcx> {
 
     pub fn mk_mut<T: NodeVariant<'mcx>>(mcx: Mcx<'mcx>, payload: T) -> PgResult<NodeMut<'mcx, T>> {
         const { assert!(!core::mem::needs_drop::<T>()) };
-        let rep = leak_in(alloc_in(mcx, NodeRep { tag: T::TAG, payload })?);
-        Ok(NodeMut { rep })
+        let rep = mk_rep(mcx, T::TAG, payload)?;
+        // SAFETY: fresh, uniquely-owned arena `NodeRep<T>` initialized below.
+        Ok(NodeMut { rep: unsafe { &mut *rep.as_ptr() } })
     }
 
     #[inline]

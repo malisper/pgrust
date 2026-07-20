@@ -1238,6 +1238,13 @@ impl<'mcx> Mcx<'mcx> {
     pub fn oom(self, request: usize) -> PgError {
         self.0.oom(request)
     }
+
+    // De-mono shell: backend dispatch emitted ONCE out of line, not inlined per
+    // generic T. Hot per-tuple allocs keep the inline `Allocator::allocate` lane.
+    #[inline(never)]
+    pub fn alloc_uninit_bytes(self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
+        Allocator::allocate(&self, layout).map(|p| p.cast::<u8>())
+    }
 }
 
 impl fmt::Debug for Mcx<'_> {
@@ -1652,9 +1659,16 @@ pub fn vec_with_capacity_in<'mcx, T>(mcx: Mcx<'mcx>, cap: usize) -> PgResult<PgV
     const { assert!(!core::mem::needs_drop::<T>()) };
     let request = cap.saturating_mul(core::mem::size_of::<T>());
     check_alloc_size(request)?;
-    let mut v = PgVec::new_in(mcx);
-    v.try_reserve_exact(cap).map_err(|_| mcx.oom(request))?;
-    Ok(v)
+    if cap == 0 || core::mem::size_of::<T>() == 0 {
+        return Ok(PgVec::new_in(mcx));
+    }
+    // Thin shell: alloc via non-generic `alloc_uninit_bytes` (no per-T grow machinery).
+    let layout = core::alloc::Layout::array::<T>(cap).map_err(|_| mcx.oom(request))?;
+    let p = mcx.alloc_uninit_bytes(layout).map_err(|_| mcx.oom(request))?;
+    // SAFETY: `p` is a fresh arena allocation of exactly `Layout::array::<T>(cap)`
+    // bytes from `mcx`; len 0 with capacity `cap` (the same layout Vec recomputes
+    // on grow/drop), matching this allocator.
+    Ok(unsafe { PgVec::from_raw_parts_in(p.cast::<T>().as_ptr(), 0, cap, mcx) })
 }
 
 /// C `MemoryContextAllocExtended(.., MCXT_ALLOC_HUGE)` sizing rules: the
