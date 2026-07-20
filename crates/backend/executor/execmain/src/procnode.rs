@@ -1514,10 +1514,11 @@ type ProcResult = PgResult<Option<ExecSlotId>>;
 // behavior-identical to today at default config by construction. These
 // knobs die only at P3, each with its arm's body (flip-ladder §5) — arm #5
 // SORT_FEED passed P3 (se/deletion-prep C1: knob + body deleted; the
-// `PGRUST_FUSED_ARM_SORT_FEED` spelling is now inert env), and arm #2
-// AGG_INDEX passed P3 (se/deletion-prep SE-AGG arm-deletions: knob + body
-// deleted, the lane agg-over-index_source seam re-drives it; the
-// `PGRUST_FUSED_ARM_AGG_INDEX` spelling is now inert env). Registry:
+// `PGRUST_FUSED_ARM_SORT_FEED` spelling is now inert env), and arms #2
+// AGG_INDEX + #3 AGG_IOS passed P3 (se/deletion-prep SE-AGG arm-deletions:
+// knob + body deleted, the lane agg-over-index_source / index_only_source
+// seams re-drive them; the `PGRUST_FUSED_ARM_AGG_INDEX` and
+// `PGRUST_FUSED_ARM_AGG_IOS` spellings are now inert env). Registry:
 // notes/se-phase0-integration.md R-KNOBS
 // (`PGRUST_FUSED_ARM_<NAME>` family, WS-P).
 //
@@ -1527,16 +1528,15 @@ type ProcResult = PgResult<Option<ExecSlotId>>;
 // ===========================================================================
 
 /// The surviving fused arms, flip-ladder §5 table order (arm #5 SORT_FEED
-/// deleted at P3 — se/deletion-prep C1; arm #2 AGG_INDEX deleted at P3 —
-/// se/deletion-prep SE-AGG arm-deletions; each knob died with the body).
-/// Discriminant = the per-arm cell index.
+/// deleted at P3 — se/deletion-prep C1; arms #2 AGG_INDEX + #3 AGG_IOS
+/// deleted at P3 — se/deletion-prep SE-AGG arm-deletions; each knob died
+/// with the body). Discriminant = the per-arm cell index.
 #[derive(Clone, Copy)]
 enum FusedArm {
     AggSeq = 0,
-    AggIos = 1,
-    AggBitmap = 2,
-    HashBuildProj = 3,
-    HashBuild = 4,
+    AggBitmap = 1,
+    HashBuildProj = 2,
+    HashBuild = 3,
 }
 
 impl FusedArm {
@@ -1544,7 +1544,6 @@ impl FusedArm {
     fn env_suffix(self) -> &'static str {
         match self {
             FusedArm::AggSeq => "AGG_SEQ",
-            FusedArm::AggIos => "AGG_IOS",
             FusedArm::AggBitmap => "AGG_BITMAP",
             FusedArm::HashBuildProj => "HASH_BUILD_PROJ",
             FusedArm::HashBuild => "HASH_BUILD",
@@ -1556,8 +1555,8 @@ impl FusedArm {
 /// forced OFF (`=0`/`off`), 2 = ON (the default). The rowmode.rs AtomicU8
 /// idiom, one cell per arm so a forced-off arm never perturbs another's
 /// resolve.
-static FUSED_ARMS: [core::sync::atomic::AtomicU8; 5] =
-    [const { core::sync::atomic::AtomicU8::new(0) }; 5];
+static FUSED_ARMS: [core::sync::atomic::AtomicU8; 4] =
+    [const { core::sync::atomic::AtomicU8::new(0) }; 4];
 
 /// The P2 gate read: `true` = the fused arm may engage (today's behavior).
 #[inline]
@@ -1588,7 +1587,6 @@ pub(crate) fn fused_arm_set_for_tests(env_suffix: &str, on: bool) {
     use core::sync::atomic::Ordering::Relaxed;
     let arm = [
         FusedArm::AggSeq,
-        FusedArm::AggIos,
         FusedArm::AggBitmap,
         FusedArm::HashBuildProj,
         FusedArm::HashBuild,
@@ -1956,35 +1954,24 @@ fn agg_arm<'mcx>(
                     return Ok(r);
                 }
             }
-            // P2 gate (flip-ladder §5 arm #3): PGRUST_FUSED_ARM_AGG_IOS.
-            // P3 note: this knob can never take `exec_agg_batched` with it —
-            // the WS-F seam re-drives the same kernel (indexsource.rs:387).
-            // SE-AGGIOS refuse-parity leg: `ioss_OrderByKeys.is_empty()` is
-            // PROVABLY DEAD given the btree leg below — the planner builds
-            // order-by-op (KNN) pathkeys only behind `amcanorderbyop`
-            // (indxpath.rs), which plancat.rs grants to gist/spgist/hnsw
-            // and NEVER btree — but it makes the AGG_IOS deletion-prep
-            // caller re-trace textual: the batch drive skips the
-            // lossy-distance check, so an OrderBy shape must land on
-            // per-tuple (`scan_next`, the reorder-checked route), the same
-            // NAMED route the lane feed's OrderByReorder refusal takes.
-            if fused_arm_enabled(FusedArm::AggIos)
-                && agg_fusible_common(agg, estate)
-                && ios.ss.qual.is_none()
-                && ios.ss.ps_ProjInfo.is_none()
-                && ios.ioss_Runtime.is_none()
-                && ios.ioss_OrderByKeys.is_empty()
-                && ::types_scan::sdir::ScanDirectionIsForward(ios.ioss_OrderDir)
-                && ios
-                    .ioss_RelationDesc
-                    .as_ref()
-                    .is_some_and(|r| r.rd_rel.relam == ::types_core::BTREE_AM_OID)
-            {
-                let ios = &mut **ios;
-                let outer_slot = ios.ss.ss_ScanTupleSlot;
-                let src = IndexOnlyScanBatchSource { ios, outer_slot };
-                return ::nodeagg::exec_agg_batched(agg, estate, src);
-            }
+            // Fused arm #3 (AGG_IOS, flip-ladder §5 / PGRUST_FUSED_ARM_AGG_IOS)
+            // DELETED — se/deletion-prep SE-AGG arm-deletions. The WS-F
+            // agg-over-index_only_source lane seam above re-drives the SAME
+            // `exec_agg_batched` kernel over the SAME node primitives,
+            // byte-identically (default ON, PGRUST_LANE_V2_INDEXSOURCE since
+            // the SE17-GATES flip). RB-C1 superset re-trace
+            // (docs/design/se-deletion-runbook.md §5 item 3):
+            // `index_only_scan_refuse_reason_ex`'s admission is a SUPERSET of
+            // the old fused gate at defaults — Epq / MVCC / qual-proj /
+            // runtime-keys / order-by-reorder / desc-order / non-btree map
+            // 1:1; the fused arm's uninstrumented-only surface is preserved
+            // (Instrumented children never reach this concrete IndexOnlyScan
+            // match, and the agg_arm peel covers only SeqScan/Sort);
+            // ScrollMark closed by B2 (SCROLL eflags fence down); ParallelGate
+            // + zero-block-geometry closed by the SE-AGGIOS increment
+            // (INDEXSOURCE_PAR, default ON). Refused shapes fall to the
+            // UNCHANGED per-tuple `exec_agg` tail below — a correct fallback
+            // either way.
         }
         PlanStateNode::BitmapHeapScan(b) => {
             let b = &mut **b;
@@ -2367,33 +2354,9 @@ impl<'mcx> ::nodehash::HashBuildBatchSource<'mcx> for SeqScanProjBatchSource<'_,
 // consumer was that arm; the lane's SeamIndexAggSource (indexsource.rs)
 // re-drives the same primitives now.
 
-struct IndexOnlyScanBatchSource<'a, 'mcx> {
-    ios: &'a mut ::nodeindexonlyscan::IndexOnlyScanState<'mcx>,
-    outer_slot: ExecSlotId,
-}
-
-impl<'mcx> ::nodeagg::AggBatchSource<'mcx> for IndexOnlyScanBatchSource<'_, 'mcx> {
-    #[inline]
-    fn next_batch(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<u32> {
-        ::nodeindexonlyscan::index_only_scan_batch_next(self.ios, estate)
-    }
-
-    #[inline]
-    fn fetch_tuple(&mut self, _i: u32, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
-        ::nodeindexonlyscan::index_only_scan_batch_store(self.ios, estate)
-    }
-
-    #[inline]
-    fn outer_slot(&self) -> ExecSlotId {
-        self.outer_slot
-    }
-
-    // next_batch returns visible rows only: the storeless drain is sound.
-    #[inline]
-    fn has_qual(&self) -> bool {
-        false
-    }
-}
+// IndexOnlyScanBatchSource DELETED with fused arm #3 (AGG_IOS): its sole
+// consumer was that arm; the lane's SeamAggSource over IndexOnlyScanSource
+// (indexsource.rs) re-drives the same primitives now.
 
 struct BitmapScanBatchSource<'a, 'mcx> {
     bhs: &'a mut ::nodebitmapheapscan::BitmapHeapScanState<'mcx>,
@@ -4171,13 +4134,12 @@ mod fused_arm_tests {
     /// by default (env absent in the test process), the test lever flips a
     /// single arm without perturbing the others, and the spellings are the
     /// surviving flip-ladder names exactly (SORT_FEED deleted at P3 —
-    /// se/deletion-prep C1; AGG_INDEX deleted at P3 — se/deletion-prep
-    /// SE-AGG arm-deletions).
+    /// se/deletion-prep C1; AGG_INDEX + AGG_IOS deleted at P3 —
+    /// se/deletion-prep SE-AGG arm-deletions).
     #[test]
     fn fused_arm_knobs_default_on_and_isolate() {
-        const ARMS: [FusedArm; 5] = [
+        const ARMS: [FusedArm; 4] = [
             FusedArm::AggSeq,
-            FusedArm::AggIos,
             FusedArm::AggBitmap,
             FusedArm::HashBuildProj,
             FusedArm::HashBuild,
@@ -4185,13 +4147,7 @@ mod fused_arm_tests {
         let names: Vec<&str> = ARMS.iter().map(|a| a.env_suffix()).collect();
         assert_eq!(
             names,
-            [
-                "AGG_SEQ",
-                "AGG_IOS",
-                "AGG_BITMAP",
-                "HASH_BUILD_PROJ",
-                "HASH_BUILD"
-            ]
+            ["AGG_SEQ", "AGG_BITMAP", "HASH_BUILD_PROJ", "HASH_BUILD"]
         );
         for arm in ARMS {
             assert!(
@@ -4200,12 +4156,12 @@ mod fused_arm_tests {
                 arm.env_suffix()
             );
         }
-        fused_arm_set_for_tests("AGG_IOS", false);
-        assert!(!fused_arm_enabled(FusedArm::AggIos));
-        for arm in [FusedArm::AggSeq, FusedArm::HashBuild, FusedArm::AggBitmap] {
+        fused_arm_set_for_tests("AGG_BITMAP", false);
+        assert!(!fused_arm_enabled(FusedArm::AggBitmap));
+        for arm in [FusedArm::AggSeq, FusedArm::HashBuild, FusedArm::HashBuildProj] {
             assert!(fused_arm_enabled(arm), "force-off must not leak across arms");
         }
-        fused_arm_set_for_tests("AGG_IOS", true);
-        assert!(fused_arm_enabled(FusedArm::AggIos));
+        fused_arm_set_for_tests("AGG_BITMAP", true);
+        assert!(fused_arm_enabled(FusedArm::AggBitmap));
     }
 }
