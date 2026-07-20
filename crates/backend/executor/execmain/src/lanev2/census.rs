@@ -135,7 +135,7 @@ pub(crate) fn census_armed() -> bool {
 /// default; dualexec/e2e channels only.
 fn assert_covered_armed() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         matches!(
             std::env::var("PGRUST_LANE_V2_ASSERT_COVERED").as_deref(),
             Ok("1") | Ok("on")

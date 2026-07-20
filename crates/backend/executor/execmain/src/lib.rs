@@ -9,6 +9,26 @@ use std::cell::Cell;
 use ::mcx::{Mcx, MemoryContext};
 use ::types_error::PgResult;
 
+/// De-monomorphization shim for the process-static `OnceLock<T>` env/config
+/// gate cluster (execmain TLS/OnceLock bloat, ~5.4% of the crate's pre-opt
+/// IR). Each `*CELL.get_or_init(|| ...)` call site otherwise instantiates a
+/// fresh closure type `F`, forcing `OnceLock::<T>::get_or_init::<F>` /
+/// `get_or_try_init` / `initialize` / `Once::call_once_force` to be
+/// monomorphized once *per call site* (~132 copies for ~27 distinct `T`).
+/// Routing every Copy-valued gate through this shim passes a *function
+/// pointer* `fn() -> T` — one witness type shared by all call sites — so
+/// those std helpers collapse to one copy per `T`.
+///
+/// Behaviour-identical by construction: the gate closures are all
+/// non-capturing (a capturing closure cannot coerce to `fn() -> T`, so the
+/// compiler rejects any accidental capture), the init runs exactly once with
+/// the same value and the same ordering, and `T: Copy` matches the existing
+/// deref-copy (`*cell.get_or_init(..)`) these sites already performed.
+#[inline]
+pub(crate) fn once_val<T: Copy>(cell: &'static std::sync::OnceLock<T>, init: fn() -> T) -> T {
+    *cell.get_or_init(init)
+}
+
 mod epq;
 mod execami;
 mod execcurrent;

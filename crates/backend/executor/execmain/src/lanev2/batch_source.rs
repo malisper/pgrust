@@ -130,7 +130,7 @@ pub(crate) fn heapfeed_set_for_tests(on: bool) {
 /// under a partition lock — fleet-measured before any default flip.
 pub(super) fn heapfeed_readahead_depth() -> u32 {
     static DEPTH: OnceLock<u32> = OnceLock::new();
-    *DEPTH.get_or_init(|| {
+    crate::once_val(&DEPTH, || {
         std::env::var("PGRUST_LANE_V2_HEAPFEED_READAHEAD")
             .ok()
             .and_then(|v| v.trim().parse::<u32>().ok())
@@ -195,7 +195,7 @@ pub(crate) fn k1_latemat_set_for_tests(on: bool) {
 /// ≥ 1 row, so no estimate reads exactly 0).
 fn k1_sel_threshold() -> f64 {
     static THR: OnceLock<f64> = OnceLock::new();
-    *THR.get_or_init(|| {
+    crate::once_val(&THR, || {
         parse_k1_sel_threshold(std::env::var("PGRUST_LANE_V2_K1_SEL_THRESHOLD").ok().as_deref())
     })
 }
@@ -347,7 +347,7 @@ pub(super) fn k1_latemat_split(
 /// e2e/letter-grade, not corpus-grade).
 fn heap_gagg_floor() -> f64 {
     static FLOOR: OnceLock<f64> = OnceLock::new();
-    *FLOOR.get_or_init(|| {
+    crate::once_val(&FLOOR, || {
         parse_gagg_floor(std::env::var("PGRUST_LANE_V2_HEAP_GAGG_FLOOR").ok().as_deref())
     })
 }

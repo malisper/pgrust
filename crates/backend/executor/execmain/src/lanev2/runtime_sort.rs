@@ -1349,7 +1349,7 @@ fn ensure_hooks_registered() {
 /// armed; the runtime itself defaults OFF).
 fn runtime_sort_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_RUNTIME_SORT").as_deref(), Ok("0") | Ok("off"))
     })
 }
@@ -1372,7 +1372,7 @@ fn refused(reason: &'static str) {
 /// (default ON; layered under the arm-wide `PGRUST_RUNTIME_SORT`).
 fn runtime_sort_full_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_RUNTIME_SORT_FULL").as_deref(), Ok("0") | Ok("off"))
     })
 }
@@ -1382,7 +1382,7 @@ fn runtime_sort_full_enabled() -> bool {
 /// every other admission are untouched.
 fn runtime_sort_dictcode_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_RUNTIME_SORT_DICTCODE").as_deref(), Ok("0") | Ok("off"))
     })
 }

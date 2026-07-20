@@ -698,7 +698,7 @@ fn helper_drive_entry(payload: &Arc<RuntimeScanShared>) -> PgResult<()> {
 /// PGRUST_RUNTIME_ENTRY_DRIVE=0 restores the M1 POST_TASK_PARK drive.
 fn entry_drive_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         std::env::var("PGRUST_RUNTIME_ENTRY_DRIVE").map_or(true, |v| v.trim() != "0")
     })
 }
@@ -712,7 +712,7 @@ fn entry_drive_enabled() -> bool {
 /// are one board each per the rollout ladder. Read once.
 fn caller_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         matches!(std::env::var("PGRUST_RUNTIME_CALLER").as_deref(), Ok("1") | Ok("on"))
     })
 }
@@ -729,7 +729,7 @@ fn caller_enabled() -> bool {
 /// inc-1 ruling.
 fn caller_c2_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         matches!(std::env::var("PGRUST_RUNTIME_CALLER_C2").as_deref(), Ok("1") | Ok("on"))
     })
 }
@@ -1275,7 +1275,7 @@ fn mark_self_errored() {
 
 fn wfin_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("PGRUST_WFIN").map_or(false, |v| v.trim() == "1"))
+    crate::once_val(&ON, || std::env::var("PGRUST_WFIN").map_or(false, |v| v.trim() == "1"))
 }
 
 /// This worker's pgrcolumnar drive counters (rg_switches, dict_builds,
@@ -1666,7 +1666,7 @@ fn ensure_hooks_registered() {
 /// PGRUST_RUNTIME_CENSUS_BITSONLY=0 restores the materializing PREWHERE arm.
 fn census_bits_only_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         std::env::var("PGRUST_RUNTIME_CENSUS_BITSONLY").map_or(true, |v| v.trim() != "0")
     })
 }
@@ -2050,7 +2050,7 @@ impl runtime::MorselSource for PgrcolumnarGranuleSource {
 /// (`PgrcolumnarGranuleSource`) reads are observationally identical.
 pub(super) fn whole_claims() -> bool {
     static SPLIT: OnceLock<bool> = OnceLock::new();
-    !*SPLIT.get_or_init(|| {
+    !crate::once_val(&SPLIT, || {
         std::env::var("PGRUST_RUNTIME_SPLIT_CLAIMS").map_or(false, |v| v.trim() == "1")
     })
 }
@@ -2143,7 +2143,7 @@ pub(super) fn exprs_parallel_safe<'mcx>(nodes: impl Iterator<Item = Node<'mcx>>)
 /// outright and launching helpers is pure overhead.
 pub(super) fn min_granules() -> u64 {
     static N: OnceLock<u64> = OnceLock::new();
-    *N.get_or_init(|| {
+    crate::once_val(&N, || {
         std::env::var("PGRUST_RUNTIME_SCAN_MIN_GRANULES")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
@@ -2174,7 +2174,7 @@ pub(super) fn elastic_dop(dop: i32, total_granules: u64) -> i32 {
         return dop;
     }
     static GPW: OnceLock<Option<u64>> = OnceLock::new();
-    let gpw = *GPW.get_or_init(|| {
+    let gpw = crate::once_val(&GPW, || {
         if std::env::var("PGRUST_RUNTIME_ELASTIC_DOP").is_ok_and(|v| v.trim() == "0") {
             return None;
         }
@@ -2197,7 +2197,7 @@ pub(super) fn elastic_dop(dop: i32, total_granules: u64) -> i32 {
 /// switch.
 fn rowdrive_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         std::env::var("PGRUST_RUNTIME_ROWDRIVE").map_or(true, |v| v.trim() != "0")
     })
 }
@@ -2208,7 +2208,7 @@ fn rowdrive_enabled() -> bool {
 /// the e2e tranche forces it down to exercise engagement.
 fn rowdrive_min_blocks() -> u64 {
     static N: OnceLock<u64> = OnceLock::new();
-    *N.get_or_init(|| {
+    crate::once_val(&N, || {
         std::env::var("PGRUST_RUNTIME_ROWDRIVE_MIN_BLOCKS")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
@@ -2962,7 +2962,7 @@ fn standing_claim_deadline() -> std::time::Duration {
     // DST P2 (contract §1.3, census erratum (a)): this deadline is
     // BEHAVIORAL (changes execution path) — its clock is pg_clock, below.
     static MS: OnceLock<u64> = OnceLock::new();
-    std::time::Duration::from_millis(*MS.get_or_init(|| {
+    std::time::Duration::from_millis(crate::once_val(&MS, || {
         std::env::var("PGRUST_RUNTIME_GANG_CLAIM_MS")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())

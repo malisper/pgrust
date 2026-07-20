@@ -207,7 +207,7 @@ pub(crate) static INDEXSOURCE_OWNED_FOR_TESTS: std::sync::atomic::AtomicU64 =
 /// `RefuseReason::TinyInputFloor` per refused offer and traces the estimate.
 fn indexsource_min_rows() -> f64 {
     static FLOOR: OnceLock<f64> = OnceLock::new();
-    *FLOOR.get_or_init(|| {
+    crate::once_val(&FLOOR, || {
         std::env::var("PGRUST_LANE_V2_INDEXSOURCE_MIN_ROWS")
             .ok()
             .and_then(|v| v.parse().ok())

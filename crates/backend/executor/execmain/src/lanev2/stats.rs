@@ -800,7 +800,7 @@ pub(super) fn stats_dir() -> Option<&'static PathBuf> {
 /// always-on is a ledgered measurement (WS-C inc-2).
 pub(super) fn coverage_armed() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         matches!(std::env::var("PGRUST_LANE_V2_COVERAGE").as_deref(), Ok("1") | Ok("on"))
     })
 }
@@ -848,7 +848,7 @@ pub(super) fn tick_refused(class: ShapeClass, reason: RefuseReason) {
 #[inline]
 pub(super) fn armed() -> bool {
     static ARMED: OnceLock<bool> = OnceLock::new();
-    *ARMED.get_or_init(|| stats_dir().is_some() || coverage_armed())
+    crate::once_val(&ARMED, || stats_dir().is_some() || coverage_armed())
 }
 
 // ---------------------------------------------------------------------------
