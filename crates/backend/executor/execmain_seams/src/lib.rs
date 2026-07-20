@@ -385,14 +385,12 @@ seam_core::seam!(
     pub fn cursor_store_armed_note()
 );
 
-seam_core::seam!(
-    // §3.3 refusal accounting (`cursor cursor-currentof-tidcapture`,
-    // RefuseReason 41): ticked once per fill-engine decision that routes a
-    // CURRENT-OF-eligible plan's store fill onto the row chain (fill_to's
-    // eligible branch — where the eligibility answer lives). Arms the
-    // reason-41 vocabulary minted RESERVED by WS-CB — CB review F1(c).
-    pub fn cursor_fill_tid_capture_refused()
-);
+// R1a (night/r1a-impl, §2a reason-41 completion): the §3.3
+// `cursor_fill_tid_capture_refused` accounting seam is RETIRED. Its sole
+// caller — fill_portal_store_to's row-chain arm B, with its post-run
+// `ss_ScanTupleSlot` read — was deleted; every CURRENT-OF-eligible fill now
+// captures identity IN-RUN (batch sink / capture row loop), so reason 41
+// never fires (stats.rs keeps the discriminant as an append-only TOMBSTONE).
 // --- end SEAM-WIRING -------------------------------------------------------------
 
 // --- SE-R41 (reason-41 retirement, se/r41-retire; notes/se-r41-retire.md) --------

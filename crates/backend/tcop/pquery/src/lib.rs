@@ -1365,11 +1365,13 @@ fn ensure_cursor_store(portal: &Portal<'static>) -> PgResult<()> {
 ///
 /// The fill's ExecutorRun goes through the standard run seam, so WS-AI's
 /// budget install arms it (`es_cursor_run_budget = Some(deficit)` — the
-/// WS-AI hand-off point). CURRENT-OF-eligible plans of the batch store-fill
-/// shape (SE-R41 `cursorCaptureBatch`) run ONE budgeted drive with in-run
-/// identity capture (sidecar-armed receiver); the remaining eligible shapes
-/// fill row-at-a-time with per-row identity capture into the sidecar
-/// (§3.3's mode choice inside a still-store-served cursor; fetch-invisible).
+/// WS-AI hand-off point). R1a (§2a reason-41 completion): EVERY
+/// CURRENT-OF-eligible plan runs ONE budgeted forward drive with the §4.2
+/// identity sidecar armed on the receiver — the identity is captured
+/// IN-RUN at the emit surface (batch sink for the lane-owned capture-batch
+/// cell; the run seam's capture row loop for every shape the D-CA-2 fence
+/// keeps on the row chain), never from a post-run `ss_ScanTupleSlot` read.
+/// The row-at-a-time arm-B loop (post-run capture) is retired.
 ///
 /// eof-pointer invariant (why appends are always visible to ptr0): the
 /// tuplestore keeps the ACTIVE eof reader at EOF across appends
@@ -1395,7 +1397,6 @@ pub fn fill_portal_store_to(portal: &Portal<'static>, target_rows: u64) -> PgRes
     let deficit = if target_rows == 0 { 0 } else { target_rows - have };
     let hold = (portal.borrow().cursorOptions & CURSOR_OPT_HOLD) != 0;
     let eligible = portal.borrow().currentOfEligible == Some(true);
-    let capture_batch = eligible && portal.borrow().cursorCaptureBatch;
     let tid_store = portal.borrow().cursorTidStore;
 
     let mut treceiver = tcop_dest::CreateDestReceiver(CommandDest::Tuplestore);
@@ -1408,18 +1409,49 @@ pub fn fill_portal_store_to(portal: &Portal<'static>, target_rows: u64) -> PgRes
     let snap = execmain_seams::query_desc_snapshot::call(query_desc)
         .expect("queryDesc->snapshot set while executor is active");
     snapmgr::PushActiveSnapshot(&snap)?;
-    if capture_batch {
-        // SE-R41 (notes/se-r41-retire.md §3.4): the capture-batch arm —
-        // ONE budgeted run for the whole fill; §4.2 identity is captured
-        // INSIDE the run (the sidecar-armed receiver: batch sink per
-        // accepted row, or the run seam's capture row loop when the batch
-        // fill refuses), so the per-row ExecutorRun(1) + post-run capture
-        // ceremony of the row-chain arm never runs here. deficit 0 (FETCH
-        // ALL / §2.4 persist) is spelled as a u64::MAX-count budgeted run:
-        // count semantics are identical for any count > rowcount, and the
-        // capture dispatch stays armed — a fill-to-EOF MUST still capture
-        // (MOVE BACKWARD after FETCH ALL resolves CURRENT OF from the
-        // sidecar).
+    if eligible {
+        // R1a (night/r1a-impl; §2a reason-41 completion): capture
+        // UNIVERSALISATION. EVERY CURRENT-OF-eligible cursor fills through
+        // ONE budgeted forward run with the §4.2 identity sidecar armed on
+        // the receiver — the old three-arm split (capture-batch sink vs.
+        // the row-chain arm-B loop) collapses to this single drive. The
+        // §4.2 identity is captured INSIDE the run, at the emit surface,
+        // regardless of which engine drove:
+        //  - a shape the lane OWNS (the capture-batch bare-heap SeqScan
+        //    cell — plain store-armed eflags at PortalStart, so its scan
+        //    inits `batch_allowed=true`) captures per accepted row in the
+        //    batch sink (SE-R41 v2, byte-proven);
+        //  - a shape the lane REFUSES (the D-CA-2 fence: PortalStart handed
+        //    it REWIND|BACKWARD eflags so its scan inits `batch_allowed=
+        //    false` — every eligible shape but the capture-batch cell while
+        //    the fence is UP) falls to the run seam's CAPTURE ROW LOOP
+        //    (execmain.rs), which appends the SAME `capture_positioned`
+        //    identity per emitted row, in-run, before the settle point.
+        // This replaces arm B's post-run `cursor_capture_current` read of
+        // `ss_ScanTupleSlot` — the single load-bearing hazard the study
+        // named. The fill is always ForwardScanDirection, so the WS-AI
+        // cursor budget installs unconditionally (cursor_admission_refusal
+        // admits every forward run), which is what arms the capture row
+        // loop for the refused shapes. The reason-41 tick is retired with
+        // arm B (the mechanism it accounted for no longer exists — the
+        // capture site is in-run, not fenced-to-the-row-chain).
+        //
+        // Cadence equivalence to the deleted arm B (see notes/r1a-impl.md):
+        // arm B did N x executor_run(1) + a post-run capture per run and
+        // set cursorFillExhausted when a run returned es_processed==0; this
+        // single run of count=deficit sets it via `nprocessed < deficit`.
+        // Both yield identical store rows, identical row-aligned sidecar
+        // tids (SAME capture_positioned source), and identical exhaustion:
+        //  R>=D  -> B breaks at filled==D (not exhausted); here nprocessed==D
+        //          (not exhausted).
+        //  R<D   -> B's (R+1)th run returns 0 (exhausted); here nprocessed<D
+        //          (exhausted).
+        //  D==0  -> both fill to EOF and mark exhausted.
+        // deficit 0 (FETCH ALL / §2.4 persist) is a u64::MAX-count budgeted
+        // run: count semantics are identical for any count > rowcount and
+        // the capture dispatch stays armed — a fill-to-EOF MUST still
+        // capture (MOVE BACKWARD after FETCH ALL resolves CURRENT OF from
+        // the sidecar).
         debug_assert!(!tid_store.is_null());
         tcop_dest::SetTuplestoreCaptureSidecar(&mut treceiver, tid_store);
         let effective = if deficit == 0 { u64::MAX } else { deficit };
@@ -1432,41 +1464,6 @@ pub fn fill_portal_store_to(portal: &Portal<'static>, target_rows: u64) -> PgRes
         let nprocessed = execmain_seams::query_desc_es_processed::call(query_desc);
         if deficit == 0 || nprocessed < deficit {
             portal.borrow_mut().cursorFillExhausted = true;
-        }
-    } else if eligible {
-        debug_assert!(!tid_store.is_null());
-        // SEAM-WIRING (SE10-GATES item 1): the §3.3 reason-41 accounting,
-        // armed — one tick per fill-engine decision that routes an eligible
-        // plan's fill onto the row chain (this branch; the eflags fence is
-        // the mechanism, the tick is its named accounting). Cadence: per
-        // fill_to call that drives the executor, never per row.
-        if execmain_seams::cursor_fill_tid_capture_refused::is_installed() {
-            execmain_seams::cursor_fill_tid_capture_refused::call();
-        }
-        // §4.2 capture reads the scan state per emitted row: single-row
-        // drives, identity appended sidecar-aligned with the store.
-        let mut filled: u64 = 0;
-        loop {
-            execmain_seams::executor_run::call(
-                query_desc,
-                ForwardScanDirection,
-                1,
-                &mut treceiver,
-            )?;
-            if execmain_seams::query_desc_es_processed::call(query_desc) == 0 {
-                portal.borrow_mut().cursorFillExhausted = true;
-                break;
-            }
-            let hit = execmain_seams::cursor_capture_current::call(query_desc)?;
-            // None (no positioned scan) stores an invalid identity so the
-            // sidecar stays row-aligned; resolution answers Ok(None) for it,
-            // C's empty-slot arm.
-            let (oid, packed) = hit.unwrap_or((0, 0));
-            tuplestore_hold_seams::tuplestore_tidstore_put::call(tid_store, oid, packed)?;
-            filled += 1;
-            if deficit != 0 && filled == deficit {
-                break;
-            }
         }
     } else {
         execmain_seams::executor_run::call(

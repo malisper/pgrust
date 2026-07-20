@@ -14865,7 +14865,7 @@ pub(crate) use push::{spi_admission_refusal_name, spi_set_for_tests};
 // assert arming note, the §3.3 tick face), re-exported at the crate root —
 // worklog notes/se-wave10-cb.md EX-CB-1. The pub(crate) faces are the run
 // seam's (execute_plan wave-10 CB sub-region) and the band-95001 units'.
-pub use push::{cursor_fill_tid_capture_refused, cursor_store_armed_note, cursor_store_fill_enabled};
+pub use push::{cursor_store_armed_note, cursor_store_fill_enabled};
 // SEAM-WIRING (SE10-GATES item 1): the portal-layer unit-test lever for THE
 // single knob cell (replaces the retired portalmem duplicate's
 // `cursor_store_set_for_tests`; pquery/portalcmds batteries reach it through

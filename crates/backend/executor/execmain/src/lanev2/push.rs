@@ -1677,21 +1677,15 @@ pub(crate) fn run_seam_backward_evidence_count() -> u64 {
     BACKWARD_RUNS.load(Relaxed)
 }
 
-/// The §3.3 refusal, WS-CA's tick face: a store fill over a
-/// CURRENT-OF-eligible plan (§4.1) uses the row-chain fill because the v1
-/// tid capture reads the scan state per row. ARMED (SEAM-WIRING): called
-/// through `execmain_seams::cursor_fill_tid_capture_refused` from
-/// `fill_portal_store_to`'s eligible branch — once per fill_to call that
-/// drives the executor (per FETCH-with-deficit; unbounded cadence like
-/// the spi scroll-mark precedent, never per row). The named follow-up
-/// retiring it (lane tid supply from WS-AH's batch rowref identity) is
-/// chartered in the contract, not implemented here.
-pub fn cursor_fill_tid_capture_refused() {
-    super::stats::tick_refused(
-        super::stats::ShapeClass::Cursor,
-        super::stats::RefuseReason::CursorCurrentOfTidCapture,
-    );
-}
+// R1a (night/r1a-impl, §2a reason-41 completion): the §3.3
+// `cursor_fill_tid_capture_refused` tick face is RETIRED. It accounted for
+// fill_portal_store_to routing a CURRENT-OF-eligible fill onto the row
+// chain so a POST-run `ss_ScanTupleSlot` read could capture identity (the
+// deleted arm B). Every eligible fill now captures IN-RUN (batch sink /
+// capture row loop), so that routing — and its accounting — no longer
+// exists. `RefuseReason::CursorCurrentOfTidCapture` (41) stays as an
+// append-only TOMBSTONE in stats.rs (NEVER-TICKING; the `cursor-scroll`
+// SUNSET precedent), and its `scripts/lane-gates.allowlist` row is removed.
 
 /// The batch store sink (§2.1, THE WS-CB core deliverable). Capacity-N push
 /// face over the fill run's `DestReceiver`: `accept` appends the produced
