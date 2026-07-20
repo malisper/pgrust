@@ -110,9 +110,29 @@ fn walk_opt_list<'mcx, W: NodeWalker<'mcx> + ?Sized>(
     Ok(false)
 }
 
-pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
+/// Thin generic wrapper — coerces the caller's concrete `W` to a single
+/// `&mut dyn NodeWalker` and delegates to the one monomorphic engine below.
+/// De-monomorphization "byte-shell" pattern (cf. the mutator half, af0dfc02d):
+/// N callsites each stamp out this ~3-line shell instead of a full ~1,600-line
+/// copy of the `NodeTag` match. Behavior is identical to a directly-generic
+/// body. `W: Sized` (was `?Sized`): every caller in-tree passes a concrete
+/// walker — no `dyn NodeWalker` exists anywhere — so the coercion is always
+/// available; the sole `?Sized` consumer (the trait default `visit_select_stmt_ref`)
+/// routes through `walk_select_stmt`, which stays generic.
+pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx>>(
     node: Node<'mcx>,
     w: &mut W,
+) -> PgResult<bool> {
+    expression_tree_walker_dyn(node, w)
+}
+
+/// Monomorphic engine: the walker is type-erased to `&mut dyn NodeWalker`, so
+/// this large `NodeTag` match is codegen'd exactly once regardless of how many
+/// distinct walker types call it. Cold (planner/rewriter/parser) path — the
+/// extra indirect call per child is planning-time only, not per-row.
+pub fn expression_tree_walker_dyn<'mcx>(
+    node: Node<'mcx>,
+    w: &mut dyn NodeWalker<'mcx>,
 ) -> PgResult<bool> {
     match node.node_tag() {
         NodeTag::T_Var
@@ -357,9 +377,19 @@ pub fn expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
     }
 }
 
-pub fn query_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
+/// Generic wrapper over the erased-walker engine (de-mono byte-shell).
+pub fn query_tree_walker<'mcx, W: NodeWalker<'mcx>>(
     query: &Query<'mcx>,
     w: &mut W,
+    flags: u32,
+) -> PgResult<bool> {
+    query_tree_walker_dyn(query, w, flags)
+}
+
+/// Monomorphic engine (single copy); see `expression_tree_walker_dyn`.
+pub fn query_tree_walker_dyn<'mcx>(
+    query: &Query<'mcx>,
+    w: &mut dyn NodeWalker<'mcx>,
     flags: u32,
 ) -> PgResult<bool> {
     if walk_list(&query.targetList, w)?
@@ -402,28 +432,48 @@ pub fn query_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
     if flags & QTW_IGNORE_CTE_SUBQUERIES == 0 && walk_list(&query.cteList, w)? {
         return Ok(true);
     }
-    if flags & QTW_IGNORE_RANGE_TABLE == 0 && range_table_walker(&query.rtable, w, flags)? {
+    if flags & QTW_IGNORE_RANGE_TABLE == 0 && range_table_walker_dyn(&query.rtable, w, flags)? {
         return Ok(true);
     }
     Ok(false)
 }
 
-pub fn range_table_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
+/// Generic wrapper over the erased-walker engine (de-mono byte-shell).
+pub fn range_table_walker<'mcx, W: NodeWalker<'mcx>>(
     rtable: &NodeList<'mcx>,
     w: &mut W,
     flags: u32,
 ) -> PgResult<bool> {
+    range_table_walker_dyn(rtable, w, flags)
+}
+
+/// Monomorphic engine (single copy); see `expression_tree_walker_dyn`.
+pub fn range_table_walker_dyn<'mcx>(
+    rtable: &NodeList<'mcx>,
+    w: &mut dyn NodeWalker<'mcx>,
+    flags: u32,
+) -> PgResult<bool> {
     for rte in rtable {
-        if range_table_entry_walker(rte, w, flags)? {
+        if range_table_entry_walker_dyn(rte, w, flags)? {
             return Ok(true);
         }
     }
     Ok(false)
 }
 
-pub fn range_table_entry_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
+/// Generic wrapper over the erased-walker engine (de-mono byte-shell).
+pub fn range_table_entry_walker<'mcx, W: NodeWalker<'mcx>>(
     rte_node: Node<'mcx>,
     w: &mut W,
+    flags: u32,
+) -> PgResult<bool> {
+    range_table_entry_walker_dyn(rte_node, w, flags)
+}
+
+/// Monomorphic engine (single copy); see `expression_tree_walker_dyn`.
+pub fn range_table_entry_walker_dyn<'mcx>(
+    rte_node: Node<'mcx>,
+    w: &mut dyn NodeWalker<'mcx>,
     flags: u32,
 ) -> PgResult<bool> {
     let rte: &RangeTblEntry<'mcx> = rte_node
@@ -467,13 +517,23 @@ pub fn range_table_entry_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
     Ok(false)
 }
 
-pub fn query_or_expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
+/// Generic wrapper over the erased-walker engine (de-mono byte-shell).
+pub fn query_or_expression_tree_walker<'mcx, W: NodeWalker<'mcx>>(
     node: Node<'mcx>,
     w: &mut W,
     flags: u32,
 ) -> PgResult<bool> {
+    query_or_expression_tree_walker_dyn(node, w, flags)
+}
+
+/// Monomorphic engine (single copy); see `expression_tree_walker_dyn`.
+pub fn query_or_expression_tree_walker_dyn<'mcx>(
+    node: Node<'mcx>,
+    w: &mut dyn NodeWalker<'mcx>,
+    flags: u32,
+) -> PgResult<bool> {
     match node.as_query() {
-        Some(q) => query_tree_walker(q, w, flags),
+        Some(q) => query_tree_walker_dyn(q, w, flags),
         None => w.visit(node),
     }
 }
@@ -537,9 +597,21 @@ pub fn walk_select_stmt<'mcx, W: NodeWalker<'mcx> + ?Sized>(
     Ok(false)
 }
 
-pub fn raw_expression_tree_walker<'mcx, W: NodeWalker<'mcx> + ?Sized>(
+/// Generic wrapper over the erased-walker engine (de-mono byte-shell).
+pub fn raw_expression_tree_walker<'mcx, W: NodeWalker<'mcx>>(
     node: Node<'mcx>,
     w: &mut W,
+) -> PgResult<bool> {
+    raw_expression_tree_walker_dyn(node, w)
+}
+
+/// Monomorphic engine (single copy); see `expression_tree_walker_dyn`. The
+/// `T_SelectStmt` arm delegates to `walk_select_stmt`, which stays generic
+/// (its `?Sized` is required by the `visit_select_stmt_ref` trait default);
+/// here it is instantiated once with `W = dyn NodeWalker`.
+pub fn raw_expression_tree_walker_dyn<'mcx>(
+    node: Node<'mcx>,
+    w: &mut dyn NodeWalker<'mcx>,
 ) -> PgResult<bool> {
     match node.node_tag() {
         NodeTag::T_JsonFormat
