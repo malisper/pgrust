@@ -33,12 +33,19 @@ pub struct ErrorLocation {
 }
 
 impl ErrorLocation {
-    #[cold]
+    /// Thin generic shell: only the two `.into()` conversions monomorphize per
+    /// caller type; the struct build lives once in the non-generic `new_impl`.
+    #[inline]
     pub fn new(filename: impl Into<String>, lineno: i32, funcname: impl Into<String>) -> Self {
+        Self::new_impl(filename.into(), lineno, funcname.into())
+    }
+
+    #[cold]
+    fn new_impl(filename: String, lineno: i32, funcname: String) -> Self {
         Self {
-            filename: Some(filename.into()),
+            filename: Some(filename),
             lineno,
-            funcname: Some(funcname.into()),
+            funcname: Some(funcname),
         }
     }
 }
@@ -89,14 +96,26 @@ impl PgError {
     /// construction site's file/line, overridable by the explicit
     /// `with_location`/`finish` lanes (which C-parity sites use to also carry
     /// the routine name).
-    #[cold]
+    #[inline]
     #[track_caller]
     pub fn new(level: ErrorLevel, message: impl Into<String>) -> Self {
-        let caller = core::panic::Location::caller();
+        // `#[track_caller]` shell: capture the construction site here and pass
+        // it explicitly so the non-generic `new_impl` reproduces the same F/L
+        // fields without itself being `#[track_caller]`. Only `message.into()`
+        // monomorphizes per caller type; the ~24-field build lives once below.
+        Self::new_impl(level, message.into(), core::panic::Location::caller())
+    }
+
+    #[cold]
+    fn new_impl(
+        level: ErrorLevel,
+        message: String,
+        caller: &core::panic::Location<'_>,
+    ) -> Self {
         Self {
             level,
             sqlstate: default_sqlstate_for_level(level),
-            message: message.into(),
+            message,
             message_raw: None,
             detail: None,
             detail_log: None,
