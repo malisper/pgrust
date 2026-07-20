@@ -562,22 +562,21 @@ pub(super) enum RefuseReason {
     // contract §3.3, the increment's SINGLE vocabulary mint; allowlist row
     // in the same commit; worklog notes/se-wave10-cb.md).
     // -----------------------------------------------------------------------
-    /// A store fill over a CURRENT-OF-eligible plan (contract §4.1) uses
-    /// the ROW-CHAIN fill: the v1 tid capture reads the scan state per
-    /// row, so the lane batch fill declines. A mode choice inside a
-    /// still-store-served cursor (fetch-invisible). ARMED (SEAM-WIRING,
-    /// SE10-GATES item 1): the tick face is
-    /// `push::cursor_fill_tid_capture_refused`, called through the
-    /// execmain_seams face from `fill_portal_store_to`'s eligible branch —
-    /// where the eligibility answer lives. CADENCE HONESTY (the
-    /// aj-allowlist-honesty family): once per fill_to CALL that drives the
-    /// executor, i.e. per FETCH-with-deficit on an eligible portal — an
-    /// UNBOUNDED-cadence row (fwd corpus: ~99k ticks/run), never per row.
-    /// Named follow-up (chartered, not inc-2): lane fill supplies per-row
-    /// `(tableoid, ctid)` from batch rowref identity, retiring this
-    /// reason. Contract note: authored as "next free discriminant, 36"
-    /// before inc-1b's chartered mint landed 36..40; next free is 41
-    /// (worklog §1 drift record).
+    /// TOMBSTONE (SUNSET EXECUTED — R1a, night/r1a-impl, the §2a reason-41
+    /// completion; the `cursor-scroll` SUNSET precedent above). This
+    /// accounted for a store fill over a CURRENT-OF-eligible plan taking
+    /// the ROW-CHAIN fill so a POST-run `ss_ScanTupleSlot` read could
+    /// capture the §4.2 identity (fill_portal_store_to's arm B). R1a
+    /// UNIVERSALISED in-run capture: every eligible fill now runs ONE
+    /// budgeted forward drive with the identity sidecar armed on the
+    /// receiver, captured IN-RUN — the batch sink for the lane-owned
+    /// capture-batch cell, the run seam's capture row loop for every shape
+    /// the D-CA-2 fence keeps on the row chain. Arm B, its post-run read,
+    /// the tick face (`push::cursor_fill_tid_capture_refused`), its seam,
+    /// and the `cursor cursor-currentof-tidcapture` allowlist row were all
+    /// REMOVED together — the reason no longer fires (R-VOCAB "reason no
+    /// longer fires" criterion). NEVER-TICKING; the variant stays because
+    /// the registry is append-only and discriminants never move.
     CursorCurrentOfTidCapture = 41,
     // Wave-9.5 SPI-admission refusal (WS-AJ Stage-A seam, `se/spi-stage-a`;
     // APPEND-ONLY chartered mint, recorded in notes/se-spi-stage-a.md). ONE

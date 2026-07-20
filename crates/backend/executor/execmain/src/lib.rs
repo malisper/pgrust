@@ -40,8 +40,7 @@ pub use lanev2::coverage::{coverage_snapshot, LANEV2_BUILTINS, PGRUST_FOID_RANGE
 // internals. Knob face for store arming (§7.3), the §6 assert-arming note,
 // and the §3.3 tick face; coverage-export precedent above.
 pub use lanev2::{
-    cursor_fill_tid_capture_refused, cursor_store_armed_note, cursor_store_fill_enabled,
-    cursor_store_fill_set_for_tests,
+    cursor_store_armed_note, cursor_store_fill_enabled, cursor_store_fill_set_for_tests,
 };
 pub use nodegather::GatherState;
 pub use nodegathermerge::GatherMergeState;
@@ -131,7 +130,7 @@ pub fn init_seams() {
     // execmain) — single knob cell, §6 assert arming, §3.3 tick face.
     execmain_seams::cursor_store_fill_enabled::set(lanev2::cursor_store_fill_enabled);
     execmain_seams::cursor_store_armed_note::set(lanev2::cursor_store_armed_note);
-    execmain_seams::cursor_fill_tid_capture_refused::set(lanev2::cursor_fill_tid_capture_refused);
+    // R1a: cursor_fill_tid_capture_refused (reason 41) retired with arm B.
     // --- end SEAM-WIRING ---
     // --- SE-R41 (reason-41 retirement): the §3.1 capture-batchable probe ---
     execmain_seams::cursor_plan_capture_batch_fill::set(
