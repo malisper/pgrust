@@ -490,6 +490,7 @@ once	crates/backend/executor/execmain/src/lanev2/runtime_plaindistinct.rs	2
 once	crates/backend/executor/execmain/src/lanev2/runtime_scan.rs	13	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
 once	crates/backend/executor/execmain/src/lanev2/runtime_sort.rs	5
 once	crates/backend/executor/execmain/src/lanev2/stats.rs	3	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
+once	crates/backend/executor/execmain/src/lib.rs	1	DST-REVIEW(t33-train): demono-tls car (night/demono-tls) — the once_val<T:Copy>(cell, fn()->T) de-mono shim routing the 110 *CELL.get_or_init(|| env-read) process-static env/config gates through one fn-ptr witness; pure env-read init closure, behaviour-identical by construction to the per-site gates it consolidated (all previously allowlisted in this crate as the same P3 row-19 benign class); composed-tip census reconciliation, knobs-registry/pgsync routing rides the SE/DST charter
 once	crates/backend/executor/instrument/src/lib.rs	1
 once	crates/backend/executor/laneexec/src/dicteval.rs	1
 once	crates/backend/executor/lanestitch/src/lib.rs	1	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
@@ -623,6 +624,7 @@ rawsync	crates/backend/executor/execmain/src/lanev2/runtime_plaindistinct.rs	1
 rawsync	crates/backend/executor/execmain/src/lanev2/runtime_scan.rs	1
 rawsync	crates/backend/executor/execmain/src/lanev2/runtime_sort.rs	1
 rawsync	crates/backend/executor/execmain/src/lanev2/stats.rs	1
+rawsync	crates/backend/executor/execmain/src/lib.rs	1	DST-REVIEW(t33-train): demono-tls car — same once_val shim; the rawsync category counts the std::sync::OnceLock<T> named by the de-mono shim (one site consolidating the 110 collapsed OnceLock gates); process-constant env-gate cache, same P3 row-19 benign class; composed-tip census reconciliation, pgsync routing chartered to the DST program
 rawsync	crates/backend/executor/instrument/src/lib.rs	1
 rawsync	crates/backend/executor/laneexec/src/dicteval.rs	1
 rawsync	crates/backend/executor/lanestitch/src/lib.rs	1	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
