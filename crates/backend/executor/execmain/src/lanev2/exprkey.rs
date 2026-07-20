@@ -59,7 +59,7 @@ use super::{
 /// every caller).
 fn exprkey_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_LANE_V2_EXPRKEY").as_deref(), Ok("0") | Ok("off"))
     })
 }
@@ -80,7 +80,7 @@ fn exprkey_enabled() -> bool {
 /// `PGRUST_LANE_V2_CODEDKEY=1|on` engages.
 fn codedkey_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         matches!(std::env::var("PGRUST_LANE_V2_CODEDKEY").as_deref(), Ok("1") | Ok("on"))
     })
 }
@@ -89,7 +89,7 @@ fn codedkey_enabled() -> bool {
 /// independent of the single-computed-key arms above.
 fn redkey_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_LANE_V2_REDKEY").as_deref(), Ok("0") | Ok("off"))
     })
 }
@@ -1479,7 +1479,7 @@ fn decide_exprkey_mk_case<'mcx>(
 /// feed exactly as before the car.
 fn case_dict_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_LANE_V2_CASEDICT").as_deref(), Ok("0") | Ok("off"))
     })
 }
@@ -1897,7 +1897,7 @@ fn exprkey_k1_latemat_arm<'mcx>(
 /// `PGRUST_LANE_V2_CODEHIST=0|off` kill switch (default ON inside the lane).
 fn codehist_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_LANE_V2_CODEHIST").as_deref(), Ok("0") | Ok("off"))
     })
 }
@@ -1957,7 +1957,7 @@ enum ChVerdict {
 /// vs the old `Vec<Option<u32>>` ptr::write fill — not the lazy paging).
 fn zeropage_cache_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         matches!(
             std::env::var("PGRUST_EXPRKEY_ZEROPAGE").as_deref(),
             Ok("1") | Ok("on") | Ok("true")

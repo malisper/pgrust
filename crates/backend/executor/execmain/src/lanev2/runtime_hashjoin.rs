@@ -130,7 +130,7 @@ const MAX_SPLIT_NODES: usize = 1024;
 
 fn min_granules() -> u64 {
     static N: OnceLock<u64> = OnceLock::new();
-    *N.get_or_init(|| {
+    crate::once_val(&N, || {
         std::env::var("PGRUST_RUNTIME_HASHJOIN_MIN_GRANULES")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
@@ -143,7 +143,7 @@ fn min_granules() -> u64 {
 /// nbatch>1 refusal exactly.
 fn hj_spill_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         std::env::var("PGRUST_RUNTIME_HASHJOIN_SPILL").map_or(true, |v| v.trim() != "0")
     })
 }
@@ -153,7 +153,7 @@ fn hj_spill_enabled() -> bool {
 /// (recorded honest limit: max spilled inner ≈ cap × combined envelope).
 fn hj_spill_max_batches() -> usize {
     static N: OnceLock<usize> = OnceLock::new();
-    *N.get_or_init(|| {
+    crate::once_val(&N, || {
         std::env::var("PGRUST_RUNTIME_HASHJOIN_SPILL_BATCHES")
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
@@ -165,7 +165,7 @@ fn hj_spill_max_batches() -> usize {
 /// Split rounds declared past the admission nbatch (§5.3 depth cap).
 fn hj_spill_rounds() -> usize {
     static N: OnceLock<usize> = OnceLock::new();
-    *N.get_or_init(|| {
+    crate::once_val(&N, || {
         std::env::var("PGRUST_RUNTIME_HASHJOIN_SPILL_DEPTH")
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
@@ -179,7 +179,7 @@ fn hj_spill_rounds() -> usize {
 /// leg needs a deterministic "estimate lied" shape). Absent in production.
 fn hj_spill_force_batches() -> Option<u32> {
     static N: OnceLock<Option<u32>> = OnceLock::new();
-    *N.get_or_init(|| {
+    crate::once_val(&N, || {
         std::env::var("PGRUST_RUNTIME_HASHJOIN_SPILL_FORCE_BATCHES")
             .ok()
             .and_then(|v| v.trim().parse::<u32>().ok())
@@ -195,7 +195,7 @@ fn hj_spill_force_batches() -> Option<u32> {
 /// admission (nested trees refuse exactly where they always did).
 fn hj_multibuild_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         std::env::var("PGRUST_RUNTIME_HASHJOIN_MULTIBUILD").map_or(true, |v| v.trim() != "0")
     })
 }
@@ -212,7 +212,7 @@ const MB_MAX_JOINS: usize = 8;
 /// exactly (and un-keys the planner probe — knob coherence, same spelling).
 fn hj_groupsink_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         std::env::var("PGRUST_RUNTIME_HASHJOIN_GROUPSINK").map_or(true, |v| v.trim() != "0")
     })
 }
@@ -223,7 +223,7 @@ fn hj_groupsink_enabled() -> bool {
 /// O(groups), and the planner floors keep engaged shapes far below it.
 fn mbg_max_groups() -> usize {
     static N: OnceLock<usize> = OnceLock::new();
-    *N.get_or_init(|| {
+    crate::once_val(&N, || {
         std::env::var("PGRUST_RUNTIME_HASHJOIN_GROUPSINK_MAX_GROUPS")
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())

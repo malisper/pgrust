@@ -151,7 +151,7 @@ pub(crate) fn mirror_gather_width(
 /// face is armed — the knob-OFF gather startup never reaches this.
 fn width_mirror_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         matches!(std::env::var("PGRUST_LANE_V2_TRACE").as_deref(), Ok("1") | Ok("on"))
     })
 }

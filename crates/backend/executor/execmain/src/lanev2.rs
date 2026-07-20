@@ -255,7 +255,7 @@ fn lane_trace(event: &str) {
 /// (router trace lines) check this before building the string.
 fn lane_trace_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         matches!(std::env::var("PGRUST_LANE_V2_TRACE").as_deref(), Ok("1") | Ok("on"))
     })
 }
@@ -747,7 +747,7 @@ const STANDALONE_SCAN_NO_UPSIDE: bool = true;
 /// overrides for floor-calibration benches.
 fn cb_tiny_floor() -> u64 {
     static FLOOR: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *FLOOR.get_or_init(|| {
+    crate::once_val(&FLOOR, || {
         std::env::var("PGRUST_LANE_V2_TINY_FLOOR")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -3204,7 +3204,7 @@ fn decide_plain_agg_lane<'mcx>(
 /// byte-identity-safe like `PGRUST_LANE_V2_K2`).
 fn metaagg_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_LANE_V2_METAAGG").as_deref(), Ok("0") | Ok("off"))
     })
 }
@@ -3215,7 +3215,7 @@ fn metaagg_enabled() -> bool {
 /// drive, which answers identically).
 fn zerocnt_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_LANE_V2_ZEROCNT").as_deref(), Ok("0") | Ok("off"))
     })
 }
@@ -3226,7 +3226,7 @@ fn zerocnt_enabled() -> bool {
 /// A/B — declined units stage and fold from decoded lanes identically).
 fn foldmeta_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_LANE_V2_FOLDMETA").as_deref(), Ok("0") | Ok("off"))
     })
 }
@@ -4363,7 +4363,7 @@ fn scan_k2_wanted<'mcx>(agg: &::nodeagg::AggStateData<'mcx>) -> bool {
 /// `PGRUST_LANE_V2_DICTGROUP` kill switch (default ON inside the lane).
 fn dictgroup_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_LANE_V2_DICTGROUP").as_deref(), Ok("0") | Ok("off"))
     })
 }
@@ -5000,7 +5000,7 @@ fn scan_dictgroup_spill<'mcx>(
 /// `PGRUST_LANE_V2_MULTIKEY` kill switch (default ON inside the lane).
 fn multikey_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_LANE_V2_MULTIKEY").as_deref(), Ok("0") | Ok("off"))
     })
 }
@@ -6226,7 +6226,7 @@ fn sort_lane_fusible_memo<'mcx>(
 /// delete knobs (rowmode FLIP idiom; the AE2/K2 precedents).
 fn sort_randomaccess_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(
             std::env::var("PGRUST_LANE_V2_SORT_RANDOMACCESS").as_deref(),
             Ok("0") | Ok("off")
@@ -7177,7 +7177,7 @@ enum AdaptiveTopkMode {
 
 fn adaptive_topk_mode() -> AdaptiveTopkMode {
     static MODE: std::sync::OnceLock<AdaptiveTopkMode> = std::sync::OnceLock::new();
-    *MODE.get_or_init(|| match std::env::var("PGRUST_LANE_ADAPTIVE_TOPK") {
+    crate::once_val(&MODE, || match std::env::var("PGRUST_LANE_ADAPTIVE_TOPK") {
         Ok(v) if v == "0" || v.eq_ignore_ascii_case("off") => AdaptiveTopkMode::Off,
         Ok(v) if v.eq_ignore_ascii_case("tracked") => AdaptiveTopkMode::Tracked,
         Ok(v) if v.eq_ignore_ascii_case("invisible") => AdaptiveTopkMode::InvisibleOnly,
@@ -7374,7 +7374,7 @@ fn topk_keep_mask<'mcx, E: BatchEmit<'mcx>>(
 /// `PGRUST_LANE_V2_TOPNEMIT` kill switch (default ON inside the lane).
 fn topn_emit_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_LANE_V2_TOPNEMIT").as_deref(), Ok("0") | Ok("off"))
     })
 }
@@ -7384,7 +7384,7 @@ fn topn_emit_enabled() -> bool {
 /// sink, which has its own arming ladder).
 fn sink_topn_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_RUNTIME_AGG_TOPN").as_deref(), Ok("0") | Ok("off"))
     })
 }
@@ -7554,7 +7554,7 @@ fn sort_feed_agg_topn<'mcx>(
 /// `PGRUST_LANE_V2_BATCHEMIT` kill switch (default ON inside the lane).
 fn batch_emit_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_LANE_V2_BATCHEMIT").as_deref(), Ok("0") | Ok("off"))
     })
 }
@@ -7590,7 +7590,7 @@ fn batch_emit_enabled() -> bool {
 /// `PGRUST_LANE_V2_TOPKFIN` kill switch (default ON inside the lane).
 fn topkfin_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_LANE_V2_TOPKFIN").as_deref(), Ok("0") | Ok("off"))
     })
 }
@@ -8155,7 +8155,7 @@ impl<'mcx> BatchSink<'mcx> for SortBreakerSink<'_, 'mcx> {
 /// `PGRUST_LANE_REFSORT` kill switch (default ON inside the lane).
 fn refsort_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_LANE_REFSORT").as_deref(), Ok("0") | Ok("off"))
     })
 }
@@ -8169,7 +8169,7 @@ fn refsort_enabled() -> bool {
 /// exactly: refsort only on Off/Track tie modes, full-needed accept.
 fn topn_lazyfetch_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_LANE_TOPN_LAZYFETCH").as_deref(), Ok("0") | Ok("off"))
     })
 }
@@ -8828,7 +8828,7 @@ impl<'mcx> Source<'mcx> for SortEmitSourceCfi {
 /// `PGRUST_LANE_V2_DISTINCTHASH` kill switch (default ON inside the lane).
 fn distincthash_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_LANE_V2_DISTINCTHASH").as_deref(), Ok("0") | Ok("off"))
     })
 }
@@ -8839,7 +8839,7 @@ fn distincthash_enabled() -> bool {
 /// attribution channel for the text-key delta.
 fn distincthash_text_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(
             std::env::var("PGRUST_LANE_V2_DISTINCTHASH_TEXT").as_deref(),
             Ok("0") | Ok("off")
@@ -8855,7 +8855,7 @@ fn distincthash_text_enabled() -> bool {
 /// channel for the batch delta.
 fn distincthash_batch_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(
             std::env::var("PGRUST_LANE_V2_DISTINCTHASH_BATCH").as_deref(),
             Ok("0") | Ok("off")
@@ -8872,7 +8872,7 @@ fn distincthash_batch_enabled() -> bool {
 /// gate) — the A/B attribution channel for the fold delta.
 fn distincthash_fold_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(
             std::env::var("PGRUST_LANE_V2_DISTINCTHASH_FOLD").as_deref(),
             Ok("0") | Ok("off")
@@ -8888,7 +8888,7 @@ fn distincthash_fold_enabled() -> bool {
 /// channel for the span delta; results are byte-identical either way.
 fn distincthash_span_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(
             std::env::var("PGRUST_LANE_V2_DISTINCTHASH_SPAN").as_deref(),
             Ok("0") | Ok("off")
@@ -8904,7 +8904,7 @@ fn distincthash_span_enabled() -> bool {
 /// attribution channel; results byte-identical either way).
 fn distincthash_textbatch_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(
             std::env::var("PGRUST_LANE_V2_DISTINCTHASH_TEXTBATCH").as_deref(),
             Ok("0") | Ok("off")
@@ -8924,7 +8924,7 @@ fn distincthash_textbatch_enabled() -> bool {
 /// serial). Off = today's refusals, byte-identical.
 pub(crate) fn agg_poly_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         matches!(
             std::env::var("PGRUST_LANE_V2_AGG_POLY").as_deref(),
             Ok("1") | Ok("on")
@@ -8937,7 +8937,7 @@ pub(crate) fn agg_poly_enabled() -> bool {
 /// never exercise the arm; the runtime degrade still bounds memory).
 fn distincthash_force() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         matches!(
             std::env::var("PGRUST_LANE_V2_DISTINCTHASH_FORCE").as_deref(),
             Ok("1") | Ok("on")
@@ -9542,7 +9542,7 @@ fn pdemit_emit<'mcx>(
 /// sort exactly as before this lane.
 fn codefeed_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_LANE_V2_CODEFEED").as_deref(), Ok("0") | Ok("off"))
     })
 }
@@ -9552,7 +9552,7 @@ fn codefeed_enabled() -> bool {
 /// still bounds memory).
 fn codefeed_force() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         matches!(std::env::var("PGRUST_LANE_V2_CODEFEED_FORCE").as_deref(), Ok("1") | Ok("on"))
     })
 }
@@ -12058,7 +12058,7 @@ struct StagedFeedShape {
 /// modes are byte-identical).
 fn k2_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_LANE_V2_K2").as_deref(), Ok("0") | Ok("off"))
     })
 }
@@ -12070,7 +12070,7 @@ fn k2_enabled() -> bool {
 /// (`PGRUST_LANE_V2_MULTIKEY`) gates this arm too (shared machinery).
 fn mkstream_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_LANE_V2_MKSTREAM").as_deref(), Ok("0") | Ok("off"))
     })
 }
@@ -12811,7 +12811,7 @@ impl<'mcx> Sink<'mcx> for StagedFoldAggSink<'_, 'mcx> {
 /// Diagnostics only — never affects execution.
 fn trace_feed(msg: &str) {
     static ON: OnceLock<bool> = OnceLock::new();
-    if *ON.get_or_init(|| {
+    if crate::once_val(&ON, || {
         matches!(std::env::var("PGRUST_LANE_V2_TRACE").as_deref(), Ok("1") | Ok("on"))
     }) {
         eprintln!("[lanev2] {msg}");
@@ -13936,7 +13936,7 @@ pub fn try_own_agg_over_subquery_scan<'mcx>(
 /// `PGRUST_LANE_V2_AGGGATHER=0`/`off` forces the Volcano fallback.
 fn agg_gather_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_LANE_V2_AGGGATHER").as_deref(), Ok("0") | Ok("off"))
     })
 }
@@ -14232,7 +14232,7 @@ pub fn try_own_append<'mcx>(
 /// `PGRUST_LANE_V2_PARDISTINCT` kill switch (default ON inside the lane).
 fn pardistinct_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_LANE_V2_PARDISTINCT").as_deref(), Ok("0") | Ok("off"))
     })
 }
@@ -14242,7 +14242,7 @@ fn pardistinct_enabled() -> bool {
 /// memory).
 fn pardistinct_force() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         matches!(
             std::env::var("PGRUST_LANE_V2_PARDISTINCT_FORCE").as_deref(),
             Ok("1") | Ok("on")

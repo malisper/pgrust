@@ -503,7 +503,7 @@ impl NumaCombine {
 /// pre-lane binary.
 fn numa_combine_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(
             std::env::var("PGRUST_RUNTIME_AGG_NUMA_COMBINE").as_deref(),
             Ok("0") | Ok("off")
@@ -517,7 +517,7 @@ fn numa_combine_enabled() -> bool {
 /// shape through the 16-thread byte gates.
 fn numa_combine_dop_min() -> i32 {
     static N: OnceLock<i32> = OnceLock::new();
-    *N.get_or_init(|| {
+    crate::once_val(&N, || {
         std::env::var("PGRUST_RUNTIME_AGG_NUMA_COMBINE_DOP")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -664,7 +664,7 @@ fn resolve_topn_mode_seal(admission: TopnMode, passthrough_shape: bool) -> TopnM
 /// `PGRUST_RUNTIME_AGG_TOPN=0` still kills the whole composition.
 fn topn_winners_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(
             std::env::var("PGRUST_RUNTIME_AGG_TOPN_WINNERS").as_deref(),
             Ok("0") | Ok("off")
@@ -677,7 +677,7 @@ fn topn_winners_enabled() -> bool {
 /// FullDrain) — the winners-phase2 A/B and rollback channel.
 fn topn_winners_spill_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(
             std::env::var("PGRUST_RUNTIME_AGG_TOPN_WINNERS_SPILL").as_deref(),
             Ok("0") | Ok("off")
@@ -692,7 +692,7 @@ fn topn_winners_spill_enabled() -> bool {
 /// A/B and rollback channel (combine-parallel lane).
 fn parseal_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(
             std::env::var("PGRUST_RUNTIME_AGG_PARSEAL").as_deref(),
             Ok("0") | Ok("off")
@@ -705,7 +705,7 @@ fn parseal_enabled() -> bool {
 /// branch per SEAL.
 fn agg_markers_on() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         matches!(std::env::var("PGRUST_MORSEL_MARKERS").as_deref(), Ok("1") | Ok("on"))
     })
 }
@@ -717,7 +717,7 @@ fn agg_markers_on() -> bool {
 /// on topn-armed combine claims (off-path-free).
 fn topn_fault_decline() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         std::env::var("PGRUST_RUNTIME_AGG_TOPN_FAULT").as_deref() == Ok("decline")
     })
 }
@@ -2003,7 +2003,7 @@ fn est_table_bytes(sink: &AggSink, rows: usize) -> usize {
 /// vocabulary (≤6).
 fn spill_split_depth_cap() -> u32 {
     static N: OnceLock<u32> = OnceLock::new();
-    *N.get_or_init(|| {
+    crate::once_val(&N, || {
         std::env::var("PGRUST_RUNTIME_AGG_SPILL_DEPTH")
             .ok()
             .and_then(|v| v.trim().parse::<u32>().ok())
@@ -2462,7 +2462,7 @@ enum DictFeed {
 
 fn dict_feed_mode() -> DictFeed {
     static MODE: OnceLock<DictFeed> = OnceLock::new();
-    *MODE.get_or_init(|| match std::env::var("PGRUST_RUNTIME_AGG_DICTFEED").as_deref() {
+    crate::once_val(&MODE, || match std::env::var("PGRUST_RUNTIME_AGG_DICTFEED").as_deref() {
         Ok("0") | Ok("off") => DictFeed::Off,
         Ok("raw") => DictFeed::Raw,
         _ => DictFeed::Code,
@@ -3401,7 +3401,7 @@ fn ensure_hooks_registered() {
 /// Env override for the sink flush cap (entries); None = budget-derived.
 fn sink_cap_override() -> Option<u32> {
     static N: OnceLock<Option<u32>> = OnceLock::new();
-    *N.get_or_init(|| {
+    crate::once_val(&N, || {
         std::env::var("PGRUST_RUNTIME_AGG_CAP")
             .ok()
             .and_then(|v| v.trim().parse::<u32>().ok())
@@ -3436,7 +3436,7 @@ fn sink_cap_override() -> Option<u32> {
 /// notes/q36-radix-lane.md).
 fn sink_locality_cap() -> LocalityCap {
     static N: OnceLock<LocalityCap> = OnceLock::new();
-    *N.get_or_init(|| {
+    crate::once_val(&N, || {
         match std::env::var("PGRUST_RUNTIME_AGG_LOCALITY_CAP")
             .ok()
             .and_then(|v| v.trim().parse::<u32>().ok())
@@ -3475,7 +3475,7 @@ enum LocalityCap {
 /// train-19 behavior exactly); an explicit LOCALITY_CAP=N is authoritative.
 fn agg_locality_ndv_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_RUNTIME_AGG_LOCALITY_NDV").as_deref(), Ok("0") | Ok("off"))
     })
 }
@@ -3495,7 +3495,7 @@ const SINK_LOCALITY_CAP_WIDE: u32 = 1 << 20;
 /// q19 -30%. `=0`/`off` restores the exclusion.
 fn agg_locality_canon_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(
             std::env::var("PGRUST_RUNTIME_AGG_LOCALITY_CANON").as_deref(),
             Ok("0") | Ok("off")
@@ -3554,7 +3554,7 @@ const SINK_LOCALITY_CAP_DEFAULT: u32 = 1 << 16;
 /// bound; `PGRUST_RUNTIME_AGG_DOPCAP_FLOOR` is the ladder A/B knob.
 fn agg_dopcap_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_RUNTIME_AGG_DOPCAP").as_deref(), Ok("0") | Ok("off"))
     })
 }
@@ -3571,7 +3571,7 @@ fn agg_dopcap_enabled() -> bool {
 /// `PGRUST_RUNTIME_AGG_DOPCAP_FLOOR` overrides the BYTE budget (A/B knob).
 fn agg_dopcap_floor_bytes() -> u64 {
     static N: OnceLock<u64> = OnceLock::new();
-    *N.get_or_init(|| {
+    crate::once_val(&N, || {
         std::env::var("PGRUST_RUNTIME_AGG_DOPCAP_FLOOR")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
@@ -3598,7 +3598,7 @@ const DOPCAP_ANCHOR: u32 = 16;
 /// unscaled band (exactly the 2x-aggregate semantics).
 fn agg_dopcap_anchor() -> u32 {
     static N: OnceLock<u32> = OnceLock::new();
-    *N.get_or_init(|| {
+    crate::once_val(&N, || {
         std::env::var("PGRUST_RUNTIME_AGG_DOPCAP_ANCHOR")
             .ok()
             .and_then(|v| v.trim().parse::<u32>().ok())
@@ -3642,7 +3642,7 @@ fn agg_dopcap_anchor() -> u32 {
 
 fn agg_alphagate_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_RUNTIME_AGG_ALPHAGATE").as_deref(), Ok("0") | Ok("off"))
     })
 }
@@ -3656,7 +3656,7 @@ fn agg_alphagate_enabled() -> bool {
 /// DOPCAP_ANCHOR ladder).
 fn agg_alpha0_x100() -> u64 {
     static N: OnceLock<u64> = OnceLock::new();
-    *N.get_or_init(|| {
+    crate::once_val(&N, || {
         std::env::var("PGRUST_RUNTIME_AGG_ALPHA0")
             .ok()
             .and_then(|v| v.trim().parse::<f64>().ok())
@@ -3673,7 +3673,7 @@ fn agg_alpha0_x100() -> u64 {
 /// then sticky until a floor window shows collapse).
 fn agg_alpha_reprobe_mult() -> u64 {
     static N: OnceLock<u64> = OnceLock::new();
-    *N.get_or_init(|| {
+    crate::once_val(&N, || {
         std::env::var("PGRUST_RUNTIME_AGG_ALPHA_REPROBE")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
@@ -3729,7 +3729,7 @@ fn alpha_gate_floor(state_bytes: usize, cap: u32, dop: i32) -> Option<u32> {
 /// `PGRUST_RUNTIME_AGG_SHARED_TABLE=1` arms the experiment (default OFF).
 fn agg_shared_table_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         matches!(std::env::var("PGRUST_RUNTIME_AGG_SHARED_TABLE").as_deref(), Ok("1"))
     })
 }
@@ -3741,7 +3741,7 @@ fn agg_shared_table_enabled() -> bool {
 /// per-worker Locals never fill and today's path is already optimal).
 fn agg_shared_table_max_groups() -> u64 {
     static N: OnceLock<u64> = OnceLock::new();
-    *N.get_or_init(|| {
+    crate::once_val(&N, || {
         std::env::var("PGRUST_RUNTIME_AGG_SHARED_MAX")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
@@ -3756,7 +3756,7 @@ fn agg_shared_table_max_groups() -> u64 {
 /// corpus's planner group estimates.
 fn agg_shared_table_min_groups() -> Option<u64> {
     static N: OnceLock<Option<u64>> = OnceLock::new();
-    *N.get_or_init(|| {
+    crate::once_val(&N, || {
         std::env::var("PGRUST_RUNTIME_AGG_SHARED_MIN")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
@@ -3916,7 +3916,7 @@ fn sink_cap_for(state_bytes: usize, budget: usize, ngroups_limit: u64) -> u32 {
 /// restores the phase-1 budget refusal exactly.
 fn agg_spill_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_AGG_SPILL").as_deref() != Ok("0"))
+    crate::once_val(&ON, || std::env::var("PGRUST_RUNTIME_AGG_SPILL").as_deref() != Ok("0"))
 }
 
 /// EPOCH SIZING A/B arm (spill-envelopes lane): `1` restores the
@@ -3925,7 +3925,7 @@ fn agg_spill_enabled() -> bool {
 /// budget crossing before an epoch is written (fewer, bigger epochs).
 fn agg_spill_eager() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_AGG_SPILL_EAGER").as_deref() == Ok("1"))
+    crate::once_val(&ON, || std::env::var("PGRUST_RUNTIME_AGG_SPILL_EAGER").as_deref() == Ok("1"))
 }
 
 /// `PGRUST_RUNTIME_AGG_TEXT` kill switch (default ON): the C2 text-key
@@ -3934,7 +3934,7 @@ fn agg_spill_eager() -> bool {
 /// those shapes refuse exactly as before the car (attribution channel).
 fn runtime_agg_text_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_RUNTIME_AGG_TEXT").as_deref(), Ok("0") | Ok("off"))
     })
 }
@@ -3945,7 +3945,7 @@ fn runtime_agg_text_enabled() -> bool {
 /// before the car (serial CaseDict arm unchanged — the attribution channel).
 fn runtime_agg_text2_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_RUNTIME_AGG_TEXT2").as_deref(), Ok("0") | Ok("off"))
     })
 }
@@ -3976,7 +3976,7 @@ fn mk_shape_sink_ok(shape: &::nodeagg::MkShape) -> bool {
 /// before the car.
 fn agg_freeze_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_RUNTIME_AGG_FREEZE").as_deref(), Ok("0") | Ok("off"))
     })
 }
@@ -3984,7 +3984,7 @@ fn agg_freeze_enabled() -> bool {
 /// Engagement floor (granules) — below it helper launches are pure overhead.
 fn min_granules() -> u64 {
     static N: OnceLock<u64> = OnceLock::new();
-    *N.get_or_init(|| {
+    crate::once_val(&N, || {
         std::env::var("PGRUST_RUNTIME_AGG_MIN_GRANULES")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())

@@ -659,7 +659,7 @@ fn teardown_worker_exec(clean: bool) -> PgResult<()> {
 /// distinct pool arms).
 fn plaindistinct_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_PLAINDISTINCT").as_deref() != Ok("0"))
+    crate::once_val(&ON, || std::env::var("PGRUST_RUNTIME_PLAINDISTINCT").as_deref() != Ok("0"))
 }
 
 #[cold]

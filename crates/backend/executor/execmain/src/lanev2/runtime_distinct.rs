@@ -740,7 +740,7 @@ const DST_SPLIT_FLUSH_BYTES: usize = 16 << 20;
 /// vocabulary (≤6).
 fn distinct_split_depth_cap() -> u32 {
     static N: OnceLock<u32> = OnceLock::new();
-    *N.get_or_init(|| {
+    crate::once_val(&N, || {
         std::env::var("PGRUST_RUNTIME_DISTINCT_SPILL_DEPTH")
             .ok()
             .and_then(|v| v.trim().parse::<u32>().ok())
@@ -1407,7 +1407,7 @@ fn ensure_hooks_registered() {
 /// restores the phase-1 budget refusal exactly.
 fn distinct_spill_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_DISTINCT_SPILL").as_deref() != Ok("0"))
+    crate::once_val(&ON, || std::env::var("PGRUST_RUNTIME_DISTINCT_SPILL").as_deref() != Ok("0"))
 }
 
 /// `PGRUST_RUNTIME_DISTINCT_LOCALITY_CAP` (bytes): unset/0 = OFF (the
@@ -1431,7 +1431,7 @@ fn distinct_spill_enabled() -> bool {
 /// (C3/q36-radix measured-refusal precedent).
 fn distinct_locality_cap() -> Option<usize> {
     static N: OnceLock<Option<usize>> = OnceLock::new();
-    *N.get_or_init(|| {
+    crate::once_val(&N, || {
         match std::env::var("PGRUST_RUNTIME_DISTINCT_LOCALITY_CAP")
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
@@ -1457,7 +1457,7 @@ fn distinct_locality_cap() -> Option<usize> {
 /// A/B attribution arm; absent/0 = derived).
 fn runtime_distinct_worker_budget() -> usize {
     static KB: OnceLock<Option<usize>> = OnceLock::new();
-    let ov = *KB.get_or_init(|| {
+    let ov = crate::once_val(&KB, || {
         std::env::var("PGRUST_RUNTIME_DISTINCT_BUDGET_KB")
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
@@ -1475,7 +1475,7 @@ fn runtime_distinct_worker_budget() -> usize {
 /// section doc).
 fn distinct_paremit_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_DISTINCT_PAREMIT").as_deref() != Ok("0"))
+    crate::once_val(&ON, || std::env::var("PGRUST_RUNTIME_DISTINCT_PAREMIT").as_deref() != Ok("0"))
 }
 
 /// `PGRUST_RUNTIME_DISTINCT_TOPN` kill switch (default ON): 0/off = the
@@ -1484,7 +1484,7 @@ fn distinct_paremit_enabled() -> bool {
 /// the winners superset lemma, pardistinct.rs topn section doc).
 fn distinct_topn_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(
             std::env::var("PGRUST_RUNTIME_DISTINCT_TOPN").as_deref(),
             Ok("0") | Ok("off")
@@ -1498,7 +1498,7 @@ fn distinct_topn_enabled() -> bool {
 /// the rollback/A-B attribution channel for the dop-budget face).
 fn distinct_topn_dopbudget_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
+    crate::once_val(&ON, || {
         !matches!(
             std::env::var("PGRUST_RUNTIME_DISTINCT_TOPN_DOPBUDGET").as_deref(),
             Ok("0") | Ok("off")

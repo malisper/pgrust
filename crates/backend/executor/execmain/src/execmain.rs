@@ -335,7 +335,7 @@ const SKELETON_RETAIN_MAX_BYTES: usize = 256 * 1024;
 // Latched once per process.
 fn execexpr_economy_threshold() -> f64 {
     static T: pgsync::OnceLock<f64> = pgsync::OnceLock::new();
-    *T.get_or_init(|| match std::env::var("PGRUST_EXECEXPR_ECONOMY") {
+    crate::once_val(&T, || match std::env::var("PGRUST_EXECEXPR_ECONOMY") {
         Err(_) => 1000.0,
         Ok(v) => match v.trim() {
             "" => 1000.0,
@@ -350,7 +350,7 @@ fn execexpr_economy_threshold() -> f64 {
 // ceremony at executor start). Latched once per process.
 fn skeleton_custom_gate_disabled() -> bool {
     static DISABLED: pgsync::OnceLock<bool> = pgsync::OnceLock::new();
-    *DISABLED.get_or_init(|| {
+    crate::once_val(&DISABLED, || {
         matches!(
             std::env::var("PGRUST_EXEC_SKELETON_CUSTOM_GATE").as_deref(),
             Ok("0") | Ok("off")

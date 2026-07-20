@@ -67,7 +67,7 @@ pub(super) enum BitmapMode {
 
 fn bitmap_mode() -> BitmapMode {
     static MODE: OnceLock<BitmapMode> = OnceLock::new();
-    *MODE.get_or_init(|| {
+    crate::once_val(&MODE, || {
         match std::env::var("PGRUST_RUNTIME_BITMAP_MODE").as_deref() {
             Ok("B") | Ok("b") | Ok("strided") => BitmapMode::Strided,
             // C (two-stage build) is not built yet: refuse loudly rather
@@ -85,7 +85,7 @@ fn bitmap_mode() -> BitmapMode {
 /// segments of the entry space.
 fn bitmap_stride() -> usize {
     static N: OnceLock<usize> = OnceLock::new();
-    *N.get_or_init(|| {
+    crate::once_val(&N, || {
         std::env::var("PGRUST_RUNTIME_BITMAP_STRIDE")
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
@@ -98,7 +98,7 @@ fn bitmap_stride() -> usize {
 /// it the serial drain wins outright. Traced refusal `"bitmap-tiny-floor"`.
 fn bitmap_min_entries() -> u64 {
     static N: OnceLock<u64> = OnceLock::new();
-    *N.get_or_init(|| {
+    crate::once_val(&N, || {
         std::env::var("PGRUST_RUNTIME_BITMAP_MIN_ENTRIES")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())

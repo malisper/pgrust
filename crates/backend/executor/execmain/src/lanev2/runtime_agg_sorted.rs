@@ -926,7 +926,7 @@ fn ensure_hooks_registered() {
 
 fn min_granules() -> u64 {
     static N: OnceLock<u64> = OnceLock::new();
-    *N.get_or_init(|| {
+    crate::once_val(&N, || {
         std::env::var("PGRUST_RUNTIME_AGG_SORTED_MIN_GRANULES")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -936,7 +936,7 @@ fn min_granules() -> u64 {
 
 fn split_claims() -> bool {
     static B: OnceLock<bool> = OnceLock::new();
-    *B.get_or_init(|| {
+    crate::once_val(&B, || {
         matches!(std::env::var("PGRUST_RUNTIME_AGG_SORTED_SPLIT").as_deref(), Ok("1"))
     })
 }
