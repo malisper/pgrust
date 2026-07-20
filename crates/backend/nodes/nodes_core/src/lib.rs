@@ -1006,6 +1006,11 @@ pub fn strip_implicit_coercions(node: Node<'_>) -> Node<'_> {
     }
 }
 
+/// Thin generic wrapper — coerces the caller's concrete `F` to a single
+/// `&mut dyn FnMut` and delegates to the one monomorphic engine below. This is
+/// the de-monomorphization "byte-shell" pattern (cf. 37f4f9def): N callsites
+/// each stamp out this ~3-line shell instead of a full ~1,160-line copy of the
+/// `NodeTag` match. Behavior is identical to a directly-generic body.
 pub fn expression_tree_mutator<'mcx, F>(
     mcx: Mcx<'mcx>,
     node: Node<'mcx>,
@@ -1014,6 +1019,18 @@ pub fn expression_tree_mutator<'mcx, F>(
 where
     F: FnMut(Node<'mcx>) -> PgResult<Option<Node<'mcx>>>,
 {
+    expression_tree_mutator_dyn(mcx, node, m)
+}
+
+/// Monomorphic engine: the callback is type-erased to `&mut dyn FnMut`, so this
+/// large `NodeTag` match is codegen'd exactly once regardless of how many
+/// distinct closures call it. Cold (planner/rewriter) path — the extra
+/// indirect call per child is planning-time only, not per-row.
+pub fn expression_tree_mutator_dyn<'mcx>(
+    mcx: Mcx<'mcx>,
+    node: Node<'mcx>,
+    m: &mut dyn FnMut(Node<'mcx>) -> PgResult<Option<Node<'mcx>>>,
+) -> PgResult<Option<Node<'mcx>>> {
     match node.node_tag() {
         NodeTag::T_Var
         | NodeTag::T_Const
@@ -1066,10 +1083,10 @@ where
         }
         NodeTag::T_Aggref => {
             let a = node.as_variant::<Aggref>().unwrap();
-            let args = mutate_list(mcx, &a.args, m)?;
-            let directargs = mutate_list(mcx, &a.aggdirectargs, m)?;
-            let aggorder = mutate_list(mcx, &a.aggorder, m)?;
-            let aggdistinct = mutate_list(mcx, &a.aggdistinct, m)?;
+            let args = mutate_list_dyn(mcx, &a.args, m)?;
+            let directargs = mutate_list_dyn(mcx, &a.aggdirectargs, m)?;
+            let aggorder = mutate_list_dyn(mcx, &a.aggorder, m)?;
+            let aggdistinct = mutate_list_dyn(mcx, &a.aggdistinct, m)?;
             let aggfilter = match a.aggfilter {
                 Some(f) => m(f)?.map(Some),
                 None => None,
@@ -1114,7 +1131,7 @@ where
         }
         NodeTag::T_GroupingFunc => {
             let g = node.as_grouping_func().unwrap();
-            match mutate_list(mcx, &g.args, m)? {
+            match mutate_list_dyn(mcx, &g.args, m)? {
                 None => Ok(None),
                 Some(args) => Ok(Some(Node::mk(
                     mcx,
@@ -1130,12 +1147,12 @@ where
         }
         NodeTag::T_WindowFunc => {
             let wf = node.as_window_func().unwrap();
-            let args = mutate_list(mcx, &wf.args, m)?;
+            let args = mutate_list_dyn(mcx, &wf.args, m)?;
             let aggfilter = match wf.aggfilter {
                 Some(f) => m(f)?.map(Some),
                 None => None,
             };
-            let run_condition = mutate_list(mcx, &wf.runCondition, m)?;
+            let run_condition = mutate_list_dyn(mcx, &wf.runCondition, m)?;
             if args.is_none() && aggfilter.is_none() && run_condition.is_none() {
                 return Ok(None);
             }
@@ -1177,7 +1194,7 @@ where
         }
         NodeTag::T_FuncExpr => {
             let f = node.as_variant::<FuncExpr>().unwrap();
-            match mutate_list(mcx, &f.args, m)? {
+            match mutate_list_dyn(mcx, &f.args, m)? {
                 None => Ok(None),
                 Some(args) => Ok(Some(Node::mk(
                     mcx,
@@ -1212,7 +1229,7 @@ where
         }
         NodeTag::T_OpExpr => {
             let o = node.as_variant::<OpExpr>().unwrap();
-            match mutate_list(mcx, &o.args, m)? {
+            match mutate_list_dyn(mcx, &o.args, m)? {
                 None => Ok(None),
                 Some(args) => Ok(Some(Node::mk(
                     mcx,
@@ -1231,7 +1248,7 @@ where
         }
         NodeTag::T_ScalarArrayOpExpr => {
             let sa = node.as_scalar_array_op_expr().unwrap();
-            match mutate_list(mcx, &sa.args, m)? {
+            match mutate_list_dyn(mcx, &sa.args, m)? {
                 None => Ok(None),
                 Some(args) => Ok(Some(Node::mk(
                     mcx,
@@ -1250,7 +1267,7 @@ where
         }
         NodeTag::T_ArrayExpr => {
             let a = node.as_array_expr().unwrap();
-            match mutate_list(mcx, &a.elements, m)? {
+            match mutate_list_dyn(mcx, &a.elements, m)? {
                 None => Ok(None),
                 Some(elements) => Ok(Some(Node::mk(
                     mcx,
@@ -1269,8 +1286,8 @@ where
         }
         NodeTag::T_SubscriptingRef => {
             let sr = node.as_subscripting_ref().unwrap();
-            let upper = mutate_opt_list(mcx, &sr.refupperindexpr, m)?;
-            let lower = mutate_opt_list(mcx, &sr.reflowerindexpr, m)?;
+            let upper = mutate_opt_list_dyn(mcx, &sr.refupperindexpr, m)?;
+            let lower = mutate_opt_list_dyn(mcx, &sr.reflowerindexpr, m)?;
             let refexpr = match sr.refexpr {
                 Some(e) => m(e)?.map(Some),
                 None => None,
@@ -1304,7 +1321,7 @@ where
         }
         NodeTag::T_BoolExpr => {
             let b = node.as_bool_expr().unwrap();
-            match mutate_list(mcx, &b.args, m)? {
+            match mutate_list_dyn(mcx, &b.args, m)? {
                 None => Ok(None),
                 Some(args) => Ok(Some(Node::mk(
                     mcx,
@@ -1344,7 +1361,7 @@ where
         }
         NodeTag::T_TableSampleClause => {
             let tsc = node.as_table_sample_clause().unwrap();
-            let args = mutate_list(mcx, &tsc.args, m)?;
+            let args = mutate_list_dyn(mcx, &tsc.args, m)?;
             let repeatable = match tsc.repeatable {
                 Some(r) => m(r)?.map(Some),
                 None => None,
@@ -1457,7 +1474,7 @@ where
         }
         NodeTag::T_DistinctExpr => {
             let d = node.as_distinct_expr().unwrap();
-            match mutate_list(mcx, &d.args, m)? {
+            match mutate_list_dyn(mcx, &d.args, m)? {
                 None => Ok(None),
                 Some(args) => Ok(Some(Node::mk(
                     mcx,
@@ -1476,7 +1493,7 @@ where
         }
         NodeTag::T_NullIfExpr => {
             let d = node.as_null_if_expr().unwrap();
-            match mutate_list(mcx, &d.args, m)? {
+            match mutate_list_dyn(mcx, &d.args, m)? {
                 None => Ok(None),
                 Some(args) => Ok(Some(Node::mk(
                     mcx,
@@ -1513,7 +1530,7 @@ where
         }
         NodeTag::T_RowExpr => {
             let r = node.as_row_expr().unwrap();
-            match mutate_list(mcx, &r.args, m)? {
+            match mutate_list_dyn(mcx, &r.args, m)? {
                 None => Ok(None),
                 Some(args) => Ok(Some(Node::mk(
                     mcx,
@@ -1529,8 +1546,8 @@ where
         }
         NodeTag::T_JsonValueExpr => {
             let j = node.as_json_value_expr().unwrap();
-            let raw = mutate_opt(j.raw_expr, m)?;
-            let formatted = mutate_opt(j.formatted_expr, m)?;
+            let raw = mutate_opt_dyn(j.raw_expr, m)?;
+            let formatted = mutate_opt_dyn(j.formatted_expr, m)?;
             if raw.is_none() && formatted.is_none() {
                 return Ok(None);
             }
@@ -1545,9 +1562,9 @@ where
         }
         NodeTag::T_JsonConstructorExpr => {
             let c = node.as_json_constructor_expr().unwrap();
-            let args = mutate_list(mcx, &c.args, m)?;
-            let func = mutate_opt(c.func, m)?;
-            let coercion = mutate_opt(c.coercion, m)?;
+            let args = mutate_list_dyn(mcx, &c.args, m)?;
+            let func = mutate_opt_dyn(c.func, m)?;
+            let coercion = mutate_opt_dyn(c.coercion, m)?;
             if args.is_none() && func.is_none() && coercion.is_none() {
                 return Ok(None);
             }
@@ -1571,7 +1588,7 @@ where
         }
         NodeTag::T_JsonIsPredicate => {
             let p = node.as_json_is_predicate().unwrap();
-            match mutate_opt(p.expr, m)? {
+            match mutate_opt_dyn(p.expr, m)? {
                 None => Ok(None),
                 Some(expr) => Ok(Some(Node::mk(
                     mcx,
@@ -1587,7 +1604,7 @@ where
         }
         NodeTag::T_JsonBehavior => {
             let b = node.as_json_behavior().unwrap();
-            match mutate_opt(b.expr, m)? {
+            match mutate_opt_dyn(b.expr, m)? {
                 None => Ok(None),
                 Some(expr) => Ok(Some(Node::mk(
                     mcx,
@@ -1602,11 +1619,11 @@ where
         }
         NodeTag::T_JsonExpr => {
             let j = node.as_json_expr().unwrap();
-            let formatted = mutate_opt(j.formatted_expr, m)?;
-            let path_spec = mutate_opt(j.path_spec, m)?;
-            let passing_values = mutate_list(mcx, &j.passing_values, m)?;
-            let on_empty = mutate_opt(j.on_empty, m)?;
-            let on_error = mutate_opt(j.on_error, m)?;
+            let formatted = mutate_opt_dyn(j.formatted_expr, m)?;
+            let path_spec = mutate_opt_dyn(j.path_spec, m)?;
+            let passing_values = mutate_list_dyn(mcx, &j.passing_values, m)?;
+            let on_empty = mutate_opt_dyn(j.on_empty, m)?;
+            let on_error = mutate_opt_dyn(j.on_error, m)?;
             if formatted.is_none()
                 && path_spec.is_none()
                 && passing_values.is_none()
@@ -1643,8 +1660,8 @@ where
         }
         NodeTag::T_RowCompareExpr => {
             let rc = node.as_row_compare_expr().unwrap();
-            let largs = mutate_list(mcx, &rc.largs, m)?;
-            let rargs = mutate_list(mcx, &rc.rargs, m)?;
+            let largs = mutate_list_dyn(mcx, &rc.largs, m)?;
+            let rargs = mutate_list_dyn(mcx, &rc.rargs, m)?;
             if largs.is_none() && rargs.is_none() {
                 return Ok(None);
             }
@@ -1669,7 +1686,7 @@ where
         NodeTag::T_FieldStore => {
             let fs = node.as_field_store().unwrap();
             let arg = m(fs.arg)?;
-            let newvals = mutate_list(mcx, &fs.newvals, m)?;
+            let newvals = mutate_list_dyn(mcx, &fs.newvals, m)?;
             if arg.is_none() && newvals.is_none() {
                 return Ok(None);
             }
@@ -1691,7 +1708,7 @@ where
         }
         NodeTag::T_MinMaxExpr => {
             let mm = node.as_min_max_expr().unwrap();
-            match mutate_list(mcx, &mm.args, m)? {
+            match mutate_list_dyn(mcx, &mm.args, m)? {
                 None => Ok(None),
                 Some(args) => Ok(Some(Node::mk(
                     mcx,
@@ -1708,7 +1725,7 @@ where
         }
         NodeTag::T_CoalesceExpr => {
             let co = node.as_coalesce_expr().unwrap();
-            match mutate_list(mcx, &co.args, m)? {
+            match mutate_list_dyn(mcx, &co.args, m)? {
                 None => Ok(None),
                 Some(args) => Ok(Some(Node::mk(
                     mcx,
@@ -1727,7 +1744,7 @@ where
                 Some(a) => m(a)?.map(Some),
                 None => None,
             };
-            let args = mutate_list(mcx, &c.args, m)?;
+            let args = mutate_list_dyn(mcx, &c.args, m)?;
             let defresult = match c.defresult {
                 Some(d) => m(d)?.map(Some),
                 None => None,
@@ -1793,7 +1810,7 @@ where
         }
         NodeTag::T_FromExpr => {
             let f = node.as_variant::<FromExpr>().unwrap();
-            let fromlist = mutate_list(mcx, &f.fromlist, m)?;
+            let fromlist = mutate_list_dyn(mcx, &f.fromlist, m)?;
             let quals = match f.quals {
                 Some(q) => m(q)?.map(Some),
                 None => None,
@@ -1836,7 +1853,7 @@ where
                 },
             )?))
         }
-        NodeTag::T_List => match mutate_list(mcx, node.as_list().unwrap(), m)? {
+        NodeTag::T_List => match mutate_list_dyn(mcx, node.as_list().unwrap(), m)? {
             None => Ok(None),
             Some(l) => Ok(Some(Node::mk_list(mcx, l)?)),
         },
@@ -1844,9 +1861,9 @@ where
             // C mutates larg/rarg/groupClauses; the col* value lists are
             // copied (nodeFuncs.c expression_tree_mutator).
             let so = node.as_set_operation_stmt().unwrap();
-            let larg = mutate_opt(so.larg, m)?;
-            let rarg = mutate_opt(so.rarg, m)?;
-            let group_clauses = mutate_list(mcx, &so.groupClauses, m)?;
+            let larg = mutate_opt_dyn(so.larg, m)?;
+            let rarg = mutate_opt_dyn(so.rarg, m)?;
+            let group_clauses = mutate_list_dyn(mcx, &so.groupClauses, m)?;
             if larg.is_none() && rarg.is_none() && group_clauses.is_none() {
                 return Ok(None);
             }
@@ -1891,7 +1908,7 @@ where
                 None => None,
                 Some(te) => m(te)?,
             };
-            let new_args = mutate_list(mcx, &sp.args, m)?;
+            let new_args = mutate_list_dyn(mcx, &sp.args, m)?;
             if new_te.is_none() && new_args.is_none() {
                 return Ok(None);
             }
@@ -1947,7 +1964,7 @@ where
                 Some(q) => m(q)?,
                 None => None,
             };
-            let new_tl = mutate_list(mcx, &a.targetList, m)?;
+            let new_tl = mutate_list_dyn(mcx, &a.targetList, m)?;
             if new_qual.is_none() && new_tl.is_none() {
                 return Ok(None);
             }
@@ -1971,8 +1988,8 @@ where
         }
         NodeTag::T_XmlExpr => {
             let x = node.as_xml_expr().unwrap();
-            let named_args = mutate_list(mcx, &x.named_args, m)?;
-            let args = mutate_list(mcx, &x.args, m)?;
+            let named_args = mutate_list_dyn(mcx, &x.named_args, m)?;
+            let args = mutate_list_dyn(mcx, &x.args, m)?;
             if named_args.is_none() && args.is_none() {
                 return Ok(None);
             }
@@ -2000,7 +2017,7 @@ where
         }
         NodeTag::T_TableFunc => {
             let tf = node.as_table_func().unwrap();
-            let ns_uris = mutate_list(mcx, &tf.ns_uris, m)?;
+            let ns_uris = mutate_list_dyn(mcx, &tf.ns_uris, m)?;
             let docexpr = match tf.docexpr {
                 Some(d) => m(d)?.map(Some),
                 None => None,
@@ -2009,10 +2026,10 @@ where
                 Some(r) => m(r)?.map(Some),
                 None => None,
             };
-            let colexprs = mutate_opt_list(mcx, &tf.colexprs, m)?;
-            let coldefexprs = mutate_opt_list(mcx, &tf.coldefexprs, m)?;
-            let colvalexprs = mutate_opt_list(mcx, &tf.colvalexprs, m)?;
-            let passingvalexprs = mutate_list(mcx, &tf.passingvalexprs, m)?;
+            let colexprs = mutate_opt_list_dyn(mcx, &tf.colexprs, m)?;
+            let coldefexprs = mutate_opt_list_dyn(mcx, &tf.coldefexprs, m)?;
+            let colvalexprs = mutate_opt_list_dyn(mcx, &tf.colvalexprs, m)?;
+            let passingvalexprs = mutate_list_dyn(mcx, &tf.passingvalexprs, m)?;
             if ns_uris.is_none()
                 && docexpr.is_none()
                 && rowexpr.is_none()
@@ -2081,11 +2098,11 @@ where
         }
         NodeTag::T_OnConflictExpr => {
             let oc = node.as_on_conflict_expr().unwrap();
-            let arbiter_elems = mutate_list(mcx, &oc.arbiterElems, m)?;
-            let arbiter_where = mutate_opt(oc.arbiterWhere, m)?;
-            let on_conflict_set = mutate_list(mcx, &oc.onConflictSet, m)?;
-            let on_conflict_where = mutate_opt(oc.onConflictWhere, m)?;
-            let excl_rel_tlist = mutate_list(mcx, &oc.exclRelTlist, m)?;
+            let arbiter_elems = mutate_list_dyn(mcx, &oc.arbiterElems, m)?;
+            let arbiter_where = mutate_opt_dyn(oc.arbiterWhere, m)?;
+            let on_conflict_set = mutate_list_dyn(mcx, &oc.onConflictSet, m)?;
+            let on_conflict_where = mutate_opt_dyn(oc.onConflictWhere, m)?;
+            let excl_rel_tlist = mutate_list_dyn(mcx, &oc.exclRelTlist, m)?;
             if arbiter_elems.is_none()
                 && arbiter_where.is_none()
                 && on_conflict_set.is_none()
@@ -2114,7 +2131,7 @@ where
         }
         NodeTag::T_AlternativeSubPlan => {
             let asp = node.as_alternative_sub_plan().unwrap();
-            match mutate_list(mcx, &asp.subplans, m)? {
+            match mutate_list_dyn(mcx, &asp.subplans, m)? {
                 None => Ok(None),
                 Some(subplans) => Ok(Some(Node::mk(
                     mcx,
@@ -2124,9 +2141,9 @@ where
         }
         NodeTag::T_PartitionBoundSpec => {
             let pbs = node.as_variant::<types_nodes::rawnodes::PartitionBoundSpec>().unwrap();
-            let listdatums = mutate_list(mcx, &pbs.listdatums, m)?;
-            let lowerdatums = mutate_list(mcx, &pbs.lowerdatums, m)?;
-            let upperdatums = mutate_list(mcx, &pbs.upperdatums, m)?;
+            let listdatums = mutate_list_dyn(mcx, &pbs.listdatums, m)?;
+            let lowerdatums = mutate_list_dyn(mcx, &pbs.lowerdatums, m)?;
+            let upperdatums = mutate_list_dyn(mcx, &pbs.upperdatums, m)?;
             if listdatums.is_none() && lowerdatums.is_none() && upperdatums.is_none() {
                 return Ok(None);
             }
@@ -2151,7 +2168,7 @@ where
         // Range-bound list elements: MINVALUE/MAXVALUE carry no value node.
         NodeTag::T_PartitionRangeDatum => {
             let prd = node.as_variant::<types_nodes::rawnodes::PartitionRangeDatum>().unwrap();
-            let Some(value) = mutate_opt(prd.value, m)? else {
+            let Some(value) = mutate_opt_dyn(prd.value, m)? else {
                 return Ok(None);
             };
             Ok(Some(Node::mk(
@@ -2168,6 +2185,7 @@ where
 }
 
 /// Mutate an optional child; `None` = unchanged (absent child included).
+/// Generic wrapper over the erased-callback engine (de-mono byte-shell).
 pub fn mutate_opt<'mcx, F>(
     n: Option<Node<'mcx>>,
     m: &mut F,
@@ -2175,6 +2193,13 @@ pub fn mutate_opt<'mcx, F>(
 where
     F: FnMut(Node<'mcx>) -> PgResult<Option<Node<'mcx>>>,
 {
+    mutate_opt_dyn(n, m)
+}
+
+pub fn mutate_opt_dyn<'mcx>(
+    n: Option<Node<'mcx>>,
+    m: &mut dyn FnMut(Node<'mcx>) -> PgResult<Option<Node<'mcx>>>,
+) -> PgResult<Option<Node<'mcx>>> {
     match n {
         Some(x) => m(x),
         None => Ok(None),
@@ -2182,6 +2207,7 @@ where
 }
 
 /// Element-wise mutate; allocates a new list only after the first change.
+/// Generic wrapper over the erased-callback engine (de-mono byte-shell).
 pub fn mutate_opt_list<'mcx, F>(
     mcx: Mcx<'mcx>,
     list: &types_nodes::OptNodeList<'mcx>,
@@ -2190,6 +2216,14 @@ pub fn mutate_opt_list<'mcx, F>(
 where
     F: FnMut(Node<'mcx>) -> PgResult<Option<Node<'mcx>>>,
 {
+    mutate_opt_list_dyn(mcx, list, m)
+}
+
+pub fn mutate_opt_list_dyn<'mcx>(
+    mcx: Mcx<'mcx>,
+    list: &types_nodes::OptNodeList<'mcx>,
+    m: &mut dyn FnMut(Node<'mcx>) -> PgResult<Option<Node<'mcx>>>,
+) -> PgResult<Option<types_nodes::OptNodeList<'mcx>>> {
     let mut out: Option<types_nodes::OptNodeList<'mcx>> = None;
     for (i, n) in list.iter().enumerate() {
         let Some(n) = n else { continue };
@@ -2204,6 +2238,7 @@ where
     Ok(out)
 }
 
+/// Generic wrapper over the erased-callback engine (de-mono byte-shell).
 pub fn mutate_list<'mcx, F>(
     mcx: Mcx<'mcx>,
     list: &NodeList<'mcx>,
@@ -2212,6 +2247,14 @@ pub fn mutate_list<'mcx, F>(
 where
     F: FnMut(Node<'mcx>) -> PgResult<Option<Node<'mcx>>>,
 {
+    mutate_list_dyn(mcx, list, m)
+}
+
+pub fn mutate_list_dyn<'mcx>(
+    mcx: Mcx<'mcx>,
+    list: &NodeList<'mcx>,
+    m: &mut dyn FnMut(Node<'mcx>) -> PgResult<Option<Node<'mcx>>>,
+) -> PgResult<Option<NodeList<'mcx>>> {
     let mut out: Option<NodeList<'mcx>> = None;
     for (i, n) in list.iter().enumerate() {
         let replaced = m(n)?;
