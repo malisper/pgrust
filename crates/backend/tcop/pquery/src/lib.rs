@@ -423,20 +423,29 @@ pub fn PortalStart(
                 let current_of_eligible = store_armed
                     && execmain_seams::cursor_plan_current_of_eligible::is_installed()
                     && execmain_seams::cursor_plan_current_of_eligible::call(&stmts[0]);
-                // SE-R41 (notes/se-r41-retire.md §3.1/§3.2): an eligible
-                // plan of the batch store-fill shape (bare heap SeqScan
-                // top) captures §4.2 identity INSIDE the run — batch sink
-                // or capture row loop, both settle-safe — so it takes the
-                // PLAIN store-armed eflags (backward consumed by the
-                // store, rewind = store rescan; the non-eligible arm
-                // verbatim). The D-CA-2 fence stays, unchanged, for every
-                // eligible shape whose capture still needs the row chain.
-                let capture_batch = current_of_eligible
-                    && execmain_seams::cursor_plan_capture_batch_fill::is_installed()
-                    && execmain_seams::cursor_plan_capture_batch_fill::call(&stmts[0]);
-                let myeflags = if scroll
-                    && (!store_armed || (current_of_eligible && !capture_batch))
-                {
+                // R1b == B2 (night/se-b2-r1b; scratchpad/night/r1-cursors-design.md
+                // §4, notes/se-b2-safety-proof.md): the D-CA-2 fence is DELETED.
+                // R1a moved §4.2 (tableoid,ctid) capture IN-RUN for EVERY
+                // eligible shape (batch sink for the lane-owned bare-SeqScan
+                // cell; the run-seam capture row loop for every other eligible
+                // shape), so the `current_of_eligible && !capture_batch` disjunct
+                // that forced `batch_allowed=false` (REWIND|BACKWARD ⇒
+                // ScrollMark ⇒ row chain) has NO correctness job left: with the
+                // fence down every eligible shape still captures at its emit
+                // surface (per the per-ShapeClass safety proof — SeqScan sink /
+                // Volcano-standalone scans / lane-owned Append with per-row scan
+                // slot stores). So `batch_allowed` now flips TRUE for
+                // CURRENT-OF-eligible SCROLL cursors. `cursor_plan_capture_batch_fill`
+                // (the bare-SeqScan sub-gate) and the `cursorCaptureBatch` portal
+                // field are now VESTIGIAL — the fill dispatch selects the sink by
+                // planstate node type (`cursor_store_batch_fill`), not this flag.
+                //
+                // The surviving `!store_armed` arm is ORTHOGONAL to the fence: a
+                // NON-store-armed SCROLL cursor still needs C's real
+                // REWIND|BACKWARD eflags for backward EXECUTION (the store is not
+                // serving its fetches). That is the backward-execution wave
+                // (B1-B11) territory, NOT landed on this R1a base — untouched here.
+                let myeflags = if scroll && !store_armed {
                     eflags | EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD
                 } else {
                     eflags
@@ -461,7 +470,10 @@ pub fn PortalStart(
                 p.cursorStoreArmed = store_armed;
                 if store_armed {
                     p.currentOfEligible = Some(current_of_eligible);
-                    p.cursorCaptureBatch = capture_batch;
+                    // R1b == B2: `cursorCaptureBatch` is vestigial (the D-CA-2
+                    // fence it fed is deleted); left at its init default `false`.
+                    // Field removal is a follow-up (R1c), mirroring R1a leaving
+                    // the `cursor_capture_current` seam registered-but-uncalled.
                 }
                 drop(p);
                 // SEAM-WIRING (SE10-GATES item 1): note the arming decision
