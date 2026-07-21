@@ -234,6 +234,79 @@ fn hj_groupsink_enabled() -> bool {
     })
 }
 
+/// TPCH-DECOROOT (night/tpch-cars-1, CAR 1) — executor half: engage the
+/// grouped-join sink when the Agg sits ONE WHITELISTED DECORATION CHAIN
+/// below the plan root (`[Limit] -> [Sort] -> Agg`): the arm fills the full
+/// grouped table (fill-only — no first-row retrieve) and the serial
+/// Sort/Limit above consumes it off the filled table, exactly the scan-side
+/// sinks' standing under-Sort/Limit posture (runtime_distinct's "the Agg
+/// need not be the plan root" law). DEFAULT OFF; `PGRUST_LANE_V2_DECOROOT=
+/// 1|on` arms — the SAME spelling as the planner probe (knob coherence: a
+/// keyed decorated shape whose arm is disarmed would suppress Gather and
+/// land on the serial join build).
+fn hj_decoroot_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&ON, || {
+        matches!(std::env::var("PGRUST_LANE_V2_DECOROOT").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
+/// TPCH-NUMJOIN (night/tpch-cars-1, CAR 2) — executor half: admit the
+/// SE-AGGPOLY manifest schema (sum/avg(NUMERIC) over free arg exprs +
+/// exportable lane kinds) into the join sinks' export/combine/absorb — the
+/// relocated NumericAgg digit-snapshot states, C numeric_avg_combine field
+/// law, exact deferred additions at absorb. Plan-covered shapes are
+/// UNTOUCHED (the schema derivation tries the fold plan first). DEFAULT
+/// OFF; `PGRUST_LANE_V2_AGGJOIN_NUMERIC=1|on` arms — same spelling as the
+/// planner probe (knob coherence).
+fn hj_aggjoin_numeric_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&ON, || {
+        matches!(
+            std::env::var("PGRUST_LANE_V2_AGGJOIN_NUMERIC").as_deref(),
+            Ok("1") | Ok("on")
+        )
+    })
+}
+
+/// TPCH-DECOROOT: resolve the Agg's plan NODE from the leader plan root.
+/// `Some` iff the root IS this Agg (the pre-existing law, any knob state),
+/// or — knob-armed and `decorated_ok` (grouped engagements only) — the root
+/// is a whitelisted decoration chain `[Limit] -> [Sort] -> Agg` whose Agg is
+/// this node. The returned node seeds the WORKER pstmt (workers must run
+/// the Agg subtree, never the decoration — the serial Sort/Limit above is
+/// the leader's). Anything else — other node kinds, deeper chains — is a
+/// refusal (fail-closed; the serial arms proceed byte-identically).
+fn decorated_agg_plan_node<'mcx>(
+    root: ::types_nodes::Node<'mcx>,
+    agg: &::nodeagg::AggStateData<'mcx>,
+    decorated_ok: bool,
+) -> Option<::types_nodes::Node<'mcx>> {
+    let is_this_agg = |n: ::types_nodes::Node<'mcx>| {
+        n.as_agg().is_some_and(|a| std::ptr::eq(a, agg.plan))
+    };
+    if is_this_agg(root) {
+        return Some(root);
+    }
+    if !decorated_ok || !hj_decoroot_enabled() {
+        return None;
+    }
+    let mut node = root;
+    let mut descended = false;
+    if let Some(l) = node.as_limit() {
+        node = l.plan.lefttree?;
+        descended = true;
+    }
+    if let Some(s) = node.as_sort() {
+        node = s.plan.lefttree?;
+        descended = true;
+    }
+    if descended && is_this_agg(node) {
+        return Some(node);
+    }
+    None
+}
+
 /// Grouped-sink export envelope: a worker table above this many groups (or
 /// any hashagg spill entry) refuses the whole engagement to the serial arm —
 /// the per-morsel cumulative export walk and the leader absorb are both
@@ -2542,7 +2615,10 @@ fn build_worker_exec(payload: &Arc<RuntimeHjShared>) -> PgResult<()> {
                         return mb_arm_worker(&mut d.estate, &mut d.planstate, chain);
                     }
                     with_join_tree(&mut d.estate, &mut d.planstate, |estate, agg, hj, outer_ss, hstate, inner_ss| {
-                        if !agg_runtime_partial_admissible(agg) {
+                        if !agg_runtime_partial_admissible(agg)
+                            && !(hj_aggjoin_numeric_enabled()
+                                && ::nodeagg::runtime_partial::agg_poly_partial_admissible(agg))
+                        {
                             return Err(Box::new(PgError::new(
                                 ERROR,
                                 "runtime hash-join worker fold plan diverged from the leader's",
@@ -3311,14 +3387,22 @@ fn mb_arm_worker<'mcx>(
     let (agg, tree) = mb_split_root(planstate)?;
     if chain.grouped {
         // SE-AGGJOIN: grouped congruence — the rebuilt agg must admit the
-        // grouped export exactly as the leader's did.
-        if !::nodeagg::agg_grouped_runtime_admissible(agg) {
+        // grouped export exactly as the leader's did (plan-based, or the
+        // knob-gated poly manifest — TPCH-NUMJOIN; env is process-shared so
+        // both sides resolve the same schema).
+        if !::nodeagg::agg_grouped_runtime_admissible(agg)
+            && !(hj_aggjoin_numeric_enabled()
+                && ::nodeagg::agg_grouped_poly_runtime_admissible(agg))
+        {
             return Err(Box::new(PgError::new(
                 ERROR,
                 "runtime hash-join grouped worker agg diverged from the leader's",
             )));
         }
-    } else if !agg_runtime_partial_admissible(agg) {
+    } else if !agg_runtime_partial_admissible(agg)
+        && !(hj_aggjoin_numeric_enabled()
+            && ::nodeagg::runtime_partial::agg_poly_partial_admissible(agg))
+    {
         return Err(Box::new(PgError::new(
             ERROR,
             "runtime hash-join multibuild worker fold plan diverged from the leader's",
@@ -3444,7 +3528,7 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
             refuse("groupsink-disabled");
             return Ok(None);
         }
-        return try_own_multibuild(agg, hj, estate, rt, dop, true);
+        return try_own_multibuild(agg, hj, estate, rt, dop, true, false);
     }
     // Done-repulls (the post-completion pull that exits via agg_is_done
     // below) are not offers — see the scan arm's identical gate.
@@ -3462,7 +3546,7 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
             refuse("multibuild-disabled");
             return Ok(None);
         }
-        return try_own_multibuild(agg, hj, estate, rt, dop, false);
+        return try_own_multibuild(agg, hj, estate, rt, dop, false, false);
     }
 
     // --- Node shape: HashJoin over two lane-fusible pgrcolumnar SeqScans; a
@@ -3485,7 +3569,10 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
         refuse("join-touched");
         return Ok(None);
     }
-    if !agg_runtime_partial_admissible(agg) {
+    if !agg_runtime_partial_admissible(agg)
+        && !(hj_aggjoin_numeric_enabled()
+            && ::nodeagg::runtime_partial::agg_poly_partial_admissible(agg))
+    {
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
         refuse("partials-not-order-insensitive-exact");
         return Ok(None);
@@ -3728,12 +3815,52 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
         fill_inner,
         spill_batches,
         None, // chain: the phase-1 single-join arm
+        root, // worker root: the Agg IS the plan root here (checked above)
+        false,
     )?;
     router::tick(
         ArmClass::HashJoin,
         if r.is_some() { ArmCounter::Completed } else { ArmCounter::Fallback },
     );
     Ok(r)
+}
+
+/// TPCH-DECOROOT (night/tpch-cars-1, CAR 1): the decorated-root FILL entry —
+/// called from the serial Sort/Limit feeds when their Agg child sits over a
+/// HashJoin. `Ok(true)` = the grouped runtime sink engaged and FILLED the
+/// leader table (finished, not retrieved) — the caller's own drain paths
+/// consume it exactly as they consume a serially built table. `Ok(false)` =
+/// not engaged/refused — the caller falls to the serial join build
+/// byte-identically (nothing consumed; a mid-engagement fallback is the R5
+/// serial-rerun discipline, table reset). Knob-gated OFF by default.
+pub(super) fn try_fill_grouped_agg_over_join_runtime<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    hj: &mut crate::procnode::HashJoinNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    if !hj_decoroot_enabled() || estate.es_epq_active {
+        return Ok(false);
+    }
+    let dop = router::arm_dop(ArmClass::HashJoin);
+    if dop <= 0 || !runtime::runtime_enabled() {
+        return Ok(false);
+    }
+    let Some(rt) = runtime::global() else { return Ok(false) };
+    // Grouped shapes only; a filled/done table is the drain phase (the
+    // caller's emit paths own it — never re-engage).
+    if !::nodeagg::agg_is_hashed(agg)
+        || ::nodeagg::agg_hash_table_filled(agg)
+        || ::nodeagg::agg_is_done(agg)
+    {
+        return Ok(false);
+    }
+    router::tick(ArmClass::HashJoin, ArmCounter::Offered);
+    if !hj_groupsink_enabled() {
+        router::tick_refused(ArmClass::HashJoin, "groupsink-disabled");
+        return Ok(false);
+    }
+    Ok(try_own_multibuild(agg, hj, estate, rt, dop, /*grouped=*/ true, /*fill_only=*/ true)?
+        .is_some())
 }
 
 /// m5p1 multibuild admission (the dispatch gate above verified a nested
@@ -3750,17 +3877,30 @@ fn try_own_multibuild<'mcx>(
     rt: &'static Arc<runtime::Runtime>,
     dop: i32,
     grouped: bool,
+    // TPCH-DECOROOT (CAR 1): fill-only engagement — the Agg sits under a
+    // whitelisted Sort/Limit decoration; on completion the leader table is
+    // filled/finished but NOT retrieved (the decorated consumer drains it).
+    fill_only: bool,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     fn refuse(reason: &'static str) {
         router::tick_refused(ArmClass::HashJoin, reason);
     }
     if grouped {
-        if !::nodeagg::agg_grouped_runtime_admissible(agg) {
+        // TPCH-NUMJOIN (CAR 2): plan-based admission FIRST (byte-untouched);
+        // the knob-gated poly twin admits the numeric-manifest shapes the
+        // relocated NumericAgg export carries.
+        if !::nodeagg::agg_grouped_runtime_admissible(agg)
+            && !(hj_aggjoin_numeric_enabled()
+                && ::nodeagg::agg_grouped_poly_runtime_admissible(agg))
+        {
             stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
             refuse("grouped-agg-not-exportable");
             return Ok(None);
         }
-    } else if !agg_runtime_partial_admissible(agg) {
+    } else if !agg_runtime_partial_admissible(agg)
+        && !(hj_aggjoin_numeric_enabled()
+            && ::nodeagg::runtime_partial::agg_poly_partial_admissible(agg))
+    {
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
         refuse("partials-not-order-insensitive-exact");
         return Ok(None);
@@ -3785,13 +3925,14 @@ fn try_own_multibuild<'mcx>(
         refuse("params");
         return Ok(None);
     }
-    // Agg must be the plan root; its child the top HashJoin (the worker
-    // pstmt transfers the whole root subtree).
+    // Agg must be the plan root — or (TPCH-DECOROOT, grouped only) sit one
+    // whitelisted `[Limit] -> [Sort]` decoration below it; the resolved Agg
+    // NODE seeds the worker pstmt (workers run the Agg subtree, never the
+    // decoration).
     let Some(root) = leader_pstmt.planTree else { return Ok(None) };
-    let Some(root_agg) = root.as_agg() else { return Ok(None) };
-    if !std::ptr::eq(root_agg, agg.plan) {
+    let Some(worker_root) = decorated_agg_plan_node(root, agg, grouped) else {
         return Ok(None);
-    }
+    };
     let Some(join_node) = agg.plan.plan.lefttree else { return Ok(None) };
     // Pass A: plan-tree walk (shape, probe-local join types, parallel
     // safety, per-build sizing inputs, preorder topology).
@@ -3939,6 +4080,8 @@ fn try_own_multibuild<'mcx>(
         false, // fill_inner: probe-local types only
         None,  // spill_batches: unbatched by admission
         Some(init),
+        worker_root,
+        fill_only,
     )?;
     router::tick(
         ArmClass::HashJoin,
@@ -3973,6 +4116,13 @@ fn engage<'mcx>(
     spill_batches: Option<u32>,
     // m5p1 multibuild descriptor (None = the phase-1 single-join arm).
     chain: Option<MbInit>,
+    // The plan NODE seeding the worker pstmt: the Agg itself (== planTree
+    // when the Agg is the root; the resolved decorated-chain Agg node under
+    // TPCH-DECOROOT — workers never see the Sort/Limit decoration).
+    worker_root: ::types_nodes::Node<'mcx>,
+    // TPCH-DECOROOT: grouped fill-only — absorb + finish the leader table
+    // but do NOT retrieve; the decorated serial consumer drains it.
+    fill_only: bool,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     ensure_hooks_registered();
     crate::execparallel::register_parallel_query_main();
@@ -4003,8 +4153,7 @@ fn engage<'mcx>(
         None => None,
     };
 
-    let agg_node = estate.es_plannedstmt.and_then(|p| p.planTree).expect("gated above");
-    let pstmt = crate::execparallel::build_worker_pstmt(estate, agg_node)?;
+    let pstmt = crate::execparallel::build_worker_pstmt(estate, worker_root)?;
 
     let leaf_cap = spill.as_ref().map_or(0, |s| s.leaf_cap);
     let payload = Arc::new(RuntimeHjShared {
@@ -4115,6 +4264,7 @@ fn engage<'mcx>(
         single,
         &payload,
         fill_inner,
+        fill_only,
     );
     xact::ExitParallelMode();
     engaged
@@ -4316,6 +4466,8 @@ fn engage_ceremony<'mcx>(
     mut single: Option<(Arc<JoinBuildSink>, Arc<dyn runtime::MorselSource>)>,
     payload: &Arc<RuntimeHjShared>,
     fill_inner: bool,
+    // TPCH-DECOROOT: grouped fill-only (see `engage`).
+    fill_only: bool,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     let pcxt = parallel::CreateParallelContext("postgres", "pgrust_runtime_hashjoin_main", dop)?;
     let mut submitted: Option<runtime::RgHandle> = None;
@@ -4596,6 +4748,14 @@ fn engage_ceremony<'mcx>(
                     parts.len(),
                     combined.len()
                 ));
+                if fill_only {
+                    // TPCH-DECOROOT: the table is filled + finished; the
+                    // decorated serial consumer (Sort/Limit feed) drains it
+                    // through the ordinary emit paths. The wrapper maps
+                    // Some(_) to "filled"; no row is consumed here.
+                    lane_trace("runtime-hashjoin: fill-only complete (decorated root)");
+                    return Ok(Some(None));
+                }
                 return Ok(Some(::nodeagg::agg_hash_retrieve(agg, estate)?));
             }
             let parts: Vec<RuntimePartial> = payload
@@ -4653,6 +4813,17 @@ fn drain_rg(rt: &'static Arc<runtime::Runtime>, rg: &runtime::RgHandle) -> bool 
 #[cfg(test)]
 mod mb_tests {
     use super::*;
+
+    /// TPCH-CARS executor knobs (night/tpch-cars-1): both DEFAULT OFF —
+    /// the test binary carries no env, so the live getters resolve OFF
+    /// (the decorated-root fill entry and the poly-manifest join admission
+    /// are unreachable at default; every pre-existing path byte-identical).
+    /// Same spelling as the planner probe (knob-coherence law).
+    #[test]
+    fn tpch_cars_executor_knobs_default_off() {
+        assert!(!hj_decoroot_enabled(), "PGRUST_LANE_V2_DECOROOT unset => OFF");
+        assert!(!hj_aggjoin_numeric_enabled(), "PGRUST_LANE_V2_AGGJOIN_NUMERIC unset => OFF");
+    }
 
     /// Decomposition invariants on a SNOWFLAKE topology
     /// `J0(outer=J1(outer=S0, build=S1), build=J2(outer=S2, build=S3))`

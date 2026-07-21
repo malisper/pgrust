@@ -6713,12 +6713,26 @@ fn sort_feed_if_needed<'mcx>(
                     true
                 }
                 crate::procnode::PlanStateNode::HashJoin(hj) => {
-                    agg_hash_join_build_if_needed(
+                    // TPCH-DECOROOT (CAR 1): the decorated grouped-join
+                    // shape — offer the runtime grouped sink a FILL-ONLY
+                    // engagement first (knob-gated OFF by default; the
+                    // filled table drains through the identical emit paths
+                    // below); a refusal falls to the serial join build
+                    // byte-identically.
+                    if runtime_hashjoin::try_fill_grouped_agg_over_join_runtime(
                         &mut aps.agg,
                         &mut **hj,
-                        &mut aps.lane_stage_slot,
                         estate,
-                    )?
+                    )? {
+                        true
+                    } else {
+                        agg_hash_join_build_if_needed(
+                            &mut aps.agg,
+                            &mut **hj,
+                            &mut aps.lane_stage_slot,
+                            estate,
+                        )?
+                    }
                 }
                 crate::procnode::PlanStateNode::Gather(g) => {
                     agg_gather_build_if_needed(

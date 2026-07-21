@@ -649,6 +649,75 @@ fn extract_exprkey_guard() -> FloorGuard {
     FloorGuard { min_dop: 12, low_dop_max_rows: 3_000_000.0, ..NO_GUARD }
 }
 
+/// The shared default-OFF arming rule (the SE-SCANPASS / K1-latemat idiom,
+/// factored pure for the tpch-cars lanes): ON iff the value is exactly `1`
+/// or `on`; every other spelling — unset, `0`, `off`, typos — fails safe to
+/// OFF (today's behaviour, byte-identical plan time).
+fn knob_spelling_armed(v: Option<&str>) -> bool {
+    matches!(v, Some("1") | Some("on"))
+}
+
+/// TPCH-DECOROOT (night/tpch-cars-1, CAR 1 — the R-root blocker,
+/// scratchpad/night/tpch-conversion-scope.md §3 car 1): decorated-root
+/// composition. Every grouped probe class is Agg-root-only today, which
+/// gates 17/20 Gather-carrying TPC-H queries (ORDER BY / LIMIT / OFFSET
+/// tops above the grouped agg). The runtime grouped arms produce the FULL
+/// grouped output and stream subsequent pulls through the serial emit paths
+/// off the filled table (se-aggjoin §3.1), so a serial Sort/Limit ABOVE the
+/// engaged arm consumes it correctly — the exprkey Reduced arm
+/// (`[Limit<-Sort<-]HashAgg<-SeqScan`), the CbGroupedAggTopN row, and the
+/// t35 AGG_BARELIMIT flip already validate the pattern. This knob teaches
+/// the probe to see THROUGH whitelisted root decoration (sortClause /
+/// limitCount / limitOffset in the parse — the serial planner turns those
+/// into Sort/Limit nodes above the Agg), keying the UNDERLYING agg class;
+/// only when the child shape keys a covered grouped class and every sort
+/// key is a group-key ref or a class-vocabulary aggregate (fail-closed).
+/// DEFAULT OFF; `PGRUST_LANE_V2_DECOROOT=1|on` arms (GL-DECOROOT-1 fleet
+/// letter owns the default flip).
+fn decoroot_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        knob_spelling_armed(std::env::var("PGRUST_LANE_V2_DECOROOT").as_deref().ok())
+    })
+}
+
+/// TPCH-DECOROOT hash-election margin (PROVISIONAL, GL-DECOROOT-1 owns the
+/// measured bound): a decorated root changes the suppressed SERIAL plan's
+/// economics — with ORDER BY over group keys the costing compares
+/// `HashAgg + Sort(ngroups)` against `Sort(input) + GroupAggregate`, and
+/// near ngroups≈input the sorted-agg shape can win, landing a plan the
+/// runtime grouped arms refuse (the B1/X5/X6 suppress-then-refuse class,
+/// costing flavor). Below this input/ngroups ratio the hash election is
+/// safely dominant (HashAgg reads N rows once; the residual sort is over
+/// ngroups ≤ N/16 rows); at or above it the decorated shape keeps Gather.
+/// Also bounds the serial decoration cost: the Sort above the arm is over
+/// at most rows/16 rows.
+const DECOROOT_NGROUPS_MARGIN: f64 = 16.0;
+
+/// TPCH-NUMJOIN (night/tpch-cars-1, CAR 2 — the N-join blocker, scoping §3
+/// car 3, join half): numeric agg-expr probe vocabulary. The
+/// runtime-partial NumericAgg/Int128 state relocation LANDED (SE-AGGPOLY:
+/// exact digit snapshots, C numeric_avg_combine field law) and the agg-poly
+/// matrix row records "the aggjoin seam's export is ready via the shared
+/// runtime-partial vocabulary once its probe admits numeric args" — the
+/// blocker for the sum(l_extendedprice*(1-l_discount)) family (13 TPC-H
+/// queries carry it) is the probe whitelist, not the kernel. This knob
+/// admits structurally plain sum/avg(NUMERIC) aggregates over ONE
+/// parallel-safe argument expression (the heap-poly precedent: the join
+/// arms run C's checked evaltrans transition program per emitted row, so
+/// the arg SHAPE is free; helper-side safety is the planner's own
+/// is_parallel_safe) into the JOIN-side classifiers. The grouped-over-SCAN
+/// half stays REFUSED — the agg-poly row names its real gap (the lanetable
+/// sink combine topology perf car), so GROUPED_SINK_AGGS is untouched.
+/// DEFAULT OFF; `PGRUST_LANE_V2_AGGJOIN_NUMERIC=1|on` arms (GL-NUMJOIN-1
+/// fleet letter owns the default flip).
+fn aggjoin_numeric_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        knob_spelling_armed(std::env::var("PGRUST_LANE_V2_AGGJOIN_NUMERIC").as_deref().ok())
+    })
+}
+
 /// SE-MKTEXT group-estimate ceiling, env-overridable
 /// (`PGRUST_LANE_V2_MULTIKEY_TEXT_MAX_GROUPS`). The family's whole point is
 /// shapes the §10 groupby_high hold (raised to 4e6 at b12c3fc74; the
@@ -1387,10 +1456,21 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     // top-N winner-selection shape — a single whitelisted-aggregate sort
     // key plus LIMIT without OFFSET (q17/q18/q31–33). A sort on the group
     // keys themselves is an ordered-stream consumer (GatherMerge class,
-    // uncovered in bootstrap).
+    // uncovered in bootstrap). TPCH-DECOROOT (CAR 1, knob-gated): the
+    // residual decorated-root shapes — ORDER BY over group keys and/or
+    // class-vocabulary aggregates, multi-key sorts, sorts without LIMIT,
+    // and LIMIT+OFFSET forms — key the UNDERLYING grouped class; the arm
+    // emits the full grouped output and the serial Sort/Limit above
+    // consumes it (the exprkey-Reduced / CbGroupedAggTopN / AGG_BARELIMIT
+    // precedent). Fail-closed: no count(DISTINCT) (distinct-sink
+    // decoration owns its own topn composition only), no const/mk-family
+    // keys (their knob paths keep their own proven compositions), at most
+    // one text key, enable_hashagg required ON (with it off the suppressed
+    // serial plan is a sorted-agg shape the walk refuses).
     let mut mk_freeze = false;
     let mut bare_limit = false;
     let mut full_sort = false;
+    let mut decorated = false;
     let topn = if parse.sortClause.is_nil() && parse.limitCount.is_none() {
         false
     } else if parse.sortClause.is_nil()
@@ -1441,9 +1521,24 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         if !is_whitelisted_agg(tle.expr, rti, passenger_list)
             && !is_count_distinct_int(tle.expr, rti)
         {
-            return Ok(false);
+            // TPCH-DECOROOT: the single-sort-key+LIMIT shape whose key is a
+            // GROUP key (not an agg) is a decorated-root form too.
+            if decoroot_enabled()
+                && n_count_distinct == 0
+                && n_const == 0
+                && n_text <= 1
+                && !mk_text_family
+                && crate::gucs::enable_hashagg()
+                && scan_sort_keys_covered(parse, &key_refs, rti, passenger_list)
+            {
+                decorated = true;
+                false
+            } else {
+                return Ok(false);
+            }
+        } else {
+            true
         }
-        true
     } else if parse.sortClause.len() == 1
         && parse.limitCount.is_none()
         && parse.limitOffset.is_none()
@@ -1455,6 +1550,8 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         // the suppressed serial plan keeps its REAL Sort above the Agg (the
         // unbounded sink_topn_arm declines into the plain full drain and
         // the Sort consumes it), so this admits the COMPOSITION only.
+        // (The TPCH-DECOROOT residual arm below owns this shape only when
+        // this proven arm's knob is killed — same full-drain semantics.)
         let Some(sc) = parse.sortClause.nth(0).as_sort_group_clause() else {
             return Ok(false);
         };
@@ -1467,6 +1564,22 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             return Ok(false);
         }
         full_sort = true;
+        false
+    } else if decoroot_enabled()
+        && !parse.sortClause.is_nil()
+        && n_count_distinct == 0
+        && n_const == 0
+        && n_text <= 1
+        && !mk_text_family
+        && crate::gucs::enable_hashagg()
+        && scan_sort_keys_covered(parse, &key_refs, rti, passenger_list)
+    {
+        // TPCH-DECOROOT (CAR 1): the residual whitelisted decorations —
+        // multi-key sorts, group-key sorts, sorts without LIMIT, and
+        // LIMIT+OFFSET above a sort. Bare LIMIT/OFFSET with NO sort stays
+        // refused here (the SE-BARELIMIT / freeze rows own the no-sort
+        // LIMIT composition; OFFSET without ORDER BY has no covered arm).
+        decorated = true;
         false
     } else {
         return Ok(false);
@@ -1504,10 +1617,11 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     // textdistinct/mktext lanes keep their proven admission domains).
     if n_strminmax > 0 {
         // Fail-closed: min/max(text) passengers ride the plain grouped /
-        // topn compositions only (the freeze, bare-LIMIT, const-key, and
-        // no-limit-sort combinations are unproven with byref text states;
-        // count(DISTINCT) + mk-text-family were excluded at admission).
-        if full_sort || bare_limit || mk_freeze || n_const > 0 {
+        // topn compositions only (the freeze, bare-LIMIT, const-key,
+        // no-limit-sort, and TPCH-DECOROOT decorated combinations are
+        // unproven with byref text states; count(DISTINCT) +
+        // mk-text-family were excluded at admission).
+        if full_sort || decorated || bare_limit || mk_freeze || n_const > 0 {
             return Ok(false);
         }
         let class = if topn {
@@ -1605,6 +1719,36 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     } else {
         CoverClass::CbGroupedAggIntKeys
     };
+    // TPCH-DECOROOT (CAR 1) knob-path finish: decorated-root shapes route
+    // through the dedicated finish (own trace tag; NOT a BOOTSTRAP_MATRIX
+    // class — tsv/route_to, drift guards, and the DEFAULT census untouched),
+    // carrying the UNDERLYING class's floor economics. The hash-election
+    // margin guards the sorted-agg serial landing (with ORDER BY over group
+    // keys the costing compares HashAgg+Sort(ngroups) against
+    // Sort(input)+GroupAggregate — near ngroups≈input the sorted shape can
+    // win, and the walk refuses it: the suppress-then-refuse direction).
+    if decorated {
+        let input_rows = run.root.rel(rel_id).rows.max(1.0);
+        if ngroups * DECOROOT_NGROUPS_MARGIN > input_rows {
+            if trace_armed() {
+                eprintln!(
+                    "m5-suppress-refuse: decoroot scan-grouped (no hash-election margin: \
+                     ngroups={ngroups:.0} rows={input_rows:.0})"
+                );
+            }
+            return Ok(false);
+        }
+        return finish_knob_path(
+            run,
+            "decoroot",
+            if n_text > 0 { "scan-grouped-text-decorated" } else { "scan-grouped-int-decorated" },
+            class_guard(class),
+            rte.relid,
+            ngroups,
+            rel_rows,
+            rel_pages,
+        );
+    }
     // SE-CONSTKEY / SE-BARELIMIT knob-path finishes: shapes admitted only
     // by their knobs route through the dedicated finish (own trace prefix;
     // NOT BOOTSTRAP_MATRIX classes — tsv/route_to and the DEFAULT census
@@ -1647,10 +1791,10 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
 ///     plan for the costing to prefer; unindexed equi-joins cost to hash);
 ///   * >=1 hashjoinable int-family equi clause in the JOIN quals.
 /// Every early `false` keeps Gather exactly as today.
-fn classify_join_covered(
-    run: &mut PlannerRun<'_>,
-    parse: &Query<'_>,
-    je: &types_nodes::primnodes::JoinExpr<'_>,
+fn classify_join_covered<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    parse: &Query<'mcx>,
+    je: &types_nodes::primnodes::JoinExpr<'mcx>,
 ) -> PgResult<bool> {
     use types_nodes::JoinType;
     // Phase-1 + right join families the walk admits (semi/anti arrive via
@@ -1753,12 +1897,12 @@ fn classify_scanpass(parse: &Query<'_>, rti: usize, is_cb: bool, has_quals: bool
 /// explicit JoinExpr, or the flat two-RangeTblRef FromExpr the planner
 /// carries for INNER joins — `a JOIN b ON q` == `a, b WHERE q` by probe
 /// time, quals in the FromExpr).
-fn classify_join_sides(
-    run: &mut PlannerRun<'_>,
-    parse: &Query<'_>,
+fn classify_join_sides<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    parse: &Query<'mcx>,
     rti_l: usize,
     rti_r: usize,
-    join_quals: Option<Node<'_>>,
+    join_quals: Option<Node<'mcx>>,
 ) -> PgResult<bool> {
     // Plain one-row aggregation only (the arm drives a plain agg sink):
     // no grouping, no DISTINCT, no ORDER BY/LIMIT decoration.
@@ -1872,13 +2016,26 @@ fn classify_join_sides(
     }
     // Emit discipline: every non-junk tlist entry is a whitelisted plain
     // aggregate whose args live on either joined rel (count(*) included).
+    // TPCH-NUMJOIN (CAR 2, knob-gated): plain sum/avg(NUMERIC) over
+    // parallel-safe joined-rel arg exprs additionally admit — the q14/q19
+    // sum(price*(1-disc)) family (the plain-join arm's export speaks the
+    // same relocated runtime-partial vocabulary via the poly manifest).
     let mut n = 0usize;
+    let mut n_numeric = 0usize;
     for tle_node in &parse.targetList {
         let Some(tle) = tle_node.as_target_entry() else { return Ok(false) };
-        if !is_whitelisted_agg_2rti(tle.expr, rti_l, rti_r, PLAIN_FOLD_AGGS) {
-            return refuse_join("tlist entry not a whitelisted plain agg");
+        if is_whitelisted_agg_2rti(tle.expr, rti_l, rti_r, PLAIN_FOLD_AGGS) {
+            n += 1;
+            continue;
         }
-        n += 1;
+        if aggjoin_numeric_enabled()
+            && is_numeric_expr_agg_nrti(run, tle.expr, &[rti_l, rti_r])?
+        {
+            n += 1;
+            n_numeric += 1;
+            continue;
+        }
+        return refuse_join("tlist entry not a whitelisted plain agg");
     }
     if n == 0 {
         return refuse_join("empty tlist");
@@ -1902,6 +2059,21 @@ fn classify_join_sides(
     }
     // Floor guard input: the larger side's estimated rows (the ladder's
     // per-table N; the probe fixture's dim side is negligible).
+    if n_numeric > 0 {
+        // Knob-admitted shapes route through the knob-path finish (own
+        // trace tag; class row / tsv / drift guards untouched) with the
+        // CbHashJoinPlainAgg floor economics.
+        return finish_knob_path(
+            run,
+            "aggjoinnum",
+            "plainjoin-numeric",
+            class_guard(CoverClass::CbHashJoinPlainAgg),
+            relids[0],
+            0.0,
+            max_rows,
+            0.0,
+        );
+    }
     finish(run, CoverClass::CbHashJoinPlainAgg, relids[0], 0.0, max_rows, 0.0)
 }
 
@@ -1991,6 +2163,51 @@ fn is_whitelisted_agg_nrti(expr: Node<'_>, rtis: &[usize], whitelist: &[u32]) ->
         return false;
     }
     rtis.iter().any(|&rti| aggref_plain(agg, rti))
+}
+
+/// TPCH-NUMJOIN (CAR 2): a structurally plain `sum(NUMERIC)` /
+/// `avg(NUMERIC)` aggregate (no ORDER BY/DISTINCT/FILTER/variadic/
+/// ordered-set/levelsup decoration) over ONE argument expression that
+///   (a) the planner's own `is_parallel_safe` admits (it runs on helpers
+///       through the join arm's per-row evaltrans transition program — C's
+///       checked program, so the arg SHAPE is otherwise free: the
+///       sum(price*(1-disc)) family), and
+///   (b) references ONLY the joined relations (every level-0 varno in the
+///       arg sits in `rtis` — fail-closed against alias/rowmark RTEs the
+///       FROM census did not enumerate).
+/// The stddev/variance family (numeric_accum, sum_x2 states) is NOT here:
+/// only the NumericAgg-state pair the relocated runtime-partial vocabulary
+/// carries (F_AVG_NUMERIC 2103 / F_SUM_NUMERIC 2114, transfn
+/// numeric_avg_accum without sum_x2 — the SE-AGGPOLY OIDs of record).
+fn is_numeric_expr_agg_nrti<'mcx>(
+    run: &PlannerRun<'mcx>,
+    expr: Node<'mcx>,
+    rtis: &[usize],
+) -> PgResult<bool> {
+    let Some(agg) = expr.as_aggref() else { return Ok(false) };
+    if !matches!(agg.aggfnoid, F_AVG_NUMERIC | F_SUM_NUMERIC)
+        || agg.agglevelsup != 0
+        || agg.aggkind != AGGKIND_NORMAL
+        || agg.aggvariadic
+        || !agg.aggorder.is_nil()
+        || !agg.aggdistinct.is_nil()
+        || agg.aggfilter.is_some()
+        || !agg.aggdirectargs.is_nil()
+        || agg.args.len() != 1
+    {
+        return Ok(false);
+    }
+    let Some(arg_tle) = agg.args.nth(0).as_target_entry() else { return Ok(false) };
+    if !crate::is_parallel_safe_opt(run, Some(arg_tle.expr))? {
+        return Ok(false);
+    }
+    let varnos = vars::pull_varnos(run.mcx, arg_tle.expr)?;
+    for vn in varnos.iter() {
+        if !rtis.contains(&(vn as usize)) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// m5p1 (band 88001): the N-relation multibuild classifier — the shared
@@ -2090,19 +2307,41 @@ fn classify_multibuild<'mcx>(
     }
     // Emit discipline: every tlist entry a whitelisted plain aggregate
     // whose args live on one of the joined rels (count(*) included).
+    // TPCH-NUMJOIN (CAR 2, knob-gated): plain sum/avg(NUMERIC) over
+    // parallel-safe joined-rel arg exprs additionally admit (see
+    // classify_join_sides' twin note).
     let mut n = 0usize;
+    let mut n_numeric = 0usize;
     for tle_node in &parse.targetList {
         let Some(tle) = tle_node.as_target_entry() else { return Ok(false) };
-        if !is_whitelisted_agg_nrti(tle.expr, rtis, PLAIN_FOLD_AGGS) {
-            return refuse_join("tlist entry not a whitelisted plain agg");
+        if is_whitelisted_agg_nrti(tle.expr, rtis, PLAIN_FOLD_AGGS) {
+            n += 1;
+            continue;
         }
-        n += 1;
+        if aggjoin_numeric_enabled() && is_numeric_expr_agg_nrti(run, tle.expr, rtis)? {
+            n += 1;
+            n_numeric += 1;
+            continue;
+        }
+        return refuse_join("tlist entry not a whitelisted plain agg");
     }
     if n == 0 {
         return refuse_join("empty tlist");
     }
     // Floor guard input: the largest rel's estimated rows (the nbatch1
     // ladder's per-table N — provisional reuse, see class_guard).
+    if n_numeric > 0 {
+        return finish_knob_path(
+            run,
+            "aggjoinnum",
+            "multibuild-numeric",
+            class_guard(CoverClass::CbHashJoinMultiBuild),
+            relids[0],
+            0.0,
+            max_rows,
+            0.0,
+        );
+    }
     finish(run, CoverClass::CbHashJoinMultiBuild, relids[0], 0.0, max_rows, 0.0)
 }
 
@@ -2336,16 +2575,30 @@ fn classify_aggjoin_grouped<'mcx>(
     if rtis.len() >= 3 && !multibuild_enabled() {
         return refuse_join("multibuild disabled (grouped tree)");
     }
-    // Bare grouped aggregation only: the Agg must be the plan ROOT (any
-    // sort/limit/distinct decoration plans a node above it — walk refusal).
-    if !parse.hasAggs
-        || parse.groupClause.is_nil()
-        || !parse.distinctClause.is_nil()
-        || !parse.sortClause.is_nil()
-        || parse.limitCount.is_some()
-        || parse.limitOffset.is_some()
-    {
+    // Bare grouped aggregation, or (TPCH-DECOROOT, CAR 1) a WHITELISTED
+    // decorated root: ORDER BY [+ LIMIT/OFFSET] above the grouped agg. The
+    // arm fills the full grouped table and streams the serial emit paths
+    // off it (se-aggjoin §3.1), so the serial Sort/Limit above consumes it;
+    // sort keys are policed by the emit walk below (every tlist entry —
+    // junk sort keys included — must be a group-key ref or an admitted
+    // aggregate). DISTINCT stays refused (distinct-sink composition over
+    // the join sink unproven); bare LIMIT/OFFSET without ORDER BY stays
+    // refused (the freeze composition is unproven on the join sink — the
+    // scan classes' SE-BARELIMIT row owns that pattern). Knob OFF takes the
+    // pre-existing refusal byte-for-byte.
+    if !parse.hasAggs || parse.groupClause.is_nil() || !parse.distinctClause.is_nil() {
         return refuse_join("not a bare grouped aggregation");
+    }
+    let decorated = !parse.sortClause.is_nil()
+        || parse.limitCount.is_some()
+        || parse.limitOffset.is_some();
+    if decorated && !decoroot_enabled() {
+        return refuse_join("not a bare grouped aggregation");
+    }
+    if decorated && parse.sortClause.is_nil() {
+        return refuse_join(
+            "LIMIT/OFFSET without ORDER BY over a grouped join (freeze composition unproven on the join sink)",
+        );
     }
     // With either planner path off, the serial plan is a sort-grouped /
     // merge / NL shape the walk refuses (the suppress-then-refuse
@@ -2426,8 +2679,15 @@ fn classify_aggjoin_grouped<'mcx>(
     }
     // Emit discipline: bare group-key Vars or whitelisted plain aggregates
     // (PLAIN_FOLD_AGGS — the grouped sink exports the numeric-family int
-    // states the scan-grouped GROUPED_SINK_AGGS row refuses).
+    // states the scan-grouped GROUPED_SINK_AGGS row refuses). TPCH-NUMJOIN
+    // (CAR 2): knob-ON additionally admits plain sum/avg(NUMERIC) over
+    // parallel-safe joined-rel arg exprs — the relocated runtime-partial
+    // NumericAgg vocabulary the grouped export already carries (the agg-poly
+    // matrix row's "export is ready once its probe admits numeric args").
+    // Because sort keys are tlist entries, this loop polices the decorated
+    // root's ORDER BY keys too (junk entries included).
     let mut n_aggs = 0usize;
+    let mut n_numeric = 0usize;
     for tle_node in &parse.targetList {
         let Some(tle) = tle_node.as_target_entry() else { return Ok(false) };
         if tle.ressortgroupref != 0 && key_refs.contains(&tle.ressortgroupref) {
@@ -2436,10 +2696,16 @@ fn classify_aggjoin_grouped<'mcx>(
             }
             continue;
         }
-        if !is_whitelisted_agg_nrti(tle.expr, rtis, PLAIN_FOLD_AGGS) {
-            return refuse_join("tlist entry not a whitelisted plain agg");
+        if is_whitelisted_agg_nrti(tle.expr, rtis, PLAIN_FOLD_AGGS) {
+            n_aggs += 1;
+            continue;
         }
-        n_aggs += 1;
+        if aggjoin_numeric_enabled() && is_numeric_expr_agg_nrti(run, tle.expr, rtis)? {
+            n_aggs += 1;
+            n_numeric += 1;
+            continue;
+        }
+        return refuse_join("tlist entry not a whitelisted plain agg");
     }
     if n_aggs == 0 {
         // Zero aggregates = a DISTINCT-shaped emit (numtrans==0 tables have
@@ -2461,6 +2727,35 @@ fn classify_aggjoin_grouped<'mcx>(
     };
     if ngroups >= groupby_high_floor() || ngroups >= GROUPSINK_NGROUPS_FLOOR {
         return refuse_join("group estimate above the grouped-sink floor");
+    }
+    // TPCH-DECOROOT hash-election margin: a decorated root makes the
+    // sorted-agg serial shape competitive near ngroups≈input (the costing
+    // can elect Sort+GroupAggregate the walk refuses — suppress-then-refuse,
+    // costing flavor); require the hash election safely dominant.
+    if decorated && ngroups * DECOROOT_NGROUPS_MARGIN > max_rows {
+        return refuse_join("decorated root without hash-election margin (ngroups too close to input)");
+    }
+    // Knob-admitted shapes route through the dedicated knob-path finishes
+    // (own trace tags, greppable apart from the bootstrap `m5-suppress:`
+    // census line; the class row / tsv / drift guards untouched), carrying
+    // the CbHashJoinGroupedAgg floor economics — the arm underneath is the
+    // same grouped sink.
+    if decorated || n_numeric > 0 {
+        let (tag, label) = match (decorated, n_numeric > 0) {
+            (true, true) => ("decoroot", "aggjoin-grouped-decorated+numeric"),
+            (true, false) => ("decoroot", "aggjoin-grouped-decorated"),
+            _ => ("aggjoinnum", "aggjoin-grouped-numeric"),
+        };
+        return finish_knob_path(
+            run,
+            tag,
+            label,
+            class_guard(CoverClass::CbHashJoinGroupedAgg),
+            relids[0],
+            ngroups,
+            max_rows,
+            0.0,
+        );
     }
     finish(run, CoverClass::CbHashJoinGroupedAgg, relids[0], ngroups, max_rows, 0.0)
 }
@@ -3675,6 +3970,35 @@ fn is_bare_count_star(parse: &Query<'_>) -> bool {
         && agg.aggkind == AGGKIND_NORMAL
 }
 
+/// TPCH-DECOROOT (CAR 1): every ORDER BY key resolves to a covered tlist
+/// entry — a GROUP-key ref (any type and sort direction: the serial Sort
+/// above the engaged arm owns the ordering semantics over the full grouped
+/// output) or a class-vocabulary aggregate. Junk tlist entries the parser
+/// adds for uncovered ORDER BY exprs fail here (and the emit walk refuses
+/// them independently — defense in depth). Empty sort clauses are NOT this
+/// shape (the bare LIMIT/OFFSET compositions have their own rows).
+fn scan_sort_keys_covered(
+    parse: &Query<'_>,
+    key_refs: &[u32],
+    rti: usize,
+    passenger_list: &[u32],
+) -> bool {
+    if parse.sortClause.is_nil() {
+        return false;
+    }
+    for sc_node in &parse.sortClause {
+        let Some(sc) = sc_node.as_sort_group_clause() else { return false };
+        if key_refs.contains(&sc.tleSortGroupRef) {
+            continue;
+        }
+        let Some(tle) = tle_by_sortgroupref(parse, sc.tleSortGroupRef) else { return false };
+        if !is_whitelisted_agg(tle.expr, rti, passenger_list) {
+            return false;
+        }
+    }
+    true
+}
+
 fn tle_by_sortgroupref<'mcx>(
     parse: &Query<'mcx>,
     sgref: u32,
@@ -3897,6 +4221,40 @@ mod tests {
         assert_eq!(get("CbHashJoinMultiBuild", "curve_reuse"), "CbHashJoinPlainAgg");
         assert_eq!(get("CbHashJoinGroupedAgg", "curve_reuse"), "CbHashJoinPlainAgg");
         assert_eq!(get("AggPolyHeapPlain", "curve_reuse"), "HeapCmpFoldPrefix");
+
+    /// TPCH-CARS knobs (night/tpch-cars-1): both cars are DEFAULT OFF and
+    /// arm only on the exact spellings `1`/`on` (the SE-SCANPASS /
+    /// K1-latemat default-OFF idiom — typos fail safe to today's behaviour,
+    /// byte-identical plan time). Pins the default-OFF posture that makes
+    /// the branch inert at default, and the live getters' resolution in a
+    /// knob-free process.
+    #[test]
+    fn tpch_cars_knobs_are_default_off() {
+        assert!(!knob_spelling_armed(None), "unset must be OFF (default)");
+        assert!(!knob_spelling_armed(Some("0")));
+        assert!(!knob_spelling_armed(Some("off")));
+        assert!(!knob_spelling_armed(Some("")));
+        assert!(!knob_spelling_armed(Some("true")), "typos fail safe to OFF");
+        assert!(!knob_spelling_armed(Some("ON")), "case-sensitive, like the arm knobs");
+        assert!(knob_spelling_armed(Some("1")));
+        assert!(knob_spelling_armed(Some("on")));
+        // The live getters memoize the process env; in the test binary the
+        // vars are unset, so both resolve OFF — the default-OFF invariant.
+        assert!(!decoroot_enabled(), "test process has no knob set => OFF");
+        assert!(!aggjoin_numeric_enabled(), "test process has no knob set => OFF");
+    }
+
+    /// TPCH-DECOROOT hash-election margin: the provisional bound must stay
+    /// a real margin (>1 — ngroups strictly below input) so the decorated
+    /// suppression never keys a shape whose serial costing could plausibly
+    /// prefer the sorted-agg landing the walk refuses; and it must bound
+    /// the serial decoration Sort at a small fraction of the input.
+    #[test]
+    fn decoroot_margin_is_conservative() {
+        assert!(DECOROOT_NGROUPS_MARGIN >= 8.0);
+        // The margin composes with the aggjoin export headroom: at the 64k
+        // group floor, engaged inputs are >= 1M rows.
+        assert!(GROUPSINK_NGROUPS_FLOOR * DECOROOT_NGROUPS_MARGIN >= 1_000_000.0);
     }
 
     /// The living-matrix discipline (§4.1, reconciled at m5-integration):

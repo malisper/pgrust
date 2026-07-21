@@ -149,6 +149,80 @@ pub fn agg_runtime_partial_admissible(node: &AggStateData<'_>) -> bool {
     }
 }
 
+/// TPCH-NUMJOIN (night/tpch-cars-1, CAR 2): the per-transno export SCHEMA a
+/// runtime-partial export/combine/absorb runs under. `Plan` = the classified
+/// fold plan covers everything (the pre-existing path, byte-untouched);
+/// `Poly` = the SE-AGGPOLY manifest (>=1 numeric_avg_accum NumericAvg entry,
+/// every other transno an exportable lane kind — arg expressions free, the
+/// per-row transition program evaluates them). Derived ONCE per
+/// export/combine/absorb call and reused across groups. Reachability is the
+/// admission gates' job: only engagements the (knob-gated) poly admission
+/// let in ever carry a Poly schema here.
+pub(crate) enum TransSchema {
+    Plan,
+    Poly(Vec<PolyTrans>),
+}
+
+pub(crate) fn trans_schema(node: &AggStateData<'_>) -> PgResult<TransSchema> {
+    if agg_runtime_partial_admissible(node) {
+        return Ok(TransSchema::Plan);
+    }
+    match agg_poly_manifest(node) {
+        Some(m) => Ok(TransSchema::Poly(m)),
+        None => Err(Box::new(PgError::error(
+            "runtime partial: no exportable trans schema".to_string(),
+        ))),
+    }
+}
+
+/// The (transno, combine-kind) layout of one schema — the combine loops'
+/// shared shape (NumericAvg entries carry their own law inside
+/// `combine_into` and never read the kind; see `poly_lane_kind`).
+fn schema_layout(node: &AggStateData<'_>, schema: &TransSchema) -> PgResult<Vec<(u16, LaneKind)>> {
+    Ok(match schema {
+        TransSchema::Plan => crate::agg_lanefold_plan(node)
+            .ok_or_else(|| {
+                PgError::error("runtime partial: plan schema without a fold plan".to_string())
+            })?
+            .trans
+            .iter()
+            .map(|t| (t.transno, t.kind))
+            .collect(),
+        TransSchema::Poly(m) => m.iter().map(|e| (e.transno, poly_lane_kind(e))).collect(),
+    })
+}
+
+/// Schema-dispatched per-base export: `Plan` takes [`export_partial_from`]
+/// byte-identically; `Poly` runs the manifest loop (the SE-AGGPOLY export
+/// body over an EXPLICIT pergroup base — the grouped sink passes each hash
+/// entry's array; the plain wrapper passes the node's fixed one).
+pub(crate) fn export_partial_with(
+    node: &AggStateData<'_>,
+    schema: &TransSchema,
+    base: core::ptr::NonNull<::execexpr::AggPerGroup>,
+    partial: &mut RuntimePartial,
+) -> PgResult<()> {
+    match schema {
+        TransSchema::Plan => export_partial_from(node, base, partial),
+        TransSchema::Poly(manifest) => {
+            let out = &mut partial.trans;
+            out.clear();
+            out.reserve(manifest.len());
+            for e in manifest {
+                // SAFETY: transno indexes the node's once-allocated pergroup
+                // array (manifest transnos are 0..numtrans by construction).
+                let pg = unsafe { &*base.as_ptr().add(e.transno as usize) };
+                let p = match &e.kind {
+                    PolyTransKind::Lane(t) => export_lane_trans(t, pg)?,
+                    PolyTransKind::NumericAvg => export_numeric_state(pg)?,
+                };
+                out.push((e.transno, p));
+            }
+            Ok(())
+        }
+    }
+}
+
 // Sign-extended fold word at the lane's RESULT width (the transvalue store
 // width) — exact under either datum-construction convention because every
 // admitted store is itself width-faithful.
@@ -200,7 +274,11 @@ pub fn agg_runtime_export_partial_into(
     node: &AggStateData<'_>,
     partial: &mut RuntimePartial,
 ) -> PgResult<()> {
-    export_partial_from(node, crate::agg_plain_pergroup_base(node), partial)
+    // TPCH-NUMJOIN (CAR 2): schema-dispatched — plan-admissible nodes take
+    // the pre-existing path byte-identically; nodes the (knob-gated) poly
+    // admission let in export via the manifest (numeric states relocated).
+    let schema = trans_schema(node)?;
+    export_partial_with(node, &schema, crate::agg_plain_pergroup_base(node), partial)
 }
 
 /// SORTED-arm twin (q28-sorted-arm): export the OPEN group's pergroup states
@@ -388,20 +466,23 @@ pub fn agg_runtime_combine_into(
 }
 
 /// Combine worker partials (order-insensitive-exact for every admitted
-/// kind; install order is immaterial by construction).
+/// kind; install order is immaterial by construction). TPCH-NUMJOIN
+/// (CAR 2): layout derived per schema — plan-admissible nodes combine over
+/// the fold plan exactly as before; poly-admitted nodes over the manifest
+/// (the NumericAgg law rides `combine_into`).
 pub fn agg_runtime_combine(
     node: &AggStateData<'_>,
     parts: &[RuntimePartial],
 ) -> PgResult<RuntimePartial> {
-    let plan = crate::agg_lanefold_plan(node)
-        .ok_or_else(|| PgError::error("runtime partial combine without a fold plan".to_string()))?;
+    let schema = trans_schema(node)?;
+    let layout = schema_layout(node, &schema)?;
     let mut acc: Option<RuntimePartial> = None;
     for p in parts {
-        if p.trans.len() != plan.trans.len()
+        if p.trans.len() != layout.len()
             || p.trans
                 .iter()
-                .zip(plan.trans.iter())
-                .any(|(&(no, _), t)| no != t.transno)
+                .zip(layout.iter())
+                .any(|(&(no, _), &(lno, _))| no != lno)
         {
             return Err(Box::new(PgError::error(
                 "runtime partial: transno layout mismatch".to_string(),
@@ -410,8 +491,8 @@ pub fn agg_runtime_combine(
         acc = Some(match acc {
             None => p.clone(),
             Some(mut a) => {
-                for (i, t) in plan.trans.iter().enumerate() {
-                    combine_into(t.kind, &mut a.trans[i].1, &p.trans[i].1);
+                for (i, &(_, kind)) in layout.iter().enumerate() {
+                    combine_into(kind, &mut a.trans[i].1, &p.trans[i].1);
                 }
                 a
             }
@@ -454,13 +535,31 @@ pub fn agg_sorted_absorb_partial(
 /// The shared absorb loop: write each transno's combined partial into the
 /// node's once-allocated pergroup array (plain and sorted share
 /// `pergroup_base` — one current-group array either way), byte-for-byte the
-/// serial transfn chain's end state.
+/// serial transfn chain's end state. TPCH-NUMJOIN (CAR 2): schema-
+/// dispatched — plan-admissible nodes (the sorted arm always; the plain arm
+/// unless the poly admission engaged) take the pre-existing path
+/// byte-identically.
 fn absorb_partial_states(
     node: &mut AggStateData<'_>,
     combined: &RuntimePartial,
 ) -> PgResult<()> {
+    let schema = trans_schema(node)?;
     let base = node.pergroup_base;
-    absorb_partial_states_at(node, base, combined)
+    absorb_partial_states_with(node, &schema, base, combined)
+}
+
+/// Schema-dispatched absorb over an explicit pergroup base (the grouped
+/// sink's per-entry arrays; the plain/sorted wrappers' fixed array).
+pub(crate) fn absorb_partial_states_with(
+    node: &mut AggStateData<'_>,
+    schema: &TransSchema,
+    base: core::ptr::NonNull<::execexpr::AggPerGroup>,
+    combined: &RuntimePartial,
+) -> PgResult<()> {
+    match schema {
+        TransSchema::Plan => absorb_partial_states_at(node, base, combined),
+        TransSchema::Poly(manifest) => absorb_poly_at(node, manifest, base, combined),
+    }
 }
 
 /// SE-AGGJOIN (band 87001): the absorb loop over an EXPLICIT pergroup base —
@@ -618,18 +717,21 @@ pub fn agg_grouped_runtime_combine(
     node: &AggStateData<'_>,
     parts: &[GroupedRuntimePartial],
 ) -> PgResult<Vec<(GroupKeyWords, RuntimePartial)>> {
-    let plan = crate::agg_lanefold_plan(node)
-        .ok_or_else(|| PgError::error("grouped runtime combine without a fold plan".to_string()))?;
+    // TPCH-NUMJOIN (CAR 2): layout per schema — plan-admissible nodes
+    // combine over the fold plan exactly as before; poly-admitted grouped
+    // nodes over the manifest (NumericAgg's own law rides `combine_into`).
+    let schema = trans_schema(node)?;
+    let layout = schema_layout(node, &schema)?;
     let mut index: std::collections::HashMap<GroupKeyWords, usize> =
         std::collections::HashMap::new();
     let mut out: Vec<(GroupKeyWords, RuntimePartial)> = Vec::new();
     for part in parts {
         for (key, p) in &part.groups {
-            if p.trans.len() != plan.trans.len()
+            if p.trans.len() != layout.len()
                 || p.trans
                     .iter()
-                    .zip(plan.trans.iter())
-                    .any(|(&(no, _), t)| no != t.transno)
+                    .zip(layout.iter())
+                    .any(|(&(no, _), &(lno, _))| no != lno)
             {
                 return Err(Box::new(PgError::error(
                     "grouped runtime partial: transno layout mismatch".to_string(),
@@ -637,8 +739,8 @@ pub fn agg_grouped_runtime_combine(
             }
             match index.get(key) {
                 Some(&i) => {
-                    for (j, t) in plan.trans.iter().enumerate() {
-                        combine_into(t.kind, &mut out[i].1.trans[j].1, &p.trans[j].1);
+                    for (j, &(_, kind)) in layout.iter().enumerate() {
+                        combine_into(kind, &mut out[i].1.trans[j].1, &p.trans[j].1);
                     }
                 }
                 None => {
@@ -906,12 +1008,25 @@ fn absorb_poly_partial_states(
 ) -> PgResult<()> {
     let manifest = agg_poly_manifest(node)
         .ok_or_else(|| PgError::error("poly absorb without a manifest".to_string()))?;
+    let base = node.pergroup_base;
+    absorb_poly_at(node, &manifest, base, combined)
+}
+
+/// The manifest absorb body over an EXPLICIT pergroup base (TPCH-NUMJOIN,
+/// CAR 2: the grouped-join sink writes each combined group's states into
+/// its hash-table entry's array; the plain wrapper above passes the node's
+/// fixed one — byte-identical to the pre-factor body for that caller).
+fn absorb_poly_at(
+    node: &mut AggStateData<'_>,
+    manifest: &[PolyTrans],
+    base: core::ptr::NonNull<::execexpr::AggPerGroup>,
+    combined: &RuntimePartial,
+) -> PgResult<()> {
     if combined.trans.len() != manifest.len() {
         return Err(Box::new(PgError::error(
             "poly partial: combined layout mismatch".to_string(),
         )));
     }
-    let base = node.pergroup_base;
     let mut int128_fixups: Vec<(u16, i64, i128)> = Vec::new();
     let mut numeric_fixups: Vec<(u16, &NumericAggPartial)> = Vec::new();
     for (e, (transno, p)) in manifest.iter().zip(combined.trans.iter()) {
