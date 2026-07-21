@@ -56,6 +56,7 @@ use types_nodes::parsenodes::{Query, RTEKind};
 use types_nodes::primnodes::{Aggref, Var, AGGKIND_NORMAL};
 use types_nodes::{CmdType, LimitOption, Node};
 use crate::run::PlannerRun;
+use types_core::BTREE_AM_OID;
 use types_pathnodes::{AMFLAG_PGRCOLUMNAR, AMFLAG_PGRCOLUMNAR_ZEROCNT};
 
 // ---------------------------------------------------------------------------
@@ -2569,6 +2570,101 @@ fn classify_join_covered<'mcx>(
     classify_join_sides(run, parse, sides[0], sides[1], je.quals)
 }
 
+// ===========================================================================
+// NLIDX (night/nlidx-arm, GL-NLIDX-2 — the routing half of the
+// NL-INNER-INDEX runtime arm). The executor half (lanev2/runtime_nlindex.rs,
+// GL-NLIDX-1) is the best NL-inner-index executor we have on the engagement
+// region — 7-11x over serial NL, 1.4-1.9x over classic Gather-NL at matched
+// width from dop 8 up (the banked ladder, scratchpad/night/
+// nlx-ab-fleet-full.tsv) — but a census-shape query never reaches it: the
+// planner elects GATHER parallel-NL (small filtered driver rel, inner index
+// probes into a big fact), which the arm fail-closed refuses. This probe
+// suppresses Gather for exactly that family so the serial NL plan survives
+// to the executor, where the arm re-classifies and engages at the routed
+// dop (router::arm_dop(ArmClass::NlIndex) → pgrust.runtime_dop).
+//
+// SUPPRESS-THEN-SERIAL LAW, ELECTION-EXACT: suppression is admitted only
+// when the joinrel's cheapest SERIAL path already IS the arm's shape —
+// NestPath(INNER, outer = heap SeqScan, inner = parameterized btree
+// IndexPath) — checked at the rel-aware choke points where that path
+// exists (generate_useful_gather_paths + create_partial_grouping_paths).
+// No stats-shaped election prediction: the planner's own serial election
+// is the guard (a smoke round proved margin/pages heuristics suppress
+// into serial hash joins). If serial-NL won the serial election, the
+// morsel arm at dop>=8 dominates every Gather form the suppression
+// removes (parallel-X >= serial-X/dop >= serial-NL/dop ~ the arm; the
+// banked ladder gives the >=8 crossover vs classic Gather-NL). Every
+// refusal keeps Gather standing byte-for-byte.
+// ===========================================================================
+
+/// NLIDX planner knob (`PGRUST_LANE_V2_NLIDX`, DEFAULT OFF, `1|on` arms —
+/// GL-NLIDX-2 fleet letter owns the default decision).
+fn nlidx_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_LANE_V2_NLIDX").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
+/// NLIDX executor coherence (the jheap `k2_heapfeed_live` precedent): the
+/// morsel arm's ENABLE switch must be armed — a suppression whose executor
+/// arm is disarmed would land on the bare serial NL (the suppress-then-
+/// serial direction). Same spelling as the executor
+/// (`PGRUST_RUNTIME_NLINDEX`, ENABLE switch, default OFF, `1|on` arms —
+/// guc_tables::runtime_pool::runtime_nlindex_pool_dop's env gate).
+fn nlidx_exec_live() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_RUNTIME_NLINDEX").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
+/// NLIDX small-driver polarity margins (PROVISIONAL — GL-NLIDX-2 owns the
+/// measured bounds). The serial NL(driver seqscan, probe index) election
+/// dominates the serial hash join when the probe side's FULL SCAN (the
+/// hash build/probe pass) is expensive relative to `driver.rows` index
+/// descents: driver post-qual rows bounded and far under the probe side's
+/// tuples, probe side big enough that scanning it wholesale loses. The
+/// flagship census point sits deep inside the region (driver ~4.7k
+/// post-qual rows of a 2M-row rel; probe 60M tuples / ~1M pages).
+/// Driver-side pages floor (env-overridable — the e2e floors force it, the
+/// runtime_scan MIN_GRANULES precedent; default PROVISIONAL, GL-NLIDX-2
+/// owns the bound): the driver's own scan is the morselized work unit —
+/// require enough of it to be worth a gang (mirrors the executor's block
+/// floor direction). The rest of the old stats-shaped polarity guards are
+/// GONE: the admission is ELECTION-EXACT (the joinrel's cheapest serial
+/// path must itself be the NL-inner-index shape — see
+/// m5_suppress_gather_nlidx), which subsumes them.
+fn nlidx_min_driver_pages() -> f64 {
+    static N: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_LANE_V2_NLIDX_MIN_DRIVER_PAGES")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .unwrap_or(64.0)
+    })
+}
+
+/// NLIDX floor: dop>=8 is the banked ladder's crossover vs classic
+/// Gather-NL (below it Gather-NL wins and stands — the band). Size
+/// economics are the inline polarity guards above (driver/probe shaped,
+/// two-sided — FloorGuard's single rows/pages slots cannot carry them).
+fn nlidx_guard() -> FloorGuard {
+    FloorGuard { min_dop: 8, ..NO_GUARD }
+}
+
+/// NLIDX named-refusal diagnostics (the `refuse_scanpass` discipline:
+/// `m5-suppress-refuse:` prefix, never `m5-suppress:` — M5CENSUS counts
+/// that prefix as suppressions). Reached only when both NLIDX knobs are
+/// armed — knob-OFF never recognizes the shape, the diagnostic is inert
+/// at default.
+fn refuse_nlidx(why: &str) -> PgResult<bool> {
+    if trace_armed() {
+        eprintln!("m5-suppress-refuse: nlidx ({why})");
+    }
+    Ok(false)
+}
+
 /// Refusal diagnostics (PGRUST_M5_SUPPRESS_TRACE=1): the join probe's
 /// guards are planner-choice-shaped and worth naming when they refuse.
 /// The prefix is deliberately NOT `m5-suppress:` — the conformance leg's
@@ -2869,6 +2965,319 @@ fn classify_join_sides<'mcx>(
         );
     }
     finish(run, CoverClass::CbHashJoinPlainAgg, relids[0], 0.0, max_rows, 0.0)
+}
+
+/// NLIDX rel-aware suppression entry (GL-NLIDX-2), called from the Gather
+/// choke points that carry the rel (generate_useful_gather_paths and
+/// create_partial_grouping_paths): suppress iff (a) the query SHAPE is the
+/// arm's (memoized structural half below) and (b) THIS rel is the final
+/// joinrel and its cheapest SERIAL path already is
+/// NestPath(INNER, heap-SeqScan outer, parameterized btree IndexPath
+/// inner) — the election itself is the guard, so a suppression can only
+/// ever land on the exact serial plan the executor arm engages. `false` =
+/// Gather stands exactly as today.
+pub(crate) fn m5_suppress_gather_nlidx(
+    run: &mut PlannerRun<'_>,
+    rel_id: types_pathnodes::RelId,
+) -> PgResult<bool> {
+    // Same session gates as the bootstrap entry (engine=runtime + pool +
+    // lane), then the nlidx knob pair — silent at default (knob-OFF never
+    // recognizes the shape; no trace, Gather untouched).
+    if run.root.query_level != 1
+        || !(nlidx_enabled() && nlidx_exec_live())
+        || !guc_tables::parallel_engine::m5_gather_suppression_active()
+    {
+        return Ok(false);
+    }
+    if !classify_nlidx_shape(run)? {
+        return Ok(false);
+    }
+    // The banked-ladder dop band applies to EVERY suppression this probe
+    // makes (below dop 8 classic Gather wins and stands, base rels
+    // included).
+    if size_floors_enabled() && guc_tables::runtime_pool::runtime_dop() < 8 {
+        if trace_armed() {
+            eprintln!("m5-suppress-floor: nlidx dop band (runtime_dop < 8)");
+        }
+        return Ok(false);
+    }
+    // SCAN/JOIN rels only: upper rels (notably the partially-grouped rel,
+    // whose MAIN pathlist is populated exclusively by its gathers — the
+    // gather_grouping_paths "could not devise" trap documented at that
+    // site) must never be suppressed by this probe.
+    let kind = run.root.rel(rel_id).reloptkind;
+    if kind != types_pathnodes::RELOPT_BASEREL && kind != types_pathnodes::RELOPT_JOINREL {
+        return Ok(false);
+    }
+    // BASE rels of the keyed 2-rel shape: suppress their own Gather forms
+    // too — otherwise `NL(Gather(base), IndexProbe)` (the join ABOVE a
+    // gathered driver) both pollutes the serial-subset election below and
+    // survives the final-rel suppression as a residual Gather plan the
+    // executor arm refuses. Regression-free: partial paths (which feed the
+    // Finalize/Gather/Partial and Gather-over-rows forms at the final rel)
+    // are untouched, so a query whose final election is NOT the arm's
+    // shape keeps its parallel plans through the final-rel refusal.
+    if !crate::relnode::relids_equal(&run.root.rel(rel_id).relids, &run.root.all_query_rels) {
+        if kind != types_pathnodes::RELOPT_BASEREL {
+            return Ok(false);
+        }
+        if trace_armed() {
+            eprintln!("m5-suppress-nlidx: base-rel gather suppressed (rti set of the keyed shape)");
+        }
+        return Ok(true);
+    }
+    // THE ELECTION CHECK: the cheapest SERIAL path — the min-total-cost
+    // non-Gather top of the pathlist (cheapest_total_path may already be a
+    // Gather at the later choke points; the serial-subset election is what
+    // survives the suppression) — must be the arm's shape, through a
+    // Projection wrapper if the scanjoin target already applied. A
+    // Memoize/Material-wrapped inner refuses (the executor arm refuses
+    // those inners by shape — suppress-then-serial otherwise).
+    let mut best: Option<(f64, types_pathnodes::PathId)> = None;
+    for &pid in run.root.rel(rel_id).pathlist.iter() {
+        let node = run.root.path(pid);
+        if matches!(
+            node,
+            types_pathnodes::PathNode::GatherPath(_)
+                | types_pathnodes::PathNode::GatherMergePath(_)
+        ) {
+            continue;
+        }
+        let c = node.base().total_cost;
+        if best.is_none_or(|(bc, _)| c < bc) {
+            best = Some((c, pid));
+        }
+    }
+    let Some((_, mut top_id)) = best else { return Ok(false) };
+    if let types_pathnodes::PathNode::ProjectionPath(pp) = run.root.path(top_id) {
+        let Some(sub) = pp.subpath else { return Ok(false) };
+        top_id = sub;
+    }
+    let types_pathnodes::PathNode::NestPath(np) = run.root.path(top_id) else {
+        return refuse_nlidx("serial election is not a nested loop");
+    };
+    if np.jpath.jointype != types_nodes::JoinType::JOIN_INNER as u32 {
+        return refuse_nlidx("serial NL is not INNER");
+    }
+    let (Some(outer_id), Some(inner_id)) = (np.jpath.outerjoinpath, np.jpath.innerjoinpath)
+    else {
+        return Ok(false);
+    };
+    // The scanjoin-target application may wrap the outer in a Projection
+    // (a plan-time artifact — createplan's physical-tlist optimization
+    // emits the bare SeqScan node, as the serial EXPLAIN shows).
+    let mut outer_id = outer_id;
+    if let types_pathnodes::PathNode::ProjectionPath(pp) = run.root.path(outer_id) {
+        let Some(sub) = pp.subpath else { return Ok(false) };
+        outer_id = sub;
+    }
+    let outer_parent = match run.root.path(outer_id) {
+        types_pathnodes::PathNode::Path(pp)
+            if pp.pathtype == crate::pathnode::tag16(types_nodes::NodeTag::T_SeqScan)
+                && !pp.parallel_aware =>
+        {
+            pp.parent
+        }
+        _ => return refuse_nlidx("serial NL outer is not a plain seqscan"),
+    };
+    if run.root.rel(outer_parent).amflags & AMFLAG_PGRCOLUMNAR != 0 {
+        return refuse_nlidx("driver side is cbstore");
+    }
+    match run.root.path(inner_id) {
+        types_pathnodes::PathNode::IndexPath(ip) => {
+            let btree = ip
+                .indexinfo
+                .is_some_and(|ix| ix.relam == BTREE_AM_OID && ix.indexprs.is_empty() && ix.indpred.is_empty());
+            if !btree {
+                return refuse_nlidx("serial NL inner index is not a plain btree");
+            }
+            // Parameterized probe (the inner index cond carries the join
+            // key): an unparameterized inner would rescan the whole index
+            // per outer row — never the census family, and the executor
+            // arm's economics were never measured on it.
+            if ip.indexclauses.is_empty() || ip.path.param_info.is_none() {
+                return refuse_nlidx("serial NL inner is not a parameterized index probe");
+            }
+        }
+        _ => return refuse_nlidx("serial NL inner is not an index probe"),
+    }
+    // Floors: the banked-ladder dop band (dop>=8 — below it classic
+    // Gather-NL wins and stands) + the driver-scan pages floor, through
+    // the shared knob-path finish (trace vocabulary: m5-suppress-nlidx /
+    // m5-suppress-floor: nlidx).
+    let driver = run.root.rel(outer_parent);
+    let (rows, pages) = (driver.rows.max(0.0), f64::from(driver.pages));
+    let relid = {
+        let rti = driver.relid as usize;
+        run.parse()
+            .rtable
+            .nth(rti - 1)
+            .as_range_tbl_entry()
+            .map(|rte| rte.relid)
+            .unwrap_or(0)
+    };
+    finish_knob_path(
+        run,
+        "nlidx",
+        "nlidx-plain",
+        FloorGuard { min_dop: 8, min_pages: nlidx_min_driver_pages(), ..NO_GUARD },
+        relid,
+        0.0,
+        rows,
+        pages,
+    )
+}
+
+/// NLIDX query-shape half (memoized on the run): plain one-row
+/// aggregation over a 2-rel INNER join form of plain HEAP rels with
+/// parallel-safe quals and an arm-admissible tlist (plain int-family
+/// folds or — poly-knob-coherent — plain sum/avg(numeric) with
+/// parallel-safe args). Rel-independent; the election check above is the
+/// other half. `false` memoizes (one trace per query, not per rel-offer).
+fn classify_nlidx_shape(run: &mut PlannerRun<'_>) -> PgResult<bool> {
+    if let Some(v) = run.m5_nlidx_shape {
+        return Ok(v);
+    }
+    let v = classify_nlidx_shape_uncached(run)?;
+    run.m5_nlidx_shape = Some(v);
+    Ok(v)
+}
+
+fn classify_nlidx_shape_uncached(run: &mut PlannerRun<'_>) -> PgResult<bool> {
+    let parse = run.parse();
+    // The classify_covered structural prefilter, replicated (this entry is
+    // reached from the rel-aware choke points, not through
+    // classify_covered).
+    if parse.commandType != CmdType::CMD_SELECT
+        || parse.resultRelation != 0
+        || parse.utilityStmt.is_some()
+        || parse.hasWindowFuncs
+        || parse.hasTargetSRFs
+        || parse.hasSubLinks
+        || parse.hasDistinctOn
+        || parse.hasRecursive
+        || parse.hasModifyingCTE
+        || parse.hasForUpdate
+        || parse.hasRowSecurity
+        || !parse.cteList.is_nil()
+        || !parse.groupingSets.is_nil()
+        || parse.havingQual.is_some()
+        || !parse.windowClause.is_nil()
+        || parse.setOperations.is_some()
+        || !parse.rowMarks.is_nil()
+        || !parse.mergeActionList.is_nil()
+        || !parse.returningList.is_nil()
+        || parse.limitOption == LimitOption::LIMIT_OPTION_WITH_TIES
+    {
+        return Ok(false);
+    }
+    // Plain one-row aggregation only.
+    if !parse.hasAggs
+        || !parse.groupClause.is_nil()
+        || !parse.distinctClause.is_nil()
+        || !parse.sortClause.is_nil()
+        || parse.limitCount.is_some()
+        || parse.limitOffset.is_some()
+    {
+        return refuse_nlidx("not a plain one-row aggregation");
+    }
+    // The serial election must be able to pick NL-with-inner-index at all.
+    if !costsize::gucs::enable_nestloop() || !costsize::gucs::enable_indexscan() {
+        return refuse_nlidx("nestloop/indexscan election disabled");
+    }
+    // 2-rel INNER form: two flat RangeTblRefs, or one INNER JoinExpr over
+    // two RangeTblRefs (the two forms the planner leaves at probe time).
+    let Some(top) = parse.jointree else { return Ok(false) };
+    let (rti_l, rti_r, quals_node) = if top.fromlist.len() == 2 {
+        let (Some(ra), Some(rb)) = (
+            top.fromlist.nth(0).as_range_tbl_ref(),
+            top.fromlist.nth(1).as_range_tbl_ref(),
+        ) else {
+            return Ok(false);
+        };
+        (ra.rtindex as usize, rb.rtindex as usize, top.quals)
+    } else if top.fromlist.len() == 1 {
+        let Some(je) = top.fromlist.nth(0).as_join_expr() else { return Ok(false) };
+        if je.jointype != types_nodes::JoinType::JOIN_INNER {
+            return refuse_nlidx("join family");
+        }
+        let (Some(ra), Some(rb)) = (je.larg.as_range_tbl_ref(), je.rarg.as_range_tbl_ref())
+        else {
+            return Ok(false);
+        };
+        (ra.rtindex as usize, rb.rtindex as usize, je.quals)
+    } else {
+        return Ok(false);
+    };
+    // Both sides plain HEAP relations; self-joins refuse.
+    let mut relids = [0u32; 2];
+    for (i, &rti) in [rti_l, rti_r].iter().enumerate() {
+        let Some(rte) = parse.rtable.nth(rti - 1).as_range_tbl_entry() else {
+            return refuse_nlidx("side not a plain RTE");
+        };
+        if rte.rtekind != RTEKind::RTE_RELATION
+            || rte.relkind != types_rel::RELKIND_RELATION
+            || rte.inh
+            || rte.tablesample.is_some()
+        {
+            return refuse_nlidx("side not a plain relation");
+        }
+        relids[i] = rte.relid;
+        let Some(rel_id) = run.root.simple_rel_array.get(rti).copied().flatten() else {
+            return refuse_nlidx("side has no RelOptInfo yet");
+        };
+        if run.root.rel(rel_id).amflags & AMFLAG_PGRCOLUMNAR != 0 {
+            return refuse_nlidx("side is cbstore");
+        }
+    }
+    if relids[0] == relids[1] {
+        return refuse_nlidx("self-join");
+    }
+    // Arm-admissible tlist: whitelisted plain folds, or (poly-coherent)
+    // plain sum/avg(NUMERIC) with parallel-safe args.
+    let mut n = 0usize;
+    let mut n_numeric = 0usize;
+    for tle_node in &parse.targetList {
+        let Some(tle) = tle_node.as_target_entry() else { return Ok(false) };
+        if is_whitelisted_agg_2rti(tle.expr, rti_l, rti_r, PLAIN_FOLD_AGGS) {
+            n += 1;
+            continue;
+        }
+        let Some(agg) = tle.expr.as_aggref() else {
+            return refuse_nlidx("tlist entry not a whitelisted plain agg");
+        };
+        if !matches!(agg.aggfnoid, F_AVG_NUMERIC | F_SUM_NUMERIC)
+            || agg.agglevelsup != 0
+            || agg.aggkind != AGGKIND_NORMAL
+            || agg.aggvariadic
+            || !agg.aggorder.is_nil()
+            || !agg.aggdistinct.is_nil()
+            || agg.aggfilter.is_some()
+            || !agg.aggdirectargs.is_nil()
+            || agg.args.len() != 1
+        {
+            return refuse_nlidx("tlist entry not a whitelisted plain agg");
+        }
+        let Some(arg_tle) = agg.args.nth(0).as_target_entry() else { return Ok(false) };
+        if !crate::is_parallel_safe_opt(run, Some(arg_tle.expr))? {
+            return refuse_nlidx("numeric agg arg not parallel-safe");
+        }
+        n += 1;
+        n_numeric += 1;
+    }
+    if n == 0 {
+        return refuse_nlidx("empty tlist");
+    }
+    if n_numeric > 0 && !agg_poly_probe_enabled() {
+        return refuse_nlidx("numeric fold with the poly export knob killed");
+    }
+    // Worker-side expression safety (the executor's walk, mirrored — an
+    // unsafe qual would refuse at exec, the suppress-then-serial
+    // direction).
+    if !crate::is_parallel_safe_opt(run, quals_node)? {
+        return refuse_nlidx("quals not parallel-safe");
+    }
+    Ok(true)
 }
 
 /// GL-HJSEAT-2 knob coherence (the GROUPSINK/AGG_POLY precedent): the

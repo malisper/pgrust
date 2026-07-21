@@ -1592,6 +1592,13 @@ fn create_partial_grouping_paths<'mcx>(
     if !force_rel_creation && crate::m5_suppress::m5_suppress_gather(run)? {
         return Ok(None);
     }
+    // NLIDX (GL-NLIDX-2, rel-aware — input_rel is the final joinrel with
+    // its serial cheapest set): a keyed shape gets NO partial-aggregation
+    // machinery, so no Finalize/Gather/Partial forms exist and the serial
+    // NL plan reaches the executor arm.
+    if !force_rel_creation && crate::m5_suppress::m5_suppress_gather_nlidx(run, input_rel)? {
+        return Ok(None);
+    }
     let parse = run.parse();
 
     // Partially aggregated NON-partial paths exist only under a parent doing

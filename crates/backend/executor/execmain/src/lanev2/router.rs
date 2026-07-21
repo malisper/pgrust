@@ -91,9 +91,12 @@ pub(super) enum ArmClass {
     HashJoin = 4,
     /// sort: bounded top-N + shape-(b) full sort (M3 + m3-sort-b).
     Sort = 5,
+    /// NL-inner-index morsel arm (nlindex lane, GL-NLIDX-2 routing half):
+    /// plain-Agg over NestLoop(heap SeqScan, btree IndexScan).
+    NlIndex = 6,
 }
 
-const N_ARMS: usize = 6;
+const N_ARMS: usize = 7;
 
 impl ArmClass {
     pub(super) const ALL: [ArmClass; N_ARMS] = [
@@ -103,6 +106,7 @@ impl ArmClass {
         ArmClass::Distinct,
         ArmClass::HashJoin,
         ArmClass::Sort,
+        ArmClass::NlIndex,
     ];
 
     pub(super) fn name(self) -> &'static str {
@@ -113,6 +117,7 @@ impl ArmClass {
             ArmClass::Distinct => "distinct",
             ArmClass::HashJoin => "hashjoin",
             ArmClass::Sort => "sort",
+            ArmClass::NlIndex => "nlindex",
         }
     }
 }
@@ -196,6 +201,7 @@ pub(super) fn arm_dop(class: ArmClass) -> i32 {
         ArmClass::Distinct => rp::runtime_distinct_pool_dop(),
         ArmClass::HashJoin => rp::runtime_hashjoin_pool_dop(),
         ArmClass::Sort => rp::runtime_sort_pool_dop(),
+        ArmClass::NlIndex => rp::runtime_nlindex_pool_dop(),
     };
     if bench > 0 {
         return bench;
@@ -209,6 +215,7 @@ pub(super) fn arm_dop(class: ArmClass) -> i32 {
         ArmClass::Distinct => rp::runtime_distinct_arm_enabled(),
         ArmClass::HashJoin => rp::runtime_hashjoin_arm_enabled(),
         ArmClass::Sort => rp::runtime_sort_arm_enabled(),
+        ArmClass::NlIndex => rp::runtime_nlindex_arm_enabled(),
     };
     if !enabled {
         return 0;

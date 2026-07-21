@@ -291,6 +291,13 @@ pub fn runtime_hashjoin_arm_enabled() -> bool {
 pub fn runtime_sort_arm_enabled() -> bool {
     crate::backing::pgrust_lane_executor()
 }
+/// NL-inner-index arm (GL-NLIDX-2 routing half): the ENABLE switch (default
+/// OFF — unlike the sibling kills, absence disarms) + the lane master, so
+/// the router arms the morsel arm at `pgrust.runtime_dop` only on armed
+/// builds/sessions. Same env read as the bench getter above.
+pub fn runtime_nlindex_arm_enabled() -> bool {
+    runtime_nlindex_env_ok()
+}
 
 /// The product runtime DOP (`pgrust.runtime_dop`), resolved: 0 = auto
 /// (available cores, the design default); explicit values clamped to
