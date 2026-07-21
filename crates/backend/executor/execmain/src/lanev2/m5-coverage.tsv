@@ -77,7 +77,7 @@ parallel-index-scan	none	na	na	na	not-covered	legacy	-	29 corpus sites; legacy-f
 parallel-bitmap-heap-scan	none	na	na	na	not-covered	legacy	-	2 corpus sites; legacy forever
 parallel-append-partitionwise	none	na	na	na	not-covered	legacy	-	34 corpus sites; partitioned-table parallelism is its own program
 parallel-ctas-matview-write	none	na	na	na	not-covered	legacy	-	write_parallel.out; legacy forever
-fdw-custom-scan-parallel	none	na	na	na	not-covered	legacy	-	contrib-only; extension APIs keep thread semantics
+fdw-custom-scan-parallel	none	na	na	na	not-covered	legacy	-	parallel lane DELETED (2026-07-20 FDW-ABI ruling: ABI ours, UX frozen; lane was unimplemented) — foreign/custom scans are serial-only by construction (create_foreignscan_path pins parallel_aware=false, set_rel_consider_parallel refuses foreign rels, is_foreign_scan_parallel_safe removed from FdwPlanRoutine; no in-tree custom-scan providers exist); future parallel foreign scans = morsel-native API opt-in, not DSM ceremony
 merge-join-parallel	none	na	na	na	not-covered	legacy	-	redesign §2.2 defers
 # --- WS-COVER (phase3-close §3.3) census-exposed gap rows: every residual
 # --- Gather class from scripts/coverage/gather-census.tsv made EXPLICITLY

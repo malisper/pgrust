@@ -952,15 +952,10 @@ fn file_acquire_sample_rows<'mcx>(
     Ok(numrows)
 }
 
-fn file_is_foreign_scan_parallel_safe(_run: &mut PlannerRun<'_>, _rel: RelId) -> PgResult<bool> {
-    Ok(true)
-}
-
 static PLAN_ROUTINE: FdwPlanRoutine = FdwPlanRoutine {
     get_foreign_rel_size: file_get_foreign_rel_size,
     get_foreign_paths: file_get_foreign_paths,
     get_foreign_plan: file_get_foreign_plan,
-    is_foreign_scan_parallel_safe: Some(file_is_foreign_scan_parallel_safe),
 };
 
 static EXEC_ROUTINE: FdwExecRoutine = FdwExecRoutine {
