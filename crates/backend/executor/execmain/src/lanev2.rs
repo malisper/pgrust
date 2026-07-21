@@ -2175,6 +2175,35 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
     if ::nodeagg::agg_plain_distinct_set_admissible(agg) {
         return try_own_plain_distinct_agg_over_seq_scan(agg, ss, estate);
     }
+    // GL-DISTALPHA-2 (knob-gated, DEFAULT OFF): the PRESORTED-bare
+    // exact-DISTINCT face — a clustered scan order serves the DISTINCT
+    // aggregate presorted with no Sort node, so the entries are set-CAPABLE
+    // but DORMANT (`set_active` honors C's adjacent-dedup contract) and the
+    // set dispatch above refuses; the runtime sink was structurally
+    // unreachable for the whole class. Probe the RUNTIME sink alone, with
+    // the skip-sort drive's force_set arming (the identical pertrans state:
+    // presorted entries armed into exact sets — the ratified
+    // order-relaxation grant; engage() arms only on ownership). A refusal
+    // falls through UNCHANGED to the per-tuple presorted drive — never the
+    // serial set drive (hash inserts must not replace the incumbent's
+    // adjacent-dedup on ordered input).
+    if distinct_presorted_probe_enabled()
+        && router::arm_dop(router::ArmClass::Distinct) > 0
+        && ::nodeagg::agg_plain_distinct_set_only(agg)
+        && !::nodeagg::agg_pertrans_all_distinct_set(agg)
+        && !estate.es_epq_active
+    {
+        if let Some(scan_node) = agg.plan.plan.lefttree {
+            if scan_node.node_tag() == ::types_nodes::NodeTag::T_SeqScan {
+                lane_trace("runtime-plaindistinct: presorted-bare probe");
+                if let Some(r) = runtime_plaindistinct::try_own_plain_distinct_runtime(
+                    agg, ss, scan_node, true, estate,
+                )? {
+                    return Ok(Some(r));
+                }
+            }
+        }
+    }
     if !agg_over_seq_scan_fusible(agg, ss, estate)? {
         // EXPLAIN (ENGINE) capture: the hashed route's production verdict
         // through the same E4 mirror the EA walk below uses (breaker
@@ -9425,6 +9454,20 @@ pub(crate) fn agg_poly_enabled() -> bool {
             std::env::var("PGRUST_LANE_V2_AGG_POLY").as_deref(),
             Ok("0") | Ok("off")
         )
+    })
+}
+
+/// GL-DISTALPHA-2 measurement arm (`PGRUST_LANE_V2_DISTINCT_PRESORTED=1`,
+/// DEFAULT OFF): probe the runtime plain-distinct sink for the
+/// PRESORTED-bare exact-DISTINCT face (clustered scan order serves the
+/// DISTINCT aggregate with no Sort node; the set entries are dormant by
+/// the `set_active` contract, so every set drive and sink probe was
+/// structurally unreachable). OFF = today's paths byte-identically; the
+/// letter's ladder is the flip evidence channel.
+pub(crate) fn distinct_presorted_probe_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&ON, || {
+        matches!(std::env::var("PGRUST_LANE_V2_DISTINCT_PRESORTED").as_deref(), Ok("1"))
     })
 }
 

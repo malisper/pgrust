@@ -120,13 +120,16 @@ pub fn plain_pd_derive_spec(node: &AggStateData<'_>) -> Option<std::sync::Arc<Pl
     if ps.num_inputs != 1 {
         return None;
     }
-    // The direct staged-key contract: single bare OUTER var, column 0, no
-    // FILTER (recorded at init). Mirrors `agg_plain_distinct_direct_shape`.
-    if ps.direct_att != Some(0) {
-        return None;
-    }
+    // The direct staged-key contract: single bare OUTER var, no FILTER
+    // (recorded at init). Column 0 is the projected over-Sort/over-scan
+    // shape (`agg_plain_distinct_direct_shape`); a nonzero column is the
+    // PRESORTED-bare physical-tlist face (GL-DISTALPHA-2), where scan
+    // output == table row, so the recorded OUTER attno IS the scan column
+    // the workers stage — the probe's `seq_scan_key_direct_att` proof
+    // (which refuses any projected scan) is what makes that identity safe.
+    let att = ps.direct_att?;
     Some(std::sync::Arc::new(PlainPdSpec {
-        att: 0,
+        att,
         kind,
         worker_budget: crate::distinct_set_budget() / 2,
     }))
