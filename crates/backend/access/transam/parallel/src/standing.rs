@@ -596,6 +596,11 @@ pub fn gang_worker_loop(_ordinal: usize) -> GangExit {
 fn warm_connect(entry: &Arc<StandingEngagement>) {
     if init_small::globals::MyDatabaseId() != InvalidOid
         || entry.shared.database_id == InvalidOid
+        // Shutdown fence: never START a cold InitPostgres behind the
+        // postmaster's stop — the worker is about to exit; a connect here
+        // would run catalog/startup work concurrent with the shutdown
+        // checkpoint the state machine is sequencing.
+        || shutting_down()
     {
         return;
     }
