@@ -836,6 +836,133 @@ impl<'mcx> BatchSink<'mcx> for TopnAcceptSink<'_> {
             }
             skip
         };
+        // COLSTAGE follow-ups (night/sort-merge-redesign, same kill
+        // switch): when NO row of the staged batch is fallback-forced,
+        // run the emit-free TIGHT loop — the per-key batch views hoisted
+        // out of the per-row walk (the per-row `refsort_key_batch`
+        // re-borrow was the largest remaining accept cost after the
+        // staging fix) and the floor prefilter (`admits`) applied before
+        // the heap-push ceremony. Observation-stream identity: the loop
+        // visits the same live rows in the same order, encodes the same
+        // entries under the same total order, and a non-admitted push was
+        // already a heap no-op (`BoundedTopnHeap::push` compares against
+        // the same floor), so the winner set is bit-identical. Any
+        // fallback bit in the batch keeps the incumbent per-row walk
+        // below, whole-batch (fail closed, rare on staged columnar
+        // windows).
+        if runtime_sort_colstage_enabled() {
+            if let Some((fb, _, dlanes)) = &fast {
+                let nwords = ((n as usize) + 63) / 64;
+                let fallback_free = fb[..nwords.min(fb.len())]
+                    .iter()
+                    .enumerate()
+                    .all(|(w, &word)| {
+                        // Mask off bits at and past `n` in the last word.
+                        let hi = (n as usize).saturating_sub(w * 64).min(64);
+                        let mask = if hi >= 64 { !0u64 } else { (1u64 << hi) - 1 };
+                        word & mask == 0
+                    });
+                if fallback_free {
+                    // Hoist per-key batch views once (batch-stable — the
+                    // fast-leg availability check above proved each key
+                    // serves this window).
+                    let mut kv: [Option<(&[::datum::Datum], &[bool])>;
+                        ::nodesort::sink::TOPN_MAX_KEYS] =
+                        [None; ::nodesort::sink::TOPN_MAX_KEYS];
+                    for (ki, key) in self.keys.iter().enumerate() {
+                        if !key.dictcode {
+                            let (vals, nulls, _, _) = emit
+                                .refsort_key_batch(key.attno_scan, n)
+                                .expect("refsort key batch stable within a staged batch");
+                            kv[ki] = Some((vals, nulls));
+                        }
+                    }
+                    let keys = self.keys;
+                    let flags = &self.flags;
+                    let obs = &mut self.obs;
+                    match &mut *self.heap {
+                        TopnLocal::Narrow(h) => {
+                            let key = keys[0];
+                            ::exectuples::for_each_live(
+                                skip.as_ref().map(|w| &w[..]),
+                                pos,
+                                n,
+                                |i| -> PgResult<()> {
+                                    let rowref = ((rg as u64) << 32) | (row0 + i) as u64;
+                                    let e = if key.dictcode {
+                                        let lane = dlanes[0].expect(
+                                            "dictcode lane present under an engaged fast leg",
+                                        );
+                                        let g = lane.table.global_code(lane.code(i as usize));
+                                        TopnEntry::encode(
+                                            g as i64,
+                                            false,
+                                            key.desc,
+                                            key.nulls_first,
+                                            rowref,
+                                        )
+                                    } else {
+                                        let (vals, nulls) =
+                                            kv[0].expect("int key view hoisted");
+                                        TopnEntry::encode(
+                                            key_i64(vals[i as usize], key.width),
+                                            nulls[i as usize],
+                                            key.desc,
+                                            key.nulls_first,
+                                            rowref,
+                                        )
+                                    };
+                                    if h.admits(e) {
+                                        h.push(e);
+                                    }
+                                    Ok(())
+                                },
+                            )?;
+                            return Ok(());
+                        }
+                        TopnLocal::Wide(h) => {
+                            ::exectuples::for_each_live(
+                                skip.as_ref().map(|w| &w[..]),
+                                pos,
+                                n,
+                                |i| -> PgResult<()> {
+                                    for (ki, key) in keys.iter().enumerate() {
+                                        if key.dictcode {
+                                            let lane = dlanes[ki].expect(
+                                                "dictcode lane present under an engaged fast leg",
+                                            );
+                                            obs[ki] = (
+                                                lane.table.global_code(lane.code(i as usize))
+                                                    as i64,
+                                                false,
+                                            );
+                                        } else {
+                                            let (vals, nulls) =
+                                                kv[ki].expect("int key view hoisted");
+                                            obs[ki] = (
+                                                key_i64(vals[i as usize], key.width),
+                                                nulls[i as usize],
+                                            );
+                                        }
+                                    }
+                                    let rowref = ((rg as u64) << 32) | (row0 + i) as u64;
+                                    let e =
+                                        WideEntry::encode(&obs[..nk], &flags[..nk], rowref);
+                                    if h.admits(e) {
+                                        h.push(e);
+                                    }
+                                    Ok(())
+                                },
+                            )?;
+                            return Ok(());
+                        }
+                        TopnLocal::Full(_) => {
+                            unreachable!("full locals feed FullAcceptSink")
+                        }
+                    }
+                }
+            }
+        }
         ::exectuples::for_each_live(skip.as_ref().map(|w| &w[..]), pos, n, |i| -> PgResult<()> {
             // Contract-break rows are dead (the RG aborts and the serial
             // arm reruns): keep dict-code-flow's whole-batch early return
