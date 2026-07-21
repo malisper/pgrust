@@ -55,7 +55,8 @@ session_guc_cluster!(CostsizeGucs, COSTSIZE_GUCS:
 //
 // These shipped as flat compile-time constants (32000.0 / 0.005) that ignored
 // parallel_setup_cost/parallel_tuple_cost entirely, which made pgrcolumnar
-// Gather pricing un-sweepable: the q33 probe's parallel_setup_cost 100:1000
+// Gather pricing un-sweepable: the high-card grouped-agg regression
+// probe's parallel_setup_cost 100:1000
 // and parallel_tuple_cost 0.01:0.1 A/Bs were byte-identical no-ops
 // (scratchpad/night/q33-regression-probe.md, probes A/B). They are now
 // MULTIPLIERS of the GUCs, derived so that at the shipped t34 defaults
@@ -143,7 +144,7 @@ pub fn pgrcolumnar_footer_ndv_est() -> bool {
 // Executor-honest per-group footprint multiplier for a leader-side hashed
 // Agg fed by a Gather/GatherMerge on a pgrcolumnar-fed plan. C's
 // hash_agg_entry_size counts only the tuple + pergroup + transition
-// chunks — for the REAL q33 shape (GROUP BY WatchID, ClientIP with
+// chunks — for the REAL high-cardinality two-int-key grouped shape (with
 // count(*) + SUM(IsRefresh) + AVG(ResolutionWidth): Gather width 16,
 // THREE transinfos, transitionSpace 48 = MAXALIGN(get_typavgwidth(_int8)
 // = 32) + 16 for AVG's by-ref int8-array transvalue — prepagg.rs) that is
