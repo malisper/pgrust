@@ -54,6 +54,12 @@ pub(super) struct StandingArm {
 pub(super) struct StandingLeader<'a> {
     /// The engagement's binder target (payload.pcxt_shared, already set).
     pub shared: &'a Arc<parallel::ParallelShared>,
+    /// M2 inc-2: the POOL-DB engagement board the arm attached to its
+    /// submission (`try_pool_channel` + `Runtime::submit_pinned_bound`).
+    /// Some ⇒ standing_wait waits on the POOL channel first; its fallback
+    /// (closed board, deadline, all-refused) then tries the gang channel
+    /// with the RG untouched. None ⇒ inc-1 exactly.
+    pub pool: Option<Arc<parallel::standing::StandingEngagement>>,
     /// The payload's board-entry slot: held across the wait so the arm's
     /// PRIVATE_SHUTDOWN hook can complete the standing join (abort + drain
     /// + await detach) on leader unwind paths that never reach this loop's
@@ -119,6 +125,20 @@ pub(super) fn standing_wait(
     rg: &runtime::RgHandle,
     waiter: &runtime::CompletionWaiter,
 ) -> PgResult<StandingWait> {
+    // M2 inc-2: POOL-DB channel first — the per-RG board the arm attached
+    // at submit (publication set the pool-visible active bit; parked pool
+    // workers rode the publish wake). Same wait loop, same leader
+    // contract; a fallback closes the board (late pool picks refuse
+    // through the closed flag + skip cache) and the gang channel takes
+    // over with the RG untouched.
+    if let Some(pool) = &leader.pool {
+        *leader.slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(pool));
+        match wait_engaged(arm, &leader, pool, "pooldb", "standing", dop, granules, rg, waiter)?
+        {
+            StandingWait::Done(o) => return Ok(StandingWait::Done(o)),
+            StandingWait::Fallback => {}
+        }
+    }
     if arm.sinks_gate && !standing_sinks_enabled() {
         return Ok(StandingWait::Fallback);
     }
@@ -132,6 +152,29 @@ pub(super) fn standing_wait(
     // the standing join if this frame never reaches one of its own cleanup
     // paths (each of which takes the slot back first).
     *leader.slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&entry));
+    wait_engaged(arm, &leader, &entry, "standing", "launched", dop, granules, rg, waiter)
+}
+
+/// The engaged wait loop (both channels): poll completion + interrupts +
+/// participation counters against ONE board entry; every exit path closes
+/// the entry and waits for claimed participants to detach. `channel`
+/// parameterizes the trace surface ("standing" keeps the inc-3/inc-1 lines
+/// byte-identical; "pooldb" is the M2 inc-2 grep surface); `next` names the
+/// fallback channel in the refusal/deadline lines.
+#[allow(clippy::too_many_arguments)]
+fn wait_engaged(
+    arm: &StandingArm,
+    leader: &StandingLeader<'_>,
+    entry: &Arc<parallel::standing::StandingEngagement>,
+    channel: &str,
+    next: &str,
+    dop: i32,
+    granules: u64,
+    rg: &runtime::RgHandle,
+    waiter: &runtime::CompletionWaiter,
+) -> PgResult<StandingWait> {
+    let _ = dop;
+    let entry = Arc::clone(entry);
     let take_slot = || {
         leader.slot.lock().unwrap_or_else(|p| p.into_inner()).take();
     };
@@ -150,7 +193,7 @@ pub(super) fn standing_wait(
             parallel::gtrace("l.close.end");
             if !traced {
                 lane_trace(&format!(
-                    "{}: engaged standing dop={} granules={granules}{census}",
+                    "{}: engaged {channel} dop={} granules={granules}{census}",
                     arm.label,
                     entry.claimed()
                 ));
@@ -170,7 +213,7 @@ pub(super) fn standing_wait(
         let claimed = entry.claimed();
         if !traced && claimed > 0 {
             lane_trace(&format!(
-                "{}: engaged standing dop={claimed} granules={granules}{census}",
+                "{}: engaged {channel} dop={claimed} granules={granules}{census}",
                 arm.label
             ));
             traced = true;
@@ -181,7 +224,7 @@ pub(super) fn standing_wait(
         // at the bind/lane stage, before any granule was claimed.
         if started == 0 && refused >= entry.tickets() {
             lane_trace(&format!(
-                "{}: standing refused ({refused} refusals) — launched fallback",
+                "{}: {channel} refused ({refused} refusals) — {next} fallback",
                 arm.label
             ));
             take_slot();
@@ -201,7 +244,7 @@ pub(super) fn standing_wait(
             && std::time::Duration::from_nanos(t0.elapsed_ns()) > standing_claim_deadline()
         {
             lane_trace(&format!(
-                "{}: standing claim deadline — launched fallback",
+                "{}: {channel} claim deadline — {next} fallback",
                 arm.label
             ));
             take_slot();
@@ -242,6 +285,40 @@ pub(super) fn standing_wait(
             parallel::standing::close_and_await(&entry);
             return Err(e);
         }
+    }
+}
+
+/// M2 inc-2: build the POOL-DB channel for one engagement — the per-RG
+/// board plus the runtime bound descriptor. The descriptor MUST ride the
+/// submission (`Runtime::submit_pinned_bound` — the pool-visible active
+/// bit keys off it at publication); the returned entry goes into
+/// `StandingLeader::pool` so standing_wait waits the pool phase first.
+/// None = channel unavailable (PGRUST_RUNTIME_POOLDB off, POOLBIND off,
+/// sinks gate, no driver, no pool identity wiring, lock-group failure) —
+/// submit plain-pinned and the layering is inc-1 exactly. Call AFTER
+/// set_standing_driver (the serve dispatches through it).
+pub(super) fn try_pool_channel(
+    shared: &Arc<parallel::ParallelShared>,
+    dop: i32,
+    sinks_gate: bool,
+) -> Option<(Arc<parallel::standing::StandingEngagement>, runtime::BoundDescriptor)> {
+    if sinks_gate && !standing_sinks_enabled() {
+        return None;
+    }
+    let entry = parallel::standing::try_engage_pool(shared, dop.max(0) as usize)?;
+    let payload: Arc<dyn std::any::Any + Send + Sync> = Arc::clone(&entry) as _;
+    Some((entry, runtime::BoundDescriptor { serve: pooldb_serve, payload }))
+}
+
+/// The bound descriptor's serve: parallel::standing::pool_serve mapped
+/// onto the runtime's verdict (the parallel crate cannot name runtime
+/// types — the dependency points the other way; this arm-side adapter
+/// closes the loop, the StandingDriver fn-pointer precedent).
+fn pooldb_serve(payload: &Arc<dyn std::any::Any + Send + Sync>) -> runtime::BoundServe {
+    match parallel::standing::pool_serve(payload) {
+        parallel::standing::PoolServe::Served => runtime::BoundServe::Served,
+        parallel::standing::PoolServe::Refused => runtime::BoundServe::Refused,
+        parallel::standing::PoolServe::Closed => runtime::BoundServe::Closed,
     }
 }
 
