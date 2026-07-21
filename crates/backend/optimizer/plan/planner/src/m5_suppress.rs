@@ -129,8 +129,11 @@ pub enum CoverClass {
     /// guards, per rel: unindexed (no serial merge/NL-with-inner-index
     /// shapes for the costing to prefer), nbatch==1 estimate (EVERY rel —
     /// any of them may be a build side; the multibuild walk is unbatched
-    /// only), cbstore AM (heap sides ride the K2 knobs, DEFAULT-OFF — a
-    /// heap-keyed suppression would land on serial). Everything else —
+    /// only), cbstore AM (heap sides: TPCH-JHEAP keys them knob-gated
+    /// behind PGRUST_LANE_V2_JHEAP — the K2 executor feed has been
+    /// DEFAULT-ON since the SE9/SE15 flips, the coherence mirror keys its
+    /// kills; the earlier "K2 DEFAULT-OFF" claim here was stale).
+    /// Everything else —
     /// grouped/distinct/sorted shapes, outer types in nested trees,
     /// disconnected graphs — classifies uncovered by construction.
     CbHashJoinMultiBuild,
@@ -716,6 +719,72 @@ fn aggjoin_numeric_enabled() -> bool {
     *ON.get_or_init(|| {
         knob_spelling_armed(std::env::var("PGRUST_LANE_V2_AGGJOIN_NUMERIC").as_deref().ok())
     })
+}
+
+/// TPCH-JHEAP (night/tpch-jheap — the scoping's car 2, the J-heap blocker):
+/// heap-side join admission. Every join classifier admitted cbstore rels
+/// ONLY ('side not cbstore' — the q14/q19 census refusal), while the
+/// executor's K2 heap feed (BatchGranuleSource seam) has been DEFAULT ON
+/// since the SE9/SE15 flips: the single-join arm and the multibuild
+/// build/probe walk both admit heap SeqScans (`k2_heap` in
+/// runtime_hashjoin's shape gates + `mb_state_walk`), INNER included in
+/// both jointype envelopes — the m5_suppress class-doc claim "heap sides
+/// ride the K2 knobs, DEFAULT-OFF" is STALE. This knob admits heap rels
+/// into the plain-join / multibuild / grouped-join censuses, fail-closed
+/// behind the executor coherence mirror below and the heap-specific guards
+/// (`jheap_shape_guards`: stats on heap equi keys — the X6 class,
+/// heap-flavored; enable_hashjoin required; unused-index tolerance with
+/// the NL-margin law). DEFAULT OFF; `PGRUST_LANE_V2_JHEAP=1|on` arms
+/// (GL-JHEAP-1 fleet letter owns the default flip).
+fn jheap_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        knob_spelling_armed(std::env::var("PGRUST_LANE_V2_JHEAP").as_deref().ok())
+    })
+}
+
+/// TPCH-JHEAP executor coherence (the m5p1 `multibuild_enabled` precedent):
+/// the K2 heap feed's own kills must also un-key heap shapes — a heap-side
+/// suppression whose feed is killed would land on the serial join build
+/// (risk P1's suppress-then-refuse direction). Same spellings as the
+/// executor (`PGRUST_LANE_V2_K2_PROBE` / `PGRUST_LANE_V2_HEAPFEED`, both
+/// default ON, `=0|off` kills — runtime_hashjoin::k2_probe_resolve /
+/// batch_source::heapfeed_v2_enabled), own cached reads.
+fn k2_heapfeed_live() -> bool {
+    static P: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static H: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let p = *P.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_K2_PROBE").as_deref(), Ok("0") | Ok("off"))
+    });
+    let h = *H.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_HEAPFEED").as_deref(), Ok("0") | Ok("off"))
+    });
+    p && h
+}
+
+/// TPCH-JHEAP NL/merge-election margin (PROVISIONAL, GL-JHEAP-1 owns the
+/// measured bound): an index on a heap rel's JOIN-KEY column makes the
+/// post-suppression serial planner's NL-with-inner-index (and index-sorted
+/// merge) shapes electable — plans the join walk refuses (the B1/X5/X6
+/// suppress-then-refuse class the scoping named). NL(outer=X,
+/// inner=IndexScan(Y)) beats hash only when X is comparable to or smaller
+/// than Y (per-probe index cost vs the one-pass hash build); requiring
+/// EVERY equi-partner of a join-key-indexed heap rel to carry at least
+/// this many times its rows keeps the hash election safely dominant.
+const JHEAP_NL_MARGIN: f64 = 4.0;
+
+/// PROVISIONAL floor for heap-fed join shapes: the heap fold arms'
+/// economics (rows>=1M & dop>=12 — the HeapCmpFoldPrefix/AggPolyHeapPlain
+/// reuse; the scoping's "heap fold floor" note), with the hashjoin-nbatch1
+/// 2M ceiling kept from the cbstore classes. GL-JHEAP-1 owns re-measuring.
+fn jheap_guard() -> FloorGuard {
+    FloorGuard {
+        min_rows: 1_000_000.0,
+        max_rows: 2_000_000.0,
+        min_dop: 12,
+        low_dop_max_rows: 0.0,
+        ..NO_GUARD
+    }
 }
 
 /// SE-MKTEXT group-estimate ceiling, env-overridable
@@ -1917,6 +1986,7 @@ fn classify_join_sides<'mcx>(
     }
     let mut relids = [0u32; 2];
     let mut max_rows = 0.0f64;
+    let mut heap: Vec<(usize, types_pathnodes::RelId)> = Vec::new();
     for (i, &rti) in [rti_l, rti_r].iter().enumerate() {
         let Some(rte) = parse.rtable.nth(rti - 1).as_range_tbl_entry() else {
             return refuse_join("side not a plain RTE");
@@ -1933,13 +2003,22 @@ fn classify_join_sides<'mcx>(
             return refuse_join("side has no RelOptInfo yet");
         };
         let rel = run.root.rel(rel_id);
-        if rel.amflags & AMFLAG_PGRCOLUMNAR == 0 {
-            return refuse_join("side not cbstore");
+        let is_cb = rel.amflags & AMFLAG_PGRCOLUMNAR != 0;
+        if !is_cb {
+            // TPCH-JHEAP: heap sides admit knob-gated (+ the executor K2
+            // feed coherence mirror); OFF takes the pre-existing refusal
+            // byte-for-byte. Index tolerance/stats ride jheap_shape_guards
+            // below (they need the qual set).
+            if !(jheap_enabled() && k2_heapfeed_live()) {
+                return refuse_join("side not cbstore");
+            }
+            heap.push((i, rel_id));
         }
         max_rows = max_rows.max(rel.rows.max(0.0));
         // Unindexed-only guard (see the fn doc): an index on either side
         // lets the costing pick serial merge/NL shapes the walk refuses.
-        if !rel.indexlist.is_empty() {
+        // cbstore keeps it verbatim; heap rides the jheap tolerance.
+        if is_cb && !rel.indexlist.is_empty() {
             return refuse_join("side has indexes");
         }
         // nbatch==1 on this side's estimate (whichever side the planner
@@ -1988,7 +2067,7 @@ fn classify_join_sides<'mcx>(
             }
         }
     };
-    for qual in quals {
+    for &qual in &quals {
         let Some(op) = qual.as_op_expr() else { continue };
         if op.args.len() != 2 {
             continue;
@@ -2013,6 +2092,19 @@ fn classify_join_sides<'mcx>(
     }
     if n_equi == 0 {
         return refuse_join("no hashjoinable int-family equi clause");
+    }
+    // TPCH-JHEAP: the heap-side guards (stats on heap equi keys,
+    // enable_hashjoin, index tolerance + NL margin). The 2-rel plain form
+    // additionally refuses heap SELF-joins outright (the B1 alias-EC
+    // hazard is newly reachable on this row's heap surface — fail-closed;
+    // the cbstore census is byte-untouched).
+    if !heap.is_empty() {
+        if relids[0] == relids[1] {
+            return refuse_join("relation appears more than once (EC self-join clause)");
+        }
+        if !jheap_shape_guards(run, parse, &[rti_l, rti_r], &quals, &heap)? {
+            return Ok(false);
+        }
     }
     // Emit discipline: every non-junk tlist entry is a whitelisted plain
     // aggregate whose args live on either joined rel (count(*) included).
@@ -2059,10 +2151,23 @@ fn classify_join_sides<'mcx>(
     }
     // Floor guard input: the larger side's estimated rows (the ladder's
     // per-table N; the probe fixture's dim side is negligible).
+    // Knob-admitted shapes route through the knob-path finishes (own trace
+    // tags; class row / tsv / drift guards untouched). Heap-fed shapes
+    // carry the jheap floor (min 1M — the heap fold economics); the pure
+    // numeric widening keeps the CbHashJoinPlainAgg floor.
+    if !heap.is_empty() {
+        return finish_knob_path(
+            run,
+            "jheap",
+            if n_numeric > 0 { "plainjoin-heap+numeric" } else { "plainjoin-heap" },
+            jheap_guard(),
+            relids[0],
+            0.0,
+            max_rows,
+            0.0,
+        );
+    }
     if n_numeric > 0 {
-        // Knob-admitted shapes route through the knob-path finish (own
-        // trace tag; class row / tsv / drift guards untouched) with the
-        // CbHashJoinPlainAgg floor economics.
         return finish_knob_path(
             run,
             "aggjoinnum",
@@ -2289,11 +2394,16 @@ fn classify_multibuild<'mcx>(
     {
         return refuse_join("not a plain one-row aggregation");
     }
-    let Some((relids, max_rows)) = multibuild_rel_guards(run, parse, rtis)? else {
+    let Some((relids, max_rows, heap)) = multibuild_rel_guards(run, parse, rtis)? else {
         return Ok(false);
     };
     if !equi_graph_connected(rtis, quals)? {
         return refuse_join("equi graph does not connect all relations");
+    }
+    // TPCH-JHEAP: the heap-side guards (stats on heap equi keys,
+    // enable_hashjoin, index tolerance + NL margin) over the full qual set.
+    if !jheap_shape_guards(run, parse, rtis, quals, &heap)? {
+        return Ok(false);
     }
     // EC discipline (SE-AGGJOIN fixer — the grouped row's hostile review
     // proved the channel PRE-EXISTS here: at base 11fe9c48b the plain
@@ -2329,7 +2439,20 @@ fn classify_multibuild<'mcx>(
         return refuse_join("empty tlist");
     }
     // Floor guard input: the largest rel's estimated rows (the nbatch1
-    // ladder's per-table N — provisional reuse, see class_guard).
+    // ladder's per-table N — provisional reuse, see class_guard). Heap-fed
+    // shapes carry the jheap floor (min 1M — the heap fold economics).
+    if !heap.is_empty() {
+        return finish_knob_path(
+            run,
+            "jheap",
+            if n_numeric > 0 { "multibuild-heap+numeric" } else { "multibuild-heap" },
+            jheap_guard(),
+            relids[0],
+            0.0,
+            max_rows,
+            0.0,
+        );
+    }
     if n_numeric > 0 {
         return finish_knob_path(
             run,
@@ -2346,17 +2469,23 @@ fn classify_multibuild<'mcx>(
 }
 
 /// The multibuild per-relation guards, shared by the plain and grouped rows
-/// (extracted verbatim at SE-AGGJOIN): plain DISTINCT unindexed cbstore
-/// rels (the B1 self-join discipline), EVERY rel's build estimate
-/// nbatch==1. `None` = refused (traced).
+/// (extracted verbatim at SE-AGGJOIN): plain DISTINCT rels (the B1
+/// self-join discipline), EVERY rel's build estimate nbatch==1; cbstore
+/// rels stay unindexed-only verbatim. TPCH-JHEAP: HEAP rels admit
+/// knob-gated (the executor's K2 feed is default-ON; the coherence mirror
+/// keys both kills) — their index tolerance and stats discipline are the
+/// caller's `jheap_shape_guards` (they need the qual set). Returns the
+/// relids, the largest side's rows, and the heap sides as
+/// (index-into-rtis, RelId). `None` = refused (traced).
 fn multibuild_rel_guards(
     run: &mut PlannerRun<'_>,
     parse: &Query<'_>,
     rtis: &[usize],
-) -> PgResult<Option<(Vec<u32>, f64)>> {
+) -> PgResult<Option<(Vec<u32>, f64, Vec<(usize, types_pathnodes::RelId)>)>> {
     let mut relids = Vec::with_capacity(rtis.len());
     let mut max_rows = 0.0f64;
-    for &rti in rtis {
+    let mut heap: Vec<(usize, types_pathnodes::RelId)> = Vec::new();
+    for (i, &rti) in rtis.iter().enumerate() {
         let Some(rte) = parse.rtable.nth(rti - 1).as_range_tbl_entry() else {
             return refuse_join_none("side not a plain RTE");
         };
@@ -2381,11 +2510,22 @@ fn multibuild_rel_guards(
             return refuse_join_none("side has no RelOptInfo yet");
         };
         let rel = run.root.rel(rel_id);
-        if rel.amflags & AMFLAG_PGRCOLUMNAR == 0 {
-            return refuse_join_none("side not cbstore");
+        let is_cb = rel.amflags & AMFLAG_PGRCOLUMNAR != 0;
+        if !is_cb {
+            // TPCH-JHEAP: a non-cbstore plain relation is the heap AM (the
+            // TableAm vocabulary is {Heap, Pgrcolumnar}; the executor walk
+            // double-checks via seq_scan_is_heap). Knob OFF (or either
+            // executor feed kill thrown) takes the pre-existing refusal
+            // byte-for-byte, trace included.
+            if !(jheap_enabled() && k2_heapfeed_live()) {
+                return refuse_join_none("side not cbstore");
+            }
+            heap.push((i, rel_id));
         }
         max_rows = max_rows.max(rel.rows.max(0.0));
-        if !rel.indexlist.is_empty() {
+        // cbstore keeps the blanket unindexed-only rule verbatim; heap
+        // index tolerance is the caller's jheap_shape_guards (needs quals).
+        if is_cb && !rel.indexlist.is_empty() {
             return refuse_join_none("side has indexes");
         }
         let Some(pt_id) = rel.pathtarget_id else {
@@ -2404,13 +2544,175 @@ fn multibuild_rel_guards(
             return refuse_join_none("nbatch estimate > 1 (multibuild walk is unbatched-only)");
         }
     }
-    Ok(Some((relids, max_rows)))
+    Ok(Some((relids, max_rows, heap)))
 }
 
 /// Traced refusal in `Option` position (the rel-guards helper's shape).
 fn refuse_join_none<T>(why: &str) -> PgResult<Option<T>> {
     let _ = refuse_join(why)?;
     Ok(None)
+}
+
+/// TPCH-JHEAP: the heap-side shape guards over the WHOLE qual set — run by
+/// every join classifier when `multibuild_rel_guards` admitted heap sides.
+/// `false` = refuse (traced). The guards, in order:
+///   * `enable_hashjoin` required ON (with it off, the post-suppression
+///     serial election on heap rels is NL/merge by construction — the
+///     suppress-then-refuse direction; the grouped classifier requires it
+///     anyway, this extends the law to the plain rows' heap shapes);
+///   * X6, heap-flavored: every int-family hashjoinable equi term with a
+///     HEAP endpoint needs statistics on BOTH key vars (stats-free heap
+///     rels default the join selectivities into merge landings — the
+///     SE-AGGJOIN live finding, now enforced for the plain rows' heap
+///     shapes too);
+///   * index tolerance (the q06/AggPolyHeapPlain precedent, join-widened;
+///     TPC-H rels carry their PK indexes, so a blanket unindexed rule
+///     would never key them): per heap-rel index — expression/partial
+///     indexes refuse; an index whose KEY columns are referenced by any
+///     RESTRICTION term refuses (an index path becomes electable); an
+///     index COVERING every referenced column refuses (index-only scan
+///     electable qual-free); an index on a JOIN-KEY column applies the
+///     NL-margin law — every equi-PARTNER rel must carry >=
+///     JHEAP_NL_MARGIN x this rel's rows (blocks the small-outer
+///     NL-with-inner-index and index-sorted merge elections);
+///   * whole-row/system-column references on a heap rel refuse (nothing
+///     the tolerance can reason about).
+fn jheap_shape_guards<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    parse: &Query<'mcx>,
+    rtis: &[usize],
+    quals: &[Node<'mcx>],
+    heap: &[(usize, types_pathnodes::RelId)],
+) -> PgResult<bool> {
+    if heap.is_empty() {
+        return Ok(true);
+    }
+    if !crate::gucs::enable_hashjoin() {
+        return refuse_join("heap side with the hashjoin planner path disabled");
+    }
+    let heap_idx = |i: usize| heap.iter().any(|&(h, _)| h == i);
+    // Term census: recognized equi edges (endpoint indexes + attnos) vs
+    // residual terms (restriction filters and anything unrecognized).
+    let mut edges: Vec<(usize, i16, usize, i16)> = Vec::new();
+    let mut resid: Vec<Node<'mcx>> = Vec::new();
+    for &q in quals {
+        let mut edge = None;
+        if let Some(op) = q.as_op_expr() {
+            if op.args.len() == 2 {
+                let (a, b) = (op.args.nth(0), op.args.nth(1));
+                let hit = |e: Node<'mcx>| rtis.iter().position(|&rti| key_var(e, rti).is_some());
+                if let (Some(ia), Some(ib)) = (hit(a), hit(b)) {
+                    if ia != ib {
+                        if let (Some(va), Some(vb)) =
+                            (key_var(a, rtis[ia]), key_var(b, rtis[ib]))
+                        {
+                            if is_int_family(va.vartype)
+                                && is_int_family(vb.vartype)
+                                && lsyscache::op_hashjoinable(op.opno, va.vartype)?
+                            {
+                                if (heap_idx(ia) || heap_idx(ib))
+                                    && (!key_var_estimable(run, a)?
+                                        || !key_var_estimable(run, b)?)
+                                {
+                                    return refuse_join(
+                                        "heap join key without statistics (X6, heap-flavored)",
+                                    );
+                                }
+                                edge = Some((ia, va.varattno, ib, vb.varattno));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        match edge {
+            Some(e) => edges.push(e),
+            None => resid.push(q),
+        }
+    }
+    use types_tuple::htup::FirstLowInvalidHeapAttributeNumber;
+    let raw = |m: i32| m + FirstLowInvalidHeapAttributeNumber;
+    for &(i, rel_id) in heap {
+        let rti = rtis[i];
+        // Column censuses for THIS rel: restriction references (residual
+        // terms only) and all references (residuals + tlist; equi-edge join
+        // keys are tracked by attno separately).
+        let mut resid_bm = types_nodes::Bitmapset::empty();
+        for &q in &resid {
+            vars::pull_varattnos(run.mcx, q, rti as i32, &mut resid_bm)?;
+        }
+        let mut all_bm = types_nodes::Bitmapset::empty();
+        for &q in &resid {
+            vars::pull_varattnos(run.mcx, q, rti as i32, &mut all_bm)?;
+        }
+        for tle_node in &parse.targetList {
+            let Some(tle) = tle_node.as_target_entry() else { return Ok(false) };
+            vars::pull_varattnos(run.mcx, tle.expr, rti as i32, &mut all_bm)?;
+        }
+        for m in all_bm.iter() {
+            if raw(m) <= 0 {
+                return refuse_join("heap side with whole-row/system-column references");
+            }
+        }
+        let join_attnos: Vec<i16> = edges
+            .iter()
+            .flat_map(|&(ia, aa, ib, ab)| {
+                [(ia, aa), (ib, ab)]
+                    .into_iter()
+                    .filter(|&(x, _)| x == i)
+                    .map(|(_, a)| a)
+            })
+            .collect();
+        let partners: Vec<usize> = edges
+            .iter()
+            .filter_map(|&(ia, _, ib, _)| {
+                if ia == i {
+                    Some(ib)
+                } else if ib == i {
+                    Some(ia)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let rel_rows = run.root.rel(rel_id).rows.max(0.0);
+        for index in run.root.rel(rel_id).indexlist.iter() {
+            if !index.indexprs.is_empty() || !index.indpred.is_empty() {
+                return refuse_join("heap expression/partial index");
+            }
+            let keys = &index.indexkeys;
+            let nkey = (index.nkeycolumns as usize).min(keys.len());
+            for m in resid_bm.iter() {
+                let a = raw(m);
+                if keys[..nkey].iter().any(|&k| k == a) {
+                    return refuse_join("heap index key referenced by a filter qual");
+                }
+            }
+            // Referenced set = residuals + tlist (all_bm) + the join keys.
+            let covers_all = all_bm.iter().all(|m| keys.iter().any(|&k| k == raw(m)))
+                && join_attnos.iter().all(|&j| keys.iter().any(|&k| k == i32::from(j)));
+            if covers_all {
+                return refuse_join("heap covering index (index-only scan electable)");
+            }
+            if keys[..nkey].iter().any(|&k| join_attnos.iter().any(|&j| i32::from(j) == k)) {
+                // Join-key index: the NL/merge hazard — every equi partner
+                // must dominate this rel by the margin.
+                for &p in &partners {
+                    let Some(p_rel) = run.root.simple_rel_array.get(rtis[p]).copied().flatten()
+                    else {
+                        return Ok(false);
+                    };
+                    let p_rows = run.root.rel(p_rel).rows.max(0.0);
+                    if p_rows < JHEAP_NL_MARGIN * rel_rows {
+                        return refuse_join(
+                            "heap join-key index without the NL-election margin",
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(true)
 }
 
 /// The multibuild connected-equi-graph check, shared by the plain and
@@ -2606,11 +2908,18 @@ fn classify_aggjoin_grouped<'mcx>(
     if !crate::gucs::enable_hashagg() || !crate::gucs::enable_hashjoin() {
         return refuse_join("hashagg/hashjoin planner paths disabled");
     }
-    let Some((relids, max_rows)) = multibuild_rel_guards(run, parse, rtis)? else {
+    let Some((relids, max_rows, heap)) = multibuild_rel_guards(run, parse, rtis)? else {
         return Ok(false);
     };
     if !equi_graph_connected(rtis, quals)? {
         return refuse_join("equi graph does not connect all relations");
+    }
+    // TPCH-JHEAP: the heap-side guards (index tolerance + NL margin;
+    // stats/enable_hashjoin overlap this classifier's own X5/X6 discipline
+    // — idempotent). The grouped row's bare-equi law below still applies
+    // to heap shapes verbatim.
+    if !jheap_shape_guards(run, parse, rtis, quals, &heap)? {
+        return Ok(false);
     }
     // Qual discipline (legs X5+X6, both reproduced LIVE by this lane's e2e):
     // EVERY top-level AND term must be an int-family hashjoinable equi
@@ -2737,9 +3046,28 @@ fn classify_aggjoin_grouped<'mcx>(
     }
     // Knob-admitted shapes route through the dedicated knob-path finishes
     // (own trace tags, greppable apart from the bootstrap `m5-suppress:`
-    // census line; the class row / tsv / drift guards untouched), carrying
-    // the CbHashJoinGroupedAgg floor economics — the arm underneath is the
-    // same grouped sink.
+    // census line; the class row / tsv / drift guards untouched). Heap-fed
+    // shapes carry the jheap floor (min 1M) — TPCH-JHEAP owns the tag; the
+    // pure decorated/numeric widenings keep the CbHashJoinGroupedAgg floor
+    // — the arm underneath is the same grouped sink either way.
+    if !heap.is_empty() {
+        let label = match (decorated, n_numeric > 0) {
+            (true, true) => "aggjoin-grouped-heap-decorated+numeric",
+            (true, false) => "aggjoin-grouped-heap-decorated",
+            (false, true) => "aggjoin-grouped-heap+numeric",
+            (false, false) => "aggjoin-grouped-heap",
+        };
+        return finish_knob_path(
+            run,
+            "jheap",
+            label,
+            jheap_guard(),
+            relids[0],
+            ngroups,
+            max_rows,
+            0.0,
+        );
+    }
     if decorated || n_numeric > 0 {
         let (tag, label) = match (decorated, n_numeric > 0) {
             (true, true) => ("decoroot", "aggjoin-grouped-decorated+numeric"),
@@ -4255,6 +4583,36 @@ mod tests {
         // The margin composes with the aggjoin export headroom: at the 64k
         // group floor, engaged inputs are >= 1M rows.
         assert!(GROUPSINK_NGROUPS_FLOOR * DECOROOT_NGROUPS_MARGIN >= 1_000_000.0);
+    }
+
+    /// TPCH-JHEAP knob (night/tpch-jheap): DEFAULT OFF, `1`/`on` arms
+    /// (the shared tpch-cars idiom); the executor coherence mirror
+    /// resolves LIVE in a knob-free process (K2_PROBE/HEAPFEED are
+    /// default-ON with `=0|off` kills — the SE9/SE15 flipped posture), so
+    /// the probe's heap gate is exactly the jheap knob at defaults. Pins
+    /// the default-OFF inertness and the mirror's default-ON reading.
+    #[test]
+    fn jheap_knob_default_off_mirror_live() {
+        assert!(!jheap_enabled(), "test process has no knob set => OFF");
+        assert!(
+            k2_heapfeed_live(),
+            "K2_PROBE/HEAPFEED default ON (SE9/SE15 flips) => mirror live"
+        );
+    }
+
+    /// TPCH-JHEAP NL-election margin + floor: the margin must be a real
+    /// multiple (the NL-with-inner-index election needs the outer side
+    /// comparable to the indexed side — 4x dominance keeps hash safely
+    /// preferred), and the heap floor must sit at the heap fold arms'
+    /// measured 1M/dop12 economics under the 2M nbatch1 ceiling.
+    #[test]
+    fn jheap_margin_and_floor_are_conservative() {
+        assert!(JHEAP_NL_MARGIN >= 4.0);
+        let g = jheap_guard();
+        assert_eq!(g.min_rows, 1_000_000.0);
+        assert_eq!(g.max_rows, 2_000_000.0);
+        assert_eq!(g.min_dop, 12);
+        assert_eq!(g.low_dop_max_rows, 0.0);
     }
 
     /// The living-matrix discipline (§4.1, reconciled at m5-integration):
