@@ -1353,7 +1353,14 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         // SE-T2AGG CAR B (knob-gated, default OFF — block doc below):
         // min/max(text) passengers over default-collation bare Vars, the
         // grouped sink's new VarlenaMinMax vocabulary. Fail-closed
-        // exclusions: SINGLE-key shapes only (the sink hosts the K2
+        // exclusions: NO QUALS (fleet containment, GL letter
+        // fleet-ab-parallelism.md: the qualed q22 suppressed but the arm
+        // never engaged on the real 10M bank — a data-dependent staging
+        // refusal the probe cannot see, so the qualed shape landed
+        // suppress-then-SERIAL at 7.6-8.5x; the local 1M fixture engages,
+        // proving the refusal is bank-dependent — refuse outright until
+        // the qualed-topn-through-the-runtime-sort-arm follow-up earns a
+        // re-letter), SINGLE-key shapes only (the sink hosts the K2
         // single-int and C2 single-text drains; the packed multi-key feed
         // refuses vguard plans), never beside count(DISTINCT) (the distinct
         // sink's vocab stays exact — the se-aggpoly suppress-then-refuse
@@ -1361,6 +1368,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         // mk finish above would key a combination the text cars never
         // proved).
         if n_count_distinct == 0
+            && !has_quals
             && !mk_text_family
             && parse.groupClause.len() == 1
             && agg_strminmax_enabled()
