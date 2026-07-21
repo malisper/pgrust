@@ -193,6 +193,21 @@ pub fn pool_binding_enabled() -> bool {
     })
 }
 
+/// M2 inc-2 kill switch: `PGRUST_RUNTIME_POOLDB=1` arms PGPROC-LEASING POOL
+/// WORKERS — rtpool threads take bgworker-shaped identity at spawn and serve
+/// per-RG engagement boards through the runtime's bound-descriptor claim
+/// gate (scratchpad/night/m2-pool-binding-scope.md §3 inc-2). DEFAULT OFF:
+/// the standing gang remains the default channel until the fleet letter;
+/// unset/0 restores inc-1 byte-exactly. Layered UNDER
+/// PGRUST_RUNTIME_POOLBIND (=0 kills this module wholesale, pool channel
+/// included).
+pub fn pooldb_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_POOLDB").is_ok_and(|v| v.trim() == "1")
+    })
+}
+
 /// Boot wiring (launch_backend rtgang): the thread spawner and the gang
 /// size (= the boot-reserved PGPROC count). Once; later calls ignored.
 pub fn install_spawner(size: usize, f: fn(usize) -> bool) {
@@ -345,8 +360,13 @@ pub fn retire_db(dboid: Oid) {
 
 /// Crash reinit (wpool flush_for_crash discipline): shared memory is about
 /// to be reset wholesale — bump the epoch so every woken worker exits RAW,
-/// touching nothing shared.
+/// touching nothing shared. Pool-db threads (M2 inc-2) are fenced by the
+/// separate `POOL_FENCE` epoch: they park on the runtime eventcount (not
+/// the gang condvar) and touch shared memory only inside a serve, so the
+/// fence is checked at serve entry — a stale-identity thread exits RAW
+/// there (PoolRetireRaw) and its slot respawns cold.
 pub fn flush_for_crash() {
+    POOL_FENCE.fetch_add(1, SeqCst);
     if GANG.get().is_none() {
         return;
     }
@@ -851,4 +871,208 @@ fn serve_ticket(entry: &Arc<StandingEngagement>, ticket: usize) {
         }
         procsignal::ProcSignalRelease();
     }
+}
+
+// ---------------------------------------------------------------------------
+// M2 inc-2 — PGPROC-LEASING POOL WORKERS (scratchpad/night/
+// m2-pool-binding-scope.md §3 inc-2): the standing engagement machinery
+// re-homed onto the RUNTIME POOL. A leader publishes a per-RG
+// StandingEngagement through the runtime's bound descriptor
+// (`runtime::submit_pinned_bound`) instead of the process-global gang
+// board; idle pool workers whose pick lands on the RG claim tickets through
+// `pool_serve` and run serve_ticket VERBATIM (connect-if-first-use,
+// park-invisibility bracket, impersonation, lock-group join, per-arm driver
+// dispatch, Drop-guaranteed detach). What the re-homing removes: the
+// separate gang thread population, the one-engagement-at-a-time board, and
+// the gang park/wake machinery — elasticity rides the pool's own permits.
+// What it keeps byte-identical: the binder, the visibility bracket, the
+// leader's close_and_await join, the exit-unwind discipline.
+//
+// Thread identity is the rtpool spawn glue's (launch_backend::rtpool under
+// PGRUST_RUNTIME_POOLDB=1): rtgang-shaped bring-up at spawn (InitProcess
+// from the boot-reserved segment, BaseInit), verified per serve through the
+// installed POOL_GATE; the crash fence (POOL_FENCE) and the DROP DATABASE
+// rider are self-checked at serve entry — a parked pool-db thread is
+// procarray-invisible and holds no ProcSignal slot, so it never blocks
+// either while idle.
+// ---------------------------------------------------------------------------
+
+/// Crash-fence epoch for pool-db threads (see `flush_for_crash`). A pool
+/// thread captures it at identity bring-up; a mismatch at serve entry means
+/// its identity predates a shared-memory reset — exit RAW.
+static POOL_FENCE: AtomicUsize = AtomicUsize::new(0);
+
+pub fn pool_fence_epoch() -> usize {
+    POOL_FENCE.load(SeqCst)
+}
+
+/// Panic payload: a pool-db thread must exit RAW — the rtpool spawn glue
+/// catches it, skips the exit-callback drain (shared memory may have been
+/// reset under its identity), and respawns the slot cold.
+pub struct PoolRetireRaw;
+
+/// Boot wiring (launch_backend rtpool): the per-serve identity gate. Runs
+/// ON the pool thread at every serve entry: verifies (or completes) the
+/// thread's leased bgworker-shaped identity and the crash fence. `false` =
+/// this thread can never bind (bring-up failed) — the serve refuses and the
+/// runtime skip-caches the publication. May UNWIND to kill the thread
+/// (PoolRetireRaw / ProcExitThread); the glue owns drain + respawn.
+static POOL_GATE: OnceLock<fn() -> bool> = OnceLock::new();
+
+pub fn install_pool_gate(f: fn() -> bool) {
+    let _ = POOL_GATE.set(f);
+}
+
+thread_local! {
+    /// True while THIS thread is inside `pool_serve`'s serve_ticket: the
+    /// arm drivers consult it to disable sticky session retention on pool
+    /// threads — between engagements a pool thread runs ORDINARY runtime
+    /// work (maintenance cycles, unbound task sets), which must never see a
+    /// retained session's identity/GUC view. Gang threads (which only ever
+    /// park between engagements) keep retention.
+    static ON_POOL_SERVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// True ⇔ the current engagement is being served by a POOL worker (see
+/// ON_POOL_SERVE). Arm drivers pass `sticky = !serving_on_pool()`.
+pub fn serving_on_pool() -> bool {
+    ON_POOL_SERVE.with(|c| c.get())
+}
+
+/// Leader side (M2 inc-2): build a POOL engagement board for `dop`
+/// participants over one ParallelShared. None = the pool channel is
+/// unavailable (kill switches, no driver, no pool identity wiring, lock
+/// group failure) — the caller proceeds without a descriptor (standing gang
+/// → launched fallback, inc-1 exactly). The entry is INERT until the caller
+/// attaches it to a submission via `runtime::submit_pinned_bound` (the
+/// publication wake is the pool's engage signal); the caller must
+/// `close_and_await` it before its executor arena unwinds, on every path —
+/// the standing board's exact leader contract.
+pub fn try_engage_pool(
+    shared: &Arc<ParallelShared>,
+    dop: usize,
+) -> Option<Arc<StandingEngagement>> {
+    if !pool_binding_enabled() || !pooldb_enabled() || dop == 0 {
+        return None;
+    }
+    // Per-arm dispatch: the engagement must carry its driver (pool serves
+    // dispatch through it exactly like gang serves).
+    shared.standing_driver()?;
+    // No pool identity wiring ⇒ no pool thread can ever serve.
+    POOL_GATE.get()?;
+    // Workers join the leader's lock group the moment they claim a ticket.
+    if lmgr_proc::BecomeLockGroupLeader().is_err() {
+        return None;
+    }
+    Some(Arc::new(StandingEngagement {
+        shared: Arc::clone(shared),
+        tickets: dop,
+        claimed: AtomicUsize::new(0),
+        detached: AtomicUsize::new(0),
+        refused: AtomicUsize::new(0),
+        closed: AtomicBool::new(false),
+    }))
+}
+
+/// Best-effort procarray re-join for a pool-db thread's GENERIC-PANIC exit
+/// (the rtpool glue): a PARKED pool thread is procarray-invisible (the
+/// serve bracket), but the exit-callback chain expects membership
+/// (RemoveProcFromArray) — re-add before the drain, the gang Wake::Retire
+/// discipline. Swallows its own failure (a mid-serve panic dies VISIBLE;
+/// the double-add must not stop the drain).
+pub fn pool_exit_rejoin_procarray() {
+    if init_small::globals::MyDatabaseId() == InvalidOid {
+        return;
+    }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = procarray_seams::proc_array_add::call(init_small::globals::MyProcNumber());
+    }));
+}
+
+/// One `pool_serve` call's verdict (mapped 1:1 onto the runtime's
+/// BoundServe by the arm-side adapter — this crate cannot name runtime
+/// types, the dependency points the other way).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PoolServe {
+    /// A ticket was claimed and served (serve_ticket ran to its tail).
+    Served,
+    /// THIS thread cannot serve THIS engagement (no gate, identity
+    /// bring-up failure, database-pin mismatch): skip the publication.
+    Refused,
+    /// Board closed or ticket cap reached: nothing left to serve here.
+    Closed,
+}
+
+/// Pool-worker side (M2 inc-2): serve one engagement from a bound RG's
+/// board. Runs on an rtpool thread through the runtime's claim gate, with
+/// the pool execution permit RELEASED (the nested drive has its own permit
+/// rhythm). Repeat calls for the same publication are deduplicated by the
+/// runtime's skip cache, so the pre-claim refusal count stays ≈ one per
+/// mismatched worker — the leader's nobody-participates check fires
+/// promptly on an all-mismatched pool without burning tickets.
+pub fn pool_serve(payload: &Arc<dyn std::any::Any + Send + Sync>) -> PoolServe {
+    let Ok(entry) = Arc::clone(payload).downcast::<StandingEngagement>() else {
+        return PoolServe::Refused;
+    };
+    if entry.closed.load(SeqCst) {
+        return PoolServe::Closed;
+    }
+    // Identity gate (rtpool glue): verify/complete this thread's leased
+    // PGPROC identity + crash fence. May unwind to kill the thread.
+    let Some(gate) = POOL_GATE.get() else {
+        return PoolServe::Refused;
+    };
+    if !gate() {
+        return PoolServe::Refused;
+    }
+    let mine = init_small::globals::MyDatabaseId();
+    // DROP DATABASE rider (self-check): a pool thread pinned to a retired
+    // database must not serve with stale caches (recreated-oid hazard) —
+    // exit CLEAN before touching the board; the glue's exit drain releases
+    // identity (procarray membership restored first: the exit callbacks
+    // expect it — the gang's Wake::Retire discipline) and the slot
+    // respawns unpinned.
+    if mine != InvalidOid {
+        let retired = {
+            let (lock, _) = gang();
+            let g = lock.lock().unwrap_or_else(|p| p.into_inner());
+            g.retired_dbs.contains(&mine)
+        };
+        if retired {
+            super::query_task_guard::sticky_clear();
+            let _ = procarray_seams::proc_array_add::call(
+                init_small::globals::MyProcNumber(),
+            );
+            ipc::proc_exit(0, init_small::globals::MyProcPid());
+        }
+    }
+    // DB pinning (TD-1): connected threads only serve their own database;
+    // unconnected ones adopt the engagement's inside serve_ticket. Counted
+    // as a refusal (once per publication per worker — skip-cache dedup)
+    // for the leader's started==0 && refused>=tickets fallback.
+    if mine != InvalidOid && mine != entry.shared.database_id {
+        entry.refused.fetch_add(1, SeqCst);
+        return PoolServe::Refused;
+    }
+    let Some(ticket) = entry.try_claim() else {
+        // Claim-race loser / full board: warm-connect an unconnected
+        // thread against the engagement's database anyway (the gang's
+        // DOP<size remedy — otherwise a later engagement pays a cold
+        // InitPostgres inside a measured query).
+        warm_connect(&entry);
+        return PoolServe::Closed;
+    };
+    // Sticky retention is disabled on pool serves (see ON_POOL_SERVE):
+    // RAII so unwinds (FATAL exits) reset the flag before the glue
+    // respawns nothing on this thread.
+    struct PoolServeReset;
+    impl Drop for PoolServeReset {
+        fn drop(&mut self) {
+            ON_POOL_SERVE.with(|c| c.set(false));
+        }
+    }
+    ON_POOL_SERVE.with(|c| c.set(true));
+    let _reset = PoolServeReset;
+    serve_ticket(&entry, ticket);
+    PoolServe::Served
 }
