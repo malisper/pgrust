@@ -1510,14 +1510,17 @@ pub(super) fn distinct_lowwidth_maxdop() -> Option<i32> {
 /// exactly what the legacy plan spends). Clamped to the pool width.
 /// Returns `(admitted dop, in_band)` — the band predicate is evaluated on
 /// the PRE-bump dop (the routed engagement width), so a dop-8 engagement
-/// bumped to 9 participants still rides the low-width combine.
+/// bumped to 9 participants still rides the low-width combine. dop-1
+/// engagements are EXCLUDED (below the measured band; bumping 1->2 turns a
+/// one-gang engagement into a real parallel one — e.g. the locality-cap
+/// DOP1 law would flip — an unmeasured corner this lane does not claim).
 pub(super) fn lowwidth_leader_parity_dop(
     rt: &runtime::Runtime,
     dop: i32,
     arm: &str,
 ) -> (i32, bool) {
     match distinct_lowwidth_maxdop() {
-        Some(max) if dop <= max => {
+        Some(max) if dop >= 2 && dop <= max => {
             let bumped = (dop + 1).min(rt.nthreads() as i32).max(dop);
             if bumped != dop {
                 lane_trace(&format!("{arm}: low-width leader-parity dop {dop}->{bumped}"));
