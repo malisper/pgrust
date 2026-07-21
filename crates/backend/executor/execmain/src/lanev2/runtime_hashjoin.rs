@@ -259,14 +259,17 @@ fn hj_decoroot_enabled() -> bool {
 /// relocated NumericAgg digit-snapshot states, C numeric_avg_combine field
 /// law, exact deferred additions at absorb. Plan-covered shapes are
 /// UNTOUCHED (the schema derivation tries the fold plan first). DEFAULT
-/// OFF; `PGRUST_LANE_V2_AGGJOIN_NUMERIC=1|on` arms — same spelling as the
-/// planner probe (knob coherence).
+/// ON (tpch-flips train, GL-NUMJOIN-1 — the planner twin's doc carries
+/// the letter numbers incl. the named multibuild-numeric@6M ~parity spot);
+/// `PGRUST_LANE_V2_AGGJOIN_NUMERIC=0|off` is the kill switch — same
+/// spelling as the planner probe (knob coherence; BOTH sites flip
+/// together).
 fn hj_aggjoin_numeric_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        matches!(
+        !matches!(
             std::env::var("PGRUST_LANE_V2_AGGJOIN_NUMERIC").as_deref(),
-            Ok("1") | Ok("on")
+            Ok("0") | Ok("off")
         )
     })
 }
@@ -4878,7 +4881,7 @@ mod mb_tests {
     fn tpch_cars_executor_knobs_default_off() {
         // tpch-flips: DECOROOT is DEFAULT ON (GL-DECOROOT-1; =0|off kills).
         assert!(hj_decoroot_enabled(), "tpch-flips: unset => ON (GL-DECOROOT-1)");
-        assert!(!hj_aggjoin_numeric_enabled(), "PGRUST_LANE_V2_AGGJOIN_NUMERIC unset => OFF");
+        assert!(hj_aggjoin_numeric_enabled(), "tpch-flips: unset => ON (GL-NUMJOIN-1)");
         assert!(!hj_cbkeys_enabled(), "PGRUST_LANE_V2_CBKEYS unset => OFF");
         assert!(!hj_bpchar_keys_enabled(), "PGRUST_LANE_V2_CBKEYS_BPCHAR unset => OFF");
     }

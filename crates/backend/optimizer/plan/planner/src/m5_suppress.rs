@@ -724,12 +724,22 @@ const DECOROOT_NGROUPS_MARGIN: f64 = 16.0;
 /// is_parallel_safe) into the JOIN-side classifiers. The grouped-over-SCAN
 /// half stays REFUSED — the agg-poly row names its real gap (the lanetable
 /// sink combine topology perf car), so GROUPED_SINK_AGGS is untouched.
-/// DEFAULT OFF; `PGRUST_LANE_V2_AGGJOIN_NUMERIC=1|on` arms (GL-NUMJOIN-1
-/// fleet letter owns the default flip).
+///
+/// DEFAULT ON (tpch-flips train; GL-NUMJOIN-1 FLIP-RECOMMENDED,
+/// fleet-ab-parallelism.md 2026-07-21): the numeric evaltrans win is
+/// THICK, not thin — grouped join 1.96-3.17x, q19-shaped plain
+/// 1.78-3.07x, q05-shaped composed 1.81-3.03x vs legacy PHJ, thicker than
+/// the int-fold analog because legacy numeric transitions cost more per
+/// row (the scoping's "thinner than int" caveat is REFUTED on the class
+/// fixture). One thin spot, NAMED: multibuild-numeric at 6M rows is
+/// ~parity (engaged, byte-correct, no win — not a regression). Byte-exact
+/// numeric results on every leg; zero refusal-guard trips; default arm
+/// inert. `PGRUST_LANE_V2_AGGJOIN_NUMERIC=0|off` is the kill switch (t35
+/// exact-spelling law).
 fn aggjoin_numeric_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        knob_spelling_armed(std::env::var("PGRUST_LANE_V2_AGGJOIN_NUMERIC").as_deref().ok())
+        knob_spelling_on(std::env::var("PGRUST_LANE_V2_AGGJOIN_NUMERIC").as_deref().ok())
     })
 }
 
@@ -4841,7 +4851,8 @@ mod tests {
         // binary. DECOROOT is DEFAULT ON since the tpch-flips train
         // (GL-DECOROOT-1; =0|off kills — the flipped-kill idiom).
         assert!(decoroot_enabled(), "tpch-flips: unset => ON (GL-DECOROOT-1)");
-        assert!(!aggjoin_numeric_enabled(), "test process has no knob set => OFF");
+        // NUMJOIN is DEFAULT ON since the tpch-flips train (GL-NUMJOIN-1).
+        assert!(aggjoin_numeric_enabled(), "tpch-flips: unset => ON (GL-NUMJOIN-1)");
     }
 
     /// TPCH-DECOROOT hash-election margin: the provisional bound must stay
