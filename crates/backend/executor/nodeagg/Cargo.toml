@@ -44,9 +44,9 @@ postgres_seams = { path = "../../tcop/postgres_seams" }
 adt_numeric = { path = "../../utils/adt/numeric" }
 pqformat = { path = "../../libpq/pqformat" }
 varlena = { path = "../../utils/adt/varlena" }
+detoast = { path = "../../access/common/detoast" }
 
 [dev-dependencies]
-detoast = { path = "../../access/common/detoast" }
 pglz = { path = "../../../common/pglz" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 elog = { path = "../../utils/error/elog" }

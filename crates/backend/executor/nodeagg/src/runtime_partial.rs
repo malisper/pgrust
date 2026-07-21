@@ -695,9 +695,27 @@ fn install_int128_fixups(
 // the plain arm above — order-insensitive-exact kinds only).
 // ===========================================================================
 
-/// One group's self-contained key: (normalized datum word, isnull) per
-/// grouping column, in the hash table's key-column order.
-pub type GroupKeyWords = Vec<(i64, bool)>;
+/// One grouping column's self-contained key value. `Word` = the
+/// width-normalized byval datum word (the SE-AGGJOIN bootstrap vocabulary —
+/// word equality IS group equality for the admitted byval types). `Bytes` =
+/// TPCH-CBKEYS (night/tpch-cbkeys): the detoasted CONTENT bytes of a
+/// text/varchar key under a DETERMINISTIC collation, where byte equality is
+/// the grouping operator's verdict (texteq — the same
+/// `group_eq_representational` law the scan-side C3/distinct machinery
+/// proved; bpchar NEVER admits: its space-stripping bpchareq and
+/// trailing-blank representative ties sit outside the byte-equality
+/// envelope — the named refusal of record, mirrored at the probe). NULLs
+/// carry `Word(0)` regardless of column kind (the isnull flag dominates
+/// equality; NULLs group together exactly as C's grouping does).
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum GroupKeyPart {
+    Word(i64),
+    Bytes(Box<[u8]>),
+}
+
+/// One group's self-contained key: (key value, isnull) per grouping column,
+/// in the hash table's key-column order.
+pub type GroupKeyWords = Vec<(GroupKeyPart, bool)>;
 
 /// A worker's (or the combined) grouped partial. `scratch_ptrs` is export
 /// scratch (entry pergroup pointers gathered under the perhash borrow, read
