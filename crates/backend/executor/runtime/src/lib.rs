@@ -470,7 +470,7 @@ impl Runtime {
         spec: QuerySpec,
         width: Option<WidthRequest>,
     ) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, false, RgClass::Utility, 0, width, None);
+        let rg = self.sched.submit(spec, false, RgClass::Utility, 0, width, None, None);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
 
@@ -608,6 +608,7 @@ impl Runtime {
             session_token,
             width,
             Some(descriptor),
+            None,
         );
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
