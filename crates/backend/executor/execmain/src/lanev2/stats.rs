@@ -231,9 +231,26 @@ pub(super) enum ShapeClass {
     /// option) is NOT seam-visible below `executor_run` — it installs no
     /// budget and ticks nothing; no RESERVED variant is minted for it.
     Spi = 39,
+    // -----------------------------------------------------------------------
+    // Phase-5 D0 engagement-evidence class (Track-5 deletion program,
+    // scratchpad/night/phase5-deletion-plan.md §2 D0; APPEND-ONLY chartered
+    // mint — discriminants above this line stay frozen).
+    // -----------------------------------------------------------------------
+    /// Parallel exact-DISTINCT partials over GatherMerge (the lane-v2
+    /// pardistinct engine: both leader arms + the worker-fragment partial
+    /// build). OWNED once per engaged drive/build, ALONGSIDE the aggbuild
+    /// tick (the Gather-class precedent: composition attribution over the
+    /// gather machinery gets its own class so the deletion program can
+    /// floor it apart from ordinary agg builds). Standing evidence for the
+    /// Track-5 D1 increment: these ticks reaching zero on the standard
+    /// ladders at defaults is the deletion precondition; today the class
+    /// is EXPECTED nonzero in the low-DOP suppression band (the
+    /// CbDistinctIntKeys / textdistinct min_dop-12 floors keep GatherMerge
+    /// plans below DOP 12, and this engine is the measured winner there).
+    ParDistinct = 40,
 }
 
-const N_CLASSES: usize = 40;
+const N_CLASSES: usize = 41;
 
 impl ShapeClass {
     pub(super) const ALL: [ShapeClass; N_CLASSES] = [
@@ -277,6 +294,7 @@ impl ShapeClass {
         ShapeClass::ModifyTable,
         ShapeClass::Cursor,
         ShapeClass::Spi,
+        ShapeClass::ParDistinct,
     ];
 
     pub(super) fn name(self) -> &'static str {
@@ -321,6 +339,7 @@ impl ShapeClass {
             ShapeClass::ModifyTable => "modifytable",
             ShapeClass::Cursor => "cursor",
             ShapeClass::Spi => "spi",
+            ShapeClass::ParDistinct => "pardistinct",
         }
     }
 }
