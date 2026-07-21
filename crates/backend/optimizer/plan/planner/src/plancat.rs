@@ -368,6 +368,25 @@ pub fn get_relation_info<'mcx>(
         } else {
             PgVec::new_in(run.mcx)
         };
+        // SE-TOPNNI text sort-key answerability: v7 per-column stitch dict
+        // sizes (0 = no stitch) for the m5_suppress DictCode top-N key
+        // probe. Knob-gated (default OFF): the walk costs nothing at
+        // default, and the probe's text admission is the only consumer.
+        // Served from the session part cache like its siblings.
+        let stitch_gndv = if is_pgrcolumnar && crate::m5_suppress::topn_nonint_enabled() {
+            match ::tableam::pgrcolumnar_footer_stitch_gndv(&relation)? {
+                Some(v) => {
+                    let mut pv: PgVec<'_, u64> = PgVec::new_in(run.mcx);
+                    for b in v {
+                        pv.push(b);
+                    }
+                    pv
+                }
+                None => PgVec::new_in(run.mcx),
+            }
+        } else {
+            PgVec::new_in(run.mcx)
+        };
         // Meta zero-count answerability (q2box lane): every committed RG
         // carries v7 zero/empty counts. Consumed by m5_suppress's
         // CbPlainAggFold keying — a qualed count-only shape may only be
@@ -391,6 +410,7 @@ pub fn get_relation_info<'mcx>(
             r.pgrcolumnar_sorted_attnos = sorted_attnos;
             r.pgrcolumnar_col_bytes = col_bytes;
             r.pgrcolumnar_col_ndv = col_ndv;
+            r.pgrcolumnar_stitch_gndv = stitch_gndv;
         } else {
             // Heap AM always provides scan_bitmap/scan_tid_range.
             r.amflags |= AMFLAG_HAS_TID_RANGE;

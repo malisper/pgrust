@@ -691,6 +691,13 @@ impl Part {
         self.stitch.gndv.get(col).copied().unwrap_or(0)
     }
 
+    /// All-column v7 stitch dict sizes (empty on pre-v7 parts) — the
+    /// plan-time DictCode sort-key answerability signal (SE-TOPNNI;
+    /// footer_stitch_gndv).
+    pub fn stitch_gndv_all(&self) -> &[u64] {
+        &self.stitch.gndv
+    }
+
     /// The (rg, col) stitch table: local dict code -> part-global byte-rank
     /// code (length = the RG chunk's local NDV). None when absent. Torn
     /// directory entries (out of bounds / misaligned) also read as None —
