@@ -1109,10 +1109,15 @@ pub fn estimate_hash_inner_rel_bytes(ntuples: f64, tupwidth: i32) -> u64 {
 /// shared_build): per tuple, 3 header words + the flat 8-byte ref charge +
 /// the 8-aligned minimal-tuple image; plus the combine-time bucket array
 /// (8 x next-power-of-2(ntuples), clamp as in the arm's seal precheck);
-/// plus 1/8 headroom for capacity-charged growth (chunk arenas and ref
-/// vectors double — the budget charges capacity, not length; the witnessed
-/// GL-HJMB-1 boundary cell at the 17-participant envelope crossed with the
-/// slack-free estimate still 5% under, so the headroom is load-bearing).
+/// plus 1/4 headroom for capacity-charged growth (chunk arenas and ref
+/// vectors double — the budget charges capacity, not length). The headroom
+/// is measured, not chosen: witnessed crossings landed with the slack-free
+/// estimate 5-13% UNDER the true peak (the 4M-build 17-participant cell
+/// and the 1.9M-build default-work_mem cliff rung), and 1/8 left the
+/// latter inside the margin — 1/4 covers every witnessed crossing with
+/// ~11% to spare while every witnessed healthy unbatched cell stays >30%
+/// clear of its envelope (the classification table rides the GL-HJMB-2
+/// letter).
 ///
 /// Consumers (GL-HJMB-1 escalation A, the demote-unsafe boundary): an
 /// admission whose exec_choose nbatch estimate is 1 but whose true build
@@ -1133,7 +1138,7 @@ pub fn estimate_runtime_hj_build_peak_bytes(ntuples: f64, tupwidth: i32) -> u64 
     // The arm's seal-precheck bucket arithmetic, verbatim.
     let n = if ntuples >= (1u64 << 31) as f64 { 1u64 << 31 } else { ntuples as u64 };
     let buckets = 8 * n.max(1).next_power_of_two().clamp(1024, 1 << 31);
-    let peak = ntuples * per_tuple * 9.0 / 8.0 + buckets as f64;
+    let peak = ntuples * per_tuple * 5.0 / 4.0 + buckets as f64;
     if peak < u64::MAX as f64 {
         peak as u64
     } else {
