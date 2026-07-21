@@ -2042,7 +2042,7 @@ pub fn cost_agg_lane_exchange_adjust(
 /// fed by a Gather/GatherMerge on a pgrcolumnar-fed plan re-prices its
 /// disk-spill surcharge with the executor-honest per-group footprint
 /// (gucs::DEFAULT_PGRCOLUMNAR_LEADER_HASHAGG_ENTRY_SCALE — q33 provenance
-/// there). C's entry estimate (~64B for the q33 shape) said a 10M-group
+/// there). C's entry estimate (96B for the q33 shape) said a 10M-group
 /// leader table fits any >=1GB budget, so cost_agg added NO spill term while
 /// the real ~3GB working set crossed the 2GB budget and ran 10x slower
 /// spilling (the q33 cliff, third sighting). Adds the DELTA between the
@@ -4371,7 +4371,7 @@ mod tests {
     // hash_mem_multiplier 2.0 (init_small boot values) = 8MB. Entry size for
     // width 12 / no transinfos / transitionSpace 0 is 16 + MAXALIGN(
     // MAXALIGN(15) + 12) = 48B: at 100k groups the C estimate says 4.8MB
-    // (fits, no spill term) while the honest 4.7x scale says 22.6MB
+    // (fits, no spill term) while the honest 3.2x scale says 15.4MB
     // (spills) — the exact q33 disease in miniature.
     const SPILLY_GROUPS: f64 = 100_000.0;
     const TINY_GROUPS: f64 = 10_000.0;
@@ -4436,6 +4436,25 @@ mod tests {
         );
         let p = run.root.path(agg).base();
         assert_eq!((p.startup_cost, p.total_cost), (1000.0, 2000.0));
+    }
+
+    /// The two fleet anchors of the entry-scale constant, pinned at the REAL
+    /// q33 shape (Gather width 16, three transinfos: count(*)+SUM+AVG — job
+    /// -5fd0's explain capture): C entry 96B; at the default scale the
+    /// 10M-group working set must cross the 512MB-arm budget (2GB: spill
+    /// priced — the cliff) and FIT the 1GB-arm budget (4.29GB: delta 0 —
+    /// the byte-identical bar). The first shipped constant (4.7, derived
+    /// against a width-12/one-transinfo mis-model) failed the second anchor.
+    #[test]
+    fn leader_hashagg_entry_scale_reproduces_q33_fleet_anchors() {
+        let entry = ::nodeagg::hash_agg_entry_size(3, 16, 0);
+        assert_eq!(entry, 96.0);
+        let scale = gucs::DEFAULT_PGRCOLUMNAR_LEADER_HASHAGG_ENTRY_SCALE;
+        let working_set = 10_000_000.0 * entry * scale;
+        let budget_512mb = 524288.0 * 1024.0 * 4.0; // work_mem 512MB x hmm 4
+        let budget_1gb = 1048576.0 * 1024.0 * 4.0; // work_mem 1GB x hmm 4
+        assert!(working_set > budget_512mb, "q33 must spill-price at 512MB");
+        assert!(working_set < budget_1gb, "q33 must stay delta-0 at 1GB");
     }
 
     #[test]

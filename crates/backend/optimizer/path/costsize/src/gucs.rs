@@ -142,21 +142,29 @@ pub fn pgrcolumnar_footer_ndv_est() -> bool {
 //
 // Executor-honest per-group footprint multiplier for a leader-side hashed
 // Agg fed by a Gather/GatherMerge on a pgrcolumnar-fed plan. C's
-// hash_agg_entry_size counts only the tuple + pergroup chunks — for the q33
-// shape (width 12, one transinfo, transitionSpace 0) that is
-// 16 + MAXALIGN(MAXALIGN(15)+12) + 16 = 64 B/group, pricing a 10M-group
-// leader table at 0.64GB. The leader's REAL working set (TupleHash bucket
-// array + palloc chunk rounding + firstTuple copies) measured ~3.03GB peak
-// TreeRssAnon in-memory and crossed a 2GB budget into spill
+// hash_agg_entry_size counts only the tuple + pergroup chunks — for the
+// REAL q33 shape (GROUP BY WatchID, ClientIP with count(*) + SUM + AVG:
+// Gather width 16, THREE transinfos, transitionSpace 0; fleet
+// explain-capture job -5fd0) that is 16 + MAXALIGN(MAXALIGN(15)+16) +
+// 3*16 = 96 B/group, pricing a 10M-group leader table at 0.96GB. The
+// leader's REAL working set (TupleHash bucket array + palloc chunk
+// rounding + firstTuple copies) measured ~3.03GB peak TreeRssAnon
+// in-memory and crossed a 2GB budget into spill
 // (scratchpad/night/q33-regression-probe.md, probe E2: work_mem 512MB*4 =
-// 2GB -> 9.6s spilling; 1GB*4 = 4GB -> 0.93s in-memory; same plan).
-// 3.03e9 / (1e7 * 64) = 4.73 -> 4.7. Both fleet anchors are reproduced at
-// 4.7: predicted working set 3.008GB > 2GB budget (spill priced) and
-// < 4GB budget (no spill term). Applied ONLY to the honest-Gather spill
-// delta (costsize::cost_agg_leader_spill_adjust); C's cost_agg spill block
+// 2GB -> 9.6s spilling; 1GB*4 = 4.29GB -> 0.93s in-memory; same plan).
+// 3.03e9 / (1e7 * 96) = 3.16 -> 3.2. Both fleet anchors are reproduced at
+// 3.2: predicted working set 3.072GB > 2GB budget (spill priced, margin
+// 1.43x) and < 4.29GB budget (no spill term, margin 0.72x).
+// CALIBRATION HISTORY: first shipped as 4.7, derived against a width-12/
+// one-transinfo MIS-model of q33 (entry 64B); at 96B/group that predicted
+// 4.51GB and would have spill-priced the 1GB arm too, forgoing the
+// measured-good 0.93s Gather plan — caught by the GL-COST-step0
+// byte-identical-at-1GB fleet bar before any merge.
+// Applied ONLY to the honest-Gather spill delta
+// (costsize::cost_agg_leader_spill_adjust); C's cost_agg spill block
 // keeps the unscaled entry size everywhere, so heap plans and serial
 // hashaggs are untouched bit-for-bit.
-pub const DEFAULT_PGRCOLUMNAR_LEADER_HASHAGG_ENTRY_SCALE: f64 = 4.7;
+pub const DEFAULT_PGRCOLUMNAR_LEADER_HASHAGG_ENTRY_SCALE: f64 = 3.2;
 
 /// Entry-scale for the leader-hashagg-over-Gather spill delta.
 /// `PGRUST_CBSTORE_LEADER_SPILL_COST=0`/`off` disables (None); a positive
