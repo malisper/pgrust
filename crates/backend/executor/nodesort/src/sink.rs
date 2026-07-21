@@ -203,6 +203,26 @@ impl WideEntry {
         let k0 = self.keys[0];
         cut64((k0 >> 64) & 1 != 0, k0 as u64)
     }
+
+    /// The packed per-key (tier | word) images (mjmerge's key-PREFIX
+    /// vocabulary). Unused slots (arity < [`TOPN_MAX_KEYS`]) are zero and
+    /// identical across one sort's entries, so full-array lexicographic
+    /// comparison of two entries' words equals their nkeys-prefix ordering
+    /// — the rowref tiebreak deliberately excluded (a JOIN groups rows by
+    /// key equality; the rowref would make every "group" a singleton).
+    #[inline]
+    pub fn key_words(self) -> [u128; TOPN_MAX_KEYS] {
+        self.keys
+    }
+
+    /// Was key `k` NULL at encode time, given the column's `nulls_first`
+    /// flag? Inverse of [`key_word128`]'s tier law (`tier = null ^
+    /// nulls_first`): the tier bit alone is direction-relative, so the
+    /// caller must supply the same flag the entry was encoded under.
+    #[inline]
+    pub fn key_is_null(self, k: usize, nulls_first: bool) -> bool {
+        ((self.keys[k] >> 64) & 1 != 0) ^ nulls_first
+    }
 }
 
 /// The per-worker bounded heap (`SealedParallelSink::Local`): keeps the

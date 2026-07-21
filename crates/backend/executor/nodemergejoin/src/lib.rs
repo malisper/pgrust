@@ -554,6 +554,31 @@ fn project_result_with<'mcx>(
     Ok(result_id)
 }
 
+/// MJSORT adopted-pair projection (lanev2/runtime_mergejoin — the "merge
+/// join after sort" car): project one joined (outer, inner) row pair
+/// through the node's OWN projection state. The arm refuses joinqual /
+/// otherqual shapes at admission ([`mjsort_has_quals`]), so projection is
+/// the whole per-row body; the per-tuple context resets per pull — the
+/// FSM's own loop-entry cadence, kept so per-tuple memory never
+/// accumulates across an adopted emit stream.
+pub fn mjsort_project<'mcx>(
+    node: &mut MergeJoinState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    outer_id: ExecSlotId,
+    inner_id: ExecSlotId,
+) -> PgResult<ExecSlotId> {
+    estate.reset_expr_context(node.ps_ExprContext);
+    node.mj_OuterTupleSlot = Some(outer_id);
+    node.mj_InnerTupleSlot = Some(inner_id);
+    project_result_with(node, estate, inner_id)
+}
+
+/// MJSORT admission probe: any joinqual/otherqual present? (The adopted
+/// drive never evaluates quals — shapes carrying them refuse to the FSM.)
+pub fn mjsort_has_quals(node: &MergeJoinState<'_>) -> bool {
+    node.joinqual.is_some() || node.otherqual.is_some()
+}
+
 fn mark_inner_tuple<'mcx>(
     node: &mut MergeJoinState<'mcx>,
     estate: &mut EStateData<'mcx>,

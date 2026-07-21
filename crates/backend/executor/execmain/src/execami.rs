@@ -268,6 +268,11 @@ pub fn exec_re_scan<'mcx>(
         // Param lanes land); node-local half clears the marked slot + state.
         PlanStateNode::MergeJoin(mj) => {
             let mj = &mut **mj;
+            // MJSORT adopted state: a rescan restarts the stream — drop
+            // the adopted result and re-allow one probe (params refuse at
+            // admission, so a re-probe re-derives the same content).
+            mj.mjsort = None;
+            mj.mjsort_probed = false;
             exec_re_scan(&mut mj.outer, estate)?;
             exec_re_scan(&mut mj.inner, estate)?;
             ::nodemergejoin::exec_rescan_merge_join(&mut mj.state, estate);
@@ -652,6 +657,9 @@ pub(crate) fn exec_re_scan_chg_forced<'mcx>(
         }
         PlanStateNode::MergeJoin(mj) => {
             let mj = &mut **mj;
+            // MJSORT adopted state: see the exec_re_scan arm.
+            mj.mjsort = None;
+            mj.mjsort_probed = false;
             exec_re_scan_with_chg(&mut mj.outer, base.lefttree.expect("MergeJoin outer plan"), estate, chg)?;
             exec_re_scan_with_chg(&mut mj.inner, base.righttree.expect("MergeJoin inner plan"), estate, chg)?;
             ::nodemergejoin::exec_rescan_merge_join(&mut mj.state, estate);

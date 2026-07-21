@@ -15439,3 +15439,14 @@ pub(crate) use agg_bitmap::try_own_agg_over_bitmap_feed;
 #[cfg(test)]
 pub(crate) use agg_bitmap::{agg_bitmap_set_for_tests, AGG_BITMAP_OWNED_FOR_TESTS};
 // --- end SE-AGGBITMAP -----------------------------------------------------------
+// --- MJSORT (the "merge join after sort" runtime car, m5-coverage row
+// merge-join-parallel; PGRUST_RUNTIME_MJSORT, default OFF): the arm rides
+// the shape-(b) full-sort machinery in PUBLISH mode on both children and
+// merges aligned key ranges as pure-compute morsels (nodesort mjmerge
+// kernels). Logic + refuse-set live in runtime_mergejoin.rs; this EOF
+// append is the module mount + re-exports only (the SE-AGGBITMAP
+// precedent). NOT a BOOTSTRAP_MATRIX class — the coverage row keeps
+// route_to=legacy until the GL-MJSORT fleet letter flips it.
+mod runtime_mergejoin;
+pub(crate) use runtime_mergejoin::{try_own_merge_join_mjsort, MjSortAdopted};
+// --- end MJSORT -------------------------------------------------------------------
