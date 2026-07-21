@@ -650,6 +650,10 @@ pub fn init_seams() {
     // shared memory) — same package-cycle reason as the trios above.
     postmaster_seams::rtgang_procs_wanted::set(rtgang::runtime_reserved_procs);
     postmaster_seams::rtgang_install::set(rtgang::install_if_enabled);
+    // Shutdown sequencing (mode-W class fix): the state machine fences the
+    // gang at PM_STOP_BACKENDS and gates PM_WAIT_BACKENDS on quiescence.
+    postmaster_seams::rtgang_retire::set(rtgang::retire_for_shutdown);
+    postmaster_seams::rtgang_live::set(rtgang::live_gang_threads);
 }
 
 /// rtpool_start seam impl: start the pool if `PGRUST_RUNTIME` enables it;
@@ -973,12 +977,35 @@ pub mod wpool {
                         let (tx2, rx2) = pgsync::mpsc::sync_channel::<StandbyTask>(1);
                         let (ack_tx2, ack_rx2) = pgsync::mpsc::sync_channel::<()>(1);
                         parked_crash_epoch = pre_crash;
-                        available().push(Standby {
-                            pid: task.child_pid,
-                            tx: tx2,
-                            db: init_small::wretain::retained_db(),
-                            released: ack_rx2,
-                        });
+                        // Fence re-check UNDER the pool lock: flush/
+                        // flush_for_crash bump their epochs BEFORE draining
+                        // under this same lock, so an unchanged epoch read
+                        // here guarantees a concurrent drain still sees this
+                        // entry; a changed one means the drain already ran —
+                        // re-pooling would park a PRE-FENCE retained identity
+                        // across the shared-memory reset (the post-recovery
+                        // "ReattachRetainedProc: retained PGPROC was
+                        // released" abort loop).
+                        let repooled = {
+                            let mut avail = available();
+                            if FLUSH_EPOCH.load(Relaxed) == pre_flush
+                                && CRASH_EPOCH.load(Relaxed) == pre_crash
+                            {
+                                avail.push(Standby {
+                                    pid: task.child_pid,
+                                    tx: tx2,
+                                    db: init_small::wretain::retained_db(),
+                                    released: ack_rx2,
+                                });
+                                true
+                            } else {
+                                false
+                            }
+                        };
+                        if !repooled {
+                            release_retained_identity(pre_crash);
+                            break;
+                        }
                         rx = rx2;
                         ack_tx = ack_tx2;
                         continue;
@@ -1059,6 +1086,12 @@ pub mod wpool {
 
     fn dispatch_inner(slot: i32, generation: u64, dboid: Oid) -> i32 {
         loop {
+            // Fence snapshot for the push-back arm below: a standby popped
+            // here holds a PRE-pop retained identity; it may only re-enter
+            // the pool if no flush/crash fence ran in between (see the
+            // repark re-check in standby_loop for the ordering argument).
+            let pop_flush = FLUSH_EPOCH.load(Relaxed);
+            let pop_crash = CRASH_EPOCH.load(Relaxed);
             // Prefer a standby whose retained caches match the task's
             // database, then a fresh one; a mismatched standby stays parked
             // (its warmth is only legal for its own db).
@@ -1099,7 +1132,19 @@ pub mod wpool {
             let Some(child_slot) =
                 pmchild_seams::assign_postmaster_child_slot::call(BackendType::BgWorker)
             else {
-                available().push(sb);
+                // Fence re-check UNDER the pool lock (see the repark
+                // re-check in standby_loop): a fence between the pop and
+                // this push already drained the pool — re-pooling `sb`
+                // would carry its pre-fence retained identity across the
+                // shared-memory reset. Dropping it (closed channel)
+                // retires the standby; its own wake skips the shared-
+                // memory release through the parked-epoch check.
+                let mut avail = available();
+                if FLUSH_EPOCH.load(Relaxed) == pop_flush
+                    && CRASH_EPOCH.load(Relaxed) == pop_crash
+                {
+                    avail.push(sb);
+                }
                 return 0;
             };
             // Fresh per-task pid: the previous task's exit announce may still
@@ -1722,6 +1767,44 @@ pub mod rtgang {
 
     static BOOT: OnceLock<Boot> = OnceLock::new();
 
+    /// Live gang threads, parent-charged: incremented BEFORE the OS spawn
+    /// (so a spawn in flight at shutdown is never invisible), decremented at
+    /// the true end of gang_thread (after the deferred-callback drain — the
+    /// last shared-memory interaction). The postmaster's PM_WAIT_BACKENDS
+    /// gate reads it through the rtgang_live seam: the shutdown checkpoint
+    /// must never run behind a live, registry-invisible gang thread
+    /// (C-parity — every C child is counted before ShutdownXLOG).
+    static LIVE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+    pub fn live_gang_threads() -> i32 {
+        LIVE.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Postmaster shutdown: fence the standing gang (parked workers exit
+    /// clean; new engagements refuse). The exiting threads poke
+    /// PMSIGNAL_ADVANCE_STATE_MACHINE so the PM_WAIT_BACKENDS gate re-runs
+    /// as the count drains.
+    pub fn retire_for_shutdown() {
+        parallel::standing::retire_for_shutdown();
+    }
+
+    /// Decrement + state-machine poke at gang-thread end (RAII so every
+    /// exit path of gang_thread — clean, raw, drained panic — reports).
+    struct LiveGuard;
+    impl Drop for LiveGuard {
+        fn drop(&mut self) {
+            LIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            // Wake the postmaster's shutdown gate. Cheap and harmless
+            // outside shutdown (one extra state-machine pass); guarded so
+            // unit substrates without a postmaster stay inert.
+            if init_small::globals::IsUnderPostmaster() {
+                pmsignal::SendPostmasterSignal(
+                    pmsignal::PMSignalReason::PMSIGNAL_ADVANCE_STATE_MACHINE,
+                );
+            }
+        }
+    }
+
     /// SIMCORPUS RED (sim builds only, env-armed by the sim harness):
     /// spawn gang workers WITHOUT their spawn door — the "new spawn site
     /// forgot the door" wiring bug (the simvfs-shared worklog's named
@@ -1820,6 +1903,9 @@ pub mod rtgang {
         // so the capture inherits correctly from wherever the gang is born.
         #[cfg(pgrust_sim)]
         let sim_universe = super::sim_universe_capture();
+        // Parent-side live charge (see LIVE): visible to the shutdown gate
+        // before the thread exists.
+        LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let spawned = std::thread::Builder::new()
             .name(format!("pg:rtgang{ordinal}:{child_pid}"))
             .stack_size(super::child_thread_stack_size())
@@ -1839,7 +1925,9 @@ pub mod rtgang {
         match spawned {
             Ok(_) => true,
             Err(_) => {
-                // F3 shape: retire the never-entered slot.
+                // F3 shape: retire the never-entered slot (and refund the
+                // parent-side live charge — no LiveGuard ever runs).
+                LIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                 #[cfg(pgrust_sim)]
                 pgsync::sim::spawn_door::cancel_child(sim_sched_slot);
                 false
@@ -1848,6 +1936,10 @@ pub mod rtgang {
     }
 
     fn gang_thread(ordinal: usize, child_pid: pid_t, boot: &'static Boot) {
+        // Live-count refund + shutdown-gate poke, dropped LAST among this
+        // frame's locals (declared first) — after the deferred-callback
+        // drain below, i.e. after the thread's final shared-memory touch.
+        let _live = LiveGuard;
         // Thread-scoped local latch slot (returned on thread exit).
         let _local_latch_release = miscinit::LocalLatchReleaseGuard::new();
         boot.inherited.apply();

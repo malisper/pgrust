@@ -103,6 +103,22 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    // Shutdown sequencing: fence the standing gang when the state machine
+    // stops backends (PM_STOP_BACKENDS / immediate shutdown) — parked gang
+    // threads exit clean, new engagements refuse. Registry-invisible
+    // threads must sequence OUT before the shutdown checkpoint (C parity:
+    // no live children behind the postmaster's count).
+    pub fn rtgang_retire()
+);
+
+seam_core::seam!(
+    // Shutdown sequencing: live standing-gang thread count — the
+    // PM_WAIT_BACKENDS quiescence gate. Exiting gang threads poke
+    // PMSIGNAL_ADVANCE_STATE_MACHINE as the count drains.
+    pub fn rtgang_live() -> i32
+);
+
+seam_core::seam!(
     // SIMCORPUS (sim parallel-query corpus): PostmasterMain parity — the
     // bgworker registry init (main_entry.rs calls it after shared memory;
     // the single-user/stdio boot ladder never does, because standalone C

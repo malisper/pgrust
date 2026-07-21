@@ -8147,6 +8147,7 @@ dependencies = [
  "pgarch",
  "pgsync",
  "pmchild_seams",
+ "pmsignal",
  "postinit",
  "postmaster_seams",
  "postmaster_startup",

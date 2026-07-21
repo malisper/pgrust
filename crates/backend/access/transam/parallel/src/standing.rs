@@ -170,6 +170,33 @@ static GANG: OnceLock<(Mutex<GangState>, Condvar)> = OnceLock::new();
 static SPAWNER: OnceLock<fn(usize) -> bool> = OnceLock::new();
 static GANG_SIZE: OnceLock<usize> = OnceLock::new();
 
+/// Postmaster shutdown fence (one-way): set when the shutdown state machine
+/// stops backends. Parked workers exit CLEAN (their proc_exit drain releases
+/// identity against still-live shared memory) and try_engage refuses — the
+/// C invariant the shutdown checkpoint assumes is "no live children behind
+/// the postmaster's count", and the gang is registry-invisible, so it must
+/// sequence itself out. A separate static (not GangState) so a fence set
+/// before the first engagement sticks without forcing the board to exist.
+static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+pub fn shutting_down() -> bool {
+    SHUTDOWN.load(SeqCst)
+}
+
+/// Postmaster shutdown (PM_STOP_BACKENDS / immediate shutdown): retire the
+/// standing gang. One-way; wakes every parked worker. The spawn glue's
+/// live-thread count (`launch_backend::rtgang`) is the postmaster's
+/// quiescence witness — PM_WAIT_BACKENDS holds until it drains.
+pub fn retire_for_shutdown() {
+    SHUTDOWN.store(true, SeqCst);
+    if GANG.get().is_none() {
+        return;
+    }
+    let (lock, cv) = gang();
+    drop(pgsync::lock(lock));
+    cv.notify_all();
+}
+
 fn gang() -> &'static (Mutex<GangState>, Condvar) {
     GANG.get_or_init(|| {
         (
@@ -248,7 +275,7 @@ pub fn gang_size() -> usize {
 /// and must call `close_and_await` on the returned entry before its
 /// executor arena unwinds, on every path.
 pub fn try_engage(shared: &Arc<ParallelShared>, dop: usize) -> Option<Arc<StandingEngagement>> {
-    if !pool_binding_enabled() || dop == 0 {
+    if !pool_binding_enabled() || dop == 0 || shutting_down() {
         return None;
     }
     let spawner = SPAWNER.get()?;
@@ -489,6 +516,13 @@ pub fn gang_worker_loop(_ordinal: usize) -> GangExit {
                 if g.epoch != my_epoch || g.retire_all {
                     break Wake::RetireRaw;
                 }
+                // Postmaster shutdown: exit CLEAN between engagements
+                // (shared memory is live under smart/fast shutdown; the
+                // proc_exit drain releases the boot-reserved PGPROC). The
+                // crash fence above still wins when both are set.
+                if shutting_down() {
+                    break Wake::Retire;
+                }
                 {
                     let mine = init_small::globals::MyDatabaseId();
                     if mine != InvalidOid && g.retired_dbs.contains(&mine) {
@@ -643,6 +677,7 @@ fn park_until_board_changes(entry: &Arc<StandingEngagement>) {
         .as_ref()
         .is_some_and(|cur| Arc::ptr_eq(cur, entry))
         && !g.retire_all
+        && !shutting_down()
         && !(mine != InvalidOid && g.retired_dbs.contains(&mine))
     {
         g = cv.wait(g).unwrap_or_else(|p| p.into_inner());
@@ -952,7 +987,7 @@ pub fn try_engage_pool(
     shared: &Arc<ParallelShared>,
     dop: usize,
 ) -> Option<Arc<StandingEngagement>> {
-    if !pool_binding_enabled() || !pooldb_enabled() || dop == 0 {
+    if !pool_binding_enabled() || !pooldb_enabled() || dop == 0 || shutting_down() {
         return None;
     }
     // Per-arm dispatch: the engagement must carry its driver (pool serves
