@@ -576,7 +576,8 @@ fn topn_nonint_guard() -> FloorGuard {
     class_guard(CoverClass::CbTopnBoundedIntKeys)
 }
 
-/// SE-TOPNNI selective-qual carve threshold (GL-TOPNNI-1 q24 diagnosis):
+/// SE-TOPNNI selective-qual carve threshold (GL-TOPNNI-1 selective-qual x
+/// datetime-lead diagnosis):
 /// estimated qual-survivor fraction below which a QUALED shape with a
 /// DATETIME (band-eligible) leading key keeps Gather. Measured anchors on
 /// the real 10M sorted bank (jobs 1784633628/-632/-634272 @ 34b23fdf2):
@@ -1709,7 +1710,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
                 return Ok(false);
             }
             // SELECTIVE-QUAL x BAND-ELIGIBLE-LEAD carve (GL-TOPNNI-1 flip
-            // sanity, q24 diagnosis 2026-07-21 @ 34b23fdf2): on the real
+            // sanity diagnosis 2026-07-21 @ 34b23fdf2): on the real
             // sorted bank a datetime LEADING key classifies ZONE-FRIENDLY
             // (1191/1221 granules serial-skippable) and the arm band-
             // refuses to the serial zone walk — but a SELECTIVE qual
