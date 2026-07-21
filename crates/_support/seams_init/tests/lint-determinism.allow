@@ -563,7 +563,7 @@ once	crates/backend/utils/misc/guc_tables/src/parallel_engine.rs	3
 once	crates/backend/utils/misc/guc_tables/src/runtime_pool.rs	9	DST-REVIEW(night/nlidx-arm): NL-inner-index runtime arm arming knob (PGRUST_RUNTIME_NLINDEX env read once, OnceLock-cached; pgsync-routing rides the chartered SE/DST knobs-registry migration)
 once	crates/backend/utils/misc/guc/src/layers.rs	3
 once	crates/backend/utils/misc/guc/src/store.rs	1
-once	crates/backend/utils/misc/timeout/src/lib.rs	1
+once	crates/backend/utils/misc/timeout/src/lib.rs	2	DST-REVIEW(q20-runaway/timeout-init-reset): +1 = PGRUST_TIMEOUT_INIT_RESET (the early-session lost-timeout fix's one-train escape hatch, DEFAULT ON, =0|off restores the legacy re-init; env read once, OnceLock-cached, process-constant per run — same process-constant knob class); knobs-registry routing rides the chartered SE migration
 once	crates/backend/utils/misc/tzparser/src/lib.rs	1
 once	crates/contrib/pgcrypto/src/crypt/cryptdes.rs	1
 once	crates/port/crc32c/src/lib.rs	1
@@ -814,6 +814,7 @@ join	crates/backend/tcop/postgres/src/sim_sched_demo.rs	1	DST-REVIEW(permit-s1-d
 spawn	crates/backend/tcop/postgres/src/sim_sched_demo.rs	3	DST-REVIEW(permit-s1-demo): plant pair + red holder + red fallback-timer spawns (no-boot corpora; the fallback timer is outside the model BY DESIGN, the watchdog's own pattern)
 env	crates/interfaces/pgclient/src/conninfo.rs	5	DST-REVIEW(t31-train): pgclient (outbound libpq-class wire client, dblink/postgres_fdw connect path) — C libpq reads the same PGHOST/PGPORT/PGUSER/PGPASSFILE/PGSERVICE env fallbacks at connect time; client-side, no in-sim consumer; knobs-registry routing (s2.5) chartered to the DST program (t32)
 env	crates/interfaces/pgclient/src/lib.rs	5	DST-REVIEW(t31-train): pgclient connect-time env fallbacks (same class as conninfo.rs — C libpq parity); knobs-registry routing (s2.5) chartered to the DST program (t32)
+env	crates/backend/utils/misc/timeout/src/lib.rs	1	DST-REVIEW(q20-runaway/timeout-init-reset): +1 = PGRUST_TIMEOUT_INIT_RESET (the early-session lost-timeout fix's one-train escape hatch, DEFAULT ON, =0|off restores the legacy re-init; env read once, OnceLock-cached, process-constant per run — same process-constant knob class); knobs-registry routing rides the chartered SE migration
 fs	crates/interfaces/pgclient/src/auth.rs	1	DST-REVIEW(t31-train): ~/.pgpass read (C libpq passfile parity); client-side credential file, outside the P1 Vfs choke (not server datadir I/O); routing chartered to the DST program (t32)
 fs	crates/interfaces/pgclient/src/conninfo.rs	3	DST-REVIEW(t31-train): passfile/service-file resolution (C libpq parity); client-side, outside the P1 Vfs choke; routing chartered to the DST program (t32)
 rand	crates/interfaces/pgclient/src/auth.rs	1	DST-REVIEW(t31-train): SCRAM client nonce (C libpq pg_strong_random parity, client side of the exchange); funnel routing (s2.3) chartered to the DST program (t32)
