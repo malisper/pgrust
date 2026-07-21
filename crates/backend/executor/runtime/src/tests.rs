@@ -4825,3 +4825,129 @@ mod utility_qos_tests {
         assert_eq!(wt2.wait(), RgOutcome::Completed);
     }
 }
+
+// ---- Q2: bounded-participation pinned drive (drive_pinned_tasks) -----------
+//
+// The leader-participation face of the Track-4.2 long-unit discipline: a
+// session thread that also owes a polling duty (interrupt checks, progress
+// relays) drives a pinned RG in ≤max_tasks bursts and regains control
+// between bursts — its duty cadence is bounded by one task, independent of
+// the RG's total work.
+mod q2_bounded_drive_tests {
+    use super::*;
+
+    fn rt2() -> Arc<Runtime> {
+        let mut cfg = RuntimeConfig::new(2);
+        cfg.slots = 4;
+        Runtime::new(cfg)
+    }
+
+    /// Bounded bursts complete the RG across MULTIPLE calls: control
+    /// returns between bursts (the duty window), every granule runs
+    /// exactly once, and at least one burst was work-bounded (ran == max).
+    /// Virtual clock (1 µs/granule, t_max 2 ms) so tasks END at the sizer
+    /// budget — the ~t_max duty-cadence claim being witnessed.
+    #[test]
+    fn bounded_drive_completes_in_bursts() {
+        let clock = Arc::new(VirtualClock::new());
+        let rt = virtual_runtime(2, &clock);
+        let total = 8_000u64;
+        let work = SyntheticWork::new(total, Some(Arc::clone(&clock)), 1_000);
+        let (h, waiter) = rt.submit_pinned(spec_one(
+            &work,
+            Arc::new(SyntheticMorselSource::with_boundaries(total, 8)),
+        ));
+        let mut local = rt.external_local(0);
+        let mut bursts = 0u64;
+        let mut bounded_bursts = 0u64;
+        let outcome = loop {
+            let (o, ran) = rt.drive_pinned_tasks(&mut local, &h, 1);
+            bursts += 1;
+            if ran >= 1 {
+                bounded_bursts += 1;
+            }
+            if let Some(o) = o {
+                break o;
+            }
+            assert!(bursts < 1_000_000, "bounded drive must terminate");
+        };
+        assert_eq!(outcome, RgOutcome::Completed);
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Completed));
+        assert!(bursts > 1, "a nontrivial RG must need several ≤1-task bursts");
+        assert!(bounded_bursts >= 1);
+        work.assert_all_executed_once();
+        assert_eq!(work.finalizes.load(Ordering::SeqCst), 1);
+    }
+
+    /// A starved OPEN stream returns (None, 0) — never parks — so the
+    /// caller's duty loop keeps running; publish-then-close from the duty
+    /// side is then driven to completion (the vacuum ticket-stream shape:
+    /// the leader participates between polls).
+    #[test]
+    fn bounded_drive_idles_on_starved_stream_and_resumes() {
+        let rt = rt2();
+        let work = SyntheticWork::new(6, None, 0);
+        let source = Arc::new(StreamSource::new());
+        let (h, waiter) =
+            rt.submit_pinned(spec_one(&work, Arc::clone(&source) as Arc<dyn MorselSource>));
+        let mut local = rt.external_local(0);
+        // Starved: no ticket published yet.
+        let (o, ran) = rt.drive_pinned_tasks(&mut local, &h, 4);
+        assert_eq!(o, None);
+        assert_eq!(ran, 0, "starved stream must not run tasks");
+        // Ticket-at-a-time production from the duty side (the serial
+        // publish-after-work protocol): each burst consumes what exists.
+        for upto in 1..=6u64 {
+            source.publish(upto);
+            rt.notify_source_progress();
+            loop {
+                let (o, ran) = rt.drive_pinned_tasks(&mut local, &h, 1);
+                assert_eq!(o, None, "stream still open");
+                if ran == 0 {
+                    break; // consumed the published ticket; starved again
+                }
+            }
+        }
+        source.close();
+        rt.notify_source_progress();
+        let outcome = loop {
+            let (o, _) = rt.drive_pinned_tasks(&mut local, &h, 4);
+            if let Some(o) = o {
+                break o;
+            }
+        };
+        assert_eq!(outcome, RgOutcome::Completed);
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Completed));
+        work.assert_all_executed_once();
+        assert_eq!(work.finalizes.load(Ordering::SeqCst), 1);
+    }
+
+    /// Abort observed by a bounded burst: the burst drains the closed
+    /// generation and reports Aborted without executing granules — the
+    /// leader's cancel path (abort → bounded drive drains) at burst grain.
+    #[test]
+    fn bounded_drive_drains_aborted_rg() {
+        let rt = rt2();
+        let work = SyntheticWork::new(64, None, 0);
+        let source = Arc::new(StreamSource::new());
+        // OPEN stream, nothing published: an aborted RG must still drain
+        // (abort-before-starved ordering in the claim path).
+        let (h, waiter) =
+            rt.submit_pinned(spec_one(&work, Arc::clone(&source) as Arc<dyn MorselSource>));
+        h.abort();
+        let mut local = rt.external_local(0);
+        let outcome = loop {
+            // The drain step counts as a task (generation-refused joins
+            // still coordinate) — the load-bearing assertion is that no
+            // GRANULE executes, below.
+            let (o, _ran) = rt.drive_pinned_tasks(&mut local, &h, 8);
+            if let Some(o) = o {
+                break o;
+            }
+        };
+        assert_eq!(outcome, RgOutcome::Aborted);
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Aborted));
+        assert!(work.claims.lock().unwrap().is_empty());
+        assert_eq!(work.finalizes.load(Ordering::SeqCst), 0);
+    }
+}

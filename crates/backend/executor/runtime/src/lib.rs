@@ -682,6 +682,69 @@ impl Runtime {
         }
     }
 
+    /// BOUNDED-PARTICIPATION pinned drive (Q2 leader participation): run at
+    /// most `max_tasks` tasks of `rg` and return — NEVER parks. The caller
+    /// interleaves its own duties (interrupt checks, progress relays)
+    /// between calls, so its cancel-observation cadence is bounded by one
+    /// task (~t_max sizer budget) plus its own loop, independent of the
+    /// total work — the long-unit law for session threads that also owe a
+    /// polling duty. Some(outcome) = the RG completed; None = still
+    /// running (a task budget elapsed, or the step went Idle: nothing
+    /// claimable right now — starved stream / queued slot — or a bounded
+    /// Retry spin expired). The second element counts tasks RUN this call —
+    /// 0 with a None outcome means idle (callers may park on their own
+    /// wait channel; a publish will not wake it, so keep that park bounded).
+    /// Same permit discipline as [`Runtime::try_drain_pinned`] (per-step
+    /// acquire/release).
+    #[cfg(not(loom))]
+    pub fn drive_pinned_tasks(
+        &self,
+        local: &mut WorkerLocal,
+        rg: &RgHandle,
+        max_tasks: u32,
+    ) -> (Option<RgOutcome>, u32) {
+        let mut ran = 0u32;
+        let mut retries = 0u32;
+        let flush = |s: &Self, local: &mut WorkerLocal| {
+            s.sched.stat_flush_all(local);
+            local.wfin_flush_all();
+        };
+        loop {
+            if let Some(outcome) = rg.try_outcome() {
+                flush(self, local);
+                return (Some(outcome), ran);
+            }
+            if ran >= max_tasks {
+                flush(self, local);
+                return (None, ran);
+            }
+            self.execution_permits().acquire();
+            let step = self.sched.worker_step_pinned(local, &rg.rg);
+            self.execution_permits().release();
+            match step {
+                Step::Ran => {
+                    ran += 1;
+                    retries = 0;
+                }
+                Step::Retry => {
+                    // Invalidated-slot windows are bounded; a stuck window
+                    // returns to the caller's duty loop instead of spinning.
+                    retries += 1;
+                    if retries >= crate::sched::RETRY_PARK_AFTER {
+                        flush(self, local);
+                        return (None, ran);
+                    }
+                    std::thread::yield_now();
+                }
+                Step::Idle => {
+                    flush(self, local);
+                    return (None, ran);
+                }
+                Step::Stop => unreachable!("pinned steps do not observe stop"),
+            }
+        }
+    }
+
     #[cfg(not(loom))]
     pub fn drive_pinned(&self, local: &mut WorkerLocal, rg: &RgHandle) -> RgOutcome {
         if !crate::sched::step_v2() {

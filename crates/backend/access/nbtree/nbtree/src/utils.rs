@@ -1938,7 +1938,7 @@ pgsync::process_global! {
     });
 }
 
-fn vac_key(rel: &Relation<'_>) -> (::types_core::Oid, ::types_core::Oid) {
+pub(crate) fn vac_key(rel: &Relation<'_>) -> (::types_core::Oid, ::types_core::Oid) {
     (rel.rd_locator.get().dbOid, rel.rd_id)
 }
 
@@ -1978,8 +1978,13 @@ pub(crate) fn bt_start_vacuum(rel: &Relation<'_>) -> PgResult<::types_nbtree::BT
 
 /// _bt_end_vacuum; silent when no entry exists, as C.
 pub(crate) fn bt_end_vacuum(rel: &Relation<'_>) {
+    bt_end_vacuum_key(vac_key(rel));
+}
+
+/// bt_end_vacuum by (db, relid) key: the chunked scan's abort-path release
+/// (Q2) runs from a Drop with no Relation handle in scope.
+pub(crate) fn bt_end_vacuum_key(key: (::types_core::Oid, ::types_core::Oid)) {
     let mut info = BTVACINFO.lock().unwrap();
-    let key = vac_key(rel);
     if let Some(i) = info.vacuums.iter().position(|v| (v.0, v.1) == key) {
         info.vacuums.swap_remove(i);
     }
