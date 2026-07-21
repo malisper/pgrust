@@ -4933,22 +4933,34 @@ fn engage_ceremony<'mcx>(
         payload.query_id.store(qid, Ordering::SeqCst);
         parallel::gtrace("l.agg.sink.end");
         let spec = runtime::QuerySpec { query_id: qid, tasksets };
+        // rg-set-BEFORE-publish (M2 inc-3 rung 3): every serve-visible rg
+        // cell is stored by on_rg before the bound submission can become
+        // pool-visible — no "rg gone" refusal churn window. The unbound arm
+        // has no pool pick; it stores post-submit as before.
+        let set_rg = |rg: &runtime::RgHandle| {
+            payload
+                .rg
+                .set(rg.downgrade())
+                .unwrap_or_else(|_| unreachable!("rg set once"));
+            sink.rg
+                .set(rg.downgrade())
+                .unwrap_or_else(|_| unreachable!("sink rg set once"));
+        };
         let (rg, waiter) = match &pool {
             Some((_, descriptor)) => rt.submit_pinned_bound(
                 spec,
                 router::session_affinity_token(),
                 descriptor.clone(),
+                set_rg,
             ),
-            None => rt.submit_pinned_with_affinity(spec, router::session_affinity_token()),
+            None => {
+                let (rg, waiter) =
+                    rt.submit_pinned_with_affinity(spec, router::session_affinity_token());
+                set_rg(&rg);
+                (rg, waiter)
+            }
         };
         parallel::gtrace("l.agg.submit.end");
-        payload
-            .rg
-            .set(rg.downgrade())
-            .unwrap_or_else(|_| unreachable!("rg set once"));
-        sink.rg
-            .set(rg.downgrade())
-            .unwrap_or_else(|_| unreachable!("sink rg set once"));
         *mut_submitted = Some(rg.clone());
 
         // M2 inc-1: STANDING engagement first (the scan arm's channel,

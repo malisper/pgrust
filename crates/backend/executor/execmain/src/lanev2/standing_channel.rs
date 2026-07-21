@@ -341,11 +341,20 @@ pub(super) fn try_pool_channel(
 /// types — the dependency points the other way; this arm-side adapter
 /// closes the loop, the StandingDriver fn-pointer precedent).
 fn pooldb_serve(payload: &Arc<dyn std::any::Any + Send + Sync>) -> runtime::BoundServe {
-    match parallel::standing::pool_serve(payload) {
+    let served = match parallel::standing::pool_serve(payload) {
         parallel::standing::PoolServe::Served => runtime::BoundServe::Served,
         parallel::standing::PoolServe::Refused => runtime::BoundServe::Refused,
         parallel::standing::PoolServe::Closed => runtime::BoundServe::Closed,
-    }
+    };
+    // M2 inc-3 rung 3: refresh the runtime's session-residue hint — a
+    // Served engagement may have PARKED a sticky session retention on this
+    // thread (pool_sticky posture); the hint feeds the scheduler's
+    // unbound-work eviction gate and the affinity tiebreak. Refreshed on
+    // every verdict (an eager sink serve EVICTS a prior retention, so the
+    // hint self-corrects to false). A FATAL unwind skips this note — the
+    // thread is dying and its TLS dies with it.
+    runtime::note_session_residue(parallel::sticky_parked());
+    served
 }
 
 /// PRIVATE_SHUTDOWN completion of the standing join (every arm): a leader

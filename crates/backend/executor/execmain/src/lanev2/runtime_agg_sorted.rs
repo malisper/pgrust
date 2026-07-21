@@ -1337,17 +1337,28 @@ fn engage_ceremony<'mcx>(
         let qid = NEXT_QUERY_ID.fetch_add(1, Ordering::SeqCst) as u64;
         payload.query_id.store(qid, Ordering::SeqCst);
         let spec = runtime::QuerySpec { query_id: qid, tasksets: vec![accept, combine] };
-        let (rg, waiter) = match &pool {
-            Some((_, descriptor)) => rt.submit_pinned_bound(spec, 0, descriptor.clone()),
-            None => rt.submit_pinned(spec),
+        // rg-set-BEFORE-publish (M2 inc-3 rung 3): every serve-visible rg
+        // cell is stored by on_rg before the bound submission can become
+        // pool-visible — no "rg gone" refusal churn window.
+        let set_rg = |rg: &runtime::RgHandle| {
+            payload
+                .rg
+                .set(rg.downgrade())
+                .unwrap_or_else(|_| unreachable!("rg set once"));
+            sink.rg
+                .set(rg.downgrade())
+                .unwrap_or_else(|_| unreachable!("sink rg set once"));
         };
-        payload
-            .rg
-            .set(rg.downgrade())
-            .unwrap_or_else(|_| unreachable!("rg set once"));
-        sink.rg
-            .set(rg.downgrade())
-            .unwrap_or_else(|_| unreachable!("sink rg set once"));
+        let (rg, waiter) = match &pool {
+            Some((_, descriptor)) => {
+                rt.submit_pinned_bound(spec, 0, descriptor.clone(), set_rg)
+            }
+            None => {
+                let (rg, waiter) = rt.submit_pinned(spec);
+                set_rg(&rg);
+                (rg, waiter)
+            }
+        };
         *mut_submitted = Some(rg.clone());
 
         // M2 inc-1: STANDING engagement first — no worker launch, one

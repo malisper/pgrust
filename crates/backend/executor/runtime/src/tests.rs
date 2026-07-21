@@ -4154,14 +4154,14 @@ mod bound_gate {
             p.tickets.fetch_sub(1, Ordering::SeqCst);
             return BoundServe::Closed;
         }
-        // The submit → handle-store window: the publication wake can beat
-        // the leader's store; the board is live, so wait for the handle.
-        let rg = loop {
-            if let Some(rg) = p.rg.get() {
-                break rg.clone();
-            }
-            std::thread::yield_now();
-        };
+        // rg-set-BEFORE-publish (inc-3 rung 3): on_rg stored the handle
+        // before the publication could make this RG pick-visible — no
+        // submit → handle-store window exists to tolerate.
+        let rg = p
+            .rg
+            .get()
+            .expect("on_rg stored the handle before publication")
+            .clone();
         let lane = p.rt.acquire_external_lane().expect("external lane for the serve");
         let mut local = lane.local();
         let _outcome = p.rt.drive_pinned(&mut local, &rg);
@@ -4192,8 +4192,8 @@ mod bound_gate {
             spec_one(&work, Arc::new(SyntheticMorselSource::new(total))),
             0,
             descriptor,
+            |rg| payload.rg.set(rg.clone()).ok().expect("handle stored once"),
         );
-        payload.rg.set(h.clone()).ok().expect("handle stored once");
         (work, payload, h, waiter)
     }
 
@@ -4351,6 +4351,83 @@ mod bound_gate {
         assert_eq!(w2.wait(), RgOutcome::Completed);
         after.assert_all_executed_once();
         pool.shutdown();
+    }
+
+    /// M2 inc-3 rung 3 — the session-residue eviction gate: a thread that
+    /// noted a parked session retention (the pool-sticky posture) has the
+    /// installed evictor run BEFORE any unbound task body executes on it,
+    /// and the hint is cleared. The churn-shaped ordering pin: a retention
+    /// parked by an exited session's serve can never be live under ordinary
+    /// runtime work — the last gate is the scheduler's unbound dispatch.
+    /// (Single-process global evictor: this is the only test that installs
+    /// one, and the hint is thread-local — the driving thread here is the
+    /// only one that notes residue, so pool workers never fire it.)
+    #[test]
+    fn session_residue_evicted_before_unbound_work() {
+        static EVICTIONS: AtomicU64 = AtomicU64::new(0);
+        fn evictor() {
+            EVICTIONS.fetch_add(1, Ordering::SeqCst);
+        }
+        crate::install_session_residue_evictor(evictor);
+
+        struct ResidueProbe {
+            inner: Arc<SyntheticWork>,
+        }
+        impl TaskSetWork for ResidueProbe {
+            fn run_morsel(&self, worker: usize, range: MorselRange) {
+                // The gate's contract: by the time unbound work runs on the
+                // noting thread, the residue was evicted and the hint is
+                // down. (Pool-spawned threads never noted residue — their
+                // hint is false and the evictor must not have fired for
+                // them; EVICTIONS counts every firing process-wide.)
+                assert!(!crate::session_residue(), "unbound work ran over session residue");
+                self.inner.run_morsel(worker, range);
+            }
+            fn finalize(&self) {
+                self.inner.finalize();
+            }
+        }
+
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 1,
+            standbys: 0,
+            slots: 4,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        // No spawned pool: this thread drives worker_step itself (the
+        // drive_bound_pool shape) so the noting thread IS the unbound
+        // executor — the exact edge under test.
+        let inner = SyntheticWork::new(8, None, 0);
+        let work: Arc<dyn TaskSetWork> =
+            Arc::new(ResidueProbe { inner: Arc::clone(&inner) });
+        crate::note_session_residue(true);
+        assert!(crate::session_residue());
+        let (_h, waiter) = rt.submit(QuerySpec {
+            query_id: 7101,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(8)),
+                work,
+                deps: vec![],
+            }],
+        });
+        let mut local = rt.worker_local(0);
+        while waiter.try_wait().is_none() {
+            rt.execution_permits().acquire();
+            let step = rt.worker_step(&mut local);
+            rt.execution_permits().release();
+            if matches!(step, Step::Idle | Step::Retry) {
+                std::thread::yield_now();
+            }
+        }
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Completed));
+        inner.assert_all_executed_once();
+        assert_eq!(
+            EVICTIONS.load(Ordering::SeqCst),
+            1,
+            "evictor ran exactly once, before the first unbound task"
+        );
+        assert!(!crate::session_residue(), "hint cleared by the gate");
     }
 
     /// Abort composes with the bound serve exactly as with any pinned

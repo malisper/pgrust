@@ -2870,18 +2870,32 @@ fn engage_ceremony<'mcx>(
             query_id: NEXT_QUERY_ID.fetch_add(1, Ordering::SeqCst) as u64,
             tasksets: vec![runtime::TaskSetSpec { source, work, deps: vec![] }],
         };
+        // rg-set-BEFORE-publish (M2 inc-3 rung 3): the bound submission's
+        // serve resolves the RG through payload.rg — the on_rg callback
+        // stores it before publication can make the RG pool-visible, so a
+        // pool pick can never claim into an unset cell ("rg gone" refusal
+        // churn, the rung-1 needle's enabler). The unbound arm has no pool
+        // pick; it stores post-submit as before.
+        let set_rg = |rg: &runtime::RgHandle| {
+            payload
+                .rg
+                .set(rg.downgrade())
+                .unwrap_or_else(|_| unreachable!("rg set once"));
+        };
         let (rg, waiter) = match &pool {
             Some((_, descriptor)) => rt.submit_pinned_bound(
                 spec,
                 router::session_affinity_token(),
                 descriptor.clone(),
+                set_rg,
             ),
-            None => rt.submit_pinned_with_affinity(spec, router::session_affinity_token()),
+            None => {
+                let (rg, waiter) =
+                    rt.submit_pinned_with_affinity(spec, router::session_affinity_token());
+                set_rg(&rg);
+                (rg, waiter)
+            }
         };
-        payload
-            .rg
-            .set(rg.downgrade())
-            .unwrap_or_else(|_| unreachable!("rg set once"));
         *mut_submitted = Some(rg.clone());
 
         // WS-X wave-5 C3 dispatch seam (PGRUST_RUNTIME_CALLER_C3, default
@@ -3213,11 +3227,14 @@ fn runtime_scan_standing_driver(shared: &parallel::ParallelShared) {
     let Ok(payload) = private.downcast::<RuntimeScanShared>() else { return };
     // sticky: standing GANG workers may retain the session bind between
     // same-session engagements (ceremony-v2; launched/wpool helpers must
-    // always park boundary-clean, hence false above). POOL serves (M2
-    // inc-2) disable retention too: between engagements a pool thread runs
-    // ordinary runtime work (maintenance cycles, unbound task sets), which
-    // must never see a retained session's identity/GUC view.
-    let sticky = !parallel::standing::serving_on_pool();
+    // always park boundary-clean, hence false above). POOL serves retain
+    // too under pool_sticky_enabled (M2 inc-3 rung 3): the runtime's
+    // session-residue gate evicts the retention before any ordinary
+    // (unbound) work can run on the thread, so the parked session view
+    // spans only idle time and same/cross-session serves — the gang
+    // envelope. PGRUST_RUNTIME_POOL_STICKY=0 restores the eager rebind.
+    let sticky = !parallel::standing::serving_on_pool()
+        || parallel::standing::pool_sticky_enabled();
     let r = catch_unwind(AssertUnwindSafe(|| helper_drive(shared, &payload, sticky)));
     if let Err(unwind) = r {
         payload.fail(PgError::new(ERROR, "runtime scan standing executor panicked").into());

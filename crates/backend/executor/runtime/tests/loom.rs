@@ -2436,17 +2436,22 @@ fn bound_model_submit(
     let work = ModelWork::new(total, None);
     // The descriptor must ride the submit (the active bit keys off it at
     // publication), but the payload needs the submit's own RgHandle: an
-    // indirection cell bridges the cycle. The cell is completed BEFORE any
-    // pool driver thread spawns, so no serve can race the store.
+    // indirection cell bridges the cycle. Rung 3 (rg-set-before-publish):
+    // the cell is completed inside on_rg — BEFORE the RG can become
+    // pick-visible — so no serve can race the store by construction.
     let placeholder = Arc::new(loom::sync::Mutex::new(None::<Arc<BoundModelPayload>>));
     fn deferred_serve(payload: &Arc<dyn std::any::Any + Send + Sync>) -> BoundServe {
         let slot = Arc::clone(payload)
             .downcast::<loom::sync::Mutex<Option<Arc<BoundModelPayload>>>>()
             .expect("model placeholder");
-        let inner = slot.lock().unwrap().clone().expect("payload installed pre-race");
+        let inner = slot.lock().unwrap().clone().expect("payload installed pre-publish (on_rg)");
         let inner: Arc<dyn std::any::Any + Send + Sync> = inner;
         bound_model_serve(&inner)
     }
+    let payload_out = Arc::new(loom::sync::Mutex::new(None::<Arc<BoundModelPayload>>));
+    let rt2 = Arc::clone(rt);
+    let p2 = Arc::clone(&placeholder);
+    let out2 = Arc::clone(&payload_out);
     let (h, waiter) = rt.submit_pinned_bound(
         QuerySpec {
             query_id: 21,
@@ -2461,15 +2466,19 @@ fn bound_model_submit(
             serve: deferred_serve,
             payload: Arc::clone(&placeholder) as Arc<dyn std::any::Any + Send + Sync>,
         },
+        move |rg| {
+            let payload = Arc::new(BoundModelPayload {
+                rt: rt2,
+                rg: rg.clone(),
+                tickets: AtomicUsize::new(0),
+                refuse_all: AtomicBool::new(refuse_all),
+                serves: AtomicUsize::new(0),
+            });
+            *p2.lock().unwrap() = Some(Arc::clone(&payload));
+            *out2.lock().unwrap() = Some(payload);
+        },
     );
-    let payload = Arc::new(BoundModelPayload {
-        rt: Arc::clone(rt),
-        rg: h.clone(),
-        tickets: AtomicUsize::new(0),
-        refuse_all: AtomicBool::new(refuse_all),
-        serves: AtomicUsize::new(0),
-    });
-    *placeholder.lock().unwrap() = Some(Arc::clone(&payload));
+    let payload = payload_out.lock().unwrap().take().expect("on_rg ran at submit");
     (work, payload, h, waiter)
 }
 
@@ -2755,7 +2764,7 @@ fn pool_board_serve(payload: &Arc<dyn std::any::Any + Send + Sync>) -> BoundServ
     let cell = Arc::clone(payload)
         .downcast::<loom::sync::Mutex<Option<Arc<PoolBoardPayload>>>>()
         .expect("model placeholder");
-    let p = cell.lock().unwrap().clone().expect("payload installed pre-race");
+    let p = cell.lock().unwrap().clone().expect("payload installed pre-publish (on_rg)");
     if p.board.closed.load(Ordering::SeqCst) {
         return BoundServe::Closed;
     }
@@ -2791,6 +2800,10 @@ fn sealed_bound_submit(
         0,
     );
     let placeholder = Arc::new(loom::sync::Mutex::new(None::<Arc<PoolBoardPayload>>));
+    let payload_out = Arc::new(loom::sync::Mutex::new(None::<Arc<PoolBoardPayload>>));
+    let rt2 = Arc::clone(rt);
+    let p2 = Arc::clone(&placeholder);
+    let out2 = Arc::clone(&payload_out);
     let (h, waiter) = rt.submit_pinned_bound(
         QuerySpec {
             query_id: 31,
@@ -2801,14 +2814,20 @@ fn sealed_bound_submit(
             serve: pool_board_serve,
             payload: Arc::clone(&placeholder) as Arc<dyn std::any::Any + Send + Sync>,
         },
+        // rg-set-before-publish (rung 3): the payload cell completes inside
+        // on_rg, before the RG is pick-visible.
+        move |rg| {
+            let payload = Arc::new(PoolBoardPayload {
+                rt: rt2,
+                rg: rg.clone(),
+                board: MirrorBoard::new(tickets),
+                serves: AtomicUsize::new(0),
+            });
+            *p2.lock().unwrap() = Some(Arc::clone(&payload));
+            *out2.lock().unwrap() = Some(payload);
+        },
     );
-    let payload = Arc::new(PoolBoardPayload {
-        rt: Arc::clone(rt),
-        rg: h.clone(),
-        board: MirrorBoard::new(tickets),
-        serves: AtomicUsize::new(0),
-    });
-    *placeholder.lock().unwrap() = Some(Arc::clone(&payload));
+    let payload = payload_out.lock().unwrap().take().expect("on_rg ran at submit");
     (sink, payload, h, waiter)
 }
 
@@ -3109,17 +3128,23 @@ fn pool_blocking_inside_bound_serve() {
         });
 
         // Bound submission with the deferred payload cell (the descriptor
-        // must ride the submit; the payload needs the submit's RgHandle).
+        // must ride the submit; the payload needs the submit's RgHandle —
+        // completed inside on_rg, before the RG is pick-visible).
         let placeholder = Arc::new(loom::sync::Mutex::new(None::<Arc<BoundModelPayload>>));
         fn deferred_serve(payload: &Arc<dyn std::any::Any + Send + Sync>) -> BoundServe {
             let slot = Arc::clone(payload)
                 .downcast::<loom::sync::Mutex<Option<Arc<BoundModelPayload>>>>()
                 .expect("model placeholder");
-            let inner = slot.lock().unwrap().clone().expect("payload installed pre-race");
+            let inner =
+                slot.lock().unwrap().clone().expect("payload installed pre-publish (on_rg)");
             let inner: Arc<dyn std::any::Any + Send + Sync> = inner;
             bound_model_serve(&inner)
         }
-        let (h, waiter) = rt.submit_pinned_bound(
+        let payload_out = Arc::new(loom::sync::Mutex::new(None::<Arc<BoundModelPayload>>));
+        let rt2 = Arc::clone(&rt);
+        let p2 = Arc::clone(&placeholder);
+        let out2 = Arc::clone(&payload_out);
+        let (_h, waiter) = rt.submit_pinned_bound(
             QuerySpec {
                 query_id: 36,
                 tasksets: vec![TaskSetSpec {
@@ -3133,15 +3158,19 @@ fn pool_blocking_inside_bound_serve() {
                 serve: deferred_serve,
                 payload: Arc::clone(&placeholder) as Arc<dyn std::any::Any + Send + Sync>,
             },
+            move |rg| {
+                let payload = Arc::new(BoundModelPayload {
+                    rt: rt2,
+                    rg: rg.clone(),
+                    tickets: AtomicUsize::new(0),
+                    refuse_all: AtomicBool::new(false),
+                    serves: AtomicUsize::new(0),
+                });
+                *p2.lock().unwrap() = Some(Arc::clone(&payload));
+                *out2.lock().unwrap() = Some(payload);
+            },
         );
-        let payload = Arc::new(BoundModelPayload {
-            rt: Arc::clone(&rt),
-            rg: h.clone(),
-            tickets: AtomicUsize::new(0),
-            refuse_all: AtomicBool::new(false),
-            serves: AtomicUsize::new(0),
-        });
-        *placeholder.lock().unwrap() = Some(Arc::clone(&payload));
+        let payload = payload_out.lock().unwrap().take().expect("on_rg ran at submit");
 
         let rt1 = Arc::clone(&rt);
         let w1 = waiter.clone();
@@ -3223,5 +3252,168 @@ fn pool_needle_read_order_no_false_death() {
 
         churn.join().unwrap();
         live.join().unwrap();
+    });
+}
+
+/// M2 inc-3 rung 3 — the rg-set-after-publish WINDOW closed (set-before-
+/// publish). A bound submission's serve resolves the RG through the
+/// caller's payload cell; under the OLD order (publication at submit, cell
+/// stored after submit returned) a pool pick could land inside the window
+/// and pay a claim + "rg gone" refusal + detach — pure churn against a
+/// healthy engagement, and at a 1-ticket board ONE spurious refusal meets
+/// the leader's `refused >= tickets` needle: instant channel fallback (the
+/// rung-2 addendum's measured dop-1 churn, agg_gang=121/400 loaded-box).
+/// With `on_rg` the submission stores every serve-visible cell BEFORE the
+/// RG can become pick-visible; this model drives the REAL runtime (bound
+/// submit + serve gate) with the arm's rg-gone transcription in the serve
+/// and pins: NO interleaving shows the serve an unset cell (rg_gone == 0,
+/// board refusals == 0), the single ticket serves at most once, and the
+/// RG completes.
+///
+/// RED (verified by transient weakening): transcribe the old order — pass
+/// an empty on_rg and store the cell after submit_pinned_bound returns —
+/// loom finds the serve observing the unset cell in its first seconds: the
+/// rg-gone refusal fires and the zero-churn oracle fails.
+#[test]
+fn pool_publish_order_no_rg_gone_churn() {
+    struct WindowPayload {
+        rt: Arc<Runtime>,
+        /// The arm's payload.rg cell (runtime_scan RuntimeScanShared::rg
+        /// shape): None ⇒ the serve refuses "rg gone".
+        rg: loom::sync::Mutex<Option<RgHandle>>,
+        board: Arc<MirrorBoard>,
+        rg_gone: AtomicUsize,
+        serves: AtomicUsize,
+    }
+
+    fn window_serve(payload: &Arc<dyn std::any::Any + Send + Sync>) -> BoundServe {
+        let p = Arc::clone(payload)
+            .downcast::<WindowPayload>()
+            .expect("model payload");
+        if p.board.closed.load(Ordering::SeqCst) {
+            return BoundServe::Closed;
+        }
+        let Some(_ticket) = p.board.try_claim() else {
+            return BoundServe::Closed;
+        };
+        let _detach = MirrorDetach(&p.board);
+        // The arms' helper_drive rg resolution: an unset/dead cell is the
+        // pre-bind "rg gone" refusal (refused bump; the DetachGuard drop
+        // detaches) — the churn shape the window manufactured.
+        let Some(rg) = p.rg.lock().unwrap().clone() else {
+            p.rg_gone.fetch_add(1, Ordering::SeqCst);
+            p.board.refused.fetch_add(1, Ordering::SeqCst);
+            return BoundServe::Refused;
+        };
+        let Some(mut cw) = runtime::CallerWorker::enter(&p.rt) else {
+            p.board.refused.fetch_add(1, Ordering::SeqCst);
+            return BoundServe::Refused;
+        };
+        let _ = cw
+            .drive_with_duty(&p.rt, &rg, &mut || Ok(()))
+            .expect("model duty never fails");
+        p.serves.fetch_add(1, Ordering::SeqCst);
+        BoundServe::Served
+    }
+
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(2);
+    b.max_branches = 500_000;
+    b.check(|| {
+        let rt = small_runtime(1, 0);
+        let work = ModelWork::new(1, None);
+        let payload = Arc::new(WindowPayload {
+            rt: Arc::clone(&rt),
+            rg: loom::sync::Mutex::new(None),
+            board: MirrorBoard::new(1),
+            rg_gone: AtomicUsize::new(0),
+            serves: AtomicUsize::new(0),
+        });
+        // The pool loop is LIVE BEFORE the submit (production: pool threads
+        // are process-lifetime; publication wakes them mid-submit) — the
+        // serve genuinely races the submission in the explored space. The
+        // done-cell stands in for the leader's waiter (set post-submit).
+        let done = Arc::new(loom::sync::Mutex::new(None::<CompletionWaiter>));
+        let rt1 = Arc::clone(&rt);
+        let done1 = Arc::clone(&done);
+        let pool = thread::spawn(move || {
+            let mut local = rt1.worker_local(0);
+            loop {
+                if let Some(w) = done1.lock().unwrap().clone() {
+                    if w.try_wait().is_some() {
+                        break;
+                    }
+                }
+                let epoch = rt1.park_epoch();
+                rt1.execution_permits().acquire();
+                let step = rt1.worker_step(&mut local);
+                rt1.execution_permits().release();
+                match step {
+                    Step::Ran => {}
+                    Step::Retry => thread::yield_now(),
+                    Step::Idle => {
+                        if let Some(w) = done1.lock().unwrap().clone() {
+                            if w.try_wait().is_some() {
+                                break;
+                            }
+                        }
+                        rt1.park(epoch);
+                    }
+                    Step::Stop => break,
+                }
+            }
+        });
+
+        let p2 = Arc::clone(&payload);
+        let (h, waiter) = rt.submit_pinned_bound(
+            QuerySpec {
+                query_id: 41,
+                tasksets: vec![TaskSetSpec {
+                    source: Arc::new(SyntheticMorselSource::new(1).with_c0(1)),
+                    work: Arc::clone(&work) as Arc<dyn TaskSetWork>,
+                    deps: vec![],
+                }],
+            },
+            0,
+            BoundDescriptor {
+                serve: window_serve,
+                payload: Arc::clone(&payload) as Arc<dyn std::any::Any + Send + Sync>,
+            },
+            // THE ORDER UNDER TEST: the cell completes before publication.
+            move |rg| {
+                *p2.rg.lock().unwrap() = Some(rg.clone());
+            },
+        );
+        *done.lock().unwrap() = Some(waiter.clone());
+        rt.notify_source_progress();
+
+        // Leader fallback face: completes the RG regardless of the pool's
+        // verdict (the launched/serial ladder's role) so both verdicts of
+        // the race terminate.
+        let mut cw = runtime::CallerWorker::enter(&rt).expect("leader lane");
+        let _ = cw
+            .drive_with_duty(&rt, &h, &mut || Ok(()))
+            .expect("leader duty never fails");
+        pool.join().unwrap();
+        payload.board.close_and_await();
+
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Completed));
+        work.assert_complete();
+        assert_eq!(
+            payload.rg_gone.load(Ordering::SeqCst),
+            0,
+            "pool serve observed an unset rg cell (rg-set-after-publish window)"
+        );
+        assert_eq!(
+            payload.board.refused.load(Ordering::SeqCst),
+            0,
+            "spurious refusal churn on a healthy engagement"
+        );
+        assert!(payload.serves.load(Ordering::SeqCst) <= 1, "ticket cap held");
+        assert_eq!(
+            payload.board.detached.load(Ordering::SeqCst),
+            payload.board.claimed.load(Ordering::SeqCst)
+        );
+        assert_eq!(rt.execution_permits().available(), 1, "permit balance");
     });
 }
