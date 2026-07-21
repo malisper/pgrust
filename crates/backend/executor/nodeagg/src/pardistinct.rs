@@ -214,98 +214,12 @@ impl PdSpec {
 }
 
 // ===========================================================================
-// Handoff registry — merge.rs's pattern, keyed by the SORT plan node's
-// address (unique per live plan; worker pstmts share the leader's plan tree
-// by reference).
+// The handoff registry (PdHandoff + the Sort-plan-keyed thread registry +
+// the execParallel export/adopt snapshot) was DELETED at Phase-5 D1 with
+// the GM-hybrid leader/worker drives (execmain lanev2 pardistinct region).
+// The builder/wire/merge machinery below REMAINS: it is the runtime
+// distinct sink's substrate (execmain lanev2/runtime_distinct.rs).
 // ===========================================================================
-
-pub struct PdHandoff {
-    pub spec: Arc<PdSpec>,
-    slots: Mutex<Vec<PdHandedTable>>,
-    /// The leader consumed this handoff (one drive per registration). A
-    /// RESCAN relaunches workers against the ORIGINAL ParallelExecShared
-    /// registry snapshot, whose Arc keeps this object alive — the flag
-    /// makes those workers refuse (classic sorted rows, which the rescan's
-    /// fresh leader drive folds; correct, merely unaccelerated).
-    spent: core::sync::atomic::AtomicBool,
-}
-
-impl PdHandoff {
-    pub fn new(spec: Arc<PdSpec>) -> PdHandoff {
-        PdHandoff {
-            spec,
-            slots: Mutex::new(Vec::new()),
-            spent: core::sync::atomic::AtomicBool::new(false),
-        }
-    }
-
-    pub fn install(&self, t: PdHandedTable) {
-        self.slots.lock().unwrap_or_else(|e| e.into_inner()).push(t);
-    }
-
-    pub fn take_all(&self) -> Vec<PdHandedTable> {
-        self.spent.store(true, core::sync::atomic::Ordering::Release);
-        core::mem::take(&mut *self.slots.lock().unwrap_or_else(|e| e.into_inner()))
-    }
-
-    pub fn is_spent(&self) -> bool {
-        self.spent.load(core::sync::atomic::Ordering::Acquire)
-    }
-}
-
-std::thread_local! {
-    static PD_REGISTRY: core::cell::RefCell<Vec<(usize, Weak<PdHandoff>)>> =
-        const { core::cell::RefCell::new(Vec::new()) };
-}
-
-pub fn pd_registry_insert(key: usize, h: &Arc<PdHandoff>) {
-    PD_REGISTRY.with(|r| {
-        let mut v = r.borrow_mut();
-        v.retain(|(_, w)| w.strong_count() > 0);
-        v.push((key, Arc::downgrade(h)));
-    });
-}
-
-pub fn pd_registry_remove(key: usize) {
-    let _ = PD_REGISTRY.try_with(|r| r.borrow_mut().retain(|(k, _)| *k != key));
-}
-
-pub fn pd_registry_get(key: usize) -> Option<Arc<PdHandoff>> {
-    PD_REGISTRY.with(|r| {
-        r.borrow().iter().find_map(|(k, w)| (*k == key).then(|| w.upgrade()).flatten())
-    })
-}
-
-/// True iff this thread's registry has ANY live entry (the worker hook's
-/// cheap first gate — serial sessions never allocate past this).
-pub fn pd_registry_nonempty() -> bool {
-    PD_REGISTRY
-        .try_with(|r| r.borrow().iter().any(|(_, w)| w.strong_count() > 0))
-        .unwrap_or(false)
-}
-
-/// Leader-side snapshot for execParallel (execparallel.rs carries it in
-/// ParallelExecShared next to the agg handoff export).
-pub struct PdExport(Vec<(usize, Arc<PdHandoff>)>);
-
-pub fn pd_export_registry() -> PdExport {
-    PdExport(PD_REGISTRY.with(|r| {
-        r.borrow().iter().filter_map(|(k, w)| w.upgrade().map(|a| (*k, a))).collect()
-    }))
-}
-
-pub fn pd_adopt_registry(export: &PdExport) {
-    PD_REGISTRY.with(|r| {
-        let mut v = r.borrow_mut();
-        for (k, a) in &export.0 {
-            v.push((*k, Arc::downgrade(a)));
-        }
-    });
-}
-
-pub fn pd_clear_thread_registry() {
-    let _ = PD_REGISTRY.try_with(|r| r.borrow_mut().clear());
-}
 
 // ===========================================================================
 // The builder — one participant's partial table.
@@ -1147,52 +1061,6 @@ impl<'mcx> PdBuilder<'mcx> {
         Ok(())
     }
 
-    /// Fold a HANDED table into this (leader) builder — the serial merge
-    /// path (spill-capable through the same eviction lever).
-    pub fn merge_handed(&mut self, t: &PdHandedTable) -> PgResult<()> {
-        self.flush_staged();
-        let spec = self.spec.clone();
-        let nkeys = spec.nkeys();
-        let nvocab = spec.vocab.len();
-        let nsets = spec.sets.len();
-        for g in 0..t.ngroups {
-            let words = &t.keys[g * nkeys..(g + 1) * nkeys];
-            let nulls = t.keynulls[g];
-            let h = t.hashes[g];
-            let src = KeySrc::Table(words, &t.key_arena);
-            let (found, slot_idx) = self.probe(words, nulls, h, &src);
-            let dst = match found {
-                Some(d) => d,
-                None => self.create_group(words, nulls, h, slot_idx, &src),
-            } as usize;
-            // Vocab: pairwise add (count/sum reassociation unobservable).
-            for vi in 0..2 * nvocab {
-                self.states[dst * 2 * nvocab + vi] += t.states[g * 2 * nvocab + vi];
-            }
-            let mut sets_mem = 0usize;
-            for j in 0..nsets {
-                let si = g * nsets + j;
-                let dset = &mut self.dsets[dst * nsets + j];
-                for &v in t.set_ints(si) {
-                    dset.insert_i64(v);
-                }
-                for (content, _) in t.set_bytes(si) {
-                    dset.insert_bytes(content);
-                }
-                if t.set_null[si] {
-                    dset.seen_null = true;
-                }
-                sets_mem += dset.mem_bytes();
-            }
-            self.total_set_mem = self.total_set_mem + sets_mem - self.set_mem[dst];
-            self.set_mem[dst] = sets_mem;
-            if self.mem() > self.budget.max(self.evict_floor) && self.mcx.is_some() {
-                self.evict_sets()?;
-            }
-        }
-        Ok(())
-    }
-
     /// Freeze into the handed wire format (plain data, Send). Grouped
     /// tables carry a group partition (top-8 hash bits); the plain shape
     /// (nkeys == 0) carries per-set ELEMENT partitions instead.
@@ -1338,19 +1206,6 @@ impl<'mcx> PdBuilder<'mcx> {
         })
     }
 
-    /// Tear the (leader) builder into merged-emit parts: keys + vocab
-    /// states + the live DistinctSets (spilled ones included — the emit
-    /// tail replays them through the existing spilled-set machinery).
-    pub fn into_merged(self) -> PdMerged<'mcx> {
-        PdMerged {
-            ngroups: self.ngroups(),
-            keys: self.keys,
-            key_arena: self.key_arena,
-            keynulls: self.keynulls,
-            states: self.states,
-            dsets: self.dsets.into_iter().map(Some).collect(),
-        }
-    }
 }
 
 impl PdBuilder<'static> {
@@ -1638,18 +1493,6 @@ impl PdMerged<'static> {
 // Parallel merge — bucket-claim over group partitions (grouped) or element
 // partitions (plain). Fast path only: every input in memory, no spills.
 // ===========================================================================
-
-struct PdParCtx<'a> {
-    spec: &'a PdSpec,
-    tables: &'a [PdHandedTable],
-    next: core::sync::atomic::AtomicUsize,
-    /// One exclusive output cell per bucket.
-    out: Vec<core::cell::UnsafeCell<PdMerged<'static>>>,
-}
-
-// SAFETY: each bucket cell is written by exactly one claimer (fetch_add
-// hands each bucket index out once); tables are read-only.
-unsafe impl Sync for PdParCtx<'_> {}
 
 fn merge_bucket(spec: &PdSpec, tables: &[PdHandedTable], b: usize) -> PdMerged<'static> {
     let refs: Vec<&PdHandedTable> = tables.iter().collect();
@@ -1954,66 +1797,6 @@ impl<'s> PdBucketMerger<'s> {
     }
 }
 
-fn pd_claim_loop(ctx: &PdParCtx<'_>, nbuckets: usize) {
-    loop {
-        let b = ctx.next.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        if b >= nbuckets {
-            return;
-        }
-        // SAFETY: bucket b handed to this claimer alone.
-        unsafe { *ctx.out[b].get() = merge_bucket(ctx.spec, ctx.tables, b) };
-    }
-}
-
-/// Grouped parallel merge: claimers own top-8-bit group buckets; the result
-/// concatenates buckets in order (deterministic; emit re-orders by the plan
-/// Sort prefix anyway).
-pub fn pd_parallel_merge_grouped(
-    spec: &Arc<PdSpec>,
-    tables: Vec<PdHandedTable>,
-    nthreads: usize,
-) -> PdMerged<'static> {
-    let ctx = PdParCtx {
-        spec,
-        tables: &tables,
-        next: core::sync::atomic::AtomicUsize::new(0),
-        out: (0..PD_GROUP_PARTS)
-            .map(|_| {
-                core::cell::UnsafeCell::new(PdMerged {
-                    ngroups: 0,
-                    keys: Vec::new(),
-                    key_arena: Vec::new(),
-                    keynulls: Vec::new(),
-                    states: Vec::new(),
-                    dsets: Vec::new(),
-                })
-            })
-            .collect(),
-    };
-    let extra = nthreads.saturating_sub(1);
-    std::thread::scope(|s| {
-        let handles: Vec<_> =
-            (0..extra).map(|_| s.spawn(|| pd_claim_loop(&ctx, PD_GROUP_PARTS))).collect();
-        pd_claim_loop(&ctx, PD_GROUP_PARTS);
-        for h in handles {
-            h.join().expect("pardistinct merge claimer panicked");
-        }
-    });
-    // Concatenate buckets.
-    let mut merged = PdMerged {
-        ngroups: 0,
-        keys: Vec::new(),
-        key_arena: Vec::new(),
-        keynulls: Vec::new(),
-        states: Vec::new(),
-        dsets: Vec::new(),
-    };
-    for cell in ctx.out {
-        concat_merged_into(spec, &mut merged, cell.into_inner());
-    }
-    merged
-}
-
 /// Append one bucket's merged output onto the accumulating result. Bytes-
 /// key span words are ARENA-RELATIVE, so they re-base onto the combined
 /// arena as the bucket's content is appended (int-only specs take the
@@ -2044,124 +1827,6 @@ fn concat_merged_into(spec: &PdSpec, merged: &mut PdMerged<'static>, m: PdMerged
 }
 
 // --- plain (single-group) parallel union over element partitions ----------
-
-struct PdElemCtx<'a> {
-    spec: &'a PdSpec,
-    tables: &'a [PdHandedTable],
-    next: core::sync::atomic::AtomicUsize,
-    /// out[set * PD_ELEM_PARTS + p]: the deduped elements of partition p.
-    out: Vec<core::cell::UnsafeCell<(Vec<i64>, Vec<u8>, Vec<PdSpan>)>>,
-}
-
-// SAFETY: as PdParCtx — each (set, partition) cell has one writer.
-unsafe impl Sync for PdElemCtx<'_> {}
-
-fn pd_elem_claim_loop(ctx: &PdElemCtx<'_>) {
-    let nsets = ctx.spec.sets.len();
-    let total = nsets * PD_ELEM_PARTS;
-    loop {
-        let w = ctx.next.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        if w >= total {
-            return;
-        }
-        let (j, p) = (w / PD_ELEM_PARTS, w % PD_ELEM_PARTS);
-        let mut dset: DistinctSet<'static> = DistinctSet::new();
-        // dedupsub reserve wave: the partition's union is bounded by the
-        // donors' slice lengths (int elements) — exact-bound pre-size, one
-        // jump instead of the per-donor ladder.
-        if pd_grow_project_enabled() {
-            let int_upper: usize = ctx
-                .tables
-                .iter()
-                .map(|t| {
-                    let parts =
-                        &t.elem_parts[j * (PD_ELEM_PARTS + 1)..(j + 1) * (PD_ELEM_PARTS + 1)];
-                    (parts[p + 1] - parts[p]) as usize
-                })
-                .sum();
-            if !matches!(ctx.spec.sets[j].kind, DistinctKeyKind::Bytes)
-                && int_upper >= PD_PROJECT_MIN
-            {
-                dset.reserve_projected(int_upper);
-            }
-        }
-        for t in ctx.tables {
-            let parts = &t.elem_parts[j * (PD_ELEM_PARTS + 1)..(j + 1) * (PD_ELEM_PARTS + 1)];
-            match ctx.spec.sets[j].kind {
-                DistinctKeyKind::Bytes => {
-                    for sp in &t.set_spans[parts[p] as usize..parts[p + 1] as usize] {
-                        dset.insert_bytes(
-                            &t.set_blob[sp.off as usize..(sp.off + sp.len) as usize],
-                        );
-                    }
-                }
-                _ => {
-                    for &v in &t.set_ints[parts[p] as usize..parts[p + 1] as usize] {
-                        dset.insert_i64(v);
-                    }
-                }
-            }
-        }
-        // dedupsub reserve wave: exact-size the bytes re-export (spans
-        // count and blob total are known from the merged set).
-        let nb = dset.n_bytes();
-        let blob_total: usize = (0..nb).map(|i| dset.bytes_span(i).1 as usize).sum();
-        let mut blob = Vec::with_capacity(blob_total);
-        let mut spans = Vec::with_capacity(nb);
-        for i in 0..nb {
-            let (off, len, h) = dset.bytes_span(i);
-            let noff = blob.len() as u32;
-            blob.extend_from_slice(dset.bytes_content(off, len));
-            spans.push(PdSpan { off: noff, len, hash: h });
-        }
-        // SAFETY: cell w has one writer.
-        unsafe { *ctx.out[w].get() = (dset.take_ints(), blob, spans) };
-    }
-}
-
-/// Plain-shape parallel union: claimers own (set, element-partition) cells;
-/// partitions are disjoint by construction so the concatenation of the
-/// per-partition deduped element lists IS the union.
-pub fn pd_parallel_merge_plain<'m>(
-    spec: &Arc<PdSpec>,
-    tables: Vec<PdHandedTable>,
-    nthreads: usize,
-) -> PdMerged<'m> {
-    let nsets = spec.sets.len();
-    let ctx = PdElemCtx {
-        spec,
-        tables: &tables,
-        next: core::sync::atomic::AtomicUsize::new(0),
-        out: (0..nsets * PD_ELEM_PARTS)
-            .map(|_| core::cell::UnsafeCell::new((Vec::new(), Vec::new(), Vec::new())))
-            .collect(),
-    };
-    let extra = nthreads.saturating_sub(1);
-    std::thread::scope(|s| {
-        let handles: Vec<_> = (0..extra).map(|_| s.spawn(|| pd_elem_claim_loop(&ctx))).collect();
-        pd_elem_claim_loop(&ctx);
-        for h in handles {
-            h.join().expect("pardistinct union claimer panicked");
-        }
-    });
-    let mut dsets: Vec<Option<DistinctSet<'m>>> = Vec::with_capacity(nsets);
-    let mut outs = ctx.out.into_iter().map(|c| c.into_inner());
-    for j in 0..nsets {
-        let mut ints: Vec<i64> = Vec::new();
-        let mut blob: Vec<u8> = Vec::new();
-        let mut spans: Vec<(u32, u32, u32)> = Vec::new();
-        for _ in 0..PD_ELEM_PARTS {
-            let (i, b, sp) = outs.next().expect("cell per (set, partition)");
-            ints.extend(i);
-            let base = blob.len() as u32;
-            blob.extend(b);
-            spans.extend(sp.iter().map(|s| (base + s.off, s.len, s.hash)));
-        }
-        let seen_null = tables.iter().any(|t| t.set_null[j]);
-        dsets.push(Some(DistinctSet::from_values(spec.sets[j].kind, ints, blob, spans, seen_null)));
-    }
-    PdMerged { ngroups: 1, keys: Vec::new(), key_arena: Vec::new(), keynulls: Vec::new(), states: Vec::new(), dsets }
-}
 
 // ===========================================================================
 // Spec derivation — the leader's vocabulary check over its initialized

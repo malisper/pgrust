@@ -236,21 +236,15 @@ pub(super) enum ShapeClass {
     // scratchpad/night/phase5-deletion-plan.md §2 D0; APPEND-ONLY chartered
     // mint — discriminants above this line stay frozen).
     // -----------------------------------------------------------------------
-    /// Parallel exact-DISTINCT partials over GatherMerge (the lane-v2
-    /// pardistinct engine: both leader arms + the worker-fragment partial
-    /// build). OWNED once per engaged drive/build, ALONGSIDE the aggbuild
-    /// tick (the Gather-class precedent: composition attribution over the
-    /// gather machinery gets its own class so the deletion program can
-    /// floor it apart from ordinary agg builds). Standing evidence for the
-    /// Track-5 D1 increment: these ticks reaching zero on the standard
-    /// ladders at defaults is the deletion precondition; today the class
-    /// is EXPECTED nonzero in the low-DOP suppression band (the
-    /// CbDistinctIntKeys / textdistinct min_dop-12 floors keep GatherMerge
-    /// plans below DOP 12, and this engine is the measured winner there).
-    ParDistinct = 40,
+    // Discriminant 40 (ParDistinct — the lane-v2 pardistinct GM-hybrid
+    // engine) was RETIRED at Phase-5 D1 with the engine's deletion: the
+    // ticking sites are gone, so the row can never be nonzero again. The
+    // discriminant stays reserved (frozen-mint law; never re-issue 40).
 }
 
-const N_CLASSES: usize = 41;
+// 40, not 41: discriminant 40 (ParDistinct) retired at Phase-5 D1 — it was
+// the top of the mint, so the dense counter arrays shrink with it.
+const N_CLASSES: usize = 40;
 
 impl ShapeClass {
     pub(super) const ALL: [ShapeClass; N_CLASSES] = [
@@ -294,7 +288,6 @@ impl ShapeClass {
         ShapeClass::ModifyTable,
         ShapeClass::Cursor,
         ShapeClass::Spi,
-        ShapeClass::ParDistinct,
     ];
 
     pub(super) fn name(self) -> &'static str {
@@ -339,7 +332,6 @@ impl ShapeClass {
             ShapeClass::ModifyTable => "modifytable",
             ShapeClass::Cursor => "cursor",
             ShapeClass::Spi => "spi",
-            ShapeClass::ParDistinct => "pardistinct",
         }
     }
 }

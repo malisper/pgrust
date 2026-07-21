@@ -235,11 +235,6 @@ pub struct SortNode<'mcx> {
     /// structural fusibility cascade must not run per pulled tuple); the
     /// dynamic gates (EPQ, direction) stay per-call in `lanev2`.
     pub lane_fusible: Option<bool>,
-    /// Lane-v2 parallel-DISTINCT worker-partial verdict (lanev2
-    /// `try_pardistinct_worker_sort`): None = not probed, Some(true) =
-    /// table handed off (this node emits nothing), Some(false) = probed and
-    /// refused or degraded (classic paths own the node).
-    pub pd_state: Option<bool>,
     /// M2 runtime DISTINCT-sink STATIC shape refusal memo (lanev2
     /// `runtime_distinct`): once the plan-shape gates (order spec / spec
     /// derivation / subtree shape / expr safety) refuse, later pulls skip
@@ -784,7 +779,6 @@ pub fn exec_init_node<'mcx>(
                 outer: ::mcx::alloc_in(estate.es_query_cxt, outer)?,
                 outer_desc: Some(outer_desc),
                 lane_fusible: None,
-                pd_state: None,
                 rd_shape_refused: false,
             })
         }
@@ -2045,25 +2039,10 @@ fn agg_arm<'mcx>(
                 }
             }
         }
-        PlanStateNode::GatherMerge(gm) => {
-            // Lane-executor-v2 dispatch hooks (parallel exact-DISTINCT
-            // partials — lane-v2-pardistinct): the plain then the grouped
-            // leader drive. Both fall through to the UNCHANGED per-tuple
-            // exec_agg over exec_gather_merge on refuse. Lane logic +
-            // refuse-sets in `lanev2`.
-            if crate::lanev2::enabled() {
-                if let Some(r) =
-                    crate::lanev2::try_own_plain_distinct_agg_over_gather_merge(agg, gm, estate)?
-                {
-                    return Ok(r);
-                }
-                if let Some(r) = crate::lanev2::try_own_sorted_distinct_agg_over_gather_merge(
-                    agg, gm, estate,
-                )? {
-                    return Ok(r);
-                }
-            }
-        }
+        // GatherMerge outers take the catch-all: the lane-v2-pardistinct
+        // GM-hybrid leader drives were DELETED at Phase-5 D1 — agg over
+        // GatherMerge always runs the per-tuple exec_agg over
+        // exec_gather_merge path below (which stays until Phase-5 D5).
         PlanStateNode::HashJoin(hj) => {
             // Lane-executor-v2 dispatch hook (Phase-2 breaker-to-breaker
             // composition: hash-agg breaker over the hash-join breaker over
@@ -2466,14 +2445,12 @@ fn window_agg_arm<'mcx>(
 
 #[inline(never)]
 fn sort_arm<'mcx>(s: &mut SortNode<'mcx>, estate: &mut EStateData<'mcx>) -> ProcResult {
-    // Lane-executor-v2 dispatch hooks: the parallel-DISTINCT worker partial
-    // (a leader-registered fragment build — lane-v2-pardistinct), then the
-    // Phase-2 sort pipeline-breaker. On refuse this falls through to the
-    // UNCHANGED paths below. Lane logic + refuse-sets live in `lanev2`.
+    // Lane-executor-v2 dispatch hook: the Phase-2 sort pipeline-breaker.
+    // (The lane-v2-pardistinct worker-partial hook that ran first was
+    // DELETED at Phase-5 D1 with the GM-hybrid leader drives.) On refuse
+    // this falls through to the UNCHANGED paths below. Lane logic +
+    // refuse-sets live in `lanev2`.
     if crate::lanev2::enabled() {
-        if let Some(r) = crate::lanev2::try_pardistinct_worker_sort(s, estate)? {
-            return Ok(r);
-        }
         if let Some(r) = crate::lanev2::try_own_sort(s, estate)? {
             return Ok(r);
         }
@@ -4149,7 +4126,7 @@ pub(crate) fn with_eval_slots_outer<'mcx, R>(
     WindowAggNode<'_> { state, outer, lane_admit, lane_framed_admit, lane_framed; lane },
     MaterialNode<'_> { state, outer },
     MemoizeNode<'_> { state, outer, outer_chg },
-    SortNode<'_> { state, outer, lane_fusible, pd_state, rd_shape_refused; outer_desc },
+    SortNode<'_> { state, outer, lane_fusible, rd_shape_refused; outer_desc },
     IncrementalSortNode<'_> { state, outer },
     AppendNode<'_> { state, substates, subplan_origin, lane_fusible },
     MergeAppendNode<'_> { state, substates, subplan_origin },
