@@ -2187,10 +2187,17 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
     // falls through UNCHANGED to the per-tuple presorted drive — never the
     // serial set drive (hash inserts must not replace the incumbent's
     // adjacent-dedup on ordered input).
-    if distinct_presorted_probe_enabled()
-        && router::arm_dop(router::ArmClass::Distinct) > 0
-        && ::nodeagg::agg_plain_distinct_set_only(agg)
+    // Conjunct ORDER is the per-pull cost discipline: this walk re-enters
+    // per pull, and multi-row Agg shapes (hashed grouping) pull it millions
+    // of times — the node-STRUCTURAL predicates short-circuit first (one
+    // aggstrategy compare for every non-target node; the sibling
+    // admissibility probes' cost class), the knob OnceLock and the router's
+    // GUC-reading arm_dop run only on actual target shapes (measured: a
+    // per-pull arm_dop cost a 2-col hash-distinct leg ~1.4x on the fleet).
+    if ::nodeagg::agg_plain_distinct_set_only(agg)
         && !::nodeagg::agg_pertrans_all_distinct_set(agg)
+        && distinct_presorted_probe_enabled()
+        && router::arm_dop(router::ArmClass::Distinct) > 0
         && !estate.es_epq_active
     {
         if let Some(scan_node) = agg.plan.plan.lefttree {
