@@ -228,3 +228,30 @@ SerialScanFoldMeta	ser_setup_ms	0.2	ms	-1784634348-6239	45f07dd71	2026-07-21	scr
 SerialScanFoldMeta	par_rate	9.7200e-6	ms/row	-1784634348-6239	45f07dd71	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	both parallel engines at parity on the anchor cell; one curve until L7 splits them	witnessed-ab
 SerialScanFoldMeta	par_cap	12	workers	-1784634348-6239	45f07dd71	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-ab
 SerialScanFoldMeta	n_min_fit	1e7	rows	-1784634348-6239	45f07dd71	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	below support (or a non-META qual posture) the term ABSTAINS	witnessed-ab
+# --- SerialTopnIntBounded (GL-COST-TOPN-1 four-posture grid folded into
+# the serial term's support; coordinator routing 2026-07-21): two
+# witnessed k-planes (uniform pseudo-random int keys, N 250k-10M x dop
+# 1-16 x LIMIT {10,1000} x postures {serial, forced-GM, pinned-runtime,
+# stock}; 50 serial:neg-ok cells). Three-way vocabulary the 2-engine
+# rt/GM curve cannot price: k=10 plane serial-dominant everywhere,
+# k=1000 plane Gather-Merge-dominant everywhere, the arm wins zero
+# best-of-four cells. Letter scratchpad/night/GL-COST-TOPN-1-letter.md.
+SerialTopnIntBounded	ser_setup_k10	1.5474	ms	-376a/-3d75/-7436/-7d0c/-4b35	27db94812	2026-07-21	scripts/sortecon-topn-ladder.sh	PGRUST_RUNTIME	the k=10 serial dominance plane (GL-COST-TOPN-1: zone walk skips ~99% of granules; flat 1.2-2.4ms across 40x N)	witnessed-ab
+SerialTopnIntBounded	ser_row_k10	1.0213e-7	ms/row	-376a/-3d75/-7436/-7d0c/-4b35	27db94812	2026-07-21	scripts/sortecon-topn-ladder.sh	PGRUST_RUNTIME	-	witnessed-ab
+SerialTopnIntBounded	gm_setup_k10	1.3707	ms	-376a/-3d75/-7436/-7d0c/-4b35	27db94812	2026-07-21	scripts/sortecon-topn-ladder.sh	PGRUST_RUNTIME	t_gather for this family prices the forced GATHER MERGE plan (the class's legacy engine of record post guard-off)	witnessed-ab
+SerialTopnIntBounded	gm_rate_k10	2.2784e-6	ms/row	-376a/-3d75/-7436/-7d0c/-4b35	27db94812	2026-07-21	scripts/sortecon-topn-ladder.sh	PGRUST_RUNTIME	-	witnessed-ab
+SerialTopnIntBounded	gm_cap_k10	6.37	workers	-376a/-3d75/-7436/-7d0c/-4b35	27db94812	2026-07-21	scripts/sortecon-topn-ladder.sh	PGRUST_RUNTIME	-	witnessed-ab
+SerialTopnIntBounded	arm_setup_k10	1.7908	ms	-376a/-3d75/-7436/-7d0c/-4b35	27db94812	2026-07-21	scripts/sortecon-topn-ladder.sh	PGRUST_RUNTIME	-	witnessed-ab
+SerialTopnIntBounded	arm_rate_k10	3.4752e-7	ms/row	-376a/-3d75/-7436/-7d0c/-4b35	27db94812	2026-07-21	scripts/sortecon-topn-ladder.sh	PGRUST_RUNTIME	-	witnessed-ab
+SerialTopnIntBounded	arm_cap_k10	1.59	workers	-376a/-3d75/-7436/-7d0c/-4b35	27db94812	2026-07-21	scripts/sortecon-topn-ladder.sh	PGRUST_RUNTIME	-	witnessed-ab
+SerialTopnIntBounded	ser_setup_k1000	17.9200	ms	-376a/-3d75/-7436/-7d0c/-4b35	27db94812	2026-07-21	scripts/sortecon-topn-ladder.sh	PGRUST_RUNTIME	the k=1000 GM-dominance plane (cutoff passes ~half the zones)	witnessed-ab
+SerialTopnIntBounded	ser_row_k1000	2.9518e-6	ms/row	-376a/-3d75/-7436/-7d0c/-4b35	27db94812	2026-07-21	scripts/sortecon-topn-ladder.sh	PGRUST_RUNTIME	-	witnessed-ab
+SerialTopnIntBounded	gm_setup_k1000	2.4454	ms	-376a/-3d75/-7436/-7d0c/-4b35	27db94812	2026-07-21	scripts/sortecon-topn-ladder.sh	PGRUST_RUNTIME	-	witnessed-ab
+SerialTopnIntBounded	gm_rate_k1000	2.4384e-6	ms/row	-376a/-3d75/-7436/-7d0c/-4b35	27db94812	2026-07-21	scripts/sortecon-topn-ladder.sh	PGRUST_RUNTIME	-	witnessed-ab
+SerialTopnIntBounded	gm_cap_k1000	6.33	workers	-376a/-3d75/-7436/-7d0c/-4b35	27db94812	2026-07-21	scripts/sortecon-topn-ladder.sh	PGRUST_RUNTIME	-	witnessed-ab
+SerialTopnIntBounded	arm_setup_k1000	19.5314	ms	-376a/-3d75/-7436/-7d0c/-4b35	27db94812	2026-07-21	scripts/sortecon-topn-ladder.sh	PGRUST_RUNTIME	-	witnessed-ab
+SerialTopnIntBounded	arm_rate_k1000	4.8864e-6	ms/row	-376a/-3d75/-7436/-7d0c/-4b35	27db94812	2026-07-21	scripts/sortecon-topn-ladder.sh	PGRUST_RUNTIME	-	witnessed-ab
+SerialTopnIntBounded	arm_cap_k1000	3.25	workers	-376a/-3d75/-7436/-7d0c/-4b35	27db94812	2026-07-21	scripts/sortecon-topn-ladder.sh	PGRUST_RUNTIME	-	witnessed-ab
+SerialTopnIntBounded	k_lo	10	rows	-376a/-3d75/-7436/-7d0c/-4b35	27db94812	2026-07-21	scripts/sortecon-topn-ladder.sh	PGRUST_RUNTIME	witnessed plane bound; the (10,1000) k-band is unwitnessed — verdict ABSTAINS (L7 owns the sweep)	witnessed-ab
+SerialTopnIntBounded	k_hi	1000	rows	-376a/-3d75/-7436/-7d0c/-4b35	27db94812	2026-07-21	scripts/sortecon-topn-ladder.sh	PGRUST_RUNTIME	-	witnessed-ab
+SerialTopnIntBounded	n_min_fit	2.5e5	rows	-376a/-3d75/-7436/-7d0c/-4b35	27db94812	2026-07-21	scripts/sortecon-topn-ladder.sh	PGRUST_RUNTIME	below support the family ABSTAINS	witnessed-ab
