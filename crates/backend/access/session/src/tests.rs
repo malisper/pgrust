@@ -572,7 +572,18 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      gang thread's implicit state; identity is PGPROC/proc-number
     //      (shared memory), not session state — the per-engagement session
     //      view is bound/unbound by the query-task binder.
-    assert_eq!(count_tree(crates), 520, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // night/cost-model-steps12 delta (521 = 520 + 1):
+    //   61. optimizer/plan/planner/src/m5_suppress.rs cost_shadow
+    //      LAST_SAMPLE — the step-2 cost-shadow EXPLAIN sample slot:
+    //      derived plan-time observability (the last covered
+    //      classification's whitelist-vs-model verdict pair), written only
+    //      while PGRUST_M5_COST_EXPLAIN is armed (default OFF — slot never
+    //      touched otherwise), cleared at every standard_planner entry and
+    //      taken (cleared) by EXPLAIN right after planning. Statement-
+    //      scoped scratch on the backend thread — same non-session class
+    //      as slot 52's debug_query_string. No session identity; never
+    //      read across a session boundary.
+    assert_eq!(count_tree(crates), 521, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

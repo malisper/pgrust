@@ -3682,6 +3682,192 @@ fn cover_class_curve(class: CoverClass) -> Option<costsize::runtime_model::Runti
     }
 }
 
+// ---------------------------------------------------------------------------
+// Step-2 shadow routing observability (runtime-cost-model design §5 step 2):
+// disagreement census + knob-gated EXPLAIN sample. PURE OBSERVATION — nothing
+// in this module feeds back into a suppression verdict, so routing is
+// byte-identical with and without it (the off-path Ir bar: an uncovered query
+// never reaches `finish`, and a covered one takes only counter increments).
+// ---------------------------------------------------------------------------
+
+pub mod cost_shadow {
+    //! Per-CoverClass whitelist-vs-model disagreement counters plus the
+    //! last-planned-sample slot the knob-gated EXPLAIN line reads.
+    //!
+    //! CENSUS: `note` is called from `finish` wherever BOTH verdicts exist
+    //! (covered class, fitted curve, cost mode not Off, floors enabled — the
+    //! floors-off measurement vehicle deliberately does not count: its
+    //! "whitelist verdict" is forced true and would poison the census).
+    //! Four cells per class:
+    //!   agree_suppress / agree_gather — both mechanisms concur;
+    //!   wl_suppress_model_gather      — whitelist says engage the runtime
+    //!                                   (suppress Gather), model says legacy;
+    //!   wl_gather_model_suppress      — whitelist says legacy, model says
+    //!                                   the runtime pays (the forgone-win
+    //!                                   direction).
+    //! Counters are process-cumulative atomics; under PGRUST_M5_SUPPRESS_TRACE
+    //! every disagreement also emits one `m5-cost-census:` stderr line with
+    //! the cumulative per-class cells (the e2e census vehicle).
+    //!
+    //! EXPLAIN SAMPLE: behind `PGRUST_M5_COST_EXPLAIN` (default OFF — any
+    //! spelling but `1`/`on` is OFF, the scanpass fail-safe idiom). When
+    //! armed, `finish` records the query's shadow sample in a thread-local
+    //! slot; `standard_planner` clears the slot at entry (stale-sample
+    //! hygiene — a query that never classifies covered must print nothing);
+    //! EXPLAIN takes it right after planning. When the knob is OFF the slot
+    //! is never touched: clear/record/take all no-op behind one cached-bool
+    //! load (the probe's own inertness idiom), and EXPLAIN output is
+    //! byte-identical to today.
+
+    use super::CoverClass;
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// One census-indexed slot per CoverClass variant (see `class_idx`).
+    const N_CLASSES: usize = 13;
+
+    pub(super) fn class_idx(class: CoverClass) -> usize {
+        match class {
+            CoverClass::CbPlainAggFold => 0,
+            CoverClass::CbGroupedAggIntKeys => 1,
+            CoverClass::CbGroupedAggTextKey => 2,
+            CoverClass::CbGroupedAggTopN => 3,
+            CoverClass::CbDistinctIntKeys => 4,
+            CoverClass::HeapPlainCountStar => 5,
+            CoverClass::HeapCmpFoldPrefix => 6,
+            CoverClass::CbTopnBoundedIntKeys => 7,
+            CoverClass::CbHashJoinPlainAgg => 8,
+            CoverClass::CbHashJoinMultiBuild => 9,
+            CoverClass::CbHashJoinGroupedAgg => 10,
+            CoverClass::AggPolyHeapPlain => 11,
+            CoverClass::CbMetaFooterAgg => 12,
+        }
+    }
+
+    pub const CLASS_NAMES: [&str; N_CLASSES] = [
+        "CbPlainAggFold",
+        "CbGroupedAggIntKeys",
+        "CbGroupedAggTextKey",
+        "CbGroupedAggTopN",
+        "CbDistinctIntKeys",
+        "HeapPlainCountStar",
+        "HeapCmpFoldPrefix",
+        "CbTopnBoundedIntKeys",
+        "CbHashJoinPlainAgg",
+        "CbHashJoinMultiBuild",
+        "CbHashJoinGroupedAgg",
+        "AggPolyHeapPlain",
+        "CbMetaFooterAgg",
+    ];
+
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    static AGREE_SUPPRESS: [AtomicU64; N_CLASSES] = [ZERO; N_CLASSES];
+    static AGREE_GATHER: [AtomicU64; N_CLASSES] = [ZERO; N_CLASSES];
+    static WL_SUPPRESS_MODEL_GATHER: [AtomicU64; N_CLASSES] = [ZERO; N_CLASSES];
+    static WL_GATHER_MODEL_SUPPRESS: [AtomicU64; N_CLASSES] = [ZERO; N_CLASSES];
+
+    /// Count one (whitelist verdict, model verdict) pair. Returns the
+    /// (wl_suppress_model_gather, wl_gather_model_suppress) cumulative pair
+    /// for the class so the caller's trace line can print it without a
+    /// second load.
+    pub(super) fn note(class: CoverClass, wl_suppress: bool, model_suppress: bool) -> (u64, u64) {
+        let i = class_idx(class);
+        match (wl_suppress, model_suppress) {
+            (true, true) => {
+                AGREE_SUPPRESS[i].fetch_add(1, Ordering::Relaxed);
+            }
+            (false, false) => {
+                AGREE_GATHER[i].fetch_add(1, Ordering::Relaxed);
+            }
+            (true, false) => {
+                WL_SUPPRESS_MODEL_GATHER[i].fetch_add(1, Ordering::Relaxed);
+            }
+            (false, true) => {
+                WL_GATHER_MODEL_SUPPRESS[i].fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        (
+            WL_SUPPRESS_MODEL_GATHER[i].load(Ordering::Relaxed),
+            WL_GATHER_MODEL_SUPPRESS[i].load(Ordering::Relaxed),
+        )
+    }
+
+    /// One census row (cumulative, process-wide).
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct CensusRow {
+        pub class: &'static str,
+        pub agree_suppress: u64,
+        pub agree_gather: u64,
+        pub wl_suppress_model_gather: u64,
+        pub wl_gather_model_suppress: u64,
+    }
+
+    /// The full census snapshot (all classes, including all-zero rows).
+    pub fn snapshot() -> [CensusRow; N_CLASSES] {
+        core::array::from_fn(|i| CensusRow {
+            class: CLASS_NAMES[i],
+            agree_suppress: AGREE_SUPPRESS[i].load(Ordering::Relaxed),
+            agree_gather: AGREE_GATHER[i].load(Ordering::Relaxed),
+            wl_suppress_model_gather: WL_SUPPRESS_MODEL_GATHER[i].load(Ordering::Relaxed),
+            wl_gather_model_suppress: WL_GATHER_MODEL_SUPPRESS[i].load(Ordering::Relaxed),
+        })
+    }
+
+    /// The shadow sample of the last covered classification this thread
+    /// planned — everything the EXPLAIN line prints.
+    #[derive(Clone, Copy, Debug)]
+    pub struct ExplainSample {
+        pub class: &'static str,
+        pub ratio: f64,
+        pub model_suppress: bool,
+        pub whitelist_suppress: bool,
+        pub decided_by: &'static str,
+        pub rows: f64,
+        pub dop: i32,
+    }
+
+    /// The default-OFF spelling rule, factored pure for exhaustive unit
+    /// tests (the scanpass idiom): ON iff exactly `1` or `on`.
+    pub(super) fn explain_spelling_on(v: Option<&str>) -> bool {
+        matches!(v, Some("1") | Some("on"))
+    }
+
+    /// `PGRUST_M5_COST_EXPLAIN` (default OFF): arm the EXPLAIN sample slot
+    /// + the "M5 Cost Route" line in the explain crate.
+    pub fn explain_armed() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| {
+            explain_spelling_on(std::env::var("PGRUST_M5_COST_EXPLAIN").as_deref().ok())
+        })
+    }
+
+    thread_local! {
+        /// Non-session TLS (census-classified in access/session tests):
+        /// derived plan-time observability, cleared at every planner entry
+        /// while armed; never read across a session boundary.
+        static LAST_SAMPLE: Cell<Option<ExplainSample>> = const { Cell::new(None) };
+    }
+
+    /// Stale-sample hygiene at `standard_planner` entry. One cached-bool
+    /// load when the knob is off.
+    pub fn clear_last_sample() {
+        if explain_armed() {
+            LAST_SAMPLE.set(None);
+        }
+    }
+
+    pub(super) fn record_sample(sample: ExplainSample) {
+        if explain_armed() {
+            LAST_SAMPLE.set(Some(sample));
+        }
+    }
+
+    /// Take (and clear) the last sample. `None` whenever the knob is off.
+    pub fn take_last_sample() -> Option<ExplainSample> {
+        if explain_armed() { LAST_SAMPLE.take() } else { None }
+    }
+}
+
 /// Matrix consult + optional trace, shared tail.
 fn finish(
     run: &mut PlannerRun<'_>,
@@ -3720,13 +3906,41 @@ fn finish(
         if !matches!(rtm::cost_route_mode(), rtm::CostRouteMode::Off) {
             if let Some(curve) = cover_class_curve(class) {
                 let v = rtm::cost_route_verdict(curve, rows, dop);
+                // What the model WOULD do: the curve verdict composed with
+                // the rowdrive block-floor ADMISSION MIRROR, which rides
+                // every mode (m5-5 reading #3; TSV admission_min_pages row).
+                let cost_suppress = v.suppress
+                    && (class != CoverClass::HeapPlainCountStar
+                        || pages >= rtm::HEAP_COUNT_ADMISSION_MIN_PAGES);
                 if rtm::cost_route_decides(curve) && size_floors_enabled() {
-                    // The rowdrive block-floor ADMISSION MIRROR rides every
-                    // mode (m5-5 reading #3; TSV admission_min_pages row).
-                    suppress = v.suppress
-                        && (class != CoverClass::HeapPlainCountStar
-                            || pages >= rtm::HEAP_COUNT_ADMISSION_MIN_PAGES);
+                    suppress = cost_suppress;
                     decided_by = "cost";
+                }
+                // Step-2 shadow census + EXPLAIN sample (cost_shadow module
+                // doc): observation only — `suppress` is already decided
+                // above and is never read back out of this block. Floors-off
+                // measurement runs do not count (forced-true whitelist
+                // verdicts would poison the census).
+                if size_floors_enabled() {
+                    let (n_ws_mg, n_wg_ms) = cost_shadow::note(class, floor_ok, cost_suppress);
+                    if trace_armed() && floor_ok != cost_suppress {
+                        eprintln!(
+                            "m5-cost-census: class={class:?} wl={} model={} \
+                             n_wl_suppress_model_gather={n_ws_mg} \
+                             n_wl_gather_model_suppress={n_wg_ms}",
+                            if floor_ok { "suppress" } else { "gather" },
+                            if cost_suppress { "suppress" } else { "gather" },
+                        );
+                    }
+                    cost_shadow::record_sample(cost_shadow::ExplainSample {
+                        class: cost_shadow::CLASS_NAMES[cost_shadow::class_idx(class)],
+                        ratio: v.ratio,
+                        model_suppress: cost_suppress,
+                        whitelist_suppress: floor_ok,
+                        decided_by,
+                        rows,
+                        dop,
+                    });
                 }
                 if trace_armed() {
                     eprintln!(
@@ -5422,6 +5636,74 @@ mod tests {
         }
     }
 
+    /// Step-2 census plumbing: every direction lands in its own cell, and
+    /// the note() return carries the cumulative disagreement pair. Uses
+    /// CbMetaFooterAgg — the one curveless class, which production code can
+    /// never note() (finish only notes inside `if let Some(curve)`), so the
+    /// deltas are interference-free even if other tests plan queries.
+    #[test]
+    fn cost_shadow_census_counts_directions() {
+        use cost_shadow::{note, snapshot, class_idx};
+        let c = CoverClass::CbMetaFooterAgg;
+        let i = class_idx(c);
+        let before = snapshot()[i];
+        assert_eq!(before.class, "CbMetaFooterAgg");
+        note(c, true, true);
+        note(c, false, false);
+        note(c, false, false);
+        let (ws_mg, wg_ms) = note(c, true, false);
+        assert_eq!((ws_mg, wg_ms), (
+            before.wl_suppress_model_gather + 1,
+            before.wl_gather_model_suppress,
+        ));
+        let (ws_mg, wg_ms) = note(c, false, true);
+        assert_eq!((ws_mg, wg_ms), (
+            before.wl_suppress_model_gather + 1,
+            before.wl_gather_model_suppress + 1,
+        ));
+        let after = snapshot()[i];
+        assert_eq!(after.agree_suppress, before.agree_suppress + 1);
+        assert_eq!(after.agree_gather, before.agree_gather + 2);
+        assert_eq!(after.wl_suppress_model_gather, before.wl_suppress_model_gather + 1);
+        assert_eq!(after.wl_gather_model_suppress, before.wl_gather_model_suppress + 1);
+    }
+
+    /// The census index and the printable class-name table cannot drift
+    /// from the CoverClass vocabulary (Debug names ARE the census names).
+    #[test]
+    fn cost_shadow_class_names_match_cover_classes() {
+        let mut seen = std::collections::BTreeSet::new();
+        for row in BOOTSTRAP_MATRIX {
+            let i = cost_shadow::class_idx(row.class);
+            assert_eq!(
+                cost_shadow::CLASS_NAMES[i],
+                format!("{:?}", row.class),
+                "census name drift at index {i}"
+            );
+            assert!(seen.insert(i), "duplicate census index {i}");
+        }
+        assert_eq!(seen.len(), BOOTSTRAP_MATRIX.len());
+    }
+
+    /// The EXPLAIN knob is default OFF (exact-spelling arm, the scanpass
+    /// idiom), and while unarmed the sample slot is never readable — the
+    /// EXPLAIN surface stays byte-identical at default even if a sample
+    /// were recorded.
+    #[test]
+    fn cost_shadow_explain_knob_default_off() {
+        assert!(!cost_shadow::explain_spelling_on(None));
+        for v in ["0", "off", "", "true", "ON", "yes"] {
+            assert!(!cost_shadow::explain_spelling_on(Some(v)), "spelling {v:?}");
+        }
+        assert!(cost_shadow::explain_spelling_on(Some("1")));
+        assert!(cost_shadow::explain_spelling_on(Some("on")));
+        // The test binary runs with the env unset: armed getters resolve OFF,
+        // so clear/record/take are all inert no-ops.
+        assert!(!cost_shadow::explain_armed());
+        cost_shadow::clear_last_sample();
+        assert!(cost_shadow::take_last_sample().is_none());
+    }
+
     /// The rectangle/admission/hold values the cost-route does NOT retire
     /// must match their rows in the constants table of record
     /// (crates/backend/optimizer/path/costsize/src/runtime-cost-constants.tsv) — same tie as
@@ -5436,7 +5718,7 @@ mod tests {
                 continue;
             }
             let cols: Vec<&str> = line.split('\t').collect();
-            assert_eq!(cols.len(), 10, "malformed TSV row: {line}");
+            assert_eq!(cols.len(), 11, "malformed TSV row: {line}");
             vals.insert((cols[0].to_string(), cols[1].to_string()), cols[2].to_string());
         }
         let get = |c: &str, t: &str| {
