@@ -725,11 +725,22 @@ mod tests {
                     );
                 }
                 // The R1 serial-regime terms are witnessed-v2 for EVERY
-                // class — the L6 supersession reworked the ARM, not the
-                // serial lane the ser legs measured.
+                // class the R1 wave fitted — the L6 supersession reworked
+                // the ARM, not the serial lane the ser legs measured.
+                // CARVE (GL-MBSEAT-1 boarding): CbHashJoinGroupedAgg
+                // boarded AFTER the R1 wave with no witnessed serial cell;
+                // its ser rows are abstain placeholders (SERIAL_FIT_UNUSABLE
+                // fails toward the incumbent) carried as unwitnessed-debt
+                // until the R1B refit row lands — the debt census below
+                // pins the pair so it cannot rot silently.
                 if matches!(term, "ser_setup" | "ser_row") {
+                    let want = if rc == RuntimeClass::CbHashJoinGroupedAgg {
+                        "unwitnessed-debt"
+                    } else {
+                        "witnessed-v2"
+                    };
                     assert_eq!(
-                        witness, "witnessed-v2",
+                        witness, want,
                         "serial-regime term {class}.{term} witness status"
                     );
                 }
@@ -768,7 +779,14 @@ mod tests {
         // this pin flips WITH the TSV row, never by drift.
         assert_eq!(
             debt,
-            vec![("CbHashJoinPlainAgg".to_string(), "seat_overlap_cell".to_string())],
+            vec![
+                ("CbHashJoinPlainAgg".to_string(), "seat_overlap_cell".to_string()),
+                // GL-MBSEAT-1 boarding: the seated class's ser placeholders
+                // (abstain via SERIAL_FIT_UNUSABLE) — retired by the R1B
+                // refit row, flipping WITH the TSV rows, never by drift.
+                ("CbHashJoinGroupedAgg".to_string(), "ser_setup".to_string()),
+                ("CbHashJoinGroupedAgg".to_string(), "ser_row".to_string()),
+            ],
             "the unwitnessed-debt census changed"
         );
     }
@@ -782,10 +800,13 @@ mod tests {
     /// and the predicted ratio legitimately WORSENS as dop widens.
     /// Witnessed: the L6 four-posture grid @ 27db94812 (rt/GM rising
     /// 6.80->9.77 at 1M across dop 4->16).
+    const LEGACY_OUTSCALES_ARM: &[RuntimeClass] = &[RuntimeClass::CbTopnBoundedIntKeys];
     // GL-MBSEAT-1: the seated grouped-join class's legacy reference
     // genuinely scaled to w16 in its witnessed grid (gather+w16 at 5M),
-    // so its fit sits AT the bound like the topn class.
-    const LEGACY_OUTSCALES_ARM: &[RuntimeClass] =
+    // so its fit sits AT the l_cap bound like the topn class — but its
+    // RATIO shape is the normal one (improves dop4 -> dop16), so it is
+    // NOT in the outscales set.
+    const L_CAP_AT_FIT_BOUND: &[RuntimeClass] =
         &[RuntimeClass::CbTopnBoundedIntKeys, RuntimeClass::CbHashJoinGroupedAgg];
 
     /// Model-shape sanity (charter: monotonicity unit tests): both cost
@@ -801,7 +822,7 @@ mod tests {
         for &class in RuntimeClass::ALL.iter() {
             let m = class_model(class);
             assert!(m.w_row > 0.0 && m.l_setup > 0.0 && m.c_engage >= 0.0, "{class:?}");
-            if LEGACY_OUTSCALES_ARM.contains(&class) {
+            if L_CAP_AT_FIT_BOUND.contains(&class) {
                 assert!(m.l_cap <= 16.0, "{class:?}: l_cap capped at the fit bound");
             } else {
                 assert!(m.l_cap < 16.0, "{class:?}: l_cap must saturate below dop16");
