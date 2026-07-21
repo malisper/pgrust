@@ -166,6 +166,10 @@ pub(super) struct RuntimeDistinctShared {
     /// only). The pressure law itself is untouched: a real budget crossing
     /// still spills (or refuses) through the same path.
     locality_cap: Option<usize>,
+    /// GL-LOWDIST-1: this engagement seals LIVE-form tables and its combine
+    /// takes the size-asymmetric steal path (knob ON and resolved dop
+    /// within the band bound — decided once at engage).
+    lowwidth: bool,
     /// Spill observability (gate-record counters, the R4 line).
     spill_epochs: AtomicU64,
     spilled_bytes: AtomicU64,
@@ -337,7 +341,15 @@ impl runtime::SealedParallelSink for RuntimeDistinctShared {
         if self.failed.load(Ordering::SeqCst) || self.crossed.load(Ordering::SeqCst) {
             return DistinctSealed { table: pd_empty_grouped_table(&self.spec), spill: None };
         }
-        let r = catch_unwind(AssertUnwindSafe(|| pd.freeze()));
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            if self.lowwidth {
+                // GL-LOWDIST-1: LIVE-form seal — the combine steals whole
+                // sets instead of re-inserting every donor's values.
+                pd.freeze_live()
+            } else {
+                pd.freeze()
+            }
+        }));
         match r {
             // freeze() sees a never-spilled builder (its `!ever_spilled`
             // invariant holds: the M3.5 spill drains set VALUES only and
@@ -505,7 +517,19 @@ impl RuntimeDistinctShared {
             .sum();
         if spilled_bytes == 0 {
             // Nothing spilled into this partition: the donor merge verbatim.
-            let refs: Vec<&PdHandedTable> = sealed.iter().map(|s| &s.table).collect();
+            let mut refs: Vec<&PdHandedTable> = sealed.iter().map(|s| &s.table).collect();
+            if self.lowwidth {
+                // GL-LOWDIST-1: LARGEST donor first — the bucket merger
+                // steals the first live donor's set per group (its values
+                // never re-hash), so ordering by per-bucket value count
+                // maximizes the stolen volume. O(donors x bucket groups)
+                // partition-index reads; group order within the bucket is
+                // first-seen (a non-surface — the adopt/emit tails order
+                // groups themselves; set replays are order-insensitive).
+                refs.sort_by_cached_key(|t| {
+                    core::cmp::Reverse(pd_bucket_precount(&self.spec, t, b).1)
+                });
+            }
             return Ok(DstCombine::Done(
                 self.finish_combine(pd_merge_bucket_refs(&self.spec, &refs, b))?,
             ));
@@ -1445,6 +1469,65 @@ fn distinct_spill_enabled() -> bool {
     crate::once_val(&ON, || std::env::var("PGRUST_RUNTIME_DISTINCT_SPILL").as_deref() != Ok("0"))
 }
 
+/// GL-LOWDIST-1 low-width combine kill switch (t35 idiom — DEFAULT OFF; a
+/// flip is a letter-gated re-baseline): `PGRUST_RUNTIME_DISTINCT_LOWWIDTH=1`
+/// (or `on`) arms the size-asymmetric low-width combine for the distinct
+/// sinks, ONLY at engagements whose resolved dop is within the band bound
+/// (`PGRUST_RUNTIME_DISTINCT_LOWWIDTH_MAXDOP`, default 8 — the pardistinct
+/// low-DOP band is dop<12; dop-12+ engagements are already runtime-won and
+/// stay byte-untouched by admission). Returns the band bound when armed,
+/// `None` when off (default) = every path byte-identical to today.
+pub(super) fn distinct_lowwidth_maxdop() -> Option<i32> {
+    static V: OnceLock<Option<i32>> = OnceLock::new();
+    crate::once_val(&V, || {
+        if !matches!(
+            std::env::var("PGRUST_RUNTIME_DISTINCT_LOWWIDTH").as_deref(),
+            Ok("1") | Ok("on")
+        ) {
+            return None;
+        }
+        Some(
+            std::env::var("PGRUST_RUNTIME_DISTINCT_LOWWIDTH_MAXDOP")
+                .ok()
+                .and_then(|v| v.trim().parse::<i32>().ok())
+                .filter(|&n| n > 0)
+                .unwrap_or(8),
+        )
+    })
+}
+
+/// GL-LOWDIST-1 leader-parity participant bump (knob-gated, band-only —
+/// above the band or knob-off returns `dop` untouched). The legacy
+/// comparison arm at mpwpg=N runs N workers PLUS a participating leader
+/// (the pardistinct hybrid's leader builds its own partial on the shared
+/// claim; plain per-tuple GM leaders drain and fold), while the runtime
+/// sink PARKS the leader in the waiter loop — an engagement at dop=N
+/// spends N participants against legacy's N+1. The baseline attribution
+/// leg (GLLOWDIST rtp1 rows, jobs @ 65e5390ac) measured that asymmetry as
+/// MOST of the grouped low-DOP band: dop2 1.25-1.33x -> 0.83-0.92x, dop4
+/// 1.07-1.18x -> 0.89-0.99x at participant parity. The bump restores
+/// parity — and the C-shaped memory envelope (N+1 processes x work_mem is
+/// exactly what the legacy plan spends). Clamped to the pool width.
+/// Returns `(admitted dop, in_band)` — the band predicate is evaluated on
+/// the PRE-bump dop (the routed engagement width), so a dop-8 engagement
+/// bumped to 9 participants still rides the low-width combine.
+pub(super) fn lowwidth_leader_parity_dop(
+    rt: &runtime::Runtime,
+    dop: i32,
+    arm: &str,
+) -> (i32, bool) {
+    match distinct_lowwidth_maxdop() {
+        Some(max) if dop <= max => {
+            let bumped = (dop + 1).min(rt.nthreads() as i32).max(dop);
+            if bumped != dop {
+                lane_trace(&format!("{arm}: low-width leader-parity dop {dop}->{bumped}"));
+            }
+            (bumped, true)
+        }
+        _ => (dop, false),
+    }
+}
+
 /// `PGRUST_RUNTIME_DISTINCT_LOCALITY_CAP` (bytes): unset/0 = OFF (the
 /// budget-epoch cadence exactly — the DEFAULT), N = working-set bound
 /// (floored at 64KB). Engagement is further gated at engage(): DOP>1 AND
@@ -1908,13 +1991,16 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     // DOP-elastic admission (tails192 #5): floors above ran against the
     // POOL dop; arm only what the work can feed (kill: PGRUST_RUNTIME_ELASTIC_DOP=0).
     let dop = super::runtime_scan::elastic_dop(dop, total_granules);
+    // GL-LOWDIST-1 leader-parity bump (knob-gated, band-only).
+    let (dop, lowwidth) = lowwidth_leader_parity_dop(rt, dop, "runtime-distinct");
     if ::nodeagg::agg_is_done(agg) {
         return Ok(Some(None));
     }
 
     // --- Engage.
     engage(
-        agg, estate, rt, dop, total_granules, starts, spec, order, paremit, topn, scan_node, ea,
+        agg, estate, rt, dop, lowwidth, total_granules, starts, spec, order, paremit, topn,
+        scan_node, ea,
     )
 }
 
@@ -1924,6 +2010,7 @@ fn engage<'mcx>(
     estate: &mut EStateData<'mcx>,
     rt: &'static Arc<runtime::Runtime>,
     dop: i32,
+    lowwidth: bool,
     total_granules: u64,
     starts: Vec<u64>,
     spec: Arc<PdSpec>,
@@ -1990,6 +2077,12 @@ fn engage<'mcx>(
         merged_bytes: AtomicUsize::new(0),
         spill_set,
         locality_cap,
+        lowwidth: {
+            if lowwidth {
+                lane_trace(&format!("runtime-distinct: low-width combine armed (dop={dop})"));
+            }
+            lowwidth
+        },
         spill_epochs: AtomicU64::new(0),
         spilled_bytes: AtomicU64::new(0),
         combine_splits: AtomicU64::new(0),

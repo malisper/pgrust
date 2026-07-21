@@ -47,8 +47,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::nodeagg::plainpd::{
-    plain_pd_combine, plain_pd_derive_spec, PlainPdLocal, PlainPdMerged, PlainPdSealed,
-    PlainPdSpec, PLAIN_PD_PARTS,
+    plain_pd_combine, plain_pd_combine_steal, plain_pd_derive_spec, PlainPdLocal, PlainPdMerged,
+    PlainPdSealed, PlainPdSpec, PLAIN_PD_PARTS,
 };
 use ::types_error::{PgError, PgResult, ERROR};
 use ::types_nodes::plannodes::PlannedStmt;
@@ -83,6 +83,10 @@ struct RuntimePlainDistinctShared {
     /// the worker key staging may sit at an arbitrary scan column —
     /// `spec.att`). False = the historical count(DISTINCT) arm, untouched.
     sd_values: bool,
+    /// GL-LOWDIST-1: this engagement's combine takes the size-asymmetric
+    /// low-width path (knob ON and resolved dop within the band bound —
+    /// decided once at engage; see runtime_distinct::distinct_lowwidth_maxdop).
+    lowwidth: bool,
     /// Helpers whose binder validate() refused (before any claim).
     refused: AtomicUsize,
     /// Helpers that bound and entered the drive.
@@ -198,7 +202,11 @@ impl runtime::SealedParallelSink for RuntimePlainDistinctShared {
             return;
         }
         let r = catch_unwind(AssertUnwindSafe(|| {
-            plain_pd_combine(self.spec.is_bytes(), part as usize, sealed)
+            if self.lowwidth {
+                plain_pd_combine_steal(self.spec.is_bytes(), part as usize, sealed)
+            } else {
+                plain_pd_combine(self.spec.is_bytes(), part as usize, sealed)
+            }
         }));
         match r {
             Ok(m) => {
@@ -850,12 +858,15 @@ pub(super) fn try_own_plain_distinct_runtime<'mcx>(
     // DOP-elastic admission (tails192 #5): floors above ran against the
     // POOL dop; arm only what the work can feed (kill: PGRUST_RUNTIME_ELASTIC_DOP=0).
     let dop = super::runtime_scan::elastic_dop(dop, total_granules);
+    // GL-LOWDIST-1 leader-parity bump (knob-gated, band-only).
+    let (dop, lowwidth) =
+        super::runtime_distinct::lowwidth_leader_parity_dop(rt, dop, "runtime-plaindistinct");
     if ::nodeagg::agg_is_done(agg) {
         return Ok(Some(None));
     }
 
     // --- Engage.
-    engage(agg, estate, rt, dop, total_granules, starts, spec, scan_node, force_set, false)
+    engage(agg, estate, rt, dop, lowwidth, total_granules, starts, spec, scan_node, force_set, false)
 }
 
 /// SE-T2AGG CAR A: the plain SELECT-DISTINCT sub-arm — `Agg(AGG_HASHED,
@@ -996,6 +1007,9 @@ pub(super) fn try_own_plain_selectdistinct_runtime<'mcx>(
         return Ok(false);
     }
     let dop = super::runtime_scan::elastic_dop(dop, total_granules);
+    // GL-LOWDIST-1 leader-parity bump (knob-gated, band-only).
+    let (dop, lowwidth) =
+        super::runtime_distinct::lowwidth_leader_parity_dop(rt, dop, "runtime-plaindistinct");
     if ::nodeagg::agg_is_done(agg) {
         return Ok(true);
     }
@@ -1007,6 +1021,7 @@ pub(super) fn try_own_plain_selectdistinct_runtime<'mcx>(
         estate,
         rt,
         dop,
+        lowwidth,
         total_granules,
         starts,
         spec,
@@ -1023,6 +1038,7 @@ fn engage<'mcx>(
     estate: &mut EStateData<'mcx>,
     rt: &'static Arc<runtime::Runtime>,
     dop: i32,
+    lowwidth: bool,
     total_granules: u64,
     starts: Vec<u64>,
     spec: Arc<PlainPdSpec>,
@@ -1052,6 +1068,12 @@ fn engage<'mcx>(
         eflags: estate.es_top_eflags,
         spec: Arc::clone(&spec),
         sd_values: emit_values,
+        lowwidth: {
+            if lowwidth {
+                lane_trace(&format!("runtime-plaindistinct: low-width combine armed (dop={dop})"));
+            }
+            lowwidth
+        },
         refused: AtomicUsize::new(0),
         started: AtomicUsize::new(0),
         exited: AtomicUsize::new(0),
