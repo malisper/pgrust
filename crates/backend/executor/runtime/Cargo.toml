@@ -30,6 +30,10 @@ postgres_seams = { path = "../../tcop/postgres_seams" }
 # lifecycle directly and observe completion via try_wait, and the waiter
 # crate's global slot surface is itself cfg(not(loom)).
 parallel = { path = "../../access/transam/parallel" }
+# runtime_enabled() reads the registered `pgrust.runtime` GUC's backing cell
+# (t34-config: ONE authority for the runtime master switch; PGRUST_RUNTIME
+# seeds the cell at boot). Cell-only dep — no registry/store machinery.
+guc_tables = { path = "../../utils/misc/guc_tables" }
 waiter = { path = "../../storage/ipc/waiter" }
 # §2.9 uring duties of the worker loop (src/io.rs): ring lifecycle +
 # boundary-reap calls, and the io_permit_release/reacquire (IoGuard) seam

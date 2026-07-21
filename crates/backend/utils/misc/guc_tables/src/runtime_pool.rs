@@ -243,6 +243,33 @@ pub fn parallel_engine_is_runtime() -> bool {
     crate::backing::pgrust_parallel_engine() == crate::consts::PARALLEL_ENGINE_RUNTIME
 }
 
+// t34-config review, defect 3 (dual authority): the M5-3 planner probe used
+// to key off the `pgrust.runtime` GUC alone while the pool spawn ALSO
+// required the legacy env read — a mismatch suppressed Gather with no pool
+// live (silent serial). The GUC cell is now the ONE authority for "runtime
+// requested" (env is a boot seed only), and this flag is the authority for
+// "pool ACTUALLY live", published by the postmaster's rtpool start
+// (launch_backend::rtpool::start) after the workers spawn. guc_tables cannot
+// see the pool object itself (layering), so the pool exports its liveness
+// here — the plan-time twin of the router's `runtime::global().is_some()`.
+static RUNTIME_POOL_LIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Postmaster-side publication: the runtime worker pool spawned. Called
+/// exactly once by `launch_backend::rtpool::start`; process-lifetime (the
+/// production pool is never torn down).
+pub fn set_runtime_pool_live() {
+    RUNTIME_POOL_LIVE.store(true, std::sync::atomic::Ordering::Release);
+}
+
+/// Whether the process runtime worker pool is live (spawned and published).
+/// False in every pool-less process — `pgrust.runtime=off`, spawn failure,
+/// or unit tests — so plan-time consumers (the M5-3 suppression probe) can
+/// require the pool they hand work to.
+pub fn runtime_pool_live() -> bool {
+    RUNTIME_POOL_LIVE.load(std::sync::atomic::Ordering::Acquire)
+}
+
 /// Per-arm enabled predicates for the M5-1 router's engine=runtime layer:
 /// the SAME kill-switch + lane-master gates the bench getters embed, exposed
 /// so the router honors `PGRUST_RUNTIME_*` kills when arming at

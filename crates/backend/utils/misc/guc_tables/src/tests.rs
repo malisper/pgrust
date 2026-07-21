@@ -233,6 +233,23 @@ fn setting_names_are_unique() {
 }
 
 #[test]
+fn m5_probe_requires_a_live_pool() {
+    // t34-config review, defect 3: with every GUC at its default
+    // (parallel_engine=runtime, pgrust.runtime=on, lane_executor=on) but NO
+    // pool spawned — exactly a unit-test process — the M5-3 suppression
+    // probe must stay inert: a suppressed Gather with no pool to pick the
+    // plan up is silent serial execution.
+    assert!(crate::runtime_pool::parallel_engine_is_runtime());
+    assert!(crate::backing::pgrust_runtime());
+    assert!(!crate::runtime_pool::runtime_pool_live());
+    assert!(!crate::parallel_engine::m5_gather_suppression_active());
+    // Once the postmaster's rtpool start publishes liveness, the probe arms
+    // (process-lifetime flag: production never unsets it, so no restore).
+    crate::runtime_pool::set_runtime_pool_live();
+    assert!(crate::parallel_engine::m5_gather_suppression_active());
+}
+
+#[test]
 fn lz4_build_config_is_reflected_in_option_sets() {
     let opts = find("default_toast_compression").options().unwrap().entries();
     assert!(!opts.iter().any(|o| o.name == "lz4"));

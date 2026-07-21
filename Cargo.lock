@@ -15334,6 +15334,7 @@ name = "runtime"
 version = "0.0.0"
 dependencies = [
  "aio_seams",
+ "guc_tables",
  "init_small",
  "loom",
  "parallel",
