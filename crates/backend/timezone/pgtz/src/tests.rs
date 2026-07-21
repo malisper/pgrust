@@ -76,6 +76,33 @@ fn tzset_offset_builds_iso_abbreviation() {
     assert_eq!(odd.name(), b"<+01:01:01>-01:01:01");
 }
 
+// Regression: the pg_timezone_abbrevs clock.rs:32 panic (fleet job
+// pgrust-fast-tests-18ae4c1cf2-1784615648-0f06). DynamicZoneAbbrev caches
+// `&'static PgTz` in the PROCESS-shared zone-abbreviation table, so pg_tzset
+// pointers must be process-permanent — one entry per zone for every thread,
+// still valid after the resolving session/thread is gone. The old
+// session-arena cache handed out a different, session-lifetime pointer per
+// thread; the first resolver's death left the shared cache dangling and
+// localsub read garbage `defaulttype`.
+#[test]
+fn tzset_pointers_are_process_permanent_across_threads() {
+    setup();
+    let from_thread = std::thread::spawn(|| {
+        pg_tzset(b"America/Montevideo").expect("zone loads") as *const PgTz as usize
+    })
+    .join()
+    .unwrap();
+    let here = pg_tzset(b"America/Montevideo").expect("zone loads");
+    assert_eq!(
+        from_thread, here as *const PgTz as usize,
+        "one permanent cache entry per zone, process-wide"
+    );
+    // The panic path: localsub -> ttis[defaulttype]. Prove the shared pointee
+    // is alive and coherent after the resolving thread exited.
+    let tm = localtime::pg_localtime(1_710_054_000, here).unwrap();
+    assert_eq!(tm.tm_zone, Some("-03"));
+}
+
 #[test]
 fn enumerate_walks_the_tree() {
     setup();

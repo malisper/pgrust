@@ -12690,7 +12690,6 @@ dependencies = [
  "guc_tables",
  "init_small",
  "localtime",
- "mcx",
  "pg_path",
  "pgstrcasecmp",
  "pgtz_seams",
