@@ -505,6 +505,7 @@ mod tests {
     fn witness_census_is_pinned() {
         let tsv = include_str!("../../../../../../crates/backend/optimizer/path/costsize/src/runtime-cost-constants.tsv");
         let mut unwitnessed = Vec::new();
+        let mut debt = Vec::new();
         for line in tsv.lines() {
             if line.starts_with('#') || line.trim().is_empty() || line.starts_with("class\t") {
                 continue;
@@ -516,9 +517,13 @@ mod tests {
                 matches!(
                     witness,
                     "witnessed-v2" | "witnessed-ab" | "unwitnessed-reuse" | "structural"
+                        | "unwitnessed-debt"
                 ),
                 "unknown witness status {witness:?} in row: {line}"
             );
+            if witness == "unwitnessed-debt" {
+                debt.push((class.to_string(), term.to_string()));
+            }
             if RuntimeClass::ALL.iter().any(|c| c.name() == class)
                 && matches!(term, "c_engage" | "w_row" | "l_setup" | "l_cap" | "n_min_fit")
             {
@@ -548,6 +553,16 @@ mod tests {
                 "unwitnessed-reuse class {class} must not be in the default decide list"
             );
         }
+        // The pinned-debt census: exactly the t36 seat-vs-curve overlap
+        // cell (hashjoin 1M@dop4 — seat band witnessed >= 2.5M only, curve
+        // witnessed a 1.32x loss). Retiring it requires the witnessed cell
+        // (ladder spec L5) or a curve gate on the seat path — either way
+        // this pin flips WITH the TSV row, never by drift.
+        assert_eq!(
+            debt,
+            vec![("CbHashJoinPlainAgg".to_string(), "seat_overlap_cell".to_string())],
+            "the unwitnessed-debt census changed"
+        );
     }
 
     /// Model-shape sanity (charter: monotonicity unit tests): both cost
