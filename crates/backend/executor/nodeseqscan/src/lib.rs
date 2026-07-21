@@ -4013,6 +4013,31 @@ pub fn seq_scan_cb_drive_counters(node: &SeqScanState<'_>) -> Option<(u64, u64, 
         .and_then(::tableam::table_scan_cb_drive_counters)
 }
 
+/// Direct bounded top-N granule drive (the runtime sort arm's
+/// PGRUST_RUNTIME_TOPN_HEAP feed): the current morsel claim's next granule
+/// whole — (nrows, rowref_base) — no window/SoA staging. The scan must be
+/// positioned by `seq_scan_set_morsel_range` first (which opens the desc).
+pub fn seq_scan_topn_direct_next_granule(
+    node: &mut SeqScanState<'_>,
+) -> PgResult<Option<(u32, u64)>> {
+    ::tableam::table_scan_topn_direct_next_granule(
+        node.ss.ss_currentScanDesc.as_mut().expect("morsel-positioned scan desc"),
+    )
+}
+
+/// The decoded datum lane of scan column `col` (0-based) for the granule
+/// `seq_scan_topn_direct_next_granule` just handed out. None = dict column
+/// (the caller fails closed to the staged feed).
+pub fn seq_scan_topn_direct_lane<'a>(
+    node: &'a mut SeqScanState<'_>,
+    col: usize,
+) -> Option<&'a [::datum::Datum]> {
+    ::tableam::table_scan_topn_direct_lane(
+        node.ss.ss_currentScanDesc.as_mut().expect("morsel-positioned scan desc"),
+        col,
+    )
+}
+
 /// GCUT zone summary of a pgrcolumnar scan's key column (night/sort-merge-
 /// redesign inc-2): per-granule best direction-folded order words + the
 /// zone-max seed word, in the morsel-range granule space. `None` = heap,

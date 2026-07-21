@@ -44,7 +44,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use ::executils::{EStateData, ExecSlotId};
 use ::nodesort::sink::{
-    topn_merge, TopnEntry, TopnHeap, TopnWideHeap, WideEntry, TOPN_MAX_BOUND,
+    topn_merge, BoundedTopnHeap, TopnEntry, TopnHeap, TopnWideHeap, WideEntry, TOPN_MAX_BOUND,
 };
 use ::types_error::{PgError, PgResult, ERROR};
 use ::types_nodes::plannodes::PlannedStmt;
@@ -275,6 +275,87 @@ fn topn_spec<'mcx>(
     Some(TopnSpec { keys, tlist_map, bound: state.bound as usize })
 }
 
+// ---------------------------------------------------------------------------
+// GL-TOPNHEAP-1: the direct morsel-native bounded top-N feed
+// (PGRUST_RUNTIME_TOPN_HEAP, default OFF). Two mechanisms, both attributed
+// on the four-posture profile of the incumbent arm's k=1000 loss:
+//   1. PAYLOAD-CARRYING ENTRIES — the heap entry carries the row's whole
+//      (byval) output tlist, captured at push time from the decoded
+//      granule lanes. Adoption becomes a pure copy: the incumbent
+//      per-winner `seq_scan_gather_row` late-mat (which re-decodes ~every
+//      granule serially on the leader — the dominant profiled term at
+//      k=1000 on zone-hostile fixtures) is gone entirely.
+//   2. DIRECT GRANULE ACCEPT — the key lane is read whole-granule from the
+//      decode cache (`topn_direct_lane`), pruned against the shared GCUT
+//      cutoff in a branchless index walk; no window staging, no SoA
+//      deform of non-key columns, no per-row emit closures.
+// The shared-bound granule skip (zone_best vs the tightening cutoff) and
+// the k-way sealed-run merge are the incumbent GCUT machinery, unchanged.
+// ---------------------------------------------------------------------------
+
+/// Max captured output columns (each one Datum word). Wider tlists keep the
+/// incumbent rowref late-mat arm.
+const TOPN_PAY_MAX: usize = 6;
+/// Direct-feed bound envelope: k×(entry bytes)×(dop+1 slots) stays
+/// megabyte-scale (the design-§7 "no work_mem interaction" law). Larger
+/// bounds keep the incumbent arm.
+const TOPN_DIRECT_MAX_BOUND: usize = 16384;
+/// Candidate chunk width for the two-phase (prune, then capture) walk —
+/// borrow-scoped lane reads, bounded scratch.
+const TOPN_DIRECT_CHUNK: u32 = 1024;
+
+/// One direct-feed heap entry: the rule-2 total order (entry, then rowref —
+/// pay never decides: rowrefs are unique) + the captured output row. POD,
+/// `Send` by construction; ≤ bound live per Local (evictions overwrite in
+/// place — no arena, nothing to free; the tuplesort bounded-sort leak class
+/// is unrepresentable here).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct PayEntry {
+    e: TopnEntry,
+    pay: [usize; TOPN_PAY_MAX],
+}
+
+/// Direct-feed spec (leader-derived; workers read it from the payload):
+/// the output tlist's scan columns in output order (`tlist_map` verbatim —
+/// every column byval fixed-width by admission).
+#[derive(Clone)]
+pub(super) struct DirectSpec {
+    pay_cols: Vec<u16>,
+}
+
+/// GL-TOPNHEAP-1 admission (fail-closed; `None` = the incumbent staged
+/// accept + rowref late-mat arm runs unchanged): single non-dictcode
+/// int-family key, qual-free scan (the direct lane walk applies no
+/// filters), all-byval output tlist within the capture envelope.
+fn topn_direct_spec(
+    spec: &TopnSpec,
+    scan_plan: &::types_nodes::plannodes::SeqScan<'_>,
+    outer_desc: &::types_tuple::TupleDescData<'static>,
+) -> Option<DirectSpec> {
+    if !runtime_topn_heap_enabled() {
+        return None;
+    }
+    if spec.keys.len() != 1 || spec.keys[0].dictcode {
+        return None;
+    }
+    if spec.bound > TOPN_DIRECT_MAX_BOUND {
+        return None;
+    }
+    if scan_plan.scan.plan.qual.iter().next().is_some() {
+        return None;
+    }
+    let natts = outer_desc.natts as usize;
+    if natts == 0 || natts > TOPN_PAY_MAX || spec.tlist_map.len() != natts {
+        return None;
+    }
+    for a in &outer_desc.attrs[..natts] {
+        if !a.attbyval || !(1..=8).contains(&(a.attlen as i64)) {
+            return None;
+        }
+    }
+    Some(DirectSpec { pay_cols: spec.tlist_map.clone() })
+}
+
 /// Shape-(b) full-sort spec: UNBOUNDED forward-only sorts; the shared key
 /// vocabulary + the self-contained-copy column census (byval / fixed-len
 /// byref / varlena; cstring refuses). `pub(super)`: the MJSORT consumer
@@ -392,6 +473,18 @@ pub(super) struct RuntimeSortShared {
     zone_best: Option<Arc<Vec<u64>>>,
     /// GCUT: granules skipped pre-staging (engagement witness).
     zone_skipped: AtomicU64,
+    /// GL-TOPNHEAP-1 direct feed (`None` = the incumbent staged accept +
+    /// rowref late-mat; see `topn_direct_spec`).
+    direct: Option<DirectSpec>,
+    /// Direct-feed publish slot: the k-way-merged winner entries WITH their
+    /// captured output rows (combine writes — partitions()=1, single
+    /// claimer; the leader adopts by pure copy, no gather).
+    winners_pay: Mutex<Option<Vec<PayEntry>>>,
+    /// Direct-feed accept census (the skip-rate/accept witness line):
+    /// rows walked, heap pushes, granules handed.
+    direct_rows: AtomicU64,
+    direct_pushed: AtomicU64,
+    direct_granules: AtomicU64,
     /// Shape (b) FULL SORT (m3-sort-b car 2; design §5). `None` = the
     /// top-N arm (everything above).
     full: Option<FullShared>,
@@ -442,6 +535,9 @@ unsafe impl Sync for FullShared {}
 pub(super) enum TopnLocal {
     Narrow(TopnHeap),
     Wide(TopnWideHeap),
+    /// GL-TOPNHEAP-1 direct feed: single-key entries carrying the captured
+    /// output row (adopt = pure copy).
+    Direct(BoundedTopnHeap<PayEntry>),
     Full(FullLocal),
 }
 
@@ -464,6 +560,8 @@ impl FullLocal {
 pub(super) enum TopnSealed {
     Narrow(Vec<TopnEntry>),
     Wide(Vec<WideEntry>),
+    /// GL-TOPNHEAP-1 direct feed: sealed payload-carrying run.
+    Direct(Vec<PayEntry>),
     /// Sealed full-sort run (sorted entries + fixed-up buf) — Arc so the
     /// finalize publish clones pointers, never row data.
     Full(Arc<::nodesort::fullsort::FullRun>),
@@ -517,6 +615,8 @@ impl runtime::SealedParallelSink for RuntimeSortShared {
                 entries: Vec::new(),
                 buf: ::nodesort::fullsort::RunBuf::new(full.natts),
             })
+        } else if self.direct.is_some() {
+            TopnLocal::Direct(BoundedTopnHeap::new(self.bound))
         } else if self.keys.len() == 1 {
             TopnLocal::Narrow(TopnHeap::new(self.bound))
         } else {
@@ -553,6 +653,7 @@ impl runtime::SealedParallelSink for RuntimeSortShared {
         match local {
             TopnLocal::Narrow(h) => TopnSealed::Narrow(h.into_sorted()),
             TopnLocal::Wide(h) => TopnSealed::Wide(h.into_sorted()),
+            TopnLocal::Direct(h) => TopnSealed::Direct(h.into_sorted()),
             TopnLocal::Full(mut l) => {
                 let full = self.full.as_ref().expect("full local under a full spec");
                 l.entries.sort_unstable();
@@ -592,7 +693,7 @@ impl runtime::SealedParallelSink for RuntimeSortShared {
                         debug_assert!(v.is_empty(), "mixed sealed variants in one sort sink");
                         &[]
                     }
-                    TopnSealed::Wide(_) => {
+                    TopnSealed::Wide(_) | TopnSealed::Direct(_) => {
                         unreachable!("mixed sealed variants in one sort sink")
                     }
                 })
@@ -610,13 +711,34 @@ impl runtime::SealedParallelSink for RuntimeSortShared {
         debug_assert_eq!(part, 0);
         // Variants never mix within one engagement (fork decides once);
         // aborted-path placeholder Narrow(empty) seals are harmless in
-        // either collection (empty runs contribute nothing).
+        // any collection (empty runs contribute nothing).
+        if self.direct.is_some() {
+            // GL-TOPNHEAP-1: k-way merge of the payload-carrying runs; the
+            // winners publish WITH their captured rows (no gather).
+            let runs: Vec<Vec<PayEntry>> = sealed
+                .iter()
+                .map(|s| match s {
+                    TopnSealed::Direct(v) => v.clone(),
+                    // Aborted seal placeholders are Narrow(empty).
+                    TopnSealed::Narrow(v) => {
+                        debug_assert!(v.is_empty(), "mixed sealed variants in one sort sink");
+                        Vec::new()
+                    }
+                    TopnSealed::Wide(_) | TopnSealed::Full(_) => {
+                        unreachable!("mixed sealed variants in one sort sink")
+                    }
+                })
+                .collect();
+            let merged = topn_merge(&runs, self.bound);
+            *self.winners_pay.lock().unwrap_or_else(|p| p.into_inner()) = Some(merged);
+            return;
+        }
         let rowrefs: Vec<u64> = if self.keys.len() == 1 {
             let runs: Vec<Vec<TopnEntry>> = sealed
                 .iter()
                 .map(|s| match s {
                     TopnSealed::Narrow(v) => v.clone(),
-                    TopnSealed::Wide(_) | TopnSealed::Full(_) => {
+                    TopnSealed::Wide(_) | TopnSealed::Full(_) | TopnSealed::Direct(_) => {
                         unreachable!("mixed sealed variants in one sort sink")
                     }
                 })
@@ -632,7 +754,7 @@ impl runtime::SealedParallelSink for RuntimeSortShared {
                         debug_assert!(v.is_empty(), "mixed sealed variants in one sort sink");
                         Vec::new()
                     }
-                    TopnSealed::Full(_) => {
+                    TopnSealed::Full(_) | TopnSealed::Direct(_) => {
                         unreachable!("mixed sealed variants in one sort sink")
                     }
                 })
@@ -765,6 +887,9 @@ impl<'a> TopnAcceptSink<'a> {
                 h.push(WideEntry::encode(&self.obs[..nk], &self.flags[..nk], rowref));
             }
             TopnLocal::Full(_) => unreachable!("full locals feed FullAcceptSink"),
+            TopnLocal::Direct(_) => {
+                unreachable!("direct locals feed direct_claim, never the staged sink")
+            }
         }
     }
 }
@@ -1047,6 +1172,9 @@ impl<'mcx> BatchSink<'mcx> for TopnAcceptSink<'_> {
                         TopnLocal::Full(_) => {
                             unreachable!("full locals feed FullAcceptSink")
                         }
+                        TopnLocal::Direct(_) => {
+                            unreachable!("direct locals feed direct_claim, never the staged sink")
+                        }
                     }
                 }
             }
@@ -1233,6 +1361,153 @@ impl<'mcx> BatchSink<'mcx> for FullAcceptSink<'_> {
 }
 
 impl RuntimeSortShared {
+    /// GL-TOPNHEAP-1 direct accept for one morsel claim: the incumbent GCUT
+    /// zone-skip segmentation, then per surviving granule a whole-granule
+    /// key-lane walk — prune against the shared cutoff (strict `>`, the
+    /// cut64 safety law) and the local heap floor, capture the output row
+    /// for the survivors, push. Two-phase per chunk so the scan borrow
+    /// (`topn_direct_lane`) never overlaps the payload-lane borrows.
+    /// Returns `broke` (a lane the columnar part cannot serve directly —
+    /// fail closed to the R5 serial rerun; nothing was emitted).
+    fn direct_claim<'mcx>(
+        &self,
+        heap: &mut BoundedTopnHeap<PayEntry>,
+        ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
+        range: runtime::MorselRange,
+    ) -> PgResult<bool> {
+        let ds = self.direct.as_ref().expect("direct local under a direct spec");
+        let key = self.keys[0];
+        let kc = key.attno_scan as usize;
+        let gcut = runtime_sort_gcut_enabled();
+        let zone = self.zone_best.as_deref();
+        let mut skipped = 0u64;
+        let mut rows_seen = 0u64;
+        let mut pushed = 0u64;
+        let mut granules = 0u64;
+        // Chunk scratch (reused across granules): pruned-in candidates +
+        // their captured rows.
+        let mut cand: Vec<(u32, TopnEntry)> = Vec::with_capacity(TOPN_DIRECT_CHUNK as usize);
+        let mut pays: Vec<[usize; TOPN_PAY_MAX]> =
+            Vec::with_capacity(TOPN_DIRECT_CHUNK as usize);
+        let mut g = range.start;
+        while g < range.end {
+            // Zone-skip segmentation: identical to the staged arm (the
+            // cutoff is re-read between segments — it only tightens).
+            let segcut = self.cutoff.load(Ordering::Relaxed);
+            if let Some(best) = zone {
+                while g < range.end && best.get(g as usize).copied().unwrap_or(0) > segcut {
+                    g += 1;
+                    skipped += 1;
+                }
+                if g >= range.end {
+                    break;
+                }
+            }
+            let s0 = g;
+            g = match zone {
+                Some(best) => {
+                    let mut e = g;
+                    while e < range.end && best.get(e as usize).copied().unwrap_or(0) <= segcut
+                    {
+                        e += 1;
+                    }
+                    e
+                }
+                None => range.end,
+            };
+            ::nodeseqscan::seq_scan_set_morsel_range(ss, estate, s0, g)?;
+            loop {
+                let Some((nrows, base)) =
+                    ::nodeseqscan::seq_scan_topn_direct_next_granule(ss)?
+                else {
+                    break;
+                };
+                granules += 1;
+                rows_seen += nrows as u64;
+                // The prune floor: the shared cutoff AND the local heap
+                // floor, both strict-`>` safe in cut64 space (a pruned
+                // entry provably cannot enter this heap, so the winner
+                // set is bit-identical to push-everything).
+                let mut cut = if gcut {
+                    self.cutoff.load(Ordering::Relaxed)
+                } else {
+                    u64::MAX
+                };
+                let mut floor_cut =
+                    heap.floor().map_or(u64::MAX, |f| f.e.cut64());
+                let mut i: u32 = 0;
+                while i < nrows {
+                    ::postgres_seams::check_for_interrupts::call()?;
+                    let hi = (i + TOPN_DIRECT_CHUNK).min(nrows);
+                    cand.clear();
+                    {
+                        let Some(lane) = ::nodeseqscan::seq_scan_topn_direct_lane(ss, kc)
+                        else {
+                            return Ok(true); // contract break: R5 rerun
+                        };
+                        let eff = cut.min(floor_cut);
+                        for j in i..hi {
+                            let e = TopnEntry::encode(
+                                key_i64(lane[j as usize], key.width),
+                                false, // pgrcolumnar parts store no NULLs
+                                key.desc,
+                                key.nulls_first,
+                                base + j as u64,
+                            );
+                            if e.cut64() > eff {
+                                continue;
+                            }
+                            cand.push((j, e));
+                        }
+                    }
+                    if !cand.is_empty() {
+                        // Capture the survivors' output rows, one lane
+                        // borrow at a time (decode-on-demand, gkey-memoized
+                        // — one decode per (granule, column) at most).
+                        pays.clear();
+                        pays.resize(cand.len(), [0usize; TOPN_PAY_MAX]);
+                        for (pi, &pc) in ds.pay_cols.iter().enumerate() {
+                            let Some(lane) =
+                                ::nodeseqscan::seq_scan_topn_direct_lane(ss, pc as usize)
+                            else {
+                                return Ok(true); // contract break: R5 rerun
+                            };
+                            for (ci, &(j, _)) in cand.iter().enumerate() {
+                                pays[ci][pi] = lane[j as usize].as_usize();
+                            }
+                        }
+                        for (ci, &(_, e)) in cand.iter().enumerate() {
+                            let pe = PayEntry { e, pay: pays[ci] };
+                            if heap.admits(pe) {
+                                heap.push(pe);
+                                pushed += 1;
+                            }
+                        }
+                        // Publish the (possibly tightened) local floor —
+                        // the incumbent GCUT monotone fetch_min law.
+                        if let Some(f) = heap.floor() {
+                            let c = f.e.cut64();
+                            floor_cut = c;
+                            if gcut && c < cut {
+                                cut = c;
+                                self.cutoff.fetch_min(c, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    i = hi;
+                }
+            }
+        }
+        if skipped > 0 {
+            self.zone_skipped.fetch_add(skipped, Ordering::Relaxed);
+        }
+        self.direct_rows.fetch_add(rows_seen, Ordering::Relaxed);
+        self.direct_pushed.fetch_add(pushed, Ordering::Relaxed);
+        self.direct_granules.fetch_add(granules, Ordering::Relaxed);
+        Ok(false)
+    }
+
     fn morsel_body(&self, local: &mut TopnLocal, range: runtime::MorselRange) -> PgResult<()> {
         WORKER_EXEC.with(|cell| {
             let b = cell.borrow();
@@ -1251,6 +1526,11 @@ impl RuntimeSortShared {
                     // lane rename); this arm admits only pgrcolumnar scans by
                     // construction.
                     let (broke, budget_broke) = match local {
+                        TopnLocal::Direct(h) => {
+                            // GL-TOPNHEAP-1: whole-granule key-lane accept
+                            // (no window staging / drain pipeline).
+                            (self.direct_claim(h, ss, estate, range)?, false)
+                        }
                         TopnLocal::Full(l) => {
                             ::nodeseqscan::seq_scan_set_morsel_range(
                                 ss,
@@ -1571,7 +1851,11 @@ fn build_worker_exec(payload: &Arc<RuntimeSortShared>) -> PgResult<()> {
                                     None,
                                 );
                             }
-                        } else if runtime_sort_colstage_enabled() {
+                        } else if runtime_sort_colstage_enabled() && payload.direct.is_none() {
+                            // (GL-TOPNHEAP-1: the direct feed reads whole-
+                            // granule decode lanes, never the staged SoA
+                            // windows — arming COLSTAGE for it is dead
+                            // setup weight, skipped above.)
                             // COLSTAGE (night/sort-merge-redesign spike;
                             // kill-switch, DEFAULT OFF): the INT-FAMILY
                             // top-N accept has NO staged fast leg on
@@ -1760,6 +2044,22 @@ fn runtime_sort_gcut_enabled() -> bool {
                 std::env::var("PGRUST_RUNTIME_SORT_GCUT").as_deref(),
                 Ok("0") | Ok("off")
             )
+    })
+}
+
+/// GL-TOPNHEAP-1 build knob (default OFF, t35 law; `1|on` arms): the
+/// direct morsel-native bounded top-N feed — payload-carrying heap entries
+/// (adopt = pure copy, no per-winner gather) + whole-granule key-lane
+/// accept (no window staging / SoA deform / per-row emit closures), with
+/// a leader-parity dop+1 bump (the GL-LOWDIST-1 participant-parity law).
+/// OFF = the incumbent staged accept + rowref late-mat arm, byte-identical.
+pub(super) fn runtime_topn_heap_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&ON, || {
+        matches!(
+            std::env::var("PGRUST_RUNTIME_TOPN_HEAP").as_deref(),
+            Ok("1") | Ok("on")
+        )
     })
 }
 
@@ -2011,6 +2311,28 @@ pub(super) fn try_own_sort<'mcx>(
     // POOL dop; arm only what the work can feed (kill: PGRUST_RUNTIME_ELASTIC_DOP=0).
     let dop = super::runtime_scan::elastic_dop(dop, total_granules);
 
+    // --- GL-TOPNHEAP-1 direct feed (PGRUST_RUNTIME_TOPN_HEAP, default OFF;
+    // `None` = the incumbent staged accept, byte-identical). Leader-parity
+    // dop+1 under the direct feed: the legacy comparison arm at mpwpg=N
+    // spends N workers PLUS a participating leader, while this sink parks
+    // the leader — admit N+1 helpers (the GL-LOWDIST-1 participant-parity
+    // law; clamped to the pool).
+    let direct = match &spec {
+        ArmSpec::Topn(s) => topn_direct_spec(s, scan_plan, outer_desc),
+        ArmSpec::Full(..) => None,
+    };
+    let dop = if direct.is_some() {
+        let bumped = (dop + 1).min(rt.nthreads() as i32).max(dop);
+        if bumped != dop {
+            lane_trace(&format!(
+                "runtime-sort: topnheap leader-parity dop {dop}->{bumped}"
+            ));
+        }
+        bumped
+    } else {
+        dop
+    };
+
     // --- BAND PREDICATE + zone stats (GL-SORTECON-3 flip increment; GCUT
     // machinery, so the GCUT kill restores the pre-flip admission). For the
     // int-leading-key top-N shape (m5-coverage row 61), read the leading
@@ -2117,7 +2439,8 @@ pub(super) fn try_own_sort<'mcx>(
     // Router counter choke point (M5-1): Engaged = ceremony entered;
     // Completed = the runtime answered; Fallback = R5 serial rerun.
     router::tick(ArmClass::Sort, ArmCounter::Engaged);
-    let outcome = engage(estate, rt, dop, total_granules, starts, &spec, scan_node, zone)?;
+    let outcome =
+        engage(estate, rt, dop, total_granules, starts, &spec, scan_node, zone, direct)?;
     // Adoption (the emit-face install) happens HERE, outside the ceremony
     // frame, so the MJSORT consumer (`full_sort_engage_publish`) can share
     // the whole engagement and take the published result un-adopted.
@@ -2134,6 +2457,9 @@ pub(super) fn try_own_sort<'mcx>(
         }
         (EngageOutcome::Completed(winners), ArmSpec::Topn(spec)) => {
             adopt_winners(state, ss, outer_desc, estate, spec, winners)?
+        }
+        (EngageOutcome::CompletedDirect(winners), ArmSpec::Topn(spec)) => {
+            adopt_direct(state, outer_desc, estate, spec, winners)?
         }
         (EngageOutcome::CompletedFull(publish), ArmSpec::Full(..)) => {
             ::nodesort::sort_lane_runtime_full_adopt(state, publish.runs, publish.parts);
@@ -2178,6 +2504,8 @@ fn engage<'mcx>(
     // through. `None` = no zone machinery (GCUT off, dictcode lead,
     // full-sort spec, or stats unavailable).
     zone: Option<(Arc<Vec<u64>>, Option<u64>)>,
+    // GL-TOPNHEAP-1 direct feed (`topn_direct_spec`; `None` = incumbent).
+    direct: Option<DirectSpec>,
 ) -> PgResult<EngageOutcome> {
     ensure_hooks_registered();
     crate::execparallel::register_parallel_query_main();
@@ -2243,6 +2571,11 @@ fn engage<'mcx>(
         cutoff: AtomicU64::new(cutoff_seed.unwrap_or(u64::MAX)),
         zone_best,
         zone_skipped: AtomicU64::new(0),
+        direct,
+        winners_pay: Mutex::new(None),
+        direct_rows: AtomicU64::new(0),
+        direct_pushed: AtomicU64::new(0),
+        direct_granules: AtomicU64::new(0),
         full,
         standing: Mutex::new(None),
     });
@@ -2256,6 +2589,9 @@ fn engage<'mcx>(
 enum EngageOutcome {
     Fallback,
     Completed(Vec<u64>),
+    /// GL-TOPNHEAP-1 direct feed: winners WITH their captured output rows
+    /// (adopt = pure copy, no gather).
+    CompletedDirect(Vec<PayEntry>),
     CompletedFull(FullPublish),
 }
 
@@ -2322,6 +2658,28 @@ fn finish_outcome(
             payload.zone_skipped.load(Ordering::SeqCst),
             zb.len()
         ));
+    }
+    if payload.direct.is_some() {
+        // GL-TOPNHEAP-1 accept census (the skip-rate / mechanism witness —
+        // the five-posture ladder greps this line).
+        lane_trace(&format!(
+            "runtime-sort: topnheap direct rows_seen={} pushed={} granules={}",
+            payload.direct_rows.load(Ordering::SeqCst),
+            payload.direct_pushed.load(Ordering::SeqCst),
+            payload.direct_granules.load(Ordering::SeqCst),
+        ));
+        let Some(winners) = payload
+            .winners_pay
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+        else {
+            return Err(Box::new(PgError::new(
+                ERROR,
+                "runtime sort (direct) completed without a winner list",
+            )));
+        };
+        return Ok(EngageOutcome::CompletedDirect(winners));
     }
     let Some(winners) = payload.take_winners() else {
         // Completed with participants but no published winners: a
@@ -2422,7 +2780,11 @@ fn engage_ceremony(
         // binder bind per participant; fallback leaves the RG untouched
         // for the launched path below.
         let census = match spec {
-            ArmSpec::Topn(s) => format!("bound={}", s.bound),
+            ArmSpec::Topn(s) => format!(
+                "bound={}{}",
+                s.bound,
+                if payload.direct.is_some() { " heap=direct" } else { "" }
+            ),
             ArmSpec::Full(..) => "full".to_string(),
         };
         match super::standing_channel::standing_wait(
@@ -2644,6 +3006,40 @@ fn adopt_winners<'mcx>(
     Ok(true)
 }
 
+/// GL-TOPNHEAP-1 adoption: the winners arrive WITH their captured output
+/// rows (all byval by admission) — a pure copy onto the node's refsort
+/// buffer, no scan access, no decode. The incumbent per-winner
+/// `seq_scan_gather_row` late-mat (the profiled dominant term of the
+/// four-posture k=1000 loss) has no analog here.
+fn adopt_direct<'mcx>(
+    state: &mut ::nodesort::SortState<'mcx>,
+    outer_desc: &::types_tuple::TupleDescData<'static>,
+    estate: &mut EStateData<'mcx>,
+    spec: &TopnSpec,
+    winners: Vec<PayEntry>,
+) -> PgResult<bool> {
+    ::nodesort::sort_lane_runtime_topn_begin(state);
+    let natts = outer_desc.natts as usize;
+    debug_assert!(natts <= TOPN_PAY_MAX);
+    let mut values = vec![::datum::Datum::null(); natts];
+    let isnull = vec![false; natts]; // byval census; parts store no NULLs
+    let mcx = estate.es_query_cxt;
+    for pe in &winners {
+        for (j, v) in values.iter_mut().enumerate() {
+            *v = ::datum::Datum::from_usize(pe.pay[j]);
+        }
+        ::nodesort::sort_lane_refsort_push_winner(state, mcx, &values, &isnull)?;
+    }
+    ::nodesort::sort_lane_runtime_topn_done(state);
+    trace_feed("runtime sort sink direct adopt + refsort emit engaged");
+    lane_trace(&format!(
+        "runtime-sort: complete (direct), winners={} (bound {})",
+        ::nodesort::sort_lane_refsort_winners(state),
+        spec.bound
+    ));
+    Ok(true)
+}
+
 // ---------------------------------------------------------------------------
 // MJSORT consumer entries (lanev2/runtime_mergejoin.rs — the "merge join
 // after sort" tier-2 car, m5-coverage row merge-join-parallel): the SAME
@@ -2740,10 +3136,10 @@ pub(super) fn full_sort_engage_publish<'mcx>(
     let MjSortSideProbe { spec_keys: _, spec, budget, total_granules, starts, scan_node, dop } =
         probe;
     let spec = ArmSpec::Full(spec, budget);
-    match engage(estate, rt, dop, total_granules, starts, &spec, scan_node, None)? {
+    match engage(estate, rt, dop, total_granules, starts, &spec, scan_node, None, None)? {
         EngageOutcome::Fallback => Ok(None),
         EngageOutcome::CompletedFull(publish) => Ok(Some(publish)),
-        EngageOutcome::Completed(_) => {
+        EngageOutcome::Completed(_) | EngageOutcome::CompletedDirect(_) => {
             Err(Box::new(PgError::new(ERROR, "runtime sort outcome/arm mismatch")))
         }
     }
