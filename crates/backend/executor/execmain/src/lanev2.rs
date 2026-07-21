@@ -48,6 +48,7 @@ mod runtime_bitmap;
 mod runtime_distinct;
 mod runtime_hashjoin;
 mod runtime_instr;
+pub(crate) mod runtime_nlindex;
 mod runtime_partwise;
 mod runtime_plaindistinct;
 mod runtime_scan;

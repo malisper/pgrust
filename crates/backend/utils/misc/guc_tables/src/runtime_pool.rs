@@ -345,3 +345,33 @@ pub fn runtime_bitmap_pool_dop() -> i32 {
     }
     pool_option_dop("pgrust.runtime_bitmap_pool")
 }
+
+// ---------------------------------------------------------------------------
+// NL-INNER-INDEX arming (nlindex lane, notes/nlindex-lane.md): executing a
+// serial-plan plain Agg over NestLoop(outer SeqScan, inner IndexScan) with
+// the OUTER side morselized across the runtime gang and each helper driving
+// its own PRIVATE inner index probes. Layering matches the bitmap/index
+// pre-boarding arms: the env switch PGRUST_RUNTIME_NLINDEX is an ENABLE
+// (default OFF — absence disarms), then PGRUST_RUNTIME=1 + the customized
+// option `pgrust.runtime_nlindex_pool` + the lane master switch.
+// ---------------------------------------------------------------------------
+
+/// Enable + master gates for the runtime NL-inner-index arm (default OFF).
+fn runtime_nlindex_env_ok() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let on = *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_RUNTIME_NLINDEX").as_deref(), Ok("1") | Ok("on"))
+    });
+    on && crate::backing::pgrust_lane_executor()
+}
+
+/// The armed runtime NL-inner-index DOP: `pgrust.runtime_nlindex_pool`
+/// clamped to available cores, or 0 when unarmed (enable switch absent,
+/// option unset/invalid/<=0, lane off). Callers additionally gate on
+/// `PGRUST_RUNTIME=1` + a started pool + the shape/binder admission.
+pub fn runtime_nlindex_pool_dop() -> i32 {
+    if !runtime_nlindex_env_ok() {
+        return 0;
+    }
+    pool_option_dop("pgrust.runtime_nlindex_pool")
+}

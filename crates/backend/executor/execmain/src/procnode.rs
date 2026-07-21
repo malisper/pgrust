@@ -2067,6 +2067,23 @@ fn agg_arm<'mcx>(
             }
         }
         PlanStateNode::NestLoop(nl) => {
+            // Runtime NL-inner-index arm (lanev2/runtime_nlindex.rs): a
+            // plain-Agg root over NestLoop(heap SeqScan, btree IndexScan)
+            // executed with the OUTER side morselized across the runtime
+            // gang, each helper driving private inner index probes.
+            // FORCED/explicit and DEFAULT OFF (PGRUST_RUNTIME_NLINDEX=1 +
+            // pgrust.runtime_nlindex_pool); dispatched BEFORE the serial
+            // lane arm (the runtime_bitmap precedent). Falls through on
+            // refuse — byte-identically, nothing consumed.
+            if crate::lanev2::enabled() {
+                if let Some(r) =
+                    crate::lanev2::runtime_nlindex::try_own_plain_agg_runtime_nl_index(
+                        agg, nl, estate,
+                    )?
+                {
+                    return Ok(r);
+                }
+            }
             // Lane-executor-v2 dispatch hook (§4: hash-agg breaker over the
             // NestLoop TupleOp over a lane outer scan; the inner stays
             // Volcano). Falls through to the UNCHANGED per-tuple agg over

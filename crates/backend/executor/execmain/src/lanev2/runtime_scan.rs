@@ -85,7 +85,7 @@ use super::{lane_trace, seq_scan_fusible, seq_scan_fusible_runtime_ea};
 // set's work body (one struct, one Arc).
 // ---------------------------------------------------------------------------
 
-struct SendConstPstmt(*const PlannedStmt<'static>);
+pub(super) struct SendConstPstmt(pub(super) *const PlannedStmt<'static>);
 // SAFETY: read-only erased reference into the leader's executor arena; the
 // leader keeps it alive until DestroyParallelContext has joined every helper
 // (the execparallel SendConst contract, verbatim).
@@ -1396,7 +1396,7 @@ fn mark_self_errored() {
 // zero cost on the ladder's standing timing arms.
 // ---------------------------------------------------------------------------
 
-fn wfin_enabled() -> bool {
+pub(super) fn wfin_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || std::env::var("PGRUST_WFIN").map_or(false, |v| v.trim() == "1"))
 }
@@ -1426,7 +1426,7 @@ fn worker_cb_counters() -> Option<(u64, u64, u64, u64)> {
 /// scheduler clock at the end of this worker's LAST executed morsel (parked
 /// waiting after the pipeline's end does not count); the harness's spread =
 /// max-min of t_us per qid across workers.
-fn emit_wfin(
+pub(super) fn emit_wfin(
     chan: &str,
     ordinal: usize,
     local: &runtime::WorkerLocal,
@@ -3238,7 +3238,7 @@ fn drain_rg(
     drain_rg_raw(rt, rg)
 }
 
-fn drain_rg_raw(rt: &'static Arc<runtime::Runtime>, rg: &runtime::RgHandle) -> bool {
+pub(super) fn drain_rg_raw(rt: &'static Arc<runtime::Runtime>, rg: &runtime::RgHandle) -> bool {
     rg.abort();
     // Bounded lane wait (~2s): helper drives settle within a morsel.
     let mut lane = None;

@@ -301,6 +301,17 @@ pub fn lane_nest_loop_untouched<'mcx>(
         && estate.ecxt(node.ps_ExprContext).ecxt_outertuple.is_none()
 }
 
+/// The join's PARAM_EXEC slot set (nestParams → paramno members), resolved
+/// at init. Read-only admission surface for the runtime NL-inner-index arm:
+/// every exec param a worker-side expression may reference must be a member
+/// (the params are bound per outer row inside the worker's own estate by
+/// `lane_accept_outer` — self-contained under the transferred subtree).
+pub fn lane_nest_param_set<'a, 'mcx>(
+    node: &'a NestLoopState<'mcx>,
+) -> &'a ::types_nodes::bitmapset::Bitmapset<'mcx> {
+    &node.nest_param_set
+}
+
 /// Current outer row's inner drain unfinished? (`nl_NeedNewOuter` is C's own
 /// cross-call flag, so a paused expansion resumes exactly across the Volcano
 /// pull boundary, as `ExecNestLoop`'s own cross-call state does.)
