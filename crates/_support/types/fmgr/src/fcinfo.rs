@@ -188,7 +188,7 @@ pub unsafe fn thin_arg(fcinfo: NonNull<ThinFcinfo>, argno: usize) -> NullableDat
 // compares a register instead of constant-folding away.
 #[inline(always)]
 fn opaque_false() -> u8 {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
     {
         let r: u8;
         // SAFETY: register-only asm; writes one output register, touches no
@@ -202,9 +202,10 @@ fn opaque_false() -> u8 {
         }
         r
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(any(not(target_arch = "aarch64"), miri))]
     {
-        // No forwarding hazard measured off arm; keep the init foldable.
+        // No forwarding hazard measured off arm (and Miri cannot execute
+        // asm); keep the init foldable.
         0u8
     }
 }
