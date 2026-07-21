@@ -562,6 +562,36 @@ impl Runtime {
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
 
+    /// M4.1 (utility compute onto the pool — scratchpad/night/
+    /// all-morsels-plan.md Track 3): [`Runtime::submit_pinned_bound`] at
+    /// QoS class UTILITY with a width request — the composition the vacuum
+    /// driver swap rides. The RG is pinned (the leader and any fallback
+    /// helpers drive it externally), carries the bound-engagement
+    /// descriptor (pool workers lease PGPROC identity and serve it through
+    /// the inc-2 gate), is served at the utility stride weight (Q0), and
+    /// its width flows into the ledger's CAPPED utility tier (Q1) so bulk
+    /// background work cannot crowd foreground queries when the ledger is
+    /// armed. The Track-4 kill switch (PGRUST_RUNTIME_UTIL_QOS=0) folds
+    /// the class to Foreground at submit, exactly as for
+    /// [`Runtime::submit_utility`].
+    pub fn submit_pinned_bound_utility(
+        &self,
+        spec: QuerySpec,
+        session_token: u64,
+        width: Option<WidthRequest>,
+        descriptor: BoundDescriptor,
+    ) -> (RgHandle, CompletionWaiter) {
+        let rg = self.sched.submit(
+            spec,
+            true,
+            RgClass::Utility,
+            session_token,
+            width,
+            Some(descriptor),
+        );
+        (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
+    }
+
     /// Per-thread bookkeeping for an external participant (pin-board lane
     /// `nthreads + ordinal`; at most [`sched::MAX_EXTERNAL_LANES`] lanes).
     /// Callers MUST hold the lane through [`Runtime::acquire_external_lane`]
