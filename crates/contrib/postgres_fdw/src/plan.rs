@@ -425,7 +425,6 @@ static PLAN_ROUTINE: FdwPlanRoutine = FdwPlanRoutine {
     get_foreign_rel_size: postgres_get_foreign_rel_size,
     get_foreign_paths: postgres_get_foreign_paths,
     get_foreign_plan: postgres_get_foreign_plan,
-    is_foreign_scan_parallel_safe: None,
 };
 
 static EXEC_ROUTINE: FdwExecRoutine = FdwExecRoutine {

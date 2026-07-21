@@ -2,6 +2,12 @@
 //! tables over planner-internal types, installed at init_seams time and keyed
 //! by [`FdwKind`] (see types_nodes::fdw for the split-routine rationale).
 
+//! No parallel entries: the parallel-FDW ABI was deleted outright (Michael's
+//! 2026-07-20 ruling — the ABI is ours to change, only FDW UX is frozen; the
+//! worker lane was never implemented). Foreign scans are serial-only by
+//! construction; a future parallel foreign scan would arrive as a
+//! morsel-native source, not as an IsForeignScanParallelSafe revival.
+
 use std::sync::OnceLock;
 
 use mcx::PgVec;
@@ -29,8 +35,6 @@ pub struct FdwPlanRoutine {
     pub get_foreign_rel_size: for<'mcx> fn(&mut PlannerRun<'mcx>, RelId, Oid) -> PgResult<()>,
     pub get_foreign_paths: for<'mcx> fn(&mut PlannerRun<'mcx>, RelId, Oid) -> PgResult<()>,
     pub get_foreign_plan: GetForeignPlan,
-    pub is_foreign_scan_parallel_safe:
-        Option<for<'mcx> fn(&mut PlannerRun<'mcx>, RelId) -> PgResult<bool>>,
 }
 
 static ROUTINES: [OnceLock<&'static FdwPlanRoutine>; NUM_FDW_KINDS] =

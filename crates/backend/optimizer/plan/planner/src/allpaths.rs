@@ -1438,18 +1438,13 @@ fn set_rel_consider_parallel(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -
                     }
                 }
             }
-            // A ForeignScan in a worker needs explicit FDW support.
+            // Foreign tables are parallel-unsafe by construction: the
+            // parallel-FDW ABI was deleted (2026-07-20 FDW-ABI ruling — UX
+            // frozen, ABI ours; the worker lane was never implemented, so
+            // IsForeignScanParallelSafe had nothing to admit into). A future
+            // parallel foreign scan arrives as a morsel-native source.
             if rte.relkind == types_rel::RELKIND_FOREIGN_TABLE {
-                let kind =
-                    run.root.rel(rel).fdwroutine.expect("foreign rel has fdwroutine");
-                match crate::fdwplan::fdw_plan_routine(kind).is_foreign_scan_parallel_safe {
-                    Some(safe) => {
-                        if !safe(run, rel)? {
-                            return Ok(());
-                        }
-                    }
-                    None => return Ok(()),
-                }
+                return Ok(());
             }
         }
         RTEKind::RTE_SUBQUERY => {
