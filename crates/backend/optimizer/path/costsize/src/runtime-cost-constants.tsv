@@ -50,6 +50,10 @@
 #                       owner GL-COST-2 / GL-AGGPOLY-1).
 #   structural        — not an economics constant (admission mirror /
 #                       no-curve marker); witness status not applicable.
+#   unwitnessed-debt  — a NAMED cell where two routing mechanisms disagree
+#                       and neither side has the witnessed measurement that
+#                       adjudicates it; the census + ladder spec own filling
+#                       it. Like unwitnessed-reuse, unusable as fit evidence.
 class	term	value	unit	fit_jobs	sha	date	ladder_script	owning_arm_killswitch	note	witness
 CbDistinctIntKeys	c_engage	0.0	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
 CbDistinctIntKeys	w_row	1.1159	legacy-row-equiv/row	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
@@ -97,6 +101,7 @@ HeapPlainCountStar	l_setup	552913.9	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47
 HeapPlainCountStar	l_cap	6.88	workers	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
 HeapPlainCountStar	n_min_fit	2500000.0	rows	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
 HeapPlainCountStar	admission_min_pages	8192	pages	-6b53/-0591/-4e08/-5020/-4082/-6632	2159563ff	2026-07-14	scripts/m5-rowflip-measure-e2e.sh	PGRUST_RUNTIME	rowdrive 64MB block-floor MIRROR (m5-5 reading #3) — applied in every cost-route mode, never retired by the curve	structural
+CbHashJoinPlainAgg	seat_overlap_cell	1000000@dop4	cell	seat: 4aae/3fa8/1877/3862 @ f7022d98e; curve: v2 grid @ c517fec04	5cb157edd	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_LANE_V2_HJPROBE_V2	t36 PINNED DEBT: the GL-HJSEAT-2 seat lift suppresses seat-shaped joins (exactly one bare int4=int4 equi clause) BEFORE the curve wiring at EVERY size; its witnessed band starts at 2.5M while the curve witnessed a 1.319x rt/legacy loss at 1M@dop4 — the overlap needs a seat-ON witnessed cell at 1M@dop4 (spec L5, notes/runtime-cost-ladder-specs.md) or a curve gate on the seat path; the seat path IS census-instrumented (finish_seat_lifted notes wl=suppress vs model)	unwitnessed-debt
 CbHashJoinMultiBuild	curve_reuse	CbHashJoinPlainAgg	class	-	c0837fba9	2026-07-14	-	PGRUST_RUNTIME	shipped guard reuse (same 2M rectangle); own witnessed ladder cells owed (GL-COST-2)	unwitnessed-reuse
 CbHashJoinGroupedAgg	curve_reuse	CbHashJoinPlainAgg	class	-	c0837fba9	2026-07-14	-	PGRUST_RUNTIME	shipped guard reuse (same 2M rectangle); own witnessed ladder cells owed (GL-COST-2)	unwitnessed-reuse
 AggPolyHeapPlain	curve_reuse	HeapCmpFoldPrefix	class	-	c0837fba9	2026-07-14	-	PGRUST_RUNTIME	PROVISIONAL reuse (strictly more per-row work than the measured int fold -> errs conservative); GL-AGGPOLY-1 owns re-measuring	unwitnessed-reuse

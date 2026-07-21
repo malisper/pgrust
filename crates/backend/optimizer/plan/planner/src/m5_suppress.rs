@@ -2600,8 +2600,40 @@ fn hjprobe_v2_live() -> bool {
 /// finish duty (coverage answer, trace) is identical. Separate fn so the
 /// unlifted `finish` path stays byte-identical for every other caller.
 fn finish_seat_lifted(run: &mut PlannerRun<'_>, relid: u32, rows: f64) -> PgResult<bool> {
+    use costsize::runtime_model as rtm;
     let class = CoverClass::CbHashJoinPlainAgg;
     let covered = class_covered(class);
+    // Step-2 shadow census on the seat-lifted path (the t36 pinned
+    // seat-vs-curve OVERLAP DEBT, TSV seat_overlap_cell row): the seat
+    // suppresses OUTSIDE `finish`, so without this branch the debt cell —
+    // seat band witnessed only >= 2.5M while the curve witnessed a 1.319x
+    // loss at 1M@dop4 — would be invisible to the disagreement census. The
+    // whitelist verdict here IS the seat's suppress (true); the curve prices
+    // the identical shape. OBSERVATION ONLY — the seat's verdict is already
+    // returned below and nothing here is read back into it.
+    if covered && size_floors_enabled()
+        && !matches!(rtm::cost_route_mode(), rtm::CostRouteMode::Off)
+    {
+        let dop = guc_tables::runtime_pool::runtime_dop();
+        let v = rtm::cost_route_verdict(rtm::RuntimeClass::CbHashJoinPlainAgg, rows, dop);
+        let (n_ws_mg, n_wg_ms) = cost_shadow::note(class, true, v.suppress);
+        if trace_armed() && !v.suppress {
+            eprintln!(
+                "m5-cost-census: class={class:?} wl=suppress model=gather \
+                 n_wl_suppress_model_gather={n_ws_mg} \
+                 n_wl_gather_model_suppress={n_wg_ms}"
+            );
+        }
+        cost_shadow::record_sample(cost_shadow::ExplainSample {
+            class: cost_shadow::CLASS_NAMES[cost_shadow::class_idx(class)],
+            ratio: v.ratio,
+            model_suppress: v.suppress,
+            whitelist_suppress: true,
+            decided_by: "seat",
+            rows,
+            dop,
+        });
+    }
     if covered && trace_armed() {
         let _ = run;
         eprintln!(
