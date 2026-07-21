@@ -221,6 +221,41 @@ fn hj_singlepass_enabled() -> bool {
     })
 }
 
+/// SE-MBSHARED (the GL-MULTIBUILD-1 lane): the shared-probe/shared-build
+/// completion of the multibuild walk. DEFAULT OFF (`PGRUST_LANE_V2_MBSHARED
+/// =1|on` arms; unset/`0`/`off` keeps today's path byte-identically). Two
+/// halves, one knob:
+///
+/// 1. PROBE HOIST: `mb_row` stops refcounting the frozen-table Arc per
+///    emitted row. The witnessed profile at the refuted grid cells (L1/L2,
+///    notes/runtime-cost-ladder-specs.md) put ~2/3 of all busy CPU on the
+///    two per-row refcount RMWs — every worker hammering the same two
+///    cache lines once per row per probe level is exactly the anti-scaling
+///    signature those grids show (worse at dop16 than dop4). The borrow is
+///    field-disjoint, so the hoisted walk passes the table by reference —
+///    same probe order, same emission, byte-identical results.
+/// 2. SINGLE-PASS BUILDS (Phase 1a, multibuild twin): each join's build
+///    table gets a [`SharedBuildDir`] sized from ITS OWN planner estimate
+///    and charged to ITS OWN budget (the per-table combined envelope —
+///    every live table keeps the `work_mem x (dop+1)` rule, C parity with
+///    one Hash node per join); accepts CAS-insert directly, the 256
+///    combine tasks become no-ops, and the COMBINE re-read bandwidth pass
+///    disappears. An estimate the directory cannot afford falls back to
+///    the two-pass build for THAT table (never a refusal on this account —
+///    the single-join 1a posture verbatim).
+///
+/// The build scheduling itself is unchanged: every build side is already
+/// its own claimable task set, deps-ordered before its probers (the m5p1
+/// decomposition below); this knob changes what a claim DOES, not who
+/// claims what. Grouped (SE-AGGJOIN) engagements ride the same walk and
+/// the same knob.
+fn hj_mbshared_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&ON, || {
+        matches!(std::env::var("PGRUST_LANE_V2_MBSHARED").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
 /// SE-AGGJOIN grouped sink (band 87001): GROUPED (AGG_HASHED) agg roots over
 /// the multibuild join walk — per-worker hashed builds exported as
 /// self-contained grouped partials, combined on the leader, absorbed into
@@ -2846,6 +2881,10 @@ pub(super) struct MbChain {
     /// (AGG_HASHED) sink — per-worker hashed builds + grouped partial export
     /// (false = the m5p1 plain-agg tail, byte-identical).
     grouped: bool,
+    /// SE-MBSHARED: the engagement resolved `hj_mbshared_enabled()` at
+    /// admission (leader-side, once) — every morsel body reads THIS bit so
+    /// a per-row knob probe never enters the walk. False = today's path.
+    shared1a: bool,
 }
 
 /// Admission output handed to `engage` (sinks are constructed there — they
@@ -2856,6 +2895,10 @@ pub(super) struct MbInit {
     jointypes: Vec<::types_nodes::JoinType>,
     /// Per join index: the gang envelope its build table gets.
     envelopes: Vec<usize>,
+    /// SE-MBSHARED: per join index, the planner's build-rows estimate — the
+    /// single-pass directory's up-front size (0 rows sizes the minimum
+    /// directory; the estimate is a capacity hint, not a correctness input).
+    build_rows: Vec<u64>,
     nscans: usize,
     /// SE-AGGJOIN: grouped (AGG_HASHED) terminal (see `MbChain::grouped`).
     grouped: bool,
@@ -3027,6 +3070,15 @@ pub(super) struct MbBuildSink {
     plan: Mutex<Option<Arc<CombinePlan>>>,
     table: Mutex<Option<Arc<FrozenJoinTable>>>,
     shared: Weak<RuntimeHjShared>,
+    /// SE-MBSHARED single-pass build (Phase 1a, multibuild twin): Some ⇒
+    /// workers CAS-insert directly into this shared directory during accept
+    /// (the 256 combine tasks no-op; finalize seals via
+    /// `finish_single_pass`). Sized up front from THIS join's planner
+    /// estimate against THIS join's budget; a directory the estimate cannot
+    /// afford leaves None and the table rides the two-pass build (never a
+    /// refusal on this account — the single-join 1a posture). None always
+    /// when the knob is off.
+    singlepass: Option<Arc<SharedBuildDir>>,
 }
 
 impl MbBuildSink {
@@ -3067,7 +3119,16 @@ impl runtime::ParallelSink for MbBuildSink {
     type Local = JoinBuildLocal;
 
     fn fork(&self, worker: usize) -> JoinBuildLocal {
-        JoinBuildLocal::new(worker, Arc::clone(&self.budget))
+        let mut local = JoinBuildLocal::new(worker, Arc::clone(&self.budget));
+        if let Some(dir) = &self.singlepass {
+            // SE-MBSHARED: this Local links tuples straight into the shared
+            // directory in `push` (accept), bypassing part_refs/COMBINE —
+            // the JoinBuildSink single-pass fork verbatim. The dense seat
+            // never arms on multibuild Locals (the seat is single-join
+            // only), so the attach's exclusivity assert cannot fire.
+            local.attach_shared_dir(Arc::clone(dir));
+        }
+        local
     }
 
     fn accept_local(&self, local: &mut JoinBuildLocal, worker: usize, range: runtime::MorselRange) {
@@ -3108,6 +3169,12 @@ impl runtime::ParallelSink for MbBuildSink {
         if self.failed() {
             return;
         }
+        // SE-MBSHARED single-pass: chains are already CAS-linked during
+        // accept — the 256 combine tasks are pure no-ops (the seal/freeze
+        // happens in finalize), exactly the JoinBuildSink posture.
+        if self.singlepass.is_some() {
+            return;
+        }
         if let Some(plan) = self.plan_for(locals) {
             plan.combine_partition(part, locals);
         }
@@ -3117,7 +3184,27 @@ impl runtime::ParallelSink for MbBuildSink {
         if self.failed() {
             return;
         }
-        let Some(plan) = self.plan_for(locals) else { return };
+        // SE-MBSHARED single-pass: seal the shared directory (barrier-gated
+        // grow_buckets on an underestimate) into a plan the frozen table
+        // consumes as-is; a grow the envelope cannot afford refuses to the
+        // serial arm BY NAME (R5 — the multibuild envelope posture).
+        let plan = if let Some(dir) = &self.singlepass {
+            match finish_single_pass(locals, Arc::clone(dir), &self.budget) {
+                Ok(p) => Arc::new(p),
+                Err(BudgetExceeded) => {
+                    lane_trace(
+                        "runtime-hashjoin: REFUSED (multibuild single-pass grow crossed envelope) — serial rerun",
+                    );
+                    if let Some(s) = self.shared.upgrade() {
+                        s.refuse_budget();
+                    }
+                    return;
+                }
+            }
+        } else {
+            let Some(plan) = self.plan_for(locals) else { return };
+            plan
+        };
         *lockm(&self.table) = Some(Arc::new(freeze(plan, locals)));
     }
 }
@@ -3205,6 +3292,13 @@ fn mb_row<'mcx>(
     probes: &mut [MbProbe<'_, 'mcx>],
     term: &mut MbTerm<'_, 'mcx>,
     crossed: &std::cell::Cell<bool>,
+    // SE-MBSHARED probe hoist (`MbChain::shared1a`, resolved once at
+    // admission): true ⇒ the frozen table is passed by reference — no
+    // per-row refcount traffic (the witnessed contention at the refuted
+    // grid cells: every worker RMWing the same two counter cache lines
+    // once per row per level). false ⇒ today's per-row clone, byte-for-
+    // byte (the knob's OFF arm).
+    shared1a: bool,
     estate: &mut EStateData<'mcx>,
     slot: ExecSlotId,
 ) -> PgResult<()> {
@@ -3228,9 +3322,17 @@ fn mb_row<'mcx>(
         }
     };
     let (hj, hs, table) = first;
+    if shared1a {
+        // Field-disjoint borrows of `first`: the table rides as `&` while
+        // the join/hash states ride as `&mut` — the walk, probe order and
+        // emission are unchanged, only the refcount round-trip is gone.
+        return shared_probe_outer(hj, hs, estate, table, slot, &mut |_hj, estate, out| {
+            mb_row(rest, term, crossed, true, estate, out)
+        });
+    }
     let table = Arc::clone(table);
     shared_probe_outer(hj, hs, estate, &table, slot, &mut |_hj, estate, out| {
-        mb_row(rest, term, crossed, estate, out)
+        mb_row(rest, term, crossed, false, estate, out)
     })
 }
 
@@ -3241,6 +3343,7 @@ fn mb_drive_claim<'mcx>(
     scan: &mut ::nodeseqscan::SeqScanState<'mcx>,
     probes: &mut [MbProbe<'_, 'mcx>],
     mut term: MbTerm<'_, 'mcx>,
+    shared1a: bool,
     estate: &mut EStateData<'mcx>,
     range: &runtime::MorselRange,
 ) -> PgResult<bool> {
@@ -3268,7 +3371,7 @@ fn mb_drive_claim<'mcx>(
                     n,
                     |i| -> PgResult<()> {
                         let Some(slot_id) = src.emit(estate, i)? else { return Ok(()) };
-                        mb_row(probes, &mut term, &crossed, estate, slot_id)
+                        mb_row(probes, &mut term, &crossed, shared1a, estate, slot_id)
                     },
                 )?;
                 if crossed.get() {
@@ -3302,7 +3405,7 @@ fn mb_drive_claim<'mcx>(
             let Some(slot_id) = ::nodeseqscan::seq_scan_batch_emit(scan, estate, i)? else {
                 return Ok(());
             };
-            mb_row(probes, &mut term, &crossed, estate, slot_id)
+            mb_row(probes, &mut term, &crossed, shared1a, estate, slot_id)
         })?;
         if crossed.get() {
             break;
@@ -3377,7 +3480,7 @@ fn mb_accept_morsel_body(
         let hs = target.expect("build pipeline has a target table");
         local.begin_run(range.start);
         let clean =
-            mb_drive_claim(scan, &mut probes, MbTerm::Build { hs, local }, es, &range)?;
+            mb_drive_claim(scan, &mut probes, MbTerm::Build { hs, local }, chain.shared1a, es, &range)?;
         local.end_run();
         Ok(clean)
     })
@@ -3406,7 +3509,7 @@ fn mb_probe_morsel_body(
             // discipline, grouped twin). An unexportable table (spill entry
             // or group-cap crossing) refuses the WHOLE engagement to the
             // serial arm — R5, exactly the build-envelope posture.
-            let clean = mb_drive_claim(scan, &mut probes, MbTerm::AggHash { agg }, es, &range)?;
+            let clean = mb_drive_claim(scan, &mut probes, MbTerm::AggHash { agg }, chain.shared1a, es, &range)?;
             debug_assert!(clean, "the hashed agg terminal has no envelope to cross");
             let pslot = worker - payload.pins_base;
             let mut g = lockm(&payload.grouped_partials[pslot]);
@@ -3421,6 +3524,7 @@ fn mb_probe_morsel_body(
             scan,
             &mut probes,
             MbTerm::Agg { agg },
+            chain.shared1a,
             es,
             &range,
         )?;
@@ -4162,6 +4266,9 @@ fn try_own_multibuild<'mcx>(
         sources,
         jointypes: pinfo.jointypes,
         envelopes,
+        // SE-MBSHARED: per-join planner estimates size the single-pass
+        // directories (knob-armed engagements only; unread otherwise).
+        build_rows: pinfo.hash_rows.iter().map(|&r| r.max(0.0) as u64).collect(),
         nscans: pinfo.nscans,
         grouped,
     };
@@ -4292,17 +4399,47 @@ fn engage<'mcx>(
         (Some(mb), _) => {
             // Multibuild: one MbBuildSink per join (frozen-table publisher);
             // the descriptor rides the payload for every task-set body.
+            // SE-MBSHARED (knob-armed): each join's table gets a single-pass
+            // shared directory sized from ITS OWN estimate against ITS OWN
+            // per-table combined envelope; a directory the estimate cannot
+            // afford leaves that table on the two-pass build (traced by
+            // name — never a refusal on this account).
+            let shared1a = hj_mbshared_enabled();
             let sinks: Vec<Arc<MbBuildSink>> = (0..mb.jointypes.len())
                 .map(|j| {
+                    let budget = JoinBudget::new(mb.envelopes[j]);
+                    let singlepass = if shared1a {
+                        match SharedBuildDir::with_estimate(mb.build_rows[j], &budget) {
+                            Ok(dir) => Some(dir),
+                            Err(BudgetExceeded) => {
+                                lane_trace(&format!(
+                                    "runtime-hashjoin: multibuild single-pass directory over budget (join={j}) — two-pass build"
+                                ));
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     Arc::new(MbBuildSink {
                         join: j,
-                        budget: JoinBudget::new(mb.envelopes[j]),
+                        budget,
                         plan: Mutex::new(None),
                         table: Mutex::new(None),
                         shared: Arc::downgrade(&payload),
+                        singlepass,
                     })
                 })
                 .collect();
+            if shared1a {
+                // Engagement witness (e2e-grepped): fires only with the
+                // knob ON — the OFF default cannot print it.
+                let sp = sinks.iter().filter(|s| s.singlepass.is_some()).count();
+                lane_trace(&format!(
+                    "runtime-hashjoin: multibuild shared build ENGAGED (singlepass={sp}/{})",
+                    sinks.len()
+                ));
+            }
             payload
                 .chain
                 .set(Arc::new(MbChain {
@@ -4312,6 +4449,7 @@ fn engage<'mcx>(
                     jointypes: mb.jointypes,
                     nscans: mb.nscans,
                     grouped: mb.grouped,
+                    shared1a,
                 }))
                 .unwrap_or_else(|_| unreachable!("chain set once"));
             None
@@ -5047,6 +5185,14 @@ mod mb_tests {
     fn mbg_knob_default_on() {
         assert!(hj_groupsink_enabled());
         assert_eq!(mbg_max_groups(), 131_072);
+    }
+
+    /// SE-MBSHARED: the shared-probe/shared-build car is DEFAULT OFF —
+    /// unset must resolve off (the =1|on posture is the e2e's armed boot;
+    /// OnceLock, one state per process).
+    #[test]
+    fn mbshared_knob_default_off() {
+        assert!(!hj_mbshared_enabled());
     }
 
     /// SE-AGGJOIN: the SINGLE-join tree decomposes to exactly one build
