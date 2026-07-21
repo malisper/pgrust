@@ -836,19 +836,22 @@ const POLY_INT8ARRAYOID: u32 = 1016;
 const POLY_INT2OID: u32 = 21;
 const POLY_INT4OID: u32 = 23;
 
-/// `PGRUST_LANE_V2_AGG_INTCASE` (int-CASE fold-args car; DEFAULT OFF):
+/// `PGRUST_LANE_V2_AGG_INTCASE` (int-CASE fold-args car; DEFAULT ON since
+/// GL-INTCASE-1 — fleet-ab-parallelism.md 2026-07-21, `=0|off` kills):
 /// admit int-family plain aggregates over ARBITRARY single-argument
 /// expressions (the conditional-aggregation idiom — sum(CASE...),
 /// count-if) as first-class poly manifest entries. The m5 suppression
 /// probe keys the matching plan shapes under the SAME env spelling (knob
-/// coherence — a keyed-but-disarmed shape would land on serial). Off =
-/// today's manifest (numeric anchor required), byte-identical.
+/// coherence — a keyed-but-disarmed shape would land on serial; the
+/// dop4-loss region belongs to the AggPolyHeapPlain FLOOR, not this
+/// knob). Killed = the pre-car manifest (numeric anchor required),
+/// byte-identical.
 fn agg_intcase_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        matches!(
+        !matches!(
             std::env::var("PGRUST_LANE_V2_AGG_INTCASE").as_deref(),
-            Ok("1") | Ok("on")
+            Ok("0") | Ok("off")
         )
     })
 }

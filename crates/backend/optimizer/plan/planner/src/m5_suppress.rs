@@ -181,8 +181,9 @@ pub enum CoverClass {
     /// serial plan shape certain (Agg over SeqScan). tpch q06 class.
     ///
     /// AGG_INTCASE widening (int-CASE fold-args car, knob-gated
-    /// `PGRUST_LANE_V2_AGG_INTCASE`, default OFF, requires the AGG_POLY
-    /// knob too): the tlist vocabulary additionally admits int-family
+    /// `PGRUST_LANE_V2_AGG_INTCASE`, DEFAULT ON since GL-INTCASE-1 —
+    /// `=0|off` kills; requires the AGG_POLY knob
+    /// too): the tlist vocabulary additionally admits int-family
     /// plain aggregates (INTCASE_POLY_AGGS) over ANY parallel-safe
     /// single-argument expression — the conditional-aggregation idiom
     /// (sum(CASE...), count-if) — and non-Aggref emit expressions over
@@ -301,7 +302,7 @@ pub const BOOTSTRAP_MATRIX: &[MatrixRow] = &[
     MatrixRow {
         class: CoverClass::AggPolyHeapPlain,
         covered: true,
-        qualifiers: "se-aggpoly (band 101001): keyed ONLY under PGRUST_LANE_V2_AGG_POLY (knob coherence); one unindexed heap rel; quals allowed, is_parallel_safe; tlist = PLAIN_FOLD_AGGS bare-int OR plain sum/avg(numeric) w/ parallel-safe arg exprs, >=1 numeric; AGG_INTCASE widening (PGRUST_LANE_V2_AGG_INTCASE, default OFF): + int-family aggs over parallel-safe conditional args (sum(CASE)/count-if) + ratio emits over admitted aggs, gate n_poly>0; Agg-root only (no sort/limit/offset); floor reused from HeapCmpFoldPrefix (provisional — GL-AGGPOLY-1/GL-INTCASE-1 letters owed)",
+        qualifiers: "se-aggpoly (band 101001): keyed ONLY under PGRUST_LANE_V2_AGG_POLY (knob coherence); one unindexed heap rel; quals allowed, is_parallel_safe; tlist = PLAIN_FOLD_AGGS bare-int OR plain sum/avg(numeric) w/ parallel-safe arg exprs, >=1 numeric; AGG_INTCASE widening (PGRUST_LANE_V2_AGG_INTCASE, DEFAULT ON since GL-INTCASE-1 2026-07-21, =0|off kills; dop4 losses are the floor's region): + int-family aggs over parallel-safe conditional args (sum(CASE)/count-if) + ratio emits over admitted aggs, gate n_poly>0; Agg-root only (no sort/limit/offset); floor reused from HeapCmpFoldPrefix (provisional — GL-AGGPOLY-1 letter owed; GL-INTCASE-1 ladder validates the direction at 10M)",
     },
     MatrixRow {
         class: CoverClass::PartwisePlainFold,
@@ -1376,17 +1377,26 @@ fn agg_poly_probe_enabled() -> bool {
     })
 }
 
-/// AGG_INTCASE (int-CASE fold-args car; DEFAULT OFF pending its GL letter):
-/// widen the AggPolyHeapPlain tlist vocabulary onto int-family plain
-/// aggregates over parallel-safe CONDITIONAL argument expressions
-/// (sum(CASE...), count-if — the conditional-aggregation idiom) and onto
-/// emit expressions over admitted aggregates (the ratio-emit shapes). The
-/// per-row drive already evaluates arbitrary arg exprs (C's checked
-/// transition program); this knob only widens ADMISSION. Knob coherence
-/// (the AGG_POLY law above): nodeagg's poly manifest reads the SAME env
-/// spelling — a keyed shape whose manifest arm is disarmed would suppress
-/// Gather and land on serial. The widening also requires the AGG_POLY knob
-/// itself (it rides that class's arm, floor, and keying site).
+/// AGG_INTCASE (int-CASE fold-args car): widen the AggPolyHeapPlain tlist
+/// vocabulary onto int-family plain aggregates over parallel-safe
+/// CONDITIONAL argument expressions (sum(CASE...), count-if — the
+/// conditional-aggregation idiom) and onto emit expressions over admitted
+/// aggregates (the ratio-emit shapes). The per-row drive already evaluates
+/// arbitrary arg exprs (C's checked transition program); this knob only
+/// widens ADMISSION. Knob coherence (the AGG_POLY law above): nodeagg's
+/// poly manifest reads the SAME env spelling — a keyed shape whose
+/// manifest arm is disarmed would suppress Gather and land on serial. The
+/// widening also requires the AGG_POLY knob itself (it rides that class's
+/// arm, floor, and keying site).
+///
+/// DEFAULT ON (GL-INTCASE-1, fleet-ab-parallelism.md 2026-07-21, @
+/// 39219b094e1f: DOP ladder on the 10M heap fixture — dop16 wins 1.9-2.2x
+/// on all six owned shapes, dop8 0.83-0.97; dop4 measured 1.03-1.20x
+/// LOSSES, which the AggPolyHeapPlain floor OWNS — suppress iff rows>=1M
+/// and dop>=12 keeps Gather in that region; kill-arm dead-flat
+/// 1.000-1.003 with zero engagements; 43q hot-quotient 0.9819 = inert
+/// noise band; byte-identity + error-identity witnessed local and
+/// in-pod). `PGRUST_LANE_V2_AGG_INTCASE=0|off` is the kill switch.
 fn agg_intcase_probe_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
@@ -1394,11 +1404,11 @@ fn agg_intcase_probe_enabled() -> bool {
     })
 }
 
-/// The default-OFF arm spelling rule, factored pure for exhaustive unit
-/// tests: ON iff the value is exactly `1` or `on`; unset and every other
-/// spelling stay OFF (fail-safe).
+/// The default-ON kill spelling rule, factored pure for exhaustive unit
+/// tests: OFF iff the value is exactly `0` or `off` (the flipped-kill
+/// idiom); unset and every other spelling stay ON.
 fn intcase_spelling_on(v: Option<&str>) -> bool {
-    matches!(v, Some("1") | Some("on"))
+    !matches!(v, Some("0") | Some("off"))
 }
 
 /// CbDistinctIntKeys PASSENGER whitelist = the runtime distinct sink's
@@ -1912,9 +1922,11 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         // is_parallel_safe over quals + numeric agg args). Unindexed keeps
         // the suppressed serial plan an Agg-over-SeqScan; no sort/limit
         // keeps the Agg the plan root (both are walk refusals — the
-        // suppress-then-refuse direction). tpch q06 class. AGG_INTCASE
-        // (default OFF) widens the tlist vocabulary onto int-family aggs
-        // over conditional args + ratio emits (heap_poly_tlist_admits).
+        // suppress-then-refuse direction). The qualed numeric-expr
+        // plain-agg-over-one-heap-rel class. AGG_INTCASE (default ON,
+        // =0|off kills — GL-INTCASE-1) widens the tlist vocabulary onto
+        // int-family aggs over conditional args + ratio emits
+        // (heap_poly_tlist_admits).
         if agg_poly_probe_enabled()
             && parse.sortClause.is_nil()
             && parse.limitCount.is_none()
@@ -6442,16 +6454,17 @@ mod tests {
     }
 
     #[test]
-    fn intcase_knob_is_default_off() {
-        assert!(!intcase_spelling_on(None), "unset must be OFF (default)");
-        assert!(!intcase_spelling_on(Some("0")));
-        assert!(!intcase_spelling_on(Some("off")));
-        assert!(!intcase_spelling_on(Some("")));
-        assert!(!intcase_spelling_on(Some("true")), "typos fail safe to OFF");
-        assert!(!intcase_spelling_on(Some("ON")), "case-sensitive, like the arm knobs");
+    fn intcase_knob_is_default_on_with_kill() {
+        assert!(intcase_spelling_on(None), "unset must be ON (GL-INTCASE-1 default flip)");
+        assert!(!intcase_spelling_on(Some("0")), "kill spelling");
+        assert!(!intcase_spelling_on(Some("off")), "kill spelling");
         assert!(intcase_spelling_on(Some("1")));
         assert!(intcase_spelling_on(Some("on")));
-        assert!(!agg_intcase_probe_enabled(), "test process has no knob set => OFF");
+        assert!(
+            intcase_spelling_on(Some("")) && intcase_spelling_on(Some("OFF")),
+            "flipped-kill idiom: only exact 0/off kill (case-sensitive, like the sibling arm knobs)"
+        );
+        assert!(agg_intcase_probe_enabled(), "test process has no knob set => ON");
     }
 
     /// AGG_INTCASE vocabulary discipline: the per-row int whitelist is
