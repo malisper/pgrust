@@ -1605,6 +1605,17 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             return Ok(verdict);
         }
     }
+    // OPEN-ROWS car 3: conditional-text-select (CASE) / timestamp-trunc
+    // computed keys + OFFSET-into-bound composition — keyed only knob-ON
+    // and BEFORE the bare-Var key discipline (which refuses expr keys). A
+    // shape MISS returns None and falls through unchanged.
+    if exprkey_topn_enabled() {
+        if let Some(verdict) =
+            classify_exprkey_topn(run, parse, rti, rte.relid, rel_id, rel_rows, rel_pages)?
+        {
+            return Ok(verdict);
+        }
+    }
     // Key discipline: all keys plain Vars on the scanned rel; int-family
     // plus at most one text/varchar key under the deterministic default
     // collation (the c3 canonical-key-bytes classes). SE-CONSTKEY: non-null
@@ -4606,6 +4617,337 @@ fn classify_extract_exprkey<'mcx>(
     )?))
 }
 
+// ---------------------------------------------------------------------------
+// OPEN-ROWS car 3 (EXPRKEY-TOPN): conditional-text-select (CASE) and
+// timestamp-truncation computed group keys + OFFSET-into-bound composition.
+// ---------------------------------------------------------------------------
+
+/// EXPRKEY-TOPN knob (`PGRUST_LANE_V2_EXPRKEY_TOPN`): DEFAULT OFF, only
+/// `1`/`on` arm (the K1-latemat idiom). Suppression-only widening for two
+/// census families whose SERIAL-lane expr-key feed arms exist and engage
+/// today, refused only by the probe's bare-Var key discipline and the
+/// top-N composition's OFFSET refusal.
+fn exprkey_topn_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        tier2_car_spelling_on(std::env::var("PGRUST_LANE_V2_EXPRKEY_TOPN").as_deref().ok())
+    })
+}
+
+/// Engine-kill coherence (suppress-then-refuse guard): the serial-lane
+/// expr-key feed owns the suppressed plans — its kill must gate the probe
+/// keyings too (a keyed shape whose arm is disarmed would land
+/// suppress-then-serial). Same env spellings as the executor (`0`/`off`
+/// kill; default ON inside the lane).
+fn exprkey_engine_live() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| knob_spelling_on(std::env::var("PGRUST_LANE_V2_EXPRKEY").as_deref().ok()))
+}
+
+/// The CASE class additionally rides the packed multi-key walk and its
+/// conditional-text-select recognizer — both executor kills mirrored.
+fn casedict_engine_live() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        exprkey_engine_live()
+            && knob_spelling_on(std::env::var("PGRUST_LANE_V2_MULTIKEY").as_deref().ok())
+            && knob_spelling_on(std::env::var("PGRUST_LANE_V2_CASEDICT").as_deref().ok())
+    })
+}
+
+/// pg_proc oid of the truncation over the tz-less timestamp. The tz-aware
+/// variants are timezone-dependent — the feed refuses them, so the probe
+/// never sees them match (different funcid).
+const F_TIMESTAMP_TRUNC_FN: u32 = 2020;
+
+/// TS-TRUNC scale fence (pages, env-overridable
+/// `PGRUST_LANE_V2_EXPRKEY_TSTRUNC_MAX_PAGES`): the ts-trunc class's
+/// suppressed plan is a SERIAL qualed fold whose cost is the scan, while
+/// the competing legacy plan for the qualed ordered-grouped shape is a
+/// genuinely parallel ordered partial-agg exchange — the arm wins where
+/// the scan is small and loses to the exchange once the relation's page
+/// count is large (fleet letter, two measured points: ~9x win at the
+/// mid-scale bank ~216k pages, ~2.3x REGRESSION at the full-scale bank
+/// ~2.16M pages). PROVISIONAL single bound between the two points; the
+/// GL letter owns the curve. The conditional-text-select class is NOT
+/// fenced (its legacy competitor is the raw-row exchange hashagg, which
+/// it beats at both measured scales).
+fn tstrunc_max_pages() -> f64 {
+    static V: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("PGRUST_LANE_V2_EXPRKEY_TSTRUNC_MAX_PAGES")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| *v > 0.0)
+            .unwrap_or(1_000_000.0)
+    })
+}
+
+/// The ts-trunc computed key: truncation with a non-null text-Const unit
+/// in the UNIFORM-MICROSECOND whitelist over a bare tz-less-timestamp Var
+/// — the expr-key feed's own recognizer mirrored (canonical lowercase
+/// names + plurals only; aliases/abbreviations refuse — strictly narrower
+/// than the arm, which itself degrades per-row on an unrecognized unit).
+fn is_ts_trunc_key(expr: Node<'_>, rti: usize, mcx: mcx::Mcx<'_>) -> bool {
+    let Some(f) = expr.as_func_expr() else { return false };
+    if f.funcid != F_TIMESTAMP_TRUNC_FN || f.funcretset || f.args.len() != 2 {
+        return false;
+    }
+    let Some(c) = f.args.nth(0).as_const() else { return false };
+    if c.constisnull || c.consttype != TEXTOID {
+        return false;
+    }
+    if !is_covered_key_var(f.args.nth(1), rti, |t| t == TIMESTAMPOID) {
+        return false;
+    }
+    // SAFETY: a compile-time non-null text Const datum is a live varlena
+    // for the statement's lifetime (the executor recognizer's contract).
+    let Ok(packed) = (unsafe { types_fmgr::datum_varlena_packed(c.constvalue, mcx) }) else {
+        return false;
+    };
+    let data = packed.data();
+    if data.is_empty() || data.len() > 16 {
+        return false;
+    }
+    let low: Vec<u8> = data.iter().map(|b| b.to_ascii_lowercase()).collect();
+    matches!(
+        low.as_slice(),
+        b"second" | b"seconds" | b"minute" | b"minutes" | b"hour" | b"hours" | b"day" | b"days"
+    )
+}
+
+/// The expr-key feed's int-equality funcids (mirror of its predicate
+/// recognizer's table — any int2/4/8 cross-width builtin equality).
+const INT_EQ_FNS_MIRROR: [u32; 9] = [63, 65, 467, 158, 159, 852, 474, 1850, 1856];
+
+/// One conditional-select predicate: `<int Var on the rel> = <non-null
+/// int Const>` through a builtin int equality (either argument order).
+fn case_pred_ok(op: &types_nodes::primnodes::OpExpr<'_>, rti: usize) -> bool {
+    if !INT_EQ_FNS_MIRROR.contains(&op.opfuncid) || op.args.len() != 2 {
+        return false;
+    }
+    let (a, b) = (op.args.nth(0), op.args.nth(1));
+    let vc = match (a.as_var(), b.as_const()) {
+        (Some(v), Some(c)) => Some((v, c)),
+        _ => match (b.as_var(), a.as_const()) {
+            (Some(v), Some(c)) => Some((v, c)),
+            _ => None,
+        },
+    };
+    let Some((v, c)) = vc else { return false };
+    v.varno as usize == rti
+        && v.varlevelsup == 0
+        && v.varattno > 0
+        && is_int_family(v.vartype)
+        && !c.constisnull
+        && is_int_family(c.consttype)
+}
+
+/// The conditional-text-select computed key (the expr-key feed's CASE
+/// class, mirrored): no CASE arg, TEXT result, exactly one WHEN whose
+/// condition is one int-eq predicate or an AND of them, THEN a bare TEXT
+/// Var on the rel (the probe adds the deterministic-default-collation
+/// gate — strictly narrower), ELSE a non-null TEXT Const (a NULL default
+/// derives NULL keys the packed image cannot carry — the feed refuses).
+fn is_case_dict_key(expr: Node<'_>, rti: usize) -> bool {
+    let Some(ce) = expr.as_case_expr() else { return false };
+    if ce.arg.is_some() || ce.casetype != TEXTOID || ce.args.len() != 1 {
+        return false;
+    }
+    let Some(when) = ce.args.nth(0).as_variant::<types_nodes::primnodes::CaseWhen>() else {
+        return false;
+    };
+    let Some(cond) = when.expr else { return false };
+    if let Some(op) = cond.as_op_expr() {
+        if !case_pred_ok(op, rti) {
+            return false;
+        }
+    } else if let Some(be) = cond.as_bool_expr() {
+        if !matches!(be.boolop, types_nodes::primnodes::BoolExprType::AND_EXPR)
+            || be.args.len() == 0
+        {
+            return false;
+        }
+        for a in be.args.iter() {
+            let Some(op) = a.as_op_expr() else { return false };
+            if !case_pred_ok(op, rti) {
+                return false;
+            }
+        }
+    } else {
+        return false;
+    }
+    let Some(tres) = when.result else { return false };
+    let Some(tv) = key_var(tres, rti) else { return false };
+    if tv.vartype != TEXTOID || tv.varcollid != DEFAULT_COLLATION_OID {
+        return false;
+    }
+    let Some(dres) = ce.defresult else { return false };
+    let Some(dc) = dres.as_const() else { return false };
+    !dc.constisnull && dc.consttype == TEXTOID
+}
+
+/// OPEN-ROWS car 3 recognizer: a single-cbstore-rel grouped agg whose
+/// keys are bare int-family Vars, at most ONE bare default-collation text
+/// Var (the Multi walk caps TextRaw components at one), and EXACTLY ONE
+/// computed key — the conditional-text-select CASE (packed as an Intern
+/// component beside the Var keys) or, ALONE, the uniform-unit timestamp
+/// truncation (the feed's single-computed-key arm). Fold-admissible aggs
+/// only (int-family args — the fold never reads the text/THEN lanes).
+///
+/// Compositions: plain grouped emit; a single fold-agg sort key with
+/// Const LIMIT and optional Const OFFSET where limit+offset stays within
+/// the sink's winner-selection bound cap (the bounded sort above the
+/// suppressed plan carries limit+offset as its bound and the sink
+/// composes it — the OFFSET refusal at the base top-N block is pure
+/// admission debt for this family); ts-trunc only — ORDER BY the computed
+/// key itself with the same Const bound (the suppressed serial plan keeps
+/// its real Sort above the Agg and the fold's drain feeds it).
+///
+/// groupby_high hold applies UNCHANGED (no interplay with the
+/// bounded-topn exemption — fail closed here). Returns `Some(verdict)` on
+/// a family match, `None` to fall through to the bare-Var discipline.
+fn classify_exprkey_topn<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    parse: &Query<'mcx>,
+    rti: usize,
+    relid: u32,
+    rel_id: types_pathnodes::RelId,
+    rel_rows: f64,
+    rel_pages: f64,
+) -> PgResult<Option<bool>> {
+    #[derive(PartialEq, Clone, Copy)]
+    enum Computed {
+        Case,
+        TsTrunc,
+    }
+    let mut computed: Option<Computed> = None;
+    let mut computed_ref = 0u32;
+    let mut key_refs: Vec<u32> = Vec::new();
+    let mut n_text = 0usize;
+    let mut int_widths = 0usize;
+    for gc_node in &parse.groupClause {
+        let Some(gc) = gc_node.as_sort_group_clause() else { return Ok(None) };
+        let Some(tle) = tle_by_sortgroupref(parse, gc.tleSortGroupRef) else {
+            return Ok(None);
+        };
+        if let Some(v) = key_var(tle.expr, rti) {
+            if is_int_family(v.vartype) {
+                int_widths += match v.vartype {
+                    INT2OID => 2,
+                    INT4OID => 4,
+                    _ => 8,
+                };
+            } else if is_text_family(v.vartype) && v.varcollid == DEFAULT_COLLATION_OID {
+                n_text += 1;
+                if n_text > 1 {
+                    return Ok(None); // the Multi walk caps TextRaw at one
+                }
+            } else {
+                return Ok(None);
+            }
+        } else if computed.is_none() && is_case_dict_key(tle.expr, rti) {
+            computed = Some(Computed::Case);
+            computed_ref = gc.tleSortGroupRef;
+        } else if computed.is_none() && is_ts_trunc_key(tle.expr, rti, run.mcx) {
+            computed = Some(Computed::TsTrunc);
+            computed_ref = gc.tleSortGroupRef;
+        } else {
+            return Ok(None); // second computed key / unadmitted expr key
+        }
+        key_refs.push(gc.tleSortGroupRef);
+    }
+    let Some(kind) = computed else { return Ok(None) };
+    match kind {
+        // The ts-trunc class is the feed's single-computed-key arm.
+        Computed::TsTrunc if parse.groupClause.len() != 1 => return Ok(None),
+        // Packed image negotiation: int widths + 4 per text + 4 for the
+        // Intern'd computed component, within the 16-byte image.
+        Computed::Case if int_widths + 4 * n_text + 4 > 16 => return Ok(None),
+        _ => {}
+    }
+    match kind {
+        Computed::Case if !casedict_engine_live() => return Ok(None),
+        Computed::TsTrunc if !exprkey_engine_live() => return Ok(None),
+        _ => {}
+    }
+    // TS-TRUNC scale fence (doc at `tstrunc_max_pages`): past the page
+    // bound the serial fold loses to the ordered partial-agg exchange —
+    // matched-shape-but-fenced keeps Gather.
+    if kind == Computed::TsTrunc && rel_pages >= tstrunc_max_pages() {
+        return Ok(Some(false));
+    }
+    // Emit discipline: keys by sortgroupref, everything else a
+    // fold-admissible aggregate.
+    for tle_node in &parse.targetList {
+        let Some(tle) = tle_node.as_target_entry() else { return Ok(None) };
+        if tle.ressortgroupref != 0 && key_refs.contains(&tle.ressortgroupref) {
+            continue;
+        }
+        if !is_whitelisted_agg(tle.expr, rti, PLAIN_FOLD_AGGS) {
+            return Ok(None);
+        }
+    }
+    // Sort/limit composition (block doc above).
+    if !parse.sortClause.is_nil() || parse.limitCount.is_some() || parse.limitOffset.is_some()
+    {
+        if parse.sortClause.len() != 1 || parse.limitCount.is_none() {
+            return Ok(None);
+        }
+        let Some(sc) = parse.sortClause.nth(0).as_sort_group_clause() else {
+            return Ok(None);
+        };
+        let Some(tle) = tle_by_sortgroupref(parse, sc.tleSortGroupRef) else {
+            return Ok(None);
+        };
+        let key_sorted = kind == Computed::TsTrunc && sc.tleSortGroupRef == computed_ref;
+        if !key_sorted && !is_whitelisted_agg(tle.expr, rti, PLAIN_FOLD_AGGS) {
+            return Ok(None);
+        }
+        let Some(limit) = const_count(parse.limitCount) else { return Ok(None) };
+        let offset = if parse.limitOffset.is_some() {
+            match const_count(parse.limitOffset) {
+                Some(v) => v,
+                None => return Ok(None),
+            }
+        } else {
+            0
+        };
+        let Some(bound) = limit.checked_add(offset) else { return Ok(None) };
+        if bound < 1 || bound > SINK_TOPN_MAX_BOUND_MIRROR {
+            return Ok(None);
+        }
+    }
+    // groupby_high hold (shared floor; matched-shape-but-floored keeps
+    // Gather).
+    let ngroups = if run.root.processed_groupClause.is_empty() {
+        1.0
+    } else {
+        let clauses =
+            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.processed_groupClause);
+        let group_exprs =
+            types_pathnodes::run::sortgrouplist_exprs(run, &clauses, &parse.targetList);
+        let input_rows = run.root.rel(rel_id).rows.max(1.0);
+        crate::selfuncs::estimate_num_groups(run, &group_exprs, input_rows)?
+    };
+    if ngroups >= groupby_high_floor() {
+        return Ok(Some(false));
+    }
+    Ok(Some(finish_knob_path(
+        run,
+        "exprkeytopn",
+        match kind {
+            Computed::Case => "casedict-grouped-agg",
+            Computed::TsTrunc => "tstrunc-grouped-agg",
+        },
+        extract_exprkey_guard(),
+        relid,
+        ngroups,
+        rel_rows,
+        rel_pages,
+    )?))
+}
+
 /// `is_whitelisted_agg` over TWO candidate range-table indexes (the join
 /// row flip): the aggregate's single Var arg may live on either joined rel.
 fn is_whitelisted_agg_2rti(expr: Node<'_>, rti_l: usize, rti_r: usize, whitelist: &[u32]) -> bool {
@@ -5317,6 +5659,17 @@ mod tests {
         assert!(!TOPN_INT8_RAW_SORT_AGGS.contains(&F_AVG_INT4), "finalfn-bearing stays out");
         assert!(!TOPN_INT8_RAW_SORT_AGGS.contains(&F_MAX_INT8), "unwitnessed order column");
         assert_eq!(SINK_TOPN_MAX_BOUND_MIRROR, 1 << 16, "mirror of the sink bound cap");
+    }
+
+    /// EXPRKEY-TOPN mirrors of record: the truncation funcid (the tz-less
+    /// timestamp variant — the tz-aware pair must NEVER match) and the
+    /// expr-key feed's int-equality table (exprkey.rs `INT_EQ_FNS`,
+    /// vendored REL 18.3 pg_proc.dat). A drift here silently widens or
+    /// narrows the probe against the arm it mirrors.
+    #[test]
+    fn exprkey_topn_mirrors_of_record() {
+        assert_eq!(F_TIMESTAMP_TRUNC_FN, 2020);
+        assert_eq!(INT_EQ_FNS_MIRROR, [63, 65, 467, 158, 159, 852, 474, 1850, 1856]);
     }
 
     /// SE-T2AGG CAR B: the min/max(text) OIDs of record (vendored REL 18.3
