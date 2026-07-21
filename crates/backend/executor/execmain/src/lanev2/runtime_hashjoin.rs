@@ -4377,9 +4377,11 @@ fn finish_outcome(
 /// The standing-first channel shared by the single-join and multibuild
 /// arms (M2 inc-1): both submit their RG, try the standing gang, and fall
 /// back to LaunchParallelWorkers + park_for_outcome with the RG untouched.
+#[allow(clippy::too_many_arguments)]
 fn standing_first(
     payload: &Arc<RuntimeHjShared>,
     rt: &'static Arc<runtime::Runtime>,
+    pool: Option<Arc<parallel::standing::StandingEngagement>>,
     dop: i32,
     outer_granules: u64,
     census: &str,
@@ -4389,10 +4391,9 @@ fn standing_first(
     match super::standing_channel::standing_wait(
         &STANDING_ARM,
         super::standing_channel::StandingLeader {
-                // M2 inc-2: sink arms ride the pool-db channel in the
-                // follow-up wiring (scan arm first — the funnel
-                // discipline); None = gang-first, inc-1 exactly.
-                pool: None,
+                // M2 inc-2: the pool-db board attached at submit (None =
+                // gang-first, inc-1 exactly).
+                pool,
             shared: payload.pcxt_shared.get().expect("pcxt shared set above"),
             slot: &payload.standing,
             started: &payload.started,
@@ -4599,13 +4600,27 @@ fn engage_ceremony<'mcx>(
                 }
             }
             static NEXT_MB_QUERY_ID: AtomicUsize = AtomicUsize::new(1);
-            let (rg, waiter) = rt.submit_pinned_with_affinity(
-                runtime::QuerySpec {
-                    query_id: NEXT_MB_QUERY_ID.fetch_add(1, Ordering::SeqCst) as u64,
-                    tasksets,
-                },
-                router::session_affinity_token(),
+            // M2 inc-2: the POOL-DB channel — built BEFORE submit (the
+            // bound descriptor must ride the submission); sinks_gate.
+            let pool = super::standing_channel::try_pool_channel(
+                payload.pcxt_shared.get().expect("pcxt shared set above"),
+                dop,
+                /* sinks_gate */ true,
             );
+            let spec = runtime::QuerySpec {
+                query_id: NEXT_MB_QUERY_ID.fetch_add(1, Ordering::SeqCst) as u64,
+                tasksets,
+            };
+            let (rg, waiter) = match &pool {
+                Some((_, descriptor)) => rt.submit_pinned_bound(
+                    spec,
+                    router::session_affinity_token(),
+                    descriptor.clone(),
+                ),
+                None => {
+                    rt.submit_pinned_with_affinity(spec, router::session_affinity_token())
+                }
+            };
             payload.rg.set(rg.downgrade()).unwrap_or_else(|_| unreachable!("rg set once"));
             *mut_submitted = Some(rg.clone());
 
@@ -4616,9 +4631,16 @@ fn engage_ceremony<'mcx>(
                 mb.sinks.len(),
                 if mb.grouped { " grouped" } else { "" }
             );
-            if let Some(outcome) =
-                standing_first(payload, rt, dop, outer_granules, &census, &rg, &waiter)?
-            {
+            if let Some(outcome) = standing_first(
+                payload,
+                rt,
+                pool.as_ref().map(|(entry, _)| Arc::clone(entry)),
+                dop,
+                outer_granules,
+                &census,
+                &rg,
+                &waiter,
+            )? {
                 return Ok(outcome);
             }
 
@@ -4735,10 +4757,25 @@ fn engage_ceremony<'mcx>(
             }
         }
         static NEXT_QUERY_ID: AtomicUsize = AtomicUsize::new(1);
-        let (rg, waiter) = rt.submit_pinned_with_affinity(runtime::QuerySpec {
+        // M2 inc-2: the POOL-DB channel — built BEFORE submit (the bound
+        // descriptor must ride the submission); sinks_gate.
+        let pool = super::standing_channel::try_pool_channel(
+            payload.pcxt_shared.get().expect("pcxt shared set above"),
+            dop,
+            /* sinks_gate */ true,
+        );
+        let spec = runtime::QuerySpec {
             query_id: NEXT_QUERY_ID.fetch_add(1, Ordering::SeqCst) as u64,
             tasksets,
-        }, router::session_affinity_token());
+        };
+        let (rg, waiter) = match &pool {
+            Some((_, descriptor)) => rt.submit_pinned_bound(
+                spec,
+                router::session_affinity_token(),
+                descriptor.clone(),
+            ),
+            None => rt.submit_pinned_with_affinity(spec, router::session_affinity_token()),
+        };
         payload.rg.set(rg.downgrade()).unwrap_or_else(|_| unreachable!("rg set once"));
         *mut_submitted = Some(rg.clone());
 
@@ -4749,9 +4786,16 @@ fn engage_ceremony<'mcx>(
             Some(sp) => format!("nbatch={} (spill)", sp.nbatch),
             None => String::new(),
         };
-        if let Some(outcome) =
-            standing_first(payload, rt, dop, outer_granules, &census, &rg, &waiter)?
-        {
+        if let Some(outcome) = standing_first(
+            payload,
+            rt,
+            pool.as_ref().map(|(entry, _)| Arc::clone(entry)),
+            dop,
+            outer_granules,
+            &census,
+            &rg,
+            &waiter,
+        )? {
             return Ok(outcome);
         }
 
