@@ -1471,6 +1471,68 @@ fn distinct_spill_enabled() -> bool {
     crate::once_val(&ON, || std::env::var("PGRUST_RUNTIME_DISTINCT_SPILL").as_deref() != Ok("0"))
 }
 
+/// GL-LOWDIST-4 B1 heap-feed knob (t35 law: DEFAULT OFF for the letter; ON
+/// iff exactly `1`/`on`; the flip rides the measured verdict). Widens BOTH
+/// distinct sinks' admission from pgrcolumnar-only to heap seq scans: the
+/// morsel positioner is already AM-dispatched (`seq_scan_set_morsel_range`
+/// — the morsel bodies never needed cbstore), so the widening is the
+/// leader-side geometry/source fork below plus the probe's heap
+/// classification (same spelling there — GROUPSINK coherence). Heap
+/// engagements ride the GENERIC accept lanes (RowFeed / collected
+/// `emit_key` batches — the columnar dict/int-SoA fast lanes have no heap
+/// producer) and refuse under EXPLAIN ANALYZE (the scan arm's
+/// heap-not-instrumented posture).
+pub(super) fn distinct_heap_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&ON, || {
+        matches!(
+            std::env::var("PGRUST_RUNTIME_DISTINCT_HEAP").as_deref(),
+            Ok("1") | Ok("on")
+        )
+    })
+}
+
+/// GL-LOWDIST-4 B1: per-AM morsel space for the distinct sinks — the
+/// hashjoin `k2_task_source` fork verbatim. cbstore → RG-boundary granule
+/// source (the historical wire; claims feed straight into
+/// `set_granule_range`, never coalesce); heap → the boundary-free block
+/// source (granule = ONE heap block, sizer-truncated, non-coalescing — the
+/// scan arm's `GranuleMap::unbounded` posture through the storage seam; a
+/// worker positions exactly blocks [a,b) via the AM-dispatched
+/// `seq_scan_set_morsel_range`). `None` = empty/unsupported rel — silent
+/// serial fallback, exactly the cb geometry contract.
+pub(super) fn distinct_task_source<'mcx>(
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<(u64, Arc<dyn runtime::MorselSource>)>> {
+    if ::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
+        let Some((granules, starts)) =
+            ::nodeseqscan::seq_scan_cb_granule_geometry(ss, estate)?
+        else {
+            return Ok(None);
+        };
+        return Ok(Some((
+            granules,
+            Arc::new(super::runtime_scan::PgrcolumnarGranuleSource {
+                starts: Arc::new(starts),
+                coalesce: false,
+            }) as Arc<dyn runtime::MorselSource>,
+        )));
+    }
+    // Heap (admission guarantees the B1 knob gates this arm): the storage
+    // seam's block geometry — no new geometry policy.
+    use super::batch_source::BatchGranuleSource as _;
+    let Some(map) = super::batch_source::SeqScanSource::new(ss).granule_map(estate)? else {
+        return Ok(None);
+    };
+    let total = map.total();
+    Ok(Some((
+        total,
+        Arc::new(runtime::GranuleMapSource::new(Arc::new(map), false, false))
+            as Arc<dyn runtime::MorselSource>,
+    )))
+}
+
 /// GL-LOWDIST-1 low-width combine — **DEFAULT ON** since the GL-LOWDIST-1
 /// flip (letter: scratchpad/night/GL-LOWDIST-1-letter.md; fleet fix A/B @
 /// a3d09b8ff: the sink beats the forced-legacy GM+pardistinct hybrid at
@@ -1793,8 +1855,17 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     } else {
         seq_scan_fusible(ss, estate)?
     };
-    if !fusible || !::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
+    let is_cb = ::nodeseqscan::seq_scan_is_pgrcolumnar(ss);
+    // GL-LOWDIST-4 B1: heap seq scans admit under the knob (the morsel
+    // bodies were already AM-generic; see distinct_task_source).
+    let heap_ok = ::nodeseqscan::seq_scan_is_heap(ss) && distinct_heap_enabled();
+    if !fusible || !(is_cb || heap_ok) {
         refused(estate, ea, node_id, "scan not fusible/cbstore");
+        return Ok(None);
+    }
+    if !is_cb && ea {
+        // The scan arm's posture: heap engagements are uninstrumented.
+        refused(estate, true, node_id, "heap-not-instrumented");
         return Ok(None);
     }
     if estate.es_epq_active {
@@ -1989,8 +2060,7 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     }
 
     // --- Geometry: enough granules to be worth a gang.
-    let Some((total_granules, starts)) =
-        ::nodeseqscan::seq_scan_cb_granule_geometry(ss, estate)?
+    let Some((total_granules, source)) = distinct_task_source(ss, estate)?
     else {
         return Ok(None);
     };
@@ -2009,7 +2079,7 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
 
     // --- Engage.
     engage(
-        agg, estate, rt, dop, lowwidth, total_granules, starts, spec, order, paremit, topn,
+        agg, estate, rt, dop, lowwidth, total_granules, source, spec, order, paremit, topn,
         scan_node, ea,
     )
 }
@@ -2022,7 +2092,7 @@ fn engage<'mcx>(
     dop: i32,
     lowwidth: bool,
     total_granules: u64,
-    starts: Vec<u64>,
+    source: Arc<dyn runtime::MorselSource>,
     spec: Arc<PdSpec>,
     order: Vec<::nodeagg::HashGroupOrderKey>,
     paremit: Option<Arc<PdEmitRecipe>>,
@@ -2120,7 +2190,7 @@ fn engage<'mcx>(
     // Completed = the runtime answered; Fallback = R5 serial rerun.
     router::tick(ArmClass::Distinct, ArmCounter::Engaged);
     let engaged =
-        engage_ceremony(agg, estate, rt, dop, total_granules, starts, &payload, spec, order);
+        engage_ceremony(agg, estate, rt, dop, total_granules, source, &payload, spec, order);
     xact::ExitParallelMode();
     if let Ok(r) = &engaged {
         router::tick(
@@ -2188,7 +2258,7 @@ fn engage_ceremony<'mcx>(
     rt: &'static Arc<runtime::Runtime>,
     dop: i32,
     total_granules: u64,
-    starts: Vec<u64>,
+    source: Arc<dyn runtime::MorselSource>,
     payload: &Arc<RuntimeDistinctShared>,
     spec: Arc<PdSpec>,
     order: Vec<::nodeagg::HashGroupOrderKey>,
@@ -2232,13 +2302,10 @@ fn engage_ceremony<'mcx>(
 
 
         // Submit the pinned RG (accept → freeze → combine) before launch.
-        // coalesce: false — this arm's morsel_body feeds the claim straight
-        // into set_granule_range (single-epoch contract); it does not
-        // subdivide multi-epoch claims.
-        let source = Arc::new(super::runtime_scan::PgrcolumnarGranuleSource {
-            starts: Arc::new(starts),
-            coalesce: false,
-        });
+        // The per-AM morsel source was built at admission
+        // (distinct_task_source — GL-LOWDIST-4 B1): cbstore RG-boundary
+        // claims fed straight into set_granule_range, or heap block-range
+        // claims through the same AM-dispatched positioner.
         let runtime::SealedSinkTaskSets { accept, freeze, combine, probe } =
             runtime::sealed_sink_tasksets(
                 Arc::clone(payload),

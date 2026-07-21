@@ -679,6 +679,93 @@ fn textdistinct_guard() -> FloorGuard {
     FloorGuard { min_dop: 12, low_dop_max_rows: 3_000_000.0, ..NO_GUARD }
 }
 
+/// GL-LOWDIST-4 B1 heap-distinct knob — the EXECUTOR spelling verbatim
+/// (runtime_distinct::distinct_heap_enabled; GROUPSINK coherence: probe
+/// routing and sink admission flip together). t35 law: DEFAULT OFF for the
+/// letter; ON iff exactly `1`/`on`.
+fn distinct_heap_probe_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("PGRUST_RUNTIME_DISTINCT_HEAP").as_deref(),
+            Ok("1") | Ok("on")
+        )
+    })
+}
+
+/// GL-LOWDIST-4 B1 provisional floor for the HEAP distinct faces: GUARDED
+/// OFF (max_rows 0 — the pre-flip CbTopnBoundedIntKeys posture): at
+/// floors-ON defaults the Gather stands even knob-ON; the witnessed heap
+/// ladder (floors OFF) measures the sink's heap economics, and the flip
+/// re-derives this guard from that verdict. Never a suppress-then-lose
+/// channel by construction.
+fn heap_distinct_guard() -> FloorGuard {
+    FloorGuard { max_rows: 0.0, ..NO_GUARD }
+}
+
+/// GL-LOWDIST-4 B1: the narrow HEAP grouped-distinct census face — every
+/// group key a bare int-family Var on the scanned rel, every non-key tlist
+/// entry an admitted `count(DISTINCT <int-kind Var>)`, at least one of
+/// them, NOTHING else (no vocab passengers in v1 — a miss keeps Gather,
+/// unchanged from today). `Ok(None)` = shape miss (fall through).
+fn classify_heap_grouped_distinct<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    parse: &Query<'mcx>,
+    rti: usize,
+    relid: u32,
+    rel_id: types_pathnodes::RelId,
+    rel_rows: f64,
+    rel_pages: f64,
+) -> PgResult<Option<bool>> {
+    let mut key_refs: Vec<u32> = Vec::new();
+    for gc_node in &parse.groupClause {
+        let Some(gc) = gc_node.as_sort_group_clause() else { return Ok(None) };
+        let Some(tle) = tle_by_sortgroupref(parse, gc.tleSortGroupRef) else {
+            return Ok(None);
+        };
+        if !is_covered_key_var(tle.expr, rti, is_int_family) {
+            return Ok(None);
+        }
+        key_refs.push(gc.tleSortGroupRef);
+    }
+    if key_refs.is_empty() {
+        return Ok(None);
+    }
+    let mut n_count_distinct = 0usize;
+    for tle_node in &parse.targetList {
+        let Some(tle) = tle_node.as_target_entry() else { return Ok(None) };
+        if tle.ressortgroupref != 0 && key_refs.contains(&tle.ressortgroupref) {
+            continue;
+        }
+        if is_count_distinct_int(tle.expr, rti) {
+            n_count_distinct += 1;
+            continue;
+        }
+        return Ok(None);
+    }
+    if n_count_distinct == 0 {
+        return Ok(None);
+    }
+    let ngroups = {
+        let clauses =
+            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.processed_groupClause);
+        let group_exprs =
+            types_pathnodes::run::sortgrouplist_exprs(run, &clauses, &parse.targetList);
+        let input_rows = run.root.rel(rel_id).rows.max(1.0);
+        crate::selfuncs::estimate_num_groups(run, &group_exprs, input_rows)?
+    };
+    Ok(Some(finish_knob_path(
+        run,
+        "distinctheap",
+        "grouped-count-distinct-heap",
+        heap_distinct_guard(),
+        relid,
+        ngroups,
+        rel_rows,
+        rel_pages,
+    )?))
+}
+
 /// GL-LOWDIST-1: the runtime distinct sinks' low-width combine +
 /// leader-parity bump is live (executor knob
 /// `PGRUST_RUNTIME_DISTINCT_LOWWIDTH`, DEFAULT ON since the GL-LOWDIST-1
@@ -2255,6 +2342,34 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             let scan_tuples = run.root.rel(rel_id).tuples.max(rel_rows);
             return finish(run, CoverClass::AggPolyHeapPlain, rte.relid, 1.0, scan_tuples, rel_pages);
         }
+        // GL-LOWDIST-4 B1 (knob-gated): plain count(DISTINCT) over one HEAP
+        // rel — the cb plain-count-distinct gates verbatim (the plain sink's
+        // col-0 direct-key discipline: no quals, no sort/limit, exactly the
+        // one count(DISTINCT) tlist entry). The sink's heap feed is the B1
+        // widening (runtime_distinct::distinct_task_source); heap text
+        // rides the collected emit_key batch (no dict lane).
+        if distinct_heap_probe_enabled()
+            && textdistinct_plain_enabled()
+            && !has_quals
+            && parse.sortClause.is_nil()
+            && parse.limitCount.is_none()
+            && parse.targetList.len() == 1
+        {
+            if let Some(tle) = parse.targetList.nth(0).as_target_entry() {
+                if is_count_distinct_any(tle.expr, rti) {
+                    return finish_knob_path(
+                        run,
+                        "distinctheap",
+                        "plain-count-distinct-heap",
+                        heap_distinct_guard(),
+                        rte.relid,
+                        1.0,
+                        rel_rows,
+                        rel_pages,
+                    );
+                }
+            }
+        }
         // Heap rows are no-qual only (LIKE-qual folds are walk refusals;
         // the qualed LIKE census is deliberately not keyed in bootstrap).
         if has_quals || !parse.sortClause.is_nil() {
@@ -2271,6 +2386,18 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
 
     // --- Grouped aggregation over pgrcolumnar ------------------------------------
     if !is_cb {
+        // GL-LOWDIST-4 B1 (knob-gated): grouped count(DISTINCT int-family)
+        // over one HEAP rel — the narrow census face only (bare int keys,
+        // key + count-distinct tlist entries, nothing else; passengers
+        // refuse and keep Gather, unchanged). A miss falls through to the
+        // unchanged refusal.
+        if distinct_heap_probe_enabled() && !has_quals && parse.sortClause.is_nil() {
+            if let Some(verdict) = classify_heap_grouped_distinct(
+                run, parse, rti, rte.relid, rel_id, rel_rows, rel_pages,
+            )? {
+                return Ok(verdict);
+            }
+        }
         return Ok(false);
     }
     // SE-TEXTDISTINCT (C1, band 86001): reduced-expr-key grouped agg —
@@ -5992,9 +6119,38 @@ fn is_count_distinct_any(expr: Node<'_>, rti: usize) -> bool {
     }
     let Some(arg_tle) = agg.args.nth(0).as_target_entry() else { return false };
     let Some(v) = key_var(arg_tle.expr, rti) else { return false };
-    // GL-LOWDIST-3: datetime args under the widening knob (int lanes).
+    // GL-LOWDIST-3: datetime args under the widening knob (int lanes);
+    // GL-LOWDIST-4 B2: text collation admission via the catalog helper.
     is_distinct_arg_int_kind(v.vartype)
-        || (is_text_family(v.vartype) && v.varcollid == DEFAULT_COLLATION_OID)
+        || (is_text_family(v.vartype) && distinct_arg_collation_ok(v.varcollid))
+}
+
+/// GL-LOWDIST-4 B2: a text DISTINCT arg's collation is admissible when it
+/// is the default collation (the historical parse-altitude answer) OR —
+/// under the widening knob — any DETERMINISTIC collation per the catalog
+/// (`get_collation_isdeterministic`, exactly the walk's own
+/// `distinct_set_kind` gate: byte equality of detoasted content IS the
+/// equality verdict for every deterministic collation, COLLATE "C"
+/// included). Probe ⊂ walk holds by construction — the widened probe
+/// admits precisely what the serial set-mode init already admits. Lookup
+/// errors refuse (fail-closed). Knob `PGRUST_LANE_V2_DISTINCT_COLLATION`
+/// (t35 law: DEFAULT OFF for the letter; ON iff exactly `1`/`on`) —
+/// probe-only: the executor side has admitted deterministic non-default
+/// collations since distinct-bytes landed.
+fn distinct_arg_collation_ok(collid: u32) -> bool {
+    if collid == DEFAULT_COLLATION_OID {
+        return true;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let widened = *ON.get_or_init(|| {
+        matches!(
+            std::env::var("PGRUST_LANE_V2_DISTINCT_COLLATION").as_deref(),
+            Ok("1") | Ok("on")
+        )
+    });
+    widened
+        && collid != 0
+        && lsyscache::get_collation_isdeterministic(collid).unwrap_or(false)
 }
 
 /// SE-TEXTDISTINCT (band 86001) reduced-expr-key affine check: `expr`
