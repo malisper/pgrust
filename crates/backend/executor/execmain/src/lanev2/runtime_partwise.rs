@@ -78,15 +78,18 @@ use super::router::{self, ArmClass, ArmCounter};
 use super::runtime_scan::{elastic_dop, engage, exprs_parallel_safe, min_granules, whole_claims};
 use super::{lane_trace, seq_scan_fusible};
 
-/// The engagement arm's kill switch (default OFF). The plan-time probe
-/// (`planner/src/m5_partwise.rs`) reads the IDENTICAL env spelling — knob
-/// coherence: the probe must never suppress a Gather this arm won't pick up.
+/// The engagement arm's knob — DEFAULT ON since the GL-PARTWISE-1 flip
+/// (2026-07-21); `PGRUST_LANE_V2_PARTWISE=0|off` kills (t35 exact-spelling
+/// flipped-kill). The plan-time probe (`planner/src/m5_partwise.rs`) reads
+/// the IDENTICAL env spelling — knob coherence: the probe must never
+/// suppress a Gather this arm won't pick up, and one kill spelling disarms
+/// BOTH halves (killed world = keep-Gather, byte-for-byte pre-flip).
 pub(super) fn partwise_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        matches!(
+        !matches!(
             std::env::var("PGRUST_LANE_V2_PARTWISE").as_deref(),
-            Ok("1") | Ok("on")
+            Ok("0") | Ok("off")
         )
     })
 }

@@ -195,6 +195,17 @@ pub enum CoverClass {
     /// fallback (lanefold admits the same affine forms), so no
     /// suppress-then-refuse serial cliff class opens.
     CbMetaFooterAgg,
+    /// PARTWISE-MORSELS increment 1 (night/partitionwise-morsels): plain
+    /// count/sum fold over ONE declaratively partitioned parent — >=2 leaf
+    /// partitions, uniform unindexed heap XOR pgrcolumnar children, no
+    /// quals, Agg-root only. Classifier lives in m5_partwise.rs (its own
+    /// module); the executor half is the partition-as-morsel arm
+    /// (lanev2/runtime_partwise.rs — child edges as hard GranuleMap
+    /// boundaries on ONE concatenated claim space). DEFAULT ON since
+    /// GL-PARTWISE-1 (2026-07-21); PGRUST_LANE_V2_PARTWISE=0|off kills.
+    /// Rectangle-retained: the PROVISIONAL per-AM floors live in the
+    /// classifier (per-AM shape is inexpressible in one FloorGuard).
+    PartwisePlainFold,
 }
 
 /// One bootstrap matrix row: class key, covered verdict, §2.4 qualifiers.
@@ -280,9 +291,14 @@ pub const BOOTSTRAP_MATRIX: &[MatrixRow] = &[
         covered: true,
         qualifiers: "se-aggpoly (band 101001): keyed ONLY under PGRUST_LANE_V2_AGG_POLY (knob coherence); one unindexed heap rel; quals allowed, is_parallel_safe; tlist = PLAIN_FOLD_AGGS bare-int OR plain sum/avg(numeric) w/ parallel-safe arg exprs, >=1 numeric; Agg-root only (no sort/limit/offset); floor reused from HeapCmpFoldPrefix (provisional — GL-AGGPOLY-1 letter owed)",
     },
+    MatrixRow {
+        class: CoverClass::PartwisePlainFold,
+        covered: true,
+        qualifiers: "partwise-morsels inc-1: plain count(*)/count(any)/sum(int2/4/8) over ONE partitioned parent; >=2 leaf partitions, uniform unindexed heap XOR pgrcolumnar children, no quals, Agg-root only; keyed under PGRUST_LANE_V2_PARTWISE (knob coherence, BOTH read sites; DEFAULT ON since GL-PARTWISE-1, =0|off kills); per-AM PROVISIONAL floors in the classifier (CbPlainAggFold/HeapCmpFoldPrefix reuse — floor-calibration mini-ladder is the named follow-up)",
+    },
 ];
 
-fn class_covered(class: CoverClass) -> bool {
+pub(crate) fn class_covered(class: CoverClass) -> bool {
     BOOTSTRAP_MATRIX.iter().any(|r| r.class == class && r.covered)
 }
 
@@ -409,6 +425,11 @@ fn class_guard(class: CoverClass) -> FloorGuard {
         CoverClass::AggPolyHeapPlain => {
             FloorGuard { min_rows: 1_000_000.0, min_dop: 12, low_dop_max_rows: 0.0, ..NO_GUARD }
         }
+        // PARTWISE: unused by construction — the classifier never calls
+        // finish(); its PROVISIONAL per-AM floors (cb vs heap differ, one
+        // FloorGuard cannot express both) live in m5_partwise.rs with
+        // GL-PARTWISE-1 provenance.
+        CoverClass::PartwisePlainFold => NO_GUARD,
     }
 }
 
@@ -1464,13 +1485,14 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     let Some(rte) = parse.rtable.nth(rti - 1).as_range_tbl_entry() else {
         return Ok(false);
     };
-    // PARTWISE-MORSELS (night/partitionwise-morsels; knob-gated DEFAULT
-    // OFF, the SE-TEXTDISTINCT non-matrix precedent — the tsv's
-    // parallel-append-partitionwise row stays route_to=legacy/probe_key="-"
-    // and the drift guards are untouched): partitioned-PARENT single-rel
-    // plain-fold shapes. The whole classifier lives in m5_partwise.rs (its
-    // own module per the night-run coordination note); this hook is the
-    // one touch in this file. Knob-OFF takes the identical refusal below.
+    // PARTWISE-MORSELS (night/partitionwise-morsels; CoverClass::
+    // PartwisePlainFold, tsv row partwise-plain-fold — covered/runtime;
+    // DEFAULT ON since GL-PARTWISE-1, PGRUST_LANE_V2_PARTWISE=0|off kills):
+    // partitioned-PARENT single-rel plain-fold shapes. The whole classifier
+    // lives in m5_partwise.rs (its own module per the night-run
+    // coordination note); this hook is the one touch in this file.
+    // Killed-knob takes the identical refusal below (keep-Gather posture,
+    // byte-for-byte the pre-flip world).
     if rte.rtekind == RTEKind::RTE_RELATION
         && rte.relkind == types_rel::RELKIND_PARTITIONED_TABLE
         && rte.inh
@@ -3798,6 +3820,10 @@ fn cover_class_curve(class: CoverClass) -> Option<costsize::runtime_model::Runti
         CoverClass::CbGroupedAggTextKey => Some(Rc::CbGroupedAggTextKey),
         // Footer answers are O(1): never floored, no curve.
         CoverClass::CbMetaFooterAgg => None,
+        // Rectangle-retained: per-AM PROVISIONAL floors in m5_partwise.rs
+        // (GL-PARTWISE-1); own curve cells ride the named floor-calibration
+        // follow-up (runtime-cost-constants.tsv row).
+        CoverClass::PartwisePlainFold => None,
     }
 }
 
@@ -5751,11 +5777,15 @@ mod tests {
         // refuted the PlainAgg reuse) and MetaFooter has no curve by design.
         for row in BOOTSTRAP_MATRIX {
             let curveless = cover_class_curve(row.class).is_none();
+            // PartwisePlainFold: rectangle-retained — per-AM PROVISIONAL
+            // floors in m5_partwise.rs (GL-PARTWISE-1); curve cells ride the
+            // named floor-calibration follow-up.
             let expect_curveless = matches!(
                 row.class,
                 CoverClass::CbMetaFooterAgg
                     | CoverClass::CbHashJoinMultiBuild
                     | CoverClass::CbHashJoinGroupedAgg
+                    | CoverClass::PartwisePlainFold
             );
             assert_eq!(
                 curveless, expect_curveless,
