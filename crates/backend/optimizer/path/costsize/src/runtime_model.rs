@@ -94,6 +94,11 @@ pub enum RuntimeClass {
     CbDistinctIntKeys,
     CbTopnBoundedIntKeys,
     CbHashJoinPlainAgg,
+    /// GL-MBSEAT-1: the grouped-join rider's OWN curve, fitted on the
+    /// SEATED arm (MBSHARED + MBSEAT default-ON world) — the planner
+    /// wiring mirrors both kills and falls back to the guarded-off
+    /// rectangle when either is dark.
+    CbHashJoinGroupedAgg,
     HeapPlainCountStar,
     HeapCmpFoldPrefix,
 }
@@ -108,12 +113,13 @@ impl RuntimeClass {
             RuntimeClass::CbDistinctIntKeys => "CbDistinctIntKeys",
             RuntimeClass::CbTopnBoundedIntKeys => "CbTopnBoundedIntKeys",
             RuntimeClass::CbHashJoinPlainAgg => "CbHashJoinPlainAgg",
+            RuntimeClass::CbHashJoinGroupedAgg => "CbHashJoinGroupedAgg",
             RuntimeClass::HeapPlainCountStar => "HeapPlainCountStar",
             RuntimeClass::HeapCmpFoldPrefix => "HeapCmpFoldPrefix",
         }
     }
 
-    pub const ALL: [RuntimeClass; 9] = [
+    pub const ALL: [RuntimeClass; 10] = [
         RuntimeClass::CbPlainAggFold,
         RuntimeClass::CbGroupedAggIntKeys,
         RuntimeClass::CbGroupedAggTextKey,
@@ -121,6 +127,7 @@ impl RuntimeClass {
         RuntimeClass::CbDistinctIntKeys,
         RuntimeClass::CbTopnBoundedIntKeys,
         RuntimeClass::CbHashJoinPlainAgg,
+        RuntimeClass::CbHashJoinGroupedAgg,
         RuntimeClass::HeapPlainCountStar,
         RuntimeClass::HeapCmpFoldPrefix,
     ];
@@ -154,6 +161,7 @@ pub fn class_model(class: RuntimeClass) -> ClassModel {
         RuntimeClass::CbGroupedAggIntKeys => ClassModel { c_engage: 1292041.9, w_row: 1.8392, l_setup: 2689172.8, l_cap: 6.04, n_min_fit: 1000000.0, ser_setup: 1521808.2, ser_row: 0.5155 },
         RuntimeClass::CbGroupedAggTextKey => ClassModel { c_engage: 628935.8, w_row: 1.6932, l_setup: 647011.4, l_cap: 5.76, n_min_fit: 1000000.0, ser_setup: 496422.6, ser_row: 0.9510 },
         RuntimeClass::CbGroupedAggTopN => ClassModel { c_engage: 461286.3, w_row: 1.6395, l_setup: 1903979.4, l_cap: 6.06, n_min_fit: 1000000.0, ser_setup: 534384.6, ser_row: 0.3162 },
+        RuntimeClass::CbHashJoinGroupedAgg => ClassModel { c_engage: 5695.0, w_row: 1.3218, l_setup: 64597.1, l_cap: 16.00, n_min_fit: 1000000.0, ser_setup: 0.0, ser_row: 0.0 },
         RuntimeClass::CbHashJoinPlainAgg => ClassModel { c_engage: 1747.4, w_row: 1.5379, l_setup: 48931.8, l_cap: 11.79, n_min_fit: 1000000.0, ser_setup: 0.0, ser_row: 0.9928 },
         RuntimeClass::CbPlainAggFold => ClassModel { c_engage: 0.0, w_row: 1.2712, l_setup: 18206.0, l_cap: 12.66, n_min_fit: 1000000.0, ser_setup: 29327.6, ser_row: 0.0120 },
         RuntimeClass::CbTopnBoundedIntKeys => ClassModel { c_engage: 3523905.4, w_row: 2.6581, l_setup: 322122.7, l_cap: 16.00, n_min_fit: 1000000.0, ser_setup: 417592.9, ser_row: 0.4527 },
@@ -178,8 +186,15 @@ pub const N_MIN_SERIAL: f64 = 100_000.0;
 /// verdict ABSTAINS (fails toward the incumbent) — the F1 floor keeps
 /// owning grouped-topn's small-N routing. Neither class is in the decide
 /// list, so this exclusion changes no live route.
-pub const SERIAL_FIT_UNUSABLE: [RuntimeClass; 2] =
-    [RuntimeClass::CbDistinctIntKeys, RuntimeClass::CbGroupedAggTopN];
+/// CbHashJoinGroupedAgg boarded with GL-MBSEAT-1 AFTER the R1 serial wave
+/// (no witnessed serial cell — its ClassModel carries ser placeholders);
+/// the regime verdict abstains (fails toward the incumbent) pending its
+/// R1B refit row.
+pub const SERIAL_FIT_UNUSABLE: [RuntimeClass; 3] = [
+    RuntimeClass::CbDistinctIntKeys,
+    RuntimeClass::CbGroupedAggTopN,
+    RuntimeClass::CbHashJoinGroupedAgg,
+];
 
 /// Predicted serial/legacy ratio (the serial-regime curve). `None` when
 /// the class's serial fit is below the quality bar.
@@ -262,11 +277,15 @@ pub enum CostRouteMode {
     DecideClasses(Vec<&'static str>),
 }
 
-/// The t36 flips2 default decide-list: the three witnessed rot cells
-/// (notes/gl-cost-class-flip-letters.md — all FLIP-RECOMMENDED). Kept as a
-/// named constant so the default and the letters stay reviewably tied.
-const DEFAULT_DECIDE_CLASSES: [&str; 3] =
-    ["CbPlainAggFold", "CbGroupedAggTextKey", "CbHashJoinPlainAgg"];
+/// The default decide-list: the t36 flips2 witnessed rot cells
+/// (notes/gl-cost-class-flip-letters.md — all FLIP-RECOMMENDED) plus the
+/// GL-MBSEAT-1 seated grouped-join lift (notes/gl-mbseat-1-letter.md:
+/// its own witnessed curve on the MBSHARED+MBSEAT arm; the planner
+/// wiring un-curves the class when either knob is killed, so the decide
+/// entry is inert in any kill posture). Kept as a named constant so the
+/// default and the letters stay reviewably tied.
+const DEFAULT_DECIDE_CLASSES: [&str; 4] =
+    ["CbPlainAggFold", "CbGroupedAggTextKey", "CbHashJoinPlainAgg", "CbHashJoinGroupedAgg"];
 
 pub fn cost_route_mode() -> &'static CostRouteMode {
     static MODE: std::sync::OnceLock<CostRouteMode> = std::sync::OnceLock::new();
@@ -384,6 +403,18 @@ mod tests {
         (RuntimeClass::CbTopnBoundedIntKeys, 1e7, 4, 3.075),
         (RuntimeClass::CbTopnBoundedIntKeys, 1e7, 8, 4.257),
         (RuntimeClass::CbTopnBoundedIntKeys, 1e7, 16, 6.509),
+        // GL-MBSEAT-1 seated grid (jobs pgrust-fast-tests-39d74f1439-*,
+        // @ night/mbseat 39d74f143; every leg dop-pinned CLEAN; the arm
+        // of record is MBSHARED+MBSEAT — see the class's enum doc).
+        (RuntimeClass::CbHashJoinGroupedAgg, 1e6, 4, 1.200),
+        (RuntimeClass::CbHashJoinGroupedAgg, 1e6, 8, 0.832),
+        (RuntimeClass::CbHashJoinGroupedAgg, 1e6, 16, 0.705),
+        (RuntimeClass::CbHashJoinGroupedAgg, 2.5e6, 4, 1.197),
+        (RuntimeClass::CbHashJoinGroupedAgg, 2.5e6, 8, 1.112),
+        (RuntimeClass::CbHashJoinGroupedAgg, 2.5e6, 16, 0.972),
+        (RuntimeClass::CbHashJoinGroupedAgg, 5e6, 4, 1.289),
+        (RuntimeClass::CbHashJoinGroupedAgg, 5e6, 8, 1.125),
+        (RuntimeClass::CbHashJoinGroupedAgg, 5e6, 16, 1.102),
         (RuntimeClass::CbHashJoinPlainAgg, 1e6, 4, 1.319),
         (RuntimeClass::CbHashJoinPlainAgg, 2.5e6, 4, 1.494),
         (RuntimeClass::CbHashJoinPlainAgg, 5e6, 4, 1.545),
@@ -418,6 +449,10 @@ mod tests {
                     && rows <= 4_000_000.0
                     && (dop >= 12 || rows <= 2_000_000.0)
             }
+            // GL-MBSEAT-1: the shipped FloorGuard for the rider is
+            // max_rows=0 (never suppress) — the lift lives ONLY in the
+            // decide-listed curve; shadow/kill postures keep Gather.
+            RuntimeClass::CbHashJoinGroupedAgg => false,
             RuntimeClass::HeapPlainCountStar => true, // pages mirror aside
             RuntimeClass::HeapCmpFoldPrefix => rows >= 1_000_000.0 && dop >= 12,
         }
@@ -502,6 +537,14 @@ mod tests {
                 // the GL-COST-TOPN-1 guard-off in this same stack: the
                 // rectangle now never suppresses, matching the curve's
                 // keep-Gather verdict at every witnessed cell.
+                // GL-MBSEAT-1: the lift's clear-win cells (outside the
+                // ±5% parity band; the 2.5M@16 win at 0.972 is band-exempt)
+                // — the rider's shipped floor is max_rows=0 (never
+                // suppress), so every curve-suppressed win cell disagrees
+                // by design; the decide-list entry IS the flip that
+                // resolves them. CELLS order (grouped precedes plain).
+                (RuntimeClass::CbHashJoinGroupedAgg, 1_000_000, 8),
+                (RuntimeClass::CbHashJoinGroupedAgg, 1_000_000, 16),
                 (RuntimeClass::CbHashJoinPlainAgg, 1_000_000, 4),
             ],
             "unexpected curve-vs-floor disagreement set"
@@ -739,7 +782,11 @@ mod tests {
     /// and the predicted ratio legitimately WORSENS as dop widens.
     /// Witnessed: the L6 four-posture grid @ 27db94812 (rt/GM rising
     /// 6.80->9.77 at 1M across dop 4->16).
-    const LEGACY_OUTSCALES_ARM: &[RuntimeClass] = &[RuntimeClass::CbTopnBoundedIntKeys];
+    // GL-MBSEAT-1: the seated grouped-join class's legacy reference
+    // genuinely scaled to w16 in its witnessed grid (gather+w16 at 5M),
+    // so its fit sits AT the bound like the topn class.
+    const LEGACY_OUTSCALES_ARM: &[RuntimeClass] =
+        &[RuntimeClass::CbTopnBoundedIntKeys, RuntimeClass::CbHashJoinGroupedAgg];
 
     /// Model-shape sanity (charter: monotonicity unit tests): both cost
     /// curves strictly increase in N; the runtime side never gets more
