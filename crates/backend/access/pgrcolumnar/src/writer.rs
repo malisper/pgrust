@@ -589,6 +589,46 @@ fn stitch_write_enabled() -> bool {
     })
 }
 
+// v8 NDV-lane kill switch (default ON): register-blob persistence, the
+// reopen-append sketch continuation, and the exact-stitch-gndv scalar
+// preference. PGRUST_CBSTORE_NDV_REGS=0/off restores the pre-v8 NDV
+// behavior exactly (no blobs, all-zero directory, reopen invalidates the
+// sketch to unknown, scalars from the HLL estimate alone).
+fn ndv_regs_enabled() -> bool {
+    static ON: pgsync::OnceLock<bool> = pgsync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_CBSTORE_NDV_REGS").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+// Reopen-append sketch reload: deserialize every column's v8 register blob
+// (directory entries are all-zero where absent). All-or-nothing, mirroring
+// CbWriter.ndv's Option<Vec<Hll>>: the writer tracks all columns or none,
+// so a single absent/unknown blob keeps the invalidate-to-unknown fallback.
+fn load_ndv_regs(
+    file: &mut SegFile,
+    dir: &[(u64, u32)],
+    ncols: usize,
+) -> PgResult<Option<Vec<Hll>>> {
+    if !ndv_regs_enabled() || dir.len() != ncols {
+        return Ok(None);
+    }
+    let total = file.total_len();
+    let mut hlls = Vec::with_capacity(ncols);
+    for &(off, len) in dir {
+        if off == 0 || len == 0 || off.checked_add(len as u64).is_none_or(|e| e > total) {
+            return Ok(None);
+        }
+        let mut blob = vec![0u8; len as usize];
+        file.read_exact_at(&mut blob, off)?;
+        match Hll::from_blob(&blob) {
+            Some(h) => hlls.push(h),
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(hlls))
+}
+
 pub struct CbWriter {
     file: SegFile,
     xid: TransactionId,
@@ -815,7 +855,7 @@ fn open_writer_inner(
                     )));
                 }
                 if footer_off != 0 {
-                    let (rgs, footer_end, _ndv, _sorted, _ckey, _lenflags, _stitch) =
+                    let (rgs, footer_end, _ndv, _sorted, _ckey, _lenflags, _stitch, ndvregs) =
                         crate::reader::read_footer_rgs(
                         &mut w.file,
                         footer_off,
@@ -824,7 +864,14 @@ fn open_writer_inner(
                         true,
                     )?;
                     if !rgs.is_empty() {
-                        w.ndv = None;
+                        // v8: continue the persisted register sketch across
+                        // the reopen instead of invalidating (registers are
+                        // per-bucket maxima — continue == recompute exactly).
+                        // Every column must deserialize; any absent/unknown
+                        // blob (pre-v8 chain, kill switch at the earlier
+                        // write, foreign precision) keeps the historical
+                        // invalidate-to-unknown fallback for the whole part.
+                        w.ndv = load_ndv_regs(&mut w.file, &ndvregs, w.ncols)?;
                         w.sorted = None;
                         w.stitch = None;
                     }
@@ -1058,6 +1105,26 @@ impl CbWriter {
         }
         let ft1 = std::time::Instant::now();
         self.finish_stitch += ft1 - ft0;
+        // v8 NDV-register blobs (the append-invalidation fix): persist the
+        // per-column sketch registers so a later reopen-append continues the
+        // sketch instead of invalidating every column to unknown. File-body
+        // blobs ahead of the footer, dead on append-refinalize — the stitch
+        // precedent. Sketch upkeep is already paid per value at ingest; this
+        // adds only the serialization write (<=4+16KiB/column dense, tens of
+        // bytes sparse).
+        let mut ndvregs_dir = vec![(0u64, 0u32); self.ncols];
+        if ndv_regs_enabled() {
+            if let Some(hlls) = &self.ndv {
+                for (c, h) in hlls.iter().enumerate() {
+                    let blob = h.to_blob();
+                    let off = align64(self.write_off);
+                    self.file.write_all_at(&blob, off)?;
+                    self.write_off = off + blob.len() as u64;
+                    self.finish_blob_bytes += blob.len() as u64;
+                    ndvregs_dir[c] = (off, blob.len() as u32);
+                }
+            }
+        }
         // Footer.
         let mut f: Vec<u8> = Vec::with_capacity(64 + self.rgs.len() * (24 + self.ncols * 24));
         put_u32(&mut f, self.rgs.len() as u32);
@@ -1084,12 +1151,19 @@ impl CbWriter {
             }
         }
         // v2 NDV section; a distinct count can never be 0 for a nonempty
-        // part, so 0 encodes unknown (append-invalidated sketch).
+        // part, so 0 encodes unknown (append-invalidated sketch). Where a
+        // v7 global dict exists, its entry count IS the column's exact
+        // distinct count (ingest rejects NULLs; the union dict spans every
+        // RG) — prefer exactness over the ~1% HLL estimate.
         let total_rows: u64 = self.rgs.iter().map(|rg| rg.nrows as u64).sum();
         for c in 0..self.ncols {
-            let est = match &self.ndv {
-                Some(hlls) => hlls[c].estimate().clamp(1, total_rows.max(1)),
-                None => 0,
+            let est = if ndv_regs_enabled() && stitch_gndv[c] > 0 {
+                stitch_gndv[c].clamp(1, total_rows.max(1))
+            } else {
+                match &self.ndv {
+                    Some(hlls) => hlls[c].estimate().clamp(1, total_rows.max(1)),
+                    None => 0,
+                }
             };
             put_u64(&mut f, est);
         }
@@ -1147,6 +1221,12 @@ impl CbWriter {
                     put_u32(&mut f, rg.zerocnt.get(g * self.ncols + c).copied().unwrap_or(0));
                 }
             }
+        }
+        // v8 NDV-registers blob directory (after zero counts); all-zero
+        // where the sketch is absent (invalidated chain or kill switch).
+        for &(off, len) in &ndvregs_dir {
+            put_u64(&mut f, off);
+            put_u32(&mut f, len);
         }
         let crc = crc32c(&f);
         let flen = (f.len() + 16) as u64;
@@ -3977,6 +4057,210 @@ mod parallel_ingest_tests {
         // col0 ascending; col1 breaks exactly at the RG seam; col2 hashes
         // unsorted; col3's zero-padded uniques are lexicographically ascending.
         assert_eq!(part.sorted, vec![1, 0, 0, 1]);
+        std::fs::remove_file(&path).unwrap();
+    }
+}
+
+// v8 NDV-register persistence: the multi-COPY differential (H1: a part
+// built by two COPYs must estimate like one) plus the fallback-ladder
+// contracts.
+#[cfg(test)]
+mod ndv_regs_tests {
+    use super::*;
+    use crate::reader::{part_footer_ndv, part_footer_ndv_hll, read_footer_rgs, Part};
+
+    fn tmp(name: &str) -> String {
+        let p =
+            std::env::temp_dir().join(format!("cbstore-ndvregs-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_file(&p);
+        std::fs::write(&p, []).unwrap();
+        p.to_str().unwrap().to_string()
+    }
+
+    fn text_datum(s: &[u8], keep: &mut Vec<Vec<u8>>) -> Datum {
+        let mut v = Vec::with_capacity(4 + s.len());
+        v.extend_from_slice(&(((s.len() + 4) as u32) << 2).to_le_bytes());
+        v.extend_from_slice(s);
+        keep.push(v);
+        Datum::from_usize(keep.last().unwrap().as_ptr() as usize)
+    }
+
+    fn put_int_rows(w: &mut CbWriter, range: std::ops::Range<usize>, ndistinct: usize) {
+        for i in range {
+            w.append_row(&[Datum::from_i64((i % ndistinct) as i64)], &[false]).unwrap();
+        }
+    }
+
+    // THE H1 differential: 200k rows / 60k distinct ints, loaded as one
+    // session vs two (finish + reopen-append + finish). Identical value
+    // stream => identical registers => byte-identical footer NDV; before
+    // the fix the two-session part invalidated to 0 (unknown).
+    #[test]
+    fn multi_copy_estimates_like_single_copy_ints() {
+        const N: usize = 200_000;
+        const D: usize = 60_000;
+
+        let one = tmp("one-copy-int");
+        let mut w = open_writer_at(&one, vec![ColType::I64]).unwrap();
+        put_int_rows(&mut w, 0..N, D);
+        w.finish().unwrap();
+        drop(w);
+        let est_one = part_footer_ndv(&one, 1).unwrap().unwrap()[0];
+
+        let two = tmp("two-copy-int");
+        let mut w1 = open_writer_at(&two, vec![ColType::I64]).unwrap();
+        put_int_rows(&mut w1, 0..N / 2, D);
+        w1.finish().unwrap();
+        drop(w1);
+        let mut w2 = open_writer_at(&two, vec![ColType::I64]).unwrap();
+        put_int_rows(&mut w2, N / 2..N, D);
+        w2.finish().unwrap();
+        drop(w2);
+        let est_two = part_footer_ndv(&two, 1).unwrap().unwrap()[0];
+
+        assert_ne!(est_two, 0, "H1: append invalidated the sketch to unknown");
+        assert_eq!(est_two, est_one, "reopen continuation must equal the single pass");
+        let err = (est_one as f64 / D as f64 - 1.0).abs();
+        assert!(err < 0.03, "estimate {est_one} vs actual {D} (err {err:.4})");
+
+        // The persisted registers round-trip through the reader-side blob
+        // path (the inherited-ANALYZE union source) with the same estimate.
+        let sk = part_footer_ndv_hll(&two, 1).unwrap().unwrap();
+        assert_eq!(sk[0].as_ref().unwrap().estimate(), est_two);
+
+        std::fs::remove_file(&one).unwrap();
+        std::fs::remove_file(&two).unwrap();
+    }
+
+    // Text arm with duplicate values STRADDLING the COPY boundary: the
+    // continued sketch must dedup across sessions (a per-COPY scalar sum
+    // would double-count). Scalars may legitimately differ between the
+    // single- and two-session parts (the single part can carry a v7 stitch
+    // whose exact gndv the scalar prefers; append invalidates stitch), so
+    // parity is asserted on the register sketches.
+    #[test]
+    fn multi_copy_text_dedups_across_boundary() {
+        const N: usize = 160_000;
+        const D: usize = 30_000;
+        let mut keep = Vec::new();
+
+        let one = tmp("one-copy-text");
+        let mut w = open_writer_at(&one, vec![ColType::Text]).unwrap();
+        for i in 0..N {
+            let d = text_datum(format!("url-{}", i % D).as_bytes(), &mut keep);
+            w.append_row(&[d], &[false]).unwrap();
+        }
+        w.finish().unwrap();
+        drop(w);
+
+        let two = tmp("two-copy-text");
+        for half in 0..2 {
+            let mut w = open_writer_at(&two, vec![ColType::Text]).unwrap();
+            for i in half * (N / 2)..(half + 1) * (N / 2) {
+                let d = text_datum(format!("url-{}", i % D).as_bytes(), &mut keep);
+                w.append_row(&[d], &[false]).unwrap();
+            }
+            w.finish().unwrap();
+        }
+
+        let sk_one = part_footer_ndv_hll(&one, 1).unwrap().unwrap();
+        let sk_two = part_footer_ndv_hll(&two, 1).unwrap().unwrap();
+        let (e1, e2) =
+            (sk_one[0].as_ref().unwrap().estimate(), sk_two[0].as_ref().unwrap().estimate());
+        assert_eq!(e1, e2, "identical value stream must yield identical registers");
+        let err = (e1 as f64 / D as f64 - 1.0).abs();
+        assert!(err < 0.03, "estimate {e1} vs actual {D} (err {err:.4})");
+        // Both scalars must be present (nonzero) and near the truth.
+        for path in [&one, &two] {
+            let s = part_footer_ndv(path, 1).unwrap().unwrap()[0];
+            let serr = (s as f64 / D as f64 - 1.0).abs();
+            assert!(s > 0 && serr < 0.03, "scalar {s} vs actual {D}");
+        }
+
+        std::fs::remove_file(&one).unwrap();
+        std::fs::remove_file(&two).unwrap();
+    }
+
+    // H5: where a v7 global dict exists its entry count is the column's
+    // EXACT distinct count — the v2 scalar must carry it verbatim instead
+    // of the ~1% HLL estimate.
+    #[test]
+    fn stitch_gndv_wins_the_scalar_exactly() {
+        const N: usize = 131_072; // two full RGs
+        const D: usize = 10_000;
+        let path = tmp("stitch-exact");
+        let mut keep = Vec::new();
+        let mut w = open_writer_at(&path, vec![ColType::Text]).unwrap();
+        for i in 0..N {
+            let d = text_datum(format!("k{:06}", i % D).as_bytes(), &mut keep);
+            w.append_row(&[d], &[false]).unwrap();
+        }
+        w.finish().unwrap();
+        drop(w);
+
+        let mut file = SegFile::open_rw(&path).unwrap();
+        let mut hdr = [0u8; CB_HEADER_LEN as usize];
+        file.read_exact_at(&mut hdr, 0).unwrap();
+        let (footer_off, _, version) = crate::reader::read_header(&hdr).unwrap();
+        let (_, _, ndv, _, _, _, stitch, _) =
+            read_footer_rgs(&mut file, footer_off, 1, version, false).unwrap();
+        assert_eq!(
+            stitch.gndv[0], D as u64,
+            "precondition: the dict/stitch arm engaged for this shape"
+        );
+        assert_eq!(ndv[0], D as u64, "scalar must be the exact stitch gndv");
+        // The register sketch coexists (append continuation stays armed).
+        let sk = part_footer_ndv_hll(&path, 1).unwrap().unwrap();
+        assert!(sk[0].is_some());
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    // Fallback-ladder contracts: an all-zero directory (pre-v8 chain or the
+    // kill switch at the earlier write) and an unknown blob shape both keep
+    // the historical invalidate-to-unknown reopen behavior.
+    #[test]
+    fn load_ndv_regs_fallback_contracts() {
+        let path = tmp("fallback");
+        std::fs::write(&path, vec![0u8; 4096]).unwrap();
+        let mut f = SegFile::open_rw(&path).unwrap();
+        assert!(load_ndv_regs(&mut f, &[(0, 0)], 1).unwrap().is_none());
+        assert!(load_ndv_regs(&mut f, &[], 1).unwrap().is_none()); // pre-v8: empty dir
+        assert!(load_ndv_regs(&mut f, &[(1 << 40, 8)], 1).unwrap().is_none()); // oob
+        // In-bounds bytes that are not a known blob shape.
+        assert!(load_ndv_regs(&mut f, &[(64, 8)], 1).unwrap().is_none());
+        // A part is all-or-nothing: one good + one absent column = None.
+        let mut w = open_writer_at(&tmp("fb2"), vec![ColType::I64]).unwrap();
+        put_int_rows(&mut w, 0..10, 10);
+        w.finish().unwrap();
+        drop(w);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    // An aborted second COPY (no finish) must not poison the continued
+    // sketch: the reopen replays from the last committed footer's
+    // registers, so a third session continues from COPY 1's state.
+    #[test]
+    fn aborted_append_leaves_sketch_continuable() {
+        const D: usize = 5_000;
+        let path = tmp("abort-append");
+        let mut w1 = open_writer_at(&path, vec![ColType::I64]).unwrap();
+        put_int_rows(&mut w1, 0..RG_ROWS, D);
+        w1.finish().unwrap();
+        drop(w1);
+        // Session 2 seals an RG to disk, then aborts before finish.
+        let mut w2 = open_writer_at(&path, vec![ColType::I64]).unwrap();
+        put_int_rows(&mut w2, 0..RG_ROWS + 5, D);
+        drop(w2);
+        // Session 3 commits; the estimate covers COPY 1 + COPY 3 rows.
+        let mut w3 = open_writer_at(&path, vec![ColType::I64]).unwrap();
+        put_int_rows(&mut w3, 0..100, D);
+        w3.finish().unwrap();
+        drop(w3);
+        let est = part_footer_ndv(&path, 1).unwrap().unwrap()[0];
+        let err = (est as f64 / D as f64 - 1.0).abs();
+        assert!(est > 0 && err < 0.03, "estimate {est} vs actual {D}");
+        let part = Part::open(&path, 1).unwrap().unwrap();
+        assert_eq!(part.total_rows(), (RG_ROWS + 100) as u64);
         std::fs::remove_file(&path).unwrap();
     }
 }

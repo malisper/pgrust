@@ -118,6 +118,15 @@ impl FooterLayout {
             0
         }
     }
+    // Byte length of the v8 NDV-registers blob directory (immediately after
+    // the zero-count section; the blobs themselves live in the file body).
+    pub(crate) fn ndvregs_len(&self, ncols: usize, version: u32) -> usize {
+        if version >= CB_VERSION_V8 {
+            ncols * CB_NDVREGS_DIR_ENTRY_LEN
+        } else {
+            0
+        }
+    }
 }
 
 // want_sums materializes the v4 per-RG sums (and the v7 per-granule length
@@ -182,7 +191,8 @@ pub fn read_footer_rgs(
     ncols: usize,
     version: u32,
     want_sums: bool,
-) -> PgResult<(Vec<FooterRg>, u64, Vec<u64>, Vec<u8>, Vec<u16>, Vec<u8>, FooterStitch)> {
+) -> PgResult<(Vec<FooterRg>, u64, Vec<u64>, Vec<u8>, Vec<u16>, Vec<u8>, FooterStitch, Vec<(u64, u32)>)>
+{
     let t0 = footer_debug().then(std::time::Instant::now);
     let total_len = file.total_len();
     let pre_len = if version >= CB_VERSION_V7 { 8 + ncols } else { 8 };
@@ -208,6 +218,7 @@ pub fn read_footer_rgs(
     };
     let body_len = lay.zerocnt_off(nrgs, ncols, nlencols, version)
         + lay.zerocnt_len(nrgs, ncols, version)
+        + lay.ndvregs_len(ncols, version)
         + 16;
     // Bounds-gate before the allocation and read: a torn/garbage footer word
     // must produce a clean error, not a huge alloc or a read past EOF.
@@ -232,15 +243,18 @@ pub fn read_footer_rgs(
         //   lenstats skipped
         //   [stitch_off, +stitch_len)      v7 stitch gndv + blob directory
         //   zerocnt skipped
-        //   [body_len-16, body_len)        len | crc | magic tail
+        //   [tail_start, body_len)         v8 ndv-regs directory + tail
+        //     (the directory sits immediately before the 16-byte
+        //      len | crc | magic tail, so one contiguous read covers both)
         let prefix_end = lay.pre_len + nrgs * 24 + nrgs * ncols * 24 + lay.ndv_len;
         let sorted_off = prefix_end + lay.sums_len;
         let stitch_off = lay.stitch_off(nrgs, ncols, nlencols);
+        let tail_start = body_len - 16 - lay.ndvregs_len(ncols, version);
         let ranges = [
             (0usize, prefix_end),
             (sorted_off, sorted_off + lay.sorted_len + lay.ckey_len),
             (stitch_off, stitch_off + lay.stitch_len(nrgs, ncols, version)),
-            (body_len - 16, body_len),
+            (tail_start, body_len),
         ];
         // Overlap the section preads (cold-readahead lane): hint every
         // materialized range up front so the kernel fetches the later
@@ -264,8 +278,8 @@ pub fn read_footer_rgs(
         file.read_exact_at(&mut buf, footer_off)?;
     }
     let out = parse_footer_checked(&buf, nrgs, ncols, version, want_sums, !lazy).map(
-        |(rgs, ndv, sorted, ckey, lenflags, stitch)| {
-            (rgs, footer_off + body_len as u64, ndv, sorted, ckey, lenflags, stitch)
+        |(rgs, ndv, sorted, ckey, lenflags, stitch, ndvregs)| {
+            (rgs, footer_off + body_len as u64, ndv, sorted, ckey, lenflags, stitch, ndvregs)
         },
     );
     if let Some(t0) = t0 {
@@ -283,7 +297,8 @@ pub fn parse_footer(
     ncols: usize,
     version: u32,
     want_sums: bool,
-) -> PgResult<(Vec<FooterRg>, Vec<u64>, Vec<u8>, Vec<u16>, Vec<u8>, FooterStitch)> {
+) -> PgResult<(Vec<FooterRg>, Vec<u64>, Vec<u8>, Vec<u16>, Vec<u8>, FooterStitch, Vec<(u64, u32)>)>
+{
     parse_footer_checked(buf, nrgs, ncols, version, want_sums, true)
 }
 
@@ -297,7 +312,8 @@ fn parse_footer_checked(
     version: u32,
     want_sums: bool,
     check_crc: bool,
-) -> PgResult<(Vec<FooterRg>, Vec<u64>, Vec<u8>, Vec<u16>, Vec<u8>, FooterStitch)> {
+) -> PgResult<(Vec<FooterRg>, Vec<u64>, Vec<u8>, Vec<u16>, Vec<u8>, FooterStitch, Vec<(u64, u32)>)>
+{
     let tail = buf.len() - 16;
     if get_u32(buf, tail + 12) != CB_FOOTER_MAGIC
         || get_u64(buf, tail) != buf.len() as u64
@@ -432,8 +448,19 @@ fn parse_footer_checked(
             off += nrgs * GRANULES_PER_RG * ncols * CB_ZEROCNT_ENTRY_LEN;
         }
     }
+    // v8 NDV-registers blob directory (after zero counts); pre-v8 parts
+    // read as no-registers. All-zero entries mark absent sketches
+    // (pre-v8 append chains or the lane kill switch).
+    let mut ndvregs = Vec::new();
+    if version >= CB_VERSION_V8 {
+        ndvregs.reserve(ncols);
+        for _ in 0..ncols {
+            ndvregs.push((get_u64(buf, off), get_u32(buf, off + 8)));
+            off += CB_NDVREGS_DIR_ENTRY_LEN;
+        }
+    }
     let _ = off;
-    Ok((rgs, ndv, sorted, cluster_key, lenflags, stitch))
+    Ok((rgs, ndv, sorted, cluster_key, lenflags, stitch, ndvregs))
 }
 
 // Planner sizing: header + footer reads only (no SegMap mmap of the data
@@ -449,7 +476,7 @@ pub fn part_footer_rows(path: &str, ncols: usize) -> PgResult<Option<u64>> {
     if footer_off == 0 {
         return Ok(None);
     }
-    let (rgs, _, _, _, _, _, _) = read_footer_rgs(&mut file, footer_off, ncols, version, false)?;
+    let (rgs, ..) = read_footer_rgs(&mut file, footer_off, ncols, version, false)?;
     Ok(Some(rgs.iter().map(|rg| rg.nrows as u64).sum()))
 }
 
@@ -466,8 +493,45 @@ pub fn part_footer_ndv(path: &str, ncols: usize) -> PgResult<Option<Vec<u64>>> {
     if footer_off == 0 || version < CB_VERSION_V2 {
         return Ok(None);
     }
-    let (_, _, ndv, _, _, _, _) = read_footer_rgs(&mut file, footer_off, ncols, version, false)?;
+    let (_, _, ndv, _, _, _, _, _) = read_footer_rgs(&mut file, footer_off, ncols, version, false)?;
     Ok(Some(ndv))
+}
+
+/// v8 per-column NDV register sketches: header + footer directory + blob
+/// reads only (no data-body mmap) — the inherited-ANALYZE union source,
+/// where per-child SCALARS cannot be combined but register sketches union
+/// losslessly. Ok(None): no committed footer (zero committed rows — the
+/// caller skips the child). Some(v): per-column Option<Hll>, None entries
+/// where the sketch is absent (pre-v8 part, append-invalidated chain,
+/// kill switch, or an unknown blob shape).
+pub fn part_footer_ndv_hll(path: &str, ncols: usize) -> PgResult<Option<Vec<Option<crate::hll::Hll>>>> {
+    let mut file = SegFile::open_rw(path)?;
+    if file.total_len() < CB_HEADER_LEN {
+        return Ok(None);
+    }
+    let mut hdr = [0u8; CB_HEADER_LEN as usize];
+    file.read_exact_at(&mut hdr, 0)?;
+    let Some((footer_off, _, version)) = read_header_opt(&hdr)? else { return Ok(None) };
+    if footer_off == 0 {
+        return Ok(None);
+    }
+    if version < CB_VERSION_V8 {
+        return Ok(Some((0..ncols).map(|_| None).collect()));
+    }
+    let (_, _, _, _, _, _, _, ndvregs) =
+        read_footer_rgs(&mut file, footer_off, ncols, version, false)?;
+    let total_len = file.total_len();
+    let mut out: Vec<Option<crate::hll::Hll>> = Vec::with_capacity(ncols);
+    for &(off, len) in &ndvregs {
+        if off == 0 || len == 0 || off.checked_add(len as u64).is_none_or(|e| e > total_len) {
+            out.push(None);
+            continue;
+        }
+        let mut blob = vec![0u8; len as usize];
+        file.read_exact_at(&mut blob, off)?;
+        out.push(crate::hll::Hll::from_blob(&blob));
+    }
+    Ok(Some(out))
 }
 
 pub struct Part {
@@ -561,7 +625,7 @@ impl Part {
         if footer_off == 0 {
             return Ok(None);
         }
-        let (rgs, _footer_end, ndv, sorted, cluster_key, lenflags, stitch) =
+        let (rgs, _footer_end, ndv, sorted, cluster_key, lenflags, stitch, _ndvregs) =
             read_footer_rgs(&mut file, footer_off, ncols, version, false)?;
         drop(file);
         // Shared mapping keyed by the part-cache identity vocabulary (seg0
@@ -1726,6 +1790,10 @@ mod tests {
                 }
             }
         }
+        if version >= CB_VERSION_V8 {
+            // All-zero NDV-registers directory: no sketches.
+            f.resize(f.len() + ncols * CB_NDVREGS_DIR_ENTRY_LEN, 0);
+        }
         let crc = crc32c(&f);
         let flen = (f.len() + 16) as u64;
         put_u64(&mut f, flen);
@@ -1770,9 +1838,9 @@ mod tests {
             let sorted = [1u8, 0, 1];
             write_part_v(&path, CB_HEADER_LEN, &[100, 200, 50], 3, version, &ndv, &sorted);
             let mut file = SegFile::open_rw(&path).unwrap();
-            let (l_rgs, l_end, l_ndv, l_sorted, l_ckey, l_lenflags, l_stitch) =
+            let (l_rgs, l_end, l_ndv, l_sorted, l_ckey, l_lenflags, l_stitch, l_ndvregs) =
                 read_footer_rgs(&mut file, CB_HEADER_LEN, 3, version, false).unwrap();
-            let (e_rgs, e_end, e_ndv, e_sorted, e_ckey, e_lenflags, e_stitch) =
+            let (e_rgs, e_end, e_ndv, e_sorted, e_ckey, e_lenflags, e_stitch, e_ndvregs) =
                 read_footer_rgs(&mut file, CB_HEADER_LEN, 3, version, true).unwrap();
             assert_eq!(l_end, e_end);
             assert_eq!(l_ndv, e_ndv);
@@ -1780,6 +1848,7 @@ mod tests {
             assert_eq!(l_ckey, e_ckey);
             assert_eq!(l_lenflags, e_lenflags);
             assert_eq!(l_stitch.gndv, e_stitch.gndv);
+            assert_eq!(l_ndvregs, e_ndvregs);
             assert_eq!(l_stitch.dir, e_stitch.dir);
             assert_eq!(l_rgs.len(), e_rgs.len());
             for (l, e) in l_rgs.iter().zip(&e_rgs) {
@@ -1889,7 +1958,7 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
 
         let mut file = SegFile::open_rw(&path).unwrap();
-        let (rgs, _, _, _, _, _, _) =
+        let (rgs, ..) =
             read_footer_rgs(&mut file, CB_HEADER_LEN, 2, CB_VERSION_V4, true).unwrap();
         assert_eq!(rgs[0].flags & RG_FLAG_SUMS, RG_FLAG_SUMS);
         assert_eq!(rgs[0].sums, vec![-(1i128 << 70), 42]);
@@ -1940,6 +2009,8 @@ mod tests {
         for _ in 0..2 * GRANULES_PER_RG * 2 {
             put_u32(&mut f, 0);
         }
+        // v8 NDV-registers directory: all-zero (no sketches).
+        f.resize(f.len() + 2 * CB_NDVREGS_DIR_ENTRY_LEN, 0);
         let crc = crc32c(&f);
         let flen = (f.len() + 16) as u64;
         put_u64(&mut f, flen);
@@ -1971,7 +2042,7 @@ mod tests {
         let path = tmp("sums3");
         write_part_v(&path, CB_HEADER_LEN, &[100, 200], 3, CB_VERSION_V3, &[1, 1, 1], &[]);
         let mut file = SegFile::open_rw(&path).unwrap();
-        let (rgs, _, _, sorted, _, _, _) =
+        let (rgs, _, _, sorted, _, _, _, _) =
             read_footer_rgs(&mut file, CB_HEADER_LEN, 3, CB_VERSION_V3, true).unwrap();
         assert_eq!(sorted, vec![0, 0, 0]);
         for rg in &rgs {
@@ -1988,7 +2059,7 @@ mod tests {
         let path = tmp("lens6");
         write_part_v(&path, CB_HEADER_LEN, &[100, 200], 3, CB_VERSION_V6, &[1, 1, 1], &[]);
         let mut file = SegFile::open_rw(&path).unwrap();
-        let (rgs, _, _, _, _, lenflags, _) =
+        let (rgs, _, _, _, _, lenflags, _, _) =
             read_footer_rgs(&mut file, CB_HEADER_LEN, 3, CB_VERSION_V6, true).unwrap();
         assert_eq!(lenflags, vec![0, 0, 0]);
         for rg in &rgs {

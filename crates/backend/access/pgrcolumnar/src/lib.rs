@@ -91,6 +91,21 @@ pub fn footer_ndv(rel: &::types_rel::Relation<'_>) -> PgResult<Option<Vec<u64>>>
         .and_then(|p| if p.ndv.is_empty() { None } else { Some(p.ndv.clone()) }))
 }
 
+// v8 per-column NDV register sketches (the inherited-ANALYZE union source:
+// per-child NDV scalars cannot be combined, register sketches union
+// losslessly). A direct targeted read (header + footer directory + blobs),
+// NOT the session part cache: the consumer runs once per ANALYZE of a
+// parent, and caching register images on every Part would tax the
+// plan-time cache for it. None: no committed footer (zero committed rows).
+// Per-column None entries: sketch absent (pre-v8 part, append-invalidated
+// chain, or the writer kill switch).
+pub fn footer_ndv_hll(
+    rel: &::types_rel::Relation<'_>,
+) -> PgResult<Option<Vec<Option<hll::Hll>>>> {
+    let ncols = writer::coltypes_of(rel)?.len();
+    reader::part_footer_ndv_hll(&rel_main_path(rel), ncols)
+}
+
 // v5 whole-part per-column sorted-asc flags for planner pathkey derivation;
 // None while the table has no committed footer. Pre-v5 parts read all-false.
 pub fn footer_sorted(rel: &::types_rel::Relation<'_>) -> PgResult<Option<Vec<bool>>> {
