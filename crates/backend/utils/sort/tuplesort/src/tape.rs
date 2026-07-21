@@ -146,7 +146,7 @@ impl<'m> TuplesortData<'m> {
         self.memtuples = tuples;
         result?;
 
-        self.tuplecontext.reset();
+        self.reset_tuplecontext();
         self.avail_mem += self.tuple_mem;
         self.tuple_mem = 0;
 
@@ -164,7 +164,7 @@ impl<'m> TuplesortData<'m> {
             self.sort_keys[0].comparator = abbrev.full_comparator;
         }
 
-        self.tuplecontext.reset();
+        self.reset_tuplecontext();
 
         self.avail_mem += (self.memtuples.capacity() * mem::size_of::<SortTuple>()) as i64;
         self.memtuples = PgVec::new_in(self.mcx);

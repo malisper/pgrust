@@ -1969,6 +1969,56 @@ mod spill {
         assert_eq!(temp_files(&dir), 0);
     }
 
+    // The bounded-capable (aset caller-tuples) arm across a spill: dumptuples
+    // writes the whole memory load to tape then releases the tuple context
+    // WHOLESALE (C never pfrees the written tuples one by one — the per-tuple
+    // writetup frees were removed upstream in favor of this reset).
+    #[test]
+    fn bounded_capable_spill_dumps_and_resets_caller_tuples() {
+        setup();
+        let (_cwd, dir) = enter_datadir("boundedspill");
+        let mcx = leaked_mcx();
+        let desc = int4_desc(mcx, 2);
+        let mut in_slot =
+            exectuples::make_tuple_table_slot(mcx, TupleSlotKind::Virtual, Some(desc.clone()));
+        let mut out_slot =
+            exectuples::make_tuple_table_slot(mcx, TupleSlotKind::MinimalTuple, Some(desc.clone()));
+
+        let keys = [int32_key(1, false, false), int32_key(2, false, false)];
+        // Bounded-capable, but the bound transition is never reached before
+        // memory runs out: the sort spills as a plain external sort.
+        let mut ts = Tuplesort::begin_heap_with_keys(desc.clone(), &keys, 64, TUPLESORT_ALLOWBOUNDED);
+        ts.set_bound(20_000);
+
+        let mut seed = 7u64;
+        let mut rows: Vec<(i32, i32)> = (0..40_000)
+            .map(|_| {
+                let a = lcg(&mut seed) % 1000;
+                let b = lcg(&mut seed) % 100;
+                (a as i32, b as i32)
+            })
+            .collect();
+        for (a, b) in &rows {
+            store_row(&mut in_slot, mcx, &[Some(*a), Some(*b)]);
+            ts.puttupleslot(&mut in_slot, mcx).unwrap();
+        }
+        ts.performsort().unwrap();
+
+        rows.sort_unstable();
+        let mut got = Vec::new();
+        while got.len() < 20_000 && ts.gettupleslot(true, false, &mut out_slot, mcx).unwrap() {
+            let mut n1 = false;
+            let mut n2 = false;
+            let v1 = exectuples::slot_getattr(&mut out_slot, 1, &mut n1);
+            let v2 = exectuples::slot_getattr(&mut out_slot, 2, &mut n2);
+            got.push((v1.as_i32(), v2.as_i32()));
+        }
+        assert_eq!(got[..], rows[..20_000]);
+        exectuples::exec_clear_tuple(&mut out_slot, mcx);
+        ts.end();
+        assert_eq!(temp_files(&dir), 0);
+    }
+
     #[test]
     fn spill_then_reset_reuses_state() {
         setup();
@@ -2342,6 +2392,93 @@ mod bounded_memory_discipline {
             "Bump",
             "no-bound sorts must keep the bump win (C parity)"
         );
+        ts.end();
+    }
+
+    fn put_rows(ts: &mut Tuplesort, n: u64, seed: &mut u64) {
+        let mut keep = Vec::new();
+        for _ in 0..n {
+            let k = (lcg(seed) % 1_000_000) as i64;
+            let payload = format!("pad-{k:016}").into_bytes();
+            let vals = [Datum::from_i64(k), text_datum(&payload, &mut keep)];
+            ts.putvalues(&vals, &[false, false]).unwrap();
+            keep.clear();
+        }
+    }
+
+    fn drain(ts: &mut Tuplesort, max: usize) -> Vec<i64> {
+        let mut got = Vec::new();
+        let mut values = [Datum::null(); 2];
+        let mut isnull = [false; 2];
+        while got.len() < max && ts.getvalues(true, &mut values, &mut isnull).unwrap() {
+            got.push(values[0].as_i64());
+        }
+        got
+    }
+
+    // tuplesort_reset's C contract: working memory releases WHOLESALE
+    // (tuplesort_free resets the sort context — the caller-tuples child dies
+    // with the RETAINED tuples still inside; readout never pfrees them — and
+    // tuplesort_begin_batch recreates it). The aset arm must honor that
+    // lifecycle: a reset with retained tuples still charged is the normal
+    // batch boundary, not a leak.
+    #[test]
+    fn reset_after_bounded_readout_releases_retained_tuples() {
+        let mcx = leaked_mcx();
+        let desc = i64_text_desc(mcx);
+        let keys = [SortSupport {
+            ssup_collation: 0,
+            ssup_reverse: false,
+            ssup_nulls_first: false,
+            ssup_attno: 1,
+            comparator: SortComparator::SignedI64,
+        }];
+        let mut ts = Tuplesort::begin_heap_with_keys(desc, &keys, 4096, TUPLESORT_ALLOWBOUNDED);
+        ts.set_bound(10);
+        let mut seed = 11u64;
+        put_rows(&mut ts, 100, &mut seed);
+        ts.performsort().unwrap();
+        let first = drain(&mut ts, 10);
+        assert_eq!(first.len(), 10);
+
+        // The bound survivors are still charged in the aset caller-tuples
+        // context here (only EVICTIONS free per-tuple).
+        ts.reset();
+
+        // The recycled state sorts a second batch.
+        put_rows(&mut ts, 50, &mut seed);
+        ts.performsort().unwrap();
+        let second = drain(&mut ts, usize::MAX);
+        assert_eq!(second.len(), 50);
+        assert!(second.windows(2).all(|w| w[0] <= w[1]));
+        ts.end();
+    }
+
+    // The bounded-CAPABLE arm without set_bound (a bounded caller whose
+    // current batch exceeds the small-group threshold puts with no bound):
+    // nothing is ever evicted, so EVERY batch tuple is retained at reset.
+    #[test]
+    fn reset_without_bound_set_releases_whole_batch() {
+        let mcx = leaked_mcx();
+        let desc = i64_text_desc(mcx);
+        let keys = [SortSupport {
+            ssup_collation: 0,
+            ssup_reverse: false,
+            ssup_nulls_first: false,
+            ssup_attno: 1,
+            comparator: SortComparator::SignedI64,
+        }];
+        let mut ts = Tuplesort::begin_heap_with_keys(desc, &keys, 4096, TUPLESORT_ALLOWBOUNDED);
+        let mut seed = 23u64;
+        put_rows(&mut ts, 64, &mut seed);
+        ts.performsort().unwrap();
+        assert_eq!(drain(&mut ts, usize::MAX).len(), 64);
+
+        ts.reset();
+
+        put_rows(&mut ts, 8, &mut seed);
+        ts.performsort().unwrap();
+        assert_eq!(drain(&mut ts, usize::MAX).len(), 8);
         ts.end();
     }
 }
