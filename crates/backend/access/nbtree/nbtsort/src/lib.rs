@@ -1,7 +1,12 @@
 // nbtsort.c, serial build: spool via tuplesort + _bt_load page accumulation,
-// duplicate keys merged into posting lists. Loud: parallel builds, spool2
-// merge (dead tuples under UNIQUE).
+// duplicate keys merged into posting lists. Loud: launched-gang parallel
+// builds (never ported — see pool.rs census); the M4.2 pool arm (pool.rs,
+// kill switch PGRUST_RUNTIME_INDEXBUILD_POOL default OFF) parallelizes the
+// SCAN phase onto morsel-pool workers and feeds the same leader-owned
+// spools, so the sort + load tail below is one code path for both arms.
 #![allow(non_snake_case)]
+
+mod pool;
 
 use ::mcx::Mcx;
 use ::types_core::{BlockNumber, ForkNumber, InvalidOid, OffsetNumber, BLCKSZ};
@@ -84,23 +89,49 @@ pub fn btbuild<'mcx>(
     let mut havedead = false;
     let mut indtuples = 0.0f64;
 
-    let reltuples = execindexing::table_index_build_scan(
-        mcx,
-        heap,
-        index,
-        indexInfo,
-        true,
-        |_index_rel, tid, values, isnull, tuple_is_alive| {
-            if tuple_is_alive || spool2.is_none() {
-                sortstate.putindextuplevalues(*tid, values, isnull)?;
+    // M4.2 pool arm (default OFF): pool workers scan block-range morsels
+    // and stream FORMED tuple images; the routing below is the serial
+    // callback's, image form. Fallback (refusal-class only, nothing
+    // consumed) keeps the serial scan byte-identical.
+    let mut pool_fed: Option<f64> = None;
+    {
+        let mut put = |image: &[u8], alive: bool| -> PgResult<()> {
+            if alive || spool2.is_none() {
+                sortstate.put_index_tuple_image(image)?;
             } else {
                 havedead = true;
-                spool2.as_mut().expect("spool2").putindextuplevalues(*tid, values, isnull)?;
+                spool2.as_mut().expect("spool2").put_index_tuple_image(image)?;
             }
             indtuples += 1.0;
             Ok(())
-        },
-    )?;
+        };
+        if let pool::PoolFeed::Fed { reltuples } =
+            pool::pool_feed_spools(heap, index, indexInfo, &mut put)?
+        {
+            pool_fed = Some(reltuples);
+        }
+    }
+
+    let reltuples = match pool_fed {
+        Some(r) => r,
+        None => execindexing::table_index_build_scan(
+            mcx,
+            heap,
+            index,
+            indexInfo,
+            true,
+            |_index_rel, tid, values, isnull, tuple_is_alive| {
+                if tuple_is_alive || spool2.is_none() {
+                    sortstate.putindextuplevalues(*tid, values, isnull)?;
+                } else {
+                    havedead = true;
+                    spool2.as_mut().expect("spool2").putindextuplevalues(*tid, values, isnull)?;
+                }
+                indtuples += 1.0;
+                Ok(())
+            },
+        )?,
+    };
 
     if !havedead {
         spool2 = None;

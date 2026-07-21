@@ -22,3 +22,17 @@ mcx = { path = "../../../../_support/mcx" }
 execindexing = { path = "../../../executor/execindexing" }
 tuplesort = { path = "../../../utils/sort/tuplesort" }
 init_small = { path = "../../../utils/init/init_small" }
+# M4.2 pool arm (pool.rs)
+parallel = { path = "../../transam/parallel" }
+xact = { path = "../../transam/xact" }
+table = { path = "../../table/table" }
+indexam = { path = "../../index/indexam" }
+runtime = { path = "../../../executor/runtime" }
+latch = { path = "../../../storage/ipc/latch" }
+pg_clock = { path = "../../../../port/pg_clock" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
+miscinit = { path = "../../../utils/init/miscinit" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
+catalog = { path = "../../../catalog/catalog" }
+procarray = { path = "../../../storage/ipc/procarray" }
+clauses = { path = "../../../optimizer/util/clauses" }

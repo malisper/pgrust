@@ -297,6 +297,7 @@ env	crates/_support/jit_deform/src/lib.rs	1
 env	crates/_support/pgrust/trace/src/lib.rs	1
 env	crates/backend/access/heap/vacuumlazy/src/morsels.rs	7	DST-REVIEW(m41-vacuum-pool): M4.1 vacuum driver swap — kill switch (PGRUST_RUNTIME_VACUUM_POOL) + claim-deadline knob (PGRUST_RUNTIME_GANG_CLAIM_MS, the standing-channel knob) env-read once-caches; knobs-registry routing (s2.5) chartered to the DST program
 env	crates/backend/access/index/indexam/src/lib.rs	4	DST-REVIEW(q2-index-chunks): the debug-only av-wedge injection probe (PGRUST_TEST_VACUUM_PANIC_INDEX) mirrored onto the Q2 chunked begin twins — test-oracle env reads, cfg(debug_assertions) only
+env	crates/backend/access/nbtree/nbtsort/src/pool.rs	6	DST-REVIEW(m42-btbuild-pool): M4.2 kill switch (PGRUST_RUNTIME_INDEXBUILD_POOL) + batch/queue calibration knobs + trace/claim-timing witness channels + the shared claim-deadline knob — pure env-read once-caches, the vacuumparallel M4.1 rows' exact class; knobs-registry routing (s2.5) chartered to the DST program
 env	crates/backend/commands/vacuumparallel/src/lib.rs	7	DST-REVIEW(q2-index-chunks): M4.1 kill switch + claim-deadline knob rows, plus the Q2 chunk gates (PGRUST_RUNTIME_VACUUM_INDEX_CHUNKS/QUANTUM/LEADER) and the claim-cadence witness channel (PGRUST_VACUUM_CLAIM_TIMING) — pure env-read once-caches layered UNDER the pool switch; knobs-registry routing (s2.5) chartered to the DST program
 env	crates/backend/access/pgrcolumnar/src/condcache.rs	1
 env	crates/backend/access/pgrcolumnar/src/part_cache.rs	3
@@ -411,6 +412,7 @@ blocking	crates/backend/access/transam/transam_xlog/src/write.rs	1
 blocking	crates/backend/access/transam/xlogutils/src/lib.rs	1
 blocking	crates/backend/commands/copy/src/parallel.rs	1	CONVERTED-row-5 (permit-s4): work/done channels now pgsync::mailbox (recv-under-mutex KILLED structurally); remaining site = the row-6 drain_rg timed sleep L1574 (stays a sleep by design, retires with the sleep family)
 blocking	crates/backend/commands/vacuum/src/lib.rs	1
+blocking	crates/backend/access/nbtree/nbtsort/src/pool.rs	4	DST-REVIEW(m42-btbuild-pool): (i) ship() bounded condvar wait under the DONATED-permit blocking facade (backpressure on the leader drain — I/O-shaped by design), (ii) pool_drain_rg bounded lane-acquire sleep (the M4.1 drain-budget class), (iii) driver rg-handle spin yields (the M4.1 submit-window class); Waiter conversion rides the same P3 backlog
 blocking	crates/backend/commands/vacuumparallel/src/lib.rs	1	DST-REVIEW(m41-vacuum-pool): pool_drain_rg bounded lane-acquire sleep — the vacuumlazy drain_rg budget row's exact class; Waiter conversion rides the same P3 backlog
 blocking	crates/backend/executor/execmain/src/execparallel.rs	1
 blocking	crates/backend/executor/execmain/src/lanev2/runtime_agg.rs	1
@@ -482,6 +484,8 @@ once	crates/_support/test_boot/src/lib.rs	2
 once	crates/backend/access/heap/vacuumlazy/src/morsels.rs	8	DST-REVIEW(m41-vacuum-pool): M4.1 vacuum driver swap — kill switch (PGRUST_RUNTIME_VACUUM_POOL) + claim-deadline knob (PGRUST_RUNTIME_GANG_CLAIM_MS, the standing-channel knob) env-read once-caches; knobs-registry routing (s2.5) chartered to the DST program (P3 row-19 pure env-read closures)
 once	crates/backend/access/pgrcolumnar/src/condcache.rs	2
 once	crates/backend/commands/vacuumparallel/src/lib.rs	9	DST-REVIEW(q2-index-chunks): M4.1 rows + the Q2 chunk gates (PGRUST_RUNTIME_VACUUM_INDEX_CHUNKS/QUANTUM/LEADER) and the claim-cadence witness channel (PGRUST_VACUUM_CLAIM_TIMING) — P3 row-19 pure env-read closures + the one-shot shutdown-hook registration (ensure_hooks_registered precedent); knobs-registry routing (s2.5) chartered to the DST program. +1 GL-M41-2: PvUnit.census_t0_ms per-unit first-quantum stamp (trace-gated telemetry, pure mono_ms closure)
+once	crates/backend/access/nbtree/nbtsort/src/pool.rs	8	DST-REVIEW(m42-btbuild-pool): P3 row-19 pure env-read closures (kill switch, batch/queue knobs, trace/claim-timing channels, claim deadline) + the one-shot shutdown-hook and entrypoint-stub registrations (ensure_hooks_registered precedent); knobs-registry routing (s2.5) chartered to the DST program
+once	crates/backend/commands/vacuumparallel/src/lib.rs	8	DST-REVIEW(q2-index-chunks): M4.1 rows + the Q2 chunk gates (PGRUST_RUNTIME_VACUUM_INDEX_CHUNKS/QUANTUM/LEADER) and the claim-cadence witness channel (PGRUST_VACUUM_CLAIM_TIMING) — P3 row-19 pure env-read closures + the one-shot shutdown-hook registration (ensure_hooks_registered precedent); knobs-registry routing (s2.5) chartered to the DST program
 once	crates/backend/access/pgrcolumnar/src/part_cache.rs	3	P3 row-19 danger class (design-cited): scan-path part-registry singletons L97/L139 (design cited 98/140; -1 drift) + debug knob L149
 once	crates/backend/access/pgrcolumnar/src/reader.rs	7
 once	crates/backend/access/pgrcolumnar/src/scan.rs	2	P3 row-19 danger class (design-cited): L22/L562 multi-thread scan knobs
@@ -632,6 +636,7 @@ rawsync	crates/backend/commands/analyze/src/lib.rs	2
 rawsync	crates/backend/commands/commands_async/src/queue.rs	1
 rawsync	crates/backend/commands/seclabel/src/lib.rs	1
 rawsync	crates/backend/commands/vacuum/src/lib.rs	1
+rawsync	crates/backend/access/nbtree/nbtsort/src/pool.rs	1
 rawsync	crates/backend/commands/vacuumparallel/src/lib.rs	1
 rawsync	crates/backend/executor/execexpr/src/jit.rs	3
 rawsync	crates/backend/executor/execmain/src/execparallel.rs	1
