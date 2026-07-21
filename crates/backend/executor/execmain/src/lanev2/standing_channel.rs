@@ -239,6 +239,22 @@ fn wait_engaged(
             parallel::standing::close_and_await(&entry);
             return Ok(StandingWait::Fallback);
         }
+        // COUNTER READ ORDER (m2-inc3 rung-1 finding, the hashjoin pooldb
+        // died-needle misfire): both detach-comparing branches below MUST
+        // read `detached` BEFORE re-reading `claimed`. Every detach is
+        // preceded by its claim, so detached(t1) <= claims-as-of(t1) <=
+        // claimed(t2) for t1 < t2 — a claim landing between the two reads
+        // can only RAISE claimed, never manufacture detached >= claimed.
+        // The old order (claimed captured at loop top, detached fresh)
+        // tore under the pool channel's pre-bind refusal churn (helpers
+        // claiming and detaching on "rg gone" — payload.rg is set only
+        // AFTER submit publishes): the stale-low claimed met the churn-
+        // inflated detached while a LATER claimer was healthily mid-drive
+        // (started>0), and the needle killed a live engagement. A real
+        // all-detached death is stable, so reading it one iteration later
+        // loses no liveness.
+        let detached = entry.detached();
+        let claimed_now = entry.claimed();
         // Nothing driving and nothing pending within the deadline: gang
         // dead/busy (claimed==0) OR a smaller-than-tickets gang whose every
         // claimant exited pre-drive without reaching the refusal counters'
@@ -248,7 +264,7 @@ fn wait_engaged(
         // RG (morsel claims are atomic; its partial combines like any
         // participant's) — close_and_await bounds on its drive.
         if started == 0
-            && entry.detached() >= claimed
+            && detached >= claimed_now
             && std::time::Duration::from_nanos(t0.elapsed_ns()) > standing_claim_deadline()
         {
             lane_trace(&format!(
@@ -262,7 +278,8 @@ fn wait_engaged(
         // Participants all detached yet the RG is incomplete and no error
         // was recorded: a worker died outside every catch layer (detach is
         // Drop-guaranteed, so this is reachable only through that needle).
-        if claimed > 0 && started > 0 && entry.detached() >= claimed {
+        // detached-before-claimed read order per the block comment above.
+        if claimed_now > 0 && started > 0 && detached >= claimed_now {
             if let Some(o) = waiter.try_wait() {
                 take_slot();
                 parallel::standing::close_and_await(&entry);
