@@ -50,8 +50,24 @@ pub const DEFAULT_GEQO_SELECTION_BIAS: f64 = 2.0;
 pub const DEFAULT_MAINTENANCE_IO_CONCURRENCY: i32 = 16;
 pub const DEFAULT_MAX_WAL_SEGS: i32 = 64;
 pub const DEFAULT_MIN_WAL_SEGS: i32 = 5;
-pub const DEFAULT_PARALLEL_SETUP_COST: f64 = 1000.0;
-pub const DEFAULT_PARALLEL_TUPLE_COST: f64 = 0.1;
+// pgrust ships parallelism priced for the THREAD-NATIVE warm work-stealing
+// pool, not C's fork+DSM. C's 1000 prices fork + DSM/shm_toc setup + GUC
+// serialize (~1-2ms; costsize/gucs.rs provenance). pgrust's shipped engine
+// (pgrust.parallel_engine=runtime, pool spawned at postmaster start) hands a
+// morsel to an already-parked standby: measured launch->worker-main 175us
+// (notes/ppool-lane.md:58), standing-executor worker-launch eliminated
+// (notes/m2-pool-binding.md:293). Anchoring C's ~1-2ms=1000 => 175us ~= 100.
+// CONTINGENCY: honest only while the runtime pool is the executor; a shape
+// that falls to the LEGACY cold-spawn Gather (~11ms full backend boot,
+// costsize/gucs.rs:53) is under-priced here — the runtime router's coverage
+// is the mitigation (docs/design/jit-parallel-defaults.md).
+pub const DEFAULT_PARALLEL_SETUP_COST: f64 = 100.0;
+// C's 0.1 prices a cross-process shm_mq copy of one tuple. pgrust moves tuples
+// worker->leader in-process through a chunked Arc ring at ~27ns/tuple (the
+// pgrcolumnar measurement, costsize/gucs.rs:57; DEFAULT_PGRCOLUMNAR_PARALLEL_
+// TUPLE_COST=0.005 for the pure-pointer-walk chunked path). 0.01 = 10x below
+// C, the in-process MinimalTuple-memcpy rate ~= one tuple's cpu_tuple_cost.
+pub const DEFAULT_PARALLEL_TUPLE_COST: f64 = 0.01;
 pub const DEFAULT_RANDOM_PAGE_COST: f64 = 4.0;
 pub const DEFAULT_RECURSIVE_WORKTABLE_FACTOR: f64 = 10.0;
 pub const DEFAULT_SEQ_PAGE_COST: f64 = 1.0;

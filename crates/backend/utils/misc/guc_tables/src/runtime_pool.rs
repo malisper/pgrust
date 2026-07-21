@@ -4,8 +4,14 @@
 //!
 //! Every runtime engagement arm layers identically (all gates required;
 //! absence of any one = exactly today's behavior, byte-for-byte):
-//!  1. `PGRUST_RUNTIME=1` — the M0 runtime kill switch (pool spawned at
-//!     postmaster start; read once, default OFF). Checked by the arm.
+//!  1. `PGRUST_RUNTIME` — the M0 runtime master switch (pool spawned at
+//!     postmaster start; read once). DEFAULT ON since the M5 boarding flip
+//!     (runtime::runtime_enabled: `PGRUST_RUNTIME=0` is the kill switch, any
+//!     other value or UNSET enables). Checked by the arm. NOTE: the product
+//!     analytics path does NOT need these per-arm pool options — under
+//!     engine=runtime (the default) the M5-1 router arms every covered shape
+//!     at `pgrust.runtime_dop` (0 = cores); these options are the DEV/BENCH
+//!     force-override layer beneath that switch.
 //!  2. A per-arm DOP knob, a placeholder customized option, deliberately
 //!     NOT a registered GUC (a new pg_settings row would break the
 //!     byte-identical SHOW ALL/pg_settings regression outputs — the

@@ -129,8 +129,9 @@ scalar_global! {
 
     N_BUFFERS, NBuffers, SetNBuffers, i32, 16384;
     MAX_CONNECTIONS, MaxConnections, SetMaxConnections, i32, 100;
-    MAX_WORKER_PROCESSES, max_worker_processes, set_max_worker_processes, i32, 8;
-    MAX_PARALLEL_WORKERS, max_parallel_workers, set_max_parallel_workers, i32, 8;
+    // 8->16, matching guc_tables::tables boot_vals (see jit-parallel-defaults).
+    MAX_WORKER_PROCESSES, max_worker_processes, set_max_worker_processes, i32, 16;
+    MAX_PARALLEL_WORKERS, max_parallel_workers, set_max_parallel_workers, i32, 16;
     MAX_BACKENDS, MaxBackends, SetMaxBackends, i32, 0;
     // M2 pool-binding: PGPROCs boot-reserved for the STANDING runtime
     // executor gang (parallel::standing) — an extra MaxBackends term and a

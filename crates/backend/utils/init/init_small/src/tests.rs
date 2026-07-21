@@ -100,8 +100,8 @@ fn defaults_match_c_initializers() {
     assert_eq!(globals::max_parallel_maintenance_workers(), 2);
     assert_eq!(globals::NBuffers(), 16384);
     assert_eq!(globals::MaxConnections(), 100);
-    assert_eq!(globals::max_worker_processes(), 8);
-    assert_eq!(globals::max_parallel_workers(), 8);
+    assert_eq!(globals::max_worker_processes(), 16);
+    assert_eq!(globals::max_parallel_workers(), 16);
     assert_eq!(globals::MaxBackends(), 0);
     assert_eq!(globals::VacuumBufferUsageLimit(), 2048);
     assert_eq!(globals::VacuumCostPageHit(), 1);

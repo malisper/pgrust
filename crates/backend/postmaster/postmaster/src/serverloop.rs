@@ -94,9 +94,13 @@ fn now_secs() -> i64 {
 }
 
 pub fn ServerLoop() -> PgResult<i32> {
-    // M1: spawn the morsel-runtime worker pool at postmaster start when (and
-    // only when) PGRUST_RUNTIME=1 (redesign §2.1 fixed pool; default OFF =
-    // zero threads, zero behavior change — the M0 kill-switch contract).
+    // M1: spawn the morsel-runtime worker pool at postmaster start. DEFAULT ON
+    // since the M5 boarding flip (runtime::runtime_enabled: `PGRUST_RUNTIME=0`
+    // is the kill switch, unset/anything-else enables). The pool sizes to
+    // available cores (RuntimeConfig::from_env). Together with the default
+    // pgrust.parallel_engine=runtime + pgrust.runtime_dop=0(=cores), this is
+    // what makes the analytics fast path engage at DOP=cores out of the box
+    // for router-covered shapes — no SET, no env var required.
     let _ = launch_backend::rtpool::start_if_enabled();
     // M2 pool-binding: wire the STANDING runtime executor gang (boot
     // captures + spawner install; threads spawn lazily at first
