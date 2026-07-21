@@ -407,15 +407,15 @@ fn size_floors_enabled() -> bool {
 /// .rs; the exprkey Reduced arm keys reduced-expr-key grouped agg,
 /// exprkey.rs decide_reduced). This knob keys those admission gaps.
 ///
-/// DEFAULT OFF (`PGRUST_LANE_V2_TEXTDISTINCT=1|on` to arm). Off = the probe
-/// falls through to today's refusals byte-for-byte (the new branches are
-/// skipped), so the DEFAULT census is unchanged (41/65) and the drift guards
+/// DEFAULT ON since night/planner-fix-forced (t34); `PGRUST_LANE_V2_TEXTDISTINCT
+/// =0|off` is the kill switch, restoring the pre-flip keep-Gather posture
+/// byte-for-byte. The arm suppresses via the knob-path finish
+/// (finish_textdistinct) — NOT a BOOTSTRAP_MATRIX class, so the drift guards
 /// (`bootstrap_matrix_matches_tsv`, `coverage_matrix_is_consistent`) are
-/// untouched — these are NOT BOOTSTRAP_MATRIX classes; the tsv rows stay
-/// `route_to=legacy` / `probe_key="-"` (default posture keeps Gather). The
-/// knob-ON arm suppresses directly (finish_textdistinct), proven byte-
-/// identical vs C + vs knob-OFF; the DEFAULT flip is fleet-gated future work
-/// (GL-TEXTDIST letters owed).
+/// untouched; the tsv rows record the flipped default with letter citations
+/// (GL-TEXTDIST, knob letter 2026-07-21: the knob is code-inert at t34 ==
+/// the measured noise floor 0.9889; grouped engagements q11/q12 0.010/0.011
+/// hot vs cpg 0.44, ~40x).
 fn textdistinct_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
@@ -435,20 +435,23 @@ fn textdistinct_enabled() -> bool {
     })
 }
 
-/// SE-TEXTDISTINCT PLAIN (ungrouped) sub-arm gate — held DEFAULT OFF by
-/// night/planner-fix-forced. The grouped/exprkey textdistinct arms are a clean
-/// unforced win (q11/q12 8-9x, matching the mt16 rt arm), but the fleet A/B
-/// measured the PLAIN count(DISTINCT) suppress-Gather serial-distinct arm as a
-/// 10M REGRESSION (q5/q6 ~2-3x slower than the default parallel), so it stays
-/// gated apart from the flipped `textdistinct_enabled()` default. Re-arm with
-/// `PGRUST_LANE_V2_TEXTDISTINCT_PLAIN=1|on` once the plain arm's scan-pool
-/// economics are re-measured (GL-TEXTDIST-2).
+/// SE-TEXTDISTINCT PLAIN (ungrouped) sub-arm gate — DEFAULT ON (t35
+/// routing-flips); `PGRUST_LANE_V2_TEXTDISTINCT_PLAIN=0|off` is the kill
+/// switch. HISTORY: night/planner-fix-forced held this OFF because the fleet
+/// A/B measured the suppress-Gather arm as a 10M REGRESSION (q5 0.046->0.151,
+/// q6 0.081->0.175) — but that was the suppress-then-UNARMED hole: the plain
+/// exact-DISTINCT sink armed off the bench GUC alone and never consulted
+/// router::arm_dop, so the suppressed plan landed SERIAL with no pool. Fixed
+/// at 98a012ba2 (fix(runtime_plaindistinct): arm via router::arm_dop
+/// (Distinct)); GL-TEXTDIST-2 re-measure post-fix is GREEN — q5/q6 at forced
+/// parity (~0.020/0.045s, floor-fix verification job 7e66, 2026-07-21) — so
+/// the sub-arm joins the flipped textdistinct default.
 fn textdistinct_plain_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        matches!(
+        !matches!(
             std::env::var("PGRUST_LANE_V2_TEXTDISTINCT_PLAIN").as_deref(),
-            Ok("1") | Ok("on")
+            Ok("0") | Ok("off")
         )
     })
 }
@@ -478,16 +481,17 @@ fn textdistinct_guard() -> FloorGuard {
 /// group-admission FREEZE owns the q18 composition (band-2a,
 /// `PGRUST_RUNTIME_AGG_FREEZE`). This knob keys the admission gaps.
 ///
-/// DEFAULT OFF (`PGRUST_LANE_V2_MULTIKEY_TEXT=1|on` to arm; every other
-/// spelling fails safe — the K1-latemat idiom). Off = the probe falls
-/// through to today's refusals byte-for-byte and the executor scan feed
-/// keeps its one-text census (lanev2 `scan_mk_text_atts`), so the DEFAULT
-/// census and the drift guards are untouched — these are NOT
-/// BOOTSTRAP_MATRIX classes; the tsv rows keep route_to=legacy /
-/// probe_key="-". Same spelling in planner and execmain (the AGG_POLY /
-/// GROUPSINK knob-coherence law: a keyed shape whose arm is disarmed would
-/// suppress Gather and land on serial). Fleet default-flip owed
-/// (GL-MKTEXT-1).
+/// DEFAULT ON (t35 routing-flips, GL-MKTEXT-1 FLIP-RECOMMENDED);
+/// `PGRUST_LANE_V2_MULTIKEY_TEXT=0|off` is the kill switch — every other
+/// spelling stays ON (the flipped-kill idiom: only the exact kill spellings
+/// disarm). MEASURED (knob letter 2026-07-21, jobs -54df/-46fa @ 4479aae8d,
+/// unforced 10M ClickBench): q17 0.861 -> 0.061 hot (14.1x, == the forced
+/// ref exactly) via the family's own 16M ceiling; zero regressions across
+/// 43q; no new byte-parity diff class. Same spelling in planner and execmain
+/// (the AGG_POLY / GROUPSINK knob-coherence law: a keyed shape whose arm is
+/// disarmed would suppress Gather and land on serial — BOTH sites flip
+/// together). Still owed per the letter (flip mechanics, not blockers): the
+/// 16M ceiling measured bound + the min_dop-12 floor reuse re-measure.
 fn multikey_text_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
@@ -495,10 +499,11 @@ fn multikey_text_enabled() -> bool {
     })
 }
 
-/// The default-OFF spelling rule, factored pure for exhaustive unit tests:
-/// ON iff the value is exactly `1` or `on` (scanpass idiom).
+/// The default-ON kill spelling rule, factored pure for exhaustive unit
+/// tests: OFF iff the value is exactly `0` or `off` (the flipped-kill
+/// idiom); unset and every other spelling stay ON.
 fn multikey_text_spelling_on(v: Option<&str>) -> bool {
-    matches!(v, Some("1") | Some("on"))
+    !matches!(v, Some("0") | Some("off"))
 }
 
 /// SE-MKTEXT pure shape law (unit-tested): a grouped key census of `nkeys`
@@ -545,11 +550,12 @@ fn agg_freeze_car_live() -> bool {
     })
 }
 
-/// The shared default-OFF knob spelling (K1-latemat idiom): ON iff exactly
-/// `1` or `on`. Factored pure for the sibling lanes' unit tests
-/// (scanpass/mktext keep their own historical twins).
+/// The shared default-ON kill spelling (t35 routing-flips): OFF iff exactly
+/// `0` or `off`; unset and every other spelling stay ON. Factored pure for
+/// the sibling lanes' unit tests (scanpass keeps its own historical
+/// default-OFF twin).
 fn knob_spelling_on(v: Option<&str>) -> bool {
-    matches!(v, Some("1") | Some("on"))
+    !matches!(v, Some("0") | Some("off"))
 }
 
 /// SE-EXTRACTKEY (Lane-3 sibling, cb q19 class — the routing map's biggest
@@ -562,8 +568,15 @@ fn knob_spelling_on(v: Option<&str>) -> bool {
 /// at 0.088s vs 1.529s legacy-parallel). Suppression-only widening: the
 /// knob keys the shape via `classify_extract_exprkey`, the suppressed
 /// serial `[Limit<-Sort<-]HashAgg<-SeqScan` plan engages the Multi feed.
-/// DEFAULT OFF (`PGRUST_LANE_V2_EXPRKEY_EXTRACT=1|on`); fleet default-flip
-/// owed (GL-EXTRACTKEY-1).
+/// DEFAULT ON (t35 routing-flips); `PGRUST_LANE_V2_EXPRKEY_EXTRACT=0|off`
+/// is the kill switch. GL-EXTRACTKEY-1 (2026-07-21, jobs -54df/-46fa/-75c3
+/// @ 4479aae8d) measured the knob safe everywhere (zero deltas across 43q)
+/// but held by the then-1e6 groupby_high floor: q19's estimate is 1,516,181
+/// (identical to q17's — the extract() key adds nothing), and with the hold
+/// bypassed the arm runs q19 at 0.093 hot (16x, forced ref 0.088). The
+/// floor's raise to 4e6 LANDED (b12c3fc74, bench letter in-commit), so the
+/// re-letter-together-with-the-floor condition is met and the flip engages
+/// q19 unforced.
 fn extract_exprkey_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
@@ -578,8 +591,14 @@ fn extract_exprkey_enabled() -> bool {
 /// so an engagement exists to key; the const contributes nothing to the
 /// partition. The knob admits NON-NULL INT-FAMILY Const group keys (and
 /// their tlist entries) alongside the existing bare-Var census — the REAL
-/// keys still drive classification and floors. DEFAULT OFF
-/// (`PGRUST_LANE_V2_AGG_CONSTKEY=1|on`); GL-CONSTKEY-1 owed.
+/// keys still drive classification and floors. DEFAULT ON (t35
+/// routing-flips); `PGRUST_LANE_V2_AGG_CONSTKEY=0|off` is the kill switch.
+/// GL-CONSTKEY-1 (2026-07-21, jobs -54df/-46fa/-75c3 @ 4479aae8d) measured
+/// the knob safe everywhere (zero deltas across 43q) but held by the
+/// then-1e6 groupby_high floor: q35's estimate is 2,625,920 (all URL — the
+/// const key contributes nothing), and with the hold bypassed the arm runs
+/// q35 at 0.227 hot (9.4x — BEATS the forced ref 0.237). The floor's raise
+/// to 4e6 LANDED (b12c3fc74), so the flip engages q35 unforced.
 fn agg_constkey_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
@@ -597,8 +616,14 @@ fn agg_constkey_enabled() -> bool {
 /// GROUPED_SINK_AGGS passengers, no count(DISTINCT), no OFFSET); the
 /// groupby_high hold still applies (the floor recalibration lane owns it).
 /// The two-key-text family's own freeze branch (SE-MKTEXT) is the
-/// more-specific sibling and carries the family ceiling. DEFAULT OFF
-/// (`PGRUST_LANE_V2_AGG_BARELIMIT=1|on`); GL-BARELIMIT-1 owed.
+/// more-specific sibling and carries the family ceiling. DEFAULT ON (t35
+/// routing-flips, GL-BARELIMIT-1 FLIP-RECOMMENDED); `PGRUST_LANE_V2_
+/// AGG_BARELIMIT=0|off` is the kill switch. MEASURED (2026-07-21, jobs
+/// -54df/-46fa @ 4479aae8d): q18 0.124 -> 0.016 hot (7.8x, forced ref
+/// 0.015) via the freeze composition with MKTEXT; zero regressions.
+/// TIE-CLASS NOTE (per the letter): bare-LIMIT-no-ORDER-BY answers change
+/// to a different VALID group subset (Q18 PASS-TIE) — callers snapshotting
+/// raw bytes will see a change; the tie law accepts it.
 fn agg_barelimit_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
@@ -615,7 +640,8 @@ fn extract_exprkey_guard() -> FloorGuard {
 
 /// SE-MKTEXT group-estimate ceiling, env-overridable
 /// (`PGRUST_LANE_V2_MULTIKEY_TEXT_MAX_GROUPS`). The family's whole point is
-/// shapes the §10 groupby_high hold (1e6) floors out — the 10M
+/// shapes the §10 groupby_high hold (raised to 4e6 at b12c3fc74; the
+/// family predates the raise and keeps its own headroom) floors out — the 10M
 /// dist-control fixture estimates 3-5M groups for `UserID, SearchPhrase`
 /// and the forced runtime arm WINS there (0.061s vs 0.900s legacy-parallel)
 /// — so the knob path carries its OWN provisional ceiling instead:
@@ -721,16 +747,27 @@ const F_SUM_NUMERIC: u32 = 2114;
 // (F_AVG_INT2/F_AVG_INT4 already defined above with the fold whitelist.)
 
 /// SE-AGGPOLY knob coherence (the GROUPSINK precedent): the executor arm's
-/// `PGRUST_LANE_V2_AGG_POLY` (execmain lanev2, default OFF) must also gate
-/// the probe keyings this lane adds — a keyed shape whose arm is disarmed
-/// would suppress Gather and land on the serial path (risk P1's
-/// suppress-then-refuse direction). Same env spelling in both crates.
+/// `PGRUST_LANE_V2_AGG_POLY` (execmain lanev2) must also gate the probe
+/// keyings this lane adds — a keyed shape whose arm is disarmed would
+/// suppress Gather and land on the serial path (risk P1's
+/// suppress-then-refuse direction). Same env spelling in both crates, and
+/// BOTH read sites flip together (the letter's knob-coherence duty).
+///
+/// DEFAULT ON (t35 routing-flips, GL letter 2026-07-21 FLIP-RECOMMENDED,
+/// jobs -558e/-135a/-3773 @ 67a99589d, unforced 10M ClickBench): official
+/// score 0.9278 (−7.2%; inert-arm noise floor 0.9889) — essentially all of
+/// it CB q10 1.861 -> 0.066 hot (28.2x, == the forced rt16 ref 0.067,
+/// confirming GL-AGGPOLY-2's avg-passenger claim unforced); 42/42 remaining
+/// queries in the noise band, byte-parity class set unchanged; composes
+/// with GL-AGGPOLY-1's SE16 −12.4% q06 heap-shape WIN. Probe cost is
+/// plan-time only (the §6 OLTP same-pod Ir pair rides this train).
+/// `PGRUST_LANE_V2_AGG_POLY=0|off` is the kill switch.
 fn agg_poly_probe_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        matches!(
+        !matches!(
             std::env::var("PGRUST_LANE_V2_AGG_POLY").as_deref(),
-            Ok("1") | Ok("on")
+            Ok("0") | Ok("off")
         )
     })
 }
@@ -1067,23 +1104,21 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             // (runtime_plaindistinct.rs) admits int AND canonical-bytes text
             // distinct VALUES; suppressing Gather yields the serial
             // `Aggregate(AGG_PLAIN) <- Sort <- SeqScan(cbstore)` shape its
-            // skip-sort dispatch owns. Knob-gated (default OFF); NARROW: no
-            // quals, no sort/limit, EXACTLY the single count(DISTINCT) tlist
-            // entry (the sink stages the distinct arg as scan column 0 — a
-            // WHERE or extra projected column could move it off col 0 and the
-            // arm would land on serial). The distinct pool must be armed
-            // (runtime_distinct_pool>0, falls back to runtime_scan_pool) at
-            // engagement — the fleet runtime posture arms it; GL-TEXTDIST-2
-            // owns the default-flip win. NOT a BOOTSTRAP_MATRIX class
-            // (route_to=legacy stays; default census byte-identical).
-            // night/planner-fix-forced: gated on the SEPARATE plain knob (still
-            // default OFF). The fleet unforced-vs-mt16 A/B measured the plain
-            // (ungrouped) suppress-Gather serial-distinct arm as a REGRESSION at
-            // 10M (q5 0.046->0.151, q6 0.081->0.175: the serial Sort<-SeqScan
-            // distinct loses to the default parallel), so it is held back while
-            // the GROUPED text-distinct arm (below) rides the default-ON flip.
-            // PGRUST_LANE_V2_TEXTDISTINCT_PLAIN=1 re-arms it (GL-TEXTDIST-2 owns
-            // the plain-arm scan-pool re-measure that would make it a clean win).
+            // skip-sort dispatch owns. Gated on the SEPARATE plain sub-knob;
+            // NARROW: no quals, no sort/limit, EXACTLY the single
+            // count(DISTINCT) tlist entry (the sink stages the distinct arg
+            // as scan column 0 — a WHERE or extra projected column could move
+            // it off col 0 and the arm would land on serial). The sink arms
+            // via router::arm_dop(Distinct) (98a012ba2). NOT a
+            // BOOTSTRAP_MATRIX class. HISTORY: night/planner-fix-forced held
+            // the plain sub-knob OFF off a measured 10M REGRESSION (q5
+            // 0.046->0.151, q6 0.081->0.175) — later diagnosed as the
+            // suppress-then-UNARMED hole (the sink armed off the bench GUC
+            // alone, so the suppressed plan ran serial with no pool). With
+            // the arm_dop fix landed, GL-TEXTDIST-2 re-measured GREEN (q5/q6
+            // at forced parity ~0.020/0.045s, job 7e66) and t35
+            // routing-flips flipped the sub-knob DEFAULT ON
+            // (PGRUST_LANE_V2_TEXTDISTINCT_PLAIN=0|off is the kill).
             if textdistinct_plain_enabled()
                 && !has_quals
                 && parse.sortClause.is_nil()
@@ -1213,9 +1248,9 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     }
     // SE-MKTEXT: the two-key-with-text family (int+text / text+text, bare
     // default-collation Vars — the knob-widened envelope), with the engine
-    // text-car kills mirrored (suppress-then-refuse guard). At defaults the
-    // knob is OFF and this is false — every branch it gates below then
-    // takes today's path byte-for-byte.
+    // text-car kills mirrored (suppress-then-refuse guard). DEFAULT ON
+    // (t35 routing-flips); with the kill thrown this is false — every
+    // branch it gates below then takes the pre-flip path byte-for-byte.
     let mk_text_family = multikey_text_enabled()
         && n_const == 0
         && mk_text_family_shape_ok(parse.groupClause.len(), n_text)
@@ -1258,13 +1293,13 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     // runtime_distinct.rs try_own_sorted_distinct_runtime) — so this is an
     // ADMISSION gap, NOT a missing kernel (SE-TEXTDISTINCT C1, band 86001;
     // cb q11/q12/q14, the census distinct-text-date-args mass). Knob-gated
-    // (PGRUST_LANE_V2_TEXTDISTINCT default OFF): OFF keeps Gather (the
-    // route_to=legacy default posture — census byte-identical); ON falls
-    // through to the class selection, where the n_count_distinct && n_text
-    // branch routes it through finish_textdistinct. The count(DISTINCT) arg
-    // stays int-family (is_count_distinct_int — the SINK's exact-set
-    // vocabulary); the TEXT is the GROUP key. Fleet default-flip owed
-    // (GL-TEXTDIST-1).
+    // (PGRUST_LANE_V2_TEXTDISTINCT, DEFAULT ON since t34; =0|off kills):
+    // killed keeps Gather (the pre-flip posture); ON falls through to the
+    // class selection, where the n_count_distinct && n_text branch routes
+    // it through finish_textdistinct. The count(DISTINCT) arg stays
+    // int-family (is_count_distinct_int — the SINK's exact-set vocabulary);
+    // the TEXT is the GROUP key. GL-TEXTDIST letter (2026-07-21): the
+    // grouped arm earns at default — q11/q12 0.010/0.011 hot vs cpg 0.44.
     // SE-MKTEXT fail-closed: grouped count(DISTINCT) rides the runtime
     // DISTINCT sink, whose canonical text-key admission is proven for ONE
     // text group key (pd_derive admit_text_keys) — the two-text distinct
@@ -3179,23 +3214,28 @@ mod tests {
     }
 
     /// SE-MKTEXT knob (Lane-3 two-key text car): `PGRUST_LANE_V2_
-    /// MULTIKEY_TEXT` is default OFF and only `1`/`on` arm it — every other
-    /// spelling fails safe to today's behaviour (the K1-latemat idiom).
-    /// Pins the default-OFF guarantee that makes the widening inert at
-    /// default (plan-time bytes, census, and regress legs unchanged).
+    /// MULTIKEY_TEXT` is DEFAULT ON since t35 routing-flips
+    /// (GL-MKTEXT-1 FLIP-RECOMMENDED) and only the exact kill spellings
+    /// `0`/`off` disarm it — the flipped-kill idiom (a typo'd kill leaves
+    /// the measured-winning default in place; matches textdistinct/
+    /// runtime-arm kill conventions). Pins the default-ON posture and the
+    /// kill switch's exact spellings.
     #[test]
-    fn multikey_text_knob_is_default_off() {
-        assert!(!multikey_text_spelling_on(None), "unset must be OFF (default)");
-        assert!(!multikey_text_spelling_on(Some("0")));
-        assert!(!multikey_text_spelling_on(Some("off")));
-        assert!(!multikey_text_spelling_on(Some("")));
-        assert!(!multikey_text_spelling_on(Some("true")), "typos fail safe to OFF");
-        assert!(!multikey_text_spelling_on(Some("ON")), "case-sensitive, like the arm knobs");
+    fn multikey_text_knob_is_default_on_with_kill() {
+        assert!(multikey_text_spelling_on(None), "unset must be ON (t35 flipped default)");
+        assert!(!multikey_text_spelling_on(Some("0")), "kill spelling");
+        assert!(!multikey_text_spelling_on(Some("off")), "kill spelling");
+        assert!(multikey_text_spelling_on(Some("")), "non-kill spellings stay ON");
+        assert!(multikey_text_spelling_on(Some("true")), "non-kill spellings stay ON");
+        assert!(
+            multikey_text_spelling_on(Some("OFF")),
+            "kill is case-sensitive, like the arm kills"
+        );
         assert!(multikey_text_spelling_on(Some("1")));
         assert!(multikey_text_spelling_on(Some("on")));
         // The live getter memoizes the process env; in the test binary the
-        // var is unset, so it resolves OFF — the default-OFF invariant.
-        assert!(!multikey_text_enabled(), "test process has no knob set => OFF");
+        // var is unset, so it resolves ON — the flipped-default invariant.
+        assert!(multikey_text_enabled(), "test process has no kill set => ON");
     }
 
     /// SE-MKTEXT shape law: the knob-widened family is EXACTLY the two-key
@@ -3239,22 +3279,23 @@ mod tests {
     }
 
     /// Sibling-lane knobs (SE-EXTRACTKEY / SE-CONSTKEY / SE-BARELIMIT):
-    /// the shared spelling rule is default OFF, `1`/`on` only — and the
-    /// live getters resolve OFF in the test process (no env set), pinning
-    /// each lane's inert-at-default guarantee.
+    /// the shared spelling rule is DEFAULT ON since t35 routing-flips with
+    /// exact-spelling kills `0`/`off` (the flipped-kill idiom) — and the
+    /// live getters resolve ON in the test process (no kill set), pinning
+    /// each lane's flipped-default posture.
     #[test]
-    fn sibling_lane_knobs_are_default_off() {
-        assert!(!knob_spelling_on(None), "unset must be OFF (default)");
-        assert!(!knob_spelling_on(Some("0")));
-        assert!(!knob_spelling_on(Some("off")));
-        assert!(!knob_spelling_on(Some("")));
-        assert!(!knob_spelling_on(Some("true")), "typos fail safe to OFF");
-        assert!(!knob_spelling_on(Some("ON")), "case-sensitive, like the arm knobs");
+    fn sibling_lane_knobs_are_default_on_with_kill() {
+        assert!(knob_spelling_on(None), "unset must be ON (t35 flipped default)");
+        assert!(!knob_spelling_on(Some("0")), "kill spelling");
+        assert!(!knob_spelling_on(Some("off")), "kill spelling");
+        assert!(knob_spelling_on(Some("")), "non-kill spellings stay ON");
+        assert!(knob_spelling_on(Some("true")), "non-kill spellings stay ON");
+        assert!(knob_spelling_on(Some("OFF")), "kill is case-sensitive, like the arm kills");
         assert!(knob_spelling_on(Some("1")));
         assert!(knob_spelling_on(Some("on")));
-        assert!(!extract_exprkey_enabled(), "test process has no knob set => OFF");
-        assert!(!agg_constkey_enabled(), "test process has no knob set => OFF");
-        assert!(!agg_barelimit_enabled(), "test process has no knob set => OFF");
+        assert!(extract_exprkey_enabled(), "test process has no kill set => ON");
+        assert!(agg_constkey_enabled(), "test process has no kill set => ON");
+        assert!(agg_barelimit_enabled(), "test process has no kill set => ON");
     }
 
     /// SE-EXTRACTKEY packed-image width law: mirrors the exprkey Multi

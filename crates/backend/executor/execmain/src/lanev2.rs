@@ -5006,21 +5006,23 @@ fn multikey_enabled() -> bool {
 }
 
 /// SE-MKTEXT (Lane-3 two-key text car): `PGRUST_LANE_V2_MULTIKEY_TEXT`,
-/// **default OFF** (`1`/`on` arm it; every other spelling fails safe — the
-/// K1-latemat idiom). Gates the UNPROJECTED scan feed's SECOND TextRaw key
-/// component (the ClickBench text+text `GROUP BY` census): the primary
-/// text rides the dict-group lane exactly as today, the second is opted in
-/// as an EXTRA dict-want column (`seq_scan_cb_dict_want_extra`, the
-/// band-2a CaseDict mechanism) and packs through the SAME per-(epoch,
+/// **DEFAULT ON** since t35 routing-flips (GL-MKTEXT-1 FLIP-RECOMMENDED:
+/// q17 0.861 -> 0.061 hot unforced, 14.1x, == forced ref; zero
+/// regressions); `=0|off` is the kill switch — every other spelling stays
+/// ON (the flipped-kill idiom). Gates the UNPROJECTED scan feed's SECOND
+/// TextRaw key component (the ClickBench text+text `GROUP BY` census): the
+/// primary text rides the dict-group lane exactly as today, the second is
+/// opted in as an EXTRA dict-want column (`seq_scan_cb_dict_want_extra`,
+/// the band-2a CaseDict mechanism) and packs through the SAME per-(epoch,
 /// code) intern resolve — or the raw-answered-window fallback — into a
 /// two-Intern MkShape (the canonical multi-tail encoding, canon-sink car
-/// 1). OFF keeps today's one-text census byte-for-byte. Same spelling as
+/// 1). Killed keeps the one-text census byte-for-byte. Same spelling as
 /// the planner probe's keying (m5_suppress.rs — the AGG_POLY/GROUPSINK
-/// knob-coherence law).
+/// knob-coherence law: BOTH read sites flip together).
 fn multikey_text2_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        matches!(std::env::var("PGRUST_LANE_V2_MULTIKEY_TEXT").as_deref(), Ok("1") | Ok("on"))
+        !matches!(std::env::var("PGRUST_LANE_V2_MULTIKEY_TEXT").as_deref(), Ok("0") | Ok("off"))
     })
 }
 
@@ -8990,22 +8992,27 @@ fn distincthash_textbatch_enabled() -> bool {
     })
 }
 
-/// `PGRUST_LANE_V2_AGG_POLY` (SE-AGGPOLY, band 101001; DEFAULT OFF): admit
-/// the poly export manifest — plain-agg shapes whose transitions the fold
-/// plan does not fully cover but whose remainder is exactly the
-/// sum/avg(numeric) NumericAggState family — to the runtime scan arm's
-/// per-row drive (DriveMode::PerRowPoly: the real checked transition
-/// program per row; numeric end states relocated as self-contained exact
-/// digit snapshots for the cross-worker export/combine/absorb). The m5
-/// suppression probe keys the matching plan shapes under the SAME env
-/// spelling (knob coherence — a keyed-but-disarmed shape would land on
-/// serial). Off = today's refusals, byte-identical.
+/// `PGRUST_LANE_V2_AGG_POLY` (SE-AGGPOLY, band 101001; DEFAULT ON since t35
+/// routing-flips, `=0|off` kills): admit the poly export manifest —
+/// plain-agg shapes whose transitions the fold plan does not fully cover
+/// but whose remainder is exactly the sum/avg(numeric) NumericAggState
+/// family — to the runtime scan arm's per-row drive (DriveMode::PerRowPoly:
+/// the real checked transition program per row; numeric end states
+/// relocated as self-contained exact digit snapshots for the cross-worker
+/// export/combine/absorb). The m5 suppression probe keys the matching plan
+/// shapes under the SAME env spelling (knob coherence — a
+/// keyed-but-disarmed shape would land on serial; BOTH read sites flip
+/// together, the GL letter's duty). FLIP EVIDENCE (GL letter 2026-07-21 @
+/// 67a99589d): official ClickBench 0.9278 vs knob-OFF (noise floor 0.9889);
+/// CB q10 1.861 -> 0.066 hot (28x, == forced ref); GL-AGGPOLY-1 SE16 q06
+/// heap −12.4%; zero regressions, parity class set unchanged. Killed =
+/// pre-flip refusals, byte-identical.
 pub(crate) fn agg_poly_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        matches!(
+        !matches!(
             std::env::var("PGRUST_LANE_V2_AGG_POLY").as_deref(),
-            Ok("1") | Ok("on")
+            Ok("0") | Ok("off")
         )
     })
 }
