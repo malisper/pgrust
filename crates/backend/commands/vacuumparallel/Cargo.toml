@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 amapi = { path = "../../access/index/amapi" }
 commands_vacuum = { path = "../vacuum" }
+indexam = { path = "../../access/index/indexam" }
 nbtree = { path = "../../access/nbtree/nbtree" }
 parallel = { path = "../../access/transam/parallel" }
 xact = { path = "../../access/transam/xact" }

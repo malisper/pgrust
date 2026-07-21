@@ -171,6 +171,54 @@ pub fn index_insert<'mcx>(
     )
 }
 
+/// Q2 (Track 4.2): begin a CHUNKED (resumable) ambulkdelete when the AM
+/// supports one. None = no chunked form for this AM — the caller must fall
+/// back to whole [`index_bulk_delete`]. Btree only at this increment (the
+/// other AMs' sweeps remain single-unit work; recorded residual). Drive the
+/// returned scan with `nbtree::bt_chunked_scan_step(dead_items, ..)` and
+/// complete with `nbtree::bt_chunked_bulkdelete_finish`.
+pub fn index_bulk_delete_chunked_begin<'mcx>(
+    info: &nbtree::IndexVacuumInfo<'_, 'mcx>,
+    istat: Option<IndexBulkDeleteResult>,
+) -> PgResult<Option<nbtree::BtVacChunkedScan>> {
+    // The av-wedge injection probe, chunked twin (index_bulk_delete).
+    #[cfg(debug_assertions)]
+    if std::env::var("PGRUST_TEST_VACUUM_PANIC_INDEX").as_deref() == Ok(info.index.name()) {
+        panic!(
+            "injected bulk-delete panic for index \"{}\" (av wedge containment test)",
+            info.index.name()
+        );
+    }
+    relation_checks(info.index)?;
+    match IndexAmKind::from_relam(info.index.rd_rel.relam) {
+        IndexAmKind::Btree => Ok(Some(nbtree::bt_chunked_bulkdelete_begin(info, istat)?)),
+        _ => Ok(None),
+    }
+}
+
+/// Q2: chunked amvacuumcleanup twin of [`index_bulk_delete_chunked_begin`].
+/// None = no chunked form; `Some(BtChunkedCleanup::Done(..))` = the pass
+/// needed no scan (result final); `Some(BtChunkedCleanup::Scan(..))` =
+/// drive with `bt_chunked_scan_step(None, ..)` then
+/// `bt_chunked_cleanup_finish`.
+pub fn index_vacuum_cleanup_chunked_begin<'mcx>(
+    info: &nbtree::IndexVacuumInfo<'_, 'mcx>,
+    istat: Option<IndexBulkDeleteResult>,
+) -> PgResult<Option<nbtree::BtChunkedCleanup>> {
+    #[cfg(debug_assertions)]
+    if std::env::var("PGRUST_TEST_VACUUM_PANIC_INDEX").as_deref() == Ok(info.index.name()) {
+        panic!(
+            "injected vacuum-cleanup panic for index \"{}\" (av wedge containment test)",
+            info.index.name()
+        );
+    }
+    relation_checks(info.index)?;
+    match IndexAmKind::from_relam(info.index.rd_rel.relam) {
+        IndexAmKind::Btree => Ok(Some(nbtree::bt_chunked_cleanup_begin(info, istat)?)),
+        _ => Ok(None),
+    }
+}
+
 /// index_bulk_delete. C divergence (recorded): the callback is monomorphized
 /// to the sorted dead-TID slice — vac_tid_reaped is its only producer.
 pub fn index_bulk_delete<'mcx>(

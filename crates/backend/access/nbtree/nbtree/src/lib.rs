@@ -29,7 +29,11 @@ mod tests;
 pub use insert::btinsert;
 pub use parallel::btparallelrescan;
 pub use page::{bt_getrootheight, bt_initmetapage, bt_metaversion, bt_pageinit};
-pub use vacuum::{btbulkdelete, btbulkdelete_collect, btvacuumcleanup, IndexVacuumInfo};
+pub use vacuum::{
+    bt_chunked_bulkdelete_begin, bt_chunked_bulkdelete_finish, bt_chunked_cleanup_begin,
+    bt_chunked_cleanup_finish, bt_chunked_scan_step, btbulkdelete, btbulkdelete_collect,
+    btvacuumcleanup, BtChunkedCleanup, BtVacChunkedScan, IndexVacuumInfo,
+};
 
 use ::mcx::Mcx;
 use ::types_core::{BLCKSZ, InvalidSubTransactionId};

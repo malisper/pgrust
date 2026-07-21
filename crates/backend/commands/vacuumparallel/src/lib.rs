@@ -320,19 +320,37 @@ fn parallel_vacuum_compute_workers(
 }
 
 // ---------------------------------------------------------------------------
-// M4.1 pool channel (driver swap, index phase): one index = ONE COARSE
-// MORSEL served by PGPROC-leasing pool workers through the M2 inc-2
-// bound-descriptor gate at QoS class Utility. The launched bgworker gang
-// stays the fallback on every refusal, and the kill switch (default OFF)
-// restores it wholesale. LONG-UNIT DEBT (Track 4.2, recorded not solved): a
-// minutes-long index sweep holds its claim (and permit) for the whole
-// sweep — abort/cancel/reclaim latency on this task set is bounded by one
-// INDEX, not one t_max; the Q2 chunked-claim resumable scan (serial cursor,
-// quantum claims, ceiling=1 pin) is the follow-up that retires this.
-// LEADER-PARTICIPATION DEBT: on the pool channel the leader parks (its park
-// loop is the cancel guarantee) instead of joining the safe-index loop as
-// the launched channel's leader does; it rejoins when long-unit chunking
-// lands.
+// M4.1 pool channel (driver swap, index phase): index passes served by
+// PGPROC-leasing pool workers through the M2 inc-2 bound-descriptor gate at
+// QoS class Utility. The launched bgworker gang stays the fallback on every
+// refusal, and the kill switch (default OFF) restores it wholesale.
+//
+// Q2 (Track 4.2 long-unit discipline) — CHUNKED-CLAIM RESUMABLE SWEEPS:
+// the M4.1 "one index = one coarse morsel" unit held a claim (and its
+// execution permit un-preemptibly) for a whole index sweep, so abort/
+// cancel/QoS-reclaim latency on this task set was bounded by one INDEX,
+// not the ~t_max sizer envelope. The chunks arm (default ON under the pool
+// switch; PGRUST_RUNTIME_VACUUM_INDEX_CHUNKS=0 restores the coarse arm)
+// replaces it with a TICKET STREAM: granule g of a StreamSource is the
+// ticket "advance unit tickets[g] by one quantum (~t_max of leaf blocks)";
+// the resumable scan state (nbtree::BtVacChunkedScan) lives in the unit,
+// so successive quanta may be served by DIFFERENT workers. SERIAL PER
+// INDEX BY CONSTRUCTION: a unit's successor ticket is published only by
+// the completer of its previous quantum — at most one claim per index is
+// ever in flight (no locks to wait on, no permit burned idle; unit.busy is
+// the overlap ASSERTION, failing closed). Every scheduler discipline now
+// applies at quantum cadence: abort observed, ledger Yield honored, stride
+// charged, permit parked — the reclaim bound the QoS design assumes.
+// INTRA-INDEX PARALLELISM ADJUDICATED OUT (see nbtree::vacuum's chunk
+// banner): the backtrack/cycle-id envelope and page-deletion bookkeeping
+// are single-scan-instance state; resumability is the honest increment.
+// LEADER PARTICIPATION (M4.1 debt #2, retired on the chunks arm): once the
+// pool channel is live the leader joins the ticket work through the
+// bounded drive (runtime::drive_pinned_tasks, ≤1 task per burst), keeping
+// its CFI/cancel cadence at ~t_max independent of index size — the park
+// loop's cancel guarantee, preserved. On the coarse arm it still parks.
+// RESIDUAL (recorded): non-btree AMs have no chunked sweep — their units
+// run whole inside a single ticket (the M4.1 coarse shape, per index).
 // ---------------------------------------------------------------------------
 
 /// M4.1 kill switch: `PGRUST_RUNTIME_VACUUM_POOL=1` arms the pool channel
@@ -349,11 +367,60 @@ fn pool_index_enabled() -> bool {
         && !parallel::IsParallelWorker()
 }
 
+/// Q2 kill switch (Track 4.2), layered UNDER PGRUST_RUNTIME_VACUUM_POOL —
+/// consulted only when the pool channel engages, so the launched/serial
+/// channels never see it. Default ON under the pool arm (the chunked shape
+/// IS Q2's deliverable); `PGRUST_RUNTIME_VACUUM_INDEX_CHUNKS=0` restores
+/// M4.1's one-index-per-claim coarse morsels exactly.
+fn pool_index_chunks_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !std::env::var("PGRUST_RUNTIME_VACUUM_INDEX_CHUNKS").is_ok_and(|v| v.trim() == "0")
+    })
+}
+
+/// Chunk quantum: index blocks advanced per claimed ticket. Sized so one
+/// quantum ≈ the sizer envelope (~t_max of leaf-page work) — the claim
+/// cadence IS the abort/QoS-reclaim cadence. Calibration knob, not product
+/// surface (the PGRUST_RUNTIME_STRIDE precedent).
+fn pool_index_quantum() -> u32 {
+    static Q: OnceLock<u32> = OnceLock::new();
+    *Q.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_VACUUM_INDEX_QUANTUM")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .filter(|q| *q > 0)
+            .unwrap_or(256)
+    })
+}
+
+/// Q2 leader participation (retires M4.1 debt #2). Chunks-arm only — the
+/// coarse arm's leader must keep parking (a whole-index burst would break
+/// the park loop's cancel cadence). Default ON.
+fn pool_index_leader_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !std::env::var("PGRUST_RUNTIME_VACUUM_INDEX_LEADER").is_ok_and(|v| v.trim() == "0")
+    })
+}
+
 /// Engagement trace (PGRUST_VACUUM_TRACE=1, the vacuum battery's oracle
 /// channel). Default-off, zero cost.
 fn ptrace_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var("PGRUST_VACUUM_TRACE").is_ok_and(|v| v.trim() == "1"))
+}
+
+/// Claim-cadence witness channel (PGRUST_VACUUM_CLAIM_TIMING=1): per-claim
+/// service time on the index-pass pool arms — the LOCAL exhibit for the Q2
+/// reclaim bound (a claim's service time bounds how long a permit is held
+/// un-preemptibly; the fleet letter's probe is the reportable number).
+/// Observability only, pg_clock (DST P2), default-off zero cost.
+fn claim_timing_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_VACUUM_CLAIM_TIMING").is_ok_and(|v| v.trim() == "1")
+    })
 }
 
 fn ptrace(msg: &str) {
@@ -375,12 +442,45 @@ struct PvPoolPass {
     /// unwinds (the shutdown_standing_join law).
     board: Mutex<Option<Arc<parallel::standing::StandingEngagement>>>,
     /// Ordinals (into indrels/indstats) of this pass's parallel-safe
-    /// indexes: granule g ⇒ safe[g].
+    /// indexes. Coarse arm: granule g ⇒ safe[g]. Chunks arm: unit u works
+    /// index safe[u]; granules are stream tickets (see `tickets`).
     safe: Vec<usize>,
+    /// Q2 chunks arm (empty/None on the coarse arm): one unit per
+    /// parallel-safe index; stream granule g is the ticket "advance unit
+    /// tickets[g] by one quantum". Serial-per-index by construction — a
+    /// unit's successor ticket is published only by the completer of its
+    /// previous quantum.
+    units: Vec<PvUnit>,
+    /// Granule → unit ordinal; appended under the lock BEFORE the stream
+    /// watermark advances, so a claimed granule always resolves.
+    tickets: Mutex<Vec<u32>>,
+    stream: Option<Arc<runtime::StreamSource>>,
+    /// Units not yet Completed; the LAST completion closes the stream.
+    units_left: AtomicUsize,
     started: AtomicUsize,
     refused: AtomicUsize,
     error: Mutex<Option<Box<PgError>>>,
     failed: AtomicBool,
+}
+
+/// One chunks-arm index unit: the resumable sweep state between tickets.
+struct PvUnit {
+    /// Ordinal into indrels/indstats.
+    ord: usize,
+    /// Overlap ASSERTION for the serial-per-index invariant (the mechanism
+    /// is publish-after-work; this witnesses it and fails closed).
+    busy: AtomicBool,
+    run: Mutex<PvUnitRun>,
+}
+
+enum PvUnitRun {
+    /// First ticket not yet served.
+    Pending,
+    /// Resumable btree sweeps (nbtree owns the state; Drop releases the
+    /// cycle slot on abandoned bulkdelete scans).
+    Bulkdelete(nbtree::BtVacChunkedScan),
+    Cleanup(nbtree::BtVacChunkedScan),
+    Done,
 }
 
 impl PvPoolPass {
@@ -481,17 +581,210 @@ impl PvPoolPass {
             if self.failed.load(SeqCst) {
                 return Ok(());
             }
-            let i = self.safe[g as usize];
-            parallel_vacuum_process_one_index(
-                &self.shared,
-                cx.mcx,
-                cx.heaprel,
-                &cx.indrels[i],
-                i,
-                cx.bstrategy,
-            )?;
+            // Both arms claim whole single granules (one ticket / one
+            // index), so per-granule service time IS per-claim service
+            // time — the un-preemptible permit-hold the witness bounds.
+            let t0 = claim_timing_enabled().then(pg_clock::MonoStamp::now);
+            if self.stream.is_some() {
+                // Q2 chunks arm: granule = one quantum ticket.
+                self.chunk_ticket(cx, g)?;
+            } else {
+                // Coarse arm (PGRUST_RUNTIME_VACUUM_INDEX_CHUNKS=0): the
+                // M4.1 one-index-per-claim unit, byte-exactly.
+                let i = self.safe[g as usize];
+                parallel_vacuum_process_one_index(
+                    &self.shared,
+                    cx.mcx,
+                    cx.heaprel,
+                    &cx.indrels[i],
+                    i,
+                    cx.bstrategy,
+                )?;
+            }
+            if let Some(t0) = t0 {
+                eprintln!("vacuum-pool-index: claim_us={}", t0.elapsed_ns() / 1000);
+            }
         }
         Ok(())
+    }
+
+    /// Serve one stream ticket: advance the ticket's unit by one quantum,
+    /// then publish the successor (publish-after-work = the serial-per-
+    /// index mechanism) or complete the unit (the LAST completion closes
+    /// the stream). The wake after publish/close is the StreamSource
+    /// producer contract.
+    fn chunk_ticket(&self, cx: &PvWorkerCx<'_, '_>, g: u64) -> PgResult<()> {
+        let u = {
+            let t = self.tickets.lock().unwrap_or_else(|p| p.into_inner());
+            t[g as usize] as usize
+        };
+        let unit = &self.units[u];
+        if unit.busy.swap(true, SeqCst) {
+            debug_assert!(false, "overlapping claims on one index-vacuum unit");
+            return Err(PgError::new(
+                ERROR,
+                "index-vacuum chunk protocol violated (overlapping claims on one index)",
+            )
+            .into());
+        }
+        let r = self.unit_quantum(cx, unit);
+        unit.busy.store(false, SeqCst);
+        let more = r?;
+        let stream = self.stream.as_ref().expect("chunk ticket on the coarse arm");
+        if more {
+            let n = {
+                let mut t = self.tickets.lock().unwrap_or_else(|p| p.into_inner());
+                t.push(u as u32);
+                t.len() as u64
+            };
+            stream.publish(n);
+        } else if self.units_left.fetch_sub(1, SeqCst) == 1 {
+            stream.close();
+        } else {
+            return Ok(());
+        }
+        if let Some(rt) = runtime::global() {
+            rt.notify_source_progress();
+        }
+        Ok(())
+    }
+
+    /// One quantum of one unit. True = the unit has more work (a successor
+    /// ticket is owed). Chunkable AMs (btree) step their resumable sweep;
+    /// the rest run whole inside this single ticket (recorded residual:
+    /// their sweeps stay single-unit, the M4.1 coarse shape).
+    fn unit_quantum(&self, cx: &PvWorkerCx<'_, '_>, unit: &PvUnit) -> PgResult<bool> {
+        let shared = &self.shared;
+        let i = unit.ord;
+        let indrel = &cx.indrels[i];
+        let ivinfo = nbtree::IndexVacuumInfo {
+            index: indrel,
+            heaprel: cx.heaprel,
+            analyze_only: false,
+            estimated_count: shared.estimated_count.load(SeqCst),
+            num_heap_tuples: f64::from_bits(shared.reltuples.load(SeqCst)),
+            strategy: cx.bstrategy.clone(),
+        };
+        let mut run = unit.run.lock().unwrap_or_else(|p| p.into_inner());
+        if matches!(&*run, PvUnitRun::Pending) {
+            let (status, istat) = {
+                let s = shared.indstats[i].lock().unwrap_or_else(|e| e.into_inner());
+                (s.status, if s.istat_updated { Some(s.istat) } else { None })
+            };
+            match status {
+                PvIndVacStatus::NeedBulkdelete => {
+                    match indexam::index_bulk_delete_chunked_begin(&ivinfo, istat)? {
+                        Some(scan) => *run = PvUnitRun::Bulkdelete(scan),
+                        None => {
+                            drop(run);
+                            return self.unit_whole(cx, unit, i);
+                        }
+                    }
+                }
+                PvIndVacStatus::NeedCleanup => {
+                    match indexam::index_vacuum_cleanup_chunked_begin(&ivinfo, istat)? {
+                        Some(nbtree::BtChunkedCleanup::Scan(scan)) => {
+                            *run = PvUnitRun::Cleanup(scan)
+                        }
+                        Some(nbtree::BtChunkedCleanup::Done(res)) => {
+                            *run = PvUnitRun::Done;
+                            drop(run);
+                            self.unit_complete(i, res);
+                            return Ok(false);
+                        }
+                        None => {
+                            drop(run);
+                            return self.unit_whole(cx, unit, i);
+                        }
+                    }
+                }
+                _ => panic!(
+                    "unexpected parallel vacuum index status {status:?} for index \"{}\"",
+                    indrel.name()
+                ),
+            }
+        }
+        // Step the in-flight sweep by one quantum (the begin ticket falls
+        // through here: begin + first quantum share ticket 0).
+        let quantum = pool_index_quantum();
+        let done = match &mut *run {
+            PvUnitRun::Bulkdelete(scan) => {
+                let dead =
+                    Arc::clone(&shared.dead_items.lock().unwrap_or_else(|e| e.into_inner()));
+                nbtree::bt_chunked_scan_step(&ivinfo, scan, Some(&dead), quantum)?
+            }
+            PvUnitRun::Cleanup(scan) => {
+                nbtree::bt_chunked_scan_step(&ivinfo, scan, None, quantum)?
+            }
+            PvUnitRun::Pending | PvUnitRun::Done => {
+                unreachable!("stepped index-vacuum unit without a live sweep")
+            }
+        };
+        if !done {
+            return Ok(true);
+        }
+        let fin = std::mem::replace(&mut *run, PvUnitRun::Done);
+        drop(run);
+        let res = match fin {
+            PvUnitRun::Bulkdelete(scan) => {
+                Some(nbtree::bt_chunked_bulkdelete_finish(&ivinfo, scan)?)
+            }
+            PvUnitRun::Cleanup(scan) => nbtree::bt_chunked_cleanup_finish(&ivinfo, scan)?,
+            PvUnitRun::Pending | PvUnitRun::Done => unreachable!("finished unit re-finished"),
+        };
+        self.unit_complete(i, res);
+        Ok(false)
+    }
+
+    /// Non-chunkable AM: the whole sweep inside this single ticket
+    /// (parallel_vacuum_process_one_index owns stats/status/progress).
+    fn unit_whole(&self, cx: &PvWorkerCx<'_, '_>, unit: &PvUnit, i: usize) -> PgResult<bool> {
+        parallel_vacuum_process_one_index(
+            &self.shared,
+            cx.mcx,
+            cx.heaprel,
+            &cx.indrels[i],
+            i,
+            cx.bstrategy,
+        )?;
+        *unit.run.lock().unwrap_or_else(|p| p.into_inner()) = PvUnitRun::Done;
+        Ok(false)
+    }
+
+    /// The completion tail of parallel_vacuum_process_one_index, chunk
+    /// form: stats + status under the slot lock, then the progress relay
+    /// (pool serves count into the leader-published relay; the
+    /// participating LEADER owns the pg_stat_progress_vacuum row and
+    /// publishes directly).
+    fn unit_complete(&self, i: usize, istat_res: Option<IndexBulkDeleteResult>) {
+        {
+            let mut s = self.shared.indstats[i].lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(res) = istat_res {
+                s.istat = res;
+                s.istat_updated = true;
+            }
+            s.status = PvIndVacStatus::Completed;
+        }
+        if parallel::standing::serving_on_pool() {
+            self.shared.pool_indexes_processed.fetch_add(1, SeqCst);
+        } else {
+            backend_progress::pgstat_progress_parallel_incr_param(
+                backend_progress::progress::PROGRESS_VACUUM_INDEXES_PROCESSED,
+                1,
+            );
+        }
+    }
+
+    /// Teardown sweep (leader cleanup + the PRIVATE_SHUTDOWN hook): drop
+    /// mid-sweep unit state DETERMINISTICALLY — BtVacChunkedScan's Drop
+    /// releases the btree cycle-slot registration, and the NEXT vacuum of
+    /// the same index must not race an Arc-chain drop for it ("multiple
+    /// active vacuums"). Runs strictly after the RG reached an outcome and
+    /// serves detached, so no step is in flight.
+    fn release_units(&self) {
+        for unit in &self.units {
+            *unit.run.lock().unwrap_or_else(|p| p.into_inner()) = PvUnitRun::Done;
+        }
     }
 }
 
@@ -743,6 +1036,8 @@ fn parallel_vacuum_pool_shutdown(private: &(dyn std::any::Any + Send + Sync)) {
     if let Some(entry) = board {
         parallel::standing::close_and_await(&entry);
     }
+    // Q2: deterministic release of mid-sweep chunk state (cycle slots).
+    pass.release_units();
 }
 
 fn ensure_pool_shutdown_registered() {
@@ -789,12 +1084,36 @@ fn pool_engage_pass(
     }
     let target = parallel::shared_for(pvs.pcxt);
     let entry = parallel::standing::try_engage_pool(&target, nworkers.max(0) as usize)?;
+    // Q2 chunks arm: one unit per safe index, one seed ticket each; the
+    // stream is claimable the moment the submission publishes.
+    let chunked = pool_index_chunks_enabled();
+    let (units, tickets, stream, units_left) = if chunked {
+        let units: Vec<PvUnit> = safe
+            .iter()
+            .map(|&ord| PvUnit {
+                ord,
+                busy: AtomicBool::new(false),
+                run: Mutex::new(PvUnitRun::Pending),
+            })
+            .collect();
+        let tickets: Vec<u32> = (0..units.len() as u32).collect();
+        let stream = Arc::new(runtime::StreamSource::new());
+        stream.publish(tickets.len() as u64);
+        let n = units.len();
+        (units, tickets, Some(stream), n)
+    } else {
+        (Vec::new(), Vec::new(), None, 0)
+    };
     let pass = Arc::new(PvPoolPass {
         shared: Arc::clone(&pvs.shared),
         target,
         rg: OnceLock::new(),
         board: Mutex::new(Some(Arc::clone(&entry))),
         safe,
+        units,
+        tickets: Mutex::new(tickets),
+        stream,
+        units_left: AtomicUsize::new(units_left),
         started: AtomicUsize::new(0),
         refused: AtomicUsize::new(0),
         error: Mutex::new(None),
@@ -809,8 +1128,12 @@ fn pool_engage_pass(
     pvs.shared.cost.active_nworkers.store(0, SeqCst);
 
     static NEXT_QUERY_ID: AtomicU64 = AtomicU64::new(1);
-    let source: Arc<dyn runtime::MorselSource> =
-        Arc::new(IndexGranuleSource { total: pass.safe.len() as u64 });
+    let source: Arc<dyn runtime::MorselSource> = match &pass.stream {
+        // Q2 chunks arm: the ticket stream (quantum claims).
+        Some(s) => Arc::clone(s) as _,
+        // Coarse arm: M4.1's one-index-per-claim geometry.
+        None => Arc::new(IndexGranuleSource { total: pass.safe.len() as u64 }),
+    };
     let work: Arc<dyn runtime::TaskSetWork> = Arc::clone(&pass) as _;
     let descriptor = runtime::BoundDescriptor {
         serve: vacuum_index_pooldb_serve,
@@ -840,6 +1163,15 @@ fn pool_engage_pass(
         "engaged pass tickets={nworkers} safe_indexes={}",
         pass.safe.len()
     ));
+    if pass.stream.is_some() {
+        // The Q2 witness line (battery oracle): the chunks arm engaged.
+        ptrace(&format!(
+            "chunked pass: units={} quantum={} leader={}",
+            pass.units.len(),
+            pool_index_quantum(),
+            pool_index_leader_enabled(),
+        ));
+    }
     Some(PoolEngaged { pass, entry, rg, waiter })
 }
 
@@ -851,23 +1183,45 @@ enum PoolPassWait {
     Fallback,
 }
 
-/// The leader's park loop for one pool pass (the standing channel's wait
+/// The leader's join loop for one pool pass (the standing channel's wait
 /// shape + the relay flush): poll completion + interrupts + participation
 /// counters; every exit path completes the RG if needed, closes the board
 /// entry, awaits detach, clears the pass slot, and flushes the relays.
-fn pool_leader_join(pvs: &ParallelVacuumState, eng: &PoolEngaged) -> PgResult<PoolPassWait> {
+/// Q2, chunks arm: once the pool channel is LIVE (a serve started) the
+/// leader also participates between poll duties through the bounded drive
+/// — ≤1 task (~t_max) per burst keeps the park loop's cancel guarantee
+/// index-size-independent. It stays parked-only until then so the
+/// started==0 fallback verdicts (refusal / claim deadline → launched gang)
+/// are never usurped by leader-only progress.
+fn pool_leader_join(
+    pvs: &ParallelVacuumState,
+    eng: &PoolEngaged,
+    mcx: Mcx<'_>,
+    heaprel: &RelationData<'_>,
+    indrels: &[Relation<'_>],
+    bstrategy: &BufferAccessStrategy,
+) -> PgResult<PoolPassWait> {
     let rt = runtime::global().expect("engaged with a live runtime");
     let shared = &pvs.shared;
     let entry = &eng.entry;
     let cleanup = |shared: &PvShared, entry: &Arc<parallel::standing::StandingEngagement>| {
         // Take the board slot first (the shutdown hook's double-close
-        // guard), then the arena-lifetime join, then the pass slot.
+        // guard), then the arena-lifetime join, then the pass slot; the
+        // unit sweep (Q2) runs after detach so no step is in flight.
         eng.pass.board.lock().unwrap_or_else(|p| p.into_inner()).take();
         parallel::standing::close_and_await(entry);
+        eng.pass.release_units();
         *shared.pool_pass.lock().unwrap_or_else(|p| p.into_inner()) = None;
         flush_pool_progress(shared);
         flush_pool_delay(shared);
     };
+    // Q2 leader participation state (chunks arm only): the external lane +
+    // worker-local are acquired lazily at first eligibility; the leader's
+    // own opened relations back its morsel bodies (the launched channel's
+    // leader-participation identity, unchanged).
+    let leader_eligible = eng.pass.stream.is_some() && pool_index_leader_enabled();
+    let mut leader_drive: Option<(runtime::ExternalLane, runtime::WorkerLocal)> = None;
+    let mut leader_cx = PvWorkerCx { mcx, heaprel, indrels, bstrategy };
     // DST P2: the claim deadline is BEHAVIORAL (changes execution path) —
     // its clock is pg_clock (the standing_channel precedent).
     let t0 = pg_clock::MonoStamp::now();
@@ -953,6 +1307,39 @@ fn pool_leader_join(pvs: &ParallelVacuumState, eng: &PoolEngaged) -> PgResult<Po
                 ERROR,
                 "parallel index vacuum pool executors exited before completing the pass",
             )));
+        }
+        // Q2 leader participation burst (chunks arm, pool live, healthy):
+        // ≤1 task per burst; a burst that RAN work re-polls immediately —
+        // the latch park is only for idle windows (every claimable ticket
+        // has a parked serve to run it, so nothing is stranded).
+        let mut participated = false;
+        if leader_eligible && started > 0 && !eng.pass.failed.load(SeqCst) {
+            if leader_drive.is_none() {
+                if let Some(lane) = rt.acquire_external_lane() {
+                    let local = lane.local();
+                    leader_drive = Some((lane, local));
+                }
+            }
+            if let Some((_lane, local)) = leader_drive.as_mut() {
+                shared.cost.active_nworkers.fetch_add(1, SeqCst);
+                // Publish the leader's relations for the morsel bodies
+                // (the drive frame outlives the burst; cleared before).
+                POOL_CX.with(|c| {
+                    c.set(unsafe {
+                        core::mem::transmute::<
+                            *mut PvWorkerCx<'_, '_>,
+                            *mut PvWorkerCx<'static, 'static>,
+                        >(&mut leader_cx as *mut PvWorkerCx<'_, '_>)
+                    })
+                });
+                let (_outcome, ran) = rt.drive_pinned_tasks(local, &eng.rg, 1);
+                POOL_CX.with(|c| c.set(std::ptr::null_mut()));
+                shared.cost.active_nworkers.fetch_sub(1, SeqCst);
+                participated = ran > 0;
+            }
+        }
+        if participated {
+            continue;
         }
         if let Err(e) = parallel::wait_parallel_finish_quantum() {
             eng.rg.abort();
@@ -1045,7 +1432,7 @@ fn parallel_vacuum_process_all_indexes(
     parallel_vacuum_process_unsafe_indexes(pvs, mcx, heaprel, indrels, bstrategy)?;
 
     match &pool {
-        Some(eng) => match pool_leader_join(pvs, eng)? {
+        Some(eng) => match pool_leader_join(pvs, eng, mcx, heaprel, indrels, bstrategy)? {
             PoolPassWait::Done => {}
             PoolPassWait::Fallback => {
                 // Nothing consumed (started == 0, statuses untouched): the
@@ -1330,6 +1717,26 @@ mod tests {
             pool_index_enabled(),
             "the vacuum index-pass pool gate admits under the armed env"
         );
+    }
+
+    /// Q2 posture: the chunk sub-switches are LAYERED UNDER the pool kill
+    /// switch (nothing here engages without PGRUST_RUNTIME_VACUUM_POOL=1 —
+    /// matching M4.1's default-OFF posture) and default to the chunked
+    /// shape + leader participation when the pool arm is live. Self-skips
+    /// under explicit overrides (the armed-witness legs set them).
+    #[test]
+    fn chunk_gates_default_posture() {
+        if std::env::var("PGRUST_RUNTIME_VACUUM_INDEX_CHUNKS").is_ok()
+            || std::env::var("PGRUST_RUNTIME_VACUUM_INDEX_QUANTUM").is_ok()
+            || std::env::var("PGRUST_RUNTIME_VACUUM_INDEX_LEADER").is_ok()
+        {
+            eprintln!("SKIP: chunk_gates_default_posture (env overrides present)");
+            return;
+        }
+        assert!(pool_index_chunks_enabled(), "chunks default ON under the pool arm");
+        assert!(pool_index_quantum() > 0, "quantum must be positive");
+        assert_eq!(pool_index_quantum(), 256, "default quantum of record");
+        assert!(pool_index_leader_enabled(), "leader participation default ON");
     }
 
     /// One-index-per-claim contract: every granule is its own hard boundary

@@ -30,7 +30,7 @@ use crate::page::{
     page_item, page_of_mut, page_opaque, write_opaque,
 };
 use crate::pagedel::{bt_pagedel, bt_pendingfsm_finalize, bt_pendingfsm_init};
-use crate::utils::{bt_end_vacuum, bt_start_vacuum};
+use crate::utils::{bt_end_vacuum, bt_end_vacuum_key, bt_start_vacuum};
 
 // IndexVacuumInfo (access/genam.h); message_level/report_progress dropped
 // (logging + progress lanes unported).
@@ -50,7 +50,11 @@ pub(crate) struct BTVacState<'a, 'cb, 'mcx> {
     // validate_index's never-delete callback: every live heap TID reported.
     pub collect: Option<&'a mut (dyn FnMut(&ItemPointerData) -> PgResult<()> + 'cb)>,
     pub cycleid: BTCycleId,
-    pub pendingpages: PgVec<'mcx, ::types_nbtree::BTPendingFSM>,
+    // Q2 divergence (recorded): a std Vec, not an arena PgVec — the pending
+    // list must persist across chunked-scan claims served by DIFFERENT
+    // worker arenas (BtVacChunkedScan owns it between claims). Bounded by
+    // maxbufsize (work_mem-derived, bt_pendingfsm_init), exactly as C.
+    pub pendingpages: Vec<::types_nbtree::BTPendingFSM>,
     pub maxbufsize: usize,
 }
 
@@ -133,7 +137,7 @@ pub fn btvacuumcleanup<'mcx>(
         return Ok(stats);
     }
 
-    let mut stats = match stats {
+    let stats = match stats {
         Some(stats) => stats,
         None => {
             if !crate::pagedel::bt_vacuum_needs_cleanup(info.index)? {
@@ -146,6 +150,15 @@ pub fn btvacuumcleanup<'mcx>(
         }
     };
 
+    Ok(Some(btvacuumcleanup_tail(info, stats)?))
+}
+
+/// btvacuumcleanup's post-scan tail (shared with the chunked form):
+/// num_delpages → cleanup-info metapage update, heap-tuple clamp.
+fn btvacuumcleanup_tail<'mcx>(
+    info: &IndexVacuumInfo<'_, 'mcx>,
+    mut stats: IndexBulkDeleteResult,
+) -> PgResult<IndexBulkDeleteResult> {
     debug_assert!(stats.pages_deleted >= stats.pages_free);
     let num_delpages = stats.pages_deleted - stats.pages_free;
     crate::pagedel::bt_set_cleanup_info(info.index, num_delpages)?;
@@ -154,7 +167,7 @@ pub fn btvacuumcleanup<'mcx>(
         stats.num_index_tuples = info.num_heap_tuples;
     }
 
-    Ok(Some(stats))
+    Ok(stats)
 }
 
 fn btvacuumscan<'mcx>(
@@ -165,6 +178,7 @@ fn btvacuumscan<'mcx>(
     collect: Option<&mut (dyn FnMut(&ItemPointerData) -> PgResult<()> + '_)>,
     cycleid: BTCycleId,
 ) -> PgResult<()> {
+    let _ = mcx; // pendingpages moved off the arena (BTVacState doc)
     let rel = info.index;
 
     stats.num_pages = 0;
@@ -179,35 +193,21 @@ fn btvacuumscan<'mcx>(
         dead_items,
         collect,
         cycleid,
-        pendingpages: PgVec::new_in(mcx),
+        pendingpages: Vec::new(),
         maxbufsize: 0,
     };
     bt_pendingfsm_init(&mut vstate, cleanuponly)?;
 
     let mut scratch = MemoryContext::new("btvacuumpage");
 
+    // The whole sweep as ONE unbounded step of the chunk-decomposed loop
+    // (Q2): identical operation sequence to the pre-decomposition body —
+    // the serial path IS the chunked path with an infinite quantum.
     let mut current: BlockNumber = BTREE_METAPAGE + 1;
-    let mut num_pages;
-    loop {
-        num_pages =
-            bufmgr::relation_get_number_of_blocks_in_fork::call(rel, ForkNumber::MAIN_FORKNUM)?;
-        if current >= num_pages {
-            break;
-        }
-        while current < num_pages {
-            vacuum_delay_point()?;
-            let pin = BufferPin::adopt(bufmgr::read_buffer_extended::call(
-                rel,
-                ForkNumber::MAIN_FORKNUM,
-                current,
-                ReadBufferMode::Normal,
-                info.strategy.clone(),
-            )?)
-            .expect("ReadBufferExtended returned InvalidBuffer");
-            btvacuumpage(&mut vstate, &mut scratch, pin)?;
-            current += 1;
-        }
-    }
+    let mut num_pages: BlockNumber = 0;
+    let done =
+        btvacuumscan_blocks(&mut vstate, &mut scratch, &mut current, &mut num_pages, u32::MAX)?;
+    debug_assert!(done, "unbounded btvacuumscan_blocks step must complete the sweep");
 
     vstate.stats.num_pages = num_pages;
 
@@ -216,6 +216,266 @@ fn btvacuumscan<'mcx>(
         ::freespace::IndexFreeSpaceMapVacuum(rel)?;
     }
     Ok(())
+}
+
+/// The btvacuumscan block loop, decomposed for resumability (Q2 long-unit
+/// discipline): advance the sweep by at most `max_blocks` pages, persisting
+/// the cursor (`current`) and the end-of-relation watermark (`num_pages` —
+/// C's loop-local, re-checked whenever the cursor reaches it so pages added
+/// by concurrent splits are still scanned) across calls. Returns true when
+/// the sweep is complete. EXACT decomposition: one call with `u32::MAX` is
+/// operation-for-operation the pre-Q2 loop.
+fn btvacuumscan_blocks(
+    vstate: &mut BTVacState<'_, '_, '_>,
+    scratch: &mut MemoryContext,
+    current: &mut BlockNumber,
+    num_pages: &mut BlockNumber,
+    max_blocks: u32,
+) -> PgResult<bool> {
+    let rel = vstate.info.index;
+    let mut scanned: u32 = 0;
+    loop {
+        if *current >= *num_pages {
+            *num_pages = bufmgr::relation_get_number_of_blocks_in_fork::call(
+                rel,
+                ForkNumber::MAIN_FORKNUM,
+            )?;
+            if *current >= *num_pages {
+                return Ok(true);
+            }
+        }
+        while *current < *num_pages {
+            if scanned >= max_blocks {
+                return Ok(false);
+            }
+            vacuum_delay_point()?;
+            let pin = BufferPin::adopt(bufmgr::read_buffer_extended::call(
+                rel,
+                ForkNumber::MAIN_FORKNUM,
+                *current,
+                ReadBufferMode::Normal,
+                vstate.info.strategy.clone(),
+            )?)
+            .expect("ReadBufferExtended returned InvalidBuffer");
+            btvacuumpage(vstate, scratch, pin)?;
+            *current += 1;
+            scanned += 1;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Q2 (Track 4.2): the RESUMABLE chunked btvacuumscan. One index sweep as a
+// sequence of bounded steps whose state lives in an owned, Send struct so
+// successive quanta may be served by DIFFERENT pool workers (each with its
+// own opened relations/arena) — the vacuum state the scan reads (dead-TID
+// set) is shared and read-only, block access has no thread affinity, and
+// the cycle-id registry is keyed by (db, relid), so WHICH thread drives a
+// step is immaterial. What IS load-bearing: steps of one scan must never
+// OVERLAP — the backtrack rule (btpo_next < scanblkno under one cycleid),
+// the pending-FSM ordering, and `stats`/`current` are single-scan-instance
+// state. INTRA-INDEX PARALLELISM IS ADJUDICATED OUT (charter Q2 item 1):
+// concurrent claims over disjoint block ranges of one index would need
+// per-range backtrack reasoning against the backwards-split interlock and
+// synchronized page-deletion bookkeeping (bt_pagedel takes &mut vstate) —
+// the honest increment is resumability with a serialized claim stream
+// (vacuumparallel's ticket protocol enforces at-most-one in-flight step).
+// ---------------------------------------------------------------------------
+
+/// Owned, resumable state of one chunked index-vacuum sweep.
+pub struct BtVacChunkedScan {
+    cycleid: BTCycleId,
+    /// (dbOid, relid) — the abort-path cycle-slot release key (Drop).
+    key: (::types_core::Oid, ::types_core::Oid),
+    current: BlockNumber,
+    num_pages: BlockNumber,
+    stats: IndexBulkDeleteResult,
+    pendingpages: Vec<::types_nbtree::BTPendingFSM>,
+    maxbufsize: usize,
+    finished: bool,
+}
+
+impl Drop for BtVacChunkedScan {
+    fn drop(&mut self) {
+        // The BtVacuumGuard law, chunk form: an abandoned bulkdelete scan
+        // (error/cancel between steps) must clear its cycle entry or every
+        // later vacuum of this index errors with "multiple active vacuums".
+        // Cleanup scans (cycleid 0) never registered.
+        if !self.finished && self.cycleid != 0 {
+            bt_end_vacuum_key(self.key);
+        }
+    }
+}
+
+impl BtVacChunkedScan {
+    /// Blocks scanned so far / last-seen relation size (progress surface).
+    pub fn blocks_scanned(&self) -> BlockNumber {
+        self.current
+    }
+
+    pub fn blocks_total(&self) -> BlockNumber {
+        self.num_pages
+    }
+}
+
+/// Begin a chunked btbulkdelete sweep: registers the vacuum cycle id (the
+/// split-tracking envelope) and sizes the pending-FSM buffer. `istat` is the
+/// carried-in stats of an earlier pass, exactly as btbulkdelete.
+pub fn bt_chunked_bulkdelete_begin<'mcx>(
+    info: &IndexVacuumInfo<'_, 'mcx>,
+    istat: Option<IndexBulkDeleteResult>,
+) -> PgResult<BtVacChunkedScan> {
+    let rel = info.index;
+    let cycleid = bt_start_vacuum(rel)?;
+    let mut stats = istat.unwrap_or_default();
+    // btvacuumscan's reset (accumulating fields — tuples_removed etc. —
+    // carry across passes; these four are per-scan).
+    stats.num_pages = 0;
+    stats.num_index_tuples = 0.0;
+    stats.pages_deleted = 0;
+    stats.pages_free = 0;
+    let mut scan = BtVacChunkedScan {
+        cycleid,
+        key: crate::utils::vac_key(rel),
+        current: BTREE_METAPAGE + 1,
+        num_pages: 0,
+        stats,
+        pendingpages: Vec::new(),
+        maxbufsize: 0,
+        finished: false,
+    };
+    // Fallible init AFTER the struct exists: an error here still releases
+    // the cycle slot through Drop.
+    with_chunk_vstate(&mut scan, info, None, |vs| bt_pendingfsm_init(vs, false))?;
+    Ok(scan)
+}
+
+/// Chunked btvacuumcleanup entry: either the pass needs no scan (`Done`,
+/// with btvacuumcleanup's tail already applied) or a scan must run
+/// (`Scan` — drive with [`bt_chunked_scan_step`] then
+/// [`bt_chunked_cleanup_finish`]).
+pub enum BtChunkedCleanup {
+    Done(Option<IndexBulkDeleteResult>),
+    Scan(BtVacChunkedScan),
+}
+
+pub fn bt_chunked_cleanup_begin<'mcx>(
+    info: &IndexVacuumInfo<'_, 'mcx>,
+    istat: Option<IndexBulkDeleteResult>,
+) -> PgResult<BtChunkedCleanup> {
+    if info.analyze_only {
+        return Ok(BtChunkedCleanup::Done(istat));
+    }
+    match istat {
+        Some(stats) => Ok(BtChunkedCleanup::Done(Some(btvacuumcleanup_tail(info, stats)?))),
+        None => {
+            if !crate::pagedel::bt_vacuum_needs_cleanup(info.index)? {
+                return Ok(BtChunkedCleanup::Done(None));
+            }
+            // Cleanup-only scan: cycleid 0 (no registry entry), stats fresh,
+            // pending-FSM init a no-op (cleanuponly) — as btvacuumscan.
+            Ok(BtChunkedCleanup::Scan(BtVacChunkedScan {
+                cycleid: 0,
+                key: crate::utils::vac_key(info.index),
+                current: BTREE_METAPAGE + 1,
+                num_pages: 0,
+                stats: IndexBulkDeleteResult::default(),
+                pendingpages: Vec::new(),
+                maxbufsize: 0,
+                finished: false,
+            }))
+        }
+    }
+}
+
+/// Advance a chunked sweep by at most `max_blocks` pages. `dead_items` is
+/// the sorted dead-TID image for bulkdelete steps, None for cleanup steps —
+/// callers must pass the SAME shape on every step of one scan. True = the
+/// sweep is complete; call the matching finish.
+pub fn bt_chunked_scan_step<'mcx>(
+    info: &IndexVacuumInfo<'_, 'mcx>,
+    scan: &mut BtVacChunkedScan,
+    dead_items: Option<&[ItemPointerData]>,
+    max_blocks: u32,
+) -> PgResult<bool> {
+    debug_assert!(!scan.finished, "step after finish");
+    debug_assert!(
+        (scan.cycleid != 0) == dead_items.is_some(),
+        "step shape must match the begin arm (bulkdelete vs cleanup)"
+    );
+    let mut scratch = MemoryContext::new("btvacuumpage");
+    let mut current = scan.current;
+    let mut num_pages = scan.num_pages;
+    let done = with_chunk_vstate(scan, info, dead_items, |vs| {
+        btvacuumscan_blocks(vs, &mut scratch, &mut current, &mut num_pages, max_blocks)
+    });
+    scan.current = current;
+    scan.num_pages = num_pages;
+    done
+}
+
+/// Complete a chunked bulkdelete sweep: pending-FSM finalize, FSM vacuum,
+/// cycle-slot release — btbulkdelete's tail, in its order.
+pub fn bt_chunked_bulkdelete_finish<'mcx>(
+    info: &IndexVacuumInfo<'_, 'mcx>,
+    mut scan: BtVacChunkedScan,
+) -> PgResult<IndexBulkDeleteResult> {
+    debug_assert!(scan.cycleid != 0);
+    chunk_scan_finalize(info, &mut scan)?;
+    scan.finished = true;
+    bt_end_vacuum_key(scan.key);
+    Ok(std::mem::take(&mut scan.stats))
+}
+
+/// Complete a chunked cleanup sweep: finalize, then btvacuumcleanup's tail
+/// (estimated_count, num_delpages/cleanup-info, heap-tuple clamp).
+pub fn bt_chunked_cleanup_finish<'mcx>(
+    info: &IndexVacuumInfo<'_, 'mcx>,
+    mut scan: BtVacChunkedScan,
+) -> PgResult<Option<IndexBulkDeleteResult>> {
+    debug_assert!(scan.cycleid == 0);
+    chunk_scan_finalize(info, &mut scan)?;
+    scan.finished = true;
+    let mut stats = std::mem::take(&mut scan.stats);
+    stats.estimated_count = true;
+    Ok(Some(btvacuumcleanup_tail(info, stats)?))
+}
+
+fn chunk_scan_finalize<'mcx>(
+    info: &IndexVacuumInfo<'_, 'mcx>,
+    scan: &mut BtVacChunkedScan,
+) -> PgResult<()> {
+    debug_assert!(scan.current >= scan.num_pages, "finish before the sweep completed");
+    scan.stats.num_pages = scan.num_pages;
+    with_chunk_vstate(scan, info, None, bt_pendingfsm_finalize)?;
+    if scan.stats.pages_free > 0 {
+        ::freespace::IndexFreeSpaceMapVacuum(info.index)?;
+    }
+    Ok(())
+}
+
+/// Materialize the per-step BTVacState view over the persistent chunk state
+/// (pendingpages/maxbufsize move in and out; stats borrowed).
+fn with_chunk_vstate<'mcx, R>(
+    scan: &mut BtVacChunkedScan,
+    info: &IndexVacuumInfo<'_, 'mcx>,
+    dead_items: Option<&[ItemPointerData]>,
+    f: impl FnOnce(&mut BTVacState<'_, '_, 'mcx>) -> PgResult<R>,
+) -> PgResult<R> {
+    let mut vstate = BTVacState {
+        info,
+        stats: &mut scan.stats,
+        dead_items,
+        collect: None,
+        cycleid: scan.cycleid,
+        pendingpages: std::mem::take(&mut scan.pendingpages),
+        maxbufsize: scan.maxbufsize,
+    };
+    let r = f(&mut vstate);
+    let BTVacState { pendingpages, maxbufsize, .. } = vstate;
+    scan.pendingpages = pendingpages;
+    scan.maxbufsize = maxbufsize;
+    r
 }
 
 fn btvacuumpage(
