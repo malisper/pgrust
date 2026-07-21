@@ -553,6 +553,26 @@ fn class_guard(class: CoverClass) -> FloorGuard {
 /// scanpass fail-safe idiom): the riders are guarded off at every size
 /// until an own witnessed curve shows a win region (witnessed grids in
 /// crates/backend/optimizer/path/costsize/src/runtime-cost-constants.tsv; ladder specs L1/L2).
+/// GL-MBSEAT-1 planner mirrors of the executor seat-world kills (the
+/// knob-coherence law — same spellings, flipped-kill parses; both
+/// default ON since the MBSHARED/MBSEAT flips). The grouped rider's OWN
+/// curve is valid ONLY on the seated arm, so `cover_class_curve`
+/// un-curves the class when either mirror reads dark and the class falls
+/// back to its guarded-off rectangle (the GL-COST-2 kill posture).
+fn mbshared_live() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_MBSHARED").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+fn mbseat_live() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_LANE_V2_MBSEAT").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
 fn hjrider_curve_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
@@ -4824,6 +4844,23 @@ fn classify_aggjoin_grouped<'mcx>(
             0.0,
         );
     }
+    // GL-MBSEAT-1 GUARD LIFT ngroups bound: the seated curve's win region
+    // was witnessed at ngroups 10 and 1k (the 1k twin tracks within
+    // 0.03-0.11 at every cell); 32k LOSES 1.86-2.48 even seated — the
+    // export/combine/absorb grouped tail is not seat-addressable, and the
+    // fitted model carries no ngroups axis. Bound the CURVE path at the
+    // last witnessed win axis point (the 1k..32k boundary is unmeasured;
+    // TSV row ngroups_lift_max). Applies ONLY when the own-curve wiring is
+    // live — every kill posture already keeps Gather via the rectangle,
+    // and the HJRIDER A/B vehicles keep their pre-letter behavior.
+    const NGROUPS_LIFT_MAX: f64 = 1024.0;
+    if !hjrider_curve_enabled()
+        && mbshared_live()
+        && mbseat_live()
+        && ngroups > NGROUPS_LIFT_MAX
+    {
+        return refuse_join("grouped ngroups above the seated win region (curve path)");
+    }
     finish(run, CoverClass::CbHashJoinGroupedAgg, relids[0], ngroups, max_rows, 0.0)
 }
 
@@ -4843,12 +4880,28 @@ fn cover_class_curve(class: CoverClass) -> Option<costsize::runtime_model::Runti
         CoverClass::HeapPlainCountStar => Some(Rc::HeapPlainCountStar),
         CoverClass::HeapCmpFoldPrefix => Some(Rc::HeapCmpFoldPrefix),
         CoverClass::CbHashJoinPlainAgg => Some(Rc::CbHashJoinPlainAgg),
-        // GL-COST-2 UNWIRE: the riders' witnessed grids refuted the PlainAgg
-        // curve reuse (see class_guard) — NO curve at default; the class
-        // routes by its guarded-off rectangle. The one-train kill restores
-        // the refuted wiring for A/B vehicles only.
-        CoverClass::CbHashJoinMultiBuild | CoverClass::CbHashJoinGroupedAgg => {
+        // GL-COST-2 UNWIRE: the multibuild rider's witnessed grid refuted
+        // the PlainAgg curve reuse (see class_guard) — NO curve at default;
+        // the class routes by its guarded-off rectangle. The one-train
+        // kill restores the refuted wiring for A/B vehicles only.
+        CoverClass::CbHashJoinMultiBuild => {
             if hjrider_curve_enabled() { Some(Rc::CbHashJoinPlainAgg) } else { None }
+        }
+        // GL-MBSEAT-1 GUARD LIFT: the grouped rider decides by its OWN
+        // fitted curve — valid ONLY on the seated arm (both seat-world
+        // mirrors live), fitted from the 9-cell seated grid @ 39d74f143
+        // (win region dop>=8 / 1M-2.5M; the classifier bounds the path at
+        // ngroups <= NGROUPS_LIFT_MAX). Either kill un-curves the class
+        // back to the guarded-off rectangle; the HJRIDER A/B knob keeps
+        // its pre-letter meaning for vehicles.
+        CoverClass::CbHashJoinGroupedAgg => {
+            if hjrider_curve_enabled() {
+                Some(Rc::CbHashJoinPlainAgg)
+            } else if mbshared_live() && mbseat_live() {
+                Some(Rc::CbHashJoinGroupedAgg)
+            } else {
+                None
+            }
         }
         // PROVISIONAL reuse matching the shipped guard reuse (GL-AGGPOLY-1).
         CoverClass::AggPolyHeapPlain => Some(Rc::HeapCmpFoldPrefix),
@@ -7185,9 +7238,11 @@ mod tests {
     /// a TSV note, never fall through silently.
     #[test]
     fn cost_route_map_names_its_curveless_classes() {
-        // Test binary runs with PGRUST_M5_HJRIDER_CURVE unset: the GL-COST-2
-        // unwire posture — the riders are curveless (their witnessed grids
-        // refuted the PlainAgg reuse) and MetaFooter has no curve by design.
+        // Test binary runs with PGRUST_M5_HJRIDER_CURVE unset and the
+        // seat-world knobs at their flipped defaults (both LIVE): the
+        // multibuild rider is curveless (GL-COST-2 unwire); the GROUPED
+        // rider decides by its OWN seated curve (GL-MBSEAT-1 guard lift);
+        // MetaFooter has no curve by design.
         for row in BOOTSTRAP_MATRIX {
             let curveless = cover_class_curve(row.class).is_none();
             // PartwisePlainFold: rectangle-retained — per-AM PROVISIONAL
@@ -7197,7 +7252,6 @@ mod tests {
                 row.class,
                 CoverClass::CbMetaFooterAgg
                     | CoverClass::CbHashJoinMultiBuild
-                    | CoverClass::CbHashJoinGroupedAgg
                     | CoverClass::PartwisePlainFold
             );
             assert_eq!(
@@ -7206,20 +7260,36 @@ mod tests {
                 row.class
             );
         }
+        // The grouped rider's own curve is the SEATED class (never the
+        // refuted PlainAgg reuse).
+        assert_eq!(
+            cover_class_curve(CoverClass::CbHashJoinGroupedAgg),
+            Some(costsize::runtime_model::RuntimeClass::CbHashJoinGroupedAgg)
+        );
     }
 
-    /// GL-COST-2 unwire posture of record: the riders are guarded OFF at
-    /// every size at default (no witnessed win region exists), the one-train
-    /// kill is exact-spelling, and floors-off (the measurement vehicle)
-    /// still measures them.
+    /// GL-COST-2 unwire posture of record, amended by the GL-MBSEAT-1
+    /// guard lift: BOTH riders keep the max_rows=0 rectangle (the honest
+    /// keep — floors alone never suppress them; every kill posture lands
+    /// here), the MULTIBUILD rider stays curveless, and the GROUPED rider
+    /// decides by its OWN seated curve at the flipped defaults (the lift
+    /// lives entirely in the decide-listed curve; PGRUST_M5_COST_ROUTE=
+    /// shadow is the standing routing kill, MBSEAT/MBSHARED=0 un-curve
+    /// the class — OnceLock env, so only the default posture is
+    /// assertable in-process; the kill postures are e2e restart legs).
     #[test]
     fn hjrider_unwire_posture() {
         assert!(!hjrider_curve_enabled(), "default must be UNWIRED");
         for class in [CoverClass::CbHashJoinMultiBuild, CoverClass::CbHashJoinGroupedAgg] {
             let g = class_guard(class);
-            assert_eq!(g.max_rows, 0.0, "{class:?} must be guarded off at every size");
-            assert!(cover_class_curve(class).is_none(), "{class:?} must be curveless");
+            assert_eq!(g.max_rows, 0.0, "{class:?} rectangle must stay guarded off");
         }
+        assert!(cover_class_curve(CoverClass::CbHashJoinMultiBuild).is_none());
+        assert_eq!(
+            cover_class_curve(CoverClass::CbHashJoinGroupedAgg),
+            Some(costsize::runtime_model::RuntimeClass::CbHashJoinGroupedAgg),
+            "the grouped rider lifts through its own seated curve"
+        );
         // The non-rider hashjoin class keeps its curve and rectangle
         // (post-S1 band collapse: dop-conditioned, ceiling at the fitted
         // dop16 crossover — see the class_guard provenance comment).
