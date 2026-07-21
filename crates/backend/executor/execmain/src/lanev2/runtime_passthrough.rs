@@ -884,6 +884,56 @@ fn funnel_leader_mode() -> bool {
     })
 }
 
+/// FLOORGUARD gate 3 predicate — the EMIT-FRACTION band, in WHOLE-PLAN units.
+///
+/// UNIT CONTRACT (pinned by the unit tests below): `plan_rows` must be the
+/// planner's whole-plan post-qual output estimate and `reltuples` the full
+/// table's analyzed tuple count, so the ratio is the TRUE emit fraction —
+/// the unit the GL-FUNNEL ladder banked the band in (GL-1 measured
+/// emitted/scanned on whole serial-shaped plans; the GL-5 knee sweep's
+/// selectivity axis is the same unit) and the unit operators tune
+/// `PGRUST_RUNTIME_ROW_FUNNEL_EMIT_MAX_PCT` in.
+///
+/// A PARALLEL FRAGMENT's `plan_rows` is NOT in that unit: the planner
+/// divides a partial path's row estimate by `get_parallel_divisor(workers)`
+/// (workers plus the leader's damped contribution) at costing time, so a
+/// fragment handed here would price `true_fraction / divisor` against the
+/// full `reltuples` — a 33%-emit qual read as 8.3% at 4 planned workers
+/// (divisor 4.0), 10.75% at 3 (3.1), 13.9% at 2 (2.4): the admission
+/// enabler of the worker-side duplication bug. The `Plan` node does not
+/// carry `parallel_workers`, so the divisor is not derivable from the
+/// fragment and exact un-division is impossible; the scale-consistent form
+/// is therefore to REFUSE per-participant estimates outright
+/// (`parallel_aware`, fail-closed — categorical, even at the band-disabling
+/// 100 setting) and compare only whole-plan estimates. For the one node
+/// shape this gate ever admits (a bare heap `SeqScan` top node),
+/// `parallel_aware` is exactly the divided-estimate marker: the planner
+/// builds partial seqscan paths parallel-aware, and a serial seqscan path
+/// is never divided.
+///
+/// Also fail-closed on missing stats (never-analyzed `reltuples <= 0`) and
+/// on a non-positive estimate: an unproven fraction refuses to the serial
+/// loop.
+fn floorguard_emit_band_admits(
+    parallel_aware: bool,
+    plan_rows: f64,
+    reltuples: f64,
+    emit_max_pct: f64,
+) -> bool {
+    if parallel_aware {
+        // Per-participant scale — never comparable against full reltuples;
+        // refuse before any ratio forms (and regardless of the knob).
+        return false;
+    }
+    if emit_max_pct >= 100.0 {
+        return true;
+    }
+    if reltuples <= 0.0 || plan_rows <= 0.0 {
+        return false;
+    }
+    plan_rows / reltuples <= emit_max_pct / 100.0
+}
+
 /// World-B gated hook (Stage 3): when the row funnel is armed (default ON
 /// since the GL-FUNNEL-4 flip; `PGRUST_RUNTIME_ROW_FUNNEL=0` kills) and the
 /// plan is a lane-ownable bare passthrough `SeqScan`, run it in parallel through
@@ -991,32 +1041,37 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
         if !::nodeseqscan::seq_scan_is_heap(ss) {
             return Ok(false);
         }
-        // FLOORGUARD gate 3: EMIT-FRACTION band. plan_rows is the planner's
-        // post-qual output estimate; reltuples the table's analyzed tuple
-        // count. Admit only when the estimated emitted/scanned fraction is
+        // FLOORGUARD gate 3: EMIT-FRACTION band, WHOLE-PLAN units only.
+        // Admit only when the estimated TRUE emitted/scanned fraction is
         // inside the proven-win band (default 10% — GL-1's recipe: proven
         // region <=0.4%, GL-5 knee sweep prices the boundary;
         // PGRUST_RUNTIME_ROW_FUNNEL_EMIT_MAX_PCT overrides, 100 disables).
-        // FAIL-CLOSED on missing stats (never-analyzed reltuples <= 0):
-        // an unproven fraction refuses to the serial loop.
+        // `floorguard_emit_band_admits` (unit-pinned above) owns the scale
+        // semantics: a parallel FRAGMENT's plan_rows is the planner's
+        // per-participant (divisor-divided) estimate — never comparable
+        // against full reltuples — so parallel_aware refuses categorically;
+        // the in-parallel-machinery gate above makes fragments unreachable
+        // today, and this keeps the band itself fragment-aware for any
+        // future engagement site handed a partial plan. Fail-closed on
+        // missing stats (never-analyzed reltuples <= 0).
         let emit_max_pct = std::env::var("PGRUST_RUNTIME_ROW_FUNNEL_EMIT_MAX_PCT")
             .ok()
             .and_then(|v| v.trim().parse::<f64>().ok())
             .filter(|p| *p > 0.0)
             .unwrap_or(10.0);
-        if emit_max_pct < 100.0 {
-            let reltuples = ss
-                .ss
-                .ss_currentRelation
-                .as_ref()
-                .map(|rel| rel.rd_rel.reltuples as f64)
-                .unwrap_or(0.0);
-            if reltuples <= 0.0 || plan.plan_rows <= 0.0 {
-                return Ok(false);
-            }
-            if plan.plan_rows / reltuples > emit_max_pct / 100.0 {
-                return Ok(false);
-            }
+        let reltuples = ss
+            .ss
+            .ss_currentRelation
+            .as_ref()
+            .map(|rel| rel.rd_rel.reltuples as f64)
+            .unwrap_or(0.0);
+        if !floorguard_emit_band_admits(
+            plan.parallel_aware,
+            plan.plan_rows,
+            reltuples,
+            emit_max_pct,
+        ) {
+            return Ok(false);
         }
         let Some(map) = SeqScanSource::new(&mut *ss).granule_map(estate)? else {
             return Ok(false);
@@ -1082,5 +1137,75 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
             Ok(true)
         }
         PassthroughEngageOutcome::Fallback => Ok(false),
+    }
+}
+
+/// Unit pins for FLOORGUARD gate 3 (`floorguard_emit_band_admits`): the
+/// knob's unit is the TRUE (whole-plan) emit fraction, and per-participant
+/// fragment estimates never reach the ratio. The fragment cells reproduce
+/// the measured mis-admission enabler exactly: divisors below are
+/// `get_parallel_divisor(w)` = w + max(0, 1 - 0.3*w) (leader participation
+/// damping) for w = 2, 3, 4 planned workers.
+#[cfg(test)]
+mod floorguard_emit_band_tests {
+    use super::floorguard_emit_band_admits;
+
+    const T: f64 = 60_000.0; // analyzed reltuples
+
+    #[test]
+    fn whole_plan_band_boundary() {
+        // Just-under, at, and just-over the default 10% band — the admitted
+        // set at the boundary is unchanged by the scale fix (<= admits).
+        assert!(floorguard_emit_band_admits(false, 5_999.0, T, 10.0));
+        assert!(floorguard_emit_band_admits(false, 6_000.0, T, 10.0));
+        assert!(!floorguard_emit_band_admits(false, 6_001.0, T, 10.0));
+        // A 33%-emit whole-plan estimate is far out of band.
+        assert!(!floorguard_emit_band_admits(false, 19_800.0, T, 10.0));
+    }
+
+    #[test]
+    fn knob_unit_is_true_emit_percent() {
+        // Residual exposure 3: operators tune the knob in TRUE emit percent.
+        // A 33% whole-plan shape admits at 50, refuses at 20 — the knob
+        // brackets the true fraction, not a divided one.
+        let rows_33pct = 0.33 * T;
+        assert!(floorguard_emit_band_admits(false, rows_33pct, T, 50.0));
+        assert!(!floorguard_emit_band_admits(false, rows_33pct, T, 20.0));
+        // 100 disables the band entirely (whole-plan shapes only).
+        assert!(floorguard_emit_band_admits(false, T, T, 100.0));
+    }
+
+    #[test]
+    fn fragment_estimates_refuse_categorically() {
+        // A 33%-TRUE-emit qual as a parallel fragment sees plan_rows divided
+        // by the parallel divisor. The dop4 cell is the RED WITNESS: its
+        // mis-scaled ratio (8.25%) sits INSIDE the 10% band — the pre-fix
+        // expression `plan_rows / reltuples <= 0.10` admitted it.
+        let whole = 0.33 * T; // 19_800 true emitted rows
+        let dop4 = whole / 4.0; // divisor 4.0 -> apparent  8.25%
+        let dop3 = whole / 3.1; // divisor 3.1 -> apparent 10.65%
+        let dop2 = whole / 2.4; // divisor 2.4 -> apparent 13.75%
+        assert!(dop4 / T <= 0.10, "red-witness cell must sit inside the band mis-scaled");
+        assert!(!floorguard_emit_band_admits(true, dop4, T, 10.0));
+        assert!(!floorguard_emit_band_admits(true, dop3, T, 10.0));
+        assert!(!floorguard_emit_band_admits(true, dop2, T, 10.0));
+        // Even a fragment whose TRUE fraction is under the band refuses:
+        // the divisor is not recoverable from the Plan node, so no exact
+        // true fraction exists to admit on — fail-closed to the serial loop.
+        let under_whole = 0.05 * T;
+        assert!(!floorguard_emit_band_admits(true, under_whole / 4.0, T, 10.0));
+        // Categorical: the band-disabling knob setting does not re-admit
+        // fragments.
+        assert!(!floorguard_emit_band_admits(true, dop4, T, 100.0));
+    }
+
+    #[test]
+    fn missing_stats_fail_closed() {
+        // Never-analyzed (reltuples -1 / 0) and non-positive estimates refuse.
+        assert!(!floorguard_emit_band_admits(false, 100.0, -1.0, 10.0));
+        assert!(!floorguard_emit_band_admits(false, 100.0, 0.0, 10.0));
+        assert!(!floorguard_emit_band_admits(false, 0.0, T, 10.0));
+        // Band disabled skips the stats check (pre-fix behavior, preserved).
+        assert!(floorguard_emit_band_admits(false, 100.0, -1.0, 100.0));
     }
 }
