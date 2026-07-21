@@ -337,7 +337,7 @@ env	crates/backend/executor/nodeagg/src/codedgroup.rs	3
 env	crates/backend/executor/nodeagg/src/compact.rs	4	DST-REVIEW(night/arena-strings): +1 = the inc-3 direct-text arm knob (PGRUST_LANE_V2_TEXT_DIRECT read in text_direct_enabled; letter GL-ARENASTR-1 flips it DEFAULT ON, kill =0|off) — same process-constant lane-knob class (env read once, OnceLock-cached); knobs-registry routing rides the chartered SE migration
 env	crates/backend/executor/nodeagg/src/distinctset.rs	2
 env	crates/backend/executor/nodeagg/src/hashgrouped.rs	4
-env	crates/backend/executor/nodeagg/src/lib.rs	3
+env	crates/backend/executor/nodeagg/src/lib.rs	4	DST-REVIEW(night/subquery-admission): SE-GROUPONLY lane knob (PGRUST_LANE_V2_GROUPONLY, default OFF) — the pre-existing lane-executor knob pattern (env read + OnceLock cache); routing onto the knobs registry chartered to the DST program with the rest of the lane knob family
 env	crates/backend/executor/nodeagg/src/merge.rs	4
 env	crates/backend/executor/nodeagg/src/pardistinct.rs	4
 env	crates/backend/executor/nodeagg/src/sink.rs	6	DST-REVIEW(night/tier2-agg-cars): +1 = the SE-T2AGG CAR B executor half (PGRUST_LANE_V2_AGG_STRMINMAX read in sink_strminmax_enabled — the VarlenaMinMax resolve-combines/emit-plan vocabulary; same spelling as the planner probe, knob-coherence law; DEFAULT OFF, ON iff 1|on) — same process-constant lane-knob class; knobs-registry routing rides the chartered SE migration +DST-REVIEW(night/arena-strings): +1 = the inc-1 flush-steal knob (PGRUST_SINK_FLUSH_STEAL read in sink_flush_steal_enabled; DEFAULT OFF, ON iff 1|on — letter GL-ARENASTR-1 keeps it gated) — same process-constant lane-knob class (env read once, OnceLock-cached); knobs-registry routing rides the chartered SE migration
@@ -509,7 +509,7 @@ once	crates/backend/executor/nodeagg/src/codedgroup.rs	3
 once	crates/backend/executor/nodeagg/src/compact.rs	4	DST-REVIEW(night/arena-strings): +1 = the inc-3 direct-text arm knob (PGRUST_LANE_V2_TEXT_DIRECT read in text_direct_enabled; letter GL-ARENASTR-1 flips it DEFAULT ON, kill =0|off) — same process-constant lane-knob class (env read once, OnceLock-cached); knobs-registry routing rides the chartered SE migration
 once	crates/backend/executor/nodeagg/src/distinctset.rs	2
 once	crates/backend/executor/nodeagg/src/hashgrouped.rs	4
-once	crates/backend/executor/nodeagg/src/lib.rs	3
+once	crates/backend/executor/nodeagg/src/lib.rs	4	DST-REVIEW(night/subquery-admission): SE-GROUPONLY lane knob (PGRUST_LANE_V2_GROUPONLY, default OFF) — the pre-existing lane-executor knob pattern (env read + OnceLock cache); routing onto the knobs registry chartered to the DST program with the rest of the lane knob family
 once	crates/backend/executor/nodeagg/src/merge.rs	4
 once	crates/backend/executor/nodeagg/src/pardistinct.rs	4
 once	crates/backend/executor/nodeagg/src/sink.rs	6	DST-REVIEW(night/tier2-agg-cars): +1 = the SE-T2AGG CAR B executor half (PGRUST_LANE_V2_AGG_STRMINMAX read in sink_strminmax_enabled — the VarlenaMinMax resolve-combines/emit-plan vocabulary; same spelling as the planner probe, knob-coherence law; DEFAULT OFF, ON iff 1|on) — same process-constant lane-knob class; knobs-registry routing rides the chartered SE migration +DST-REVIEW(night/arena-strings): +1 = the inc-1 flush-steal knob (PGRUST_SINK_FLUSH_STEAL read in sink_flush_steal_enabled; DEFAULT OFF, ON iff 1|on — letter GL-ARENASTR-1 keeps it gated) — same process-constant lane-knob class (env read once, OnceLock-cached); knobs-registry routing rides the chartered SE migration
@@ -647,7 +647,7 @@ rawsync	crates/backend/executor/nodeagg/src/codedgroup.rs	3
 rawsync	crates/backend/executor/nodeagg/src/compact.rs	4	DST-REVIEW(night/arena-strings): +1 = the inc-3 direct-text arm knob (PGRUST_LANE_V2_TEXT_DIRECT read in text_direct_enabled; letter GL-ARENASTR-1 flips it DEFAULT ON, kill =0|off) — same process-constant lane-knob class (env read once, OnceLock-cached); knobs-registry routing rides the chartered SE migration
 rawsync	crates/backend/executor/nodeagg/src/distinctset.rs	2
 rawsync	crates/backend/executor/nodeagg/src/hashgrouped.rs	4
-rawsync	crates/backend/executor/nodeagg/src/lib.rs	3
+rawsync	crates/backend/executor/nodeagg/src/lib.rs	4	DST-REVIEW(night/subquery-admission): SE-GROUPONLY lane knob (PGRUST_LANE_V2_GROUPONLY, default OFF) — the pre-existing lane-executor knob pattern (env read + OnceLock cache); routing onto the knobs registry chartered to the DST program with the rest of the lane knob family
 rawsync	crates/backend/executor/nodeagg/src/merge.rs	5
 rawsync	crates/backend/executor/nodeagg/src/pardistinct.rs	5
 rawsync	crates/backend/executor/nodeagg/src/sink.rs	6	DST-REVIEW(night/tier2-agg-cars): +1 = the SE-T2AGG CAR B executor half (PGRUST_LANE_V2_AGG_STRMINMAX read in sink_strminmax_enabled — the VarlenaMinMax resolve-combines/emit-plan vocabulary; same spelling as the planner probe, knob-coherence law; DEFAULT OFF, ON iff 1|on) — same process-constant lane-knob class; knobs-registry routing rides the chartered SE migration +DST-REVIEW(night/arena-strings): +1 = the inc-1 flush-steal knob (PGRUST_SINK_FLUSH_STEAL read in sink_flush_steal_enabled; DEFAULT OFF, ON iff 1|on — letter GL-ARENASTR-1 keeps it gated) — same process-constant lane-knob class (env read once, OnceLock-cached); knobs-registry routing rides the chartered SE migration
