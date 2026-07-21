@@ -36,7 +36,8 @@
 //!
 //! Arming (all four required; absence of any = byte-identical classic path):
 //!   PGRUST_RUNTIME=1                       (pool kill switch, M0)
-//!   PGRUST_RUNTIME_BITMAP=1                (this arm's ENABLE, default off)
+//!   PGRUST_RUNTIME_BITMAP not 0/off        (this arm's KILL switch; sibling
+//!                                           layering since GL-BITMAP-1)
 //!   SET pgrust.runtime_bitmap_pool = <dop> (arming, runtime_pool.rs)
 //!   pgrust.lane_executor on                (lane master)
 //!
