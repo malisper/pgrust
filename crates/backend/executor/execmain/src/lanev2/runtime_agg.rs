@@ -1391,9 +1391,9 @@ impl AggSink {
             for r in &l.runs {
                 rows += (r.starts[b + 1] - r.starts[b]) as usize;
                 if canon {
-                    content += (r.key_offs[r.starts[b + 1] as usize]
-                        - r.key_offs[r.starts[b] as usize])
-                        as usize;
+                    // bucket_key_bytes dispatches the contiguous/stolen
+                    // key-store law (arena-strings inc-1).
+                    content += r.bucket_key_bytes(b);
                 }
             }
             if let (Some(t), Some(p)) = (&l.table, &l.part) {

@@ -219,6 +219,24 @@ pub fn sink_combine16_enabled() -> bool {
     })
 }
 
+/// `PGRUST_SINK_FLUSH_STEAL=1` opt-in (default OFF — arena-strings inc-1,
+/// scratchpad/night/arena-string-tables-design.md §4.3/§4.6): the canonical
+/// flush STEALS the accept-time store-once byte store (`canon_store`) into
+/// the run instead of permute-copying every key image bucket-major — the
+/// q34-profile flush-copy bucket. Slots stay bucket-major (starts, states,
+/// hashes, gid words are permuted exactly as before — u64 traffic only);
+/// key bytes stay arrival-ordered with per-slot (off, end) into the stolen
+/// store (`SinkRun::key_ends`, read via [`SinkRun::key_slice`]). Byte-
+/// identical results by construction: same rows, same slots, same bytes —
+/// only WHERE the bytes live differs, and the spill record (self-describing
+/// per-row `key_len`) serializes identically from either law.
+pub fn sink_flush_steal_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_SINK_FLUSH_STEAL").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
 // ---------------------------------------------------------------------------
 // SinkRun — the flush wire format.
 // ---------------------------------------------------------------------------
@@ -244,13 +262,25 @@ pub struct SinkRun {
     /// The out-of-band NULL group's state block (word modes; canonical
     /// bytes-mode shapes are non-nullable — never a NULL group).
     pub null_states: Option<Vec<u64>>,
-    /// Bytes mode: `nrows + 1` offsets into `key_bytes`, bucket-major and
-    /// contiguous (row i's canonical key = `key_bytes[key_offs[i]..
-    /// key_offs[i+1]]`). Empty in word modes.
+    /// Bytes mode: `nrows + 1` offsets into `key_bytes`. CONTIGUOUS law
+    /// (`key_ends` empty): bucket-major and monotone — row i's canonical
+    /// key = `key_bytes[key_offs[i]..key_offs[i+1]]`. STOLEN law
+    /// (`key_ends` non-empty, arena-strings inc-1): slot i's key =
+    /// `key_bytes[key_offs[i]..key_ends[i]]` — offsets point into the
+    /// ARRIVAL-ordered stolen store and are NOT monotone in slot order
+    /// (the final entry stays `key_bytes.len()` so `nrows` holds). ALWAYS
+    /// read through [`SinkRun::key_slice`]. Empty in word modes.
     pub key_offs: Vec<u32>,
-    /// Bytes mode: canonical key bytes, COPIED at flush (the table reset
-    /// frees its arena; the intern table is scan-lifetime but the run must
-    /// stay self-contained — the groundwork's copy discipline).
+    /// Bytes mode, STOLEN law only: slot i's key END offset (parallel to
+    /// `key_offs[..n]`). Empty = the contiguous law. The spill record is
+    /// UNAFFECTED either way (self-describing per-row `key_len`; the
+    /// serializer reads through `key_slice`).
+    pub key_ends: Vec<u32>,
+    /// Bytes mode: canonical key bytes — copied bucket-major at flush
+    /// (contiguous law), or the table's canonical store STOLEN whole
+    /// (arena-strings inc-1: kills the per-flush byte permute-copy; the
+    /// run must stay self-contained either way — the reset frees nothing
+    /// the run still references).
     pub key_bytes: Vec<u8>,
     /// Bytes mode: row i's [`sink_hash_bytes`] over its canonical bytes,
     /// bucket-major (parallel to `key_offs` slots). Computed once at flush
@@ -289,8 +319,37 @@ impl SinkRun {
             + self.states.capacity() * 8
             + self.null_states.as_ref().map_or(0, |b| b.capacity() * 8)
             + self.key_offs.capacity() * 4
+            + self.key_ends.capacity() * 4
             + self.key_bytes.capacity()
             + self.hashes.capacity() * 8
+    }
+
+    /// Bytes mode: slot `i`'s canonical key bytes — THE read path for
+    /// `key_offs`/`key_bytes` (dispatches the contiguous vs stolen law;
+    /// see the field docs).
+    #[inline(always)]
+    pub fn key_slice(&self, i: usize) -> &[u8] {
+        let s = self.key_offs[i] as usize;
+        let e = if self.key_ends.is_empty() {
+            self.key_offs[i + 1] as usize
+        } else {
+            self.key_ends[i] as usize
+        };
+        &self.key_bytes[s..e]
+    }
+
+    /// Bytes mode: total canonical key bytes of bucket `b`'s rows (the
+    /// combine's arena pre-reserve hint). O(1) under the contiguous law,
+    /// O(rows-in-bucket) under the stolen law.
+    #[inline]
+    pub fn bucket_key_bytes(&self, b: usize) -> usize {
+        let lo = self.starts[b] as usize;
+        let hi = self.starts[b + 1] as usize;
+        if self.key_ends.is_empty() {
+            (self.key_offs[hi] - self.key_offs[lo]) as usize
+        } else {
+            (lo..hi).map(|i| (self.key_ends[i] - self.key_offs[i]) as usize).sum()
+        }
     }
 }
 
@@ -386,6 +445,7 @@ pub fn sink_flush_table(t: &mut LaneAggTable) -> SinkRun {
     t.reset();
     SinkRun {
         key_words,
+        key_ends: Vec::new(),
         state_words,
         starts,
         keys,
@@ -494,6 +554,7 @@ pub fn sink_run_from_bucket_table(b: usize, t: &LaneAggTable) -> SinkRun {
     }
     SinkRun {
         key_words,
+        key_ends: Vec::new(),
         state_words,
         starts,
         keys,
@@ -671,12 +732,17 @@ fn canon_row_bytes_append(
 /// ids stay valid). Bucket-major two-pass counting sort by
 /// [`sink_hash_bytes`] over the canonical bytes.
 fn sink_flush_table_canon(ch: &mut crate::compact::CompactHash) -> SinkRun {
-    sink_flush_table_canon_impl(ch, sink_gid_merge_enabled())
+    sink_flush_table_canon_impl(ch, sink_gid_merge_enabled(), sink_flush_steal_enabled())
 }
 
-/// [`sink_flush_table_canon`] with the GID-word fill decision injected (the
-/// unit tests exercise the GID lane regardless of the process env).
-fn sink_flush_table_canon_impl(ch: &mut crate::compact::CompactHash, gid: bool) -> SinkRun {
+/// [`sink_flush_table_canon`] with the GID-word fill and store-steal
+/// decisions injected (the unit tests exercise both lanes regardless of the
+/// process env).
+fn sink_flush_table_canon_impl(
+    ch: &mut crate::compact::CompactHash,
+    gid: bool,
+    steal: bool,
+) -> SinkRun {
     let spk_t0 = crate::spankey::spankey_t0();
     // The batch tails already hashed every row's canonical image
     // (`compact_extend_canon_hashes` — accept-time, parallel); the extend
@@ -710,6 +776,13 @@ fn sink_flush_table_canon_impl(ch: &mut crate::compact::CompactHash, gid: bool) 
     // before, IDENTICAL bytes by the stored-hash law either way.
     let mut lscratch: Vec<u8> = Vec::new();
     let mut loffs: Vec<u32> = Vec::with_capacity(n + 1);
+    // STEAL (arena-strings inc-1): the store-once law already left every
+    // image materialized arrival-ordered in `canon_store` — take the store
+    // whole and permute OFFSETS into bucket-major slots instead of the
+    // bytes (u32/u64 traffic replaces the whole-key-volume memcpy). Only
+    // the store-once shape qualifies (the non-batched fallback below
+    // rebuilds into a scratch it owns anyway, where a copy is the build).
+    let steal = steal && canon_offs.len() == n + 1;
     let (scratch, scratch_offs): (&[u8], &[u32]) = if canon_offs.len() == n + 1 {
         for i in 0..n {
             let img = &canon_store[canon_offs[i] as usize..canon_offs[i + 1] as usize];
@@ -752,7 +825,8 @@ fn sink_flush_table_canon_impl(ch: &mut crate::compact::CompactHash, gid: bool) 
     let mut cursor: [u32; SINK_NBUCKETS] = core::array::from_fn(|b| starts[b]);
     let mut bcursor = bstart;
     let mut key_offs: Vec<u32> = vec![0; n + 1];
-    let mut key_bytes: Vec<u8> = vec![0; total_bytes];
+    let mut key_ends: Vec<u32> = if steal { vec![0; n] } else { Vec::new() };
+    let mut key_bytes: Vec<u8> = if steal { Vec::new() } else { vec![0; total_bytes] };
     let mut states: Vec<u64> = vec![0; n * state_words];
     let mut run_hashes: Vec<u64> = vec![0; n];
     // GID-merge car: carry each row's PACKED key words (per-worker intern
@@ -761,15 +835,21 @@ fn sink_flush_table_canon_impl(ch: &mut crate::compact::CompactHash, gid: bool) 
     // canonical bytes.
     let mut gid_words: Vec<u64> = if gid { vec![0; n * 2] } else { Vec::new() };
     for i in 0..n {
-        let img =
-            &scratch[scratch_offs[i] as usize..scratch_offs[i + 1] as usize];
         let b = bucket_of(hashes[i]);
         let slot = cursor[b] as usize;
         cursor[b] += 1;
-        let off = bcursor[b];
-        bcursor[b] += img.len();
-        key_offs[slot] = off as u32;
-        key_bytes[off..off + img.len()].copy_from_slice(img);
+        if steal {
+            // STOLEN law: the slot points at the row's arrival-order image
+            // in the (about-to-be-stolen) store — no byte copy.
+            key_offs[slot] = scratch_offs[i];
+            key_ends[slot] = scratch_offs[i + 1];
+        } else {
+            let img = &scratch[scratch_offs[i] as usize..scratch_offs[i + 1] as usize];
+            let off = bcursor[b];
+            bcursor[b] += img.len();
+            key_offs[slot] = off as u32;
+            key_bytes[off..off + img.len()].copy_from_slice(img);
+        }
         run_hashes[slot] = hashes[i];
         if gid {
             let w = mk_words_of(table, shape, i);
@@ -787,10 +867,18 @@ fn sink_flush_table_canon_impl(ch: &mut crate::compact::CompactHash, gid: bool) 
         }
     }
     key_offs[n] = total_bytes as u32;
-    // Offsets are consistent per slot: rows within a bucket fill both the
-    // slot range and the byte range in the same order, and buckets are laid
-    // out contiguously — slot s's key ends exactly where slot s+1 begins.
-    debug_assert!(key_offs.windows(2).all(|w| w[0] <= w[1]));
+    if steal {
+        // Take the store whole; the run is self-contained exactly as under
+        // the copy law (the store restarts empty for the next epoch, below).
+        key_bytes = core::mem::take(canon_store);
+        debug_assert_eq!(key_bytes.len(), total_bytes);
+    } else {
+        // Offsets are consistent per slot: rows within a bucket fill both
+        // the slot range and the byte range in the same order, and buckets
+        // are laid out contiguously — slot s's key ends exactly where slot
+        // s+1 begins.
+        debug_assert!(key_offs.windows(2).all(|w| w[0] <= w[1]));
+    }
     table.reset();
     // The epoch's rows are gone — the stored hashes AND the store-once
     // canonical images restart with them.
@@ -805,6 +893,7 @@ fn sink_flush_table_canon_impl(ch: &mut crate::compact::CompactHash, gid: bool) 
     }
     SinkRun {
         key_words: 0,
+        key_ends,
         state_words,
         starts,
         keys: gid_words,
@@ -1101,10 +1190,11 @@ pub fn sink_run_spill_bucket(run: &SinkRun, b: usize, out: &mut Vec<u8>) {
     let hi = run.starts[b + 1] as usize;
     if run.key_words == 0 {
         for i in lo..hi {
-            let ks = run.key_offs[i] as usize;
-            let ke = run.key_offs[i + 1] as usize;
             let states = &run.states[i * run.state_words..(i + 1) * run.state_words];
-            sink_canon_spill_append(&run.key_bytes[ks..ke], run.hashes[i], states, out);
+            // key_slice dispatches the contiguous/stolen law; the on-disk
+            // record is self-describing (per-row key_len) and therefore
+            // byte-identical from either representation.
+            sink_canon_spill_append(run.key_slice(i), run.hashes[i], states, out);
         }
         return;
     }
@@ -1225,6 +1315,7 @@ pub fn sink_run_from_spill_bytes(
     }
     Ok(SinkRun {
         key_words: 0,
+        key_ends: Vec::new(),
         state_words,
         starts,
         keys: Vec::new(),
@@ -1346,6 +1437,7 @@ pub fn sink_run_from_spill(
     // (canonical text) shapes — the spill arm's admission is word-keyed.
     Ok(SinkRun {
         key_words,
+        key_ends: Vec::new(),
         state_words,
         starts,
         keys,
@@ -1447,6 +1539,7 @@ pub fn sink_null_only_run(key_words: usize, state_words: usize, block: Vec<u64>)
     debug_assert_eq!(block.len(), state_words);
     SinkRun {
         key_words,
+        key_ends: Vec::new(),
         state_words,
         starts: vec![0; SINK_NBUCKETS + 1],
         keys: Vec::new(),
@@ -2089,8 +2182,7 @@ fn sink_combine_bucket_impl(
         for r in l.all_runs() {
             total += (r.starts[b + 1] - r.starts[b]) as usize;
             if key_words == 0 {
-                key_bytes += (r.key_offs[r.starts[b + 1] as usize]
-                    - r.key_offs[r.starts[b] as usize]) as usize;
+                key_bytes += r.bucket_key_bytes(b);
             }
         }
         if let Some(rem) = &l.remainder {
@@ -2226,16 +2318,11 @@ fn sink_combine_bucket_impl(
                             }
                             continue;
                         }
-                        let ks = r.key_offs[i] as usize;
-                        let ke = r.key_offs[i + 1] as usize;
-                        let dst =
-                            absorb_bytes(&mut t, &r.key_bytes[ks..ke], r.hashes[i], src)?;
+                        let dst = absorb_bytes(&mut t, r.key_slice(i), r.hashes[i], src)?;
                         gmap.insert(w, dst);
                         continue;
                     }
-                    let ks = r.key_offs[i] as usize;
-                    let ke = r.key_offs[i + 1] as usize;
-                    absorb_bytes(&mut t, &r.key_bytes[ks..ke], r.hashes[i], src)?;
+                    absorb_bytes(&mut t, r.key_slice(i), r.hashes[i], src)?;
                 } else {
                     let w0 = r.keys[i * key_words];
                     let w1 = if key_words == 2 { r.keys[i * key_words + 1] } else { 0 };
@@ -4248,6 +4335,7 @@ impl SharedCountTable {
         }
         Some(SinkRun {
             key_words: 1,
+            key_ends: Vec::new(),
             state_words: 2,
             starts,
             keys,
@@ -4312,6 +4400,7 @@ mod tests {
         }
         SinkRun {
             key_words: 1,
+            key_ends: Vec::new(),
             state_words: 2,
             starts,
             keys,
@@ -5573,6 +5662,21 @@ mod tests {
         }
     }
 
+    /// The 1-comp single-text shape (bump_canon's `k = None` twin — the
+    /// q34-class image is the intern id word alone).
+    fn canon_shape_text_only() -> MkShape {
+        MkShape {
+            comps: vec![crate::compact::MkComp {
+                att: 0,
+                off: 0,
+                kind: MkCompKind::Intern,
+            }],
+            packed_bytes: 4,
+            nullable: false,
+            two_words: false,
+        }
+    }
+
     /// A worker-shaped compact state for the canonical tests: the mk table
     /// (Int128 for the 12-byte image) + the intern table, wrapped the way
     /// `agg_hash_compact_try_arm_mk` builds them.
@@ -5644,6 +5748,68 @@ mod tests {
         assert!(p >= lo && p < lo + buf.arena.len(), "text datum points into the buf arena");
         // SAFETY: the emit wrote a 4B-header varlena at p.
         unsafe { ::datum::VarlenaRef::from_ptr(p as *const u8) }.data().to_vec()
+    }
+
+    /// arena-strings inc-1: the STOLEN key-store law must be observationally
+    /// identical to the contiguous copy law — same slots, same per-slot key
+    /// bytes/hash/states, and a byte-identical spill stream (the record is
+    /// self-describing). Mixed short (≤8 B packed) and long (arena) texts,
+    /// duplicates, both the 2-comp and the 1-comp single-text shapes; the
+    /// store restarts correctly across consecutive steal flushes.
+    #[test]
+    fn canon_flush_steal_matches_copy_law() {
+        let corpus: [(&[u8], i64); 7] = [
+            (b"apple", 1),
+            (b"a-rather-long-canonical-key-way-past-eight", 2),
+            (b"apple", 3),
+            (b"", 4),
+            (b"banana", 5),
+            (b"zz", 6),
+            (b"a-rather-long-canonical-key-way-past-eight", 7),
+        ];
+        for single in [false, true] {
+            let shape = if single { canon_shape_text_only() } else { canon_shape_int8_text() };
+            let build = |steal: bool| -> (SinkRun, SinkRun) {
+                let mut w = canon_worker(shape.clone());
+                for (i, (text, c)) in corpus.iter().enumerate() {
+                    let k = (!single).then_some((i % 3) as i64);
+                    bump_canon(&mut w, k, text, *c);
+                }
+                let first = sink_flush_table_canon_impl(&mut w, false, steal);
+                // Epoch 2 re-feeds a suffix — the store must have restarted.
+                for (text, c) in corpus.iter().skip(3) {
+                    let k = (!single).then_some(9i64);
+                    bump_canon(&mut w, k, text, *c);
+                }
+                (first, sink_flush_table_canon_impl(&mut w, false, steal))
+            };
+            let (copy1, copy2) = build(false);
+            let (steal1, steal2) = build(true);
+            for (a, b) in [(&copy1, &steal1), (&copy2, &steal2)] {
+                assert_eq!(a.key_words, 0);
+                assert!(a.key_ends.is_empty(), "copy law carries no ends");
+                assert!(!b.key_ends.is_empty(), "steal law carries per-slot ends");
+                assert_eq!(a.starts, b.starts);
+                assert_eq!(a.hashes, b.hashes);
+                assert_eq!(a.states, b.states);
+                assert_eq!(a.nrows(), b.nrows());
+                for i in 0..a.nrows() {
+                    assert_eq!(a.key_slice(i), b.key_slice(i), "slot {i} key bytes diverge");
+                }
+                // The spill stream is byte-identical from either law.
+                for bkt in 0..SINK_NBUCKETS {
+                    let (mut sa, mut sb) = (Vec::new(), Vec::new());
+                    sink_run_spill_bucket(a, bkt, &mut sa);
+                    sink_run_spill_bucket(b, bkt, &mut sb);
+                    assert_eq!(sa, sb, "spill records diverge in bucket {bkt}");
+                }
+                // The combine's arena hint law holds on both representations.
+                let total: usize = (0..SINK_NBUCKETS).map(|bkt| a.bucket_key_bytes(bkt)).sum();
+                let total_b: usize = (0..SINK_NBUCKETS).map(|bkt| b.bucket_key_bytes(bkt)).sum();
+                assert_eq!(total, total_b);
+                assert_eq!(total, b.key_bytes.len(), "stolen store holds exactly the images");
+            }
+        }
     }
 
     #[test]
@@ -5978,11 +6144,9 @@ mod tests {
         let run = sink_flush_table_canon(&mut w);
         assert_eq!(run.hashes.len(), run.nrows());
         for i in 0..run.nrows() {
-            let ks = run.key_offs[i] as usize;
-            let ke = run.key_offs[i + 1] as usize;
             assert_eq!(
                 run.hashes[i],
-                sink_hash_bytes(&run.key_bytes[ks..ke]),
+                sink_hash_bytes(run.key_slice(i)),
                 "run slot {i} carries its own canonical hash"
             );
         }
@@ -7249,9 +7413,9 @@ mod tests {
         let mut w = canon_worker(canon_shape_int8_text());
         bump_canon(&mut w, Some(1), b"first-gen-a", 1);
         bump_canon(&mut w, Some(2), b"first-gen-b", 2);
-        let run1 = sink_flush_table_canon_impl(&mut w, true);
+        let run1 = sink_flush_table_canon_impl(&mut w, true, false);
         bump_canon(&mut w, Some(1), b"first-gen-a", 10);
-        let run2 = sink_flush_table_canon_impl(&mut w, true);
+        let run2 = sink_flush_table_canon_impl(&mut w, true, false);
         // Simulate the wide-vocabulary intern reset (agg_sink_flush_now's
         // reset arm): ids restart, the generation bumps.
         w.intern.as_mut().unwrap().reset();
@@ -7259,7 +7423,7 @@ mod tests {
         // Post-reset: "second-gen-a" gets intern id 0 — the SAME packed
         // words as key (1, "first-gen-a") pre-reset.
         bump_canon(&mut w, Some(1), b"second-gen-a", 100);
-        let run3 = sink_flush_table_canon_impl(&mut w, true);
+        let run3 = sink_flush_table_canon_impl(&mut w, true, false);
         assert_eq!(run3.gid_gen, 1, "post-reset runs carry the new generation");
         bump_canon(&mut w, Some(1), b"second-gen-a", 1000);
         bump_canon(&mut w, Some(2), b"first-gen-b", 3);
@@ -7317,6 +7481,7 @@ mod tests {
                 states: r.states.clone(),
                 null_states: None,
                 key_offs: r.key_offs.clone(),
+                key_ends: r.key_ends.clone(),
                 key_bytes: r.key_bytes.clone(),
                 hashes: r.hashes.clone(),
                 gid_gen: 0,
