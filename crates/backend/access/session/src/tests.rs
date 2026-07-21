@@ -542,7 +542,13 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      alignment log. Whole module is cfg(pgrust_sim) at the mod decl
     //      — ABSENT from product codegen (same class as 48); source census
     //      sees the text. No session identity.
-    assert_eq!(count_tree(crates), 518, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // night/fix-tz-abbrevs delta (517 = 518 - 1): REMOVED
+    //   timezone/pgtz/src/lib.rs TIMEZONE_CACHE — the session-arena
+    //   pg_tzset cache was the pg_timezone_abbrevs use-after-free
+    //   (localtime/clock.rs:32 panic): `&'static PgTz` escapes the thread
+    //   via the process-shared DynamicZoneAbbrev table, so the cache is now
+    //   a process-permanent static (C dynahash parity), not TLS.
+    assert_eq!(count_tree(crates), 517, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
