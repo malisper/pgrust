@@ -558,7 +558,21 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //   (localtime/clock.rs:32 panic): `&'static PgTz` escapes the thread
     //   via the process-shared DynamicZoneAbbrev table, so the cache is now
     //   a process-permanent static (C dynahash parity), not TLS.
-    assert_eq!(count_tree(crates), 518, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // m2-inc2 fold delta (520 = 518 + 2) — PGPROC-leasing pool workers,
+    // both deliberately NON-SESSION TLS:
+    //   59. access/transam/parallel/src/standing.rs — ON_POOL_SERVE: a
+    //      bool marking "this thread is inside a pool-db serve_ticket"
+    //      (arm drivers read it to disable sticky retention on pool
+    //      threads). Engagement-scoped RAII flag on the executor THREAD;
+    //      no session identity, never captured/restored by an envelope
+    //      (the binder guard it influences owns the session state).
+    //   60. postmaster/launch_backend/src/lib.rs — POOL_IDENT: the pool
+    //      thread's leased-identity state (None/Ready(fence-epoch)/
+    //      Poisoned), thread-lifetime bring-up bookkeeping exactly like a
+    //      gang thread's implicit state; identity is PGPROC/proc-number
+    //      (shared memory), not session state — the per-engagement session
+    //      view is bound/unbound by the query-task binder.
+    assert_eq!(count_tree(crates), 520, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
