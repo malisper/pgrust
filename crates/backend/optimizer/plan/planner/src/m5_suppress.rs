@@ -833,7 +833,7 @@ fn k2_heapfeed_live() -> bool {
 /// this many times its rows keeps the hash election safely dominant.
 const JHEAP_NL_MARGIN: f64 = 4.0;
 
-/// GL-COST-2 x tpch-flips merge carve: the conversion-flip knob paths
+/// GL-COST-2 x conversion-flips-train merge carve: the flipped knob paths
 /// (aggjoinnum / decoroot-grouped / joinfilters cbstore-int) borrowed the
 /// RIDER guards as their provisional floor; the GL-COST-2 unwire zeroed
 /// those rider rectangles on the riders' OWN witnessed grids (pure-
