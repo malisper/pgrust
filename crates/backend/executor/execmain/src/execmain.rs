@@ -437,28 +437,44 @@ pub(crate) fn executor_start_seam(h: QueryDescHandle, eflags: i32) -> PgResult<(
 }
 
 // ---------------------------------------------------------------------------
-// M2 inc-3 rung-2 letter addendum — serial-through-pool overhead, arm (a):
-// LEASE-ONLY accounting. MEASUREMENT VEHICLE, default OFF, never a
-// production posture. PGRUST_RUNTIME_SERIAL_LEASE=1 makes the session
-// thread acquire ONE runtime execution permit around each TOP-LEVEL
-// ExecutorRun — the query still executes inline on the session thread; the
-// pool's permit ledger simply accounts it like a worker. Depth guard:
-// nested executor runs (SPI, triggers, RI checks) lease nothing, so
-// re-entry can never self-deadlock on the permit cap. Unarmed cost: one
-// memoized bool load per ExecutorRun, nothing else.
+// SERIAL LEASE — lease-only permit unification (GL-SLEASE-1 flip; born as
+// the M2 inc-3 rung-2 letter addendum's measurement vehicle, adopted per
+// Michael's unification steer: "unify the ledger via lease-only now").
+// DEFAULT ON: the session thread acquires ONE runtime execution permit
+// around each TOP-LEVEL ExecutorRun — the query still executes inline on
+// the session thread; the pool's permit ledger simply accounts it like a
+// worker, so the scheduler sees TOTAL machine load (sessions + pool).
+// `PGRUST_RUNTIME_SERIAL_LEASE=0` restores the unleased posture exactly.
+// Structurally inert without a runtime (`runtime::global()` None — no
+// permit ledger exists to unify; cost = one memoized bool + a TLS depth
+// bump per ExecutorRun). Depth guard: nested executor runs (SPI, triggers,
+// RI checks) lease nothing, so re-entry can never self-deadlock on the
+// permit cap. ENGAGEMENT YIELD: a leader that hands its query to the pool
+// and PARKS (the standing channel wait) must not sit on a permit its own
+// workers need — standing_wait takes `serial_lease_yield_for_engagement`
+// (release for the wait span, re-acquire after). Residual (documented, not
+// wired): the launched-fallback park loops keep the lease across their
+// wait — fallback-only paths, deleted at rung 4; and a serial query that
+// blocks on I/O mid-run holds its permit (session threads are not
+// registered with the §2.8 donation facade).
 // ---------------------------------------------------------------------------
 fn serial_lease_armed() -> bool {
     static ON: pgsync::OnceLock<bool> = pgsync::OnceLock::new();
     *ON.get_or_init(|| {
-        std::env::var("PGRUST_RUNTIME_SERIAL_LEASE").is_ok_and(|v| v.trim() == "1")
+        std::env::var("PGRUST_RUNTIME_SERIAL_LEASE").map_or(true, |v| v.trim() != "0")
     })
 }
 
 thread_local! {
-    /// Top-level-run depth for the lease guard (measurement vehicle;
-    /// deliberately non-session TLS — unwound by construction with the
-    /// executor frames, never carries across queries).
+    /// Top-level-run depth for the lease guard (deliberately non-session
+    /// TLS — unwound by construction with the executor frames, never
+    /// carries across queries).
     static SERIAL_LEASE_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// The runtime whose permit the CURRENT top-level lease HOLDS (None =
+    /// no lease, no runtime, or yielded for an engagement wait). Non-session
+    /// TLS: pure permit bookkeeping, same lifecycle as the depth cell.
+    static SERIAL_LEASE_HELD: std::cell::Cell<Option<&'static std::sync::Arc<runtime::Runtime>>> =
+        const { std::cell::Cell::new(None) };
 }
 
 struct SerialLease {
@@ -479,6 +495,8 @@ impl SerialLease {
             let rt = runtime::global();
             if let Some(rt) = rt {
                 rt.execution_permits().acquire();
+                SERIAL_LEASE_HELD.with(|c| c.set(Some(rt)));
+                crate::lanev2::tick_serial_lease();
             }
             rt
         } else {
@@ -491,9 +509,41 @@ impl SerialLease {
 impl Drop for SerialLease {
     fn drop(&mut self) {
         if let Some(rt) = self.leased {
+            // The yield guard is scoped strictly inside the run, so the
+            // permit is always re-held here.
             rt.execution_permits().release();
+            SERIAL_LEASE_HELD.with(|c| c.set(None));
         }
         SERIAL_LEASE_DEPTH.with(|c| c.set(c.get() - 1));
+    }
+}
+
+/// Engagement yield (see the module comment): release the current
+/// top-level serial-lease permit for a pool-engagement wait span; the drop
+/// re-acquires and restores. No-op when nothing is held (unleased posture,
+/// no runtime, nested run, or an outer yield already active — nesting is
+/// safe by the take()). pub(crate): called by lanev2's standing channel.
+pub(crate) struct SerialLeaseYield {
+    rt: Option<&'static std::sync::Arc<runtime::Runtime>>,
+}
+
+pub(crate) fn serial_lease_yield_for_engagement() -> SerialLeaseYield {
+    let rt = SERIAL_LEASE_HELD.with(|c| c.take());
+    if let Some(rt) = rt {
+        rt.execution_permits().release();
+    }
+    SerialLeaseYield { rt }
+}
+
+impl Drop for SerialLeaseYield {
+    fn drop(&mut self) {
+        if let Some(rt) = self.rt {
+            // Blocks until a permit frees — bounded by the pool's morsel
+            // cadence; the leader resumes inline work only under capacity
+            // (exactly the unification semantics).
+            rt.execution_permits().acquire();
+            SERIAL_LEASE_HELD.with(|c| c.set(Some(rt)));
+        }
     }
 }
 

@@ -863,6 +863,24 @@ pub(super) fn tick_engaged(label: &str, channel: EngageChannel) {
         arm_dump_on_thread_exit();
     }
 }
+/// GL-SLEASE-1 accounting witness: top-level serial ExecutorRuns that took a
+/// pool execution permit (the serial-lease unification, execmain.rs
+/// SerialLease). One tick per leased run — the letter's "the scheduler sees
+/// serial load" witness row; `PGRUST_RUNTIME_SERIAL_LEASE=0` (or no runtime)
+/// must dump 0.
+static SERIAL_LEASES: AtomicU64 = AtomicU64::new(0);
+
+/// Record one taken serial lease (armed-gated like every counter here).
+/// pub(crate): re-exported at the lanev2 root for the execmain seam.
+#[inline]
+pub(crate) fn tick_serial_lease() {
+    if !armed() {
+        return;
+    }
+    SERIAL_LEASES.fetch_add(1, Relaxed);
+    arm_dump_on_thread_exit();
+}
+
 #[allow(clippy::declare_interior_mutable_const)]
 static REFUSED: [[AtomicU64; N_REASONS]; N_CLASSES] =
     [const { [const { AtomicU64::new(0) }; N_REASONS] }; N_CLASSES];
@@ -1250,6 +1268,12 @@ fn dump() {
     out.push_str(&format!(
         "counter\tfused-hash-build-pertuple-other\t{}\n",
         FUSED_HASH_BUILD_PERTUPLE_OTHER.load(Relaxed)
+    ));
+    // GL-SLEASE-1 witness row (zero included — the letter's OFF arms
+    // assert 0, so absent≠zero would ambiguate).
+    out.push_str(&format!(
+        "counter\tserial-lease-acquires\t{}\n",
+        SERIAL_LEASES.load(Relaxed)
     ));
     // M2 inc-3 rung-2 fallback-floor rows (engagement channels per arm;
     // zeros included — the floor reader diffs runs, absent≠zero would

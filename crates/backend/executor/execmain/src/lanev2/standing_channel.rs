@@ -127,6 +127,12 @@ pub(super) fn standing_wait(
     rg: &runtime::RgHandle,
     waiter: &runtime::CompletionWaiter,
 ) -> PgResult<StandingWait> {
+    // GL-SLEASE-1: a leased session leader is about to PARK while pool/gang
+    // workers execute its query — give the lease permit up for the wait
+    // span (its own workers need it; a parked leader holding one steals a
+    // worker-width from every engagement). Re-acquired on every exit path
+    // by the guard's drop. No-op when unleased.
+    let _lease_yield = crate::execmain::serial_lease_yield_for_engagement();
     // M2 inc-2: POOL-DB channel first — the per-RG board the arm attached
     // at submit (publication set the pool-visible active bit; parked pool
     // workers rode the publish wake). Same wait loop, same leader
