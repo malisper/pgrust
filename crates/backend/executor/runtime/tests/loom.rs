@@ -2512,3 +2512,576 @@ fn bound_gate_abort_vs_serve() {
         assert_eq!(rt.execution_permits().available(), 1, "permit balance");
     });
 }
+
+// ---------------------------------------------------------------------------
+// M2 inc-3 rung 1 — the sink arms ride the pool descriptor
+// (scratchpad/night/m2-inc3-scope.md §4 models 1/2/3/5/6; model 4 — close vs
+// late claim without Destroy — lands with rung 5's EngagementGuard, per the
+// scope doc's models-land-with-their-rung law). Dialects, disclosed:
+//
+//   * pool_sealed_* / pool_two_bound_boards_* / pool_blocking_* — REAL
+//     TYPES: they drive the production runtime (submit_pinned_bound + the
+//     serve claim gate + CallerWorker as the loom-usable face of the
+//     production pinned serve drive + the REAL sealed-sink task sets the
+//     agg/plaindistinct arms build) with a TRANSCRIBED leader join
+//     (`MirrorBoard`, 1:1 from parallel::standing's try_claim / DetachGuard
+//     / close_and_await — the parallel crate is not loom-buildable: PGPROC/
+//     latch/procarray machinery outside model reach).
+//   * pool_detach_on_raw_exit_join_terminates — MIRROR of the board protocol
+//     alone (the §3.3(i) DetachGuard-vs-raw-exit ordering question made
+//     mechanical); no runtime.
+//
+// RED battery (house law): each model's doc names its red — the weakened
+// shape and how it fails.
+// ---------------------------------------------------------------------------
+
+use runtime::{sealed_sink_tasksets, SealedParallelSink};
+
+/// The leader-side board protocol, transcribed 1:1 from
+/// parallel::standing::StandingEngagement { try_claim (standing.rs:92),
+/// DetachGuard::drop (:125), close_and_await (:314) } minus the PG latch
+/// set (the leader latch is a second, redundant wake channel for the lanev2
+/// poll loops; the Condvar join modeled here is the one close_and_await
+/// itself parks on).
+struct MirrorBoard {
+    tickets: usize,
+    claimed: AtomicUsize,
+    detached: AtomicUsize,
+    refused: AtomicUsize,
+    closed: AtomicBool,
+    gang: Arc<(Mutex<()>, Condvar)>,
+}
+
+impl MirrorBoard {
+    fn new(tickets: usize) -> Arc<MirrorBoard> {
+        Arc::new(MirrorBoard {
+            tickets,
+            claimed: AtomicUsize::new(0),
+            detached: AtomicUsize::new(0),
+            refused: AtomicUsize::new(0),
+            closed: AtomicBool::new(false),
+            gang: Arc::new((Mutex::new(()), Condvar::new())),
+        })
+    }
+
+    fn wake(&self) {
+        let (m, cv) = &*self.gang;
+        drop(m.lock().unwrap());
+        cv.notify_all();
+    }
+
+    /// standing.rs try_claim: over-claims are returned, and the settling
+    /// decrement carries the same lock-mediated wake as a detach (the
+    /// leader's cv join may have parked on the transient inflated count).
+    fn try_claim(&self) -> Option<usize> {
+        if self.closed.load(Ordering::SeqCst) {
+            return None;
+        }
+        let t = self.claimed.fetch_add(1, Ordering::SeqCst);
+        if t < self.tickets && !self.closed.load(Ordering::SeqCst) {
+            Some(t)
+        } else {
+            self.claimed.fetch_sub(1, Ordering::SeqCst);
+            self.wake();
+            None
+        }
+    }
+
+    /// DetachGuard::drop: bump FIRST, then the lock-mediated notify —
+    /// either the leader sees the new count at its under-lock check, or it
+    /// is already parked when the notify fires.
+    fn detach(&self) {
+        self.detached.fetch_add(1, Ordering::SeqCst);
+        self.wake();
+    }
+
+    /// close_and_await: no new claims, then the detach-count Condvar join.
+    fn close_and_await(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        let (m, cv) = &*self.gang;
+        let mut g = m.lock().unwrap();
+        cv.notify_all();
+        while self.detached.load(Ordering::SeqCst) < self.claimed.load(Ordering::SeqCst) {
+            g = cv.wait(g).unwrap();
+        }
+        drop(g);
+    }
+}
+
+/// Drop-guaranteed detach (the workers' DetachGuard): every exit path out
+/// of a serve — completion, refusal past the claim, unwind — detaches.
+struct MirrorDetach<'a>(&'a MirrorBoard);
+impl Drop for MirrorDetach<'_> {
+    fn drop(&mut self) {
+        self.0.detach();
+    }
+}
+
+/// Instrumented SealedParallelSink over the REAL 3-set plumbing (the agg
+/// arm's ACCEPT → FREEZE → COMBINE sealed pipeline shape).
+struct LoomSealedSink {
+    accepted: AtomicUsize,
+    seals: AtomicUsize,
+    ready: AtomicUsize,
+    combines: AtomicUsize,
+    finalizes: AtomicUsize,
+}
+
+impl LoomSealedSink {
+    fn new() -> Arc<LoomSealedSink> {
+        Arc::new(LoomSealedSink {
+            accepted: AtomicUsize::new(0),
+            seals: AtomicUsize::new(0),
+            ready: AtomicUsize::new(0),
+            combines: AtomicUsize::new(0),
+            finalizes: AtomicUsize::new(0),
+        })
+    }
+}
+
+impl SealedParallelSink for LoomSealedSink {
+    type Local = usize;
+    type Sealed = usize;
+
+    fn fork(&self, _worker: usize) -> usize {
+        0
+    }
+    fn accept_local(&self, local: &mut usize, _worker: usize, range: MorselRange) {
+        let n = (range.end - range.start) as usize;
+        *local += n;
+        self.accepted.fetch_add(n, Ordering::SeqCst);
+    }
+    fn seal(&self, _worker: usize, local: usize) -> usize {
+        self.seals.fetch_add(1, Ordering::SeqCst);
+        local
+    }
+    fn sealed_ready(&self, _sealed: &mut Vec<usize>) {
+        let prev = self.ready.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(prev, 0, "sealed_ready ran twice");
+    }
+    fn partitions(&self) -> u64 {
+        1
+    }
+    fn combine(&self, _part: u64, _sealed: &[usize]) {
+        assert_eq!(self.ready.load(Ordering::SeqCst), 1, "combine before sealed_ready");
+        self.combines.fetch_add(1, Ordering::SeqCst);
+    }
+    fn finalize(&self, sealed: &[usize]) {
+        let prev = self.finalizes.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(prev, 0, "sink finalize ran twice");
+        let total: usize = sealed.iter().sum();
+        assert_eq!(
+            total,
+            self.accepted.load(Ordering::SeqCst),
+            "sealed census lost accepted granules"
+        );
+    }
+}
+
+/// The pool-channel serve over a MirrorBoard: parallel::standing::pool_serve
+/// shape (closed check → claim gate → Drop-guaranteed detach around the
+/// drive), with CallerWorker as the drive face (the B-model disclosure).
+struct PoolBoardPayload {
+    rt: Arc<Runtime>,
+    rg: RgHandle,
+    board: Arc<MirrorBoard>,
+    serves: AtomicUsize,
+}
+
+fn pool_board_serve(payload: &Arc<dyn std::any::Any + Send + Sync>) -> BoundServe {
+    let cell = Arc::clone(payload)
+        .downcast::<loom::sync::Mutex<Option<Arc<PoolBoardPayload>>>>()
+        .expect("model placeholder");
+    let p = cell.lock().unwrap().clone().expect("payload installed pre-race");
+    if p.board.closed.load(Ordering::SeqCst) {
+        return BoundServe::Closed;
+    }
+    let Some(_ticket) = p.board.try_claim() else {
+        return BoundServe::Closed;
+    };
+    let _detach = MirrorDetach(&p.board);
+    let Some(mut cw) = runtime::CallerWorker::enter(&p.rt) else {
+        p.board.refused.fetch_add(1, Ordering::SeqCst);
+        return BoundServe::Refused;
+    };
+    let _ = cw
+        .drive_with_duty(&p.rt, &p.rg, &mut || Ok(()))
+        .expect("model duty never fails");
+    p.serves.fetch_add(1, Ordering::SeqCst);
+    BoundServe::Served
+}
+
+/// Submit the sealed 3-set pipeline bound to a MirrorBoard (the descriptor
+/// rides the submission, the payload cell closes the rg cycle — the
+/// bound_model_submit pattern).
+fn sealed_bound_submit(
+    rt: &Arc<Runtime>,
+    granules: u64,
+    tickets: usize,
+    nslots: usize,
+) -> (Arc<LoomSealedSink>, Arc<PoolBoardPayload>, RgHandle, CompletionWaiter) {
+    let sink = LoomSealedSink::new();
+    let sets = sealed_sink_tasksets(
+        Arc::clone(&sink),
+        Arc::new(SyntheticMorselSource::new(granules).with_c0(1)),
+        nslots,
+        0,
+    );
+    let placeholder = Arc::new(loom::sync::Mutex::new(None::<Arc<PoolBoardPayload>>));
+    let (h, waiter) = rt.submit_pinned_bound(
+        QuerySpec {
+            query_id: 31,
+            tasksets: vec![sets.accept, sets.freeze, sets.combine],
+        },
+        0,
+        BoundDescriptor {
+            serve: pool_board_serve,
+            payload: Arc::clone(&placeholder) as Arc<dyn std::any::Any + Send + Sync>,
+        },
+    );
+    let payload = Arc::new(PoolBoardPayload {
+        rt: Arc::clone(rt),
+        rg: h.clone(),
+        board: MirrorBoard::new(tickets),
+        serves: AtomicUsize::new(0),
+    });
+    *placeholder.lock().unwrap() = Some(Arc::clone(&payload));
+    (sink, payload, h, waiter)
+}
+
+/// §4 model 1 — pool-worker cancel vs sink finalize: the leader's CFI abort
+/// path (abort → drain → close_and_await, wait_engaged's exact order) races
+/// ONE bound serve that may be anywhere in the 3-set sealed pipeline.
+/// Oracles: the RG always reaches an outcome and the leader join always
+/// terminates (deadlock detector); an ABORTED outcome never ran the sink's
+/// COMBINE-set finalize (the last-worker-out SEAL law: a dead generation
+/// never publishes/finalizes the sink tail); sealed_ready/finalize at most
+/// once ever; detached == claimed at the join; permit capacity restored.
+///
+/// RED: drop the drain (abort → close only) ⇒ a serve parked mid-pipeline
+/// on the eventcount never observes teardown — loom deadlock; bump detach
+/// AFTER the close check (guard weakening) ⇒ the join loses the last wake.
+#[test]
+fn pool_sealed_cancel_vs_sink_finalize() {
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(2);
+    b.max_branches = 500_000;
+    b.check(|| {
+        let rt = small_runtime(1, 0);
+        // nslots: nthreads + the model's concurrent external lanes (one
+        // serve + the leader's drain participant).
+        let nslots = rt.nthreads() + 2;
+        let (sink, payload, h, waiter) = sealed_bound_submit(&rt, 2, 1, nslots);
+
+        let rt1 = Arc::clone(&rt);
+        let w1 = waiter.clone();
+        let pool = thread::spawn(move || drive_bound_pool(&rt1, 0, &[w1]));
+
+        // Leader CFI-abort ordering (standing_channel.rs wait_engaged CFI
+        // branch): abort THEN drain (protocol cleanup completes the RG and
+        // releases parked drives) THEN close-and-await.
+        h.abort();
+        let mut cw = runtime::CallerWorker::enter(&rt).expect("drain lane");
+        let _ = cw
+            .drive_with_duty(&rt, &h, &mut || Ok(()))
+            .expect("drain duty never fails");
+        payload.board.close_and_await();
+
+        pool.join().unwrap();
+
+        let outcome = waiter.try_wait().expect("RG reached an outcome");
+        match outcome {
+            RgOutcome::Aborted => {
+                assert_eq!(
+                    sink.finalizes.load(Ordering::SeqCst),
+                    0,
+                    "aborted engagement ran the sink finalize tail"
+                );
+            }
+            RgOutcome::Completed => {
+                assert_eq!(sink.accepted.load(Ordering::SeqCst), 2);
+                assert_eq!(sink.ready.load(Ordering::SeqCst), 1);
+                assert_eq!(sink.combines.load(Ordering::SeqCst), 1);
+                assert_eq!(sink.finalizes.load(Ordering::SeqCst), 1);
+            }
+        }
+        assert!(sink.ready.load(Ordering::SeqCst) <= 1);
+        assert_eq!(
+            payload.board.detached.load(Ordering::SeqCst),
+            payload.board.claimed.load(Ordering::SeqCst),
+            "detached == claimed at the leader join"
+        );
+        assert_eq!(rt.execution_permits().available(), 1, "permit balance");
+    });
+}
+
+/// §4 model 2 — elastic participation across the sealed task sets: TWO pool
+/// serves (tickets=2) interleave freely over ACCEPT → FREEZE → COMBINE —
+/// loom explores every stagger, including one serve arriving only for the
+/// COMBINE tail and per-worker slots whose accepter and sealer differ (the
+/// slot-reuse/generation-keying invariant the census named; under the
+/// descriptor channel a serve leaves only at RG outcome or unwind, so
+/// elasticity IS the late join + cross-set slot handoff modeled here).
+/// Oracles: completion, the sink census exact (no accepted granule lost
+/// across the handoff), sealed_ready/finalize exactly once, ≤2 serves,
+/// detached == claimed, permit capacity restored.
+///
+/// RED: key the freeze/combine reads off a refetched (unkeyed) local slot —
+/// SealedShared's generation panics fire ("sink task set ran before
+/// bind_generation" class); drop the ticket cap ⇒ serves > tickets.
+#[test]
+fn pool_sealed_elastic_join_across_sets() {
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(2);
+    b.max_branches = 500_000;
+    b.check(|| {
+        // workers=1, standbys=1: two pool threads, ONE permit — the permit
+        // handoff at morsel boundaries is part of the explored space.
+        let rt = small_runtime(1, 1);
+        let nslots = rt.nthreads() + 2;
+        let (sink, payload, _h, waiter) = sealed_bound_submit(&rt, 2, 2, nslots);
+
+        let rt1 = Arc::clone(&rt);
+        let w1 = waiter.clone();
+        let peer = thread::spawn(move || drive_bound_pool(&rt1, 1, &[w1]));
+        drive_bound_pool(&rt, 0, &[waiter.clone()]);
+        peer.join().unwrap();
+        payload.board.close_and_await();
+
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Completed));
+        assert_eq!(sink.accepted.load(Ordering::SeqCst), 2);
+        assert_eq!(sink.ready.load(Ordering::SeqCst), 1);
+        assert_eq!(sink.combines.load(Ordering::SeqCst), 1);
+        assert_eq!(sink.finalizes.load(Ordering::SeqCst), 1);
+        assert!(payload.serves.load(Ordering::SeqCst) <= 2, "ticket cap held");
+        assert_eq!(
+            payload.board.detached.load(Ordering::SeqCst),
+            payload.board.claimed.load(Ordering::SeqCst)
+        );
+        assert_eq!(rt.execution_permits().available(), 1, "permit balance");
+    });
+}
+
+/// §4 model 3 — detach on raw exit: a pool thread dying mid-serve (FATAL /
+/// PoolRetireRaw) unwinds through serve_ticket, so its DetachGuard drops —
+/// bump + lock-mediated wake — BEFORE the rtpool glue's catch decides to
+/// skip the exit-callback drain (launch_backend pooldb_thread_main); the
+/// skipped drain touches nothing on the board. A second claimer races the
+/// leader's close: either a pre-driver refusal (refused bump + detach) or
+/// the over-claim settle, whose decrement carries its own wake. The leader's
+/// close_and_await must terminate in EVERY interleaving (loom's deadlock
+/// detector is the oracle) with detached == claimed.
+///
+/// RED (verified by transient weakening): detach bump moved AFTER the raw-
+/// exit decision (i.e. skipped with the drain) ⇒ the leader join wedges —
+/// loom deadlock; dropping the settle-decrement's wake in try_claim ⇒ the
+/// join parks on the transient inflated `claimed` forever.
+#[test]
+fn pool_detach_on_raw_exit_join_terminates() {
+    loom::model(|| {
+        let board = MirrorBoard::new(2);
+
+        // Worker 1: FATAL mid-serve — claim, DetachGuard drop on the
+        // unwind, then the raw exit (no drain, no further board touch).
+        let b1 = Arc::clone(&board);
+        let w1 = thread::spawn(move || {
+            if b1.try_claim().is_some() {
+                let _detach = MirrorDetach(&b1);
+                // ... serve unwinds here (PoolRetireRaw / ProcExitThread);
+                // the guard drop below IS the ordering under test.
+            }
+        });
+
+        // Worker 2: claim racing the close — pre-driver refusal path
+        // (connect failure: refused bump, guard detach) or the over-claim /
+        // closed-board settle (wake carried by try_claim itself).
+        let b2 = Arc::clone(&board);
+        let w2 = thread::spawn(move || {
+            if b2.try_claim().is_some() {
+                let _detach = MirrorDetach(&b2);
+                b2.refused.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        board.close_and_await();
+        w1.join().unwrap();
+        w2.join().unwrap();
+
+        assert_eq!(
+            board.detached.load(Ordering::SeqCst),
+            board.claimed.load(Ordering::SeqCst),
+            "detached == claimed once the join returns"
+        );
+    });
+}
+
+/// §4 model 5 — two bound boards over a starved pool: two descriptor-bound
+/// RGs whose combined tickets exceed the pool (ONE permit, one pool thread),
+/// board A refusing (the identity-mismatch shape) while an external caller
+/// (the leader fallback face) completes it — the pool worker's refused SKIP
+/// of A must not lose the wake for B's publication (the multi-board
+/// extension of bound_gate_refused_skip_no_lost_wake, the shape the rung-2
+/// fleet letter measures as elastic redistribution).
+/// Oracles: BOTH RGs complete, A never pool-served, B served at most once,
+/// permit capacity restored.
+///
+/// RED: skip-cache the refusal against the WRONG publication key ⇒ B's
+/// publish wake is consumed by the cached skip — the pool worker parks,
+/// loom deadlock.
+#[test]
+fn pool_two_bound_boards_starved_no_lost_wake() {
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(2);
+    b.max_branches = 500_000;
+    b.check(|| {
+        let rt = small_runtime(1, 0);
+        let (awork, apayload, ah, awaiter) = bound_model_submit(&rt, 1, true);
+        let (bwork, bpayload, _bh, bwaiter) = bound_model_submit(&rt, 1, false);
+
+        // External caller completes the refused board A.
+        let rt1 = Arc::clone(&rt);
+        let ah1 = ah.clone();
+        let external = thread::spawn(move || {
+            let mut cw = runtime::CallerWorker::enter(&rt1).expect("caller lane");
+            cw.drive_with_duty(&rt1, &ah1, &mut || Ok(())).expect("duty never fails")
+        });
+        drive_bound_pool(&rt, 0, &[awaiter.clone(), bwaiter.clone()]);
+        assert_eq!(external.join().unwrap(), RgOutcome::Completed);
+
+        assert_eq!(awaiter.try_wait(), Some(RgOutcome::Completed));
+        assert_eq!(bwaiter.try_wait(), Some(RgOutcome::Completed));
+        awork.assert_complete();
+        bwork.assert_complete();
+        assert_eq!(apayload.serves.load(Ordering::SeqCst), 0, "refused board never served");
+        assert!(bpayload.serves.load(Ordering::SeqCst) <= 1, "ticket cap held");
+        assert_eq!(rt.execution_permits().available(), 1, "permit balance");
+    });
+}
+
+/// §4 model 6 — a declared blocking section INSIDE a bound serve's nested
+/// drive: the serving pool thread is facade-registered (PermitThreadReg,
+/// the pool.rs worker_loop discipline); its serve's CallerWorker drive
+/// executes a morsel that takes `blocking_io_section()` — the permit
+/// donation nests inside serve_bound's own release/re-acquire (the inc-2
+/// stale-PERMIT_HELD hazard, now modeled rather than just fixed) while the
+/// second pool thread absorbs the donated permit.
+/// Oracles: completion, every granule exactly once, finalize exactly once,
+/// and FULL permit capacity restored (donation + serve release/re-acquire
+/// balanced in every interleaving — io::note_permit accuracy).
+///
+/// RED: leave PERMIT_HELD stale across the serve's release (the inc-2
+/// defect) ⇒ the facade double-releases — permit balance assert fires
+/// (capacity > 1) or the model deadlocks on a starved re-acquire.
+#[test]
+fn pool_blocking_inside_bound_serve() {
+    struct FacadeBoundWork {
+        inner: Arc<ModelWork>,
+        io_taken: AtomicUsize,
+    }
+    impl TaskSetWork for FacadeBoundWork {
+        fn run_morsel(&self, worker: usize, range: MorselRange) {
+            if self.io_taken.fetch_add(1, Ordering::SeqCst) == 0 {
+                let io = runtime::blocking_io_section();
+                thread::yield_now(); // let the peer absorb the donation
+                self.inner.run_morsel(worker, range);
+                drop(io);
+            } else {
+                self.inner.run_morsel(worker, range);
+            }
+        }
+        fn finalize(&self) {
+            self.inner.finalize();
+        }
+    }
+
+    /// drive_bound_pool with the facade registration (pool.rs worker_loop).
+    fn drive_bound_pool_registered(
+        rt: &Arc<Runtime>,
+        worker: usize,
+        waiters: &[CompletionWaiter],
+    ) {
+        // SAFETY: the runtime outlives this drive; the permit is held
+        // across worker_step, where the facade is called.
+        let _reg = unsafe { runtime::PermitThreadReg::new(rt.execution_permits()) };
+        let mut local = rt.worker_local(worker);
+        loop {
+            if waiters.iter().all(|w| w.try_wait().is_some()) {
+                break;
+            }
+            let epoch = rt.park_epoch();
+            rt.execution_permits().acquire();
+            let step = rt.worker_step(&mut local);
+            rt.execution_permits().release();
+            match step {
+                Step::Ran => {}
+                Step::Retry => thread::yield_now(),
+                Step::Idle => {
+                    if waiters.iter().all(|w| w.try_wait().is_some()) {
+                        break;
+                    }
+                    rt.park(epoch);
+                }
+                Step::Stop => break,
+            }
+        }
+    }
+
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(2);
+    b.max_branches = 500_000;
+    b.check(|| {
+        // workers=1, standbys=1: two pool threads, ONE permit.
+        let rt = small_runtime(1, 1);
+        let inner = ModelWork::new(2, None);
+        let work = Arc::new(FacadeBoundWork {
+            inner: Arc::clone(&inner),
+            io_taken: AtomicUsize::new(0),
+        });
+
+        // Bound submission with the deferred payload cell (the descriptor
+        // must ride the submit; the payload needs the submit's RgHandle).
+        let placeholder = Arc::new(loom::sync::Mutex::new(None::<Arc<BoundModelPayload>>));
+        fn deferred_serve(payload: &Arc<dyn std::any::Any + Send + Sync>) -> BoundServe {
+            let slot = Arc::clone(payload)
+                .downcast::<loom::sync::Mutex<Option<Arc<BoundModelPayload>>>>()
+                .expect("model placeholder");
+            let inner = slot.lock().unwrap().clone().expect("payload installed pre-race");
+            let inner: Arc<dyn std::any::Any + Send + Sync> = inner;
+            bound_model_serve(&inner)
+        }
+        let (h, waiter) = rt.submit_pinned_bound(
+            QuerySpec {
+                query_id: 36,
+                tasksets: vec![TaskSetSpec {
+                    source: Arc::new(SyntheticMorselSource::new(2).with_c0(1)),
+                    work: Arc::clone(&work) as Arc<dyn TaskSetWork>,
+                    deps: vec![],
+                }],
+            },
+            0,
+            BoundDescriptor {
+                serve: deferred_serve,
+                payload: Arc::clone(&placeholder) as Arc<dyn std::any::Any + Send + Sync>,
+            },
+        );
+        let payload = Arc::new(BoundModelPayload {
+            rt: Arc::clone(&rt),
+            rg: h.clone(),
+            tickets: AtomicUsize::new(0),
+            refuse_all: AtomicBool::new(false),
+            serves: AtomicUsize::new(0),
+        });
+        *placeholder.lock().unwrap() = Some(Arc::clone(&payload));
+
+        let rt1 = Arc::clone(&rt);
+        let w1 = waiter.clone();
+        let peer = thread::spawn(move || drive_bound_pool_registered(&rt1, 1, &[w1]));
+        drive_bound_pool_registered(&rt, 0, &[waiter.clone()]);
+        peer.join().unwrap();
+
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Completed));
+        inner.assert_complete();
+        assert!(payload.serves.load(Ordering::SeqCst) <= 1, "ticket cap held");
+        assert_eq!(rt.execution_permits().available(), 1, "permit balance");
+    });
+}
