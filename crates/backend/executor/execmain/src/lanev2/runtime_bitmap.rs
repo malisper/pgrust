@@ -31,8 +31,17 @@
 //!   B — strided claims: a leader-built permutation interleaves S contiguous
 //!       segments (PGRUST_RUNTIME_BITMAP_STRIDE), spreading concurrent
 //!       claims across the whole relation for NVMe I/O spread.
-//!   C (two-stage morselized BUILD) — not yet built; the fetch stage above
-//!       is mode-agnostic and C reuses it when chartered in.
+//!   C (two-stage) — the BUILD is morselized too (night/bitmap-modec,
+//!       profile-gated: build = 41-79% of the armed hot wall on exact
+//!       rungs): a const int-family btree range on the leading index column
+//!       is partitioned into key-subrange granules; each claim re-runs the
+//!       worker's own BitmapIndexScan with the >=/<= arguments clamped to
+//!       the claim window into a claim-local bitmap, freezes it, and the
+//!       LEADER unions the frozen partials (tbm_union semantics per entry —
+//!       set union, so the granule cover reproduces the unclamped scan
+//!       exactly; lossy folding rides union_page). Non-clampable shapes and
+//!       every engage fallback run the serial build, traced; the fetch
+//!       phase is mode A's machinery unchanged either way.
 //!
 //! Arming (all four required; absence of any = byte-identical classic path):
 //!   PGRUST_RUNTIME=1                       (pool kill switch, M0)
@@ -64,6 +73,12 @@ pub(super) enum BitmapMode {
     Contiguous,
     /// Strided claims via a leader-built permutation (I/O spread).
     Strided,
+    /// Two-stage: the bitmap BUILD is morselized too (clamped key-subrange
+    /// claims over the index scan, frozen claim-partials unioned by the
+    /// leader), then the fetch phase runs exactly as mode A. Fail-closed:
+    /// any non-clampable shape runs the serial build (traced), and the
+    /// fetch phase is byte-identical mode A machinery either way.
+    TwoStage,
 }
 
 fn bitmap_mode() -> BitmapMode {
@@ -71,12 +86,7 @@ fn bitmap_mode() -> BitmapMode {
     crate::once_val(&MODE, || {
         match std::env::var("PGRUST_RUNTIME_BITMAP_MODE").as_deref() {
             Ok("B") | Ok("b") | Ok("strided") => BitmapMode::Strided,
-            // C (two-stage build) is not built yet: refuse loudly rather
-            // than silently racing the wrong arm.
-            Ok("C") | Ok("c") => {
-                lane_trace("runtime-bitmap: MODE=C not built, running mode A");
-                BitmapMode::Contiguous
-            }
+            Ok("C") | Ok("c") | Ok("twostage") => BitmapMode::TwoStage,
             _ => BitmapMode::Contiguous,
         }
     })
@@ -156,6 +166,192 @@ fn build_strided_order(nentries: usize, s: usize) -> Vec<u32> {
         }
     }
     order
+}
+
+// ---------------------------------------------------------------------------
+// Mode C — the parallel bitmap BUILD phase.
+// ---------------------------------------------------------------------------
+
+/// Mode C build-phase shared context: the clampable range geometry plus the
+/// frozen claim-partials the workers push (the leader unions them —
+/// `TIDBitmap` is `!Send`, the frozen readout is the sanctioned handoff).
+pub(super) struct BitmapBuildCtx {
+    pub(super) clamp: ::nodebitmapindexscan::BitmapBuildClamp,
+    /// Original range bounds (inclusive) from the leader's built scankeys.
+    pub(super) lo: i64,
+    pub(super) hi: i64,
+    /// Keys per granule (last granule clamps to `hi`).
+    pub(super) granule_width: u64,
+    /// Per-claim bitmap budget in bytes (work_mem is a per-NODE budget;
+    /// claim partials split it across the gang, floored so tiny budgets
+    /// still build exact — a lossy partial is CORRECT, recheck fixes rows).
+    pub(super) claim_maxbytes: usize,
+    /// Frozen claim partials, pushed per claim, unioned by the leader.
+    pub(super) partials: pgsync::Mutex<Vec<Arc<TbmSharedIterState>>>,
+    /// Diagnostic: rows added across all claims (trace only).
+    pub(super) ntuples: pgsync::atomic::AtomicU64,
+}
+
+/// The build phase's morsel source: granule = one key subrange.
+struct BitmapBuildSource {
+    ngranules: u64,
+}
+
+impl runtime::MorselSource for BitmapBuildSource {
+    fn total_granules(&self) -> u64 {
+        self.ngranules
+    }
+
+    /// A key-subrange granule is a whole (bounded) index descent + leaf
+    /// walk — much fatter than a page granule; start claims small.
+    fn startup_c0(&self) -> u64 {
+        1
+    }
+}
+
+/// The key window of a claimed granule range [start, end): keys
+/// `[lo + start*w, min(lo + end*w - 1, hi)]`. A claim spanning several
+/// granules is ONE contiguous window — one clamped scan. i128 mid-math: the
+/// pre-clamp top of the last granule may exceed i64 (hi near i64::MAX).
+fn granule_bounds(lo: i64, hi: i64, w: u64, start: u64, end: u64) -> (i64, i64) {
+    let glo = lo as i128 + start as i128 * w as i128;
+    let ghi = (lo as i128 + end as i128 * w as i128 - 1).min(hi as i128);
+    debug_assert!(glo <= ghi, "granule cover partitions [lo, hi]");
+    (glo as i64, ghi as i64)
+}
+
+/// Worker/claim side of the BUILD phase: clamp the worker's OWN
+/// BitmapIndexScan to the claimed key window, run it into a claim-local
+/// bitmap, freeze, export. Called from `runtime_scan::morsel_body`.
+pub(super) fn build_claim<'mcx>(
+    ctx: &BitmapBuildCtx,
+    b: &mut crate::procnode::BitmapHeapPlanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    range: runtime::MorselRange,
+) -> PgResult<()> {
+    // The leader proved the clampable shape on the identical plan; a
+    // diverged worker shape is an ERROR, never a wrong answer.
+    let crate::procnode::PlanStateNode::BitmapIndexScan(biss) = &mut b.bitmapqual else {
+        return Err(Box::new(PgError::new(
+            ERROR,
+            "runtime bitmap build worker bitmapqual diverged from the leader's",
+        )));
+    };
+    if biss.biss_Runtime.is_some()
+        || ::nodebitmapindexscan::clampable_range(&biss.biss_ScanKeys).is_none()
+    {
+        return Err(Box::new(PgError::new(
+            ERROR,
+            "runtime bitmap build worker scankeys diverged from the leader's",
+        )));
+    }
+    let (lo, hi) = granule_bounds(ctx.lo, ctx.hi, ctx.granule_width, range.start, range.end);
+    let mut tbm = ::tidbitmap::TIDBitmap::new(estate.es_query_cxt, ctx.claim_maxbytes);
+    let n = ::nodebitmapindexscan::multi_exec_bitmap_index_scan_clamped_into(
+        biss, estate, &ctx.clamp, lo, hi, &mut tbm,
+    )?;
+    let frozen = tbm.prepare_shared_iterate()?;
+    pgsync::lock(&ctx.partials).push(frozen);
+    ctx.ntuples
+        .fetch_add(n as u64, pgsync::atomic::Ordering::Relaxed);
+    Ok(())
+}
+
+/// Leader side of mode C: probe the clampable shape and, when it holds, run
+/// the BUILD phase on the gang and union the frozen claim partials into ONE
+/// leader-arena bitmap. `Ok(None)` = not attempted or engage fell back with
+/// nothing consumed — the caller runs the classic serial build (fail-closed;
+/// build work is never duplicated because fallback implies zero claims ran).
+fn try_parallel_build<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    b: &mut crate::procnode::BitmapHeapPlanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    rt: &'static Arc<runtime::Runtime>,
+    dop: i32,
+    est_rows: f64,
+) -> PgResult<Option<::tidbitmap::TIDBitmap<'mcx>>> {
+    // Shape probe on the LEADER's own (initialized, never-run) bitmapqual.
+    let crate::procnode::PlanStateNode::BitmapIndexScan(biss) = &mut b.bitmapqual else {
+        lane_trace("runtime-bitmap: buildC refused (bitmapqual not a bare BitmapIndexScan)");
+        return Ok(None);
+    };
+    if biss.biss_Runtime.is_some() {
+        lane_trace("runtime-bitmap: buildC refused (runtime keys)");
+        return Ok(None);
+    }
+    let Some((clamp, lo, hi)) = ::nodebitmapindexscan::clampable_range(&biss.biss_ScanKeys)
+    else {
+        lane_trace("runtime-bitmap: buildC refused (non-clampable scankeys)");
+        return Ok(None);
+    };
+    // Estimate floor: a tiny build parallelizes into pure overhead. The
+    // planner row estimate stands in for the (unknown-until-built) entry
+    // count; the REAL floor still runs post-build on the unioned bitmap.
+    if est_rows < bitmap_min_entries().max(2 * dop as u64) as f64 {
+        lane_trace(&format!(
+            "runtime-bitmap: buildC refused (buildC-est-floor) est_rows={est_rows:.0}"
+        ));
+        return Ok(None);
+    }
+    let width = (hi as i128 - lo as i128 + 1) as u128;
+    let target_granules = (8 * dop.max(1) as u128).min(width).max(1);
+    let granule_width = width.div_ceil(target_granules) as u64;
+    let ngranules = width.div_ceil(granule_width as u128) as u64;
+    let work_mem_bytes = init_small::globals::work_mem() as usize * 1024;
+    let claim_maxbytes = (work_mem_bytes / dop.max(1) as usize).max(256 * 1024);
+    let ctx = Arc::new(BitmapBuildCtx {
+        clamp,
+        lo,
+        hi,
+        granule_width,
+        claim_maxbytes,
+        partials: pgsync::Mutex::new(Vec::new()),
+        ntuples: pgsync::atomic::AtomicU64::new(0),
+    });
+    let source: Arc<dyn runtime::MorselSource> =
+        Arc::new(BitmapBuildSource { ngranules });
+    lane_trace(&format!(
+        "runtime-bitmap: buildC admit granules={ngranules} range=[{lo},{hi}] \
+         width_per_granule={granule_width}"
+    ));
+    let r = engage(
+        agg,
+        estate,
+        rt,
+        dop,
+        ngranules,
+        0,
+        source,
+        None,
+        None,
+        false,
+        None,
+        Some(Arc::clone(&ctx)),
+    )?;
+    if r.is_none() {
+        // Engage fallback: NOTHING consumed (all-refused / zero workers —
+        // fallback paths guarantee zero claims). Serial build takes over.
+        lane_trace("runtime-bitmap: buildC engage fallback, serial build");
+        debug_assert!(pgsync::lock(&ctx.partials).is_empty());
+        return Ok(None);
+    }
+    // Union the frozen claim partials into ONE leader-arena bitmap under
+    // the node's full work_mem budget — per-entry semantics are exactly
+    // tbm_union's, so exact/lossy folding and the final lossify guard
+    // behave as if one bitmap had been built serially.
+    let mut tbm = ::tidbitmap::TIDBitmap::new(estate.es_query_cxt, work_mem_bytes);
+    let parts = std::mem::take(
+        &mut *pgsync::lock(&ctx.partials),
+    );
+    for f in parts.iter() {
+        tbm.union_frozen(f)?;
+    }
+    lane_trace(&format!(
+        "runtime-bitmap: buildC complete claims={} ntuples={}",
+        parts.len(),
+        ctx.ntuples.load(pgsync::atomic::Ordering::Relaxed)
+    ));
+    Ok(Some(tbm))
 }
 
 /// Worker/claim side: drain one claimed granule range through the node's
@@ -307,10 +503,25 @@ pub(super) fn try_own_plain_agg_over_bitmap_runtime<'mcx>(
         return Ok(Some(None));
     }
 
-    // --- Build the bitmap ONCE (the classic serial build, leader session —
-    // C's BM_INITIAL winner). From here every fall-through must hand the
-    // built bitmap to the classic setup: the build is never re-run.
-    let mut tbm = crate::procnode::multi_exec_bitmap_node(&mut b.bitmapqual, estate)?;
+    // --- Build the bitmap ONCE. Mode A/B: the classic serial build, leader
+    // session — C's BM_INITIAL winner. Mode C: the gang builds it via
+    // clamped key-subrange claims and the leader unions the frozen partials
+    // (any refusal/fallback in there = the serial build, with a trace).
+    // From here every fall-through must hand the built bitmap to the
+    // classic setup: the build is never re-run.
+    let mode = bitmap_mode();
+    let mut tbm = match mode {
+        BitmapMode::TwoStage => {
+            match try_parallel_build(agg, b, estate, rt, dop, scan_plan.scan.plan.plan_rows)?
+            {
+                Some(tbm) => tbm,
+                None => crate::procnode::multi_exec_bitmap_node(&mut b.bitmapqual, estate)?,
+            }
+        }
+        BitmapMode::Contiguous | BitmapMode::Strided => {
+            crate::procnode::multi_exec_bitmap_node(&mut b.bitmapqual, estate)?
+        }
+    };
 
     // --- Geometry floor (fail-closed, traced by name).
     let (npages, nchunks) = tbm.entry_counts();
@@ -330,9 +541,9 @@ pub(super) fn try_own_plain_agg_over_bitmap_runtime<'mcx>(
     // (parity with the classic serial node; the frozen arrays are
     // independent std Vecs).
     b.scan.tbm = Some(tbm);
-    let mode = bitmap_mode();
     let order = match mode {
-        BitmapMode::Contiguous => None,
+        // Mode C's fetch phase = mode A's contiguous claims.
+        BitmapMode::Contiguous | BitmapMode::TwoStage => None,
         BitmapMode::Strided => {
             Some(build_strided_order(nentries as usize, bitmap_stride()))
         }
@@ -372,6 +583,57 @@ pub(super) fn try_own_plain_agg_over_bitmap_runtime<'mcx>(
         )?;
     }
     Ok(r)
+}
+
+#[cfg(test)]
+mod build_cover_tests {
+    use super::granule_bounds;
+
+    /// The granule cover must PARTITION [lo, hi] exactly for any claim
+    /// segmentation: contiguous, non-overlapping, first starts at lo, last
+    /// ends at hi. Duplicated coverage would still be correct (bitmap set
+    /// union), but the cover is exact by construction — pin it.
+    fn assert_partition(lo: i64, hi: i64, ngranules: u64, w: u64) {
+        // per-granule claims
+        let mut next = lo as i128;
+        for g in 0..ngranules {
+            let (a, b) = granule_bounds(lo, hi, w, g, g + 1);
+            assert_eq!(a as i128, next, "granule {g} start");
+            assert!(a <= b);
+            next = b as i128 + 1;
+        }
+        assert_eq!(next, hi as i128 + 1, "last granule ends at hi");
+        // a coalesced claim spanning everything equals the whole range
+        let (a, b) = granule_bounds(lo, hi, w, 0, ngranules);
+        assert_eq!((a, b), (lo, hi));
+    }
+
+    fn geometry(lo: i64, hi: i64, target: u128) -> (u64, u64) {
+        // mirrors try_parallel_build's granuling
+        let width = (hi as i128 - lo as i128 + 1) as u128;
+        let target = target.min(width).max(1);
+        let w = width.div_ceil(target) as u64;
+        let n = width.div_ceil(w as u128) as u64;
+        (n, w)
+    }
+
+    #[test]
+    fn cover_partitions_exactly() {
+        for (lo, hi) in [
+            (0i64, 999i64),
+            (-500, 499),
+            (1_500_000, 4_400_000),
+            (7, 7),               // single key
+            (0, 6),               // fewer keys than target granules
+            (i64::MAX - 1000, i64::MAX), // pre-clamp top overflow rung
+            (i64::MIN, i64::MIN + 1000),
+        ] {
+            for target in [1u128, 2, 8, 64, 128] {
+                let (n, w) = geometry(lo, hi, target);
+                assert_partition(lo, hi, n, w);
+            }
+        }
+    }
 }
 
 /// Worker-side shape check + drive-mode derivation, called from

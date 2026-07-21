@@ -173,6 +173,11 @@ pub(super) struct RuntimeScanShared {
     /// on every other path (dead-when-off). Set at construction, read per
     /// claim segment.
     partwise: Option<Arc<super::runtime_partwise::PartwiseCtx>>,
+    /// bitmap-morsels mode C: the parallel bitmap BUILD phase context —
+    /// Some ONLY on a build-phase engagement (granule = a clamped key
+    /// subrange; workers push frozen claim-partials, the LEADER unions).
+    /// Mutually exclusive with `bitmap` (a payload is build XOR fetch).
+    bitmap_build: Option<Arc<super::runtime_bitmap::BitmapBuildCtx>>,
 }
 
 impl RuntimeScanShared {
@@ -407,6 +412,28 @@ impl RuntimeScanShared {
                         )));
                     };
                     let aps = &mut **aps;
+                    // bitmap-morsels mode C BUILD phase: the claim is a
+                    // clamped key subrange — the worker re-runs ITS OWN
+                    // BitmapIndexScan over the clamp into a claim-local
+                    // bitmap and exports the frozen partial; no agg rows,
+                    // no agg partial export (the fetch phase does those).
+                    if let Some(bctx) = self.bitmap_build.as_ref() {
+                        let crate::procnode::PlanStateNode::BitmapHeapScan(b) =
+                            &mut aps.outer
+                        else {
+                            return Err(Box::new(PgError::new(
+                                ERROR,
+                                "runtime bitmap build worker outer node diverged \
+                                 from the leader's BitmapHeapScan",
+                            )));
+                        };
+                        return super::runtime_bitmap::build_claim(
+                            bctx,
+                            b,
+                            estate,
+                            range.start..range.end,
+                        );
+                    }
                     // bitmap-morsels arm: claimed-window drive over the
                     // frozen shared bitmap (runtime_bitmap::drain_claim —
                     // the node's unchanged serial per-row path), then the
@@ -1506,7 +1533,9 @@ fn build_worker_exec_inner(payload: &RuntimeScanShared) -> PgResult<()> {
                     // per-claim drive is the node's serial row path; the
                     // leader proved admission on the identical plan.
                     if matches!(&aps.outer, crate::procnode::PlanStateNode::BitmapHeapScan(_)) {
-                        if payload.bitmap.is_none() {
+                        // Fetch engagements carry the frozen-bitmap ctx;
+                        // mode C BUILD engagements carry the build ctx.
+                        if payload.bitmap.is_none() && payload.bitmap_build.is_none() {
                             return Err(Box::new(PgError::new(
                                 ERROR,
                                 "runtime bitmap worker without a bitmap context",
@@ -2681,7 +2710,12 @@ pub(super) fn engage<'mcx>(
     ea_timer: bool,
     bitmap_ctx: Option<Arc<super::runtime_bitmap::BitmapMorselCtx>>,
     partwise_ctx: Option<Arc<super::runtime_partwise::PartwiseCtx>>,
+    bitmap_build_ctx: Option<Arc<super::runtime_bitmap::BitmapBuildCtx>>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
+    debug_assert!(
+        bitmap_ctx.is_none() || bitmap_build_ctx.is_none(),
+        "a bitmap engagement is build XOR fetch"
+    );
     ensure_hooks_registered();
     crate::execparallel::register_parallel_query_main();
 
@@ -2720,6 +2754,7 @@ pub(super) fn engage<'mcx>(
         ea_epoch: std::time::Instant::now(),
         bitmap: bitmap_ctx,
         partwise: partwise_ctx,
+        bitmap_build: bitmap_build_ctx,
     });
     // Set BEFORE any claim can run (submit happens inside engage_ceremony):
     // morsel_body expects the edges whenever the source coalesces (pgrcolumnar).
@@ -3023,6 +3058,15 @@ fn engage_ceremony<'mcx>(
         EngageOutcome::Fallback => {
             lane_trace("runtime-scan: fallback to serial arm");
             Ok(None)
+        }
+        EngageOutcome::Completed if payload.bitmap_build.is_some() => {
+            // mode C build phase: the deliverable is the frozen claim
+            // partials in the build ctx — there are no agg partials to
+            // combine and no result row. Some(None) = "engaged and
+            // completed" to the (sole) mode C caller, never surfaced as a
+            // query result.
+            lane_trace("runtime-bitmap: buildC phase complete");
+            Ok(Some(None))
         }
         EngageOutcome::Completed => {
             let parts: Vec<RuntimePartial> = payload

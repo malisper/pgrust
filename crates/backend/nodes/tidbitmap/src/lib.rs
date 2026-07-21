@@ -262,6 +262,21 @@ impl<'mcx> TIDBitmap<'mcx> {
         Ok(())
     }
 
+    /// bitmap-morsels mode C: `self |= frozen` — union a FROZEN readout (the
+    /// cross-thread partial a build worker produced with
+    /// `prepare_shared_iterate`; `TIDBitmap` itself is `!Send`, the frozen
+    /// state is the sanctioned handoff) into this live bitmap. Per-entry
+    /// semantics are exactly `tbm_union`'s — the same `union_page` body, in
+    /// arbitrary entry order (C's tbm_union iterates hash order), including
+    /// the exact/lossy fold and the maxentries lossify guard.
+    pub fn union_frozen(&mut self, f: &TbmSharedIterState) -> PgResult<()> {
+        debug_assert!(self.iterating == TbmIterating::Not);
+        for e in f.ptbase.iter() {
+            self.union_page(e)?;
+        }
+        Ok(())
+    }
+
     fn union_page(&mut self, bpage: &PagetableEntry) -> PgResult<()> {
         if bpage.ischunk {
             for wn in 0..WORDS_PER_CHUNK {
