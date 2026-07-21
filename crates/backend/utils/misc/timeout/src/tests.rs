@@ -163,6 +163,37 @@ fn periodic_reenables_itself() {
 }
 
 #[test]
+fn reinit_keeps_long_deadlines_armable() {
+    // The early-session lost-timeout shape: a pre-init phase arms a long
+    // timeout (the startup-packet/auth window), disables it, and the session
+    // main re-runs InitializeTimeouts — which destroys the armed slot wake.
+    // A later enable whose fin_time lands at or past the stale pre-init
+    // deadline must still ARM a real wake and fire (legacy behavior took the
+    // setitimer-avoidance skip against the destroyed wake and never fired).
+    let _serial = setup_thread(9008);
+    RegisterTimeout(STATEMENT_TIMEOUT, handler_a);
+
+    // Pre-init phase: long arm (physical deadline far in the future), then
+    // disable — the wake deliberately stays armed (C itimer parity).
+    enable_timeout_after(STATEMENT_TIMEOUT, 6_000);
+    disable_timeout(STATEMENT_TIMEOUT, false);
+
+    // The session-main re-init (wipes the slot deadline).
+    InitializeTimeouts();
+    RegisterTimeout(STATEMENT_TIMEOUT, handler_a);
+
+    // Arm so fin_time lands past the stale pre-init deadline while now is
+    // still before it: fake-now T0+5.9s, fin T0+6.1s >= stale due-at T0+6s.
+    advance_ms(5_900);
+    enable_timeout_after(STATEMENT_TIMEOUT, 200);
+
+    advance_ms(300);
+    drain_when_posted();
+    assert_eq!(FIRED.with(|f| f.borrow().clone()), vec!["a"]);
+    assert!(!get_timeout_active(STATEMENT_TIMEOUT));
+}
+
+#[test]
 fn timer_post_raises_interrupt_pending() {
     let _serial = setup_thread(9007);
     RegisterTimeout(STATEMENT_TIMEOUT, handler_a);

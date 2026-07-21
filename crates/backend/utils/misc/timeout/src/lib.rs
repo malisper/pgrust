@@ -416,7 +416,9 @@ pub fn ProcessTimeoutInterrupt() {
     }
 }
 
-// FIX (kill-switched, default OFF — flip via PGRUST_TIMEOUT_INIT_RESET=1):
+// BUG FIX (DEFAULT ON; PGRUST_TIMEOUT_INIT_RESET=0|off restores the legacy
+// lost-timeout behavior for ONE TRAIN as the bisection escape, then the knob
+// is removed — this is a correctness fix, not a perf arm):
 // re-running InitializeTimeouts on a live connection thread (the session
 // main re-init after the startup-packet/auth phase) replaces this thread's
 // timer slot with `deadline: None`, destroying a still-armed wake — while
@@ -427,14 +429,18 @@ pub fn ProcessTimeoutInterrupt() {
 // schedule_alarm runs after SIGNAL_DUE_AT has passed (the "assumed lost"
 // recovery). Net effect: any timeout armed within the first
 // authentication_timeout seconds of a session whose deadline extends past
-// that window is lost. C is immune because its kernel itimer survives
-// InitializeTimeouts, keeping signal_pending truthful. The fix resets the
-// pending-wake bookkeeping to match the destroyed slot, so the next
-// schedule_alarm always arms a real wake.
+// that window is lost (C-divergent — C is immune because its kernel itimer
+// survives InitializeTimeouts, keeping signal_pending truthful). The fix
+// resets the pending-wake bookkeeping to match the destroyed slot, so the
+// next schedule_alarm always arms a real wake. Witnesses: the
+// reinit_keeps_long_deadlines_armable unit below (default world) + the
+// timeout-e2e early-session long-timeout scenario (both engines).
 fn timeout_init_reset_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
-        std::env::var("PGRUST_TIMEOUT_INIT_RESET").map_or(false, |v| v != "0" && !v.is_empty())
+        std::env::var("PGRUST_TIMEOUT_INIT_RESET").map_or(true, |v| {
+            !(v == "0" || v.eq_ignore_ascii_case("off") || v.eq_ignore_ascii_case("false"))
+        })
     })
 }
 
