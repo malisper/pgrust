@@ -812,7 +812,15 @@ static FUSED_HASH_BUILD_PERTUPLE_OTHER: AtomicU64 = AtomicU64::new(0);
 //   * `launched` — the launched-bgworker ceremony engaged (launch returned
 //                  workers and the submit-and-park loop took over);
 //   * `serial`   — the whole parallel engagement fell back to the serial
-//                  arm (EngageOutcome::Fallback at the arm's dispatch).
+//                  arm (EngageOutcome::Fallback at the arm's dispatch);
+//   * `nolaunch-serial` — the rung-4 posture knob (PGRUST_RUNTIME_NOLAUNCH)
+//                  retired this engagement's launched fallback: the board
+//                  channels declined and the arm went STRAIGHT to serial.
+//                  THE rung-4 deletion evidence row — each tick is one
+//                  engagement the post-deletion ladder would serialize
+//                  (the R2 cliff, measured not vibed). Doubles with the
+//                  arm-tail `serial` tick by design (serial stays the
+//                  outcome census; this row is the cause attribution).
 // Tick cadence: one per engagement OUTCOME (completions for the two board
 // channels; path-taken for launched/serial) — engagement-grain, never
 // per-row. Error exits tick nothing (they surface, they don't fall back).
@@ -827,11 +835,12 @@ pub(super) enum EngageChannel {
     Gang = 1,
     Launched = 2,
     Serial = 3,
+    NolaunchSerial = 4,
 }
 
-const N_ENGAGE_CHANNELS: usize = 4;
+const N_ENGAGE_CHANNELS: usize = 5;
 const ENGAGE_CHANNEL_NAMES: [&str; N_ENGAGE_CHANNELS] =
-    ["pooldb", "gang", "launched", "serial"];
+    ["pooldb", "gang", "launched", "serial", "nolaunch-serial"];
 
 /// The arm vocabulary keys off the StandingArm label (already the stable
 /// per-arm trace identity) so the channel code needs no new per-arm enum.

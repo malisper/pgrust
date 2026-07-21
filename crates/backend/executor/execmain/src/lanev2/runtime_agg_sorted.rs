@@ -1389,7 +1389,7 @@ fn engage_ceremony<'mcx>(
             super::standing_channel::StandingWait::Fallback => {}
         }
 
-        let launched = parallel::LaunchParallelWorkers(pcxt)?;
+        let launched = super::standing_channel::launch_fallback_workers(&STANDING_ARM, pcxt)?;
         if launched <= 0 {
             lane_trace("runtime-agg-sorted: zero workers launched");
             drain_rg(rt, &rg);
