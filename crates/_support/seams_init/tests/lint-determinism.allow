@@ -243,6 +243,7 @@ fs	crates/backend/access/heap/rewriteheap/src/lib.rs	9	DST-REVIEW(t30-train): st
 
 # ==== time ====
 time	crates/backend/access/common/tidstore/bench/rig/src/main.rs	7	BENCH-RIG: bench-rig crate, not server prod
+time	crates/backend/access/heap/vacuumlazy/src/lib.rs	5	INFRA-telemetry: GL-M41-2 phase_trace per-vacuum phase clocks (scan/idxbulk/reap/idxclean/fsm/pvend/trunc), trace-gated emit only — the morsels ScanPhaseClock class; no semantic deadlines
 time	crates/backend/access/heap/vacuumlazy/src/morsels.rs	16	INFRA-telemetry: scan-phase clock.{source,rounds,finalize,merge,ceremony}_ns counters + vtrace spans; MIXED erratum (b) resolved — no semantic deadlines here (cost-delay pacing lives in commands/vacuum, routed P2)
 time	crates/backend/access/pgrcolumnar/src/loadsort.rs	2	INFRA-telemetry: phase counters
 time	crates/backend/access/pgrcolumnar/src/part_cache.rs	2	INFRA-telemetry: phase counters
@@ -478,7 +479,7 @@ once	crates/_support/seams_init/src/lib.rs	1
 once	crates/_support/test_boot/src/lib.rs	2
 once	crates/backend/access/heap/vacuumlazy/src/morsels.rs	8	DST-REVIEW(m41-vacuum-pool): M4.1 vacuum driver swap — kill switch (PGRUST_RUNTIME_VACUUM_POOL) + claim-deadline knob (PGRUST_RUNTIME_GANG_CLAIM_MS, the standing-channel knob) env-read once-caches; knobs-registry routing (s2.5) chartered to the DST program (P3 row-19 pure env-read closures)
 once	crates/backend/access/pgrcolumnar/src/condcache.rs	2
-once	crates/backend/commands/vacuumparallel/src/lib.rs	8	DST-REVIEW(q2-index-chunks): M4.1 rows + the Q2 chunk gates (PGRUST_RUNTIME_VACUUM_INDEX_CHUNKS/QUANTUM/LEADER) and the claim-cadence witness channel (PGRUST_VACUUM_CLAIM_TIMING) — P3 row-19 pure env-read closures + the one-shot shutdown-hook registration (ensure_hooks_registered precedent); knobs-registry routing (s2.5) chartered to the DST program
+once	crates/backend/commands/vacuumparallel/src/lib.rs	9	DST-REVIEW(q2-index-chunks): M4.1 rows + the Q2 chunk gates (PGRUST_RUNTIME_VACUUM_INDEX_CHUNKS/QUANTUM/LEADER) and the claim-cadence witness channel (PGRUST_VACUUM_CLAIM_TIMING) — P3 row-19 pure env-read closures + the one-shot shutdown-hook registration (ensure_hooks_registered precedent); knobs-registry routing (s2.5) chartered to the DST program. +1 GL-M41-2: PvUnit.census_t0_ms per-unit first-quantum stamp (trace-gated telemetry, pure mono_ms closure)
 once	crates/backend/access/pgrcolumnar/src/part_cache.rs	3	P3 row-19 danger class (design-cited): scan-path part-registry singletons L97/L139 (design cited 98/140; -1 drift) + debug knob L149
 once	crates/backend/access/pgrcolumnar/src/reader.rs	7
 once	crates/backend/access/pgrcolumnar/src/scan.rs	2	P3 row-19 danger class (design-cited): L22/L562 multi-thread scan knobs
