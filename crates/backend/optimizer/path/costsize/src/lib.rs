@@ -1922,11 +1922,25 @@ fn hashed_agg_spill_surcharge(
     input_tuples: f64,
     input_width: i32,
 ) -> (f64, f64) {
+    hashed_agg_spill_surcharge_scaled(run, aggcosts, num_groups, input_tuples, input_width, 1.0)
+}
+
+// hashed_agg_spill_surcharge with the per-group entry size scaled by
+// entry_scale (1.0 = the C estimate). The step-0b honest-Gather delta
+// evaluates it at gucs::pgrcolumnar_leader_hashagg_entry_scale.
+fn hashed_agg_spill_surcharge_scaled(
+    run: &PlannerRun<'_>,
+    aggcosts: &types_pathnodes::AggClauseCosts,
+    num_groups: f64,
+    input_tuples: f64,
+    input_width: i32,
+    entry_scale: f64,
+) -> (f64, f64) {
     let hashentrysize = ::nodeagg::hash_agg_entry_size(
         run.root.aggtransinfos.len(),
         input_width.max(0) as usize,
         aggcosts.transitionSpace as usize,
-    );
+    ) * entry_scale;
     let (mem_limit, ngroups_limit, num_partitions) =
         ::nodeagg::hash_agg_set_limits(hashentrysize, num_groups, 0);
     let nbatches = ((num_groups * hashentrysize) / mem_limit as f64)
@@ -2021,6 +2035,70 @@ pub fn cost_agg_lane_exchange_adjust(
         p.startup_cost = input_total_cost + (p.startup_cost - input_total_cost) / claimers;
         p.total_cost = p.startup_cost + emit;
     }
+}
+
+/// Step-0b honest-Gather spill pricing (runtime cost-model design §5,
+/// scratchpad/night/runtime-cost-model-design.md): a leader-side hashed Agg
+/// fed by a Gather/GatherMerge on a pgrcolumnar-fed plan re-prices its
+/// disk-spill surcharge with the executor-honest per-group footprint
+/// (gucs::DEFAULT_PGRCOLUMNAR_LEADER_HASHAGG_ENTRY_SCALE — q33 provenance
+/// there). C's entry estimate (~64B for the q33 shape) said a 10M-group
+/// leader table fits any >=1GB budget, so cost_agg added NO spill term while
+/// the real ~3GB working set crossed the 2GB budget and ran 10x slower
+/// spilling (the q33 cliff, third sighting). Adds the DELTA between the
+/// honest-entry surcharge and the C-entry surcharge cost_agg already added —
+/// exactly 0.0 whenever even the scaled working set fits the hash budget
+/// (both evaluate to no-spill), so tiny/regress shapes are byte-identical.
+/// Heap-only plans never reach this (pgrcolumnar_feeds_plan gate); serial
+/// hashaggs (no Gather input) keep pure C costing — those fold to the
+/// runtime engine, whose memory economics are step-1's spillrisk term.
+pub fn cost_agg_leader_spill_adjust(
+    run: &mut PlannerRun<'_>,
+    path_id: types_pathnodes::PathId,
+    aggstrategy: u32,
+    subpath_id: types_pathnodes::PathId,
+    aggcosts: &types_pathnodes::AggClauseCosts,
+    num_groups: f64,
+    input_tuples: f64,
+    input_width: i32,
+) {
+    let Some(entry_scale) = gucs::pgrcolumnar_leader_hashagg_entry_scale() else {
+        return;
+    };
+    if aggstrategy != types_pathnodes::AGG_HASHED || !pgrcolumnar_feeds_plan(run) {
+        return;
+    }
+    // Leader-side only: the agg's direct input is a Gather/GatherMerge —
+    // raw rows (the q33 AGGSPLIT_SIMPLE shape) or a gathered partial agg's
+    // finalize; either way the leader builds the num_groups-entry table.
+    let gather_sub = match run.root.path(peel_projection(run, subpath_id)) {
+        PathNode::GatherPath(g) => g.subpath,
+        PathNode::GatherMergePath(g) => g.subpath,
+        _ => return,
+    };
+    // The admitted radix exchange hands partial tables to the finalize by
+    // pointer and merges in place — cost_agg_lane_exchange_adjust owns that
+    // shape's pricing (and deliberately strips the spill surcharge).
+    if gather_sub.is_some_and(|s| lane_exchange_partial_agg(run, s)) {
+        return;
+    }
+    let (s_base, t_base) =
+        hashed_agg_spill_surcharge_scaled(run, aggcosts, num_groups, input_tuples, input_width, 1.0);
+    let (s_honest, t_honest) = hashed_agg_spill_surcharge_scaled(
+        run,
+        aggcosts,
+        num_groups,
+        input_tuples,
+        input_width,
+        entry_scale,
+    );
+    let (ds, dt) = (s_honest - s_base, t_honest - t_base);
+    if ds == 0.0 && dt == 0.0 {
+        return;
+    }
+    let p = run.root.path_mut(path_id).base_mut();
+    p.startup_cost += ds;
+    p.total_cost += dt;
 }
 
 /// cost_group (costsize.c); caller ensures the input is sorted.
@@ -4203,4 +4281,200 @@ fn calc_joinrel_size_estimate<'mcx>(
         other => panic!("calc_joinrel_size_estimate (costsize.c): jointype {other}"),
     };
     Ok(crate::clamp_row_est(nrows))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- Step-0a: pgrcolumnar Gather pricing is GUC-anchored -----------------
+
+    /// The anchoring contract: at the shipped t34 defaults the GUC-anchored
+    /// prices reproduce the retired flat constants EXACTLY (bit-for-bit), so
+    /// default-config plans and EXPLAIN costs are unchanged by step 0a.
+    #[test]
+    fn pgrcolumnar_gather_pricing_anchored_at_defaults() {
+        assert_eq!(gucs::DEFAULT_PGRCOLUMNAR_PARALLEL_SETUP_COST, 32000.0);
+        assert_eq!(gucs::DEFAULT_PGRCOLUMNAR_PARALLEL_TUPLE_COST, 0.005);
+        // Session cells boot at the defaults (thread-local, untouched here).
+        assert_eq!(gucs::pgrcolumnar_parallel_setup_cost(), 32000.0);
+        assert_eq!(gucs::pgrcolumnar_parallel_tuple_cost(), 0.005);
+    }
+
+    /// The q33 probe's "A/B inert" bug stays fixed: sweeping the parallel
+    /// cost GUCs moves the pgrcolumnar Gather prices proportionally.
+    #[test]
+    fn pgrcolumnar_gather_pricing_tracks_parallel_gucs() {
+        gucs::set_parallel_setup_cost(1000.0);
+        gucs::set_parallel_tuple_cost(0.1);
+        assert_eq!(gucs::pgrcolumnar_parallel_setup_cost(), 320_000.0);
+        assert_eq!(gucs::pgrcolumnar_parallel_tuple_cost(), 0.05);
+        gucs::set_parallel_setup_cost(guc_tables::consts::DEFAULT_PARALLEL_SETUP_COST);
+        gucs::set_parallel_tuple_cost(guc_tables::consts::DEFAULT_PARALLEL_TUPLE_COST);
+    }
+
+    // -- Step-0b: leader-hashagg-over-Gather spill delta ---------------------
+
+    fn install_seams_once() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            if !guc_tables::vars::work_mem.installed() {
+                init_small::init_seams();
+            }
+        });
+    }
+
+    fn scratch_path<'m>(mcx: mcx::Mcx<'m>, rel: RelId) -> types_pathnodes::Path<'m> {
+        types_pathnodes::Path {
+            type_: 0,
+            pathtype: 0,
+            parent: rel,
+            pathtarget_id: None,
+            param_info: None,
+            parallel_aware: false,
+            parallel_safe: true,
+            parallel_workers: 0,
+            rows: 0.0,
+            disabled_nodes: 0,
+            startup_cost: 1000.0,
+            total_cost: 2000.0,
+            pathkeys: mcx::PgVec::new_in(mcx),
+        }
+    }
+
+    // (run, agg_path_id, gather_path_id): an AGG-shaped scratch path above a
+    // Gather above a scan-shaped scratch path, over one baserel whose
+    // amflags carry `columnar`.
+    fn leader_hashagg_fixture<'m>(
+        mcx: mcx::Mcx<'m>,
+        columnar: bool,
+    ) -> (PlannerRun<'m>, types_pathnodes::PathId, types_pathnodes::PathId) {
+        let mut run = PlannerRun::new(mcx);
+        let mut rel = types_pathnodes::RelOptInfo::new(mcx);
+        if columnar {
+            rel.amflags |= types_pathnodes::AMFLAG_PGRCOLUMNAR;
+        }
+        let rid = run.root.alloc_rel(rel);
+        run.root.simple_rel_array.push(Some(rid));
+        let inner = run.root.alloc_path(PathNode::Path(scratch_path(mcx, rid)));
+        let gather = run.root.alloc_path(PathNode::GatherPath(types_pathnodes::GatherPath {
+            path: scratch_path(mcx, rid),
+            subpath: Some(inner),
+            single_copy: false,
+            num_workers: 16,
+        }));
+        let agg = run.root.alloc_path(PathNode::Path(scratch_path(mcx, rid)));
+        (run, agg, gather)
+    }
+
+    // q33-class shape scaled to the unit-test budget: work_mem 4096kB x
+    // hash_mem_multiplier 2.0 (init_small boot values) = 8MB. Entry size for
+    // width 12 / no transinfos / transitionSpace 0 is 16 + MAXALIGN(
+    // MAXALIGN(15) + 12) = 48B: at 100k groups the C estimate says 4.8MB
+    // (fits, no spill term) while the honest 4.7x scale says 22.6MB
+    // (spills) — the exact q33 disease in miniature.
+    const SPILLY_GROUPS: f64 = 100_000.0;
+    const TINY_GROUPS: f64 = 10_000.0;
+    const INPUT_TUPLES: f64 = 1_000_000.0;
+    const INPUT_WIDTH: i32 = 12;
+
+    #[test]
+    fn leader_hashagg_over_gather_prices_the_spill() {
+        install_seams_once();
+        let cx = mcx::MemoryContext::new_bump("costsize-test");
+        let mcx = cx.mcx();
+        let (mut run, agg, gather) = leader_hashagg_fixture(mcx, true);
+        let costs = types_pathnodes::AggClauseCosts::default();
+
+        // Precondition (the q33 disease): C's own pricing sees no spill.
+        let (s_base, t_base) = hashed_agg_spill_surcharge_scaled(
+            &run, &costs, SPILLY_GROUPS, INPUT_TUPLES, INPUT_WIDTH, 1.0,
+        );
+        assert_eq!((s_base, t_base), (0.0, 0.0), "C estimate must fit the 8MB budget");
+
+        let (before_s, before_t) = {
+            let p = run.root.path(agg).base();
+            (p.startup_cost, p.total_cost)
+        };
+        cost_agg_leader_spill_adjust(
+            &mut run,
+            agg,
+            types_pathnodes::AGG_HASHED,
+            gather,
+            &costs,
+            SPILLY_GROUPS,
+            INPUT_TUPLES,
+            INPUT_WIDTH,
+        );
+        let p = run.root.path(agg).base();
+        assert!(
+            p.startup_cost > before_s && p.total_cost > before_t,
+            "honest scale must price the spill: {} / {}",
+            p.startup_cost,
+            p.total_cost
+        );
+        // total picks up the read-back leg on top of startup's write leg.
+        assert!(p.total_cost - before_t > p.startup_cost - before_s);
+    }
+
+    #[test]
+    fn leader_hashagg_spill_delta_is_exact_noop_when_it_fits() {
+        install_seams_once();
+        let cx = mcx::MemoryContext::new_bump("costsize-test");
+        let mcx = cx.mcx();
+        let (mut run, agg, gather) = leader_hashagg_fixture(mcx, true);
+        let costs = types_pathnodes::AggClauseCosts::default();
+        cost_agg_leader_spill_adjust(
+            &mut run,
+            agg,
+            types_pathnodes::AGG_HASHED,
+            gather,
+            &costs,
+            TINY_GROUPS,
+            INPUT_TUPLES,
+            INPUT_WIDTH,
+        );
+        let p = run.root.path(agg).base();
+        assert_eq!((p.startup_cost, p.total_cost), (1000.0, 2000.0));
+    }
+
+    #[test]
+    fn leader_hashagg_spill_delta_skips_non_gather_and_heap() {
+        install_seams_once();
+        let cx = mcx::MemoryContext::new_bump("costsize-test");
+        let mcx = cx.mcx();
+        let costs = types_pathnodes::AggClauseCosts::default();
+
+        // Serial hashagg (input is not a Gather): pure C costing kept.
+        let (mut run, agg, gather) = leader_hashagg_fixture(mcx, true);
+        let PathNode::GatherPath(g) = run.root.path(gather) else { unreachable!() };
+        let inner = g.subpath.unwrap();
+        cost_agg_leader_spill_adjust(
+            &mut run,
+            agg,
+            types_pathnodes::AGG_HASHED,
+            inner,
+            &costs,
+            SPILLY_GROUPS,
+            INPUT_TUPLES,
+            INPUT_WIDTH,
+        );
+        let p = run.root.path(agg).base();
+        assert_eq!((p.startup_cost, p.total_cost), (1000.0, 2000.0));
+
+        // Heap-only plan (no pgrcolumnar baserel): untouched bit-for-bit.
+        let (mut run, agg, gather) = leader_hashagg_fixture(mcx, false);
+        cost_agg_leader_spill_adjust(
+            &mut run,
+            agg,
+            types_pathnodes::AGG_HASHED,
+            gather,
+            &costs,
+            SPILLY_GROUPS,
+            INPUT_TUPLES,
+            INPUT_WIDTH,
+        );
+        let p = run.root.path(agg).base();
+        assert_eq!((p.startup_cost, p.total_cost), (1000.0, 2000.0));
+    }
 }

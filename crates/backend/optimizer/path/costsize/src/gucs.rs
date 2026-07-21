@@ -50,12 +50,37 @@ session_guc_cluster!(CostsizeGucs, COSTSIZE_GUCS:
 // live with their original definitions on the old branch
 // (guc_tables::consts @ inter-query-scheduling).
 
-// pgrcolumnar-path Gather setup: measured one-time thread-native startup
-// (~11ms flat) vs C's fork-based ~1-2ms that DEFAULT_PARALLEL_SETUP_COST
-// prices. PROVISIONAL — re-measure when lane-v2 parallel over pgrcolumnar lands.
-pub const DEFAULT_PGRCOLUMNAR_PARALLEL_SETUP_COST: f64 = 32000.0;
-// pgrcolumnar-path Gather per-tuple transfer (chunked transport ~27ns/tuple).
-pub const DEFAULT_PGRCOLUMNAR_PARALLEL_TUPLE_COST: f64 = 0.005;
+// pgrcolumnar-path Gather setup/transfer pricing — GUC-ANCHORED (runtime
+// cost-model step 0a, scratchpad/night/runtime-cost-model-design.md §5).
+//
+// These shipped as flat compile-time constants (32000.0 / 0.005) that ignored
+// parallel_setup_cost/parallel_tuple_cost entirely, which made pgrcolumnar
+// Gather pricing un-sweepable: the q33 probe's parallel_setup_cost 100:1000
+// and parallel_tuple_cost 0.01:0.1 A/Bs were byte-identical no-ops
+// (scratchpad/night/q33-regression-probe.md, probes A/B). They are now
+// MULTIPLIERS of the GUCs, derived so that at the shipped t34 defaults
+// (parallel_setup_cost=100, parallel_tuple_cost=0.01 — guc_tables::consts)
+// the computed prices reproduce the previous flat values EXACTLY
+// (320 * 100 = 32000; 0.5 * 0.01 = 0.005; both products are exact in f64,
+// pinned by pgrcolumnar_gather_pricing_anchored_at_defaults below), so
+// default-config plans and EXPLAIN costs are byte-identical to the flat era.
+//
+// Provenance of the anchored values (unchanged from the flat constants):
+// setup 32000 = measured one-time LEGACY cold-spawn thread startup (~11ms)
+// vs the C fork ~1-2ms that the old parallel_setup_cost=1000 priced.
+// PROVISIONAL and known stale for warm-pool sessions (the same measurement
+// chain that re-set parallel_setup_cost to 100 at t34 —
+// docs/design/jit-parallel-defaults.md); honest re-derivation is step-1
+// calibration work — step 0 by design preserves default-equivalent pricing.
+// tuple 0.005 = measured chunked transport ~27ns/tuple.
+pub const PGRCOLUMNAR_PARALLEL_SETUP_MULTIPLIER: f64 = 320.0;
+pub const PGRCOLUMNAR_PARALLEL_TUPLE_MULTIPLIER: f64 = 0.5;
+// Default-equivalent values (multiplier * default GUC), kept as the anchoring
+// contract for the drift test and external references.
+pub const DEFAULT_PGRCOLUMNAR_PARALLEL_SETUP_COST: f64 =
+    PGRCOLUMNAR_PARALLEL_SETUP_MULTIPLIER * guc_tables::consts::DEFAULT_PARALLEL_SETUP_COST;
+pub const DEFAULT_PGRCOLUMNAR_PARALLEL_TUPLE_COST: f64 =
+    PGRCOLUMNAR_PARALLEL_TUPLE_MULTIPLIER * guc_tables::consts::DEFAULT_PARALLEL_TUPLE_COST;
 // pgrcolumnar no-stats group-key ndistinct ratio (0 disables = C behavior);
 // superseded per column once a footer-NDV-backed ANALYZE has run.
 pub const DEFAULT_PGRCOLUMNAR_GROUP_NDISTINCT_RATIO: f64 = 0.05;
@@ -64,11 +89,11 @@ pub const DEFAULT_PGRCOLUMNAR_GROUP_NDISTINCT_RATIO: f64 = 0.05;
 pub const DEFAULT_PGRCOLUMNAR_GATHER_SORT_TUPLE_COST: f64 = 30.0;
 
 pub fn pgrcolumnar_parallel_setup_cost() -> f64 {
-    DEFAULT_PGRCOLUMNAR_PARALLEL_SETUP_COST
+    PGRCOLUMNAR_PARALLEL_SETUP_MULTIPLIER * parallel_setup_cost()
 }
 
 pub fn pgrcolumnar_parallel_tuple_cost() -> f64 {
-    DEFAULT_PGRCOLUMNAR_PARALLEL_TUPLE_COST
+    PGRCOLUMNAR_PARALLEL_TUPLE_MULTIPLIER * parallel_tuple_cost()
 }
 
 pub fn pgrcolumnar_group_ndistinct_ratio() -> f64 {
@@ -110,6 +135,41 @@ pub fn pgrcolumnar_footer_ndv_est() -> bool {
             std::env::var("PGRUST_CBSTORE_FOOTER_NDV_EST").as_deref(),
             Ok("0") | Ok("off")
         )
+    })
+}
+
+// --- Step-0b: leader-hashagg spill honesty over Gather ----------------------
+//
+// Executor-honest per-group footprint multiplier for a leader-side hashed
+// Agg fed by a Gather/GatherMerge on a pgrcolumnar-fed plan. C's
+// hash_agg_entry_size counts only the tuple + pergroup chunks — for the q33
+// shape (width 12, one transinfo, transitionSpace 0) that is
+// 16 + MAXALIGN(MAXALIGN(15)+12) + 16 = 64 B/group, pricing a 10M-group
+// leader table at 0.64GB. The leader's REAL working set (TupleHash bucket
+// array + palloc chunk rounding + firstTuple copies) measured ~3.03GB peak
+// TreeRssAnon in-memory and crossed a 2GB budget into spill
+// (scratchpad/night/q33-regression-probe.md, probe E2: work_mem 512MB*4 =
+// 2GB -> 9.6s spilling; 1GB*4 = 4GB -> 0.93s in-memory; same plan).
+// 3.03e9 / (1e7 * 64) = 4.73 -> 4.7. Both fleet anchors are reproduced at
+// 4.7: predicted working set 3.008GB > 2GB budget (spill priced) and
+// < 4GB budget (no spill term). Applied ONLY to the honest-Gather spill
+// delta (costsize::cost_agg_leader_spill_adjust); C's cost_agg spill block
+// keeps the unscaled entry size everywhere, so heap plans and serial
+// hashaggs are untouched bit-for-bit.
+pub const DEFAULT_PGRCOLUMNAR_LEADER_HASHAGG_ENTRY_SCALE: f64 = 4.7;
+
+/// Entry-scale for the leader-hashagg-over-Gather spill delta.
+/// `PGRUST_CBSTORE_LEADER_SPILL_COST=0`/`off` disables (None); a positive
+/// numeric value overrides the scale for calibration sweeps.
+pub fn pgrcolumnar_leader_hashagg_entry_scale() -> Option<f64> {
+    static V: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+    *V.get_or_init(|| match std::env::var("PGRUST_CBSTORE_LEADER_SPILL_COST").as_deref() {
+        Ok("0") | Ok("off") => None,
+        Ok(s) => match s.parse::<f64>() {
+            Ok(v) if v > 0.0 => Some(v),
+            _ => Some(DEFAULT_PGRCOLUMNAR_LEADER_HASHAGG_ENTRY_SCALE),
+        },
+        Err(_) => Some(DEFAULT_PGRCOLUMNAR_LEADER_HASHAGG_ENTRY_SCALE),
     })
 }
 
