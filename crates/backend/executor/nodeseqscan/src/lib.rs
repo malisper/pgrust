@@ -1890,6 +1890,52 @@ pub fn seq_scan_batch_soa_prepare_varlane<'mcx>(
     true
 }
 
+/// SE-T2AGG CAR B (string-min/max engagement fix): shed the fold feed's own
+/// bare varlena REMAP staging (`seq_scan_batch_soa_prepare_varlane`'s exact
+/// shape: `key_col == attnum`, varkey pass, NO qual arming, NO co-resident
+/// consumer — lane/stitch/contains/proj/dict all absent) so the caller can
+/// arm the full-prefix columnar deform in its place. The remap staging hosts
+/// ONE column at SoA index 0 and cannot widen, while the runtime agg sink's
+/// drains read DIRECT SoA indexes — on QUAL-FREE single-varlena grouped
+/// shapes (string min/max passengers, plain and bounded-top-n compositions
+/// alike) the sink's mandatory re-arm ([`seq_scan_cb_columnar_arm`]) used to
+/// hit the foreign-consumer guard and refuse EVERY engagement, landing the
+/// probe-suppressed plan SERIAL (the suppress-then-unarmed bug class).
+///
+/// QUAL-FREE scans only (`ss.qual` must be None): the plain columnar arm
+/// never stages a qual program, and the sink drains read the selection as
+/// the WHOLE qual verdict — on a qualed scan whose lane arm refused (the
+/// only way a qualed scan still carries the bare remap here), shedding
+/// would silently drop the qual. Those shapes keep today's refusal.
+/// `false` = a qual is present, the staged batch is not the bare remap
+/// shape (a foreign consumer owns it), or nothing is staged — nothing is
+/// changed, the caller keeps its refusal. A later serial fallback re-arms
+/// the remap through the staging ladder (`seq_scan_batch_soa_prepare_varlane`
+/// rebuilds on any non-memo-hit), so shedding is never observable outside
+/// the engagement attempt.
+pub fn seq_scan_cb_varlane_shed(node: &mut SeqScanState<'_>, attnum: u16) -> bool {
+    if node.ss.qual.is_some() {
+        return false;
+    }
+    match node.batch_soa.as_deref() {
+        Some(b)
+            if b.key_col == Some(attnum)
+                && b.varkey.is_some()
+                && !b.qual_armed
+                && b.nquals == 0
+                && b.contains.is_none()
+                && b.lane.is_none()
+                && b.stitch.is_none()
+                && b.proj.is_none()
+                && b.dict_group.is_none() =>
+        {
+            node.batch_soa = None;
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Arm the contains-LIKE kernel qual (the lane-v2 strsearch tier,
 /// `notes/strsearch-parity-2026-07-12.md`): the scan qual is exactly one
 /// `scan_var LIKE '%literal%'` clause (execexpr's `scan_contains_clause`

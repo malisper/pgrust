@@ -2390,6 +2390,21 @@ fn sink_rearm_vguard_columnar<'mcx>(
     if ::nodeseqscan::seq_scan_batch_soa(ss).is_some_and(|soa| soa.ncols() as i32 >= need) {
         return true;
     }
+    // String-min/max engagement fix (suppress-then-unarmed bug class): on
+    // QUAL-FREE single-varlena shapes the staging ladder armed the varkey
+    // REMAP (one column at SoA 0, plan ncols == 0), which can never satisfy
+    // `need` and which `seq_scan_cb_columnar_arm`'s foreign-consumer guard
+    // rightly refuses to clobber — so every qual-free engagement refused
+    // here ("vguard columnar staging") and the probe-suppressed plan landed
+    // SERIAL. The remap is the fold feed's OWN staging (bare shape proven by
+    // the shed's precondition, qual-free scans only — fn doc), so shed it
+    // and arm the full columnar prefix — the direct-index staging the sink
+    // drains require, the exact staging the QUALED path gets from the
+    // PREWHERE dual arm. A later serial fallback re-arms the remap
+    // idempotently through `arm_scan_staging`'s ladder.
+    if let Some(vcol) = lanefold_varlane_col(plan) {
+        let _ = ::nodeseqscan::seq_scan_cb_varlane_shed(ss, vcol);
+    }
     ::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, need, None)
         && ::nodeseqscan::seq_scan_batch_soa(ss).is_some_and(|soa| soa.ncols() as i32 >= need)
 }
