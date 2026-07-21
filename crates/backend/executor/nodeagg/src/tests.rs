@@ -2810,3 +2810,34 @@ fn byref_merge_handed_tables_share_leader_bucket_mapping_under_variable_iv() {
         "one merged group per key — duplicate finalize groups otherwise (write_parallel unique-index class)",
     );
 }
+
+/// SE-GROUPONLY knob (night/subquery-admission): `PGRUST_LANE_V2_GROUPONLY`
+/// is default OFF and only `1`/`on` arm it — every other spelling fails
+/// safe to today's behaviour ("no lanefold plan (classify refused)" — the
+/// legacy row-at-a-time build). Pins the inert-at-default guarantee.
+#[test]
+fn grouponly_knob_is_default_off() {
+    assert!(!crate::grouponly_spelling_on(None), "unset must be OFF (default)");
+    assert!(!crate::grouponly_spelling_on(Some("0")));
+    assert!(!crate::grouponly_spelling_on(Some("off")));
+    assert!(!crate::grouponly_spelling_on(Some("")));
+    assert!(!crate::grouponly_spelling_on(Some("true")), "typos fail safe to OFF");
+    assert!(!crate::grouponly_spelling_on(Some("ON")), "case-sensitive, like the arm knobs");
+    assert!(crate::grouponly_spelling_on(Some("1")));
+    assert!(crate::grouponly_spelling_on(Some("on")));
+}
+
+/// SE-GROUPONLY: the vacuous fold plan is structurally empty — no
+/// transitions, no lane columns, no guards, unguarded — so every grouped
+/// fold over it is a no-op by construction and the dangling pergroup
+/// sentinels the zero-trans probes hand back are never dereferenced.
+#[test]
+fn grouponly_empty_plan_is_vacuous() {
+    let ctx = ::mcx::MemoryContext::new("grouponly-test");
+    let plan = ::lanefold::empty_plan(ctx.mcx());
+    assert!(plan.trans.is_empty());
+    assert!(plan.cols.is_empty());
+    assert!(plan.guards.is_empty() && plan.vguards.is_empty() && plan.uguards.is_empty());
+    assert!(plan.filters.is_empty() && plan.resid.is_empty());
+    assert!(!plan.guarded);
+}

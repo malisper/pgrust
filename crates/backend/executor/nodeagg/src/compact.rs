@@ -535,7 +535,12 @@ pub fn agg_hash_compact_try_arm(node: &mut AggStateData<'_>) -> CompactArm {
         return CompactArm::KeyKind;
     };
     let additionalsize = ph.hashtable.additionalsize();
-    debug_assert!(additionalsize > 0, "K2 shapes carry a fold plan (numtrans > 0)");
+    // SE-GROUPONLY: zero-transition (grouping-only) builds carry 0-byte
+    // state rows — legal since the vacuous fold plan (lanefold::empty_plan).
+    debug_assert!(
+        additionalsize > 0 || node.trans_init.is_empty(),
+        "K2 shapes carry a fold plan (numtrans > 0) or none at all (group-only)"
+    );
     // Spill-eligibility estimate at half margin ([`single_word_spillrisk`],
     // the single-sourced arithmetic — the M2 sink leader mirror reads it
     // too). M3.5 spill-armed sink builds vacate the estimate refusal
@@ -848,7 +853,11 @@ fn mk_admit_n(
         return Err(CompactArm::KeyKind);
     }
     let additionalsize = ph.hashtable.additionalsize();
-    debug_assert!(additionalsize > 0, "fold-fed shapes carry transitions (numtrans > 0)");
+    // SE-GROUPONLY: zero-transition builds carry 0-byte state rows.
+    debug_assert!(
+        additionalsize > 0 || node.trans_init.is_empty(),
+        "fold-fed shapes carry transitions (numtrans > 0) or none at all (group-only)"
+    );
     // Spill-eligibility estimate at half margin (compact v1 formula; the
     // 2-word key rides the same 8-B slack term — conservative either way).
     // M3.5 spill-armed sink admission (the q33@100M hmm=2 cliff): a live
@@ -899,9 +908,10 @@ fn compact_single_word_gates(node: &AggStateData<'_>) -> Result<u64, CompactArm>
     if let Some(cap) = ph.sink_cap {
         numgroups = numgroups.min(cap as u64);
     }
+    // SE-GROUPONLY: zero-transition builds carry 0-byte state rows.
     debug_assert!(
-        ph.hashtable.additionalsize() > 0,
-        "fold-fed shapes carry transitions (numtrans > 0)"
+        ph.hashtable.additionalsize() > 0 || node.trans_init.is_empty(),
+        "fold-fed shapes carry transitions (numtrans > 0) or none at all (group-only)"
     );
     // M3.5 spill-armed sink admission: single-word keys are always
     // spillable — a live spill arm vacates the estimate refusal (the
@@ -1808,18 +1818,22 @@ fn compact_migrate<'mcx>(
         let ix = ix.expect("non-spill-mode lookup always yields an entry");
         debug_assert!(isnew, "compact rows are distinct groups");
         ph.hash_ngroups_current += 1;
-        let dst = ph
-            .hashtable
-            .entry_additional(ix)
-            .expect("numtrans > 0 tables carry additional space");
-        // SAFETY: both blocks are `additionalsize` bytes — the C entry's
-        // zeroed additional area and the compact row's live states.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                ch.table.row_states(row),
-                dst.as_ptr(),
-                additionalsize,
-            );
+        // SE-GROUPONLY: zero-transition tables have no state block to carry
+        // over — the C entry is complete with its key image alone.
+        if additionalsize > 0 {
+            let dst = ph
+                .hashtable
+                .entry_additional(ix)
+                .expect("numtrans > 0 tables carry additional space");
+            // SAFETY: both blocks are `additionalsize` bytes — the C entry's
+            // zeroed additional area and the compact row's live states.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    ch.table.row_states(row),
+                    dst.as_ptr(),
+                    additionalsize,
+                );
+            }
         }
     }
     // One post-hoc limits check (spill mode may engage for the C path's

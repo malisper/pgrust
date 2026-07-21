@@ -334,7 +334,7 @@ env	crates/backend/executor/nodeagg/src/codedgroup.rs	3
 env	crates/backend/executor/nodeagg/src/compact.rs	3
 env	crates/backend/executor/nodeagg/src/distinctset.rs	2
 env	crates/backend/executor/nodeagg/src/hashgrouped.rs	4
-env	crates/backend/executor/nodeagg/src/lib.rs	3
+env	crates/backend/executor/nodeagg/src/lib.rs	4	DST-REVIEW(night/subquery-admission): SE-GROUPONLY lane knob (PGRUST_LANE_V2_GROUPONLY, default OFF) — the pre-existing lane-executor knob pattern (env read + OnceLock cache); routing onto the knobs registry chartered to the DST program with the rest of the lane knob family
 env	crates/backend/executor/nodeagg/src/merge.rs	4
 env	crates/backend/executor/nodeagg/src/pardistinct.rs	4
 env	crates/backend/executor/nodeagg/src/sink.rs	4
@@ -502,7 +502,7 @@ once	crates/backend/executor/nodeagg/src/codedgroup.rs	3
 once	crates/backend/executor/nodeagg/src/compact.rs	3
 once	crates/backend/executor/nodeagg/src/distinctset.rs	2
 once	crates/backend/executor/nodeagg/src/hashgrouped.rs	4
-once	crates/backend/executor/nodeagg/src/lib.rs	3
+once	crates/backend/executor/nodeagg/src/lib.rs	4	DST-REVIEW(night/subquery-admission): SE-GROUPONLY lane knob (PGRUST_LANE_V2_GROUPONLY, default OFF) — the pre-existing lane-executor knob pattern (env read + OnceLock cache); routing onto the knobs registry chartered to the DST program with the rest of the lane knob family
 once	crates/backend/executor/nodeagg/src/merge.rs	4
 once	crates/backend/executor/nodeagg/src/pardistinct.rs	4
 once	crates/backend/executor/nodeagg/src/sink.rs	4
@@ -636,7 +636,7 @@ rawsync	crates/backend/executor/nodeagg/src/codedgroup.rs	3
 rawsync	crates/backend/executor/nodeagg/src/compact.rs	3
 rawsync	crates/backend/executor/nodeagg/src/distinctset.rs	2
 rawsync	crates/backend/executor/nodeagg/src/hashgrouped.rs	4
-rawsync	crates/backend/executor/nodeagg/src/lib.rs	3
+rawsync	crates/backend/executor/nodeagg/src/lib.rs	4	DST-REVIEW(night/subquery-admission): SE-GROUPONLY lane knob (PGRUST_LANE_V2_GROUPONLY, default OFF) — the pre-existing lane-executor knob pattern (env read + OnceLock cache); routing onto the knobs registry chartered to the DST program with the rest of the lane knob family
 rawsync	crates/backend/executor/nodeagg/src/merge.rs	5
 rawsync	crates/backend/executor/nodeagg/src/pardistinct.rs	5
 rawsync	crates/backend/executor/nodeagg/src/sink.rs	4
