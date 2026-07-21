@@ -441,3 +441,41 @@ fn range_iterator_windows_cover_shared_content() {
     it.end_iterate();
     assert!(it.exhausted());
 }
+
+// bitmap-morsels mode C: union_frozen must equal live union for every
+// exact/lossy combination — frozen partials are the cross-thread build
+// handoff and must fold identically.
+#[test]
+fn union_frozen_matches_live_union() {
+    let corpora: [fn(&mut TIDBitmap<'_>); 4] = [
+        |t| t.add_tuples(&[tid(1, 1), tid(2, 2), tid(7, 40)], false).unwrap(),
+        |t| t.add_tuples(&[tid(2, 5), tid(9, 1)], true).unwrap(),
+        |t| {
+            t.add_tuples(&[tid(3, 3)], false).unwrap();
+            t.add_page(600).unwrap();
+            t.add_page(601).unwrap();
+        },
+        |t| {
+            // lossify pressure: many pages under a tiny budget
+            for blk in 0..3000u32 {
+                t.add_tuples(&[tid(blk * 7 + 1, (blk % 30 + 1) as OffsetNumber)], false)
+                    .unwrap();
+            }
+        },
+    ];
+    for a_fill in corpora {
+        for b_fill in corpora {
+            let ctx = MemoryContext::new("t");
+            // live oracle
+            let mut a1 = build(&ctx, 64 * 1024, a_fill);
+            let b1 = build(&ctx, 64 * 1024, b_fill);
+            a1.union(&b1).unwrap();
+            // frozen path
+            let mut a2 = build(&ctx, 64 * 1024, a_fill);
+            let mut b2 = build(&ctx, 64 * 1024, b_fill);
+            let frozen = b2.prepare_shared_iterate().unwrap();
+            a2.union_frozen(&frozen).unwrap();
+            assert_eq!(drain(&mut a1), drain(&mut a2));
+        }
+    }
+}

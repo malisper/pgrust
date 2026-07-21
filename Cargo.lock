@@ -9347,6 +9347,7 @@ dependencies = [
 name = "nodebitmapindexscan"
 version = "0.1.0"
 dependencies = [
+ "datum",
  "executils",
  "indexam",
  "init_small",
@@ -9354,6 +9355,7 @@ dependencies = [
  "nodeindexscan",
  "postgres_seams",
  "tidbitmap",
+ "types_core",
  "types_error",
  "types_nodes",
  "types_rel",
