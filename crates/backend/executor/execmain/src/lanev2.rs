@@ -54,6 +54,7 @@ mod runtime_sort;
 mod standing_channel;
 mod push;
 mod row_emit;
+mod runtime_passthrough;
 mod rowmode;
 mod rowmode_tail;
 mod stats;
