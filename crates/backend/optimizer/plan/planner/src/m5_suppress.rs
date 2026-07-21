@@ -756,12 +756,24 @@ fn aggjoin_numeric_enabled() -> bool {
 /// behind the executor coherence mirror below and the heap-specific guards
 /// (`jheap_shape_guards`: stats on heap equi keys — the X6 class,
 /// heap-flavored; enable_hashjoin required; unused-index tolerance with
-/// the NL-margin law). DEFAULT OFF; `PGRUST_LANE_V2_JHEAP=1|on` arms
-/// (GL-JHEAP-1 fleet letter owns the default flip).
+/// the NL-margin law).
+///
+/// DEFAULT ON (tpch-flips train; GL-JHEAP-1 FLIP-RECOMMENDED,
+/// fleet-ab-parallelism.md 2026-07-21): heap-side joins engage 2.1-3.1x
+/// vs legacy (grouped-int 2.3-2.8x, multibuild star 2.4-2.9x, real-q19
+/// shape 2.6-3.1x, q05-shaped flagship 2.5-2.9x); JHEAP_NL_MARGIN=4
+/// VALIDATED per-edge (8x and 4.0x-boundary partners engage full-thick,
+/// 2x refuses by name — headroom, no loss at 4); the [1M,2M] row floor
+/// enforced at scale (800k/3M refuse, 1.5M engages). NAMED caveats: at
+/// SF10 census scale the car is INERT — census q19 is an NL+index legacy
+/// plan (66ms hot), NOT a Gather hash join, so its conversion belongs to
+/// the NL-inner-index follow-on family (q03/q04/...); the q14-shaped
+/// ratio emit stays a named gap. `PGRUST_LANE_V2_JHEAP=0|off` is the kill
+/// switch (t35 exact-spelling law).
 fn jheap_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        knob_spelling_armed(std::env::var("PGRUST_LANE_V2_JHEAP").as_deref().ok())
+        knob_spelling_on(std::env::var("PGRUST_LANE_V2_JHEAP").as_deref().ok())
     })
 }
 
@@ -4876,7 +4888,8 @@ mod tests {
     /// the default-OFF inertness and the mirror's default-ON reading.
     #[test]
     fn jheap_knob_default_off_mirror_live() {
-        assert!(!jheap_enabled(), "test process has no knob set => OFF");
+        // tpch-flips: JHEAP is DEFAULT ON (GL-JHEAP-1; =0|off kills).
+        assert!(jheap_enabled(), "tpch-flips: unset => ON (GL-JHEAP-1)");
         assert!(
             k2_heapfeed_live(),
             "K2_PROBE/HEAPFEED default ON (SE9/SE15 flips) => mirror live"
