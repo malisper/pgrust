@@ -3554,6 +3554,29 @@ impl SinkTableHandle {
         }
     }
 
+    /// SEAL-time remainder flush (the runtime sink's seal-flush arm): the
+    /// whole remainder leaves as ONE more radix-partitioned run — the same
+    /// flush bodies the cap/pressure flushes run, so flush-cadence
+    /// semantics-freedom covers it (runs merge first-seen; a final flush at
+    /// SEAL is byte-invisible) — and the combine then streams this Local's
+    /// remainder sequentially (bucket-contiguous keys/states) instead of
+    /// random-accessing its table through a SEAL index. `None` = empty
+    /// table (nothing to hand). Intern-reset semantics are moot at SEAL —
+    /// the table is dropped right after and nothing re-fills it (the run
+    /// copied/stole its canonical bytes, self-contained either way).
+    pub fn flush_remainder(&mut self) -> Option<SinkRun> {
+        if self.0.table.len() == 0 {
+            return None;
+        }
+        if self.0.text_direct {
+            return Some(sink_flush_table_direct(&mut self.0));
+        }
+        if compact_canon_shape(&self.0).is_some() {
+            return Some(sink_flush_table_canon(&mut self.0));
+        }
+        Some(sink_flush_table(&mut self.0.table))
+    }
+
     /// This handle's retained footprint (compact + intern tables + the
     /// stored canonical row hashes) — the SEAL-time budget accounting twin
     /// of [`agg_sink_table_mem`].
@@ -5022,6 +5045,70 @@ mod tests {
             assert_eq!(m, want_m.max(if k < 1000 { k } else { want_m }), "max of key {k}");
         }
         assert_eq!(null_seen, Some((3, 7)));
+    }
+
+    #[test]
+    fn seal_flush_run_matches_remainder_view() {
+        // The seal-flush arm's byte-identity claim, unit form: combining a
+        // Local's remainder through the SEAL index (incumbent) and through a
+        // final flush_remainder run appended LAST (seal-flush) must produce
+        // per-bucket tables identical in row order and state content.
+        let build = || {
+            let mut t1 = mk_table(64);
+            for k in 0..1000 {
+                bump(&mut t1, Some(k), 1, k);
+            }
+            bump(&mut t1, None, 1, 7);
+            let run = sink_flush_table(&mut t1);
+            for k in 300..1300 {
+                bump(&mut t1, Some(k), 2, 2 * k);
+            }
+            bump(&mut t1, None, 2, 3);
+            let ch = crate::compact::compact_hash_for_tests(
+                t1,
+                crate::compact::CompactKeySpec::Single { width: 8 },
+                None,
+            );
+            (SinkTableHandle(ch), run)
+        };
+        let combines = test_combines();
+
+        // Incumbent: run + remainder view over the SEAL index.
+        let (mut h_a, run_a) = build();
+        let part_a = h_a.partition_remainder();
+        let rem_a = h_a.remainder_view(&part_a);
+        let locals_a = [SinkLocalView {
+            spilled: &[],
+            runs: core::slice::from_ref(&run_a),
+            remainder: Some(rem_a),
+        }];
+
+        // Seal-flush: the remainder leaves as one more run, appended last.
+        let (mut h_b, run_b) = build();
+        let flushed = h_b.flush_remainder().expect("non-empty remainder");
+        assert_eq!(h_b.table().nrows(), 0, "flush drains the table");
+        assert!(h_b.flush_remainder().is_none(), "empty table flushes nothing");
+        let runs_b = [run_b, flushed];
+        let locals_b =
+            [SinkLocalView { spilled: &[], runs: &runs_b, remainder: None }];
+
+        for b in 0..SINK_NBUCKETS {
+            let ta = sink_combine_bucket(b, 1, STATE_BYTES, &locals_a, &combines).unwrap();
+            let tb = sink_combine_bucket(b, 1, STATE_BYTES, &locals_b, &combines).unwrap();
+            assert_eq!(ta.nrows(), tb.nrows(), "bucket {b} row count");
+            for row in 0..ta.nrows() {
+                assert_eq!(
+                    ta.row_key_int(row),
+                    tb.row_key_int(row),
+                    "bucket {b} row {row} key (first-seen order)"
+                );
+                assert_eq!(
+                    row_counts(&ta, row),
+                    row_counts(&tb, row),
+                    "bucket {b} row {row} states"
+                );
+            }
+        }
     }
 
     #[test]
