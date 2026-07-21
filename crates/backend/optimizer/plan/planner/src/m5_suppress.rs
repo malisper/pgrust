@@ -45,7 +45,8 @@
 //!     Gather the runtime cannot pick up).
 //!   * `PGRUST_M5_GROUPBY_HIGH_FLOOR=<ngroups>` — the groupby_high
 //!     legacy-hold boundary (§10 default taken: groupby_high stays legacy
-//!     until parity), default 1e6 estimated groups.
+//!     until parity), default 4e6 estimated groups (raised from 1e6,
+//!     night/routing-floor-fixes; setting 1000000 restores the old bound).
 //!   * `PGRUST_M5_SUPPRESS_TRACE=1` — one stderr line per suppressed
 //!     query (class, rel OID, group estimate) for the refusal-rate
 //!     reports.
@@ -578,7 +579,21 @@ fn is_text_family(typ: u32) -> bool {
 
 /// The §10 groupby_high legacy-hold boundary: estimated groups at or above
 /// this stay legacy (the radix-exchange arm still wins there, 2.73× vs
-/// 2.23×). Env-overridable for calibration sweeps.
+/// 2.23× — measured at est_groups≈1e7, the matrix row's workload).
+/// Env-overridable for calibration sweeps, and the override doubles as the
+/// kill switch: `PGRUST_M5_GROUPBY_HIGH_FLOOR=1000000` restores the
+/// pre-2026-07-21 boundary.
+///
+/// Default RAISED 1e6 → 4e6 (night/routing-floor-fixes, fleet letter in the
+/// branch commit): the original 1e6 was derived from the OLD groupby-high
+/// fixture at est_groups≈1e7 and silently held the whole 1e6..1e7 band
+/// legacy. The forced-mt16 routing-gap harvest + the floor=4e6 env A/B
+/// (unforced ClickBench 10M, cbstore9-v8-sorted-v2, c8gd NVMe) showed the
+/// CURRENT runtime agg arm crushes the 1e6..3e6 band (cb q16 0.864s→~0.02s,
+/// q17 0.900s→~0.06s, q34/q35 2.3s→~0.24s) while est_groups≈1e7 (cb q33
+/// class) still loses in the runtime combine until the exchange program
+/// lands — so the boundary moves to 4e6 (above the measured-winning ≈3e6
+/// band, below the known-losing 1e7), NOT to unbounded.
 fn groupby_high_floor() -> f64 {
     static FLOOR: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
     *FLOOR.get_or_init(|| {
@@ -586,7 +601,7 @@ fn groupby_high_floor() -> f64 {
             .ok()
             .and_then(|v| v.trim().parse::<f64>().ok())
             .filter(|v| *v > 0.0)
-            .unwrap_or(1_000_000.0)
+            .unwrap_or(4_000_000.0)
     })
 }
 
