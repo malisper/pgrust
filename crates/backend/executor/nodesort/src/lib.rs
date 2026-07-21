@@ -33,6 +33,7 @@ mod tests;
 // data structures — the runtime SealedParallelSink impl over them lives at
 // the engagement seam (execmain lanev2/runtime_sort.rs, inc-2).
 pub mod fullsort;
+pub mod mjmerge;
 pub mod sink;
 
 pub struct SortState<'mcx> {
@@ -116,6 +117,18 @@ pub fn sort_child_eflags(eflags: i32) -> i32 {
 impl SortState<'_> {
     pub fn sort_done(&self) -> bool {
         self.sort_Done
+    }
+
+    /// Never pulled, fed, or adopted — the whole node state is pristine
+    /// (the MJSORT probe-once law: an engagement bypassing this node may
+    /// proceed only while a later fallback would still drive a virgin
+    /// Volcano tree byte-identically).
+    pub fn sort_virgin(&self) -> bool {
+        !self.sort_Done
+            && self.tuplesortstate.is_none()
+            && self.runtime_full.is_none()
+            && !self.refsort
+            && self.refsort_out.is_empty()
     }
 }
 

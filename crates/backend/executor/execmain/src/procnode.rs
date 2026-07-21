@@ -372,6 +372,15 @@ pub struct MergeJoinNode<'mcx> {
     pub state: ::nodemergejoin::MergeJoinState<'mcx>,
     pub outer: PgBox<'mcx, PlanStateNode<'mcx>>,
     pub inner: PgBox<'mcx, PlanStateNode<'mcx>>,
+    /// MJSORT adopted result (lanev2/runtime_mergejoin — the "merge join
+    /// after sort" car, PGRUST_RUNTIME_MJSORT): both sides' published
+    /// runs + the joined pair lists; the emit face serves them per pull.
+    /// Dropped on rescan/end (the adopted-sort lifecycle).
+    pub mjsort: Option<Box<crate::lanev2::MjSortAdopted>>,
+    /// MJSORT probe-once law: only a node's FIRST pull may engage (a
+    /// refused probe is sticky), so the FSM's stream can never be
+    /// double-fed by a mid-stream engagement. Reset with `mjsort`.
+    pub mjsort_probed: bool,
 }
 
 // Init-time tree node touched by &mut per tuple; rule-9 budget covers the per-row carriers inside.
@@ -1068,6 +1077,8 @@ pub fn exec_init_node<'mcx>(
                     state,
                     outer: ::mcx::alloc_in(mcx, outer)?,
                     inner: ::mcx::alloc_in(mcx, inner)?,
+                    mjsort: None,
+                    mjsort_probed: false,
                 },
             )?)
         }
@@ -3057,6 +3068,15 @@ fn merge_join_arm<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> ProcResult {
     let mj = &mut **mj;
+    // MJSORT dispatch hook (the "merge join after sort" runtime car,
+    // PGRUST_RUNTIME_MJSORT, default OFF — lanev2/runtime_mergejoin.rs):
+    // whole-node ownership (both sorts + the merge run on the morsel
+    // runtime; the adopted face serves the joined pairs). One relaxed
+    // cached-bool load + compare on the default path; on refuse this
+    // falls through byte-identically to the arms below.
+    if let Some(r) = crate::lanev2::try_own_merge_join_mjsort(mj, estate)? {
+        return Ok(r);
+    }
     // WS-MJ1 lane-NATIVE dispatch hook (LANE-MERGEJOIN inc-1, contract §4.1:
     // "one relaxed cached-bool load + compare at the head of the mergejoin
     // dispatch arm" — PGRUST_LANE_V2_MERGEJOIN_NATIVE, default OFF): on
@@ -3074,7 +3094,7 @@ fn merge_join_arm<'mcx>(
     // no arm-level enabled() gate — the MERGEJOIN knob heads the verdict,
     // the GUC rides the fast-admit byte / slow-path head.
     crate::lanev2::merge_join_pull_verdict(mj, estate);
-    let MergeJoinNode { state, outer, inner } = mj;
+    let MergeJoinNode { state, outer, inner, .. } = mj;
     ::nodemergejoin::exec_merge_join(state, &mut **outer, &mut **inner, estate)
 }
 
@@ -3718,6 +3738,10 @@ fn exec_end_node_inner<'mcx>(
         }
         PlanStateNode::MergeJoin(mj) => {
             let mj = &mut **mj;
+            // MJSORT adopted result: released HERE (the exec_end_sort
+            // exemption pattern — the field is forget-exempt in the
+            // census below, so the normal end path must drop it).
+            mj.mjsort = None;
             ::nodemergejoin::exec_end_merge_join(&mut mj.state);
             exec_end_node(&mut mj.outer, estate)?;
             exec_end_node(&mut mj.inner, estate)
@@ -4139,7 +4163,9 @@ pub(crate) fn with_eval_slots_outer<'mcx, R>(
     NestLoopNode<'_> { state, outer, inner, lane_fusible },
     HashSubNode<'_> { state, child },
     HashJoinNode<'_> { state, outer, hash, probe_batch, lane_fusible },
-    MergeJoinNode<'_> { state, outer, inner },
+    // MergeJoinNode.mjsort exempt: released in exec_end_node's MergeJoin
+    // arm and on every rescan (the SortState runtime_full precedent).
+    MergeJoinNode<'_> { state, outer, inner, mjsort_probed; mjsort },
     GatherNode<'_> { state, outer },
     GatherMergeNode<'_> { state, outer },
 );

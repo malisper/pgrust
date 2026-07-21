@@ -86,15 +86,17 @@ fn key_i64(d: ::datum::Datum, w: KeyWidth) -> i64 {
 }
 
 /// One admitted sort key (plain data; workers read it from the payload).
+/// `pub(super)` fields: the MJSORT consumer (runtime_mergejoin) reads the
+/// per-key flags for its cross-side alignment law.
 #[derive(Clone, Copy)]
-struct KeyCol {
+pub(super) struct KeyCol {
     /// Scan column (0-based; the SoA fast-leg read).
     attno_scan: u16,
     /// Position in the outer (child output) desc — the fallback leg reads
     /// this projected slot cell.
     resno_outer: usize,
-    desc: bool,
-    nulls_first: bool,
+    pub(super) desc: bool,
+    pub(super) nulls_first: bool,
     width: KeyWidth,
     /// DictCode class (docs/design/dict-code-flow.md inc-1): the key is a
     /// dict-text column ordered by its v7 part-global byte-rank code (u32,
@@ -105,6 +107,15 @@ struct KeyCol {
     /// no order-preserving i64) — any fallback-forced row or unstitched /
     /// non-dict window is a sink contract break (RG abort, serial rerun).
     dictcode: bool,
+}
+
+impl KeyCol {
+    /// U32 (Oid) key class — the MJSORT cross-side law needs the signed/
+    /// unsigned split to line up (i64 widening preserves equality only
+    /// within one class).
+    pub(super) fn is_unsigned(&self) -> bool {
+        matches!(self.width, KeyWidth::U32)
+    }
 }
 
 struct TopnSpec {
@@ -266,9 +277,11 @@ fn topn_spec<'mcx>(
 
 /// Shape-(b) full-sort spec: UNBOUNDED forward-only sorts; the shared key
 /// vocabulary + the self-contained-copy column census (byval / fixed-len
-/// byref / varlena; cstring refuses).
-struct FullSpec {
-    keys: Vec<KeyCol>,
+/// byref / varlena; cstring refuses). `pub(super)`: the MJSORT consumer
+/// (runtime_mergejoin) probes both merge-join Sort children through this
+/// spec and reads the keys for its cross-side alignment law.
+pub(super) struct FullSpec {
+    pub(super) keys: Vec<KeyCol>,
     natts: usize,
     cols: Vec<::nodesort::fullsort::RunCol>,
 }
@@ -278,9 +291,23 @@ fn full_spec<'mcx>(
     ss: &::nodeseqscan::SeqScanState<'mcx>,
     outer_desc: &::types_tuple::TupleDescData<'static>,
 ) -> Option<FullSpec> {
+    full_spec_ex(state, ss, outer_desc, false)
+}
+
+/// [`full_spec`] with the randomAccess refusal parameterized (`allow_ra`).
+/// The Sort-node arm NEVER allows it (the adopted emit face cannot serve
+/// random-access reads); the MJSORT consumer does — it never installs an
+/// emit face on the Sort node (the published runs are merged internally),
+/// so the RA-shaped merge-join INNER (EXEC_FLAG_MARK) is admissible.
+fn full_spec_ex<'mcx>(
+    state: &::nodesort::SortState<'mcx>,
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+    outer_desc: &::types_tuple::TupleDescData<'static>,
+    allow_ra: bool,
+) -> Option<FullSpec> {
     // Bounded sorts are the top-N arm's; rewind/mark/backward shapes
     // refuse (the runtime result is forward-streamed once).
-    if state.bounded || state.randomAccess {
+    if state.bounded || (state.randomAccess && !allow_ra) {
         return None;
     }
     let (keys, _tlist_map) = sort_keys_and_map(state, ss, outer_desc)?;
@@ -399,8 +426,8 @@ pub(super) struct FullShared {
 }
 
 pub(super) struct FullPublish {
-    runs: Vec<Arc<::nodesort::fullsort::FullRun>>,
-    parts: Vec<Vec<(u16, u32)>>,
+    pub(super) runs: Vec<Arc<::nodesort::fullsort::FullRun>>,
+    pub(super) parts: Vec<Vec<(u16, u32)>>,
 }
 
 // SAFETY: `out_parts` slots follow the single-writer-per-partition sink
@@ -1981,19 +2008,35 @@ pub(super) fn try_own_sort<'mcx>(
     // Router counter choke point (M5-1): Engaged = ceremony entered;
     // Completed = the runtime answered; Fallback = R5 serial rerun.
     router::tick(ArmClass::Sort, ArmCounter::Engaged);
-    let r = engage(
-        state,
-        ss,
-        outer_desc,
-        estate,
-        rt,
-        dop,
-        total_granules,
-        starts,
-        spec,
-        scan_node,
-        zone,
-    )?;
+    let outcome = engage(estate, rt, dop, total_granules, starts, &spec, scan_node, zone)?;
+    // Adoption (the emit-face install) happens HERE, outside the ceremony
+    // frame, so the MJSORT consumer (`full_sort_engage_publish`) can share
+    // the whole engagement and take the published result un-adopted.
+    let r = match (outcome, &spec) {
+        (EngageOutcome::Fallback, _) => {
+            // M2 inc-3 rung-2 fallback-floor accounting rides the moved
+            // match (the ceremony returns the raw outcome since mjsort).
+            super::stats::tick_engaged(
+                STANDING_ARM.label,
+                super::stats::EngageChannel::Serial,
+            );
+            lane_trace("runtime-sort: fallback to serial arm");
+            false
+        }
+        (EngageOutcome::Completed(winners), ArmSpec::Topn(spec)) => {
+            adopt_winners(state, ss, outer_desc, estate, spec, winners)?
+        }
+        (EngageOutcome::CompletedFull(publish), ArmSpec::Full(..)) => {
+            ::nodesort::sort_lane_runtime_full_adopt(state, publish.runs, publish.parts);
+            trace_feed("runtime full sort adopt + partition emit engaged");
+            lane_trace(&format!(
+                "runtime-sort: complete (full), rows={}",
+                ::nodesort::sort_lane_runtime_full_rows(state)
+            ));
+            true
+        }
+        _ => return Err(Box::new(PgError::new(ERROR, "runtime sort outcome/arm mismatch"))),
+    };
     router::tick(
         ArmClass::Sort,
         if r { ArmCounter::Completed } else { ArmCounter::Fallback },
@@ -2014,28 +2057,25 @@ const FULLSORT_PARTS: usize = 256;
 
 #[allow(clippy::too_many_arguments)]
 fn engage<'mcx>(
-    state: &mut ::nodesort::SortState<'mcx>,
-    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
-    outer_desc: &::types_tuple::TupleDescData<'static>,
     estate: &mut EStateData<'mcx>,
     rt: &'static Arc<runtime::Runtime>,
     dop: i32,
     total_granules: u64,
     starts: Vec<u64>,
-    spec: ArmSpec,
+    spec: &ArmSpec,
     scan_node: ::types_nodes::node_tree::Node<'mcx>,
     // GCUT zone stats (per-granule best cut64 words + cutoff seed),
     // computed ONCE by `try_own_sort`'s band predicate and passed
     // through. `None` = no zone machinery (GCUT off, dictcode lead,
     // full-sort spec, or stats unavailable).
     zone: Option<(Arc<Vec<u64>>, Option<u64>)>,
-) -> PgResult<bool> {
+) -> PgResult<EngageOutcome> {
     ensure_hooks_registered();
     crate::execparallel::register_parallel_query_main();
 
     let pstmt = crate::execparallel::build_worker_pstmt(estate, scan_node)?;
 
-    let (keys, bound, full) = match &spec {
+    let (keys, bound, full) = match spec {
         ArmSpec::Topn(s) => (s.keys.clone(), s.bound, None),
         ArmSpec::Full(s, budget) => (
             s.keys.clone(),
@@ -2099,18 +2139,7 @@ fn engage<'mcx>(
     });
 
     xact::EnterParallelMode();
-    let engaged = engage_ceremony(
-        state,
-        ss,
-        outer_desc,
-        estate,
-        rt,
-        dop,
-        total_granules,
-        starts,
-        &payload,
-        &spec,
-    );
+    let engaged = engage_ceremony(rt, dop, total_granules, starts, &payload, spec);
     xact::ExitParallelMode();
     engaged
 }
@@ -2196,19 +2225,14 @@ fn finish_outcome(
     Ok(EngageOutcome::Completed(winners))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn engage_ceremony<'mcx>(
-    state: &mut ::nodesort::SortState<'mcx>,
-    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
-    outer_desc: &::types_tuple::TupleDescData<'static>,
-    estate: &mut EStateData<'mcx>,
+fn engage_ceremony(
     rt: &'static Arc<runtime::Runtime>,
     dop: i32,
     total_granules: u64,
     starts: Vec<u64>,
     payload: &Arc<RuntimeSortShared>,
     spec: &ArmSpec,
-) -> PgResult<bool> {
+) -> PgResult<EngageOutcome> {
     let pcxt = parallel::CreateParallelContext("postgres", "pgrust_runtime_sort_main", dop)?;
     let mut submitted: Option<runtime::RgHandle> = None;
 
@@ -2453,30 +2477,7 @@ fn engage_ceremony<'mcx>(
     let destroy = parallel::DestroyParallelContext(pcxt);
     let outcome = body?;
     destroy?;
-
-    match (outcome, spec) {
-        (EngageOutcome::Fallback, _) => {
-            super::stats::tick_engaged(
-                STANDING_ARM.label,
-                super::stats::EngageChannel::Serial,
-            );
-            lane_trace("runtime-sort: fallback to serial arm");
-            Ok(false)
-        }
-        (EngageOutcome::Completed(winners), ArmSpec::Topn(spec)) => {
-            adopt_winners(state, ss, outer_desc, estate, spec, winners)
-        }
-        (EngageOutcome::CompletedFull(publish), ArmSpec::Full(..)) => {
-            ::nodesort::sort_lane_runtime_full_adopt(state, publish.runs, publish.parts);
-            trace_feed("runtime full sort adopt + partition emit engaged");
-            lane_trace(&format!(
-                "runtime-sort: complete (full), rows={}",
-                ::nodesort::sort_lane_runtime_full_rows(state)
-            ));
-            Ok(true)
-        }
-        _ => Err(Box::new(PgError::new(ERROR, "runtime sort outcome/arm mismatch"))),
-    }
+    Ok(outcome)
 }
 
 /// The leader's late-materialization gather (refsort v2, design §4): decode
@@ -2532,6 +2533,111 @@ fn adopt_winners<'mcx>(
         spec.bound
     ));
     Ok(true)
+}
+
+// ---------------------------------------------------------------------------
+// MJSORT consumer entries (lanev2/runtime_mergejoin.rs — the "merge join
+// after sort" tier-2 car, m5-coverage row merge-join-parallel): the SAME
+// full-sort admission battery + engagement, in PUBLISH mode — the sealed
+// runs + partition outputs return to the caller instead of adopting onto
+// the Sort node's emit face. Two deliberate deltas from `try_own_sort`,
+// both consumer-lawful:
+//   * NO router ticks / sort-arm refusal taxonomy (the caller owns its own
+//     witnesses; the sort arm's counters must not see another arm's
+//     probes). The battery itself is kept in LOCKSTEP with try_own_sort's
+//     full-shape arm — divergence is a bug, comment-linked there.
+//   * randomAccess is ADMISSIBLE (`full_spec_ex(allow_ra)`): no emit face
+//     is installed on the Sort node, so the RA-shaped merge-join INNER
+//     (EXEC_FLAG_MARK) never has random-access reads to serve.
+// ---------------------------------------------------------------------------
+
+/// One admitted merge-join side, probe output: everything the engagement
+/// needs, derived without consuming any node state.
+pub(super) struct MjSortSideProbe<'mcx> {
+    pub(super) spec_keys: Vec<KeyCol>,
+    spec: FullSpec,
+    budget: usize,
+    total_granules: u64,
+    starts: Vec<u64>,
+    scan_node: ::types_nodes::node_tree::Node<'mcx>,
+    pub(super) dop: i32,
+}
+
+/// The full-sort admission battery for ONE merge-join Sort child.
+/// `Ok(Err(reason))` = refused (the caller traces it; nothing consumed,
+/// the serial arm runs byte-identically). Session-level gates (EPQ /
+/// instrument / params / snapshot / policy / parallel-mode) are the
+/// CALLER's — they are per-estate, probed once for both sides.
+pub(super) fn full_sort_probe_for_mjsort<'mcx>(
+    state: &::nodesort::SortState<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    outer_desc: &::types_tuple::TupleDescData<'static>,
+    estate: &mut EStateData<'mcx>,
+    dop: i32,
+) -> PgResult<Result<MjSortSideProbe<'mcx>, &'static str>> {
+    if !seq_scan_fusible(ss, estate)? {
+        return Ok(Err("scan not fusible"));
+    }
+    let Some(spec) = full_spec_ex(state, ss, outer_desc, true) else {
+        return Ok(Err("full-sort shape spec (key vocabulary/tlist/column census)"));
+    };
+    // Per-participant budget: work_mem per Local (design §7) — the
+    // try_own_sort full-arm estimate, verbatim.
+    let budget = (::init_small::globals::work_mem().max(64) as usize) * 1024;
+    let est_row = state.plan.plan.plan_width.max(1) as f64
+        + core::mem::size_of::<::nodesort::fullsort::RunEnt>() as f64
+        + (spec.natts * 9) as f64;
+    let est_per_local = state.plan.plan.plan_rows.max(0.0) * est_row / dop.max(1) as f64;
+    if est_per_local > budget as f64 {
+        return Ok(Err("full-sort admission estimate exceeds work_mem per participant"));
+    }
+    let Some(scan_node) = state.plan.plan.lefttree else {
+        return Ok(Err("sort child missing"));
+    };
+    if scan_node.node_tag() != NodeTag::T_SeqScan {
+        return Ok(Err("sort child not SeqScan"));
+    }
+    let scan_plan = scan_node.as_seq_scan().expect("SeqScan tag");
+    if !super::runtime_scan::exprs_parallel_safe(scan_plan.scan.plan.qual.iter())?
+        || !super::runtime_scan::exprs_parallel_safe(scan_plan.scan.plan.targetlist.iter())?
+    {
+        return Ok(Err("parallel-unsafe scan exprs"));
+    }
+    let Some((total_granules, starts)) = ::nodeseqscan::seq_scan_cb_granule_geometry(ss, estate)?
+    else {
+        return Ok(Err("granule geometry unavailable (no columnar part)"));
+    };
+    if total_granules < super::runtime_scan::min_granules().max(2 * dop as u64) {
+        return Ok(Err("granule floor"));
+    }
+    let dop = super::runtime_scan::elastic_dop(dop, total_granules);
+    let spec_keys = spec.keys.clone();
+    Ok(Ok(MjSortSideProbe { spec_keys, spec, budget, total_granules, starts, scan_node, dop }))
+}
+
+/// Engage one probed side in PUBLISH mode: the whole `engage` ceremony
+/// (payload, parallel context, standing/launched channels, liveness,
+/// teardown), the published runs + partition outputs returned un-adopted.
+/// `None` = engagement fell back (nothing consumed; the caller reruns the
+/// serial arm — R5). NOTE the one shared-taxonomy residue: worker-phase
+/// budget/contract refusals inside the ceremony trace and tick as
+/// runtime-sort refusals (they ARE sort-sink refusals; the MJ arm's own
+/// witness lines wrap the engagement).
+pub(super) fn full_sort_engage_publish<'mcx>(
+    estate: &mut EStateData<'mcx>,
+    rt: &'static Arc<runtime::Runtime>,
+    probe: MjSortSideProbe<'mcx>,
+) -> PgResult<Option<FullPublish>> {
+    let MjSortSideProbe { spec_keys: _, spec, budget, total_granules, starts, scan_node, dop } =
+        probe;
+    let spec = ArmSpec::Full(spec, budget);
+    match engage(estate, rt, dop, total_granules, starts, &spec, scan_node, None)? {
+        EngageOutcome::Fallback => Ok(None),
+        EngageOutcome::CompletedFull(publish) => Ok(Some(publish)),
+        EngageOutcome::Completed(_) => {
+            Err(Box::new(PgError::new(ERROR, "runtime sort outcome/arm mismatch")))
+        }
+    }
 }
 
 /// Reap a pinned RG no helper will drive (abort/fallback paths) — protocol

@@ -219,7 +219,7 @@ pub(super) fn lane_merge_join_drive<'mcx>(
 ) -> PgResult<Option<ExecSlotId>> {
     #[cfg(test)]
     MJ_NATIVE_OWNED_FOR_TESTS.fetch_add(1, Relaxed);
-    let MergeJoinNode { state, outer, inner } = mj;
+    let MergeJoinNode { state, outer, inner, .. } = mj;
     debug_assert!(matches!(&**inner, PlanStateNode::Sort(_)), "admitted at the surface");
     let skip_mark_restore = state.plan.skip_mark_restore;
     let mut o = LaneMergeOuter { child: &mut **outer };
