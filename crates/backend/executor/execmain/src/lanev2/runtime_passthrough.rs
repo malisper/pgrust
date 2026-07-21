@@ -468,6 +468,13 @@ pub(super) enum PassthroughEngageOutcome {
 /// producer parked on a full ring is freed within one bounded quantum).
 /// `emit_row` receives each drained row image and returns `false` to stop
 /// (client stop); `limit` closes demand once satisfied (LIMIT).
+///
+/// `pure_drain` (W0.1, GL-W0-1 lever 1): the leader NEVER alternates into
+/// producing, even when leader-producer mode is on. Write dests set this —
+/// the leader IS the writer there, and every leader morsel stalls the write
+/// drain (GL-W0-1 measured Gather beating the funnel 1.3-2.4x on writes with
+/// the producing leader; wire drains keep the GL-FUNNEL-2 default). Producer-
+/// count parity falls back to DOP+1 admission (funnel_plus1), unchanged.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn engage_passthrough(
     rt: &'static Arc<runtime::Runtime>,
@@ -478,6 +485,7 @@ pub(super) fn engage_passthrough(
     source: Arc<dyn runtime::MorselSource>,
     ring_cap: usize,
     limit: Option<u64>,
+    pure_drain: bool,
     emit_row: impl FnMut(MinImage) -> PgResult<bool>,
 ) -> PgResult<PassthroughEngageOutcome> {
     ensure_passthrough_hooks_registered();
@@ -506,7 +514,8 @@ pub(super) fn engage_passthrough(
     // UNWIND aborts the transaction, which destroys live contexts and resets
     // the mode (AtEOXact_Parallel — the Gather discipline).
     ::xact::EnterParallelMode();
-    let r = engage_passthrough_inner(rt, &funnel, &payload, dop, source, limit, emit_row);
+    let r =
+        engage_passthrough_inner(rt, &funnel, &payload, dop, source, limit, pure_drain, emit_row);
     ::xact::ExitParallelMode();
     r
 }
@@ -515,6 +524,7 @@ pub(super) fn engage_passthrough(
 /// pinned RG, launch, run the leader drain loop, tear down. On ANY return path
 /// the parallel context is destroyed (workers joined) and the RG completed and
 /// drained before the caller's arena can unwind.
+#[allow(clippy::too_many_arguments)]
 fn engage_passthrough_inner(
     rt: &'static Arc<runtime::Runtime>,
     funnel: &Arc<RowFunnel<MinImage>>,
@@ -522,13 +532,17 @@ fn engage_passthrough_inner(
     dop: i32,
     source: Arc<dyn runtime::MorselSource>,
     limit: Option<u64>,
+    pure_drain: bool,
     emit_row: impl FnMut(MinImage) -> PgResult<bool>,
 ) -> PgResult<PassthroughEngageOutcome> {
+    // W0.1: a pure-drain engagement (write dests) suppresses leader-producer
+    // mode entirely — the DOP+1 arm below supplies the +1 producer instead.
+    let leader_mode = funnel_leader_mode() && !pure_drain;
     // GL-FUNNEL-2 producer-count parity vs classic Gather (whose leader
     // participates, giving N+1 producers at DOP N): leader-producer mode makes
     // the funnel leader the +1 (gang stays N); otherwise DOP+1 admission
     // launches one extra gang producer (default ON; _PLUS1=0 restores N).
-    let launch_n = if funnel_leader_mode() {
+    let launch_n = if leader_mode {
         dop
     } else if funnel_plus1() {
         dop + 1
@@ -664,7 +678,7 @@ fn engage_passthrough_inner(
         //    here: the leader itself drives the RG to completion even if
         //    every gang worker refuses or dies without error (their error
         //    path still aborts the RG through the message channel duty).
-        if funnel_leader_mode() {
+        if leader_mode {
             if let Some(mut cw) = runtime::CallerWorker::enter(rt) {
                 // run_morsel receives the PIN-BOARD worker index, which for an
                 // external lane is `nthreads + lane ordinal` (lib.rs worker
@@ -1151,6 +1165,8 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
         source,
         super::row_emit::DEFAULT_RING_CAP,
         limit,
+        // W0.1: write dests drain PURE — the leader is the writer.
+        write_dest,
         |img: MinImage| -> PgResult<bool> {
             // SAFETY: `wire_slot` is a Minimal slot; `img` owns the bytes and
             // outlives this store+receive (dropped at the end of the call).
