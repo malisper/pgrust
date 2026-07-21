@@ -363,13 +363,18 @@ pub fn runtime_bitmap_pool_dop() -> i32 {
 // option `pgrust.runtime_nlindex_pool` + the lane master switch.
 // ---------------------------------------------------------------------------
 
-/// Enable + master gates for the runtime NL-inner-index arm (default OFF).
+/// Kill switch + master gates for the runtime NL-inner-index arm.
+/// FLIPPED-KILL (DEFAULT ON since the GL-NLIDX-2 letter, 2026-07-21 —
+/// scratchpad/night/fleet-ab-parallelism.md: routed ladder beats classic
+/// Gather 1.25-1.39x at dop>=8 with election-moved + parity witnesses;
+/// census flagship election moved and won -10.8%; 22q byte-stable):
+/// `PGRUST_RUNTIME_NLINDEX=0|off` kills (the t35 exact spelling).
 fn runtime_nlindex_env_ok() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let on = *ON.get_or_init(|| {
-        matches!(std::env::var("PGRUST_RUNTIME_NLINDEX").as_deref(), Ok("1") | Ok("on"))
+    static KILLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let killed = *KILLED.get_or_init(|| {
+        matches!(std::env::var("PGRUST_RUNTIME_NLINDEX").as_deref(), Ok("0") | Ok("off"))
     });
-    on && crate::backing::pgrust_lane_executor()
+    !killed && crate::backing::pgrust_lane_executor()
 }
 
 /// The armed runtime NL-inner-index DOP: `pgrust.runtime_nlindex_pool`

@@ -2597,25 +2597,26 @@ fn classify_join_covered<'mcx>(
 // refusal keeps Gather standing byte-for-byte.
 // ===========================================================================
 
-/// NLIDX planner knob (`PGRUST_LANE_V2_NLIDX`, DEFAULT OFF, `1|on` arms —
-/// GL-NLIDX-2 fleet letter owns the default decision).
+/// NLIDX planner knob. FLIPPED-KILL (DEFAULT ON since the GL-NLIDX-2
+/// letter, 2026-07-21 — scratchpad/night/fleet-ab-parallelism.md; the t35
+/// exact spelling): `PGRUST_LANE_V2_NLIDX=0|off` kills.
 fn nlidx_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        matches!(std::env::var("PGRUST_LANE_V2_NLIDX").as_deref(), Ok("1") | Ok("on"))
+    static KILLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*KILLED.get_or_init(|| {
+        matches!(std::env::var("PGRUST_LANE_V2_NLIDX").as_deref(), Ok("0") | Ok("off"))
     })
 }
 
-/// NLIDX executor coherence (the jheap `k2_heapfeed_live` precedent): the
-/// morsel arm's ENABLE switch must be armed — a suppression whose executor
-/// arm is disarmed would land on the bare serial NL (the suppress-then-
-/// serial direction). Same spelling as the executor
-/// (`PGRUST_RUNTIME_NLINDEX`, ENABLE switch, default OFF, `1|on` arms —
-/// guc_tables::runtime_pool::runtime_nlindex_pool_dop's env gate).
+/// NLIDX executor coherence (the jheap `k2_heapfeed_live` precedent): a
+/// thrown executor kill must also un-key the shape — a suppression whose
+/// executor arm is killed would land on the bare serial NL (the
+/// suppress-then-serial direction). Same FLIPPED-KILL spelling as the
+/// executor (`PGRUST_RUNTIME_NLINDEX=0|off` kills; DEFAULT ON since the
+/// GL-NLIDX-2 letter — runtime_pool::runtime_nlindex_env_ok).
 fn nlidx_exec_live() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        matches!(std::env::var("PGRUST_RUNTIME_NLINDEX").as_deref(), Ok("1") | Ok("on"))
+    static KILLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    !*KILLED.get_or_init(|| {
+        matches!(std::env::var("PGRUST_RUNTIME_NLINDEX").as_deref(), Ok("0") | Ok("off"))
     })
 }
 
