@@ -965,18 +965,73 @@ pub fn install_pool_gate(f: fn() -> bool) {
 
 thread_local! {
     /// True while THIS thread is inside `pool_serve`'s serve_ticket: the
-    /// arm drivers consult it to disable sticky session retention on pool
-    /// threads — between engagements a pool thread runs ORDINARY runtime
-    /// work (maintenance cycles, unbound task sets), which must never see a
-    /// retained session's identity/GUC view. Gang threads (which only ever
-    /// park between engagements) keep retention.
+    /// arm drivers consult it for the sticky-retention decision. Before
+    /// rung 3, retention was DISABLED wholesale on pool threads — between
+    /// engagements a pool thread runs ORDINARY runtime work (maintenance
+    /// cycles, unbound task sets), which must never see a retained
+    /// session's identity/GUC view. Rung 3 re-enables it under
+    /// `pool_sticky_enabled`: the runtime's session-residue gate
+    /// (`runtime::evict_session_residue_for_unbound_work`, fed by the
+    /// serve adapter's residue hint) evicts the retention at the last gate
+    /// before any unbound work runs, so parked retention only ever spans
+    /// idle time and same/cross-session serves — exactly the gang envelope
+    /// plus the modeled eviction edge. Gang threads (which only ever park
+    /// between engagements) keep retention unconditionally.
     static ON_POOL_SERVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// True ⇔ the current engagement is being served by a POOL worker (see
-/// ON_POOL_SERVE). Arm drivers pass `sticky = !serving_on_pool()`.
+/// ON_POOL_SERVE). Arm drivers pass
+/// `sticky = !serving_on_pool() || pool_sticky_enabled()`.
 pub fn serving_on_pool() -> bool {
     ON_POOL_SERVE.with(|c| c.get())
+}
+
+/// M2 inc-3 rung 3: sticky session retention on POOL serves.
+/// `PGRUST_RUNTIME_POOL_STICKY=0` restores the rungs-1-2 posture (eager
+/// full session bind on every pool engagement). Default ON — but layered
+/// under the pool-db channel itself (`PGRUST_RUNTIME_POOLDB=1`, default
+/// OFF), so the default posture of the server is unchanged; the retention
+/// safety envelope is the gang's (heap-only parked state, the sticky key +
+/// validate_for_sticky_resume gates) plus the runtime's unbound-work
+/// eviction gate.
+pub fn pool_sticky_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    pooldb_enabled()
+        && *ON.get_or_init(|| {
+            std::env::var("PGRUST_RUNTIME_POOL_STICKY").map_or(true, |v| v.trim() != "0")
+        })
+}
+
+/// The runtime's session-residue evictor (installed by the rtpool glue —
+/// runtime cannot name this crate): restore the thread to a clean boundary
+/// before unbound work, or die. An eviction failure means the session
+/// restore itself failed — the thread's session/GUC view is indeterminate
+/// and it must NOT survive to run ordinary work (the connect_failed_die
+/// rationale: only this thread's exit-callback drain can release its
+/// identity safely; the slot respawns cold).
+pub fn sticky_evict_for_unbound_work() {
+    match super::query_task_guard::sticky_evict_parked() {
+        Ok(()) => {}
+        Err(e) => {
+            let _ = elog::elog(
+                WARNING,
+                format!(
+                    "pool executor sticky eviction failed before unbound work: {}",
+                    e.message()
+                ),
+            );
+            ipc::proc_exit(1, init_small::globals::MyProcPid());
+        }
+    }
+}
+
+/// Pool-thread exit hygiene (rtpool glue): drop any parked sticky
+/// retention with a PLAIN drop — heap-only, the parked guard is disarmed,
+/// no shared-memory interaction (safe on the raw/crash-fence exits too;
+/// the gang's RetireRaw discipline).
+pub fn sticky_clear_on_pool_exit() {
+    super::query_task_guard::sticky_clear();
 }
 
 /// Leader side (M2 inc-2): build a POOL engagement board for `dop`
@@ -1102,9 +1157,11 @@ pub fn pool_serve(payload: &Arc<dyn std::any::Any + Send + Sync>) -> PoolServe {
         warm_connect(&entry);
         return PoolServe::Closed;
     };
-    // Sticky retention is disabled on pool serves (see ON_POOL_SERVE):
-    // RAII so unwinds (FATAL exits) reset the flag before the glue
-    // respawns nothing on this thread.
+    // ON_POOL_SERVE marks the serve span for the arm drivers' sticky
+    // decision (see the thread_local doc: retention rides pool serves only
+    // under pool_sticky_enabled, with the runtime's unbound-work eviction
+    // gate as the containment). RAII so unwinds (FATAL exits) reset the
+    // flag before the glue respawns anything on this thread.
     struct PoolServeReset;
     impl Drop for PoolServeReset {
         fn drop(&mut self) {

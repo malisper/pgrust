@@ -611,7 +611,15 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      trace-gated instrumentation scratch on the driving thread —
     //      reset at vacuum entry, read at the trace emit; no session
     //      identity, never captured/restored by an envelope.
-    assert_eq!(count_tree(crates), 525, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // m2-inc3 rung-3 delta (526 = 525 + 1), deliberately NON-SESSION TLS:
+    //   66. executor/runtime/src/lib.rs — SESSION_RESIDUE: the pool
+    //      worker's parked-sticky-retention HINT (bool) feeding the
+    //      scheduler's unbound-work eviction gate and the affinity
+    //      tiebreak. Pure scheduling advisory on the executor THREAD; the
+    //      session state it hints at lives in the binder layer's sticky
+    //      slot (query_task_guard STICKY, already row 57-class), which
+    //      owns capture/restore — the hint itself carries no identity.
+    assert_eq!(count_tree(crates), 526, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

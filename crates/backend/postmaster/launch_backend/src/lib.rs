@@ -1445,6 +1445,11 @@ pub mod rtpool {
             // thread ends without respawn; identity dies with the process.
             Ok(()) => {}
             Err(payload) => {
+                // Sticky hygiene (rung 3): drop any parked session
+                // retention with a plain drop — heap-only, disarmed guard,
+                // no shared-memory touch (safe on the raw arm too; the
+                // gang exit discipline).
+                parallel::standing::sticky_clear_on_pool_exit();
                 if payload.is::<parallel::standing::PoolRetireRaw>() {
                     // Crash fence: NO shared-memory interaction — the
                     // PGPROC was reset wholesale with shared memory.
@@ -1527,6 +1532,17 @@ pub mod rtpool {
                     },
                 });
                 parallel::standing::install_pool_gate(pool_gate);
+                // M2 inc-3 rung 3: sticky session retention on pool serves
+                // needs the scheduler's unbound-work eviction gate armed —
+                // the runtime evicts a parked session view (through this
+                // installed fn) before any ordinary task work runs on a
+                // pool thread. Installed whenever pooldb is armed (the
+                // sticky knob itself is consulted at the binder layer;
+                // installing the evictor unconditionally is a no-op when
+                // no retention ever parks).
+                runtime::install_session_residue_evictor(
+                    parallel::standing::sticky_evict_for_unbound_work,
+                );
             }
             let rt = runtime::Runtime::new(runtime::RuntimeConfig::from_env());
             let pool = runtime::WorkerPool::spawn_with(Arc::clone(&rt), spawn_worker)

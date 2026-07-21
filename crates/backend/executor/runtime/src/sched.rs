@@ -1005,6 +1005,7 @@ impl Scheduler {
         session_token: u64,
         width: Option<WidthRequest>,
         bound: Option<BoundDescriptor>,
+        on_rg: Option<&mut dyn FnMut(&crate::RgHandle)>,
     ) -> Arc<ResourceGroup> {
         assert!(
             !(pinned && class == RgClass::Maintenance),
@@ -1040,6 +1041,20 @@ impl Scheduler {
             // (= the p_min floor) the M5-5 decay site skips utility RGs
             // outright via its `priority > p_min` guard.
             rg.priority.store(self.p_util.load(Ordering::Relaxed), Ordering::Relaxed);
+        }
+        // M2 inc-3 rung 3: hand the caller its RgHandle BEFORE any
+        // publication can make the RG pool-visible. A bound submission's
+        // serve dispatches into arm code that resolves the RG through a
+        // caller-side cell (payload.rg) — under the old order (publish,
+        // return, caller sets the cell) a pool pick could reach the driver
+        // inside the rg-set-after-publish window and pay a spurious
+        // claim + "rg gone" refusal + detach (churn the rung-1 needle fix
+        // had to tolerate; at 1-ticket boards one such refusal >= tickets
+        // flipped the whole engagement to the fallback channel). Running
+        // the callback here makes set-before-publish structural: there is
+        // no state in which the RG is pick-visible with the cell unset.
+        if let Some(f) = on_rg {
+            f(&crate::RgHandle { rg: Arc::clone(&rg) });
         }
         rg.submit_ns.store(self.clock.now_ns().max(1), Ordering::Relaxed);
         RuntimeStats::tick(&self.stats.rgs_submitted);
@@ -1480,6 +1495,17 @@ impl Scheduler {
             // serve would deadlock the drive against our own settle).
             Some(ts) if ts.rg.bound.is_some() => self.serve_bound(local, &ts),
             Some(ts) => {
+                // M2 inc-3 rung 3: ordinary (non-bound) work is about to run
+                // on this thread — evict any parked session retention first
+                // (a pool worker's sticky-parked session view must never be
+                // live under unbound task bodies). One thread-local read +
+                // branch when no residue is hinted (the pool-sticky posture
+                // is the only setter). The stale affinity token dies with
+                // the retention (advisory tiebreak input only).
+                if crate::session_residue() {
+                    local.session_token = 0;
+                    crate::evict_session_residue_for_unbound_work();
+                }
                 let step = self.run_task_admitted(local, &ts);
                 // Protocol step 4: settle own pin; pay any marker debt.
                 self.settle(local.worker);
@@ -1523,6 +1549,17 @@ impl Scheduler {
         match served {
             BoundServe::Served => {
                 RuntimeStats::tick(&self.stats.bound_serves);
+                // M2 inc-3 rung 3 affinity hint: if the serve parked a
+                // session retention on this thread (the adapter noted the
+                // residue before returning), record the served RG's leader-
+                // session token so the equal-pass pick tiebreak prefers this
+                // session's next engagement landing HERE — the sticky-resume
+                // path. Cleared when the retention is not (re)parked.
+                local.session_token = if crate::session_residue() {
+                    ts.rg.session_token
+                } else {
+                    0
+                };
                 Step::Ran
             }
             BoundServe::Refused | BoundServe::Closed => {

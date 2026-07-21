@@ -307,7 +307,7 @@ env	crates/backend/access/pgrcolumnar/src/writer.rs	7
 env	crates/backend/access/table/tableam/src/lib.rs	1
 env	crates/backend/access/transam/parallel/src/lib.rs	2
 env	crates/backend/access/transam/parallel/src/query_task_guard.rs	2
-env	crates/backend/access/transam/parallel/src/standing.rs	2	DST-REVIEW(m2-inc2): +1 = PGRUST_RUNTIME_POOLDB (the PGPROC-leasing pool-workers kill switch, default OFF) — process-constant lane-knob class (env read once, OnceLock-cached); knobs-registry routing rides the chartered SE/DST migration
+env	crates/backend/access/transam/parallel/src/standing.rs	3	DST-REVIEW(m2-inc2): +1 = PGRUST_RUNTIME_POOLDB (the PGPROC-leasing pool-workers kill switch, default OFF) — process-constant lane-knob class (env read once, OnceLock-cached); knobs-registry routing rides the chartered SE/DST migration; DST-REVIEW(m2-inc3): +1 = PGRUST_RUNTIME_POOL_STICKY (rung-3 sticky-on-pool kill switch, default ON layered under POOLDB; same OnceLock-cached process-constant class)
 env	crates/backend/access/transam/xlogrecovery/src/lib.rs	1
 env	crates/backend/commands/analyze/src/lib.rs	2
 env	crates/backend/commands/copy/src/parallel.rs	14
@@ -487,7 +487,7 @@ once	crates/backend/access/pgrcolumnar/src/segfile.rs	1
 once	crates/backend/access/pgrcolumnar/src/writer.rs	4
 once	crates/backend/access/transam/parallel/src/lib.rs	2
 once	crates/backend/access/transam/parallel/src/query_task_guard.rs	2
-once	crates/backend/access/transam/parallel/src/standing.rs	3	P3 row 19 (design-cited L148): gang OnceLock init — pure Mutex+Condvar alloc closure; DST-REVIEW(m2-inc2): +1 = pooldb_enabled's OnceLock (pure env-read init closure, the R-KNOBS idiom)
+once	crates/backend/access/transam/parallel/src/standing.rs	4	P3 row 19 (design-cited L148): gang OnceLock init — pure Mutex+Condvar alloc closure; DST-REVIEW(m2-inc2): +1 = pooldb_enabled's OnceLock (pure env-read init closure, the R-KNOBS idiom); DST-REVIEW(m2-inc3): +1 = pool_sticky_enabled's OnceLock (same pure env-read idiom)
 once	crates/backend/access/transam/xlogrecovery/src/lib.rs	1
 once	crates/backend/catalog/pg_constraint/src/lib.rs	1
 once	crates/backend/commands/copy/src/parallel.rs	15

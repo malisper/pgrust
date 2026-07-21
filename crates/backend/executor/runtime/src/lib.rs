@@ -286,7 +286,7 @@ impl Runtime {
     /// parking on the returned waiter (§2.5: submit-and-park; no leader
     /// execution path exists, deliberately).
     pub fn submit(&self, spec: QuerySpec) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, false, RgClass::Foreground, 0, None, None);
+        let rg = self.sched.submit(spec, false, RgClass::Foreground, 0, None, None, None);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
 
@@ -302,7 +302,7 @@ impl Runtime {
         spec: QuerySpec,
         session_token: u64,
     ) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, false, RgClass::Foreground, session_token, None, None);
+        let rg = self.sched.submit(spec, false, RgClass::Foreground, session_token, None, None, None);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
 
@@ -318,7 +318,7 @@ impl Runtime {
         spec: QuerySpec,
         width: WidthRequest,
     ) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, false, RgClass::Foreground, 0, Some(width), None);
+        let rg = self.sched.submit(spec, false, RgClass::Foreground, 0, Some(width), None, None);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
 
@@ -330,7 +330,7 @@ impl Runtime {
         session_token: u64,
         width: WidthRequest,
     ) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, true, RgClass::Foreground, session_token, Some(width), None);
+        let rg = self.sched.submit(spec, true, RgClass::Foreground, session_token, Some(width), None, None);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
 
@@ -444,7 +444,7 @@ impl Runtime {
     /// deadlines. Cycle task sets are single-morsel by construction, so the
     /// preference diverts at most one worker for one cycle body.
     pub fn submit_maintenance(&self, spec: QuerySpec) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, false, RgClass::Maintenance, 0, None, None);
+        let rg = self.sched.submit(spec, false, RgClass::Maintenance, 0, None, None, None);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
 
@@ -529,7 +529,7 @@ impl Runtime {
         spec: QuerySpec,
         session_token: u64,
     ) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, true, RgClass::Foreground, session_token, None, None);
+        let rg = self.sched.submit(spec, true, RgClass::Foreground, session_token, None, None, None);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
 
@@ -545,12 +545,31 @@ impl Runtime {
     ///
     /// The descriptor must be attached AT SUBMIT (never retro-fitted): the
     /// active bit and the gate key off it at publication time.
+    ///
+    /// `on_rg` runs with the submission's RgHandle BEFORE the RG can become
+    /// pool-visible (M2 inc-3 rung 3 — closing the rg-set-after-publish
+    /// window): the serve dispatches into arm code that resolves the RG
+    /// through a caller-owned cell, and publication used to race the
+    /// caller's post-return store — pool picks landing inside the window
+    /// paid a spurious claim + "rg gone" refusal + detach per worker, and a
+    /// 1-ticket board's single spurious refusal met the leader's
+    /// `refused >= tickets` needle and flipped the engagement to the
+    /// fallback channel. Set every serve-visible cell here; the callback
+    /// runs pre-admission on the submitting thread (keep it tiny — a store,
+    /// no locks the serve path takes).
     pub fn submit_pinned_bound(
         &self,
         spec: QuerySpec,
         session_token: u64,
         descriptor: BoundDescriptor,
+        on_rg: impl FnOnce(&RgHandle),
     ) -> (RgHandle, CompletionWaiter) {
+        let mut on_rg = Some(on_rg);
+        let mut call = |rg: &RgHandle| {
+            if let Some(f) = on_rg.take() {
+                f(rg);
+            }
+        };
         let rg = self.sched.submit(
             spec,
             true,
@@ -558,6 +577,7 @@ impl Runtime {
             session_token,
             None,
             Some(descriptor),
+            Some(&mut call),
         );
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
@@ -946,6 +966,71 @@ impl Runtime {
 fn sched_park(sched: &sched::Scheduler, seen: u64) {
     stats::RuntimeStats::tick(&sched.stats.worker_parks);
     sched.park.park(seen);
+}
+
+// ---------------------------------------------------------------------------
+// M2 inc-3 rung 3 — SESSION RESIDUE on pool workers (sticky retention).
+//
+// A pool worker that finished a bound serve may PARK its session binding
+// (the binder layer's sticky retention) so a re-engagement from the same
+// session resumes in the sticky class instead of paying the full session
+// bind. Between engagements a pool worker runs ORDINARY runtime work
+// (maintenance cycles, unbound task sets), which must never execute over a
+// retained session's identity/GUC view — so the scheduler EVICTS the
+// residue at the last gate before unbound work runs (worker_step's unbound
+// dispatch). The runtime never interprets the residue: the binder layer
+// owns park/resume/evict; this seam is a thread-local hint plus an
+// installed evictor (the POOL_GATE fn-pointer precedent — the binder crate
+// cannot name runtime types).
+//
+// The hint is maintained by the serve adapter (arm side) after every bound
+// serve; it is thread-local, so session threads / external drives never see
+// it, and with no pool-sticky posture armed it is never set — the unbound
+// hot path pays one thread-local read + branch.
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    static SESSION_RESIDUE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The installed residue evictor. Contract: restore the thread to a clean
+/// (no retained session state) boundary or DO NOT RETURN (a failed session
+/// restore must kill the thread — the glue owns respawn); returning with
+/// residue still live would run unbound work over a foreign session view.
+static RESIDUE_EVICTOR: crate::sync::OnceLock<fn()> = crate::sync::OnceLock::new();
+
+/// Boot wiring (rtpool glue): install the sticky-residue evictor. Once;
+/// later calls ignored.
+pub fn install_session_residue_evictor(f: fn()) {
+    let _ = RESIDUE_EVICTOR.set(f);
+}
+
+/// Serve-adapter side: record whether THIS pool thread parked a session
+/// retention when its bound serve returned (true) or holds none (false).
+/// Advisory for scheduling (the affinity tiebreak) and the eviction gate;
+/// never a correctness input on its own — the binder revalidates its keys.
+pub fn note_session_residue(parked: bool) {
+    SESSION_RESIDUE.with(|c| c.set(parked));
+}
+
+/// True ⇔ this thread currently hints a parked session retention.
+pub fn session_residue() -> bool {
+    SESSION_RESIDUE.with(|c| c.get())
+}
+
+/// The unbound-work gate (called by the scheduler): evict any parked
+/// session residue before ordinary (non-bound) task work may run on this
+/// thread. No-op unless the hint is set; the evictor either restores a
+/// clean boundary or kills the thread (see [`install_session_residue_evictor`]).
+pub(crate) fn evict_session_residue_for_unbound_work() {
+    SESSION_RESIDUE.with(|c| {
+        if c.get() {
+            c.set(false);
+            if let Some(f) = RESIDUE_EVICTOR.get() {
+                f();
+            }
+        }
+    });
 }
 
 /// RAII width lease for a non-pool parallel gang (WS-O wave 2, retargeted
