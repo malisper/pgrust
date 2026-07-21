@@ -64,7 +64,7 @@ use types_guc::{GUC_UNIT_BLOCKS, GUC_UNIT_KB, GUC_UNIT_MEMORY, PGC_POSTMASTER, P
 const MIB: u64 = 1024 * 1024;
 
 // --- budget fractions / factors (see module doc for the rationale) ----------
-/// Shared buffer pool: 25% of RAM (matches pgtune and the ClickBench PG entry).
+/// Shared buffer pool: 25% of RAM (matches pgtune and the public leaderboard's PG config).
 const SHARED_BUFFERS_FRACTION: f64 = 0.25;
 /// Planner's assumed total data-cache size: 75% of RAM (matches both).
 const EFFECTIVE_CACHE_FRACTION: f64 = 0.75;
@@ -180,7 +180,7 @@ pub fn compute_memory_tuning(ram_bytes: u64, cores: usize, max_connections: i32)
 
     // Parallelism (memory-adjacent: each worker is a thread that gets its own
     // work_mem + columnar arenas). Scale to cores; cap per-gather so one query
-    // cannot monopolise every core in a multi-user server (the ClickBench
+    // cannot monopolise every core in a multi-user server (the benchmark
     // single-client harness raises it explicitly).
     let max_worker_processes = clamp_to_registered("max_worker_processes", (cores + 8).max(8));
     let max_parallel_workers = clamp_to_registered("max_parallel_workers", cores.max(2));
@@ -217,7 +217,7 @@ pub fn mem_autotune_enabled() -> bool {
 }
 
 /// Total physical RAM in bytes. Linux via `/proc/meminfo` (the primary target;
-/// same source the ClickBench PG entry reads); macOS via `sysctl hw.memsize`
+/// same source the public leaderboard's PG config reads); macOS via `sysctl hw.memsize`
 /// (dev boxes / `cargo test`). `None` if neither is available.
 pub fn detect_total_ram_bytes() -> Option<u64> {
     // Linux / most Unixes expose MemTotal (kB) here; harmless no-op elsewhere.

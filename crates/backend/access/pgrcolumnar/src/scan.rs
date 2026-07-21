@@ -305,7 +305,7 @@ struct AdaptiveOrder {
     // docs/conformance/tie-ordering.md), so only strict domination skips.
     strict: bool,
     bound: Option<i64>,
-    // Probe budget (measured failure mode: CB Q24@10M — a sparse qual never
+    // Probe budget (measured failure mode: take-k sorted on the 10M bank — a sparse qual never
     // bounds the heap early, so the best-first walk degenerated into a full
     // scattered-order scan, 2.5x the physical drive). The walk is a PROBE:
     // if it isn't visibly paying by these thresholds, revert the REMAINING
@@ -314,13 +314,13 @@ struct AdaptiveOrder {
     // (strict domination is order-independent), only the sorted-order early
     // STOP is forfeited.
     //   nobound_budget: claims allowed before the consumer ever feeds a
-    //     bound (heap never filled — the Q24 class).
+    //     bound (heap never filled — the sparse-qual take-k class).
     //   projected_budget: with a bound in hand the sorted entry list makes
     //     the walk's end exact TODAY (binary search for the first dominated
     //     bound); if that projection says more than this many further
     //     claims, the zone/key correlation isn't there — revert now. The
     //     projection only shrinks as the bound tightens, so a walk that
-    //     would have stopped within budget is never reverted (CB Q25@10M
+    //     would have stopped within budget is never reverted (a 10M-bank sorted-limit projection walk
     //     stops after 34/1238 granules and must stay on the fast path).
     nobound_budget: usize,
     projected_budget: usize,
@@ -838,7 +838,7 @@ impl<'mcx> CbScanDescData<'mcx> {
         // bound-feed latency of the largest admitted top-N (the consumer
         // caps k at 65536 = 8 full granules) with slack; the fractions keep
         // the worst pre-revert scattered-order share small on big directories
-        // while never reverting a walk that stops early (Q25@10M: projection
+        // while never reverting a walk that stops early (sorted-limit @10M: projection
         // ~34 << max(64, 1238/8)=154).
         let n = entries.len();
         self.adaptive = Some(Box::new(AdaptiveOrder {
@@ -1073,7 +1073,7 @@ impl<'mcx> CbScanDescData<'mcx> {
             sums: sum_cols.iter().map(|&c| (c, 0i128)).collect(),
         };
         let Some(part) = self.part.as_ref() else { return Ok(Some(out)) };
-        // With a zero-count qual the cb zone quals are exactly that
+        // With a zero-count qual the cbstore zone quals are exactly that
         // conjunct (advisory); the bare arm still requires none.
         debug_assert!(zq.is_some() || self.zone_quals.is_empty());
         // Per-granule visible-row count under the qual: grows - zeros for
@@ -1291,7 +1291,7 @@ impl<'mcx> CbScanDescData<'mcx> {
         };
         // Count in the per-scan cell (cond is Some — cond_slot said so);
         // the shared statics see one fold at scan teardown, not one
-        // fetch_add per window (the q21/q8 contention line, census U7).
+        // fetch_add per window (the selective-qual-grouped/plain-agg contention line, census U7).
         if let Some(cond) = self.cond.as_deref_mut() {
             cond.stats.count(hit);
         }
@@ -2373,7 +2373,7 @@ impl<'mcx> CbScanDescData<'mcx> {
     /// position): staged row `i`'s rowref is `base + i` — windows never
     /// cross a granule, let alone a row group, so the low word never carries
     /// into the rg bits. `None` when nothing is staged or the part exceeds
-    /// the consumer's 48-bit envelope (>= 2^16 row groups — never on the CB
+    /// the consumer's 48-bit envelope (>= 2^16 row groups — never on the analytics
     /// banks; the consumer then keeps its demote backstop).
     #[inline]
     pub fn staged_rowref_base(&self) -> Option<u64> {

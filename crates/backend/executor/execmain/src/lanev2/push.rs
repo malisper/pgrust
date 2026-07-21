@@ -314,7 +314,7 @@ pub(super) trait BatchSink<'mcx>: Sink<'mcx> {
         // cleared bit answers `emit` with None and no observable effect, so
         // skipping it is feed-stream-identical — the per-row emit ceremony
         // collapses to one word test per 64 rows on selective quals (the
-        // q22 sort-feed lever, generalized; CFI cadence for skipped rows
+        // qualed-top-n sort-feed lever, generalized; CFI cadence for skipped rows
         // follows the page-level staging check, the topk-cut precedent).
         let live = emit.live_sel();
         ::exectuples::for_each_live(live.as_ref().map(|w| &w[..]), pos, n, |i| -> PgResult<()> {
@@ -910,7 +910,7 @@ pub(crate) fn cursors_v2_enabled() -> bool {
             // SE12-GATES CURSORS FLIP (flip-ladder board; notes/se12-gates.md):
             // default ON — the SE11 B1 blocker (+18.15% instr forloop cadence)
             // was cleared to FLAT by the se/b1fix NO_SCROLL C-parity fix
-            // (notes/se-b1fix.md §5: B1 −0.01% instr, cb store leg −6.66%,
+            // (notes/se-b1fix.md §5: B1 −0.01% instr, analytics-bank store leg −6.66%,
             // point-pair invisibility ±0.01%), and the flip letter battery
             // re-proved every bar at the flipped tip. Only this default read
             // changes — the explicit `=0`/`off` spelling is the permanent
@@ -1915,7 +1915,7 @@ pub(crate) fn cursor_store_batch_fill<'m, 'mcx>(
     // also makes the settle walker's `engaged` detection see this fill) —
     // deliberately NOT `try_own_seq_scan`: its heap standalone refuse
     // prices the PER-PULL capacity-one adapter, which this push-sink drive
-    // never pays (the cb store leg measured the store-fill economics at
+    // never pays (the analytics-bank store leg measured the store-fill economics at
     // −6.68% — the SE11 4a-store controlled experiment).
     if let Some(sidecar) = capture {
         debug_assert!(

@@ -104,7 +104,7 @@ pub struct ModifyTableState<'mcx> {
     // The unpruned result relations (C mtstate->resultRelInfo[0..mt_nrels]).
     // Arena-backed (es_query_cxt) like every sibling collection: the whole
     // planstate bundle is FORGOTTEN at standard_executor_end, so a std-heap
-    // buffer here leaked once per write statement (832 B — the pgbench-rw
+    // buffer here leaked once per write statement (832 B — the OLTP read-write bank's
     // eviction driver, notes/oltp-memory-footprint-2026-07-12.md).
     rels: mcx::PgVec<'mcx, ResultRelExec<'mcx>>,
     // C mtstate->rootResultRelInfo when node->rootRelation > 0 (inherited or

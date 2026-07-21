@@ -705,7 +705,7 @@ pub fn DefineRelation<'mcx>(
         },
     };
 
-    // pgrcolumnar accepts only ClickBench's type surface; refuse at CREATE TABLE
+    // pgrcolumnar accepts only the analytics charter's type surface; refuse at CREATE TABLE
     // (docs/design/pgrcolumnar-impl.md §3).
     if access_method_id != InvalidOid
         && access_method_id != 2

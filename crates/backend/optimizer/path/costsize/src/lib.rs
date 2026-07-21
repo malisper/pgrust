@@ -613,7 +613,7 @@ pub fn cost_gather_merge(
 }
 
 // pgrcolumnar column-fraction disk costing (pgrust-only, AMFLAG_PGRCOLUMNAR-gated;
-// the Q38 sort-vs-hash fix): a pgrcolumnar seqscan opens with a plan-derived
+// the sort-vs-hash grouping fix): a pgrcolumnar seqscan opens with a plan-derived
 // column need-set and never touches the other columns' chunks, so the honest
 // disk term is the referenced columns' share of the part's on-disk bytes.
 // C's costing structure (pages you read x spc_seq_page_cost) is kept — only
@@ -626,8 +626,8 @@ pub fn cost_gather_merge(
 // a large shared constant in every candidate plan's total, which at scale
 // compresses REAL differences (e.g. hash-vs-sort grouping) inside
 // add_path's 1% STD_FUZZ_FACTOR, where the sorted path wins the pathkey
-// tiebreak (CB Q38 @100M planned Sort+GroupAggregate ~17x slower than the
-// hash plan it fuzzily displaced).
+// tiebreak (two-key grouped agg @100M: planned Sort+GroupAggregate ~17x
+// slower than the hash plan it fuzzily displaced).
 fn pgrcolumnar_scan_col_fraction(
     run: &mut PlannerRun<'_>,
     rel: RelId,

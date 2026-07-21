@@ -74,7 +74,7 @@ pub enum CoverClass {
     /// whitelisted order-insensitive-exact aggregates, no GROUP BY. WS-COVER
     /// (phase3-close §3.2) widened the keyed shape to min/max(date) — the
     /// fold arm's classify_trans admits it at the I32 lane (date is int4-width
-    /// byval), so the same fold economics + floor apply (CB q7 flip).
+    /// byval), so the same fold economics + floor apply (byval min/max flip).
     CbPlainAggFold,
     /// hashed GROUP BY over pgrcolumnar, int-family NOT-NULL-agnostic Var keys
     /// (walk enforces nullable-image refusal); spill-ELIGIBLE row.
@@ -86,11 +86,11 @@ pub enum CoverClass {
     /// pressure — expected, serial-correct).
     CbGroupedAggTextKey,
     /// GROUP BY + ORDER BY <whitelisted agg> LIMIT n over pgrcolumnar (the
-    /// m3-sort-b combine-phase top-N composition, q17/q18/q31–33 family);
+    /// m3-sort-b combine-phase top-N composition, two-key grouped-top-n family);
     /// §2.4 law 2b degrade rules are arm-internal.
     CbGroupedAggTopN,
     /// Grouped COUNT(DISTINCT <int Var>) over pgrcolumnar, int-family GROUP
-    /// keys (the runtime distinct sink's sorted-distinct feed — CB q9/q10
+    /// keys (the runtime distinct sink's sorted-distinct feed — the narrow-sort
     /// class); plain whitelisted aggs may ride alongside; single-agg-key
     /// ORDER BY + LIMIT composition is walk-admitted. RE-KEYED at
     /// m5-integration-r2: the bootstrap probe keyed plain `SELECT
@@ -178,7 +178,7 @@ pub enum CoverClass {
     /// sort/limit/offset (the Agg must be the plan ROOT — a Limit/Sort
     /// above it is an agg-not-plan-root walk refusal, the
     /// suppress-then-refuse direction); unindexed keeps the suppressed
-    /// serial plan shape certain (Agg over SeqScan). tpch q06 class.
+    /// serial plan shape certain (Agg over SeqScan). Filtered fact-rel plain-agg class.
     ///
     /// AGG_INTCASE widening (int-CASE fold-args car, knob-gated
     /// `PGRUST_LANE_V2_AGG_INTCASE`, DEFAULT ON since GL-INTCASE-1 —
@@ -192,7 +192,7 @@ pub enum CoverClass {
     /// conditional-bearing int arg (guaranteed manifest engagement — see
     /// heap_poly_tlist_admits).
     AggPolyHeapPlain,
-    /// M5-5 Meta-over-Gather (the band-2a q30 handoff): plain (ungrouped)
+    /// M5-5 Meta-over-Gather (the band-2a arithmetic-agg handoff): plain (ungrouped)
     /// FOOTER-ANSWERABLE aggregation over one plain pgrcolumnar rel with NO
     /// quals — count(*)/count(col), min/max over bare int-family Vars,
     /// and sum/avg over int2/int4 AFFINE transforms (`v±k`, `v*k`; the
@@ -201,7 +201,7 @@ pub enum CoverClass {
     /// answers these from part footers in milliseconds; the
     /// planner-parallel FinalizeAgg→Gather→PartialAgg shape escapes the
     /// Meta arm's Agg-over-SeqScan scope entirely (band-2a measured
-    /// q30@100M: 3.9–7.2s parallel vs ~5ms footer — a ~700x hole
+    /// the SUM(x op k) family @100M: 3.9–7.2s parallel vs ~5ms footer — a ~700x hole
     /// neutralized only by forced vectors). Suppressing Gather keeps the
     /// serial plan; if the Meta arm's runtime footer checks refuse (guard
     /// interval / non-MVCC), the runtime scan-arm fold is the engagement
@@ -502,9 +502,9 @@ pub(crate) fn size_floors_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("PGRUST_M5_SIZE_FLOORS").map_or(true, |v| v.trim() != "0"))
 }
 
-/// SE-TEXTDISTINCT (C1 text-distinct + q36 exprkey coverage car, band
+/// SE-TEXTDISTINCT (C1 text-distinct + reduced-exprkey coverage car, band
 /// 86001): the row-executor-removal WS-COVER census's `distinct-text-date-
-/// args` (7.58s/7q) + `gap:agg-expr-keys` (q36, 2.42s/1q) rows plan Gather
+/// args` (7.58s/7q) + `gap:agg-expr-keys` (2.42s/1q) rows plan Gather
 /// at default because the probe cannot key text-keyed / expression-keyed
 /// DISTINCT + grouped-agg shapes — even though the runtime arms ALREADY
 /// admit them (the runtime distinct SINK keys canonical-bytes text group
@@ -520,7 +520,7 @@ pub(crate) fn size_floors_enabled() -> bool {
 /// (`bootstrap_matrix_matches_tsv`, `coverage_matrix_is_consistent`) are
 /// untouched; the tsv rows record the flipped default with letter citations
 /// (GL-TEXTDIST, knob letter 2026-07-21: the knob is code-inert at t34 ==
-/// the measured noise floor 0.9889; grouped engagements q11/q12 0.010/0.011
+/// the measured noise floor 0.9889; grouped distinct-arg engagements 0.010/0.011
 /// hot vs cpg 0.44, ~40x).
 fn textdistinct_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -529,7 +529,7 @@ fn textdistinct_enabled() -> bool {
         // GL-TEXTDIST default-flip win. Eliminates part of the CB_FORCE_PLANS=mt16
         // vector: unforced release selection now suppresses Gather and engages the
         // runtime distinct / plain-distinct / exprkey sinks for the text/int
-        // count(DISTINCT) (q5/q6) + reduced-expr-key grouped-agg (q36) shapes the
+        // count(DISTINCT) + reduced-expr-key grouped-agg shapes the
         // mt16 vector forced (rt/rt16). The arm is proven byte-identical vs C and
         // vs knob-OFF (doc above); this flip is validated on the fleet
         // unforced-vs-mt16 A/B. PGRUST_LANE_V2_TEXTDISTINCT=0/off restores the
@@ -544,12 +544,12 @@ fn textdistinct_enabled() -> bool {
 /// SE-TEXTDISTINCT PLAIN (ungrouped) sub-arm gate — DEFAULT ON (t35
 /// routing-flips); `PGRUST_LANE_V2_TEXTDISTINCT_PLAIN=0|off` is the kill
 /// switch. HISTORY: night/planner-fix-forced held this OFF because the fleet
-/// A/B measured the suppress-Gather arm as a 10M REGRESSION (q5 0.046->0.151,
-/// q6 0.081->0.175) — but that was the suppress-then-UNARMED hole: the plain
+/// A/B measured the suppress-Gather arm as a 10M REGRESSION (int-key distinct
+/// 0.046->0.151, text-key 0.081->0.175) — but that was the suppress-then-UNARMED hole: the plain
 /// exact-DISTINCT sink armed off the bench GUC alone and never consulted
 /// router::arm_dop, so the suppressed plan landed SERIAL with no pool. Fixed
 /// at 98a012ba2 (fix(runtime_plaindistinct): arm via router::arm_dop
-/// (Distinct)); GL-TEXTDIST-2 re-measure post-fix is GREEN — q5/q6 at forced
+/// (Distinct)); GL-TEXTDIST-2 re-measure post-fix is GREEN — both at forced
 /// parity (~0.020/0.045s, floor-fix verification job 7e66, 2026-07-21) — so
 /// the sub-arm joins the flipped textdistinct default.
 fn textdistinct_plain_enabled() -> bool {
@@ -653,24 +653,24 @@ fn topn_nonint_text_key_stitched(
             .is_some_and(|&g| g > 0)
 }
 
-/// SE-MKTEXT (Lane-3 probe widening, two-key text car): the ClickBench
-/// q17/q18-class `GROUP BY UserID, SearchPhrase` shapes — TWO-key grouped
+/// SE-MKTEXT (Lane-3 probe widening, two-key text car): the analytics-bank
+/// int+text-class `GROUP BY UserID, SearchPhrase` shapes — TWO-key grouped
 /// aggregation with one or two default-collation text keys — run 8-39x
 /// slower unforced than on the hand-armed runtime agg pool (harvest3arm
-/// t32 A/B @ 10M dist-control: q17 0.900s unforced vs 0.061s forced; q18
-/// 0.122 vs 0.015) because the probe refuses them at plan time while the
+/// t32 A/B @ 10M dist-control: 0.900s unforced vs 0.061s forced; the LIMIT
+/// sibling 0.122 vs 0.015) because the probe refuses them at plan time while the
 /// runtime agg SINK already owns the shapes end to end: the Mk composite
 /// feed packs int+text keys (C2/Mk cars, canonical-bytes merge), the
 /// canonical multi-tail encoding carries TWO Intern components
 /// (canon-sink car 1, `PGRUST_RUNTIME_AGG_TEXT2`), and the bare-LIMIT
-/// group-admission FREEZE owns the q18 composition (band-2a,
+/// group-admission FREEZE owns the bare-LIMIT composition (band-2a,
 /// `PGRUST_RUNTIME_AGG_FREEZE`). This knob keys the admission gaps.
 ///
 /// DEFAULT ON (t35 routing-flips, GL-MKTEXT-1 FLIP-RECOMMENDED);
 /// `PGRUST_LANE_V2_MULTIKEY_TEXT=0|off` is the kill switch — every other
 /// spelling stays ON (the flipped-kill idiom: only the exact kill spellings
 /// disarm). MEASURED (knob letter 2026-07-21, jobs -54df/-46fa @ 4479aae8d,
-/// unforced 10M ClickBench): q17 0.861 -> 0.061 hot (14.1x, == the forced
+/// unforced 10M bank): two-key shape 0.861 -> 0.061 hot (14.1x, == the forced
 /// ref exactly) via the family's own 16M ceiling; zero regressions across
 /// 43q; no new byte-parity diff class. Same spelling in planner and execmain
 /// (the AGG_POLY / GROUPSINK knob-coherence law: a keyed shape whose arm is
@@ -743,25 +743,25 @@ fn knob_spelling_on(v: Option<&str>) -> bool {
     !matches!(v, Some("0") | Some("off"))
 }
 
-/// SE-EXTRACTKEY (Lane-3 sibling, cb q19 class — the routing map's biggest
+/// SE-EXTRACTKEY (Lane-3 sibling, ts-extract exprkey class — the routing map's biggest
 /// single probe win, 1.44s @ 10M): `GROUP BY UserID, extract(minute FROM
 /// EventTime), SearchPhrase` — the probe's bare-Var key discipline refuses
 /// the extract() expr key, yet the SERIAL-lane exprkey Multi arm ALREADY
 /// OWNS execution (exprkey.rs `decide_exprkey_mk`: one computed
 /// NUMERIC-returning chain key + bare int/text Vars, `int8 + numeric4 +
-/// intern4 = 16` — THE q19 shape; the forced arm ran mpwpg=0 with NO pools
+/// intern4 = 16` — THE ts-extract shape; the forced arm ran mpwpg=0 with NO pools
 /// at 0.088s vs 1.529s legacy-parallel). Suppression-only widening: the
 /// knob keys the shape via `classify_extract_exprkey`, the suppressed
 /// serial `[Limit<-Sort<-]HashAgg<-SeqScan` plan engages the Multi feed.
 /// DEFAULT ON (t35 routing-flips); `PGRUST_LANE_V2_EXPRKEY_EXTRACT=0|off`
 /// is the kill switch. GL-EXTRACTKEY-1 (2026-07-21, jobs -54df/-46fa/-75c3
 /// @ 4479aae8d) measured the knob safe everywhere (zero deltas across 43q)
-/// but held by the then-1e6 groupby_high floor: q19's estimate is 1,516,181
-/// (identical to q17's — the extract() key adds nothing), and with the hold
-/// bypassed the arm runs q19 at 0.093 hot (16x, forced ref 0.088). The
+/// but held by the then-1e6 groupby_high floor: the shape's estimate is 1,516,181
+/// (== the two-key base shape's — the extract() key adds nothing), and with the hold
+/// bypassed the arm runs the shape at 0.093 hot (16x, forced ref 0.088). The
 /// floor's raise to 4e6 LANDED (b12c3fc74, bench letter in-commit), so the
 /// re-letter-together-with-the-floor condition is met and the flip engages
-/// q19 unforced.
+/// the shape unforced.
 fn extract_exprkey_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
@@ -769,9 +769,9 @@ fn extract_exprkey_enabled() -> bool {
     })
 }
 
-/// SE-CONSTKEY (Lane-3 sibling, cb q35 class, 2.07s @ 10M): `SELECT 1, URL,
+/// SE-CONSTKEY (Lane-3 sibling, const-tlist-key class, 2.07s @ 10M): `SELECT 1, URL,
 /// count(*) … GROUP BY 1, URL` — the const group key fails `key_var` and
-/// the const tlist entry fails the emit discipline (the named q35 refusal;
+/// the const tlist entry fails the emit discipline (the named const-tlist refusal;
 /// matrix row agg-const-tlist). The forced arm (serial + pools) wins 10x,
 /// so an engagement exists to key; the const contributes nothing to the
 /// partition. The knob admits NON-NULL INT-FAMILY Const group keys (and
@@ -780,10 +780,10 @@ fn extract_exprkey_enabled() -> bool {
 /// routing-flips); `PGRUST_LANE_V2_AGG_CONSTKEY=0|off` is the kill switch.
 /// GL-CONSTKEY-1 (2026-07-21, jobs -54df/-46fa/-75c3 @ 4479aae8d) measured
 /// the knob safe everywhere (zero deltas across 43q) but held by the
-/// then-1e6 groupby_high floor: q35's estimate is 2,625,920 (all URL — the
+/// then-1e6 groupby_high floor: the shape's estimate is 2,625,920 (all URL — the
 /// const key contributes nothing), and with the hold bypassed the arm runs
-/// q35 at 0.227 hot (9.4x — BEATS the forced ref 0.237). The floor's raise
-/// to 4e6 LANDED (b12c3fc74), so the flip engages q35 unforced.
+/// the shape at 0.227 hot (9.4x — BEATS the forced ref 0.237). The floor's raise
+/// to 4e6 LANDED (b12c3fc74), so the flip engages the shape unforced.
 fn agg_constkey_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
@@ -791,7 +791,7 @@ fn agg_constkey_enabled() -> bool {
     })
 }
 
-/// SE-BARELIMIT (Lane-3 sibling, cb q18-composition class, 0.11s @ 10M):
+/// SE-BARELIMIT (Lane-3 sibling, bare-LIMIT-composition class, 0.11s @ 10M):
 /// bare `LIMIT k` with NO ORDER BY over a grouped agg falls into the topn
 /// else-branch refusal today. The suppressed serial plan is
 /// `Limit <- HashAgg <- SeqScan`; the runtime agg sink's group-admission
@@ -804,10 +804,10 @@ fn agg_constkey_enabled() -> bool {
 /// more-specific sibling and carries the family ceiling. DEFAULT ON (t35
 /// routing-flips, GL-BARELIMIT-1 FLIP-RECOMMENDED); `PGRUST_LANE_V2_
 /// AGG_BARELIMIT=0|off` is the kill switch. MEASURED (2026-07-21, jobs
-/// -54df/-46fa @ 4479aae8d): q18 0.124 -> 0.016 hot (7.8x, forced ref
+/// -54df/-46fa @ 4479aae8d): the composition 0.124 -> 0.016 hot (7.8x, forced ref
 /// 0.015) via the freeze composition with MKTEXT; zero regressions.
 /// TIE-CLASS NOTE (per the letter): bare-LIMIT-no-ORDER-BY answers change
-/// to a different VALID group subset (Q18 PASS-TIE) — callers snapshotting
+/// to a different VALID group subset (a PASS-TIE class) — callers snapshotting
 /// raw bytes will see a change; the tie law accepts it.
 fn agg_barelimit_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -817,7 +817,7 @@ fn agg_barelimit_enabled() -> bool {
 }
 
 /// PROVISIONAL floor for the SE-EXTRACTKEY knob path: the shared
-/// text-keyed-grouped economics (the q19 shape carries a text key too).
+/// text-keyed-grouped economics (the ts-extract shape carries a text key too).
 /// GL-EXTRACTKEY-1 owns re-measuring.
 fn extract_exprkey_guard() -> FloorGuard {
     FloorGuard { min_dop: 12, low_dop_max_rows: 3_000_000.0, ..NO_GUARD }
@@ -1389,12 +1389,12 @@ const F_SUM_NUMERIC: u32 = 2114;
 /// BOTH read sites flip together (the letter's knob-coherence duty).
 ///
 /// DEFAULT ON (t35 routing-flips, GL letter 2026-07-21 FLIP-RECOMMENDED,
-/// jobs -558e/-135a/-3773 @ 67a99589d, unforced 10M ClickBench): official
+/// jobs -558e/-135a/-3773 @ 67a99589d, unforced 10M bank): official suite
 /// score 0.9278 (−7.2%; inert-arm noise floor 0.9889) — essentially all of
-/// it CB q10 1.861 -> 0.066 hot (28.2x, == the forced rt16 ref 0.067,
+/// it the narrow-sort distinct shape 1.861 -> 0.066 hot (28.2x, == the forced rt16 ref 0.067,
 /// confirming GL-AGGPOLY-2's avg-passenger claim unforced); 42/42 remaining
 /// queries in the noise band, byte-parity class set unchanged; composes
-/// with GL-AGGPOLY-1's SE16 −12.4% q06 heap-shape WIN. Probe cost is
+/// with GL-AGGPOLY-1's SE16 −12.4% fact-rel heap-shape WIN. Probe cost is
 /// plan-time only (the §6 OLTP same-pod Ir pair rides this train).
 /// `PGRUST_LANE_V2_AGG_POLY=0|off` is the kill switch.
 fn agg_poly_probe_enabled() -> bool {
@@ -1503,10 +1503,10 @@ fn is_text_family(typ: u32) -> bool {
 /// branch commit): the original 1e6 was derived from the OLD groupby-high
 /// fixture at est_groups≈1e7 and silently held the whole 1e6..1e7 band
 /// legacy. The forced-mt16 routing-gap harvest + the floor=4e6 env A/B
-/// (unforced ClickBench 10M, cbstore9-v8-sorted-v2, c8gd NVMe) showed the
-/// CURRENT runtime agg arm crushes the 1e6..3e6 band (cb q16 0.864s→~0.02s,
-/// q17 0.900s→~0.06s, q34/q35 2.3s→~0.24s) while est_groups≈1e7 (cb q33
-/// class) still loses in the runtime combine until the exchange program
+/// (unforced 10M analytics bank, cbstore9-v8-sorted-v2, c8gd NVMe) showed the
+/// CURRENT runtime agg arm crushes the 1e6..3e6 band (dict-int-key 0.864s→~0.02s,
+/// two-key 0.900s→~0.06s, URL-key shapes 2.3s→~0.24s) while est_groups≈1e7 (the
+/// 10M-group class) still loses in the runtime combine until the exchange program
 /// lands — so the boundary moves to 4e6 (above the measured-winning ≈3e6
 /// band, below the known-losing 1e7), NOT to unbounded.
 fn groupby_high_floor() -> f64 {
@@ -1876,7 +1876,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
                 // answer serves only the zero-count qual shape on parts
                 // whose EVERY RG carries v7 zerocnts. Suppressing the
                 // Gather without that answerability is a measured 5x
-                // serial-instead-of-legacy false positive (q2 on the v6
+                // serial-instead-of-legacy false positive (measured on the v6
                 // 100M bank: Gather-16 0.011s -> suppressed-serial 0.055s;
                 // notes/q2box-lane.md). Probe subset-of walk: keep the
                 // legacy Gather when the META answer provably cannot
@@ -1891,7 +1891,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
                 }
                 return finish(run, CoverClass::CbPlainAggFold, rte.relid, 1.0, rel_rows, rel_pages);
             }
-            // Meta-over-Gather (M5-5, the band-2a q30 handoff): the residual
+            // Meta-over-Gather (M5-5, the band-2a arithmetic-agg handoff): the residual
             // plain-agg shapes the Meta footer arm answers — affine int
             // sum/avg args (`sum(v+k)` batteries) the bare-Var whitelist
             // above does not key. No quals (footer answers are whole-table;
@@ -1903,8 +1903,8 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
                 return finish(run, CoverClass::CbMetaFooterAgg, rte.relid, 1.0, rel_rows, rel_pages);
             }
             // SE-TEXTDISTINCT (C1, band 86001): ungrouped count(DISTINCT
-            // <int|default-collation text Var>) — the census's "plain q5/q6
-            // shape unwired" gap (cb q5 count(DISTINCT UserID), q6
+            // <int|default-collation text Var>) — the census's "plain distinct
+            // shape unwired" gap (int-key count(DISTINCT UserID), text-key
             // count(DISTINCT SearchPhrase)). The runtime PLAIN-distinct SINK
             // (runtime_plaindistinct.rs) admits int AND canonical-bytes text
             // distinct VALUES; suppressing Gather yields the serial
@@ -1916,11 +1916,11 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             // it off col 0 and the arm would land on serial). The sink arms
             // via router::arm_dop(Distinct) (98a012ba2). NOT a
             // BOOTSTRAP_MATRIX class. HISTORY: night/planner-fix-forced held
-            // the plain sub-knob OFF off a measured 10M REGRESSION (q5
-            // 0.046->0.151, q6 0.081->0.175) — later diagnosed as the
+            // the plain sub-knob OFF off a measured 10M REGRESSION (int-key
+            // 0.046->0.151, text-key 0.081->0.175) — later diagnosed as the
             // suppress-then-UNARMED hole (the sink armed off the bench GUC
             // alone, so the suppressed plan ran serial with no pool). With
-            // the arm_dop fix landed, GL-TEXTDIST-2 re-measured GREEN (q5/q6
+            // the arm_dop fix landed, GL-TEXTDIST-2 re-measured GREEN (both shapes
             // at forced parity ~0.020/0.045s, job 7e66) and t35
             // routing-flips flipped the sub-knob DEFAULT ON
             // (PGRUST_LANE_V2_TEXTDISTINCT_PLAIN=0|off is the kill).
@@ -1991,7 +1991,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     if !is_cb {
         return Ok(false);
     }
-    // SE-TEXTDISTINCT (C1, band 86001): q36 reduced-expr-key grouped agg —
+    // SE-TEXTDISTINCT (C1, band 86001): reduced-expr-key grouped agg —
     // keyed only knob-ON and BEFORE the bare-Var key discipline (which
     // refuses expr keys). A shape MISS returns None and falls through
     // unchanged.
@@ -2002,7 +2002,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             return Ok(verdict);
         }
     }
-    // SE-EXTRACTKEY (cb q19 class): extract()-keyed grouped agg — keyed
+    // SE-EXTRACTKEY (ts-extract class): extract()-keyed grouped agg — keyed
     // only knob-ON and BEFORE the bare-Var key discipline (which refuses
     // expr keys). A shape MISS returns None and falls through unchanged.
     if extract_exprkey_enabled() {
@@ -2026,7 +2026,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     // Key discipline: all keys plain Vars on the scanned rel; int-family
     // plus at most one text/varchar key under the deterministic default
     // collation (the c3 canonical-key-bytes classes). SE-CONSTKEY: non-null
-    // int-family Const keys admitted knob-ON (the q35 `GROUP BY 1, URL`
+    // int-family Const keys admitted knob-ON (the `GROUP BY 1, URL`
     // census) — they contribute nothing to the partition, so the REAL keys
     // keep driving classification and floors.
     let mut n_text = 0usize;
@@ -2080,7 +2080,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         && mk_text_family_shape_ok(parse.groupClause.len(), n_text)
         && mk_text_agg_cars_live(n_text);
     // Emit discipline: every tlist entry is a bare group-key Var, a
-    // whitelisted sink aggregate (const tlist entries — the q35 refusal,
+    // whitelisted sink aggregate (const tlist entries — the const-tlist refusal,
     // now keyed under SE-CONSTKEY — and non-identity emits classify
     // uncovered here), or a
     // count(DISTINCT <int Var>) — the runtime distinct sink's class
@@ -2116,14 +2116,14 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     // collation (pd_derive_spec(agg, desc, /*admit_text_keys=*/true) in
     // runtime_distinct.rs try_own_sorted_distinct_runtime) — so this is an
     // ADMISSION gap, NOT a missing kernel (SE-TEXTDISTINCT C1, band 86001;
-    // cb q11/q12/q14, the census distinct-text-date-args mass). Knob-gated
+    // the grouped distinct-arg top-n mass, census row distinct-text-date-args). Knob-gated
     // (PGRUST_LANE_V2_TEXTDISTINCT, DEFAULT ON since t34; =0|off kills):
     // killed keeps Gather (the pre-flip posture); ON falls through to the
     // class selection, where the n_count_distinct && n_text branch routes
     // it through finish_textdistinct. The count(DISTINCT) arg stays
     // int-family (is_count_distinct_int — the SINK's exact-set vocabulary);
     // the TEXT is the GROUP key. GL-TEXTDIST letter (2026-07-21): the
-    // grouped arm earns at default — q11/q12 0.010/0.011 hot vs cpg 0.44.
+    // grouped arm earns at default — distinct-arg shapes 0.010/0.011 hot vs cpg 0.44.
     // SE-MKTEXT fail-closed: grouped count(DISTINCT) rides the runtime
     // DISTINCT sink, whose canonical text-key admission is proven for ONE
     // text group key (pd_derive admit_text_keys) — the two-text distinct
@@ -2231,7 +2231,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         && n_count_distinct == 0
         && agg_freeze_car_live()
     {
-        // SE-MKTEXT: bare `LIMIT k` with NO ORDER BY (the cb q18 class,
+        // SE-MKTEXT: bare `LIMIT k` with NO ORDER BY (the bare-LIMIT class,
         // `GROUP BY UserID, SearchPhrase LIMIT 10`) — the runtime agg
         // sink's group-admission FREEZE composition (band-2a): the
         // suppressed serial plan is `Limit <- HashAgg <- SeqScan`, the sink
@@ -2301,7 +2301,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         && agg_sort_nolimit_enabled()
     {
         // SE-T2AGG CAR C (knob-gated, default OFF — block doc below): the
-        // topn shape WITHOUT the bound (cb q8 class, ORDER BY count(*) no
+        // topn shape WITHOUT the bound (full-sort class, ORDER BY count(*) no
         // LIMIT). Same single-agg sort-key vocabulary law as the topn arm;
         // the suppressed serial plan keeps its REAL Sort above the Agg (the
         // unbounded sink_topn_arm declines into the plain full drain and
@@ -2392,7 +2392,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         crate::selfuncs::estimate_num_groups(run, &group_exprs, input_rows)?
     };
     // SE-MKTEXT: the family's whole population sits ABOVE the groupby_high
-    // hold at ClickBench scale (10M dist-control estimates 3-5M groups for
+    // hold at analytics-bank scale (10M dist-control estimates 3-5M groups for
     // `UserID, SearchPhrase` — the forced runtime arm wins 8-15x there), so
     // the knob path carries its OWN provisional ceiling instead of the §10
     // hold; everything else keeps the hold byte-for-byte.
@@ -2490,7 +2490,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     // sink as the int-key class, with text group keys admitted (module doc);
     // route it through the dedicated knob-path finish (own trace + provisional
     // floor; NOT a BOOTSTRAP_MATRIX class, so the default census + drift
-    // guards are untouched). The top-N composition (cb q11/q12/q14 are all
+    // guards are untouched). The top-N composition (the distinct-arg shapes are all
     // ORDER BY count DESC LIMIT) rides the sink's paremit selection — the
     // walk composes it (named-kernels-distinct Kernel 2), so no extra probe
     // condition is needed beyond the topn shape already validated above.
@@ -2818,7 +2818,7 @@ fn classify_scanpass(parse: &Query<'_>, rti: usize, is_cb: bool, has_quals: bool
     // Projection that is not a bare column reference: no vectorized
     // projection kernel is wired on a row-returning passthrough (the future
     // arm's covered-expr gate). Bare-Var tlists are the covered projection
-    // class (the cb-q20 `SELECT UserID ...` shape).
+    // class (the bare single-int-Var emit `SELECT UserID ...` shape).
     for tle_node in &parse.targetList {
         let Some(tle) = tle_node.as_target_entry() else {
             return refuse_scanpass("non-TargetEntry tlist");
@@ -2831,7 +2831,7 @@ fn classify_scanpass(parse: &Query<'_>, rti: usize, is_cb: bool, has_quals: bool
         }
     }
     // A bare filtered (or unfiltered) row-returning pgrcolumnar passthrough
-    // — the covered SHAPE (the cb-q20 class). Still refused: there is no
+    // — the covered SHAPE (the bare-Var-emit class). Still refused: there is no
     // `parallel_engine=runtime` row-emit boundary to hand the suppressed
     // Gather to (every runtime arm folds). Owning enabler: the parallel
     // row-emit-boundary subsystem (notes/se-scanpass.md §4). The serial
@@ -4978,7 +4978,7 @@ fn finish_multikey_text(
 //          — strictly better than the per-row breaker), never a
 //          conflicting route.
 //
-//   CAR B  gap:agg-min-text (`grouped_str_minmax_arg`): cb q22-class text-key
+//   CAR B  gap:agg-min-text (`grouped_str_minmax_arg`): the single-text-key
 //          grouped agg with MIN(URL)/MIN(Title) — GROUPED_SINK_AGGS is
 //          int-only and the runtime agg sink's spec derivation
 //          (sink_resolve_combines) refused text min/max. The sink gains a
@@ -4991,13 +4991,13 @@ fn finish_multikey_text(
 //          the only collation the probe recognizes as deterministic; the
 //          engine's `str_collation_safe` is the stricter runtime twin.
 //
-//   CAR C  gap:agg-orderby-nolimit (`full_sort` composition): cb q8-class
+//   CAR C  gap:agg-orderby-nolimit (`full_sort` composition): the unbounded
 //          grouped agg + `ORDER BY count(*)` with NO LIMIT — the topn arm's
 //          `limitCount.is_some()` binding left the shape on the final
 //          `Ok(false)`. The suppressed serial plan is `Sort <- HashAgg <-
 //          SeqScan` (or `Sort <- Agg(SORTED) <- Sort <- SeqScan` for the
 //          count(DISTINCT) class): the runtime sinks already engage with the
-//          Agg below a Sort root (the q36 decorated-root precedent), the
+//          Agg below a Sort root (the reduced-exprkey decorated-root precedent), the
 //          unbounded `sink_topn_arm` declines into the plain full drain, and
 //          the REAL serial Sort above orders the finalized groups — the
 //          decorated-root pattern WITHOUT the bound; no executor change.
@@ -5096,7 +5096,7 @@ fn agg_strminmax_enabled() -> bool {
 /// CAR C knob (`PGRUST_LANE_V2_AGG_SORT_NOLIMIT`): DEFAULT ON since t36
 /// flips2 (`=0|off` kills). Planner-only (suppression-widening; the
 /// executor composition already exists). FLIP EVIDENCE (GL-T2B
-/// FLIP-RECOMMENDED, 2026-07-21, tier2 campaign @ 7d8aa9a2b, CB 10M
+/// FLIP-RECOMMENDED, 2026-07-21, tier2 campaign @ 7d8aa9a2b, 10M bank
 /// unforced + mt16): the grouped-agg-sort-no-limit target engages 3/3 in
 /// BOTH postures (planner suppress +
 /// runtime-agg engaged dop=16, groups=8), byte-identical output, wall flat
@@ -5229,7 +5229,7 @@ fn key_var<'mcx>(expr: Node<'mcx>, rti: usize) -> Option<&'mcx Var<'mcx>> {
 }
 
 /// SE-CONSTKEY: a group-key Const the knob admits — NON-NULL, INT-FAMILY
-/// (byval word keys; the q35 shape's `1`). Null consts (NULL group-key
+/// (byval word keys; the const-tlist shape's `1`). Null consts (NULL group-key
 /// semantics), text/varlena consts (canonical-bytes derivation untested for
 /// consts), and every other type fail closed.
 fn is_admissible_const_key(expr: Node<'_>) -> bool {
@@ -5410,13 +5410,13 @@ fn is_count_distinct_any(expr: Node<'_>, rti: usize) -> bool {
         || (is_text_family(v.vartype) && v.varcollid == DEFAULT_COLLATION_OID)
 }
 
-/// SE-TEXTDISTINCT (band 86001) q36 reduced-expr-key affine check: `expr`
+/// SE-TEXTDISTINCT (band 86001) reduced-expr-key affine check: `expr`
 /// is `base ± <int4 Const>` (or `<int4 Const> ± base`) where `base` is the
 /// representative int4 Var at `base_attno` on the scanned rel. Mirrors
 /// `decide_reduced`'s per-key admission (exprkey.rs: Add2/Sub2/… over the
 /// ONE representative Var, non-null Const, same width) STRICTLY NARROWER —
 /// int4-only (decide_reduced admits any uniform int width; the probe keeps
-/// to int4, the q36 shape). Mul/Div refuse (decide_reduced refuses them too).
+/// to int4, the measured shape). Mul/Div refuse (decide_reduced refuses them too).
 fn reduced_affine_of_var(expr: Node<'_>, rti: usize, base_attno: i16) -> bool {
     let Some(op) = expr.as_op_expr() else { return false };
     if op.opretset || op.args.len() != 2 {
@@ -5446,8 +5446,8 @@ fn reduced_affine_of_var(expr: Node<'_>, rti: usize, base_attno: i16) -> bool {
     !c.constisnull && c.consttype == INT4OID
 }
 
-/// SE-TEXTDISTINCT (band 86001) q36 reduced-expr-key recognizer. Keys the
-/// census `gap:agg-expr-keys` shape (cb q36):
+/// SE-TEXTDISTINCT (band 86001) reduced-expr-key recognizer. Keys the
+/// census `gap:agg-expr-keys` shape:
 ///   SELECT ClientIP, ClientIP-1, ClientIP-2, ClientIP-3, count(*), ...
 ///   FROM hits GROUP BY 1,2,3,4 ORDER BY count DESC LIMIT n
 /// — a single-rel grouped agg whose keys are ONE bare int4 Var plus affine
@@ -5517,7 +5517,7 @@ fn classify_reduced_exprkey<'mcx>(
     // Emit discipline: each tlist entry is a group-key expr (matched by
     // ressortgroupref) or a fold-admissible agg. PLAIN_FOLD_AGGS (WIDER than
     // GROUPED_SINK_AGGS: includes avg/sum poly-state int aggs) because the
-    // exprkey fold hosts them via lanefold — q36 has avg(ResolutionWidth).
+    // exprkey fold hosts them via lanefold — the census shape has avg(ResolutionWidth).
     for tle_node in &parse.targetList {
         let Some(tle) = tle_node.as_target_entry() else { return Ok(None) };
         if tle.ressortgroupref != 0 && key_refs.contains(&tle.ressortgroupref) {
@@ -5579,13 +5579,13 @@ fn classify_reduced_exprkey<'mcx>(
 /// `date_trunc` (timestamp result) deliberately NOT keyed: the Multi walk
 /// requires a NUMERIC computed key, so keying them would be
 /// suppress-then-refuse; single-key date_trunc is the TsTrunc class whose
-/// census composition (cb q43: ORDER BY the key + OFFSET) is the
+/// census composition (ORDER BY the key + OFFSET) is the
 /// topn-offset row's territory.
 const F_EXTRACT_TIMESTAMP: u32 = 6202;
 const TIMESTAMPOID: u32 = 1114;
 
 /// SE-EXTRACTKEY: the computed group key `extract(<non-null Const field>
-/// FROM <bare TIMESTAMP Var on the scanned rel>)` — cb q19's
+/// FROM <bare TIMESTAMP Var on the scanned rel>)` — the ts-extract class's
 /// `extract(minute FROM EventTime)`. Strictly narrower than the walk
 /// (`compile_value_chain` admits any IMMUTABLE strict builtin chain): one
 /// call, the exact extract-over-timestamp OID. The field spelling is NOT
@@ -5609,14 +5609,14 @@ fn is_extract_ts_key(expr: Node<'_>, rti: usize) -> bool {
 /// mk_admit_n): Σ int-key widths + 4 per text key + the computed NUMERIC
 /// key at 8 bytes, shrinking the numeric to 4 when the image exceeds 16.
 /// A shape that fits neither way must NOT be keyed (walk refusal —
-/// suppress-then-refuse). The q19 image: int8 + text4 + numeric8 = 20 →
+/// suppress-then-refuse). The measured image: int8 + text4 + numeric8 = 20 →
 /// shrink → 16 (fits exactly).
 fn extract_key_image_fits(int_widths_sum: usize, n_text: usize) -> bool {
     let fixed = int_widths_sum + n_text * 4;
     fixed + 8 <= 16 || fixed + 4 <= 16
 }
 
-/// SE-EXTRACTKEY (cb q19 class) recognizer: a single-cbstore-rel grouped
+/// SE-EXTRACTKEY (ts-extract class) recognizer: a single-cbstore-rel grouped
 /// agg whose keys are bare int-family Vars, at most ONE bare
 /// default-collation text Var (the Multi walk caps TextRaw components at
 /// one — dict/intern lane), and EXACTLY ONE `extract(field FROM ts)`
@@ -6100,7 +6100,7 @@ fn aggref_plain(agg: &Aggref<'_>, rti: usize) -> bool {
 
 /// SE-AGGPOLY (band 101001): the single-rel plain-agg INDEX guard —
 /// strictly narrower than the join classes' blanket "unindexed" rule
-/// (which refused tpch q06 outright: lineitem carries its PRIMARY KEY, a
+/// (which refused the fact-rel shape outright: lineitem carries its PRIMARY KEY, a
 /// live census finding). With ONE baserel and no join, an index can steer
 /// the suppressed serial plan away from Agg-over-SeqScan only when:
 ///   (a) a QUAL references the index's KEY columns (an index path becomes
@@ -6110,7 +6110,7 @@ fn aggref_plain(agg: &Aggref<'_>, rti: usize) -> bool {
 ///       index-only scan can cost below the seqscan even qual-free).
 /// Expression or partial indexes refuse outright (their matching is the
 /// planner's own — not re-derived here), as do whole-row references.
-/// q06's lineitem_pkey (l_orderkey, l_linenumber) triggers neither arm.
+/// The shape's lineitem_pkey (l_orderkey, l_linenumber) triggers neither arm.
 fn heap_poly_indexes_admit(
     run: &PlannerRun<'_>,
     parse: &Query<'_>,
@@ -6602,7 +6602,7 @@ mod tests {
     /// (bare-Var + DEFAULT_COLLATION_OID discipline, unchanged).
     #[test]
     fn mk_text_family_admits_two_key_text_shapes_only() {
-        // ADMITTED: the q17/q18 class (int+text) and text+text.
+        // ADMITTED: the two-key grouped class (int+text) and text+text.
         assert!(mk_text_family_shape_ok(2, 1), "two keys, int+text");
         assert!(mk_text_family_shape_ok(2, 2), "two keys, text+text");
         // REFUSED: all-int two-key (existing bootstrap rows own it).
@@ -6611,7 +6611,7 @@ mod tests {
         assert!(!mk_text_family_shape_ok(1, 1), "single text key is the C2/bootstrap row");
         assert!(!mk_text_family_shape_ok(1, 0));
         // REFUSED: 3+ keys — with or without a second text (fail-closed;
-        // the q19 class additionally carries an expr key, refused upstream).
+        // the ts-extract class additionally carries an expr key, refused upstream).
         assert!(!mk_text_family_shape_ok(3, 1), "3-key with one text stays bootstrap-only");
         assert!(!mk_text_family_shape_ok(3, 2), "3-key with two texts fails closed");
         assert!(!mk_text_family_shape_ok(4, 2));
@@ -6661,7 +6661,7 @@ mod tests {
     /// (suppress-then-refuse). Admitted/refused sets of record.
     #[test]
     fn extract_key_image_width_law() {
-        // The q19 image: int8 + text4 + numeric8 = 20 → shrink → 16. Fits.
+        // The ts-extract image: int8 + text4 + numeric8 = 20 → shrink → 16. Fits.
         assert!(extract_key_image_fits(8, 1));
         // int4 + text + extract: 4+4+8 = 16 exactly.
         assert!(extract_key_image_fits(4, 1));

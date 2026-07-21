@@ -140,7 +140,7 @@ static NEXT_CHILD_PID: AtomicI32 = AtomicI32::new(1000);
 /// moment every SetLatch/pmsignal wake aimed at the postmaster is silently
 /// misrouted, and each child-exit/launch request the postmaster sleeps
 /// through costs one DetermineSleepTime period (60 s). Root-caused from
-/// ClickBench Q9 (job pgrust-cb-pdstall-1783929932: postmaster pid 1094,
+/// a narrow-sort grouped exact-DISTINCT rep (the pdstall job 1783929932: postmaster pid 1094,
 /// worker synthetic pid 1094 in the wedged rep, 12 exit announces processed
 /// exactly 60.03 s late; notes/pardistinct-contention-fix.md). The counter
 /// must therefore never emit the postmaster's pid.

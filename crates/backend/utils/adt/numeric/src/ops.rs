@@ -838,7 +838,7 @@ pub fn numeric_avg_div(sum: Num<'_>, count: i64) -> PgResult<NumericImage> {
 /// `NumericImage` materializations (`int64_to_numeric` of sum and count)
 /// AND (in the common range) the digit-loop `div_var` machinery: the
 /// quotient computes as one i128 division. The hashed-agg emit's finalize
-/// hot path (ClickBench Q32-class: `avg(int)` over millions of groups).
+/// hot path (high-cardinality-group class: `avg(int)` over millions of groups).
 pub fn int64_avg_div(sum: i64, count: i64) -> PgResult<NumericImage> {
     let mut v1 = NumericVar::new();
     set_var_from_int64(sum, &mut v1);

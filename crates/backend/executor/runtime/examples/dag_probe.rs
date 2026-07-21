@@ -5,7 +5,7 @@
 //! dimension builds + a gated probe), (b) independent subqueries (two
 //! chains joining a final), (c) UNION ALL (independent branches + concat) —
 //! each run A/B with DAG dispatch ON vs OFF (today's sequential walk) on
-//! one warm pool, plus the single-pipeline flatness control (the ClickBench
+//! one warm pool, plus the single-pipeline flatness control (the wide-events
 //! shape class, expected ≈0).
 //!
 //! The predicted win is the SERIALIZED BUILD TAIL: dimension builds are
@@ -131,7 +131,7 @@ fn main() {
             ],
         ),
         (
-            // Flatness control: ONE wide pipeline (the CB shape class).
+            // Flatness control: ONE wide pipeline (the wide-events shape class).
             "single_pipeline",
             vec![wide(g * 64, vec![])],
         ),

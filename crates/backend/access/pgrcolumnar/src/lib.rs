@@ -1,4 +1,4 @@
-//! pgrcolumnar: scan-only columnar table AM for the ClickBench charter
+//! pgrcolumnar: scan-only columnar table AM for the analytics charter
 //! (docs/design/clickbench-format.md, docs/design/pgrcolumnar-impl.md).
 //! Buffer-cache-bypass by design (approved): reads are mmap of the part
 //! file, writes are direct pwrites + fsync; the main fork file's existence

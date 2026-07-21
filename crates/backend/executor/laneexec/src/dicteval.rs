@@ -305,7 +305,7 @@ fn build_fmgr_calls(specs: &[DictCallSpec]) -> Result<Vec<FmgrCall>, &'static st
 }
 
 /// A validated strict fmgr chain over an arbitrary input DATUM — the
-/// expr-key multi-key feed's derived-key evaluator (Q19's
+/// expr-key multi-key feed's derived-key evaluator (the ts-extract
 /// `extract(minute FROM EventTime)` class). Same catalog admission as the
 /// dict kernel ([`validate_calls`]); evaluation runs every call's production
 /// entry point per input, intermediates and results in the owned bump arena

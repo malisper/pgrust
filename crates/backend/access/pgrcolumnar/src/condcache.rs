@@ -171,7 +171,7 @@ fn shared_stats() -> bool {
 /// Per-scan hit/miss stat cells. The process counters are observational
 /// only (eviction is last_used-LRU, admission is the byte budget — neither
 /// reads hits/misses), but the per-window `count_hit` fetch_add on the
-/// shared statics was a 16-worker cache-line ping-pong worth 88% of q21's
+/// shared statics was a 16-worker cache-line ping-pong worth 88% of the selective-qual grouped shape's
 /// cycles at 100M mt16 (suite-profile census U7). Each scan counts in its
 /// own plain cells and folds into the globals once at teardown (`Drop`) or
 /// at an explicit stats read (`fold`).

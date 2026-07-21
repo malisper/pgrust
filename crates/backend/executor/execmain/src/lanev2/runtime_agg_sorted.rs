@@ -1,4 +1,4 @@
-//! q28-sorted-arm — the ORDERED-GROUPED runtime aggregation arm: a
+//! sorted-sink arm — the ORDERED-GROUPED runtime aggregation arm: a
 //! SERIAL-plan sort-free GroupAggregate (`Agg(AGG_SORTED) → pgrcolumnar
 //! SeqScan`, the clustered/footer-sorted bank shape) executed as one runtime
 //! ParallelSink at DOP N on the M1 pinned-RG machinery.
@@ -38,7 +38,7 @@
 //!    staging arms (PREWHERE for qualled scans);
 //!  * no vguards, no residual transitions; every transition kind
 //!    runtime-partial combinable (AvgAccum/Int128/Count/Sum/byval folds —
-//!    Str/Bp/F min-max refuse). GUARDED plans (the real q28 charlen mb
+//!    Str/Bp/F min-max refuse). GUARDED plans (the real length()-agg charlen mb
 //!    guard) ADMIT: the claim drive re-proves guards per window from zone
 //!    answers and refuses fail-closed on a Demote verdict (no checked
 //!    per-row program exists in the narrow drive);
@@ -449,7 +449,7 @@ fn drive_claim<'mcx>(
         if n % 64 != 0 {
             sel[nwords - 1] &= (1u64 << (n % 64)) - 1;
         }
-        // GUARDED plans (the real q28 class — charlen multibyte guard on
+        // GUARDED plans (the real length()-agg class — charlen multibyte guard on
         // avg(length(url))): the serial fold's per-window guard re-proof,
         // verbatim (zone minmax answers first, then check_guards over the
         // selected non-fallback rows). A Demote verdict is a fail-closed
@@ -867,7 +867,7 @@ fn sorted_arm_shape_ok(agg: &::nodeagg::AggStateData<'_>) -> bool {
     ::nodeagg::agg_sorted_fold_admissible(agg)
         // GUARDED plans admit — including vguard/uguard (varlena inline-form
         // + UTF-8 countability) obligations, which EVERY length/str lane
-        // carries (the real q28's avg(length(URL)) class): the claim drive
+        // carries (the bank's real avg(length(URL)) class): the claim drive
         // runs the serial fold's exact `check_guards` per window (len-staged
         // columns skip their proofs there) and REFUSES fail-closed on a
         // Demote verdict (no checked per-row program exists in the narrow

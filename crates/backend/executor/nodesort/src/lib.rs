@@ -716,7 +716,7 @@ pub trait SortLaneBatchFeed<'mcx> {
 /// the selective-qual sort feed's per-row emit ceremony (ExprContext reset,
 /// CFI, bitmap re-test per row) collapses to one word test per 64 rows.
 /// One shared implementation: `exectuples::for_each_live` (the wordskip
-/// generalization of this q22 helper); the differential test below stays
+/// generalization of this qualed-sort-feed helper); the differential test below stays
 /// the put-stream-identity gate at this seam.
 #[inline(always)]
 fn for_each_put(

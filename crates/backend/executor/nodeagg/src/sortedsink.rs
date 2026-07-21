@@ -1,4 +1,4 @@
-//! q28-sorted-arm — the ordered-grouped runtime aggregation sink's nodeagg
+//! sorted-arm lane — the ordered-grouped runtime aggregation sink's nodeagg
 //! seams (leader emit state + boundary-group stitch installs).
 //!
 //! The runtime ordered arm (execmain lanev2/runtime_agg_sorted.rs) drives the

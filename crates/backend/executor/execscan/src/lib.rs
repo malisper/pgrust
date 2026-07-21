@@ -354,7 +354,7 @@ fn exec_scan_impl<'mcx, N: ScanNode<'mcx>, const QUAL: bool, const PROJ: bool, c
                 // regexp_replace's wchar buffer) must live in the per-tuple
                 // memory reset at the next exec_scan entry (C projects into
                 // ecxt_per_tuple_memory); es_query_cxt here accumulated
-                // ~26GB anon over one 100M-row scan (ClickBench Q29).
+                // ~26GB anon over one 100M-row per-row-regexp_replace scan.
                 // SAFETY: reset-only context, outlives the plan.
                 unsafe {
                     let per_tuple = estate.ecxt(ecxt).per_tuple_mcx();

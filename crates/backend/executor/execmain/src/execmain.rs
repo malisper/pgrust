@@ -384,7 +384,7 @@ fn skeleton_disarm_in_place(qd: &mut QueryDescData) -> PgResult<Option<i32>> {
     // across reuses. C frees the ExecutorState on every execution; retention
     // is only sound if the arena stays at its post-first-execution size.
     // Statements whose executions grow the arena (e.g. PL/pgSQL function
-    // calls: SELECT f(...) under a generic plan — the TPROC-C P1 leak,
+    // calls: SELECT f(...) under a generic plan — the stored-proc OLTP P1 leak,
     // notes/memleak-tpcc-lane.md) get their executor torn down on the normal
     // reset/recycle path once the arena crosses the cap; non-growing
     // statements (point selects) park forever and pay only this load+cmp.

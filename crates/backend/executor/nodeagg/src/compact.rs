@@ -57,7 +57,7 @@ pub enum MkCompKind {
     /// component — resolved through [`agg_hash_compact_intern`].
     Intern,
     /// numeric in the canonical (mantissa, exp10) key form
-    /// (`adt_numeric::keypack` — the Q19 numeric key kind): low `width - 1`
+    /// (`adt_numeric::keypack` — the ts-extract-key numeric key kind): low `width - 1`
     /// bytes = sign-extended mantissa, top byte = exp10 as i8 with -128
     /// reserved for specials (mantissa 1 = NaN, 2 = +Inf, 3 = -Inf).
     /// `width` is 4 or 8; values outside the width's mantissa range, or
@@ -111,7 +111,7 @@ impl MkShape {
 
     /// The shape's FIRST Intern (text) component, when one exists — the M2
     /// sink's canonical-bytes machinery keys "is this a canonical shape" off
-    /// it. Shapes may carry up to two Intern components (the CaseDict q40
+    /// it. Shapes may carry up to two Intern components (the CaseDict
     /// class: computed CASE key + bare text Var); the canonical byte image
     /// length-prefixes each tail when more than one exists
     /// ([`crate::sink`]'s `canon_row_bytes` doc).
@@ -135,7 +135,7 @@ impl MkShape {
 }
 
 /// The arithmetic of one reconstructable (redundant) grouping key
-/// (redundant-key lane, ClickBench Q36 class): `Var ± Const` int arithmetic
+/// (redundant-key lane, reduced-expr-key class): `Var ± Const` int arithmetic
 /// over the representative key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RedOp {
@@ -208,7 +208,7 @@ pub(crate) struct CompactHash {
     /// BATCH TAIL for newly inserted rows (the accept path — parallel and
     /// cache-warm), so the flush and the single-threaded SEAL partition
     /// never hash: the SEAL collapses to a counting sort over these values
-    /// (the q19@100M settle/finalize serial-tail profile). Cleared with
+    /// (the expr-key class's @100M settle/finalize serial-tail profile). Cleared with
     /// every table reset (flush) — rows restart per epoch. Empty for word
     /// shapes.
     pub(crate) canon_hashes: Vec<u64>,
@@ -320,24 +320,24 @@ fn compact_enabled() -> bool {
 /// arena-strings inc-3 arm switch (`PGRUST_LANE_V2_TEXT_DIRECT`, **default
 /// ON** since letter GL-ARENASTR-1; `=0`/`off` is the exact-spelling kill):
 /// DIRECT single-text worker accept tables. The M2 sink's SINGLE-TEXT class
-/// (mk1: one non-nullable Intern component — the q34/q35 `GROUP BY url`
+/// (mk1: one non-nullable Intern component — the wide-vocabulary `GROUP BY url`
 /// shape) keys its LOCAL table directly on the CANONICAL IMAGE bytes
 /// (`KeyRepr::Bytes`, probed with `sink::sink_hash_bytes` — the saved hash
 /// word IS the sink hash) instead of the intern-id indirection
 /// (text → intern id → packed image → Int probe → store-once canon rebuild).
 /// SINK worker builds only (`ph.sink_cap` installed before the arm); the
-/// serial lane and the coded-group (q29) mk1 consumers keep the intern arm
+/// serial lane and the coded-group (long-text regexp class) mk1 consumers keep the intern arm
 /// verbatim regardless of the env. Kill = byte-identical incumbent paths.
 ///
-/// FLIP PROVENANCE (letter GL-ARENASTR-1, scratchpad/night/, fleet cb-mt16
-/// forced-plan channel, CB conf v2.1, dist builds, banks cbstore9-v8[x]-
-/// sorted-v2): TDonly @ 34d377de5, c8gd — q34 0.825 / q35 0.808 / q19
-/// 1.000 (FLAT) @10M (damped geomean 0.874); q34 0.933 / q35 0.928 / q19
+/// FLIP PROVENANCE (letter GL-ARENASTR-1, scratchpad/night/, the mt16
+/// forced-plan fleet channel, bench conf v2.1, dist builds, banks cbstore9-v8[x]-
+/// sorted-v2): TDonly @ 34d377de5, c8gd — url-key 0.825 / const-tlist 0.808 / expr-key
+/// 1.000 (FLAT) @10M (damped geomean 0.874); url-key 0.933 / const-tlist 0.928 / expr-key
 /// 0.971 @100M (0.944). Parity: outputs byte-identical across arms, both
-/// scales, both storage arms, every DOP mode (md5 matrix; cb-explain
-/// sorted-sha single). q19 guard: zero direct-arm traces (expr-key class
+/// scales, both storage arms, every DOP mode (md5 matrix; explain-channel
+/// sorted-sha single). Expr-key guard: zero direct-arm traces (expr-key class
 /// out of scope), flush_bytes A0-class. DOP matrix @10M: wins every mode
-/// ~15-20%. The sibling inc-1 STEAL knob stays OFF (its q19 flush-bytes
+/// ~15-20%. The sibling inc-1 STEAL knob stays OFF (its expr-key flush-bytes
 /// inflation failed the guard — re-letter only after store compaction).
 pub fn text_direct_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -528,7 +528,7 @@ pub fn agg_hash_compact_sink_admissible(node: &AggStateData<'_>, cap: u32, spill
     if ph.hash_grp_col_idx_input.len() > ph.num_cols {
         return false;
     }
-    // M3.5 spill-armed admission (the q33@100M hmm=2 cliff): with a live
+    // M3.5 spill-armed admission (the ~10M-group @100M hmm=2 cliff): with a live
     // spill arm on a word-keyed engagement the WORKER gates vacate the
     // estimate refusal (compact_single_word_gates / try_arm / mk_admit_n
     // under `sink_spill_ok`), so this leader mirror must vacate it too —
@@ -598,7 +598,7 @@ pub fn agg_hash_compact_try_arm(node: &mut AggStateData<'_>) -> CompactArm {
     // the entry line alone (key inline; the probe never touches the payload
     // row) — ONE serialized miss per hit instead of Salt8's entry→row
     // two-load chain, with the row/states miss overlapped by the probe-time
-    // states prefetch + the separate fold pass. The in-situ Q16 A/B
+    // states prefetch + the separate fold pass. The in-situ dict-int-key A/B
     // (2026-07-15) showed the 1.5-4M DRAM-bound band is chain-latency bound
     // (eliminating instruction overhead alone moved nothing), so Inline16's
     // band is 4M (was 1M); the old pod A/B's 8.4M-band loss (2x entry
@@ -615,7 +615,7 @@ pub fn agg_hash_compact_try_arm(node: &mut AggStateData<'_>) -> CompactArm {
             additionalsize,
             // Capacity hint: the planner group estimate, honored well past
             // the two-level threshold (the table presizes its 256 buckets
-            // from it — Q16's 1.5M-group estimate previously clamped to 1M
+            // from it — a dict-int-key 1.5M-group estimate previously clamped to 1M
             // and was then discarded at conversion). The 8M cap bounds the
             // birth prealloc at 256MB of entries; the spill/backstop gates
             // already bounded the estimate against hash_mem.
@@ -670,7 +670,7 @@ pub fn agg_hash_compact_try_arm_mk(
 }
 
 /// [`agg_hash_compact_try_arm_mk`] over a SET of Intern (text) components
-/// (band-2a CaseDict, q40 class): every att in `intern_atts` packs as a
+/// (band-2a CaseDict computed-text-key class): every att in `intern_atts` packs as a
 /// 4-byte intern id through the SHARED intern pool (ids only distinguish
 /// equal bytes, so one pool serves any number of components; read-back maps
 /// each component id through the same reverse map). SINK admission caps
@@ -781,7 +781,7 @@ fn try_arm_mk_n(
             additionalsize,
             // Capacity hint: the planner group estimate, honored well past
             // the two-level threshold (the table presizes its 256 buckets
-            // from it — Q16's 1.5M-group estimate previously clamped to 1M
+            // from it — a dict-int-key 1.5M-group estimate previously clamped to 1M
             // and was then discarded at conversion). The 8M cap bounds the
             // birth prealloc at 256MB of entries; the spill/backstop gates
             // already bounded the estimate against hash_mem.
@@ -889,7 +889,7 @@ fn mk_admit_n(
     }
     // Component kinds first; offsets are laid out per numeric width below
     // (numeric components try the roomy 8-byte encoding, shrinking to 4
-    // bytes when the image would exceed 16 — the Q19 shape's budget:
+    // bytes when the image would exceed 16 — the ts-extract shape's budget:
     // int8 + numeric4 + intern4 = 16).
     let mut kinds: Vec<(u16, MkCompKind)> = Vec::with_capacity(key_cols.len());
     let mut has_numeric = false;
@@ -947,7 +947,7 @@ fn mk_admit_n(
     );
     // Spill-eligibility estimate at half margin (compact v1 formula; the
     // 2-word key rides the same 8-B slack term — conservative either way).
-    // M3.5 spill-armed sink admission (the q33@100M hmm=2 cliff): a live
+    // M3.5 spill-armed sink admission (the ~10M-group @100M hmm=2 cliff): a live
     // spill arm absorbs budget crossings (runs spill as records), so the
     // ESTIMATE refusal is vacated then — the cap-bounded sizing (numgroups
     // min'd above) still holds. Word-keyed shapes spill fixed-width records;
@@ -1021,7 +1021,7 @@ pub fn agg_hash_compact_reduced_admissible(node: &AggStateData<'_>) -> CompactAr
 }
 
 /// Decide + arm the compact table for a REDUCED-key build (redundant
-/// grouping-key elimination, Q36 class). The caller (the lane's expr-key
+/// grouping-key elimination, reduced-expr-key class). The caller (the lane's expr-key
 /// feed) has already admitted the shape: 2..N int grouping keys where every
 /// non-representative key is a deterministic `Var ± Const` function of the
 /// representative, plus the feed half (unguarded-or-proven fold plan, no
@@ -1059,7 +1059,7 @@ pub fn agg_hash_compact_try_arm_reduced(
             additionalsize,
             // Capacity hint: the planner group estimate, honored well past
             // the two-level threshold (the table presizes its 256 buckets
-            // from it — Q16's 1.5M-group estimate previously clamped to 1M
+            // from it — a dict-int-key 1.5M-group estimate previously clamped to 1M
             // and was then discarded at conversion). The 8M cap bounds the
             // birth prealloc at 256MB of entries; the spill/backstop gates
             // already bounded the estimate against hash_mem.
@@ -1651,7 +1651,7 @@ fn mk_intern_datum(ch: &CompactHash, id: u32, mcx: ::mcx::Mcx<'_>) -> PgResult<D
     Ok(d)
 }
 
-// -- Numeric key components (the Q19 numeric key kind) -----------------------
+// -- Numeric key components (the ts-extract-key numeric key kind) ------------
 //
 // Bit codec for [`MkCompKind::Numeric`]: low `width - 1` bytes carry the
 // canonical mantissa (sign-extended two's complement), the top byte carries
@@ -2053,7 +2053,7 @@ mod numeric_key_tests {
 
     #[test]
     fn i64_bits_match_materialized_datum_bits() {
-        // The integer fast pack (Q19 extract-key class) must produce the
+        // The integer fast pack (ts-extract key class) must produce the
         // EXACT bits of the datum path over int64_to_numeric — same key,
         // same read-back datum — across the trailing-zero ladder, signs,
         // the width-4/8 range gates, and a deterministic sweep.
@@ -2502,7 +2502,7 @@ pub fn batch_emit_row<'mcx>(
 // topnemit spec — count(*)/count(x)/sum-int leading key) the downstream
 // bounded tuplesort keeps only k of the ~ngroups finalized rows; the
 // streaming topnemit boundary cut only elides groups STRICTLY worse than the
-// live k-th boundary, which on flat count distributions (Q32/Q33: the 10th
+// live k-th boundary, which on flat count distributions (~10M-group class: the 10th
 // boundary count is ~1) cuts nothing. This pass instead selects the k
 // surviving groups FIRST — a bounded (badness, row) heap over the raw int8
 // transvalues, one sequential read per group — so finalize (numeric avg

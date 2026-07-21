@@ -177,7 +177,7 @@ pub struct AggStateData<'mcx> {
     // table's by-ref transvalues live in aggcontext (module doc).
     hashgroup: Option<Box<hashgrouped::HashGroupedState<'mcx>>>,
     // Lane-v2 dict-code batched exact-DISTINCT grouping (codedgroup.rs, the
-    // Q14-class near-unique text-key shape): Some while the arm holds state
+    // near-unique text-key shape class): Some while the arm holds state
     // (building or emitting). Plain Rust memory only — no aggcontext
     // residue, no interplay with the group-boundary resets (module doc).
     codedgroup: Option<Box<codedgroup::CodedGroupState<'mcx>>>,
@@ -190,7 +190,7 @@ pub struct AggStateData<'mcx> {
     // per call through the cross-bucket merge. Plain Rust memory; no
     // aggcontext residue, no interplay with the group-boundary resets.
     pdemit: Option<Box<pardistinct::PdParemitState>>,
-    // q28-sorted-arm: the ordered-grouped runtime sink's adopted emit state
+    // sorted-arm lane: the ordered-grouped runtime sink's adopted emit state
     // (sortedsink.rs) — stitched ordered segments drained one row per call.
     // Plain Rust memory; no aggcontext residue.
     sorted_sink_emit: Option<Box<sortedsink::SortedSinkEmitState>>,
@@ -675,7 +675,7 @@ struct PerHashData<'mcx> {
     // backstop must never migrate into the C table (the sink cannot export
     // it); the sink drain flushes at the cap instead.
     sink_cap: Option<u32>,
-    // M3.5 spill-armed admission (mt16-cliffs, the q33@100M hmm=2 cliff):
+    // M3.5 spill-armed admission (mt16-cliffs, the ~10M-group @100M hmm=2 cliff):
     // true on a sink build whose engagement carries a live spill arm. The
     // compact admission gates skip the ESTIMATE-based SpillRisk refusal
     // then (word-keyed shapes only — a budget crossing degrades to spill
@@ -2016,8 +2016,8 @@ fn init_perhash<'mcx>(
         // C build_hash_table: DO_AGGSPLIT_SKIPFINAL(aggsplit) — partial aggs
         // (each parallel participant, leader included) get a per-worker hash
         // IV so their bucket-order EMISSION doesn't feed the finalize's
-        // identically-mapped table in hash order (q18fin lane: that
-        // correlation cost 104e9 probes / ~500s on TPROC-H q18's finalize).
+        // identically-mapped table in hash order (finalize-corr lane: that
+        // correlation cost 104e9 probes / ~500s on a decision-support big-group finalize).
         node.aggsplit & AGGSPLITOP_SKIPFINAL != 0,
     )?;
     let hashslot =
@@ -5184,7 +5184,7 @@ pub fn agg_plain_distinct_insert_batch<'mcx>(
 }
 
 /// One staged window of the direct-feed drive consumed as the scan's KEY
-/// LANE (hot-gap lever C2, the q5 class): `vals`/`isnull` are the staged key
+/// LANE (hot-gap lever C2, the int-key count(DISTINCT) class): `vals`/`isnull` are the staged key
 /// column's value and null lanes for the window's rows, in row order.
 /// Equivalent to `agg_plain_distinct_insert_batch` over the same rows —
 /// NULLs elided value-for-value and folded into the set's one `seen_null` —
@@ -6016,7 +6016,7 @@ pub fn agg_sorted_lane_admissible(node: &AggStateData<'_>) -> bool {
 }
 
 /// Grouped narrow-sort admission (lanev2 `try_own_sorted_agg_over_sort`'s
-/// order-relaxation arm — the ClickBench Q9/Q10 shape): AGG_SORTED whose
+/// order-relaxation arm — the sorted grouped exact-DISTINCT shape): AGG_SORTED whose
 /// every internal-sort entry is a set-CAPABLE exact-DISTINCT (presorted
 /// entries included — the drive arms `force_distinct_set`, replacing the
 /// plan's sort-suffix adjacent-dedup with the exact set) and whose EVERY
@@ -7065,7 +7065,7 @@ fn agg_retrieve_hash_table<'mcx>(
 /// content size triggers an allocator release after the drop. The engagement
 /// that produced it churned a working set several times larger (per-worker
 /// tables + radix runs + merge tables, most of it in helper threads that have
-/// already exited), all freed-but-RETAINED by mimalloc — at q33@100M-class
+/// already exited), all freed-but-RETAINED by mimalloc — at high-cardinality @100M-class
 /// shapes (~10^8 groups) that ratchet is multi-GB per execution and a repeat
 /// run of the same query crosses the pod cgroup ceiling: the kernel
 /// OOM-kills the whole (single-process) server silently (m2-coverage
@@ -7089,7 +7089,7 @@ pub fn exec_end_agg(node: &mut AggStateData<'_>) {
             hashagg_release_retained("sink_teardown");
         }
     }
-    // q28-sorted-arm: same discipline for the ordered sink's segments.
+    // sorted-arm lane: same discipline for the ordered sink's segments.
     sortedsink::agg_sorted_sink_reset(node);
     node.qual = None;
     node.merge = None;

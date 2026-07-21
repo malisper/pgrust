@@ -1,6 +1,6 @@
 //! Lane-v2 hash-grouped exact-DISTINCT aggregation — the uniqexact2 grouped
 //! narrow-sort arm's named follow-up (lane-v2-distincthash). For the
-//! ClickBench Q9/Q10 plan shape — `Sort(group cols, distinct arg) →
+//! sorted grouped exact-DISTINCT plan shape — `Sort(group cols, distinct arg) →
 //! GroupAggregate(aggpresorted DISTINCT)` — the narrow-sort arm already
 //! deletes the distinct-arg SUFFIX compares, but the group-prefix sort over
 //! ALL input rows remains the dominant cost. This arm deletes that sort too:
@@ -338,7 +338,7 @@ fn smap_shape(node: &AggStateData<'_>) -> bool {
 }
 
 /// Density threshold for the stringhash shape. Default stays at the generic
-/// 8.0 until the Q14 crossover A/B lands a measured value.
+/// 8.0 until the near-unique-key crossover A/B lands a measured value.
 fn stringhash_min_rpg() -> f64 {
     static V: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
     *V.get_or_init(|| {
@@ -371,17 +371,17 @@ pub fn agg_hashgroup_economical(node: &AggStateData<'_>, force: bool, input_rows
     /// conservative mean — the runtime degrade bounds the real usage).
     const PER_TEXT_KEY_EST: f64 = 64.0;
     /// DENSITY tier: the arm's win is collapsing many rows into few group
-    /// states; near-unique group keys (CB Q14: ~1.35M input rows over ~690k
+    /// states; near-unique group keys (measured case: ~1.35M input rows over ~690k
     /// estimated SearchPhrase groups) make the per-row group switch/create
     /// machinery COST vs the narrowed sort's adjacent dedup — measured
     /// 2.0s vs 1.44s serial with engage-then-degrade every rep (fleet
-    /// 2026-07-12, 10M bank, work_mem=1GB). Q9-Q12 sit at 200x-100000x
-    /// rows/group; Q14-class near-unique shapes refuse here. `input_rows`
+    /// 2026-07-12, 10M bank, work_mem=1GB). The winner shapes sit at 200x-100000x
+    /// rows/group; near-unique-key shapes refuse here. `input_rows`
     /// is the plan Sort's row estimate (0.0 = unknown: tier skipped).
     const MIN_ROWS_PER_GROUP: f64 = 8.0;
     // The 8x tier was calibrated on the GENERIC span table's probe/create
     // cost. The stringhash-admissible shape (single text key, switch on)
-    // reads its own threshold — re-priced by the Q14 A/B; the env override
+    // reads its own threshold — re-priced by the near-unique A/B; the env override
     // is the measurement channel (PGRUST_LANE_V2_STRINGHASH_MINRPG).
     let min_rpg = if smap_shape(node) { stringhash_min_rpg() } else { MIN_ROWS_PER_GROUP };
     let est_groups = (node.plan.numGroups as f64).max(1.0);
@@ -399,12 +399,12 @@ pub fn agg_hashgroup_economical(node: &AggStateData<'_>, force: bool, input_rows
 /// groups must fit the per-Local budget with 2x slack. Density reads its
 /// own threshold (`PGRUST_RUNTIME_DISTINCT_MINRPG`) — MEASURED 2026-07-14
 /// (job pgrust-m0-accept-1784045139-06ee, 10M v7u bank, wm=1GB,
-/// condcache=on): with the tier at 1.0 the near-unique CB-q14 class
+/// condcache=on): with the tier at 1.0 the near-unique text-key class
 /// (SearchPhrase text key, ~1.6 rows/group, 835k merged groups) ENGAGES
 /// with full parity + morsel-elastic disturb (4.7%) but LOSES —
 /// runtime16 1.739s vs ser 1.254s (0.72x): the build parallelizes but
 /// the leader-side adopt/emit tail (concat + rep synthesis + order +
-/// per-group emit over 835k groups) dominates, the q19@10M
+/// per-group emit over 835k groups) dominates, the 10M-scale
 /// "emit/combine-bound near-unique" class. The serial-calibrated 8.0
 /// therefore prices the ADOPT tail.
 ///
@@ -414,10 +414,10 @@ pub fn agg_hashgroup_economical(node: &AggStateData<'_>, force: bool, input_rows
 /// to the cross-bucket merge + datum memcpy), which removes exactly the
 /// serial floor the 8.0 tier priced. Those shapes read their own default
 /// (1.0; `PGRUST_RUNTIME_DISTINCT_PAREMIT_MINRPG` is the re-pricing
-/// channel) so the near-unique q14 class engages by default. The
+/// channel) so the near-unique text-key class engages by default. The
 /// budget-fit term applies unchanged to both tiers.
 ///
-/// `dop_budget` (q14-100m lane, the K2 100M admission): `Some((per_local
+/// `dop_budget` (near-unique-100M lane, the K2 100M admission): `Some((per_local
 /// envelope bytes, dop))` when the caller proved the FULL bounded-memory
 /// stack is armed — a live paremit recipe, a resolved K2 top-N selection
 /// (leader retention ≤ bound×parts candidates, never the merged group
@@ -428,7 +428,7 @@ pub fn agg_hashgroup_economical(node: &AggStateData<'_>, force: bool, input_rows
 /// sealed.len()`) plus value-hash splits already bound each partition's
 /// merged table dynamically, and per-partition tables are est/256-sized.
 /// The fit term therefore becomes the same union bound the combine
-/// enforces: `est_groups × per_group × 2 ≤ envelope × dop` (CB q14@100M:
+/// enforces: `est_groups × per_group × 2 ≤ envelope × dop` (near-unique @100M:
 /// 5.43M est × 640 = 3.48GB vs 512MB serial-halved → refused; vs 2GiB ×
 /// 16 = 32GiB → admits; the 10M engagement admits under BOTH terms —
 /// this face only ADDS engagements, never removes one). `None` = the
@@ -515,7 +515,7 @@ pub fn agg_hashgroup_reset(node: &mut AggStateData<'_>) {
         // swapped-in sets; the group-boundary restart clears those.
         drop(hg);
         // The DISTINCT-sink half of 69b97573f's teardown discipline (the
-        // q33-lane flag: "the same teardown release belongs in the distinct
+        // high-cardinality-lane flag: "the same teardown release belongs in the distinct
         // sink"): the runtime distinct sink adopts its merged result HERE
         // (agg_hashgroup_adopt_merged), and the parallel build that produced
         // it churned a multi-GB per-worker working set in helper threads
@@ -1134,7 +1134,7 @@ pub struct HgBatchShape {
 /// grouping key is an integer kind and EVERY transition of the node is
 /// either (a) a set-mode pertrans with a bare integer-Var argument
 /// (`direct_att`: single input, no FILTER) or (b) — mixed-shape fold
-/// admission, `allow_fold` (the Q10-class sums alongside the DISTINCT) — a
+/// admission, `allow_fold` (the class with sums alongside the DISTINCT) — a
 /// plain transition in the exact-integer vocabulary
 /// (`pardistinct::vocab_kind`: count(*)/count(x)/sum(int2/4)/avg(int2/4),
 /// single bare-Var argument, no FILTER/DISTINCT/ORDER). Under that shape
@@ -1532,7 +1532,7 @@ pub unsafe fn agg_hashgroup_accept_batch_span(
     while i < n {
         let (w, bit) = ((i / 64) as usize, 1u64 << (i % 64));
         if let Some(s) = sel {
-            // Word skip (the q22 survivor-walk precedent): an all-dead sel
+            // Word skip (the qualed-scan survivor-walk precedent): an all-dead sel
             // word advances 64 rows in one test. Forced-fallback rows carry
             // a SET sel bit (the refsort contract), so no NeedSlot row is
             // ever skipped with its word.
@@ -1672,7 +1672,7 @@ fn hg_fold_combine(node: &mut AggStateData<'_>) -> PgResult<()> {
                 // advanced by the rep replay still has `no_trans_value ==
                 // true` from its NULL initval. Deciding replace-vs-add on
                 // that stale latch overwrote the rep's contribution (the
-                // q10 parity bug: every group's sum short by exactly its
+                // mixed-fold parity bug: every group's sum short by exactly its
                 // deferred representative's value).
                 PdVocabKind::CountStar | PdVocabKind::CountAny { .. } => {
                     if acc != 0 {

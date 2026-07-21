@@ -336,7 +336,7 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      — the vacuum SCAN task set's drive-scoped worker context pointer,
     //      set for one run_morsel drive and cleared on every exit path —
     //      same drive-scoped class and argument as WORKER_EXEC slots 4-6.
-    // Train-14's own cargo (q5/q22/q14/topn) adds ZERO sources — the
+    // Train-14's own cargo (int-key distinct, qualed text min/max, near-unique text top-n, topn) adds ZERO sources — the
     // per-file census at the train-13 tip and the train-14 tip is identical.
     // (Merge reconciliation, train-14 car 6: the m35-spill-joins lane
     // independently re-pinned 474 attributing the whole drift to morsels.rs
@@ -352,7 +352,7 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      worker executor slot (built inside the query-task binding, torn
     //      down on every drive exit path) — same drive-scoped class and
     //      argument as WORKER_EXEC slots 4-6.
-    // 476, re-pinned at train-18 (q28-sorted-arm ordered-grouped runtime sink):
+    // 476, re-pinned at train-18 (the ordered-grouped sorted-agg runtime sink):
     //   17. executor/execmain/src/lanev2/runtime_agg_sorted.rs
     //      WORKER_EXEC — the ordered-grouped (sorted-agg) sink's drive-scoped
     //      worker executor slot (QueryDescHandle + fold keys/spec, built

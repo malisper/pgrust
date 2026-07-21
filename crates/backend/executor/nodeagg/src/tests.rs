@@ -2504,7 +2504,7 @@ mod hashspill {
 
 // AGG_SORTED with a compressed text group key: the boundary eq (texteq)
 // detoasts its args through the frame's armed result mcx (tmpcontext
-// per-tuple memory). Unarmed frames panic here (ClickBench Q14 shape).
+// per-tuple memory). Unarmed frames panic here (near-unique text-key shape).
 #[test]
 fn sorted_group_by_compressed_text_key_detoasts_in_boundary_eq() {
     use core::mem::MaybeUninit;
@@ -2658,7 +2658,7 @@ fn sorted_group_by_compressed_text_key_detoasts_in_boundary_eq() {
 }
 
 // ---------------------------------------------------------------------------
-// q28-sorted-arm: SortedEmitAcc capture round trip (byval + varlena deep
+// sorted-arm lane: SortedEmitAcc capture round trip (byval + varlena deep
 // copy, 8-aligned arena, end-resolved fixups).
 // ---------------------------------------------------------------------------
 
@@ -2703,7 +2703,7 @@ fn sorted_emit_acc_round_trip() {
 // q18fin r3 red/green unit — byref merge under variable hash IVs (the t26
 // integration ledger's "q18fin-t26-r2 re-earn verdict" defect). Participants
 // (leader partial = worker -1, workers 0 and 1) build their partial tables
-// with per-participant hash IVs (execGrouping.c parity — the q18
+// with per-participant hash IVs (execGrouping.c parity — the big-group
 // parallel-finalize stall fix), but the byref finalize merge compares STORED
 // hashes across the handed tables AND the finalize's own IV=0 table (parts[0]
 // of consume_handoff). Without the export-boundary rebase

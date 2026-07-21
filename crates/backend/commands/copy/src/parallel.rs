@@ -115,7 +115,7 @@ fn dop(rt: &runtime::Runtime) -> i32 {
 }
 
 /// In-flight chunk window (published − committed): bounds leader read-ahead
-/// memory (a chunk is ~1 RG of raw input, ~50 MB on ClickBench rows).
+/// memory (a chunk is ~1 RG of raw input, ~50 MB on wide-events analytics rows).
 fn window(k: i32) -> u64 {
     static N: OnceLock<Option<u64>> = OnceLock::new();
     let req = *N.get_or_init(|| {

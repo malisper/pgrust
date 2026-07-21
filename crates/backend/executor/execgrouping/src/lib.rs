@@ -547,7 +547,7 @@ pub fn build_tuple_hash_table<'mcx>(
     // underestimated." Concretely (q18fin lane): a Finalize HashAggregate
     // re-inserting worker partials that arrive in the workers' bucket order
     // degenerates linear probing into ~1e5-bucket runs (measured 104e9 bucket
-    // inspections for the first 1M inserts on TPROC-H q18's 15M-group
+    // inspections for the first 1M inserts on a decision-support 15M-group
     // finalize) — the per-participant IV decorrelates emission order from
     // the consumer's bucket mapping.
     let hash_iv = if use_variable_hash_iv {

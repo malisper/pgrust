@@ -5,7 +5,7 @@
 //! reading from the same queue"). On ship-all-rows shapes where the leader
 //! is slower than a single producer, that queue never empties and the scan
 //! degenerates to one producer + leader (the 2026-07-14 parallelism audit
-//! measured 146x worker-row skew on Q18/Q19/Q33). pgrust's batched tqueue
+//! measured 146x worker-row skew on three grouped-agg shapes). pgrust's batched tqueue
 //! transport makes rotation nearly free (the leader holds a decoded chunk
 //! per reader; switching readers costs no queue traffic), so a bounded
 //! per-queue drain is a candidate divergence — but it is a DIVERGENCE from

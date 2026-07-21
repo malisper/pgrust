@@ -110,7 +110,7 @@ pub fn sink_hash_bytes(b: &[u8]) -> u64 {
 /// words (`[count: i64, sum: i64]` in the transno's 16-byte `AggPerGroup`
 /// slot) instead of a per-group 40-byte transarray in the worker
 /// aggcontext. Kills the unspillable byref-floor refusal class (the
-/// proportionality-audit q33@dop2 172s verdict): flush/spill/combine copy
+/// proportionality-audit high-cardinality @dop2 172s verdict): flush/spill/combine copy
 /// state words verbatim, so with nothing pointer-shaped left the spill law
 /// drains ALL pressure. Off restores the aggcontext representation
 /// everywhere, bit-exactly.
@@ -185,7 +185,7 @@ pub fn sink_spill_canon_enabled() -> bool {
 /// `PGRUST_RUNTIME_AGG_GIDMERGE=1` opt-in (default OFF): the combine-side
 /// GID merge (canon-sink-increments car 2 — per-worker packed-word group ids
 /// short-circuit the canonical bytes probe for repeat arrivals).
-/// MEASURED NO-SHIP at 100M (2026-07-14 A/B, text family q13/15/17/19,
+/// MEASURED NO-SHIP at 100M (2026-07-14 A/B, four text-family shapes,
 /// rta16, jobs -2b22 on / -064e off): ON is +10/+10/+19/+32% hot — the
 /// near-unique text classes re-arrive too rarely for map hits to pay for
 /// the per-claim map allocation + the flush-side word fill. The mechanism
@@ -223,7 +223,7 @@ pub fn sink_combine16_enabled() -> bool {
 /// scratchpad/night/arena-string-tables-design.md §4.3/§4.6): the canonical
 /// flush STEALS the accept-time store-once byte store (`canon_store`) into
 /// the run instead of permute-copying every key image bucket-major — the
-/// q34-profile flush-copy bucket. Slots stay bucket-major (starts, states,
+/// url-key-profile flush-copy bucket. Slots stay bucket-major (starts, states,
 /// hashes, gid words are permuted exactly as before — u64 traffic only);
 /// key bytes stay arrival-ordered with per-slot (off, end) into the stolen
 /// store (`SinkRun::key_ends`, read via [`SinkRun::key_slice`]). Byte-
@@ -674,7 +674,7 @@ fn mk_words_of(table: &LaneAggTable, shape: &MkShape, row: usize) -> [u64; 2] {
 ///  * ONE Intern component (the C2 single-text classes): the raw text bytes
 ///    verbatim — the historical image, byte-for-byte (freeze snapshots,
 ///    topn tie order, and every landed gate keep their exact bytes).
-///  * TWO+ Intern components (the CaseDict q40 class): each tail is
+///  * TWO+ Intern components (the CaseDict two-text class): each tail is
 ///    length-prefixed (`u32` LE len + content) in component order — the two
 ///    tails decode unambiguously (canon-sink-increments car 1).
 /// Injective either way: the prefix is fixed-width per shape and the tail
@@ -761,7 +761,7 @@ fn sink_flush_table_canon_impl(
     // plain permuting byte copy — the old shape re-ran the whole canonical
     // materialization (word unpack + intern reverse-map chase + component
     // assembly) a second time per row AND hashed at flush, which the
-    // q13/q19 profiles put at ~14% of the engaged 16-thread query.
+    // interned-key/expr-key profiles put at ~14% of the engaged 16-thread query.
     compact_extend_canon_hashes(ch);
     let gid_gen = ch.intern_gen;
     let crate::compact::CompactHash {
@@ -917,7 +917,7 @@ fn sink_flush_table_canon_impl(
 /// [`sink_partition_remainder`]'s canonical twin: bucket index by the
 /// STORED canonical hashes (`compact_extend_canon_hashes` — accept-time,
 /// parallel). This runs on the single-threaded last-worker-out SEAL, which
-/// the q19@100M profile showed serializing a canon+hash sweep over every
+/// the expr-key @100M profile showed serializing a canon+hash sweep over every
 /// Local's remainder while 15 workers waited — with the hashes carried it
 /// is a plain counting sort. Canonical shapes are non-nullable —
 /// `has_null` is structurally false.
@@ -1083,9 +1083,9 @@ fn sink_partition_remainder_direct(ch: &crate::compact::CompactHash) -> SinkPart
 }
 
 // ---------------------------------------------------------------------------
-// LIMIT-k-no-ORDER group-admission FREEZE (band-kernels-2a, ClickBench q18
+// LIMIT-k-no-ORDER group-admission FREEZE (band-kernels-2a, the grouped-LIMIT
 // class): `GROUP BY ... LIMIT k` with NO ORDER BY needs only k groups with
-// EXACT aggregates — the ratified q18 PASS-TIE membership class (count-gated:
+// EXACT aggregates — the ratified PASS-TIE membership class (count-gated:
 // rowcount equal, values exact for whichever groups emit). The law:
 //  * OPEN: every worker admits groups normally (nothing is ever dropped).
 //  * INSTALL: the first worker whose live compact table holds >= bound
@@ -1109,7 +1109,7 @@ fn sink_partition_remainder_direct(ch: &crate::compact::CompactHash) -> SinkPart
 // ---------------------------------------------------------------------------
 
 /// Freeze bound ceiling: entry masks ride a u64 in the worker filter, and
-/// the class only pays off for small k (q18 is LIMIT 10). Larger bounds
+/// the class only pays off for small k (the motivating shape is LIMIT 10). Larger bounds
 /// decline at arming and keep the full drain.
 pub const SINK_FREEZE_MAX_BOUND: u32 = 64;
 
@@ -2712,13 +2712,13 @@ pub enum SinkEmitCol {
     /// text varlena into the buf arena (nothing worker-owned crosses to the
     /// leader).
     MultiText { nth: u8 },
-    /// A packed Numeric component (the q19 `extract(minute ...)` key class):
+    /// A packed Numeric component (the `extract(minute ...)` ts-key class):
     /// `width` bytes at byte `off` decode through the canonical keypack form
     /// (`mk_numeric_key_decode` → `numeric_key_unpack`) into a NUMERIC image
     /// in the buf arena — byte-identical to the packed first-arrival datum
     /// by the keypack canonicality gates.
     MultiNumeric { off: u8, width: u8 },
-    /// A constant tlist entry (the q35 `SELECT 1, URL, ...` class): the
+    /// A constant tlist entry (the const-tlist `SELECT 1, URL, ...` class): the
     /// plan's Const datum, emitted verbatim on every row. Byval-only by
     /// admission (a byref image would need per-row arena copies — refused
     /// fail-closed), so nothing worker- or query-arena-owned crosses to the
@@ -2830,7 +2830,7 @@ pub fn sink_build_emit_plan(
                 },
                 SinkKeySpec::Multi(shape) => {
                     // Int components decode from the key image; Intern (C2
-                    // car) emits the canonical tail as text; Numeric (q19
+                    // car) emits the canonical tail as text; Numeric (the
                     // minute() class) decodes through keypack. Nullable
                     // images stay heap-source-only — refused fail-closed.
                     let comp = shape.comps.get(j)?;
@@ -2887,7 +2887,7 @@ pub fn sink_build_emit_plan(
             continue;
         }
         if let Some(c) = te.expr.as_const() {
-            // Const tlist entry (q35's `SELECT 1, URL, ...` class): byval
+            // Const tlist entry (the `SELECT 1, URL, ...` class): byval
             // images only — the emit-buf and table drains copy the datum
             // verbatim per row; a byref const would need arena
             // materialization (refuse fail-closed, as before this arm).
@@ -3412,7 +3412,7 @@ pub fn agg_sink_set_cap(node: &mut AggStateData<'_>, cap: u32) {
 /// [`agg_sink_set_cap`] with the M3.5 spill-armed admission flag: when the
 /// engagement carries a live spill arm, the compact admission gates skip
 /// the ESTIMATE-based SpillRisk refusal for word-keyed shapes (a budget
-/// crossing degrades to spill epochs, not an error) — the q33@100M hmm=2
+/// crossing degrades to spill epochs, not an error) — the ~10M-group @100M hmm=2
 /// cliff was a pure estimate refusal that the landed spill arm could have
 /// absorbed. Canonical bytes-keyed (Intern-bearing) shapes keep the
 /// phase-1 refusal regardless (their runs are not spillable); the mk
@@ -3644,7 +3644,7 @@ pub fn agg_sink_put_table(node: &mut AggStateData<'_>, h: SinkTableHandle) {
 /// run copied its canonical bytes and the remainder is empty at this
 /// moment, so no live row references an intern id — the next window
 /// re-interns its own vocabulary (bounded memory instead of the backstop's
-/// half-limit error on wide-vocabulary scans — the q34@100M URL class).
+/// half-limit error on wide-vocabulary scans — the URL-key @100M class).
 /// `true` in the pair = the intern table WAS reset: the caller MUST
 /// invalidate any code→intern-id cache it holds (`MkScratch`/
 /// `MultiKeyChain` epoch caches) — a stale id would materialize the wrong
@@ -3705,7 +3705,7 @@ pub(crate) fn sink_table_live_bytes(t: &LaneAggTable) -> usize {
 
 /// Force-flush the armed table into a run NOW, regardless of the cap
 /// (`None` = empty table, nothing to flush). The budget-pressure spill law
-/// (mt16-cliffs, the q33@100M hmm=2 cliff): when half-limit pressure trips
+/// (mt16-cliffs, the ~10M-group @100M hmm=2 cliff): when half-limit pressure trips
 /// on a spill-armed engagement, the drain flushes the bounded table through
 /// this and spills the accumulated runs as one epoch instead of refusing —
 /// the mem-leg pressure is table-driven there, and the flush drains it.
@@ -3830,7 +3830,7 @@ pub fn agg_sink_aggctx_mem(node: &AggStateData<'_>) -> usize {
 // group is unique), so the order is total and the winner set is a PURE
 // FUNCTION OF THE DATA — independent of worker claim order and of bucket
 // geometry. Against C / the serial relaxed arm the boundary tie group is
-// the ratified count-gated class (the q31/q32/q33 precedent).
+// the ratified count-gated class (the high-cardinality top-n precedent).
 //
 // SELECTION-ORDER TOTALITY LAW (train-14 P0, topn x bytes — the mt16 v4
 // stop finding): every key representation the sink ADMITS must carry a
@@ -5766,7 +5766,7 @@ mod tests {
 
     #[test]
     fn emit_bucket_multi_components() {
-        // One-word packed image: int4 at off 0, int2 at off 4 (q42 class).
+        // One-word packed image: int4 at off 0, int2 at off 4 (multi-int class).
         let mut t = mk_table(8);
         let img: u64 = ((-7i32 as u32) as u64) | ((300u16 as u64) << 32);
         bump(&mut t, Some(img as i64), 5, 9);
@@ -5787,7 +5787,7 @@ mod tests {
         assert_eq!(buf.values[2].as_i64(), 5);
         assert!(!buf.nulls[0] && !buf.nulls[1] && !buf.nulls[2]);
 
-        // Two-word packed image: int8 at off 0, int4 at off 8 (q41 class —
+        // Two-word packed image: int8 at off 0, int4 at off 8 (multi-int class —
         // the component at off 8 lives entirely in the high key word).
         let mut t2 = LaneAggTable::with_config(
             KeyRepr::Int128,
@@ -5920,7 +5920,7 @@ mod tests {
     // -- Canonical (text-bearing) shapes — the C2 car ------------------------
 
     /// int8 + text shape: Int{8} at off 0, Intern at off 8 (12-byte image,
-    /// two words) — the q17/q18 `UserID, SearchPhrase` class.
+    /// two words) — the two-key `UserID, SearchPhrase` class.
     fn canon_shape_int8_text() -> MkShape {
         MkShape {
             comps: vec![
@@ -5934,7 +5934,7 @@ mod tests {
     }
 
     /// The 1-comp single-text shape (bump_canon's `k = None` twin — the
-    /// q34-class image is the intern id word alone).
+    /// single-text-class image is the intern id word alone).
     fn canon_shape_text_only() -> MkShape {
         MkShape {
             comps: vec![crate::compact::MkComp {
@@ -6603,7 +6603,7 @@ mod tests {
 
     #[test]
     fn canonical_single_text_short_and_long_keys() {
-        // 1-comp Intern shape (4-byte image, one word — the q13/q34 single
+        // 1-comp Intern shape (4-byte image, one word — the interned single
         // text class). Canonical keys span probe_bytes' packed8 arm
         // (len <= 8: empty + short texts) AND the arena arm (long text).
         let shape = MkShape {
@@ -7054,7 +7054,7 @@ mod tests {
         )
     }
 
-    /// The c3-class corpus: shared >16-byte prefixes (the ClickBench URL
+    /// The c3-class corpus: shared >16-byte prefixes (the analytics-bank URL
     /// shape — every prefix-only image would collide), keys equal through
     /// byte 16 differing only in length, short (<= 8 B packed-word) keys,
     /// and the empty canonical key.
@@ -7515,7 +7515,7 @@ mod tests {
         }
     }
 
-    // -- LIMIT-k-no-ORDER group-admission freeze (band-2a q18) -------------
+    // -- LIMIT-k-no-ORDER group-admission freeze (band-2a) -----------------
 
     /// SinkFreeze state machine: election is exclusive, entries visible
     /// only after publish, disable fails open.
@@ -7666,7 +7666,7 @@ mod tests {
 
     // -- canon-sink-increments: two-text tails, canonical spill, GID merge --
 
-    /// int2 + TWO Intern components (the CaseDict q40 image class):
+    /// int2 + TWO Intern components (the CaseDict two-text image class):
     /// Int{2} at 0, Intern at 2, Intern at 6 — 10-byte image, two words.
     fn canon_shape_two_text() -> MkShape {
         MkShape {

@@ -18,7 +18,7 @@
 //   MIN/MAX(text/varchar/bpchar) under the memcmp collation tier (C/POSIX
 //   only) with a per-batch inline-varlena proof (vguards) and C's exact
 //   datumCopy-into-aggcontext transvalue discipline. The strlenfold tier
-//   (lane-v2-strlenfold, CB Q28) adds the int4 SUM/AVG/MIN/MAX/bit kinds
+//   (lane-v2-strlenfold, the length()-arg plain-agg class) adds the int4 SUM/AVG/MIN/MAX/bit kinds
 //   over `length(text Var)` / `octet_length(text Var)` — Var-pointer-backed
 //   integer lane widths (VarLenBytes/VarLenChars) whose kernels read the
 //   char/byte count straight off the inline payload (uguard-proven exact
@@ -654,7 +654,7 @@ pub struct FilterEntry {
 
 // Branchy on the loop-invariant transform fields so LLVM unswitches the
 // per-row loops: the dominant addend-only shape must stay a bare add (an
-// unconditional sdiv per row cost Q7-class min/max folds ~13% on CB).
+// unconditional sdiv per row cost byval min/max folds ~13% on the analytics banks).
 #[inline(always)]
 fn xform(t: &LaneTrans, v: i64) -> i64 {
     let v = if t.divk != 1 { v / t.divk as i64 } else { v };

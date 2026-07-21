@@ -1,8 +1,8 @@
 //! Lane-v2 parallel exact-DISTINCT partials (lane-v2-pardistinct).
 //!
 //! The planner can never emit a Partial Agg for a DISTINCT aggregate
-//! (prepagg hasNonPartialAggs), so the parallel plan for the ClickBench
-//! Q5/Q6/Q9/Q10 shapes is always `Agg ← GatherMerge ← Sort ←
+//! (prepagg hasNonPartialAggs), so the parallel plan for the plain and
+//! grouped count(DISTINCT) shapes is always `Agg ← GatherMerge ← Sort ←
 //! ParallelSeqScan`: workers sort ALL rows (group prefix + distinct-arg
 //! suffix) and the leader deduplicates serially. This module supplies the
 //! winning algorithm instead: the LEADER (which owns the Agg node and its
@@ -490,7 +490,7 @@ pub struct PdBuilder<'mcx> {
     evict_floor: usize,
     frozen: bool,
     /// batch-insert lane: staged-window batched distinct-set inserts (the
-    /// q9/q10 accept-side stall fix — micro-probe job -075a: accept-side
+    /// grouped-DISTINCT accept-side stall fix — micro-probe job -075a: accept-side
     /// ~-28% cycles from miss-chain overlap across the per-group sets).
     /// Admitted at construction only (`set_batch_insert`): single int-kind
     /// set, grouped shape. `stage_g/stage_v` hold the deferred (group,
@@ -508,13 +508,13 @@ pub struct PdBuilder<'mcx> {
     /// dedupsub I3 touched-group dedup: per-group window stamp (index =
     /// group, value = the `touch_epoch` that last touched it; 0 = never).
     /// Replaces the per-window sort+dedup of `stage_g` (measured ~4.5-5.4%
-    /// of q9/q10 rt16 cycles) with an O(window) stamp pass.
+    /// of grouped-DISTINCT rt16 cycles) with an O(window) stamp pass.
     touch_stamp: Vec<u32>,
     touch_epoch: u32,
     /// dedupsub I3 projection input: staged values fed so far (the
     /// denominator of expected_worker_rows / staged_rows).
     staged_rows: u64,
-    /// q9internals inc-2 run memo (int-only specs, nkeys <= MEMO_KEYS;
+    /// distinct-internals inc-2 run memo (int-only specs, nkeys <= MEMO_KEYS;
     /// `memo_g == u32::MAX` = no run). The sorted banks cluster rows by
     /// group key: a row whose key words + null mask equal the previous
     /// row's takes the memoized group id and skips hash+probe entirely.
@@ -529,7 +529,7 @@ pub struct PdBuilder<'mcx> {
     last_sv: i64,
 }
 
-/// q9internals inc-2: memoized key width (covers the q9/q10 family's 1-2
+/// distinct-internals inc-2: memoized key width (covers the sorted-DISTINCT family's 1-2
 /// int keys; wider int specs keep the per-row probe).
 const MEMO_KEYS: usize = 4;
 
@@ -674,7 +674,7 @@ impl<'mcx> PdBuilder<'mcx> {
         self.staged_rows += n as u64;
         // Touched-group dedup (nsets == 1: set index == group index).
         // dedupsub I3: an O(window) epoch-stamp pass replaces the per-window
-        // sort+dedup (quicksort measured 5.38%/4.48% of q9/q10 rt16 cycles).
+        // sort+dedup (quicksort measured 5.38%/4.48% of grouped-DISTINCT rt16 cycles).
         // stage_touch ends up in first-touch order instead of sorted order —
         // a non-surface: it only drives the delta re-account below, whose
         // sum is order-invariant, and the projection reserve (geometry).
@@ -703,7 +703,7 @@ impl<'mcx> PdBuilder<'mcx> {
         // dedupsub I3 projection reserve: pre-size each touched BIG set's
         // probe table for its projected final length — one jump instead of
         // the doubling-rehash ladder (IntSet::grow measured 5.09%/3.99% of
-        // q9/q10 rt16 cycles). Projection: linear extrapolation of the
+        // grouped-DISTINCT rt16 cycles). Projection: linear extrapolation of the
         // set's length over the worker's expected row share, ratio clamped
         // (early windows / estimate error), target capped at the share
         // itself (a set can never exceed the rows that feed it). Runs
@@ -1585,11 +1585,11 @@ impl<'s> PdBucketMerger<'s> {
         }
     }
 
-    /// q9internals inc-3: declare the total donor count (the non-split
+    /// distinct-internals inc-3: declare the total donor count (the non-split
     /// combine knows all its tables up front). ONLY a reserve-geometry
     /// input: with n roughly-equal donors the per-donor exact bound
     /// re-grows the same dst set ~log2(n) times, each grow a full-set
-    /// rehash (~2x final len of reinsert volume at q9's disjoint
+    /// rehash (~2x final len of reinsert volume at the clustered-key class's disjoint
     /// per-worker sets); scaling the target by the donors still to come
     /// makes the first reserve final. The split paths keep hint 0: their
     /// per-absorb budget checks (mem_bytes-driven split decisions) must
@@ -1743,7 +1743,7 @@ impl<'s> PdBucketMerger<'s> {
                 // first reserve is the last — the per-donor exact bound
                 // re-grew the same big set once per donor, a full-set
                 // rehash each time. Geometry only; grow_to_cap census
-                // measured 5.05%/4.19% of q9/q10 rt16 cycles at t23.
+                // measured 5.05%/4.19% of grouped-DISTINCT rt16 cycles at t23.
                 if !vals.is_empty() && pd_grow_project_enabled() {
                     let target = dset.len() + vals.len() * donors_left;
                     if target >= PD_PROJECT_MIN {
@@ -2012,7 +2012,7 @@ pub fn pd_parallel_merge_plain<'m>(
 /// HISTORY NOTE (m2-distinct-sink): the original table listed the TRANSFN
 /// proc oids while the caller passed `ar.aggfnoid` — no vocab shape could
 /// ever derive. Unobservable under the Gather-era arm (its v1 economics
-/// refused non-empty vocab before deriving); found by the sink's Q10-class
+/// refused non-empty vocab before deriving); found by the sink's mixed-fold-class
 /// e2e engagement coverage.
 pub(crate) fn vocab_kind(aggfnoid: Oid, att: Option<(u16, PdInt)>) -> Option<PdVocabKind> {
     /// pg_proc: count(*) / count(any) / sum(int2) / sum(int4) /
@@ -2219,7 +2219,7 @@ impl PdSinkMerged {
 
 // ===========================================================================
 // PAREMIT — emission-in-combine for the runtime distinct sink (m2-sinks §6
-// applied to donor B; the winners-phase2 q14 car). For ADMITTED shapes —
+// applied to donor B; the winners-phase2 near-unique car). For ADMITTED shapes —
 // a pure column shuffle of group keys and identity-finalized aggregate
 // results (`pd_paremit_cols` in lib.rs; the merge.rs `build_emit_plan`
 // precedent, which is how this sink's paremit worked BEFORE the adopt
@@ -2228,7 +2228,7 @@ impl PdSinkMerged {
 // Sort's prefix order, and the leader's emit collapses to a cross-bucket
 // ordered merge + a datum memcpy per row. The adopt tail's bucket concat,
 // rep synthesis, full-table order_groups, and per-group finalize/project
-// (the measured ~1.4s-of-1.7s serial floor at q14@10M rt16, 835k groups)
+// (the measured ~1.4s-of-1.7s serial floor at near-unique@10M rt16, 835k groups)
 // all move into the parallel combine phase.
 //
 // Byte identity vs the adopt arm:
@@ -2974,7 +2974,7 @@ impl PdBuilder<'_> {
     /// Vec/IntSet doublings, where the 8-byte payloads are only ~1/6..1/3 of
     /// set memory (IntSet's 50% max load = 16-32 table bytes/value, plus
     /// 8-16 ints-Vec bytes/value). A purely value-dominated uniform corpus
-    /// (the q9 class: 97 sets filling in lockstep, all doubling together)
+    /// (the grouped-DISTINCT class: 97 sets filling in lockstep, all doubling together)
     /// deterministically sat below budget/4 at every crossing and the arm
     /// fail-closed to the serial fallback on every worker.
     fn spill_freeable_bytes(&self) -> usize {
@@ -3733,7 +3733,7 @@ mod tests {
             expected_worker_rows: 0,
         });
         // 4 donors, one dominant group: donor d holds values in a mostly
-        // disjoint range (the q9 UserID-clustered shape) plus a shared
+        // disjoint range (the UserID-clustered shape) plus a shared
         // overlap slice (dedup face).
         let tables: Vec<PdHandedTable> = (0..4i64)
             .map(|d| {
@@ -3998,7 +3998,7 @@ mod tests {
     // bytes-mode replay/route, arena-rebased concat) — fleet-run ----------
 
     fn bytes_test_spec() -> Arc<PdSpec> {
-        // key 0 = text (canonical bytes), key 1 = int32 — the q14 class
+        // key 0 = text (canonical bytes), key 1 = int32 — the near-unique class
         // (text group key + COUNT(DISTINCT int8)) plus an int companion
         // exercising the mixed canonical image; one int64 set + CountStar.
         Arc::new(PdSpec {

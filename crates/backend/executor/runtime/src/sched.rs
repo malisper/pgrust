@@ -79,7 +79,7 @@
 //! dependency-depth priority, ties by submission order). OFF (the kill
 //! switch, this increment's default) is today's sequential walk,
 //! byte-identical; ON with a single-pipeline RG degenerates to the same
-//! pick and pass sequence by construction (the CB-43 flatness anchor).
+//! pick and pass sequence by construction (the single-wide-pipeline flatness anchor).
 //! Streaming across pipeline seams is inc-3 (evidence-gated, NOT here);
 //! tail/ramp readahead overlap is inc-2 (also not here).
 
@@ -553,7 +553,7 @@ fn coalesce_epochs() -> u64 {
 /// End-game terminal sub-RG split (tails192 #6, 48xl finding): at high
 /// width the whole-boundary rule floors terminal claims at ONE whole RG,
 /// making the photo-finish inert — the last few heavy RGs run on a
-/// shrinking worker set while the rest of the crowd idles (48xl q19/q33:
+/// shrinking worker set while the rest of the crowd idles (48xl expr-key/10M-group arms:
 /// 180-250ms finish skew = 30-45% of the drive at {96,191}). When the
 /// remaining tail has fewer whole RGs than live workers, fall back to
 /// sizer-driven granule claims INSIDE the RG (never across granules) —
@@ -2128,7 +2128,7 @@ impl Scheduler {
             // Whole-boundary claims (drive-scaling inc-2): epoch-heavy
             // sources never stop a claim short of the boundary — a split
             // epoch is executed by 2+ workers, each rebuilding the epoch's
-            // dictionary/memo state (the measured q21 DOP15 +78% busy
+            // dictionary/memo state (the measured dict-memo-shape DOP15 +78% busy
             // inflation). The sizer still observes for phase/stats.
             // End-game terminal sub-RG split (tails192 #6): the whole-RG
             // floor below makes the Shutdown sizing inert; when the tail
@@ -2145,7 +2145,7 @@ impl Scheduler {
             let end = if ts.whole_claims && !terminal_split {
                 // Claim coalescing (dop1-tax fix 1): at LOW live width the
                 // per-claim drive re-entry (scan reposition + drain prologue
-                // + partial export, ~30-45µs each on q21-class shapes) is
+                // + partial export, ~30-45µs each on dict-memo-heavy shapes) is
                 // the dominant DOP-1 tax — span SEVERAL epochs per claim and
                 // let the work body iterate per-epoch segments (one dict
                 // snapshot per segment; the epoch rules hold inside the

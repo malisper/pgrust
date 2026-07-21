@@ -57,7 +57,7 @@ pub fn subquery_planner<'mcx>(
         // CTE subplans, clobbering the flag their Gathers set — a Gather that
         // lives only inside a CTE/sublink subplan then shipped with
         // parallelModeNeeded=false and silently launched 0 workers
-        // (q15probe lane: TPC-H q15 CTE, Workers Planned 7 / Launched 0,
+        // (q15probe lane: a CTE-of-grouped-agg reused twice, Workers Planned 7 / Launched 0,
         // 3.68x-of-C; notes/q15probe-lane.md).
         run.glob.parallel_mode_needed = run.glob.parallel_mode_ok
             && crate::gucs::debug_parallel_query() != guc_tables::consts::DEBUG_PARALLEL_OFF;

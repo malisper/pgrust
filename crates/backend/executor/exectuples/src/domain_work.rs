@@ -3,8 +3,8 @@
 //! The bug family this watches: per-{plan, open, execution, worker, claim,
 //! epoch} work sized by a DOMAIN (dict NDV, row-group count x column count,
 //! granule counts, pool width) where the useful work is O(touched data).
-//! Confirmed members: q40's exprkey gndv-sized cache fills, the footer_ndv
-//! per-plan reparse, dictkey's dense-array zeroing, q33's byref aggcontext
+//! Confirmed members: CaseDict's exprkey gndv-sized cache fills, the footer_ndv
+//! per-plan reparse, dictkey's dense-array zeroing, the ~10M-group byref aggcontext
 //! floor. Fix lanes close members; THIS module keeps the class from
 //! silently re-entering: every knowingly domain-sized operation left in a
 //! hot path ticks its size here, the scan-shutdown SFIN marker dumps the

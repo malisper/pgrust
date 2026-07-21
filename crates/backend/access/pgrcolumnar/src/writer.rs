@@ -498,7 +498,7 @@ fn stitch_pool_thread(
 // ---- PGRUST_CBSTORE_FASTHASH (load-speed prototype, DEFAULT OFF) -----------
 // The ingest dictionary passes (per-RG dict build + the v7 stitch intern
 // table) hash every text value through std's SipHash — measured ~8% of the
-// 10M ClickBench COPY wall (load-speed lane perf, 2026-07-14). The maps only
+// 10M-bank COPY wall (load-speed lane perf, 2026-07-14). The maps only
 // DEDUP: dict order is byte-sorted after the build and stitch ids are
 // re-ranked byte-sorted at finish(), so the hasher never reaches the on-disk
 // bytes — output is byte-identical either way. FASTHASH=1 swaps in an
@@ -1942,7 +1942,7 @@ pub(crate) fn encode_int_chunk(
             if g == 0 {
                 // Delta lanes decode through a prefix sum regardless, so the
                 // narrow_hot LZ4 bias does not apply — let ZSTD compete on
-                // ratio (survey: delta+ZSTD dominates on the CB bank).
+                // ratio (survey: delta+ZSTD dominates on the analytics banks).
                 dcodec = cc.pick(&img, false).unwrap_or(Codec::None);
             }
             let stored = match dcodec {

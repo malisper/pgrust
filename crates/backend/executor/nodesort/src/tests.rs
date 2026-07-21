@@ -486,7 +486,7 @@ fn refsort_feed_gather_emit_and_rescan() {
 /// ties at the LIMIT cut select the physically-earliest refs and emit in
 /// ref order, independent of put order. Under the plain single-key
 /// comparator the same feed's tie survivors are heap-shape arbitrary (the
-/// Q25 rule-2 landing's KEY FACT) — this pins the rule-2 leg exactly.
+/// sorted-limit-walk rule-2 landing's KEY FACT) — this pins the rule-2 leg exactly.
 #[test]
 fn refsort_rule2_ties_select_earliest_refs_in_ref_order() {
     let (mut node, mut estate, _desc, _feed) = setup(2, vec![], 0);

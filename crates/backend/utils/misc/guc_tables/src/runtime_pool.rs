@@ -125,7 +125,7 @@ pub fn runtime_agg_pool_armed() -> bool {
     runtime_agg_pool_dop() > 0
 }
 
-/// q28-sorted-arm: the ordered-grouped (sorted-agg) runtime arm rides the
+/// Sorted-arm gate: the ordered-grouped (sorted-agg) runtime arm rides the
 /// SAME `pgrust.runtime_agg_pool` DOP (it is the agg pool's ordered face —
 /// rt16/rta16 arms exercise both) with its own dedicated kill switch:
 /// `PGRUST_RUNTIME_AGG_SORTED=0/off` disarms exactly this arm, leaving the

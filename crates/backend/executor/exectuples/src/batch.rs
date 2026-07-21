@@ -16,7 +16,7 @@ pub const SOA_BM_WORDS: usize = SOA_MAX_ROWS.div_ceil(64);
 
 /// Visit the positions of `pos..n` whose bit is SET in `live`, ascending;
 /// `live = None` visits every position (the dense loop, unchanged codegen).
-/// WORD-GRANULAR SKIP (the q22 sort-feed lever, one shared implementation):
+/// WORD-GRANULAR SKIP (the qualed-top-n sort-feed lever, one shared impl):
 /// an all-clear word advances 64 positions in one compare, and set bits
 /// within a sparse word iterate by trailing-zeros — so a batched loop whose
 /// per-position work is nothing on cleared bits (the caller's contract: a
@@ -74,7 +74,7 @@ pub fn for_each_live<E>(
 /// duplicated into separate dense and sparse loop arms. Use this when `f`
 /// is large and the dense case is hot: duplicating a big row body into two
 /// arms measurably regressed the hashgroup span accept's unfiltered leg
-/// (q9/q10 +9%), while the all-set word walk costs ~2 extra ops per row.
+/// (narrow-sort DISTINCT shapes +9%), while the all-set word walk costs ~2 extra ops per row.
 #[inline(always)]
 pub fn for_each_live_onebody<E>(
     live: Option<&[u64]>,

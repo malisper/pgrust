@@ -51,7 +51,7 @@ impl Default for SizingParams {
 //
 // DEFAULT OFF (opt-in PGRUST_RUNTIME_TMAX_DOPSCALE=1): the 48xl window-C
 // A/B (2026-07-15, notes/tails192-lane.md) measured NO wall win from this
-// lever at any width on q19/q33 and a +18% q33@191 REGRESSION (iso-A
+// lever at any width on the expr-key/10M-group arms and a +18% 10M-group@191 REGRESSION (iso-A
 // exonerated the endgame split; dopscale-on was the delta). Suspected
 // mechanism: a fast zone-skipped first epoch seeds tput high and the
 // duration-targeted spanning oversizes claims of HEAVY epochs. Re-enable
@@ -84,7 +84,7 @@ impl SizingParams {
     /// Width-scaled params for one task: t_max ramps with the live worker
     /// count, t_min (photo-finish floor) is untouched. Identity for
     /// `w <= DOPSCALE_W0` and unless the opt-in is set (default OFF — the
-    /// window-C q33@191 verdict above).
+    /// window-C 10M-group@191 verdict above).
     pub fn scaled_for_width(self, w: u64) -> SizingParams {
         if !dopscale_enabled() {
             return self;

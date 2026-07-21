@@ -2040,10 +2040,10 @@ pub fn compare_fractional_path_costs(path1: &Path<'_>, path2: &Path<'_>, fractio
 // Gather/GatherMerge on a pgrcolumnar-fed plan denies the workers the fused
 // bounded-sort feed (top-k admission + ref decode clamp): every surviving row
 // is materialized full-width in a worker, pulled per-row through the tuple
-// queue, and sorted wide in the leader. Measured CB Q24 forced-shape A/B @
-// b81a4e09958 (jobs pgrust-clickbench-explain-1783458412/-1783458427):
+// queue, and sorted wide in the leader. Measured take-k-sorted forced-shape A/B
+// @ b81a4e09958 (explain-channel jobs -1783458412/-1783458427):
 // GatherMerge-over-worker-Sort 0.956s vs leader-Sort ~7.1s steady-state
-// lane-on (lane-off ties), ~30 units/tuple at the Q17 163-units/ms anchor.
+// lane-on (lane-off ties), ~30 units/tuple at the two-key-grouped 163-units/ms anchor.
 // The surcharge is startup+total (a Sort consumes its whole input before the
 // first output row). Heap plans keep C costing.
 fn pgrcolumnar_gather_sort_penalty(run: &PlannerRun<'_>, subpath_id: PathId) -> f64 {

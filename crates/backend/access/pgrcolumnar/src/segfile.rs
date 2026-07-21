@@ -312,7 +312,7 @@ unsafe impl Sync for SegMap {}
 // used to mmap the same part privately — N workers = N mappings = each page
 // cache page taking up to N separate minor faults (one per mapping's PTEs)
 // serialized on the process's mmap_lock, and re-taken across queries/reps
-// as morsel assignment shifts. q33@100M cold: 48.6s sys / ~1.1M minflt on
+// as morsel assignment shifts. A ~10M-group two-int-key top-n @100M cold: 48.6s sys / ~1.1M minflt on
 // the official 32GB substrate, 28.2s sys with memory pressure removed —
 // mapping fan-out, not reads (majflt ~0). One shared mapping = one PTE fill
 // per page per process, persistent for as long as any part-cache entry

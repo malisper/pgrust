@@ -1,6 +1,6 @@
 //! Ingest-time per-column NDV sketch (HyperLogLog, p=14: ~0.8% standard
 //! error at 16KiB/column — exact tracking would need GB-scale sets at
-//! ClickBench text cardinalities, and planner NDV tolerates ~1% error).
+//! analytics-bank text cardinalities, and planner NDV tolerates ~1% error).
 
 use std::hash::Hasher;
 

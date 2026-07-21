@@ -3,8 +3,8 @@
 //! docs/design/parallelism-redesign-2026-07.md §2.2/§5-M2).
 //!
 //! Shape: the SERIAL-plan grouped distinct pipeline `Agg(AGG_SORTED) ← Sort
-//! ← SeqScan(pgrcolumnar)` (the ClickBench Q9/Q10 class — and, with the
-//! distinct-bytes car, the text-group-key q14 donor-B class), executed as
+//! ← SeqScan(pgrcolumnar)` (the sorted grouped exact-DISTINCT class — and, with the
+//! distinct-bytes car, the near-unique text-group-key donor-B class), executed as
 //! one SealedParallelSink on the runtime: ACCEPT (granule-morsel scan →
 //! PREWHERE → per-worker `PdBuilder` partial: compact int group keys +
 //! canonical-bytes text keys (content identity, arena spans),
@@ -22,7 +22,7 @@
 //! vs the Gather-era donor (pardistinct): the registry/handoff, the leader's
 //! own partial, the stray-row queue drain, and the `spent` flag are all
 //! GONE (no tuple queues exist); the vocabulary refusal is DROPPED — the
-//! Q10 companion-agg shape rides the sink (the donor's refusal priced the
+//! vocab companion-agg shape rides the sink (the donor's refusal priced the
 //! per-row vocab accept against the fused classic GatherMerge drives, a
 //! comparison that no longer exists here).
 //!
@@ -153,7 +153,7 @@ pub(super) struct RuntimeDistinctShared {
     /// M3.5 spill arm: the engagement's spill set (None = spill disabled →
     /// budget crossings refuse exactly as before).
     spill_set: Option<Arc<::spillset::SpillSet>>,
-    /// LOCALITY CAP (distinct-sidecar-cap lane — the q36-radix medicine on
+    /// LOCALITY CAP (distinct-sidecar-cap lane — the radix-cap medicine on
     /// the DISTINCT-sidecar working set): Some(bytes) = a worker whose
     /// per-group distinct sets hold >= cap bytes drains them through the
     /// EXISTING spill-epoch machinery (256-partition contiguous value
@@ -373,7 +373,7 @@ impl runtime::SealedParallelSink for RuntimeDistinctShared {
                 // sealed tables' content, so this trips only on real
                 // overhead/accounting surprises — fail-closed, visible).
                 // NOT one worker_budget: the union legitimately exceeds a
-                // single Local's budget (the q9@100M rt1-crosses/rt2-fits
+                // single Local's budget (the grouped-distinct @100M rt1-crosses/rt2-fits
                 // booked behavior). Crossing takes the same bounded fallback
                 // as an accept-phase crossing.
                 let b = m.mem_bytes();
@@ -968,7 +968,7 @@ impl PdAcceptSink<'_> {
         // payload: crossings land right after capacity doublings, where
         // payload is only ~1/6..1/3 of set memory and a payload-based gate
         // deterministically refused legitimate value-dominated shapes (the
-        // q9-class lockstep corpus; see the PdBuilder doc).
+        // grouped-distinct lockstep corpus; see the PdBuilder doc).
         let budget = self.shared.spec.worker_budget;
         if !locality && pd.pd_spill_freeable_bytes() < budget / 4 {
             trace_feed("runtime-distinct: spill refused (group-table-dominated crossing)");
@@ -1450,11 +1450,11 @@ fn distinct_spill_enabled() -> bool {
 /// (floored at 64KB). Engagement is further gated at engage(): DOP>1 AND
 /// the spill arm live (the epoch drain is the spill machinery; a dead arm
 /// means no flush target, and a single Local has no duplicate-group tax to
-/// convert — the q36-radix DOP1 law).
+/// convert — the radix-cap DOP1 law).
 ///
-/// MEASURED REFUSAL as a default (2026-07-14 q9/q10/q14 @100M mt16 cap
+/// MEASURED REFUSAL as a default (2026-07-14 grouped-distinct trio @100M mt16 cap
 /// ladder, notes/distinct-sidecar-cap.md): every cap point 2MB-32MB is
-/// +17..21% WORSE than off on q9/q10 (hot 0.79/0.93 -> 0.94-0.99/
+/// +17..21% WORSE than off on the narrow-sort pair (hot 0.79/0.93 -> 0.94-0.99/
 /// 1.09-1.13) and cap-FLAT — no knee. The distinct-sidecar working set is
 /// not a latency lever there: at matched memory the baseline never spills
 /// and its sets merge ONCE through the freeze partition law, while the
@@ -1463,7 +1463,7 @@ fn distinct_spill_enabled() -> bool {
 /// repay (the bandwidth study's instruction-parity reading). Outputs
 /// byte-MATCHED on all four cap arms at 100M — the mechanism is correct,
 /// just unprofitable; the env channel stays for shapes that may differ
-/// (C3/q36-radix measured-refusal precedent).
+/// (C3/radix-cap measured-refusal precedent).
 fn distinct_locality_cap() -> Option<usize> {
     static N: OnceLock<Option<usize>> = OnceLock::new();
     crate::once_val(&N, || {
@@ -1529,7 +1529,7 @@ fn distinct_topn_enabled() -> bool {
 
 /// `PGRUST_RUNTIME_DISTINCT_TOPN_DOPBUDGET` kill switch (default ON): 0/off
 /// restores the serial-halved budget-fit admission exactly (the K2 100M
-/// budget refusal — q14@100M falls back to the vector's non-runtime arm;
+/// budget refusal — the near-unique shape @100M falls back to the vector's non-runtime arm;
 /// the rollback/A-B attribution channel for the dop-budget face).
 fn distinct_topn_dopbudget_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
@@ -1569,7 +1569,7 @@ fn distinct_topn_arm(
     if !distinct_topn_enabled() {
         return None;
     }
-    // --- Consumer shape: root Limit → Sort → this Agg (the CB q14 class).
+    // --- Consumer shape: root Limit → Sort → this Agg (the near-unique text top-n class).
     let pstmt = estate.es_plannedstmt?;
     let root = pstmt.planTree?;
     let limit = root.as_limit()?;
@@ -1721,15 +1721,15 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     }
     // Agg-side admission: the hash-grouped arm's int/text-key exact-set
     // vocabulary and the SINK economics tier (a refusal falls back to the
-    // serial arms, byte-identically). Vocab shapes (Q10 companions) are
+    // serial arms, byte-identically). Vocab shapes (companion aggs) are
     // ADMITTED — see the module doc. The sink reads its own density tier
     // (`agg_hashgroup_economical_sink`): the serial 8×-rows-per-group
     // refusal priced the SERIAL hashgroup build vs the narrow sort, but
-    // near-unique text shapes (CB q14, ~2 rows/group) are exactly this
+    // near-unique text shapes (~2 rows/group, qual on the key) are exactly this
     // arm's DOP-parallel conversion targets — the budget-fit term stays.
     // PAREMIT shape probe BEFORE the economics tier: paremit-admitted
     // shapes read the 1.0 density default — the serial adopt/emit tail the
-    // 8.0 tier priced is exactly what the parallel emit removes (the q14
+    // 8.0 tier priced is exactly what the parallel emit removes (the
     // near-unique class's conversion; hashgrouped.rs economics doc).
     let paremit_cols =
         if distinct_paremit_enabled() { ::nodeagg::pd_paremit_cols(agg) } else { None };
@@ -1853,7 +1853,7 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     }
     // Plan shape below the Agg: exactly THIS Sort → SeqScan (the workers
     // receive the SCAN SUBTREE as their pstmt — the Agg need not be the
-    // plan root, so ORDER BY/LIMIT above it, the real CB q9/q10 shape,
+    // plan root, so ORDER BY/LIMIT above it, the real bank grouped-distinct shape,
     // stays engageable).
     let Some(sort_node) = agg.plan.plan.lefttree else { return Ok(None) };
     if sort_node.node_tag() != NodeTag::T_Sort

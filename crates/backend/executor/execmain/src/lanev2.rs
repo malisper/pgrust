@@ -522,9 +522,9 @@ fn arm_scan_staging<'mcx>(
             if vcol.is_some() {
                 lane_trace("cbstore prewhere+varlane dual arm engaged");
             }
-            // Multi-key dict co-arm on the PREWHERE-owned batch (Q15-class
-            // `... WHERE SearchPhrase <> '' GROUP BY SearchEngineID,
-            // SearchPhrase`): count(*)-only fold plans take decide's
+            // Multi-key dict co-arm on the PREWHERE-owned batch (the two-key
+            // dict-int + text grouped-count shape whose qual sits on the
+            // text key itself): count(*)-only fold plans take decide's
             // `plan.cols.is_empty()` shortcut, so no decide-phase probe ever
             // registered the text component as a dict lane, and the early
             // return here used to skip the arm entirely — the multi-key feed
@@ -534,16 +534,16 @@ fn arm_scan_staging<'mcx>(
             // covers the feed's ask by construction: `ask` >= the fused
             // prefix); the fill answers the component as codes+dict and the
             // pack pre-pass interns per (epoch, code). Refusal falls through
-            // byte-identically. Measured (CB 10M sorted-v2, serial hot):
-            // Q15 0.572 -> 0.375 s.
+            // byte-identically. Measured (10M bank sorted-v2, serial hot):
+            // this two-key shape 0.572 -> 0.375 s.
             //
             // DELIBERATELY NOT the single-key dict-group co-arm: for the
-            // Q13 class (single dict key under a SELECTIVE qual) the
+            // interned-int-key class (single dict key under a SELECTIVE qual) the
             // survivors-per-epoch ~ distinct-codes-per-epoch, so the lazy
             // per-(epoch, code) resolve dominates and dict-code grouping
             // measured SLOWER than the K2 staged text probe it would replace
             // (0.381 -> 0.413 s serial, +10% parallel; jobs
-            // pgrust-clickbench-explain-1783907728 / -1783908658). The K2
+            // explain-channel 1783907728 / -1783908658). The K2
             // text probe stays the single-key path under PREWHERE; the
             // multi-key arm has no such fallback (its alternative is the
             // per-row arrival probe, far behind the packed feed even with
@@ -590,7 +590,7 @@ fn arm_scan_staging<'mcx>(
             } else if ::nodeagg::agg_lanefold_plan(agg)
                 .is_some_and(|p| !p.vguards.is_empty())
             {
-                // Multi-varlena fold (Q23-class): re-arm the pgrcolumnar
+                // Multi-varlena fold (2+ varlena lanes): re-arm the pgrcolumnar
                 // virtual-prefix staging the decide-phase probe proved
                 // (idempotent). A lost arm leaves the SoA unarmed and the
                 // feed's (None, _) route asserts no lane reader — so a
@@ -671,8 +671,8 @@ fn arm_scan_staging<'mcx>(
     Ok(())
 }
 
-/// Multi-varlena fold staging (lane-v2-dictminmax, the Q23-class
-/// `MIN(URL), MIN(Title)` shape): a plan whose lane set carries 2+ varlena
+/// Multi-varlena fold staging (lane-v2-dictminmax, the multi-varlena
+/// `MIN(text1), MIN(text2)` shape): a plan whose lane set carries 2+ varlena
 /// columns (or one varlena among fixed-width lanes) is unhostable by the
 /// heap paths — the fixed-width prefix deform cannot stage `attlen == -1`
 /// and the varkey pass stages exactly one column — but the pgrcolumnar
@@ -725,21 +725,21 @@ fn probe_arm_fold_prefix<'mcx>(
 
 // ===========================================================================
 // Standalone scan ownership: DELIBERATELY REFUSED (admission economics,
-// design §4; measured on the integration bench 2026-07-11, q9-class).
+// design §4; measured on the integration bench 2026-07-11, narrow-sort class).
 //
 // The `try_own_*` scan entry points are reached only from the per-node
 // dispatch arms — i.e. only when the PARENT is a per-tuple Volcano consumer
 // (lane breakers drive their scan pipelines directly, never through these
 // hooks). A lane-owned scan in that position emits one tuple per pull through
 // the capacity-one adapter with NO batch consumer above and NO scan kernels
-// wired yet — pure adapter overhead (q9: +3–9%), and for kernel-qual'd scans
+// wired yet — pure adapter overhead (narrow-sort: +3–9%), and for kernel-qual'd scans
 // it PREEMPTS the row executor's own fused SoA-bitmap WithQual drive.
 //
 // Revisited with the Phase-3 qual kernel (2026-07-11): lane-owned filtered
 // scans now carry the same selection bitmap, but for a STANDALONE scan the
 // incumbent per-node drive is `exec_seq_scan_batch` — the identical bitmap
 // over the identical staging, with NO pull-adapter round trip per surviving
-// row on top. The lane can therefore only match-or-lose here (the q9-class
+// row on top. The lane can therefore only match-or-lose here (the narrow-sort-class
 // adapter overhead stands), so the refuse stays. It shrinks when standalone
 // scans gain a kernel the row drive lacks (dict/PREWHERE-class); the scan
 // pipelines stay fully exercised via the agg/sort/join breaker feeds.
@@ -1999,10 +1999,10 @@ impl<'mcx> BatchEmit<'mcx> for BitmapHeapScanBatchEmit<'_, 'mcx> {
 pub enum AggLaneChoice {
     /// Admission economics (design §4): no lanefold coverage AND the legacy
     /// fused `exec_agg_batched` arm would engage — the lane must not preempt
-    /// the measured-faster fused batch drive (q3/q4-class, integration bench
+    /// the measured-faster fused batch drive (plain count/avg class, integration bench
     /// 2026-07-11). Re-measured with the Phase-3 qual bitmap (2026-07-12):
     /// the lane's per-row breaker feed is STILL slower than the fused arm at
-    /// q4's 50% selectivity (+2.5%; only ~-5% at 10% selectivity) — the
+    /// the qualed plain-avg shape's 50% selectivity (+2.5%; only ~-5% at 10% selectivity) — the
     /// dominant cost is the per-row `agg_hash_build_accept` vs the fused
     /// arm's batched drive, which carries the same bitmap. Deliberate
     /// refuse-set entry; shrinks as fold coverage widens.
@@ -2022,7 +2022,7 @@ pub enum AggLaneChoice {
     /// runtime gates (MVCC snapshot, AM answerability, guard-interval
     /// re-proof) fall back to the per-row drive byte-identically.
     Meta,
-    /// q28-sorted-arm: the ordered-grouped RUNTIME sink engaged and the
+    /// sorted-arm lane: the ordered-grouped RUNTIME sink engaged and the
     /// stitched parallel result was adopted — every subsequent pull drains
     /// it (`agg_sorted_sink_emit_next`). Memoized like the serial choices:
     /// the engagement ran once, at the first pull, before anything was
@@ -2284,7 +2284,7 @@ fn decide_agg_lane<'mcx>(
             return Ok(AggLaneChoice::Fold);
         }
     }
-    // Decide-phase skip traces (Q22 serial audit, 2026-07-14 follow-up): a
+    // Decide-phase skip traces (qualed text-min/max serial audit, 2026-07-14 follow-up): a
     // non-Fold decide that does NOT hit the economics refuse below is
     // otherwise invisible in trace capture (PerRow ticks nothing here), so
     // name the failed gate once per memoized decision.
@@ -2315,7 +2315,7 @@ fn decide_agg_lane<'mcx>(
                         }
                         armed
                     }
-                    // Multi-varlena (Q23-class): pgrcolumnar's virtual-prefix
+                    // Multi-varlena (2+ varlena lanes): pgrcolumnar's virtual-prefix
                     // staging hosts it (lane-v2-dictminmax); heap refuses.
                     None => {
                         let armed = try_arm_cb_multivar(agg, ss, estate)?;
@@ -2349,14 +2349,14 @@ fn decide_agg_lane<'mcx>(
     // Admission economics (design §4): without fold coverage the lane's
     // per-row breaker feed is strictly slower than the legacy fused batched
     // drive it would preempt (the agg hook runs first) — measured +5%
-    // (q3/q4-class). Never preempt a measured-faster path.
+    // (plain count/avg class). Never preempt a measured-faster path.
     if crate::procnode::seq_agg_fusible(agg, ss, estate)
         && ::nodeseqscan::seq_scan_batch_supported(ss, estate)?
     {
         // One tick per memoized structural choice (the choice is decided once
         // per node and stable thereafter).
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AdmissionEconomicsFusedDrive);
-        // Trace the structural refuse (Q22 serial-dispatch diagnosis,
+        // Trace the structural refuse (qualed text-min/max serial-dispatch diagnosis,
         // 2026-07-14): the memoized Refuse routes the agg into the legacy
         // FUSED batched drive, which never passes through try_own_seq_scan —
         // so a refused chain shows ZERO lane markers (not even a PREWHERE
@@ -2716,7 +2716,7 @@ fn agg_hash_build_fold_drain<'mcx, S: batch_source::BatchGranuleSource<'mcx>>(
     let mut groups: Vec<core::ptr::NonNull<::execexpr::AggPerGroup>> = Vec::new();
     // Varlena-lane plans read their one column through the varkey staging at
     // SoA column 0 (see lanefold_varlane_col / VarLaneCols). Multi-varlena
-    // plans (lane-v2-dictminmax, Q23-class) admitted only over the pgrcolumnar
+    // plans (lane-v2-dictminmax, multi-varlena class) admitted only over the pgrcolumnar
     // virtual-prefix staging, which stages every column at its NATURAL index
     // — no remap (vcol None).
     let vcol = {
@@ -3075,7 +3075,7 @@ fn agg_fold_feed_row<'mcx>(
 }
 
 // ===========================================================================
-// Plain-agg (AGG_PLAIN, ungrouped) fold drive — the q2-class
+// Plain-agg (AGG_PLAIN, ungrouped) fold drive — the one-group
 // `SELECT sum(a), avg(b), count(*) FROM t [WHERE ...]` shapes. SIMPLER than
 // the hashed breaker: one group, no probe — each staged batch folds straight
 // into the single pergroup array via `lanefold::fold_batch` (the ungrouped
@@ -3186,7 +3186,7 @@ fn try_own_plain_agg_over_seq_scan<'mcx>(
 /// kernel shape) into the FULL per-row transition program. This replaces the
 /// per-pull Volcano chain (`exec_agg` → `exec_proc_node` → `getnextslot`)
 /// with one drained loop over staged windows; no fold plan is required, so
-/// arbitrary transition expressions (the Q30-class SUM(x op k) batteries)
+/// arbitrary transition expressions (the arithmetic SUM(x op k) batteries)
 /// are hosted.
 ///
 /// Byte-identity: the same rows flow through the same qual (staged bitmap =
@@ -4145,7 +4145,7 @@ impl<'mcx> BatchSink<'mcx> for PlainDistinctAggBuildSink<'_, 'mcx> {
                 );
             }
         }
-        // Lane-sliced int-key consume (hot-gap C2, the q5 class): read the
+        // Lane-sliced int-key consume (hot-gap C2, the single-int-key count(DISTINCT) class): read the
         // staged key lane as WHOLE SLICES — no per-row emit_key call — and
         // let nodeagg run one null scan per window before the batched set
         // insert. Same rows, same order, same cells `emit_key` reads (the
@@ -4267,7 +4267,7 @@ fn try_own_plain_distinct_agg_over_seq_scan<'mcx>(
 }
 
 /// Try to let the lane own `Agg(AGG_PLAIN, all-DISTINCT) → Sort → SeqScan`
-/// by SKIPPING the Sort — the q9/Q14-family plan shape: the planner serves a
+/// by SKIPPING the Sort — the presorted-DISTINCT plan-shape family: the planner serves a
 /// single DISTINCT aggregate by sorting the whole input and marking the
 /// aggregate `aggpresorted` (adjacent-dedup). When EVERY transition of the
 /// node is replayed from an exact-DISTINCT set
@@ -4313,7 +4313,7 @@ pub fn try_own_plain_distinct_agg_over_sort<'mcx>(
     if !fusible {
         return Ok(None);
     }
-    // v1 scope: SeqScan child only (the q9-class shape; index/bitmap-fed
+    // v1 scope: SeqScan child only (the presorted-DISTINCT shape; index/bitmap-fed
     // sorts under an all-DISTINCT plain agg keep the C drive). Silent for
     // the same fall-through reason as above.
     if !matches!(&*s.outer, crate::procnode::PlanStateNode::SeqScan(_)) {
@@ -4411,7 +4411,7 @@ fn agg_seq_scan_build_if_needed<'mcx>(
     // agg_hash_retrieve's sink branch. Refusal falls through to the serial
     // build byte-identically. `sink_topn` (m3-sort-b car 1): the sort feed's
     // resolved combine-phase top-N spec — None from the other chains.
-    // `sink_freeze` (band-2a q18): the Limit-over-agg chain's LIMIT-k-no-
+    // `sink_freeze` (band-2a): the Limit-over-agg chain's LIMIT-k-no-
     // ORDER bound (offset+count) — None from the other chains.
     if c == AggLaneChoice::Fold {
         if runtime_agg::try_engage_hashagg_runtime(
@@ -5134,8 +5134,8 @@ fn scan_dictgroup_spill<'mcx>(
 }
 
 // ===========================================================================
-// Packed multi-key GROUP BY (multikey spike 2026-07-14 — the Q17/Q18-class
-// `GROUP BY UserID, SearchPhrase` shapes): a batch pre-pass packs the N
+// Packed multi-key GROUP BY (multikey spike 2026-07-14 — the two-key
+// int+text `GROUP BY` grouped-count shapes): a batch pre-pass packs the N
 // fixed-width key components of a staged window into ONE synthetic u64/u128
 // key lane (REUSED per-batch scratch — the spike's 5.5ms-vs-45.5ms verdict),
 // then ALL single-key compact-table machinery runs unchanged through
@@ -5165,10 +5165,10 @@ fn multikey_enabled() -> bool {
 
 /// SE-MKTEXT (Lane-3 two-key text car): `PGRUST_LANE_V2_MULTIKEY_TEXT`,
 /// **DEFAULT ON** since t35 routing-flips (GL-MKTEXT-1 FLIP-RECOMMENDED:
-/// q17 0.861 -> 0.061 hot unforced, 14.1x, == forced ref; zero
+/// the two-key int+text shape 0.861 -> 0.061 hot unforced, 14.1x, == forced ref; zero
 /// regressions); `=0|off` is the kill switch — every other spelling stays
 /// ON (the flipped-kill idiom). Gates the UNPROJECTED scan feed's SECOND
-/// TextRaw key component (the ClickBench text+text `GROUP BY` census): the
+/// TextRaw key component (the analytics charter's text+text `GROUP BY` census): the
 /// primary text rides the dict-group lane exactly as today, the second is
 /// opted in as an EXTRA dict-want column (`seq_scan_cb_dict_want_extra`,
 /// the band-2a CaseDict mechanism) and packs through the SAME per-(epoch,
@@ -5251,7 +5251,7 @@ fn try_arm_cb_multikey_dict<'mcx>(
     // Pure-int multi-key shapes need no dict lane — but a varlena column
     // INSIDE the fixed-width prefix (the reason the standard arm refused)
     // still blocks the staging. The offset-free columnar arm hosts those
-    // (Q32-class `GROUP BY WatchID, ClientIP` on pgrcolumnar): every staged
+    // (the high-cardinality two-int-key `GROUP BY` on pgrcolumnar): every staged
     // column fills as decoded Datums, no dict registration.
     let Some((texts, n_texts)) = scan_mk_text_atts(agg) else {
         // A third text / Other component: the compact arm would refuse
@@ -5313,8 +5313,8 @@ struct MkScratch {
     // (RG index, cleared per roll) or — under a v7 stitch — part-global
     // (scan-stable gepoch, never cleared within one scan). Entry encoding:
     // 0 = unset, `id + 1` otherwise (exprkey::reset_code_id_cache — the
-    // zero-page allocation is the vecstate q40 fix: the gndv-sized eager
-    // None-fill was 38% of q40's cycles).
+    // zero-page allocation is the vecstate CaseDict-shape fix: the gndv-sized
+    // eager None-fill was 38% of that shape's cycles).
     epoch: Option<(bool, u64)>,
     code_ids: Vec<u32>,
     /// DIRECT single-text arm (arena-strings inc-3): per-(identity, code)
@@ -5328,7 +5328,7 @@ struct MkScratch {
     /// would otherwise dangle into the reset RowStore. FAIL-CLOSED: cleared
     /// on every identity mismatch and every flush.
     code_states: Vec<*mut u8>,
-    /// LIMIT-k-no-ORDER freeze filter scratch (band-2a q18): the worker's
+    /// LIMIT-k-no-ORDER freeze filter scratch (band-2a): the worker's
     /// parsed snapshot of the frozen set + its per-epoch code -> member-mask
     /// cache. `None` until this worker observes FROZEN.
     fz: Option<MkFreezeSnap>,
@@ -5435,7 +5435,7 @@ fn scan_mk1_text_admit<'mcx>(
         return None;
     }
     // SE-T2AGG CAR B: vguard-only guarded plans (min/max(text) passengers)
-    // admit knob-ON through `sink_vguard_plan_ok` — the q22-class single-
+    // admit knob-ON through `sink_vguard_plan_ok` — the grouped-min/max single-
     // text-key shape. The proof obligation moves to the sink drain's
     // per-batch check_guards (demote = refusal to the serial rerun).
     let vguard_ok = sink_vguard_plan_ok(agg, ss);
@@ -5693,7 +5693,7 @@ fn scan_mk_batch<'mcx>(
         return Ok(false);
     }
     // SURVIVOR-LESS PREWHERE-lane window: skip BEFORE the packability
-    // pre-check below reads every staged row's cells (the q14 codedgroup
+    // pre-check below reads every staged row's cells (the near-unique-text-key codedgroup
     // precedent — condcache-census lane). A condition-cache hit whose
     // cached verdicts are all-fail legitimately skips the survivor deform
     // (nodeseqscan's cond_hit arm; multi-clause all-fail miss windows too),
@@ -5742,7 +5742,7 @@ fn scan_mk_batch<'mcx>(
     let MkScratch { rows, packbuf, keys1, keys2, epoch, code_ids, code_states, fz, fz_mask } =
         mks;
     scan_collect_survivors(ss, estate, n, rows)?;
-    // FREEZE FILTER (band-2a q18, LIMIT-k-no-ORDER): once FROZEN, drop
+    // FREEZE FILTER (band-2a, LIMIT-k-no-ORDER): once FROZEN, drop
     // survivors whose key is not in the frozen set BEFORE any interning or
     // packing — post-freeze per-row work collapses to a per-(epoch, code)
     // mask lookup + tiny int compares. Component-major like the pack loop;
@@ -6096,7 +6096,7 @@ fn scan_mk_batch<'mcx>(
     Ok(true)
 }
 
-/// FREEZE INSTALL ELECTION (band-2a q18), shared by the packed and DIRECT
+/// FREEZE INSTALL ELECTION (band-2a LIMIT-k-no-ORDER), shared by the packed and DIRECT
 /// accept arms: the first worker whose live table reaches the bound wins the
 /// CAS and publishes its first `bound` groups' canonical keys. Correct from
 /// ANY table state — nothing was dropped anywhere before FROZEN, so every
@@ -6897,7 +6897,7 @@ fn sort_feed_if_needed<'mcx>(
             // selection (docs/conformance/tie-ordering.md) — the bounded
             // heap runs the (key, rowref) total order, pinning survivor
             // selection to the physical feed's first-arrived set by
-            // construction, so no boundary tie can demote (the 100M Q25
+            // construction, so no boundary tie can demote (the 100M sorted-limit-walk
             // cliff: at high per-key densities the LIMIT boundary always
             // ties and the old cut-selection demote re-fed the whole scan).
             // `=tracked` keeps the tie-tracking demote ladder (byte-exact
@@ -6928,7 +6928,7 @@ fn sort_feed_if_needed<'mcx>(
             // exact with NO demote, while the refsort narrow sort resolves
             // full-key ties heap-arbitrarily and only has the tracked demote
             // ladder (a dense boundary tie would re-feed the whole scan: the
-            // Q25@100M cliff class fix-100m-engagement retired). Refsort still
+            // sorted-limit-walk@100M cliff class fix-100m-engagement retired). Refsort still
             // owns adaptive-off and tracked feeds (its ratified e2e arms).
             // LAZYTOPN (the chartered follow-up, delivered): under
             // `topn_lazyfetch_enabled` the narrow comparator EXTENDS with the
@@ -7594,10 +7594,10 @@ enum AdaptiveTopkMode {
     /// payload-visible shapes with tie tracking, but demote ONLY on
     /// cut-selection ambiguity — retained-tie emit order is accepted as-is
     /// (the ratified relaxation surface: same selected rows, possibly
-    /// different order within equal-full-key groups). Q25-class shapes stop
+    /// different order within equal-full-key groups). Sorted-limit-walk shapes stop
     /// demoting (their boundary tie was pure retained order); the exactness
     /// backstop for WHICH rows are returned stays. The AM-side probe budget
-    /// covers the Q24-class sparse-qual degeneration.
+    /// covers the take-k-sorted-class sparse-qual degeneration.
     Relaxed,
     /// `=tracked`: payload-visible shapes demote on EITHER trigger
     /// (retained-tie order included) — the byte-exact experiment channel.
@@ -7709,7 +7709,7 @@ fn sort_topk_ties_invisible(
             // Deterministic collations only compare equal on identical bytes
             // (C's varstr_cmp strcmp tiebreak, kept by the ported comparator
             // and the varstr_cmp_locale seam); this resolves the DEFAULT
-            // collation through the database locale (the CB banks are
+            // collation through the database locale (the analytics banks are
             // initdb'd --no-locale with no per-column COLLATE).
             TEXTOID | VARCHAROID => {
                 ::varlena::text_collation_is_raw_bytes(plan.collations[i]).unwrap_or(false)
@@ -7757,8 +7757,8 @@ fn topk_keep_mask<'mcx, E: BatchEmit<'mcx>>(
 // ===========================================================================
 // Emit-side top-N boundary cut on the hash-agg-fed sort breaker (lane-v2
 // topnemit; the emit-side complement of the scan-level topk_cut above). The
-// `GROUP BY keys ORDER BY count-agg DESC LIMIT k` tail (CB Q13/Q15/Q16/Q17/
-// Q31–Q35 class) today EMITS EVERY GROUP — key reconstruction, finalize,
+// `GROUP BY keys ORDER BY count-agg DESC LIMIT k` tail (the grouped-count
+// top-n family class) today EMITS EVERY GROUP — key reconstruction, finalize,
 // projection, minimal-tuple form, sort put — into a bounded sort that keeps
 // k. Once the bounded heap is full, each further put is compare-against-the-
 // k-th-boundary-and-usually-discard; this arm hoists that compare all the
@@ -7993,7 +7993,7 @@ fn batch_emit_enabled() -> bool {
 // finalize/emit. The batched feed above still finalizes and forms a tuple for
 // EVERY group the topnemit boundary cut can't skip — and the streaming cut
 // only skips groups STRICTLY worse than the live k-th boundary, so on flat
-// order-key distributions (Q32/Q33: ~10M groups, boundary count ~1) it skips
+// order-key distributions (two-int-key high-card: ~10M groups, boundary count ~1) it skips
 // nothing and ~10M numeric-avg divisions + tuple forms feed a sort that
 // keeps 10. This pass selects the k surviving groups FIRST, on the raw int8
 // order-key states (`nodeagg::topk_finalize_select` — a bounded (key, row)
@@ -8632,8 +8632,8 @@ fn refsort_arm<'mcx>(
     if !refsort_enabled() || ::nodesort::sort_lane_refsort_refused(state) {
         return None;
     }
-    // Parallel-worker refusal (measured 2026-07-13, Q24 sorted-v2-10m bank,
-    // cb-explain warm x3: parallel lane-on 0.068s refsort-off vs 0.097s
+    // Parallel-worker refusal (measured 2026-07-13, take-k-sorted shape on the
+    // sorted-v2-10m bank, explain-channel warm x3: parallel lane-on 0.068s refsort-off vs 0.097s
     // refsort-on, ~+45%): under Gather Merge every worker gathers its own
     // `bound` winners — N_workers x bound full-granule decodes through
     // `gather_row` for the ~bound rows that survive the leader's merge, while
@@ -8646,7 +8646,7 @@ fn refsort_arm<'mcx>(
     // v1.2: the gate is the SCAN's parallelism, not the process role — with
     // leader participation the leader runs the same partial Sort with
     // IsParallelWorker()==false, and its bound-winner gathers alone kept the
-    // Q24 parallel leg at +50% (v1.1 A/B: lane-on 0.106s vs 0.070s with only
+    // take-k-sorted parallel leg at +50% (v1.1 A/B: lane-on 0.106s vs 0.070s with only
     // the worker-side refusal). A parallel-aware scan means this Sort is a
     // per-participant partial sort whose winners mostly die at the merge.
     if ::parallel::IsParallelWorker() || ss.is_parallel() {
@@ -9028,7 +9028,7 @@ impl<'mcx> Source<'mcx> for SortEmitSource {
         // would enter ExecSort once per tuple — keep that cadence here
         // rather than once per pull (§9). Pending-gated, exactly C's
         // CHECK_FOR_INTERRUPTS macro: the unconditional seam call per
-        // produced tuple measured +17% on the distinct-count shape (q9),
+        // produced tuple measured +17% on the distinct-count shape (narrow-sort),
         // where the agg parent pulls this source once per input row.
         if ::init_small::globals::InterruptPending() {
             ::postgres_seams::check_for_interrupts::call()?;
@@ -9225,7 +9225,7 @@ impl<'mcx> Source<'mcx> for SortEmitSourceCfi {
 // ===========================================================================
 // Hash-grouped exact-DISTINCT arm (lane-v2-distincthash; nodeagg
 // hashgrouped.rs holds the state machine + the byte-identity argument). For
-// the narrow-sort shape (CB Q9/Q10) the group-prefix SORT itself is the
+// the narrow-sort shape (sorted grouped exact-DISTINCT) the group-prefix SORT itself is the
 // remaining dominant cost: this arm bypasses the plan's Sort node entirely —
 // the scan pipeline drains into a group hash table whose entries own the
 // order-insensitive transition state and the per-aggregate exact-DISTINCT
@@ -9263,7 +9263,7 @@ fn distincthash_enabled() -> bool {
 }
 
 /// `PGRUST_LANE_V2_DISTINCTHASH_TEXT` kill switch (default ON): text group
-/// keys for the hash-grouped arm (the Q11/Q12/Q14 shape). Off, text-keyed
+/// keys for the hash-grouped arm (the text-keyed grouped-distinct shape). Off, text-keyed
 /// nodes fall to the narrow-sort arm exactly as before this lane — the A/B
 /// attribution channel for the text-key delta.
 fn distincthash_text_enabled() -> bool {
@@ -9279,7 +9279,7 @@ fn distincthash_text_enabled() -> bool {
 /// `PGRUST_LANE_V2_DISTINCTHASH_BATCH` kill switch (default ON): the
 /// batched fast leg of the hash-grouped distinct feed (staged-cell key
 /// probe + direct set insert, skipping per-row slot projection and the
-/// transition program for the all-set-mode bare-Var shape — Q9-class).
+/// transition program for the all-set-mode bare-Var shape — narrow-sort class).
 /// Off, the sink feeds per-row exactly as before — the A/B attribution
 /// channel for the batch delta.
 fn distincthash_batch_enabled() -> bool {
@@ -9295,7 +9295,7 @@ fn distincthash_batch_enabled() -> bool {
 /// `PGRUST_LANE_V2_DISTINCTHASH_FOLD` kill switch (default ON): mixed-shape
 /// admission into the batched fast leg — plain exact-integer vocabulary
 /// transitions (count(*)/count(x)/sum(int2/4)/avg(int2/4), the pardistinct
-/// vocab) fold in sidecar words beside the DISTINCT set parks (Q10-class:
+/// vocab) fold in sidecar words beside the DISTINCT set parks (the companion-agg class:
 /// sums alongside the COUNT DISTINCT). Off, mixed shapes keep the per-row
 /// transition program exactly as before (the historical all-set-mode batch
 /// gate) — the A/B attribution channel for the fold delta.
@@ -9327,8 +9327,8 @@ fn distincthash_span_enabled() -> bool {
 
 /// `PGRUST_LANE_V2_DISTINCTHASH_TEXTBATCH` kill switch (default ON): admit
 /// TEXT/VARCHAR grouping keys to the batched fast leg (named-kernels-
-/// distinct kernel 1 — the filtered grouped-distinct batch feed, CB
-/// q11/q12). Off = the historical int-keys-only batch gate; the text-key
+/// distinct kernel 1 — the filtered grouped-distinct batch feed, the
+/// text-arg distinct-count top-n class). Off = the historical int-keys-only batch gate; the text-key
 /// arm then rides the per-row path exactly as before this lane (the A/B
 /// attribution channel; results byte-identical either way).
 fn distincthash_textbatch_enabled() -> bool {
@@ -9352,8 +9352,8 @@ fn distincthash_textbatch_enabled() -> bool {
 /// shapes under the SAME env spelling (knob coherence — a
 /// keyed-but-disarmed shape would land on serial; BOTH read sites flip
 /// together, the GL letter's duty). FLIP EVIDENCE (GL letter 2026-07-21 @
-/// 67a99589d): official ClickBench 0.9278 vs knob-OFF (noise floor 0.9889);
-/// CB q10 1.861 -> 0.066 hot (28x, == forced ref); GL-AGGPOLY-1 SE16 q06
+/// 67a99589d): official suite geomean 0.9278 vs knob-OFF (noise floor 0.9889);
+/// the mixed narrow-sort shape 1.861 -> 0.066 hot (28x, == forced ref); GL-AGGPOLY-1 SE16 filtered-plain-agg
 /// heap −12.4%; zero regressions, parity class set unchanged. Killed =
 /// pre-flip refusals, byte-identical.
 pub(crate) fn agg_poly_enabled() -> bool {
@@ -9747,7 +9747,7 @@ fn try_hashgroup_build<'mcx>(
     if !distincthash_enabled() {
         return Ok(HgBuild::Refused);
     }
-    // v1 feed scope: SeqScan child only (the Q9/Q10 shape; index/bitmap-fed
+    // v1 feed scope: SeqScan child only (the narrow-sort shape; index/bitmap-fed
     // sorts keep the narrow-sort arm).
     let crate::procnode::PlanStateNode::SeqScan(ss) = outer else {
         return Ok(HgBuild::Refused);
@@ -9941,7 +9941,7 @@ fn pdemit_emit<'mcx>(
 // Dict-code batched exact-DISTINCT grouping (lane-v2-q14feed; nodeagg
 // codedgroup.rs holds the state machine + the byte-identity argument). The
 // textgroup lane's deferred lever for the near-unique single-text-key shape
-// BOTH incumbent arms price per survivor string (CB Q14: the hash arm's
+// BOTH incumbent arms price per survivor string (the near-unique shape: the hash arm's
 // density tier refuses at 1.95 rows/group and the narrow sort pays sort 33%
 // + memcmp 21%): group on the (epoch, dict code) INTEGER domain batch-wise —
 // per surviving row one direct-map index + one chain append of the DISTINCT
@@ -9950,7 +9950,7 @@ fn pdemit_emit<'mcx>(
 // Sort's ASC memcmp-tier group order, unioning equal-content states' chains
 // into the pertrans exact set through the unchanged finalize tail.
 //
-// Q13 negative-precedent boundary (dictgroupwire, feded70a7): for a K2 FOLD
+// Interned-int-key negative-precedent boundary (dictgroupwire, feded70a7): for a K2 FOLD
 // under a selective qual, per-(epoch, code) lazy STRING RESOLVES INTO THE
 // HASH TABLE lost to hashing survivor strings directly (survivors-per-epoch
 // ≈ codes-per-epoch). This arm's alternative is NOT a hash probe — it is the
@@ -9965,14 +9965,14 @@ fn pdemit_emit<'mcx>(
 // Admission tier: engages ONLY where the hash arm's density tier refuses
 // (the two arms partition the density axis at MIN_ROWS_PER_GROUP), pgrcolumnar
 // scans only, dict-answered sorted windows only, bare-Var projections, the
-// Q14 transition shape (one set-mode COUNT(DISTINCT <bare int Var>)).
+// near-unique-key transition shape (one set-mode COUNT(DISTINCT <bare int Var>)).
 // Everything else falls through to the hash arm / narrow sort exactly as
 // before. Runtime degrade replays every absorbed (key, arg) row into the
 // narrowed sort — no residual state, the narrow emit chain runs unchanged.
 // ===========================================================================
 
 /// `PGRUST_LANE_V2_CODEFEED` kill switch (default ON inside the lane) — the
-/// A/B attribution channel; OFF keeps Q14-class shapes on the narrowed text
+/// A/B attribution channel; OFF keeps near-unique-text-key shapes on the narrowed text
 /// sort exactly as before this lane.
 fn codefeed_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
@@ -10116,8 +10116,8 @@ fn try_codedgroup_build<'mcx>(
         }
     };
     // Arm the staging: PREWHERE owns qualled scans (dict text tier included
-    // — the Q14 qual is on the key column itself); the columnar arm then
-    // registers the dict-group consumer on the live batch (the Q15 co-arm
+    // — this shape's qual is on the key column itself); the columnar arm then
+    // registers the dict-group consumer on the live batch (the multi-key co-arm
     // seam) or arms fresh offset-free staging for bare scans. The ask covers
     // both consumed columns.
     let ask = (key_col.max(arg_col) as i32) + 1;
@@ -10199,7 +10199,7 @@ fn codedgroup_drive<'mcx>(
         // published for the window — nodeseqscan's cond_hit arm), and the
         // window carries nothing to absorb either way. Requiring the lane
         // there demoted the WHOLE remaining scan to the narrow sort on the
-        // first all-fail hit (the official condcache arm's Q14 1.19 s vs
+        // first all-fail hit (the official condcache arm's near-unique shape 1.19 s vs
         // 0.55 s). Zero survivors also implies zero fallback bits (fallback
         // rows OR their bits into the selection), so the fallback-free
         // admission is vacuously met.
@@ -10432,7 +10432,7 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
     // Agg-side admission (static shape; ticked per offered call, the hashed
     // breaker's AggNotDrainable cadence).
     //
-    // Grouped narrow-sort arm (v2, the ClickBench Q9/Q10 shape): an
+    // Grouped narrow-sort arm (v2, the sorted grouped exact-DISTINCT shape): an
     // AGG_SORTED node whose DISTINCT aggregates ride the plan Sort's
     // distinct-arg SUFFIX keys (aggpresorted adjacent-dedup) fails the plain
     // admission — but when every internal-sort entry is set-CAPABLE, every
@@ -10520,7 +10520,7 @@ pub fn try_own_sorted_agg_over_sort<'mcx>(
                 None => {}
             }
             // Dict-code distinct arm first: it owns EXACTLY the density band
-            // the hash arm's tier refuses (Q14-class near-unique text keys;
+            // the hash arm's tier refuses (the near-unique-text-key class;
             // the two admissions partition the density axis), so ordering
             // between the two arms is arbitrary — coded-first keeps the
             // engaged arm's traces unambiguous. Refused falls to the hash
@@ -10714,7 +10714,7 @@ pub fn try_own_sorted_agg_over_index_only_scan<'mcx>(
 // ===========================================================================
 
 /// Group-key columns the sorted-fold boundary compare can host: at most this
-/// many by-value fixed-width grouping columns (CB shapes carry 1-2).
+/// many by-value fixed-width grouping columns (the analytics-bank shapes carry 1-2).
 const SORTED_FOLD_MAX_KEYS: usize = 4;
 
 /// The staged group-key column set for the sorted-fold arm: 0-based scan
@@ -10901,7 +10901,7 @@ pub fn try_own_sorted_agg_over_seq_scan<'mcx>(
     let c = match *choice {
         Some(c) => c,
         None => {
-            // M2 runtime ORDERED-GROUPED arm first (q28-sorted-arm; armed
+            // M2 runtime ORDERED-GROUPED arm first (the sorted-arm lane; armed
             // only under PGRUST_RUNTIME=1 + pgrust.runtime_agg_pool > 0 —
             // absent, two cheap gate reads and fall through). Engagement
             // runs the whole parallel attempt here, before anything is
@@ -12522,7 +12522,7 @@ fn mkstream_enabled() -> bool {
 ///     check, which counts the intern arena);
 ///   * the packing admission + table arm (`agg_hash_compact_try_arm_mk`) —
 ///     first WITH the null-bitmap byte (slot streams carry no no-NULLs
-///     proof), and when that busts the 16-byte image budget (Q19's
+///     proof), and when that busts the 16-byte image budget (the ts-extract-keyed shape's
 ///     int8+numeric4+intern4 = 16), WITHOUT it plus `flush_mk`'s runtime
 ///     NULL-demote pre-check (a NULL grouping key migrates to the C table —
 ///     byte-safe, never packed wrong).
@@ -13661,13 +13661,13 @@ pub fn try_own_limit<'mcx>(
                 let built = match &mut aps.outer {
                     crate::procnode::PlanStateNode::SeqScan(ss) => {
                         let c = aps.lane_choice.expect("admission decided the agg lane choice");
-                        // band-2a q18: the Limit-over-Agg chain is the one
+                        // band-2a: the Limit-over-Agg chain is the one
                         // chain that knows the bare-LIMIT bound — derive the
                         // group-admission freeze bound (offset + count,
                         // recomputed by the prologue above). There is no
                         // Sort between this Limit and the Agg by
                         // construction, so ANY `bound` groups with exact
-                        // aggregates satisfy the query (the ratified q18
+                        // aggregates satisfy the query (the ratified LIMIT-k-no-ORDER
                         // membership class); the sink's arming gates
                         // (Mk-drain shape, bound ceiling, kill switch)
                         // decline everything else, and a decline keeps
@@ -14358,7 +14358,7 @@ pub fn try_own_agg_over_subquery_scan<'mcx>(
 //   * dynamic EPQ / non-forward pulls (§4 model-incompatible; per call).
 //   * GatherMerge stays Volcano: the planner puts a hash agg above
 //     GatherMerge only when the merge order is useful elsewhere — no such
-//     CB shape exists; a sorted GroupAggregate over GatherMerge is a
+//     analytics-charter shape exists; a sorted GroupAggregate over GatherMerge is a
 //     different (sorted-agg) breaker and refuses via the dispatch match.
 //   * kill switch `PGRUST_LANE_V2_AGGGATHER=0` (A/B tooling; default ON).
 //
@@ -14994,7 +14994,7 @@ fn pd_leader_gates<'mcx>(
 }
 
 /// Leader arm, grouped shape: `Agg(AGG_SORTED) ← GatherMerge ← Sort ←
-/// ParallelSeqScan` with exact-DISTINCT aggregates (ClickBench Q9/Q10).
+/// ParallelSeqScan` with exact-DISTINCT aggregates (the narrow-sort shape).
 /// `None` = refused (the unchanged per-tuple agg over exec_gather_merge
 /// runs, byte-safely).
 #[inline]
@@ -15053,8 +15053,8 @@ pub fn try_own_sorted_distinct_agg_over_gather_merge<'mcx>(
         return Ok(None);
     };
     // v1 economics: engage the grouped arm only when the DISTINCT sets are
-    // the WHOLE transition load (empty vocabulary — the Q9 shape). Measured
-    // 2026-07-12 (10m bank, DOP 6): Q9 1.675 -> 0.894s, but the Q10 shape
+    // the WHOLE transition load (empty vocabulary — the bare-distinct shape).
+    // Measured 2026-07-12 (10m bank, DOP 6): 1.675 -> 0.894s, but the companion-agg shape
     // (sum/count/avg companions) REGRESSED 2.14 -> 2.31s — the per-row
     // vocabulary accept underprices the fused classic drives. The batched
     // vocabulary accept is the named follow-up; until then companion-agg
@@ -15063,7 +15063,7 @@ pub fn try_own_sorted_distinct_agg_over_gather_merge<'mcx>(
         return Ok(None);
     }
     // Last refusal point passed: arm set-mode (sticky, value-safe; measured
-    // 2026-07-12 — arming BEFORE the vocab refusal cost the refused Q10
+    // 2026-07-12 — arming BEFORE the vocab refusal cost the refused companion-agg
     // shape ~10% in the classic parallel path, so it must come last).
     ::nodeagg::agg_sorted_force_distinct_set(agg);
     trace_feed("pardistinct grouped leader drive engaged");
@@ -15081,7 +15081,7 @@ pub fn try_own_sorted_distinct_agg_over_gather_merge<'mcx>(
 
 /// Leader arm, plain shape: `Agg(AGG_PLAIN) ← GatherMerge ← Sort ←
 /// ParallelSeqScan` where EVERY transition replays from an exact-DISTINCT
-/// set (ClickBench Q5/Q6). `None` = refused.
+/// set (the single-key count(DISTINCT) shapes). `None` = refused.
 #[inline]
 pub fn try_own_plain_distinct_agg_over_gather_merge<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,

@@ -1,7 +1,7 @@
 //! spankey lane — copy-tax decomposition counters (MEASUREMENT ONLY).
 //!
 //! Charter step 1 (notes/spankey-lane.md): decompose the text-grouping
-//! family's accept-side wall (q13/q15/q34/q35 @100M mt16) into
+//! family's accept-side wall (the interned/dict-key top-n shapes @100M mt16) into
 //!   (a) varlena datum materialization from the scan arena,
 //!   (b) canonical-bytes / intern build,
 //!   (c) hash/compare over the materialized bytes,
@@ -69,10 +69,10 @@ macro_rules! ctrs {
 ctrs!(
     // scan_mk_batch pack pre-pass, Intern components: datum views +
     // code_ids identity cache + DictLazy ensures + intern resolves
-    // (per-row on Raw windows — the q13 class; per (identity, code) on
-    // dict windows — the q34/q35 class).
+    // (per-row on Raw windows — the interned-int-key class; per (identity, code) on
+    // dict windows — the wide-vocabulary class).
     pack_intern_ns,
-    // scan_mk_batch pack pre-pass, Int/Numeric components (q15's int half).
+    // scan_mk_batch pack pre-pass, Int/Numeric components (the dict-int shape's int half).
     pack_word_ns,
     // agg_hash_compact_batch_mk1/mk2: packed-key batch probe + new-group
     // seeding. INCLUDES canon_accept_ns (nested) — subtract at analysis.
