@@ -116,6 +116,36 @@ AggPolyHeapPlain	curve_reuse	HeapCmpFoldPrefix	class	-	c0837fba9	2026-07-14	-	PG
 CbMetaFooterAgg	curve_reuse	-	class	-	0a1ab4a55	2026-07-14	-	PGRUST_RUNTIME	footer answers are O(1): never floored, no curve — NO_GUARD posture kept in every mode	structural
 _grouped_classes	hold_groups_min	4000000	groups	unforced-CB-10M A/B (night/routing-floor-fixes)	b12c3fc74	2026-07-21	fleet letter in branch commit	PGRUST_RUNTIME	classify-time groupby-high HOLD (PGRUST_M5_GROUPBY_HIGH_FLOOR overridable); becomes the seal-term crossover at step 2	witnessed-ab
 PartwisePlainFold	curve_reuse	-	class	-	a88c58496e70	2026-07-21	scripts/partwise-fleet-ladder.sh	PGRUST_LANE_V2_PARTWISE	rectangle-retained: per-AM PROVISIONAL floors live in the m5_partwise.rs classifier (CbPlainAggFold/HeapCmpFoldPrefix reuse, GL-PARTWISE-1); own curve cells ride the named floor-calibration mini-ladder follow-up	structural
+# --- R1 SERIAL-REGIME rows (soak-adj round-2 §R2.4; runtime_model.rs
+# ser_setup/ser_row + cost_route_verdict_regime): the SAME nine witnessed
+# v2 jobs' SERIAL legs (serial:neg-ok on every row — engine-pinned walls,
+# valid where the runtime witness is absent), fit with the legacy params
+# FROZEN (scripts/runtime-cost-fit.py fit_serial). Consumed when the
+# arm-admission mirror says the arm will NOT own the suppressed plan
+# (t_rt := t_ser). UNUSABLE-fit classes (rms > 40%: CbDistinctIntKeys
+# ~1152%, CbGroupedAggTopN ~69%) carry their rows for provenance; the
+# regime verdict ABSTAINS there (SERIAL_FIT_UNUSABLE pin). The
+# CbTopnBoundedIntKeys ARM is superseded (L6) but its SERIAL lane was
+# not reworked — its ser rows stay witnessed-v2.
+CbDistinctIntKeys	ser_setup	0.0	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	UNUSABLE fit (rms ~1152% — linear t_ser cannot follow this class's serial surface); regime abstains	witnessed-v2
+CbDistinctIntKeys	ser_row	0.2701	legacy-row-equiv/row	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	UNUSABLE fit; regime abstains	witnessed-v2
+CbGroupedAggIntKeys	ser_setup	1521808.2	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbGroupedAggIntKeys	ser_row	0.5155	legacy-row-equiv/row	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbGroupedAggTextKey	ser_setup	496422.6	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbGroupedAggTextKey	ser_row	0.9510	legacy-row-equiv/row	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbGroupedAggTopN	ser_setup	534384.6	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	UNUSABLE fit (rms ~69%); regime abstains — the F1 post-qual floor owns this class's small-N routing	witnessed-v2
+CbGroupedAggTopN	ser_row	0.3162	legacy-row-equiv/row	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	UNUSABLE fit; regime abstains	witnessed-v2
+CbHashJoinPlainAgg	ser_setup	0.0	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbHashJoinPlainAgg	ser_row	0.9928	legacy-row-equiv/row	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbPlainAggFold	ser_setup	29327.6	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	the serial fold answers ~flat (footer/zone) — ser_row ~0; the q2-class small-N win regime	witnessed-v2
+CbPlainAggFold	ser_row	0.0120	legacy-row-equiv/row	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbTopnBoundedIntKeys	ser_setup	417592.9	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	serial lane NOT superseded by the L6 arm rework — legs current	witnessed-v2
+CbTopnBoundedIntKeys	ser_row	0.4527	legacy-row-equiv/row	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+HeapCmpFoldPrefix	ser_setup	228223.5	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+HeapCmpFoldPrefix	ser_row	1.3933	legacy-row-equiv/row	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+HeapPlainCountStar	ser_setup	454725.6	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+HeapPlainCountStar	ser_row	0.4871	legacy-row-equiv/row	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+_serial_regime	n_min_serial	100000	rows	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	smallest serial-witnessed cell; the R1 small-N wave extends downward	witnessed-v2
 # --- SERIAL-SIDE TERM (step-2 three-way shadow; costsize/src/serial_model.rs,
 # pinned by serial_constants_match_tsv; fit scripts/serial-term-fit.py).
 # Units: witnessed-wall-ms on the reference rig (dist, warm medians) —

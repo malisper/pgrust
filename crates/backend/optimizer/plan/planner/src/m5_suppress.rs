@@ -3632,7 +3632,14 @@ fn finish_seat_lifted(run: &mut PlannerRun<'_>, relid: u32, rows: f64) -> PgResu
         && !matches!(rtm::cost_route_mode(), rtm::CostRouteMode::Off)
     {
         let dop = guc_tables::runtime_pool::runtime_dop();
-        let v = rtm::cost_route_verdict(rtm::RuntimeClass::CbHashJoinPlainAgg, rows, dop);
+        // R1 regime split mirrored here too (the seat path never sees
+        // pages; the hashjoin admission mirror is rows-only).
+        let v = rtm::cost_route_verdict_regime(
+            rtm::RuntimeClass::CbHashJoinPlainAgg,
+            rows,
+            dop,
+            rows >= HJ_ARM_MIN_ROWS,
+        );
         let (n_ws_mg, n_wg_ms) = cost_shadow::note(class, true, v.suppress);
         if trace_armed() && !v.suppress {
             eprintln!(
@@ -5072,6 +5079,43 @@ fn serial_shadow_tail(
     }
 }
 
+/// R1 ARM-ADMISSION MIRROR (soak-adj round-2 §R2.4, built by the
+/// serial-cost-term lane): the plan-computable predicate for "will the
+/// arm OWN the suppressed plan?" — the regime input of
+/// `cost_route_verdict_regime`. When it answers false, suppression
+/// delivers the SERIAL lane and the verdict prices t_ser/t_leg on the
+/// serial support floor instead of the engaged curve. Instances are
+/// MIRRORS of witnessed engage floors, never new economics:
+///   * cbstore classes — the scan/sort/agg arms' 64-granule geometry
+///     floor (64 x 8192 = 524,288 rows; HJ_ARM_MIN_ROWS is the same
+///     constant, S1's re-derivation): the nine-job grid witnessed
+///     runtime:absent at <= 500k rows and engagement at >= 1M on every
+///     cbstore class.
+///   * CbGroupedAggTopN — F1's 500k post-qual floor (the sorted serial
+///     election the arm refuses).
+///   * HeapPlainCountStar — the rowdrive 64MB block floor
+///     (admission_min_pages mirror, applied in every mode).
+///   * HeapCmpFoldPrefix — no witnessed floor instance (the heap
+///     cmp-fold arm engaged at the 100k cells): always admits.
+fn arm_admission_mirror(class: CoverClass, rows: f64, pages: f64) -> bool {
+    use costsize::runtime_model as rtm;
+    match class {
+        CoverClass::CbGroupedAggTopN => rows >= 500_000.0,
+        CoverClass::HeapPlainCountStar => pages >= rtm::HEAP_COUNT_ADMISSION_MIN_PAGES,
+        CoverClass::HeapCmpFoldPrefix => true,
+        CoverClass::CbPlainAggFold
+        | CoverClass::CbGroupedAggIntKeys
+        | CoverClass::CbGroupedAggTextKey
+        | CoverClass::CbDistinctIntKeys
+        | CoverClass::CbTopnBoundedIntKeys
+        | CoverClass::CbHashJoinPlainAgg
+        | CoverClass::CbHashJoinMultiBuild
+        | CoverClass::CbHashJoinGroupedAgg => rows >= HJ_ARM_MIN_ROWS,
+        // Curveless / knob-path classes never reach the regime verdict.
+        _ => true,
+    }
+}
+
 /// Matrix consult + optional trace, shared tail.
 fn finish(
     run: &mut PlannerRun<'_>,
@@ -5109,10 +5153,19 @@ fn finish(
         let mut decided_by = "floor";
         if !matches!(rtm::cost_route_mode(), rtm::CostRouteMode::Off) {
             if let Some(curve) = cover_class_curve(class) {
-                let v = rtm::cost_route_verdict(curve, rows, dop);
-                // What the model WOULD do: the curve verdict composed with
-                // the rowdrive block-floor ADMISSION MIRROR, which rides
-                // every mode (m5-5 reading #3; TSV admission_min_pages row).
+                // R1 regime split (soak-adj round-2 §R2.4): when the
+                // arm-admission mirror says the arm will NOT own the
+                // suppressed plan, suppression delivers the SERIAL lane —
+                // the verdict prices the witnessed serial curve
+                // (t_ser/t_leg on the serial support floor) instead of
+                // the engaged curve. arm_admits=true is byte-identical
+                // to the pre-R1 verdict (pinned in runtime_model).
+                let arm_admits = arm_admission_mirror(class, rows, pages);
+                let v = rtm::cost_route_verdict_regime(curve, rows, dop, arm_admits);
+                // What the model WOULD do: the regime verdict composed
+                // with the rowdrive block-floor ADMISSION MIRROR, which
+                // rides every mode (m5-5 reading #3; TSV
+                // admission_min_pages row).
                 let cost_suppress = v.suppress
                     && (class != CoverClass::HeapPlainCountStar
                         || pages >= rtm::HEAP_COUNT_ADMISSION_MIN_PAGES);
@@ -5150,8 +5203,8 @@ fn finish(
                     eprintln!(
                         "m5-cost-route: class={class:?} curve={curve:?} relid={relid} \
                          rows={rows:.0} pages={pages:.0} ngroups={ngroups:.0} dop={dop} \
-                         r_pred={:.3} cost_verdict={} floor_verdict={floor_ok} \
-                         decided_by={decided_by}",
+                         arm_admits={arm_admits} r_pred={:.3} cost_verdict={} \
+                         floor_verdict={floor_ok} decided_by={decided_by}",
                         v.ratio, v.suppress
                     );
                 }
@@ -7194,6 +7247,44 @@ mod tests {
         let v = sm::tstrunc_two_way(admitted_rows).unwrap();
         assert!(216_000.0 < tstrunc_max_pages());
         assert!(agrees(true, v.pick), "fence admits, model {v:?}");
+    }
+
+    /// R1 arm-admission mirror pins: every instance mirrors a WITNESSED
+    /// engage floor (never new economics) — the cbstore 64-granule
+    /// geometry floor (== HJ_ARM_MIN_ROWS == S1's constant), F1's 500k
+    /// grouped-topn post-qual floor, the heap-count block floor; the
+    /// heap cmp-fold arm has no witnessed floor and always admits.
+    #[test]
+    fn arm_admission_mirror_matches_the_witnessed_floors() {
+        use costsize::runtime_model as rtm;
+        // cbstore classes: the nine-job grid witnessed absent <= 500k /
+        // engaged >= 1M — the 64-granule mirror splits inside that band.
+        for class in [
+            CoverClass::CbPlainAggFold,
+            CoverClass::CbGroupedAggIntKeys,
+            CoverClass::CbGroupedAggTextKey,
+            CoverClass::CbDistinctIntKeys,
+            CoverClass::CbTopnBoundedIntKeys,
+            CoverClass::CbHashJoinPlainAgg,
+        ] {
+            assert!(!arm_admission_mirror(class, 500_000.0, 1e5), "{class:?} @500k");
+            assert!(arm_admission_mirror(class, 1_000_000.0, 1e5), "{class:?} @1M");
+            assert!(!arm_admission_mirror(class, HJ_ARM_MIN_ROWS - 1.0, 1e5));
+            assert!(arm_admission_mirror(class, HJ_ARM_MIN_ROWS, 1e5));
+        }
+        assert_eq!(HJ_ARM_MIN_ROWS, 64.0 * 8192.0, "the 64-granule geometry mirror");
+        // F1's post-qual floor.
+        assert!(!arm_admission_mirror(CoverClass::CbGroupedAggTopN, 499_999.0, 1e5));
+        assert!(arm_admission_mirror(CoverClass::CbGroupedAggTopN, 500_000.0, 1e5));
+        // Heap count: the block floor, rows-independent.
+        assert!(!arm_admission_mirror(CoverClass::HeapPlainCountStar, 1e7, 8191.0));
+        assert!(arm_admission_mirror(
+            CoverClass::HeapPlainCountStar,
+            1e7,
+            rtm::HEAP_COUNT_ADMISSION_MIN_PAGES
+        ));
+        // Heap cmp-fold engaged at the 100k cells: always admits.
+        assert!(arm_admission_mirror(CoverClass::HeapCmpFoldPrefix, 1_000.0, 10.0));
     }
 
     /// The census index and the printable class-name table cannot drift
