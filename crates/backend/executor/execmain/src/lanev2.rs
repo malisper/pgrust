@@ -57,8 +57,10 @@ mod standing_channel;
 mod push;
 mod row_emit;
 mod runtime_passthrough;
+mod write_funnel; // W0 funnel-into-writer admission (parallel-writes design §4)
 pub(crate) use runtime_passthrough::try_passthrough_funnel;
 pub use runtime_passthrough::funnel_engagements;
+pub use write_funnel::ctas_funnel_engagements;
 mod rowmode;
 mod rowmode_tail;
 mod stats;
