@@ -1,12 +1,21 @@
 //! pgtz.c: tz directory, pg_tzset cache, session/log timezone globals.
 //! Cache entries are leaked (C's dynahash entries are permanent; a `pg_tz *`
 //! stays valid for the backend's life) — `&'static PgTz`, no refcounts.
+//!
+//! The cache is PROCESS-global and never freed. It must be: `&'static PgTz`
+//! pointers escape the owning thread — `DynamicZoneAbbrev` (adt_datetime
+//! tz.rs) caches them in the process-shared zone-abbreviation table, and GUC
+//! extras carry them — so a session- or thread-scoped arena here turns every
+//! such consumer into a use-after-free once the first resolving session ends
+//! (the pg_timezone_abbrevs localtime/clock.rs:32 garbage-`defaulttype`
+//! panic). C never has this problem because its dynahash lives in
+//! TopMemoryContext for the life of the (single-session) process.
 
-use core::cell::{Cell, RefCell};
-use std::sync::OnceLock;
+use core::cell::Cell;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 use localtime::{pg_tz_acceptable, tzload, tzparse, PgTz, TzLoadError, TzState, TZ_STRLEN_MAX};
-use mcx::{Mcx, MemoryContext, PgHashMap};
 use pgstrcasecmp::pg_toupper;
 use types_core::primitive::MAXPGPATH;
 use types_error::{PgError, PgResult, ERROR, LOG};
@@ -152,13 +161,13 @@ fn scan_directory_ci(dirname: &str, fname: &[u8]) -> PgResult<Option<String>> {
     Ok(found)
 }
 
-struct TzCache {
-    mcx: Mcx<'static>,
-    map: PgHashMap<'static, &'static [u8], &'static PgTz>,
-}
+// Process-lifetime cache (see the module doc): entries are Box::leak'd, the
+// map itself is never dropped. Lookups are cold (SET timezone, zone-name
+// decode), so a plain Mutex is fine.
+static TIMEZONE_CACHE: OnceLock<Mutex<HashMap<Box<[u8]>, &'static PgTz>>> = OnceLock::new();
 
-thread_local! {
-    static TIMEZONE_CACHE: RefCell<Option<TzCache>> = const { RefCell::new(None) };
+fn timezone_cache() -> &'static Mutex<HashMap<Box<[u8]>, &'static PgTz>> {
+    TIMEZONE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 #[cold]
@@ -179,11 +188,7 @@ pub fn pg_tzset(tzname: &[u8]) -> Option<&'static PgTz> {
     }
     let uppername = &upper[..tzname.len()];
 
-    if let Some(tz) = TIMEZONE_CACHE.with(|c| {
-        c.borrow()
-            .as_ref()
-            .and_then(|cache| cache.map.get(uppername).copied())
-    }) {
+    if let Some(tz) = timezone_cache().lock().unwrap().get(uppername).copied() {
         return Some(tz);
     }
 
@@ -208,33 +213,15 @@ pub fn pg_tzset(tzname: &[u8]) -> Option<&'static PgTz> {
         }
     }
 
-    Some(TIMEZONE_CACHE.with(|c| {
-        let mut slot = c.borrow_mut();
-        let cache = slot.get_or_insert_with(|| {
-            let mcx = ::mcx::session_root("Timezones").mcx();
-            // Registered after session_root, so this runs FIRST (LIFO): the
-            // droppy TLS cache must be emptied before its context is freed,
-            // or the thread-exit TLS destructor frees into a dead arena.
-            ::mcx::register_session_cleanup(Box::new(|| {
-                TIMEZONE_CACHE.with(|c| drop(c.borrow_mut().take()));
-            }));
-            TzCache {
-                mcx,
-                map: PgHashMap::with_capacity_in(4, mcx),
-            }
-        });
-        let key: &'static [u8] = mcx::slice_borrow_in(cache.mcx, uppername)
-            .unwrap_or_else(|e| escaped_report("pg_tzset cache", e));
-        let tz = mcx::alloc_leak_in(
-            cache.mcx,
-            PgTz {
-                tzname: canonname,
-                state: *tzstate,
-            },
-        )
-        .unwrap_or_else(|e| escaped_report("pg_tzset cache", e));
-        cache.map.insert(key, tz);
-        tz
+    // Two threads racing on the same uncached zone both build it; the first
+    // insert wins and the loser's build is dropped, so every caller — and the
+    // process-shared pointer caches downstream — sees ONE permanent entry.
+    let mut map = timezone_cache().lock().unwrap();
+    Some(*map.entry(uppername.into()).or_insert_with(|| {
+        Box::leak(Box::new(PgTz {
+            tzname: canonname,
+            state: *tzstate,
+        }))
     }))
 }
 
