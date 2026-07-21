@@ -419,8 +419,35 @@ fn size_floors_enabled() -> bool {
 fn textdistinct_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        matches!(
+        // night/planner-fix-forced: DEFAULT FLIP OFF->ON (unset = on), the
+        // GL-TEXTDIST default-flip win. Eliminates part of the CB_FORCE_PLANS=mt16
+        // vector: unforced release selection now suppresses Gather and engages the
+        // runtime distinct / plain-distinct / exprkey sinks for the text/int
+        // count(DISTINCT) (q5/q6) + reduced-expr-key grouped-agg (q36) shapes the
+        // mt16 vector forced (rt/rt16). The arm is proven byte-identical vs C and
+        // vs knob-OFF (doc above); this flip is validated on the fleet
+        // unforced-vs-mt16 A/B. PGRUST_LANE_V2_TEXTDISTINCT=0/off restores the
+        // pre-flip keep-Gather posture for A/B.
+        !matches!(
             std::env::var("PGRUST_LANE_V2_TEXTDISTINCT").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
+/// SE-TEXTDISTINCT PLAIN (ungrouped) sub-arm gate — held DEFAULT OFF by
+/// night/planner-fix-forced. The grouped/exprkey textdistinct arms are a clean
+/// unforced win (q11/q12 8-9x, matching the mt16 rt arm), but the fleet A/B
+/// measured the PLAIN count(DISTINCT) suppress-Gather serial-distinct arm as a
+/// 10M REGRESSION (q5/q6 ~2-3x slower than the default parallel), so it stays
+/// gated apart from the flipped `textdistinct_enabled()` default. Re-arm with
+/// `PGRUST_LANE_V2_TEXTDISTINCT_PLAIN=1|on` once the plain arm's scan-pool
+/// economics are re-measured (GL-TEXTDIST-2).
+fn textdistinct_plain_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("PGRUST_LANE_V2_TEXTDISTINCT_PLAIN").as_deref(),
             Ok("1") | Ok("on")
         )
     })
@@ -871,7 +898,15 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             // engagement — the fleet runtime posture arms it; GL-TEXTDIST-2
             // owns the default-flip win. NOT a BOOTSTRAP_MATRIX class
             // (route_to=legacy stays; default census byte-identical).
-            if textdistinct_enabled()
+            // night/planner-fix-forced: gated on the SEPARATE plain knob (still
+            // default OFF). The fleet unforced-vs-mt16 A/B measured the plain
+            // (ungrouped) suppress-Gather serial-distinct arm as a REGRESSION at
+            // 10M (q5 0.046->0.151, q6 0.081->0.175: the serial Sort<-SeqScan
+            // distinct loses to the default parallel), so it is held back while
+            // the GROUPED text-distinct arm (below) rides the default-ON flip.
+            // PGRUST_LANE_V2_TEXTDISTINCT_PLAIN=1 re-arms it (GL-TEXTDIST-2 owns
+            // the plain-arm scan-pool re-measure that would make it a clean win).
+            if textdistinct_plain_enabled()
                 && !has_quals
                 && parse.sortClause.is_nil()
                 && parse.limitCount.is_none()
