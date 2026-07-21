@@ -9,8 +9,11 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::SeqCst};
-use std::sync::{Arc, Mutex};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{
+    AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering::SeqCst,
+};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use ::amapi::{
     amparallelvacuumoptions, amusemaintenanceworkmem, VACUUM_OPTION_MAX_VALID_VALUE,
@@ -24,7 +27,7 @@ use ::commands_vacuum::{
 };
 use ::mcx::{Mcx, MemoryContext};
 use ::types_core::{BlockNumber, ForkNumber, Oid, BLCKSZ};
-use ::types_error::PgResult;
+use ::types_error::{PgError, PgResult, ERROR};
 use ::types_nbtree::IndexBulkDeleteResult;
 use ::types_rel::lock::{RowExclusiveLock, ShareUpdateExclusiveLock};
 use ::types_rel::{Relation, RelationData};
@@ -59,6 +62,14 @@ struct PvShared {
     cost: Arc<VacuumSharedCost>,
     indstats: Vec<Mutex<PvIndStats>>,
     dead_items: Mutex<Arc<[ItemPointerData]>>,
+    /// M4.1 pool channel: the per-pass payload slot (the pool driver reads
+    /// it; cleared by the leader at every pass end) plus the leader-flushed
+    /// progress relays — a pool serve has no launched-worker progress
+    /// sender, so workers count here and the LEADER (owner of the
+    /// pg_stat_progress_vacuum row) publishes.
+    pool_pass: Mutex<Option<Arc<PvPoolPass>>>,
+    pool_indexes_processed: AtomicI64,
+    pool_delay_ns: AtomicI64,
 }
 
 /// Leader state; relations/bstrategy are passed per call (arena-tied).
@@ -70,6 +81,9 @@ pub struct ParallelVacuumState {
     nindexes_parallel_bulkdel: i32,
     nindexes_parallel_cleanup: i32,
     nindexes_parallel_condcleanup: i32,
+    /// M4.1: binder target + standing driver installed on the pcxt at init
+    /// — index passes may engage the pool channel (pool_engage_pass).
+    pool_armed: bool,
 }
 
 fn index_am_kind(indrel: &RelationData<'_>) -> IndexAmKind {
@@ -156,8 +170,35 @@ pub fn parallel_vacuum_init(
         }),
         indstats,
         dead_items: Mutex::new(Arc::from(Vec::new())),
+        pool_pass: Mutex::new(None),
+        pool_indexes_processed: AtomicI64::new(0),
+        pool_delay_ns: AtomicI64::new(0),
     });
     parallel::set_private(pcxt, Arc::clone(&shared) as Arc<dyn std::any::Any + Send + Sync>);
+
+    // M4.1 pool channel (arm once per vacuum; passes engage per pass):
+    // binder target + standing driver on THIS pcxt. Fail-closed: any
+    // refusal here leaves the launched bgworker gang the driver of record,
+    // byte-exactly.
+    let mut pool_armed = false;
+    if pool_index_enabled() {
+        let policy = parallel::query_task_policy_probe();
+        if !(policy.temp_state || policy.serializable || policy.pending_invalidations)
+            && parallel::InstallQueryTaskBinding(pcxt, policy).is_ok()
+        {
+            parallel::set_standing_driver(
+                pcxt,
+                parallel::standing::StandingDriver {
+                    drive: parallel_vacuum_pool_driver,
+                    deferred_bind: false,
+                },
+            );
+            ensure_pool_shutdown_registered();
+            pool_armed = true;
+        } else {
+            ptrace("pool channel refused (binder policy probe)");
+        }
+    }
 
     Ok(Some(ParallelVacuumState {
         pcxt,
@@ -167,6 +208,7 @@ pub fn parallel_vacuum_init(
         nindexes_parallel_bulkdel,
         nindexes_parallel_cleanup,
         nindexes_parallel_condcleanup,
+        pool_armed,
     }))
 }
 
@@ -277,6 +319,676 @@ fn parallel_vacuum_compute_workers(
     Ok(parallel_workers.min(guc_tables::vars::max_parallel_maintenance_workers.read()))
 }
 
+// ---------------------------------------------------------------------------
+// M4.1 pool channel (driver swap, index phase): one index = ONE COARSE
+// MORSEL served by PGPROC-leasing pool workers through the M2 inc-2
+// bound-descriptor gate at QoS class Utility. The launched bgworker gang
+// stays the fallback on every refusal, and the kill switch (default OFF)
+// restores it wholesale. LONG-UNIT DEBT (Track 4.2, recorded not solved): a
+// minutes-long index sweep holds its claim (and permit) for the whole
+// sweep — abort/cancel/reclaim latency on this task set is bounded by one
+// INDEX, not one t_max; the Q2 chunked-claim resumable scan (serial cursor,
+// quantum claims, ceiling=1 pin) is the follow-up that retires this.
+// LEADER-PARTICIPATION DEBT: on the pool channel the leader parks (its park
+// loop is the cancel guarantee) instead of joining the safe-index loop as
+// the launched channel's leader does; it rejoins when long-unit chunking
+// lands.
+// ---------------------------------------------------------------------------
+
+/// M4.1 kill switch: `PGRUST_RUNTIME_VACUUM_POOL=1` arms the pool channel
+/// for the parallel-index passes (same switch as the heap phase's driver
+/// swap). DEFAULT OFF. Layered under the runtime master switch and the
+/// standing module's own gates (POOLBIND/POOLDB inside try_engage_pool).
+fn pool_index_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_VACUUM_POOL").is_ok_and(|v| v.trim() == "1")
+    }) && runtime::runtime_enabled()
+        && runtime::global().is_some()
+        && miscinit::GetMyBackendType() != ::types_core::BackendType::AutovacWorker
+        && !parallel::IsParallelWorker()
+}
+
+/// Engagement trace (PGRUST_VACUUM_TRACE=1, the vacuum battery's oracle
+/// channel). Default-off, zero cost.
+fn ptrace_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_VACUUM_TRACE").is_ok_and(|v| v.trim() == "1"))
+}
+
+fn ptrace(msg: &str) {
+    if ptrace_enabled() {
+        eprintln!("vacuum-pool-index: {msg}");
+    }
+}
+
+/// One pool-engaged index pass (bulkdel or cleanup): participation board +
+/// the task-set work. Granule g ⇒ the pass's g-th parallel-safe index.
+struct PvPoolPass {
+    shared: Arc<PvShared>,
+    /// The binder target (shared_for(pcxt)) — the driver binds eagerly
+    /// through it.
+    target: Arc<parallel::ParallelShared>,
+    rg: OnceLock<runtime::WeakRgHandle>,
+    /// Board-entry slot, held across the leader join so the
+    /// PRIVATE_SHUTDOWN hook can complete the standing join on leader
+    /// unwinds (the shutdown_standing_join law).
+    board: Mutex<Option<Arc<parallel::standing::StandingEngagement>>>,
+    /// Ordinals (into indrels/indstats) of this pass's parallel-safe
+    /// indexes: granule g ⇒ safe[g].
+    safe: Vec<usize>,
+    started: AtomicUsize,
+    refused: AtomicUsize,
+    error: Mutex<Option<Box<PgError>>>,
+    failed: AtomicBool,
+}
+
+impl PvPoolPass {
+    fn fail(&self, e: Box<PgError>) {
+        {
+            let mut g = self.error.lock().unwrap_or_else(|p| p.into_inner());
+            if g.is_none() {
+                *g = Some(e);
+            }
+        }
+        self.failed.store(true, SeqCst);
+        if let Some(rg) = self.rg.get().and_then(|w| w.upgrade()) {
+            rg.abort();
+        }
+    }
+
+    fn take_error(&self) -> Option<Box<PgError>> {
+        self.error.lock().unwrap_or_else(|p| p.into_inner()).take()
+    }
+}
+
+/// One-index-per-claim source: every granule is its own hard boundary and
+/// claims run whole-boundary, so a claim is exactly one index regardless of
+/// sizer ramp state (the "coarse per-index morsel" of record).
+struct IndexGranuleSource {
+    total: u64,
+}
+
+impl runtime::MorselSource for IndexGranuleSource {
+    fn total_granules(&self) -> u64 {
+        self.total
+    }
+
+    fn next_boundary_after(&self, start: u64) -> u64 {
+        start + 1
+    }
+
+    fn startup_c0(&self) -> u64 {
+        1
+    }
+
+    fn whole_boundary_claims(&self) -> bool {
+        true
+    }
+}
+
+/// Per-participant index-pass context: the participant's OWN opened
+/// relations + strategy, published for run_morsel through a thread-local
+/// pointer (the heap phase's WORKER_CX pattern — this thread is the only
+/// driver of its lane).
+struct PvWorkerCx<'a, 'mcx> {
+    mcx: Mcx<'a>,
+    heaprel: &'a RelationData<'mcx>,
+    indrels: &'a [Relation<'mcx>],
+    bstrategy: &'a BufferAccessStrategy,
+}
+
+thread_local! {
+    static POOL_CX: std::cell::Cell<*mut PvWorkerCx<'static, 'static>> =
+        const { std::cell::Cell::new(std::ptr::null_mut()) };
+}
+
+impl runtime::TaskSetWork for PvPoolPass {
+    fn run_morsel(&self, _worker: usize, range: runtime::MorselRange) {
+        if self.failed.load(SeqCst) {
+            // Already aborting: the claim drains without work.
+            return;
+        }
+        let r = catch_unwind(AssertUnwindSafe(|| self.morsel_body(range)));
+        match r {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => self.fail(e),
+            Err(_panic) => self.fail(
+                PgError::new(ERROR, "parallel index vacuum worker panicked in a morsel")
+                    .into(),
+            ),
+        }
+    }
+
+    fn finalize(&self) {
+        // Index stats land in PvShared.indstats under their own locks; the
+        // leader verifies Completed statuses after the join.
+    }
+}
+
+impl PvPoolPass {
+    fn morsel_body(&self, range: runtime::MorselRange) -> PgResult<()> {
+        let p = POOL_CX.with(|c| c.get());
+        if p.is_null() {
+            return Err(
+                PgError::new(ERROR, "index vacuum morsel without a bound worker").into()
+            );
+        }
+        // SAFETY: set by THIS thread's drive frame; the frame outlives the
+        // drive, and run_morsel only executes on the claiming thread.
+        let cx: &mut PvWorkerCx<'_, '_> = unsafe { &mut *p };
+        for g in range {
+            if self.failed.load(SeqCst) {
+                return Ok(());
+            }
+            let i = self.safe[g as usize];
+            parallel_vacuum_process_one_index(
+                &self.shared,
+                cx.mcx,
+                cx.heaprel,
+                &cx.indrels[i],
+                i,
+                cx.bstrategy,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// The bound descriptor's serve: parallel::standing::pool_serve mapped onto
+/// the runtime's verdict (the standing_channel adapter precedent).
+fn vacuum_index_pooldb_serve(
+    payload: &Arc<dyn std::any::Any + Send + Sync>,
+) -> runtime::BoundServe {
+    match parallel::standing::pool_serve(payload) {
+        parallel::standing::PoolServe::Served => runtime::BoundServe::Served,
+        parallel::standing::PoolServe::Refused => runtime::BoundServe::Refused,
+        parallel::standing::PoolServe::Closed => runtime::BoundServe::Closed,
+    }
+}
+
+/// The standing/pool driver: runs ON a pool worker inside serve_ticket —
+/// leased PGPROC identity live, parallel-worker impersonation + lock-group
+/// membership installed. Owns the EAGER binder wrap around the
+/// parallel_vacuum_main-shaped drive body: the binder's statement half
+/// supplies what the launched substrate supplies a bgworker. Exit-committed
+/// unwinds (FATAL) rethrow to the pool glue.
+fn parallel_vacuum_pool_driver(shared: &parallel::ParallelShared) {
+    let Some(private) = shared.private() else { return };
+    let Ok(pv) = private.downcast::<PvShared>() else { return };
+    let Some(pass) = pv.pool_pass.lock().unwrap_or_else(|p| p.into_inner()).clone() else {
+        // Board raced pass teardown (close precedes the slot clear, so this
+        // is a straggler): nothing to serve.
+        return;
+    };
+    // The submit → handle-store window: the publication wake can beat the
+    // leader's rg-handle store; wait briefly (a never-stored handle
+    // degrades to the drive body's fail-closed refusal).
+    let mut spins = 0u32;
+    while pass.rg.get().is_none() && spins < 10_000 {
+        std::thread::yield_now();
+        spins += 1;
+    }
+    let target = Arc::clone(&pass.target);
+    let entered = std::cell::Cell::new(false);
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        parallel::with_query_task_binding(&target, || {
+            entered.set(true);
+            pool_index_drive(&pv, &pass)
+        })
+    }));
+    match r {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            if !entered.get() {
+                // Binder refusal (validate() gate): fail-closed
+                // non-participation — the leader's nobody-participates
+                // probe falls back to the launched gang.
+                ptrace(&format!("pool bind refused: {}", e.message()));
+                pass.refused.fetch_add(1, SeqCst);
+            } else if !pass.failed.load(SeqCst) {
+                pass.fail(e);
+            }
+        }
+        Err(unwind) => {
+            pass.fail(
+                PgError::new(ERROR, "parallel index vacuum pool executor panicked").into(),
+            );
+            latch::SetLatch(::types_storage::latch::LatchHandle::proc(
+                shared.parallel_leader_proc_number,
+            ));
+            if parallel::standing::is_exit_unwind(&*unwind) {
+                std::panic::resume_unwind(unwind);
+            }
+            return;
+        }
+    }
+    // Wake the parked leader: completion/refusal/error all re-poll there.
+    latch::SetLatch(::types_storage::latch::LatchHandle::proc(
+        shared.parallel_leader_proc_number,
+    ));
+}
+
+/// The drive body (parallel_vacuum_main, pool form): identity + cost
+/// ceremony, then an external-lane pinned drive claiming per-index morsels.
+/// Errors record into the pass (first-wins) and return Err so the binder
+/// aborts the worker transaction (resowner releases the residue).
+fn pool_index_drive(shared: &Arc<PvShared>, pass: &Arc<PvPoolPass>) -> PgResult<()> {
+    let Some(rt) = runtime::global() else {
+        pass.refused.fetch_add(1, SeqCst);
+        return Ok(());
+    };
+    let Some(rg) = pass.rg.get().and_then(|w| w.upgrade()) else {
+        pass.refused.fetch_add(1, SeqCst);
+        return Ok(());
+    };
+    // Process-wide external-lane lease: exhaustion = fail-closed
+    // non-participation.
+    let Some(lane) = rt.acquire_external_lane() else {
+        pass.refused.fetch_add(1, SeqCst);
+        return Ok(());
+    };
+    let mut lane_local = lane.local();
+
+    let ctx = MemoryContext::new("parallel vacuum pool worker");
+    let mcx = ctx.mcx();
+    let rel = match table::table_open(mcx, shared.relid, ShareUpdateExclusiveLock) {
+        Ok(rel) => rel,
+        Err(e) => {
+            // Clean pre-drive failure: record it and reap the RG (a pinned
+            // RG needs SOME driver to run its protocol cleanup).
+            pass.fail(e);
+            if rg.try_outcome().is_none() {
+                rg.abort();
+                let _ = rt.drive_pinned(&mut lane_local, &rg);
+            }
+            return Ok(());
+        }
+    };
+    let indrels = match vac_open_indexes(mcx, &rel, RowExclusiveLock) {
+        Ok(v) => v,
+        Err(e) => {
+            pass.fail(e);
+            if rg.try_outcome().is_none() {
+                rg.abort();
+                let _ = rt.drive_pinned(&mut lane_local, &rg);
+            }
+            let _ = table::table_close(rel, ShareUpdateExclusiveLock);
+            return Ok(());
+        }
+    };
+    debug_assert!(!indrels.is_empty());
+
+    if shared.maintenance_work_mem_worker > 0 {
+        g::set_maintenance_work_mem(shared.maintenance_work_mem_worker);
+    }
+
+    autovacuum_seams::vacuum_update_costs::call()?;
+    g::SetVacuumCostBalance(0);
+    set_vacuum_cost_balance_local(0);
+    set_vacuum_shared_cost(Some(Arc::clone(&shared.cost)));
+    shared.cost.active_nworkers.fetch_add(1, SeqCst);
+    pass.started.fetch_add(1, SeqCst);
+
+    let bstrategy = bufmgr_seams::get_access_strategy_with_size::call(
+        BufferAccessStrategyType::BasVacuum,
+        shared.ring_nbuffers * (BLCKSZ as i32 / 1024),
+    );
+
+    let mut cx = PvWorkerCx { mcx, heaprel: &rel, indrels: &indrels, bstrategy: &bstrategy };
+    // Publish the worker cx for run_morsel (this thread only), drive, clear.
+    // SAFETY (lifetime erasure): cx outlives the drive on this frame; the
+    // pointer is cleared before cx drops.
+    POOL_CX.with(|c| {
+        c.set(unsafe {
+            core::mem::transmute::<*mut PvWorkerCx<'_, '_>, *mut PvWorkerCx<'static, 'static>>(
+                &mut cx as *mut PvWorkerCx<'_, '_>,
+            )
+        })
+    });
+    let _outcome = rt.drive_pinned(&mut lane_local, &rg);
+    POOL_CX.with(|c| c.set(std::ptr::null_mut()));
+    drop(cx);
+
+    // Teardown (parallel_vacuum_main order).
+    shared.cost.active_nworkers.fetch_sub(1, SeqCst);
+    set_vacuum_shared_cost(None);
+    if guc_tables::vars::track_cost_delay_timing.read() {
+        shared
+            .pool_delay_ns
+            .fetch_add(::commands_vacuum::parallel_vacuum_worker_delay_ns(), SeqCst);
+    }
+    bufmgr_seams::free_access_strategy::call(bstrategy);
+    vac_close_indexes(indrels, RowExclusiveLock)?;
+    table::table_close(rel, ShareUpdateExclusiveLock)?;
+
+    if pass.failed.load(SeqCst) {
+        // A recorded error (possibly this worker's, possibly a sibling's):
+        // return Err so the binder aborts the worker transaction and
+        // resowner releases any residue (the leader rethrows the recorded
+        // error; this message is never user-visible on that path).
+        return Err(Box::new(PgError::new(
+            ERROR,
+            "parallel index vacuum worker failed (see leader error)",
+        )));
+    }
+    Ok(())
+}
+
+/// Leader-side relay flush: pool workers count processed indexes / delay
+/// time into PvShared; the leader (owner of the progress row) publishes.
+fn flush_pool_progress(shared: &PvShared) {
+    let n = shared.pool_indexes_processed.swap(0, SeqCst);
+    if n > 0 {
+        backend_progress::pgstat_progress_incr_param(
+            backend_progress::progress::PROGRESS_VACUUM_INDEXES_PROCESSED,
+            n,
+        );
+    }
+}
+
+fn flush_pool_delay(shared: &PvShared) {
+    let ns = shared.pool_delay_ns.swap(0, SeqCst);
+    if ns > 0 {
+        backend_progress::pgstat_progress_incr_param(
+            backend_progress::progress::PROGRESS_VACUUM_DELAY_TIME,
+            ns,
+        );
+    }
+}
+
+/// Everything the leader join needs from one engaged pass.
+struct PoolEngaged {
+    pass: Arc<PvPoolPass>,
+    entry: Arc<parallel::standing::StandingEngagement>,
+    rg: runtime::RgHandle,
+    waiter: runtime::CompletionWaiter,
+}
+
+/// Abort + BOUNDED drain of the pinned RG (the vacuumlazy drain_rg shape).
+/// False = leaked (dead participant) — callers surface an error rather
+/// than wait forever.
+fn pool_drain_rg(rt: &'static Arc<runtime::Runtime>, rg: &runtime::RgHandle) -> bool {
+    rg.abort();
+    let mut lane = None;
+    for _ in 0..4000 {
+        if let Some(l) = rt.acquire_external_lane() {
+            lane = Some(l);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_micros(500));
+    }
+    let Some(lane) = lane else { return false };
+    let mut local = lane.local();
+    rt.try_drain_pinned(&mut local, rg, 4000).is_some()
+}
+
+/// PRIVATE_SHUTDOWN hook: a leader unwind between pool engage and the join's
+/// own cleanup reaches here through DestroyParallelContext — complete the RG
+/// (drain releases drives parked on the aborted generation) and the standing
+/// join (close + await detach) so pool participants never outlive the leader
+/// arena.
+fn parallel_vacuum_pool_shutdown(private: &(dyn std::any::Any + Send + Sync)) {
+    let Some(pv) = private.downcast_ref::<PvShared>() else { return };
+    let pass = pv.pool_pass.lock().unwrap_or_else(|p| p.into_inner()).take();
+    let Some(pass) = pass else { return };
+    if let Some(rt) = runtime::global() {
+        if let Some(rg) = pass.rg.get().and_then(|w| w.upgrade()) {
+            if rg.try_outcome().is_none() {
+                pool_drain_rg(rt, &rg);
+            }
+        }
+    }
+    let board = pass.board.lock().unwrap_or_else(|p| p.into_inner()).take();
+    if let Some(entry) = board {
+        parallel::standing::close_and_await(&entry);
+    }
+}
+
+fn ensure_pool_shutdown_registered() {
+    static ONCE: OnceLock<()> = OnceLock::new();
+    ONCE.get_or_init(|| {
+        parallel::register_parallel_private_shutdown(parallel_vacuum_pool_shutdown);
+    });
+}
+
+/// First-claim deadline (the standing channel's knob): an unclaimed
+/// engagement after this long means the pool cannot serve us — launched
+/// fallback (correctness never depends on this).
+fn pool_claim_deadline() -> std::time::Duration {
+    static MS: OnceLock<u64> = OnceLock::new();
+    std::time::Duration::from_millis(*MS.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_GANG_CLAIM_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(100)
+    }))
+}
+
+/// Engage the pool channel for one index pass: build the pass payload +
+/// board, run the cost carry-in, submit the bound utility RG. None =
+/// channel unavailable / nothing parallel-safe — the launched gang takes
+/// over with NOTHING consumed (the pass payload is cleared).
+fn pool_engage_pass(
+    pvs: &ParallelVacuumState,
+    nworkers: i32,
+) -> Option<PoolEngaged> {
+    let rt = runtime::global()?;
+    let safe: Vec<usize> = pvs
+        .shared
+        .indstats
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| {
+            s.lock().unwrap_or_else(|e| e.into_inner()).parallel_workers_can_process
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if safe.is_empty() {
+        return None;
+    }
+    let target = parallel::shared_for(pvs.pcxt);
+    let entry = parallel::standing::try_engage_pool(&target, nworkers.max(0) as usize)?;
+    let pass = Arc::new(PvPoolPass {
+        shared: Arc::clone(&pvs.shared),
+        target,
+        rg: OnceLock::new(),
+        board: Mutex::new(Some(Arc::clone(&entry))),
+        safe,
+        started: AtomicUsize::new(0),
+        refused: AtomicUsize::new(0),
+        error: Mutex::new(None),
+        failed: AtomicBool::new(false),
+    });
+    *pvs.shared.pool_pass.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&pass));
+
+    // C's leader cost-balance carry-in (the launched block's discipline) —
+    // BEFORE the submission goes live: pool workers may serve the instant
+    // the publication lands.
+    pvs.shared.cost.cost_balance.store(g::VacuumCostBalance() as u32, SeqCst);
+    pvs.shared.cost.active_nworkers.store(0, SeqCst);
+
+    static NEXT_QUERY_ID: AtomicU64 = AtomicU64::new(1);
+    let source: Arc<dyn runtime::MorselSource> =
+        Arc::new(IndexGranuleSource { total: pass.safe.len() as u64 });
+    let work: Arc<dyn runtime::TaskSetWork> = Arc::clone(&pass) as _;
+    let descriptor = runtime::BoundDescriptor {
+        serve: vacuum_index_pooldb_serve,
+        payload: Arc::clone(&entry) as Arc<dyn std::any::Any + Send + Sync>,
+    };
+    let (rg, waiter) = rt.submit_pinned_bound_utility(
+        runtime::QuerySpec {
+            query_id: NEXT_QUERY_ID.fetch_add(1, SeqCst),
+            tasksets: vec![runtime::TaskSetSpec { source, work, deps: vec![] }],
+        },
+        0,
+        Some(runtime::WidthRequest::unbounded(nworkers.max(1) as u32)),
+        descriptor,
+    );
+    pass.rg
+        .set(rg.downgrade())
+        .unwrap_or_else(|_| unreachable!("rg set once per pass payload"));
+
+    // The leader's own accounting joins the shared-balance discipline for
+    // the pass (its unsafe-index processing runs concurrently with pool
+    // participants).
+    g::SetVacuumCostBalance(0);
+    set_vacuum_cost_balance_local(0);
+    set_vacuum_shared_cost(Some(Arc::clone(&pvs.shared.cost)));
+
+    ptrace(&format!(
+        "engaged pass tickets={nworkers} safe_indexes={}",
+        pass.safe.len()
+    ));
+    Some(PoolEngaged { pass, entry, rg, waiter })
+}
+
+/// One pool pass's leader join verdict.
+enum PoolPassWait {
+    Done,
+    /// Nothing claimed (started == 0): statuses untouched — the launched
+    /// gang takes over.
+    Fallback,
+}
+
+/// The leader's park loop for one pool pass (the standing channel's wait
+/// shape + the relay flush): poll completion + interrupts + participation
+/// counters; every exit path completes the RG if needed, closes the board
+/// entry, awaits detach, clears the pass slot, and flushes the relays.
+fn pool_leader_join(pvs: &ParallelVacuumState, eng: &PoolEngaged) -> PgResult<PoolPassWait> {
+    let rt = runtime::global().expect("engaged with a live runtime");
+    let shared = &pvs.shared;
+    let entry = &eng.entry;
+    let cleanup = |shared: &PvShared, entry: &Arc<parallel::standing::StandingEngagement>| {
+        // Take the board slot first (the shutdown hook's double-close
+        // guard), then the arena-lifetime join, then the pass slot.
+        eng.pass.board.lock().unwrap_or_else(|p| p.into_inner()).take();
+        parallel::standing::close_and_await(entry);
+        *shared.pool_pass.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        flush_pool_progress(shared);
+        flush_pool_delay(shared);
+    };
+    let t0 = std::time::Instant::now();
+    let mut traced = false;
+    loop {
+        if let Some(o) = eng.waiter.try_wait() {
+            cleanup(shared, entry);
+            if !traced {
+                ptrace(&format!(
+                    "engaged pooldb dop={} safe_indexes={}",
+                    entry.claimed(),
+                    eng.pass.safe.len()
+                ));
+            }
+            if let Some(e) = eng.pass.take_error() {
+                return Err(e);
+            }
+            if o == runtime::RgOutcome::Aborted {
+                postgres_seams::check_for_interrupts::call()?;
+                return Err(Box::new(PgError::new(
+                    ERROR,
+                    "parallel index vacuum pool pass aborted",
+                )));
+            }
+            if eng.pass.started.load(SeqCst) == 0 {
+                // Completed but nobody participated (only possible
+                // pre-claim; an empty pass is refused at engage).
+                return Ok(PoolPassWait::Fallback);
+            }
+            return Ok(PoolPassWait::Done);
+        }
+        // Order matters on every error exit: abort THEN drain (the leader's
+        // protocol cleanup completes the RG and releases workers parked in
+        // their drives) THEN close-and-await.
+        if let Err(e) = postgres_seams::check_for_interrupts::call() {
+            eng.rg.abort();
+            pool_drain_rg(rt, &eng.rg);
+            cleanup(shared, entry);
+            return Err(e);
+        }
+        // Progress relay: the leader owns the pg_stat_progress_vacuum row.
+        flush_pool_progress(shared);
+        let claimed = entry.claimed();
+        if !traced && claimed > 0 {
+            ptrace(&format!(
+                "engaged pooldb dop={claimed} safe_indexes={}",
+                eng.pass.safe.len()
+            ));
+            traced = true;
+        }
+        let started = eng.pass.started.load(SeqCst);
+        let refused = entry.refused() + eng.pass.refused.load(SeqCst);
+        if started == 0 && refused >= entry.tickets() {
+            pool_drain_rg(rt, &eng.rg);
+            cleanup(shared, entry);
+            ptrace(&format!("pooldb refused ({refused} refusals) — launched fallback"));
+            return Ok(PoolPassWait::Fallback);
+        }
+        if started == 0 && entry.detached() >= claimed && t0.elapsed() > pool_claim_deadline()
+        {
+            pool_drain_rg(rt, &eng.rg);
+            cleanup(shared, entry);
+            ptrace("pooldb claim deadline — launched fallback");
+            return Ok(PoolPassWait::Fallback);
+        }
+        if claimed > 0 && started > 0 && entry.detached() >= claimed {
+            if let Some(o) = eng.waiter.try_wait() {
+                let _ = o;
+                continue;
+            }
+            if let Some(e) = eng.pass.take_error() {
+                eng.rg.abort();
+                pool_drain_rg(rt, &eng.rg);
+                cleanup(shared, entry);
+                return Err(e);
+            }
+            eng.rg.abort();
+            pool_drain_rg(rt, &eng.rg);
+            cleanup(shared, entry);
+            return Err(Box::new(PgError::new(
+                ERROR,
+                "parallel index vacuum pool executors exited before completing the pass",
+            )));
+        }
+        if let Err(e) = parallel::wait_parallel_finish_quantum() {
+            eng.rg.abort();
+            pool_drain_rg(rt, &eng.rg);
+            cleanup(shared, entry);
+            return Err(e);
+        }
+    }
+}
+
+/// The launched bgworker gang's per-pass bring-up (the pre-M4.1 block,
+/// hoisted so the pool channel's fallback shares it). `carry_in` = run the
+/// leader cost-balance carry-in (skipped on a pool fallback: the shared
+/// balance already holds it plus the leader's unsafe-index accrual).
+fn launch_gang(
+    pvs: &ParallelVacuumState,
+    nworkers: i32,
+    num_index_scans: i32,
+    carry_in: bool,
+) -> PgResult<()> {
+    if num_index_scans > 0 {
+        parallel::ReinitializeParallelDSM(pvs.pcxt)?;
+    }
+
+    if carry_in {
+        pvs.shared.cost.cost_balance.store(g::VacuumCostBalance() as u32, SeqCst);
+        pvs.shared.cost.active_nworkers.store(0, SeqCst);
+    }
+
+    parallel::ReinitializeParallelWorkers(pvs.pcxt, nworkers);
+    parallel::LaunchParallelWorkers(pvs.pcxt)?;
+
+    if parallel::nworkers_launched(pvs.pcxt) > 0 {
+        g::SetVacuumCostBalance(0);
+        set_vacuum_cost_balance_local(0);
+        set_vacuum_shared_cost(Some(Arc::clone(&pvs.shared.cost)));
+    }
+    Ok(())
+}
+
 fn parallel_vacuum_process_all_indexes(
     pvs: &mut ParallelVacuumState,
     mcx: Mcx<'_>,
@@ -311,41 +1023,60 @@ fn parallel_vacuum_process_all_indexes(
 
     pvs.shared.idx.store(0, SeqCst);
 
-    if nworkers > 0 {
-        if num_index_scans > 0 {
-            parallel::ReinitializeParallelDSM(pvs.pcxt)?;
-        }
+    // M4.1 pool channel first (armed + workers wanted): per-index coarse
+    // morsels on PGPROC-leasing pool workers; the launched bgworker gang
+    // stays the fallback on every refusal (fail-closed layering: pool →
+    // launched → leader-serial).
+    let mut pool: Option<PoolEngaged> = None;
+    if nworkers > 0 && pvs.pool_armed {
+        pool = pool_engage_pass(pvs, nworkers);
+    }
 
-        pvs.shared.cost.cost_balance.store(g::VacuumCostBalance() as u32, SeqCst);
-        pvs.shared.cost.active_nworkers.store(0, SeqCst);
-
-        parallel::ReinitializeParallelWorkers(pvs.pcxt, nworkers);
-        parallel::LaunchParallelWorkers(pvs.pcxt)?;
-
-        if parallel::nworkers_launched(pvs.pcxt) > 0 {
-            g::SetVacuumCostBalance(0);
-            set_vacuum_cost_balance_local(0);
-            set_vacuum_shared_cost(Some(Arc::clone(&pvs.shared.cost)));
-        }
+    if nworkers > 0 && pool.is_none() {
+        launch_gang(pvs, nworkers, num_index_scans, /* carry_in */ true)?;
         // "launched %d parallel vacuum workers ..." at elevel: DEBUG2 without
         // VERBOSE (loud upstream), so not emitted.
     }
 
     parallel_vacuum_process_unsafe_indexes(pvs, mcx, heaprel, indrels, bstrategy)?;
-    parallel_vacuum_process_safe_indexes(
-        &pvs.shared,
-        mcx,
-        heaprel,
-        indrels,
-        bstrategy,
-        vacuum_shared_cost().is_some(),
-    )?;
 
-    if nworkers > 0 {
-        parallel::WaitForParallelWorkersToFinish(pvs.pcxt)?;
-        // Buffer/WAL usage accumulation skipped: pgBufferUsage is derived
-        // from live bufmgr counters here and its vacuum consumers (VERBOSE,
-        // autovacuum log) are elided/loud.
+    match &pool {
+        Some(eng) => match pool_leader_join(pvs, eng)? {
+            PoolPassWait::Done => {}
+            PoolPassWait::Fallback => {
+                // Nothing consumed (started == 0, statuses untouched): the
+                // launched gang takes over. The cost carry-in is SKIPPED —
+                // the shared balance already holds it plus the leader's
+                // unsafe-index accrual from the engaged window.
+                launch_gang(pvs, nworkers, num_index_scans, /* carry_in */ false)?;
+                parallel_vacuum_process_safe_indexes(
+                    &pvs.shared,
+                    mcx,
+                    heaprel,
+                    indrels,
+                    bstrategy,
+                    vacuum_shared_cost().is_some(),
+                )?;
+                parallel::WaitForParallelWorkersToFinish(pvs.pcxt)?;
+            }
+        },
+        None => {
+            parallel_vacuum_process_safe_indexes(
+                &pvs.shared,
+                mcx,
+                heaprel,
+                indrels,
+                bstrategy,
+                vacuum_shared_cost().is_some(),
+            )?;
+
+            if nworkers > 0 {
+                parallel::WaitForParallelWorkersToFinish(pvs.pcxt)?;
+                // Buffer/WAL usage accumulation skipped: pgBufferUsage is
+                // derived from live bufmgr counters here and its vacuum
+                // consumers (VERBOSE, autovacuum log) are elided/loud.
+            }
+        }
     }
 
     for (i, slot) in pvs.shared.indstats.iter().enumerate() {
@@ -474,10 +1205,18 @@ fn parallel_vacuum_process_one_index(
         }
         s.status = PvIndVacStatus::Completed;
     }
-    backend_progress::pgstat_progress_parallel_incr_param(
-        backend_progress::progress::PROGRESS_VACUUM_INDEXES_PROCESSED,
-        1,
-    );
+    if parallel::standing::serving_on_pool() {
+        // M4.1 pool worker: no launched-channel progress sender exists on a
+        // pool serve — relay through the shared counter; the LEADER (owner
+        // of the pg_stat_progress_vacuum row) publishes at its park-loop
+        // cadence, so the row stays truthful within one poll quantum.
+        shared.pool_indexes_processed.fetch_add(1, SeqCst);
+    } else {
+        backend_progress::pgstat_progress_parallel_incr_param(
+            backend_progress::progress::PROGRESS_VACUUM_INDEXES_PROCESSED,
+            1,
+        );
+    }
     Ok(())
 }
 

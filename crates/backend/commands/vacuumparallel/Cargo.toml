@@ -29,3 +29,7 @@ guc_tables = { path = "../../utils/misc/guc_tables" }
 backend_progress = { path = "../../utils/activity/backend_progress" }
 init_small = { path = "../../utils/init/init_small" }
 elog = { path = "../../utils/error/elog" }
+runtime = { path = "../../executor/runtime" }
+latch = { path = "../../storage/ipc/latch" }
+postgres_seams = { path = "../../tcop/postgres_seams" }
+miscinit = { path = "../../utils/init/miscinit" }

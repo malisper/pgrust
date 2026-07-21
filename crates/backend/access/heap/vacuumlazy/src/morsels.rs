@@ -98,6 +98,24 @@ fn flag_enabled() -> bool {
     })
 }
 
+/// M4.1 driver-swap kill switch (scratchpad/night/all-morsels-plan.md
+/// Track 3 item 1): `PGRUST_RUNTIME_VACUUM_POOL=1` arms the POOL channel —
+/// the round's helpers are PGPROC-leasing runtime pool workers engaged
+/// through the M2 inc-2 bound-descriptor gate at QoS class Utility, instead
+/// of a launched bgworker gang. DEFAULT OFF: the bgworker gang stays the
+/// driver of record until the fleet letter. Fail-closed layering: pool
+/// channel unavailable/refused ⇒ the launched gang below, byte-exactly;
+/// unset/0 ⇒ this arm never engages. Layered under PGRUST_RUNTIME_VACUUM
+/// and PGRUST_RUNTIME (both must admit first), and under the standing
+/// module's own switches (PGRUST_RUNTIME_POOLBIND / PGRUST_RUNTIME_POOLDB
+/// gate try_engage_pool).
+fn pool_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_VACUUM_POOL").is_ok_and(|v| v.trim() == "1")
+    })
+}
+
 /// Engagement trace (PGRUST_VACUUM_TRACE=1): the §9 battery's engagement /
 /// kill-switch oracle channel. Default-off, zero cost.
 pub(crate) fn vtrace_enabled() -> bool {
@@ -660,6 +678,15 @@ impl Frontier {
 pub(crate) struct VacScanShared {
     rt: &'static Arc<runtime::Runtime>,
     rg: OnceLock<runtime::WeakRgHandle>,
+    /// M4.1 pool channel: the engagement's binder target (shared_for(pcxt),
+    /// set once per round after InitializeParallelDSM) — the pool driver
+    /// binds eagerly through it (with_query_task_binding).
+    pcxt_shared: OnceLock<Arc<parallel::ParallelShared>>,
+    /// M4.1 pool channel: the board-entry slot, held across the pool wait
+    /// so the PRIVATE_SHUTDOWN hook can complete the standing join (close +
+    /// await detach) on leader unwinds that never reach the wait loop's own
+    /// cleanup (the arm-side shutdown_standing_join law).
+    pool_board: Mutex<Option<Arc<parallel::standing::StandingEngagement>>>,
     source: Arc<VacuumBlockSource>,
     relid: Oid,
     /// Cutoffs computed once by the leader in C's load-bearing order
@@ -703,6 +730,8 @@ impl VacScanShared {
         VacScanShared {
             rt,
             rg: OnceLock::new(),
+            pcxt_shared: OnceLock::new(),
+            pool_board: Mutex::new(None),
             source,
             relid: vacrel.rel.rd_id,
             cutoffs: vacrel.cutoffs,
@@ -1122,6 +1151,133 @@ fn worker_drive(shared: &Arc<VacScanShared>) -> PgResult<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// M4.1 pool channel (driver swap): the round's helpers as PGPROC-leasing
+// pool workers, engaged through the M2 inc-2 bound-descriptor gate.
+// ---------------------------------------------------------------------------
+
+/// The bound descriptor's serve: parallel::standing::pool_serve mapped onto
+/// the runtime's verdict (the parallel crate cannot name runtime types —
+/// the standing_channel adapter precedent, replicated here because the
+/// vacuum driver lives outside execmain).
+fn vacuum_pooldb_serve(
+    payload: &Arc<dyn std::any::Any + Send + Sync>,
+) -> runtime::BoundServe {
+    match parallel::standing::pool_serve(payload) {
+        parallel::standing::PoolServe::Served => runtime::BoundServe::Served,
+        parallel::standing::PoolServe::Refused => runtime::BoundServe::Refused,
+        parallel::standing::PoolServe::Closed => runtime::BoundServe::Closed,
+    }
+}
+
+/// The standing/pool driver (StandingDriver.drive): runs ON a pool worker
+/// inside serve_ticket — leased PGPROC identity live, parallel-worker
+/// impersonation + lock-group membership installed. Owns the EAGER binder
+/// wrap around the launched path's exact drive body (`worker_drive`): the
+/// binder's statement half supplies what the launched substrate supplies a
+/// bgworker (worker transaction, snapshots, identity, parallel mode), so
+/// the vacuum bodies run identically on both channels. Exit-committed
+/// unwinds (FATAL) are rethrown to the pool glue — a terminated worker
+/// must die (swallowing one would resurrect it into the pool).
+fn vacuum_scan_pool_driver(shared: &parallel::ParallelShared) {
+    let Some(private) = shared.private() else { return };
+    let Ok(payload) = private.downcast::<VacScanShared>() else { return };
+    let Some(target) = payload.pcxt_shared.get() else {
+        payload.refused.fetch_add(1, Ordering::SeqCst);
+        return;
+    };
+    let target = Arc::clone(target);
+    // The submit → handle-store window: the publication wake can beat the
+    // leader's rg-handle store; the board is live, so wait briefly (a
+    // never-stored handle degrades to worker_drive's fail-closed refusal).
+    let mut spins = 0u32;
+    while payload.rg.get().is_none() && spins < 10_000 {
+        std::thread::yield_now();
+        spins += 1;
+    }
+    let entered = std::cell::Cell::new(false);
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        parallel::with_query_task_binding(&target, || {
+            entered.set(true);
+            worker_drive(&payload)
+        })
+    }));
+    match r {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            if !entered.get() {
+                // Binder refusal (validate() gate): fail-closed
+                // non-participation — the leader's nobody-participates
+                // probe falls back to the launched gang.
+                vtrace(&format!("pool bind refused: {}", e.message()));
+                payload.refused.fetch_add(1, Ordering::SeqCst);
+            } else if !payload.failed.load(Ordering::SeqCst) {
+                // An error escaped worker_drive without a recorded fail
+                // (worker_drive records its own on every failure path;
+                // this is the binder's own teardown surface).
+                payload.fail(e);
+            }
+        }
+        Err(unwind) => {
+            payload.fail(
+                PgError::new(ERROR, "vacuum scan pool executor panicked").into(),
+            );
+            latch::SetLatch(::types_storage::latch::LatchHandle::proc(
+                shared.parallel_leader_proc_number,
+            ));
+            if parallel::standing::is_exit_unwind(&*unwind) {
+                std::panic::resume_unwind(unwind);
+            }
+            return;
+        }
+    }
+    // Wake the parked leader: completion/refusal/error all re-poll there.
+    latch::SetLatch(::types_storage::latch::LatchHandle::proc(
+        shared.parallel_leader_proc_number,
+    ));
+}
+
+/// Build the pool channel for one round: install the binder target +
+/// standing driver on the fresh round pcxt, then the per-RG engagement
+/// board + bound descriptor (returned pair rides the submission). None =
+/// channel unavailable (kill switches, binder policy refusal, no pool
+/// identity wiring, lock-group failure) — submit plain-pinned; the
+/// launched gang is the driver, today exactly.
+fn try_pool_channel(
+    pcxt: parallel::ParallelContextId,
+    shared: &Arc<VacScanShared>,
+    k: i32,
+) -> Option<(Arc<parallel::standing::StandingEngagement>, runtime::BoundDescriptor)> {
+    if !pool_enabled() {
+        return None;
+    }
+    // Binder-policy fail-closed admission (the M1 scan leader's law): any
+    // set flag would refuse validate() on every serve anyway — don't build
+    // a board nobody can serve. Vacuum never carries params.
+    let policy = parallel::query_task_policy_probe();
+    if policy.temp_state || policy.serializable || policy.pending_invalidations {
+        vtrace("pool channel refused (binder policy probe)");
+        return None;
+    }
+    if parallel::InstallQueryTaskBinding(pcxt, policy).is_err() {
+        // Installed-twice is unreachable on a fresh round pcxt; refuse
+        // fail-closed rather than unwind the round.
+        vtrace("pool channel refused (binding install)");
+        return None;
+    }
+    parallel::set_standing_driver(
+        pcxt,
+        parallel::standing::StandingDriver {
+            drive: vacuum_scan_pool_driver,
+            deferred_bind: false,
+        },
+    );
+    let target = shared.pcxt_shared.get()?;
+    let entry = parallel::standing::try_engage_pool(target, k.max(0) as usize)?;
+    let payload: Arc<dyn std::any::Any + Send + Sync> = Arc::clone(&entry) as _;
+    Some((entry, runtime::BoundDescriptor { serve: vacuum_pooldb_serve, payload }))
+}
+
 fn wfin_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var("PGRUST_WFIN").is_ok_and(|v| v.trim() == "1"))
@@ -1163,6 +1319,14 @@ fn vacuum_scan_private_shutdown(private: &(dyn std::any::Any + Send + Sync)) {
             drain_rg(payload.rt, &rg);
         }
     }
+    // M4.1 pool channel: a leader unwind between submit and the pool wait's
+    // own cleanup leaves the board entry live — complete the standing join
+    // (close + await detach) so pool participants never outlive the leader
+    // arena (the arm-side shutdown_standing_join law).
+    let board = payload.pool_board.lock().unwrap_or_else(|p| p.into_inner()).take();
+    if let Some(entry) = board {
+        parallel::standing::close_and_await(&entry);
+    }
 }
 
 fn ensure_hooks_registered() {
@@ -1201,6 +1365,196 @@ enum RoundOutcome {
     Completed,
 }
 
+/// The parked leader's per-poll duty, shared by BOTH wait loops (launched
+/// gang and M4.1 pool channel): progress publication (decision 3 — the min
+/// contiguous claim frontier, never past holes; dead-TID counters from the
+/// shared feed) and the failsafe cadence (§5.5 — the shared scanned counter
+/// crossing FAILSAFE_EVERY_PAGES multiples, checked on the LEADER: its own
+/// PGPROC, C's every-4GB rule).
+struct LeaderCadence {
+    last_failsafe_page: u64,
+    progress_base_items: i64,
+    progress_base_bytes: u64,
+}
+
+impl LeaderCadence {
+    fn new(vacrel: &LVRelState<'_, '_>, shared: &VacScanShared) -> LeaderCadence {
+        LeaderCadence {
+            last_failsafe_page: shared.scanned_pages.load(Ordering::Relaxed),
+            progress_base_items: vacrel.dead_items_info.num_items,
+            progress_base_bytes: vacrel
+                .dead_items
+                .as_ref()
+                .map(|d| d.memory_usage())
+                .unwrap_or(0) as u64,
+        }
+    }
+
+    fn tick(&mut self, shared: &VacScanShared) -> PgResult<()> {
+        let f = shared.frontier.prefix.load(Ordering::Relaxed);
+        if f > 0 {
+            pgstat_progress_update_param(
+                PROGRESS_VACUUM_HEAP_BLKS_SCANNED,
+                shared.source.block_of(f - 1).block as i64,
+            );
+        }
+        ::backend_progress::pgstat_progress_update_multi_param(
+            &[PROGRESS_VACUUM_NUM_DEAD_ITEM_IDS, PROGRESS_VACUUM_DEAD_TUPLE_BYTES],
+            &[
+                self.progress_base_items + shared.num_dead_items.load(Ordering::Relaxed),
+                (self.progress_base_bytes + shared.quiesce.bytes()) as i64,
+            ],
+        );
+
+        let scanned = shared.scanned_pages.load(Ordering::Relaxed);
+        if !shared.failsafe.load(Ordering::Relaxed)
+            && scanned / FAILSAFE_EVERY_PAGES as u64
+                > self.last_failsafe_page / FAILSAFE_EVERY_PAGES as u64
+        {
+            self.last_failsafe_page = scanned;
+            if vacuum_xid_failsafe_check(&shared.cutoffs)? {
+                // Quiesce the round (claims no-op; delays stop). The
+                // C-body state change applies after the round completes.
+                shared.failsafe.store(true, Ordering::Release);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// M4.1 pool channel: one round's pool wait verdict.
+enum PoolWait {
+    /// The RG reached an outcome under pool participation.
+    Done(runtime::RgOutcome),
+    /// Pool path refused with the RG UNTOUCHED (started == 0, so no
+    /// granule was claimed) — the launched gang takes over.
+    Fallback,
+}
+
+/// First-claim deadline for the pool channel (the standing channel's
+/// PGRUST_RUNTIME_GANG_CLAIM_MS, same knob): parked pool workers wake in
+/// microseconds, so an unclaimed engagement after this long means the pool
+/// cannot serve us — fall back to the launched gang (correctness never
+/// depends on this).
+fn pool_claim_deadline() -> std::time::Duration {
+    static MS: OnceLock<u64> = OnceLock::new();
+    std::time::Duration::from_millis(*MS.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_GANG_CLAIM_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(100)
+    }))
+}
+
+/// The pool channel's submit-and-park (the standing channel's wait loop
+/// shape + this arm's leader cadence): poll completion + interrupts +
+/// progress/failsafe + board participation counters. Every exit path
+/// closes the board entry and awaits participant detach (the leader arena
+/// must outlive the workers' refs); Fallback returns with the RG untouched.
+fn pool_wait(
+    vacrel: &mut LVRelState<'_, '_>,
+    rt: &'static Arc<runtime::Runtime>,
+    shared: &Arc<VacScanShared>,
+    entry: &Arc<parallel::standing::StandingEngagement>,
+    rg: &runtime::RgHandle,
+    waiter: &runtime::CompletionWaiter,
+) -> PgResult<PoolWait> {
+    let take_board = || {
+        shared.pool_board.lock().unwrap_or_else(|p| p.into_inner()).take();
+    };
+    let close = |why: &str| {
+        take_board();
+        parallel::standing::close_and_await(entry);
+        if !why.is_empty() {
+            vtrace(why);
+        }
+    };
+    let mut cadence = LeaderCadence::new(vacrel, shared);
+    let t0 = std::time::Instant::now();
+    let mut traced = false;
+    let granules = shared.source.entries().len();
+    loop {
+        if let Some(o) = waiter.try_wait() {
+            close("");
+            if !traced {
+                vtrace(&format!(
+                    "engaged pooldb dop={} granules={granules}",
+                    entry.claimed()
+                ));
+            }
+            return Ok(PoolWait::Done(o));
+        }
+        // Order matters on every error exit: abort THEN drain (the leader's
+        // protocol cleanup completes the RG and releases workers parked in
+        // their drives) THEN close-and-await.
+        if let Err(e) = postgres_seams::check_for_interrupts::call() {
+            rg.abort();
+            drain_rg(rt, rg);
+            close("");
+            return Err(e);
+        }
+        if let Err(e) = cadence.tick(shared) {
+            rg.abort();
+            drain_rg(rt, rg);
+            close("");
+            return Err(e);
+        }
+        let claimed = entry.claimed();
+        if !traced && claimed > 0 {
+            vtrace(&format!("engaged pooldb dop={claimed} granules={granules}"));
+            traced = true;
+        }
+        let started = shared.started.load(Ordering::SeqCst);
+        let refused = entry.refused() + shared.refused.load(Ordering::SeqCst);
+        // Nobody will participate: every ticket-holder refused pre-bind or
+        // at the bind/lane stage, before any granule was claimed.
+        if started == 0 && refused >= entry.tickets() {
+            close(&format!("pooldb refused ({refused} refusals) — launched fallback"));
+            return Ok(PoolWait::Fallback);
+        }
+        // Nothing driving and nothing pending within the deadline: the pool
+        // cannot serve us (all busy / gated off). No granule was consumed;
+        // the launched gang takes over. A straggler that claims right as we
+        // close simply drives the same RG (morsel claims are atomic).
+        if started == 0
+            && entry.detached() >= claimed
+            && t0.elapsed() > pool_claim_deadline()
+        {
+            close("pooldb claim deadline — launched fallback");
+            return Ok(PoolWait::Fallback);
+        }
+        // Participants all detached yet the RG is incomplete and no error
+        // was recorded: a worker died outside every catch layer.
+        if claimed > 0 && started > 0 && entry.detached() >= claimed {
+            if let Some(o) = waiter.try_wait() {
+                close("");
+                return Ok(PoolWait::Done(o));
+            }
+            if let Some(e) = shared.take_error() {
+                rg.abort();
+                drain_rg(rt, rg);
+                close("");
+                return Err(e);
+            }
+            rg.abort();
+            drain_rg(rt, rg);
+            close("");
+            return Err(Box::new(PgError::new(
+                ERROR,
+                "vacuum scan pool executors exited before completing the round",
+            )));
+        }
+        // Cancel dispositions (statement_timeout / pg_cancel_backend)
+        // surface from the latch quantum.
+        if let Err(e) = parallel::wait_parallel_finish_quantum() {
+            rg.abort();
+            drain_rg(rt, rg);
+            close("");
+            return Err(e);
+        }
+    }
+}
+
 fn run_round(
     vacrel: &mut LVRelState<'_, '_>,
     rt: &'static Arc<runtime::Runtime>,
@@ -1234,27 +1588,83 @@ fn round_ceremony(
             return Ok(RoundOutcome::Refused);
         }
         parallel::set_private(pcxt, Arc::clone(shared) as _);
+        shared
+            .pcxt_shared
+            .set(parallel::shared_for(pcxt))
+            .unwrap_or_else(|_| unreachable!("pcxt shared set once per round payload"));
+
+        // M4.1 pool channel — built BEFORE submit (the bound descriptor
+        // must ride the submission: publication keys the pool-visible
+        // active bit off it). None = plain pinned submit + launched gang,
+        // today exactly.
+        let pool = try_pool_channel(pcxt, shared, k);
+
+        // C's leader cost-balance carry-in (vacuumparallel discipline).
+        // BEFORE the submission goes live on any channel: pool workers may
+        // serve the instant the publication lands, and their shared-cost
+        // fetch_adds must never race the carry-in stores. The parked leader
+        // accrues nothing until the round's carry-back.
+        shared
+            .cost
+            .cost_balance
+            .store(g::VacuumCostBalance() as u32, std::sync::atomic::Ordering::SeqCst);
+        shared.cost.active_nworkers.store(0, std::sync::atomic::Ordering::SeqCst);
 
         // Submit the pinned RG before launch: helpers find work immediately.
         static NEXT_QUERY_ID: AtomicU64 = AtomicU64::new(1);
         let work: Arc<dyn runtime::TaskSetWork> = Arc::clone(shared) as _;
         let source: Arc<dyn runtime::MorselSource> = Arc::clone(&shared.source) as _;
-        let (rg, waiter) = rt.submit_pinned(runtime::QuerySpec {
+        let spec = runtime::QuerySpec {
             query_id: NEXT_QUERY_ID.fetch_add(1, Ordering::SeqCst),
             tasksets: vec![runtime::TaskSetSpec { source, work, deps: vec![] }],
-        });
+        };
+        let (rg, waiter) = match &pool {
+            // QoS class Utility (Track-4 Q0/Q1): utility stride weight +
+            // the capped ledger tier; width ceiling = the admitted K.
+            Some((_, descriptor)) => rt.submit_pinned_bound_utility(
+                spec,
+                0,
+                Some(runtime::WidthRequest::unbounded(k.max(1) as u32)),
+                descriptor.clone(),
+            ),
+            None => rt.submit_pinned(spec),
+        };
         shared
             .rg
             .set(rg.downgrade())
             .unwrap_or_else(|_| unreachable!("rg set once per round payload"));
         *submitted = Some(rg.clone());
 
-        // C's leader cost-balance carry-in (vacuumparallel discipline).
-        shared
-            .cost
-            .cost_balance
-            .store(g::VacuumCostBalance() as u32, std::sync::atomic::Ordering::SeqCst);
-        shared.cost.active_nworkers.store(0, std::sync::atomic::Ordering::SeqCst);
+        // Pool phase: park against the board; Done shares the launched
+        // path's post-outcome tail below; Fallback leaves the RG untouched
+        // (started == 0, nothing claimed) and the launched gang takes over.
+        if let Some((entry, _)) = &pool {
+            *shared.pool_board.lock().unwrap_or_else(|p| p.into_inner()) =
+                Some(Arc::clone(entry));
+            match pool_wait(vacrel, rt, shared, entry, &rg, &waiter)? {
+                PoolWait::Done(outcome) => {
+                    if let Some(e) = shared.take_error() {
+                        return Err(e);
+                    }
+                    if outcome == runtime::RgOutcome::Aborted {
+                        postgres_seams::check_for_interrupts::call()?;
+                        return Err(Box::new(PgError::new(
+                            ERROR,
+                            "vacuum morsel scan round aborted",
+                        )));
+                    }
+                    if shared.started.load(Ordering::SeqCst) == 0 {
+                        return Ok(RoundOutcome::Refused);
+                    }
+                    return Ok(RoundOutcome::Completed);
+                }
+                PoolWait::Fallback => {}
+            }
+        }
+        // Pool-phase refusals must not poison the launched loop's
+        // nobody-participates probe below (fresh helpers are still coming
+        // up): count launched-phase refusals from this floor.
+        let refused_base = shared.refused.load(Ordering::SeqCst);
 
         let launched = parallel::LaunchParallelWorkers(pcxt)?;
         clock.ceremony_ns += t_launch.elapsed().as_nanos() as u64;
@@ -1272,10 +1682,7 @@ fn round_ceremony(
         // Submit-and-park (WaitForParallelWorkersToFinish-shaped): completion
         // poll + parallel-message drain + CFI + progress publication +
         // failsafe cadence + bounded latch quantum.
-        let mut last_failsafe_page: u64 = shared.scanned_pages.load(Ordering::Relaxed);
-        let progress_base_items = vacrel.dead_items_info.num_items;
-        let progress_base_bytes =
-            vacrel.dead_items.as_ref().map(|d| d.memory_usage()).unwrap_or(0) as u64;
+        let mut cadence = LeaderCadence::new(vacrel, shared);
         let outcome = loop {
             if let Some(o) = waiter.try_wait() {
                 break o;
@@ -1287,38 +1694,8 @@ fn round_ceremony(
                 return Err(e);
             }
 
-            // Progress (decision 3): the min contiguous claim frontier,
-            // never past holes; dead-TID counters from the shared feed.
-            let f = shared.frontier.prefix.load(Ordering::Relaxed);
-            if f > 0 {
-                pgstat_progress_update_param(
-                    PROGRESS_VACUUM_HEAP_BLKS_SCANNED,
-                    shared.source.block_of(f - 1).block as i64,
-                );
-            }
-            ::backend_progress::pgstat_progress_update_multi_param(
-                &[PROGRESS_VACUUM_NUM_DEAD_ITEM_IDS, PROGRESS_VACUUM_DEAD_TUPLE_BYTES],
-                &[
-                    progress_base_items + shared.num_dead_items.load(Ordering::Relaxed),
-                    (progress_base_bytes + shared.quiesce.bytes()) as i64,
-                ],
-            );
-
-            // Failsafe cadence (§5.5): the shared scanned counter crossing
-            // FAILSAFE_EVERY_PAGES multiples, checked on the LEADER (its own
-            // PGPROC; C's every-4GB rule).
-            let scanned = shared.scanned_pages.load(Ordering::Relaxed);
-            if !shared.failsafe.load(Ordering::Relaxed)
-                && scanned / FAILSAFE_EVERY_PAGES as u64
-                    > last_failsafe_page / FAILSAFE_EVERY_PAGES as u64
-            {
-                last_failsafe_page = scanned;
-                if vacuum_xid_failsafe_check(&shared.cutoffs)? {
-                    // Quiesce the round (claims no-op; delays stop). The
-                    // C-body state change applies after the round completes.
-                    shared.failsafe.store(true, Ordering::Release);
-                }
-            }
+            // Progress (decision 3) + failsafe cadence (§5.5).
+            cadence.tick(shared)?;
 
             // Helpers all gone with the RG incomplete: post-Terminate death.
             if parallel::parallel_workers_all_stopped(pcxt) {
@@ -1339,7 +1716,7 @@ fn round_ceremony(
                 )));
             }
             // All-refused with nothing claimed: fall back serial.
-            let refused = shared.refused.load(Ordering::SeqCst);
+            let refused = shared.refused.load(Ordering::SeqCst) - refused_base;
             let started = shared.started.load(Ordering::SeqCst);
             if started == 0 && refused >= launched as usize {
                 drain_rg(rt, &rg);
