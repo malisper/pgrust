@@ -597,6 +597,20 @@ pub fn InitProcess(backend_type: BackendType) -> PgResult<()> {
     let proc = &hdr.allProcs[procno as usize];
     debug_assert_eq!(proc.procgloballist.get(), Some(list_id));
 
+    // TRIPWIRE (concurrent-window mode-P forensics): a freelist pop must
+    // yield a DEAD proc. A live pid here means the freelist handed out a
+    // PGPROC some backend still owns (double push / live-leader return) —
+    // panic NOW with the attribution instead of a bare "latch already
+    // owned by PID <n>" three lines later.
+    let stale_pid = proc.pid.load(Relaxed);
+    if stale_pid != 0 {
+        panic!(
+            "InitProcess: freelist returned live PGPROC (procno {procno}, \
+             pid {stale_pid}, lockGroupLeader {}, list {list_id:?})",
+            proc.lockGroupLeader.load(Relaxed)
+        );
+    }
+
     init_my_proc_common(proc, procno);
     proc.isRegularBackend
         .store(backend_type == BackendType::Backend, Relaxed);
@@ -885,11 +899,31 @@ pub fn ProcKill(_code: i32, _arg: usize) {
         if plist_is_empty(&leader.lockGroupMembers) {
             leader.lockGroupLeader.store(INVALID_PROC_NUMBER, Relaxed);
             if leader_no != procno {
-                // Leader exited first; return its PGPROC.
-                let list = leader.procgloballist.get().expect("leader freelist");
-                spin_acquire(&ProcStructLock);
-                plist_push_head(hdr, freelist(hdr, list), leader_no, links_of);
-                ProcStructLock.unlock();
+                // Leader exited first; return its PGPROC. TRIPWIRE
+                // (concurrent-window mode-P forensics): an exited leader
+                // always has pid==0 (its own ProcKill stored it before
+                // skipping the deferred return). A NONZERO pid here means
+                // this group state is corrupt and the push would hand a
+                // LIVE backend's PGPROC to the freelist — the observed
+                // "latch already owned by PID <n>" / "ProcKill() called in
+                // child process" theft pair. Refuse the push (bounded leak:
+                // one PGPROC) and log the state instead of corrupting.
+                let leader_pid = leader.pid.load(Relaxed);
+                if leader_pid != 0 {
+                    // stderr (no elog dep this low): reaches the server log
+                    // like the panics this tripwire preempts.
+                    eprintln!(
+                        "WARNING: lock group corruption: leader procno \
+                         {leader_no} still live (pid {leader_pid}) at \
+                         member-empty return; refusing freelist push \
+                         (member procno {procno})"
+                    );
+                } else {
+                    let list = leader.procgloballist.get().expect("leader freelist");
+                    spin_acquire(&ProcStructLock);
+                    plist_push_head(hdr, freelist(hdr, list), leader_no, links_of);
+                    ProcStructLock.unlock();
+                }
             }
         } else if leader_no != procno {
             proc.lockGroupLeader.store(INVALID_PROC_NUMBER, Relaxed);
@@ -990,10 +1024,22 @@ pub fn LeaveLockGroup() {
     if plist_is_empty(&leader.lockGroupMembers) {
         leader.lockGroupLeader.store(INVALID_PROC_NUMBER, Relaxed);
         // Leader exited first; return its PGPROC (ProcKill parity).
-        let list = leader.procgloballist.get().expect("leader freelist");
-        spin_acquire(&ProcStructLock);
-        plist_push_head(hdr, freelist(hdr, list), leader_no, links_of);
-        ProcStructLock.unlock();
+        // TRIPWIRE: same live-leader refusal as ProcKill's arm — a live
+        // leader here means group-state corruption; refuse the push
+        // (bounded leak) rather than hand a live PGPROC to the freelist.
+        let leader_pid = leader.pid.load(Relaxed);
+        if leader_pid != 0 {
+            eprintln!(
+                "WARNING: lock group corruption: leader procno {leader_no} \
+                 still live (pid {leader_pid}) at member-empty return; \
+                 refusing freelist push (leaving member procno {procno})"
+            );
+        } else {
+            let list = leader.procgloballist.get().expect("leader freelist");
+            spin_acquire(&ProcStructLock);
+            plist_push_head(hdr, freelist(hdr, list), leader_no, links_of);
+            ProcStructLock.unlock();
+        }
     }
     lwlock::LWLockRelease(leader_lwlock).expect("partition unlock in LeaveLockGroup");
 }
