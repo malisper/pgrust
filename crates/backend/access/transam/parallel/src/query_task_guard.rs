@@ -84,6 +84,31 @@ fn accept_invals_or_flush_taint() -> PgResult<()> {
     Ok(())
 }
 
+/// The bind-time invalidation step, target-aware (M4.2): an
+/// uncommitted-DDL target (installed with `invals_flush`, or a
+/// `leader_pending_invals` capture) gets the launched-substrate fallback —
+/// blanket `InvalidateSystemCaches` so every cache entry consulted during
+/// the task is rebuilt under the bound snapshot/xid (the leader's
+/// uncommitted catalog rows become visible), then an EAGER taint: entries
+/// built during the task hold uncommitted catalog state, and if that
+/// transaction ABORTS no sinval traffic ever corrects them, so the next
+/// adoption on this thread must re-blanket instead of trusting the cheap
+/// drain (the launched path's `note_caches_tainted` law, parallel/lib.rs).
+/// Eager (at bind, not unbind) so every exit path — error, panic, retry —
+/// is covered without touching the finish choreography.
+fn bind_invalidations(shared: &Arc<ParallelShared>) -> PgResult<()> {
+    let policy = shared
+        .query_task_binding
+        .load(std::sync::atomic::Ordering::Acquire);
+    if policy & super::QUERY_TASK_INVALS_FLUSH != 0 || shared.leader_pending_invals {
+        inval::local::InvalidateSystemCaches()?;
+        init_small::wretain::note_caches_tainted();
+        Ok(())
+    } else {
+        accept_invals_or_flush_taint()
+    }
+}
+
 pub(super) fn with_query_task_binding<T>(
     shared: &Arc<ParallelShared>,
     body: impl FnOnce() -> PgResult<T>,
@@ -166,7 +191,12 @@ fn validate(shared: &ParallelShared) -> PgResult<()> {
     {
         return Err(unsupported("query-task binding refuses temporary state"));
     }
-    if policy & super::QUERY_TASK_PENDING_INVALS != 0 || shared.leader_pending_invals {
+    if (policy & super::QUERY_TASK_PENDING_INVALS != 0 || shared.leader_pending_invals)
+        && policy & super::QUERY_TASK_INVALS_FLUSH == 0
+    {
+        // M4.2: an installer that DECLARED the uncommitted-DDL target
+        // (invals_flush) opts into the launched-substrate fallback
+        // semantics instead (blanket flush + eager taint at bind).
         return Err(unsupported(
             "query-task binding refuses target-uncommitted invalidations",
         ));
@@ -275,7 +305,7 @@ impl QueryTaskBindingGuard {
             guard.snapshot_pushed = true;
             #[cfg(debug_assertions)]
             inject(QueryTaskFaultPoint::BindActiveSnapshot)?;
-            accept_invals_or_flush_taint()?;
+            bind_invalidations(shared)?;
             #[cfg(debug_assertions)]
             inject(QueryTaskFaultPoint::BindInvalidations)?;
 
@@ -502,7 +532,7 @@ impl QueryTaskBindingGuard {
             self.snapshot_pushed = true;
             #[cfg(debug_assertions)]
             inject(QueryTaskFaultPoint::BindActiveSnapshot)?;
-            accept_invals_or_flush_taint()?;
+            bind_invalidations(shared)?;
             #[cfg(debug_assertions)]
             inject(QueryTaskFaultPoint::BindInvalidations)?;
 
@@ -753,7 +783,12 @@ fn validate_for_sticky_resume(shared: &ParallelShared) -> PgResult<()> {
     {
         return Err(unsupported("query-task binding refuses temporary state"));
     }
-    if policy & super::QUERY_TASK_PENDING_INVALS != 0 || shared.leader_pending_invals {
+    if (policy & super::QUERY_TASK_PENDING_INVALS != 0 || shared.leader_pending_invals)
+        && policy & super::QUERY_TASK_INVALS_FLUSH == 0
+    {
+        // M4.2: an installer that DECLARED the uncommitted-DDL target
+        // (invals_flush) opts into the launched-substrate fallback
+        // semantics instead (blanket flush + eager taint at bind).
         return Err(unsupported(
             "query-task binding refuses target-uncommitted invalidations",
         ));

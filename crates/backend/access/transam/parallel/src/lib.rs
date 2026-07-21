@@ -58,6 +58,19 @@ pub struct QueryTaskBindingPolicy {
     pub temp_state: bool,
     pub serializable: bool,
     pub pending_invalidations: bool,
+    /// M4.2 (utility DDL on the pool): the installer DECLARES the target
+    /// transaction carries unbroadcast (uncommitted-DDL) invalidation
+    /// messages and requests the launched-substrate fallback semantics on
+    /// every bind: blanket `InvalidateSystemCaches` (C fresh-process
+    /// parity — cache entries must be rebuilt under the bound snapshot/xid
+    /// so the leader's uncommitted catalog rows are seen) plus an EAGER
+    /// caches taint (`wretain::note_caches_tainted`: if the bound
+    /// transaction aborts, no sinval traffic ever corrects entries built
+    /// during it — the next adoption on this thread re-blankets instead of
+    /// trusting the cheap drain; the exact law of the launched path in
+    /// lib.rs `leader_pending_invals`). Without this flag a pending-invals
+    /// target keeps today's fail-closed refusal.
+    pub invals_flush: bool,
 }
 
 const QUERY_TASK_INSTALLED: u8 = 1 << 0;
@@ -65,6 +78,7 @@ const QUERY_TASK_PARAMS: u8 = 1 << 1;
 const QUERY_TASK_TEMP: u8 = 1 << 2;
 const QUERY_TASK_SERIALIZABLE: u8 = 1 << 3;
 const QUERY_TASK_PENDING_INVALS: u8 = 1 << 4;
+const QUERY_TASK_INVALS_FLUSH: u8 = 1 << 5;
 
 // Post-task park hooks (harvested with the query-task binder from
 // morsel/query-task-binder-20260710 @ 1b3cba43f; entrypoint-table precedent).
@@ -508,7 +522,8 @@ pub fn InstallQueryTaskBinding(
         | u8::from(policy.has_params) * QUERY_TASK_PARAMS
         | u8::from(policy.temp_state) * QUERY_TASK_TEMP
         | u8::from(policy.serializable) * QUERY_TASK_SERIALIZABLE
-        | u8::from(policy.pending_invalidations) * QUERY_TASK_PENDING_INVALS;
+        | u8::from(policy.pending_invalidations) * QUERY_TASK_PENDING_INVALS
+        | u8::from(policy.invals_flush) * QUERY_TASK_INVALS_FLUSH;
     shared
         .query_task_binding
         .compare_exchange(0, encoded, SeqCst, SeqCst)
@@ -543,6 +558,7 @@ pub fn query_task_policy_probe() -> QueryTaskBindingPolicy {
         serializable: xact::IsolationUsesXactSnapshot()
             || predicate_seams::share_serializable_xact::call() != 0,
         pending_invalidations: inval::TransactionHasPendingInvalidationMessages(),
+        invals_flush: false,
     }
 }
 
