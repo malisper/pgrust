@@ -1469,20 +1469,25 @@ fn distinct_spill_enabled() -> bool {
     crate::once_val(&ON, || std::env::var("PGRUST_RUNTIME_DISTINCT_SPILL").as_deref() != Ok("0"))
 }
 
-/// GL-LOWDIST-1 low-width combine kill switch (t35 idiom — DEFAULT OFF; a
-/// flip is a letter-gated re-baseline): `PGRUST_RUNTIME_DISTINCT_LOWWIDTH=1`
-/// (or `on`) arms the size-asymmetric low-width combine for the distinct
-/// sinks, ONLY at engagements whose resolved dop is within the band bound
+/// GL-LOWDIST-1 low-width combine — **DEFAULT ON** since the GL-LOWDIST-1
+/// flip (letter: scratchpad/night/GL-LOWDIST-1-letter.md; fleet fix A/B @
+/// a3d09b8ff: the sink beats the forced-legacy GM+pardistinct hybrid at
+/// 23/24 band cells, grouped 0.67-0.96 / plain 0.33-0.44, sole residual
+/// 5M-class dop8 grouped = 1.008 parity). Kill spellings exactly
+/// `PGRUST_RUNTIME_DISTINCT_LOWWIDTH=0|off` (the t35 flipped-kill idiom) —
+/// the kill restores BOTH the combine strategy and (via the planner's
+/// same-spelling guard term, m5_suppress::distinct_lowwidth_live) the
+/// pre-flip keep-Gather routing, byte-for-byte. Applies ONLY at
+/// engagements whose routed dop is within the band bound
 /// (`PGRUST_RUNTIME_DISTINCT_LOWWIDTH_MAXDOP`, default 8 — the pardistinct
 /// low-DOP band is dop<12; dop-12+ engagements are already runtime-won and
-/// stay byte-untouched by admission). Returns the band bound when armed,
-/// `None` when off (default) = every path byte-identical to today.
+/// stay byte-untouched by admission). Returns the band bound when armed.
 pub(super) fn distinct_lowwidth_maxdop() -> Option<i32> {
     static V: OnceLock<Option<i32>> = OnceLock::new();
     crate::once_val(&V, || {
-        if !matches!(
+        if matches!(
             std::env::var("PGRUST_RUNTIME_DISTINCT_LOWWIDTH").as_deref(),
-            Ok("1") | Ok("on")
+            Ok("0") | Ok("off")
         ) {
             return None;
         }

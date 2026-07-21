@@ -380,10 +380,22 @@ fn class_guard(class: CoverClass) -> FloorGuard {
         }
         // Wins everywhere engaged (0.34–0.85).
         CoverClass::CbGroupedAggTopN => NO_GUARD,
-        // dop4 1.21–1.24 at every engaged size; dop8 1.06; dop16 0.79–0.90.
-        CoverClass::CbDistinctIntKeys => {
-            FloorGuard { min_dop: 12, low_dop_max_rows: 0.0, ..NO_GUARD }
-        }
+        // GL-LOWDIST-1 re-derivation (2026-07-21, letter scratchpad/night/
+        // GL-LOWDIST-1-letter.md; witnessed fix A/B @ a3d09b8ff, dop
+        // {2,4,8} x 1M-10M): with the low-width combine + leader-parity
+        // bump DEFAULT ON, the sink beats the forced-legacy GM+pardistinct
+        // hybrid at every measured low-dop cell (0.67-0.96; sole residual
+        // 5M-class dop8 = 1.008 parity) — min_dop drops 12 -> 2. dop1
+        // stays keep-Gather (below the measured band; the executor bump
+        // excludes it too). Kill-coherent: LOWWIDTH=0|off restores the
+        // pre-flip min_dop-12 floor (whose own basis was dop4 1.21-1.24 /
+        // dop8 1.06 / dop16 0.79-0.90) so the kill reverts routing AND
+        // combine together.
+        CoverClass::CbDistinctIntKeys => distinct_lowwidth_guard(FloorGuard {
+            min_dop: 12,
+            low_dop_max_rows: 0.0,
+            ..NO_GUARD
+        }),
         // Suppressing below the rowdrive 64MB block floor measured
         // 1.08–1.41x (arm refuses, serial fallback loses to Gather);
         // above it the arm WINS 0.27–0.37 at every DOP.
@@ -572,6 +584,41 @@ fn textdistinct_plain_enabled() -> bool {
 /// probe refusal here only costs "legacy instead of runtime".
 fn textdistinct_guard() -> FloorGuard {
     FloorGuard { min_dop: 12, low_dop_max_rows: 3_000_000.0, ..NO_GUARD }
+}
+
+/// GL-LOWDIST-1: the runtime distinct sinks' low-width combine +
+/// leader-parity bump is live (executor knob
+/// `PGRUST_RUNTIME_DISTINCT_LOWWIDTH`, DEFAULT ON since the GL-LOWDIST-1
+/// flip; kill spellings exactly `0|off`). Same spelling both crates — the
+/// GROUPSINK coherence rule: the planner's re-derived low-dop routing and
+/// the executor's combine strategy flip TOGETHER, so the kill restores the
+/// pre-flip world byte-for-byte on both sides.
+fn distinct_lowwidth_live() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_RUNTIME_DISTINCT_LOWWIDTH").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
+/// GL-LOWDIST-1 re-derived floor for the INT-face distinct sinks' low-DOP
+/// band (letter of record: scratchpad/night/GL-LOWDIST-1-letter.md; fleet
+/// fix A/B @ a3d09b8ff, dop {2,4,8} x 1M-10M — the sink with the low-width
+/// combine beats the forced-legacy GM+pardistinct hybrid at 23/24 cells:
+/// grouped 0.67-0.96, plain-int 0.33-0.44, sole residual 5M-class dop8
+/// grouped = 1.008 parity; it also beats SERIAL at every grouped cell).
+/// min_dop 2: dop-1 stays keep-Gather (below the measured band; the
+/// executor's leader-parity bump excludes dop 1 too). `base` = the
+/// pre-flip provisional floor, restored verbatim when the LOWWIDTH kill is
+/// set (kill-coherent routing).
+fn distinct_lowwidth_guard(base: FloorGuard) -> FloorGuard {
+    if distinct_lowwidth_live() {
+        FloorGuard { min_dop: 2, low_dop_max_rows: 0.0, ..NO_GUARD }
+    } else {
+        base
+    }
 }
 
 /// SE-TOPNNI (gap:topn-nonint-keys car, tier 2): bounded top-N whose ORDER
@@ -1932,10 +1979,23 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             {
                 if let Some(tle) = parse.targetList.nth(0).as_target_entry() {
                     if is_count_distinct_any(tle.expr, rti) {
+                        // GL-LOWDIST-1 re-derivation, plain INT face: the
+                        // baseline alone showed this guard preserving a
+                        // 1.7-2.7x-losing GM+hybrid across the whole low-dop
+                        // band (the sink wins every measured cell, letter
+                        // §1/§3) — the covered-int-arg face rides the
+                        // re-derived low-width curve. The TEXT face keeps
+                        // the provisional textdistinct economics until its
+                        // own ladder (named follow-up lane).
+                        let guard = if is_count_distinct_int(tle.expr, rti) {
+                            distinct_lowwidth_guard(textdistinct_guard())
+                        } else {
+                            textdistinct_guard()
+                        };
                         return finish_textdistinct(
                             run,
                             "plain-count-distinct",
-                            textdistinct_guard(),
+                            guard,
                             rte.relid,
                             1.0,
                             rel_rows,
