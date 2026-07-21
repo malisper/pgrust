@@ -1484,10 +1484,12 @@ fn distinct_spill_enabled() -> bool {
 /// heap-not-instrumented posture).
 pub(super) fn distinct_heap_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
+    // DEFAULT ON since the GL-LOWDIST-4 flip (Michael's B1 GO; kill
+    // spellings exactly 0|off, the t35 flipped-kill idiom).
     crate::once_val(&ON, || {
-        matches!(
+        !matches!(
             std::env::var("PGRUST_RUNTIME_DISTINCT_HEAP").as_deref(),
-            Ok("1") | Ok("on")
+            Ok("0") | Ok("off")
         )
     })
 }
@@ -1589,6 +1591,13 @@ pub(super) fn lowwidth_leader_parity_dop(
     arm: &str,
 ) -> (i32, bool) {
     match distinct_lowwidth_maxdop() {
+        // GL-LOWDIST-5 (the dop1 car, first lever): dop1 JOINS the
+        // low-width COMBINE band — a width-1 engagement's combine is a
+        // pure single-donor steal (live-form seal: no value flatten at
+        // freeze, no re-insert at merge — every set adopts) — but NOT the
+        // leader-parity bump (bumping 1->2 flips the locality-cap DOP1
+        // law; witnessed at the GL-LOWDIST-1 shakeout).
+        Some(_) if dop == 1 => (1, true),
         Some(max) if dop >= 2 && dop <= max => {
             let bumped = (dop + 1).min(rt.nthreads() as i32).max(dop);
             if bumped != dop {

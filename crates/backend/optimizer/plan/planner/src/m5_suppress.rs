@@ -685,10 +685,11 @@ fn textdistinct_guard() -> FloorGuard {
 /// letter; ON iff exactly `1`/`on`.
 fn distinct_heap_probe_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    // DEFAULT ON since the GL-LOWDIST-4 flip (Michael's B1 GO; kill 0|off).
     *ON.get_or_init(|| {
-        matches!(
+        !matches!(
             std::env::var("PGRUST_RUNTIME_DISTINCT_HEAP").as_deref(),
-            Ok("1") | Ok("on")
+            Ok("0") | Ok("off")
         )
     })
 }
@@ -699,8 +700,14 @@ fn distinct_heap_probe_enabled() -> bool {
 /// ladder (floors OFF) measures the sink's heap economics, and the flip
 /// re-derives this guard from that verdict. Never a suppress-then-lose
 /// channel by construction.
+/// GL-LOWDIST-4 flip re-derivation (letter §2/§4 + Michael's B3
+/// suppress-to-sink ruling): the heap sink beats the hybrid at every
+/// measured dop-4/16 cell (0.44-0.97) and beats the post-deletion
+/// per-tuple fall 2.7-6.4x at dop1 — suppress everywhere the probe
+/// classifies (the arm's own granule floor handles tiny rels). Kill
+/// coherence rides the B1 knob itself (kill = no classify = keep Gather).
 fn heap_distinct_guard() -> FloorGuard {
-    FloorGuard { max_rows: 0.0, ..NO_GUARD }
+    NO_GUARD
 }
 
 /// GL-LOWDIST-4 B1: the narrow HEAP grouped-distinct census face — every
@@ -795,7 +802,12 @@ fn distinct_lowwidth_live() -> bool {
 /// set (kill-coherent routing).
 fn distinct_lowwidth_guard(base: FloorGuard) -> FloorGuard {
     if distinct_lowwidth_live() {
-        FloorGuard { min_dop: 2, low_dop_max_rows: 0.0, ..NO_GUARD }
+        // min_dop 1 since the GL-LOWDIST-4 flips: Michael's B3 ruling =
+        // SUPPRESS-TO-SINK at dop1 (the sink is 2.7-6.4x better than the
+        // post-deletion per-tuple fall at every measured dop1 cell; the
+        // remaining sink-vs-hybrid dop1 gap on grouped-int is the
+        // GL-LOWDIST-5 car: "continue optimizing dop1 so it always wins").
+        FloorGuard { min_dop: 1, low_dop_max_rows: 0.0, ..NO_GUARD }
     } else {
         base
     }
@@ -6142,10 +6154,11 @@ fn distinct_arg_collation_ok(collid: u32) -> bool {
         return true;
     }
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    // DEFAULT ON since the GL-LOWDIST-4 flip (Michael's B2 GO; kill 0|off).
     let widened = *ON.get_or_init(|| {
-        matches!(
+        !matches!(
             std::env::var("PGRUST_LANE_V2_DISTINCT_COLLATION").as_deref(),
-            Ok("1") | Ok("on")
+            Ok("0") | Ok("off")
         )
     });
     widened
