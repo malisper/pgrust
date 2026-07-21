@@ -900,16 +900,24 @@ pub static ConfigureNamesReal: &[GucRealSetting] = &[
     GucRealSetting { name: "cpu_operator_cost", context: PGC_USERSET, group: QUERY_TUNING_COST, short_desc: Some("Sets the planner's estimate of the cost of processing each operator or function call."), long_desc: None, flags: GUC_EXPLAIN, variable: &vars::cpu_operator_cost, boot_val: GucDefaultValue::Real(DEFAULT_CPU_OPERATOR_COST), min: 0.0, max: f64::MAX, check_hook: None, assign_hook: None, show_hook: None },
     GucRealSetting { name: "parallel_tuple_cost", context: PGC_USERSET, group: QUERY_TUNING_COST, short_desc: Some("Sets the planner's estimate of the cost of passing each tuple (row) from worker to leader backend."), long_desc: None, flags: GUC_EXPLAIN, variable: &vars::parallel_tuple_cost, boot_val: GucDefaultValue::Real(DEFAULT_PARALLEL_TUPLE_COST), min: 0.0, max: f64::MAX, check_hook: None, assign_hook: None, show_hook: None },
     GucRealSetting { name: "parallel_setup_cost", context: PGC_USERSET, group: QUERY_TUNING_COST, short_desc: Some("Sets the planner's estimate of the cost of starting up worker processes for parallel query."), long_desc: None, flags: GUC_EXPLAIN, variable: &vars::parallel_setup_cost, boot_val: GucDefaultValue::Real(DEFAULT_PARALLEL_SETUP_COST), min: 0.0, max: f64::MAX, check_hook: None, assign_hook: None, show_hook: None },
-    // pgrust JIT is copy-and-patch (~5us/kernel, ~808-1426 user instr), not
-    // LLVM (~10-50ms). C's 100000 amortizes the ~ms LLVM compile; pgrust's
-    // compile is ~10000x cheaper, so the break-even plan cost scales down by
-    // the same factor: 100000/10000 = 10. Directly: the expression JIT (the
-    // only consumer that gates on this cost) breaks even at ~300 rows naked /
-    // O(10) rows once the arena amortizes (jit-qual.md:147); ~300 rows of a
-    // scan+filter plan cost ~7.5, so 10 gives a margin AND leaves single-row
-    // OLTP point lookups (total_cost ~8.4) interpreted. See
-    // docs/design/jit-parallel-defaults.md.
-    GucRealSetting { name: "jit_above_cost", context: PGC_USERSET, group: QUERY_TUNING_COST, short_desc: Some("Perform JIT compilation if query is more expensive."), long_desc: Some("-1 disables JIT compilation."), flags: GUC_EXPLAIN, variable: &vars::jit_above_cost, boot_val: GucDefaultValue::Real(10.0), min: -(1.0), max: f64::MAX, check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust JIT is copy-and-patch (~4-5us/kernel, ~808-1426 user instr), not
+    // LLVM (~10-50ms) — but expression kernels have NO cross-execution cache:
+    // they are estate-owned (execexpr/src/jit.rs), so every EXECUTE of a
+    // prepared statement recompiles every Program-shape expression (~4-6
+    // kernels, ~17-25us, ~6-9k instr per execution; each install pays two
+    // mprotects + icache flush even arena-warm — jit_deform alloc_code). The
+    // threshold must therefore clear the WHOLE per-execution compile bill over
+    // expected executions = 1. Break-even: ~20us compile / ~14ns-per-row
+    // saving = ~1.4k rows ~= seqscan+filter plan cost ~40-60; a 3-5x margin
+    // for index-shaped plans (whose cost/row is ~10x a seqscan's, so equal
+    // cost = far fewer rows) puts the default at 200. Cross-check: C's 100000
+    // amortizes ~10-50ms of LLVM compile; pgrust's ~20us per execution is
+    // ~500-2500x cheaper -> 100000/500..2500 = 40..200. 200 keeps the whole
+    // mid-cost prepared-OLTP band (plan cost 10-100) interpreted — the old
+    // default of 10 taxed it 5-15% per execution — while analytics scans
+    // (cost in the thousands, 8-14x per-row JIT wins) still compile. Full
+    // derivation: docs/design/jit-parallel-defaults.md.
+    GucRealSetting { name: "jit_above_cost", context: PGC_USERSET, group: QUERY_TUNING_COST, short_desc: Some("Perform JIT compilation if query is more expensive."), long_desc: Some("-1 disables JIT compilation."), flags: GUC_EXPLAIN, variable: &vars::jit_above_cost, boot_val: GucDefaultValue::Real(200.0), min: -(1.0), max: f64::MAX, check_hook: None, assign_hook: None, show_hook: None },
     // INERT under copy-and-patch: PGJIT_OPT3/PGJIT_INLINE have no consumer that
     // does work (only the planner sets them and EXPLAIN prints them; LLVM
     // phase counters print 0.000 — jit-qual.md:415). Copy-and-patch emits its
@@ -917,8 +925,8 @@ pub static ConfigureNamesReal: &[GucRealSetting] = &[
     // gate. Kept for pg_settings compatibility, set equal to jit_above_cost to
     // document "one JIT tier engaged together" rather than C's misleading 5x
     // ordering (which would imply an optimizer that does not exist).
-    GucRealSetting { name: "jit_optimize_above_cost", context: PGC_USERSET, group: QUERY_TUNING_COST, short_desc: Some("Optimize JIT-compiled functions if query is more expensive."), long_desc: Some("-1 disables optimization."), flags: GUC_EXPLAIN, variable: &vars::jit_optimize_above_cost, boot_val: GucDefaultValue::Real(10.0), min: -(1.0), max: f64::MAX, check_hook: None, assign_hook: None, show_hook: None },
-    GucRealSetting { name: "jit_inline_above_cost", context: PGC_USERSET, group: QUERY_TUNING_COST, short_desc: Some("Perform JIT inlining if query is more expensive."), long_desc: Some("-1 disables inlining."), flags: GUC_EXPLAIN, variable: &vars::jit_inline_above_cost, boot_val: GucDefaultValue::Real(10.0), min: -(1.0), max: f64::MAX, check_hook: None, assign_hook: None, show_hook: None },
+    GucRealSetting { name: "jit_optimize_above_cost", context: PGC_USERSET, group: QUERY_TUNING_COST, short_desc: Some("Optimize JIT-compiled functions if query is more expensive."), long_desc: Some("-1 disables optimization."), flags: GUC_EXPLAIN, variable: &vars::jit_optimize_above_cost, boot_val: GucDefaultValue::Real(200.0), min: -(1.0), max: f64::MAX, check_hook: None, assign_hook: None, show_hook: None },
+    GucRealSetting { name: "jit_inline_above_cost", context: PGC_USERSET, group: QUERY_TUNING_COST, short_desc: Some("Perform JIT inlining if query is more expensive."), long_desc: Some("-1 disables inlining."), flags: GUC_EXPLAIN, variable: &vars::jit_inline_above_cost, boot_val: GucDefaultValue::Real(200.0), min: -(1.0), max: f64::MAX, check_hook: None, assign_hook: None, show_hook: None },
     GucRealSetting { name: "cursor_tuple_fraction", context: PGC_USERSET, group: QUERY_TUNING_OTHER, short_desc: Some("Sets the planner's estimate of the fraction of a cursor's rows that will be retrieved."), long_desc: None, flags: GUC_EXPLAIN, variable: &vars::cursor_tuple_fraction, boot_val: GucDefaultValue::Real(DEFAULT_CURSOR_TUPLE_FRACTION), min: 0.0f64, max: 1.0f64, check_hook: None, assign_hook: None, show_hook: None },
     GucRealSetting { name: "recursive_worktable_factor", context: PGC_USERSET, group: QUERY_TUNING_OTHER, short_desc: Some("Sets the planner's estimate of the average size of a recursive query's working table."), long_desc: None, flags: GUC_EXPLAIN, variable: &vars::recursive_worktable_factor, boot_val: GucDefaultValue::Real(DEFAULT_RECURSIVE_WORKTABLE_FACTOR), min: 0.001f64, max: 1000000.0f64, check_hook: None, assign_hook: None, show_hook: None },
     GucRealSetting { name: "geqo_selection_bias", context: PGC_USERSET, group: QUERY_TUNING_GEQO, short_desc: Some("GEQO: selective pressure within the population."), long_desc: None, flags: GUC_EXPLAIN, variable: &vars::Geqo_selection_bias, boot_val: GucDefaultValue::Real(DEFAULT_GEQO_SELECTION_BIAS), min: MIN_GEQO_SELECTION_BIAS, max: MAX_GEQO_SELECTION_BIAS, check_hook: None, assign_hook: None, show_hook: None },

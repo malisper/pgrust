@@ -88,13 +88,18 @@ pub mod gucs {
     guc_tables::session_guc_cluster!(PlannerGucs, PLANNER_GUCS:
         (cursor_tuple_fraction_cell, f64, cursor_tuple_fraction, set_cursor_tuple_fraction, (0.1) as f64),
         // pgrust copy-and-patch JIT defaults (was C's 100000/500000/500000);
-        // must match guc_tables::tables boot_vals. 10 = 100000 / the ~10000x
-        // compile-cost advantage; optimize/inline are inert under copy-and-
-        // patch (no LLVM phase) so they equal jit_above_cost. Rationale in
-        // guc_tables/tables.rs + docs/design/jit-parallel-defaults.md.
-        (jit_above_cost_cell, f64, jit_above_cost, set_jit_above_cost, (10.0) as f64),
-        (jit_optimize_above_cost_cell, f64, jit_optimize_above_cost, set_jit_optimize_above_cost, (10.0) as f64),
-        (jit_inline_above_cost_cell, f64, jit_inline_above_cost, set_jit_inline_above_cost, (10.0) as f64),
+        // must match guc_tables::tables boot_vals. 200 amortizes the WHOLE
+        // per-execution compile bill over ONE execution: expression kernels
+        // are estate-owned (no cross-execution cache — every EXECUTE of a
+        // prepared statement recompiles ~4-6 kernels at ~4-5us each), so the
+        // threshold must clear ~20us of compile per execution, not the ~5us
+        // one-kernel figure the earlier default of 10 was derived from.
+        // optimize/inline are inert under copy-and-patch (no LLVM phase) so
+        // they equal jit_above_cost. Full derivation in guc_tables/tables.rs
+        // + docs/design/jit-parallel-defaults.md.
+        (jit_above_cost_cell, f64, jit_above_cost, set_jit_above_cost, (200.0) as f64),
+        (jit_optimize_above_cost_cell, f64, jit_optimize_above_cost, set_jit_optimize_above_cost, (200.0) as f64),
+        (jit_inline_above_cost_cell, f64, jit_inline_above_cost, set_jit_inline_above_cost, (200.0) as f64),
         (from_collapse_limit_cell, i32, from_collapse_limit, set_from_collapse_limit, 8),
         (join_collapse_limit_cell, i32, join_collapse_limit, set_join_collapse_limit, 8),
         (constraint_exclusion_cell, i32, constraint_exclusion, set_constraint_exclusion, guc_tables::consts::CONSTRAINT_EXCLUSION_PARTITION),
