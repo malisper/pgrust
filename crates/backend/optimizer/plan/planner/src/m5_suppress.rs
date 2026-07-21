@@ -2457,6 +2457,36 @@ fn classify_aggjoin_grouped<'mcx>(
     finish(run, CoverClass::CbHashJoinGroupedAgg, relids[0], ngroups, max_rows, 0.0)
 }
 
+/// Step-1 cost-route map: which fitted crossover curve
+/// (costsize::runtime_model) prices a CoverClass's economics. `None` =
+/// no curve — the FloorGuard rectangle stays the only economics gate
+/// (rectangle-retained / never-floored classes; provenance in
+/// crates/backend/optimizer/path/costsize/src/runtime-cost-constants.tsv).
+fn cover_class_curve(class: CoverClass) -> Option<costsize::runtime_model::RuntimeClass> {
+    use costsize::runtime_model::RuntimeClass as Rc;
+    match class {
+        CoverClass::CbPlainAggFold => Some(Rc::CbPlainAggFold),
+        CoverClass::CbGroupedAggIntKeys => Some(Rc::CbGroupedAggIntKeys),
+        CoverClass::CbGroupedAggTopN => Some(Rc::CbGroupedAggTopN),
+        CoverClass::CbDistinctIntKeys => Some(Rc::CbDistinctIntKeys),
+        CoverClass::CbTopnBoundedIntKeys => Some(Rc::CbTopnBoundedIntKeys),
+        CoverClass::HeapPlainCountStar => Some(Rc::HeapPlainCountStar),
+        CoverClass::HeapCmpFoldPrefix => Some(Rc::HeapCmpFoldPrefix),
+        // Shipped guard reuse (same 2M rectangle) -> same curve; own
+        // ladder cells owed (TSV curve_reuse rows, GL-COST-2).
+        CoverClass::CbHashJoinPlainAgg
+        | CoverClass::CbHashJoinMultiBuild
+        | CoverClass::CbHashJoinGroupedAgg => Some(Rc::CbHashJoinPlainAgg),
+        // PROVISIONAL reuse matching the shipped guard reuse (GL-AGGPOLY-1).
+        CoverClass::AggPolyHeapPlain => Some(Rc::HeapCmpFoldPrefix),
+        // Curve-fit since the witnessed v2 grid (the v1 record's
+        // non-monotonic N profile was contamination — GL-COST-3).
+        CoverClass::CbGroupedAggTextKey => Some(Rc::CbGroupedAggTextKey),
+        // Footer answers are O(1): never floored, no curve.
+        CoverClass::CbMetaFooterAgg => None,
+    }
+}
+
 /// Matrix consult + optional trace, shared tail.
 fn finish(
     run: &mut PlannerRun<'_>,
@@ -2466,19 +2496,55 @@ fn finish(
     rows: f64,
     pages: f64,
 ) -> PgResult<bool> {
+    use costsize::runtime_model as rtm;
     let covered = class_covered(class);
-    // M5-5 engagement-floor guard: a covered class outside its measured
-    // economics keeps Gather (routes legacy). Traced under its OWN prefix —
-    // floor refusals are neither suppressions (M5CENSUS greps
-    // `m5-suppress:`) nor arm refusals (`m5-suppress-refuse:`).
-    if covered && size_floors_enabled() {
-        let g = class_guard(class);
+    if covered {
         let dop = guc_tables::runtime_pool::runtime_dop();
-        let ok = rows >= g.min_rows
-            && rows <= g.max_rows
-            && pages >= g.min_pages
-            && (dop >= g.min_dop || rows <= g.low_dop_max_rows);
-        if !ok {
+        // M5-5 engagement-floor guard: a covered class outside its measured
+        // economics keeps Gather (routes legacy). Traced under its OWN
+        // prefix — floor refusals are neither suppressions (M5CENSUS greps
+        // `m5-suppress:`) nor arm refusals (`m5-suppress-refuse:`).
+        let floor_ok = if size_floors_enabled() {
+            let g = class_guard(class);
+            rows >= g.min_rows
+                && rows <= g.max_rows
+                && pages >= g.min_pages
+                && (dop >= g.min_dop || rows <= g.low_dop_max_rows)
+        } else {
+            true
+        };
+        // Step-1 cost route (runtime-cost-model design §5 step 1): the
+        // fitted crossover curve evaluated NEXT TO the rectangle. Default
+        // mode is SHADOW — both verdicts traced, floors decide, zero
+        // behavior change. PGRUST_M5_COST_ROUTE flips classes to
+        // curve-decides after their flip gate. PGRUST_M5_SIZE_FLOORS=0
+        // (the rowflip economics-measurement vehicle) disables BOTH
+        // economics gates — measurement mode measures raw arm economics.
+        let mut suppress = floor_ok;
+        let mut decided_by = "floor";
+        if !matches!(rtm::cost_route_mode(), rtm::CostRouteMode::Off) {
+            if let Some(curve) = cover_class_curve(class) {
+                let v = rtm::cost_route_verdict(curve, rows, dop);
+                if rtm::cost_route_decides(curve) && size_floors_enabled() {
+                    // The rowdrive block-floor ADMISSION MIRROR rides every
+                    // mode (m5-5 reading #3; TSV admission_min_pages row).
+                    suppress = v.suppress
+                        && (class != CoverClass::HeapPlainCountStar
+                            || pages >= rtm::HEAP_COUNT_ADMISSION_MIN_PAGES);
+                    decided_by = "cost";
+                }
+                if trace_armed() {
+                    eprintln!(
+                        "m5-cost-route: class={class:?} curve={curve:?} relid={relid} \
+                         rows={rows:.0} pages={pages:.0} ngroups={ngroups:.0} dop={dop} \
+                         r_pred={:.3} cost_verdict={} floor_verdict={floor_ok} \
+                         decided_by={decided_by}",
+                        v.ratio, v.suppress
+                    );
+                }
+            }
+        }
+        if !suppress {
             if trace_armed() {
                 eprintln!(
                     "m5-suppress-floor: class={class:?} relid={relid} rows={rows:.0} \
@@ -3727,6 +3793,61 @@ mod tests {
         assert!(!extract_key_image_fits(16, 1));
         // int8 + int4 + text + extract: 12+4+4=20 even shrunk. REFUSED.
         assert!(!extract_key_image_fits(12, 1));
+    }
+
+    /// Step-1 cost-route wiring pins (runtime-cost-model design §5 step 1).
+    /// The curve map is total by construction (match); this pins WHICH
+    /// classes deliberately have no curve — a new CoverClass must either
+    /// get a fitted curve (ladder cells + TSV rows) or join this list with
+    /// a TSV note, never fall through silently.
+    #[test]
+    fn cost_route_map_names_its_curveless_classes() {
+        for row in BOOTSTRAP_MATRIX {
+            let curveless = cover_class_curve(row.class).is_none();
+            let expect_curveless = matches!(row.class, CoverClass::CbMetaFooterAgg);
+            assert_eq!(
+                curveless, expect_curveless,
+                "cost-route curve map drift for {:?}",
+                row.class
+            );
+        }
+    }
+
+    /// The rectangle/admission/hold values the cost-route does NOT retire
+    /// must match their rows in the constants table of record
+    /// (crates/backend/optimizer/path/costsize/src/runtime-cost-constants.tsv) — same tie as
+    /// bootstrap_matrix_matches_tsv, for the step-1 residue.
+    #[test]
+    fn retained_rectangles_match_constants_tsv() {
+        let tsv = include_str!("../../../../../../crates/backend/optimizer/path/costsize/src/runtime-cost-constants.tsv");
+        let mut vals: std::collections::BTreeMap<(String, String), String> =
+            std::collections::BTreeMap::new();
+        for line in tsv.lines() {
+            if line.starts_with('#') || line.trim().is_empty() || line.starts_with("class\t") {
+                continue;
+            }
+            let cols: Vec<&str> = line.split('\t').collect();
+            assert_eq!(cols.len(), 10, "malformed TSV row: {line}");
+            vals.insert((cols[0].to_string(), cols[1].to_string()), cols[2].to_string());
+        }
+        let get = |c: &str, t: &str| {
+            vals.get(&(c.to_string(), t.to_string()))
+                .unwrap_or_else(|| panic!("TSV missing {c}.{t}"))
+                .clone()
+        };
+        assert_eq!(
+            get("HeapPlainCountStar", "admission_min_pages").parse::<f64>().unwrap(),
+            class_guard(CoverClass::HeapPlainCountStar).min_pages
+        );
+        assert_eq!(
+            get("_grouped_classes", "hold_groups_min").parse::<f64>().unwrap(),
+            groupby_high_floor(),
+            "groupby-high HOLD drifted from its TSV row (env override in a test run?)"
+        );
+        // Reuse rows point at real curve classes.
+        assert_eq!(get("CbHashJoinMultiBuild", "curve_reuse"), "CbHashJoinPlainAgg");
+        assert_eq!(get("CbHashJoinGroupedAgg", "curve_reuse"), "CbHashJoinPlainAgg");
+        assert_eq!(get("AggPolyHeapPlain", "curve_reuse"), "HeapCmpFoldPrefix");
     }
 
     /// The living-matrix discipline (§4.1, reconciled at m5-integration):
