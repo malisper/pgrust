@@ -1699,6 +1699,19 @@ fn groupby_high_doplift_enabled() -> bool {
     })
 }
 
+/// Dop-lift α_est floor (`PGRUST_M5_GROUPBY_HIGH_DOPLIFT_ALPHA`, default
+/// 4.0) — see the hold-site comment: α ≈ 1 shapes keep Gather.
+fn groupby_high_doplift_alpha() -> f64 {
+    static N: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_M5_GROUPBY_HIGH_DOPLIFT_ALPHA")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|a| a.is_finite() && *a >= 1.0)
+            .unwrap_or(4.0)
+    })
+}
+
 fn groupby_high_floor() -> f64 {
     static FLOOR: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
     *FLOOR.get_or_init(|| {
@@ -2680,6 +2693,13 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     let over_groupby_high = over_groupby_high
         && !(groupby_high_doplift_enabled()
             && guc_tables::runtime_pool::runtime_dop() >= 12
+            // α_est floor (GL-RADIX-2 10M leg): at α ≈ 1 (near row-per-
+            // group output) the radix-exchange arm keeps a ~20% lead the
+            // pool arm's extra-seat diagnostic did not explain — those
+            // shapes keep the hold. Parity was measured at α = 10; 4 is
+            // the fail-closed midpoint (env override for calibration).
+            && run.root.rel(rel_id).rows.max(1.0) / ngroups.max(1.0)
+                >= groupby_high_doplift_alpha()
             && !topn
             && !full_sort
             && !bare_limit
