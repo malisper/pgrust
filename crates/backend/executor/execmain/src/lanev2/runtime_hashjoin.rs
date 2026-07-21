@@ -260,6 +260,30 @@ fn hj_mbshared_enabled() -> bool {
     })
 }
 
+/// SE-MBSEAT (the GL-MBSEAT-1 lane): per-table dense seats on the
+/// multibuild walk's single-pass tables — the order-free CSR built at the
+/// freeze barrier from `(packed_ref, key)` pairs
+/// (`shared_build::build_seat_single_pass`), probed via the single-join
+/// arm's exact `shared_probe_outer_dense` dispatch. Targets the named
+/// GL-MULTIBUILD-1 residual: the v1 per-row probe-walk gap (outer-hash
+/// interpreter dispatch + bucket/tag lookup + hashvalue prefilter +
+/// hashclauses recheck, skipped exactly when int4 key equality IS the
+/// hash-match semantics — the `dense_seat_build_col` introspection, per
+/// join). Economics per TABLE: probe estimate (the join's OUTER subtree
+/// plan_rows) >= SEAT_MIN_PROBE_RATIO x build estimate (the GL-HJSEAT-2
+/// constant, PROVISIONAL reuse — GL-MBSEAT-1 re-measures); seat arrays
+/// charge each table's OWN budget optionally (forgo, never refuse).
+/// DEFAULT OFF (`PGRUST_LANE_V2_MBSEAT=1|on` arms). COMPOSES with
+/// MBSHARED — the seat rides the sealed single-pass directory, so a
+/// thrown `PGRUST_LANE_V2_MBSHARED=0|off` kill inertly disarms this car
+/// too (compose, never contradict).
+fn hj_mbseat_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&ON, || {
+        matches!(std::env::var("PGRUST_LANE_V2_MBSEAT").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
 /// SE-AGGJOIN grouped sink (band 87001): GROUPED (AGG_HASHED) agg roots over
 /// the multibuild join walk — per-worker hashed builds exported as
 /// self-contained grouped partials, combined on the leader, absorbed into
@@ -2889,6 +2913,12 @@ pub(super) struct MbChain {
     /// admission (leader-side, once) — every morsel body reads THIS bit so
     /// a per-row knob probe never enters the walk. False = today's path.
     shared1a: bool,
+    /// SE-MBSEAT: knob resolved once at engage (true requires `shared1a` —
+    /// compose, never contradict) AND the per-join economics verdicts.
+    /// Build morsel bodies consult `mbseat && seat_ok[j]` before the
+    /// per-plan `dense_seat_build_col` introspection.
+    mbseat: bool,
+    seat_ok: Vec<bool>,
 }
 
 /// Admission output handed to `engage` (sinks are constructed there — they
@@ -2903,6 +2933,11 @@ pub(super) struct MbInit {
     /// single-pass directory's up-front size (0 rows sizes the minimum
     /// directory; the estimate is a capacity hint, not a correctness input).
     build_rows: Vec<u64>,
+    /// SE-MBSEAT: per join index, the seat-economics verdict — the OUTER
+    /// subtree's probe estimate amortizes the seat's O(build) construction
+    /// (the GL-HJSEAT-2 ratio, per table). Read only on knob-armed
+    /// engagements.
+    seat_ok: Vec<bool>,
     nscans: usize,
     /// SE-AGGJOIN: grouped (AGG_HASHED) terminal (see `MbChain::grouped`).
     grouped: bool,
@@ -2921,6 +2956,20 @@ struct MbPlanInfo {
     hash_widths: Vec<i32>,
     children: Vec<(MbChild, MbChild)>,
     nscans: usize,
+    /// SE-MBSEAT sizing inputs: per scan index / per join index, the plan
+    /// node's own rows estimate — `outer_rows_of` resolves a join's OUTER
+    /// child estimate (its per-table probe volume) from these.
+    scan_rows: Vec<f64>,
+    join_rows: Vec<f64>,
+}
+
+/// SE-MBSEAT: the probe-volume estimate of join `j`'s table = its OUTER
+/// child's plan rows (every row of the outer subtree probes table j once).
+fn outer_rows_of(info: &MbPlanInfo, j: usize) -> f64 {
+    match info.children[j].0 {
+        MbChild::Scan(k) => info.scan_rows[k],
+        MbChild::Join(i) => info.join_rows[i],
+    }
 }
 
 /// Recursive plan walk: `None` = shape outside the multibuild envelope
@@ -2941,6 +2990,7 @@ fn mb_plan_walk(
             }
             let idx = info.nscans;
             info.nscans += 1;
+            info.scan_rows.push(scan.scan.plan.plan_rows);
             Ok(Some(MbChild::Scan(idx)))
         }
         NodeTag::T_HashJoin => {
@@ -2972,6 +3022,7 @@ fn mb_plan_walk(
             info.jointypes.push(hj.join.jointype);
             info.hash_rows.push(hash.plan.plan_rows);
             info.hash_widths.push(hash.plan.plan_width);
+            info.join_rows.push(hj.join.plan.plan_rows);
             info.children.push((MbChild::Scan(usize::MAX), MbChild::Scan(usize::MAX)));
             let Some(oc) = mb_plan_walk(outer, info)? else { return Ok(None) };
             let Some(ic) = mb_plan_walk(inner, info)? else { return Ok(None) };
@@ -3209,7 +3260,17 @@ impl runtime::ParallelSink for MbBuildSink {
             let Some(plan) = self.plan_for(locals) else { return };
             plan
         };
-        *lockm(&self.table) = Some(Arc::new(freeze(plan, locals)));
+        let table = freeze(plan, locals);
+        // SE-MBSEAT engagement witness (e2e-grepped): fires only when the
+        // order-free seat actually built (knob + economics + introspection
+        // + range/budget gates all passed).
+        if table.has_seat() {
+            lane_trace(&format!(
+                "runtime-hashjoin: multibuild dense-seat (join={})",
+                self.join
+            ));
+        }
+        *lockm(&self.table) = Some(Arc::new(table));
     }
 }
 
@@ -3279,7 +3340,13 @@ type MbProbe<'x, 'mcx> = (
 
 /// A pipeline's terminal.
 enum MbTerm<'x, 'mcx> {
-    Build { hs: &'x mut ::nodehash::HashState<'mcx>, local: &'x mut JoinBuildLocal },
+    Build {
+        hs: &'x mut ::nodehash::HashState<'mcx>,
+        local: &'x mut JoinBuildLocal,
+        /// SE-MBSEAT: Some(build key col) ⇒ keyed accept — the Local
+        /// tracks `(ref, key)` pairs for the order-free seat.
+        key_col: Option<u16>,
+    },
     Agg { agg: &'x mut ::nodeagg::AggStateData<'mcx> },
     /// SE-AGGJOIN grouped terminal: the worker's OWN hashed build (C's
     /// checked per-row transition program; spill-mode entries are caught by
@@ -3317,8 +3384,12 @@ fn mb_row<'mcx>(
             MbTerm::AggHash { agg } => {
                 return ::nodeagg::agg_hash_build_accept(agg, estate, slot);
             }
-            MbTerm::Build { hs, local } => {
-                if shared_build_accept(hs, estate, slot, local)?.is_err() {
+            MbTerm::Build { hs, local, key_col } => {
+                let accepted = match key_col {
+                    Some(col) => shared_build_accept_keyed(hs, estate, slot, local, *col)?,
+                    None => shared_build_accept(hs, estate, slot, local)?,
+                };
+                if accepted.is_err() {
                     crossed.set(true);
                 }
                 return Ok(());
@@ -3327,6 +3398,13 @@ fn mb_row<'mcx>(
     };
     let (hj, hs, table) = first;
     if shared1a {
+        // SE-MBSEAT dispatch: seat existence IS the toggle (the single-join
+        // arm's law) — a seat only ever builds on knob-armed engagements.
+        if table.has_seat() {
+            return shared_probe_outer_dense(hj, hs, estate, table, slot, &mut |_hj, estate, out| {
+                mb_row(rest, term, crossed, true, estate, out)
+            });
+        }
         // Field-disjoint borrows of `first`: the table rides as `&` while
         // the join/hash states ride as `&mut` — the walk, probe order and
         // emission are unchanged, only the refcount round-trip is gone.
@@ -3427,7 +3505,12 @@ fn mb_take_pipeline<'a, 'mcx>(
 ) -> PgResult<(
     &'a mut ::nodeseqscan::SeqScanState<'mcx>,
     Vec<MbProbe<'a, 'mcx>>,
-    Option<&'a mut ::nodehash::HashState<'mcx>>,
+    // Build target: the join state rides along for the SE-MBSEAT per-plan
+    // introspection (`dense_seat_build_col`) at the accept site.
+    Option<(
+        &'a mut ::nodehashjoin::HashJoinState<'mcx>,
+        &'a mut ::nodehash::HashState<'mcx>,
+    )>,
 )> {
     let stale = || {
         Box::new(PgError::new(
@@ -3454,8 +3537,8 @@ fn mb_take_pipeline<'a, 'mcx>(
     let target = match p.sink {
         None => None,
         Some(j) => {
-            let (_hj, hs) = refs.joins.get_mut(j).and_then(|c| c.take()).ok_or_else(stale)?;
-            Some(hs)
+            let (hj, hs) = refs.joins.get_mut(j).and_then(|c| c.take()).ok_or_else(stale)?;
+            Some((hj, hs))
         }
     };
     Ok((scan, probes, target))
@@ -3481,10 +3564,30 @@ fn mb_accept_morsel_body(
         let mut refs = MbRefs::default();
         mb_collect(tree, &mut refs)?;
         let (scan, mut probes, target) = mb_take_pipeline(&chain, p, &mut refs)?;
-        let hs = target.expect("build pipeline has a target table");
+        let (t_hj, hs) = target.expect("build pipeline has a target table");
+        // SE-MBSEAT: knob + per-table economics + the per-plan int4-equality
+        // introspection — deterministic from this worker's own executor
+        // state, so every tuple-bearing Local arms identically (the
+        // all-or-none seat law); armed on the FIRST morsel, idempotent
+        // after (armed-or-never).
+        let key_col = if chain.mbseat && chain.seat_ok[join] {
+            ::nodehashjoin::shared_exec::dense_seat_build_col(t_hj, hs)
+        } else {
+            None
+        };
+        if key_col.is_some() && local.single_pass() {
+            local.arm_singlepass_keys();
+        }
+        let key_col = key_col.filter(|_| local.singlepass_keys_armed());
         local.begin_run(range.start);
-        let clean =
-            mb_drive_claim(scan, &mut probes, MbTerm::Build { hs, local }, chain.shared1a, es, &range)?;
+        let clean = mb_drive_claim(
+            scan,
+            &mut probes,
+            MbTerm::Build { hs, local, key_col },
+            chain.shared1a,
+            es,
+            &range,
+        )?;
         local.end_run();
         Ok(clean)
     })
@@ -4149,6 +4252,8 @@ fn try_own_multibuild<'mcx>(
         hash_widths: Vec::new(),
         children: Vec::new(),
         nscans: 0,
+        scan_rows: Vec::new(),
+        join_rows: Vec::new(),
     };
     match mb_plan_walk(join_node, &mut pinfo)? {
         Some(MbChild::Join(0)) => {}
@@ -4265,14 +4370,24 @@ fn try_own_multibuild<'mcx>(
     let sources: Vec<Arc<dyn runtime::MorselSource>> =
         sinfo.sources.into_iter().map(|(_, s)| s).collect();
     let probe_source = Arc::clone(&sources[last_scan]);
+    // SE-MBSEAT per-table economics: the join's OUTER subtree rows must
+    // amortize the seat's O(build) construction (GL-HJSEAT-2's gate, per
+    // table; the constant is a PROVISIONAL reuse the letter re-measures).
+    let seat_ok: Vec<bool> = (0..pinfo.jointypes.len())
+        .map(|j| {
+            outer_rows_of(&pinfo, j) >= pinfo.hash_rows[j].max(0.0) * SEAT_MIN_PROBE_RATIO
+                && pinfo.hash_rows[j] > 0.0
+        })
+        .collect();
     let init = MbInit {
         pipelines,
         sources,
-        jointypes: pinfo.jointypes,
         envelopes,
         // SE-MBSHARED: per-join planner estimates size the single-pass
         // directories (knob-armed engagements only; unread otherwise).
         build_rows: pinfo.hash_rows.iter().map(|&r| r.max(0.0) as u64).collect(),
+        seat_ok,
+        jointypes: pinfo.jointypes,
         nscans: pinfo.nscans,
         grouped,
     };
@@ -4409,6 +4524,9 @@ fn engage<'mcx>(
             // afford leaves that table on the two-pass build (traced by
             // name — never a refusal on this account).
             let shared1a = hj_mbshared_enabled();
+            // SE-MBSEAT: requires the single-pass world (the seat rides the
+            // sealed directory); MBSHARED=0 inertly disarms this car.
+            let mbseat = shared1a && hj_mbseat_enabled();
             let sinks: Vec<Arc<MbBuildSink>> = (0..mb.jointypes.len())
                 .map(|j| {
                     let budget = JoinBudget::new(mb.envelopes[j]);
@@ -4455,6 +4573,8 @@ fn engage<'mcx>(
                     nscans: mb.nscans,
                     grouped: mb.grouped,
                     shared1a,
+                    mbseat,
+                    seat_ok: mb.seat_ok,
                 }))
                 .unwrap_or_else(|_| unreachable!("chain set once"));
             None
@@ -5159,6 +5279,8 @@ mod mb_tests {
                 (MbChild::Scan(2), MbChild::Scan(3)), // J2
             ],
             nscans: 4,
+            scan_rows: vec![0.0; 4],
+            join_rows: vec![0.0; 3],
         };
         let ps = mb_decompose(&info);
         assert_eq!(ps.len(), 4);
@@ -5202,6 +5324,15 @@ mod mb_tests {
         assert!(hj_mbshared_enabled());
     }
 
+    /// SE-MBSEAT: the multibuild seat car is DEFAULT OFF — unset must
+    /// resolve off (the =1|on posture is the e2e's armed boot; OnceLock,
+    /// one state per process). Compose law: the car additionally requires
+    /// the MBSHARED world at engage (`mbseat = shared1a && knob`).
+    #[test]
+    fn mbseat_knob_default_off() {
+        assert!(!hj_mbseat_enabled());
+    }
+
     /// SE-AGGJOIN: the SINGLE-join tree decomposes to exactly one build
     /// pipeline + the agg pipeline (the grouped arm admits 1-join trees the
     /// plain dispatch never sends here).
@@ -5213,6 +5344,8 @@ mod mb_tests {
             hash_widths: vec![0],
             children: vec![(MbChild::Scan(0), MbChild::Scan(1))],
             nscans: 2,
+            scan_rows: vec![0.0; 2],
+            join_rows: vec![0.0],
         };
         let ps = mb_decompose(&info);
         assert_eq!(ps.len(), 2);
