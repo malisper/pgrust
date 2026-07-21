@@ -355,6 +355,15 @@ impl<T: Send + 'static> RowFunnel<T> {
         fence(Ordering::SeqCst);
     }
 
+    /// CONSUMER-side snapshot: every ring currently reads empty. ADVISORY
+    /// (a producer may push concurrently): used as the leader-producer
+    /// mode's drain-first gate — a stale "empty" only means the leader
+    /// claims one more morsel before the next pump; a stale "non-empty"
+    /// only delays a claim. Correctness never rests on it.
+    pub fn all_rings_empty(&self) -> bool {
+        self.rings.iter().all(|r| r.is_empty())
+    }
+
     /// Install the external consumer wake hook (see the field doc). Leader-
     /// side, BEFORE any producer starts; at most once (later calls ignored).
     pub fn set_wake_hook(&self, f: Box<dyn Fn() + Send + Sync>) {
@@ -432,6 +441,12 @@ pub enum PushOutcome {
 }
 
 impl<T: Send + 'static> FunnelProducer<T> {
+    /// LIMIT observation for producer bodies that do not push through this
+    /// ring (the leader-producer stash path).
+    pub fn demand_closed(&self) -> bool {
+        self.funnel.demand_closed()
+    }
+
     /// Non-blocking append. `Err(v)` = ring full (caller may park or retry).
     pub fn try_push(&self, v: T) -> Result<(), T> {
         let r = self.ring.try_push(v);
