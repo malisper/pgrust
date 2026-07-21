@@ -1396,8 +1396,9 @@ pub struct RelOptInfo<'mcx> {
     pub pgrcolumnar_col_ndv: PgVec<'mcx, u64>,
     // pgrcolumnar v7 per-column part-global stitch dict sizes (1-based attno
     // = index + 1, 0 = no stitch) for the SE-TOPNNI text sort-key plan-time
-    // answerability probe; populated ONLY under PGRUST_LANE_V2_TOPN_NONINT
-    // (empty for every other relation, footer-less parts, and at knob-off).
+    // answerability probe; populated only while PGRUST_LANE_V2_TOPN_NONINT
+    // is armed (default ON since the GL-TOPNNI-1 flip; empty for every
+    // other relation, footer-less parts, and under the kill spelling).
     pub pgrcolumnar_stitch_gndv: PgVec<'mcx, u64>,
     pub fdwroutine: Option<types_nodes::FdwKind>,
     pub attr_needed: PgVec<'mcx, Relids<'mcx>>,

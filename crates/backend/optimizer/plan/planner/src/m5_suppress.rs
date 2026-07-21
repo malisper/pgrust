@@ -545,15 +545,23 @@ fn textdistinct_guard() -> FloorGuard {
 /// qualed star-tlist / narrow-tlist / text-key / mixed-key analogs of the
 /// census shapes engage and win 2.3–6.7x vs forced legacy, byte parity OK.
 ///
-/// DEFAULT OFF (`PGRUST_LANE_V2_TOPN_NONINT=1|on` arms — the pre-flip
-/// default-OFF idiom; the flip rides the GL-TOPNNI-1 fleet letter, never
-/// the build merge). Suppresses via the knob-path finish — NOT a
-/// BOOTSTRAP_MATRIX class (the tsv row stays route_to=legacy /
-/// probe_key="-"; drift guards untouched).
+/// DEFAULT ON since the GL-TOPNNI-1 flip (scratchpad/night/
+/// GL-TOPNNI-1-letter.md, dist witnessed ladder 2026-07-21 @ 8cf38a8c7:
+/// 10M dop{4,8,16} all six keyed shapes suppressed-and-winning vs
+/// best(serial, forced legacy), worst cell exact parity; 100M dop{4,16}
+/// census-family wins everywhere). `PGRUST_LANE_V2_TOPN_NONINT=0|off` is
+/// the kill, restoring the keep-Gather posture byte-for-byte (the
+/// flipped-kill idiom — only the exact kill spellings disarm). Named
+/// residual carried from the letter: the UNQUALED star-tlist shape at
+/// 100M-class scale forgoes a <=1.23x serial-walk win while beating the
+/// legacy Gather it displaces 10-30x — cost-route step-2 arbitration /
+/// band-predicate early-exit term owns it. Suppresses via the knob-path
+/// finish — NOT a BOOTSTRAP_MATRIX class (probe_key stays "-"; drift
+/// guards untouched).
 pub(crate) fn topn_nonint_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        tier2_car_spelling_on(std::env::var("PGRUST_LANE_V2_TOPN_NONINT").as_deref().ok())
+        tier2_car_kill_spelling_on(std::env::var("PGRUST_LANE_V2_TOPN_NONINT").as_deref().ok())
     })
 }
 
@@ -1610,8 +1618,8 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             // One key-vocabulary walk serves both rows: all-int keys keep
             // the bootstrap class (verdicts byte-identical to the pre-
             // SE-TOPNNI code); any admissible non-int key routes to the
-            // knob path below (default OFF => keep Gather exactly as
-            // before).
+            // knob path below (kill =0|off => keep Gather exactly as
+            // before the car).
             let mut n_nonint = 0usize;
             let mut n_text = 0usize;
             for sc_node in &parse.sortClause {
@@ -6240,9 +6248,9 @@ mod tests {
         assert!(distinct_plainshape_enabled(), "CAR A must be ON at default (GL-T2C flip)");
         assert!(agg_strminmax_enabled(), "CAR B must be ON at default (GL-STRMM-2 flip)");
         assert!(agg_sort_nolimit_enabled(), "CAR C must be ON at default (GL-T2B flip)");
-        // SE-TOPNNI (gap:topn-nonint-keys car) rides the still-gated
-        // spelling rule: DEFAULT OFF until its GL-TOPNNI-1 letter flips it.
-        assert!(!topn_nonint_enabled(), "SE-TOPNNI must be OFF at default");
+        // SE-TOPNNI (gap:topn-nonint-keys car): DEFAULT ON since the
+        // GL-TOPNNI-1 flip — the flipped-kill rule (kill =0|off).
+        assert!(topn_nonint_enabled(), "SE-TOPNNI must be ON at default (GL-TOPNNI-1 flip)");
     }
 
     /// SE-TOPNNI: the provisional floor is the CbTopnBoundedIntKeys guard
