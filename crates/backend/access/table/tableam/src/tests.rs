@@ -368,3 +368,25 @@ fn parallelscan_estimate_is_struct_size_for_snapshot_any() {
     assert_eq!(sz, core::mem::size_of::<ParallelBlockTableScanDescData>());
     assert_eq!(sz, table_block_parallelscan_estimate(&rel));
 }
+
+#[test]
+fn write_buffer_begin_gates_on_switch_and_am() {
+    let ctx = MemoryContext::new("test");
+    let heap = make(ctx.mcx(), 1, RELKIND_RELATION, HEAP_TABLE_AM_OID);
+    let foreign = make(ctx.mcx(), 2, RELKIND_FOREIGN_TABLE, 0);
+
+    // Default OFF: never arms, heap AM or not.
+    crate::write_buffer::write_multi_insert_set_for_tests(false);
+    assert!(crate::write_buffer::write_buffer_begin(&heap).is_none());
+    assert!(crate::write_buffer::write_buffer_begin(&foreign).is_none());
+
+    // ON: arms for the heap AM only (an armed buffer starts empty).
+    crate::write_buffer::write_multi_insert_set_for_tests(true);
+    let buf = crate::write_buffer::write_buffer_begin(&heap).expect("armed for heap");
+    assert_eq!(buf.nused, 0);
+    assert_eq!(buf.bytes, 0);
+    assert!(buf.slots.is_empty());
+    assert!(crate::write_buffer::write_buffer_begin(&foreign).is_none());
+
+    crate::write_buffer::write_multi_insert_set_for_tests(false);
+}

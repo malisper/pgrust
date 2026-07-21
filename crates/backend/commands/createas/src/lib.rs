@@ -415,6 +415,8 @@ fn intorel_startup<'mcx>(
     state.output_cid = xact::GetCurrentCommandId(true)?;
     state.ti_options = tableam_vocab::TABLE_INSERT_SKIP_FSM;
     state.bistate = if !into.skipData { Some(heapam::GetBulkInsertState()) } else { None };
+    // W1 multi-insert buffering (PGRUST_CTAS_MULTIINSERT, default OFF).
+    state.mibuf = if !into.skipData { tableam::write_buffer::write_buffer_begin(&rel) } else { None };
     state.rel = Some(rel);
     Ok(())
 }
@@ -427,6 +429,18 @@ fn intorel_receive<'mcx>(
     // skipData test here has no live arm; a newly created relation has no
     // indexes to insert into.
     let rel = state.rel.as_ref().expect("intorel_startup ran");
+    if let Some(buf) = state.mibuf.as_mut() {
+        tableam::write_buffer::write_buffer_receive(
+            state.mcx,
+            rel,
+            buf,
+            slot,
+            state.output_cid,
+            state.ti_options,
+            state.bistate.as_mut(),
+        )?;
+        return Ok(true);
+    }
     tableam::table_tuple_insert(
         state.mcx,
         rel,
@@ -445,6 +459,20 @@ fn intorel_shutdown<'mcx>(state: &mut IntoRelState<'mcx>) -> PgResult<()> {
         .expect("IntoClause")
         .skipData;
     if !skip_data {
+        // Tail flush (success path only — an erroring statement drops the
+        // buffered copies unflushed, and the aborted xact kills the rest).
+        if let Some(mut buf) = state.mibuf.take() {
+            if let Some(rel) = state.rel.as_ref() {
+                tableam::write_buffer::write_buffer_flush(
+                    state.mcx,
+                    rel,
+                    &mut buf,
+                    state.output_cid,
+                    state.ti_options,
+                    state.bistate.as_mut(),
+                )?;
+            }
+        }
         // FreeBulkInsertState: the pin/strategy guards release on drop.
         drop(state.bistate.take());
         if let Some(rel) = state.rel.as_ref() {
