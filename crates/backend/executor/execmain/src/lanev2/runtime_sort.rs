@@ -2312,6 +2312,7 @@ fn engage_ceremony<'mcx>(
             drain_rg(rt, &rg);
             return Ok(EngageOutcome::Fallback);
         }
+        super::stats::tick_engaged(STANDING_ARM.label, super::stats::EngageChannel::Launched);
         // The launched-DOP census line (the m1-heap-source harness trap:
         // max_worker_processes silently caps DOP probes — every probe
         // config must be able to see the LAUNCHED number, not the asked
@@ -2444,6 +2445,10 @@ fn engage_ceremony<'mcx>(
 
     match (outcome, spec) {
         (EngageOutcome::Fallback, _) => {
+            super::stats::tick_engaged(
+                STANDING_ARM.label,
+                super::stats::EngageChannel::Serial,
+            );
             lane_trace("runtime-sort: fallback to serial arm");
             Ok(false)
         }

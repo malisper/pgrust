@@ -799,6 +799,70 @@ static FUSED_HASH_BUILD_ENGAGED_BARE: AtomicU64 = AtomicU64::new(0);
 static FUSED_HASH_BUILD_ENGAGED_PROJ: AtomicU64 = AtomicU64::new(0);
 static FUSED_HASH_BUILD_PERTUPLE_SEQ: AtomicU64 = AtomicU64::new(0);
 static FUSED_HASH_BUILD_PERTUPLE_OTHER: AtomicU64 = AtomicU64::new(0);
+
+// ---------------------------------------------------------------------------
+// M2 inc-3 rung-2 — fallback-floor counters (m2-inc3-scope.md §5 rung 2):
+// one counter per (runtime arm × engagement channel), so the rung-3/4
+// demotion/deletion decisions read evidence, not vibes. Channels:
+//   * `pooldb`   — the RG reached its outcome under the POOL-DB channel
+//                  (bound-descriptor board; StandingWait::Done, pool phase);
+//   * `gang`     — outcome under the STANDING GANG channel (Done, gang
+//                  phase) — i.e. the pool phase refused/was off and the
+//                  gang absorbed it: THE gang-fallback rate per arm;
+//   * `launched` — the launched-bgworker ceremony engaged (launch returned
+//                  workers and the submit-and-park loop took over);
+//   * `serial`   — the whole parallel engagement fell back to the serial
+//                  arm (EngageOutcome::Fallback at the arm's dispatch).
+// Tick cadence: one per engagement OUTCOME (completions for the two board
+// channels; path-taken for launched/serial) — engagement-grain, never
+// per-row. Error exits tick nothing (they surface, they don't fall back).
+// Informational `counter` dump lines (`engage-<arm>-<channel>`); the gate's
+// floor/allowlist machinery ignores them until rung 3 pins gang≈0 floors.
+// ---------------------------------------------------------------------------
+
+/// The engagement-channel vocabulary for the fallback floors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum EngageChannel {
+    PoolDb = 0,
+    Gang = 1,
+    Launched = 2,
+    Serial = 3,
+}
+
+const N_ENGAGE_CHANNELS: usize = 4;
+const ENGAGE_CHANNEL_NAMES: [&str; N_ENGAGE_CHANNELS] =
+    ["pooldb", "gang", "launched", "serial"];
+
+/// The arm vocabulary keys off the StandingArm label (already the stable
+/// per-arm trace identity) so the channel code needs no new per-arm enum.
+const ENGAGE_ARMS: [&str; 7] = [
+    "runtime-scan",
+    "runtime-agg",
+    "runtime-agg-sorted",
+    "runtime-sort",
+    "runtime-hashjoin",
+    "runtime-distinct",
+    "runtime-plaindistinct",
+];
+
+#[allow(clippy::declare_interior_mutable_const)]
+static ENGAGE: [[AtomicU64; N_ENGAGE_CHANNELS]; ENGAGE_ARMS.len()] =
+    [const { [const { AtomicU64::new(0) }; N_ENGAGE_CHANNELS] }; ENGAGE_ARMS.len()];
+
+/// Record one engagement on `channel` for the arm labeled `label` (the
+/// StandingArm label / the arm's lane_trace prefix). Engagement-grain: the
+/// linear label scan (7 entries) runs at most once per query engagement,
+/// and only with accounting armed.
+#[inline]
+pub(super) fn tick_engaged(label: &str, channel: EngageChannel) {
+    if !armed() {
+        return;
+    }
+    if let Some(i) = ENGAGE_ARMS.iter().position(|a| *a == label) {
+        ENGAGE[i][channel as usize].fetch_add(1, Relaxed);
+        arm_dump_on_thread_exit();
+    }
+}
 #[allow(clippy::declare_interior_mutable_const)]
 static REFUSED: [[AtomicU64; N_REASONS]; N_CLASSES] =
     [const { [const { AtomicU64::new(0) }; N_REASONS] }; N_CLASSES];
@@ -1187,6 +1251,18 @@ fn dump() {
         "counter\tfused-hash-build-pertuple-other\t{}\n",
         FUSED_HASH_BUILD_PERTUPLE_OTHER.load(Relaxed)
     ));
+    // M2 inc-3 rung-2 fallback-floor rows (engagement channels per arm;
+    // zeros included — the floor reader diffs runs, absent≠zero would
+    // ambiguate a never-engaged arm against a dropped row).
+    for (i, arm) in ENGAGE_ARMS.iter().enumerate() {
+        for (c, ch) in ENGAGE_CHANNEL_NAMES.iter().enumerate() {
+            let short = arm.strip_prefix("runtime-").unwrap_or(arm);
+            out.push_str(&format!(
+                "counter\tengage-{short}-{ch}\t{}\n",
+                ENGAGE[i][c].load(Relaxed)
+            ));
+        }
+    }
     // --- WS-CB wave-10 (cursors inc-2 §6 staging; worklog EX-CB-2): the
     // run-seam backward-drive evidence counter — the post-flip deletion
     // bake reads this at zero across all corpora. Static lives in push.rs
