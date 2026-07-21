@@ -604,6 +604,77 @@ fn index_sort_two_keys_then_tid() {
     ts.end();
 }
 
+/// M4.2 feed-entry equivalence: `put_index_tuple_image` (the pool arm's
+/// pre-formed-image entry) must yield a sorted stream identical to
+/// `putindextuplevalues` over the same logical tuples — INCLUDING under a
+/// different arrival order, because the index comparator is total (key
+/// then TID): the parallel scan's nondeterministic interleave cannot
+/// change the sorted sequence.
+#[test]
+fn index_sort_image_feed_matches_values_feed() {
+    let mcx = leaked_mcx();
+    let desc = int4_desc(mcx, 1);
+    let mk = || {
+        Tuplesort::begin_index_with_keys(
+            desc.clone(),
+            &[int32_key(1, false, false)],
+            1,
+            false,
+            false,
+            "t_a_idx",
+            None,
+            1024,
+            TUPLESORT_NONE,
+        )
+    };
+    let mut seed = 41u64;
+    let mut rows: Vec<(i32, (u32, u16))> = Vec::new();
+    for i in 0..500u32 {
+        rows.push(((lcg(&mut seed) % 60) as i32, (i / 90, (i % 90 + 1) as u16)));
+    }
+
+    let mut by_values = mk();
+    for (k, (blk, pos)) in &rows {
+        by_values
+            .putindextuplevalues(tid(*blk, *pos), &[Datum::from_i32(*k)], &[false])
+            .unwrap();
+    }
+
+    // Image feed, arrival order REVERSED (the pool interleave stand-in):
+    // form each tuple exactly as a worker does (index_form_tuple + t_tid
+    // write), ship the raw bytes.
+    let scratch = mcx::MemoryContext::new("image feed scratch");
+    let mut by_image = mk();
+    for (k, (blk, pos)) in rows.iter().rev() {
+        let mut buf = nbtree::itup::index_form_tuple(
+            scratch.mcx(),
+            &desc,
+            &[Datum::from_i32(*k)],
+            &[false],
+        )
+        .unwrap();
+        let t = tid(*blk, *pos);
+        // SAFETY: t_tid = first 6 bytes of the owned image (itup.h).
+        unsafe {
+            buf.as_mut_ptr()
+                .cast::<::types_tuple::itemptr::ItemPointerData>()
+                .write_unaligned(t);
+        }
+        let len = buf.size();
+        // SAFETY: freshly formed live image of `len` bytes.
+        let image = unsafe { core::slice::from_raw_parts(buf.as_ptr(), len) };
+        by_image.put_index_tuple_image(image).unwrap();
+    }
+
+    by_values.performsort().unwrap();
+    by_image.performsort().unwrap();
+    let a = drain_index(&mut by_values, &desc, 1);
+    let b = drain_index(&mut by_image, &desc, 1);
+    assert_eq!(a, b, "sorted stream must be entry-point- and arrival-order-independent");
+    by_values.end();
+    by_image.end();
+}
+
 #[test]
 fn index_sort_unique_violation_is_23505() {
     let mcx = leaked_mcx();

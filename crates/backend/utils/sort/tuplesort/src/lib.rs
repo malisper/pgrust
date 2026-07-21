@@ -1502,6 +1502,44 @@ impl Tuplesort {
         })
     }
 
+    /// Parallel index-build feed (M4.2): put one PRE-FORMED index-tuple
+    /// image (`t_tid` already set — a pool worker formed it under a
+    /// descriptor identical to this sort's). Byte-equivalent to
+    /// [`Tuplesort::putindextuplevalues`] modulo WHO ran `index_form_tuple`:
+    /// the image is copied into `tuplecontext` and enters through the same
+    /// `puttuple_common` tail (datum1 extraction included), so the sorted
+    /// output — and every downstream page image — is independent of which
+    /// entry point fed the sort.
+    pub fn put_index_tuple_image(&mut self, image: &[u8]) -> PgResult<()> {
+        self.0.with_mut(|st| {
+            let (SortVariant::Index { tup_desc, .. } | SortVariant::IndexHash { tup_desc, .. }) =
+                &st.variant
+            else {
+                panic!("put_index_tuple_image on a non-index tuplesort")
+            };
+            let tuplen = image.len() as i64;
+            // MAXALIGNed backing store (u64 words), as putheaptuple does:
+            // index_getattr walks the copy, not the caller's bytes.
+            let words = image.len().div_ceil(8);
+            let mut blob: PgVec<'_, u64> =
+                ::mcx::vec_with_capacity_in(st.tuplecontext.mcx(), words)?;
+            blob.resize(words, 0);
+            let tuple = blob.as_mut_ptr().cast::<u8>();
+            // SAFETY: fresh words*8 >= image.len() byte buffer.
+            unsafe {
+                core::ptr::copy_nonoverlapping(image.as_ptr(), tuple, image.len());
+            }
+            // Ownership moves to tuplecontext (bulk-freed at end).
+            mem::forget(blob);
+
+            let mut isnull1 = false;
+            // SAFETY: freshly copied live image under tup_desc.
+            let datum1 =
+                unsafe { nbtree::itup::index_getattr(tuple, 1, tup_desc, &mut isnull1) };
+            st.puttuple_common(tuple.cast::<MinimalTupleData>(), datum1, isnull1, tuplen)
+        })
+    }
+
     /// `tuplesort_putheaptuple` (cluster variant). `itup` carries the formed
     /// index key tuple image; required iff the expression-index lane is armed.
     pub fn putheaptuple(
