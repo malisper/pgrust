@@ -118,7 +118,7 @@ use std::sync::Arc;
 use crate::morsel::MorselRange;
 use crate::rg::TaskSetWork;
 use crate::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use crate::sync::ParkLot;
+use crate::sync::{OnceLock, ParkLot};
 use crate::taskset::CachePadded;
 
 /// Bounded lock-free single-producer / single-consumer ring of owned `T`.
@@ -280,6 +280,14 @@ pub struct RowFunnel<T> {
     /// The drain's empty-park lot: woken by any producer that pushes into a
     /// previously-empty ring or marks a ring done.
     not_empty: ParkLot,
+    /// External consumer wake hook (set once by the leader before producers
+    /// start): fired on every producer push / done / park so a leader that
+    /// waits OUTSIDE the funnel's own ParkLot (e.g. a latch-based
+    /// WaitForParallelWorkersToFinish loop) wakes immediately instead of at
+    /// its recheck quantum. Latch semantics make the extra fires cheap
+    /// (setting an already-set latch is a flag test) and the set-after-push
+    /// order makes it lost-wake-free against a check-then-wait consumer.
+    wake: OnceLock<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl<T: Send + 'static> RowFunnel<T> {
@@ -291,7 +299,21 @@ impl<T: Send + 'static> RowFunnel<T> {
             done: (0..nworkers).map(|_| AtomicBool::new(false)).collect(),
             demand_closed: AtomicBool::new(false),
             not_empty: ParkLot::new(),
+            wake: OnceLock::new(),
         })
+    }
+
+    /// Install the external consumer wake hook (see the field doc). Leader-
+    /// side, BEFORE any producer starts; at most once (later calls ignored).
+    pub fn set_wake_hook(&self, f: Box<dyn Fn() + Send + Sync>) {
+        let _ = self.wake.set(f);
+    }
+
+    #[inline]
+    fn fire_wake(&self) {
+        if let Some(f) = self.wake.get() {
+            f();
+        }
     }
 
     pub fn nworkers(&self) -> usize {
@@ -325,6 +347,7 @@ impl<T: Send + 'static> RowFunnel<T> {
             d.store(true, Ordering::Release);
         }
         self.not_empty.wake_all();
+        self.fire_wake();
     }
 
     /// A producer handle bound to worker `w`'s ring. One handle per worker
@@ -367,6 +390,11 @@ impl<T: Send + 'static> FunnelProducer<T> {
             // Every push adds a row, so every push is a valid wake; a spurious
             // one (no parked drain) is a cheap ParkLot no-op. Same PERF-TODO.
             self.funnel.not_empty.wake_all();
+            // External consumer wake (leader latch): fired per push so a leader
+            // waiting outside the ParkLot (latch quantum loop) drains promptly
+            // rather than at its recheck quantum — the mid-drive wake the
+            // review found missing.
+            self.funnel.fire_wake();
         }
         r
     }
@@ -398,6 +426,9 @@ impl<T: Send + 'static> FunnelProducer<T> {
                     if !self.ring.is_full() || self.funnel.demand_closed() {
                         continue;
                     }
+                    // About to park on a FULL ring: nudge the external consumer
+                    // (leader latch) so the drain that frees us runs promptly.
+                    self.funnel.fire_wake();
                     // Donate the permit for the duration of the park (held
                     // across `producer_park`, reacquired when `_section` drops).
                     let _section = mk_section();
@@ -413,6 +444,7 @@ impl<T: Send + 'static> FunnelProducer<T> {
     pub fn mark_done(&self) {
         self.funnel.done[self.w].store(true, Ordering::Release);
         self.funnel.not_empty.wake_all();
+        self.funnel.fire_wake();
     }
 }
 
@@ -657,6 +689,36 @@ mod tests {
         }
         got.sort();
         assert_eq!(got, vec![10, 11, 20]);
+    }
+
+    #[test]
+    fn wake_hook_fires_on_push_done_and_park() {
+        // The external consumer wake (leader latch stand-in) must fire on
+        // every push, on mark_done, and before a full-ring park — the
+        // mid-drive leader wake of the review fix.
+        let fired = StdArc::new(StdAtomicUsize::new(0));
+        let f: Arc<RowFunnel<u32>> = RowFunnel::new(1, 2);
+        let fc = StdArc::clone(&fired);
+        f.set_wake_hook(Box::new(move || {
+            fc.fetch_add(1, StdOrd::SeqCst);
+        }));
+        let p = f.producer(0);
+        p.try_push(1).ok().unwrap();
+        assert_eq!(fired.load(StdOrd::SeqCst), 1, "push fires the hook");
+        p.try_push(2).ok().unwrap();
+        assert_eq!(fired.load(StdOrd::SeqCst), 2);
+        // Ring full: a blocking push fires the hook before parking; unblock it
+        // by closing demand from the consumer side.
+        let f2 = Arc::clone(&f);
+        let t = std::thread::spawn(move || f2.producer(0).push_blocking(3, || {}));
+        while fired.load(StdOrd::SeqCst) < 3 {
+            std::thread::yield_now();
+        }
+        f.close_demand();
+        assert_eq!(t.join().unwrap(), PushOutcome::DemandClosed);
+        let before = fired.load(StdOrd::SeqCst);
+        p.mark_done();
+        assert!(fired.load(StdOrd::SeqCst) > before, "mark_done fires the hook");
     }
 
     #[test]
