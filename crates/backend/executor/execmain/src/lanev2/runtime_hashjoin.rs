@@ -88,7 +88,8 @@ use ::nodehashjoin::batch::{
     LEAF_INMEM,
 };
 use ::nodehashjoin::shared_build::{
-    freeze, BudgetExceeded, CombinePlan, FrozenJoinTable, JoinBudget, JoinBuildLocal, PARTITIONS,
+    finish_single_pass, freeze, BudgetExceeded, CombinePlan, FrozenJoinTable, JoinBudget,
+    JoinBuildLocal, SharedBuildDir, PARTITIONS,
 };
 use ::nodehashjoin::shared_exec::{
     shared_build_accept, shared_build_accept_keyed, shared_build_hash_tuple,
@@ -203,6 +204,22 @@ fn hj_multibuild_enabled() -> bool {
 /// Defensive cap on multibuild tree size (joins per engagement); beyond it
 /// the walk refuses to the serial arms (task-set fan bound).
 const MB_MAX_JOINS: usize = 8;
+
+/// SINGLE-PASS build (Phase 1a; gather-elimination-plan §1a): fuse the
+/// two-pass materialize→COMBINE build into ONE pass — each build tuple is
+/// CAS-inserted directly into the shared directory during accept, killing the
+/// COMBINE re-read that loses 1.14–1.50× vs PG Parallel Hash / Umbra above
+/// ~2M rows. OFF BY DEFAULT: two-pass stays the default until a per-shape
+/// fleet A/B proves ≥ parity (the low-distinct/skew CAS-contention crossover
+/// must be measured, not assumed — see shared_build.rs contention note).
+/// `PGRUST_RUNTIME_HJ_SINGLEPASS=1` engages it for UNBATCHED single-join
+/// engagements only; batched/spill and multibuild stay two-pass this phase.
+fn hj_singlepass_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_HJ_SINGLEPASS").map_or(false, |v| v.trim() == "1")
+    })
+}
 
 /// SE-AGGJOIN grouped sink (band 87001): GROUPED (AGG_HASHED) agg roots over
 /// the multibuild join walk — per-worker hashed builds exported as
@@ -791,6 +808,11 @@ pub(super) struct JoinBuildSink {
     /// Published at finalize; the probe task set (deps=[combine]) reads it.
     table: Mutex<Option<Arc<FrozenJoinTable>>>,
     shared: Weak<RuntimeHjShared>,
+    /// SINGLE-PASS (Phase 1a): Some ⇒ workers CAS-insert directly into this
+    /// shared directory during accept (no COMBINE). Sized up front from the
+    /// planner's inner-rows estimate. None ⇒ the two-pass default. Set only
+    /// for UNBATCHED single-join engagements under the kill switch.
+    singlepass: Option<Arc<SharedBuildDir>>,
 }
 
 impl JoinBuildSink {
@@ -843,7 +865,13 @@ impl runtime::ParallelSink for JoinBuildSink {
     type Local = JoinBuildLocal;
 
     fn fork(&self, worker: usize) -> JoinBuildLocal {
-        JoinBuildLocal::new(worker, Arc::clone(&self.budget))
+        let mut local = JoinBuildLocal::new(worker, Arc::clone(&self.budget));
+        if let Some(dir) = &self.singlepass {
+            // SINGLE-PASS: this Local links tuples straight into the shared
+            // directory in `push` (accept), bypassing part_refs/COMBINE.
+            local.attach_shared_dir(Arc::clone(dir));
+        }
+        local
     }
 
     fn accept_local(&self, local: &mut JoinBuildLocal, worker: usize, range: runtime::MorselRange) {
@@ -938,6 +966,11 @@ impl runtime::ParallelSink for JoinBuildSink {
         if self.failed() || self.demoted() {
             return;
         }
+        // SINGLE-PASS: chains are already CAS-linked during accept — the 256
+        // combine tasks are pure no-ops (the seal/freeze happens in finalize).
+        if self.singlepass.is_some() {
+            return;
+        }
         if let Some(plan) = self.plan_for(locals) {
             plan.combine_partition(part, locals);
         }
@@ -947,10 +980,28 @@ impl runtime::ParallelSink for JoinBuildSink {
         if self.failed() || self.demoted() {
             return;
         }
-        // Zero-granule inner side: no combine morsel ran (empty partition
-        // space never happens — PARTITIONS is fixed — but a fully-refused
-        // plan slot can be absent after refuse_budget).
-        let Some(plan) = self.plan_for(locals) else { return };
+        // SINGLE-PASS: seal the shared directory (barrier-gated grow_buckets
+        // on an underestimate) into a plan the frozen table consumes as-is.
+        let plan = if let Some(dir) = &self.singlepass {
+            match finish_single_pass(locals, Arc::clone(dir), &self.budget) {
+                Ok(p) => Arc::new(p),
+                Err(BudgetExceeded) => {
+                    lane_trace(
+                        "runtime-hashjoin: REFUSED (single-pass grow crossed envelope) — serial rerun",
+                    );
+                    if let Some(s) = self.shared.upgrade() {
+                        s.refuse_budget();
+                    }
+                    return;
+                }
+            }
+        } else {
+            // Zero-granule inner side: no combine morsel ran (empty partition
+            // space never happens — PARTITIONS is fixed — but a fully-refused
+            // plan slot can be absent after refuse_budget).
+            let Some(plan) = self.plan_for(locals) else { return };
+            plan
+        };
         let table = freeze(plan, locals);
         // HJPROBE-V2 engagement witness (e2e-grepped; the trace can only
         // ever fire with the knob ON — no armed Local exists otherwise).
@@ -1191,6 +1242,10 @@ fn build_morsel_body(
             let dense_col = if spill.is_none()
                 && shared.chain.get().is_none()
                 && hjprobe_v2_enabled()
+                // SINGLE-PASS forgoes the dense seat (its concurrent chain
+                // order is not reproducible — the seat's byte-identity proof
+                // does not hold). The Local's attached-dir state is the gate.
+                && !local.single_pass()
             {
                 ::nodehashjoin::shared_exec::dense_seat_build_col(hj, hstate)
             } else {
@@ -3629,6 +3684,7 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
         outer_source,
         Some(inner_source),
         envelope,
+        hash_plan.plan.plan_rows.max(0.0) as u64,
         fill_inner,
         spill_batches,
         None, // chain: the phase-1 single-join arm
@@ -3838,6 +3894,7 @@ fn try_own_multibuild<'mcx>(
         probe_source,
         None,  // inner_source: single-join only
         0,     // envelope: single-join only (per-join envelopes ride MbInit)
+        0,     // inner_rows_est: multibuild sizes per-join from MbInit
         false, // fill_inner: probe-local types only
         None,  // spill_batches: unbatched by admission
         Some(init),
@@ -3865,6 +3922,9 @@ fn engage<'mcx>(
     // Combined gang envelope per live table (admission's `envelope`; equals
     // exec_choose's space_allowed exactly when nbatch == 1).
     envelope: usize,
+    // Planner inner-rows estimate — the single-pass directory's up-front size
+    // (Phase 1a). 0 for multibuild (each join sizes from its own MbInit).
+    inner_rows_est: u64,
     fill_inner: bool,
     spill_batches: Option<u32>,
     // m5p1 multibuild descriptor (None = the phase-1 single-join arm).
@@ -3961,11 +4021,31 @@ fn engage<'mcx>(
             None
         }
         (None, Some(inner_source)) => {
+            let budget = JoinBudget::new(envelope);
+            // SINGLE-PASS (Phase 1a, kill-switch): UNBATCHED single-join arm
+            // only. Size the shared directory from the planner's inner-rows
+            // estimate and charge it to the join budget; if it will not fit,
+            // fall back to the two-pass build (never a refusal on this
+            // account). Batched/spill and multibuild stay two-pass this phase.
+            // `spill_batches.is_none()` ⇒ unbatched (nbatch <= 1); batched
+            // engagements carry Some(want) and stay two-pass this phase.
+            let singlepass = if hj_singlepass_enabled() && spill_batches.is_none() {
+                match SharedBuildDir::with_estimate(inner_rows_est, &budget) {
+                    Ok(dir) => {
+                        lane_trace("runtime-hashjoin: single-pass build ENGAGED");
+                        Some(dir)
+                    }
+                    Err(BudgetExceeded) => None,
+                }
+            } else {
+                None
+            };
             let sink = Arc::new(JoinBuildSink {
-                budget: JoinBudget::new(envelope),
+                budget,
                 plan: Mutex::new(None),
                 table: Mutex::new(None),
                 shared: Arc::downgrade(&payload),
+                singlepass,
             });
             payload
                 .sink

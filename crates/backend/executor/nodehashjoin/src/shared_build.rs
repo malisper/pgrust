@@ -268,6 +268,11 @@ pub struct JoinBuildLocal {
     chunk_cap_words: usize,
     /// HJPROBE-V2: armed dense-key tracking (None = v1, byte-identical).
     dense_keys: Option<DenseKeys>,
+    /// SINGLE-PASS (Phase 1a): the shared directory this Local inserts into
+    /// directly during accept (None = the two-pass materialize→combine
+    /// default). Attached at fork under the PGRUST_RUNTIME_HJ_SINGLEPASS
+    /// kill switch; when set, `push` bypasses `part_refs`/`runs` entirely.
+    shared_dir: Option<Arc<SharedBuildDir>>,
 }
 
 impl JoinBuildLocal {
@@ -298,11 +303,28 @@ impl JoinBuildLocal {
             budget,
             chunk_cap_words: cap_words.clamp(CHUNK_MIN_WORDS, CHUNK_MAX_WORDS),
             dense_keys: None,
+            shared_dir: None,
         }
     }
 
     pub fn ordinal(&self) -> usize {
         self.ordinal as usize
+    }
+
+    /// SINGLE-PASS (Phase 1a): attach the shared directory. Must run before
+    /// the first push (asserted) and is mutually exclusive with dense-key
+    /// arming — the runtime forks a Local into exactly one mode.
+    pub fn attach_shared_dir(&mut self, dir: Arc<SharedBuildDir>) {
+        assert!(self.tuples == 0, "attach_shared_dir after pushes");
+        assert!(self.dense_keys.is_none(), "single-pass is incompatible with the dense seat");
+        self.shared_dir = Some(dir);
+    }
+
+    /// Whether this Local inserts single-pass (the accept site's dispatch;
+    /// also the runtime's gate to keep the dense seat OFF under single-pass).
+    #[inline(always)]
+    pub fn single_pass(&self) -> bool {
+        self.shared_dir.is_some()
     }
 
     /// HJPROBE-V2: arm dense-key tracking. Idempotent; must run before the
@@ -313,6 +335,7 @@ impl JoinBuildLocal {
             return;
         }
         assert!(self.tuples == 0, "dense-key arming after pushes");
+        assert!(self.shared_dir.is_none(), "the dense seat is incompatible with single-pass build");
         self.dense_keys = Some(DenseKeys {
             part_keys: (0..PARTITIONS).map(|_| Vec::new()).collect(),
         });
@@ -412,6 +435,30 @@ impl JoinBuildLocal {
     /// storage is self-contained global-heap (survives helper teardown
     /// for rescan reuse, §8).
     pub fn push(&mut self, hashvalue: u32, payload: &[u8]) -> Result<(), BudgetExceeded> {
+        // SINGLE-PASS (Phase 1a): a Local with an attached shared directory
+        // inserts EACH tuple directly into the shared table via atomic CAS
+        // during the build scan (Umbra/PG Parallel Hash lineage) — no
+        // per-partition ref list, no second COMBINE bandwidth pass. The
+        // attach is a fork-time decision (JoinBuildSink under the
+        // PGRUST_RUNTIME_HJ_SINGLEPASS kill switch), so every accept call
+        // site is unchanged.
+        if self.shared_dir.is_some() {
+            return self.push_single_pass(hashvalue, payload);
+        }
+        let (chunk_idx, off) = self.materialize(hashvalue, payload)?;
+        let r = pack_ref(self.ordinal, chunk_idx, off);
+        self.part_refs[partition_of(hashvalue)].push(r);
+        self.tuples += 1;
+        Ok(())
+    }
+
+    /// Materialize one row into this Local's chunk arena and return its
+    /// `(chunk_idx, word_offset)`. Charges the envelope (chunk capacity + 8B
+    /// per tuple). Header words are written (next=0, len|hash, match=0); the
+    /// caller decides how the tuple is INDEXED (two-pass: recorded in
+    /// `part_refs` for a later COMBINE; single-pass: CAS-linked immediately).
+    #[inline]
+    fn materialize(&mut self, hashvalue: u32, payload: &[u8]) -> Result<(usize, usize), BudgetExceeded> {
         assert!(self.in_run, "push outside a run");
         let payload_words = payload.len().div_ceil(8);
         let need = HDR_WORDS + payload_words;
@@ -458,9 +505,27 @@ impl JoinBuildLocal {
             }
         }
         self.cur_used = off + need;
+        Ok((chunk_idx, off))
+    }
 
+    /// Single-pass insert (Phase 1a): materialize, then CAS-link the tuple at
+    /// its bucket's chain head in the attached shared directory. The tuple's
+    /// `next` word (W0, in this Local's own chunk) is the CAS's per-tuple
+    /// scratch — only this worker writes it, so no writer touches another
+    /// chain word during build; cross-worker visibility of the finished
+    /// chains is the runtime task-set completion barrier (as in the two-pass
+    /// combine). Dense-key tracking is NOT supported here (the HJPROBE-V2
+    /// seat needs a reproducible chain order the concurrent insert cannot
+    /// give — the runtime gates the seat off under single-pass).
+    fn push_single_pass(&mut self, hashvalue: u32, payload: &[u8]) -> Result<(), BudgetExceeded> {
+        debug_assert!(self.dense_keys.is_none(), "dense seat unsupported under single-pass build");
+        let (chunk_idx, off) = self.materialize(hashvalue, payload)?;
+        let dir = self.shared_dir.clone().expect("single-pass push without a shared dir");
         let r = pack_ref(self.ordinal, chunk_idx, off);
-        self.part_refs[partition_of(hashvalue)].push(r);
+        // SAFETY: `chunk.atomic(off)` views this tuple's next word (W0) as an
+        // AtomicU64 — the module's chunk-atomic-view contract.
+        let next_word = self.chunks[chunk_idx].atomic(off);
+        dir.insert(r, next_word, hashvalue);
         self.tuples += 1;
         Ok(())
     }
@@ -483,7 +548,13 @@ pub struct CombinePlan {
     /// reproducible combine order (a debugging nicety since the 2026-07-13
     /// order directive; NOT a correctness contract).
     run_order: Vec<(u64, u32, u32)>, // (range_start, local, run)
+    /// Two-pass (or grown single-pass) directory. Empty when `singledir` owns
+    /// the buckets (single-pass, un-grown).
     buckets: Box<[AtomicU64]>,
+    /// SINGLE-PASS (Phase 1a): the directory the build workers CAS-inserted
+    /// into. When present the chains are already linked (`combine_partition`
+    /// is never called) and bucket reads route here via [`bucket_slice`].
+    singledir: Option<Arc<SharedBuildDir>>,
     log2_nbuckets: u32,
     total_tuples: u64,
 }
@@ -532,9 +603,20 @@ impl CombinePlan {
             by_ordinal,
             run_order,
             buckets: buckets.into_boxed_slice(),
+            singledir: None,
             log2_nbuckets: nbuckets.trailing_zeros(),
             total_tuples: total,
         })
+    }
+
+    /// The live bucket directory — the single-pass `SharedBuildDir`'s array
+    /// when it owns the table, else this plan's own `buckets`.
+    #[inline]
+    fn bucket_slice(&self) -> &[AtomicU64] {
+        match &self.singledir {
+            Some(d) => &d.buckets,
+            None => &self.buckets,
+        }
     }
 
     pub fn partitions(&self) -> u64 {
@@ -582,6 +664,203 @@ impl CombinePlan {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// SINGLE-PASS atomic-CAS build (Phase 1a; gather-elimination-plan §1a,
+// research-parallelize-hashjoin §3.2 option A). One shared bucket directory,
+// sized UP FRONT from the planner's inner-rows estimate; every build tuple is
+// linked into its bucket chain ONCE, during the build scan, via an atomic CAS
+// on the bucket head (a Treiber push) — killing the two-pass COMBINE re-read
+// that loses 1.14–1.50× vs PG Parallel Hash / Umbra above ~2M rows. The 16-bit
+// tag word (an embedded Bloom filter, §1.6) is maintained under the same CAS,
+// so the probe pre-filter is identical to the two-pass table.
+//
+// CONTENTION NOTE (coordinator steer): the CAS contends on bucket HEADS. Low
+// distinct-key / skewed builds pile many tuples onto a few chains → hot-line
+// ping-pong that can erase (or invert) the bandwidth win. This is a BANDWIDTH
+// optimization; the per-shape route_to flip stays fleet-gated precisely so the
+// low-distinct/skew crossover is measured, not assumed. The CAS carries a
+// spin-loop backoff on contention; correctness is contention-independent (a
+// degenerate all-one-bucket build is covered by tests).
+// ---------------------------------------------------------------------------
+
+const GROW_LOAD_FACTOR: u64 = 2;
+
+/// Link `packed_ref`'s tuple at `bucket`'s chain head. `next_word` is the
+/// tuple's OWN W0 (this worker is its only writer); on a CAS race we re-point
+/// it at the fresh head and retry. Lost-update freedom is the CAS itself,
+/// independent of memory ordering; the Release success ordering publishes the
+/// `next_word` store to any later acquirer of this bucket. LOOM-COVERED — the
+/// `singlepass_loom` model mirrors this loop verbatim against loom atomics.
+#[inline]
+fn cas_insert_head(bucket: &AtomicU64, next_word: &AtomicU64, packed_ref: u64, tag: u64) {
+    let mut old = bucket.load(Ordering::Relaxed);
+    loop {
+        // next := old head's packed ref+1 (0 when the bucket was empty).
+        next_word.store(old >> 16, Ordering::Relaxed);
+        let newv = ((packed_ref + 1) << 16) | ((old & 0xFFFF) | tag);
+        match bucket.compare_exchange_weak(old, newv, Ordering::Release, Ordering::Relaxed) {
+            Ok(_) => return,
+            Err(cur) => {
+                old = cur;
+                std::hint::spin_loop(); // bounded backoff on hot-bucket contention
+            }
+        }
+    }
+}
+
+/// The shared bucket directory for the single-pass build. Fixed size during
+/// the concurrent accept phase (online mid-build resize is deferred — the
+/// hardest PG code, §5 risk); underestimates are absorbed by a ONE-SHOT
+/// barrier-gated `grow_buckets` at seal (`finish_single_pass`, single-threaded).
+pub struct SharedBuildDir {
+    buckets: Box<[AtomicU64]>,
+    log2_nbuckets: u32,
+    inserted: AtomicU64,
+}
+
+impl SharedBuildDir {
+    /// Size from the planner's inner-rows estimate (rounded to a power of two,
+    /// clamped to the same [`MIN_NBUCKETS`]..[`MAX_NBUCKETS`] band the
+    /// two-pass plan uses) and charge the array to the shared envelope. A
+    /// crossing returns `BudgetExceeded` — the caller falls back to two-pass
+    /// (never a refusal on account of single-pass alone).
+    pub fn with_estimate(est_rows: u64, budget: &JoinBudget) -> Result<Arc<SharedBuildDir>, BudgetExceeded> {
+        let nbuckets = est_rows.next_power_of_two().clamp(MIN_NBUCKETS, MAX_NBUCKETS);
+        if !budget.try_charge(nbuckets as usize * 8) {
+            return Err(BudgetExceeded);
+        }
+        let buckets: Vec<AtomicU64> = (0..nbuckets).map(|_| AtomicU64::new(0)).collect();
+        Ok(Arc::new(SharedBuildDir {
+            buckets: buckets.into_boxed_slice(),
+            log2_nbuckets: nbuckets.trailing_zeros(),
+            inserted: AtomicU64::new(0),
+        }))
+    }
+
+    /// CAS-link a materialized tuple. `next_word` = the tuple's W0 (its
+    /// chunk's next word). Concurrent-safe across all build workers.
+    #[inline]
+    pub(crate) fn insert(&self, packed_ref: u64, next_word: &AtomicU64, hashvalue: u32) {
+        let b = bucket_of(hashvalue, self.log2_nbuckets);
+        cas_insert_head(&self.buckets[b], next_word, packed_ref, tag_bit(hashvalue));
+        self.inserted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inserted(&self) -> u64 {
+        self.inserted.load(Ordering::Relaxed)
+    }
+
+    pub fn nbuckets(&self) -> usize {
+        self.buckets.len()
+    }
+}
+
+/// SEAL for a single-pass build (single-threaded, at the accept→probe
+/// barrier): optionally `grow_buckets` if the estimate underran the true
+/// count, then wrap the directory as a [`CombinePlan`] the frozen table and
+/// probe/fill paths consume UNCHANGED. `combine_partition` is never called on
+/// the result — the chains are already linked. Consumes `dir`.
+///
+/// The dense seat is always absent here (single-pass Locals are never armed),
+/// so `freeze` builds no seat and the probe uses the v1 tag-filtered walk.
+pub fn finish_single_pass(
+    locals: &[JoinBuildLocal],
+    dir: Arc<SharedBuildDir>,
+    budget: &JoinBudget,
+) -> Result<CombinePlan, BudgetExceeded> {
+    // by_ordinal (dense index into the sealed Locals) — identical to `plan`.
+    let slots = locals.iter().map(|l| l.ordinal as usize + 1).max().unwrap_or(0);
+    assert!(locals.len() < u16::MAX as usize, "Local count exceeds dense-index space");
+    let mut by_ordinal = vec![u16::MAX; slots].into_boxed_slice();
+    for (li, l) in locals.iter().enumerate() {
+        assert!(!l.in_run, "sealed a Local with an open run");
+        assert!(l.shared_dir.is_some() || l.tuples == 0, "two-pass Local in a single-pass seal");
+        assert!(
+            by_ordinal[l.ordinal as usize] == u16::MAX,
+            "duplicate Local ordinal {}",
+            l.ordinal
+        );
+        by_ordinal[l.ordinal as usize] = li as u16;
+    }
+
+    // The Locals still hold Arc clones of `dir` at seal (the ParallelSink
+    // hands finalize `&[Local]`), so we do NOT reclaim ownership; the plan
+    // keeps its own Arc and reads buckets through it. The array is frozen and
+    // immutable from here (probe reads only).
+    let total = dir.inserted.load(Ordering::Relaxed);
+
+    // Barrier-gated grow_buckets: if the up-front estimate underran the true
+    // count past the load-factor bound, rehash ONCE into a right-sized array.
+    // This reintroduces a single build-side pass for MIS-ESTIMATED builds
+    // only (the documented §5 mitigation); a good estimate pays nothing.
+    let want = total.next_power_of_two().clamp(MIN_NBUCKETS, MAX_NBUCKETS);
+    if want > dir.buckets.len() as u64 && total > dir.buckets.len() as u64 * GROW_LOAD_FACTOR {
+        let (buckets, log2_nbuckets) =
+            grow_buckets(&dir.buckets, dir.log2_nbuckets, want, locals, &by_ordinal, budget)?;
+        Ok(CombinePlan {
+            by_ordinal,
+            run_order: Vec::new(),
+            buckets,
+            singledir: None, // the grown array is plan-owned
+            log2_nbuckets,
+            total_tuples: total,
+        })
+    } else {
+        let log2_nbuckets = dir.log2_nbuckets;
+        Ok(CombinePlan {
+            by_ordinal,
+            run_order: Vec::new(), // single-pass: no COMBINE walk, no seat
+            buckets: Box::new([]),
+            singledir: Some(dir),
+            log2_nbuckets,
+            total_tuples: total,
+        })
+    }
+}
+
+/// Rehash every tuple of the (frozen, single-threaded) old directory into a
+/// larger array. Walks the OLD chains — the only tuple index a single-pass
+/// build keeps — re-linking at the new heads with plain stores (no other
+/// thread is live at seal). Preserves the full multiset; chain order within a
+/// bucket changes, which is tie-normalized-OK (the 2026-07-13 order directive).
+fn grow_buckets(
+    old: &[AtomicU64],
+    old_log2: u32,
+    new_nbuckets: u64,
+    locals: &[JoinBuildLocal],
+    by_ordinal: &[u16],
+    budget: &JoinBudget,
+) -> Result<(Box<[AtomicU64]>, u32), BudgetExceeded> {
+    let _ = old_log2;
+    if !budget.try_charge(new_nbuckets as usize * 8) {
+        return Err(BudgetExceeded);
+    }
+    let new_log2 = new_nbuckets.trailing_zeros();
+    let newb: Vec<AtomicU64> = (0..new_nbuckets).map(|_| AtomicU64::new(0)).collect();
+    let newb = newb.into_boxed_slice();
+    let resolve = |r: u64| -> (&Chunk, usize) {
+        let (ord, ci, off) = unpack_ref(r);
+        let li = by_ordinal[ord];
+        debug_assert!(li != u16::MAX, "grow: ref to unknown Local ordinal");
+        (&locals[li as usize].chunks[ci], off)
+    };
+    for slot in old.iter() {
+        let mut cur = slot.load(Ordering::Relaxed) >> 16; // ref+1
+        while cur != 0 {
+            let r = cur - 1;
+            let (chunk, off) = resolve(r);
+            let old_next = chunk.atomic(off).load(Ordering::Relaxed); // snapshot BEFORE relink
+            let h = chunk.read(off + 1) as u32;
+            let b = bucket_of(h, new_log2);
+            let head = newb[b].load(Ordering::Relaxed);
+            chunk.atomic(off).store(head >> 16, Ordering::Relaxed);
+            newb[b].store(((r + 1) << 16) | ((head & 0xFFFF) | tag_bit(h)), Ordering::Relaxed);
+            cur = old_next;
+        }
+    }
+    Ok((newb, new_log2))
 }
 
 // ---------------------------------------------------------------------------
@@ -731,7 +1010,7 @@ pub struct FrozenJoinTable {
 
 impl FrozenJoinTable {
     pub fn nbuckets(&self) -> usize {
-        self.plan.buckets.len()
+        self.plan.bucket_slice().len()
     }
 
     /// HJPROBE-V2: the dense seat, when it built (knob-armed build + the
@@ -769,7 +1048,7 @@ impl FrozenJoinTable {
     /// Yields every chain tuple; the caller filters by hashvalue + quals
     /// (C's probe discipline).
     pub fn chain(&self, hashvalue: u32) -> ChainIter<'_> {
-        let word = self.plan.buckets[bucket_of(hashvalue, self.plan.log2_nbuckets)]
+        let word = self.plan.bucket_slice()[bucket_of(hashvalue, self.plan.log2_nbuckets)]
             .load(Ordering::Relaxed);
         let head = if word & tag_bit(hashvalue) != 0 { word >> 16 } else { 0 };
         ChainIter { table: self, next_packed: head }
@@ -779,13 +1058,13 @@ impl FrozenJoinTable {
     pub fn bucket_chain(&self, bucket: usize) -> ChainIter<'_> {
         ChainIter {
             table: self,
-            next_packed: self.plan.buckets[bucket].load(Ordering::Relaxed) >> 16,
+            next_packed: self.plan.bucket_slice()[bucket].load(Ordering::Relaxed) >> 16,
         }
     }
 
     /// Partition `part`'s exclusive bucket range (§4 layout).
     pub fn partition_buckets(&self, part: u64) -> Range<usize> {
-        let per = self.plan.buckets.len() / PARTITIONS;
+        let per = self.plan.bucket_slice().len() / PARTITIONS;
         let p = part as usize;
         p * per..(p + 1) * per
     }
@@ -1799,5 +2078,277 @@ mod tests {
         let sizes = (0..).map(|i| (mix(0xFACE ^ i) % 9) + 1);
         let sched = deal(ranges_of_sizes(ds.granules, sizes.take(200)), 16, 0xFACE);
         assert_serial_identical(&ds, &sched, true);
+    }
+
+    // ---- SINGLE-PASS atomic-CAS build (Phase 1a) ----
+    //
+    // The single-pass build links every tuple concurrently at its bucket
+    // head via CAS during accept — no COMBINE. Chain order within a bucket
+    // is therefore NONDETERMINISTIC (many writers race the head), so the
+    // oracle is TIE-NORMALIZED: the frozen table must hold the exact same
+    // MULTISET of tuples as the serial reference, each in bucket_of(hash),
+    // and every tuple must be reachable via chain() (no lost CAS updates).
+
+    /// Build single-pass over `schedule` into a directory sized from
+    /// `est_rows`, then seal+freeze. `concurrent` spawns one scoped thread
+    /// per worker (the real racing insert); otherwise workers run serially
+    /// (still exercises the CAS + seal path deterministically).
+    fn build_single_pass(
+        ds: &Dataset,
+        schedule: &Schedule,
+        est_rows: u64,
+        budget: &Arc<JoinBudget>,
+        concurrent: bool,
+    ) -> FrozenJoinTable {
+        let dir = SharedBuildDir::with_estimate(est_rows, budget).expect("dir within budget");
+        let mut locals: Vec<JoinBuildLocal> = (0..schedule.len())
+            .map(|w| {
+                let mut l = JoinBuildLocal::new(w, Arc::clone(budget));
+                l.attach_shared_dir(Arc::clone(&dir));
+                l
+            })
+            .collect();
+        let run_worker = |l: &mut JoinBuildLocal, claims: &Vec<Range<u64>>| {
+            for range in claims {
+                l.begin_run(range.start);
+                for g in range.clone() {
+                    for (h, p) in ds.rows_of(g) {
+                        l.push(h, &p).unwrap();
+                    }
+                }
+                l.end_run();
+            }
+        };
+        if concurrent {
+            std::thread::scope(|scope| {
+                for (w, l) in locals.iter_mut().enumerate() {
+                    let claims = &schedule[w];
+                    scope.spawn(move || run_worker(l, claims));
+                }
+            });
+        } else {
+            for (w, l) in locals.iter_mut().enumerate() {
+                run_worker(l, &schedule[w]);
+            }
+        }
+        let plan = Arc::new(finish_single_pass(&locals, dir, budget).expect("finish within budget"));
+        let t = freeze(Arc::clone(&plan), &locals);
+        drop(locals); // chunk storage survives via Arc adoption
+        t
+    }
+
+    /// Every tuple in the table as a sorted (bucket, hash, payload) multiset —
+    /// also asserts each tuple sits in bucket_of(hash) (chain integrity).
+    fn frozen_multiset(t: &FrozenJoinTable) -> Vec<(u32, Vec<u8>)> {
+        let l2 = (t.nbuckets() as u64).trailing_zeros();
+        let mut out = Vec::new();
+        for b in 0..t.nbuckets() {
+            for tr in t.bucket_chain(b) {
+                let h = tr.hashvalue();
+                assert_eq!(bucket_of(h, l2), b, "tuple in the wrong bucket");
+                out.push((h, tr.payload().to_vec()));
+            }
+        }
+        out.sort();
+        out
+    }
+
+    fn sorted_rows(ds: &Dataset) -> Vec<(u32, Vec<u8>)> {
+        let mut r = ds.all_rows();
+        r.sort();
+        r
+    }
+
+    /// Also assert chain() (the tag-prefiltered probe entry) reaches every
+    /// tuple — the CAS must never lose a tuple nor hide it behind a stale tag.
+    fn assert_single_pass_multiset(ds: &Dataset, schedule: &Schedule, est_rows: u64, concurrent: bool) {
+        let budget = JoinBudget::unlimited();
+        let t = build_single_pass(ds, schedule, est_rows, &budget, concurrent);
+        assert_eq!(t.total_tuples(), ds.granules * ds.rows_per_granule);
+        assert_eq!(frozen_multiset(&t), sorted_rows(ds), "single-pass multiset diverges");
+        for (h, p) in ds.all_rows() {
+            assert!(
+                t.chain(h).any(|tr| tr.hashvalue() == h && tr.payload() == &p[..]),
+                "single-pass lost a tuple on the probe path (hash {h:#x})"
+            );
+        }
+    }
+
+    #[test]
+    fn single_pass_serial_matches_oracle_multiset() {
+        let ds = ds_default();
+        assert_single_pass_multiset(&ds, &vec![vec![0..ds.granules]], ds.granules * ds.rows_per_granule, false);
+    }
+
+    #[test]
+    fn single_pass_concurrent_matches_oracle_multiset() {
+        let ds = ds_default();
+        for seed in 0..12u64 {
+            let sizes = (0..).map(|i| (mix(seed ^ i) % 7) + 1);
+            let sched = deal(ranges_of_sizes(ds.granules, sizes.take(64)), 1 + (seed as usize % 8), seed);
+            // Estimate deliberately spot-on for these (grow untouched).
+            assert_single_pass_multiset(&ds, &sched, ds.granules * ds.rows_per_granule, true);
+        }
+    }
+
+    #[test]
+    fn single_pass_hot_bucket_skew_is_correct() {
+        // MAXIMAL contention: every tuple hashes into ONE partition and a
+        // tiny key space ⇒ a few very hot chain heads. This is the shape the
+        // coordinator flagged where the CAS ping-pongs; correctness must be
+        // contention-INDEPENDENT even if throughput is not.
+        let mut ds = ds_default();
+        ds.force_partition = Some(0x7C);
+        ds.key_space = 3; // 3 chains take all the traffic
+        ds.rows_per_granule = 64;
+        let sched = deal(ranges_of_sizes(ds.granules, std::iter::repeat(2)), 12, 0xC0FFEE);
+        assert_single_pass_multiset(&ds, &sched, ds.granules * ds.rows_per_granule, true);
+    }
+
+    #[test]
+    fn single_pass_all_identical_hash_no_lost_updates() {
+        // The pathological limit: every row in ONE bucket, one chain head —
+        // the CAS is fully serialized by contention. All tuples must survive.
+        let ds = Dataset {
+            granules: 48,
+            rows_per_granule: 50,
+            key_space: 1, // single hash ⇒ single bucket
+            seed: 0x515,
+            force_partition: Some(0x11),
+        };
+        let sched = deal(ranges_of_sizes(ds.granules, std::iter::repeat(1)), 8, 0xA5A5);
+        assert_single_pass_multiset(&ds, &sched, 2048, true);
+    }
+
+    #[test]
+    fn single_pass_underestimate_triggers_grow_buckets() {
+        // Estimate 64 rows; true count is 64*37 = 2368 ⇒ load factor forces a
+        // barrier-gated grow at seal. The grown table must still hold the
+        // exact multiset (grow preserves every tuple).
+        let ds = ds_default();
+        let budget = JoinBudget::unlimited();
+        let sched = deal(ranges_of_sizes(ds.granules, std::iter::repeat(3)), 6, 0x9);
+        let t = build_single_pass(&ds, &sched, 64, &budget, true);
+        assert!(t.nbuckets() as u64 >= (ds.granules * ds.rows_per_granule) / GROW_LOAD_FACTOR, "grow must have enlarged the table");
+        assert_eq!(t.total_tuples(), ds.granules * ds.rows_per_granule);
+        assert_eq!(frozen_multiset(&t), sorted_rows(&ds), "grow_buckets dropped/duplicated tuples");
+    }
+
+    #[test]
+    fn single_pass_overestimate_keeps_estimate_size_no_grow() {
+        let ds = ds_default();
+        let budget = JoinBudget::unlimited();
+        let sched = vec![vec![0..ds.granules]];
+        // Estimate 10x the truth: no grow, table sized from the estimate.
+        let est = 10 * ds.granules * ds.rows_per_granule;
+        let t = build_single_pass(&ds, &sched, est, &budget, false);
+        assert_eq!(t.nbuckets() as u64, est.next_power_of_two());
+        assert_eq!(frozen_multiset(&t), sorted_rows(&ds));
+    }
+
+    #[test]
+    fn single_pass_empty_build() {
+        let budget = JoinBudget::unlimited();
+        let dir = SharedBuildDir::with_estimate(1000, &budget).unwrap();
+        let plan = Arc::new(finish_single_pass(&[], dir, &budget).unwrap());
+        let t = freeze(plan, &[]);
+        assert_eq!(t.total_tuples(), 0);
+        assert_eq!(t.chain(0xDEAD_BEEF).count(), 0);
+        assert!(!t.has_seat(), "single-pass never builds the dense seat");
+    }
+
+    #[test]
+    fn single_pass_never_seats() {
+        // Even over a dense int-key stream, single-pass forgoes the seat
+        // (its chain order is not reproducible). The v1 probe still answers.
+        let ds = ds_default();
+        let sched = deal(ranges_of_sizes(ds.granules, std::iter::repeat(4)), 5, 0x33);
+        let budget = JoinBudget::unlimited();
+        let t = build_single_pass(&ds, &sched, ds.granules * ds.rows_per_granule, &budget, true);
+        assert!(!t.has_seat());
+    }
+
+    #[test]
+    fn single_pass_dir_budget_crossing_is_recoverable() {
+        // A directory that won't fit returns BudgetExceeded — the runtime
+        // falls back to two-pass (never a refusal on account of single-pass).
+        let budget = JoinBudget::new(4096); // < 1024 buckets * 8B
+        assert_eq!(SharedBuildDir::with_estimate(1_000_000, &budget).err(), Some(BudgetExceeded));
+    }
+
+    // ---- LOOM: concurrent CAS head-insert (the singlepass insert core) ----
+    //
+    // Models `cas_insert_head`'s Treiber push against loom atomics: N workers
+    // race to link their tuples at one bucket head. The property under EVERY
+    // interleaving loom explores: NO lost updates (every inserted ref appears
+    // exactly once in the final chain) and NO cycle. This is the correctness
+    // contract the production `cas_insert_head` (std atomics) must uphold; the
+    // loop below mirrors it verbatim. loom drives its OWN atomics, so it runs
+    // under plain `cargo test -p nodehashjoin` (no --cfg loom needed).
+    mod singlepass_loom {
+        use loom::sync::atomic::{AtomicU64, Ordering};
+        use loom::sync::Arc;
+
+        /// Mirror of super::cas_insert_head over loom atomics (no tag — tag
+        /// accumulation is a monotonic OR that cannot lose refs; the modeled
+        /// property is chain integrity of the head pointer).
+        fn cas_insert_head(bucket: &AtomicU64, next_word: &AtomicU64, packed_ref: u64) {
+            let mut old = bucket.load(Ordering::Relaxed);
+            loop {
+                next_word.store(old >> 16, Ordering::Relaxed);
+                let newv = (packed_ref + 1) << 16;
+                match bucket.compare_exchange_weak(old, newv, Ordering::Release, Ordering::Relaxed) {
+                    Ok(_) => return,
+                    Err(cur) => old = cur,
+                }
+            }
+        }
+
+        /// Walk the final chain and assert every ref in `0..n` appears once.
+        fn assert_all_present(bucket: &AtomicU64, nexts: &[AtomicU64], n: u64) {
+            let mut seen = vec![false; n as usize];
+            let mut cur = bucket.load(Ordering::Acquire) >> 16;
+            let mut steps = 0u64;
+            while cur != 0 {
+                let r = cur - 1;
+                assert!(!seen[r as usize], "cycle/duplicate ref {r}");
+                seen[r as usize] = true;
+                steps += 1;
+                assert!(steps <= n, "chain longer than inserted");
+                // The per-tuple next word holds a bare ref+1 (cas_insert_head
+                // stores `old >> 16`), NOT a shifted bucket word — no >> 16.
+                cur = nexts[r as usize].load(Ordering::Acquire);
+            }
+            assert!(seen.iter().all(|&s| s), "lost a tuple under concurrent CAS");
+        }
+
+        #[test]
+        fn two_workers_one_bucket_no_lost_updates() {
+            // Worker A inserts refs {0,1}; worker B inserts ref {2}. One
+            // bucket ⇒ full head contention. 3 tuples keeps loom tractable.
+            loom::model(|| {
+                const N: u64 = 3;
+                let bucket = Arc::new(AtomicU64::new(0));
+                let nexts: Arc<Vec<AtomicU64>> =
+                    Arc::new((0..N).map(|_| AtomicU64::new(0)).collect());
+
+                let a = {
+                    let (bucket, nexts) = (bucket.clone(), nexts.clone());
+                    loom::thread::spawn(move || {
+                        cas_insert_head(&bucket, &nexts[0], 0);
+                        cas_insert_head(&bucket, &nexts[1], 1);
+                    })
+                };
+                let b = {
+                    let (bucket, nexts) = (bucket.clone(), nexts.clone());
+                    loom::thread::spawn(move || {
+                        cas_insert_head(&bucket, &nexts[2], 2);
+                    })
+                };
+                a.join().unwrap();
+                b.join().unwrap();
+                assert_all_present(&bucket, &nexts, N);
+            });
+        }
     }
 }
