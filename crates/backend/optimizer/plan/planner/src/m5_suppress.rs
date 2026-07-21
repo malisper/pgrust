@@ -3116,6 +3116,7 @@ fn classify_join_sides<'mcx>(
     }
     let mut relids = [0u32; 2];
     let mut max_rows = 0.0f64;
+    let mut side_rows = [0.0f64; 2];
     let mut heap: Vec<(usize, types_pathnodes::RelId)> = Vec::new();
     for (i, &rti) in [rti_l, rti_r].iter().enumerate() {
         let Some(rte) = parse.rtable.nth(rti - 1).as_range_tbl_entry() else {
@@ -3145,6 +3146,7 @@ fn classify_join_sides<'mcx>(
             heap.push((i, rel_id));
         }
         max_rows = max_rows.max(rel.rows.max(0.0));
+        side_rows[i] = rel.rows.max(0.0);
         // Unindexed-only guard (see the fn doc): an index on either side
         // lets the costing pick serial merge/NL shapes the walk refuses.
         // cbstore keeps it verbatim; heap rides the jheap tolerance.
@@ -3193,6 +3195,11 @@ fn classify_join_sides<'mcx>(
     // bare clause.
     let mut n_equi = 0usize;
     let mut int4_pair_only = true;
+    // DUP-FLIP ELECTION GUARD input: the admitted equi keys that live on
+    // the SMALLER rel (the planner's natural build side).
+    let small = if side_rows[0] <= side_rows[1] { 0 } else { 1 };
+    let small_rti = [rti_l, rti_r][small];
+    let mut small_keys: Vec<Node<'mcx>> = Vec::new();
     let quals: Vec<Node<'_>> = match join_quals {
         None => return refuse_join("no join quals"),
         Some(q) => {
@@ -3234,10 +3241,45 @@ fn classify_join_sides<'mcx>(
             if va.vartype != INT4OID || vb.vartype != INT4OID {
                 int4_pair_only = false;
             }
+            // Dup-flip guard input: this clause's key on the smaller rel.
+            if key_var(a, small_rti).is_some() {
+                small_keys.push(a);
+            } else if key_var(b, small_rti).is_some() {
+                small_keys.push(b);
+            }
         }
     }
     if n_equi == 0 {
         return refuse_join("no hashjoinable int-family equi clause");
+    }
+    // DUP-FLIP ELECTION GUARD (GL-MBSEAT-1 named hazard, 2026-07-21;
+    // notes/se-mbseat.md §3): a dup-dense key on the SMALLER rel carries
+    // the bucket-stats penalty that makes the SERIAL election flip the
+    // build side onto the BIG rel — the elected probe side (the small rel)
+    // then sits under the arm's 64-granule tiny-input floor and the
+    // suppression lands on a silent refusal -> serial rerun, measured
+    // **10.1x** rt/legacy at the reproducer (1M fact x 100k build, 8
+    // dups/key, dop4, floors-off vehicle; witness runtime:absent).
+    // PROVENANCE (bracket at that geometry, EXPLAIN election): 2/3/4/6
+    // dups keep the small rel as the build; 8 flips — the flip point sits
+    // in (6, 8]. The guard trips ABOVE 4 (headroom below the witnessed
+    // band, the boundary-guard 5/4-headroom idiom: the flip point moves
+    // with stats/geometry and a missed flip costs 10x, while the widest
+    // witnessed-engaged dup class — the vehicle's 2-dups cell, 0.46-1.25
+    // across the whole GL-MBSEAT-1 grid — stays keyed with margin).
+    // Evidence-only: a stats-free key never trips it (get_variable_
+    // numdistinct's DEFAULT answer is not evidence; the stats-free
+    // election hazard stays with the X5/X6 family). Election-risk guard,
+    // the B1/EC-disjointness family: unconditional, NOT floor-gated.
+    const DUP_FLIP_MAX: f64 = 4.0;
+    let small_rows = side_rows[small].max(1.0);
+    for &v_node in &small_keys {
+        let id = run.intern_expr(v_node);
+        let vd = crate::selfuncs::examine_variable(run, id, v_node, 0)?;
+        let (nd, isdefault) = crate::selfuncs::get_variable_numdistinct(run, &vd);
+        if !isdefault && nd > 0.0 && small_rows / nd > DUP_FLIP_MAX {
+            return refuse_join("build-side key dup density above the election-flip band");
+        }
     }
     // SE-JHEAP: the heap-side guards (stats on heap equi keys,
     // enable_hashjoin, index tolerance + NL margin). The 2-rel plain form
