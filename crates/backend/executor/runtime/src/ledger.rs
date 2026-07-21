@@ -121,6 +121,15 @@ pub struct LedgerBudgets {
     /// Core budget: max concurrent granted workers across all entries.
     /// Production: the pool's execution-permit count (config.workers).
     pub cores: u32,
+    /// Utility permit budget B_util (Track-4 Q1, pool-qos-design.md §1.3):
+    /// while ANY standard (foreground/maintenance) entry is admitted, the
+    /// utility tier's targets split min(util_cores, cores − Σ standard
+    /// targets) — SOFT cap, ratified: with no standard entry admitted,
+    /// utility splits the full budget (work-conserving; the reclaim bound
+    /// is the claim-boundary Yield, not the cap). The per-entry liveness
+    /// floor (target ≥ 1) survives a zeroed utility budget — the no-wedge
+    /// guarantee is class-blind.
+    pub util_cores: u32,
     /// Shared-cache budget, bytes (DOPCAP-class width clamp).
     /// u64::MAX = unbounded — the inc-1 default until arms supply footprints.
     pub cache_bytes: u64,
@@ -142,11 +151,27 @@ impl LedgerBudgets {
     pub fn from_env(cores: u32) -> LedgerBudgets {
         LedgerBudgets {
             cores: cores.max(1),
+            util_cores: util_cores_default(cores.max(1)),
             cache_bytes: u64::MAX,
             join_threshold_ns: join_threshold_default_ns(),
             renudge_max: 4,
         }
     }
+}
+
+/// `PGRUST_RUNTIME_UTIL_PERMITS`: the utility permit budget B_util
+/// (calibration knob on the PGRUST_RUNTIME_STRIDE precedent, not product
+/// surface). Default max(1, cores/8). Read once.
+fn util_cores_default(cores: u32) -> u32 {
+    static V: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    V.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_UTIL_PERMITS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .filter(|p| *p > 0)
+    })
+    .unwrap_or_else(|| (cores / 8).max(1))
+    .min(cores)
 }
 
 /// `PGRUST_RUNTIME_LEDGER_JOIN_US` (µs → ns), default 0: no entry is ever
@@ -190,6 +215,18 @@ impl WidthRequest {
     }
 }
 
+/// Budget tier of a pool entry (Track-4 Q1). Standard = foreground +
+/// maintenance (the full-budget fair split, today's algebra exactly);
+/// Utility = the capped tier (soft B_util cap, pool-qos-design.md §1.3).
+/// Mapped from [`crate::rg::RgClass`] at the ONE admit call site
+/// (sched.rs start_rg_locked); the hot words (`target`/`granted`) stay
+/// class-blind — the class is fully compiled into the recompute's targets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LedgerClass {
+    Standard,
+    Utility,
+}
+
 /// What the submitter must do after admit (the ledger never touches the
 /// park lot — the Scheduler owns wakes).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -215,6 +252,10 @@ pub struct LedgerSnapshot {
     pub admitted: u32,
     pub granted_total: u32,
     pub target_total: u32,
+    /// Utility-tier pool entries currently admitted (Track-4 Q1).
+    pub util_admitted: u32,
+    /// Σ targets over admitted utility-tier entries (⊆ target_total).
+    pub util_target_total: u32,
     pub cache_charged_bytes: u64,
     pub yields: u64,
     pub renudges: u64,
@@ -287,7 +328,7 @@ struct GangEntry {
 /// hold Gang rows (membership-event cadence only).
 #[derive(Clone, Copy, Debug)]
 enum LedgerEntry {
-    Pool(WidthRequest),
+    Pool(WidthRequest, LedgerClass),
     Gang(GangEntry),
 }
 
@@ -314,7 +355,7 @@ impl LedgerInner {
             .flatten()
             .map(|e| match e {
                 LedgerEntry::Gang(g) => u64::from(g.active),
-                LedgerEntry::Pool(_) => 0,
+                LedgerEntry::Pool(..) => 0,
             })
             .sum()
     }
@@ -326,7 +367,7 @@ impl LedgerInner {
         self.table
             .iter()
             .enumerate()
-            .filter(|(_, e)| matches!(e, Some(LedgerEntry::Pool(_))))
+            .filter(|(_, e)| matches!(e, Some(LedgerEntry::Pool(..))))
             .map(|(slot, _)| u64::from(entries[slot].target.load(Ordering::Relaxed)))
             .sum()
     }
@@ -353,6 +394,10 @@ pub struct AdmissionLedger {
     /// budgets.join_threshold_ns, atomic-backed so deterministic tests can
     /// tighten it per instance (the set_decay_quantum_ns precedent).
     join_threshold_ns: AtomicU64,
+    /// budgets.util_cores (B_util), atomic-backed for the same per-instance
+    /// test-hook reason. Read only inside the recompute (membership
+    /// cadence) — never on a hot path.
+    util_cores: AtomicU32,
     stats: LedgerStats,
 }
 
@@ -377,6 +422,7 @@ impl AdmissionLedger {
                 cache_charged: 0,
             }),
             join_threshold_ns: AtomicU64::new(budgets.join_threshold_ns),
+            util_cores: AtomicU32::new(budgets.util_cores.min(budgets.cores)),
             budgets,
             stats: LedgerStats::default(),
         }
@@ -385,6 +431,7 @@ impl AdmissionLedger {
     pub fn budgets(&self) -> LedgerBudgets {
         LedgerBudgets {
             join_threshold_ns: self.join_threshold_ns.load(Ordering::Relaxed),
+            util_cores: self.util_cores.load(Ordering::Relaxed),
             ..self.budgets
         }
     }
@@ -394,15 +441,28 @@ impl AdmissionLedger {
         self.join_threshold_ns.store(ns, Ordering::SeqCst);
     }
 
+    /// Test hook (per-instance utility budget B_util; see the field doc).
+    /// Production keeps PGRUST_RUNTIME_UTIL_PERMITS (default cores/8,
+    /// floor 1). Takes effect at the next recompute (membership event).
+    pub(crate) fn set_util_cores(&self, n: u32) {
+        self.util_cores.store(n.clamp(1, self.budgets.cores), Ordering::SeqCst);
+    }
+
     /// ARRIVAL: register + recompute targets (incumbents over their new
     /// target shed at their next claim boundary). Called from
     /// start_rg_locked under the membership lock (lock order:
-    /// membership → ledger.inner; never inverted).
-    pub(crate) fn admit(&self, slot: usize, req: WidthRequest) -> ArrivalNudge {
+    /// membership → ledger.inner; never inverted). `class` selects the
+    /// budget tier (Track-4 Q1) — Standard is today's algebra exactly.
+    pub(crate) fn admit(
+        &self,
+        slot: usize,
+        req: WidthRequest,
+        class: LedgerClass,
+    ) -> ArrivalNudge {
         let mut inner = lock(&self.inner);
         debug_assert!(slot < self.entries.len(), "pool admit into the gang region");
         debug_assert!(inner.table[slot].is_none(), "slot admitted twice without retire");
-        inner.table[slot] = Some(LedgerEntry::Pool(req));
+        inner.table[slot] = Some(LedgerEntry::Pool(req, class));
         inner.admitted += 1;
         let advertises =
             req.est_work_ns >= self.join_threshold_ns.load(Ordering::Relaxed);
@@ -697,6 +757,8 @@ impl AdmissionLedger {
         let inner = lock(&self.inner);
         let mut granted_total = 0u32;
         let mut target_total = 0u32;
+        let mut util_admitted = 0u32;
+        let mut util_target_total = 0u32;
         let mut gang_admitted = 0u32;
         let mut gang_granted = 0u32;
         let mut gang_active = 0u32;
@@ -704,9 +766,14 @@ impl AdmissionLedger {
         // come from the same stats surface (§2.4 snapshot unification).
         for (idx, entry) in inner.table.iter().enumerate() {
             match entry {
-                Some(LedgerEntry::Pool(_)) => {
+                Some(LedgerEntry::Pool(_, class)) => {
+                    let t = self.entries[idx].target.load(Ordering::Relaxed);
                     granted_total += self.entries[idx].granted.load(Ordering::Relaxed);
-                    target_total += self.entries[idx].target.load(Ordering::Relaxed);
+                    target_total += t;
+                    if *class == LedgerClass::Utility {
+                        util_admitted += 1;
+                        util_target_total += t;
+                    }
                 }
                 Some(LedgerEntry::Gang(g)) => {
                     gang_admitted += 1;
@@ -720,6 +787,8 @@ impl AdmissionLedger {
             admitted: inner.admitted,
             granted_total,
             target_total,
+            util_admitted,
+            util_target_total,
             cache_charged_bytes: inner.cache_charged,
             yields: self.stats.yields.load(Ordering::Relaxed),
             renudges: self.stats.renudges.load(Ordering::Relaxed),
@@ -743,7 +812,7 @@ impl AdmissionLedger {
     }
 
     /// Target recompute (membership-event cadence, under `inner`) — THE
-    /// ONE grant algebra: one walk of the one entry table.
+    /// ONE grant algebra: one class-tiered walk of the one entry table.
     /// target_i = max(1, min(ceiling_i, predicted_i, fair_i, cache room)).
     /// Fair shares split the core budget — MINUS the non-shedding gang
     /// charges (recompute participation,
@@ -756,6 +825,17 @@ impl AdmissionLedger {
     /// is the liveness floor, which wins over the cache clamp by design.
     /// Refills every pool entry's re-nudge budget. Returns the number of
     /// entries whose target ROSE (the worker-freed wake hint).
+    ///
+    /// TWO TIERS (Track-4 Q1, pool-qos-design.md §1.3, SOFT cap ratified):
+    /// Standard entries (foreground + maintenance) split the full budget
+    /// among THEMSELVES — with no utility entries admitted this is the
+    /// pre-Q1 walk value-identically (n_std == admitted). Utility entries
+    /// then split `min(B_util, budget − Σ standard targets)` — or the FULL
+    /// budget when no standard entry is admitted (work-conserving: an idle
+    /// box runs utility wide; the arrival of a standard entry re-runs this
+    /// recompute and over-target utility workers shed at their next claim
+    /// boundary via should_continue's Yield — the ≤one-claim reclaim
+    /// bound). Cache charging walks standard-first in slot order.
     fn recompute_locked(&self, inner: &mut LedgerInner) -> u32 {
         let n = inner.admitted;
         if n == 0 {
@@ -765,36 +845,76 @@ impl AdmissionLedger {
         let budget = u64::from(self.budgets.cores)
             .saturating_sub(inner.gang_active())
             .min(u64::from(u32::MAX)) as u32;
-        let base = budget / n;
-        let mut rem = budget % n;
+        let n_util = inner
+            .table
+            .iter()
+            .flatten()
+            .filter(|e| matches!(e, LedgerEntry::Pool(_, LedgerClass::Utility)))
+            .count() as u32;
+        let n_std = n - n_util;
         let mut charged: u64 = 0;
         let mut widened = 0u32;
-        for (slot, entry) in inner.table.iter().enumerate() {
-            let Some(LedgerEntry::Pool(req)) = entry else { continue };
-            let mut fair = base;
-            if rem > 0 {
-                fair += 1;
-                rem -= 1;
+        let mut tier = |inner: &LedgerInner,
+                        class: LedgerClass,
+                        count: u32,
+                        tier_budget: u32,
+                        charged: &mut u64|
+         -> (u32, u32) {
+            // Returns (widened, Σ targets) over this tier's entries.
+            if count == 0 {
+                return (0, 0);
             }
-            let mut t = req
-                .ceiling
-                .max(1)
-                .min(req.predicted.max(1))
-                .min(fair.max(1));
-            if req.cache_bytes_per_worker > 0 && self.budgets.cache_bytes != u64::MAX {
-                let room = self.budgets.cache_bytes.saturating_sub(charged)
-                    / req.cache_bytes_per_worker;
-                t = t.min(room.min(u64::from(u32::MAX)) as u32);
+            let base = tier_budget / count;
+            let mut rem = tier_budget % count;
+            let mut widened = 0u32;
+            let mut total = 0u32;
+            for (slot, entry) in inner.table.iter().enumerate() {
+                let Some(LedgerEntry::Pool(req, c)) = entry else { continue };
+                if *c != class {
+                    continue;
+                }
+                let mut fair = base;
+                if rem > 0 {
+                    fair += 1;
+                    rem -= 1;
+                }
+                let mut t = req
+                    .ceiling
+                    .max(1)
+                    .min(req.predicted.max(1))
+                    .min(fair.max(1));
+                if req.cache_bytes_per_worker > 0 && self.budgets.cache_bytes != u64::MAX {
+                    let room = self.budgets.cache_bytes.saturating_sub(*charged)
+                        / req.cache_bytes_per_worker;
+                    t = t.min(room.min(u64::from(u32::MAX)) as u32);
+                }
+                let t = t.max(1); // liveness floor: target >= 1 while admitted
+                *charged = charged
+                    .saturating_add(u64::from(t).saturating_mul(req.cache_bytes_per_worker));
+                total += t;
+                let e = &self.entries[slot];
+                let old = e.target.swap(t, Ordering::Relaxed);
+                if t > old {
+                    widened += 1;
+                }
+                e.renudge_left.store(self.budgets.renudge_max, Ordering::Relaxed);
             }
-            let t = t.max(1); // liveness floor: target >= 1 while admitted
-            charged = charged
-                .saturating_add(u64::from(t).saturating_mul(req.cache_bytes_per_worker));
-            let e = &self.entries[slot];
-            let old = e.target.swap(t, Ordering::Relaxed);
-            if t > old {
-                widened += 1;
-            }
-            e.renudge_left.store(self.budgets.renudge_max, Ordering::Relaxed);
+            (widened, total)
+        };
+        let (w_std, std_total) =
+            tier(inner, LedgerClass::Standard, n_std, budget, &mut charged);
+        widened += w_std;
+        if n_util > 0 {
+            let util_budget = if n_std == 0 {
+                budget // work-conserving idle box: utility runs wide
+            } else {
+                self.util_cores
+                    .load(Ordering::Relaxed)
+                    .min(budget.saturating_sub(std_total))
+            };
+            let (w_util, _) =
+                tier(inner, LedgerClass::Utility, n_util, util_budget, &mut charged);
+            widened += w_util;
         }
         inner.cache_charged = charged;
         widened

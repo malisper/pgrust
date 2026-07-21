@@ -448,6 +448,62 @@ impl Runtime {
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
 
+    /// Submit a UTILITY resource group (Track-4 Q0/Q1, scratchpad/night/
+    /// pool-qos-design.md §1/§3): bulk background compute — vacuum drivers,
+    /// index build, COPY after their M4 migrations. Pool-executed with
+    /// ordinary FIFO admission (never overtakes; NOT the Maintenance
+    /// pick-preference class), but served at the utility stride weight
+    /// (p_util, default = the ratified p_min floor: guaranteed nonzero
+    /// share, ≥1/(1+K·p0/p_util) against K fresh queries — no starvation)
+    /// and, under the WS-B ledger, admitted into the CAPPED utility budget
+    /// tier: soft cap B_util (`PGRUST_RUNTIME_UTIL_PERMITS`, default
+    /// cores/8) whenever foreground is admitted, full fair share on an
+    /// idle pool, reclaim on foreground arrival bounded by one claim
+    /// (should_continue's Yield). `width` carries the utility work's
+    /// ceiling/footprint (ledger policy only; None = no-information).
+    /// Kill switch `PGRUST_RUNTIME_UTIL_QOS=0` folds this to a plain
+    /// foreground submit. NO CONSUMERS on this train — the surface lands
+    /// ahead of M4.1 (first consumer, gated on M2 inc-2) so Track 3's
+    /// QoS gate is discharged by the synthetic proofs in tests.rs.
+    pub fn submit_utility(
+        &self,
+        spec: QuerySpec,
+        width: Option<WidthRequest>,
+    ) -> (RgHandle, CompletionWaiter) {
+        let rg = self.sched.submit(spec, false, RgClass::Utility, 0, width, None);
+        (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
+    }
+
+    /// Track-4 kill-switch toggle (tests / A-B arms). Production default is
+    /// the PGRUST_RUNTIME_UTIL_QOS switch, read once at construction —
+    /// default ON (inert without utility submissions). OFF ⇒
+    /// [`Runtime::submit_utility`] behaves as plain [`Runtime::submit`].
+    pub fn set_util_qos(&self, on: bool) {
+        self.sched.set_util_qos(on);
+    }
+
+    pub fn util_qos_enabled(&self) -> bool {
+        self.sched.util_qos_enabled()
+    }
+
+    /// Track-4 Q0 test hook (the set_p_min precedent): probe alternative
+    /// utility stride weights. Production keeps
+    /// PGRUST_RUNTIME_UTIL_PRIORITY (default = p_min = p0/16).
+    pub fn set_p_util(&self, p: u32) {
+        self.sched.set_p_util(p);
+    }
+
+    pub fn p_util(&self) -> u32 {
+        self.sched.p_util_value()
+    }
+
+    /// Track-4 Q1 test hook (the set_ledger_join_threshold_ns precedent):
+    /// per-instance utility permit budget B_util. Production keeps
+    /// PGRUST_RUNTIME_UTIL_PERMITS (default max(1, cores/8)).
+    pub fn set_util_permits(&self, n: u32) {
+        self.sched.ledger.set_util_cores(n);
+    }
+
     /// Submit a PINNED resource group (M1 scan pipelines): executed only by
     /// external participant threads driving [`Runtime::drive_pinned`] — the
     /// query's own bound parallel helpers, which carry the session state the
