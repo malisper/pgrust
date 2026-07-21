@@ -634,7 +634,16 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      exactly: exists only between the drive frame's publish and
     //      clear on ONE thread, torn down before unbind on every path; no
     //      session identity (the binder owns all session state movement).
-    assert_eq!(count_tree(crates), 527, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+        // POOL-QOS interactive tier delta (+1), deliberately NON-SESSION TLS:
+    //   access/transam/parallel/src/standing.rs — the serve-yield block
+    //      {YIELD_DETACHED, CURRENT_SERVE_BOARD, YIELD_PENDING}: pool-
+    //      serve-scoped protocol bookkeeping (the DetachGuard suppression
+    //      mark, the current serve's board Arc for the yield grant, the
+    //      granted-yield pending mark). Engagement-scoped RAII state on
+    //      the executor THREAD (pool_serve installs/clears); no session
+    //      identity, never captured/restored by an envelope — the
+    //      ON_POOL_SERVE classification exactly.
+    assert_eq!(count_tree(crates), 528, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

@@ -246,6 +246,35 @@ const DECAY_LAMBDA_DEFAULT: f64 = 0.5;
 const DECAY_QUANTUM_NS_DEFAULT: u64 = 50_000_000;
 pub(crate) const P_MIN_DEFAULT: u32 = crate::rg::INITIAL_PRIORITY / 16;
 
+/// POOL-QOS kill switch (GL-POOLDB-1 mitigation): `PGRUST_RUNTIME_POOL_QOS=0`
+/// restores the pre-QoS pool exactly (no interactive demand, no serve
+/// yields, no priority permits). Default ON — but the whole mechanism only
+/// runs inside POOL serves' drives (the arms call the yieldable drive only
+/// when serving on a pool thread), so the effective exposure rides the
+/// PGRUST_RUNTIME_POOLDB layering.
+pub(crate) fn pool_qos_enabled() -> bool {
+    static ON: crate::sync::OnceLock<bool> = crate::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_POOL_QOS").map_or(true, |v| v.trim() != "0")
+    })
+}
+
+/// POOL-QOS interactive threshold: an RG whose CURRENT priority is at or
+/// above this is INTERACTIVE-class (fresh / undecayed — the ratified M5-5
+/// decay constants make this "consumed less than one 50ms-CPU quantum").
+/// Default p0/2 = the first decay halving. Calibration knob on the
+/// DECAY_LAMBDA precedent, not product surface.
+pub(crate) fn qos_interactive_p() -> u32 {
+    static V: crate::sync::OnceLock<u32> = crate::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_QOS_INTERACTIVE_P")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .filter(|p| *p > 0)
+            .unwrap_or(crate::rg::INITIAL_PRIORITY / 2)
+    })
+}
+
 /// M5-5 kill switch: `PGRUST_RUNTIME_DECAY=0` pins every RG at p0 (the
 /// M5-4 equal-shares scheduler exactly). Default ON. Read once; tests
 /// toggle per-instance via [`crate::Runtime::set_decay`].
@@ -756,6 +785,23 @@ pub(crate) struct Scheduler {
     nthreads: usize,
     next_seq: AtomicU64,
     next_rg_id: AtomicU64,
+    /// POOL-QOS interactive-demand ledger (GL-POOLDB-1 mitigation): global
+    /// unmet-width count over live FRESH (undecayed) bound RGs. Nonzero ⇔
+    /// demoted pool serves should yield threads/permits at their next
+    /// morsel boundary. One Relaxed load on the demoted step path; zero on
+    /// every other path.
+    qos_demand: AtomicU64,
+    /// Per-slot remaining unmet width backing `qos_demand` (word-paired:
+    /// publish charges, serve starts consume, slot release flushes — the
+    /// global can never leak past its slot's lifetime).
+    slot_bound_need: Vec<AtomicU32>,
+    /// POOL-QOS: external-lane ordinals PARKED by yielded participants,
+    /// keyed to their RG — released when the RG completes (swept at slot
+    /// release). Parking prevents a rejoining serve from leasing the
+    /// departed participant's lane and inheriting its mid-accept per-lane
+    /// slot state (the sink Local↔executor pairing is per-lane). Bounded
+    /// by the board's yield budget (≤ 2×tickets per engagement).
+    parked_lanes: Mutex<Vec<(std::sync::Weak<ResourceGroup>, usize)>>,
     trace: bool,
 }
 
@@ -796,6 +842,9 @@ impl Scheduler {
             global_pass: AtomicU64::new(0),
             ledger: AdmissionLedger::new(nslots, LedgerBudgets::from_env(permits as u32)),
             ledger_on: AtomicBool::new(ledger_default()),
+            qos_demand: AtomicU64::new(0),
+            slot_bound_need: (0..nslots).map(|_| AtomicU32::new(0)).collect(),
+            parked_lanes: Mutex::new(Vec::new()),
             clock,
             params,
             stats: RuntimeStats::default(),
@@ -1276,6 +1325,24 @@ impl Scheduler {
             // exact per-slot sequence sequential mode would produce.
             self.slots[slot].pass.store(ts.rg.pass_account.load(Ordering::Relaxed), Ordering::Relaxed);
         }
+        // POOL-QOS demand charge (under the membership lock, like every
+        // slot-word transition): flush any stale need left on this slot,
+        // then charge the engagement's unmet width iff the RG is bound AND
+        // still INTERACTIVE-class at this publish (a fresh engagement's
+        // first publish always is; a decayed RG's later task-set publishes
+        // are not — demand is a fresh-start latency instrument, not a
+        // width entitlement).
+        if pool_qos_enabled() {
+            self.qos_flush_slot(slot);
+            if let Some(bd) = ts.rg.bound.as_ref() {
+                if ts.rg.priority.load(Ordering::Relaxed) >= qos_interactive_p() && bd.width > 0
+                {
+                    self.slot_bound_need[slot].store(bd.width, Ordering::SeqCst);
+                    self.qos_demand.fetch_add(bd.width as u64, Ordering::SeqCst);
+                    RuntimeStats::add(&self.stats.qos_demand_published, bd.width as u64);
+                }
+            }
+        }
         m.owned[slot] = Some(SlotEntry { seq, ts });
         self.slots[slot].word.store((seq << 1) | 1, Ordering::SeqCst);
         // WS-B JOIN_THRESHOLD (knob-gated; OFF ⇒ advert is true and the
@@ -1302,6 +1369,43 @@ impl Scheduler {
         if advert {
             self.park.wake_all();
         }
+    }
+
+    /// POOL-QOS: return `slot`'s remaining unmet width to zero, settling
+    /// the global demand word. Called at publish (stale flush) and slot
+    /// release — the pairing that keeps `qos_demand` leak-free.
+    fn qos_flush_slot(&self, slot: usize) {
+        let stale = self.slot_bound_need[slot].swap(0, Ordering::SeqCst);
+        if stale > 0 {
+            self.qos_demand.fetch_sub(stale as u64, Ordering::SeqCst);
+        }
+    }
+
+    /// POOL-QOS: live interactive demand (one Relaxed load — the demoted
+    /// step-boundary gate).
+    pub(crate) fn qos_demand_live(&self) -> bool {
+        self.qos_demand.load(Ordering::Relaxed) > 0
+    }
+
+    /// POOL-QOS: park a yielded participant's external-lane ordinal until
+    /// its RG completes (see the field doc). The caller forgot the RAII
+    /// lease; this owns the eventual bit clear.
+    pub(crate) fn park_lane_for_rg(&self, rg: &Arc<ResourceGroup>, ordinal: usize) {
+        lock(&self.parked_lanes).push((Arc::downgrade(rg), ordinal));
+    }
+
+    /// POOL-QOS: release parked lanes whose RG is gone or completed. Runs
+    /// at slot release (completion cadence); the vec is yield-budget-small.
+    fn sweep_parked_lanes(&self) {
+        let mut parked = lock(&self.parked_lanes);
+        parked.retain(|(rg, ordinal)| {
+            let live = rg.upgrade().is_some_and(|rg| rg.completion.try_wait().is_none());
+            if !live {
+                self.external_lanes[ordinal / 64]
+                    .fetch_and(!(1u64 << (ordinal % 64)), Ordering::SeqCst);
+            }
+            live
+        });
     }
 
     fn set_active(&self, slot: usize, class: RgClass) {
@@ -1531,6 +1635,17 @@ impl Scheduler {
         let Some(bd) = ts.rg.bound.clone() else {
             return Step::Retry; // unreachable (caller gated); fail closed
         };
+        // POOL-QOS: this serve is about to meet one unit of the slot's
+        // unmet width — consume it BEFORE the serve so demoted holders stop
+        // yielding toward width that is already being met. Returned on any
+        // non-Served verdict (the pre-claim refusal window is µs).
+        let took_need = pool_qos_enabled()
+            && self.slot_bound_need[ts.slot]
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok();
+        if took_need {
+            self.qos_demand.fetch_sub(1, Ordering::SeqCst);
+        }
         // Keep the io-layer permit flag ACCURATE across the serve: the
         // pool loop noted the permit held, but we are about to give it up —
         // a stale `true` would let a connect-phase uring wait inside the
@@ -1563,6 +1678,16 @@ impl Scheduler {
                 Step::Ran
             }
             BoundServe::Refused | BoundServe::Closed => {
+                // POOL-QOS: the width unit was not met — return it (the
+                // slot may have been flushed/republished meanwhile; only
+                // re-add if the slot's need word still belongs to this
+                // publication's lifetime, which the release-flush pairing
+                // guarantees at worst as a transient over-count settled by
+                // the release flush).
+                if took_need {
+                    self.slot_bound_need[ts.slot].fetch_add(1, Ordering::SeqCst);
+                    self.qos_demand.fetch_add(1, Ordering::SeqCst);
+                }
                 // This worker will not serve THIS publication again
                 // (identity/db refusal, closed board, participant cap):
                 // remember the slot WORD so the pick skips the slot until
@@ -2499,6 +2624,10 @@ impl Scheduler {
         for rg in complete_aborted {
             self.complete_queued_aborted(&rg);
         }
+        // POOL-QOS: completion cadence — free parked lanes whose RG ended.
+        if pool_qos_enabled() {
+            self.sweep_parked_lanes();
+        }
     }
 
     /// Free `slot` and admit the next queued RG into it. Returns RGs popped
@@ -2516,6 +2645,12 @@ impl Scheduler {
             "releasing a slot we do not own"
         );
         m.owned[slot] = None;
+        // POOL-QOS: the slot's engagement is over — flush its unmet width
+        // from the demand word (an interactive RG that completed under-
+        // width must stop drawing yields).
+        if pool_qos_enabled() {
+            self.qos_flush_slot(slot);
+        }
         // WS-B ledger retirement (knob-gated): both completion paths — the
         // sequential last-out and the DAG release — funnel here, BEFORE the
         // waitq pop can admit the next RG into the slot. The wake hint
@@ -2635,5 +2770,27 @@ impl Scheduler {
             rg.cpu_consumed_ns.load(Ordering::Relaxed) / 1000,
             rg.priority.load(Ordering::Relaxed),
         );
+        // GL-POOLDB-1 G3 gap: class-behavior emission channels for the
+        // letter rig (markers_enabled-gated like RGDONE itself).
+        // MORSEL|QOS| — the pool-qos snapshot at this RG's completion.
+        if pool_qos_enabled() {
+            let s = self.stats.snapshot();
+            eprintln!(
+                "MORSEL|QOS|qid={}|rg={}|demand_live={}|demand_published={}|yields={}|prio_acquires={}|permit_defers={}",
+                rg.query_id,
+                rg.rg_id,
+                self.qos_demand.load(Ordering::Relaxed),
+                s.qos_demand_published,
+                s.qos_yields,
+                s.qos_priority_acquires,
+                s.qos_permit_defers,
+            );
+        }
+        // MORSEL|LEDGER| — the WS-B admission-ledger snapshot (the letter
+        // spec's named future-proof grep; ledger default OFF ⇒ absent).
+        if self.ledger_on.load(Ordering::Relaxed) {
+            let ls = self.ledger.snapshot();
+            eprintln!("MORSEL|LEDGER|qid={}|rg={}|{:?}", rg.query_id, rg.rg_id, ls);
+        }
     }
 }

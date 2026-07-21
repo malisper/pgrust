@@ -1274,7 +1274,15 @@ fn try_pool_channel(
     let target = shared.pcxt_shared.get()?;
     let entry = parallel::standing::try_engage_pool(target, k.max(0) as usize)?;
     let payload: Arc<dyn std::any::Any + Send + Sync> = Arc::clone(&entry) as _;
-    Some((entry, runtime::BoundDescriptor { serve: vacuum_pooldb_serve, payload }))
+    Some((entry, runtime::BoundDescriptor {
+        serve: vacuum_pooldb_serve,
+        payload,
+        // POOL-QOS: utility engagements never charge interactive demand
+        // (their RGs run at the utility stride weight, below the
+        // interactive threshold once seeded); width 0 keeps them out of
+        // the demand ledger entirely.
+        width: 0,
+    }))
 }
 
 fn wfin_enabled() -> bool {

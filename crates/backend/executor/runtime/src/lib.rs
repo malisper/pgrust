@@ -766,6 +766,120 @@ impl Runtime {
         }
     }
 
+    /// POOL-QOS (GL-POOLDB-1 mitigation): [`Runtime::drive_pinned`] for a
+    /// POOL SERVE's nested drive — identical STEP-V2 loop plus the three
+    /// class-aware moves, all inert when `PGRUST_RUNTIME_POOL_QOS=0` or no
+    /// interactive demand exists:
+    ///
+    ///   1. INTERACTIVE drives (the RG is still undecayed — the ratified
+    ///      M5-5 constants make that "< 50ms consumed CPU") acquire their
+    ///      permit through the semaphore's PRIORITY lane;
+    ///   2. DEMOTED drives holding a permit release/re-acquire it at step
+    ///      boundaries while priority waiters are parked (first-permit
+    ///      latency for a fresh engagement ≈ one morsel, not one query);
+    ///   3. DEMOTED drives YIELD THE WHOLE SERVE at a step boundary when
+    ///      interactive demand is live and `should_yield` grants (the
+    ///      board's last-active-guarded exit): the drive returns `None`
+    ///      WITHOUT an outcome — the serve's thread frees to pick the
+    ///      waiting interactive engagement; the yielded capacity refills
+    ///      through the board's concurrent ticket cap.
+    ///
+    /// `should_yield` is the arm-side board grant (the runtime cannot name
+    /// the parallel crate); once it returns true the drive exits
+    /// immediately — a grant is always spent. Returns `Some(outcome)` when
+    /// the RG completed under this participant, `None` on a yield.
+    #[cfg(not(loom))]
+    pub fn drive_pinned_yieldable(
+        &self,
+        local: &mut WorkerLocal,
+        rg: &RgHandle,
+        should_yield: &mut dyn FnMut() -> bool,
+    ) -> Option<RgOutcome> {
+        if !crate::sched::step_v2() || !crate::sched::pool_qos_enabled() {
+            return Some(self.drive_pinned(local, rg));
+        }
+        let cprobe = crate::sched::cprobe_enabled();
+        let mut held = false;
+        let mut retries = 0u32;
+        let outcome = loop {
+            if let Some(outcome) = rg.try_outcome() {
+                self.sched.stat_flush_all(local);
+                local.wfin_flush_all();
+                break Some(outcome);
+            }
+            // Class read per iteration: demotion mid-drive downgrades the
+            // drive's posture at the next boundary (one Relaxed load).
+            let interactive =
+                rg.rg.priority.load(crate::sync::atomic::Ordering::Relaxed)
+                    >= crate::sched::qos_interactive_p();
+            let epoch = self.park_epoch();
+            if !held {
+                if interactive {
+                    self.execution_permits().acquire_priority();
+                    stats::RuntimeStats::tick(&self.sched.stats.qos_priority_acquires);
+                } else {
+                    self.execution_permits().acquire();
+                }
+                held = true;
+            }
+            let step = self.sched.worker_step_pinned(local, &rg.rg);
+            match step {
+                Step::Ran => {
+                    retries = 0;
+                    if !interactive {
+                        // Move 3: yield the serve toward live interactive
+                        // demand (board grant = the last-active guard).
+                        if self.sched.qos_demand_live() && should_yield() {
+                            stats::RuntimeStats::tick(&self.sched.stats.qos_yields);
+                            self.sched.stat_flush_all(local);
+                            local.wfin_flush_all();
+                            break None;
+                        }
+                        // Move 2: hand the permit through the priority
+                        // lane's deferral window, then take one back.
+                        if self.execution_permits().priority_waiting() > 0 {
+                            stats::RuntimeStats::tick(&self.sched.stats.qos_permit_defers);
+                            self.execution_permits().release();
+                            self.execution_permits().acquire();
+                        }
+                    }
+                }
+                Step::Retry => {
+                    local.drive.steps_retry += 1;
+                    retries += 1;
+                    if retries >= crate::sched::RETRY_PARK_AFTER {
+                        retries = 0;
+                        self.execution_permits().release();
+                        held = false;
+                        local.drive.parks += 1;
+                        self.park(epoch);
+                    } else if cprobe {
+                        let t0 = std::time::Instant::now();
+                        std::thread::yield_now();
+                        local.drive.retry_spin_ns += t0.elapsed().as_nanos() as u64;
+                    } else {
+                        std::thread::yield_now();
+                    }
+                }
+                Step::Idle => {
+                    retries = 0;
+                    if rg.try_outcome().is_some() {
+                        continue;
+                    }
+                    self.execution_permits().release();
+                    held = false;
+                    local.drive.parks += 1;
+                    self.park(epoch);
+                }
+                Step::Stop => unreachable!("pinned steps do not observe stop"),
+            }
+        };
+        if held {
+            self.execution_permits().release();
+        }
+        outcome
+    }
+
     #[cfg(not(loom))]
     pub fn drive_pinned(&self, local: &mut WorkerLocal, rg: &RgHandle) -> RgOutcome {
         if !crate::sched::step_v2() {
@@ -913,6 +1027,27 @@ impl Runtime {
     /// [`Semaphore::io_section`].
     pub fn execution_permits(&self) -> &Semaphore {
         &self.sched.permits
+    }
+
+    /// POOL-QOS observability: live interactive demand (unmet width of
+    /// fresh bound engagements). Tests + diagnostics.
+    pub fn qos_demand_live(&self) -> bool {
+        self.sched.qos_demand_live()
+    }
+
+    /// POOL-QOS: park a yielded participant's external lane until its RG
+    /// completes — a rejoining serve must never lease the departed
+    /// participant's lane and inherit its mid-accept per-lane slot state
+    /// (the sink Local↔executor pairing is per-lane). The RAII lease is
+    /// consumed; the scheduler owns the eventual bit clear (swept at RG
+    /// completion). NOTE: the forget leaks the lease's Arc<Runtime> strong
+    /// count — bounded by the board yield budget and irrelevant to the
+    /// process-lifetime production runtime; test runtimes that exercise
+    /// yields leak their allocation at exit (accepted, documented).
+    pub fn park_external_lane(&self, lane: ExternalLane, rg: &RgHandle) {
+        let ordinal = lane.ordinal();
+        std::mem::forget(lane);
+        self.sched.park_lane_for_rg(&rg.rg, ordinal);
     }
 
     /// Stream-source producer wake: after `StreamSource::publish`/`close`

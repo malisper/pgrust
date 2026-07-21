@@ -72,6 +72,21 @@ pub struct StandingEngagement {
     /// failure): the worker never reached the arm's payload accounting, so
     /// the board carries them for the leader's nobody-participates check.
     refused: AtomicUsize,
+    /// POOL-QOS yields: detaches that were VOLUNTARY morsel-boundary
+    /// serve-yields (a demoted serve leaving to free its thread for a
+    /// waiting interactive engagement) — never deaths. The leader's died
+    /// needle subtracts these (yield-kind split): a board whose every
+    /// detach is a yield is HEALTHY (capacity refills via the concurrent
+    /// ticket cap below). Write order law: `yielded` bumps strictly BEFORE
+    /// its detach lands (both inside yield_detach's lock), and the leader
+    /// reads `detached` BEFORE `yielded`, so terminal = detached − yielded
+    /// can only UNDER-count terminal detaches (waits instead of erroring —
+    /// the safe direction; a real death stabilizes terminal > 0).
+    yielded: AtomicUsize,
+    /// Yield grants outstanding (granted but not yet yield_detach-settled),
+    /// serialized by the gang mutex with the grant check — the atomic form
+    /// only so the leader can read it without the lock if ever needed.
+    yield_grants: AtomicUsize,
     closed: AtomicBool,
 }
 
@@ -85,6 +100,9 @@ impl StandingEngagement {
     pub fn refused(&self) -> usize {
         self.refused.load(SeqCst)
     }
+    pub fn yielded(&self) -> usize {
+        self.yielded.load(SeqCst)
+    }
     pub fn tickets(&self) -> usize {
         self.tickets
     }
@@ -94,8 +112,19 @@ impl StandingEngagement {
             return None;
         }
         // Over-claims (fetch_add races, bounded by gang size) are returned.
+        //
+        // POOL-QOS: the cap is CONCURRENT participants (claims minus
+        // detaches), not claims-ever — a voluntary serve-yield returns its
+        // capacity, so a later worker can rejoin the engagement (the yield
+        // would otherwise bleed the board's width permanently). `detached`
+        // is read AFTER the claim fetch_add: every detach follows its
+        // claim, so the concurrent count can only be OVER-estimated by the
+        // race (an under-admission — refused claims settle and retry via
+        // the pick; never an over-admission beyond the historical
+        // over-claim class, which the settle below still returns).
         let t = self.claimed.fetch_add(1, SeqCst);
-        if t < self.tickets && !self.closed.load(SeqCst) {
+        let det = self.detached.load(SeqCst);
+        if t - det.min(t) < self.tickets && !self.closed.load(SeqCst) {
             Some(t)
         } else {
             self.claimed.fetch_sub(1, SeqCst);
@@ -111,6 +140,96 @@ impl StandingEngagement {
             None
         }
     }
+
+    /// POOL-QOS serve-yield grant: may THIS participant leave the
+    /// engagement at a morsel boundary? Granted only while at least one
+    /// OTHER active participant remains after every outstanding grant is
+    /// spent — the last-active guard, serialized under the gang mutex so
+    /// two concurrent yielders can never both drain the board (an
+    /// all-yielded board would stall the query until a re-claim and trip
+    /// the leader's death needles). A granted yield MUST proceed to
+    /// [`StandingEngagement::yield_detach`] (no cancel path — the grant is
+    /// spent either way).
+    pub fn try_grant_yield(&self) -> bool {
+        let (lock, _cv) = gang();
+        let _g = pgsync::lock(lock);
+        let claimed = self.claimed.load(SeqCst);
+        let detached = self.detached.load(SeqCst);
+        let grants = self.yield_grants.load(SeqCst);
+        let active = claimed.saturating_sub(detached).saturating_sub(grants);
+        if self.closed.load(SeqCst) || active < 2 {
+            return false;
+        }
+        // Yield budget: at most 2×tickets voluntary leaves per engagement —
+        // bounds the parked-lane inventory (yielded participants park their
+        // external lanes until the RG completes so a rejoining serve can
+        // never inherit a mid-accept per-lane slot) and the rebind churn.
+        if self.yielded.load(SeqCst) + grants >= self.tickets.saturating_mul(2) {
+            return false;
+        }
+        self.yield_grants.fetch_add(1, SeqCst);
+        true
+    }
+
+    /// POOL-QOS yield detach: the granted yielder's OWN detach, performed
+    /// under the gang mutex so the grant settle, the yield-kind count, and
+    /// the detach land atomically against other grant checks. Marks the
+    /// thread so the enclosing serve's DetachGuard (which fires on every
+    /// serve exit) skips its own bump — exactly one detach per serve.
+    pub fn yield_detach(&self) {
+        {
+            let (lock, _cv) = gang();
+            let _g = pgsync::lock(lock);
+            self.yielded.fetch_add(1, SeqCst);
+            self.yield_grants.fetch_sub(1, SeqCst);
+            self.detached.fetch_add(1, SeqCst);
+            YIELD_DETACHED.with(|c| c.set(true));
+        }
+        // The detach wake, outside the lock (DetachGuard's exact shape).
+        latch::SetLatch(types_storage::latch::LatchHandle::proc(
+            self.shared.parallel_leader_proc_number,
+        ));
+        let (lock, cv) = gang();
+        drop(pgsync::lock(lock));
+        cv.notify_all();
+    }
+}
+
+thread_local! {
+    /// Set by yield_detach, consumed by the enclosing serve's DetachGuard
+    /// drop (same thread by construction: the yield happens inside the
+    /// driver, inside serve_ticket's frame).
+    static YIELD_DETACHED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The board of the POOL serve currently running on this thread
+    /// (pool_serve installs it around serve_ticket) — the arms' yield
+    /// callback grants against it without any payload plumbing. None on
+    /// gang serves (the gang board is one-at-a-time and pooldb0 is the
+    /// letter's control arm — it must stay byte-identical).
+    static CURRENT_SERVE_BOARD: std::cell::RefCell<Option<Arc<StandingEngagement>>> =
+        const { std::cell::RefCell::new(None) };
+    /// A yield grant was taken by the current serve's drive; the driver's
+    /// enclosing serve_ticket settles it (yield_detach) after the driver's
+    /// teardown fully returns — the arena-outlives-workers law: the leader
+    /// join must not release before this thread is done with arena refs.
+    static YIELD_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// POOL-QOS: the arms' serve-yield grant callback body. Grants against the
+/// CURRENT pool serve's board (last-active-guarded); a `true` return also
+/// marks the yield pending so serve_ticket settles the detach after the
+/// driver returns. False when not on a pool serve, board unavailable, or
+/// the guard denies.
+pub fn try_grant_yield_current() -> bool {
+    CURRENT_SERVE_BOARD.with(|slot| {
+        let slot = slot.borrow();
+        let Some(board) = slot.as_ref() else { return false };
+        if board.try_grant_yield() {
+            YIELD_PENDING.with(|c| c.set(true));
+            true
+        } else {
+            false
+        }
+    })
 }
 
 /// Everything a worker does after claiming a ticket happens under this
@@ -124,6 +243,14 @@ struct DetachGuard<'a> {
 
 impl Drop for DetachGuard<'_> {
     fn drop(&mut self) {
+        // POOL-QOS: a serve that left via yield_detach already detached
+        // (under the gang lock, with the yield-kind count) — consume the
+        // thread mark and skip the second bump. Same thread by
+        // construction; the mark is set only between yield_detach and this
+        // drop.
+        if YIELD_DETACHED.with(|c| c.replace(false)) {
+            return;
+        }
         // The modeled detach wake (loom spec: runtime/tests/loom.rs
         // `standing_gang_detach_count_join_no_lost_wake`): bump `detached`
         // FIRST, then a lock-mediated notify — either the leader sees the
@@ -326,6 +453,8 @@ pub fn try_engage(shared: &Arc<ParallelShared>, dop: usize) -> Option<Arc<Standi
         claimed: AtomicUsize::new(0),
         detached: AtomicUsize::new(0),
         refused: AtomicUsize::new(0),
+        yielded: AtomicUsize::new(0),
+        yield_grants: AtomicUsize::new(0),
         closed: AtomicBool::new(false),
     });
     g.current = Some(Arc::clone(&entry));
@@ -869,6 +998,16 @@ fn serve_ticket(entry: &Arc<StandingEngagement>, ticket: usize) {
             // worker serving future engagements. DetachGuard already
             // covers the leader's join on this path.
             let r = catch_unwind(AssertUnwindSafe(|| (driver.drive)(shared)));
+            // POOL-QOS: settle a granted serve-yield AFTER the driver has
+            // fully returned (teardown done — no arena refs remain on this
+            // thread) and before the lock-group leave. Covers the caught-
+            // generic-panic arm too (the grant was spent either way); an
+            // exit-committed unwind leaks its grant — the board dies with
+            // the query and a leaked grant only makes the last-active
+            // guard stricter (the safe direction).
+            if YIELD_PENDING.with(|c| c.replace(false)) {
+                entry.yield_detach();
+            }
             if let Err(payload) = r {
                 if payload.is::<ipc::ProcExitThread>()
                     || payload.is::<types_error::PanicExitThread>()
@@ -1065,6 +1204,8 @@ pub fn try_engage_pool(
         claimed: AtomicUsize::new(0),
         detached: AtomicUsize::new(0),
         refused: AtomicUsize::new(0),
+        yielded: AtomicUsize::new(0),
+        yield_grants: AtomicUsize::new(0),
         closed: AtomicBool::new(false),
     }))
 }
@@ -1166,9 +1307,16 @@ pub fn pool_serve(payload: &Arc<dyn std::any::Any + Send + Sync>) -> PoolServe {
     impl Drop for PoolServeReset {
         fn drop(&mut self) {
             ON_POOL_SERVE.with(|c| c.set(false));
+            CURRENT_SERVE_BOARD.with(|slot| slot.borrow_mut().take());
+            // A granted-but-unsettled yield can only remain here on an
+            // unwind (the structured path settles in serve_ticket);
+            // clear the mark so a respawned/reused thread never settles a
+            // stale grant against a future board.
+            YIELD_PENDING.with(|c| c.set(false));
         }
     }
     ON_POOL_SERVE.with(|c| c.set(true));
+    CURRENT_SERVE_BOARD.with(|slot| *slot.borrow_mut() = Some(Arc::clone(&entry)));
     let _reset = PoolServeReset;
     serve_ticket(&entry, ticket);
     PoolServe::Served

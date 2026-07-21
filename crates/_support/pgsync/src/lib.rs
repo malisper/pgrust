@@ -122,24 +122,72 @@ pub fn lock<T: ?Sized>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 pub struct Semaphore {
     permits: Mutex<usize>,
     cv: Condvar,
+    /// POOL-QOS priority lane (interactive-class engagements): count of
+    /// waiters parked in [`Semaphore::acquire_priority`]. AUTHORITATIVE
+    /// updates happen under the `permits` mutex (the loom-explorable
+    /// protocol); this atomic is a lock-free MIRROR for off-lock advisory
+    /// reads ([`Semaphore::priority_waiting`] — the demoted-holder
+    /// step-boundary check). Plain std atomic by design: advisory reads
+    /// need no loom exploration, and pgsync's L-rules forbid loom types in
+    /// statics.
+    prio_waiting: core::sync::atomic::AtomicUsize,
 }
 
 impl Semaphore {
     pub fn new(permits: usize) -> Self {
-        Semaphore { permits: Mutex::new(permits), cv: Condvar::new() }
+        Semaphore {
+            permits: Mutex::new(permits),
+            cv: Condvar::new(),
+            prio_waiting: core::sync::atomic::AtomicUsize::new(0),
+        }
     }
 
     pub fn acquire(&self) {
         let mut g = lock(&self.permits);
-        while *g == 0 {
+        // Defer to the priority lane: while a priority waiter is parked,
+        // ordinary acquirers leave the permit for it (release/priority-take
+        // both notify_all, so this wait cannot be lost). Starvation of the
+        // ordinary lane is bounded by the interactive class's own size —
+        // interactive demand is short by classification (undecayed = <1
+        // decay quantum of consumed CPU).
+        while *g == 0 || self.prio_waiting.load(core::sync::atomic::Ordering::Relaxed) > 0 {
             g = self.cv.wait(g).unwrap_or_else(|e| e.into_inner());
         }
         *g -= 1;
     }
 
+    /// POOL-QOS: acquire ahead of the ordinary lane (interactive-class
+    /// drives). Waits only for a PERMIT; ordinary acquirers defer while any
+    /// priority waiter is parked, and demoted permit holders release at
+    /// morsel boundaries when [`Semaphore::priority_waiting`] is nonzero —
+    /// the two halves that bound interactive first-permit latency by ~one
+    /// morsel instead of one query.
+    pub fn acquire_priority(&self) {
+        let mut g = lock(&self.permits);
+        self.prio_waiting.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        while *g == 0 {
+            g = self.cv.wait(g).unwrap_or_else(|e| e.into_inner());
+        }
+        *g -= 1;
+        let prev = self.prio_waiting.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+        drop(g);
+        if prev == 1 {
+            // Last priority waiter satisfied: wake deferred ordinary
+            // acquirers (permits may remain — they were waiting on the
+            // priority gate, not the count).
+            self.cv.notify_all();
+        }
+    }
+
+    /// Off-lock advisory read: are priority waiters parked? One Relaxed
+    /// load — the demoted-holder step-boundary check's whole cost.
+    pub fn priority_waiting(&self) -> usize {
+        self.prio_waiting.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn try_acquire(&self) -> bool {
         let mut g = lock(&self.permits);
-        if *g == 0 {
+        if *g == 0 || self.prio_waiting.load(core::sync::atomic::Ordering::Relaxed) > 0 {
             return false;
         }
         *g -= 1;
@@ -150,7 +198,11 @@ impl Semaphore {
         let mut g = lock(&self.permits);
         *g += 1;
         drop(g);
-        self.cv.notify_one();
+        // notify_all (was notify_one): the woken waiter must be able to be
+        // the priority one even with ordinary waiters queued ahead in the
+        // condvar's arbitrary order; ordinary wakees re-check the priority
+        // gate and re-park. Zero-waiter cost is unchanged.
+        self.cv.notify_all();
     }
 
     pub fn available(&self) -> usize {

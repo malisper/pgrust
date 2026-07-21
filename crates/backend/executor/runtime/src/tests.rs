@@ -4187,6 +4187,7 @@ mod bound_gate {
         let descriptor = BoundDescriptor {
             serve,
             payload: Arc::clone(&payload) as Arc<dyn std::any::Any + Send + Sync>,
+            width: cap as u32,
         };
         let (h, waiter) = rt.submit_pinned_bound(
             spec_one(&work, Arc::new(SyntheticMorselSource::new(total))),
@@ -4257,6 +4258,7 @@ mod bound_gate {
         let descriptor = BoundDescriptor {
             serve,
             payload: Arc::clone(&payload) as Arc<dyn std::any::Any + Send + Sync>,
+            width: 0,
         };
         let (h, waiter) = rt.submit_pinned_bound_utility(
             spec_one(&work, Arc::new(SyntheticMorselSource::new(64))),
@@ -4296,6 +4298,7 @@ mod bound_gate {
         let descriptor2 = BoundDescriptor {
             serve,
             payload: Arc::clone(&payload2) as Arc<dyn std::any::Any + Send + Sync>,
+            width: 0,
         };
         let (h2, waiter2) = rt.submit_pinned_bound_utility(
             spec_one(&work2, Arc::new(SyntheticMorselSource::new(8))),
@@ -4428,6 +4431,71 @@ mod bound_gate {
             "evictor ran exactly once, before the first unbound task"
         );
         assert!(!crate::session_residue(), "hint cleared by the gate");
+    }
+
+    /// POOL-QOS: the interactive-demand ledger's lifecycle — a fresh bound
+    /// submission charges its width at publish; the slot release at RG
+    /// completion flushes the unmet remainder (leak-free pairing).
+    #[test]
+    fn qos_demand_charges_and_flushes() {
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 1,
+            standbys: 0,
+            slots: 4,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        // refuse_all serve + no pool threads: nothing ever consumes the
+        // demand — the completion flush must return it all.
+        let (work, _payload, h, _waiter) = bound_setup(&rt, 8, 2, true);
+        assert!(rt.qos_demand_live(), "fresh bound publish charged its width");
+        let lane = rt.acquire_external_lane().expect("external lane");
+        let mut local = lane.local();
+        assert_eq!(rt.drive_pinned(&mut local, &h), RgOutcome::Completed);
+        work.assert_all_executed_once();
+        assert!(!rt.qos_demand_live(), "slot release flushed the unmet width");
+    }
+
+    /// POOL-QOS: the semaphore's priority lane — a parked priority waiter
+    /// is served ahead of an ordinary waiter on release, and ordinary
+    /// acquires defer while the priority lane is occupied.
+    #[test]
+    fn semaphore_priority_lane_order() {
+        use std::sync::atomic::AtomicUsize;
+        let s = std::sync::Arc::new(crate::sync::Semaphore::new(1));
+        s.acquire(); // hold the only permit
+        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+
+        let s1 = std::sync::Arc::clone(&s);
+        let o1 = std::sync::Arc::clone(&order);
+        let prio = std::thread::spawn(move || {
+            s1.acquire_priority();
+            o1.lock().unwrap().push("prio");
+            s1.release();
+        });
+        // The ordinary waiter arrives only after the priority waiter is
+        // parked (deterministic ordering for the assertion).
+        while s.priority_waiting() == 0 {
+            std::thread::yield_now();
+        }
+        let s2 = std::sync::Arc::clone(&s);
+        let o2 = std::sync::Arc::clone(&order);
+        let norm = std::thread::spawn(move || {
+            s2.acquire();
+            o2.lock().unwrap().push("norm");
+            s2.release();
+        });
+        // Give the ordinary waiter time to park behind the gate.
+        static SPIN: AtomicUsize = AtomicUsize::new(0);
+        while SPIN.fetch_add(1, Ordering::Relaxed) < 10_000 {
+            std::hint::spin_loop();
+        }
+        s.release();
+        prio.join().unwrap();
+        norm.join().unwrap();
+        let order = order.lock().unwrap();
+        assert_eq!(order.as_slice(), ["prio", "norm"], "priority lane served first");
+        assert_eq!(s.available(), 1, "permit balance");
     }
 
     /// Abort composes with the bound serve exactly as with any pinned

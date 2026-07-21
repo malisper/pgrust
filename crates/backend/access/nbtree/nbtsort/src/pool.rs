@@ -858,6 +858,7 @@ pub(crate) fn pool_feed_spools<'mcx>(
     let descriptor = runtime::BoundDescriptor {
         serve: btbuild_pooldb_serve,
         payload: Arc::clone(&entry) as Arc<dyn std::any::Any + Send + Sync>,
+        width: 0, // utility: never charges interactive demand
     };
     let (rg, waiter) = rt.submit_pinned_bound_utility(
         runtime::QuerySpec {
