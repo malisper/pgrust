@@ -833,6 +833,20 @@ fn k2_heapfeed_live() -> bool {
 /// this many times its rows keeps the hash election safely dominant.
 const JHEAP_NL_MARGIN: f64 = 4.0;
 
+/// GL-COST-2 x tpch-flips merge carve: the conversion-flip knob paths
+/// (aggjoinnum / decoroot-grouped / joinfilters cbstore-int) borrowed the
+/// RIDER guards as their provisional floor; the GL-COST-2 unwire zeroed
+/// those rider rectangles on the riders' OWN witnessed grids (pure-
+/// bootstrap int-key shapes, rt/legacy 3.0-6.4x), but the knob paths'
+/// shapes were measured SEPARATELY by their GL letters (NUMJOIN-1 /
+/// DECOROOT-1 / FILTERQUALS-1, all FLIP-RECOMMENDED with wins) — so they
+/// RETAIN the pre-unwire hashjoin-nbatch1 2M rectangle under their own
+/// name. Those letters own re-measuring it; the riders' zeroed guard
+/// governs only the finish(rider-class) bootstrap path.
+fn hj_knobpath_2m_guard() -> FloorGuard {
+    FloorGuard { max_rows: 2_000_000.0, ..NO_GUARD }
+}
+
 /// PROVISIONAL floor for heap-fed join shapes: the heap fold arms'
 /// economics (rows>=1M & dop>=12 — the HeapCmpFoldPrefix/AggPolyHeapPlain
 /// reuse; the scoping's "heap fold floor" note), with the hashjoin-nbatch1
@@ -2915,7 +2929,7 @@ fn classify_multibuild<'mcx>(
             run,
             "aggjoinnum",
             "multibuild-numeric",
-            class_guard(CoverClass::CbHashJoinMultiBuild),
+            hj_knobpath_2m_guard(),
             relids[0],
             0.0,
             max_rows,
@@ -3640,7 +3654,9 @@ fn classify_aggjoin_grouped<'mcx>(
         } else if n_bytes_keys > 0 {
             cbkeys_guard()
         } else {
-            class_guard(CoverClass::CbHashJoinGroupedAgg)
+            // GL-COST-2 carve: the knob path keeps its letters' measured
+            // rectangle; the rider's zeroed guard governs only finish().
+            hj_knobpath_2m_guard()
         };
         return finish_knob_path(
             run,
@@ -3702,7 +3718,7 @@ fn classify_aggjoin_grouped<'mcx>(
             run,
             tag,
             label,
-            class_guard(CoverClass::CbHashJoinGroupedAgg),
+            hj_knobpath_2m_guard(),
             relids[0],
             ngroups,
             max_rows,
