@@ -5747,16 +5747,17 @@ pub fn pd_derive_spec(
     }))
 }
 
-/// Vocab aggfnoids map through the transfn whitelist; re-exported check the
-/// leader arm uses to pair `pd_derive_spec` with its admission story.
+/// Vocab aggfnoids map through the transfn whitelist; re-exported checks
+/// the runtime distinct sink pairs with `pd_derive_spec`'s admission story.
+/// (The GM-hybrid-only surface — the handoff registry, the export/adopt
+/// snapshot, and the leader-side parallel-merge drivers — was DELETED at
+/// Phase-5 D1.)
 pub use pardistinct::{
-    pd_adopt_registry, pd_bucket_precount, pd_clear_thread_registry, pd_concat_buckets,
-    pd_emit_bucket, pd_empty_grouped_table, pd_export_registry, pd_merge_bucket,
-    pd_merge_bucket_refs, pd_parallel_merge_grouped, pd_parallel_merge_plain, pd_paremit_recipe,
-    pd_paremit_state, pd_registry_get, pd_registry_insert, pd_registry_nonempty,
-    pd_registry_remove, pd_route_value_records, pd_spill_bytes_mode, pd_spill_min_record_width,
+    pd_bucket_precount, pd_concat_buckets, pd_emit_bucket, pd_empty_grouped_table,
+    pd_merge_bucket, pd_merge_bucket_refs, pd_paremit_recipe, pd_paremit_state,
+    pd_route_value_records, pd_spill_bytes_mode, pd_spill_min_record_width,
     pd_spill_record_width, pd_table_from_spill, PdBucketMerger, PdBuilder, PdEmitBucket,
-    PdEmitRecipe, PdExport, PdFeed, PdHandedTable, PdHandoff, PdKeyKind, PdMerged, PdParemitCol,
+    PdEmitRecipe, PdFeed, PdHandedTable, PdKeyKind, PdMerged, PdParemitCol,
     PdParemitState, PdSinkLocal, PdSinkMerged, PdSpec, PdTopnCand, PdTopnKey, PdTopnSpec,
     PD_SINK_GROUP_PARTS,
 };
@@ -5913,37 +5914,10 @@ pub fn agg_pdemit_reset(node: &mut AggStateData<'_>) {
     }
 }
 
-/// Plain-shape adoption for ZERO input rows anywhere: fresh init states +
-/// empty sets ARE the empty-input contract; finish emits the one row.
-pub fn agg_plain_adopt_empty<'mcx>(
-    node: &mut AggStateData<'mcx>,
-    estate: &mut EStateData<'mcx>,
-) -> PgResult<Option<ExecSlotId>> {
-    debug_assert_eq!(node.plan.aggstrategy, AGG_PLAIN);
-    initialize_aggregates(node, estate)?;
-    plain_finish(node, estate)
-}
-
-/// Plain-shape (nkeys == 0) merged adoption: install the merged
-/// exact-DISTINCT sets into the pertrans slots and finish through the
-/// unchanged plain finalize (set replay + finalfns + qual + project). The
-/// caller armed `force_distinct_set` and owns the one-row contract.
-pub fn agg_plain_adopt_merged<'mcx>(
-    node: &mut AggStateData<'mcx>,
-    estate: &mut EStateData<'mcx>,
-    mut merged: pardistinct::PdMerged<'mcx>,
-) -> PgResult<Option<ExecSlotId>> {
-    debug_assert_eq!(node.plan.aggstrategy, AGG_PLAIN);
-    debug_assert!(node.force_distinct_set);
-    debug_assert_eq!(merged.ngroups, 1);
-    debug_assert_eq!(merged.dsets.len(), node.pertrans_sort.len());
-    initialize_aggregates(node, estate)?;
-    for (j, ps) in node.pertrans_sort.iter_mut().enumerate() {
-        debug_assert!(!ps.dset_degraded);
-        ps.dset = merged.dsets[j].take();
-    }
-    plain_finish(node, estate)
-}
+// (agg_plain_adopt_empty / agg_plain_adopt_merged — the GM-hybrid plain
+// leader drive's adoption tail — were DELETED at Phase-5 D1 with the
+// lane-v2 pardistinct drives. The runtime plain-distinct sink installs its
+// merged sets through plainpd::agg_plain_install_merged_set instead.)
 
 /// Metadata-answerable transitions (lane-v2 metaagg arm); None = not
 /// answerable (the fold/per-row drives own the node).
