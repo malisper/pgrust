@@ -897,33 +897,41 @@ pub fn ProcKill(_code: i32, _arg: usize) {
         debug_assert!(!plist_is_empty(&leader.lockGroupMembers));
         plist_delete(hdr, &leader.lockGroupMembers, procno, group_link_of);
         if plist_is_empty(&leader.lockGroupMembers) {
-            leader.lockGroupLeader.store(INVALID_PROC_NUMBER, Relaxed);
             if leader_no != procno {
-                // Leader exited first; return its PGPROC. TRIPWIRE
-                // (concurrent-window mode-P forensics): an exited leader
-                // always has pid==0 (its own ProcKill stored it before
-                // skipping the deferred return). A NONZERO pid here means
-                // this group state is corrupt and the push would hand a
-                // LIVE backend's PGPROC to the freelist — the observed
-                // "latch already owned by PID <n>" / "ProcKill() called in
-                // child process" theft pair. Refuse the push (bounded leak:
-                // one PGPROC) and log the state instead of corrupting.
-                let leader_pid = leader.pid.load(Relaxed);
-                if leader_pid != 0 {
-                    // stderr (no elog dep this low): reaches the server log
-                    // like the panics this tripwire preempts.
-                    eprintln!(
-                        "WARNING: lock group corruption: leader procno \
-                         {leader_no} still live (pid {leader_pid}) at \
-                         member-empty return; refusing freelist push \
-                         (member procno {procno})"
-                    );
-                } else {
-                    let list = leader.procgloballist.get().expect("leader freelist");
-                    spin_acquire(&ProcStructLock);
+                // Leader exited first (its detach block removed its own
+                // link — a live attached leader is always on its own list,
+                // so this transition is proof it already died or parked).
+                // DEFERRED-RETURN ARBITRATION under ProcStructLock: the
+                // pointer clear, the pid read, and the push form one
+                // critical section against the leader's own freelist tail
+                // (which stores pid=0 and reads this pointer under the
+                // same lock). Exactly one side returns the PGPROC:
+                //   pid == 0  -> the leader's tail CS already ran; it saw
+                //                its pointer still set (== leader_no) and
+                //                skipped its self-push: WE return it.
+                //   pid != 0  -> the leader has not reached its tail CS
+                //                (or wretain-parked and never will): it
+                //                owns its own return — our pointer clear
+                //                makes its gate read INVALID and self-push
+                //                (a parked leader keeps its retained PGPROC
+                //                and reattaches group-clean). NOT a leak,
+                //                NOT corruption: the designed handoff.
+                // Racy-shape note: C's proc.c shares the unlocked shape
+                // (pid=0 store and the tail gate outside any lock common
+                // with this arm); stock C never gets here concurrently —
+                // parallel-context teardown waits for worker DEATH before
+                // the leader's ProcKill, and only dying procs detach. Our
+                // LeaveLockGroup (live pool workers, per-engagement) makes
+                // the window hot, hence the stronger locking here.
+                let list = leader.procgloballist.get().expect("leader freelist");
+                spin_acquire(&ProcStructLock);
+                leader.lockGroupLeader.store(INVALID_PROC_NUMBER, Relaxed);
+                if leader.pid.load(Relaxed) == 0 {
                     plist_push_head(hdr, freelist(hdr, list), leader_no, links_of);
-                    ProcStructLock.unlock();
                 }
+                ProcStructLock.unlock();
+            } else {
+                leader.lockGroupLeader.store(INVALID_PROC_NUMBER, Relaxed);
             }
         } else if leader_no != procno {
             proc.lockGroupLeader.store(INVALID_PROC_NUMBER, Relaxed);
@@ -949,14 +957,23 @@ pub fn ProcKill(_code: i32, _arg: usize) {
     g::SetMyProcNumber(INVALID_PROC_NUMBER);
     latch_seams::disown_latch::call(&proc.procLatch);
 
-    proc.pid.store(0, Relaxed);
     proc.vxid.procNumber.store(INVALID_PROC_NUMBER, Relaxed);
     proc.vxid.lxid.store(InvalidLocalTransactionId, Relaxed);
 
     let list = proc.procgloballist.get().expect("proc freelist");
     spin_acquire(&ProcStructLock);
-    // Still being a group leader here means we exited before our children;
-    // the last remaining child returns this PGPROC instead.
+    // pid=0 INSIDE the ProcStructLock section: it is the deferred-return
+    // arbiter. The last member's empty-transition arm (ProcKill member arm
+    // above / LeaveLockGroup) clears our lockGroupLeader and reads this
+    // pid under the same lock — pid still nonzero there means we have not
+    // passed this gate yet and the member must NOT push us (we self-push
+    // below, seeing the pointer it cleared). C stores pid=0 before its
+    // spinlock; see the arbitration comment in the member arm for why the
+    // port needs the stronger ordering (live-member LeaveLockGroup churn).
+    proc.pid.store(0, Relaxed);
+    // Still being a group leader here means we exited before our children
+    // AND the last member has not yet run its empty transition; that
+    // member returns this PGPROC instead (its arm will read pid==0).
     if proc.lockGroupLeader.load(Relaxed) == INVALID_PROC_NUMBER {
         debug_assert!(plist_is_empty(&proc.lockGroupMembers));
         plist_push_tail(hdr, freelist(hdr, list), procno, links_of);
@@ -1022,24 +1039,24 @@ pub fn LeaveLockGroup() {
     // stale pointer would advertise membership in a recycled PGPROC slot.
     proc.lockGroupLeader.store(INVALID_PROC_NUMBER, Relaxed);
     if plist_is_empty(&leader.lockGroupMembers) {
+        // Leader exited first (a live attached leader is always on its own
+        // members list). DEFERRED-RETURN ARBITRATION under ProcStructLock —
+        // the exact protocol of ProcKill's member arm (see the comment
+        // there): clear the dead leader's pointer and read its pid in one
+        // critical section against the leader's own freelist tail.
+        //   pid == 0  -> its tail CS already skipped the self-push: we
+        //               return the PGPROC (exactly once).
+        //   pid != 0  -> it has not reached its tail CS (it will self-push
+        //               after seeing this clear), or it wretain-parked and
+        //               keeps its retained PGPROC. Designed handoff, no
+        //               push here.
+        let list = leader.procgloballist.get().expect("leader freelist");
+        spin_acquire(&ProcStructLock);
         leader.lockGroupLeader.store(INVALID_PROC_NUMBER, Relaxed);
-        // Leader exited first; return its PGPROC (ProcKill parity).
-        // TRIPWIRE: same live-leader refusal as ProcKill's arm — a live
-        // leader here means group-state corruption; refuse the push
-        // (bounded leak) rather than hand a live PGPROC to the freelist.
-        let leader_pid = leader.pid.load(Relaxed);
-        if leader_pid != 0 {
-            eprintln!(
-                "WARNING: lock group corruption: leader procno {leader_no} \
-                 still live (pid {leader_pid}) at member-empty return; \
-                 refusing freelist push (leaving member procno {procno})"
-            );
-        } else {
-            let list = leader.procgloballist.get().expect("leader freelist");
-            spin_acquire(&ProcStructLock);
+        if leader.pid.load(Relaxed) == 0 {
             plist_push_head(hdr, freelist(hdr, list), leader_no, links_of);
-            ProcStructLock.unlock();
         }
+        ProcStructLock.unlock();
     }
     lwlock::LWLockRelease(leader_lwlock).expect("partition unlock in LeaveLockGroup");
 }
