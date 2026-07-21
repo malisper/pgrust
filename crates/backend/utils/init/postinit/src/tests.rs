@@ -71,10 +71,12 @@ fn fastpath_groups_default_is_four() {
 #[test]
 fn initialize_max_backends_sums_and_gates() {
     install_test_gucs();
-    // Boot values: 100 + 16 + 8 + 10 + 2.
+    // Boot values: 100 + 16 + 16 + 10 + 2 (max_connections + autovacuum_worker_slots
+    // + max_worker_processes + max_wal_senders + NUM_SPECIAL_WORKER_PROCS).
+    // max_worker_processes moved 8 -> 16 with the t34 jit/parallel shipped defaults.
     init_small::globals::SetMaxBackends(0);
     InitializeMaxBackends().unwrap();
-    assert_eq!(init_small::globals::MaxBackends(), 136);
+    assert_eq!(init_small::globals::MaxBackends(), 144);
 }
 
 #[test]
