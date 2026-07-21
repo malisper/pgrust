@@ -153,6 +153,48 @@ impl RowEmitSink {
             clear_on_finish,
         }
     }
+
+    /// Copy the produced slot into a fresh owned bounded image (via the reset
+    /// scratch bump context). Shared by the push-pipeline `accept` path and the
+    /// bgworker direct-drive `emit_blocking` path.
+    fn materialize(
+        &mut self,
+        tuple: ExecSlotId,
+        estate: &mut EStateData<'_>,
+    ) -> PgResult<MinImage> {
+        let slot_mcx = estate.es_query_cxt;
+        let mt = {
+            let slot = estate.slot_mut(tuple);
+            ::exectuples::exec_copy_slot_minimal_tuple(slot, slot_mcx, self.scratch.mcx(), 0)?
+        };
+        let img = MinImage::from_bytes(mt.as_bytes());
+        drop(mt);
+        // Bounded scratch: the owned image carries the bytes now.
+        self.scratch.reset();
+        Ok(img)
+    }
+
+    /// bgworker DIRECT-DRIVE emit (World-B producer body): materialize the
+    /// produced slot and push into this worker's ring, BLOCKING on a full ring
+    /// under the K-standby permit (`runtime::blocking_io_section`). Returns
+    /// `false` iff demand was closed (LIMIT) before the row could be buffered —
+    /// the caller must then stop producing. Unlike `accept` (the push-pipeline
+    /// Sink face, which returns `Full` and pauses), a dedicated producer thread
+    /// blocks here — the correct model for the parallel-context worker body.
+    pub(super) fn emit_blocking(
+        &mut self,
+        tuple: ExecSlotId,
+        estate: &mut EStateData<'_>,
+    ) -> PgResult<bool> {
+        let img = self.materialize(tuple, estate)?;
+        match self.producer.push_blocking(img, ::runtime::blocking_io_section) {
+            PushOutcome::Pushed => {
+                estate.es_processed += 1;
+                Ok(true)
+            }
+            PushOutcome::DemandClosed => Ok(false),
+        }
+    }
 }
 
 impl<'mcx> Sink<'mcx> for RowEmitSink {
@@ -165,18 +207,7 @@ impl<'mcx> Sink<'mcx> for RowEmitSink {
         // a fresh owned image from the produced slot.
         let img = match self.pending.take() {
             Some(p) => p,
-            None => {
-                let slot_mcx = estate.es_query_cxt;
-                let mt = {
-                    let slot = estate.slot_mut(tuple);
-                    ::exectuples::exec_copy_slot_minimal_tuple(slot, slot_mcx, self.scratch.mcx(), 0)?
-                };
-                let img = MinImage::from_bytes(mt.as_bytes());
-                drop(mt);
-                // Bounded scratch: the owned image carries the bytes now.
-                self.scratch.reset();
-                img
-            }
+            None => self.materialize(tuple, estate)?,
         };
 
         match self.producer.try_push(img) {
