@@ -70,6 +70,18 @@ pub(super) struct PassthroughShared {
     error: Mutex<Option<Box<PgError>>>,
     /// Set when any worker recorded an error (fast skip for later morsels).
     failed: AtomicBool,
+    /// Leader-producer mode: the leader's caller-worker lane ordinal (its
+    /// `run_morsel` worker index). Set before the caller drive starts;
+    /// `run_morsel` takes the NON-PARKING leader emit path for this index.
+    leader_lane: OnceLock<usize>,
+    /// Leader-producer mode: the leader's produced images. The leader NEVER
+    /// parks producing (it is the drainer — a park would self-deadlock), so
+    /// its emit is stash-append instead of `push_blocking`; the pump drains
+    /// the stash to the wire alongside the rings. Bounded by ONE claim's rows
+    /// (the drain-first claim gate ends the leader's task at the next claim
+    /// boundary once the stash is non-empty). Leader-thread-only in practice;
+    /// the Mutex is uncontended shape (Send/Sync for the work body).
+    leader_stash: Mutex<Vec<MinImage>>,
 }
 
 impl PassthroughShared {
@@ -93,7 +105,23 @@ impl PassthroughShared {
             exited: AtomicUsize::new(0),
             error: Mutex::new(None),
             failed: AtomicBool::new(false),
+            leader_lane: OnceLock::new(),
+            leader_stash: Mutex::new(Vec::new()),
         })
+    }
+
+    fn set_leader_lane(&self, lane: usize) {
+        let _ = self.leader_lane.set(lane);
+    }
+
+    fn leader_stash_empty(&self) -> bool {
+        self.leader_stash.lock().unwrap_or_else(|p| p.into_inner()).is_empty()
+    }
+
+    /// Drain the leader stash (pump side; leader thread only).
+    fn take_leader_stash(&self, into: &mut Vec<MinImage>) {
+        let mut g = self.leader_stash.lock().unwrap_or_else(|p| p.into_inner());
+        into.append(&mut g);
     }
 
     pub(super) fn set_rg(&self, rg: runtime::WeakRgHandle) {
@@ -235,13 +263,17 @@ impl PassthroughShared {
                         )));
                     };
                     let mut src = SeqScanSource::new(&mut *ss);
+                    // Leader-producer mode: the leader's claims emit into the
+                    // stash (non-parking); workers emit through their rings.
+                    let stash = (self.leader_lane.get() == Some(&worker))
+                        .then_some(&self.leader_stash);
                     // Heap sources have no interior boundaries → one positioned
                     // range (`Segments::whole`); the segment loop matches the
                     // fold arm's `drive_claim_segments` shape.
                     let mut segs = runtime::Segments::whole(range.start..range.end);
                     while let Some(seg) = segs.next() {
                         src.position(estate, seg)?;
-                        if !emit_drain(sink, &mut src, estate)? {
+                        if !emit_drain(sink, &mut src, estate, stash)? {
                             // Demand closed (LIMIT): stop this claim.
                             break;
                         }
@@ -259,13 +291,16 @@ impl PassthroughShared {
 }
 
 /// Drive one positioned segment: `next_batch` → per surviving row `emit(i)` →
-/// `RowEmitSink::emit_blocking` (materialize + blocking push). Returns `false`
-/// iff demand closed (LIMIT) — the caller stops. Mirrors the fold drain's
-/// batch loop with the sink swapped for the funnel producer.
+/// the sink emit — `RowEmitSink::emit_blocking` (materialize + blocking push)
+/// for workers, `RowEmitSink::emit_stash` (materialize + non-parking stash
+/// append) for the leader-producer (`stash` = Some). Returns `false` iff
+/// demand closed (LIMIT) — the caller stops. Mirrors the fold drain's batch
+/// loop with the sink swapped for the funnel producer.
 fn emit_drain<'a, 'mcx>(
     sink: &mut RowEmitSink,
     src: &mut SeqScanSource<'a, 'mcx>,
     estate: &mut ::executils::EStateData<'mcx>,
+    stash: Option<&std::sync::Mutex<Vec<MinImage>>>,
 ) -> PgResult<bool> {
     loop {
         let n = src.next_batch(estate)?;
@@ -280,7 +315,11 @@ fn emit_drain<'a, 'mcx>(
         ::postgres_seams::check_for_interrupts::call()?;
         for i in 0..n {
             if let Some(slot) = src.emit(estate, i)? {
-                if !sink.emit_blocking(slot, estate)? {
+                let cont = match stash {
+                    Some(s) => sink.emit_stash(slot, estate, s)?,
+                    None => sink.emit_blocking(slot, estate)?,
+                };
+                if !cont {
                     return Ok(false);
                 }
             }
@@ -485,7 +524,19 @@ fn engage_passthrough_inner(
     limit: Option<u64>,
     emit_row: impl FnMut(MinImage) -> PgResult<bool>,
 ) -> PgResult<PassthroughEngageOutcome> {
-    let pcxt = parallel::CreateParallelContext("postgres", "pgrust_runtime_passthrough_main", dop)?;
+    // GL-FUNNEL-2 producer-count parity vs classic Gather (whose leader
+    // participates, giving N+1 producers at DOP N): leader-producer mode makes
+    // the funnel leader the +1 (gang stays N); otherwise DOP+1 admission
+    // launches one extra gang producer (default ON; _PLUS1=0 restores N).
+    let launch_n = if funnel_leader_mode() {
+        dop
+    } else if funnel_plus1() {
+        dop + 1
+    } else {
+        dop
+    };
+    let pcxt =
+        parallel::CreateParallelContext("postgres", "pgrust_runtime_passthrough_main", launch_n)?;
     let mut submitted: Option<runtime::RgHandle> = None;
     let funnel_body = Arc::clone(funnel);
 
@@ -523,7 +574,8 @@ fn engage_passthrough_inner(
         let mut stop_emitting = false;
         let mut all_exited_seen = false;
 
-        // Non-blocking drain pass: emit every currently-available row, freeing
+        // Non-blocking drain pass: emit every currently-available row (worker
+        // rings round-robin, then the leader-producer stash), freeing
         // producers parked on full rings. Never parks (so the poll below runs).
         let mut pump = |drain: &mut runtime::FunnelDrain<MinImage>,
                         emitted: &mut u64,
@@ -544,10 +596,142 @@ fn engage_passthrough_inner(
                             funnel_body.close_demand();
                         }
                     }
-                    DrainStep::Idle | DrainStep::Eof => return Ok(()),
+                    DrainStep::Idle | DrainStep::Eof => break,
                 }
             }
+            // Leader-producer stash (empty in every other mode): one lock per
+            // pump pass, bounded by one leader claim's rows.
+            if !payload.leader_stash_empty() {
+                let mut sb: Vec<MinImage> = Vec::new();
+                payload.take_leader_stash(&mut sb);
+                for img in sb {
+                    if *stop {
+                        drop(img);
+                        continue;
+                    }
+                    let cont = emit_row(img)?;
+                    *emitted += 1;
+                    if !cont || limit.is_some_and(|n| *emitted >= n) {
+                        *stop = true;
+                        funnel_body.close_demand();
+                    }
+                }
+            }
+            Ok(())
         };
+
+        // GL-FUNNEL-2 increment 2 — LEADER-PRODUCER MODE: the leader drives
+        // the SAME pinned RG through the sanctioned caller-worker machinery
+        // (`drive_with_duties_parked`), alternating drain passes with morsel
+        // production. Fail-closed: lane exhaustion falls through to the
+        // pure-drain loop below.
+        //
+        // INVARIANT RE-PROOF for the producing leader (the funnel.rs
+        // invariant #4 pure-drain argument no longer applies verbatim):
+        // 1. DRAIN-FIRST at claim granularity: `claim_duty` admits a claim
+        //    ONLY when every ring AND the stash read empty; it also runs at
+        //    every claim boundary of a leader task, ending the task as soon
+        //    as anything is drainable. The leader is "busy producing" only
+        //    when there was nothing to drain, for at most ONE claim.
+        // 2. NO SELF-DEADLOCK: the leader's emit is `emit_stash` — a
+        //    non-parking append — never `push_blocking`. The leader can
+        //    therefore never park as a producer; its only waits are the
+        //    bounded `idle_park` latch quantum (armed drain-waiter flag →
+        //    any worker push sets the latch) and never-while-holding-work.
+        // 3. WORKERS PARKED ON FULL RINGS ARE FREED IN BOUNDED TIME: a
+        //    leader claim is bounded (sizer-bounded block range); after it,
+        //    control returns to the step loop whose `duty` pumps every ring.
+        //    No wait cycle exists: workers wait only on the leader's pump,
+        //    which the leader reaches after bounded work; the leader waits
+        //    only on the latch with a bounded quantum + wake hook.
+        // 4. LAST-WORKER-OUT / GENERATION UNCHANGED: the leader participates
+        //    through the ordinary external-lane pinned-step machinery
+        //    (worker_step_pinned) — pin board, fin_counter, generation join
+        //    all standard; `finalize` (mark_all_done) may run on the leader,
+        //    which is sound (atomic stores + wakes).
+        // 5. STASH BOUND: one claim's rows (drain-first gate #1) — the same
+        //    order of buffering as Gather's per-worker tuple queue.
+        // 6. ERROR DISCIPLINE: a duty/park error aborts + drains the RG
+        //    inside the caller drive (CallerWorker contract) before Err
+        //    surfaces; worker errors abort the RG via payload.fail and
+        //    surface from the post-completion take_error, as in pure-drain
+        //    mode. The all-refused/all-stopped liveness reaps are NOT needed
+        //    here: the leader itself drives the RG to completion even if
+        //    every gang worker refuses or dies without error (their error
+        //    path still aborts the RG through the message channel duty).
+        if funnel_leader_mode() {
+            if let Some(mut cw) = runtime::CallerWorker::enter(rt) {
+                // run_morsel receives the PIN-BOARD worker index, which for an
+                // external lane is `nthreads + lane ordinal` (lib.rs worker
+                // index space) — NOT the bare lane ordinal. The first smoke of
+                // this mode hung on exactly that mismatch: the leader took the
+                // worker push_blocking path and parked on its own full ring.
+                payload.set_leader_lane(rt.nthreads() + cw.lane_ordinal());
+                // The leader is a real participant: count it started so the
+                // post-completion "started == 0 → Fallback" can never rerun a
+                // scan whose rows the leader already emitted.
+                payload.started.fetch_add(1, Ordering::SeqCst);
+                let drive = {
+                    let pump = &mut pump;
+                    let drain = &mut drain;
+                    let emitted = &mut emitted;
+                    let stop_emitting = &mut stop_emitting;
+                    let mut duty = || -> PgResult<()> {
+                        // Waiter-flag pattern, caller form: arm, then pump
+                        // (the sweep); a push after the arm sets the latch.
+                        funnel_body.arm_drain_wait();
+                        pump(drain, emitted, stop_emitting, emit_row)?;
+                        ::postgres_seams::check_for_interrupts::call()?;
+                        parallel::ProcessParallelMessages()?;
+                        Ok(())
+                    };
+                    let mut claim_duty = || {
+                        !funnel_body.demand_closed()
+                            && funnel_body.all_rings_empty()
+                            && payload.leader_stash_empty()
+                    };
+                    let mut idle_park =
+                        || -> PgResult<()> { parallel::wait_parallel_finish_quantum() };
+                    cw.drive_with_duties_parked(
+                        rt,
+                        &rg,
+                        &mut duty,
+                        &mut claim_duty,
+                        &mut idle_park,
+                    )
+                };
+                let outcome = match drive {
+                    Ok(o) => o,
+                    Err(e) => {
+                        // CallerWorker discipline: the RG is already aborted
+                        // AND drained. Release the leader's own executor
+                        // (mid-batch possible) and surface.
+                        let _ = teardown_worker_exec_pt(false);
+                        return Err(e);
+                    }
+                };
+                // Tear down the leader's thread-local executor (built iff the
+                // leader claimed at least one morsel; no-op otherwise) BEFORE
+                // returning — the session thread must never carry it into a
+                // later query.
+                let self_errored = payload.failed.load(Ordering::SeqCst);
+                teardown_worker_exec_pt(!self_errored)?;
+                // Post-completion tail: drain rings + stash to EOF.
+                pump(&mut drain, &mut emitted, &mut stop_emitting, emit_row)?;
+                if let Some(e) = payload.take_error() {
+                    return Err(e);
+                }
+                if outcome == runtime::RgOutcome::Aborted {
+                    ::postgres_seams::check_for_interrupts::call()?;
+                    return Err(Box::new(PgError::new(
+                        ERROR,
+                        "passthrough pipeline aborted",
+                    )));
+                }
+                return Ok(PassthroughEngageOutcome::Completed(emitted));
+            }
+            // Lanes exhausted: fall through to pure-drain (fail-closed).
+        }
 
         let outcome = loop {
             // The waiter-flag wait pattern, LATCH form (funnel.rs protocol
@@ -669,6 +853,35 @@ fn funnel_dop() -> i32 {
         .and_then(|v| v.trim().parse::<i32>().ok())
         .filter(|&d| d > 0)
         .unwrap_or(2)
+}
+
+/// GL-FUNNEL-2 increment 1 — DOP+1 admission (default ON;
+/// `PGRUST_RUNTIME_ROW_FUNNEL_PLUS1=0` restores N producers): launch N+1 gang
+/// producers at funnel DOP N, matching classic Gather's (N+1)/N producer count
+/// (its leader participates) while the funnel leader stays a pure drain — the
+/// structural deficit GL-FUNNEL-1 measured as most of the ≤1GB funnel/gather
+/// gap. Superseded (not stacked) by leader-producer mode below: with the
+/// leader producing, the gang stays at N (leader IS the +1).
+fn funnel_plus1() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_ROW_FUNNEL_PLUS1").map_or(true, |v| v.trim() != "0")
+    })
+}
+
+/// GL-FUNNEL-2 increment 2 — leader-producer mode (default OFF;
+/// `PGRUST_RUNTIME_ROW_FUNNEL_LEADER=1`/`on` arms): the leader alternates
+/// drain passes with producing morsels through the sanctioned caller-worker
+/// machinery (`runtime::CallerWorker::drive_with_duties_parked`) — see
+/// `engage_leader_producer` for the mode's invariant analysis.
+fn funnel_leader_mode() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("PGRUST_RUNTIME_ROW_FUNNEL_LEADER").as_deref(),
+            Ok("1") | Ok("on")
+        )
+    })
 }
 
 /// World-B gated hook (Stage 3): when `PGRUST_RUNTIME_ROW_FUNNEL` is on and the

@@ -1081,7 +1081,15 @@ fn funnel_armed() -> bool {
 fn funnel_runtime_boot() {
     static BOOT: Once = Once::new();
     BOOT.call_once(|| {
-        let rt = ::runtime::Runtime::new(::runtime::RuntimeConfig::new(2));
+        // 8 execution permits (not 2): external participants (bgworkers + the
+        // leader-producer caller) each hold a permit across a step, and a
+        // producer parked on a full ring HOLDS its permit (blocking_io_section
+        // donates only on registered pool threads) — at permits <= gang size
+        // the caller-leader starves behind parked producers (measured: the
+        // leader-mode smoke ran 8.4s at 2 permits, ms at 8). Production pools
+        // have `cores` permits, so the squeeze needs DOP ~ cores there; the
+        // GL-FUNNEL-2 letter records it as a leader-mode admission bound.
+        let rt = ::runtime::Runtime::new(::runtime::RuntimeConfig::new(8));
         ::runtime::install_global(rt);
     });
 }
@@ -1224,6 +1232,31 @@ fn funnel_run_once(
     Ok((processed, values))
 }
 
+/// Postmaster stand-in with a stop flag: exits when it launched a worker
+/// batch OR when the funnel run already completed (leader-producer mode can
+/// finish the whole scan before the 10ms poll ever launches the gang — the
+/// stock 600x10ms poller would then spin its full timeout for nothing).
+fn spawn_postmaster_standin_stoppable(
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> std::thread::JoinHandle<Vec<std::thread::JoinHandle<i32>>> {
+    std::thread::spawn(move || {
+        thread_globals();
+        let mut joins = Vec::new();
+        for _ in 0..600 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let mut new = launch_registered_workers();
+            if !new.is_empty() {
+                joins.append(&mut new);
+                break;
+            }
+            if stop.load(Relaxed) {
+                break;
+            }
+        }
+        joins
+    })
+}
+
 /// Full leader-side run of a funnel-candidate pstmt. `poller` spawns the
 /// postmaster stand-in (needed whenever the funnel may LaunchParallelWorkers).
 /// Errors tear down via release + transaction abort (the session error path).
@@ -1246,8 +1279,10 @@ fn funnel_run_pstmt(
     )
     .unwrap();
     execmain_seams::executor_start::call(qd, 0).unwrap();
-    let poller = poller.then(spawn_postmaster_standin);
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let poller = poller.then(|| spawn_postmaster_standin_stoppable(std::sync::Arc::clone(&stop)));
     let r = funnel_run_once(qd, count);
+    stop.store(true, Relaxed);
     let joins = poller.map(|p| p.join().unwrap()).unwrap_or_default();
     match r {
         Ok((processed, values)) => {

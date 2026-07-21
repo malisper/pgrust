@@ -187,6 +187,28 @@ impl RowEmitSink {
             PushOutcome::DemandClosed => Ok(false),
         }
     }
+
+    /// LEADER-PRODUCER emit (GL-FUNNEL-2 increment 2): materialize and append
+    /// to the leader's stash — NEVER parks (the leader is the drainer; a
+    /// `push_blocking` park on its own full ring would self-deadlock). The
+    /// stash is drained by the leader's own pump between claims; it is bounded
+    /// by one claim's rows (the drain-first claim gate). Returns `false` on
+    /// demand-closed (LIMIT), like `emit_blocking`.
+    pub(super) fn emit_stash(
+        &mut self,
+        tuple: ExecSlotId,
+        estate: &mut EStateData<'_>,
+        stash: &std::sync::Mutex<Vec<MinImage>>,
+    ) -> PgResult<bool> {
+        debug_assert!(!estate.es_epq_active, "RowEmitSink inside an EPQ drive");
+        if self.producer.demand_closed() {
+            return Ok(false);
+        }
+        let img = self.materialize(tuple, estate)?;
+        stash.lock().unwrap_or_else(|p| p.into_inner()).push(img);
+        estate.es_processed += 1;
+        Ok(true)
+    }
 }
 
 /// LEADER-side pure drain of the whole funnel to the wire (World-B). Ports
