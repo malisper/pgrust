@@ -594,3 +594,148 @@ pub(super) fn engage_passthrough(
     destroy?;
     Ok(outcome)
 }
+
+// ---------------------------------------------------------------------------
+// Stage 3: the gated execute_plan hook.
+// ---------------------------------------------------------------------------
+
+/// Degree of parallelism for the funnel (`PGRUST_RUNTIME_ROW_FUNNEL_DOP`,
+/// default 2). The funnel is experimental/gated, so DOP is a knob rather than
+/// the planner's estimate.
+fn funnel_dop() -> i32 {
+    std::env::var("PGRUST_RUNTIME_ROW_FUNNEL_DOP")
+        .ok()
+        .and_then(|v| v.trim().parse::<i32>().ok())
+        .filter(|&d| d > 0)
+        .unwrap_or(2)
+}
+
+/// World-B gated hook (Stage 3): when `PGRUST_RUNTIME_ROW_FUNNEL` is on and the
+/// plan is a lane-ownable bare passthrough `SeqScan`, run it in parallel through
+/// the funnel and stream the rows to `dest`. Returns `true` iff it handled the
+/// whole run (the caller then skips the serial per-tuple loop); `false` = not
+/// eligible / fell back (the caller runs the serial loop, byte-identically).
+///
+/// DEFAULT OFF: with the kill switch unset this returns `false` on the first
+/// test, so default behavior — and `route_to`/the coverage matrix — is
+/// unchanged.
+pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
+    estate: &mut ::executils::EStateData<'mcx>,
+    planstate: &mut crate::procnode::PlanStateNode<'mcx>,
+    number_tuples: u64,
+    dest: &mut ::tcop_dest::DestReceiver<'d>,
+) -> PgResult<bool> {
+    // Kill switch (default OFF) — the cheap first test.
+    if !super::row_emit::row_funnel_enabled() {
+        return Ok(false);
+    }
+    // Fail-closed gates: no EPQ recheck, no junk filter, no cursor/SPI cadence.
+    if estate.es_epq_active
+        || estate.es_junkFilter.is_some()
+        || estate.es_lane_cursor_parked
+        || estate.es_cursor_run_budget.is_some()
+        || estate.es_spi_run_budget.is_some()
+    {
+        return Ok(false);
+    }
+    // The runtime pool must be live.
+    let Some(rt) = runtime::global() else { return Ok(false) };
+    if !runtime::runtime_enabled() {
+        return Ok(false);
+    }
+    // Top node must be a bare SeqScan.
+    if !matches!(&*planstate, crate::procnode::PlanStateNode::SeqScan(_)) {
+        return Ok(false);
+    }
+    // Plan + result descriptor (immutable planstate borrow, released before the
+    // mutable scan-source build below).
+    let Some(pstmt_ref) = estate.es_plannedstmt else { return Ok(false) };
+    let Some(plan_node) = pstmt_ref.planTree else { return Ok(false) };
+    let Some(plan) = plan_node.as_plan() else { return Ok(false) };
+    if !plan.parallel_safe {
+        return Ok(false);
+    }
+    let desc = planstate.exec_get_result_type(plan)?;
+
+    // Binder policy: a shape the query-task binder would refuse must not launch.
+    let policy = parallel::query_task_policy_probe();
+    if policy.has_params || policy.temp_state || policy.serializable || policy.pending_invalidations
+    {
+        return Ok(false);
+    }
+
+    let pstmt: *const PlannedStmt<'static> =
+        pstmt_ref as *const PlannedStmt<'mcx> as *const PlannedStmt<'static>;
+    let query_text = estate.es_sourceText.unwrap_or("");
+    let eflags = estate.es_top_eflags;
+    let wire_mcx = estate.es_query_cxt;
+    let dop = funnel_dop();
+
+    // Morsel source (heap block geometry): mutable scan-source borrow.
+    let source: Arc<dyn runtime::MorselSource> = {
+        let crate::procnode::PlanStateNode::SeqScan(ss) = planstate else {
+            return Ok(false);
+        };
+        if !::nodeseqscan::seq_scan_is_heap(ss) {
+            return Ok(false);
+        }
+        let Some(map) = SeqScanSource::new(&mut *ss).granule_map(estate)? else {
+            return Ok(false);
+        };
+        Arc::new(runtime::GranuleMapSource::new(Arc::new(map), false, false))
+    };
+    let total_granules = source.total_granules();
+    // Tiny-input floor: a gang is only worth it above a small block count.
+    if total_granules < (2 * dop as u64).max(2) {
+        return Ok(false);
+    }
+
+    let limit = (number_tuples != 0).then_some(number_tuples);
+
+    // Wire slot: a Minimal slot carrying the result descriptor; the drain
+    // stores each image into it and hands it to `dest.receive_slot`.
+    let mut wire_slot = ::exectuples::make_tuple_table_slot(
+        wire_mcx,
+        ::types_slot::TupleSlotKind::MinimalTuple,
+        Some(desc),
+    );
+
+    let outcome = engage_passthrough(
+        rt,
+        pstmt,
+        query_text,
+        eflags,
+        dop,
+        source,
+        super::row_emit::DEFAULT_RING_CAP,
+        limit,
+        |img: MinImage| -> PgResult<bool> {
+            // SAFETY: `wire_slot` is a Minimal slot; `img` owns the bytes and
+            // outlives this store+receive (dropped at the end of the call).
+            unsafe {
+                ::exectuples::exec_store_minimal_tuple_ptr(&mut wire_slot, wire_mcx, img.as_mtup_ptr());
+            }
+            // Lifetime bridge at the dest seam (as in TuplestoreBatchSink): the
+            // receiver only reads datums out during the call and retains no
+            // borrow, so re-tagging the slot to the dest's lifetime is sound.
+            let slot: &mut ::types_slot::SlotData<'d> = unsafe {
+                &mut *(&mut wire_slot as *mut ::types_slot::SlotData<'mcx>)
+                    .cast::<::types_slot::SlotData<'d>>()
+            };
+            let cont = dest.receive_slot(slot)?;
+            // Clear the borrowed pointer before freeing the image (the original
+            // 'mcx-typed slot; the re-tagged `slot` alias's borrow ends above).
+            ::exectuples::exec_clear_tuple(&mut wire_slot, wire_mcx);
+            drop(img);
+            Ok(cont)
+        },
+    )?;
+
+    match outcome {
+        PassthroughEngageOutcome::Completed(n) => {
+            estate.es_processed = n;
+            Ok(true)
+        }
+        PassthroughEngageOutcome::Fallback => Ok(false),
+    }
+}
