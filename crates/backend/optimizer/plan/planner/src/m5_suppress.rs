@@ -354,12 +354,23 @@ fn class_guard(class: CoverClass) -> FloorGuard {
         CoverClass::HeapCmpFoldPrefix => {
             FloorGuard { min_rows: 1_000_000.0, min_dop: 12, low_dop_max_rows: 0.0, ..NO_GUARD }
         }
-        // GUARDED OFF (max_rows=0): 4.30–8.00x vs legacy at EVERY measured
-        // (size, dop) — rt grows with size (11→44ms vs serial 4.3→10.1),
-        // refuting the fixed-ceremony theory; this is sort-arm parallel
-        // economics, the named follow-up. PGRUST_M5_SIZE_FLOORS=0
-        // re-enables suppression for the measure vehicle.
-        CoverClass::CbTopnBoundedIntKeys => FloorGuard { max_rows: 0.0, ..NO_GUARD },
+        // RE-FLIPPED at the GL-SORTECON-3 flip increment (night/
+        // sort-merge-redesign; measured 2026-07-21 @ 0296033fd, fleet jobs
+        // 61f2/3efc/5509 — notes/sort-merge-redesign-lane.md): the COLSTAGE
+        // staged accept + GCUT shared cutoff/zone-skip retired the 4.30-8.00x
+        // loss (that was the per-row emit ceremony, not ceremony size); the
+        // arm now measures rt/serial 0.49-0.09 on the zone-hostile band and
+        // <=1.08 worst point semi-hostile at dop4 (damped geomean 1.005),
+        // dop 4/8/16, 1M-20M rows, both profiles. min_dop=4: dop1/2 measured
+        // LOSING (rand 1.96/1.80, dup 2.18/1.46 rt/serial, 5M local ladder
+        // 2026-07-21) — below it keep Gather. Band routing WITHIN the
+        // admitted region is the arm's own engage-time zone predicate
+        // (runtime_sort.rs ZONE_FRIENDLY_MIN_SKIP_FRAC): zone-friendly
+        // shapes refuse to the serial zone-adaptive walk, which beats both
+        // engines there.
+        CoverClass::CbTopnBoundedIntKeys => {
+            FloorGuard { min_dop: 4, low_dop_max_rows: 0.0, ..NO_GUARD }
+        }
         // Wins ≤1M (0.41 vs serial-shaped legacy); loses 1.39–1.50x once
         // legacy PHJ engages ≥2.5M at dop≤8, and 1.14 even at dop16@5M
         // (dop16@2.5M's 0.92 marginal win is deliberately forgone for the

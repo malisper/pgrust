@@ -1696,38 +1696,76 @@ fn runtime_sort_full_enabled() -> bool {
     })
 }
 
-/// COLSTAGE kill switch (night/sort-merge-redesign spike): arm the staged
+/// COLSTAGE kill switch (night/sort-merge-redesign): arm the staged
 /// columnar accept fast leg for INT-FAMILY top-N specs (the DictCode leg's
-/// no-qual staging arm, extended to the int-key vocabulary). DEFAULT OFF —
-/// `PGRUST_RUNTIME_SORT_COLSTAGE=1|on` enables; absent/other = today's
-/// per-row emit accept, byte-identical.
+/// no-qual staging arm, extended to the int-key vocabulary).
+/// DEFAULT ON since the GL-SORTECON-3 flip increment (flipped-kill idiom):
+/// `PGRUST_RUNTIME_SORT_COLSTAGE=0|off` restores the incumbent per-row
+/// emit accept byte-identically. Parity evidence: OFF/ON md5-identical on
+/// every zonetopn/ladder leg, local + fleet jobs 61f2/3efc/5509 @
+/// 0296033fd (2026-07-21).
 fn runtime_sort_colstage_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        matches!(
+        !matches!(
             std::env::var("PGRUST_RUNTIME_SORT_COLSTAGE").as_deref(),
-            Ok("1") | Ok("on")
+            Ok("0") | Ok("off")
         )
     })
 }
 
 /// GCUT kill switch (night/sort-merge-redesign inc-2): shared cross-worker
 /// cutoff (zone-max seed + published worker floors, insert-time prune) plus
-/// pre-staging zone granule skip. LAYERED ON TOP of COLSTAGE — the cutoff
-/// publishes/prunes in the COLSTAGE tight loop, so GCUT without COLSTAGE
-/// would be dead weight; requiring both keeps the parity story one switch
-/// deep (OFF either one = the incumbent observation stream). DEFAULT OFF —
-/// `PGRUST_RUNTIME_SORT_GCUT=1|on` (with COLSTAGE=1) enables.
+/// pre-staging zone granule skip AND the band predicate. LAYERED ON TOP of
+/// COLSTAGE — the cutoff publishes/prunes in the COLSTAGE tight loop, so
+/// GCUT without COLSTAGE would be dead weight; requiring both keeps the
+/// parity story one switch deep (OFF either one = the incumbent
+/// observation stream, and the band predicate stands down with it).
+/// DEFAULT ON since the GL-SORTECON-3 flip increment (flipped-kill idiom):
+/// `PGRUST_RUNTIME_SORT_GCUT=0|off` disables.
 fn runtime_sort_gcut_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
         runtime_sort_colstage_enabled()
-            && matches!(
+            && !matches!(
                 std::env::var("PGRUST_RUNTIME_SORT_GCUT").as_deref(),
-                Ok("1") | Ok("on")
+                Ok("0") | Ok("off")
             )
     })
 }
+
+/// Zone-stats granule cap (the GL-SORTECON-3 pre-flip bound on engage-time
+/// cost): above this many granules the leader zone walk is SKIPPED and the
+/// band predicate cannot run — the arm refuses to the serial walk
+/// (fail-conservative: the serial zone walk is never catastrophic; the
+/// arm's win on an ultra-huge zone-hostile table is forgone, a documented
+/// residual). Default 131072 granules ≈ 1.07B rows; the walk measured
+/// ~82ns/granule (0.2ms @ 2442 granules, fleet job 3efc @ 0296033fd,
+/// 2026-07-21) ⇒ ≤ ~11ms worst engage cost at the cap, noise against a
+/// query of that scale. `PGRUST_RUNTIME_SORT_ZONESTATS_CAP` overrides.
+fn runtime_sort_zonestats_cap() -> u64 {
+    static CAP: OnceLock<u64> = OnceLock::new();
+    crate::once_val(&CAP, || {
+        std::env::var("PGRUST_RUNTIME_SORT_ZONESTATS_CAP")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(131_072)
+    })
+}
+
+/// The band predicate's threshold (GL-SORTECON-3): the fraction of granules
+/// PROVABLY serial-skippable at the zone-max seed bound (best word > seed —
+/// a LOWER bound on what the serial zone-adaptive walk skips, since the
+/// seed is achievable by construction). At or above this fraction the
+/// shape is the ZONE-FRIENDLY band: the serial walk reads ≤ half the
+/// granules and stays the winner — the arm refuses. Below it the shape is
+/// the hostile/semi-hostile band the arm wins (fleet ladder @ 0296033fd,
+/// 2026-07-21: dup_int rt/serial 0.49-0.09, rand_int ≤1.08 worst point at
+/// dop4 with damped geomean 1.005 — the dop dependence is folded into the
+/// planner floor's min_dop=4, notes/sort-merge-redesign-lane.md).
+/// Fixture witness: asc_int frac=610/611 → serial; rand_int/dup_int
+/// frac=0 → runtime.
+const ZONE_FRIENDLY_MIN_SKIP_FRAC: f64 = 0.5;
 
 /// DictCode sort-key class kill switch (docs/design/dict-code-flow.md
 /// inc-1): `0|off` refuses text keys only — the int-family vocabulary and
@@ -1878,11 +1916,84 @@ pub(super) fn try_own_sort<'mcx>(
     // POOL dop; arm only what the work can feed (kill: PGRUST_RUNTIME_ELASTIC_DOP=0).
     let dop = super::runtime_scan::elastic_dop(dop, total_granules);
 
+    // --- BAND PREDICATE + zone stats (GL-SORTECON-3 flip increment; GCUT
+    // machinery, so the GCUT kill restores the pre-flip admission). For the
+    // int-leading-key top-N shape (m5-coverage row 61), read the leading
+    // key's zone stats ONCE (capped — see `runtime_sort_zonestats_cap`) and
+    // classify the band: the fraction of granules PROVABLY skippable at the
+    // zone-max seed is a LOWER bound on what the serial zone-adaptive walk
+    // skips, so at >= ZONE_FRIENDLY_MIN_SKIP_FRAC the serial walk is the
+    // proven winner and the arm refuses; below it the arm engages and the
+    // same stats seed the shared cutoff + granule skip (computed once,
+    // passed through to the payload).
+    let zone: Option<(Arc<Vec<u64>>, Option<u64>)> = match (&spec, runtime_sort_gcut_enabled())
+    {
+        (ArmSpec::Topn(s), true) if !s.keys[0].dictcode => {
+            if total_granules > runtime_sort_zonestats_cap() {
+                // Fail-conservative: without stats the friendly band cannot
+                // be detected — keep the serial walk (never catastrophic;
+                // the forgone ultra-huge hostile win is the documented
+                // residual).
+                refused("zone-stats granule cap (band unknown; serial walk retained)");
+                return Ok(false);
+            }
+            let k0 = s.keys[0];
+            match ::nodeseqscan::seq_scan_cb_zone_topk_words(
+                ss,
+                k0.attno_scan,
+                k0.desc,
+                s.bound as u64,
+            )? {
+                Some((words, seed)) if words.len() == total_granules as usize => {
+                    let nf = k0.nulls_first;
+                    let t64: Vec<u64> = words
+                        .into_iter()
+                        .map(|w| ::nodesort::sink::cut64(nf, w))
+                        .collect();
+                    let seed_t64 = seed.map(|w| ::nodesort::sink::cut64(nf, w));
+                    if let Some(sd) = seed_t64 {
+                        let skippable = t64.iter().filter(|&&w| w > sd).count();
+                        let frac = skippable as f64 / t64.len().max(1) as f64;
+                        if frac >= ZONE_FRIENDLY_MIN_SKIP_FRAC {
+                            lane_trace(&format!(
+                                "runtime-sort: band predicate — zone-friendly \
+                                 ({skippable}/{} granules provably serial-skippable)",
+                                t64.len()
+                            ));
+                            refused("zone-friendly band (serial zone walk retained)");
+                            return Ok(false);
+                        }
+                        lane_trace(&format!(
+                            "runtime-sort: band predicate — hostile \
+                             ({skippable}/{} granules seed-skippable)",
+                            t64.len()
+                        ));
+                    }
+                    Some((Arc::new(t64), seed_t64))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+
     // --- Engage.
     // Router counter choke point (M5-1): Engaged = ceremony entered;
     // Completed = the runtime answered; Fallback = R5 serial rerun.
     router::tick(ArmClass::Sort, ArmCounter::Engaged);
-    let r = engage(state, ss, outer_desc, estate, rt, dop, total_granules, starts, spec, scan_node)?;
+    let r = engage(
+        state,
+        ss,
+        outer_desc,
+        estate,
+        rt,
+        dop,
+        total_granules,
+        starts,
+        spec,
+        scan_node,
+        zone,
+    )?;
     router::tick(
         ArmClass::Sort,
         if r { ArmCounter::Completed } else { ArmCounter::Fallback },
@@ -1913,6 +2024,11 @@ fn engage<'mcx>(
     starts: Vec<u64>,
     spec: ArmSpec,
     scan_node: ::types_nodes::node_tree::Node<'mcx>,
+    // GCUT zone stats (per-granule best cut64 words + cutoff seed),
+    // computed ONCE by `try_own_sort`'s band predicate and passed
+    // through. `None` = no zone machinery (GCUT off, dictcode lead,
+    // full-sort spec, or stats unavailable).
+    zone: Option<(Arc<Vec<u64>>, Option<u64>)>,
 ) -> PgResult<bool> {
     ensure_hooks_registered();
     crate::execparallel::register_parallel_query_main();
@@ -1936,42 +2052,21 @@ fn engage<'mcx>(
             }),
         ),
     };
-    // GCUT (inc-2): leader-side zone stats for the shared cutoff. The
-    // zone-max SEED starts the cutoff where a best-first (zone-ordered)
-    // claim schedule would have converged it — >= bound rows provably sit
-    // at-or-below the k-th smallest zone-max word — so workers prune and
-    // zone-skip from the FIRST morsel without reordering the claim
-    // protocol. Single-int-leading-key top-N only (dictcode codes have no
-    // int zone entries); non-exact-encoding granules get best word 0
-    // (never skipped, never wrong); a geometry/zone length mismatch drops
-    // the whole thing (fail closed to inc-1 behavior).
-    let (zone_best, cutoff_seed) = match (&spec, runtime_sort_gcut_enabled()) {
-        (ArmSpec::Topn(s), true) if !s.keys[0].dictcode => {
-            let k0 = s.keys[0];
-            match ::nodeseqscan::seq_scan_cb_zone_topk_words(
-                ss,
-                k0.attno_scan,
-                k0.desc,
-                s.bound as u64,
-            )? {
-                Some((words, seed)) if words.len() == total_granules as usize => {
-                    let nf = k0.nulls_first;
-                    let t64: Vec<u64> = words
-                        .into_iter()
-                        .map(|w| ::nodesort::sink::cut64(nf, w))
-                        .collect();
-                    let seed_t64 = seed.map(|w| ::nodesort::sink::cut64(nf, w));
-                    lane_trace(&format!(
-                        "runtime-sort: gcut armed (zone granules={} seed={})",
-                        t64.len(),
-                        if seed_t64.is_some() { "yes" } else { "no" }
-                    ));
-                    (Some(Arc::new(t64)), seed_t64)
-                }
-                _ => (None, None),
-            }
+    // GCUT (inc-2): the leader zone stats — per-granule best cut64 words
+    // for the pre-staging granule skip + the zone-max SEED that starts the
+    // shared cutoff where a best-first (zone-ordered) claim schedule would
+    // have converged it. Computed once by the band predicate in
+    // `try_own_sort`; passed through here.
+    let (zone_best, cutoff_seed) = match zone {
+        Some((best, seed)) => {
+            lane_trace(&format!(
+                "runtime-sort: gcut armed (zone granules={} seed={})",
+                best.len(),
+                if seed.is_some() { "yes" } else { "no" }
+            ));
+            (Some(best), seed)
         }
-        _ => (None, None),
+        None => (None, None),
     };
     let payload = Arc::new(RuntimeSortShared {
         rt,
