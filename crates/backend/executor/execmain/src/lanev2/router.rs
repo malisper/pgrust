@@ -153,7 +153,8 @@ fn engine_runtime_pool_ready() -> bool {
         // therefore regress under engine=runtime — byte-identical.
         eprintln!(
             "[m5-router] pgrust.parallel_engine=runtime but the runtime pool is \
-             unavailable (PGRUST_RUNTIME is not 1); degrading to the legacy engine"
+             unavailable (pgrust.runtime=off / PGRUST_RUNTIME=0, or the pool did not \
+             spawn); degrading to the legacy engine"
         );
     });
     false

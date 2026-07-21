@@ -146,10 +146,12 @@ bool_var!(B_data_checksums, data_checksums, set_data_checksums, false);
 // postmaster start; it cannot be un-spawned per session), default ON since the
 // M5 boarding flip. The PGRUST_RUNTIME boot env var seeds this (=0 -> off) via
 // initialize_guc_options_from_environment (PGC_S_ENV_VAR); postgresql.conf can
-// also set it. launch_backend::rtpool::start_if_enabled gates the pool spawn on
-// this cell (AND runtime::runtime_enabled), and the M5-3 planner probe
-// (parallel_engine.rs) reads it, so `pgrust.runtime=off` fully disables the
-// engine (no pool -> runtime::global() None -> every arm stays serial).
+// also set it. THE one authority for "runtime requested" (t34-config review,
+// defect 3): runtime::runtime_enabled() IS a read of this cell, so the pool
+// spawn gate (launch_backend::rtpool::start_if_enabled) and every executor arm
+// read the same value; `pgrust.runtime=off` fully disables the engine (no pool
+// -> runtime::global() None + runtime_pool::runtime_pool_live() false -> the
+// M5-3 probe stays inert and every arm stays serial).
 bool_var!(B_pgrust_runtime, pgrust_runtime, set_pgrust_runtime, true);
 
 // pgrust.mem_autotune (pgrust-only, env-to-guc train): gates the machine-scaled

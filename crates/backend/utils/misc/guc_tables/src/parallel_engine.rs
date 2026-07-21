@@ -16,13 +16,15 @@
 //!     since the M5 boarding flip (§4.4 criteria met; boarded with
 //!     coverage-keyed FloorGuards, min_dop=12). `legacy` restores the
 //!     pre-M5 planning byte-for-byte.
-//!   * `runtime` additionally requires the runtime pool
-//!     (`PGRUST_RUNTIME=1`, the M0 master switch) and the lane master
-//!     switch (`pgrust.lane_executor`). Absent either, the suppression
-//!     stays inert with a loud-once log line (§2.2) — the plan-time twin
-//!     of the router's executor-side degrade (execmain::lanev2::router;
-//!     guc_tables cannot see the live pool object, so this probe keys off
-//!     the process master switch).
+//!   * `runtime` additionally requires the runtime pool to be LIVE
+//!     (spawned; `runtime_pool::runtime_pool_live`, published by
+//!     `launch_backend::rtpool::start` — the `pgrust.runtime` GUC is the one
+//!     requested-state cell, seeded at boot by `PGRUST_RUNTIME`) and the
+//!     lane master switch (`pgrust.lane_executor`). Absent either, the
+//!     suppression stays inert with a loud-once log line (§2.2) — the
+//!     plan-time twin of the router's executor-side degrade
+//!     (execmain::lanev2::router checks `runtime::global()`; this probe
+//!     checks the liveness flag the pool exports into guc_tables).
 //!   * `PGRUST_M5_SUPPRESS=0|off` is the dedicated kill switch for the
 //!     M5-3 coverage-keyed Gather suppression itself, independent of the
 //!     engine selector (a runtime-mode server with suppression killed
@@ -39,14 +41,15 @@ fn m5_suppress_killed() -> bool {
     })
 }
 
-/// Whether the runtime pool is enabled in this process (the M0 master switch,
-/// DEFAULT ON since the M5 boarding flip). env-to-guc train: this now reads the
-/// registered `pgrust.runtime` GUC backing cell (the PGRUST_RUNTIME env var
-/// seeds it at boot; postgresql.conf can also set it), so the planner probe and
-/// the actual pool-spawn gate (launch_backend::rtpool) agree on one source of
-/// truth. guc_tables owns the backing cell, so this needs no runtime-crate dep.
-fn runtime_pool_env() -> bool {
-    crate::backing::pgrust_runtime()
+/// Whether the runtime worker pool is LIVE in this process — spawned and
+/// published by `launch_backend::rtpool::start` (t34-config review, defect 3):
+/// the probe must never suppress a Gather the runtime cannot pick up, and only
+/// pool liveness proves that. The `pgrust.runtime` GUC cell (the one
+/// requested-state authority both this probe and the spawn gate read; the
+/// PGRUST_RUNTIME env var only seeds it at boot) is a PGC_POSTMASTER setting,
+/// so live ⊆ requested and a separate GUC re-check is redundant here.
+fn runtime_pool_live() -> bool {
+    crate::runtime_pool::runtime_pool_live()
 }
 
 /// §2.2 degrade line, loud-once per process.
@@ -62,11 +65,13 @@ fn degrade_loud_once(reason: &str) {
 
 /// The full M5-3 planner-probe gate: engine=runtime selected (the registered
 /// `pgrust.parallel_engine` GUC via the M5-0 reader) AND the suppression
-/// kill switch is not thrown AND the runtime pool + lane master switch are
-/// live. On every legacy-mode server this is one cached-bool load plus one
-/// session-GUC TLS read per Gather-generation call site (the sites already
-/// early-return before this when no partial paths exist, so serial arms and
-/// select1-class queries never reach it).
+/// kill switch is not thrown AND the runtime pool is LIVE (spawned — the
+/// condition this probe documents; a suppressed Gather with no pool is
+/// silent serial) AND the lane master switch is on. On every legacy-mode
+/// server this is one cached-bool load plus one session-GUC TLS read per
+/// Gather-generation call site (the sites already early-return before this
+/// when no partial paths exist, so serial arms and select1-class queries
+/// never reach it).
 pub fn m5_gather_suppression_active() -> bool {
     if m5_suppress_killed() {
         return false;
@@ -74,8 +79,11 @@ pub fn m5_gather_suppression_active() -> bool {
     if !crate::runtime_pool::parallel_engine_is_runtime() {
         return false;
     }
-    if !runtime_pool_env() {
-        degrade_loud_once("the runtime pool is absent (PGRUST_RUNTIME != 1)");
+    if !runtime_pool_live() {
+        degrade_loud_once(
+            "the runtime pool is not live (pgrust.runtime=off, PGRUST_RUNTIME=0, or the \
+             pool failed to spawn)",
+        );
         return false;
     }
     if !crate::backing::pgrust_lane_executor() {

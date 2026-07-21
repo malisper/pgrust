@@ -1215,14 +1215,17 @@ pub mod rtpool {
     /// The process runtime, if the kill switch enabled it. M0: called by
     /// nothing in production; tests and (later) M1 postmaster startup.
     pub fn start_if_enabled() -> Option<&'static Arc<runtime::Runtime>> {
-        // env-to-guc train: the runtime-pool master switch is now the
-        // registered `pgrust.runtime` GUC (PGRUST_RUNTIME seeds it at boot;
-        // postgresql.conf can also set it). Gate the spawn on BOTH the legacy
-        // env read (runtime::runtime_enabled, the minimal runtime crate's own
-        // authority) and the GUC backing cell, so `pgrust.runtime=off` set via
-        // conf fully disables the engine (no pool -> runtime::global() None ->
-        // every executor arm stays serial). At the default (ON) both are true.
-        if !runtime::runtime_enabled() || !guc_tables::backing::pgrust_runtime() {
+        // ONE authority (t34-config review, defect 3): the registered
+        // `pgrust.runtime` GUC backing cell — which `runtime::runtime_enabled`
+        // itself now reads — gates the spawn. PGRUST_RUNTIME only SEEDS the
+        // cell at boot (initialize_guc_options_from_environment,
+        // PGC_S_ENV_VAR); postgresql.conf/-c can override the seed and every
+        // reader (this spawn gate, the executor arms, the M5-3 planner probe
+        // via the pool-live flag start() publishes) agrees. The old dual gate
+        // (env read AND GUC cell) could disagree — e.g. PGRUST_RUNTIME=0 plus
+        // an explicit conf `pgrust.runtime=on` spawned no pool while the
+        // planner probe suppressed Gather: silent serial.
+        if !runtime::runtime_enabled() {
             return None;
         }
         Some(start())
@@ -1244,6 +1247,11 @@ pub mod rtpool {
             // scan arm reaches the runtime through `runtime::global()`,
             // avoiding an execmain -> launch_backend dependency).
             runtime::install_global(Arc::clone(&rt));
+            // Publish pool liveness where plan-time code can see it: the
+            // M5-3 suppression probe (guc_tables::parallel_engine) requires
+            // a LIVE pool before suppressing any Gather — never suppress
+            // what the runtime cannot pick up (t34-config review, defect 3).
+            guc_tables::runtime_pool::set_runtime_pool_live();
             // M4 background-job dispatcher (docs/design/m4-bgjobs.md §3.2):
             // its own kill switch on top of the pool's; with
             // PGRUST_RUNTIME_BGJOBS unset this is a no-op and no dispatcher

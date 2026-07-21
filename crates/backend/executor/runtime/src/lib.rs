@@ -141,12 +141,19 @@ pub use parallel::{
 
 /// Kill switch (M0 deliverable 6; DEFAULT FLIPPED at the M5 boarding —
 /// docs/design/m5-planner.md §4.4 criteria met): the runtime pool is ON by
-/// default. `PGRUST_RUNTIME=0` is the kill switch (restores the pool-less
-/// process exactly); any other value (or unset) enables. Read once.
+/// default. ONE authority (t34-config review, defect 3): this reads the
+/// registered `pgrust.runtime` GUC's backing cell — the same cell the pool
+/// spawn gate (launch_backend::rtpool) and the M5-3 planner probe key off —
+/// so no reader can disagree with another. `PGRUST_RUNTIME=0` still kills:
+/// it SEEDS the cell at boot (guc/store.rs
+/// initialize_guc_options_from_environment, PGC_S_ENV_VAR); postgresql.conf
+/// / -c can also set it. PGC_POSTMASTER scope: the value is fixed before any
+/// executor reads it, and the cell read is one Relaxed atomic load (cheaper
+/// than the env read this replaces; deliberately NOT cached so a pre-seed
+/// early call cannot freeze a stale value).
 #[cfg(not(loom))]
 pub fn runtime_enabled() -> bool {
-    static ENABLED: crate::sync::OnceLock<bool> = crate::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| !std::env::var("PGRUST_RUNTIME").is_ok_and(|v| v == "0"))
+    guc_tables::backing::pgrust_runtime()
 }
 
 /// Process-global runtime handle (M1): published once by the postmaster's
