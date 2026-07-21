@@ -2297,9 +2297,9 @@ fn cover_class_curve(class: CoverClass) -> Option<costsize::runtime_model::Runti
         | CoverClass::CbHashJoinGroupedAgg => Some(Rc::CbHashJoinPlainAgg),
         // PROVISIONAL reuse matching the shipped guard reuse (GL-AGGPOLY-1).
         CoverClass::AggPolyHeapPlain => Some(Rc::HeapCmpFoldPrefix),
-        // Rectangle retained: the (N,D) model is under-determined for the
-        // text class (G-axis partial-agg step at 5M; GL-COST-1).
-        CoverClass::CbGroupedAggTextKey => None,
+        // Curve-fit since the witnessed v2 grid (the v1 record's
+        // non-monotonic N profile was contamination — GL-COST-3).
+        CoverClass::CbGroupedAggTextKey => Some(Rc::CbGroupedAggTextKey),
         // Footer answers are O(1): never floored, no curve.
         CoverClass::CbMetaFooterAgg => None,
     }
@@ -3397,10 +3397,7 @@ mod tests {
     fn cost_route_map_names_its_curveless_classes() {
         for row in BOOTSTRAP_MATRIX {
             let curveless = cover_class_curve(row.class).is_none();
-            let expect_curveless = matches!(
-                row.class,
-                CoverClass::CbGroupedAggTextKey | CoverClass::CbMetaFooterAgg
-            );
+            let expect_curveless = matches!(row.class, CoverClass::CbMetaFooterAgg);
             assert_eq!(
                 curveless, expect_curveless,
                 "cost-route curve map drift for {:?}",
@@ -3431,12 +3428,6 @@ mod tests {
                 .unwrap_or_else(|| panic!("TSV missing {c}.{t}"))
                 .clone()
         };
-        let text_guard = class_guard(CoverClass::CbGroupedAggTextKey);
-        assert_eq!(get("CbGroupedAggTextKey", "rectangle_min_dop"), format!("{}", text_guard.min_dop));
-        assert_eq!(
-            get("CbGroupedAggTextKey", "rectangle_low_dop_max_rows").parse::<f64>().unwrap(),
-            text_guard.low_dop_max_rows
-        );
         assert_eq!(
             get("HeapPlainCountStar", "admission_min_pages").parse::<f64>().unwrap(),
             class_guard(CoverClass::HeapPlainCountStar).min_pages
