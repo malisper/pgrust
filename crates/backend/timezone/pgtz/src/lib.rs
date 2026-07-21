@@ -12,7 +12,7 @@
 //! TopMemoryContext for the life of the (single-session) process.
 
 use core::cell::Cell;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
 
 use localtime::{pg_tz_acceptable, tzload, tzparse, PgTz, TzLoadError, TzState, TZ_STRLEN_MAX};
@@ -163,12 +163,9 @@ fn scan_directory_ci(dirname: &str, fname: &[u8]) -> PgResult<Option<String>> {
 
 // Process-lifetime cache (see the module doc): entries are Box::leak'd, the
 // map itself is never dropped. Lookups are cold (SET timezone, zone-name
-// decode), so a plain Mutex is fine.
-static TIMEZONE_CACHE: OnceLock<Mutex<HashMap<Box<[u8]>, &'static PgTz>>> = OnceLock::new();
-
-fn timezone_cache() -> &'static Mutex<HashMap<Box<[u8]>, &'static PgTz>> {
-    TIMEZONE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
+// decode), so a plain Mutex is fine; BTreeMap keeps the init const (no once
+// site) and the iteration order deterministic.
+static TIMEZONE_CACHE: Mutex<BTreeMap<Box<[u8]>, &'static PgTz>> = Mutex::new(BTreeMap::new());
 
 #[cold]
 fn escaped_report(what: &str, e: Box<PgError>) -> ! {
@@ -188,7 +185,7 @@ pub fn pg_tzset(tzname: &[u8]) -> Option<&'static PgTz> {
     }
     let uppername = &upper[..tzname.len()];
 
-    if let Some(tz) = timezone_cache().lock().unwrap().get(uppername).copied() {
+    if let Some(tz) = TIMEZONE_CACHE.lock().unwrap().get(uppername).copied() {
         return Some(tz);
     }
 
@@ -216,7 +213,7 @@ pub fn pg_tzset(tzname: &[u8]) -> Option<&'static PgTz> {
     // Two threads racing on the same uncached zone both build it; the first
     // insert wins and the loser's build is dropped, so every caller — and the
     // process-shared pointer caches downstream — sees ONE permanent entry.
-    let mut map = timezone_cache().lock().unwrap();
+    let mut map = TIMEZONE_CACHE.lock().unwrap();
     Some(*map.entry(uppername.into()).or_insert_with(|| {
         Box::leak(Box::new(PgTz {
             tzname: canonname,
