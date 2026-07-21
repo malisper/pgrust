@@ -642,13 +642,24 @@ mod heapfix {
     struct Fake {
         tables: HashMap<Oid, Vec<Buffer>>,
         pages: Vec<usize>,
+        /// Per-relation (relpages, reltuples) — the fixture's ANALYZE:
+        /// `register_table` records the true page/row counts so
+        /// `fake_relation_open` serves an analyzed pg_class row (the funnel's
+        /// emit-fraction FloorGuard fail-closes on reltuples <= 0).
+        /// `register_table_unanalyzed` records reltuples = -1 (never analyzed)
+        /// for the negative witness.
+        stats: HashMap<Oid, (i32, f32)>,
     }
 
     static FAKE: Mutex<Option<Fake>> = Mutex::new(None);
 
     fn with_fake<R>(f: impl FnOnce(&mut Fake) -> R) -> R {
         let mut g = FAKE.lock().unwrap_or_else(|e| e.into_inner());
-        f(g.get_or_insert_with(|| Fake { tables: HashMap::new(), pages: Vec::new() }))
+        f(g.get_or_insert_with(|| Fake {
+            tables: HashMap::new(),
+            pages: Vec::new(),
+            stats: HashMap::new(),
+        }))
     }
 
     pub fn install() {
@@ -735,7 +746,21 @@ mod heapfix {
         page
     }
 
+    /// Register an ANALYZED table: pg_class stats (relpages/reltuples) are
+    /// populated from the actual fixture contents, exactly what ANALYZE
+    /// leaves behind on a real table.
     pub fn register_table(relid: Oid, pages: &[&[i32]]) {
+        let reltuples: usize = pages.iter().map(|p| p.len()).sum();
+        register_table_impl(relid, pages, reltuples as f32);
+    }
+
+    /// Register a NEVER-ANALYZED table (reltuples = -1): the negative-witness
+    /// fixture for stats-gated paths (the funnel FloorGuard must fail-close).
+    pub fn register_table_unanalyzed(relid: Oid, pages: &[&[i32]]) {
+        register_table_impl(relid, pages, -1.0);
+    }
+
+    fn register_table_impl(relid: Oid, pages: &[&[i32]], reltuples: f32) {
         with_fake(|f| {
             if f.tables.contains_key(&relid) {
                 return;
@@ -747,6 +772,7 @@ mod heapfix {
                 bufs.push(f.pages.len() as Buffer);
             }
             f.tables.insert(relid, bufs);
+            f.stats.insert(relid, (pages.len() as i32, reltuples));
         });
     }
 
@@ -783,6 +809,11 @@ mod heapfix {
     ) -> ::types_error::PgResult<Relation<'mcx>> {
         let mut relname = NameData::default();
         relname.namestrcpy("t");
+        // The fixture's ANALYZE: registered tables serve their true
+        // relpages/reltuples; unregistered (or register_table_unanalyzed)
+        // relations stay never-analyzed (reltuples = -1).
+        let (relpages, reltuples) =
+            with_fake(|f| f.stats.get(&relid).copied().unwrap_or((0, -1.0)));
         let rd_rel = FormData_pg_class {
             relname,
             relnamespace: 2200,
@@ -791,8 +822,8 @@ mod heapfix {
             relam: tableam::HEAP_TABLE_AM_OID,
             relfilenode: relid,
             reltablespace: 0,
-            relpages: 0,
-            reltuples: -1.0,
+            relpages,
+            reltuples,
             relallvisible: 0,
             reltoastrelid: 0,
             relhasindex: false,
@@ -1169,10 +1200,15 @@ fn funnel_qual_div_err(mcx: ::mcx::Mcx<'_>, k: i32) -> NodeList<'_> {
 /// parallel_safe so the funnel gate admits it; NOT parallel_aware — each
 /// funnel worker positions its own scan over claimed morsel block ranges
 /// (seq_scan_set_morsel_range), no shared parallel scan descriptor.
+/// `plan_rows` is the planner's post-qual output estimate (what a real plan
+/// carries after ANALYZE): the emit-fraction FloorGuard consults
+/// plan_rows/reltuples, so armed engagement witnesses must pass an in-band
+/// estimate and fail-closed witnesses an out-of-band (or zero) one.
 fn funnel_seqscan_pstmt<'m>(
     mcx: ::mcx::Mcx<'m>,
     relid: u32,
     qual: Option<NodeList<'m>>,
+    plan_rows: f64,
 ) -> &'m PlannedStmt<'m> {
     use ::types_nodes::plannodes::{Plan, Scan, SeqScan};
     let var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
@@ -1182,6 +1218,7 @@ fn funnel_seqscan_pstmt<'m>(
         plan_node_id: 0,
         parallel_safe: true,
         parallel_aware: false,
+        plan_rows,
         ..Default::default()
     };
     if let Some(q) = qual {
@@ -1327,26 +1364,30 @@ fn funnel_smoke_byte_identical_on_vs_off() {
     heapfix::install();
     funnel_runtime_boot();
 
-    // 60 pages x 100 rows = 6000 rows (values 1..=6000): enough granules for
-    // the gang floor and enough rows to fill 1024-slot rings (real
-    // back-pressure + the mid-drive leader wake).
+    // 600 pages x 100 rows = 60000 rows (values 1..=60000): enough granules
+    // for the gang floor and — with the a>55000 qual — 5000 emitted rows,
+    // enough to fill 1024-slot rings (real back-pressure + the mid-drive
+    // leader wake). The qual keeps the shape INSIDE the GL-FUNNEL-4
+    // FloorGuard emit band: plan_rows/reltuples = 5000/60000 = 8.3% <= 10%
+    // (the fixture is registered ANALYZED, so reltuples is real).
     const RELID: u32 = 93001;
-    let pages: Vec<Vec<i32>> = (0..60)
+    let pages: Vec<Vec<i32>> = (0..600)
         .map(|p| ((p * 100 + 1)..=(p * 100 + 100)).collect())
         .collect();
     let page_refs: Vec<&[i32]> = pages.iter().map(|v| &v[..]).collect();
     heapfix::register_table(RELID, &page_refs);
-    let expected: Vec<i32> = (301..=6000).collect();
+    let expected: Vec<i32> = (55_001..=60_000).collect();
 
     // OFF-equivalent baseline: a count-limited run (count >> rows). The
     // count-limited gate refuses the funnel (the portal-suspend duplication
     // fix), so this is the SERIAL loop — engagement counters must not move.
     let (e0, c0) = execmain::funnel_engagements();
     let mcx = leaked_mcx();
-    let pstmt_off = funnel_seqscan_pstmt(mcx, RELID, Some(funnel_qual_gt(mcx, 300)));
+    let pstmt_off =
+        funnel_seqscan_pstmt(mcx, RELID, Some(funnel_qual_gt(mcx, 55_000)), 5000.0);
     let t0 = std::time::Instant::now();
     let (processed_off, mut values_off) =
-        funnel_run_pstmt(pstmt_off, "select a where a>300 (serial baseline)", 100_000, false)
+        funnel_run_pstmt(pstmt_off, "select a where a>55000 (serial baseline)", 100_000, false)
             .unwrap();
     let serial_ms = t0.elapsed().as_millis();
     let (e1, c1) = execmain::funnel_engagements();
@@ -1358,10 +1399,11 @@ fn funnel_smoke_byte_identical_on_vs_off() {
     // ON: complete-drain run — the funnel engages, bgworkers produce, the
     // leader drains concurrently to the tuplestore dest.
     let mcx = leaked_mcx();
-    let pstmt_on = funnel_seqscan_pstmt(mcx, RELID, Some(funnel_qual_gt(mcx, 300)));
+    let pstmt_on =
+        funnel_seqscan_pstmt(mcx, RELID, Some(funnel_qual_gt(mcx, 55_000)), 5000.0);
     let t1 = std::time::Instant::now();
     let (processed_on, mut values_on) =
-        funnel_run_pstmt(pstmt_on, "select a where a>300 (funnel)", 0, true).unwrap();
+        funnel_run_pstmt(pstmt_on, "select a where a>55000 (funnel)", 0, true).unwrap();
     let funnel_ms = t1.elapsed().as_millis();
     let (e2, c2) = execmain::funnel_engagements();
     assert_eq!(e2, e1 + 1, "complete-drain run must engage the funnel");
@@ -1402,7 +1444,7 @@ fn funnel_limit_refusal_stays_serial_no_hang() {
 
     let (e0, _) = execmain::funnel_engagements();
     let mcx = leaked_mcx();
-    let pstmt = funnel_seqscan_pstmt(mcx, RELID, None);
+    let pstmt = funnel_seqscan_pstmt(mcx, RELID, None, 40.0);
     let (processed, values) =
         funnel_run_pstmt(pstmt, "select a limit-cadence (serial)", 5, false).unwrap();
     let (e1, _) = execmain::funnel_engagements();
@@ -1437,12 +1479,59 @@ fn funnel_worker_error_mid_scan_surfaces() {
 
     let (e0, c0) = execmain::funnel_engagements();
     let mcx = leaked_mcx();
-    // 10 / (a - 60) errors at a == 60 (page 6 of 12).
-    let pstmt = funnel_seqscan_pstmt(mcx, RELID, Some(funnel_qual_div_err(mcx, 60)));
+    // 10 / (a - 60) errors at a == 60 (page 6 of 12). plan_rows 10 of 120
+    // analyzed reltuples = 8.3%, inside the FloorGuard band, so the ONLY
+    // exit is the mid-scan error.
+    let pstmt = funnel_seqscan_pstmt(mcx, RELID, Some(funnel_qual_div_err(mcx, 60)), 10.0);
     let r = funnel_run_pstmt(pstmt, "select a div-err (funnel)", 0, true);
     let (e1, c1) = execmain::funnel_engagements();
     assert_eq!(e1, e0 + 1, "the error run must have engaged the funnel");
     assert_eq!(c1, c0, "an errored run must NOT count as completed");
     let err = r.expect_err("division by zero must surface as a query error");
     eprintln!("funnel worker-error surfaced: {err}");
+}
+
+// NEGATIVE WITNESS (the emit-fraction FloorGuard's fail-closed contract): a
+// shape that passes every other gate — qualed, in-band plan_rows, complete
+// drain, enough granules — but scans a GENUINELY stats-less table
+// (never-analyzed reltuples = -1) must REFUSE to the serial loop: engagement
+// counters do not move and the rows are still byte-correct.
+#[test]
+fn funnel_statsless_table_fail_closes_to_serial() {
+    if !funnel_armed() {
+        eprintln!(
+            "SKIP: funnel_statsless_table_fail_closes_to_serial (PGRUST_RUNTIME_ROW_FUNNEL unset)"
+        );
+        return;
+    }
+    let _s = serial();
+    let _w = Watchdog::arm(120, "funnel_statsless_table_fail_closes_to_serial");
+    setup();
+    heapfix::install();
+    funnel_runtime_boot();
+
+    // 12 pages x 100 rows, registered UNANALYZED (reltuples = -1).
+    const RELID: u32 = 93004;
+    let pages: Vec<Vec<i32>> =
+        (0..12).map(|p| ((p * 100 + 1)..=(p * 100 + 100)).collect()).collect();
+    let page_refs: Vec<&[i32]> = pages.iter().map(|v| &v[..]).collect();
+    heapfix::register_table_unanalyzed(RELID, &page_refs);
+    let expected: Vec<i32> = (1101..=1200).collect();
+
+    let (e0, c0) = execmain::funnel_engagements();
+    let mcx = leaked_mcx();
+    // In-band estimate (100/1200 = 8.3% WOULD pass if the table had stats):
+    // the refusal below is attributable to missing stats alone.
+    let pstmt = funnel_seqscan_pstmt(mcx, RELID, Some(funnel_qual_gt(mcx, 1100)), 100.0);
+    let (processed, mut values) =
+        funnel_run_pstmt(pstmt, "select a where a>1100 (stats-less)", 0, false).unwrap();
+    let (e1, c1) = execmain::funnel_engagements();
+    assert_eq!(
+        (e1, c1),
+        (e0, c0),
+        "a stats-less table must fail-close to the serial loop (no engagement)"
+    );
+    assert_eq!(processed, expected.len() as u64);
+    values.sort_unstable();
+    assert_eq!(values, expected, "serial fallback rows must be byte-correct");
 }
