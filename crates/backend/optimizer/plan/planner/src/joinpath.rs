@@ -119,7 +119,7 @@ pub fn add_paths_to_joinrel<'mcx>(
         } else {
             crate::relnode::relids_copy(mcx, &run.root.rel(joinrel).relids)
         };
-        let mut psr: Relids<'mcx> = None;
+        let mut psr: Relids<'mcx> = crate::relnode::relids_empty();
         for i in 0..run.root.join_info_list.len() {
             let (min_l, min_r, jt) = {
                 let sj = &run.root.join_info_list[i];
@@ -514,7 +514,7 @@ fn generate_mergejoin_paths<'mcx>(
             run,
             &inner_pathlist,
             trialsortkeys,
-            &None,
+            &crate::relnode::RELIDS_UNSET,
             CostSelector::Total,
             is_partial,
         );
@@ -565,7 +565,7 @@ fn generate_mergejoin_paths<'mcx>(
             run,
             &inner_pathlist,
             trialsortkeys,
-            &None,
+            &crate::relnode::RELIDS_UNSET,
             CostSelector::Startup,
             is_partial,
         );
@@ -913,7 +913,7 @@ fn consider_parallel_mergejoin<'mcx>(
             false,
             inner_cheapest_total,
             &merge_pathkeys,
-            &None,
+            &crate::relnode::RELIDS_UNSET,
             semifactors,
             true,
         )?;
@@ -1225,7 +1225,7 @@ fn try_nestloop_path<'mcx>(
         let u = relids_union(mcx, &outer_paramrels, &inner_paramrels);
         let d = relids_difference(mcx, &u, &outerrelids);
         if relids_is_empty(&d) {
-            None
+            crate::relnode::relids_empty()
         } else {
             d
         }
@@ -1325,7 +1325,7 @@ fn try_partial_nestloop_path<'mcx>(
     }
     let path = create_nestloop_path(
         run, joinrel, jointype, &workspace, inner_unique, sjinfo, outer_path, inner_path,
-        pathkeys, restrictlist, &None, semifactors,
+        pathkeys, restrictlist, &crate::relnode::RELIDS_UNSET, semifactors,
     )?;
     add_partial_path(run, joinrel, path);
     Ok(())
@@ -1488,7 +1488,7 @@ fn try_partial_mergejoin_path<'mcx>(
     }
     let path = create_mergejoin_path(
         run, joinrel, jointype, &workspace, inner_unique, sjinfo, outer_path, inner_path,
-        restrictlist, pathkeys, &None, mergeclauses, outersortkeys, innersortkeys,
+        restrictlist, pathkeys, &crate::relnode::RELIDS_UNSET, mergeclauses, outersortkeys, innersortkeys,
         outer_presorted_keys,
     )?;
     add_partial_path(run, joinrel, path);
@@ -1784,7 +1784,7 @@ fn try_partial_hashjoin_path<'mcx>(
     }
     let path = create_hashjoin_path(
         run, joinrel, jointype, &workspace, inner_unique, sjinfo, outer_path, inner_path,
-        parallel_hash, restrictlist, &None, hashclauses, semifactors,
+        parallel_hash, restrictlist, &crate::relnode::RELIDS_UNSET, hashclauses, semifactors,
     )?;
     add_partial_path(run, joinrel, path);
     Ok(())

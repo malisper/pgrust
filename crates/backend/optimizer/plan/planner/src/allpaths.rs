@@ -808,7 +808,7 @@ pub(crate) fn add_paths_to_append_rel(
             subpaths,
             mcx::PgVec::new_in(mcx),
             mcx::PgVec::new_in(mcx),
-            &None,
+            &crate::relnode::RELIDS_UNSET,
             0,
             false,
             -1.0,
@@ -821,7 +821,7 @@ pub(crate) fn add_paths_to_append_rel(
                 startup_subpaths,
                 mcx::PgVec::new_in(mcx),
                 mcx::PgVec::new_in(mcx),
-                &None,
+                &crate::relnode::RELIDS_UNSET,
                 0,
                 false,
                 -1.0,
@@ -854,7 +854,7 @@ pub(crate) fn add_paths_to_append_rel(
             mcx::PgVec::new_in(mcx),
             partial_subpaths,
             mcx::PgVec::new_in(mcx),
-            &None,
+            &crate::relnode::RELIDS_UNSET,
             parallel_workers,
             pa_enabled,
             -1.0,
@@ -880,7 +880,7 @@ pub(crate) fn add_paths_to_append_rel(
             pa_nonpartial_subpaths,
             pa_partial_subpaths,
             mcx::PgVec::new_in(mcx),
-            &None,
+            &crate::relnode::RELIDS_UNSET,
             parallel_workers,
             true,
             partial_rows,
@@ -1077,7 +1077,7 @@ fn generate_orderedappend_paths<'mcx>(
                 run,
                 &child_paths,
                 pathkeys,
-                &None,
+                &crate::relnode::RELIDS_UNSET,
                 crate::pathnode::CostSelector::Startup,
                 false,
             );
@@ -1085,7 +1085,7 @@ fn generate_orderedappend_paths<'mcx>(
                 run,
                 &child_paths,
                 pathkeys,
-                &None,
+                &crate::relnode::RELIDS_UNSET,
                 crate::pathnode::CostSelector::Total,
                 false,
             );
@@ -1150,7 +1150,7 @@ fn generate_orderedappend_paths<'mcx>(
                 startup_subpaths,
                 mcx::PgVec::new_in(mcx),
                 crate::relnode::pgvec_clone_shallow(mcx, pathkeys),
-                &None,
+                &crate::relnode::RELIDS_UNSET,
                 0,
                 false,
                 -1.0,
@@ -1163,7 +1163,7 @@ fn generate_orderedappend_paths<'mcx>(
                     total_subpaths,
                     mcx::PgVec::new_in(mcx),
                     crate::relnode::pgvec_clone_shallow(mcx, pathkeys),
-                    &None,
+                    &crate::relnode::RELIDS_UNSET,
                     0,
                     false,
                     -1.0,
@@ -1177,7 +1177,7 @@ fn generate_orderedappend_paths<'mcx>(
                     fractional_subpaths,
                     mcx::PgVec::new_in(mcx),
                     crate::relnode::pgvec_clone_shallow(mcx, pathkeys),
-                    &None,
+                    &crate::relnode::RELIDS_UNSET,
                     0,
                     false,
                     -1.0,
@@ -1300,7 +1300,7 @@ fn set_function_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> Pg
 // set_namedtuplestore_pathlist (allpaths.c); sizing ran in set_rel_size (the
 // RTE_RESULT split here), required_outer empty on this lane.
 fn set_namedtuplestore_pathlist(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<()> {
-    debug_assert!(run.root.rel(rel).lateral_relids.is_none());
+    debug_assert!(crate::relnode::relids_is_unset(&run.root.rel(rel).lateral_relids));
     let path = crate::pathnode::create_namedtuplestorescan_path(run, rel)?;
     add_path(run, rel, path);
     Ok(())
@@ -1609,7 +1609,7 @@ fn create_plain_partial_paths(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<
     if parallel_workers <= 0 {
         return Ok(());
     }
-    let p = crate::pathnode::create_seqscan_path(run, rel, &None, parallel_workers)?;
+    let p = crate::pathnode::create_seqscan_path(run, rel, &crate::relnode::RELIDS_UNSET, parallel_workers)?;
     crate::pathnode::add_partial_path(run, rel, p);
     Ok(())
 }

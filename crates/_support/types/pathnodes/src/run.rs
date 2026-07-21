@@ -306,7 +306,7 @@ impl<'mcx> PlannerRun<'mcx> {
     /// SS_identify_outer_params timing).
     pub fn pop_root_to_subroot(&mut self) -> usize {
         let outer = {
-            let mut outer: crate::Relids<'mcx> = None;
+            let mut outer: crate::Relids<'mcx> = crate::relids::relids_empty();
             if !self.glob.param_exec_types.is_nil() {
                 for i in 0..self.suspended_roots.len() {
                     // SAFETY-free split: scan borrows one suspended root at a time.
@@ -335,7 +335,7 @@ impl<'mcx> PlannerRun<'mcx> {
     /// snapshot.
     pub fn pop_root_to_rel_subroot(&mut self) -> usize {
         let outer = {
-            let mut outer: crate::Relids<'mcx> = None;
+            let mut outer: crate::Relids<'mcx> = crate::relids::relids_empty();
             if !self.glob.param_exec_types.is_nil() {
                 for i in 0..self.suspended_roots.len() {
                     let root = &self.suspended_roots[i].root;
@@ -406,10 +406,10 @@ impl<'mcx> PlannerRun<'mcx> {
     // current root included (it is the child's immediate parent).
     fn identify_outer_params(&mut self) -> PgResult<crate::Relids<'mcx>> {
         if self.glob.param_exec_types.is_nil() {
-            return Ok(None);
+            return Ok(crate::relids::relids_empty());
         }
         let mcx = self.mcx;
-        let mut outer: crate::Relids<'mcx> = None;
+        let mut outer: crate::Relids<'mcx> = crate::relids::relids_empty();
         let scan = |outer: &mut crate::Relids<'mcx>, root: &PlannerInfo<'mcx>| {
             let mut add = |outer: &mut crate::Relids<'mcx>, id: i32| {
                 *outer = crate::relids::relids_union(
@@ -536,10 +536,10 @@ pub fn init_dummy_sjinfo<'mcx>(
         syn_righthand: right_relids,
         jointype: crate::JOIN_INNER,
         ojrelid: 0,
-        commute_above_l: None,
-        commute_above_r: None,
-        commute_below_l: None,
-        commute_below_r: None,
+        commute_above_l: crate::relids::relids_empty(),
+        commute_above_r: crate::relids::relids_empty(),
+        commute_below_l: crate::relids::relids_empty(),
+        commute_below_r: crate::relids::relids_empty(),
         lhs_strict: false,
         semi_can_btree: false,
         semi_can_hash: false,

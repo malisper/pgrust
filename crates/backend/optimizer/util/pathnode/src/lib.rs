@@ -417,7 +417,7 @@ fn compare_path_costs_fuzzily(
 pub fn path_req_outer<'p, 'mcx>(path: &'p Path<'mcx>) -> &'p Relids<'mcx> {
     match &path.param_info {
         Some(ppi) => &ppi.ppi_req_outer,
-        None => &None,
+        None => &types_pathnodes::relids::RELIDS_UNSET,
     }
 }
 
@@ -802,7 +802,7 @@ pub fn get_baserel_parampathinfo<'mcx>(
         debug_assert!(join_clause_is_movable_into(run, rid, &rel_relids, &joinrelids));
         pclauses.push(rid);
     }
-    let mut pserials: types_pathnodes::Relids<'mcx> = None;
+    let mut pserials: types_pathnodes::Relids<'mcx> = types_pathnodes::relids::relids_empty();
     for &rid in pclauses.iter() {
         pserials = relids_add_member(mcx, &pserials, run.root.rinfo(rid).rinfo_serial as u32);
     }
@@ -855,7 +855,7 @@ pub fn get_joinrel_parampathinfo<'mcx>(
             path_req_outer(run.root.path(outer_path).base()),
         )
     } else {
-        None
+        types_pathnodes::relids::relids_empty()
     };
     let inner_and_req = if run.root.path(inner_path).base().param_info.is_some() {
         relids_union(
@@ -864,7 +864,7 @@ pub fn get_joinrel_parampathinfo<'mcx>(
             path_req_outer(run.root.path(inner_path).base()),
         )
     } else {
-        None
+        types_pathnodes::relids::relids_empty()
     };
 
     let joininfo = types_pathnodes::relids::pgvec_clone_shallow(mcx, &run.root.rel(joinrel).joininfo);
@@ -942,7 +942,7 @@ pub fn get_joinrel_parampathinfo<'mcx>(
         ppi_req_outer: relids_copy(mcx, required_outer),
         ppi_rows: rows,
         ppi_clauses: PgVec::new_in(mcx),
-        ppi_serials: None,
+        ppi_serials: types_pathnodes::relids::relids_empty(),
     };
     run.root.rel_mut(joinrel).ppilist.push(ppi.clone());
     Ok(Some(mcx::box_new_in(mcx, ppi)))
@@ -983,7 +983,7 @@ pub fn get_appendrel_parampathinfo<'mcx>(
         ppi_req_outer: relids_copy(mcx, required_outer),
         ppi_rows: 0.0,
         ppi_clauses: PgVec::new_in(mcx),
-        ppi_serials: None,
+        ppi_serials: types_pathnodes::relids::relids_empty(),
     };
     run.root.rel_mut(appendrel).ppilist.push(ppi.clone());
     Some(mcx::box_new_in(mcx, ppi))
@@ -998,7 +998,7 @@ pub fn get_param_path_clause_serials<'mcx>(
     let mcx = run.mcx;
     let node = run.root.path(path_id);
     if node.base().param_info.is_none() {
-        return None;
+        return types_pathnodes::relids::relids_empty();
     }
     let jpath = match node {
         PathNode::MergeAppendPath(_) => {
@@ -1023,7 +1023,7 @@ pub fn get_param_path_clause_serials<'mcx>(
         return pserials;
     }
     if let PathNode::AppendPath(apath) = node {
-        let mut pserials: types_pathnodes::Relids<'mcx> = None;
+        let mut pserials: types_pathnodes::Relids<'mcx> = types_pathnodes::relids::relids_empty();
         for (i, &sp) in apath.subpaths.iter().enumerate() {
             let subserials = get_param_path_clause_serials(run, sp);
             if i == 0 {
@@ -1155,7 +1155,7 @@ pub fn add_partial_path_precheck(
     // Neither clearly better nor worse than another partial path: reject if
     // it loses to a complete path even before the Gather overhead
     // (total_cost passed for startup too — partial plans run to completion).
-    add_path_precheck(run, rel_id, disabled_nodes, total_cost, total_cost, pathkeys, &None)
+    add_path_precheck(run, rel_id, disabled_nodes, total_cost, total_cost, pathkeys, &types_pathnodes::relids::RELIDS_UNSET)
 }
 
 // create_gather_path (pathnode.c); required_outer is empty at every ported
@@ -1501,7 +1501,7 @@ pub fn create_bitmap_and_path<'mcx>(
 ) -> PgResult<PathId> {
     let mcx = run.mcx;
     use types_pathnodes::relids::relids_union;
-    let mut required_outer: types_pathnodes::Relids<'mcx> = None;
+    let mut required_outer: types_pathnodes::Relids<'mcx> = types_pathnodes::relids::relids_empty();
     for &q in bitmapquals.iter() {
         required_outer = relids_union(
             mcx,
@@ -1529,7 +1529,7 @@ pub fn create_bitmap_or_path<'mcx>(
 ) -> PgResult<PathId> {
     let mcx = run.mcx;
     use types_pathnodes::relids::relids_union;
-    let mut required_outer: types_pathnodes::Relids<'mcx> = None;
+    let mut required_outer: types_pathnodes::Relids<'mcx> = types_pathnodes::relids::relids_empty();
     for &q in bitmapquals.iter() {
         required_outer = relids_union(
             mcx,

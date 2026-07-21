@@ -83,8 +83,75 @@ impl PartialEq for Bitmapset<'_> {
 }
 impl Eq for Bitmapset<'_> {}
 
-/// `Bitmapset *`; the empty set is `None` (planner convention).
+/// `Bitmapset *`; the empty set is `None` (planner convention). Boxed
+/// representation of record, kept for bisection behind `boxed_relids`.
+#[cfg(feature = "boxed_relids")]
 pub type Relids<'mcx> = Option<PgBox<'mcx, Bitmapset<'mcx>>>;
+
+/// `Bitmapset *`, by value. `Empty` is the unset value (C's NULL / the old
+/// `None`); `Small` carries a one-word set inline — zero allocation for every
+/// set whose max member is < 64, i.e. all short-query shapes; `Big` stores
+/// the multi-word words directly (one allocation, no box indirection).
+///
+/// Value identity is the word slice, verbatim: `Empty` is `[]`, `Small(w)`
+/// is `[w]`, `Big(v)` is `v`. The relids_* helpers reproduce the boxed
+/// representation's word slices bit-for-bit — including its non-canonical
+/// values (allocated all-zero sets distinct from `Empty`, trailing zero
+/// words preserved) — so every comparison, and therefore every plan, is
+/// unchanged by construction. Pinned by relids_differential_tests.
+#[cfg(not(feature = "boxed_relids"))]
+#[derive(Clone, Debug)]
+pub enum Relids<'mcx> {
+    Empty,
+    Small(u64),
+    Big(PgVec<'mcx, u64>),
+}
+
+#[cfg(not(feature = "boxed_relids"))]
+impl<'mcx> Relids<'mcx> {
+    #[inline]
+    pub fn word_slice(&self) -> &[u64] {
+        match self {
+            Relids::Empty => &[],
+            Relids::Small(w) => core::slice::from_ref(w),
+            Relids::Big(v) => v.as_slice(),
+        }
+    }
+    #[inline]
+    pub fn word_slice_mut(&mut self) -> &mut [u64] {
+        match self {
+            Relids::Empty => &mut [],
+            Relids::Small(w) => core::slice::from_mut(w),
+            Relids::Big(v) => v.as_mut_slice(),
+        }
+    }
+}
+
+#[cfg(not(feature = "boxed_relids"))]
+impl Default for Relids<'_> {
+    #[inline]
+    fn default() -> Self {
+        Relids::Empty
+    }
+}
+
+// Same equality as the boxed repr: unset equals only unset (an allocated
+// all-zero set is NOT unset); otherwise verbatim word-slice comparison.
+#[cfg(not(feature = "boxed_relids"))]
+impl PartialEq for Relids<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Relids::Empty, Relids::Empty) => true,
+            (Relids::Empty, _) | (_, Relids::Empty) => false,
+            _ => self.word_slice() == other.word_slice(),
+        }
+    }
+}
+#[cfg(not(feature = "boxed_relids"))]
+impl Eq for Relids<'_> {}
+
+#[cfg(not(feature = "boxed_relids"))]
+mcx::forget_safe_enum!(Relids<'_> { Empty, Small(x), Big(x) });
 
 pub type JoinType = u32;
 pub const JOIN_INNER: JoinType = 0;
@@ -390,7 +457,7 @@ impl<'mcx> PartitionBoundInfoData<'mcx> {
             indexes: PgVec::new_in(mcx),
             datums: PgVec::new_in(mcx),
             kind: None,
-            interleaved_parts: None,
+            interleaved_parts: relids::relids_empty(),
         }
     }
 }
@@ -1141,7 +1208,7 @@ impl<'mcx> EquivalenceClass<'mcx> {
             ec_sources: PgVec::new_in(mcx),
             ec_derives_list: PgVec::new_in(mcx),
             ec_derives_hash: None,
-            ec_relids: None,
+            ec_relids: relids::relids_empty(),
             ec_has_const: false,
             ec_has_volatile: false,
             ec_broken: false,
@@ -1180,7 +1247,7 @@ impl<'mcx> EquivalenceMemberIterator<'mcx> {
         EquivalenceMemberIterator {
             ec: None,
             current_relid: 0,
-            child_relids: None,
+            child_relids: relids::relids_empty(),
             current_cell: None,
             current_list: PgVec::new_in(mcx),
         }
@@ -1242,7 +1309,7 @@ impl<'mcx> StatisticExtInfo<'mcx> {
             inherit: false,
             rel: None,
             kind: 0,
-            keys: None,
+            keys: relids::relids_empty(),
             exprs: PgVec::new_in(mcx),
         }
     }
@@ -1437,7 +1504,7 @@ impl<'mcx> RelOptInfo<'mcx> {
     pub fn new(mcx: Mcx<'mcx>) -> Self {
         RelOptInfo {
             reloptkind: RELOPT_BASEREL,
-            relids: None,
+            relids: relids::relids_empty(),
             rows: 0.0,
             consider_startup: false,
             consider_param_startup: false,
@@ -1450,8 +1517,8 @@ impl<'mcx> RelOptInfo<'mcx> {
             cheapest_total_path: None,
             cheapest_unique_path: None,
             cheapest_parameterized_paths: PgVec::new_in(mcx),
-            direct_lateral_relids: None,
-            lateral_relids: None,
+            direct_lateral_relids: relids::relids_empty(),
+            lateral_relids: relids::relids_empty(),
             lateral_vars: PgVec::new_in(mcx),
             relid: 0,
             reltablespace: 0,
@@ -1459,8 +1526,8 @@ impl<'mcx> RelOptInfo<'mcx> {
             min_attr: 0,
             max_attr: 0,
             attr_widths: PgVec::new_in(mcx),
-            nulling_relids: None,
-            lateral_referencers: None,
+            nulling_relids: relids::relids_empty(),
+            lateral_referencers: relids::relids_empty(),
             pages: 0,
             tuples: 0.0,
             allvisfrac: 0.0,
@@ -1475,7 +1542,7 @@ impl<'mcx> RelOptInfo<'mcx> {
             useridiscurrent: false,
             parent: None,
             top_parent: None,
-            top_parent_relids: None,
+            top_parent_relids: relids::relids_empty(),
             rel_parallel_workers: 0,
             amflags: 0,
             pgrcolumnar_sorted_attnos: PgVec::new_in(mcx),
@@ -1484,10 +1551,10 @@ impl<'mcx> RelOptInfo<'mcx> {
             pgrcolumnar_stitch_gndv: PgVec::new_in(mcx),
             fdwroutine: None,
             attr_needed: PgVec::new_in(mcx),
-            notnullattnums: None,
+            notnullattnums: relids::relids_empty(),
             indexlist: PgVec::new_in(mcx),
             statlist: PgVec::new_in(mcx),
-            eclass_indexes: None,
+            eclass_indexes: relids::relids_empty(),
             subroot: Subroot::default(),
             subroot_idx: None,
             subplan_params: PgVec::new_in(mcx),
@@ -1501,8 +1568,8 @@ impl<'mcx> RelOptInfo<'mcx> {
             partbounds_merged: false,
             partition_qual: PgVec::new_in(mcx),
             part_rels: PgVec::new_in(mcx),
-            live_parts: None,
-            all_partrels: None,
+            live_parts: relids::relids_empty(),
+            all_partrels: relids::relids_empty(),
             partexprs: PgVec::new_in(mcx),
             nullable_partexprs: PgVec::new_in(mcx),
         }
@@ -1541,10 +1608,10 @@ impl<'mcx> PlannerGlobal<'mcx> {
             subplans: PgVec::new_in(mcx),
             subpaths: PgVec::new_in(mcx),
             subroots: PgVec::new_in(mcx),
-            rewind_plan_ids: None,
+            rewind_plan_ids: relids::relids_empty(),
             finalrtable: PgVec::new_in(mcx),
-            all_relids: None,
-            prunable_relids: None,
+            all_relids: relids::relids_empty(),
+            prunable_relids: relids::relids_empty(),
             finalrteperminfos: PgVec::new_in(mcx),
             finalrowmarks: PgVec::new_in(mcx),
             result_relations: PgVec::new_in(mcx),
@@ -1867,14 +1934,14 @@ impl<'mcx> PlannerInfo<'mcx> {
             query_level: 0,
             parent_root: None,
             plan_params: PgVec::new_in(mcx),
-            outer_params: None,
+            outer_params: relids::relids_empty(),
             simple_rel_array: PgVec::new_in(mcx),
             simple_rel_array_size: 0,
             simple_rte_array: PgVec::new_in(mcx),
             append_rel_array: PgVec::new_in(mcx),
-            all_baserels: None,
-            outer_join_rels: None,
-            all_query_rels: None,
+            all_baserels: relids::relids_empty(),
+            outer_join_rels: relids::relids_empty(),
+            all_query_rels: relids::relids_empty(),
             join_rel_list: PgVec::new_in(mcx),
             join_rel_hash: None,
             join_rel_level: PgVec::new_in(mcx),
@@ -1893,8 +1960,8 @@ impl<'mcx> PlannerInfo<'mcx> {
             full_join_clauses: PgVec::new_in(mcx),
             join_info_list: PgVec::new_in(mcx),
             last_rinfo_serial: 0,
-            all_result_relids: None,
-            leaf_result_relids: None,
+            all_result_relids: relids::relids_empty(),
+            leaf_result_relids: relids::relids_empty(),
             append_rel_list: PgVec::new_in(mcx),
             row_identity_vars: PgVec::new_in(mcx),
             rowMarks: PgVec::new_in(mcx),
@@ -1940,7 +2007,7 @@ impl<'mcx> PlannerInfo<'mcx> {
             non_recursive_path: None,
             self_ref_wt_param: -1,
             non_recursive_rows: None,
-            curOuterRels: None,
+            curOuterRels: relids::relids_empty(),
             curOuterParams: PgVec::new_in(mcx),
             partColsUpdated: false,
             join_search_private: None,

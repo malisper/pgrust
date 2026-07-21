@@ -77,7 +77,7 @@ pub fn plan_cluster_use_sort<'mcx>(
     // cost_qual_eval over ii_Expressions: structurally empty on this lane.
     let comparison_cost = 0.0;
 
-    let seq_id = create_seqscan_path(&mut run, rel_id, &None, 0)?;
+    let seq_id = create_seqscan_path(&mut run, rel_id, &crate::relnode::RELIDS_UNSET, 0)?;
     let (seq_disabled, seq_total) = {
         let p = run.root.path(seq_id).base();
         (p.disabled_nodes, p.total_cost)
@@ -101,7 +101,7 @@ pub fn plan_cluster_use_sort<'mcx>(
         mcx::PgVec::new_in(mcx),
         1, // ForwardScanDirection
         false,
-        &None,
+        &crate::relnode::RELIDS_UNSET,
         1.0,
         false,
     )?;

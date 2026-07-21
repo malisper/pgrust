@@ -274,7 +274,7 @@ fn build_setop_child_paths<'mcx>(
             c.pid,
             trivial_tlist,
             pathkeys,
-            &None,
+            &crate::relnode::RELIDS_UNSET,
             &c.info,
         )?;
         add_path(run, rel, id);
@@ -290,7 +290,7 @@ fn build_setop_child_paths<'mcx>(
                 c.pid,
                 trivial_tlist,
                 PgVec::new_in(run.mcx),
-                &None,
+                &crate::relnode::RELIDS_UNSET,
                 &c.info,
             )?;
             crate::pathnode::add_partial_path(run, rel, id);
@@ -390,7 +390,7 @@ fn generate_union_paths<'mcx>(
     let mut partial_pathlist: PgVec<'mcx, PathId> = PgVec::new_in(mcx);
     let mut partial_paths_valid = true;
     let mut consider_parallel = true;
-    let mut relids: Relids<'mcx> = None;
+    let mut relids: Relids<'mcx> = crate::relnode::relids_empty();
     for &(rel, _, _) in rellist.iter() {
         cheapest_pathlist
             .push(run.root.rel(rel).cheapest_total_path.expect("union child has cheapest path"));
@@ -401,7 +401,7 @@ fn generate_union_paths<'mcx>(
                 run,
                 &paths,
                 &union_pathkeys,
-                &None,
+                &crate::relnode::RELIDS_UNSET,
                 crate::pathnode::CostSelector::Total,
                 false,
             ) {
@@ -439,7 +439,7 @@ fn generate_union_paths<'mcx>(
         cheapest_pathlist,
         PgVec::new_in(mcx),
         PgVec::new_in(mcx),
-        &None,
+        &crate::relnode::RELIDS_UNSET,
         0,
         false,
         -1.0,
@@ -467,7 +467,7 @@ fn generate_union_paths<'mcx>(
             PgVec::new_in(mcx),
             partial_pathlist,
             PgVec::new_in(mcx),
-            &None,
+            &crate::relnode::RELIDS_UNSET,
             parallel_workers,
             crate::gucs::enable_parallel_append(),
             -1.0,
@@ -818,7 +818,7 @@ fn sorted_nonunion_input<'mcx>(
         run,
         &paths,
         nonunion_pathkeys,
-        &None,
+        &crate::relnode::RELIDS_UNSET,
         crate::pathnode::CostSelector::Total,
         false,
     ) {

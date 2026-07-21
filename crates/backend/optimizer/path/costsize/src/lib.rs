@@ -6,8 +6,8 @@ use mcx::PgVec;
 use types_error::PgResult;
 use types_nodes::{Node, NodeTag};
 use types_pathnodes::{
-    is_outer_join, pathkeys_contained_in, tag16, HashPath, MergePath, MergeScanSelCache, NestPath,
-    NodeId, PathId, PathKey, PathNode, QualCost, RelId, RinfoId, SemiAntiJoinFactors,
+    is_outer_join, pathkeys_contained_in, relids, tag16, HashPath, MergePath, MergeScanSelCache,
+    NestPath, NodeId, PathId, PathKey, PathNode, QualCost, RelId, RinfoId, SemiAntiJoinFactors,
     SpecialJoinInfo, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT, RTE_RELATION,
 };
 
@@ -1879,7 +1879,7 @@ pub fn cost_agg_shape(
         for &q in quals {
             let clause = *run.root.expr_node(q);
             rids.push(planner_seams::make_restrictinfo::call(
-                run, clause, true, false, false, false, 0, None, None, None,
+                run, clause, true, false, false, false, 0, relids::relids_empty(), relids::relids_empty(), relids::relids_empty(),
             )?);
         }
         let sel = planner_seams::clauselist_selectivity::call(
@@ -2143,7 +2143,7 @@ pub fn cost_group(
         for &q in quals {
             let clause = *run.root.expr_node(q);
             rids.push(planner_seams::make_restrictinfo::call(
-                run, clause, true, false, false, false, 0, None, None, None,
+                run, clause, true, false, false, false, 0, relids::relids_empty(), relids::relids_empty(), relids::relids_empty(),
             )?);
         }
         let sel = planner_seams::clauselist_selectivity::call(

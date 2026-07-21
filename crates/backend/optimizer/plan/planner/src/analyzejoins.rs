@@ -194,7 +194,7 @@ fn remove_leftjoinrel_from_query<'mcx>(
             let needed = if relids_is_member(0, &run.root.phinfo(phid).ph_needed) {
                 relids_singleton(mcx, 0)
             } else {
-                None
+                crate::relnode::relids_empty()
             };
             run.root.phinfo_mut(phid).ph_needed = needed;
             let mut lateral = adjust_relid_set(run, &run.root.phinfo(phid).ph_lateral, relid, -1);
@@ -224,7 +224,7 @@ fn remove_leftjoinrel_from_query<'mcx>(
         for ndx in 0..n {
             let keep = relids_is_member(0, &run.root.rel(other).attr_needed[ndx]);
             run.root.rel_mut(other).attr_needed[ndx] =
-                if keep { relids_singleton(mcx, 0) } else { None };
+                if keep { relids_singleton(mcx, 0) } else { crate::relnode::relids_empty() };
         }
     }
 
@@ -1044,7 +1044,7 @@ fn remove_rel_from_query_subst(
         let needed = if relids_is_member(0, &run.root.phinfo(phid).ph_needed) {
             relids_singleton(mcx, 0)
         } else {
-            None
+            crate::relnode::relids_empty()
         };
         run.root.phinfo_mut(phid).ph_needed = needed;
         let mut lateral = adjust_relid_set(run, &run.root.phinfo(phid).ph_lateral, relid, subst);
@@ -1071,7 +1071,7 @@ fn remove_rel_from_query_subst(
         for ndx in 0..n {
             let keep = relids_is_member(0, &run.root.rel(other).attr_needed[ndx]);
             run.root.rel_mut(other).attr_needed[ndx] =
-                if keep { relids_singleton(mcx, 0) } else { None };
+                if keep { relids_singleton(mcx, 0) } else { crate::relnode::relids_empty() };
         }
         let lvars = pgvec_clone_shallow(mcx, &run.root.rel(other).lateral_vars);
         for &lv in lvars.iter() {
@@ -1367,7 +1367,7 @@ fn remove_self_joins_one_group<'mcx>(
     relids: &Relids<'mcx>,
 ) -> PgResult<Relids<'mcx>> {
     let mcx = run.mcx;
-    let mut result: Relids<'mcx> = None;
+    let mut result: Relids<'mcx> = crate::relnode::relids_empty();
     let members: PgVec<'_, i32> = {
         let mut v = PgVec::new_in(mcx);
         v.extend(relids_members(relids));
@@ -1418,7 +1418,7 @@ fn remove_self_joins_one_group<'mcx>(
                 }
             }
 
-            let mut joinrelids: Relids<'mcx> = None;
+            let mut joinrelids: Relids<'mcx> = crate::relnode::relids_empty();
             joinrelids = relids_add_member(mcx, &joinrelids, r as u32);
             joinrelids = relids_add_member(mcx, &joinrelids, k as u32);
 
@@ -1476,7 +1476,7 @@ fn remove_self_joins_recurse<'mcx>(
     mut to_remove: Relids<'mcx>,
 ) -> PgResult<Relids<'mcx>> {
     let mcx = run.mcx;
-    let mut relids: Relids<'mcx> = None;
+    let mut relids: Relids<'mcx> = crate::relnode::relids_empty();
     for jl in joinlist {
         match jl {
             JoinlistNode::Rel(varno) => {
@@ -1514,7 +1514,7 @@ fn remove_self_joins_recurse<'mcx>(
     for j in 1..=num_rels {
         if j == num_rels || candidates[j].1 != candidates[i].1 {
             if j - i >= 2 {
-                let mut group: Relids<'mcx> = None;
+                let mut group: Relids<'mcx> = crate::relnode::relids_empty();
                 while i < j {
                     group = relids_add_member(mcx, &group, candidates[i].0 as u32);
                     i += 1;
@@ -1548,7 +1548,7 @@ pub fn remove_useless_self_joins<'mcx>(
         return Ok(joinlist);
     }
 
-    let to_remove = remove_self_joins_recurse(run, &joinlist, None)?;
+    let to_remove = remove_self_joins_recurse(run, &joinlist, crate::relnode::relids_empty())?;
 
     let mut joinlist = joinlist;
     for relid in relids_members(&to_remove) {

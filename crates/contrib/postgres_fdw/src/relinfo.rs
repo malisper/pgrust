@@ -103,8 +103,8 @@ impl<'mcx> PgFdwRelationInfo<'mcx> {
             grouped_tlist: NodeList::nil(),
             make_outerrel_subquery: false,
             make_innerrel_subquery: false,
-            lower_subquery_rels: None,
-            hidden_subquery_rels: None,
+            lower_subquery_rels: types_pathnodes::relids::relids_empty(),
+            hidden_subquery_rels: types_pathnodes::relids::relids_empty(),
             relation_index: 0,
         }
     }

@@ -36,7 +36,7 @@ fn clamp_probability(p: f64) -> f64 {
 }
 
 fn attnums_from_members<'mcx>(run: &PlannerRun<'mcx>, members: &[i16]) -> Relids<'mcx> {
-    let mut r: Relids<'mcx> = None;
+    let mut r: Relids<'mcx> = crate::relnode::relids_empty();
     for &m in members {
         r = crate::relnode::relids_union(
             run.mcx,
@@ -388,7 +388,7 @@ fn compatible_clause_tail<'mcx>(
     clause: Node<'mcx>,
     relid: i32,
 ) -> PgResult<Option<(Relids<'mcx>, Vec<Node<'mcx>>)>> {
-    let mut attnums: Relids<'mcx> = None;
+    let mut attnums: Relids<'mcx> = crate::relnode::relids_empty();
     let mut exprs: Vec<Node<'mcx>> = Vec::new();
     let mut leakproof = true;
     if !compatible_internal(run, clause, relid, &mut attnums, &mut exprs, &mut leakproof)? {
@@ -470,16 +470,14 @@ fn choose_best_statistics(
             if !stat_covers_expressions(&sexprs, ce, Some(&mut expr_idxs)) {
                 continue;
             }
-            if let Some(b) = ca {
-                for (i, w) in b.word_slice().iter().enumerate() {
-                    let mut w = *w;
-                    while w != 0 {
-                        let m = (i * 64) as i32 + w.trailing_zeros() as i32;
-                        if !matched.contains(&m) {
-                            matched.push(m);
-                        }
-                        w &= w - 1;
+            for (i, w) in crate::relnode::relids_word_slice(ca).iter().enumerate() {
+                let mut w = *w;
+                while w != 0 {
+                    let m = (i * 64) as i32 + w.trailing_zeros() as i32;
+                    if !matched.contains(&m) {
+                        matched.push(m);
                     }
+                    w &= w - 1;
                 }
             }
             for ei in expr_idxs {
@@ -633,7 +631,7 @@ fn statext_mcv_clauselist_selectivity_or_nodes<'mcx>(
                 continue;
             }
             simple_clauses.push(
-                (ca.is_none() && ce.len() == 1)
+                (crate::relnode::relids_is_unset(ca) && ce.len() == 1)
                     || (ce.is_empty() && relids_num_members(ca) == 1),
             );
             stat_clauses.push(clause);
@@ -731,9 +729,10 @@ fn mcv_clauselist_selectivity<'mcx>(
 }
 
 fn bms_member_index(keys: &Relids<'_>, attnum: i16) -> usize {
-    let Some(b) = keys else { panic!("mcv_match_expression: empty keys") };
+    // Unset (not merely all-zero) keys are the caller bug this guards.
+    assert!(!crate::relnode::relids_is_unset(keys), "mcv_match_expression: empty keys");
     let mut idx = 0usize;
-    for (i, w) in b.word_slice().iter().enumerate() {
+    for (i, w) in crate::relnode::relids_word_slice(keys).iter().enumerate() {
         let mut w = *w;
         while w != 0 {
             let m = (i * 64) as i32 + w.trailing_zeros() as i32;
@@ -1193,7 +1192,7 @@ fn dependencies_clauselist_selectivity<'mcx>(
     let attnum_offset: i16 =
         if unique_exprs.is_empty() { 0 } else { unique_exprs.len() as i16 + 1 };
 
-    let mut clauses_attnums: Relids<'mcx> = None;
+    let mut clauses_attnums: Relids<'mcx> = crate::relnode::relids_empty();
     for a in list_attnums.iter_mut() {
         if let Some(v) = a {
             *v += attnum_offset;
@@ -1220,16 +1219,14 @@ fn dependencies_clauselist_selectivity<'mcx>(
         }
         let this_stat_exprs = stat_exprs(run, id);
         let mut nmatched = 0;
-        if let Some(b) = &keys {
-            for (i, w) in b.word_slice().iter().enumerate() {
-                let mut w = *w;
-                while w != 0 {
-                    let m = (i * 64) as i32 + w.trailing_zeros() as i32;
-                    if relids_is_member(m + attnum_offset as i32, &clauses_attnums) {
-                        nmatched += 1;
-                    }
-                    w &= w - 1;
+        for (i, w) in crate::relnode::relids_word_slice(&keys).iter().enumerate() {
+            let mut w = *w;
+            while w != 0 {
+                let m = (i * 64) as i32 + w.trailing_zeros() as i32;
+                if relids_is_member(m + attnum_offset as i32, &clauses_attnums) {
+                    nmatched += 1;
                 }
+                w &= w - 1;
             }
         }
         let mut nexprs = 0;
@@ -1348,14 +1345,11 @@ fn relids_del_member<'mcx>(
     r: &Relids<'mcx>,
     x: i32,
 ) -> Relids<'mcx> {
-    let cloned = clone_relids(run, r);
-    if let Some(mut b) = cloned {
-        if let Some(w) = b.word_slice_mut().get_mut(x as usize / 64) {
-            *w &= !(1u64 << (x % 64));
-        }
-        return Some(b);
+    let mut cloned = clone_relids(run, r);
+    if let Some(w) = crate::relnode::relids_word_slice_mut(&mut cloned).get_mut(x as usize / 64) {
+        *w &= !(1u64 << (x % 64));
     }
-    None
+    cloned
 }
 
 // estimate_multivariate_ndistinct (selfuncs.c): pick the ndistinct

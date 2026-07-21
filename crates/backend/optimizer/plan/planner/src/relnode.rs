@@ -141,7 +141,7 @@ pub fn build_simple_rel<'mcx>(
             rel.attr_widths = mcx::vec_from_elem_in(mcx, 0i32, span);
             rel.attr_needed = mcx::PgVec::new_in(mcx);
             for _ in 0..span {
-                rel.attr_needed.push(None);
+                rel.attr_needed.push(relids_empty());
             }
         }
         other => panic!("build_simple_rel (relnode.c): rtekind {other:?}; M2 scan lane"),
@@ -217,7 +217,7 @@ pub fn build_simple_rel_child<'mcx>(
             rel.attr_widths = mcx::vec_from_elem_in(mcx, 0i32, span);
             rel.attr_needed = mcx::PgVec::new_in(mcx);
             for _ in 0..span {
-                rel.attr_needed.push(None);
+                rel.attr_needed.push(relids_empty());
             }
         }
         other => panic!("build_simple_rel (relnode.c): child rtekind {other:?}"),
