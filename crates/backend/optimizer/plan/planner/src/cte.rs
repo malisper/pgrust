@@ -323,7 +323,7 @@ pub fn set_cte_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) -> PgR
         }
         None => mcx::PgVec::new_in(mcx),
     };
-    debug_assert!(run.root.rel(rel).lateral_relids.is_none());
+    debug_assert!(crate::relnode::relids_is_unset(&run.root.rel(rel).lateral_relids));
     let path = crate::pathnode::create_ctescan_path(run, rel, pathkeys)?;
     add_path(run, rel, path);
     Ok(())
@@ -361,7 +361,7 @@ pub fn set_worktable_pathlist(run: &mut PlannerRun<'_>, rel: RelId, rti: usize) 
     run.root.self_ref_wt_param = wt_param;
 
     crate::costsize::set_cte_size_estimates(run, rel, nr_rows)?;
-    debug_assert!(run.root.rel(rel).lateral_relids.is_none());
+    debug_assert!(crate::relnode::relids_is_unset(&run.root.rel(rel).lateral_relids));
     let path = crate::pathnode::create_worktablescan_path(run, rel)?;
     add_path(run, rel, path);
     Ok(())

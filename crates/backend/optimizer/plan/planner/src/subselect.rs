@@ -1937,14 +1937,12 @@ pub fn ss_finalize_plan<'mcx>(
 ) -> PgResult<()> {
     // Planner-arena set -> nodes-side bitmapset, converted once at the boundary.
     let mut valid = types_nodes::bitmapset::Bitmapset::empty();
-    if let Some(b) = outer_params {
-        for (i, w) in b.word_slice().iter().enumerate() {
-            let mut w = *w;
-            while w != 0 {
-                let bit = w.trailing_zeros();
-                valid.add_member(run.mcx, (i as i32) * 64 + bit as i32)?;
-                w &= w - 1;
-            }
+    for (i, w) in crate::relnode::relids_word_slice(outer_params).iter().enumerate() {
+        let mut w = *w;
+        while w != 0 {
+            let bit = w.trailing_zeros();
+            valid.add_member(run.mcx, (i as i32) * 64 + bit as i32)?;
+            w &= w - 1;
         }
     }
     finalize_plan(run, root, plan, -1, &valid, &types_nodes::bitmapset::Bitmapset::empty())?;
@@ -2199,14 +2197,14 @@ fn finalize_plan<'mcx>(
             // with the parent Gather's rescan param carried across (a
             // parallel-aware node inside the subquery hangs off our Gather).
             let mut subquery_params = types_nodes::bitmapset::Bitmapset::empty();
-            if let Some(b) = &subroot.outer_params {
-                for (i, w) in b.word_slice().iter().enumerate() {
-                    let mut w = *w;
-                    while w != 0 {
-                        let bit = w.trailing_zeros();
-                        subquery_params.add_member(mcx, (i as i32) * 64 + bit as i32)?;
-                        w &= w - 1;
-                    }
+            for (i, w) in
+                crate::relnode::relids_word_slice(&subroot.outer_params).iter().enumerate()
+            {
+                let mut w = *w;
+                while w != 0 {
+                    let bit = w.trailing_zeros();
+                    subquery_params.add_member(mcx, (i as i32) * 64 + bit as i32)?;
+                    w &= w - 1;
                 }
             }
             if gather_param >= 0 {

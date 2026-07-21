@@ -124,9 +124,9 @@ fn consider_new_or_clause<'mcx>(
         false,
         false,
         security_level,
-        None,
-        None,
-        None,
+        crate::relnode::relids_empty(),
+        crate::relnode::relids_empty(),
+        crate::relnode::relids_empty(),
     )?;
     let or_selec = crate::clausesel::clause_selectivity(run, or_rid, 0, JOIN_INNER, None)?;
     // Below 0.9 selectivity the extracted qual rejects enough rows to beat

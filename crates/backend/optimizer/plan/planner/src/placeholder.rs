@@ -33,11 +33,9 @@ pub fn make_placeholder_expr<'mcx>(
 }
 
 fn node_bms_to_relids<'mcx>(mcx: Mcx<'mcx>, bms: &types_nodes::Bitmapset<'mcx>) -> Relids<'mcx> {
-    let mut out: Relids<'mcx> = None;
-    for x in bms.iter() {
-        out = relids_union(mcx, &out, &relids_singleton(mcx, x as u32));
-    }
-    out
+    // Planner-arena set from the nodes-side words; value-identical to the
+    // historical per-member union-of-singletons loop.
+    crate::relnode::relids_from_words(mcx, bms.as_words())
 }
 
 fn relids_to_node_bms<'mcx>(
@@ -79,7 +77,7 @@ pub fn find_placeholder_info<'mcx>(
     let ph_lateral = {
         let d = relids_difference(mcx, &rels_used, &phrels);
         if relids_is_empty(&d) {
-            None
+            crate::relnode::relids_empty()
         } else {
             d
         }
@@ -100,7 +98,7 @@ pub fn find_placeholder_info<'mcx>(
         ph_var_phrels: phrels,
         ph_eval_at,
         ph_lateral,
-        ph_needed: None,
+        ph_needed: crate::relnode::relids_empty(),
         ph_width,
     });
     run.root.placeholder_list.push(id);
@@ -222,7 +220,7 @@ pub fn add_vars_to_targetlist_incl_phvs<'mcx>(
     for node in vars {
         if let Some(phv) = node.as_place_holder_var() {
             let id = find_placeholder_info(run, phv)?;
-            let cur = run.root.phinfo_mut(id).ph_needed.take();
+            let cur = crate::relnode::relids_take(&mut run.root.phinfo_mut(id).ph_needed);
             run.root.phinfo_mut(id).ph_needed = relids_union(mcx, &cur, where_needed);
         } else {
             plain.push(node);
@@ -313,7 +311,7 @@ pub fn add_placeholders_to_joinrel<'mcx>(
             target.cost.per_tuple += cost.per_tuple;
             tuple_width += ph_width as i64;
         }
-        let cur = run.root.rel_mut(joinrel).direct_lateral_relids.take();
+        let cur = crate::relnode::relids_take(&mut run.root.rel_mut(joinrel).direct_lateral_relids);
         run.root.rel_mut(joinrel).direct_lateral_relids = relids_union(mcx, &cur, &ph_lateral);
     }
     run.root.rel_reltarget_mut(joinrel).width = crate::costsize::clamp_width_est(tuple_width);
@@ -372,7 +370,7 @@ pub fn contain_placeholder_references_to<'mcx>(
 pub fn get_placeholder_nulling_relids<'mcx>(run: &PlannerRun<'mcx>, id: PhInfoId) -> Relids<'mcx> {
     let mcx = run.mcx;
     let phinfo = run.root.phinfo(id);
-    let mut result: Relids<'mcx> = None;
+    let mut result: Relids<'mcx> = crate::relnode::relids_empty();
     for relid in relids_members(&phinfo.ph_eval_at) {
         if relid == run.root.group_rtindex {
             continue;

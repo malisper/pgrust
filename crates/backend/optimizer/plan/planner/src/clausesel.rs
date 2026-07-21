@@ -525,7 +525,7 @@ fn rowcomparesel<'mcx>(
     } else {
         let mut bms = vars::pull_varnos(run.mcx, larg)?;
         bms.add_members(run.mcx, &vars::pull_varnos(run.mcx, rarg)?)?;
-        debug_assert!(run.root.outer_join_rels.is_none());
+        debug_assert!(crate::relnode::relids_is_unset(&run.root.outer_join_rels));
         bms.iter().count() > 1
     };
     if is_join {

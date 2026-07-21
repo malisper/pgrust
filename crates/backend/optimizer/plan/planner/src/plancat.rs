@@ -57,7 +57,7 @@ pub fn get_relation_info<'mcx>(
         let span = (r.max_attr - r.min_attr + 1) as usize;
         r.attr_needed = PgVec::new_in(mcx);
         for _ in 0..span {
-            r.attr_needed.push(None);
+            r.attr_needed.push(crate::relnode::relids_empty());
         }
         r.attr_widths = vec_from_elem_in(mcx, 0i32, span);
     }
@@ -70,7 +70,7 @@ pub fn get_relation_info<'mcx>(
             if attr.attnullability == ATTNULLABLE_VALID {
                 debug_assert!(!attr.attisdropped);
                 let nn = relids_singleton(mcx, (i + 1) as u32);
-                let cur = run.root.rel_mut(rel).notnullattnums.take();
+                let cur = crate::relnode::relids_take(&mut run.root.rel_mut(rel).notnullattnums);
                 run.root.rel_mut(rel).notnullattnums = relids_union(mcx, &cur, &nn);
             }
         }

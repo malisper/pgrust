@@ -21,7 +21,7 @@ const INDEX_VAR: i32 = -3;
 
 pub fn create_plan<'mcx>(run: &mut PlannerRun<'mcx>, best_path: PathId) -> PgResult<Node<'mcx>> {
     debug_assert!(run.root.plan_params.is_empty());
-    run.root.curOuterRels = None;
+    run.root.curOuterRels = types_pathnodes::relids::relids_empty();
     run.root.curOuterParams.clear();
 
     let plan = create_plan_recurse(run, best_path, CP_EXACT_TLIST)?;
@@ -3011,7 +3011,7 @@ fn create_upper_unique_plan<'mcx>(
         } else {
             for tle_node in &tlist {
                 let tle = tle_node.as_target_entry().expect("TargetEntry");
-                if let Some(em_id) = find_ec_member_matching_expr(run, ec, tle.expr, &None) {
+                if let Some(em_id) = find_ec_member_matching_expr(run, ec, tle.expr, &types_pathnodes::relids::RELIDS_UNSET) {
                     found = Some((tle.resno, run.root.em(em_id).em_datatype));
                     break;
                 }
@@ -3145,7 +3145,7 @@ fn sort_relids_for_child_ec<'mcx>(
             let parent = run.root.path(path_id).base().parent;
             types_pathnodes::relids::relids_copy(run.mcx, &run.root.rel(parent).relids)
         }
-        _ => None,
+        _ => types_pathnodes::relids::relids_empty(),
     }
 }
 

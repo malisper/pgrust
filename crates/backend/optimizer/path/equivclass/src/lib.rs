@@ -14,7 +14,7 @@ use types_pathnodes::{
 };
 
 use types_pathnodes::relids::{
-    find_base_rel, find_childrel_parents, pgvec_clone_shallow, relids_add_member, relids_copy,
+    find_base_rel, find_childrel_parents, pgvec_clone_shallow, relids_add_member, relids_copy, relids_empty,
     relids_equal, relids_is_empty, relids_is_member, relids_is_subset, relids_members,
     relids_num_members, relids_overlap, relids_union,
 };
@@ -103,7 +103,7 @@ pub fn process_equivalence<'mcx>(
                 is_clone,
                 pseudoconstant,
                 security,
-                None,
+                types_pathnodes::relids::relids_empty(),
                 incompatible,
                 outer,
             )?;
@@ -1832,7 +1832,7 @@ where
         run.root.rel(rel).reloptkind == types_pathnodes::RELOPT_OTHER_MEMBER_REL;
     // Ancestor relids, to skip useless joins from a child to its own parents.
     let parent_relids =
-        if is_child_rel { find_childrel_parents(&run.root, rel) } else { None };
+        if is_child_rel { find_childrel_parents(&run.root, rel) } else { relids_empty() };
 
     let eclass_indexes = relids_copy(mcx, &run.root.rel(rel).eclass_indexes);
     for i in relids_members(&eclass_indexes) {
@@ -1996,7 +1996,7 @@ pub fn get_eclass_indexes_for_relids<'mcx>(
 ) -> Relids<'mcx> {
     let mcx = run.mcx;
     debug_assert!(run.root.ec_merging_done);
-    let mut ec_indexes: Relids<'mcx> = None;
+    let mut ec_indexes: Relids<'mcx> = relids_empty();
     for i in relids_members(relids) {
         if i == run.root.group_rtindex {
             continue;

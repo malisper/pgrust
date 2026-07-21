@@ -478,9 +478,7 @@ fn build_join_rel_hash<'mcx>(root: &mut types_pathnodes::PlannerInfo<'mcx>) {
 
 fn join_rel_hash_key<'mcx>(mcx: mcx::Mcx<'mcx>, relids: &Relids<'_>) -> PgVec<'mcx, u64> {
     let mut key: PgVec<'mcx, u64> = PgVec::new_in(mcx);
-    if let Some(b) = relids {
-        key.extend_from_slice(b.word_slice());
-    }
+    key.extend_from_slice(crate::relnode::relids_word_slice(relids));
     key
 }
 
@@ -808,7 +806,7 @@ pub fn min_join_parameterization<'mcx>(
     );
     let r = crate::relnode::relids_difference(mcx, &u, joinrelids);
     if crate::relnode::relids_is_empty(&r) {
-        None
+        crate::relnode::relids_empty()
     } else {
         r
     }
@@ -872,7 +870,7 @@ fn build_join_rel<'mcx>(
             &run.root.rel(joinrel).relids,
         );
         run.root.rel_mut(joinrel).direct_lateral_relids =
-            if crate::relnode::relids_is_empty(&d) { None } else { d };
+            if crate::relnode::relids_is_empty(&d) { crate::relnode::relids_empty() } else { d };
     }
 
     let restrictlist =
@@ -1255,13 +1253,13 @@ fn try_partitionwise_join<'mcx>(
                 )?;
                 run.root.rel_mut(joinrel).part_rels[cnt_parts] = Some(cj);
                 {
-                    let lp = run.root.rel_mut(joinrel).live_parts.take();
+                    let lp = crate::relnode::relids_take(&mut run.root.rel_mut(joinrel).live_parts);
                     run.root.rel_mut(joinrel).live_parts =
                         crate::relnode::relids_add_member(mcx, &lp, cnt_parts as u32);
                 }
                 {
                     let cj_relids = relids_copy(mcx, &run.root.rel(cj).relids);
-                    let cur = run.root.rel_mut(joinrel).all_partrels.take();
+                    let cur = crate::relnode::relids_take(&mut run.root.rel_mut(joinrel).all_partrels);
                     run.root.rel_mut(joinrel).all_partrels =
                         relids_union(mcx, &cur, &cj_relids);
                 }

@@ -225,10 +225,10 @@ fn expand_partitioned_rtentry<'mcx>(
     {
         let r = run.root.rel_mut(relinfo);
         r.part_rels = mcx::vec_from_elem_in(mcx, None, oids.len());
-        r.all_partrels = None;
+        r.all_partrels = crate::relnode::relids_empty();
     }
     {
-        let mut lp: types_pathnodes::Relids<'mcx> = None;
+        let mut lp: types_pathnodes::Relids<'mcx> = crate::relnode::relids_empty();
         let mut m = live_parts.next_member(-1);
         while m >= 0 {
             lp = crate::relnode::relids_add_member(mcx, &lp, m as u32);
@@ -251,7 +251,7 @@ fn expand_partitioned_rtentry<'mcx>(
         run.root.rel_mut(relinfo).part_rels[i as usize] = Some(childrelinfo);
         {
             let child_relids = crate::relnode::relids_copy(mcx, &run.root.rel(childrelinfo).relids);
-            let cur = run.root.rel_mut(relinfo).all_partrels.take();
+            let cur = crate::relnode::relids_take(&mut run.root.rel_mut(relinfo).all_partrels);
             run.root.rel_mut(relinfo).all_partrels =
                 crate::relnode::relids_union(mcx, &cur, &child_relids);
         }
@@ -388,11 +388,11 @@ fn expand_single_inheritance_child<'mcx>(
     }
 
     if crate::relnode::relids_is_member(parent_rti as i32, &run.root.all_result_relids) {
-        let cur = run.root.all_result_relids.take();
+        let cur = crate::relnode::relids_take(&mut run.root.all_result_relids);
         run.root.all_result_relids = crate::relnode::relids_add_member(mcx, &cur, child_rti);
         // Non-leaf partitions need no row identity info.
         if child_relkind != types_rel::RELKIND_PARTITIONED_TABLE {
-            let cur = run.root.leaf_result_relids.take();
+            let cur = crate::relnode::relids_take(&mut run.root.leaf_result_relids);
             run.root.leaf_result_relids =
                 crate::relnode::relids_add_member(mcx, &cur, child_rti);
             let rrvar = mk_var(
@@ -1022,9 +1022,9 @@ pub fn apply_child_basequals<'mcx>(
                 is_clone,
                 pseudoconstant,
                 security_level,
-                None,
-                None,
-                None,
+                crate::relnode::relids_empty(),
+                crate::relnode::relids_empty(),
+                crate::relnode::relids_empty(),
             )?;
             if crate::initsplan::restriction_is_always_false(run, childrinfo) {
                 return Ok(false);
@@ -1052,9 +1052,9 @@ pub fn apply_child_basequals<'mcx>(
                 false,
                 false,
                 security_level,
-                None,
-                None,
-                None,
+                crate::relnode::relids_empty(),
+                crate::relnode::relids_empty(),
+                crate::relnode::relids_empty(),
             )?;
             childquals.push(childrinfo);
             cq_min_security = cq_min_security.min(security_level);
@@ -1199,7 +1199,7 @@ pub fn add_row_identity_var<'mcx>(
             continue;
         }
         if types_nodes::equal(*run.root.expr_node(var_id), rowid_node) {
-            let cur = run.root.row_identity_vars[i].rowidrels.take();
+            let cur = crate::relnode::relids_take(&mut run.root.row_identity_vars[i].rowidrels);
             run.root.row_identity_vars[i].rowidrels =
                 crate::relnode::relids_add_member(mcx, &cur, rtindex);
             return Ok(());

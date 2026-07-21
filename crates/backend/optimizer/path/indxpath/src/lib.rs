@@ -7,7 +7,7 @@ use types_nodes::{Node, NodeTag};
 use types_pathnodes::{IndexClause, IndexOptInfo, PathId, RelId, RinfoId};
 
 use pathnode::add_path;
-use types_pathnodes::relids::{relids_is_member, relids_is_subset};
+use types_pathnodes::relids::{relids_empty, relids_is_member, relids_is_subset};
 use types_pathnodes::run::PlannerRun;
 
 pub struct IndexClauseSet<'mcx> {
@@ -490,7 +490,7 @@ pub(crate) fn get_loop_count(
     cur_relid: u32,
     outer_relids: &types_pathnodes::Relids<'_>,
 ) -> PgResult<f64> {
-    if outer_relids.is_none() {
+    if types_pathnodes::relids::relids_is_unset(outer_relids) {
         return Ok(1.0);
     }
     let mut members: PgVec<'_, i32> = PgVec::new_in(run.mcx);
@@ -770,7 +770,7 @@ fn match_boolean_index_clause<'mcx>(
     let Some(op) = op else { return Ok(None) };
     let mut indexquals = PgVec::new_in(mcx);
     indexquals.push(planner_seams::make_restrictinfo::call(
-        run, op, true, false, false, false, 0, None, None, None,
+        run, op, true, false, false, false, 0, relids_empty(), relids_empty(), relids_empty(),
     )?);
     Ok(Some(IndexClause {
         rinfo: Some(rinfo),
@@ -1083,7 +1083,7 @@ fn expand_indexqual_rowcompare<'mcx>(
             },
         )?;
         planner_seams::make_restrictinfo::call(
-            run, new_rc, true, false, false, false, 0, None, None, None,
+            run, new_rc, true, false, false, false, 0, relids_empty(), relids_empty(), relids_empty(),
         )?
     } else {
         indexcols.clear();
@@ -1095,7 +1095,7 @@ fn expand_indexqual_rowcompare<'mcx>(
             rc.inputcollids.nth(0),
         )?;
         planner_seams::make_restrictinfo::call(
-            run, op, true, false, false, false, 0, None, None, None,
+            run, op, true, false, false, false, 0, relids_empty(), relids_empty(), relids_empty(),
         )?
     };
 
@@ -1333,7 +1333,7 @@ fn match_orclause_to_indexcol<'mcx>(
     .expect("array type verified on the first arm");
     let mut indexquals = PgVec::new_in(mcx);
     indexquals.push(planner_seams::make_restrictinfo::call(
-        run, saop, true, false, false, false, 0, None, None, None,
+        run, saop, true, false, false, false, 0, relids_empty(), relids_empty(), relids_empty(),
     )?);
     Ok(Some(IndexClause {
         rinfo: Some(rinfo),
@@ -1451,7 +1451,7 @@ fn get_index_clause_from_support<'mcx>(
     for expr in exprs.iter() {
         // make_simple_restrictinfo (restrictinfo.h).
         indexquals.push(planner_seams::make_restrictinfo::call(
-            run, *expr, true, false, false, false, 0, None, None, None,
+            run, *expr, true, false, false, false, 0, relids_empty(), relids_empty(), relids_empty(),
         )?);
     }
     Ok(Some(IndexClause {

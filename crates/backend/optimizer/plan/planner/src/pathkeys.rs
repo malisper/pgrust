@@ -275,7 +275,7 @@ pub fn make_pathkey_from_sortop<'mcx>(
         reverse_sort,
         nulls_first,
         sortref,
-        &None,
+        &crate::relnode::RELIDS_UNSET,
         true,
     )?
     .expect("create_it pathkey"))
@@ -769,7 +769,7 @@ pub fn initialize_mergeclause_eclasses(
         lefttype,
         o.inputcollid,
         0,
-        &None,
+        &crate::relnode::RELIDS_UNSET,
         true,
     )?;
     let right_ec = crate::equivclass::get_eclass_for_sort_expr(
@@ -779,7 +779,7 @@ pub fn initialize_mergeclause_eclasses(
         righttype,
         o.inputcollid,
         0,
-        &None,
+        &crate::relnode::RELIDS_UNSET,
         true,
     )?;
     let r = run.root.rinfo_mut(rinfo);

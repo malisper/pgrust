@@ -2147,7 +2147,7 @@ fn add_predicate_to_index_quals<'mcx>(
             let pred = *run.root.expr_node(pid);
             if !crate::predtest::predicate_implied_by(mcx, &[pred], &qual_nodes, false)? {
                 result.push(crate::initsplan::make_restrictinfo(
-                    run, pred, true, false, false, false, 0, None, None, None,
+                    run, pred, true, false, false, false, 0, crate::relnode::relids_empty(), crate::relnode::relids_empty(), crate::relnode::relids_empty(),
                 )?);
             }
         }
