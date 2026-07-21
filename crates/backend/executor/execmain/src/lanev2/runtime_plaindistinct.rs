@@ -715,17 +715,24 @@ fn plaindistinct_enabled() -> bool {
     crate::once_val(&ON, || std::env::var("PGRUST_RUNTIME_PLAINDISTINCT").as_deref() != Ok("0"))
 }
 
-/// SE-T2AGG CAR A arm switch (`PGRUST_LANE_V2_DISTINCT_PLAINSHAPE`, default
-/// OFF; ON iff exactly `1`/`on`). SAME spelling as the m5_suppress probe
-/// half (`distinct_plainshape_enabled`) — both read sites flip together
+/// SE-T2AGG CAR A arm switch (`PGRUST_LANE_V2_DISTINCT_PLAINSHAPE`, DEFAULT
+/// ON since t36 flips2; `=0|off` is the kill — the flipped-kill idiom).
+/// FLIP EVIDENCE (GL-T2C FLIP-RECOMMENDED, 2026-07-21, tier2 campaign @
+/// 7d8aa9a2b): bare SELECT DISTINCT int 0.164s (6.1x win) / text 0.195s
+/// (5.1x win) at 10M/2M, md5 parity every leg, OFF arm inert, GROUP BY
+/// control flat, wrapped/hasAggs forms correctly shape-refused; measured
+/// in the engagement region (dop 12, floors disabled symmetrically) — the
+/// production floor guard (min_dop 12 / low-dop<=3M) bounds exposure.
+/// SAME spelling as the m5_suppress probe half
+/// (`distinct_plainshape_enabled`) — both read sites flip together
 /// (knob-coherence law); the family kill `PGRUST_RUNTIME_PLAINDISTINCT=0`
 /// above still disarms everything.
 fn selectdistinct_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        matches!(
+        !matches!(
             std::env::var("PGRUST_LANE_V2_DISTINCT_PLAINSHAPE").as_deref(),
-            Ok("1") | Ok("on")
+            Ok("0") | Ok("off")
         )
     })
 }
