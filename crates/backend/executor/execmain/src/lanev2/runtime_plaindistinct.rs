@@ -647,18 +647,19 @@ fn build_worker_exec(payload: &Arc<RuntimePlainDistinctShared>) -> PgResult<()> 
                     let estate = &mut d.estate;
                     let ss = plain_worker_scan(d.planstate.as_mut())?;
                     // The serial drive's direct-key staging probe, per worker
-                    // executor (arming decides staging). SE-T2AGG CAR A: the
-                    // SELECT-DISTINCT sub-arm additionally proves the
-                    // explicit-attnum arm (the unprojected physical-tlist
-                    // shape — the leader proved the same ladder); the
-                    // historical count(DISTINCT) arm is byte-untouched.
+                    // executor (arming decides staging). The explicit-attnum
+                    // arm (the unprojected physical-tlist shape — the leader
+                    // proved the same ladder) serves the SE-T2AGG CAR A
+                    // SELECT-DISTINCT sub-arm AND the GL-DISTALPHA-2
+                    // PRESORTED-bare count(DISTINCT) face; on projected
+                    // scans it refuses by construction (ProjInfo present),
+                    // so historical projected engagements are byte-untouched.
                     let key_direct = ::nodeseqscan::seq_scan_sortkey_direct(ss, estate)
-                        || (payload.sd_values
-                            && ::nodeseqscan::seq_scan_key_direct_att(
-                                ss,
-                                estate,
-                                payload.spec.att,
-                            ));
+                        || ::nodeseqscan::seq_scan_key_direct_att(
+                            ss,
+                            estate,
+                            payload.spec.att,
+                        );
                     let key_bytes = key_direct && payload.spec.is_bytes();
                     if key_bytes {
                         // Arm the dict-coded key lane when the bank serves it
@@ -803,16 +804,23 @@ pub(super) fn try_own_plain_distinct_runtime<'mcx>(
         refused(estate, ea, node_id, "already in parallel machinery");
         return Ok(None);
     }
-    // The direct staged-key feed is the whole accept path: prove it on the
-    // leader's scan (workers re-prove on their own executors).
-    if !::nodeseqscan::seq_scan_sortkey_direct(ss, estate) {
-        refused(estate, ea, node_id, "key staging not direct");
-        return Ok(None);
-    }
     let Some(spec) = plain_pd_derive_spec(agg) else {
         refused(estate, ea, node_id, "spec derivation");
         return Ok(None);
     };
+    // The direct staged-key feed is the whole accept path: prove it on the
+    // leader's scan (workers re-prove on their own executors) — the sortkey
+    // resolution for projected single-column shapes; the explicit-attnum
+    // arm (GL-DISTALPHA-2, the sd sub-arm's own ladder) for the unprojected
+    // physical-tlist PRESORTED-bare face, where `spec.att` is the scan
+    // column by the physical-tlist identity `key_direct_att` itself
+    // enforces (it refuses any projected scan).
+    if !::nodeseqscan::seq_scan_sortkey_direct(ss, estate)
+        && !::nodeseqscan::seq_scan_key_direct_att(ss, estate, spec.att)
+    {
+        refused(estate, ea, node_id, "key staging not direct");
+        return Ok(None);
+    }
     // No params, either kind (the binder refuses Params; the worker pstmt
     // carries none).
     if estate.es_param_list_info.is_some_and(|p| !p.is_empty()) {
