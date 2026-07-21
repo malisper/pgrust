@@ -39,13 +39,14 @@ fn m5_suppress_killed() -> bool {
     })
 }
 
-/// Whether the runtime pool exists in this process (the M0 master switch,
-/// DEFAULT ON since the M5 boarding flip; `PGRUST_RUNTIME=0` kills; mirrors
-/// `runtime::runtime_enabled` — guc_tables cannot depend on the runtime
-/// crate).
+/// Whether the runtime pool is enabled in this process (the M0 master switch,
+/// DEFAULT ON since the M5 boarding flip). env-to-guc train: this now reads the
+/// registered `pgrust.runtime` GUC backing cell (the PGRUST_RUNTIME env var
+/// seeds it at boot; postgresql.conf can also set it), so the planner probe and
+/// the actual pool-spawn gate (launch_backend::rtpool) agree on one source of
+/// truth. guc_tables owns the backing cell, so this needs no runtime-crate dep.
 fn runtime_pool_env() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| !std::env::var("PGRUST_RUNTIME").is_ok_and(|v| v == "0"))
+    crate::backing::pgrust_runtime()
 }
 
 /// §2.2 degrade line, loud-once per process.

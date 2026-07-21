@@ -62,13 +62,16 @@ libc = "0.2"
 
 syslogger_seams = { path = "../syslogger_seams" }
 
+# env-to-guc train: read the process-global `pgrust.runtime` GUC backing cell to
+# gate the runtime-pool spawn (rtpool::start_if_enabled). Was dev-only.
+guc_tables = { path = "../../utils/misc/guc_tables" }
+
 [dev-dependencies]
 xact_seams = { path = "../../access/transam/xact_seams" }
 scalar_seams = { path = "../../utils/adt/scalar_seams" }
 types_guc = { path = "../../../_support/types/types_guc" }
 ip = { path = "../../../common/ip" }
 libpq_pqsignal = { path = "../../libpq/libpq_pqsignal" }
-guc_tables = { path = "../../utils/misc/guc_tables" }
 pqcomm_seams = { path = "../../libpq/pqcomm_seams" }
 types_storage = { path = "../../../_support/types/types_storage" }
 libc = "0.2"
