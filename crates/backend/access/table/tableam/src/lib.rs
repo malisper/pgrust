@@ -1343,6 +1343,35 @@ pub fn table_scan_cb_zone_topk_words(
     }
 }
 
+/// Direct bounded top-N granule drive of a pgrcolumnar scan (the runtime
+/// sort arm's PGRUST_RUNTIME_TOPN_HEAP feed): hand out the current
+/// granule-range claim's next granule whole — (nrows, rowref_base) — with
+/// the per-RG visibility gate, no window/SoA staging. `None` = claim
+/// exhausted. Heap AMs error (the arm admits pgrcolumnar only).
+pub fn table_scan_topn_direct_next_granule(
+    scan: &mut TableScanDesc<'_>,
+) -> PgResult<Option<(u32, u64)>> {
+    match scan {
+        TableScanDesc::Heap(_) => Err(elog_error(
+            "direct top-N granule drive on a non-columnar scan",
+        )),
+        TableScanDesc::Pgrcolumnar(c) => c.topn_direct_next_granule(),
+    }
+}
+
+/// The decoded datum lane of column `col` for the granule
+/// `table_scan_topn_direct_next_granule` just handed out. None = dict
+/// column / out of range (the caller fails closed to the staged feed).
+pub fn table_scan_topn_direct_lane<'a>(
+    scan: &'a mut TableScanDesc<'_>,
+    col: usize,
+) -> Option<&'a [::datum::Datum]> {
+    match scan {
+        TableScanDesc::Heap(_) => None,
+        TableScanDesc::Pgrcolumnar(c) => c.topn_direct_lane(col),
+    }
+}
+
 /// Drive-scaling observability counters of a pgrcolumnar scan (the runtime
 /// WFIN channel): (rg_switches, dict_builds, granules_scanned,
 /// windows_staged). None = heap.
