@@ -305,13 +305,15 @@ fn hj_cbkeys_enabled() -> bool {
 /// equal-under-bpchareq <=> byte-identical images — the stored bytes ARE
 /// canonical and no trailing-blank representative tie exists. Sub-knob of
 /// CBKEYS (both must be armed; the planner probe reads the same pair).
-/// DEFAULT OFF; `PGRUST_LANE_V2_CBKEYS_BPCHAR=1|on` arms.
+/// DEFAULT ON (tpch-flips train, GL-BPCHAR-1 — the planner twin's doc
+/// carries the letter numbers incl. the byte-identical production canary);
+/// `PGRUST_LANE_V2_CBKEYS_BPCHAR=0|off` is the kill switch.
 fn hj_bpchar_keys_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        matches!(
+        !matches!(
             std::env::var("PGRUST_LANE_V2_CBKEYS_BPCHAR").as_deref(),
-            Ok("1") | Ok("on")
+            Ok("0") | Ok("off")
         )
     })
 }
@@ -4885,7 +4887,7 @@ mod mb_tests {
         assert!(hj_decoroot_enabled(), "tpch-flips: unset => ON (GL-DECOROOT-1)");
         assert!(hj_aggjoin_numeric_enabled(), "tpch-flips: unset => ON (GL-NUMJOIN-1)");
         assert!(hj_cbkeys_enabled(), "tpch-flips: unset => ON (GL-CBKEYS-1)");
-        assert!(!hj_bpchar_keys_enabled(), "PGRUST_LANE_V2_CBKEYS_BPCHAR unset => OFF");
+        assert!(hj_bpchar_keys_enabled(), "tpch-flips: unset => ON (GL-BPCHAR-1)");
     }
 
     /// Decomposition invariants on a SNOWFLAKE topology

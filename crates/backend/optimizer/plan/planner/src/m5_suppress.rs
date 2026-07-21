@@ -866,12 +866,21 @@ fn cbkeys_enabled() -> bool {
 /// bpchar stores unpadded and stays a named refusal), deterministic
 /// DEFAULT collation. The absorb-side `!isnew` backstop remains defense
 /// in depth (a non-canonical image refuses to the serial rerun), not the
-/// argument. DEFAULT OFF; `PGRUST_LANE_V2_CBKEYS_BPCHAR=1|on` arms
-/// (GL-BPCHAR-1 fleet letter owns the default flip).
+/// argument.
+///
+/// DEFAULT ON (tpch-flips train; GL-BPCHAR-1 FLIP-RECOMMENDED,
+/// fleet-ab-parallelism.md 2026-07-21): the K-text unlock on skeletons —
+/// Q05 skeleton (char(25), five cars composed) 2.77-3.32x, Q12 skeleton
+/// (char(10), the trailing-blank tie adversary in the fixture) 2.56-3.09x,
+/// multibyte char(8) 2.21-2.65x vs legacy; the tie-law PRODUCTION canary
+/// at SF10 (3 char(n) GROUP BY shapes x both postures x both arms) is ALL
+/// byte-identical; typmod-less bpchar refuses by name (13 traces);
+/// sub-knob OFF restores the cbkeys refusal byte-for-byte. `PGRUST_LANE_
+/// V2_CBKEYS_BPCHAR=0|off` is the kill switch (t35 exact-spelling law).
 fn bpchar_keys_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        knob_spelling_armed(std::env::var("PGRUST_LANE_V2_CBKEYS_BPCHAR").as_deref().ok())
+        knob_spelling_on(std::env::var("PGRUST_LANE_V2_CBKEYS_BPCHAR").as_deref().ok())
     })
 }
 
@@ -4924,7 +4933,8 @@ mod tests {
     /// bpchar_input/bpchareq (bpchar_tie_law_* tests).
     #[test]
     fn bpchar_subknob_default_off() {
-        assert!(!bpchar_keys_enabled(), "test process has no knob set => OFF");
+        // tpch-flips: DEFAULT ON (GL-BPCHAR-1; =0|off kills).
+        assert!(bpchar_keys_enabled(), "tpch-flips: unset => ON (GL-BPCHAR-1)");
     }
 
     /// TPCH-FILTERQUALS knob (night/tpch-filterquals): DEFAULT OFF, `1`/
