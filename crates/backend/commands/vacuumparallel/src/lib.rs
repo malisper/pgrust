@@ -1291,3 +1291,59 @@ fn parallel_vacuum_main(pshared: &parallel::ParallelShared) -> PgResult<()> {
 pub fn init_seams() {
     parallel::register_parallel_worker_entrypoint("parallel_vacuum_main", parallel_vacuum_main);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ARMED-WITNESS leg (scripts/armed-witness-e2e.sh registry row
+    /// `vacuum-pool`): the arming env must TAKE through every once-cached
+    /// gate on the M4.1 kill-switch chain — the silent-no-witness failure
+    /// mode (misspelled knob, stale process-static cache) the registry
+    /// exists to kill. Engagement itself is witnessed by the server-level
+    /// battery (scripts/vacuum-pool-e2e.sh, its armed legs self-arm);
+    /// this leg mechanically proves the env plumbing in the CONFIRM world.
+    /// Unarmed (the default `cargo test` world) it self-SKIPs, so the
+    /// default units leg stays byte-identical.
+    #[test]
+    fn armed_pool_kill_switch_chain_takes() {
+        if std::env::var("PGRUST_RUNTIME_VACUUM_POOL").as_deref() != Ok("1") {
+            eprintln!(
+                "SKIP: armed_pool_kill_switch_chain_takes (PGRUST_RUNTIME_VACUUM_POOL unset)"
+            );
+            return;
+        }
+        assert!(
+            runtime::runtime_enabled(),
+            "PGRUST_RUNTIME=1 must ride the registry row's env"
+        );
+        runtime::install_global(runtime::Runtime::new(runtime::RuntimeConfig::new(2)));
+        assert!(
+            parallel::standing::pool_binding_enabled(),
+            "POOLBIND default-on gate observes the armed world"
+        );
+        assert!(
+            parallel::standing::pooldb_enabled(),
+            "PGRUST_RUNTIME_POOLDB=1 must ride the registry row's env (the inc-2 gate)"
+        );
+        assert!(
+            pool_index_enabled(),
+            "the vacuum index-pass pool gate admits under the armed env"
+        );
+    }
+
+    /// One-index-per-claim contract: every granule is its own hard boundary
+    /// (whole-boundary claims make a claim exactly one index — the coarse
+    /// long-unit morsel of record). Unconditional: pure geometry.
+    #[test]
+    fn index_granule_source_one_index_per_claim() {
+        use runtime::MorselSource as _;
+        let s = IndexGranuleSource { total: 5 };
+        assert_eq!(s.total_granules(), 5);
+        for g in 0..5u64 {
+            assert_eq!(s.next_boundary_after(g), g + 1, "granule {g} is its own boundary");
+        }
+        assert!(s.whole_boundary_claims());
+        assert_eq!(s.startup_c0(), 1);
+    }
+}
