@@ -35,8 +35,10 @@
 //! aborts to the serial rerun), EXPLAIN ANALYZE refuses (the serial arm
 //! serves EA — transparency records the gate).
 //!
-//! Kill switch: `PGRUST_RUNTIME_PLAINDISTINCT=0`. Pool arming rides
-//! `pgrust.runtime_distinct_pool` (this is the distinct-sink family).
+//! Kill switch: `PGRUST_RUNTIME_PLAINDISTINCT=0`. Arming rides the M5-1
+//! router's `ArmClass::Distinct` (this is the distinct-sink family): the
+//! bench GUC `pgrust.runtime_distinct_pool` verbatim when set, else
+//! engine=runtime at `pgrust.runtime_dop`.
 
 use std::cell::UnsafeCell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -687,7 +689,13 @@ pub(super) fn try_own_plain_distinct_runtime<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     // --- Arming + kill-switch layering (all cheap; absent = today's path).
-    let dop = ::guc_tables::runtime_pool::runtime_distinct_pool_dop();
+    // M5-1: the router is the DOP source, like every sibling arm (bench GUC
+    // verbatim when set; else engine=runtime arms at pgrust.runtime_dop;
+    // else 0 = today's path). Reading the bench GUC alone left this arm
+    // UNARMED in every engine=runtime session with the pool GUC unset — the
+    // probe suppressed the Gather and execution landed SERIAL (the q5/q6
+    // suppress-then-unarmed class, night/routing-floor-fixes).
+    let dop = super::router::arm_dop(super::router::ArmClass::Distinct);
     if dop <= 0 || !runtime::runtime_enabled() || !plaindistinct_enabled() {
         return Ok(None);
     }
