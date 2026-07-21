@@ -273,14 +273,16 @@ fn hj_mbshared_enabled() -> bool {
 /// plan_rows) >= SEAT_MIN_PROBE_RATIO x build estimate (the GL-HJSEAT-2
 /// constant, PROVISIONAL reuse — GL-MBSEAT-1 re-measures); seat arrays
 /// charge each table's OWN budget optionally (forgo, never refuse).
-/// DEFAULT OFF (`PGRUST_LANE_V2_MBSEAT=1|on` arms). COMPOSES with
-/// MBSHARED — the seat rides the sealed single-pass directory, so a
+/// DEFAULT ON (flipped-kill, t35 idiom — GL-MBSEAT-1 letter basis:
+/// strictly-better-or-flat at every measured walk cell, controls
+/// knob-flat, byte-identity across the gates; `=0|off` kills). COMPOSES
+/// with MBSHARED — the seat rides the sealed single-pass directory, so a
 /// thrown `PGRUST_LANE_V2_MBSHARED=0|off` kill inertly disarms this car
 /// too (compose, never contradict).
 fn hj_mbseat_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        matches!(std::env::var("PGRUST_LANE_V2_MBSEAT").as_deref(), Ok("1") | Ok("on"))
+        !matches!(std::env::var("PGRUST_LANE_V2_MBSEAT").as_deref(), Ok("0") | Ok("off"))
     })
 }
 
@@ -5324,13 +5326,14 @@ mod mb_tests {
         assert!(hj_mbshared_enabled());
     }
 
-    /// SE-MBSEAT: the multibuild seat car is DEFAULT OFF — unset must
-    /// resolve off (the =1|on posture is the e2e's armed boot; OnceLock,
-    /// one state per process). Compose law: the car additionally requires
-    /// the MBSHARED world at engage (`mbseat = shared1a && knob`).
+    /// SE-MBSEAT: the multibuild seat car is DEFAULT ON (flipped-kill
+    /// since GL-MBSEAT-1) — unset must resolve ON (the =0|off posture is
+    /// the e2e's kill boot; OnceLock, one state per process). Compose
+    /// law: the car additionally requires the MBSHARED world at engage
+    /// (`mbseat = shared1a && knob`).
     #[test]
-    fn mbseat_knob_default_off() {
-        assert!(!hj_mbseat_enabled());
+    fn mbseat_knob_default_on() {
+        assert!(hj_mbseat_enabled());
     }
 
     /// SE-AGGJOIN: the SINGLE-join tree decomposes to exactly one build
