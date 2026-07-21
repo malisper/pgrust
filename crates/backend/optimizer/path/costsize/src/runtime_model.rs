@@ -406,9 +406,10 @@ mod tests {
             // arm refuses (suppress-then-refuse).
             RuntimeClass::CbGroupedAggTopN => rows >= 500_000.0,
             RuntimeClass::CbDistinctIntKeys => dop >= 12,
-            // GL-SORTECON-3 re-flip (min_dop 4; the max_rows=0 hack retired
-            // by the COLSTAGE+GCUT sort-arm rework, not by this model).
-            RuntimeClass::CbTopnBoundedIntKeys => dop >= 4,
+            // GL-COST-TOPN-1 guard-off (the GL-SORTECON-3 min_dop=4
+            // re-flip retired): zero best-of-four wins on the four-posture
+            // grid — the rectangle never suppresses.
+            RuntimeClass::CbTopnBoundedIntKeys => false,
             // S1 band collapse (soak adjudication round 1): the arm-floor
             // min, the low-dop 2M ceiling, and the dop>=12 extension to the
             // fitted dop16 crossover (~4.18M) floored to 4M.
@@ -496,24 +497,11 @@ mod tests {
                 (RuntimeClass::CbPlainAggFold, 1_000_000, 4),
                 (RuntimeClass::CbGroupedAggTextKey, 1_000_000, 4),
                 (RuntimeClass::CbGroupedAggTextKey, 2_500_000, 4),
-                // The L6 refit's twelve topn cells: the min_dop=4 rectangle
-                // (GL-SORTECON-3, ratified on rt/SERIAL) suppresses at every
-                // dop>=4 size, but the refit curve — fit WITH the forced
-                // Gather Merge leg the re-flip never measured (escalation
-                // E1) — witnesses 3.08-9.77x rt/GM losses at every one.
-                // Flip-gate queue: GL-COST-TOPN-1 (the guard-off increment).
-                (RuntimeClass::CbTopnBoundedIntKeys, 1_000_000, 4),
-                (RuntimeClass::CbTopnBoundedIntKeys, 1_000_000, 8),
-                (RuntimeClass::CbTopnBoundedIntKeys, 1_000_000, 16),
-                (RuntimeClass::CbTopnBoundedIntKeys, 2_500_000, 4),
-                (RuntimeClass::CbTopnBoundedIntKeys, 2_500_000, 8),
-                (RuntimeClass::CbTopnBoundedIntKeys, 2_500_000, 16),
-                (RuntimeClass::CbTopnBoundedIntKeys, 5_000_000, 4),
-                (RuntimeClass::CbTopnBoundedIntKeys, 5_000_000, 8),
-                (RuntimeClass::CbTopnBoundedIntKeys, 5_000_000, 16),
-                (RuntimeClass::CbTopnBoundedIntKeys, 10_000_000, 4),
-                (RuntimeClass::CbTopnBoundedIntKeys, 10_000_000, 8),
-                (RuntimeClass::CbTopnBoundedIntKeys, 10_000_000, 16),
+                // The L6 refit's twelve topn disagreement cells (min_dop=4
+                // rectangle vs the GM-legged refit curve) were RETIRED by
+                // the GL-COST-TOPN-1 guard-off in this same stack: the
+                // rectangle now never suppresses, matching the curve's
+                // keep-Gather verdict at every witnessed cell.
                 (RuntimeClass::CbHashJoinPlainAgg, 1_000_000, 4),
             ],
             "unexpected curve-vs-floor disagreement set"
@@ -564,10 +552,9 @@ mod tests {
         // topn: the L6 REFIT curve never suppresses anywhere in its
         // measured range (min predicted rt/GM 2.92 at 10M@dop1) — the
         // post-COLSTAGE arm loses to the forced Gather Merge posture at
-        // every witnessed k=1000 cell, so keep-Gather is now the WITNESSED
-        // direction, no longer a superseded artifact. The min_dop=4
-        // rectangle contradicts it at every dop>=4 cell — the flip-gate
-        // queue (GL-COST-TOPN-1), pinned in the disagreement set above.
+        // every witnessed k=1000 cell, so keep-Gather is the WITNESSED
+        // direction, and since the GL-COST-TOPN-1 guard-off the shipped
+        // rectangle agrees at every cell.
         for &(class, rows, dop, _) in CELLS {
             if class == RuntimeClass::CbTopnBoundedIntKeys {
                 assert!(!cost_route_verdict(class, rows, dop).suppress);
