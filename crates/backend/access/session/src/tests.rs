@@ -583,7 +583,13 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      scoped scratch on the backend thread — same non-session class
     //      as slot 52's debug_query_string. No session identity; never
     //      read across a session boundary.
-    assert_eq!(count_tree(crates), 521, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // m2-inc3 rung-2 delta (522 = 521 + 1), deliberately NON-SESSION TLS:
+    //   62. executor/execmain/src/execmain.rs — SERIAL_LEASE_DEPTH: the
+    //      lease-only measurement vehicle's top-level-ExecutorRun depth
+    //      guard (PGRUST_RUNTIME_SERIAL_LEASE, default OFF). Pure frame
+    //      counter, unwound by construction with the executor frames;
+    //      no session identity, never captured/restored by an envelope.
+    assert_eq!(count_tree(crates), 522, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

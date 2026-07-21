@@ -436,6 +436,67 @@ pub(crate) fn executor_start_seam(h: QueryDescHandle, eflags: i32) -> PgResult<(
     })
 }
 
+// ---------------------------------------------------------------------------
+// M2 inc-3 rung-2 letter addendum — serial-through-pool overhead, arm (a):
+// LEASE-ONLY accounting. MEASUREMENT VEHICLE, default OFF, never a
+// production posture. PGRUST_RUNTIME_SERIAL_LEASE=1 makes the session
+// thread acquire ONE runtime execution permit around each TOP-LEVEL
+// ExecutorRun — the query still executes inline on the session thread; the
+// pool's permit ledger simply accounts it like a worker. Depth guard:
+// nested executor runs (SPI, triggers, RI checks) lease nothing, so
+// re-entry can never self-deadlock on the permit cap. Unarmed cost: one
+// memoized bool load per ExecutorRun, nothing else.
+// ---------------------------------------------------------------------------
+fn serial_lease_armed() -> bool {
+    static ON: pgsync::OnceLock<bool> = pgsync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_SERIAL_LEASE").is_ok_and(|v| v.trim() == "1")
+    })
+}
+
+thread_local! {
+    /// Top-level-run depth for the lease guard (measurement vehicle;
+    /// deliberately non-session TLS — unwound by construction with the
+    /// executor frames, never carries across queries).
+    static SERIAL_LEASE_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+struct SerialLease {
+    leased: Option<&'static std::sync::Arc<runtime::Runtime>>,
+}
+
+impl SerialLease {
+    fn enter() -> Option<SerialLease> {
+        if !serial_lease_armed() {
+            return None;
+        }
+        let depth = SERIAL_LEASE_DEPTH.with(|c| {
+            let d = c.get();
+            c.set(d + 1);
+            d
+        });
+        let leased = if depth == 0 {
+            let rt = runtime::global();
+            if let Some(rt) = rt {
+                rt.execution_permits().acquire();
+            }
+            rt
+        } else {
+            None
+        };
+        Some(SerialLease { leased })
+    }
+}
+
+impl Drop for SerialLease {
+    fn drop(&mut self) {
+        if let Some(rt) = self.leased {
+            rt.execution_permits().release();
+        }
+        SERIAL_LEASE_DEPTH.with(|c| c.set(c.get() - 1));
+    }
+}
+
 pub(crate) fn executor_run_seam(
     h: QueryDescHandle,
     direction: ScanDirection,
@@ -443,6 +504,7 @@ pub(crate) fn executor_run_seam(
     dest: &mut DestReceiver<'_>,
 ) -> PgResult<()> {
     tap_executor_run::call_if(|f| f(h));
+    let _lease = SerialLease::enter();
     let r = querydesc::with_qd(h, |qd| standard_executor_run(qd, direction, count, dest));
     tap_executor_run_leave::call_if(|f| f(h));
     r
