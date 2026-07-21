@@ -171,6 +171,44 @@ pub unsafe fn thin_arg(fcinfo: NonNull<ThinFcinfo>, argno: usize) -> NullableDat
     }
 }
 
+// A zero the optimizer cannot see through: minted in a register by a pure,
+// register-only asm (no memory operand, no clobbers), so a plain byte store
+// of it is the frame's LAST write to isnull that no pass can widen into — or
+// fold under — a covering constant store (the value is unknown). That keeps
+// the emitted isnull init a byte store wherever the callee stays out of line
+// (the immediately-following isnull byte reload only hits store-to-load
+// forwarding on the wide arm cores when the youngest covering store is the
+// byte itself — a merged word store covering it mid-span is a measured hard
+// stall), while costing inlined call sites nothing: unlike a volatile store
+// — whose ordering semantics pin the frame and defeat store merging/DSE at
+// every inlined call site, a measured engine-wide loss under fat LTO — a
+// plain store of an opaque value can still be dead-store-eliminated, and the
+// asm is pure/nomem so it hoists, CSEs, and erects no memory barrier. The
+// only residue at fully-inlined sites is that the post-call isnull check
+// compares a register instead of constant-folding away.
+#[inline(always)]
+fn opaque_false() -> u8 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let r: u8;
+        // SAFETY: register-only asm; writes one output register, touches no
+        // memory, preserves flags.
+        unsafe {
+            core::arch::asm!(
+                "mov {r:w}, wzr",
+                r = out(reg) r,
+                options(pure, nomem, nostack, preserves_flags)
+            );
+        }
+        r
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        // No forwarding hazard measured off arm; keep the init foldable.
+        0u8
+    }
+}
+
 // Layout vs C fmgr.h (LP64): NullableDatum 16 == 16; header 32 == 32
 // (result_mcx rides where C keeps flinfo); fcinfo(2) 64 <= 64; FmgrInfo 48
 // == 48 (thin fn_extra; fat fn_expr +8, fn_mcxt dropped; rule-9 cap 128).
@@ -196,11 +234,12 @@ impl<const N: usize> LocalFcinfo<N> {
         }
     }
 
-    // Fresh per-call frame with (fncollation, isnull, pad, nargs) written as
-    // ONE aligned 8B word: LLVM's merge of the field inits produced a store
+    // Fresh per-call frame with the (fncollation, isnull, pad, nargs) header
+    // rewritten by rearm(): naive field inits get merged by LLVM into a store
     // covering isnull at neither its start nor middle, and the post-call
-    // isnull reload then missed V2 store-to-load forwarding (graviton.md
-    // §4.5) — a measured 1.5× ns stall on fmgr_call2 at 0.86× instructions.
+    // isnull byte reload then misses store-to-load forwarding on the wide
+    // arm cores (graviton.md §4.5) — a measured 1.5× ns stall on the 2-arg
+    // call loop at 0.86× instructions. See rearm() for the store discipline.
     #[inline]
     pub fn fresh(collation: Oid) -> Self {
         const {
@@ -225,9 +264,9 @@ impl<const N: usize> LocalFcinfo<N> {
         fcinfo
     }
 
-    // Persistent-carrier reuse (the fmgr_call2 M2 watch item's remedy): reset
-    // (fncollation, isnull, nargs) as the same ONE aligned 8B store; args are
-    // rewritten in place by the caller.
+    // Persistent-carrier reuse: reset (fncollation, isnull, nargs) with the
+    // header store discipline below; args are rewritten in place by the
+    // caller.
     #[inline]
     pub fn rearm(&mut self, collation: Oid) {
         const {
@@ -247,16 +286,20 @@ impl<const N: usize> LocalFcinfo<N> {
                     == core::mem::offset_of!(LocalFcinfo<N>, fncollation) + 6
             );
         }
-        // isnull must be covered by EXACTLY ONE store, a byte store (C's
-        // `strb`), or the post-call `ldrb` reload misses V2 store-to-load
-        // forwarding (measured: that reload+cmp carried 80% of fmgr_call2's
-        // cycles — 0.79x instr but 2.07x ns). Two refuted shapes: field-wise
-        // inits (LLVM merges them into a store covering isnull mid-span) and
-        // one 8B header word + trailing volatile byte (LLVM legally sinks the
-        // word's pieces PAST the volatile, leaving a misaligned `stur`
-        // covering isnull as its last byte). Splitting the word around a
-        // volatile isnull byte is stable: no pass may synthesize another
-        // store covering a volatile-written byte.
+        // isnull's YOUNGEST covering store must be a byte store (C's `strb`),
+        // or the post-call `ldrb` reload misses store-to-load forwarding on
+        // the wide arm cores (measured: that reload+cmp carried 80% of the
+        // call loop's cycles — 0.79x instr but 2.07x ns). Refuted shapes:
+        // field-wise constant inits (LLVM merges them into a store covering
+        // isnull mid-span); one 8B header word + trailing volatile byte
+        // (LLVM legally sinks the word's pieces PAST the volatile, leaving a
+        // misaligned `stur` covering isnull as its last byte); and a volatile
+        // byte itself, which holds the shape but pins every inlined call
+        // site's frame against store merging/DSE — a measured engine-wide
+        // regression under fat LTO. The opaque_false() plain byte store is
+        // stable WITHOUT the volatile poison: its value is unknown, so no
+        // pass can widen it into, or sink a covering constant store past,
+        // the byte — while dead frames still fold away.
         // SAFETY: asserted above — (fncollation, isnull, pad, nargs) is an
         // 8-aligned 8B span. Pointer is derived from `self` so its provenance
         // covers the whole span (a field-raw pointer would carry 4B
@@ -266,22 +309,23 @@ impl<const N: usize> LocalFcinfo<N> {
                 .cast::<u8>()
                 .add(core::mem::offset_of!(LocalFcinfo<N>, fncollation));
             p.cast::<u32>().write(collation);
-            p.add(4).write_volatile(0u8);
+            p.add(4).write(opaque_false());
             p.add(6).cast::<u16>().write(N as u16);
         }
     }
 
     // Fresh frame built IN PLACE: every field written exactly once and isnull
-    // ONLY via the volatile byte store. `fresh()` (new() + rearm()) still
-    // carries new()'s non-volatile isnull=false init; with a COMPILE-TIME
+    // ONLY via the opaque byte store. `fresh()` (new() + rearm()) still
+    // carries new()'s constant isnull=false init; with a COMPILE-TIME
     // collation (the define_calls literal-0 callers) LLVM merges that init
-    // with the adjacent zero fields into one covering store and sinks it past
-    // rearm()'s volatile strb — the post-call isnull ldrb then misses V2
-    // store-to-load forwarding (measured 80% of fmgr_call2's cycles; two
-    // volatile placements inside fresh() were defeated the same way). With no
-    // non-volatile isnull store in existence, no pass can synthesize one over
-    // a volatile-written byte. No move-out: returning Self by value would
-    // recopy the frame with plain stores.
+    // with the adjacent zero fields into one covering store — with the
+    // opaque store as the byte's unremovable-by-merging LAST writer that is
+    // harmless (the covering store lands before it), but a fully constant
+    // frame init invites the mid-span covering shape that misses
+    // store-to-load forwarding on the byte reload. With isnull written
+    // exactly once, opaquely, the youngest covering store is a byte store on
+    // every path. No move-out: returning Self by value would recopy the
+    // frame with plain stores.
     #[inline(always)]
     pub fn init_in_place(slot: &mut core::mem::MaybeUninit<Self>, collation: Oid) -> &mut Self {
         const {
@@ -314,7 +358,7 @@ impl<const N: usize> LocalFcinfo<N> {
                 .cast::<u8>()
                 .add(core::mem::offset_of!(LocalFcinfo<N>, fncollation));
             h.cast::<u32>().write(collation);
-            h.add(4).write_volatile(0u8);
+            h.add(4).write(opaque_false());
             h.add(6).cast::<u16>().write(N as u16);
             (&raw mut (*p).args).write([NullableDatum::null(); N]);
             &mut *p
