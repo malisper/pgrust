@@ -5,12 +5,12 @@
 //! to RE2 as CaptureSafe and (b) fits the even smaller subset compiled here
 //! is turned once into a tiny op program executed by a tight interpreter:
 //! memcmp for literal runs, memchr/memchr2/memchr3 for negated byte-set
-//! spans, a 256-bit table for the rest. Q29's
+//! spans, a 256-bit table for the rest. The flagship anchored-URL pattern
 //! `^https?://(?:www\.)?([^/]+)/.*$` compiles to
 //! `Lit "http"; Opt "s"; Lit "://"; Opt "www."; CapStart;
 //!  Set(not '/', min 1); CapEnd; Lit "/"; TailAny`.
 //!
-//! Subset (v1, the Q29 shape family and PR #108004's core):
+//! Subset (v1, the anchored-URL shape family and PR #108004's core):
 //! - `^`-anchored only; `$` only as the final atom;
 //! - literal runs (escapes decoded per the classifier's whitelist);
 //! - optional atoms `X?`, `(?:literal)?` — greedy try-with-first;
@@ -42,7 +42,7 @@ use super::GroupSpan;
 
 const MAX_OPS: usize = 64;
 
-// Backtracking budget: generous for real subjects (Q29 uses ~1 step per
+// Backtracking budget: generous for real subjects (the URL pattern uses ~1 step per
 // op), tripped only by adversarial span-stacking; overruns fall back to
 // RE2, which is linear-time.
 fn step_budget(hay_len: usize) -> u64 {

@@ -1,5 +1,5 @@
 //! Parallel PLAIN exact-DISTINCT partial state (band-2b) — the zero-group-key
-//! twin of `pardistinct.rs` for the CB q5/q6 shape:
+//! twin of `pardistinct.rs` for the ungrouped count(DISTINCT) shape:
 //! `Aggregate(AGG_PLAIN, all-DISTINCT) → [Sort →] SeqScan`.
 //!
 //! The grouped runtime distinct sink partitions its combine space by GROUP

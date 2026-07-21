@@ -2310,7 +2310,7 @@ fn dag_admission_fans_out_and_gates() {
 }
 
 /// DAG ON with a dependency CHAIN (single live pipeline throughout — the
-/// ClickBench shape class) produces the exact claim sequence the sequential
+/// wide-events shape class) produces the exact claim sequence the sequential
 /// walk produces: the flatness anchor.
 #[test]
 fn dag_chain_claim_sequence_identical_to_off() {

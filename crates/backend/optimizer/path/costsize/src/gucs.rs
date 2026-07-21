@@ -105,8 +105,8 @@ pub fn pgrcolumnar_gather_sort_tuple_cost() -> f64 {
     DEFAULT_PGRCOLUMNAR_GATHER_SORT_TUPLE_COST
 }
 
-/// Column-fraction seqscan disk costing on pgrcolumnar (pgrust-only, the Q38
-/// sort-vs-hash costing fix): the disk term of a pgrcolumnar seqscan is scaled
+/// Column-fraction seqscan disk costing on pgrcolumnar (pgrust-only, the
+/// sort-vs-hash grouping costing fix): the disk term of a pgrcolumnar seqscan is scaled
 /// by the referenced columns' share of the part's on-disk bytes — C's
 /// pages*seq_page_cost structure kept, with an honest page count for a
 /// columnar AM whose scan open takes a plan-derived column need-set.

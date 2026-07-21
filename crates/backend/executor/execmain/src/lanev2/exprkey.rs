@@ -5,7 +5,7 @@
 //!
 //! Two admission classes, one feed:
 //!
-//! * **Int-expression keys** (ClickBench Q19-class): the key is int2/4/8
+//! * **Int-expression keys** (the ts-extract grouped-agg class): the key is int2/4/8
 //!   arithmetic over scan Vars/Consts — the stitcher census
 //!   (`ScanProjCols`, the projstitch vocabulary). The key lane is computed
 //!   per staged batch by the lanestitch REFERENCE INTERPRETER
@@ -17,7 +17,7 @@
 //!   per-row emit path — the C-ported `exec_project` raises C's exact error
 //!   on C's row — then refuses STICKY (all later batches per-row).
 //!
-//! * **Dict-expression keys** (Q29-class): the key is a strict fmgr chain
+//! * **Dict-expression keys** (the regexp-over-long-text class): the key is a strict fmgr chain
 //!   over ONE dict-coded pgrcolumnar text column (`ScanProjExprKey` census →
 //!   `laneexec::dicteval`, IMMUTABLE internal-language builtins only —
 //!   volatile/stable/SQL-language functions refuse there). The dict-memo
@@ -38,7 +38,7 @@
 //! lane. Residual (classify-refused) transitions ARE hosted — unlike K2 —
 //! because the projected row can be rebuilt from the staged lanes plus the
 //! derived key (`fill_stage_slot`), so the resid program never needs the
-//! per-row projection: this is what lets Q29's `avg(length(Referer))` leg
+//! per-row projection: this is what lets that class's `avg(length(Referer))` leg
 //! ride along while the regexp key stays once-per-code.
 //!
 //! Everything outside the vocabulary refuses (`RefuseReason::ExprKeyShape`)
@@ -67,7 +67,7 @@ fn exprkey_enabled() -> bool {
 /// Opt-in switch for the coded-group arm (q29coded lane): the Dict key
 /// class groups by the INTERN ID of the memo's output value on the compact
 /// mk1 single-Intern table instead of probing the staged C tuplehash with
-/// the output TEXT. Default OFF — MEASURED REGRESSION at the q29@100M
+/// the output TEXT. Default OFF — MEASURED REGRESSION at the regexp-key 100M
 /// lpp15 face (5.11s vs 3.00s staged; byte gates green, par16/serial
 /// controls flat, zero budget teardowns): the partial's OUTPUT CONTRACT is
 /// still materialized text rows through the Gather tuple queues, so the
@@ -177,7 +177,7 @@ const NUMERICOID: ::types_core::Oid = 1700;
 /// (tz-dependent) are NOT admitted.
 const F_EXTRACT_TIMESTAMP: ::types_core::Oid = 6202;
 
-/// extract()-class fields the fast multi-key kernel hosts (Q19 class).
+/// extract()-class fields the fast multi-key kernel hosts (ts-extract class).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TsPartField {
     Minute,
@@ -275,7 +275,7 @@ fn proj_arith_konst(op: ::execexpr::ProjArithOp, konst: ::datum::Datum) -> ::dat
     }
 }
 
-/// Multi-key packed state (the Q19-class arm): a projected scan whose tlist
+/// Multi-key packed state (the ts-extract multi-key arm): a projected scan whose tlist
 /// is bare Vars plus EXACTLY ONE computed column — a strict fmgr chain over
 /// one base scan column (`ScanProjExprKey` census) — where the agg groups by
 /// 2..N keys including the computed one. The computed key's grouping kind
@@ -291,7 +291,7 @@ pub(super) struct MultiKeyChain {
     /// for the CaseDict class (`case_dict` is `Some` then): the computed
     /// component is a conditional text select, not a numeric chain.
     pub(super) chain: Option<::laneexec::ValueChain>,
-    /// CaseDict computed key (band-2a, q40 class): `CASE WHEN <AND of
+    /// CaseDict computed key (band-2a computed-text-key class): `CASE WHEN <AND of
     /// int-eq-const preds> THEN <text Var> ELSE <text Const> END` as a
     /// grouping key — evaluated per survivor as a bitmask of int compares
     /// selecting between the THEN column's per-(epoch, code) intern id and
@@ -333,7 +333,7 @@ pub(super) struct CaseDictSpec {
     /// Per-(epoch, code) intern-id cache for the THEN column (the mk
     /// Intern arm's cache discipline, its own identity roll). Entry
     /// encoding: 0 = unset, `id + 1` otherwise (`reset_code_id_cache` —
-    /// the zero-page allocation is the q40 vecstate fix).
+    /// the zero-page allocation is the CaseDict vecstate fix).
     pub(super) cd_epoch: Option<(bool, u64)>,
     pub(super) cd_code_ids: Vec<u32>,
     /// Memoized ELSE intern id (cleared with the intern cache).
@@ -366,7 +366,7 @@ pub enum ExprKeyKind {
     TsTrunc { input_col: u16, unit: i64 },
     /// Packed multi-key over a projected scan (see [`MultiKeyChain`]).
     Multi(Box<MultiKeyChain>),
-    /// Redundant grouping-key elimination (Q36 class): 2..N int grouping
+    /// Redundant grouping-key elimination (reduced-expr-key class): 2..N int grouping
     /// keys where every non-representative key is `Var ± Const` over the
     /// ONE bare-Var key (deterministic — grouping by the representative
     /// alone is the same partition). The build probes the compact table on
@@ -461,9 +461,9 @@ pub(super) fn decide_exprkey<'mcx>(
     let plan = ::nodeagg::agg_lanefold_plan(agg)?;
     let Some(key_out) = ::nodeagg::agg_hash_staged_probe_col(agg) else {
         // 2..N grouping keys: the redundant-key (reduced grouping) tranche
-        // first (Q36 class — every non-representative key a Var ± Const
+        // first (reduced-key class — every non-representative key a Var ± Const
         // function of the one bare-Var key; its own refuse accounting ticks
-        // inside), then the packed multi-key arm (Q19-class). Its refusals
+        // inside), then the packed multi-key arm (ts-extract class). Its refusals
         // tick the multikey taxonomy inside.
         if let Some(xk) = decide_reduced(agg, ss, estate) {
             return Some(xk);
@@ -472,7 +472,7 @@ pub(super) fn decide_exprkey<'mcx>(
             if let Some(xk) = decide_exprkey_mk(agg, ss, estate) {
                 return Some(xk);
             }
-            // CaseDict computed-text-key class (band-2a q40): the census
+            // CaseDict computed-text-key class (band-2a): the census
             // above has no CASE vocabulary — a refusal falls through to the
             // plan-tlist recognizer.
             return decide_exprkey_mk_case(agg, ss, estate);
@@ -558,7 +558,7 @@ pub(super) fn decide_exprkey<'mcx>(
         let keytype = estate.slot(result_slot).base().tts_tupleDescriptor.as_ref()?.attrs
             [key_out as usize]
             .atttypid;
-        // Ts-trunc class first (Q43 class): `date_trunc(const, ts)` for
+        // Ts-trunc class first (date_trunc-keyed class): `date_trunc(const, ts)` for
         // uniform-microsecond units — a non-erroring arithmetic key lane,
         // no fmgr, no dict requirement (any staged store).
         if let Some(unit) = ts_trunc_unit_usecs(&xk, keytype, estate.es_query_cxt) {
@@ -718,7 +718,7 @@ pub(super) fn decide_exprkey<'mcx>(
     }))
 }
 
-/// The multi-key packed decide (Q19-class; see [`MultiKeyChain`]): mirrors
+/// The multi-key packed decide (ts-extract class; see [`MultiKeyChain`]): mirrors
 /// `scan_mk_shape`'s admission over the PROJECTED coordinate space, WITHOUT
 /// arming the compact table (the decide phase holds `&AggStateData`; the
 /// build feed arms per build, exactly like the scan feed re-deciding per
@@ -843,7 +843,7 @@ fn decide_exprkey_mk<'mcx>(
         Ok(c) => c,
         Err(_) => return refused(),
     };
-    // Fast ts-extract kernel (Q19 class): recognized ON TOP of the compiled
+    // Fast ts-extract kernel (the eponymous class): recognized ON TOP of the compiled
     // chain — a non-recognized shape keeps the chain, byte-identically.
     let fast = ts_extract_field(&xk, keytype, estate.es_query_cxt);
     // Coordinate map + the fold/spill bare-Var rules (the single-key
@@ -930,7 +930,7 @@ fn decide_exprkey_mk<'mcx>(
 /// {representative} produces the identical partition, so the build probes
 /// one int lane and reconstructs the redundant keys once per GROUP at
 /// read-back (the compact table's `RedShape` emit spec) instead of packing
-/// or evaluating them per row. ClickBench Q36 exactly:
+/// or evaluating them per row. The canonical instance exactly:
 /// `GROUP BY ClientIP, ClientIP-1, ClientIP-2, ClientIP-3`.
 ///
 /// The general functional-dependency case (multiple bare-Var keys,
@@ -1260,7 +1260,7 @@ fn case_dict_recognize(
     Some((preds, (tv.varattno - 1) as u16, bytes))
 }
 
-/// [`decide_exprkey_mk`]'s CaseDict twin (band-2a, ClickBench q40 class):
+/// [`decide_exprkey_mk`]'s CaseDict twin (band-2a computed-text-key class):
 /// the projected scan computes ONE grouping key as a CaseDict text select
 /// (recognized off the PLAN tlist — the compiled census has no CASE
 /// vocabulary); every other tlist column is a bare Var. The packed image
@@ -1504,7 +1504,7 @@ pub(super) fn exprkey_rearm<'mcx>(
             return false;
         }
         // CaseDict THEN column: its dict lanes ride an EXTRA registration
-        // on the armed batch (band-2a q40).
+        // on the armed batch (band-2a CaseDict).
         if let ExprKeyKind::Multi(m) = &xk.kind {
             if let Some(cd) = &m.case_dict {
                 if !::nodeseqscan::seq_scan_cb_dict_want_extra(ss, cd.then_base) {
@@ -1951,7 +1951,7 @@ enum ChVerdict {
 /// allocation (`PGRUST_EXPRKEY_ZEROPAGE=1`). Default OFF — MEASURED
 /// (board-or-hold wave, notes/vecstate-lane.md): the fresh-mmap-per-
 /// execution strategy showed a consistent official-channel hot try-2
-/// spike (+6-14% on q40; allocator page-churn class) while the eager
+/// spike (+6-14% on the CaseDict shape; allocator page-churn class) while the eager
 /// u32-memset refill below carries the SAME -27% diagnostic win (the win
 /// is the u32 id+1 representation — memset-optimizable at half the bytes
 /// vs the old `Vec<Option<u32>>` ptr::write fill — not the lazy paging).
@@ -1968,10 +1968,10 @@ fn zeropage_cache_enabled() -> bool {
 /// Reset a code → intern-id cache for a new (epoch) identity. Entry
 /// encoding: 0 = unset, `id + 1` otherwise.
 ///
-/// vecstate q40 fix (notes/vecstate-lane.md wave-3): under a v7 stitch
+/// vecstate CaseDict fix (notes/vecstate-lane.md wave-3): under a v7 stitch
 /// `size` is the part-GLOBAL dict NDV (URL @100M ≈ 18.3M) and the
 /// historical `clear()+resize(size, None)` eagerly `ptr::write`-filled the
-/// whole gndv-sized array per worker per execution — 38% of q40's total
+/// whole gndv-sized array per worker per execution — 38% of that shape's total
 /// cycles. The fresh `vec![0; size]` goes through `alloc_zeroed` (kernel
 /// zero pages for large sizes): untouched codes never cost a write and the
 /// resident set is O(touched pages), so the per-query working memory
@@ -2184,7 +2184,7 @@ struct MmState {
 /// M2 sink drain adapter (runtime_agg.rs): one staged page batch through
 /// the expr-key feed under SINK constraints — compact table REQUIRED, no
 /// dict/code-histogram state, empty str-mm memo; `mk_shape` = the armed
-/// packed shape for the Multi kind (q19 class), `None` otherwise.
+/// packed shape for the Multi kind (ts-extract class), `None` otherwise.
 /// `Ok(false)` = the batch routed anywhere the compact table cannot host
 /// (sticky range-guard refusal, a numeric pack demote's compact disarm):
 /// the sink cannot export the C tuplehash, so the caller REFUSES (RG abort
@@ -2224,7 +2224,7 @@ pub(super) enum SinkXkKind {
     Single,
     /// Redundant-key elimination (compact Reduced).
     Reduced(::nodeagg::RedShape),
-    /// Packed multi-key over the projected scan (q19 class) — the compact
+    /// Packed multi-key over the projected scan (ts-extract class) — the compact
     /// Multi arm packs it; `dict_input_att` names the TextRaw component's
     /// tlist attno when one exists (the intern/canonical-bytes lane).
     Multi { dict_input_att: Option<u16> },
@@ -2399,7 +2399,7 @@ fn exprkey_batch<'mcx>(
             xk.rows.push(i);
         }
     }
-    // ZERO-SURVIVOR staged window: skip BEFORE any lane demand (the q14
+    // ZERO-SURVIVOR staged window: skip BEFORE any lane demand (the near-unique-text-key
     // codedgroup precedent — condcache-census lane). A condition-cache HIT
     // whose cached verdicts are all-fail legitimately skips the survivor
     // deform and dict-lane gather (nodeseqscan's cond_hit arm; multi-clause
@@ -2954,7 +2954,7 @@ fn exprkey_mk_batch<'mcx>(
                     }
                 }
                 ::nodeagg::MkCompKind::Intern if att == *key_out && case_dict.is_some() => {
-                    // CaseDict computed key (band-2a q40): per-survivor int
+                    // CaseDict computed key (band-2a): per-survivor int
                     // predicate mask, then select between the THEN column's
                     // per-(epoch, code) intern id and the memoized ELSE id.
                     let cd = case_dict.as_mut().expect("checked Some");
@@ -3437,7 +3437,7 @@ mod ts_trunc_tests {
             86_400_000_000,
             -86_400_000_000,
             -86_400_000_001,
-            // 2013-07-14-era ClickBench values (µs since 2000-01-01).
+            // 2013-era timestamp values in the analytics bank (µs since 2000-01-01).
             426_038_400_000_000 + 12 * 3_600_000_000 + 34 * 60_000_000 + 56_789_012,
             i64::MIN, // DT_NOBEGIN: passes through
             i64::MAX, // DT_NOEND: passes through
@@ -3514,7 +3514,7 @@ mod ts_extract_tests {
             86_400_000_000,
             -86_400_000_000,
             -86_400_000_001,
-            // 2013-07-14-era ClickBench values (µs since 2000-01-01).
+            // 2013-era timestamp values in the analytics bank (µs since 2000-01-01).
             426_038_400_000_000 + 12 * 3_600_000_000 + 34 * 60_000_000 + 56_789_012,
         ];
         let mut x: u64 = 0x9e3779b97f4a7c15;

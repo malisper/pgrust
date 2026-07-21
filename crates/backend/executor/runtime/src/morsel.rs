@@ -39,13 +39,13 @@ pub trait MorselSource: Send + Sync {
     /// hard boundary — the duration-adaptive sizer never stops a claim
     /// short of an epoch edge. Sources whose per-EPOCH state dominates the
     /// per-granule work opt in (pgrcolumnar: the runtime-drive-scaling lane's
-    /// WFIN decomposition measured q21@10M DOP15 busy inflation of +78%,
+    /// WFIN decomposition measured dict-memo-shape@10M DOP15 busy inflation of +78%,
     /// tracking dict_builds 153→243 almost exactly — every row group SPLIT
     /// across workers duplicates its dictionary decompress + dict-eval
     /// memo sweep; the armed lane-pool arm claims whole RGs and scales
     /// 13x). The finalization protocol is claim-size-agnostic;
     /// photo-finish granularity becomes one epoch (~8 granules, ~1.2ms on
-    /// q21-class kernels — within the <=1-task spread acceptance). Sources
+    /// dict-memo-heavy kernels — within the <=1-task spread acceptance). Sources
     /// WITHOUT interior boundaries must not opt in (one claim would take
     /// the whole pipeline).
     fn whole_boundary_claims(&self) -> bool {

@@ -59,7 +59,7 @@ pub const PREFETCH_MIN_TABLE_BYTES: usize = 1 << 20;
 /// PrefetchingHelper MEASURES a look-ahead in [4, 32] per batch; at the
 /// executor's 1024-row batches that sampling left the first 100 rows of
 /// EVERY batch unprefetched (~10% of all probes) and paid two clock reads
-/// per batch — both visible in the in-situ Q16 profile (2026-07-15,
+/// per batch — both visible in the in-situ dict-int-key grouped-count profile (2026-07-15,
 /// serialgap2: vdso/clock_gettime/Timespec::now lines). A fixed distance
 /// covers the whole batch with zero measurement overhead.
 ///
@@ -67,12 +67,12 @@ pub const PREFETCH_MIN_TABLE_BYTES: usize = 1 << 20;
 /// notes/hot-c3-probe-prefetch.md):
 /// - Inline16 (one 16 B slot line resolves the compare):
 ///   [`PREFETCH_LOOKAHEAD_INLINE`] = 24. Same-pod restart-arm ladder on
-///   the v7u 10M bank read Q16/Q36 serial 8→16 = −7%, 16→24 = −2.6%,
+///   the v7u 10M bank read the dict-key/expr-key grouped classes serial 8→16 = −7%, 16→24 = −2.6%,
 ///   24→32 = flat — at 8 the hint lands only ~8 hit-iterations (~tens
 ///   of ns) before use, short of DRAM latency; the plateau starts ~24.
 /// - Salt8 / Int128 (entry line + dependent row line per probe):
 ///   [`PREFETCH_LOOKAHEAD`] = 8. The same ladder read the 2-key i128
-///   class WORSE at 24 (same-pod Q32 +4.4%, Q15 +2.0%, Q31 +1.8%): the
+///   class WORSE at 24 (same-pod 10M-group arms +4.4%/+1.8%, dict-key arm +2.0%): the
 ///   demand stream is already two lines deep per row, and a longer
 ///   speculative hint stream competes for the same fill buffers.
 /// PGRUST_LANE_V2_PROBE_LOOKAHEAD overrides BOTH at boot (0 = no
@@ -114,11 +114,11 @@ fn arena_reserve_enabled() -> bool {
 // C3 lane note (2026-07-13, notes/hot-c3-probe-prefetch.md): a two-stage
 // row-line prefetch for the Salt8/Int128 runs (read the hinted home slot
 // d ahead, prefetch the row its ref points at) was built and MEASURED
-// WORSE — Q17 +9.7%, Q32/Q33 +2% — because the home-slot row is fetched
+// WORSE — int+text two-key +9.7%, 10M-group two-int-key +2% — because the home-slot row is fetched
 // even when the probe resolves elsewhere in the chain or the salt
 // mismatches: pure extra DRAM traffic on a loop already at the
 // bandwidth/MSHR floor. Same floor logic refused a batched+prefetched
-// stringhash IntSet insert (Q5/Q9/Q10 flat: iterations are independent,
+// stringhash IntSet insert (count(DISTINCT)/narrow-sort classes flat: iterations are independent,
 // so OoO runahead already extracts the available MLP). Do not rebuild
 // either without new evidence that the floor moved.
 
@@ -615,7 +615,7 @@ impl LaneAggTable {
         // run low; one ×4 bucket grow bounds any residual underestimate).
         // The in-situ alternative — presize single-level, then THROW THE
         // ARRAY AWAY at the 100K-member conversion and regrow 256 buckets
-        // from 1024 slots — cost Q16 ~12% in rehash walks (grow_set +
+        // from 1024 slots — cost the dict-key grouped count ~12% in rehash walks (grow_set +
         // convert_two_level + insert_int, serialgap2 profile).
         let (single, buckets) = if capacity_hint > TWO_LEVEL_THRESHOLD {
             let per_bucket = (capacity_hint.saturating_mul(4) / 256).next_power_of_two().max(64);
@@ -966,7 +966,7 @@ impl LaneAggTable {
     /// probe loop over a PRE-HASHED batch, issuing the entry-slot prefetch
     /// [`PREFETCH_LOOKAHEAD`] rows ahead. This replaces the engaged
     /// per-row-`probe_int` shape (which reloaded the table's mask/base
-    /// pointers from memory every row — 41% of in-situ Q16) and the CH
+    /// pointers from memory every row — 41% of the in-situ dict-key grouped count) and the CH
     /// per-batch look-ahead measurement (see [`PREFETCH_LOOKAHEAD`]).
     fn probe_fold_hashed_run<const INLINE: bool>(
         &mut self,
@@ -982,7 +982,7 @@ impl LaneAggTable {
         // dependent row line — see PREFETCH_LOOKAHEAD), clamped to the
         // staged batch: a filtered window hands ~35 survivors of the
         // 256-row window, where distance 24 forfeits ~2/3 of the hint
-        // coverage (Q15/Q31 same-pod +2% — the short-batch clamp keeps
+        // coverage (dict-key/10M-group same-pod +2% — the short-batch clamp keeps
         // them at ~8 while full windows keep 24).
         let la = probe_lookahead(if INLINE {
             PREFETCH_LOOKAHEAD_INLINE
@@ -1207,7 +1207,7 @@ impl LaneAggTable {
                 // fixed look-ahead prefetch (PREFETCH_LOOKAHEAD): full batch
                 // coverage, no per-batch clock reads, no per-row table-field
                 // reloads (the engaged per-row probe_int shape was 41% of
-                // in-situ Q16).
+                // the in-situ dict-key grouped count).
                 let hs: &[u64] = hashes;
                 if self.slot_words == 2 {
                     self.probe_fold_hashed_run::<true>(keys, hs, &mut |states, i, is_new| {
@@ -1633,7 +1633,7 @@ impl LaneAggTable {
     /// handoff, CONTESTED:stringhash2 — accepted): the arena is
     /// `Vec::new()` at construction and fed one `extend_from_slice` per new
     /// > 8 B key, so every doubling memcpies the ENTIRE arena — on
-    /// q34/q35-class tables (~18M URL-length keys per build) that is a
+    /// full-URL-key-class tables (~18M URL-length keys per build) that is a
     /// hundreds-of-MB realloc-copy stream, while `capacity_hint` sized only
     /// the entry sets. The projection scales the observed
     /// arena-bytes-per-member by the construction-time member hint, so a

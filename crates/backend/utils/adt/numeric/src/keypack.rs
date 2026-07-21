@@ -1,5 +1,5 @@
 //! Canonical (mantissa, exp10) key form for numeric grouping keys — the
-//! lane-v2 compact-table "numeric key kind" (Q19 follow-up of the multikey
+//! lane-v2 compact-table "numeric key kind" (a follow-up of the multikey
 //! landing, whose v1 admission refused numeric because 1.0 ≡ 1.00 under
 //! `numeric_eq` but not by bytes).
 //!

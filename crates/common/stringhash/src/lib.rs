@@ -1061,7 +1061,7 @@ impl ExtIdMap {
 /// pattern that needs this is the executor's POOLED per-group DistinctSet
 /// (codedgroup emit): one big group inflates the retained capacity, then
 /// hundreds of thousands of tiny groups would each pay the full-capacity
-/// memset (the train-10 Q14 regression, +17%).
+/// memset (the train-10 near-unique-text-key regression, +17%).
 const CLEAR_SPARSE_FACTOR: usize = 16;
 
 /// Exact i64 set. 8-byte cells (the key itself); 0 is a valid key, tracked
@@ -1153,7 +1153,7 @@ impl IntSet {
     /// Grow to `new_cap` cells (pow2, > cap) with ONE realloc + tail zero +
     /// in-place rehash — `grow` generalized so a projection reserve can jump
     /// the whole doubling ladder in one step (dedupsub I3: the ladder's
-    /// rehash volume is ~1x final len and measured ~4-5% of q9/q10 cycles).
+    /// rehash volume is ~1x final len and measured ~4-5% of narrow-sort DISTINCT cycles).
     /// The two rehash loops are ratio-independent: pass 1 reinserts every
     /// key from the old prefix at its new-mask position; pass 2 fixes the
     /// chain segment that wrapped past the old end (identical to the 2x

@@ -479,7 +479,7 @@ mod tests {
     fn capture_safety_tiers() {
         setup_utf8();
         let tier = |p: &str| classify(p.as_bytes(), REG_ADVANCED).tier;
-        // Unquantified captures (Q29's shape) stay capture-safe.
+        // Unquantified captures (the anchored URL-capture shape) stay capture-safe.
         assert_eq!(tier(r"^https?://(?:www\.)?([^/]+)/.*$"), Compat::CaptureSafe);
         assert_eq!(tier("(a)(b)(c)"), Compat::CaptureSafe);
         // Quantified non-capturing subtrees stay capture-safe.

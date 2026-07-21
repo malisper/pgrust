@@ -183,7 +183,7 @@ impl<'mcx> BufFile<'mcx> {
         // VFD here is freed, and flushing the dirty buffer would write
         // through dead Files. Late drop glue (Tuplesort/Tuplestore on the
         // ProcExitThread unwind or TLS teardown) must be a no-op — C's
-        // process exit never revisits sort state (ClickBench Q19: worker
+        // process exit never revisits sort state (ts-extract grouped-agg run: worker
         // FATAL mid-sort-spill aborted the postmaster via panic-in-drop).
         if ::elog::config::proc_exit_inprogress() {
             return Ok(());

@@ -298,7 +298,7 @@ fn lookup_int8_kernel() {
     assert_eq!(table.num_entries(), 3);
 }
 
-// q18fin diagnostic (fix/parallel-finalize-stall): the TPROC-H q18 finalize
+// q18fin diagnostic (fix/parallel-finalize-stall): the 15M-group finalize
 // does 15M all-miss int8 inserts through lookup() at ~19us each while the
 // serial agg's identical call site pays ~140ns. This probe isolates the
 // variable: N distinct int8 keys inserted (a) in ascending arrival order

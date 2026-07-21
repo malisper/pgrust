@@ -308,7 +308,7 @@ fn pattern_program_budget_fallback() {
     assert!(!on);
 }
 
-// The tier engages for Q29's exact pattern under auto dispatch, and the
+// The tier engages for the exact anchored-URL pattern under auto dispatch, and the
 // GUC turns it off without recompiling.
 #[test]
 fn pattern_program_attaches_for_q29() {

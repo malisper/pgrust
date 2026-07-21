@@ -733,7 +733,7 @@ impl ScanProjCols {
 }
 
 /// Call-chain caps for [`ScanProjExprKey`] (the lane-v2 expression-group-key
-/// census; sized for the ClickBench Q29 class — one regexp_replace call with
+/// census; sized for the per-row regexp_replace class — one such call with
 /// two const siblings — with slack for a short composition).
 pub const PROJ_KEY_MAX_CALLS: usize = 2;
 pub const PROJ_KEY_MAX_ARGS: usize = 4;

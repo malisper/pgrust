@@ -266,7 +266,7 @@ pub struct SubDfa {
 // kernel initializes every sset row via pickss before reading it (nssused
 // starts at 0 in the fresh DfaMeta). Dirty reuse of pooled space is therefore
 // exactly C's contract; zero-filling a fresh SmallDfaSpace per pg_regexec
-// call was 34% of ClickBench Q29's CPU.
+// call was 34% of the per-row long-text regexp_replace shape's CPU.
 const SUBDFA_POOL_CAP: usize = 40; // C regexec.c LOCALDFAS — max live sub-DFAs per call
 
 std::thread_local! {

@@ -75,16 +75,16 @@ struct BytesSpan {
 /// difference; the arm swap only replaces the probe INDEX. Kill switch
 /// PGRUST_LANE_V2_STRINGHASH_SET=0/off keeps the legacy table.
 ///
-/// SIZE GATE (train-10 Q14 follow-up): the stringhash tables' fixed cost —
+/// SIZE GATE (train-10 near-unique-key follow-up): the stringhash tables' fixed cost —
 /// a 2-3 KiB zeroed initial allocation (1<<INITIAL_DEGREE cells) per set,
 /// paid again in dealloc — loses to the 256 B legacy table on the many
 /// small per-group sets a grouped COUNT(DISTINCT) with high group count
-/// builds (Q14: +17% on train 10). Every set therefore STARTS legacy and
+/// builds (near-unique text-key class: +17% on train 10). Every set STARTS legacy and
 /// promotes to the stringhash arm only when it holds
 /// `stringhash_promote_len()` values (default 56 = the legacy table's first
 /// grow boundary, so an ungated set never grows the legacy table): small
 /// sets keep the cheap representation for their whole life, big sets
-/// (Q5/Q6/Q9/Q10/Q11 winners) pay one trivial <=threshold-key rebuild.
+/// (the count(DISTINCT)-winner shapes) pay one trivial <=threshold-key rebuild.
 /// PGRUST_LANE_V2_STRINGHASH_SET_MINLEN=0 restores the ungated train-10
 /// behavior (promote on first insert) for A/B.
 enum ProbeTab {
@@ -358,7 +358,7 @@ impl<'mcx> DistinctSet<'mcx> {
     /// Stringhash arms clear by CONTENTS (the value arrays), not capacity:
     /// the pooled per-group reuse (codedgroup emit) lets one big group
     /// inflate the retained table, and a capacity-bounded memset would then
-    /// tax every later small group with it (the train-10 Q14 +17%).
+    /// tax every later small group with it (the train-10 near-unique +17%).
     fn reset_values(&mut self) {
         let DistinctSet { table, ints, blob, spans, .. } = self;
         match table {

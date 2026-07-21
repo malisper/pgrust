@@ -1,7 +1,7 @@
 // Write-statement leak gate: the ModifyTable planstate bundle is arena-
 // FORGOTTEN at standard_executor_end, so any std-heap buffer left inside it
 // leaks once per INSERT/UPDATE/DELETE statement (832 B/stmt via
-// ModifyTableState.rels — the pgbench-rw 29.7 GB eviction,
+// ModifyTableState.rels — the OLTP read-write bank's 29.7 GB eviction,
 // notes/oltp-memory-footprint-2026-07-12.md). This test drives the FULL
 // statement path (parse -> plan -> ModifyTable executor -> heapam) under a
 // counting global allocator, reclaims the harness's own deliberate leaks, and

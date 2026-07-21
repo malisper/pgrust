@@ -803,7 +803,7 @@ fn eval_raw_rows(
     // contiguity witness for this window, run ONE memmem pass over the whole
     // span and map hits back to rows, instead of one finder call per row.
     // Engaged only on full-selection windows — the single-clause LIKE band
-    // shape (Q21/Q24 class); under a partial selection the per-row loop
+    // shape (selective text-qual class); under a partial selection the per-row loop
     // touches fewer bytes than the blob would. Occurrence set is identical
     // to the per-row kernel (hits are validated against the owning row's
     // payload bounds; boundary-straddling and header/padding hits resume at

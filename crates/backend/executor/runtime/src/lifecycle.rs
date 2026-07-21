@@ -17,7 +17,7 @@
 //! - Query-owned generations: every published execution gets an immutable
 //!   generation identity; rescan/reinitialize publishes a NEW generation and
 //!   stale handles can never join or migrate into it. Aborted/cancelled
-//!   generations are unconsumable by construction (the H1 Q40-TLS structural
+//!   generations are unconsumable by construction (the H1 CaseDict-TLS structural
 //!   fix: partial state keyed by a generation dies with it).
 //! - Armed participant outcomes: a joined participant must explicitly
 //!   `complete()` or `fail()`; an unfinished Drop (error unwind, panic,

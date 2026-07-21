@@ -285,7 +285,7 @@ pub fn agg_runtime_export_partial_into(
     export_partial_with(node, &schema, crate::agg_plain_pergroup_base(node), partial)
 }
 
-/// SORTED-arm twin (q28-sorted-arm): export the OPEN group's pergroup states
+/// SORTED-arm twin (the sorted-arm lane): export the OPEN group's pergroup states
 /// (the sorted drive's single current-group array) — the per-claim boundary
 /// partial of the ordered-grouped runtime arm. Same admission, same
 /// self-contained representation, same error-path invariant as the plain
@@ -536,7 +536,7 @@ pub fn exec_agg_runtime_partials<'mcx>(
     crate::agg_plain_finish(node, estate)
 }
 
-/// SORTED-arm twin (q28-sorted-arm): absorb a combined boundary partial into
+/// SORTED-arm twin (the sorted-arm lane): absorb a combined boundary partial into
 /// the CURRENT group's pergroup states. The caller ran
 /// [`crate::agg_sorted_stitch_begin`] (initval copies installed) and follows
 /// with `agg_sorted_emit` — the plain arm's begin/absorb/finish discipline,

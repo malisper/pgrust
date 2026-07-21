@@ -29,7 +29,7 @@ std::thread_local! {
 // PGRUST_ADT_IN_FASTUTF8 (load-speed prototype, DEFAULT OFF): from_utf8_lossy
 // walks the bytes with the chunked lossy iterator even when the input is
 // entirely valid (the always case for COPY input, which is already
-// encoding-verified) — measured ~4% of the 10M ClickBench COPY wall
+// encoding-verified) — measured ~4% of the 10M-bank COPY wall
 // (load-speed lane perf, 2026-07-14; ~20M date/timestamp fields). The fast
 // arm validates with core's optimized `str::from_utf8` and borrows; invalid
 // input falls back to the identical lossy copy, so semantics are unchanged.

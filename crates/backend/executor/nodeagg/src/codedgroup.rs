@@ -1,6 +1,6 @@
 //! Lane-v2 dict-code batched exact-DISTINCT grouping (lane-v2-q14feed) — the
 //! textgroup lane's deferred "dict-code batch feed" for the near-unique
-//! single-text-key shape the hash-grouped arm's density tier refuses (CB Q14:
+//! single-text-key shape the hash-grouped arm's density tier refuses (e.g.
 //! `SELECT SearchPhrase, COUNT(DISTINCT UserID) … WHERE SearchPhrase <> ''
 //! GROUP BY SearchPhrase`, ~1.35M qual survivors over ~689k groups).
 //!
@@ -10,7 +10,7 @@
 //! detoast+hash+memcmp per row into ~as many group states as rows (measured
 //! LOSS — its density tier now refuses upfront). This arm exploits the
 //! pgrcolumnar dict facts instead (the dictminmax foundation, verified in
-//! writer.rs): every CB-bank text chunk is dict-encoded, per-epoch (row
+//! writer.rs): every analytics-bank text chunk is dict-encoded, per-epoch (row
 //! group) dictionaries are DEDUPLICATED and BYTE-SORTED, and a dict-lane
 //! window's codes satisfy `values[i] == table.datum(code(i))`.
 //!
@@ -72,7 +72,7 @@
 //! emit chain runs unchanged. Unlike the hash arm, NO residual state
 //! survives a degrade — every absorbed row rides the sort.
 //!
-//! Admission (v1, deliberately tight — the Q14 shape): the narrow-sort
+//! Admission (v1, deliberately tight — the near-unique text-key shape): the narrow-sort
 //! admission, exactly ONE text/varchar grouping column, exactly ONE
 //! transition which is a set-mode COUNT(DISTINCT <bare int Var>) pertrans
 //! (`set_count_transfn` + `direct_att`), pgrcolumnar scan + dict staging armed
@@ -496,9 +496,9 @@ fn count_distinct_small(vals: &[i64]) -> i64 {
 }
 
 /// Planner-estimate economics: engage EXACTLY the density band the
-/// hash-grouped arm's tier refuses (near-unique keys, the Q14 class) — the
+/// hash-grouped arm's tier refuses (near-unique keys, ~2 rows/group) — the
 /// higher-density single-text-key shapes keep the measured hash-arm text
-/// path (Q11/Q12: -9%/-17% landed). `force` = the e2e harness override
+/// path (count(DISTINCT) top-n shapes: -9%/-17% landed). `force` = the e2e harness override
 /// (small tables never look near-unique); the runtime degrade still bounds
 /// memory.
 pub fn agg_codedgroup_economical(node: &AggStateData<'_>, force: bool, input_rows: f64) -> bool {

@@ -228,7 +228,7 @@ struct AggSpillState {
 enum SinkDrain {
     /// Unprojected scan, K2 single-int-key batch probe.
     K2,
-    /// Unprojected scan, packed multi-int composite key (Mk car, q41/q42
+    /// Unprojected scan, packed multi-int composite key (Mk car, one/two-word-image
     /// class) — `scan_mk_batch` per staged batch, fail-closed off-compact.
     /// Int components only: the packed image is value-derived, so worker
     /// tables merge on the canonical key words verbatim (no per-worker
@@ -302,7 +302,7 @@ struct AggSink {
     /// across all workers (worker-time, not wall — divide by the engaged
     /// DOP for a critical-path estimate).
     topn_ctr: TopnCounters,
-    /// LIMIT-k-no-ORDER group-admission freeze (band-2a q18 class; see the
+    /// LIMIT-k-no-ORDER group-admission freeze (band-2a freeze class; see the
     /// sink.rs section doc): armed only on the Mk drain from a bare
     /// Limit-over-Agg bound; structurally never co-armed with `topn`.
     /// Workers install/consult it through [`scan_mk_batch`]; the combine
@@ -1495,7 +1495,7 @@ impl AggSink {
     ) -> PgResult<CombineOutcome> {
         {
             let locals_len = nlocals;
-            // Freeze member filter (band-2a q18): a FROZEN engagement emits
+            // Freeze member filter (band-2a): a FROZEN engagement emits
             // ONLY set members — pre-freeze stragglers are undercounted
             // past the freeze point and must never leave the sink. Rows
             // ascend (sink_emit_bucket_rows contract). Structurally
@@ -1669,7 +1669,7 @@ impl AggSink {
 /// single-threaded and O(forked Locals × remainder rows) — a per-Local
 /// locality-capped table makes that O(DOP × cap), a serial term that GROWS
 /// with DOP while the parallel combine share shrinks (measured DOP-15 gap
-/// 5-10ms on q17/q34; Amdahl-fatal at DOP 192 — notes/combine-parallel-lane.md).
+/// 5-10ms on the two-key and wide-vocabulary top-n shapes; Amdahl-fatal at DOP 192 — notes/combine-parallel-lane.md).
 /// Byte identity: partition_remainder is a pure per-Local function, and the
 /// whole-census decisions (TRUE TABLE ADOPT, top-N SEAL resolution) run
 /// exactly once in `sealed_ready` (single-threaded, happens-before every
@@ -2439,14 +2439,14 @@ fn split_subparts_and_emit(
     Ok(SplitOutcome::Done)
 }
 
-/// The q16-class dict-code sink feed mode (`PGRUST_RUNTIME_AGG_DICTFEED`):
+/// The dict-int-key-class dict-code sink feed mode (`PGRUST_RUNTIME_AGG_DICTFEED`):
 /// what the K2 sink does when the scan staging is dict-group armed (the
 /// single-int-key GROUP BY over a dict-encoded pgrcolumnar column whose
 /// fixed-width prefix deform is unarmable — UserID past varlena columns).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DictFeed {
     /// Keep the dict-group registration and admit. MEASURED FINDING
-    /// (q16-columnar-feed lane): pgrcolumnar NEVER dict-encodes INT chunks
+    /// (dict-columnar-feed lane): pgrcolumnar NEVER dict-encodes INT chunks
     /// (`encode_int_chunk`: Const/For/Raw/DeltaFor only — Encoding::Dict is
     /// the varlena encoder's arm), and the K2 sink admits int keys only
     /// (`agg_sink_key_width`), so dict windows cannot reach this drain
@@ -2457,7 +2457,7 @@ enum DictFeed {
     /// window's key Datum cells are stale by the set_dict_lane contract),
     /// and the ready lane if int dict encoding ever lands.
     Code,
-    /// Dict-free columnar re-arm (the q5-serial precedent): rebuild the
+    /// Dict-free columnar re-arm (the int-distinct-serial precedent): rebuild the
     /// scan staging with NO dict registration so windows fill decoded
     /// Datums, then the plain K2 per-row probe drain runs unchanged.
     Raw,
@@ -2683,9 +2683,9 @@ fn sink_drain_range<'mcx>(
         // Demote = refusal: at half-limit pressure (table + intern +
         // aggcontext vs the compact backstop's own thresholds) REFUSE — RG
         // abort -> serial rerun — before the backstop's sink-mode belt
-        // would raise its hard error (the q34@100M wide-vocabulary class).
+        // would raise its hard error (the wide-vocabulary @100M class).
         //
-        // M3.5 x mt16-cliffs (the q33@100M hmm=2 cliff — measured: the
+        // M3.5 x mt16-cliffs (the two-int-key @100M hmm=2 cliff — measured: the
         // engaged arm hit THIS demote with ZERO spill epochs and fell to a
         // 150s serial spill): with a live spill arm the pressure is
         // table-driven (the mem leg counts the cap-bounded table, which the
@@ -2706,7 +2706,7 @@ fn sink_drain_range<'mcx>(
         // The pressure trip sits at the ~half-limit altitude (pinned by the
         // compact backstop's sink-mode belt — raising it means moving the
         // belt's hard error), so spill-per-trip wrote one ~(half-limit −
-        // aggctx) run per epoch (q33@100M: 15 × ~400MB per Local); the
+        // aggctx) run per epoch (two-int-key @100M: 15 × ~400MB per Local); the
         // budget-crossing law accumulates ~2 trips per epoch — half the
         // epoch brackets, half the combine-replay extents, same bytes.
         // PGRUST_RUNTIME_AGG_SPILL_EAGER=1 restores spill-per-trip (the
@@ -2753,7 +2753,7 @@ fn sink_drain_range<'mcx>(
                     }
                     if ::nodeagg::sink::agg_sink_budget_pressure(agg) {
                         // RESIDUAL pressure after flush+spill = the
-                        // unspillable floor (q33's byref aggcontext class,
+                        // unspillable floor (the two-int-key byref aggcontext class,
                         // proportionality-audit). One counted line makes
                         // every future envelope cliff self-diagnosing —
                         // without it the refusal is silent and only shows
@@ -3237,7 +3237,7 @@ fn build_worker_exec(payload: &Arc<RuntimeAggShared>) -> PgResult<()> {
 
 /// DictFeed::Raw: rebuild the scan staging as the dict-FREE columnar arm —
 /// the same offset-free window deform with NO column opted into dict lanes
-/// (`seq_scan_cb_columnar_arm(.., None)`; the q5-serial `arm_key_soa`
+/// (`seq_scan_cb_columnar_arm(.., None)`; the int-distinct-serial `arm_key_soa`
 /// precedent generalized to the fold prefix) — so every window fills
 /// decoded Datums and the plain K2 drain runs untouched. Fail-closed: the
 /// re-arm must actually shed the dict registration (a PREWHERE-owned batch
@@ -3315,7 +3315,7 @@ fn arm_sink_build<'mcx>(
                 Some(lshape),
                 Some(super::exprkey::SinkXkKind::Multi { dict_input_att: _ }),
             ) => {
-                // The q19/q40 class: the serial build's own mk arm sequence
+                // The ts-extract/CaseDict class: the serial build's own mk arm sequence
                 // under the sink cap (CaseDict shapes arm their two Intern
                 // atts through the shared pool — the serial feed's exact
                 // call); every divergence from the leader's snapshot is an
@@ -3407,7 +3407,7 @@ fn arm_sink_build<'mcx>(
     if super::scan_k2_shape_sink(agg, ss, estate).is_none() {
         return Err(shape_err("worker K2 shape diverged from the leader's"));
     }
-    // Dict-group staging on the K2 build (the q16 class): the same mode
+    // Dict-group staging on the K2 build (the dict-int-key class): the same mode
     // decision the leader made. Code = keep the dict registration (the
     // drain's dict-window branch consumes the codes); Raw = dict-free
     // columnar re-arm (windows fill decoded Datums; the plain drain runs);
@@ -3505,9 +3505,9 @@ fn sink_cap_override() -> Option<u32> {
     })
 }
 
-/// LOCALITY CAP (q36-radix lane): the high-NDV accept-latency bound. At
+/// LOCALITY CAP (radix-cap lane): the high-NDV accept-latency bound. At
 /// 100M/dop15 the budget-derived cap (~22M entries at matched memory) lets a
-/// q36-class Local grow to ~5-6M Salt8 entries (hundreds of MB): every
+/// reduced-key-class Local grow to ~5-6M Salt8 entries (hundreds of MB): every
 /// accept probe is a dependent DRAM miss (the dop16-bandwidth-ceiling study's
 /// memory-LATENCY class — 55% stall_backend_mem at 3.6% bandwidth), and the
 /// combine then re-merges ~dop× duplicated groups from the SEAL remainders
@@ -3555,17 +3555,17 @@ enum LocalityCap {
     Fixed(u32),
 }
 
-/// NDV-ADAPTIVE locality cap (distinct-sidecar-cap lane — the q36-radix
+/// NDV-ADAPTIVE locality cap (distinct-sidecar-cap lane — the radix-cap
 /// close-out's flagged refinement): the 64K-vs-1M adjudication (repeat pair
 /// -3aef/-2af4, reproduced against r2 exactly) showed a REAL per-query
-/// split, not pod drift — q36 (9.76M est groups) runs ~10% faster at 1M,
-/// q16 (17.6M) ~16% faster at 64K, q33 (~1e8) cap-flat 256K-1M. Mechanism
+/// split, not pod drift — the reduced-key shape (9.76M est groups) runs ~10% faster at 1M,
+/// the dict-key shape (17.6M) ~16% faster at 64K, the two-int-key (~1e8) cap-flat 256K-1M. Mechanism
 /// reading: at the higher NDV the worker table re-fills quickly at ANY cap,
 /// so the smallest (L2-resident) table wins outright; in the mid band the
 /// duplicate-absorption of a larger (L3-resident) table repays its slower
 /// probes. Rule (defended by the ladder in notes/distinct-sidecar-cap.md):
 ///   est >= 12M            -> 64K (SINK_LOCALITY_CAP_DEFAULT; today's cap)
-///   2M <= est < 12M       -> 1M  (SINK_LOCALITY_CAP_WIDE; the q36 band)
+///   2M <= est < 12M       -> 1M  (SINK_LOCALITY_CAP_WIDE; the mid-NDV band)
 ///   est < 2M              -> 64K (cap barely binds; tranche-proven regime)
 /// `PGRUST_RUNTIME_AGG_LOCALITY_NDV=0` kills adaptivity (fixed 64K default,
 /// train-19 behavior exactly); an explicit LOCALITY_CAP=N is authoritative.
@@ -3576,19 +3576,19 @@ fn agg_locality_ndv_enabled() -> bool {
     })
 }
 
-/// The q36-band (mid-NDV) locality cap — see [`agg_locality_ndv_enabled`].
+/// The mid-NDV-band locality cap — see [`agg_locality_ndv_enabled`].
 const SINK_LOCALITY_CAP_WIDE: u32 = 1 << 20;
 
 /// `PGRUST_RUNTIME_AGG_LOCALITY_CANON` (default ON since train-20): extend
-/// the locality cap to CANONICAL (Intern-bearing) Mk shapes (the q17 class:
-/// 17M UserID×SearchPhrase groups; the q40 CaseDict residual). The canonical
+/// the locality cap to CANONICAL (Intern-bearing) Mk shapes (the two-key int+text class:
+/// 17M UserID×SearchPhrase groups; the CaseDict residual). The canonical
 /// flush/SEAL/combine machinery exists since train-17 text-kernels (canon
 /// shapes already flush at the BUDGET cap); the train-19 exclusion was the
 /// car3/car4 seam, not a mechanism gap. Default flipped ON at the train-20
-/// merge: the lane's ladder measured q17 -28% (byte-MATCH) and the
-/// canon-family guard pair (q13/q15/q17/q19/q37/q40 @100M mt16, jobs
+/// merge: the lane's ladder measured the two-key shape -28% (byte-MATCH) and the
+/// canon-family guard pair (the six canon-key shapes @100M mt16, jobs
 /// -1784092204-0df8 vs -1784092208-06ce) adjudicated ZERO regressions with
-/// q19 -30%. `=0`/`off` restores the exclusion.
+/// the ts-extract shape -30%. `=0`/`off` restores the exclusion.
 fn agg_locality_canon_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
@@ -3615,9 +3615,9 @@ fn sink_locality_cap_for(est_groups: u64) -> Option<u32> {
     }
 }
 
-/// Wave-1 r2 ladder verdict (q36/q16@100M, notes/q36-radix-lane.md):
-/// monotone improvement control→64K (q36 0.378→0.234 = 2.30x→1.40x CH-mt16;
-/// q16 0.468→0.270), knee flattening 256K→64K, guards (q21/q38) flat-or-
+/// Wave-1 r2 ladder verdict (reduced-key/dict-key @100M, notes/q36-radix-lane.md):
+/// monotone improvement control→64K (reduced-key 0.378→0.234 = 2.30x→1.40x ref-mt16;
+/// dict-key 0.468→0.270), knee flattening 256K→64K, guards (selective-qual, two-key-sort) flat-or-
 /// better. 64K = the historical exchange-class cap (tranche-proven).
 /// 32K/16K extension arms recorded in the lane note; env overrides.
 const SINK_LOCALITY_CAP_DEFAULT: u32 = 1 << 16;
@@ -3639,7 +3639,7 @@ const SINK_LOCALITY_CAP_DEFAULT: u32 = 1 << 16;
 /// random-probed table bytes at 191 workers, spilling the shared SLC
 /// between 64 and 128 workers. The measured signature: instructions and
 /// LLC-miss COUNTS flat, stall_backend_mem x4-5, system-wide miss RATE
-/// saturating at ~1.7-1.9 G/s and then COLLAPSING at 191 (q19 1.24 G/s <
+/// saturating at ~1.7-1.9 G/s and then COLLAPSING at 191 (ts-extract 1.24 G/s <
 /// its own 128-dop rate — queueing overload = the 191<128 regression).
 /// Fix: above the 16-worker anchor, scale the locality bound so the
 /// AGGREGATE stays at the anchor's working set (cap x 16 / dop), floored
@@ -3661,7 +3661,7 @@ fn agg_dopcap_enabled() -> bool {
 /// shares the private cache with the table, so the floor must be a byte
 /// budget, not an entry count — an entry floor silently overflows L2 on
 /// state-heavy shapes). Default 1MB of table bytes at the sink's own
-/// entry estimate (16+8+state+16): ≈18K entries on the q19-class 56B
+/// entry estimate (16+8+state+16): ≈18K entries on the ts-extract-class 56B
 /// entry, proportionally fewer on heavy states — table + flush output +
 /// scan batch fit a Neoverse-V2 core's private 2MB L2 with headroom.
 /// `PGRUST_RUNTIME_AGG_DOPCAP_FLOOR` overrides the BYTE budget (A/B knob).
@@ -3677,7 +3677,7 @@ fn agg_dopcap_floor_bytes() -> u64 {
 }
 
 /// The DOP anchor: at or below this width the locality bound is exactly
-/// the calibrated per-worker cap (the q36-ladder 64K / mid-NDV 1M bands);
+/// the calibrated per-worker cap (the radix-ladder 64K / mid-NDV 1M bands);
 /// above it the AGGREGATE working set is held at the anchor's.
 const DOPCAP_ANCHOR: u32 = 16;
 
@@ -3792,7 +3792,7 @@ fn agg_alpha_reprobe_mult() -> u64 {
 /// the anchor width the aggregate working set already sits at the ratified
 /// SLC constant — demoting write-buffer tables there paid flush-EVENT
 /// overhead (dict-code cache invalidation + run setup at ~3.5× the
-/// cadence: q32 hot +9%, q19 +2.5%, suite otherwise flat 1.0026) and
+/// cadence: high-card two-int-key hot +9%, ts-extract +2.5%, suite otherwise flat 1.0026) and
 /// bought no residency anyone needed at 16 workers. Above the anchor is
 /// the window-B regime the controller is FOR (per-worker shares shrink
 /// below adjudication value; dopcap scales caps toward the floor and the
@@ -3963,13 +3963,13 @@ fn sink_cap_engaged(
 
 /// Sink flush cap (worker table bound, entries) — BUDGET-DERIVED (dop1-tax
 /// inc-3b). The fixed 64K exchange-class cap forced ~17 flush cycles on
-/// q36@10M at DOP1 (~1.1M groups), keeping the single-Local pass-through
+/// the reduced-key shape @10M at DOP1 (~1.1M groups), keeping the single-Local pass-through
 /// permanently dormant and re-inserting every group at combine. The cap is
 /// now the entry count whose compact-table estimate fills HALF the
 /// per-Local budget (the compact spill gate's own arithmetic:
 /// 16+8+state+16 bytes/entry), floored at the 64K class — at default
 /// work_mem it degenerates to ~the old cap (tranche behavior preserved);
-/// under the matched-memory protocol (1GB) a q36-class Local holds all its
+/// under the matched-memory protocol (1GB) a reduced-key-class Local holds all its
 /// groups, never flushes, and the pass-through fires. Width-INDEPENDENT:
 /// each Local is budget-bounded exactly as before (runs held the same
 /// bytes the larger live table now holds — the R3 envelope arithmetic is
@@ -4036,7 +4036,7 @@ fn runtime_agg_text_enabled() -> bool {
 }
 
 /// `PGRUST_RUNTIME_AGG_TEXT2` kill switch (default ON): TWO-text canonical
-/// shapes (the CaseDict q40 class — canon-sink car 1: length-prefixed
+/// shapes (the CaseDict class — canon-sink car 1: length-prefixed
 /// canonical tails). Off, two-Intern shapes refuse the sink exactly as
 /// before the car (serial CaseDict arm unchanged — the attribution channel).
 fn runtime_agg_text2_enabled() -> bool {
@@ -4067,7 +4067,7 @@ fn mk_shape_sink_ok(shape: &::nodeagg::MkShape) -> bool {
 }
 
 /// `PGRUST_RUNTIME_AGG_FREEZE` kill switch (default ON): the LIMIT-k-no-
-/// ORDER group-admission freeze (band-2a q18 class). Off, bare-Limit bounds
+/// ORDER group-admission freeze (band-2a freeze class). Off, bare-Limit bounds
 /// are ignored and those engagements run the plain full drain exactly as
 /// before the car.
 fn agg_freeze_enabled() -> bool {
@@ -4257,7 +4257,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
                 mk = None;
             }
             super::exprkey::SinkXkKind::Multi { dict_input_att: _ } => {
-                // q19/q40 class: packed multi-key over the projected scan
+                // ts-extract/CaseDict class: packed multi-key over the projected scan
                 // (int/numeric components + one or two texts through the
                 // canonical-bytes lane; CaseDict shapes carry TWO Intern
                 // atts — the bare text Var and the computed key). Cap-aware
@@ -4306,7 +4306,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         let k2_int = super::scan_k2_shape_sink(agg, ss, estate).is_some()
             && ::nodeagg::sink::agg_sink_key_width(agg).is_some();
         if k2_int {
-            // Dict-group staging (the q16 class: a single dict-encoded int
+            // Dict-group staging (the dict-int-key class: a single dict-encoded int
             // key whose fixed-width prefix deform is unarmable). CODE feed:
             // admit with the dict registration kept — the sink drain's
             // dict-window branch consumes the codes through the per-epoch
@@ -4420,7 +4420,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     // (Intern-bearing Mk shapes merge on canonical bytes; everything else —
     // Single/Reduced/K2/all-int Mk — merges on key words). Canon shapes
     // stayed excluded from the cap at train-19 (car3/car4 seam);
-    // PGRUST_RUNTIME_AGG_LOCALITY_CANON=1 opts them in (the q17/q40 probe
+    // PGRUST_RUNTIME_AGG_LOCALITY_CANON=1 opts them in (the two-key/CaseDict probe
     // channel — see [`agg_locality_canon_enabled`]).
     let word_keyed = !mk.as_ref().is_some_and(|s| s.intern_comp().is_some());
     let cap_shape_ok = word_keyed || agg_locality_canon_enabled();
@@ -4528,7 +4528,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     // DOP-elastic admission (tails192 #5): floors above ran against the
     // POOL dop; arm only what the work can feed (kill:
     // PGRUST_RUNTIME_ELASTIC_DOP=0). BYREF-FLOOR GUARD (cross-lane
-    // constraint, proportionality-audit @ a39910a0b, q33@dop2 172s
+    // constraint, proportionality-audit @ a39910a0b, two-int-key @dop2 172s
     // root-cause): byref state classes (AvgInt8/PolyInt128) accumulate an
     // UNSPILLABLE per-Local aggcontext floor ~= est_groups/W x per-group
     // bytes, while agg_sink_budget_pressure refuses at hash_mem_limit/2 —
@@ -4607,7 +4607,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     } else {
         None
     };
-    // LIMIT-k-no-ORDER group-admission freeze (band-2a q18): armed only on
+    // LIMIT-k-no-ORDER group-admission freeze (band-2a): armed only on
     // the unprojected Mk drain — the one worker feed carrying the filter
     // hooks — with a small bound, no composed top-N (structurally exclusive:
     // topn derives from a Sort consumer, the bound from a bare Limit), a

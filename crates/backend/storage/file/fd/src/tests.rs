@@ -763,7 +763,7 @@ fn parse_filename_for_nontemp_relation_shapes() {
     assert_eq!(parse("99999999999999999999"), None);
 }
 
-// Worker FATAL mid-sort ordering (ClickBench Q19 P2): proc_exit's abort
+// Worker FATAL mid-sort ordering (ts-extract grouped-agg, P2): proc_exit's abort
 // cleanup frees the spill VFDs, then the ProcExitThread unwind drops the
 // Tuplesort, whose tapeset close reaches BufFile::close with a dirty buffer.
 // The close must be a no-op, never a write through dead Files.
@@ -853,7 +853,7 @@ fn allocated_desc_indices_stable_across_out_of_order_free() {
     with_fd(|fd| assert!(fd.allocated_descs.is_empty()));
 }
 
-// The TPCC wh100 vu64 finding (notes/fdcap-lane.md): many pg_subtrans SLRU
+// The 100-warehouse OLTP write bank vu64 finding (notes/fdcap-lane.md): many pg_subtrans SLRU
 // segment fds held open at once by one backend. A thread left at the
 // FD_MINFREE boot default (never handed the postmaster's set_max_safe_fds
 // probe) freezes maxAllocatedDescs at FD_MINFREE/3 = 16; with the probed

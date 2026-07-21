@@ -1,12 +1,12 @@
 //! Runtime PLAIN exact-DISTINCT sink (band-2b) — DOP-parallel
-//! `Aggregate(AGG_PLAIN, all-DISTINCT) → [Sort →] SeqScan(pgrcolumnar)`, the CB
-//! q5/q6 class (`COUNT(DISTINCT UserID)` / `COUNT(DISTINCT SearchPhrase)`).
+//! `Aggregate(AGG_PLAIN, all-DISTINCT) → [Sort →] SeqScan(pgrcolumnar)`, the
+//! single-key count(DISTINCT) class (`COUNT(DISTINCT UserID)` / `COUNT(DISTINCT SearchPhrase)`).
 //!
 //! Why this arm exists: the planner-parallel plan for this shape is
 //! `Aggregate ← Gather Merge ← Sort ← Parallel Seq Scan` — every input row
 //! ships through the tuple queue and the leader runs the presorted distinct
 //! transition serially. The dop16-bandwidth study classified that arm
-//! INSTRUCTION-WASTE (q5 dop16 executes ~9x the serial instructions:
+//! INSTRUCTION-WASTE (the int-key shape at dop16 executes ~9x the serial instructions:
 //! per-worker duplication + queue spin), so the fix is routing the shape to
 //! a runtime sink over the SERIAL plan, not patching the legacy path.
 //!
@@ -354,7 +354,7 @@ impl<'mcx> BatchSink<'mcx> for PlainAcceptSink<'_> {
                 return Ok(());
             }
         }
-        // Integer key lane, whole-slice (the q5 hot path).
+        // Integer key lane, whole-slice (the int-distinct hot path).
         if !self.key_bytes {
             if let Some((vals, isnull, fb)) = emit.topk_key_lane(n) {
                 if fb.iter().all(|&w| w == 0) {
@@ -766,7 +766,7 @@ pub(super) fn try_own_plain_distinct_runtime<'mcx>(
     // verbatim when set; else engine=runtime arms at pgrust.runtime_dop;
     // else 0 = today's path). Reading the bench GUC alone left this arm
     // UNARMED in every engine=runtime session with the pool GUC unset — the
-    // probe suppressed the Gather and execution landed SERIAL (the q5/q6
+    // probe suppressed the Gather and execution landed SERIAL (the plain-distinct
     // suppress-then-unarmed class, night/routing-floor-fixes).
     let dop = super::router::arm_dop(super::router::ArmClass::Distinct);
     if dop <= 0 || !runtime::runtime_enabled() || !plaindistinct_enabled() {

@@ -536,7 +536,7 @@ fn run_fold_datum(
 // ---- layout + proofs ----
 
 // lanetrans-compact: the per-lane descriptor must stay off the wide-fold
-// regression path (Q30 folds 90 of these).
+// regression path (the multi-battery SUM(x op k) shape folds 90 of these).
 #[test]
 fn lanetrans_layout_is_compact() {
     assert!(core::mem::size_of::<LaneTrans>() <= 24);
@@ -3341,7 +3341,7 @@ fn granule_meta_admission_matrix() {
     assert_eq!(granule_meta_len_cols(&plan_min), None);
 }
 
-// fold_granule_meta vs fold_batch byte parity on Q28's transition family,
+// fold_granule_meta vs fold_batch byte parity on the length()-arg transition family,
 // under both qual shapes the meta arm hosts: no qual (all rows selected) and
 // `col <> ''` (empty-string rows rejected). The footer-style inputs are
 // (passing, Σ octet_length over ALL rows) — empties contribute zero, so the

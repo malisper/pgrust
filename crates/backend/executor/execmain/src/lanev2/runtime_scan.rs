@@ -1659,7 +1659,7 @@ fn build_worker_exec_inner(payload: &RuntimeScanShared) -> PgResult<()> {
                             // Census shape: row-feed staging (kernel-qual
                             // selection bitmap / PREWHERE when the qual has
                             // kernel shape; stitched tiers on) — the same
-                            // staging the SERIAL q21-class drive uses (the
+                            // staging the SERIAL selective-qual-class drive uses (the
                             // lane refuses census and the Volcano pull runs
                             // over the prewhere-staged scan). A qual-only
                             // restage was tried here (dop1-tax inc-2 first
@@ -2176,11 +2176,11 @@ impl runtime::MorselSource for PgrcolumnarGranuleSource {
     /// Row group == dictionary epoch: a claim that stops short of the RG
     /// edge hands the rest of the RG to another worker, which rebuilds the
     /// RG's dictionary (LZ4 blob decompress) and refills every per-epoch
-    /// lane memo (dict-eval predicate sweep) — measured on q21@10M as the
+    /// lane memo (dict-eval predicate sweep) — measured on the selective-qual shape @10M as the
     /// entire runtime-vs-armed drive-phase gap (WFIN decomposition,
     /// notes/runtime-drive-scaling.md: dict_builds 153→243, busy +78% at
     /// DOP15; the armed arm claims whole RGs and scales 13x). Whole-RG
-    /// claims are ~8 granules ≈ ~1.2ms on q21-class kernels — the same
+    /// claims are ~8 granules ≈ ~1.2ms on selective-qual-class kernels — the same
     /// cancel/photo-finish granularity the armed arm already ships.
     /// PGRUST_RUNTIME_SPLIT_CLAIMS=1 restores sizer-truncated claims (A/B).
     fn whole_boundary_claims(&self) -> bool {

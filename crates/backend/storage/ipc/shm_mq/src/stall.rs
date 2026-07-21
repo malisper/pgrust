@@ -20,9 +20,9 @@
 // LOST latch wake cost exactly one threshold (the wait un-wedged only when
 // the next WaitLatch entry saw a stuck is_set) and made a SECOND lost wake
 // on the same blocked operation a PERMANENT hang (post-report the sleep
-// reverted to infinite). Production hit this repeatedly (ClickBench Q15
+// reverted to infinite). Production hit this repeatedly (a dict-int-key grouped top-n's
 // default plan: 173 s for a 0.3 s query = wedge timeouts, S3 job
-// pgrust-cb-flatprof-1783927152; the same 60 s-cadence signature on two
+// flatprof-1783927152; the same 60 s-cadence signature on two
 // pods in notes/batchemit-lane.md). The blocked sleeps now time out every
 // PGRUST_MQ_RECHECK_MS (default 1000, <= 0 restores the old infinite
 // behavior) and RETURN to the caller as a spurious wake — every wait site

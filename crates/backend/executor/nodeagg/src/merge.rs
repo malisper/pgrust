@@ -79,8 +79,8 @@ const INTERNALOID: Oid = 2281;
 // bucket merge combines them through the production fmgr entry points, and
 // the bucket-parallel merge runs them natively (pure adds / memcmp+len
 // pick-pointer). Before this, these combines refused `init_finalize_merge`
-// entirely — q29-class partials (avg(length(text)) + min(text)) fell to the
-// classic tuple-queue + leader-re-hash path, THE measured q29 wall.
+// entirely — long-text-shape partials (avg(length(text)) + min(text)) fell to
+// the classic tuple-queue + leader-re-hash path, THE measured combine wall.
 const COMBINE_INT4_AVG: Oid = 3324;
 const F_TEXT_LARGER: Oid = 458;
 const F_TEXT_SMALLER: Oid = 459;

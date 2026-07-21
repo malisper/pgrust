@@ -362,7 +362,7 @@ pub fn lane_limit_admissible(node: &LimitState<'_>) -> bool {
 }
 
 /// The window's total input-row bound (offset + count) for the LIMIT-k-no-
-/// ORDER group-admission freeze (band-2a q18 class): `Some` only for a
+/// ORDER group-admission freeze (the band-2a composition class): `Some` only for a
 /// plain-COUNT window with a computed positive count and a non-negative
 /// offset. Call AFTER the prologue (the LIMIT_INITIAL recompute evaluated
 /// the expressions). Saturating: an absurd offset+count simply exceeds every

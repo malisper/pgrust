@@ -999,7 +999,7 @@ pub fn seq_scan_cb_prewhere_arm<'mcx>(
     seq_scan_batch_soa_prepare(node, estate, prefix, false, true, true);
     if node.batch_soa.is_none() {
         // Text-qual staging (likeband): the fixed-width prefix refused — a
-        // text column sits inside the qual prefix (the LIKE band's Q21-class
+        // text column sits inside the qual prefix (the LIKE band's selective-text-qual
         // shape). That proof is a heap tuple-walk requirement only; the
         // pgrcolumnar window deform fills ANY column type per column
         // (`batch_deform_col` publishes decoded pointer Datums for text) and
@@ -1120,7 +1120,7 @@ pub fn seq_scan_cb_lane_covers(node: &SeqScanState<'_>, prefix: i32) -> bool {
         .is_some_and(|b| b.lane.is_some() && b.plan.ncols() as i32 >= prefix)
 }
 
-/// EXTRA dict-lane registration (band-2a CaseDict, q40 class): opt ANOTHER
+/// EXTRA dict-lane registration (band-2a CaseDict computed-key class): opt ANOTHER
 /// column into dict lanes on the ALREADY-ARMED columnar batch — the CASE
 /// source column, read per (epoch, code) beside the primary dict-group key.
 /// Call with/after [`seq_scan_cb_columnar_arm`], before the first window
@@ -1602,7 +1602,7 @@ fn arm_key_soa<'mcx>(
             None => match ::exectuples::SoaVarKeyPlan::try_new(atts, attnum as usize) {
                 Some(vk) => (::exectuples::SoaDeformPlan::unused(mcx), Some(vk)),
                 None => {
-                    // pgrcolumnar columnar key staging (the q5-class refusal): a
+                    // pgrcolumnar columnar key staging (the int-key-distinct refusal): a
                     // FIXED-WIDTH key sitting past a varlena column — the
                     // heap fixed-width-prefix proof refuses and the varkey
                     // pass wants a varlena key. The pgrcolumnar window deform
@@ -4081,7 +4081,7 @@ fn cb_scan_info<'mcx>(
     // planner's pre-physical-tlist read set. `use_physical_tlist` hands most
     // scans a whole-row tlist — free on heap (lazy deform), catastrophic
     // here: a one-column qual scan under count(*) decodes/decompresses every
-    // column of every surviving granule (the Q2/Q8 0.9s-serial pathology —
+    // column of every surviving granule (the ungrouped min/max 0.9s-serial pathology —
     // 49% decompress_frame_into of columns nothing reads). Prefer the exact
     // set; the qual walk above stays as fail-safe union (zone extraction
     // needs it anyway). Lane-gated so the lane-off arm remains the untouched

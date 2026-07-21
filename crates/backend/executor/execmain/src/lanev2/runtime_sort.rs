@@ -3,7 +3,7 @@
 //! parallelism-redesign-2026-07.md §2.2/§5-M3).
 //!
 //! Shape: the SERIAL-plan bounded sort breaker `Sort(bounded) ←
-//! SeqScan(pgrcolumnar)` (the ClickBench Q24/Q25 class), executed as one
+//! SeqScan(pgrcolumnar)` (the take-k-sorted full-scan class), executed as one
 //! SealedParallelSink on the runtime: ACCEPT (granule-morsel scan →
 //! PREWHERE → narrow (key, rowref) pushes into a per-worker bounded
 //! `TopnHeap` on the tie-ordering rule-2 TOTAL order) → SEAL (parallel
@@ -128,7 +128,7 @@ fn sort_keys_and_map<'mcx>(
     // / no row image to carry) — refused UNLESS a DictCode key admits (the
     // deferred check below): for a dict-text key the datum IS a string
     // gather per survivor, exactly what the winner-only late
-    // materialization elides (Q26's shape).
+    // materialization elides (the single dict-text-key sort shape).
     let is_datum = ::nodesort::sort_lane_is_datum(state);
     let plan = state.plan;
     let nkeys = plan.numCols as usize;
@@ -164,7 +164,7 @@ fn sort_keys_and_map<'mcx>(
             }
             // A single-column pure-Var projection compiles to a
             // JustAssignVar KERNEL (no step program => no scan_proj_cols
-            // census) — the datum-shaped DictCode admission (Q26's exact
+            // census) — the datum-shaped DictCode admission (that class's exact
             // shape; the sortkey_direct census, same pattern).
             None => match p.pi_state.kernel() {
                 ::execexpr::Kernel::JustAssignVar {
@@ -1490,7 +1490,7 @@ fn build_worker_exec(payload: &Arc<RuntimeSortShared>) -> PgResult<()> {
                     // Key-only staged accept (inc-4 lever 1): the worker
                     // emits nothing but (keys, rowref) — narrow the scan's
                     // needed set to qual columns ∪ the sort keys so staging
-                    // never decompresses the payload width (q24 take-1
+                    // never decompresses the payload width (take-1
                     // profile: 77.5% decompress_frame_into of columns
                     // nothing read; the LEADER's winner gather runs under
                     // its own FULL needed set). Before staging arms, so the
@@ -1509,14 +1509,14 @@ fn build_worker_exec(payload: &Arc<RuntimeSortShared>) -> PgResult<()> {
                         // a code — so staged coverage must be forced BEFORE
                         // the generic arm: (a) with a qual, the PREWHERE
                         // prefix covers only the qual's columns (leg-7 v3:
-                        // q5/q6 int keys past it broke every window) — widen
+                        // distinct-shape int keys past it broke every window) — widen
                         // it to the int-family key columns (dict keys read
                         // the code side channel, never datum cells, and stay
                         // OUT of the ask: a varlena in the fixed-width ask
                         // forces the virtual-prefix detour for nothing);
                         // (b) with NO qual, nothing arms at all and the
                         // drain delivers row-granular arrivals (leg-7 v3:
-                        // q2/q4) — arm the offset-free columnar staging
+                        // no-qual plain aggs) — arm the offset-free columnar staging
                         // (batched windows + window refs; the masks
                         // accessor's no-qual arm serves all-survive).
                         // Refusal on either path leaves the batch unarmed
