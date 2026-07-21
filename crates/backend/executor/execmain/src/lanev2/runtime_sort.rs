@@ -2231,6 +2231,17 @@ fn engage_ceremony<'mcx>(
             drive: runtime_sort_standing_driver,
             deferred_bind: false,
         });
+        // M2 inc-2: the POOL-DB channel — built BEFORE submit (the bound
+        // descriptor must ride the submission: publication keys the
+        // pool-visible active bit off it); sinks_gate: POOLBIND_SINKS=0
+        // retires this channel with the gang's. None = plain pinned
+        // submit, inc-1 byte-exactly.
+        let pool = super::standing_channel::try_pool_channel(
+            payload.pcxt_shared.get().expect("pcxt shared set above"),
+            dop,
+            /* sinks_gate */ true,
+        );
+
 
         // Submit the pinned RG (accept → seal → combine) before launch.
         let source = Arc::new(super::runtime_scan::PgrcolumnarGranuleSource {
@@ -2248,10 +2259,18 @@ fn engage_ceremony<'mcx>(
                 0,
             );
         static NEXT_QUERY_ID: AtomicUsize = AtomicUsize::new(1);
-        let (rg, waiter) = rt.submit_pinned_with_affinity(runtime::QuerySpec {
+        let qspec = runtime::QuerySpec {
             query_id: NEXT_QUERY_ID.fetch_add(1, Ordering::SeqCst) as u64,
             tasksets: vec![accept, freeze, combine],
-        }, router::session_affinity_token());
+        };
+        let (rg, waiter) = match &pool {
+            Some((_, descriptor)) => rt.submit_pinned_bound(
+                qspec,
+                router::session_affinity_token(),
+                descriptor.clone(),
+            ),
+            None => rt.submit_pinned_with_affinity(qspec, router::session_affinity_token()),
+        };
         payload.rg.set(rg.downgrade()).unwrap_or_else(|_| unreachable!("rg set once"));
         *mut_submitted = Some(rg.clone());
 
@@ -2265,10 +2284,9 @@ fn engage_ceremony<'mcx>(
         match super::standing_channel::standing_wait(
             &STANDING_ARM,
             super::standing_channel::StandingLeader {
-                // M2 inc-2: sink arms ride the pool-db channel in the
-                // follow-up wiring (scan arm first — the funnel
-                // discipline); None = gang-first, inc-1 exactly.
-                pool: None,
+                // M2 inc-2: the pool-db board attached at submit (None =
+                // gang-first, inc-1 exactly).
+                pool: pool.as_ref().map(|(entry, _)| Arc::clone(entry)),
                 shared: payload.pcxt_shared.get().expect("pcxt shared set above"),
                 slot: &payload.standing,
                 started: &payload.started,
