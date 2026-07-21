@@ -1,10 +1,12 @@
 //! PARTWISE-MORSELS plan-time probe (night/partitionwise-morsels,
-//! increment 1): knob-gated Gather suppression for the PLAIN (ungrouped)
-//! count/sum fold over ONE partitioned table — the
-//! `parallel-append-partitionwise` coverage-matrix row's first keyed
-//! sub-shape (m5-coverage.tsv row stays `route_to=legacy` / `probe_key="-"`;
-//! this is deliberately NOT a BOOTSTRAP_MATRIX class, the SE-TEXTDISTINCT
-//! precedent — the drift guards and the DEFAULT census are untouched).
+//! increment 1): Gather suppression for the PLAIN (ungrouped) count/sum
+//! fold over ONE partitioned table — the first keyed sub-shape of the
+//! legacy partitioned-append family, now a REAL matrix class
+//! (`CoverClass::PartwisePlainFold`, m5-coverage.tsv row
+//! `partwise-plain-fold`, covered/runtime). DEFAULT ON since the
+//! GL-PARTWISE-1 flip (2026-07-21); `PGRUST_LANE_V2_PARTWISE=0|off` is the
+//! kill switch (t35 exact-spelling flipped-kill; restores the keep-Gather
+//! posture byte-for-byte).
 //!
 //! LIVES IN ITS OWN MODULE by the night-run coordination note: another lane
 //! is widening probe classes in `m5_suppress.rs`, so this lane's additions
@@ -46,15 +48,21 @@ use crate::m5_suppress::{is_whitelisted_agg, size_floors_enabled, trace_armed};
 use crate::run::PlannerRun;
 use types_pathnodes::AMFLAG_PGRCOLUMNAR;
 
-/// Knob (default OFF): `PGRUST_LANE_V2_PARTWISE=1|on`. The executor arm
-/// reads the IDENTICAL spelling (`lanev2/runtime_partwise.rs`) — the
-/// GROUPSINK knob-coherence law.
+/// Knob — DEFAULT ON since the GL-PARTWISE-1 flip;
+/// `PGRUST_LANE_V2_PARTWISE=0|off` kills (t35 exact-spelling flipped-kill).
+/// The executor arm reads the IDENTICAL spelling
+/// (`lanev2/runtime_partwise.rs`) — the GROUPSINK knob-coherence law.
+/// FLIP PROVENANCE: GL-PARTWISE-1 (scratchpad/night/fleet-ab-parallelism.md,
+/// 2026-07-21 @ a88c58496e70): witnessed 3-way ladder wins/ties every
+/// DOP{4,8,16} x {heap,cb,skew} cell (rt/legacy 0.998→0.333), partitioned
+/// byte-identity spot 3-way + ON==OFF PASS, headline-bank flatness 0.9786
+/// hot (probe provably silent on unpartitioned banks).
 pub(crate) fn partwise_probe_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        matches!(
+        !matches!(
             std::env::var("PGRUST_LANE_V2_PARTWISE").as_deref(),
-            Ok("1") | Ok("on")
+            Ok("0") | Ok("off")
         )
     })
 }
@@ -164,12 +172,18 @@ pub(crate) fn classify_partitionwise(
     }
     let is_cb = uniform_cb.expect("children walked");
 
-    // --- Provisional engagement floor: the single-rel fold classes' floors
-    // reused per AM (CbPlainAggFold / HeapCmpFoldPrefix, notes/m5-5-floors
-    // .md), applied to the SUM of the children — the engagement claims the
-    // concatenated space, so the sum is the economically meaningful size.
-    // PROVISIONAL: GL-PARTWISE-1 (fleet letter) owes the partitioned
-    // re-measurement before any default flip.
+    // --- PROVISIONAL per-AM engagement floors, KEPT at the GL-PARTWISE-1
+    // flip: the single-rel fold classes' floors reused per AM
+    // (CbPlainAggFold / HeapCmpFoldPrefix, notes/m5-5-floors.md), applied
+    // to the SUM of the children — the engagement claims the concatenated
+    // space, so the sum is the economically meaningful size. The letter's
+    // ladder ran floors-off at 10M (every cell wins/ties), which validates
+    // the covered region but does NOT place the crossover; the reuse stays
+    // the guard. Per-AM shape is why this class is rectangle-retained in
+    // class_guard/cover_class_curve (NO_GUARD there; the floor lives HERE).
+    // NAMED FOLLOW-UP (non-blocking): floor-calibration mini-ladder
+    // ({100k..2.5M} x dop{4,8}, floors-off B-cells) to re-place per-AM
+    // floors from partitioned measurements.
     if size_floors_enabled() {
         let dop = guc_tables::runtime_pool::runtime_dop();
         let ok = if is_cb {
@@ -187,25 +201,38 @@ pub(crate) fn classify_partitionwise(
             return Ok(false);
         }
     }
-    if trace_armed() {
+    // Matrix consult (the drift-guarded routing surface): the admission
+    // above keys the class; whether the class routes runtime is the
+    // BOOTSTRAP_MATRIX/tsv pair's verdict, same as every covered sibling.
+    let covered = crate::m5_suppress::class_covered(crate::m5_suppress::CoverClass::PartwisePlainFold);
+    if covered && trace_armed() {
         let _ = run;
         eprintln!(
             "m5-suppress-partwise: engine=runtime children={nchildren} rows={rows:.0} \
              cb={is_cb} => gather suppressed"
         );
     }
-    Ok(true)
+    Ok(covered)
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn knob_default_off() {
-        // Env not set in the test harness ⇒ the probe is inert (the DEFAULT
-        // census stays byte-identical; the m5_suppress hook short-circuits).
+    fn knob_default_on_flipped_kill() {
+        // GL-PARTWISE-1 flip: env unset ⇒ the probe is ARMED (default ON);
+        // the kill spellings are exactly "0"/"off" (t35 flipped-kill law).
         if std::env::var("PGRUST_LANE_V2_PARTWISE").is_err() {
-            assert!(!super::partwise_probe_enabled());
+            assert!(super::partwise_probe_enabled());
         }
+    }
+
+    #[test]
+    fn matrix_class_is_covered() {
+        // The class the classifier consults must be a covered BOOTSTRAP row
+        // (the tsv side is tied by bootstrap_matrix_matches_tsv).
+        assert!(crate::m5_suppress::class_covered(
+            crate::m5_suppress::CoverClass::PartwisePlainFold
+        ));
     }
 
     #[test]
