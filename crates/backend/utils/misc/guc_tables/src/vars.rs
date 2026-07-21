@@ -314,6 +314,7 @@ pub static pgrust_runtime_dop: GucIntVar = GucSlot::new("pgrust_runtime_dop");
 // boot-time memory auto-tune (PGC_POSTMASTER).
 pub static pgrust_runtime: GucBoolVar = GucSlot::new("pgrust_runtime");
 pub static pgrust_mem_autotune: GucBoolVar = GucSlot::new("pgrust_mem_autotune");
+pub static pgrust_runtime_vacuum_pool: GucBoolVar = GucSlot::new("pgrust_runtime_vacuum_pool");
 // pgrust-only (env-to-guc train, no C symbol): the per-arm runtime pool DOP
 // force-overrides + the Gather read-fairness stride. Registered from the
 // deferred pool-GUC recipe (docs/design/jit-parallel-defaults.md §3). Each is

@@ -39,12 +39,13 @@ fn table_counts_match_compiled_backend_shape() {
     //     runtime_sort_pool / runtime_bitmap_pool / lane_parallel_pool /
     //     gather_fair_stride -> 154 + 8 = 162.
     //   Total 435 + 10 = 445.
-    assert_eq!(ConfigureNamesBool.len(), 131);
+    //   GL-M41-3 flip: + pgrust.runtime_vacuum_pool (Bool 131 -> 132) = 446.
+    assert_eq!(ConfigureNamesBool.len(), 132);
     assert_eq!(ConfigureNamesInt.len(), 162);
     assert_eq!(ConfigureNamesReal.len(), 28);
     assert_eq!(ConfigureNamesString.len(), 77);
     assert_eq!(ConfigureNamesEnum.len(), 47);
-    assert_eq!(all_settings().count(), 445);
+    assert_eq!(all_settings().count(), 446);
     assert_eq!(GucContext_Names.len(), PGC_USERSET as usize + 1);
     assert_eq!(GucSource_Names.len(), PGC_S_SESSION as usize + 1);
     assert_eq!(config_group_names.len(), DEVELOPER_OPTIONS as usize + 1);

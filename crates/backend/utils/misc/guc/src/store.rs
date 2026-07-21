@@ -267,6 +267,14 @@ pub fn initialize_guc_options_from_environment() -> PgResult<()> {
         let v = if env == "0" { "off" } else { "on" };
         crate::SetConfigOption("pgrust.runtime", Some(v), PGC_POSTMASTER, PGC_S_ENV_VAR)?;
     }
+    // pgrust-only (GL-M41-3 flip): pgrust.runtime_vacuum_pool's startup
+    // default (parallel VACUUM on the morsel-pool workers). Flipped-kill
+    // spelling per t35 convention: "0" or "off" disables; any other value /
+    // unset = on (the flipped default).
+    if let Ok(env) = std::env::var("PGRUST_RUNTIME_VACUUM_POOL") {
+        let v = if matches!(env.trim(), "0" | "off") { "off" } else { "on" };
+        crate::SetConfigOption("pgrust.runtime_vacuum_pool", Some(v), PGC_POSTMASTER, PGC_S_ENV_VAR)?;
+    }
     // pgrust-only (env-to-guc train): pgrust.mem_autotune's startup default
     // (the boot-time machine-scaled memory/parallel auto-tune gate). Accepts
     // the same truthy set the autotune reader recognized (1/on/true/yes); the

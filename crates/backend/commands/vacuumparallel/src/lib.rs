@@ -323,7 +323,8 @@ fn parallel_vacuum_compute_workers(
 // M4.1 pool channel (driver swap, index phase): index passes served by
 // PGPROC-leasing pool workers through the M2 inc-2 bound-descriptor gate at
 // QoS class Utility. The launched bgworker gang stays the fallback on every
-// refusal, and the kill switch (default OFF) restores it wholesale.
+// refusal, and the flipped-kill switch (pgrust.runtime_vacuum_pool, default
+// ON since the train-40 flip) restores it wholesale when set off.
 //
 // Q2 (Track 4.2 long-unit discipline) — CHUNKED-CLAIM RESUMABLE SWEEPS:
 // the M4.1 "one index = one coarse morsel" unit held a claim (and its
@@ -353,15 +354,15 @@ fn parallel_vacuum_compute_workers(
 // run whole inside a single ticket (the M4.1 coarse shape, per index).
 // ---------------------------------------------------------------------------
 
-/// M4.1 kill switch: `PGRUST_RUNTIME_VACUUM_POOL=1` arms the pool channel
-/// for the parallel-index passes (same switch as the heap phase's driver
-/// swap). DEFAULT OFF. Layered under the runtime master switch and the
-/// standing module's own gates (POOLBIND/POOLDB inside try_engage_pool).
+/// M4.1 driver switch for the parallel-index passes (same switch as the
+/// heap phase's driver swap). FLIPPED-KILL: default ON since the train-40
+/// flip (GL-M41-3); `pgrust.runtime_vacuum_pool = off` (env seed
+/// PGRUST_RUNTIME_VACUUM_POOL=0|off) restores the launched gang. Layered
+/// under the runtime master switch and the standing module's own gates
+/// (POOLBIND/POOLDB inside try_engage_pool).
 fn pool_index_enabled() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var("PGRUST_RUNTIME_VACUUM_POOL").is_ok_and(|v| v.trim() == "1")
-    }) && runtime::runtime_enabled()
+    guc_tables::backing::pgrust_runtime_vacuum_pool()
+        && runtime::runtime_enabled()
         && runtime::global().is_some()
         && miscinit::GetMyBackendType() != ::types_core::BackendType::AutovacWorker
         && !parallel::IsParallelWorker()
@@ -1846,6 +1847,19 @@ mod tests {
             pool_index_enabled(),
             "the vacuum index-pass pool gate admits under the armed env"
         );
+        // GL-M41-3 flipped-kill polarity: the backing cell IS the switch
+        // (env seeds it at boot; unit processes see the flipped default).
+        // Off must close the gate; restore the default after.
+        assert!(
+            guc_tables::backing::pgrust_runtime_vacuum_pool(),
+            "pgrust.runtime_vacuum_pool defaults ON since the train-40 flip"
+        );
+        guc_tables::backing::set_pgrust_runtime_vacuum_pool(false);
+        assert!(
+            !pool_index_enabled(),
+            "pgrust.runtime_vacuum_pool = off must restore the launched gang"
+        );
+        guc_tables::backing::set_pgrust_runtime_vacuum_pool(true);
     }
 
     /// Q2 posture: the chunk sub-switches are LAYERED UNDER the pool kill
