@@ -1,5 +1,5 @@
 use mcx::Mcx;
-use tableam_vocab::BulkInsertStateData;
+use tableam_vocab::{BulkInsertStateData, WriteMultiInsertBuffer};
 use types_core::{CommandId, InvalidOid, Oid};
 use types_error::PgResult;
 use types_nodes::Node;
@@ -17,6 +17,8 @@ pub struct IntoRelState<'mcx> {
     pub output_cid: CommandId,
     pub ti_options: i32,
     pub bistate: Option<BulkInsertStateData>,
+    /// W1 multi-insert buffer (tableam::write_buffer); None = per-tuple path.
+    pub mibuf: Option<WriteMultiInsertBuffer<'mcx>>,
 }
 
 impl<'mcx> IntoRelState<'mcx> {
@@ -29,6 +31,7 @@ impl<'mcx> IntoRelState<'mcx> {
             output_cid: 0,
             ti_options: 0,
             bistate: None,
+            mibuf: None,
         }
     }
 }

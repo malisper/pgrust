@@ -306,6 +306,7 @@ env	crates/backend/access/pgrcolumnar/src/scan.rs	7
 env	crates/backend/access/pgrcolumnar/src/segfile.rs	1
 env	crates/backend/access/pgrcolumnar/src/writer.rs	7
 env	crates/backend/access/table/tableam/src/lib.rs	1
+env	crates/backend/access/table/tableam/src/write_buffer.rs	1	DST-REVIEW(w1-writes): PGRUST_CTAS_MULTIINSERT kill switch (default OFF) — process-constant env read, AtomicU8-cached; same lane-knob class as the SE16 agg_bitmap row; knobs-registry routing queued with the parallel-writes ladder
 env	crates/backend/access/transam/parallel/src/lib.rs	2
 env	crates/backend/access/transam/parallel/src/query_task_guard.rs	2
 env	crates/backend/access/transam/parallel/src/standing.rs	3	DST-REVIEW(m2-inc2): +1 = PGRUST_RUNTIME_POOLDB (the PGPROC-leasing pool-workers kill switch, default OFF) — process-constant lane-knob class (env read once, OnceLock-cached); knobs-registry routing rides the chartered SE/DST migration; DST-REVIEW(m2-inc3): +1 = PGRUST_RUNTIME_POOL_STICKY (rung-3 sticky-on-pool kill switch, default ON layered under POOLDB; same OnceLock-cached process-constant class)

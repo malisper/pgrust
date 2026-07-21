@@ -171,6 +171,34 @@ pub struct BulkInsertStateData {
     pub already_extended_by: u32,
 }
 
+/// W1 receiver-level multi-insert buffer (parallel-writes ladder): row copies
+/// parked between `table_multi_insert` flushes by the table-rewrite
+/// DestReceivers (intorel/transientrel receive). Data shape only — the
+/// buffer/flush logic lives in `tableam::write_buffer` (this crate sits below
+/// the AM crates so the receiver states in the command seams can carry it).
+///
+/// std Vec: SlotData owns droppy state via the arena-erased views (buffer
+/// pins, SHOULDFREE images); the pool lives for the statement and is dropped
+/// (never flushed) on the statement's Err path, C's CopyMultiInsertBuffer
+/// abort discipline.
+pub struct WriteMultiInsertBuffer<'mcx> {
+    pub slots: Vec<::types_slot::SlotData<'mcx>>,
+    pub nused: usize,
+    pub bytes: usize,
+}
+
+impl<'mcx> WriteMultiInsertBuffer<'mcx> {
+    pub fn new() -> Self {
+        WriteMultiInsertBuffer { slots: Vec::new(), nused: 0, bytes: 0 }
+    }
+}
+
+impl Default for WriteMultiInsertBuffer<'_> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // tsmapi.h sample capability; an OPEN extension point in C, so dyn is
 // faithful. `donetuples` is the scan's returned-tuple count — C's callbacks
 // read it off the SampleScanState they are handed (tsm_system_rows does).

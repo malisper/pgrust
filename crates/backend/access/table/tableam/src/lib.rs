@@ -42,6 +42,8 @@ pub use ::tableam_vocab::*;
 #[cfg(test)]
 mod tests;
 
+pub mod write_buffer;
+
 pub fn init_seams() {
     guc_tables::vars::synchronize_seqscans.install(guc_tables::GucVarAccessors {
         get: synchronize_seqscans,

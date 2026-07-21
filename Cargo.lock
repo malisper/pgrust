@@ -17524,6 +17524,7 @@ dependencies = [
  "types_error",
  "types_rel",
  "types_scan",
+ "types_slot",
  "types_snapshot",
  "types_storage",
  "types_tuple",

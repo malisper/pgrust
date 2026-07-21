@@ -605,6 +605,8 @@ fn transientrel_startup<'mcx>(
     // visibility, page vm/PD_ALL_VISIBLE bits diverge until that lane lands.
     state.ti_options = tableam_vocab::TABLE_INSERT_SKIP_FSM;
     state.bistate = Some(heapam::GetBulkInsertState());
+    // W1 multi-insert buffering (PGRUST_CTAS_MULTIINSERT, default OFF).
+    state.mibuf = tableam::write_buffer::write_buffer_begin(&rel);
     state.rel = Some(rel);
     Ok(())
 }
@@ -614,6 +616,18 @@ fn transientrel_receive<'mcx>(
     slot: &mut SlotData<'mcx>,
 ) -> PgResult<bool> {
     let rel = state.rel.as_ref().expect("transientrel_startup ran");
+    if let Some(buf) = state.mibuf.as_mut() {
+        tableam::write_buffer::write_buffer_receive(
+            state.mcx,
+            rel,
+            buf,
+            slot,
+            state.output_cid,
+            state.ti_options,
+            state.bistate.as_mut(),
+        )?;
+        return Ok(true);
+    }
     tableam::table_tuple_insert(
         state.mcx,
         rel,
@@ -626,6 +640,20 @@ fn transientrel_receive<'mcx>(
 }
 
 fn transientrel_shutdown<'mcx>(state: &mut TransientRelState<'mcx>) -> PgResult<()> {
+    // Tail flush (success path only — an erroring statement drops the
+    // buffered copies unflushed, and the aborted xact kills the rest).
+    if let Some(mut buf) = state.mibuf.take() {
+        if let Some(rel) = state.rel.as_ref() {
+            tableam::write_buffer::write_buffer_flush(
+                state.mcx,
+                rel,
+                &mut buf,
+                state.output_cid,
+                state.ti_options,
+                state.bistate.as_mut(),
+            )?;
+        }
+    }
     // FreeBulkInsertState: the pin/strategy guards release on drop.
     drop(state.bistate.take());
     if let Some(rel) = state.rel.as_ref() {
