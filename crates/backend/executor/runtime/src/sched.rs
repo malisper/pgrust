@@ -87,7 +87,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::clock::Clock;
-use crate::ledger::{AdmissionLedger, ClaimVerdict, LedgerBudgets, WidthRequest};
+use crate::ledger::{AdmissionLedger, ClaimVerdict, LedgerBudgets, LedgerClass, WidthRequest};
 use crate::morsel::MorselRange;
 use crate::rg::{BoundDescriptor, BoundServe, QuerySpec, ResourceGroup, RgClass, RgOutcome};
 use crate::sizing::{SizingDecision, SizingParams, TaskSizer};
@@ -299,6 +299,37 @@ fn p_min_default() -> u32 {
             .filter(|p| *p > 0 && *p <= crate::rg::INITIAL_PRIORITY)
             .unwrap_or(P_MIN_DEFAULT)
     })
+}
+
+/// Track-4 Q0: the UTILITY class stride weight p_util (pool-qos-design.md
+/// §1.2). Default = the ratified p_min floor (p0/16 = 625): utility work
+/// holds exactly the fully-decayed-batch share — the §3.4 C-legality bound
+/// already argued for the floor — and, being at the floor, never decays
+/// (the decay site's `priority > p_min` guard). Env override is a
+/// calibration knob on the PGRUST_RUNTIME_PMIN precedent, not product
+/// surface.
+pub(crate) const P_UTIL_DEFAULT: u32 = P_MIN_DEFAULT;
+
+fn p_util_default() -> u32 {
+    static V: crate::sync::OnceLock<u32> = crate::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_UTIL_PRIORITY")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .filter(|p| *p > 0 && *p <= crate::rg::INITIAL_PRIORITY)
+            .unwrap_or(P_UTIL_DEFAULT)
+    })
+}
+
+/// Track-4 Q0/Q1 kill switch: `PGRUST_RUNTIME_UTIL_QOS=0` makes a Utility
+/// submission behave as a plain Foreground one (p0 stride weight, standard
+/// ledger tier) — the pre-QoS scheduler byte-identically. Default ON;
+/// INERT either way until a consumer submits a Utility RG (none on this
+/// train — M4.1 is the first, gated on M2 inc-2). Read once; tests toggle
+/// per instance via [`crate::Runtime::set_util_qos`].
+fn util_qos_default() -> bool {
+    static ON: crate::sync::OnceLock<bool> = crate::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_UTIL_QOS").map_or(true, |v| v.trim() != "0"))
 }
 
 /// Pin-board lanes reserved for EXTERNAL participant threads (M1: the
@@ -697,6 +728,13 @@ pub(crate) struct Scheduler {
     /// probe alternative floors per instance; production is the ratified
     /// default).
     p_min: AtomicU32,
+    /// Track-4 Q0: utility-class stride weight (atomic: per-instance test
+    /// probe on the p_min precedent; production is the env default).
+    p_util: AtomicU32,
+    /// Track-4 kill switch (env default ON; tests toggle per instance).
+    /// OFF ⇒ Utility submissions fold to Foreground — pre-QoS behavior
+    /// byte-identically.
+    util_qos: AtomicBool,
     /// Global pass watermark (monotone max of charged passes): a NEWLY
     /// admitted RG's slot pass starts here — standard stride join, no
     /// credit for queue wait, no monopoly for late arrivals.
@@ -753,6 +791,8 @@ impl Scheduler {
             decay_lambda: decay_lambda_default(),
             decay_quantum_ns: AtomicU64::new(decay_quantum_default()),
             p_min: AtomicU32::new(p_min_default()),
+            p_util: AtomicU32::new(p_util_default()),
+            util_qos: AtomicBool::new(util_qos_default()),
             global_pass: AtomicU64::new(0),
             ledger: AdmissionLedger::new(nslots, LedgerBudgets::from_env(permits as u32)),
             ledger_on: AtomicBool::new(ledger_default()),
@@ -860,6 +900,27 @@ impl Scheduler {
         self.p_min.load(Ordering::Relaxed)
     }
 
+    /// Track-4 Q0 test hook: probe alternative utility stride weights
+    /// (the set_p_min precedent). Production keeps the env default.
+    pub(crate) fn set_p_util(&self, p: u32) {
+        self.p_util.store(p.clamp(1, crate::rg::INITIAL_PRIORITY), Ordering::SeqCst);
+    }
+
+    pub(crate) fn p_util_value(&self) -> u32 {
+        self.p_util.load(Ordering::Relaxed)
+    }
+
+    /// Track-4 kill-switch toggle (tests / A-B; production reads the
+    /// PGRUST_RUNTIME_UTIL_QOS default once at construction — default ON).
+    /// Toggle BEFORE submitting: the class fold happens at submit.
+    pub(crate) fn set_util_qos(&self, on: bool) {
+        self.util_qos.store(on, Ordering::SeqCst);
+    }
+
+    pub(crate) fn util_qos_enabled(&self) -> bool {
+        self.util_qos.load(Ordering::Relaxed)
+    }
+
     /// WS-B: per-instance ledger toggle (tests / A-B; production reads the
     /// PGRUST_RUNTIME_LEDGER_V2 default once at construction — default OFF
     /// this increment). Toggle BEFORE submitting: join/leave accounting
@@ -953,6 +1014,15 @@ impl Scheduler {
             bound.is_none() || pinned,
             "bound-engagement descriptors ride PINNED submissions only"
         );
+        // Track-4 kill switch (PGRUST_RUNTIME_UTIL_QOS=0): fold Utility to
+        // Foreground BEFORE the RG is built — class tag, stride weight, and
+        // ledger tier all revert in this one place, restoring the pre-QoS
+        // submit byte-identically.
+        let class = if class == RgClass::Utility && !self.util_qos.load(Ordering::Relaxed) {
+            RgClass::Foreground
+        } else {
+            class
+        };
         let rg_id = self.next_rg_id.fetch_add(1, Ordering::SeqCst) + 1;
         let rg = ResourceGroup::new(
             rg_id,
@@ -963,6 +1033,14 @@ impl Scheduler {
             Arc::downgrade(self),
             bound,
         );
+        if class == RgClass::Utility {
+            // Q0: the class weight IS the priority word — zero pick-path
+            // change. Stored before any publish derives the slot stride
+            // from it (publish_taskset_locked). At the default weight
+            // (= the p_min floor) the M5-5 decay site skips utility RGs
+            // outright via its `priority > p_min` guard.
+            rg.priority.store(self.p_util.load(Ordering::Relaxed), Ordering::Relaxed);
+        }
         rg.submit_ns.store(self.clock.now_ns().max(1), Ordering::Relaxed);
         RuntimeStats::tick(&self.stats.rgs_submitted);
         if self.trace {
@@ -978,7 +1056,12 @@ impl Scheduler {
         }
         let mut m = lock(&self.membership);
         match class {
-            RgClass::Foreground => {
+            // Utility shares Foreground's FIFO admission exactly (Track-4
+            // Q0): no queue overtake in either direction — the class
+            // differentiates SERVICE (stride weight, ledger tier), never
+            // admission order. The 128-slot array makes queue pressure
+            // rare; a queued utility RG waits like any query.
+            RgClass::Foreground | RgClass::Utility => {
                 // FIFO admission: never overtake queued RGs.
                 if m.waitq.is_empty() {
                     if let Some(slot) = m.owned.iter().position(Option::is_none) {
@@ -1029,7 +1112,15 @@ impl Scheduler {
         if self.ledger_on.load(Ordering::Relaxed) {
             let req = width
                 .unwrap_or_else(|| WidthRequest::unbounded(self.ledger.budgets().cores));
-            let _nudge = self.ledger.admit(slot, req);
+            // Track-4 Q1: the RG class selects the budget tier — Utility
+            // enters the capped tier, everything else is Standard (today's
+            // algebra exactly; Maintenance entries are few/single-morsel
+            // and ride Standard).
+            let tier = match rg.class {
+                RgClass::Utility => LedgerClass::Utility,
+                RgClass::Foreground | RgClass::Maintenance => LedgerClass::Standard,
+            };
+            let _nudge = self.ledger.admit(slot, req, tier);
         }
         // Stride join (M5-4, refined at M5-5): a newly-admitted RG starts at
         // the stride VIRTUAL TIME — the minimum pass among currently-active

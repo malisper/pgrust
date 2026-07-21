@@ -3041,10 +3041,16 @@ mod granule_map_tests {
 
 mod ledger_tests {
     use super::*;
-    use crate::ledger::AdmissionLedger;
+    use crate::ledger::{AdmissionLedger, LedgerClass};
 
     fn budgets(cores: u32) -> LedgerBudgets {
-        LedgerBudgets { cores, cache_bytes: u64::MAX, join_threshold_ns: 0, renudge_max: 4 }
+        LedgerBudgets {
+            cores,
+            util_cores: (cores / 8).max(1),
+            cache_bytes: u64::MAX,
+            join_threshold_ns: 0,
+            renudge_max: 4,
+        }
     }
 
     fn req(ceiling: u32) -> WidthRequest {
@@ -3056,17 +3062,18 @@ mod ledger_tests {
     #[test]
     fn target_math_fair_share_and_clamps() {
         let l = AdmissionLedger::new(8, budgets(8));
-        let n = l.admit(0, req(16));
+        let n = l.admit(0, req(16), LedgerClass::Standard);
         assert_eq!(n, ArrivalNudge { wake: 8, advertises: true });
         assert_eq!(l.debug_words(0), (0, 8), "alone: fair share is the whole core budget");
 
-        l.admit(1, req(2));
+        l.admit(1, req(2), LedgerClass::Standard);
         assert_eq!(l.debug_words(0).1, 4, "incumbent narrowed to the equal share");
         assert_eq!(l.debug_words(1).1, 2, "ceiling clamps below the fair share");
 
         l.admit(
             2,
             WidthRequest { predicted: 1, ..req(8) },
+            LedgerClass::Standard,
         );
         // base = 8/3 = 2, remainder 2 in slot order => fair 3,3,2.
         assert_eq!(l.debug_words(0).1, 3);
@@ -3077,7 +3084,7 @@ mod ledger_tests {
         // floor of one.
         let l = AdmissionLedger::new(8, budgets(2));
         for slot in 0..3 {
-            l.admit(slot, req(4));
+            l.admit(slot, req(4), LedgerClass::Standard);
         }
         for slot in 0..3 {
             assert!(l.debug_words(slot).1 >= 1, "liveness floor: target >= 1");
@@ -3094,13 +3101,13 @@ mod ledger_tests {
     #[test]
     fn shed_within_one_claim() {
         let l = AdmissionLedger::new(4, budgets(2));
-        l.admit(0, req(4));
+        l.admit(0, req(4), LedgerClass::Standard);
         assert!(l.try_join(0));
         assert!(l.try_join(0));
         assert!(!l.try_join(0), "grants stop at the target");
         assert_eq!(l.should_continue(0), ClaimVerdict::Continue);
 
-        l.admit(1, req(4)); // fresh arrival: targets 1,1 — incumbent over-granted
+        l.admit(1, req(4), LedgerClass::Standard); // fresh arrival: targets 1,1 — incumbent over-granted
         assert_eq!(l.should_continue(0), ClaimVerdict::Yield, "shed at the next boundary");
         assert_eq!(l.leave(0), 0, "still at/above target: no wake needed");
         assert_eq!(
@@ -3119,10 +3126,10 @@ mod ledger_tests {
     #[test]
     fn fresh_query_wins_pick() {
         let l = AdmissionLedger::new(4, budgets(2));
-        l.admit(0, req(4));
+        l.admit(0, req(4), LedgerClass::Standard);
         assert!(l.try_join(0));
         assert!(l.try_join(0));
-        l.admit(1, req(4));
+        l.admit(1, req(4), LedgerClass::Standard);
         assert!(!l.wants_workers(0), "saturated incumbent is filtered out");
         assert!(l.wants_workers(1), "fresh under-target entry passes the filter");
         assert!(!l.try_join(0), "stale pick of the incumbent is refused");
@@ -3136,7 +3143,13 @@ mod ledger_tests {
     fn cache_budget_refusal() {
         let l = AdmissionLedger::new(
             8,
-            LedgerBudgets { cores: 8, cache_bytes: 1000, join_threshold_ns: 0, renudge_max: 4 },
+            LedgerBudgets {
+                cores: 8,
+                util_cores: 1,
+                cache_bytes: 1000,
+                join_threshold_ns: 0,
+                renudge_max: 4,
+            },
         );
         let wide = WidthRequest {
             ceiling: 8,
@@ -3144,7 +3157,7 @@ mod ledger_tests {
             cache_bytes_per_worker: 400,
             est_work_ns: u64::MAX,
         };
-        let nudge = l.admit(0, wide);
+        let nudge = l.admit(0, wide, LedgerClass::Standard);
         assert_eq!(l.debug_words(0).1, 2, "cache headroom denies widening past 2");
         assert_eq!(nudge.wake, 2);
         assert!(l.try_join(0));
@@ -3154,7 +3167,7 @@ mod ledger_tests {
 
         // A second footprint entry: no headroom left — the liveness floor
         // wins (target 1), charging past the budget by design.
-        l.admit(1, wide);
+        l.admit(1, wide, LedgerClass::Standard);
         assert_eq!(l.debug_words(0).1, 2);
         assert_eq!(l.debug_words(1).1, 1, "liveness floor beats the cache clamp");
         assert_eq!(l.snapshot().cache_charged_bytes, 1200);
@@ -3166,8 +3179,8 @@ mod ledger_tests {
     #[test]
     fn widening_on_worker_freed() {
         let l = AdmissionLedger::new(4, budgets(4));
-        l.admit(0, req(8));
-        l.admit(1, req(8));
+        l.admit(0, req(8), LedgerClass::Standard);
+        l.admit(1, req(8), LedgerClass::Standard);
         assert_eq!(l.debug_words(0).1, 2);
         assert!(l.try_join(0));
         assert!(l.try_join(0));
@@ -3190,16 +3203,22 @@ mod ledger_tests {
     fn join_threshold_sub_threshold_admit() {
         let l = AdmissionLedger::new(
             4,
-            LedgerBudgets { cores: 4, cache_bytes: u64::MAX, join_threshold_ns: 1000, renudge_max: 4 },
+            LedgerBudgets {
+                cores: 4,
+                util_cores: 1,
+                cache_bytes: u64::MAX,
+                join_threshold_ns: 1000,
+                renudge_max: 4,
+            },
         );
-        let n = l.admit(0, WidthRequest { est_work_ns: 999, ..req(4) });
+        let n = l.admit(0, WidthRequest { est_work_ns: 999, ..req(4) }, LedgerClass::Standard);
         assert_eq!(n, ArrivalNudge { wake: 0, advertises: false });
         assert!(!l.wants_workers(0), "sub-threshold entries are invisible to the pick");
         assert!(!l.advertises(0));
         assert!(l.try_join(0), "the caller itself may still join");
         assert_eq!(l.snapshot().sub_threshold_admits, 1);
 
-        let n = l.admit(1, WidthRequest { est_work_ns: 1000, ..req(4) });
+        let n = l.admit(1, WidthRequest { est_work_ns: 1000, ..req(4) }, LedgerClass::Standard);
         assert!(n.advertises, "at-threshold work advertises (strictly-below rule)");
     }
 
@@ -3208,7 +3227,7 @@ mod ledger_tests {
     #[test]
     fn renudge_bounded_by_budget() {
         let l = AdmissionLedger::new(4, budgets(4));
-        l.admit(0, req(8)); // target 4
+        l.admit(0, req(8), LedgerClass::Standard); // target 4
         assert!(l.try_join(0)); // granted 1 < 4: under target
         for _ in 0..4 {
             assert!(l.renudge(0), "under-target boundary may request a wake");
@@ -3217,7 +3236,7 @@ mod ledger_tests {
         assert_eq!(l.snapshot().renudges, 4);
         assert_eq!(l.snapshot().renudges_suppressed, 1);
 
-        l.admit(1, req(8)); // recompute refills the budget (targets 2,2)
+        l.admit(1, req(8), LedgerClass::Standard); // recompute refills the budget (targets 2,2)
         assert!(l.renudge(0), "budget refilled at the membership event");
 
         // At/above target: no nudge, no budget spend.
@@ -3247,7 +3266,7 @@ mod ledger_tests {
     #[test]
     fn retired_slot_reuse_fails_open() {
         let l = AdmissionLedger::new(4, budgets(2));
-        l.admit(0, req(2));
+        l.admit(0, req(2), LedgerClass::Standard);
         assert!(l.try_join(0));
         assert_eq!(l.leave(0), 0);
         l.retire(0);
@@ -3278,7 +3297,7 @@ mod ledger_tests {
             match rng() % 4 {
                 0 => {
                     if !admitted[slot] {
-                        l.admit(slot, req(1 + rng() % 6));
+                        l.admit(slot, req(1 + rng() % 6), LedgerClass::Standard);
                         admitted[slot] = true;
                     }
                 }
@@ -3860,10 +3879,16 @@ mod caller_c2_tests {
 // ---------------------------------------------------------------------------
 mod ledger_gang_tests {
     use super::*;
-    use crate::ledger::{AdmissionLedger, MAX_GANG_ENTRIES};
+    use crate::ledger::{AdmissionLedger, LedgerClass, MAX_GANG_ENTRIES};
 
     fn budgets(cores: u32) -> LedgerBudgets {
-        LedgerBudgets { cores, cache_bytes: u64::MAX, join_threshold_ns: 0, renudge_max: 4 }
+        LedgerBudgets {
+            cores,
+            util_cores: (cores / 8).max(1),
+            cache_bytes: u64::MAX,
+            join_threshold_ns: 0,
+            renudge_max: 4,
+        }
     }
 
     fn req(ceiling: u32) -> WidthRequest {
@@ -3894,7 +3919,7 @@ mod ledger_gang_tests {
         // budget — the gang's grant is 0, the caller must go serial, and
         // the zero grant is visible in the one stats surface.
         let l = AdmissionLedger::new(4, budgets(8));
-        l.admit(0, req(16));
+        l.admit(0, req(16), LedgerClass::Standard);
         assert_eq!(l.debug_words(0).1, 8);
         let (_, granted) = l.admit_gang(4).unwrap();
         assert_eq!(granted, 0, "no headroom: grant 0, caller's serial path");
@@ -3910,7 +3935,7 @@ mod ledger_gang_tests {
         let l = AdmissionLedger::new(4, budgets(8));
         let (id, granted) = l.admit_gang(6).unwrap();
         assert_eq!(granted, 6);
-        l.admit(0, req(16));
+        l.admit(0, req(16), LedgerClass::Standard);
         assert_eq!(l.debug_words(0).1, 2, "pool target = cores - gang active");
         // Gang launched only 3 of its 6: settle releases the parked width.
         assert_eq!(l.settle_gang(id, 3), 1, "pool target widened -> wake hint");
@@ -3923,7 +3948,7 @@ mod ledger_gang_tests {
         let l = AdmissionLedger::new(4, budgets(2));
         let (_, g) = l.admit_gang(2).unwrap();
         assert_eq!(g, 2);
-        l.admit(0, req(4));
+        l.admit(0, req(4), LedgerClass::Standard);
         assert_eq!(l.debug_words(0).1, 1, "liveness floor beats the gang charge");
     }
 
@@ -3935,8 +3960,8 @@ mod ledger_gang_tests {
         let l = AdmissionLedger::new(4, budgets(8));
         let (id, granted) = l.admit_gang(5).unwrap();
         assert_eq!(granted, 5);
-        l.admit(0, req(16)); // arrival recompute
-        l.admit(1, req(16)); // second arrival
+        l.admit(0, req(16), LedgerClass::Standard); // arrival recompute
+        l.admit(1, req(16), LedgerClass::Standard); // second arrival
         l.retire(1); // departure recompute
         let snap = l.snapshot();
         assert_eq!(snap.gang_granted, 5, "grant frozen across pool churn");
@@ -3989,6 +4014,7 @@ mod ledger_gang_tests {
         // to 4; the cache room term is unchanged by the gang's existence).
         let l = AdmissionLedger::new(4, LedgerBudgets {
             cores: 8,
+            util_cores: 1,
             cache_bytes: 4096,
             join_threshold_ns: 0,
             renudge_max: 4,
@@ -4000,7 +4026,7 @@ mod ledger_gang_tests {
             predicted: u32::MAX,
             cache_bytes_per_worker: 1024,
             est_work_ns: u64::MAX,
-        });
+        }, LedgerClass::Standard);
         // core budget after gang charge = 4; cache room = 4096/1024 = 4:
         // target 4 — the two clamps compose, neither re-derives the other.
         assert_eq!(l.debug_words(0).1, 4);
@@ -4019,7 +4045,7 @@ mod ledger_gang_tests {
         assert_eq!(g2, 3, "second gang sees the first one's charge (8-3)");
         let (_, g3) = l.admit_gang(4).unwrap();
         assert_eq!(g3, 2, "third gang sees both charges (8-3-3)");
-        l.admit(0, req(16));
+        l.admit(0, req(16), LedgerClass::Standard);
         assert_eq!(l.debug_words(0).1, 1, "pool floor under the gang charges (8-3-3-2=0 -> floor)");
     }
 
@@ -4257,5 +4283,458 @@ mod bound_gate {
         assert_eq!(waiter.wait(), RgOutcome::Aborted);
         pool.shutdown();
         assert_eq!(rt.execution_permits().available(), 2, "permits balanced after abort");
+    }
+}
+
+// ---- Track-4 QoS: utility class + capped budget tier (Q0/Q1) ---------------
+// Appended module per the shared-file rule (design authority:
+// scratchpad/night/pool-qos-design.md; decisions of record: SOFT cap,
+// ceiling=1 pin deferred to Q2). The three named proofs — starvation,
+// flatness, reclaim — discharge the Track-3 gate ("utility must not starve
+// queries / queries must be insensitive to utility") ahead of any consumer.
+
+mod utility_qos_tests {
+    use super::*;
+    use crate::ledger::{AdmissionLedger, LedgerClass};
+
+    fn budgets(cores: u32, util_cores: u32) -> LedgerBudgets {
+        LedgerBudgets {
+            cores,
+            util_cores,
+            cache_bytes: u64::MAX,
+            join_threshold_ns: 0,
+            renudge_max: 4,
+        }
+    }
+
+    fn req(ceiling: u32) -> WidthRequest {
+        WidthRequest::unbounded(ceiling)
+    }
+
+    fn long_spec(qid: u64, total: u64, clock: &Arc<VirtualClock>) -> (Arc<SyntheticWork>, QuerySpec) {
+        let w = SyntheticWork::new(total, Some(Arc::clone(clock)), 1_000);
+        let spec = QuerySpec {
+            query_id: qid,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(total)),
+                work: Arc::clone(&w) as Arc<dyn TaskSetWork>,
+                deps: vec![],
+            }],
+        };
+        (w, spec)
+    }
+
+    /// Q1 target math, unit form: the two-tier recompute. Utility alone
+    /// splits the FULL budget (soft cap, work-conserving idle box); any
+    /// standard admission narrows the utility tier to
+    /// min(B_util, budget − Σ standard targets); a saturated standard tier
+    /// leaves utility the liveness floor (target 1, never 0); standard
+    /// retire widens utility back. Standard math is byte-value-identical
+    /// to the pre-Q1 walk (n_std == admitted when no utility exists —
+    /// every pre-existing ledger test doubles as that regression proof).
+    #[test]
+    fn util_two_tier_target_math() {
+        let l = AdmissionLedger::new(8, budgets(8, 2));
+        // Utility alone: full budget (work-conserving).
+        l.admit(0, req(16), LedgerClass::Utility);
+        assert_eq!(l.debug_words(0).1, 8, "idle box: utility runs wide");
+        // Unbounded standard arrival: takes the whole budget; utility
+        // drops to the liveness floor (min(2, 8-8) = 0 → floor 1).
+        l.admit(1, req(16), LedgerClass::Standard);
+        assert_eq!(l.debug_words(1).1, 8, "standard tier splits the full budget");
+        assert_eq!(l.debug_words(0).1, 1, "utility floored, never zero");
+        let snap = l.snapshot();
+        assert_eq!(snap.util_admitted, 1);
+        assert_eq!(snap.util_target_total, 1);
+        // Standard retire: utility widens back to the full budget.
+        assert!(l.retire(1) > 0, "utility target rose — wake hint");
+        assert_eq!(l.debug_words(0).1, 8);
+        // Ceiling-clamped standard leaves headroom: utility gets
+        // min(B_util=2, 8−4=4) = 2.
+        l.admit(2, req(4), LedgerClass::Standard);
+        assert_eq!(l.debug_words(2).1, 4);
+        assert_eq!(l.debug_words(0).1, 2, "soft cap: min(B_util, leftover)");
+        // Second utility entry: the CAPPED tier splits fairly (1,1).
+        l.admit(3, req(16), LedgerClass::Utility);
+        assert_eq!(l.debug_words(0).1, 1);
+        assert_eq!(l.debug_words(3).1, 1);
+        let snap = l.snapshot();
+        assert_eq!(snap.util_admitted, 2);
+        assert_eq!(snap.util_target_total, 2);
+        // Test hook: B_util raised per instance takes effect at the next
+        // membership event.
+        l.set_util_cores(4);
+        l.retire(3);
+        assert_eq!(l.debug_words(0).1, 4, "min(B_util=4, leftover 4)");
+    }
+
+    /// RECLAIM, mechanism level (the ≤one-CLAIM bound): a standard arrival
+    /// narrows a wide-running utility entry and the claim-boundary verdict
+    /// flips to Yield IMMEDIATELY — the running worker sheds at its very
+    /// next claim, morsel cadence, not task cadence (should_continue is
+    /// evaluated per claim in run_task's loop, sched.rs).
+    #[test]
+    fn util_reclaim_yields_within_one_claim() {
+        let l = AdmissionLedger::new(4, budgets(2, 1));
+        l.admit(0, req(4), LedgerClass::Utility);
+        assert_eq!(l.debug_words(0).1, 2, "idle: full budget");
+        assert!(l.try_join(0));
+        assert!(l.try_join(0));
+        assert_eq!(l.should_continue(0), ClaimVerdict::Continue);
+        // Foreground arrives: standard takes the budget, utility floors.
+        l.admit(1, req(2), LedgerClass::Standard);
+        assert_eq!(l.debug_words(1).1, 2);
+        assert_eq!(l.debug_words(0).1, 1);
+        assert_eq!(
+            l.should_continue(0),
+            ClaimVerdict::Yield,
+            "over-target utility sheds at the NEXT claim boundary"
+        );
+        assert_eq!(l.leave(0), 0);
+        assert_eq!(
+            l.should_continue(0),
+            ClaimVerdict::Continue,
+            "one shed resolves it — the floor keeps one utility worker running"
+        );
+        assert!(l.snapshot().yields >= 1);
+    }
+
+    /// Q0 seeding + kill switch: a Utility submission holds p_util from
+    /// birth (default = the ratified p_min floor, 625) and NEVER decays
+    /// (the decay site's `priority > p_min` guard); with
+    /// PGRUST_RUNTIME_UTIL_QOS off it folds to a plain Foreground submit —
+    /// p0, standard ledger tier — byte-identically.
+    #[test]
+    fn utility_priority_seeding_and_kill_switch() {
+        for qos in [true, false] {
+            let clock = Arc::new(VirtualClock::new());
+            let rt = virtual_runtime(1, &clock);
+            rt.set_stride(true);
+            rt.set_decay(true);
+            rt.set_decay_quantum_ns(1_000_000); // aggressive: many boundaries
+            rt.set_ledger(true);
+            rt.set_util_qos(qos);
+            assert_eq!(rt.p_util(), 625, "default weight = the p_min floor");
+            let total = 16_000u64;
+            let work = SyntheticWork::new(total, Some(Arc::clone(&clock)), 1_000);
+            let (h, waiter) = rt.submit_utility(
+                spec_one(&work, Arc::new(SyntheticMorselSource::new(total))),
+                None,
+            );
+            let expect_p = if qos { 625 } else { 10_000 };
+            assert_eq!(h.priority(), expect_p, "qos={qos}: class weight at submit");
+            let snap = rt.ledger_snapshot();
+            assert_eq!(
+                snap.util_admitted,
+                u32::from(qos),
+                "qos={qos}: ledger tier follows the fold"
+            );
+            let mut local = rt.worker_local(0);
+            while waiter.try_wait().is_none() {
+                rt.worker_step(&mut local);
+                if qos {
+                    // Utility never decays (at the floor from birth).
+                    assert_eq!(h.priority(), 625, "utility priority never moves");
+                } else {
+                    // Folded to Foreground: ordinary M5-5 decay applies —
+                    // p0 downward, exactly the pre-QoS behavior.
+                    assert!(h.priority() <= 10_000, "foreground decays from p0");
+                }
+            }
+            assert_eq!(waiter.wait(), RgOutcome::Completed);
+            work.assert_all_executed_once();
+            let snap = rt.ledger_snapshot();
+            assert_eq!(snap.util_admitted, 0, "entry retired at completion");
+            assert_eq!(snap.admitted, 0);
+        }
+    }
+
+    /// PROOF 1 — STARVATION (the Track-3 gate's "utility must make
+    /// guaranteed progress"): under a saturating fresh-p0 foreground query
+    /// (decay frozen — the adversarial worst case, the §3.4 shape), a
+    /// utility RG at p_util = p0/16 keeps ≈1/17 of the machine and is
+    /// serviced at least every ~p0/p_util = 16 task boundaries. Mirrors
+    /// decay_starvation_floor_share_skew — same bands, class-seeded weight
+    /// instead of decayed weight.
+    #[test]
+    fn utility_progress_under_saturating_foreground() {
+        let clock = Arc::new(VirtualClock::new());
+        let rt = virtual_runtime(1, &clock);
+        rt.set_stride(true);
+        rt.set_decay(true);
+        rt.set_decay_quantum_ns(u64::MAX); // freeze: foreground stays p0
+        let total = 40_000_000u64; // 40 s virtual CPU: nobody finishes
+        let (_uw, uspec) = long_spec(1, total, &clock);
+        let (hu, wu) = rt.submit_utility(uspec, None);
+        assert_eq!(hu.priority(), 625);
+        let (_fw, fspec) = long_spec(2, total, &clock);
+        let (hf, wf) = rt.submit(fspec);
+        assert_eq!(hf.priority(), 10_000);
+        let mut local = rt.worker_local(0);
+        let mut last_u = hu.cpu_consumed_ns();
+        let mut gap = 0u32;
+        let mut max_gap = 0u32;
+        const BOUNDARIES: u32 = 340;
+        for _ in 0..BOUNDARIES {
+            assert_eq!(rt.worker_step(&mut local), Step::Ran);
+            let uc = hu.cpu_consumed_ns();
+            if uc > last_u {
+                last_u = uc;
+                gap = 0;
+            } else {
+                gap += 1;
+                max_gap = max_gap.max(gap);
+            }
+        }
+        assert!(
+            max_gap <= 24,
+            "utility starved: waited {max_gap} boundaries (p0/p_util = 16)"
+        );
+        let u_cpu = hu.cpu_consumed_ns() as f64;
+        let f_cpu = hf.cpu_consumed_ns() as f64;
+        let u_share = u_cpu / (u_cpu + f_cpu);
+        assert!(
+            (0.035..=0.085).contains(&u_share),
+            "utility share {u_share:.4} outside the ≈1/17 band (u={u_cpu} f={f_cpu})"
+        );
+        eprintln!("utility starvation proof: share {u_share:.4}, max gap {max_gap} boundaries");
+        hu.abort();
+        hf.abort();
+        while wu.try_wait().is_none() || wf.try_wait().is_none() {
+            rt.worker_step(&mut local);
+        }
+    }
+
+    /// PROOF 2 — FLATNESS (the OLTP-flatness law applied to the pool): a
+    /// short foreground query's completion, in task boundaries, is nearly
+    /// UNCHANGED by a saturating utility background (≤ isolated + a few
+    /// boundaries — the 1:16 stride ratio grants utility at most ~one task
+    /// per 16 of the short query's), while the same background submitted
+    /// as FOREGROUND (equal shares) roughly doubles it. Deterministic
+    /// virtual-clock twin of the fleet disturbed-elasticity gate.
+    #[test]
+    fn utility_flatness_short_query_latency() {
+        #[derive(PartialEq)]
+        enum Bg {
+            None,
+            Utility,
+            Foreground,
+        }
+        let run = |bg: Bg| -> u32 {
+            let clock = Arc::new(VirtualClock::new());
+            let rt = virtual_runtime(1, &clock);
+            rt.set_stride(true);
+            rt.set_decay(true);
+            rt.set_decay_quantum_ns(u64::MAX); // freeze: fg background stays p0
+            let mut local = rt.worker_local(0);
+            let bg_handles = match bg {
+                Bg::None => None,
+                _ => {
+                    let (_w, spec) = long_spec(1, 40_000_000, &clock);
+                    let (h, wt) = match bg {
+                        Bg::Utility => rt.submit_utility(spec, None),
+                        _ => rt.submit(spec),
+                    };
+                    // Warm the background: it runs alone for a few tasks.
+                    for _ in 0..8 {
+                        assert_eq!(rt.worker_step(&mut local), Step::Ran);
+                    }
+                    Some((h, wt))
+                }
+            };
+            let short = SyntheticWork::new(20_000, Some(Arc::clone(&clock)), 1_000);
+            let (_hs, ws) = rt.submit(QuerySpec {
+                query_id: 99,
+                tasksets: vec![TaskSetSpec {
+                    source: Arc::new(SyntheticMorselSource::new(20_000)),
+                    work: Arc::clone(&short) as Arc<dyn TaskSetWork>,
+                    deps: vec![],
+                }],
+            });
+            let mut boundaries = 0u32;
+            while ws.try_wait().is_none() {
+                rt.worker_step(&mut local);
+                boundaries += 1;
+                assert!(boundaries < 10_000, "short query starved");
+            }
+            if let Some((h, wt)) = bg_handles {
+                h.abort();
+                while wt.try_wait().is_none() {
+                    rt.worker_step(&mut local);
+                }
+            }
+            boundaries
+        };
+        let isolated = run(Bg::None);
+        let with_util = run(Bg::Utility);
+        let with_fg = run(Bg::Foreground);
+        assert!(
+            with_util <= isolated + 4,
+            "flatness violated: {with_util} boundaries under utility background \
+             vs {isolated} isolated"
+        );
+        assert!(
+            with_util < with_fg,
+            "class weight bought nothing: utility bg {with_util} !< foreground bg {with_fg}"
+        );
+        eprintln!(
+            "utility flatness proof: short query {isolated} boundaries isolated, \
+             {with_util} under utility bg, {with_fg} under foreground bg"
+        );
+    }
+
+    /// PROOF 3 — RECLAIM LATENCY (task cadence; the claim-cadence half is
+    /// util_reclaim_yields_within_one_claim): a foreground query arriving
+    /// while utility saturates the pool is first serviced within ≤2 task
+    /// boundaries — utility can win at most ONE more equal-pass tie
+    /// (min-active-pass join) before its 16×-faster pass advance puts the
+    /// query ahead — i.e. submit→first-service ≤ ~2·t_max of virtual time.
+    /// The ledger composes: the utility entry's target drops to the floor
+    /// the moment the query is admitted.
+    #[test]
+    fn utility_reclaim_latency_within_two_boundaries() {
+        let clock = Arc::new(VirtualClock::new());
+        let rt = virtual_runtime(1, &clock);
+        rt.set_stride(true);
+        rt.set_decay(true);
+        rt.set_decay_quantum_ns(u64::MAX);
+        rt.set_ledger(true);
+        rt.set_util_permits(1);
+        let mut local = rt.worker_local(0);
+        let (_uw, uspec) = long_spec(1, 40_000_000, &clock);
+        let (hu, wu) = rt.submit_utility(uspec, None);
+        // Utility saturates the (1-core) pool for a while.
+        for _ in 0..12 {
+            assert_eq!(rt.worker_step(&mut local), Step::Ran);
+        }
+        assert_eq!(
+            rt.ledger_snapshot().util_target_total,
+            1,
+            "idle 1-core box: utility holds the whole budget"
+        );
+        let (_fw, fspec) = long_spec(2, 40_000_000, &clock);
+        let (hf, wf) = rt.submit(fspec);
+        assert_eq!(
+            rt.ledger_snapshot().util_target_total,
+            1,
+            "utility narrowed to the floor at the query's admission"
+        );
+        let mut boundaries = 0u32;
+        while hf.service_times().1 == 0 {
+            assert_eq!(rt.worker_step(&mut local), Step::Ran);
+            boundaries += 1;
+            assert!(boundaries <= 2, "reclaim exceeded two task boundaries");
+        }
+        let (submit_ns, first_ns, _) = hf.service_times();
+        let wait = first_ns.saturating_sub(submit_ns);
+        assert!(
+            wait <= 2 * crate::sizing::DEFAULT_T_MAX_NS + 100_000,
+            "submit→first-service {wait}ns exceeds ~2·t_max"
+        );
+        eprintln!(
+            "utility reclaim proof: foreground first-serviced after {boundaries} \
+             boundaries, {wait}ns virtual"
+        );
+        hu.abort();
+        hf.abort();
+        while wu.try_wait().is_none() || wf.try_wait().is_none() {
+            rt.worker_step(&mut local);
+        }
+    }
+
+    /// Q1 end-to-end on a REAL pool, ledger ON: utility + foreground mix
+    /// completes, every granule exactly once, and the accounting (class
+    /// tiers included) drains to zero. The cross-thread wiring proof.
+    #[test]
+    fn utility_ledger_on_pool_end_to_end() {
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 2,
+            standbys: 1,
+            slots: 4,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        rt.set_ledger(true);
+        rt.set_util_permits(1);
+        let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+        let uwork = SyntheticWork::new(4096, None, 0);
+        let (_hu, uwaiter) = rt.submit_utility(
+            QuerySpec {
+                query_id: 1,
+                tasksets: vec![TaskSetSpec {
+                    source: Arc::new(SyntheticMorselSource::new(4096).with_c0(8)),
+                    work: Arc::clone(&uwork) as Arc<dyn TaskSetWork>,
+                    deps: vec![],
+                }],
+            },
+            Some(WidthRequest::unbounded(2)),
+        );
+        let mut works = Vec::new();
+        let mut waiters = Vec::new();
+        for i in 0..2u64 {
+            let work = SyntheticWork::new(2048, None, 0);
+            let (_h, waiter) = rt.submit_with_width(
+                QuerySpec {
+                    query_id: i + 2,
+                    tasksets: vec![TaskSetSpec {
+                        source: Arc::new(SyntheticMorselSource::new(2048).with_c0(8)),
+                        work: Arc::clone(&work) as Arc<dyn TaskSetWork>,
+                        deps: vec![],
+                    }],
+                },
+                WidthRequest::unbounded(2),
+            );
+            works.push(work);
+            waiters.push(waiter);
+        }
+        assert_eq!(uwaiter.wait(), RgOutcome::Completed);
+        for w in &waiters {
+            assert_eq!(w.wait(), RgOutcome::Completed);
+        }
+        uwork.assert_all_executed_once();
+        for w in &works {
+            w.assert_all_executed_once();
+        }
+        let snap = rt.ledger_snapshot();
+        assert_eq!(snap.admitted, 0, "every entry retired");
+        assert_eq!(snap.util_admitted, 0, "utility tier drained");
+        assert_eq!(snap.granted_total, 0, "every grant returned");
+        pool.shutdown();
+    }
+
+    /// Utility admission is FIFO — it never overtakes queued foreground
+    /// (the anti-Maintenance property; heeding the design's trap note):
+    /// with every slot busy and a foreground RG queued, a utility
+    /// submission lands BEHIND it in the wait queue.
+    #[test]
+    fn utility_never_overtakes_queued_foreground() {
+        let clock = Arc::new(VirtualClock::new());
+        let mut cfg = RuntimeConfig::new(1);
+        cfg.slots = 1; // force queueing
+        let rt = Runtime::with_clock(cfg, Arc::clone(&clock) as Arc<dyn Clock>);
+        rt.set_stride(true);
+        let (_w0, s0) = long_spec(1, 8_000, &clock);
+        let (_h0, wt0) = rt.submit(s0); // occupies the only slot
+        let (_w1, s1) = long_spec(2, 8_000, &clock);
+        let (h1, wt1) = rt.submit(s1); // queued foreground
+        let (_w2, s2) = long_spec(3, 8_000, &clock);
+        let (h2, wt2) = rt.submit_utility(s2, None); // queued utility
+        let mut local = rt.worker_local(0);
+        while wt0.try_wait().is_none() {
+            rt.worker_step(&mut local);
+        }
+        // The queued FOREGROUND RG must be admitted (serviced) first.
+        while h1.service_times().1 == 0 {
+            assert_eq!(
+                h2.service_times().1,
+                0,
+                "utility overtook queued foreground"
+            );
+            rt.worker_step(&mut local);
+        }
+        while wt1.try_wait().is_none() || wt2.try_wait().is_none() {
+            rt.worker_step(&mut local);
+        }
+        assert_eq!(wt2.wait(), RgOutcome::Completed);
     }
 }

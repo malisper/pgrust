@@ -109,18 +109,32 @@ pub enum BoundServe {
     Closed,
 }
 
-/// RG scheduling class (M4, docs/design/m4-bgjobs.md §3.5). Maintenance RGs
+/// RG scheduling class (M4, docs/design/m4-bgjobs.md §3.5; Track-4 QoS,
+/// scratchpad/night/pool-qos-design.md §1/§3). Maintenance RGs
 /// (background-job cycles) are preferred by the pool's pick over foreground
 /// FIFO order, and overtake the wait queue on submission — the minimal
 /// starvation floor, deliberately NOT a scheduler: maintenance slots are few
 /// (one per due job cycle) and their task sets are single-morsel, so the
 /// foreground tax is bounded by one worker × one cycle body. The slot word
 /// stays the sole execution authority; the class only orders the pick.
-/// Stride/priority activation stays M5.
+///
+/// Utility (Track-4 Q0/Q1) is the BULK-BACKGROUND class — vacuum drivers,
+/// index build, COPY compute after their M4 migrations. It is the opposite
+/// of Maintenance and must never be conflated with it: no pick preference,
+/// no queue overtake. The class is compiled entirely into two existing
+/// mechanisms at submit time — (i) the RG's priority word is seeded at the
+/// utility weight p_util (default = the ratified p_min floor, p0/16) so the
+/// M5-4/M5-5 stride pick gives it the floor's proven ≥1/(1+K·p0/p_util)
+/// share (no starvation, no new pick code), and (ii) the WS-B ledger admits
+/// it into the capped utility budget tier (soft cap: full fair share on an
+/// idle box, min(B_util, cores − Σ foreground targets) otherwise) so
+/// foreground occupancy is structurally protected, with reclaim bounded by
+/// one claim via the existing should_continue Yield.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RgClass {
     Foreground,
     Maintenance,
+    Utility,
 }
 
 pub(crate) struct RgProgress {
