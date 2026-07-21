@@ -601,21 +601,64 @@ fn distinct_set_kind(
     const F_INT4EQ: Oid = 65;
     const F_TEXTEQ: Oid = 67;
     const F_INT8EQ: Oid = 467;
+    // GL-LOWDIST-3 datetime widening (adt_date/adt_timestamp builtins).
+    const F_DATE_EQ: Oid = 1086;
+    const F_TIMESTAMPTZ_EQ: Oid = 1152;
+    const F_TIMESTAMP_EQ: Oid = 2052;
     const INT2OID: Oid = 21;
     const INT4OID: Oid = 23;
     const INT8OID: Oid = 20;
     const TEXTOID: Oid = 25;
     const VARCHAROID: Oid = 1043;
+    const DATEOID: Oid = 1082;
+    const TIMESTAMPOID: Oid = 1114;
+    const TIMESTAMPTZOID: Oid = 1184;
     Ok(match (eq_proc, atttypid) {
         (F_INT2EQ, INT2OID) => Some(distinctset::DistinctKeyKind::Int16),
         (F_INT4EQ, INT4OID) => Some(distinctset::DistinctKeyKind::Int32),
         (F_INT8EQ, INT8OID) => Some(distinctset::DistinctKeyKind::Int64),
+        // GL-LOWDIST-3 (knob-gated, default OFF): the datetime family's
+        // same-type equality is REPRESENTATIONAL word equality on the
+        // stored key exactly like the int family — date_eq is `==` on the
+        // i32 day count, timestamp_eq/timestamptz_eq are `==` on the i64
+        // microsecond count (adt_date/adt_timestamp cmp-op macros; the
+        // infinity sentinels are ordinary word values) — so the sets ride
+        // the existing Int32/Int64 lanes byte-identically. Cross-type
+        // equalities (date-vs-timestamp) never appear as a same-type
+        // DISTINCT arg's operator and stay refused.
+        (F_DATE_EQ, DATEOID) if distinct_datetime_enabled() => {
+            Some(distinctset::DistinctKeyKind::Int32)
+        }
+        (F_TIMESTAMP_EQ, TIMESTAMPOID) | (F_TIMESTAMPTZ_EQ, TIMESTAMPTZOID)
+            if distinct_datetime_enabled() =>
+        {
+            Some(distinctset::DistinctKeyKind::Int64)
+        }
         (F_TEXTEQ, TEXTOID | VARCHAROID)
             if collation != 0 && lsyscache::get_collation_isdeterministic(collation)? =>
         {
             Some(distinctset::DistinctKeyKind::Bytes)
         }
         _ => None,
+    })
+}
+
+/// GL-LOWDIST-3 datetime-distinct widening knob (t35 law: DEFAULT OFF for
+/// the letter; ON iff exactly `1`/`on`; the flip rides the measured
+/// verdict). Same spelling in the planner probe
+/// (m5_suppress::distinct_datetime_enabled) — the GROUPSINK coherence rule:
+/// admission (set kinds here + sink spec derivation) and routing (probe
+/// suppression) flip together. The pardistinct HYBRIDS never read this
+/// knob: their `pd_derive_spec` calls pass `admit_datetime: false` and
+/// refuse datetime sets cleanly (the hybrids are on the D1 deletion list —
+/// widening only sink+serial keeps the displacement direction).
+pub fn distinct_datetime_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("PGRUST_LANE_V2_DISTINCT_DATETIME").as_deref(),
+            Ok("1") | Ok("on")
+        )
     })
 }
 
@@ -5511,6 +5554,7 @@ pub fn pd_derive_spec(
     node: &AggStateData<'_>,
     desc: &TupleDescData<'_>,
     admit_text_keys: bool,
+    admit_datetime: bool,
 ) -> Option<std::sync::Arc<pardistinct::PdSpec>> {
     use pardistinct::{PdInt, PdKeyKind, PdSetSpec, PdSpec, PdVocab};
     const INT2OID: Oid = 21;
@@ -5518,11 +5562,34 @@ pub fn pd_derive_spec(
     const INT8OID: Oid = 20;
     const TEXTOID: Oid = 25;
     const VARCHAROID: Oid = 1043;
+    const DATEOID: Oid = 1082;
+    const TIMESTAMPOID: Oid = 1114;
+    const TIMESTAMPTZOID: Oid = 1184;
     let int_kind = |t: Oid| match t {
         INT2OID => Some(PdInt::I16),
         INT4OID => Some(PdInt::I32),
         INT8OID => Some(PdInt::I64),
         _ => None,
+    };
+    // GL-LOWDIST-3: the SET-ARG width vocabulary — int family always;
+    // datetime (i32 date / i64 timestamp+timestamptz word equality, the
+    // distinct_set_kind argument) only under the caller's contract. The
+    // runtime distinct SINK passes `distinct_datetime_enabled()`; the
+    // Gather-era pardistinct HYBRIDS pass false and refuse datetime sets
+    // cleanly (D1 deletion list — sink+serial only keeps the displacement
+    // direction). Vocab args and group keys stay int/text (unchanged).
+    let set_arg_kind = |t: Oid| -> Option<PdInt> {
+        if let Some(k) = int_kind(t) {
+            return Some(k);
+        }
+        if !admit_datetime {
+            return None;
+        }
+        match t {
+            DATEOID => Some(PdInt::I32),
+            TIMESTAMPOID | TIMESTAMPTZOID => Some(PdInt::I64),
+            _ => None,
+        }
     };
     // Group-key component kind. `admit_text_keys` is the caller's CONTRACT
     // that byte equality is the grouping operator's verdict for text
@@ -5591,12 +5658,16 @@ pub fn pd_derive_spec(
             return None;
         };
         // The set kind was established from this very argument at init; the
-        // width re-check keeps the extraction honest.
+        // width re-check keeps the extraction honest (set_arg_kind — the
+        // GL-LOWDIST-3 datetime widening rides here, caller-gated).
         match kind {
             distinctset::DistinctKeyKind::Int16
             | distinctset::DistinctKeyKind::Int32
             | distinctset::DistinctKeyKind::Int64 => {
-                int_kind(desc.attr(att as usize).atttypid)?;
+                if set_arg_kind(desc.attr(att as usize).atttypid).is_none() {
+                    pd_derive_trace("set argument outside the caller's width vocabulary");
+                    return None;
+                }
             }
             distinctset::DistinctKeyKind::Bytes => {}
         }
