@@ -1001,6 +1001,25 @@ fn multikey_text_max_groups() -> f64 {
     })
 }
 
+/// SE-T2AGG CAR B group-estimate ceiling (GL-STRMM-2 flip calibration): at
+/// or above this many estimated groups the string-min/max suppression
+/// REFUSES — the witnessed A-B-A ladder banked a 1.25x LOSS for the engaged
+/// sink at the ~1e5-group band (the serial hash lane wins there) against
+/// 1.5-2x wins at <= 1e3 groups and int keys; the ceiling sits at the
+/// conservative end of the letter's named band so the losing band routes to
+/// the planner's own choice. Env-overridable for floor-recalibration ladders
+/// (`PGRUST_LANE_V2_AGG_STRMINMAX_MAX_GROUPS`, > 0).
+fn strminmax_max_groups() -> f64 {
+    static CEIL: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *CEIL.get_or_init(|| {
+        std::env::var("PGRUST_LANE_V2_AGG_STRMINMAX_MAX_GROUPS")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| *v > 0.0)
+            .unwrap_or(30_000.0)
+    })
+}
+
 /// PROVISIONAL floor for the SE-MKTEXT knob path: the CbGroupedAggTextKey
 /// economics verbatim (min_dop 12, low-dop win region ≤3M — the same
 /// text-keyed grouped engagement, one more key word/tail). GL-MKTEXT-1
@@ -2085,6 +2104,12 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         // unproven with byref text states; count(DISTINCT) +
         // mk-text-family were excluded at admission).
         if full_sort || decorated || bare_limit || mk_freeze || n_const > 0 {
+            return Ok(false);
+        }
+        // GL-STRMM-2 flip calibration: refuse the group-estimate band where
+        // the engaged sink measurably LOSES to the serial hash lane (fn doc
+        // on the ceiling) — the planner keeps its own plan there.
+        if ngroups >= strminmax_max_groups() {
             return Ok(false);
         }
         let class = if topn {
@@ -4260,25 +4285,27 @@ fn distinct_plainshape_guard() -> FloorGuard {
     FloorGuard { min_dop: 12, low_dop_max_rows: 3_000_000.0, ..NO_GUARD }
 }
 
-/// CAR B knob (`PGRUST_LANE_V2_AGG_STRMINMAX`, default OFF — **KEEP-GATED
-/// per its letter; do NOT flip**). LETTER OF RECORD (GL-T2A KEEP GATED,
-/// 2026-07-21, tier2 campaign @ 7d8aa9a2b): the target qualed text-minmax
-/// top-n shape is a
-/// suppress-then-serial containment violation — `m5-suppress-strminmax ...
-/// gather suppressed` then `runtime-sort: refused (full-sort shape spec)`,
-/// zero runtime engagements, target hot 0.022 -> 0.234s (7.6x damped; 8.5x
-/// mt16), official 43q geomean dragged +3.3%/+5.9%. Parity clean.
-/// RE-LETTER PRECONDITIONS: narrow the probe (mirror the executor shape
-/// gates into classify) or thread qualed topn through the runtime sort
-/// arm; add a QUALED text-minmax-class e2e row (the CAR-B e2e shapes are unqualed
-/// — the coverage hole). SAME spelling
+/// CAR B knob (`PGRUST_LANE_V2_AGG_STRMINMAX`, DEFAULT ON since the
+/// GL-STRMM-2 flip — kill spellings exactly `0`/`off`, the t35/t36
+/// flipped-kill idiom). LETTER OF RECORD (GL-STRMM-2, 2026-07-21,
+/// night/strmm-qualed-topn): the GL-T2A suppress-then-serial had two
+/// halves, both closed — (1) the QUAL-FREE varlena-remap staging refusal
+/// (fixed: `seq_scan_cb_varlane_shed`); (2) the QUALED shapes\' serial
+/// winner is the SORTED agg strategy the runtime hash sink structurally
+/// never engages — CONTAINED at admission (`!has_quals`, kept). Flip
+/// evidence: witnessed A-B-A ladder wins 1.5-2x at low group counts /
+/// int keys where the planner otherwise runs serial; the ~1e5-group loss
+/// band is refused by `strminmax_max_groups`; scored-bank inertness pair
+/// flat under the containment. SAME spelling
 /// as the executor half (nodeagg sink.rs `sink_strminmax_enabled` — the
 /// resolve-combines / emit-plan vocabulary widening): both read sites flip
 /// together, the AGG_POLY knob-coherence law.
 fn agg_strminmax_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        tier2_car_spelling_on(std::env::var("PGRUST_LANE_V2_AGG_STRMINMAX").as_deref().ok())
+        tier2_car_kill_spelling_on(
+            std::env::var("PGRUST_LANE_V2_AGG_STRMINMAX").as_deref().ok(),
+        )
     })
 }
 
@@ -6034,7 +6061,7 @@ mod tests {
         // The live getters memoize the process env; in the test binary no
         // vars are set, so the postures resolve to the shipped defaults.
         assert!(distinct_plainshape_enabled(), "CAR A must be ON at default (GL-T2C flip)");
-        assert!(!agg_strminmax_enabled(), "CAR B must be OFF at default (KEEP-GATED)");
+        assert!(agg_strminmax_enabled(), "CAR B must be ON at default (GL-STRMM-2 flip)");
         assert!(agg_sort_nolimit_enabled(), "CAR C must be ON at default (GL-T2B flip)");
     }
 

@@ -1851,8 +1851,9 @@ pub enum SinkCombineKind {
     VarlenaMinMax { larger: bool },
 }
 
-/// SE-T2AGG CAR B kill/arm switch (`PGRUST_LANE_V2_AGG_STRMINMAX`, default
-/// OFF; ON iff exactly `1`/`on` — every other spelling fails safe to OFF).
+/// SE-T2AGG CAR B kill/arm switch (`PGRUST_LANE_V2_AGG_STRMINMAX`, DEFAULT
+/// ON since the GL-STRMM-2 flip; OFF iff exactly `0`/`off` — the t35/t36
+/// flipped-kill idiom, a typo\'d kill leaves the arm live).
 /// SAME spelling as the m5_suppress probe half (`agg_strminmax_enabled`):
 /// both read sites flip together (the AGG_POLY knob-coherence law — a keyed
 /// shape whose vocabulary is disarmed here would suppress a Gather and land
@@ -1860,9 +1861,9 @@ pub enum SinkCombineKind {
 pub fn sink_strminmax_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        matches!(
+        !matches!(
             std::env::var("PGRUST_LANE_V2_AGG_STRMINMAX").as_deref(),
-            Ok("1") | Ok("on")
+            Ok("0") | Ok("off")
         )
     })
 }
@@ -5569,8 +5570,11 @@ mod tests {
     /// SE-T2AGG CAR B knob: default OFF in a kill-free process (the probe /
     /// resolve-combines vocabulary stays int-only at default — inert pin).
     #[test]
-    fn sink_strminmax_knob_default_off() {
-        assert!(!sink_strminmax_enabled(), "test process has no knob set => OFF");
+    fn sink_strminmax_knob_default_on() {
+        assert!(
+            sink_strminmax_enabled(),
+            "test process has no knob set => ON (GL-STRMM-2 flipped-kill default)"
+        );
     }
 
     // avgpack: seed a packed [count, sum] image into a pergroup slot.
