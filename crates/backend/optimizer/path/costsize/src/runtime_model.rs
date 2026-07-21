@@ -531,6 +531,7 @@ mod tests {
         let tsv = include_str!("../../../../../../crates/backend/optimizer/path/costsize/src/runtime-cost-constants.tsv");
         let mut unwitnessed = Vec::new();
         let mut debt = Vec::new();
+        let mut refuted = Vec::new();
         for line in tsv.lines() {
             if line.starts_with('#') || line.trim().is_empty() || line.starts_with("class\t") {
                 continue;
@@ -542,12 +543,16 @@ mod tests {
                 matches!(
                     witness,
                     "witnessed-v2" | "witnessed-v2-superseded" | "witnessed-ab"
-                        | "unwitnessed-reuse" | "structural" | "unwitnessed-debt"
+                        | "unwitnessed-reuse" | "witnessed-refutes-reuse" | "structural"
+                        | "unwitnessed-debt"
                 ),
                 "unknown witness status {witness:?} in row: {line}"
             );
             if witness == "unwitnessed-debt" {
                 debt.push((class.to_string(), term.to_string()));
+            }
+            if witness == "witnessed-refutes-reuse" {
+                refuted.push((class.to_string(), term.to_string()));
             }
             if let Some(&rc) = RuntimeClass::ALL.iter().find(|c| c.name() == class) {
                 if matches!(term, "c_engage" | "w_row" | "l_setup" | "l_cap" | "n_min_fit") {
@@ -571,14 +576,24 @@ mod tests {
         }
         assert_eq!(
             unwitnessed,
-            vec![
-                ("CbHashJoinMultiBuild".to_string(), "curve_reuse".to_string()),
-                ("CbHashJoinGroupedAgg".to_string(), "curve_reuse".to_string()),
-                ("AggPolyHeapPlain".to_string(), "curve_reuse".to_string()),
-            ],
+            vec![("AggPolyHeapPlain".to_string(), "curve_reuse".to_string())],
             "the unwitnessed-reuse census changed; a new unwitnessed cell must \
              arrive with its ladder spec (notes/runtime-cost-ladder-specs.md), \
              and a witnessed one must flip this pin + the TSV row together"
+        );
+        // The witnessed-REFUTED reuses (L1/L2 grids @ d10db8ef5e): both
+        // hashjoin riders measured 3.0-6.4x rt/legacy against the host
+        // curve's 0.73-1.43 predictions. The reuse stays WIRED because
+        // unwiring changes routing (the riders are cost-decided through the
+        // host at default) — that flip is GL-COST-2's letter, and this pin
+        // flips with it, never by drift.
+        assert_eq!(
+            refuted,
+            vec![
+                ("CbHashJoinMultiBuild".to_string(), "curve_reuse".to_string()),
+                ("CbHashJoinGroupedAgg".to_string(), "curve_reuse".to_string()),
+            ],
+            "the witnessed-refutes-reuse census changed"
         );
         for (class, _) in &unwitnessed {
             assert!(
