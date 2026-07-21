@@ -1584,6 +1584,34 @@ pub fn classify<'mcx>(
     })
 }
 
+/// SE-GROUPONLY (night/subquery-admission): the VACUOUS fold plan for a
+/// ZERO-transition hashed aggregation — grouping-only builds (bare
+/// `GROUP BY` emit under a parent consumer, `SELECT DISTINCT`, the
+/// grouped-subquery inner the arena-strings profile caught at a 7.2x
+/// admission cliff). `classify` deliberately refuses empty spec sets
+/// (line "trans.is_empty() => None" — nothing to fold); this constructor
+/// is the one legal source of an empty plan, minted only by nodeagg's
+/// knob-gated init arm: no transitions, no lane columns, no guards — every
+/// fold call over it is a no-op by construction (`fold_rows_grouped*`
+/// iterate `trans`), and the staged feeds' entire value is the BATCHED
+/// GROUP PROBE (the compact tables / staged K2 legs) replacing the
+/// row-at-a-time TupleHashTable lookup world.
+pub fn empty_plan<'mcx>(mcx: Mcx<'mcx>) -> LanePlan<'mcx> {
+    LanePlan {
+        trans: PgVec::new_in(mcx),
+        cse: PgVec::new_in(mcx),
+        cse_members: PgVec::new_in(mcx),
+        cse_skip: PgVec::new_in(mcx),
+        guards: PgVec::new_in(mcx),
+        vguards: PgVec::new_in(mcx),
+        uguards: PgVec::new_in(mcx),
+        filters: PgVec::new_in(mcx),
+        cols: PgVec::new_in(mcx),
+        resid: PgVec::new_in(mcx),
+        guarded: false,
+    }
+}
+
 /// CSE schedule over classified transitions. SumBase: Sum/AvgAccum cluster by
 /// (col, divk) — addend/mulk live in the per-member derivation (Int128AvgAccum
 /// stays OUT: its carrier is i128, not the i64 SumBase pass; sum(int8) +

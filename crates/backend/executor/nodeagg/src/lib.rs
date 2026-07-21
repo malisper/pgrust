@@ -212,6 +212,32 @@ fn lane_v2_enabled() -> bool {
     ::guc_tables::backing::pgrust_lane_executor()
 }
 
+/// SE-GROUPONLY (night/subquery-admission): `PGRUST_LANE_V2_GROUPONLY`,
+/// **default OFF** (`1`/`on` arm it; every other spelling fails safe — the
+/// K1-latemat idiom). Admits ZERO-transition hashed aggregation
+/// (grouping-only builds: bare `GROUP BY` emit under a parent consumer,
+/// `SELECT DISTINCT`, the grouped-subquery inner) into the lane's staged
+/// feeds via the vacuous fold plan (`lanefold::empty_plan`) — the
+/// arena-strings profile's 7.2x admission cliff (`SELECT count(*) FROM
+/// (SELECT url FROM t GROUP BY url) s` classify-refused at 1982ms vs the
+/// aggregated twin's 274ms, SAME inner HashAggregate). OFF keeps today's
+/// refusal byte-for-byte ("no lanefold plan (classify refused)" — the
+/// legacy row-at-a-time TupleHashTable build). This is the serial-lane
+/// half of the named "plain SELECT DISTINCT hash-shape gap" (m5-coverage
+/// CbDistinctIntKeys row note); the parallel SINK stays a fail-closed
+/// refusal (`agg_sink_plan_shape_ok` — no partial states to export).
+fn lane_v2_grouponly_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        grouponly_spelling_on(std::env::var("PGRUST_LANE_V2_GROUPONLY").as_deref().ok())
+    })
+}
+
+/// The default-OFF spelling rule, factored pure for unit tests.
+fn grouponly_spelling_on(v: Option<&str>) -> bool {
+    matches!(v, Some("1") | Some("on"))
+}
+
 const MAX_ORDERED_TRANS_ARGS: usize = 8;
 
 // C AggStatePerTransData's non-presorted DISTINCT/ORDER BY slice
@@ -1462,6 +1488,26 @@ pub fn exec_init_agg<'mcx>(
     // (lanev2 `try_own_sorted_agg_over_seq_scan`): its per-group-run fold
     // targets the same fixed `pergroup_base` the plain fold does.
     let lanefold = if lane_v2_enabled()
+        && lane_v2_grouponly_enabled()
+        && gs.is_none()
+        && node.aggstrategy == AGG_HASHED
+        && numtrans == 0
+    {
+        // SE-GROUPONLY: a grouping-only hashed build (zero transitions) —
+        // ordered FIRST because a zero-transition evaltrans still exists as
+        // an (empty) program, which would send the shape into the classify
+        // arm below and out through its empty-spec refusal. The "fold" is
+        // vacuous (`lanefold::empty_plan` — no trans, no lane columns); the
+        // lane's value is the staged/batched GROUP PROBE (K2 / dict-group /
+        // compact single-text / Mk feeds) replacing the per-row
+        // TupleHashTable lookup, and the retrieve emits reconstructed keys
+        // with an empty finalize loop. Zero-trans discipline downstream:
+        // pergroup pointers are DANGLING sentinels (never dereferenced —
+        // the empty plan folds nothing, peragg is empty at finalize), the
+        // compact tables carry 0-byte state rows, and the compact→C
+        // backstop migrate skips its state copy.
+        Some(LaneFold { plan: ::lanefold::empty_plan(mcx), resid: None })
+    } else if lane_v2_enabled()
         && gs.is_none()
         && (node.aggstrategy == AGG_HASHED
             || node.aggstrategy == AGG_PLAIN
@@ -4627,9 +4673,18 @@ pub fn agg_hash_build_probe_resid<'mcx>(
     let mut pg = None;
     if lookup_hash_entry(node, estate, outer_id)? {
         let ph = node.perhash.as_ref().expect("hashed Agg has perhash");
-        // SAFETY: lookup_hash_entry installed the entry's live pergroup in
-        // the cell (numtrans > 0 whenever a fold plan exists).
-        pg = Some(unsafe { ph.pergroup_cell.as_ptr().read() });
+        // SE-GROUPONLY: zero-transition builds have no pergroup array —
+        // lookup_hash_entry never writes the cell (trans_init is empty on
+        // both its arms). Hand back a DANGLING sentinel: the caller only
+        // forwards it to the fold, and the empty plan folds nothing (the
+        // resid arm below is None too), so it is never dereferenced.
+        pg = Some(if node.trans_init.is_empty() {
+            NonNull::dangling()
+        } else {
+            // SAFETY: lookup_hash_entry installed the entry's live pergroup
+            // in the cell (numtrans > 0 on this arm).
+            unsafe { ph.pergroup_cell.as_ptr().read() }
+        });
         if let Some(resid) =
             node.lanefold.as_mut().and_then(|lf| lf.resid.as_mut())
         {
@@ -6194,11 +6249,14 @@ pub fn agg_hash_probe_staged<'mcx>(
             ix
         }
     };
+    // SE-GROUPONLY: zero-transition builds carry no additional space —
+    // the dangling sentinel is never dereferenced (the empty fold plan
+    // folds nothing; the dict-code per-epoch caches only store and forward
+    // these pointers to the same fold).
     Ok(Some(
         ph.hashtable
             .entry_additional(ix)
-            .expect("fold-fed hashagg carries pergroup space")
-            .cast::<AggPerGroup>(),
+            .map_or(NonNull::dangling(), |p| p.cast::<AggPerGroup>()),
     ))
 }
 

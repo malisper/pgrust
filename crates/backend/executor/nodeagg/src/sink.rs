@@ -3394,6 +3394,11 @@ pub fn agg_sink_plan_shape_ok(node: &AggStateData<'_>) -> bool {
         && node.plan.groupingSets.is_nil()
         && node.plan.numCols >= 1
         && node.gsets.is_none()
+        // SE-GROUPONLY fail-closed: zero-transition (grouping-only) builds
+        // have no pergroup space to export — the SERIAL lane owns them
+        // (lanefold::empty_plan); the parallel export/combine machinery
+        // (runtime_partial states, worker exports) assumes numtrans > 0.
+        && !node.trans_init.is_empty()
 }
 
 /// Arm SINK MODE on a worker build: the compact arms gate/size by `cap`
