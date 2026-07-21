@@ -12,6 +12,7 @@ use types_pathnodes::{
 };
 
 pub mod gucs;
+pub mod runtime_model;
 
 pub fn init_seams() {
     gucs::install();
