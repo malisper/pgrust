@@ -153,15 +153,23 @@ impl JoinBudget {
         prev.saturating_add(n) <= self.limit
     }
 
-    /// Optional charge (HJPROBE-V2 dense seat): on a crossing the charge is
-    /// BACKED OUT and the caller simply forgoes the optional structure —
-    /// never a refusal (the seat is an accelerator, not a table half).
+    /// Optional charge (HJPROBE-V2 dense seat; the single-pass directory):
+    /// on a crossing the charge is BACKED OUT and the caller simply forgoes
+    /// the optional structure — never a refusal (the structure is an
+    /// accelerator or has a documented fallback, not a table half).
     fn try_charge_optional(&self, n: usize) -> bool {
         if self.try_charge(n) {
             return true;
         }
-        self.used.fetch_sub(n, Ordering::Relaxed);
+        self.release(n);
         false
+    }
+
+    /// Return `n` previously charged bytes to the envelope (a backed-out
+    /// optional charge, or an array superseded by a grown replacement).
+    fn release(&self, n: usize) {
+        let prev = self.used.fetch_sub(n, Ordering::Relaxed);
+        debug_assert!(prev >= n, "budget release exceeds charges");
     }
 
     pub fn used(&self) -> usize {
@@ -724,11 +732,14 @@ impl SharedBuildDir {
     /// Size from the planner's inner-rows estimate (rounded to a power of two,
     /// clamped to the same [`MIN_NBUCKETS`]..[`MAX_NBUCKETS`] band the
     /// two-pass plan uses) and charge the array to the shared envelope. A
-    /// crossing returns `BudgetExceeded` — the caller falls back to two-pass
-    /// (never a refusal on account of single-pass alone).
+    /// crossing BACKS THE CHARGE OUT and returns `BudgetExceeded` — the
+    /// caller falls back to two-pass against the SAME (unpoisoned) budget,
+    /// so single-pass alone never causes a refusal. The back-out is what
+    /// makes that true: a multi-MB charge left in place would eat the whole
+    /// envelope and turn the fallback's first chunk charge into a refusal.
     pub fn with_estimate(est_rows: u64, budget: &JoinBudget) -> Result<Arc<SharedBuildDir>, BudgetExceeded> {
         let nbuckets = est_rows.next_power_of_two().clamp(MIN_NBUCKETS, MAX_NBUCKETS);
-        if !budget.try_charge(nbuckets as usize * 8) {
+        if !budget.try_charge_optional(nbuckets as usize * 8) {
             return Err(BudgetExceeded);
         }
         let buckets: Vec<AtomicU64> = (0..nbuckets).map(|_| AtomicU64::new(0)).collect();
@@ -837,6 +848,12 @@ fn grow_buckets(
     if !budget.try_charge(new_nbuckets as usize * 8) {
         return Err(BudgetExceeded);
     }
+    // The grown array REPLACES the estimate-sized one: release the old
+    // array's charge so the envelope holds ONE directory, not two. (The old
+    // storage itself dies when the last `SharedBuildDir` Arc drops with the
+    // Locals right after seal; the transient both-charged window above is
+    // exactly the both-alive rehash window.)
+    budget.release(old.len() * 8);
     let new_log2 = new_nbuckets.trailing_zeros();
     let newb: Vec<AtomicU64> = (0..new_nbuckets).map(|_| AtomicU64::new(0)).collect();
     let newb = newb.into_boxed_slice();
@@ -2270,33 +2287,95 @@ mod tests {
 
     #[test]
     fn single_pass_dir_budget_crossing_is_recoverable() {
-        // A directory that won't fit returns BudgetExceeded — the runtime
-        // falls back to two-pass (never a refusal on account of single-pass).
-        let budget = JoinBudget::new(4096); // < 1024 buckets * 8B
+        // A directory that won't fit returns BudgetExceeded with the failed
+        // charge BACKED OUT — the runtime falls back to two-pass against the
+        // SAME budget (never a refusal on account of single-pass alone), so
+        // the fallback build must GENUINELY PROCEED within what remains.
+        let ds = Dataset {
+            granules: 8,
+            rows_per_granule: 20,
+            key_space: 31,
+            seed: 0xB0D6E,
+            force_partition: None,
+        };
+        // Two-pass needs ~one 64KB chunk + 160 ref-words + the 1024-bucket
+        // plan array (~73KB); the 1M-row directory (8MB) never fits.
+        let budget = JoinBudget::new(CHUNK_MIN_WORDS * 8 + 64 * 1024);
         assert_eq!(SharedBuildDir::with_estimate(1_000_000, &budget).err(), Some(BudgetExceeded));
+        assert_eq!(
+            budget.used(),
+            0,
+            "the failed dir charge must be backed out, not poison the envelope"
+        );
+        // The documented fallback, on the SAME budget: the two-pass build
+        // must complete and match the serial oracle byte-for-byte.
+        let locals = build_from_schedule(&ds, &vec![vec![0..ds.granules]], &budget)
+            .expect("two-pass fallback must fit once the dir charge is released");
+        let t = plan_combine_freeze(locals, &budget, false);
+        assert_eq!(t.total_tuples(), ds.granules * ds.rows_per_granule);
+        let l2 = (t.nbuckets() as u64).trailing_zeros();
+        assert_eq!(frozen_chains(&t), reference_chains(&ds.all_rows(), l2));
+    }
+
+    #[test]
+    fn grow_buckets_releases_the_superseded_dir_charge() {
+        // Underestimate forces the seal-time grow; the estimate-sized
+        // array's charge must be RELEASED when the grown array is charged,
+        // so the envelope ends holding chunks + refs + ONE directory.
+        let ds = ds_default();
+        let budget = JoinBudget::unlimited();
+        let dir = SharedBuildDir::with_estimate(64, &budget).expect("unlimited");
+        let old_dir_bytes = dir.nbuckets() * 8;
+        let mut l = JoinBuildLocal::new(0, Arc::clone(&budget));
+        l.attach_shared_dir(Arc::clone(&dir));
+        l.begin_run(0);
+        for g in 0..ds.granules {
+            for (h, p) in ds.rows_of(g) {
+                l.push(h, &p).unwrap();
+            }
+        }
+        l.end_run();
+        let locals = vec![l];
+        let used_before_seal = budget.used();
+        let plan = finish_single_pass(&locals, dir, &budget).expect("unlimited");
+        assert!(plan.singledir.is_none(), "underestimate must grow into a plan-owned array");
+        let new_dir_bytes = plan.buckets.len() * 8;
+        assert!(new_dir_bytes > old_dir_bytes);
+        assert_eq!(
+            budget.used(),
+            used_before_seal - old_dir_bytes + new_dir_bytes,
+            "the superseded estimate-sized array must be un-charged at grow"
+        );
+        // The grown table still answers (belt and braces).
+        let t = freeze(Arc::new(plan), &locals);
+        drop(locals);
+        assert_eq!(frozen_multiset(&t), sorted_rows(&ds));
     }
 
     // ---- LOOM: concurrent CAS head-insert (the singlepass insert core) ----
     //
     // Models `cas_insert_head`'s Treiber push against loom atomics: N workers
-    // race to link their tuples at one bucket head. The property under EVERY
+    // race to link their tuples at one bucket head. The properties under EVERY
     // interleaving loom explores: NO lost updates (every inserted ref appears
-    // exactly once in the final chain) and NO cycle. This is the correctness
-    // contract the production `cas_insert_head` (std atomics) must uphold; the
-    // loop below mirrors it verbatim. loom drives its OWN atomics, so it runs
-    // under plain `cargo test -p nodehashjoin` (no --cfg loom needed).
+    // exactly once in the final chain), NO cycle, and the 16-bit TAG WORD is
+    // exactly the OR of every inserted tuple's tag — the `(old & 0xFFFF) | tag`
+    // maintenance rides the same CAS, and a regression that clobbers it would
+    // re-open the probe pre-filter's false-negative hole (a dropped tag bit
+    // hides a whole chain from `chain()`). This is the correctness contract
+    // the production `cas_insert_head` (std atomics) must uphold; the loop
+    // below mirrors it verbatim, tag included. loom drives its OWN atomics, so
+    // it runs under plain `cargo test -p nodehashjoin` (no --cfg loom needed).
     mod singlepass_loom {
         use loom::sync::atomic::{AtomicU64, Ordering};
         use loom::sync::Arc;
 
-        /// Mirror of super::cas_insert_head over loom atomics (no tag — tag
-        /// accumulation is a monotonic OR that cannot lose refs; the modeled
-        /// property is chain integrity of the head pointer).
-        fn cas_insert_head(bucket: &AtomicU64, next_word: &AtomicU64, packed_ref: u64) {
+        /// Mirror of super::cas_insert_head over loom atomics, INCLUDING the
+        /// tag-word maintenance (`(old & 0xFFFF) | tag` under the same CAS).
+        fn cas_insert_head(bucket: &AtomicU64, next_word: &AtomicU64, packed_ref: u64, tag: u64) {
             let mut old = bucket.load(Ordering::Relaxed);
             loop {
                 next_word.store(old >> 16, Ordering::Relaxed);
-                let newv = (packed_ref + 1) << 16;
+                let newv = ((packed_ref + 1) << 16) | ((old & 0xFFFF) | tag);
                 match bucket.compare_exchange_weak(old, newv, Ordering::Release, Ordering::Relaxed) {
                     Ok(_) => return,
                     Err(cur) => old = cur,
@@ -2304,10 +2383,25 @@ mod tests {
             }
         }
 
-        /// Walk the final chain and assert every ref in `0..n` appears once.
+        /// Each modeled ref carries its own distinct tag bit, so a clobbered
+        /// (dropped or stray) bit is unambiguously attributable.
+        fn tag_of(r: u64) -> u64 {
+            1 << r
+        }
+
+        /// Walk the final chain and assert every ref in `0..n` appears once,
+        /// and that the bucket's tag word is EXACTLY the OR of all inserted
+        /// tags — no dropped bits (a lost `old & 0xFFFF`), no stray bits.
         fn assert_all_present(bucket: &AtomicU64, nexts: &[AtomicU64], n: u64) {
+            let word = bucket.load(Ordering::Acquire);
+            let expect_tags = (0..n).fold(0u64, |acc, r| acc | tag_of(r));
+            assert_eq!(
+                word & 0xFFFF,
+                expect_tags,
+                "tag word diverges from the OR of inserted tags"
+            );
             let mut seen = vec![false; n as usize];
-            let mut cur = bucket.load(Ordering::Acquire) >> 16;
+            let mut cur = word >> 16;
             let mut steps = 0u64;
             while cur != 0 {
                 let r = cur - 1;
@@ -2326,6 +2420,8 @@ mod tests {
         fn two_workers_one_bucket_no_lost_updates() {
             // Worker A inserts refs {0,1}; worker B inserts ref {2}. One
             // bucket ⇒ full head contention. 3 tuples keeps loom tractable.
+            // Every ref carries a distinct tag bit; the final word must OR
+            // all three (tag-clobber coverage).
             loom::model(|| {
                 const N: u64 = 3;
                 let bucket = Arc::new(AtomicU64::new(0));
@@ -2335,14 +2431,14 @@ mod tests {
                 let a = {
                     let (bucket, nexts) = (bucket.clone(), nexts.clone());
                     loom::thread::spawn(move || {
-                        cas_insert_head(&bucket, &nexts[0], 0);
-                        cas_insert_head(&bucket, &nexts[1], 1);
+                        cas_insert_head(&bucket, &nexts[0], 0, tag_of(0));
+                        cas_insert_head(&bucket, &nexts[1], 1, tag_of(1));
                     })
                 };
                 let b = {
                     let (bucket, nexts) = (bucket.clone(), nexts.clone());
                     loom::thread::spawn(move || {
-                        cas_insert_head(&bucket, &nexts[2], 2);
+                        cas_insert_head(&bucket, &nexts[2], 2, tag_of(2));
                     })
                 };
                 a.join().unwrap();
