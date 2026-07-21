@@ -833,12 +833,19 @@ fn jheap_guard() -> FloorGuard {
 /// ties sit outside the byte-equality envelope — exactly why the scan
 /// sinks exclude it — so TPC-H's char(n) keys (q04/q05/q07/q08/q12/q21)
 /// stay refused until a bpchar tie-law car rules on canonicalization.
-/// DEFAULT OFF; `PGRUST_LANE_V2_CBKEYS=1|on` arms (GL-CBKEYS-1 fleet
-/// letter owns the default flip).
+///
+/// DEFAULT ON (tpch-flips train; GL-CBKEYS-1 FLIP-RECOMMENDED,
+/// fleet-ab-parallelism.md 2026-07-21): varchar/text canonical-bytes join
+/// keys engage 2.55-3.07x vs legacy on the q05v composed shape,
+/// identically in the 4- and 5-car arms (word shapes never re-route; the
+/// bytes lane is stable); bpchar refuses BY NAME without the sub-knob (52
+/// pinned traces); COLLATE/stats laws held; parity 15/15; ducktpch
+/// byte-stable; CB flat. `PGRUST_LANE_V2_CBKEYS=0|off` is the kill switch
+/// (t35 exact-spelling law).
 fn cbkeys_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        knob_spelling_armed(std::env::var("PGRUST_LANE_V2_CBKEYS").as_deref().ok())
+        knob_spelling_on(std::env::var("PGRUST_LANE_V2_CBKEYS").as_deref().ok())
     })
 }
 
@@ -4903,7 +4910,8 @@ mod tests {
     /// subsumed — its low-dop win region covers the whole admitted range).
     #[test]
     fn cbkeys_knob_default_off_and_floor() {
-        assert!(!cbkeys_enabled(), "test process has no knob set => OFF");
+        // tpch-flips: CBKEYS is DEFAULT ON (GL-CBKEYS-1; =0|off kills).
+        assert!(cbkeys_enabled(), "tpch-flips: unset => ON (GL-CBKEYS-1)");
         let g = cbkeys_guard();
         assert_eq!(g.max_rows, 2_000_000.0);
         assert_eq!(g.min_rows, 0.0);
