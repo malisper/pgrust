@@ -4833,7 +4833,8 @@ fn engage_ceremony<'mcx>(
                 return Ok(outcome);
             }
 
-            let launched = parallel::LaunchParallelWorkers(pcxt)?;
+            let launched =
+                super::standing_channel::launch_fallback_workers(&STANDING_ARM, pcxt)?;
             if launched <= 0 {
                 lane_trace("runtime-hashjoin: zero workers launched");
                 drain_rg(rt, &rg);
@@ -5000,7 +5001,7 @@ fn engage_ceremony<'mcx>(
             return Ok(outcome);
         }
 
-        let launched = parallel::LaunchParallelWorkers(pcxt)?;
+        let launched = super::standing_channel::launch_fallback_workers(&STANDING_ARM, pcxt)?;
         if launched <= 0 {
             lane_trace("runtime-hashjoin: zero workers launched");
             drain_rg(rt, &rg);

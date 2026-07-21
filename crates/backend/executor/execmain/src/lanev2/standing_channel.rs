@@ -111,6 +111,50 @@ fn standing_sinks_enabled() -> bool {
     })
 }
 
+/// M2 inc-3 rung 4 posture (m2-inc3-scope.md §5 rung 4):
+/// `PGRUST_RUNTIME_NOLAUNCH=1` retires the launched-bgworker FALLBACK on
+/// the pool-channel arms — when the board channels decline
+/// (`StandingWait::Fallback`), the arm goes straight to its serial arm
+/// instead of `LaunchParallelWorkers`. This is the post-deletion
+/// engagement ladder (pool → gang → serial) run as a REVERSIBLE posture:
+/// the floors read the serialization rate the physical deletion would
+/// buy into (`engage-<arm>-nolaunch-serial`), and the deletion itself
+/// stays HELD until the pool is the default elastic absorber (the
+/// GL-POOLDB-1 flip — its NO-FLIP-YET verdict is exactly the launched
+/// path's remaining job). DEFAULT OFF: unset/0 keeps today's ladder
+/// byte-exactly. Launched-ONLY vehicles (funnel passthrough, nlindex)
+/// are NOT governed — they have no board channel to fall back from and
+/// migrate in their own increments.
+fn nolaunch_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&ON, || {
+        std::env::var("PGRUST_RUNTIME_NOLAUNCH").is_ok_and(|v| v.trim() == "1")
+    })
+}
+
+/// The pool-channel arms' launched-fallback gate: exactly
+/// `parallel::LaunchParallelWorkers` until the rung-4 posture arms, then
+/// a constant zero-launch — the arms' existing `launched <= 0` branch
+/// (drain the pinned RG, `EngageOutcome::Fallback`) is the serial
+/// fallback, byte-shared with the zero-workers-available case it has
+/// always handled. Board state on entry is identical either way: every
+/// `StandingWait::Fallback` exit closed its entry (`close_and_await`),
+/// so no straggler serve outlives this decision.
+pub(super) fn launch_fallback_workers(
+    arm: &StandingArm,
+    pcxt: parallel::ParallelContextId,
+) -> PgResult<i32> {
+    if nolaunch_enabled() {
+        lane_trace(&format!(
+            "{}: launched fallback retired (nolaunch) — serial fallback",
+            arm.label
+        ));
+        super::stats::tick_engaged(arm.label, super::stats::EngageChannel::NolaunchSerial);
+        return Ok(0);
+    }
+    parallel::LaunchParallelWorkers(pcxt)
+}
+
 /// The standing channel's submit-and-park (the scan arm's standing_wait,
 /// verbatim, parameterized per arm): publish the engagement, then poll
 /// completion + interrupts + participation counters. Every exit path

@@ -3185,6 +3185,67 @@ fn pool_blocking_inside_bound_serve() {
     });
 }
 
+/// M2 inc-3 rung 4 (nolaunch posture) — the serial-fallback seam the
+/// launched-path retirement makes the COMMON exit: every pool pick refuses
+/// the bound board (the arms' all-refused `StandingWait::Fallback`), and
+/// the leader — with no launched-bgworker fallback to absorb the RG — runs
+/// the arms' cleanup verbatim: `abort()` then the pinned drain (CallerWorker
+/// as the loom-usable face of `try_drain_pinned`, the rung-1 dialect),
+/// CONCURRENT with the still-running pool thread. Today this shape is
+/// reachable only through the rare zero-workers-launched branch; under
+/// PGRUST_RUNTIME_NOLAUNCH it is the posture's every fallback, so it gets
+/// its own pin. Oracles: the drain terminates with a settled outcome
+/// (Aborted, or Completed when the drain's claim outruns the abort — the
+/// B3 disjunction; an Aborted settle may still carry one finalize when
+/// every granule completed before the abort was observed — abort owns the
+/// OUTCOME, and the sealed-generation "SEAL never runs on an aborted
+/// generation" pin lives in pool_sealed_cancel_vs_sink_finalize), the
+/// refused board is never served, the parked pool thread's loop exits
+/// (the abort's wake is not lost), and permit capacity restores. NO
+/// PGPROC lease/return is modeled or touched: the nolaunch path launches
+/// nobody and leases nothing (it strictly removes launched-worker
+/// lock-group joins), so the night/lockgroup-loom-red window is not
+/// widened by construction.
+///
+/// RED: drop the abort's wake propagation (naked outcome store) ⇒ the
+/// parked pool thread never re-checks its waiter — loom deadlock; admit a
+/// serve through the refused board ⇒ the serves oracle fires.
+#[test]
+fn nolaunch_allrefused_abort_drain_terminates() {
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(2);
+    b.max_branches = 500_000;
+    b.check(|| {
+        let rt = small_runtime(1, 0);
+        let (work, payload, h, waiter) = bound_model_submit(&rt, 1, true);
+
+        // The leader's nolaunch fallback: abort, then drain the pinned RG.
+        let rt1 = Arc::clone(&rt);
+        let h1 = h.clone();
+        let leader = thread::spawn(move || {
+            h1.abort();
+            let mut cw = runtime::CallerWorker::enter(&rt1).expect("caller lane for the drain");
+            cw.drive_with_duty(&rt1, &h1, &mut || Ok(())).expect("drain duty never fails")
+        });
+        drive_bound_pool(&rt, 0, &[waiter.clone()]);
+        let drained = leader.join().unwrap();
+
+        let outcome = waiter.try_wait().expect("drain settled the RG");
+        assert_eq!(outcome, drained, "leader drain observed the settled outcome");
+        if outcome == RgOutcome::Completed {
+            work.assert_complete();
+            assert_eq!(rt.stats().finalize_events, 1);
+        } else {
+            assert_eq!(outcome, RgOutcome::Aborted);
+            // Abort owns the outcome; one finalize is legal when the
+            // drained granule completed first (doc above).
+            assert!(rt.stats().finalize_events <= 1, "at most one finalize");
+        }
+        assert_eq!(payload.serves.load(Ordering::SeqCst), 0, "refused board never served");
+        assert_eq!(rt.execution_permits().available(), 1, "permit balance");
+    });
+}
+
 /// Rung-1 finding (the hashjoin pooldb died-needle misfire): the leader
 /// poll loop's death/deadline needles compare `detached` against `claimed`
 /// under pre-bind refusal churn (pool helpers claiming + detaching on the
