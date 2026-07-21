@@ -150,12 +150,69 @@ pub struct LVRelState<'a, 'mcx> {
     next_unskippable_vmbuffer: VmBuffer,
 }
 
+/// GL-M41-2 per-phase wall clocks (trace-gated, PGRUST_VACUUM_TRACE=1):
+/// leader-thread TLS accumulators, reset per heap_vacuum_rel, emitted as ONE
+/// `vacuum-phases:` summary line at the end. Every phase also snapshots the
+/// leader's TLS WalUsage so the summary carries leader-side WAL per phase.
+/// Observability only — never consulted behaviorally (DST: wall Instants,
+/// the ScanPhaseClock precedent).
+pub(crate) mod phase_trace {
+    use std::cell::RefCell;
+
+    pub const SCAN: usize = 0;
+    pub const IDXBULK: usize = 1;
+    pub const REAP: usize = 2;
+    pub const IDXCLEAN: usize = 3;
+    pub const FSM: usize = 4;
+    pub const PVEND: usize = 5;
+    pub const TRUNC: usize = 6;
+    pub const N: usize = 7;
+
+    #[derive(Clone, Copy, Default)]
+    pub struct Acc {
+        pub ns: u64,
+        pub calls: u32,
+        pub wal_records: i64,
+        pub wal_bytes: u64,
+    }
+
+    thread_local! {
+        static ACC: RefCell<[Acc; N]> = const { RefCell::new([Acc { ns: 0, calls: 0, wal_records: 0, wal_bytes: 0 }; N]) };
+    }
+
+    pub fn reset() {
+        ACC.with(|a| *a.borrow_mut() = [Acc::default(); N]);
+    }
+
+    pub fn time<T>(ph: usize, f: impl FnOnce() -> T) -> T {
+        let t0 = std::time::Instant::now();
+        let w0 = ::instrument::pg_wal_usage();
+        let r = f();
+        let w1 = ::instrument::pg_wal_usage();
+        let ns = t0.elapsed().as_nanos() as u64;
+        ACC.with(|a| {
+            let mut a = a.borrow_mut();
+            a[ph].ns += ns;
+            a[ph].calls += 1;
+            a[ph].wal_records += w1.wal_records - w0.wal_records;
+            a[ph].wal_bytes += w1.wal_bytes.wrapping_sub(w0.wal_bytes);
+        });
+        r
+    }
+
+    pub fn get(ph: usize) -> Acc {
+        ACC.with(|a| a.borrow()[ph])
+    }
+}
+
 pub fn heap_vacuum_rel<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &RelationData<'mcx>,
     params: &VacuumParams,
     bstrategy: BufferAccessStrategy,
 ) -> PgResult<()> {
+    let trace_t0 = std::time::Instant::now();
+    phase_trace::reset();
     let verbose = params.options & VACOPT_VERBOSE != 0;
     let instrument_vac = verbose
         || (miscinit::GetMyBackendType() == ::types_core::BackendType::AutovacWorker
@@ -277,12 +334,15 @@ pub fn heap_vacuum_rel<'mcx>(
     lazy_check_wraparound_failsafe(&mut vacrel)?;
     dead_items_alloc(&mut vacrel, params.nworkers)?;
 
-    lazy_scan_heap(&mut vacrel, mcx, params.nworkers)?;
+    let trace_setup_ns = trace_t0.elapsed().as_nanos() as u64;
+    phase_trace::time(phase_trace::SCAN, || lazy_scan_heap(&mut vacrel, mcx, params.nworkers))?;
 
     // dead_items_cleanup: ends parallel mode (copying worker stats out first),
     // then drops the tidstore.
     if let Some(pvs) = vacrel.pvs.take() {
-        vacuumparallel::parallel_vacuum_end(pvs, &mut vacrel.indstats)?;
+        phase_trace::time(phase_trace::PVEND, || {
+            vacuumparallel::parallel_vacuum_end(pvs, &mut vacrel.indstats)
+        })?;
     }
     debug_assert!(!xact::IsInParallelMode());
     vacrel.dead_items = None;
@@ -295,7 +355,7 @@ pub fn heap_vacuum_rel<'mcx>(
     vac_close_indexes(indrels, NoLock)?;
 
     if should_attempt_truncation(&vacrel) {
-        lazy_truncate_heap(&mut vacrel)?;
+        phase_trace::time(phase_trace::TRUNC, || lazy_truncate_heap(&mut vacrel))?;
     }
 
     pgstat_progress_update_param(PROGRESS_VACUUM_PHASE, PROGRESS_VACUUM_PHASE_FINAL_CLEANUP);
@@ -357,6 +417,60 @@ pub fn heap_vacuum_rel<'mcx>(
         starttime,
     );
     pgstat_progress_end_command();
+
+    if morsels::vtrace_enabled() {
+        // GL-M41-2 attribution line. scan includes the nested idxbulk/reap/
+        // idxclean/fsm windows (they run inside lazy_scan_heap); scan_only
+        // subtracts them. tail = everything after truncate (relstats,
+        // visibilitymap_count, pgstat report). WAL figures are the LEADER's
+        // TLS WalUsage only (pool/launched helpers accumulate their own).
+        let total_ns = trace_t0.elapsed().as_nanos() as u64;
+        let scan = phase_trace::get(phase_trace::SCAN);
+        let idxbulk = phase_trace::get(phase_trace::IDXBULK);
+        let reap = phase_trace::get(phase_trace::REAP);
+        let idxclean = phase_trace::get(phase_trace::IDXCLEAN);
+        let fsm = phase_trace::get(phase_trace::FSM);
+        let pvend = phase_trace::get(phase_trace::PVEND);
+        let trunc = phase_trace::get(phase_trace::TRUNC);
+        let mut walusage = ::types_core::instrument::WalUsage::default();
+        ::instrument::wal_usage_accum_diff(
+            &mut walusage,
+            &::instrument::pg_wal_usage(),
+            &startwalusage,
+        );
+        let nested_ns = idxbulk.ns + reap.ns + idxclean.ns + fsm.ns;
+        let tail_ns = total_ns
+            .saturating_sub(trace_setup_ns + scan.ns + pvend.ns + trunc.ns);
+        morsels::vtrace(&format!(
+            "vacuum-phases: rel={} total_ms={} setup_ms={} scan_ms={} scan_only_ms={} \
+             idxbulk_ms={} idxbulk_n={} reap_ms={} reap_n={} idxclean_ms={} fsm_ms={} \
+             pvend_ms={} trunc_ms={} tail_ms={} \
+             leader_wal_recs={} leader_wal_bytes={} leader_wal_fpi={} leader_wal_buf_full={} \
+             idxbulk_lwal_recs={} idxbulk_lwal_bytes={} reap_lwal_recs={} reap_lwal_bytes={}",
+            vacrel.rel.name(),
+            total_ns / 1_000_000,
+            trace_setup_ns / 1_000_000,
+            scan.ns / 1_000_000,
+            scan.ns.saturating_sub(nested_ns) / 1_000_000,
+            idxbulk.ns / 1_000_000,
+            idxbulk.calls,
+            reap.ns / 1_000_000,
+            reap.calls,
+            idxclean.ns / 1_000_000,
+            fsm.ns / 1_000_000,
+            pvend.ns / 1_000_000,
+            trunc.ns / 1_000_000,
+            tail_ns / 1_000_000,
+            walusage.wal_records,
+            walusage.wal_bytes,
+            walusage.wal_fpi,
+            walusage.wal_buffers_full,
+            idxbulk.wal_records,
+            idxbulk.wal_bytes,
+            reap.wal_records,
+            reap.wal_bytes,
+        ));
+    }
 
     if instrument_vac {
         let endtime = timestamp_seams::get_current_timestamp::call();
@@ -767,7 +881,9 @@ fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>, nrequested: i32
             vmbuffer.release();
             vacrel.consider_bypass_optimization = false;
             lazy_vacuum(vacrel)?;
-            freespace::FreeSpaceMapVacuumRange(vacrel.rel, next_fsm_block_to_vacuum, blkno + 1)?;
+            phase_trace::time(phase_trace::FSM, || {
+                freespace::FreeSpaceMapVacuumRange(vacrel.rel, next_fsm_block_to_vacuum, blkno + 1)
+            })?;
             next_fsm_block_to_vacuum = blkno;
 
             pgstat_progress_update_param(PROGRESS_VACUUM_PHASE, PROGRESS_VACUUM_PHASE_SCAN_HEAP);
@@ -896,13 +1012,15 @@ fn lazy_scan_heap(vacrel: &mut LVRelState<'_, '_>, mcx: Mcx<'_>, nrequested: i32
     }
 
     if rel_pages > next_fsm_block_to_vacuum {
-        freespace::FreeSpaceMapVacuumRange(vacrel.rel, next_fsm_block_to_vacuum, rel_pages)?;
+        phase_trace::time(phase_trace::FSM, || {
+            freespace::FreeSpaceMapVacuumRange(vacrel.rel, next_fsm_block_to_vacuum, rel_pages)
+        })?;
     }
 
     pgstat_progress_update_param(PROGRESS_VACUUM_HEAP_BLKS_VACUUMED, rel_pages as i64);
 
     if vacrel.nindexes > 0 && vacrel.do_index_cleanup {
-        lazy_cleanup_all_indexes(vacrel)?;
+        phase_trace::time(phase_trace::IDXCLEAN, || lazy_cleanup_all_indexes(vacrel))?;
     }
     Ok(())
 }
@@ -1350,8 +1468,8 @@ fn lazy_vacuum(vacrel: &mut LVRelState<'_, '_>) -> PgResult<()> {
 
     if bypass {
         vacrel.do_index_vacuuming = false;
-    } else if lazy_vacuum_all_indexes(vacrel)? {
-        lazy_vacuum_heap_rel(vacrel)?;
+    } else if phase_trace::time(phase_trace::IDXBULK, || lazy_vacuum_all_indexes(vacrel))? {
+        phase_trace::time(phase_trace::REAP, || lazy_vacuum_heap_rel(vacrel))?;
     } else {
         debug_assert!(VacuumFailsafeActive());
     }
