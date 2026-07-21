@@ -4061,6 +4061,32 @@ fn grouped_key_type_exportable(att: &::types_tuple::FormData_pg_attribute) -> bo
         && matches!(att.atttypid, 16 | 18 | 20 | 21 | 23 | 26 | 1082)
 }
 
+/// TPCH-CBKEYS (night/tpch-cbkeys): a grouping column's key EXPORT kind.
+/// `Word` = the byval vocabulary above (the bootstrap row, byte-untouched).
+/// `Bytes` = canonical-bytes text/varchar under a DETERMINISTIC collation
+/// (default 100 / C 950) — byte equality of the detoasted content IS the
+/// grouping operator's verdict (texteq; the scan-side C3/distinct
+/// machinery's `group_eq_representational` law). BPCHAR (1042) is the
+/// NAMED REFUSAL of record — its space-stripping `bpchareq` and
+/// trailing-blank representative ties sit outside the byte-equality
+/// envelope, exactly why the scan sinks exclude it (hashgrouped/merge
+/// module docs) — so every TPC-H char(n) key stays refused until a bpchar
+/// tie-law car rules on canonicalization.
+enum GroupedKeyKind {
+    Word,
+    Bytes,
+}
+
+fn grouped_key_kind(att: &::types_tuple::FormData_pg_attribute) -> Option<GroupedKeyKind> {
+    if grouped_key_type_exportable(att) {
+        return Some(GroupedKeyKind::Word);
+    }
+    (att.attlen == -1
+        && matches!(att.atttypid, 25 | 1043)
+        && matches!(att.attcollation, 100 | 950))
+        .then_some(GroupedKeyKind::Bytes)
+}
+
 /// Fail-closed admission for the grouped runtime sink: a serial simple-split
 /// hashed Agg (single set, param-free — the breaker gate), untouched by any
 /// lane arm (no compact/sink/merge state), whose fold plan covers EVERY
@@ -4084,11 +4110,67 @@ pub fn agg_grouped_poly_runtime_admissible(node: &AggStateData<'_>) -> bool {
         && runtime_partial::agg_poly_partial_admissible(node)
 }
 
+/// TPCH-CBKEYS: the BYTES-key admission pair — the identical structural
+/// core with the canonical-bytes key census (every key column Word- or
+/// Bytes-exportable, at least one Bytes) in place of the word-only census.
+/// The caller (the runtime hash-join grouped sink) gates these behind the
+/// PGRUST_LANE_V2_CBKEYS knob and tries the word-key admissions FIRST —
+/// word-keyed shapes never reach them.
+pub fn agg_grouped_bytes_runtime_admissible(node: &AggStateData<'_>) -> bool {
+    agg_grouped_runtime_shell_core(node)
+        && grouped_keys_bytes_admissible(node)
+        && runtime_partial::agg_runtime_partial_admissible(node)
+}
+
+pub fn agg_grouped_bytes_poly_runtime_admissible(node: &AggStateData<'_>) -> bool {
+    agg_grouped_runtime_shell_core(node)
+        && grouped_keys_bytes_admissible(node)
+        && runtime_partial::agg_poly_partial_admissible(node)
+}
+
 /// The grouped admission's structural shell (shared by the plan-based and
-/// poly rows): a serial simple-split hashed Agg (single set, param-free —
-/// the breaker gate), untouched by any lane arm (no compact/sink/merge
-/// state), byval int-family word-equality grouping keys.
+/// poly rows): the core below + byval int-family word-equality grouping
+/// keys (the bootstrap vocabulary, byte-untouched).
 fn agg_grouped_runtime_shell_admissible(node: &AggStateData<'_>) -> bool {
+    if !agg_grouped_runtime_shell_core(node) {
+        return false;
+    }
+    let ph = node.perhash.as_ref().expect("core verified perhash");
+    let base = ph.hashslot.base();
+    let Some(desc) = base.tts_tupleDescriptor.as_ref() else { return false };
+    let nkeys = ph.hash_grp_col_idx_input.len();
+    if desc.attrs.len() < nkeys || nkeys == 0 {
+        return false;
+    }
+    desc.attrs[..nkeys].iter().all(grouped_key_type_exportable)
+}
+
+/// TPCH-CBKEYS: the mixed word/bytes key census (>=1 canonical-bytes text
+/// column; bpchar and non-deterministic collations refuse via
+/// `grouped_key_kind`).
+fn grouped_keys_bytes_admissible(node: &AggStateData<'_>) -> bool {
+    let Some(ph) = node.perhash.as_ref() else { return false };
+    let base = ph.hashslot.base();
+    let Some(desc) = base.tts_tupleDescriptor.as_ref() else { return false };
+    let nkeys = ph.hash_grp_col_idx_input.len();
+    if desc.attrs.len() < nkeys || nkeys == 0 {
+        return false;
+    }
+    let mut n_bytes = 0usize;
+    for att in &desc.attrs[..nkeys] {
+        match grouped_key_kind(att) {
+            Some(GroupedKeyKind::Bytes) => n_bytes += 1,
+            Some(GroupedKeyKind::Word) => {}
+            None => return false,
+        }
+    }
+    n_bytes > 0
+}
+
+/// The structural core (no key-vocabulary check): a serial simple-split
+/// hashed Agg (single set, param-free — the breaker gate), untouched by
+/// any lane arm (no compact/sink/merge state).
+fn agg_grouped_runtime_shell_core(node: &AggStateData<'_>) -> bool {
     if node.plan.aggstrategy != AGG_HASHED
         || node.plan.aggsplit != AGGSPLIT_SIMPLE
         || !agg_hash_breaker_admissible(node)
@@ -4099,16 +4181,7 @@ fn agg_grouped_runtime_shell_admissible(node: &AggStateData<'_>) -> bool {
         return false;
     }
     let Some(ph) = node.perhash.as_ref() else { return false };
-    if ph.compact.is_some() || ph.sink_cap.is_some() || node.sink_emit.is_some() {
-        return false;
-    }
-    let base = ph.hashslot.base();
-    let Some(desc) = base.tts_tupleDescriptor.as_ref() else { return false };
-    let nkeys = ph.hash_grp_col_idx_input.len();
-    if desc.attrs.len() < nkeys || nkeys == 0 {
-        return false;
-    }
-    desc.attrs[..nkeys].iter().all(grouped_key_type_exportable)
+    !(ph.compact.is_some() || ph.sink_cap.is_some() || node.sink_emit.is_some())
 }
 
 /// Width-normalized key word of one stored key datum (canonical value form:
@@ -4133,6 +4206,57 @@ fn grouped_key_datum(att: &::types_tuple::FormData_pg_attribute, w: i64) -> Datu
         4 => Datum::from_i32(w as i32),
         _ => Datum::from_i64(w),
     }
+}
+
+/// TPCH-CBKEYS: a text/varchar key datum's canonical CONTENT bytes —
+/// short/inline images read in place; compressed/external images detoast
+/// (the hash table materializes input datums verbatim; a heap scan can hand
+/// back toasted attributes). Byte equality of this content is the grouping
+/// verdict under the admitted deterministic collations.
+fn grouped_text_key_bytes(mcx: ::mcx::Mcx<'_>, d: Datum) -> PgResult<Box<[u8]>> {
+    use ::types_tuple::varatt;
+    let p = d.as_usize() as *const u8;
+    if p.is_null() {
+        return Err(Box::new(PgError::error(
+            "grouped bytes key: null pointer datum".to_string(),
+        )));
+    }
+    // SAFETY: a non-null text datum points at a live varlena image readable
+    // through its header (the retrieve slot's materialized entry tuple).
+    unsafe {
+        if varatt::varatt_is_1b(p) && !varatt::varatt_is_1b_e(p) {
+            let n = varatt::varsize_1b(p) - varatt::VARHDRSZ_SHORT;
+            return Ok(core::slice::from_raw_parts(p.add(varatt::VARHDRSZ_SHORT), n).into());
+        }
+        if varatt::varatt_is_4b_u(p) {
+            let n = varatt::varsize_4b(p) - varatt::VARHDRSZ;
+            return Ok(core::slice::from_raw_parts(p.add(varatt::VARHDRSZ), n).into());
+        }
+        // Compressed or external: flatten, then take the 4B payload.
+        let image = core::slice::from_raw_parts(p, varatt::varsize_any(p));
+        let flat = ::detoast::detoast_attr(mcx, image)?;
+        let n = varatt::varsize_4b(flat.as_ptr()) - varatt::VARHDRSZ;
+        Ok(core::slice::from_raw_parts(flat.as_ptr().add(varatt::VARHDRSZ), n).into())
+    }
+}
+
+/// The inverse: rebuild a canonical 4B-header varlena datum from content
+/// bytes (the absorb side; the hash table copies the tuple into its own
+/// context on insert, so `mcx` = the query context is life-time-sufficient).
+fn grouped_text_key_datum(mcx: ::mcx::Mcx<'_>, content: &[u8]) -> PgResult<Datum> {
+    use ::types_tuple::varatt;
+    let total = content.len() + varatt::VARHDRSZ;
+    let layout = core::alloc::Layout::from_size_align(total, 8)
+        .map_err(|_| PgError::error("grouped bytes key: oversized image".to_string()))?;
+    let raw = ::mcx::Allocator::allocate(&mcx, layout).map_err(|_| mcx.oom(total))?;
+    let ptr = raw.cast::<u8>().as_ptr();
+    let word = varatt::set_varsize_4b_word(total as u32);
+    // SAFETY: fresh allocation of `total` bytes.
+    unsafe {
+        core::ptr::copy_nonoverlapping(word.to_ne_bytes().as_ptr(), ptr, varatt::VARHDRSZ);
+        core::ptr::copy_nonoverlapping(content.as_ptr(), ptr.add(varatt::VARHDRSZ), content.len());
+    }
+    Ok(Datum::from_usize(ptr as usize))
 }
 
 /// WORKER side (per morsel, cumulative-overwrite discipline — the M1 partial
@@ -4181,7 +4305,27 @@ pub fn agg_hash_export_grouped_into<'mcx>(
             let mut key: runtime_partial::GroupKeyWords = Vec::with_capacity(nkeys);
             for i in 0..nkeys {
                 let isnull = base.tts_isnull[i];
-                key.push((grouped_key_word(&desc.attrs[i], base.tts_values[i], isnull), isnull));
+                let part = if isnull {
+                    runtime_partial::GroupKeyPart::Word(0)
+                } else {
+                    match grouped_key_kind(&desc.attrs[i]) {
+                        Some(GroupedKeyKind::Word) => runtime_partial::GroupKeyPart::Word(
+                            grouped_key_word(&desc.attrs[i], base.tts_values[i], isnull),
+                        ),
+                        // TPCH-CBKEYS: canonical content bytes (admission
+                        // guaranteed the kind; reaching None is a walk bug).
+                        Some(GroupedKeyKind::Bytes) => runtime_partial::GroupKeyPart::Bytes(
+                            grouped_text_key_bytes(mcx, base.tts_values[i])?,
+                        ),
+                        None => {
+                            return Err(Box::new(PgError::error(
+                                "grouped export: key column outside the admitted vocabulary"
+                                    .to_string(),
+                            )))
+                        }
+                    }
+                };
+                key.push((part, isnull));
             }
             let pg = ph
                 .hashtable
@@ -4268,15 +4412,33 @@ pub fn exec_agg_grouped_runtime_partials<'mcx>(
                 if key.len() > base.tts_values.len() {
                     None
                 } else {
-                    for (i, &(w, isnull)) in key.iter().enumerate() {
-                        base.tts_isnull[i] = isnull;
-                        base.tts_values[i] = if isnull {
+                    let mut ok = true;
+                    for (i, (part, isnull)) in key.iter().enumerate() {
+                        base.tts_isnull[i] = *isnull;
+                        base.tts_values[i] = if *isnull {
                             Datum::null()
                         } else {
-                            grouped_key_datum(&desc.attrs[i], w)
+                            match part {
+                                runtime_partial::GroupKeyPart::Word(w) => {
+                                    grouped_key_datum(&desc.attrs[i], *w)
+                                }
+                                // TPCH-CBKEYS: rebuild the canonical
+                                // varlena; an allocation failure refuses to
+                                // the serial rerun (fail-closed, correct
+                                // results — the grouped_absorb_reset path).
+                                runtime_partial::GroupKeyPart::Bytes(b) => {
+                                    match grouped_text_key_datum(mcx, b) {
+                                        Ok(d) => d,
+                                        Err(_) => {
+                                            ok = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
                         };
                     }
-                    Some(())
+                    ok.then_some(())
                 }
             }
             .and_then(|()| {

@@ -269,6 +269,27 @@ fn hj_aggjoin_numeric_enabled() -> bool {
     })
 }
 
+/// TPCH-CBKEYS (night/tpch-cbkeys) — executor half: admit CANONICAL-BYTES
+/// text/varchar group keys (deterministic collations only) into the
+/// grouped-join sink's export/combine/absorb, bringing the JOIN sink to
+/// the scan sinks' key parity (the C3 `group_eq_representational` law:
+/// byte equality of the detoasted content IS texteq's verdict). BPCHAR
+/// stays a NAMED refusal (its space-stripping equality and trailing-blank
+/// representative ties are exactly why the scan sinks exclude it —
+/// hashgrouped/merge module docs; a future bpchar tie-law car owns any
+/// canonicalization ruling). Word-keyed shapes are byte-untouched (the
+/// bytes admissions are tried only after the word admissions refuse).
+/// The grouped-join row is spill-DISABLED by construction (the export
+/// refuses spill-mode tables), so matrix law 2c (bytes keys disable the
+/// spill arm) holds inherently. DEFAULT OFF; `PGRUST_LANE_V2_CBKEYS=1|on`
+/// arms — same spelling as the planner probe (knob coherence).
+fn hj_cbkeys_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&ON, || {
+        matches!(std::env::var("PGRUST_LANE_V2_CBKEYS").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
 /// TPCH-DECOROOT: resolve the Agg's plan NODE from the leader plan root.
 /// `Some` iff the root IS this Agg (the pre-existing law, any knob state),
 /// or — knob-armed and `decorated_ok` (grouped engagements only) — the root
@@ -3388,12 +3409,17 @@ fn mb_arm_worker<'mcx>(
     if chain.grouped {
         // SE-AGGJOIN: grouped congruence — the rebuilt agg must admit the
         // grouped export exactly as the leader's did (plan-based, or the
-        // knob-gated poly manifest — TPCH-NUMJOIN; env is process-shared so
-        // both sides resolve the same schema).
-        if !::nodeagg::agg_grouped_runtime_admissible(agg)
-            && !(hj_aggjoin_numeric_enabled()
-                && ::nodeagg::agg_grouped_poly_runtime_admissible(agg))
-        {
+        // knob-gated poly manifest — TPCH-NUMJOIN; or the knob-gated
+        // bytes-key admissions — TPCH-CBKEYS; env is process-shared so
+        // both sides resolve the same schema and key mode).
+        let numeric = hj_aggjoin_numeric_enabled();
+        let word_ok = ::nodeagg::agg_grouped_runtime_admissible(agg)
+            || (numeric && ::nodeagg::agg_grouped_poly_runtime_admissible(agg));
+        let bytes_ok = !word_ok
+            && hj_cbkeys_enabled()
+            && (::nodeagg::agg_grouped_bytes_runtime_admissible(agg)
+                || (numeric && ::nodeagg::agg_grouped_bytes_poly_runtime_admissible(agg)));
+        if !word_ok && !bytes_ok {
             return Err(Box::new(PgError::new(
                 ERROR,
                 "runtime hash-join grouped worker agg diverged from the leader's",
@@ -3888,11 +3914,17 @@ fn try_own_multibuild<'mcx>(
     if grouped {
         // TPCH-NUMJOIN (CAR 2): plan-based admission FIRST (byte-untouched);
         // the knob-gated poly twin admits the numeric-manifest shapes the
-        // relocated NumericAgg export carries.
-        if !::nodeagg::agg_grouped_runtime_admissible(agg)
-            && !(hj_aggjoin_numeric_enabled()
-                && ::nodeagg::agg_grouped_poly_runtime_admissible(agg))
-        {
+        // relocated NumericAgg export carries. TPCH-CBKEYS: the bytes-key
+        // admissions (canonical text/varchar keys) follow, knob-gated —
+        // key mode and trans schema compose freely.
+        let numeric = hj_aggjoin_numeric_enabled();
+        let word_ok = ::nodeagg::agg_grouped_runtime_admissible(agg)
+            || (numeric && ::nodeagg::agg_grouped_poly_runtime_admissible(agg));
+        let bytes_ok = !word_ok
+            && hj_cbkeys_enabled()
+            && (::nodeagg::agg_grouped_bytes_runtime_admissible(agg)
+                || (numeric && ::nodeagg::agg_grouped_bytes_poly_runtime_admissible(agg)));
+        if !word_ok && !bytes_ok {
             stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
             refuse("grouped-agg-not-exportable");
             return Ok(None);
@@ -4823,6 +4855,7 @@ mod mb_tests {
     fn tpch_cars_executor_knobs_default_off() {
         assert!(!hj_decoroot_enabled(), "PGRUST_LANE_V2_DECOROOT unset => OFF");
         assert!(!hj_aggjoin_numeric_enabled(), "PGRUST_LANE_V2_AGGJOIN_NUMERIC unset => OFF");
+        assert!(!hj_cbkeys_enabled(), "PGRUST_LANE_V2_CBKEYS unset => OFF");
     }
 
     /// Decomposition invariants on a SNOWFLAKE topology

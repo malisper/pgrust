@@ -787,6 +787,38 @@ fn jheap_guard() -> FloorGuard {
     }
 }
 
+/// TPCH-CBKEYS (night/tpch-cbkeys): canonical-bytes join-key admission —
+/// the grouped-JOIN sink's key vocabulary was word-only (byval int-family)
+/// while the SCAN sinks already run canonical-bytes text keys (the C3
+/// machinery, agg-text-canonical-bytes row). This knob admits bare
+/// text/varchar group keys under the deterministic DEFAULT collation into
+/// the grouped-join census (the sink's export/combine/absorb carry the
+/// detoasted content bytes — byte equality IS texteq's verdict, the
+/// `group_eq_representational` law). BPCHAR is the NAMED REFUSAL of
+/// record: its space-stripping bpchareq and trailing-blank representative
+/// ties sit outside the byte-equality envelope — exactly why the scan
+/// sinks exclude it — so TPC-H's char(n) keys (q04/q05/q07/q08/q12/q21)
+/// stay refused until a bpchar tie-law car rules on canonicalization.
+/// DEFAULT OFF; `PGRUST_LANE_V2_CBKEYS=1|on` arms (GL-CBKEYS-1 fleet
+/// letter owns the default flip).
+fn cbkeys_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        knob_spelling_armed(std::env::var("PGRUST_LANE_V2_CBKEYS").as_deref().ok())
+    })
+}
+
+/// PROVISIONAL floor for bytes-keyed grouped-join shapes: the
+/// CbHashJoinGroupedAgg 2M ceiling verbatim — the scan text-key row's
+/// min_dop-12 discipline is SUBSUMED here because its low-dop win region
+/// (<=3M) covers the whole admitted range (every engaged size <= 2M).
+/// GL-CBKEYS-1 owns re-measuring. (The grouped-join row is spill-disabled
+/// by construction — the export refuses spill-mode tables — so matrix law
+/// 2c, bytes keys disable the word-mode spill arm, holds inherently.)
+fn cbkeys_guard() -> FloorGuard {
+    FloorGuard { max_rows: 2_000_000.0, ..NO_GUARD }
+}
+
 /// SE-MKTEXT group-estimate ceiling, env-overridable
 /// (`PGRUST_LANE_V2_MULTIKEY_TEXT_MAX_GROUPS`). The family's whole point is
 /// shapes the §10 groupby_high hold (raised to 4e6 at b12c3fc74; the
@@ -957,6 +989,9 @@ const INT4OID: u32 = 23;
 const INT8OID: u32 = 20;
 const DATEOID: u32 = 1082;
 const TEXTOID: u32 = 25;
+/// TPCH-CBKEYS: bpchar — recognized ONLY to NAME its refusal (the
+/// space-insensitive-equality exclusion; never admitted as a key).
+const BPCHAROID: u32 = 1042;
 const VARCHAROID: u32 = 1043;
 const DEFAULT_COLLATION_OID: u32 = 100;
 
@@ -2969,7 +3004,13 @@ fn classify_aggjoin_grouped<'mcx>(
     }
     // Key discipline: every group key a bare int2/4/8 Var on one joined rel
     // (the walk's byval word-equality whitelist is wider — probe narrower).
+    // TPCH-CBKEYS (knob-gated): bare text/varchar Vars under the
+    // deterministic DEFAULT collation additionally admit (the canonical-
+    // bytes key export). BPCHAR refuses BY NAME knob-on (space-insensitive
+    // bpchareq — outside the byte-equality envelope, the scan sinks'
+    // standing exclusion; TPC-H char(n) keys wait on the tie-law car).
     let mut key_refs: Vec<u32> = Vec::new();
+    let mut n_bytes_keys = 0usize;
     for gc_node in &parse.groupClause {
         let Some(gc) = gc_node.as_sort_group_clause() else { return Ok(false) };
         let Some(tle) = tle_by_sortgroupref(parse, gc.tleSortGroupRef) else {
@@ -2978,7 +3019,19 @@ fn classify_aggjoin_grouped<'mcx>(
         let Some(v) = rtis.iter().find_map(|&rti| key_var(tle.expr, rti)) else {
             return refuse_join("group key not a bare joined-rel Var");
         };
-        if !is_int_family(v.vartype) {
+        if is_int_family(v.vartype) {
+            // The bootstrap word-key vocabulary.
+        } else if cbkeys_enabled()
+            && is_text_family(v.vartype)
+            && v.varcollid == DEFAULT_COLLATION_OID
+        {
+            n_bytes_keys += 1;
+        } else {
+            if cbkeys_enabled() && v.vartype == BPCHAROID {
+                return refuse_join(
+                    "bpchar group key (space-insensitive bpchareq outside the canonical-bytes envelope — tie-law car owed)",
+                );
+            }
             return refuse_join("group key not int-family");
         }
         if !key_var_estimable(run, tle.expr)? {
@@ -3050,6 +3103,24 @@ fn classify_aggjoin_grouped<'mcx>(
     // shapes carry the jheap floor (min 1M) — TPCH-JHEAP owns the tag; the
     // pure decorated/numeric widenings keep the CbHashJoinGroupedAgg floor
     // — the arm underneath is the same grouped sink either way.
+    // TPCH-CBKEYS: bytes-keyed shapes route under the cbkeys tag (their
+    // own kill's greppable line), composing with the heap/decorated/
+    // numeric riders in the label; the binding floor is the strictest of
+    // the composed cars (heap's 1M min when heap sides ride along).
+    if n_bytes_keys > 0 {
+        let mut label = String::from("aggjoin-grouped-cbkeys");
+        if !heap.is_empty() {
+            label.push_str("-heap");
+        }
+        if decorated {
+            label.push_str("-decorated");
+        }
+        if n_numeric > 0 {
+            label.push_str("+numeric");
+        }
+        let guard = if heap.is_empty() { cbkeys_guard() } else { jheap_guard() };
+        return finish_knob_path(run, "cbkeys", &label, guard, relids[0], ngroups, max_rows, 0.0);
+    }
     if !heap.is_empty() {
         let label = match (decorated, n_numeric > 0) {
             (true, true) => "aggjoin-grouped-heap-decorated+numeric",
@@ -4598,6 +4669,19 @@ mod tests {
             k2_heapfeed_live(),
             "K2_PROBE/HEAPFEED default ON (SE9/SE15 flips) => mirror live"
         );
+    }
+
+    /// TPCH-CBKEYS knob (night/tpch-cbkeys): DEFAULT OFF, `1`/`on` arms
+    /// (the shared tpch-cars idiom) — bytes-key join shapes are unkeyable
+    /// at default, byte-identical plan time; and the bytes floor keeps the
+    /// grouped-join 2M ceiling (the scan text-key min_dop discipline is
+    /// subsumed — its low-dop win region covers the whole admitted range).
+    #[test]
+    fn cbkeys_knob_default_off_and_floor() {
+        assert!(!cbkeys_enabled(), "test process has no knob set => OFF");
+        let g = cbkeys_guard();
+        assert_eq!(g.max_rows, 2_000_000.0);
+        assert_eq!(g.min_rows, 0.0);
     }
 
     /// TPCH-JHEAP NL-election margin + floor: the margin must be a real
