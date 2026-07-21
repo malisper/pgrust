@@ -53,10 +53,22 @@
 //! - CbMetaFooterAgg: footer answers are O(1) — never floored, no curve.
 //!
 //! Routing mode — `PGRUST_M5_COST_ROUTE` (design §migration):
-//!   unset / "shadow"  SHADOW (default): curve computed + traced next to
-//!                     the floor verdict; FLOORS DECIDE. Zero behavior
-//!                     change; the fleet verdict-diff report reads the
-//!                     `m5-cost-route:` trace lines.
+//!   unset             DEFAULT since t36 flips2 = the THREE WITNESSED rot
+//!                     cells decide by curve:
+//!                     `CbPlainAggFold,CbGroupedAggTextKey,CbHashJoinPlainAgg`
+//!                     (GL-COST-SCANFOLD-1 / -TEXTKEY-1 / -HASHJOIN-1, all
+//!                     FLIP-RECOMMENDED — notes/gl-cost-class-flip-letters.md,
+//!                     2026-07-21: flip A/B jobs -4ff1/-296e/-0325 @
+//!                     3f50bea20, every cell in the letters' expected
+//!                     direction, hashjoin 1M@dop4 57->43ms loss avoided +
+//!                     2.5M@dop16 forgone win recovered, agree-controls
+//!                     flat; economics = the witnessed v2 ladder). The
+//!                     multibuild/groupsink hashjoin riders follow the
+//!                     PlainAgg curve exactly as they rode the rectangle.
+//!                     Every other curve-modeled class stays SHADOW.
+//!   "shadow"          the KILL for the default flip: curve computed +
+//!                     traced next to the floor verdict; FLOORS DECIDE
+//!                     everywhere (the pre-t36 posture).
 //!   "0" / "off"       fully off: no curve evaluation, no trace.
 //!   "1" / "all"       curves decide every curve-modeled class (rectangle
 //!                     classes keep floors).
@@ -179,10 +191,19 @@ pub enum CostRouteMode {
     DecideClasses(Vec<&'static str>),
 }
 
+/// The t36 flips2 default decide-list: the three witnessed rot cells
+/// (notes/gl-cost-class-flip-letters.md — all FLIP-RECOMMENDED). Kept as a
+/// named constant so the default and the letters stay reviewably tied.
+const DEFAULT_DECIDE_CLASSES: [&str; 3] =
+    ["CbPlainAggFold", "CbGroupedAggTextKey", "CbHashJoinPlainAgg"];
+
 pub fn cost_route_mode() -> &'static CostRouteMode {
     static MODE: std::sync::OnceLock<CostRouteMode> = std::sync::OnceLock::new();
     MODE.get_or_init(|| match std::env::var("PGRUST_M5_COST_ROUTE").as_deref() {
-        Err(_) | Ok("") | Ok("shadow") => CostRouteMode::Shadow,
+        // DEFAULT since t36 flips2 (GL-COST class flip letters): the three
+        // witnessed rot cells decide by curve; "shadow" is the kill.
+        Err(_) | Ok("") => CostRouteMode::DecideClasses(DEFAULT_DECIDE_CLASSES.to_vec()),
+        Ok("shadow") => CostRouteMode::Shadow,
         Ok("0") | Ok("off") => CostRouteMode::Off,
         Ok("1") | Ok("all") => CostRouteMode::DecideAll,
         Ok(list) => {
@@ -469,13 +490,31 @@ mod tests {
         );
     }
 
-    /// Mode knob: unset is SHADOW (floors decide), and no class decides
-    /// unless explicitly flipped — the default-inert guarantee.
+    /// Mode knob posture of record at t36 flips2: unset = the THREE
+    /// witnessed rot cells decide by curve (the GL-COST class flip
+    /// letters' exact list — pinned name-for-name against RuntimeClass so
+    /// a rename can never silently un-flip a cell); every other
+    /// curve-modeled class stays shadow; `shadow` is the kill.
     #[test]
-    fn cost_route_default_is_shadow() {
-        assert_eq!(*cost_route_mode(), CostRouteMode::Shadow);
+    fn cost_route_default_is_the_witnessed_rot_cells() {
+        match cost_route_mode() {
+            CostRouteMode::DecideClasses(v) => {
+                assert_eq!(v.as_slice(), DEFAULT_DECIDE_CLASSES.as_slice());
+            }
+            m => panic!("t36 default must be the rot-cell decide list, got {m:?}"),
+        }
+        for name in DEFAULT_DECIDE_CLASSES {
+            assert!(
+                RuntimeClass::ALL.iter().any(|c| c.name() == name),
+                "default decide-list names a real curve class: {name}"
+            );
+        }
         for &class in RuntimeClass::ALL.iter() {
-            assert!(!cost_route_decides(class));
+            assert_eq!(
+                cost_route_decides(class),
+                DEFAULT_DECIDE_CLASSES.contains(&class.name()),
+                "exactly the letters' three cells decide at default: {class:?}"
+            );
         }
     }
 }
