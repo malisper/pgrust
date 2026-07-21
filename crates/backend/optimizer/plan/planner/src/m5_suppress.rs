@@ -1699,7 +1699,8 @@ fn classify_join_sides(
     // an explicit BoolExpr AND, the planner's implicit-AND List (the
     // canonicalized form the FromExpr carries at path generation), or one
     // bare clause.
-    let mut has_equi = false;
+    let mut n_equi = 0usize;
+    let mut int4_pair_only = true;
     let quals: Vec<Node<'_>> = match join_quals {
         None => return refuse_join("no join quals"),
         Some(q) => {
@@ -1734,11 +1735,16 @@ fn classify_join_sides(
             && is_int_family(vb.vartype)
             && lsyscache::op_hashjoinable(op.opno, va.vartype)?
         {
-            has_equi = true;
-            break;
+            // Count EVERY hashjoinable clause (the GL-HJSEAT-2 seat-lift
+            // predicate needs "exactly one, int4=int4" — the plan-time
+            // image of the executor's dense_cols gate).
+            n_equi += 1;
+            if va.vartype != INT4OID || vb.vartype != INT4OID {
+                int4_pair_only = false;
+            }
         }
     }
-    if !has_equi {
+    if n_equi == 0 {
         return refuse_join("no hashjoinable int-family equi clause");
     }
     // Emit discipline: every non-junk tlist entry is a whitelisted plain
@@ -1754,9 +1760,59 @@ fn classify_join_sides(
     if n == 0 {
         return refuse_join("empty tlist");
     }
+    // GL-HJSEAT-2 SEAT-SCOPED FLOOR LIFT (letter: scratchpad/night/
+    // hj-seat-gate-and-floor-rederivation.md; witnessed band seat/legacy
+    // 0.636-0.764 at 2.5M/5M/10M dop4 + 5M dop16, jobs 4aae/3fa8/1877/3862
+    // @ f7022d98e, 2026-07-21): when the join is SEAT-SHAPED — exactly one
+    // hashjoinable equi clause and it is bare int4 Var = int4 Var (the
+    // plan-time image of the executor's dense_cols gate) — and the HJPROBE-V2
+    // knob is live (flipped-kill; same spelling as the executor, the
+    // GROUPSINK knob-coherence law), the 2M ceiling lifts: runtime+seat beat
+    // legacy PHJ at every witnessed band point. The seat's remaining laws
+    // (probe/build ratio >= 1 via seat_ok, range <= 4x at build) stay
+    // executor-side; a build-time refusal degrades that query to the v1
+    // runtime probe at the witnessed 1.15-1.66x vs PHJ — the letter's
+    // bounded residual. Non-seat-shaped joins keep the 2M ceiling unchanged.
+    let seat_shaped = n_equi == 1 && int4_pair_only;
+    if seat_shaped && hjprobe_v2_live() {
+        return finish_seat_lifted(run, relids[0], max_rows);
+    }
     // Floor guard input: the larger side's estimated rows (the ladder's
     // per-table N; the probe fixture's dim side is negligible).
     finish(run, CoverClass::CbHashJoinPlainAgg, relids[0], 0.0, max_rows, 0.0)
+}
+
+/// GL-HJSEAT-2 knob coherence (the GROUPSINK/AGG_POLY precedent): the
+/// executor's HJPROBE-V2 kill (`PGRUST_LANE_V2_HJPROBE_V2=0|off`,
+/// FLIPPED-KILL: default ON) must also void the planner's seat-scoped floor
+/// lift — a killed seat above 2M would ship the witnessed 1.15-1.66x
+/// un-seated loss. Same spelling, same default, read once per process.
+fn hjprobe_v2_live() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_LANE_V2_HJPROBE_V2").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
+/// [`finish`] for the seat-lifted CbHashJoinPlainAgg path: the class floor's
+/// 2M ceiling does not apply (the witnessed band has no structure — the
+/// gated seat wins every measured point at every size/dop); every other
+/// finish duty (coverage answer, trace) is identical. Separate fn so the
+/// unlifted `finish` path stays byte-identical for every other caller.
+fn finish_seat_lifted(run: &mut PlannerRun<'_>, relid: u32, rows: f64) -> PgResult<bool> {
+    let class = CoverClass::CbHashJoinPlainAgg;
+    let covered = class_covered(class);
+    if covered && trace_armed() {
+        let _ = run;
+        eprintln!(
+            "m5-suppress: engine=runtime class={class:?} relid={relid} rows={rows:.0} \
+             seat-lift => gather suppressed (GL-HJSEAT-2)"
+        );
+    }
+    Ok(covered)
 }
 
 /// Top-level AND terms of an optional qual tree into `out` (explicit
