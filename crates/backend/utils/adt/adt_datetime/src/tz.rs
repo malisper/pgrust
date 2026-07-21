@@ -267,14 +267,18 @@ pub fn FetchDynamicTimeZone<'a>(
 ) -> Option<&'static PgTz> {
     debug_assert_eq!(tp.typ as i32, DYNTZ);
     let dtza = &tbl.dynamic[tp.value as usize];
-    let cached = dtza.tz.load(Ordering::Relaxed);
+    // Acquire/Release: the table is process-shared, so the pointee's bytes
+    // (built by whichever thread resolved the zone first) must be published
+    // with the pointer. pg_tzset's entries are process-permanent, which is
+    // what makes caching the pointer here sound at all.
+    let cached = dtza.tz.load(Ordering::Acquire);
     if !cached.is_null() {
         // SAFETY: the slot only ever holds &'static PgTz from pg_tzset below.
         return Some(unsafe { &*cached });
     }
     match pg_tzset(dtza.zone) {
         Some(tz) => {
-            dtza.tz.store(tz as *const PgTz as *mut PgTz, Ordering::Relaxed);
+            dtza.tz.store(tz as *const PgTz as *mut PgTz, Ordering::Release);
             Some(tz)
         }
         None => {

@@ -552,7 +552,13 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      the same non-session class as slot 46's LEDGER_GRANT and
     //      blocking.rs's PERMIT_SEM (slot 13). No session identity, no
     //      cross-thread access.
-    assert_eq!(count_tree(crates), 519, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // night/fix-tz-abbrevs delta (t36 composed: 518 = 519 - 1): REMOVED
+    //   timezone/pgtz/src/lib.rs TIMEZONE_CACHE — the session-arena
+    //   pg_tzset cache was the pg_timezone_abbrevs use-after-free
+    //   (localtime/clock.rs:32 panic): `&'static PgTz` escapes the thread
+    //   via the process-shared DynamicZoneAbbrev table, so the cache is now
+    //   a process-permanent static (C dynahash parity), not TLS.
+    assert_eq!(count_tree(crates), 518, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
