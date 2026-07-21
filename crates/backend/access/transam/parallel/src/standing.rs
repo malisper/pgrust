@@ -347,19 +347,33 @@ pub fn pool_binding_enabled() -> bool {
     })
 }
 
-/// M2 inc-2 kill switch: `PGRUST_RUNTIME_POOLDB=1` arms PGPROC-LEASING POOL
-/// WORKERS — rtpool threads take bgworker-shaped identity at spawn and serve
-/// per-RG engagement boards through the runtime's bound-descriptor claim
-/// gate (scratchpad/night/m2-pool-binding-scope.md §3 inc-2). DEFAULT OFF:
-/// the standing gang remains the default channel until the fleet letter;
-/// unset/0 restores inc-1 byte-exactly. Layered UNDER
-/// PGRUST_RUNTIME_POOLBIND (=0 kills this module wholesale, pool channel
-/// included).
+/// PGPROC-LEASING POOL WORKERS (M2 inc-2 keystone) — rtpool threads take
+/// bgworker-shaped identity at spawn and serve per-RG engagement boards
+/// through the runtime's bound-descriptor claim gate
+/// (scratchpad/night/m2-pool-binding-scope.md §3 inc-2).
+///
+/// **DEFAULT ON since the GL-POOLDB-1 acceptance re-run**
+/// (scratchpad/night/gl-pooldb-1-letter-spec.md §9: dop1 needle p50
+/// −0.18% vs the ≤1% bar; needle-under-saturated-mixed-load 0.64× vs the
+/// ≤2× bar — the letter's 4.4× small-stream tax INVERTED by the pool-qos
+/// interactive tier; heavy-stream p99 123.5s → 10.3s; gang-churn witness
+/// + units ALL green at the flip base). `PGRUST_RUNTIME_POOLDB=0|off`
+/// restores the standing-gang-first posture byte-identically (the t35
+/// flipped-kill law). Layered UNDER PGRUST_RUNTIME_POOLBIND (=0 kills
+/// this module wholesale, pool channel included); the sticky
+/// (PGRUST_RUNTIME_POOL_STICKY) and QoS (PGRUST_RUNTIME_POOL_QOS) tiers
+/// layer under THIS switch and flip with it.
 pub fn pooldb_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
-        std::env::var("PGRUST_RUNTIME_POOLDB").is_ok_and(|v| v.trim() == "1")
+        pooldb_posture(std::env::var("PGRUST_RUNTIME_POOLDB").ok().as_deref())
     })
+}
+
+/// The flip's pure parse (unit-pinned): default ON; `0`/`off` kill; any
+/// other value (including the historical arming spelling `1`) is ON.
+fn pooldb_posture(v: Option<&str>) -> bool {
+    !matches!(v.map(str::trim), Some("0") | Some("off"))
 }
 
 /// Boot wiring (launch_backend rtgang): the thread spawner and the gang
@@ -1320,4 +1334,38 @@ pub fn pool_serve(payload: &Arc<dyn std::any::Any + Send + Sync>) -> PoolServe {
     let _reset = PoolServeReset;
     serve_ticket(&entry, ticket);
     PoolServe::Served
+}
+
+#[cfg(test)]
+mod pooldb_flip_tests {
+    /// GL-POOLDB-1 flip pin (t35 flipped-kill law): default ON; `=0|off`
+    /// restores the gang-first posture; the historical arming spelling
+    /// `=1` stays ON; whitespace trimmed.
+    #[test]
+    fn pooldb_default_on_kill_spellings() {
+        assert!(super::pooldb_posture(None), "unset = flipped default ON");
+        assert!(super::pooldb_posture(Some("1")), "historical arming spelling stays ON");
+        assert!(super::pooldb_posture(Some("on")), "affirmative spelling ON");
+        assert!(!super::pooldb_posture(Some("0")), "=0 kills");
+        assert!(!super::pooldb_posture(Some("off")), "=off kills");
+        assert!(!super::pooldb_posture(Some(" 0 ")), "kill spelling trimmed");
+    }
+
+    /// Armed-witness companion (the add-a-row law's env-gated cargo leg):
+    /// self-SKIPs unless the registry row's arming env is present, then
+    /// asserts POSITIVELY that the process-level switch resolved to the
+    /// posture the env spells — the flip's kill lever provably takes.
+    #[test]
+    fn pooldb_kill_env_takes() {
+        let Ok(v) = std::env::var("PGRUST_RUNTIME_POOLDB") else {
+            println!("SKIP: PGRUST_RUNTIME_POOLDB unset (armed-witness leg runs it =0)");
+            return;
+        };
+        let expect = super::pooldb_posture(Some(v.as_str()));
+        assert_eq!(
+            super::pooldb_enabled(),
+            expect,
+            "process switch disagrees with the spelled posture"
+        );
+    }
 }
