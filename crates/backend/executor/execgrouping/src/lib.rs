@@ -523,6 +523,15 @@ pub struct TupleHashTable<'mcx> {
     tab_hash_expr: PgBox<'mcx, ExprState<'mcx>>,
     tab_eq_func: PgBox<'mcx, ExprState<'mcx>>,
     tableslot: SlotData<'mcx>,
+    // C hashtable->tempcxt (execGrouping.c): the short-lived context hash and
+    // match evaluation allocate in — detoast copies of external/compressed
+    // by-ref keys above all. The CALLER resets it (per input tuple); without
+    // it every probe of a compressed text key would leak its detoast copy
+    // into a query-lifetime context, off the hashagg spill accounting —
+    // memory ∝ input rows, a container-kill class. Raw pointer for the same
+    // lifetime-erasure reason as ExprState::arm_result_mcx_raw; None (unit
+    // tables that never see toasted keys) falls back to the entries arena.
+    temp_ctx: Option<NonNull<::mcx::MemoryContext>>,
 }
 
 /// C `BuildTupleHashTable`; entry tuples go to the per-lookup `table_mcx`
@@ -617,8 +626,10 @@ pub fn build_tuple_hash_table_with_iv<'mcx>(
         eqfuncoids,
         collations,
     )?;
-    // DIVERGENCE: C runs hash/eq fns in the caller-reset tempcxt; here their
-    // allocations (record keys deform) live in metacxt to teardown.
+    // C runs hash/eq fns in the caller-reset tempcxt; production callers
+    // install theirs via set_temp_ctx_raw right after build (which re-arms
+    // these two programs onto it). Until then the arming below (metacxt, to
+    // teardown) only covers tables that never install one — unit rigs.
     tab_hash_expr.arm_result_mcx(metacxt);
     tab_eq_func.arm_result_mcx(metacxt);
     let tableslot = exectuples::make_tuple_table_slot(
@@ -651,12 +662,28 @@ pub fn build_tuple_hash_table_with_iv<'mcx>(
         tab_hash_expr,
         tab_eq_func,
         tableslot,
+        temp_ctx: None,
     })
 }
 
 #[inline]
 const fn maxalign(n: usize) -> usize {
     (n + 7) & !7
+}
+
+/// [`TupleHashTable::probe_mcx`] for borrow-split call sites (`lookup`'s
+/// destructured body): the installed tempcxt, else the caller's fallback.
+#[inline]
+fn probe_mcx_parts<'a>(
+    temp_ctx: &'a Option<NonNull<::mcx::MemoryContext>>,
+    fallback: Mcx<'a>,
+) -> Mcx<'a> {
+    match temp_ctx {
+        // SAFETY: set_temp_ctx_raw contract — live + address-stable for
+        // every probe of the table.
+        Some(p) => unsafe { p.as_ref() }.mcx(),
+        None => fallback,
+    }
 }
 
 /// C `get_hash_memory_limit` (nodeHash.c; no hash-AM executor crate yet).
@@ -685,6 +712,36 @@ impl<'mcx> TupleHashTable<'mcx> {
     pub fn meta_mem(&self) -> usize {
         self.entries.capacity() * core::mem::size_of::<TupleHashEntryData>()
             + self.hashtab.buckets.capacity() * core::mem::size_of::<u32>()
+    }
+
+    /// Install C's `hashtable->tempcxt` (BuildTupleHashTable's tempcxt
+    /// argument): the context hash + match evaluation run in — the Text
+    /// kernel's detoast copies and the Expr programs' by-ref call results.
+    /// Every production consumer passes its C-parity per-tuple context and
+    /// keeps C's cadence of resetting it between input tuples.
+    ///
+    /// # Safety
+    /// `mcx`'s context outlives every probe of this table AND its
+    /// MemoryContext struct is address-stable for that whole span (the
+    /// armed pointer is raw) — the `arm_result_mcx_raw` contract; per-tuple
+    /// ExprContext memory satisfies both (arena-boxed).
+    pub unsafe fn set_temp_ctx_raw(&mut self, mcx: Mcx<'_>) {
+        self.temp_ctx = Some(NonNull::from(mcx.context()));
+        // C-parity for the Expr kernel too: hash/equality programs allocate
+        // their by-ref results in tempcxt (C evaluates them after switching
+        // to it), not in a query-lifetime context.
+        // SAFETY: forwarded caller contract.
+        unsafe {
+            self.tab_hash_expr.arm_result_mcx_raw(mcx);
+            self.tab_eq_func.arm_result_mcx_raw(mcx);
+        }
+    }
+
+    /// The context for probe-time transient allocations: the installed
+    /// tempcxt, or the entries arena for setter-less (unit-rig) tables.
+    #[inline]
+    fn probe_mcx(&self) -> Mcx<'_> {
+        probe_mcx_parts(&self.temp_ctx, *self.entries.allocator())
     }
 
     /// C `TupleHashTableHash`; the caller resets its per-tuple context.
@@ -721,7 +778,9 @@ impl<'mcx> TupleHashTable<'mcx> {
                 let h = if isnull {
                     0
                 } else {
-                    text_kernel_hash(key, *self.entries.allocator())?
+                    // Detoast copies land in the caller-reset tempcxt
+                    // (C: LookupTupleHashEntry switches to it before hashing).
+                    text_kernel_hash(key, self.probe_mcx())?
                 };
                 Ok(::hashfn::murmurhash32(iv_rot ^ h))
             }
@@ -758,7 +817,8 @@ impl<'mcx> TupleHashTable<'mcx> {
                 );
             }
         }
-        let TupleHashTable { entries, hashtab, tab_eq_func, tableslot, kernel, .. } = self;
+        let TupleHashTable { entries, hashtab, tab_eq_func, tableslot, kernel, temp_ctx, .. } =
+            self;
         let mut eq_err: Option<Box<PgError>> = None;
         let input_slot = input_slot;
         // Kernel match = NOT DISTINCT over the entry's cached key datum.
@@ -796,7 +856,10 @@ impl<'mcx> TupleHashTable<'mcx> {
             }
             ProbeKernel::Text { att } => {
                 let (key, isnull) = kernel_key(input_slot, att);
-                let det_mcx = *entries.allocator();
+                // Caller-reset tempcxt: a probe of a compressed/external key
+                // detoasts BOTH sides per call — a query-lifetime context
+                // here is memory ∝ input rows, off the spill accounting.
+                let det_mcx = probe_mcx_parts(temp_ctx, *entries.allocator());
                 // Detoast the input side once per probe, not per candidate.
                 // SAFETY: non-null live text varlena (key column type is
                 // text/varchar by kernel selection).
@@ -936,7 +999,7 @@ impl<'mcx> TupleHashTable<'mcx> {
             }),
             ProbeKernel::Text { .. } => match (input_key.1, entry.key_isnull) {
                 (false, false) => {
-                    let det_mcx = *self.entries.allocator();
+                    let det_mcx = self.probe_mcx();
                     // SAFETY: both sides are non-null live text varlenas —
                     // the input key per `kernel_key_of`'s caller contract,
                     // the entry's cached key inside its live stored image.
@@ -1051,7 +1114,7 @@ impl<'mcx> TupleHashTable<'mcx> {
                 })
             }),
             ProbeKernel::Text { .. } => {
-                let det_mcx = *entries.allocator();
+                let det_mcx = self.probe_mcx();
                 // Detoast the input side once per probe, not per candidate.
                 // SAFETY: non-null live text varlena (fn contract).
                 let a = if isnull {
@@ -1219,7 +1282,7 @@ impl<'mcx> TupleHashTable<'mcx> {
                 }
             }
             ProbeKernel::Text { .. } => {
-                let mcx = *self.entries.allocator();
+                let mcx = self.probe_mcx();
                 for (&k, &n) in keys.iter().zip(isnull) {
                     let h = if n { 0 } else { text_kernel_hash(k, mcx)? };
                     out.push(::hashfn::murmurhash32(iv_rot ^ h));
@@ -1238,11 +1301,10 @@ impl<'mcx> TupleHashTable<'mcx> {
 }
 
 /// The Text kernel's hashtext core over a live text datum: detoast
-/// (`pg_detoast_datum_packed`; external/compressed images land in `mcx` — the
-/// same metacxt the Expr path's armed result mcx uses, per the divergence
-/// note in `build_tuple_hash_table`) + raw-bytes hash_any — bit-identical to
-/// the fmgr `hashtext` under the kernel's resolved-once raw-bytes collation
-/// gate.
+/// (`pg_detoast_datum_packed`; external/compressed images land in `mcx` —
+/// the table's caller-reset tempcxt, C's context discipline for hash
+/// evaluation) + raw-bytes hash_any — bit-identical to the fmgr `hashtext`
+/// under the kernel's resolved-once raw-bytes collation gate.
 ///
 /// Safety contract (inline, not `unsafe fn`, mirroring `kernel_key`): the
 /// datum must be a non-null live text/varchar varlena — kernel selection

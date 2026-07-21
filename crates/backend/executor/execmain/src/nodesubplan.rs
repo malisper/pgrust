@@ -368,6 +368,10 @@ struct HashedSubPlanState<'mcx> {
     hashtable: Option<::execgrouping::TupleHashTable<'mcx>>,
     hashnulls: Option<::execgrouping::TupleHashTable<'mcx>>,
     table_ctx: ::mcx::MemoryContext,
+    // C sstate->hashtempcxt: probe-time transient memory (detoast copies of
+    // compressed by-ref keys above all), reset after each hashtable lookup
+    // (build scan) / probe (ExecHashSubPlan) — never query-lifetime.
+    hashtempcxt: ::mcx::MemoryContext,
     key_col_idx: PgVec<'mcx, i16>,
     tab_eq_funcoids: PgVec<'mcx, ::types_core::Oid>,
     tab_hash_funcs: PgVec<'mcx, ::types_core::Oid>,
@@ -646,6 +650,7 @@ fn init_hashed_state<'mcx>(
         hashtable: None,
         hashnulls: None,
         table_ctx: mcx.context().new_child_bump("Subplan HashTable Context"),
+        hashtempcxt: mcx.context().new_child_bump("Subplan HashTable Temp Context"),
         key_col_idx,
         tab_eq_funcoids,
         tab_hash_funcs,
@@ -1135,7 +1140,6 @@ fn exec_hash_sub_plan<'mcx>(
     if !sstate.hashed.as_ref().unwrap().built {
         build_sub_plan_hash(sstate, estate)?;
     }
-    let mcx = estate.es_query_cxt;
     let h = sstate.hashed.as_mut().unwrap();
     if !h.havehashrows && !h.havenullrows {
         return Ok(NullableDatum { value: Datum::from_bool(false), isnull: false });
@@ -1154,6 +1158,21 @@ fn exec_hash_sub_plan<'mcx>(
         project_lhs_nested_subplans(proj_left, estate, ecxt, lhs_slot, outer)?;
     }
 
+    let result = hash_sub_plan_probe(sstate, estate, lhs_slot);
+    // C ExecHashSubPlan: "Also must reset the hashtempcxt after each
+    // hashtable lookup."
+    sstate.hashed.as_mut().unwrap().hashtempcxt.reset();
+    result
+}
+
+// ExecHashSubPlan's probe tail, split out so the hashtempcxt reset above
+// covers every return path.
+fn hash_sub_plan_probe<'mcx>(
+    sstate: &mut SubPlanExprState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    lhs_slot: ExecSlotId,
+) -> PgResult<NullableDatum> {
+    let mcx = estate.es_query_cxt;
     let h = sstate.hashed.as_mut().unwrap();
     let ncols = h.key_col_idx.len();
     let (no_nulls, all_nulls) = {
@@ -1215,7 +1234,7 @@ fn build_sub_plan_hash<'mcx>(
         if let Some(ht) = h.hashtable.as_mut() {
             ht.reset();
         } else {
-            h.hashtable = Some(::execgrouping::build_tuple_hash_table(
+            let mut ht = ::execgrouping::build_tuple_hash_table(
                 mcx,
                 &h.desc_right,
                 &h.key_col_idx,
@@ -1225,7 +1244,15 @@ fn build_sub_plan_hash<'mcx>(
                 nbuckets,
                 0,
                 false,
-            )?);
+            )?;
+            // C BuildTupleHashTable's tempcxt = sstate->hashtempcxt, reset
+            // after each lookup: probe-time detoasts of compressed by-ref
+            // keys must not accumulate for the query's lifetime.
+            // SAFETY: hashtempcxt lives in the leaked SubPlanExprState —
+            // address-stable at build time (exec), dropped with the table
+            // at executor end.
+            unsafe { ht.set_temp_ctx_raw(h.hashtempcxt.mcx()) };
+            h.hashtable = Some(ht);
         }
         if !h.unknown_eq_false {
             if h.key_col_idx.len() == 1 {
@@ -1236,7 +1263,7 @@ fn build_sub_plan_hash<'mcx>(
             if let Some(ht) = h.hashnulls.as_mut() {
                 ht.reset();
             } else {
-                h.hashnulls = Some(::execgrouping::build_tuple_hash_table(
+                let mut ht = ::execgrouping::build_tuple_hash_table(
                     mcx,
                     &h.desc_right,
                     &h.key_col_idx,
@@ -1246,7 +1273,11 @@ fn build_sub_plan_hash<'mcx>(
                     nbuckets,
                     0,
                     false,
-                )?);
+                )?;
+                // Same tempcxt install as the main table above.
+                // SAFETY: same outlives/address-stability argument.
+                unsafe { ht.set_temp_ctx_raw(h.hashtempcxt.mcx()) };
+                h.hashnulls = Some(ht);
             }
         } else {
             h.hashnulls = None;
@@ -1308,6 +1339,9 @@ fn build_sub_plan_hash_scan<'mcx>(
             ht.lookup(slot, hash, Some(table_mcx), mcx)?;
             h.havenullrows = true;
         }
+        // C buildSubPlanHash: "Also must reset the hashtempcxt after each
+        // hashtable lookup."
+        h.hashtempcxt.reset();
     }
     Ok(())
 }
@@ -1329,7 +1363,16 @@ fn find_partial_match<'mcx>(
         // SAFETY: lhs_slot is estate-minted, distinct from probe_slot (owned
         // by the SubPlanExprState, not in es_tupleTable).
         let lhs = unsafe { &mut *(&mut estate.es_tupleTable[lhs_slot.0 as usize] as *mut SlotData<'mcx>) };
-        if !exec_tuples_unequal(mcx, lhs, &mut h.probe_slot, ncols, &mut h.cur_eq_funcs, &h.tab_collations)? {
+        // Eq-proc detoasts ride hashtempcxt (reset per probe by the caller),
+        // C's short-lived-context discipline — never query-lifetime memory.
+        if !exec_tuples_unequal(
+            h.hashtempcxt.mcx(),
+            lhs,
+            &mut h.probe_slot,
+            ncols,
+            &mut h.cur_eq_funcs,
+            &h.tab_collations,
+        )? {
             return Ok(true);
         }
     }
@@ -1337,9 +1380,11 @@ fn find_partial_match<'mcx>(
 }
 
 // execTuplesUnequal (nodeSubplan.c): true only if some non-null pair
-// compares not-equal; last column first.
+// compares not-equal; last column first. `temp_mcx`: the short-lived
+// context by-ref eq results (detoast copies) land in — the caller resets it
+// per probe.
 fn exec_tuples_unequal<'mcx>(
-    mcx: Mcx<'mcx>,
+    temp_mcx: Mcx<'_>,
     slot1: &mut SlotData<'mcx>,
     slot2: &mut SlotData<'mcx>,
     ncols: usize,
@@ -1361,8 +1406,8 @@ fn exec_tuples_unequal<'mcx>(
         let flinfo = &mut eqfuncs[i];
         let mut fcinfo = LocalFcinfo::<2>::fresh(collations[i]);
         // C execTuplesUnequal: the eq proc detoasts by-ref args via
-        // DirectFunctionCall, pallocing in the caller's context.
-        unsafe { fcinfo.set_result_mcx(mcx) };
+        // DirectFunctionCall, pallocing in the caller's (short-lived) context.
+        unsafe { fcinfo.set_result_mcx(temp_mcx) };
         fcinfo.args[0] = NullableDatum { value: a1, isnull: false };
         fcinfo.args[1] = NullableDatum { value: a2, isnull: false };
         let fn_addr = flinfo.fn_addr;
@@ -1411,8 +1456,9 @@ fn hash_slot_lhs<'mcx>(
             let flinfo = &mut h.lhs_hash_funcs[i];
             let mut fcinfo = LocalFcinfo::<1>::fresh(h.tab_collations[i]);
             // C ExecBuildHash32FromAttrs: the hash proc detoasts its by-ref
-            // arg via DirectFunctionCall, pallocing in the caller's context.
-            unsafe { fcinfo.set_result_mcx(mcx) };
+            // arg via DirectFunctionCall — into hashtempcxt (reset per
+            // probe), never query-lifetime memory.
+            unsafe { fcinfo.set_result_mcx(h.hashtempcxt.mcx()) };
             fcinfo.args[0] = NullableDatum { value: v, isnull: false };
             let fn_addr = flinfo.fn_addr;
             let d = fn_addr(Some(flinfo), &mut fcinfo)?;
@@ -1438,7 +1484,10 @@ fn find_exact_cross<'mcx>(
 ) -> PgResult<bool> {
     let mcx = estate.es_query_cxt;
     let ncols = h.key_col_idx.len();
-    let HashedSubPlanState { hashtable, probe_slot, cur_eq_funcs, tab_collations, .. } = h;
+    let HashedSubPlanState {
+        hashtable, probe_slot, cur_eq_funcs, tab_collations, hashtempcxt, ..
+    } = h;
+    let temp_mcx = hashtempcxt.mcx();
     let ht = hashtable.as_ref().expect("hashtable built");
     // SAFETY: lhs_slot is estate-minted, distinct from probe_slot and the
     // hash table's internals.
@@ -1457,10 +1506,9 @@ fn find_exact_cross<'mcx>(
             debug_assert!(!n1 && !n2);
             let flinfo = &mut cur_eq_funcs[i];
             let mut fcinfo = LocalFcinfo::<2>::fresh(tab_collations[i]);
-            // C execTuplesMatch/FindTupleHashEntry: the eq proc detoasts
-            // by-ref args via DirectFunctionCall, pallocing in the caller's
-            // context.
-            unsafe { fcinfo.set_result_mcx(mcx) };
+            // C FindTupleHashEntry runs the cross-type eq inside tempcxt:
+            // by-ref detoasts land in hashtempcxt (reset per probe).
+            unsafe { fcinfo.set_result_mcx(temp_mcx) };
             fcinfo.args[0] = NullableDatum { value: a1, isnull: false };
             fcinfo.args[1] = NullableDatum { value: a2, isnull: false };
             let fn_addr = flinfo.fn_addr;
