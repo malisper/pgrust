@@ -30,6 +30,7 @@ backend_progress = { path = "../../utils/activity/backend_progress" }
 init_small = { path = "../../utils/init/init_small" }
 elog = { path = "../../utils/error/elog" }
 runtime = { path = "../../executor/runtime" }
+pg_clock = { path = "../../../port/pg_clock" }
 latch = { path = "../../storage/ipc/latch" }
 postgres_seams = { path = "../../tcop/postgres_seams" }
 miscinit = { path = "../../utils/init/miscinit" }

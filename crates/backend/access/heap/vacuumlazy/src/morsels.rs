@@ -1470,7 +1470,9 @@ fn pool_wait(
         }
     };
     let mut cadence = LeaderCadence::new(vacrel, shared);
-    let t0 = std::time::Instant::now();
+    // DST P2: the claim deadline is BEHAVIORAL (changes execution path) —
+    // its clock is pg_clock (the standing_channel precedent).
+    let t0 = pg_clock::MonoStamp::now();
     let mut traced = false;
     let granules = shared.source.entries().len();
     loop {
@@ -1518,7 +1520,7 @@ fn pool_wait(
         // close simply drives the same RG (morsel claims are atomic).
         if started == 0
             && entry.detached() >= claimed
-            && t0.elapsed() > pool_claim_deadline()
+            && std::time::Duration::from_nanos(t0.elapsed_ns()) > pool_claim_deadline()
         {
             close("pooldb claim deadline — launched fallback");
             return Ok(PoolWait::Fallback);
