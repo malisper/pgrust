@@ -220,6 +220,10 @@ fn install_guc_tables_owned_vars() {
         get: backing::pgrust_mem_autotune,
         set: backing::set_pgrust_mem_autotune,
     });
+    vars::pgrust_runtime_vacuum_pool.install(GucVarAccessors {
+        get: backing::pgrust_runtime_vacuum_pool,
+        set: backing::set_pgrust_runtime_vacuum_pool,
+    });
     vars::pgrust_runtime_scan_pool.install(GucVarAccessors {
         get: backing::pgrust_runtime_scan_pool,
         set: backing::set_pgrust_runtime_scan_pool,
