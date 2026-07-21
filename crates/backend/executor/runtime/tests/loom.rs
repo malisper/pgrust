@@ -2878,7 +2878,14 @@ fn pool_sealed_elastic_join_across_sets() {
 /// join parks on the transient inflated `claimed` forever.
 #[test]
 fn pool_detach_on_raw_exit_join_terminates() {
-    loom::model(|| {
+    // Bounded like the runtime models (R8 exhaustive-budget law): the bare
+    // model ran >60s even under the fast tier's permutation cap; at
+    // preemption_bound 3 the space is exhaustable and the RED battery
+    // (skipped detach) still fails in the first seconds — re-verified at
+    // this bound.
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(3);
+    b.check(|| {
         let board = MirrorBoard::new(2);
 
         // Worker 1: FATAL mid-serve — claim, DetachGuard drop on the
