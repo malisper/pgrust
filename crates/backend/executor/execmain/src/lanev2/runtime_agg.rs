@@ -309,6 +309,21 @@ struct AggSink {
     /// filters merged buckets to set members; seal/passthrough/adopt fast
     /// paths are skipped once FROZEN (their tables may carry stragglers).
     freeze: Option<Arc<::nodeagg::sink::SinkFreeze>>,
+    /// SEAL-FLUSH (radix seal) arm — GL-RADIX-1 (the groupby-high port):
+    /// on the admitted high-NDV band the SEAL pass flushes each Local's
+    /// remainder table into ONE final bucket-contiguous SinkRun (the
+    /// cap-flush bodies verbatim; [`agg_sealflush_enabled`]) instead of
+    /// building the SEAL index — the combine then streams EVERY face
+    /// sequentially (the incumbent parallel-finalize lane's raw-exchange
+    /// merge shape), where the SEAL index random-accesses up to DOP × cap
+    /// entries across the Locals' tables at combine (the high-NDV combine's
+    /// last latency-bound term). Resolved at construction; false = the
+    /// incumbent SEAL partition exactly.
+    seal_flush: bool,
+    /// Seal-flush engagement witness: remainder rows handed through
+    /// seal-flush runs (non-NULL; summed across Locals). Read by the
+    /// AGGSEAL marker lines.
+    sealflush_rows: AtomicU64,
     /// 256 per-bucket outputs; slot b is written only by the combine task
     /// that claimed partition b (single writer by the sink contract).
     out_emit: Vec<UnsafeCell<SinkEmitBuf>>,
@@ -862,6 +877,29 @@ impl AggSink {
     /// (per-Local, so safely parallel across seal claims — the refusal flag
     /// is idempotent and fail-closed).
     fn seal_partition_local(&self, l: &mut AggSinkLocal) {
+        if self.seal_flush {
+            // Radix seal-flush arm ([`AggSink::seal_flush`]): the remainder
+            // leaves as one final bucket-contiguous run, appended LAST — the
+            // SEAL face's own visit position in the combine's first-seen
+            // order, so the merge is byte-identical (flush cadence is
+            // semantics-free; unit-pinned by
+            // seal_flush_run_matches_remainder_view). No SEAL index is
+            // built. R3: the run's bytes replace the table + index charge
+            // (same content, contiguous layout); crossing = budget refusal,
+            // exactly the incumbent arm's discipline.
+            if let Some(mut t) = l.table.take() {
+                if let Some(run) = t.flush_remainder() {
+                    self.sealflush_rows.fetch_add(run.nrows() as u64, Ordering::Relaxed);
+                    l.run_bytes += run.bytes();
+                    l.runs.push(run);
+                }
+            }
+            l.part = None;
+            if l.run_bytes > self.budget {
+                self.refuse_budget();
+            }
+            return;
+        }
         // Canonical (text-bearing) shapes partition by canonical bytes;
         // word shapes by key words — the handle dispatches.
         l.part = l.table.as_mut().map(::nodeagg::sink::SinkTableHandle::partition_remainder);
@@ -1005,9 +1043,10 @@ impl runtime::ParallelSink for AggSink {
             let flush_bytes: u64 = locals.iter().map(|l| l.probe_flush_bytes).sum();
             let (ad, ar, ap) = alpha_sums(locals);
             eprintln!(
-                "MORSEL|AGGSEAL|arm=2set|locals={}|rows={rows}|flushes={flushes}|flush_bytes={flush_bytes}|alpha_demotes={ad}|alpha_restores={ar}|alpha_reprobes={ap}|dur_us={}",
+                "MORSEL|AGGSEAL|arm=2set|locals={}|rows={rows}|flushes={flushes}|flush_bytes={flush_bytes}|alpha_demotes={ad}|alpha_restores={ar}|alpha_reprobes={ap}|dur_us={}|sealflush_rows={}",
                 locals.len(),
-                t0.elapsed().as_micros()
+                t0.elapsed().as_micros(),
+                self.sealflush_rows.load(Ordering::Relaxed),
             );
         }
     }
@@ -1736,8 +1775,9 @@ impl runtime::SealedParallelSink for AggSink {
             let flush_bytes: u64 = sealed.iter().map(|l| l.probe_flush_bytes).sum();
             let (ad, ar, ap) = alpha_sums(sealed);
             eprintln!(
-                "MORSEL|AGGSEAL|arm=3set|locals={}|rows={rows}|flushes={flushes}|flush_bytes={flush_bytes}|alpha_demotes={ad}|alpha_restores={ar}|alpha_reprobes={ap}|dur_us=0",
+                "MORSEL|AGGSEAL|arm=3set|locals={}|rows={rows}|flushes={flushes}|flush_bytes={flush_bytes}|alpha_demotes={ad}|alpha_restores={ar}|alpha_reprobes={ap}|dur_us=0|sealflush_rows={}",
                 sealed.len(),
+                self.sealflush_rows.load(Ordering::Relaxed),
             );
         }
         if self.try_adopt_census(sealed) {
@@ -3615,6 +3655,48 @@ fn sink_locality_cap_for(est_groups: u64) -> Option<u32> {
     }
 }
 
+/// SEAL-FLUSH (radix seal) arm — GL-RADIX-1, the groupby-high port's
+/// runtime-side increment. On the admitted band the SEAL pass flushes each
+/// Local's remainder table into ONE final bucket-contiguous SinkRun (the
+/// cap-flush bodies verbatim, [`::nodeagg::sink::SinkTableHandle::flush_remainder`])
+/// instead of building the SEAL index. Mechanism: at high NDV the combine's
+/// remainder face random-accesses up to DOP × cap entries through the SEAL
+/// index across the Locals' live tables (dependent DRAM loads — the same
+/// memory-LATENCY class the locality cap bounded on the ACCEPT side), while
+/// every other face already streams bucket-contiguous runs; the incumbent
+/// parallel-finalize lane's raw exchange has NO such face — its final
+/// install radix-partitions contiguously. Seal-flush closes that structural
+/// gap: after it, the combine input is 100% sequential runs. Byte identity
+/// rides the ratified flush-cadence law (runs merge first-seen; the
+/// remainder run lands LAST — the SEAL face's own visit position) and is
+/// unit-pinned (seal_flush_run_matches_remainder_view). DEFAULT OFF —
+/// armed iff `PGRUST_RUNTIME_AGG_SEALFLUSH` is exactly `1`/`on`; the
+/// GL-RADIX-1 witnessed ladder owns the flip.
+fn agg_sealflush_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&ON, || {
+        matches!(std::env::var("PGRUST_RUNTIME_AGG_SEALFLUSH").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
+/// Seal-flush admission floor in plan-estimated groups
+/// (`PGRUST_RUNTIME_AGG_SEALFLUSH_FLOOR`, default 4e6 — the m5
+/// groupby-high hold's own class boundary): below it the remainder is a
+/// minority combine face over small tables and the SEAL index is already
+/// cheap; the arm targets exactly the band the hold keeps legacy. Low-card
+/// shapes are structurally untouched (admission never fires; the sink code
+/// path is the incumbent's, branch-for-branch).
+fn agg_sealflush_floor() -> u64 {
+    static N: OnceLock<u64> = OnceLock::new();
+    crate::once_val(&N, || {
+        std::env::var("PGRUST_RUNTIME_AGG_SEALFLUSH_FLOOR")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|&f| f > 0)
+            .unwrap_or(4_000_000)
+    })
+}
+
 /// Wave-1 r2 ladder verdict (reduced-key/dict-key @100M, notes/q36-radix-lane.md):
 /// monotone improvement control→64K (reduced-key 0.378→0.234 = 2.30x→1.40x ref-mt16;
 /// dict-key 0.468→0.270), knee flattening 256K→64K, guards (selective-qual, two-key-sort) flat-or-
@@ -4669,6 +4751,21 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     } else {
         None
     };
+    // SEAL-FLUSH (radix seal) admission — [`agg_sealflush_enabled`]: the
+    // high-NDV band only (the groupby-high class), multi-Local engagements
+    // (DOP1 keeps the adopt/pass-through fast paths, which require zero
+    // flushed runs), and no freeze/topn/shared composition in v1 — their
+    // SEAL censuses read the remainder table; each composes later with its
+    // own letter if the phase data asks for it.
+    let seal_flush = agg_sealflush_enabled()
+        && dop > 1
+        && est_groups >= agg_sealflush_floor()
+        && topn.is_none()
+        && freeze.is_none()
+        && shared.is_none();
+    if seal_flush {
+        lane_trace(&format!("runtime-agg: seal-flush armed (est_groups={est_groups})"));
+    }
     let sink = Arc::new(AggSink {
         drain,
         red,
@@ -4709,6 +4806,8 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         topn_refused: AtomicBool::new(false),
         topn_ctr: TopnCounters::default(),
         freeze,
+        seal_flush,
+        sealflush_rows: AtomicU64::new(0),
         out_emit: (0..SINK_NBUCKETS).map(|_| UnsafeCell::new(SinkEmitBuf::default())).collect(),
         published: Mutex::new(None),
         adopt_shape,
