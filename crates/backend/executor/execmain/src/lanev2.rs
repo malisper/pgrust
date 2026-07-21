@@ -2153,6 +2153,28 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
         }
     };
     if c == AggLaneChoice::Refuse {
+        // SE-T2AGG CAR A (knob-gated, default OFF): the zero-aggregate
+        // SELECT DISTINCT shape has no fold plan, so its memoized choice
+        // may be Refuse (the legacy fused drive never hosts it — the
+        // hash-agg breaker runs it serially) — probe the runtime
+        // plain-distinct sub-arm HERE, before the refusal stands. Success
+        // adopts the published emit; re-pulls resume through the
+        // emitting marker and drain agg_retrieve_hash_table's sink branch.
+        if ::nodeagg::sink::agg_sink_emitting(agg)
+            || runtime_plaindistinct::try_own_plain_selectdistinct_runtime(agg, ss, estate)?
+        {
+            if ::nodeagg::agg_is_done(agg) {
+                return Ok(Some(None));
+            }
+            let mut root = RootAdapter::new(None);
+            return Ok(Some(pull_step(
+                agg,
+                &mut HashAggSource,
+                &mut HashAggEmit,
+                &mut root,
+                estate,
+            )?));
+        }
         return Ok(None);
     }
     // exec_agg's top-of-call guard: a drained agg stays drained (the hash
@@ -2317,6 +2339,59 @@ fn decide_agg_lane<'mcx>(
         return Ok(AggLaneChoice::Refuse);
     }
     Ok(AggLaneChoice::PerRow)
+}
+
+/// SE-T2AGG CAR B (knob-gated, default OFF): a vguard-bearing fold plan the
+/// RUNTIME AGG SINK can host — min/max(text) transitions (and their uguard
+/// siblings) over the multivar/prewhere DIRECT-INDEX stagings. Conditions:
+///   * the knob (`sink_strminmax_enabled`, same spelling as the m5 probe);
+///   * vguards present, NO int-range guards (their demote leg is the
+///     checked per-row program, which the sink lacks — a vguard/uguard
+///     demote instead REFUSES to the serial rerun in the drain), no
+///     residual transitions;
+///   * unprojected scan (the expr-key decides never proved vguard plans).
+///
+/// The sink drains read DIRECT SoA indexes, so single-varlena shapes (whose
+/// `arm_scan_staging` ladder arms the REMAPPED varkey staging) additionally
+/// need the columnar re-arm — [`sink_rearm_vguard_columnar`], run by the
+/// sink decide and the worker arm right after the staging ladder.
+fn sink_vguard_plan_ok(
+    agg: &::nodeagg::AggStateData<'_>,
+    ss: &::nodeseqscan::SeqScanState<'_>,
+) -> bool {
+    ss.ss.ps_ProjInfo.is_none()
+        && ::nodeagg::sink::sink_strminmax_enabled()
+        && !::nodeagg::agg_lanefold_has_resid(agg)
+        && ::nodeagg::agg_lanefold_plan(agg).is_some_and(|p| {
+            !p.vguards.is_empty() && p.guards.is_empty() && p.resid.is_empty()
+        })
+}
+
+/// SE-T2AGG CAR B: ensure the armed SoA staging covers EVERY fold/vguard
+/// column at its direct index. The prewhere lane already covers the ask
+/// (arm_scan_staging widens its prefix onto vguard columns) and is left
+/// untouched; the single-varlena REMAP staging (varkey pass — one column at
+/// SoA index 0) does not, so re-arm the pgrcolumnar columnar deform over the
+/// full prefix (the `sink_rearm_dictfree` precedent; a later serial
+/// fallback re-arms its own shape through the staging ladder, idempotently).
+fn sink_rearm_vguard_columnar<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> bool {
+    let Some(plan) = ::nodeagg::agg_lanefold_plan(agg) else { return false };
+    let mut need: i32 = fused_agg_soa_prefix(agg, ss).unwrap_or(0);
+    for &c in plan.cols.iter().chain(plan.vguards.iter()) {
+        need = need.max(c as i32 + 1);
+    }
+    if need <= 0 {
+        return false;
+    }
+    if ::nodeseqscan::seq_scan_batch_soa(ss).is_some_and(|soa| soa.ncols() as i32 >= need) {
+        return true;
+    }
+    ::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, need, None)
+        && ::nodeseqscan::seq_scan_batch_soa(ss).is_some_and(|soa| soa.ncols() as i32 >= need)
 }
 
 /// The varlena-lane fold feed's single staged column, when the plan is that
@@ -4277,6 +4352,16 @@ fn agg_seq_scan_build_if_needed<'mcx>(
     if ::nodeagg::agg_hash_table_filled(agg) || ::nodeagg::sink::agg_sink_emitting(agg) {
         return Ok(());
     }
+    // SE-T2AGG CAR A (knob-gated, default OFF): the zero-aggregate SELECT
+    // DISTINCT sub-arm, probed at the same shared build seam as the runtime
+    // agg sink below (Fold/PerRow choices land here; the Refuse choice has
+    // its own probe in try_own_agg_over_seq_scan). Success adopts the
+    // published emit — the early return above catches re-pulls, and every
+    // retrieve drains agg_hash_retrieve's sink branch. Refusal falls
+    // through byte-identically.
+    if runtime_plaindistinct::try_own_plain_selectdistinct_runtime(agg, ss, estate)? {
+        return Ok(());
+    }
     // M2 runtime aggregation sink (runtime_agg.rs): the forced/explicit
     // parallel engagement, tried at the ONE build seam every drive chain
     // shares (bare agg hook, Limit-over-agg, sort feed). Success adopts the
@@ -4466,6 +4551,32 @@ fn scan_k2_shape<'mcx>(
     if !scan_k2_wanted(agg) {
         return None;
     }
+    scan_k2_shape_body(agg, ss, estate)
+}
+
+/// SE-T2AGG CAR B: the K2 shape probe for the RUNTIME AGG SINK's decide —
+/// `scan_k2_shape` widened onto vguard-only guarded plans
+/// (`sink_vguard_plan_ok`; knob-gated, default OFF — identical to
+/// `scan_k2_shape` otherwise, so the serial feed's own probe is untouched).
+fn scan_k2_shape_sink<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> Option<ScanK2> {
+    let vguard_wanted = k2_enabled()
+        && sink_vguard_plan_ok(agg, ss)
+        && ::nodeagg::agg_hash_staged_probe_col(agg).is_some();
+    if !scan_k2_wanted(agg) && !vguard_wanted {
+        return None;
+    }
+    scan_k2_shape_body(agg, ss, estate)
+}
+
+fn scan_k2_shape_body<'mcx>(
+    agg: &::nodeagg::AggStateData<'mcx>,
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+    estate: &EStateData<'mcx>,
+) -> Option<ScanK2> {
     let key_col = ::nodeagg::agg_hash_staged_probe_col(agg)?;
     let soa = ::nodeseqscan::seq_scan_batch_soa(ss)?;
     let (colnos_needed, max_colno) = ::nodeagg::agg_hash_needed_cols(agg);
@@ -5270,7 +5381,13 @@ fn scan_mk1_text_admit<'mcx>(
     if !multikey_enabled() || !::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
         return None;
     }
-    let plan_ok = ::nodeagg::agg_lanefold_plan(agg).is_some_and(|plan| !plan.guarded)
+    // SE-T2AGG CAR B: vguard-only guarded plans (min/max(text) passengers)
+    // admit knob-ON through `sink_vguard_plan_ok` — the q22-class single-
+    // text-key shape. The proof obligation moves to the sink drain's
+    // per-batch check_guards (demote = refusal to the serial rerun).
+    let vguard_ok = sink_vguard_plan_ok(agg, ss);
+    let plan_ok = (::nodeagg::agg_lanefold_plan(agg).is_some_and(|plan| !plan.guarded)
+        || vguard_ok)
         && !::nodeagg::agg_lanefold_has_resid(agg);
     if !plan_ok {
         return None;
@@ -5285,13 +5402,16 @@ fn scan_mk1_text_admit<'mcx>(
     }
     {
         let plan = ::nodeagg::agg_lanefold_plan(agg)?;
-        if !plan.vguards.is_empty() {
+        if !plan.vguards.is_empty() && !vguard_ok {
             return refused(RefuseReason::MultiKeyShape);
         }
         // Stale-cell rule: while a dict lane answers the key column, its
         // SoA Datum cells are stale — the fold must not read them. (Raw
         // staging has no dict lane, but the worker's staging arm may
         // dict-arm where the leader's did — gate on the plan either way.)
+        // The vguard widening keeps the rule verbatim: a min/max(text)
+        // reading the KEY column itself stays refused (its lane is the
+        // dict/intern side channel, not a foldable Datum lane).
         if plan.cols.iter().any(|&c| c == key) {
             return refused(RefuseReason::MultiKeyShape);
         }

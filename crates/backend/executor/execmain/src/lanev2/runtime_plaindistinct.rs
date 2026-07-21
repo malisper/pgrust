@@ -79,6 +79,10 @@ struct RuntimePlainDistinctShared {
     query_text: String,
     eflags: i32,
     spec: Arc<PlainPdSpec>,
+    /// SE-T2AGG CAR A: the SELECT-DISTINCT sub-arm (emit the merged VALUES;
+    /// the worker key staging may sit at an arbitrary scan column —
+    /// `spec.att`). False = the historical count(DISTINCT) arm, untouched.
+    sd_values: bool,
     /// Helpers whose binder validate() refused (before any claim).
     refused: AtomicUsize,
     /// Helpers that bound and entered the drive.
@@ -635,8 +639,18 @@ fn build_worker_exec(payload: &Arc<RuntimePlainDistinctShared>) -> PgResult<()> 
                     let estate = &mut d.estate;
                     let ss = plain_worker_scan(d.planstate.as_mut())?;
                     // The serial drive's direct-key staging probe, per worker
-                    // executor (arming decides staging).
-                    let key_direct = ::nodeseqscan::seq_scan_sortkey_direct(ss, estate);
+                    // executor (arming decides staging). SE-T2AGG CAR A: the
+                    // SELECT-DISTINCT sub-arm additionally proves the
+                    // explicit-attnum arm (the unprojected physical-tlist
+                    // shape — the leader proved the same ladder); the
+                    // historical count(DISTINCT) arm is byte-untouched.
+                    let key_direct = ::nodeseqscan::seq_scan_sortkey_direct(ss, estate)
+                        || (payload.sd_values
+                            && ::nodeseqscan::seq_scan_key_direct_att(
+                                ss,
+                                estate,
+                                payload.spec.att,
+                            ));
                     let key_bytes = key_direct && payload.spec.is_bytes();
                     if key_bytes {
                         // Arm the dict-coded key lane when the bank serves it
@@ -699,6 +713,21 @@ fn teardown_worker_exec(clean: bool) -> PgResult<()> {
 fn plaindistinct_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || std::env::var("PGRUST_RUNTIME_PLAINDISTINCT").as_deref() != Ok("0"))
+}
+
+/// SE-T2AGG CAR A arm switch (`PGRUST_LANE_V2_DISTINCT_PLAINSHAPE`, default
+/// OFF; ON iff exactly `1`/`on`). SAME spelling as the m5_suppress probe
+/// half (`distinct_plainshape_enabled`) — both read sites flip together
+/// (knob-coherence law); the family kill `PGRUST_RUNTIME_PLAINDISTINCT=0`
+/// above still disarms everything.
+fn selectdistinct_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&ON, || {
+        matches!(
+            std::env::var("PGRUST_LANE_V2_DISTINCT_PLAINSHAPE").as_deref(),
+            Ok("1") | Ok("on")
+        )
+    })
 }
 
 #[cold]
@@ -819,7 +848,166 @@ pub(super) fn try_own_plain_distinct_runtime<'mcx>(
     }
 
     // --- Engage.
-    engage(agg, estate, rt, dop, total_granules, starts, spec, scan_node, force_set)
+    engage(agg, estate, rt, dop, total_granules, starts, spec, scan_node, force_set, false)
+}
+
+/// SE-T2AGG CAR A: the plain SELECT-DISTINCT sub-arm — `Agg(AGG_HASHED,
+/// zero aggregates) → SeqScan(pgrcolumnar)`, the shape the serial hash-agg
+/// breaker owns today (matrix row distinct-plain-shape: "UNKEYED until the
+/// hash shape is wired"). Reuses this module's whole worker/combine
+/// pipeline (the distinct VALUES are the answer); the adopt tail publishes
+/// the merged values as the sink's emit buffers instead of installing a
+/// count(DISTINCT) set. `Ok(false)` = refused or fell back (nothing
+/// consumed; the serial arms run byte-identically). `Ok(true)` = the arm
+/// owns the node (emit adopted OR the node was already drained) — the
+/// caller's own pull drains `agg_retrieve_hash_table`'s sink branch.
+pub(super) fn try_own_plain_selectdistinct_runtime<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<bool> {
+    // Cheap static gates first: the sub-arm knob (default OFF), the family
+    // kill, and the zero-aggregate shape precheck (per-pull cost discipline
+    // — the full spec derivation runs only past these).
+    if !selectdistinct_enabled() || !plaindistinct_enabled() {
+        return Ok(false);
+    }
+    if !::nodeagg::agg_is_hashed(agg)
+        || agg.plan.numCols != 1
+        || agg.plan.plan.targetlist.len() != 1
+        || !agg.plan.plan.qual.is_nil()
+    {
+        return Ok(false);
+    }
+    let dop = super::router::arm_dop(super::router::ArmClass::Distinct);
+    if dop <= 0 || !runtime::runtime_enabled() {
+        return Ok(false);
+    }
+    let Some(rt) = runtime::global() else { return Ok(false) };
+    lane_trace("runtime-plaindistinct: probed (select-distinct)");
+
+    let ea = runtime_instr::ea_active(estate);
+    let node_id = agg.plan.plan.plan_node_id;
+    // v1: EXPLAIN ANALYZE refuses (the serial arm serves EA,
+    // value-identically; the transparency record names this gate).
+    if ea {
+        refused(estate, true, node_id, "ea not threaded (select-distinct v1)");
+        return Ok(false);
+    }
+    if !seq_scan_fusible(ss, estate)? || !::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
+        refused(estate, ea, node_id, "scan not fusible/cbstore");
+        return Ok(false);
+    }
+    if estate.es_epq_active {
+        return Ok(false);
+    }
+    if parallel::IsParallelWorker() || xact::IsInParallelMode() {
+        refused(estate, ea, node_id, "already in parallel machinery");
+        return Ok(false);
+    }
+    // Plan shape below the Agg: exactly the SeqScan child (the workers
+    // receive the scan subtree as their pstmt).
+    let Some(scan_node) = agg.plan.plan.lefttree else { return Ok(false) };
+    if scan_node.node_tag() != NodeTag::T_SeqScan {
+        refused(estate, ea, node_id, "scan node tag");
+        return Ok(false);
+    }
+    let scan_plan = scan_node.as_seq_scan().expect("SeqScan tag");
+    // The staged key column = the Agg's one grouping column (an arbitrary
+    // scan OUTPUT column — AGG_HASHED keeps the scan's physical tlist);
+    // its type from the scan tlist's bare Var at that position (anything
+    // else refuses fail-closed).
+    let key_att = match agg.plan.grpColIdx {
+        [c] if *c >= 1 => (*c - 1) as u16,
+        _ => {
+            refused(estate, ea, node_id, "group key census (select-distinct)");
+            return Ok(false);
+        }
+    };
+    let Some(key_typ) = scan_plan
+        .scan
+        .plan
+        .targetlist
+        .nth(key_att as usize)
+        .as_target_entry()
+        .and_then(|te| te.expr.as_var())
+        .map(|v| v.vartype)
+    else {
+        refused(estate, ea, node_id, "scan key col not a bare Var");
+        return Ok(false);
+    };
+    let Some(spec) = ::nodeagg::plainpd::plain_sd_derive_spec(agg, key_typ)? else {
+        refused(estate, ea, node_id, "spec derivation (select-distinct)");
+        return Ok(false);
+    };
+    debug_assert_eq!(spec.att, key_att);
+    // The direct staged-key feed is the whole accept path: prove it on the
+    // leader's scan (workers re-prove on their own executors) — the sortkey
+    // resolution for projected single-column shapes, the explicit-attnum
+    // arm for the unprojected physical-tlist shape.
+    if !::nodeseqscan::seq_scan_sortkey_direct(ss, estate)
+        && !::nodeseqscan::seq_scan_key_direct_att(ss, estate, key_att)
+    {
+        refused(estate, ea, node_id, "key staging not direct");
+        return Ok(false);
+    }
+    // No params, either kind (the binder refuses Params; the worker pstmt
+    // carries none).
+    if estate.es_param_list_info.is_some_and(|p| !p.is_empty()) {
+        refused(estate, ea, node_id, "extern params");
+        return Ok(false);
+    }
+    let Some(leader_pstmt) = estate.es_plannedstmt else { return Ok(false) };
+    if leader_pstmt.paramExecTypes.iter().next().is_some() {
+        refused(estate, ea, node_id, "exec params");
+        return Ok(false);
+    }
+    if !super::runtime_scan::exprs_parallel_safe(scan_plan.scan.plan.qual.iter())?
+        || !super::runtime_scan::exprs_parallel_safe(scan_plan.scan.plan.targetlist.iter())?
+    {
+        refused(estate, ea, node_id, "parallel-unsafe scan exprs");
+        return Ok(false);
+    }
+    if !estate.es_snapshot.as_deref().is_some_and(::types_snapshot::IsMVCCSnapshot) {
+        refused(estate, ea, node_id, "non-MVCC snapshot");
+        return Ok(false);
+    }
+    let policy = parallel::query_task_policy_probe();
+    if policy.has_params || policy.temp_state || policy.serializable || policy.pending_invalidations
+    {
+        refused(estate, ea, node_id, "binder policy sources");
+        return Ok(false);
+    }
+
+    // --- Geometry: enough granules to be worth a gang.
+    let Some((total_granules, starts)) = ::nodeseqscan::seq_scan_cb_granule_geometry(ss, estate)?
+    else {
+        return Ok(false);
+    };
+    if total_granules < super::runtime_scan::min_granules().max(2 * dop as u64) {
+        refused(estate, ea, node_id, "granule floor");
+        return Ok(false);
+    }
+    let dop = super::runtime_scan::elastic_dop(dop, total_granules);
+    if ::nodeagg::agg_is_done(agg) {
+        return Ok(true);
+    }
+
+    // --- Engage (the shared ceremony; the emit_values tail adopts the
+    // merged values as sink emit buffers).
+    let engaged = engage(
+        agg,
+        estate,
+        rt,
+        dop,
+        total_granules,
+        starts,
+        spec,
+        scan_node,
+        /* force_set = */ false,
+        /* emit_values = */ true,
+    )?;
+    Ok(engaged.is_some())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -833,6 +1021,7 @@ fn engage<'mcx>(
     spec: Arc<PlainPdSpec>,
     scan_node: ::types_nodes::node_tree::Node<'mcx>,
     force_set: bool,
+    emit_values: bool,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     ensure_hooks_registered();
     crate::execparallel::register_parallel_query_main();
@@ -855,6 +1044,7 @@ fn engage<'mcx>(
         query_text: estate.es_sourceText.unwrap_or("").to_string(),
         eflags: estate.es_top_eflags,
         spec: Arc::clone(&spec),
+        sd_values: emit_values,
         refused: AtomicUsize::new(0),
         started: AtomicUsize::new(0),
         exited: AtomicUsize::new(0),
@@ -868,7 +1058,17 @@ fn engage<'mcx>(
     });
 
     xact::EnterParallelMode();
-    let engaged = engage_ceremony(agg, estate, rt, dop, total_granules, starts, &payload, force_set);
+    let engaged = engage_ceremony(
+        agg,
+        estate,
+        rt,
+        dop,
+        total_granules,
+        starts,
+        &payload,
+        force_set,
+        emit_values,
+    );
     xact::ExitParallelMode();
     engaged
 }
@@ -930,6 +1130,7 @@ fn engage_ceremony<'mcx>(
     starts: Vec<u64>,
     payload: &Arc<RuntimePlainDistinctShared>,
     force_set: bool,
+    emit_values: bool,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     let pcxt = parallel::CreateParallelContext("postgres", "pgrust_runtime_plaindistinct_main", dop)?;
     let mut submitted: Option<runtime::RgHandle> = None;
@@ -1113,6 +1314,19 @@ fn engage_ceremony<'mcx>(
             stats::tick_owned(ShapeClass::AggBuild);
             let n: usize = parts.iter().map(|m| m.len()).sum();
             lane_trace(&format!("runtime-plaindistinct: complete, distinct={n}"));
+            // SE-T2AGG CAR A (plain SELECT DISTINCT): the merged VALUES are
+            // the answer — adopt them as the sink's published emit (one key
+            // column; every retrieve path drains it through
+            // agg_retrieve_hash_table's sink branch). `Some(None)` is the
+            // "arm owns the node, nothing consumed yet" marker: the caller
+            // returns to its own pull, which drains the adopted emit.
+            if emit_values {
+                let bufs =
+                    ::nodeagg::plainpd::plain_sd_emit_bufs(&payload.spec, &parts, seen_null);
+                ::nodeagg::sink::agg_sink_adopt_emit(agg, bufs, 1, None);
+                trace_feed("plain-select-distinct runtime drive engaged");
+                return Ok(Some(None));
+            }
             // Adopt: the serial drives' exact sequence — arm set-mode (the
             // skip-sort shape), fresh pergroups, install the replay-only
             // merged set, ordinary set-mode finalize (count shortcut,

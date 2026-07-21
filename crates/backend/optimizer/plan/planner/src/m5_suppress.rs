@@ -1024,6 +1024,14 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     // the sink refuses — suppressing it was a measured serial-instead-of-
     // legacy false positive (rowflip measure, 2.66x at dop4). Keep Gather.
     if !parse.distinctClause.is_nil() {
+        // SE-T2AGG CAR A (knob-gated, default OFF — block doc below): the
+        // plain single-column shape keys the runtime plain-distinct sink's
+        // SELECT-DISTINCT sub-arm; every miss keeps the refusal verbatim.
+        if let Some(verdict) = classify_distinct_plain(
+            run, parse, rti, rte.relid, rel_id, is_cb, has_quals, rel_rows, rel_pages,
+        )? {
+            return Ok(verdict);
+        }
         return Ok(false);
     }
 
@@ -1224,6 +1232,9 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     let mut n_const = 0usize;
     let mut key_refs: Vec<u32> = Vec::new();
     let mut const_key_refs: Vec<u32> = Vec::new();
+    // SE-T2AGG CAR B: the key Vars' attnos (the stale-cell refusal input —
+    // a min/max(text) over a GROUP KEY column keeps the refusal).
+    let mut key_attnos: Vec<i16> = Vec::new();
     for gc_node in &parse.groupClause {
         let Some(gc) = gc_node.as_sort_group_clause() else { return Ok(false) };
         let Some(tle) = tle_by_sortgroupref(parse, gc.tleSortGroupRef) else {
@@ -1236,6 +1247,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             continue;
         }
         let Some(v) = key_var(tle.expr, rti) else { return Ok(false) };
+        key_attnos.push(v.varattno);
         if is_int_family(v.vartype) {
             // covered
         } else if is_text_family(v.vartype) && v.varcollid == DEFAULT_COLLATION_OID {
@@ -1333,10 +1345,34 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     // AGG_POLY knob); everything else keeps GROUPED_SINK_AGGS verbatim.
     let passenger_list =
         if n_count_distinct > 0 { distinct_passenger_aggs() } else { GROUPED_SINK_AGGS };
+    let mut n_strminmax = 0usize;
     for e in &passengers {
-        if !is_whitelisted_agg(*e, rti, passenger_list) {
-            return Ok(false);
+        if is_whitelisted_agg(*e, rti, passenger_list) {
+            continue;
         }
+        // SE-T2AGG CAR B (knob-gated, default OFF — block doc below):
+        // min/max(text) passengers over default-collation bare Vars, the
+        // grouped sink's new VarlenaMinMax vocabulary. Fail-closed
+        // exclusions: SINGLE-key shapes only (the sink hosts the K2
+        // single-int and C2 single-text drains; the packed multi-key feed
+        // refuses vguard plans), never beside count(DISTINCT) (the distinct
+        // sink's vocab stays exact — the se-aggpoly suppress-then-refuse
+        // lesson), and never inside the SE-MKTEXT two-key-text family (the
+        // mk finish above would key a combination the text cars never
+        // proved).
+        if n_count_distinct == 0
+            && !mk_text_family
+            && parse.groupClause.len() == 1
+            && agg_strminmax_enabled()
+        {
+            if let Some(arg) = grouped_str_minmax_arg(*e, rti) {
+                if !key_attnos.contains(&arg) {
+                    n_strminmax += 1;
+                    continue;
+                }
+            }
+        }
+        return Ok(false);
     }
 
     // Sort/limit composition: none at all (plain grouped emit), or the
@@ -1346,6 +1382,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     // uncovered in bootstrap).
     let mut mk_freeze = false;
     let mut bare_limit = false;
+    let mut full_sort = false;
     let topn = if parse.sortClause.is_nil() && parse.limitCount.is_none() {
         false
     } else if parse.sortClause.is_nil()
@@ -1399,6 +1436,30 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             return Ok(false);
         }
         true
+    } else if parse.sortClause.len() == 1
+        && parse.limitCount.is_none()
+        && parse.limitOffset.is_none()
+        && agg_sort_nolimit_enabled()
+    {
+        // SE-T2AGG CAR C (knob-gated, default OFF — block doc below): the
+        // topn shape WITHOUT the bound (cb q8 class, ORDER BY count(*) no
+        // LIMIT). Same single-agg sort-key vocabulary law as the topn arm;
+        // the suppressed serial plan keeps its REAL Sort above the Agg (the
+        // unbounded sink_topn_arm declines into the plain full drain and
+        // the Sort consumes it), so this admits the COMPOSITION only.
+        let Some(sc) = parse.sortClause.nth(0).as_sort_group_clause() else {
+            return Ok(false);
+        };
+        let Some(tle) = tle_by_sortgroupref(parse, sc.tleSortGroupRef) else {
+            return Ok(false);
+        };
+        if !is_whitelisted_agg(tle.expr, rti, passenger_list)
+            && !is_count_distinct_int(tle.expr, rti)
+        {
+            return Ok(false);
+        }
+        full_sort = true;
+        false
     } else {
         return Ok(false);
     };
@@ -1430,6 +1491,60 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         return Ok(false);
     }
 
+    // SE-T2AGG knob-path finishes (BEFORE the sibling knob finishes: shapes
+    // only these knobs admit must route through their own trace tags — the
+    // textdistinct/mktext lanes keep their proven admission domains).
+    if n_strminmax > 0 {
+        // Fail-closed: min/max(text) passengers ride the plain grouped /
+        // topn compositions only (the freeze, bare-LIMIT, const-key, and
+        // no-limit-sort combinations are unproven with byref text states;
+        // count(DISTINCT) + mk-text-family were excluded at admission).
+        if full_sort || bare_limit || mk_freeze || n_const > 0 {
+            return Ok(false);
+        }
+        let class = if topn {
+            CoverClass::CbGroupedAggTopN
+        } else if n_text > 0 {
+            CoverClass::CbGroupedAggTextKey
+        } else {
+            CoverClass::CbGroupedAggIntKeys
+        };
+        return finish_knob_path(
+            run,
+            "strminmax",
+            if topn { "strminmax-grouped-topn" } else { "strminmax-grouped-agg" },
+            class_guard(class),
+            rte.relid,
+            ngroups,
+            rel_rows,
+            rel_pages,
+        );
+    }
+    if full_sort {
+        // Fail-closed: the const-key emit and the mk-text ceiling path stay
+        // outside the no-limit sort composition (unproven combinations; the
+        // groupby_high hold above already bounds the serial Sort's input).
+        if n_const > 0 || mk_text_family {
+            return Ok(false);
+        }
+        let class = if n_count_distinct > 0 {
+            CoverClass::CbDistinctIntKeys
+        } else if n_text > 0 {
+            CoverClass::CbGroupedAggTextKey
+        } else {
+            CoverClass::CbGroupedAggIntKeys
+        };
+        return finish_knob_path(
+            run,
+            "aggsortnl",
+            if n_count_distinct > 0 { "sortnl-grouped-distinct" } else { "sortnl-grouped-agg" },
+            class_guard(class),
+            rte.relid,
+            ngroups,
+            rel_rows,
+            rel_pages,
+        );
+    }
     // SE-TEXTDISTINCT (band 86001): text-keyed grouped count(DISTINCT) is
     // reachable here ONLY knob-ON (the n_count_distinct && n_text gate above
     // returns Ok(false) at defaults). It rides the SAME runtime distinct
@@ -2472,6 +2587,231 @@ fn finish_multikey_text(
     finish_knob_path(run, "mktext", label, guard, relid, ngroups, rows, pages)
 }
 
+// ===========================================================================
+// SE-T2AGG (night/tier2-agg-cars): three tier-2 coverage cars, ONE fenced
+// block (sibling probe lanes add their own blocks — keep this region
+// contiguous; the classify_covered call sites are one-liner delegations).
+//
+//   CAR A  distinct-plain-shape (`classify_distinct_plain`): plain
+//          `SELECT DISTINCT col` plans HashAggregate (AGG_HASHED, zero
+//          aggregates), which no runtime sink admitted — the m5-integration
+//          r2 suppress-then-refuse false positive re-keyed the bootstrap
+//          class away and left the shape UNKEYED (matrix row
+//          distinct-plain-shape). The runtime PLAIN-distinct sink's kernels
+//          already collect int + canonical-bytes text distinct VALUES
+//          (plainpd.rs — the distinct-text-date-args admission note); the
+//          new executor sub-arm (runtime_plaindistinct.rs
+//          `try_own_plain_selectdistinct_runtime`) reuses that pipeline and
+//          adopts the merged set as emit rows. Knob:
+//          `PGRUST_LANE_V2_DISTINCT_PLAINSHAPE` (default OFF; ON iff `1|on`),
+//          same spelling read by the executor sub-arm (knob-coherence law),
+//          plus the engine-car kill `PGRUST_RUNTIME_PLAINDISTINCT` mirrored
+//          here (a keyed shape whose arm is disarmed would land on serial).
+//          COMPOSITION NOTE (assembly): night/subquery-admission lands the
+//          SERIAL half of the same gap (zero-transition grouping in the
+//          lane, `PGRUST_LANE_V2_GROUPONLY`) — the halves compose: this
+//          probe only suppresses the Gather; a runtime sub-arm refusal
+//          falls to whatever serial arm owns the shape (theirs once landed
+//          — strictly better than the per-row breaker), never a
+//          conflicting route.
+//
+//   CAR B  gap:agg-min-text (`grouped_str_minmax_arg`): cb q22-class text-key
+//          grouped agg with MIN(URL)/MIN(Title) — GROUPED_SINK_AGGS is
+//          int-only and the runtime agg sink's spec derivation
+//          (sink_resolve_combines) refused text min/max. The sink gains a
+//          knob-gated VarlenaMinMax vocabulary entry (nodeagg sink.rs;
+//          canonical-bytes survivor, memcmp-tier collations only, the
+//          merge.rs VarlenaMinMax kernel mirrored); this probe admits
+//          min/max(text) PASSENGERS under the SAME spelling
+//          (`PGRUST_LANE_V2_AGG_STRMINMAX`, default OFF; ON iff `1|on`).
+//          Fail-closed: default-collation (OID 100) bare text Vars only —
+//          the only collation the probe recognizes as deterministic; the
+//          engine's `str_collation_safe` is the stricter runtime twin.
+//
+//   CAR C  gap:agg-orderby-nolimit (`full_sort` composition): cb q8-class
+//          grouped agg + `ORDER BY count(*)` with NO LIMIT — the topn arm's
+//          `limitCount.is_some()` binding left the shape on the final
+//          `Ok(false)`. The suppressed serial plan is `Sort <- HashAgg <-
+//          SeqScan` (or `Sort <- Agg(SORTED) <- Sort <- SeqScan` for the
+//          count(DISTINCT) class): the runtime sinks already engage with the
+//          Agg below a Sort root (the q36 decorated-root precedent), the
+//          unbounded `sink_topn_arm` declines into the plain full drain, and
+//          the REAL serial Sort above orders the finalized groups — the
+//          decorated-root pattern WITHOUT the bound; no executor change.
+//          Knob: `PGRUST_LANE_V2_AGG_SORT_NOLIMIT` (default OFF; ON iff
+//          `1|on`). NOTE for assembly: the tpch-cars agent's CAR 1
+//          generalizes root decoration — this is the agg-specific narrow
+//          case behind its own switch; unify at merge if theirs subsumes.
+//
+// All three are knob-path finishes (finish_knob_path) — NOT BOOTSTRAP_MATRIX
+// classes, so the tsv route_to columns, the drift guards, and the DEFAULT
+// census are untouched; OFF takes the identical pre-car refusal
+// byte-for-byte.
+// ===========================================================================
+
+/// The tier-2 cars' shared default-OFF spelling rule, factored pure for
+/// exhaustive unit tests (the K1-latemat / scanpass idiom): ON iff the value
+/// is exactly `1` or `on`; every other spelling (incl. unset, `0`, `off`,
+/// typos) fails safe to OFF.
+fn tier2_car_spelling_on(v: Option<&str>) -> bool {
+    matches!(v, Some("1") | Some("on"))
+}
+
+/// CAR A probe knob (`PGRUST_LANE_V2_DISTINCT_PLAINSHAPE`, default OFF).
+fn distinct_plainshape_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        tier2_car_spelling_on(
+            std::env::var("PGRUST_LANE_V2_DISTINCT_PLAINSHAPE").as_deref().ok(),
+        )
+    })
+}
+
+/// CAR A engine-kill coherence (the mk_text_agg_cars_live precedent): the
+/// runtime plain-distinct sink family's own kill
+/// (`PGRUST_RUNTIME_PLAINDISTINCT=0`, default ON — runtime_plaindistinct.rs
+/// spelling verbatim) must be live for the keyed shape, or the suppression
+/// would land on the serial hash-agg breaker (risk P1's suppress-then-
+/// unarmed direction).
+fn plaindistinct_engine_live() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_PLAINDISTINCT").as_deref() != Ok("0"))
+}
+
+/// PROVISIONAL floor for the CAR A knob path: the shared distinct-family
+/// economics (the textdistinct guard verbatim — same sink family, same
+/// engagement shape). The fleet letter owns re-measuring.
+fn distinct_plainshape_guard() -> FloorGuard {
+    FloorGuard { min_dop: 12, low_dop_max_rows: 3_000_000.0, ..NO_GUARD }
+}
+
+/// CAR B knob (`PGRUST_LANE_V2_AGG_STRMINMAX`, default OFF). SAME spelling
+/// as the executor half (nodeagg sink.rs `sink_strminmax_enabled` — the
+/// resolve-combines / emit-plan vocabulary widening): both read sites flip
+/// together, the AGG_POLY knob-coherence law.
+fn agg_strminmax_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        tier2_car_spelling_on(std::env::var("PGRUST_LANE_V2_AGG_STRMINMAX").as_deref().ok())
+    })
+}
+
+/// CAR C knob (`PGRUST_LANE_V2_AGG_SORT_NOLIMIT`, default OFF). Planner-only
+/// (suppression-widening; the executor composition already exists).
+fn agg_sort_nolimit_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        tier2_car_spelling_on(std::env::var("PGRUST_LANE_V2_AGG_SORT_NOLIMIT").as_deref().ok())
+    })
+}
+
+/// min(text) 2145 / max(text) 2129 — pg_proc OIDs of record (vendored REL
+/// 18.3 pg_proc.dat; transfns text_smaller 459 / text_larger 458).
+const F_MIN_TEXT: u32 = 2145;
+const F_MAX_TEXT: u32 = 2129;
+
+/// CAR B shape law: a bare min/max(text) Aggref over a default-collation
+/// text/varchar Var on the scanned rel — `Some(arg attno)` when admitted
+/// (the caller additionally refuses args that ARE group-key columns: the
+/// sink's stale-cell rule keeps the dict/intern key column out of the
+/// fold's lane reads). Fail-closed on collation weirdness: BOTH the Var's
+/// collation and the Aggref's inputcollid must be the deterministic default
+/// (OID 100) — the only collation the probe recognizes (the
+/// is_count_distinct_any contract); the runtime sink's `str_collation_safe`
+/// gate is the stricter twin (memcmp tier), so probe ⊂ walk holds. bpchar
+/// never reaches here (arg type discipline).
+fn grouped_str_minmax_arg(expr: Node<'_>, rti: usize) -> Option<i16> {
+    let agg = expr.as_aggref()?;
+    if !matches!(agg.aggfnoid, F_MIN_TEXT | F_MAX_TEXT) {
+        return None;
+    }
+    if agg.inputcollid != DEFAULT_COLLATION_OID {
+        return None;
+    }
+    if !aggref_plain_typed(agg, rti, is_text_family) {
+        return None;
+    }
+    // The bare-Var arg (proven by aggref_plain_typed) must itself carry the
+    // deterministic default collation.
+    let arg_tle = agg.args.nth(0).as_target_entry()?;
+    let v = key_var(arg_tle.expr, rti)?;
+    (v.varcollid == DEFAULT_COLLATION_OID).then_some(v.varattno)
+}
+
+/// CAR A classifier: plain `SELECT DISTINCT <col>` over one pgrcolumnar rel
+/// — the AGG_HASHED zero-aggregate HashAggregate shape. `None` = shape miss
+/// or knob off: the caller takes the historical keep-Gather refusal
+/// byte-for-byte. NARROW (v1, fail-closed): no quals (the sink stages the
+/// distinct column as scan col 0 — the plain count(DISTINCT) discipline),
+/// no sort/limit/offset, EXACTLY one distinct column = the single tlist
+/// entry, a bare int-family Var or default-collation text/varchar Var.
+#[allow(clippy::too_many_arguments)]
+fn classify_distinct_plain<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    parse: &Query<'mcx>,
+    rti: usize,
+    relid: u32,
+    rel_id: types_pathnodes::RelId,
+    is_cb: bool,
+    has_quals: bool,
+    rel_rows: f64,
+    rel_pages: f64,
+) -> PgResult<Option<bool>> {
+    if !distinct_plainshape_enabled() || !plaindistinct_engine_live() {
+        return Ok(None);
+    }
+    if !is_cb
+        || has_quals
+        || parse.hasAggs
+        || !parse.groupClause.is_nil()
+        || !parse.sortClause.is_nil()
+        || parse.limitCount.is_some()
+        || parse.limitOffset.is_some()
+    {
+        return Ok(None);
+    }
+    if parse.distinctClause.len() != 1 || parse.targetList.len() != 1 {
+        return Ok(None);
+    }
+    let Some(dc) = parse.distinctClause.nth(0).as_sort_group_clause() else {
+        return Ok(None);
+    };
+    let Some(tle) = parse.targetList.nth(0).as_target_entry() else {
+        return Ok(None);
+    };
+    // The one distinct clause must name the one tlist entry.
+    if tle.ressortgroupref == 0 || tle.ressortgroupref != dc.tleSortGroupRef {
+        return Ok(None);
+    }
+    let Some(v) = key_var(tle.expr, rti) else { return Ok(None) };
+    let type_ok = is_int_family(v.vartype)
+        || (is_text_family(v.vartype) && v.varcollid == DEFAULT_COLLATION_OID);
+    if !type_ok {
+        return Ok(None);
+    }
+    // NDV estimate for the floor + the groupby_high hold (§10): the leader
+    // emit materializes every distinct value, so the radix-exchange hold's
+    // boundary applies unchanged.
+    let input_rows = run.root.rel(rel_id).rows.max(1.0);
+    let expr_id = run.intern_expr(tle.expr);
+    let ngroups = crate::selfuncs::estimate_num_groups(run, &[(expr_id, tle.expr)], input_rows)?;
+    if ngroups >= groupby_high_floor() {
+        return Ok(None);
+    }
+    Ok(Some(finish_knob_path(
+        run,
+        "distinctplain",
+        "plain-select-distinct",
+        distinct_plainshape_guard(),
+        relid,
+        ngroups,
+        rel_rows,
+        rel_pages,
+    )?))
+}
+
+// --------------------------- end SE-T2AGG block ----------------------------
+
 // ---------------------------------------------------------------------------
 // Expression helpers.
 // ---------------------------------------------------------------------------
@@ -3438,5 +3778,51 @@ mod tests {
                 "route-to drift for {key}: TSV vs BOOTSTRAP_MATRIX"
             );
         }
+    }
+
+    /// SE-T2AGG (night/tier2-agg-cars): the three tier-2 car knobs are
+    /// DEFAULT OFF and only `1`/`on` arm them — every other spelling fails
+    /// safe to today's behaviour (the scanpass default-OFF idiom). Pins the
+    /// inert-at-default guarantee for CAR A (distinct-plain-shape), CAR B
+    /// (gap:agg-min-text), and CAR C (gap:agg-orderby-nolimit).
+    #[test]
+    fn tier2_agg_car_knobs_are_default_off() {
+        assert!(!tier2_car_spelling_on(None), "unset must be OFF (default)");
+        for v in ["0", "off", "", "true", "ON", "yes"] {
+            assert!(!tier2_car_spelling_on(Some(v)), "spelling {v:?} must fail safe to OFF");
+        }
+        assert!(tier2_car_spelling_on(Some("1")));
+        assert!(tier2_car_spelling_on(Some("on")));
+        // The live getters memoize the process env; in the test binary the
+        // vars are unset, so all three cars resolve OFF.
+        assert!(!distinct_plainshape_enabled(), "CAR A must be OFF at default");
+        assert!(!agg_strminmax_enabled(), "CAR B must be OFF at default");
+        assert!(!agg_sort_nolimit_enabled(), "CAR C must be OFF at default");
+    }
+
+    /// SE-T2AGG CAR A engine-kill coherence: the runtime plain-distinct sink
+    /// family's kill (`PGRUST_RUNTIME_PLAINDISTINCT`, default ON) resolves
+    /// LIVE in a kill-free process — the probe's coherence gate is inert
+    /// unless an attribution kill is thrown (the mk_text_agg_cars_live
+    /// pattern).
+    #[test]
+    fn tier2_plaindistinct_engine_coherence_defaults_live() {
+        assert!(plaindistinct_engine_live());
+    }
+
+    /// SE-T2AGG CAR B: the min/max(text) OIDs of record (vendored REL 18.3
+    /// pg_proc.dat) — a silent renumber would move the car onto the wrong
+    /// aggregates.
+    #[test]
+    fn tier2_strminmax_oids_of_record() {
+        assert_eq!(F_MIN_TEXT, 2145);
+        assert_eq!(F_MAX_TEXT, 2129);
+        assert!(!GROUPED_SINK_AGGS.contains(&F_MIN_TEXT), "text min/max stays knob-gated");
+        assert!(!GROUPED_SINK_AGGS.contains(&F_MAX_TEXT), "text min/max stays knob-gated");
+        assert!(
+            !DISTINCT_PASSENGER_AGGS.contains(&F_MIN_TEXT)
+                && !DISTINCT_PASSENGER_AGGS_POLY.contains(&F_MIN_TEXT),
+            "the distinct sink's vocabulary never admits text min/max"
+        );
     }
 }

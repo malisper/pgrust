@@ -2825,6 +2825,43 @@ fn sink_drain_range<'mcx>(
                 "fallback rows in a sink accept batch",
             )));
         }
+        // SE-T2AGG CAR B: guarded (vguard/uguard) plans prove the batch's
+        // SELECTED rows inline BEFORE any consumer touches a varlena payload
+        // (the serial feed's check_guards discipline; unselected prewhere
+        // cells may be stale, so the domain is the qual selection). The
+        // serial arm DEMOTES to its checked per-row program on a failed
+        // proof; the sink has no per-row leg, so a demote is a REFUSAL —
+        // RG abort → serial whole-attempt rerun (the mk numeric-demote
+        // discipline). Unreachable unless the vguard admission
+        // (sink_vguard_plan_ok, knob-gated default OFF) let the plan in.
+        {
+            let plan =
+                ::nodeagg::agg_lanefold_plan(agg).expect("sink drain without a fold plan");
+            if plan.guarded {
+                let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                    .expect("sink drain requires the armed SoA");
+                let nwords = (n as usize).div_ceil(64);
+                let mut sel = [0u64; ::exectuples::SOA_BM_WORDS];
+                match ::nodeseqscan::seq_scan_batch_qual_sel(ss) {
+                    Some(q) => sel[..nwords].copy_from_slice(&q[..nwords]),
+                    None => sel[..nwords].fill(u64::MAX),
+                }
+                if n % 64 != 0 {
+                    sel[nwords - 1] &= (1u64 << (n % 64)) - 1;
+                }
+                // SAFETY: selected rows of an all-lane batch carry live
+                // deformed lane values for every plan column (the staging
+                // contract the serial proof site rides — survivor windows'
+                // completing deform filled every prefix column).
+                let demote = unsafe {
+                    ::lanefold::check_guards(plan, soa, &sel[..nwords], |_| None)
+                } == ::lanefold::GuardCheck::Demote;
+                if demote {
+                    lane_trace("runtime-agg: vguard proof demoted — refusing to serial");
+                    return Err(AcceptFail::Budget);
+                }
+            }
+        }
         if sink.drain == SinkDrain::Mk {
             // The serial lane's own packed multi-key batch (survivors →
             // pack pre-pass → mk1/mk2 compact probe → whole-batch fold).
@@ -3230,8 +3267,11 @@ fn arm_sink_build<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<ArmedDrain> {
     let shape_err = ::nodeagg::sink::sink_shape_error;
+    // SE-T2AGG CAR B: the vguard-only widening mirrors the leader's gate
+    // exactly (F1 leader/worker-verdict law; the knob is process-constant).
     let plan_ok = ::nodeagg::agg_lanefold_plan(agg)
-        .is_some_and(|p| !p.guarded && p.vguards.is_empty() && p.resid.is_empty());
+        .is_some_and(|p| !p.guarded && p.vguards.is_empty() && p.resid.is_empty())
+        || super::sink_vguard_plan_ok(agg, ss);
     if !plan_ok || ::nodeagg::agg_lanefold_has_resid(agg) {
         return Err(shape_err("worker fold plan diverged from the leader's"));
     }
@@ -3309,6 +3349,13 @@ fn arm_sink_build<'mcx>(
         return Ok(ArmedDrain::ExprKey(xk));
     }
     super::arm_scan_staging(ss, estate, ScanFeedShape::HashAggFold { agg })?;
+    // SE-T2AGG CAR B: the worker mirrors the leader's vguard columnar
+    // re-arm (direct-index staging law; F1 leader/worker-verdict).
+    if super::sink_vguard_plan_ok(agg, ss)
+        && !super::sink_rearm_vguard_columnar(agg, ss, estate)
+    {
+        return Err(shape_err("worker vguard columnar staging refused"));
+    }
     if sink.drain == SinkDrain::Mk {
         // Packed multi-key arm: the same decide the leader probed, this time
         // arming the compact table under the sink cap. Every divergence from
@@ -3350,7 +3397,7 @@ fn arm_sink_build<'mcx>(
         }
         return Ok(ArmedDrain::Mk(mk));
     }
-    if super::scan_k2_shape(agg, ss, estate).is_none() {
+    if super::scan_k2_shape_sink(agg, ss, estate).is_none() {
         return Err(shape_err("worker K2 shape diverged from the leader's"));
     }
     // Dict-group staging on the K2 build (the q16 class): the same mode
@@ -4128,8 +4175,12 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     }
     // Unprojected K2 class only in phase 1 (exprkey/Reduced/Multi are the
     // next cars); scan projection means the key is computed — refuse.
+    // SE-T2AGG CAR B: vguard-only guarded plans (min/max(text) passengers)
+    // admit knob-ON through `sink_vguard_plan_ok` — the drain proves each
+    // batch inline (check_guards) and a demote REFUSES to the serial rerun.
     let plan_ok = ::nodeagg::agg_lanefold_plan(agg)
-        .is_some_and(|p| !p.guarded && p.vguards.is_empty() && p.resid.is_empty());
+        .is_some_and(|p| !p.guarded && p.vguards.is_empty() && p.resid.is_empty())
+        || super::sink_vguard_plan_ok(agg, ss);
     if !plan_ok || ::nodeagg::agg_lanefold_has_resid(agg) {
         refuse(estate, ea, node_id, "fold plan guarded/varlena/residual");
         return Ok(false);
@@ -4221,7 +4272,15 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         // same shape on fallback) + the K2 single-int / single-text / Mk
         // packed decides.
         super::arm_scan_staging(ss, estate, ScanFeedShape::HashAggFold { agg })?;
-        let k2_int = super::scan_k2_shape(agg, ss, estate).is_some()
+        // SE-T2AGG CAR B: vguard plans read direct SoA indexes — re-arm the
+        // columnar deform over any single-varlena remap staging (fn doc).
+        if super::sink_vguard_plan_ok(agg, ss)
+            && !super::sink_rearm_vguard_columnar(agg, ss, estate)
+        {
+            refuse(estate, ea, node_id, "vguard columnar staging");
+            return Ok(false);
+        }
+        let k2_int = super::scan_k2_shape_sink(agg, ss, estate).is_some()
             && ::nodeagg::sink::agg_sink_key_width(agg).is_some();
         if k2_int {
             // Dict-group staging (the q16 class: a single dict-encoded int

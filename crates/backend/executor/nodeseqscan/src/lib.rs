@@ -1527,6 +1527,30 @@ pub fn seq_scan_batch_complete_deform(node: &mut SeqScanState<'_>, cols: &[u16],
     ::tableam::table_scan_batch_complete_deform(sd, &b.plan, &mut b.soa, cols, sel);
 }
 
+/// SE-T2AGG CAR A (plain SELECT DISTINCT): arm the direct key feed at an
+/// EXPLICIT scan output column — the unprojected physical-tlist shape
+/// (`Agg(AGG_HASHED) → SeqScan` keeps the scan unprojected, so the key is
+/// an arbitrary output column, not column 0). Same laws as
+/// [`seq_scan_sortkey_direct`] otherwise: no qual, no projection (a
+/// projection re-orders output columns — the single-column shapes keep the
+/// sortkey resolution), `arm_key_soa`'s own fixed-width / varkey /
+/// pgrcolumnar-columnar ladder decides stageability. False leaves the
+/// per-row path.
+pub fn seq_scan_key_direct_att<'mcx>(
+    node: &mut SeqScanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    attnum: u16,
+) -> bool {
+    if node.ss.qual.is_some() || node.ss.ps_ProjInfo.is_some() {
+        return false;
+    }
+    let rel = node.ss.ss_currentRelation.as_ref().expect("seqscan has a relation");
+    if (attnum as i32) >= i32::from(rel.rd_att.natts) {
+        return false;
+    }
+    arm_key_soa(node, estate, attnum)
+}
+
 /// Arm the fused-sort direct key feed: output column 0 must be exactly one
 /// scan Var (bare single-column scan or a lone `JustAssignVar` projection)
 /// the fixed-width SoA plan covers, no qual. False leaves the per-row path.
