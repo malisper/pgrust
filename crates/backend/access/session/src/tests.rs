@@ -605,7 +605,13 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      only between the drive frame's publish and clear on ONE thread,
     //      torn down before unbind on every path; no session identity
     //      (the binder owns all session state movement).
-    assert_eq!(count_tree(crates), 524, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // night/m41-w-gap delta (525 = 524 + 1), deliberately NON-SESSION TLS:
+    //   65. access/heap/vacuumlazy/src/lib.rs — phase_trace ACC: the GL-M41-2
+    //      per-phase vacuum clock accumulator (ns/calls/WAL per phase),
+    //      trace-gated instrumentation scratch on the driving thread —
+    //      reset at vacuum entry, read at the trace emit; no session
+    //      identity, never captured/restored by an envelope.
+    assert_eq!(count_tree(crates), 525, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
