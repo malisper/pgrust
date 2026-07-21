@@ -668,6 +668,20 @@ impl PvPoolPass {
         if let Some(rt) = runtime::global() {
             rt.notify_source_progress();
         }
+        // GL-M41-2 fix (publish wake, the serve-start wake's other half): a
+        // participating leader that found no claimable ticket parks on its
+        // latch — notify_source_progress wakes only pool workers. Hand a
+        // pool worker's freshly published ticket to the (possibly parked)
+        // leader too; a leader-published ticket needs no wake (the leader
+        // is awake) and self-wakes would only cost a spurious re-poll.
+        if more
+            && pool_index_leader_enabled()
+            && parallel::standing::serving_on_pool()
+        {
+            latch::SetLatch(::types_storage::latch::LatchHandle::proc(
+                self.target.parallel_leader_proc_number,
+            ));
+        }
         Ok(())
     }
 
@@ -956,6 +970,19 @@ fn pool_index_drive(shared: &Arc<PvShared>, pass: &Arc<PvPoolPass>) -> PgResult<
     set_vacuum_shared_cost(Some(Arc::clone(&shared.cost)));
     shared.cost.active_nworkers.fetch_add(1, SeqCst);
     pass.started.fetch_add(1, SeqCst);
+    // GL-M41-2 fix (serve-start wake): the leader's participation gate
+    // (started > 0, pool_leader_join) parks on the leader latch, but no
+    // wake fired at serve start — only completion/refusal/error and the
+    // ~1s stall recheck set it. Any pass shorter than the recheck cadence
+    // therefore ran WITHOUT the leader (width = nworkers, vs the launched
+    // gang's nworkers + participating leader): the constant per-vacuum W
+    // wall gap. Chunks arm only (the coarse arm's leader parks by design);
+    // PGRUST_RUNTIME_VACUUM_INDEX_LEADER=0 kills it with participation.
+    if pass.stream.is_some() && pool_index_leader_enabled() {
+        latch::SetLatch(::types_storage::latch::LatchHandle::proc(
+            pass.target.parallel_leader_proc_number,
+        ));
+    }
 
     let bstrategy = bufmgr_seams::get_access_strategy_with_size::call(
         BufferAccessStrategyType::BasVacuum,
