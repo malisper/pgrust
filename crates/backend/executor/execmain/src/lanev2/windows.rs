@@ -681,7 +681,12 @@ pub fn try_own_window_agg_t2<'mcx>(
         return Ok(None);
     }
     stats::tick_owned(ShapeClass::WindowAgg);
-    super::lane_trace("windows-t2 row-mode drive owned (T2-A delegation)");
+    // GL-ROWMODE-1: owned-trace deduped to the first owned pull per
+    // execution (this verdict is per output-row pull; rationale at
+    // `lane_trace_owned_once`).
+    super::lane_trace_owned_once(ShapeClass::WindowAgg, estate, || {
+        "windows-t2 row-mode drive owned (T2-A delegation)".to_owned()
+    });
     #[cfg(test)]
     WINDOWS_T2_OWNED_FOR_TESTS.fetch_add(1, Relaxed);
     // No clear-on-finish: exec_window_agg returns end-of-set without

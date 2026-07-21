@@ -554,9 +554,12 @@ fn t3_drive<'mcx, S: RowSource<'mcx>>(
         return Ok(None);
     }
     stats::tick_owned(class);
-    if super::lane_trace_enabled() {
-        super::lane_trace(&format!("scans-t3: {} source drive owned", class.name()));
-    }
+    // GL-ROWMODE-1: owned-trace deduped to the first owned pull per class
+    // per execution (per-pull tracing is a per-row stderr write on high
+    // pull-count shapes; rationale at `lane_trace_owned_once`).
+    super::lane_trace_owned_once(class, estate, || {
+        format!("scans-t3: {} source drive owned", class.name())
+    });
     #[cfg(test)]
     T3_OWNED_FOR_TESTS[class as usize].fetch_add(1, Relaxed);
     let mut feed = T3Feed::new(node, src);

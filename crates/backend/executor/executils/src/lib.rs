@@ -915,6 +915,20 @@ pub struct EStateData<'mcx> {
     /// structurally unaffected. Default false (EPQ/worker estates stay on
     /// the slow path).
     pub es_lane_leaf_fast: bool,
+    /// GL-ROWMODE-1: per-execution dedup bitmask for the row-mode OWNED
+    /// engagement trace (bit = lanev2 ShapeClass discriminant; bit 63 is the
+    /// instrumented-execution note). The OWNED verdict/tick cadence is per
+    /// pull (row-mode law §3.3) and stays per pull — but the TRACE line is
+    /// emitted at most once per class per execution (per worker: each worker
+    /// dedups on its own estate). A per-pull trace on a delegation leaf that
+    /// sits on a per-inner-row pull path (a merge join's Materialize inner
+    /// re-pulled across mark/restore) is one format!+stderr write per inner
+    /// row per worker: a trace-armed boot turned a ~50ms statement into
+    /// ~10-17s and masqueraded as an engine collapse in a measurement
+    /// vehicle. Written only by lanev2::lane_trace_owned_once /
+    /// refresh_lane_leaf_fast under an armed trace; stays 0 at default
+    /// config. Estate-resident by the TLS-census-zero law.
+    pub es_lane_trace_owned: u64,
     /// wave-9 WS-AI (forward-pull cursors inc-1, contract §3 / lane-cursors.md
     /// §1): the per-run emission budget of a count-limited forward SELECT
     /// run — `Some(count)` iff `PGRUST_LANE_V2_CURSORS` is ON and this
@@ -1211,6 +1225,7 @@ impl<'mcx> EStateData<'mcx> {
             es_top_eflags: 0,
             es_instrument: 0,
             es_lane_leaf_fast: false,
+            es_lane_trace_owned: 0,
             es_cursor_run_budget: None,
             es_lane_cursor_parked: false,
             es_spi_run_budget: None,
@@ -1714,7 +1729,8 @@ mcx::forget_safe_struct!(
         es_param_subplans, es_per_tuple_exprcontext,
         es_sourceText, es_use_parallel_mode, es_parallel_workers_to_launch,
         es_parallel_workers_launched, es_jit_flags, es_jit_instr, es_epq,
-        es_epq_active, es_lane_leaf_fast, es_cursor_run_budget, es_lane_cursor_parked,
+        es_epq_active, es_lane_leaf_fast, es_lane_trace_owned, es_cursor_run_budget,
+        es_lane_cursor_parked,
         es_spi_run_budget, es_rowmarks;
         es_jit_blocks,
         es_snapshot, es_crosscheck_snapshot, es_relations, es_junkFilter,
