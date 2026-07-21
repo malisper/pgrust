@@ -1314,7 +1314,7 @@ impl Tuplesort {
                     .close()
                     .expect("tuplesort_reset: closing tape temp files failed");
             }
-            st.tuplecontext.reset();
+            st.reset_tuplecontext();
             st.memtuples.clear();
             if st.memtuples.capacity() == 0 {
                 st.memtuples.reserve(INITIAL_MEMTUPSIZE);
@@ -2497,6 +2497,25 @@ impl<'m> TuplesortData<'m> {
         }
         self.avail_mem += freed_space(self.free_typlen, stup);
         dealloc_stup(self.tuplecontext.mcx(), self.free_typlen, stup);
+    }
+
+    /// Wholesale release of the caller-tuples context at a batch boundary
+    /// (`tuplesort_reset` -> `tuplesort_begin_batch`; dumptuples' post-run
+    /// reset). C never frees the surviving tuples one by one first — readout
+    /// and writetup leave them allocated and the context reclaims them in
+    /// bulk (tuplesort_free resets the whole sort context; begin_batch
+    /// recreates the child). The bounded-capable arm is an exact-accounting
+    /// aset whose reset() leak canary would (by its own contract) trip on
+    /// those still-charged bytes, so when bytes remain the context is
+    /// recreated instead — C's exact per-batch lifecycle, drop releases
+    /// bytes and charge together. The bump arm keeps reset()'s keeper-window
+    /// reuse, and an already-empty aset takes the cheap reset path.
+    fn reset_tuplecontext(&mut self) {
+        if self.sortopt & TUPLESORT_ALLOWBOUNDED != 0 && self.tuplecontext.used() != 0 {
+            self.tuplecontext = self.mcx.context().new_child("Caller tuples");
+        } else {
+            self.tuplecontext.reset();
+        }
     }
 
     /// `tuplesort_sort_memtuples`: comparator-identity specialization dispatch.
