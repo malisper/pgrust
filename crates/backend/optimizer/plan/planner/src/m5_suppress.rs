@@ -179,6 +179,17 @@ pub enum CoverClass {
     /// above it is an agg-not-plan-root walk refusal, the
     /// suppress-then-refuse direction); unindexed keeps the suppressed
     /// serial plan shape certain (Agg over SeqScan). tpch q06 class.
+    ///
+    /// AGG_INTCASE widening (int-CASE fold-args car, knob-gated
+    /// `PGRUST_LANE_V2_AGG_INTCASE`, default OFF, requires the AGG_POLY
+    /// knob too): the tlist vocabulary additionally admits int-family
+    /// plain aggregates (INTCASE_POLY_AGGS) over ANY parallel-safe
+    /// single-argument expression — the conditional-aggregation idiom
+    /// (sum(CASE...), count-if) — and non-Aggref emit expressions over
+    /// admitted aggregates (ratio emits; leader-side finalize only). The
+    /// keying gate becomes n_poly > 0: >=1 numeric anchor OR >=1
+    /// conditional-bearing int arg (guaranteed manifest engagement — see
+    /// heap_poly_tlist_admits).
     AggPolyHeapPlain,
     /// M5-5 Meta-over-Gather (the band-2a q30 handoff): plain (ungrouped)
     /// FOOTER-ANSWERABLE aggregation over one plain pgrcolumnar rel with NO
@@ -290,7 +301,7 @@ pub const BOOTSTRAP_MATRIX: &[MatrixRow] = &[
     MatrixRow {
         class: CoverClass::AggPolyHeapPlain,
         covered: true,
-        qualifiers: "se-aggpoly (band 101001): keyed ONLY under PGRUST_LANE_V2_AGG_POLY (knob coherence); one unindexed heap rel; quals allowed, is_parallel_safe; tlist = PLAIN_FOLD_AGGS bare-int OR plain sum/avg(numeric) w/ parallel-safe arg exprs, >=1 numeric; Agg-root only (no sort/limit/offset); floor reused from HeapCmpFoldPrefix (provisional — GL-AGGPOLY-1 letter owed)",
+        qualifiers: "se-aggpoly (band 101001): keyed ONLY under PGRUST_LANE_V2_AGG_POLY (knob coherence); one unindexed heap rel; quals allowed, is_parallel_safe; tlist = PLAIN_FOLD_AGGS bare-int OR plain sum/avg(numeric) w/ parallel-safe arg exprs, >=1 numeric; AGG_INTCASE widening (PGRUST_LANE_V2_AGG_INTCASE, default OFF): + int-family aggs over parallel-safe conditional args (sum(CASE)/count-if) + ratio emits over admitted aggs, gate n_poly>0; Agg-root only (no sort/limit/offset); floor reused from HeapCmpFoldPrefix (provisional — GL-AGGPOLY-1/GL-INTCASE-1 letters owed)",
     },
     MatrixRow {
         class: CoverClass::PartwisePlainFold,
@@ -1177,6 +1188,29 @@ pub(crate) const PLAIN_FOLD_AGGS: &[u32] = &[
     F_MIN_INT2,
 ];
 
+/// AGG_INTCASE (int-CASE fold-args car): the int-family plain aggregates
+/// whose transition STATE is an exportable runtime-partial kind regardless
+/// of how the argument was evaluated — PLAIN_FOLD_AGGS minus the zero-arg
+/// count(*) (bare-whitelist territory). MIRROR of nodeagg
+/// runtime_partial.rs `intcase_perrow_kind` (fail-closed both sides; a
+/// probe admission the manifest refuses would land on serial — the e2e's
+/// engagement legs pin the pair).
+const INTCASE_POLY_AGGS: &[u32] = &[
+    F_COUNT_ANY,
+    F_SUM_INT8,
+    F_SUM_INT4,
+    F_SUM_INT2,
+    F_AVG_INT8,
+    F_AVG_INT4,
+    F_AVG_INT2,
+    F_MAX_INT8,
+    F_MAX_INT4,
+    F_MAX_INT2,
+    F_MIN_INT8,
+    F_MIN_INT4,
+    F_MIN_INT2,
+];
+
 /// Grouped-sink aggregate whitelist: COMBINE_WHITELIST byval transitions
 /// only — PolyInt128/NumericAgg states (avg(int*), sum(int8)) are walk
 /// refusals on the grouped path (relocation car), so the probe excludes
@@ -1340,6 +1374,31 @@ fn agg_poly_probe_enabled() -> bool {
             Ok("0") | Ok("off")
         )
     })
+}
+
+/// AGG_INTCASE (int-CASE fold-args car; DEFAULT OFF pending its GL letter):
+/// widen the AggPolyHeapPlain tlist vocabulary onto int-family plain
+/// aggregates over parallel-safe CONDITIONAL argument expressions
+/// (sum(CASE...), count-if — the conditional-aggregation idiom) and onto
+/// emit expressions over admitted aggregates (the ratio-emit shapes). The
+/// per-row drive already evaluates arbitrary arg exprs (C's checked
+/// transition program); this knob only widens ADMISSION. Knob coherence
+/// (the AGG_POLY law above): nodeagg's poly manifest reads the SAME env
+/// spelling — a keyed shape whose manifest arm is disarmed would suppress
+/// Gather and land on serial. The widening also requires the AGG_POLY knob
+/// itself (it rides that class's arm, floor, and keying site).
+fn agg_intcase_probe_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        intcase_spelling_on(std::env::var("PGRUST_LANE_V2_AGG_INTCASE").as_deref().ok())
+    })
+}
+
+/// The default-OFF arm spelling rule, factored pure for exhaustive unit
+/// tests: ON iff the value is exactly `1` or `on`; unset and every other
+/// spelling stay OFF (fail-safe).
+fn intcase_spelling_on(v: Option<&str>) -> bool {
+    matches!(v, Some("1") | Some("on"))
 }
 
 /// CbDistinctIntKeys PASSENGER whitelist = the runtime distinct sink's
@@ -1853,7 +1912,9 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         // is_parallel_safe over quals + numeric agg args). Unindexed keeps
         // the suppressed serial plan an Agg-over-SeqScan; no sort/limit
         // keeps the Agg the plan root (both are walk refusals — the
-        // suppress-then-refuse direction). tpch q06 class.
+        // suppress-then-refuse direction). tpch q06 class. AGG_INTCASE
+        // (default OFF) widens the tlist vocabulary onto int-family aggs
+        // over conditional args + ratio emits (heap_poly_tlist_admits).
         if agg_poly_probe_enabled()
             && parse.sortClause.is_nil()
             && parse.limitCount.is_none()
@@ -6026,45 +6087,188 @@ fn heap_poly_indexes_admit(
 }
 
 /// SE-AGGPOLY (band 101001): the plain-heap-poly tlist discipline — every
-/// entry is a whitelisted bare-int-Var aggregate (PLAIN_FOLD_AGGS) or a
+/// entry is a whitelisted bare-int-Var aggregate (PLAIN_FOLD_AGGS), a
 /// structurally plain sum/avg(NUMERIC) (no ORDER BY/DISTINCT/FILTER/
 /// variadic/ordered-set/levelsup) whose single argument expression the
 /// planner's own `is_parallel_safe` admits (it runs on helpers through the
 /// per-row transition program; the arg SHAPE is otherwise free — the poly
-/// manifest classifies by state, not argument). At least one numeric
-/// aggregate required (all-int shapes keep their existing rows), and
-/// nothing else in the tlist (consts and bare Vars refuse — narrow probe).
+/// manifest classifies by state, not argument), or — AGG_INTCASE,
+/// knob-gated — an int-family plain aggregate over a parallel-safe arg
+/// expression / an emit expression over admitted aggregates (ratio emits).
+///
+/// The keying gate is `n_poly > 0`: at least one entry the executor
+/// manifest is GUARANTEED to classify as a poly entry — numeric anchors,
+/// plus int-family aggs whose arg carries a CONDITIONAL node
+/// (CASE/COALESCE/NULLIF/GREATEST/LEAST), which the fold plan's
+/// classify_arg can never lane-classify. Int-family expr args WITHOUT a
+/// conditional (affine forms, textlen, var-op-var) are admitted as
+/// riders but never counted: a lane-classifiable rider that turned out to
+/// be the only "poly" entry would leave the manifest empty — the
+/// suppress-then-refuse channel this gate closes. All-rider/all-bare
+/// shapes keep their existing rows (narrow probe).
 fn heap_poly_tlist_admits(
     run: &PlannerRun<'_>,
     parse: &Query<'_>,
     rti: usize,
 ) -> PgResult<bool> {
-    let mut n_numeric = 0usize;
+    let intcase = agg_intcase_probe_enabled();
+    let mut n_poly = 0usize;
     for tle_node in &parse.targetList {
         let Some(tle) = tle_node.as_target_entry() else { return Ok(false) };
         if is_whitelisted_agg(tle.expr, rti, PLAIN_FOLD_AGGS) {
             continue;
         }
-        let Some(agg) = tle.expr.as_aggref() else { return Ok(false) };
-        if !matches!(agg.aggfnoid, F_AVG_NUMERIC | F_SUM_NUMERIC)
-            || agg.agglevelsup != 0
-            || agg.aggkind != AGGKIND_NORMAL
-            || agg.aggvariadic
-            || !agg.aggorder.is_nil()
-            || !agg.aggdistinct.is_nil()
-            || agg.aggfilter.is_some()
-            || !agg.aggdirectargs.is_nil()
-            || agg.args.len() != 1
-        {
+        if let Some(agg) = tle.expr.as_aggref() {
+            if !heap_poly_aggref_admits(run, agg, intcase, &mut n_poly)? {
+                return Ok(false);
+            }
+            continue;
+        }
+        // AGG_INTCASE ratio emits: a non-Aggref entry admits iff it is a
+        // const/operator/function composition over admitted aggregates
+        // (>=1). The composition runs ONCE, leader-side, at the serial
+        // plan's own finalize/projection — identical to the suppressed
+        // serial execution by construction; only the per-row transition
+        // work moves to helpers.
+        if !intcase || !intcase_emit_expr_admits(run, tle.expr, rti, &mut n_poly)? {
             return Ok(false);
         }
-        let Some(arg_tle) = agg.args.nth(0).as_target_entry() else { return Ok(false) };
-        if !crate::is_parallel_safe_opt(run, Some(arg_tle.expr))? {
-            return Ok(false);
-        }
-        n_numeric += 1;
     }
-    Ok(n_numeric > 0)
+    Ok(n_poly > 0)
+}
+
+/// One non-bare-whitelist Aggref of the plain-heap-poly tlist: the plain
+/// sum/avg(NUMERIC) arm (always counted — the manifest's NumericAvg class),
+/// or — `intcase` — an int-family INTCASE_POLY_AGGS entry over any
+/// parallel-safe single arg (counted toward the keying gate only when the
+/// arg carries a conditional node; see `heap_poly_tlist_admits`).
+fn heap_poly_aggref_admits(
+    run: &PlannerRun<'_>,
+    agg: &Aggref<'_>,
+    intcase: bool,
+    n_poly: &mut usize,
+) -> PgResult<bool> {
+    if agg.agglevelsup != 0
+        || agg.aggkind != AGGKIND_NORMAL
+        || agg.aggvariadic
+        || !agg.aggorder.is_nil()
+        || !agg.aggdistinct.is_nil()
+        || agg.aggfilter.is_some()
+        || !agg.aggdirectargs.is_nil()
+        || agg.args.len() != 1
+    {
+        return Ok(false);
+    }
+    let numeric = matches!(agg.aggfnoid, F_AVG_NUMERIC | F_SUM_NUMERIC);
+    if !numeric && !(intcase && INTCASE_POLY_AGGS.contains(&agg.aggfnoid)) {
+        return Ok(false);
+    }
+    let Some(arg_tle) = agg.args.nth(0).as_target_entry() else { return Ok(false) };
+    if !crate::is_parallel_safe_opt(run, Some(arg_tle.expr))? {
+        return Ok(false);
+    }
+    if numeric || contains_conditional(arg_tle.expr)? {
+        *n_poly += 1;
+    }
+    Ok(true)
+}
+
+/// AGG_INTCASE: does the expression carry a conditional node anywhere?
+/// (CASE / COALESCE / NULLIF / GREATEST / LEAST — the conditional-
+/// aggregation idiom.) These forms NEVER lane-classify (lanefold
+/// classify_arg admits bare Vars, textlen, and affine Var-op-Const only),
+/// so a conditional-bearing arg is guaranteed to reach the manifest's
+/// per-row classification — the keying gate's engagement proof.
+fn contains_conditional(expr: Node<'_>) -> PgResult<bool> {
+    use nodes_core::NodeWalker;
+    use types_nodes::NodeTag;
+    struct W {
+        found: bool,
+    }
+    impl<'mcx> nodes_core::NodeWalker<'mcx> for W {
+        fn visit(&mut self, node: Node<'mcx>) -> PgResult<bool> {
+            match node.node_tag() {
+                NodeTag::T_CaseExpr
+                | NodeTag::T_CoalesceExpr
+                | NodeTag::T_NullIfExpr
+                | NodeTag::T_MinMaxExpr => {
+                    self.found = true;
+                    Ok(true)
+                }
+                _ => nodes_core::expression_tree_walker(node, self),
+            }
+        }
+    }
+    let mut w = W { found: false };
+    let _ = w.visit(expr)?;
+    Ok(w.found)
+}
+
+/// AGG_INTCASE ratio emits: admit `expr` iff it is a composition of
+/// {OpExpr, FuncExpr (non-set-returning), RelabelType, CoerceViaIO, Const}
+/// over >=1 admitted Aggref leaves (bare-whitelist or the poly arms above).
+/// Anything else — Params, SRFs, CASE above the aggregates, sublinks —
+/// fails closed. The composition itself is leader-side-only (see the
+/// caller); the AGGREGATES' args carry the helper-side safety obligations.
+fn intcase_emit_expr_admits(
+    run: &PlannerRun<'_>,
+    expr: Node<'_>,
+    rti: usize,
+    n_poly: &mut usize,
+) -> PgResult<bool> {
+    let mut n_aggs = 0usize;
+    if !intcase_emit_walk(run, expr, rti, n_poly, &mut n_aggs)? {
+        return Ok(false);
+    }
+    Ok(n_aggs > 0)
+}
+
+fn intcase_emit_walk(
+    run: &PlannerRun<'_>,
+    expr: Node<'_>,
+    rti: usize,
+    n_poly: &mut usize,
+    n_aggs: &mut usize,
+) -> PgResult<bool> {
+    if let Some(agg) = expr.as_aggref() {
+        *n_aggs += 1;
+        if is_whitelisted_agg(expr, rti, PLAIN_FOLD_AGGS) {
+            return Ok(true);
+        }
+        return heap_poly_aggref_admits(run, agg, true, n_poly);
+    }
+    if expr.as_const().is_some() {
+        return Ok(true);
+    }
+    if let Some(op) = expr.as_op_expr() {
+        if op.opretset {
+            return Ok(false);
+        }
+        for a in op.args.iter() {
+            if !intcase_emit_walk(run, a, rti, n_poly, n_aggs)? {
+                return Ok(false);
+            }
+        }
+        return Ok(true);
+    }
+    if let Some(f) = expr.as_func_expr() {
+        if f.funcretset {
+            return Ok(false);
+        }
+        for a in f.args.iter() {
+            if !intcase_emit_walk(run, a, rti, n_poly, n_aggs)? {
+                return Ok(false);
+            }
+        }
+        return Ok(true);
+    }
+    if let Some(r) = expr.as_relabel_type() {
+        return intcase_emit_walk(run, r.arg, rti, n_poly, n_aggs);
+    }
+    if let Some(c) = expr.as_coerce_via_io() {
+        return intcase_emit_walk(run, c.arg, rti, n_poly, n_aggs);
+    }
+    Ok(false)
 }
 
 /// `aggref_plain` with a caller-supplied single-arg type predicate: a
@@ -6235,6 +6439,33 @@ mod tests {
         // The live getter memoizes the process env; in the test binary the
         // var is unset, so it resolves OFF — the default-OFF invariant.
         assert!(!scanpass_enabled(), "test process has no knob set => OFF");
+    }
+
+    #[test]
+    fn intcase_knob_is_default_off() {
+        assert!(!intcase_spelling_on(None), "unset must be OFF (default)");
+        assert!(!intcase_spelling_on(Some("0")));
+        assert!(!intcase_spelling_on(Some("off")));
+        assert!(!intcase_spelling_on(Some("")));
+        assert!(!intcase_spelling_on(Some("true")), "typos fail safe to OFF");
+        assert!(!intcase_spelling_on(Some("ON")), "case-sensitive, like the arm knobs");
+        assert!(intcase_spelling_on(Some("1")));
+        assert!(intcase_spelling_on(Some("on")));
+        assert!(!agg_intcase_probe_enabled(), "test process has no knob set => OFF");
+    }
+
+    /// AGG_INTCASE vocabulary discipline: the per-row int whitelist is
+    /// EXACTLY the plain-fold whitelist minus the zero-arg count(*) — a
+    /// drift here would either key a shape the manifest refuses
+    /// (suppress-then-refuse) or silently narrow the car.
+    #[test]
+    fn intcase_whitelist_is_plain_fold_minus_count_star() {
+        let expect: Vec<u32> = PLAIN_FOLD_AGGS
+            .iter()
+            .copied()
+            .filter(|&o| o != F_COUNT_STAR)
+            .collect();
+        assert_eq!(INTCASE_POLY_AGGS, expect.as_slice());
     }
 
     /// Naming a passthrough refusal is NEVER a suppression: every arm of the

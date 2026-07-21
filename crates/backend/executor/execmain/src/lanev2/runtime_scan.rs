@@ -2262,13 +2262,31 @@ impl<'mcx> ::nodes_core::NodeWalker<'mcx> for SafetyCx {
                 let s = n.as_scalar_array_op_expr().unwrap();
                 self.check_func(s.opfuncid);
             }
+            // OpExpr-layout aliases (C `typedef OpExpr DistinctExpr/
+            // NullIfExpr`): the same opfuncid check — mirrors C
+            // check_functions_in_node's coverage exactly (AGG_INTCASE: the
+            // NULLIF conditional-arg form rides this arm).
+            NodeTag::T_DistinctExpr => {
+                let d = n.as_distinct_expr().unwrap();
+                self.check_func(d.opfuncid);
+            }
+            NodeTag::T_NullIfExpr => {
+                let ni = n.as_null_if_expr().unwrap();
+                self.check_func(ni.opfuncid);
+            }
+            // MinMaxExpr (GREATEST/LEAST) carries no function OID —
+            // its comparison is the type-cache btree cmp proc, which C's
+            // max_parallel_hazard walk does not check either (not a
+            // check_functions_in_node node); structural admit, children
+            // walked (AGG_INTCASE conditional-arg form).
             NodeTag::T_BoolExpr
             | NodeTag::T_NullTest
             | NodeTag::T_BooleanTest
             | NodeTag::T_RelabelType
             | NodeTag::T_CaseExpr
             | NodeTag::T_CaseWhen
-            | NodeTag::T_CoalesceExpr => {}
+            | NodeTag::T_CoalesceExpr
+            | NodeTag::T_MinMaxExpr => {}
             // Anything else (Params, SubPlans, SRFs, coercions with side
             // tables, ...) refuses — fail-closed.
             _ => {

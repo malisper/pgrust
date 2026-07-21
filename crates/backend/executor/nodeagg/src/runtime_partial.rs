@@ -30,7 +30,7 @@
 //! partial_admissible`) — fail-closed, before any worker launches.
 
 use ::datum::Datum;
-use ::lanefold::{LaneKind, LaneTrans};
+use ::lanefold::{LaneKind, LaneTrans, LaneWidth};
 use ::types_error::{PgError, PgResult};
 
 use ::executils::{EStateData, ExecSlotId};
@@ -226,9 +226,8 @@ pub(crate) fn export_partial_with(
 // Sign-extended fold word at the lane's RESULT width (the transvalue store
 // width) — exact under either datum-construction convention because every
 // admitted store is itself width-faithful.
-fn fold_word(t: &LaneTrans, d: Datum) -> i64 {
-    use ::lanefold::LaneWidth;
-    match t.res_width {
+fn fold_word(res_width: LaneWidth, d: Datum) -> i64 {
+    match res_width {
         LaneWidth::I16 => t_i64(d.as_i16() as i64),
         LaneWidth::I32 => t_i64(d.as_i32() as i64),
         LaneWidth::Bool => d.as_bool() as i64,
@@ -317,7 +316,20 @@ pub(crate) fn export_partial_from(
 /// (the per-kind body of [`export_partial_from`], shared with the SE-AGGPOLY
 /// manifest export — byte-identical either caller).
 fn export_lane_trans(t: &LaneTrans, pg: &::execexpr::AggPerGroup) -> PgResult<RuntimePartialTrans> {
-    Ok(match t.kind {
+    export_kind(t.kind, t.res_width, pg)
+}
+
+/// The (kind, result-width)-keyed export body. Shared by the fold-plan
+/// callers above (through [`export_lane_trans`]) and the poly manifest's
+/// per-row entries (AGG_INTCASE — the pergroup state a per-row transfn
+/// chain leaves has the identical layout, keyed by the transition, not by
+/// how its argument was evaluated).
+fn export_kind(
+    kind: LaneKind,
+    res_width: LaneWidth,
+    pg: &::execexpr::AggPerGroup,
+) -> PgResult<RuntimePartialTrans> {
+    Ok(match kind {
         LaneKind::CountStar | LaneKind::CountAny => {
             RuntimePartialTrans::Count(pg.trans_value.as_i64())
         }
@@ -331,7 +343,7 @@ fn export_lane_trans(t: &LaneTrans, pg: &::execexpr::AggPerGroup) -> PgResult<Ru
         | LaneKind::BitOr
         | LaneKind::BoolAnd
         | LaneKind::BoolOr => RuntimePartialTrans::Fold {
-            v: if pg.trans_value_is_null { 0 } else { fold_word(t, pg.trans_value) },
+            v: if pg.trans_value_is_null { 0 } else { fold_word(res_width, pg.trans_value) },
             present: !pg.trans_value_is_null,
         },
         LaneKind::AvgAccum => {
@@ -793,6 +805,72 @@ const AGG_SUM_NUMERIC: u32 = 2114;
 /// INTERNAL — the pointer-datum transition type.
 const POLY_INTERNALOID: u32 = 2281;
 
+// AGG_INTCASE (int-CASE fold-args car): the int-family plain-agg OIDs whose
+// TRANSITION STATE is already an exportable runtime-partial kind (pg_proc /
+// pg_aggregate REL 18.3, verified vendored — mirrors the planner probe's
+// PLAIN_FOLD_AGGS constants; drift is pinned by the intcase e2e's
+// engagement legs). The manifest classifies by STATE — the argument
+// expression is free (the per-row transition program evaluates it), which
+// is exactly what unlocks conditional (CASE/COALESCE) int args.
+const AGG_COUNT_ANY: u32 = 2147;
+const AGG_SUM_INT8: u32 = 2107;
+const AGG_SUM_INT4: u32 = 2108;
+const AGG_SUM_INT2: u32 = 2109;
+const AGG_AVG_INT8: u32 = 2100;
+const AGG_AVG_INT4: u32 = 2101;
+const AGG_AVG_INT2: u32 = 2102;
+const AGG_MAX_INT8: u32 = 2115;
+const AGG_MAX_INT4: u32 = 2116;
+const AGG_MAX_INT2: u32 = 2117;
+const AGG_MIN_INT8: u32 = 2131;
+const AGG_MIN_INT4: u32 = 2132;
+const AGG_MIN_INT2: u32 = 2133;
+/// int8 / int8[] transition types (count / int2+int4 avg transarrays).
+const POLY_INT8OID: u32 = 20;
+const POLY_INT8ARRAYOID: u32 = 1016;
+const POLY_INT2OID: u32 = 21;
+const POLY_INT4OID: u32 = 23;
+
+/// `PGRUST_LANE_V2_AGG_INTCASE` (int-CASE fold-args car; DEFAULT OFF):
+/// admit int-family plain aggregates over ARBITRARY single-argument
+/// expressions (the conditional-aggregation idiom — sum(CASE...),
+/// count-if) as first-class poly manifest entries. The m5 suppression
+/// probe keys the matching plan shapes under the SAME env spelling (knob
+/// coherence — a keyed-but-disarmed shape would land on serial). Off =
+/// today's manifest (numeric anchor required), byte-identical.
+fn agg_intcase_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("PGRUST_LANE_V2_AGG_INTCASE").as_deref(),
+            Ok("1") | Ok("on")
+        )
+    })
+}
+
+/// AGG_INTCASE: (state kind, result width) for an int-family plain agg the
+/// per-row drive can carry regardless of its argument's shape. `None` =
+/// not in the vocabulary (fail-closed; the caller refuses). The
+/// aggtranstype double-check pins the state layout the export reads.
+fn intcase_perrow_kind(ar: &::types_nodes::primnodes::Aggref<'_>) -> Option<(LaneKind, LaneWidth)> {
+    let (kind, res_width, transtype) = match ar.aggfnoid {
+        AGG_COUNT_ANY => (LaneKind::CountAny, LaneWidth::I64, POLY_INT8OID),
+        AGG_SUM_INT2 | AGG_SUM_INT4 => (LaneKind::Sum, LaneWidth::I64, POLY_INT8OID),
+        AGG_SUM_INT8 | AGG_AVG_INT8 => {
+            (LaneKind::Int128AvgAccum, LaneWidth::I64, POLY_INTERNALOID)
+        }
+        AGG_AVG_INT2 | AGG_AVG_INT4 => (LaneKind::AvgAccum, LaneWidth::I64, POLY_INT8ARRAYOID),
+        AGG_MAX_INT2 => (LaneKind::Max, LaneWidth::I16, POLY_INT2OID),
+        AGG_MIN_INT2 => (LaneKind::Min, LaneWidth::I16, POLY_INT2OID),
+        AGG_MAX_INT4 => (LaneKind::Max, LaneWidth::I32, POLY_INT4OID),
+        AGG_MIN_INT4 => (LaneKind::Min, LaneWidth::I32, POLY_INT4OID),
+        AGG_MAX_INT8 => (LaneKind::Max, LaneWidth::I64, POLY_INT8OID),
+        AGG_MIN_INT8 => (LaneKind::Min, LaneWidth::I64, POLY_INT8OID),
+        _ => return None,
+    };
+    (ar.aggtranstype == transtype).then_some((kind, res_width))
+}
+
 /// One manifest entry's classification.
 #[derive(Clone, Copy, Debug)]
 pub enum PolyTransKind {
@@ -801,6 +879,11 @@ pub enum PolyTransKind {
     Lane(LaneTrans),
     /// numeric_avg_accum NumericAggState (sum/avg numeric, no sum_x2).
     NumericAvg,
+    /// AGG_INTCASE: an int-family plain agg whose ARG the fold plan could
+    /// not classify (conditional / expression args) but whose STATE is an
+    /// exportable kind — per-row driven, exported/combined/absorbed by the
+    /// identical per-kind bodies as `Lane`.
+    PerRow { kind: LaneKind, res_width: LaneWidth },
 }
 
 /// One transno's manifest row. Entries are in TRANSNO order (canonical:
@@ -818,18 +901,20 @@ fn poly_lane_kind(e: &PolyTrans) -> LaneKind {
     match e.kind {
         PolyTransKind::Lane(t) => t.kind,
         PolyTransKind::NumericAvg => LaneKind::CountStar,
+        PolyTransKind::PerRow { kind, .. } => kind,
     }
 }
 
 /// Classify the node's transitions into the poly manifest, fail-closed:
-/// `None` = at least one transition is neither an exportable lane kind nor
-/// a bare sum/avg(numeric) — the caller refuses to the serial arm. Requires
-/// at least ONE NumericAvg entry (fully-lane-covered nodes belong to the
-/// plan-based path above, byte-untouched). DISTINCT/ORDER BY/FILTER/
-/// ordered-set qualifiers refuse (the export has no representation for
-/// their side state); the aggregate's ARGUMENT expression is free — the
-/// per-row transition program evaluates it, the state layout does not
-/// depend on it.
+/// `None` = at least one transition is neither an exportable lane kind,
+/// nor a bare sum/avg(numeric), nor (AGG_INTCASE, knob-gated) an
+/// int-family plain agg with an exportable state — the caller refuses to
+/// the serial arm. Requires at least ONE poly entry (NumericAvg or
+/// PerRow; fully-lane-covered nodes belong to the plan-based path above,
+/// byte-untouched). DISTINCT/ORDER BY/FILTER/ordered-set qualifiers
+/// refuse (the export has no representation for their side state); the
+/// aggregate's ARGUMENT expression is free — the per-row transition
+/// program evaluates it, the state layout does not depend on it.
 pub fn agg_poly_manifest(node: &AggStateData<'_>) -> Option<Vec<PolyTrans>> {
     let numtrans = node.numtrans;
     if numtrans == 0 {
@@ -856,7 +941,10 @@ pub fn agg_poly_manifest(node: &AggStateData<'_>) -> Option<Vec<PolyTrans>> {
             kinds[t.transno as usize] = Some(PolyTransKind::Lane(*t));
         }
     }
-    let mut n_numeric = 0usize;
+    // Poly entries = the fold plan's remainder: NumericAvg anchors plus
+    // (AGG_INTCASE, knob-gated) per-row int-family entries. At least one is
+    // required — fully-lane-covered nodes belong to the plan-based path.
+    let mut n_poly = 0usize;
     for pa in node.peragg.iter() {
         let transno = pa.transno as usize;
         if kinds[transno].is_some() {
@@ -871,15 +959,23 @@ pub fn agg_poly_manifest(node: &AggStateData<'_>) -> Option<Vec<PolyTrans>> {
         {
             return None;
         }
-        if !matches!(ar.aggfnoid, AGG_AVG_NUMERIC | AGG_SUM_NUMERIC)
-            || ar.aggtranstype != POLY_INTERNALOID
+        if matches!(ar.aggfnoid, AGG_AVG_NUMERIC | AGG_SUM_NUMERIC)
+            && ar.aggtranstype == POLY_INTERNALOID
         {
-            return None;
+            kinds[transno] = Some(PolyTransKind::NumericAvg);
+            n_poly += 1;
+            continue;
         }
-        kinds[transno] = Some(PolyTransKind::NumericAvg);
-        n_numeric += 1;
+        if agg_intcase_enabled() {
+            if let Some((kind, res_width)) = intcase_perrow_kind(ar) {
+                kinds[transno] = Some(PolyTransKind::PerRow { kind, res_width });
+                n_poly += 1;
+                continue;
+            }
+        }
+        return None;
     }
-    if n_numeric == 0 {
+    if n_poly == 0 {
         return None;
     }
     let mut out = Vec::with_capacity(numtrans);
@@ -963,6 +1059,7 @@ pub fn agg_poly_export_partial_into(
         let p = match &e.kind {
             PolyTransKind::Lane(t) => export_lane_trans(t, pg)?,
             PolyTransKind::NumericAvg => export_numeric_state(pg)?,
+            PolyTransKind::PerRow { kind, res_width } => export_kind(*kind, *res_width, pg)?,
         };
         out.push((e.transno, p));
     }
@@ -1067,7 +1164,7 @@ fn absorb_poly_at(
                     "poly partial: numeric entry with a non-numeric state".to_string(),
                 )));
             }
-            (PolyTransKind::Lane(_), p) => {
+            (PolyTransKind::Lane(_) | PolyTransKind::PerRow { .. }, p) => {
                 // SAFETY: transno bound as in the plan-based absorb.
                 let pg = unsafe { &mut *base.as_ptr().add(e.transno as usize) };
                 absorb_lane_trans(pg, p, e.transno, &mut int128_fixups)?;
