@@ -14806,6 +14806,7 @@ pub fn try_pardistinct_worker_sort<'mcx>(
     }
     trace_feed("pardistinct worker partial build engaged");
     stats::tick_owned(ShapeClass::AggBuild);
+    stats::tick_owned(ShapeClass::ParDistinct);
     arm_scan_staging(
         ss,
         estate,
@@ -15066,6 +15067,7 @@ pub fn try_own_sorted_distinct_agg_over_gather_merge<'mcx>(
     ::nodeagg::agg_sorted_force_distinct_set(agg);
     trace_feed("pardistinct grouped leader drive engaged");
     stats::tick_owned(ShapeClass::AggBuild);
+    stats::tick_owned(ShapeClass::ParDistinct);
     let key = sp as *const ::types_nodes::plannodes::Sort<'_> as usize;
     let handoff = std::sync::Arc::new(::nodeagg::PdHandoff::new(spec.clone()));
     ::nodeagg::pd_registry_insert(key, &handoff);
@@ -15105,6 +15107,7 @@ pub fn try_own_plain_distinct_agg_over_gather_merge<'mcx>(
     ::nodeagg::agg_force_distinct_set(agg);
     trace_feed("pardistinct plain leader drive engaged");
     stats::tick_owned(ShapeClass::AggBuild);
+    stats::tick_owned(ShapeClass::ParDistinct);
     let key = sp as *const ::types_nodes::plannodes::Sort<'_> as usize;
     let handoff = std::sync::Arc::new(::nodeagg::PdHandoff::new(spec.clone()));
     ::nodeagg::pd_registry_insert(key, &handoff);
