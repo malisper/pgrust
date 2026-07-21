@@ -106,6 +106,11 @@ pub(super) struct AggSinkLocal {
     /// the Local through SEAL for the AGGSEAL observability sums only —
     /// behavior after seal never reads it.
     alpha: AlphaGate,
+    /// SCATTER ACCEPT (GL-RADIX-3, [`AggSink::scatter`]): the fold-bypass
+    /// per-worker bucket buffers. Built lazily at the first drained batch of
+    /// a scatter-armed engagement; its buffered rows flush as ordinary runs
+    /// at the sink cap and at SEAL ([`AggSink::seal_partition_local`]).
+    scatter: Option<Box<::nodeagg::sink::SinkScatter>>,
 }
 
 /// Per-Local α-gate state (Müller ADAPTIVE): a pure function of this
@@ -324,6 +329,21 @@ struct AggSink {
     /// seal-flush runs (non-NULL; summed across Locals). Read by the
     /// AGGSEAL marker lines.
     sealflush_rows: AtomicU64,
+    /// SCATTER ACCEPT arm (GL-RADIX-3, the fold-bypass drain): on the
+    /// admitted low-α band (α_est ≤ [`agg_scatter_alpha`], est_groups ≥
+    /// [`agg_scatter_floor`], K2 byval-POD, DOP>1, no topn/freeze/shared/
+    /// dict composition; kill switch [`agg_scatter_enabled`] DEFAULT OFF)
+    /// the K2 drain skips the worker table entirely and radix-scatters each
+    /// surviving row as a single-row state block into bucket-contiguous
+    /// [`SinkRun`]s (::nodeagg::sink::SinkScatter). Deletes the α≈1 accept's
+    /// probe-miss + insert + cap-flush cycle; the combine consumes the runs
+    /// unchanged (a scatter run is a run with α = 1). Resolved at
+    /// construction; false = the incumbent drain exactly.
+    scatter: bool,
+    /// Scatter engagement witness: rows handed through scatter-built runs
+    /// (non-NULL; summed across Locals). Read by the AGGSEAL marker lines —
+    /// the sealflush_rows discipline exactly.
+    scatter_rows: AtomicU64,
     /// 256 per-bucket outputs; slot b is written only by the combine task
     /// that claimed partition b (single writer by the sink contract).
     out_emit: Vec<UnsafeCell<SinkEmitBuf>>,
@@ -862,7 +882,16 @@ impl AggSink {
         let frozen = self.freeze.as_ref().is_some_and(|f| f.frozen());
         if self.adopt_shape && !frozen {
             if let [l] = &mut *locals {
-                if l.runs.is_empty() && l.spill.is_none() && l.table.is_some() {
+                // Scatter composition: a scatter-armed Local's rows live in
+                // its scatter buffers/runs, NOT its (empty) table — the
+                // wholesale table hand-off would drop them. Scatter admits
+                // DOP>1 only, so this census is structurally a non-scatter
+                // shape; fail closed if a degenerate launch ever lands here.
+                if l.runs.is_empty()
+                    && l.spill.is_none()
+                    && l.table.is_some()
+                    && l.scatter.is_none()
+                {
                     let t = l.table.take().expect("checked Some");
                     *self.adopted.lock().unwrap_or_else(|g| g.into_inner()) = Some(t);
                     self.adopted_flag.store(true, Ordering::SeqCst);
@@ -877,6 +906,21 @@ impl AggSink {
     /// (per-Local, so safely parallel across seal claims — the refusal flag
     /// is idempotent and fail-closed).
     fn seal_partition_local(&self, l: &mut AggSinkLocal) {
+        // SCATTER ACCEPT remainder (GL-RADIX-3): the Local's buffered
+        // scatter rows leave as one final bucket-contiguous run, appended
+        // after the cap-flushed scatter runs — chronological face order, so
+        // first-seen order is preserved (the seal-flush arm's own cadence
+        // argument). The worker table stayed EMPTY under scatter (nothing
+        // ever folds into it), so the branches below are no-ops on its
+        // remainder. R3: the run's bytes ride `run_bytes` into the same
+        // budget checks below.
+        if let Some(mut sc) = l.scatter.take() {
+            if let Some(run) = sc.take_run() {
+                self.scatter_rows.fetch_add(run.nrows() as u64, Ordering::Relaxed);
+                l.run_bytes += run.bytes();
+                l.runs.push(run);
+            }
+        }
         if self.seal_flush {
             // Radix seal-flush arm ([`AggSink::seal_flush`]): the remainder
             // leaves as one final bucket-contiguous run, appended LAST — the
@@ -1043,10 +1087,11 @@ impl runtime::ParallelSink for AggSink {
             let flush_bytes: u64 = locals.iter().map(|l| l.probe_flush_bytes).sum();
             let (ad, ar, ap) = alpha_sums(locals);
             eprintln!(
-                "MORSEL|AGGSEAL|arm=2set|locals={}|rows={rows}|flushes={flushes}|flush_bytes={flush_bytes}|alpha_demotes={ad}|alpha_restores={ar}|alpha_reprobes={ap}|dur_us={}|sealflush_rows={}",
+                "MORSEL|AGGSEAL|arm=2set|locals={}|rows={rows}|flushes={flushes}|flush_bytes={flush_bytes}|alpha_demotes={ad}|alpha_restores={ar}|alpha_reprobes={ap}|dur_us={}|sealflush_rows={}|scatter_rows={}",
                 locals.len(),
                 t0.elapsed().as_micros(),
                 self.sealflush_rows.load(Ordering::Relaxed),
+                self.scatter_rows.load(Ordering::Relaxed),
             );
         }
     }
@@ -1742,7 +1787,10 @@ impl runtime::SealedParallelSink for AggSink {
             && self.forks.load(Ordering::SeqCst) == 1
             && local.runs.is_empty()
             && local.spill.is_none()
-            && local.table.is_some();
+            && local.table.is_some()
+            // Scatter Locals must partition (their remainder leaves in
+            // seal_partition_local) — see try_adopt_census.
+            && local.scatter.is_none();
         if !adopt_skip {
             let r = catch_unwind(AssertUnwindSafe(|| self.seal_partition_local(&mut local)));
             if r.is_err() {
@@ -1775,9 +1823,10 @@ impl runtime::SealedParallelSink for AggSink {
             let flush_bytes: u64 = sealed.iter().map(|l| l.probe_flush_bytes).sum();
             let (ad, ar, ap) = alpha_sums(sealed);
             eprintln!(
-                "MORSEL|AGGSEAL|arm=3set|locals={}|rows={rows}|flushes={flushes}|flush_bytes={flush_bytes}|alpha_demotes={ad}|alpha_restores={ar}|alpha_reprobes={ap}|dur_us=0|sealflush_rows={}",
+                "MORSEL|AGGSEAL|arm=3set|locals={}|rows={rows}|flushes={flushes}|flush_bytes={flush_bytes}|alpha_demotes={ad}|alpha_restores={ar}|alpha_reprobes={ap}|dur_us=0|sealflush_rows={}|scatter_rows={}",
                 sealed.len(),
                 self.sealflush_rows.load(Ordering::Relaxed),
+                self.scatter_rows.load(Ordering::Relaxed),
             );
         }
         if self.try_adopt_census(sealed) {
@@ -2665,7 +2714,44 @@ fn sink_drain_range<'mcx>(
             ))
         })? as usize,
     };
+    // SCATTER ACCEPT (GL-RADIX-3): build the Local's scatter state at the
+    // first drained batch. The worker re-derives the leader's whitelist
+    // verdict on its own plan (F1 both-sides law) — a divergence is a
+    // contract breach, fail-closed.
+    if sink.scatter && local.scatter.is_none() {
+        let Some(sc) = ::nodeagg::sink::sink_scatter_new(agg, sink.width) else {
+            return Err(AcceptFail::Error(::nodeagg::sink::sink_shape_error(
+                "scatter worker shape diverged from admission",
+            )));
+        };
+        local.scatter = Some(Box::new(sc));
+    }
     loop {
+        // Scatter flush discipline (before the batch, the table's own law):
+        // at the sink cap the buffered single-row blocks leave as ONE
+        // ordinary bucket-contiguous run; R3 budget crossing afterwards
+        // spills the accumulated runs (scatter-built included — the spill
+        // record is key/state-word framing either way) or refuses exactly
+        // like the table's cap-flush path below.
+        if local.scatter.as_deref().is_some_and(|s| s.nrows() >= sink.cap as usize) {
+            if let Some(run) = local.scatter.as_deref_mut().and_then(|s| s.take_run()) {
+                sink.scatter_rows.fetch_add(run.nrows() as u64, Ordering::Relaxed);
+                local.probe_flushes += 1;
+                local.probe_flush_bytes += run.bytes() as u64;
+                local.run_bytes += run.bytes();
+                local.runs.push(run);
+            }
+            if local.run_bytes + local.scatter.as_deref().map_or(0, |s| s.bytes())
+                > sink.budget
+            {
+                match &sink.spill_set {
+                    Some(set) => {
+                        spill_epoch(sink, local, set, worker).map_err(AcceptFail::Error)?
+                    }
+                    None => return Err(AcceptFail::Budget),
+                }
+            }
+        }
         // Bounded-Local discipline: flush BEFORE the batch (no group pointer
         // held across this point), budget-check table + runs. The threshold
         // is the α-gate's per-Local effective cap (== sink.cap until a fill
@@ -2974,6 +3060,15 @@ fn sink_drain_range<'mcx>(
         if let Some(lane) = ::nodeseqscan::seq_scan_batch_soa(ss)
             .and_then(|soa| soa.dict_lane(key_col))
         {
+            // Scatter admission excluded the dict-code feed (the only arm
+            // that registers a dict lane) — a sighting here is a contract
+            // breach, never a silent path mix (which would reorder
+            // first-seen arrivals across the buffer/table faces).
+            if local.scatter.is_some() {
+                return Err(AcceptFail::Error(::nodeagg::sink::sink_shape_error(
+                    "dict window on a scatter-armed drain",
+                )));
+            }
             sink_dict_batch(agg, ss, dgs, rows, keys, knull, idxs, groups, lane, estate)?;
             continue;
         }
@@ -2987,6 +3082,17 @@ fn sink_drain_range<'mcx>(
                 keys.push(kv[i as usize]);
                 knull.push(kn[i as usize]);
             }
+        }
+        // SCATTER ACCEPT (GL-RADIX-3): bypass the worker table wholesale —
+        // each survivor becomes a single-row state block radix-routed into
+        // the Local's bucket buffers (::nodeagg::sink::SinkScatter doc; the
+        // cap/flush/budget discipline is at the loop top). No probe, no
+        // insert, no fold.
+        if let Some(sc) = local.scatter.as_deref_mut() {
+            let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                .expect("sink drain requires the armed SoA");
+            sc.absorb_batch(soa, rows, keys, knull);
+            continue;
         }
         if !::nodeagg::agg_hash_compact_batch(agg, estate, keys, knull, groups)? {
             // The compact table migrated (backstop) — unexportable. The
@@ -3774,6 +3880,48 @@ fn agg_sealflush_floor() -> u64 {
     })
 }
 
+/// `PGRUST_RUNTIME_AGG_SCATTER` kill switch (GL-RADIX-3, DEFAULT OFF —
+/// armed iff exactly `1`/`on`): the fold-bypass SCATTER ACCEPT
+/// ([`AggSink::scatter`]). Off = the incumbent drain, branch-for-branch.
+fn agg_scatter_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&ON, || {
+        matches!(std::env::var("PGRUST_RUNTIME_AGG_SCATTER").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
+/// Scatter admission α ceiling (`PGRUST_RUNTIME_AGG_SCATTER_ALPHA`, default
+/// 2): admit iff α_est = est_rows / est_groups ≤ it — the band where accept
+/// rows are dominated by probe misses and the table folds ~nothing. This is
+/// PLANNER-EST admission (the cap-band v2 α term's discipline), disjoint
+/// from the cachebudget lane's runtime α-gate controller.
+fn agg_scatter_alpha() -> u64 {
+    static N: OnceLock<u64> = OnceLock::new();
+    crate::once_val(&N, || {
+        std::env::var("PGRUST_RUNTIME_AGG_SCATTER_ALPHA")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|&a| a > 0)
+            .unwrap_or(2)
+    })
+}
+
+/// Scatter admission floor in plan-estimated groups
+/// (`PGRUST_RUNTIME_AGG_SCATTER_FLOOR`, default 4e6 — the seal-flush /
+/// groupby-high class boundary): below it the worker tables are
+/// cache-resident and the fold path already wins; the arm targets exactly
+/// the high-NDV band where the α≈1 accept loses to the exchange hybrid.
+fn agg_scatter_floor() -> u64 {
+    static N: OnceLock<u64> = OnceLock::new();
+    crate::once_val(&N, || {
+        std::env::var("PGRUST_RUNTIME_AGG_SCATTER_FLOOR")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|&f| f > 0)
+            .unwrap_or(4_000_000)
+    })
+}
+
 /// Wave-1 r2 ladder verdict (reduced-key/dict-key @100M, notes/q36-radix-lane.md):
 /// monotone improvement control→64K (reduced-key 0.378→0.234 = 2.30x→1.40x ref-mt16;
 /// dict-key 0.468→0.270), knee flattening 256K→64K, guards (selective-qual, two-key-sort) flat-or-
@@ -4388,6 +4536,11 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     // the single-TEXT 1-component packed feed (C2 car), or the packed
     // multi-key composite feed (Mk car, int/numeric/one-text components).
     let (drain, red, mk, width);
+    // K2 dict-code feed marker (set below): dict windows group on codes
+    // through the worker table — a shape the scatter accept must refuse
+    // (its fold-bypass has no dict leg; mixing paths would reorder
+    // first-seen arrivals).
+    let mut k2_dict_code = false;
     if ss.ss.ps_ProjInfo.is_some() {
         let Some(xk) = xk else {
             refuse(estate, ea, node_id, "projected scan without an expr-key decide");
@@ -4476,6 +4629,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
             if ::nodeseqscan::seq_scan_batch_dictgroup_col(ss).is_some() {
                 match dict_feed_mode() {
                     DictFeed::Code => {
+                        k2_dict_code = true;
                         lane_trace("runtime-agg: K2 dict-code feed admitted");
                     }
                     DictFeed::Raw => {
@@ -4885,6 +5039,36 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     if seal_flush {
         lane_trace(&format!("runtime-agg: seal-flush armed (est_groups={est_groups})"));
     }
+    // SCATTER ACCEPT admission (GL-RADIX-3, [`AggSink::scatter`]): kill
+    // switch DEFAULT OFF; PLANNER-EST band gates (α_est ≤ ceiling AND
+    // est_groups ≥ floor — the α≈1 high-NDV class where the accept is
+    // probe-miss-dominated); the K2 single-int-key unprojected drain only,
+    // dict-code feed excluded (no dict leg in the bypass); BYVAL-POD state
+    // blocks only (single-row blocks are copied verbatim into runs — the
+    // byref contract of the seal-flush exclusion above, same argument);
+    // DOP>1 (the DOP1 adopt/pass-through fast paths keep the fold);
+    // topn (reads the post-combine no_trans_value flag) / freeze / shared
+    // (both census the worker table) excluded; fold-plan whitelist verdict
+    // via `sink_scatter_admits` (the worker re-derives it — F1 law).
+    // Spill composition: scatter buffers flush as ORDINARY runs under the
+    // Local's R3 budget accounting, so the existing pressure→spill-epoch
+    // law applies to them unchanged (nothing scatter-specific to compose).
+    let scatter = agg_scatter_enabled()
+        && drain == SinkDrain::K2
+        && !k2_dict_code
+        && dop > 1
+        && !byref_states
+        && topn.is_none()
+        && freeze.is_none()
+        && shared.is_none()
+        && est_groups >= agg_scatter_floor()
+        && est_rows / est_groups.max(1) <= agg_scatter_alpha()
+        && ::nodeagg::sink::sink_scatter_admits(agg);
+    if scatter {
+        lane_trace(&format!(
+            "runtime-agg: scatter accept armed (est_groups={est_groups} est_rows={est_rows})"
+        ));
+    }
     let sink = Arc::new(AggSink {
         drain,
         red,
@@ -4927,6 +5111,8 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         freeze,
         seal_flush,
         sealflush_rows: AtomicU64::new(0),
+        scatter,
+        scatter_rows: AtomicU64::new(0),
         out_emit: (0..SINK_NBUCKETS).map(|_| UnsafeCell::new(SinkEmitBuf::default())).collect(),
         published: Mutex::new(None),
         adopt_shape,
