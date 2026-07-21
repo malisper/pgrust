@@ -428,22 +428,32 @@ fn class_guard(class: CoverClass) -> FloorGuard {
         CoverClass::HeapCmpFoldPrefix => {
             FloorGuard { min_rows: 1_000_000.0, min_dop: 12, low_dop_max_rows: 0.0, ..NO_GUARD }
         }
-        // RE-FLIPPED at the GL-SORTECON-3 flip increment (night/
-        // sort-merge-redesign; measured 2026-07-21 @ 0296033fd, fleet jobs
-        // 61f2/3efc/5509 — notes/sort-merge-redesign-lane.md): the COLSTAGE
-        // staged accept + GCUT shared cutoff/zone-skip retired the 4.30-8.00x
-        // loss (that was the per-row emit ceremony, not ceremony size); the
-        // arm now measures rt/serial 0.49-0.09 on the zone-hostile band and
-        // <=1.08 worst point semi-hostile at dop4 (damped geomean 1.005),
-        // dop 4/8/16, 1M-20M rows, both profiles. min_dop=4: dop1/2 measured
-        // LOSING (rand 1.96/1.80, dup 2.18/1.46 rt/serial, 5M local ladder
-        // 2026-07-21) — below it keep Gather. Band routing WITHIN the
-        // admitted region is the arm's own engage-time zone predicate
-        // (runtime_sort.rs ZONE_FRIENDLY_MIN_SKIP_FRAC): zone-friendly
-        // shapes refuse to the serial zone-adaptive walk, which beats both
-        // engines there.
+        // GL-COST-TOPN-1 GUARD-OFF (this letter; the GL-SORTECON-3 min_dop=4
+        // re-flip retired): the re-flip was ratified on rt/SERIAL economics
+        // only — the four-posture ladder (scripts/sortecon-topn-ladder.sh @
+        // 27db94812, 2026-07-21, jobs -376a/-3d75/-7436/-7d0c/-4b35) added
+        // the forced GATHER MERGE leg the re-flip never measured (soak
+        // escalation E1) and the arm wins ZERO best-of-four cells on the
+        // witnessed grid (250k-10M x dop{1,2,4,8,16} x LIMIT {10,1000},
+        // uniform int keys): at LIMIT 1000 forced GM beats the engaged arm
+        // 2.89-9.77x at EVERY cell (and serial by 2-8.7x); at LIMIT 10 the
+        // SERIAL zone walk beats the arm 1.33-1.75x (the arm's zone
+        // predicate failed to refuse a shape whose zone-min cutoff skips
+        // ~99% of granules). So the class is guarded OFF at every size (the
+        // hjrider max_rows=0 precedent): keep Gather, let the legacy cost
+        // model route (it elects GM where GM wins and serial where serial
+        // wins — both measured better than the arm everywhere on this
+        // band). NAMED CAVEAT: the dup/zone-hostile band's rt/serial wins
+        // (0.09-0.49, GL-SORTECON-3) were never measured against a GM leg;
+        // its GM-legged ladder is the re-open trigger for a band-scoped
+        // re-guard-on. PGRUST_M5_TOPN_RECT=1 restores the retired min_dop=4
+        // rectangle for A/B vehicles and one-train rollback.
         CoverClass::CbTopnBoundedIntKeys => {
-            FloorGuard { min_dop: 4, low_dop_max_rows: 0.0, ..NO_GUARD }
+            if topn_rect_enabled() {
+                FloorGuard { min_dop: 4, low_dop_max_rows: 0.0, ..NO_GUARD }
+            } else {
+                FloorGuard { max_rows: 0.0, ..NO_GUARD }
+            }
         }
         // Wins ≤1M (0.41 vs serial-shaped legacy); loses 1.39–1.50x once
         // legacy PHJ engages ≥2.5M at dop≤8, and 1.14 even at dop16@5M
@@ -548,6 +558,22 @@ fn hjrider_curve_enabled() -> bool {
     *ON.get_or_init(|| {
         matches!(
             std::env::var("PGRUST_M5_HJRIDER_CURVE").as_deref(),
+            Ok("1") | Ok("on")
+        )
+    })
+}
+
+/// GL-COST-TOPN-1 rollback lever: PGRUST_M5_TOPN_RECT=1 restores the
+/// retired GL-SORTECON-3 min_dop=4 rectangle for the bounded top-N int-key
+/// class — for A/B vehicles and one-train emergency rollback. DEFAULT OFF
+/// = the guard-off posture (exact-spelling arm, the hjrider idiom): the
+/// class keeps Gather at every size until a witnessed grid shows a
+/// best-of-four win region (four-posture record @ 27db94812 shows none).
+fn topn_rect_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("PGRUST_M5_TOPN_RECT").as_deref(),
             Ok("1") | Ok("on")
         )
     })
@@ -702,15 +728,20 @@ pub(crate) fn topn_nonint_enabled() -> bool {
     })
 }
 
-/// PROVISIONAL floor for the SE-TOPNNI knob path: the CbTopnBoundedIntKeys
-/// guard verbatim (min_dop=4 — dop1/2 measured losing on the int-key
-/// ladder; the same sink, same COLSTAGE/GCUT accept economics, runs the
-/// non-int keys). GL-TOPNNI-1 owns re-measuring the non-int shapes'
-/// own crossovers; the known small-scale corner is the UNQUALED star-tlist
-/// shape at low dop (smoke 2M×dop4: rt/serial 2.76 — engage ceremony vs a
-/// 4ms serial walk), which the ladder must carve or clear before any flip.
+/// Floor for the SE-TOPNNI knob path: the min_dop=4 rectangle, OWN COPY.
+/// This was a verbatim reuse of the CbTopnBoundedIntKeys class_guard until
+/// GL-COST-TOPN-1 guarded THAT class off (its four-posture grid @ 27db94812
+/// refuted the int-key arm against forced Gather Merge at every cell) —
+/// the reuse was SEVERED rather than inherited because the non-int car's
+/// floor is backed by its OWN witnessed record (GL-TOPNNI-1: dist 10M
+/// dop{4,8,16} all keyed shapes winning vs best engine, floor verdict
+/// KEEP min_dop=4 — datetime/text keys, wide tlists, qualed shapes: a
+/// different economics regime from the narrow int-key fixture that lost).
+/// NAMED DEBT: GL-TOPNNI-1's ladder predates the four-posture vehicle —
+/// its "best engine" reference should be re-witnessed with a forced-GM leg
+/// (the E1 lesson) before this floor is next widened.
 fn topn_nonint_guard() -> FloorGuard {
-    class_guard(CoverClass::CbTopnBoundedIntKeys)
+    FloorGuard { min_dop: 4, low_dop_max_rows: 0.0, ..NO_GUARD }
 }
 
 /// SE-TOPNNI selective-qual carve threshold (GL-TOPNNI-1 selective-qual x
@@ -7590,19 +7621,24 @@ mod tests {
         assert!(topn_nonint_enabled(), "SE-TOPNNI must be ON at default (GL-TOPNNI-1 flip)");
     }
 
-    /// SE-TOPNNI: the provisional floor is the CbTopnBoundedIntKeys guard
-    /// VERBATIM (same sink, same accept economics) — pin the reuse so an
-    /// int-row floor recalibration cannot silently diverge from the knob
-    /// path until GL-TOPNNI-1 measures the non-int shapes' own crossovers.
+    /// SE-TOPNNI floor: its OWN min_dop=4 rectangle (GL-TOPNNI-1 verdict
+    /// KEEP), no longer the int-key class_guard reuse — GL-COST-TOPN-1
+    /// guarded the int class off (four-posture grid: zero best-of-four
+    /// wins) and severed the reuse so the non-int car keeps riding its own
+    /// witnessed record. Pin both postures so neither can drift silently.
     #[test]
-    fn topn_nonint_guard_reuses_int_row_floor() {
+    fn topn_nonint_guard_is_its_own_min_dop4_rectangle() {
         let g = topn_nonint_guard();
+        assert_eq!(g.min_rows, 0.0);
+        assert_eq!(g.max_rows, f64::INFINITY);
+        assert_eq!(g.min_pages, 0.0);
+        assert_eq!(g.min_dop, 4);
+        assert_eq!(g.low_dop_max_rows, 0.0);
+        // The int-key class itself: guarded OFF at every size at default
+        // (GL-COST-TOPN-1; PGRUST_M5_TOPN_RECT=1 is the A/B restore).
         let i = class_guard(CoverClass::CbTopnBoundedIntKeys);
-        assert_eq!(g.min_rows, i.min_rows);
-        assert_eq!(g.max_rows, i.max_rows);
-        assert_eq!(g.min_pages, i.min_pages);
-        assert_eq!(g.min_dop, i.min_dop);
-        assert_eq!(g.low_dop_max_rows, i.low_dop_max_rows);
+        assert_eq!(i.max_rows, 0.0, "int-key topn must be guarded off");
+        assert_eq!(i.min_dop, 0);
     }
 
     /// SE-T2AGG CAR A engine-kill coherence: the runtime plain-distinct sink
