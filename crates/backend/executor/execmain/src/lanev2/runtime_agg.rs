@@ -4767,7 +4767,19 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         && est_groups >= agg_sealflush_floor()
         && topn.is_none()
         && freeze.is_none()
-        && shared.is_none();
+        && shared.is_none()
+        // BYREF-STATE EXCLUSION (t40 composition red, assembler unload):
+        // the flush bodies' caller contract is byval-POD state blocks
+        // (sink_flush_table doc) — a byref transvalue (VarlenaMinMax /
+        // unpacked PolyInt128) is a POINTER copied verbatim into the run,
+        // and under rung-3 sticky retention the re-engaged worker's
+        // aggcontext lifecycle no longer brackets the combine that reads
+        // it (grouped-agg parity FAIL(15) at the t40 assembly tip:
+        // min/max transvalues dropped; either side alone green). Byref
+        // shapes keep the SEAL-index remainder path — which reads states
+        // through the LIVE table — branch-for-branch. The GL-RADIX-1
+        // ladder cells (byval count/sum) are untouched by this gate.
+        && !byref_states;
     if seal_flush {
         lane_trace(&format!("runtime-agg: seal-flush armed (est_groups={est_groups})"));
     }
