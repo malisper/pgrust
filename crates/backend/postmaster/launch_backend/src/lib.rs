@@ -648,7 +648,7 @@ pub fn init_seams() {
     // SIMVFS-SHARED: the sim rtgang corpus needs postmaster parity in the
     // sim-net harness (sizing before InitializeMaxBackends, install after
     // shared memory) — same package-cycle reason as the trios above.
-    postmaster_seams::rtgang_procs_wanted::set(rtgang::gang_procs_wanted);
+    postmaster_seams::rtgang_procs_wanted::set(rtgang::runtime_reserved_procs);
     postmaster_seams::rtgang_install::set(rtgang::install_if_enabled);
 }
 
@@ -1231,12 +1231,258 @@ pub mod rtpool {
         Some(start())
     }
 
+    // ---- M2 inc-2: PGPROC-LEASING POOL WORKERS (PGRUST_RUNTIME_POOLDB) ----
+    //
+    // With the kill switch armed, every rtpool thread takes the rtgang
+    // bring-up at spawn (GUC child prelude, InitPostmasterChild, synthetic
+    // bgworker entry, InitProcess from the boot-reserved segment, BaseInit)
+    // and the rtgang exit discipline (ProcExitThread → deferred-callback
+    // drain so ProcKill releases the PGPROC; PoolRetireRaw → raw exit, no
+    // shmem touch) PLUS slot respawn — the pool must never shrink. The
+    // per-serve identity/fence gate is installed into parallel::standing
+    // (POOL_GATE); serve dispatch itself rides the runtime's bound
+    // descriptor. OFF (the default): byte-identical rtpool.
+
+    struct PoolBoot {
+        guc_base: Option<std::sync::Arc<guc::layers::GucBaseSnapshot>>,
+        guc_snapshot: Vec<guc::store::NondefaultGuc>,
+    }
+
+    static POOL_BOOT: OnceLock<PoolBoot> = OnceLock::new();
+
+    /// All three switch layers (read once): the runtime exists, the
+    /// standing module is alive, and the inc-2 keystone is armed.
+    pub fn pooldb_armed() -> bool {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| {
+            runtime::runtime_enabled()
+                && parallel::standing::pool_binding_enabled()
+                && parallel::standing::pooldb_enabled()
+        })
+    }
+
+    /// PGPROCs to boot-reserve for pool-db threads: ONE PER POOL THREAD
+    /// (workers + standbys — the scope doc §5 decided default; idle
+    /// entries are park-invisible so the procarray never scans them).
+    /// 0 unless armed — byte-identical sizing under the kill switch.
+    /// Consumed by rtgang::runtime_reserved_procs (the one budget
+    /// authority feeding SetRuntimeGangProcs).
+    pub fn pool_procs_wanted() -> i32 {
+        if !pooldb_armed() {
+            return 0;
+        }
+        let cfg = runtime::RuntimeConfig::from_env();
+        ((cfg.workers + cfg.standbys) as i64).clamp(0, 2048) as i32
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum PoolIdent {
+        /// No identity on this thread (pooldb off / bring-up not run).
+        None,
+        /// Identity live; the captured crash-fence epoch.
+        Ready(usize),
+        /// Bring-up failed: this thread never serves (fail-open to inc-1 —
+        /// it keeps executing ordinary runtime work).
+        Poisoned,
+    }
+
+    thread_local! {
+        static POOL_IDENT: std::cell::Cell<PoolIdent> =
+            const { std::cell::Cell::new(PoolIdent::None) };
+    }
+
+    /// The per-serve gate installed into parallel::standing: verify this
+    /// thread's leased identity + crash fence. Unwinds PoolRetireRaw when
+    /// the fence moved (shared memory was reset under our identity — the
+    /// thread must die RAW and respawn cold).
+    fn pool_gate() -> bool {
+        match POOL_IDENT.with(std::cell::Cell::get) {
+            PoolIdent::Ready(epoch) => {
+                if epoch != parallel::standing::pool_fence_epoch() {
+                    std::panic::panic_any(parallel::standing::PoolRetireRaw);
+                }
+                true
+            }
+            PoolIdent::None | PoolIdent::Poisoned => false,
+        }
+    }
+
+    /// Pool-db thread body: rtgang-shaped identity bring-up, then the
+    /// ordinary worker loop under the rtgang exit discipline + respawn.
+    /// Bring-up failures before InitProcess poison the thread and fall
+    /// open to the plain executor loop (inc-1 behavior; the gate refuses
+    /// serves); failures after InitProcess release identity through the
+    /// exit path and respawn.
+    fn pooldb_thread_main(ordinal: usize, child_pid: pid_t, body: Box<dyn FnOnce() + Send>) {
+        // Thread-scoped local latch slot (returned on thread exit).
+        let _local_latch_release = miscinit::LocalLatchReleaseGuard::new();
+        let Some(boot) = POOL_BOOT.get() else {
+            POOL_IDENT.with(|c| c.set(PoolIdent::Poisoned));
+            body();
+            return;
+        };
+        let guc_ok = if let Some(base) = &boot.guc_base {
+            guc::store::initialize_guc_options_for_child_base(base)
+                .and_then(|()| guc::layers::bind_base(base))
+        } else {
+            guc::store::initialize_guc_options_for_child(&boot.guc_snapshot)
+                .and_then(|()| guc::store::restore_nondefault_variables(&boot.guc_snapshot))
+        };
+        if let Err(e) = guc_ok {
+            let _ = elog::elog(
+                types_error::WARNING,
+                format!("pool executor {ordinal}: GUC bring-up failed: {}", e.message()),
+            );
+            POOL_IDENT.with(|c| c.set(PoolIdent::Poisoned));
+            body();
+            return;
+        }
+        if let Err(e) = miscinit::InitPostmasterChild(child_pid) {
+            let _ = elog::elog(
+                types_error::WARNING,
+                format!(
+                    "pool executor {ordinal}: InitPostmasterChild failed: {}",
+                    e.message()
+                ),
+            );
+            POOL_IDENT.with(|c| c.set(PoolIdent::Poisoned));
+            body();
+            return;
+        }
+        procsignal::pqsignal_thread(
+            procsignal::signums::SIGQUIT,
+            procsignal::ThreadSignalHandler::Simple(super::default_sigquit_handler),
+        );
+        miscinit::SetMyBackendType(types_core::init::BackendType::BgWorker);
+        bgworker::adopt_worker_entry(bgworker::BackgroundWorker {
+            bgw_name: format!("runtime pool executor {ordinal}"),
+            bgw_type: "runtime pool executor".to_string(),
+            bgw_flags: bgworker::BGWORKER_SHMEM_ACCESS
+                | bgworker::BGWORKER_BACKEND_DATABASE_CONNECTION,
+            bgw_start_time: bgworker::BgWorkerStartTime::ConsistentState,
+            bgw_restart_time: bgworker::BGW_NEVER_RESTART,
+            bgw_main: pool_entry_never,
+            bgw_main_arg: 0,
+            bgw_extra: [0u8; bgworker::BGW_EXTRALEN],
+            bgw_notify_pid: 0,
+        });
+        // Per-thread timeout machinery BEFORE any connect (the rtgang
+        // train-12 finding: the serve-time InitPostgres registers session
+        // timeouts, which debug_assert InitializeTimeouts ran here).
+        timeout_seams::initialize_timeouts::call();
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if let Err(e) = lmgr_proc::InitProcess(types_core::init::BackendType::BgWorker) {
+                let _ = elog::elog(
+                    types_error::WARNING,
+                    format!("pool executor {ordinal}: InitProcess failed: {}", e.message()),
+                );
+                POOL_IDENT.with(|c| c.set(PoolIdent::Poisoned));
+                body();
+                return;
+            }
+            if let Err(e) = postinit::BaseInit() {
+                let _ = elog::elog(
+                    types_error::WARNING,
+                    format!("pool executor {ordinal}: BaseInit failed: {}", e.message()),
+                );
+                // PGPROC is claimed: release identity via the exit path.
+                ipc::proc_exit(1, init_small::globals::MyProcPid());
+            }
+            // Identity live; capture the crash fence it was minted under.
+            POOL_IDENT.with(|c| {
+                c.set(PoolIdent::Ready(parallel::standing::pool_fence_epoch()))
+            });
+            body();
+        }));
+        match outcome {
+            // Clean loop exit (request_stop — tests/shutdown only): the
+            // thread ends without respawn; identity dies with the process.
+            Ok(()) => {}
+            Err(payload) => {
+                if payload.is::<parallel::standing::PoolRetireRaw>() {
+                    // Crash fence: NO shared-memory interaction — the
+                    // PGPROC was reset wholesale with shared memory.
+                } else if let Some(p) = payload.downcast_ref::<ipc::ProcExitThread>() {
+                    // FATAL / retired-db / connect-failure exit: the
+                    // deferred drain (ProcKill, RemoveProcFromArray,
+                    // sinval cleanup) releases identity against LIVE
+                    // shared memory.
+                    let code = p.code;
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        ipc::run_deferred_exit_callbacks(code)
+                    }));
+                } else {
+                    // Generic panic with identity possibly held: best-
+                    // effort drain (the rtgang leak argument — a leaked
+                    // procarray/sinval entry blocks DROP DATABASE forever
+                    // and a leaked PGPROC drains the freelist).
+                    let _ = elog::elog(
+                        types_error::WARNING,
+                        format!("pool executor {ordinal} died on a panic; releasing identity"),
+                    );
+                    // A PARKED pool thread is procarray-invisible (the
+                    // serve bracket), but the exit callbacks expect
+                    // membership (RemoveProcFromArray) — re-add first, the
+                    // gang's Wake::Retire discipline (best-effort; a
+                    // mid-serve panic dies VISIBLE and the double-add's
+                    // own failure is swallowed so the drain still runs).
+                    parallel::standing::pool_exit_rejoin_procarray();
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        ipc::proc_exit(2, init_small::globals::MyProcPid())
+                    }));
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        ipc::run_deferred_exit_callbacks(2)
+                    }));
+                }
+                // The pool must never shrink: respawn the slot cold (fresh
+                // pid, fresh identity at its bring-up — post-crash that
+                // happens against reinitialized shared memory, because the
+                // fence only trips at a serve, which requires an engaging
+                // leader, which requires live shared memory).
+                respawn_pool_slot(ordinal);
+            }
+        }
+    }
+
+    fn pool_entry_never(_arg: u64) -> types_error::PgResult<()> {
+        unreachable!("pool executor entry is never dispatched")
+    }
+
+    fn respawn_pool_slot(ordinal: usize) {
+        let Some(rt) = RUNTIME.get() else { return };
+        let rt2 = Arc::clone(rt);
+        if spawn_worker(ordinal, Box::new(move || runtime::worker_loop(&rt2, ordinal)))
+            .is_err()
+        {
+            let _ = elog::elog(
+                types_error::WARNING,
+                format!("pool executor {ordinal}: respawn failed (pool shrinks)"),
+            );
+        }
+    }
+
     /// Start (or get) the process runtime pool: `workers + standbys`
     /// executor threads per the env-derived config (workers = cores).
     /// Postmaster thread only (the Inherited/GUC capture rule wpool's
     /// maintain() documents applies to the prelude capture here too).
     pub fn start() -> &'static Arc<runtime::Runtime> {
         RUNTIME.get_or_init(|| {
+            // M2 inc-2 boot wiring (postmaster thread; BEFORE any worker
+            // spawns — the threads' bring-up reads these): GUC captures +
+            // the per-serve identity gate.
+            if pooldb_armed() {
+                let _ = POOL_BOOT.set(PoolBoot {
+                    guc_base: guc::layers::base_share_enabled()
+                        .then(guc::layers::ensure_base_current),
+                    guc_snapshot: if guc::layers::base_share_enabled() {
+                        Vec::new()
+                    } else {
+                        guc::store::capture_nondefault_variables()
+                    },
+                });
+                parallel::standing::install_pool_gate(pool_gate);
+            }
             let rt = runtime::Runtime::new(runtime::RuntimeConfig::from_env());
             let pool = runtime::WorkerPool::spawn_with(Arc::clone(&rt), spawn_worker)
                 .expect("runtime worker pool spawn failed");
@@ -1304,7 +1550,14 @@ pub mod rtpool {
                 let _charge = PopulationCharge;
                 inherited.apply();
                 let _ = stack_depth::set_stack_base();
-                body();
+                // M2 inc-2: PGPROC-leasing identity + exit/respawn
+                // discipline around the loop (armed only; OFF = the plain
+                // executor body, byte-identical).
+                if pooldb_armed() {
+                    pooldb_thread_main(ordinal, pid, body);
+                } else {
+                    body();
+                }
             });
         match spawned {
             Ok(h) => {
@@ -1500,6 +1753,16 @@ pub mod rtgang {
             .and_then(|v| v.trim().parse::<i64>().ok())
             .unwrap_or_else(|| runtime::RuntimeConfig::from_env().workers as i64);
         n.clamp(0, 1024) as i32
+    }
+
+    /// The ONE boot PGPROC-budget authority (SetRuntimeGangProcs — both the
+    /// postmaster's main_entry and the sim seam consume this): the standing
+    /// gang's reservation PLUS, under PGRUST_RUNTIME_POOLDB=1 (M2 inc-2),
+    /// one PGPROC per pool thread (workers + standbys). The gang keeps its
+    /// own segment while it remains the fallback channel; both terms are 0
+    /// under their kill switches — byte-identical sizing.
+    pub fn runtime_reserved_procs() -> i32 {
+        gang_procs_wanted() + super::rtpool::pool_procs_wanted()
     }
 
     /// Postmaster boot wiring (serverloop, next to rtpool::start_if_enabled;
