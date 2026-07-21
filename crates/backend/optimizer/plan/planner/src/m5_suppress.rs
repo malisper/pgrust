@@ -379,16 +379,26 @@ fn class_guard(class: CoverClass) -> FloorGuard {
         // (dop16@2.5M's 0.92 marginal win is deliberately forgone for the
         // clean single bound).
         CoverClass::CbHashJoinPlainAgg => FloorGuard { max_rows: 2_000_000.0, ..NO_GUARD },
-        // m5p1: PROVISIONAL reuse of the hashjoin-nbatch1 floor (the walk's
-        // build/probe economics are the same shared-build machinery per
-        // level; the largest side is the ladder's per-table N). The fleet
-        // letter (GL-M5P1-1) owns un-provisionalizing or re-measuring it.
-        CoverClass::CbHashJoinMultiBuild => FloorGuard { max_rows: 2_000_000.0, ..NO_GUARD },
-        // SE-AGGJOIN: PROVISIONAL reuse of the hashjoin-nbatch1 floor (same
-        // shared-build machinery per level; the grouped tail adds the
-        // export/absorb walk, floored separately by the ngroups guard in
-        // classify_aggjoin_grouped). GL-AGGJOIN-1 owns re-measuring.
-        CoverClass::CbHashJoinGroupedAgg => FloorGuard { max_rows: 2_000_000.0, ..NO_GUARD },
+        // GL-COST-2 UNWIRE (this letter): the m5p1/SE-AGGJOIN PROVISIONAL
+        // reuse of the hashjoin-nbatch1 floor is REFUTED by the riders' own
+        // witnessed grids (L1/L2 @ d10db8ef5e: rt/legacy 3.04-6.03x
+        // multibuild, 3.14-6.40x grouped, at EVERY 1M/2.5M x dop4/16 cell;
+        // TSV rectangle_max_rows rows). No witnessed win region exists for
+        // either rider (the t35 floor was itself a reuse, never measured),
+        // so both are GUARDED OFF at every size — the topn max_rows=0
+        // precedent: a measured-losing arm expressed as an economics
+        // rectangle, un-guarding itself only through an OWN witnessed curve
+        // (ladder spec L1/L2). PGRUST_M5_SIZE_FLOORS=0 re-enables for the
+        // measurement vehicle; PGRUST_M5_HJRIDER_CURVE=1 restores the
+        // refuted pre-letter wiring (2M rectangle + PlainAgg curve) for
+        // A/B vehicles and one-train rollback.
+        CoverClass::CbHashJoinMultiBuild | CoverClass::CbHashJoinGroupedAgg => {
+            if hjrider_curve_enabled() {
+                FloorGuard { max_rows: 2_000_000.0, ..NO_GUARD }
+            } else {
+                FloorGuard { max_rows: 0.0, ..NO_GUARD }
+            }
+        }
         // Footer answers are O(1) — never floored.
         CoverClass::CbMetaFooterAgg => NO_GUARD,
         // SE-AGGPOLY: PROVISIONAL reuse of the HeapCmpFoldPrefix guard (the
@@ -400,6 +410,24 @@ fn class_guard(class: CoverClass) -> FloorGuard {
             FloorGuard { min_rows: 1_000_000.0, min_dop: 12, low_dop_max_rows: 0.0, ..NO_GUARD }
         }
     }
+}
+
+/// GL-COST-2 unwire kill (one-train retention, the FloorGuard =0-fallback
+/// precedent): `PGRUST_M5_HJRIDER_CURVE=1|on` restores the REFUTED
+/// pre-letter wiring — the multibuild / grouped-agg-join riders back on the
+/// CbHashJoinPlainAgg curve with the 2M rectangle — for A/B vehicles and
+/// emergency rollback. DEFAULT OFF = unwired (exact-spelling arm, the
+/// scanpass fail-safe idiom): the riders are guarded off at every size
+/// until an own witnessed curve shows a win region (witnessed grids in
+/// crates/backend/optimizer/path/costsize/src/runtime-cost-constants.tsv; ladder specs L1/L2).
+fn hjrider_curve_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("PGRUST_M5_HJRIDER_CURVE").as_deref(),
+            Ok("1") | Ok("on")
+        )
+    })
 }
 
 /// M5-5 floors kill switch: PGRUST_M5_SIZE_FLOORS=0 disables every guard.
@@ -3699,11 +3727,14 @@ fn cover_class_curve(class: CoverClass) -> Option<costsize::runtime_model::Runti
         CoverClass::CbTopnBoundedIntKeys => Some(Rc::CbTopnBoundedIntKeys),
         CoverClass::HeapPlainCountStar => Some(Rc::HeapPlainCountStar),
         CoverClass::HeapCmpFoldPrefix => Some(Rc::HeapCmpFoldPrefix),
-        // Shipped guard reuse (same 2M rectangle) -> same curve; own
-        // ladder cells owed (TSV curve_reuse rows, GL-COST-2).
-        CoverClass::CbHashJoinPlainAgg
-        | CoverClass::CbHashJoinMultiBuild
-        | CoverClass::CbHashJoinGroupedAgg => Some(Rc::CbHashJoinPlainAgg),
+        CoverClass::CbHashJoinPlainAgg => Some(Rc::CbHashJoinPlainAgg),
+        // GL-COST-2 UNWIRE: the riders' witnessed grids refuted the PlainAgg
+        // curve reuse (see class_guard) — NO curve at default; the class
+        // routes by its guarded-off rectangle. The one-train kill restores
+        // the refuted wiring for A/B vehicles only.
+        CoverClass::CbHashJoinMultiBuild | CoverClass::CbHashJoinGroupedAgg => {
+            if hjrider_curve_enabled() { Some(Rc::CbHashJoinPlainAgg) } else { None }
+        }
         // PROVISIONAL reuse matching the shipped guard reuse (GL-AGGPOLY-1).
         CoverClass::AggPolyHeapPlain => Some(Rc::HeapCmpFoldPrefix),
         // Curve-fit since the witnessed v2 grid (the v1 record's
@@ -5657,15 +5688,40 @@ mod tests {
     /// a TSV note, never fall through silently.
     #[test]
     fn cost_route_map_names_its_curveless_classes() {
+        // Test binary runs with PGRUST_M5_HJRIDER_CURVE unset: the GL-COST-2
+        // unwire posture — the riders are curveless (their witnessed grids
+        // refuted the PlainAgg reuse) and MetaFooter has no curve by design.
         for row in BOOTSTRAP_MATRIX {
             let curveless = cover_class_curve(row.class).is_none();
-            let expect_curveless = matches!(row.class, CoverClass::CbMetaFooterAgg);
+            let expect_curveless = matches!(
+                row.class,
+                CoverClass::CbMetaFooterAgg
+                    | CoverClass::CbHashJoinMultiBuild
+                    | CoverClass::CbHashJoinGroupedAgg
+            );
             assert_eq!(
                 curveless, expect_curveless,
                 "cost-route curve map drift for {:?}",
                 row.class
             );
         }
+    }
+
+    /// GL-COST-2 unwire posture of record: the riders are guarded OFF at
+    /// every size at default (no witnessed win region exists), the one-train
+    /// kill is exact-spelling, and floors-off (the measurement vehicle)
+    /// still measures them.
+    #[test]
+    fn hjrider_unwire_posture() {
+        assert!(!hjrider_curve_enabled(), "default must be UNWIRED");
+        for class in [CoverClass::CbHashJoinMultiBuild, CoverClass::CbHashJoinGroupedAgg] {
+            let g = class_guard(class);
+            assert_eq!(g.max_rows, 0.0, "{class:?} must be guarded off at every size");
+            assert!(cover_class_curve(class).is_none(), "{class:?} must be curveless");
+        }
+        // The non-rider hashjoin class keeps its curve and rectangle.
+        assert_eq!(class_guard(CoverClass::CbHashJoinPlainAgg).max_rows, 2_000_000.0);
+        assert!(cover_class_curve(CoverClass::CbHashJoinPlainAgg).is_some());
     }
 
     /// Step-2 census plumbing: every direction lands in its own cell, and
@@ -5767,9 +5823,17 @@ mod tests {
             groupby_high_floor(),
             "groupby-high HOLD drifted from its TSV row (env override in a test run?)"
         );
-        // Reuse rows point at real curve classes.
-        assert_eq!(get("CbHashJoinMultiBuild", "curve_reuse"), "CbHashJoinPlainAgg");
-        assert_eq!(get("CbHashJoinGroupedAgg", "curve_reuse"), "CbHashJoinPlainAgg");
+        // GL-COST-2 unwire rows: the riders' guarded-off rectangles are of
+        // record in the TSV (witnessed grids in the note columns).
+        assert_eq!(
+            get("CbHashJoinMultiBuild", "rectangle_max_rows").parse::<f64>().unwrap(),
+            class_guard(CoverClass::CbHashJoinMultiBuild).max_rows
+        );
+        assert_eq!(
+            get("CbHashJoinGroupedAgg", "rectangle_max_rows").parse::<f64>().unwrap(),
+            class_guard(CoverClass::CbHashJoinGroupedAgg).max_rows
+        );
+        // The remaining reuse row points at a real curve class.
         assert_eq!(get("AggPolyHeapPlain", "curve_reuse"), "HeapCmpFoldPrefix");
     }
 

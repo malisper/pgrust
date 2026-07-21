@@ -63,8 +63,13 @@
 //!                     direction, hashjoin 1M@dop4 57->43ms loss avoided +
 //!                     2.5M@dop16 forgone win recovered, agree-controls
 //!                     flat; economics = the witnessed v2 ladder). The
-//!                     multibuild/groupsink hashjoin riders follow the
-//!                     PlainAgg curve exactly as they rode the rectangle.
+//!                     multibuild/groupsink hashjoin riders were UNWIRED
+//!                     from the PlainAgg curve at GL-COST-2: their own
+//!                     witnessed grids refuted the reuse (3.0-6.4x
+//!                     rt/legacy) — guarded off at every size until an own
+//!                     witnessed curve (m5_suppress::class_guard, TSV
+//!                     rectangle_max_rows rows, kill
+//!                     PGRUST_M5_HJRIDER_CURVE=1 one train).
 //!                     Every other curve-modeled class stays SHADOW.
 //!   "shadow"          the KILL for the default flip: curve computed +
 //!                     traced next to the floor verdict; FLOORS DECIDE
@@ -581,19 +586,15 @@ mod tests {
              arrive with its ladder spec (notes/runtime-cost-ladder-specs.md), \
              and a witnessed one must flip this pin + the TSV row together"
         );
-        // The witnessed-REFUTED reuses (L1/L2 grids @ d10db8ef5e): both
-        // hashjoin riders measured 3.0-6.4x rt/legacy against the host
-        // curve's 0.73-1.43 predictions. The reuse stays WIRED because
-        // unwiring changes routing (the riders are cost-decided through the
-        // host at default) — that flip is GL-COST-2's letter, and this pin
-        // flips with it, never by drift.
+        // witnessed-refutes-reuse is ACTED-ON state, not a resting place:
+        // the L1/L2 refutation (3.0-6.4x rt/legacy grids @ d10db8ef5e) was
+        // resolved by the GL-COST-2 unwire (the riders' rectangle_max_rows=0
+        // rows) — so the refuted census must be EMPTY. A new refuted row is
+        // legitimate only while its unwire letter is in flight.
         assert_eq!(
             refuted,
-            vec![
-                ("CbHashJoinMultiBuild".to_string(), "curve_reuse".to_string()),
-                ("CbHashJoinGroupedAgg".to_string(), "curve_reuse".to_string()),
-            ],
-            "the witnessed-refutes-reuse census changed"
+            Vec::<(String, String)>::new(),
+            "a witnessed-refutes-reuse row exists — its unwire letter is owed"
         );
         for (class, _) in &unwitnessed {
             assert!(
