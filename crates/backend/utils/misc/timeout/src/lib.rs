@@ -416,8 +416,35 @@ pub fn ProcessTimeoutInterrupt() {
     }
 }
 
+// FIX (kill-switched, default OFF — flip via PGRUST_TIMEOUT_INIT_RESET=1):
+// re-running InitializeTimeouts on a live connection thread (the session
+// main re-init after the startup-packet/auth phase) replaces this thread's
+// timer slot with `deadline: None`, destroying a still-armed wake — while
+// the SIGNAL_PENDING/SIGNAL_DUE_AT thread-locals survive untouched. Every
+// later schedule_alarm whose nearest fin_time lands at or past the stale
+// SIGNAL_DUE_AT then takes the setitimer-avoidance skip and trusts a wake
+// that can no longer arrive: the timeout silently never fires until a
+// schedule_alarm runs after SIGNAL_DUE_AT has passed (the "assumed lost"
+// recovery). Net effect: any timeout armed within the first
+// authentication_timeout seconds of a session whose deadline extends past
+// that window is lost. C is immune because its kernel itimer survives
+// InitializeTimeouts, keeping signal_pending truthful. The fix resets the
+// pending-wake bookkeeping to match the destroyed slot, so the next
+// schedule_alarm always arms a real wake.
+fn timeout_init_reset_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_TIMEOUT_INIT_RESET").map_or(false, |v| v != "0" && !v.is_empty())
+    })
+}
+
 pub fn InitializeTimeouts() {
     disable_alarm();
+
+    if timeout_init_reset_enabled() {
+        SIGNAL_PENDING.with(|c| c.set(false));
+        SIGNAL_DUE_AT.with(|c| c.set(0));
+    }
 
     DATA.with(|d| {
         let data = &mut *d.borrow_mut();
