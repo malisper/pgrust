@@ -313,27 +313,30 @@ pub fn runtime_dop() -> i32 {
 // ---------------------------------------------------------------------------
 // bitmap-morsels arming (bitmap-morsels lane): the FORCED/explicit knob for
 // executing a serial-plan plain Agg over a Bitmap Heap Scan as morselized
-// claims over the frozen shared bitmap at DOP N. Layering DIFFERS from the
-// sibling arms in one deliberate way (lane charter): the env switch
-// PGRUST_RUNTIME_BITMAP is an ENABLE (default OFF — absence disarms), not a
-// kill switch, because the arm is pre-boarding and race-only. Everything
-// else matches: PGRUST_RUNTIME=1 + the customized option
-// `pgrust.runtime_bitmap_pool` + the lane master switch; the mode selector
-// (PGRUST_RUNTIME_BITMAP_MODE=A|B) lives with the arm in
-// execmain::lanev2::runtime_bitmap.
+// claims over the frozen shared bitmap at DOP N. Layering now MATCHES the
+// sibling arms (GL-BITMAP-1 close-out, scratchpad/night/bitmap-arm-letter.md:
+// proven-faster at every grid point at main tip b12c3fc74, byte parity,
+// dormant tax none): PGRUST_RUNTIME_BITMAP=0/off is the dedicated KILL
+// switch; any other value or unset leaves the arm reachable. This is a zero
+// default-behavior change — engagement still requires the explicit session
+// option `SET pgrust.runtime_bitmap_pool = <dop>`, which nothing sets by
+// default, plus the runtime master + lane master + the fail-closed
+// admission. The mode selector (PGRUST_RUNTIME_BITMAP_MODE=A|B) lives with
+// the arm in execmain::lanev2::runtime_bitmap.
 // ---------------------------------------------------------------------------
 
-/// Enable + master gates for the runtime bitmap-heap arm (default OFF).
+/// Kill switch + master gates for the runtime bitmap-heap arm (sibling
+/// layering since GL-BITMAP-1; formerly a pre-boarding ENABLE).
 fn runtime_bitmap_env_ok() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let on = *ON.get_or_init(|| {
-        matches!(std::env::var("PGRUST_RUNTIME_BITMAP").as_deref(), Ok("1") | Ok("on"))
+    static KILLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let killed = *KILLED.get_or_init(|| {
+        matches!(std::env::var("PGRUST_RUNTIME_BITMAP").as_deref(), Ok("0") | Ok("off"))
     });
-    on && crate::backing::pgrust_lane_executor()
+    !killed && crate::backing::pgrust_lane_executor()
 }
 
 /// The armed runtime bitmap-heap DOP: `pgrust.runtime_bitmap_pool` clamped
-/// to available cores, or 0 when unarmed (enable switch absent, option
+/// to available cores, or 0 when unarmed (kill switch, option
 /// unset/invalid/<=0, lane off). Callers additionally gate on
 /// `PGRUST_RUNTIME=1` + a started pool + the shape/binder admission.
 pub fn runtime_bitmap_pool_dop() -> i32 {
