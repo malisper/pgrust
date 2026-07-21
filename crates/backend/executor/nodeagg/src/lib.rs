@@ -213,8 +213,18 @@ fn lane_v2_enabled() -> bool {
 }
 
 /// SE-GROUPONLY (night/subquery-admission): `PGRUST_LANE_V2_GROUPONLY`,
-/// **default OFF** (`1`/`on` arm it; every other spelling fails safe — the
-/// K1-latemat idiom). Admits ZERO-transition hashed aggregation
+/// **DEFAULT ON** since t36 flips2 (`=0|off` is the kill switch — the
+/// flipped-kill idiom; every other spelling stays ON). FLIP EVIDENCE
+/// (GL-GROUPONLY-1 FLIP-RECOMMENDED, 2026-07-21, A-B-A discriminator job
+/// pgrust-fast-tests-1d6836056f-1784619706-15e1, arena-strings 10M/2M
+/// median-of-5): official damped geomean ON/OFF 0.720 (1.39x win on the
+/// admitted grouped-subquery/DISTINCT wrapper shapes; the middle ON boot
+/// beat BOTH flanking OFF boots), ordered string_agg md5 parity every leg
+/// at both scales, refusal witness 20 -> 0. Letter caveats: the earlier
+/// 7.2x-cliff claim restates as ~1.4x on this fixture class (the refusal
+/// lands on legacy serial hash agg, not a cliff); serial-lane admission
+/// only (the rig pinned pgrust.parallel_engine=legacy). Admits
+/// ZERO-transition hashed aggregation
 /// (grouping-only builds: bare `GROUP BY` emit under a parent consumer,
 /// `SELECT DISTINCT`, the grouped-subquery inner) into the lane's staged
 /// feeds via the vacuous fold plan (`lanefold::empty_plan`) — the
@@ -233,9 +243,10 @@ fn lane_v2_grouponly_enabled() -> bool {
     })
 }
 
-/// The default-OFF spelling rule, factored pure for unit tests.
+/// The default-ON kill spelling rule (t36 flips2), factored pure for unit
+/// tests: OFF iff exactly `0` or `off`; unset and every other spelling ON.
 fn grouponly_spelling_on(v: Option<&str>) -> bool {
-    matches!(v, Some("1") | Some("on"))
+    !matches!(v, Some("0") | Some("off"))
 }
 
 const MAX_ORDERED_TRANS_ARGS: usize = 8;

@@ -2812,17 +2812,21 @@ fn byref_merge_handed_tables_share_leader_bucket_mapping_under_variable_iv() {
 }
 
 /// SE-GROUPONLY knob (night/subquery-admission): `PGRUST_LANE_V2_GROUPONLY`
-/// is default OFF and only `1`/`on` arm it — every other spelling fails
-/// safe to today's behaviour ("no lanefold plan (classify refused)" — the
-/// legacy row-at-a-time build). Pins the inert-at-default guarantee.
+/// is DEFAULT ON since t36 flips2 (GL-GROUPONLY-1 FLIP-RECOMMENDED) and
+/// only the exact kill spellings `0`/`off` disarm it — the flipped-kill
+/// idiom (a typo'd kill leaves the measured-winning default in place).
+/// Pins the flipped-default posture + the kill's exact spellings.
 #[test]
-fn grouponly_knob_is_default_off() {
-    assert!(!crate::grouponly_spelling_on(None), "unset must be OFF (default)");
-    assert!(!crate::grouponly_spelling_on(Some("0")));
-    assert!(!crate::grouponly_spelling_on(Some("off")));
-    assert!(!crate::grouponly_spelling_on(Some("")));
-    assert!(!crate::grouponly_spelling_on(Some("true")), "typos fail safe to OFF");
-    assert!(!crate::grouponly_spelling_on(Some("ON")), "case-sensitive, like the arm knobs");
+fn grouponly_knob_is_default_on_with_kill() {
+    assert!(crate::grouponly_spelling_on(None), "unset must be ON (t36 flipped default)");
+    assert!(!crate::grouponly_spelling_on(Some("0")), "kill spelling");
+    assert!(!crate::grouponly_spelling_on(Some("off")), "kill spelling");
+    assert!(crate::grouponly_spelling_on(Some("")), "non-kill spellings stay ON");
+    assert!(crate::grouponly_spelling_on(Some("true")), "non-kill spellings stay ON");
+    assert!(
+        crate::grouponly_spelling_on(Some("OFF")),
+        "kill is case-sensitive, like the arm kills"
+    );
     assert!(crate::grouponly_spelling_on(Some("1")));
     assert!(crate::grouponly_spelling_on(Some("on")));
 }

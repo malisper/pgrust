@@ -2712,30 +2712,51 @@ fn finish_multikey_text(
 //          unbounded `sink_topn_arm` declines into the plain full drain, and
 //          the REAL serial Sort above orders the finalized groups — the
 //          decorated-root pattern WITHOUT the bound; no executor change.
-//          Knob: `PGRUST_LANE_V2_AGG_SORT_NOLIMIT` (default OFF; ON iff
-//          `1|on`). NOTE for assembly: the tpch-cars agent's CAR 1
+//          Knob: `PGRUST_LANE_V2_AGG_SORT_NOLIMIT` (DEFAULT ON since t36
+//          flips2, GL-T2B; `=0|off` kills). NOTE for assembly: the
+//          tpch-cars agent's CAR 1
 //          generalizes root decoration — this is the agg-specific narrow
 //          case behind its own switch; unify at merge if theirs subsumes.
 //
 // All three are knob-path finishes (finish_knob_path) — NOT BOOTSTRAP_MATRIX
-// classes, so the tsv route_to columns, the drift guards, and the DEFAULT
-// census are untouched; OFF takes the identical pre-car refusal
-// byte-for-byte.
+// classes, so the drift guards are untouched; a thrown kill (or the two
+// still-gated cars' default OFF) takes the identical pre-car refusal
+// byte-for-byte. t36 flips2 dispositions per the GL-T2 letters: CARs A
+// (GL-T2C) + C (GL-T2B) FLIPPED ON; CAR B KEEP-GATED (GL-T2A: the q22
+// suppress-then-serial 7.6x containment violation).
 // ===========================================================================
 
-/// The tier-2 cars' shared default-OFF spelling rule, factored pure for
-/// exhaustive unit tests (the K1-latemat / scanpass idiom): ON iff the value
-/// is exactly `1` or `on`; every other spelling (incl. unset, `0`, `off`,
-/// typos) fails safe to OFF.
+/// The STILL-GATED tier-2 cars' shared default-OFF spelling rule, factored
+/// pure for exhaustive unit tests (the K1-latemat / scanpass idiom): ON iff
+/// the value is exactly `1` or `on`; every other spelling (incl. unset,
+/// `0`, `off`, typos) fails safe to OFF. Since t36 flips2 this covers ONLY
+/// CAR B (STRMINMAX, KEEP-GATED per its letter); the flipped CARs A + C
+/// ride `tier2_car_kill_spelling_on`.
 fn tier2_car_spelling_on(v: Option<&str>) -> bool {
     matches!(v, Some("1") | Some("on"))
 }
 
-/// CAR A probe knob (`PGRUST_LANE_V2_DISTINCT_PLAINSHAPE`, default OFF).
+/// The FLIPPED tier-2 cars' default-ON kill spelling (t36 flips2, the
+/// flipped-kill idiom): OFF iff exactly `0` or `off`; unset and every other
+/// spelling stay ON.
+fn tier2_car_kill_spelling_on(v: Option<&str>) -> bool {
+    !matches!(v, Some("0") | Some("off"))
+}
+
+/// CAR A probe knob (`PGRUST_LANE_V2_DISTINCT_PLAINSHAPE`): DEFAULT ON
+/// since t36 flips2 (`=0|off` kills). FLIP EVIDENCE (GL-T2C
+/// FLIP-RECOMMENDED, 2026-07-21, tier2 campaign @ 7d8aa9a2b): bare SELECT
+/// DISTINCT int 0.164s (6.1x win) / text 0.195s (5.1x win) at 10M/2M, md5
+/// parity every leg, OFF arm inert (0 engagements), GROUP BY control flat,
+/// wrapped/hasAggs forms correctly shape-refused; measured at dop 12 with
+/// floors disabled symmetrically — the production floor guard (min_dop 12
+/// / low-dop<=3M) bounds exposure. SAME spelling as the executor sub-arm
+/// (runtime_plaindistinct `selectdistinct_enabled`) — both sites flip
+/// together (knob-coherence law).
 fn distinct_plainshape_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        tier2_car_spelling_on(
+        tier2_car_kill_spelling_on(
             std::env::var("PGRUST_LANE_V2_DISTINCT_PLAINSHAPE").as_deref().ok(),
         )
     })
@@ -2759,7 +2780,17 @@ fn distinct_plainshape_guard() -> FloorGuard {
     FloorGuard { min_dop: 12, low_dop_max_rows: 3_000_000.0, ..NO_GUARD }
 }
 
-/// CAR B knob (`PGRUST_LANE_V2_AGG_STRMINMAX`, default OFF). SAME spelling
+/// CAR B knob (`PGRUST_LANE_V2_AGG_STRMINMAX`, default OFF — **KEEP-GATED
+/// per its letter; do NOT flip**). LETTER OF RECORD (GL-T2A KEEP GATED,
+/// 2026-07-21, tier2 campaign @ 7d8aa9a2b): the target q22 is a
+/// suppress-then-serial containment violation — `m5-suppress-strminmax ...
+/// gather suppressed` then `runtime-sort: refused (full-sort shape spec)`,
+/// zero runtime engagements, q22 hot 0.022 -> 0.234s (7.6x damped; 8.5x
+/// mt16), official 43q geomean dragged +3.3%/+5.9%. Parity clean.
+/// RE-LETTER PRECONDITIONS: narrow the probe (mirror the executor shape
+/// gates into classify) or thread qualed topn through the runtime sort
+/// arm; add a QUALED q22-class e2e row (the CAR-B e2e shapes are unqualed
+/// — the coverage hole). SAME spelling
 /// as the executor half (nodeagg sink.rs `sink_strminmax_enabled` — the
 /// resolve-combines / emit-plan vocabulary widening): both read sites flip
 /// together, the AGG_POLY knob-coherence law.
@@ -2770,12 +2801,20 @@ fn agg_strminmax_enabled() -> bool {
     })
 }
 
-/// CAR C knob (`PGRUST_LANE_V2_AGG_SORT_NOLIMIT`, default OFF). Planner-only
-/// (suppression-widening; the executor composition already exists).
+/// CAR C knob (`PGRUST_LANE_V2_AGG_SORT_NOLIMIT`): DEFAULT ON since t36
+/// flips2 (`=0|off` kills). Planner-only (suppression-widening; the
+/// executor composition already exists). FLIP EVIDENCE (GL-T2B
+/// FLIP-RECOMMENDED, 2026-07-21, tier2 campaign @ 7d8aa9a2b, CB 10M
+/// unforced + mt16): q8 engages 3/3 in BOTH postures (planner suppress +
+/// runtime-agg engaged dop=16, groups=8), byte-identical output, wall flat
+/// (the win is retiring the uncovered gap:agg-orderby-nolimit row), all 41
+/// guard queries flat; attribution clean via the per-car suppress labels.
 fn agg_sort_nolimit_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        tier2_car_spelling_on(std::env::var("PGRUST_LANE_V2_AGG_SORT_NOLIMIT").as_deref().ok())
+        tier2_car_kill_spelling_on(
+            std::env::var("PGRUST_LANE_V2_AGG_SORT_NOLIMIT").as_deref().ok(),
+        )
     })
 }
 
@@ -3909,24 +3948,34 @@ mod tests {
         }
     }
 
-    /// SE-T2AGG (night/tier2-agg-cars): the three tier-2 car knobs are
-    /// DEFAULT OFF and only `1`/`on` arm them — every other spelling fails
-    /// safe to today's behaviour (the scanpass default-OFF idiom). Pins the
-    /// inert-at-default guarantee for CAR A (distinct-plain-shape), CAR B
-    /// (gap:agg-min-text), and CAR C (gap:agg-orderby-nolimit).
+    /// SE-T2AGG (night/tier2-agg-cars) knob posture of record at t36
+    /// flips2, per the GL-T2 letters: CAR B (gap:agg-min-text) stays
+    /// DEFAULT OFF — `1`/`on` only (KEEP-GATED by GL-T2A: the q22
+    /// suppress-then-serial containment violation). CARs A
+    /// (distinct-plain-shape, GL-T2C) and C (gap:agg-orderby-nolimit,
+    /// GL-T2B) are DEFAULT ON with the exact-spelling kill `0`/`off` —
+    /// the flipped-kill idiom.
     #[test]
-    fn tier2_agg_car_knobs_are_default_off() {
+    fn tier2_agg_car_knob_postures() {
+        // Still-gated spelling rule (CARs A + B).
         assert!(!tier2_car_spelling_on(None), "unset must be OFF (default)");
         for v in ["0", "off", "", "true", "ON", "yes"] {
             assert!(!tier2_car_spelling_on(Some(v)), "spelling {v:?} must fail safe to OFF");
         }
         assert!(tier2_car_spelling_on(Some("1")));
         assert!(tier2_car_spelling_on(Some("on")));
-        // The live getters memoize the process env; in the test binary the
-        // vars are unset, so all three cars resolve OFF.
-        assert!(!distinct_plainshape_enabled(), "CAR A must be OFF at default");
-        assert!(!agg_strminmax_enabled(), "CAR B must be OFF at default");
-        assert!(!agg_sort_nolimit_enabled(), "CAR C must be OFF at default");
+        // Flipped kill rule (CAR C).
+        assert!(tier2_car_kill_spelling_on(None), "unset must be ON (t36 flipped default)");
+        assert!(!tier2_car_kill_spelling_on(Some("0")), "kill spelling");
+        assert!(!tier2_car_kill_spelling_on(Some("off")), "kill spelling");
+        for v in ["", "true", "OFF", "1", "on"] {
+            assert!(tier2_car_kill_spelling_on(Some(v)), "non-kill spelling {v:?} stays ON");
+        }
+        // The live getters memoize the process env; in the test binary no
+        // vars are set, so the postures resolve to the shipped defaults.
+        assert!(distinct_plainshape_enabled(), "CAR A must be ON at default (GL-T2C flip)");
+        assert!(!agg_strminmax_enabled(), "CAR B must be OFF at default (KEEP-GATED)");
+        assert!(agg_sort_nolimit_enabled(), "CAR C must be ON at default (GL-T2B flip)");
     }
 
     /// SE-T2AGG CAR A engine-kill coherence: the runtime plain-distinct sink
