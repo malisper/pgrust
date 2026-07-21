@@ -1210,6 +1210,21 @@ fn funnel_seqscan_pstmt<'m>(
     qual: Option<NodeList<'m>>,
     plan_rows: f64,
 ) -> &'m PlannedStmt<'m> {
+    funnel_seqscan_pstmt_frag(mcx, relid, qual, plan_rows, false)
+}
+
+/// `funnel_seqscan_pstmt` with an explicit `parallel_aware` marker: `true`
+/// builds a parallel-FRAGMENT shape (what a parallel worker's deserialized
+/// plan carries — its `plan_rows` is the planner's PER-PARTICIPANT estimate,
+/// divided by the parallel divisor at costing). The emit-band FloorGuard must
+/// refuse fragment estimates categorically; see `floorguard_emit_band_admits`.
+fn funnel_seqscan_pstmt_frag<'m>(
+    mcx: ::mcx::Mcx<'m>,
+    relid: u32,
+    qual: Option<NodeList<'m>>,
+    plan_rows: f64,
+    parallel_aware: bool,
+) -> &'m PlannedStmt<'m> {
     use ::types_nodes::plannodes::{Plan, Scan, SeqScan};
     let var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
     let tle = Node::mk_target_entry(mcx, var, 1, Some("a"), false).unwrap();
@@ -1217,7 +1232,7 @@ fn funnel_seqscan_pstmt<'m>(
         targetlist: NodeList::make1(mcx, tle).unwrap(),
         plan_node_id: 0,
         parallel_safe: true,
-        parallel_aware: false,
+        parallel_aware,
         plan_rows,
         ..Default::default()
     };
@@ -1616,4 +1631,94 @@ fn funnel_refuses_inside_parallel_mode() {
     assert_eq!(processed_ctl, expected.len() as u64);
     values_ctl.sort_unstable();
     assert_eq!(values_ctl, expected);
+}
+
+// FLOORGUARD gate 3 scale-consistency witnesses (emit-band divisor fix):
+// admission must track the TRUE emit fraction at every planned DOP. A
+// parallel FRAGMENT's plan_rows is the planner's PER-PARTICIPANT estimate —
+// divided at costing by the parallel divisor, w + max(0, 1 - 0.3*w) for w
+// planned workers — so the pre-fix expression `plan_rows / reltuples <= band`
+// read a 33%-emit qual as 8.25% at 4 planned workers (divisor 4.0) and
+// ADMITTED it (the mis-admission enabler of the worker-side duplication bug);
+// at 2 workers (divisor 2.4) the same qual read 13.75% and refused — the
+// exact clean-vs-dirty DOP boundary observed. Post-fix the band refuses
+// fragment estimates categorically (the divisor is not recoverable from the
+// Plan node, so no exact true fraction exists to admit on) and prices
+// whole-plan estimates unchanged. Every cell also asserts byte-correct rows
+// through whichever engine served it.
+#[test]
+fn funnel_band_boundary_tracks_true_fraction_across_dop() {
+    if !funnel_armed() {
+        eprintln!(
+            "SKIP: funnel_band_boundary_tracks_true_fraction_across_dop (PGRUST_RUNTIME_ROW_FUNNEL unset)"
+        );
+        return;
+    }
+    let _s = serial();
+    let _w = Watchdog::arm(240, "funnel_band_boundary_tracks_true_fraction_across_dop");
+    setup();
+    heapfix::install();
+    funnel_runtime_boot();
+
+    // 60 pages x 100 rows, ANALYZED: reltuples = 6000.
+    const RELID: u32 = 93006;
+    let pages: Vec<Vec<i32>> =
+        (0..60).map(|p| ((p * 100 + 1)..=(p * 100 + 100)).collect()).collect();
+    let page_refs: Vec<&[i32]> = pages.iter().map(|v| &v[..]).collect();
+    heapfix::register_table(RELID, &page_refs);
+
+    // (tag, qual threshold k — `a > k` truly emits 6000-k rows, plan_rows,
+    //  parallel_aware, expect_engage). Fragment plan_rows = whole / divisor.
+    let cells: &[(&'static str, i32, f64, bool, bool)] = &[
+        // Planned DOP 1 (serial whole-plan shapes): admission tracks the
+        // true fraction across the 10% boundary — 9.9% engages, 10.3%
+        // refuses.
+        ("dop1 true 9.9% whole-plan (engage)", 5406, 594.0, false, true),
+        ("dop1 true 10.3% whole-plan (refuse)", 5382, 618.0, false, false),
+        // Planned DOP 2 fragment, true 33% (divisor 2.4 -> apparent 13.75%):
+        // refuse — pre-fix also refused; the clean side of the measured
+        // boundary.
+        ("dop2 fragment true 33% (refuse)", 4020, 825.0, true, false),
+        // Planned DOP 4 fragment, true 33% (divisor 4.0 -> apparent 8.25%,
+        // INSIDE the band): RED WITNESS — the pre-fix expression admitted
+        // this cell.
+        ("dop4 fragment true 33% (refuse; red witness)", 4020, 495.0, true, false),
+        // Planned DOP 4 fragment, true 9.9% (apparent 2.475%): refuses too —
+        // fragments fail closed even when the true fraction is in-band,
+        // because the divisor is not recoverable from the Plan node.
+        ("dop4 fragment true 9.9% (refuse; fail-closed)", 5406, 148.5, true, false),
+        // Positive control for the red-witness cell: the SAME 8.25% estimate
+        // on a whole-plan shape engages — the fragment refusals above are
+        // attributable to the per-participant marker alone, not any other
+        // gate.
+        ("whole-plan 8.25% estimate control (engage)", 4020, 495.0, false, true),
+    ];
+
+    for &(tag, k, plan_rows, parallel_aware, expect_engage) in cells {
+        let (e0, c0) = execmain::funnel_engagements();
+        let mcx = leaked_mcx();
+        let pstmt = funnel_seqscan_pstmt_frag(
+            mcx,
+            RELID,
+            Some(funnel_qual_gt(mcx, k)),
+            plan_rows,
+            parallel_aware,
+        );
+        let expected: Vec<i32> = ((k + 1)..=6000).collect();
+        // Poller on EVERY cell (not only the engage-expected ones): a
+        // refuse-expected cell that regresses into engaging must fail the
+        // counter assert below, not hang waiting for a gang that no
+        // postmaster stand-in would ever launch.
+        let (processed, mut values) = funnel_run_pstmt(pstmt, tag, 0, true).unwrap();
+        let (e1, c1) = execmain::funnel_engagements();
+        if expect_engage {
+            assert_eq!(e1, e0 + 1, "{tag}: must engage the funnel");
+            assert_eq!(c1, c0 + 1, "{tag}: must complete through the funnel");
+        } else {
+            assert_eq!((e1, c1), (e0, c0), "{tag}: must NOT engage the funnel");
+        }
+        assert_eq!(processed, expected.len() as u64, "{tag}: row count");
+        values.sort_unstable();
+        assert_eq!(values, expected, "{tag}: rows must be byte-correct");
+    }
 }
