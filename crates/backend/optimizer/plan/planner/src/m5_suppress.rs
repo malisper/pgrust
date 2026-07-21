@@ -1596,16 +1596,17 @@ fn is_datetime_family(typ: u32) -> bool {
     matches!(typ, DATEOID | TIMESTAMPOID | TIMESTAMPTZOID)
 }
 
-/// GL-LOWDIST-3 datetime-distinct widening knob — the EXECUTOR spelling
-/// verbatim (nodeagg::distinct_datetime_enabled; GROUPSINK coherence:
-/// probe routing and sink/serial admission flip together). t35 law:
-/// DEFAULT OFF for the letter; ON iff exactly `1`/`on`.
+/// GL-LOWDIST-3 datetime-distinct widening — **DEFAULT ON** since the
+/// GL-LOWDIST-3 flip; kill spellings exactly `0|off`, the EXECUTOR
+/// spelling verbatim (nodeagg::distinct_datetime_enabled; GROUPSINK
+/// coherence: probe routing and sink/serial admission kill together).
+/// Letter of record: scratchpad/night/GL-LOWDIST-3-letter.md.
 fn distinct_datetime_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        matches!(
+        !matches!(
             std::env::var("PGRUST_LANE_V2_DISTINCT_DATETIME").as_deref(),
-            Ok("1") | Ok("on")
+            Ok("0") | Ok("off")
         )
     })
 }
