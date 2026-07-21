@@ -42,6 +42,7 @@
 
 mod blocking;
 mod clock;
+mod funnel;
 mod ledger;
 
 /// PHASE3-CLOSE WS-WIDTH: whether non-pool gangs (Gather/GatherMerge
@@ -103,6 +104,9 @@ use std::sync::Arc;
 
 pub use blocking::{blocking_io_section, BlockingIoSection, PermitThreadReg};
 pub use clock::{Clock, MonotonicClock, VirtualClock};
+pub use funnel::{
+    DrainStep, FunnelDrain, FunnelProducer, PushOutcome, RowFunnel, SpscRing,
+};
 pub use ledger::{ArrivalNudge, ClaimVerdict, LedgerBudgets, LedgerSnapshot, WidthRequest};
 pub use lifecycle::{
     ForeignParticipationDisabled, Generation, LifecycleState, ParticipantOwner, QueryTaskLifecycle,
