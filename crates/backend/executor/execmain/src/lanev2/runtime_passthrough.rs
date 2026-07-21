@@ -884,15 +884,12 @@ fn funnel_leader_mode() -> bool {
     })
 }
 
-/// World-B gated hook (Stage 3): when `PGRUST_RUNTIME_ROW_FUNNEL` is on and the
+/// World-B gated hook (Stage 3): when the row funnel is armed (default ON
+/// since the GL-FUNNEL-4 flip; `PGRUST_RUNTIME_ROW_FUNNEL=0` kills) and the
 /// plan is a lane-ownable bare passthrough `SeqScan`, run it in parallel through
 /// the funnel and stream the rows to `dest`. Returns `true` iff it handled the
 /// whole run (the caller then skips the serial per-tuple loop); `false` = not
 /// eligible / fell back (the caller runs the serial loop, byte-identically).
-///
-/// DEFAULT OFF: with the kill switch unset this returns `false` on the first
-/// test, so default behavior — and `route_to`/the coverage matrix — is
-/// unchanged.
 pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
     estate: &mut ::executils::EStateData<'mcx>,
     planstate: &mut crate::procnode::PlanStateNode<'mcx>,
@@ -925,6 +922,21 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
         || estate.es_spi_run_budget.is_some()
         || estate.es_instrument != 0
     {
+        return Ok(false);
+    }
+    // Not from within parallel machinery (the sibling arms' gate; every
+    // runtime engagement carries it). A legacy Gather WORKER re-enters
+    // execute_plan with its serial-shaped fragment (the serialized plan
+    // clears parallelModeNeeded, so the caller's !use_parallel_mode guard
+    // does not cover it): engaging here would (a) full-scan the relation
+    // through a private granule map instead of the shared parallel scan
+    // descriptor — every participant emits the complete result, and a
+    // write destination persists the (workers+1)x duplication — and (b)
+    // nest LaunchParallelWorkers inside the worker, whose
+    // BecomeLockGroupLeader corrupts the in-flight lock-group membership
+    // (debug builds assert at the stale lockGroupLeader). A leader already
+    // in parallel mode must equally not stack a second context.
+    if parallel::IsParallelWorker() || ::xact::IsInParallelMode() {
         return Ok(false);
     }
     // The runtime pool must be live.

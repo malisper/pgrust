@@ -1246,12 +1246,14 @@ pub(crate) fn execute_plan<'m, 'mcx>(
     // sidecar stay aligned no matter which engine drove. Knob-OFF and
     // unarmed fills read one more None here, per RUN only.
     // World-B parallel passthrough funnel (gather-elimination Phase 2, Stage 3;
-    // PGRUST_RUNTIME_ROW_FUNNEL, DEFAULT OFF). Runs a lane-ownable bare
-    // passthrough SeqScan in parallel through the runtime funnel and streams the
-    // rows to `dest` (dest.startup/shutdown stay the caller's). Fail-closed: any
-    // ineligibility returns false and the serial per-tuple loop below runs
-    // byte-identically. With the kill switch unset this returns on the first
-    // test, so default behavior / route_to / the coverage matrix are unchanged.
+    // default ON since the GL-FUNNEL-4 flip — PGRUST_RUNTIME_ROW_FUNNEL=0
+    // kills). Runs a lane-ownable bare passthrough SeqScan in parallel through
+    // the runtime funnel and streams the rows to `dest` (dest.startup/shutdown
+    // stay the caller's). Fail-closed: any ineligibility returns false and the
+    // serial per-tuple loop below runs byte-identically. `!use_parallel_mode`
+    // covers only the leader of a parallel plan; a parallel WORKER's fragment
+    // clears parallelModeNeeded, so the funnel's own in-parallel-machinery
+    // gate does the worker-side refusal.
     if operation == CmdType::CMD_SELECT && send_tuples && !use_parallel_mode {
         if crate::lanev2::try_passthrough_funnel(estate, planstate, number_tuples, dest)? {
             return Ok(());

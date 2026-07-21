@@ -1535,3 +1535,85 @@ fn funnel_statsless_table_fail_closes_to_serial() {
     values.sort_unstable();
     assert_eq!(values, expected, "serial fallback rows must be byte-correct");
 }
+
+// In-parallel-mode refusal: a shape that passes every other gate must REFUSE
+// when the session is already inside parallel machinery. This is the
+// worker-side duplication regression: a legacy Gather WORKER re-enters
+// execute_plan with a serial-shaped fragment (the serialized plan clears
+// parallelModeNeeded), and an engaged funnel there would full-scan the
+// relation through a private granule map — every participant emits the
+// complete result, (workers+1)x rows at the destination — and nest a second
+// parallel context whose lock-group join corrupts the in-flight membership.
+// Workers always run inside parallel mode (StartParallelWorkerTransaction),
+// so EnterParallelMode reproduces the worker-side gate condition exactly.
+#[test]
+fn funnel_refuses_inside_parallel_mode() {
+    if !funnel_armed() {
+        eprintln!("SKIP: funnel_refuses_inside_parallel_mode (PGRUST_RUNTIME_ROW_FUNNEL unset)");
+        return;
+    }
+    let _s = serial();
+    let _w = Watchdog::arm(120, "funnel_refuses_inside_parallel_mode");
+    setup();
+    heapfix::install();
+    funnel_runtime_boot();
+
+    // 60 pages x 100 rows, ANALYZED; qual a > 5700 emits 300/6000 = 5% —
+    // inside the emit band, above the granule floor: every gate but the
+    // parallel-mode one admits, so the refusal below is attributable to
+    // parallel mode alone.
+    const RELID: u32 = 93005;
+    let pages: Vec<Vec<i32>> =
+        (0..60).map(|p| ((p * 100 + 1)..=(p * 100 + 100)).collect()).collect();
+    let page_refs: Vec<&[i32]> = pages.iter().map(|v| &v[..]).collect();
+    heapfix::register_table(RELID, &page_refs);
+    let expected: Vec<i32> = (5701..=6000).collect();
+
+    // Leg 1 — inside parallel mode: complete-drain shape, counters must not
+    // move, rows served byte-correct by the serial loop.
+    let (e0, c0) = execmain::funnel_engagements();
+    let mcx = leaked_mcx();
+    let pstmt = funnel_seqscan_pstmt(mcx, RELID, Some(funnel_qual_gt(mcx, 5700)), 300.0);
+    begin_xact();
+    xact::EnterParallelMode();
+    let qd = execmain_seams::create_query_desc::call(
+        pstmt,
+        "select a where a>5700 (in parallel mode)",
+        Some(snapmgr::GetActiveSnapshot()),
+        None,
+        CommandDest::None,
+        ParamListHandle::NULL,
+        QueryEnvHandle::NULL,
+        0,
+    )
+    .unwrap();
+    execmain_seams::executor_start::call(qd, 0).unwrap();
+    let (processed, mut values) = funnel_run_once(qd, 0).unwrap();
+    execmain_seams::executor_finish::call(qd).unwrap();
+    execmain_seams::executor_end::call(qd).unwrap();
+    execmain_seams::free_query_desc::call(qd);
+    xact::ExitParallelMode();
+    end_xact();
+    let (e1, c1) = execmain::funnel_engagements();
+    assert_eq!(
+        (e1, c1),
+        (e0, c0),
+        "a run inside parallel mode must NOT engage the funnel"
+    );
+    assert_eq!(processed, expected.len() as u64);
+    values.sort_unstable();
+    assert_eq!(values, expected, "serial fallback rows must be byte-correct");
+
+    // Leg 2 — the identical shape OUTSIDE parallel mode engages (the refusal
+    // above is not vacuous).
+    let mcx = leaked_mcx();
+    let pstmt_ctl = funnel_seqscan_pstmt(mcx, RELID, Some(funnel_qual_gt(mcx, 5700)), 300.0);
+    let (processed_ctl, mut values_ctl) =
+        funnel_run_pstmt(pstmt_ctl, "select a where a>5700 (control)", 0, true).unwrap();
+    let (e2, c2) = execmain::funnel_engagements();
+    assert_eq!(e2, e1 + 1, "the control leg must engage the funnel");
+    assert_eq!(c2, c1 + 1, "the control leg must complete through the funnel");
+    assert_eq!(processed_ctl, expected.len() as u64);
+    values_ctl.sort_unstable();
+    assert_eq!(values_ctl, expected);
+}
