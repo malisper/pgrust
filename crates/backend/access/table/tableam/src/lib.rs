@@ -1404,6 +1404,19 @@ pub fn table_scan_set_lazy_decode(scan: &mut TableScanDesc<'_>, on: bool) {
 
 /// pgrcolumnar zone-map pruning conjuncts (advisory-only; executor still
 /// evaluates the full qual on surviving rows).
+/// RG-altitude meta-answerability census over the scan's PUSHED zone quals
+/// (pgrcolumnar::zone_meta_rg_census doc — the GL-SERIALTERM-META qual-zone
+/// helper). None = heap or no columnar part.
+pub fn table_scan_cb_zone_meta_census(
+    scan: &TableScanDesc<'_>,
+    need_sums: bool,
+) -> PgResult<Option<(u64, u64)>> {
+    match scan {
+        TableScanDesc::Heap(_) => Ok(None),
+        TableScanDesc::Pgrcolumnar(c) => c.zone_meta_rg_census(need_sums),
+    }
+}
+
 pub fn table_scan_push_zone_quals(scan: &mut TableScanDesc<'_>, quals: &[ZoneQual]) {
     match scan {
         TableScanDesc::Heap(_) => {}
