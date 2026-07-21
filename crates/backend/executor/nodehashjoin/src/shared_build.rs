@@ -2286,6 +2286,51 @@ mod tests {
     }
 
     #[test]
+    fn boundary_guard_estimator_covers_this_representation() {
+        // GL-HJMB-1 escalation A: nodehash::estimate_runtime_hj_build_peak_bytes
+        // prices THIS module's representation (HDR_WORDS + the flat 8B ref
+        // charge + whole-word images + the seal bucket arithmetic). If these
+        // constants drift under it, the admission/probe boundary guards
+        // under-predict and the demote-unsafe seal refusal (an R5 serial
+        // rerun measured 5-11x worse than legacy Parallel Hash) comes back.
+        // Bound both sides: estimate >= the ACTUAL charged accounting (with
+        // min-size chunks so allocator tail slack stays marginal), and
+        // within 2x of it (a uselessly conservative estimator would eat the
+        // engaged-spill band).
+        for &(ntuples, width) in &[(50_000u64, 8usize), (20_000, 40), (5_000, 128)] {
+            let budget = JoinBudget::new(usize::MAX);
+            // Min chunk cap: capacity tail <= 64KB, so the comparison
+            // exercises the per-tuple constants, not chunk-growth slack
+            // (which the estimator's 1/8 headroom owns at scale).
+            let mut l = JoinBuildLocal::with_chunk_cap(0, Arc::clone(&budget), CHUNK_MIN_WORDS);
+            // The estimator's assumed image: maxaligned minimal header (15
+            // -> 16) + maxaligned data width.
+            let image = 16 + width.div_ceil(8) * 8;
+            let payload = vec![0u8; image];
+            l.begin_run(0);
+            for i in 0..ntuples {
+                l.push(mix(i) as u32, &payload).expect("unlimited budget");
+            }
+            l.end_run();
+            let buckets = 8 * ntuples.max(1).next_power_of_two().clamp(1024, 1 << 31);
+            let actual = budget.used() as u64 + buckets;
+            let est =
+                ::nodehash::estimate_runtime_hj_build_peak_bytes(ntuples as f64, width as i32);
+            assert!(
+                est >= actual,
+                "boundary-guard estimator UNDER-predicts the arm representation: \
+                 est={est} actual={actual} (n={ntuples} w={width}) — the demote-unsafe \
+                 seal-refusal band reopens"
+            );
+            assert!(
+                est <= actual.saturating_mul(2),
+                "boundary-guard estimator uselessly conservative: est={est} actual={actual} \
+                 (n={ntuples} w={width})"
+            );
+        }
+    }
+
+    #[test]
     fn single_pass_dir_budget_crossing_is_recoverable() {
         // A directory that won't fit returns BudgetExceeded with the failed
         // charge BACKED OUT — the runtime falls back to two-pass against the

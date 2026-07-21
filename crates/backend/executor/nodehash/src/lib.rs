@@ -1104,6 +1104,43 @@ pub fn estimate_hash_inner_rel_bytes(ntuples: f64, tupwidth: i32) -> u64 {
     }
 }
 
+/// pgrust-only (NOT a C-parity port): the RUNTIME hash-join arm's estimated
+/// PEAK in-memory build footprint under its OWN representation (nodehashjoin
+/// shared_build): per tuple, 3 header words + the flat 8-byte ref charge +
+/// the 8-aligned minimal-tuple image; plus the combine-time bucket array
+/// (8 x next-power-of-2(ntuples), clamp as in the arm's seal precheck);
+/// plus 1/8 headroom for capacity-charged growth (chunk arenas and ref
+/// vectors double — the budget charges capacity, not length; the witnessed
+/// GL-HJMB-1 boundary cell at the 17-participant envelope crossed with the
+/// slack-free estimate still 5% under, so the headroom is load-bearing).
+///
+/// Consumers (GL-HJMB-1 escalation A, the demote-unsafe boundary): an
+/// admission whose exec_choose nbatch estimate is 1 but whose true build
+/// crosses the combined envelope has NO demote path — HjSpill is only
+/// constructed for batched admissions — and refuses at seal into an R5
+/// serial rerun measured 5-11x worse than legacy Parallel Hash. A crossing
+/// estimate must therefore either engage BATCHED (the arm's admission
+/// boundary guard) or keep Gather (the m5 suppression probe's mirrored
+/// refusal). Representation constants are tied to nodehashjoin
+/// shared_build by its estimator-parity unit test.
+pub fn estimate_runtime_hj_build_peak_bytes(ntuples: f64, tupwidth: i32) -> u64 {
+    let ntuples = if ntuples <= 0.0 { 1000.0 } else { ntuples };
+    // shared_build materialize(): HDR_WORDS(3) x 8 + ref charge 8 + the
+    // image rounded up to whole words. The image estimate reuses C's
+    // maxaligned minimal-tuple arithmetic (already 8-aligned).
+    let image = maxalign(SizeofMinimalTupleHeader) + maxalign(tupwidth.max(0) as usize);
+    let per_tuple = (3 * 8 + 8 + image) as f64;
+    // The arm's seal-precheck bucket arithmetic, verbatim.
+    let n = if ntuples >= (1u64 << 31) as f64 { 1u64 << 31 } else { ntuples as u64 };
+    let buckets = 8 * n.max(1).next_power_of_two().clamp(1024, 1 << 31);
+    let peak = ntuples * per_tuple * 9.0 / 8.0 + buckets as f64;
+    if peak < u64::MAX as f64 {
+        peak as u64
+    } else {
+        u64::MAX
+    }
+}
+
 /// `ExecChooseHashTableSize` -> (numbuckets, numbatches, num_skew_mcvs).
 pub fn exec_choose_hash_table_size(
     ntuples: f64,

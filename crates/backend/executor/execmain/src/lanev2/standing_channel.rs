@@ -39,6 +39,8 @@ pub(super) enum StandingWait {
 pub(super) struct StandingArm {
     /// Trace prefix ("runtime-agg", …) — the channel's lane_trace lines
     /// ("<label>: engaged standing dop=…", the tranche legs' grep surface).
+    /// The dop printed is the POST-CLOSE claim census (true participation);
+    /// it is emitted at completion, never mid-claim (GL-HJMB-1 esc. B).
     pub label: &'static str,
     /// Error text when claimed participants all detached with the RG
     /// incomplete and no recorded error (a worker died outside every catch
@@ -184,20 +186,24 @@ fn wait_engaged(
     } else {
         format!(" {}", leader.census)
     };
-    let mut traced = false;
     loop {
         if let Some(o) = waiter.try_wait() {
             take_slot();
             parallel::gtrace("l.close.begin");
             parallel::standing::close_and_await(&entry);
             parallel::gtrace("l.close.end");
-            if !traced {
-                lane_trace(&format!(
-                    "{}: engaged {channel} dop={} granules={granules}{census}",
-                    arm.label,
-                    entry.claimed()
-                ));
-            }
+            // Engagement trace at COMPLETION only (GL-HJMB-1 escalation B):
+            // the old mid-loop trace printed the claim count at first
+            // observation — a race with worker wakeup that reported dop=1/2
+            // on healthy full-dop engagements and poisoned every dop pin
+            // grepped from it. Post-close claimed() is the true
+            // participation census (the arms' "complete, partials=N" line
+            // agrees with it by construction).
+            lane_trace(&format!(
+                "{}: engaged {channel} dop={} granules={granules}{census}",
+                arm.label,
+                entry.claimed()
+            ));
             return Ok(StandingWait::Done(o));
         }
         if let Err(e) = ::postgres_seams::check_for_interrupts::call() {
@@ -211,13 +217,6 @@ fn wait_engaged(
             return Err(e);
         }
         let claimed = entry.claimed();
-        if !traced && claimed > 0 {
-            lane_trace(&format!(
-                "{}: engaged {channel} dop={claimed} granules={granules}{census}",
-                arm.label
-            ));
-            traced = true;
-        }
         let started = leader.started.load(Ordering::SeqCst);
         let refused = entry.refused() + leader.refused.load(Ordering::SeqCst);
         // Nobody will participate: every ticket-holder refused pre-bind or
