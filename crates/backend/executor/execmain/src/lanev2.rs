@@ -51,6 +51,7 @@ mod runtime_instr;
 mod runtime_plaindistinct;
 mod runtime_scan;
 mod runtime_sort;
+mod standing_channel;
 mod push;
 mod rowmode;
 mod rowmode_tail;

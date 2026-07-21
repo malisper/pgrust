@@ -194,6 +194,9 @@ pub(super) struct RuntimeDistinctShared {
     /// mode and on every non-EA path: zero clock reads.
     ea_timer: bool,
     ea_epoch: std::time::Instant,
+    /// M2 inc-1 standing channel: the live board entry, held for the
+    /// PRIVATE_SHUTDOWN standing join (standing_channel, scan discipline).
+    standing: Mutex<Option<Arc<parallel::standing::StandingEngagement>>>,
 }
 
 // SAFETY: (i) each `out` cell has a single writer — the sink contract
@@ -1201,6 +1204,12 @@ fn runtime_distinct_post_task_park(shared: &parallel::ParallelShared) {
         return;
     };
     let Ok(payload) = private.downcast::<RuntimeDistinctShared>() else { return };
+    // Every LAUNCHED helper bumps `exited` exactly once, on EVERY exit path
+    // (the leader's liveness reap counts these against `launched`).
+    // HOOK-frame placement (the scan arm's law): the standing driver reuses
+    // helper_drive and must NOT bump — standing exits ride the board's
+    // claimed/detached accounting.
+    let _exit = super::runtime_agg::ExitBump(&payload.exited);
     let r = catch_unwind(AssertUnwindSafe(|| helper_drive(shared, &payload)));
     if r.is_err() {
         payload.fail(PgError::new(ERROR, "runtime distinct helper panicked").into());
@@ -1210,11 +1219,31 @@ fn runtime_distinct_post_task_park(shared: &parallel::ParallelShared) {
     ));
 }
 
+/// The standing driver (M2 inc-1, parallel::set_standing_driver): the
+/// POST_TASK_PARK body minus the ExitBump; exit-committed unwinds (FATAL)
+/// rethrow to the gang glue (a terminated worker must die).
+fn runtime_distinct_standing_driver(shared: &parallel::ParallelShared) {
+    let Some(private) = shared.private() else { return };
+    let Ok(payload) = private.downcast::<RuntimeDistinctShared>() else { return };
+    let r = catch_unwind(AssertUnwindSafe(|| helper_drive(shared, &payload)));
+    if let Err(unwind) = r {
+        payload
+            .fail(PgError::new(ERROR, "runtime distinct standing executor panicked").into());
+        latch::SetLatch(::types_storage::latch::LatchHandle::proc(
+            shared.parallel_leader_proc_number,
+        ));
+        if parallel::standing::is_exit_unwind(&*unwind) {
+            std::panic::resume_unwind(unwind);
+        }
+        return;
+    }
+    latch::SetLatch(::types_storage::latch::LatchHandle::proc(
+        shared.parallel_leader_proc_number,
+    ));
+}
+
 fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeDistinctShared>) {
     let _ = shared;
-    // Every launched helper bumps `exited` exactly once, on EVERY exit path
-    // (the leader's liveness reap counts these against `launched`).
-    let _exit = super::runtime_agg::ExitBump(&payload.exited);
     // Liveness-battery injection (test-only, default-off): the wedge-class
     // exit — panic before binding or driving; the reap must convert it into
     // a prompt error (scripts/runtime-liveness-e2e.sh).
@@ -1385,9 +1414,15 @@ fn teardown_worker_exec(clean: bool) -> PgResult<()> {
 
 fn runtime_distinct_private_shutdown(private: &(dyn std::any::Any + Send + Sync)) {
     let Some(payload) = private.downcast_ref::<RuntimeDistinctShared>() else { return };
-    if let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) {
+    let rg = payload.rg.get().and_then(|w| w.upgrade());
+    if let Some(rg) = &rg {
         rg.abort();
     }
+    // Standing channel (M2 inc-1): complete the standing join on leader
+    // unwind paths (standing_channel::shutdown_standing_join).
+    super::standing_channel::shutdown_standing_join(&payload.standing, rg.as_ref(), &|rg| {
+        drain_rg(payload.rt, rg)
+    });
 }
 
 fn ensure_hooks_registered() {
@@ -1974,6 +2009,7 @@ fn engage<'mcx>(
         }),
         ea_timer: ea && runtime_instr::ea_timer(estate),
         ea_epoch: std::time::Instant::now(),
+        standing: Mutex::new(None),
     });
 
     xact::EnterParallelMode();
@@ -1995,6 +2031,51 @@ fn engage<'mcx>(
 enum EngageOutcome {
     Fallback,
     Completed,
+}
+
+/// This arm's standing-channel constants (M2 inc-1; see
+/// standing_channel::StandingArm — sinks_gate: PGRUST_RUNTIME_POOLBIND_SINKS).
+static STANDING_ARM: super::standing_channel::StandingArm =
+    super::standing_channel::StandingArm {
+        label: "runtime-distinct",
+        died: "runtime distinct standing executors exited before completing the build",
+        sinks_gate: true,
+    };
+
+/// Shared post-outcome tail (standing and launched channels): worker-phase
+/// errors rethrow PLAIN; a budget crossing takes the bounded-memory serial
+/// rerun; an unexplained abort surfaces the pending interrupt or reports;
+/// completed-but-nobody-participated falls back serially.
+fn finish_outcome(
+    payload: &Arc<RuntimeDistinctShared>,
+    outcome: runtime::RgOutcome,
+) -> PgResult<EngageOutcome> {
+    if let Some(e) = payload.take_error() {
+        lane_trace(&format!(
+            "runtime-distinct: worker-phase error: {}",
+            e.message()
+        ));
+        return Err(e);
+    }
+    if outcome == runtime::RgOutcome::Aborted {
+        if payload.crossed.load(Ordering::SeqCst) {
+            // Worker budget crossed: bounded-memory refusal — rerun the
+            // serial arm (nothing was emitted; the leader's scan is
+            // untouched).
+            lane_trace("runtime-distinct: worker budget crossed; serial fallback");
+            stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AdmissionEconomicsFusedDrive);
+            return Ok(EngageOutcome::Fallback);
+        }
+        ::postgres_seams::check_for_interrupts::call()?;
+        return Err(Box::new(PgError::new(
+            ERROR,
+            "runtime distinct pipeline aborted",
+        )));
+    }
+    if payload.started.load(Ordering::SeqCst) == 0 {
+        return Ok(EngageOutcome::Fallback);
+    }
+    Ok(EngageOutcome::Completed)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2028,6 +2109,13 @@ fn engage_ceremony<'mcx>(
             .set(parallel::shared_for(pcxt))
             .unwrap_or_else(|_| unreachable!("pcxt shared set once"));
         parallel::set_private(pcxt, Arc::clone(payload) as _);
+        // Standing driver dispatch (M2 inc-1): deferred_bind false — this
+        // arm binds EAGERLY (with_query_task_binding); the standing serve
+        // re-establishes visibility up front and evicts parked sticky.
+        parallel::set_standing_driver(pcxt, parallel::standing::StandingDriver {
+            drive: runtime_distinct_standing_driver,
+            deferred_bind: false,
+        });
 
         // Submit the pinned RG (accept → freeze → combine) before launch.
         // coalesce: false — this arm's morsel_body feeds the claim straight
@@ -2055,6 +2143,32 @@ fn engage_ceremony<'mcx>(
             .set(rg.downgrade())
             .unwrap_or_else(|_| unreachable!("rg set once"));
         *mut_submitted = Some(rg.clone());
+
+        // M2 inc-1: STANDING engagement first — no worker launch, one
+        // binder bind per participant; fallback leaves the RG untouched
+        // for the launched path below.
+        let census = format!("vocab={} sets={}", spec.vocab.len(), spec.sets.len());
+        match super::standing_channel::standing_wait(
+            &STANDING_ARM,
+            super::standing_channel::StandingLeader {
+                shared: payload.pcxt_shared.get().expect("pcxt shared set above"),
+                slot: &payload.standing,
+                started: &payload.started,
+                refused: &payload.refused,
+                take_error: &|| payload.take_error(),
+                drain: &|rg| drain_rg(rt, rg),
+                census: &census,
+            },
+            dop,
+            total_granules,
+            &rg,
+            &waiter,
+        )? {
+            super::standing_channel::StandingWait::Done(outcome) => {
+                return finish_outcome(payload, outcome);
+            }
+            super::standing_channel::StandingWait::Fallback => {}
+        }
 
         let launched = parallel::LaunchParallelWorkers(pcxt)?;
         if launched <= 0 {
@@ -2162,32 +2276,7 @@ fn engage_ceremony<'mcx>(
 
         };
 
-        if let Some(e) = payload.take_error() {
-            lane_trace(&format!(
-                "runtime-distinct: worker-phase error: {}",
-                e.message()
-            ));
-            return Err(e);
-        }
-        if outcome == runtime::RgOutcome::Aborted {
-            if payload.crossed.load(Ordering::SeqCst) {
-                // Worker budget crossed: bounded-memory refusal — rerun the
-                // serial arm (nothing was emitted; the leader's scan is
-                // untouched).
-                lane_trace("runtime-distinct: worker budget crossed; serial fallback");
-                stats::tick_refused(ShapeClass::AggBuild, RefuseReason::AdmissionEconomicsFusedDrive);
-                return Ok(EngageOutcome::Fallback);
-            }
-            ::postgres_seams::check_for_interrupts::call()?;
-            return Err(Box::new(PgError::new(
-                ERROR,
-                "runtime distinct pipeline aborted",
-            )));
-        }
-        if payload.started.load(Ordering::SeqCst) == 0 {
-            return Ok(EngageOutcome::Fallback);
-        }
-        Ok(EngageOutcome::Completed)
+        finish_outcome(payload, outcome)
     })(&mut submitted);
 
     // Teardown tail (every path): a submitted RG must be COMPLETE before the

@@ -40,6 +40,12 @@
 //! reserved PGPROC segment too), engages only for published engagements
 //! (the M1 arm's own arming gates those), and PGRUST_RUNTIME_POOLBIND=0
 //! disables this module entirely (leader falls back to the launched path).
+//!
+//! M2 inc-1: ALL runtime SQL arms use this channel — the per-arm driver
+//! rides each engagement's ParallelShared (`StandingDriver`,
+//! `set_standing_driver`) instead of a process-global slot; the sink arms
+//! carry their own layered kill (PGRUST_RUNTIME_POOLBIND_SINKS=0, gated at
+//! their call sites in execmain's standing_channel).
 
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
@@ -162,7 +168,6 @@ struct GangState {
 
 static GANG: OnceLock<(Mutex<GangState>, Condvar)> = OnceLock::new();
 static SPAWNER: OnceLock<fn(usize) -> bool> = OnceLock::new();
-static DRIVER: OnceLock<fn(&ParallelShared)> = OnceLock::new();
 static GANG_SIZE: OnceLock<usize> = OnceLock::new();
 
 fn gang() -> &'static (Mutex<GangState>, Condvar) {
@@ -195,11 +200,24 @@ pub fn install_spawner(size: usize, f: fn(usize) -> bool) {
     let _ = GANG_SIZE.set(size);
 }
 
-/// The engagement driver (execmain's runtime arm): runs ON the standing
+/// One arm's engagement driver, carried per engagement on its
+/// ParallelShared (`super::set_standing_driver`) — the per-arm dispatch
+/// that replaced the single process-global driver slot when the sink arms
+/// joined the standing channel (M2 inc-1). `drive` runs ON the standing
 /// worker, fully impersonated (worker number + lock group), and owns the
 /// binder wrap + executor build + pinned drive + payload error routing.
-pub fn register_standing_driver(f: fn(&ParallelShared)) {
-    let _ = DRIVER.set(f);
+#[derive(Clone, Copy)]
+pub struct StandingDriver {
+    pub drive: fn(&ParallelShared),
+    /// True when the driver binds through the DEFERRED binder
+    /// (DeferredQueryTaskBinding — the scan arm's ceremony-v2 lazy
+    /// first-touch path): serve_ticket may then defer the procarray/
+    /// ProcSignal visibility bracket to the first-touch bind. False = the
+    /// driver binds EAGERLY (with_query_task_binding — the sink arms):
+    /// visibility is re-established up front and any parked sticky
+    /// retention is evicted first (the eager validate()'s envelope gate
+    /// refuses over a live retained session bind).
+    pub deferred_bind: bool,
 }
 
 pub fn gang_size() -> usize {
@@ -219,7 +237,8 @@ pub fn try_engage(shared: &Arc<ParallelShared>, dop: usize) -> Option<Arc<Standi
         return None;
     }
     let spawner = SPAWNER.get()?;
-    DRIVER.get()?;
+    // Per-arm dispatch (M2 inc-1): the engagement must carry its driver.
+    shared.standing_driver()?;
     let size = gang_size();
     if size == 0 {
         return None;
@@ -629,6 +648,14 @@ fn serve_ticket(entry: &Arc<StandingEngagement>, ticket: usize) {
     let detach = DetachGuard { entry };
     let mut in_procarray = false;
 
+    // Per-arm dispatch (M2 inc-1): the driver rides the engagement's
+    // ParallelShared. Unreachable-missing (try_engage gates on it) —
+    // refuse fail-closed rather than expect().
+    let Some(driver) = shared.standing_driver() else {
+        entry.refused.fetch_add(1, SeqCst);
+        return;
+    };
+
     // First engagement on this worker: adopt the engagement's database
     // (exactly parallel_worker_body's connect flags).
     if init_small::globals::MyDatabaseId() == InvalidOid {
@@ -682,37 +709,70 @@ fn serve_ticket(entry: &Arc<StandingEngagement>, ticket: usize) {
             }
         }
         in_procarray = true; // InitPostgres's InitProcessPhase2 added us.
-    } else if super::query_task_guard::lazy_bind_enabled() {
-        // CEREMONY-V2 lazy bind: visibility (procarray + ProcSignal) is
-        // deferred to the FIRST MORSEL CLAIM — the deferred binder consumes
-        // this arming before its snapshot restore (xmin ordering held). A
-        // participant that never claims work stays park-invisible and pays
-        // neither the procarray lock nor the ProcSignal slot churn.
-        arm_deferred_visibility();
     } else {
-        // Re-engagement on a connected worker: rejoin the procarray
-        // BEFORE any snapshot state exists (the binder's snapshot restore
-        // publishes xmin, which only counts while visible), and retake a
-        // ProcSignal slot (released at every park — see the tail).
-        if let Err(e) = procarray_seams::proc_array_add::call(
-            init_small::globals::MyProcNumber(),
-        ) {
-            let _ = elog::elog(
-                WARNING,
-                format!("standing executor procarray re-add failed: {}", e.message()),
-            );
-            entry.refused.fetch_add(1, SeqCst);
-            return;
+        // EAGER-binding drivers (the sink arms) cannot bind over a parked
+        // sticky retention (the eager validate()'s envelope gate refuses a
+        // live retained session bind) — evict it with the full session
+        // restore FIRST (the deferred binder evicts its own mismatches in
+        // DeferredQueryTaskBinding::new). A failed eviction refuses
+        // fail-closed, pre-claim, pre-visibility (nothing to remove at the
+        // tail).
+        if !driver.deferred_bind {
+            if let Err(e) = super::query_task_guard::sticky_evict_parked() {
+                let _ = elog::elog(
+                    WARNING,
+                    format!(
+                        "standing executor sticky eviction failed: {}",
+                        e.message()
+                    ),
+                );
+                entry.refused.fetch_add(1, SeqCst);
+                return;
+            }
         }
-        in_procarray = true;
-        // No-callback variant: the connect-time init registered the exit
-        // callback once; re-registering per engagement would grow the
-        // exit-callback stack unboundedly.
-        if let Err(e) = procsignal::ProcSignalReinitStanding(&[]) {
-            let _ = elog::elog(
-                WARNING,
-                format!("standing executor ProcSignal re-init failed: {}", e.message()),
-            );
+        if driver.deferred_bind && super::query_task_guard::lazy_bind_enabled() {
+            // CEREMONY-V2 lazy bind (deferred-binder drivers only — the
+            // sink arms' eager binder never calls the consuming bind_now,
+            // so arming it for them would bind with the worker
+            // procarray-INVISIBLE): visibility (procarray + ProcSignal) is
+            // deferred to the FIRST MORSEL CLAIM — the deferred binder
+            // consumes this arming before its snapshot restore (xmin
+            // ordering held). A participant that never claims work stays
+            // park-invisible and pays neither the procarray lock nor the
+            // ProcSignal slot churn.
+            arm_deferred_visibility();
+        } else {
+            // Re-engagement on a connected worker: rejoin the procarray
+            // BEFORE any snapshot state exists (the binder's snapshot
+            // restore publishes xmin, which only counts while visible),
+            // and retake a ProcSignal slot (released at every park — see
+            // the tail).
+            if let Err(e) = procarray_seams::proc_array_add::call(
+                init_small::globals::MyProcNumber(),
+            ) {
+                let _ = elog::elog(
+                    WARNING,
+                    format!(
+                        "standing executor procarray re-add failed: {}",
+                        e.message()
+                    ),
+                );
+                entry.refused.fetch_add(1, SeqCst);
+                return;
+            }
+            in_procarray = true;
+            // No-callback variant: the connect-time init registered the
+            // exit callback once; re-registering per engagement would grow
+            // the exit-callback stack unboundedly.
+            if let Err(e) = procsignal::ProcSignalReinitStanding(&[]) {
+                let _ = elog::elog(
+                    WARNING,
+                    format!(
+                        "standing executor ProcSignal re-init failed: {}",
+                        e.message()
+                    ),
+                );
+            }
         }
     }
     debug_assert_eq!(init_small::globals::MyDatabaseId(), shared.database_id);
@@ -726,7 +786,6 @@ fn serve_ticket(entry: &Arc<StandingEngagement>, ticket: usize) {
     );
     match joined {
         Ok(true) => {
-            let driver = DRIVER.get().expect("standing driver registered (try_engage gate)");
             // The driver catches its own panics into the payload (the M1
             // hook discipline); this outer catch is containment of last
             // resort so lock-group leave + unimpersonation always run —
@@ -736,7 +795,7 @@ fn serve_ticket(entry: &Arc<StandingEngagement>, ticket: usize) {
             // lock-group leave; swallowing it would leave a terminated
             // worker serving future engagements. DetachGuard already
             // covers the leader's join on this path.
-            let r = catch_unwind(AssertUnwindSafe(|| driver(shared)));
+            let r = catch_unwind(AssertUnwindSafe(|| (driver.drive)(shared)));
             if let Err(payload) = r {
                 if payload.is::<ipc::ProcExitThread>()
                     || payload.is::<types_error::PanicExitThread>()

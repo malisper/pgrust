@@ -169,6 +169,11 @@ pub struct ParallelShared {
     error_senders: Vec<Mutex<Option<MailboxSender<WorkerMessage>>>>,
     worker_attached: Vec<AtomicBool>,
     private: Mutex<Option<Arc<dyn Any + Send + Sync>>>,
+    // Per-arm standing-gang driver (M2 inc-1): the engagement's driver
+    // rides its shared state so several runtime arms can use the standing
+    // channel without a process-global driver slot. Set alongside
+    // `private` (set_standing_driver), read by standing::serve_ticket.
+    standing_driver: Mutex<Option<standing::StandingDriver>>,
     query_task_binding: AtomicU8,
 }
 
@@ -180,6 +185,14 @@ const _: fn() = || {
 impl ParallelShared {
     pub fn private(&self) -> Option<Arc<dyn Any + Send + Sync>> {
         self.private.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// This engagement's standing-gang driver (M2 inc-1 per-arm dispatch).
+    pub fn standing_driver(&self) -> Option<standing::StandingDriver> {
+        *self
+            .standing_driver
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -443,6 +456,7 @@ pub fn InitializeParallelDSM(id: ParallelContextId) -> PgResult<()> {
         error_senders,
         worker_attached,
         private: Mutex::new(None),
+        standing_driver: Mutex::new(None),
         query_task_binding: AtomicU8::new(0),
     });
 
@@ -470,6 +484,19 @@ pub fn shared_for(id: ParallelContextId) -> Arc<ParallelShared> {
 pub fn set_private(id: ParallelContextId, private: Arc<dyn Any + Send + Sync>) {
     let shared = shared_for(id);
     *shared.private.lock().unwrap_or_else(|e| e.into_inner()) = Some(private);
+}
+
+/// Install the standing-gang driver for this context's engagement (M2
+/// inc-1 per-arm dispatch): `standing::try_engage` refuses an engagement
+/// without one, and the gang's serve dispatches through it. Set after
+/// InitializeParallelDSM, before the standing publish — the same window as
+/// `set_private`.
+pub fn set_standing_driver(id: ParallelContextId, driver: standing::StandingDriver) {
+    let shared = shared_for(id);
+    *shared
+        .standing_driver
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(driver);
 }
 
 pub fn InstallQueryTaskBinding(

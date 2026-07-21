@@ -352,6 +352,9 @@ pub(super) struct RuntimeSortShared {
     /// Shape (b) FULL SORT (m3-sort-b car 2; design §5). `None` = the
     /// top-N arm (everything above).
     full: Option<FullShared>,
+    /// M2 inc-1 standing channel: the live board entry, held for the
+    /// PRIVATE_SHUTDOWN standing join (standing_channel, scan discipline).
+    standing: Mutex<Option<Arc<parallel::standing::StandingEngagement>>>,
 }
 
 /// Shape-(b) full-sort payload half: per-worker self-contained run
@@ -1113,6 +1116,12 @@ fn runtime_sort_worker_main(_shared: &parallel::ParallelShared) -> PgResult<()> 
 fn runtime_sort_post_task_park(shared: &parallel::ParallelShared) {
     let Some(private) = shared.private() else { return };
     let Ok(payload) = private.downcast::<RuntimeSortShared>() else { return };
+    // Every LAUNCHED helper bumps `exited` exactly once, on EVERY exit path
+    // (the leader's liveness reap counts these against `launched`;
+    // m35-spill inc-2c port). HOOK-frame placement (the scan arm's law):
+    // the standing driver reuses helper_drive and must NOT bump — standing
+    // exits ride the board's claimed/detached accounting.
+    let _exit = super::runtime_agg::ExitBump(&payload.exited);
     let r = catch_unwind(AssertUnwindSafe(|| helper_drive(shared, &payload)));
     if r.is_err() {
         payload.fail(PgError::new(ERROR, "runtime sort helper panicked").into());
@@ -1122,12 +1131,30 @@ fn runtime_sort_post_task_park(shared: &parallel::ParallelShared) {
     ));
 }
 
+/// The standing driver (M2 inc-1, parallel::set_standing_driver): the
+/// POST_TASK_PARK body minus the ExitBump; exit-committed unwinds (FATAL)
+/// rethrow to the gang glue (a terminated worker must die).
+fn runtime_sort_standing_driver(shared: &parallel::ParallelShared) {
+    let Some(private) = shared.private() else { return };
+    let Ok(payload) = private.downcast::<RuntimeSortShared>() else { return };
+    let r = catch_unwind(AssertUnwindSafe(|| helper_drive(shared, &payload)));
+    if let Err(unwind) = r {
+        payload.fail(PgError::new(ERROR, "runtime sort standing executor panicked").into());
+        latch::SetLatch(::types_storage::latch::LatchHandle::proc(
+            shared.parallel_leader_proc_number,
+        ));
+        if parallel::standing::is_exit_unwind(&*unwind) {
+            std::panic::resume_unwind(unwind);
+        }
+        return;
+    }
+    latch::SetLatch(::types_storage::latch::LatchHandle::proc(
+        shared.parallel_leader_proc_number,
+    ));
+}
+
 fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeSortShared>) {
     let _ = shared;
-    // Every launched helper bumps `exited` exactly once, on EVERY exit path
-    // (the leader's liveness reap counts these against `launched`;
-    // m35-spill inc-2c port).
-    let _exit = super::runtime_agg::ExitBump(&payload.exited);
     // Liveness-battery injection (test-only, default-off): the wedge-class
     // exit — panic before binding or driving; the reap must convert it into
     // a prompt error (scripts/runtime-liveness-e2e.sh).
@@ -1328,9 +1355,15 @@ fn teardown_worker_exec(clean: bool) -> PgResult<()> {
 
 fn runtime_sort_private_shutdown(private: &(dyn std::any::Any + Send + Sync)) {
     let Some(payload) = private.downcast_ref::<RuntimeSortShared>() else { return };
-    if let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) {
+    let rg = payload.rg.get().and_then(|w| w.upgrade());
+    if let Some(rg) = &rg {
         rg.abort();
     }
+    // Standing channel (M2 inc-1): complete the standing join on leader
+    // unwind paths (standing_channel::shutdown_standing_join).
+    super::standing_channel::shutdown_standing_join(&payload.standing, rg.as_ref(), &|rg| {
+        drain_rg(payload.rt, rg)
+    });
 }
 
 fn ensure_hooks_registered() {
@@ -1608,6 +1641,7 @@ fn engage<'mcx>(
         broke: AtomicBool::new(false),
         winners: Mutex::new(None),
         full,
+        standing: Mutex::new(None),
     });
 
     xact::EnterParallelMode();
@@ -1631,6 +1665,71 @@ enum EngageOutcome {
     Fallback,
     Completed(Vec<u64>),
     CompletedFull(FullPublish),
+}
+
+/// This arm's standing-channel constants (M2 inc-1; see
+/// standing_channel::StandingArm — sinks_gate: PGRUST_RUNTIME_POOLBIND_SINKS).
+static STANDING_ARM: super::standing_channel::StandingArm =
+    super::standing_channel::StandingArm {
+        label: "runtime-sort",
+        died: "runtime sort standing executors exited before completing the sort",
+        sinks_gate: true,
+    };
+
+/// Shared post-outcome tail (standing and launched channels): worker-phase
+/// errors rethrow PLAIN; budget/contract refusals take the R5 whole-attempt
+/// serial rerun; an unexplained abort surfaces the pending interrupt or
+/// reports; completed engagements must have published (protocol violation
+/// otherwise, never silently wrong output).
+fn finish_outcome(
+    payload: &Arc<RuntimeSortShared>,
+    outcome: runtime::RgOutcome,
+) -> PgResult<EngageOutcome> {
+    if let Some(e) = payload.take_error() {
+        lane_trace(&format!("runtime-sort: worker-phase error: {}", e.message()));
+        return Err(e);
+    }
+    if outcome == runtime::RgOutcome::Aborted {
+        if let Some(full) = &payload.full {
+            if full.budget_refused.load(Ordering::SeqCst) {
+                // Design §7: a runtime budget crossing is a recorded
+                // refusal + whole-attempt serial rerun (the serial arm
+                // spills correctly), never an error.
+                refused("per-participant sort budget crossed at accept");
+                return Ok(EngageOutcome::Fallback);
+            }
+        }
+        if payload.broke.load(Ordering::SeqCst) {
+            lane_trace("runtime-sort: sink contract break; serial fallback");
+            return Ok(EngageOutcome::Fallback);
+        }
+        ::postgres_seams::check_for_interrupts::call()?;
+        return Err(Box::new(PgError::new(ERROR, "runtime sort pipeline aborted")));
+    }
+    if payload.started.load(Ordering::SeqCst) == 0 {
+        return Ok(EngageOutcome::Fallback);
+    }
+    if let Some(full) = &payload.full {
+        let Some(publish) = full.published.lock().unwrap_or_else(|p| p.into_inner()).take()
+        else {
+            // Completed with participants but nothing published: a
+            // protocol violation, never silently wrong output.
+            return Err(Box::new(PgError::new(
+                ERROR,
+                "runtime full sort completed without a published result",
+            )));
+        };
+        return Ok(EngageOutcome::CompletedFull(publish));
+    }
+    let Some(winners) = payload.take_winners() else {
+        // Completed with participants but no published winners: a
+        // protocol violation, never silently wrong output.
+        return Err(Box::new(PgError::new(
+            ERROR,
+            "runtime sort completed without a winner list",
+        )));
+    };
+    Ok(EngageOutcome::Completed(winners))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1661,6 +1760,13 @@ fn engage_ceremony<'mcx>(
             .set(parallel::shared_for(pcxt))
             .unwrap_or_else(|_| unreachable!("pcxt shared set once"));
         parallel::set_private(pcxt, Arc::clone(payload) as _);
+        // Standing driver dispatch (M2 inc-1): deferred_bind false — this
+        // arm binds EAGERLY (with_query_task_binding); the standing serve
+        // re-establishes visibility up front and evicts parked sticky.
+        parallel::set_standing_driver(pcxt, parallel::standing::StandingDriver {
+            drive: runtime_sort_standing_driver,
+            deferred_bind: false,
+        });
 
         // Submit the pinned RG (accept → seal → combine) before launch.
         let source = Arc::new(super::runtime_scan::PgrcolumnarGranuleSource {
@@ -1684,6 +1790,35 @@ fn engage_ceremony<'mcx>(
         }, router::session_affinity_token());
         payload.rg.set(rg.downgrade()).unwrap_or_else(|_| unreachable!("rg set once"));
         *mut_submitted = Some(rg.clone());
+
+        // M2 inc-1: STANDING engagement first — no worker launch, one
+        // binder bind per participant; fallback leaves the RG untouched
+        // for the launched path below.
+        let census = match spec {
+            ArmSpec::Topn(s) => format!("bound={}", s.bound),
+            ArmSpec::Full(..) => "full".to_string(),
+        };
+        match super::standing_channel::standing_wait(
+            &STANDING_ARM,
+            super::standing_channel::StandingLeader {
+                shared: payload.pcxt_shared.get().expect("pcxt shared set above"),
+                slot: &payload.standing,
+                started: &payload.started,
+                refused: &payload.refused,
+                take_error: &|| payload.take_error(),
+                drain: &|rg| drain_rg(rt, rg),
+                census: &census,
+            },
+            dop,
+            total_granules,
+            &rg,
+            &waiter,
+        )? {
+            super::standing_channel::StandingWait::Done(outcome) => {
+                return finish_outcome(payload, outcome);
+            }
+            super::standing_channel::StandingWait::Fallback => {}
+        }
 
         let launched = parallel::LaunchParallelWorkers(pcxt)?;
         if launched <= 0 {
@@ -1807,51 +1942,7 @@ fn engage_ceremony<'mcx>(
             }
         };
 
-        if let Some(e) = payload.take_error() {
-            lane_trace(&format!("runtime-sort: worker-phase error: {}", e.message()));
-            return Err(e);
-        }
-        if outcome == runtime::RgOutcome::Aborted {
-            if let Some(full) = &payload.full {
-                if full.budget_refused.load(Ordering::SeqCst) {
-                    // Design §7: a runtime budget crossing is a recorded
-                    // refusal + whole-attempt serial rerun (the serial arm
-                    // spills correctly), never an error.
-                    refused("per-participant sort budget crossed at accept");
-                    return Ok(EngageOutcome::Fallback);
-                }
-            }
-            if payload.broke.load(Ordering::SeqCst) {
-                lane_trace("runtime-sort: sink contract break; serial fallback");
-                return Ok(EngageOutcome::Fallback);
-            }
-            ::postgres_seams::check_for_interrupts::call()?;
-            return Err(Box::new(PgError::new(ERROR, "runtime sort pipeline aborted")));
-        }
-        if payload.started.load(Ordering::SeqCst) == 0 {
-            return Ok(EngageOutcome::Fallback);
-        }
-        if let Some(full) = &payload.full {
-            let Some(publish) = full.published.lock().unwrap_or_else(|p| p.into_inner()).take()
-            else {
-                // Completed with participants but nothing published: a
-                // protocol violation, never silently wrong output.
-                return Err(Box::new(PgError::new(
-                    ERROR,
-                    "runtime full sort completed without a published result",
-                )));
-            };
-            return Ok(EngageOutcome::CompletedFull(publish));
-        }
-        let Some(winners) = payload.take_winners() else {
-            // Completed with participants but no published winners: a
-            // protocol violation, never silently wrong output.
-            return Err(Box::new(PgError::new(
-                ERROR,
-                "runtime sort completed without a winner list",
-            )));
-        };
-        Ok(EngageOutcome::Completed(winners))
+        finish_outcome(payload, outcome)
     })(&mut submitted);
 
     // Teardown tail (every path): a submitted RG must be COMPLETE before the
