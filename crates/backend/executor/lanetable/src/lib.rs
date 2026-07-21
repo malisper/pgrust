@@ -1836,6 +1836,29 @@ impl LaneAggTable {
         }
     }
 
+    /// Row `i`'s SAVED hash word (Bytes repr only — the third key word,
+    /// written verbatim by `insert_bytes` for every key length, short packed
+    /// keys included). This is exactly the hash the inserting probe was
+    /// called with, so a caller that probes with an external hash (the sink's
+    /// `sink_hash_bytes` — the arena-strings direct-text law) reads that
+    /// same hash back here without rehashing. Never the NULL row (NULL rows
+    /// carry no key words).
+    #[inline]
+    pub fn row_key_hash(&self, i: usize) -> u64 {
+        debug_assert_eq!(self.repr, KeyRepr::Bytes);
+        debug_assert_ne!(self.null_row, Some(i), "the NULL row has no saved hash");
+        // SAFETY: live Bytes row, word 2 = saved hash (caller keeps i < nrows).
+        unsafe { *self.rows.row_ptr(i).add(2) }
+    }
+
+    /// Live long-key arena bytes (Bytes repr; short keys never land here) —
+    /// the live-bytes budget accounting term ([`Self::mem_used`] counts
+    /// retained capacity instead).
+    #[inline]
+    pub fn arena_len(&self) -> usize {
+        self.arena.len()
+    }
+
     /// Row `i`'s state bytes.
     #[inline]
     pub fn row_states(&self, i: usize) -> *mut u8 {

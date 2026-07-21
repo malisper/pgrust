@@ -573,10 +573,18 @@ pub fn sink_run_from_bucket_table(b: usize, t: &LaneAggTable) -> SinkRun {
 
 /// The armed compact state's canonical (text-bearing) Multi shape, when the
 /// sink must merge on CANONICAL KEY BYTES: a Multi key spec carrying an
-/// Intern component. `None` = word-keyed shapes (the existing paths).
+/// Intern component. `None` = word-keyed shapes (the existing paths) AND
+/// the DIRECT single-text arm (arena-strings inc-3: the table already keys
+/// on the canonical image — no intern table exists and none of the
+/// intern-side canon machinery may run; every canon consumer dispatches
+/// `text_direct` FIRST).
 fn compact_canon_shape(ch: &crate::compact::CompactHash) -> Option<&MkShape> {
     match &ch.key {
-        crate::compact::CompactKeySpec::Multi(s) if s.intern_comp().is_some() => Some(s),
+        crate::compact::CompactKeySpec::Multi(s)
+            if s.intern_comp().is_some() && !ch.text_direct =>
+        {
+            Some(s)
+        }
         _ => None,
     }
 }
@@ -942,6 +950,138 @@ fn sink_partition_remainder_canon(ch: &mut crate::compact::CompactHash) -> SinkP
     SinkPart { starts, idx, has_null: false, hashes: part_hashes }
 }
 
+/// [`sink_flush_table_canon`]'s DIRECT-arm twin (arena-strings inc-3): the
+/// direct table's rows already ARE the canonical images and their saved
+/// hash words already ARE the sink hashes (the probe-hash law —
+/// `agg_hash_compact_probe_text_direct`), so the flush is a plain bucket-
+/// major two-pass counting sort off the stored hashes: no canon rebuild, no
+/// rehash. `sink_flush_table_canon_impl`'s exact copy law — contiguous
+/// `key_offs` (`key_ends` empty), arrival order preserved within buckets,
+/// states verbatim; no GID words (no packed image exists — the combine
+/// always bytes-probes these runs, `gid_gen` 0). The table is RESET — for
+/// direct tables the table IS the vocabulary, so the caller must propagate
+/// the cache-invalidation signal on EVERY direct flush. (Arena-steal for the
+/// direct flush is a later increment — this is the simple copy.)
+fn sink_flush_table_direct(ch: &mut crate::compact::CompactHash) -> SinkRun {
+    debug_assert!(ch.text_direct, "direct flush requires the direct arm");
+    debug_assert!(ch.canon_hashes.is_empty() && ch.canon_store.is_empty());
+    let table = &mut ch.table;
+    debug_assert_eq!(table.repr(), KeyRepr::Bytes);
+    let state_words = table.state_bytes() / 8;
+    let n = table.nrows();
+    // Pass 1: per-bucket row + byte counts off the stored hashes.
+    let mut counts = [0u32; SINK_NBUCKETS];
+    let mut byte_counts = [0usize; SINK_NBUCKETS];
+    let mut scratch = [0u8; 8];
+    for i in 0..n {
+        let h = table.row_key_hash(i);
+        let k = table
+            .row_key_bytes(i, &mut scratch)
+            .expect("direct tables are non-nullable");
+        debug_assert_eq!(h, sink_hash_bytes(k), "direct probe-hash law");
+        counts[bucket_of(h)] += 1;
+        byte_counts[bucket_of(h)] += k.len();
+    }
+    let mut starts: Vec<u32> = Vec::with_capacity(SINK_NBUCKETS + 1);
+    let mut acc = 0u32;
+    starts.push(0);
+    for c in counts {
+        acc += c;
+        starts.push(acc);
+    }
+    let total_bytes: usize = byte_counts.iter().sum();
+    let mut bstart = [0usize; SINK_NBUCKETS];
+    {
+        let mut b_acc = 0usize;
+        for (b, &bc) in byte_counts.iter().enumerate() {
+            bstart[b] = b_acc;
+            b_acc += bc;
+        }
+    }
+    // Pass 2: permuting copy into bucket-major slots (arrival order within
+    // each bucket — the counting sort is stable by construction).
+    let mut cursor: [u32; SINK_NBUCKETS] = core::array::from_fn(|b| starts[b]);
+    let mut bcursor = bstart;
+    let mut key_offs: Vec<u32> = vec![0; n + 1];
+    let mut key_bytes: Vec<u8> = vec![0; total_bytes];
+    let mut states: Vec<u64> = vec![0; n * state_words];
+    let mut run_hashes: Vec<u64> = vec![0; n];
+    for i in 0..n {
+        let h = table.row_key_hash(i);
+        let b = bucket_of(h);
+        let slot = cursor[b] as usize;
+        cursor[b] += 1;
+        let k = table
+            .row_key_bytes(i, &mut scratch)
+            .expect("direct tables are non-nullable");
+        let off = bcursor[b];
+        bcursor[b] += k.len();
+        key_offs[slot] = off as u32;
+        key_bytes[off..off + k.len()].copy_from_slice(k);
+        run_hashes[slot] = h;
+        // SAFETY: the row's state block is state_words u64s (8-aligned by
+        // the LaneAggTable state layout); dst was sized above.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                table.row_states(i).cast::<u64>().cast_const(),
+                states.as_mut_ptr().add(slot * state_words),
+                state_words,
+            );
+        }
+    }
+    key_offs[n] = total_bytes as u32;
+    // Offsets are consistent per slot (the canon flush's exact argument):
+    // rows within a bucket fill both the slot range and the byte range in
+    // the same order, and buckets are laid out contiguously.
+    debug_assert!(key_offs.windows(2).all(|w| w[0] <= w[1]));
+    table.reset();
+    SinkRun {
+        key_words: 0,
+        key_ends: Vec::new(),
+        state_words,
+        starts,
+        keys: Vec::new(),
+        states,
+        null_states: None,
+        key_offs,
+        key_bytes,
+        hashes: run_hashes,
+        gid_gen: 0,
+    }
+}
+
+/// [`sink_partition_remainder_canon`]'s DIRECT-arm twin: bucket index by the
+/// table's SAVED hash words (== the sink hashes by the probe-hash law) — a
+/// plain counting sort, no canon extension, no rehash. Direct shapes are
+/// non-nullable (`has_null` structurally false).
+fn sink_partition_remainder_direct(ch: &crate::compact::CompactHash) -> SinkPart {
+    debug_assert!(ch.text_direct, "direct partition requires the direct arm");
+    let table = &ch.table;
+    let n = table.nrows();
+    let mut counts = [0u32; SINK_NBUCKETS];
+    for i in 0..n {
+        counts[bucket_of(table.row_key_hash(i))] += 1;
+    }
+    let mut starts: Vec<u32> = Vec::with_capacity(SINK_NBUCKETS + 1);
+    let mut acc = 0u32;
+    starts.push(0);
+    for c in counts {
+        acc += c;
+        starts.push(acc);
+    }
+    let mut cursor: [u32; SINK_NBUCKETS] = core::array::from_fn(|b| starts[b]);
+    let mut idx = vec![0u32; acc as usize];
+    let mut part_hashes = vec![0u64; acc as usize];
+    for i in 0..n {
+        let h = table.row_key_hash(i);
+        let b = bucket_of(h);
+        idx[cursor[b] as usize] = i as u32;
+        part_hashes[cursor[b] as usize] = h;
+        cursor[b] += 1;
+    }
+    SinkPart { starts, idx, has_null: false, hashes: part_hashes }
+}
+
 // ---------------------------------------------------------------------------
 // LIMIT-k-no-ORDER group-admission FREEZE (band-kernels-2a, ClickBench q18
 // class): `GROUP BY ... LIMIT k` with NO ORDER BY needs only k groups with
@@ -1110,6 +1250,20 @@ pub(crate) fn sink_freeze_extract_ch(
         return None;
     }
     let mut out: Vec<Vec<u8>> = Vec::with_capacity(bound as usize);
+    // DIRECT single-text arm (arena-strings inc-3): the rows already ARE
+    // the canonical images — read them back verbatim.
+    if ch.text_direct {
+        let mut scratch = [0u8; 8];
+        for i in 0..bound as usize {
+            out.push(
+                ch.table
+                    .row_key_bytes(i, &mut scratch)
+                    .expect("direct tables are non-nullable")
+                    .to_vec(),
+            );
+        }
+        return Some(out);
+    }
     match compact_canon_shape(ch) {
         Some(shape) => {
             let intern = ch.intern.as_ref()?;
@@ -1359,6 +1513,34 @@ pub fn sink_remainder_spill_bucket_canon(
     b: usize,
     out: &mut Vec<u8>,
 ) -> PgResult<()> {
+    // DIRECT single-text arm (arena-strings inc-3): the rows ARE the
+    // canonical images and the SEAL carried their sink hashes — serialize
+    // verbatim (the record is identical to the intern arm's by the
+    // canonical-bytes law).
+    if rem.direct {
+        let (t, part) = (rem.table, rem.part);
+        let state_words = t.state_bytes() / 8;
+        let lo = part.starts[b] as usize;
+        let hi = part.starts[b + 1] as usize;
+        let mut k8 = [0u8; 8];
+        let mut states: Vec<u64> = vec![0; state_words];
+        for (slot, &row) in part.idx[lo..hi].iter().enumerate() {
+            let img = t
+                .row_key_bytes(row as usize, &mut k8)
+                .expect("direct tables are non-nullable");
+            // SAFETY: the row's state block is state_words u64s (8-aligned
+            // by the LaneAggTable state layout).
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    t.row_states(row as usize).cast::<u64>().cast_const(),
+                    states.as_mut_ptr(),
+                    state_words,
+                );
+            }
+            sink_canon_spill_append(img, part.hashes[lo + slot], &states, out);
+        }
+        return Ok(());
+    }
     let (shape, intern) = rem
         .canon
         .ok_or_else(|| sink_shape_error("canonical remainder spill without a canon face"))?;
@@ -1389,6 +1571,21 @@ pub fn sink_remainder_spill_bucket_canon(
 /// materialization-exact) — the combine pre-build estimate's key-content
 /// term for the face the spill directory cannot answer.
 pub fn sink_remainder_canon_content(rem: &SinkRemainder<'_>, b: usize) -> usize {
+    // DIRECT arm: image bytes = the rows' own key bytes.
+    if rem.direct {
+        let (t, part) = (rem.table, rem.part);
+        let lo = rem.part.starts[b] as usize;
+        let hi = rem.part.starts[b + 1] as usize;
+        let mut k8 = [0u8; 8];
+        return part.idx[lo..hi]
+            .iter()
+            .map(|&row| {
+                t.row_key_bytes(row as usize, &mut k8)
+                    .expect("direct tables are non-nullable")
+                    .len()
+            })
+            .sum();
+    }
     let Some((shape, intern)) = rem.canon else { return 0 };
     let (t, part) = (rem.table, rem.part);
     let lo = part.starts[b] as usize;
@@ -1994,6 +2191,13 @@ pub struct SinkRemainder<'a> {
     /// generation — remainder rows sit in the live table, so their packed
     /// words are generation-current by construction. 0 for word shapes.
     pub gid_gen: u64,
+    /// DIRECT single-text arm (arena-strings inc-3): the remainder table is
+    /// `KeyRepr::Bytes` keyed on the canonical images themselves — the
+    /// combine/spill faces read key bytes per row via `row_key_bytes` and
+    /// the SEAL-carried hashes (== the saved sink hashes), never a canon
+    /// rebuild (`canon`/`canon_store` are None). The GID arm never applies
+    /// (no packed image exists).
+    pub direct: bool,
 }
 
 /// One Local's combine-visible faces: its spill-synthesized runs (epoch
@@ -2345,7 +2549,27 @@ fn sink_combine_bucket_impl(
             debug_assert_eq!(rt.state_bytes(), t.state_bytes());
             let lo = part.starts[b] as usize;
             let hi = part.starts[b + 1] as usize;
-            if key_words == 0 {
+            if key_words == 0 && rem.direct {
+                // DIRECT single-text remainder (arena-strings inc-3): the
+                // rows already ARE the canonical images and the SEAL carried
+                // their saved sink hashes — read both back verbatim (no
+                // canon face, no rebuild). The GID arm never applies: direct
+                // rows carry no packed image (byte-invisible either way —
+                // the map only short-circuits probes).
+                let mut k8 = [0u8; 8];
+                for (slot, &row) in part.idx[lo..hi].iter().enumerate() {
+                    let src: *const u64 = rt.row_states(row as usize).cast_const().cast();
+                    let img = rt
+                        .row_key_bytes(row as usize, &mut k8)
+                        .expect("direct tables are non-nullable");
+                    if spk {
+                        spk_rows += 1;
+                        spk_bytes += img.len() as u64;
+                    }
+                    absorb_bytes(&mut t, img, part.hashes[lo + slot], src)?;
+                }
+                debug_assert!(!part.has_null, "direct shapes are non-nullable");
+            } else if key_words == 0 {
                 let (shape, intern) = rem
                     .canon
                     .ok_or_else(|| sink_shape_error("bytes-mode remainder without a canon face"))?;
@@ -3303,7 +3527,10 @@ impl SinkTableHandle {
     /// (text-bearing) shapes partition by their canonical bytes, word shapes
     /// by the key words ([`sink_partition_remainder`]).
     pub fn partition_remainder(&mut self) -> SinkPart {
-        if compact_canon_shape(&self.0).is_some() {
+        if self.0.text_direct {
+            // DIRECT arm: counting sort off the saved sink hashes.
+            sink_partition_remainder_direct(&self.0)
+        } else if compact_canon_shape(&self.0).is_some() {
             sink_partition_remainder_canon(&mut self.0)
         } else {
             sink_partition_remainder(&self.0.table)
@@ -3346,6 +3573,10 @@ impl SinkTableHandle {
             canon,
             canon_store,
             gid_gen: self.0.intern_gen,
+            // DIRECT arm: `compact_canon_shape` excluded it above (canon and
+            // canon_store are None) — the combine/spill faces read the rows
+            // verbatim instead.
+            direct: self.0.text_direct,
         }
     }
 }
@@ -3411,6 +3642,13 @@ pub fn agg_sink_flush_if_due(
     if ch.table.len() < cap as usize {
         return None;
     }
+    if ch.text_direct {
+        // DIRECT single-text arm: the flush RESETS the table, and the table
+        // IS the vocabulary — `true` (the intern-reset channel) on EVERY
+        // flush, so the drain drops its code→group caches (the 830320fed
+        // law: any code→X cache is (build, epoch, table-generation)-scoped).
+        return Some((sink_flush_table_direct(ch), true));
+    }
     if compact_canon_shape(ch).is_some() {
         let run = sink_flush_table_canon(ch);
         let reset_intern = ch
@@ -3437,7 +3675,15 @@ pub fn agg_sink_flush_if_due(
 /// own per-entry arithmetic, applied to `nrows` instead of retained
 /// capacity. Used by the spill-armed pressure/backstop accounting only.
 pub(crate) fn sink_table_live_bytes(t: &LaneAggTable) -> usize {
-    t.nrows() * (16 + 8 * table_key_words(t) + t.state_bytes())
+    // Bytes-keyed tables (the DIRECT single-text arm): 3 key words per row
+    // + the live long-key arena bytes (short keys pack inline). Word modes
+    // keep the historical arithmetic exactly.
+    let key_bytes = match t.repr() {
+        KeyRepr::Bytes => 24,
+        _ => 8 * table_key_words(t),
+    };
+    let arena = if t.repr() == KeyRepr::Bytes { t.arena_len() } else { 0 };
+    t.nrows() * (16 + key_bytes + t.state_bytes()) + arena
 }
 
 /// Force-flush the armed table into a run NOW, regardless of the cap
@@ -3454,6 +3700,11 @@ pub fn agg_sink_flush_now(node: &mut AggStateData<'_>) -> Option<(SinkRun, bool)
     let ch = ph.compact.as_mut()?;
     if ch.table.len() == 0 {
         return None;
+    }
+    if ch.text_direct {
+        // DIRECT arm: as agg_sink_flush_if_due — table reset = vocabulary
+        // reset, the cache-invalidation signal is unconditional.
+        return Some((sink_flush_table_direct(ch), true));
     }
     if compact_canon_shape(ch).is_some() {
         let run = sink_flush_table_canon(ch);
@@ -4705,8 +4956,8 @@ mod tests {
         assert!(!part2.has_null);
 
         let locals = [
-            SinkLocalView { spilled: &[], runs: core::slice::from_ref(&run1), remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, canon_store: None, gid_gen: 0 }) },
-            SinkLocalView { spilled: &[], runs: &[], remainder: Some(SinkRemainder { table: &t2, part: &part2, canon: None, canon_store: None, gid_gen: 0 }) },
+            SinkLocalView { spilled: &[], runs: core::slice::from_ref(&run1), remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, canon_store: None, gid_gen: 0, direct: false }) },
+            SinkLocalView { spilled: &[], runs: &[], remainder: Some(SinkRemainder { table: &t2, part: &part2, canon: None, canon_store: None, gid_gen: 0, direct: false }) },
         ];
         let combines = test_combines();
         let mut merged: Vec<LaneAggTable> = Vec::with_capacity(SINK_NBUCKETS);
@@ -4782,8 +5033,8 @@ mod tests {
         bump(&mut t2, Some(same[0]), 1, 0);
         let part2 = sink_partition_remainder(&t2);
         let locals = [
-            SinkLocalView { spilled: &[], runs: core::slice::from_ref(&run1), remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, canon_store: None, gid_gen: 0 }) },
-            SinkLocalView { spilled: &[], runs: &[], remainder: Some(SinkRemainder { table: &t2, part: &part2, canon: None, canon_store: None, gid_gen: 0 }) },
+            SinkLocalView { spilled: &[], runs: core::slice::from_ref(&run1), remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, canon_store: None, gid_gen: 0, direct: false }) },
+            SinkLocalView { spilled: &[], runs: &[], remainder: Some(SinkRemainder { table: &t2, part: &part2, canon: None, canon_store: None, gid_gen: 0, direct: false }) },
         ];
         let combines = test_combines();
         let t = sink_combine_bucket(want_bucket, 1, STATE_BYTES, &locals, &combines).unwrap();
@@ -4842,22 +5093,22 @@ mod tests {
             SinkLocalView {
                 spilled: &[],
                 runs: core::slice::from_ref(&run0),
-                remainder: Some(SinkRemainder { table: &t0, part: &part0, canon: None, canon_store: None, gid_gen: 0 }),
+                remainder: Some(SinkRemainder { table: &t0, part: &part0, canon: None, canon_store: None, gid_gen: 0, direct: false }),
             },
             SinkLocalView {
                 spilled: &[],
                 runs: &[],
-                remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, canon_store: None, gid_gen: 0 }),
+                remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, canon_store: None, gid_gen: 0, direct: false }),
             },
             SinkLocalView {
                 spilled: &[],
                 runs: core::slice::from_ref(&run2),
-                remainder: Some(SinkRemainder { table: &t2, part: &part2, canon: None, canon_store: None, gid_gen: 0 }),
+                remainder: Some(SinkRemainder { table: &t2, part: &part2, canon: None, canon_store: None, gid_gen: 0, direct: false }),
             },
             SinkLocalView {
                 spilled: &[],
                 runs: &[],
-                remainder: Some(SinkRemainder { table: &t3, part: &part3, canon: None, canon_store: None, gid_gen: 0 }),
+                remainder: Some(SinkRemainder { table: &t3, part: &part3, canon: None, canon_store: None, gid_gen: 0, direct: false }),
             },
         ];
         let combines = test_combines();
@@ -5581,7 +5832,7 @@ mod tests {
             ],
         };
         let locals =
-            [SinkLocalView { spilled: &[], runs: &[], remainder: Some(SinkRemainder { table: &t, part: &part, canon: None, canon_store: None, gid_gen: 0 }) }];
+            [SinkLocalView { spilled: &[], runs: &[], remainder: Some(SinkRemainder { table: &t, part: &part, canon: None, canon_store: None, gid_gen: 0, direct: false }) }];
         let combines = test_combines();
         let mut total_rows = 0usize;
         for b in 0..SINK_NBUCKETS {
@@ -5724,19 +5975,12 @@ mod tests {
         };
         let pg = pr.states.cast::<AggPerGroup>();
         // SAFETY: STATE_BYTES holds two AggPerGroup slots, zeroed at birth.
+        // NEW rows need no seed writes: the zeroed slot already reads as
+        // {trans_value: 0, non-null} — and FIELD-free seeding keeps the
+        // struct padding deterministically zero, so the direct-arm
+        // equivalence tests may compare raw state words (a whole-struct
+        // `write` copies stack padding garbage into the row).
         unsafe {
-            if pr.is_new {
-                pg.write(AggPerGroup {
-                    trans_value: Datum::from_i64(0),
-                    trans_value_is_null: false,
-                    no_trans_value: false,
-                });
-                pg.add(1).write(AggPerGroup {
-                    trans_value: Datum::from_i64(0),
-                    trans_value_is_null: false,
-                    no_trans_value: false,
-                });
-            }
             let c = &mut *pg;
             c.trans_value = Datum::from_i64(c.trans_value.as_i64() + count);
         }
@@ -5810,6 +6054,285 @@ mod tests {
                 assert_eq!(total, b.key_bytes.len(), "stolen store holds exactly the images");
             }
         }
+    }
+
+    // -- arena-strings inc-3: the DIRECT single-text arm ----------------------
+
+    /// A DIRECT-armed worker state (arena-strings inc-3): `KeyRepr::Bytes`
+    /// table keyed on the canonical image itself, no intern table — exactly
+    /// what `try_arm_mk_n`'s direct branch installs.
+    fn direct_worker() -> crate::compact::CompactHash {
+        let table = LaneAggTable::with_config(
+            KeyRepr::Bytes,
+            STATE_BYTES,
+            16,
+            HashKind::best(),
+            EntryLayout::Salt8,
+        );
+        let mut ch = crate::compact::compact_hash_for_tests(
+            table,
+            crate::compact::CompactKeySpec::Multi(canon_shape_text_only()),
+            None,
+        );
+        ch.text_direct = true;
+        ch
+    }
+
+    /// The mk1 1-Intern canonical image of `text`: `packed_bytes` (4) zeroed
+    /// id bytes + the raw text verbatim (`canon_row_bytes`' law).
+    fn direct_image(text: &[u8]) -> Vec<u8> {
+        let mut img = Vec::with_capacity(4 + text.len());
+        img.extend_from_slice(&[0u8; 4]);
+        img.extend_from_slice(text);
+        img
+    }
+
+    /// The feed's DIRECT probe for one row — `scan_mk1_text_direct_batch`'s
+    /// probe in miniature: canonical image, [`sink_hash_bytes`] as the probe
+    /// hash (the probe-hash law), same toy transitions as `bump_canon`.
+    fn bump_direct(ch: &mut crate::compact::CompactHash, text: &[u8], count: i64) {
+        assert!(ch.text_direct);
+        let img = direct_image(text);
+        let h = sink_hash_bytes(&img);
+        let pr = ch.table.probe_bytes(&img, h);
+        let pg = pr.states.cast::<AggPerGroup>();
+        // SAFETY: STATE_BYTES holds two AggPerGroup slots, zeroed at birth
+        // (which already reads as the {0, non-null} count seed — see
+        // bump_canon's padding-determinism note).
+        unsafe {
+            let c = &mut *pg;
+            c.trans_value = Datum::from_i64(c.trans_value.as_i64() + count);
+        }
+    }
+
+    /// Dup/short/long/empty single-text corpus (feed order fixed — the
+    /// equivalence assertions below are slot-for-slot).
+    const DIRECT_CORPUS: [(&[u8], i64); 8] = [
+        (b"apple", 1),
+        (b"a-rather-long-canonical-key-way-past-eight-bytes", 2),
+        (b"apple", 3),
+        (b"", 4),
+        (b"banana", 5),
+        (b"zz", 6),
+        (b"a-rather-long-canonical-key-way-past-eight-bytes", 7),
+        (b"12345678", 8),
+    ];
+
+    /// (a) Direct-vs-intern equivalence at the FLUSH face: identical feeds
+    /// through the DIRECT arm and the intern arm produce slot-for-slot
+    /// identical bytes-mode runs (starts, key bytes, hashes, states) and a
+    /// byte-identical spill stream — the canonical-bytes law that makes
+    /// cross-worker merges of the two arms correct by construction.
+    #[test]
+    fn direct_flush_matches_intern_arm() {
+        let mut w = canon_worker(canon_shape_text_only());
+        let mut d = direct_worker();
+        for (text, c) in DIRECT_CORPUS {
+            bump_canon(&mut w, None, text, c);
+            bump_direct(&mut d, text, c);
+        }
+        let run_i = sink_flush_table_canon_impl(&mut w, false, false);
+        let run_d = sink_flush_table_direct(&mut d);
+        assert_eq!(d.table.nrows(), 0, "direct flush resets the table");
+        for (a, b) in [(&run_i, &run_d)] {
+            assert_eq!(a.key_words, 0);
+            assert_eq!(b.key_words, 0);
+            assert!(b.key_ends.is_empty(), "direct flush is the contiguous copy law");
+            assert!(b.keys.is_empty() && b.gid_gen == 0, "no GID words on direct runs");
+            assert_eq!(a.starts, b.starts);
+            assert_eq!(a.hashes, b.hashes);
+            assert_eq!(a.states, b.states);
+            assert_eq!(a.nrows(), b.nrows());
+            for i in 0..a.nrows() {
+                assert_eq!(a.key_slice(i), b.key_slice(i), "slot {i} key bytes diverge");
+            }
+            for bkt in 0..SINK_NBUCKETS {
+                let (mut sa, mut sb) = (Vec::new(), Vec::new());
+                sink_run_spill_bucket(a, bkt, &mut sa);
+                sink_run_spill_bucket(b, bkt, &mut sb);
+                assert_eq!(sa, sb, "spill records diverge in bucket {bkt}");
+            }
+        }
+        // Epoch 2 (post-flush): the direct table restarted its vocabulary —
+        // both arms must again produce identical runs.
+        for (text, c) in DIRECT_CORPUS.iter().skip(3) {
+            bump_canon(&mut w, None, text, *c);
+            bump_direct(&mut d, text, *c);
+        }
+        let run_i2 = sink_flush_table_canon_impl(&mut w, false, false);
+        let run_d2 = sink_flush_table_direct(&mut d);
+        assert_eq!(run_i2.starts, run_d2.starts);
+        assert_eq!(run_i2.hashes, run_d2.hashes);
+        assert_eq!(run_i2.states, run_d2.states);
+        for i in 0..run_i2.nrows() {
+            assert_eq!(run_i2.key_slice(i), run_d2.key_slice(i));
+        }
+    }
+
+    /// (d) The direct flush hash law: every run slot's carried hash is
+    /// [`sink_hash_bytes`] over its key slice, and slots sit in their hash's
+    /// bucket (the combine reuses the hash verbatim — no rehash anywhere).
+    #[test]
+    fn direct_flush_hash_law() {
+        let mut d = direct_worker();
+        for (text, c) in DIRECT_CORPUS {
+            bump_direct(&mut d, text, c);
+        }
+        let run = sink_flush_table_direct(&mut d);
+        assert_eq!(run.nrows(), 6);
+        for b in 0..SINK_NBUCKETS {
+            for i in run.starts[b] as usize..run.starts[b + 1] as usize {
+                assert_eq!(run.hashes[i], sink_hash_bytes(run.key_slice(i)), "slot {i}");
+                assert_eq!(bucket_of(run.hashes[i]), b, "slot {i} bucket-major framing");
+            }
+        }
+    }
+
+    /// (b) Remainder face: unflushed direct tables partition by the SAVED
+    /// sink hashes and the combine reads key bytes straight off the rows —
+    /// merged results equal the intern-armed twin's, row for row, across a
+    /// run + remainder mix, both GID-map arms, and the remainder spill
+    /// serialization.
+    #[test]
+    fn direct_remainder_combine_matches_intern_arm() {
+        let build_intern = || {
+            let mut w1 = canon_worker(canon_shape_text_only());
+            for (text, c) in DIRECT_CORPUS {
+                bump_canon(&mut w1, None, text, c);
+            }
+            let run1 = sink_flush_table_canon(&mut w1);
+            // Remainder epoch: reused + new texts, NOT flushed.
+            bump_canon(&mut w1, None, b"apple", 10);
+            bump_canon(&mut w1, None, b"remainder-only-key-way-past-eight-bytes", 11);
+            bump_canon(&mut w1, None, b"", 12);
+            let mut w2 = canon_worker(canon_shape_text_only());
+            bump_canon(&mut w2, None, b"banana", 20);
+            bump_canon(&mut w2, None, b"w2-only", 21);
+            (run1, SinkTableHandle(w1), SinkTableHandle(w2))
+        };
+        let build_direct = || {
+            let mut w1 = direct_worker();
+            for (text, c) in DIRECT_CORPUS {
+                bump_direct(&mut w1, text, c);
+            }
+            let run1 = sink_flush_table_direct(&mut w1);
+            bump_direct(&mut w1, b"apple", 10);
+            bump_direct(&mut w1, b"remainder-only-key-way-past-eight-bytes", 11);
+            bump_direct(&mut w1, b"", 12);
+            let mut w2 = direct_worker();
+            bump_direct(&mut w2, b"banana", 20);
+            bump_direct(&mut w2, b"w2-only", 21);
+            (run1, SinkTableHandle(w1), SinkTableHandle(w2))
+        };
+        let (irun, mut ih1, mut ih2) = build_intern();
+        let (drun, mut dh1, mut dh2) = build_direct();
+        let (ipart1, ipart2) = (ih1.partition_remainder(), ih2.partition_remainder());
+        let (dpart1, dpart2) = (dh1.partition_remainder(), dh2.partition_remainder());
+        assert_eq!(ipart1.starts, dpart1.starts, "SEAL partition geometry diverges");
+        assert_eq!(ipart1.hashes, dpart1.hashes, "SEAL-carried hashes diverge");
+        assert!(!dpart1.has_null && !dpart2.has_null);
+        let combines = test_combines();
+        for gid in [false, true] {
+            let ilocals = [
+                SinkLocalView {
+                    spilled: &[],
+                    runs: core::slice::from_ref(&irun),
+                    remainder: Some(ih1.remainder_view(&ipart1)),
+                },
+                SinkLocalView {
+                    spilled: &[],
+                    runs: &[],
+                    remainder: Some(ih2.remainder_view(&ipart2)),
+                },
+            ];
+            let dlocals = [
+                SinkLocalView {
+                    spilled: &[],
+                    runs: core::slice::from_ref(&drun),
+                    remainder: Some(dh1.remainder_view(&dpart1)),
+                },
+                SinkLocalView {
+                    spilled: &[],
+                    runs: &[],
+                    remainder: Some(dh2.remainder_view(&dpart2)),
+                },
+            ];
+            assert!(dlocals[0].remainder.as_ref().unwrap().direct);
+            assert!(dlocals[0].remainder.as_ref().unwrap().canon.is_none());
+            for b in 0..SINK_NBUCKETS {
+                let mi =
+                    sink_combine_bucket_impl(b, 0, STATE_BYTES, &ilocals, &combines, gid, true)
+                        .unwrap();
+                let md =
+                    sink_combine_bucket_impl(b, 0, STATE_BYTES, &dlocals, &combines, gid, true)
+                        .unwrap();
+                assert_merged_identical(&mi, &md, 0);
+            }
+        }
+        // The remainder spill serialization is byte-identical across arms
+        // (the C2 canonical record — self-describing per-row key_len).
+        for b in 0..SINK_NBUCKETS {
+            let (mut si, mut sd) = (Vec::new(), Vec::new());
+            sink_remainder_spill_bucket_canon(&ih1.remainder_view(&ipart1), b, &mut si)
+                .unwrap();
+            sink_remainder_spill_bucket_canon(&dh1.remainder_view(&dpart1), b, &mut sd)
+                .unwrap();
+            assert_eq!(si, sd, "remainder spill records diverge in bucket {b}");
+            assert_eq!(
+                sink_remainder_canon_content(&ih1.remainder_view(&ipart1), b),
+                sink_remainder_canon_content(&dh1.remainder_view(&dpart1), b),
+                "remainder content estimate diverges in bucket {b}"
+            );
+        }
+    }
+
+    /// (c) Flush-reset law (the 830320fed cache-invalidation contract at
+    /// the table's own level): the direct flush RESETS the table — its
+    /// vocabulary restarts — so a post-flush re-feed of the same texts must
+    /// re-probe into FRESH rows, and both epochs' runs carry independent,
+    /// correct counts (a dangling code→state cache would have folded epoch
+    /// 2's rows into freed epoch-1 rows instead).
+    #[test]
+    fn direct_flush_resets_vocabulary() {
+        let mut d = direct_worker();
+        bump_direct(&mut d, b"alpha", 1);
+        bump_direct(&mut d, b"beta-longer-than-eight-bytes", 2);
+        bump_direct(&mut d, b"alpha", 3);
+        assert_eq!(d.table.nrows(), 2);
+        let run1 = sink_flush_table_direct(&mut d);
+        assert_eq!(d.table.nrows(), 0, "the flush resets the table (vocabulary)");
+        // Re-feed the SAME texts: fresh probes must create fresh rows.
+        bump_direct(&mut d, b"alpha", 10);
+        bump_direct(&mut d, b"beta-longer-than-eight-bytes", 20);
+        assert_eq!(d.table.nrows(), 2, "post-flush arrivals re-probe, never dangle");
+        let run2 = sink_flush_table_direct(&mut d);
+        let count_of = |run: &SinkRun, text: &[u8]| -> Option<i64> {
+            let img = direct_image(text);
+            (0..run.nrows()).find_map(|i| {
+                (run.key_slice(i) == img.as_slice())
+                    .then(|| run.states[i * run.state_words] as i64)
+            })
+        };
+        assert_eq!(count_of(&run1, b"alpha"), Some(4));
+        assert_eq!(count_of(&run1, b"beta-longer-than-eight-bytes"), Some(2));
+        assert_eq!(count_of(&run2, b"alpha"), Some(10));
+        assert_eq!(count_of(&run2, b"beta-longer-than-eight-bytes"), Some(20));
+    }
+
+    /// The direct arm's freeze extraction reads the canonical images
+    /// verbatim off the rows — identical to the intern arm's extraction.
+    #[test]
+    fn direct_freeze_extract_matches_intern_arm() {
+        let mut w = canon_worker(canon_shape_text_only());
+        let mut d = direct_worker();
+        for (text, c) in DIRECT_CORPUS {
+            bump_canon(&mut w, None, text, c);
+            bump_direct(&mut d, text, c);
+        }
+        let ei = sink_freeze_extract_ch(&w, 3).expect("intern extractable");
+        let ed = sink_freeze_extract_ch(&d, 3).expect("direct extractable");
+        assert_eq!(ei, ed);
+        assert!(sink_freeze_extract_ch(&d, 64).is_none(), "bound past nrows declines");
     }
 
     #[test]
@@ -5942,8 +6465,8 @@ mod tests {
         }
         let part2 = sink_partition_remainder(&t2);
         let locals = [
-            SinkLocalView { spilled: &[], runs: core::slice::from_ref(&run1), remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, canon_store: None, gid_gen: 0 }) },
-            SinkLocalView { spilled: &[], runs: &[], remainder: Some(SinkRemainder { table: &t2, part: &part2, canon: None, canon_store: None, gid_gen: 0 }) },
+            SinkLocalView { spilled: &[], runs: core::slice::from_ref(&run1), remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, canon_store: None, gid_gen: 0, direct: false }) },
+            SinkLocalView { spilled: &[], runs: &[], remainder: Some(SinkRemainder { table: &t2, part: &part2, canon: None, canon_store: None, gid_gen: 0, direct: false }) },
         ];
         let combines = test_combines();
         for b in 0..SINK_NBUCKETS {
@@ -6324,7 +6847,7 @@ mod tests {
             let locals = [SinkLocalView {
                 spilled: core::slice::from_ref(&run1),
                 runs: &[],
-                remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, canon_store: None, gid_gen: 0 }),
+                remainder: Some(SinkRemainder { table: &t1, part: &part1, canon: None, canon_store: None, gid_gen: 0, direct: false }),
             }];
             let direct = sink_combine_bucket(b, 1, STATE_BYTES, &locals, &combines).unwrap();
 

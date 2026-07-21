@@ -251,6 +251,18 @@ pub(crate) struct CompactHash {
     /// table never mixes representations. 0 everywhere else (the serial
     /// arm, the leader's own node, migration-eligible builds).
     pub(crate) avgpack_mask: u64,
+    /// arena-strings inc-3: TRUE = the DIRECT single-text arm — `table` is
+    /// `KeyRepr::Bytes` keyed on the canonical image itself (the mk1
+    /// 1-Intern canonical bytes: `packed_bytes` zeroed id bytes + the raw
+    /// text, `sink::canon_row_bytes`' exact encoding), probed with
+    /// `sink::sink_hash_bytes` as the probe hash, `intern` is None, and the
+    /// store-once canon fields stay empty (the table IS the canonical
+    /// store). Every flush RESETS the table (it is the vocabulary), so the
+    /// flush signals the cache-invalidation channel unconditionally.
+    pub(crate) text_direct: bool,
+    /// Direct-arm probe scratch: the canonical image under construction
+    /// (prefix + text), reused across probes.
+    pub(crate) direct_img: Vec<u8>,
     // Batch scratch (canonical keys + probe outputs), reused across batches.
     keys: Vec<i64>,
     states: Vec<*mut u8>,
@@ -276,6 +288,8 @@ pub(crate) fn compact_hash_for_tests(
         sink_mode: false,
         intern_gen: 0,
         avgpack_mask: 0,
+        text_direct: false,
+        direct_img: Vec::new(),
         keys: Vec::new(),
         states: Vec::new(),
         hashes: Vec::new(),
@@ -301,6 +315,24 @@ pub enum CompactArm {
 fn compact_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("PGRUST_LANE_V2_COMPACT").map_or(true, |v| v != "0"))
+}
+
+/// arena-strings inc-3 arm switch (`PGRUST_LANE_V2_TEXT_DIRECT`, default
+/// OFF; ON iff exactly `1`/`on` — every other spelling fails safe to OFF):
+/// DIRECT single-text worker accept tables. The M2 sink's SINGLE-TEXT class
+/// (mk1: one non-nullable Intern component — the q34/q35 `GROUP BY url`
+/// shape) keys its LOCAL table directly on the CANONICAL IMAGE bytes
+/// (`KeyRepr::Bytes`, probed with `sink::sink_hash_bytes` — the saved hash
+/// word IS the sink hash) instead of the intern-id indirection
+/// (text → intern id → packed image → Int probe → store-once canon rebuild).
+/// SINK worker builds only (`ph.sink_cap` installed before the arm); the
+/// serial lane and the coded-group (q29) mk1 consumers keep the intern arm
+/// verbatim even with the env set. OFF = byte-identical incumbent paths.
+pub fn text_direct_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_LANE_V2_TEXT_DIRECT").as_deref(), Ok("1") | Ok("on"))
+    })
 }
 
 /// mkaccept inc-1 kill switch (census U4): fused mk accept lanes — the
@@ -583,6 +615,8 @@ pub fn agg_hash_compact_try_arm(node: &mut AggStateData<'_>) -> CompactArm {
         sink_mode: false,
         intern_gen: 0,
         avgpack_mask,
+        text_direct: false,
+        direct_img: Vec::new(),
         keys: Vec::new(),
         states: Vec::new(),
         hashes: Vec::new(),
@@ -677,6 +711,46 @@ fn try_arm_mk_n(
     // avgpack: packed inline AvgInt8 states, SINK builds only (decided at
     // table creation — before any group seeds).
     let avgpack_mask = if ph.sink_cap.is_some() { node.avgpack_shape_mask } else { 0 };
+    // arena-strings inc-3: the DIRECT single-text arm — SINK worker builds
+    // of the exact mk1 1-Intern non-nullable shape key the local table on
+    // the canonical image bytes themselves (no intern table, no packed-id
+    // probe, no store-once canon). The env is process-constant, so every
+    // worker of one engagement arms the same way (the leader's admission
+    // snapshot — key spec, emit plan, combine — is shape-only and
+    // arm-agnostic: both arms flush identical bytes-mode runs).
+    if text_direct_enabled()
+        && ph.sink_cap.is_some()
+        && !nullable
+        && shape.comps.len() == 1
+        && shape.comps[0].kind == MkCompKind::Intern
+    {
+        ph.compact = Some(CompactHash {
+            table: ::lanetable::LaneAggTable::with_config(
+                ::lanetable::KeyRepr::Bytes,
+                additionalsize,
+                // Capacity hint: as the intern arm below (cap-bounded).
+                (numgroups as usize).min(1 << 23),
+                ::lanetable::HashKind::best(),
+                // Bytes keys are Salt8-only (3 key words never inline).
+                ::lanetable::EntryLayout::Salt8,
+            ),
+            key: CompactKeySpec::Multi(shape),
+            intern: None,
+            canon_hashes: Vec::new(),
+            canon_store: Vec::new(),
+            canon_offs: Vec::new(),
+            sink_mode: false,
+            intern_gen: 0,
+            avgpack_mask,
+            text_direct: true,
+            direct_img: Vec::new(),
+            keys: Vec::new(),
+            states: Vec::new(),
+            hashes: Vec::new(),
+            new_rows: Vec::new(),
+        });
+        return CompactArm::Armed;
+    }
     let (repr, layout) = if two_words {
         // Int128 is Salt8-only (2 key words cannot inline into a 16-B slot).
         (::lanetable::KeyRepr::Int128, ::lanetable::EntryLayout::Salt8)
@@ -709,6 +783,8 @@ fn try_arm_mk_n(
         sink_mode: false,
         intern_gen: 0,
         avgpack_mask,
+        text_direct: false,
+        direct_img: Vec::new(),
         keys: Vec::new(),
         states: Vec::new(),
         hashes: Vec::new(),
@@ -978,6 +1054,8 @@ pub fn agg_hash_compact_try_arm_reduced(
         sink_mode: false,
         intern_gen: 0,
         avgpack_mask,
+        text_direct: false,
+        direct_img: Vec::new(),
         keys: Vec::new(),
         states: Vec::new(),
         hashes: Vec::new(),
@@ -1029,6 +1107,65 @@ pub fn agg_hash_compact_intern(node: &mut AggStateData<'_>, bytes: &[u8]) -> u32
 /// Whether this build currently runs on the compact table.
 pub fn agg_hash_compact_armed(node: &AggStateData<'_>) -> bool {
     node.perhash.as_ref().is_some_and(|ph| ph.compact.is_some())
+}
+
+/// Whether the armed compact table is the DIRECT single-text arm
+/// (arena-strings inc-3) — the feed dispatches its accept branch on this.
+pub fn agg_hash_compact_text_direct(node: &AggStateData<'_>) -> bool {
+    node.perhash
+        .as_ref()
+        .and_then(|ph| ph.compact.as_ref())
+        .is_some_and(|ch| ch.text_direct)
+}
+
+/// DIRECT single-text probe (arena-strings inc-3): resolve one row's text
+/// payload to its live group state by probing the direct-armed table on the
+/// CANONICAL IMAGE — the mk1 1-Intern canonical bytes (`packed_bytes`
+/// zeroed id bytes + the raw text verbatim; `sink::canon_row_bytes`' exact
+/// encoding, so flushed runs merge byte-for-byte with intern-armed
+/// workers') — with [`crate::sink::sink_hash_bytes`] over that image as
+/// the PROBE HASH. Probe-hash law: the table's saved hash word is therefore
+/// THE sink hash (flush and the SEAL partition read it back, never
+/// rehashing); growth/two-level conversion re-place entries off the saved
+/// word (`lanetable` slot_hash's Bytes arm), so the external hash stays
+/// consistent for the table's lifetime. NEW groups seed through the same
+/// `trans_init` datumCopy loop as every other arrival. The returned pointer
+/// is stable until the next flush (the caller's code→state cache rides the
+/// flush-reset invalidation channel).
+pub fn agg_hash_compact_probe_text_direct<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    text: &[u8],
+) -> PgResult<NonNull<AggPerGroup>> {
+    // SAFETY: read of the once-allocated node; no &mut to it is live.
+    let aggctx = unsafe { node.agg_node.as_ref() }.aggcontext();
+    let AggStateData { perhash, trans_init, trans_typ, .. } = node;
+    let ph = perhash.as_mut().expect("hashed Agg has perhash");
+    let ch = ph.compact.as_mut().expect("direct probe requires an armed table");
+    debug_assert!(ch.text_direct, "direct probe requires the direct arm");
+    let avgpack_mask = ch.avgpack_mask;
+    let CompactHash { table, key, direct_img: img, .. } = &mut *ch;
+    let CompactKeySpec::Multi(shape) = key else {
+        unreachable!("direct tables carry the mk1 shape")
+    };
+    debug_assert!(
+        shape.comps.len() == 1
+            && shape.comps[0].kind == MkCompKind::Intern
+            && !shape.nullable,
+        "direct tables are the 1-Intern non-nullable shape"
+    );
+    // The canonical image: the packed prefix with the Intern component's id
+    // bytes zeroed (for the 1-Intern shape that is `packed_bytes` zero
+    // bytes) + the raw text tail.
+    img.clear();
+    img.resize(shape.packed_bytes as usize, 0);
+    img.extend_from_slice(text);
+    let hash = crate::sink::sink_hash_bytes(img);
+    let pr = table.probe_bytes(img, hash);
+    if pr.is_new {
+        seed_new_groups(aggctx, trans_init, trans_typ, &[pr.states], &[0], avgpack_mask)?;
+    }
+    // SAFETY: probe never returns null state pointers.
+    Ok(unsafe { NonNull::new_unchecked(pr.states.cast::<AggPerGroup>()) })
 }
 
 /// Budget peek for the coded-group feed (q29coded lane): TRUE = the armed

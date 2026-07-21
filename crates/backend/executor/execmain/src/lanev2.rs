@@ -5275,6 +5275,17 @@ struct MkScratch {
     // None-fill was 38% of q40's cycles).
     epoch: Option<(bool, u64)>,
     code_ids: Vec<u32>,
+    /// DIRECT single-text arm (arena-strings inc-3): per-(identity, code)
+    /// GROUP STATE pointer cache — dict[code]'s live row in the DIRECT
+    /// compact table (null = unset). THE 830320fed LAW: any code→X cache is
+    /// (build, epoch, table-generation)-scoped — this one shares `epoch`'s
+    /// identity roll, and because for direct tables every FLUSH resets the
+    /// table itself (the table IS the vocabulary), the flush's
+    /// `intern_reset` signal is unconditionally true and the drain clears
+    /// `epoch`/this vec (runtime_agg's flush sites) — a cached pointer
+    /// would otherwise dangle into the reset RowStore. FAIL-CLOSED: cleared
+    /// on every identity mismatch and every flush.
+    code_states: Vec<*mut u8>,
     /// LIMIT-k-no-ORDER freeze filter scratch (band-2a q18): the worker's
     /// parsed snapshot of the frozen set + its per-epoch code -> member-mask
     /// cache. `None` until this worker observes FROZEN.
@@ -5441,6 +5452,10 @@ fn scan_mk1_text_admit<'mcx>(
             ::nodeagg::CompactArm::Armed => {
                 let shape =
                     ::nodeagg::agg_hash_compact_mk_shape(agg).expect("armed single-text table");
+                if ::nodeagg::agg_hash_compact_text_direct(agg) {
+                    // arena-strings inc-3 witness (e2e/rig greppable).
+                    lane_trace("runtime-agg: text-direct accept table armed");
+                }
                 return Some(ScanMk { shape, dict_att: dict });
             }
             v => v,
@@ -5682,7 +5697,8 @@ fn scan_mk_batch<'mcx>(
         ::nodeagg::agg_hash_compact_disarm(agg, estate)?;
         return Ok(false);
     }
-    let MkScratch { rows, packbuf, keys1, keys2, epoch, code_ids, fz, fz_mask } = mks;
+    let MkScratch { rows, packbuf, keys1, keys2, epoch, code_ids, code_states, fz, fz_mask } =
+        mks;
     scan_collect_survivors(ss, estate, n, rows)?;
     // FREEZE FILTER (band-2a q18, LIMIT-k-no-ORDER): once FROZEN, drop
     // survivors whose key is not in the frozen set BEFORE any interning or
@@ -5828,6 +5844,31 @@ fn scan_mk_batch<'mcx>(
             rows.truncate(w);
             fzc.note_dropped((n_before - w) as u64);
         }
+    }
+    // DIRECT single-text accept (arena-strings inc-3, design §4.2): the
+    // armed table keys on the canonical image itself — no interning, no
+    // packing, no packed-word probe. Resolve survivors to live group states
+    // (dict windows through the per-(identity, code) state cache, raw
+    // windows per row), then the packed arm's exact fold + election tail.
+    if ::nodeagg::agg_hash_compact_text_direct(agg) {
+        let mcx = estate.es_query_cxt;
+        scan_mk1_text_direct_batch(agg, ss, mk, rows, epoch, code_states, groups, mcx)?;
+        idxs.clear();
+        idxs.extend_from_slice(rows);
+        let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+            .expect("multi-key feed requires the armed SoA");
+        // SAFETY: as the packed arm's fold below — every probed row is
+        // non-fallback (the caller admits only all-lane batches) with valid
+        // lane values for every plan column (the key column is never in
+        // `plan.cols` — admission); the plan is unguarded; each pergroup is
+        // a live direct-table row installed by a probe since the last flush
+        // (every direct flush clears the code→state cache through the
+        // intern_reset channel before the next batch).
+        let spk_t0 = ::nodeagg::spankey::spankey_t0();
+        unsafe { agg_fold_staged(agg, soa, idxs, groups)? };
+        ::nodeagg::spankey::spankey_lap(&::nodeagg::spankey::SPANKEY_CTRS.fold_ns, spk_t0);
+        scan_mk_freeze_election(agg, freeze);
+        return Ok(true);
     }
     // Pack pre-pass, component-major over the survivors (each component
     // lane streams once), into the REUSED u128 accumulator.
@@ -6009,11 +6050,20 @@ fn scan_mk_batch<'mcx>(
     let spk_t0 = ::nodeagg::spankey::spankey_t0();
     unsafe { agg_fold_staged(agg, soa, idxs, groups)? };
     ::nodeagg::spankey::spankey_lap(&::nodeagg::spankey::SPANKEY_CTRS.fold_ns, spk_t0);
-    // FREEZE INSTALL ELECTION (band-2a q18): the first worker whose live
-    // table reaches the bound wins the CAS and publishes its first `bound`
-    // groups' canonical keys. Correct from ANY table state — nothing was
-    // dropped anywhere before FROZEN, so every present group is exact-so-far
-    // and set members keep counting everywhere after.
+    scan_mk_freeze_election(agg, freeze);
+    Ok(true)
+}
+
+/// FREEZE INSTALL ELECTION (band-2a q18), shared by the packed and DIRECT
+/// accept arms: the first worker whose live table reaches the bound wins the
+/// CAS and publishes its first `bound` groups' canonical keys. Correct from
+/// ANY table state — nothing was dropped anywhere before FROZEN, so every
+/// present group is exact-so-far and set members keep counting everywhere
+/// after.
+fn scan_mk_freeze_election(
+    agg: &::nodeagg::AggStateData<'_>,
+    freeze: Option<&::nodeagg::sink::SinkFreeze>,
+) {
     if let Some(fzc) = freeze {
         if !fzc.frozen()
             && ::nodeagg::agg_hash_compact_ngroups(agg)
@@ -6037,7 +6087,125 @@ fn scan_mk_batch<'mcx>(
             }
         }
     }
-    Ok(true)
+}
+
+/// [`scan_mk_batch`]'s DIRECT single-text accept arm (arena-strings inc-3):
+/// resolve each survivor row's text to its live group state by probing the
+/// DIRECT compact table on the canonical image
+/// ([`::nodeagg::agg_hash_compact_probe_text_direct`] — sink-hash probed, so
+/// the table's saved hash word IS the sink hash). DICT windows resolve once
+/// per (identity, code) through `code_states` — the Intern arm's `code_ids`
+/// cache discipline with the value type swapped from intern id to live
+/// group-state pointer (THE 830320fed LAW: (build, epoch, table-generation)
+/// scoped; for direct tables every flush resets the TABLE, so the flush's
+/// unconditional `intern_reset` signal clears this cache in the drain). RAW
+/// windows probe the staged text per row (no cache — the dictgroup Raw
+/// fallback's analog, correct and colder).
+#[allow(clippy::too_many_arguments)]
+fn scan_mk1_text_direct_batch<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &::nodeseqscan::SeqScanState<'mcx>,
+    mk: &ScanMk,
+    rows: &[u32],
+    epoch: &mut Option<(bool, u64)>,
+    code_states: &mut Vec<*mut u8>,
+    groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
+    mcx: ::mcx::Mcx<'mcx>,
+) -> PgResult<()> {
+    let shape = &mk.shape;
+    debug_assert!(
+        shape.comps.len() == 1
+            && shape.comps[0].kind == ::nodeagg::MkCompKind::Intern
+            && !shape.nullable,
+        "direct accept requires the mk1 single-Intern shape"
+    );
+    let att = shape.comps[0].att as usize;
+    groups.clear();
+    let spk_t0 = ::nodeagg::spankey::spankey_t0();
+    // Dict-code fast path only for the feed's registered dict component —
+    // the single-lane cache discipline of the Intern arm, verbatim.
+    let lane = if Some(att as u16) == mk.dict_att {
+        ::nodeseqscan::seq_scan_batch_soa(ss).and_then(|soa| soa.dict_lane(att))
+    } else {
+        None
+    };
+    match lane {
+        Some(lane) => {
+            // Cache identity roll (the Intern arm's per-RG/gepoch cache,
+            // retargeted to group-state pointers).
+            let ndict = lane.table.ndict as usize;
+            let global = lane.table.has_stitch();
+            let (ident, size) = if global {
+                ((true, lane.table.gepoch), lane.table.gndv as usize)
+            } else {
+                ((false, lane.table.epoch), ndict)
+            };
+            if *epoch != Some(ident) {
+                *epoch = Some(ident);
+                code_states.clear();
+                code_states.resize(size, core::ptr::null_mut());
+            }
+            debug_assert!(code_states.len() >= size);
+            for &i in rows.iter() {
+                let local = lane.code(i as usize);
+                debug_assert!((local as usize) < ndict, "filler contract: code < ndict");
+                let code = if global {
+                    lane.table.global_code(local) as usize
+                } else {
+                    local as usize
+                };
+                debug_assert!(code < size, "stitch contract: global code < gndv");
+                let pg = match code_states[code] {
+                    p if !p.is_null() => p,
+                    _ => {
+                        // First surviving row of (identity, code):
+                        // materialize dict[code] once, probe DIRECT.
+                        let d = lane.table.datum(local);
+                        // SAFETY: dict entries are live non-null text
+                        // varlenas for the staged window (dict lane
+                        // contract; kernel selection proved the column
+                        // type).
+                        let v = unsafe { ::types_fmgr::datum_varlena_packed(d, mcx) }?;
+                        let p = ::nodeagg::agg_hash_compact_probe_text_direct(agg, v.data())?
+                            .as_ptr()
+                            .cast::<u8>();
+                        code_states[code] = p;
+                        p
+                    }
+                };
+                // SAFETY: probes never return null state pointers; a cached
+                // pointer was installed by a probe since the last flush
+                // (the flush clears this cache — the intern_reset channel).
+                groups.push(unsafe {
+                    core::ptr::NonNull::new_unchecked(pg.cast::<::execexpr::AggPerGroup>())
+                });
+            }
+        }
+        None => {
+            // Raw-answered window (non-dict key chunk): probe the staged
+            // text per row.
+            let soa = ::nodeseqscan::seq_scan_batch_soa(ss)
+                .expect("multi-key feed requires the armed SoA");
+            let values = soa.col_values(att);
+            debug_assert!(
+                rows.iter().all(|&i| !soa.col_isnull(att)[i as usize]),
+                "cbstore no-NULLs proof violated in a single-text window"
+            );
+            for &i in rows.iter() {
+                let d = values[i as usize];
+                // SAFETY: staged non-null live text varlena (the columnar
+                // fill stages decoded Datums; kernel selection proved the
+                // column type).
+                let v = unsafe { ::types_fmgr::datum_varlena_packed(d, mcx) }?;
+                groups.push(::nodeagg::agg_hash_compact_probe_text_direct(agg, v.data())?);
+            }
+        }
+    }
+    {
+        use ::nodeagg::spankey::{spankey_lap, SPANKEY_CTRS as S};
+        spankey_lap(&S.pack_intern_ns, spk_t0);
+    }
+    Ok(())
 }
 
 /// Shared fold tail for the staged fold feeds (seqscan page batches and the

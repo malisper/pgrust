@@ -2651,8 +2651,12 @@ fn sink_drain_range<'mcx>(
                 // The flush RESET the intern table (wide-vocabulary
                 // bounding): every code→intern-id cache is now stale — a
                 // cached id would materialize the WRONG canonical bytes.
+                // DIRECT tables (arena-strings inc-3) raise this signal on
+                // EVERY flush — the table itself reset, so the code→state
+                // pointers dangle (the 830320fed law, fail-closed).
                 mks.epoch = None;
                 mks.code_ids.clear();
+                mks.code_states.clear();
                 if let Some(xk) = xk.as_deref_mut() {
                     xk.invalidate_mk_intern_cache();
                 }
@@ -2725,6 +2729,9 @@ fn sink_drain_range<'mcx>(
                         if intern_reset {
                             mks.epoch = None;
                             mks.code_ids.clear();
+                            // DIRECT tables: the table reset — dangling
+                            // code→state pointers (see the cap flush above).
+                            mks.code_states.clear();
                             if let Some(xk) = xk.as_deref_mut() {
                                 xk.invalidate_mk_intern_cache();
                             }
