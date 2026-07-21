@@ -398,6 +398,7 @@ pub(super) fn try_own_plain_agg_partwise<'mcx>(
         false,
         None,
         Some(ctx),
+        None,
     )?;
     router::tick(
         class,

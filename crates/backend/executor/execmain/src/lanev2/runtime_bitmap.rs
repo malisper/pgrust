@@ -326,6 +326,7 @@ fn try_parallel_build<'mcx>(
         None,
         false,
         None,
+        None,
         Some(Arc::clone(&ctx)),
     )?;
     if r.is_none() {
@@ -568,6 +569,7 @@ pub(super) fn try_own_plain_agg_over_bitmap_runtime<'mcx>(
         None,
         false,
         Some(ctx),
+        None,
         None,
     )?;
     if r.is_none() {
