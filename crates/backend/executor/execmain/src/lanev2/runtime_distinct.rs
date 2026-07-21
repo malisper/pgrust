@@ -1591,14 +1591,18 @@ pub(super) fn lowwidth_leader_parity_dop(
     arm: &str,
 ) -> (i32, bool) {
     match distinct_lowwidth_maxdop() {
-        // GL-LOWDIST-5 (the dop1 car, first lever): dop1 JOINS the
-        // low-width COMBINE band — a width-1 engagement's combine is a
-        // pure single-donor steal (live-form seal: no value flatten at
-        // freeze, no re-insert at merge — every set adopts) — but NOT the
-        // leader-parity bump (bumping 1->2 flips the locality-cap DOP1
-        // law; witnessed at the GL-LOWDIST-1 shakeout).
-        Some(_) if dop == 1 => (1, true),
-        Some(max) if dop >= 2 && dop <= max => {
+        // GL-LOWDIST-5 lever 2: dop1 joins the leader-parity bump — the
+        // hybrid at dop1 runs TWO participants (its GM worker's partial
+        // AND the leader's own partial on the shared claim), so the sink
+        // spending 1 was the same asymmetry GL-LOWDIST-1 measured at dop
+        // 2-8 (fourth appearance of the pattern). The original dop1
+        // exclusion protected a TEST expectation, not an invariant: at
+        // bumped width 2 the locality cap engaging is CORRECT (two Locals
+        // have a real duplicate-group tax) — the DOP1 law is re-derived at
+        // the cap gate and leg4L-dop1 (runtime-distinct-e2e) accordingly.
+        // Reached only from the two distinct sinks' admissions — no other
+        // arm's dop1 behavior moves.
+        Some(max) if dop >= 1 && dop <= max => {
             let bumped = (dop + 1).min(rt.nthreads() as i32).max(dop);
             if bumped != dop {
                 lane_trace(&format!("{arm}: low-width leader-parity dop {dop}->{bumped}"));
@@ -2134,6 +2138,12 @@ fn engage<'mcx>(
     };
     // Locality cap (distinct-sidecar-cap lane): resolved once per
     // engagement — DOP>1 with a live spill arm only (fn doc).
+    // GL-LOWDIST-5 lever-2 re-derivation of the DOP1 law: `dop` here is
+    // the RESOLVED participant count (post leader-parity bump), so a
+    // requested dop1 lowwidth engagement arrives as dop=2 and the cap
+    // rightly resolves — two Locals have a real duplicate-group tax. The
+    // dop>1 gate still protects the true single-Local case (lowwidth
+    // killed, or the pool clamped to 1).
     let locality_cap = if dop > 1 && spill_set.is_some() {
         distinct_locality_cap()
     } else {
