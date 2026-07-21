@@ -390,6 +390,12 @@ pub fn CleanupInvalidationState() -> PgResult<()> {
     let num_procs = h.numProcs.load(Relaxed) as usize;
     let pgprocnos = seg.pgprocnos();
     let Some(index) = (0..num_procs).rfind(|&i| pgprocnos[i].load(Relaxed) == my) else {
+        // Release before erroring: this cleanup runs on exit/park teardown
+        // paths whose callers may not unwind through ProcKill's
+        // LWLockReleaseAll (a retained-park release drains no exit
+        // callbacks) — an early return holding the sinval write lock
+        // silently wedges every later backend exit and sinval catchup.
+        LWLockRelease(write_lock)?;
         return Err(Box::new(PgError::new(
             PANIC,
             "could not find entry in sinval array",

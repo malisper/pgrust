@@ -1152,6 +1152,69 @@ fn standing_gang_detach_count_join_no_lost_wake() {
 }
 
 // ===========================================================================
+// WPOOL RE-POOL FENCE — night/gang-churn-stability: a parked standby's
+// retained identity must never RE-ENTER the pool across a flush/crash fence.
+// Production shape (launch_backend::wpool): flush()/flush_for_crash() bump
+// their epoch BEFORE draining under the pool lock; every pusher (the
+// standby's repark, dispatch_inner's assign-failure push-back) re-checks the
+// epoch UNDER that same lock and retires the standby instead when it moved.
+// The pre-fix hole: an unguarded push landing after the drain parks a
+// PRE-FENCE retained PGPROC/sinval identity across the crash reinit's
+// shared-memory reset — the post-recovery warm claim then reattaches a
+// zeroed PGPROC ("ReattachRetainedProc: retained PGPROC was released") and
+// aborts, re-crashing the server in a loop.
+// Mirror-dialect: launch_backend is not loom-buildable (PGPROC/latch
+// globals) — the model drives loom Mutex + atomics directly.
+// ===========================================================================
+
+/// Pusher (repark / dispatch push-back) races the fence (bump-then-drain).
+/// Invariant: after both complete, every pooled entry carries the CURRENT
+/// epoch — no pre-fence identity survives the drain into the pool.
+#[test]
+fn wpool_repool_fence_no_stale_entry() {
+    loom::model(|| {
+        let epoch = Arc::new(AtomicUsize::new(0));
+        let pool: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let pusher = {
+            let (epoch, pool) = (Arc::clone(&epoch), Arc::clone(&pool));
+            thread::spawn(move || {
+                // The identity's park epoch (pre_flush/pop_flush snapshot).
+                let pre = epoch.load(Ordering::SeqCst);
+                // Fence re-check UNDER the pool lock (the fix): an
+                // unchanged epoch read here guarantees a concurrent drain
+                // acquires the lock after us and still sees this entry.
+                let mut g = pool.lock().unwrap();
+                if epoch.load(Ordering::SeqCst) == pre {
+                    g.push(pre);
+                }
+                // else: retire (closed channel) — nothing re-pooled.
+            })
+        };
+
+        let flusher = {
+            let (epoch, pool) = (Arc::clone(&epoch), Arc::clone(&pool));
+            thread::spawn(move || {
+                // flush_for_crash: bump FIRST, then drain under the lock.
+                epoch.fetch_add(1, Ordering::SeqCst);
+                pool.lock().unwrap().clear();
+            })
+        };
+
+        pusher.join().unwrap();
+        flusher.join().unwrap();
+
+        let now = epoch.load(Ordering::SeqCst);
+        for &e in pool.lock().unwrap().iter() {
+            assert_eq!(
+                e, now,
+                "pre-fence identity re-pooled across the drain (stale retained PGPROC)"
+            );
+        }
+    });
+}
+
+// ===========================================================================
 // PERMIT-S4 — the step-4 PROTOCOL-conversion models (notes/dst-permit-s4.md).
 // Three converted sites, three models. Dialect per model, disclosed:
 //

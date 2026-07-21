@@ -15,6 +15,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(pgrust_sim)'] }
 
 [dependencies]
 guc = { path = "../../utils/misc/guc" }
+pmsignal = { path = "../../storage/ipc/pmsignal" }
 types_core = { path = "../../../_support/types/types_core" }
 types_startup = { path = "../../../_support/types/types_startup" }
 init_small = { path = "../../utils/init/init_small" }

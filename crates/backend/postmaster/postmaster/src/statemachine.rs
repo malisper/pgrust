@@ -185,6 +185,12 @@ pub fn process_pm_shutdown_request() -> PgResult<()> {
             miscinit::AddToDataDirLockFile(LOCK_FILE_LINE_PM_STATUS, PM_STATUS_STOPPING)?;
 
             pmsignal::SetQuitSignalReason(pmsignal::QuitSignalReason::PMQUIT_FOR_STOP);
+            // Immediate shutdown skips PM_STOP_BACKENDS: fence the
+            // registry-invisible standing gang here (see the
+            // PM_STOP_BACKENDS arm in PostmasterStateMachine).
+            if postmaster_seams::rtgang_retire::is_installed() {
+                postmaster_seams::rtgang_retire::call();
+            }
             TerminateChildren(procsignal::signums::SIGQUIT);
             UpdatePMState(PMState::PM_WAIT_BACKENDS);
 
@@ -240,11 +246,22 @@ pub fn PostmasterStateMachine() -> PgResult<()> {
 
         if with_pm(|pm| pm.pm_state == PMState::PM_STOP_BACKENDS) {
             bgworker::ForgetUnstartedBackgroundWorkers();
+            // Registry-invisible standing runtime executors: fence them
+            // alongside the SIGTERM broadcast (they carry no pmchild slot,
+            // so the mask below can never reach them). Parked ones exit
+            // clean; exits poke PMSIGNAL_ADVANCE_STATE_MACHINE so the
+            // quiescence gate below re-runs as they drain.
+            if postmaster_seams::rtgang_retire::is_installed() {
+                postmaster_seams::rtgang_retire::call();
+            }
             SignalChildren(procsignal::signums::SIGTERM, target_mask);
             UpdatePMState(PMState::PM_WAIT_BACKENDS);
         }
 
-        if pmchild_seams::count_children::call(target_mask) == 0 {
+        if pmchild_seams::count_children::call(target_mask) == 0
+            && (!postmaster_seams::rtgang_live::is_installed()
+                || postmaster_seams::rtgang_live::call() == 0)
+        {
             if with_pm(|pm| pm.shutdown >= ImmediateShutdown || pm.fatal_error) {
                 UpdatePMState(PMState::PM_WAIT_DEAD_END);
                 ConfigurePostmasterWaitSet(false)?;
