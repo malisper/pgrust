@@ -317,8 +317,8 @@ fn compact_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("PGRUST_LANE_V2_COMPACT").map_or(true, |v| v != "0"))
 }
 
-/// arena-strings inc-3 arm switch (`PGRUST_LANE_V2_TEXT_DIRECT`, default
-/// OFF; ON iff exactly `1`/`on` — every other spelling fails safe to OFF):
+/// arena-strings inc-3 arm switch (`PGRUST_LANE_V2_TEXT_DIRECT`, **default
+/// ON** since letter GL-ARENASTR-1; `=0`/`off` is the exact-spelling kill):
 /// DIRECT single-text worker accept tables. The M2 sink's SINGLE-TEXT class
 /// (mk1: one non-nullable Intern component — the q34/q35 `GROUP BY url`
 /// shape) keys its LOCAL table directly on the CANONICAL IMAGE bytes
@@ -327,11 +327,22 @@ fn compact_enabled() -> bool {
 /// (text → intern id → packed image → Int probe → store-once canon rebuild).
 /// SINK worker builds only (`ph.sink_cap` installed before the arm); the
 /// serial lane and the coded-group (q29) mk1 consumers keep the intern arm
-/// verbatim even with the env set. OFF = byte-identical incumbent paths.
+/// verbatim regardless of the env. Kill = byte-identical incumbent paths.
+///
+/// FLIP PROVENANCE (letter GL-ARENASTR-1, scratchpad/night/, fleet cb-mt16
+/// forced-plan channel, CB conf v2.1, dist builds, banks cbstore9-v8[x]-
+/// sorted-v2): TDonly @ 34d377de5, c8gd — q34 0.825 / q35 0.808 / q19
+/// 1.000 (FLAT) @10M (damped geomean 0.874); q34 0.933 / q35 0.928 / q19
+/// 0.971 @100M (0.944). Parity: outputs byte-identical across arms, both
+/// scales, both storage arms, every DOP mode (md5 matrix; cb-explain
+/// sorted-sha single). q19 guard: zero direct-arm traces (expr-key class
+/// out of scope), flush_bytes A0-class. DOP matrix @10M: wins every mode
+/// ~15-20%. The sibling inc-1 STEAL knob stays OFF (its q19 flush-bytes
+/// inflation failed the guard — re-letter only after store compaction).
 pub fn text_direct_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        matches!(std::env::var("PGRUST_LANE_V2_TEXT_DIRECT").as_deref(), Ok("1") | Ok("on"))
+        !matches!(std::env::var("PGRUST_LANE_V2_TEXT_DIRECT").as_deref(), Ok("0") | Ok("off"))
     })
 }
 
