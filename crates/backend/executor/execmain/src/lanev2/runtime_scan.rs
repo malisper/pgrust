@@ -167,6 +167,12 @@ pub(super) struct RuntimeScanShared {
     /// on the bitmap arm's engagements (runtime_bitmap.rs); None on every
     /// scan-arm path (dead-when-off). Set at construction, read per claim.
     bitmap: Option<Arc<super::runtime_bitmap::BitmapMorselCtx>>,
+    /// partwise-morsels: the partition directory (child offset prefix sums
+    /// into the concatenated claim space) — Some ONLY on the partitionwise
+    /// arm's engagements (runtime_partwise.rs, Agg→Append→SeqScan×N); None
+    /// on every other path (dead-when-off). Set at construction, read per
+    /// claim segment.
+    partwise: Option<Arc<super::runtime_partwise::PartwiseCtx>>,
 }
 
 impl RuntimeScanShared {
@@ -420,6 +426,95 @@ impl RuntimeScanShared {
                             estate,
                             range.start..range.end,
                         )?;
+                        let slot = worker - self.pins_base;
+                        let mut g =
+                            self.partials[slot].lock().unwrap_or_else(|p| p.into_inner());
+                        return agg_runtime_export_partial_into(
+                            &aps.agg,
+                            g.get_or_insert_with(Default::default),
+                        );
+                    }
+                    // partwise-morsels arm (runtime_partwise.rs): the claim
+                    // is segmented at the engagement map's hard boundaries —
+                    // child edges ALWAYS, pgrcolumnar row-group edges within
+                    // a child — so every segment lies inside exactly one
+                    // child. Resolve the owning child from the partition
+                    // directory, position ITS scan with the CHILD-LOCAL
+                    // range, and run the unchanged fold drain; the Agg
+                    // transition state accumulates across children (order-
+                    // insensitive-exact partials by admission). Same
+                    // cumulative partial export as the scan arm (EA never
+                    // admits this arm: no instr block).
+                    if let crate::procnode::PlanStateNode::Append(apn) = &mut aps.outer {
+                        let Some(ctx) = self.partwise.as_ref() else {
+                            return Err(Box::new(PgError::new(
+                                ERROR,
+                                "runtime partwise morsel without a partition directory",
+                            )));
+                        };
+                        let Some(map) = self.map.get() else {
+                            return Err(Box::new(PgError::new(
+                                ERROR,
+                                "runtime partwise morsel without engagement geometry",
+                            )));
+                        };
+                        let apn = &mut **apn;
+                        let interrupted = || {
+                            self.failed.load(Ordering::SeqCst)
+                                || self
+                                    .rg
+                                    .get()
+                                    .and_then(|w| w.upgrade())
+                                    .is_some_and(|rg| rg.is_aborted())
+                        };
+                        let mut tally = EaRowTally::default();
+                        let mut segs = map.segments(range.start..range.end);
+                        while let Some(seg) = segs.next() {
+                            let child = ctx.child_of(seg.start);
+                            let base = ctx.child_start(child);
+                            debug_assert!(
+                                seg.end <= ctx.child_start(child + 1),
+                                "claim segment crosses a partition edge"
+                            );
+                            let Some(sub) = apn.substates.get_mut(child) else {
+                                return Err(Box::new(PgError::new(
+                                    ERROR,
+                                    "runtime partwise morsel child outside the plan",
+                                )));
+                            };
+                            let crate::procnode::PlanStateNode::SeqScan(ss) = sub else {
+                                return Err(Box::new(PgError::new(
+                                    ERROR,
+                                    "runtime partwise morsel child is not a SeqScan",
+                                )));
+                            };
+                            let local = (seg.start - base)..(seg.end - base);
+                            // Claim settle discipline mirrors the scan arm's
+                            // SeqScanSource branch (end_claim owner under
+                            // the heapfeed knob; error path settles too).
+                            let mut src = SeqScanSource::new(&mut *ss);
+                            let drove = drive_claim_segments(
+                                &mut src,
+                                &mut aps.agg,
+                                estate,
+                                mode,
+                                false,
+                                &mut tally,
+                                None,
+                                local,
+                                &interrupted,
+                            );
+                            let settled = if heapfeed_v2_enabled() {
+                                src.end_claim(estate)
+                            } else {
+                                Ok(())
+                            };
+                            drove?;
+                            settled?;
+                            if segs.more() && interrupted() {
+                                break;
+                            }
+                        }
                         let slot = worker - self.pins_base;
                         let mut g =
                             self.partials[slot].lock().unwrap_or_else(|p| p.into_inner());
@@ -1420,6 +1515,54 @@ fn build_worker_exec_inner(payload: &RuntimeScanShared) -> PgResult<()> {
                         super::runtime_bitmap::worker_shape_check(&aps.agg)?;
                         ::nodeagg::agg_plain_build_begin(&mut aps.agg, estate)?;
                         return Ok(DriveMode::BitmapPerRow);
+                    }
+                    // partwise-morsels arm (runtime_partwise.rs): Append
+                    // outer — the PER-ROW drive on every child (the serial
+                    // row path: `seq_scan_batch_emit` fetch + qual +
+                    // PROJECTION per row — Append children carry
+                    // CP_EXACT_TLIST projections structurally, and emit
+                    // returns the PROJECTED slot, so the Agg transition
+                    // program sees exactly the serial OUTER positions).
+                    // RowFeed staging per child (the PerRowFold/PerRowPoly
+                    // arm verbatim), one build_begin.
+                    if let crate::procnode::PlanStateNode::Append(apn) = &mut aps.outer {
+                        let Some(ctx) = payload.partwise.as_ref() else {
+                            return Err(Box::new(PgError::new(
+                                ERROR,
+                                "runtime partwise worker without a partition directory",
+                            )));
+                        };
+                        if !agg_runtime_partial_admissible(&aps.agg) {
+                            return Err(Box::new(PgError::new(
+                                ERROR,
+                                "runtime partwise worker fold plan diverged from the leader's",
+                            )));
+                        }
+                        let apn = &mut **apn;
+                        if apn.substates.len() != ctx.nchildren() {
+                            return Err(Box::new(PgError::new(
+                                ERROR,
+                                "runtime partwise worker child set diverged from the leader's",
+                            )));
+                        }
+                        for sub in apn.substates.iter_mut() {
+                            let crate::procnode::PlanStateNode::SeqScan(ss) = sub else {
+                                return Err(Box::new(PgError::new(
+                                    ERROR,
+                                    "runtime partwise worker child is not a SeqScan",
+                                )));
+                            };
+                            super::arm_scan_staging(
+                                ss,
+                                estate,
+                                super::ScanFeedShape::RowFeed {
+                                    ctx: "runtime partwise perrow feed",
+                                    stitch: true,
+                                },
+                            )?;
+                        }
+                        ::nodeagg::agg_plain_build_begin(&mut aps.agg, estate)?;
+                        return Ok(DriveMode::PerRowFold);
                     }
                     let crate::procnode::PlanStateNode::SeqScan(ss) = &mut aps.outer else {
                         return Err(Box::new(PgError::new(
@@ -2490,6 +2633,7 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
         ea_scan_node,
         ea_timer,
         None,
+        None,
     )?;
     router::tick(
         class,
@@ -2536,6 +2680,7 @@ pub(super) fn engage<'mcx>(
     ea_scan_node: Option<i32>,
     ea_timer: bool,
     bitmap_ctx: Option<Arc<super::runtime_bitmap::BitmapMorselCtx>>,
+    partwise_ctx: Option<Arc<super::runtime_partwise::PartwiseCtx>>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     ensure_hooks_registered();
     crate::execparallel::register_parallel_query_main();
@@ -2574,6 +2719,7 @@ pub(super) fn engage<'mcx>(
         ea_timer,
         ea_epoch: std::time::Instant::now(),
         bitmap: bitmap_ctx,
+        partwise: partwise_ctx,
     });
     // Set BEFORE any claim can run (submit happens inside engage_ceremony):
     // morsel_body expects the edges whenever the source coalesces (pgrcolumnar).

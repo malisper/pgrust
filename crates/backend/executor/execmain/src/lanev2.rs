@@ -48,6 +48,7 @@ mod runtime_bitmap;
 mod runtime_distinct;
 mod runtime_hashjoin;
 mod runtime_instr;
+mod runtime_partwise;
 mod runtime_plaindistinct;
 mod runtime_scan;
 mod runtime_sort;
@@ -2029,6 +2030,31 @@ pub enum AggLaneChoice {
 }
 
 ::mcx::forget_safe_nodrop!(AggLaneChoice);
+
+/// PARTWISE-MORSELS (night/partitionwise-morsels, knob-gated default OFF):
+/// try to let the RUNTIME own a plain `Agg` over an `Append` of partition
+/// SeqScans — partition-as-morsel on the scan arm's engagement
+/// (runtime_partwise.rs module doc). `Some(result)` = the runtime drove the
+/// node; `None` = refused (the caller falls through to the unchanged serial
+/// Append per-tuple drive, byte-identically). Knob-OFF this is one memoized
+/// bool read.
+#[inline]
+pub fn try_own_agg_over_append<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    apn: &mut crate::procnode::AppendNode<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    if !runtime_partwise::partwise_enabled() {
+        return Ok(None);
+    }
+    // Plain (ungrouped) fold shapes only — the same admissibility face the
+    // seq-scan plain walk fronts with; grouped/sorted/distinct shapes keep
+    // today's path untouched.
+    if !::nodeagg::agg_plain_fold_admissible(agg) {
+        return Ok(None);
+    }
+    runtime_partwise::try_own_plain_agg_partwise(agg, apn, estate)
+}
 
 /// Try to let the lane own an `Agg` over a `SeqScan` child — the fused
 /// scan→filter→hash-agg push pipeline. `Some(result)` = the lane drove this

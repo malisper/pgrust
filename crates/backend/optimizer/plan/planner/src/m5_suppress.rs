@@ -433,7 +433,7 @@ fn hjrider_curve_enabled() -> bool {
 /// M5-5 floors kill switch: PGRUST_M5_SIZE_FLOORS=0 disables every guard.
 /// The rowflip measure vehicle runs floors-off so engagement economics
 /// stay measurable at any (size, dop); production default ON.
-fn size_floors_enabled() -> bool {
+pub(crate) fn size_floors_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("PGRUST_M5_SIZE_FLOORS").map_or(true, |v| v.trim() != "0"))
 }
@@ -1059,7 +1059,7 @@ const F_MIN_DATE: u32 = 2138;
 /// Plain-fold (scan-arm) aggregate whitelist: the order-insensitive-exact
 /// partial kinds of §1.1 (CountStar/Any, Sum ring, AvgAccum/Int128Avg,
 /// strict byval Min/Max) keyed by builtin OID over int-family args.
-const PLAIN_FOLD_AGGS: &[u32] = &[
+pub(crate) const PLAIN_FOLD_AGGS: &[u32] = &[
     F_COUNT_STAR,
     F_COUNT_ANY,
     F_SUM_INT8,
@@ -1319,7 +1319,7 @@ fn groupby_high_floor() -> f64 {
     })
 }
 
-fn trace_armed() -> bool {
+pub(crate) fn trace_armed() -> bool {
     static ARMED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ARMED.get_or_init(|| {
         matches!(std::env::var("PGRUST_M5_SUPPRESS_TRACE").as_deref(), Ok("1"))
@@ -1464,6 +1464,21 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     let Some(rte) = parse.rtable.nth(rti - 1).as_range_tbl_entry() else {
         return Ok(false);
     };
+    // PARTWISE-MORSELS (night/partitionwise-morsels; knob-gated DEFAULT
+    // OFF, the SE-TEXTDISTINCT non-matrix precedent — the tsv's
+    // parallel-append-partitionwise row stays route_to=legacy/probe_key="-"
+    // and the drift guards are untouched): partitioned-PARENT single-rel
+    // plain-fold shapes. The whole classifier lives in m5_partwise.rs (its
+    // own module per the night-run coordination note); this hook is the
+    // one touch in this file. Knob-OFF takes the identical refusal below.
+    if rte.rtekind == RTEKind::RTE_RELATION
+        && rte.relkind == types_rel::RELKIND_PARTITIONED_TABLE
+        && rte.inh
+        && rte.tablesample.is_none()
+        && crate::m5_partwise::partwise_probe_enabled()
+    {
+        return crate::m5_partwise::classify_partitionwise(run, parse, rti);
+    }
     if rte.rtekind != RTEKind::RTE_RELATION
         || rte.relkind != types_rel::RELKIND_RELATION
         || rte.inh
@@ -4460,7 +4475,7 @@ fn is_covered_key_var(expr: Node<'_>, rti: usize, type_ok: impl Fn(u32) -> bool)
 /// A structurally plain, whitelisted Aggref: builtin OID in `whitelist`,
 /// no ORDER BY/DISTINCT/FILTER/variadic/ordered-set decoration, args
 /// either empty (count(*)) or a single int-family Var on the scanned rel.
-fn is_whitelisted_agg(expr: Node<'_>, rti: usize, whitelist: &[u32]) -> bool {
+pub(crate) fn is_whitelisted_agg(expr: Node<'_>, rti: usize, whitelist: &[u32]) -> bool {
     let Some(agg) = expr.as_aggref() else { return false };
     aggref_plain(agg, rti) && whitelist.contains(&agg.aggfnoid)
 }

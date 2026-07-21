@@ -356,6 +356,7 @@ pub(super) fn try_own_plain_agg_over_bitmap_runtime<'mcx>(
         None,
         false,
         Some(ctx),
+        None,
     )?;
     if r.is_none() {
         // Engage fallback with NOTHING consumed (all-refused / zero
