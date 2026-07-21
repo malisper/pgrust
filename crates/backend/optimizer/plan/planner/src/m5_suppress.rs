@@ -378,8 +378,30 @@ fn class_guard(class: CoverClass) -> FloorGuard {
         CoverClass::CbGroupedAggTextKey => {
             FloorGuard { min_dop: 12, low_dop_max_rows: 3_000_000.0, ..NO_GUARD }
         }
-        // Wins everywhere engaged (0.34–0.85).
-        CoverClass::CbGroupedAggTopN => NO_GUARD,
+        // Wins everywhere engaged (0.34–0.85) — but only where the arm can
+        // OWN the suppressed plan. Qualed-selective shapes whose post-qual
+        // estimate is tiny elect the sorted serial grouping plan
+        // (Sort→GroupAggregate: near ngroups≈rows the sort election wins
+        // the serial tournament), which the arm's HashAgg-over-scan shape
+        // gate refuses — the suppress-then-refuse class, costing flavor
+        // (the agg-arm analog of the GL-HJMB-3 join finding). Witnessed
+        // (soak adjudication round 1, 2026-07-21 @ 307329686bda+rig, jobs
+        // pgrust-fast-tests-f52d0d5a33-{1784664239-7dc7,1784664244-2e55} +
+        // -2c2fa48f66-1784664675-7c72): ~250-row post-qual cells suppressed
+        // to SERIAL at 3.3–5.3x the forgone single-worker frame plan;
+        // ≥598k post-qual cells engaged and won 4–6x over both serial and
+        // the forced frame. min_rows sits just below the smallest witnessed
+        // engaged win (598k, estimate-wobble headroom); the fail-closed
+        // region keeps Gather. Cost asymmetry is one-directional: where the
+        // serial election IS arm-ownable, the arm still engages at exec
+        // time with Gather standing (witnessed: identical wall both ways),
+        // so the floor only stops deleting viable parallel plans on
+        // tiny-selective shapes. Knob paths carrying this guard verbatim
+        // (strminmax-topn / decoroot / constkey) inherit the floor; their
+        // letters own re-measuring their own tiny cells.
+        CoverClass::CbGroupedAggTopN => {
+            FloorGuard { min_rows: 500_000.0, ..NO_GUARD }
+        }
         // GL-LOWDIST-1 re-derivation (2026-07-21, letter scratchpad/night/
         // GL-LOWDIST-1-letter.md; witnessed fix A/B @ a3d09b8ff, dop
         // {2,4,8} x 1M-10M): with the low-width combine + leader-parity
@@ -447,9 +469,34 @@ fn class_guard(class: CoverClass) -> FloorGuard {
         // forgone PHJ at 500k across dop {4,8,16}, both takes). 524,288 is
         // that floor expressed in rows; the seat-lift path honors the same
         // bound (its witnessed win band starts at 1M).
-        CoverClass::CbHashJoinPlainAgg => {
-            FloorGuard { min_rows: HJ_ARM_MIN_ROWS, max_rows: 2_000_000.0, ..NO_GUARD }
-        }
+        //
+        // BAND COLLAPSE (S1, soak adjudication round 1, 2026-07-21): the
+        // clean-2M ceiling's forgone win at the (2.5M, dop16) cell was
+        // re-confirmed IN VIVO — suppression 2.06x wall over the kept
+        // Gather at the census shape (jobs pgrust-fast-tests-f52d0d5a33-
+        // {1784664239-7dc7,1784664244-2e55} + -2c2fa48f66-1784664675-7c72
+        // @ 307329686bda+rig; v2 grid 0.923; flip A/B -0325 47→45ms) — so
+        // the rectangle now mirrors the witnessed curve verdicts instead
+        // of sacrificing it: low dop keeps the 2M ceiling (dop4 losses
+        // 1.39–1.50 witnessed above it), dop≥12 extends to the fitted
+        // curve's own dop16 crossover N*≈4.18M floored to 4M (witnessed
+        // win at 2.5M/dop16; the witnessed 1.024 parity-loss at 5M/dop16
+        // stays OUT, so no kill-posture cell regresses). min_dop=12 per
+        // the house auto-DOP convention (12–15 interpolated). DEFAULT
+        // behavior is unchanged — this class decides by curve since t36
+        // flips2; the collapse keeps the KILL/floor band from
+        // resurrecting the forgone-win rot. Ceiling-lift prerequisite (the
+        // GL-HJMB-1/-2 demote-unsafe boundary guard) is landed and sits
+        // upstream; the guarded 8M-probe/4M-build control rung measured
+        // GREEN above this ceiling. Reuse rider: the aggjoinnum knob path
+        // borrows this guard verbatim (its letter owns re-measuring).
+        CoverClass::CbHashJoinPlainAgg => FloorGuard {
+            min_rows: HJ_ARM_MIN_ROWS,
+            max_rows: 4_000_000.0,
+            min_dop: 12,
+            low_dop_max_rows: 2_000_000.0,
+            ..NO_GUARD
+        },
         // GL-COST-2 UNWIRE (this letter): the m5p1/SE-AGGJOIN PROVISIONAL
         // reuse of the hashjoin-nbatch1 floor is REFUTED by the riders' own
         // witnessed grids (L1/L2 @ d10db8ef5e: rt/legacy 3.04-6.03x
@@ -6791,9 +6838,30 @@ mod tests {
             assert_eq!(g.max_rows, 0.0, "{class:?} must be guarded off at every size");
             assert!(cover_class_curve(class).is_none(), "{class:?} must be curveless");
         }
-        // The non-rider hashjoin class keeps its curve and rectangle.
-        assert_eq!(class_guard(CoverClass::CbHashJoinPlainAgg).max_rows, 2_000_000.0);
+        // The non-rider hashjoin class keeps its curve and rectangle
+        // (post-S1 band collapse: dop-conditioned, ceiling at the fitted
+        // dop16 crossover — see the class_guard provenance comment).
+        let g = class_guard(CoverClass::CbHashJoinPlainAgg);
+        assert_eq!(g.min_rows, HJ_ARM_MIN_ROWS);
+        assert_eq!(g.max_rows, 4_000_000.0);
+        assert_eq!(g.min_dop, 12);
+        assert_eq!(g.low_dop_max_rows, 2_000_000.0);
         assert!(cover_class_curve(CoverClass::CbHashJoinPlainAgg).is_some());
+    }
+
+    /// F1 (soak adjudication round 1): the grouped top-n class carries a
+    /// post-qual min_rows floor — tiny-selective shapes elect the sorted
+    /// serial grouping plan the arm refuses (suppress-then-refuse), so
+    /// suppression below the witnessed engaged-win region must keep the
+    /// frame's parallel plan. The floor sits below the smallest witnessed
+    /// engaged win (598k post-qual) and above the witnessed 3.3-5.3x
+    /// serial-landing losses (~250-row post-qual cells).
+    #[test]
+    fn grouped_topn_tiny_selective_floor() {
+        let g = class_guard(CoverClass::CbGroupedAggTopN);
+        assert_eq!(g.min_rows, 500_000.0);
+        assert_eq!(g.max_rows, f64::INFINITY);
+        assert_eq!(g.min_dop, 0, "the class's win band is not dop-shaped");
     }
 
     /// Step-2 census plumbing: every direction lands in its own cell, and

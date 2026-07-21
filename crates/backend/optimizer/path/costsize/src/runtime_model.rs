@@ -313,12 +313,22 @@ mod tests {
             RuntimeClass::CbPlainAggFold => dop >= 12 || rows <= 1_500_000.0,
             RuntimeClass::CbGroupedAggIntKeys => true,
             RuntimeClass::CbGroupedAggTextKey => dop >= 12 || rows <= 3_000_000.0,
-            RuntimeClass::CbGroupedAggTopN => true,
+            // F1 (soak adjudication round 1): post-qual min_rows floor —
+            // tiny-selective shapes land on the sorted serial election the
+            // arm refuses (suppress-then-refuse).
+            RuntimeClass::CbGroupedAggTopN => rows >= 500_000.0,
             RuntimeClass::CbDistinctIntKeys => dop >= 12,
             // GL-SORTECON-3 re-flip (min_dop 4; the max_rows=0 hack retired
             // by the COLSTAGE+GCUT sort-arm rework, not by this model).
             RuntimeClass::CbTopnBoundedIntKeys => dop >= 4,
-            RuntimeClass::CbHashJoinPlainAgg => rows <= 2_000_000.0,
+            // S1 band collapse (soak adjudication round 1): the arm-floor
+            // min, the low-dop 2M ceiling, and the dop>=12 extension to the
+            // fitted dop16 crossover (~4.18M) floored to 4M.
+            RuntimeClass::CbHashJoinPlainAgg => {
+                rows >= 524_288.0
+                    && rows <= 4_000_000.0
+                    && (dop >= 12 || rows <= 2_000_000.0)
+            }
             RuntimeClass::HeapPlainCountStar => true, // pages mirror aside
             RuntimeClass::HeapCmpFoldPrefix => rows >= 1_000_000.0 && dop >= 12,
         }
@@ -370,14 +380,16 @@ mod tests {
     }
 
     /// The curve-vs-floor disagreement set at WITNESSED cells is exactly
-    /// the five cells where the v2 record contradicts the shipped
-    /// rectangles — four v1-carved floor-rot cells that suppress at a
-    /// measured loss (scan-fold 1M@dop4 1.258; text 1M/2.5M@dop4
-    /// 1.130/1.339; hashjoin 1M@dop4 1.319) and the one forgone win the
-    /// rectangle's clean-2M bound sacrificed (hashjoin 2.5M@dop16 0.923,
-    /// now witnessed). These are the flip-gate candidates (GL-COST-<class>
-    /// letters). Any new disagreement is a red test — it must arrive with
-    /// a witnessed cell, not by drift. (Parity-band cells exempt.)
+    /// the four v1-carved floor-rot cells that suppress at a measured loss
+    /// (scan-fold 1M@dop4 1.258; text 1M/2.5M@dop4 1.130/1.339; hashjoin
+    /// 1M@dop4 1.319). The fifth disagreement of the original pin — the
+    /// forgone win the clean-2M hashjoin bound sacrificed (2.5M@dop16
+    /// 0.923) — was RETIRED by the S1 band collapse (soak adjudication
+    /// round 1, 2026-07-21: re-confirmed in vivo 2.06x, whereupon the
+    /// rectangle was re-derived to mirror the witnessed curve verdicts).
+    /// These are the flip-gate candidates (GL-COST-<class> letters). Any
+    /// new disagreement is a red test — it must arrive with a witnessed
+    /// cell, not by drift. (Parity-band cells exempt.)
     #[test]
     fn curve_vs_floor_disagreements_are_exactly_the_witnessed_rot_cells() {
         let mut disagreements = Vec::new();
@@ -398,7 +410,6 @@ mod tests {
                 (RuntimeClass::CbGroupedAggTextKey, 1_000_000, 4),
                 (RuntimeClass::CbGroupedAggTextKey, 2_500_000, 4),
                 (RuntimeClass::CbHashJoinPlainAgg, 1_000_000, 4),
-                (RuntimeClass::CbHashJoinPlainAgg, 2_500_000, 16),
             ],
             "unexpected curve-vs-floor disagreement set"
         );
