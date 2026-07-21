@@ -663,9 +663,11 @@ fn build_worker_exec(payload: &Arc<RuntimePlainDistinctShared>) -> PgResult<()> 
                             payload.spec.att,
                         );
                     let key_bytes = key_direct && payload.spec.is_bytes();
-                    if key_bytes {
+                    if key_bytes && ::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
                         // Arm the dict-coded key lane when the bank serves it
-                        // (the serial drive's own arming call).
+                        // (the serial drive's own arming call; columnar-only
+                        // — heap text rides the collected emit_key batch,
+                        // GL-LOWDIST-4 B1).
                         let _ = ::nodeseqscan::seq_scan_key_dict_arm(ss);
                     }
                     Ok((estate.exec_assign_expr_context(), key_direct, key_bytes))
@@ -795,7 +797,13 @@ pub(super) fn try_own_plain_distinct_runtime<'mcx>(
         refused(estate, true, node_id, "ea not threaded (plain-distinct v1)");
         return Ok(None);
     }
-    if !seq_scan_fusible(ss, estate)? || !::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
+    // GL-LOWDIST-4 B1: heap seq scans admit under the knob (the columnar
+    // dict/int lanes fall back to the collected emit_key batch on heap).
+    if !seq_scan_fusible(ss, estate)?
+        || !(::nodeseqscan::seq_scan_is_pgrcolumnar(ss)
+            || (::nodeseqscan::seq_scan_is_heap(ss)
+                && super::runtime_distinct::distinct_heap_enabled()))
+    {
         refused(estate, ea, node_id, "scan not fusible/cbstore");
         return Ok(None);
     }
@@ -857,7 +865,7 @@ pub(super) fn try_own_plain_distinct_runtime<'mcx>(
     }
 
     // --- Geometry: enough granules to be worth a gang.
-    let Some((total_granules, starts)) = ::nodeseqscan::seq_scan_cb_granule_geometry(ss, estate)?
+    let Some((total_granules, source)) = super::runtime_distinct::distinct_task_source(ss, estate)?
     else {
         return Ok(None);
     };
@@ -876,7 +884,7 @@ pub(super) fn try_own_plain_distinct_runtime<'mcx>(
     }
 
     // --- Engage.
-    engage(agg, estate, rt, dop, lowwidth, total_granules, starts, spec, scan_node, force_set, false)
+    engage(agg, estate, rt, dop, lowwidth, total_granules, source, spec, scan_node, force_set, false)
 }
 
 /// SE-T2AGG CAR A: the plain SELECT-DISTINCT sub-arm — `Agg(AGG_HASHED,
@@ -922,7 +930,13 @@ pub(super) fn try_own_plain_selectdistinct_runtime<'mcx>(
         refused(estate, true, node_id, "ea not threaded (select-distinct v1)");
         return Ok(false);
     }
-    if !seq_scan_fusible(ss, estate)? || !::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
+    // GL-LOWDIST-4 B1: heap seq scans admit under the knob (the columnar
+    // dict/int lanes fall back to the collected emit_key batch on heap).
+    if !seq_scan_fusible(ss, estate)?
+        || !(::nodeseqscan::seq_scan_is_pgrcolumnar(ss)
+            || (::nodeseqscan::seq_scan_is_heap(ss)
+                && super::runtime_distinct::distinct_heap_enabled()))
+    {
         refused(estate, ea, node_id, "scan not fusible/cbstore");
         return Ok(false);
     }
@@ -1008,7 +1022,7 @@ pub(super) fn try_own_plain_selectdistinct_runtime<'mcx>(
     }
 
     // --- Geometry: enough granules to be worth a gang.
-    let Some((total_granules, starts)) = ::nodeseqscan::seq_scan_cb_granule_geometry(ss, estate)?
+    let Some((total_granules, source)) = super::runtime_distinct::distinct_task_source(ss, estate)?
     else {
         return Ok(false);
     };
@@ -1033,7 +1047,7 @@ pub(super) fn try_own_plain_selectdistinct_runtime<'mcx>(
         dop,
         lowwidth,
         total_granules,
-        starts,
+        source,
         spec,
         scan_node,
         /* force_set = */ false,
@@ -1050,7 +1064,7 @@ fn engage<'mcx>(
     dop: i32,
     lowwidth: bool,
     total_granules: u64,
-    starts: Vec<u64>,
+    source: std::sync::Arc<dyn runtime::MorselSource>,
     spec: Arc<PlainPdSpec>,
     scan_node: ::types_nodes::node_tree::Node<'mcx>,
     force_set: bool,
@@ -1103,7 +1117,7 @@ fn engage<'mcx>(
         rt,
         dop,
         total_granules,
-        starts,
+        source,
         &payload,
         force_set,
         emit_values,
@@ -1166,7 +1180,7 @@ fn engage_ceremony<'mcx>(
     rt: &'static Arc<runtime::Runtime>,
     dop: i32,
     total_granules: u64,
-    starts: Vec<u64>,
+    source: std::sync::Arc<dyn runtime::MorselSource>,
     payload: &Arc<RuntimePlainDistinctShared>,
     force_set: bool,
     emit_values: bool,
@@ -1205,10 +1219,8 @@ fn engage_ceremony<'mcx>(
         );
 
 
-        let source = Arc::new(super::runtime_scan::PgrcolumnarGranuleSource {
-            starts: Arc::new(starts),
-            coalesce: false,
-        });
+        // Per-AM morsel source built at admission (distinct_task_source —
+        // GL-LOWDIST-4 B1).
         let runtime::SealedSinkTaskSets { accept, freeze, combine, probe: _probe } =
             runtime::sealed_sink_tasksets(
                 Arc::clone(payload),
