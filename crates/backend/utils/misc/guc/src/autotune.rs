@@ -130,12 +130,19 @@ pub fn compute_memory_tuning(ram_bytes: u64, cores: usize, max_connections: i32)
     }
 }
 
-/// Whether `PGRUST_MEM_AUTOTUNE` requests the machine-scaled defaults.
+/// Whether the machine-scaled defaults are requested. Reads the registered
+/// `pgrust.mem_autotune` GUC (env-to-guc train); the `PGRUST_MEM_AUTOTUNE`
+/// environment variable still seeds this GUC's startup default at boot via
+/// `initialize_guc_options_from_environment` (guc/src/store.rs), so the env
+/// idiom keeps working while `postgresql.conf` / `ALTER SYSTEM` now also apply.
+/// `apply_memory_autotune()` runs after `SelectConfigFiles`, so the value is
+/// already resolved when this is read.
 pub fn mem_autotune_enabled() -> bool {
-    matches!(
-        std::env::var("PGRUST_MEM_AUTOTUNE").as_deref(),
-        Ok("1") | Ok("on") | Ok("true") | Ok("yes")
-    )
+    crate::GetConfigOption("pgrust.mem_autotune", true, false)
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some("on")
 }
 
 /// Total physical RAM in bytes. Linux via `/proc/meminfo` (the primary target;
