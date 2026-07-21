@@ -41,13 +41,21 @@
 //! precedent). The hook therefore admits `pending_invalidations` for write
 //! dests ONLY; every other dest keeps the conservative refusal.
 //!
-//! # Status: KILL-SWITCH GATED, DEFAULT OFF.
+//! # Status: FLIPPED ON (GL-W0-2; `PGRUST_RUNTIME_CTAS_FUNNEL=0|off` kills).
 //!
-//! `PGRUST_RUNTIME_CTAS_FUNNEL=1|on` arms write-dest admission, and only on
-//! top of the funnel's own `PGRUST_RUNTIME_ROW_FUNNEL` switch. Unset, every
-//! write dest fail-closes to the serial per-tuple loop byte-identically —
-//! `route_to` / the coverage matrix row `parallel-ctas-matview-write` are
-//! unchanged until the fleet letter flips them.
+//! The GL-W0-2 composition ladder (W0 + W0.1 pure-drain + W1 multi-insert,
+//! scratchpad/night/GL-W0-2-letter.md) measured the stack ALWAYS-WIN vs
+//! serial in its engagement region — every shape 0.23–0.64 at 2M rows,
+//! DOP {2,4,8}, ground-truth row counts verified — and the region is
+//! STRICTLY ADDITIVE: this hook engages only on serial-SHAPED plans
+//! (`!use_parallel_mode` at the execute_plan call site), so Gather-planned
+//! CTAS is untouched and W0 displaces only the serial per-tuple loop.
+//! Honest region note for the census confirm leg: at default costs the
+//! planner Gathers large CTAS SELECTs, so default-ON yield lives where
+//! Gather is priced out or unavailable; the dop>=4 funnel-vs-Gather gap is
+//! the drain loop (W2a's charter), not this flip's concern.
+//! The kill restores the serial loop byte-identically; it also rides the
+//! funnel's own `PGRUST_RUNTIME_ROW_FUNNEL=0` master kill.
 //!
 //! Fail-closed carve-outs (inherited from the hook's gates, listed here as
 //! the write-shape reading): CTAS WITH NO DATA never runs the executor;
@@ -62,13 +70,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use ::types_dest::CommandDest;
 
-/// Kill switch (default OFF): `PGRUST_RUNTIME_CTAS_FUNNEL=1`/`on` admits the
-/// write dests below into the passthrough funnel. One process-static resolve
-/// (the `PGRUST_RUNTIME_*` precedent).
+/// ON BY DEFAULT (GL-W0-2 flip; flipped-kill idiom, the row_funnel_enabled
+/// spelling): `PGRUST_RUNTIME_CTAS_FUNNEL=0`/`off` kills write-dest
+/// admission, restoring the serial per-tuple loop byte-identically. One
+/// process-static resolve (the `PGRUST_RUNTIME_*` precedent).
 fn ctas_funnel_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        matches!(std::env::var("PGRUST_RUNTIME_CTAS_FUNNEL").as_deref(), Ok("1") | Ok("on"))
+        !std::env::var("PGRUST_RUNTIME_CTAS_FUNNEL")
+            .is_ok_and(|v| matches!(v.trim(), "0" | "off"))
     })
 }
 
@@ -129,16 +139,19 @@ pub(super) fn note_completed(rows: u64) {
 mod tests {
     use super::*;
 
+    /// GL-W0-2 flip pin: the DEFAULT world admits write dests (flipped-kill —
+    /// only an explicit =0|off kills; the un-gated default-pin test per the
+    /// t38 convention).
     #[test]
-    fn kill_switch_default_off_refuses_write_dests() {
+    fn flipped_default_admits_write_dests() {
         if std::env::var("PGRUST_RUNTIME_CTAS_FUNNEL").is_err() {
             assert!(matches!(
                 classify_write_dest(CommandDest::IntoRel),
-                WriteDestVerdict::Refuse
+                WriteDestVerdict::Admit
             ));
             assert!(matches!(
                 classify_write_dest(CommandDest::TransientRel),
-                WriteDestVerdict::Refuse
+                WriteDestVerdict::Admit
             ));
         }
     }
