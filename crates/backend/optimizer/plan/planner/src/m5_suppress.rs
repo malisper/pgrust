@@ -1059,16 +1059,23 @@ const GROUPED_SINK_AGGS_AVG: &[u32] = &[
     F_MIN_INT2,
 ];
 
-/// GROUPED-AVG knob (`PGRUST_M5_GROUPED_AVG`): DEFAULT OFF, only `1`/`on`
-/// arm (the K1-latemat idiom — every other spelling fails safe to today's
-/// refusal). Probe-side only: no executor change rides this knob (the sink
-/// vocabulary above is live at default), so the suppress-then-refuse
-/// direction is guarded by the sink's own fail-closed combine resolution.
-/// Fleet letter owed before any default flip.
+/// GROUPED-AVG knob (`PGRUST_M5_GROUPED_AVG`): DEFAULT ON (open-rows
+/// flip train, GL-OPENROWS-AVG FLIP-RECOMMENDED as the car1+car2 PAIR —
+/// fleet letter 2026-07-21, 10M unforced pair jobs -6edd/-533a: the
+/// qualed/unqualed two-int-key winner-selection census rows land 5.4x/
+/// 5.3x AT the forced ceiling with per-leg suppression witnesses; 100M
+/// alone is FLAT within noise, zero knob-tax, because the shapes' group
+/// estimates cross the §10 hold there — the PAIR flip with the
+/// winner-selection hold exemption below is the scale recipe, composition
+/// leg -2250: 8.0x/73x at the ceilings). Probe-side only: no executor
+/// change rides this knob (the sink vocabulary above is live at default),
+/// so the suppress-then-refuse direction is guarded by the sink's own
+/// fail-closed combine resolution. `PGRUST_M5_GROUPED_AVG=0|off` is the
+/// kill (the flipped-kill idiom: unset and every other spelling stay ON).
 fn grouped_avg_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        tier2_car_spelling_on(std::env::var("PGRUST_M5_GROUPED_AVG").as_deref().ok())
+        tier2_car_kill_spelling_on(std::env::var("PGRUST_M5_GROUPED_AVG").as_deref().ok())
     })
 }
 
@@ -1099,13 +1106,23 @@ const SINK_TOPN_MAX_BOUND_MIRROR: i64 = 1 << 16;
 /// merge) predate the sink's combine-phase top-N, which materializes
 /// winners only — at winner-selection shapes the group estimate no longer
 /// prices the emit, and the held legacy plan is a serial leader hashagg
-/// over raw exchanged rows (the spill cliff at scale). Build-side memory
-/// at group counts near input rows is the fleet letter's spill-pressure
-/// leg (work_mem ladder) — REQUIRED evidence before any default flip.
+/// over raw exchanged rows (the spill cliff at scale).
+///
+/// DEFAULT ON (open-rows flip train, GL-OPENROWS-GBHIGH-TOPN
+/// FLIP-RECOMMENDED — fleet letter 2026-07-21: the no-qual three-int-agg
+/// winner-selection census row 100M 54.0s -> 1.04s, 51.9x, BEATING the
+/// forced-vector ceiling; 10M 8.2x; jobs -695b/-10b3, composition leg
+/// -2250 lands the qualed siblings 8.0x/73x at their ceilings. The
+/// REQUIRED spill-pressure ladder — work_mem 128MB..1GB at full scale,
+/// jobs -6012/-1bba, memsample banked — is FLAT 1.04-1.24s at every
+/// rung, suppressed plans throughout, zero session deaths: the
+/// winners-only sink has no work_mem cliff in-range, unlike the leader
+/// hashagg it replaces). `PGRUST_M5_TOPN_HIGHGROUPS=0|off` is the kill
+/// (flipped-kill idiom).
 fn topn_highgroups_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        tier2_car_spelling_on(std::env::var("PGRUST_M5_TOPN_HIGHGROUPS").as_deref().ok())
+        tier2_car_kill_spelling_on(std::env::var("PGRUST_M5_TOPN_HIGHGROUPS").as_deref().ok())
     })
 }
 
@@ -5642,8 +5659,8 @@ mod tests {
         for oid in GROUPED_SINK_AGGS {
             assert!(GROUPED_SINK_AGGS_AVG.contains(oid), "widening is a superset");
         }
-        // The knob rides the default-OFF spelling helper (pinned above):
-        // unset/typos fail safe to the base list.
+        // The knob rides the flipped-kill spelling helper (pinned above):
+        // only 0|off restore the base list; unset stays widened.
     }
 
     /// TOPN-HIGHGROUPS: the exemption's sort-key set is exactly the
