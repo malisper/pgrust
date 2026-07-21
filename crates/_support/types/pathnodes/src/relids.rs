@@ -1,6 +1,46 @@
 use mcx::{box_new_in, vec_from_elem_in, Mcx, PgVec};
 use crate::{Bitmapset, PathTarget, PlannerInfo, PtId, RelId, RelOptInfo, Relids, UpperRelationKind, RELOPT_UPPER_REL};
 
+/// The unset (`None`-shaped) Relids. Distinct from an allocated all-zero set:
+/// the planner's helpers preserve that distinction (e.g. `relids_intersect`
+/// of two disjoint one-word sets yields an allocated empty set that compares
+/// unequal to the unset value), so callers must not conflate the two.
+pub fn relids_empty<'mcx>() -> Relids<'mcx> {
+    None
+}
+
+/// True only for the unset value — NOT for allocated all-zero sets. This is
+/// the representation-agnostic spelling of the incumbent `.is_none()`.
+pub fn relids_is_unset(a: &Relids<'_>) -> bool {
+    a.is_none()
+}
+
+/// The set's backing words; empty slice for the unset value. Word count is
+/// part of the value's identity (`relids_equal` compares slices verbatim),
+/// so this is the canonical observation point for representation parity.
+pub fn relids_word_slice<'a>(a: &'a Relids<'_>) -> &'a [u64] {
+    a.as_ref().map_or(&[] as &[u64], |b| b.word_slice())
+}
+
+/// Build a Relids from raw set words (e.g. a nodes-side bitmapset's words).
+/// Value-identical to the historical per-member
+/// `out = relids_union(out, relids_singleton(x))` loop for every input: that
+/// loop yields exactly `wordnum(max_member) + 1` words, so trailing zero
+/// words in the input are trimmed here, and an all-zero input yields the
+/// unset value.
+pub fn relids_from_words<'mcx>(mcx: Mcx<'mcx>, words: &[u64]) -> Relids<'mcx> {
+    let n = words.iter().rposition(|w| *w != 0).map_or(0, |i| i + 1);
+    if n == 0 {
+        return None;
+    }
+    if n == 1 {
+        return Some(box_new_in(mcx, Bitmapset::Small(words[0])));
+    }
+    let mut out = vec_from_elem_in(mcx, 0u64, n);
+    out.copy_from_slice(&words[..n]);
+    Some(box_new_in(mcx, Bitmapset::Big(out)))
+}
+
 pub fn relids_singleton<'mcx>(mcx: Mcx<'mcx>, x: u32) -> Relids<'mcx> {
     if x < 64 {
         return Some(box_new_in(mcx, Bitmapset::Small(1u64 << x)));
