@@ -1078,6 +1078,53 @@ fn grouped_sink_aggs() -> &'static [u32] {
     if grouped_avg_enabled() { GROUPED_SINK_AGGS_AVG } else { GROUPED_SINK_AGGS }
 }
 
+/// TOPN-HIGHGROUPS sort-key vocabulary: the finalfn-free int8-transvalue
+/// aggregates — exactly the order columns the runtime sink's combine-phase
+/// top-N can resolve (the sink's order-column resolve wants a bare
+/// finalfn-none int8 Aggref: count and the int2/int4 sum ring). An order
+/// column outside this set declines the sink's bound and the drain
+/// materializes every group — the exemption below must never admit that at
+/// high group estimates.
+const TOPN_INT8_RAW_SORT_AGGS: &[u32] = &[F_COUNT_STAR, F_COUNT_ANY, F_SUM_INT4, F_SUM_INT2];
+
+/// Mirror of the runtime sink's combine-phase top-N bound cap
+/// (`nodeagg::sink::SINK_TOPN_MAX_BOUND`): a bound past the cap declines
+/// the winner selection, so the exemption fails closed past it too.
+const SINK_TOPN_MAX_BOUND_MIRROR: i64 = 1 << 16;
+
+/// TOPN-HIGHGROUPS knob (`PGRUST_M5_TOPN_HIGHGROUPS`): DEFAULT OFF, only
+/// `1`/`on` arm (the K1-latemat idiom). Exempts the bounded
+/// winner-selection composition from the §10 groupby_high legacy hold: the
+/// hold's economics (unbounded emit of every group through the exchange
+/// merge) predate the sink's combine-phase top-N, which materializes
+/// winners only — at winner-selection shapes the group estimate no longer
+/// prices the emit, and the held legacy plan is a serial leader hashagg
+/// over raw exchanged rows (the spill cliff at scale). Build-side memory
+/// at group counts near input rows is the fleet letter's spill-pressure
+/// leg (work_mem ladder) — REQUIRED evidence before any default flip.
+fn topn_highgroups_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        tier2_car_spelling_on(std::env::var("PGRUST_M5_TOPN_HIGHGROUPS").as_deref().ok())
+    })
+}
+
+/// A plan-time-constant LIMIT/OFFSET count: `Some(v)` for a non-null
+/// int8/int4 Const with `v >= 0`; `None` (fail closed) for params,
+/// expressions, nulls, and every other type.
+fn const_count(node: Option<Node<'_>>) -> Option<i64> {
+    let c = node?.as_const()?;
+    if c.constisnull {
+        return None;
+    }
+    let v = match c.consttype {
+        INT8OID => c.constvalue.as_i64(),
+        INT4OID => i64::from(c.constvalue.as_i32()),
+        _ => return None,
+    };
+    (v >= 0).then_some(v)
+}
+
 // SE-AGGPOLY (band 101001): sum/avg over NUMERIC — aggregate OIDs of record
 // (vendored REL 18.3 pg_proc/pg_aggregate, verified): both ride transfn
 // numeric_avg_accum (2858, NOT strict) over an INTERNAL NumericAggState
@@ -1754,6 +1801,9 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     let mut bare_limit = false;
     let mut full_sort = false;
     let mut decorated = false;
+    // TOPN-HIGHGROUPS: does the top-N sort key sit in the finalfn-free
+    // int8-transvalue set the sink's winner selection can resolve?
+    let mut topn_int8_raw_sort = false;
     let topn = if parse.sortClause.is_nil() && parse.limitCount.is_none() {
         false
     } else if parse.sortClause.is_nil()
@@ -1820,6 +1870,11 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
                 return Ok(false);
             }
         } else {
+            // TOPN-HIGHGROUPS capture: only the admitted-agg sort key can
+            // be a winner-selection order column (decorated group-key
+            // sorts are full-drain forms — the hold exemption never fires
+            // for them, `topn` stays false there).
+            topn_int8_raw_sort = is_whitelisted_agg(tle.expr, rti, TOPN_INT8_RAW_SORT_AGGS);
             true
         }
     } else if parse.sortClause.len() == 1
@@ -1922,7 +1977,25 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     // the knob path carries its OWN provisional ceiling instead of the §10
     // hold; everything else keeps the hold byte-for-byte.
     let over_groupby_high = ngroups >= groupby_high_floor();
+    // TOPN-HIGHGROUPS exemption: the bounded winner-selection composition
+    // only, admitted iff the sink's combine-phase top-N provably arms —
+    // sort key in the finalfn-free int8-transvalue set, a small Const
+    // bound within the sink's cap, and no sibling knob composition riding
+    // along (fail closed). The avg-passenger widening (its own knob)
+    // COMPOSES: the three-int-agg winner-selection census shape carries
+    // avg and needs both knobs armed.
+    let topn_highgroups_bypass = over_groupby_high
+        && topn_highgroups_enabled()
+        && topn
+        && topn_int8_raw_sort
+        && n_count_distinct == 0
+        && n_strminmax == 0
+        && n_const == 0
+        && !mk_text_family
+        && const_count(parse.limitCount)
+            .is_some_and(|b| b > 0 && b <= SINK_TOPN_MAX_BOUND_MIRROR);
     if over_groupby_high
+        && !topn_highgroups_bypass
         && !(mk_text_family
             && n_count_distinct == 0
             && ngroups < multikey_text_max_groups())
@@ -2090,6 +2163,27 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             run,
             "barelimit",
             "barelimit-grouped-agg",
+            class_guard(class),
+            rte.relid,
+            ngroups,
+            rel_rows,
+            rel_pages,
+        );
+    }
+    // TOPN-HIGHGROUPS knob-path finish: shapes past the §10 hold ONLY via
+    // the exemption route through the dedicated finish (own trace tag; the
+    // label names the avg-passenger composition when it rides along —
+    // the letters' grep vocabulary). class is CbGroupedAggTopN by
+    // construction here (topn true, no count(DISTINCT)).
+    if topn_highgroups_bypass {
+        return finish_knob_path(
+            run,
+            "topnhigh",
+            if n_avg_widened > 0 {
+                "avgint-grouped-topn-highgroups"
+            } else {
+                "grouped-topn-highgroups"
+            },
             class_guard(class),
             rte.relid,
             ngroups,
@@ -5206,6 +5300,23 @@ mod tests {
         }
         // The knob rides the default-OFF spelling helper (pinned above):
         // unset/typos fail safe to the base list.
+    }
+
+    /// TOPN-HIGHGROUPS: the exemption's sort-key set is exactly the
+    /// finalfn-free int8-transvalue aggregates the sink's winner selection
+    /// resolves — a strict subset of the grouped-sink passenger list.
+    /// min/max carry finalfn-free int8 transvalues too but were never
+    /// witnessed as winner-selection order columns at high group counts;
+    /// avg carries a finalfn (declines the resolve). Both stay out.
+    #[test]
+    fn topn_highgroups_sort_vocabulary_is_finalfn_free_int8() {
+        assert_eq!(TOPN_INT8_RAW_SORT_AGGS, &[F_COUNT_STAR, F_COUNT_ANY, F_SUM_INT4, F_SUM_INT2]);
+        for oid in TOPN_INT8_RAW_SORT_AGGS {
+            assert!(GROUPED_SINK_AGGS.contains(oid), "subset of the base passenger list");
+        }
+        assert!(!TOPN_INT8_RAW_SORT_AGGS.contains(&F_AVG_INT4), "finalfn-bearing stays out");
+        assert!(!TOPN_INT8_RAW_SORT_AGGS.contains(&F_MAX_INT8), "unwitnessed order column");
+        assert_eq!(SINK_TOPN_MAX_BOUND_MIRROR, 1 << 16, "mirror of the sink bound cap");
     }
 
     /// SE-T2AGG CAR B: the min/max(text) OIDs of record (vendored REL 18.3
