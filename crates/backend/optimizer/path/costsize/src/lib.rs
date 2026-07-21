@@ -2042,11 +2042,12 @@ pub fn cost_agg_lane_exchange_adjust(
 /// scratchpad/night/runtime-cost-model-design.md): a leader-side hashed Agg
 /// fed by a Gather/GatherMerge on a pgrcolumnar-fed plan re-prices its
 /// disk-spill surcharge with the executor-honest per-group footprint
-/// (gucs::DEFAULT_PGRCOLUMNAR_LEADER_HASHAGG_ENTRY_SCALE — q33 provenance
-/// there). C's entry estimate (96B for the q33 shape) said a 10M-group
+/// (gucs::DEFAULT_PGRCOLUMNAR_LEADER_HASHAGG_ENTRY_SCALE — provenance
+/// there). C's entry estimate (96B for the probed shape) said a 10M-group
 /// leader table fits any >=1GB budget, so cost_agg added NO spill term while
 /// the real ~3GB working set crossed the 2GB budget and ran 10x slower
-/// spilling (the q33 cliff, third sighting). Adds the DELTA between the
+/// spilling (the high-card grouped-agg cliff, third sighting). Adds the
+/// DELTA between the
 /// honest-entry surcharge and the C-entry surcharge cost_agg already added —
 /// exactly 0.0 whenever even the scaled working set fits the hash budget
 /// (both evaluate to no-spill), so tiny/regress shapes are byte-identical.
@@ -2070,7 +2071,7 @@ pub fn cost_agg_leader_spill_adjust(
         return;
     }
     // Leader-side only: the agg's direct input is a Gather/GatherMerge —
-    // raw rows (the q33 AGGSPLIT_SIMPLE shape) or a gathered partial agg's
+    // raw rows (the leader-hashagg AGGSPLIT_SIMPLE shape) or a gathered partial agg's
     // finalize; either way the leader builds the num_groups-entry table.
     let gather_sub = match run.root.path(peel_projection(run, subpath_id)) {
         PathNode::GatherPath(g) => g.subpath,
@@ -4302,7 +4303,7 @@ mod tests {
         assert_eq!(gucs::pgrcolumnar_parallel_tuple_cost(), 0.005);
     }
 
-    /// The q33 probe's "A/B inert" bug stays fixed: sweeping the parallel
+    /// The regression probe's "A/B inert" bug stays fixed: sweeping the parallel
     /// cost GUCs moves the pgrcolumnar Gather prices proportionally.
     #[test]
     fn pgrcolumnar_gather_pricing_tracks_parallel_gucs() {
@@ -4368,12 +4369,12 @@ mod tests {
         (run, agg, gather)
     }
 
-    // q33-class shape scaled to the unit-test budget: work_mem 4096kB x
+    // high-card grouped shape scaled to the unit-test budget: work_mem 4096kB x
     // hash_mem_multiplier 2.0 (init_small boot values) = 8.39MB. Entry size
     // for width 12 / no transinfos / transitionSpace 0 is 16 + MAXALIGN(
     // MAXALIGN(15) + 12) = 48B: at 100k groups the C estimate says 4.8MB
     // (fits, no spill term) while the honest 1.8x scale says 8.64MB
-    // (spills) — the exact q33 disease in miniature.
+    // (spills) — the exact leader-spill disease in miniature.
     const SPILLY_GROUPS: f64 = 100_000.0;
     const TINY_GROUPS: f64 = 10_000.0;
     const INPUT_TUPLES: f64 = 1_000_000.0;
@@ -4387,7 +4388,7 @@ mod tests {
         let (mut run, agg, gather) = leader_hashagg_fixture(mcx, true);
         let costs = types_pathnodes::AggClauseCosts::default();
 
-        // Precondition (the q33 disease): C's own pricing sees no spill.
+        // Precondition (the leader-spill disease): C's own pricing sees no spill.
         let (s_base, t_base) = hashed_agg_spill_surcharge_scaled(
             &run, &costs, SPILLY_GROUPS, INPUT_TUPLES, INPUT_WIDTH, 1.0,
         );
@@ -4440,7 +4441,7 @@ mod tests {
     }
 
     /// The two fleet anchors of the entry-scale constant, pinned at the REAL
-    /// q33 shape as hash_agg_entry_size itself prices it (Gather width 16,
+    /// probed 10M-group shape as hash_agg_entry_size itself prices it (Gather width 16,
     /// three transinfos for count(*)+SUM+AVG, transitionSpace 48 from AVG's
     /// by-ref int8-array transvalue — jobs -5fd0/-07cf explain captures +
     /// prepagg derivation): at the default scale the 10M-group working set
@@ -4458,8 +4459,8 @@ mod tests {
         let working_set = 10_000_000.0 * entry * scale;
         let budget_512mb = 524288.0 * 1024.0 * 4.0; // work_mem 512MB x hmm 4
         let budget_1gb = 1048576.0 * 1024.0 * 4.0; // work_mem 1GB x hmm 4
-        assert!(working_set > budget_512mb, "q33 must spill-price at 512MB");
-        assert!(working_set < budget_1gb, "q33 must stay delta-0 at 1GB");
+        assert!(working_set > budget_512mb, "the 10M-group shape must spill-price at 512MB");
+        assert!(working_set < budget_1gb, "the 10M-group shape must stay delta-0 at 1GB");
         // Calibration target: the measured ~3.03GB leader working set
         // (probe E2 TreeRssAnon peak) within 5%.
         assert!((working_set / 3.03e9 - 1.0).abs() < 0.05);

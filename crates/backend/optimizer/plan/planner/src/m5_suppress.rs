@@ -1354,7 +1354,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         // min/max(text) passengers over default-collation bare Vars, the
         // grouped sink's new VarlenaMinMax vocabulary. Fail-closed
         // exclusions: NO QUALS (fleet containment, GL letter
-        // fleet-ab-parallelism.md: the qualed q22 suppressed but the arm
+        // fleet-ab-parallelism.md: the qualed target shape suppressed but the arm
         // never engaged on the real 10M bank — a data-dependent staging
         // refusal the probe cannot see, so the qualed shape landed
         // suppress-then-SERIAL at 7.6-8.5x; the local 1M fixture engages,
@@ -2714,7 +2714,7 @@ fn finish_multikey_text(
 //          decorated-root pattern WITHOUT the bound; no executor change.
 //          Knob: `PGRUST_LANE_V2_AGG_SORT_NOLIMIT` (DEFAULT ON since t36
 //          flips2, GL-T2B; `=0|off` kills). NOTE for assembly: the
-//          tpch-cars agent's CAR 1
+//          decorated-root generalization lane's CAR 1
 //          generalizes root decoration — this is the agg-specific narrow
 //          case behind its own switch; unify at merge if theirs subsumes.
 //
@@ -2722,7 +2722,7 @@ fn finish_multikey_text(
 // classes, so the drift guards are untouched; a thrown kill (or the two
 // still-gated cars' default OFF) takes the identical pre-car refusal
 // byte-for-byte. t36 flips2 dispositions per the GL-T2 letters: CARs A
-// (GL-T2C) + C (GL-T2B) FLIPPED ON; CAR B KEEP-GATED (GL-T2A: the q22
+// (GL-T2C) + C (GL-T2B) FLIPPED ON; CAR B KEEP-GATED (GL-T2A: the
 // suppress-then-serial 7.6x containment violation).
 // ===========================================================================
 
@@ -2782,14 +2782,15 @@ fn distinct_plainshape_guard() -> FloorGuard {
 
 /// CAR B knob (`PGRUST_LANE_V2_AGG_STRMINMAX`, default OFF — **KEEP-GATED
 /// per its letter; do NOT flip**). LETTER OF RECORD (GL-T2A KEEP GATED,
-/// 2026-07-21, tier2 campaign @ 7d8aa9a2b): the target q22 is a
+/// 2026-07-21, tier2 campaign @ 7d8aa9a2b): the target qualed text-minmax
+/// top-n shape is a
 /// suppress-then-serial containment violation — `m5-suppress-strminmax ...
 /// gather suppressed` then `runtime-sort: refused (full-sort shape spec)`,
-/// zero runtime engagements, q22 hot 0.022 -> 0.234s (7.6x damped; 8.5x
+/// zero runtime engagements, target hot 0.022 -> 0.234s (7.6x damped; 8.5x
 /// mt16), official 43q geomean dragged +3.3%/+5.9%. Parity clean.
 /// RE-LETTER PRECONDITIONS: narrow the probe (mirror the executor shape
 /// gates into classify) or thread qualed topn through the runtime sort
-/// arm; add a QUALED q22-class e2e row (the CAR-B e2e shapes are unqualed
+/// arm; add a QUALED text-minmax-class e2e row (the CAR-B e2e shapes are unqualed
 /// — the coverage hole). SAME spelling
 /// as the executor half (nodeagg sink.rs `sink_strminmax_enabled` — the
 /// resolve-combines / emit-plan vocabulary widening): both read sites flip
@@ -2805,7 +2806,8 @@ fn agg_strminmax_enabled() -> bool {
 /// flips2 (`=0|off` kills). Planner-only (suppression-widening; the
 /// executor composition already exists). FLIP EVIDENCE (GL-T2B
 /// FLIP-RECOMMENDED, 2026-07-21, tier2 campaign @ 7d8aa9a2b, CB 10M
-/// unforced + mt16): q8 engages 3/3 in BOTH postures (planner suppress +
+/// unforced + mt16): the grouped-agg-sort-no-limit target engages 3/3 in
+/// BOTH postures (planner suppress +
 /// runtime-agg engaged dop=16, groups=8), byte-identical output, wall flat
 /// (the win is retiring the uncovered gap:agg-orderby-nolimit row), all 41
 /// guard queries flat; attribution clean via the per-car suppress labels.
@@ -3950,7 +3952,7 @@ mod tests {
 
     /// SE-T2AGG (night/tier2-agg-cars) knob posture of record at t36
     /// flips2, per the GL-T2 letters: CAR B (gap:agg-min-text) stays
-    /// DEFAULT OFF — `1`/`on` only (KEEP-GATED by GL-T2A: the q22
+    /// DEFAULT OFF — `1`/`on` only (KEEP-GATED by GL-T2A: the
     /// suppress-then-serial containment violation). CARs A
     /// (distinct-plain-shape, GL-T2C) and C (gap:agg-orderby-nolimit,
     /// GL-T2B) are DEFAULT ON with the exact-spelling kill `0`/`off` —

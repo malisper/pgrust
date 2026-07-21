@@ -1753,7 +1753,7 @@ pub fn create_agg_path<'mcx>(
         sub_total,
     );
     // Step-0b honest-Gather pricing: a leader hashagg above a Gather on a
-    // pgrcolumnar-fed plan carries an executor-honest spill term (the q33
+    // pgrcolumnar-fed plan carries an executor-honest spill term (the high-card
     // cliff). Exact no-op when the scaled working set fits the hash budget
     // or on any shape the exchange adjust above owns — see costsize.
     costsize::cost_agg_leader_spill_adjust(
