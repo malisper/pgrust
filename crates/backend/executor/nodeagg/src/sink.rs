@@ -4657,6 +4657,353 @@ pub fn agg_sink_all_count(node: &AggStateData<'_>) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// SCATTER ACCEPT (fold-bypass) — the near-unique-key drain's per-row law.
+// ---------------------------------------------------------------------------
+//
+// On admitted low-α engagements (est_rows ≈ est_groups) nearly every accept
+// row is a probe MISS: the worker table's probe + insert + cap-flush cycle
+// does per-row work that folds nothing. The scatter accept SKIPS the worker
+// hash table for the whole drain: each qualifying row becomes ONE
+// SINGLE-ROW STATE BLOCK (the fold of one row from the seeded init state —
+// count → 1, sum → the value) appended straight into bucket-contiguous
+// buffers keyed by [`sink_hash`]'s top byte, exactly the [`SinkRun`] radix
+// space. A buffer flush IS an ordinary run: entries may repeat a key (the
+// duplicates the table would have folded), and the combine consumes repeats
+// through the same probe-or-merge arithmetic it already runs across faces —
+// a scatter run is just a run whose windows collapsed to α = 1.
+//
+// Byte identity (unit-pinned by `scatter_runs_combine_matches_fold`,
+// modeled on `seal_flush_run_matches_remainder_view`): the admitted kinds
+// (count/int-sum/int-min/max) combine associatively bit-exactly, and rows
+// scatter in arrival order into stable per-bucket buffers, so the merged
+// table's first-seen row order and every (trans_value, isnull) pair equal
+// the fold path's — flush cadence is semantics-free (the ratified
+// flush-cadence law the seal-flush arm rides). The mid-transition
+// `no_trans_value` scratch flag is OUTSIDE this claim: the combine itself
+// clears it on any second arrival, so it is cadence-dependent under the
+// incumbent cadences too (a group split across two cap windows vs one) and
+// nothing post-combine reads it on a scatter-admitted shape (topn — the one
+// reader — is excluded at admission).
+//
+// NULL-key rows fold into a per-buffer NULL accumulator block (the same
+// one-row ops applied cumulatively — for the admitted kinds the accumulate
+// IS the fold) and ride the next flushed run's out-of-band `null_states`,
+// the incumbent's own channel.
+
+/// The scatter accept's per-worker state: 256 bucket-contiguous key/state
+/// buffers plus the seeded init template and the validated fold
+/// descriptors. Lives in the sink Local between morsels (the table's own
+/// discipline); flushed to [`SinkRun`]s at the row cap and at SEAL.
+pub struct SinkScatter {
+    trans: Vec<::lanefold::LaneTrans>,
+    /// Seeded init state block (`initialize_hash_entry`'s field values, the
+    /// `seed_new_groups` law): one 16-byte `AggPerGroup` image per transno,
+    /// padding zeroed (padding is not part of any consumer's read).
+    init: Vec<u64>,
+    /// Key canonicalization width (2/4/8 — the `agg_hash_compact_batch`
+    /// sign-extension law).
+    key_width: u8,
+    keys: Vec<Vec<u64>>,
+    states: Vec<Vec<u64>>,
+    nrows: usize,
+    null_block: Option<Vec<u64>>,
+}
+
+/// The scatter fold whitelist: kinds whose one-row synthesis is trivial and
+/// whose combine arithmetic is associative BIT-EXACTLY (integer wrapping
+/// adds, integer min/max), so single-row blocks re-associate to the fold's
+/// bytes. Order-sensitive kinds (float sums/accums), pointer states, str
+/// kinds, and filtered transitions refuse.
+fn scatter_kind_ok(t: &::lanefold::LaneTrans) -> bool {
+    use ::lanefold::{LaneKind, LaneWidth};
+    let int_w = |w: LaneWidth| matches!(w, LaneWidth::I16 | LaneWidth::I32 | LaneWidth::I64);
+    if t.filter != ::lanefold::NO_FILTER {
+        return false;
+    }
+    match t.kind {
+        LaneKind::CountStar => true,
+        LaneKind::CountAny => true,
+        LaneKind::Sum => int_w(t.width),
+        LaneKind::Min | LaneKind::Max => int_w(t.width) && int_w(t.res_width),
+        _ => false,
+    }
+}
+
+/// Leader/worker scatter shape verdict (the F1 both-sides-same-inputs law):
+/// the fold plan must be total (no residual transitions), proof-free (no
+/// guards — a demote path would need the per-row program the scatter
+/// deleted), all-whitelist, and every transition state byval (single-row
+/// blocks are copied verbatim into runs).
+pub fn sink_scatter_admits(node: &AggStateData<'_>) -> bool {
+    let Some(plan) = crate::agg_lanefold_plan(node) else { return false };
+    if plan.guarded || !plan.resid.is_empty() || !plan.vguards.is_empty() {
+        return false;
+    }
+    if !plan.trans.iter().all(scatter_kind_ok) {
+        return false;
+    }
+    node.trans_typ.iter().all(|t| t.byval)
+}
+
+/// Build the worker's scatter state. `None` = the shape verdict diverged
+/// from the leader's admission (the caller fail-closes).
+pub fn sink_scatter_new(node: &AggStateData<'_>, key_width: u8) -> Option<SinkScatter> {
+    if !sink_scatter_admits(node) {
+        return None;
+    }
+    let plan = crate::agg_lanefold_plan(node)?;
+    let trans: Vec<::lanefold::LaneTrans> = plan.trans.iter().copied().collect();
+    // The init template — `seed_new_groups`'s exact field values over a
+    // zeroed block (byval-only by the admission above, so no datumCopy).
+    let mut init = vec![0u64; node.numtrans * 2];
+    for (transno, iv) in node.trans_init.iter().enumerate() {
+        scatter_seed_slot(&mut init, transno, iv.value, iv.isnull);
+    }
+    Some(SinkScatter::from_parts(trans, init, key_width))
+}
+
+/// Write one transno's `AggPerGroup` init image into a state block: word 0
+/// the init datum, bytes 8/9 the `trans_value_is_null`/`no_trans_value`
+/// flags (both = the initval's nullness, `initialize_hash_entry`'s law),
+/// padding left zero.
+fn scatter_seed_slot(block: &mut [u64], transno: usize, value: Datum, isnull: bool) {
+    const {
+        assert!(core::mem::size_of::<AggPerGroup>() == 16);
+        assert!(core::mem::align_of::<AggPerGroup>() == 8);
+    }
+    block[transno * 2] = value.as_u64();
+    block[transno * 2 + 1] = if isnull { 0x0101 } else { 0 };
+}
+
+// --- One-row / accumulate kernels: mirrors of the lanefold fold bodies
+// (`xform`, `lane_value`, `count_apply`, `sum_apply`, `minmax_advance`,
+// `store_res`/`load_res` in lanefold/src/lib.rs). Kept textually tiny so
+// drift is reviewable; the admitted-kind subset only ever reaches these.
+
+#[inline(always)]
+fn sc_xform(t: &::lanefold::LaneTrans, v: i64) -> i64 {
+    let v = if t.divk != 1 { v / t.divk as i64 } else { v };
+    let v = if t.mulk != 1 { v.wrapping_mul(t.mulk as i64) } else { v };
+    v.wrapping_add(t.addend as i64)
+}
+
+#[inline(always)]
+fn sc_lane_value(values: &[Datum], w: ::lanefold::LaneWidth, i: usize) -> i64 {
+    match w {
+        ::lanefold::LaneWidth::I16 => values[i].as_i16() as i64,
+        ::lanefold::LaneWidth::I32 => values[i].as_i32() as i64,
+        ::lanefold::LaneWidth::I64 => values[i].as_i64(),
+        // scatter_kind_ok admits integer widths only.
+        _ => unreachable!("non-integer lane width on a scatter transition"),
+    }
+}
+
+#[inline(always)]
+fn sc_store_res(t: &::lanefold::LaneTrans, v: i64) -> Datum {
+    match t.res_width {
+        ::lanefold::LaneWidth::I16 => Datum::from_i16(v as i16),
+        ::lanefold::LaneWidth::I32 => Datum::from_i32(v as i32),
+        ::lanefold::LaneWidth::I64 => Datum::from_i64(v),
+        _ => unreachable!("non-integer result width on a scatter transition"),
+    }
+}
+
+#[inline(always)]
+fn sc_load_res(t: &::lanefold::LaneTrans, pg: &AggPerGroup) -> i64 {
+    match t.res_width {
+        ::lanefold::LaneWidth::I16 => pg.trans_value.as_i16() as i64,
+        ::lanefold::LaneWidth::I32 => pg.trans_value.as_i32() as i64,
+        ::lanefold::LaneWidth::I64 => pg.trans_value.as_i64(),
+        _ => unreachable!("non-integer result width on a scatter transition"),
+    }
+}
+
+/// Apply one admitted transition for one staged row into `pg` — the exact
+/// per-row bodies `fold_rows_grouped` runs, so the same function serves the
+/// single-row synthesis (over a fresh init block) AND the NULL-group
+/// accumulator (cumulative application).
+#[inline(always)]
+fn scatter_apply_row(
+    t: &::lanefold::LaneTrans,
+    pg: &mut AggPerGroup,
+    values: &[Datum],
+    isnull: &[bool],
+    i: usize,
+) {
+    use ::lanefold::LaneKind;
+    match t.kind {
+        LaneKind::CountStar => {
+            pg.trans_value = Datum::from_i64(pg.trans_value.as_i64().wrapping_add(1));
+            pg.trans_value_is_null = false;
+            pg.no_trans_value = false;
+        }
+        LaneKind::CountAny => {
+            if !isnull[i] {
+                pg.trans_value = Datum::from_i64(pg.trans_value.as_i64().wrapping_add(1));
+                pg.trans_value_is_null = false;
+                pg.no_trans_value = false;
+            }
+        }
+        LaneKind::Sum => {
+            if !isnull[i] {
+                let delta = sc_xform(t, sc_lane_value(values, t.width, i));
+                let old = if pg.trans_value_is_null { 0 } else { pg.trans_value.as_i64() };
+                pg.trans_value = Datum::from_i64(old.wrapping_add(delta));
+                pg.trans_value_is_null = false;
+            }
+        }
+        LaneKind::Min | LaneKind::Max => {
+            if !isnull[i] {
+                let v = sc_xform(t, sc_lane_value(values, t.width, i));
+                if pg.no_trans_value {
+                    pg.trans_value = sc_store_res(t, v);
+                    pg.trans_value_is_null = false;
+                    pg.no_trans_value = false;
+                } else if !pg.trans_value_is_null {
+                    let old = sc_load_res(t, pg);
+                    let next =
+                        if t.kind == LaneKind::Max { old.max(v) } else { old.min(v) };
+                    if next != old {
+                        pg.trans_value = sc_store_res(t, next);
+                    }
+                }
+            }
+        }
+        _ => unreachable!("non-whitelist kind on a scatter transition"),
+    }
+}
+
+impl SinkScatter {
+    /// Shared constructor (the unit tests build descriptor sets directly;
+    /// `sink_scatter_new` is the executor's validated path).
+    fn from_parts(
+        trans: Vec<::lanefold::LaneTrans>,
+        init: Vec<u64>,
+        key_width: u8,
+    ) -> SinkScatter {
+        SinkScatter {
+            trans,
+            init,
+            key_width,
+            keys: (0..SINK_NBUCKETS).map(|_| Vec::new()).collect(),
+            states: (0..SINK_NBUCKETS).map(|_| Vec::new()).collect(),
+            nrows: 0,
+            null_block: None,
+        }
+    }
+
+    /// Buffered non-NULL rows (the flush-cadence clock).
+    #[inline]
+    pub fn nrows(&self) -> usize {
+        self.nrows
+    }
+
+    /// Heap bytes held against the Local's budget (capacity, the
+    /// [`SinkRun::bytes`] discipline).
+    pub fn bytes(&self) -> usize {
+        self.keys.iter().map(|v| v.capacity() * 8).sum::<usize>()
+            + self.states.iter().map(|v| v.capacity() * 8).sum::<usize>()
+            + self.null_block.as_ref().map_or(0, |b| b.capacity() * 8)
+    }
+
+    /// Scatter one staged batch's survivors: for each row, canonicalize the
+    /// key (the `agg_hash_compact_batch` width law), radix-route on
+    /// [`sink_hash`]'s top byte, and append the one-row state block.
+    /// `keys`/`knull` are parallel to `rows`; `cols` answers the staged
+    /// lanes the transitions read.
+    pub fn absorb_batch(
+        &mut self,
+        cols: &impl ::lanefold::LaneCols,
+        rows: &[u32],
+        keys: &[Datum],
+        knull: &[bool],
+    ) {
+        debug_assert_eq!(rows.len(), keys.len());
+        debug_assert_eq!(rows.len(), knull.len());
+        let SinkScatter { trans, init, key_width, keys: bkeys, states, nrows, null_block } =
+            self;
+        let hoisted: Vec<(&[Datum], &[bool])> = trans
+            .iter()
+            .map(|t| (cols.col_values(t.col as usize), cols.col_isnull(t.col as usize)))
+            .collect();
+        let state_words = init.len();
+        for (j, &row) in rows.iter().enumerate() {
+            let i = row as usize;
+            if knull[j] {
+                let blk = null_block.get_or_insert_with(|| init.clone());
+                let pgs = blk.as_mut_ptr().cast::<AggPerGroup>();
+                for (t, (values, isnull)) in trans.iter().zip(hoisted.iter()) {
+                    // SAFETY: blk holds numtrans AggPerGroup slots (the
+                    // init template's layout).
+                    scatter_apply_row(t, unsafe { &mut *pgs.add(t.transno as usize) },
+                        values, isnull, i);
+                }
+                continue;
+            }
+            let k = match key_width {
+                2 => keys[j].as_i16() as i64,
+                4 => keys[j].as_i32() as i64,
+                _ => keys[j].as_i64(),
+            };
+            let w0 = k as u64;
+            let b = bucket_of(sink_hash(w0, 0));
+            bkeys[b].push(w0);
+            let st = &mut states[b];
+            let base = st.len();
+            st.extend_from_slice(init);
+            let pgs = st[base..base + state_words].as_mut_ptr().cast::<AggPerGroup>();
+            for (t, (values, isnull)) in trans.iter().zip(hoisted.iter()) {
+                // SAFETY: the freshly appended block holds numtrans
+                // AggPerGroup slots (the init template's layout).
+                scatter_apply_row(t, unsafe { &mut *pgs.add(t.transno as usize) },
+                    values, isnull, i);
+            }
+            *nrows += 1;
+        }
+    }
+
+    /// Assemble the buffered rows into one bucket-contiguous [`SinkRun`]
+    /// (single-word keys, arrival order preserved per bucket) and reset the
+    /// buffers (allocations retained — the flush re-arm discipline).
+    /// `None` = nothing buffered.
+    pub fn take_run(&mut self) -> Option<SinkRun> {
+        if self.nrows == 0 && self.null_block.is_none() {
+            return None;
+        }
+        let state_words = self.init.len();
+        let mut starts: Vec<u32> = Vec::with_capacity(SINK_NBUCKETS + 1);
+        let mut acc = 0u32;
+        starts.push(0);
+        for b in 0..SINK_NBUCKETS {
+            acc += self.keys[b].len() as u32;
+            starts.push(acc);
+        }
+        let mut keys: Vec<u64> = Vec::with_capacity(self.nrows);
+        let mut states: Vec<u64> = Vec::with_capacity(self.nrows * state_words);
+        for b in 0..SINK_NBUCKETS {
+            keys.extend_from_slice(&self.keys[b]);
+            states.extend_from_slice(&self.states[b]);
+            self.keys[b].clear();
+            self.states[b].clear();
+        }
+        self.nrows = 0;
+        Some(SinkRun {
+            key_words: 1,
+            key_ends: Vec::new(),
+            state_words,
+            starts,
+            keys,
+            states,
+            null_states: self.null_block.take(),
+            key_offs: Vec::new(),
+            key_bytes: Vec::new(),
+            hashes: Vec::new(),
+            gid_gen: 0,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests: pure kernels, no executor.
 // ---------------------------------------------------------------------------
 
@@ -8134,4 +8481,298 @@ mod tests {
         // with exact counts — the generation stamp did its job.
     }
 
+    // ---- SCATTER ACCEPT (GL-RADIX-3 fold-bypass) ---------------------
+
+    /// Staged-lane stand-in for the scatter tests.
+    struct TestCols {
+        vals: Vec<Vec<Datum>>,
+        nulls: Vec<Vec<bool>>,
+    }
+
+    impl ::lanefold::LaneCols for TestCols {
+        fn col_values(&self, c: usize) -> &[Datum] {
+            &self.vals[c]
+        }
+        fn col_isnull(&self, c: usize) -> &[bool] {
+            &self.nulls[c]
+        }
+    }
+
+    /// The scatter fixture's transitions: count(*), count(col1),
+    /// sum(col2 + 3) (int4 lane, addend transform), max(col3) (int4).
+    fn scatter_trans() -> Vec<::lanefold::LaneTrans> {
+        use ::lanefold::{FloatConv, LaneKind, LaneTrans, LaneWidth, NO_FILTER};
+        let mk = |kind, col: u16, width, res_width, addend: i32, transno: u16| LaneTrans {
+            kind,
+            col,
+            col2: col,
+            width,
+            res_width,
+            fconv: FloatConv::None,
+            fconv2: FloatConv::None,
+            filter: NO_FILTER,
+            addend,
+            mulk: 1,
+            divk: 1,
+            transno,
+        };
+        vec![
+            mk(LaneKind::CountStar, 0, LaneWidth::I64, LaneWidth::I64, 0, 0),
+            mk(LaneKind::CountAny, 1, LaneWidth::I64, LaneWidth::I64, 0, 1),
+            mk(LaneKind::Sum, 2, LaneWidth::I32, LaneWidth::I64, 3, 2),
+            mk(LaneKind::Max, 3, LaneWidth::I32, LaneWidth::I32, 0, 3),
+        ]
+    }
+
+    /// The fixture's seeded init template (`seed_new_groups` field values):
+    /// counts non-null 0, sum/max NULL initvals.
+    fn scatter_init() -> Vec<u64> {
+        let mut init = vec![0u64; 4 * 2];
+        scatter_seed_slot(&mut init, 0, Datum::from_i64(0), false);
+        scatter_seed_slot(&mut init, 1, Datum::from_i64(0), false);
+        scatter_seed_slot(&mut init, 2, Datum::from_i64(0), true);
+        scatter_seed_slot(&mut init, 3, Datum::from_i64(0), true);
+        init
+    }
+
+    fn scatter_combines() -> Vec<SinkCombineFn> {
+        fn add(
+            _f: Option<&mut ::types_fmgr::FmgrInfo>,
+            fcinfo: &mut ::types_fmgr::FunctionCallInfoBaseData,
+        ) -> PgResult<Datum> {
+            let a = fcinfo.args[0].value.as_i64();
+            let b = fcinfo.args[1].value.as_i64();
+            Ok(Datum::from_i64(a.wrapping_add(b)))
+        }
+        fn larger32(
+            _f: Option<&mut ::types_fmgr::FmgrInfo>,
+            fcinfo: &mut ::types_fmgr::FunctionCallInfoBaseData,
+        ) -> PgResult<Datum> {
+            let a = fcinfo.args[0].value.as_i32();
+            let b = fcinfo.args[1].value.as_i32();
+            Ok(Datum::from_i32(a.max(b)))
+        }
+        let f = |func| SinkCombineFn {
+            func,
+            strict: true,
+            collation: Oid::from(0u8),
+            kind: SinkCombineKind::Byval,
+        };
+        vec![f(add), f(add), f(add), f(larger32)]
+    }
+
+    /// Row states as the OBSERVABLE pairs (isnull, value-as-i64) per
+    /// transno. `no_trans_value` is deliberately outside the comparison:
+    /// the combine clears it on any second arrival, so it is
+    /// flush-cadence-dependent under the INCUMBENT cadences too (a group
+    /// split across two cap windows vs one) — it is not part of the
+    /// run/combine contract's observable state, and the one post-combine
+    /// reader (topn) is excluded from scatter admission.
+    fn row_obs(t: &LaneAggTable, row: usize) -> Vec<(bool, i64)> {
+        let pg = t.row_states(row).cast_const().cast::<AggPerGroup>();
+        (0..4)
+            .map(|k| unsafe {
+                let s = &*pg.add(k);
+                (
+                    s.trans_value_is_null,
+                    if s.trans_value_is_null { 0 } else { s.trans_value.as_i64() },
+                )
+            })
+            .collect()
+    }
+
+    /// The scatter arm's byte-identity claim, unit form (the
+    /// seal_flush_run_matches_remainder_view model): scatter-built runs
+    /// (single-row state blocks, duplicate keys, arbitrary flush cadence)
+    /// must combine to per-bucket tables identical in row order and
+    /// observable state content to the incumbent fold path (probe + seeded
+    /// init + per-row transitions + cap-flush runs + SEAL remainder).
+    #[test]
+    fn scatter_runs_combine_matches_fold() {
+        let trans = scatter_trans();
+        let init = scatter_init();
+        // 2000 rows over 500 int keys (α = 4 — every group merges across
+        // scattered arrivals), plus NULL keys and NULL inputs.
+        let n = 2000usize;
+        let mut rows: Vec<u32> = Vec::new();
+        let mut keys: Vec<Datum> = Vec::new();
+        let mut knull: Vec<bool> = Vec::new();
+        let mut cols = TestCols {
+            vals: vec![vec![Datum::from_i64(0); n]; 4],
+            nulls: vec![vec![false; n]; 4],
+        };
+        for i in 0..n {
+            rows.push(i as u32);
+            if i % 97 == 13 {
+                keys.push(Datum::from_i64(0));
+                knull.push(true);
+            } else {
+                keys.push(Datum::from_i64((i % 500) as i64));
+                knull.push(false);
+            }
+            // col1: count(col) input, NULL every 7th row.
+            cols.nulls[1][i] = i % 7 == 0;
+            cols.vals[1][i] = Datum::from_i64(1);
+            // col2: sum input (int4 lane), NULL every 11th row.
+            cols.nulls[2][i] = i % 11 == 0;
+            cols.vals[2][i] = Datum::from_i32((i % 61) as i32 - 30);
+            // col3: max input (int4 lane), NULL every 5th row.
+            cols.nulls[3][i] = i % 5 == 0;
+            cols.vals[3][i] = Datum::from_i32(((i * 37) % 101) as i32 - 50);
+        }
+
+        // Incumbent: fold every row into a real table (probe + seed + the
+        // same per-row transition bodies), cap-flushing at 300 entries —
+        // groups straddle the flush boundary, exercising cross-run merges.
+        let mut t = LaneAggTable::with_config(
+            KeyRepr::Int,
+            4 * core::mem::size_of::<AggPerGroup>(),
+            64,
+            HashKind::best(),
+            EntryLayout::Inline16,
+        );
+        let mut fold_runs: Vec<SinkRun> = Vec::new();
+        for j in 0..n {
+            if t.nrows() >= 300 {
+                fold_runs.push(sink_flush_table(&mut t));
+            }
+            let pr = if knull[j] {
+                t.probe_null()
+            } else {
+                let k = keys[j].as_i64();
+                t.probe_int(k, t.hash_key_int(k as u64))
+            };
+            let pgs = pr.states.cast::<AggPerGroup>();
+            if pr.is_new {
+                // seed_new_groups' field values (the init template).
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        init.as_ptr(),
+                        pr.states.cast::<u64>(),
+                        init.len(),
+                    );
+                }
+            }
+            for tr in &trans {
+                // SAFETY: live 4-slot state block.
+                let pg = unsafe { &mut *pgs.add(tr.transno as usize) };
+                scatter_apply_row(tr, pg, &cols.vals[tr.col as usize],
+                    &cols.nulls[tr.col as usize], j);
+            }
+        }
+        let part = sink_partition_remainder(&t);
+        let locals_fold = [SinkLocalView {
+            spilled: &[],
+            runs: &fold_runs,
+            remainder: Some(SinkRemainder {
+                table: &t,
+                part: &part,
+                canon: None,
+                canon_store: None,
+                gid_gen: 0,
+                direct: false,
+            }),
+        }];
+
+        // Scatter: same rows in batch slices, a DIFFERENT flush cadence
+        // (take_run mid-stream + at the end — the cadence-freedom claim).
+        let mut sc = SinkScatter::from_parts(trans.clone(), init.clone(), 8);
+        let mut sc_runs: Vec<SinkRun> = Vec::new();
+        for (bi, chunk) in rows.chunks(97).enumerate() {
+            let lo = bi * 97;
+            sc.absorb_batch(&cols, chunk, &keys[lo..lo + chunk.len()],
+                &knull[lo..lo + chunk.len()]);
+            if sc.nrows() >= 700 {
+                sc_runs.extend(sc.take_run());
+            }
+        }
+        sc_runs.extend(sc.take_run());
+        assert!(sc_runs.len() >= 2, "cadence exercise wants multiple runs");
+        assert_eq!(
+            sc_runs.iter().map(SinkRun::nrows).sum::<usize>(),
+            n - rows.iter().filter(|&&r| knull[r as usize]).count(),
+            "every non-NULL-key row scatters exactly once"
+        );
+        let locals_sc =
+            [SinkLocalView { spilled: &[], runs: &sc_runs, remainder: None }];
+
+        let combines = scatter_combines();
+        let state_bytes = 4 * core::mem::size_of::<AggPerGroup>();
+        let mut total = 0usize;
+        for b in 0..SINK_NBUCKETS {
+            let ta = sink_combine_bucket(b, 1, state_bytes, &locals_fold, &combines).unwrap();
+            let tb = sink_combine_bucket(b, 1, state_bytes, &locals_sc, &combines).unwrap();
+            assert_eq!(ta.nrows(), tb.nrows(), "bucket {b} row count");
+            total += ta.nrows();
+            for row in 0..ta.nrows() {
+                assert_eq!(
+                    ta.row_key_int(row),
+                    tb.row_key_int(row),
+                    "bucket {b} row {row} key (first-seen order)"
+                );
+                assert_eq!(
+                    row_obs(&ta, row),
+                    row_obs(&tb, row),
+                    "bucket {b} row {row} states"
+                );
+            }
+        }
+        assert_eq!(total, 501, "500 int groups + the NULL group");
+    }
+
+    /// The single-row block law itself: one scattered row's state block is
+    /// the fold of that one row from the seeded init (count → 1, sum → the
+    /// transformed value non-null, strict max → the value adopted; NULL
+    /// inputs leave the seeded state).
+    #[test]
+    fn scatter_single_row_block_is_one_row_fold() {
+        let mut sc = SinkScatter::from_parts(scatter_trans(), scatter_init(), 8);
+        let cols = TestCols {
+            vals: vec![
+                vec![Datum::from_i64(0), Datum::from_i64(0)],
+                vec![Datum::from_i64(1), Datum::from_i64(1)],
+                vec![Datum::from_i32(40), Datum::from_i32(40)],
+                vec![Datum::from_i32(-7), Datum::from_i32(-7)],
+            ],
+            // Row 1: every input NULL — the block must stay the seed
+            // (counts 0, sum/max NULL).
+            nulls: vec![
+                vec![false, false],
+                vec![false, true],
+                vec![false, true],
+                vec![false, true],
+            ],
+        };
+        sc.absorb_batch(
+            &cols,
+            &[0, 1],
+            &[Datum::from_i64(42), Datum::from_i64(43)],
+            &[false, false],
+        );
+        let run = sc.take_run().expect("two rows buffered");
+        assert_eq!(run.nrows(), 2);
+        assert!(run.null_states.is_none());
+        assert_eq!(run.state_words, 8);
+        // Locate each key's slot (bucket-major layout).
+        let slot_of = |key: u64| run.keys.iter().position(|&k| k == key).unwrap();
+        let obs = |slot: usize, transno: usize| {
+            let w0 = run.states[slot * 8 + transno * 2];
+            let flags = run.states[slot * 8 + transno * 2 + 1];
+            (flags & 0xFF != 0, w0)
+        };
+        let s0 = slot_of(42);
+        assert_eq!(obs(s0, 0), (false, 1), "count(*) of one row");
+        assert_eq!(obs(s0, 1), (false, 1), "count(col) of one non-null row");
+        assert_eq!(obs(s0, 2), (false, 43), "sum: value 40 + addend 3");
+        assert_eq!(
+            obs(s0, 3),
+            (false, Datum::from_i32(-7).as_u64()),
+            "max: the value at res_width"
+        );
+        let s1 = slot_of(43);
+        assert_eq!(obs(s1, 0), (false, 1), "count(*) counts the NULL-input row");
+        assert_eq!(obs(s1, 1), (false, 0), "count(col) skips the NULL input");
+        assert_eq!(obs(s1, 2), (true, 0), "sum stays the NULL seed");
+        assert_eq!(obs(s1, 3), (true, 0), "max stays the NULL seed");
+    }
 }
