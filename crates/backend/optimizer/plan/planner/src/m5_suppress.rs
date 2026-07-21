@@ -903,15 +903,27 @@ fn bpchar_keys_enabled() -> bool {
 /// l_receiptdate — no grounding). Post-filter estimates flow into the
 /// floors and the per-edge NL margins automatically (RelOptInfo.rows is
 /// post-restriction at the probe's choke point), so filtered builds
-/// cannot out-run the election evidence. DEFAULT OFF;
-/// `PGRUST_LANE_V2_JOINFILTERS=1|on` arms (GL-FILTERQUALS-1 owns the
-/// flip). NOT touched: the EC-tree law (full q05's shared s_nationkey
+/// cannot out-run the election evidence.
+///
+/// DEFAULT ON (tpch-flips train; GL-FILTERQUALS-1 FLIP-RECOMMENDED,
+/// fleet-ab-parallelism.md 2026-07-21): the first FILTERED grouped-join
+/// engagements — the six-car filtered composition 2.36-2.85x, the
+/// SAOP-filtered core 2.50-3.01x, the stats-grounded restriction halves
+/// 1.39-1.88x vs legacy; the stats-defaulting expr term NEVER keys
+/// (suppress-then-refuse channel closed live at scale); the selectivity
+/// ladder (90..1% x indexed/unindexed dims) found NO keyed point losing
+/// to the serial costing's election — below the knob's own suppression
+/// region the legacy costing itself elects SERIAL plans where the
+/// default-ON serial-shaped runtime path already engages in both arms and
+/// beats that election 3.7-8.2x — so NO selectivity floor is carried (the
+/// ladder's explicit verdict). `PGRUST_LANE_V2_JOINFILTERS=0|off` is the
+/// kill switch (t35 exact-spelling law). NOT touched: the EC-tree law (full q05's shared s_nationkey
 /// endpoint is the hostile-proven H1/H2 hazard — a correctness guard,
 /// not conservatism) and the plain rows' pre-existing wider admission.
 fn joinfilters_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        knob_spelling_armed(std::env::var("PGRUST_LANE_V2_JOINFILTERS").as_deref().ok())
+        knob_spelling_on(std::env::var("PGRUST_LANE_V2_JOINFILTERS").as_deref().ok())
     })
 }
 
@@ -4942,7 +4954,9 @@ mod tests {
     /// refusal byte-for-byte at default.
     #[test]
     fn joinfilters_knob_default_off() {
-        assert!(!joinfilters_enabled(), "test process has no knob set => OFF");
+        // tpch-flips: DEFAULT ON (GL-FILTERQUALS-1; =0|off kills; the
+        // ladder carried NO selectivity floor — its explicit verdict).
+        assert!(joinfilters_enabled(), "tpch-flips: unset => ON (GL-FILTERQUALS-1)");
     }
 
     /// TPCH-JHEAP NL-election margin + floor: the margin must be a real
