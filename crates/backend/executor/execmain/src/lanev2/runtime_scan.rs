@@ -2653,13 +2653,31 @@ fn engage_ceremony<'mcx>(
             deferred_bind: true,
         });
 
+        // M2 inc-2: the POOL-DB channel — built BEFORE submit because the
+        // bound descriptor must ride the submission (publication sets the
+        // pool-visible active bit off it). None (kill switch etc.) keeps
+        // the plain pinned submit: inc-1 byte-exactly.
+        let pool = super::standing_channel::try_pool_channel(
+            payload.pcxt_shared.get().expect("pcxt shared set above"),
+            dop,
+            /* sinks_gate */ false,
+        );
+
         // Submit the pinned RG before launch: helpers find work immediately.
         let work: Arc<dyn runtime::TaskSetWork> = Arc::clone(payload) as _;
         static NEXT_QUERY_ID: AtomicUsize = AtomicUsize::new(1);
-        let (rg, waiter) = rt.submit_pinned_with_affinity(runtime::QuerySpec {
+        let spec = runtime::QuerySpec {
             query_id: NEXT_QUERY_ID.fetch_add(1, Ordering::SeqCst) as u64,
             tasksets: vec![runtime::TaskSetSpec { source, work, deps: vec![] }],
-        }, router::session_affinity_token());
+        };
+        let (rg, waiter) = match &pool {
+            Some((_, descriptor)) => rt.submit_pinned_bound(
+                spec,
+                router::session_affinity_token(),
+                descriptor.clone(),
+            ),
+            None => rt.submit_pinned_with_affinity(spec, router::session_affinity_token()),
+        };
         payload
             .rg
             .set(rg.downgrade())
@@ -2690,6 +2708,7 @@ fn engage_ceremony<'mcx>(
                     .pcxt_shared
                     .get()
                     .expect("pcxt shared set before standing_wait"),
+                pool: pool.as_ref().map(|(entry, _)| Arc::clone(entry)),
                 slot: &payload.standing,
                 started: &payload.started,
                 refused: &payload.refused,
@@ -2981,10 +3000,14 @@ static STANDING_ARM: super::standing_channel::StandingArm =
 fn runtime_scan_standing_driver(shared: &parallel::ParallelShared) {
     let Some(private) = shared.private() else { return };
     let Ok(payload) = private.downcast::<RuntimeScanShared>() else { return };
-    // sticky=true: standing gang workers may retain the session bind
-    // between same-session engagements (ceremony-v2; launched/wpool
-    // helpers must always park boundary-clean, hence false above).
-    let r = catch_unwind(AssertUnwindSafe(|| helper_drive(shared, &payload, true)));
+    // sticky: standing GANG workers may retain the session bind between
+    // same-session engagements (ceremony-v2; launched/wpool helpers must
+    // always park boundary-clean, hence false above). POOL serves (M2
+    // inc-2) disable retention too: between engagements a pool thread runs
+    // ordinary runtime work (maintenance cycles, unbound task sets), which
+    // must never see a retained session's identity/GUC view.
+    let sticky = !parallel::standing::serving_on_pool();
+    let r = catch_unwind(AssertUnwindSafe(|| helper_drive(shared, &payload, sticky)));
     if let Err(unwind) = r {
         payload.fail(PgError::new(ERROR, "runtime scan standing executor panicked").into());
         latch::SetLatch(::types_storage::latch::LatchHandle::proc(

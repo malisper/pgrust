@@ -1344,6 +1344,10 @@ fn engage_ceremony<'mcx>(
         match super::standing_channel::standing_wait(
             &STANDING_ARM,
             super::standing_channel::StandingLeader {
+                // M2 inc-2: sink arms ride the pool-db channel in the
+                // follow-up wiring (scan arm first — the funnel
+                // discipline); None = gang-first, inc-1 exactly.
+                pool: None,
                 shared: payload.pcxt_shared.get().expect("pcxt shared set above"),
                 slot: &payload.standing,
                 started: &payload.started,
