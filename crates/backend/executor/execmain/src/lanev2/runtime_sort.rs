@@ -1781,16 +1781,22 @@ fn runtime_sort_zonestats_cap() -> u64 {
 }
 
 /// EXPECTED-EARLY-EXIT band arm (the serial-term enforce lane,
-/// GL-SERIALTERM-2; DEFAULT OFF pending the flip letter — `1|on` arms).
-/// Layered under GCUT like the zone-friendly band (the stats read is the
-/// same walk); OFF = the shipped admission byte-identically.
+/// GL-SERIALTERM-2). DEFAULT ON since the flip increment (flipped-kill
+/// idiom): `PGRUST_RUNTIME_SORT_EARLYEXIT_BAND=0|off` restores the
+/// pre-band admission (the shipped arm whole-scans the shape). Flip
+/// letter of record: the both-ways full-scale ladder at the enforce tip
+/// — the band-delivered wall beats/ties the engaged arm on the census
+/// shape at every dop while the qual/tie-guard control shapes stay
+/// byte-flat (GL-SERIALTERM-2-letter). Layered under GCUT like the
+/// zone-friendly band (the stats read is the same walk).
 fn runtime_sort_earlyexit_band_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        matches!(
-            std::env::var("PGRUST_RUNTIME_SORT_EARLYEXIT_BAND").as_deref(),
-            Ok("1") | Ok("on")
-        )
+        runtime_sort_gcut_enabled()
+            && !matches!(
+                std::env::var("PGRUST_RUNTIME_SORT_EARLYEXIT_BAND").as_deref(),
+                Ok("0") | Ok("off")
+            )
     })
 }
 
@@ -2803,15 +2809,19 @@ mod earlyexit_band_tests {
         assert!(!earlyexit_band_takes(10, 12_210, 0, 0));
     }
 
-    /// The arm knob is DEFAULT OFF pending the flip letter (build-time
-    /// posture: an unset env must leave the shipped admission intact).
-    /// Spelling is the tier-2 rule: exactly `1|on` arms.
+    /// Posture of record since the GL-SERIALTERM-2 flip: DEFAULT ON
+    /// (flipped-kill — `0|off` restores the pre-band admission), and the
+    /// band rides the GCUT layer (killing GCUT stands the band down with
+    /// the zone machinery that feeds it).
     #[test]
-    fn earlyexit_band_default_off() {
+    fn earlyexit_band_default_on_flipped_kill() {
         // NOTE: OnceLock reads the process env once; tests must not set
-        // the var. Unset in the test runner => the default posture.
-        if std::env::var("PGRUST_RUNTIME_SORT_EARLYEXIT_BAND").is_err() {
-            assert!(!runtime_sort_earlyexit_band_enabled());
+        // the vars. Unset in the test runner => the default posture.
+        if std::env::var("PGRUST_RUNTIME_SORT_EARLYEXIT_BAND").is_err()
+            && std::env::var("PGRUST_RUNTIME_SORT_GCUT").is_err()
+            && std::env::var("PGRUST_RUNTIME_SORT_COLSTAGE").is_err()
+        {
+            assert!(runtime_sort_earlyexit_band_enabled());
         }
         assert_eq!(runtime_sort_earlyexit_min_granules(), 6_000);
     }
