@@ -272,6 +272,41 @@ fn lane_trace_enabled() -> bool {
     })
 }
 
+/// GL-ROWMODE-1: emit a row-mode OWNED engagement trace at most ONCE per
+/// (class × execution), deduped through the estate-resident
+/// `es_lane_trace_owned` bitmask (bit = `ShapeClass` discriminant; workers
+/// dedup on their own estates, so per-worker engagement stays visible).
+///
+/// The OWNED verdict/tick cadence is per pull (row-mode law §3.3) and is
+/// NOT changed here — only the trace line's cadence is. A per-pull trace on
+/// a delegation leaf that sits on a per-inner-row pull path is one
+/// format! + locked stderr write syscall per inner row per worker: a merge
+/// join's Materialize inner re-pulled across its mark/restore cycle emitted
+/// ~1.2M lines per statement at w16 and turned a ~50ms statement into
+/// ~10-17s (~200-330x) under a trace-armed boot — which read as a
+/// legacy-engine collapse in the rowflip measurement vehicle (that vehicle
+/// boots with the trace armed) and was UNDER-read by EXPLAIN ANALYZE (the
+/// instrumented gate refuses before the trace). Engagement witnesses assert
+/// line PRESENCE, never per-pull counts (lane-rowmode-tail-e2e asserts off
+/// the stats TSV), so first-pull-only is witness-preserving.
+///
+/// Trace-disarmed cost is one cached-bool check — identical to a bare
+/// `lane_trace` call; the line closure runs only on the first armed emit.
+pub(self) fn lane_trace_owned_once<F: FnOnce() -> String>(
+    class: ShapeClass,
+    estate: &mut ::executils::EStateData<'_>,
+    line: F,
+) {
+    if !lane_trace_enabled() {
+        return;
+    }
+    let bit = 1u64 << (class as usize);
+    if estate.es_lane_trace_owned & bit == 0 {
+        estate.es_lane_trace_owned |= bit;
+        lane_trace(&line());
+    }
+}
+
 /// Process-static diagnostics mask for the row-mode LEAF drives' owned path
 /// (se-delegtax SH-B): bit 0 = lane accounting armed (`stats::armed()` —
 /// PGRUST_LANE_V2_STATS / PGRUST_LANE_V2_COVERAGE), bit 1 = engagement trace
@@ -312,6 +347,28 @@ pub(crate) fn refresh_lane_leaf_fast(estate: &mut ::executils::EStateData<'_>) {
         && estate.es_instrument == 0
         && !estate.engine_capture()
         && leaf_diag_mask() == 0;
+    // GL-ROWMODE-1 known-divergence note (trace-armed only, once per
+    // execution — bit 63 of the owned-trace dedup mask, no ShapeClass
+    // conflict at N_CLASSES=41): an instrumented execution (EXPLAIN
+    // ANALYZE / auto_explain) refuses every lane/runtime arm through the
+    // Instrumented gates, so its timings measure the fallback executor —
+    // any shape where an arm is slower OR faster than the fallback reads
+    // differently under instrumentation than in plain execution. The gate
+    // is load-bearing (the arms carry no per-node instrumentation
+    // counters; owning an instrumented pull would fabricate zeroed
+    // EXPLAIN ANALYZE node stats), so the honest posture is this
+    // triage-visible marker rather than a silent divergence.
+    if estate.es_instrument != 0 && enabled() && lane_trace_enabled() {
+        const INSTR_NOTE: u64 = 1u64 << 63;
+        if estate.es_lane_trace_owned & INSTR_NOTE == 0 {
+            estate.es_lane_trace_owned |= INSTR_NOTE;
+            lane_trace(
+                "instrumented execution: lane arms refuse under instrumentation — \
+                 instrumented timings measure the fallback executor, not the arms \
+                 a plain execution elects",
+            );
+        }
+    }
 }
 
 #[cold]

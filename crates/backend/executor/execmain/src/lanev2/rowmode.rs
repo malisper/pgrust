@@ -366,7 +366,7 @@ fn mj_verdict_slow<'mcx>(
     }
     let diag = super::leaf_diag_mask();
     if diag != 0 {
-        mj_diag_owned(diag);
+        mj_diag_owned(diag, estate);
     }
     #[cfg(test)]
     ROWMODE_MJ_OWNED_FOR_TESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -397,13 +397,19 @@ fn mj_gate_refused<'mcx>(
 
 /// Cold owned-path diagnostics tail (SH-B): reached only when the diag mask
 /// is nonzero (accounting or trace armed — never at default config).
+/// GL-ROWMODE-1: the TRACE line (bit 1) is deduped to the first owned pull
+/// per execution (tick cadence unchanged; rationale at
+/// `lane_trace_owned_once` — the MergeJoin verdict is per output-row pull,
+/// the same unbounded cadence as the tail leaves).
 #[cold]
 #[inline(never)]
-fn mj_diag_owned(diag: u8) {
+fn mj_diag_owned(diag: u8, estate: &mut EStateData<'_>) {
     if diag & 1 != 0 {
         stats::tick_owned(ShapeClass::MergeJoin);
     }
     if diag & 2 != 0 {
-        super::lane_trace("mergejoin: row-mode drive owned");
+        super::lane_trace_owned_once(ShapeClass::MergeJoin, estate, || {
+            "mergejoin: row-mode drive owned".to_owned()
+        });
     }
 }

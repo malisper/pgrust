@@ -133,14 +133,21 @@ fn tail_gate_refused(class: ShapeClass, estate: &EStateData<'_>) -> RefuseReason
 /// Cold owned-path diagnostics tail (se-delegtax SH-B): reached only when
 /// `super::leaf_diag_mask()` is nonzero (accounting or trace armed — never
 /// at default config). Tick cadence unchanged: OWNED once per drive start.
+/// GL-ROWMODE-1: the TRACE line (bit 1) is deduped to the first owned pull
+/// per class per execution — per-pull tracing on these delegation leaves is
+/// a per-inner-row stderr write on merge-join-over-Materialize shapes (the
+/// witnessed ~200-330x trace-armed collapse; rationale at
+/// `lane_trace_owned_once`).
 #[cold]
 #[inline(never)]
-fn tail_diag_owned(class: ShapeClass, diag: u8) {
+fn tail_diag_owned(class: ShapeClass, diag: u8, estate: &mut EStateData<'_>) {
     if diag & 1 != 0 {
         stats::tick_owned(class);
     }
     if diag & 2 != 0 {
-        super::lane_trace(&format!("rowmode-tail: {} drive owned", class.name()));
+        super::lane_trace_owned_once(class, estate, || {
+            format!("rowmode-tail: {} drive owned", class.name())
+        });
     }
 }
 
@@ -209,7 +216,7 @@ fn verdict_slow<F: FnOnce() -> Option<i32>>(
     }
     let diag = super::leaf_diag_mask();
     if diag != 0 {
-        tail_diag_owned(class, diag);
+        tail_diag_owned(class, diag, estate);
     }
     #[cfg(test)]
     ROWMODE_TAIL_OWNED_FOR_TESTS[class as usize].fetch_add(1, Relaxed);
