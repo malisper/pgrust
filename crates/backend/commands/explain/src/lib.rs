@@ -181,6 +181,13 @@ pub fn standard_ExplainOneQuery<'mcx>(
     let plan = postgres::simple_query::pg_plan_query(mcx, mcx::leak_in(mcx::alloc_in(mcx, query)?), query_string, cursor_options, params)?
         .expect("planner will not cope with utility statements");
     let planduration = planstart.elapsed();
+    // Step-2 cost-shadow EXPLAIN sample (runtime-cost-model design §5 step
+    // 2): take the sample this planning recorded (the planner cleared the
+    // slot at entry, so a query that never classified covered yields None).
+    // One cached-bool load when PGRUST_M5_COST_EXPLAIN is off.
+    if planner::m5_suppress::cost_shadow::explain_armed() {
+        es.m5_cost_route = planner::m5_suppress::cost_shadow::take_last_sample();
+    }
     let mem_counters = mem_before.map(|b| mem_counters_since(mcx, b));
     let bufusage = bufusage_start.map(|start| {
         let mut b = BufferUsage::default();
@@ -579,6 +586,28 @@ fn ExplainOnePlanRef<'mcx>(
             es.indent -= 1;
         }
         ExplainCloseGroup("Planning", Some("Planning"), true, es);
+    }
+
+    // pgrust-only "M5 Cost Route" line (knob-gated: the field is only ever
+    // filled while PGRUST_M5_COST_EXPLAIN is armed — default OFF keeps every
+    // EXPLAIN golden byte-identical). Shows the shadow verdict pair of the
+    // planning that produced this plan: the whitelist/floor verdict, the
+    // cost-model verdict, and which mechanism decided.
+    if let Some(s) = es.m5_cost_route {
+        ExplainPropertyText(
+            "M5 Cost Route",
+            &format!(
+                "class={} r_pred={:.3} model={} whitelist={} decided_by={} rows={:.0} dop={}",
+                s.class,
+                s.ratio,
+                if s.model_suppress { "suppress" } else { "gather" },
+                if s.whitelist_suppress { "suppress" } else { "gather" },
+                s.decided_by,
+                s.rows,
+                s.dop,
+            ),
+            es,
+        );
     }
 
     if es.summary {

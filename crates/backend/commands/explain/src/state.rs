@@ -76,6 +76,14 @@ pub struct ExplainState<'mcx> {
     pub rtable_names: PgVec<'mcx, Option<&'mcx str>>,
     pub hide_workers: bool,
     pub workers_state: Option<WorkersState<'mcx>>,
+    /// pgrust-only (runtime-cost-model design §5 step 2): the m5 cost-shadow
+    /// sample of the planning that produced this plan, printed as one
+    /// "M5 Cost Route" line. Filled ONLY by standard_ExplainOneQuery (fresh
+    /// plan — the prepared-statement path deliberately never fills it: a
+    /// cached plan's sample belongs to whoever planned it) and ONLY while
+    /// `PGRUST_M5_COST_EXPLAIN` is armed; None keeps EXPLAIN output
+    /// byte-identical to today.
+    pub m5_cost_route: Option<planner::m5_suppress::cost_shadow::ExplainSample>,
     /// C's void*-per-extension slot array, indexed by GetExplainExtensionId.
     pub extension_state: PgVec<'mcx, Option<&'mcx (dyn core::any::Any + 'static)>>,
     /// plan_ids already displayed (C printed_subplans).
@@ -109,6 +117,7 @@ pub fn NewExplainState(mcx: Mcx<'_>) -> PgResult<ExplainState<'_>> {
         rtable_names: PgVec::new_in(mcx),
         hide_workers: false,
         workers_state: None,
+        m5_cost_route: None,
         extension_state: PgVec::new_in(mcx),
         deparse_cxt: None,
     })

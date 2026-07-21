@@ -14,8 +14,12 @@
 # Model: t_rt = c_engage + w_row*N/D; t_leg = l_setup + N/min(D,l_cap);
 # suppress iff t_rt/t_leg <= 1.0 && N >= n_min_fit.
 #
-# ROUTING STATUS: SHADOW ONLY (PGRUST_M5_COST_ROUTE default; floors
-# decide). The witnessed record contradicts three shipped rectangles at
+# ROUTING STATUS (t36 flips2): the THREE witnessed rot cells decide by
+# curve at default — PGRUST_M5_COST_ROUTE unset = CbPlainAggFold,
+# CbGroupedAggTextKey, CbHashJoinPlainAgg (GL-COST class flip letters,
+# notes/gl-cost-class-flip-letters.md); `shadow` is the kill that restores
+# floors-decide everywhere; every other curve-modeled class stays SHADOW.
+# The witnessed record contradicts three shipped rectangles at
 # measured cells (the runtime_model disagreement pin):
 #   CbPlainAggFold 1M@dop4 suppressed at 1.258x loss;
 #   CbGroupedAggTextKey 1M/2.5M@dop4 suppressed at 1.130/1.339x loss;
@@ -31,55 +35,70 @@
 #   curve_reuse      — class rides another class's fitted curve (value =
 #                      that class), matching the shipped guard reuse.
 #   hold_groups_min  — classify-time groupby-high HOLD; retired at step 2.
-class	term	value	unit	fit_jobs	sha	date	ladder_script	owning_arm_killswitch	note
-CbDistinctIntKeys	c_engage	0.0	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbDistinctIntKeys	w_row	1.1159	legacy-row-equiv/row	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbDistinctIntKeys	l_setup	6127.2	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbDistinctIntKeys	l_cap	11.52	workers	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbDistinctIntKeys	n_min_fit	1000000.0	rows	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbGroupedAggIntKeys	c_engage	1292041.9	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbGroupedAggIntKeys	w_row	1.8392	legacy-row-equiv/row	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbGroupedAggIntKeys	l_setup	2689172.8	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbGroupedAggIntKeys	l_cap	6.04	workers	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbGroupedAggIntKeys	n_min_fit	1000000.0	rows	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbGroupedAggTextKey	c_engage	628935.8	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbGroupedAggTextKey	w_row	1.6932	legacy-row-equiv/row	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbGroupedAggTextKey	l_setup	647011.4	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbGroupedAggTextKey	l_cap	5.76	workers	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbGroupedAggTextKey	n_min_fit	1000000.0	rows	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbGroupedAggTopN	c_engage	461286.3	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbGroupedAggTopN	w_row	1.6395	legacy-row-equiv/row	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbGroupedAggTopN	l_setup	1903979.4	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbGroupedAggTopN	l_cap	6.06	workers	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbGroupedAggTopN	n_min_fit	1000000.0	rows	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbHashJoinPlainAgg	c_engage	1747.4	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbHashJoinPlainAgg	w_row	1.5379	legacy-row-equiv/row	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbHashJoinPlainAgg	l_setup	48931.8	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbHashJoinPlainAgg	l_cap	11.79	workers	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbHashJoinPlainAgg	n_min_fit	1000000.0	rows	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbPlainAggFold	c_engage	0.0	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbPlainAggFold	w_row	1.2712	legacy-row-equiv/row	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbPlainAggFold	l_setup	18206.0	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbPlainAggFold	l_cap	12.66	workers	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbPlainAggFold	n_min_fit	1000000.0	rows	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbTopnBoundedIntKeys	c_engage	439075.0	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbTopnBoundedIntKeys	w_row	10.4623	legacy-row-equiv/row	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbTopnBoundedIntKeys	l_setup	236241.6	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbTopnBoundedIntKeys	l_cap	11.81	workers	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-CbTopnBoundedIntKeys	n_min_fit	1000000.0	rows	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-HeapCmpFoldPrefix	c_engage	199319.8	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-HeapCmpFoldPrefix	w_row	1.1983	legacy-row-equiv/row	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-HeapCmpFoldPrefix	l_setup	164041.4	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-HeapCmpFoldPrefix	l_cap	7.32	workers	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-HeapCmpFoldPrefix	n_min_fit	100000.0	rows	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-HeapPlainCountStar	c_engage	257515.3	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-HeapPlainCountStar	w_row	0.3037	legacy-row-equiv/row	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-HeapPlainCountStar	l_setup	552913.9	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-HeapPlainCountStar	l_cap	6.88	workers	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-HeapPlainCountStar	n_min_fit	2500000.0	rows	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-
-HeapPlainCountStar	admission_min_pages	8192	pages	-6b53/-0591/-4e08/-5020/-4082/-6632	2159563ff	2026-07-14	scripts/m5-rowflip-measure-e2e.sh	PGRUST_RUNTIME	rowdrive 64MB block-floor MIRROR (m5-5 reading #3) — applied in every cost-route mode, never retired by the curve
-CbHashJoinMultiBuild	curve_reuse	CbHashJoinPlainAgg	class	-	c0837fba9	2026-07-14	-	PGRUST_RUNTIME	shipped guard reuse (same 2M rectangle); own witnessed ladder cells owed (GL-COST-2)
-CbHashJoinGroupedAgg	curve_reuse	CbHashJoinPlainAgg	class	-	c0837fba9	2026-07-14	-	PGRUST_RUNTIME	shipped guard reuse (same 2M rectangle); own witnessed ladder cells owed (GL-COST-2)
-AggPolyHeapPlain	curve_reuse	HeapCmpFoldPrefix	class	-	c0837fba9	2026-07-14	-	PGRUST_RUNTIME	PROVISIONAL reuse (strictly more per-row work than the measured int fold -> errs conservative); GL-AGGPOLY-1 owns re-measuring
-CbMetaFooterAgg	curve_reuse	-	class	-	0a1ab4a55	2026-07-14	-	PGRUST_RUNTIME	footer answers are O(1): never floored, no curve — NO_GUARD posture kept in every mode
-_grouped_classes	hold_groups_min	4000000	groups	unforced-CB-10M A/B (night/routing-floor-fixes)	b12c3fc74	2026-07-21	fleet letter in branch commit	PGRUST_RUNTIME	classify-time groupby-high HOLD (PGRUST_M5_GROUPBY_HIGH_FLOOR overridable); becomes the seal-term crossover at step 2
+# WITNESS column (the witnessed-ladder-discipline census; pinned by
+# runtime_model::witness_census_is_pinned):
+#   witnessed-v2      — fit from WITNESSED M5ROWFLIP2 cells (per-leg engine
+#                       pins + negative witnesses; the vehicle of record).
+#   witnessed-ab      — pinned by a timed unforced A/B with its fleet
+#                       letter in the provenance columns.
+#   unwitnessed-reuse — rides another class's fitted curve with NO witnessed
+#                       cells of its own. UNUSABLE as fit evidence: the row
+#                       may keep following its host curve (the shipped guard
+#                       reuse it mirrors) but may NOT be refit, re-anchored,
+#                       or flipped to an own curve until its ladder cells are
+#                       witnessed (specs: notes/runtime-cost-ladder-specs.md;
+#                       owner GL-COST-2 / GL-AGGPOLY-1).
+#   structural        — not an economics constant (admission mirror /
+#                       no-curve marker); witness status not applicable.
+class	term	value	unit	fit_jobs	sha	date	ladder_script	owning_arm_killswitch	note	witness
+CbDistinctIntKeys	c_engage	0.0	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbDistinctIntKeys	w_row	1.1159	legacy-row-equiv/row	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbDistinctIntKeys	l_setup	6127.2	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbDistinctIntKeys	l_cap	11.52	workers	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbDistinctIntKeys	n_min_fit	1000000.0	rows	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbGroupedAggIntKeys	c_engage	1292041.9	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbGroupedAggIntKeys	w_row	1.8392	legacy-row-equiv/row	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbGroupedAggIntKeys	l_setup	2689172.8	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbGroupedAggIntKeys	l_cap	6.04	workers	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbGroupedAggIntKeys	n_min_fit	1000000.0	rows	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbGroupedAggTextKey	c_engage	628935.8	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbGroupedAggTextKey	w_row	1.6932	legacy-row-equiv/row	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbGroupedAggTextKey	l_setup	647011.4	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbGroupedAggTextKey	l_cap	5.76	workers	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbGroupedAggTextKey	n_min_fit	1000000.0	rows	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbGroupedAggTopN	c_engage	461286.3	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbGroupedAggTopN	w_row	1.6395	legacy-row-equiv/row	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbGroupedAggTopN	l_setup	1903979.4	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbGroupedAggTopN	l_cap	6.06	workers	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbGroupedAggTopN	n_min_fit	1000000.0	rows	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbHashJoinPlainAgg	c_engage	1747.4	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbHashJoinPlainAgg	w_row	1.5379	legacy-row-equiv/row	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbHashJoinPlainAgg	l_setup	48931.8	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbHashJoinPlainAgg	l_cap	11.79	workers	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbHashJoinPlainAgg	n_min_fit	1000000.0	rows	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbPlainAggFold	c_engage	0.0	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbPlainAggFold	w_row	1.2712	legacy-row-equiv/row	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbPlainAggFold	l_setup	18206.0	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbPlainAggFold	l_cap	12.66	workers	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbPlainAggFold	n_min_fit	1000000.0	rows	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbTopnBoundedIntKeys	c_engage	439075.0	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbTopnBoundedIntKeys	w_row	10.4623	legacy-row-equiv/row	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbTopnBoundedIntKeys	l_setup	236241.6	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbTopnBoundedIntKeys	l_cap	11.81	workers	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+CbTopnBoundedIntKeys	n_min_fit	1000000.0	rows	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+HeapCmpFoldPrefix	c_engage	199319.8	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+HeapCmpFoldPrefix	w_row	1.1983	legacy-row-equiv/row	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+HeapCmpFoldPrefix	l_setup	164041.4	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+HeapCmpFoldPrefix	l_cap	7.32	workers	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+HeapCmpFoldPrefix	n_min_fit	100000.0	rows	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+HeapPlainCountStar	c_engage	257515.3	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+HeapPlainCountStar	w_row	0.3037	legacy-row-equiv/row	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+HeapPlainCountStar	l_setup	552913.9	legacy-row-equiv	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+HeapPlainCountStar	l_cap	6.88	workers	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+HeapPlainCountStar	n_min_fit	2500000.0	rows	-66c9/-0f09/-3ad6/-2686/-47ad/-58be/-17f3/-11d5/-683a	c517fec04	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-v2
+HeapPlainCountStar	admission_min_pages	8192	pages	-6b53/-0591/-4e08/-5020/-4082/-6632	2159563ff	2026-07-14	scripts/m5-rowflip-measure-e2e.sh	PGRUST_RUNTIME	rowdrive 64MB block-floor MIRROR (m5-5 reading #3) — applied in every cost-route mode, never retired by the curve	structural
+CbHashJoinMultiBuild	curve_reuse	CbHashJoinPlainAgg	class	-	c0837fba9	2026-07-14	-	PGRUST_RUNTIME	shipped guard reuse (same 2M rectangle); own witnessed ladder cells owed (GL-COST-2)	unwitnessed-reuse
+CbHashJoinGroupedAgg	curve_reuse	CbHashJoinPlainAgg	class	-	c0837fba9	2026-07-14	-	PGRUST_RUNTIME	shipped guard reuse (same 2M rectangle); own witnessed ladder cells owed (GL-COST-2)	unwitnessed-reuse
+AggPolyHeapPlain	curve_reuse	HeapCmpFoldPrefix	class	-	c0837fba9	2026-07-14	-	PGRUST_RUNTIME	PROVISIONAL reuse (strictly more per-row work than the measured int fold -> errs conservative); GL-AGGPOLY-1 owns re-measuring	unwitnessed-reuse
+CbMetaFooterAgg	curve_reuse	-	class	-	0a1ab4a55	2026-07-14	-	PGRUST_RUNTIME	footer answers are O(1): never floored, no curve — NO_GUARD posture kept in every mode	structural
+_grouped_classes	hold_groups_min	4000000	groups	unforced-CB-10M A/B (night/routing-floor-fixes)	b12c3fc74	2026-07-21	fleet letter in branch commit	PGRUST_RUNTIME	classify-time groupby-high HOLD (PGRUST_M5_GROUPBY_HIGH_FLOOR overridable); becomes the seal-term crossover at step 2	witnessed-ab

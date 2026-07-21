@@ -460,7 +460,7 @@ mod tests {
             if cols[0] == "class" {
                 continue;
             }
-            assert_eq!(cols.len(), 10, "malformed TSV row: {line}");
+            assert_eq!(cols.len(), 11, "malformed TSV row: {line}");
             let (class_name, term, value) = (cols[0], cols[1], cols[2]);
             let Some(&class) = RuntimeClass::ALL.iter().find(|c| c.name() == class_name)
             else {
@@ -488,6 +488,99 @@ mod tests {
             RuntimeClass::ALL.len() * 5,
             "TSV curve rows incomplete: {seen:?}"
         );
+    }
+
+    /// WITNESS CENSUS of record (charter: every cell carries witness
+    /// status; UNWITNESSED cells are marked and unusable). Pins:
+    /// (1) the witness vocabulary; (2) every fitted curve term is
+    /// witnessed-v2 — an unwitnessed constant can never enter the fitted
+    /// block by drift; (3) the unwitnessed-reuse set is EXACTLY the three
+    /// named reuse rows (their own ladder cells are owed — specs in
+    /// notes/runtime-cost-ladder-specs.md, owners GL-COST-2/GL-AGGPOLY-1);
+    /// (4) no unwitnessed-reuse class name is in the default decide list
+    /// (the riders decide only THROUGH their host curve's flip letters,
+    /// matching the shipped guard reuse — an own-curve flip needs its own
+    /// witnessed cells first).
+    #[test]
+    fn witness_census_is_pinned() {
+        let tsv = include_str!("../../../../../../crates/backend/optimizer/path/costsize/src/runtime-cost-constants.tsv");
+        let mut unwitnessed = Vec::new();
+        for line in tsv.lines() {
+            if line.starts_with('#') || line.trim().is_empty() || line.starts_with("class\t") {
+                continue;
+            }
+            let cols: Vec<&str> = line.split('\t').collect();
+            assert_eq!(cols.len(), 11, "malformed TSV row: {line}");
+            let (class, term, witness) = (cols[0], cols[1], cols[10]);
+            assert!(
+                matches!(
+                    witness,
+                    "witnessed-v2" | "witnessed-ab" | "unwitnessed-reuse" | "structural"
+                ),
+                "unknown witness status {witness:?} in row: {line}"
+            );
+            if RuntimeClass::ALL.iter().any(|c| c.name() == class)
+                && matches!(term, "c_engage" | "w_row" | "l_setup" | "l_cap" | "n_min_fit")
+            {
+                assert_eq!(
+                    witness, "witnessed-v2",
+                    "fitted curve term {class}.{term} must be witnessed-v2"
+                );
+            }
+            if witness == "unwitnessed-reuse" {
+                unwitnessed.push((class.to_string(), term.to_string()));
+            }
+        }
+        assert_eq!(
+            unwitnessed,
+            vec![
+                ("CbHashJoinMultiBuild".to_string(), "curve_reuse".to_string()),
+                ("CbHashJoinGroupedAgg".to_string(), "curve_reuse".to_string()),
+                ("AggPolyHeapPlain".to_string(), "curve_reuse".to_string()),
+            ],
+            "the unwitnessed-reuse census changed; a new unwitnessed cell must \
+             arrive with its ladder spec (notes/runtime-cost-ladder-specs.md), \
+             and a witnessed one must flip this pin + the TSV row together"
+        );
+        for (class, _) in &unwitnessed {
+            assert!(
+                !DEFAULT_DECIDE_CLASSES.contains(&class.as_str()),
+                "unwitnessed-reuse class {class} must not be in the default decide list"
+            );
+        }
+    }
+
+    /// Model-shape sanity (charter: monotonicity unit tests): both cost
+    /// curves strictly increase in N; the runtime side never gets more
+    /// expensive with more workers; and widening dop 4 -> 16 never makes the
+    /// predicted rt/legacy ratio WORSE anywhere in or above measured support
+    /// (the fitted l_cap < 16 everywhere, so legacy saturates first).
+    #[test]
+    fn model_terms_are_monotone() {
+        let grid = [1e5, 2.5e5, 5e5, 1e6, 2.5e6, 5e6, 1e7];
+        for &class in RuntimeClass::ALL.iter() {
+            let m = class_model(class);
+            assert!(m.w_row > 0.0 && m.l_setup > 0.0 && m.c_engage >= 0.0, "{class:?}");
+            assert!(m.l_cap < 16.0, "{class:?}: l_cap must saturate below dop16");
+            for w in grid.windows(2) {
+                for d in [1, 4, 8, 16] {
+                    let t_rt = |n: f64| m.c_engage + m.w_row * n / d as f64;
+                    let t_leg = |n: f64| m.l_setup + n / (d as f64).min(m.l_cap);
+                    assert!(t_rt(w[1]) > t_rt(w[0]), "{class:?} t_rt not increasing in N");
+                    assert!(t_leg(w[1]) > t_leg(w[0]), "{class:?} t_leg not increasing in N");
+                }
+            }
+            for &n in &grid {
+                // Runtime cost non-increasing in D.
+                let rt = |d: i32| m.c_engage + m.w_row * n / d as f64;
+                assert!(rt(16) <= rt(8) && rt(8) <= rt(4), "{class:?} t_rt increases in D");
+                // Ratio no worse at dop16 than dop4.
+                assert!(
+                    predicted_ratio(class, n, 16) <= predicted_ratio(class, n, 4) + 1e-9,
+                    "{class:?} N={n}: ratio worsens from dop4 to dop16"
+                );
+            }
+        }
     }
 
     /// Mode knob posture of record at t36 flips2: unset = the THREE
