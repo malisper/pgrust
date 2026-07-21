@@ -89,7 +89,7 @@ pub fn exec_init_recursive_union<'mcx>(
             ::execgrouping::exec_tuples_hash_prepare(mcx, node.dupOperators)?;
         // C divergence (nodesetop precedent): entries live in the query
         // context, not a rescan-reset tableContext.
-        let hashtable = ::execgrouping::build_tuple_hash_table(
+        let mut hashtable = ::execgrouping::build_tuple_hash_table(
             mcx,
             outer_desc,
             node.dupColIdx,
@@ -100,7 +100,16 @@ pub fn exec_init_recursive_union<'mcx>(
             0,
             false,
         )?;
-        (Some(hashtable), Some(estate.exec_assign_expr_context()))
+        let ps_ExprContext = estate.exec_assign_expr_context();
+        // C BuildTupleHashTable's tempcxt = rustate->tempContext, reset
+        // after each lookup (`lookup_is_new`): probe-time detoasts of
+        // compressed by-ref keys must not accumulate in query memory.
+        // SAFETY: the ExprContext is arena-boxed in the same estate and
+        // outlives the table.
+        unsafe {
+            hashtable.set_temp_ctx_raw(estate.ecxt(ps_ExprContext).per_tuple_mcx())
+        };
+        (Some(hashtable), Some(ps_ExprContext))
     } else {
         (None, None)
     };

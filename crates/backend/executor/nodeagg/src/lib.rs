@@ -1448,7 +1448,17 @@ pub fn exec_init_agg<'mcx>(
         )?;
         (None, None, None, Some(gs))
     } else if node.aggstrategy == AGG_HASHED {
-        let ph = init_perhash(node, estate, numtrans)?;
+        let mut ph = init_perhash(node, estate, numtrans)?;
+        // Hash/match evaluation allocates in tmpcontext per-tuple memory,
+        // reset per input row by every drive loop — C BuildTupleHashTable's
+        // tempcxt (nodeAgg.c init_hash_table). Above all: probing a
+        // compressed/external by-ref grouping key detoasts per PROBE; a
+        // query-lifetime context there is memory ∝ input rows, invisible to
+        // hash_agg_check_limits — high-NDV text-key hash aggregation must
+        // stay bounded by entering spill mode, not grow with the scan.
+        // SAFETY: the tmpcontext ExprContext outlives the table (same
+        // estate, arena-boxed).
+        unsafe { ph.hashtable.set_temp_ctx_raw(estate.ecxt(tmpcontext).per_tuple_mcx()) };
         let evaltrans = ::executils::with_subplan_compile_env(estate, |env| {
             ::execexpr::exec_build_agg_trans_hashed_subplans(
                 mcx,

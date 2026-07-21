@@ -116,7 +116,7 @@ pub fn exec_init_set_op<'mcx>(
             let (eqfuncoids, hashfunctions) =
                 ::execgrouping::exec_tuples_hash_prepare(mcx, node.cmpOperators)?;
             let table_ctx = make_table_context(mcx)?;
-            let hashtable = ::execgrouping::build_tuple_hash_table(
+            let mut hashtable = ::execgrouping::build_tuple_hash_table(
                 mcx,
                 outer_desc,
                 node.cmpColIdx,
@@ -127,6 +127,15 @@ pub fn exec_init_set_op<'mcx>(
                 core::mem::size_of::<SetOpPerGroup>(),
                 false,
             )?;
+            // C BuildTupleHashTable's tempcxt = the econtext's per-tuple
+            // memory (nodeSetOp.c), reset per drained row: probe-time
+            // detoasts of compressed by-ref keys must not accumulate in
+            // query-lifetime memory.
+            // SAFETY: the ExprContext is arena-boxed in the same estate and
+            // outlives the table.
+            unsafe {
+                hashtable.set_temp_ctx_raw(estate.ecxt(ps_ExprContext).per_tuple_mcx())
+            };
             StrategyState::Hashed(HashedState {
                 hashtable,
                 table_ctx,

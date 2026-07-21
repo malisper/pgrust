@@ -258,6 +258,11 @@ pub(crate) fn init_grouping_sets<'mcx>(
         for ph in h.perhash.iter_mut() {
             // SAFETY: the tmpcontext ExprContext outlives every phase program.
             unsafe { ph.refill_trans.arm_result_mcx_raw(per_tuple) };
+            // C BuildTupleHashTable tempcxt (lib.rs init note): probe-time
+            // detoasts of compressed by-ref keys must live in the per-row
+            // reset context, not query memory — bounded, spill-accountable.
+            // SAFETY: same outlives argument as the arming above.
+            unsafe { ph.hashtable.set_temp_ctx_raw(per_tuple) };
         }
     }
     let mut phases: PgVec<'mcx, PerPhaseData<'mcx>> = droppy_vec(mcx, numphases)?;
