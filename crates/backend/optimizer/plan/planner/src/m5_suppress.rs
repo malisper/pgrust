@@ -129,7 +129,7 @@ pub enum CoverClass {
     /// guards, per rel: unindexed (no serial merge/NL-with-inner-index
     /// shapes for the costing to prefer), nbatch==1 estimate (EVERY rel —
     /// any of them may be a build side; the multibuild walk is unbatched
-    /// only), cbstore AM (heap sides: TPCH-JHEAP keys them knob-gated
+    /// only), cbstore AM (heap sides: SE-JHEAP keys them knob-gated
     /// behind PGRUST_LANE_V2_JHEAP — the K2 executor feed has been
     /// DEFAULT-ON since the SE9/SE15 flips, the coherence mirror keys its
     /// kills; the earlier "K2 DEFAULT-OFF" claim here was stale).
@@ -653,17 +653,16 @@ fn extract_exprkey_guard() -> FloorGuard {
 }
 
 /// The shared default-OFF arming rule (the SE-SCANPASS / K1-latemat idiom,
-/// factored pure for the tpch-cars lanes): ON iff the value is exactly `1`
+/// factored pure for the conversion-car lanes): ON iff the value is exactly `1`
 /// or `on`; every other spelling — unset, `0`, `off`, typos — fails safe to
 /// OFF (today's behaviour, byte-identical plan time).
 fn knob_spelling_armed(v: Option<&str>) -> bool {
     matches!(v, Some("1") | Some("on"))
 }
 
-/// TPCH-DECOROOT (night/tpch-cars-1, CAR 1 — the R-root blocker,
-/// scratchpad/night/tpch-conversion-scope.md §3 car 1): decorated-root
+/// SE-DECOROOT (the GL-DECOROOT-1 lane, conversion-scope car 1 — the decorated-root blocker): decorated-root
 /// composition. Every grouped probe class is Agg-root-only today, which
-/// gates 17/20 Gather-carrying TPC-H queries (ORDER BY / LIMIT / OFFSET
+/// gates 17 of the 20 Gather-carrying census queries (ORDER BY / LIMIT / OFFSET
 /// tops above the grouped agg). The runtime grouped arms produce the FULL
 /// grouped output and stream subsequent pulls through the serial emit paths
 /// off the filled table (se-aggjoin §3.1), so a serial Sort/Limit ABOVE the
@@ -676,18 +675,18 @@ fn knob_spelling_armed(v: Option<&str>) -> bool {
 /// only when the child shape keys a covered grouped class and every sort
 /// key is a group-key ref or a class-vocabulary aggregate (fail-closed).
 ///
-/// DEFAULT ON (tpch-flips train; GL-DECOROOT-1 FLIP-RECOMMENDED, campaign
-/// of record scratchpad/night/fleet-ab-parallelism.md 2026-07-21, rig
-/// snapshots fleet/tpchcars-ab..fleet/6car-ab): decorated grouped SCANS
+/// DEFAULT ON (conversion-flips train; GL-DECOROOT-1 FLIP-RECOMMENDED, campaign
+/// of record scratchpad/night/fleet-ab-parallelism.md 2026-07-21, campaign
+/// rig snapshots (see the letter file)): decorated grouped SCANS
 /// win 1.4-5.2x vs legacy Gather at dop {4,8,16} (d3/l300/l24/l16 ladder);
 /// decorated JOIN tops inherit the underlying default-ON aggjoin class's
 /// economics exactly (the rider adds ~nothing — that class's own dop-8/16
 /// 0.89x-vs-legacy trait pre-exists this car); the 16x hash-election
 /// margin VALIDATED (the 16-rows/group boundary still wins 1.37-3.48x; 12
-/// refuses by name); parity everywhere, default arm inert, ducktpch
-/// byte-stable, CB flat (single q8-class keying ~parity; the q39-43
-/// topn-offset upside is 100m-scale territory — the 10m bank margin
-/// correctly refuses). `PGRUST_LANE_V2_DECOROOT=0|off` is the kill switch
+/// refuses by name); parity everywhere, default arm inert, the full
+/// census byte-stable, the row-suite census flat (single scan-grouped-decorated
+/// keying ~parity; the grouped topn-offset upside is 100m-scale
+/// territory — the 10m bank margin correctly refuses). `PGRUST_LANE_V2_DECOROOT=0|off` is the kill switch
 /// (t35 exact-spelling law).
 fn decoroot_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -696,7 +695,7 @@ fn decoroot_enabled() -> bool {
     })
 }
 
-/// TPCH-DECOROOT hash-election margin (PROVISIONAL, GL-DECOROOT-1 owns the
+/// SE-DECOROOT hash-election margin (PROVISIONAL, GL-DECOROOT-1 owns the
 /// measured bound): a decorated root changes the suppressed SERIAL plan's
 /// economics — with ORDER BY over group keys the costing compares
 /// `HashAgg + Sort(ngroups)` against `Sort(input) + GroupAggregate`, and
@@ -709,14 +708,13 @@ fn decoroot_enabled() -> bool {
 /// at most rows/16 rows.
 const DECOROOT_NGROUPS_MARGIN: f64 = 16.0;
 
-/// TPCH-NUMJOIN (night/tpch-cars-1, CAR 2 — the N-join blocker, scoping §3
-/// car 3, join half): numeric agg-expr probe vocabulary. The
+/// SE-NUMJOIN (the GL-NUMJOIN-1 lane, conversion-scope car 3 join half — the numeric agg-expr blocker): numeric agg-expr probe vocabulary. The
 /// runtime-partial NumericAgg/Int128 state relocation LANDED (SE-AGGPOLY:
 /// exact digit snapshots, C numeric_avg_combine field law) and the agg-poly
 /// matrix row records "the aggjoin seam's export is ready via the shared
 /// runtime-partial vocabulary once its probe admits numeric args" — the
-/// blocker for the sum(l_extendedprice*(1-l_discount)) family (13 TPC-H
-/// queries carry it) is the probe whitelist, not the kernel. This knob
+/// blocker for the sum(price*(1-disc)) money-expression family (13
+/// census queries carry it) is the probe whitelist, not the kernel. This knob
 /// admits structurally plain sum/avg(NUMERIC) aggregates over ONE
 /// parallel-safe argument expression (the heap-poly precedent: the join
 /// arms run C's checked evaltrans transition program per emitted row, so
@@ -725,10 +723,10 @@ const DECOROOT_NGROUPS_MARGIN: f64 = 16.0;
 /// half stays REFUSED — the agg-poly row names its real gap (the lanetable
 /// sink combine topology perf car), so GROUPED_SINK_AGGS is untouched.
 ///
-/// DEFAULT ON (tpch-flips train; GL-NUMJOIN-1 FLIP-RECOMMENDED,
+/// DEFAULT ON (conversion-flips train; GL-NUMJOIN-1 FLIP-RECOMMENDED,
 /// fleet-ab-parallelism.md 2026-07-21): the numeric evaltrans win is
-/// THICK, not thin — grouped join 1.96-3.17x, q19-shaped plain
-/// 1.78-3.07x, q05-shaped composed 1.81-3.03x vs legacy PHJ, thicker than
+/// THICK, not thin — grouped join 1.96-3.17x, the plain money-join
+/// core 1.78-3.07x, the composed grouped core 1.81-3.03x vs legacy PHJ, thicker than
 /// the int-fold analog because legacy numeric transitions cost more per
 /// row (the scoping's "thinner than int" caveat is REFUTED on the class
 /// fixture). One thin spot, NAMED: multibuild-numeric at 6M rows is
@@ -743,9 +741,9 @@ fn aggjoin_numeric_enabled() -> bool {
     })
 }
 
-/// TPCH-JHEAP (night/tpch-jheap — the scoping's car 2, the J-heap blocker):
+/// SE-JHEAP (the GL-JHEAP-1 lane, conversion-scope car 2 — the heap-side join blocker):
 /// heap-side join admission. Every join classifier admitted cbstore rels
-/// ONLY ('side not cbstore' — the q14/q19 census refusal), while the
+/// ONLY ('side not cbstore' — the pure-shape census refusal), while the
 /// executor's K2 heap feed (BatchGranuleSource seam) has been DEFAULT ON
 /// since the SE9/SE15 flips: the single-join arm and the multibuild
 /// build/probe walk both admit heap SeqScans (`k2_heap` in
@@ -758,17 +756,17 @@ fn aggjoin_numeric_enabled() -> bool {
 /// heap-flavored; enable_hashjoin required; unused-index tolerance with
 /// the NL-margin law).
 ///
-/// DEFAULT ON (tpch-flips train; GL-JHEAP-1 FLIP-RECOMMENDED,
+/// DEFAULT ON (conversion-flips train; GL-JHEAP-1 FLIP-RECOMMENDED,
 /// fleet-ab-parallelism.md 2026-07-21): heap-side joins engage 2.1-3.1x
-/// vs legacy (grouped-int 2.3-2.8x, multibuild star 2.4-2.9x, real-q19
-/// shape 2.6-3.1x, q05-shaped flagship 2.5-2.9x); JHEAP_NL_MARGIN=4
+/// vs legacy (grouped-int 2.3-2.8x, multibuild star 2.4-2.9x, the pure
+/// plain-join money shape 2.6-3.1x, the composed grouped flagship 2.5-2.9x); JHEAP_NL_MARGIN=4
 /// VALIDATED per-edge (8x and 4.0x-boundary partners engage full-thick,
 /// 2x refuses by name — headroom, no loss at 4); the [1M,2M] row floor
 /// enforced at scale (800k/3M refuse, 1.5M engages). NAMED caveats: at
-/// SF10 census scale the car is INERT — census q19 is an NL+index legacy
-/// plan (66ms hot), NOT a Gather hash join, so its conversion belongs to
-/// the NL-inner-index follow-on family (q03/q04/...); the q14-shaped
-/// ratio emit stays a named gap. `PGRUST_LANE_V2_JHEAP=0|off` is the kill
+/// bank census scale the car is INERT — the pure plain-join census query
+/// plans NL+index under legacy (66ms hot), NOT a Gather hash join, so its
+/// conversion belongs to the NL-inner-index follow-on family; the
+/// agg-ratio emit shape stays a named gap. `PGRUST_LANE_V2_JHEAP=0|off` is the kill
 /// switch (t35 exact-spelling law).
 fn jheap_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -777,7 +775,7 @@ fn jheap_enabled() -> bool {
     })
 }
 
-/// TPCH-JHEAP executor coherence (the m5p1 `multibuild_enabled` precedent):
+/// SE-JHEAP executor coherence (the m5p1 `multibuild_enabled` precedent):
 /// the K2 heap feed's own kills must also un-key heap shapes — a heap-side
 /// suppression whose feed is killed would land on the serial join build
 /// (risk P1's suppress-then-refuse direction). Same spellings as the
@@ -796,7 +794,7 @@ fn k2_heapfeed_live() -> bool {
     p && h
 }
 
-/// TPCH-JHEAP NL/merge-election margin (PROVISIONAL, GL-JHEAP-1 owns the
+/// SE-JHEAP NL/merge-election margin (PROVISIONAL, GL-JHEAP-1 owns the
 /// measured bound): an index on a heap rel's JOIN-KEY column makes the
 /// post-suppression serial planner's NL-with-inner-index (and index-sorted
 /// merge) shapes electable — plans the join walk refuses (the B1/X5/X6
@@ -821,7 +819,7 @@ fn jheap_guard() -> FloorGuard {
     }
 }
 
-/// TPCH-CBKEYS (night/tpch-cbkeys): canonical-bytes join-key admission —
+/// SE-CBKEYS (the GL-CBKEYS-1 lane): canonical-bytes join-key admission —
 /// the grouped-JOIN sink's key vocabulary was word-only (byval int-family)
 /// while the SCAN sinks already run canonical-bytes text keys (the C3
 /// machinery, agg-text-canonical-bytes row). This knob admits bare
@@ -831,16 +829,16 @@ fn jheap_guard() -> FloorGuard {
 /// `group_eq_representational` law). BPCHAR is the NAMED REFUSAL of
 /// record: its space-stripping bpchareq and trailing-blank representative
 /// ties sit outside the byte-equality envelope — exactly why the scan
-/// sinks exclude it — so TPC-H's char(n) keys (q04/q05/q07/q08/q12/q21)
-/// stay refused until a bpchar tie-law car rules on canonicalization.
+/// sinks exclude it — so the census' char(n) keys stay refused until a
+/// bpchar tie-law car rules on canonicalization.
 ///
-/// DEFAULT ON (tpch-flips train; GL-CBKEYS-1 FLIP-RECOMMENDED,
+/// DEFAULT ON (conversion-flips train; GL-CBKEYS-1 FLIP-RECOMMENDED,
 /// fleet-ab-parallelism.md 2026-07-21): varchar/text canonical-bytes join
-/// keys engage 2.55-3.07x vs legacy on the q05v composed shape,
+/// keys engage 2.55-3.07x vs legacy on the varchar-keyed composed core,
 /// identically in the 4- and 5-car arms (word shapes never re-route; the
 /// bytes lane is stable); bpchar refuses BY NAME without the sub-knob (52
-/// pinned traces); COLLATE/stats laws held; parity 15/15; ducktpch
-/// byte-stable; CB flat. `PGRUST_LANE_V2_CBKEYS=0|off` is the kill switch
+/// pinned traces); COLLATE/stats laws held; parity 15/15; the full and
+/// row-suite censuses byte-stable/flat. `PGRUST_LANE_V2_CBKEYS=0|off` is the kill switch
 /// (t35 exact-spelling law).
 fn cbkeys_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -849,7 +847,7 @@ fn cbkeys_enabled() -> bool {
     })
 }
 
-/// TPCH-BPCHAR (night/tpch-bpchar) — the bpchar TIE-LAW sub-gate of the
+/// SE-BPCHAR (the GL-BPCHAR-1 lane) — the bpchar TIE-LAW sub-gate of the
 /// cbkeys car (both knobs must be armed; same pair read in the executor —
 /// knob coherence). The ruling of record, proven against the vendored
 /// varchar functions (tie-law corpus in that crate's tests): stored
@@ -868,10 +866,10 @@ fn cbkeys_enabled() -> bool {
 /// in depth (a non-canonical image refuses to the serial rerun), not the
 /// argument.
 ///
-/// DEFAULT ON (tpch-flips train; GL-BPCHAR-1 FLIP-RECOMMENDED,
+/// DEFAULT ON (conversion-flips train; GL-BPCHAR-1 FLIP-RECOMMENDED,
 /// fleet-ab-parallelism.md 2026-07-21): the K-text unlock on skeletons —
-/// Q05 skeleton (char(25), five cars composed) 2.77-3.32x, Q12 skeleton
-/// (char(10), the trailing-blank tie adversary in the fixture) 2.56-3.09x,
+/// the char(25)-keyed five-car skeleton 2.77-3.32x, the char(10)-keyed
+/// skeleton (the trailing-blank tie adversary in the fixture) 2.56-3.09x,
 /// multibyte char(8) 2.21-2.65x vs legacy; the tie-law PRODUCTION canary
 /// at SF10 (3 char(n) GROUP BY shapes x both postures x both arms) is ALL
 /// byte-identical; typmod-less bpchar refuses by name (13 traces);
@@ -884,10 +882,10 @@ fn bpchar_keys_enabled() -> bool {
     })
 }
 
-/// TPCH-FILTERQUALS (night/tpch-filterquals) — the X5 relaxation, the top
-/// remaining TPC-H blocker after the five-car stack: the grouped-join
+/// SE-FILTERQUALS (the GL-FILTERQUALS-1 lane) — the X5 relaxation, the top
+/// remaining conversion blocker after the five-car stack: the grouped-join
 /// classifier's BARE-EQUI-ONLY law refuses every filtered census text
-/// (q05's region/date quals, q12's shipmode/date quals). The EXECUTOR was
+/// (the filtered census cores’ region/date and shipmode/date restriction quals). The EXECUTOR was
 /// never the gap — the join walks parallel-safety-check scan quals
 /// (mb_plan_walk + the single-join gates) and the worker RowFeed re-checks
 /// them per row; X5 was probe conservatism against the merge-election
@@ -899,13 +897,13 @@ fn bpchar_keys_enabled() -> bool {
 /// ScalarArrayOp (IN) of the same shape — parallel-safe, so the planner's
 /// selectivity is grounded in pg_statistic rather than defaults; the
 /// stats-defaulting expr class that drove X5 (`f.v % 3 = 0`) stays a
-/// named refusal, as do var-var terms (q12's l_commitdate <
-/// l_receiptdate — no grounding). Post-filter estimates flow into the
+/// named refusal, as do var-var terms (same-rel column-column date
+/// compares — no grounding). Post-filter estimates flow into the
 /// floors and the per-edge NL margins automatically (RelOptInfo.rows is
 /// post-restriction at the probe's choke point), so filtered builds
 /// cannot out-run the election evidence.
 ///
-/// DEFAULT ON (tpch-flips train; GL-FILTERQUALS-1 FLIP-RECOMMENDED,
+/// DEFAULT ON (conversion-flips train; GL-FILTERQUALS-1 FLIP-RECOMMENDED,
 /// fleet-ab-parallelism.md 2026-07-21): the first FILTERED grouped-join
 /// engagements — the six-car filtered composition 2.36-2.85x, the
 /// SAOP-filtered core 2.50-3.01x, the stats-grounded restriction halves
@@ -917,8 +915,8 @@ fn bpchar_keys_enabled() -> bool {
 /// default-ON serial-shaped runtime path already engages in both arms and
 /// beats that election 3.7-8.2x — so NO selectivity floor is carried (the
 /// ladder's explicit verdict). `PGRUST_LANE_V2_JOINFILTERS=0|off` is the
-/// kill switch (t35 exact-spelling law). NOT touched: the EC-tree law (full q05's shared s_nationkey
-/// endpoint is the hostile-proven H1/H2 hazard — a correctness guard,
+/// kill switch (t35 exact-spelling law). NOT touched: the EC-tree law (the six-rel census core’s shared
+/// nation-key endpoint is the hostile-proven H1/H2 hazard — a correctness guard,
 /// not conservatism) and the plain rows' pre-existing wider admission.
 fn joinfilters_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1108,7 +1106,7 @@ const INT4OID: u32 = 23;
 const INT8OID: u32 = 20;
 const DATEOID: u32 = 1082;
 const TEXTOID: u32 = 25;
-/// TPCH-CBKEYS: bpchar — recognized ONLY to NAME its refusal (the
+/// SE-CBKEYS: bpchar — recognized ONLY to NAME its refusal (the
 /// space-insensitive-equality exclusion; never admitted as a key).
 const BPCHAROID: u32 = 1042;
 const VARCHAROID: u32 = 1043;
@@ -1679,7 +1677,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     // top-N winner-selection shape — a single whitelisted-aggregate sort
     // key plus LIMIT without OFFSET (q17/q18/q31–33). A sort on the group
     // keys themselves is an ordered-stream consumer (GatherMerge class,
-    // uncovered in bootstrap). TPCH-DECOROOT (CAR 1, knob-gated): the
+    // uncovered in bootstrap). SE-DECOROOT (CAR 1, knob-gated): the
     // residual decorated-root shapes — ORDER BY over group keys and/or
     // class-vocabulary aggregates, multi-key sorts, sorts without LIMIT,
     // and LIMIT+OFFSET forms — key the UNDERLYING grouped class; the arm
@@ -1744,7 +1742,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         if !is_whitelisted_agg(tle.expr, rti, passenger_list)
             && !is_count_distinct_int(tle.expr, rti)
         {
-            // TPCH-DECOROOT: the single-sort-key+LIMIT shape whose key is a
+            // SE-DECOROOT: the single-sort-key+LIMIT shape whose key is a
             // GROUP key (not an agg) is a decorated-root form too.
             if decoroot_enabled()
                 && n_count_distinct == 0
@@ -1773,7 +1771,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         // the suppressed serial plan keeps its REAL Sort above the Agg (the
         // unbounded sink_topn_arm declines into the plain full drain and
         // the Sort consumes it), so this admits the COMPOSITION only.
-        // (The TPCH-DECOROOT residual arm below owns this shape only when
+        // (The SE-DECOROOT residual arm below owns this shape only when
         // this proven arm's knob is killed — same full-drain semantics.)
         let Some(sc) = parse.sortClause.nth(0).as_sort_group_clause() else {
             return Ok(false);
@@ -1797,7 +1795,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         && crate::gucs::enable_hashagg()
         && scan_sort_keys_covered(parse, &key_refs, rti, passenger_list)
     {
-        // TPCH-DECOROOT (CAR 1): the residual whitelisted decorations —
+        // SE-DECOROOT (CAR 1): the residual whitelisted decorations —
         // multi-key sorts, group-key sorts, sorts without LIMIT, and
         // LIMIT+OFFSET above a sort. Bare LIMIT/OFFSET with NO sort stays
         // refused here (the SE-BARELIMIT / freeze rows own the no-sort
@@ -1841,7 +1839,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     if n_strminmax > 0 {
         // Fail-closed: min/max(text) passengers ride the plain grouped /
         // topn compositions only (the freeze, bare-LIMIT, const-key,
-        // no-limit-sort, and TPCH-DECOROOT decorated combinations are
+        // no-limit-sort, and SE-DECOROOT decorated combinations are
         // unproven with byref text states; count(DISTINCT) +
         // mk-text-family were excluded at admission).
         if full_sort || decorated || bare_limit || mk_freeze || n_const > 0 {
@@ -1942,7 +1940,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     } else {
         CoverClass::CbGroupedAggIntKeys
     };
-    // TPCH-DECOROOT (CAR 1) knob-path finish: decorated-root shapes route
+    // SE-DECOROOT (CAR 1) knob-path finish: decorated-root shapes route
     // through the dedicated finish (own trace tag; NOT a BOOTSTRAP_MATRIX
     // class — tsv/route_to, drift guards, and the DEFAULT census untouched),
     // carrying the UNDERLYING class's floor economics. The hash-election
@@ -2159,7 +2157,7 @@ fn classify_join_sides<'mcx>(
         let rel = run.root.rel(rel_id);
         let is_cb = rel.amflags & AMFLAG_PGRCOLUMNAR != 0;
         if !is_cb {
-            // TPCH-JHEAP: heap sides admit knob-gated (+ the executor K2
+            // SE-JHEAP: heap sides admit knob-gated (+ the executor K2
             // feed coherence mirror); OFF takes the pre-existing refusal
             // byte-for-byte. Index tolerance/stats ride jheap_shape_guards
             // below (they need the qual set).
@@ -2247,7 +2245,7 @@ fn classify_join_sides<'mcx>(
     if n_equi == 0 {
         return refuse_join("no hashjoinable int-family equi clause");
     }
-    // TPCH-JHEAP: the heap-side guards (stats on heap equi keys,
+    // SE-JHEAP: the heap-side guards (stats on heap equi keys,
     // enable_hashjoin, index tolerance + NL margin). The 2-rel plain form
     // additionally refuses heap SELF-joins outright (the B1 alias-EC
     // hazard is newly reachable on this row's heap surface — fail-closed;
@@ -2262,10 +2260,11 @@ fn classify_join_sides<'mcx>(
     }
     // Emit discipline: every non-junk tlist entry is a whitelisted plain
     // aggregate whose args live on either joined rel (count(*) included).
-    // TPCH-NUMJOIN (CAR 2, knob-gated): plain sum/avg(NUMERIC) over
-    // parallel-safe joined-rel arg exprs additionally admit — the q14/q19
-    // sum(price*(1-disc)) family (the plain-join arm's export speaks the
-    // same relocated runtime-partial vocabulary via the poly manifest).
+    // SE-NUMJOIN (CAR 2, knob-gated): plain sum/avg(NUMERIC) over
+    // parallel-safe joined-rel arg exprs additionally admit — the
+    // sum(price*(1-disc)) money-expression family (the plain-join arm's
+    // export speaks the same relocated runtime-partial vocabulary via the
+    // poly manifest).
     let mut n = 0usize;
     let mut n_numeric = 0usize;
     for tle_node in &parse.targetList {
@@ -2424,7 +2423,7 @@ fn is_whitelisted_agg_nrti(expr: Node<'_>, rtis: &[usize], whitelist: &[u32]) ->
     rtis.iter().any(|&rti| aggref_plain(agg, rti))
 }
 
-/// TPCH-NUMJOIN (CAR 2): a structurally plain `sum(NUMERIC)` /
+/// SE-NUMJOIN (CAR 2): a structurally plain `sum(NUMERIC)` /
 /// `avg(NUMERIC)` aggregate (no ORDER BY/DISTINCT/FILTER/variadic/
 /// ordered-set/levelsup decoration) over ONE argument expression that
 ///   (a) the planner's own `is_parallel_safe` admits (it runs on helpers
@@ -2554,7 +2553,7 @@ fn classify_multibuild<'mcx>(
     if !equi_graph_connected(rtis, quals)? {
         return refuse_join("equi graph does not connect all relations");
     }
-    // TPCH-JHEAP: the heap-side guards (stats on heap equi keys,
+    // SE-JHEAP: the heap-side guards (stats on heap equi keys,
     // enable_hashjoin, index tolerance + NL margin) over the full qual set.
     if !jheap_shape_guards(run, parse, rtis, quals, &heap)? {
         return Ok(false);
@@ -2571,7 +2570,7 @@ fn classify_multibuild<'mcx>(
     }
     // Emit discipline: every tlist entry a whitelisted plain aggregate
     // whose args live on one of the joined rels (count(*) included).
-    // TPCH-NUMJOIN (CAR 2, knob-gated): plain sum/avg(NUMERIC) over
+    // SE-NUMJOIN (CAR 2, knob-gated): plain sum/avg(NUMERIC) over
     // parallel-safe joined-rel arg exprs additionally admit (see
     // classify_join_sides' twin note).
     let mut n = 0usize;
@@ -2625,7 +2624,7 @@ fn classify_multibuild<'mcx>(
 /// The multibuild per-relation guards, shared by the plain and grouped rows
 /// (extracted verbatim at SE-AGGJOIN): plain DISTINCT rels (the B1
 /// self-join discipline), EVERY rel's build estimate nbatch==1; cbstore
-/// rels stay unindexed-only verbatim. TPCH-JHEAP: HEAP rels admit
+/// rels stay unindexed-only verbatim. SE-JHEAP: HEAP rels admit
 /// knob-gated (the executor's K2 feed is default-ON; the coherence mirror
 /// keys both kills) — their index tolerance and stats discipline are the
 /// caller's `jheap_shape_guards` (they need the qual set). Returns the
@@ -2666,7 +2665,7 @@ fn multibuild_rel_guards(
         let rel = run.root.rel(rel_id);
         let is_cb = rel.amflags & AMFLAG_PGRCOLUMNAR != 0;
         if !is_cb {
-            // TPCH-JHEAP: a non-cbstore plain relation is the heap AM (the
+            // SE-JHEAP: a non-cbstore plain relation is the heap AM (the
             // TableAm vocabulary is {Heap, Pgrcolumnar}; the executor walk
             // double-checks via seq_scan_is_heap). Knob OFF (or either
             // executor feed kill thrown) takes the pre-existing refusal
@@ -2707,7 +2706,7 @@ fn refuse_join_none<T>(why: &str) -> PgResult<Option<T>> {
     Ok(None)
 }
 
-/// TPCH-JHEAP: the heap-side shape guards over the WHOLE qual set — run by
+/// SE-JHEAP: the heap-side shape guards over the WHOLE qual set — run by
 /// every join classifier when `multibuild_rel_guards` admitted heap sides.
 /// `false` = refuse (traced). The guards, in order:
 ///   * `enable_hashjoin` required ON (with it off, the post-suppression
@@ -2719,8 +2718,8 @@ fn refuse_join_none<T>(why: &str) -> PgResult<Option<T>> {
 ///     rels default the join selectivities into merge landings — the
 ///     SE-AGGJOIN live finding, now enforced for the plain rows' heap
 ///     shapes too);
-///   * index tolerance (the q06/AggPolyHeapPlain precedent, join-widened;
-///     TPC-H rels carry their PK indexes, so a blanket unindexed rule
+///   * index tolerance (the AggPolyHeapPlain precedent, join-widened;
+///     the conversion-target rels carry their PK indexes, so a blanket unindexed rule
 ///     would never key them): per heap-rel index — expression/partial
 ///     indexes refuse; an index whose KEY columns are referenced by any
 ///     RESTRICTION term refuses (an index path becomes electable); an
@@ -3024,7 +3023,7 @@ fn key_var_estimable<'mcx>(
     Ok(vd.stats.is_some() || vd.isunique)
 }
 
-/// TPCH-FILTERQUALS: one pushed filter term's admission census. `Some(i)` =
+/// SE-FILTERQUALS: one pushed filter term's admission census. `Some(i)` =
 /// an admitted single-rel restriction on joined rel index `i`; `None` = not
 /// this shape (the caller refuses, keeping Gather). Admitted, fail-closed:
 ///   * `OpExpr((Relabel'd) Var, non-null Const)` either side, or
@@ -3035,8 +3034,8 @@ fn key_var_estimable<'mcx>(
 ///     the merge election was driven by a stats-DEFAULTING expr term);
 ///   * the whole term `is_parallel_safe` (it runs on helpers through the
 ///     scan feeds' per-row qual re-check).
-/// Refused by shape (named at the caller): var-var terms (q12's
-/// l_commitdate < l_receiptdate — no grounding), expr restrictions (X5's
+/// Refused by shape (named at the caller): var-var terms (same-rel
+/// column-column compares — no grounding), expr restrictions (X5’s
 /// `f.v % 3 = 0` class), OR trees, NULL consts, volatile/unsafe exprs.
 fn classify_filter_term<'mcx>(
     run: &mut PlannerRun<'mcx>,
@@ -3091,7 +3090,7 @@ fn classify_aggjoin_grouped<'mcx>(
     if rtis.len() >= 3 && !multibuild_enabled() {
         return refuse_join("multibuild disabled (grouped tree)");
     }
-    // Bare grouped aggregation, or (TPCH-DECOROOT, CAR 1) a WHITELISTED
+    // Bare grouped aggregation, or (SE-DECOROOT, CAR 1) a WHITELISTED
     // decorated root: ORDER BY [+ LIMIT/OFFSET] above the grouped agg. The
     // arm fills the full grouped table and streams the serial emit paths
     // off it (se-aggjoin §3.1), so the serial Sort/Limit above consumes it;
@@ -3128,7 +3127,7 @@ fn classify_aggjoin_grouped<'mcx>(
     if !equi_graph_connected(rtis, quals)? {
         return refuse_join("equi graph does not connect all relations");
     }
-    // TPCH-JHEAP: the heap-side guards (index tolerance + NL margin;
+    // SE-JHEAP: the heap-side guards (index tolerance + NL margin;
     // stats/enable_hashjoin overlap this classifier's own X5/X6 discipline
     // — idempotent). The grouped row's bare-equi law below still applies
     // to heap shapes verbatim.
@@ -3173,7 +3172,7 @@ fn classify_aggjoin_grouped<'mcx>(
             }
             continue;
         }
-        // TPCH-FILTERQUALS (knob-gated): single-rel stats-grounded simple
+        // SE-FILTERQUALS (knob-gated): single-rel stats-grounded simple
         // restrictions admit; everything else keeps the X5 refusal
         // byte-for-byte (knob OFF never reaches the classifier).
         if joinfilters_enabled() && classify_filter_term(run, rtis, qual)?.is_some() {
@@ -3194,11 +3193,11 @@ fn classify_aggjoin_grouped<'mcx>(
     }
     // Key discipline: every group key a bare int2/4/8 Var on one joined rel
     // (the walk's byval word-equality whitelist is wider — probe narrower).
-    // TPCH-CBKEYS (knob-gated): bare text/varchar Vars under the
+    // SE-CBKEYS (knob-gated): bare text/varchar Vars under the
     // deterministic DEFAULT collation additionally admit (the canonical-
     // bytes key export). BPCHAR refuses BY NAME knob-on (space-insensitive
     // bpchareq — outside the byte-equality envelope, the scan sinks'
-    // standing exclusion; TPC-H char(n) keys wait on the tie-law car).
+    // standing exclusion; census char(n) keys wait on the tie-law car).
     let mut key_refs: Vec<u32> = Vec::new();
     let mut n_bytes_keys = 0usize;
     let mut n_bpchar_keys = 0usize;
@@ -3223,7 +3222,7 @@ fn classify_aggjoin_grouped<'mcx>(
             && v.varcollid == DEFAULT_COLLATION_OID
             && v.vartypmod >= 5
         {
-            // TPCH-BPCHAR: the tie law — a bare-Var char(n) key's stored
+            // SE-BPCHAR: the tie law — a bare-Var char(n) key's stored
             // images are canonical (see bpchar_keys_enabled's doc), so it
             // rides the canonical-bytes export as-is.
             n_bytes_keys += 1;
@@ -3248,7 +3247,7 @@ fn classify_aggjoin_grouped<'mcx>(
     }
     // Emit discipline: bare group-key Vars or whitelisted plain aggregates
     // (PLAIN_FOLD_AGGS — the grouped sink exports the numeric-family int
-    // states the scan-grouped GROUPED_SINK_AGGS row refuses). TPCH-NUMJOIN
+    // states the scan-grouped GROUPED_SINK_AGGS row refuses). SE-NUMJOIN
     // (CAR 2): knob-ON additionally admits plain sum/avg(NUMERIC) over
     // parallel-safe joined-rel arg exprs — the relocated runtime-partial
     // NumericAgg vocabulary the grouped export already carries (the agg-poly
@@ -3297,7 +3296,7 @@ fn classify_aggjoin_grouped<'mcx>(
     if ngroups >= groupby_high_floor() || ngroups >= GROUPSINK_NGROUPS_FLOOR {
         return refuse_join("group estimate above the grouped-sink floor");
     }
-    // TPCH-DECOROOT hash-election margin: a decorated root makes the
+    // SE-DECOROOT hash-election margin: a decorated root makes the
     // sorted-agg serial shape competitive near ngroups≈input (the costing
     // can elect Sort+GroupAggregate the walk refuses — suppress-then-refuse,
     // costing flavor); require the hash election safely dominant.
@@ -3307,10 +3306,10 @@ fn classify_aggjoin_grouped<'mcx>(
     // Knob-admitted shapes route through the dedicated knob-path finishes
     // (own trace tags, greppable apart from the bootstrap `m5-suppress:`
     // census line; the class row / tsv / drift guards untouched). Heap-fed
-    // shapes carry the jheap floor (min 1M) — TPCH-JHEAP owns the tag; the
+    // shapes carry the jheap floor (min 1M) — SE-JHEAP owns the tag; the
     // pure decorated/numeric widenings keep the CbHashJoinGroupedAgg floor
     // — the arm underneath is the same grouped sink either way.
-    // TPCH-FILTERQUALS: filtered shapes route under the joinfilters tag
+    // SE-FILTERQUALS: filtered shapes route under the joinfilters tag
     // (every such shape is unkeyable without the knob), composing the
     // riders in the label; the binding floor is the strictest of the
     // composed cars. Post-filter estimates already flowed through
@@ -3350,7 +3349,7 @@ fn classify_aggjoin_grouped<'mcx>(
             0.0,
         );
     }
-    // TPCH-CBKEYS: bytes-keyed shapes route under the cbkeys tag (their
+    // SE-CBKEYS: bytes-keyed shapes route under the cbkeys tag (their
     // own kill's greppable line), composing with the heap/decorated/
     // numeric riders in the label; the binding floor is the strictest of
     // the composed cars (heap's 1M min when heap sides ride along).
@@ -4619,7 +4618,7 @@ fn is_bare_count_star(parse: &Query<'_>) -> bool {
         && agg.aggkind == AGGKIND_NORMAL
 }
 
-/// TPCH-DECOROOT (CAR 1): every ORDER BY key resolves to a covered tlist
+/// SE-DECOROOT (CAR 1): every ORDER BY key resolves to a covered tlist
 /// entry — a GROUP-key ref (any type and sort direction: the serial Sort
 /// above the engaged arm owns the ordering semantics over the full grouped
 /// output) or a class-vocabulary aggregate. Junk tlist entries the parser
@@ -4870,15 +4869,17 @@ mod tests {
         assert_eq!(get("CbHashJoinMultiBuild", "curve_reuse"), "CbHashJoinPlainAgg");
         assert_eq!(get("CbHashJoinGroupedAgg", "curve_reuse"), "CbHashJoinPlainAgg");
         assert_eq!(get("AggPolyHeapPlain", "curve_reuse"), "HeapCmpFoldPrefix");
+    }
 
-    /// TPCH-CARS knobs (night/tpch-cars-1): both cars are DEFAULT OFF and
+    /// SE-CARS knobs (the GL-DECOROOT-1/GL-NUMJOIN-1 lane): the shared
+    /// default-OFF arming spelling (`1`/`on` only — typos fail safe), and
     /// arm only on the exact spellings `1`/`on` (the SE-SCANPASS /
     /// K1-latemat default-OFF idiom — typos fail safe to today's behaviour,
     /// byte-identical plan time). Pins the default-OFF posture that makes
     /// the branch inert at default, and the live getters' resolution in a
     /// knob-free process.
     #[test]
-    fn tpch_cars_knobs_are_default_off() {
+    fn conversion_car_knob_spellings() {
         assert!(!knob_spelling_armed(None), "unset must be OFF (default)");
         assert!(!knob_spelling_armed(Some("0")));
         assert!(!knob_spelling_armed(Some("off")));
@@ -4888,14 +4889,14 @@ mod tests {
         assert!(knob_spelling_armed(Some("1")));
         assert!(knob_spelling_armed(Some("on")));
         // The live getters memoize the process env; unset in the test
-        // binary. DECOROOT is DEFAULT ON since the tpch-flips train
+        // binary. DECOROOT is DEFAULT ON since the conversion-flips train
         // (GL-DECOROOT-1; =0|off kills — the flipped-kill idiom).
-        assert!(decoroot_enabled(), "tpch-flips: unset => ON (GL-DECOROOT-1)");
-        // NUMJOIN is DEFAULT ON since the tpch-flips train (GL-NUMJOIN-1).
-        assert!(aggjoin_numeric_enabled(), "tpch-flips: unset => ON (GL-NUMJOIN-1)");
+        assert!(decoroot_enabled(), "conversion-flips: unset => ON (GL-DECOROOT-1)");
+        // NUMJOIN is DEFAULT ON since the conversion-flips train (GL-NUMJOIN-1).
+        assert!(aggjoin_numeric_enabled(), "conversion-flips: unset => ON (GL-NUMJOIN-1)");
     }
 
-    /// TPCH-DECOROOT hash-election margin: the provisional bound must stay
+    /// SE-DECOROOT hash-election margin: the provisional bound must stay
     /// a real margin (>1 — ngroups strictly below input) so the decorated
     /// suppression never keys a shape whose serial costing could plausibly
     /// prefer the sorted-agg landing the walk refuses; and it must bound
@@ -4908,58 +4909,58 @@ mod tests {
         assert!(GROUPSINK_NGROUPS_FLOOR * DECOROOT_NGROUPS_MARGIN >= 1_000_000.0);
     }
 
-    /// TPCH-JHEAP knob (night/tpch-jheap): DEFAULT OFF, `1`/`on` arms
-    /// (the shared tpch-cars idiom); the executor coherence mirror
+    /// SE-JHEAP knob (the GL-JHEAP-1 lane): DEFAULT OFF, `1`/`on` arms
+    /// (the shared conversion-car idiom); the executor coherence mirror
     /// resolves LIVE in a knob-free process (K2_PROBE/HEAPFEED are
     /// default-ON with `=0|off` kills — the SE9/SE15 flipped posture), so
     /// the probe's heap gate is exactly the jheap knob at defaults. Pins
     /// the default-OFF inertness and the mirror's default-ON reading.
     #[test]
     fn jheap_knob_default_off_mirror_live() {
-        // tpch-flips: JHEAP is DEFAULT ON (GL-JHEAP-1; =0|off kills).
-        assert!(jheap_enabled(), "tpch-flips: unset => ON (GL-JHEAP-1)");
+        // conversion-flips: JHEAP is DEFAULT ON (GL-JHEAP-1; =0|off kills).
+        assert!(jheap_enabled(), "conversion-flips: unset => ON (GL-JHEAP-1)");
         assert!(
             k2_heapfeed_live(),
             "K2_PROBE/HEAPFEED default ON (SE9/SE15 flips) => mirror live"
         );
     }
 
-    /// TPCH-CBKEYS knob (night/tpch-cbkeys): DEFAULT OFF, `1`/`on` arms
-    /// (the shared tpch-cars idiom) — bytes-key join shapes are unkeyable
+    /// SE-CBKEYS knob (the GL-CBKEYS-1 lane): DEFAULT OFF, `1`/`on` arms
+    /// (the shared conversion-car idiom) — bytes-key join shapes are unkeyable
     /// at default, byte-identical plan time; and the bytes floor keeps the
     /// grouped-join 2M ceiling (the scan text-key min_dop discipline is
     /// subsumed — its low-dop win region covers the whole admitted range).
     #[test]
     fn cbkeys_knob_default_off_and_floor() {
-        // tpch-flips: CBKEYS is DEFAULT ON (GL-CBKEYS-1; =0|off kills).
-        assert!(cbkeys_enabled(), "tpch-flips: unset => ON (GL-CBKEYS-1)");
+        // conversion-flips: CBKEYS is DEFAULT ON (GL-CBKEYS-1; =0|off kills).
+        assert!(cbkeys_enabled(), "conversion-flips: unset => ON (GL-CBKEYS-1)");
         let g = cbkeys_guard();
         assert_eq!(g.max_rows, 2_000_000.0);
         assert_eq!(g.min_rows, 0.0);
     }
 
-    /// TPCH-BPCHAR sub-knob (night/tpch-bpchar): DEFAULT OFF, `1`/`on`
+    /// SE-BPCHAR sub-knob (the GL-BPCHAR-1 lane): DEFAULT OFF, `1`/`on`
     /// arms — bpchar keys are unkeyable at default even with CBKEYS armed
     /// (the sub-gate composes: BOTH knobs must be on). The tie law itself
     /// is proven in the adt_varchar crate's corpus against the real
     /// bpchar_input/bpchareq (bpchar_tie_law_* tests).
     #[test]
     fn bpchar_subknob_default_off() {
-        // tpch-flips: DEFAULT ON (GL-BPCHAR-1; =0|off kills).
-        assert!(bpchar_keys_enabled(), "tpch-flips: unset => ON (GL-BPCHAR-1)");
+        // conversion-flips: DEFAULT ON (GL-BPCHAR-1; =0|off kills).
+        assert!(bpchar_keys_enabled(), "conversion-flips: unset => ON (GL-BPCHAR-1)");
     }
 
-    /// TPCH-FILTERQUALS knob (night/tpch-filterquals): DEFAULT OFF, `1`/
+    /// SE-FILTERQUALS knob (the GL-FILTERQUALS-1 lane): DEFAULT OFF, `1`/
     /// `on` arms — filtered grouped-join shapes keep the X5 bare-equi
     /// refusal byte-for-byte at default.
     #[test]
     fn joinfilters_knob_default_off() {
-        // tpch-flips: DEFAULT ON (GL-FILTERQUALS-1; =0|off kills; the
+        // conversion-flips: DEFAULT ON (GL-FILTERQUALS-1; =0|off kills; the
         // ladder carried NO selectivity floor — its explicit verdict).
-        assert!(joinfilters_enabled(), "tpch-flips: unset => ON (GL-FILTERQUALS-1)");
+        assert!(joinfilters_enabled(), "conversion-flips: unset => ON (GL-FILTERQUALS-1)");
     }
 
-    /// TPCH-JHEAP NL-election margin + floor: the margin must be a real
+    /// SE-JHEAP NL-election margin + floor: the margin must be a real
     /// multiple (the NL-with-inner-index election needs the outer side
     /// comparable to the indexed side — 4x dominance keeps hash safely
     /// preferred), and the heap floor must sit at the heap fold arms'

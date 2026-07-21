@@ -289,7 +289,7 @@ fn cstring_array_1d(elems: &[&[u8]]) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
-// TPCH-BPCHAR (night/tpch-bpchar) — the tie law of record, proven against
+// SE-BPCHAR (the GL-BPCHAR-1 lane) — the tie law of record, proven against
 // THE REAL vendored functions (not a model): for values stored under ONE
 // typmod (a bare-Var char(n) key column shares its atttypmod by
 // construction), bpchareq's verdict coincides with BYTE EQUALITY of the

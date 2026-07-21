@@ -6713,7 +6713,7 @@ fn sort_feed_if_needed<'mcx>(
                     true
                 }
                 crate::procnode::PlanStateNode::HashJoin(hj) => {
-                    // TPCH-DECOROOT (CAR 1): the decorated grouped-join
+                    // SE-DECOROOT (CAR 1): the decorated grouped-join
                     // shape — offer the runtime grouped sink a FILL-ONLY
                     // engagement first (knob-gated OFF by default; the
                     // filled table drains through the identical emit paths
