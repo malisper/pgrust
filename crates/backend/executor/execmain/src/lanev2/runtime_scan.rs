@@ -1625,29 +1625,11 @@ fn runtime_scan_private_shutdown(private: &(dyn std::any::Any + Send + Sync)) {
     if let Some(rg) = &rg {
         rg.abort();
     }
-    // Standing channel (inc-3): a leader unwind (error/panic between
-    // publish and standing_wait's own cleanup) reaches here through
-    // DestroyParallelContext with claimed workers possibly still driving.
-    // Complete the RG (drain releases drives parked on the aborted
-    // generation) and hold the frame until every participant detached —
-    // the leader arena must outlive their SendConst refs. UNCONDITIONAL
-    // on the rg upgrade: a dead weak handle still leaves the board entry
-    // occupied (every future try_engage would refuse and parked workers
-    // would wedge against an entry nobody removes).
-    let entry = payload
-        .standing
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .take();
-    if let Some(entry) = entry {
-        if let Some(rg) = &rg {
-            if rg.try_outcome().is_none() {
-                // drain_rg aborts (idempotent) and drives protocol cleanup.
-                drain_rg_raw(payload.rt, rg);
-            }
-        }
-        parallel::standing::close_and_await(&entry);
-    }
+    // Standing channel (inc-3): complete the standing join on leader
+    // unwind paths (see standing_channel::shutdown_standing_join).
+    super::standing_channel::shutdown_standing_join(&payload.standing, rg.as_ref(), &|rg| {
+        drain_rg_raw(payload.rt, rg)
+    });
 }
 
 fn ensure_hooks_registered() {
@@ -1659,7 +1641,9 @@ fn ensure_hooks_registered() {
         );
         parallel::register_parallel_post_task_park(runtime_scan_post_task_park);
         parallel::register_parallel_private_shutdown(runtime_scan_private_shutdown);
-        parallel::standing::register_standing_driver(runtime_scan_standing_driver);
+        // The standing driver is no longer a process-global registration:
+        // it rides each engagement's ParallelShared (set_standing_driver,
+        // M2 inc-1 per-arm dispatch).
     });
 }
 
@@ -2660,6 +2644,14 @@ fn engage_ceremony<'mcx>(
             .set(parallel::shared_for(pcxt))
             .unwrap_or_else(|_| unreachable!("pcxt shared set once"));
         parallel::set_private(pcxt, Arc::clone(payload) as _);
+        // Standing driver dispatch (M2 inc-1): the engagement's driver
+        // rides its ParallelShared. deferred_bind: this driver binds
+        // through the DEFERRED binder (ceremony-v2 lazy first-touch), so
+        // the standing serve may defer the visibility bracket to bind_now.
+        parallel::set_standing_driver(pcxt, parallel::standing::StandingDriver {
+            drive: runtime_scan_standing_driver,
+            deferred_bind: true,
+        });
 
         // Submit the pinned RG before launch: helpers find work immediately.
         let work: Arc<dyn runtime::TaskSetWork> = Arc::clone(payload) as _;
@@ -2691,12 +2683,32 @@ fn engage_ceremony<'mcx>(
         // no entry task, one binder bind per participant. Fallback (gang
         // unavailable/kill-switched/all-refused/claim-deadline) leaves the
         // RG untouched and takes the launched path below.
-        match standing_wait(rt, payload, dop, total_granules, &rg, &waiter)? {
-            StandingWait::Done(outcome) => {
+        match super::standing_channel::standing_wait(
+            &STANDING_ARM,
+            super::standing_channel::StandingLeader {
+                shared: payload
+                    .pcxt_shared
+                    .get()
+                    .expect("pcxt shared set before standing_wait"),
+                slot: &payload.standing,
+                started: &payload.started,
+                refused: &payload.refused,
+                take_error: &|| payload.take_error(),
+                drain: &|rg| drain_rg(rt, payload, rg),
+                // Empty: the scan arm's standing line stays byte-identical
+                // to inc-3 (the tranche legs' grep surface).
+                census: "",
+            },
+            dop,
+            total_granules,
+            &rg,
+            &waiter,
+        )? {
+            super::standing_channel::StandingWait::Done(outcome) => {
                 emit_lfin(rt, "standing", &rg, total_granules, nrgs, payload);
                 return finish_outcome(payload, outcome);
             }
-            StandingWait::Fallback => {}
+            super::standing_channel::StandingWait::Fallback => {}
         }
 
         let launched = parallel::LaunchParallelWorkers(pcxt)?;
@@ -2946,162 +2958,20 @@ fn finish_outcome(
 
 // ---------------------------------------------------------------------------
 // M2 pool-binding: the standing engagement channel (parallel::standing).
+// The leader wait loop lives in the shared super::standing_channel module
+// (M2 inc-1: hoisted verbatim when the sink arms joined the channel); this
+// arm keeps its constants and driver here.
 // ---------------------------------------------------------------------------
 
-enum StandingWait {
-    /// The RG reached an outcome under standing participation.
-    Done(runtime::RgOutcome),
-    /// Standing path unavailable or refused with the RG UNTOUCHED —
-    /// take the launched path.
-    Fallback,
-}
-
-/// First-claim deadline: parked standing workers wake in microseconds, so
-/// an unclaimed engagement after this long means the gang is dead/busy —
-/// fall back to the launched path (correctness never depends on this).
-fn standing_claim_deadline() -> std::time::Duration {
-    // DST P2 (contract §1.3, census erratum (a)): this deadline is
-    // BEHAVIORAL (changes execution path) — its clock is pg_clock, below.
-    static MS: OnceLock<u64> = OnceLock::new();
-    std::time::Duration::from_millis(crate::once_val(&MS, || {
-        std::env::var("PGRUST_RUNTIME_GANG_CLAIM_MS")
-            .ok()
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .unwrap_or(100)
-    }))
-}
-
-/// The standing channel's submit-and-park: publish the engagement, then
-/// poll completion + interrupts + participation counters. Every exit path
-/// closes the board entry and waits for claimed participants to detach
-/// (the arena-lifetime join — detach is Drop-guaranteed on the workers).
-fn standing_wait(
-    rt: &'static Arc<runtime::Runtime>,
-    payload: &Arc<RuntimeScanShared>,
-    dop: i32,
-    total_granules: u64,
-    rg: &runtime::RgHandle,
-    waiter: &runtime::CompletionWaiter,
-) -> PgResult<StandingWait> {
-    let shared = payload.pcxt_shared.get().expect("pcxt shared set before standing_wait");
-    parallel::gtrace("l.publish.begin");
-    let engaged = parallel::standing::try_engage(shared, dop.max(0) as usize);
-    parallel::gtrace("l.publish.end");
-    let Some(entry) = engaged else {
-        return Ok(StandingWait::Fallback);
+/// This arm's standing-channel constants (see standing_channel::StandingArm).
+/// sinks_gate false: the scan arm's standing channel predates inc-1 and is
+/// governed by PGRUST_RUNTIME_POOLBIND alone.
+static STANDING_ARM: super::standing_channel::StandingArm =
+    super::standing_channel::StandingArm {
+        label: "runtime-scan",
+        died: "runtime scan standing executors exited before completing the scan",
+        sinks_gate: false,
     };
-    // Leader-unwind containment: PRIVATE_SHUTDOWN completes the standing
-    // join if this frame never reaches one of its own cleanup paths (each
-    // of which takes the slot back first).
-    *payload.standing.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&entry));
-    let take_slot = || {
-        payload
-            .standing
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .take();
-    };
-    let t0 = pg_clock::MonoStamp::now();
-    let mut traced = false;
-    loop {
-        if let Some(o) = waiter.try_wait() {
-            take_slot();
-            parallel::gtrace("l.close.begin");
-            parallel::standing::close_and_await(&entry);
-            parallel::gtrace("l.close.end");
-            if !traced {
-                lane_trace(&format!(
-                    "runtime-scan: engaged standing dop={} granules={total_granules}",
-                    entry.claimed()
-                ));
-            }
-            return Ok(StandingWait::Done(o));
-        }
-        if let Err(e) = ::postgres_seams::check_for_interrupts::call() {
-            // Order matters: abort THEN drain (the leader's protocol
-            // cleanup is what completes the RG and releases workers parked
-            // in their drives) THEN await detach.
-            rg.abort();
-            drain_rg(rt, payload, rg);
-            take_slot();
-            parallel::standing::close_and_await(&entry);
-            return Err(e);
-        }
-        let claimed = entry.claimed();
-        if !traced && claimed > 0 {
-            lane_trace(&format!(
-                "runtime-scan: engaged standing dop={claimed} granules={total_granules}"
-            ));
-            traced = true;
-        }
-        let started = payload.started.load(Ordering::SeqCst);
-        let refused = entry.refused() + payload.refused.load(Ordering::SeqCst);
-        // Nobody will participate: every ticket-holder refused pre-bind or
-        // at the bind/lane stage, before any granule was claimed.
-        if started == 0 && refused >= entry.tickets() {
-            lane_trace(&format!(
-                "runtime-scan: standing refused ({refused} refusals) — launched fallback"
-            ));
-            take_slot();
-            parallel::standing::close_and_await(&entry);
-            return Ok(StandingWait::Fallback);
-        }
-        // Nothing driving and nothing pending within the deadline: gang
-        // dead/busy (claimed==0) OR a smaller-than-tickets gang whose every
-        // claimant exited pre-drive without reaching the refusal counters'
-        // tickets floor above (started==0, detached>=claimed>0). Either
-        // way no granule was consumed; the launched path takes over. A
-        // straggler that claims right as we close simply drives the same
-        // RG (morsel claims are atomic; its partial combines like any
-        // participant's) — close_and_await bounds on its drive.
-        if started == 0
-            && entry.detached() >= claimed
-            && std::time::Duration::from_nanos(t0.elapsed_ns()) > standing_claim_deadline()
-        {
-            lane_trace("runtime-scan: standing claim deadline — launched fallback");
-            take_slot();
-            parallel::standing::close_and_await(&entry);
-            return Ok(StandingWait::Fallback);
-        }
-        // Participants all detached yet the RG is incomplete and no error
-        // was recorded: a worker died outside every catch layer (detach is
-        // Drop-guaranteed, so this is reachable only through that needle).
-        if claimed > 0 && started > 0 && entry.detached() >= claimed {
-            if let Some(o) = waiter.try_wait() {
-                take_slot();
-                parallel::standing::close_and_await(&entry);
-                return Ok(StandingWait::Done(o));
-            }
-            if let Some(e) = payload.take_error() {
-                rg.abort();
-                drain_rg(rt, payload, rg);
-                take_slot();
-                parallel::standing::close_and_await(&entry);
-                return Err(e);
-            }
-            rg.abort();
-            drain_rg(rt, payload, rg);
-            take_slot();
-            parallel::standing::close_and_await(&entry);
-            return Err(Box::new(PgError::new(
-                ERROR,
-                "runtime scan standing executors exited before completing the scan",
-            )));
-        }
-        // F1 PgResult propagation (train-12 composition seam): a raised
-        // cancel disposition (statement_timeout / pg_cancel_backend)
-        // surfaces from the latch quantum — the standing-loop mirror of
-        // the launched path's F1 defect layer 2b branch and the CFI
-        // branch above (abort THEN drain THEN close-and-await).
-        if let Err(e) = parallel::wait_parallel_finish_quantum() {
-            rg.abort();
-            drain_rg(rt, payload, rg);
-            take_slot();
-            parallel::standing::close_and_await(&entry);
-            return Err(e);
-        }
-    }
-}
 
 /// The standing driver (parallel::standing::register_standing_driver):
 /// runs ON a standing executor, already impersonated (worker number +

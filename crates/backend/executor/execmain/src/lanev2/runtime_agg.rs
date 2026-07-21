@@ -1806,6 +1806,11 @@ pub(super) struct RuntimeAggShared {
     exited: AtomicUsize,
     sink: Arc<AggSink>,
     query_id: AtomicU64,
+    /// M2 inc-1 standing channel: the live board entry, held so the
+    /// PRIVATE_SHUTDOWN hook can complete the standing join (abort + drain
+    /// + await detach) on leader unwind paths — the scan arm's discipline,
+    /// verbatim (standing_channel::shutdown_standing_join).
+    standing: Mutex<Option<Arc<parallel::standing::StandingEngagement>>>,
 }
 
 /// Bump-on-drop exit counter: rides `helper_drive`'s frame so EVERY exit
@@ -2935,6 +2940,13 @@ fn runtime_agg_post_task_park(shared: &parallel::ParallelShared) {
         return;
     };
     let Ok(payload) = private.downcast::<RuntimeAggShared>() else { return };
+    // Every LAUNCHED helper bumps `exited` exactly once, on EVERY exit path
+    // (the leader's liveness reap counts these against `launched`).
+    // HOOK-frame placement (the scan arm's law): the standing driver reuses
+    // helper_drive and must NOT bump — standing exits are accounted by the
+    // board's claimed/detached counters, and stale standing bumps would
+    // poison the launched loop's reap threshold.
+    let _exit = ExitBump(&payload.exited);
     let r = catch_unwind(AssertUnwindSafe(|| helper_drive(shared, &payload)));
     if r.is_err() {
         payload.sink.fail(PgError::new(ERROR, "runtime agg helper panicked").into());
@@ -2944,11 +2956,35 @@ fn runtime_agg_post_task_park(shared: &parallel::ParallelShared) {
     ));
 }
 
+/// The standing driver (M2 inc-1, parallel::set_standing_driver): runs ON
+/// a standing executor, already impersonated (worker number + lock group).
+/// Identical body to the POST_TASK_PARK hook minus the ExitBump (standing
+/// exits ride the board's claimed/detached accounting); exit-committed
+/// unwinds (FATAL) are rethrown to the gang glue — a terminated worker
+/// must die, and swallowing one would resurrect it into the standing pool.
+fn runtime_agg_standing_driver(shared: &parallel::ParallelShared) {
+    let Some(private) = shared.private() else { return };
+    let Ok(payload) = private.downcast::<RuntimeAggShared>() else { return };
+    let r = catch_unwind(AssertUnwindSafe(|| helper_drive(shared, &payload)));
+    if let Err(unwind) = r {
+        payload
+            .sink
+            .fail(PgError::new(ERROR, "runtime agg standing executor panicked").into());
+        latch::SetLatch(::types_storage::latch::LatchHandle::proc(
+            shared.parallel_leader_proc_number,
+        ));
+        if parallel::standing::is_exit_unwind(&*unwind) {
+            std::panic::resume_unwind(unwind);
+        }
+        return;
+    }
+    latch::SetLatch(::types_storage::latch::LatchHandle::proc(
+        shared.parallel_leader_proc_number,
+    ));
+}
+
 fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeAggShared>) {
     let _ = shared;
-    // Every launched helper bumps `exited` exactly once, on EVERY exit path
-    // (the leader's liveness reap counts these against `launched`).
-    let _exit = ExitBump(&payload.exited);
     // Liveness-battery injection (test-only, default-off): the wedge-class
     // exit — panic before binding or driving; the reap must convert it into
     // a prompt error (scripts/runtime-liveness-e2e.sh).
@@ -3377,9 +3413,15 @@ fn teardown_worker_exec(clean: bool) -> PgResult<()> {
 
 fn runtime_agg_private_shutdown(private: &(dyn std::any::Any + Send + Sync)) {
     let Some(payload) = private.downcast_ref::<RuntimeAggShared>() else { return };
-    if let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) {
+    let rg = payload.rg.get().and_then(|w| w.upgrade());
+    if let Some(rg) = &rg {
         rg.abort();
     }
+    // Standing channel (M2 inc-1): complete the standing join on leader
+    // unwind paths (standing_channel::shutdown_standing_join).
+    super::standing_channel::shutdown_standing_join(&payload.standing, rg.as_ref(), &|rg| {
+        drain_rg(payload.rt, rg)
+    });
 }
 
 fn ensure_hooks_registered() {
@@ -4637,6 +4679,7 @@ fn engage<'mcx>(
         exited: AtomicUsize::new(0),
         sink: Arc::clone(&sink),
         query_id: AtomicU64::new(0),
+        standing: Mutex::new(None),
     });
 
     // Arming-phase decomposition spans (tails192 #5): the agg arm had NO
@@ -4665,6 +4708,51 @@ fn engage<'mcx>(
 enum EngageOutcome {
     Fallback,
     Completed,
+}
+
+/// This arm's standing-channel constants (M2 inc-1; see
+/// standing_channel::StandingArm — sinks_gate: PGRUST_RUNTIME_POOLBIND_SINKS).
+static STANDING_ARM: super::standing_channel::StandingArm =
+    super::standing_channel::StandingArm {
+        label: "runtime-agg",
+        died: "runtime agg standing executors exited before completing the aggregation",
+        sinks_gate: true,
+    };
+
+/// Shared post-outcome tail (standing and launched channels): worker-phase
+/// errors rethrow PLAIN (the serial arm's surface, the parity oracle);
+/// budget / topn-winners refusals take the R5 whole-attempt serial rerun;
+/// an unexplained abort surfaces the pending interrupt or reports; a
+/// completed-but-nobody-participated RG falls back serially.
+fn finish_outcome(
+    payload: &Arc<RuntimeAggShared>,
+    sink: &Arc<AggSink>,
+    outcome: runtime::RgOutcome,
+) -> PgResult<EngageOutcome> {
+    if let Some(e) = sink.take_error() {
+        return Err(e);
+    }
+    if sink.budget_refused.load(Ordering::SeqCst) {
+        // R5 degrade: whole-attempt rerun on the serial arm.
+        lane_trace("runtime-agg: budget refusal — falling back to the serial arm");
+        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
+        return Ok(EngageOutcome::Fallback);
+    }
+    if sink.topn_refused.load(Ordering::SeqCst) {
+        // Winners-only refusal: same R5 whole-attempt serial rerun,
+        // its own named trace reason (count-gated ≈0 by the e2e legs).
+        lane_trace("runtime-agg: topn-winners refusal — falling back to the serial arm");
+        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
+        return Ok(EngageOutcome::Fallback);
+    }
+    if outcome == runtime::RgOutcome::Aborted {
+        ::postgres_seams::check_for_interrupts::call()?;
+        return Err(Box::new(PgError::new(ERROR, "runtime agg pipeline aborted")));
+    }
+    if payload.started.load(Ordering::SeqCst) == 0 {
+        return Ok(EngageOutcome::Fallback);
+    }
+    Ok(EngageOutcome::Completed)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4699,6 +4787,14 @@ fn engage_ceremony<'mcx>(
             .set(parallel::shared_for(pcxt))
             .unwrap_or_else(|_| unreachable!("pcxt shared set once"));
         parallel::set_private(pcxt, Arc::clone(payload) as _);
+        // Standing driver dispatch (M2 inc-1): deferred_bind false — this
+        // arm's helper_drive binds EAGERLY (with_query_task_binding), so
+        // the standing serve re-establishes visibility up front and evicts
+        // any parked sticky retention.
+        parallel::set_standing_driver(pcxt, parallel::standing::StandingDriver {
+            drive: runtime_agg_standing_driver,
+            deferred_bind: false,
+        });
 
         // The sink's task sets over the pgrcolumnar granule geometry. Default
         // (combine-parallel lane): the 3-set sealed plumbing — ACCEPT →
@@ -4739,6 +4835,36 @@ fn engage_ceremony<'mcx>(
             .set(rg.downgrade())
             .unwrap_or_else(|_| unreachable!("sink rg set once"));
         *mut_submitted = Some(rg.clone());
+
+        // M2 inc-1: STANDING engagement first (the scan arm's channel,
+        // extended to the sink arms) — no worker launch, no entry task,
+        // one binder bind per participant. Fallback (kill switch / gang
+        // busy / all-refused / claim deadline) leaves the RG untouched and
+        // takes the launched path below.
+        match super::standing_channel::standing_wait(
+            &STANDING_ARM,
+            super::standing_channel::StandingLeader {
+                shared: payload
+                    .pcxt_shared
+                    .get()
+                    .expect("pcxt shared set above"),
+                slot: &payload.standing,
+                started: &payload.started,
+                refused: &payload.refused,
+                take_error: &|| sink.take_error(),
+                drain: &|rg| drain_rg(rt, rg),
+                census: "",
+            },
+            dop,
+            total_granules,
+            &rg,
+            &waiter,
+        )? {
+            super::standing_channel::StandingWait::Done(outcome) => {
+                return finish_outcome(payload, sink, outcome);
+            }
+            super::standing_channel::StandingWait::Fallback => {}
+        }
 
         let launched = parallel::LaunchParallelWorkers(pcxt)?;
         parallel::gtrace("l.agg.launch.end");
@@ -4848,30 +4974,7 @@ fn engage_ceremony<'mcx>(
 
         };
 
-        if let Some(e) = sink.take_error() {
-            return Err(e);
-        }
-        if sink.budget_refused.load(Ordering::SeqCst) {
-            // R5 degrade: whole-attempt rerun on the serial arm.
-            lane_trace("runtime-agg: budget refusal — falling back to the serial arm");
-            stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
-            return Ok(EngageOutcome::Fallback);
-        }
-        if sink.topn_refused.load(Ordering::SeqCst) {
-            // Winners-only refusal: same R5 whole-attempt serial rerun,
-            // its own named trace reason (count-gated ≈0 by the e2e legs).
-            lane_trace("runtime-agg: topn-winners refusal — falling back to the serial arm");
-            stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
-            return Ok(EngageOutcome::Fallback);
-        }
-        if outcome == runtime::RgOutcome::Aborted {
-            ::postgres_seams::check_for_interrupts::call()?;
-            return Err(Box::new(PgError::new(ERROR, "runtime agg pipeline aborted")));
-        }
-        if payload.started.load(Ordering::SeqCst) == 0 {
-            return Ok(EngageOutcome::Fallback);
-        }
-        Ok(EngageOutcome::Completed)
+        finish_outcome(payload, sink, outcome)
     })(&mut submitted);
 
     if let Some(rg) = &submitted {

@@ -661,6 +661,43 @@ pub fn sticky_parked() -> bool {
     STICKY.with(|slot| slot.borrow().is_some())
 }
 
+/// Evict one taken sticky retention with the full session-half unbind —
+/// finish(true): the parked guard holds no statement state, so this is the
+/// session restore only. The eviction choreography shared by
+/// `DeferredQueryTaskBinding::new` and `sticky_evict_parked`.
+fn finish_evicted_sticky(mut sticky: StickySession) -> PgResult<()> {
+    super::gtrace("w.qtb.unstick.begin");
+    let r = catch_unwind(AssertUnwindSafe(|| sticky.guard.finish(true)));
+    super::gtrace("w.qtb.unstick.end");
+    match r {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Err(payload) => {
+            if is_exit_unwind_payload(&*payload) {
+                resume_unwind(payload);
+            }
+            sticky.guard.retry_cleanup_after_panic();
+            Err(prerequisite(
+                "sticky session eviction panicked; engagement refused",
+            ))
+        }
+    }
+}
+
+/// Evict ANY parked sticky retention (M2 inc-1): the EAGER binder's
+/// pre-bind discipline on a standing worker — the sink arms bind through
+/// `with_query_task_binding`, whose validate() envelope gate refuses over
+/// a live retained session bind, so a retention parked by a (scan-arm)
+/// deferred engagement must be restored away first. No-op when nothing is
+/// parked; an eviction error refuses the engagement (fail-closed,
+/// pre-claim).
+pub(crate) fn sticky_evict_parked() -> PgResult<()> {
+    let Some(sticky) = STICKY.with(|slot| slot.borrow_mut().take()) else {
+        return Ok(());
+    };
+    finish_evicted_sticky(sticky)
+}
+
 /// validate() for the sticky resume: the same gates, except the envelope's
 /// live-SessionGucBinding condition — the retention IS a deliberately-live
 /// binding (see SessionEnvelopeBoundaryIssueForRetainedBind). Only reachable
@@ -767,23 +804,8 @@ impl DeferredQueryTaskBinding {
                 _ => None,
             }
         });
-        if let Some(mut sticky) = evict {
-            super::gtrace("w.qtb.unstick.begin");
-            let r = catch_unwind(AssertUnwindSafe(|| sticky.guard.finish(true)));
-            super::gtrace("w.qtb.unstick.end");
-            match r {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => return Err(e),
-                Err(payload) => {
-                    if is_exit_unwind_payload(&*payload) {
-                        resume_unwind(payload);
-                    }
-                    sticky.guard.retry_cleanup_after_panic();
-                    return Err(prerequisite(
-                        "sticky session eviction panicked; engagement refused",
-                    ));
-                }
-            }
+        if let Some(sticky) = evict {
+            finish_evicted_sticky(sticky)?;
         }
         Ok(DeferredQueryTaskBinding {
             shared: Arc::clone(shared),
