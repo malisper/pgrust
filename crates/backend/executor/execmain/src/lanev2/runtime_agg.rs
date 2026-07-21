@@ -3669,13 +3669,18 @@ fn sink_locality_cap_for(est_groups: u64) -> Option<u32> {
 /// gap: after it, the combine input is 100% sequential runs. Byte identity
 /// rides the ratified flush-cadence law (runs merge first-seen; the
 /// remainder run lands LAST — the SEAL face's own visit position) and is
-/// unit-pinned (seal_flush_run_matches_remainder_view). DEFAULT OFF —
-/// armed iff `PGRUST_RUNTIME_AGG_SEALFLUSH` is exactly `1`/`on`; the
-/// GL-RADIX-1 witnessed ladder owns the flip.
+/// unit-pinned (seal_flush_run_matches_remainder_view). DEFAULT ON since
+/// the GL-RADIX-1 witnessed ladder (scratchpad/night/GL-RADIX-1-letter.md,
+/// 2026-07-21: within-pod win vs the incumbent combine on the admitted
+/// band at every scale/DOP/cap measured, byte-equal everywhere, zero
+/// off-band engagements incl. a 43q ON-arm census of zero — the flip is
+/// behavior-inert at product defaults while the m5 groupby_high hold
+/// routes the band legacy, and positions the D2 recipe).
+/// `PGRUST_RUNTIME_AGG_SEALFLUSH=0`/`off` is the kill switch.
 fn agg_sealflush_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        matches!(std::env::var("PGRUST_RUNTIME_AGG_SEALFLUSH").as_deref(), Ok("1") | Ok("on"))
+        !matches!(std::env::var("PGRUST_RUNTIME_AGG_SEALFLUSH").as_deref(), Ok("0") | Ok("off"))
     })
 }
 
