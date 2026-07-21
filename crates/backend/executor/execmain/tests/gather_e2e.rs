@@ -1054,3 +1054,360 @@ fn gather_merge_merges_sorted_streams() {
         assert_eq!(j.join().unwrap(), 0);
     }
 }
+
+// ---------------------------------------------------------------------------
+// World-B passthrough row-emit funnel — Stage-4 SQL smoke (gather-elimination
+// Phase 2). ARMED only when the kill switch is set at process start:
+//
+//   PGRUST_RUNTIME_ROW_FUNNEL=1 cargo test -p execmain --test gather_e2e funnel_
+//
+// Unarmed (the default `cargo test` world) every test here SKIPS, so the
+// default binary's behavior — and the pre-existing gather tests — stay
+// byte-identical. The kill switch is a process-static OnceLock, so arming
+// must happen at process start (the env prefix), never mid-process.
+// ---------------------------------------------------------------------------
+
+fn funnel_armed() -> bool {
+    matches!(
+        std::env::var("PGRUST_RUNTIME_ROW_FUNNEL").as_deref(),
+        Ok("1") | Ok("on")
+    )
+}
+
+/// Install the process-global runtime (the pool the hook's `runtime::global()`
+/// gate requires). No pool threads are spawned: the passthrough RG is PINNED
+/// (invisible to pool workers); the bgworkers drive it themselves through
+/// external lanes, exactly as in production.
+fn funnel_runtime_boot() {
+    static BOOT: Once = Once::new();
+    BOOT.call_once(|| {
+        let rt = ::runtime::Runtime::new(::runtime::RuntimeConfig::new(2));
+        ::runtime::install_global(rt);
+    });
+}
+
+const BOOLOID: u32 = 16;
+
+/// `Var(a) > Const(k)` int4 qual (opno 521 / int4gt proc 147).
+fn funnel_qual_gt(mcx: ::mcx::Mcx<'_>, k: i32) -> NodeList<'_> {
+    let var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+    let op = Node::mk(
+        mcx,
+        ::types_nodes::primnodes::OpExpr {
+            opno: 521,
+            opfuncid: 147, // pg_proc int4gt
+            opresulttype: BOOLOID,
+            opretset: false,
+            opcollid: 0,
+            inputcollid: 0,
+            args: NodeList::make2(mcx, var, mk_int4_const(mcx, k)).unwrap(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    NodeList::make1(mcx, op).unwrap()
+}
+
+/// `(10 / (a - k)) >= 0` — errors with division-by-zero exactly at a == k
+/// (the worker-error-mid-scan injection).
+fn funnel_qual_div_err(mcx: ::mcx::Mcx<'_>, k: i32) -> NodeList<'_> {
+    let var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+    let mi = Node::mk(
+        mcx,
+        ::types_nodes::primnodes::OpExpr {
+            opno: 555,
+            opfuncid: 181, // int4mi
+            opresulttype: INT4OID,
+            opretset: false,
+            opcollid: 0,
+            inputcollid: 0,
+            args: NodeList::make2(mcx, var, mk_int4_const(mcx, k)).unwrap(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    let div = Node::mk(
+        mcx,
+        ::types_nodes::primnodes::OpExpr {
+            opno: 528,
+            opfuncid: 154, // int4div — raises on zero divisor
+            opresulttype: INT4OID,
+            opretset: false,
+            opcollid: 0,
+            inputcollid: 0,
+            args: NodeList::make2(mcx, mk_int4_const(mcx, 10), mi).unwrap(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    let ge = Node::mk(
+        mcx,
+        ::types_nodes::primnodes::OpExpr {
+            opno: 525,
+            opfuncid: 150, // int4ge
+            opresulttype: BOOLOID,
+            opretset: false,
+            opcollid: 0,
+            inputcollid: 0,
+            args: NodeList::make2(mcx, div, mk_int4_const(mcx, 0)).unwrap(),
+            location: -1,
+        },
+    )
+    .unwrap();
+    NodeList::make1(mcx, ge).unwrap()
+}
+
+/// Bare (non-parallel-aware) SeqScan pstmt: `SELECT a FROM rel [WHERE qual]`.
+/// parallel_safe so the funnel gate admits it; NOT parallel_aware — each
+/// funnel worker positions its own scan over claimed morsel block ranges
+/// (seq_scan_set_morsel_range), no shared parallel scan descriptor.
+fn funnel_seqscan_pstmt<'m>(
+    mcx: ::mcx::Mcx<'m>,
+    relid: u32,
+    qual: Option<NodeList<'m>>,
+) -> &'m PlannedStmt<'m> {
+    use ::types_nodes::plannodes::{Plan, Scan, SeqScan};
+    let var = Node::mk_var(mcx, 1, 1, INT4OID, -1, 0, 0).unwrap();
+    let tle = Node::mk_target_entry(mcx, var, 1, Some("a"), false).unwrap();
+    let mut plan = Plan {
+        targetlist: NodeList::make1(mcx, tle).unwrap(),
+        plan_node_id: 0,
+        parallel_safe: true,
+        parallel_aware: false,
+        ..Default::default()
+    };
+    if let Some(q) = qual {
+        plan.qual = q;
+    }
+    let scan =
+        Node::mk(mcx, SeqScan { scan: Scan { plan, scanrelid: 1 }, cb_scan_cols: None }).unwrap();
+    let mut pstmt = Node::build::<PlannedStmt>(mcx).unwrap();
+    pstmt.commandType = CmdType::CMD_SELECT;
+    pstmt.canSetTag = true;
+    pstmt.planTree = Some(scan);
+    seqscan_tables(mcx, relid, &mut pstmt);
+    pstmt.seal_ref()
+}
+
+/// `run_once` with an explicit executor count (0 = complete drain; N = the
+/// count-limited/suspendable cadence the funnel must REFUSE).
+fn funnel_run_once(
+    qd: types_portal::QueryDescHandle,
+    count: u64,
+) -> PgResult<(u64, Vec<i32>)> {
+    let store = tuplestore::Tuplestore::begin_heap(false, false, 1024);
+    let h = tuplestore::hold::register(store);
+    let mut dest = DestReceiver::Tuplestore(tstore_receiver::tstore_create_DR());
+    tcop_dest::SetTuplestoreDestReceiverParams(&mut dest, h, false);
+    execmain_seams::executor_run::call(qd, ForwardScanDirection, count, &mut dest)?;
+    let processed = execmain_seams::query_desc_es_processed::call(qd);
+    let mcx = leaked_mcx();
+    let desc = execmain_seams::query_desc_result_tupdesc::call(qd).unwrap();
+    let mut slot = exectuples::make_tuple_table_slot(
+        mcx,
+        TupleSlotKind::MinimalTuple,
+        Some(std::rc::Rc::clone(&desc)),
+    );
+    let mut values = Vec::new();
+    let mut store = tuplestore::hold::take(h).unwrap();
+    loop {
+        let got = store.gettupleslot(true, false, &mut slot, mcx)?;
+        if !got {
+            break;
+        }
+        let mut isnull = false;
+        let d = exectuples::slot_getattr(&mut slot, 1, &mut isnull);
+        assert!(!isnull);
+        values.push(d.as_i32());
+    }
+    store.end();
+    Ok((processed, values))
+}
+
+/// Full leader-side run of a funnel-candidate pstmt. `poller` spawns the
+/// postmaster stand-in (needed whenever the funnel may LaunchParallelWorkers).
+/// Errors tear down via release + transaction abort (the session error path).
+fn funnel_run_pstmt(
+    pstmt: &'static PlannedStmt<'static>,
+    tag: &'static str,
+    count: u64,
+    poller: bool,
+) -> PgResult<(u64, Vec<i32>)> {
+    begin_xact();
+    let qd = execmain_seams::create_query_desc::call(
+        pstmt,
+        tag,
+        Some(snapmgr::GetActiveSnapshot()),
+        None,
+        CommandDest::None,
+        ParamListHandle::NULL,
+        QueryEnvHandle::NULL,
+        0,
+    )
+    .unwrap();
+    execmain_seams::executor_start::call(qd, 0).unwrap();
+    let poller = poller.then(spawn_postmaster_standin);
+    let r = funnel_run_once(qd, count);
+    let joins = poller.map(|p| p.join().unwrap()).unwrap_or_default();
+    match r {
+        Ok((processed, values)) => {
+            execmain_seams::executor_finish::call(qd).unwrap();
+            execmain_seams::executor_end::call(qd).unwrap();
+            execmain_seams::free_query_desc::call(qd);
+            end_xact();
+            for j in joins {
+                assert_eq!(j.join().unwrap(), 0);
+            }
+            Ok((processed, values))
+        }
+        Err(e) => {
+            // Session error path: release the executor mid-run and abort the
+            // transaction; workers exited through their own error paths (their
+            // exit codes are not asserted — the leader error is the contract).
+            execmain_seams::release_query_desc::call(qd);
+            xact::AbortCurrentTransaction().unwrap();
+            for j in joins {
+                let _ = j.join();
+            }
+            Err(e)
+        }
+    }
+}
+
+// Byte-identity smoke: a multi-page passthrough SELECT a WHERE a > 300 runs
+// once through the SERIAL loop (count-limited run — which also proves the
+// portal-suspend refusal gate) and once through the FUNNEL (complete drain),
+// and must produce the identical row multiset. Engagement is asserted
+// POSITIVELY through the funnel counters — identical rows alone cannot tell
+// the funnel from the serial loop.
+#[test]
+fn funnel_smoke_byte_identical_on_vs_off() {
+    if !funnel_armed() {
+        eprintln!("SKIP: funnel_smoke_byte_identical_on_vs_off (PGRUST_RUNTIME_ROW_FUNNEL unset)");
+        return;
+    }
+    let _s = serial();
+    let _w = Watchdog::arm(240, "funnel_smoke_byte_identical_on_vs_off");
+    setup();
+    heapfix::install();
+    funnel_runtime_boot();
+
+    // 60 pages x 100 rows = 6000 rows (values 1..=6000): enough granules for
+    // the gang floor and enough rows to fill 1024-slot rings (real
+    // back-pressure + the mid-drive leader wake).
+    const RELID: u32 = 93001;
+    let pages: Vec<Vec<i32>> = (0..60)
+        .map(|p| ((p * 100 + 1)..=(p * 100 + 100)).collect())
+        .collect();
+    let page_refs: Vec<&[i32]> = pages.iter().map(|v| &v[..]).collect();
+    heapfix::register_table(RELID, &page_refs);
+    let expected: Vec<i32> = (301..=6000).collect();
+
+    // OFF-equivalent baseline: a count-limited run (count >> rows). The
+    // count-limited gate refuses the funnel (the portal-suspend duplication
+    // fix), so this is the SERIAL loop — engagement counters must not move.
+    let (e0, c0) = execmain::funnel_engagements();
+    let mcx = leaked_mcx();
+    let pstmt_off = funnel_seqscan_pstmt(mcx, RELID, Some(funnel_qual_gt(mcx, 300)));
+    let t0 = std::time::Instant::now();
+    let (processed_off, mut values_off) =
+        funnel_run_pstmt(pstmt_off, "select a where a>300 (serial baseline)", 100_000, false)
+            .unwrap();
+    let serial_ms = t0.elapsed().as_millis();
+    let (e1, c1) = execmain::funnel_engagements();
+    assert_eq!((e1, c1), (e0, c0), "count-limited run must NOT engage the funnel");
+    assert_eq!(processed_off, expected.len() as u64);
+    values_off.sort_unstable();
+    assert_eq!(values_off, expected);
+
+    // ON: complete-drain run — the funnel engages, bgworkers produce, the
+    // leader drains concurrently to the tuplestore dest.
+    let mcx = leaked_mcx();
+    let pstmt_on = funnel_seqscan_pstmt(mcx, RELID, Some(funnel_qual_gt(mcx, 300)));
+    let t1 = std::time::Instant::now();
+    let (processed_on, mut values_on) =
+        funnel_run_pstmt(pstmt_on, "select a where a>300 (funnel)", 0, true).unwrap();
+    let funnel_ms = t1.elapsed().as_millis();
+    let (e2, c2) = execmain::funnel_engagements();
+    assert_eq!(e2, e1 + 1, "complete-drain run must engage the funnel");
+    assert_eq!(c2, c1 + 1, "the funnel must complete the run (not fall back)");
+    assert_eq!(processed_on, expected.len() as u64);
+    values_on.sort_unstable();
+    assert_eq!(values_on, expected, "funnel rows must equal the serial rows");
+    eprintln!(
+        "funnel smoke: rows={} serial_ms={serial_ms} funnel_ms={funnel_ms}",
+        expected.len()
+    );
+    assert!(!parallel::ParallelContextActive());
+}
+
+// LIMIT / portal-suspend variant: a small count-limited run (the
+// Execute(portal, max_rows) shape) must stay on the SERIAL path — the
+// count-limited refusal gate — return exactly `count` rows in serial scan
+// order, and not hang.
+#[test]
+fn funnel_limit_refusal_stays_serial_no_hang() {
+    if !funnel_armed() {
+        eprintln!(
+            "SKIP: funnel_limit_refusal_stays_serial_no_hang (PGRUST_RUNTIME_ROW_FUNNEL unset)"
+        );
+        return;
+    }
+    let _s = serial();
+    let _w = Watchdog::arm(120, "funnel_limit_refusal_stays_serial_no_hang");
+    setup();
+    heapfix::install();
+    funnel_runtime_boot();
+
+    const RELID: u32 = 93002;
+    let pages: Vec<Vec<i32>> =
+        (0..8).map(|p| ((p * 5 + 1)..=(p * 5 + 5)).collect()).collect();
+    let page_refs: Vec<&[i32]> = pages.iter().map(|v| &v[..]).collect();
+    heapfix::register_table(RELID, &page_refs);
+
+    let (e0, _) = execmain::funnel_engagements();
+    let mcx = leaked_mcx();
+    let pstmt = funnel_seqscan_pstmt(mcx, RELID, None);
+    let (processed, values) =
+        funnel_run_pstmt(pstmt, "select a limit-cadence (serial)", 5, false).unwrap();
+    let (e1, _) = execmain::funnel_engagements();
+    assert_eq!(e1, e0, "count-limited run must NOT engage the funnel");
+    assert_eq!(processed, 5);
+    // Serial scan order is deterministic: the first 5 heap rows.
+    assert_eq!(values, vec![1, 2, 3, 4, 5]);
+}
+
+// Worker-error-mid-scan: a qual that raises division-by-zero at one mid-table
+// row must surface as a query ERROR from the funnel run — never partial rows
+// as success — and tear down without a hang.
+#[test]
+fn funnel_worker_error_mid_scan_surfaces() {
+    if !funnel_armed() {
+        eprintln!(
+            "SKIP: funnel_worker_error_mid_scan_surfaces (PGRUST_RUNTIME_ROW_FUNNEL unset)"
+        );
+        return;
+    }
+    let _s = serial();
+    let _w = Watchdog::arm(120, "funnel_worker_error_mid_scan_surfaces");
+    setup();
+    heapfix::install();
+    funnel_runtime_boot();
+
+    const RELID: u32 = 93003;
+    let pages: Vec<Vec<i32>> =
+        (0..12).map(|p| ((p * 10 + 1)..=(p * 10 + 10)).collect()).collect();
+    let page_refs: Vec<&[i32]> = pages.iter().map(|v| &v[..]).collect();
+    heapfix::register_table(RELID, &page_refs);
+
+    let (e0, c0) = execmain::funnel_engagements();
+    let mcx = leaked_mcx();
+    // 10 / (a - 60) errors at a == 60 (page 6 of 12).
+    let pstmt = funnel_seqscan_pstmt(mcx, RELID, Some(funnel_qual_div_err(mcx, 60)));
+    let r = funnel_run_pstmt(pstmt, "select a div-err (funnel)", 0, true);
+    let (e1, c1) = execmain::funnel_engagements();
+    assert_eq!(e1, e0 + 1, "the error run must have engaged the funnel");
+    assert_eq!(c1, c0, "an errored run must NOT count as completed");
+    let err = r.expect_err("division by zero must surface as a query error");
+    eprintln!("funnel worker-error surfaced: {err}");
+}

@@ -459,9 +459,35 @@ pub(super) fn engage_passthrough(
     let payload =
         PassthroughShared::new(rt, pstmt, query_text.to_string(), eflags, Arc::clone(&funnel));
 
+    // EnterParallelMode brackets the parallel-context lifetime
+    // (CreateParallelContext asserts it; the agg arm's engage discipline,
+    // runtime_scan.rs). The hook engages from a SERIAL plan, so the executor's
+    // own use_parallel_mode bracket never ran. An error RETURN exits the mode
+    // below (the context is destroyed on every return path first); an error
+    // UNWIND aborts the transaction, which destroys live contexts and resets
+    // the mode (AtEOXact_Parallel — the Gather discipline).
+    ::xact::EnterParallelMode();
+    let r = engage_passthrough_inner(rt, &funnel, &payload, dop, source, limit, emit_row);
+    ::xact::ExitParallelMode();
+    r
+}
+
+/// Everything between Enter/ExitParallelMode: create the context, submit the
+/// pinned RG, launch, run the leader drain loop, tear down. On ANY return path
+/// the parallel context is destroyed (workers joined) and the RG completed and
+/// drained before the caller's arena can unwind.
+fn engage_passthrough_inner(
+    rt: &'static Arc<runtime::Runtime>,
+    funnel: &Arc<RowFunnel<MinImage>>,
+    payload: &Arc<PassthroughShared>,
+    dop: i32,
+    source: Arc<dyn runtime::MorselSource>,
+    limit: Option<u64>,
+    emit_row: impl FnMut(MinImage) -> PgResult<bool>,
+) -> PgResult<PassthroughEngageOutcome> {
     let pcxt = parallel::CreateParallelContext("postgres", "pgrust_runtime_passthrough_main", dop)?;
     let mut submitted: Option<runtime::RgHandle> = None;
-    let funnel_body = Arc::clone(&funnel);
+    let funnel_body = Arc::clone(funnel);
 
     let body = (move |mut_submitted: &mut Option<runtime::RgHandle>,
                       mut emit_row: &mut dyn FnMut(MinImage) -> PgResult<bool>|
@@ -472,9 +498,9 @@ pub(super) fn engage_passthrough(
         }
         parallel::InstallQueryTaskBinding(pcxt, parallel::QueryTaskBindingPolicy::default())?;
         payload.set_pcxt_shared(parallel::shared_for(pcxt));
-        parallel::set_private(pcxt, Arc::clone(&payload) as _);
+        parallel::set_private(pcxt, Arc::clone(payload) as _);
 
-        let work: Arc<dyn runtime::TaskSetWork> = Arc::clone(&payload) as _;
+        let work: Arc<dyn runtime::TaskSetWork> = Arc::clone(payload) as _;
         static NEXT_QID: AtomicUsize = AtomicUsize::new(1);
         let (rg, waiter) = rt.submit_pinned_with_affinity(
             runtime::QuerySpec {
@@ -598,7 +624,7 @@ pub(super) fn engage_passthrough(
     // Teardown tail: a submitted RG must be COMPLETE before DestroyParallelContext.
     if let Some(rg) = &submitted {
         if rg.try_outcome().is_none() {
-            drain_rg_pt(rt, &funnel, rg);
+            drain_rg_pt(rt, funnel, rg);
         }
     }
     let destroy = parallel::DestroyParallelContext(pcxt);
@@ -610,6 +636,22 @@ pub(super) fn engage_passthrough(
 // ---------------------------------------------------------------------------
 // Stage 3: the gated execute_plan hook.
 // ---------------------------------------------------------------------------
+
+/// Stage-4 smoke observability: cumulative (engaged, completed) counters —
+/// `engaged` bumps when every eligibility gate passed and the ceremony was
+/// entered; `completed` bumps when the funnel answered the run. The e2e smoke
+/// asserts engagement positively (byte-identical rows alone cannot distinguish
+/// the funnel from the serial loop) and asserts NON-engagement on the
+/// fail-closed paths (count-limited refusal). Diagnostic-only.
+static PT_ENGAGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PT_COMPLETED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn funnel_engagements() -> (u64, u64) {
+    (
+        PT_ENGAGED.load(Ordering::SeqCst),
+        PT_COMPLETED.load(Ordering::SeqCst),
+    )
+}
 
 /// Degree of parallelism for the funnel (`PGRUST_RUNTIME_ROW_FUNNEL_DOP`,
 /// default 2). The funnel is experimental/gated, so DOP is a knob rather than
@@ -731,6 +773,7 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
         Some(desc),
     );
 
+    PT_ENGAGED.fetch_add(1, Ordering::SeqCst);
     let outcome = engage_passthrough(
         rt,
         pstmt,
@@ -764,6 +807,7 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
 
     match outcome {
         PassthroughEngageOutcome::Completed(n) => {
+            PT_COMPLETED.fetch_add(1, Ordering::SeqCst);
             estate.es_processed = n;
             Ok(true)
         }
