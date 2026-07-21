@@ -1979,23 +1979,21 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             {
                 if let Some(tle) = parse.targetList.nth(0).as_target_entry() {
                     if is_count_distinct_any(tle.expr, rti) {
-                        // GL-LOWDIST-1 re-derivation, plain INT face: the
-                        // baseline alone showed this guard preserving a
-                        // 1.7-2.7x-losing GM+hybrid across the whole low-dop
-                        // band (the sink wins every measured cell, letter
-                        // §1/§3) — the covered-int-arg face rides the
-                        // re-derived low-width curve. The TEXT face keeps
-                        // the provisional textdistinct economics until its
-                        // own ladder (named follow-up lane).
-                        let guard = if is_count_distinct_int(tle.expr, rti) {
-                            distinct_lowwidth_guard(textdistinct_guard())
-                        } else {
-                            textdistinct_guard()
-                        };
+                        // GL-LOWDIST-1 re-derivation (INT face — the
+                        // baseline alone showed the provisional guard
+                        // preserving a 1.7-2.7x-losing GM+hybrid across the
+                        // low-dop band) + GL-LOWDIST-2 (TEXT face — its own
+                        // witnessed ladder, dop {1,2,4,8,16} x 1M-10M
+                        // spanning the 3M edge, fast + dist profiles: the
+                        // sink wins EVERY dop>=2 cell against both the
+                        // forced-legacy GM and serial, 0.32-0.57 rt/legacy;
+                        // letter scratchpad/night/GL-LOWDIST-2-letter.md).
+                        // Both arg faces ride the re-derived low-width
+                        // curve; the kill restores the provisional floor.
                         return finish_textdistinct(
                             run,
                             "plain-count-distinct",
-                            guard,
+                            distinct_lowwidth_guard(textdistinct_guard()),
                             rte.relid,
                             1.0,
                             rel_rows,
@@ -2555,10 +2553,22 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     // walk composes it (named-kernels-distinct Kernel 2), so no extra probe
     // condition is needed beyond the topn shape already validated above.
     if n_count_distinct > 0 && n_text > 0 {
+        // GL-LOWDIST-2 re-derivation: this face's witnessed ladder (dop
+        // {1,2,4,8,16} x 1M-10M, fast + dist profiles) measured the sink
+        // winning EVERY cell against the forced-legacy arm 3-24x — the
+        // pardistinct hybrids never engage on text group keys (hashgroup
+        // admission is int-key), so the provisional floor was preserving
+        // per-tuple GM, the worst arm at every point. dop>=2 also beats
+        // serial everywhere; dop1 keeps Gather under the re-derived guard
+        // (the named forgone win — suppression measured 3-4x better than
+        // GM at dop1 but 2.2-2.4x worse than serial; the clean single
+        // bound matches the INT face). Letter:
+        // scratchpad/night/GL-LOWDIST-2-letter.md; kill restores the
+        // provisional floor.
         return finish_textdistinct(
             run,
             "text-grouped-count-distinct",
-            textdistinct_guard(),
+            distinct_lowwidth_guard(textdistinct_guard()),
             rte.relid,
             ngroups,
             rel_rows,
