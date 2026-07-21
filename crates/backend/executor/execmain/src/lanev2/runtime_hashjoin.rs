@@ -234,13 +234,13 @@ fn hj_groupsink_enabled() -> bool {
     })
 }
 
-/// TPCH-DECOROOT (night/tpch-cars-1, CAR 1) — executor half: engage the
+/// SE-DECOROOT (the GL-DECOROOT-1 lane) — executor half: engage the
 /// grouped-join sink when the Agg sits ONE WHITELISTED DECORATION CHAIN
 /// below the plan root (`[Limit] -> [Sort] -> Agg`): the arm fills the full
 /// grouped table (fill-only — no first-row retrieve) and the serial
 /// Sort/Limit above consumes it off the filled table, exactly the scan-side
 /// sinks' standing under-Sort/Limit posture (runtime_distinct's "the Agg
-/// need not be the plan root" law). DEFAULT ON (tpch-flips train,
+/// need not be the plan root" law). DEFAULT ON (conversion-flips train,
 /// GL-DECOROOT-1 — see the planner twin's doc for the letter numbers);
 /// `PGRUST_LANE_V2_DECOROOT=0|off` is the kill switch — the SAME spelling
 /// as the planner probe (knob coherence: a keyed decorated shape whose arm
@@ -253,13 +253,13 @@ fn hj_decoroot_enabled() -> bool {
     })
 }
 
-/// TPCH-NUMJOIN (night/tpch-cars-1, CAR 2) — executor half: admit the
+/// SE-NUMJOIN (the GL-NUMJOIN-1 lane) — executor half: admit the
 /// SE-AGGPOLY manifest schema (sum/avg(NUMERIC) over free arg exprs +
 /// exportable lane kinds) into the join sinks' export/combine/absorb — the
 /// relocated NumericAgg digit-snapshot states, C numeric_avg_combine field
 /// law, exact deferred additions at absorb. Plan-covered shapes are
 /// UNTOUCHED (the schema derivation tries the fold plan first). DEFAULT
-/// ON (tpch-flips train, GL-NUMJOIN-1 — the planner twin's doc carries
+/// ON (conversion-flips train, GL-NUMJOIN-1 — the planner twin's doc carries
 /// the letter numbers incl. the named multibuild-numeric@6M ~parity spot);
 /// `PGRUST_LANE_V2_AGGJOIN_NUMERIC=0|off` is the kill switch — same
 /// spelling as the planner probe (knob coherence; BOTH sites flip
@@ -274,7 +274,7 @@ fn hj_aggjoin_numeric_enabled() -> bool {
     })
 }
 
-/// TPCH-CBKEYS (night/tpch-cbkeys) — executor half: admit CANONICAL-BYTES
+/// SE-CBKEYS (the GL-CBKEYS-1 lane) — executor half: admit CANONICAL-BYTES
 /// text/varchar group keys (deterministic collations only) into the
 /// grouped-join sink's export/combine/absorb, bringing the JOIN sink to
 /// the scan sinks' key parity (the C3 `group_eq_representational` law:
@@ -286,7 +286,7 @@ fn hj_aggjoin_numeric_enabled() -> bool {
 /// bytes admissions are tried only after the word admissions refuse).
 /// The grouped-join row is spill-DISABLED by construction (the export
 /// refuses spill-mode tables), so matrix law 2c (bytes keys disable the
-/// spill arm) holds inherently. DEFAULT ON (tpch-flips train, GL-CBKEYS-1
+/// spill arm) holds inherently. DEFAULT ON (conversion-flips train, GL-CBKEYS-1
 /// — the planner twin's doc carries the letter numbers);
 /// `PGRUST_LANE_V2_CBKEYS=0|off` is the kill switch — same spelling as
 /// the planner probe (knob coherence; BOTH sites flip together).
@@ -297,7 +297,7 @@ fn hj_cbkeys_enabled() -> bool {
     })
 }
 
-/// TPCH-BPCHAR (night/tpch-bpchar) — the tie-law sub-gate of the cbkeys
+/// SE-BPCHAR (the GL-BPCHAR-1 lane) — the tie-law sub-gate of the cbkeys
 /// car: admit `char(n)` (real-typmod bpchar) group keys into the
 /// canonical-bytes vocabulary. The ruling (proven in the varchar crate's
 /// tie-law corpus against the vendored bpchar_input/bpchareq): same-typmod
@@ -305,7 +305,7 @@ fn hj_cbkeys_enabled() -> bool {
 /// equal-under-bpchareq <=> byte-identical images — the stored bytes ARE
 /// canonical and no trailing-blank representative tie exists. Sub-knob of
 /// CBKEYS (both must be armed; the planner probe reads the same pair).
-/// DEFAULT ON (tpch-flips train, GL-BPCHAR-1 — the planner twin's doc
+/// DEFAULT ON (conversion-flips train, GL-BPCHAR-1 — the planner twin's doc
 /// carries the letter numbers incl. the byte-identical production canary);
 /// `PGRUST_LANE_V2_CBKEYS_BPCHAR=0|off` is the kill switch.
 fn hj_bpchar_keys_enabled() -> bool {
@@ -318,7 +318,7 @@ fn hj_bpchar_keys_enabled() -> bool {
     })
 }
 
-/// TPCH-DECOROOT: resolve the Agg's plan NODE from the leader plan root.
+/// SE-DECOROOT: resolve the Agg's plan NODE from the leader plan root.
 /// `Some` iff the root IS this Agg (the pre-existing law, any knob state),
 /// or — knob-armed and `decorated_ok` (grouped engagements only) — the root
 /// is a whitelisted decoration chain `[Limit] -> [Sort] -> Agg` whose Agg is
@@ -3437,8 +3437,8 @@ fn mb_arm_worker<'mcx>(
     if chain.grouped {
         // SE-AGGJOIN: grouped congruence — the rebuilt agg must admit the
         // grouped export exactly as the leader's did (plan-based, or the
-        // knob-gated poly manifest — TPCH-NUMJOIN; or the knob-gated
-        // bytes-key admissions — TPCH-CBKEYS; env is process-shared so
+        // knob-gated poly manifest — SE-NUMJOIN; or the knob-gated
+        // bytes-key admissions — SE-CBKEYS; env is process-shared so
         // both sides resolve the same schema and key mode).
         let numeric = hj_aggjoin_numeric_enabled();
         let word_ok = ::nodeagg::agg_grouped_runtime_admissible(agg)
@@ -3880,7 +3880,7 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
     Ok(r)
 }
 
-/// TPCH-DECOROOT (night/tpch-cars-1, CAR 1): the decorated-root FILL entry —
+/// SE-DECOROOT (the GL-DECOROOT-1 lane): the decorated-root FILL entry —
 /// called from the serial Sort/Limit feeds when their Agg child sits over a
 /// HashJoin. `Ok(true)` = the grouped runtime sink engaged and FILLED the
 /// leader table (finished, not retrieved) — the caller's own drain paths
@@ -3932,7 +3932,7 @@ fn try_own_multibuild<'mcx>(
     rt: &'static Arc<runtime::Runtime>,
     dop: i32,
     grouped: bool,
-    // TPCH-DECOROOT (CAR 1): fill-only engagement — the Agg sits under a
+    // SE-DECOROOT (CAR 1): fill-only engagement — the Agg sits under a
     // whitelisted Sort/Limit decoration; on completion the leader table is
     // filled/finished but NOT retrieved (the decorated consumer drains it).
     fill_only: bool,
@@ -3941,9 +3941,9 @@ fn try_own_multibuild<'mcx>(
         router::tick_refused(ArmClass::HashJoin, reason);
     }
     if grouped {
-        // TPCH-NUMJOIN (CAR 2): plan-based admission FIRST (byte-untouched);
+        // SE-NUMJOIN (CAR 2): plan-based admission FIRST (byte-untouched);
         // the knob-gated poly twin admits the numeric-manifest shapes the
-        // relocated NumericAgg export carries. TPCH-CBKEYS: the bytes-key
+        // relocated NumericAgg export carries. SE-CBKEYS: the bytes-key
         // admissions (canonical text/varchar keys) follow, knob-gated —
         // key mode and trans schema compose freely.
         let numeric = hj_aggjoin_numeric_enabled();
@@ -3987,7 +3987,7 @@ fn try_own_multibuild<'mcx>(
         refuse("params");
         return Ok(None);
     }
-    // Agg must be the plan root — or (TPCH-DECOROOT, grouped only) sit one
+    // Agg must be the plan root — or (SE-DECOROOT, grouped only) sit one
     // whitelisted `[Limit] -> [Sort]` decoration below it; the resolved Agg
     // NODE seeds the worker pstmt (workers run the Agg subtree, never the
     // decoration).
@@ -4180,9 +4180,9 @@ fn engage<'mcx>(
     chain: Option<MbInit>,
     // The plan NODE seeding the worker pstmt: the Agg itself (== planTree
     // when the Agg is the root; the resolved decorated-chain Agg node under
-    // TPCH-DECOROOT — workers never see the Sort/Limit decoration).
+    // SE-DECOROOT — workers never see the Sort/Limit decoration).
     worker_root: ::types_nodes::Node<'mcx>,
-    // TPCH-DECOROOT: grouped fill-only — absorb + finish the leader table
+    // SE-DECOROOT: grouped fill-only — absorb + finish the leader table
     // but do NOT retrieve; the decorated serial consumer drains it.
     fill_only: bool,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
@@ -4528,7 +4528,7 @@ fn engage_ceremony<'mcx>(
     mut single: Option<(Arc<JoinBuildSink>, Arc<dyn runtime::MorselSource>)>,
     payload: &Arc<RuntimeHjShared>,
     fill_inner: bool,
-    // TPCH-DECOROOT: grouped fill-only (see `engage`).
+    // SE-DECOROOT: grouped fill-only (see `engage`).
     fill_only: bool,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     let pcxt = parallel::CreateParallelContext("postgres", "pgrust_runtime_hashjoin_main", dop)?;
@@ -4811,7 +4811,7 @@ fn engage_ceremony<'mcx>(
                     combined.len()
                 ));
                 if fill_only {
-                    // TPCH-DECOROOT: the table is filled + finished; the
+                    // SE-DECOROOT: the table is filled + finished; the
                     // decorated serial consumer (Sort/Limit feed) drains it
                     // through the ordinary emit paths. The wrapper maps
                     // Some(_) to "filled"; no row is consumed here.
@@ -4876,18 +4876,18 @@ fn drain_rg(rt: &'static Arc<runtime::Runtime>, rg: &runtime::RgHandle) -> bool 
 mod mb_tests {
     use super::*;
 
-    /// TPCH-CARS executor knobs (night/tpch-cars-1): both DEFAULT OFF —
+    /// SE-CARS executor knobs (the GL-DECOROOT-1/GL-NUMJOIN-1 lane): both DEFAULT OFF —
     /// the test binary carries no env, so the live getters resolve OFF
     /// (the decorated-root fill entry and the poly-manifest join admission
     /// are unreachable at default; every pre-existing path byte-identical).
     /// Same spelling as the planner probe (knob-coherence law).
     #[test]
-    fn tpch_cars_executor_knobs_default_off() {
-        // tpch-flips: DECOROOT is DEFAULT ON (GL-DECOROOT-1; =0|off kills).
-        assert!(hj_decoroot_enabled(), "tpch-flips: unset => ON (GL-DECOROOT-1)");
-        assert!(hj_aggjoin_numeric_enabled(), "tpch-flips: unset => ON (GL-NUMJOIN-1)");
-        assert!(hj_cbkeys_enabled(), "tpch-flips: unset => ON (GL-CBKEYS-1)");
-        assert!(hj_bpchar_keys_enabled(), "tpch-flips: unset => ON (GL-BPCHAR-1)");
+    fn conversion_car_executor_knob_defaults() {
+        // conversion-flips: DECOROOT is DEFAULT ON (GL-DECOROOT-1; =0|off kills).
+        assert!(hj_decoroot_enabled(), "conversion-flips: unset => ON (GL-DECOROOT-1)");
+        assert!(hj_aggjoin_numeric_enabled(), "conversion-flips: unset => ON (GL-NUMJOIN-1)");
+        assert!(hj_cbkeys_enabled(), "conversion-flips: unset => ON (GL-CBKEYS-1)");
+        assert!(hj_bpchar_keys_enabled(), "conversion-flips: unset => ON (GL-BPCHAR-1)");
     }
 
     /// Decomposition invariants on a SNOWFLAKE topology

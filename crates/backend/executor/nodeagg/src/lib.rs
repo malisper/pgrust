@@ -4061,14 +4061,14 @@ fn grouped_key_type_exportable(att: &::types_tuple::FormData_pg_attribute) -> bo
         && matches!(att.atttypid, 16 | 18 | 20 | 21 | 23 | 26 | 1082)
 }
 
-/// TPCH-CBKEYS (night/tpch-cbkeys): a grouping column's key EXPORT kind.
+/// SE-CBKEYS (the GL-CBKEYS-1 lane): a grouping column's key EXPORT kind.
 /// `Word` = the byval vocabulary above (the bootstrap row, byte-untouched).
 /// `Bytes` = canonical-bytes text/varchar under a DETERMINISTIC collation
 /// (default 100 / C 950) — byte equality of the detoasted content IS the
 /// grouping operator's verdict (texteq; the scan-side C3/distinct
 /// machinery's `group_eq_representational` law).
 ///
-/// TPCH-BPCHAR (night/tpch-bpchar) — the TIE LAW of record: BPCHAR (1042)
+/// SE-BPCHAR (the GL-BPCHAR-1 lane) — the TIE LAW of record: BPCHAR (1042)
 /// columns with a REAL typmod (`char(n)`, atttypmod >= 5) additionally
 /// admit as `Bytes` when the caller passes `admit_bpchar` (the
 /// PGRUST_LANE_V2_CBKEYS_BPCHAR gate). The ruling, proven against the
@@ -4121,7 +4121,7 @@ pub fn agg_grouped_runtime_admissible(node: &AggStateData<'_>) -> bool {
         && runtime_partial::agg_runtime_partial_admissible(node)
 }
 
-/// TPCH-NUMJOIN (night/tpch-cars-1, CAR 2): the grouped admission's POLY
+/// SE-NUMJOIN (the GL-NUMJOIN-1 lane): the grouped admission's POLY
 /// twin — the identical structural shell, with the SE-AGGPOLY manifest
 /// (>=1 numeric_avg_accum NumericAvg transition, remainder exportable lane
 /// kinds; arg expressions free) in place of the full-fold-plan requirement.
@@ -4133,7 +4133,7 @@ pub fn agg_grouped_poly_runtime_admissible(node: &AggStateData<'_>) -> bool {
         && runtime_partial::agg_poly_partial_admissible(node)
 }
 
-/// TPCH-CBKEYS: the BYTES-key admission pair — the identical structural
+/// SE-CBKEYS: the BYTES-key admission pair — the identical structural
 /// core with the canonical-bytes key census (every key column Word- or
 /// Bytes-exportable, at least one Bytes) in place of the word-only census.
 /// The caller (the runtime hash-join grouped sink) gates these behind the
@@ -4171,7 +4171,7 @@ fn agg_grouped_runtime_shell_admissible(node: &AggStateData<'_>) -> bool {
     desc.attrs[..nkeys].iter().all(grouped_key_type_exportable)
 }
 
-/// TPCH-CBKEYS: the mixed word/bytes key census (>=1 canonical-bytes text
+/// SE-CBKEYS: the mixed word/bytes key census (>=1 canonical-bytes text
 /// column; bpchar and non-deterministic collations refuse via
 /// `grouped_key_kind`).
 fn grouped_keys_bytes_admissible(node: &AggStateData<'_>, admit_bpchar: bool) -> bool {
@@ -4234,7 +4234,7 @@ fn grouped_key_datum(att: &::types_tuple::FormData_pg_attribute, w: i64) -> Datu
     }
 }
 
-/// TPCH-CBKEYS: a text/varchar key datum's canonical CONTENT bytes —
+/// SE-CBKEYS: a text/varchar key datum's canonical CONTENT bytes —
 /// short/inline images read in place; compressed/external images detoast
 /// (the hash table materializes input datums verbatim; a heap scan can hand
 /// back toasted attributes). Byte equality of this content is the grouping
@@ -4299,7 +4299,7 @@ pub fn agg_hash_export_grouped_into<'mcx>(
 ) -> PgResult<bool> {
     debug_assert_eq!(node.plan.aggstrategy, AGG_HASHED);
     let mcx = estate.es_query_cxt;
-    // TPCH-NUMJOIN (CAR 2): the export schema, once per call (plan-based for
+    // SE-NUMJOIN (CAR 2): the export schema, once per call (plan-based for
     // every pre-existing engagement; the poly manifest only for shapes the
     // knob-gated poly admission let in).
     let schema = runtime_partial::trans_schema(node)?;
@@ -4338,7 +4338,7 @@ pub fn agg_hash_export_grouped_into<'mcx>(
                         Some(GroupedKeyKind::Word) => runtime_partial::GroupKeyPart::Word(
                             grouped_key_word(&desc.attrs[i], base.tts_values[i], isnull),
                         ),
-                        // TPCH-CBKEYS: canonical content bytes (admission
+                        // SE-CBKEYS: canonical content bytes (admission
                         // guaranteed the kind; reaching None is a walk bug).
                         Some(GroupedKeyKind::Bytes) => runtime_partial::GroupKeyPart::Bytes(
                             grouped_text_key_bytes(mcx, base.tts_values[i])?,
@@ -4404,7 +4404,7 @@ pub fn exec_agg_grouped_runtime_partials<'mcx>(
 ) -> PgResult<bool> {
     debug_assert_eq!(node.plan.aggstrategy, AGG_HASHED);
     let mcx = estate.es_query_cxt;
-    // TPCH-NUMJOIN (CAR 2): the absorb schema, once per call (see the
+    // SE-NUMJOIN (CAR 2): the absorb schema, once per call (see the
     // export's twin note).
     let schema = runtime_partial::trans_schema(node)?;
     {
@@ -4448,7 +4448,7 @@ pub fn exec_agg_grouped_runtime_partials<'mcx>(
                                 runtime_partial::GroupKeyPart::Word(w) => {
                                     grouped_key_datum(&desc.attrs[i], *w)
                                 }
-                                // TPCH-CBKEYS: rebuild the canonical
+                                // SE-CBKEYS: rebuild the canonical
                                 // varlena; an allocation failure refuses to
                                 // the serial rerun (fail-closed, correct
                                 // results — the grouped_absorb_reset path).

@@ -149,7 +149,7 @@ pub fn agg_runtime_partial_admissible(node: &AggStateData<'_>) -> bool {
     }
 }
 
-/// TPCH-NUMJOIN (night/tpch-cars-1, CAR 2): the per-transno export SCHEMA a
+/// SE-NUMJOIN (the GL-NUMJOIN-1 lane): the per-transno export SCHEMA a
 /// runtime-partial export/combine/absorb runs under. `Plan` = the classified
 /// fold plan covers everything (the pre-existing path, byte-untouched);
 /// `Poly` = the SE-AGGPOLY manifest (>=1 numeric_avg_accum NumericAvg entry,
@@ -274,7 +274,7 @@ pub fn agg_runtime_export_partial_into(
     node: &AggStateData<'_>,
     partial: &mut RuntimePartial,
 ) -> PgResult<()> {
-    // TPCH-NUMJOIN (CAR 2): schema-dispatched — plan-admissible nodes take
+    // SE-NUMJOIN (CAR 2): schema-dispatched — plan-admissible nodes take
     // the pre-existing path byte-identically; nodes the (knob-gated) poly
     // admission let in export via the manifest (numeric states relocated).
     let schema = trans_schema(node)?;
@@ -466,7 +466,7 @@ pub fn agg_runtime_combine_into(
 }
 
 /// Combine worker partials (order-insensitive-exact for every admitted
-/// kind; install order is immaterial by construction). TPCH-NUMJOIN
+/// kind; install order is immaterial by construction). SE-NUMJOIN
 /// (CAR 2): layout derived per schema — plan-admissible nodes combine over
 /// the fold plan exactly as before; poly-admitted nodes over the manifest
 /// (the NumericAgg law rides `combine_into`).
@@ -535,7 +535,7 @@ pub fn agg_sorted_absorb_partial(
 /// The shared absorb loop: write each transno's combined partial into the
 /// node's once-allocated pergroup array (plain and sorted share
 /// `pergroup_base` — one current-group array either way), byte-for-byte the
-/// serial transfn chain's end state. TPCH-NUMJOIN (CAR 2): schema-
+/// serial transfn chain's end state. SE-NUMJOIN (CAR 2): schema-
 /// dispatched — plan-admissible nodes (the sorted arm always; the plain arm
 /// unless the poly admission engaged) take the pre-existing path
 /// byte-identically.
@@ -698,7 +698,7 @@ fn install_int128_fixups(
 /// One grouping column's self-contained key value. `Word` = the
 /// width-normalized byval datum word (the SE-AGGJOIN bootstrap vocabulary —
 /// word equality IS group equality for the admitted byval types). `Bytes` =
-/// TPCH-CBKEYS (night/tpch-cbkeys): the detoasted CONTENT bytes of a
+/// SE-CBKEYS (the GL-CBKEYS-1 lane): the detoasted CONTENT bytes of a
 /// text/varchar key under a DETERMINISTIC collation, where byte equality is
 /// the grouping operator's verdict (texteq — the same
 /// `group_eq_representational` law the scan-side C3/distinct machinery
@@ -735,7 +735,7 @@ pub fn agg_grouped_runtime_combine(
     node: &AggStateData<'_>,
     parts: &[GroupedRuntimePartial],
 ) -> PgResult<Vec<(GroupKeyWords, RuntimePartial)>> {
-    // TPCH-NUMJOIN (CAR 2): layout per schema — plan-admissible nodes
+    // SE-NUMJOIN (CAR 2): layout per schema — plan-admissible nodes
     // combine over the fold plan exactly as before; poly-admitted grouped
     // nodes over the manifest (NumericAgg's own law rides `combine_into`).
     let schema = trans_schema(node)?;
@@ -1030,7 +1030,7 @@ fn absorb_poly_partial_states(
     absorb_poly_at(node, &manifest, base, combined)
 }
 
-/// The manifest absorb body over an EXPLICIT pergroup base (TPCH-NUMJOIN,
+/// The manifest absorb body over an EXPLICIT pergroup base (SE-NUMJOIN,
 /// CAR 2: the grouped-join sink writes each combined group's states into
 /// its hash-table entry's array; the plain wrapper above passes the node's
 /// fixed one — byte-identical to the pre-factor body for that caller).
