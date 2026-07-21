@@ -869,18 +869,18 @@ fn funnel_plus1() -> bool {
     })
 }
 
-/// GL-FUNNEL-2 increment 2 — leader-producer mode (default OFF;
-/// `PGRUST_RUNTIME_ROW_FUNNEL_LEADER=1`/`on` arms): the leader alternates
-/// drain passes with producing morsels through the sanctioned caller-worker
-/// machinery (`runtime::CallerWorker::drive_with_duties_parked`) — see
-/// `engage_leader_producer` for the mode's invariant analysis.
+/// Leader-producer mode — THE DEFAULT ENGAGEMENT CONFIG as of the GL-FUNNEL-4
+/// flip (`PGRUST_RUNTIME_ROW_FUNNEL_LEADER=0` restores the pure-drain leader
+/// with DOP+1 admission): the leader alternates drain passes with producing
+/// morsels through the sanctioned caller-worker machinery
+/// (`runtime::CallerWorker::drive_with_duties_parked`) — invariant analysis at
+/// the engage site. It dominated DOP+1 at every measured exp point (GL-2) and
+/// carried the GL-4 decider (0.905/0.917 vs Gather) while using one fewer
+/// gang slot.
 fn funnel_leader_mode() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        matches!(
-            std::env::var("PGRUST_RUNTIME_ROW_FUNNEL_LEADER").as_deref(),
-            Ok("1") | Ok("on")
-        )
+        !std::env::var("PGRUST_RUNTIME_ROW_FUNNEL_LEADER").is_ok_and(|v| v.trim() == "0")
     })
 }
 
@@ -944,6 +944,18 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
     if !plan.parallel_safe {
         return Ok(false);
     }
+    // FLOORGUARD (GL-FUNNEL-4 flip band; GL-FUNNEL-1 recipe, all fail-closed):
+    // 1. QUAL REQUIRED — bare no-qual passthroughs measured 1.55–2.3x losses
+    //    (the drain ceiling); never admissible.
+    if plan.qual.is_nil() {
+        return Ok(false);
+    }
+    // 2. DOP >= 2 (no DOP-1 arm was ever measured; DOP2 already wins 0.59–0.75
+    //    in-region).
+    let dop = funnel_dop();
+    if dop < 2 {
+        return Ok(false);
+    }
     let desc = planstate.exec_get_result_type(plan)?;
 
     // Binder policy: a shape the query-task binder would refuse must not launch.
@@ -958,7 +970,6 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
     let query_text = estate.es_sourceText.unwrap_or("");
     let eflags = estate.es_top_eflags;
     let wire_mcx = estate.es_query_cxt;
-    let dop = funnel_dop();
 
     // Morsel source (heap block geometry): mutable scan-source borrow.
     let source: Arc<dyn runtime::MorselSource> = {
@@ -967,6 +978,33 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
         };
         if !::nodeseqscan::seq_scan_is_heap(ss) {
             return Ok(false);
+        }
+        // FLOORGUARD gate 3: EMIT-FRACTION band. plan_rows is the planner's
+        // post-qual output estimate; reltuples the table's analyzed tuple
+        // count. Admit only when the estimated emitted/scanned fraction is
+        // inside the proven-win band (default 10% — GL-1's recipe: proven
+        // region <=0.4%, GL-5 knee sweep prices the boundary;
+        // PGRUST_RUNTIME_ROW_FUNNEL_EMIT_MAX_PCT overrides, 100 disables).
+        // FAIL-CLOSED on missing stats (never-analyzed reltuples <= 0):
+        // an unproven fraction refuses to the serial loop.
+        let emit_max_pct = std::env::var("PGRUST_RUNTIME_ROW_FUNNEL_EMIT_MAX_PCT")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|p| *p > 0.0)
+            .unwrap_or(10.0);
+        if emit_max_pct < 100.0 {
+            let reltuples = ss
+                .ss
+                .ss_currentRelation
+                .as_ref()
+                .map(|rel| rel.rd_rel.reltuples as f64)
+                .unwrap_or(0.0);
+            if reltuples <= 0.0 || plan.plan_rows <= 0.0 {
+                return Ok(false);
+            }
+            if plan.plan_rows / reltuples > emit_max_pct / 100.0 {
+                return Ok(false);
+            }
         }
         let Some(map) = SeqScanSource::new(&mut *ss).granule_map(estate)? else {
             return Ok(false);

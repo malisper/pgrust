@@ -25,15 +25,15 @@
 //!   win with no vectorization — is a SEPARATE later step, deliberately not
 //!   built here.
 //!
-//! # Status: KILL-SWITCH GATED, DEFAULT OFF ([`row_funnel_enabled`]).
+//! # Status: FLIPPED ON for the FloorGuard band (GL-FUNNEL-4;
+//! `PGRUST_RUNTIME_ROW_FUNNEL=0` kills — [`row_funnel_enabled`]).
 //!
-//! This increment provides the producer sink + leader drain + the owned
-//! bounded transport payload, compiled against the real `Sink`/slot APIs, but
-//! is NOT wired into `route_to` / the coverage matrix and is NOT reachable
-//! unless the kill switch is set. The scheduler-side wiring (publishing the
-//! row-emit taskset, parking producers on the ring under the K-standby permit,
-//! running the leader drain in place of `CompletionWaiter::wait`) lands with
-//! the fleet A/B that proves ≥ parity — the discipline the plan mandates.
+//! The fleet A/B ladder (GL-FUNNEL-1..4) proved the band: qualed selective
+//! passthrough beats the shipped serial default 6.3x geomean and classic
+//! Gather 0.905–1.037 across 1gb/10gb x DOP 4–16 under fair buffer residency
+//! (byte-identity + engagement evidence at every point). Everything outside
+//! the band (`try_passthrough_funnel`'s fail-closed gates) refuses to the
+//! serial loop byte-identically. Matrix row: gap:scan-passthrough.
 
 // Kill-switch-gated integration seam: the producer sink + leader drain compile
 // against the real `Sink`/slot APIs but have NO live call site yet (the
@@ -52,13 +52,19 @@ use ::types_tuple::MinimalTupleData;
 
 use runtime::{DrainStep, FunnelProducer, PushOutcome, RowFunnel};
 
-/// Kill switch (default OFF): `PGRUST_RUNTIME_ROW_FUNNEL=1`/`on` arms World-B
-/// parallel lane row-emit. One process-static resolve (the
-/// `PGRUST_RUNTIME_*` precedent, `runtime/src/sched.rs`).
+/// THE GL-FUNNEL-4 FLIP (flipped-kill idiom): the parallel row-emit funnel is
+/// ON BY DEFAULT for the FloorGuard-scoped band (`try_passthrough_funnel`'s
+/// gates: qual required, emit fraction inside the proven band, DOP >= 2,
+/// complete-drain only; every other shape refuses to the serial loop
+/// byte-identically). `PGRUST_RUNTIME_ROW_FUNNEL=0` is the kill switch.
+/// Provenance: GL-FUNNEL-4 warm-equalized decider — funnel-leader
+/// 0.905/0.917 vs classic Gather at 10gb-exp DOP 8/16, 1gb parity
+/// 1.015–1.037, 6.3x geomean vs the shipped serial default, byte-identity +
+/// engagement evidence at every point.
 pub(super) fn row_funnel_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        matches!(std::env::var("PGRUST_RUNTIME_ROW_FUNNEL").as_deref(), Ok("1") | Ok("on"))
+        !std::env::var("PGRUST_RUNTIME_ROW_FUNNEL").is_ok_and(|v| v.trim() == "0")
     })
 }
 
@@ -280,10 +286,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn kill_switch_default_off() {
-        // No env set in the default test process → World-B stays OFF.
+    fn kill_switch_default_on_flipped() {
+        // GL-FUNNEL-4 flip: default ON for the FloorGuard band; only an
+        // explicit "0" kills. (Env unset in the default test process.)
         if std::env::var("PGRUST_RUNTIME_ROW_FUNNEL").is_err() {
-            assert!(!row_funnel_enabled());
+            assert!(row_funnel_enabled(), "flipped-kill: default must be ON");
+        } else if std::env::var("PGRUST_RUNTIME_ROW_FUNNEL").as_deref() == Ok("0") {
+            assert!(!row_funnel_enabled(), "=0 must kill");
         }
     }
 
