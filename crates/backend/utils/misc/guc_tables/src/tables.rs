@@ -660,6 +660,19 @@ pub static ConfigureNamesBool: &[GucBoolSetting] = &[
     // the one sanctioned cross-query in-memory cache, GUC-gated). Default
     // OFF; benchmark arms enable it explicitly and record it in manifests.
     GucBoolSetting { name: "pgrust.condition_cache", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Enables the cbstore condition cache (cross-query cached qual verdicts per granule)."), long_desc: None, flags: 0, variable: &vars::pgrust_condition_cache, boot_val: GucDefaultValue::Bool(false), check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust.runtime (pgrust-only, env-to-guc train): the M0 master switch for
+    // the morsel runtime worker pool, replacing the PGRUST_RUNTIME env var as
+    // the product surface. PGC_POSTMASTER (the pool spawns once at boot),
+    // default ON. PGRUST_RUNTIME=0 seeds this off at boot; postgresql.conf may
+    // also set it. Off => the pool is never spawned, so the whole runtime
+    // engine stays inert (every arm falls back to the serial/Gather plan).
+    GucBoolSetting { name: "pgrust.runtime", context: PGC_POSTMASTER, group: CUSTOM_OPTIONS, short_desc: Some("Enables the pgrust morsel runtime worker pool (the parallel analytics engine)."), long_desc: Some("Off restores the pool-less process exactly. The PGRUST_RUNTIME environment variable seeds the startup default."), flags: 0, variable: &vars::pgrust_runtime, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust.mem_autotune (pgrust-only, env-to-guc train): gates the boot-time
+    // machine-scaled memory/parallel default auto-tune (autotune.rs, assembled
+    // from night/mem-defaults). PGC_POSTMASTER, default OFF (stock boot values,
+    // so SHOW ALL / pg_settings conformance is unaffected unless opted in).
+    // Seeded by the PGRUST_MEM_AUTOTUNE boot env var.
+    GucBoolSetting { name: "pgrust.mem_autotune", context: PGC_POSTMASTER, group: CUSTOM_OPTIONS, short_desc: Some("Applies machine-scaled memory and parallelism defaults at server startup."), long_desc: Some("Off keeps the stock boot defaults. The PGRUST_MEM_AUTOTUNE environment variable seeds the startup default."), flags: 0, variable: &vars::pgrust_mem_autotune, boot_val: GucDefaultValue::Bool(false), check_hook: None, assign_hook: None, show_hook: None },
     // pgrust.regex_pattern_program: the anchored pattern-program regex fast
     // tier under the auto RE2 dispatch (regexp_alt::program). Hidden like
     // regex_engine; OFF restores the exact pre-tier RE2 arm — the toggle is
@@ -858,6 +871,24 @@ pub static ConfigureNamesInt: &[GucIntSetting] = &[
     // pgrust.parallel_engine=runtime (the M5-1 router reads it; the per-arm
     // bench pool GUCs never do). 0 = auto (available cores at engagement).
     GucIntSetting { name: "pgrust.runtime_dop", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Sets the degree of parallelism for runtime-engine engagements (0 = number of cores)."), long_desc: None, flags: 0, variable: &vars::pgrust_runtime_dop, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024, check_hook: None, assign_hook: None, show_hook: None },
+    // Per-arm runtime pool DOP force-overrides (env-to-guc train; deferred
+    // pool-GUC recipe, docs/design/jit-parallel-defaults.md §3). Registered
+    // faces of the formerly-unregistered `pgrust.*` placeholder options; the
+    // arm readers (runtime_pool.rs / lane_pool.rs) resolve them through the
+    // get_config_option seam, which now returns these registered cells.
+    // 0 = auto: inherit pgrust.runtime_dop under pgrust.parallel_engine=runtime
+    // (behavior-neutral at the default). PGC_USERSET, same bounds as runtime_dop.
+    GucIntSetting { name: "pgrust.runtime_scan_pool", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Forces the runtime scan arm's degree of parallelism (0 = auto)."), long_desc: Some("0 = auto: inherit pgrust.runtime_dop under pgrust.parallel_engine=runtime."), flags: 0, variable: &vars::pgrust_runtime_scan_pool, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024, check_hook: None, assign_hook: None, show_hook: None },
+    GucIntSetting { name: "pgrust.runtime_agg_pool", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Forces the runtime aggregation-sink arm's degree of parallelism (0 = auto)."), long_desc: Some("0 = auto: inherit pgrust.runtime_dop under pgrust.parallel_engine=runtime."), flags: 0, variable: &vars::pgrust_runtime_agg_pool, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024, check_hook: None, assign_hook: None, show_hook: None },
+    GucIntSetting { name: "pgrust.runtime_distinct_pool", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Forces the runtime distinct-sink arm's degree of parallelism (0 = auto)."), long_desc: Some("0 = auto: inherit pgrust.runtime_dop (or pgrust.runtime_scan_pool) under pgrust.parallel_engine=runtime."), flags: 0, variable: &vars::pgrust_runtime_distinct_pool, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024, check_hook: None, assign_hook: None, show_hook: None },
+    GucIntSetting { name: "pgrust.runtime_hashjoin_pool", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Forces the runtime hash-join arm's degree of parallelism (0 = auto)."), long_desc: Some("0 = auto: inherit pgrust.runtime_dop under pgrust.parallel_engine=runtime."), flags: 0, variable: &vars::pgrust_runtime_hashjoin_pool, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024, check_hook: None, assign_hook: None, show_hook: None },
+    GucIntSetting { name: "pgrust.runtime_sort_pool", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Forces the runtime sort arm's degree of parallelism (0 = auto)."), long_desc: Some("0 = auto: inherit pgrust.runtime_dop under pgrust.parallel_engine=runtime."), flags: 0, variable: &vars::pgrust_runtime_sort_pool, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024, check_hook: None, assign_hook: None, show_hook: None },
+    GucIntSetting { name: "pgrust.runtime_bitmap_pool", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Forces the runtime bitmap-heap arm's degree of parallelism (0 = auto)."), long_desc: Some("0 = auto: inherit pgrust.runtime_dop under pgrust.parallel_engine=runtime."), flags: 0, variable: &vars::pgrust_runtime_bitmap_pool, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024, check_hook: None, assign_hook: None, show_hook: None },
+    GucIntSetting { name: "pgrust.lane_parallel_pool", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Forces the lane-v2 parallel arm's degree of parallelism (0 = auto)."), long_desc: Some("0 = auto: inherit pgrust.runtime_dop under pgrust.parallel_engine=runtime."), flags: 0, variable: &vars::pgrust_lane_parallel_pool, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024, check_hook: None, assign_hook: None, show_hook: None },
+    // Gather read-fairness stride: after N consecutive tuples from one queue
+    // the Gather leader advances its read cursor round-robin. 0 = C parity
+    // (drain one queue until it would block). A tuple count, not a DOP.
+    GucIntSetting { name: "pgrust.gather_fair_stride", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Round-robins the Gather leader's queue reads after this many tuples (0 = C behavior)."), long_desc: None, flags: 0, variable: &vars::pgrust_gather_fair_stride, boot_val: GucDefaultValue::Int(0), min: 0, max: i32::MAX, check_hook: None, assign_hook: None, show_hook: None },
 ];
 
 pub static ConfigureNamesReal: &[GucRealSetting] = &[

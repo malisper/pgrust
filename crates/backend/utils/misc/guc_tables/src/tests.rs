@@ -27,12 +27,24 @@ fn table_counts_match_compiled_backend_shape() {
     // Bool +8, Int +2, Real +1, Enum +2.
     // H7 (pgrust-only): String +1 pgrust.resource_counters (PGC_INTERNAL
     // computed channel for the simharness F8 resource-baseline hook).
-    assert_eq!(ConfigureNamesBool.len(), 129);
-    assert_eq!(ConfigureNamesInt.len(), 154);
+    // env-to-guc train (pgrust-only; INTENTIONAL C byte-identity divergence of
+    // pg_settings / SHOW ALL — these are new pgrust.* rows for the public
+    // release, migrating former PGRUST_* env vars to registered GUCs):
+    //   Bool +2: pgrust.runtime (the runtime-pool master switch, was
+    //     PGRUST_RUNTIME) and pgrust.mem_autotune (boot memory auto-tune gate,
+    //     was PGRUST_MEM_AUTOTUNE) -> 129 + 2 = 131.
+    //   Int +8: the deferred per-arm pool-GUC recipe
+    //     (docs/design/jit-parallel-defaults.md §3): pgrust.runtime_scan_pool /
+    //     runtime_agg_pool / runtime_distinct_pool / runtime_hashjoin_pool /
+    //     runtime_sort_pool / runtime_bitmap_pool / lane_parallel_pool /
+    //     gather_fair_stride -> 154 + 8 = 162.
+    //   Total 435 + 10 = 445.
+    assert_eq!(ConfigureNamesBool.len(), 131);
+    assert_eq!(ConfigureNamesInt.len(), 162);
     assert_eq!(ConfigureNamesReal.len(), 28);
     assert_eq!(ConfigureNamesString.len(), 77);
     assert_eq!(ConfigureNamesEnum.len(), 47);
-    assert_eq!(all_settings().count(), 435);
+    assert_eq!(all_settings().count(), 445);
     assert_eq!(GucContext_Names.len(), PGC_USERSET as usize + 1);
     assert_eq!(GucSource_Names.len(), PGC_S_SESSION as usize + 1);
     assert_eq!(config_group_names.len(), DEVELOPER_OPTIONS as usize + 1);

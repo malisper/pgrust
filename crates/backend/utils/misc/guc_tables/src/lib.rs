@@ -212,6 +212,46 @@ fn install_guc_tables_owned_vars() {
         get: backing::pgrust_runtime_dop,
         set: backing::set_pgrust_runtime_dop,
     });
+    vars::pgrust_runtime.install(GucVarAccessors {
+        get: backing::pgrust_runtime,
+        set: backing::set_pgrust_runtime,
+    });
+    vars::pgrust_mem_autotune.install(GucVarAccessors {
+        get: backing::pgrust_mem_autotune,
+        set: backing::set_pgrust_mem_autotune,
+    });
+    vars::pgrust_runtime_scan_pool.install(GucVarAccessors {
+        get: backing::pgrust_runtime_scan_pool,
+        set: backing::set_pgrust_runtime_scan_pool,
+    });
+    vars::pgrust_runtime_agg_pool.install(GucVarAccessors {
+        get: backing::pgrust_runtime_agg_pool,
+        set: backing::set_pgrust_runtime_agg_pool,
+    });
+    vars::pgrust_runtime_distinct_pool.install(GucVarAccessors {
+        get: backing::pgrust_runtime_distinct_pool,
+        set: backing::set_pgrust_runtime_distinct_pool,
+    });
+    vars::pgrust_runtime_hashjoin_pool.install(GucVarAccessors {
+        get: backing::pgrust_runtime_hashjoin_pool,
+        set: backing::set_pgrust_runtime_hashjoin_pool,
+    });
+    vars::pgrust_runtime_sort_pool.install(GucVarAccessors {
+        get: backing::pgrust_runtime_sort_pool,
+        set: backing::set_pgrust_runtime_sort_pool,
+    });
+    vars::pgrust_runtime_bitmap_pool.install(GucVarAccessors {
+        get: backing::pgrust_runtime_bitmap_pool,
+        set: backing::set_pgrust_runtime_bitmap_pool,
+    });
+    vars::pgrust_lane_parallel_pool.install(GucVarAccessors {
+        get: backing::pgrust_lane_parallel_pool,
+        set: backing::set_pgrust_lane_parallel_pool,
+    });
+    vars::pgrust_gather_fair_stride.install(GucVarAccessors {
+        get: backing::pgrust_gather_fair_stride,
+        set: backing::set_pgrust_gather_fair_stride,
+    });
     vars::check_function_bodies.install(GucVarAccessors {
         get: backing::check_function_bodies,
         set: backing::set_check_function_bodies,

@@ -1215,7 +1215,14 @@ pub mod rtpool {
     /// The process runtime, if the kill switch enabled it. M0: called by
     /// nothing in production; tests and (later) M1 postmaster startup.
     pub fn start_if_enabled() -> Option<&'static Arc<runtime::Runtime>> {
-        if !runtime::runtime_enabled() {
+        // env-to-guc train: the runtime-pool master switch is now the
+        // registered `pgrust.runtime` GUC (PGRUST_RUNTIME seeds it at boot;
+        // postgresql.conf can also set it). Gate the spawn on BOTH the legacy
+        // env read (runtime::runtime_enabled, the minimal runtime crate's own
+        // authority) and the GUC backing cell, so `pgrust.runtime=off` set via
+        // conf fully disables the engine (no pool -> runtime::global() None ->
+        // every executor arm stays serial). At the default (ON) both are true.
+        if !runtime::runtime_enabled() || !guc_tables::backing::pgrust_runtime() {
             return None;
         }
         Some(start())

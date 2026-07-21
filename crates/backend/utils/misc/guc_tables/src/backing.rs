@@ -55,6 +55,23 @@ crate::session_guc_cluster!(BackingSessionGucs, BACKING_SESSION_GUCS:
     // pgrust.runtime_dop (pgrust-only, M5-0): the product DOP knob, consulted
     // ONLY under engine=runtime (the M5-1 router). 0 = auto (available cores).
     (pgrust_runtime_dop_cell, i32, pgrust_runtime_dop, set_pgrust_runtime_dop, 0),
+    // pgrust.runtime_*_pool / lane_parallel_pool / gather_fair_stride
+    // (pgrust-only, env-to-guc train): the per-arm DEV/BENCH force-override
+    // layer BENEATH pgrust.parallel_engine. Registered (env-to-guc) so they
+    // are discoverable/tunable in pg_settings; each defaults 0 = auto (inherit
+    // pgrust.runtime_dop under engine=runtime). The arm readers
+    // (runtime_pool.rs / lane_pool.rs / gather_fair.rs) resolve them through
+    // the get_config_option string seam, which now returns THIS registered
+    // cell's value — behavior-neutral at the default 0. PGC_USERSET session
+    // scope: SET applies to the setting session's next engagement only.
+    (pgrust_runtime_scan_pool_cell, i32, pgrust_runtime_scan_pool, set_pgrust_runtime_scan_pool, 0),
+    (pgrust_runtime_agg_pool_cell, i32, pgrust_runtime_agg_pool, set_pgrust_runtime_agg_pool, 0),
+    (pgrust_runtime_distinct_pool_cell, i32, pgrust_runtime_distinct_pool, set_pgrust_runtime_distinct_pool, 0),
+    (pgrust_runtime_hashjoin_pool_cell, i32, pgrust_runtime_hashjoin_pool, set_pgrust_runtime_hashjoin_pool, 0),
+    (pgrust_runtime_sort_pool_cell, i32, pgrust_runtime_sort_pool, set_pgrust_runtime_sort_pool, 0),
+    (pgrust_runtime_bitmap_pool_cell, i32, pgrust_runtime_bitmap_pool, set_pgrust_runtime_bitmap_pool, 0),
+    (pgrust_lane_parallel_pool_cell, i32, pgrust_lane_parallel_pool, set_pgrust_lane_parallel_pool, 0),
+    (pgrust_gather_fair_stride_cell, i32, pgrust_gather_fair_stride, set_pgrust_gather_fair_stride, 0),
     (check_function_bodies_cell, bool, check_function_bodies, set_check_function_bodies, true),
     (default_with_oids_cell, bool, default_with_oids, set_default_with_oids, false),
     (current_role_is_superuser_cell, bool, current_role_is_superuser, set_current_role_is_superuser, false),
@@ -123,6 +140,24 @@ bool_var!(B_AllowAlterSystem, AllowAlterSystem, set_AllowAlterSystem, true);
 bool_var!(B_assert_enabled, assert_enabled, set_assert_enabled, false);
 
 bool_var!(B_data_checksums, data_checksums, set_data_checksums, false);
+
+// pgrust.runtime (pgrust-only, env-to-guc train): the M0 master switch for the
+// morsel runtime worker pool. PGC_POSTMASTER (the pool spawns once at
+// postmaster start; it cannot be un-spawned per session), default ON since the
+// M5 boarding flip. The PGRUST_RUNTIME boot env var seeds this (=0 -> off) via
+// initialize_guc_options_from_environment (PGC_S_ENV_VAR); postgresql.conf can
+// also set it. launch_backend::rtpool::start_if_enabled gates the pool spawn on
+// this cell (AND runtime::runtime_enabled), and the M5-3 planner probe
+// (parallel_engine.rs) reads it, so `pgrust.runtime=off` fully disables the
+// engine (no pool -> runtime::global() None -> every arm stays serial).
+bool_var!(B_pgrust_runtime, pgrust_runtime, set_pgrust_runtime, true);
+
+// pgrust.mem_autotune (pgrust-only, env-to-guc train): gates the machine-scaled
+// memory/parallel default auto-tune at postmaster boot (autotune.rs, assembled
+// from night/mem-defaults into the config train). PGC_POSTMASTER, default OFF
+// so the byte-identical SHOW ALL / pg_settings conformance suite is unaffected
+// unless the operator opts in. Seeded by the PGRUST_MEM_AUTOTUNE boot env var.
+bool_var!(B_pgrust_mem_autotune, pgrust_mem_autotune, set_pgrust_mem_autotune, false);
 bool_var!(
     B_integer_datetimes,
     integer_datetimes,

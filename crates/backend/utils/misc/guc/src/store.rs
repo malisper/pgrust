@@ -257,6 +257,24 @@ pub fn initialize_guc_options_from_environment() -> PgResult<()> {
         let v = if matches!(env.as_str(), "0" | "off") { "off" } else { "on" };
         crate::SetConfigOption("pgrust.condition_cache", Some(v), PGC_POSTMASTER, PGC_S_ENV_VAR)?;
     }
+    // pgrust-only (env-to-guc train): pgrust.runtime's startup default (the M0
+    // runtime-pool master switch). Only the exact value "0" kills, matching the
+    // legacy runtime::runtime_enabled contract (any other value / unset = on),
+    // so this seed is byte-neutral vs the prior env-only behavior. The pool
+    // spawn (launch_backend::rtpool) and the M5 planner probe both key off the
+    // resulting GUC value.
+    if let Ok(env) = std::env::var("PGRUST_RUNTIME") {
+        let v = if env == "0" { "off" } else { "on" };
+        crate::SetConfigOption("pgrust.runtime", Some(v), PGC_POSTMASTER, PGC_S_ENV_VAR)?;
+    }
+    // pgrust-only (env-to-guc train): pgrust.mem_autotune's startup default
+    // (the boot-time machine-scaled memory/parallel auto-tune gate). Accepts
+    // the same truthy set the autotune reader recognized (1/on/true/yes); the
+    // default stays OFF without the env var.
+    if let Ok(env) = std::env::var("PGRUST_MEM_AUTOTUNE") {
+        let v = if matches!(env.as_str(), "1" | "on" | "true" | "yes") { "on" } else { "off" };
+        crate::SetConfigOption("pgrust.mem_autotune", Some(v), PGC_POSTMASTER, PGC_S_ENV_VAR)?;
+    }
     Ok(())
 }
 

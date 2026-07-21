@@ -309,6 +309,24 @@ pub static pgrust_condition_cache_size: GucIntVar = GucSlot::new("pgrust_conditi
 // is consulted ONLY under engine=runtime (never by the per-arm bench GUCs).
 pub static pgrust_parallel_engine: GucEnumVar = GucSlot::new("pgrust_parallel_engine");
 pub static pgrust_runtime_dop: GucIntVar = GucSlot::new("pgrust_runtime_dop");
+// pgrust-only (env-to-guc train, no C symbol): pgrust.runtime is the M0 master
+// switch for the runtime pool (PGC_POSTMASTER); pgrust.mem_autotune gates the
+// boot-time memory auto-tune (PGC_POSTMASTER).
+pub static pgrust_runtime: GucBoolVar = GucSlot::new("pgrust_runtime");
+pub static pgrust_mem_autotune: GucBoolVar = GucSlot::new("pgrust_mem_autotune");
+// pgrust-only (env-to-guc train, no C symbol): the per-arm runtime pool DOP
+// force-overrides + the Gather read-fairness stride. Registered from the
+// deferred pool-GUC recipe (docs/design/jit-parallel-defaults.md §3). Each is
+// the registered face of a previously-unregistered `pgrust.*` placeholder
+// option; the arm readers resolve them through the get_config_option seam.
+pub static pgrust_runtime_scan_pool: GucIntVar = GucSlot::new("pgrust_runtime_scan_pool");
+pub static pgrust_runtime_agg_pool: GucIntVar = GucSlot::new("pgrust_runtime_agg_pool");
+pub static pgrust_runtime_distinct_pool: GucIntVar = GucSlot::new("pgrust_runtime_distinct_pool");
+pub static pgrust_runtime_hashjoin_pool: GucIntVar = GucSlot::new("pgrust_runtime_hashjoin_pool");
+pub static pgrust_runtime_sort_pool: GucIntVar = GucSlot::new("pgrust_runtime_sort_pool");
+pub static pgrust_runtime_bitmap_pool: GucIntVar = GucSlot::new("pgrust_runtime_bitmap_pool");
+pub static pgrust_lane_parallel_pool: GucIntVar = GucSlot::new("pgrust_lane_parallel_pool");
+pub static pgrust_gather_fair_stride: GucIntVar = GucSlot::new("pgrust_gather_fair_stride");
 // pgrust-only: pgrust.regex_pattern_program (no C symbol; the anchored
 // pattern-program fast tier under the auto RE2 dispatch — regexp_alt owns
 // the backing and installs the accessors).
