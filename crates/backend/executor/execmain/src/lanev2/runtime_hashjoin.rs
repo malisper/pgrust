@@ -303,13 +303,21 @@ pub(crate) fn k2_probe_set_for_tests(on: bool) {
 
 // ---------------------------------------------------------------------------
 // HJPROBE-V2 (notes/se-hjprobe-v2.md §4.3 increment 1): the dense-key seat
-// on the lane hash-join kernel. Default OFF; `=1`/`on` arms key tracking at
-// build accept + the seat probe (skips the probe hash eval, bucket/tag
-// lookup, hashvalue prefilter and hashclauses recheck on int4eq-keyed
-// unbatched single-join engagements — the legacy hj-dense lever's lane
-// twin). The kill spelling restores the v1 probe bytes and ticks exactly:
-// with the knob OFF no Local ever arms, no seat ever builds, and the probe
-// dispatch reads `has_seat() == false` down the identical v1 path.
+// on the lane hash-join kernel — key tracking at build accept + the seat
+// probe (skips the probe hash eval, bucket/tag lookup, hashvalue prefilter
+// and hashclauses recheck on int4eq-keyed unbatched single-join engagements
+// — the legacy hj-dense lever's lane twin).
+//
+// DEFAULT ON since the GL-HJSEAT-2 flip (flipped-kill idiom; letter:
+// scratchpad/night/hj-seat-gate-and-floor-rederivation.md, gated census job
+// pgrust-fast-tests-f7022d98e0-1784620323-01f4 PASS + the witnessed band
+// seat/legacy 0.636-0.764 at 2.5M/5M/10M dop4 + 5M dop16, 2026-07-21).
+// `PGRUST_LANE_V2_HJPROBE_V2=0|off` is the kill: it restores the v1 probe
+// bytes and ticks exactly — no Local ever arms, no seat ever builds, and
+// the probe dispatch reads `has_seat() == false` down the identical v1
+// path. The m5_suppress seat-scoped floor lift reads the SAME spelling
+// (knob coherence, the GROUPSINK law): killing the knob also restores the
+// 2M suppression ceiling.
 // ---------------------------------------------------------------------------
 
 /// GL-HJSEAT-2 seat-economics gate: arm the dense seat only when the
@@ -344,9 +352,10 @@ fn hjprobe_v2_enabled() -> bool {
 #[cold]
 #[inline(never)]
 fn hjprobe_v2_resolve() -> bool {
-    let on = matches!(
+    // GL-HJSEAT-2 flip: DEFAULT ON; =0|off is the kill (flipped-kill idiom).
+    let on = !matches!(
         std::env::var("PGRUST_LANE_V2_HJPROBE_V2").as_deref(),
-        Ok("1") | Ok("on")
+        Ok("0") | Ok("off")
     );
     HJPROBE_V2.store(if on { 2 } else { 1 }, Ordering::Relaxed);
     on
@@ -1259,7 +1268,8 @@ fn build_morsel_body(
     let slot = shared.worker_slot(worker);
     with_worker_exec("runtime hash-join build morsel without a bound executor", |es, ps| {
         with_join_tree(es, ps, |estate, _agg, hj, _outer_ss, hstate, inner_ss| {
-            // HJPROBE-V2 dense-seat arming (knob default OFF; single-join
+            // HJPROBE-V2 dense-seat arming (knob default ON since the
+            // GL-HJSEAT-2 flip, =0|off kills; single-join
             // UNBATCHED engagements only): every worker computes the same
             // deterministic gate from its own executor state, so all
             // tuple-bearing Locals arm identically (the seat's all-or-none
