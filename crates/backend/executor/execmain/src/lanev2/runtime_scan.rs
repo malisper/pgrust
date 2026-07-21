@@ -2663,6 +2663,7 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
         ea_timer,
         None,
         None,
+        None,
     )?;
     router::tick(
         class,
