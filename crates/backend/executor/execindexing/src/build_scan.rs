@@ -51,6 +51,44 @@ pub fn table_index_build_range_scan<'mcx, F>(
     anyvisible: bool,
     start_blockno: BlockNumber,
     numblocks: BlockNumber,
+    callback: F,
+) -> PgResult<f64>
+where
+    F: FnMut(&Relation<'mcx>, &ItemPointerData, &[Datum], &[bool], bool) -> PgResult<()>,
+{
+    table_index_build_range_scan_with_xmin(
+        mcx,
+        heap_relation,
+        index_relation,
+        index_info,
+        allow_sync,
+        anyvisible,
+        start_blockno,
+        numblocks,
+        None,
+        callback,
+    )
+}
+
+/// [`table_index_build_range_scan`] with a HOISTED `OldestXmin` (M4.2
+/// parallel build): the SnapshotAny lane's horizon is per-tuple
+/// conservative, so any single value valid at scan start works for every
+/// range — the pool driver computes it ONCE on the leader and shares it, so
+/// (i) per-claim `GetOldestNonRemovableTransactionId` procarray scans are
+/// not paid at morsel cadence and (ii) every worker routes DEAD vs
+/// RECENTLY_DEAD identically to a serial scan started at the same instant
+/// (the parity leg's determinism). `None` keeps today's per-call compute.
+#[allow(clippy::too_many_arguments)]
+pub fn table_index_build_range_scan_with_xmin<'mcx, F>(
+    mcx: Mcx<'mcx>,
+    heap_relation: &Relation<'mcx>,
+    index_relation: &Relation<'mcx>,
+    index_info: &mut IndexInfo<'mcx>,
+    allow_sync: bool,
+    anyvisible: bool,
+    start_blockno: BlockNumber,
+    numblocks: BlockNumber,
+    hoisted_oldest_xmin: Option<types_core::TransactionId>,
     mut callback: F,
 ) -> PgResult<f64>
 where
@@ -80,6 +118,9 @@ where
     };
     let oldest_xmin = if concurrent {
         types_core::InvalidTransactionId
+    } else if let Some(x) = hoisted_oldest_xmin {
+        debug_assert!(x != 0);
+        x
     } else {
         let x = procarray::GetOldestNonRemovableTransactionId(heap_relation)?;
         debug_assert!(x != 0);
