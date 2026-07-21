@@ -437,6 +437,184 @@ fn textdistinct_guard() -> FloorGuard {
     FloorGuard { min_dop: 12, low_dop_max_rows: 3_000_000.0, ..NO_GUARD }
 }
 
+/// SE-MKTEXT (Lane-3 probe widening, two-key text car): the ClickBench
+/// q17/q18-class `GROUP BY UserID, SearchPhrase` shapes — TWO-key grouped
+/// aggregation with one or two default-collation text keys — run 8-39x
+/// slower unforced than on the hand-armed runtime agg pool (harvest3arm
+/// t32 A/B @ 10M dist-control: q17 0.900s unforced vs 0.061s forced; q18
+/// 0.122 vs 0.015) because the probe refuses them at plan time while the
+/// runtime agg SINK already owns the shapes end to end: the Mk composite
+/// feed packs int+text keys (C2/Mk cars, canonical-bytes merge), the
+/// canonical multi-tail encoding carries TWO Intern components
+/// (canon-sink car 1, `PGRUST_RUNTIME_AGG_TEXT2`), and the bare-LIMIT
+/// group-admission FREEZE owns the q18 composition (band-2a,
+/// `PGRUST_RUNTIME_AGG_FREEZE`). This knob keys the admission gaps.
+///
+/// DEFAULT OFF (`PGRUST_LANE_V2_MULTIKEY_TEXT=1|on` to arm; every other
+/// spelling fails safe — the K1-latemat idiom). Off = the probe falls
+/// through to today's refusals byte-for-byte and the executor scan feed
+/// keeps its one-text census (lanev2 `scan_mk_text_atts`), so the DEFAULT
+/// census and the drift guards are untouched — these are NOT
+/// BOOTSTRAP_MATRIX classes; the tsv rows keep route_to=legacy /
+/// probe_key="-". Same spelling in planner and execmain (the AGG_POLY /
+/// GROUPSINK knob-coherence law: a keyed shape whose arm is disarmed would
+/// suppress Gather and land on serial). Fleet default-flip owed
+/// (GL-MKTEXT-1).
+fn multikey_text_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        multikey_text_spelling_on(std::env::var("PGRUST_LANE_V2_MULTIKEY_TEXT").as_deref().ok())
+    })
+}
+
+/// The default-OFF spelling rule, factored pure for exhaustive unit tests:
+/// ON iff the value is exactly `1` or `on` (scanpass idiom).
+fn multikey_text_spelling_on(v: Option<&str>) -> bool {
+    matches!(v, Some("1") | Some("on"))
+}
+
+/// SE-MKTEXT pure shape law (unit-tested): a grouped key census of `nkeys`
+/// bare group-key Vars with `n_text` deterministic-default-collation text
+/// keys enters the knob-widened family iff it is EXACTLY the two-key
+/// int+text or text+text shape. Everything wider fails closed: 3+ keys
+/// (with any second text), all-int two-key (existing bootstrap rows), and
+/// the single-key shapes (existing rows / sibling cars). Expression keys
+/// and non-default collations never reach this law — the surrounding
+/// census refuses them first (bare-Var + DEFAULT_COLLATION_OID discipline).
+fn mk_text_family_shape_ok(nkeys: usize, n_text: usize) -> bool {
+    nkeys == 2 && (1..=2).contains(&n_text)
+}
+
+/// SE-MKTEXT engine-kill coherence (the m5p1 `multibuild_enabled`
+/// precedent): the runtime agg sink's text cars must be live for the keyed
+/// shape — `PGRUST_RUNTIME_AGG_TEXT` (Intern components at all) and, for
+/// the two-text census, `PGRUST_RUNTIME_AGG_TEXT2` (the canonical
+/// multi-tail encoding). A keyed shape whose car is killed would suppress
+/// a Gather the walk then refuses (risk P1's suppress-then-refuse
+/// direction). Same spellings as the executor (runtime_agg.rs), own cached
+/// reads; both default ON there, so this gate is inert unless someone
+/// throws an attribution kill.
+fn mk_text_agg_cars_live(n_text: usize) -> bool {
+    static T1: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static T2: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let t1 = *T1.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_RUNTIME_AGG_TEXT").as_deref(), Ok("0") | Ok("off"))
+    });
+    let t2 = *T2.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_RUNTIME_AGG_TEXT2").as_deref(), Ok("0") | Ok("off"))
+    });
+    t1 && (n_text < 2 || t2)
+}
+
+/// Freeze-car coherence (SE-MKTEXT + SE-BARELIMIT): the bare-LIMIT
+/// composition engages the sink's group-admission freeze — keyed only
+/// while `PGRUST_RUNTIME_AGG_FREEZE` (default ON) is live, same spelling
+/// as the executor.
+fn agg_freeze_car_live() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_RUNTIME_AGG_FREEZE").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// The shared default-OFF knob spelling (K1-latemat idiom): ON iff exactly
+/// `1` or `on`. Factored pure for the sibling lanes' unit tests
+/// (scanpass/mktext keep their own historical twins).
+fn knob_spelling_on(v: Option<&str>) -> bool {
+    matches!(v, Some("1") | Some("on"))
+}
+
+/// SE-EXTRACTKEY (Lane-3 sibling, cb q19 class — the routing map's biggest
+/// single probe win, 1.44s @ 10M): `GROUP BY UserID, extract(minute FROM
+/// EventTime), SearchPhrase` — the probe's bare-Var key discipline refuses
+/// the extract() expr key, yet the SERIAL-lane exprkey Multi arm ALREADY
+/// OWNS execution (exprkey.rs `decide_exprkey_mk`: one computed
+/// NUMERIC-returning chain key + bare int/text Vars, `int8 + numeric4 +
+/// intern4 = 16` — THE q19 shape; the forced arm ran mpwpg=0 with NO pools
+/// at 0.088s vs 1.529s legacy-parallel). Suppression-only widening: the
+/// knob keys the shape via `classify_extract_exprkey`, the suppressed
+/// serial `[Limit<-Sort<-]HashAgg<-SeqScan` plan engages the Multi feed.
+/// DEFAULT OFF (`PGRUST_LANE_V2_EXPRKEY_EXTRACT=1|on`); fleet default-flip
+/// owed (GL-EXTRACTKEY-1).
+fn extract_exprkey_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        knob_spelling_on(std::env::var("PGRUST_LANE_V2_EXPRKEY_EXTRACT").as_deref().ok())
+    })
+}
+
+/// SE-CONSTKEY (Lane-3 sibling, cb q35 class, 2.07s @ 10M): `SELECT 1, URL,
+/// count(*) … GROUP BY 1, URL` — the const group key fails `key_var` and
+/// the const tlist entry fails the emit discipline (the named q35 refusal;
+/// matrix row agg-const-tlist). The forced arm (serial + pools) wins 10x,
+/// so an engagement exists to key; the const contributes nothing to the
+/// partition. The knob admits NON-NULL INT-FAMILY Const group keys (and
+/// their tlist entries) alongside the existing bare-Var census — the REAL
+/// keys still drive classification and floors. DEFAULT OFF
+/// (`PGRUST_LANE_V2_AGG_CONSTKEY=1|on`); GL-CONSTKEY-1 owed.
+fn agg_constkey_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        knob_spelling_on(std::env::var("PGRUST_LANE_V2_AGG_CONSTKEY").as_deref().ok())
+    })
+}
+
+/// SE-BARELIMIT (Lane-3 sibling, cb q18-composition class, 0.11s @ 10M):
+/// bare `LIMIT k` with NO ORDER BY over a grouped agg falls into the topn
+/// else-branch refusal today. The suppressed serial plan is
+/// `Limit <- HashAgg <- SeqScan`; the runtime agg sink's group-admission
+/// FREEZE (band-2a, `PGRUST_RUNTIME_AGG_FREEZE`) owns the bound and any k
+/// groups are a correct answer for an unordered LIMIT. The knob admits the
+/// composition for shapes the census otherwise covers (bare-Var keys,
+/// GROUPED_SINK_AGGS passengers, no count(DISTINCT), no OFFSET); the
+/// groupby_high hold still applies (the floor recalibration lane owns it).
+/// The two-key-text family's own freeze branch (SE-MKTEXT) is the
+/// more-specific sibling and carries the family ceiling. DEFAULT OFF
+/// (`PGRUST_LANE_V2_AGG_BARELIMIT=1|on`); GL-BARELIMIT-1 owed.
+fn agg_barelimit_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        knob_spelling_on(std::env::var("PGRUST_LANE_V2_AGG_BARELIMIT").as_deref().ok())
+    })
+}
+
+/// PROVISIONAL floor for the SE-EXTRACTKEY knob path: the shared
+/// text-keyed-grouped economics (the q19 shape carries a text key too).
+/// GL-EXTRACTKEY-1 owns re-measuring.
+fn extract_exprkey_guard() -> FloorGuard {
+    FloorGuard { min_dop: 12, low_dop_max_rows: 3_000_000.0, ..NO_GUARD }
+}
+
+/// SE-MKTEXT group-estimate ceiling, env-overridable
+/// (`PGRUST_LANE_V2_MULTIKEY_TEXT_MAX_GROUPS`). The family's whole point is
+/// shapes the §10 groupby_high hold (1e6) floors out — the 10M
+/// dist-control fixture estimates 3-5M groups for `UserID, SearchPhrase`
+/// and the forced runtime arm WINS there (0.061s vs 0.900s legacy-parallel)
+/// — so the knob path carries its OWN provisional ceiling instead:
+/// default 16M, above the fixture's estimates, below untested 1e7+
+/// radix-exchange territory (the groupby-high-1e7 covered-losing row).
+/// The runtime backstop is the sink's own cap/budget/spill machinery
+/// (canonical shapes spill through the C2 bytes record, canon-sink car 3).
+/// GL-MKTEXT-1 owns the measured bound.
+fn multikey_text_max_groups() -> f64 {
+    static CEIL: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *CEIL.get_or_init(|| {
+        std::env::var("PGRUST_LANE_V2_MULTIKEY_TEXT_MAX_GROUPS")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| *v > 0.0)
+            .unwrap_or(16_000_000.0)
+    })
+}
+
+/// PROVISIONAL floor for the SE-MKTEXT knob path: the CbGroupedAggTextKey
+/// economics verbatim (min_dop 12, low-dop win region ≤3M — the same
+/// text-keyed grouped engagement, one more key word/tail). GL-MKTEXT-1
+/// owns re-measuring.
+fn multikey_text_guard() -> FloorGuard {
+    FloorGuard { min_dop: 12, low_dop_max_rows: 3_000_000.0, ..NO_GUARD }
+}
+
 // ---------------------------------------------------------------------------
 // Whitelists (pg_proc OIDs of record, verified against the vendored
 // REL 18.3 pg_proc.dat) and type keys.
@@ -930,22 +1108,52 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             return Ok(verdict);
         }
     }
+    // SE-EXTRACTKEY (cb q19 class): extract()-keyed grouped agg — keyed
+    // only knob-ON and BEFORE the bare-Var key discipline (which refuses
+    // expr keys). A shape MISS returns None and falls through unchanged.
+    if extract_exprkey_enabled() {
+        if let Some(verdict) =
+            classify_extract_exprkey(run, parse, rti, rte.relid, rel_id, rel_rows, rel_pages)?
+        {
+            return Ok(verdict);
+        }
+    }
     // Key discipline: all keys plain Vars on the scanned rel; int-family
     // plus at most one text/varchar key under the deterministic default
-    // collation (the c3 canonical-key-bytes classes).
+    // collation (the c3 canonical-key-bytes classes). SE-CONSTKEY: non-null
+    // int-family Const keys admitted knob-ON (the q35 `GROUP BY 1, URL`
+    // census) — they contribute nothing to the partition, so the REAL keys
+    // keep driving classification and floors.
     let mut n_text = 0usize;
+    let mut n_const = 0usize;
     let mut key_refs: Vec<u32> = Vec::new();
+    let mut const_key_refs: Vec<u32> = Vec::new();
     for gc_node in &parse.groupClause {
         let Some(gc) = gc_node.as_sort_group_clause() else { return Ok(false) };
         let Some(tle) = tle_by_sortgroupref(parse, gc.tleSortGroupRef) else {
             return Ok(false);
         };
+        if agg_constkey_enabled() && is_admissible_const_key(tle.expr) {
+            n_const += 1;
+            const_key_refs.push(gc.tleSortGroupRef);
+            key_refs.push(gc.tleSortGroupRef);
+            continue;
+        }
         let Some(v) = key_var(tle.expr, rti) else { return Ok(false) };
         if is_int_family(v.vartype) {
             // covered
         } else if is_text_family(v.vartype) && v.varcollid == DEFAULT_COLLATION_OID {
             n_text += 1;
-            if n_text > 1 {
+            // SE-MKTEXT: a SECOND text key is keyable ONLY as the exact
+            // two-key text+text shape under PGRUST_LANE_V2_MULTIKEY_TEXT
+            // (the widened scan feed's envelope — two Intern components,
+            // dict/raw-stageable). Anything wider (3+ keys carrying two
+            // texts) stays uncovered — fail-closed, probe ⊂ walk. Knob OFF
+            // takes the identical refusal as before.
+            if n_text > 1
+                && !(multikey_text_enabled()
+                    && mk_text_family_shape_ok(parse.groupClause.len(), n_text))
+            {
                 return Ok(false);
             }
         } else {
@@ -953,15 +1161,32 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         }
         key_refs.push(gc.tleSortGroupRef);
     }
+    // SE-MKTEXT: the two-key-with-text family (int+text / text+text, bare
+    // default-collation Vars — the knob-widened envelope), with the engine
+    // text-car kills mirrored (suppress-then-refuse guard). At defaults the
+    // knob is OFF and this is false — every branch it gates below then
+    // takes today's path byte-for-byte.
+    let mk_text_family = multikey_text_enabled()
+        && n_const == 0
+        && mk_text_family_shape_ok(parse.groupClause.len(), n_text)
+        && mk_text_agg_cars_live(n_text);
     // Emit discipline: every tlist entry is a bare group-key Var, a
-    // whitelisted sink aggregate (const tlist entries — the q35 refusal —
-    // and non-identity emits classify uncovered here), or a
+    // whitelisted sink aggregate (const tlist entries — the q35 refusal,
+    // now keyed under SE-CONSTKEY — and non-identity emits classify
+    // uncovered here), or a
     // count(DISTINCT <int Var>) — the runtime distinct sink's class
     // (CbDistinctIntKeys; int GROUP keys only, checked below).
     let mut n_count_distinct = 0usize;
     let mut passengers: Vec<Node<'_>> = Vec::new();
     for tle_node in &parse.targetList {
         let Some(tle) = tle_node.as_target_entry() else { return Ok(false) };
+        if tle.ressortgroupref != 0 && const_key_refs.contains(&tle.ressortgroupref) {
+            // SE-CONSTKEY: the const key's own tlist entry (same shape law).
+            if !is_admissible_const_key(tle.expr) {
+                return Ok(false);
+            }
+            continue;
+        }
         if tle.ressortgroupref != 0 && key_refs.contains(&tle.ressortgroupref) {
             if key_var(tle.expr, rti).is_none() {
                 return Ok(false);
@@ -990,6 +1215,19 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     // stays int-family (is_count_distinct_int — the SINK's exact-set
     // vocabulary); the TEXT is the GROUP key. Fleet default-flip owed
     // (GL-TEXTDIST-1).
+    // SE-MKTEXT fail-closed: grouped count(DISTINCT) rides the runtime
+    // DISTINCT sink, whose canonical text-key admission is proven for ONE
+    // text group key (pd_derive admit_text_keys) — the two-text distinct
+    // feed is unproven, refuse outright (reachable only knob-ON; the
+    // default census refused n_text > 1 in the key loop).
+    if n_count_distinct > 0 && n_text > 1 {
+        return Ok(false);
+    }
+    // SE-CONSTKEY fail-closed: const keys through the runtime DISTINCT
+    // sink's key derivation are untested — refuse the mix.
+    if n_count_distinct > 0 && n_const > 0 {
+        return Ok(false);
+    }
     if n_count_distinct > 0 && n_text > 0 && !textdistinct_enabled() {
         return Ok(false);
     }
@@ -1010,7 +1248,41 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     // key plus LIMIT without OFFSET (q17/q18/q31–33). A sort on the group
     // keys themselves is an ordered-stream consumer (GatherMerge class,
     // uncovered in bootstrap).
+    let mut mk_freeze = false;
+    let mut bare_limit = false;
     let topn = if parse.sortClause.is_nil() && parse.limitCount.is_none() {
+        false
+    } else if parse.sortClause.is_nil()
+        && parse.limitCount.is_some()
+        && parse.limitOffset.is_none()
+        && mk_text_family
+        && n_count_distinct == 0
+        && agg_freeze_car_live()
+    {
+        // SE-MKTEXT: bare `LIMIT k` with NO ORDER BY (the cb q18 class,
+        // `GROUP BY UserID, SearchPhrase LIMIT 10`) — the runtime agg
+        // sink's group-admission FREEZE composition (band-2a): the
+        // suppressed serial plan is `Limit <- HashAgg <- SeqScan`, the sink
+        // freezes admission at the bound and the serial Limit consumes the
+        // drain (any-k-groups is a correct answer for an unordered LIMIT).
+        // Knob-ON family shapes only; every other bare-LIMIT grouped shape
+        // keeps the refusal below byte-for-byte.
+        mk_freeze = true;
+        false
+    } else if parse.sortClause.is_nil()
+        && parse.limitCount.is_some()
+        && parse.limitOffset.is_none()
+        && n_count_distinct == 0
+        && agg_barelimit_enabled()
+        && agg_freeze_car_live()
+    {
+        // SE-BARELIMIT: the GENERAL bare-LIMIT composition (its own knob,
+        // the mk-text family branch above being the more-specific sibling):
+        // the same freeze-owned `Limit <- HashAgg <- SeqScan` suppression
+        // for the shapes the census otherwise covers. The groupby_high hold
+        // below still applies (the floor recalibration lane owns raising
+        // it), so this admits the COMPOSITION only.
+        bare_limit = true;
         false
     } else if parse.sortClause.len() == 1
         && parse.limitCount.is_some()
@@ -1048,7 +1320,17 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         let input_rows = run.root.rel(rel_id).rows.max(1.0);
         crate::selfuncs::estimate_num_groups(run, &group_exprs, input_rows)?
     };
-    if ngroups >= groupby_high_floor() {
+    // SE-MKTEXT: the family's whole population sits ABOVE the groupby_high
+    // hold at ClickBench scale (10M dist-control estimates 3-5M groups for
+    // `UserID, SearchPhrase` — the forced runtime arm wins 8-15x there), so
+    // the knob path carries its OWN provisional ceiling instead of the §10
+    // hold; everything else keeps the hold byte-for-byte.
+    let over_groupby_high = ngroups >= groupby_high_floor();
+    if over_groupby_high
+        && !(mk_text_family
+            && n_count_distinct == 0
+            && ngroups < multikey_text_max_groups())
+    {
         return Ok(false);
     }
 
@@ -1073,6 +1355,26 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             rel_pages,
         );
     }
+    // SE-MKTEXT knob-path finish: shapes admitted ONLY by the knob — a
+    // second text key, the bare-LIMIT freeze composition, or a group
+    // estimate past the groupby_high hold under the family ceiling — route
+    // through the dedicated finish (own trace prefix + provisional floor;
+    // NOT a BOOTSTRAP_MATRIX class, so the tsv/route_to columns, the drift
+    // guards, and the DEFAULT census are untouched). Family shapes the
+    // DEFAULT probe already covers (int+text under the groupby_high hold)
+    // fall through to their bootstrap classes unchanged — knob-ON only
+    // ADDS suppressions, never re-classes an existing one.
+    if mk_text_family && n_count_distinct == 0 && (n_text > 1 || mk_freeze || over_groupby_high) {
+        return finish_multikey_text(
+            run,
+            if mk_freeze { "twokey-text-freeze" } else { "twokey-text-grouped-agg" },
+            multikey_text_guard(),
+            rte.relid,
+            ngroups,
+            rel_rows,
+            rel_pages,
+        );
+    }
     let class = if n_count_distinct > 0 {
         // The sorted-distinct feed owns grouped count(DISTINCT) — with or
         // without the top-N composition (walk-admitted, e2e leg 177 class).
@@ -1084,6 +1386,36 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     } else {
         CoverClass::CbGroupedAggIntKeys
     };
+    // SE-CONSTKEY / SE-BARELIMIT knob-path finishes: shapes admitted only
+    // by their knobs route through the dedicated finish (own trace prefix;
+    // NOT BOOTSTRAP_MATRIX classes — tsv/route_to and the DEFAULT census
+    // untouched), carrying the guard of the class the REAL keys classify
+    // as (const keys add nothing to the partition; the bare-LIMIT freeze
+    // rides its plain grouped class's economics).
+    if n_const > 0 {
+        return finish_knob_path(
+            run,
+            "constkey",
+            if topn { "constkey-grouped-topn" } else { "constkey-grouped-agg" },
+            class_guard(class),
+            rte.relid,
+            ngroups,
+            rel_rows,
+            rel_pages,
+        );
+    }
+    if bare_limit {
+        return finish_knob_path(
+            run,
+            "barelimit",
+            "barelimit-grouped-agg",
+            class_guard(class),
+            rte.relid,
+            ngroups,
+            rel_rows,
+            rel_pages,
+        );
+    }
     finish(run, class, rte.relid, ngroups, rel_rows, rel_pages)
 }
 
@@ -1919,6 +2251,26 @@ fn finish_textdistinct(
     rows: f64,
     pages: f64,
 ) -> PgResult<bool> {
+    finish_knob_path(run, "textdistinct", label, guard, relid, ngroups, rows, pages)
+}
+
+/// The shared knob-path finish body (SE-TEXTDISTINCT precedent, extracted
+/// at SE-MKTEXT): floor guard + per-lane trace prefixes derived from `tag`
+/// — the floor line `m5-suppress-floor: {tag} label=…` and the suppression
+/// line `m5-suppress-{tag}: …` (each lane greppable apart from the
+/// bootstrap `m5-suppress:` census line). Every caller is a
+/// knob-gated admission branch whose shape rides a proven runtime/serial
+/// arm; none are BOOTSTRAP_MATRIX classes.
+fn finish_knob_path(
+    run: &mut PlannerRun<'_>,
+    tag: &str,
+    label: &str,
+    guard: FloorGuard,
+    relid: u32,
+    ngroups: f64,
+    rows: f64,
+    pages: f64,
+) -> PgResult<bool> {
     if size_floors_enabled() {
         let dop = guc_tables::runtime_pool::runtime_dop();
         let ok = rows >= guard.min_rows
@@ -1928,7 +2280,7 @@ fn finish_textdistinct(
         if !ok {
             if trace_armed() {
                 eprintln!(
-                    "m5-suppress-floor: textdistinct label={label} relid={relid} \
+                    "m5-suppress-floor: {tag} label={label} relid={relid} \
                      rows={rows:.0} pages={pages:.0} dop={dop} => gather stands"
                 );
             }
@@ -1938,11 +2290,34 @@ fn finish_textdistinct(
     if trace_armed() {
         let _ = run;
         eprintln!(
-            "m5-suppress-textdistinct: engine=runtime label={label} relid={relid} \
+            "m5-suppress-{tag}: engine=runtime label={label} relid={relid} \
              ngroups={ngroups:.0} => gather suppressed"
         );
     }
     Ok(true)
+}
+
+/// SE-MKTEXT knob-path finish (Lane-3 two-key text car). Reached ONLY from
+/// the `multikey_text_enabled()`-gated admission branches (two-key
+/// int+text / text+text grouped agg: the text+text census, the bare-LIMIT
+/// freeze composition, the family group-estimate ceiling), so the caller
+/// has already proven the shape rides the runtime agg sink's existing Mk /
+/// canonical-bytes / freeze machinery. Like `finish_textdistinct`, this
+/// does NOT consult BOOTSTRAP_MATRIX / the tsv — deliberately not a
+/// bootstrap class (route_to/probe_key stay legacy/"-"; drift guards and
+/// the DEFAULT census untouched). Applies the provisional floor + its own
+/// trace prefix (`m5-suppress-mktext:` — greppable apart from the
+/// bootstrap `m5-suppress:` and the textdistinct lines), then suppresses.
+fn finish_multikey_text(
+    run: &mut PlannerRun<'_>,
+    label: &str,
+    guard: FloorGuard,
+    relid: u32,
+    ngroups: f64,
+    rows: f64,
+    pages: f64,
+) -> PgResult<bool> {
+    finish_knob_path(run, "mktext", label, guard, relid, ngroups, rows, pages)
 }
 
 // ---------------------------------------------------------------------------
@@ -1953,6 +2328,15 @@ fn finish_textdistinct(
 fn key_var<'mcx>(expr: Node<'mcx>, rti: usize) -> Option<&'mcx Var<'mcx>> {
     let v = expr.as_var()?;
     (v.varno as usize == rti && v.varattno > 0 && v.varlevelsup == 0).then_some(v)
+}
+
+/// SE-CONSTKEY: a group-key Const the knob admits — NON-NULL, INT-FAMILY
+/// (byval word keys; the q35 shape's `1`). Null consts (NULL group-key
+/// semantics), text/varlena consts (canonical-bytes derivation untested for
+/// consts), and every other type fail closed.
+fn is_admissible_const_key(expr: Node<'_>) -> bool {
+    let Some(c) = expr.as_const() else { return false };
+    !c.constisnull && is_int_family(c.consttype)
 }
 
 fn is_covered_key_var(expr: Node<'_>, rti: usize, type_ok: impl Fn(u32) -> bool) -> bool {
@@ -2290,6 +2674,174 @@ fn classify_reduced_exprkey<'mcx>(
     )?))
 }
 
+/// `extract(text, timestamp)` — pg_proc OID of record (vendored REL 18.3,
+/// adt_timestamp builtins), NUMERIC result — the exprkey Multi decide's
+/// computed-key class ("the extract()-class census result type",
+/// exprkey.rs decide_exprkey_mk). `date_part` (float8) and
+/// `date_trunc` (timestamp result) deliberately NOT keyed: the Multi walk
+/// requires a NUMERIC computed key, so keying them would be
+/// suppress-then-refuse; single-key date_trunc is the TsTrunc class whose
+/// census composition (cb q43: ORDER BY the key + OFFSET) is the
+/// topn-offset row's territory.
+const F_EXTRACT_TIMESTAMP: u32 = 6202;
+const TIMESTAMPOID: u32 = 1114;
+
+/// SE-EXTRACTKEY: the computed group key `extract(<non-null Const field>
+/// FROM <bare TIMESTAMP Var on the scanned rel>)` — cb q19's
+/// `extract(minute FROM EventTime)`. Strictly narrower than the walk
+/// (`compile_value_chain` admits any IMMUTABLE strict builtin chain): one
+/// call, the exact extract-over-timestamp OID. The field spelling is NOT
+/// whitelisted — the engine runs the real builtin, and an invalid field
+/// errors identically on the suppressed serial plan (byte-identical
+/// behavior either way).
+fn is_extract_ts_key(expr: Node<'_>, rti: usize) -> bool {
+    let Some(f) = expr.as_func_expr() else { return false };
+    if f.funcid != F_EXTRACT_TIMESTAMP || f.funcretset || f.args.len() != 2 {
+        return false;
+    }
+    let Some(c) = f.args.nth(0).as_const() else { return false };
+    if c.constisnull {
+        return false;
+    }
+    is_covered_key_var(f.args.nth(1), rti, |t| t == TIMESTAMPOID)
+}
+
+/// SE-EXTRACTKEY packed-image width preview (pure, unit-tested): mirrors
+/// the exprkey Multi walk's 16-byte negotiation (decide_exprkey_mk /
+/// mk_admit_n): Σ int-key widths + 4 per text key + the computed NUMERIC
+/// key at 8 bytes, shrinking the numeric to 4 when the image exceeds 16.
+/// A shape that fits neither way must NOT be keyed (walk refusal —
+/// suppress-then-refuse). The q19 image: int8 + text4 + numeric8 = 20 →
+/// shrink → 16 (fits exactly).
+fn extract_key_image_fits(int_widths_sum: usize, n_text: usize) -> bool {
+    let fixed = int_widths_sum + n_text * 4;
+    fixed + 8 <= 16 || fixed + 4 <= 16
+}
+
+/// SE-EXTRACTKEY (cb q19 class) recognizer: a single-cbstore-rel grouped
+/// agg whose keys are bare int-family Vars, at most ONE bare
+/// default-collation text Var (the Multi walk caps TextRaw components at
+/// one — dict/intern lane), and EXACTLY ONE `extract(field FROM ts)`
+/// computed key (`is_extract_ts_key`); fold-admissible aggs
+/// (PLAIN_FOLD_AGGS — the exprkey fold hosts them via lanefold, the
+/// classify_reduced_exprkey precedent); optional `ORDER BY <agg> LIMIT`
+/// top-N, no OFFSET. The SERIAL-lane exprkey Multi arm owns the suppressed
+/// plan (decide_exprkey_mk — projected scan, packed int/numeric/intern
+/// image, ts-extract fast kernel); suppression-only, no engine work.
+///
+/// Returns `Some(verdict)` when the shape MATCHES (suppress, or false when
+/// floored), `None` to fall through to the bare-Var key discipline.
+/// Fail-closed refusals: two computed keys, two text keys, non-extract
+/// exprs (date_part/date_trunc — see the OID note), images past the
+/// 16-byte negotiation, count(DISTINCT), OFFSET, groupby_high (the floor
+/// lane owns raising it).
+fn classify_extract_exprkey<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    parse: &Query<'mcx>,
+    rti: usize,
+    relid: u32,
+    rel_id: types_pathnodes::RelId,
+    rel_rows: f64,
+    rel_pages: f64,
+) -> PgResult<Option<bool>> {
+    if parse.groupClause.len() < 2 {
+        return Ok(None);
+    }
+    let mut key_refs: Vec<u32> = Vec::new();
+    let mut n_extract = 0usize;
+    let mut n_text = 0usize;
+    let mut int_widths = 0usize;
+    for gc_node in &parse.groupClause {
+        let Some(gc) = gc_node.as_sort_group_clause() else { return Ok(None) };
+        let Some(tle) = tle_by_sortgroupref(parse, gc.tleSortGroupRef) else {
+            return Ok(None);
+        };
+        if let Some(v) = key_var(tle.expr, rti) {
+            if is_int_family(v.vartype) {
+                int_widths += match v.vartype {
+                    INT2OID => 2,
+                    INT4OID => 4,
+                    _ => 8,
+                };
+            } else if is_text_family(v.vartype) && v.varcollid == DEFAULT_COLLATION_OID {
+                n_text += 1;
+                if n_text > 1 {
+                    return Ok(None); // the Multi walk caps TextRaw at one
+                }
+            } else {
+                return Ok(None);
+            }
+        } else if is_extract_ts_key(tle.expr, rti) {
+            n_extract += 1;
+            if n_extract > 1 {
+                return Ok(None); // one computed chain key (walk shape)
+            }
+        } else {
+            return Ok(None);
+        }
+        key_refs.push(gc.tleSortGroupRef);
+    }
+    if n_extract != 1 || !extract_key_image_fits(int_widths, n_text) {
+        return Ok(None);
+    }
+    // Emit discipline: key exprs by sortgroupref, or fold-admissible aggs
+    // (count(DISTINCT) is not in the fold vocabulary — is_whitelisted_agg
+    // refuses aggdistinct decoration, fail-closed).
+    for tle_node in &parse.targetList {
+        let Some(tle) = tle_node.as_target_entry() else { return Ok(None) };
+        if tle.ressortgroupref != 0 && key_refs.contains(&tle.ressortgroupref) {
+            continue;
+        }
+        if !is_whitelisted_agg(tle.expr, rti, PLAIN_FOLD_AGGS) {
+            return Ok(None);
+        }
+    }
+    // Optional top-N: ORDER BY <fold-whitelisted agg> LIMIT, no OFFSET — or
+    // a plain grouped emit (classify_reduced_exprkey's block verbatim).
+    if !parse.sortClause.is_nil() || parse.limitCount.is_some() {
+        if parse.sortClause.len() != 1
+            || parse.limitCount.is_none()
+            || parse.limitOffset.is_some()
+        {
+            return Ok(None);
+        }
+        let Some(sc) = parse.sortClause.nth(0).as_sort_group_clause() else {
+            return Ok(None);
+        };
+        let Some(tle) = tle_by_sortgroupref(parse, sc.tleSortGroupRef) else {
+            return Ok(None);
+        };
+        if !is_whitelisted_agg(tle.expr, rti, PLAIN_FOLD_AGGS) {
+            return Ok(None);
+        }
+    }
+    // groupby_high hold (shared floor; the floor recalibration lane owns
+    // raising it): matched-shape-but-floored keeps Gather.
+    let ngroups = if run.root.processed_groupClause.is_empty() {
+        1.0
+    } else {
+        let clauses =
+            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.processed_groupClause);
+        let group_exprs =
+            types_pathnodes::run::sortgrouplist_exprs(run, &clauses, &parse.targetList);
+        let input_rows = run.root.rel(rel_id).rows.max(1.0);
+        crate::selfuncs::estimate_num_groups(run, &group_exprs, input_rows)?
+    };
+    if ngroups >= groupby_high_floor() {
+        return Ok(Some(false));
+    }
+    Ok(Some(finish_knob_path(
+        run,
+        "extractkey",
+        "extract-exprkey-grouped-agg",
+        extract_exprkey_guard(),
+        relid,
+        ngroups,
+        rel_rows,
+        rel_pages,
+    )?))
+}
+
 /// `is_whitelisted_agg` over TWO candidate range-table indexes (the join
 /// row flip): the aggregate's single Var arg may live on either joined rel.
 fn is_whitelisted_agg_2rti(expr: Node<'_>, rti_l: usize, rti_r: usize, whitelist: &[u32]) -> bool {
@@ -2574,6 +3126,109 @@ mod tests {
         ] {
             assert_eq!(refuse_scanpass(why).unwrap(), false);
         }
+    }
+
+    /// SE-MKTEXT knob (Lane-3 two-key text car): `PGRUST_LANE_V2_
+    /// MULTIKEY_TEXT` is default OFF and only `1`/`on` arm it — every other
+    /// spelling fails safe to today's behaviour (the K1-latemat idiom).
+    /// Pins the default-OFF guarantee that makes the widening inert at
+    /// default (plan-time bytes, census, and regress legs unchanged).
+    #[test]
+    fn multikey_text_knob_is_default_off() {
+        assert!(!multikey_text_spelling_on(None), "unset must be OFF (default)");
+        assert!(!multikey_text_spelling_on(Some("0")));
+        assert!(!multikey_text_spelling_on(Some("off")));
+        assert!(!multikey_text_spelling_on(Some("")));
+        assert!(!multikey_text_spelling_on(Some("true")), "typos fail safe to OFF");
+        assert!(!multikey_text_spelling_on(Some("ON")), "case-sensitive, like the arm knobs");
+        assert!(multikey_text_spelling_on(Some("1")));
+        assert!(multikey_text_spelling_on(Some("on")));
+        // The live getter memoizes the process env; in the test binary the
+        // var is unset, so it resolves OFF — the default-OFF invariant.
+        assert!(!multikey_text_enabled(), "test process has no knob set => OFF");
+    }
+
+    /// SE-MKTEXT shape law: the knob-widened family is EXACTLY the two-key
+    /// int+text / text+text census — everything beyond fails closed. The
+    /// admitted set and the still-refused set of record; the surrounding
+    /// census refuses expr keys and non-default collations before this law
+    /// (bare-Var + DEFAULT_COLLATION_OID discipline, unchanged).
+    #[test]
+    fn mk_text_family_admits_two_key_text_shapes_only() {
+        // ADMITTED: the q17/q18 class (int+text) and text+text.
+        assert!(mk_text_family_shape_ok(2, 1), "two keys, int+text");
+        assert!(mk_text_family_shape_ok(2, 2), "two keys, text+text");
+        // REFUSED: all-int two-key (existing bootstrap rows own it).
+        assert!(!mk_text_family_shape_ok(2, 0), "int+int is not this family");
+        // REFUSED: single-key shapes (existing rows / sibling cars).
+        assert!(!mk_text_family_shape_ok(1, 1), "single text key is the C2/bootstrap row");
+        assert!(!mk_text_family_shape_ok(1, 0));
+        // REFUSED: 3+ keys — with or without a second text (fail-closed;
+        // the q19 class additionally carries an expr key, refused upstream).
+        assert!(!mk_text_family_shape_ok(3, 1), "3-key with one text stays bootstrap-only");
+        assert!(!mk_text_family_shape_ok(3, 2), "3-key with two texts fails closed");
+        assert!(!mk_text_family_shape_ok(4, 2));
+        assert!(!mk_text_family_shape_ok(6, 1));
+        // Degenerate censuses can never arise (n_text <= nkeys), but the
+        // law still refuses them.
+        assert!(!mk_text_family_shape_ok(0, 0));
+        assert!(!mk_text_family_shape_ok(2, 3));
+    }
+
+    /// SE-MKTEXT engine-kill coherence: with the executor text cars at
+    /// their defaults (no kill env set in the test process), the coherence
+    /// gate admits both the one-text and two-text censuses — and the gate
+    /// is the ONLY extra condition between the shape law and family
+    /// membership, so a thrown kill un-keys the family (asserted live by
+    /// the e2e, not reproducible in-process once the OnceLock caches).
+    #[test]
+    fn mk_text_agg_car_coherence_defaults_on() {
+        assert!(mk_text_agg_cars_live(1));
+        assert!(mk_text_agg_cars_live(2));
+        assert!(agg_freeze_car_live());
+    }
+
+    /// Sibling-lane knobs (SE-EXTRACTKEY / SE-CONSTKEY / SE-BARELIMIT):
+    /// the shared spelling rule is default OFF, `1`/`on` only — and the
+    /// live getters resolve OFF in the test process (no env set), pinning
+    /// each lane's inert-at-default guarantee.
+    #[test]
+    fn sibling_lane_knobs_are_default_off() {
+        assert!(!knob_spelling_on(None), "unset must be OFF (default)");
+        assert!(!knob_spelling_on(Some("0")));
+        assert!(!knob_spelling_on(Some("off")));
+        assert!(!knob_spelling_on(Some("")));
+        assert!(!knob_spelling_on(Some("true")), "typos fail safe to OFF");
+        assert!(!knob_spelling_on(Some("ON")), "case-sensitive, like the arm knobs");
+        assert!(knob_spelling_on(Some("1")));
+        assert!(knob_spelling_on(Some("on")));
+        assert!(!extract_exprkey_enabled(), "test process has no knob set => OFF");
+        assert!(!agg_constkey_enabled(), "test process has no knob set => OFF");
+        assert!(!agg_barelimit_enabled(), "test process has no knob set => OFF");
+    }
+
+    /// SE-EXTRACTKEY packed-image width law: mirrors the exprkey Multi
+    /// walk's 16-byte negotiation exactly — a shape that fits neither the
+    /// 8-byte nor the shrunk 4-byte numeric image must NOT be keyed
+    /// (suppress-then-refuse). Admitted/refused sets of record.
+    #[test]
+    fn extract_key_image_width_law() {
+        // The q19 image: int8 + text4 + numeric8 = 20 → shrink → 16. Fits.
+        assert!(extract_key_image_fits(8, 1));
+        // int4 + text + extract: 4+4+8 = 16 exactly.
+        assert!(extract_key_image_fits(4, 1));
+        // extract alone / with one small int.
+        assert!(extract_key_image_fits(0, 0));
+        assert!(extract_key_image_fits(2, 0));
+        assert!(extract_key_image_fits(8, 0));
+        // int8 + int4 + extract: 12+8=20 → shrink 12+4=16. Fits.
+        assert!(extract_key_image_fits(12, 0));
+        // int8 + int8 + extract: 16+4=20 even shrunk. REFUSED.
+        assert!(!extract_key_image_fits(16, 0));
+        // int8 + int8 + text + extract: wider still. REFUSED.
+        assert!(!extract_key_image_fits(16, 1));
+        // int8 + int4 + text + extract: 12+4+4=20 even shrunk. REFUSED.
+        assert!(!extract_key_image_fits(12, 1));
     }
 
     /// The living-matrix discipline (§4.1, reconciled at m5-integration):

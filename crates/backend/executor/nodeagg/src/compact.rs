@@ -623,9 +623,11 @@ pub fn agg_hash_compact_try_arm_mk(
 /// (band-2a CaseDict, q40 class): every att in `intern_atts` packs as a
 /// 4-byte intern id through the SHARED intern pool (ids only distinguish
 /// equal bytes, so one pool serves any number of components; read-back maps
-/// each component id through the same reverse map). SERIAL-ONLY admission:
-/// the M2 sink's canonical-bytes machinery caps Intern components at ONE
-/// (single text tail), so multi-intern shapes refuse the sink upstream.
+/// each component id through the same reverse map). SINK admission caps
+/// Intern components at TWO — the canonical multi-tail encoding
+/// (canon-sink car 1, `PGRUST_RUNTIME_AGG_TEXT2`); wider shapes refuse the
+/// sink upstream (`mk_shape_sink_ok`). Unprojected two-text scan feeds
+/// reach here behind `PGRUST_LANE_V2_MULTIKEY_TEXT` (SE-MKTEXT).
 pub fn agg_hash_compact_try_arm_mk_multi(
     node: &mut AggStateData<'_>,
     nullable: bool,
