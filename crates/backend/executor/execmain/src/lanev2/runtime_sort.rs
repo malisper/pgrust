@@ -1780,6 +1780,66 @@ fn runtime_sort_zonestats_cap() -> u64 {
     })
 }
 
+/// EXPECTED-EARLY-EXIT band arm (the serial-term enforce lane,
+/// GL-SERIALTERM-2; DEFAULT OFF pending the flip letter — `1|on` arms).
+/// Layered under GCUT like the zone-friendly band (the stats read is the
+/// same walk); OFF = the shipped admission byte-identically.
+fn runtime_sort_earlyexit_band_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&ON, || {
+        matches!(
+            std::env::var("PGRUST_RUNTIME_SORT_EARLYEXIT_BAND").as_deref(),
+            Ok("1") | Ok("on")
+        )
+    })
+}
+
+/// Expected-early-exit granule floor: the serial_model three-way crossover
+/// puts the unqualed-walk-vs-arm flip at ~3600-5400 granules (dop 4/16,
+/// star class); the floor sits ABOVE the bracket AND above the witnessed
+/// arm-favoring scale (1221 granules — parity-to-arm cells), below the
+/// witnessed walk-winning scale (12210 granules — 1.07-1.23x serial win).
+/// Between the crossover and the floor the arm keeps the shape (fail
+/// toward the incumbent on unwitnessed middle ground — the tstrunc-fence
+/// two-point discipline). `PGRUST_RUNTIME_SORT_EARLYEXIT_MIN_GRANULES`
+/// overrides (A/B vehicles).
+fn runtime_sort_earlyexit_min_granules() -> u64 {
+    static V: OnceLock<u64> = OnceLock::new();
+    crate::once_val(&V, || {
+        std::env::var("PGRUST_RUNTIME_SORT_EARLYEXIT_MIN_GRANULES")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(6_000)
+    })
+}
+
+/// Early exit was witnessed at bound k=10 (the census family's LIMIT);
+/// the walk's read count scales with the bound, so larger bounds keep the
+/// arm (fail-conservative).
+const EARLYEXIT_MAX_BOUND: usize = 16;
+
+/// Tie-risk gate: fraction of DISTINCT per-granule best words below which
+/// the key is duplicate-heavy and the walk's bound cannot prune (the
+/// int-control full-walk cells: 1 distinct word across every granule) —
+/// the arm keeps the shape.
+const EARLYEXIT_MIN_DISTINCT_FRAC: f64 = 0.5;
+
+/// The expected-early-exit band's SHAPE decision, factored pure for
+/// exhaustive unit pins (the scanpass spelling-rule idiom): given an
+/// unqualed admitted top-N (the caller has already checked the knob and
+/// `ss.ss.qual.is_none()`), does the band hand the shape to the serial
+/// best-first walk? All three guards fail toward the incumbent arm.
+pub(super) fn earlyexit_band_takes(
+    bound: usize,
+    total_granules: u64,
+    distinct_words: usize,
+    total_words: usize,
+) -> bool {
+    bound <= EARLYEXIT_MAX_BOUND
+        && total_granules >= runtime_sort_earlyexit_min_granules()
+        && distinct_words as f64 / total_words.max(1) as f64 >= EARLYEXIT_MIN_DISTINCT_FRAC
+}
+
 /// The band predicate's threshold (GL-SORTECON-3): the fraction of granules
 /// PROVABLY serial-skippable at the zone-max seed bound (best word > seed —
 /// a LOWER bound on what the serial zone-adaptive walk skips, since the
@@ -1995,6 +2055,47 @@ pub(super) fn try_own_sort<'mcx>(
                              ({skippable}/{} granules seed-skippable)",
                             t64.len()
                         ));
+                    }
+                    // EXPECTED-EARLY-EXIT BAND (the serial-term enforce
+                    // increment; GL-SERIALTERM-2): the zone-friendly band
+                    // above only refuses PROVABLY-skippable shapes, but the
+                    // witnessed record (the topn-nonint letter's named
+                    // residual + the serial-term three-way grid) shows the
+                    // serial best-first walk reads a ~CONSTANT granule
+                    // count on an UNQUALED small-bound top-N even at
+                    // provable-skip 0 — flat ~5ms across a 10x scale sweep
+                    // — while the engaged arm whole-scans. Above the
+                    // granule floor (derived from the serial_model
+                    // crossover, set ABOVE the witnessed arm-favoring
+                    // scale — fail toward the incumbent between the two
+                    // measured points) the walk is the priced winner and
+                    // the arm refuses. Guards, each fail-conservative:
+                    //  * no scan qual (a qual starves the walk's bound —
+                    //    the selective-qual carve's mechanism);
+                    //  * small Const bound (early exit witnessed at k=10);
+                    //  * tie-risk gate: the granule best words must be
+                    //    mostly DISTINCT — on a dup-heavy key the bound
+                    //    cannot prune (the int-control full-walk cells)
+                    //    and the arm keeps the shape.
+                    if runtime_sort_earlyexit_band_enabled() && ss.ss.qual.is_none() {
+                        let mut words = t64.clone();
+                        words.sort_unstable();
+                        words.dedup();
+                        if earlyexit_band_takes(s.bound, total_granules, words.len(), t64.len())
+                        {
+                            lane_trace(&format!(
+                                "runtime-sort: band predicate — expected-early-exit \
+                                 ({}/{} distinct granule best words, {} granules)",
+                                words.len(),
+                                t64.len(),
+                                total_granules
+                            ));
+                            refused(
+                                "expected-early-exit band (unqualed bounded walk; \
+                                 serial best-first retained)",
+                            );
+                            return Ok(false);
+                        }
                     }
                     Some((Arc::new(t64), seed_t64))
                 }
@@ -2670,4 +2771,48 @@ fn drain_rg(rt: &'static Arc<runtime::Runtime>, rg: &runtime::RgHandle) -> bool 
         lane_trace("runtime-sort: LEAKED pinned RG (drain gave up — dead participant?)");
     }
     drained
+}
+
+#[cfg(test)]
+mod earlyexit_band_tests {
+    use super::*;
+
+    /// The expected-early-exit band's guards, pinned exhaustively (each
+    /// fails toward the incumbent arm): fires only at (small bound) x
+    /// (granules at/above the floor) x (mostly-distinct best words); the
+    /// dup-heavy tie gate and the below-floor scale each block alone.
+    #[test]
+    fn earlyexit_band_guards_fail_toward_the_arm() {
+        // The witnessed residual shape: k=10, full-scale granule count,
+        // near-unique key (all best words distinct).
+        assert!(earlyexit_band_takes(10, 12_210, 12_210, 12_210));
+        // Below the floor (the witnessed arm-favoring scale) — arm keeps.
+        assert!(!earlyexit_band_takes(10, 1_221, 1_221, 1_221));
+        // Just under / at the floor boundary.
+        assert!(!earlyexit_band_takes(10, 5_999, 5_999, 5_999));
+        assert!(earlyexit_band_takes(10, 6_000, 6_000, 6_000));
+        // Large bound — early exit witnessed at k=10 only.
+        assert!(earlyexit_band_takes(16, 12_210, 12_210, 12_210));
+        assert!(!earlyexit_band_takes(17, 12_210, 12_210, 12_210));
+        assert!(!earlyexit_band_takes(100, 12_210, 12_210, 12_210));
+        // Dup-heavy key (the int-control cells: one distinct word).
+        assert!(!earlyexit_band_takes(10, 12_210, 1, 12_210));
+        assert!(!earlyexit_band_takes(10, 12_210, 6_104, 12_210)); // 49.99%
+        assert!(earlyexit_band_takes(10, 12_210, 6_105, 12_210)); // 50%
+        // Degenerate word census never divides by zero.
+        assert!(!earlyexit_band_takes(10, 12_210, 0, 0));
+    }
+
+    /// The arm knob is DEFAULT OFF pending the flip letter (build-time
+    /// posture: an unset env must leave the shipped admission intact).
+    /// Spelling is the tier-2 rule: exactly `1|on` arms.
+    #[test]
+    fn earlyexit_band_default_off() {
+        // NOTE: OnceLock reads the process env once; tests must not set
+        // the var. Unset in the test runner => the default posture.
+        if std::env::var("PGRUST_RUNTIME_SORT_EARLYEXIT_BAND").is_err() {
+            assert!(!runtime_sort_earlyexit_band_enabled());
+        }
+        assert_eq!(runtime_sort_earlyexit_min_granules(), 6_000);
+    }
 }
