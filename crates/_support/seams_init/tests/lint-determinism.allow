@@ -390,7 +390,7 @@ env	crates/backend/utils/init/miscinit/src/lockfile.rs	1
 env	crates/backend/utils/init/postinit/src/lib.rs	2
 env	crates/backend/utils/misc/guc/src/layers.rs	3
 env	crates/backend/utils/misc/guc/src/select.rs	1
-env	crates/backend/utils/misc/guc/src/store.rs	10	DST-REVIEW(t34-config): 8->10 = initialize_guc_options_from_environment boot-seed env reads for the env->GUC migration (fac980a36; PGRUST_* seeds read once at postmaster boot) — knobs-registry routing chartered to the DST program
+env	crates/backend/utils/misc/guc/src/store.rs	11	DST-REVIEW(t34-config): 8->10 = initialize_guc_options_from_environment boot-seed env reads for the env->GUC migration (fac980a36; PGRUST_* seeds read once at postmaster boot) — knobs-registry routing chartered to the DST program; +1 DST-REVIEW(m41-flip): the pgrust.runtime_vacuum_pool boot seed (GL-M41-3 flip), same class
 env	crates/backend/utils/misc/guc_tables/src/lane_pool.rs	4
 env	crates/backend/utils/misc/guc_tables/src/parallel_engine.rs	2
 env	crates/backend/utils/misc/guc_tables/src/runtime_pool.rs	7	DST-REVIEW(night/nlidx-arm): NL-inner-index runtime arm arming knob (PGRUST_RUNTIME_NLINDEX env read once, OnceLock-cached; pgsync-routing rides the chartered SE/DST knobs-registry migration)
