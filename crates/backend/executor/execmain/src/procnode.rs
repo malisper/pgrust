@@ -2105,6 +2105,20 @@ fn agg_arm<'mcx>(
                 }
             }
         }
+        PlanStateNode::Append(apn) => {
+            // PARTWISE-MORSELS dispatch hook (night/partitionwise-morsels,
+            // knob-gated default OFF): plain fold agg over a partitioned
+            // table's serial Append — the runtime scan arm's partition-as-
+            // morsel engagement (lanev2/runtime_partwise.rs). Falls through
+            // to the UNCHANGED per-tuple agg over exec_append on refuse.
+            if crate::lanev2::enabled() {
+                if let Some(r) =
+                    crate::lanev2::try_own_agg_over_append(agg, &mut **apn, estate)?
+                {
+                    return Ok(r);
+                }
+            }
+        }
         _ => {}
     }
     ::nodeagg::exec_agg(agg, estate, |e| exec_proc_node(outer, e))
