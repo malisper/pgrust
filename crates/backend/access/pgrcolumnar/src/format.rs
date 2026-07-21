@@ -88,7 +88,32 @@ pub const CB_VERSION_V6: u32 = 6;
 //     then granule slot, then column ascending; slots past an RG's last row
 //     are zero.
 pub const CB_VERSION_V7: u32 = 7;
-pub const CB_VERSION: u32 = 7;
+// v8 — NDV register persistence (the append-invalidation fix): the v2
+// scalar NDV section keeps only the whole-part HLL ESTIMATE, so a writer
+// reopening a nonempty part could not continue the sketch and invalidated
+// every column to 0 — any part built by more than one COPY permanently lost
+// footer NDV. v8 persists the per-column HLL REGISTER images so reopen
+// loads-and-continues (registers are per-bucket maxima: continue ==
+// recompute exactly).
+//  - Register blobs live in the file body ahead of the footer (64-aligned;
+//    dead on append-refinalize — the stitch-blob precedent), one blob per
+//    column, encoded per hll.rs to_blob (dense or sparse; low-NDV columns
+//    are tens of bytes).
+//  - The footer appends a per-column blob directory after the v7
+//    zero-count body: ncols x (u64 file_off | u32 len), all-zero where
+//    absent (pre-v8 append chains, or the lane kill switch
+//    PGRUST_CBSTORE_NDV_REGS=0). Fixed-width so read_footer_rgs still
+//    sizes the body read closed-form; the register bytes themselves are
+//    outside the footer body (and its CRC — the stitch-blob trust model).
+//  - The v2 scalar section is still written (derived from the registers,
+//    or exact from the v7 stitch gndv where a global dict exists): every
+//    scalar consumer (part cache, ANALYZE, planner fallback) reads v8
+//    parts unchanged. Consumption ladder: v8 registers -> v2 scalar ->
+//    sampled estimate; strictly monotone, v<=7 parts lose nothing.
+pub const CB_VERSION_V8: u32 = 8;
+pub const CB_VERSION: u32 = 8;
+// v8 NDV-registers directory entry: u64 file_off | u32 len.
+pub const CB_NDVREGS_DIR_ENTRY_LEN: usize = 12;
 // Stitch directory entry: u64 file_off | u32 count.
 pub const CB_STITCH_DIR_ENTRY_LEN: usize = 12;
 pub const CB_CLUSTER_KEY_MAX_COLS: usize = 8;

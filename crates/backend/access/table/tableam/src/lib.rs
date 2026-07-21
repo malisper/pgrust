@@ -995,6 +995,19 @@ pub fn pgrcolumnar_footer_ndv(rel: &Relation<'_>) -> PgResult<Option<Vec<u64>>> 
     ::pgrcolumnar::footer_ndv(rel)
 }
 
+/// v8 per-column NDV register sketch (whole-part HyperLogLog). Register
+/// sketches union losslessly where NDV scalars cannot be combined — the
+/// inherited-ANALYZE consumer unions these across pgrcolumnar children for
+/// an honest parent-level NDV. None: no committed footer (zero committed
+/// rows). Per-column None entries: sketch absent (pre-v8 part,
+/// append-invalidated chain, or the writer kill switch).
+pub use ::pgrcolumnar::hll::Hll as PgrcolumnarNdvSketch;
+pub fn pgrcolumnar_footer_ndv_hll(
+    rel: &Relation<'_>,
+) -> PgResult<Option<Vec<Option<PgrcolumnarNdvSketch>>>> {
+    ::pgrcolumnar::footer_ndv_hll(rel)
+}
+
 // v5 whole-part per-column sorted-asc flags (false = unknown); None while
 // the table has no committed footer.
 pub fn pgrcolumnar_footer_sorted(rel: &Relation<'_>) -> PgResult<Option<Vec<bool>>> {
