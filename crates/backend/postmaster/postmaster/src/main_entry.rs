@@ -401,9 +401,10 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
     }
 
     // M2 pool-binding: reserve PGPROCs for the standing runtime executor
-    // gang BEFORE MaxBackends is computed (0 unless PGRUST_RUNTIME=1 —
+    // gang — and, under PGRUST_RUNTIME_POOLDB=1 (M2 inc-2), one per pool
+    // thread — BEFORE MaxBackends is computed (0 unless PGRUST_RUNTIME=1 —
     // byte-identical sizing with the runtime off).
-    init_small::globals::SetRuntimeGangProcs(launch_backend::rtgang::gang_procs_wanted());
+    init_small::globals::SetRuntimeGangProcs(launch_backend::rtgang::runtime_reserved_procs());
     postinit::InitializeMaxBackends()?;
     pmchild_seams::init_postmaster_child_slots::call();
     // C runs this inside CreateSharedMemoryAndSemaphores; hoisted next to the
