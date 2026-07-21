@@ -3869,7 +3869,7 @@ pub mod cost_shadow {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// One census-indexed slot per CoverClass variant (see `class_idx`).
-    const N_CLASSES: usize = 13;
+    const N_CLASSES: usize = 14;
 
     pub(super) fn class_idx(class: CoverClass) -> usize {
         match class {
@@ -3886,6 +3886,7 @@ pub mod cost_shadow {
             CoverClass::CbHashJoinGroupedAgg => 10,
             CoverClass::AggPolyHeapPlain => 11,
             CoverClass::CbMetaFooterAgg => 12,
+            CoverClass::PartwisePlainFold => 13,
         }
     }
 
@@ -3903,6 +3904,7 @@ pub mod cost_shadow {
         "CbHashJoinGroupedAgg",
         "AggPolyHeapPlain",
         "CbMetaFooterAgg",
+        "PartwisePlainFold",
     ];
 
     const ZERO: AtomicU64 = AtomicU64::new(0);
