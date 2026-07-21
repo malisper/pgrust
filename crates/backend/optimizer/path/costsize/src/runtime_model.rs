@@ -156,7 +156,7 @@ pub fn class_model(class: RuntimeClass) -> ClassModel {
         RuntimeClass::CbGroupedAggTopN => ClassModel { c_engage: 461286.3, w_row: 1.6395, l_setup: 1903979.4, l_cap: 6.06, n_min_fit: 1000000.0, ser_setup: 534384.6, ser_row: 0.3162 },
         RuntimeClass::CbHashJoinPlainAgg => ClassModel { c_engage: 1747.4, w_row: 1.5379, l_setup: 48931.8, l_cap: 11.79, n_min_fit: 1000000.0, ser_setup: 0.0, ser_row: 0.9928 },
         RuntimeClass::CbPlainAggFold => ClassModel { c_engage: 0.0, w_row: 1.2712, l_setup: 18206.0, l_cap: 12.66, n_min_fit: 1000000.0, ser_setup: 29327.6, ser_row: 0.0120 },
-        RuntimeClass::CbTopnBoundedIntKeys => ClassModel { c_engage: 439075.0, w_row: 10.4623, l_setup: 236241.6, l_cap: 11.81, n_min_fit: 1000000.0, ser_setup: 417592.9, ser_row: 0.4527 },
+        RuntimeClass::CbTopnBoundedIntKeys => ClassModel { c_engage: 3523905.4, w_row: 2.6581, l_setup: 322122.7, l_cap: 16.00, n_min_fit: 1000000.0, ser_setup: 417592.9, ser_row: 0.4527 },
         RuntimeClass::HeapCmpFoldPrefix => ClassModel { c_engage: 199319.8, w_row: 1.1983, l_setup: 164041.4, l_cap: 7.32, n_min_fit: 100000.0, ser_setup: 228223.5, ser_row: 1.3933 },
         RuntimeClass::HeapPlainCountStar => ClassModel { c_engage: 257515.3, w_row: 0.3037, l_setup: 552913.9, l_cap: 6.88, n_min_fit: 2500000.0, ser_setup: 454725.6, ser_row: 0.4871 },
     }
@@ -356,12 +356,34 @@ mod tests {
         (RuntimeClass::CbDistinctIntKeys, 5e6, 8, 1.056),
         (RuntimeClass::CbDistinctIntKeys, 5e6, 16, 0.805),
         (RuntimeClass::CbDistinctIntKeys, 2.5e6, 16, 0.769),
-        (RuntimeClass::CbTopnBoundedIntKeys, 1e6, 4, 6.350),
-        (RuntimeClass::CbTopnBoundedIntKeys, 2.5e6, 4, 8.677),
-        (RuntimeClass::CbTopnBoundedIntKeys, 5e6, 4, 9.204),
-        (RuntimeClass::CbTopnBoundedIntKeys, 5e6, 8, 7.405),
-        (RuntimeClass::CbTopnBoundedIntKeys, 5e6, 16, 5.643),
-        (RuntimeClass::CbTopnBoundedIntKeys, 2.5e6, 16, 4.609),
+        // L6 refit (GL-SORTECON-3 follow-through): the POST-COLSTAGE sort
+        // arm vs a forced GATHER MERGE leg — four-posture vehicle
+        // scripts/sortecon-topn-ladder.sh @ 27db94812, fleet fast-profile,
+        // k=1000 axis (the GM-viable regime). The k=10 axis is NOT fit:
+        // there the arm beats GM at scale (0.20-0.87) but the SERIAL zone
+        // walk beats both engines (rt/serial 1.33-1.75) — the L4
+        // serial-term gap a 2-engine ratio cannot price. 250k cells
+        // excluded (arm granule-floor refusals; coverage, not economics).
+        (RuntimeClass::CbTopnBoundedIntKeys, 1e6, 1, 5.273),
+        (RuntimeClass::CbTopnBoundedIntKeys, 1e6, 2, 5.595),
+        (RuntimeClass::CbTopnBoundedIntKeys, 1e6, 4, 6.800),
+        (RuntimeClass::CbTopnBoundedIntKeys, 1e6, 8, 7.581),
+        (RuntimeClass::CbTopnBoundedIntKeys, 1e6, 16, 9.774),
+        (RuntimeClass::CbTopnBoundedIntKeys, 2.5e6, 1, 4.243),
+        (RuntimeClass::CbTopnBoundedIntKeys, 2.5e6, 2, 4.259),
+        (RuntimeClass::CbTopnBoundedIntKeys, 2.5e6, 4, 5.068),
+        (RuntimeClass::CbTopnBoundedIntKeys, 2.5e6, 8, 6.583),
+        (RuntimeClass::CbTopnBoundedIntKeys, 2.5e6, 16, 9.000),
+        (RuntimeClass::CbTopnBoundedIntKeys, 5e6, 1, 3.591),
+        (RuntimeClass::CbTopnBoundedIntKeys, 5e6, 2, 3.415),
+        (RuntimeClass::CbTopnBoundedIntKeys, 5e6, 4, 3.821),
+        (RuntimeClass::CbTopnBoundedIntKeys, 5e6, 8, 5.250),
+        (RuntimeClass::CbTopnBoundedIntKeys, 5e6, 16, 8.225),
+        (RuntimeClass::CbTopnBoundedIntKeys, 1e7, 1, 2.974),
+        (RuntimeClass::CbTopnBoundedIntKeys, 1e7, 2, 2.893),
+        (RuntimeClass::CbTopnBoundedIntKeys, 1e7, 4, 3.075),
+        (RuntimeClass::CbTopnBoundedIntKeys, 1e7, 8, 4.257),
+        (RuntimeClass::CbTopnBoundedIntKeys, 1e7, 16, 6.509),
         (RuntimeClass::CbHashJoinPlainAgg, 1e6, 4, 1.319),
         (RuntimeClass::CbHashJoinPlainAgg, 2.5e6, 4, 1.494),
         (RuntimeClass::CbHashJoinPlainAgg, 5e6, 4, 1.545),
@@ -402,15 +424,14 @@ mod tests {
 
     /// Classes whose WITNESSED v2 cells were measured on an arm that has
     /// since CHANGED ECONOMICS (the design §3 arm-change trigger, fired but
-    /// not yet honored with a refit ladder):
-    ///   CbTopnBoundedIntKeys — the v2 grid measured the PRE-COLSTAGE sort
-    ///   arm (4.6-9.2x rt/legacy); GL-SORTECON-3 (COLSTAGE+GCUT) retired
-    ///   that loss and re-flipped the floor to min_dop=4. The fitted curve
-    ///   is therefore SUPERSEDED: it still reflects its cells, but the
-    ///   cells no longer reflect the shipped arm. Shadow-only exposure (the
-    ///   class is not in the decide list); refit owed — ladder spec L6,
-    ///   TSV witness=witnessed-v2-superseded.
-    const SUPERSEDED_CLASSES: &[RuntimeClass] = &[RuntimeClass::CbTopnBoundedIntKeys];
+    /// not yet honored with a refit ladder). EMPTY since the L6 refit
+    /// (GL-SORTECON-3 follow-through, 2026-07-21): CbTopnBoundedIntKeys was
+    /// the only member — its post-COLSTAGE four-posture grid landed
+    /// (scripts/sortecon-topn-ladder.sh @ 27db94812) and the curve refit
+    /// from the k=1000 rt/GM cells. The mechanism stays: an arm rework that
+    /// invalidates a class's fitted cells re-adds the class here WITH its
+    /// TSV rows flipped to witnessed-v2-superseded, never by drift.
+    const SUPERSEDED_CLASSES: &[RuntimeClass] = &[];
 
     fn superseded(class: RuntimeClass) -> bool {
         SUPERSEDED_CLASSES.contains(&class)
@@ -475,6 +496,24 @@ mod tests {
                 (RuntimeClass::CbPlainAggFold, 1_000_000, 4),
                 (RuntimeClass::CbGroupedAggTextKey, 1_000_000, 4),
                 (RuntimeClass::CbGroupedAggTextKey, 2_500_000, 4),
+                // The L6 refit's twelve topn cells: the min_dop=4 rectangle
+                // (GL-SORTECON-3, ratified on rt/SERIAL) suppresses at every
+                // dop>=4 size, but the refit curve — fit WITH the forced
+                // Gather Merge leg the re-flip never measured (escalation
+                // E1) — witnesses 3.08-9.77x rt/GM losses at every one.
+                // Flip-gate queue: GL-COST-TOPN-1 (the guard-off increment).
+                (RuntimeClass::CbTopnBoundedIntKeys, 1_000_000, 4),
+                (RuntimeClass::CbTopnBoundedIntKeys, 1_000_000, 8),
+                (RuntimeClass::CbTopnBoundedIntKeys, 1_000_000, 16),
+                (RuntimeClass::CbTopnBoundedIntKeys, 2_500_000, 4),
+                (RuntimeClass::CbTopnBoundedIntKeys, 2_500_000, 8),
+                (RuntimeClass::CbTopnBoundedIntKeys, 2_500_000, 16),
+                (RuntimeClass::CbTopnBoundedIntKeys, 5_000_000, 4),
+                (RuntimeClass::CbTopnBoundedIntKeys, 5_000_000, 8),
+                (RuntimeClass::CbTopnBoundedIntKeys, 5_000_000, 16),
+                (RuntimeClass::CbTopnBoundedIntKeys, 10_000_000, 4),
+                (RuntimeClass::CbTopnBoundedIntKeys, 10_000_000, 8),
+                (RuntimeClass::CbTopnBoundedIntKeys, 10_000_000, 16),
                 (RuntimeClass::CbHashJoinPlainAgg, 1_000_000, 4),
             ],
             "unexpected curve-vs-floor disagreement set"
@@ -522,12 +561,13 @@ mod tests {
                 );
             }
         }
-        // topn: the SUPERSEDED curve (pre-COLSTAGE cells) never suppresses
-        // anywhere in its measured range. Kept as a shadow-BEHAVIOR pin —
-        // this is the census direction the class emits until the L6 refit
-        // ladder lands post-GL-SORTECON-3 constants (the shipped floor now
-        // suppresses at dop>=4, so every engaged cell censuses as
-        // wl_suppress_model_gather by construction).
+        // topn: the L6 REFIT curve never suppresses anywhere in its
+        // measured range (min predicted rt/GM 2.92 at 10M@dop1) — the
+        // post-COLSTAGE arm loses to the forced Gather Merge posture at
+        // every witnessed k=1000 cell, so keep-Gather is now the WITNESSED
+        // direction, no longer a superseded artifact. The min_dop=4
+        // rectangle contradicts it at every dop>=4 cell — the flip-gate
+        // queue (GL-COST-TOPN-1), pinned in the disagreement set above.
         for &(class, rows, dop, _) in CELLS {
             if class == RuntimeClass::CbTopnBoundedIntKeys {
                 assert!(!cost_route_verdict(class, rows, dop).suppress);
@@ -703,18 +743,35 @@ mod tests {
         );
     }
 
+    /// Classes whose witnessed grid shows the LEGACY engine out-scaling the
+    /// runtime arm in D — the arm's wall time is engage-dominated (flat to
+    /// RISING in dop: 20.4->30.6ms across dop 4->16 at 2.5M) while forced
+    /// Gather Merge keeps gaining through dop16 (w16 witnessed at 5M/10M,
+    /// gm 7.0->5.3ms). For these the fitted l_cap legitimately reaches the
+    /// 16.0 bound (legacy never saturates below the measured dop ceiling)
+    /// and the predicted ratio legitimately WORSENS as dop widens.
+    /// Witnessed: the L6 four-posture grid @ 27db94812 (rt/GM rising
+    /// 6.80->9.77 at 1M across dop 4->16).
+    const LEGACY_OUTSCALES_ARM: &[RuntimeClass] = &[RuntimeClass::CbTopnBoundedIntKeys];
+
     /// Model-shape sanity (charter: monotonicity unit tests): both cost
     /// curves strictly increase in N; the runtime side never gets more
     /// expensive with more workers; and widening dop 4 -> 16 never makes the
     /// predicted rt/legacy ratio WORSE anywhere in or above measured support
-    /// (the fitted l_cap < 16 everywhere, so legacy saturates first).
+    /// (the fitted l_cap saturates below dop16 for every class EXCEPT the
+    /// LEGACY_OUTSCALES_ARM set, where the witnessed record shows the
+    /// opposite shape).
     #[test]
     fn model_terms_are_monotone() {
         let grid = [1e5, 2.5e5, 5e5, 1e6, 2.5e6, 5e6, 1e7];
         for &class in RuntimeClass::ALL.iter() {
             let m = class_model(class);
             assert!(m.w_row > 0.0 && m.l_setup > 0.0 && m.c_engage >= 0.0, "{class:?}");
-            assert!(m.l_cap < 16.0, "{class:?}: l_cap must saturate below dop16");
+            if LEGACY_OUTSCALES_ARM.contains(&class) {
+                assert!(m.l_cap <= 16.0, "{class:?}: l_cap capped at the fit bound");
+            } else {
+                assert!(m.l_cap < 16.0, "{class:?}: l_cap must saturate below dop16");
+            }
             for w in grid.windows(2) {
                 for d in [1, 4, 8, 16] {
                     let t_rt = |n: f64| m.c_engage + m.w_row * n / d as f64;
@@ -727,11 +784,19 @@ mod tests {
                 // Runtime cost non-increasing in D.
                 let rt = |d: i32| m.c_engage + m.w_row * n / d as f64;
                 assert!(rt(16) <= rt(8) && rt(8) <= rt(4), "{class:?} t_rt increases in D");
-                // Ratio no worse at dop16 than dop4.
-                assert!(
-                    predicted_ratio(class, n, 16) <= predicted_ratio(class, n, 4) + 1e-9,
-                    "{class:?} N={n}: ratio worsens from dop4 to dop16"
-                );
+                // Ratio no worse at dop16 than dop4 — except where the
+                // witnessed record shows legacy out-scaling the arm.
+                if LEGACY_OUTSCALES_ARM.contains(&class) {
+                    assert!(
+                        predicted_ratio(class, n, 16) >= predicted_ratio(class, n, 4) - 1e-9,
+                        "{class:?} N={n}: the legacy-outscales shape inverted"
+                    );
+                } else {
+                    assert!(
+                        predicted_ratio(class, n, 16) <= predicted_ratio(class, n, 4) + 1e-9,
+                        "{class:?} N={n}: ratio worsens from dop4 to dop16"
+                    );
+                }
             }
         }
     }
