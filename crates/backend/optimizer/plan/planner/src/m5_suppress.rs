@@ -1782,10 +1782,28 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         if !is_whitelisted_agg(tle.expr, rti, passenger_list)
             && !is_count_distinct_int(tle.expr, rti)
         {
-            return Ok(false);
+            // conversion-flips composition: this arm owns AGG sort keys
+            // only — a single GROUP-key sort without LIMIT is the
+            // SE-DECOROOT residual's shape, so fall through to its census
+            // (the topn arm's identical fallback) instead of refusing;
+            // with both knobs killed the refusal is byte-identical.
+            if decoroot_enabled()
+                && n_count_distinct == 0
+                && n_const == 0
+                && n_text <= 1
+                && !mk_text_family
+                && crate::gucs::enable_hashagg()
+                && scan_sort_keys_covered(parse, &key_refs, rti, passenger_list)
+            {
+                decorated = true;
+                false
+            } else {
+                return Ok(false);
+            }
+        } else {
+            full_sort = true;
+            false
         }
-        full_sort = true;
-        false
     } else if decoroot_enabled()
         && !parse.sortClause.is_nil()
         && n_count_distinct == 0
