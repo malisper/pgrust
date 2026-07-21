@@ -9485,6 +9485,7 @@ dependencies = [
  "hashfn",
  "init_small",
  "instrument",
+ "loom",
  "lsyscache",
  "mcx",
  "nodehash",
