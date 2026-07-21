@@ -356,6 +356,14 @@ const NO_GUARD: FloorGuard = FloorGuard {
     low_dop_max_rows: f64::INFINITY,
 };
 
+/// The runtime hash-join arm's tiny-input admission floor in rows: 64
+/// granules (runtime_hashjoin `min_granules`, env-overridable there) x
+/// 8192 rows/granule. Join-class suppression below this lands on the
+/// arm's tiny-input refusal — a serial fallback measured 2.22-2.34x worse
+/// than the forgone PHJ (GL-HJMB-3, 500k rung, dop {4,8,16} x 2 takes) —
+/// so both the class FloorGuard's min and the seat-lift path bound on it.
+const HJ_ARM_MIN_ROWS: f64 = 524_288.0;
+
 fn class_guard(class: CoverClass) -> FloorGuard {
     match class {
         // dop4: 1.21–1.26x ≥2.5M (WIN 0.34 at 1M); dop8 1.10; dop16
@@ -419,7 +427,17 @@ fn class_guard(class: CoverClass) -> FloorGuard {
         // — a 5-11x serial-rerun cliff vs the PHJ the suppression forgoes.
         // Any floor change must land WITH (or after) that guard and re-run
         // the GL-HJMB-1 boundary cells.
-        CoverClass::CbHashJoinPlainAgg => FloorGuard { max_rows: 2_000_000.0, ..NO_GUARD },
+        //
+        // MIN floor (GL-HJMB-3, 2026-07-21): suppression must not outrun
+        // the ARM's own tiny-input admission floor (64 granules x 8192 rows
+        // — runtime_hashjoin min_granules; a suppressed join the arm then
+        // tiny-refuses lands SERIAL, witnessed 2.22-2.34x worse than the
+        // forgone PHJ at 500k across dop {4,8,16}, both takes). 524,288 is
+        // that floor expressed in rows; the seat-lift path honors the same
+        // bound (its witnessed win band starts at 1M).
+        CoverClass::CbHashJoinPlainAgg => {
+            FloorGuard { min_rows: HJ_ARM_MIN_ROWS, max_rows: 2_000_000.0, ..NO_GUARD }
+        }
         // GL-COST-2 UNWIRE (this letter): the m5p1/SE-AGGJOIN PROVISIONAL
         // reuse of the hashjoin-nbatch1 floor is REFUTED by the riders' own
         // witnessed grids (L1/L2 @ d10db8ef5e: rt/legacy 3.04-6.03x
@@ -3033,7 +3051,18 @@ fn classify_join_sides<'mcx>(
     // and carry their OWN floors (the jheap 1M min must not be bypassed by
     // the ceiling lift), so only pure-bootstrap shapes reach it.
     let seat_shaped = n_equi == 1 && int4_pair_only;
-    if seat_shaped && hjprobe_v2_live() && heap.is_empty() && n_numeric == 0 {
+    // GL-HJMB-3 min bound on the lift: below the arm's tiny-input floor
+    // (HJ_ARM_MIN_ROWS) the suppressed query lands on the arm's refusal —
+    // serial, 2.2-2.3x worse than the forgone PHJ (witnessed 500k rung).
+    // Fall through to the class guard, whose min_rows keeps Gather.
+    // PGRUST_M5_SIZE_FLOORS=0 disables the bound with every other floor
+    // (calibration boots).
+    if seat_shaped
+        && hjprobe_v2_live()
+        && heap.is_empty()
+        && n_numeric == 0
+        && (max_rows >= HJ_ARM_MIN_ROWS || !size_floors_enabled())
+    {
         return finish_seat_lifted(run, relids[0], max_rows);
     }
     // Floor guard input: the larger side's estimated rows (the ladder's
