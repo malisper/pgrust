@@ -295,6 +295,7 @@ spawn	crates/backend/utils/misc/timeout/src/lib.rs	1	DST-REVIEW(permit-s5): row 
 # ==== env ====
 env	crates/_support/jit_deform/src/lib.rs	1
 env	crates/_support/pgrust/trace/src/lib.rs	1
+env	crates/_support/types/datum/src/array_build.rs	1	DST-REVIEW(night/replan-arrayfetch): PGRUST_ARRAY_FETCH_INLINE kill knob (inline byval element fetch in deconstruct_array_image; =0|off restores the incumbent runtime-length copy arm) — process-constant env read once, OnceLock-cached, checked once per deconstruct call (the jit_deform idiom); knobs-registry routing (s2.5) chartered to the DST program
 env	crates/backend/access/heap/vacuumlazy/src/morsels.rs	7	DST-REVIEW(m41-vacuum-pool): M4.1 vacuum driver swap — kill switch (PGRUST_RUNTIME_VACUUM_POOL) + claim-deadline knob (PGRUST_RUNTIME_GANG_CLAIM_MS, the standing-channel knob) env-read once-caches; knobs-registry routing (s2.5) chartered to the DST program
 env	crates/backend/access/index/indexam/src/lib.rs	4	DST-REVIEW(q2-index-chunks): the debug-only av-wedge injection probe (PGRUST_TEST_VACUUM_PANIC_INDEX) mirrored onto the Q2 chunked begin twins — test-oracle env reads, cfg(debug_assertions) only
 env	crates/backend/access/nbtree/nbtsort/src/pool.rs	6	DST-REVIEW(m42-btbuild-pool): M4.2 kill switch (PGRUST_RUNTIME_INDEXBUILD_POOL) + batch/queue calibration knobs + trace/claim-timing witness channels + the shared claim-deadline knob — pure env-read once-caches, the vacuumparallel M4.1 rows' exact class; knobs-registry routing (s2.5) chartered to the DST program
@@ -483,6 +484,7 @@ once	crates/_support/jit_deform/src/lib.rs	1
 once	crates/_support/pgrust/trace/src/lib.rs	1
 once	crates/_support/seams_init/src/lib.rs	1
 once	crates/_support/test_boot/src/lib.rs	2
+once	crates/_support/types/datum/src/array_build.rs	1	DST-REVIEW(night/replan-arrayfetch): the PGRUST_ARRAY_FETCH_INLINE kill knob's once-cache (pure env-read init closure, P3 row-19 benign class); knobs-registry routing rides the chartered DST migration
 once	crates/backend/access/heap/vacuumlazy/src/morsels.rs	8	DST-REVIEW(m41-vacuum-pool): M4.1 vacuum driver swap — kill switch (PGRUST_RUNTIME_VACUUM_POOL) + claim-deadline knob (PGRUST_RUNTIME_GANG_CLAIM_MS, the standing-channel knob) env-read once-caches; knobs-registry routing (s2.5) chartered to the DST program (P3 row-19 pure env-read closures)
 once	crates/backend/access/pgrcolumnar/src/condcache.rs	2
 once	crates/backend/commands/vacuumparallel/src/lib.rs	9	DST-REVIEW(q2-index-chunks): M4.1 rows + the Q2 chunk gates (PGRUST_RUNTIME_VACUUM_INDEX_CHUNKS/QUANTUM/LEADER) and the claim-cadence witness channel (PGRUST_VACUUM_CLAIM_TIMING) — P3 row-19 pure env-read closures + the one-shot shutdown-hook registration (ensure_hooks_registered precedent); knobs-registry routing (s2.5) chartered to the DST program. +1 GL-M41-2: PvUnit.census_t0_ms per-unit first-quantum stamp (trace-gated telemetry, pure mono_ms closure)
@@ -614,6 +616,7 @@ rawsync	crates/_support/jit_deform/src/lib.rs	1
 rawsync	crates/_support/pgrust/trace/src/lib.rs	1
 rawsync	crates/_support/seams_init/src/lib.rs	1
 rawsync	crates/_support/test_boot/src/lib.rs	1
+rawsync	crates/_support/types/datum/src/array_build.rs	1	DST-REVIEW(night/replan-arrayfetch): the PGRUST_ARRAY_FETCH_INLINE kill knob's OnceLock cell (same lane-knob class); pgsync routing rides the chartered DST migration
 rawsync	crates/backend/access/common/syncscan/src/lib.rs	1
 rawsync	crates/backend/access/common/tidstore/src/lib.rs	1
 rawsync	crates/backend/access/heap/vacuumlazy/src/morsels.rs	1
