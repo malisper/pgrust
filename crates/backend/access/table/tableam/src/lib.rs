@@ -1014,6 +1014,13 @@ pub fn pgrcolumnar_footer_zerocnt_all(rel: &Relation<'_>) -> PgResult<Option<boo
     ::pgrcolumnar::footer_zerocnt_all(rel)
 }
 
+// v7 per-column part-global stitch dict sizes (SE-TOPNNI plan-time DictCode
+// sort-key answerability; 0 = no stitch). None while the table has no
+// committed footer; empty on pre-v7 parts.
+pub fn pgrcolumnar_footer_stitch_gndv(rel: &Relation<'_>) -> PgResult<Option<Vec<u64>>> {
+    ::pgrcolumnar::footer_stitch_gndv(rel)
+}
+
 // pgrcolumnar's AM-specific sample acquisition (C table_relation_analyze lets the
 // AM supply the whole acquirefunc): row-group enumeration + random row fetch.
 pub fn pgrcolumnar_analyze_visible_rgs(scan: &TableScanDesc<'_>) -> PgResult<Vec<(u32, u32)>> {

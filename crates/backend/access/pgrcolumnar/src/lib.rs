@@ -119,6 +119,17 @@ pub fn footer_zerocnt_all(rel: &::types_rel::Relation<'_>) -> PgResult<Option<bo
     Ok(part_cache::cached_part(rel)?.map(|p| p.zerocnt_all_rgs()))
 }
 
+// v7 per-column part-global stitch dict sizes (0 = no stitch for that
+// column: pre-v7 part, non-dict column, or invalidated by append) — the
+// SE-TOPNNI plan-time answerability probe for DictCode text sort keys (a
+// text key without a stitch would engage the runtime sort sink and then
+// contract-break at accept). Served from the session part cache like its
+// siblings above; None while the table has no committed footer; empty on
+// pre-v7 parts.
+pub fn footer_stitch_gndv(rel: &::types_rel::Relation<'_>) -> PgResult<Option<Vec<u64>>> {
+    Ok(part_cache::cached_part(rel)?.map(|p| p.stitch_gndv_all().to_vec()))
+}
+
 pub fn unsupported(what: &str) -> Box<PgError> {
     Box::new(
         PgError::error(format!("cbstore does not support {what}"))

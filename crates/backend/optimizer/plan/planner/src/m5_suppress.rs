@@ -531,6 +531,66 @@ fn textdistinct_guard() -> FloorGuard {
     FloorGuard { min_dop: 12, low_dop_max_rows: 3_000_000.0, ..NO_GUARD }
 }
 
+/// SE-TOPNNI (gap:topn-nonint-keys car, tier 2): bounded top-N whose ORDER
+/// BY keys are NON-integer — date/timestamp Vars (the sink's
+/// I4/I8 CmpOp aliases: plain int compares per date.c/timestamp.c) and/or
+/// stitched deterministic-default-collation text/varchar Vars (the DictCode
+/// key class, docs/design/dict-code-flow.md) — the census's bounded-top-N
+/// over datetime/text sort keys with wide (star-tlist) payloads, qualed
+/// and unqualed. The runtime sort SINK already owns every piece (KeyWidth
+/// I4/I8 widening for the datetime family, v7 part-global byte-rank codes
+/// for text, multi-key wide heaps, winner-only late materialization for
+/// the star tlist, COLSTAGE staged accept + GCUT band predicate); only
+/// this probe refuses the shapes. Smoke (2M rows, dop4, 2026-07-21):
+/// qualed star-tlist / narrow-tlist / text-key / mixed-key analogs of the
+/// census shapes engage and win 2.3–6.7x vs forced legacy, byte parity OK.
+///
+/// DEFAULT OFF (`PGRUST_LANE_V2_TOPN_NONINT=1|on` arms — the pre-flip
+/// default-OFF idiom; the flip rides the GL-TOPNNI-1 fleet letter, never
+/// the build merge). Suppresses via the knob-path finish — NOT a
+/// BOOTSTRAP_MATRIX class (the tsv row stays route_to=legacy /
+/// probe_key="-"; drift guards untouched).
+pub(crate) fn topn_nonint_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        tier2_car_spelling_on(std::env::var("PGRUST_LANE_V2_TOPN_NONINT").as_deref().ok())
+    })
+}
+
+/// PROVISIONAL floor for the SE-TOPNNI knob path: the CbTopnBoundedIntKeys
+/// guard verbatim (min_dop=4 — dop1/2 measured losing on the int-key
+/// ladder; the same sink, same COLSTAGE/GCUT accept economics, runs the
+/// non-int keys). GL-TOPNNI-1 owns re-measuring the non-int shapes'
+/// own crossovers; the known small-scale corner is the UNQUALED star-tlist
+/// shape at low dop (smoke 2M×dop4: rt/serial 2.76 — engage ceremony vs a
+/// 4ms serial walk), which the ladder must carve or clear before any flip.
+fn topn_nonint_guard() -> FloorGuard {
+    class_guard(CoverClass::CbTopnBoundedIntKeys)
+}
+
+/// SE-TOPNNI text sort-key answerability (the zerocnt-answerability
+/// precedent, per column): the DictCode key class serves order ONLY via
+/// the v7 part-global byte-rank stitch — a text key column without one
+/// would engage and then CONTRACT-BREAK at accept (RG abort, R5 serial
+/// rerun: the suppress-then-refuse trap). plancat stores the footer's
+/// per-column stitch NDV when the knob is armed
+/// (`RelOptInfo::pgrcolumnar_stitch_gndv`, 1-based attno = index + 1;
+/// empty on footer-less/pre-v7 parts and at knob-off); 0/absent = keep
+/// Gather.
+fn topn_nonint_text_key_stitched(
+    run: &PlannerRun<'_>,
+    rel_id: types_pathnodes::RelId,
+    varattno: i32,
+) -> bool {
+    varattno >= 1
+        && run
+            .root
+            .rel(rel_id)
+            .pgrcolumnar_stitch_gndv
+            .get(varattno as usize - 1)
+            .is_some_and(|&g| g > 0)
+}
+
 /// SE-MKTEXT (Lane-3 probe widening, two-key text car): the ClickBench
 /// q17/q18-class `GROUP BY UserID, SearchPhrase` shapes — TWO-key grouped
 /// aggregation with one or two default-collation text keys — run 8-39x
@@ -1297,6 +1357,7 @@ const INT2OID: u32 = 21;
 const INT4OID: u32 = 23;
 const INT8OID: u32 = 20;
 const DATEOID: u32 = 1082;
+// (TIMESTAMPOID lives next to F_EXTRACT_TIMESTAMP below.)
 const TEXTOID: u32 = 25;
 /// SE-CBKEYS: bpchar — recognized ONLY to NAME its refusal (the
 /// space-insensitive-equality exclusion; never admitted as a key).
@@ -1546,13 +1607,43 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             && parse.limitCount.is_some()
             && parse.limitOffset.is_none()
         {
+            // One key-vocabulary walk serves both rows: all-int keys keep
+            // the bootstrap class (verdicts byte-identical to the pre-
+            // SE-TOPNNI code); any admissible non-int key routes to the
+            // knob path below (default OFF => keep Gather exactly as
+            // before).
+            let mut n_nonint = 0usize;
+            let mut n_text = 0usize;
             for sc_node in &parse.sortClause {
                 let Some(sc) = sc_node.as_sort_group_clause() else { return Ok(false) };
                 let Some(tle) = tle_by_sortgroupref(parse, sc.tleSortGroupRef) else {
                     return Ok(false);
                 };
-                if !is_covered_key_var(tle.expr, rti, is_int_family) {
+                let Some(v) = key_var(tle.expr, rti) else { return Ok(false) };
+                if is_int_family(v.vartype) {
+                    continue;
+                }
+                // SE-TOPNNI non-int vocabulary — exactly what the sink
+                // admits: the datetime family rides the I4/I8 CmpOp
+                // aliases; text rides the DictCode class (deterministic
+                // default collation + a v7 stitch on the column, checked
+                // at plan time — the answerability discipline).
+                if !topn_nonint_enabled() {
                     return Ok(false);
+                }
+                n_nonint += 1;
+                // (timestamptz would ride the same I8 alias, but the cb AM
+                // refuses timestamptz COLUMNS — a bare-Var tstz key on a cb
+                // rel is unreachable, so it is deliberately not keyed.)
+                match v.vartype {
+                    DATEOID | TIMESTAMPOID => {}
+                    TEXTOID | VARCHAROID
+                        if v.varcollid == DEFAULT_COLLATION_OID
+                            && topn_nonint_text_key_stitched(run, rel_id, v.varattno as i32) =>
+                    {
+                        n_text += 1;
+                    }
+                    _ => return Ok(false),
                 }
             }
             for tle_node in &parse.targetList {
@@ -1561,7 +1652,46 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
                     return Ok(false);
                 }
             }
-            return finish(run, CoverClass::CbTopnBoundedIntKeys, rte.relid, 0.0, rel_rows, rel_pages);
+            if n_nonint == 0 {
+                return finish(run, CoverClass::CbTopnBoundedIntKeys, rte.relid, 0.0, rel_rows, rel_pages);
+            }
+            // Knob-path guards mirroring the SINK's own admission (a keyed
+            // shape the sink refuses lands on serial — the suppress-then-
+            // refuse direction, excluded structurally):
+            //   * <=4 keys (nodesort::sink::TOPN_MAX_KEYS — the wide-heap
+            //     encode arity; the bootstrap int row predates the cap and
+            //     keeps its historical behavior);
+            //   * bound <= 65536 when the LIMIT is a plain Const
+            //     (TOPN_MAX_BOUND; non-Const bounds refuse fail-closed);
+            //   * single-entry tlists only with a text key (the sink's
+            //     datum-shape gate: `is_datum` refuses unless a DictCode
+            //     key admits — smoke-verified on the bare
+            //     `SELECT ts ORDER BY ts LIMIT n` shape).
+            if parse.sortClause.len() > 4 {
+                return Ok(false);
+            }
+            match parse.limitCount.and_then(|n| n.as_const()) {
+                Some(c) if !c.constisnull && c.consttype == INT8OID => {
+                    let b = c.constvalue.as_i64();
+                    if !(1..=65536).contains(&b) {
+                        return Ok(false);
+                    }
+                }
+                _ => return Ok(false),
+            }
+            if parse.targetList.len() == 1 && n_text == 0 {
+                return Ok(false);
+            }
+            return finish_knob_path(
+                run,
+                "topnnonint",
+                if n_text > 0 { "topn-text-keys" } else { "topn-datetime-keys" },
+                topn_nonint_guard(),
+                rte.relid,
+                0.0,
+                rel_rows,
+                rel_pages,
+            );
         }
         // SE-SCANPASS (band 72001, se/scan-passthrough): the row-returning
         // passthrough shape (bare filtered SELECT, no agg / group / top-N /
@@ -6110,6 +6240,24 @@ mod tests {
         assert!(distinct_plainshape_enabled(), "CAR A must be ON at default (GL-T2C flip)");
         assert!(agg_strminmax_enabled(), "CAR B must be ON at default (GL-STRMM-2 flip)");
         assert!(agg_sort_nolimit_enabled(), "CAR C must be ON at default (GL-T2B flip)");
+        // SE-TOPNNI (gap:topn-nonint-keys car) rides the still-gated
+        // spelling rule: DEFAULT OFF until its GL-TOPNNI-1 letter flips it.
+        assert!(!topn_nonint_enabled(), "SE-TOPNNI must be OFF at default");
+    }
+
+    /// SE-TOPNNI: the provisional floor is the CbTopnBoundedIntKeys guard
+    /// VERBATIM (same sink, same accept economics) — pin the reuse so an
+    /// int-row floor recalibration cannot silently diverge from the knob
+    /// path until GL-TOPNNI-1 measures the non-int shapes' own crossovers.
+    #[test]
+    fn topn_nonint_guard_reuses_int_row_floor() {
+        let g = topn_nonint_guard();
+        let i = class_guard(CoverClass::CbTopnBoundedIntKeys);
+        assert_eq!(g.min_rows, i.min_rows);
+        assert_eq!(g.max_rows, i.max_rows);
+        assert_eq!(g.min_pages, i.min_pages);
+        assert_eq!(g.min_dop, i.min_dop);
+        assert_eq!(g.low_dop_max_rows, i.low_dop_max_rows);
     }
 
     /// SE-T2AGG CAR A engine-kill coherence: the runtime plain-distinct sink
