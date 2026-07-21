@@ -2218,3 +2218,71 @@ fn caller_c2_ledger_starved_park_completes() {
         assert_eq!(snap.granted_total, 0);
     });
 }
+
+/// 11. funnel_waiter_flag_park_wake — the row-emit funnel's waiter-flag
+/// park/wake protocol (gather-elimination Phase 2; funnel.rs), the SC-fence
+/// Dekker handshake on BOTH sides: producer parks on full behind
+/// `producer_waiting` (armed before the full re-check, consumed by the pop
+/// wake) and the drain parks on empty behind `drain_waiting` (armed before
+/// the final sweep, consumed by the push wake). A capacity-2 ring with 3
+/// rows forces both full-parks and empty-parks across interleavings; a LOST
+/// WAKE on either side — the store-buffering double-park race the flags must
+/// resolve — is a loom-detected deadlock. Oracles: termination, and all rows
+/// delivered exactly once in order (SPSC FIFO through the funnel).
+#[test]
+fn funnel_waiter_flag_park_wake() {
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(3);
+    b.max_branches = 200_000;
+    b.check(|| {
+        let f: Arc<runtime::RowFunnel<u32>> = runtime::RowFunnel::new(1, 2);
+        let fp = Arc::clone(&f);
+        let t = thread::spawn(move || {
+            let p = fp.producer(0);
+            assert_eq!(p.push_blocking(1, || {}), runtime::PushOutcome::Pushed);
+            assert_eq!(p.push_blocking(2, || {}), runtime::PushOutcome::Pushed);
+            assert_eq!(p.push_blocking(3, || {}), runtime::PushOutcome::Pushed);
+            p.mark_done();
+        });
+        let mut d = f.drain();
+        let mut got = Vec::new();
+        loop {
+            // The waiter-flag wait pattern: epoch, arm, sweep, park-on-Idle.
+            let seen = d.park_epoch();
+            d.arm_wait();
+            match d.next() {
+                runtime::DrainStep::Row(v) => got.push(v),
+                runtime::DrainStep::Idle => d.park(seen),
+                runtime::DrainStep::Eof => break,
+            }
+        }
+        t.join().unwrap();
+        assert_eq!(got, vec![1, 2, 3], "every row exactly once, FIFO");
+    });
+}
+
+/// 12. funnel_close_demand_unblocks — LIMIT/demand-close liveness under the
+/// waiter-flag protocol: a producer parked on a FULL ring must be freed by
+/// `close_demand`'s unconditional wake (the drain never pops). Termination
+/// is the oracle (a missed close wake = loom-detected deadlock); the
+/// outcome may be Pushed or DemandClosed depending on the race — both legal,
+/// the parked case exercising the flag-armed park against the close.
+#[test]
+fn funnel_close_demand_unblocks() {
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(3);
+    b.max_branches = 200_000;
+    b.check(|| {
+        let f: Arc<runtime::RowFunnel<u32>> = runtime::RowFunnel::new(1, 2);
+        // Fill the ring before spawning (sequential producer handoff — the
+        // SPSC discipline holds: never two live producers at once).
+        let p0 = f.producer(0);
+        p0.try_push(1).ok().unwrap();
+        p0.try_push(2).ok().unwrap();
+        drop(p0);
+        let fp = Arc::clone(&f);
+        let t = thread::spawn(move || fp.producer(0).push_blocking(3, || {}));
+        f.close_demand();
+        let _ = t.join().unwrap();
+    });
+}

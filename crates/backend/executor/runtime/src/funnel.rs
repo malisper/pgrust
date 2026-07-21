@@ -117,7 +117,7 @@ use std::sync::Arc;
 
 use crate::morsel::MorselRange;
 use crate::rg::TaskSetWork;
-use crate::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use crate::sync::atomic::{fence, AtomicBool, AtomicUsize, Ordering};
 use crate::sync::{OnceLock, ParkLot};
 use crate::taskset::CachePadded;
 
@@ -145,6 +145,29 @@ pub struct SpscRing<T> {
     /// Producer park lot (woken by the consumer when a full ring frees a slot,
     /// and by [`RowFunnel::close_demand`]).
     not_full: ParkLot,
+    /// WAITER FLAG (the per-row wake-cost fix): true ⇔ the producer is parking
+    /// (or about to park) on full. Set by the producer BEFORE its park-path
+    /// full re-check (SeqCst store + SeqCst fence), consumed (`swap(false)`)
+    /// by the consumer's pop wake — so the hot pop path pays one fence + one
+    /// load instead of an unconditional `ParkLot::wake_all`.
+    ///
+    /// LOST-WAKE PROOF (the store-buffering shape of the double-park race
+    /// fixed earlier, now resolved by SC fences instead of unconditional
+    /// wakes). Producer park path: `flag.store(true, SeqCst); fence(SeqCst);
+    /// re-check full; park(seen)` (with `seen` captured BEFORE the flag
+    /// store). Consumer pop: `head.store(Release); fence(SeqCst); if
+    /// flag.load(SeqCst) { flag.swap(false); wake_all() }`. The two SeqCst
+    /// fences are totally ordered: if the consumer's fence precedes the
+    /// producer's, the producer's full re-check (after its fence) sees the
+    /// pop's head advance (before the consumer's fence) → NOT full → no park.
+    /// Otherwise the producer's fence precedes the consumer's → the
+    /// consumer's flag load (after its fence) sees the flag → wake_all bumps
+    /// the ParkLot epoch, which was captured before the flag store, so
+    /// `park(seen)` returns immediately (ParkLot's own under-lock recheck
+    /// covers the notify race). Either way the producer cannot sleep through
+    /// a freed slot. Verified exhaustively by the loom model
+    /// (tests/loom.rs `funnel_waiter_flag_park_wake`).
+    producer_waiting: AtomicBool,
 }
 
 // SAFETY: `T: Send` crosses the producer→consumer boundary by ownership; the
@@ -167,6 +190,7 @@ impl<T> SpscRing<T> {
             head: CachePadded(AtomicUsize::new(0)),
             tail: CachePadded(AtomicUsize::new(0)),
             not_full: ParkLot::new(),
+            producer_waiting: AtomicBool::new(false),
         }
     }
 
@@ -221,17 +245,17 @@ impl<T> SpscRing<T> {
         // Release store to `tail`, which our Acquire load synchronized with.
         let v = unsafe { (*self.buf[head & self.mask].get()).assume_init_read() };
         self.head.store(head.wrapping_add(1), Ordering::Release);
-        // Wake a producer parked on full. UNCONDITIONAL (not gated on "was the
-        // ring full") on purpose: the consumer's Acquire load of `tail` can lag
-        // the producer's Release store, so a "was full" test (`occ >= cap`) can
-        // MISS a pop-from-full and lose the wake — the producer would then sleep
-        // forever while the drain sleeps on empty (a real double-park deadlock,
-        // observed and fixed here). Every pop frees a slot, so every pop is a
-        // valid wake; ParkLot's epoch makes a spurious wake (no parked producer)
-        // a cheap no-op. PERF-TODO (production wiring): gate on a SeqCst
-        // "producer waiting" flag (Dekker handshake) to drop the per-row
-        // notify; correctness-first here since the funnel ships OFF by default.
-        self.not_full.wake_all();
+        // Waiter-flag-gated producer wake (the executed PERF-TODO: the earlier
+        // unconditional wake_all — which fixed the transition-detection lost
+        // wake — cost a ParkLot notify per pop). The SC-fence pairing with the
+        // producer's park path preserves lost-wake freedom; see the
+        // `producer_waiting` field doc for the full proof and the loom model.
+        fence(Ordering::SeqCst);
+        if self.producer_waiting.load(Ordering::SeqCst)
+            && self.producer_waiting.swap(false, Ordering::SeqCst)
+        {
+            self.not_full.wake_all();
+        }
         Some(v)
     }
 
@@ -277,17 +301,35 @@ pub struct RowFunnel<T> {
     done: Vec<AtomicBool>,
     /// LIMIT / early-stop: once set, producers stop and the drain reaches EOF.
     demand_closed: AtomicBool,
-    /// The drain's empty-park lot: woken by any producer that pushes into a
-    /// previously-empty ring or marks a ring done.
+    /// The drain's empty-park lot: woken by a producer push while the drain
+    /// waiter flag is armed, and unconditionally by done/close transitions.
     not_empty: ParkLot,
     /// External consumer wake hook (set once by the leader before producers
-    /// start): fired on every producer push / done / park so a leader that
-    /// waits OUTSIDE the funnel's own ParkLot (e.g. a latch-based
-    /// WaitForParallelWorkersToFinish loop) wakes immediately instead of at
-    /// its recheck quantum. Latch semantics make the extra fires cheap
-    /// (setting an already-set latch is a flag test) and the set-after-push
-    /// order makes it lost-wake-free against a check-then-wait consumer.
+    /// start): fired — together with the `not_empty` wake, under the same
+    /// `drain_waiting` gate — so a leader that waits OUTSIDE the funnel's own
+    /// ParkLot (e.g. a latch-based WaitForParallelWorkersToFinish loop) wakes
+    /// immediately instead of at its recheck quantum. The done/close
+    /// transitions fire it unconditionally (EOF liveness).
     wake: OnceLock<Box<dyn Fn() + Send + Sync>>,
+    /// WAITER FLAG, drain side (mirror of `SpscRing::producer_waiting`): true
+    /// ⇔ the consumer is about to wait for rows (ParkLot park or the external
+    /// latch quantum). Armed by the consumer BEFORE its final empty sweep
+    /// (`arm_drain_wait`: SeqCst store + SeqCst fence); consumed
+    /// (`swap(false)`) by the first producer push that observes it — so the
+    /// hot push path pays one fence + one load instead of an unconditional
+    /// notify + latch set per row.
+    ///
+    /// LOST-WAKE PROOF (same SC-fence store-buffering argument as the
+    /// producer flag): consumer waits only via `epoch capture → arm (store +
+    /// fence) → sweep all rings → park(seen)` (or, on the latch path,
+    /// `arm → pump → WaitLatch`); producer push is `tail.store(Release);
+    /// fence(SeqCst); if flag { swap(false); wake }`. SC-fence total order:
+    /// producer's fence first ⇒ the consumer's post-fence sweep sees the
+    /// pushed row ⇒ no wait; consumer's fence first ⇒ the producer's
+    /// post-fence flag load sees armed ⇒ wake (epoch bump after the
+    /// pre-capture / latch set after the pump) ⇒ the wait returns. Verified
+    /// by the loom model (tests/loom.rs `funnel_waiter_flag_park_wake`).
+    drain_waiting: AtomicBool,
 }
 
 impl<T: Send + 'static> RowFunnel<T> {
@@ -300,7 +342,17 @@ impl<T: Send + 'static> RowFunnel<T> {
             demand_closed: AtomicBool::new(false),
             not_empty: ParkLot::new(),
             wake: OnceLock::new(),
+            drain_waiting: AtomicBool::new(false),
         })
+    }
+
+    /// CONSUMER: arm the drain waiter flag BEFORE the final empty sweep that
+    /// precedes a wait (ParkLot park or the external latch quantum). See the
+    /// `drain_waiting` field doc for the protocol + proof. The flag is
+    /// consumed by the waking producer; re-arm each wait round (idempotent).
+    pub fn arm_drain_wait(&self) {
+        self.drain_waiting.store(true, Ordering::SeqCst);
+        fence(Ordering::SeqCst);
     }
 
     /// Install the external consumer wake hook (see the field doc). Leader-
@@ -384,17 +436,19 @@ impl<T: Send + 'static> FunnelProducer<T> {
     pub fn try_push(&self, v: T) -> Result<(), T> {
         let r = self.ring.try_push(v);
         if r.is_ok() {
-            // Wake a drain parked on all-rings-empty. UNCONDITIONAL for the same
-            // reason as `try_pop`'s producer wake: a "was empty" transition test
-            // races the drain's index reads and can lose the wake (double-park).
-            // Every push adds a row, so every push is a valid wake; a spurious
-            // one (no parked drain) is a cheap ParkLot no-op. Same PERF-TODO.
-            self.funnel.not_empty.wake_all();
-            // External consumer wake (leader latch): fired per push so a leader
-            // waiting outside the ParkLot (latch quantum loop) drains promptly
-            // rather than at its recheck quantum — the mid-drive wake the
-            // review found missing.
-            self.funnel.fire_wake();
+            // Waiter-flag-gated drain wake (the executed PERF-TODO: the earlier
+            // unconditional wake_all + latch fire per push — which fixed both
+            // the transition-detection lost wake and the missing mid-drive
+            // leader wake — cost a notify + SetLatch per row). The SC-fence
+            // pairing with `arm_drain_wait` preserves lost-wake freedom; see
+            // the `drain_waiting` field doc for the proof and the loom model.
+            fence(Ordering::SeqCst);
+            if self.funnel.drain_waiting.load(Ordering::SeqCst)
+                && self.funnel.drain_waiting.swap(false, Ordering::SeqCst)
+            {
+                self.funnel.not_empty.wake_all();
+                self.funnel.fire_wake();
+            }
         }
         r
     }
@@ -419,20 +473,41 @@ impl<T: Send + 'static> FunnelProducer<T> {
                 Ok(()) => return PushOutcome::Pushed,
                 Err(back) => {
                     v = back;
-                    // Capture the epoch BEFORE re-checking full, then park:
-                    // a consumer pop (or close) between the check and the park
-                    // bumps the epoch and cannot be lost.
+                    // PARK PATH (waiter-flag protocol; proof at
+                    // `SpscRing::producer_waiting`):
+                    //  1. capture the epoch (any later wake bumps it);
+                    //  2. arm the waiter flag (SeqCst store + fence);
+                    //  3. re-check full/closed — a pop ordered before our
+                    //     fence is visible here (no park); a pop ordered
+                    //     after it sees the flag and wakes us;
+                    //  4. park on the captured epoch.
                     let seen = self.ring.producer_epoch();
+                    self.ring.producer_waiting.store(true, Ordering::SeqCst);
+                    fence(Ordering::SeqCst);
                     if !self.ring.is_full() || self.funnel.demand_closed() {
+                        // Not parking after all: disarm (a stale armed flag
+                        // costs one spurious wake at the next pop; clearing
+                        // keeps steady-state pops wake-free).
+                        self.ring.producer_waiting.store(false, Ordering::Relaxed);
                         continue;
                     }
-                    // About to park on a FULL ring: nudge the external consumer
+                    // About to park on a FULL ring: nudge a WAITING consumer
                     // (leader latch) so the drain that frees us runs promptly.
-                    self.funnel.fire_wake();
+                    // Gated like the push wake; cold path either way.
+                    if self.funnel.drain_waiting.load(Ordering::SeqCst)
+                        && self.funnel.drain_waiting.swap(false, Ordering::SeqCst)
+                    {
+                        self.funnel.not_empty.wake_all();
+                        self.funnel.fire_wake();
+                    }
                     // Donate the permit for the duration of the park (held
                     // across `producer_park`, reacquired when `_section` drops).
                     let _section = mk_section();
                     self.ring.producer_park(seen);
+                    // Woken (pop claimed the flag, or close_demand's
+                    // unconditional wake left it stale): disarm before the
+                    // retry so steady-state pops stay wake-free.
+                    self.ring.producer_waiting.store(false, Ordering::Relaxed);
                 }
             }
         }
@@ -549,8 +624,20 @@ impl<T: Send + 'static> FunnelDrain<T> {
         self.funnel.not_empty.epoch()
     }
 
+    /// Arm the drain waiter flag — MUST be called AFTER [`FunnelDrain::
+    /// park_epoch`] and BEFORE the [`FunnelDrain::next`] sweep whose `Idle`
+    /// leads to [`FunnelDrain::park`] (the waiter-flag wait pattern:
+    /// `seen = park_epoch(); arm_wait(); match next() { Idle => park(seen),
+    /// … }`). Without the arm, a push that lands after the sweep fires no
+    /// wake and the park sleeps to no backstop. Re-arm every wait round;
+    /// a `Row` outcome simply leaves the flag for a producer to claim.
+    pub fn arm_wait(&self) {
+        self.funnel.arm_drain_wait();
+    }
+
     /// Park the drain until a producer pushes or marks a ring done (used on
-    /// [`DrainStep::Idle`] when there is no leader-local work).
+    /// [`DrainStep::Idle`] when there is no leader-local work). Caller must
+    /// have followed the [`FunnelDrain::arm_wait`] pattern.
     pub fn park(&self, seen: u64) {
         self.funnel.not_empty.park(seen);
     }
@@ -692,33 +779,46 @@ mod tests {
     }
 
     #[test]
-    fn wake_hook_fires_on_push_done_and_park() {
-        // The external consumer wake (leader latch stand-in) must fire on
-        // every push, on mark_done, and before a full-ring park — the
-        // mid-drive leader wake of the review fix.
+    fn wake_hook_gated_by_drain_waiter_flag() {
+        // The external consumer wake (leader latch stand-in) fires ONLY when
+        // the drain waiter flag is armed — the per-row wake-cost fix — and the
+        // waking push CONSUMES the flag (one wake per empty window). mark_done
+        // stays unconditional (EOF liveness).
         let fired = StdArc::new(StdAtomicUsize::new(0));
-        let f: Arc<RowFunnel<u32>> = RowFunnel::new(1, 2);
+        let f: Arc<RowFunnel<u32>> = RowFunnel::new(1, 4);
         let fc = StdArc::clone(&fired);
         f.set_wake_hook(Box::new(move || {
             fc.fetch_add(1, StdOrd::SeqCst);
         }));
         let p = f.producer(0);
+        // Unarmed: steady-state pushes fire NOTHING.
         p.try_push(1).ok().unwrap();
-        assert_eq!(fired.load(StdOrd::SeqCst), 1, "push fires the hook");
         p.try_push(2).ok().unwrap();
-        assert_eq!(fired.load(StdOrd::SeqCst), 2);
-        // Ring full: a blocking push fires the hook before parking; unblock it
-        // by closing demand from the consumer side.
+        assert_eq!(fired.load(StdOrd::SeqCst), 0, "unarmed pushes must not fire the hook");
+        // Armed: the next push fires exactly once and consumes the flag.
+        f.arm_drain_wait();
+        p.try_push(3).ok().unwrap();
+        assert_eq!(fired.load(StdOrd::SeqCst), 1, "armed push fires the hook");
+        p.try_push(4).ok().unwrap();
+        assert_eq!(fired.load(StdOrd::SeqCst), 1, "the wake consumed the flag");
+        // mark_done fires unconditionally (EOF liveness).
+        p.mark_done();
+        assert_eq!(fired.load(StdOrd::SeqCst), 2, "mark_done fires the hook");
+    }
+
+    #[test]
+    fn close_demand_wakes_parked_producer_with_flag_protocol() {
+        // A producer parked on full under the waiter-flag protocol must still
+        // be freed by close_demand's unconditional wake.
+        let f: Arc<RowFunnel<u32>> = RowFunnel::new(1, 2);
+        let p = f.producer(0);
+        p.try_push(1).ok().unwrap();
+        p.try_push(2).ok().unwrap();
         let f2 = Arc::clone(&f);
         let t = std::thread::spawn(move || f2.producer(0).push_blocking(3, || {}));
-        while fired.load(StdOrd::SeqCst) < 3 {
-            std::thread::yield_now();
-        }
+        std::thread::yield_now();
         f.close_demand();
         assert_eq!(t.join().unwrap(), PushOutcome::DemandClosed);
-        let before = fired.load(StdOrd::SeqCst);
-        p.mark_done();
-        assert!(fired.load(StdOrd::SeqCst) > before, "mark_done fires the hook");
     }
 
     #[test]
@@ -792,24 +892,15 @@ mod tests {
         let mut got: u64 = 0;
         let mut sum: u64 = 0;
         loop {
+            // The waiter-flag wait pattern: epoch, arm, sweep, park-on-Idle.
+            let seen = d.park_epoch();
+            d.arm_wait();
             match d.next() {
                 DrainStep::Row(v) => {
                     sum += v as u64;
                     got += 1;
                 }
-                DrainStep::Idle => {
-                    let seen = d.park_epoch();
-                    // re-check before parking (lost-wakeup-free)
-                    match d.next() {
-                        DrainStep::Row(v) => {
-                            sum += v as u64;
-                            got += 1;
-                            continue;
-                        }
-                        DrainStep::Eof => break,
-                        DrainStep::Idle => d.park(seen),
-                    }
-                }
+                DrainStep::Idle => d.park(seen),
                 DrainStep::Eof => break,
             }
         }
@@ -877,11 +968,13 @@ mod tests {
             }],
         });
 
-        // LEADER = pure drain, concurrent with the producing pool workers.
+        // LEADER = pure drain, concurrent with the producing pool workers
+        // (the waiter-flag wait pattern: epoch, arm, sweep, park-on-Idle).
         let mut drain = funnel.drain();
         let mut got: Vec<u64> = Vec::with_capacity(n as usize);
         loop {
             let seen = drain.park_epoch();
+            drain.arm_wait();
             match drain.next() {
                 DrainStep::Row(v) => got.push(v),
                 DrainStep::Idle => drain.park(seen),
@@ -923,6 +1016,7 @@ mod tests {
         let mut got: usize = 0;
         loop {
             let seen = drain.park_epoch();
+            drain.arm_wait();
             match drain.next() {
                 DrainStep::Row(_) => {
                     got += 1;

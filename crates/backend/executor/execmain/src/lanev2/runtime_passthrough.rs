@@ -550,6 +550,13 @@ fn engage_passthrough_inner(
         };
 
         let outcome = loop {
+            // The waiter-flag wait pattern, LATCH form (funnel.rs protocol
+            // doc): ARM the drain waiter flag, THEN pump. A push ordered after
+            // the arm-fence sees the flag and sets the leader's latch (the
+            // wake hook), so the WaitLatch quantum below returns immediately;
+            // one ordered before it is drained by this pump. Re-armed every
+            // iteration (the waking push consumes the flag).
+            funnel_body.arm_drain_wait();
             if let Err(e) = pump(&mut drain, &mut emitted, &mut stop_emitting, emit_row) {
                 rg.abort();
                 drain_rg_pt(rt, &funnel_body, &rg);
