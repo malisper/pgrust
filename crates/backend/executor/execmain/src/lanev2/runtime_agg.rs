@@ -4078,6 +4078,22 @@ fn agg_freeze_enabled() -> bool {
 }
 
 /// Engagement floor (granules) — below it helper launches are pure overhead.
+/// GL-STRMM-2 group-estimate ceiling, executor half — SAME env spelling and
+/// default as the m5 probe's `strminmax_max_groups` (planner m5_suppress.rs;
+/// the knob-coherence law: both seams move together or a suppressed shape
+/// diverges from its engagement). Doc + calibration provenance live on the
+/// probe half. Env: `PGRUST_LANE_V2_AGG_STRMINMAX_MAX_GROUPS` (> 0).
+fn strminmax_max_groups() -> f64 {
+    static CEIL: OnceLock<f64> = OnceLock::new();
+    *CEIL.get_or_init(|| {
+        std::env::var("PGRUST_LANE_V2_AGG_STRMINMAX_MAX_GROUPS")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| *v > 0.0)
+            .unwrap_or(30_000.0)
+    })
+}
+
 fn min_granules() -> u64 {
     static N: OnceLock<u64> = OnceLock::new();
     crate::once_val(&N, || {
@@ -4412,6 +4428,23 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     // same leader estimate the compact layout law reads; the adaptive bands
     // in [`sink_locality_cap_for`] were calibrated on this figure).
     let est_groups = agg.plan.numGroups.max(1) as u64;
+    // GL-STRMM-2 flip calibration, EXECUTOR half (knob-coherence law: same
+    // spelling + same constant as the m5 probe's `strminmax_max_groups`):
+    // string-min/max transvalues (byref text states, deep-copy emit) make
+    // the sink measurably LOSE to the serial hash lane past the group-count
+    // band the witnessed ladder banked — and the engine's OWN serial-plan
+    // offer reaches here WITHOUT any suppression, so the probe-side ceiling
+    // alone cannot close the band. Refuse fail-open to the serial arm (the
+    // measured winner there). Leader-side pre-launch => workers never arm.
+    if est_groups as f64 >= strminmax_max_groups()
+        && combines
+            .iter()
+            .any(|c| matches!(c.kind, ::nodeagg::sink::SinkCombineKind::VarlenaMinMax { .. }))
+    {
+        refuse(estate, ea, node_id, "strminmax group-estimate ceiling");
+        stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
+        return Ok(false);
+    }
     let sink_cap =
         sink_cap_engaged(state_bytes, budget, ngroups_limit, dop, cap_shape_ok, est_groups);
     if sink_cap < sink_cap_for(state_bytes, budget, ngroups_limit) {
