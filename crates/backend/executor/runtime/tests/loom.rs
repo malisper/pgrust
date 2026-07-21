@@ -3092,3 +3092,73 @@ fn pool_blocking_inside_bound_serve() {
         assert_eq!(rt.execution_permits().available(), 1, "permit balance");
     });
 }
+
+/// Rung-1 finding (the hashjoin pooldb died-needle misfire): the leader
+/// poll loop's death/deadline needles compare `detached` against `claimed`
+/// under pre-bind refusal churn (pool helpers claiming + detaching on the
+/// rg-set-after-publish window). Pin: with the FIXED read order —
+/// `detached` read BEFORE a fresh `claimed` re-read — no interleaving of
+/// {churn claim+detach, live claim+start+complete} makes the needle kill a
+/// live engagement (detached(t1) <= claims-as-of(t1) <= claimed(t2)).
+///
+/// RED (verified by transient weakening): the landed-then-fixed order —
+/// claimed captured BEFORE the churn/live claims land, detached read fresh
+/// — lets loom manufacture claimed_stale=1, started=1, detached=1 with the
+/// live worker mid-drive: the needle fires on a healthy engagement (the
+/// battery's 1-in-20 armed-parity kill, made deterministic).
+#[test]
+fn pool_needle_read_order_no_false_death() {
+    // Bounded (R8 law): the leader's poll loop makes the bare space
+    // seconds-to-minutes scale; at preemption_bound 3 the space exhausts
+    // fast and the RED (old read order) still fails immediately.
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(3);
+    b.max_branches = 500_000;
+    b.check(|| {
+        let board = MirrorBoard::new(2);
+        let started = Arc::new(AtomicUsize::new(0));
+        let complete = Arc::new(AtomicBool::new(false));
+
+        // Churn worker: the rg-gone shape — claim, refuse pre-bind, detach.
+        let b1 = Arc::clone(&board);
+        let churn = thread::spawn(move || {
+            if b1.try_claim().is_some() {
+                let _detach = MirrorDetach(&b1);
+                b1.refused.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        // Live worker: claim, bind (started), drive to completion, detach.
+        let b2 = Arc::clone(&board);
+        let (s2, c2) = (Arc::clone(&started), Arc::clone(&complete));
+        let live = thread::spawn(move || {
+            if b2.try_claim().is_some() {
+                let _detach = MirrorDetach(&b2);
+                s2.fetch_add(1, Ordering::SeqCst);
+                c2.store(true, Ordering::SeqCst);
+            }
+        });
+
+        // Leader poll loop (wait_engaged's needle, fixed read order).
+        loop {
+            if complete.load(Ordering::SeqCst) {
+                break;
+            }
+            let started_v = started.load(Ordering::SeqCst);
+            let detached = board.detached.load(Ordering::SeqCst);
+            let claimed_now = board.claimed.load(Ordering::SeqCst);
+            if claimed_now > 0 && started_v > 0 && detached >= claimed_now {
+                // The needle's own re-poll (waiter.try_wait mirror).
+                assert!(
+                    complete.load(Ordering::SeqCst),
+                    "died needle fired on a live engagement (read tear)"
+                );
+                break;
+            }
+            thread::yield_now();
+        }
+
+        churn.join().unwrap();
+        live.join().unwrap();
+    });
+}
