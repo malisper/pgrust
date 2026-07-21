@@ -627,7 +627,14 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      yield release/re-acquire). Pure permit bookkeeping, the same
     //      executor-frame lifecycle and non-session classification as
     //      row 61.
-    assert_eq!(count_tree(crates), 526, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // m4.2 fold delta (527 = 526 + 1) — parallel btree build on the pool:
+    //   67. access/nbtree/nbtsort/src/pool.rs — BT_CX: the build-scan
+    //      relations + IndexInfo + form scratch on the drive frame), the
+    //      vacuumparallel POOL_CX / vacuumlazy WORKER_CX precedent
+    //      exactly: exists only between the drive frame's publish and
+    //      clear on ONE thread, torn down before unbind on every path; no
+    //      session identity (the binder owns all session state movement).
+    assert_eq!(count_tree(crates), 527, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
