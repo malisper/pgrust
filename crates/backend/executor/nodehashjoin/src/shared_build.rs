@@ -281,6 +281,14 @@ pub struct JoinBuildLocal {
     /// default). Attached at fork under the PGRUST_RUNTIME_HJ_SINGLEPASS
     /// kill switch; when set, `push` bypasses `part_refs`/`runs` entirely.
     shared_dir: Option<Arc<SharedBuildDir>>,
+    /// SE-MBSEAT: single-pass dense-key tracking — flat `(packed_ref, key)`
+    /// pairs in materialization order (NO chain-order lockstep: the
+    /// single-pass chains are concurrent-nondeterministic already, and the
+    /// multibuild consumer is order-insensitive by construction — the
+    /// 2026-07-13 order directive's baseline). `Some` only on a Local with
+    /// an attached shared directory ([`JoinBuildLocal::arm_singlepass_keys`]);
+    /// consumed by [`build_seat_single_pass`] at the freeze barrier.
+    sp_keys: Option<Vec<(u64, i64)>>,
 }
 
 impl JoinBuildLocal {
@@ -312,6 +320,7 @@ impl JoinBuildLocal {
             chunk_cap_words: cap_words.clamp(CHUNK_MIN_WORDS, CHUNK_MAX_WORDS),
             dense_keys: None,
             shared_dir: None,
+            sp_keys: None,
         }
     }
 
@@ -335,6 +344,31 @@ impl JoinBuildLocal {
         self.shared_dir.is_some()
     }
 
+    /// SE-MBSEAT: arm single-pass dense-key tracking. Idempotent; must run
+    /// before the Local's first push (asserted) — the runtime arms on the
+    /// Local's FIRST build morsel of a seat-targeted table, so a Local with
+    /// tuples is armed-or-never (the all-or-none law across tuple-bearing
+    /// Locals, [`build_seat_single_pass`]'s input contract). Requires the
+    /// attached shared directory (single-pass only; the two-pass seat rides
+    /// [`JoinBuildLocal::arm_dense_keys`]).
+    pub fn arm_singlepass_keys(&mut self) {
+        if self.sp_keys.is_some() {
+            return;
+        }
+        assert!(self.tuples == 0, "single-pass key arming after pushes");
+        assert!(
+            self.shared_dir.is_some(),
+            "single-pass key tracking requires an attached shared directory"
+        );
+        self.sp_keys = Some(Vec::new());
+    }
+
+    /// Whether this Local tracks single-pass keys (the accept dispatch).
+    #[inline(always)]
+    pub fn singlepass_keys_armed(&self) -> bool {
+        self.sp_keys.is_some()
+    }
+
     /// HJPROBE-V2: arm dense-key tracking. Idempotent; must run before the
     /// Local's first push (asserted) — the runtime arms on the Local's
     /// FIRST build morsel, so a Local with tuples is armed-or-never.
@@ -355,14 +389,24 @@ impl JoinBuildLocal {
         self.dense_keys.is_some()
     }
 
-    /// [`JoinBuildLocal::push`] + the dense-key record (lockstep with the
-    /// pushed ref; `NULL_KEY` = SQL NULL, kept out of seat chains).
+    /// [`JoinBuildLocal::push`] + the dense-key record. Two-pass: keys in
+    /// EXACT lockstep with `part_refs` (the chain-order seat's contract).
+    /// Single-pass (SE-MBSEAT): flat `(packed_ref, key)` pairs, order-free.
+    /// `NULL_KEY` = SQL NULL, kept out of seat chains either way.
     pub fn push_keyed(
         &mut self,
         hashvalue: u32,
         payload: &[u8],
         key: i64,
     ) -> Result<(), BudgetExceeded> {
+        if self.shared_dir.is_some() {
+            let r = self.push_single_pass(hashvalue, payload)?;
+            self.sp_keys
+                .as_mut()
+                .expect("push_keyed on an unarmed single-pass Local")
+                .push((r, key));
+            return Ok(());
+        }
         self.push(hashvalue, payload)?;
         self.dense_keys
             .as_mut()
@@ -411,6 +455,9 @@ impl JoinBuildLocal {
                 keys.clear();
             }
         }
+        if let Some(sp) = &mut self.sp_keys {
+            sp.clear();
+        }
         self.runs.clear();
         self.tuples = 0;
     }
@@ -451,7 +498,7 @@ impl JoinBuildLocal {
         // PGRUST_RUNTIME_HJ_SINGLEPASS kill switch), so every accept call
         // site is unchanged.
         if self.shared_dir.is_some() {
-            return self.push_single_pass(hashvalue, payload);
+            return self.push_single_pass(hashvalue, payload).map(|_| ());
         }
         let (chunk_idx, off) = self.materialize(hashvalue, payload)?;
         let r = pack_ref(self.ordinal, chunk_idx, off);
@@ -522,10 +569,12 @@ impl JoinBuildLocal {
     /// scratch — only this worker writes it, so no writer touches another
     /// chain word during build; cross-worker visibility of the finished
     /// chains is the runtime task-set completion barrier (as in the two-pass
-    /// combine). Dense-key tracking is NOT supported here (the HJPROBE-V2
-    /// seat needs a reproducible chain order the concurrent insert cannot
-    /// give — the runtime gates the seat off under single-pass).
-    fn push_single_pass(&mut self, hashvalue: u32, payload: &[u8]) -> Result<(), BudgetExceeded> {
+    /// combine). TWO-PASS dense-key tracking (`dense_keys`) is NOT supported
+    /// here — the single-join HJPROBE-V2 seat's byte-parity proof needs the
+    /// reproducible chain order the concurrent insert cannot give. The
+    /// SE-MBSEAT order-free key tracking (`sp_keys`) IS supported: it rides
+    /// [`JoinBuildLocal::push_keyed`], never this plain-push path.
+    fn push_single_pass(&mut self, hashvalue: u32, payload: &[u8]) -> Result<u64, BudgetExceeded> {
         debug_assert!(self.dense_keys.is_none(), "dense seat unsupported under single-pass build");
         let (chunk_idx, off) = self.materialize(hashvalue, payload)?;
         let dir = self.shared_dir.clone().expect("single-pass push without a shared dir");
@@ -535,7 +584,7 @@ impl JoinBuildLocal {
         let next_word = self.chunks[chunk_idx].atomic(off);
         dir.insert(r, next_word, hashvalue);
         self.tuples += 1;
-        Ok(())
+        Ok(r)
     }
 
     pub fn tuples(&self) -> u64 {
@@ -774,8 +823,9 @@ impl SharedBuildDir {
 /// probe/fill paths consume UNCHANGED. `combine_partition` is never called on
 /// the result — the chains are already linked. Consumes `dir`.
 ///
-/// The dense seat is always absent here (single-pass Locals are never armed),
-/// so `freeze` builds no seat and the probe uses the v1 tag-filtered walk.
+/// The TWO-PASS dense seat is always absent here (single-pass Locals never
+/// arm `dense_keys`); when the SE-MBSEAT order-free pairs were tracked,
+/// `freeze` builds the single-pass seat instead ([`build_seat_single_pass`]).
 pub fn finish_single_pass(
     locals: &[JoinBuildLocal],
     dir: Arc<SharedBuildDir>,
@@ -822,7 +872,7 @@ pub fn finish_single_pass(
         let log2_nbuckets = dir.log2_nbuckets;
         Ok(CombinePlan {
             by_ordinal,
-            run_order: Vec::new(), // single-pass: no COMBINE walk, no seat
+            run_order: Vec::new(), // single-pass: no COMBINE walk (seat, if any, is the order-free SE-MBSEAT build)
             buckets: Box::new([]),
             singledir: Some(dir),
             log2_nbuckets,
@@ -1001,15 +1051,90 @@ fn build_seat(plan: &CombinePlan, locals: &[JoinBuildLocal]) -> Option<DenseSeat
     Some(DenseSeat { min, offs, refs })
 }
 
+/// SE-MBSEAT: seat construction for SINGLE-PASS builds (single-threaded —
+/// the freeze/seal barrier caller), from the Locals' order-free
+/// `(packed_ref, key)` pairs. Same gates as [`build_seat`] (all-or-nothing
+/// arming across tuple-bearing Locals, range ≤ 4x rows, OPTIONAL budget
+/// charge — a crossing forgoes the seat, never refuses the build), but NO
+/// chain-order reproduction: the CSR slices carry each key's candidates in
+/// plain enumeration order. That is deliberate and consumer-scoped — the
+/// multibuild walk's emission is order-insensitive through the sink absorb
+/// (the 2026-07-13 order directive's baseline), and the single-pass chains
+/// this seat shadows are concurrent-nondeterministic already. The
+/// single-join byte-parity seat stays [`build_seat`], two-pass only.
+fn build_seat_single_pass(locals: &[JoinBuildLocal]) -> Option<DenseSeat> {
+    let bearing: Vec<&JoinBuildLocal> = locals.iter().filter(|l| l.tuples > 0).collect();
+    if bearing.is_empty() || !bearing.iter().all(|l| l.sp_keys.is_some()) {
+        debug_assert!(
+            bearing.iter().all(|l| l.sp_keys.is_none())
+                || bearing.iter().all(|l| l.sp_keys.is_some()),
+            "mixed single-pass key arming across tuple-bearing Locals"
+        );
+        return None;
+    }
+    // Pass 0: min/max/count over non-NULL keys (order-free).
+    let (mut min, mut max, mut seated) = (i32::MAX, i32::MIN, 0u64);
+    for l in &bearing {
+        for &(_, k) in l.sp_keys.as_ref().expect("armed") {
+            if k == NULL_KEY {
+                continue;
+            }
+            let k = k as i32;
+            min = min.min(k);
+            max = max.max(k);
+            seated += 1;
+        }
+    }
+    if seated == 0 {
+        return None;
+    }
+    let range = max as i64 - min as i64 + 1;
+    if range as u64 > seated.saturating_mul(4) {
+        return None; // sparse keys: the seat would be mostly holes
+    }
+    let bytes = (range as usize + 1) * size_of::<u32>() + seated as usize * size_of::<u64>();
+    if !bearing[0].budget.try_charge_optional(bytes) {
+        return None;
+    }
+    // Pass 1: per-key counts -> exclusive prefix offs (offs[k+1] = end).
+    let mut offs = vec![0u32; range as usize + 1].into_boxed_slice();
+    for l in &bearing {
+        for &(_, k) in l.sp_keys.as_ref().expect("armed") {
+            if k != NULL_KEY {
+                offs[(k as i32 as i64 - min as i64) as usize + 1] += 1;
+            }
+        }
+    }
+    for i in 1..offs.len() {
+        offs[i] += offs[i - 1];
+    }
+    // Pass 2: fill FORWARD in enumeration order (order-free; see above).
+    let mut cursor: Vec<u32> = offs[..offs.len() - 1].to_vec(); // cursor[k] = slice start
+    let mut refs = vec![0u64; seated as usize].into_boxed_slice();
+    for l in &bearing {
+        for &(r, k) in l.sp_keys.as_ref().expect("armed") {
+            if k == NULL_KEY {
+                continue;
+            }
+            let slot = (k as i32 as i64 - min as i64) as usize;
+            refs[cursor[slot] as usize] = r;
+            cursor[slot] += 1;
+        }
+    }
+    debug_assert!(cursor.iter().zip(offs[1..].iter()).all(|(c, o)| c == o));
+    Some(DenseSeat { min, offs, refs })
+}
+
 /// Publish (§4 finalize): freeze — adopt the Locals' chunk Arcs (dense
 /// order, matching `by_ordinal`) and the finished plan. The Locals then
 /// drop with the sink plumbing; the storage survives in the table. When
-/// the Locals tracked dense keys (HJPROBE-V2 armed), the seat builds here
-/// — or silently doesn't (range/budget gates), leaving the v1 probe.
+/// the Locals tracked dense keys (HJPROBE-V2 two-pass, or the SE-MBSEAT
+/// single-pass pairs), the seat builds here — or silently doesn't
+/// (range/budget gates), leaving the v1 probe.
 pub fn freeze(plan: Arc<CombinePlan>, locals: &[JoinBuildLocal]) -> FrozenJoinTable {
     let chunk_lists: Vec<Box<[Arc<Chunk>]>> =
         locals.iter().map(|l| l.chunks.clone().into_boxed_slice()).collect();
-    let seat = build_seat(&plan, locals);
+    let seat = build_seat(&plan, locals).or_else(|| build_seat_single_pass(locals));
     FrozenJoinTable { plan, chunk_lists, seat }
 }
 
@@ -2276,13 +2401,103 @@ mod tests {
 
     #[test]
     fn single_pass_never_seats() {
-        // Even over a dense int-key stream, single-pass forgoes the seat
-        // (its chain order is not reproducible). The v1 probe still answers.
+        // Plain (un-keyed) single-pass pushes forgo the seat — the SE-MBSEAT
+        // order-free seat exists ONLY when the runtime armed key tracking
+        // (see single_pass_armed_seat_*). The v1 probe still answers.
         let ds = ds_default();
         let sched = deal(ranges_of_sizes(ds.granules, std::iter::repeat(4)), 5, 0x33);
         let budget = JoinBudget::unlimited();
         let t = build_single_pass(&ds, &sched, ds.granules * ds.rows_per_granule, &budget, true);
         assert!(!t.has_seat());
+    }
+
+    /// SE-MBSEAT: keyed single-pass build helper — key = a small int derived
+    /// from the row (NULL_KEY every `null_every`-th row when nonzero).
+    fn build_single_pass_keyed(
+        nworkers: usize,
+        rows_per_worker: u64,
+        key_space: i64,
+        key_stride: i64,
+        key_base: i64,
+        null_every: u64,
+        budget: &Arc<JoinBudget>,
+    ) -> (FrozenJoinTable, Vec<(i64, Vec<u8>)>) {
+        let dir = SharedBuildDir::with_estimate(nworkers as u64 * rows_per_worker, budget)
+            .expect("dir within budget");
+        let mut locals: Vec<JoinBuildLocal> = (0..nworkers)
+            .map(|w| {
+                let mut l = JoinBuildLocal::new(w, Arc::clone(budget));
+                l.attach_shared_dir(Arc::clone(&dir));
+                l.arm_singlepass_keys();
+                l
+            })
+            .collect();
+        let mut expect: Vec<(i64, Vec<u8>)> = Vec::new();
+        for (w, l) in locals.iter_mut().enumerate() {
+            l.begin_run(w as u64 * rows_per_worker);
+            for i in 0..rows_per_worker {
+                let n = w as u64 * rows_per_worker + i;
+                let payload = n.to_le_bytes().to_vec();
+                let h = mix(n) as u32;
+                let key = if null_every != 0 && n % null_every == 0 {
+                    NULL_KEY
+                } else {
+                    key_base + (n as i64 % key_space) * key_stride
+                };
+                l.push_keyed(h, &payload, key).unwrap();
+                if key != NULL_KEY {
+                    expect.push((key, payload));
+                }
+            }
+            l.end_run();
+        }
+        let plan = Arc::new(finish_single_pass(&locals, dir, budget).expect("finish"));
+        let t = freeze(Arc::clone(&plan), &locals);
+        drop(locals);
+        (t, expect)
+    }
+
+    #[test]
+    fn single_pass_armed_seat_candidates_match_reference() {
+        // Order-free contract: per-key candidate PAYLOAD MULTISETS equal the
+        // reference (order deliberately unasserted — the multibuild consumer
+        // is order-insensitive); NULL keys sit in no slice; out-of-range
+        // probes answer empty.
+        let budget = JoinBudget::unlimited();
+        let (t, mut expect) =
+            build_single_pass_keyed(4, 200, 37, 1, -5, 7, &budget);
+        let seat = t.seat().expect("armed dense-int build must seat");
+        let mut got: Vec<(i64, Vec<u8>)> = Vec::new();
+        for k in -5..(-5 + 37) {
+            for &r in seat.candidates(k as i32) {
+                got.push((k, t.tuple_ref(r).payload().to_vec()));
+            }
+        }
+        got.sort();
+        expect.sort();
+        assert_eq!(got, expect, "seat candidate multiset diverges from the reference");
+        assert!(seat.candidates(i32::MIN + 1).is_empty());
+        assert!(seat.candidates(1 << 20).is_empty());
+    }
+
+    #[test]
+    fn single_pass_armed_seat_respects_range_gate() {
+        // Sparse keys (range >> 4x rows): the seat is forgone, the build
+        // stands, the v1 probe answers — never a refusal.
+        let budget = JoinBudget::unlimited();
+        let (t, expect) =
+            build_single_pass_keyed(2, 50, 100, 1 << 14, 0, 0, &budget);
+        assert!(!t.has_seat(), "sparse keys must forgo the seat");
+        assert_eq!(t.total_tuples() as usize, expect.len());
+    }
+
+    #[test]
+    fn single_pass_armed_seat_all_null_keys_forgo() {
+        let budget = JoinBudget::unlimited();
+        let (t, expect) = build_single_pass_keyed(2, 40, 5, 1, 0, 1, &budget);
+        assert!(expect.is_empty());
+        assert!(!t.has_seat(), "an all-NULL key stream seats nothing");
+        assert_eq!(t.total_tuples(), 80);
     }
 
     #[test]
