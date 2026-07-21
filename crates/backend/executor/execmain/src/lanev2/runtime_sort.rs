@@ -1303,6 +1303,53 @@ fn build_worker_exec(payload: &Arc<RuntimeSortShared>) -> PgResult<()> {
                                     None,
                                 );
                             }
+                        } else if runtime_sort_colstage_enabled() {
+                            // COLSTAGE (night/sort-merge-redesign spike;
+                            // kill-switch, DEFAULT OFF): the INT-FAMILY
+                            // top-N accept has NO staged fast leg on
+                            // qual-less scans — `arm_seq_scan_qual_bitmap`
+                            // arms nothing without a qual (the exact hole
+                            // the DictCode branch above documents), so
+                            // `refsort_key_batch` refuses and EVERY row
+                            // takes the per-row emit ceremony (projection
+                            // program + per-row columnar datum decode +
+                            // slot ceremony + per-row CFI) — profiled at
+                            // ~75% of worker accept time on the
+                            // zone-hostile rand-key top-N fixture (the
+                            // GL-SORTECON-1 4.28x class). Arm the same
+                            // offset-free columnar staging over the key
+                            // prefix (no qual), or widen the PREWHERE
+                            // prefix to the key columns (qual) — the
+                            // sink's EXISTING fast leg then serves keys
+                            // straight from the staged SoA lanes; rows the
+                            // masks force to fallback keep the exact
+                            // per-row emit. Staging availability never
+                            // changes the observation stream (the fast-leg
+                            // soundness contract the qual/dictcode arms
+                            // already ride), so parity is unchanged.
+                            let int_ask = payload
+                                .keys
+                                .iter()
+                                .map(|k| k.attno_scan as i32 + 1)
+                                .max()
+                                .unwrap_or(0);
+                            let armed = if ss.ss.qual.is_some() {
+                                ::nodeseqscan::seq_scan_cb_prewhere_arm(
+                                    ss, estate, int_ask,
+                                )?
+                            } else {
+                                ::nodeseqscan::seq_scan_cb_columnar_arm(
+                                    ss,
+                                    estate,
+                                    int_ask.max(1),
+                                    None,
+                                )
+                            };
+                            if armed {
+                                lane_trace(
+                                    "runtime-sort: colstage armed (staged int-key accept)",
+                                );
+                            }
                         }
                     }
                     super::arm_scan_staging(
@@ -1407,6 +1454,21 @@ fn runtime_sort_full_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
         !matches!(std::env::var("PGRUST_RUNTIME_SORT_FULL").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// COLSTAGE kill switch (night/sort-merge-redesign spike): arm the staged
+/// columnar accept fast leg for INT-FAMILY top-N specs (the DictCode leg's
+/// no-qual staging arm, extended to the int-key vocabulary). DEFAULT OFF —
+/// `PGRUST_RUNTIME_SORT_COLSTAGE=1|on` enables; absent/other = today's
+/// per-row emit accept, byte-identical.
+fn runtime_sort_colstage_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&ON, || {
+        matches!(
+            std::env::var("PGRUST_RUNTIME_SORT_COLSTAGE").as_deref(),
+            Ok("1") | Ok("on")
+        )
     })
 }
 
