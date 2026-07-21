@@ -222,9 +222,13 @@ fn hj_singlepass_enabled() -> bool {
 }
 
 /// SE-MBSHARED (the GL-MULTIBUILD-1 lane): the shared-probe/shared-build
-/// completion of the multibuild walk. DEFAULT OFF (`PGRUST_LANE_V2_MBSHARED
-/// =1|on` arms; unset/`0`/`off` keeps today's path byte-identically). Two
-/// halves, one knob:
+/// completion of the multibuild walk. DEFAULT ON (flipped-kill, t35 idiom:
+/// `PGRUST_LANE_V2_MBSHARED=0|off` restores the pre-letter walk
+/// byte-identically). Letter basis (GL-MULTIBUILD-1,
+/// notes/gl-multibuild-1-letter.md): strictly-better-or-flat at every
+/// re-measured refuted cell (rt/legacy 2.9-6.3x -> 1.2-2.2x, one witnessed
+/// win; single-join controls knob-flat; census spotcheck byte-identical
+/// both postures; 43q control pair flat). Two halves, one knob:
 ///
 /// 1. PROBE HOIST: `mb_row` stops refcounting the frozen-table Arc per
 ///    emitted row. The witnessed profile at the refuted grid cells (L1/L2,
@@ -252,7 +256,7 @@ fn hj_singlepass_enabled() -> bool {
 fn hj_mbshared_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        matches!(std::env::var("PGRUST_LANE_V2_MBSHARED").as_deref(), Ok("1") | Ok("on"))
+        !matches!(std::env::var("PGRUST_LANE_V2_MBSHARED").as_deref(), Ok("0") | Ok("off"))
     })
 }
 
@@ -4433,7 +4437,8 @@ fn engage<'mcx>(
                 .collect();
             if shared1a {
                 // Engagement witness (e2e-grepped): fires only with the
-                // knob ON — the OFF default cannot print it.
+                // knob armed (the default since the GL-MULTIBUILD-1 flip);
+                // the =0|off kill posture cannot print it.
                 let sp = sinks.iter().filter(|s| s.singlepass.is_some()).count();
                 lane_trace(&format!(
                     "runtime-hashjoin: multibuild shared build ENGAGED (singlepass={sp}/{})",
@@ -5187,12 +5192,13 @@ mod mb_tests {
         assert_eq!(mbg_max_groups(), 131_072);
     }
 
-    /// SE-MBSHARED: the shared-probe/shared-build car is DEFAULT OFF —
-    /// unset must resolve off (the =1|on posture is the e2e's armed boot;
-    /// OnceLock, one state per process).
+    /// SE-MBSHARED: the shared-probe/shared-build car is DEFAULT ON
+    /// (flipped-kill since GL-MULTIBUILD-1) — unset must resolve ON (the
+    /// =0|off posture is the e2e's kill boot; OnceLock, one state per
+    /// process).
     #[test]
-    fn mbshared_knob_default_off() {
-        assert!(!hj_mbshared_enabled());
+    fn mbshared_knob_default_on() {
+        assert!(hj_mbshared_enabled());
     }
 
     /// SE-AGGJOIN: the SINGLE-join tree decomposes to exactly one build
