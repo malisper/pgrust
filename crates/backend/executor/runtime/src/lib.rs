@@ -115,8 +115,8 @@ pub use lifecycle::{
 pub use morsel::{MorselRange, MorselSource, StreamSource, SyntheticMorselSource};
 pub use morsel::{GranuleMap, GranuleMapSource, Segments};
 pub use rg::{
-    CompletionWaiter, QuerySpec, RgClass, RgHandle, RgOutcome, TaskSetSpec, TaskSetWork,
-    WeakRgHandle,
+    BoundDescriptor, BoundServe, CompletionWaiter, QuerySpec, RgClass, RgHandle, RgOutcome,
+    TaskSetSpec, TaskSetWork, WeakRgHandle,
 };
 pub use sched::{DriveLocal, Step, WorkerLocal, DEFAULT_SLOTS, MAX_EXTERNAL_LANES};
 pub use sink::{
@@ -129,7 +129,7 @@ pub use sync::{IoGuard, Semaphore};
 
 pub use caller::CallerWorker;
 #[cfg(not(loom))]
-pub use pool::WorkerPool;
+pub use pool::{worker_loop, WorkerPool};
 
 /// Pinned M0 interface, lane A's binder half: [`QueryTaskGuard`] is the
 /// query-task binder's RAII bind/unbind of xact + snapshot + temp-namespace
@@ -286,7 +286,7 @@ impl Runtime {
     /// parking on the returned waiter (§2.5: submit-and-park; no leader
     /// execution path exists, deliberately).
     pub fn submit(&self, spec: QuerySpec) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, false, RgClass::Foreground, 0, None);
+        let rg = self.sched.submit(spec, false, RgClass::Foreground, 0, None, None);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
 
@@ -302,7 +302,7 @@ impl Runtime {
         spec: QuerySpec,
         session_token: u64,
     ) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, false, RgClass::Foreground, session_token, None);
+        let rg = self.sched.submit(spec, false, RgClass::Foreground, session_token, None, None);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
 
@@ -318,7 +318,7 @@ impl Runtime {
         spec: QuerySpec,
         width: WidthRequest,
     ) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, false, RgClass::Foreground, 0, Some(width));
+        let rg = self.sched.submit(spec, false, RgClass::Foreground, 0, Some(width), None);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
 
@@ -330,7 +330,7 @@ impl Runtime {
         session_token: u64,
         width: WidthRequest,
     ) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, true, RgClass::Foreground, session_token, Some(width));
+        let rg = self.sched.submit(spec, true, RgClass::Foreground, session_token, Some(width), None);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
 
@@ -444,7 +444,7 @@ impl Runtime {
     /// deadlines. Cycle task sets are single-morsel by construction, so the
     /// preference diverts at most one worker for one cycle body.
     pub fn submit_maintenance(&self, spec: QuerySpec) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, false, RgClass::Maintenance, 0, None);
+        let rg = self.sched.submit(spec, false, RgClass::Maintenance, 0, None, None);
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
 
@@ -473,7 +473,36 @@ impl Runtime {
         spec: QuerySpec,
         session_token: u64,
     ) -> (RgHandle, CompletionWaiter) {
-        let rg = self.sched.submit(spec, true, RgClass::Foreground, session_token, None);
+        let rg = self.sched.submit(spec, true, RgClass::Foreground, session_token, None, None);
+        (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
+    }
+
+    /// M2 inc-2 (PGPROC-leasing pool workers): [`Runtime::submit_pinned_with_affinity`]
+    /// CARRYING a bound-engagement descriptor — the scheduler's bindability
+    /// gate. Unlike a plain pinned submission, publication SETS the
+    /// pool-visible active bit: pool workers' picks reach the RG and each
+    /// serves one engagement through `descriptor.serve` (ticket claim →
+    /// leased-PGPROC identity → query-task bind → external-lane drive to an
+    /// outcome → unbind → detach). External participants (launched/standing
+    /// helpers, the leader's cleanup drains) drive it exactly as any pinned
+    /// RG — the two channels compose on the ordinary morsel protocol.
+    ///
+    /// The descriptor must be attached AT SUBMIT (never retro-fitted): the
+    /// active bit and the gate key off it at publication time.
+    pub fn submit_pinned_bound(
+        &self,
+        spec: QuerySpec,
+        session_token: u64,
+        descriptor: BoundDescriptor,
+    ) -> (RgHandle, CompletionWaiter) {
+        let rg = self.sched.submit(
+            spec,
+            true,
+            RgClass::Foreground,
+            session_token,
+            None,
+            Some(descriptor),
+        );
         (RgHandle { rg: Arc::clone(&rg) }, CompletionWaiter { rg })
     }
 

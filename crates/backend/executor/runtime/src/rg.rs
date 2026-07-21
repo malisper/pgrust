@@ -67,6 +67,48 @@ pub enum RgOutcome {
     Aborted,
 }
 
+/// M2 inc-2 (PGPROC-leasing pool workers — scratchpad/night/
+/// m2-pool-binding-scope.md §3 inc-2): the BOUND-ENGAGEMENT descriptor a
+/// pinned RG may carry at submission ([`crate::Runtime::submit_pinned_bound`]).
+/// Its presence is the scheduler's BINDABILITY gate: publication sets the
+/// pool-visible active bit (a plain pinned RG stays invisible to the pool's
+/// pick), and a pool worker whose pick lands on the RG dispatches ONE
+/// engagement through `serve` instead of claiming morsels directly — the
+/// serve claims a participation ticket from the (opaque) board, brings up /
+/// verifies the thread's leased PGPROC identity, binds the query's task
+/// binding, drives the RG as an EXTERNAL participant (its own leased
+/// pin-board lane) to an outcome, unbinds, and detaches. The runtime never
+/// interprets the payload — the parallel/arm layers own the binder and the
+/// board (the standing-gang engagement machinery, re-homed per-RG).
+#[derive(Clone)]
+pub struct BoundDescriptor {
+    /// Serve one engagement on the calling pool thread (see above). Runs
+    /// WITHOUT the caller's execution permit — the scheduler releases it
+    /// around the call because the nested drive has its own permit rhythm
+    /// (a held permit here would deadlock at capacity: every worker holding
+    /// one while its drive waits for another). Must not unwind except to
+    /// KILL the thread (exit-committed FATALs; the pool spawn glue owns the
+    /// identity drain + respawn).
+    pub serve: fn(&Arc<dyn std::any::Any + Send + Sync>) -> BoundServe,
+    /// Opaque engagement board (the parallel crate's per-RG entry).
+    pub payload: Arc<dyn std::any::Any + Send + Sync>,
+}
+
+/// One `BoundDescriptor::serve` call's scheduling verdict.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoundServe {
+    /// A ticket was claimed and served to completion (bind → drive →
+    /// unbind → detach all happened inside the call).
+    Served,
+    /// THIS worker can never serve THIS engagement (identity bring-up
+    /// failure, database-pin mismatch, binder refusal surface): skip the
+    /// slot for the rest of the publication.
+    Refused,
+    /// Board closed or participant cap reached: nothing left to serve —
+    /// skip the slot for the rest of the publication.
+    Closed,
+}
+
 /// RG scheduling class (M4, docs/design/m4-bgjobs.md §3.5). Maintenance RGs
 /// (background-job cycles) are preferred by the pool's pick over foreground
 /// FIFO order, and overtake the wait queue on submission — the minimal
@@ -234,6 +276,11 @@ pub struct ResourceGroup {
     /// M4 scheduling class (see [`RgClass`]). Maintenance implies !pinned
     /// (asserted at submit): job cycles are executed by pool workers.
     pub(crate) class: RgClass,
+    /// M2 inc-2 bound-engagement descriptor (implies `pinned`, asserted at
+    /// submit): present ⇔ pool workers may claim engagements on this RG
+    /// through the descriptor's serve (see [`BoundDescriptor`]). None on
+    /// every other submission — byte-identical scheduling.
+    pub(crate) bound: Option<BoundDescriptor>,
     /// Query-owned generation machinery (H1 structural fix): every task the
     /// runtime carves for this RG carries (query_id, generation) and enters
     /// shared state only through the generation's fail-closed armed join
@@ -301,6 +348,7 @@ impl ResourceGroup {
         class: RgClass,
         session_token: u64,
         sched: std::sync::Weak<crate::sched::Scheduler>,
+        bound: Option<BoundDescriptor>,
     ) -> Arc<ResourceGroup> {
         let n = spec.tasksets.len();
         for (i, ts) in spec.tasksets.iter().enumerate() {
@@ -324,6 +372,7 @@ impl ResourceGroup {
             query_id: spec.query_id,
             pinned,
             class,
+            bound,
             task,
             handle,
             tasksets: spec.tasksets,

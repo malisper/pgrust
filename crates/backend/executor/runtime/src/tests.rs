@@ -4090,3 +4090,167 @@ mod ledger_gang_tests {
     }
 
 }
+
+// ---- M2 inc-2: bound-engagement descriptor (PGPROC-leasing pool workers) ---
+//
+// The production serve (parallel::standing::pool_serve) binds a real query;
+// these tests exercise the SCHEDULER's contract with a synthetic serve:
+// dispatch-through-descriptor (never run_task), the ticket cap, the
+// Refused/Closed skip cache (pool stays live, parks stay reachable), permit
+// balance across the nested drive, and abort composition.
+mod bound_gate {
+    use super::*;
+
+    use crate::sync::OnceLock;
+
+    /// Synthetic per-RG engagement board + serve: cap-limited tickets, each
+    /// served by an external-lane pinned drive to the RG's outcome — the
+    /// arm driver's exact shape (helper_drive → drive_pinned), minus the
+    /// binder.
+    struct BoundPayload {
+        rt: Arc<Runtime>,
+        rg: OnceLock<RgHandle>,
+        tickets: AtomicU64,
+        cap: u64,
+        serves: AtomicU64,
+        refuse_all: AtomicBool,
+    }
+
+    fn serve(payload: &Arc<dyn std::any::Any + Send + Sync>) -> BoundServe {
+        let p = Arc::clone(payload)
+            .downcast::<BoundPayload>()
+            .expect("test payload");
+        if p.refuse_all.load(Ordering::SeqCst) {
+            return BoundServe::Refused;
+        }
+        // Ticket cap (the standing board's tickets, synthetically).
+        if p.tickets.fetch_add(1, Ordering::SeqCst) >= p.cap {
+            p.tickets.fetch_sub(1, Ordering::SeqCst);
+            return BoundServe::Closed;
+        }
+        // The submit → handle-store window: the publication wake can beat
+        // the leader's store; the board is live, so wait for the handle.
+        let rg = loop {
+            if let Some(rg) = p.rg.get() {
+                break rg.clone();
+            }
+            std::thread::yield_now();
+        };
+        let lane = p.rt.acquire_external_lane().expect("external lane for the serve");
+        let mut local = lane.local();
+        let _outcome = p.rt.drive_pinned(&mut local, &rg);
+        p.serves.fetch_add(1, Ordering::SeqCst);
+        BoundServe::Served
+    }
+
+    fn bound_setup(
+        rt: &Arc<Runtime>,
+        total: u64,
+        cap: u64,
+        refuse_all: bool,
+    ) -> (Arc<SyntheticWork>, Arc<BoundPayload>, RgHandle, CompletionWaiter) {
+        let work = SyntheticWork::new(total, None, 0);
+        let payload = Arc::new(BoundPayload {
+            rt: Arc::clone(rt),
+            rg: OnceLock::new(),
+            tickets: AtomicU64::new(0),
+            cap,
+            serves: AtomicU64::new(0),
+            refuse_all: AtomicBool::new(refuse_all),
+        });
+        let descriptor = BoundDescriptor {
+            serve,
+            payload: Arc::clone(&payload) as Arc<dyn std::any::Any + Send + Sync>,
+        };
+        let (h, waiter) = rt.submit_pinned_bound(
+            spec_one(&work, Arc::new(SyntheticMorselSource::new(total))),
+            0,
+            descriptor,
+        );
+        payload.rg.set(h.clone()).ok().expect("handle stored once");
+        (work, payload, h, waiter)
+    }
+
+    /// Pool workers serve a bound pinned RG to completion through the
+    /// descriptor (never through run_task), respect the ticket cap, and
+    /// permits balance after the nested drives.
+    #[test]
+    fn bound_rg_served_by_pool_workers() {
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 2,
+            standbys: 1,
+            slots: 4,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+        let (work, payload, _h, waiter) = bound_setup(&rt, 64, 2, false);
+        assert_eq!(waiter.wait(), RgOutcome::Completed);
+        work.assert_all_executed_once();
+        assert_eq!(work.finalizes.load(Ordering::SeqCst), 1);
+        let serves = payload.serves.load(Ordering::SeqCst);
+        assert!(serves >= 1 && serves <= 2, "cap-bounded serves, got {serves}");
+        assert!(rt.stats().bound_serves >= 1, "serve dispatched through the gate");
+        pool.shutdown();
+        assert_eq!(
+            rt.execution_permits().available(),
+            2,
+            "permits balanced after nested bound drives"
+        );
+    }
+
+    /// A refusing serve skip-caches the publication: the pool neither spins
+    /// nor wedges — an external (leader-style) drive still completes the
+    /// bound RG, and ordinary pool work keeps flowing afterwards.
+    #[test]
+    fn bound_rg_refused_skips_then_external_drive_completes() {
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 2,
+            standbys: 0,
+            slots: 4,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+        let (work, payload, h, waiter) = bound_setup(&rt, 32, 2, true);
+        // Give the pool time to observe, refuse, and skip-cache the slot.
+        let t0 = std::time::Instant::now();
+        while rt.stats().bound_skips == 0 && t0.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::yield_now();
+        }
+        assert!(rt.stats().bound_skips >= 1, "refusal recorded a skip");
+        assert_eq!(waiter.try_wait(), None, "nobody serves a refused board");
+        assert_eq!(payload.serves.load(Ordering::SeqCst), 0);
+        // Leader-style fallback: an external participant drives the same
+        // pinned RG to completion (the launched/standing channels' shape).
+        let lane = rt.acquire_external_lane().expect("external lane");
+        let mut local = lane.local();
+        assert_eq!(rt.drive_pinned(&mut local, &h), RgOutcome::Completed);
+        work.assert_all_executed_once();
+        // The pool is not wedged: ordinary (unbound) work still executes.
+        let after = SyntheticWork::new(16, None, 0);
+        let (_h2, w2) = rt.submit(spec_one(&after, Arc::new(SyntheticMorselSource::new(16))));
+        assert_eq!(w2.wait(), RgOutcome::Completed);
+        after.assert_all_executed_once();
+        pool.shutdown();
+    }
+
+    /// Abort composes with the bound serve exactly as with any pinned
+    /// drive: the RG completes Aborted, the serve returns, permits balance.
+    #[test]
+    fn bound_rg_abort_completes_aborted() {
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 2,
+            standbys: 0,
+            slots: 4,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+        let (_work, _payload, h, waiter) = bound_setup(&rt, 1 << 20, 2, false);
+        h.abort();
+        assert_eq!(waiter.wait(), RgOutcome::Aborted);
+        pool.shutdown();
+        assert_eq!(rt.execution_permits().available(), 2, "permits balanced after abort");
+    }
+}

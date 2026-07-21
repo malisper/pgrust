@@ -80,6 +80,12 @@ counters!(RuntimeStats, RuntimeStatsSnapshot;
     /// M5+1: stride picks resolved by the within-query dependency-depth
     /// refinement (equal pass, same query — deeper pipeline preferred).
     dag_depth_picks,
+    /// M2 inc-2 bound engagements served by pool workers (one per
+    /// bind→drive→unbind span dispatched through a BoundDescriptor).
+    bound_serves,
+    /// M2 inc-2 bound-slot skips recorded (a worker's serve returned
+    /// Refused/Closed and the slot's publication was skip-cached).
+    bound_skips,
 );
 
 counters!(RgStats, RgStatsSnapshot;

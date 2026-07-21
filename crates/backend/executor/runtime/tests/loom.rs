@@ -2286,3 +2286,229 @@ fn funnel_close_demand_unblocks() {
         let _ = t.join().unwrap();
     });
 }
+
+// ---------------------------------------------------------------------------
+// M2 inc-2 — the bound-engagement claim gate (PGPROC-leasing pool workers;
+// scratchpad/night/m2-pool-binding-scope.md §3 inc-2 "NEW loom models:
+// claim-gate vs abort, detach join, permit + binding interleavings").
+//
+// The detach-count leader join is the standing board's, already pinned by
+// `standing_gang_detach_count_join_no_lost_wake` (the pool channel reuses
+// StandingEngagement verbatim). These models pin the RUNTIME-side additions:
+// the worker_step dispatch (bound RGs never reach run_task from a pool
+// worker; the early pin settle cannot corrupt the finalization protocol),
+// the permit release/re-acquire around the nested serve drive (balance at
+// capacity — the double-permit deadlock the release exists to prevent), and
+// the Refused/Closed skip cache (a refusing worker parks instead of
+// spinning, and the park loses no wake for other work).
+// ---------------------------------------------------------------------------
+
+use runtime::{BoundDescriptor, BoundServe, RgHandle};
+
+/// The models' serve: claim one synthetic ticket (cap 1) and drive the
+/// bound RG to its outcome as an external participant (CallerWorker — the
+/// loom-usable face of the production external-lane pinned drive). Called
+/// by the scheduler with the pool permit RELEASED; the caller drive's own
+/// per-step permit rhythm exercises exactly the capacity interleaving the
+/// release exists for (at workers=1 a held permit here would deadlock).
+struct BoundModelPayload {
+    rt: Arc<Runtime>,
+    rg: RgHandle,
+    tickets: AtomicUsize,
+    refuse_all: AtomicBool,
+    serves: AtomicUsize,
+}
+
+fn bound_model_serve(payload: &Arc<dyn std::any::Any + Send + Sync>) -> BoundServe {
+    let p = Arc::clone(payload)
+        .downcast::<BoundModelPayload>()
+        .expect("model payload");
+    if p.refuse_all.load(Ordering::SeqCst) {
+        return BoundServe::Refused;
+    }
+    if p.tickets.fetch_add(1, Ordering::SeqCst) >= 1 {
+        p.tickets.fetch_sub(1, Ordering::SeqCst);
+        return BoundServe::Closed;
+    }
+    let mut cw = runtime::CallerWorker::enter(&p.rt).expect("external lane for the serve");
+    let _outcome = cw
+        .drive_with_duty(&p.rt, &p.rg, &mut || Ok(()))
+        .expect("model duty never fails");
+    p.serves.fetch_add(1, Ordering::SeqCst);
+    BoundServe::Served
+}
+
+/// Pool-loop emulation with the REAL permit discipline (the serve gate's
+/// contract: worker_step is entered with a permit held) — the
+/// standby_absorption driver, shared by the bound models.
+fn drive_bound_pool(rt: &Arc<Runtime>, worker: usize, waiters: &[CompletionWaiter]) {
+    let mut local = rt.worker_local(worker);
+    loop {
+        if waiters.iter().all(|w| w.try_wait().is_some()) {
+            break;
+        }
+        let epoch = rt.park_epoch();
+        rt.execution_permits().acquire();
+        let step = rt.worker_step(&mut local);
+        rt.execution_permits().release();
+        match step {
+            Step::Ran => {}
+            Step::Retry => thread::yield_now(),
+            Step::Idle => {
+                if waiters.iter().all(|w| w.try_wait().is_some()) {
+                    break;
+                }
+                rt.park(epoch);
+            }
+            Step::Stop => break,
+        }
+    }
+}
+
+fn bound_model_submit(
+    rt: &Arc<Runtime>,
+    total: u64,
+    refuse_all: bool,
+) -> (Arc<ModelWork>, Arc<BoundModelPayload>, RgHandle, CompletionWaiter) {
+    let work = ModelWork::new(total, None);
+    // The descriptor must ride the submit (the active bit keys off it at
+    // publication), but the payload needs the submit's own RgHandle: an
+    // indirection cell bridges the cycle. The cell is completed BEFORE any
+    // pool driver thread spawns, so no serve can race the store.
+    let placeholder = Arc::new(loom::sync::Mutex::new(None::<Arc<BoundModelPayload>>));
+    fn deferred_serve(payload: &Arc<dyn std::any::Any + Send + Sync>) -> BoundServe {
+        let slot = Arc::clone(payload)
+            .downcast::<loom::sync::Mutex<Option<Arc<BoundModelPayload>>>>()
+            .expect("model placeholder");
+        let inner = slot.lock().unwrap().clone().expect("payload installed pre-race");
+        let inner: Arc<dyn std::any::Any + Send + Sync> = inner;
+        bound_model_serve(&inner)
+    }
+    let (h, waiter) = rt.submit_pinned_bound(
+        QuerySpec {
+            query_id: 21,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(total).with_c0(1)),
+                work: Arc::clone(&work) as Arc<dyn TaskSetWork>,
+                deps: vec![],
+            }],
+        },
+        0,
+        BoundDescriptor {
+            serve: deferred_serve,
+            payload: Arc::clone(&placeholder) as Arc<dyn std::any::Any + Send + Sync>,
+        },
+    );
+    let payload = Arc::new(BoundModelPayload {
+        rt: Arc::clone(rt),
+        rg: h.clone(),
+        tickets: AtomicUsize::new(0),
+        refuse_all: AtomicBool::new(refuse_all),
+        serves: AtomicUsize::new(0),
+    });
+    *placeholder.lock().unwrap() = Some(Arc::clone(&payload));
+    (work, payload, h, waiter)
+}
+
+/// Model B1 — bound serve completes under the permit cap: ONE permit
+/// (workers=1), two pool threads; whoever picks the bound RG settles its
+/// pool pin, gives up the permit, and drives the whole RG through the
+/// caller face while the other thread interleaves freely. Oracles: RG
+/// completes, every granule exactly once, finalize exactly once, the
+/// ticket cap held (≤1 serve), and full permit capacity restored (the
+/// release/re-acquire around the serve balanced in every interleaving).
+#[test]
+fn bound_gate_serve_completes_under_permit_cap() {
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(2);
+    b.check(|| {
+        let rt = small_runtime(1, 1);
+        let (work, payload, _h, waiter) = bound_model_submit(&rt, 2, false);
+
+        let rt1 = Arc::clone(&rt);
+        let w1 = waiter.clone();
+        let peer = thread::spawn(move || drive_bound_pool(&rt1, 1, &[w1]));
+        drive_bound_pool(&rt, 0, &[waiter.clone()]);
+        peer.join().unwrap();
+
+        assert_eq!(waiter.try_wait(), Some(RgOutcome::Completed));
+        work.assert_complete();
+        assert_eq!(rt.stats().finalize_events, 1);
+        assert!(payload.serves.load(Ordering::SeqCst) <= 1, "ticket cap held");
+        assert_eq!(rt.execution_permits().available(), 1, "permit balance");
+    });
+}
+
+/// Model B2 — the Refused skip cache: a pool worker whose serve refuses
+/// (identity/db mismatch in production) must SKIP the publication — its
+/// park stays reachable and an UNBOUND RG published afterwards is still
+/// executed (no lost wake through the skip), while an external caller
+/// completes the bound RG. Oracles: both RGs complete, granules exactly
+/// once each, permit balance.
+#[test]
+fn bound_gate_refused_skip_no_lost_wake() {
+    let mut b = loom::model::Builder::new();
+    // Three threads x two RGs x the permit handoff: the richest of the
+    // bound models — needs the explicit branch budget the caller/ledger
+    // models use (the default trips loom's spin heuristic long before the
+    // space is explored).
+    b.preemption_bound = Some(2);
+    b.max_branches = 500_000;
+    b.check(|| {
+        let rt = small_runtime(1, 0);
+        let (bwork, payload, h, bwaiter) = bound_model_submit(&rt, 1, true);
+        let uwork = ModelWork::new(1, None);
+        let (_uh, uwaiter) = rt.submit(QuerySpec {
+            query_id: 22,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(1).with_c0(1)),
+                work: Arc::clone(&uwork) as Arc<dyn TaskSetWork>,
+                deps: vec![],
+            }],
+        });
+
+        // External caller (the leader's fallback face) completes the
+        // refused bound RG while the pool worker skips it.
+        let rt1 = Arc::clone(&rt);
+        let h1 = h.clone();
+        let external = thread::spawn(move || {
+            let mut cw = runtime::CallerWorker::enter(&rt1).expect("caller lane");
+            cw.drive_with_duty(&rt1, &h1, &mut || Ok(())).expect("duty never fails")
+        });
+        drive_bound_pool(&rt, 0, &[bwaiter.clone(), uwaiter.clone()]);
+        assert_eq!(external.join().unwrap(), RgOutcome::Completed);
+
+        assert_eq!(bwaiter.try_wait(), Some(RgOutcome::Completed));
+        assert_eq!(uwaiter.try_wait(), Some(RgOutcome::Completed));
+        bwork.assert_complete();
+        uwork.assert_complete();
+        assert_eq!(payload.serves.load(Ordering::SeqCst), 0, "refused board never served");
+        assert_eq!(rt.execution_permits().available(), 1, "permit balance");
+    });
+}
+
+/// Model B3 — abort vs the serve claim: an abort racing the pool worker's
+/// engagement (before, during, or after its drive) always completes the
+/// RG (Aborted or Completed — both legal depending on the interleaving),
+/// never runs finalize work on the aborted arm, and balances permits.
+#[test]
+fn bound_gate_abort_vs_serve() {
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(2);
+    b.check(|| {
+        let rt = small_runtime(1, 0);
+        let (work, _payload, h, waiter) = bound_model_submit(&rt, 2, false);
+
+        let h1 = h.clone();
+        let aborter = thread::spawn(move || h1.abort());
+        drive_bound_pool(&rt, 0, &[waiter.clone()]);
+        aborter.join().unwrap();
+
+        let outcome = waiter.try_wait().expect("RG reached an outcome");
+        if outcome == RgOutcome::Completed {
+            work.assert_complete();
+            assert_eq!(rt.stats().finalize_events, 1);
+        }
+        assert_eq!(rt.execution_permits().available(), 1, "permit balance");
+    });
+}
