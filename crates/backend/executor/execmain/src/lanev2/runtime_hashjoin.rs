@@ -4687,6 +4687,7 @@ fn engage_ceremony<'mcx>(
                 drain_rg(rt, &rg);
                 return Ok(EngageOutcome::Fallback);
             }
+            stats::tick_engaged(STANDING_ARM.label, stats::EngageChannel::Launched);
             lane_trace(&format!(
                 "runtime-hashjoin: engaged dop={launched} outer_granules={outer_granules} builds={} (multibuild{})",
                 mb.sinks.len(),
@@ -4842,6 +4843,7 @@ fn engage_ceremony<'mcx>(
             drain_rg(rt, &rg);
             return Ok(EngageOutcome::Fallback);
         }
+        stats::tick_engaged(STANDING_ARM.label, stats::EngageChannel::Launched);
         match payload.spill.as_ref() {
             Some(sp) => lane_trace(&format!(
                 "runtime-hashjoin: engaged dop={launched} outer_granules={outer_granules} nbatch={} (spill)",
@@ -4866,6 +4868,7 @@ fn engage_ceremony<'mcx>(
 
     match outcome {
         EngageOutcome::Fallback => {
+            stats::tick_engaged(STANDING_ARM.label, stats::EngageChannel::Serial);
             lane_trace("runtime-hashjoin: fallback to serial arm");
             Ok(None)
         }

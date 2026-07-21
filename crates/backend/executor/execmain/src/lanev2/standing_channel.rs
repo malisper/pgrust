@@ -186,6 +186,14 @@ fn wait_engaged(
     } else {
         format!(" {}", leader.census)
     };
+    // M2 inc-3 rung-2 fallback-floor accounting: one tick per engagement
+    // OUTCOME on this channel (the two Done exits below). Fallback and
+    // error exits tick nothing here — launched/serial tick at the arm.
+    let floor_channel = if channel == "pooldb" {
+        super::stats::EngageChannel::PoolDb
+    } else {
+        super::stats::EngageChannel::Gang
+    };
     loop {
         if let Some(o) = waiter.try_wait() {
             take_slot();
@@ -204,6 +212,7 @@ fn wait_engaged(
                 arm.label,
                 entry.claimed()
             ));
+            super::stats::tick_engaged(arm.label, floor_channel);
             return Ok(StandingWait::Done(o));
         }
         if let Err(e) = ::postgres_seams::check_for_interrupts::call() {
@@ -257,6 +266,7 @@ fn wait_engaged(
             if let Some(o) = waiter.try_wait() {
                 take_slot();
                 parallel::standing::close_and_await(&entry);
+                super::stats::tick_engaged(arm.label, floor_channel);
                 return Ok(StandingWait::Done(o));
             }
             if let Some(e) = (leader.take_error)() {

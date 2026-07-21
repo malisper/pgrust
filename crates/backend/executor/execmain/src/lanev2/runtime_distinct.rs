@@ -2198,6 +2198,7 @@ fn engage_ceremony<'mcx>(
             drain_rg(rt, &rg);
             return Ok(EngageOutcome::Fallback);
         }
+        stats::tick_engaged(STANDING_ARM.label, stats::EngageChannel::Launched);
         lane_trace(&format!(
             "runtime-distinct: engaged dop={launched} granules={total_granules} vocab={} sets={}",
             spec.vocab.len(),
@@ -2320,6 +2321,7 @@ fn engage_ceremony<'mcx>(
 
     match outcome {
         EngageOutcome::Fallback => {
+            stats::tick_engaged(STANDING_ARM.label, stats::EngageChannel::Serial);
             lane_trace("runtime-distinct: fallback to serial arm");
             Ok(None)
         }
