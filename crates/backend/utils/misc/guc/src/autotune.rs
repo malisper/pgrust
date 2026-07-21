@@ -11,6 +11,21 @@
 //! it runs AFTER `SelectConfigFiles`, it also reads the operator's configured
 //! `max_connections`, so `work_mem` scales down if that was raised.
 //!
+//! ## initdb pinning (why shared_buffers can stay 128MB with autotune on)
+//! initdb writes an EXPLICIT `shared_buffers = 128MB` (and `max_connections =
+//! 100`) line into every postgresql.conf it generates, so on a stock cluster
+//! that value carries source `PGC_S_FILE` and — by the "explicit settings
+//! win" contract above — the `PGC_S_DYNAMIC_DEFAULT` auto-tune cannot raise
+//! it, while the GUCs initdb leaves commented (work_mem etc.) scale normally.
+//! This is deliberate: the config source ladder cannot distinguish initdb's
+//! boilerplate from an operator's intent, and silently overriding a conf-file
+//! line would break the ladder for everyone else. `apply_memory_autotune`
+//! detects any pinned value by read-back and reports it at LOG; the public-
+//! release entrypoint (the same script that sets `PGRUST_MEM_AUTOTUNE=1`)
+//! must remove/knock out initdb's shared_buffers line — or initdb with
+//! `-c shared_buffers=<25% RAM>` — for the documented 25% default to apply
+//! (docs/design/memory-defaults.md §"initdb pinning").
+//!
 //! ## Gating (why it defaults OFF)
 //! Applied only when `PGRUST_MEM_AUTOTUNE` is set (`1`/`on`/`true`/`yes`).
 //! Unset (the default) keeps the stock boot values, so the byte-identical
@@ -44,7 +59,7 @@
 //! cache and the OS page cache.
 
 use types_error::{ErrorLocation, PgResult, LOG};
-use types_guc::{PGC_POSTMASTER, PGC_S_DYNAMIC_DEFAULT};
+use types_guc::{GUC_UNIT_BLOCKS, GUC_UNIT_KB, GUC_UNIT_MEMORY, PGC_POSTMASTER, PGC_S_DYNAMIC_DEFAULT};
 
 const MIB: u64 = 1024 * 1024;
 
@@ -74,6 +89,42 @@ const MAINTENANCE_FLOOR_MB: i64 = 64; // stock boot value (65536 kB)
 /// `maintenance_work_mem`, all in the one postmaster address space.
 const MAINTENANCE_CAP_MB: i64 = 1024;
 
+/// The registered [min, max] of an int GUC from the static settings tables,
+/// converted to the unit `MemoryTuning` carries for it: whole MB for memory
+/// GUCs (GUC_UNIT_BLOCKS/GUC_UNIT_KB), the raw count otherwise. `value * K`
+/// (K = native units per MB) must land inside the registered i32 range, so
+/// the MB bounds are ceil(min/K) / floor(max/K). Panics on a missing/non-int
+/// name: the tables are static and every caller is unit-tested, so a rename
+/// must break loudly rather than silently drop the clamp.
+fn registered_bounds(name: &str) -> (i64, i64) {
+    let (min, max, flags) = guc_tables::all_settings()
+        .find_map(|s| match s {
+            guc_tables::GucSetting::Int(i) if i.name == name => {
+                Some((i.min as i64, i.max as i64, i.flags))
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("autotune: {name} is not a registered int GUC"));
+    let per_mb: i64 = match flags & GUC_UNIT_MEMORY {
+        f if f == GUC_UNIT_BLOCKS => MIB as i64 / guc_tables::consts::BLCKSZ as i64,
+        f if f == GUC_UNIT_KB => 1024,
+        0 => return (min, max), // plain count: bounds already in the field's unit
+        f => panic!("autotune: {name} has unhandled memory unit flags {f:#x}"),
+    };
+    // Manual ceil-div (registered mins are never negative here; asserted so
+    // the shortcut can't silently go wrong on a future negative-min GUC).
+    assert!(min >= 0 && per_mb > 0);
+    ((min + per_mb - 1) / per_mb, max / per_mb)
+}
+
+/// Clamp a computed default into its GUC's registered range so the boot-time
+/// `SetConfigOption` can never fail range validation (a huge-RAM box would
+/// otherwise turn `pgrust.mem_autotune=on` into a boot failure).
+fn clamp_to_registered(name: &str, value: i64) -> i64 {
+    let (min, max) = registered_bounds(name);
+    value.clamp(min, max)
+}
+
 /// The computed machine-scaled defaults (all sizes in MB, counts unitless).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryTuning {
@@ -94,29 +145,49 @@ pub fn compute_memory_tuning(ram_bytes: u64, cores: usize, max_connections: i32)
     let conns = max_connections.max(1) as f64;
     let cores = cores.max(1) as i64;
 
-    let shared_buffers_mb =
-        (((ram * SHARED_BUFFERS_FRACTION) as u64 / MIB) as i64).max(SHARED_BUFFERS_FLOOR_MB);
+    // Every computed value is finally clamped into its GUC's REGISTERED
+    // [min, max] (clamp_to_registered): the policy floors/caps below express
+    // the tuning model, but only the registered range keeps the boot-time
+    // SetConfigOption from erroring out — e.g. 25% of a >32 TiB box exceeds
+    // shared_buffers' max of i32::MAX/2 blocks, and >1024 cores would push
+    // the parallel counts past MAX_PARALLEL_WORKER_LIMIT, either of which
+    // would otherwise abort postmaster boot under pgrust.mem_autotune=on.
+    let shared_buffers_mb = clamp_to_registered(
+        "shared_buffers",
+        (((ram * SHARED_BUFFERS_FRACTION) as u64 / MIB) as i64).max(SHARED_BUFFERS_FLOOR_MB),
+    );
 
     // Planner hint only (no allocation); floor at the shared pool so it is
-    // never smaller than shared_buffers on a tiny box.
-    let effective_cache_size_mb =
-        (((ram * EFFECTIVE_CACHE_FRACTION) as u64 / MIB) as i64).max(shared_buffers_mb);
+    // never smaller than shared_buffers on a tiny box. (Range note: ecs' max
+    // — i32::MAX blocks — is above shared_buffers' max, so the ordering
+    // survives the clamp.)
+    let effective_cache_size_mb = clamp_to_registered(
+        "effective_cache_size",
+        (((ram * EFFECTIVE_CACHE_FRACTION) as u64 / MIB) as i64).max(shared_buffers_mb),
+    );
 
     let work_mem_bytes = (ram * WORKMEM_BUDGET_FRACTION) / (conns * WORKMEM_OPS_PER_CONN);
-    let work_mem_mb =
-        ((work_mem_bytes as u64 / MIB) as i64).clamp(WORK_MEM_FLOOR_MB, WORK_MEM_CAP_MB);
+    let work_mem_mb = clamp_to_registered(
+        "work_mem",
+        ((work_mem_bytes as u64 / MIB) as i64).clamp(WORK_MEM_FLOOR_MB, WORK_MEM_CAP_MB),
+    );
 
-    let maintenance_work_mem_mb = ((ram_bytes / MAINTENANCE_FRACTION_DIV / MIB) as i64)
-        .clamp(MAINTENANCE_FLOOR_MB, MAINTENANCE_CAP_MB);
+    let maintenance_work_mem_mb = clamp_to_registered(
+        "maintenance_work_mem",
+        ((ram_bytes / MAINTENANCE_FRACTION_DIV / MIB) as i64)
+            .clamp(MAINTENANCE_FLOOR_MB, MAINTENANCE_CAP_MB),
+    );
 
     // Parallelism (memory-adjacent: each worker is a thread that gets its own
     // work_mem + columnar arenas). Scale to cores; cap per-gather so one query
     // cannot monopolise every core in a multi-user server (the ClickBench
     // single-client harness raises it explicitly).
-    let max_worker_processes = (cores + 8).max(8);
-    let max_parallel_workers = cores.max(2);
-    let max_parallel_workers_per_gather = (cores / 2).clamp(2, 8);
-    let max_parallel_maintenance_workers = (cores / 2).clamp(2, 4);
+    let max_worker_processes = clamp_to_registered("max_worker_processes", (cores + 8).max(8));
+    let max_parallel_workers = clamp_to_registered("max_parallel_workers", cores.max(2));
+    let max_parallel_workers_per_gather =
+        clamp_to_registered("max_parallel_workers_per_gather", (cores / 2).clamp(2, 8));
+    let max_parallel_maintenance_workers =
+        clamp_to_registered("max_parallel_maintenance_workers", (cores / 2).clamp(2, 4));
 
     MemoryTuning {
         shared_buffers_mb,
@@ -225,26 +296,71 @@ pub fn apply_memory_autotune() -> PgResult<()> {
     let max_connections = current_max_connections();
     let t = compute_memory_tuning(ram_bytes, cores, max_connections);
 
-    set_dynamic_default("shared_buffers", &format!("{}MB", t.shared_buffers_mb))?;
-    set_dynamic_default(
-        "effective_cache_size",
-        &format!("{}MB", t.effective_cache_size_mb),
-    )?;
-    set_dynamic_default("work_mem", &format!("{}MB", t.work_mem_mb))?;
-    set_dynamic_default(
-        "maintenance_work_mem",
-        &format!("{}MB", t.maintenance_work_mem_mb),
-    )?;
-    set_dynamic_default("max_worker_processes", &t.max_worker_processes.to_string())?;
-    set_dynamic_default("max_parallel_workers", &t.max_parallel_workers.to_string())?;
-    set_dynamic_default(
-        "max_parallel_workers_per_gather",
-        &t.max_parallel_workers_per_gather.to_string(),
-    )?;
-    set_dynamic_default(
-        "max_parallel_maintenance_workers",
-        &t.max_parallel_maintenance_workers.to_string(),
-    )?;
+    // (name, value to set, expected value AFTER a successful set in the GUC's
+    // NATIVE units — blocks for GUC_UNIT_BLOCKS, kB for GUC_UNIT_KB, the raw
+    // count otherwise; what GetConfigOption's unit-less show returns.)
+    let blocks_per_mb = MIB as i64 / guc_tables::consts::BLCKSZ as i64;
+    let entries: [(&str, String, i64); 8] = [
+        (
+            "shared_buffers",
+            format!("{}MB", t.shared_buffers_mb),
+            t.shared_buffers_mb * blocks_per_mb,
+        ),
+        (
+            "effective_cache_size",
+            format!("{}MB", t.effective_cache_size_mb),
+            t.effective_cache_size_mb * blocks_per_mb,
+        ),
+        ("work_mem", format!("{}MB", t.work_mem_mb), t.work_mem_mb * 1024),
+        (
+            "maintenance_work_mem",
+            format!("{}MB", t.maintenance_work_mem_mb),
+            t.maintenance_work_mem_mb * 1024,
+        ),
+        ("max_worker_processes", t.max_worker_processes.to_string(), t.max_worker_processes),
+        ("max_parallel_workers", t.max_parallel_workers.to_string(), t.max_parallel_workers),
+        (
+            "max_parallel_workers_per_gather",
+            t.max_parallel_workers_per_gather.to_string(),
+            t.max_parallel_workers_per_gather,
+        ),
+        (
+            "max_parallel_maintenance_workers",
+            t.max_parallel_maintenance_workers.to_string(),
+            t.max_parallel_maintenance_workers,
+        ),
+    ];
+    // PGC_S_DYNAMIC_DEFAULT loses (by design) to any higher-priority source —
+    // postgresql.conf / ALTER SYSTEM / -c / environment. That is the "explicit
+    // operator setting wins" contract, but it has one systematic surprise:
+    // initdb WRITES an explicit `shared_buffers = 128MB` (and
+    // `max_connections = 100`) line into every generated postgresql.conf, so
+    // on a stock cluster the shared_buffers auto-tune is pinned at 128MB while
+    // everything else scales. Detect pinned values by read-back and say so at
+    // LOG, naming the fix (docs/design/memory-defaults.md "initdb pinning").
+    let mut pinned: Vec<String> = Vec::new();
+    for (name, value, expect_native) in &entries {
+        set_dynamic_default(name, value)?;
+        let now = crate::GetConfigOption(name, true, false)
+            .ok()
+            .flatten()
+            .and_then(|s| s.trim().parse::<i64>().ok());
+        if now != Some(*expect_native) {
+            pinned.push(format!(
+                "{name} (wanted {value}, kept {})",
+                now.map_or_else(|| "?".to_string(), |v| v.to_string())
+            ));
+        }
+    }
+    if !pinned.is_empty() {
+        log_line(format!(
+            "pgrust memory auto-tune: {} pinned by an explicit setting (postgresql.conf / \
+             ALTER SYSTEM / command line); note initdb writes an explicit shared_buffers line \
+             into postgresql.conf — remove or adjust it for the auto-tuned value to apply \
+             (docs/design/memory-defaults.md)",
+            pinned.join(", "),
+        ));
+    }
 
     log_line(format!(
         "pgrust memory auto-tune: RAM={} MiB, cores={}, max_connections={} -> \
@@ -336,6 +452,70 @@ mod tests {
             work_peak + sb,
             ram
         );
+    }
+
+    #[test]
+    fn absurd_ram_and_cores_stay_within_registered_guc_ranges() {
+        // The boot-failure mode this pins: a computed default outside its
+        // GUC's registered range makes apply_memory_autotune's
+        // SetConfigOption error and aborts postmaster boot. Sweep absurd
+        // machines and assert every value (a) sits inside the registered
+        // range and (b) fits i32 in the GUC's NATIVE units (blocks/kB), the
+        // representation the parse path validates.
+        // (name, getter, native units per MB: 128 blocks/MB or 1024 kB/MB)
+        let mem_gucs: &[(&str, fn(&MemoryTuning) -> i64, i64)] = &[
+            ("shared_buffers", |t| t.shared_buffers_mb, 128),
+            ("effective_cache_size", |t| t.effective_cache_size_mb, 128),
+            ("work_mem", |t| t.work_mem_mb, 1024),
+            ("maintenance_work_mem", |t| t.maintenance_work_mem_mb, 1024),
+        ];
+        let count_gucs: &[(&str, fn(&MemoryTuning) -> i64)] = &[
+            ("max_worker_processes", |t| t.max_worker_processes),
+            ("max_parallel_workers", |t| t.max_parallel_workers),
+            ("max_parallel_workers_per_gather", |t| t.max_parallel_workers_per_gather),
+            ("max_parallel_maintenance_workers", |t| t.max_parallel_maintenance_workers),
+        ];
+        for ram in [4 * 1024 * GIB, 64 * 1024 * GIB, 1024 * 1024 * GIB] {
+            for cores in [16usize, 512, 4096] {
+                let t = compute_memory_tuning(ram, cores, 100);
+                for (name, get, per_mb) in mem_gucs {
+                    let (min, max) = registered_bounds(name);
+                    let v = get(&t);
+                    assert!(
+                        (min..=max).contains(&v),
+                        "{name}={v}MB outside registered [{min}, {max}]MB at ram={ram} cores={cores}"
+                    );
+                    // Native-unit i32 fit (what SetConfigOption validates).
+                    assert!(
+                        v.checked_mul(*per_mb).is_some_and(|n| n <= i32::MAX as i64),
+                        "{name}={v}MB overflows i32 in native units (x{per_mb})"
+                    );
+                }
+                for (name, get) in count_gucs {
+                    let (min, max) = registered_bounds(name);
+                    let v = get(&t);
+                    assert!(
+                        (min..=max).contains(&v),
+                        "{name}={v} outside registered [{min}, {max}] at ram={ram} cores={cores}"
+                    );
+                }
+                assert!(t.effective_cache_size_mb >= t.shared_buffers_mb);
+            }
+        }
+        // Independent literals (not via registered_bounds) pin the actual
+        // registered maxima: shared_buffers i32::MAX/2 blocks -> 8388607 MB;
+        // effective_cache_size i32::MAX blocks -> 16777215 MB;
+        // max_parallel_workers MAX_PARALLEL_WORKER_LIMIT = 1024.
+        let huge = compute_memory_tuning(1024 * 1024 * GIB, 4096, 100); // 1 PiB
+        assert_eq!(huge.shared_buffers_mb, 8_388_607);
+        assert_eq!(huge.effective_cache_size_mb, 16_777_215);
+        assert_eq!(huge.max_parallel_workers, 1024);
+        assert_eq!(huge.max_parallel_workers_per_gather, 8); // policy cap holds
+        // The review's 4 TiB example: in range, and NOT needlessly clamped
+        // (25% = 1 TiB and 75% = 3 TiB both fit their registered maxima).
+        let t4 = compute_memory_tuning(4 * 1024 * GIB, 64, 100);
+        assert_eq!(t4.shared_buffers_mb, 1024 * 1024);
+        assert_eq!(t4.effective_cache_size_mb, 3 * 1024 * 1024);
     }
 
     #[test]
