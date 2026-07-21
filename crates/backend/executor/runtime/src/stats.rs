@@ -69,6 +69,17 @@ counters!(RuntimeStats, RuntimeStatsSnapshot;
     /// M5-5 decaying priorities: priority updates applied (one per RG per
     /// crossed decay quantum until the RG reaches the p_min floor).
     priority_decays,
+    /// POOL-QOS (GL-POOLDB-1 mitigation): interactive demand published
+    /// (unmet-width units added at fresh bound publishes).
+    qos_demand_published,
+    /// POOL-QOS: demoted serves that yielded their thread at a morsel
+    /// boundary toward waiting interactive width.
+    qos_yields,
+    /// POOL-QOS: priority-lane permit acquires by interactive drives.
+    qos_priority_acquires,
+    /// POOL-QOS: demoted holders that released/re-acquired their permit at
+    /// a step boundary because priority waiters were parked.
+    qos_permit_defers,
     /// M5+1 pipeline-DAG dispatch: dependency-satisfied pipelines published
     /// into ADDITIONAL slots (beyond the RG's first/reused slot) — the
     /// independent-subtree overlap the increment buys.

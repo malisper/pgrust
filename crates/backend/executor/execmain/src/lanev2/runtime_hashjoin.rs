@@ -2658,11 +2658,12 @@ fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeHjShared
         return;
     };
     let mut local = lane.local();
+    let lane = std::cell::RefCell::new(Some(lane));
     let entered = std::cell::Cell::new(false);
     let bound = parallel::with_query_task_binding(target, || {
         entered.set(true);
         payload.started.fetch_add(1, Ordering::SeqCst);
-        drive_bound(payload, &mut local, &rg)
+        drive_bound(payload, &mut local, &rg, &mut lane.borrow_mut())
     });
     match bound {
         Ok(()) => {}
@@ -2700,10 +2701,11 @@ fn drive_bound(
     payload: &Arc<RuntimeHjShared>,
     local: &mut runtime::WorkerLocal,
     rg: &runtime::RgHandle,
+    lane: &mut Option<runtime::ExternalLane>,
 ) -> PgResult<()> {
     build_worker_exec(payload)?;
     HJ_PAYLOAD.with(|c| *c.borrow_mut() = Some(Arc::clone(payload)));
-    let _outcome = payload.rt.drive_pinned(local, rg);
+    let _end = super::standing_channel::drive_pool_serve(&payload.rt, local, rg, lane);
     HJ_PAYLOAD.with(|c| *c.borrow_mut() = None);
     let self_errored =
         HJ_WORKER_EXEC.with(|cell| cell.borrow().as_ref().is_some_and(|ex| ex.errored.get()));

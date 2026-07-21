@@ -92,6 +92,12 @@ pub struct BoundDescriptor {
     pub serve: fn(&Arc<dyn std::any::Any + Send + Sync>) -> BoundServe,
     /// Opaque engagement board (the parallel crate's per-RG entry).
     pub payload: Arc<dyn std::any::Any + Send + Sync>,
+    /// POOL-QOS: the engagement's requested width (the board's ticket
+    /// count / dop). Feeds the interactive-demand ledger: a FRESH
+    /// (undecayed) bound RG published with width W wants W serves; unmet
+    /// width is what demoted serves yield their threads toward. Advisory —
+    /// never a correctness input.
+    pub width: u32,
 }
 
 /// One `BoundDescriptor::serve` call's scheduling verdict.
@@ -225,7 +231,7 @@ impl Completion {
         }
     }
 
-    fn try_wait(&self) -> Option<RgOutcome> {
+    pub(crate) fn try_wait(&self) -> Option<RgOutcome> {
         lock(&self.state).outcome
     }
 

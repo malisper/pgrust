@@ -2465,6 +2465,7 @@ fn bound_model_submit(
         BoundDescriptor {
             serve: deferred_serve,
             payload: Arc::clone(&placeholder) as Arc<dyn std::any::Any + Send + Sync>,
+            width: 0,
         },
         move |rg| {
             let payload = Arc::new(BoundModelPayload {
@@ -2813,6 +2814,7 @@ fn sealed_bound_submit(
         BoundDescriptor {
             serve: pool_board_serve,
             payload: Arc::clone(&placeholder) as Arc<dyn std::any::Any + Send + Sync>,
+            width: 0,
         },
         // rg-set-before-publish (rung 3): the payload cell completes inside
         // on_rg, before the RG is pick-visible.
@@ -3157,6 +3159,7 @@ fn pool_blocking_inside_bound_serve() {
             BoundDescriptor {
                 serve: deferred_serve,
                 payload: Arc::clone(&placeholder) as Arc<dyn std::any::Any + Send + Sync>,
+            width: 0,
             },
             move |rg| {
                 let payload = Arc::new(BoundModelPayload {
@@ -3316,6 +3319,133 @@ fn pool_needle_read_order_no_false_death() {
     });
 }
 
+/// POOL-QOS (GL-POOLDB-1 mitigation) — the serve-yield protocol,
+/// transcribed 1:1 from parallel::standing::StandingEngagement
+/// {try_grant_yield, yield_detach} + the leader needle's yield-kind split
+/// (standing_channel wait_engaged). Two participants on a 2-ticket board;
+/// BOTH race a voluntary yield against each other and against the leader's
+/// poll. Pins: the last-active guard admits AT MOST ONE yield (an
+/// all-yielded board cannot exist); the yield-kind death needle
+/// (terminal = detached − yielded, yielded read AFTER detached) NEVER
+/// fires while the board is healthy; the leader's close_and_await
+/// terminates with detached == claimed and grants fully settled.
+///
+/// RED (verified by transient weakening): drop the last-active guard
+/// (grant unconditionally) ⇒ loom finds the both-yield interleaving — the
+/// needle sees detached >= claimed with terminal == 0 blocked only by the
+/// yield-kind split, and WITHOUT the split (the second weakening) the
+/// needle kills a healthy engagement (the assert fires).
+#[test]
+fn pool_qos_yield_last_active_guard_and_needle() {
+    struct QosBoard {
+        board: Arc<MirrorBoard>,
+        yielded: AtomicUsize,
+        yield_grants: AtomicUsize,
+    }
+    impl QosBoard {
+        /// try_grant_yield (standing.rs): last-active guard under the
+        /// board mutex.
+        fn try_grant_yield(&self) -> bool {
+            let (m, _cv) = &*self.board.gang;
+            let _g = m.lock().unwrap();
+            let claimed = self.board.claimed.load(Ordering::SeqCst);
+            let detached = self.board.detached.load(Ordering::SeqCst);
+            let grants = self.yield_grants.load(Ordering::SeqCst);
+            let active = claimed.saturating_sub(detached).saturating_sub(grants);
+            if active < 2 {
+                return false;
+            }
+            self.yield_grants.fetch_add(1, Ordering::SeqCst);
+            true
+        }
+        /// yield_detach (standing.rs): yielded++, grant settle, detach —
+        /// atomically under the board mutex, then the wake.
+        fn yield_detach(&self) {
+            {
+                let (m, _cv) = &*self.board.gang;
+                let _g = m.lock().unwrap();
+                self.yielded.fetch_add(1, Ordering::SeqCst);
+                self.yield_grants.fetch_sub(1, Ordering::SeqCst);
+                self.board.detached.fetch_add(1, Ordering::SeqCst);
+            }
+            self.board.wake();
+        }
+    }
+
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(3);
+    b.max_branches = 500_000;
+    b.check(|| {
+        let qb = Arc::new(QosBoard {
+            board: MirrorBoard::new(2),
+            yielded: AtomicUsize::new(0),
+            yield_grants: AtomicUsize::new(0),
+        });
+        let started = Arc::new(AtomicUsize::new(0));
+        let complete = Arc::new(AtomicBool::new(false));
+
+        // Two participants; each claims, starts, tries to YIELD, and
+        // completes the drive when the yield is denied (the last-active
+        // participant must finish the work).
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let qb1 = Arc::clone(&qb);
+            let (s1, c1) = (Arc::clone(&started), Arc::clone(&complete));
+            handles.push(thread::spawn(move || {
+                if qb1.board.try_claim().is_some() {
+                    let _detach = MirrorDetach(&qb1.board);
+                    s1.fetch_add(1, Ordering::SeqCst);
+                    if qb1.try_grant_yield() {
+                        // Granted: leave at the morsel boundary. The
+                        // MirrorDetach guard is the DetachGuard whose bump
+                        // yield_detach subsumes — mirror the TLS-mark skip
+                        // by forgetting the guard.
+                        qb1.yield_detach();
+                        std::mem::forget(_detach);
+                        return;
+                    }
+                    // Denied (last active): finish the engagement.
+                    c1.store(true, Ordering::SeqCst);
+                }
+            }));
+        }
+
+        // Leader poll (wait_engaged's needle with the yield-kind split;
+        // detached-before-claimed AND detached-before-yielded read order).
+        loop {
+            if complete.load(Ordering::SeqCst) {
+                break;
+            }
+            let started_v = started.load(Ordering::SeqCst);
+            let detached = qb.board.detached.load(Ordering::SeqCst);
+            let claimed_now = qb.board.claimed.load(Ordering::SeqCst);
+            let yielded = qb.yielded.load(Ordering::SeqCst);
+            let terminal = detached.saturating_sub(yielded);
+            if claimed_now > 0 && started_v > 0 && detached >= claimed_now && terminal > 0 {
+                assert!(
+                    complete.load(Ordering::SeqCst),
+                    "died needle fired on a healthy yielding engagement"
+                );
+                break;
+            }
+            thread::yield_now();
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        qb.board.close_and_await();
+
+        assert!(complete.load(Ordering::SeqCst), "the last active participant completed");
+        assert!(qb.yielded.load(Ordering::SeqCst) <= 1, "last-active guard: at most one yield");
+        assert_eq!(qb.yield_grants.load(Ordering::SeqCst), 0, "grants fully settled");
+        assert_eq!(
+            qb.board.detached.load(Ordering::SeqCst),
+            qb.board.claimed.load(Ordering::SeqCst),
+            "detached == claimed at the leader join"
+        );
+    });
+}
+
 /// M2 inc-3 rung 3 — the rg-set-after-publish WINDOW closed (set-before-
 /// publish). A bound submission's serve resolves the RG through the
 /// caller's payload cell; under the OLD order (publication at submit, cell
@@ -3439,6 +3569,7 @@ fn pool_publish_order_no_rg_gone_churn() {
             BoundDescriptor {
                 serve: window_serve,
                 payload: Arc::clone(&payload) as Arc<dyn std::any::Any + Send + Sync>,
+                width: 0,
             },
             // THE ORDER UNDER TEST: the cell completes before publication.
             move |rg| {

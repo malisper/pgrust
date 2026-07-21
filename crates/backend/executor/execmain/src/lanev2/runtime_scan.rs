@@ -1232,6 +1232,8 @@ fn helper_drive_lazy(
         return;
     };
     let mut local = lane.local();
+    let lane_ordinal = lane.ordinal();
+    let mut lane = Some(lane);
     LAZY_CTX.with(|slot| {
         // A stale ctx can only remain if a previous drive escaped its
         // structured cleanup (a drive_pinned panic — already a protocol
@@ -1243,11 +1245,12 @@ fn helper_drive_lazy(
             bind_failed: false,
         });
     });
-    let _outcome = payload.rt.drive_pinned(&mut local, rg);
+    let _end =
+        super::standing_channel::drive_pool_serve(&payload.rt, &mut local, rg, &mut lane);
     // WS-O inc-2 pin-board assert (as the entry drive's).
     debug_assert!(payload.rt.debug_pin_settled(&local), "pin unsettled after lazy drive");
     parallel::gtrace("w.qtb.body.end");
-    emit_wfin("bound", lane.ordinal(), &local, rg);
+    emit_wfin("bound", lane_ordinal, &local, rg);
     let ctx = LAZY_CTX
         .with(|slot| slot.borrow_mut().take())
         .expect("lazy bind ctx present after the drive");
@@ -1303,11 +1306,13 @@ fn helper_drive_eager(
         return;
     };
     let mut local = lane.local();
+    let lane_ordinal = lane.ordinal();
+    let lane = std::cell::RefCell::new(Some(lane));
     let entered = std::cell::Cell::new(false);
     let bound = parallel::with_query_task_binding(target, || {
         entered.set(true);
         payload.started.fetch_add(1, Ordering::SeqCst);
-        drive_bound(payload, lane.ordinal(), &mut local, rg)
+        drive_bound(payload, lane_ordinal, &mut local, rg, &mut lane.borrow_mut())
     });
     match bound {
         Ok(()) => {}
@@ -1349,9 +1354,10 @@ fn drive_bound(
     ordinal: usize,
     local: &mut runtime::WorkerLocal,
     rg: &runtime::RgHandle,
+    lane: &mut Option<runtime::ExternalLane>,
 ) -> PgResult<()> {
     build_worker_exec(payload)?;
-    let _outcome = payload.rt.drive_pinned(local, rg);
+    let _end = super::standing_channel::drive_pool_serve(&payload.rt, local, rg, lane);
     // WS-O inc-2 pin-board assert (as the entry drive's).
     debug_assert!(payload.rt.debug_pin_settled(local), "pin unsettled after bound drive");
     emit_wfin("bound", ordinal, local, rg);

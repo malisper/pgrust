@@ -329,7 +329,18 @@ fn wait_engaged(
         // was recorded: a worker died outside every catch layer (detach is
         // Drop-guaranteed, so this is reachable only through that needle).
         // detached-before-claimed read order per the block comment above.
-        if claimed_now > 0 && started > 0 && detached >= claimed_now {
+        //
+        // POOL-QOS yield-kind split: voluntary serve-yields are detaches
+        // too, but HEALTHY ones (the board's last-active guard keeps >=1
+        // participant, and yielded capacity refills through the concurrent
+        // ticket cap) — subtract them. Read order law: `yielded` is read
+        // AFTER `detached` (every yield bumps both under one lock, yielded
+        // first), so `terminal` can only UNDER-count — the needle waits
+        // instead of killing a live engagement; a real death stabilizes
+        // terminal > 0 by the next iteration.
+        let yielded = entry.yielded();
+        let terminal = detached.saturating_sub(yielded);
+        if claimed_now > 0 && started > 0 && detached >= claimed_now && terminal > 0 {
             if let Some(o) = waiter.try_wait() {
                 take_slot();
                 parallel::standing::close_and_await(&entry);
@@ -383,7 +394,49 @@ pub(super) fn try_pool_channel(
     }
     let entry = parallel::standing::try_engage_pool(shared, dop.max(0) as usize)?;
     let payload: Arc<dyn std::any::Any + Send + Sync> = Arc::clone(&entry) as _;
-    Some((entry, runtime::BoundDescriptor { serve: pooldb_serve, payload }))
+    Some((entry, runtime::BoundDescriptor {
+        serve: pooldb_serve,
+        payload,
+        // POOL-QOS: the engagement's requested width feeds the interactive
+        // demand ledger (unmet width draws demoted serve-yields).
+        width: dop.max(0) as u32,
+    }))
+}
+
+/// POOL-QOS (GL-POOLDB-1 mitigation): the arms' driver-body drive. On a
+/// POOL serve the nested drive may YIELD at a morsel boundary toward
+/// waiting interactive width (`Runtime::drive_pinned_yieldable`; the grant
+/// callback is the board's last-active-guarded exit, and the pending
+/// detach settles in serve_ticket after the driver's teardown). Returns
+/// None on a yield — the arm's teardown runs exactly as on completion:
+/// the participant simply stops participating; its partials live in the
+/// leader-arena per-worker slots and seal cross-worker per the elastic
+/// protocol (the loom-modeled accepter≠sealer invariant). Gang serves and
+/// launched helpers keep the plain drive byte-identically (pooldb0 is the
+/// letter's control arm).
+pub(super) fn drive_pool_serve(
+    rt: &runtime::Runtime,
+    local: &mut runtime::WorkerLocal,
+    rg: &runtime::RgHandle,
+    lane: &mut Option<runtime::ExternalLane>,
+) -> Option<runtime::RgOutcome> {
+    if parallel::standing::serving_on_pool() {
+        let end = rt.drive_pinned_yieldable(local, rg, &mut || {
+            parallel::standing::try_grant_yield_current()
+        });
+        if end.is_none() {
+            // Yielded: PARK this participant's lane until the RG completes
+            // — its per-lane sink slot may hold mid-accept state that a
+            // rejoining serve must not inherit (the FREEZE set seals it
+            // cross-worker later, the elastic accepter≠sealer invariant).
+            if let Some(l) = lane.take() {
+                rt.park_external_lane(l, rg);
+            }
+        }
+        end
+    } else {
+        Some(rt.drive_pinned(local, rg))
+    }
 }
 
 /// The bound descriptor's serve: parallel::standing::pool_serve mapped

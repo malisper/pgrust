@@ -1204,6 +1204,7 @@ fn pool_engage_pass(
     let descriptor = runtime::BoundDescriptor {
         serve: vacuum_index_pooldb_serve,
         payload: Arc::clone(&entry) as Arc<dyn std::any::Any + Send + Sync>,
+        width: 0, // utility: never charges interactive demand
     };
     let (rg, waiter) = rt.submit_pinned_bound_utility(
         runtime::QuerySpec {

@@ -3200,11 +3200,12 @@ fn helper_drive(shared: &parallel::ParallelShared, payload: &Arc<RuntimeAggShare
     };
     let mut local = lane.local();
     let worker = payload.rt.nthreads() + lane.ordinal();
+    let lane = std::cell::RefCell::new(Some(lane));
     let entered = std::cell::Cell::new(false);
     let bound = parallel::with_query_task_binding(target, || {
         entered.set(true);
         payload.started.fetch_add(1, Ordering::SeqCst);
-        drive_bound(payload, &mut local, &rg, worker)
+        drive_bound(payload, &mut local, &rg, worker, &mut lane.borrow_mut())
     });
     match bound {
         Ok(()) => {}
@@ -3281,10 +3282,11 @@ fn drive_bound(
     local: &mut runtime::WorkerLocal,
     rg: &runtime::RgHandle,
     worker: usize,
+    lane: &mut Option<runtime::ExternalLane>,
 ) -> PgResult<()> {
     build_worker_exec(payload)?;
     spill_substrate_probe(payload, worker);
-    let _outcome = payload.rt.drive_pinned(local, rg);
+    let _end = super::standing_channel::drive_pool_serve(&payload.rt, local, rg, lane);
     let self_errored =
         WORKER_EXEC.with(|cell| cell.borrow().as_ref().is_some_and(|ex| ex.errored.get()));
     let teardown = teardown_worker_exec(!self_errored);
