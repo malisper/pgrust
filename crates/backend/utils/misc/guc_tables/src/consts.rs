@@ -58,14 +58,16 @@ pub const DEFAULT_MIN_WAL_SEGS: i32 = 5;
 // (notes/ppool-lane.md:58), standing-executor worker-launch eliminated
 // (notes/m2-pool-binding.md:293). Anchoring C's ~1-2ms=1000 => 175us ~= 100.
 // CONTINGENCY: honest only while the runtime pool is the executor; a shape
-// that falls to the LEGACY cold-spawn Gather (~11ms full backend boot,
-// costsize/gucs.rs:53) is under-priced here — the runtime router's coverage
-// is the mitigation (docs/design/jit-parallel-defaults.md).
+// that falls to the LEGACY cold-spawn Gather (~11ms full backend boot —
+// priced by costsize/gucs.rs's PGRCOLUMNAR_PARALLEL_SETUP_MULTIPLIER x this
+// GUC on pgrcolumnar plans) is under-priced here — the runtime router's
+// coverage is the mitigation (docs/design/jit-parallel-defaults.md).
 pub const DEFAULT_PARALLEL_SETUP_COST: f64 = 100.0;
 // C's 0.1 prices a cross-process shm_mq copy of one tuple. pgrust moves tuples
 // worker->leader in-process through a chunked Arc ring at ~27ns/tuple (the
-// pgrcolumnar measurement, costsize/gucs.rs:57; DEFAULT_PGRCOLUMNAR_PARALLEL_
-// TUPLE_COST=0.005 for the pure-pointer-walk chunked path). 0.01 = 10x below
+// pgrcolumnar measurement, costsize/gucs.rs; pgrcolumnar plans price
+// transfer at PGRCOLUMNAR_PARALLEL_TUPLE_MULTIPLIER=0.5 x this GUC = 0.005
+// at this default, the pure-pointer-walk chunked path). 0.01 = 10x below
 // C, the in-process MinimalTuple-memcpy rate ~= one tuple's cpu_tuple_cost.
 pub const DEFAULT_PARALLEL_TUPLE_COST: f64 = 0.01;
 pub const DEFAULT_RANDOM_PAGE_COST: f64 = 4.0;

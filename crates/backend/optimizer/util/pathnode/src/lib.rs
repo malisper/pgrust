@@ -1752,6 +1752,20 @@ pub fn create_agg_path<'mcx>(
         sub_width,
         sub_total,
     );
+    // Step-0b honest-Gather pricing: a leader hashagg above a Gather on a
+    // pgrcolumnar-fed plan carries an executor-honest spill term (the q33
+    // cliff). Exact no-op when the scaled working set fits the hash budget
+    // or on any shape the exchange adjust above owns — see costsize.
+    costsize::cost_agg_leader_spill_adjust(
+        run,
+        id,
+        aggstrategy,
+        subpath_id,
+        aggcosts,
+        num_groups,
+        sub_rows,
+        sub_width,
+    );
 
     let target = run.root.pathtarget(target_id);
     let (t_startup, t_per_tuple) = (target.cost.startup, target.cost.per_tuple);
