@@ -12,6 +12,22 @@
 //! bootstrap_matrix_matches_tsv precedent). No naked numbers: every value
 //! here carries measurement sha + date + jobs in the TSV.
 //!
+//! CALIBRATION STATUS — PROVISIONAL(v1-contaminated), SHADOW-ONLY BASIS
+//! (2026-07-21, scratchpad/night/hj-ladder-v2-and-seat-letter.md): the v1
+//! rowflip ladder these curves are fit from was doubly contaminated — its
+//! serial/legacy preludes never pinned pgrust.parallel_engine (under a
+//! PGRUST_RUNTIME=1 boot they ran the RUNTIME arm at dop=ncpu) and the
+//! job class defaulted SERVER_PROFILE=dev (inflates the runtime arm ~19x
+//! vs serial ~1.7x). The v1 record IS what the shipped FloorGuards were
+//! carved from, so these curves remain the correct SHADOW-parity encoding
+//! of the floors — but they must NEVER be the basis of a
+//! PGRUST_M5_COST_ROUTE flip. Witnessed v2 spot values (5M dop4, jobs
+//! -4fc1/-3862) contradict v1 on several classes (heap-cmp rt/serial 0.26
+//! vs v1's 1.25; distinct 0.46 vs 1.21; hashjoin rt/serial 0.31 vs 3.48).
+//! The refit rides the witnessed v2 grid (scripts/m5-rowflip-measure-v2.sh,
+//! per-leg engine pins + negative witnesses + fast-profile) — GL-COST-3;
+//! per-class TSV notes carry the witnessed values known so far.
+//!
 //! MODEL (ratio-normalized — legacy per-row work == 1 unit; verdicts are
 //! ratio comparisons, so the absolute anchor cancels; step 2 rebases both
 //! sides to cost units via the t34 anchor without moving any verdict):
@@ -198,10 +214,15 @@ pub fn cost_route_decides(class: RuntimeClass) -> bool {
 mod tests {
     use super::*;
 
-    // The engaged ladder cells (class, rows, dop, measured rt/legacy) —
+    // The engaged ladder cells (class, rows, dop, recorded rt/legacy) —
     // the SAME table scripts/runtime-cost-fit.py fits from (provenance in
     // the module doc). Refused (sub-granule) cells are excluded: they
     // measure fallback parity, not arm economics.
+    //
+    // NOTE these are the V1 RECORD's values (see CALIBRATION STATUS): the
+    // tests below pin the fit's equivalence to the record THE SHIPPED
+    // FLOORS ENCODE — shadow-parity, not ground truth. The v2 refit
+    // (GL-COST-3) replaces this table wholesale.
     const CELLS: &[(RuntimeClass, f64, i32, f64)] = &[
         (RuntimeClass::CbPlainAggFold, 1e6, 4, 0.34),
         (RuntimeClass::CbPlainAggFold, 2.5e6, 4, 1.26),
@@ -298,13 +319,15 @@ mod tests {
         }
     }
 
-    /// The curve-vs-floor disagreement set at measured cells is EXACTLY the
-    /// named forgone win the design expects the curves to recover
-    /// (hashjoin dop16@2.5M, measured 0.92 — the rectangle's clean-2M-bound
-    /// sacrifice) plus nothing. Any new disagreement is a red test — it
-    /// must arrive with a ladder cell + a flip-gate letter, not by drift.
-    /// (Parity-band cells are exempt: suppressed-at-parity vs
-    /// kept-at-parity are both inside the shipped acceptance bar.)
+    /// The curve-vs-floor disagreement set at recorded cells is EXACTLY the
+    /// one cell the v1 record named a forgone win (hashjoin dop16@2.5M,
+    /// recorded 0.92 — the rectangle's clean-2M-bound sacrifice) plus
+    /// nothing. Any new disagreement is a red test — it must arrive with a
+    /// ladder cell + a flip-gate letter, not by drift. (Parity-band cells
+    /// are exempt.) CAVEAT: the 0.92 itself is v1-contaminated data — the
+    /// witnessed v2 record re-adjudicates this cell with everything else
+    /// (GL-COST-3); until then the pin documents floor-encoding parity
+    /// only.
     #[test]
     fn curve_vs_floor_disagreements_are_exactly_the_named_forgone_wins() {
         let mut disagreements = Vec::new();
