@@ -3484,8 +3484,19 @@ pub fn agg_sink_key_spec(node: &AggStateData<'_>) -> Option<SinkKeySpec> {
             // Intern component(s) decode through the canonical image (one
             // tail raw — the historical image; two tails length-prefixed,
             // canon-sink car 1); the intern table's presence must match the
-            // shape.
-            if (shape.n_intern() >= 1) != ch.intern.is_some() {
+            // shape — EXCEPT the DIRECT single-text arm (arena-strings
+            // inc-3): the table keys on the canonical image itself and
+            // carries NO intern table BY DESIGN. Its flush emits the same
+            // bytes-mode runs as the intern arm, so the sink key spec is
+            // the same Multi shape (GL-ARENASTR-1 smoke: this mismatch
+            // returned None on direct-armed PARALLEL worker builds and
+            // hard-failed the engagement's worker-side shape re-check —
+            // fail-closed held, no wrong answers).
+            if ch.text_direct {
+                if shape.n_intern() != 1 || ch.intern.is_some() {
+                    return None; // belt: direct is exactly 1-Intern, no intern table
+                }
+            } else if (shape.n_intern() >= 1) != ch.intern.is_some() {
                 return None;
             }
             Some(SinkKeySpec::Multi(shape.clone()))
