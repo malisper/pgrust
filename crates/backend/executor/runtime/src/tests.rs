@@ -4188,10 +4188,15 @@ mod bound_gate {
         assert_eq!(waiter.wait(), RgOutcome::Completed);
         work.assert_all_executed_once();
         assert_eq!(work.finalizes.load(Ordering::SeqCst), 1);
+        // Counter reads AFTER the join: the leader's completion wake races
+        // the serving worker's post-drive bookkeeping (serves increments
+        // after drive_pinned returns; bound_serves after the serve returns)
+        // — shutdown joins every worker, settling both (the fleet CONFIRM
+        // caught the pre-join read at 0).
+        pool.shutdown();
         let serves = payload.serves.load(Ordering::SeqCst);
         assert!(serves >= 1 && serves <= 2, "cap-bounded serves, got {serves}");
         assert!(rt.stats().bound_serves >= 1, "serve dispatched through the gate");
-        pool.shutdown();
         assert_eq!(
             rt.execution_permits().available(),
             2,

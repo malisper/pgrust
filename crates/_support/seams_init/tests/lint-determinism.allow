@@ -305,7 +305,7 @@ env	crates/backend/access/pgrcolumnar/src/writer.rs	7
 env	crates/backend/access/table/tableam/src/lib.rs	1
 env	crates/backend/access/transam/parallel/src/lib.rs	2
 env	crates/backend/access/transam/parallel/src/query_task_guard.rs	2
-env	crates/backend/access/transam/parallel/src/standing.rs	1
+env	crates/backend/access/transam/parallel/src/standing.rs	2	DST-REVIEW(m2-inc2): +1 = PGRUST_RUNTIME_POOLDB (the PGPROC-leasing pool-workers kill switch, default OFF) — process-constant lane-knob class (env read once, OnceLock-cached); knobs-registry routing rides the chartered SE/DST migration
 env	crates/backend/access/transam/xlogrecovery/src/lib.rs	1
 env	crates/backend/commands/analyze/src/lib.rs	2
 env	crates/backend/commands/copy/src/parallel.rs	14
@@ -479,7 +479,7 @@ once	crates/backend/access/pgrcolumnar/src/segfile.rs	1
 once	crates/backend/access/pgrcolumnar/src/writer.rs	4
 once	crates/backend/access/transam/parallel/src/lib.rs	2
 once	crates/backend/access/transam/parallel/src/query_task_guard.rs	2
-once	crates/backend/access/transam/parallel/src/standing.rs	2	P3 row 19 (design-cited L148): gang OnceLock init — pure Mutex+Condvar alloc closure
+once	crates/backend/access/transam/parallel/src/standing.rs	3	P3 row 19 (design-cited L148): gang OnceLock init — pure Mutex+Condvar alloc closure; DST-REVIEW(m2-inc2): +1 = pooldb_enabled's OnceLock (pure env-read init closure, the R-KNOBS idiom)
 once	crates/backend/access/transam/xlogrecovery/src/lib.rs	1
 once	crates/backend/catalog/pg_constraint/src/lib.rs	1
 once	crates/backend/commands/copy/src/parallel.rs	15
@@ -528,7 +528,7 @@ once	crates/backend/optimizer/plan/planner/src/syscache_memo.rs	3
 once	crates/backend/postmaster/autovacuum/src/shmem.rs	1
 once	crates/backend/postmaster/bgjobs/src/lib.rs	3
 once	crates/backend/postmaster/bgworker/src/lib.rs	1
-once	crates/backend/postmaster/launch_backend/src/lib.rs	3	DST-REVIEW(simcorpus): +1 = doorskip_red_armed's OnceLock (pgsync type; P3 row-19 class: pure env-read init closure, cfg(pgrust_sim)-fenced red knob memo)
+once	crates/backend/postmaster/launch_backend/src/lib.rs	4	DST-REVIEW(simcorpus): +1 = doorskip_red_armed's OnceLock (pgsync type; P3 row-19 class: pure env-read init closure, cfg(pgrust_sim)-fenced red knob memo); DST-REVIEW(m2-inc2): +1 = rtpool pooldb_armed's OnceLock (pure env/knob-composition read, P3 row-19 class)
 once	crates/backend/replication/walsender/src/lib.rs	1
 once	crates/backend/storage/ipc/pmsignal/src/lib.rs	1
 once	crates/backend/storage/ipc/procsignal/src/lib.rs	1
