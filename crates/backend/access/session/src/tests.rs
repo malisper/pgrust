@@ -619,6 +619,14 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      session state it hints at lives in the binder layer's sticky
     //      slot (query_task_guard STICKY, already row 57-class), which
     //      owns capture/restore — the hint itself carries no identity.
+    // GL-SLEASE-1 flip (count UNCHANGED at 522 — the census counts
+    // thread_local! source sites and the new cell rides row 61's block):
+    //   62b. executor/execmain/src/execmain.rs — SERIAL_LEASE_HELD joined
+    //      the SERIAL_LEASE_DEPTH block: the runtime whose permit the
+    //      current top-level serial lease holds (feeds the engagement-
+    //      yield release/re-acquire). Pure permit bookkeeping, the same
+    //      executor-frame lifecycle and non-session classification as
+    //      row 61.
     assert_eq!(count_tree(crates), 526, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
