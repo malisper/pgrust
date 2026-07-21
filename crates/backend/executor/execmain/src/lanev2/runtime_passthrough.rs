@@ -547,7 +547,12 @@ fn engage_passthrough_inner(
         if parallel::nworkers(pcxt) <= 0 {
             return Ok(PassthroughEngageOutcome::Fallback);
         }
-        parallel::InstallQueryTaskBinding(pcxt, parallel::QueryTaskBindingPolicy::default())?;
+        // Install the REAL session policy (not default): for the wire path
+        // every probed flag is false by the hook's gates (identical encoding);
+        // for W0 write dests `pending_invalidations` rides along so a parked-
+        // helper adoption (never used by this launched-only ceremony today)
+        // would fail-closed refuse in validate() rather than bind blind.
+        parallel::InstallQueryTaskBinding(pcxt, parallel::query_task_policy_probe())?;
         payload.set_pcxt_shared(parallel::shared_for(pcxt));
         parallel::set_private(pcxt, Arc::clone(payload) as _);
 
@@ -961,6 +966,15 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
     if number_tuples != 0 {
         return Ok(false);
     }
+    // W0 funnel-into-writer (parallel-writes design §4; write_funnel.rs): a
+    // write DestReceiver (IntoRel/TransientRel — CTAS / SELECT INTO / matview
+    // datafill) engages only under its own kill switch, and fail-closes to the
+    // serial loop otherwise. Non-write dests: unchanged rules.
+    let write_dest = match super::write_funnel::classify_write_dest(dest.mydest()) {
+        super::write_funnel::WriteDestVerdict::NotWrite => false,
+        super::write_funnel::WriteDestVerdict::Admit => true,
+        super::write_funnel::WriteDestVerdict::Refuse => return Ok(false),
+    };
     // Fail-closed gates: no EPQ recheck, no junk filter, no cursor/SPI cadence,
     // and no instrumented run (review fix #3b: EXPLAIN ANALYZE node
     // instrumentation would silently read zero — the workers' per-node
@@ -1009,7 +1023,13 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
     // FLOORGUARD (GL-FUNNEL-4 flip band; GL-FUNNEL-1 recipe, all fail-closed):
     // 1. QUAL REQUIRED — bare no-qual passthroughs measured 1.55–2.3x losses
     //    (the drain ceiling); never admissible.
-    if plan.qual.is_nil() {
+    //    W0 write dests are EXEMPT from the wire band (this gate and the
+    //    emit-fraction gate below): those price the funnel against the serial
+    //    WIRE emit, whereas a write drain's per-row baseline is a heap insert
+    //    (WAL + extension + TOAST) — bulk (high-emit, unqualed) CTAS is the
+    //    canonical write shape. Write admission is guarded by its own kill
+    //    switch (default OFF) until the W0 fleet ladder prices a write band.
+    if plan.qual.is_nil() && !write_dest {
         return Ok(false);
     }
     // 2. DOP >= 2 (no DOP-1 arm was ever measured; DOP2 already wins 0.59–0.75
@@ -1022,8 +1042,21 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
 
     // Binder policy: a shape the query-task binder would refuse must not launch.
     let policy = parallel::query_task_policy_probe();
-    if policy.has_params || policy.temp_state || policy.serializable || policy.pending_invalidations
-    {
+    if policy.has_params || policy.temp_state || policy.serializable {
+        return Ok(false);
+    }
+    // Pending uncommitted-DDL invalidations: refused (parity with every other
+    // arm's probe) EXCEPT for W0 write dests, whose statement SELF-CREATES the
+    // target before the SELECT runs — the flag is unconditionally true there.
+    // Admission is sound for the LAUNCHED-ONLY ceremony below: launched gang
+    // workers bind through `parallel::parallel_worker_body`, whose
+    // pending-invals arm skips the warm claim, runs InvalidateSystemCaches,
+    // and notes the abort-poison taint (the shipped matview-datafill /
+    // legacy-Gather precedent); the leader-producer sees its own state
+    // natively. The parked-helper binder (`validate()`) still refuses these
+    // targets — the InstallQueryTaskBinding policy below carries the real
+    // probe so any future adoption path fail-closes.
+    if policy.pending_invalidations && !write_dest {
         return Ok(false);
     }
 
@@ -1065,12 +1098,19 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
             .as_ref()
             .map(|rel| rel.rd_rel.reltuples as f64)
             .unwrap_or(0.0);
-        if !floorguard_emit_band_admits(
-            plan.parallel_aware,
-            plan.plan_rows,
-            reltuples,
-            emit_max_pct,
-        ) {
+        // W0 (writes-stack): write destinations bypass the emit band — every
+        // row is "emitted" into the writer by construction, so the band is
+        // meaningless there; the divisor member's whole-plan-units law
+        // (floorguard_emit_band_admits: fragment estimates refuse
+        // categorically, stats-less fail-closed) governs read emits only.
+        if !write_dest
+            && !floorguard_emit_band_admits(
+                plan.parallel_aware,
+                plan.plan_rows,
+                reltuples,
+                emit_max_pct,
+            )
+        {
             return Ok(false);
         }
         let Some(map) = SeqScanSource::new(&mut *ss).granule_map(estate)? else {
@@ -1099,6 +1139,9 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
     );
 
     PT_ENGAGED.fetch_add(1, Ordering::SeqCst);
+    if write_dest {
+        super::write_funnel::note_engaged(total_granules);
+    }
     let outcome = engage_passthrough(
         rt,
         pstmt,
@@ -1133,6 +1176,9 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
     match outcome {
         PassthroughEngageOutcome::Completed(n) => {
             PT_COMPLETED.fetch_add(1, Ordering::SeqCst);
+            if write_dest {
+                super::write_funnel::note_completed(n);
+            }
             estate.es_processed = n;
             Ok(true)
         }

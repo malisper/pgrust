@@ -60,8 +60,8 @@ pub use lanev2::coverage::{coverage_snapshot, LANEV2_BUILTINS, PGRUST_FOID_RANGE
 // internals. Knob face for store arming (§7.3), the §6 assert-arming note,
 // and the §3.3 tick face; coverage-export precedent above.
 pub use lanev2::{
-    cursor_store_armed_note, cursor_store_fill_enabled, cursor_store_fill_set_for_tests,
-    funnel_engagements,
+    ctas_funnel_engagements, cursor_store_armed_note, cursor_store_fill_enabled,
+    cursor_store_fill_set_for_tests, funnel_engagements,
 };
 pub use nodegather::GatherState;
 pub use nodegathermerge::GatherMergeState;
