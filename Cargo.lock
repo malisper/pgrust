@@ -19360,6 +19360,7 @@ dependencies = [
  "miscinit",
  "nbtree",
  "parallel",
+ "pg_clock",
  "postgres_seams",
  "runtime",
  "table",

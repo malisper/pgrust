@@ -4230,6 +4230,93 @@ mod bound_gate {
         );
     }
 
+    /// M4.1 composition (the vacuum driver swap's submit shape): a BOUND
+    /// pinned RG at class UTILITY — pool workers serve it through the
+    /// descriptor, the RG carries the Q0 utility stride weight (p_util
+    /// seeding), and the Track-4 kill switch folds the weight back to the
+    /// foreground seed while the bound gate keeps dispatching.
+    #[test]
+    fn bound_utility_rg_pool_served_and_seeded() {
+        let rt = Runtime::new(RuntimeConfig {
+            workers: 2,
+            standbys: 1,
+            slots: 4,
+            sizing: SizingParams::default(),
+            trace: false,
+        });
+        let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+        let work = SyntheticWork::new(64, None, 0);
+        let payload = Arc::new(BoundPayload {
+            rt: Arc::clone(&rt),
+            rg: OnceLock::new(),
+            tickets: AtomicU64::new(0),
+            cap: 2,
+            serves: AtomicU64::new(0),
+            refuse_all: AtomicBool::new(false),
+        });
+        let descriptor = BoundDescriptor {
+            serve,
+            payload: Arc::clone(&payload) as Arc<dyn std::any::Any + Send + Sync>,
+        };
+        let (h, waiter) = rt.submit_pinned_bound_utility(
+            spec_one(&work, Arc::new(SyntheticMorselSource::new(64))),
+            0,
+            Some(crate::ledger::WidthRequest::unbounded(2)),
+            descriptor,
+        );
+        assert_eq!(
+            h.priority(),
+            rt.p_util(),
+            "utility class seeds the Q0 stride weight on a bound pinned RG"
+        );
+        payload.rg.set(h.clone()).ok().expect("handle stored once");
+        assert_eq!(waiter.wait(), RgOutcome::Completed);
+        work.assert_all_executed_once();
+        pool.shutdown();
+        assert!(rt.stats().bound_serves >= 1, "served through the bound gate");
+        assert_eq!(
+            rt.execution_permits().available(),
+            2,
+            "permits balanced after nested bound drives"
+        );
+
+        // Kill-switch fold (PGRUST_RUNTIME_UTIL_QOS=0 equivalent): the
+        // class folds to Foreground at submit — foreground seed, bound
+        // descriptor intact (an external drive completes it).
+        rt.set_util_qos(false);
+        let work2 = SyntheticWork::new(8, None, 0);
+        let payload2 = Arc::new(BoundPayload {
+            rt: Arc::clone(&rt),
+            rg: OnceLock::new(),
+            tickets: AtomicU64::new(0),
+            cap: 1,
+            serves: AtomicU64::new(0),
+            refuse_all: AtomicBool::new(true),
+        });
+        let descriptor2 = BoundDescriptor {
+            serve,
+            payload: Arc::clone(&payload2) as Arc<dyn std::any::Any + Send + Sync>,
+        };
+        let (h2, waiter2) = rt.submit_pinned_bound_utility(
+            spec_one(&work2, Arc::new(SyntheticMorselSource::new(8))),
+            0,
+            None,
+            descriptor2,
+        );
+        payload2.rg.set(h2.clone()).ok().expect("handle stored once");
+        assert_eq!(
+            h2.priority(),
+            crate::rg::INITIAL_PRIORITY,
+            "kill switch folds the utility weight to the foreground seed"
+        );
+        let lane = rt.acquire_external_lane().expect("external lane");
+        let mut local = lane.local();
+        assert_eq!(rt.drive_pinned(&mut local, &h2), RgOutcome::Completed);
+        assert_eq!(waiter2.wait(), RgOutcome::Completed);
+        work2.assert_all_executed_once();
+        rt.set_util_qos(true);
+    }
+
     /// A refusing serve skip-caches the publication: the pool neither spins
     /// nor wedges — an external (leader-style) drive still completes the
     /// bound RG, and ordinary pool work keeps flowing afterwards.

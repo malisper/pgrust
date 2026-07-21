@@ -868,7 +868,9 @@ fn pool_leader_join(pvs: &ParallelVacuumState, eng: &PoolEngaged) -> PgResult<Po
         flush_pool_progress(shared);
         flush_pool_delay(shared);
     };
-    let t0 = std::time::Instant::now();
+    // DST P2: the claim deadline is BEHAVIORAL (changes execution path) —
+    // its clock is pg_clock (the standing_channel precedent).
+    let t0 = pg_clock::MonoStamp::now();
     let mut traced = false;
     loop {
         if let Some(o) = eng.waiter.try_wait() {
@@ -924,7 +926,9 @@ fn pool_leader_join(pvs: &ParallelVacuumState, eng: &PoolEngaged) -> PgResult<Po
             ptrace(&format!("pooldb refused ({refused} refusals) — launched fallback"));
             return Ok(PoolPassWait::Fallback);
         }
-        if started == 0 && entry.detached() >= claimed && t0.elapsed() > pool_claim_deadline()
+        if started == 0
+            && entry.detached() >= claimed
+            && std::time::Duration::from_nanos(t0.elapsed_ns()) > pool_claim_deadline()
         {
             pool_drain_rg(rt, &eng.rg);
             cleanup(shared, entry);

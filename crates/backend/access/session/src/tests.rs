@@ -597,7 +597,15 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      installed at worker bind, taken at detach; identity is the
     //      engagement, never the session; never captured/restored by an
     //      envelope.
-    assert_eq!(count_tree(crates), 523, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // m4.1 fold delta (524 = 523 + 1) — vacuum driver swap:
+    //   64. commands/vacuumparallel/src/lib.rs — POOL_CX: the index-pass
+    //      participant's per-DRIVE worker context pointer (opened
+    //      relations + strategy on the drive frame), the vacuumlazy
+    //      WORKER_CX / runtime_scan WORKER_EXEC precedent exactly: exists
+    //      only between the drive frame's publish and clear on ONE thread,
+    //      torn down before unbind on every path; no session identity
+    //      (the binder owns all session state movement).
+    assert_eq!(count_tree(crates), 524, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
