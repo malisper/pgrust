@@ -370,9 +370,10 @@ pub fn get_relation_info<'mcx>(
         };
         // SE-TOPNNI text sort-key answerability: v7 per-column stitch dict
         // sizes (0 = no stitch) for the m5_suppress DictCode top-N key
-        // probe. Knob-gated (default OFF): the walk costs nothing at
-        // default, and the probe's text admission is the only consumer.
-        // Served from the session part cache like its siblings.
+        // probe. Knob-gated (default ON since the GL-TOPNNI-1 flip; the
+        // kill spelling stands the walk down with the probe — knob
+        // coherence). Served from the session part cache like its
+        // siblings (one cached-Part vec clone per pgrcolumnar plancat).
         let stitch_gndv = if is_pgrcolumnar && crate::m5_suppress::topn_nonint_enabled() {
             match ::tableam::pgrcolumnar_footer_stitch_gndv(&relation)? {
                 Some(v) => {
