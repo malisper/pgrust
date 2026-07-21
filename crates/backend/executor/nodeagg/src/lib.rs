@@ -643,21 +643,25 @@ fn distinct_set_kind(
     })
 }
 
-/// GL-LOWDIST-3 datetime-distinct widening knob (t35 law: DEFAULT OFF for
-/// the letter; ON iff exactly `1`/`on`; the flip rides the measured
-/// verdict). Same spelling in the planner probe
-/// (m5_suppress::distinct_datetime_enabled) — the GROUPSINK coherence rule:
-/// admission (set kinds here + sink spec derivation) and routing (probe
-/// suppression) flip together. The pardistinct HYBRIDS never read this
-/// knob: their `pd_derive_spec` calls pass `admit_datetime: false` and
-/// refuse datetime sets cleanly (the hybrids are on the D1 deletion list —
-/// widening only sink+serial keeps the displacement direction).
+/// GL-LOWDIST-3 datetime-distinct widening — **DEFAULT ON** since the
+/// GL-LOWDIST-3 flip (letter scratchpad/night/GL-LOWDIST-3-letter.md;
+/// widen A/B @ 96c075c0a, dop {1,4,16} x {2.5M,10M}: serial set-mode
+/// 14-23x over the C sort path, sink/GM 0.015-0.165 at every cell, all
+/// oracle legs byte-equal). Kill spellings exactly
+/// `PGRUST_LANE_V2_DISTINCT_DATETIME=0|off` (the t35 flipped-kill idiom) —
+/// same spelling in the planner probe (m5_suppress::
+/// distinct_datetime_enabled), the GROUPSINK coherence rule: admission
+/// (set kinds here + sink spec derivation) and routing (probe suppression)
+/// kill together. The pardistinct HYBRIDS never read this knob: their
+/// `pd_derive_spec` calls pass `admit_datetime: false` and refuse datetime
+/// sets cleanly (the hybrids are on the D1 deletion list — widening only
+/// sink+serial keeps the displacement direction).
 pub fn distinct_datetime_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        matches!(
+        !matches!(
             std::env::var("PGRUST_LANE_V2_DISTINCT_DATETIME").as_deref(),
-            Ok("1") | Ok("on")
+            Ok("0") | Ok("off")
         )
     })
 }
