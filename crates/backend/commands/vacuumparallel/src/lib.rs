@@ -471,6 +471,13 @@ struct PvUnit {
     /// is publish-after-work; this witnesses it and fails closed).
     busy: AtomicBool,
     run: Mutex<PvUnitRun>,
+    /// GL-M41-2 width census (trace-gated, observability only): first-quantum
+    /// mono_ms, quanta served by pool workers vs the participating leader,
+    /// and busy time actually spent inside quanta (vs. inter-ticket gaps).
+    census_t0_ms: OnceLock<i64>,
+    census_quanta_pool: AtomicU64,
+    census_quanta_leader: AtomicU64,
+    census_busy_ns: AtomicU64,
 }
 
 enum PvUnitRun {
@@ -627,7 +634,22 @@ impl PvPoolPass {
             )
             .into());
         }
+        // GL-M41-2 width census (trace-gated): quanta per server class +
+        // in-quantum busy time; gaps between tickets show up as
+        // (end - t0) - busy in the unit-done line.
+        let census = ptrace_enabled().then(|| {
+            unit.census_t0_ms.get_or_init(pg_clock::mono_ms);
+            pg_clock::MonoStamp::now()
+        });
         let r = self.unit_quantum(cx, unit);
+        if let Some(t0) = census {
+            unit.census_busy_ns.fetch_add(t0.elapsed_ns(), SeqCst);
+            if parallel::standing::serving_on_pool() {
+                unit.census_quanta_pool.fetch_add(1, SeqCst);
+            } else {
+                unit.census_quanta_leader.fetch_add(1, SeqCst);
+            }
+        }
         unit.busy.store(false, SeqCst);
         let more = r?;
         let stream = self.stream.as_ref().expect("chunk ticket on the coarse arm");
@@ -772,6 +794,18 @@ impl PvPoolPass {
                 backend_progress::progress::PROGRESS_VACUUM_INDEXES_PROCESSED,
                 1,
             );
+        }
+        if ptrace_enabled() {
+            if let Some(unit) = self.units.iter().find(|u| u.ord == i) {
+                let t0 = unit.census_t0_ms.get().copied().unwrap_or(0);
+                ptrace(&format!(
+                    "unit-done i={i} start_ms={t0} end_ms={} quanta_pool={} quanta_leader={} busy_ms={}",
+                    pg_clock::mono_ms(),
+                    unit.census_quanta_pool.load(SeqCst),
+                    unit.census_quanta_leader.load(SeqCst),
+                    unit.census_busy_ns.load(SeqCst) / 1_000_000,
+                ));
+            }
         }
     }
 
@@ -1094,6 +1128,10 @@ fn pool_engage_pass(
                 ord,
                 busy: AtomicBool::new(false),
                 run: Mutex::new(PvUnitRun::Pending),
+                census_t0_ms: OnceLock::new(),
+                census_quanta_pool: AtomicU64::new(0),
+                census_quanta_leader: AtomicU64::new(0),
+                census_busy_ns: AtomicU64::new(0),
             })
             .collect();
         let tickets: Vec<u32> = (0..units.len() as u32).collect();
@@ -1226,6 +1264,10 @@ fn pool_leader_join(
     // its clock is pg_clock (the standing_channel precedent).
     let t0 = pg_clock::MonoStamp::now();
     let mut traced = false;
+    // GL-M41-2 census: leader-participation bursts (drive calls / tasks
+    // actually ran) + total join time, emitted on the Done exit.
+    let mut census_bursts: u64 = 0;
+    let mut census_ran: u64 = 0;
     loop {
         if let Some(o) = eng.waiter.try_wait() {
             cleanup(shared, entry);
@@ -1236,6 +1278,11 @@ fn pool_leader_join(
                     eng.pass.safe.len()
                 ));
             }
+            ptrace(&format!(
+                "pass-done join_ms={} claimed={} leader_bursts={census_bursts} leader_ran={census_ran}",
+                t0.elapsed_ns() / 1_000_000,
+                entry.claimed(),
+            ));
             if let Some(e) = eng.pass.take_error() {
                 return Err(e);
             }
@@ -1335,6 +1382,8 @@ fn pool_leader_join(
                 let (_outcome, ran) = rt.drive_pinned_tasks(local, &eng.rg, 1);
                 POOL_CX.with(|c| c.set(std::ptr::null_mut()));
                 shared.cost.active_nworkers.fetch_sub(1, SeqCst);
+                census_bursts += 1;
+                census_ran += ran as u64;
                 participated = ran > 0;
             }
         }
@@ -1360,6 +1409,7 @@ fn launch_gang(
     num_index_scans: i32,
     carry_in: bool,
 ) -> PgResult<()> {
+    let census_t0 = ptrace_enabled().then(pg_clock::MonoStamp::now);
     if num_index_scans > 0 {
         parallel::ReinitializeParallelDSM(pvs.pcxt)?;
     }
@@ -1377,6 +1427,13 @@ fn launch_gang(
         set_vacuum_cost_balance_local(0);
         set_vacuum_shared_cost(Some(Arc::clone(&pvs.shared.cost)));
     }
+    if let Some(t0) = census_t0 {
+        ptrace(&format!(
+            "gang-launch nworkers={nworkers} launched={} ms={}",
+            parallel::nworkers_launched(pvs.pcxt),
+            t0.elapsed_ns() / 1_000_000,
+        ));
+    }
     Ok(())
 }
 
@@ -1390,6 +1447,10 @@ fn parallel_vacuum_process_all_indexes(
     vacuum: bool,
 ) -> PgResult<()> {
     debug_assert!(!parallel::IsParallelWorker());
+
+    // GL-M41-2: whole-pass wall + channel label (trace-gated).
+    let census_t0 = ptrace_enabled().then(pg_clock::MonoStamp::now);
+    let mut census_channel = "leader-serial";
 
     let (new_status, mut nworkers) = if vacuum {
         (PvIndVacStatus::NeedBulkdelete, pvs.nindexes_parallel_bulkdel)
@@ -1433,12 +1494,15 @@ fn parallel_vacuum_process_all_indexes(
 
     match &pool {
         Some(eng) => match pool_leader_join(pvs, eng, mcx, heaprel, indrels, bstrategy)? {
-            PoolPassWait::Done => {}
+            PoolPassWait::Done => {
+                census_channel = "pool";
+            }
             PoolPassWait::Fallback => {
                 // Nothing consumed (started == 0, statuses untouched): the
                 // launched gang takes over. The cost carry-in is SKIPPED —
                 // the shared balance already holds it plus the leader's
                 // unsafe-index accrual from the engaged window.
+                census_channel = "pool-fallback-launched";
                 launch_gang(pvs, nworkers, num_index_scans, /* carry_in */ false)?;
                 parallel_vacuum_process_safe_indexes(
                     &pvs.shared,
@@ -1448,10 +1512,17 @@ fn parallel_vacuum_process_all_indexes(
                     bstrategy,
                     vacuum_shared_cost().is_some(),
                 )?;
+                let wait_t0 = ptrace_enabled().then(pg_clock::MonoStamp::now);
                 parallel::WaitForParallelWorkersToFinish(pvs.pcxt)?;
+                if let Some(t0) = wait_t0 {
+                    ptrace(&format!("gang-wait ms={}", t0.elapsed_ns() / 1_000_000));
+                }
             }
         },
         None => {
+            if nworkers > 0 {
+                census_channel = "launched";
+            }
             parallel_vacuum_process_safe_indexes(
                 &pvs.shared,
                 mcx,
@@ -1462,7 +1533,11 @@ fn parallel_vacuum_process_all_indexes(
             )?;
 
             if nworkers > 0 {
+                let wait_t0 = ptrace_enabled().then(pg_clock::MonoStamp::now);
                 parallel::WaitForParallelWorkersToFinish(pvs.pcxt)?;
+                if let Some(t0) = wait_t0 {
+                    ptrace(&format!("gang-wait ms={}", t0.elapsed_ns() / 1_000_000));
+                }
                 // Buffer/WAL usage accumulation skipped: pgBufferUsage is
                 // derived from live bufmgr counters here and its vacuum
                 // consumers (VERBOSE, autovacuum log) are elided/loud.
@@ -1487,6 +1562,13 @@ fn parallel_vacuum_process_all_indexes(
     if let Some(shared_cost) = vacuum_shared_cost() {
         g::SetVacuumCostBalance(shared_cost.cost_balance.load(SeqCst) as i32);
         set_vacuum_shared_cost(None);
+    }
+    if let Some(t0) = census_t0 {
+        ptrace(&format!(
+            "pass-all op={} channel={census_channel} nworkers={nworkers} ms={}",
+            if vacuum { "bulkdel" } else { "cleanup" },
+            t0.elapsed_ns() / 1_000_000,
+        ));
     }
     Ok(())
 }
@@ -1561,6 +1643,12 @@ fn parallel_vacuum_process_one_index(
     idx: usize,
     bstrategy: &BufferAccessStrategy,
 ) -> PgResult<()> {
+    // GL-M41-2 width census (trace-gated): who processed this index, when it
+    // started (shared mono epoch — overlap reads directly off start+dur), and
+    // how long it took. Covers the launched workers, the participating/serial
+    // leader, the unsafe-index loop, and the pool COARSE arm (the chunks arm
+    // reports per-unit through unit_complete instead).
+    let census_t0 = ptrace_enabled().then(|| (pg_clock::mono_ms(), pg_clock::MonoStamp::now()));
     let (status, istat) = {
         let s = shared.indstats[idx].lock().unwrap_or_else(|e| e.into_inner());
         (s.status, if s.istat_updated { Some(s.istat) } else { None })
@@ -1607,6 +1695,20 @@ fn parallel_vacuum_process_one_index(
             backend_progress::progress::PROGRESS_VACUUM_INDEXES_PROCESSED,
             1,
         );
+    }
+    if let Some((start_ms, t0)) = census_t0 {
+        let who = if parallel::IsParallelWorker() {
+            "launched"
+        } else if parallel::standing::serving_on_pool() {
+            "pool"
+        } else {
+            "leader"
+        };
+        ptrace(&format!(
+            "idx-one i={idx} name={} op={status:?} who={who} start_ms={start_ms} ms={}",
+            indrel.name(),
+            t0.elapsed_ns() / 1_000_000,
+        ));
     }
     Ok(())
 }
