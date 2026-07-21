@@ -576,6 +576,16 @@ fn topn_nonint_guard() -> FloorGuard {
     class_guard(CoverClass::CbTopnBoundedIntKeys)
 }
 
+/// SE-TOPNNI selective-qual carve threshold (GL-TOPNNI-1 q24 diagnosis):
+/// estimated qual-survivor fraction below which a QUALED shape with a
+/// DATETIME (band-eligible) leading key keeps Gather. Measured anchors on
+/// the real 10M sorted bank (jobs 1784633628/-632/-634272 @ 34b23fdf2):
+/// LOSES at survival ~0.001 (2.9x — the band refuses to a serial walk the
+/// qual starves), WINS at ~0.75 (0.71x). 0.10 sits between the estimate
+/// classes with wide margin on both sides; the cost-route lane owns any
+/// refit into a curve.
+const TOPN_NONINT_MIN_QUAL_SURVIVAL: f64 = 0.10;
+
 /// SE-TOPNNI text sort-key answerability (the zerocnt-answerability
 /// precedent, per column): the DictCode key class serves order ONLY via
 /// the v7 part-global byte-rank stitch — a text key column without one
@@ -1622,12 +1632,20 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             // before the car).
             let mut n_nonint = 0usize;
             let mut n_text = 0usize;
-            for sc_node in &parse.sortClause {
+            // The LEADING key's class decides the sink's band-predicate
+            // eligibility (runtime_sort keys the zone machinery off
+            // keys[0]; a dict-text lead skips it) — tracked for the
+            // selective-qual carve below.
+            let mut lead_is_text = false;
+            for (ki, sc_node) in parse.sortClause.iter().enumerate() {
                 let Some(sc) = sc_node.as_sort_group_clause() else { return Ok(false) };
                 let Some(tle) = tle_by_sortgroupref(parse, sc.tleSortGroupRef) else {
                     return Ok(false);
                 };
                 let Some(v) = key_var(tle.expr, rti) else { return Ok(false) };
+                if ki == 0 {
+                    lead_is_text = is_text_family(v.vartype);
+                }
                 if is_int_family(v.vartype) {
                     continue;
                 }
@@ -1689,6 +1707,37 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             }
             if parse.targetList.len() == 1 && n_text == 0 {
                 return Ok(false);
+            }
+            // SELECTIVE-QUAL x BAND-ELIGIBLE-LEAD carve (GL-TOPNNI-1 flip
+            // sanity, q24 diagnosis 2026-07-21 @ 34b23fdf2): on the real
+            // sorted bank a datetime LEADING key classifies ZONE-FRIENDLY
+            // (1191/1221 granules serial-skippable) and the arm band-
+            // refuses to the serial zone walk — but a SELECTIVE qual
+            // starves the walk's early exit (most best-first rows fail the
+            // qual), so the displaced Gather was the real winner (measured
+            // hot 0.062s Gather vs 0.199s suppressed-serial, 2.9x). The
+            // non-selective siblings WIN under the identical band refusal
+            // (survival ~0.75: 0.021->0.012, 0.022->0.014), and dict-text
+            // LEADS skip the band entirely and win engaged at any
+            // selectivity. So: quals + datetime lead + estimated survival
+            // below the threshold => keep Gather (fail toward the
+            // incumbent; a zone-HOSTILE selective shape forgoes a measured
+            // win here — the conservative direction, named in the letter).
+            // Under the same economics gate as the floors so the rowflip
+            // measure vehicle (PGRUST_M5_SIZE_FLOORS=0) can see through.
+            if has_quals && !lead_is_text && size_floors_enabled() {
+                let tuples = run.root.rel(rel_id).tuples.max(rel_rows).max(1.0);
+                let survival = rel_rows / tuples;
+                if survival < TOPN_NONINT_MIN_QUAL_SURVIVAL {
+                    if trace_armed() {
+                        eprintln!(
+                            "m5-suppress-floor: topnnonint label=selective-qual-datetime-lead \
+                             relid={} survival={survival:.4} => gather stands",
+                            rte.relid
+                        );
+                    }
+                    return Ok(false);
+                }
             }
             return finish_knob_path(
                 run,
