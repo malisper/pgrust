@@ -19354,6 +19354,7 @@ dependencies = [
  "commands_vacuum",
  "elog",
  "guc_tables",
+ "indexam",
  "init_small",
  "latch",
  "mcx",
