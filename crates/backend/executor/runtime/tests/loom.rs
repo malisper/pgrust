@@ -3417,3 +3417,372 @@ fn pool_publish_order_no_rg_gone_churn() {
         assert_eq!(rt.execution_permits().available(), 1, "permit balance");
     });
 }
+// =========================================================================
+// PGPROC lock-group protocol mirrors (lmgr_proc/src/lib.rs; loom-exh r3
+// follow-up wave, lock-group hygiene audit escalation 2026-07-21).
+//
+// The join/leave/dying-leader-freelist protocol was entirely unmodeled:
+// BecomeLockGroupLeader (lib.rs:1146) / BecomeLockGroupMember (:1163) /
+// LeaveLockGroup (:993, the pool's per-engagement leave) / ProcKill's
+// lock-group block + deferred leader return (:866, :891-932, :952-963) /
+// InitProcess freelist pop + tripwire (:571-630) / ReattachRetainedProc
+// asserts (:661-672). These are MIRROR models (latch-Dekker style): the
+// state machine is transcribed operation-for-operation with the port's
+// orderings — every atomic access Relaxed exactly as in lib.rs, the
+// lockGroupMembers list guarded by the leader's partition LWLock (a Mutex
+// here: every real access holds exactly that lock), the freelist guarded
+// by ProcStructLock (a second Mutex). C parity reference:
+// vendor/postgres-src/src/backend/storage/lmgr/proc.c ProcKill tail.
+//
+// The corruption oracle is intrusive-list discipline: plist_push of an
+// already-linked node corrupts the freelist silently in release builds
+// (the mode-P "live PGPROC popped by a fresh backend" shape), so the
+// mirror asserts not-already-linked AT EVERY PUSH, plus the InitProcess
+// pop-side tripwires (pid==0, group-clean) and the ReattachRetainedProc
+// postcondition.
+//
+// HISTORY: born RED (night/lockgroup-loom-red @ 7582c196a) against the
+// pre-fix protocol — pid=0 stored before the leader's ProcStructLock tail
+// and the member's pointer-clear outside it allowed a freelist DOUBLE PUSH
+// of the dead leader (all four models, <0.01s at pb=2). GREEN since the
+// mirrors transcribe night/lockgroup-fix: both deferred-return decision
+// points are single ProcStructLock critical sections with the leader pid
+// as arbiter (see lmgr_proc/src/lib.rs, ProcKill member arm comment).
+// =========================================================================
+
+const LG_INVALID: usize = usize::MAX;
+
+struct LgSlot {
+    /// proc.pid — 0 = dead. Relaxed on every access on this path (lib.rs).
+    pid: AtomicUsize,
+    /// proc.lockGroupLeader — procno or LG_INVALID. Relaxed everywhere.
+    leader: AtomicUsize,
+    /// proc.lockGroupMembers + LockHashPartitionLockByProc(leader): every
+    /// real mutation/read of the members list holds exactly this LWLock
+    /// exclusively, so one Mutex models the pair. Vec order mirrors plist
+    /// order (index 0 = head).
+    group: Mutex<Vec<usize>>,
+}
+
+struct LgWorld {
+    slots: Vec<LgSlot>,
+    /// ProcStructLock + the freelist it guards (index 0 = head).
+    freelist: Mutex<Vec<usize>>,
+    /// The live-leader tripwire WARNING arms (lib.rs:912/:1031): a refused
+    /// push is a bounded PGPROC leak, counted so the exactly-once account
+    /// below can distinguish leak from loss.
+    refused_push: AtomicUsize,
+}
+
+fn lg_world(pids: &[usize]) -> Arc<LgWorld> {
+    Arc::new(LgWorld {
+        slots: pids
+            .iter()
+            .map(|&p| LgSlot {
+                pid: AtomicUsize::new(p),
+                leader: AtomicUsize::new(LG_INVALID),
+                group: Mutex::new(Vec::new()),
+            })
+            .collect(),
+        freelist: Mutex::new(Vec::new()),
+        refused_push: AtomicUsize::new(0),
+    })
+}
+
+/// BecomeLockGroupLeader (lib.rs:1146-1161).
+fn lg_become_leader(w: &LgWorld, procno: usize) {
+    if w.slots[procno].leader.load(Ordering::Relaxed) == procno {
+        return;
+    }
+    assert_eq!(w.slots[procno].leader.load(Ordering::Relaxed), LG_INVALID);
+    let mut g = w.slots[procno].group.lock().unwrap(); // partition LWLock
+    w.slots[procno].leader.store(procno, Ordering::Relaxed);
+    g.insert(0, procno); // plist_push_head
+}
+
+/// BecomeLockGroupMember (lib.rs:1163-1187). Returns the join verdict.
+fn lg_become_member(w: &LgWorld, procno: usize, leader_no: usize, pid: usize) -> bool {
+    assert_ne!(procno, leader_no);
+    assert_eq!(w.slots[procno].leader.load(Ordering::Relaxed), LG_INVALID);
+    let mut ok = false;
+    let mut g = w.slots[leader_no].group.lock().unwrap(); // partition LWLock
+    if w.slots[leader_no].pid.load(Ordering::Relaxed) == pid
+        && w.slots[leader_no].leader.load(Ordering::Relaxed) == leader_no
+    {
+        ok = true;
+        w.slots[procno].leader.store(leader_no, Ordering::Relaxed);
+        g.push(procno); // plist_push_tail
+    }
+    ok
+}
+
+/// The intrusive-plist discipline made explicit: pushing an already-linked
+/// node is the silent-corruption event the freelist tripwires exist for.
+fn lg_freelist_push(fl: &mut Vec<usize>, slot: usize, head: bool, ctx: &str) {
+    assert!(
+        !fl.contains(&slot),
+        "freelist DOUBLE PUSH of procno {slot} ({ctx}) — intrusive plist corruption; \
+         two InitProcess pops would hand the same PGPROC to two live backends"
+    );
+    if head {
+        fl.insert(0, slot); // plist_push_head
+    } else {
+        fl.push(slot); // plist_push_tail
+    }
+}
+
+/// LeaveLockGroup — the pool worker's per-engagement leave: live caller,
+/// clears its own leader pointer in BOTH arms, runs the leader-exited-first
+/// deferred return. FIXED PROTOCOL (night/lockgroup-fix): the empty
+/// transition's {clear leader pointer, read leader pid, maybe push} is ONE
+/// ProcStructLock critical section, arbitrated against the leader's own
+/// freelist tail (which stores pid=0 and reads the pointer under the same
+/// lock). pid != 0 here = the leader has not passed its tail CS (it will
+/// self-push after seeing our clear) or is wretain-parked (retains its
+/// PGPROC): the designed handoff, not a push.
+fn lg_leave(w: &LgWorld, procno: usize) {
+    let leader_no = w.slots[procno].leader.load(Ordering::Relaxed);
+    if leader_no == LG_INVALID {
+        return;
+    }
+    assert_ne!(leader_no, procno, "standing executors only ever join");
+    let mut g = w.slots[leader_no].group.lock().unwrap(); // partition LWLock
+    assert!(!g.is_empty());
+    g.retain(|&m| m != procno); // plist_delete
+    w.slots[procno].leader.store(LG_INVALID, Ordering::Relaxed);
+    if g.is_empty() {
+        let mut fl = w.freelist.lock().unwrap(); // ProcStructLock
+        w.slots[leader_no].leader.store(LG_INVALID, Ordering::Relaxed);
+        if w.slots[leader_no].pid.load(Ordering::Relaxed) == 0 {
+            lg_freelist_push(&mut fl, leader_no, true, "LeaveLockGroup leader-exited-first");
+        } else {
+            w.refused_push.fetch_add(1, Ordering::Relaxed); // handoff arm (leader self-pushes / parked)
+        }
+    }
+    // partition LWLock released on drop
+}
+
+/// ProcKill (lib.rs:866-975), lock-group block + freelist tail only (the
+/// latch/lwlock preamble is out of scope). `parking` = the wretain arm
+/// (:937-946): session state released, PGPROC retained, NO freelist
+/// interaction, pid keeps the parked task's value.
+fn lg_prockill(w: &LgWorld, procno: usize, parking: bool) {
+    let leader_no = w.slots[procno].leader.load(Ordering::Relaxed);
+    if leader_no != LG_INVALID {
+        let mut g = w.slots[leader_no].group.lock().unwrap(); // partition LWLock
+        assert!(!g.is_empty());
+        g.retain(|&m| m != procno); // plist_delete
+        if g.is_empty() {
+            if leader_no != procno {
+                // FIXED PROTOCOL: deferred-return arbitration — clear +
+                // pid read + maybe-push in ONE ProcStructLock section
+                // (see lg_leave; identical arm in ProcKill's member leg).
+                let mut fl = w.freelist.lock().unwrap(); // ProcStructLock
+                w.slots[leader_no].leader.store(LG_INVALID, Ordering::Relaxed);
+                if w.slots[leader_no].pid.load(Ordering::Relaxed) == 0 {
+                    lg_freelist_push(&mut fl, leader_no, true, "ProcKill leader-exited-first");
+                } else {
+                    w.refused_push.fetch_add(1, Ordering::Relaxed); // handoff arm
+                }
+            } else {
+                w.slots[leader_no].leader.store(LG_INVALID, Ordering::Relaxed);
+            }
+        } else if leader_no != procno {
+            w.slots[procno].leader.store(LG_INVALID, Ordering::Relaxed);
+        }
+        // partition LWLock released (drop)
+    }
+    if parking {
+        return; // wretain park — PGPROC retained, pid keeps its value
+    }
+    {
+        let mut fl = w.freelist.lock().unwrap(); // ProcStructLock
+        // FIXED PROTOCOL: pid=0 INSIDE the ProcStructLock section — the
+        // deferred-return arbiter. A member's empty-transition arm reading
+        // pid!=0 under this lock is proof we have not passed this gate:
+        // it hands the return off to us (we see its pointer clear below).
+        w.slots[procno].pid.store(0, Ordering::Relaxed);
+        // Pointer still set (== procno) means the last member has not run
+        // its empty transition; that member returns this PGPROC instead.
+        if w.slots[procno].leader.load(Ordering::Relaxed) == LG_INVALID {
+            lg_freelist_push(&mut fl, procno, false, "ProcKill self return");
+        }
+    }
+}
+
+/// InitProcess freelist pop + tripwires (lib.rs:571-630): pop head under
+/// ProcStructLock; a live pid is the mode-P forensics panic (:606); the
+/// group-state debug_asserts (:629-630) are the slot-reuse hygiene gate.
+/// Stores the new pid on success (init_my_proc_common).
+fn lg_init_pop(w: &LgWorld, new_pid: usize) -> Option<usize> {
+    let popped = {
+        let mut fl = w.freelist.lock().unwrap(); // ProcStructLock :571
+        if fl.is_empty() { None } else { Some(fl.remove(0)) } // plist_pop_head
+    };
+    let procno = popped?;
+    let stale_pid = w.slots[procno].pid.load(Ordering::Relaxed);
+    assert_eq!(
+        stale_pid, 0,
+        "InitProcess tripwire: freelist returned live PGPROC (procno {procno}, pid {stale_pid})"
+    );
+    assert_eq!(
+        w.slots[procno].leader.load(Ordering::Relaxed),
+        LG_INVALID,
+        "InitProcess: popped slot advertises lock-group membership"
+    );
+    assert!(
+        w.slots[procno].group.lock().unwrap().is_empty(),
+        "InitProcess: popped slot has lockGroupMembers"
+    );
+    w.slots[procno].pid.store(new_pid, Ordering::Relaxed);
+    Some(procno)
+}
+
+/// ReattachRetainedProc postcondition (lib.rs:667-672): the parked PGPROC
+/// is pid-live, group-clean.
+fn lg_reattach_assert(w: &LgWorld, procno: usize) {
+    assert_ne!(
+        w.slots[procno].pid.load(Ordering::Relaxed),
+        0,
+        "ReattachRetainedProc: retained PGPROC was released"
+    );
+    assert_eq!(w.slots[procno].leader.load(Ordering::Relaxed), LG_INVALID);
+    assert!(w.slots[procno].group.lock().unwrap().is_empty());
+}
+
+/// Shared closing account, FIXED-PROTOCOL bar: a DYING leader's PGPROC is
+/// on the freelist EXACTLY once — never double-pushed (asserted at push
+/// time), never leaked (the pre-fix refusal/leak arm is arbitrated away:
+/// whichever side loses the ProcStructLock race, the other side pushes).
+fn lg_leader_return_account(w: &LgWorld, leader_no: usize) {
+    let fl = w.freelist.lock().unwrap();
+    let on_list = fl.iter().filter(|&&s| s == leader_no).count();
+    assert_eq!(
+        on_list, 1,
+        "dead leader PGPROC returned {on_list}x (exactly-once bar)"
+    );
+}
+
+fn lg_builder() -> loom::model::Builder {
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(2);
+    b.max_branches = 500_000;
+    b
+}
+
+/// Dying leader vs the pool member's per-engagement leave: the deferred
+/// leader return happens exactly once (ProcKill self-return gate :960 vs
+/// LeaveLockGroup's leader-exited-first arm :1024-1042), and the leaving
+/// member is group-clean for its next engagement.
+#[test]
+fn lockgroup_dying_leader_vs_member_leave_return_exactly_once() {
+    lg_builder().check(|| {
+        let w = lg_world(&[10, 11]);
+        lg_become_leader(&w, 0);
+        assert!(lg_become_member(&w, 1, 0, 10));
+
+        let w1 = Arc::clone(&w);
+        let tl = thread::spawn(move || lg_prockill(&w1, 0, false));
+        let w2 = Arc::clone(&w);
+        let tm = thread::spawn(move || lg_leave(&w2, 1));
+        tl.join().unwrap();
+        tm.join().unwrap();
+
+        assert_eq!(
+            w.slots[1].leader.load(Ordering::Relaxed),
+            LG_INVALID,
+            "member not group-clean after leave (next join would assert)"
+        );
+        assert!(w.slots[0].group.lock().unwrap().is_empty());
+        lg_leader_return_account(&w, 0);
+        // Slot reuse over whatever was returned must be hygienic.
+        while lg_init_pop(&w, 99).is_some() {}
+    });
+}
+
+/// The join itself racing the leader's death: BecomeLockGroupMember's
+/// pid+leader-pointer double check under the partition lock (:1179) either
+/// admits a member the protocol then accounts for, or refuses cleanly —
+/// an orphan membership in a dead/recycled slot is the failure.
+#[test]
+fn lockgroup_member_join_vs_dying_leader_no_orphan_membership() {
+    lg_builder().check(|| {
+        let w = lg_world(&[10, 11]);
+        lg_become_leader(&w, 0);
+
+        let w1 = Arc::clone(&w);
+        let tl = thread::spawn(move || lg_prockill(&w1, 0, false));
+        let w2 = Arc::clone(&w);
+        let tm = thread::spawn(move || {
+            if lg_become_member(&w2, 1, 0, 10) {
+                lg_leave(&w2, 1);
+            }
+        });
+        tl.join().unwrap();
+        tm.join().unwrap();
+
+        assert_eq!(w.slots[1].leader.load(Ordering::Relaxed), LG_INVALID);
+        assert!(w.slots[0].group.lock().unwrap().is_empty());
+        lg_leader_return_account(&w, 0);
+        while lg_init_pop(&w, 99).is_some() {}
+    });
+}
+
+/// Slot reuse racing the deferred return: a fresh backend's InitProcess pop
+/// (with the :606 live-pid tripwire and the :629-630 group-clean asserts)
+/// interleaved with the dying leader's return path.
+#[test]
+fn lockgroup_slot_reuse_pop_vs_deferred_return_never_live() {
+    lg_builder().check(|| {
+        let w = lg_world(&[10, 11]);
+        lg_become_leader(&w, 0);
+        assert!(lg_become_member(&w, 1, 0, 10));
+
+        let w1 = Arc::clone(&w);
+        let tl = thread::spawn(move || lg_prockill(&w1, 0, false));
+        let w2 = Arc::clone(&w);
+        let tm = thread::spawn(move || lg_leave(&w2, 1));
+        let w3 = Arc::clone(&w);
+        let tr = thread::spawn(move || lg_init_pop(&w3, 42));
+        tl.join().unwrap();
+        tm.join().unwrap();
+        let reused = tr.join().unwrap();
+
+        // Exactly-once, counting the racing reuse as a completed return
+        // (fixed-protocol bar: no leak arm — a dying leader is always
+        // returned by exactly one side of the arbitration).
+        let on_list = w.freelist.lock().unwrap().iter().filter(|&&s| s == 0).count();
+        let returned = on_list + usize::from(reused == Some(0));
+        assert_eq!(returned, 1, "dead leader PGPROC returned {returned}x");
+    });
+}
+
+/// The POOLDB lease surface: pool worker leaves its engagement group, parks
+/// (wretain arm of ProcKill — PGPROC retained, no freelist interaction),
+/// and reattaches; ReattachRetainedProc's group-clean postcondition
+/// (:667-672) must hold against the racing leader death.
+#[test]
+fn lockgroup_pool_park_reattach_group_clean() {
+    lg_builder().check(|| {
+        let w = lg_world(&[10, 11]);
+        lg_become_leader(&w, 0);
+        assert!(lg_become_member(&w, 1, 0, 10));
+
+        let w1 = Arc::clone(&w);
+        let tl = thread::spawn(move || lg_prockill(&w1, 0, false));
+        let w2 = Arc::clone(&w);
+        let tm = thread::spawn(move || {
+            lg_leave(&w2, 1);
+            lg_prockill(&w2, 1, true); // retention park
+            lg_reattach_assert(&w2, 1); // next lease claim
+        });
+        tl.join().unwrap();
+        tm.join().unwrap();
+
+        assert!(
+            !w.freelist.lock().unwrap().contains(&1),
+            "parked worker's retained PGPROC reached the freelist"
+        );
+        lg_leader_return_account(&w, 0);
+    });
+}
