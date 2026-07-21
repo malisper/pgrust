@@ -2298,8 +2298,13 @@ fn classify_join_sides<'mcx>(
     // executor-side; a build-time refusal degrades that query to the v1
     // runtime probe at the witnessed 1.15-1.66x vs PHJ — the letter's
     // bounded residual. Non-seat-shaped joins keep the 2M ceiling unchanged.
+    // SEAT-LIFT ORDERING (conversion-flips train): the lift's witnessed
+    // band is the BOOTSTRAP census (cbstore rels, bare-int emits) — the
+    // heap-fed and numeric-emit widenings below were not in its dataset
+    // and carry their OWN floors (the jheap 1M min must not be bypassed by
+    // the ceiling lift), so only pure-bootstrap shapes reach it.
     let seat_shaped = n_equi == 1 && int4_pair_only;
-    if seat_shaped && hjprobe_v2_live() {
+    if seat_shaped && hjprobe_v2_live() && heap.is_empty() && n_numeric == 0 {
         return finish_seat_lifted(run, relids[0], max_rows);
     }
     // Floor guard input: the larger side's estimated rows (the ladder's
