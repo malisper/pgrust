@@ -115,6 +115,8 @@ use std::cell::UnsafeCell;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
 
+use crate::morsel::MorselRange;
+use crate::rg::TaskSetWork;
 use crate::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use crate::sync::ParkLot;
 use crate::taskset::CachePadded;
@@ -311,6 +313,20 @@ impl<T: Send + 'static> RowFunnel<T> {
         self.not_empty.wake_all();
     }
 
+    /// Mark EVERY ring producer-finished. Called by the row-emit taskset's
+    /// `finalize()` (the last-worker-out join point): by the time finalize
+    /// runs, every worker has settled its last morsel (the last-worker-out
+    /// protocol gates on it), so no producer is still pushing — this is the
+    /// streaming taskset's "finalize = no-op join that publishes done" contract
+    /// (funnel.rs invariant #2). Wakes the drain so it reaches EOF once each
+    /// ring is also drained.
+    pub fn mark_all_done(&self) {
+        for d in &self.done {
+            d.store(true, Ordering::Release);
+        }
+        self.not_empty.wake_all();
+    }
+
     /// A producer handle bound to worker `w`'s ring. One handle per worker
     /// (SPSC discipline).
     pub fn producer(self: &Arc<Self>, w: usize) -> FunnelProducer<T> {
@@ -397,6 +413,58 @@ impl<T: Send + 'static> FunnelProducer<T> {
     pub fn mark_done(&self) {
         self.funnel.done[self.w].store(true, Ordering::Release);
         self.funnel.not_empty.wake_all();
+    }
+}
+
+/// The row-emit taskset's WORK body (the scheduler-side producer wiring): each
+/// claimed morsel range is turned into rows by `produce`, which pushes them into
+/// the claiming worker's ring. This is the runtime's first NON-BREAKER
+/// `TaskSetWork` — it streams into the funnel instead of folding into a partial.
+///
+/// - `run_morsel` runs on a pool worker (worker index = its ring); it skips work
+///   once demand is closed (LIMIT), so a stalled/last morsel stops promptly.
+/// - `finalize` (last-worker-out, single thread) marks every ring done so the
+///   leader drain reaches EOF — the streaming taskset's finalize contract.
+///
+/// `produce(worker, range, &producer)` MUST push via
+/// [`FunnelProducer::push_blocking`] (so a full ring parks the worker under the
+/// blocking permit) and stop early if it returns [`PushOutcome::DemandClosed`].
+pub struct RowEmitWork<T, F>
+where
+    T: Send + 'static,
+    F: Fn(usize, MorselRange, &FunnelProducer<T>) + Send + Sync,
+{
+    funnel: Arc<RowFunnel<T>>,
+    produce: F,
+}
+
+impl<T, F> RowEmitWork<T, F>
+where
+    T: Send + 'static,
+    F: Fn(usize, MorselRange, &FunnelProducer<T>) + Send + Sync,
+{
+    pub fn new(funnel: Arc<RowFunnel<T>>, produce: F) -> Arc<RowEmitWork<T, F>> {
+        Arc::new(RowEmitWork { funnel, produce })
+    }
+}
+
+impl<T, F> TaskSetWork for RowEmitWork<T, F>
+where
+    T: Send + 'static,
+    F: Fn(usize, MorselRange, &FunnelProducer<T>) + Send + Sync,
+{
+    fn run_morsel(&self, worker: usize, range: MorselRange) {
+        // LIMIT already satisfied: drop this claim without producing (the drain
+        // closed demand; the parked/subsequent producers stop cooperatively).
+        if self.funnel.demand_closed() {
+            return;
+        }
+        let producer = self.funnel.producer(worker);
+        (self.produce)(worker, range, &producer);
+    }
+
+    fn finalize(&self) {
+        self.funnel.mark_all_done();
     }
 }
 
@@ -691,5 +759,124 @@ mod tests {
         }
         assert_eq!(got, N as u64);
         assert_eq!(sum, (0..N as u64).sum::<u64>());
+    }
+
+    // ---- END-TO-END scheduler wiring (real WorkerPool) --------------------
+    //
+    // These exercise the FULL deferred scheduler path: submit a row-emit
+    // taskset (RowEmitWork), pool worker threads run_morsel → produce into the
+    // rings (parking on full under the blocking permit), the LEADER runs the
+    // funnel drain CONCURRENTLY as a pure consumer (in place of parking on the
+    // CompletionWaiter), finalize marks the rings done, EOF, RG completes.
+    // This is the model of a parallel passthrough SELECT: each granule = one
+    // scanned row emitted to the wire.
+
+    use crate::{
+        Runtime, RuntimeConfig, RgOutcome, QuerySpec, SizingParams, SyntheticMorselSource,
+        TaskSetSpec, TaskSetWork, WorkerPool,
+    };
+
+    fn e2e_runtime() -> Arc<Runtime> {
+        Runtime::new(RuntimeConfig {
+            workers: 4,
+            standbys: 2,
+            slots: 8,
+            sizing: SizingParams::default(),
+            trace: false,
+        })
+    }
+
+    /// Producer closure for a passthrough shape: emit granule index `g` as the
+    /// row value, pushing under the blocking permit (K-standby donation), and
+    /// stop promptly if demand is closed (LIMIT).
+    fn passthrough_produce(_w: usize, range: MorselRange, p: &FunnelProducer<u64>) {
+        for g in range {
+            match p.push_blocking(g, crate::blocking_io_section) {
+                PushOutcome::Pushed => {}
+                PushOutcome::DemandClosed => return,
+            }
+        }
+    }
+
+    #[test]
+    fn e2e_parallel_passthrough_all_rows_once() {
+        let rt = e2e_runtime();
+        let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+        let n: u64 = 40_000;
+        // Small rings relative to N → real back-pressure / producer parking.
+        let funnel: Arc<RowFunnel<u64>> = RowFunnel::new(rt.nthreads(), 128);
+        let work = RowEmitWork::new(Arc::clone(&funnel), passthrough_produce);
+        let (_h, waiter) = rt.submit(QuerySpec {
+            query_id: 42,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(n)),
+                work: work as Arc<dyn TaskSetWork>,
+                deps: vec![],
+            }],
+        });
+
+        // LEADER = pure drain, concurrent with the producing pool workers.
+        let mut drain = funnel.drain();
+        let mut got: Vec<u64> = Vec::with_capacity(n as usize);
+        loop {
+            let seen = drain.park_epoch();
+            match drain.next() {
+                DrainStep::Row(v) => got.push(v),
+                DrainStep::Idle => drain.park(seen),
+                DrainStep::Eof => break,
+            }
+        }
+
+        assert_eq!(waiter.wait(), RgOutcome::Completed);
+        pool.shutdown();
+
+        // Row-correctness: every scanned row delivered EXACTLY once (arrival
+        // order is arbitrary — unordered passthrough).
+        assert_eq!(got.len(), n as usize, "row count");
+        got.sort_unstable();
+        assert!(got.iter().copied().eq(0..n), "each row 0..n exactly once");
+    }
+
+    #[test]
+    fn e2e_parallel_passthrough_limit_no_hang() {
+        // LIMIT: the leader stops after `limit` rows and closes demand; parked
+        // producers wake, see the close, and stop cooperatively — the RG must
+        // still complete (no deadlock/hang), the classic parallel-LIMIT path.
+        let rt = e2e_runtime();
+        let pool = WorkerPool::spawn_std(Arc::clone(&rt)).unwrap();
+        let n: u64 = 200_000;
+        let limit: usize = 1000;
+        let funnel: Arc<RowFunnel<u64>> = RowFunnel::new(rt.nthreads(), 64);
+        let work = RowEmitWork::new(Arc::clone(&funnel), passthrough_produce);
+        let (_h, waiter) = rt.submit(QuerySpec {
+            query_id: 43,
+            tasksets: vec![TaskSetSpec {
+                source: Arc::new(SyntheticMorselSource::new(n)),
+                work: work as Arc<dyn TaskSetWork>,
+                deps: vec![],
+            }],
+        });
+
+        let mut drain = funnel.drain();
+        let mut got: usize = 0;
+        loop {
+            let seen = drain.park_epoch();
+            match drain.next() {
+                DrainStep::Row(_) => {
+                    got += 1;
+                    if got >= limit {
+                        funnel.close_demand();
+                        break;
+                    }
+                }
+                DrainStep::Idle => drain.park(seen),
+                DrainStep::Eof => break,
+            }
+        }
+
+        assert_eq!(got, limit, "delivered exactly LIMIT rows");
+        // No hang: producers stop cooperatively and the RG completes.
+        assert_eq!(waiter.wait(), RgOutcome::Completed);
+        pool.shutdown();
     }
 }
