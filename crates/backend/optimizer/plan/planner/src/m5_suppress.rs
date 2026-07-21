@@ -1956,12 +1956,14 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     // passengers are proven for the plain grouped emit and the agg-sort
     // top-N winner selection only (the engagement witnesses of record).
     // The freeze/bare-LIMIT drains, the no-limit sort, const keys, text
-    // min/max passengers, and the two-key-text family never carried the
-    // widened vocabulary — keep today's refusal there.
+    // min/max passengers, the two-key-text family, and the SE-DECOROOT
+    // decorated-root forms never carried the widened vocabulary — keep
+    // today's refusal there.
     if n_avg_widened > 0
         && (mk_freeze
             || bare_limit
             || full_sort
+            || decorated
             || n_strminmax > 0
             || n_const > 0
             || mk_text_family)
