@@ -312,6 +312,25 @@ pub(crate) fn k2_probe_set_for_tests(on: bool) {
 // dispatch reads `has_seat() == false` down the identical v1 path.
 // ---------------------------------------------------------------------------
 
+/// GL-HJSEAT-2 seat-economics gate: arm the dense seat only when the
+/// planner's PROBE-rows estimate is at least SEAT_MIN_PROBE_RATIO x the
+/// BUILD-rows estimate. The seat pays O(build) construction (per-Local key
+/// tracking + the 3-pass CSR at freeze) and earns O(probes) savings (the
+/// outer-hash interpreter dispatch + the per-candidate recheck) — below the
+/// ratio the construction is not amortized.
+/// PROVENANCE (constants discipline, 2026-07-21): GL-HJSEAT-1 census (fleet
+/// job pgrust-fast-tests-15bfe40a57-1784617559-64ac, dop8) + the ratio
+/// bracket (hj-seat-census-ab.sh CLASS_FILTER=int4_uniq at 2M/2M and 4M/2M):
+/// damped ON/OFF = 0.594 at probe/build=4, 0.766 at 2, 0.930 at 1, and
+/// 1.23-1.29 at 0.25 (the census "dup" classes — their planner-chosen build
+/// side is the 8M UNIQUE fact table, so they measure ratio 0.25, NOT build
+/// duplication; build-side dup was ruled out as the axis: EXPLAIN shows the
+/// bucket-stats penalty routes dup-heavy sides to probe, and first-principles
+/// says dup makes the seat cheaper, not dearer). The crossover lies in the
+/// unmeasured (0.25, 1) interval; the constant sits at the LAST MEASURED
+/// WINNING point (1). Lowering it requires its own letter. GL-HJSEAT-2.
+const SEAT_MIN_PROBE_RATIO: f64 = 1.0;
+
 static HJPROBE_V2: AtomicU8 = AtomicU8::new(0);
 
 fn hjprobe_v2_enabled() -> bool {
@@ -735,6 +754,12 @@ pub(super) struct RuntimeHjShared {
     /// m5p1 multibuild: the multi-pipeline engagement descriptor (empty =
     /// the phase-1 single-join arm, byte-identical paths throughout).
     chain: OnceLock<Arc<MbChain>>,
+    /// GL-HJSEAT-2 seat-economics verdict, computed once at admission from
+    /// the planner's estimates (probe rows >= SEAT_MIN_PROBE_RATIO x build
+    /// rows). false suppresses dense-seat ARMING entirely (zero key-tracking
+    /// tax); the v1 tag-filtered probe is the unchanged outcome. Always
+    /// false for multibuild/batched engagements (the seat never arms there).
+    seat_ok: bool,
     /// M3.5 batch state (None = unbatched engagement — dormant default).
     spill: Option<Arc<HjSpill>>,
     /// Per-leaf frozen tables (batched engagements; the batch-0 table lives
@@ -1242,6 +1267,10 @@ fn build_morsel_body(
             let dense_col = if spill.is_none()
                 && shared.chain.get().is_none()
                 && hjprobe_v2_enabled()
+                // GL-HJSEAT-2 economics: only arm when the probe estimate
+                // amortizes the seat's O(build) construction (admission
+                // computed shared.seat_ok from the planner's estimates).
+                && shared.seat_ok
                 // SINGLE-PASS forgoes the dense seat (its concurrent chain
                 // order is not reproducible — the seat's byte-identity proof
                 // does not hold). The Local's attached-dir state is the gate.
@@ -3685,6 +3714,7 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
         Some(inner_source),
         envelope,
         hash_plan.plan.plan_rows.max(0.0) as u64,
+        outer_scan_plan.scan.plan.plan_rows.max(0.0) as u64,
         fill_inner,
         spill_batches,
         None, // chain: the phase-1 single-join arm
@@ -3895,6 +3925,7 @@ fn try_own_multibuild<'mcx>(
         None,  // inner_source: single-join only
         0,     // envelope: single-join only (per-join envelopes ride MbInit)
         0,     // inner_rows_est: multibuild sizes per-join from MbInit
+        0,     // outer_rows_est: the seat never arms for multibuild
         false, // fill_inner: probe-local types only
         None,  // spill_batches: unbatched by admission
         Some(init),
@@ -3925,6 +3956,9 @@ fn engage<'mcx>(
     // Planner inner-rows estimate — the single-pass directory's up-front size
     // (Phase 1a). 0 for multibuild (each join sizes from its own MbInit).
     inner_rows_est: u64,
+    // Planner outer-rows estimate — the GL-HJSEAT-2 seat-economics input.
+    // 0 for multibuild (the seat never arms there).
+    outer_rows_est: u64,
     fill_inner: bool,
     spill_batches: Option<u32>,
     // m5p1 multibuild descriptor (None = the phase-1 single-join arm).
@@ -3988,6 +4022,10 @@ fn engage<'mcx>(
         grouped_partials: (0..runtime::MAX_EXTERNAL_LANES).map(|_| Mutex::new(None)).collect(),
         sink: OnceLock::new(),
         chain: OnceLock::new(),
+        // GL-HJSEAT-2: the seat's O(build) construction must be amortized by
+        // the probe estimate (see SEAT_MIN_PROBE_RATIO's provenance).
+        seat_ok: outer_rows_est as f64 >= inner_rows_est as f64 * SEAT_MIN_PROBE_RATIO
+            && inner_rows_est > 0,
         spill,
         leaf_tables: (0..leaf_cap).map(|_| Mutex::new(None)).collect(),
         standing: Mutex::new(None),
