@@ -15,9 +15,28 @@ fn with_rel<R>(f: impl FnOnce(&mut RelOptInfo<'_>) -> R) -> R {
     f(&mut rel)
 }
 
+// The log3-rule tests below verify compute_parallel_worker's ALGORITHM against
+// C's documented behavior, which is keyed to C's threshold defaults (1024
+// table / 64 index pages). pgrust ships LOWER defaults (8MB->1MB, 512KB->64KB;
+// docs/design/jit-parallel-defaults.md), so pin C's reference thresholds here
+// to keep exercising the algorithm rather than the default value. Save/restore
+// keeps the process-global GUC clean for sibling tests.
+fn pin_c_thresholds() -> (i32, i32) {
+    let save = (gucs::min_parallel_table_scan_size(), gucs::min_parallel_index_scan_size());
+    gucs::set_min_parallel_table_scan_size(1024);
+    gucs::set_min_parallel_index_scan_size(64);
+    save
+}
+
+fn restore_thresholds((table, index): (i32, i32)) {
+    gucs::set_min_parallel_table_scan_size(table);
+    gucs::set_min_parallel_index_scan_size(index);
+}
+
 #[test]
 fn heap_pages_log3_rule_matches_c() {
     let _g = test_lock();
+    let save = pin_c_thresholds();
     with_rel(|rel| {
         for (pages, want) in [
             (0.0, 0),
@@ -36,11 +55,13 @@ fn heap_pages_log3_rule_matches_c() {
             );
         }
     });
+    restore_thresholds(save);
 }
 
 #[test]
 fn index_pages_use_index_threshold() {
     let _g = test_lock();
+    let save = pin_c_thresholds();
     with_rel(|rel| {
         assert_eq!(compute_parallel_worker(rel, -1.0, 63.0, 8), 0);
         assert_eq!(compute_parallel_worker(rel, -1.0, 64.0, 8), 1);
@@ -48,16 +69,19 @@ fn index_pages_use_index_threshold() {
         assert_eq!(compute_parallel_worker(rel, -1.0, 192.0, 8), 2);
         assert_eq!(compute_parallel_worker(rel, -1.0, 576.0, 8), 3);
     });
+    restore_thresholds(save);
 }
 
 #[test]
 fn both_set_takes_min() {
     let _g = test_lock();
+    let save = pin_c_thresholds();
     with_rel(|rel| {
         assert_eq!(compute_parallel_worker(rel, 9216.0, 64.0, 8), 1);
         assert_eq!(compute_parallel_worker(rel, 1024.0, 576.0, 8), 1);
         assert_eq!(compute_parallel_worker(rel, 9216.0, 576.0, 8), 3);
     });
+    restore_thresholds(save);
 }
 
 #[test]
@@ -78,6 +102,7 @@ fn reloption_overrides_and_max_workers_clamps() {
 #[test]
 fn small_rel_gate_skipped_for_non_baserel() {
     let _g = test_lock();
+    let save = pin_c_thresholds();
     with_rel(|rel| {
         assert_eq!(compute_parallel_worker(rel, 10.0, -1.0, 8), 0);
         assert_eq!(compute_parallel_worker(rel, 1024.0, 63.0, 8), 0);
@@ -85,6 +110,7 @@ fn small_rel_gate_skipped_for_non_baserel() {
         assert_eq!(compute_parallel_worker(rel, 10.0, -1.0, 8), 1);
         assert_eq!(compute_parallel_worker(rel, -1.0, 10.0, 8), 1);
     });
+    restore_thresholds(save);
 }
 
 #[test]

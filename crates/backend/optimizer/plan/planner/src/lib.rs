@@ -87,14 +87,19 @@ const PGJIT_DEFORM: i32 = 1 << 4;
 pub mod gucs {
     guc_tables::session_guc_cluster!(PlannerGucs, PLANNER_GUCS:
         (cursor_tuple_fraction_cell, f64, cursor_tuple_fraction, set_cursor_tuple_fraction, (0.1) as f64),
-        (jit_above_cost_cell, f64, jit_above_cost, set_jit_above_cost, (100000.0) as f64),
-        (jit_optimize_above_cost_cell, f64, jit_optimize_above_cost, set_jit_optimize_above_cost, (500000.0) as f64),
-        (jit_inline_above_cost_cell, f64, jit_inline_above_cost, set_jit_inline_above_cost, (500000.0) as f64),
+        // pgrust copy-and-patch JIT defaults (was C's 100000/500000/500000);
+        // must match guc_tables::tables boot_vals. 10 = 100000 / the ~10000x
+        // compile-cost advantage; optimize/inline are inert under copy-and-
+        // patch (no LLVM phase) so they equal jit_above_cost. Rationale in
+        // guc_tables/tables.rs + docs/design/jit-parallel-defaults.md.
+        (jit_above_cost_cell, f64, jit_above_cost, set_jit_above_cost, (10.0) as f64),
+        (jit_optimize_above_cost_cell, f64, jit_optimize_above_cost, set_jit_optimize_above_cost, (10.0) as f64),
+        (jit_inline_above_cost_cell, f64, jit_inline_above_cost, set_jit_inline_above_cost, (10.0) as f64),
         (from_collapse_limit_cell, i32, from_collapse_limit, set_from_collapse_limit, 8),
         (join_collapse_limit_cell, i32, join_collapse_limit, set_join_collapse_limit, 8),
         (constraint_exclusion_cell, i32, constraint_exclusion, set_constraint_exclusion, guc_tables::consts::CONSTRAINT_EXCLUSION_PARTITION),
         (debug_parallel_query_cell, i32, debug_parallel_query, set_debug_parallel_query, guc_tables::consts::DEBUG_PARALLEL_OFF),
-        (max_parallel_workers_per_gather_cell, i32, max_parallel_workers_per_gather, set_max_parallel_workers_per_gather, 2),
+        (max_parallel_workers_per_gather_cell, i32, max_parallel_workers_per_gather, set_max_parallel_workers_per_gather, 4),
         (jit_enabled_cell, bool, jit_enabled, set_jit_enabled, true),
         (enable_self_join_elimination_cell, bool, enable_self_join_elimination, set_enable_self_join_elimination, true),
         (jit_expressions_cell, bool, jit_expressions, set_jit_expressions, true),
