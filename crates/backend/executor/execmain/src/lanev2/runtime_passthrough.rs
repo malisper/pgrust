@@ -210,7 +210,7 @@ impl PassthroughShared {
                 crate::querydesc::release_query_desc_seam(qd);
                 return Err(e);
             }
-            let sink = RowEmitSink::new(self.funnel.producer(worker), None);
+            let sink = RowEmitSink::new(self.funnel.producer(worker));
             *cell.borrow_mut() = Some(WorkerExecPt { qd, sink });
             Ok(())
         })
@@ -444,6 +444,18 @@ pub(super) fn engage_passthrough(
     ensure_passthrough_hooks_registered();
     let funnel: Arc<RowFunnel<MinImage>> =
         RowFunnel::new(rt.nthreads() + runtime::MAX_EXTERNAL_LANES, ring_cap);
+    // Review fix #2 (leader mid-drive wake): producers SET THE LEADER'S LATCH
+    // on every push / done / full-ring park, so the drain below wakes
+    // immediately instead of at the bounded recheck quantum (which stays as a
+    // backstop only — without this, every ring-full batch cost a full quantum,
+    // and a non-expiring quantum would deadlock). Captured on the leader
+    // thread BEFORE any producer starts; SetLatch on an already-set latch is a
+    // cheap flag test, and set-after-push ordering against the loop's
+    // check-then-wait makes it lost-wake-free (standard latch protocol).
+    let leader_proc = init_small::globals::MyProcNumber();
+    funnel.set_wake_hook(Box::new(move || {
+        latch::SetLatch(::types_storage::latch::LatchHandle::proc(leader_proc));
+    }));
     let payload =
         PassthroughShared::new(rt, pstmt, query_text.to_string(), eflags, Arc::clone(&funnel));
 
@@ -629,12 +641,27 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
     if !super::row_emit::row_funnel_enabled() {
         return Ok(false);
     }
-    // Fail-closed gates: no EPQ recheck, no junk filter, no cursor/SPI cadence.
+    // CRITICAL (review fix #1): the funnel is a COMPLETE-DRAIN engine only. A
+    // count-limited run (extended-protocol Execute(portal, max_rows) — and any
+    // suspendable portal cadence) must NOT engage: the funnel would emit
+    // `number_tuples` rows, close demand, and destroy the parallel context;
+    // the portal then SUSPENDS and the next Execute would re-engage a FRESH
+    // funnel that rescans from block 0 → duplicated rows. A resumable funnel
+    // is future work; fail closed to the serial loop, whose per-tuple state
+    // survives suspend/resume.
+    if number_tuples != 0 {
+        return Ok(false);
+    }
+    // Fail-closed gates: no EPQ recheck, no junk filter, no cursor/SPI cadence,
+    // and no instrumented run (review fix #3b: EXPLAIN ANALYZE node
+    // instrumentation would silently read zero — the workers' per-node
+    // instrumentation is never merged back on this arm).
     if estate.es_epq_active
         || estate.es_junkFilter.is_some()
         || estate.es_lane_cursor_parked
         || estate.es_cursor_run_budget.is_some()
         || estate.es_spi_run_budget.is_some()
+        || estate.es_instrument != 0
     {
         return Ok(false);
     }
@@ -690,7 +717,11 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
         return Ok(false);
     }
 
-    let limit = (number_tuples != 0).then_some(number_tuples);
+    // Complete-drain only (the count-limited refusal above): no LIMIT bound
+    // rides the engagement. `engage_passthrough` keeps its `limit` parameter
+    // for the future resumable-funnel increment (and the runtime e2e tests).
+    let limit = None;
+    debug_assert_eq!(number_tuples, 0, "count-limited runs are refused above");
 
     // Wire slot: a Minimal slot carrying the result descriptor; the drain
     // stores each image into it and hands it to `dest.receive_slot`.

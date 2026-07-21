@@ -52,8 +52,6 @@ use ::types_tuple::MinimalTupleData;
 
 use runtime::{DrainStep, FunnelProducer, PushOutcome, RowFunnel};
 
-use super::push::{Sink, SinkFeed};
-
 /// Kill switch (default OFF): `PGRUST_RUNTIME_ROW_FUNNEL=1`/`on` arms World-B
 /// parallel lane row-emit. One process-static resolve (the
 /// `PGRUST_RUNTIME_*` precedent, `runtime/src/sched.rs`).
@@ -120,43 +118,35 @@ impl Drop for MinImage {
     }
 }
 
-/// Worker-side terminal sink of the parallel lane push island (World-B). Slots
-/// in where the serial lane uses `RootAdapter`: instead of a capacity-one PG
-/// pull buffer, it appends the projected tuple into this worker's funnel ring.
+/// Worker-side emitter of the parallel passthrough arm (World-B): materializes
+/// each produced tuple into an owned [`MinImage`] and pushes it into this
+/// worker's funnel ring via [`emit_blocking`](RowEmitSink::emit_blocking)
+/// (blocking on a full ring under the K-standby permit).
 ///
-/// Back-pressure: [`accept`](RowEmitSink::accept) is NON-blocking — a full ring
-/// returns [`SinkFeed::Full`], which pauses the push pipeline (`OpStatus::
-/// Paused`); the worker loop then parks on the ring (the scheduler wiring
-/// donates the permit via `runtime::blocking_io_section`). The boundary tuple
-/// is held in `pending` so it is re-pushed, never lost, when the pipeline
-/// resumes (the `RootAdapter`-overfill law: no silent row loss).
+/// NOTE (review fix): the earlier push-pipeline `Sink` face (`accept` returning
+/// `SinkFeed::Full` with a `pending` boundary tuple) was DELETED — its protocol
+/// dropped the newly-produced row whenever a pending boundary tuple was being
+/// re-pushed (one lost row per ring-full event). The direct-drive
+/// `emit_blocking` face is the only producer face; a pause/resume `Sink` face
+/// is future work with a re-delivery contract, not a field on this struct.
 pub(super) struct RowEmitSink {
     producer: FunnelProducer<MinImage>,
     /// Scratch bump context to FORM the minimal tuple before copying it into an
     /// owned image; reset after each row so it never grows (the images, not the
     /// scratch, carry the bounded memory).
     scratch: ::mcx::MemoryContext,
-    /// Boundary tuple saved on `SinkFeed::Full` — re-pushed on resume.
-    pending: Option<MinImage>,
-    clear_on_finish: Option<ExecSlotId>,
 }
 
 impl RowEmitSink {
-    pub(super) fn new(
-        producer: FunnelProducer<MinImage>,
-        clear_on_finish: Option<ExecSlotId>,
-    ) -> RowEmitSink {
+    pub(super) fn new(producer: FunnelProducer<MinImage>) -> RowEmitSink {
         RowEmitSink {
             producer,
             scratch: ::mcx::MemoryContext::new_bump("lane-row-emit"),
-            pending: None,
-            clear_on_finish,
         }
     }
 
     /// Copy the produced slot into a fresh owned bounded image (via the reset
-    /// scratch bump context). Shared by the push-pipeline `accept` path and the
-    /// bgworker direct-drive `emit_blocking` path.
+    /// scratch bump context).
     fn materialize(
         &mut self,
         tuple: ExecSlotId,
@@ -178,14 +168,16 @@ impl RowEmitSink {
     /// produced slot and push into this worker's ring, BLOCKING on a full ring
     /// under the K-standby permit (`runtime::blocking_io_section`). Returns
     /// `false` iff demand was closed (LIMIT) before the row could be buffered —
-    /// the caller must then stop producing. Unlike `accept` (the push-pipeline
-    /// Sink face, which returns `Full` and pauses), a dedicated producer thread
-    /// blocks here — the correct model for the parallel-context worker body.
+    /// the caller must then stop producing. A dedicated producer thread blocks
+    /// here — the correct model for the parallel-context worker body.
     pub(super) fn emit_blocking(
         &mut self,
         tuple: ExecSlotId,
         estate: &mut EStateData<'_>,
     ) -> PgResult<bool> {
+        // A parallel row-emit must never ride an EPQ recheck (the non-lane
+        // tail): the eligibility gates carve these out; assert the invariant.
+        debug_assert!(!estate.es_epq_active, "RowEmitSink inside an EPQ drive");
         let img = self.materialize(tuple, estate)?;
         match self.producer.push_blocking(img, ::runtime::blocking_io_section) {
             PushOutcome::Pushed => {
@@ -194,50 +186,6 @@ impl RowEmitSink {
             }
             PushOutcome::DemandClosed => Ok(false),
         }
-    }
-}
-
-impl<'mcx> Sink<'mcx> for RowEmitSink {
-    fn accept(&mut self, tuple: ExecSlotId, estate: &mut EStateData<'mcx>) -> PgResult<SinkFeed> {
-        // A parallel row-emit must never ride an EPQ recheck (the non-lane
-        // tail): the push path already carves these out; assert the invariant.
-        debug_assert!(!estate.es_epq_active, "RowEmitSink inside an EPQ drive");
-
-        // Materialize the row to push: reuse a saved boundary tuple, else form
-        // a fresh owned image from the produced slot.
-        let img = match self.pending.take() {
-            Some(p) => p,
-            None => self.materialize(tuple, estate)?,
-        };
-
-        match self.producer.try_push(img) {
-            Ok(()) => {
-                estate.es_processed += 1;
-                // Capacity-N buffer: unlike RootAdapter it can take more.
-                Ok(SinkFeed::NeedMore)
-            }
-            Err(back) => {
-                // Ring full: save the boundary tuple and pause the pipeline.
-                self.pending = Some(back);
-                Ok(SinkFeed::Full)
-            }
-        }
-    }
-
-    fn finish(&mut self, estate: &mut EStateData<'mcx>) -> PgResult<()> {
-        // Flush a saved boundary tuple before finishing — block (donating the
-        // permit) until the leader frees space, or stop if demand closed.
-        if let Some(img) = self.pending.take() {
-            let _ = self.producer.push_blocking(img, ::runtime::blocking_io_section);
-        }
-        // Publish producer-done so the leader drain can reach EOF once this
-        // ring is also drained (the streaming taskset's finalize contract).
-        self.producer.mark_done();
-        if let Some(slot) = self.clear_on_finish {
-            let mcx = estate.es_query_cxt;
-            ::exectuples::exec_clear_tuple(estate.slot_mut(slot), mcx);
-        }
-        Ok(())
     }
 }
 
