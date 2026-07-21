@@ -30,6 +30,8 @@ extern crate alloc;
 pub mod optimizer_plan;
 pub mod relids;
 pub mod run;
+#[cfg(test)]
+mod relids_differential_tests;
 
 use core::cell::{Cell, RefCell};
 
