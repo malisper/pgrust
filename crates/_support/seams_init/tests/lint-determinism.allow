@@ -317,11 +317,13 @@ env	crates/backend/executor/execmain/src/execmain.rs	2	DST-REVIEW(t27-train): bu
 env	crates/backend/executor/execmain/src/execparallel.rs	3
 env	crates/backend/executor/execmain/src/lanev2.rs	36	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake + SE16-GATES boarding delta DST-REVIEW(SE16-GATES): {aggidx-par _PAR knob, agg-bitmap feed knob, agg-poly knob/probe} — same process-constant lane-knob class (env read once, OnceLock-cached, process-constant per run); knobs-registry routing queued in notes/se16-gates.md §8 alongside the t30-chartered SE migration + DST-REVIEW(t35-routing-flips): +1 = the SE-MKTEXT executor half (PGRUST_LANE_V2_MULTIKEY_TEXT read in multikey_text2_enabled, merged @ 4479aae8d; same spelling as the planner probe — knob-coherence law; DEFAULT ON at t35, =0|off kills) — same process-constant lane-knob class; knobs-registry routing rides the chartered SE migration
 env	crates/backend/executor/execmain/src/lanev2/exprkey.rs	6
+env	crates/backend/executor/execmain/src/lanev2/row_emit.rs	1	DST-REVIEW(night/row-emit-funnel): PGRUST_RUNTIME_ROW_FUNNEL — THE GL-FUNNEL-4 flipped-kill switch (default ON for the FloorGuard band; =0 restores serial byte-exactly); process-constant OnceLock env read, the pre-existing lane-knob class; knobs-registry routing rides the chartered SE/DST migration
 env	crates/backend/executor/execmain/src/lanev2/runtime_agg.rs	29
 env	crates/backend/executor/execmain/src/lanev2/runtime_agg_sorted.rs	2
 env	crates/backend/executor/execmain/src/lanev2/runtime_bitmap.rs	3
 env	crates/backend/executor/execmain/src/lanev2/runtime_distinct.rs	7
 env	crates/backend/executor/execmain/src/lanev2/runtime_hashjoin.rs	11	DST-REVIEW(t32-train): +1 = PGRUST_LANE_V2_HJPROBE_V2 (the se/hjprobe-v2 car boarded at t32; R-KNOBS registry row on the lane branch; default OFF, process-constant env read, the same lane-knob class — the car sealed without its ratchet row, reconciled at boarding). Prior: DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake + DST-REVIEW(GL-HJSEAT-2 flip lane): +1 = PGRUST_RUNTIME_HJ_SINGLEPASS (phase-1a single-pass CAS build kill-switch, default OFF, parked per GL-HJSP-1) — same process-constant lane-knob class (env read once, OnceLock-cached); knobs-registry routing rides the chartered SE migration
+env	crates/backend/executor/execmain/src/lanev2/runtime_passthrough.rs	4	DST-REVIEW(night/row-emit-funnel): the funnel knob family {PGRUST_RUNTIME_ROW_FUNNEL_DOP, _PLUS1 (DOP+1 admission kill), _LEADER (leader-producer kill), _EMIT_MAX_PCT (the FloorGuard emit-fraction override; 100 disables)} — same process-constant lane-knob class as the sibling arms (env read once per process); knobs-registry routing rides the chartered SE/DST migration
 env	crates/backend/executor/execmain/src/lanev2/runtime_plaindistinct.rs	1
 env	crates/backend/executor/execmain/src/lanev2/runtime_scan.rs	12	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake. 13->12 @ M2 inc-1: the GANG_CLAIM_MS read moved to standing_channel.rs (its row).
 env	crates/backend/executor/execmain/src/lanev2/runtime_sort.rs	6	DST-REVIEW(sort-merge-redesign): GL-SORTECON-3 flipped-kill switches (PGRUST_RUNTIME_SORT_COLSTAGE/_GCUT) + the zone-stats granule cap (PGRUST_RUNTIME_SORT_ZONESTATS_CAP) — boot-frozen OnceLock env reads (once per process, never per query); knobs-registry charter absorbs (dst-and-wasm.md s2.5)
@@ -406,6 +408,7 @@ blocking	crates/backend/executor/execmain/src/lanev2/runtime_agg.rs	1
 blocking	crates/backend/executor/execmain/src/lanev2/runtime_agg_sorted.rs	1
 blocking	crates/backend/executor/execmain/src/lanev2/runtime_distinct.rs	1
 blocking	crates/backend/executor/execmain/src/lanev2/runtime_hashjoin.rs	1
+blocking	crates/backend/executor/execmain/src/lanev2/runtime_passthrough.rs	1	DST-REVIEW(night/row-emit-funnel): bounded 500us external-lane acquire backoff in drain_rg_pt (abort/teardown drain of the pinned RG; capped at 4000 iterations, error/teardown path only) — same class as the sibling arms' blocking-1 rows; Waiter/eventcount conversion rides the chartered SE/DST migration
 blocking	crates/backend/executor/execmain/src/lanev2/runtime_plaindistinct.rs	1
 blocking	crates/backend/executor/execmain/src/lanev2/runtime_scan.rs	1
 blocking	crates/backend/executor/execmain/src/lanev2/runtime_sort.rs	1
@@ -484,11 +487,13 @@ once	crates/backend/executor/execmain/src/execmain.rs	2	DST-REVIEW(t27-train): b
 once	crates/backend/executor/execmain/src/lanev2.rs	33	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake + SE16-GATES boarding delta DST-REVIEW(SE16-GATES): {aggidx-par _PAR knob, agg-bitmap feed knob, agg-poly knob/probe} — same process-constant lane-knob class (env read once, OnceLock-cached, process-constant per run); knobs-registry routing queued in notes/se16-gates.md §8 alongside the t30-chartered SE migration
 once	crates/backend/executor/execmain/src/lanev2/exprkey.rs	6
 once	crates/backend/executor/execmain/src/lanev2/router.rs	1
+once	crates/backend/executor/execmain/src/lanev2/row_emit.rs	1	DST-REVIEW(night/row-emit-funnel): P3 row-19 pure env-read init closure (the GL-FUNNEL-4 kill-switch OnceLock cache) — proof-row class, same as the sibling arms' knob once-caches
 once	crates/backend/executor/execmain/src/lanev2/runtime_agg_sorted.rs	3
 once	crates/backend/executor/execmain/src/lanev2/runtime_agg.rs	30	P3 row 19: lanev2 runtime knobs (design-cited class)
 once	crates/backend/executor/execmain/src/lanev2/runtime_bitmap.rs	3
 once	crates/backend/executor/execmain/src/lanev2/runtime_distinct.rs	8
 once	crates/backend/executor/execmain/src/lanev2/runtime_hashjoin.rs	9	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
+once	crates/backend/executor/execmain/src/lanev2/runtime_passthrough.rs	3	DST-REVIEW(night/row-emit-funnel): P3 row-19 — 2 pure env-read knob once-caches (_PLUS1/_LEADER) + the parallel worker-entrypoint registration once (ensure_passthrough_hooks_registered; the sibling arms' hook-registration pattern, process-constant, no choke crossing)
 once	crates/backend/executor/execmain/src/lanev2/runtime_plaindistinct.rs	2
 once	crates/backend/executor/execmain/src/lanev2/runtime_scan.rs	13	DST-REVIEW(t30-train): single-executor merge car (SE15, K2+HEAPFEED flip) — SE-owned executor surface (lane knob env reads / once-caches / locks, all the pre-existing lane-executor pattern); routing onto knobs-registry/pgsync chartered to the DST program alongside the row-executor deletion bake
 once	crates/backend/executor/execmain/src/lanev2/runtime_sort.rs	5
@@ -618,11 +623,13 @@ rawsync	crates/backend/executor/execmain/src/execparallel.rs	1
 rawsync	crates/backend/executor/execmain/src/lanev2.rs	3
 rawsync	crates/backend/executor/execmain/src/lanev2/exprkey.rs	2
 rawsync	crates/backend/executor/execmain/src/lanev2/router.rs	1
+rawsync	crates/backend/executor/execmain/src/lanev2/row_emit.rs	2	DST-REVIEW(night/row-emit-funnel): the kill-switch OnceLock cell + the leader-stash Mutex slot type — the pre-existing lanev2 rawsync class; pgsync routing chartered to the DST program. The funnel SPSC ring's atomics are NOT here: they live in runtime/src/funnel.rs behind the loom-proved waiter-flag wake protocol (0de39dba1) and are load-bearing by proof, not conversion candidates
 rawsync	crates/backend/executor/execmain/src/lanev2/runtime_agg.rs	1
 rawsync	crates/backend/executor/execmain/src/lanev2/runtime_agg_sorted.rs	1
 rawsync	crates/backend/executor/execmain/src/lanev2/runtime_bitmap.rs	1
 rawsync	crates/backend/executor/execmain/src/lanev2/runtime_distinct.rs	1
 rawsync	crates/backend/executor/execmain/src/lanev2/runtime_hashjoin.rs	1
+rawsync	crates/backend/executor/execmain/src/lanev2/runtime_passthrough.rs	4	DST-REVIEW(night/row-emit-funnel): std::sync import line (Arc/Mutex/OnceLock — the shared-state slots: error Mutex, leader stash Mutex, rg/pcxt/leader-lane OnceLocks) + atomic engagement counters + the knob OnceLock cells — matching the sibling arms' pre-existing lanev2 rawsync class; pgsync routing chartered to the DST program. The SPSC ring atomics ride runtime/src/funnel.rs's loom proof (0de39dba1), not this file
 rawsync	crates/backend/executor/execmain/src/lanev2/runtime_plaindistinct.rs	1
 rawsync	crates/backend/executor/execmain/src/lanev2/runtime_scan.rs	1
 rawsync	crates/backend/executor/execmain/src/lanev2/runtime_sort.rs	1

@@ -542,7 +542,17 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      alignment log. Whole module is cfg(pgrust_sim) at the mod decl
     //      — ABSENT from product codegen (same class as 48); source census
     //      sees the text. No session identity.
-    assert_eq!(count_tree(crates), 518, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // night/row-emit-funnel delta (519 = 518 + 1):
+    //   58. executor/execmain/src/lanev2/runtime_passthrough.rs
+    //      WORKER_EXEC_PT — per-runtime-worker executor state for the
+    //      parallel row-emit funnel (World-B): a fresh QueryDesc over the
+    //      leader-arena pstmt + this worker's RowEmitSink, built on the
+    //      worker's first claimed morsel and released on drive teardown.
+    //      Plain per-thread state owned by the pool-loop worker thread —
+    //      the same non-session class as slot 46's LEDGER_GRANT and
+    //      blocking.rs's PERMIT_SEM (slot 13). No session identity, no
+    //      cross-thread access.
+    assert_eq!(count_tree(crates), 519, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
