@@ -1660,38 +1660,47 @@ fn funnel_band_boundary_tracks_true_fraction_across_dop() {
     heapfix::install();
     funnel_runtime_boot();
 
-    // 60 pages x 100 rows, ANALYZED: reltuples = 6000.
+    // 600 pages x 100 rows = 60000 rows, ANALYZED (the smoke test's scan
+    // scale — POD-CLASS SIZING, not taste: an engaged run must outlive the
+    // postmaster stand-in's first 10ms launch tick. A shorter engaged run
+    // lands in the pod doom band — longer than the tick, shorter than the
+    // tick plus worker-thread startup — so the gang attaches only AFTER the
+    // leader-producer finished and destroyed the parallel context, fails to
+    // map the segment, and exits nonzero (benign late-worker in C; an
+    // exit-code assert in this harness). Locally such a run ends before the
+    // tick and nothing ever launches, which is why a 60-page variant passed
+    // every local run and failed every fleet pod.
     const RELID: u32 = 93006;
     let pages: Vec<Vec<i32>> =
-        (0..60).map(|p| ((p * 100 + 1)..=(p * 100 + 100)).collect()).collect();
+        (0..600).map(|p| ((p * 100 + 1)..=(p * 100 + 100)).collect()).collect();
     let page_refs: Vec<&[i32]> = pages.iter().map(|v| &v[..]).collect();
     heapfix::register_table(RELID, &page_refs);
 
-    // (tag, qual threshold k — `a > k` truly emits 6000-k rows, plan_rows,
+    // (tag, qual threshold k — `a > k` truly emits 60000-k rows, plan_rows,
     //  parallel_aware, expect_engage). Fragment plan_rows = whole / divisor.
     let cells: &[(&'static str, i32, f64, bool, bool)] = &[
         // Planned DOP 1 (serial whole-plan shapes): admission tracks the
         // true fraction across the 10% boundary — 9.9% engages, 10.3%
         // refuses.
-        ("dop1 true 9.9% whole-plan (engage)", 5406, 594.0, false, true),
-        ("dop1 true 10.3% whole-plan (refuse)", 5382, 618.0, false, false),
+        ("dop1 true 9.9% whole-plan (engage)", 54060, 5940.0, false, true),
+        ("dop1 true 10.3% whole-plan (refuse)", 53820, 6180.0, false, false),
         // Planned DOP 2 fragment, true 33% (divisor 2.4 -> apparent 13.75%):
         // refuse — pre-fix also refused; the clean side of the measured
         // boundary.
-        ("dop2 fragment true 33% (refuse)", 4020, 825.0, true, false),
+        ("dop2 fragment true 33% (refuse)", 40200, 8250.0, true, false),
         // Planned DOP 4 fragment, true 33% (divisor 4.0 -> apparent 8.25%,
         // INSIDE the band): RED WITNESS — the pre-fix expression admitted
         // this cell.
-        ("dop4 fragment true 33% (refuse; red witness)", 4020, 495.0, true, false),
+        ("dop4 fragment true 33% (refuse; red witness)", 40200, 4950.0, true, false),
         // Planned DOP 4 fragment, true 9.9% (apparent 2.475%): refuses too —
         // fragments fail closed even when the true fraction is in-band,
         // because the divisor is not recoverable from the Plan node.
-        ("dop4 fragment true 9.9% (refuse; fail-closed)", 5406, 148.5, true, false),
+        ("dop4 fragment true 9.9% (refuse; fail-closed)", 54060, 1485.0, true, false),
         // Positive control for the red-witness cell: the SAME 8.25% estimate
         // on a whole-plan shape engages — the fragment refusals above are
         // attributable to the per-participant marker alone, not any other
         // gate.
-        ("whole-plan 8.25% estimate control (engage)", 4020, 495.0, false, true),
+        ("whole-plan 8.25% estimate control (engage)", 40200, 4950.0, false, true),
     ];
 
     for &(tag, k, plan_rows, parallel_aware, expect_engage) in cells {
@@ -1704,12 +1713,14 @@ fn funnel_band_boundary_tracks_true_fraction_across_dop() {
             plan_rows,
             parallel_aware,
         );
-        let expected: Vec<i32> = ((k + 1)..=6000).collect();
-        // Poller on EVERY cell (not only the engage-expected ones): a
-        // refuse-expected cell that regresses into engaging must fail the
-        // counter assert below, not hang waiting for a gang that no
-        // postmaster stand-in would ever launch.
-        let (processed, mut values) = funnel_run_pstmt(pstmt, tag, 0, true).unwrap();
+        let expected: Vec<i32> = ((k + 1)..=60000).collect();
+        // Poller only where a gang is expected (pod-class hardening, the
+        // sibling tests' shape): a refuse-expected cell registers nothing,
+        // so its poller could only ever launch strays racing a previous
+        // cell's context teardown. A refuse cell that regresses into
+        // engaging hangs awaiting a gang no stand-in launches and surfaces
+        // as this test's named watchdog abort — still red, just not crisp.
+        let (processed, mut values) = funnel_run_pstmt(pstmt, tag, 0, expect_engage).unwrap();
         let (e1, c1) = execmain::funnel_engagements();
         if expect_engage {
             assert_eq!(e1, e0 + 1, "{tag}: must engage the funnel");
