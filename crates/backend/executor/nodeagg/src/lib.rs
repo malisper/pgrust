@@ -4068,6 +4068,27 @@ fn grouped_key_type_exportable(att: &::types_tuple::FormData_pg_attribute) -> bo
 /// whitelist — AvgAccum/Int128 numeric-family states included) and whose
 /// grouping keys are all byval int-family word-equality types.
 pub fn agg_grouped_runtime_admissible(node: &AggStateData<'_>) -> bool {
+    agg_grouped_runtime_shell_admissible(node)
+        && runtime_partial::agg_runtime_partial_admissible(node)
+}
+
+/// TPCH-NUMJOIN (night/tpch-cars-1, CAR 2): the grouped admission's POLY
+/// twin — the identical structural shell, with the SE-AGGPOLY manifest
+/// (>=1 numeric_avg_accum NumericAvg transition, remainder exportable lane
+/// kinds; arg expressions free) in place of the full-fold-plan requirement.
+/// The caller (the runtime hash-join grouped sink) gates it behind the
+/// PGRUST_LANE_V2_AGGJOIN_NUMERIC knob and tries the plan-based admission
+/// FIRST — plan-covered shapes never reach this.
+pub fn agg_grouped_poly_runtime_admissible(node: &AggStateData<'_>) -> bool {
+    agg_grouped_runtime_shell_admissible(node)
+        && runtime_partial::agg_poly_partial_admissible(node)
+}
+
+/// The grouped admission's structural shell (shared by the plan-based and
+/// poly rows): a serial simple-split hashed Agg (single set, param-free —
+/// the breaker gate), untouched by any lane arm (no compact/sink/merge
+/// state), byval int-family word-equality grouping keys.
+fn agg_grouped_runtime_shell_admissible(node: &AggStateData<'_>) -> bool {
     if node.plan.aggstrategy != AGG_HASHED
         || node.plan.aggsplit != AGGSPLIT_SIMPLE
         || !agg_hash_breaker_admissible(node)
@@ -4079,9 +4100,6 @@ pub fn agg_grouped_runtime_admissible(node: &AggStateData<'_>) -> bool {
     }
     let Some(ph) = node.perhash.as_ref() else { return false };
     if ph.compact.is_some() || ph.sink_cap.is_some() || node.sink_emit.is_some() {
-        return false;
-    }
-    if !runtime_partial::agg_runtime_partial_admissible(node) {
         return false;
     }
     let base = ph.hashslot.base();
@@ -4131,6 +4149,10 @@ pub fn agg_hash_export_grouped_into<'mcx>(
 ) -> PgResult<bool> {
     debug_assert_eq!(node.plan.aggstrategy, AGG_HASHED);
     let mcx = estate.es_query_cxt;
+    // TPCH-NUMJOIN (CAR 2): the export schema, once per call (plan-based for
+    // every pre-existing engagement; the poly manifest only for shapes the
+    // knob-gated poly admission let in).
+    let schema = runtime_partial::trans_schema(node)?;
     out.groups.clear();
     out.scratch_ptrs.clear();
     {
@@ -4173,7 +4195,7 @@ pub fn agg_hash_export_grouped_into<'mcx>(
     for (i, (_key, partial)) in groups.iter_mut().enumerate() {
         let base = NonNull::new(scratch_ptrs[i] as *mut AggPerGroup)
             .expect("entry pergroup pointer is non-null");
-        runtime_partial::export_partial_from(node, base, partial)?;
+        runtime_partial::export_partial_with(node, &schema, base, partial)?;
     }
     Ok(true)
 }
@@ -4212,6 +4234,9 @@ pub fn exec_agg_grouped_runtime_partials<'mcx>(
 ) -> PgResult<bool> {
     debug_assert_eq!(node.plan.aggstrategy, AGG_HASHED);
     let mcx = estate.es_query_cxt;
+    // TPCH-NUMJOIN (CAR 2): the absorb schema, once per call (see the
+    // export's twin note).
+    let schema = runtime_partial::trans_schema(node)?;
     {
         let Some(ph) = node.perhash.as_ref() else { return Ok(false) };
         if ph.table_filled
@@ -4281,7 +4306,7 @@ pub fn exec_agg_grouped_runtime_partials<'mcx>(
             })
         };
         match pergroup {
-            Some(pg) => runtime_partial::absorb_partial_states_at(node, pg, partial)?,
+            Some(pg) => runtime_partial::absorb_partial_states_with(node, &schema, pg, partial)?,
             None => {
                 grouped_absorb_reset(node);
                 return Ok(false);
