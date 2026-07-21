@@ -589,7 +589,15 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      guard (PGRUST_RUNTIME_SERIAL_LEASE, default OFF). Pure frame
     //      counter, unwound by construction with the executor frames;
     //      no session identity, never captured/restored by an envelope.
-    assert_eq!(count_tree(crates), 522, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // night/nlidx-arm delta (523 = 522 + 1), deliberately NON-SESSION TLS:
+    //   63. executor/execmain/src/lanev2/runtime_nlindex.rs — WORKER_NLEXEC:
+    //      the NL-inner-index arm's per-worker private executor slot (the
+    //      worker's own QueryDescHandle + errored flag for teardown-path
+    //      selection). Engagement-scoped scratch on the gang thread —
+    //      installed at worker bind, taken at detach; identity is the
+    //      engagement, never the session; never captured/restored by an
+    //      envelope.
+    assert_eq!(count_tree(crates), 523, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
