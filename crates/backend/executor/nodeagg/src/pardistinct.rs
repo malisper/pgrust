@@ -1334,6 +1334,7 @@ impl<'mcx> PdBuilder<'mcx> {
             set_null,
             elem_parts,
             parts,
+            live_sets: Vec::new(),
         })
     }
 
@@ -1349,6 +1350,62 @@ impl<'mcx> PdBuilder<'mcx> {
             states: self.states,
             dsets: self.dsets.into_iter().map(Some).collect(),
         }
+    }
+}
+
+impl PdBuilder<'static> {
+    /// GL-LOWDIST-1: freeze into the LIVE-form handed table (grouped
+    /// specs only) — group/key/state surfaces and the partition index are
+    /// `freeze()` verbatim, but the `DistinctSet`s ride WHOLE (probe
+    /// tables intact) instead of flattening their values, so the
+    /// low-width combine can steal a donor's set per group and re-insert
+    /// only the smaller donors' values. `'static` builders only (the sink
+    /// Locals' mcx-free form; the leader/hybrid builders never take this
+    /// path).
+    pub fn freeze_live(mut self) -> PgResult<PdHandedTable> {
+        debug_assert!(!self.frozen);
+        debug_assert!(!self.ever_spilled, "frozen tables are in-memory only");
+        debug_assert!(self.spec.nkeys() > 0, "live freeze is grouped-only");
+        self.flush_staged();
+        self.frozen = true;
+        let n = self.ngroups();
+        let set_null: Vec<bool> = self.dsets.iter().map(|d| d.seen_null).collect();
+        // Group partition — freeze()'s counting sort verbatim.
+        let mut starts = vec![0u32; PD_GROUP_PARTS + 1];
+        for &h in &self.hashes {
+            starts[(h >> 56) as usize + 1] += 1;
+        }
+        for p in 0..PD_GROUP_PARTS {
+            starts[p + 1] += starts[p];
+        }
+        let mut idx = vec![0u32; n];
+        let mut cur = starts.clone();
+        for (g, &h) in self.hashes.iter().enumerate() {
+            let b = (h >> 56) as usize;
+            idx[cur[b] as usize] = g as u32;
+            cur[b] += 1;
+        }
+        let live_sets = core::mem::take(&mut self.dsets)
+            .into_iter()
+            .map(|d| core::cell::UnsafeCell::new(Some(d)))
+            .collect();
+        Ok(PdHandedTable {
+            ngroups: n,
+            keys: core::mem::take(&mut self.keys),
+            key_arena: core::mem::take(&mut self.key_arena),
+            keynulls: core::mem::take(&mut self.keynulls),
+            hashes: core::mem::take(&mut self.hashes),
+            states: core::mem::take(&mut self.states),
+            set_ints: Vec::new(),
+            set_int_offs: Vec::new(),
+            set_blob: Vec::new(),
+            set_spans: Vec::new(),
+            set_span_offs: Vec::new(),
+            set_null,
+            elem_parts: Vec::new(),
+            parts: Some(PdPartition { starts, idx }),
+            live_sets,
+        })
     }
 }
 
@@ -1379,6 +1436,15 @@ pub struct PdPartition {
 }
 
 /// One participant's frozen partial table — plain data, self-contained.
+///
+/// Two set-value FORMS (the group/key/state/partition surfaces are
+/// identical): FLAT (`freeze()` — values flattened into
+/// `set_ints`/`set_blob`+`set_spans`; the historical wire form, spill- and
+/// hybrid-compatible) and LIVE (`freeze_live()`, GL-LOWDIST-1 — the
+/// builder's `DistinctSet`s ride whole in `live_sets`, probe tables
+/// intact, so the low-width combine can STEAL a donor's set per group
+/// instead of re-hashing every value). `set_ints`/`set_bytes` read both
+/// forms transparently; a live form is grouped-only.
 pub struct PdHandedTable {
     pub ngroups: usize,
     keys: Vec<i64>,
@@ -1397,21 +1463,93 @@ pub struct PdHandedTable {
     /// set_ints/set_spans (laid consecutively per set).
     elem_parts: Vec<u32>,
     parts: Option<PdPartition>,
+    /// LIVE form only (empty = flat): set `si`'s live `DistinctSet`, in
+    /// cells so the sole claimer of the set's group partition can take it
+    /// (see the Sync SAFETY note).
+    live_sets: Vec<core::cell::UnsafeCell<Option<DistinctSet<'static>>>>,
+}
+
+/// Iterator over one set's byte elements — both handed-table forms.
+enum SetBytesIter<'a> {
+    Flat { spans: &'a [PdSpan], blob: &'a [u8], i: usize },
+    Live { d: &'a DistinctSet<'static>, i: usize, n: usize },
+    Empty,
+}
+
+impl<'a> Iterator for SetBytesIter<'a> {
+    type Item = (&'a [u8], u32);
+    fn next(&mut self) -> Option<(&'a [u8], u32)> {
+        match self {
+            SetBytesIter::Flat { spans, blob, i } => {
+                let sp = spans.get(*i)?;
+                *i += 1;
+                Some((&blob[sp.off as usize..(sp.off + sp.len) as usize], sp.hash))
+            }
+            SetBytesIter::Live { d, i, n } => {
+                if *i >= *n {
+                    return None;
+                }
+                let (off, len, h) = d.bytes_span(*i);
+                *i += 1;
+                Some((d.bytes_content(off, len), h))
+            }
+            SetBytesIter::Empty => None,
+        }
+    }
 }
 
 impl PdHandedTable {
     #[inline]
     fn set_ints(&self, si: usize) -> &[i64] {
+        if !self.live_sets.is_empty() {
+            // SAFETY: single-claimer-per-partition contract (Sync note); a
+            // taken set reads empty.
+            return unsafe { (*self.live_sets[si].get()).as_ref().map_or(&[], |d| d.ints()) };
+        }
         &self.set_ints[self.set_int_offs[si] as usize..self.set_int_offs[si + 1] as usize]
     }
 
-    /// Iterate (content, hash) of set `si`'s byte elements.
-    fn set_bytes(&self, si: usize) -> impl Iterator<Item = (&[u8], u32)> {
-        self.set_spans[self.set_span_offs[si] as usize..self.set_span_offs[si + 1] as usize]
-            .iter()
-            .map(|sp| {
-                (&self.set_blob[sp.off as usize..(sp.off + sp.len) as usize], sp.hash)
-            })
+    /// Iterate (content, hash) of set `si`'s byte elements (both forms).
+    fn set_bytes(&self, si: usize) -> SetBytesIter<'_> {
+        if !self.live_sets.is_empty() {
+            // SAFETY: as `set_ints`.
+            return match unsafe { (*self.live_sets[si].get()).as_ref() } {
+                Some(d) => SetBytesIter::Live { d, i: 0, n: d.n_bytes() },
+                None => SetBytesIter::Empty,
+            };
+        }
+        SetBytesIter::Flat {
+            spans: &self.set_spans
+                [self.set_span_offs[si] as usize..self.set_span_offs[si + 1] as usize],
+            blob: &self.set_blob,
+            i: 0,
+        }
+    }
+
+    /// LIVE form: move set `si` out (the low-width steal; `None` = flat
+    /// form or already taken). SAFETY (caller): only the claimer of the
+    /// set's group partition, with no live `set_ints`/`set_bytes` borrow of
+    /// the same cell.
+    #[inline]
+    fn take_live_set(&self, si: usize) -> Option<DistinctSet<'static>> {
+        if self.live_sets.is_empty() {
+            return None;
+        }
+        // SAFETY: single-claimer-per-partition contract (Sync note).
+        unsafe { (*self.live_sets[si].get()).take() }
+    }
+
+    /// Set `si`'s int-value count without materializing the slice (the
+    /// combine pre-count; flat semantics — bytes sets count 0 here).
+    #[inline]
+    fn set_int_len(&self, si: usize) -> usize {
+        if !self.live_sets.is_empty() {
+            // SAFETY: as `set_ints`.
+            return unsafe {
+                (*self.live_sets[si].get()).as_ref().map_or(0, |d| d.ints().len())
+            };
+        }
+        (self.set_int_offs[si + 1] - self.set_int_offs[si]) as usize
     }
 
     pub fn mem_bytes(&self) -> usize {
@@ -1424,11 +1562,25 @@ impl PdHandedTable {
             + self.set_blob.len()
             + self.set_spans.len() * core::mem::size_of::<PdSpan>()
             + self.set_null.len()
+            // SAFETY: as `set_ints` (leader-side callers only see never-live
+            // hybrid tables; sink-side metering happens pre-combine).
+            + self
+                .live_sets
+                .iter()
+                .map(|c| unsafe { (*c.get()).as_ref().map_or(0, |d| d.mem_bytes()) })
+                .sum::<usize>()
     }
 }
 
-// SAFETY: plain owned data, no interior pointers.
+// SAFETY: plain owned data, no interior pointers (live sets are owned,
+// never-spilled, global-allocator data — the PdSinkLocal Send argument).
 unsafe impl Send for PdHandedTable {}
+// SAFETY: shared reads are confined by the sink contract — the combine
+// visits each GROUP PARTITION exactly once, by a single claimer, and every
+// set index `si` belongs to exactly one partition (its group's top-8 hash
+// bucket, the partition index), so cell `live_sets[si]` is touched (read OR
+// taken) by that partition's sole claimer only: shared references never
+// coexist with the take. Flat fields are read-only after construction.
 unsafe impl Sync for PdHandedTable {}
 
 // ===========================================================================
@@ -1649,9 +1801,11 @@ impl<'s> PdBucketMerger<'s> {
             // Probe.
             let mut mask = table.len() - 1;
             let mut slot = (h as usize) & mask;
+            let mut created = false;
             let dst = loop {
                 match table[slot] {
                     0 => {
+                        created = true;
                         let d = out.ngroups;
                         out.ngroups += 1;
                         hashes.push(h);
@@ -1730,6 +1884,19 @@ impl<'s> PdBucketMerger<'s> {
             }
             for j in 0..nsets {
                 let si = g * nsets + j;
+                // GL-LOWDIST-1 steal arm: a NEW output group whose donor is
+                // a LIVE-form table adopts the donor's whole set (probe
+                // table intact — none of its values re-hash, re-probe, or
+                // copy). Only live-form tables (the low-width sink seal)
+                // ever yield one; the stolen set carries its donor's
+                // values AND `seen_null`, so skipping the generic insert +
+                // set_null OR for THIS donor merges exactly the same facts.
+                if created {
+                    if let Some(stolen) = t.take_live_set(si) {
+                        out.dsets[dst * nsets + j] = Some(stolen);
+                        continue;
+                    }
+                }
                 let dset = out.dsets[dst * nsets + j].as_mut().unwrap();
                 let vals = t.set_ints(si);
                 // dedupsub I3, combine face: the union is bounded by
@@ -2126,6 +2293,13 @@ impl PdSinkLocal {
     /// Seal: freeze into the partitioned wire form.
     pub fn freeze(self) -> PgResult<PdHandedTable> {
         self.builder.freeze()
+    }
+
+    /// GL-LOWDIST-1 seal: freeze into the LIVE-form table (grouped specs;
+    /// see [`PdBuilder::freeze_live`]) — the low-width combine's steal
+    /// substrate.
+    pub fn freeze_live(self) -> PgResult<PdHandedTable> {
+        self.builder.freeze_live()
     }
 
     pub fn ngroups(&self) -> usize {
@@ -3338,7 +3512,7 @@ pub fn pd_bucket_precount(
         let g = g as usize;
         for j in 0..nsets {
             let si = g * nsets + j;
-            vals += (t.set_int_offs[si + 1] - t.set_int_offs[si]) as usize;
+            vals += t.set_int_len(si);
         }
         if spec.has_bytes_keys() {
             for (i, kind) in spec.key_kinds.iter().enumerate() {
@@ -3854,6 +4028,55 @@ mod tests {
             }
         }
         assert!(groups >= direct.ngroups);
+    }
+
+    /// GL-LOWDIST-1: LIVE-form tables (`freeze_live`) merged through the
+    /// steal arm equal the flat-form donor merge exactly — groups, key
+    /// nulls, vocab states, sorted set values, and the seen_null face —
+    /// under donor REORDERING (the combine's largest-first shuffle) and
+    /// with MIXED live/flat donors (a spilled Local seals flat beside live
+    /// peers on the error path).
+    #[test]
+    fn live_form_steal_merge_invariance() {
+        let spec = spill_test_spec();
+        let flat = [
+            build_worker(&spec, 0).freeze().unwrap(),
+            build_worker(&spec, 5).freeze().unwrap(),
+        ];
+        let direct = pd_concat_buckets(
+            &spec,
+            (0..PD_GROUP_PARTS).map(|b| pd_merge_bucket(&spec, &flat, b)).collect(),
+        );
+
+        // Live pair, donors reordered.
+        let l1 = build_worker(&spec, 0).freeze_live().unwrap();
+        let l2 = build_worker(&spec, 5).freeze_live().unwrap();
+        let refs: Vec<&PdHandedTable> = vec![&l2, &l1];
+        let live_merged = pd_concat_buckets(
+            &spec,
+            (0..PD_GROUP_PARTS).map(|b| pd_merge_bucket_refs(&spec, &refs, b)).collect(),
+        );
+        assert_eq!(canon(&spec, &direct), canon(&spec, &live_merged));
+
+        // Mixed forms.
+        let l3 = build_worker(&spec, 0).freeze_live().unwrap();
+        let f5 = build_worker(&spec, 5).freeze().unwrap();
+        let refs: Vec<&PdHandedTable> = vec![&l3, &f5];
+        let mixed_merged = pd_concat_buckets(
+            &spec,
+            (0..PD_GROUP_PARTS).map(|b| pd_merge_bucket_refs(&spec, &refs, b)).collect(),
+        );
+        assert_eq!(canon(&spec, &direct), canon(&spec, &mixed_merged));
+
+        // Precount reads both forms identically.
+        let f0 = build_worker(&spec, 0).freeze().unwrap();
+        let l0 = build_worker(&spec, 0).freeze_live().unwrap();
+        for b in 0..PD_GROUP_PARTS {
+            assert_eq!(
+                pd_bucket_precount(&spec, &f0, b),
+                pd_bucket_precount(&spec, &l0, b)
+            );
+        }
     }
 
     /// Torn / corrupt records fail closed (never a silent wrong answer).

@@ -314,21 +314,31 @@ impl PlainPdLocal {
     /// Freeze into the combine-readable form (a plain move — the partition
     /// split already happened at insert).
     pub fn seal(self) -> PlainPdSealed {
-        PlainPdSealed { parts: self.parts, seen_null: self.seen_null }
+        PlainPdSealed {
+            parts: self.parts.into_iter().map(core::cell::UnsafeCell::new).collect(),
+            seen_null: self.seen_null,
+        }
     }
 }
 
-/// A frozen worker partial.
+/// A frozen worker partial. Partition cells are `UnsafeCell` so the
+/// low-width combine can TAKE a live set out of its sole claimer's
+/// partition (see [`plain_pd_combine_steal`]); the generic combine reads
+/// through the same cells.
 pub struct PlainPdSealed {
-    parts: Vec<DistinctSet<'static>>,
+    parts: Vec<core::cell::UnsafeCell<DistinctSet<'static>>>,
     seen_null: bool,
 }
 
 // SAFETY: the PlainPdLocal argument verbatim (sealed = the same sets,
 // moved); combine claimers read disjoint partitions, one claimer per call.
 unsafe impl Send for PlainPdSealed {}
-// SAFETY: `&PlainPdSealed` exposes only reads of never-spilled sets
-// (global-allocator memory); the sink contract serializes writers.
+// SAFETY: the sink contract visits each partition index EXACTLY ONCE, by a
+// single claimer, across the whole sealed slice — so for every `p`, cell
+// `parts[p]` of every sealed partial is touched (read OR taken) only by
+// partition p's claimer, and never again: shared references never coexist
+// with the mutation. `seen_null` is a plain bool read by finalize, which
+// the runtime orders after every combine.
 unsafe impl Sync for PlainPdSealed {}
 
 impl PlainPdSealed {
@@ -342,9 +352,31 @@ impl PlainPdSealed {
         self.seen_null
     }
 
+    /// Partition `p`'s set, by shared reference. SAFETY (caller): only
+    /// partition `p`'s combine claimer may call this, and not after a
+    /// `take_part(p)` on the same sealed partial.
+    #[inline]
+    fn part(&self, p: usize) -> Option<&DistinctSet<'static>> {
+        // SAFETY: single-claimer-per-partition contract (struct doc).
+        self.parts.get(p).map(|c| unsafe { &*c.get() })
+    }
+
+    /// Move partition `p`'s set out (the low-width steal base). SAFETY
+    /// (caller): only partition `p`'s combine claimer, at most once, with
+    /// no live `part(p)` borrow.
+    #[inline]
+    fn take_part(&self, p: usize) -> Option<DistinctSet<'static>> {
+        // SAFETY: single-claimer-per-partition contract (struct doc); the
+        // replaced empty set keeps drops sound.
+        self.parts.get(p).map(|c| unsafe { core::mem::replace(&mut *c.get(), DistinctSet::new()) })
+    }
+
     /// Approximate memory of this partial (the combine envelope check).
+    /// Leader-side only (before the combine set runs — never concurrent
+    /// with claims).
     pub fn mem_bytes(&self) -> usize {
-        self.parts.iter().map(|s| s.mem_bytes()).sum()
+        // SAFETY: leader-side, pre-combine (doc above).
+        self.parts.iter().map(|c| unsafe { (*c.get()).mem_bytes() }).sum()
     }
 }
 
@@ -362,7 +394,7 @@ pub fn plain_pd_combine(kind_bytes: bool, part: usize, sealed: &[PlainPdSealed])
     let mut set: DistinctSet<'static> = DistinctSet::new();
     let mut hashes: Vec<u64> = Vec::new();
     for s in sealed {
-        let Some(p) = s.parts.get(part) else { continue };
+        let Some(p) = s.part(part) else { continue };
         if kind_bytes {
             for i in 0..p.n_bytes() {
                 let (off, len, _h) = p.bytes_span(i);
@@ -372,7 +404,71 @@ pub fn plain_pd_combine(kind_bytes: bool, part: usize, sealed: &[PlainPdSealed])
             set.insert_i64_batch(p.ints(), &mut hashes);
         }
     }
-    // Export the merged values (the set is spent).
+    export_merged(kind_bytes, set)
+}
+
+/// GL-LOWDIST-1 low-width combine: SIZE-ASYMMETRIC union — TAKE the largest
+/// donor's live set (probe table intact — its values are never re-hashed,
+/// re-probed, or copied; `take_ints` later moves its value vec out
+/// wholesale) and insert only the OTHER donors' values into it. At width
+/// 2-4 the largest donor is most of the partition, so most of the generic
+/// combine's insert work vanishes.
+///
+/// Value identity: the merged VALUE SET is the same union (set insertion is
+/// idempotent; representational equality unchanged); only set-internal
+/// insertion ORDER differs, which the admitted order-insensitive replays
+/// cannot observe (distinctset.rs module doc). The SELECT-DISTINCT
+/// sub-arm's emitted row order within a partition follows the base donor
+/// instead of worker 0 — DISTINCT row order is a non-surface (unordered
+/// plan), and the sink's order was already engagement-shaped.
+///
+/// SAFETY: relies on the sink contract — this claimer is partition
+/// `part`'s SOLE toucher across `sealed` (PlainPdSealed struct doc).
+pub fn plain_pd_combine_steal(
+    kind_bytes: bool,
+    part: usize,
+    sealed: &[PlainPdSealed],
+) -> PlainPdMerged {
+    // Choose the largest donor (ties: first).
+    let mut base: Option<(usize, usize)> = None; // (index, len)
+    let mut total = 0usize;
+    for (i, s) in sealed.iter().enumerate() {
+        let Some(p) = s.part(part) else { continue };
+        let l = p.len();
+        total += l;
+        if base.is_none_or(|(_, bl)| l > bl) && l > 0 {
+            base = Some((i, l));
+        }
+    }
+    let Some((bi, blen)) = base else {
+        return PlainPdMerged { ints: Vec::new(), blob: Vec::new(), spans: Vec::new() };
+    };
+    let mut set = sealed[bi].take_part(part).expect("chosen donor holds the partition");
+    if total > blen {
+        // Union ≤ total (exact pre-size; the projection gate keeps small
+        // legacy-arm sets untouched).
+        set.reserve_projected(total);
+    }
+    let mut hashes: Vec<u64> = Vec::new();
+    for (i, s) in sealed.iter().enumerate() {
+        if i == bi {
+            continue;
+        }
+        let Some(p) = s.part(part) else { continue };
+        if kind_bytes {
+            for j in 0..p.n_bytes() {
+                let (off, len, _h) = p.bytes_span(j);
+                set.insert_bytes(p.bytes_content(off, len));
+            }
+        } else {
+            set.insert_i64_batch(p.ints(), &mut hashes);
+        }
+    }
+    export_merged(kind_bytes, set)
+}
+
+/// Export the merged values (the set is spent) — shared combine tail.
+fn export_merged(kind_bytes: bool, mut set: DistinctSet<'static>) -> PlainPdMerged {
     if kind_bytes {
         let n = set.n_bytes();
         let mut blob = Vec::new();
@@ -674,5 +770,66 @@ mod tests {
         let vals: Vec<Datum> = (0..1000i64).map(Datum::from_i64).collect();
         a.accept_datums_int(false, false, &vals, false);
         assert!(a.crossed());
+    }
+
+    /// GL-LOWDIST-1: the size-asymmetric steal combine produces the SAME
+    /// value set as the generic combine (int face) — skewed widths, ties,
+    /// empty donors, cross-worker duplicates.
+    #[test]
+    fn steal_combine_int_set_equivalence() {
+        let mut a = local();
+        let mut b = local();
+        let mut c = local();
+        // Skew: a is the big donor; b overlaps a; c is empty-ish.
+        let big: Vec<Datum> = (0..5000i64).map(|k| Datum::from_i64(k * 37 % 4096)).collect();
+        a.accept_datums_int(false, false, &big, false);
+        let small: Vec<Datum> = (0..300i64).map(|k| Datum::from_i64(k * 37 % 4096 + 2048)).collect();
+        b.accept_datums_int(false, false, &small, true);
+        c.accept_datums_int(false, false, &[Datum::from_i64(7)], false);
+        let sealed_g = vec![a.seal(), b.seal(), c.seal()];
+        let generic: Vec<PlainPdMerged> =
+            (0..PLAIN_PD_PARTS).map(|p| plain_pd_combine(false, p, &sealed_g)).collect();
+        // Rebuild the same locals for the steal pass (take_part consumes).
+        let mut a2 = local();
+        let mut b2 = local();
+        let mut c2 = local();
+        a2.accept_datums_int(false, false, &big, false);
+        b2.accept_datums_int(false, false, &small, true);
+        c2.accept_datums_int(false, false, &[Datum::from_i64(7)], false);
+        let sealed_s = vec![a2.seal(), b2.seal(), c2.seal()];
+        let steal: Vec<PlainPdMerged> =
+            (0..PLAIN_PD_PARTS).map(|p| plain_pd_combine_steal(false, p, &sealed_s)).collect();
+        assert_eq!(merged_int_values(&generic), merged_int_values(&steal));
+        // Per-partition lengths match too (partition routing untouched).
+        let lens = |m: &[PlainPdMerged]| m.iter().map(|x| x.len()).collect::<Vec<_>>();
+        assert_eq!(lens(&generic), lens(&steal));
+    }
+
+    /// GL-LOWDIST-1: steal ≡ generic on the bytes face.
+    #[test]
+    fn steal_combine_bytes_set_equivalence() {
+        let strs: Vec<Vec<u8>> =
+            (0..600).map(|i| format!("v{}", i * 13 % 400).into_bytes()).collect();
+        let build = || {
+            let mut a = local();
+            let mut b = local();
+            for s in &strs {
+                a.parts[part_of_bytes(s)].insert_bytes(s);
+            }
+            for s in strs.iter().take(50) {
+                b.parts[part_of_bytes(s)].insert_bytes(s);
+            }
+            for s in [b"only-b".as_slice(), b"".as_slice()] {
+                b.parts[part_of_bytes(s)].insert_bytes(s);
+            }
+            vec![a.seal(), b.seal()]
+        };
+        let sealed_g = build();
+        let generic: Vec<PlainPdMerged> =
+            (0..PLAIN_PD_PARTS).map(|p| plain_pd_combine(true, p, &sealed_g)).collect();
+        let sealed_s = build();
+        let steal: Vec<PlainPdMerged> =
+            (0..PLAIN_PD_PARTS).map(|p| plain_pd_combine_steal(true, p, &sealed_s)).collect();
+        assert_eq!(merged_bytes_values(&generic), merged_bytes_values(&steal));
     }
 }
