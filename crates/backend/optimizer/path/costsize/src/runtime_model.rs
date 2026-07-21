@@ -310,11 +310,29 @@ mod tests {
             RuntimeClass::CbGroupedAggTextKey => dop >= 12 || rows <= 3_000_000.0,
             RuntimeClass::CbGroupedAggTopN => true,
             RuntimeClass::CbDistinctIntKeys => dop >= 12,
-            RuntimeClass::CbTopnBoundedIntKeys => false, // max_rows: 0
+            // GL-SORTECON-3 re-flip (min_dop 4; the max_rows=0 hack retired
+            // by the COLSTAGE+GCUT sort-arm rework, not by this model).
+            RuntimeClass::CbTopnBoundedIntKeys => dop >= 4,
             RuntimeClass::CbHashJoinPlainAgg => rows <= 2_000_000.0,
             RuntimeClass::HeapPlainCountStar => true, // pages mirror aside
             RuntimeClass::HeapCmpFoldPrefix => rows >= 1_000_000.0 && dop >= 12,
         }
+    }
+
+    /// Classes whose WITNESSED v2 cells were measured on an arm that has
+    /// since CHANGED ECONOMICS (the design §3 arm-change trigger, fired but
+    /// not yet honored with a refit ladder):
+    ///   CbTopnBoundedIntKeys — the v2 grid measured the PRE-COLSTAGE sort
+    ///   arm (4.6-9.2x rt/legacy); GL-SORTECON-3 (COLSTAGE+GCUT) retired
+    ///   that loss and re-flipped the floor to min_dop=4. The fitted curve
+    ///   is therefore SUPERSEDED: it still reflects its cells, but the
+    ///   cells no longer reflect the shipped arm. Shadow-only exposure (the
+    ///   class is not in the decide list); refit owed — ladder spec L6,
+    ///   TSV witness=witnessed-v2-superseded.
+    const SUPERSEDED_CLASSES: &[RuntimeClass] = &[RuntimeClass::CbTopnBoundedIntKeys];
+
+    fn superseded(class: RuntimeClass) -> bool {
+        SUPERSEDED_CLASSES.contains(&class)
     }
 
     /// EQUIVALENCE ASSERTION (design §migration-2): at every measured
@@ -324,6 +342,9 @@ mod tests {
     #[test]
     fn curve_verdicts_match_measurements_at_ladder_cells() {
         for &(class, rows, dop, meas) in CELLS {
+            if superseded(class) {
+                continue; // cells no longer describe the shipped arm (L6)
+            }
             let v = cost_route_verdict(class, rows, dop);
             if meas < 0.95 {
                 assert!(
@@ -356,7 +377,7 @@ mod tests {
     fn curve_vs_floor_disagreements_are_exactly_the_witnessed_rot_cells() {
         let mut disagreements = Vec::new();
         for &(class, rows, dop, meas) in CELLS {
-            if (0.95..=1.05).contains(&meas) {
+            if (0.95..=1.05).contains(&meas) || superseded(class) {
                 continue;
             }
             let cost = cost_route_verdict(class, rows, dop).suppress;
@@ -419,8 +440,12 @@ mod tests {
                 );
             }
         }
-        // topn: honestly never wins anywhere in the measured range — the
-        // curve IS the retired max_rows=0 hack.
+        // topn: the SUPERSEDED curve (pre-COLSTAGE cells) never suppresses
+        // anywhere in its measured range. Kept as a shadow-BEHAVIOR pin —
+        // this is the census direction the class emits until the L6 refit
+        // ladder lands post-GL-SORTECON-3 constants (the shipped floor now
+        // suppresses at dop>=4, so every engaged cell censuses as
+        // wl_suppress_model_gather by construction).
         for &(class, rows, dop, _) in CELLS {
             if class == RuntimeClass::CbTopnBoundedIntKeys {
                 assert!(!cost_route_verdict(class, rows, dop).suppress);
@@ -516,21 +541,29 @@ mod tests {
             assert!(
                 matches!(
                     witness,
-                    "witnessed-v2" | "witnessed-ab" | "unwitnessed-reuse" | "structural"
-                        | "unwitnessed-debt"
+                    "witnessed-v2" | "witnessed-v2-superseded" | "witnessed-ab"
+                        | "unwitnessed-reuse" | "structural" | "unwitnessed-debt"
                 ),
                 "unknown witness status {witness:?} in row: {line}"
             );
             if witness == "unwitnessed-debt" {
                 debt.push((class.to_string(), term.to_string()));
             }
-            if RuntimeClass::ALL.iter().any(|c| c.name() == class)
-                && matches!(term, "c_engage" | "w_row" | "l_setup" | "l_cap" | "n_min_fit")
-            {
-                assert_eq!(
-                    witness, "witnessed-v2",
-                    "fitted curve term {class}.{term} must be witnessed-v2"
-                );
+            if let Some(&rc) = RuntimeClass::ALL.iter().find(|c| c.name() == class) {
+                if matches!(term, "c_engage" | "w_row" | "l_setup" | "l_cap" | "n_min_fit") {
+                    let want = if superseded(rc) {
+                        // The arm changed under the fit (GL-SORTECON-3);
+                        // cells still witnessed, no longer current — L6
+                        // owns the refit.
+                        "witnessed-v2-superseded"
+                    } else {
+                        "witnessed-v2"
+                    };
+                    assert_eq!(
+                        witness, want,
+                        "fitted curve term {class}.{term} witness status"
+                    );
+                }
             }
             if witness == "unwitnessed-reuse" {
                 unwitnessed.push((class.to_string(), term.to_string()));
