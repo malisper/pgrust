@@ -98,22 +98,21 @@ fn flag_enabled() -> bool {
     })
 }
 
-/// M4.1 driver-swap kill switch (scratchpad/night/all-morsels-plan.md
-/// Track 3 item 1): `PGRUST_RUNTIME_VACUUM_POOL=1` arms the POOL channel —
-/// the round's helpers are PGPROC-leasing runtime pool workers engaged
-/// through the M2 inc-2 bound-descriptor gate at QoS class Utility, instead
-/// of a launched bgworker gang. DEFAULT OFF: the bgworker gang stays the
-/// driver of record until the fleet letter. Fail-closed layering: pool
-/// channel unavailable/refused ⇒ the launched gang below, byte-exactly;
-/// unset/0 ⇒ this arm never engages. Layered under PGRUST_RUNTIME_VACUUM
-/// and PGRUST_RUNTIME (both must admit first), and under the standing
+/// M4.1 driver-swap switch (scratchpad/night/all-morsels-plan.md Track 3
+/// item 1), FLIPPED-KILL since the train-40 flip (GL-M41-3: wall 1.009
+/// parity 2-idx / 0.906 WIN 4-idx, OLTP flat, reclaim 15ms): the POOL
+/// channel — PGPROC-leasing runtime pool workers engaged through the M2
+/// inc-2 bound-descriptor gate at QoS class Utility — is the driver of
+/// record; `pgrust.runtime_vacuum_pool = off` (env seed
+/// PGRUST_RUNTIME_VACUUM_POOL=0|off) restores the launched bgworker gang
+/// exactly. Fail-closed layering unchanged: pool channel
+/// unavailable/refused ⇒ the launched gang, byte-exactly; layered under
+/// PGRUST_RUNTIME_VACUUM and PGRUST_RUNTIME, and under the standing
 /// module's own switches (PGRUST_RUNTIME_POOLBIND / PGRUST_RUNTIME_POOLDB
-/// gate try_engage_pool).
+/// gate try_engage_pool — until the M2 lane flips POOLDB, default servers
+/// keep the launched driver and this switch is polarity-ready).
 fn pool_enabled() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var("PGRUST_RUNTIME_VACUUM_POOL").is_ok_and(|v| v.trim() == "1")
-    })
+    guc_tables::backing::pgrust_runtime_vacuum_pool()
 }
 
 /// Engagement trace (PGRUST_VACUUM_TRACE=1): the §9 battery's engagement /

@@ -160,6 +160,22 @@ bool_var!(B_pgrust_runtime, pgrust_runtime, set_pgrust_runtime, true);
 // so the byte-identical SHOW ALL / pg_settings conformance suite is unaffected
 // unless the operator opts in. Seeded by the PGRUST_MEM_AUTOTUNE boot env var.
 bool_var!(B_pgrust_mem_autotune, pgrust_mem_autotune, set_pgrust_mem_autotune, false);
+
+// pgrust.runtime_vacuum_pool (pgrust-only, GL-M41-3 flip): parallel VACUUM's
+// driver rides the morsel-pool workers (M4.1 ⊕ Q2, PGPROC-leasing bound gate
+// at QoS Utility) instead of a launched bgworker gang. DEFAULT ON since the
+// train-40 flip (GL-M41-3: wall 1.009 parity 2-idx / 0.906 WIN 4-idx, OLTP
+// flat 1.020 under the Q1 cap, reclaim 15ms) — off restores the launched
+// gang exactly (flipped-kill). Layering unchanged: the pool channel also
+// requires the pooldb identity glue (PGRUST_RUNTIME_POOLDB, the M2 lane's
+// switch) — until that flips, default servers keep the launched driver and
+// this GUC is polarity-ready. Seeded by PGRUST_RUNTIME_VACUUM_POOL.
+bool_var!(
+    B_pgrust_runtime_vacuum_pool,
+    pgrust_runtime_vacuum_pool,
+    set_pgrust_runtime_vacuum_pool,
+    true
+);
 bool_var!(
     B_integer_datetimes,
     integer_datetimes,

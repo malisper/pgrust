@@ -667,6 +667,12 @@ pub static ConfigureNamesBool: &[GucBoolSetting] = &[
     // also set it. Off => the pool is never spawned, so the whole runtime
     // engine stays inert (every arm falls back to the serial/Gather plan).
     GucBoolSetting { name: "pgrust.runtime", context: PGC_POSTMASTER, group: CUSTOM_OPTIONS, short_desc: Some("Enables the pgrust morsel runtime worker pool (the parallel analytics engine)."), long_desc: Some("Off restores the pool-less process exactly. The PGRUST_RUNTIME environment variable seeds the startup default."), flags: 0, variable: &vars::pgrust_runtime, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust.runtime_vacuum_pool (pgrust-only, GL-M41-3 flip): parallel
+    // VACUUM's driver on the morsel-pool workers (M4.1 ⊕ Q2). PGC_POSTMASTER
+    // (the reader is a per-process cell consulted at each vacuum; the pool
+    // identity glue it composes with is spawn-time), default ON since the
+    // train-40 flip. Off restores the launched bgworker gang exactly.
+    GucBoolSetting { name: "pgrust.runtime_vacuum_pool", context: PGC_POSTMASTER, group: CUSTOM_OPTIONS, short_desc: Some("Runs parallel VACUUM's workers on the pgrust runtime worker pool."), long_desc: Some("Off restores the launched background-worker vacuum gang exactly. The PGRUST_RUNTIME_VACUUM_POOL environment variable seeds the startup default (0 or off disables)."), flags: 0, variable: &vars::pgrust_runtime_vacuum_pool, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
     // pgrust.mem_autotune (pgrust-only, env-to-guc train): gates the boot-time
     // machine-scaled memory/parallel default auto-tune (autotune.rs, assembled
     // from night/mem-defaults). PGC_POSTMASTER, default OFF (stock boot values,
