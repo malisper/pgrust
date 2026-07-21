@@ -96,6 +96,44 @@ impl TopnEntry {
     pub fn raw(self) -> u128 {
         self.0
     }
+
+    /// The entry's [`cut64`] image (leading-key null tier + direction-folded
+    /// word, rowref dropped) — the shared-cutoff comparison space (GCUT,
+    /// night/sort-merge-redesign inc-2).
+    #[inline]
+    pub fn cut64(self) -> u64 {
+        cut64((self.0 >> 112) & 1 != 0, (self.0 >> 48) as u64)
+    }
+}
+
+/// Direction-folded order-preserving word of a NON-NULL key — exactly the
+/// word [`TopnEntry::encode`]/`key_word128` pack (exposed so zone-metadata
+/// cutoff comparisons share the fold law; drift here would break the GCUT
+/// prune-safety argument).
+#[inline]
+pub fn key_order_word(key: i64, desc: bool) -> u64 {
+    let asc = (key as u64) ^ (1 << 63);
+    if desc {
+        !asc
+    } else {
+        asc
+    }
+}
+
+/// The 64-bit SHARED-CUTOFF comparison space (GCUT, night/sort-merge-
+/// redesign inc-2): `(tier:1 | word>>1:63)` of an entry's LEADING key.
+/// The 65-bit (tier, word) prefix is truncated by one word bit so it fits
+/// one `AtomicU64`; comparisons are STRICT `>`, so the truncation is
+/// conservative — `a.cut64() > b.cut64()` implies the full entry order
+/// `a > b` (tier dominates, then word; equal truncated words never prune).
+/// Prune safety: any worker's full-heap floor f satisfies f >= the final
+/// global k-th entry G (a subset's k-th best only tightens toward the
+/// union's), and entries are unique (disjoint rowrefs), so pruning e with
+/// `e.cut64() > min_floors.cut64()` implies e > f >= G — e cannot be in
+/// the global top-k.
+#[inline]
+pub fn cut64(tier: bool, word: u64) -> u64 {
+    ((tier as u64) << 63) | (word >> 1)
 }
 
 /// Multi-key cap (inc-5): entries carry up to this many packed key words.
@@ -154,6 +192,16 @@ impl WideEntry {
     #[inline]
     pub fn rowref(self) -> u64 {
         self.rowref
+    }
+
+    /// The entry's [`cut64`] image over the LEADING key (lexicographic
+    /// order: a strictly greater leading (tier, word) makes the whole
+    /// entry strictly greater, so the shared-cutoff prune law holds at
+    /// every key arity).
+    #[inline]
+    pub fn cut64(self) -> u64 {
+        let k0 = self.keys[0];
+        cut64((k0 >> 64) & 1 != 0, k0 as u64)
     }
 }
 
@@ -652,6 +700,69 @@ mod tests {
                     })
                     .collect();
                 assert_eq!(topn_merge(&sealed, bound), want, "bound={bound} trial={trial}");
+            }
+        }
+    }
+
+    #[test]
+    fn cut64_prune_law_narrow() {
+        // The GCUT safety pin: a.cut64() > b.cut64() must imply the full
+        // entry order a > b, across keys × null × flags × rowrefs (strict
+        // `>` only — equal truncated words never prune).
+        let mut obs = Vec::new();
+        for &k in KEY_SAMPLE {
+            for null in [false, true] {
+                for rowref in [0u64, 1, TOPN_MAX_ROWREF] {
+                    obs.push((k, null, rowref));
+                }
+            }
+        }
+        for desc in [false, true] {
+            for nf in [false, true] {
+                for &a in &obs {
+                    for &b in &obs {
+                        let ea = TopnEntry::encode(a.0, a.1, desc, nf, a.2);
+                        let eb = TopnEntry::encode(b.0, b.1, desc, nf, b.2);
+                        if ea.cut64() > eb.cut64() {
+                            assert!(ea > eb, "cut64 prune law: {a:?} vs {b:?} desc={desc} nf={nf}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cut64_prune_law_wide() {
+        // Leading-key cut64 dominance at arity 2 (lexicographic order).
+        let flags = [(false, false), (true, false)];
+        let mut es = Vec::new();
+        let mut r = 0u64;
+        for &k0 in &[i64::MIN, -1, 0, 1, i64::MAX] {
+            for n0 in [false, true] {
+                for &k1 in &[-5i64, 0, 5] {
+                    es.push(WideEntry::encode(&[(k0, n0), (k1, false)], &flags, r));
+                    r += 1;
+                }
+            }
+        }
+        for &a in &es {
+            for &b in &es {
+                if a.cut64() > b.cut64() {
+                    assert!(a > b, "wide cut64 prune law: {a:?} vs {b:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn key_order_word_matches_encode() {
+        // The zone-metadata fold must be encode's own word fold.
+        for &k in KEY_SAMPLE {
+            for desc in [false, true] {
+                let e = TopnEntry::encode(k, false, desc, false, 0);
+                let word = (e.raw() >> 48) as u64;
+                assert_eq!(word, key_order_word(k, desc), "k={k} desc={desc}");
             }
         }
     }

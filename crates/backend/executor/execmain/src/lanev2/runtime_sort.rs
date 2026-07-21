@@ -39,7 +39,7 @@
 
 use std::cell::UnsafeCell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use ::executils::{EStateData, ExecSlotId};
@@ -349,6 +349,22 @@ pub(super) struct RuntimeSortShared {
     /// completion and gathers by rowref — the entry width is a worker
     /// detail).
     winners: Mutex<Option<Vec<u64>>>,
+    /// GCUT (inc-2): the shared cross-worker cutoff in `nodesort::sink::
+    /// cut64` space — monotone `fetch_min`, `u64::MAX` = unbounded. Seeded
+    /// at engage time from the zone-max seed (the k-th smallest zone-max
+    /// word: >= bound rows provably sit at-or-below it), tightened by every
+    /// worker's full-heap floor. Prune/skip comparisons are STRICT `>`
+    /// (see `cut64`'s safety doc). Dormant (never read) unless
+    /// `runtime_sort_gcut_enabled()`.
+    cutoff: AtomicU64,
+    /// GCUT: per-granule BEST cut64 words (leader zone stats, absolute
+    /// granule space, len == total_granules). A granule whose best word
+    /// exceeds the current cutoff cannot contribute a winner — workers
+    /// skip it before staging/decompression. `None` = no zone skip
+    /// (dictcode leading key, non-exact encodings only, or GCUT off).
+    zone_best: Option<Arc<Vec<u64>>>,
+    /// GCUT: granules skipped pre-staging (engagement witness).
+    zone_skipped: AtomicU64,
     /// Shape (b) FULL SORT (m3-sort-b car 2; design §5). `None` = the
     /// top-N arm (everything above).
     full: Option<FullShared>,
@@ -680,10 +696,18 @@ struct TopnAcceptSink<'a> {
     /// Per-row multi-key scratch (avoids a per-row alloc).
     obs: [( i64, bool); ::nodesort::sink::TOPN_MAX_KEYS],
     flags: [(bool, bool); ::nodesort::sink::TOPN_MAX_KEYS],
+    /// GCUT (inc-2): the payload's shared cutoff. Read once per staged
+    /// batch and pruned/published against in the COLSTAGE tight loop only
+    /// (`runtime_sort_gcut_enabled()` — dormant otherwise).
+    cutoff: &'a AtomicU64,
 }
 
 impl<'a> TopnAcceptSink<'a> {
-    fn new(heap: &'a mut TopnLocal, keys: &'a [KeyCol]) -> TopnAcceptSink<'a> {
+    fn new(
+        heap: &'a mut TopnLocal,
+        keys: &'a [KeyCol],
+        cutoff: &'a AtomicU64,
+    ) -> TopnAcceptSink<'a> {
         let mut flags = [(false, false); ::nodesort::sink::TOPN_MAX_KEYS];
         for (i, k) in keys.iter().enumerate() {
             flags[i] = (k.desc, k.nulls_first);
@@ -695,6 +719,7 @@ impl<'a> TopnAcceptSink<'a> {
             dictcode: keys.iter().any(|k| k.dictcode),
             obs: [(0, false); ::nodesort::sink::TOPN_MAX_KEYS],
             flags,
+            cutoff,
         }
     }
 
@@ -880,6 +905,16 @@ impl<'mcx> BatchSink<'mcx> for TopnAcceptSink<'_> {
                     let keys = self.keys;
                     let flags = &self.flags;
                     let obs = &mut self.obs;
+                    // GCUT (inc-2): shared-cutoff prune + floor publication
+                    // (see `cut64`'s safety doc — strict `>` prune only,
+                    // publication is a monotone fetch_min of the local
+                    // full-heap floor). OFF ⇒ `cut = u64::MAX`: the prune
+                    // compare is statically false and no publication runs —
+                    // the COLSTAGE loop stays exactly the inc-1 shape.
+                    let gcut = runtime_sort_gcut_enabled();
+                    let cutoff = self.cutoff;
+                    let mut cut =
+                        if gcut { cutoff.load(Ordering::Relaxed) } else { u64::MAX };
                     match &mut *self.heap {
                         TopnLocal::Narrow(h) => {
                             let key = keys[0];
@@ -912,8 +947,21 @@ impl<'mcx> BatchSink<'mcx> for TopnAcceptSink<'_> {
                                             rowref,
                                         )
                                     };
+                                    if e.cut64() > cut {
+                                        return Ok(());
+                                    }
                                     if h.admits(e) {
                                         h.push(e);
+                                        if gcut {
+                                            if let Some(f) = h.floor() {
+                                                let c = f.cut64();
+                                                if c < cut {
+                                                    cut = c;
+                                                    cutoff
+                                                        .fetch_min(c, Ordering::Relaxed);
+                                                }
+                                            }
+                                        }
                                     }
                                     Ok(())
                                 },
@@ -948,8 +996,21 @@ impl<'mcx> BatchSink<'mcx> for TopnAcceptSink<'_> {
                                     let rowref = ((rg as u64) << 32) | (row0 + i) as u64;
                                     let e =
                                         WideEntry::encode(&obs[..nk], &flags[..nk], rowref);
+                                    if e.cut64() > cut {
+                                        return Ok(());
+                                    }
                                     if h.admits(e) {
                                         h.push(e);
+                                        if gcut {
+                                            if let Some(f) = h.floor() {
+                                                let c = f.cut64();
+                                                if c < cut {
+                                                    cut = c;
+                                                    cutoff
+                                                        .fetch_min(c, Ordering::Relaxed);
+                                                }
+                                            }
+                                        }
                                     }
                                     Ok(())
                                 },
@@ -1162,14 +1223,14 @@ impl RuntimeSortShared {
                     // train-12 composition: AM-dispatched positioner (heap
                     // lane rename); this arm admits only pgrcolumnar scans by
                     // construction.
-                    ::nodeseqscan::seq_scan_set_morsel_range(
-                        ss,
-                        estate,
-                        range.start,
-                        range.end,
-                    )?;
                     let (broke, budget_broke) = match local {
                         TopnLocal::Full(l) => {
+                            ::nodeseqscan::seq_scan_set_morsel_range(
+                                ss,
+                                estate,
+                                range.start,
+                                range.end,
+                            )?;
                             let full =
                                 self.full.as_ref().expect("full local under a full spec");
                             let mut sink = FullAcceptSink::new(l, &self.keys, full);
@@ -1185,16 +1246,67 @@ impl RuntimeSortShared {
                             flags
                         }
                         local => {
-                            let mut sink = TopnAcceptSink::new(local, &self.keys);
-                            let fed = drain_pipeline(
-                                ss,
-                                &mut SeqScanSource,
-                                &mut SeqScanFilterProject,
-                                &mut sink,
-                                estate,
-                            );
-                            let broke = sink.broke;
-                            fed?;
+                            // GCUT (inc-2): segment the claim at zone-skipped
+                            // granules — a granule whose BEST cut64 word
+                            // exceeds the current shared cutoff cannot
+                            // contribute a winner (strict `>`, the cut64
+                            // safety law), so it is skipped BEFORE staging /
+                            // decompression. Consecutive survivors drain as
+                            // one range (a skip-free claim = exactly the
+                            // incumbent single-range shape); the cutoff is
+                            // re-read between segments (it only tightens).
+                            // Out-of-range indices answer 0 = never skip
+                            // (defensive; engage pinned len == geometry).
+                            let zone = self.zone_best.as_deref();
+                            let mut broke = false;
+                            let mut skipped = 0u64;
+                            let mut g = range.start;
+                            while g < range.end && !broke {
+                                let cut = self.cutoff.load(Ordering::Relaxed);
+                                if let Some(best) = zone {
+                                    while g < range.end
+                                        && best.get(g as usize).copied().unwrap_or(0) > cut
+                                    {
+                                        g += 1;
+                                        skipped += 1;
+                                    }
+                                    if g >= range.end {
+                                        break;
+                                    }
+                                }
+                                let s0 = g;
+                                g = match zone {
+                                    Some(best) => {
+                                        let mut e = g;
+                                        while e < range.end
+                                            && best.get(e as usize).copied().unwrap_or(0)
+                                                <= cut
+                                        {
+                                            e += 1;
+                                        }
+                                        e
+                                    }
+                                    None => range.end,
+                                };
+                                ::nodeseqscan::seq_scan_set_morsel_range(ss, estate, s0, g)?;
+                                let mut sink = TopnAcceptSink::new(
+                                    &mut *local,
+                                    &self.keys,
+                                    &self.cutoff,
+                                );
+                                let fed = drain_pipeline(
+                                    ss,
+                                    &mut SeqScanSource,
+                                    &mut SeqScanFilterProject,
+                                    &mut sink,
+                                    estate,
+                                );
+                                broke = sink.broke;
+                                fed?;
+                            }
+                            if skipped > 0 {
+                                self.zone_skipped.fetch_add(skipped, Ordering::Relaxed);
+                            }
                             (broke, false)
                         }
                     };
@@ -1599,6 +1711,24 @@ fn runtime_sort_colstage_enabled() -> bool {
     })
 }
 
+/// GCUT kill switch (night/sort-merge-redesign inc-2): shared cross-worker
+/// cutoff (zone-max seed + published worker floors, insert-time prune) plus
+/// pre-staging zone granule skip. LAYERED ON TOP of COLSTAGE — the cutoff
+/// publishes/prunes in the COLSTAGE tight loop, so GCUT without COLSTAGE
+/// would be dead weight; requiring both keeps the parity story one switch
+/// deep (OFF either one = the incumbent observation stream). DEFAULT OFF —
+/// `PGRUST_RUNTIME_SORT_GCUT=1|on` (with COLSTAGE=1) enables.
+fn runtime_sort_gcut_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&ON, || {
+        runtime_sort_colstage_enabled()
+            && matches!(
+                std::env::var("PGRUST_RUNTIME_SORT_GCUT").as_deref(),
+                Ok("1") | Ok("on")
+            )
+    })
+}
+
 /// DictCode sort-key class kill switch (docs/design/dict-code-flow.md
 /// inc-1): `0|off` refuses text keys only — the int-family vocabulary and
 /// every other admission are untouched.
@@ -1806,6 +1936,43 @@ fn engage<'mcx>(
             }),
         ),
     };
+    // GCUT (inc-2): leader-side zone stats for the shared cutoff. The
+    // zone-max SEED starts the cutoff where a best-first (zone-ordered)
+    // claim schedule would have converged it — >= bound rows provably sit
+    // at-or-below the k-th smallest zone-max word — so workers prune and
+    // zone-skip from the FIRST morsel without reordering the claim
+    // protocol. Single-int-leading-key top-N only (dictcode codes have no
+    // int zone entries); non-exact-encoding granules get best word 0
+    // (never skipped, never wrong); a geometry/zone length mismatch drops
+    // the whole thing (fail closed to inc-1 behavior).
+    let (zone_best, cutoff_seed) = match (&spec, runtime_sort_gcut_enabled()) {
+        (ArmSpec::Topn(s), true) if !s.keys[0].dictcode => {
+            let k0 = s.keys[0];
+            match ::nodeseqscan::seq_scan_cb_zone_topk_words(
+                ss,
+                k0.attno_scan,
+                k0.desc,
+                s.bound as u64,
+            )? {
+                Some((words, seed)) if words.len() == total_granules as usize => {
+                    let nf = k0.nulls_first;
+                    let t64: Vec<u64> = words
+                        .into_iter()
+                        .map(|w| ::nodesort::sink::cut64(nf, w))
+                        .collect();
+                    let seed_t64 = seed.map(|w| ::nodesort::sink::cut64(nf, w));
+                    lane_trace(&format!(
+                        "runtime-sort: gcut armed (zone granules={} seed={})",
+                        t64.len(),
+                        if seed_t64.is_some() { "yes" } else { "no" }
+                    ));
+                    (Some(Arc::new(t64)), seed_t64)
+                }
+                _ => (None, None),
+            }
+        }
+        _ => (None, None),
+    };
     let payload = Arc::new(RuntimeSortShared {
         rt,
         rg: OnceLock::new(),
@@ -1829,6 +1996,9 @@ fn engage<'mcx>(
         failed: AtomicBool::new(false),
         broke: AtomicBool::new(false),
         winners: Mutex::new(None),
+        cutoff: AtomicU64::new(cutoff_seed.unwrap_or(u64::MAX)),
+        zone_best,
+        zone_skipped: AtomicU64::new(0),
         full,
         standing: Mutex::new(None),
     });
@@ -1909,6 +2079,16 @@ fn finish_outcome(
             )));
         };
         return Ok(EngageOutcome::CompletedFull(publish));
+    }
+    // GCUT engagement witness (the ladder rig greps this line) — the
+    // shared tail serves both the standing and launched channels, so the
+    // witness fires on either.
+    if let Some(zb) = &payload.zone_best {
+        lane_trace(&format!(
+            "runtime-sort: gcut zone-skip granules_skipped={} of {}",
+            payload.zone_skipped.load(Ordering::SeqCst),
+            zb.len()
+        ));
     }
     let Some(winners) = payload.take_winners() else {
         // Completed with participants but no published winners: a

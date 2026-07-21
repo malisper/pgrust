@@ -1305,6 +1305,22 @@ pub fn table_scan_holds_claim_pin(scan: &TableScanDesc<'_>) -> bool {
     }
 }
 
+/// GCUT zone summary of a pgrcolumnar scan's key column (night/sort-merge-
+/// redesign inc-2): per-granule best direction-folded order words + the
+/// zone-max seed word — see `CbScanDescData::zone_topk_words` for the
+/// correctness posture. `None` = heap or no columnar part.
+pub fn table_scan_cb_zone_topk_words(
+    scan: &TableScanDesc<'_>,
+    col: u16,
+    desc: bool,
+    bound: u64,
+) -> PgResult<Option<(Vec<u64>, Option<u64>)>> {
+    match scan {
+        TableScanDesc::Heap(_) => Ok(None),
+        TableScanDesc::Pgrcolumnar(c) => c.zone_topk_words(col, desc, bound),
+    }
+}
+
 /// Drive-scaling observability counters of a pgrcolumnar scan (the runtime
 /// WFIN channel): (rg_switches, dict_builds, granules_scanned,
 /// windows_staged). None = heap.

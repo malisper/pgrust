@@ -1603,6 +1603,94 @@ impl<'mcx> CbScanDescData<'mcx> {
         self.win = 0;
     }
 
+    /// GCUT zone summary for the runtime parallel top-N (night/sort-merge-
+    /// redesign inc-2). Returns, over the WHOLE part in absolute granule
+    /// order (the morsel-range granule space):
+    ///   * per-granule BEST direction-folded order word of key column `col`
+    ///     (`key_order_word(asc ? min : max)` — the best any row of that
+    ///     granule could contribute), and
+    ///   * the zone-max SEED word: the smallest folded WORST word `W` such
+    ///     that wholly-visible exact-zone granules with worst word <= `W`
+    ///     together hold >= `bound` rows — so the global k-th order word is
+    ///     provably <= `W` and any entry with a strictly greater word is
+    ///     out of the top-k before a single row is read.
+    ///
+    /// Correctness posture:
+    ///   * BEST words bound STORED values — a superset of every snapshot's
+    ///     visible rows (deletes only shrink, appends are invisible-or-
+    ///     covered) — so a granule whose best word exceeds a proven cutoff
+    ///     cannot contribute regardless of visibility. Granules without
+    ///     exact decoded-value zone entries (encodings other than
+    ///     Raw/For/Const — the `granule_meta_peek` gate) get best word 0:
+    ///     never skippable, never wrong.
+    ///   * SEED rows count only WHOLLY-VISIBLE RGs with exact zones (the
+    ///     `granule_meta_peek` visibility law — invisible rows must not
+    ///     stand in for the k rows the bound needs); `None` when the
+    ///     eligible rows never reach `bound`.
+    ///   * pgrcolumnar stores no NULLs (the `gather_row` law), so zone
+    ///     words describe every stored row; the caller folds the null
+    ///     tier itself.
+    /// `None` = no columnar part (nothing to summarize).
+    pub fn zone_topk_words(
+        &self,
+        col: u16,
+        desc: bool,
+        bound: u64,
+    ) -> PgResult<Option<(Vec<u64>, Option<u64>)>> {
+        let Some(part) = self.part.clone() else { return Ok(None) };
+        let fold = |v: i64| -> u64 {
+            let asc = (v as u64) ^ (1 << 63);
+            if desc {
+                !asc
+            } else {
+                asc
+            }
+        };
+        let mut best: Vec<u64> = Vec::new();
+        let mut seedable: Vec<(u64, u32)> = Vec::new();
+        for rg in 0..part.rgs.len() {
+            let rg_rows = part.rgs[rg].nrows as usize;
+            let ngranules = rg_rows.div_ceil(GRANULE_ROWS);
+            let chunk = part.chunk(rg, col as usize);
+            // Value-exact zone encodings for INT columns: Raw/For/Const (the
+            // granule_meta_peek set) + DeltaFor, whose format doc pins "zone
+            // maps ... computed from the plain values exactly as For/Raw —
+            // value-domain metadata is untouched by the payload transform"
+            // (format.rs Encoding::DeltaFor). Dict/text encodings carry
+            // code/length-domain entries — never valid here (the caller
+            // admits int-family keys only; this is the belt).
+            let exact = matches!(
+                chunk.hdr.encoding,
+                Encoding::Raw | Encoding::For | Encoding::Const | Encoding::DeltaFor
+            );
+            let vis = exact && self.rg_wholly_visible(rg)?;
+            for g in 0..ngranules {
+                if !exact {
+                    best.push(0);
+                    continue;
+                }
+                let ge = chunk.granule(g);
+                let (b, w) = if desc { (ge.max, ge.min) } else { (ge.min, ge.max) };
+                best.push(fold(b));
+                if vis {
+                    let grows = (rg_rows - g * GRANULE_ROWS).min(GRANULE_ROWS) as u32;
+                    seedable.push((fold(w), grows));
+                }
+            }
+        }
+        seedable.sort_unstable_by_key(|&(w, _)| w);
+        let mut acc = 0u64;
+        let mut seed = None;
+        for (w, rows) in seedable {
+            acc += rows as u64;
+            if acc >= bound {
+                seed = Some(w);
+                break;
+            }
+        }
+        Ok(Some((best, seed)))
+    }
+
     /// Footer-stat aggregate metadata peek (the plain fold drive's meta
     /// arm): when the NEXT `next_window` call would decode a fresh scan
     /// unit, describe that unit from footer metadata alone — IF every

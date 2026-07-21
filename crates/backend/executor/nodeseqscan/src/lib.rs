@@ -3943,6 +3943,23 @@ pub fn seq_scan_cb_drive_counters(node: &SeqScanState<'_>) -> Option<(u64, u64, 
         .and_then(::tableam::table_scan_cb_drive_counters)
 }
 
+/// GCUT zone summary of a pgrcolumnar scan's key column (night/sort-merge-
+/// redesign inc-2): per-granule best direction-folded order words + the
+/// zone-max seed word, in the morsel-range granule space. `None` = heap,
+/// scan not opened, or no columnar part. See
+/// `CbScanDescData::zone_topk_words` for the correctness posture.
+pub fn seq_scan_cb_zone_topk_words(
+    node: &SeqScanState<'_>,
+    col: u16,
+    desc: bool,
+    bound: u64,
+) -> PgResult<Option<(Vec<u64>, Option<u64>)>> {
+    match node.ss.ss_currentScanDesc.as_ref() {
+        Some(sd) => ::tableam::table_scan_cb_zone_topk_words(sd, col, desc, bound),
+        None => Ok(None),
+    }
+}
+
 // Plan-derived need-set + zone-mappable conjuncts for a pgrcolumnar scan.
 fn cb_scan_info<'mcx>(
     node: &SeqScan<'mcx>,
