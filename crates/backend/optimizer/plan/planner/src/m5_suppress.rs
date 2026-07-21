@@ -1570,7 +1570,9 @@ const INT2OID: u32 = 21;
 const INT4OID: u32 = 23;
 const INT8OID: u32 = 20;
 const DATEOID: u32 = 1082;
-// (TIMESTAMPOID lives next to F_EXTRACT_TIMESTAMP below.)
+/// GL-LOWDIST-3 datetime family sibling (timestamptz; TIMESTAMPOID lives
+/// next to F_EXTRACT_TIMESTAMP below).
+const TIMESTAMPTZOID: u32 = 1184;
 const TEXTOID: u32 = 25;
 /// SE-CBKEYS: bpchar — recognized ONLY to NAME its refusal (the
 /// space-insensitive-equality exclusion; never admitted as a key).
@@ -1584,6 +1586,34 @@ fn is_int_family(typ: u32) -> bool {
 
 fn is_text_family(typ: u32) -> bool {
     matches!(typ, TEXTOID | VARCHAROID)
+}
+
+/// GL-LOWDIST-3: the datetime family whose same-type equality is
+/// representational word equality on the stored key (date = i32 days,
+/// timestamp/timestamptz = i64 microseconds; the distinct_set_kind
+/// argument) — admitted as DISTINCT ARGS only, under the widening knob.
+fn is_datetime_family(typ: u32) -> bool {
+    matches!(typ, DATEOID | TIMESTAMPOID | TIMESTAMPTZOID)
+}
+
+/// GL-LOWDIST-3 datetime-distinct widening knob — the EXECUTOR spelling
+/// verbatim (nodeagg::distinct_datetime_enabled; GROUPSINK coherence:
+/// probe routing and sink/serial admission flip together). t35 law:
+/// DEFAULT OFF for the letter; ON iff exactly `1`/`on`.
+fn distinct_datetime_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("PGRUST_LANE_V2_DISTINCT_DATETIME").as_deref(),
+            Ok("1") | Ok("on")
+        )
+    })
+}
+
+/// A DISTINCT-ARG type the exact-set machinery admits: int family always;
+/// datetime under the GL-LOWDIST-3 knob.
+fn is_distinct_arg_int_kind(typ: u32) -> bool {
+    is_int_family(typ) || (distinct_datetime_enabled() && is_datetime_family(typ))
 }
 
 /// The §10 groupby_high legacy-hold boundary: estimated groups at or above
@@ -5746,7 +5776,9 @@ fn is_count_distinct_int(expr: Node<'_>, rti: usize) -> bool {
         return false;
     }
     let Some(arg_tle) = agg.args.nth(0).as_target_entry() else { return false };
-    is_covered_key_var(arg_tle.expr, rti, is_int_family)
+    // GL-LOWDIST-3: datetime args ride the int lanes under the widening
+    // knob (is_distinct_arg_int_kind); int-family unchanged at knob-off.
+    is_covered_key_var(arg_tle.expr, rti, is_distinct_arg_int_kind)
 }
 
 /// SE-TEXTDISTINCT (band 86001): `count(DISTINCT <bare Var>)` whose arg is
@@ -5775,7 +5807,8 @@ fn is_count_distinct_any(expr: Node<'_>, rti: usize) -> bool {
     }
     let Some(arg_tle) = agg.args.nth(0).as_target_entry() else { return false };
     let Some(v) = key_var(arg_tle.expr, rti) else { return false };
-    is_int_family(v.vartype)
+    // GL-LOWDIST-3: datetime args under the widening knob (int lanes).
+    is_distinct_arg_int_kind(v.vartype)
         || (is_text_family(v.vartype) && v.varcollid == DEFAULT_COLLATION_OID)
 }
 

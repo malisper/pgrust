@@ -1866,7 +1866,7 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     // of the same gate: no surface without a bytes-comparable image ever
     // sees a bytes key — the m2-sinks §1 rule-5 selection-order totality
     // law's admission discipline).
-    let Some(mut spec) = ::nodeagg::pd_derive_spec(agg, desc, true) else {
+    let Some(mut spec) = ::nodeagg::pd_derive_spec(agg, desc, true, ::nodeagg::distinct_datetime_enabled()) else {
         refused(estate, ea, node_id, "spec derivation");
         *rd_shape_refused = true;
         return Ok(None);
