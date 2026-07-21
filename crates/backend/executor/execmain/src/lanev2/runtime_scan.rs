@@ -2322,17 +2322,22 @@ pub(super) fn exprs_parallel_safe<'mcx>(nodes: impl Iterator<Item = Node<'mcx>>)
 
 /// Env floor for engagement (granules): below it the serial fold wins
 /// outright and launching helpers is pure overhead.
-/// META-BAND arm knob (GL-SERIALTERM-META-2; DEFAULT OFF pending the flip
-/// letter — `1|on` arms). Layered under the serial fold-meta arm's own
-/// kill by construction: the band probes `plain_fold_meta_arm`, which is
-/// None under PGRUST_LANE_V2_FOLDMETA=0 — killing the serial arm stands
-/// the band down with it (suppress-then-slow structurally excluded).
+/// META-BAND arm knob (GL-SERIALTERM-META-2). DEFAULT ON since the flip
+/// increment (flipped-kill idiom): `PGRUST_RUNTIME_SCAN_META_BAND=0|off`
+/// restores the pre-band engagement. Flip letter of record: the
+/// both-ways 10M dist ladder — band-delivered 1.1ms vs the engaged
+/// arm's 25.4 (dop4) / 7.9 (dop16), Mixed/text controls byte-flat
+/// (GL-SERIALTERM-META-2-letter). Layered under the serial fold-meta
+/// arm's own kill by construction: the band probes `plain_fold_meta_arm`,
+/// which is None under PGRUST_LANE_V2_FOLDMETA=0 — killing the serial
+/// arm stands the band down with it (suppress-then-slow structurally
+/// excluded).
 fn meta_band_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        matches!(
+        !matches!(
             std::env::var("PGRUST_RUNTIME_SCAN_META_BAND").as_deref(),
-            Ok("1") | Ok("on")
+            Ok("0") | Ok("off")
         )
     })
 }
