@@ -4368,10 +4368,10 @@ mod tests {
     }
 
     // q33-class shape scaled to the unit-test budget: work_mem 4096kB x
-    // hash_mem_multiplier 2.0 (init_small boot values) = 8MB. Entry size for
-    // width 12 / no transinfos / transitionSpace 0 is 16 + MAXALIGN(
+    // hash_mem_multiplier 2.0 (init_small boot values) = 8.39MB. Entry size
+    // for width 12 / no transinfos / transitionSpace 0 is 16 + MAXALIGN(
     // MAXALIGN(15) + 12) = 48B: at 100k groups the C estimate says 4.8MB
-    // (fits, no spill term) while the honest 3.2x scale says 15.4MB
+    // (fits, no spill term) while the honest 1.8x scale says 8.64MB
     // (spills) — the exact q33 disease in miniature.
     const SPILLY_GROUPS: f64 = 100_000.0;
     const TINY_GROUPS: f64 = 10_000.0;
@@ -4439,22 +4439,29 @@ mod tests {
     }
 
     /// The two fleet anchors of the entry-scale constant, pinned at the REAL
-    /// q33 shape (Gather width 16, three transinfos: count(*)+SUM+AVG — job
-    /// -5fd0's explain capture): C entry 96B; at the default scale the
-    /// 10M-group working set must cross the 512MB-arm budget (2GB: spill
-    /// priced — the cliff) and FIT the 1GB-arm budget (4.29GB: delta 0 —
-    /// the byte-identical bar). The first shipped constant (4.7, derived
-    /// against a width-12/one-transinfo mis-model) failed the second anchor.
+    /// q33 shape as hash_agg_entry_size itself prices it (Gather width 16,
+    /// three transinfos for count(*)+SUM+AVG, transitionSpace 48 from AVG's
+    /// by-ref int8-array transvalue — jobs -5fd0/-07cf explain captures +
+    /// prepagg derivation): at the default scale the 10M-group working set
+    /// must cross the 512MB-arm budget (2.15GB: spill priced — the cliff)
+    /// and FIT the 1GB-arm budget (4.29GB: delta 0 — the byte-identical
+    /// bar). Two prior constants (4.7, 3.2) failed the second anchor by
+    /// deriving against hand models of the entry (64B/96B) instead of the
+    /// function's real 168B output — both caught by the fleet bar; this
+    /// test makes the third such miss a red test instead.
     #[test]
     fn leader_hashagg_entry_scale_reproduces_q33_fleet_anchors() {
-        let entry = ::nodeagg::hash_agg_entry_size(3, 16, 0);
-        assert_eq!(entry, 96.0);
+        let entry = ::nodeagg::hash_agg_entry_size(3, 16, 48);
+        assert_eq!(entry, 168.0);
         let scale = gucs::DEFAULT_PGRCOLUMNAR_LEADER_HASHAGG_ENTRY_SCALE;
         let working_set = 10_000_000.0 * entry * scale;
         let budget_512mb = 524288.0 * 1024.0 * 4.0; // work_mem 512MB x hmm 4
         let budget_1gb = 1048576.0 * 1024.0 * 4.0; // work_mem 1GB x hmm 4
         assert!(working_set > budget_512mb, "q33 must spill-price at 512MB");
         assert!(working_set < budget_1gb, "q33 must stay delta-0 at 1GB");
+        // Calibration target: the measured ~3.03GB leader working set
+        // (probe E2 TreeRssAnon peak) within 5%.
+        assert!((working_set / 3.03e9 - 1.0).abs() < 0.05);
     }
 
     #[test]
