@@ -116,3 +116,76 @@ AggPolyHeapPlain	curve_reuse	HeapCmpFoldPrefix	class	-	c0837fba9	2026-07-14	-	PG
 CbMetaFooterAgg	curve_reuse	-	class	-	0a1ab4a55	2026-07-14	-	PGRUST_RUNTIME	footer answers are O(1): never floored, no curve — NO_GUARD posture kept in every mode	structural
 _grouped_classes	hold_groups_min	4000000	groups	unforced-CB-10M A/B (night/routing-floor-fixes)	b12c3fc74	2026-07-21	fleet letter in branch commit	PGRUST_RUNTIME	classify-time groupby-high HOLD (PGRUST_M5_GROUPBY_HIGH_FLOOR overridable); becomes the seal-term crossover at step 2	witnessed-ab
 PartwisePlainFold	curve_reuse	-	class	-	a88c58496e70	2026-07-21	scripts/partwise-fleet-ladder.sh	PGRUST_LANE_V2_PARTWISE	rectangle-retained: per-AM PROVISIONAL floors live in the m5_partwise.rs classifier (CbPlainAggFold/HeapCmpFoldPrefix reuse, GL-PARTWISE-1); own curve cells ride the named floor-calibration mini-ladder follow-up	structural
+# --- SERIAL-SIDE TERM (step-2 three-way shadow; costsize/src/serial_model.rs,
+# pinned by serial_constants_match_tsv; fit scripts/serial-term-fit.py).
+# Units: witnessed-wall-ms on the reference rig (dist, warm medians) —
+# argmin within a family, anchor cancels; NOT commensurable with the
+# legacy-row-equiv rows above. Serial* classes are SHADOW-ONLY: nothing
+# routes off them; the three hand-carves they price stay wired until
+# their GL flip letters ride the agreement census. Provenance:
+# SerialTopnNonInt = the GL-TOPNNI-1 three-way grid (10M dist job
+# pgrust-fast-tests-8cf38a8c7c-1784631271-6af8 + wave-3 100M dist leg,
+# per-cell serial:neg/legacy:gather+wN/runtime:sup+dopN witnesses,
+# scratchpad/night/GL-TOPNNI-1-{10m,100m}-dist.tsv) + the real-sorted-bank
+# friendly anchors (flip-sanity jobs -1784633628/-632/-634272 @ 34b23fdf2).
+# SerialTsTruncFold = the GL-OPENROWS car-3 two-scale record (jobs
+# -0c51/-2e14/-70ed/-66f5, scratchpad/night/open-rows-letters.md).
+# SerialScanFoldMeta = the L4 named serial-dominance cell (job
+# …-1784634348-6239 @ 45f07dd71) — single-cell anchor, L7 owns the grid.
+SerialTopnNonInt	granule_rows	8192	rows/granule	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	footer geometry (1221 granules @ 10M, the band diagnosis)	witnessed-ab
+SerialTopnNonInt	ser_setup_ms	1.0	ms	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	engage/parse floor, fixed pre-fit	witnessed-ab
+SerialTopnNonInt	g_bf_hostile	97.6	granules	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	best-first read at survival 1, k=10, permutation key (flat 10M/100M)	witnessed-ab
+SerialTopnNonInt	g_bf_friendly	12.5	granules	-1784633628/-632/-634272	34b23fdf2	2026-07-21	fleet letter in branch commit	PGRUST_LANE_V2_TOPN_NONINT	real-sorted-bank anchor pair (loses at survival 0.0101, wins at 0.75)	witnessed-ab
+SerialTopnNonInt	k_ref	10	rows	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	bound the g_bf cells witnessed; larger bounds scale linearly (conservative)	witnessed-ab
+SerialTopnNonInt	n_min_fit	1e7	rows	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	below support the term ABSTAINS (carve/floor verdict stands)	witnessed-ab
+SerialTopnNonInt	s_gran_star_wide	0.0449	ms/granule	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	leg_setup_star_wide	3.51	ms	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	leg_rate_star_wide	1.1235e-5	ms/row	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	leg_cap_star_wide	13.34	workers	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	rt_setup_star_wide	5.85	ms	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	rt_rate_star_wide	5.4943e-6	ms/row	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	rt_cap_star_wide	14.25	workers	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	s_gran_star_wide_noqual	0.0449	ms/granule	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	shares the qualed star fit (the qual column read costs a key-column read)	witnessed-ab
+SerialTopnNonInt	leg_setup_star_wide_noqual	3.13	ms	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	leg_rate_star_wide_noqual	8.0746e-6	ms/row	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	leg_cap_star_wide_noqual	13.61	workers	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	rt_setup_star_wide_noqual	4.76	ms	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	rt_rate_star_wide_noqual	8.6386e-8	ms/row	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	rt_cap_star_wide_noqual	6.09	workers	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	s_gran_narrow_ts	0.1943	ms/granule	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	leg_setup_narrow_ts	7.10	ms	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	leg_rate_narrow_ts	5.1631e-5	ms/row	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	leg_cap_narrow_ts	13.67	workers	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	rt_setup_narrow_ts	4.65	ms	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	rt_rate_narrow_ts	1.4015e-7	ms/row	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	rt_cap_narrow_ts	6.83	workers	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	s_gran_multi_key	0.4639	ms/granule	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	leg_setup_multi_key	7.38	ms	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	leg_rate_multi_key	5.9300e-5	ms/row	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	leg_cap_multi_key	13.60	workers	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	rt_setup_multi_key	5.56	ms	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	rt_rate_multi_key	1.9453e-7	ms/row	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	rt_cap_multi_key	8.03	workers	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	s_gran_text_lead	0.3445	ms/granule	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	text keys have no zone vocabulary: g_read = g_total	witnessed-ab
+SerialTopnNonInt	leg_setup_text_lead	4.53	ms	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	leg_rate_text_lead	3.3829e-5	ms/row	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	leg_cap_text_lead	12.90	workers	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	rt_setup_text_lead	1.76	ms	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	rt_rate_text_lead	5.4498e-6	ms/row	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	rt_cap_text_lead	14.96	workers	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	s_gran_text_datum	0.1665	ms/granule	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	leg_setup_text_datum	3.39	ms	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	leg_rate_text_datum	1.6108e-5	ms/row	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	leg_cap_text_datum	12.95	workers	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	rt_setup_text_datum	1.79	ms	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	rt_rate_text_datum	4.6133e-6	ms/row	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTopnNonInt	rt_cap_text_datum	15.54	workers	-6af8+100m-wave3	8cf38a8c7	2026-07-21	scripts/gl-topnni-ladder.sh	PGRUST_LANE_V2_TOPN_NONINT	-	witnessed-ab
+SerialTsTruncFold	s_row_serial	1.0100e-6	ms/row	-0c51/-2e14/-70ed/-66f5	cd271d726	2026-07-21	fleet letter in branch commit	PGRUST_LANE_V2_EXPRKEY_TOPN	pinned at the LOSING scale (conservative at mid-scale); crossover ~855k pages inside the witnessed bracket, same order as the shipped 1e6 fence	witnessed-ab
+SerialTsTruncFold	leg_setup	37.33	ms	-0c51/-2e14/-70ed/-66f5	cd271d726	2026-07-21	fleet letter in branch commit	PGRUST_LANE_V2_EXPRKEY_TOPN	ordered partial-agg exchange, dop-flat over the witnessed cells	witnessed-ab
+SerialTsTruncFold	leg_rate	6.6667e-8	ms/row	-0c51/-2e14/-70ed/-66f5	cd271d726	2026-07-21	fleet letter in branch commit	PGRUST_LANE_V2_EXPRKEY_TOPN	-	witnessed-ab
+SerialTsTruncFold	n_min_fit	1e7	rows	-0c51/-2e14/-70ed/-66f5	cd271d726	2026-07-21	fleet letter in branch commit	PGRUST_LANE_V2_EXPRKEY_TOPN	below support the term ABSTAINS	witnessed-ab
+SerialScanFoldMeta	s_meta	7.3728e-4	ms/granule	-1784634348-6239	45f07dd71	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	footer META answer per granule (zone-provable qual posture); SINGLE-CELL anchor — ladder spec L7 owns the grid	witnessed-ab
+SerialScanFoldMeta	ser_setup_ms	0.2	ms	-1784634348-6239	45f07dd71	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-ab
+SerialScanFoldMeta	par_rate	9.7200e-6	ms/row	-1784634348-6239	45f07dd71	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	both parallel engines at parity on the anchor cell; one curve until L7 splits them	witnessed-ab
+SerialScanFoldMeta	par_cap	12	workers	-1784634348-6239	45f07dd71	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	-	witnessed-ab
+SerialScanFoldMeta	n_min_fit	1e7	rows	-1784634348-6239	45f07dd71	2026-07-21	scripts/m5-rowflip-measure-v2.sh	PGRUST_RUNTIME	below support (or a non-META qual posture) the term ABSTAINS	witnessed-ab

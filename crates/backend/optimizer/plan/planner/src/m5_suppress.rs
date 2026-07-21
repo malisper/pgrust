@@ -1891,18 +1891,55 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             if parse.sortClause.len() > 4 {
                 return Ok(false);
             }
-            match parse.limitCount.and_then(|n| n.as_const()) {
+            let bound = match parse.limitCount.and_then(|n| n.as_const()) {
                 Some(c) if !c.constisnull && c.consttype == INT8OID => {
                     let b = c.constvalue.as_i64();
                     if !(1..=65536).contains(&b) {
                         return Ok(false);
                     }
+                    b
                 }
                 _ => return Ok(false),
-            }
+            };
             if parse.targetList.len() == 1 && n_text == 0 {
                 return Ok(false);
             }
+            // SERIAL-SIDE three-way shadow (costsize::serial_model,
+            // observation only): price the serial zone walk against both
+            // parallel engines next to the carve below. Inputs are the
+            // probe's own vocabulary: raw tuples (the walk's domain),
+            // estimated qual survival, the Const bound, and the carve's
+            // zone-posture proxy (band-eligible datetime lead).
+            let survival = if has_quals {
+                let tuples = run.root.rel(rel_id).tuples.max(rel_rows).max(1.0);
+                (rel_rows / tuples).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            let topn_shadow = {
+                use costsize::serial_model as sm;
+                let class = if lead_is_text {
+                    if parse.targetList.len() == 1 {
+                        sm::TopnKeyClass::TextDatum
+                    } else {
+                        sm::TopnKeyClass::TextLead
+                    }
+                } else if parse.sortClause.len() > 1 {
+                    sm::TopnKeyClass::MultiKey
+                } else if parse.targetList.len() >= 3 {
+                    sm::TopnKeyClass::StarWide
+                } else {
+                    sm::TopnKeyClass::NarrowTs
+                };
+                sm::topn_nonint_three_way(&sm::TopnShape {
+                    class,
+                    rows: run.root.rel(rel_id).tuples.max(rel_rows).max(1.0),
+                    dop: guc_tables::runtime_pool::runtime_dop(),
+                    limit: bound as f64,
+                    survival,
+                    zone_friendly: !lead_is_text,
+                })
+            };
             // SELECTIVE-QUAL x BAND-ELIGIBLE-LEAD carve (GL-TOPNNI-1 flip
             // sanity diagnosis 2026-07-21 @ 34b23fdf2): on the real
             // sorted bank a datetime LEADING key classifies ZONE-FRIENDLY
@@ -1920,30 +1957,39 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             // win here — the conservative direction, named in the letter).
             // Under the same economics gate as the floors so the rowflip
             // measure vehicle (PGRUST_M5_SIZE_FLOORS=0) can see through.
-            if has_quals && !lead_is_text && size_floors_enabled() {
-                let tuples = run.root.rel(rel_id).tuples.max(rel_rows).max(1.0);
-                let survival = rel_rows / tuples;
-                if survival < TOPN_NONINT_MIN_QUAL_SURVIVAL {
-                    if trace_armed() {
-                        eprintln!(
-                            "m5-suppress-floor: topnnonint label=selective-qual-datetime-lead \
-                             relid={} survival={survival:.4} => gather stands",
-                            rte.relid
-                        );
-                    }
-                    return Ok(false);
+            if has_quals
+                && !lead_is_text
+                && size_floors_enabled()
+                && survival < TOPN_NONINT_MIN_QUAL_SURVIVAL
+            {
+                if trace_armed() {
+                    eprintln!(
+                        "m5-suppress-floor: topnnonint label=selective-qual-datetime-lead \
+                         relid={} survival={survival:.4} => gather stands",
+                        rte.relid
+                    );
                 }
+                serial_shadow_tail(
+                    serial_shadow::TOPN_NONINT,
+                    "selective-qual-datetime-lead",
+                    topn_shadow,
+                    false,
+                );
+                return Ok(false);
             }
-            return finish_knob_path(
+            let label = if n_text > 0 { "topn-text-keys" } else { "topn-datetime-keys" };
+            let suppressed = finish_knob_path(
                 run,
                 "topnnonint",
-                if n_text > 0 { "topn-text-keys" } else { "topn-datetime-keys" },
+                label,
                 topn_nonint_guard(),
                 rte.relid,
                 0.0,
                 rel_rows,
                 rel_pages,
-            );
+            )?;
+            serial_shadow_tail(serial_shadow::TOPN_NONINT, label, topn_shadow, suppressed);
+            return Ok(suppressed);
         }
         // SE-SCANPASS (band 72001, se/scan-passthrough): the row-returning
         // passthrough shape (bare filtered SELECT, no agg / group / top-N /
@@ -1983,7 +2029,29 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
                 {
                     return Ok(false);
                 }
-                return finish(run, CoverClass::CbPlainAggFold, rte.relid, 1.0, rel_rows, rel_pages);
+                let suppressed =
+                    finish(run, CoverClass::CbPlainAggFold, rte.relid, 1.0, rel_rows, rel_pages)?;
+                // SERIAL-SIDE shadow, qualed-fold family: when the qual's
+                // estimated survival is ~1 the serial lane answers per
+                // granule from footer META (the zone-provable posture the
+                // ladder-spec L4 named cell witnessed: the serial walk
+                // beats BOTH parallel engines ~7x). The term abstains on
+                // any other posture — single-anchor support.
+                if has_quals {
+                    let tuples = run.root.rel(rel_id).tuples.max(rel_rows).max(1.0);
+                    let shadow = costsize::serial_model::scanfold_meta_three_way(
+                        tuples,
+                        guc_tables::runtime_pool::runtime_dop(),
+                        (rel_rows / tuples).clamp(0.0, 1.0),
+                    );
+                    serial_shadow_tail(
+                        serial_shadow::SCANFOLD_META,
+                        "qualed-plain-fold",
+                        shadow,
+                        suppressed,
+                    );
+                }
+                return Ok(suppressed);
             }
             // Meta-over-Gather (M5-5, the band-2a arithmetic-agg handoff): the residual
             // plain-agg shapes the Meta footer arm answers — affine int
@@ -4873,6 +4941,137 @@ pub mod cost_shadow {
     }
 }
 
+pub mod serial_shadow {
+    //! Step-2 SERIAL-SIDE three-way shadow census (costsize::serial_model
+    //! — the term for the serial lane's early-exit/zone-skip advantages
+    //! the two-way rt/legacy curves cannot see). PURE OBSERVATION, the
+    //! cost_shadow contract verbatim: nothing here feeds a suppression
+    //! verdict; the three hand-carves this term prices (the selective-qual
+    //! datetime-lead top-N carve, the truncated-timestamp fold page fence,
+    //! and the plain-fold classify tail) keep deciding exactly as shipped.
+    //!
+    //! CENSUS: one row per serial family, cells keyed by (what the shipped
+    //! mechanism ENFORCED, what the three-way model PICKS):
+    //!   enforced ∈ {gather (carve/fence/floor kept the exchange),
+    //!               suppress (the shape was handed to the serial-shaped
+    //!               plan — the router/band decides the engine at exec)}
+    //!   pick     ∈ {serial, runtime, gather}
+    //! Agreement = enforced=gather & pick=gather, or enforced=suppress &
+    //! pick∈{serial, runtime} (suppression's delivered engine is one of
+    //! the two). Parity picks (top two engines within the band) are NOT
+    //! counted — a tie is not routing evidence. Counted only when BOTH
+    //! economics gates are live (cost mode not Off, floors on) so the
+    //! floors-off measurement vehicle cannot poison the census, and only
+    //! when the term is inside its witnessed support (it abstains below).
+    //!
+    //! Under PGRUST_M5_SUPPRESS_TRACE every counted sample also emits one
+    //! `m5-serial-term:` stderr line with the three predicted walls, the
+    //! pick, and the enforced verdict (the e2e/fleet census vehicle).
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    pub const FAMILY_NAMES: [&str; 3] = ["topn-nonint", "tstrunc-fold", "scanfold-meta"];
+    pub const N_FAMILIES: usize = 3;
+    pub const TOPN_NONINT: usize = 0;
+    pub const TSTRUNC_FOLD: usize = 1;
+    pub const SCANFOLD_META: usize = 2;
+
+    /// [family][enforced(0=gather,1=suppress)][pick(0=serial,1=runtime,2=gather)]
+    static CELLS: [[[AtomicU64; 3]; 2]; N_FAMILIES] = {
+        #[allow(clippy::declare_interior_mutable_const)]
+        const Z: AtomicU64 = AtomicU64::new(0);
+        #[allow(clippy::declare_interior_mutable_const)]
+        const ROW: [AtomicU64; 3] = [Z; 3];
+        #[allow(clippy::declare_interior_mutable_const)]
+        const ENF: [[AtomicU64; 3]; 2] = [ROW; 2];
+        [ENF; N_FAMILIES]
+    };
+
+    pub(super) fn pick_idx(pick: costsize::serial_model::EnginePick) -> usize {
+        use costsize::serial_model::EnginePick as P;
+        match pick {
+            P::Serial => 0,
+            P::Runtime => 1,
+            P::Gather => 2,
+        }
+    }
+
+    /// Count one (enforced, pick) sample; returns the cell's cumulative
+    /// count for the caller's trace line.
+    pub(super) fn note(
+        family: usize,
+        enforced_suppress: bool,
+        pick: costsize::serial_model::EnginePick,
+    ) -> u64 {
+        let cell = &CELLS[family][usize::from(enforced_suppress)][pick_idx(pick)];
+        cell.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// One family's census row (cumulative, process-wide).
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct CensusRow {
+        pub family: &'static str,
+        /// [enforced(gather,suppress)][pick(serial,runtime,gather)]
+        pub cells: [[u64; 3]; 2],
+    }
+
+    pub fn snapshot() -> [CensusRow; N_FAMILIES] {
+        core::array::from_fn(|f| CensusRow {
+            family: FAMILY_NAMES[f],
+            cells: core::array::from_fn(|e| {
+                core::array::from_fn(|p| CELLS[f][e][p].load(Ordering::Relaxed))
+            }),
+        })
+    }
+
+    /// Does the (enforced, pick) pair agree? (Suppression's delivered
+    /// engine is serial OR runtime — the band/router decides at exec.)
+    pub fn agrees(enforced_suppress: bool, pick: costsize::serial_model::EnginePick) -> bool {
+        use costsize::serial_model::EnginePick as P;
+        match (enforced_suppress, pick) {
+            (false, P::Gather) => true,
+            (true, P::Serial) | (true, P::Runtime) => true,
+            _ => false,
+        }
+    }
+}
+
+/// Shared serial-shadow tail: census + trace for one classified shape.
+/// Observation only (the cost_shadow contract); gated exactly like the
+/// step-2 census — both economics gates live — and skipping parity picks
+/// (a tie is not evidence). `verdict` is `None` when the term abstained
+/// (below witnessed support / posture): nothing is counted, matching the
+/// fail-toward-the-incumbent posture.
+fn serial_shadow_tail(
+    family: usize,
+    label: &str,
+    verdict: Option<costsize::serial_model::ThreeWay>,
+    enforced_suppress: bool,
+) {
+    use costsize::runtime_model as rtm;
+    if matches!(rtm::cost_route_mode(), rtm::CostRouteMode::Off) || !size_floors_enabled() {
+        return;
+    }
+    let Some(v) = verdict else { return };
+    if v.parity {
+        return;
+    }
+    let n = serial_shadow::note(family, enforced_suppress, v.pick);
+    if trace_armed() {
+        eprintln!(
+            "m5-serial-term: family={} label={label} t_ser={:.1} t_rt={} t_leg={:.1} \
+             pick={} enforced={} agree={} n_cell={n}",
+            serial_shadow::FAMILY_NAMES[family],
+            v.t_serial,
+            v.t_runtime.map_or("na".to_string(), |t| format!("{t:.1}")),
+            v.t_gather,
+            v.pick.name(),
+            if enforced_suppress { "suppress" } else { "gather" },
+            serial_shadow::agrees(enforced_suppress, v.pick),
+        );
+    }
+}
+
 /// Matrix consult + optional trace, shared tail.
 fn finish(
     run: &mut PlannerRun<'_>,
@@ -6126,8 +6325,22 @@ fn classify_exprkey_topn<'mcx>(
     }
     // TS-TRUNC scale fence (doc at `tstrunc_max_pages`): past the page
     // bound the serial fold loses to the ordered partial-agg exchange —
-    // matched-shape-but-fenced keeps Gather.
+    // matched-shape-but-fenced keeps Gather. The serial-side term prices
+    // the same two-way (fold-vs-exchange) in shadow next to the fence;
+    // the groupby-high hold below is outside the term's witnessed cells
+    // (it abstains there by not being consulted).
+    let tstrunc_shadow = if kind == Computed::TsTrunc {
+        costsize::serial_model::tstrunc_two_way(rel_rows)
+    } else {
+        None
+    };
     if kind == Computed::TsTrunc && rel_pages >= tstrunc_max_pages() {
+        serial_shadow_tail(
+            serial_shadow::TSTRUNC_FOLD,
+            "tstrunc-grouped-agg",
+            tstrunc_shadow,
+            false,
+        );
         return Ok(Some(false));
     }
     // Emit discipline: keys by sortgroupref, everything else a
@@ -6186,7 +6399,7 @@ fn classify_exprkey_topn<'mcx>(
     if ngroups >= groupby_high_floor() {
         return Ok(Some(false));
     }
-    Ok(Some(finish_knob_path(
+    let suppressed = finish_knob_path(
         run,
         "exprkeytopn",
         match kind {
@@ -6198,7 +6411,16 @@ fn classify_exprkey_topn<'mcx>(
         ngroups,
         rel_rows,
         rel_pages,
-    )?))
+    )?;
+    if kind == Computed::TsTrunc {
+        serial_shadow_tail(
+            serial_shadow::TSTRUNC_FOLD,
+            "tstrunc-grouped-agg",
+            tstrunc_shadow,
+            suppressed,
+        );
+    }
+    Ok(Some(suppressed))
 }
 
 /// `is_whitelisted_agg` over TWO candidate range-table indexes (the join
@@ -6894,6 +7116,84 @@ mod tests {
         assert_eq!(after.agree_gather, before.agree_gather + 2);
         assert_eq!(after.wl_suppress_model_gather, before.wl_suppress_model_gather + 1);
         assert_eq!(after.wl_gather_model_suppress, before.wl_gather_model_suppress + 1);
+    }
+
+    /// Serial-side shadow census plumbing: every (enforced, pick) pair
+    /// lands in its own cell; the agreement predicate is exactly
+    /// "gather-gather or suppress-{serial,runtime}" (suppression's
+    /// delivered engine is decided at exec by the router/band). Uses the
+    /// scanfold-meta family row: its production note() path requires a
+    /// qualed covered plain fold at 10M-scale, which no unit test plans —
+    /// deltas are interference-free.
+    #[test]
+    fn serial_shadow_census_counts_cells() {
+        use costsize::serial_model::EnginePick as P;
+        use serial_shadow::{agrees, note, snapshot, SCANFOLD_META};
+        let before = snapshot()[SCANFOLD_META];
+        assert_eq!(before.family, "scanfold-meta");
+        let n1 = note(SCANFOLD_META, false, P::Gather);
+        note(SCANFOLD_META, true, P::Serial);
+        note(SCANFOLD_META, true, P::Serial);
+        note(SCANFOLD_META, true, P::Runtime);
+        note(SCANFOLD_META, false, P::Serial);
+        let after = snapshot()[SCANFOLD_META];
+        assert_eq!(n1, before.cells[0][2] + 1);
+        assert_eq!(after.cells[0][2], before.cells[0][2] + 1); // gather/gather
+        assert_eq!(after.cells[1][0], before.cells[1][0] + 2); // suppress/serial
+        assert_eq!(after.cells[1][1], before.cells[1][1] + 1); // suppress/runtime
+        assert_eq!(after.cells[0][0], before.cells[0][0] + 1); // gather/serial
+        assert_eq!(after.cells[0][1], before.cells[0][1]);
+        assert_eq!(after.cells[1][2], before.cells[1][2]);
+        // Agreement semantics.
+        assert!(agrees(false, P::Gather));
+        assert!(agrees(true, P::Serial));
+        assert!(agrees(true, P::Runtime));
+        assert!(!agrees(false, P::Serial));
+        assert!(!agrees(false, P::Runtime));
+        assert!(!agrees(true, P::Gather));
+    }
+
+    /// The serial shadow is OBSERVATION ONLY, pinned structurally: the
+    /// tail helper takes the ALREADY-DECIDED verdict by value and returns
+    /// unit — it cannot feed back. This test pins the carve-agreement
+    /// surface the planner wires: at the carves' own witnessed anchors
+    /// the model pick agrees with what each carve enforces (the letter's
+    /// table lives in costsize::serial_model tests; this is the
+    /// planner-side smoke that the wired inputs reproduce it).
+    #[test]
+    fn serial_shadow_agrees_with_the_carves_at_their_anchors() {
+        use costsize::serial_model as sm;
+        use serial_shadow::agrees;
+        // Selective-qual datetime-lead carve: below the survival bound
+        // the carve keeps Gather (enforced=false) — model agrees.
+        let losing = sm::TopnShape {
+            class: sm::TopnKeyClass::NarrowTs,
+            rows: 1e7,
+            dop: 16,
+            limit: 10.0,
+            survival: 0.0101,
+            zone_friendly: true,
+        };
+        assert!(losing.survival < TOPN_NONINT_MIN_QUAL_SURVIVAL);
+        let v = sm::topn_nonint_three_way(&losing).unwrap();
+        assert!(agrees(false, v.pick), "carve keeps Gather, model {v:?}");
+        // Above the bound the carve admits (suppress) — model agrees.
+        let winning = sm::TopnShape { survival: 0.75, ..losing };
+        assert!(winning.survival >= TOPN_NONINT_MIN_QUAL_SURVIVAL);
+        let v = sm::topn_nonint_three_way(&winning).unwrap();
+        assert!(agrees(true, v.pick), "carve admits, model {v:?}");
+        // Page fence: the fenced scale keeps Gather, the admitted scale
+        // suppresses — model agrees on both sides of the shipped bound
+        // (fixture geometry: ~46 rows/page on the banked fixture).
+        let rows_per_page = 1e7 / 216_000.0;
+        let fenced_rows = 2_160_000.0 * rows_per_page;
+        let v = sm::tstrunc_two_way(fenced_rows).unwrap();
+        assert!(2_160_000.0 >= tstrunc_max_pages());
+        assert!(agrees(false, v.pick), "fence keeps Gather, model {v:?}");
+        let admitted_rows = 216_000.0 * rows_per_page;
+        let v = sm::tstrunc_two_way(admitted_rows).unwrap();
+        assert!(216_000.0 < tstrunc_max_pages());
+        assert!(agrees(true, v.pick), "fence admits, model {v:?}");
     }
 
     /// The census index and the printable class-name table cannot drift
