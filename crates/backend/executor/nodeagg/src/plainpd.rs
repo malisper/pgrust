@@ -404,6 +404,160 @@ impl PlainPdMerged {
     }
 }
 
+/// SE-T2AGG CAR A (distinct-plain-shape): derive the parallel plain
+/// SELECT-DISTINCT spec — the `Agg(AGG_HASHED, zero aggregates) → SeqScan`
+/// HashAggregate shape the serial hash-agg breaker owns today. `Ok(None)` =
+/// shape refused (the caller falls to the serial arms, value-identically).
+///
+/// Gates (v1, fail-closed):
+///   * AGG_HASHED, AGGSPLIT_SIMPLE, no HAVING, ZERO transitions (numtrans ==
+///     0, no peragg, no pertrans_sort) — the pure-dedup node;
+///   * exactly ONE grouping column = OUTER column 1 (the staged direct-key
+///     feed's own col-0 requirement, the plain count(DISTINCT) discipline);
+///   * the Agg's targetlist is exactly that one key Var (identity emit);
+///   * the grouping equality is REPRESENTATIONAL on the stored key — the
+///     `distinct_set_kind` equality matrix verbatim: int2/int4/int8eq over
+///     the int family (sign-extended-word equality), or texteq over
+///     text/varchar under a DETERMINISTIC collation (byte equality of
+///     detoasted content — exactly `DistinctSet`'s byte key; nondeterministic
+///     collations refuse).
+///
+/// `key_typ` is the scan-tlist column-0 type (the caller extracts it from
+/// the proven SeqScan child — this module never walks plan trees).
+pub fn plain_sd_derive_spec(
+    node: &AggStateData<'_>,
+    key_typ: ::types_core::Oid,
+) -> PgResult<Option<std::sync::Arc<PlainPdSpec>>> {
+    use ::types_pathnodes::{AGGSPLIT_SIMPLE, AGG_HASHED};
+    const F_INT2EQ: ::types_core::Oid = 63;
+    const F_INT4EQ: ::types_core::Oid = 65;
+    const F_TEXTEQ: ::types_core::Oid = 67;
+    const F_INT8EQ: ::types_core::Oid = 467;
+    const INT2OID: ::types_core::Oid = 21;
+    const INT4OID: ::types_core::Oid = 23;
+    const INT8OID: ::types_core::Oid = 20;
+    const TEXTOID: ::types_core::Oid = 25;
+    const VARCHAROID: ::types_core::Oid = 1043;
+    if node.plan.aggstrategy != AGG_HASHED || node.plan.aggsplit != AGGSPLIT_SIMPLE {
+        return Ok(None);
+    }
+    if node.numtrans != 0 || !node.peragg.is_empty() || !node.pertrans_sort.is_empty() {
+        return Ok(None);
+    }
+    if node.qual.is_some() {
+        return Ok(None);
+    }
+    let [grp_col] = node.plan.grpColIdx else { return Ok(None) };
+    if *grp_col < 1 || node.plan.grpOperators.len() != 1 {
+        return Ok(None);
+    }
+    // Identity emit: the one tlist entry is the one key Var (the grouping
+    // column — an arbitrary scan OUTPUT column: AGG_HASHED keeps the scan's
+    // physical tlist, so the key need not be column 0; the staging arm
+    // stages that exact column).
+    let tlist = &node.plan.plan.targetlist;
+    if tlist.len() != 1 {
+        return Ok(None);
+    }
+    let Some(te) = tlist.nth(0).as_target_entry() else { return Ok(None) };
+    let Some(v) = te.expr.as_var() else { return Ok(None) };
+    if v.varno != ::execexpr::OUTER_VAR || v.varlevelsup != 0 || v.varattno != *grp_col {
+        return Ok(None);
+    }
+    let eq_proc = ::lsyscache::get_opcode(node.plan.grpOperators[0])?;
+    let collation = node.plan.grpCollations.first().copied().unwrap_or(0);
+    let kind = match (eq_proc, key_typ) {
+        (F_INT2EQ, INT2OID) => DistinctKeyKind::Int16,
+        (F_INT4EQ, INT4OID) => DistinctKeyKind::Int32,
+        (F_INT8EQ, INT8OID) => DistinctKeyKind::Int64,
+        (F_TEXTEQ, TEXTOID | VARCHAROID)
+            if collation != 0 && ::lsyscache::get_collation_isdeterministic(collation)? =>
+        {
+            DistinctKeyKind::Bytes
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(std::sync::Arc::new(PlainPdSpec {
+        att: (*grp_col - 1) as u16,
+        kind,
+        worker_budget: crate::distinct_set_budget() / 2,
+    })))
+}
+
+/// SE-T2AGG CAR A: materialize the merged distinct VALUES as the sink's
+/// emit buffers — exactly [`crate::sink::SINK_NBUCKETS`] bufs (partition i
+/// → bucket i), one output column (the key). Ints ride byval datums at the
+/// spec's width (the sign-extended-word identity the equality admitted);
+/// bytes wrap in 4B-header text varlenas in each buf's own arena (equal
+/// payload bytes = the serial path's text value; header form is
+/// representation, not identity). `seen_null` appends one SQL-NULL row
+/// (DISTINCT groups all NULLs together) — unreachable on the cbstore feeds
+/// (the AM refuses NULLs) but exact if a feed ever carries one.
+///
+/// Emit order is partition-then-set order — DIVERGENT from the serial hash
+/// table's insertion order, legal under the 2026-07-13 order-relaxation
+/// policy (same rows/values; group order free unless SQL mandates it — the
+/// probe refuses ORDER BY shapes).
+pub fn plain_sd_emit_bufs(
+    spec: &PlainPdSpec,
+    merged: &[PlainPdMerged],
+    seen_null: bool,
+) -> Vec<crate::sink::SinkEmitBuf> {
+    let mut bufs = Vec::with_capacity(crate::sink::SINK_NBUCKETS);
+    for b in 0..crate::sink::SINK_NBUCKETS {
+        let Some(m) = merged.get(b).filter(|m| !m.is_empty()) else {
+            bufs.push(crate::sink::SinkEmitBuf::default());
+            continue;
+        };
+        let n = m.len();
+        let mut values: Vec<Datum> = Vec::with_capacity(n);
+        let mut arena: Vec<u8> = Vec::new();
+        if spec.is_bytes() {
+            arena.reserve(m.blob.len() + m.spans.len() * 12);
+            let mut offs: Vec<usize> = Vec::with_capacity(n);
+            for &(off, len, _h) in &m.spans {
+                // 8-align each image (varlena consumers may read aligned
+                // payloads — the sink emit arena's own law).
+                let pad = (8 - arena.len() % 8) % 8;
+                arena.resize(arena.len() + pad, 0);
+                offs.push(arena.len());
+                let hdr = ::datum::varlena::set_varsize_4b(
+                    len as usize + ::datum::varlena::VARHDRSZ,
+                );
+                arena.extend_from_slice(&hdr);
+                arena.extend_from_slice(&m.blob[off as usize..(off + len) as usize]);
+            }
+            // The arena is final — resolve the datums (Vec growth may have
+            // moved the buffer during the loop).
+            for o in offs {
+                values.push(Datum::from_usize(arena[o..].as_ptr() as usize));
+            }
+        } else {
+            for &k in &m.ints {
+                values.push(match spec.kind {
+                    DistinctKeyKind::Int16 => Datum::from_i16(k as i16),
+                    DistinctKeyKind::Int32 => Datum::from_i32(k as i32),
+                    _ => Datum::from_i64(k),
+                });
+            }
+        }
+        bufs.push(crate::sink::SinkEmitBuf {
+            values,
+            nulls: vec![false; n],
+            nrows: n,
+            arena,
+        });
+    }
+    if seen_null {
+        // The NULL group row rides the sink's own NULL bucket position.
+        let b = crate::sink::SINK_NULL_BUCKET;
+        bufs[b].values.push(Datum::null());
+        bufs[b].nulls.push(true);
+        bufs[b].nrows += 1;
+    }
+    bufs
+}
+
 /// Install the merged partitions as the plain agg's replay-only set and let
 /// the ordinary set-mode finalize run. The caller must have run
 /// `agg_plain_build_begin` (fresh pergroups) and, on the skip-sort shape,

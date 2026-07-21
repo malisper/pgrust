@@ -1546,6 +1546,35 @@ pub enum SinkCombineKind {
     /// all-NULL-input group). Combine = unconditional element adds; the
     /// new-group verbatim block copy IS the correct seed.
     AvgInt8Packed,
+    /// min/max(text) — `text_smaller` 459 / `text_larger` 458 over a TEXT
+    /// transvalue (SE-T2AGG CAR B, knob-gated `PGRUST_LANE_V2_AGG_STRMINMAX`
+    /// default OFF): the survivor is a live plain varlena in a worker
+    /// aggcontext (byref accounting via [`sink_combines_byref`]; the same
+    /// lifetime argument as PolyInt128 — every source outlives the combine).
+    /// Combine is memcmp + length tiebreak pick-pointer
+    /// (`varstrfastcmp_c` — the merge.rs `CombineKind::VarlenaMinMax` kernel
+    /// verbatim), admitted under memcmp-tier collations only
+    /// (`str_collation_safe`), so ties are byte-equal and the pick is
+    /// unobservable. Emit deep-copies the survivor image into the EmitBuf
+    /// arena ([`SinkEmitCol::VarlenaTrans`]) — nothing pointer-shaped ever
+    /// crosses to the leader.
+    VarlenaMinMax { larger: bool },
+}
+
+/// SE-T2AGG CAR B kill/arm switch (`PGRUST_LANE_V2_AGG_STRMINMAX`, default
+/// OFF; ON iff exactly `1`/`on` — every other spelling fails safe to OFF).
+/// SAME spelling as the m5_suppress probe half (`agg_strminmax_enabled`):
+/// both read sites flip together (the AGG_POLY knob-coherence law — a keyed
+/// shape whose vocabulary is disarmed here would suppress a Gather and land
+/// on the serial arm).
+pub fn sink_strminmax_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("PGRUST_LANE_V2_AGG_STRMINMAX").as_deref(),
+            Ok("1") | Ok("on")
+        )
+    })
 }
 
 /// One transno's resolved combine: the kind + (byval only) a bare whitelist
@@ -1573,6 +1602,12 @@ const FINALFN_INT8_AVG: Oid = 1964;
 /// `numeric_poly_avg` / `numeric_poly_sum` — the Int128AggState finalfns.
 const FINALFN_POLY_AVG: Oid = 3389;
 const FINALFN_POLY_SUM: Oid = 3388;
+/// `text_larger` 458 / `text_smaller` 459 — min/max(text)'s transition AND
+/// combine fns (pg_aggregate: aggcombinefn == aggtransfn for both); TEXT
+/// transtype (SE-T2AGG CAR B).
+const F_TEXT_LARGER_FN: Oid = 458;
+const F_TEXT_SMALLER_FN: Oid = 459;
+const SINK_TEXTOID: Oid = 25;
 
 /// Resolve every transno's catalog combine function, fail-closed:
 /// `Ok(None)` = a transition refuses the sink (unknown state class, missing
@@ -1621,6 +1656,16 @@ pub fn sink_resolve_combines(node: &AggStateData<'_>) -> PgResult<Option<Vec<Sin
             && crate::merge::COMBINE_WHITELIST.contains(&shape.aggcombinefn)
         {
             SinkCombineKind::Byval
+        } else if aggref.aggtranstype == SINK_TEXTOID
+            && matches!(shape.aggcombinefn, F_TEXT_SMALLER_FN | F_TEXT_LARGER_FN)
+            && sink_strminmax_enabled()
+            && ::lanefold::str_collation_safe(aggref.inputcollid)
+        {
+            // SE-T2AGG CAR B: min/max(text) under a memcmp-tier collation
+            // only (fail-closed on collation weirdness — nondeterministic /
+            // libc/ICU collations keep the historical refusal; bpchar never
+            // matches, its transtype is BPCHAR).
+            SinkCombineKind::VarlenaMinMax { larger: shape.aggcombinefn == F_TEXT_LARGER_FN }
         } else {
             return Ok(None);
         };
@@ -1743,6 +1788,32 @@ pub unsafe fn sink_combine_states(
             },
             // Handled (with continue) before the flag-reading block above.
             SinkCombineKind::AvgInt8Packed => unreachable!(),
+            // text_smaller/text_larger's exact pick under a memcmp-tier
+            // collation (SE-T2AGG CAR B; the merge.rs VarlenaMinMax kernel
+            // verbatim): memcmp + length tiebreak. C returns arg1 (dst) only
+            // on a STRICT win, so ties take the src datum — ties are
+            // byte-equal under the admitted collations, so either pointer is
+            // byte-identical output.
+            SinkCombineKind::VarlenaMinMax { larger } => unsafe {
+                // SAFETY: non-null text transvalues are live varlena images
+                // in worker aggcontexts (caller contract; every source
+                // outlives the combine — drive_pinned holds every helper to
+                // RG settlement). The payload reader validates the header
+                // class (plain short / 4B-uncompressed) and errors on
+                // anything else — transitions store detoasted plain images
+                // on the admitted cbstore feeds.
+                let (dp, dl) = text_trans_payload(d.trans_value)?;
+                let (sp, sl) = text_trans_payload(s.trans_value)?;
+                let cmp = ::varlena::varstrfastcmp_c(
+                    core::slice::from_raw_parts(dp, dl),
+                    core::slice::from_raw_parts(sp, sl),
+                );
+                let keep_dst = if larger { cmp > 0 } else { cmp < 0 };
+                if !keep_dst {
+                    d.trans_value = s.trans_value;
+                }
+                d.no_trans_value = false;
+            },
             // int4_avg_combine's core (numeric.c:6832): element adds over
             // the int8[2] {count,sum} transarray.
             SinkCombineKind::AvgInt8 => unsafe {
@@ -1756,6 +1827,30 @@ pub unsafe fn sink_combine_states(
         }
     }
     Ok(())
+}
+
+/// Checked text-transvalue payload (SE-T2AGG CAR B): pointer + length of the
+/// content bytes of a plain short-header or 4B-uncompressed varlena image.
+/// Compressed/external headers ERROR (fail-closed shape backstop — the
+/// admitted cbstore feeds stage detoasted plain images, so the class is
+/// unreachable; the error mirrors `int8_avg_trans_read`'s discipline).
+///
+/// # Safety
+/// `d` is a non-null text transvalue datum pointing at a live, readable
+/// varlena image.
+unsafe fn text_trans_payload(d: Datum) -> PgResult<(*const u8, usize)> {
+    use ::types_tuple::varatt;
+    let p = d.as_usize() as *const u8;
+    // SAFETY: caller contract — live varlena image, header readable.
+    unsafe {
+        if varatt::varatt_is_1b(p) {
+            Ok((p.add(varatt::VARHDRSZ_SHORT), varatt::varsize_1b(p) - varatt::VARHDRSZ_SHORT))
+        } else if varatt::varatt_is_4b_u(p) {
+            Ok((p.add(varatt::VARHDRSZ), varatt::varsize_4b(p) - varatt::VARHDRSZ))
+        } else {
+            Err(sink_shape_error("non-plain text transvalue in a sink combine/emit"))
+        }
+    }
 }
 
 /// Mutable {count,sum} pointer into a live, MAXALIGNed int8[2] transarray
@@ -2319,6 +2414,12 @@ pub enum SinkEmitCol {
     ConstByval { value: Datum, isnull: bool },
     /// Aggregate result = the byval transvalue (no finalfn).
     Agg { transno: u32 },
+    /// min/max(text) result = the byref TEXT transvalue, deep-copied into
+    /// the buf arena at emit (SE-T2AGG CAR B; finalfn-none like `Agg`, but
+    /// the survivor is a live worker-aggcontext varlena — the arena copy is
+    /// what makes the published buf self-contained). Never table-adopted
+    /// (`sink_emit_plan_all_byval` counts it byref).
+    VarlenaTrans { transno: u32 },
     /// `avg(int2/int4)` (finalfn `int8_avg` 1964): {count,sum} int8[2]
     /// transarray → `ops::int64_avg_div` NUMERIC image into the buf arena
     /// (`BatchEmitCol::AvgInt8`'s exact core). `packed` = the avgpack
@@ -2367,10 +2468,18 @@ pub fn sink_build_emit_plan(
         match pa.finalfn.as_ref() {
             // Raw-transvalue emission requires a byval word; INTERNAL is
             // byval-but-pointer — refuse (batch_emit_resolve's gate).
+            // SE-T2AGG CAR B: byref TEXT transvalues (min/max(text)) are
+            // admitted knob-ON under memcmp-tier collations — the emit
+            // deep-copies the survivor image into the buf arena
+            // (SinkEmitCol::VarlenaTrans below).
             None => {
-                if !node.trans_typ[pa.transno as usize].byval
-                    || pa.aggref.aggtranstype == INTERNALOID
-                {
+                let byval_ok = node.trans_typ[pa.transno as usize].byval
+                    && pa.aggref.aggtranstype != INTERNALOID;
+                let text_ok = pa.aggref.aggtranstype == SINK_TEXTOID
+                    && !node.trans_typ[pa.transno as usize].byval
+                    && sink_strminmax_enabled()
+                    && ::lanefold::str_collation_safe(pa.aggref.inputcollid);
+                if !byval_ok && !text_ok {
                     return None;
                 }
             }
@@ -2444,6 +2553,11 @@ pub fn sink_build_emit_plan(
             }
             let pa = &node.peragg[a.aggno as usize];
             let col = match pa.finalfn.as_ref() {
+                // The finalfn-none gate above proved byval-word OR the
+                // knob-gated text min/max class (SE-T2AGG CAR B).
+                None if !node.trans_typ[pa.transno as usize].byval => {
+                    SinkEmitCol::VarlenaTrans { transno: pa.transno }
+                }
                 None => SinkEmitCol::Agg { transno: pa.transno },
                 Some(f) => match f.fn_oid {
                     FINALFN_INT8_AVG => SinkEmitCol::AvgInt8 {
@@ -2762,6 +2876,29 @@ fn emit_row(
                 let pg = &*states.add(transno as usize);
                 values.push(pg.trans_value);
                 nulls.push(pg.trans_value_is_null);
+            },
+            // min/max(text) survivor (SE-T2AGG CAR B): deep-copy the live
+            // worker-aggcontext varlena image verbatim into the buf arena
+            // (header form included — representation, not identity).
+            // SAFETY: as `Agg`; a non-null text transvalue is a live plain
+            // varlena image (combine contract; the payload check errored
+            // on any other header class during the combine).
+            SinkEmitCol::VarlenaTrans { transno } => unsafe {
+                let pg = &*states.add(transno as usize);
+                if pg.trans_value_is_null {
+                    values.push(Datum::null());
+                    nulls.push(true);
+                } else {
+                    let p = pg.trans_value.as_usize() as *const u8;
+                    let len = ::types_tuple::varatt::varsize_any(p);
+                    push_image(
+                        values,
+                        nulls,
+                        arena,
+                        fixups,
+                        core::slice::from_raw_parts(p, len),
+                    );
+                }
             },
             // Plan-owned byval datum, copied verbatim (admission gate).
             SinkEmitCol::ConstByval { value, isnull } => {
@@ -3579,9 +3716,11 @@ fn table_emit_datum(
         // Plan-owned byval datum, copied verbatim (admission gate).
         SinkEmitCol::ConstByval { value, isnull } => (value, isnull),
         // Byref emit kinds never reach the table drain: table adoption is
-        // gated by sink_emit_plan_all_byval (MultiText/MultiNumeric/Avg*
-        // are byref) — fail-soft NULL rather than asserting.
-        SinkEmitCol::MultiText { .. } | SinkEmitCol::MultiNumeric { .. } => (Datum::null(), true),
+        // gated by sink_emit_plan_all_byval (MultiText/MultiNumeric/Avg*/
+        // VarlenaTrans are byref) — fail-soft NULL rather than asserting.
+        SinkEmitCol::MultiText { .. }
+        | SinkEmitCol::MultiNumeric { .. }
+        | SinkEmitCol::VarlenaTrans { .. } => (Datum::null(), true),
         // Byref finalize kinds never reach a table-backed drain:
         // sink_emit_plan_all_byval refuses adoption (and the debug_assert
         // in agg_sink_adopt_table re-checks).
@@ -4915,6 +5054,167 @@ mod tests {
             assert_eq!(got, expect);
         }
         assert!(!buf.nulls[1] && !buf.nulls[2]);
+    }
+
+    // SE-T2AGG CAR B: a minimal plain 4B-U text varlena image (header +
+    // payload) — the aggcontext form a min/max(text) transvalue holds.
+    #[repr(C, align(8))]
+    struct TextImage {
+        buf: [u8; 32],
+    }
+
+    fn mk_text(payload: &[u8]) -> Box<TextImage> {
+        assert!(payload.len() <= 28);
+        let mut t = Box::new(TextImage { buf: [0; 32] });
+        let size = (4 + payload.len()) as u32;
+        t.buf[0..4].copy_from_slice(&(size << 2).to_le_bytes()); // varatt 4B-U
+        t.buf[4..4 + payload.len()].copy_from_slice(payload);
+        t
+    }
+
+    fn pg_of(img: &TextImage) -> AggPerGroup {
+        AggPerGroup {
+            trans_value: Datum::from_usize(img as *const _ as usize),
+            trans_value_is_null: false,
+            no_trans_value: false,
+        }
+    }
+
+    /// SE-T2AGG CAR B: the VarlenaMinMax combine is the merge.rs kernel
+    /// verbatim — memcmp + length tiebreak pick-pointer, keep-dst only on a
+    /// STRICT win (ties take src; byte-equal under the admitted collations,
+    /// so unobservable), strict NULL adopt-pointer — and the emit deep-copies
+    /// the survivor image into the buf's own arena (byref discipline: never
+    /// table-adopted).
+    #[test]
+    fn varlena_minmax_combine_and_emit() {
+        let combines = vec![
+            SinkCombineFn {
+                func: test_combines()[0].func, // never called by this kind
+                strict: true,
+                collation: Oid::from(0u8),
+                kind: SinkCombineKind::VarlenaMinMax { larger: false },
+            },
+            SinkCombineFn {
+                func: test_combines()[0].func,
+                strict: true,
+                collation: Oid::from(0u8),
+                kind: SinkCombineKind::VarlenaMinMax { larger: true },
+            },
+        ];
+        // Byref accounting + the table-adopt refusal (self-containment law).
+        assert!(sink_combines_byref(&combines));
+        let plan = SinkEmitPlan {
+            width: 8,
+            fixed: None,
+            ntails: 0,
+            cols: vec![SinkEmitCol::Key, SinkEmitCol::VarlenaTrans { transno: 0 }],
+        };
+        assert!(!sink_emit_plan_all_byval(&plan), "text survivors never table-adopt");
+
+        let apple = mk_text(b"apple");
+        let pear = mk_text(b"pear");
+        let app = mk_text(b"app");
+        let apple2 = mk_text(b"apple");
+
+        // min keeps "apple" vs "pear"; max adopts "pear".
+        let mut dst = [pg_of(&apple), pg_of(&apple)];
+        let src = [pg_of(&pear), pg_of(&pear)];
+        unsafe { sink_combine_states(&combines, dst.as_mut_ptr(), src.as_ptr()).unwrap() };
+        assert_eq!(dst[0].trans_value.as_usize(), &*apple as *const _ as usize, "min keeps dst");
+        assert_eq!(dst[1].trans_value.as_usize(), &*pear as *const _ as usize, "max adopts src");
+
+        // Length tiebreak on a shared prefix: "app" < "apple".
+        let mut dst_len = [pg_of(&apple), pg_of(&apple)];
+        let src_len = [pg_of(&app), pg_of(&app)];
+        unsafe {
+            sink_combine_states(&combines, dst_len.as_mut_ptr(), src_len.as_ptr()).unwrap()
+        };
+        assert_eq!(dst_len[0].trans_value.as_usize(), &*app as *const _ as usize, "min: shorter");
+        assert_eq!(dst_len[1].trans_value.as_usize(), &*apple as *const _ as usize, "max: longer");
+
+        // Byte-equal tie: C returns arg1 only on a STRICT win → src adopted
+        // (unobservable — the images are byte-identical).
+        let mut dst_tie = [pg_of(&apple), pg_of(&apple)];
+        let src_tie = [pg_of(&apple2), pg_of(&apple2)];
+        unsafe {
+            sink_combine_states(&combines, dst_tie.as_mut_ptr(), src_tie.as_ptr()).unwrap()
+        };
+        assert_eq!(dst_tie[0].trans_value.as_usize(), &*apple2 as *const _ as usize);
+
+        // Strict NULL handling: NULL dst adopts the src pointer; NULL src is
+        // a skip.
+        let mut dst_null = [
+            AggPerGroup {
+                trans_value: Datum::null(),
+                trans_value_is_null: true,
+                no_trans_value: true,
+            },
+            pg_of(&apple),
+        ];
+        let src_null = [
+            pg_of(&pear),
+            AggPerGroup {
+                trans_value: Datum::null(),
+                trans_value_is_null: true,
+                no_trans_value: true,
+            },
+        ];
+        unsafe {
+            sink_combine_states(&combines, dst_null.as_mut_ptr(), src_null.as_ptr()).unwrap()
+        };
+        assert_eq!(dst_null[0].trans_value.as_usize(), &*pear as *const _ as usize);
+        assert!(!dst_null[0].trans_value_is_null);
+        assert_eq!(dst_null[1].trans_value.as_usize(), &*apple as *const _ as usize);
+
+        // Emit: the survivor image lands in the buf's OWN arena, verbatim.
+        let mut t = mk_table(4);
+        let pr = t.probe_int(7, t.hash_key_int(7));
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                [pg_of(&apple), pg_of(&pear)].as_ptr(),
+                pr.states.cast::<AggPerGroup>(),
+                2,
+            );
+        }
+        let buf = sink_emit_bucket(&plan, &t).unwrap();
+        assert_eq!(buf.nrows, 1);
+        assert_eq!(buf.values[0].as_i64(), 7);
+        let expect = &apple.buf[..4 + 5];
+        let p = buf.values[1].as_usize();
+        let lo = buf.arena.as_ptr() as usize;
+        assert!(p >= lo && p + expect.len() <= lo + buf.arena.len(), "datum points into arena");
+        let got = unsafe { core::slice::from_raw_parts(p as *const u8, expect.len()) };
+        assert_eq!(got, expect, "survivor image copied verbatim");
+        assert!(!buf.nulls[1]);
+
+        // All-NULL group emits SQL NULL.
+        let mut t2 = mk_table(4);
+        let pr2 = t2.probe_int(9, t2.hash_key_int(9));
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                [
+                    AggPerGroup {
+                        trans_value: Datum::null(),
+                        trans_value_is_null: true,
+                        no_trans_value: true,
+                    },
+                    pg_of(&pear),
+                ]
+                .as_ptr(),
+                pr2.states.cast::<AggPerGroup>(),
+                2,
+            );
+        }
+        let buf2 = sink_emit_bucket(&plan, &t2).unwrap();
+        assert!(buf2.nulls[1], "all-NULL-input group finalizes to NULL");
+    }
+
+    /// SE-T2AGG CAR B knob: default OFF in a kill-free process (the probe /
+    /// resolve-combines vocabulary stays int-only at default — inert pin).
+    #[test]
+    fn sink_strminmax_knob_default_off() {
+        assert!(!sink_strminmax_enabled(), "test process has no knob set => OFF");
     }
 
     // avgpack: seed a packed [count, sum] image into a pergroup slot.
