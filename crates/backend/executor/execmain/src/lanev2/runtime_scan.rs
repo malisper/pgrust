@@ -231,7 +231,8 @@ enum DriveMode {
     /// UNCHANGED serial fetch+recheck+qual+projection path over a claimed
     /// window of the frozen shared bitmap (runtime_bitmap::drain_claim).
     BitmapPerRow,
-    /// SE-AGGPOLY (band 101001, PGRUST_LANE_V2_AGG_POLY default OFF): heap
+    /// SE-AGGPOLY (band 101001, PGRUST_LANE_V2_AGG_POLY DEFAULT ON since
+    /// t35 routing-flips, `=0|off` kills): heap
     /// plain-agg shapes whose transitions the fold plan does NOT fully
     /// cover but whose remainder is exactly the sum/avg(numeric)
     /// NumericAggState family (the poly export manifest,
