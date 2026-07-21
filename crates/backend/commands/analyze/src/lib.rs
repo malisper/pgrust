@@ -543,12 +543,17 @@ fn do_analyze_rel<'mcx>(
         let src = FetchSource::Heap { tupdesc, rows: &rows[..numrows as usize] };
         // Ingest-time footer NDV (whole-stream HLL): sampled Duj1 underestimates
         // heavy-tailed text NDV 100-1500x, so a present footer count wins.
-        let footer_ndv = if !inh
-            && tableam::TableAm::of(onerel) == Some(tableam::TableAm::Pgrcolumnar)
-        {
-            tableam::pgrcolumnar_footer_ndv(onerel)?
+        // The inherited pass unions the children's v8 REGISTER sketches
+        // (scalars cannot be combined — a sum double-counts values shared
+        // across children) into an honest parent-level NDV.
+        let footer_ndv = if !inh {
+            if tableam::TableAm::of(onerel) == Some(tableam::TableAm::Pgrcolumnar) {
+                tableam::pgrcolumnar_footer_ndv(onerel)?
+            } else {
+                None
+            }
         } else {
-            None
+            inherited_pgrcolumnar_footer_ndv(anl_mcx, onerel)?
         };
         for s in vacattrstats.iter_mut() {
             let t_col = anl_trace.then(std::time::Instant::now);
@@ -1615,6 +1620,92 @@ fn pgrcolumnar_acquire_sample_rows<'mcx>(
         );
     }
     Ok(numrows)
+}
+
+/// Inherited-pass footer NDV (pgrust-only divergence, the !inh footer-NDV
+/// override's parent-level sibling): union the v8 per-column HLL register
+/// sketches across every pgrcolumnar leaf child, per parent column matched
+/// by name (the convert_tuples_by_name vocabulary). Strictly monotone
+/// fallback: any child that is not pgrcolumnar disqualifies the whole
+/// override (None -> sampled Duj1, exactly as before); a child without a
+/// sketch for a mapped column zeroes that column (0 = unknown, the v2
+/// scalar contract); a child with no committed footer has no committed
+/// rows and contributes nothing. Register union is lossless (per-bucket
+/// maxima), so the parent estimate equals a single sketch built over all
+/// children's rows.
+fn inherited_pgrcolumnar_footer_ndv<'mcx>(
+    mcx: Mcx<'mcx>,
+    onerel: &Relation<'mcx>,
+) -> PgResult<Option<Vec<u64>>> {
+    let table_oids = pg_inherits::find_all_inheritors(mcx, onerel.rd_id, ACCESS_SHARE_LOCK)?;
+    let parent_atts = &onerel.rd_att.attrs;
+    // Per parent column: the running union (None until first contribution)
+    // and a poison flag (a mapped child column without a sketch).
+    let mut acc: Vec<Option<tableam::PgrcolumnarNdvSketch>> =
+        (0..parent_atts.len()).map(|_| None).collect();
+    let mut poisoned = vec![false; parent_atts.len()];
+    let mut any_child = false;
+    for &child_oid in table_oids.iter() {
+        let childrel = table::table_open(mcx, child_oid, NO_LOCK)?;
+        match childrel.rd_rel.relkind {
+            RELKIND_RELATION | RELKIND_MATVIEW => {}
+            _ => {
+                // Partitioned intermediates (incl. a partitioned onerel
+                // itself) carry no storage.
+                table::table_close(childrel, NO_LOCK)?;
+                continue;
+            }
+        }
+        if tableam::TableAm::of(&childrel) != Some(tableam::TableAm::Pgrcolumnar) {
+            // Mixed hierarchy: keep C-parity sampling for the whole parent.
+            table::table_close(childrel, NO_LOCK)?;
+            return Ok(None);
+        }
+        let sketches = tableam::pgrcolumnar_footer_ndv_hll(&childrel)?;
+        if let Some(sketches) = sketches {
+            any_child = true;
+            let child_atts = &childrel.rd_att.attrs;
+            for (pi, patt) in parent_atts.iter().enumerate() {
+                if patt.attisdropped || poisoned[pi] {
+                    continue;
+                }
+                // Child column by name (attnums may diverge across the
+                // hierarchy); pgrcolumnar column index = attnum - 1 (the
+                // footer_ndv consumer's existing contract).
+                let child_sk = child_atts
+                    .iter()
+                    .position(|a| {
+                        !a.attisdropped && a.attname.name_str() == patt.attname.name_str()
+                    })
+                    .and_then(|ci| sketches.get(ci))
+                    .and_then(|s| s.as_ref());
+                match child_sk {
+                    Some(sk) => match &mut acc[pi] {
+                        Some(u) => u.merge(sk),
+                        None => {
+                            let mut u = tableam::PgrcolumnarNdvSketch::default();
+                            u.merge(sk);
+                            acc[pi] = Some(u);
+                        }
+                    },
+                    None => poisoned[pi] = true,
+                }
+            }
+        }
+        table::table_close(childrel, NO_LOCK)?;
+    }
+    if !any_child {
+        return Ok(None);
+    }
+    Ok(Some(
+        acc.iter()
+            .zip(&poisoned)
+            .map(|(u, &p)| match (u, p) {
+                (Some(u), false) => u.estimate().max(1),
+                _ => 0,
+            })
+            .collect(),
+    ))
 }
 
 /// acquire_inherited_sample_rows (analyze.c): the sampled union across all
