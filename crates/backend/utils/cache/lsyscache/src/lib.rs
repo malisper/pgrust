@@ -13,6 +13,10 @@ pub mod relation;
 pub(crate) mod scratch;
 pub mod statistics;
 pub mod typ;
+// Per-planning-cycle catalog memos (NOT glob-re-exported: its names shadow
+// the incumbent per-call accessors deliberately, callers opt in via the
+// module path + a &PlannerRun).
+pub mod run_memo;
 
 #[cfg(test)]
 mod tests;

@@ -83,7 +83,7 @@ fn index_am_translate_cmptype(cmptype: CompareType, amoid: Oid, _opfamily: Oid) 
 }
 
 // (amconsistentequality, amconsistentordering) from the built-in AM handlers.
-fn index_am_consistent_flags(amoid: Oid) -> (bool, bool) {
+pub(crate) fn index_am_consistent_flags(amoid: Oid) -> (bool, bool) {
     match amoid {
         BTREE_AM_OID => (true, true),
         HASH_AM_OID => (true, false),

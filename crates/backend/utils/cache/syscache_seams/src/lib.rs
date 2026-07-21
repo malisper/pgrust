@@ -1043,7 +1043,7 @@ mcx::forget_safe_struct!(
 
 // The planner's per-cycle syscache memos (syscache-memo lane) arena-leak
 // these Copy PODs the same way; !needs_drop is the whole proof.
-mcx::forget_safe_nodrop!(PgOperatorShape, PgAmopShape);
+mcx::forget_safe_nodrop!(PgOperatorShape, PgAmopShape, PgAmopMemberShape);
 
 seam_core::seam!(
     // SearchSysCache3(STATRELATTINH) + full slot decode (the planner's

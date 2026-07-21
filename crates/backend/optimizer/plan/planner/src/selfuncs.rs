@@ -670,7 +670,7 @@ pub(crate) fn ineq_histogram_selectivity<'mcx>(
     let nvalues = sslot.values()?.len() as i32;
     if nvalues > 1
         && sslot.stacoll == collation
-        && lsyscache::comparison_ops_are_compatible(sslot.staop, opoid)?
+        && crate::syscache_memo::comparison_ops_are_compatible(run, sslot.staop, opoid)?
     {
         // C overwrites sslot.values[0]/[nvalues-1] in place with the probed
         // actual endpoints; the overrides model that without mutating the

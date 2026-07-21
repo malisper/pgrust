@@ -920,7 +920,7 @@ fn match_rowcompare_to_indexcol<'mcx>(
         return Ok(None);
     }
 
-    match lsyscache::get_op_opfamily_strategy(expr_op, opfamily)? {
+    match lsyscache::run_memo::get_op_opfamily_strategy(run, expr_op, opfamily)? {
         1 | 2 | 4 | 5 => {
             // BTLess/BTLessEqual/BTGreaterEqual/BTGreater
             expand_indexqual_rowcompare(run, rinfo, indexcol, index, expr_op, var_on_left)
@@ -953,7 +953,7 @@ fn expand_indexqual_rowcompare<'mcx>(
         if var_on_left { (&rc.largs, &rc.rargs) } else { (&rc.rargs, &rc.largs) };
 
     let (mut op_strategy, op_lefttype, op_righttype) =
-        lsyscache::get_op_opfamily_properties(first_op, index.opfamily[indexcol], false)?;
+        lsyscache::run_memo::get_op_opfamily_properties(run, first_op, index.opfamily[indexcol], false)?;
 
     let mut indexcols: PgVec<'mcx, i16> = PgVec::new_in(mcx);
     indexcols.push(indexcol as i16);
@@ -988,7 +988,7 @@ fn expand_indexqual_rowcompare<'mcx>(
         let mut matched = None;
         for i in 0..index.nkeycolumns as usize {
             if match_index_to_operand(run, varop, i, index)
-                && lsyscache::get_op_opfamily_strategy(expr_op, index.opfamily[i])?
+                && lsyscache::run_memo::get_op_opfamily_strategy(run, expr_op, index.opfamily[i])?
                     == op_strategy
                 && index_coll_matches_expr_coll(
                     index.indexcollations[i],
@@ -1003,7 +1003,7 @@ fn expand_indexqual_rowcompare<'mcx>(
 
         indexcols.push(i as i16);
         let (strat, lefttype, righttype) =
-            lsyscache::get_op_opfamily_properties(expr_op, index.opfamily[i], false)?;
+            lsyscache::run_memo::get_op_opfamily_properties(run, expr_op, index.opfamily[i], false)?;
         op_strategy = strat;
         expr_ops.push(expr_op);
         opfamilies.push(index.opfamily[i]);
@@ -1136,7 +1136,7 @@ fn match_opclause_to_indexcol<'mcx>(
         && !clauses::contain_volatile_functions(rightop)?
     {
         if index_coll_matches_expr_coll(idxcollation, op.inputcollid)
-            && lsyscache::op_in_opfamily(op.opno, opfamily)?
+            && lsyscache::run_memo::op_in_opfamily(run, op.opno, opfamily)?
         {
             return Ok(Some(IndexClause {
                 rinfo: Some(rinfo),
@@ -1150,7 +1150,7 @@ fn match_opclause_to_indexcol<'mcx>(
                 indexcols: PgVec::new_in(run.mcx),
             }));
         }
-        let opfuncid = lsyscache::get_opcode(op.opno)?;
+        let opfuncid = lsyscache::run_memo::get_opcode(run, op.opno)?;
         if let Some(ic) = get_index_clause_from_support(run, rinfo, opfuncid, 0, indexcol, index)? {
             return Ok(Some(ic));
         }
@@ -1161,8 +1161,8 @@ fn match_opclause_to_indexcol<'mcx>(
         && !clauses::contain_volatile_functions(leftop)?
     {
         if index_coll_matches_expr_coll(idxcollation, op.inputcollid) {
-            let comm_op = lsyscache::get_commutator(op.opno)?;
-            if comm_op != 0 && lsyscache::op_in_opfamily(comm_op, opfamily)? {
+            let comm_op = lsyscache::run_memo::get_commutator(run, op.opno)?;
+            if comm_op != 0 && lsyscache::run_memo::op_in_opfamily(run, comm_op, opfamily)? {
                 let commrinfo = planner_seams::commute_restrictinfo::call(run, rinfo, comm_op)?;
                 return Ok(Some(IndexClause {
                     rinfo: Some(rinfo),
@@ -1208,7 +1208,7 @@ fn match_saopclause_to_indexcol<'mcx>(
         && !right_relids.is_member(index_relid as i32)
         && !clauses::contain_volatile_functions(rightop)?
         && index_coll_matches_expr_coll(index.indexcollations[indexcol], saop.inputcollid)
-        && lsyscache::op_in_opfamily(saop.opno, index.opfamily[indexcol])?
+        && lsyscache::run_memo::op_in_opfamily(run, saop.opno, index.opfamily[indexcol])?
     {
         return Ok(Some(IndexClause {
             rinfo: Some(rinfo),
@@ -1291,7 +1291,7 @@ fn match_orclause_to_indexcol<'mcx>(
             let arraytype = lsyscache::get_array_type(consttype)?;
             inputcollid = sub.inputcollid;
             if !index_coll_matches_expr_coll(index.indexcollations[indexcol], inputcollid)
-                || !lsyscache::op_in_opfamily(match_opno, index.opfamily[indexcol])?
+                || !lsyscache::run_memo::op_in_opfamily(run, match_opno, index.opfamily[indexcol])?
                 || arraytype == 0
                 || consttype == RECORDOID
                 || expr_type(index_expr.unwrap()) == RECORDOID
@@ -1718,7 +1718,7 @@ fn match_clause_to_ordering_op<'mcx>(
         return Ok(None);
     }
 
-    let sortfamily = lsyscache::get_op_opfamily_sortfamily(expr_op, opfamily)?;
+    let sortfamily = lsyscache::run_memo::get_op_opfamily_sortfamily(run, expr_op, opfamily)?;
     if sortfamily != pk_opfamily {
         return Ok(None);
     }
