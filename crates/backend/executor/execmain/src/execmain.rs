@@ -1245,6 +1245,18 @@ pub(crate) fn execute_plan<'m, 'mcx>(
     // the row loop captures after each accepted row) — the store and
     // sidecar stay aligned no matter which engine drove. Knob-OFF and
     // unarmed fills read one more None here, per RUN only.
+    // World-B parallel passthrough funnel (gather-elimination Phase 2, Stage 3;
+    // PGRUST_RUNTIME_ROW_FUNNEL, DEFAULT OFF). Runs a lane-ownable bare
+    // passthrough SeqScan in parallel through the runtime funnel and streams the
+    // rows to `dest` (dest.startup/shutdown stay the caller's). Fail-closed: any
+    // ineligibility returns false and the serial per-tuple loop below runs
+    // byte-identically. With the kill switch unset this returns on the first
+    // test, so default behavior / route_to / the coverage matrix are unchanged.
+    if operation == CmdType::CMD_SELECT && send_tuples && !use_parallel_mode {
+        if crate::lanev2::try_passthrough_funnel(estate, planstate, number_tuples, dest)? {
+            return Ok(());
+        }
+    }
     let mut cursor_capture_sidecar: Option<::types_portal::TuplestoreHandle> = None;
     let cursor_fill_engaged = if estate.es_cursor_run_budget.is_some()
         && send_tuples

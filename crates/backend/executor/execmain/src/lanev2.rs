@@ -55,6 +55,7 @@ mod standing_channel;
 mod push;
 mod row_emit;
 mod runtime_passthrough;
+pub(crate) use runtime_passthrough::try_passthrough_funnel;
 mod rowmode;
 mod rowmode_tail;
 mod stats;

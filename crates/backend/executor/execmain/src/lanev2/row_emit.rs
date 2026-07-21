@@ -108,7 +108,7 @@ impl MinImage {
     }
 
     /// The image as a `MinimalTupleData` pointer for `exec_store_minimal_tuple_ptr`.
-    fn as_mtup_ptr(&self) -> NonNull<MinimalTupleData> {
+    pub(super) fn as_mtup_ptr(&self) -> NonNull<MinimalTupleData> {
         self.ptr.cast::<MinimalTupleData>()
     }
 }
