@@ -209,11 +209,12 @@ pub(super) fn drain_lane_funnel<'mcx>(
     let mut emitted: u64 = 0;
     loop {
         crate::cfi()?;
-        // Capture the wake epoch BEFORE the drain sweep (canonical
-        // lost-wakeup-free order, matching the pool worker loop): a producer
-        // push/mark-done between the sweep and the park bumps the epoch, so the
-        // park returns immediately and the outer loop re-drains.
+        // The waiter-flag wait pattern (funnel.rs protocol doc): capture the
+        // wake epoch, ARM the drain waiter flag, THEN sweep — a producer push
+        // ordered after the arm-fence sees the flag and wakes (epoch bump),
+        // one ordered before it is seen by the sweep. Park only on Idle.
         let seen = drain.park_epoch();
+        drain.arm_wait();
         match drain.next() {
             DrainStep::Row(img) => {
                 let cont = {
