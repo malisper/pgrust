@@ -1087,7 +1087,19 @@ impl Tuplesort {
                 allowed_mem - (INITIAL_MEMTUPSIZE * mem::size_of::<SortTuple>()) as i64;
             Ok(TuplesortData {
                 mcx,
-                tuplecontext: mcx.context().new_child_bump("Caller tuples"),
+                // C's TupleSortUseBumpTupleCxt: a bounded-capable sort
+                // (TUPLESORT_ALLOWBOUNDED) pfrees tuples evicted from the
+                // bounded heap (free_sort_tuple), which a bump arena cannot
+                // do — its footprint would grow with INPUT rows while the
+                // sort reports the bound's few kB. Mirror C exactly: aset
+                // iff the bound is allowed, bump otherwise (the unbounded
+                // arm keeps the bump win; reclamation there is wholesale
+                // reset/end, never per-tuple).
+                tuplecontext: if sortopt & TUPLESORT_ALLOWBOUNDED != 0 {
+                    mcx.context().new_child("Caller tuples")
+                } else {
+                    mcx.context().new_child_bump("Caller tuples")
+                },
                 status: TupSortStatus::Initial,
                 sortopt,
                 bounded: false,
@@ -1957,6 +1969,14 @@ impl Tuplesort {
     }
 
     pub fn end(self) {}
+
+    /// Test-only: the caller-tuples context's stats (kind + real arena
+    /// footprint) — pins the bounded-arm aset choice and that eviction
+    /// frees physically (footprint tracks the bound, not the input).
+    #[cfg(test)]
+    pub(crate) fn tuplecontext_stats(&mut self) -> ::mcx::TreeStats {
+        self.0.with_mut(|st| st.tuplecontext.stats_tree())
+    }
 }
 
 /// Register-resident put cursor over the TSS_INITIAL window [len, watermark).
@@ -2426,15 +2446,19 @@ impl<'m> TuplesortData<'m> {
         self.avail_mem < 0
     }
 
-    /// `free_sort_tuple`: accounting only — tuplecontext is a bump arena, so
-    /// discarded bounded-sort tuples are reclaimed at end, not per-tuple as
-    /// C's aset pfree does (memory-footprint divergence, not behavior).
+    /// `free_sort_tuple`: FREEMEM accounting + the physical pfree. Bounded
+    /// sorts allocate caller tuples in an aset (begin_common mirrors C's
+    /// TupleSortUseBumpTupleCxt), so the evicted tuple's bytes really return
+    /// here — footprint tracks the bound, not the input. The caller must not
+    /// read `stup.tuple` afterwards (C nulls the pointer; ours are `Copy`
+    /// locals that die at the call site).
     #[inline]
     fn free_sort_tuple(&mut self, stup: &SortTuple) {
         if stup.tuple.is_null() {
             return;
         }
         self.avail_mem += freed_space(self.free_typlen, stup);
+        dealloc_stup(self.tuplecontext.mcx(), self.free_typlen, stup);
     }
 
     /// `tuplesort_sort_memtuples`: comparator-identity specialization dispatch.
@@ -2600,6 +2624,7 @@ impl<'m> TuplesortData<'m> {
         let free_typlen = self.free_typlen;
         let tie_track = self.tie_track;
         let rowref_mode = self.rowref_mode;
+        let tmcx = self.tuplecontext.mcx();
         let mut tie_dirty = false;
         let mut freed: i64 = 0;
         let result = (|| {
@@ -2610,6 +2635,7 @@ impl<'m> TuplesortData<'m> {
                     // (key, rowref) total order (ties never track).
                     bounded_backlog(
                         rowref_cmp(cmp),
+                        tmcx,
                         &mut tuples,
                         tupcount,
                         bound,
@@ -2621,6 +2647,7 @@ impl<'m> TuplesortData<'m> {
                 } else {
                     bounded_backlog(
                         cmp,
+                        tmcx,
                         &mut tuples,
                         tupcount,
                         bound,
@@ -2732,12 +2759,14 @@ impl<'m> TuplesortData<'m> {
 // header: >0 fixed, -1 varlena).
 const FREE_SIZE_TLEN: i16 = i16::MIN;
 
+/// Put-time allocation size of a live sort tuple: the minimal-tuple image's
+/// t_len (heaptuple's alloc_image, extra = 0), or the datum copy's typlen /
+/// varlena size (putdatum). Must stay in lockstep with those alloc sites —
+/// `dealloc_stup` rebuilds the allocation layout from it.
 #[inline]
-fn freed_space(free_typlen: i16, stup: &SortTuple) -> i64 {
-    if stup.tuple.is_null() {
-        return 0;
-    }
-    let size = if free_typlen == FREE_SIZE_TLEN {
+fn stup_alloc_size(free_typlen: i16, stup: &SortTuple) -> usize {
+    debug_assert!(!stup.tuple.is_null());
+    if free_typlen == FREE_SIZE_TLEN {
         // SAFETY: live tuplecontext image.
         (unsafe { (*stup.tuple).t_len }) as usize
     } else if free_typlen > 0 {
@@ -2745,8 +2774,36 @@ fn freed_space(free_typlen: i16, stup: &SortTuple) -> i64 {
     } else {
         // SAFETY: live tuplecontext varlena image.
         unsafe { ::types_tuple::varatt::varsize_any(stup.tuple.cast_const().cast::<u8>()) }
-    };
-    maxalign(size) as i64
+    }
+}
+
+#[inline]
+fn freed_space(free_typlen: i16, stup: &SortTuple) -> i64 {
+    if stup.tuple.is_null() {
+        return 0;
+    }
+    maxalign(stup_alloc_size(free_typlen, stup)) as i64
+}
+
+/// The physical half of C's free_sort_tuple (pfree): deallocate the tuple's
+/// bytes in the caller-tuples context under the put-time layout. On the
+/// unbounded arm the context is a bump arena whose deallocate is a no-op by
+/// design — physical reclamation exists exactly where C has it (the
+/// TUPLESORT_ALLOWBOUNDED aset). After this call the tuple bytes are dead:
+/// callers order any boundary-tie compare BEFORE freeing the evictee.
+#[inline]
+fn dealloc_stup(tmcx: Mcx<'_>, free_typlen: i16, stup: &SortTuple) {
+    let size = stup_alloc_size(free_typlen, stup);
+    // SAFETY: `stup.tuple` was allocated in `tmcx` with exactly this
+    // size/align pair (alloc_image's MAXIMUM_ALIGNOF == putdatum's 8) and is
+    // freed at most once (eviction removes it from memtuples first).
+    unsafe {
+        ::mcx::Allocator::deallocate(
+            &tmcx,
+            core::ptr::NonNull::new_unchecked(stup.tuple.cast::<u8>()),
+            core::alloc::Layout::from_size_align_unchecked(size, 8),
+        );
+    }
 }
 
 fn heap_insert(
@@ -2827,6 +2884,7 @@ fn rowref_cmp(
 #[allow(clippy::too_many_arguments)]
 fn bounded_backlog(
     cmp: impl Fn(&SortTuple, &SortTuple) -> i32 + Copy,
+    tmcx: Mcx<'_>,
     tuples: &mut [SortTuple],
     tupcount: usize,
     bound: usize,
@@ -2846,21 +2904,31 @@ fn bounded_backlog(
                 // Tie tracking: same discard/evict rules as
                 // puttuple_bounded / puttuple_bounded_replace
                 // (this loop is the same bounded put over the
-                // pre-transition backlog). freed_space is
-                // size accounting only, so the evicted root's
-                // bytes stay live for the post-replace compare.
+                // pre-transition backlog).
                 if c == 0 && tie_track {
                     *tie_dirty = true;
                 }
-                *freed += freed_space(free_typlen, &tuples[i]);
+                let stup = tuples[i];
+                if !stup.tuple.is_null() {
+                    *freed += freed_space(free_typlen, &stup);
+                    // free_sort_tuple's physical half: the discarded backlog
+                    // slot is never revisited (i advances; the array is
+                    // truncated to `bound` after the transition).
+                    dealloc_stup(tmcx, free_typlen, &stup);
+                }
                 cfi()?;
             } else {
                 let stup = tuples[i];
                 let top = tuples[0];
-                *freed += freed_space(free_typlen, &top);
                 heap_replace_top(cmp, tuples, count, stup)?;
                 if tie_track {
+                    // The evicted root's bytes must stay live for this
+                    // boundary-tie compare — its free is ordered below.
                     *tie_dirty = cmp(&top, &tuples[0]) == 0;
+                }
+                if !top.tuple.is_null() {
+                    *freed += freed_space(free_typlen, &top);
+                    dealloc_stup(tmcx, free_typlen, &top);
                 }
             }
         }

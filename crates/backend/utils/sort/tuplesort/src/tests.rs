@@ -2158,3 +2158,119 @@ mod pgrcolumnar_ingest_large {
         }
     }
 }
+
+// Bounded-sort memory discipline (C's TupleSortUseBumpTupleCxt): the
+// caller-tuples context is an aset iff TUPLESORT_ALLOWBOUNDED, and eviction
+// really frees, so the context footprint tracks the BOUND, not the input.
+// Regression fence for the containerized top-N OOM class (a bump tuple
+// context silently held every discarded input tuple to sort end).
+mod bounded_memory_discipline {
+    use super::pgrcolumnar_ingest::{i64_text_desc, text_datum};
+    use super::*;
+
+    // Far above any credible per-bound footprint, far below the ~14MB the
+    // pre-fix bump arena held for this input.
+    const FOOT_CAP: usize = 512 * 1024;
+
+    #[test]
+    fn bounded_heap_sort_uses_aset_and_frees_evictions() {
+        let mcx = leaked_mcx();
+        let desc = i64_text_desc(mcx);
+        let keys = [SortSupport {
+            ssup_collation: 0,
+            ssup_reverse: false,
+            ssup_nulls_first: false,
+            ssup_attno: 1,
+            comparator: SortComparator::SignedI64,
+        }];
+        let mut ts = Tuplesort::begin_heap_with_keys(desc, &keys, 4096, TUPLESORT_ALLOWBOUNDED);
+        ts.set_bound(10);
+        assert_eq!(ts.tuplecontext_stats().kind, "AllocSet", "bounded arm must be pfree-capable");
+        let mut seed = 7u64;
+        let mut keep = Vec::new();
+        let mut mins: Vec<i64> = Vec::new();
+        for _ in 0..200_000 {
+            let k = (lcg(&mut seed) % 1_000_000_000) as i64;
+            mins.push(k);
+            let payload = format!("pad-{k:032}").into_bytes();
+            let vals = [Datum::from_i64(k), text_datum(&payload, &mut keep)];
+            ts.putvalues(&vals, &[false, false]).unwrap();
+            keep.clear();
+        }
+        ts.performsort().unwrap();
+        let stats = ts.tuplecontext_stats();
+        assert!(
+            stats.arena_footprint < FOOT_CAP,
+            "caller-tuples footprint {} must track the bound, not the 200k-row input",
+            stats.arena_footprint
+        );
+        mins.sort_unstable();
+        let mut got = Vec::new();
+        let mut values = [Datum::null(); 2];
+        let mut isnull = [false; 2];
+        for _ in 0..10 {
+            assert!(ts.getvalues(true, &mut values, &mut isnull).unwrap());
+            got.push(values[0].as_i64());
+        }
+        assert_eq!(got, mins[..10], "top-N output survives the physical frees");
+        ts.end();
+    }
+
+    #[test]
+    fn bounded_text_datum_sort_frees_evictions() {
+        let vals = random_texts(50_000, 0x5eed, b"");
+        let mut ts = begin_text_datum_abbrev(TUPLESORT_ALLOWBOUNDED);
+        ts.set_bound(25);
+        assert_eq!(ts.tuplecontext_stats().kind, "AllocSet");
+        let blobs: Vec<Option<Box<[u64]>>> =
+            vals.iter().map(|v| v.as_ref().map(|p| text_blob(p))).collect();
+        for b in &blobs {
+            match b {
+                Some(blob) => {
+                    ts.putdatum(Datum::from_usize(blob.as_ptr() as usize), false).unwrap()
+                }
+                None => ts.putdatum(Datum::null(), true).unwrap(),
+            }
+        }
+        ts.performsort().unwrap();
+        assert!(ts.used_bound());
+        let stats = ts.tuplecontext_stats();
+        assert!(
+            stats.arena_footprint < FOOT_CAP,
+            "datumCopy footprint {} must track the bound, not the 50k-datum input",
+            stats.arena_footprint
+        );
+        let mut got = Vec::new();
+        for _ in 0..25 {
+            let nd = ts.getdatum(true).unwrap().expect("bound rows present");
+            got.push(if nd.isnull {
+                None
+            } else {
+                let p = nd.value.as_usize() as *const u8;
+                // SAFETY: sort-owned datumCopy image.
+                Some(unsafe {
+                    use ::types_tuple::varatt::{varatt_is_1b, varsize_1b, varsize_4b};
+                    if varatt_is_1b(p) {
+                        std::slice::from_raw_parts(p.add(1), varsize_1b(p) - 1).to_vec()
+                    } else {
+                        std::slice::from_raw_parts(p.add(4), varsize_4b(p) - 4).to_vec()
+                    }
+                })
+            });
+        }
+        assert_eq!(got[..], text_oracle(vals, false)[..25]);
+        ts.end();
+    }
+
+    #[test]
+    fn unbounded_sort_keeps_the_bump_arm() {
+        let mut ts =
+            Tuplesort::begin_datum_with_key(int32_key(1, false, false), 1024, TUPLESORT_NONE);
+        assert_eq!(
+            ts.tuplecontext_stats().kind,
+            "Bump",
+            "no-bound sorts must keep the bump win (C parity)"
+        );
+        ts.end();
+    }
+}
