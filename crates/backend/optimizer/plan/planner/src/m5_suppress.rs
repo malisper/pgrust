@@ -834,6 +834,37 @@ fn bpchar_keys_enabled() -> bool {
     })
 }
 
+/// TPCH-FILTERQUALS (night/tpch-filterquals) — the X5 relaxation, the top
+/// remaining TPC-H blocker after the five-car stack: the grouped-join
+/// classifier's BARE-EQUI-ONLY law refuses every filtered census text
+/// (q05's region/date quals, q12's shipmode/date quals). The EXECUTOR was
+/// never the gap — the join walks parallel-safety-check scan quals
+/// (mb_plan_walk + the single-join gates) and the worker RowFeed re-checks
+/// them per row; X5 was probe conservatism against the merge-election
+/// hazard its own e2e reproduced LIVE (a filter with a stats-defaulting
+/// EXPR selectivity shifted the costing to a top-level Merge Join). This
+/// knob admits per-rel PUSHED filter terms under a STATS-GROUNDED
+/// discipline (classify_filter_term): single-rel simple restrictions only
+/// — (possibly Relabel'd) stats'd Var op non-null Const, or a
+/// ScalarArrayOp (IN) of the same shape — parallel-safe, so the planner's
+/// selectivity is grounded in pg_statistic rather than defaults; the
+/// stats-defaulting expr class that drove X5 (`f.v % 3 = 0`) stays a
+/// named refusal, as do var-var terms (q12's l_commitdate <
+/// l_receiptdate — no grounding). Post-filter estimates flow into the
+/// floors and the per-edge NL margins automatically (RelOptInfo.rows is
+/// post-restriction at the probe's choke point), so filtered builds
+/// cannot out-run the election evidence. DEFAULT OFF;
+/// `PGRUST_LANE_V2_JOINFILTERS=1|on` arms (GL-FILTERQUALS-1 owns the
+/// flip). NOT touched: the EC-tree law (full q05's shared s_nationkey
+/// endpoint is the hostile-proven H1/H2 hazard — a correctness guard,
+/// not conservatism) and the plain rows' pre-existing wider admission.
+fn joinfilters_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        knob_spelling_armed(std::env::var("PGRUST_LANE_V2_JOINFILTERS").as_deref().ok())
+    })
+}
+
 /// PROVISIONAL floor for bytes-keyed grouped-join shapes: the
 /// CbHashJoinGroupedAgg 2M ceiling verbatim — the scan text-key row's
 /// min_dop-12 discipline is SUBSUMED here because its low-dop win region
@@ -2931,6 +2962,61 @@ fn key_var_estimable<'mcx>(
     Ok(vd.stats.is_some() || vd.isunique)
 }
 
+/// TPCH-FILTERQUALS: one pushed filter term's admission census. `Some(i)` =
+/// an admitted single-rel restriction on joined rel index `i`; `None` = not
+/// this shape (the caller refuses, keeping Gather). Admitted, fail-closed:
+///   * `OpExpr((Relabel'd) Var, non-null Const)` either side, or
+///     `ScalarArrayOpExpr((Relabel'd) Var, non-null Const array)` (the IN /
+///     ALL forms) — SIMPLE restrictions whose selectivity the planner
+///     grounds in pg_statistic;
+///   * the Var carries statistics (`key_var_estimable` — the X5 lesson:
+///     the merge election was driven by a stats-DEFAULTING expr term);
+///   * the whole term `is_parallel_safe` (it runs on helpers through the
+///     scan feeds' per-row qual re-check).
+/// Refused by shape (named at the caller): var-var terms (q12's
+/// l_commitdate < l_receiptdate — no grounding), expr restrictions (X5's
+/// `f.v % 3 = 0` class), OR trees, NULL consts, volatile/unsafe exprs.
+fn classify_filter_term<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    rtis: &[usize],
+    qual: Node<'mcx>,
+) -> PgResult<Option<usize>> {
+    let strip = |e: Node<'mcx>| e.as_relabel_type().map_or(e, |r| r.arg);
+    let var_side = |e: Node<'mcx>| {
+        let e = strip(e);
+        rtis.iter().position(|&rti| key_var(e, rti).is_some()).map(|i| (i, e))
+    };
+    let const_ok = |e: Node<'mcx>| e.as_const().is_some_and(|c| !c.constisnull);
+    let (i, v_node) = if let Some(op) = qual.as_op_expr() {
+        if op.opretset || op.args.len() != 2 {
+            return Ok(None);
+        }
+        let (a, b) = (op.args.nth(0), op.args.nth(1));
+        match (var_side(a), const_ok(b), var_side(b), const_ok(a)) {
+            (Some(x), true, _, _) => x,
+            (_, _, Some(x), true) => x,
+            _ => return Ok(None),
+        }
+    } else if let Some(saop) = qual.as_scalar_array_op_expr() {
+        if saop.args.len() != 2 {
+            return Ok(None);
+        }
+        match (var_side(saop.args.nth(0)), const_ok(saop.args.nth(1))) {
+            (Some(x), true) => x,
+            _ => return Ok(None),
+        }
+    } else {
+        return Ok(None);
+    };
+    if !key_var_estimable(run, v_node)? {
+        return Ok(None);
+    }
+    if !crate::is_parallel_safe_opt(run, Some(qual))? {
+        return Ok(None);
+    }
+    Ok(Some(i))
+}
+
 fn classify_aggjoin_grouped<'mcx>(
     run: &mut PlannerRun<'mcx>,
     parse: &Query<'mcx>,
@@ -2995,33 +3081,44 @@ fn classify_aggjoin_grouped<'mcx>(
     // Join with FULL statistics present — X5), and statistics-free keys give
     // the costing default join selectivities with the same merge landing
     // (X6). Bare equi-join grouped shapes over analyzed rels ONLY.
+    let mut n_filters = 0usize;
     for &qual in quals {
-        let Some(op) = qual.as_op_expr() else {
-            return refuse_join("non-equi qual (costing can elect merge/sort shapes)");
-        };
-        if op.args.len() != 2 {
-            return refuse_join("non-equi qual (costing can elect merge/sort shapes)");
+        // Two-DISTINCT-rel bare-var terms are JOIN terms: they keep the
+        // X5/X6 equi discipline verbatim (never filter candidates).
+        let two_rel = qual.as_op_expr().and_then(|op| {
+            if op.args.len() != 2 {
+                return None;
+            }
+            let (a, b) = (op.args.nth(0), op.args.nth(1));
+            let hit = |e: Node<'_>| rtis.iter().position(|&rti| key_var(e, rti).is_some());
+            match (hit(a), hit(b)) {
+                (Some(ia), Some(ib)) if ia != ib => Some((op, a, b, ia, ib)),
+                _ => None,
+            }
+        });
+        if let Some((op, a, b, ia, ib)) = two_rel {
+            let (Some(va), Some(vb)) = (key_var(a, rtis[ia]), key_var(b, rtis[ib])) else {
+                return refuse_join("non-equi qual (costing can elect merge/sort shapes)");
+            };
+            if !is_int_family(va.vartype)
+                || !is_int_family(vb.vartype)
+                || !lsyscache::op_hashjoinable(op.opno, va.vartype)?
+            {
+                return refuse_join("non-hashjoinable qual term");
+            }
+            if !key_var_estimable(run, a)? || !key_var_estimable(run, b)? {
+                return refuse_join("join key without statistics (statistics-free rel)");
+            }
+            continue;
         }
-        let (a, b) = (op.args.nth(0), op.args.nth(1));
-        let hit = |e: Node<'_>| rtis.iter().position(|&rti| key_var(e, rti).is_some());
-        let (Some(ia), Some(ib)) = (hit(a), hit(b)) else {
-            return refuse_join("non-equi qual (costing can elect merge/sort shapes)");
-        };
-        if ia == ib {
-            return refuse_join("non-equi qual (costing can elect merge/sort shapes)");
+        // TPCH-FILTERQUALS (knob-gated): single-rel stats-grounded simple
+        // restrictions admit; everything else keeps the X5 refusal
+        // byte-for-byte (knob OFF never reaches the classifier).
+        if joinfilters_enabled() && classify_filter_term(run, rtis, qual)?.is_some() {
+            n_filters += 1;
+            continue;
         }
-        let (Some(va), Some(vb)) = (key_var(a, rtis[ia]), key_var(b, rtis[ib])) else {
-            return refuse_join("non-equi qual (costing can elect merge/sort shapes)");
-        };
-        if !is_int_family(va.vartype)
-            || !is_int_family(vb.vartype)
-            || !lsyscache::op_hashjoinable(op.opno, va.vartype)?
-        {
-            return refuse_join("non-hashjoinable qual term");
-        }
-        if !key_var_estimable(run, a)? || !key_var_estimable(run, b)? {
-            return refuse_join("join key without statistics (statistics-free rel)");
-        }
+        return refuse_join("non-equi qual (costing can elect merge/sort shapes)");
     }
     // EC discipline (hostile-review BLOCKING find — see ec_disjoint_equi_edges):
     // pairwise-disjoint two-var ECs only, and exactly rels-1 distinct edges
@@ -3151,6 +3248,46 @@ fn classify_aggjoin_grouped<'mcx>(
     // shapes carry the jheap floor (min 1M) — TPCH-JHEAP owns the tag; the
     // pure decorated/numeric widenings keep the CbHashJoinGroupedAgg floor
     // — the arm underneath is the same grouped sink either way.
+    // TPCH-FILTERQUALS: filtered shapes route under the joinfilters tag
+    // (every such shape is unkeyable without the knob), composing the
+    // riders in the label; the binding floor is the strictest of the
+    // composed cars. Post-filter estimates already flowed through
+    // max_rows/ngroups/margins above (RelOptInfo.rows is post-restriction).
+    if n_filters > 0 {
+        let mut label = String::from("aggjoin-grouped-filtered");
+        if n_bytes_keys > 0 {
+            label.push_str("-cbkeys");
+        }
+        if n_bpchar_keys > 0 {
+            label.push_str("-bpchar");
+        }
+        if !heap.is_empty() {
+            label.push_str("-heap");
+        }
+        if decorated {
+            label.push_str("-decorated");
+        }
+        if n_numeric > 0 {
+            label.push_str("+numeric");
+        }
+        let guard = if !heap.is_empty() {
+            jheap_guard()
+        } else if n_bytes_keys > 0 {
+            cbkeys_guard()
+        } else {
+            class_guard(CoverClass::CbHashJoinGroupedAgg)
+        };
+        return finish_knob_path(
+            run,
+            "joinfilters",
+            &label,
+            guard,
+            relids[0],
+            ngroups,
+            max_rows,
+            0.0,
+        );
+    }
     // TPCH-CBKEYS: bytes-keyed shapes route under the cbkeys tag (their
     // own kill's greppable line), composing with the heap/decorated/
     // numeric riders in the label; the binding floor is the strictest of
@@ -4743,6 +4880,14 @@ mod tests {
     #[test]
     fn bpchar_subknob_default_off() {
         assert!(!bpchar_keys_enabled(), "test process has no knob set => OFF");
+    }
+
+    /// TPCH-FILTERQUALS knob (night/tpch-filterquals): DEFAULT OFF, `1`/
+    /// `on` arms — filtered grouped-join shapes keep the X5 bare-equi
+    /// refusal byte-for-byte at default.
+    #[test]
+    fn joinfilters_knob_default_off() {
+        assert!(!joinfilters_enabled(), "test process has no knob set => OFF");
     }
 
     /// TPCH-JHEAP NL-election margin + floor: the margin must be a real
