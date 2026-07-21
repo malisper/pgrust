@@ -710,26 +710,6 @@ fn serve_ticket(entry: &Arc<StandingEngagement>, ticket: usize) {
         }
         in_procarray = true; // InitPostgres's InitProcessPhase2 added us.
     } else {
-        // EAGER-binding drivers (the sink arms) cannot bind over a parked
-        // sticky retention (the eager validate()'s envelope gate refuses a
-        // live retained session bind) — evict it with the full session
-        // restore FIRST (the deferred binder evicts its own mismatches in
-        // DeferredQueryTaskBinding::new). A failed eviction refuses
-        // fail-closed, pre-claim, pre-visibility (nothing to remove at the
-        // tail).
-        if !driver.deferred_bind {
-            if let Err(e) = super::query_task_guard::sticky_evict_parked() {
-                let _ = elog::elog(
-                    WARNING,
-                    format!(
-                        "standing executor sticky eviction failed: {}",
-                        e.message()
-                    ),
-                );
-                entry.refused.fetch_add(1, SeqCst);
-                return;
-            }
-        }
         if driver.deferred_bind && super::query_task_guard::lazy_bind_enabled() {
             // CEREMONY-V2 lazy bind (deferred-binder drivers only — the
             // sink arms' eager binder never calls the consuming bind_now,
@@ -780,11 +760,44 @@ fn serve_ticket(entry: &Arc<StandingEngagement>, ticket: usize) {
     // Parallel-worker impersonation for the binder's validate() and the
     // executor's IsParallelWorker gates; cleared on every exit path.
     super::PARALLEL_WORKER_NUMBER.with(|c| c.set(ticket as i32));
-    let joined = lmgr_proc::BecomeLockGroupMember(
-        shared.parallel_leader_proc_number,
-        shared.parallel_leader_pid,
-    );
+    // EAGER-binding drivers (the sink arms) cannot bind over a parked
+    // sticky retention (the eager validate()'s envelope gate refuses a
+    // live retained session bind) — evict it with the full session restore
+    // FIRST (the deferred binder evicts its own mismatches inside the
+    // driver, in DeferredQueryTaskBinding::new). Placement law: eviction
+    // runs UNDER the parallel-worker impersonation above — the guard's
+    // finish restores the parallel start timestamps, whose setter asserts
+    // IsParallelWorker (the deferred path's evictions always ran inside
+    // the driver, i.e. impersonated). A failed eviction refuses this
+    // ticket fail-closed (pre-bind; the RG is untouched by this worker)
+    // and falls through to the normal tail.
+    let evict_ok = driver.deferred_bind
+        || match super::query_task_guard::sticky_evict_parked() {
+            Ok(()) => true,
+            Err(e) => {
+                let _ = elog::elog(
+                    WARNING,
+                    format!(
+                        "standing executor sticky eviction failed: {}",
+                        e.message()
+                    ),
+                );
+                entry.refused.fetch_add(1, SeqCst);
+                false
+            }
+        };
+    let joined = if evict_ok {
+        lmgr_proc::BecomeLockGroupMember(
+            shared.parallel_leader_proc_number,
+            shared.parallel_leader_pid,
+        )
+    } else {
+        // Refused (and counted) above: skip the join and the driver, keep
+        // the unimpersonation + park-invisibility tail below.
+        Ok(false)
+    };
     match joined {
+        Ok(false) if !evict_ok => {}
         Ok(true) => {
             // The driver catches its own panics into the payload (the M1
             // hook discipline); this outer catch is containment of last
