@@ -287,3 +287,89 @@ fn cstring_array_1d(elems: &[&[u8]]) -> Vec<u8> {
     v[..4].copy_from_slice(&total.to_ne_bytes());
     v
 }
+
+// ---------------------------------------------------------------------------
+// TPCH-BPCHAR (night/tpch-bpchar) — the tie law of record, proven against
+// THE REAL vendored functions (not a model): for values stored under ONE
+// typmod (a bare-Var char(n) key column shares its atttypmod by
+// construction), bpchareq's verdict coincides with BYTE EQUALITY of the
+// canonical stored images. Both directions over a corpus that includes
+// trailing-blank input variants (the representative-tie hazard the scan
+// sinks' bpchar exclusion names), multibyte UTF-8 content (0x20 stripping
+// is byte-based; server encodings keep non-first bytes high-bit-set), the
+// n=1 edge, empty/all-space inputs, and truncate-trailing-spaces inputs.
+// The grouped-join canonical-bytes key export (nodeagg grouped_key_kind's
+// admit_bpchar arm) rests on exactly this law; the absorb-side `!isnew`
+// backstop is defense in depth, not the argument.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bpchar_tie_law_equal_iff_identical_images() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let inputs: &[&[u8]] = &[
+        b"",
+        b" ",
+        b"   ",
+        b"A",
+        b"A ",
+        b"AIR",
+        b"AIR ",
+        b"AIR    ",
+        b"AIR REG",
+        b"MAIL",
+        b"a b",
+        b"a b ",
+        b"ASIA",
+        b"EUROPE",
+        "caf\u{e9}".as_bytes(),         // café — 2-byte é
+        "caf\u{e9} ".as_bytes(),        // café + trailing space
+        "na\u{ef}ve".as_bytes(),        // naïve
+        "\u{6771}\u{4eac}".as_bytes(),  // 東京 — 3-byte chars
+        "\u{6771}\u{4eac} ".as_bytes(), // 東京 + trailing space
+    ];
+    for n in [1i32, 3, 8, 10, 25] {
+        let tm = typmod(n);
+        // Store each input under the shared typmod; too-long inputs (the
+        // non-space-truncation errors) fall out of the column's population.
+        let mut images: Vec<Vec<u8>> = Vec::new();
+        for s in inputs {
+            let mut soft = SoftErrorContext::default();
+            if let Ok(Some(v)) = bpchar_input(mcx, s, tm, Some(&mut soft)) {
+                images.push(v.data().to_vec());
+            }
+        }
+        assert!(images.len() >= 4, "corpus survives typmod {n}");
+        for a in &images {
+            // The padding invariant itself: every stored image carries
+            // exactly n CHARACTERS (bpchar_clip's pad/clip law).
+            assert_eq!(
+                mbutils::pg_mbstrlen_with_len(a).unwrap(),
+                n,
+                "stored char({n}) image is exactly {n} characters"
+            );
+            for b in &images {
+                let eq = bpchareq(a, b, C).unwrap();
+                assert_eq!(
+                    eq,
+                    a == b,
+                    "tie law: bpchareq <=> byte-identical images (typmod {n}, {a:?} vs {b:?})"
+                );
+            }
+        }
+    }
+}
+
+/// The tie law's SCOPE boundary: typmod-less bpchar stores UNPADDED, and
+/// there equal-under-bpchareq values with DIFFERENT bytes exist ('AIR' vs
+/// 'AIR  ') — exactly why the admission requires vartypmod >= 5 and why
+/// bare `bpchar` columns stay a named refusal.
+#[test]
+fn bpchar_tie_law_fails_without_typmod() {
+    let ctx = MemoryContext::new("t");
+    let mcx = ctx.mcx();
+    let a = bpchar_input(mcx, b"AIR", -1, None).unwrap().unwrap();
+    let b = bpchar_input(mcx, b"AIR  ", -1, None).unwrap().unwrap();
+    assert!(bpchareq(a.data(), b.data(), C).unwrap(), "bpchareq strips trailing blanks");
+    assert_ne!(a.data(), b.data(), "but the unpadded images differ — no tie law");
+}

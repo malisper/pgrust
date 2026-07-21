@@ -4066,24 +4066,47 @@ fn grouped_key_type_exportable(att: &::types_tuple::FormData_pg_attribute) -> bo
 /// `Bytes` = canonical-bytes text/varchar under a DETERMINISTIC collation
 /// (default 100 / C 950) — byte equality of the detoasted content IS the
 /// grouping operator's verdict (texteq; the scan-side C3/distinct
-/// machinery's `group_eq_representational` law). BPCHAR (1042) is the
-/// NAMED REFUSAL of record — its space-stripping `bpchareq` and
-/// trailing-blank representative ties sit outside the byte-equality
-/// envelope, exactly why the scan sinks exclude it (hashgrouped/merge
-/// module docs) — so every TPC-H char(n) key stays refused until a bpchar
-/// tie-law car rules on canonicalization.
+/// machinery's `group_eq_representational` law).
+///
+/// TPCH-BPCHAR (night/tpch-bpchar) — the TIE LAW of record: BPCHAR (1042)
+/// columns with a REAL typmod (`char(n)`, atttypmod >= 5) additionally
+/// admit as `Bytes` when the caller passes `admit_bpchar` (the
+/// PGRUST_LANE_V2_CBKEYS_BPCHAR gate). The ruling, proven against the
+/// vendored functions (varchar::bpchar_clip / bpchareq, tie-law unit
+/// corpus in the varchar crate): every stored `char(n)` value carries
+/// EXACTLY n characters (bpchar_input/recv and the length-coercion cast
+/// pad, or truncate trailing spaces only), and `bpchareq` is texteq over
+/// `bc_trim` (trailing-0x20-BYTE strip — multibyte-safe because every
+/// legal SERVER encoding keeps non-first bytes of multibyte characters
+/// high-bit-set, so 0x20 is always a real space; C's bcTruelen relies on
+/// the same law). Hence for two values of ONE column (same typmod, the
+/// bare-Var probe discipline): equal-under-bpchareq <=> byte-identical
+/// stored images — the canonical bytes ARE the stored bytes, and the
+/// group representative is unique (no trailing-blank tie exists between
+/// equal keys). Typmod-less bpchar (unpadded storage) stays refused; the
+/// absorb-side `!isnew` check remains the DEFENSE (a non-canonical image
+/// — corruption, a rogue writer — refuses to the serial rerun), never the
+/// argument.
 enum GroupedKeyKind {
     Word,
     Bytes,
 }
 
-fn grouped_key_kind(att: &::types_tuple::FormData_pg_attribute) -> Option<GroupedKeyKind> {
+fn grouped_key_kind(
+    att: &::types_tuple::FormData_pg_attribute,
+    admit_bpchar: bool,
+) -> Option<GroupedKeyKind> {
     if grouped_key_type_exportable(att) {
         return Some(GroupedKeyKind::Word);
     }
-    (att.attlen == -1
-        && matches!(att.atttypid, 25 | 1043)
-        && matches!(att.attcollation, 100 | 950))
+    if att.attlen != -1 || !matches!(att.attcollation, 100 | 950) {
+        return None;
+    }
+    if matches!(att.atttypid, 25 | 1043) {
+        return Some(GroupedKeyKind::Bytes);
+    }
+    // char(n) under the tie law: typmod = n + VARHDRSZ(4), n >= 1.
+    (admit_bpchar && att.atttypid == 1042 && att.atttypmod >= 5)
         .then_some(GroupedKeyKind::Bytes)
 }
 
@@ -4116,15 +4139,18 @@ pub fn agg_grouped_poly_runtime_admissible(node: &AggStateData<'_>) -> bool {
 /// The caller (the runtime hash-join grouped sink) gates these behind the
 /// PGRUST_LANE_V2_CBKEYS knob and tries the word-key admissions FIRST —
 /// word-keyed shapes never reach them.
-pub fn agg_grouped_bytes_runtime_admissible(node: &AggStateData<'_>) -> bool {
+pub fn agg_grouped_bytes_runtime_admissible(node: &AggStateData<'_>, admit_bpchar: bool) -> bool {
     agg_grouped_runtime_shell_core(node)
-        && grouped_keys_bytes_admissible(node)
+        && grouped_keys_bytes_admissible(node, admit_bpchar)
         && runtime_partial::agg_runtime_partial_admissible(node)
 }
 
-pub fn agg_grouped_bytes_poly_runtime_admissible(node: &AggStateData<'_>) -> bool {
+pub fn agg_grouped_bytes_poly_runtime_admissible(
+    node: &AggStateData<'_>,
+    admit_bpchar: bool,
+) -> bool {
     agg_grouped_runtime_shell_core(node)
-        && grouped_keys_bytes_admissible(node)
+        && grouped_keys_bytes_admissible(node, admit_bpchar)
         && runtime_partial::agg_poly_partial_admissible(node)
 }
 
@@ -4148,7 +4174,7 @@ fn agg_grouped_runtime_shell_admissible(node: &AggStateData<'_>) -> bool {
 /// TPCH-CBKEYS: the mixed word/bytes key census (>=1 canonical-bytes text
 /// column; bpchar and non-deterministic collations refuse via
 /// `grouped_key_kind`).
-fn grouped_keys_bytes_admissible(node: &AggStateData<'_>) -> bool {
+fn grouped_keys_bytes_admissible(node: &AggStateData<'_>, admit_bpchar: bool) -> bool {
     let Some(ph) = node.perhash.as_ref() else { return false };
     let base = ph.hashslot.base();
     let Some(desc) = base.tts_tupleDescriptor.as_ref() else { return false };
@@ -4158,7 +4184,7 @@ fn grouped_keys_bytes_admissible(node: &AggStateData<'_>) -> bool {
     }
     let mut n_bytes = 0usize;
     for att in &desc.attrs[..nkeys] {
-        match grouped_key_kind(att) {
+        match grouped_key_kind(att, admit_bpchar) {
             Some(GroupedKeyKind::Bytes) => n_bytes += 1,
             Some(GroupedKeyKind::Word) => {}
             None => return false,
@@ -4308,7 +4334,7 @@ pub fn agg_hash_export_grouped_into<'mcx>(
                 let part = if isnull {
                     runtime_partial::GroupKeyPart::Word(0)
                 } else {
-                    match grouped_key_kind(&desc.attrs[i]) {
+                    match grouped_key_kind(&desc.attrs[i], true) {
                         Some(GroupedKeyKind::Word) => runtime_partial::GroupKeyPart::Word(
                             grouped_key_word(&desc.attrs[i], base.tts_values[i], isnull),
                         ),

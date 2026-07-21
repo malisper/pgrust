@@ -290,6 +290,25 @@ fn hj_cbkeys_enabled() -> bool {
     })
 }
 
+/// TPCH-BPCHAR (night/tpch-bpchar) — the tie-law sub-gate of the cbkeys
+/// car: admit `char(n)` (real-typmod bpchar) group keys into the
+/// canonical-bytes vocabulary. The ruling (proven in the varchar crate's
+/// tie-law corpus against the vendored bpchar_input/bpchareq): same-typmod
+/// stored images are exactly-n-characters blank-padded, so
+/// equal-under-bpchareq <=> byte-identical images — the stored bytes ARE
+/// canonical and no trailing-blank representative tie exists. Sub-knob of
+/// CBKEYS (both must be armed; the planner probe reads the same pair).
+/// DEFAULT OFF; `PGRUST_LANE_V2_CBKEYS_BPCHAR=1|on` arms.
+fn hj_bpchar_keys_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&ON, || {
+        matches!(
+            std::env::var("PGRUST_LANE_V2_CBKEYS_BPCHAR").as_deref(),
+            Ok("1") | Ok("on")
+        )
+    })
+}
+
 /// TPCH-DECOROOT: resolve the Agg's plan NODE from the leader plan root.
 /// `Some` iff the root IS this Agg (the pre-existing law, any knob state),
 /// or — knob-armed and `decorated_ok` (grouped engagements only) — the root
@@ -3415,10 +3434,11 @@ fn mb_arm_worker<'mcx>(
         let numeric = hj_aggjoin_numeric_enabled();
         let word_ok = ::nodeagg::agg_grouped_runtime_admissible(agg)
             || (numeric && ::nodeagg::agg_grouped_poly_runtime_admissible(agg));
+        let bp = hj_bpchar_keys_enabled();
         let bytes_ok = !word_ok
             && hj_cbkeys_enabled()
-            && (::nodeagg::agg_grouped_bytes_runtime_admissible(agg)
-                || (numeric && ::nodeagg::agg_grouped_bytes_poly_runtime_admissible(agg)));
+            && (::nodeagg::agg_grouped_bytes_runtime_admissible(agg, bp)
+                || (numeric && ::nodeagg::agg_grouped_bytes_poly_runtime_admissible(agg, bp)));
         if !word_ok && !bytes_ok {
             return Err(Box::new(PgError::new(
                 ERROR,
@@ -3920,10 +3940,11 @@ fn try_own_multibuild<'mcx>(
         let numeric = hj_aggjoin_numeric_enabled();
         let word_ok = ::nodeagg::agg_grouped_runtime_admissible(agg)
             || (numeric && ::nodeagg::agg_grouped_poly_runtime_admissible(agg));
+        let bp = hj_bpchar_keys_enabled();
         let bytes_ok = !word_ok
             && hj_cbkeys_enabled()
-            && (::nodeagg::agg_grouped_bytes_runtime_admissible(agg)
-                || (numeric && ::nodeagg::agg_grouped_bytes_poly_runtime_admissible(agg)));
+            && (::nodeagg::agg_grouped_bytes_runtime_admissible(agg, bp)
+                || (numeric && ::nodeagg::agg_grouped_bytes_poly_runtime_admissible(agg, bp)));
         if !word_ok && !bytes_ok {
             stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
             refuse("grouped-agg-not-exportable");
@@ -4856,6 +4877,7 @@ mod mb_tests {
         assert!(!hj_decoroot_enabled(), "PGRUST_LANE_V2_DECOROOT unset => OFF");
         assert!(!hj_aggjoin_numeric_enabled(), "PGRUST_LANE_V2_AGGJOIN_NUMERIC unset => OFF");
         assert!(!hj_cbkeys_enabled(), "PGRUST_LANE_V2_CBKEYS unset => OFF");
+        assert!(!hj_bpchar_keys_enabled(), "PGRUST_LANE_V2_CBKEYS_BPCHAR unset => OFF");
     }
 
     /// Decomposition invariants on a SNOWFLAKE topology

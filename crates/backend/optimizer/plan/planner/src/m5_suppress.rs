@@ -808,6 +808,32 @@ fn cbkeys_enabled() -> bool {
     })
 }
 
+/// TPCH-BPCHAR (night/tpch-bpchar) — the bpchar TIE-LAW sub-gate of the
+/// cbkeys car (both knobs must be armed; same pair read in the executor —
+/// knob coherence). The ruling of record, proven against the vendored
+/// varchar functions (tie-law corpus in that crate's tests): stored
+/// `char(n)` values carry EXACTLY n characters (bpchar_input/recv and the
+/// length-coercion cast pad, or truncate trailing spaces only), and
+/// bpchareq is texteq over the trailing-0x20-byte trim (multibyte-safe:
+/// server encodings keep non-first bytes high-bit-set), so for BARE-VAR
+/// keys of one column (same typmod by construction):
+/// equal-under-bpchareq <=> byte-identical stored images. The canonical
+/// bytes ARE the stored bytes; no trailing-blank representative tie
+/// exists between equal keys. Guards at the admission: bare Vars only
+/// (exprs — substr() etc. — break the padding invariant and refuse via
+/// the bare-Var census), vartypmod >= 5 (`char(n)`, n >= 1 — typmod-less
+/// bpchar stores unpadded and stays a named refusal), deterministic
+/// DEFAULT collation. The absorb-side `!isnew` backstop remains defense
+/// in depth (a non-canonical image refuses to the serial rerun), not the
+/// argument. DEFAULT OFF; `PGRUST_LANE_V2_CBKEYS_BPCHAR=1|on` arms
+/// (GL-BPCHAR-1 fleet letter owns the default flip).
+fn bpchar_keys_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        knob_spelling_armed(std::env::var("PGRUST_LANE_V2_CBKEYS_BPCHAR").as_deref().ok())
+    })
+}
+
 /// PROVISIONAL floor for bytes-keyed grouped-join shapes: the
 /// CbHashJoinGroupedAgg 2M ceiling verbatim — the scan text-key row's
 /// min_dop-12 discipline is SUBSUMED here because its low-dop win region
@@ -2698,13 +2724,17 @@ fn jheap_shape_guards<'mcx>(
                     .map(|(_, a)| a)
             })
             .collect();
-        let partners: Vec<usize> = edges
+        // (this rel's edge attno, partner rel index) per incident edge —
+        // the NL-margin law is PER EDGE: a parameterized inner-index path
+        // on THIS rel exists only for edges whose join column the index
+        // covers (an index on a different column parameterizes nothing).
+        let edge_partners: Vec<(i16, usize)> = edges
             .iter()
-            .filter_map(|&(ia, _, ib, _)| {
+            .filter_map(|&(ia, aa, ib, ab)| {
                 if ia == i {
-                    Some(ib)
+                    Some((aa, ib))
                 } else if ib == i {
-                    Some(ia)
+                    Some((ab, ia))
                 } else {
                     None
                 }
@@ -2729,20 +2759,21 @@ fn jheap_shape_guards<'mcx>(
             if covers_all {
                 return refuse_join("heap covering index (index-only scan electable)");
             }
-            if keys[..nkey].iter().any(|&k| join_attnos.iter().any(|&j| i32::from(j) == k)) {
-                // Join-key index: the NL/merge hazard — every equi partner
-                // must dominate this rel by the margin.
-                for &p in &partners {
-                    let Some(p_rel) = run.root.simple_rel_array.get(rtis[p]).copied().flatten()
-                    else {
-                        return Ok(false);
-                    };
-                    let p_rows = run.root.rel(p_rel).rows.max(0.0);
-                    if p_rows < JHEAP_NL_MARGIN * rel_rows {
-                        return refuse_join(
-                            "heap join-key index without the NL-election margin",
-                        );
-                    }
+            // Join-key index: the NL/merge hazard, PER EDGE — only the
+            // partners of edges whose join column this index covers can
+            // elect an inner-index path on this rel; each such partner
+            // must dominate this rel by the margin.
+            for &(attno, p) in &edge_partners {
+                if !keys[..nkey].iter().any(|&k| k == i32::from(attno)) {
+                    continue;
+                }
+                let Some(p_rel) = run.root.simple_rel_array.get(rtis[p]).copied().flatten()
+                else {
+                    return Ok(false);
+                };
+                let p_rows = run.root.rel(p_rel).rows.max(0.0);
+                if p_rows < JHEAP_NL_MARGIN * rel_rows {
+                    return refuse_join("heap join-key index without the NL-election margin");
                 }
             }
         }
@@ -3011,6 +3042,7 @@ fn classify_aggjoin_grouped<'mcx>(
     // standing exclusion; TPC-H char(n) keys wait on the tie-law car).
     let mut key_refs: Vec<u32> = Vec::new();
     let mut n_bytes_keys = 0usize;
+    let mut n_bpchar_keys = 0usize;
     for gc_node in &parse.groupClause {
         let Some(gc) = gc_node.as_sort_group_clause() else { return Ok(false) };
         let Some(tle) = tle_by_sortgroupref(parse, gc.tleSortGroupRef) else {
@@ -3026,8 +3058,24 @@ fn classify_aggjoin_grouped<'mcx>(
             && v.varcollid == DEFAULT_COLLATION_OID
         {
             n_bytes_keys += 1;
+        } else if cbkeys_enabled()
+            && bpchar_keys_enabled()
+            && v.vartype == BPCHAROID
+            && v.varcollid == DEFAULT_COLLATION_OID
+            && v.vartypmod >= 5
+        {
+            // TPCH-BPCHAR: the tie law — a bare-Var char(n) key's stored
+            // images are canonical (see bpchar_keys_enabled's doc), so it
+            // rides the canonical-bytes export as-is.
+            n_bytes_keys += 1;
+            n_bpchar_keys += 1;
         } else {
             if cbkeys_enabled() && v.vartype == BPCHAROID {
+                if bpchar_keys_enabled() && v.vartypmod < 5 {
+                    return refuse_join(
+                        "bpchar group key without a typmod (unpadded storage outside the tie law)",
+                    );
+                }
                 return refuse_join(
                     "bpchar group key (space-insensitive bpchareq outside the canonical-bytes envelope — tie-law car owed)",
                 );
@@ -3109,6 +3157,9 @@ fn classify_aggjoin_grouped<'mcx>(
     // the composed cars (heap's 1M min when heap sides ride along).
     if n_bytes_keys > 0 {
         let mut label = String::from("aggjoin-grouped-cbkeys");
+        if n_bpchar_keys > 0 {
+            label.push_str("-bpchar");
+        }
         if !heap.is_empty() {
             label.push_str("-heap");
         }
@@ -4682,6 +4733,16 @@ mod tests {
         let g = cbkeys_guard();
         assert_eq!(g.max_rows, 2_000_000.0);
         assert_eq!(g.min_rows, 0.0);
+    }
+
+    /// TPCH-BPCHAR sub-knob (night/tpch-bpchar): DEFAULT OFF, `1`/`on`
+    /// arms — bpchar keys are unkeyable at default even with CBKEYS armed
+    /// (the sub-gate composes: BOTH knobs must be on). The tie law itself
+    /// is proven in the adt_varchar crate's corpus against the real
+    /// bpchar_input/bpchareq (bpchar_tie_law_* tests).
+    #[test]
+    fn bpchar_subknob_default_off() {
+        assert!(!bpchar_keys_enabled(), "test process has no knob set => OFF");
     }
 
     /// TPCH-JHEAP NL-election margin + floor: the margin must be a real
