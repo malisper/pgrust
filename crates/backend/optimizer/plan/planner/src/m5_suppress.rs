@@ -407,6 +407,18 @@ fn class_guard(class: CoverClass) -> FloorGuard {
         // legacy PHJ engages ≥2.5M at dop≤8, and 1.14 even at dop16@5M
         // (dop16@2.5M's 0.92 marginal win is deliberately forgone for the
         // clean single bound).
+        //
+        // RE-DERIVATION NOTE (GL-HJMB-1, 2026-07-21): this bound's original
+        // basis was the retired v1 ladder; the witnessed record (hj-ladder-v2
+        // + the GL-HJMB-1 control rung at 8M-probe/4M-build: arm/PHJ
+        // 0.59-0.86 at dop4/8) supports LIFTING it. The lift's PREREQUISITE
+        // GATE is the demote-unsafe boundary guard (the
+        // estimate_runtime_hj_build_peak_bytes refusal in the join rel
+        // guards + the arm's batched-band admission): without it, admitting
+        // larger builds exposes the estimate-boundary seal-crossing refusal
+        // — a 5-11x serial-rerun cliff vs the PHJ the suppression forgoes.
+        // Any floor change must land WITH (or after) that guard and re-run
+        // the GL-HJMB-1 boundary cells.
         CoverClass::CbHashJoinPlainAgg => FloorGuard { max_rows: 2_000_000.0, ..NO_GUARD },
         // GL-COST-2 UNWIRE (this letter): the m5p1/SE-AGGJOIN PROVISIONAL
         // reuse of the hashjoin-nbatch1 floor is REFUTED by the riders' own
@@ -2892,6 +2904,22 @@ fn classify_join_sides<'mcx>(
         if nbatch > 1 {
             return refuse_join("nbatch estimate > 1 (hashjoin-multibatch-spill row unflipped)");
         }
+        // BOUNDARY GUARD (GL-HJMB-1 escalation A): exec_choose prices C's
+        // representation; the runtime arm's own build footprint runs
+        // ~40% heavier per tuple, so a band of builds estimates nbatch==1
+        // here yet truly crosses the combined envelope at execution — and
+        // an unbatched engagement that crosses has no demote path (it
+        // refuses at seal into an R5 serial rerun measured 5-11x worse
+        // than the legacy Parallel Hash this suppression forgoes). Keep
+        // Gather for the band: PHJ is the measured best route for it.
+        // This guard is a PREREQUISITE for any lift of the join rows'
+        // 2M-row FloorGuard (see join_floor_guard) — without it the lift
+        // converts the masked cliff into a live regression.
+        if ::nodehash::estimate_runtime_hj_build_peak_bytes(rel.rows.max(1.0), width)
+            > ::nodehash::get_hash_memory_limit().saturating_mul(dop.max(1) as usize + 1) as u64
+        {
+            return refuse_join("build estimate within the demote-unsafe envelope band (boundary guard)");
+        }
     }
     // >=1 hashjoinable int-family equi clause between the two sides in the
     // join quals (top-level AND terms only). By probe time the quals may be
@@ -3746,6 +3774,19 @@ fn multibuild_rel_guards(
         );
         if nbatch > 1 {
             return refuse_join_none("nbatch estimate > 1 (multibuild walk is unbatched-only)");
+        }
+        // BOUNDARY GUARD (GL-HJMB-1 escalation A), multibuild mirror: the
+        // walk is unbatched-only AND demote-less, so a build in the
+        // estimate-unbatched-but-truly-crossing band refuses at seal into
+        // the serial-rerun cliff. Keep Gather for the band (the arm keeps
+        // its behavior — no batch option exists for trees; the probe is
+        // where PHJ can still be chosen).
+        if ::nodehash::estimate_runtime_hj_build_peak_bytes(rel.rows.max(1.0), width)
+            > ::nodehash::get_hash_memory_limit().saturating_mul(dop.max(1) as usize + 1) as u64
+        {
+            return refuse_join_none(
+                "build estimate within the demote-unsafe envelope band (boundary guard)",
+            );
         }
     }
     Ok(Some((relids, max_rows, heap)))

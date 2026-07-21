@@ -1004,9 +1004,15 @@ impl JoinBuildSink {
             }
             Err(BudgetExceeded) => {
                 drop(g);
-                // With the spill arm on, the SEAL pre-check demotes before
-                // this can trip (same arithmetic); this remains the
-                // spill-disarmed refusal (R5, exact phase-1 posture).
+                // Reachable two ways: (a) spill disarmed — the R5 phase-1
+                // refusal, exact posture; (b) an UNBATCHED admission whose
+                // true build crossed (HjSpill absent => the seal pre-check
+                // demote never runs — it requires `shared.spill`). The
+                // admission boundary guard (GL-HJMB-1) keeps the estimated
+                // crossing band batched, so an armed-spill hit here means
+                // the estimate was wrong-side by more than the guard's
+                // headroom; the cost is the measured 5-11x serial-rerun
+                // cliff vs legacy Parallel Hash.
                 lane_trace("runtime-hashjoin: REFUSED (envelope crossed at seal) — serial rerun");
                 if let Some(s) = self.shared.upgrade() {
                     s.refuse_budget();
@@ -1040,8 +1046,12 @@ impl runtime::ParallelSink for JoinBuildSink {
         match r {
             Ok(Ok(true)) => {}
             Ok(Ok(false)) => {
-                // §6 envelope crossing mid-accept, spill disarmed: refusal,
-                // not error (with the arm on the crossing DEMOTES instead).
+                // §6 envelope crossing mid-accept: refusal, not error. With
+                // the spill arm on AND a BATCHED admission the crossing
+                // demotes instead; an UNBATCHED admission has no HjSpill and
+                // lands here (GL-HJMB-1 boundary — the admission guard keeps
+                // the estimated crossing band batched, so armed hits mean
+                // the estimate was wrong-side beyond the guard's headroom).
                 lane_trace("runtime-hashjoin: REFUSED (envelope crossed in build) — serial rerun");
                 shared.refuse_budget();
             }
@@ -3799,6 +3809,33 @@ pub(super) fn try_own_agg_over_hash_join_runtime<'mcx>(
             return Ok(None);
         }
         spill_batches = Some(want);
+    }
+    // BOUNDARY GUARD (GL-HJMB-1 escalation A): an admission whose nbatch
+    // estimate is 1 but whose ARM-representation peak crosses the combined
+    // envelope has NO demote path — HjSpill is only constructed for batched
+    // admissions, so the crossing REFUSES at seal/in-build into an R5
+    // serial rerun measured 5-11x worse than legacy Parallel Hash (the
+    // witnessed ladder's two boundary cells). exec_choose's nbatch prices
+    // C's representation (~40B/tuple at narrow widths); the arm's chunked
+    // arena + refs + combine buckets run ~55-65B/tuple, so a band of
+    // builds sits estimate-unbatched but truly crossing. Engage BATCHED
+    // (2 level-0 batches) instead: the spill machinery owns the build from
+    // the first row and the crossing lands on the ordinary demote path —
+    // demote-safe by construction. Squeakers (true fit inside the band)
+    // pay the 2-batch tax instead of keeping the cliff risk. The kill
+    // switch (spill disarmed) keeps the phase-1 posture exactly; heap
+    // feeds hit the AC2 refusal below, as any batched estimate does.
+    if spill_batches.is_none() && hj_spill_enabled() {
+        let est_peak = ::nodehash::estimate_runtime_hj_build_peak_bytes(
+            hash_plan.plan.plan_rows,
+            hash_plan.plan.plan_width,
+        );
+        if est_peak > envelope as u64 {
+            lane_trace(
+                "runtime-hashjoin: demote-unsafe envelope band (boundary guard) — engaging batched nbatch=2",
+            );
+            spill_batches = Some(2);
+        }
     }
     // AC2 spill rung (K2 inc-1, the recorded choice — notes/se-wave8-k2.md
     // §3): the heap feed refuses whenever the engagement would be BATCHED
