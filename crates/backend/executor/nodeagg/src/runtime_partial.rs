@@ -215,6 +215,11 @@ pub(crate) fn export_partial_with(
                 let p = match &e.kind {
                     PolyTransKind::Lane(t) => export_lane_trans(t, pg)?,
                     PolyTransKind::NumericAvg => export_numeric_state(pg)?,
+                    // AGG_INTCASE: per-row int-family entry — the identical
+                    // per-kind export body as Lane (state-keyed).
+                    PolyTransKind::PerRow { kind, res_width } => {
+                        export_kind(*kind, *res_width, pg)?
+                    }
                 };
                 out.push((e.transno, p));
             }
