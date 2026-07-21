@@ -1032,6 +1032,52 @@ const GROUPED_SINK_AGGS: &[u32] = &[
     F_MIN_INT2,
 ];
 
+/// GROUPED-AVG widening (probe-side): `GROUPED_SINK_AGGS` plus
+/// avg(int2)/avg(int4). The historical exclusion note above ("PolyInt128/
+/// NumericAgg states are walk refusals on the grouped path") is STALE for
+/// these two OIDs: the runtime grouped sink's combine resolution
+/// (`sink_resolve_combines`, nodeagg sink.rs) admits the `_int8[2]`
+/// {count,sum} transarray through `int4_avg_combine` UNCONDITIONALLY (the
+/// AvgInt8/AvgInt8Packed classes; both finalize at emit, nothing
+/// pointer-shaped reaches the leader), and the serial-shaped router path
+/// engages the avg-carrying grouped top-N shapes end-to-end today. The
+/// INTERNAL-transtype family (avg(int8)/sum(int8), PolyInt128) stays
+/// excluded here — the sink admits it but the probe widening is unproven
+/// for it; a named follow-up owns that pair.
+const GROUPED_SINK_AGGS_AVG: &[u32] = &[
+    F_COUNT_STAR,
+    F_COUNT_ANY,
+    F_SUM_INT4,
+    F_SUM_INT2,
+    F_AVG_INT4,
+    F_AVG_INT2,
+    F_MAX_INT8,
+    F_MAX_INT4,
+    F_MAX_INT2,
+    F_MIN_INT8,
+    F_MIN_INT4,
+    F_MIN_INT2,
+];
+
+/// GROUPED-AVG knob (`PGRUST_M5_GROUPED_AVG`): DEFAULT OFF, only `1`/`on`
+/// arm (the K1-latemat idiom — every other spelling fails safe to today's
+/// refusal). Probe-side only: no executor change rides this knob (the sink
+/// vocabulary above is live at default), so the suppress-then-refuse
+/// direction is guarded by the sink's own fail-closed combine resolution.
+/// Fleet letter owed before any default flip.
+fn grouped_avg_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        tier2_car_spelling_on(std::env::var("PGRUST_M5_GROUPED_AVG").as_deref().ok())
+    })
+}
+
+/// The grouped-sink passenger vocabulary of record: base list, or the
+/// avg-of-int widening knob-ON.
+fn grouped_sink_aggs() -> &'static [u32] {
+    if grouped_avg_enabled() { GROUPED_SINK_AGGS_AVG } else { GROUPED_SINK_AGGS }
+}
+
 // SE-AGGPOLY (band 101001): sum/avg over NUMERIC — aggregate OIDs of record
 // (vendored REL 18.3 pg_proc/pg_aggregate, verified): both ride transfn
 // numeric_avg_accum (2858, NOT strict) over an INTERNAL NumericAggState
@@ -1632,12 +1678,20 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     // Passenger discipline per class (se-aggpoly): the DISTINCT class
     // consults the distinct sink's exact vocabulary (min/max REMOVED — the
     // latent suppress-then-refuse channel; avg(int2/4) ADDED under the
-    // AGG_POLY knob); everything else keeps GROUPED_SINK_AGGS verbatim.
+    // AGG_POLY knob); everything else keeps the grouped-sink vocabulary
+    // (base list, or the GROUPED-AVG widening knob-ON).
     let passenger_list =
-        if n_count_distinct > 0 { distinct_passenger_aggs() } else { GROUPED_SINK_AGGS };
+        if n_count_distinct > 0 { distinct_passenger_aggs() } else { grouped_sink_aggs() };
     let mut n_strminmax = 0usize;
+    let mut n_avg_widened = 0usize;
     for e in &passengers {
         if is_whitelisted_agg(*e, rti, passenger_list) {
+            // GROUPED-AVG bookkeeping: a passenger only the widened list
+            // admits routes the verdict through the knob-path finish below
+            // (own trace tag; the default census stays byte-identical).
+            if n_count_distinct == 0 && !is_whitelisted_agg(*e, rti, GROUPED_SINK_AGGS) {
+                n_avg_widened += 1;
+            }
             continue;
         }
         // SE-T2AGG CAR B (knob-gated, default OFF — block doc below):
@@ -1673,21 +1727,29 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         return Ok(false);
     }
 
+    // Sort-key vocabulary: the BASE (un-widened) lists. An avg-of-int SORT
+    // key would arm a bound the sink's combine-phase top-N declines (the
+    // order-column resolve wants a finalfn-free int8 transvalue), degrading
+    // the suppressed plan to the full drain — fail closed on that
+    // composition until a letter proves the degrade economics.
+    let sortkey_list =
+        if n_count_distinct > 0 { distinct_passenger_aggs() } else { GROUPED_SINK_AGGS };
     // Sort/limit composition: none at all (plain grouped emit), or the
     // top-N winner-selection shape — a single whitelisted-aggregate sort
-    // key plus LIMIT without OFFSET (q17/q18/q31–33). A sort on the group
-    // keys themselves is an ordered-stream consumer (GatherMerge class,
-    // uncovered in bootstrap). SE-DECOROOT (CAR 1, knob-gated): the
-    // residual decorated-root shapes — ORDER BY over group keys and/or
-    // class-vocabulary aggregates, multi-key sorts, sorts without LIMIT,
-    // and LIMIT+OFFSET forms — key the UNDERLYING grouped class; the arm
-    // emits the full grouped output and the serial Sort/Limit above
-    // consumes it (the exprkey-Reduced / CbGroupedAggTopN / AGG_BARELIMIT
-    // precedent). Fail-closed: no count(DISTINCT) (distinct-sink
-    // decoration owns its own topn composition only), no const/mk-family
-    // keys (their knob paths keep their own proven compositions), at most
-    // one text key, enable_hashagg required ON (with it off the suppressed
-    // serial plan is a sorted-agg shape the walk refuses).
+    // key plus LIMIT without OFFSET (the grouped winner-selection census
+    // family). A sort on the group keys themselves is an ordered-stream
+    // consumer (GatherMerge class, uncovered in bootstrap). SE-DECOROOT
+    // (CAR 1, knob-gated): the residual decorated-root shapes — ORDER BY
+    // over group keys and/or class-vocabulary aggregates, multi-key
+    // sorts, sorts without LIMIT, and LIMIT+OFFSET forms — key the
+    // UNDERLYING grouped class; the arm emits the full grouped output and
+    // the serial Sort/Limit above consumes it (the exprkey-Reduced /
+    // CbGroupedAggTopN / AGG_BARELIMIT precedent). Fail-closed: no
+    // count(DISTINCT) (distinct-sink decoration owns its own topn
+    // composition only), no const/mk-family keys (their knob paths keep
+    // their own proven compositions), at most one text key,
+    // enable_hashagg required ON (with it off the suppressed serial plan
+    // is a sorted-agg shape the walk refuses).
     let mut mk_freeze = false;
     let mut bare_limit = false;
     let mut full_sort = false;
@@ -1739,7 +1801,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         // The sort key rides the same class-dependent vocabulary as the
         // passengers (se-aggpoly): a distinct-class sort key outside the
         // sink vocab would key a shape the sink refuses.
-        if !is_whitelisted_agg(tle.expr, rti, passenger_list)
+        if !is_whitelisted_agg(tle.expr, rti, sortkey_list)
             && !is_count_distinct_int(tle.expr, rti)
         {
             // SE-DECOROOT: the single-sort-key+LIMIT shape whose key is a
@@ -1779,7 +1841,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         let Some(tle) = tle_by_sortgroupref(parse, sc.tleSortGroupRef) else {
             return Ok(false);
         };
-        if !is_whitelisted_agg(tle.expr, rti, passenger_list)
+        if !is_whitelisted_agg(tle.expr, rti, sortkey_list)
             && !is_count_distinct_int(tle.expr, rti)
         {
             // conversion-flips composition: this arm owns AGG sort keys
@@ -1823,6 +1885,23 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     } else {
         return Ok(false);
     };
+
+    // GROUPED-AVG fail-closed compositions: the widened avg-of-int
+    // passengers are proven for the plain grouped emit and the agg-sort
+    // top-N winner selection only (the engagement witnesses of record).
+    // The freeze/bare-LIMIT drains, the no-limit sort, const keys, text
+    // min/max passengers, and the two-key-text family never carried the
+    // widened vocabulary — keep today's refusal there.
+    if n_avg_widened > 0
+        && (mk_freeze
+            || bare_limit
+            || full_sort
+            || n_strminmax > 0
+            || n_const > 0
+            || mk_text_family)
+    {
+        return Ok(false);
+    }
 
     // groupby_high hold (§10): estimate the group cardinality off the
     // processed group clause; at or above the floor the class routes
@@ -2011,6 +2090,24 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             run,
             "barelimit",
             "barelimit-grouped-agg",
+            class_guard(class),
+            rte.relid,
+            ngroups,
+            rel_rows,
+            rel_pages,
+        );
+    }
+    // GROUPED-AVG knob-path finish: shapes admitted ONLY by the widened
+    // avg-of-int passenger vocabulary route through the dedicated finish
+    // (own trace prefix; NOT a BOOTSTRAP_MATRIX re-class — tsv/route_to
+    // and the DEFAULT census untouched), carrying the guard of the class
+    // the shape otherwise classifies as (the widening changes the
+    // passenger vocabulary, not the shape's economics).
+    if n_avg_widened > 0 {
+        return finish_knob_path(
+            run,
+            "groupedavg",
+            if topn { "avgint-grouped-topn" } else { "avgint-grouped-agg" },
             class_guard(class),
             rte.relid,
             ngroups,
@@ -5087,6 +5184,28 @@ mod tests {
     #[test]
     fn tier2_plaindistinct_engine_coherence_defaults_live() {
         assert!(plaindistinct_engine_live());
+    }
+
+    /// GROUPED-AVG widening: the widened list is EXACTLY the base list plus
+    /// avg(int2)/avg(int4) — the two OIDs whose grouped-sink combine class
+    /// (the {count,sum} transarray pair) is admitted unconditionally by the
+    /// sink's combine resolution. The INTERNAL-transtype avg/sum family
+    /// stays out (named follow-up), and the BASE list stays avg-free (the
+    /// default census is byte-identical knob-OFF).
+    #[test]
+    fn grouped_avg_widening_is_exactly_two_oids() {
+        assert!(!GROUPED_SINK_AGGS.contains(&F_AVG_INT4));
+        assert!(!GROUPED_SINK_AGGS.contains(&F_AVG_INT2));
+        assert!(GROUPED_SINK_AGGS_AVG.contains(&F_AVG_INT4));
+        assert!(GROUPED_SINK_AGGS_AVG.contains(&F_AVG_INT2));
+        assert!(!GROUPED_SINK_AGGS_AVG.contains(&F_AVG_INT8), "INTERNAL transtype stays out");
+        assert!(!GROUPED_SINK_AGGS_AVG.contains(&F_SUM_INT8), "INTERNAL transtype stays out");
+        assert_eq!(GROUPED_SINK_AGGS_AVG.len(), GROUPED_SINK_AGGS.len() + 2);
+        for oid in GROUPED_SINK_AGGS {
+            assert!(GROUPED_SINK_AGGS_AVG.contains(oid), "widening is a superset");
+        }
+        // The knob rides the default-OFF spelling helper (pinned above):
+        // unset/typos fail safe to the base list.
     }
 
     /// SE-T2AGG CAR B: the min/max(text) OIDs of record (vendored REL 18.3
