@@ -3639,13 +3639,85 @@ fn agg_locality_canon_enabled() -> bool {
     })
 }
 
+/// CAP-BAND v2 (GL-RADIX-2, the D2-completion increment): est+collapse
+/// adaptive locality bands, replacing the v1 NDV-only rule where armed.
+/// Two GL-RADIX-1-measured defects of the v1 curve on the plain word-key
+/// class:
+///   * the (64K, 2M) est band paid 1.6-3.4x vs NO cap at high collapse
+///     ratios (100M-scale α = rows/groups ≥ 100): the 64K table holds a
+///     few percent of the key space, so its fill-window statistic never
+///     sees the global fold potential — an UNCAPPED table folds every
+///     repeat in place (one probe per row) while the capped build pays
+///     probe + flush + a full combine re-pass over ~every row. The α-gate
+///     cannot adjudicate this (it only demotes, is anchored off at
+///     dop ≤ 16, and its window-α is blind to out-of-table repeats), so
+///     the band rule reads the PLANNER's α estimate instead: est under
+///     the WIDE floor with α_est at/above [`agg_capband_alpha_min`]
+///     drops the locality bound entirely (the budget cap still applies;
+///     the spill/pressure machinery still bounds estimate misses). Low-α
+///     small-scale points (α ≈ 10 at 10M rows measured the cap WINNING
+///     ~10%) keep the incumbent 64K — the α_min default (16) splits the
+///     measured cells.
+///   * the [2M, 12M) WIDE band's 1M constant lost to 256K by 7-10% at the
+///     1e7-class point on the same-pod hybrid head-to-head (GL-RADIX-1
+///     decision job; with seal-flush ON the residual cap sensitivity is
+///     small, but 256K is the measured band winner and its per-worker
+///     table is SLC-friendlier at width) — v2 moves the band constant to
+///     [`SINK_LOCALITY_CAP_MID`].
+/// est ≥ 12M keeps 64K verbatim (the q16-class banked evidence).
+/// DEFAULT OFF — armed iff `PGRUST_RUNTIME_AGG_CAP_BAND_V2` is `1`/`on`;
+/// the GL-RADIX-2 ladder owns the flip. An explicit LOCALITY_CAP=N stays
+/// authoritative over both curves; LOCALITY_NDV=0 keeps its meaning
+/// (v1 flat-64K) when v2 is unarmed.
+fn agg_capband_v2_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&ON, || {
+        matches!(std::env::var("PGRUST_RUNTIME_AGG_CAP_BAND_V2").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
+/// v2 collapse-ratio floor for dropping the cap under the WIDE band
+/// (`PGRUST_RUNTIME_AGG_CAP_BAND_ALPHA`, default 16): α_est =
+/// plan rows / plan groups. 10M-scale cells measured the cap winning at
+/// α = 10 and losing 1.6-3.4x at α ≥ 100; 16 splits the evidence with
+/// margin on the regression side (a wrong uncap is bounded by the budget
+/// cap + pressure/spill machinery; a wrong cap is the multi-x misroute).
+fn agg_capband_alpha_min() -> u64 {
+    static N: OnceLock<u64> = OnceLock::new();
+    crate::once_val(&N, || {
+        std::env::var("PGRUST_RUNTIME_AGG_CAP_BAND_ALPHA")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|&a| a >= 1)
+            .unwrap_or(16)
+    })
+}
+
+/// v2 mid-band ([2M, 12M) est) locality cap — see [`agg_capband_v2_enabled`].
+const SINK_LOCALITY_CAP_MID: u32 = 1 << 18;
+
 /// Resolve the engaged locality bound for this shape's plan-estimated group
-/// count. `None` = no locality bound (kill switch).
-fn sink_locality_cap_for(est_groups: u64) -> Option<u32> {
+/// count (+ the scan's estimated rows — the v2 curve's collapse term).
+/// `None` = no locality bound (kill switch / v2 high-α band).
+fn sink_locality_cap_for(est_groups: u64, est_rows: u64) -> Option<u32> {
     match sink_locality_cap() {
         LocalityCap::Off => None,
         LocalityCap::Fixed(c) => Some(c),
         LocalityCap::Default => {
+            if agg_capband_v2_enabled() {
+                let alpha_est = est_rows / est_groups.max(1);
+                return if est_groups >= 12_000_000 {
+                    Some(SINK_LOCALITY_CAP_DEFAULT)
+                } else if est_groups >= 2_000_000 {
+                    Some(SINK_LOCALITY_CAP_MID)
+                } else if alpha_est >= agg_capband_alpha_min() {
+                    // High-collapse sub-WIDE band: uncapped (budget bound
+                    // only) — the GL-RADIX-1 side-finding cells.
+                    None
+                } else {
+                    Some(SINK_LOCALITY_CAP_DEFAULT)
+                };
+            }
             if agg_locality_ndv_enabled() && (2_000_000..12_000_000).contains(&est_groups) {
                 Some(SINK_LOCALITY_CAP_WIDE)
             } else {
@@ -4014,6 +4086,7 @@ impl SharedAggFace {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sink_cap_engaged(
     state_bytes: usize,
     budget: usize,
@@ -4021,6 +4094,7 @@ fn sink_cap_engaged(
     dop: i32,
     word_keyed: bool,
     est_groups: u64,
+    est_rows: u64,
 ) -> u32 {
     let base = sink_cap_for(state_bytes, budget, ngroups_limit);
     // An explicit fixed-cap override (PGRUST_RUNTIME_AGG_CAP) is the A/B
@@ -4028,7 +4102,7 @@ fn sink_cap_engaged(
     if sink_cap_override().is_some() || dop <= 1 || !word_keyed {
         return base;
     }
-    match sink_locality_cap_for(est_groups) {
+    match sink_locality_cap_for(est_groups, est_rows) {
         Some(l) => {
             let mut l = l;
             let anchor = agg_dopcap_anchor();
@@ -4515,6 +4589,16 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     // same leader estimate the compact layout law reads; the adaptive bands
     // in [`sink_locality_cap_for`] were calibrated on this figure).
     let est_groups = agg.plan.numGroups.max(1) as u64;
+    // The scan's estimated rows — the cap-band v2 curve's collapse term
+    // (α_est = est_rows / est_groups; [`agg_capband_v2_enabled`]). The
+    // same planner figure the m5 FloorGuards read for this shape.
+    let est_rows = agg
+        .plan
+        .plan
+        .lefttree
+        .and_then(Node::as_plan)
+        .map(|p| p.plan_rows.max(0.0) as u64)
+        .unwrap_or(0);
     // GL-STRMM-2 flip calibration, EXECUTOR half (knob-coherence law: same
     // spelling + same constant as the m5 probe's `strminmax_max_groups`):
     // string-min/max transvalues (byref text states, deep-copy emit) make
@@ -4532,10 +4616,28 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
         return Ok(false);
     }
-    let sink_cap =
-        sink_cap_engaged(state_bytes, budget, ngroups_limit, dop, cap_shape_ok, est_groups);
+    let sink_cap = sink_cap_engaged(
+        state_bytes,
+        budget,
+        ngroups_limit,
+        dop,
+        cap_shape_ok,
+        est_groups,
+        est_rows,
+    );
     if sink_cap < sink_cap_for(state_bytes, budget, ngroups_limit) {
         lane_trace(&format!("runtime-agg: locality cap engaged (cap={sink_cap})"));
+    } else if agg_capband_v2_enabled()
+        && cap_shape_ok
+        && dop > 1
+        && sink_cap_override().is_none()
+    {
+        // v2 high-α uncap witness (the band's engagement trace — the
+        // GL-RADIX-2 ladder greps it; low-α / high-est shapes fall in the
+        // branch above with their band cap in the line).
+        lane_trace(&format!(
+            "runtime-agg: cap-band v2 uncapped (est_groups={est_groups} est_rows={est_rows})"
+        ));
     }
     if !::nodeagg::agg_hash_compact_sink_admissible(agg, sink_cap, spill_admission) {
         refuse(estate, ea, node_id, "worker compact arm would refuse under the sink cap/budget");

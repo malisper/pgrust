@@ -1685,6 +1685,20 @@ fn is_distinct_arg_int_kind(typ: u32) -> bool {
 /// 10M-group class) still loses in the runtime combine until the exchange program
 /// lands — so the boundary moves to 4e6 (above the measured-winning ≈3e6
 /// band, below the known-losing 1e7), NOT to unbounded.
+/// GL-RADIX-2 dop-lift knob — see the hold site. DEFAULT OFF; armed iff
+/// exactly `1`/`on`. The flip rides the GL-RADIX-2 letter with the
+/// cap-band-v2 executor knob (knob-coherence: the lift only holds its bar
+/// with v2's band curve engaged on the executor side).
+fn groupby_high_doplift_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("PGRUST_M5_GROUPBY_HIGH_DOPLIFT").as_deref(),
+            Ok("1") | Ok("on")
+        )
+    })
+}
+
 fn groupby_high_floor() -> f64 {
     static FLOOR: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
     *FLOOR.get_or_init(|| {
@@ -2652,6 +2666,30 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     // the knob path carries its OWN provisional ceiling instead of the §10
     // hold; everything else keeps the hold byte-for-byte.
     let over_groupby_high = ngroups >= groupby_high_floor();
+    // GL-RADIX-2 DOP-LIFT (default OFF, armed iff
+    // PGRUST_M5_GROUPBY_HIGH_DOPLIFT=1|on): lift the §10 hold for the BARE
+    // int-key grouped-agg class only, at dop >= 12 — the band where the
+    // runtime sink's seal-flush + cap-band-v2 combine measured same-pod
+    // parity with the radix-exchange arm (GL-RADIX-1 decision job; the
+    // GL-RADIX-2 letter owns the flip). Every other composition (text /
+    // mk-text / count-distinct / strminmax / const-key / topn / sort /
+    // limit / freeze / decorated) and every dop < 12 session keeps the
+    // hold byte-for-byte — the radix-exchange arm still wins those cells
+    // (its participating leader is a structural +1 scan thread the pool
+    // arm does not field at low width).
+    let over_groupby_high = over_groupby_high
+        && !(groupby_high_doplift_enabled()
+            && guc_tables::runtime_pool::runtime_dop() >= 12
+            && !topn
+            && !full_sort
+            && !bare_limit
+            && !decorated
+            && !mk_freeze
+            && !mk_text_family
+            && n_text == 0
+            && n_count_distinct == 0
+            && n_strminmax == 0
+            && n_const == 0);
     // TOPN-HIGHGROUPS exemption: the bounded winner-selection composition
     // only, admitted iff the sink's combine-phase top-N provably arms —
     // sort key in the finalfn-free int8-transvalue set, a small Const
