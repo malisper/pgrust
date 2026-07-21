@@ -52,20 +52,19 @@
 //! (the R5 whole-attempt-rerun discipline; nothing was emitted). The two
 //! sort phases carry their own per-participant budgets (design §7).
 //!
-//! Engagement layering (absent = today's path, byte-identical):
+//! Engagement layering (unarmed = today's path, byte-identical):
 //! PGRUST_RUNTIME=1 + the sort arm's DOP source (this car's engagements
 //! ARE sort engagements — `router::arm_dop(ArmClass::Sort)`, so the bench
 //! GUC `pgrust.runtime_sort_pool` and engine=runtime both arm it) + the
-//! car's own kill `PGRUST_RUNTIME_MJSORT` (DEFAULT OFF, ON iff exactly
-//! `1`/`on` — the t35 exact-spelling law). Instrumented runs refuse
-//! (EXPLAIN ANALYZE stays C-exact); EXPLAIN shape unchanged.
+//! car's kill `PGRUST_RUNTIME_MJSORT` (DEFAULT ON since the GL-MJSORT-1
+//! flip; OFF iff exactly `0`/`off` — the flipped-kill exact-spelling
+//! law; provenance + named debts at the knob below). Instrumented runs
+//! refuse (EXPLAIN ANALYZE stays C-exact); EXPLAIN shape unchanged.
 //!
-//! NOT a BOOTSTRAP_MATRIX class: the coverage row keeps route_to=legacy
-//! until the GL-MJSORT fleet letter flips it. Named debts (inc-1):
-//! the two sort phases run sequentially (no overlap); the merge RG rides
-//! the sort arm's DOP rather than its own router class; jointype INNER
-//! only; int-family keys only (dictcode text keys refuse with the
-//! full-sort spec).
+//! Coverage: matrix row mergejoin-int-columnar-sorts (covered/runtime,
+//! probe_key "-" — no Gather competes on this shape, so there is nothing
+//! to suppress at plan time and no BOOTSTRAP_MATRIX class is minted; the
+//! umbrella row merge-join-parallel keeps the honestly-named remainder).
 
 use std::cell::UnsafeCell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -89,11 +88,28 @@ use crate::procnode::{MergeJoinNode, PlanStateNode};
 /// precedent — partition-count-agnostic content, tested in mjmerge).
 const MJSORT_PARTS: usize = 256;
 
-/// `PGRUST_RUNTIME_MJSORT` (DEFAULT OFF; ON iff exactly `1`/`on` — the
-/// t35 exact-spelling law for default-OFF cars). 0 = unresolved, 1 = OFF,
-/// 2 = ON — the AtomicU8 same-process A/B idiom (lane_mergejoin.rs).
+/// `PGRUST_RUNTIME_MJSORT` — **DEFAULT ON since the GL-MJSORT-1 flip**
+/// (letter: scratchpad/night/fleet-ab-parallelism.md @ measured sha
+/// df9301f2f; DOP ladder ALL GATES PASS every cell witnessed+parity —
+/// uniq 7.6-9.9x / dup 13.1-14.7x / two_key 17.6-25.8x vs serial at dop
+/// {4,8,16}; 43q flatness pair 0.9992 damped geomean with the knob OFF).
+/// Flipped-kill, t35 exact-spelling law: OFF iff exactly `0`/`off`;
+/// every other spelling (including unset) is ON. 0 = unresolved, 1 =
+/// OFF, 2 = ON — the AtomicU8 same-process A/B idiom (lane_mergejoin.rs).
 /// Env-var, not GUC, per the standing `pg_settings` byte-identity
 /// discipline.
+///
+/// Named debts carried across the flip (the letter's pre-flip list,
+/// resolved as flip-time-acceptable — engagement still requires the sort
+/// arm's DOP source to arm, so default sessions are unaffected until the
+/// router arms):
+///   * the two sort phases run sequentially (no overlap) — inc-2;
+///   * DOP source borrowed from the sort arm (`ArmClass::Sort`), no own
+///     router class/floor yet;
+///   * INNER + int-family keys only (the admitted shape; everything else
+///     refuses by name to the serial FSM);
+///   * leader-side adopted-pair emit is the serial residual (the
+///     saturation ceiling at high DOP) — batched emit is the inc-2 lever.
 static MJSORT: AtomicU8 = AtomicU8::new(0);
 
 #[inline]
@@ -105,12 +121,36 @@ pub(super) fn mjsort_enabled() -> bool {
     }
 }
 
+/// The flipped-kill spelling law, isolated for the unit pins: ON unless
+/// EXACTLY `0`/`off` (GL-MJSORT-1 flip; the t35 exact-spelling idiom).
+#[inline]
+fn mjsort_spelling_on(v: Option<&str>) -> bool {
+    !matches!(v, Some("0") | Some("off"))
+}
+
 #[cold]
 #[inline(never)]
 fn mjsort_resolve() -> bool {
-    let on = matches!(std::env::var("PGRUST_RUNTIME_MJSORT").as_deref(), Ok("1") | Ok("on"));
+    let on = mjsort_spelling_on(std::env::var("PGRUST_RUNTIME_MJSORT").ok().as_deref());
     MJSORT.store(if on { 2 } else { 1 }, Ordering::Relaxed);
     on
+}
+
+#[cfg(test)]
+mod knob_tests {
+    use super::mjsort_spelling_on;
+
+    /// GL-MJSORT-1 flip posture: DEFAULT ON, kill iff exactly `0`/`off`
+    /// (the flipped-kill exact-spelling law).
+    #[test]
+    fn mjsort_flipped_kill_spelling() {
+        assert!(mjsort_spelling_on(None), "unset must be ON (flipped default)");
+        for v in ["1", "on", "", "true", "ON", "OFF", "yes"] {
+            assert!(mjsort_spelling_on(Some(v)), "spelling {v:?} must stay ON");
+        }
+        assert!(!mjsort_spelling_on(Some("0")));
+        assert!(!mjsort_spelling_on(Some("off")));
+    }
 }
 
 /// The adopted result living on the MergeJoinNode: both sides' sealed
