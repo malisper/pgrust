@@ -89,7 +89,7 @@ use std::sync::Arc;
 use crate::clock::Clock;
 use crate::ledger::{AdmissionLedger, ClaimVerdict, LedgerBudgets, WidthRequest};
 use crate::morsel::MorselRange;
-use crate::rg::{QuerySpec, ResourceGroup, RgClass, RgOutcome};
+use crate::rg::{BoundDescriptor, BoundServe, QuerySpec, ResourceGroup, RgClass, RgOutcome};
 use crate::sizing::{SizingDecision, SizingParams, TaskSizer};
 use crate::stats::{RuntimeStats, RuntimeStatsSnapshot};
 use crate::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -426,6 +426,13 @@ pub struct WorkerLocal {
     /// pinned RG. Revalidated by one slot-word read per step; the membership
     /// lock is touched only when it goes stale (publish/finalize events).
     pinned_slot: Option<(usize, u64)>,
+    /// M2 inc-2 bound-engagement skip cache: per slot, the exact slot WORD
+    /// this worker will not serve again (its serve returned Refused/Closed
+    /// for that publication). The pick passes over a slot whose current
+    /// word still matches — a republish/invalidation (word change)
+    /// self-clears the entry. Purely a scheduling preference: a stale skip
+    /// only delays this worker's next serve attempt, never execution safety.
+    bound_skip: Vec<Option<u64>>,
     /// STILL INERT after M5-4 (decision recorded): the ratified §5.3 shape
     /// is per-SLOT pass/stride ("each slot gets a stride/pass"), which M5-4
     /// activated on [`crate::taskset::Slot`] directly — at task cadence
@@ -776,6 +783,7 @@ impl Scheduler {
             },
             stat: (0..self.slots.len()).map(|_| None).collect(),
             pinned_slot: None,
+            bound_skip: (0..self.slots.len()).map(|_| None).collect(),
             local_pass: 0,
             global_pass: 0,
             session_token: 0,
@@ -797,6 +805,7 @@ impl Scheduler {
             },
             stat: (0..self.slots.len()).map(|_| None).collect(),
             pinned_slot: None,
+            bound_skip: (0..self.slots.len()).map(|_| None).collect(),
             local_pass: 0,
             global_pass: 0,
             session_token: 0,
@@ -934,14 +943,26 @@ impl Scheduler {
         class: RgClass,
         session_token: u64,
         width: Option<WidthRequest>,
+        bound: Option<BoundDescriptor>,
     ) -> Arc<ResourceGroup> {
         assert!(
             !(pinned && class == RgClass::Maintenance),
             "maintenance RGs are pool-executed, never pinned"
         );
+        assert!(
+            bound.is_none() || pinned,
+            "bound-engagement descriptors ride PINNED submissions only"
+        );
         let rg_id = self.next_rg_id.fetch_add(1, Ordering::SeqCst) + 1;
-        let rg =
-            ResourceGroup::new(rg_id, spec, pinned, class, session_token, Arc::downgrade(self));
+        let rg = ResourceGroup::new(
+            rg_id,
+            spec,
+            pinned,
+            class,
+            session_token,
+            Arc::downgrade(self),
+            bound,
+        );
         rg.submit_ns.store(self.clock.now_ns().max(1), Ordering::Relaxed);
         RuntimeStats::tick(&self.stats.rgs_submitted);
         if self.trace {
@@ -1128,6 +1149,7 @@ impl Scheduler {
             ));
         }
         let pinned = ts.rg.pinned;
+        let bound = ts.rg.bound.is_some();
         let class = ts.rg.class;
         // Stride inputs (M5-4), refreshed at every publish: the slot's
         // stride derives from the RG's CURRENT priority (constant p_0 at
@@ -1159,8 +1181,13 @@ impl Scheduler {
             !self.ledger_on.load(Ordering::Relaxed) || self.ledger.advertises(slot);
         // Pinned RGs are invisible to the pool's pick: only external
         // participants (drive_pinned) may execute them — pool workers have
-        // no session binding for the query (M1; §2.3 retires this in M2+).
-        if !pinned && advert {
+        // no session binding for the query (M1). M2 inc-2: a pinned RG
+        // CARRYING a bound-engagement descriptor is the exception — the
+        // descriptor IS the bindability proof, so publication sets the
+        // active bit and pool workers claim engagements through its serve
+        // (never morsels directly: worker_step's gate dispatches on
+        // rg.bound before run_task can see the task set).
+        if (!pinned || bound) && advert {
             self.set_active(slot, class);
         }
         RuntimeStats::tick(&self.stats.tasksets_published);
@@ -1224,17 +1251,27 @@ impl Scheduler {
             if slot >= self.slots.len() {
                 return None;
             }
+            if self.bound_skipped(local, slot) {
+                return None;
+            }
             if ledger_on && !self.ledger.wants_workers(slot) {
                 return None;
             }
             return Some(slot);
         }
         if !self.stride.load(Ordering::Relaxed) {
-            // Kill switch (PGRUST_RUNTIME_STRIDE=0): the M0 FIFO pick.
+            // Kill switch (PGRUST_RUNTIME_STRIDE=0): the M0 FIFO pick
+            // (lowest active index this worker has not bound-skipped).
             for (i, mask) in [m0, m1].into_iter().enumerate() {
-                if mask != 0 {
-                    let slot = i * 64 + mask.trailing_zeros() as usize;
-                    if slot < self.slots.len() {
+                let mut w = mask;
+                while w != 0 {
+                    let b = w.trailing_zeros() as usize;
+                    w &= w - 1;
+                    let slot = i * 64 + b;
+                    if slot >= self.slots.len() {
+                        break;
+                    }
+                    if !self.bound_skipped(local, slot) {
                         return Some(slot);
                     }
                 }
@@ -1263,6 +1300,9 @@ impl Scheduler {
                 // it never duplicates pass accounting). Advisory like every
                 // pick input: a stale hit resolves through try_join into
                 // Retry.
+                if self.bound_skipped(local, slot) {
+                    continue;
+                }
                 if ledger_on && !self.ledger.wants_workers(slot) {
                     continue;
                 }
@@ -1331,14 +1371,91 @@ impl Scheduler {
         // Protocol step 1: publish-target-before-claim.
         self.pins.publish(local.worker, slot);
 
-        let step = match self.resolve(local, slot) {
-            None => Step::Retry,
-            Some(ts) => self.run_task_admitted(local, &ts),
-        };
+        match self.resolve(local, slot) {
+            None => {
+                // Protocol step 4: settle own pin; pay any marker debt.
+                self.settle(local.worker);
+                Step::Retry
+            }
+            // M2 inc-2 bindability gate: a bound-descriptor RG is never
+            // task-claimed by a pool worker — one ENGAGEMENT is served
+            // through the descriptor instead (bind → external-lane drive →
+            // unbind). Checked on the post-publish resolve, so a slot that
+            // rolled to a bound RG between pick and revalidation can never
+            // leak into run_task (an unbound morsel execution would error).
+            // The pin is settled BEFORE the serve (inside serve_bound; the
+            // serve's drive completes this very RG, and finalization waits
+            // on every marked pin — holding our pool-lane pin across the
+            // serve would deadlock the drive against our own settle).
+            Some(ts) if ts.rg.bound.is_some() => self.serve_bound(local, &ts),
+            Some(ts) => {
+                let step = self.run_task_admitted(local, &ts);
+                // Protocol step 4: settle own pin; pay any marker debt.
+                self.settle(local.worker);
+                step
+            }
+        }
+    }
 
-        // Protocol step 4: settle own pin; pay any marker debt.
+    /// M2 inc-2: serve one bound engagement on this pool worker (see
+    /// [`BoundDescriptor`]). The serve nests a WHOLE pinned drive with its
+    /// own permit rhythm, so the step's permit is given up around the call
+    /// — worker_step is entered with the permit held (both pool-loop
+    /// generations) and must return holding it. An unwind out of the serve
+    /// is exit-committed (FATAL: the thread is dying and the pool glue owns
+    /// drain + respawn); the permit then deliberately stays released — the
+    /// pool loop's unwind path releases nothing, so accounting balances.
+    ///
+    /// The caller's published pin is settled HERE, before the serve (see
+    /// worker_step); the settle-exactly-once contract (PinBoard's
+    /// settle-without-publish assert) is why this branch owns it.
+    fn serve_bound(&self, local: &mut WorkerLocal, ts: &Arc<TaskSetRt>) -> Step {
         self.settle(local.worker);
-        step
+        let Some(bd) = ts.rg.bound.clone() else {
+            return Step::Retry; // unreachable (caller gated); fail closed
+        };
+        // Keep the io-layer permit flag ACCURATE across the serve: the
+        // pool loop noted the permit held, but we are about to give it up —
+        // a stale `true` would let a connect-phase uring wait inside the
+        // serve donate a permit this thread no longer holds (count
+        // inflation). With the flag false, the serve's I/O blocks plainly —
+        // exactly a gang/launched external drive's posture. (The spill
+        // facade is unaffected and stays armed: its sections run only
+        // inside task bodies, where the nested drive holds a real permit.)
+        #[cfg(not(loom))]
+        crate::io::note_permit(false);
+        self.permits.release();
+        let served = (bd.serve)(&bd.payload);
+        self.permits.acquire();
+        #[cfg(not(loom))]
+        crate::io::note_permit(true);
+        match served {
+            BoundServe::Served => {
+                RuntimeStats::tick(&self.stats.bound_serves);
+                Step::Ran
+            }
+            BoundServe::Refused | BoundServe::Closed => {
+                // This worker will not serve THIS publication again
+                // (identity/db refusal, closed board, participant cap):
+                // remember the slot WORD so the pick skips the slot until
+                // it changes — Idle parks stay reachable and the refusing
+                // worker cannot spin on the board.
+                local.bound_skip[ts.slot] = Some((ts.seq << 1) | 1);
+                RuntimeStats::tick(&self.stats.bound_skips);
+                Step::Retry
+            }
+        }
+    }
+
+    /// M2 inc-2: true ⇔ this worker bound-skips `slot` at its CURRENT word
+    /// (see [`WorkerLocal::bound_skip`]). One branch when the cache entry is
+    /// empty — the every-pick cost on unbound workloads.
+    #[inline]
+    fn bound_skipped(&self, local: &WorkerLocal, slot: usize) -> bool {
+        match local.bound_skip.get(slot).copied().flatten() {
+            Some(word) => self.slots[slot].word.load(Ordering::SeqCst) == word,
+            None => false,
+        }
     }
 
     /// [`Scheduler::run_task`] wrapped in the WS-B ledger's join/leave
