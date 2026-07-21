@@ -2322,6 +2322,27 @@ pub(super) fn exprs_parallel_safe<'mcx>(nodes: impl Iterator<Item = Node<'mcx>>)
 
 /// Env floor for engagement (granules): below it the serial fold wins
 /// outright and launching helpers is pure overhead.
+/// META-BAND arm knob (GL-SERIALTERM-META-2; DEFAULT OFF pending the flip
+/// letter — `1|on` arms). Layered under the serial fold-meta arm's own
+/// kill by construction: the band probes `plain_fold_meta_arm`, which is
+/// None under PGRUST_LANE_V2_FOLDMETA=0 — killing the serial arm stands
+/// the band down with it (suppress-then-slow structurally excluded).
+fn meta_band_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&ON, || {
+        matches!(
+            std::env::var("PGRUST_RUNTIME_SCAN_META_BAND").as_deref(),
+            Ok("1") | Ok("on")
+        )
+    })
+}
+
+/// The witnessed fast posture is ALL units answering at the meta tier
+/// (the grid cells' quals are AllPass on every RG); a Mixed-heavy part
+/// decodes its Mixed units serially and the flat-wall prediction breaks
+/// — the band demands near-total coverage, failing toward the arm.
+const META_BAND_MIN_ALLPASS: f64 = 0.999;
+
 pub(super) fn min_granules() -> u64 {
     static N: OnceLock<u64> = OnceLock::new();
     crate::once_val(&N, || {
@@ -2638,6 +2659,39 @@ pub(super) fn try_own_plain_agg_runtime<'mcx>(
     }
     if ::nodeagg::agg_is_done(agg) {
         return Ok(Some(None));
+    }
+    // META BAND (GL-SERIALTERM-META-2; the serial-cost-term enforce
+    // template): when the SERIAL fold-meta arm would own this shape from
+    // footer metadata alone — the exact serial admission probed via
+    // `plain_fold_meta_arm` (pure, borrow-only: pgrcolumnar + foldmeta
+    // live + MVCC + classified fold plan + footer-answerable transitions
+    // + the whole qual zone-owned) — AND the part's RG census says
+    // ~every unit answers at the whole-RG tier (wholly visible, every
+    // pushed zone qual AllPass over RG extremes, sums present where the
+    // fold needs them), the serial wall is ~flat in N (the witnessed
+    // grid: 0.9-1.1ms at 10M vs the engaged arm's 8-26ms) and the arm
+    // refuses. Guards fail toward the arm: any Mixed-heavy / non-owned /
+    // non-answerable posture keeps the shipped engagement; the census is
+    // one O(RGs) footer walk paid only after every shape gate and the
+    // granule floor (OLTP/tiny scans never reach it). Economics only —
+    // the serial arm re-proves every unit at drain time.
+    if !rowdrive
+        && !perrow
+        && !poly
+        && is_cb
+        && meta_band_enabled()
+        && super::plain_fold_meta_arm(agg, ss, estate)
+            .map(|arm| !arm.sum_cols.is_empty())
+            .map_or(false, |need_sums| {
+                match ::nodeseqscan::seq_scan_cb_zone_meta_census(ss, need_sums) {
+                    Ok(Some((allpass, total))) => {
+                        total > 0 && allpass as f64 / total as f64 >= META_BAND_MIN_ALLPASS
+                    }
+                    _ => false,
+                }
+            })
+    {
+        return ea_refused(estate, ea, node_id, "meta-band (footer answers; serial fold retained)");
     }
     if rowdrive {
         // Observability (e2e tranche; after the done-pull early-return so

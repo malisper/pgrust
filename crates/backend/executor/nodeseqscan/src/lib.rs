@@ -4030,6 +4030,21 @@ pub fn seq_scan_cb_zone_topk_words(
     }
 }
 
+/// RG-altitude meta-answerability census over this scan's pushed zone
+/// quals (the GL-SERIALTERM-META qual-zone helper; semantics at
+/// pgrcolumnar::zone_meta_rg_census). None = heap / no descriptor / no
+/// columnar part. Economics signal only — the serial fold-meta arm
+/// re-proves every unit itself.
+pub fn seq_scan_cb_zone_meta_census(
+    node: &SeqScanState<'_>,
+    need_sums: bool,
+) -> PgResult<Option<(u64, u64)>> {
+    match node.ss.ss_currentScanDesc.as_ref() {
+        Some(sd) => ::tableam::table_scan_cb_zone_meta_census(sd, need_sums),
+        None => Ok(None),
+    }
+}
+
 // Plan-derived need-set + zone-mappable conjuncts for a pgrcolumnar scan.
 fn cb_scan_info<'mcx>(
     node: &SeqScan<'mcx>,

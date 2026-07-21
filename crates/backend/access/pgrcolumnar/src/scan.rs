@@ -1691,6 +1691,41 @@ impl<'mcx> CbScanDescData<'mcx> {
         Ok(Some((best, seed)))
     }
 
+    /// RG-altitude meta-answerability census over the PUSHED zone quals
+    /// (the GL-SERIALTERM-META qual-zone helper): (allpass_rgs, total_rgs)
+    /// where an RG counts iff it is wholly visible, every pushed zone qual
+    /// folds AllPass over its footer extremes, and (when `need_sums`) it
+    /// carries the v4 footer sums — EXACTLY `agg_meta_peek`'s whole-RG-tier
+    /// precondition, evaluated for the whole part in one footer walk
+    /// (O(RGs x quals); ~24B footer peeks, no payload). ECONOMICS SIGNAL
+    /// ONLY: callers use the fraction to predict the serial fold-meta
+    /// arm's flat wall; the serial arm re-proves every unit itself, so a
+    /// misprediction can only route, never corrupt. An empty pushed set
+    /// counts every visible RG (the no-qual meta posture). `None` = no
+    /// columnar part.
+    pub fn zone_meta_rg_census(&self, need_sums: bool) -> PgResult<Option<(u64, u64)>> {
+        let Some(part) = self.part.clone() else { return Ok(None) };
+        let mut allpass = 0u64;
+        let mut total = 0u64;
+        for rg in 0..part.rgs.len() {
+            total += 1;
+            if need_sums && part.rgs[rg].flags & RG_FLAG_SUMS == 0 {
+                continue;
+            }
+            if !self.rg_wholly_visible(rg)? {
+                continue;
+            }
+            let ok = self.zone_quals.iter().all(|q| {
+                let (_, min, max) = part.rgs[rg].chunks[(q.attnum - 1) as usize];
+                zone_verdict(q, min, max) == ZoneVerdict::AllPass
+            });
+            if ok {
+                allpass += 1;
+            }
+        }
+        Ok(Some((allpass, total)))
+    }
+
     /// Footer-stat aggregate metadata peek (the plain fold drive's meta
     /// arm): when the NEXT `next_window` call would decode a fresh scan
     /// unit, describe that unit from footer metadata alone — IF every
