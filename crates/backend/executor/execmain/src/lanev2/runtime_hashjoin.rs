@@ -240,14 +240,16 @@ fn hj_groupsink_enabled() -> bool {
 /// grouped table (fill-only — no first-row retrieve) and the serial
 /// Sort/Limit above consumes it off the filled table, exactly the scan-side
 /// sinks' standing under-Sort/Limit posture (runtime_distinct's "the Agg
-/// need not be the plan root" law). DEFAULT OFF; `PGRUST_LANE_V2_DECOROOT=
-/// 1|on` arms — the SAME spelling as the planner probe (knob coherence: a
-/// keyed decorated shape whose arm is disarmed would suppress Gather and
-/// land on the serial join build).
+/// need not be the plan root" law). DEFAULT ON (tpch-flips train,
+/// GL-DECOROOT-1 — see the planner twin's doc for the letter numbers);
+/// `PGRUST_LANE_V2_DECOROOT=0|off` is the kill switch — the SAME spelling
+/// as the planner probe (knob coherence: a keyed decorated shape whose arm
+/// is disarmed would suppress Gather and land on the serial join build;
+/// BOTH read sites flip together).
 fn hj_decoroot_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        matches!(std::env::var("PGRUST_LANE_V2_DECOROOT").as_deref(), Ok("1") | Ok("on"))
+        !matches!(std::env::var("PGRUST_LANE_V2_DECOROOT").as_deref(), Ok("0") | Ok("off"))
     })
 }
 
@@ -4874,7 +4876,8 @@ mod mb_tests {
     /// Same spelling as the planner probe (knob-coherence law).
     #[test]
     fn tpch_cars_executor_knobs_default_off() {
-        assert!(!hj_decoroot_enabled(), "PGRUST_LANE_V2_DECOROOT unset => OFF");
+        // tpch-flips: DECOROOT is DEFAULT ON (GL-DECOROOT-1; =0|off kills).
+        assert!(hj_decoroot_enabled(), "tpch-flips: unset => ON (GL-DECOROOT-1)");
         assert!(!hj_aggjoin_numeric_enabled(), "PGRUST_LANE_V2_AGGJOIN_NUMERIC unset => OFF");
         assert!(!hj_cbkeys_enabled(), "PGRUST_LANE_V2_CBKEYS unset => OFF");
         assert!(!hj_bpchar_keys_enabled(), "PGRUST_LANE_V2_CBKEYS_BPCHAR unset => OFF");

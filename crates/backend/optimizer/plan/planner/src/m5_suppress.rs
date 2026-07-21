@@ -675,12 +675,24 @@ fn knob_spelling_armed(v: Option<&str>) -> bool {
 /// into Sort/Limit nodes above the Agg), keying the UNDERLYING agg class;
 /// only when the child shape keys a covered grouped class and every sort
 /// key is a group-key ref or a class-vocabulary aggregate (fail-closed).
-/// DEFAULT OFF; `PGRUST_LANE_V2_DECOROOT=1|on` arms (GL-DECOROOT-1 fleet
-/// letter owns the default flip).
+///
+/// DEFAULT ON (tpch-flips train; GL-DECOROOT-1 FLIP-RECOMMENDED, campaign
+/// of record scratchpad/night/fleet-ab-parallelism.md 2026-07-21, rig
+/// snapshots fleet/tpchcars-ab..fleet/6car-ab): decorated grouped SCANS
+/// win 1.4-5.2x vs legacy Gather at dop {4,8,16} (d3/l300/l24/l16 ladder);
+/// decorated JOIN tops inherit the underlying default-ON aggjoin class's
+/// economics exactly (the rider adds ~nothing — that class's own dop-8/16
+/// 0.89x-vs-legacy trait pre-exists this car); the 16x hash-election
+/// margin VALIDATED (the 16-rows/group boundary still wins 1.37-3.48x; 12
+/// refuses by name); parity everywhere, default arm inert, ducktpch
+/// byte-stable, CB flat (single q8-class keying ~parity; the q39-43
+/// topn-offset upside is 100m-scale territory — the 10m bank margin
+/// correctly refuses). `PGRUST_LANE_V2_DECOROOT=0|off` is the kill switch
+/// (t35 exact-spelling law).
 fn decoroot_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        knob_spelling_armed(std::env::var("PGRUST_LANE_V2_DECOROOT").as_deref().ok())
+        knob_spelling_on(std::env::var("PGRUST_LANE_V2_DECOROOT").as_deref().ok())
     })
 }
 
@@ -4825,9 +4837,10 @@ mod tests {
         assert!(!knob_spelling_armed(Some("ON")), "case-sensitive, like the arm knobs");
         assert!(knob_spelling_armed(Some("1")));
         assert!(knob_spelling_armed(Some("on")));
-        // The live getters memoize the process env; in the test binary the
-        // vars are unset, so both resolve OFF — the default-OFF invariant.
-        assert!(!decoroot_enabled(), "test process has no knob set => OFF");
+        // The live getters memoize the process env; unset in the test
+        // binary. DECOROOT is DEFAULT ON since the tpch-flips train
+        // (GL-DECOROOT-1; =0|off kills — the flipped-kill idiom).
+        assert!(decoroot_enabled(), "tpch-flips: unset => ON (GL-DECOROOT-1)");
         assert!(!aggjoin_numeric_enabled(), "test process has no knob set => OFF");
     }
 
