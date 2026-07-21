@@ -4641,15 +4641,28 @@ fn classify_extract_exprkey<'mcx>(
 // timestamp-truncation computed group keys + OFFSET-into-bound composition.
 // ---------------------------------------------------------------------------
 
-/// EXPRKEY-TOPN knob (`PGRUST_LANE_V2_EXPRKEY_TOPN`): DEFAULT OFF, only
-/// `1`/`on` arm (the K1-latemat idiom). Suppression-only widening for two
-/// census families whose SERIAL-lane expr-key feed arms exist and engage
-/// today, refused only by the probe's bare-Var key discipline and the
-/// top-N composition's OFFSET refusal.
+/// EXPRKEY-TOPN knob (`PGRUST_LANE_V2_EXPRKEY_TOPN`): DEFAULT ON
+/// (open-rows flip train, GL-OPENROWS-EXPRKEY-TOPN — fleet letter
+/// 2026-07-21). Suppression-only widening for two census families whose
+/// SERIAL-lane expr-key feed arms exist and engage today, refused only by
+/// the probe's bare-Var key discipline and the top-N composition's OFFSET
+/// refusal. Letter evidence per class:
+/// * conditional-text-select (case-dict): wins BOTH scales — 5.0-5.1x at
+///   the mid-scale bank, 4.6x at the full-scale bank, beating the
+///   forced-vector ceiling there (jobs -0c51/-2e14, take-2 -66f5/-70ed);
+/// * ts-trunc: 9.5-12x at the mid-scale bank but a measured 2.3x
+///   REGRESSION at the full-scale bank — flips ONLY behind the
+///   provisional page fence below (`tstrunc_max_pages`), which take-2
+///   verified on the real bank (fenced shape = exact baseline wall, no
+///   suppression trace; the case class and the mid-scale wins untouched).
+///   NAMED FOLLOW-UP (the letter owns it): a THIRD SCALE POINT between
+///   the two measured banks to turn the single provisional bound into a
+///   curve — until then the fence errs toward keeping the exchange plan.
+/// `PGRUST_LANE_V2_EXPRKEY_TOPN=0|off` is the kill (flipped-kill idiom).
 fn exprkey_topn_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        tier2_car_spelling_on(std::env::var("PGRUST_LANE_V2_EXPRKEY_TOPN").as_deref().ok())
+        tier2_car_kill_spelling_on(std::env::var("PGRUST_LANE_V2_EXPRKEY_TOPN").as_deref().ok())
     })
 }
 
