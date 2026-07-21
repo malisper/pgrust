@@ -656,11 +656,22 @@ pub(crate) fn try_own_plain_agg_runtime_nl_index<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
     // Arming + kill-switch layering (all cheap; absent = today's path,
-    // zero ticks — the armed-but-dormant OLTP gate law).
-    let dop = runtime_nlindex_pool_dop();
+    // zero ticks — the armed-but-dormant OLTP gate law). GL-NLIDX-2: the
+    // dop resolves through the M5-1 router — bench pool option verbatim
+    // when SET (the FORCED posture), else engine=runtime + the arm's
+    // ENABLE switch at pgrust.runtime_dop (the ROUTED posture, fed by the
+    // planner's nlidx Gather suppression).
+    let dop = super::router::arm_dop(super::router::ArmClass::NlIndex);
     if dop <= 0 || !runtime::runtime_enabled() {
         return Ok(None);
     }
+    // FORCED vs ROUTED floors: the bench pool path keeps the outer-row
+    // floor (armed sessions must cheap-refuse OLTP-sized shapes); a routed
+    // shape was already priced by the planner's polarity guards + min_dop
+    // band — re-flooring it on post-qual outer rows would refuse exactly
+    // the census family (tiny post-qual driver, big scan) the route exists
+    // for. The block floor below governs both.
+    let forced = runtime_nlindex_pool_dop() > 0;
     let Some(rt) = runtime::global() else { return Ok(None) };
 
     // --- Plan shape (pointer chases only before the floor).
@@ -676,7 +687,8 @@ pub(crate) fn try_own_plain_agg_runtime_nl_index<'mcx>(
     // SIZE FLOOR FIRST (planner estimate of the driving side's rows — the
     // pre-scan signal this arm has): the refusal path stays pointer chases
     // only — no agg walks, no expression-safety walks before the floor.
-    if outer_plan.scan.plan.plan_rows < min_outer_rows() {
+    // FORCED posture only (see the dop derivation above).
+    if forced && outer_plan.scan.plan.plan_rows < min_outer_rows() {
         return refused("tiny-outer-floor", RefuseReason::TinyInputFloor);
     }
 

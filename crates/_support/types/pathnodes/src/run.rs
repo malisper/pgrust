@@ -160,6 +160,10 @@ pub struct PlannerRun<'mcx> {
     /// never suppresses subquery levels) and only under
     /// pgrust.parallel_engine=runtime, so legacy planning never writes it.
     pub m5_suppress_gather: Option<bool>,
+    /// NLIDX (GL-NLIDX-2) query-SHAPE memo — the rel-independent half of the
+    /// rel-aware nlidx suppression probe (the election check is per-rel and
+    /// never memoized here).
+    pub m5_nlidx_shape: Option<bool>,
     /// Per-planning-cycle attribute-statistics memo (replanfix2 T1):
     /// (relid, attnum, inh) -> arena-leaked decoded pg_statistic bundle
     /// (None = row absent, negative-memoized). Values are planner-crate
@@ -203,7 +207,7 @@ mcx::forget_safe_struct!(
         assess_parallel, suspended_roots, subroots, rel_subroots,
         minmax_subroots, active_windows, suspended_active_windows, qp_setop,
         rowmarks, gset_data, pending_part_prune_infos, cte_subpath_infos,
-        swapped_parent_subroot, m5_suppress_gather, att_stats_memo,
+        swapped_parent_subroot, m5_suppress_gather, m5_nlidx_shape, att_stats_memo,
         syscache_memos },
 );
 
@@ -229,6 +233,7 @@ impl<'mcx> PlannerRun<'mcx> {
             cte_subpath_infos: PgVec::new_in(mcx),
             swapped_parent_subroot: None,
             m5_suppress_gather: None,
+            m5_nlidx_shape: None,
             att_stats_memo: core::cell::RefCell::new(PgVec::new_in(mcx)),
             syscache_memos: core::cell::Cell::new(None),
         }

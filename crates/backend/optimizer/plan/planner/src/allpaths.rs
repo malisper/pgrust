@@ -1703,6 +1703,12 @@ pub(crate) fn generate_useful_gather_paths(
     if crate::m5_suppress::m5_suppress_gather(run)? {
         return Ok(());
     }
+    // NLIDX (GL-NLIDX-2, rel-aware): the final joinrel's serial election is
+    // itself the NL-inner-index shape the morsel arm engages — no Gather of
+    // any form; uncovered shapes and knob-OFF fall through unchanged.
+    if crate::m5_suppress::m5_suppress_gather_nlidx(run, rel)? {
+        return Ok(());
+    }
 
     generate_gather_paths(run, rel, override_rows)?;
 
