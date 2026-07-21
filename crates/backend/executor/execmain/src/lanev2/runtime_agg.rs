@@ -4239,10 +4239,13 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
             probe
         } {
             // Component gates: nullable images are heap-source-only; at most
-            // one Intern (text) component — merged on CANONICAL RAW BYTES
-            // (intern ids stay per-worker); Numeric packs are demote-SAFE
-            // (a mid-build pack failure maps to the budget-refusal rerun);
-            // text/numeric classes ride the text-car kill switch.
+            // TWO Intern (text) components — merged on CANONICAL RAW BYTES
+            // (intern ids stay per-worker; two tails ride the canonical
+            // multi-tail encoding — the unprojected two-text feed is the
+            // SE-MKTEXT knob path, `PGRUST_LANE_V2_MULTIKEY_TEXT`); Numeric
+            // packs are demote-SAFE (a mid-build pack failure maps to the
+            // budget-refusal rerun); text/numeric classes ride the text-car
+            // kill switches.
             if !mk_shape_sink_ok(&probe.shape) {
                 refuse(estate, ea, node_id, "mk component kind (text car gate)");
                 return Ok(false);

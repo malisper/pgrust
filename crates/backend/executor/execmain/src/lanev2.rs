@@ -5005,6 +5005,25 @@ fn multikey_enabled() -> bool {
     })
 }
 
+/// SE-MKTEXT (Lane-3 two-key text car): `PGRUST_LANE_V2_MULTIKEY_TEXT`,
+/// **default OFF** (`1`/`on` arm it; every other spelling fails safe — the
+/// K1-latemat idiom). Gates the UNPROJECTED scan feed's SECOND TextRaw key
+/// component (the ClickBench text+text `GROUP BY` census): the primary
+/// text rides the dict-group lane exactly as today, the second is opted in
+/// as an EXTRA dict-want column (`seq_scan_cb_dict_want_extra`, the
+/// band-2a CaseDict mechanism) and packs through the SAME per-(epoch,
+/// code) intern resolve — or the raw-answered-window fallback — into a
+/// two-Intern MkShape (the canonical multi-tail encoding, canon-sink car
+/// 1). OFF keeps today's one-text census byte-for-byte. Same spelling as
+/// the planner probe's keying (m5_suppress.rs — the AGG_POLY/GROUPSINK
+/// knob-coherence law).
+fn multikey_text2_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&ON, || {
+        matches!(std::env::var("PGRUST_LANE_V2_MULTIKEY_TEXT").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
 /// The plan-level half of the multi-key admission (the SoA/compact halves
 /// need the armed batch — `scan_mk_shape`): unguarded, fully lanefold-
 /// admitted, 2..N grouping keys (the single-key kernels own num_cols == 1).
@@ -5018,25 +5037,30 @@ fn scan_mk_plan_wanted<'mcx>(agg: &::nodeagg::AggStateData<'mcx>) -> bool {
         && ::nodeagg::agg_hash_key_cols(agg).len() >= 2
 }
 
-/// The multi-key shapes' dict-text component, when the plan has EXACTLY one
-/// raw-bytes text key among Int-class keys: `Some(input colno)`. `None` =
-/// pure-int multi-key (no dict lane needed) or an unpackable component mix
-/// (the compact arm refuses later with the same taxonomy).
-fn scan_mk_dict_att<'mcx>(agg: &::nodeagg::AggStateData<'mcx>) -> Option<u16> {
-    let mut dict = None;
+/// The multi-key shapes' raw-bytes TEXT key components among Int-class
+/// keys: `Some((atts, n))` with n ∈ 0..=2 (input colnos, group-clause
+/// order). Historically capped at ONE (the dict-group lane); SE-MKTEXT
+/// admits a SECOND text component behind `PGRUST_LANE_V2_MULTIKEY_TEXT`
+/// (the caller gates — this census only counts). `None` = a third text or
+/// an unpackable Other component (the compact arm refuses the same shapes
+/// with the same taxonomy).
+fn scan_mk_text_atts<'mcx>(agg: &::nodeagg::AggStateData<'mcx>) -> Option<([u16; 2], usize)> {
+    let mut texts = [0u16; 2];
+    let mut n = 0usize;
     for (att, kind) in ::nodeagg::agg_hash_key_cols(agg) {
         match kind {
             ::nodeagg::GroupKeyKind::Int { .. } | ::nodeagg::GroupKeyKind::Numeric => {}
             ::nodeagg::GroupKeyKind::TextRaw => {
-                if dict.is_some() {
+                if n == 2 {
                     return None;
                 }
-                dict = Some(att);
+                texts[n] = att;
+                n += 1;
             }
             ::nodeagg::GroupKeyKind::Other => return None,
         }
     }
-    dict
+    Some((texts, n))
 }
 
 /// Multi-key dict-component columnar arm, tried when the fixed-width-prefix
@@ -5069,33 +5093,40 @@ fn try_arm_cb_multikey_dict<'mcx>(
     // still blocks the staging. The offset-free columnar arm hosts those
     // (Q32-class `GROUP BY WatchID, ClientIP` on pgrcolumnar): every staged
     // column fills as decoded Datums, no dict registration.
-    let Some(key) = scan_mk_dict_att(agg) else {
-        // All-Int keys → plain columnar staging; any Other component means
-        // the compact arm will refuse anyway — don't arm for nothing.
-        let all_int = ::nodeagg::agg_hash_key_cols(agg).iter().all(|&(_, k)| {
-            matches!(
-                k,
-                ::nodeagg::GroupKeyKind::Int { .. } | ::nodeagg::GroupKeyKind::Numeric
-            )
-        });
-        if !all_int {
-            return refused();
-        }
+    let Some((texts, n_texts)) = scan_mk_text_atts(agg) else {
+        // A third text / Other component: the compact arm would refuse
+        // anyway — don't arm for nothing.
+        return refused();
+    };
+    if n_texts == 0 {
         let Some(prefix) = fused_agg_soa_prefix(agg, ss) else { return refused() };
         if !::nodeseqscan::seq_scan_cb_columnar_arm(ss, estate, prefix, None) {
             return refused();
         }
         return true;
-    };
-    // The fold must not read the dict component's SoA Datum cells: they are
-    // STALE while a dict lane answers (the dictgroup rule, unchanged).
-    if plan.cols.iter().any(|&c| c == key) {
+    }
+    // SE-MKTEXT: the second text component is knob-gated (default OFF keeps
+    // the one-text census byte-for-byte).
+    if n_texts == 2 && !multikey_text2_enabled() {
+        return refused();
+    }
+    // The fold must not read any dict component's SoA Datum cells: they are
+    // STALE while a dict lane answers (the dictgroup rule, unchanged; the
+    // extra dict-want column rides the same fill).
+    if plan.cols.iter().any(|&c| texts[..n_texts].contains(&c)) {
         return refused();
     }
     let Some(prefix) = fused_agg_soa_prefix(agg, ss) else { return refused() };
-    if !::nodeseqscan::seq_scan_cb_dictgroup_arm(ss, estate, prefix, key) {
+    if !::nodeseqscan::seq_scan_cb_dictgroup_arm(ss, estate, prefix, texts[0]) {
         return refused();
     }
+    // SE-MKTEXT second text: deliberately NOT dict-opted — it stages as
+    // decoded raw Datums and the pack pre-pass interns it per row through
+    // the raw-answered Intern branch ("correct, colder"). The dict-code
+    // fast path's per-(epoch, code) id cache is SINGLE-LANE (one cache per
+    // scratch), so a second dict-coded component would read the first's
+    // ids — the cross-component crosstalk the mktext e2e caught live. A
+    // per-component cache is the named follow-up (GL-MKTEXT-2).
     true
 }
 
@@ -5367,18 +5398,28 @@ fn scan_mk_admit<'mcx>(
         }
     }
     let is_cb = ::nodeseqscan::seq_scan_is_pgrcolumnar(ss);
-    // A text component needs its dict-lane registration (pgrcolumnar only) and
-    // must stay out of the fold's lane reads (stale SoA cells).
-    let dict_att = scan_mk_dict_att(agg);
+    // Text components need the dict-lane registration (pgrcolumnar only) and
+    // must stay out of the fold's lane reads (stale SoA cells). SE-MKTEXT:
+    // a SECOND text component is knob-gated (`PGRUST_LANE_V2_MULTIKEY_TEXT`,
+    // default OFF = the historical one-text census); the primary text is
+    // the dict-group column, the second rides the extra dict-want lane the
+    // staging arm registered (or the raw-answered Intern fallback).
+    let text_atts = scan_mk_text_atts(agg);
     let has_text = ::nodeagg::agg_hash_key_cols(agg)
         .iter()
         .any(|&(_, k)| k == ::nodeagg::GroupKeyKind::TextRaw);
     if has_text {
-        let Some(att) = dict_att else { return refused(RefuseReason::MultiKeyShape) };
+        let Some((texts, n_texts)) = text_atts else {
+            return refused(RefuseReason::MultiKeyShape);
+        };
+        debug_assert!(n_texts >= 1, "has_text census saw a TextRaw component");
+        if n_texts == 2 && !multikey_text2_enabled() {
+            return refused(RefuseReason::MultiKeyShape);
+        }
         if !is_cb
-            || ::nodeseqscan::seq_scan_batch_dictgroup_col(ss) != Some(att)
+            || ::nodeseqscan::seq_scan_batch_dictgroup_col(ss) != Some(texts[0])
             || ::nodeagg::agg_lanefold_plan(agg)
-                .is_some_and(|plan| plan.cols.iter().any(|&c| c == att))
+                .is_some_and(|plan| plan.cols.iter().any(|&c| texts[..n_texts].contains(&c)))
         {
             return refused(RefuseReason::MultiKeyShape);
         }
@@ -5405,10 +5446,22 @@ fn scan_mk_admit<'mcx>(
         }
     }
     // Packing admission + table arm (nullable = heap; pgrcolumnar rides the
-    // no-NULLs per-chunk proof and packs no null byte).
-    let dict = dict_att.filter(|_| is_cb);
+    // no-NULLs per-chunk proof and packs no null byte). Text components
+    // pass as the Intern att set (heap sources reach here textless — the
+    // has_text block above requires cbstore): one att = the historical
+    // dict-component admission verbatim; two atts = the SE-MKTEXT knob path
+    // (mk_admit_n packs both through the shared intern pool).
+    let interns_buf;
+    let interns: &[u16] = match text_atts {
+        Some((texts, n_texts)) if is_cb => {
+            interns_buf = texts;
+            &interns_buf[..n_texts]
+        }
+        _ => &[],
+    };
+    let dict = interns.first().copied();
     let verdict = if arm {
-        match ::nodeagg::agg_hash_compact_try_arm_mk(agg, !is_cb, dict) {
+        match ::nodeagg::agg_hash_compact_try_arm_mk_multi(agg, !is_cb, interns) {
             ::nodeagg::CompactArm::Armed => {
                 let shape =
                     ::nodeagg::agg_hash_compact_mk_shape(agg).expect("armed multi-key table");
@@ -5417,7 +5470,7 @@ fn scan_mk_admit<'mcx>(
             v => v,
         }
     } else {
-        match ::nodeagg::agg_hash_compact_mk_admit(agg, !is_cb, dict) {
+        match ::nodeagg::agg_hash_compact_mk_admit_multi(agg, !is_cb, interns) {
             Ok((shape, _numgroups)) => return Some(ScanMk { shape, dict_att: dict }),
             Err(v) => v,
         }
@@ -5553,8 +5606,19 @@ fn scan_mk_batch<'mcx>(
                     }
                     ::nodeagg::MkCompKind::Intern => {
                         let mcx = estate.es_query_cxt;
-                        let lane = ::nodeseqscan::seq_scan_batch_soa(ss)
-                            .and_then(|soa| soa.dict_lane(att));
+                        // Dict-code fast path ONLY for the feed's registered
+                        // dict component: the snap's per-(identity, code)
+                        // member-mask cache is single-lane, and another
+                        // consumer (the PREWHERE dict tier; SE-MKTEXT's
+                        // second text) may have dict lanes of its own whose
+                        // code space would collide in it. Everything else
+                        // takes the raw per-row compare below.
+                        let lane = if Some(att as u16) == mk.dict_att {
+                            ::nodeseqscan::seq_scan_batch_soa(ss)
+                                .and_then(|soa| soa.dict_lane(att))
+                        } else {
+                            None
+                        };
                         match lane {
                             Some(lane) => {
                                 // The code_ids identity discipline retargeted
@@ -5693,8 +5757,22 @@ fn scan_mk_batch<'mcx>(
             }
             ::nodeagg::MkCompKind::Intern => {
                 let mcx = estate.es_query_cxt;
-                let lane = ::nodeseqscan::seq_scan_batch_soa(ss)
-                    .and_then(|soa| soa.dict_lane(att));
+                // Dict-code fast path ONLY for the feed's registered dict
+                // component: the per-(identity, code) → intern-id cache
+                // below is SINGLE-LANE (`epoch` + `code_ids`, one per
+                // scratch), so a second dict-coded Intern component — the
+                // SE-MKTEXT second text, or a PREWHERE-dict-tier column —
+                // would read the FIRST component's ids for its own codes
+                // (cross-component crosstalk, caught live by the mktext
+                // e2e: t2 emitted t1's dict values). Non-dict components
+                // take the raw-answered branch (per-row intern — correct,
+                // colder); the per-component cache is GL-MKTEXT-2.
+                let lane = if Some(att as u16) == mk.dict_att {
+                    ::nodeseqscan::seq_scan_batch_soa(ss)
+                        .and_then(|soa| soa.dict_lane(att))
+                } else {
+                    None
+                };
                 match lane {
                     Some(lane) => {
                         // Cache identity roll (dictgroup's per-RG cache,
