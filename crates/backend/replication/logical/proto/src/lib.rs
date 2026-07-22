@@ -822,28 +822,108 @@ fn logicalrep_read_namespace(r: &mut Reader<'_>) -> PgResult<String> {
     })
 }
 
-// --- streaming / two-phase: constants exist, functions refuse (phase-2) ---
+// --- streaming messages (proto.c:1058) ---
 
-pub fn logicalrep_write_stream_start(_out: &mut Vec<u8>, _xid: TransactionId, _first: bool) -> ! {
-    unported("logicalrep_write_stream_start (streaming)")
+// logicalrep_write_stream_start (proto.c:1061).
+pub fn logicalrep_write_stream_start(out: &mut Vec<u8>, xid: TransactionId, first_segment: bool) {
+    send_byte(out, LOGICAL_REP_MSG_STREAM_START);
+    debug_assert!(xid != InvalidTransactionId);
+    send_int32(out, xid);
+    // 1 if this is the first streaming segment for this xid.
+    send_byte(out, if first_segment { 1 } else { 0 });
 }
-pub fn logicalrep_read_stream_start(_r: &mut Reader<'_>) -> ! {
-    unported("logicalrep_read_stream_start (streaming)")
+
+// logicalrep_read_stream_start (proto.c:1079): (xid, first_segment).
+pub fn logicalrep_read_stream_start(r: &mut Reader<'_>) -> PgResult<(TransactionId, bool)> {
+    let xid = r.get_int32()?;
+    let first_segment = r.get_byte()? == 1;
+    Ok((xid, first_segment))
 }
-pub fn logicalrep_write_stream_stop(_out: &mut Vec<u8>) -> ! {
-    unported("logicalrep_write_stream_stop (streaming)")
+
+// logicalrep_write_stream_stop (proto.c:1095).
+pub fn logicalrep_write_stream_stop(out: &mut Vec<u8>) {
+    send_byte(out, LOGICAL_REP_MSG_STREAM_STOP);
 }
-pub fn logicalrep_write_stream_commit(_out: &mut Vec<u8>) -> ! {
-    unported("logicalrep_write_stream_commit (streaming)")
+
+// logicalrep_write_stream_commit (proto.c:1104).
+pub fn logicalrep_write_stream_commit(
+    out: &mut Vec<u8>,
+    xid: TransactionId,
+    commit_lsn: XLogRecPtr,
+    end_lsn: XLogRecPtr,
+    commit_time: TimestampTz,
+) {
+    send_byte(out, LOGICAL_REP_MSG_STREAM_COMMIT);
+    debug_assert!(xid != InvalidTransactionId);
+    send_int32(out, xid);
+    // flags field (unused for now)
+    send_byte(out, 0);
+    send_int64(out, commit_lsn);
+    send_int64(out, end_lsn);
+    send_int64(out, commit_time as u64);
 }
-pub fn logicalrep_read_stream_commit(_r: &mut Reader<'_>) -> ! {
-    unported("logicalrep_read_stream_commit (streaming)")
+
+// logicalrep_read_stream_commit (proto.c:1129): (xid, commit data).
+pub fn logicalrep_read_stream_commit(
+    r: &mut Reader<'_>,
+) -> PgResult<(TransactionId, LogicalRepCommitData)> {
+    let xid = r.get_int32()?;
+    let flags = r.get_byte()?;
+    if flags != 0 {
+        elog(ERROR, format!("unrecognized flags {flags} in commit message"))?;
+    }
+    Ok((
+        xid,
+        LogicalRepCommitData {
+            commit_lsn: r.get_int64()?,
+            end_lsn: r.get_int64()?,
+            committime: r.get_int64()? as TimestampTz,
+        },
+    ))
 }
-pub fn logicalrep_write_stream_abort(_out: &mut Vec<u8>) -> ! {
-    unported("logicalrep_write_stream_abort (streaming)")
+
+// LogicalRepStreamAbortData (logicalproto.h).
+pub struct LogicalRepStreamAbortData {
+    pub xid: TransactionId,
+    pub subxid: TransactionId,
+    pub abort_lsn: XLogRecPtr,
+    pub abort_time: TimestampTz,
 }
-pub fn logicalrep_read_stream_abort(_r: &mut Reader<'_>) -> ! {
-    unported("logicalrep_read_stream_abort (streaming)")
+
+// logicalrep_write_stream_abort (proto.c:1158). xid == subxid for a top-level
+// abort; abort_lsn/abort_time ride only when write_abort_info (protocol >= 4
+// with parallel streaming).
+pub fn logicalrep_write_stream_abort(
+    out: &mut Vec<u8>,
+    xid: TransactionId,
+    subxid: TransactionId,
+    abort_lsn: XLogRecPtr,
+    abort_time: TimestampTz,
+    write_abort_info: bool,
+) {
+    send_byte(out, LOGICAL_REP_MSG_STREAM_ABORT);
+    debug_assert!(xid != InvalidTransactionId && subxid != InvalidTransactionId);
+    send_int32(out, xid);
+    send_int32(out, subxid);
+    if write_abort_info {
+        send_int64(out, abort_lsn);
+        send_int64(out, abort_time as u64);
+    }
+}
+
+// logicalrep_read_stream_abort (proto.c:1184).
+pub fn logicalrep_read_stream_abort(
+    r: &mut Reader<'_>,
+    read_abort_info: bool,
+) -> PgResult<LogicalRepStreamAbortData> {
+    let xid = r.get_int32()?;
+    let subxid = r.get_int32()?;
+    let (abort_lsn, abort_time) = if read_abort_info {
+        (r.get_int64()?, r.get_int64()? as TimestampTz)
+    } else {
+        (InvalidXLogRecPtr, 0)
+    };
+    Ok(LogicalRepStreamAbortData { xid, subxid, abort_lsn, abort_time })
 }
 // --- two-phase (prepare family) messages ---
 

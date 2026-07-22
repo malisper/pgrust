@@ -685,7 +685,16 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //   73. replication/logical/reorderbuffer/src/tests.rs (+1 beside row
     //      49's pair) — STATS_FLUSHES: cfg(test) rig TLS counting spill
     //      stats-flush hook invocations; never in dist.
-    assert_eq!(count_tree(crates), 533, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // logdec-port streaming delta (534 = 533 + 1), deliberately NON-SESSION
+    // TLS:
+    //   74. replication/logical/worker/src/stream_apply.rs — the serial
+    //      streamed-apply spool state (C worker.c statics
+    //      in_streamed_transaction/stream_xid/stream_fd/subxact_data plus
+    //      MyLogicalRepWorker->stream_fileset): per-WORKER state owned by
+    //      the apply bgworker thread for the life of the worker; no session
+    //      identity, never captured/restored by an envelope (one backend
+    //      worker = one thread, rule 10).
+    assert_eq!(count_tree(crates), 534, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

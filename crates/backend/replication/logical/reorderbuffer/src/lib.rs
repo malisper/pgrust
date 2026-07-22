@@ -6,6 +6,7 @@ mod iter;
 mod replay;
 mod spill;
 mod startup;
+mod stream;
 mod toast;
 mod visibility;
 
@@ -476,6 +477,11 @@ pub struct ReorderBuffer {
     // startup. None (no context yet) flushes nothing, like C before
     // private_data is set.
     pub update_stats: Option<fn(&mut ReorderBuffer)>,
+    // The decoding-context half of ReorderBufferCanStartStreaming
+    // (reorderbuffer.c:4285): snapbuild consistent and not skipping the
+    // record being decoded. Mirrored here by the decode loop before each
+    // record; the builder itself lives across the crate boundary.
+    pub streaming_ready: bool,
     pub output_rewrites: bool,
     pub(crate) current_restart_decoding_lsn: XLogRecPtr,
     pub size: usize,
@@ -509,6 +515,7 @@ impl ReorderBuffer {
             callbacks: ReorderBufferCallbacks::unset(),
             private_data: 0,
             update_stats: None,
+            streaming_ready: false,
             output_rewrites: false,
             current_restart_decoding_lsn: InvalidXLogRecPtr,
             size: 0,
@@ -547,7 +554,8 @@ impl ReorderBuffer {
         self.changes[id as usize].as_mut().expect("live change")
     }
 
-    pub(crate) fn toptxn_id(&self, id: TxnId) -> TxnId {
+    // rbtxn_get_toptxn (reorderbuffer.h): the toplevel txn of a (sub)txn.
+    pub fn toptxn_id(&self, id: TxnId) -> TxnId {
         let txn = self.txn(id);
         if txn.toptxn == INVALID_ID {
             id
@@ -892,7 +900,7 @@ impl ReorderBuffer {
 
         let sz = self.change_size(cid);
         self.change_memory_update(Some(cid), None, true, sz);
-        self.process_partial_change(txn, cid, toast_insert);
+        self.process_partial_change(txn, cid, toast_insert)?;
         self.check_memory_limit()?;
         Ok(())
     }
@@ -901,9 +909,9 @@ impl ReorderBuffer {
         self.callbacks.stream_start.is_some()
     }
 
-    fn process_partial_change(&mut self, txn: TxnId, cid: ChangeId, toast_insert: bool) {
+    fn process_partial_change(&mut self, txn: TxnId, cid: ChangeId, toast_insert: bool) -> PgResult<()> {
         if !self.can_stream() {
-            return;
+            return Ok(());
         }
         let toptxn = self.toptxn_id(txn);
         let action = self.change(cid).action;
@@ -929,12 +937,17 @@ impl ReorderBuffer {
             self.txn_mut(toptxn).txn_flags &= !RBTXN_HAS_PARTIAL_CHANGE;
         }
 
-        if !self.txn(toptxn).has_partial_change()
+        // Stream the transaction if it was serialized before and its changes
+        // are now complete at the toplevel (reorderbuffer.c:794): otherwise a
+        // later eviction pass could try to spill an incomplete-change txn.
+        if self.can_start_streaming()
+            && !self.txn(toptxn).has_partial_change()
             && self.txn(txn).is_serialized()
             && self.txn(toptxn).has_streamable_change()
         {
-            unported("ReorderBufferStreamTXN (streaming): phase-2");
+            self.stream_txn(toptxn)?;
         }
+        Ok(())
     }
 
     pub fn queue_message(

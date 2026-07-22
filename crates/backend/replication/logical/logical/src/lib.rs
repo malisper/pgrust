@@ -101,6 +101,17 @@ pub type RollbackPreparedCB = fn(
 ) -> PgResult<()>;
 pub type FilterPrepareCB =
     fn(&mut OutputPluginContext, TransactionId, &str) -> PgResult<bool>;
+// Streaming family (logical.h): start/stop share BeginCB's shape; abort/
+// prepare/commit share CommitCB's (opc, rb, txn, lsn); change/message/
+// truncate mirror their non-stream counterparts.
+pub type StreamStartCB = BeginCB;
+pub type StreamStopCB = BeginCB;
+pub type StreamAbortCB = CommitCB;
+pub type StreamPrepareCB = CommitCB;
+pub type StreamCommitCB = CommitCB;
+pub type StreamChangeCB = ChangeCB;
+pub type StreamMessageCB = MessageCB;
+pub type StreamTruncateCB = TruncateCB;
 
 #[derive(Default)]
 pub struct OutputPluginCallbacks {
@@ -117,9 +128,14 @@ pub struct OutputPluginCallbacks {
     pub rollback_prepared_cb: Option<RollbackPreparedCB>,
     pub filter_by_origin_cb: Option<FilterByOriginCB>,
     pub shutdown_cb: Option<ShutdownCB>,
-    // The streaming callback family is unported; a plugin that needs it sets
-    // this so the wrappers can fail loudly.
-    pub streaming_requested: bool,
+    pub stream_start_cb: Option<StreamStartCB>,
+    pub stream_stop_cb: Option<StreamStopCB>,
+    pub stream_abort_cb: Option<StreamAbortCB>,
+    pub stream_prepare_cb: Option<StreamPrepareCB>,
+    pub stream_commit_cb: Option<StreamCommitCB>,
+    pub stream_change_cb: Option<StreamChangeCB>,
+    pub stream_message_cb: Option<StreamMessageCB>,
+    pub stream_truncate_cb: Option<StreamTruncateCB>,
 }
 
 // C's ctx->out is a StringInfo carrying either textual (test_decoding) or
@@ -308,7 +324,17 @@ fn StartupDecodingContext(
         slot.data.get().two_phase_at,
     );
 
-    let streaming = callbacks.streaming_requested;
+    // To support streaming, start/stop/abort/commit/change callbacks are
+    // required; message and truncate are optional. Streaming turns on when
+    // any one of them is set so a missing member fails loudly in its wrapper
+    // (logical.c:231).
+    let streaming = callbacks.stream_start_cb.is_some()
+        || callbacks.stream_stop_cb.is_some()
+        || callbacks.stream_abort_cb.is_some()
+        || callbacks.stream_commit_cb.is_some()
+        || callbacks.stream_change_cb.is_some()
+        || callbacks.stream_message_cb.is_some()
+        || callbacks.stream_truncate_cb.is_some();
     // To support two-phase logical decoding we require the whole prepare
     // family; enabling on any one of them makes a missing member fail loudly
     // in its wrapper (logical.c:246).
@@ -459,7 +485,7 @@ pub fn CreateInitDecodingContext(
     ReplicationSlotMarkDirty();
     ReplicationSlotSave()?;
 
-    let ctx = StartupDecodingContext(
+    let mut ctx = StartupDecodingContext(
         output_plugin_options,
         restart_lsn,
         xmin_horizon,
@@ -471,7 +497,7 @@ pub fn CreateInitDecodingContext(
         update_progress,
     )?;
 
-    startup_cb_maybe(&ctx, true)?;
+    startup_cb_maybe(&mut ctx, true)?;
 
     let receive_rewrites = {
         let opc = ctx.opc();
@@ -554,7 +580,7 @@ pub fn CreateDecodingContext(
         start_lsn = slot.data.get().confirmed_flush;
     }
 
-    let ctx = StartupDecodingContext(
+    let mut ctx = StartupDecodingContext(
         output_plugin_options,
         start_lsn,
         InvalidTransactionId,
@@ -566,7 +592,7 @@ pub fn CreateDecodingContext(
         update_progress,
     )?;
 
-    startup_cb_maybe(&ctx, false)?;
+    startup_cb_maybe(&mut ctx, false)?;
 
     let (receive_rewrites, mark_two_phase) = {
         let opc = ctx.opc();
@@ -602,7 +628,7 @@ pub fn CreateDecodingContext(
     Ok(ctx)
 }
 
-fn startup_cb_maybe(ctx: &LogicalDecodingContext, is_init: bool) -> PgResult<()> {
+fn startup_cb_maybe(ctx: &mut LogicalDecodingContext, is_init: bool) -> PgResult<()> {
     let opc = ctx.opc();
     if let Some(cb) = opc.callbacks.startup_cb {
         debug_assert!(!opc.fast_forward);
@@ -610,8 +636,20 @@ fn startup_cb_maybe(ctx: &LogicalDecodingContext, is_init: bool) -> PgResult<()>
         opc.end_xact = false;
         cb(opc, is_init)?;
     }
+    // The plugin's startup callback finalizes ctx->streaming (pgoutput turns
+    // it off unless the subscriber negotiated it); only then wire the
+    // reorderbuffer's stream slots — their presence IS the buffer's
+    // ReorderBufferCanStream (C keys that off ctx->streaming instead,
+    // reorderbuffer.c:4272).
     if opc.streaming {
-        unported("logical streaming (stream-changes)");
+        ctx.reorder.callbacks.stream_start = Some(stream_start_cb_wrapper);
+        ctx.reorder.callbacks.stream_stop = Some(stream_stop_cb_wrapper);
+        ctx.reorder.callbacks.stream_abort = Some(stream_abort_cb_wrapper);
+        ctx.reorder.callbacks.stream_prepare = Some(stream_prepare_cb_wrapper);
+        ctx.reorder.callbacks.stream_commit = Some(stream_commit_cb_wrapper);
+        ctx.reorder.callbacks.stream_change = Some(stream_change_cb_wrapper);
+        ctx.reorder.callbacks.stream_message = Some(stream_message_cb_wrapper);
+        ctx.reorder.callbacks.stream_truncate = Some(stream_truncate_cb_wrapper);
     }
     Ok(())
 }
@@ -826,6 +864,152 @@ fn rollback_prepared_cb_wrapper(
         return missing_prepare_family_cb("rollback_prepared_cb");
     };
     cb(opc, rb, txn, prepare_end_lsn, prepare_time)
+}
+
+#[cold]
+fn missing_stream_cb(which: &str) -> PgResult<()> {
+    // logical.c:1230 — in streaming mode the start/stop/abort/commit/change
+    // callbacks are required (and prepare, for streamed two-phase).
+    ereport(ERROR)
+        .errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+        .errmsg(format!("logical streaming requires a {which} callback"))
+        .finish(loc("stream_cb_wrapper"))?;
+    unreachable!();
+}
+
+fn stream_start_cb_wrapper(rb: &mut ReorderBuffer, txn: TxnId, first_lsn: XLogRecPtr) -> PgResult<()> {
+    let opc = opc_from_rb(rb);
+    debug_assert!(!opc.fast_forward);
+    debug_assert!(opc.streaming);
+    opc.accept_writes = true;
+    opc.write_xid = rb.txn(txn).xid;
+    opc.write_location = first_lsn;
+    opc.end_xact = false;
+    let Some(cb) = opc.callbacks.stream_start_cb else {
+        return missing_stream_cb("stream_start_cb");
+    };
+    cb(opc, rb, txn)
+}
+
+fn stream_stop_cb_wrapper(rb: &mut ReorderBuffer, txn: TxnId, last_lsn: XLogRecPtr) -> PgResult<()> {
+    let opc = opc_from_rb(rb);
+    debug_assert!(!opc.fast_forward);
+    debug_assert!(opc.streaming);
+    opc.accept_writes = true;
+    opc.write_xid = rb.txn(txn).xid;
+    opc.write_location = last_lsn;
+    opc.end_xact = false;
+    let Some(cb) = opc.callbacks.stream_stop_cb else {
+        return missing_stream_cb("stream_stop_cb");
+    };
+    cb(opc, rb, txn)
+}
+
+fn stream_abort_cb_wrapper(rb: &mut ReorderBuffer, txn: TxnId, abort_lsn: XLogRecPtr) -> PgResult<()> {
+    let opc = opc_from_rb(rb);
+    debug_assert!(!opc.fast_forward);
+    debug_assert!(opc.streaming);
+    opc.accept_writes = true;
+    opc.write_xid = rb.txn(txn).xid;
+    opc.write_location = abort_lsn;
+    opc.end_xact = true;
+    let Some(cb) = opc.callbacks.stream_abort_cb else {
+        return missing_stream_cb("stream_abort_cb");
+    };
+    cb(opc, rb, txn, abort_lsn)
+}
+
+fn stream_prepare_cb_wrapper(rb: &mut ReorderBuffer, txn: TxnId, prepare_lsn: XLogRecPtr) -> PgResult<()> {
+    let opc = opc_from_rb(rb);
+    debug_assert!(!opc.fast_forward);
+    debug_assert!(opc.streaming);
+    // We're only supposed to call this when streaming and two-phase commits
+    // are both supported (logical.c:1281).
+    debug_assert!(opc.twophase);
+    opc.accept_writes = true;
+    opc.write_xid = rb.txn(txn).xid;
+    opc.write_location = rb.txn(txn).end_lsn;
+    opc.end_xact = true;
+    let Some(cb) = opc.callbacks.stream_prepare_cb else {
+        // In streaming mode with two-phase, stream_prepare_cb is required
+        // (logical.c:1288).
+        return missing_stream_cb("stream_prepare_cb");
+    };
+    cb(opc, rb, txn, prepare_lsn)
+}
+
+fn stream_commit_cb_wrapper(rb: &mut ReorderBuffer, txn: TxnId, commit_lsn: XLogRecPtr) -> PgResult<()> {
+    let opc = opc_from_rb(rb);
+    debug_assert!(!opc.fast_forward);
+    debug_assert!(opc.streaming);
+    opc.accept_writes = true;
+    opc.write_xid = rb.txn(txn).xid;
+    opc.write_location = rb.txn(txn).end_lsn;
+    opc.end_xact = true;
+    let Some(cb) = opc.callbacks.stream_commit_cb else {
+        return missing_stream_cb("stream_commit_cb");
+    };
+    cb(opc, rb, txn, commit_lsn)
+}
+
+fn stream_change_cb_wrapper(
+    rb: &mut ReorderBuffer,
+    txn: TxnId,
+    relation: &RelationData<'static>,
+    change: &mut ReorderBufferChange,
+) -> PgResult<()> {
+    let opc = opc_from_rb(rb);
+    debug_assert!(!opc.fast_forward);
+    debug_assert!(opc.streaming);
+    opc.accept_writes = true;
+    opc.write_xid = rb.txn(txn).xid;
+    opc.write_location = change.lsn;
+    opc.end_xact = false;
+    let Some(cb) = opc.callbacks.stream_change_cb else {
+        return missing_stream_cb("stream_change_cb");
+    };
+    cb(opc, rb, txn, relation, change)
+}
+
+fn stream_message_cb_wrapper(
+    rb: &mut ReorderBuffer,
+    txn: Option<TxnId>,
+    lsn: XLogRecPtr,
+    transactional: bool,
+    prefix: &str,
+    message: &[u8],
+) -> PgResult<()> {
+    let opc = opc_from_rb(rb);
+    debug_assert!(!opc.fast_forward);
+    debug_assert!(opc.streaming);
+    // This callback is optional (logical.c:1385).
+    let Some(cb) = opc.callbacks.stream_message_cb else {
+        return Ok(());
+    };
+    opc.accept_writes = true;
+    opc.write_xid = txn.map(|t| rb.txn(t).xid).unwrap_or(InvalidTransactionId);
+    opc.write_location = lsn;
+    opc.end_xact = false;
+    cb(opc, rb, txn, lsn, transactional, prefix, message)
+}
+
+fn stream_truncate_cb_wrapper(
+    rb: &mut ReorderBuffer,
+    txn: TxnId,
+    relations: &[Rc<RelationData<'static>>],
+    change: &mut ReorderBufferChange,
+) -> PgResult<()> {
+    let opc = opc_from_rb(rb);
+    debug_assert!(!opc.fast_forward);
+    debug_assert!(opc.streaming);
+    opc.accept_writes = true;
+    opc.write_xid = rb.txn(txn).xid;
+    opc.write_location = change.lsn;
+    opc.end_xact = false;
+    let Some(cb) = opc.callbacks.stream_truncate_cb else {
+        return missing_stream_cb("stream_truncate_cb");
+    };
+    cb(opc, rb, txn, relations, change)
 }
 
 pub fn filter_prepare_cb_wrapper(

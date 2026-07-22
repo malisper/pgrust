@@ -360,3 +360,65 @@ fn prepared_gid_truncates_at_gidsize() {
     let p = logicalrep_read_prepare(&mut r).unwrap();
     assert_eq!(p.gid.len(), GIDSIZE - 1);
 }
+
+#[test]
+fn stream_start_roundtrip_and_layout() {
+    let mut out = Vec::new();
+    logicalrep_write_stream_start(&mut out, 754, true);
+    // 'S' + xid(4) + first_segment(1)
+    assert_eq!(out[0], LOGICAL_REP_MSG_STREAM_START);
+    assert_eq!(out.len(), 6);
+    let mut r = Reader::new(&out[1..]);
+    let (xid, first) = logicalrep_read_stream_start(&mut r).unwrap();
+    assert_eq!(xid, 754);
+    assert!(first);
+
+    let mut out2 = Vec::new();
+    logicalrep_write_stream_start(&mut out2, 754, false);
+    let mut r2 = Reader::new(&out2[1..]);
+    assert_eq!(logicalrep_read_stream_start(&mut r2).unwrap(), (754, false));
+}
+
+#[test]
+fn stream_stop_is_a_bare_action_byte() {
+    let mut out = Vec::new();
+    logicalrep_write_stream_stop(&mut out);
+    assert_eq!(out, vec![LOGICAL_REP_MSG_STREAM_STOP]);
+}
+
+#[test]
+fn stream_commit_roundtrip_and_layout() {
+    let mut out = Vec::new();
+    logicalrep_write_stream_commit(&mut out, 755, 0x1122, 0x3344, 777);
+    // 'c' + xid(4) + flags(1) + 3x int64
+    assert_eq!(out[0], LOGICAL_REP_MSG_STREAM_COMMIT);
+    assert_eq!(out.len(), 1 + 4 + 1 + 24);
+    let mut r = Reader::new(&out[1..]);
+    let (xid, commit) = logicalrep_read_stream_commit(&mut r).unwrap();
+    assert_eq!(xid, 755);
+    assert_eq!(commit.commit_lsn, 0x1122);
+    assert_eq!(commit.end_lsn, 0x3344);
+    assert_eq!(commit.committime, 777);
+}
+
+#[test]
+fn stream_abort_roundtrip_with_and_without_abort_info() {
+    // Serial apply: no abort info on the wire.
+    let mut out = Vec::new();
+    logicalrep_write_stream_abort(&mut out, 756, 757, 0x99, 555, false);
+    assert_eq!(out[0], LOGICAL_REP_MSG_STREAM_ABORT);
+    assert_eq!(out.len(), 1 + 4 + 4);
+    let mut r = Reader::new(&out[1..]);
+    let a = logicalrep_read_stream_abort(&mut r, false).unwrap();
+    assert_eq!((a.xid, a.subxid), (756, 757));
+    assert_eq!(a.abort_lsn, 0);
+    assert_eq!(a.abort_time, 0);
+
+    // Parallel-protocol form carries lsn + time.
+    let mut out2 = Vec::new();
+    logicalrep_write_stream_abort(&mut out2, 756, 757, 0x99, 555, true);
+    assert_eq!(out2.len(), 1 + 4 + 4 + 16);
+    let mut r2 = Reader::new(&out2[1..]);
+    let a2 = logicalrep_read_stream_abort(&mut r2, true).unwrap();
+    assert_eq!((a2.xid, a2.subxid, a2.abort_lsn, a2.abort_time), (756, 757, 0x99, 555));
+}

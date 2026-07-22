@@ -17,7 +17,8 @@ pub mod temp;
 pub mod vfd;
 
 pub use buffile::{
-    BufFile, BufFileCreateFileSet, BufFileCreateTemp, BufFileOpenFileSet, PrepareTempTablespaces,
+    BufFile, BufFileCreateFileSet, BufFileCreateTemp, BufFileDeleteFileSet, BufFileOpenFileSet,
+    BufFileOpenFileSetMaybe, PrepareTempTablespaces,
 };
 pub use fileset::FileSet;
 pub use copydir::{copy_file, copydir, directory_is_empty, pg_mkdir_p, rmtree};

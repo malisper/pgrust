@@ -31,6 +31,7 @@ use types_error::{
 use walreceiver::client::{CopyData, PgConn};
 
 mod apply;
+mod stream_apply;
 mod tablesync;
 
 pub(crate) fn request_apply_worker_exit() {
@@ -41,7 +42,7 @@ pub(crate) fn apply_worker_exit_requested() -> bool {
     APPLY_WORKER_EXIT.get()
 }
 
-fn loc(func: &'static str) -> ErrorLocation {
+pub(crate) fn loc(func: &'static str) -> ErrorLocation {
     ErrorLocation::new("src/backend/replication/logical/worker.c", 0, func)
 }
 
@@ -320,7 +321,10 @@ pub(crate) fn apply_loop(conn: &mut PgConn, mut last_received: XLogRecPtr) -> Pg
                 // writes; process invals when idle; wait for the socket.
                 send_feedback(conn, last_received, false, false)?;
 
-                if !IN_REMOTE_TRANSACTION.get() {
+                // C gates this idle work on being outside BOTH a remote
+                // transaction and a streamed chunk (worker.c:3720): a chunk's
+                // spool transaction stays open until STREAM STOP.
+                if !IN_REMOTE_TRANSACTION.get() && !stream_apply::in_streamed_transaction() {
                     inval::local::AcceptInvalidationMessages()?;
                     maybe_reread_subscription(mcx)?;
                     if APPLY_WORKER_EXIT.get() {
@@ -417,17 +421,25 @@ fn start_logical_streaming_opts(
     two_phase: bool,
 ) -> PgResult<()> {
     let slot = slotname.to_string();
-    let (publications, binary, origin_opt) = my_sub(|s| {
+    let (publications, binary, origin_opt, stream_mode) = my_sub(|s| {
         (
             s.publications.clone(),
             s.binary,
             s.origin.clone(),
+            s.stream,
         )
     });
 
-    // Streaming (in-progress transactions) is never requested: the pgrust
-    // subscriber does not handle it yet. two_phase is requested only by
-    // run_apply_worker's PENDING->ENABLED transition.
+    // set_stream_options (worker.c:4429): streaming=on requests the serial
+    // streamed-apply path; parallel apply (applyparallelworker.c) is not
+    // ported and refuses loudly rather than degrading. two_phase is requested
+    // only by run_apply_worker's PENDING->ENABLED transition.
+    if stream_mode == pg_subscription::LOGICALREP_STREAM_PARALLEL {
+        ereport(ERROR)
+            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("streaming = parallel is not supported yet (use streaming = on)")
+            .finish(loc("start_logical_streaming"))?;
+    }
     let pubnames = publications
         .iter()
         .map(|p| format!("\"{}\"", p.replace('"', "\"\"")))
@@ -446,6 +458,9 @@ fn start_logical_streaming_opts(
     cmd.push_str(&format!(", publication_names {pubnames_literal}"));
     if binary {
         cmd.push_str(", binary 'true'");
+    }
+    if stream_mode != pg_subscription::LOGICALREP_STREAM_OFF {
+        cmd.push_str(", streaming 'on'");
     }
     if two_phase {
         cmd.push_str(", two_phase 'on'");

@@ -1530,3 +1530,78 @@ fn spill_tuplecid_and_speculative_forms_roundtrip() {
     rb.iter_txn_finish(state);
     rb.cleanup_txn(txn).unwrap();
 }
+
+// ---- streaming eviction selection -------------------------------------------
+
+#[test]
+fn largest_streamable_top_txn_selection_rules() {
+    let mut rb = rb();
+
+    // txn 200: streamable, base snapshot, two changes.
+    rb.queue_change(200, 100, msg_change(&"x".repeat(500)), false).unwrap();
+    rb.queue_change(200, 110, msg_change("small"), false).unwrap();
+    rb.set_base_snapshot(200, 90, snap(200));
+    // txn 201: bigger but no base snapshot -> not a candidate.
+    rb.queue_change(201, 120, msg_change(&"y".repeat(5000)), false).unwrap();
+    // txn 202: base snapshot but only non-streamable changes.
+    rb.add_new_command_id(202, 130, 7).unwrap();
+    rb.set_base_snapshot(202, 125, snap(202));
+
+    let t200 = rb.txn_by_xid(200, false, 0, false).0.unwrap();
+    let picked = rb.largest_streamable_top_txn();
+    assert_eq!(picked, Some(t200), "only the snapshot-bearing streamable txn qualifies");
+
+    // A partial change disqualifies the toplevel.
+    rb.txn_mut(t200).txn_flags |= RBTXN_HAS_PARTIAL_CHANGE;
+    assert_eq!(rb.largest_streamable_top_txn(), None);
+    rb.txn_mut(t200).txn_flags &= !RBTXN_HAS_PARTIAL_CHANGE;
+
+    // An aborted txn is skipped.
+    rb.txn_mut(t200).txn_flags |= RBTXN_IS_ABORTED;
+    assert_eq!(rb.largest_streamable_top_txn(), None);
+}
+
+#[test]
+fn can_start_streaming_needs_callbacks_and_ready_flag() {
+    let mut rb = rb();
+    assert!(!rb.can_stream());
+    rb.streaming_ready = true;
+    assert!(!rb.can_start_streaming(), "no stream callbacks installed");
+
+    fn noop_lsn_cb(
+        _: &mut ReorderBuffer,
+        _: TxnId,
+        _: XLogRecPtr,
+    ) -> types_error::PgResult<()> {
+        Ok(())
+    }
+    rb.callbacks.stream_start = Some(noop_lsn_cb);
+    assert!(rb.can_stream());
+    assert!(rb.can_start_streaming());
+    rb.streaming_ready = false;
+    assert!(!rb.can_start_streaming(), "decode loop has not reached a consistent point");
+}
+
+#[test]
+fn save_txn_snapshot_copies_uncopied_snapshots() {
+    let mut rb = rb();
+    rb.queue_change(210, 100, msg_change("x"), false).unwrap();
+    let txn = rb.txn_by_xid(210, false, 0, false).0.unwrap();
+
+    // Uncopied (shared snapbuild-style) snapshot: a private copy is stored.
+    let shared = snap(210);
+    assert!(!shared.copied);
+    rb.save_txn_snapshot(txn, &shared, 3);
+    {
+        let stored = rb.txn(txn).snapshot_now.as_ref().unwrap();
+        assert!(stored.copied, "shared snapshots are copied before storing");
+        assert_eq!(stored.curcid.get(), 3);
+        assert_eq!(rb.txn(txn).command_id, 3);
+    }
+
+    // Already-copied snapshot: stored as-is (same Rc identity).
+    let copied = rb.copy_snap(&snap(211), txn, 5);
+    rb.save_txn_snapshot(txn, &copied, 5);
+    let stored = rb.txn(txn).snapshot_now.as_ref().unwrap();
+    assert!(Rc::ptr_eq(stored, &copied), "copied snapshots are not re-copied");
+}

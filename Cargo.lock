@@ -8592,6 +8592,7 @@ dependencies = [
  "execindexing",
  "execreplication",
  "exectuples",
+ "fd",
  "fmgr_seams",
  "guc_tables",
  "heapam",

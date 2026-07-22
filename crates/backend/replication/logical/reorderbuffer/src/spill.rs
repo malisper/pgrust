@@ -25,7 +25,7 @@ use types_storage::{RelFileLocator, SharedInvalidationMessage};
 use types_tuple::{BlockIdData, ItemPointerData, SizeofHeapTupleHeader};
 
 use crate::{
-    dl_delete, dl_iter, rb_error, unported, ChangeId, ListHead, ReorderBuffer,
+    dl_delete, dl_iter, rb_error, ChangeId, ListHead, ReorderBuffer,
     ReorderBufferChange, ReorderBufferChangeData, ReorderBufferChangeType,
     ReorderBufferChangeType::*, TxnId, INVALID_ID, RBTXN_IS_ABORTED, RBTXN_IS_SERIALIZED,
     RBTXN_IS_SERIALIZED_CLEAR,
@@ -277,30 +277,44 @@ impl ReorderBuffer {
         // Loop rather than evicting once: the GUC can shrink between changes,
         // so one eviction is not guaranteed to get back under the limit.
         while self.size >= limit || (immediate && self.size > 0) {
-            // C prefers streaming the largest streamable toplevel txn when the
-            // output plugin supports it (ReorderBufferCanStartStreaming);
-            // streaming is phase-2, and no plugin installs stream callbacks
-            // yet — fail loudly rather than silently spilling if one does.
-            if self.can_stream() {
-                unported("ReorderBufferStreamTXN (streaming): phase-2");
+            // Prefer evicting the largest streamable toplevel transaction by
+            // streaming it, when the plugin supports it and a consistent
+            // point was reached; otherwise spill the largest (sub)txn.
+            let streamable = if self.can_start_streaming() {
+                self.largest_streamable_top_txn()
+            } else {
+                None
+            };
+            if let Some(txn) = streamable {
+                debug_assert!(self.txn(txn).is_toptxn());
+                debug_assert!(self.txn(txn).total_size > 0);
+                debug_assert!(self.size >= self.txn(txn).total_size);
+
+                // Skip the transaction if aborted.
+                if self.check_and_truncate_aborted_txn(txn)? {
+                    continue;
+                }
+
+                self.stream_txn(txn)?;
+            } else {
+                // Pick the largest transaction (or subtransaction) and evict
+                // it from memory by serializing it to disk.
+                let txn = self.largest_txn().expect("nonzero rb size implies a sized txn");
+                debug_assert!(self.txn(txn).size > 0);
+                debug_assert!(self.size >= self.txn(txn).size);
+
+                // Skip the transaction if aborted.
+                if self.check_and_truncate_aborted_txn(txn)? {
+                    continue;
+                }
+
+                self.serialize_txn(txn)?;
+
+                // After eviction, the transaction must hold no accounted
+                // memory.
+                debug_assert_eq!(self.txn(txn).size, 0);
+                debug_assert_eq!(self.txn(txn).nentries_mem, 0);
             }
-
-            // Pick the largest transaction (or subtransaction) and evict it
-            // from memory by serializing it to disk.
-            let txn = self.largest_txn().expect("nonzero rb size implies a sized txn");
-            debug_assert!(self.txn(txn).size > 0);
-            debug_assert!(self.size >= self.txn(txn).size);
-
-            // Skip the transaction if aborted.
-            if self.check_and_truncate_aborted_txn(txn)? {
-                continue;
-            }
-
-            self.serialize_txn(txn)?;
-
-            // After eviction, the transaction must hold no accounted memory.
-            debug_assert_eq!(self.txn(txn).size, 0);
-            debug_assert_eq!(self.txn(txn).nentries_mem, 0);
         }
 
         debug_assert!(self.size < limit);
