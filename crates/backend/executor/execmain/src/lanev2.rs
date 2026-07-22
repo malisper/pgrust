@@ -13356,6 +13356,26 @@ impl<'mcx> Sink<'mcx> for StagedFoldAggSink<'_, 'mcx> {
 /// Engagement trace for the composition feeds, env-gated
 /// (`PGRUST_LANE_V2_TRACE=1`): one line per build-feed engagement on stderr.
 /// Diagnostics only — never affects execution.
+/// GL-VECACCEPT lane posture (knob unification, the flip's coherent
+/// surface): `PGRUST_RUNTIME_AGG_VECACCEPT` governs the WHOLE vectorized-
+/// accept lane — the distinct sink's whole-granule accept (GL-VECACCEPT-1)
+/// AND the K2 agg drain's (GL-VECACCEPT-2). DEFAULT ON (both flips'
+/// evidence: GL-VECACCEPT-1 §5b — 0.64-0.72 vec/base everywhere incl. the
+/// shipped binary; GL-VECACCEPT-2 §4 — never loses a cell, flips the
+/// 1e6-group band); t35 flipped-kill: `0|off` restores BOTH incumbent
+/// accepts byte-identically. Per-sink sub-kill: the K2 side additionally
+/// honors `PGRUST_RUNTIME_AGG_VECACCEPT_K2=0|off` (adjudication
+/// granularity — kill one sink without the other).
+pub(super) fn vecaccept_lane_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&ON, || {
+        !matches!(
+            std::env::var("PGRUST_RUNTIME_AGG_VECACCEPT").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
 fn trace_feed(msg: &str) {
     static ON: OnceLock<bool> = OnceLock::new();
     if crate::once_val(&ON, || {

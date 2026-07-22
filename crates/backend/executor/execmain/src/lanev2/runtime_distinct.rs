@@ -59,8 +59,8 @@ use ::executils::{EStateData, EcxtId, ExecSlotId};
 use ::nodeagg::{
     pd_bucket_precount, pd_concat_buckets, pd_emit_bucket, pd_empty_grouped_table,
     pd_merge_bucket_refs, pd_route_value_records, pd_spill_record_width, pd_table_from_spill,
-    PdBucketMerger, PdEmitBucket, PdEmitRecipe, PdFeed, PdHandedTable, PdMerged, PdSinkLocal,
-    PdSpec, PdTopnCand, PdTopnSpec, PD_SINK_GROUP_PARTS,
+    pd_vec_plan, PdBucketMerger, PdEmitBucket, PdEmitRecipe, PdFeed, PdHandedTable, PdInt,
+    PdMerged, PdSinkLocal, PdSpec, PdTopnCand, PdTopnSpec, PdVecScratch, PD_SINK_GROUP_PARTS,
 };
 use ::types_error::{PgError, PgResult, ERROR};
 use ::types_nodes::plannodes::PlannedStmt;
@@ -201,6 +201,31 @@ pub(super) struct RuntimeDistinctShared {
     /// M2 inc-1 standing channel: the live board entry, held for the
     /// PRIVATE_SHUTDOWN standing join (standing_channel, scan discipline).
     standing: Mutex<Option<Arc<parallel::standing::StandingEngagement>>>,
+    /// GL-VECACCEPT-1 (PGRUST_RUNTIME_AGG_VECACCEPT, default OFF): Some =
+    /// every accept claim runs the vectorized whole-granule drive
+    /// ([`PdAcceptSink::vec_claim`]) — direct decoded lanes, batch hash,
+    /// prefetched batch probe/resolve, columnar rider folds, the staged
+    /// set feed in bulk. None = the incumbent per-row emit/accept pipeline
+    /// byte-for-byte. Resolved once at engage (fail-closed admission:
+    /// `vec_cols`).
+    vec: Option<VecCols>,
+    /// Vec-accept census (the mechanism witness: rows/granules through the
+    /// direct lanes; printed at finalize under the trace channel).
+    vec_rows: AtomicU64,
+    vec_granules: AtomicU64,
+}
+
+/// GL-VECACCEPT-1 lane geometry, scan-column space: the [`pd_vec_plan`]
+/// atts mapped through the (Var-only) projection census onto 0-based scan
+/// columns the direct granule feed can hand out whole.
+struct VecCols {
+    key_col: u16,
+    key_kind: PdInt,
+    set_col: u16,
+    set_kind: PdInt,
+    /// Aligned with `spec.vocab`: Some = a value lane to canonicalize +
+    /// fold; None = count-only rider (no lane read).
+    riders: Vec<Option<(u16, PdInt)>>,
 }
 
 // SAFETY: (i) each `out` cell has a single writer — the sink contract
@@ -306,6 +331,17 @@ impl runtime::SealedParallelSink for RuntimeDistinctShared {
             // batch-insert lane engagement trace (e2e leg pin; once per
             // engagement — worker 0's fork).
             trace_feed("runtime-distinct: batched set-insert armed");
+        }
+        if self.vec.is_some() {
+            // GL-VECACCEPT-1 invariant: the engagement-level admission
+            // (`vec_cols`) is the Local-side gate's superset — a Local
+            // that cannot run the vec schedule under an armed engagement
+            // is a contract breach, never a silent per-row fallback.
+            debug_assert!(pd.vec_admissible(), "vec engagement forked a non-vec Local");
+            if _worker == 0 {
+                // The armed-witness line (e2e leg pin; once per engagement).
+                trace_feed("runtime-distinct: vecaccept armed");
+            }
         }
         DistinctSinkLocal { pd, spill: None }
     }
@@ -430,6 +466,15 @@ impl runtime::SealedParallelSink for RuntimeDistinctShared {
     fn finalize(&self, _sealed: &[DistinctSealed]) {
         if self.failed.load(Ordering::SeqCst) || self.crossed.load(Ordering::SeqCst) {
             return;
+        }
+        if self.vec.is_some() {
+            // GL-VECACCEPT-1 accept census (the mechanism witness: every
+            // accepted row rode the direct lanes, none the per-row path).
+            trace_feed(&format!(
+                "runtime-distinct: vecaccept rows={} granules={}",
+                self.vec_rows.load(Ordering::Relaxed),
+                self.vec_granules.load(Ordering::Relaxed),
+            ));
         }
         // SAFETY: single-threaded under last-worker-out, after every combine.
         let cells: Vec<DstCombined> = self
@@ -920,6 +965,22 @@ struct WorkerExec {
     /// EA-on-morsels: this worker's cumulative instrument partial (written
     /// only when the engagement carries `ea_instr_slots`).
     instr: std::cell::RefCell<InstrumentPartial>,
+    /// GL-VECACCEPT-1 per-worker lane scratch (canonicalized granule
+    /// lanes + the builder's hash/gid lanes) — allocated once, reused
+    /// across claims; unused (empty) when the engagement runs the
+    /// incumbent per-row accept.
+    vec_scratch: std::cell::RefCell<VecClaimScratch>,
+}
+
+/// GL-VECACCEPT-1 canonicalization scratch: one i64 lane per read column
+/// (the lanes borrow `&mut ss` one at a time — the topn-heap two-phase
+/// borrow discipline — so each is copied out before the fused passes run).
+#[derive(Default)]
+struct VecClaimScratch {
+    keys: Vec<i64>,
+    vals: Vec<i64>,
+    riders: Vec<Vec<i64>>,
+    pd: PdVecScratch,
 }
 
 thread_local! {
@@ -1025,6 +1086,111 @@ impl PdAcceptSink<'_> {
             ));
         }
         Ok(true)
+    }
+
+    /// GL-VECACCEPT-1: the vectorized whole-granule accept for one morsel
+    /// claim (the incumbent `drain_pipeline` per-row emit/deform/accept is
+    /// bypassed wholesale). Per granule: hand the decoded lanes out whole
+    /// (the topn-heap direct feed), canonicalize each into worker scratch
+    /// (one `&mut ss` lane borrow at a time), then the builder's fused
+    /// passes — batch hash → prefetched batch probe/resolve → columnar
+    /// rider folds → the staged distinct-set feed (dup-skip, window
+    /// flushes, and the window-grain budget law all unchanged; a crossing
+    /// runs the SAME spill-epoch law and resumes the set feed — phases 1-3
+    /// never spill). The budget/locality checks move to granule grain (a
+    /// documented one-granule overshoot of the incumbent's per-row check —
+    /// same law family as the staged one-batch-overshoot contract).
+    ///
+    /// A lane the part cannot serve directly (dict-coded — impossible for
+    /// the admitted int-family columns, kept fail-closed) flips `crossed`:
+    /// RG abort → serial rerun, nothing consumed.
+    fn vec_claim<'mcx>(
+        &mut self,
+        cols: &VecCols,
+        vs: &mut VecClaimScratch,
+        ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+        estate: &mut EStateData<'mcx>,
+        range: runtime::MorselRange,
+    ) -> PgResult<()> {
+        ::nodeseqscan::seq_scan_set_morsel_range(ss, estate, range.start, range.end)?;
+        vs.riders.resize_with(cols.riders.len(), Vec::new);
+        let mut rows = 0u64;
+        let mut granules = 0u64;
+        'claim: loop {
+            ::postgres_seams::check_for_interrupts::call()?;
+            let Some((nrows, _base)) = ::nodeseqscan::seq_scan_topn_direct_next_granule(ss)?
+            else {
+                break;
+            };
+            let n = nrows as usize;
+            // Canonicalize the granule's lanes (borrow-scoped, one at a
+            // time; decode-on-demand is granule-memoized underneath).
+            let mut lane_into = |col: u16, kind: PdInt, out: &mut Vec<i64>| -> bool {
+                let Some(lane) = ::nodeseqscan::seq_scan_topn_direct_lane(ss, col as usize)
+                else {
+                    return false;
+                };
+                out.clear();
+                out.extend(lane[..n].iter().map(|&d| kind.read(d)));
+                true
+            };
+            let mut ok = lane_into(cols.key_col, cols.key_kind, &mut vs.keys)
+                && lane_into(cols.set_col, cols.set_kind, &mut vs.vals);
+            for (vi, r) in cols.riders.iter().enumerate() {
+                if !ok {
+                    break;
+                }
+                if let Some((col, kind)) = r {
+                    ok = lane_into(*col, *kind, &mut vs.riders[vi]);
+                }
+            }
+            if !ok {
+                // Fail-closed: the direct feed cannot serve a lane —
+                // refuse to the serial arm (never an error, nothing kept).
+                trace_feed("runtime-distinct: vecaccept lane refused — serial fallback");
+                self.crossed = true;
+                return Ok(());
+            }
+            // Phases 1-3 (group resolve + rider folds; infallible wrt the
+            // budget — group growth is metered at the staged flush below,
+            // the incumbent staged law).
+            let riders: Vec<Option<&[i64]>> = cols
+                .riders
+                .iter()
+                .enumerate()
+                .map(|(vi, r)| r.as_ref().map(|_| vs.riders[vi].as_slice()))
+                .collect();
+            self.local.pd.vec_resolve_fold(&vs.keys, &riders, &mut vs.pd);
+            // Phase 4: the staged set feed, resumable across spill epochs.
+            let mut at = 0usize;
+            loop {
+                let (feed, consumed) =
+                    self.local.pd.vec_stage_sets(&vs.pd.gids, &vs.vals, at)?;
+                at = consumed;
+                if feed == PdFeed::Ok {
+                    break;
+                }
+                if !self.try_spill_epoch(false)? {
+                    self.crossed = true;
+                    break 'claim;
+                }
+            }
+            // Locality flush at granule grain (the incumbent's per-row
+            // check, one-granule overshoot; same cap, same epoch law).
+            if let Some(cap) = self.shared.locality_cap {
+                if !self.locality_denied
+                    && self.local.pd.pd_spill_freeable_bytes() >= cap
+                    && !self.try_spill_epoch(true)?
+                {
+                    self.locality_denied = true;
+                }
+            }
+            rows += n as u64;
+            granules += 1;
+        }
+        self.shared.vec_rows.fetch_add(rows, Ordering::Relaxed);
+        self.shared.vec_granules.fetch_add(granules, Ordering::Relaxed);
+        Ok(())
     }
 }
 
@@ -1157,13 +1323,22 @@ impl RuntimeDistinctShared {
                         locality_denied: false,
                         tally: ea.then_some(&mut ipb.rows),
                     };
-                    let fed = drain_pipeline(
-                        ss,
-                        &mut SeqScanSource,
-                        &mut SeqScanFilterProject,
-                        &mut sink,
-                        estate,
-                    );
+                    // GL-VECACCEPT-1: the vectorized whole-granule drive
+                    // owns the claim when armed; the incumbent per-row
+                    // emit/accept pipeline is the default, byte-for-byte.
+                    let fed = match &self.vec {
+                        Some(cols) => {
+                            let mut vsb = ex.vec_scratch.borrow_mut();
+                            sink.vec_claim(cols, &mut vsb, ss, estate, range.clone())
+                        }
+                        None => drain_pipeline(
+                            ss,
+                            &mut SeqScanSource,
+                            &mut SeqScanFilterProject,
+                            &mut sink,
+                            estate,
+                        ),
+                    };
                     let crossed = sink.crossed;
                     fed?;
                     // Claim fold + overwrite export (EXACT — accumulate in
@@ -1404,6 +1579,7 @@ fn build_worker_exec(payload: &Arc<RuntimeDistinctShared>) -> PgResult<()> {
                     reset_tmp: payload.spec.any_bytes(),
                     errored: std::cell::Cell::new(false),
                     instr: Default::default(),
+                    vec_scratch: Default::default(),
                 });
                 Ok(())
             }
@@ -1461,6 +1637,97 @@ fn ensure_hooks_registered() {
         parallel::register_parallel_post_task_park(runtime_distinct_post_task_park);
         parallel::register_parallel_private_shutdown(runtime_distinct_private_shutdown);
     });
+}
+
+/// GL-VECACCEPT-1 knob — DEFAULT ON (flip staged off the 100M verdict:
+/// vec/base 0.64-0.72 at every measured (dop, shape) cell on fast-profile
+/// AND the shipped dist binary; flip-preview at unpinned defaults −6..−10%;
+/// parity byte-equal on every arm of every job; census exact; the
+/// symbolized profile moved the accept-substrate samples exactly as
+/// chartered — letter GL-VECACCEPT-1 §5). t35 flipped-kill spelling:
+/// `PGRUST_RUNTIME_AGG_VECACCEPT=0|off` restores the incumbent per-row
+/// accept pipeline byte-identically (the vectorized schedule feeds the
+/// same kernels in the same row order — set bytes identical by
+/// construction, unit-pinned).
+fn runtime_agg_vecaccept_enabled() -> bool {
+    // Knob unification (GL-VECACCEPT-2 flip prep): the lane posture is
+    // shared with the K2 agg drain — one default, one kill.
+    super::vecaccept_lane_enabled()
+}
+
+/// GL-VECACCEPT-1 admission (fail-closed; `None` = the incumbent per-row
+/// accept, byte-for-byte): knob armed; non-EA session (the EA row funnel
+/// is per-row machinery — a named residual, not a law); the staged
+/// set-insert lane armed ([`::nodeagg::pd_batch_insert_enabled`] — the
+/// Local-side `vec_admissible` twin); the [`pd_vec_plan`] shape (single
+/// int-family group key, single int-family distinct set, int-family
+/// riders); a QUAL-FREE scan (the direct lane walk applies no filters);
+/// and a Var-only projection census mapping every referenced att onto a
+/// scan column the direct feed can serve (the topn-heap tlist_map law).
+fn vec_cols(
+    spec: &PdSpec,
+    ss: &::nodeseqscan::SeqScanState<'_>,
+    scan_plan: &::types_nodes::plannodes::SeqScan<'_>,
+    outer_desc: &::types_tuple::TupleDescData<'static>,
+    ea: bool,
+) -> Option<VecCols> {
+    if !runtime_agg_vecaccept_enabled() || ea || !::nodeagg::pd_batch_insert_enabled() {
+        return None;
+    }
+    if scan_plan.scan.plan.qual.iter().next().is_some() {
+        return None;
+    }
+    let plan = pd_vec_plan(spec)?;
+    let natts = outer_desc.natts as usize;
+    let tlist_map: Vec<u16> = match ss.ss.ps_ProjInfo.as_ref() {
+        // No projection: outer resno j is scan attno j (physical tlist).
+        None => (0..natts as u16).collect(),
+        // Projected scans admit only the pure Var-copy census.
+        Some(p) => match p.pi_state.scan_proj_cols() {
+            Some(cols) => {
+                if cols.any_arith() || cols.n as usize != natts {
+                    return None;
+                }
+                cols.cols[..natts]
+                    .iter()
+                    .map(|c| match *c {
+                        ::execexpr::ScanProjCol::Var { attnum } => Some(attnum),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<u16>>>()?
+            }
+            // Single-column pure-Var projection compiles to a kernel (no
+            // step program => no census) — the topn-heap admission's arm.
+            None => match p.pi_state.kernel() {
+                ::execexpr::Kernel::JustAssignVar {
+                    src: ::execexpr::SlotSrc::Scan,
+                    attnum,
+                    resultnum: 0,
+                }
+                | ::execexpr::Kernel::JustAssignVarVirt {
+                    src: ::execexpr::SlotSrc::Scan,
+                    attnum,
+                    resultnum: 0,
+                } if natts == 1 => vec![attnum],
+                _ => return None,
+            },
+        },
+    };
+    let map = |att: u16| -> Option<u16> { tlist_map.get(att as usize).copied() };
+    Some(VecCols {
+        key_col: map(plan.key_att)?,
+        key_kind: plan.key_kind,
+        set_col: map(plan.set_att)?,
+        set_kind: plan.set_kind,
+        riders: plan
+            .riders
+            .iter()
+            .map(|r| match r {
+                None => Some(None),
+                Some((att, kind)) => map(*att).map(|c| Some((c, *kind))),
+            })
+            .collect::<Option<Vec<_>>>()?,
+    })
 }
 
 /// M3.5 spill arm kill switch: ON by default when the sink engages
@@ -2054,6 +2321,9 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
         *rd_shape_refused = true;
         return Ok(None);
     }
+    // GL-VECACCEPT-1 (knob-gated, default OFF; fail-closed to the incumbent
+    // per-row accept — a None changes NOTHING).
+    let vec = vec_cols(&spec, ss, scan_plan, desc, ea);
     if !estate
         .es_snapshot
         .as_deref()
@@ -2093,7 +2363,7 @@ pub(super) fn try_own_sorted_distinct_runtime<'mcx>(
     // --- Engage.
     engage(
         agg, estate, rt, dop, lowwidth, total_granules, source, spec, order, paremit, topn,
-        scan_node, ea,
+        vec, scan_node, ea,
     )
 }
 
@@ -2110,6 +2380,7 @@ fn engage<'mcx>(
     order: Vec<::nodeagg::HashGroupOrderKey>,
     paremit: Option<Arc<PdEmitRecipe>>,
     topn: Option<PdTopnSpec>,
+    vec: Option<VecCols>,
     scan_node: ::types_nodes::node_tree::Node<'mcx>,
     ea: bool,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
@@ -2202,6 +2473,14 @@ fn engage<'mcx>(
         ea_timer: ea && runtime_instr::ea_timer(estate),
         ea_epoch: std::time::Instant::now(),
         standing: Mutex::new(None),
+        vec: {
+            if vec.is_some() {
+                lane_trace(&format!("runtime-distinct: vecaccept engaged (dop={dop})"));
+            }
+            vec
+        },
+        vec_rows: AtomicU64::new(0),
+        vec_granules: AtomicU64::new(0),
     });
 
     xact::EnterParallelMode();
