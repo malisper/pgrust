@@ -15,14 +15,16 @@
 //              (eq/ne/LIKE/ILIKE + lazy regex memo) over SoaDictLane.
 // - dicteval:  generic pure-expression evaluation memoized per dict code
 //              (dict-pushdown), lazy-by-default with eager proofs.
-// - textlen:   length()/char_length()/octet_length() lane vocabulary.
 //
 // Everything unsupported refuses loudly and keeps the per-row drive.
+// (A third length-kernel surface, textlen.rs, was deleted 2026-07-21: it
+// shipped with no non-test caller — lanefold owns the fold-path length
+// kernels and dicteval owns the dict-expr-key ones, so the intended
+// consumer never materialized.)
 mod dict;
 mod dicteval;
 pub mod interp;
 pub mod shape;
-mod textlen;
 mod translate;
 
 pub use dicteval::{
@@ -44,9 +46,6 @@ pub fn func_catalog_rettype(fn_oid: types_core::Oid) -> Option<types_core::Oid> 
     syscache_seams::lookup_pg_proc_shape::call(fn_oid).ok().flatten().map(|s| s.prorettype)
 }
 pub use dict::{collation_usable, inline_varlena_payload, non_inline_lane_datum};
-pub use textlen::{
-    lane_text_payload, lane_textlen_eval, lane_textlen_mode, TEXTLEN_CHAR, TEXTLEN_OCTET,
-};
 pub use translate::{
     eval_lane_qual, lane_cmp_for_fn_oid, translate_scan_qual, LaneQualProg, StagedZoneSrc,
 };

@@ -669,20 +669,12 @@ fn underscore_pattern_admits_without_kernel() {
     }
 }
 
-// ------------------------------------------------------------------ textlen
+// ------------------------------------------------------------- inline const
 
 #[test]
-fn textlen_modes_and_eval() {
-    use laneexec::{lane_textlen_eval, lane_textlen_mode, TEXTLEN_CHAR, TEXTLEN_OCTET};
-    assert_eq!(lane_textlen_mode(1257), Some(TEXTLEN_CHAR));
-    assert_eq!(lane_textlen_mode(1381), Some(TEXTLEN_CHAR));
-    assert_eq!(lane_textlen_mode(1374), Some(TEXTLEN_OCTET));
-    assert_eq!(lane_textlen_mode(67), None);
-    assert_eq!(lane_textlen_eval(b"hello", TEXTLEN_OCTET).unwrap(), 5);
-    assert_eq!(lane_textlen_eval(b"", TEXTLEN_OCTET).unwrap(), 0);
-    // Payload probe: inline images answer, the datum path mirrors dict.rs.
+fn inline_const_probe() {
+    // Inline images answer the walker-side Const admission probe.
     let d = text_datum(b"xyz");
-    assert_eq!(laneexec::lane_text_payload(d), Some(&b"xyz"[..]));
     assert!(laneexec::inline_const_ok(d));
 }
 
