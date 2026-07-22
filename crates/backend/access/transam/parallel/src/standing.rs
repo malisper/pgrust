@@ -479,6 +479,28 @@ pub fn try_engage(shared: &Arc<ParallelShared>, dop: usize) -> Option<Arc<Standi
     Some(entry)
 }
 
+/// Close the board entry WITHOUT waiting: no new claims; ticketless parked
+/// workers wake off the board. The leader still owes `close_and_await`
+/// before its arena unwinds — this is the CHASE-ORDERING face
+/// (GL-STMTTASK-1): an interrupt chase against a still-open board races a
+/// re-claim storm (every detach notifies the gang cv; parked workers
+/// re-claim the aborted-but-open engagement in a tight serve cycle —
+/// witnessed at ~4k claims per chase — and a join poll can livelock against
+/// perpetually in-flight claims). Close first, then chase, then await.
+/// Idempotent with `close_and_await` (same closed store + board clear).
+pub fn close_no_wait(entry: &Arc<StandingEngagement>) {
+    entry.closed.store(true, SeqCst);
+    let (lock, cv) = gang();
+    let mut g = pgsync::lock(lock);
+    if let Some(cur) = &g.current {
+        if Arc::ptr_eq(cur, entry) {
+            g.current = None;
+        }
+    }
+    drop(g);
+    cv.notify_all();
+}
+
 /// Leader side: close the board entry (no new claims) and wait until every
 /// claimed participant detached. Interrupt-opaque by design: detach is
 /// Drop-guaranteed on the workers, so this wait is bounded by one drive

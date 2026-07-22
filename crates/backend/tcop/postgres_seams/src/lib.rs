@@ -108,3 +108,117 @@ seam_core::seam!(
     // fallback identity. Exits the process; never returns.
     pub fn postgres_sim_net_main(argv: &[String], username: &str) -> !
 );
+
+// ---------------------------------------------------------------------------
+// GL-STMTTASK-1 — the statement-as-task PROTOCOL ARM (not a seam call: a
+// statement-scoped thread-local handshake between the two sides of the
+// seam boundary). exec_simple_query (tcop) arms exactly one statement's
+// top-level portal run; the executor's statement-task hook consumes the
+// arm on its first entry. Lives here because it is the one crate both
+// sides production-link (tcop reaches the executor only through seam
+// crates; the executor cannot name tcop).
+// ---------------------------------------------------------------------------
+pub mod stmt_task_arm {
+    /// The unloaded posture's pure parse (unit-pinned below): DEFAULT OFF;
+    /// ON iff exactly `1`/`on` (t35 exact-spelling arming law).
+    fn posture(v: Option<&str>) -> bool {
+        matches!(v.map(str::trim), Some("1") | Some("on"))
+    }
+
+    /// `PGRUST_STMT_TASK` — the GL-STMTTASK-1 master knob (kill knob for
+    /// the statement-as-task executor arm). ONE authority: both the tcop
+    /// arm site and the executor hook resolve through this cell.
+    pub fn stmt_task_enabled() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| posture(std::env::var("PGRUST_STMT_TASK").ok().as_deref()))
+    }
+
+    thread_local! {
+        /// Set for exactly one simple-protocol statement's portal run on
+        /// the session thread; consumed (take) by the FIRST executor-run
+        /// hook entry of that statement — the top-level run by
+        /// construction. Never set on worker threads.
+        static ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// RAII disarm: the arm can never leak past its statement (error
+    /// unwinds included).
+    pub struct StmtTaskArm(());
+
+    impl Drop for StmtTaskArm {
+        fn drop(&mut self) {
+            ARMED.with(|c| c.set(false));
+        }
+    }
+
+    /// Protocol-side arming. `eligible` carries the protocol-level facts
+    /// only the caller knows (simple protocol, single statement, wire
+    /// dest, raw SELECT, normal non-subtransaction session state). Arms
+    /// only when the knob is ON; the executor hook owns the plan-shape
+    /// gates. Knob-OFF cost: one memoized bool read.
+    pub fn arm_statement(eligible: bool) -> StmtTaskArm {
+        if eligible && stmt_task_enabled() {
+            ARMED.with(|c| c.set(true));
+        }
+        StmtTaskArm(())
+    }
+
+    /// Consume the arm (executor side; first hook entry of the statement).
+    pub fn take_armed() -> bool {
+        ARMED.with(|c| c.replace(false))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// t35 exact-spelling law: DEFAULT OFF; arms on exactly `1`/`on`
+        /// (trimmed); every other spelling stays OFF.
+        #[test]
+        fn knob_default_off_exact_spellings() {
+            assert!(!posture(None), "unset = default OFF");
+            assert!(posture(Some("1")), "=1 arms");
+            assert!(posture(Some("on")), "=on arms");
+            assert!(posture(Some(" 1 ")), "trimmed arming spelling");
+            assert!(!posture(Some("0")));
+            assert!(!posture(Some("off")));
+            assert!(!posture(Some("true")), "non-registry spelling stays OFF");
+            assert!(!posture(Some("ON")), "case-sensitive: only the exact spellings arm");
+            assert!(!posture(Some("")));
+        }
+
+        /// Armed-witness companion (the pooldb pattern): the process switch
+        /// agrees with the env's spelled posture when the env is set.
+        #[test]
+        fn knob_env_takes() {
+            let Ok(v) = std::env::var("PGRUST_STMT_TASK") else {
+                println!("SKIP: PGRUST_STMT_TASK unset (armed-witness leg runs it =0)");
+                return;
+            };
+            let expect = posture(Some(v.as_str()));
+            assert_eq!(
+                stmt_task_enabled(),
+                expect,
+                "process switch disagrees with spelled posture"
+            );
+        }
+
+        /// The arm is statement-scoped and consumed at most once; an
+        /// ineligible arm never sets the flag.
+        #[test]
+        fn arm_scoped_and_consumed() {
+            {
+                let _g = arm_statement(false);
+                assert!(!take_armed(), "ineligible never arms");
+            }
+            ARMED.with(|c| c.set(true));
+            assert!(take_armed(), "armed flag consumed");
+            assert!(!take_armed(), "consumed exactly once");
+            {
+                ARMED.with(|c| c.set(true));
+                let _g = StmtTaskArm(());
+            }
+            assert!(!take_armed(), "guard drop disarms");
+        }
+    }
+}
