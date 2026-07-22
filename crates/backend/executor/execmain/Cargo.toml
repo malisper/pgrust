@@ -110,6 +110,10 @@ nodelockrows = { path = "../nodelockrows" }
 types_snapshot = { path = "../../../_support/types/snapshot" }
 pgstat = { path = "../../utils/activity/pgstat" }
 tableam = { path = "../../access/table/tableam" }
+# W2a block-run worker-direct writes: target open + bulk-insert state +
+# the parallel-write token live below the executor.
+table = { path = "../../access/table/table" }
+heapam = { path = "../../access/heap/heapam" }
 # SEAM-WIRING (SE10-GATES item 1): relam_is_pgrcolumnar for the §4.1
 # CURRENT-OF eligibility probe's AM narrowing (execcurrent.rs).
 reloptions = { path = "../../access/common/reloptions" }

@@ -62,8 +62,9 @@ pub(crate) fn RelationInitTableAccessMethod(relkind: u8, relam: Oid) -> PgResult
     }
 }
 
-// Steady-state arms only: the historic-snapshot (logical decoding) refresh and
-// the parallel-worker rd_firstRelfilelocatorSubid restore are unported.
+// Steady-state arms only: the historic-snapshot (logical decoding) refresh is
+// unported. The parallel-worker rd_firstRelfilelocatorSubid restore is ported
+// below (W2a parallel writes; C c6b92041 parity).
 pub(crate) fn RelationInitPhysicalAddr(data: &RelationData<'_>) -> PgResult<()> {
     if !types_rel::RELKIND_HAS_STORAGE(data.rd_rel.relkind) {
         return Ok(());
@@ -94,8 +95,32 @@ pub(crate) fn RelationInitPhysicalAddr(data: &RelationData<'_>) -> PgResult<()> 
         }
         n
     };
-    data.rd_locator
-        .set(types_storage::RelFileLocator::new(spc, db, rel_number));
+    let locator = types_storage::RelFileLocator::new(spc, db, rel_number);
+    data.rd_locator.set(locator);
+
+    // C relcache.c (c6b92041 wal_level=minimal WAL-skip): "For
+    // RelationNeedsWAL() to answer correctly on parallel workers, restore
+    // rd_firstRelfilelocatorSubid. No subtransactions start or end while in
+    // parallel mode, so the specific SubTransactionId does not matter."
+    // A worker's fresh entry for a leader-created-this-xact relation would
+    // otherwise read as WAL-logged while the leader's reads WAL-skipped —
+    // splitting one relfilenode between logged and unlogged writes (the W2a
+    // parallel-write engage seam asserts the two agree and fails closed).
+    // pendingSyncs are restored into workers by the binder (RestorePendingSyncs),
+    // so the probe answers leader-identically. DIVERGENCE from C: also
+    // register for AtEOXact cleanup — C's worker process dies at xact end,
+    // but a retained worker thread must not park with the field set (the
+    // next task's blanket invalidation would trip RelationClearRelation's
+    // no-in-transaction-subids invariant).
+    if parallel_seams::is_parallel_worker::is_installed()
+        && parallel_seams::is_parallel_worker::call()
+        && catalog_storage_seams::rel_file_locator_skipping_wal::is_installed()
+        && catalog_storage_seams::rel_file_locator_skipping_wal::call(locator)
+    {
+        data.rd_firstRelfilelocatorSubid
+            .set(types_core::xact::TopSubTransactionId);
+        crate::store::eoxact_list_add(data.rd_id);
+    }
     Ok(())
 }
 

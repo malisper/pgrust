@@ -57,6 +57,7 @@ mod standing_channel;
 mod push;
 mod row_emit;
 mod runtime_passthrough;
+mod write_blockrun; // W2a inc-2 worker-direct block-run writes
 mod write_funnel; // W0 funnel-into-writer admission (parallel-writes design §4)
 pub(crate) use runtime_passthrough::try_passthrough_funnel;
 pub use runtime_passthrough::funnel_engagements;

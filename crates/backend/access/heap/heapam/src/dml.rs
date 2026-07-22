@@ -90,7 +90,7 @@ const fn tuple_lock_hwlock(mode: LockTupleMode) -> LOCKMODE {
 // RelationNeedsWAL (rel.h): under wal_level=minimal, relations created (or
 // given a new relfilenumber) in the current transaction skip WAL; commit
 // durability comes from smgrDoPendingSyncs.
-pub(crate) fn relation_needs_wal(rel: &RelationData<'_>) -> bool {
+pub fn relation_needs_wal(rel: &RelationData<'_>) -> bool {
     rel.is_permanent()
         && (transam_xlog_seams::xlog_standby_info_active::call()
             || (rel.rd_createSubid.get() == types_core::InvalidSubTransactionId
@@ -112,9 +112,47 @@ pub fn relation_is_accessible_in_logical_decoding(rel: &RelationData<'_>) -> boo
         && (catalog_seams::is_catalog_relation::call(rel) || rel.is_used_as_catalog_table())
 }
 
-// IsParallelWorker() (miscadmin.h): parallel workers unported.
+// IsParallelWorker() (miscadmin.h), via the seam (installed by the parallel
+// crate at boot; uninstalled = unit-test process = not a worker). This was a
+// dead stub returning false until W2a — the CTAS-under-Gather postmortem's
+// "debug asserts are not witnesses" law: unmarked worker-thread inserts must
+// ERROR in release builds too.
 fn is_parallel_worker() -> bool {
-    false
+    parallel_seams::is_parallel_worker::is_installed()
+        && parallel_seams::is_parallel_worker::call()
+}
+
+// W2a carve: the parallel-write capability token. C forbids ALL worker
+// inserts (heap_prepare_insert's IsParallelWorker ereport); pgrust's W2a
+// block-run write sink is the one sanctioned exception — it arms this token
+// around exactly its own write calls (never thread-ambient), so the guard
+// stays a live tripwire for every OTHER worker-side insert path. RAII so an
+// unwinding write cannot leak the permit into later statements on a retained
+// worker thread.
+thread_local! {
+    static PARALLEL_WRITE_PERMITS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// RAII permit for heap inserts on a parallel-worker thread (W2a block-run
+/// write sink only — see the module note on `is_parallel_worker`).
+pub struct ParallelWriteGuard(());
+
+impl ParallelWriteGuard {
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> ParallelWriteGuard {
+        PARALLEL_WRITE_PERMITS.with(|c| c.set(c.get() + 1));
+        ParallelWriteGuard(())
+    }
+}
+
+impl Drop for ParallelWriteGuard {
+    fn drop(&mut self) {
+        PARALLEL_WRITE_PERMITS.with(|c| c.set(c.get() - 1));
+    }
+}
+
+fn parallel_write_permitted() -> bool {
+    PARALLEL_WRITE_PERMITS.with(|c| c.get() > 0)
 }
 
 fn xl_heap_header(hdr: &::types_tuple::HeapTupleHeaderData) -> [u8; 5] {
@@ -180,7 +218,7 @@ fn heap_prepare_insert(
     cid: CommandId,
     options: i32,
 ) -> PgResult<()> {
-    if is_parallel_worker() {
+    if is_parallel_worker() && !parallel_write_permitted() {
         return Err(Box::new(
             PgError::error("cannot insert tuples in a parallel worker")
                 .with_sqlstate(::types_error::ERRCODE_INVALID_TRANSACTION_STATE),
