@@ -924,6 +924,36 @@ pub fn init_seams() {
             SmgrKind::Md => md::mdreadv(rlocator, &mut r.md, forknum, blocknum, buffers),
         })?
     });
+    smgr_seams::smgr_startreadv::set(|rlocator, forknum, blocknum, pages| {
+        // smgrstartreadv: interrupts held so the resolved fd cannot be closed
+        // before pgaio_io_start_readv consumes it; an ereport unwinds past the
+        // resume, exactly like C's longjmp (error recovery resets the count).
+        init_small::globals::HoldInterrupts();
+        let result = opened(rlocator, |r| match r.which {
+            SmgrKind::Md => md::mdstartreadv(rlocator, &mut r.md, forknum, blocknum, pages),
+        })
+        .and_then(|inner| inner);
+        if result.is_ok() {
+            init_small::globals::ResumeInterrupts();
+        }
+        result
+    });
+    smgr_seams::aio_smgr_reopen::set(|td, op, temp_procno, offset| {
+        let key = RelFileLocatorBackend {
+            locator: td.smgr.rlocator,
+            backend: if td.smgr.is_temp { temp_procno } else { INVALID_PROC_NUMBER },
+        };
+        match op {
+            types_storage::aio::PGAIO_OP_READV => opened(key, |r| match r.which {
+                SmgrKind::Md => {
+                    md::md_aio_reopen_fd(key, &mut r.md, td.smgr.forkNum, td.smgr.blockNum, offset)
+                }
+            })?,
+            _ => panic!("unported arm reached from smgr.c smgr_aio_reopen: writev"),
+        }
+    });
+    smgr_seams::aio_md_readv_complete::set(md::md_readv_complete);
+    smgr_seams::aio_md_readv_report::set(md::md_readv_report);
     smgr_seams::smgr_write::set(|rlocator, forknum, blocknum, buffer, skip_fsync| {
         opened(rlocator, |r| match r.which {
             SmgrKind::Md => {

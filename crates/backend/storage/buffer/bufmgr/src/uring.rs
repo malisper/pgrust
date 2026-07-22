@@ -52,12 +52,12 @@ pub fn start_read(
             Ok(Some(PrefetchOutcome::Issued))
         }
         Ok(false) => {
-            TerminateBufferIO(desc, false, BM_IO_ERROR, false);
+            TerminateBufferIO(desc, false, BM_IO_ERROR, false, false);
             UnpinBuffer(desc);
             Ok(None)
         }
         Err(e) => {
-            TerminateBufferIO(desc, false, BM_IO_ERROR, false);
+            TerminateBufferIO(desc, false, BM_IO_ERROR, false, false);
             UnpinBuffer(desc);
             Err(e)
         }
@@ -129,5 +129,5 @@ pub fn uring_read_complete(buffer: Buffer, res: i32) {
     uring_clear_io_wref(buffer);
     let desc = GetBufferDescriptor(buffer - 1);
     let ok = res == BLCKSZ as i32 && page_is_verified(BufferGetBlockPtr(buffer));
-    TerminateBufferIO(desc, false, if ok { BM_VALID } else { BM_IO_ERROR }, false);
+    TerminateBufferIO(desc, false, if ok { BM_VALID } else { BM_IO_ERROR }, false, false);
 }

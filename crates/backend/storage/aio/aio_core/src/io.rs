@@ -149,3 +149,10 @@ unsafe fn pg_pwritev_raw(fd: i32, iov: *const libc::iovec, iovcnt: i32, offset: 
         return r;
     }
 }
+
+// Current-handle conveniences for the smgr/md chain (C threads the PgAioHandle
+// pointer down; here the handle is pinned to handed_out_io by the before-start
+// assertions, so lower layers address it implicitly).
+pub fn pgaio_io_current() -> u32 {
+    current_handed_out("pgaio_io_current")
+}

@@ -1442,3 +1442,202 @@ mod tests {
         assert!(n.is_some());
     }
 }
+
+// ---------------------------------------------------------------------------
+// AIO arms (md.c): mdstartreadv + the PGAIO_HCB_MD_READV callbacks.
+// ---------------------------------------------------------------------------
+
+/// mdstartreadv: asynchronous mdreadv on the current handed-out AIO handle.
+/// `pages` are pinned pool pages (BLCKSZ each), consecutive on disk.
+pub fn mdstartreadv(
+    rlocator: RelFileLocatorBackend,
+    st: &mut MdRelnState,
+    forknum: ForkNumber,
+    blocknum: BlockNumber,
+    pages: &[*mut u8],
+) -> PgResult<()> {
+    let nblocks = pages.len() as BlockNumber;
+    let v = _mdfd_getseg(
+        rlocator,
+        st,
+        forknum,
+        blocknum,
+        false,
+        EXTENSION_FAIL | EXTENSION_CREATE_RECOVERY,
+    )?
+    .expect("EXTENSION_FAIL ereports rather than returning None");
+
+    let seekpos = BLCKSZ_I64 * (blocknum % RELSEG_SIZE) as i64;
+    debug_assert!(seekpos < BLCKSZ_I64 * RELSEG_SIZE as i64);
+
+    let nblocks_this_segment =
+        core::cmp::min(nblocks as i64, (RELSEG_SIZE - (blocknum % RELSEG_SIZE)) as i64)
+            as BlockNumber;
+    if nblocks_this_segment != nblocks {
+        return throw(
+            ereport(ERROR).errmsg_internal("read crossing segment boundary"),
+            "mdstartreadv",
+        );
+    }
+
+    let iovcnt = aio_core::pgaio_io_set_iovec_pages(pages, BLCKSZ);
+    debug_assert!(iovcnt <= nblocks_this_segment as i32);
+
+    if fd::io_direct_flags() & IO_DIRECT_DATA == 0 {
+        aio_core::pgaio_io_set_flag(aio_core::pgaio_io_current(), types_storage::aio::PGAIO_HF_BUFFERED);
+    }
+
+    let ioh = aio_core::pgaio_io_current();
+    aio_core::pgaio_io_set_target_smgr(
+        ioh,
+        rlocator.locator,
+        forknum,
+        blocknum,
+        nblocks,
+        rlocator.backend != INVALID_PROC_NUMBER,
+        false,
+    );
+    aio_core::pgaio_io_register_callbacks(ioh, types_storage::aio::PGAIO_HCB_MD_READV, 0);
+
+    let ret = fd::FileStartReadV(v.mdfd_vfd, iovcnt, seekpos, WAIT_EVENT_DATA_FILE_READ)?;
+    if ret != 0 {
+        return throw(
+            ereport(ERROR)
+                .with_saved_errno(last_errno())
+                .errcode_for_file_access()
+                .errmsg(format!(
+                    "could not start reading blocks {}..{} in file \"{}\": %m",
+                    blocknum,
+                    blocknum + nblocks_this_segment - 1,
+                    fd::FilePathName(v.mdfd_vfd)
+                )),
+            "mdstartreadv",
+        );
+    }
+    // Post-read checks live in md_readv_complete; zero_damaged_pages'
+    // past-EOF arm is intentionally NOT implemented on the AIO path (C 18
+    // dropped it there too).
+    Ok(())
+}
+
+/// smgr_aio_reopen's md half: resolve the segment through THIS thread's vfd
+/// cache and return the raw fd (workers re-resolve, never reuse the issuer's
+/// fd — the C cross-process reopen contract, thread-rendered).
+pub fn md_aio_reopen_fd(
+    rlocator: RelFileLocatorBackend,
+    st: &mut MdRelnState,
+    forknum: ForkNumber,
+    blocknum: BlockNumber,
+    expected_offset: u64,
+) -> PgResult<i32> {
+    let v = _mdfd_getseg(
+        rlocator,
+        st,
+        forknum,
+        blocknum,
+        false,
+        EXTENSION_FAIL | EXTENSION_CREATE_RECOVERY,
+    )?
+    .expect("EXTENSION_FAIL ereports rather than returning None");
+    let seekpos = BLCKSZ_I64 * (blocknum % RELSEG_SIZE) as i64;
+    debug_assert_eq!(seekpos as u64, expected_offset);
+    let raw = fd::FileRawDescForAio(v.mdfd_vfd)?;
+    if raw < 0 {
+        return throw(
+            ereport(ERROR)
+                .with_saved_errno(last_errno())
+                .errcode_for_file_access()
+                .errmsg(format!(
+                    "could not reopen file \"{}\" for IO: %m",
+                    fd::FilePathName(v.mdfd_vfd)
+                )),
+            "md_aio_reopen_fd",
+        );
+    }
+    Ok(raw)
+}
+
+fn md_relpath(td: &types_storage::aio::PgAioTargetData) -> String {
+    let l = td.smgr.rlocator;
+    format!(
+        "base/{}/{}{}",
+        l.dbOid,
+        l.relNumber,
+        match td.smgr.forkNum {
+            ForkNumber::MAIN_FORKNUM => String::new(),
+            f => format!("_{}", f as i32),
+        }
+    )
+}
+
+/// md_readv_complete: distill the raw byte result into blocks; encode hard
+/// errors / short reads for md_readv_report.
+pub fn md_readv_complete(
+    ioh: u32,
+    prior_result: types_storage::aio::PgAioResult,
+    _cb_data: u8,
+) -> types_storage::aio::PgAioResult {
+    use types_storage::aio::PgAioResultStatus as Rs;
+    let td = aio_core::pgaio_io_get_target_data(ioh);
+    let mut result = prior_result;
+
+    if prior_result.result < 0 {
+        result.status = Rs::Error;
+        result.id = types_storage::aio::PGAIO_HCB_MD_READV;
+        // Hard errors carry the errno in error_data.
+        result.error_data = (-prior_result.result) as u32;
+        result.result = 0;
+        // Log immediately, server-only: the definer may never process the
+        // result (see bufmgr's completion rationale).
+        let _ = aio_core::pgaio_result_report(result, &td, types_error::LOG_SERVER_ONLY);
+        return result;
+    }
+
+    // The smgr API is block-, not byte-grained.
+    result.result /= BLCKSZ as i32;
+    debug_assert!(result.result <= td.smgr.nblocks as i32);
+
+    if result.result == 0 {
+        // Zero blocks read is a failure (unexpected EOF).
+        result.status = Rs::Error;
+        result.id = types_storage::aio::PGAIO_HCB_MD_READV;
+        result.error_data = 0;
+        let _ = aio_core::pgaio_result_report(result, &td, types_error::LOG_SERVER_ONLY);
+        return result;
+    }
+
+    if result.status != Rs::Error && result.result < td.smgr.nblocks as i32 {
+        // Partial reads are retried at the bufmgr level.
+        result.status = Rs::Partial;
+        result.id = types_storage::aio::PGAIO_HCB_MD_READV;
+    }
+
+    result
+}
+
+/// md_readv_report: error_data != 0 is a hard errno; == 0 is a short read.
+pub fn md_readv_report(
+    result: types_storage::aio::PgAioResult,
+    td: types_storage::aio::PgAioTargetData,
+    elevel: types_error::ErrorLevel,
+) -> PgResult<()> {
+    let path = md_relpath(&td);
+    let first = td.smgr.blockNum;
+    let last = first + td.smgr.nblocks - 1;
+    if result.error_data != 0 {
+        ereport(elevel)
+            .with_saved_errno(result.error_data as i32)
+            .errcode_for_file_access()
+            .errmsg(format!("could not read blocks {first}..{last} in file \"{path}\": %m"))
+            .finish(loc("md_readv_report"))
+    } else {
+        ereport(elevel)
+            .errcode(ERRCODE_DATA_CORRUPTED)
+            .errmsg(format!(
+                "could not read blocks {first}..{last} in file \"{path}\": read only {} of {} bytes",
+                result.result as i64 * BLCKSZ_I64,
+                td.smgr.nblocks as i64 * BLCKSZ_I64
+            ))
+            .finish(loc("md_readv_report"))
+    }
+}

@@ -46,8 +46,11 @@ pub use handle::{
     pgaio_wref_wait, AtEOXact_Aio,
 };
 pub use init::{pgaio_init_backend, AioShmemInit, AioShmemResetAfterCrash, AioShmemSize};
-pub use io::{pgaio_io_set_iovec_pages, pgaio_io_start_readv_current};
-pub use method_worker::{pgaio_workers_enabled, IoWorkerMain};
+pub use io::{pgaio_io_current, pgaio_io_set_iovec_pages, pgaio_io_start_readv_current};
+pub use method_worker::{
+    pgaio_worker_cycle, pgaio_worker_executed_count, pgaio_worker_register,
+    pgaio_workers_enabled,
+};
 pub use target::{pgaio_io_get_target_data, pgaio_io_set_target_smgr};
 
 pub const IO_METHOD_OPTIONS: &[config_enum_entry] = &[

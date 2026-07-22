@@ -13,7 +13,6 @@ libc = "0.2"
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_guc = { path = "../../../../_support/types/types_guc" }
-types_startup = { path = "../../../../_support/types/types_startup" }
 types_storage = { path = "../../../../_support/types/types_storage" }
 datum = { path = "../../../../_support/types/datum" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
@@ -22,7 +21,6 @@ aio_seams = { path = "../aio_seams" }
 bufmgr_seams = { path = "../../buffer/bufmgr_seams" }
 smgr_seams = { path = "../../smgr/smgr_seams" }
 ipc_seams = { path = "../../ipc/ipc_seams" }
-ipc = { path = "../../ipc/ipc" }
 miscinit = { path = "../../../utils/init/miscinit" }
 init_small = { path = "../../../utils/init/init_small" }
 lmgr_proc = { path = "../../lmgr/lmgr_proc" }
@@ -32,9 +30,6 @@ latch = { path = "../../ipc/latch" }
 shmem = { path = "../../ipc/shmem" }
 resowner = { path = "../../../utils/resowner/resowner" }
 elog = { path = "../../../utils/error/elog" }
-procsignal = { path = "../../ipc/procsignal" }
 interrupt = { path = "../../../postmaster/interrupt" }
-auxprocess = { path = "../../../postmaster/auxprocess" }
-libpq_pqsignal = { path = "../../../libpq/libpq_pqsignal" }
 waitevent_seams = { path = "../../../utils/activity/waitevent_seams" }
 types_resowner = { path = "../../../../_support/types/types_resowner" }

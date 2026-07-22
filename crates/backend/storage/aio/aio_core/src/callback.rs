@@ -167,7 +167,7 @@ pub(crate) fn pgaio_io_call_complete_local(index: u32) -> PgAioResult {
 pub fn pgaio_result_report(
     result: PgAioResult,
     target_data: &PgAioTargetData,
-    elevel: i32,
+    elevel: types_error::ErrorLevel,
 ) -> PgResult<()> {
     debug_assert!(result.status != PgAioResultStatus::Unknown);
     debug_assert!(result.status != PgAioResultStatus::Ok);

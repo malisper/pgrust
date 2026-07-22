@@ -111,9 +111,14 @@ fn crash_fans_out_sigquit_and_reinit_completes() {
         });
     }
     aio_core::init_seams();
+    // commands_variable owns this accessor in production seams_init; this
+    // harness inits GUCs piecemeal (AioShmemSize reads it).
+    guc_tables::vars::io_max_combine_limit.install_if_absent(guc_tables::GucVarAccessors {
+        get: || 16,
+        set: |_| {},
+    });
 
     guc::store::initialize_guc_options().unwrap();
-    guc_tables::vars::io_method.write(0); // boot value is worker; IoWorkerMain unported
     pg_prng::global_prng(|prng| prng.seed(42));
 
     init_small::globals::SetIsPostmasterEnvironment(true);

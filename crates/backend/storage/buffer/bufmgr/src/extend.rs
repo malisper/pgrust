@@ -373,7 +373,7 @@ fn ExtendBufferedRelShared(
         if lock {
             LWLockAcquire(&desc.content_lock, LW_EXCLUSIVE, init_small::globals::MyProcNumber())?;
         }
-        TerminateBufferIO(desc, false, BM_VALID, true);
+        TerminateBufferIO(desc, false, BM_VALID, true, false);
     }
 
     for _ in 0..extend_by {
