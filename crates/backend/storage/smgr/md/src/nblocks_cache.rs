@@ -38,7 +38,13 @@ use ::types_storage::RelFileLocator;
 /// a u32).
 const POISON: u64 = u64::MAX;
 
-static CACHE: RwLock<BTreeMap<u128, u64>> = RwLock::new(BTreeMap::new());
+// OnceLock-mediated init (pgsync loom papering law: no statics hold loom
+// types — loom's RwLock::new is not const; std/native worlds are identical
+// after the first deref). t44 composition fix for the blocking loom gate.
+fn cache() -> &'static RwLock<BTreeMap<u128, u64>> {
+    static CACHE: pgsync::OnceLock<RwLock<BTreeMap<u128, u64>>> = pgsync::OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(BTreeMap::new()))
+}
 
 /// dbOid in the top bits so a whole database is one contiguous key range.
 #[inline]
@@ -58,7 +64,7 @@ fn db_range(db: Oid) -> (u128, u128) {
 
 /// The read hook: Some(nblocks) iff cached and not poisoned.
 pub fn lookup(locator: RelFileLocator, forknum: ForkNumber) -> Option<BlockNumber> {
-    let g = CACHE.read().unwrap();
+    let g = cache().read().unwrap();
     match g.get(&key(locator, forknum)) {
         Some(&v) if v != POISON => Some(v as BlockNumber),
         _ => None,
@@ -67,7 +73,7 @@ pub fn lookup(locator: RelFileLocator, forknum: ForkNumber) -> Option<BlockNumbe
 
 /// Populate after a real segment walk. Poison is sticky.
 pub fn note_walked(locator: RelFileLocator, forknum: ForkNumber, nblocks: BlockNumber) {
-    let mut g = CACHE.write().unwrap();
+    let mut g = cache().write().unwrap();
     let e = g.entry(key(locator, forknum)).or_insert(nblocks as u64);
     if *e != POISON {
         *e = nblocks as u64;
@@ -78,7 +84,7 @@ pub fn note_walked(locator: RelFileLocator, forknum: ForkNumber, nblocks: BlockN
 /// an existing entry (absent stays absent — the next read walks); max() so a
 /// stale smaller value can never overwrite a newer larger one.
 pub fn extend_to(locator: RelFileLocator, forknum: ForkNumber, new_min: BlockNumber) {
-    let mut g = CACHE.write().unwrap();
+    let mut g = cache().write().unwrap();
     if let Some(e) = g.get_mut(&key(locator, forknum)) {
         if *e != POISON && *e < new_min as u64 {
             *e = new_min as u64;
@@ -89,7 +95,7 @@ pub fn extend_to(locator: RelFileLocator, forknum: ForkNumber, new_min: BlockNum
 /// Truncation landed: the size is exactly `nblocks` now (caller holds the
 /// exclusive relation lock the truncate itself required). Poison is sticky.
 pub fn set_exact(locator: RelFileLocator, forknum: ForkNumber, nblocks: BlockNumber) {
-    let mut g = CACHE.write().unwrap();
+    let mut g = cache().write().unwrap();
     let e = g.entry(key(locator, forknum)).or_insert(nblocks as u64);
     if *e != POISON {
         *e = nblocks as u64;
@@ -99,7 +105,7 @@ pub fn set_exact(locator: RelFileLocator, forknum: ForkNumber, nblocks: BlockNum
 /// A size-changing op errored partway: forget the value (next read walks the
 /// real file). Poison survives.
 pub fn invalidate(locator: RelFileLocator, forknum: ForkNumber) {
-    let mut g = CACHE.write().unwrap();
+    let mut g = cache().write().unwrap();
     if let Some(&v) = g.get(&key(locator, forknum)) {
         if v != POISON {
             g.remove(&key(locator, forknum));
@@ -111,18 +117,18 @@ pub fn invalidate(locator: RelFileLocator, forknum: ForkNumber) {
 /// entirely, poison included. A reused relfilenumber starts clean; a
 /// columnar writer re-poisons at its next open.
 pub fn remove(locator: RelFileLocator, forknum: ForkNumber) {
-    CACHE.write().unwrap().remove(&key(locator, forknum));
+    cache().write().unwrap().remove(&key(locator, forknum));
 }
 
 /// Mark this fork as mutated outside md: never serve it from the cache.
 pub fn poison(locator: RelFileLocator, forknum: ForkNumber) {
-    CACHE.write().unwrap().insert(key(locator, forknum), POISON);
+    cache().write().unwrap().insert(key(locator, forknum), POISON);
 }
 
 /// DROP/move DATABASE removes file trees with rmtree, not per-rel unlinks.
 pub fn purge_db(db: Oid) {
     let (lo, hi) = db_range(db);
-    let mut g = CACHE.write().unwrap();
+    let mut g = cache().write().unwrap();
     let doomed: Vec<u128> = g.range(lo..=hi).map(|(&k, _)| k).collect();
     for k in doomed {
         g.remove(&k);
@@ -132,7 +138,7 @@ pub fn purge_db(db: Oid) {
 /// The unlogged-relation reinit pass copies init forks over main forks at
 /// the file level, outside md — drop everything (startup-time, rare).
 pub fn clear() {
-    CACHE.write().unwrap().clear();
+    cache().write().unwrap().clear();
 }
 
 #[cfg(test)]

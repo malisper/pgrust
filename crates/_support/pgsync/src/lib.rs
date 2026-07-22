@@ -425,6 +425,17 @@ impl ParkLot {
         if spinning {
             self.spinners.fetch_sub(1, atomic::Ordering::SeqCst);
         }
+        // GL-SPINPARK-1: the StoreLoad hinge made EXPLICIT (survey rule 2 —
+        // the Go wakep protocol's fence): decrement-then-recheck here pairs
+        // with bump-then-read-spinners in wake_work; each side fences
+        // between its write and its read so one of them always sees the
+        // other. The pure SeqCst accesses are formally sufficient under the
+        // C++ SC total order, but the explicit fence is (a) Go parity, (b)
+        // robustness, and (c) what loom actually verifies — loom explores
+        // AcqRel-like weakenings of SC ACCESSES and only pins the total
+        // order at SC FENCES; the parklot elision models deadlock without
+        // these two fences (found by parklot_wake_work_elision_never_lost).
+        atomic::fence(atomic::Ordering::SeqCst);
         if self.epoch.load(atomic::Ordering::SeqCst) != seen {
             return;
         }
@@ -458,6 +469,9 @@ impl ParkLot {
     /// cap).
     pub fn wake_work(&self) {
         self.epoch.fetch_add(1, atomic::Ordering::SeqCst);
+        // The publisher half of the StoreLoad hinge — pairs with
+        // park_worker's fence (rationale there).
+        atomic::fence(atomic::Ordering::SeqCst);
         let legacy = {
             let g = lock(&self.m);
             let n = self.legacy_parked.load(atomic::Ordering::SeqCst);

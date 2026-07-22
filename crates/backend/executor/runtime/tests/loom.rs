@@ -440,6 +440,12 @@ fn standby_absorption() {
 
     let mut b = loom::model::Builder::new();
     b.preemption_bound = Some(3);
+    // GL-SPINPARK-1 gate-run finding: the GL-STMTTASK-2 ParkLot rework
+    // (legacy-parked count + unparks bookkeeping on every park/wake_all)
+    // grew these permit-churn-heavy executions past loom's default
+    // 1,000-branch cap (green at t43 main, instant overflow at the stack
+    // base). Same bump every sibling whole-runtime model already carries.
+    b.max_branches = 200_000;
     b.check(|| {
         // workers=1 ⇒ ONE execution permit; standbys=1 ⇒ two pool threads.
         let rt = small_runtime(1, 1);
@@ -535,6 +541,12 @@ fn facade_standby_absorption() {
 
     let mut b = loom::model::Builder::new();
     b.preemption_bound = Some(3);
+    // GL-SPINPARK-1 gate-run finding: the GL-STMTTASK-2 ParkLot rework
+    // (legacy-parked count + unparks bookkeeping on every park/wake_all)
+    // grew these permit-churn-heavy executions past loom's default
+    // 1,000-branch cap (green at t43 main, instant overflow at the stack
+    // base). Same bump every sibling whole-runtime model already carries.
+    b.max_branches = 200_000;
     b.check(|| {
         // workers=1 ⇒ ONE execution permit; standbys=1 ⇒ two pool threads.
         let rt = small_runtime(1, 1);
@@ -981,6 +993,41 @@ fn parklot_wake_all_reaches_every_parker() {
         for w in workers {
             w.join().unwrap();
         }
+    });
+}
+
+/// One publisher, one directed worker (the elision protocol's minimal
+/// no-lost-wake shape): publisher stores work then wake_work()s — which may
+/// legitimately ELIDE its notify when it observes the worker's search-phase
+/// mark. In every interleaving the worker must terminate having claimed the
+/// work.
+#[test]
+fn parklot_wake_work_elision_never_lost() {
+    loom::model(|| {
+        let lot = Arc::new(pgsync::ParkLot::new());
+        let work = Arc::new(AtomicBool::new(false));
+
+        let publisher = {
+            let (lot, work) = (Arc::clone(&lot), Arc::clone(&work));
+            thread::spawn(move || {
+                work.store(true, Ordering::SeqCst);
+                lot.wake_work();
+            })
+        };
+
+        let parker = Arc::new(pgsync::WorkerParker::new());
+        lot.spin_enter();
+        loop {
+            let seen = lot.epoch();
+            if work.load(Ordering::SeqCst) {
+                lot.spin_found_work();
+                break;
+            }
+            lot.park_worker(seen, &parker, true);
+            lot.spin_enter();
+        }
+        publisher.join().unwrap();
+        assert!(work.load(Ordering::SeqCst));
     });
 }
 
