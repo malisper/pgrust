@@ -101,6 +101,55 @@
 //! producer parks under the K-standby blocking section, woken by drain or
 //! demand-close — never while holding an execution obligation).
 
+//! # Increment 2 (GL-STMTTASK-2) — kill the per-statement ceremony
+//!
+//! Four changes (scratchpad/night/wakeup-cost-survey.md "Convergent design
+//! rules", cited by rule):
+//!
+//! 1. STANDING-ENGAGEMENT REUSE (`PGRUST_STMT_TASK_STANDING`, default ON
+//!    under the master knob; `0`/`off` kills): the per-SESSION funnel is
+//!    created once and reset per statement (`RowFunnel::reset_for_reuse`),
+//!    and the WORKER side binds through the deferred binder with STICKY
+//!    session retention — statement N+1 from the same session pays only
+//!    the statement-half resume (`resume_statement`: transaction adopt,
+//!    snapshots, invals drain), never the full session bind. Survey rule 6
+//!    (ceremony is many slices): the funnel ring allocation and the
+//!    session-half GUC/identity ceremony were two of them.
+//! 2. POINTER-PASSING, NOT DSM RITUAL (`PGRUST_STMT_TASK_PTRPASS`, default
+//!    ON under the master knob; `0`/`off` restores the inc-1 pcxt
+//!    ceremony): the binder target is built by
+//!    `parallel::statement_task_shared` — no parallel-context list entry,
+//!    no error mailboxes, no registry key, no DestroyParallelContext walk;
+//!    session-stable state travels by Arc (GUC pin, record registry,
+//!    combocid), the plan by leader-arena pointer (inc-1's SendConst), the
+//!    snapshot as the thread-native Send struct (never a byte-image
+//!    ritual). The leader-unwind containment that DestroyParallelContext's
+//!    private-shutdown hook provided is an RAII join guard in the engage
+//!    frame. The DSM-shaped path is untouched for REAL parallel
+//!    engagements.
+//! 3. INLINE-EXECUTE DEFAULT (`PGRUST_STMT_TASK_INLINE`, default ON under
+//!    the master knob; `0`/`off` kills): survey rule 1 (Cilk work-first;
+//!    Go rejected handoff-with-wakeup; run-on-arrival is the default). If
+//!    a pool seat is free WITHOUT WAITING (`Runtime::try_borrow_seat`),
+//!    the session thread executes the statement ITSELF through the
+//!    incumbent per-tuple loop — literally the same code, with the seat
+//!    held for governed accounting — and no submission, no wake, no bind,
+//!    no funnel exists. Cancel identity on this path IS the incumbent
+//!    path's (CFI raises on the session thread). Enqueue+wake happens
+//!    ONLY under contention (no free seat).
+//! 4. SPINNER-COUNT WAKE ELISION (`PGRUST_POOL_WAKE_SPINNER`, default OFF,
+//!    pool-wide): survey rule 2 (Go nmspinning/wakep) — the pool's
+//!    new-work submission wake becomes epoch-bump + spinner check; notify
+//!    only when no searcher covers the work, and then exactly ONE idle
+//!    worker in LIFO order with the 3-poll starvation cap (survey rule 4).
+//!    Lives in `pgsync::ParkLot` / `runtime::sched`, not here; the enqueue
+//!    path rides it when armed.
+//!
+//! The engaged/inline trace lines carry `unparks=<delta>` (the wakeup
+//! program's unparks-per-statement metric, survey rule 6): the leader
+//! reads the pool park lot's unpark counter around its own ceremony.
+
+use std::cell::RefCell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -123,6 +172,49 @@ use super::{lane_trace, lane_trace_enabled};
 // ---------------------------------------------------------------------------
 
 use ::postgres_seams::stmt_task_arm::take_armed;
+
+// ---------------------------------------------------------------------------
+// GL-STMTTASK-2 sub-knobs (all under the master PGRUST_STMT_TASK, which is
+// DEFAULT OFF — the server's default posture is unchanged; these are the
+// ablation kill levers within the armed lane, the t35 layered-kill shape).
+// ---------------------------------------------------------------------------
+
+/// Change 1 kill: `PGRUST_STMT_TASK_STANDING=0|off` restores the
+/// per-statement funnel + the eager per-statement worker bind (inc-1).
+fn stmt_standing_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&ON, || {
+        !matches!(
+            std::env::var("PGRUST_STMT_TASK_STANDING").ok().as_deref().map(str::trim),
+            Some("0") | Some("off")
+        )
+    })
+}
+
+/// Change 2 kill: `PGRUST_STMT_TASK_PTRPASS=0|off` restores the inc-1
+/// parallel-context ceremony (CreateParallelContext + InitializeParallelDSM
+/// + InstallQueryTaskBinding + DestroyParallelContext) per statement.
+fn stmt_ptrpass_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&ON, || {
+        !matches!(
+            std::env::var("PGRUST_STMT_TASK_PTRPASS").ok().as_deref().map(str::trim),
+            Some("0") | Some("off")
+        )
+    })
+}
+
+/// Change 3 kill: `PGRUST_STMT_TASK_INLINE=0|off` disables inline-execute
+/// (every admitted statement takes the enqueue path).
+fn stmt_inline_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&ON, || {
+        !matches!(
+            std::env::var("PGRUST_STMT_TASK_INLINE").ok().as_deref().map(str::trim),
+            Some("0") | Some("off")
+        )
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Refusal taxonomy + engagement counters (diagnostics; e2e witnesses).
@@ -157,6 +249,10 @@ pub(crate) enum StmtTaskRefusal {
     /// No channel served (pool/gang unavailable, refused, or claim
     /// deadline) — the RG was reaped untouched.
     NoChannel,
+    /// The dop-1 ceremony builder refused (interrupt holdoff / critical
+    /// section, uncommitted enum values) — GL-STMTTASK-2 fast path only;
+    /// the launched-DSM path turns the enum case into an ERROR instead.
+    CeremonyRefused,
 }
 
 impl StmtTaskRefusal {
@@ -172,6 +268,7 @@ impl StmtTaskRefusal {
             StmtTaskRefusal::NotParallelSafe => "not-parallel-safe",
             StmtTaskRefusal::BinderPolicy => "binder-policy",
             StmtTaskRefusal::NoChannel => "no-channel",
+            StmtTaskRefusal::CeremonyRefused => "ceremony-refused",
         }
     }
 }
@@ -179,6 +276,7 @@ impl StmtTaskRefusal {
 static STMT_ENGAGED: AtomicU64 = AtomicU64::new(0);
 static STMT_COMPLETED: AtomicU64 = AtomicU64::new(0);
 static STMT_REFUSED: AtomicU64 = AtomicU64::new(0);
+static STMT_INLINE: AtomicU64 = AtomicU64::new(0);
 
 /// (engaged, completed, refused-armed) — tests/diagnostics.
 pub fn stmt_task_engagements() -> (u64, u64, u64) {
@@ -189,12 +287,33 @@ pub fn stmt_task_engagements() -> (u64, u64, u64) {
     )
 }
 
-fn refuse(reason: StmtTaskRefusal) -> PgResult<bool> {
+/// GL-STMTTASK-2: statements executed on the INLINE fast path (a subset of
+/// engaged) — tests/diagnostics.
+pub fn stmt_task_inline_count() -> u64 {
+    STMT_INLINE.load(Ordering::SeqCst)
+}
+
+fn refuse(reason: StmtTaskRefusal) -> PgResult<StmtTaskVerdict> {
     STMT_REFUSED.fetch_add(1, Ordering::SeqCst);
     if lane_trace_enabled() {
         lane_trace(&format!("stmt-task: refused {}", reason.name()));
     }
-    Ok(false)
+    Ok(StmtTaskVerdict::Incumbent)
+}
+
+/// The hook's answer to execute_plan (GL-STMTTASK-2).
+pub(crate) enum StmtTaskVerdict {
+    /// Not armed / refused / fell back — the caller runs the serial
+    /// per-tuple loop byte-identically.
+    Incumbent,
+    /// Change 3 (inline-execute): admitted, and a pool seat was free
+    /// without waiting — the CALLER runs its own serial loop (literally
+    /// the incumbent code) with this seat held for governed accounting.
+    /// Cancel/timeout identity on this path IS the incumbent path's.
+    Inline(runtime::InlineSeat),
+    /// Engaged on the pool; every row was streamed and es_processed set —
+    /// the caller skips the serial loop.
+    Handled,
 }
 
 // ---------------------------------------------------------------------------
@@ -369,7 +488,13 @@ impl StmtTaskShared {
     /// SELECT es_processed accounting) with the receive step swapped for
     /// the funnel emit. Complete-drain only (count-limited runs never
     /// arm), forward direction only (the run seam law).
-    fn pull_loop(&self, qd: ::types_portal::QueryDescHandle, worker: usize) -> PgResult<()> {
+    ///
+    /// GL-STMTTASK-2: the funnel has exactly ONE ring — a dop-1 statement
+    /// task has at most one producer per engagement (the single synthetic
+    /// morsel's claim is consumed even on a panic, so no second run_morsel
+    /// can ever exist), always ring 0 regardless of the serving lane's
+    /// ordinal.
+    fn pull_loop(&self, qd: ::types_portal::QueryDescHandle, _worker: usize) -> PgResult<()> {
         crate::querydesc::with_qd(qd, |q| {
             let x = q.exec.as_mut().expect("statement task executor state");
             x.with_mut(|d| -> PgResult<()> {
@@ -377,7 +502,7 @@ impl StmtTaskShared {
                 let planstate =
                     planstate.as_mut().expect("statement task run without a plan state");
                 estate.es_direction = ScanDirection::ForwardScanDirection;
-                let mut sink = RowEmitSink::new(self.funnel.producer(worker));
+                let mut sink = RowEmitSink::new(self.funnel.producer(0));
                 loop {
                     // Leader chase / client stop: observed per output row
                     // (inner executor CFIs carry the non-emitting stretches
@@ -441,6 +566,15 @@ fn helper_drive_stmt(payload: &Arc<StmtTaskShared>) {
         payload.refused.fetch_add(1, Ordering::SeqCst);
         return;
     };
+    // GL-STMTTASK-2 change 1 (worker half): bind through the DEFERRED
+    // binder with sticky session retention — statement N+1 from the same
+    // session on this worker resumes the statement half only. The eager
+    // wrap below is the inc-1 shape (kill: PGRUST_STMT_TASK_STANDING=0,
+    // or the binder-layer kills PGRUST_RUNTIME_LAZYBIND/STICKY=0).
+    if stmt_standing_enabled() && parallel::lazy_bind_enabled() {
+        helper_drive_stmt_sticky(payload, target, &rg);
+        return;
+    }
     // Process-wide pin-board lane lease: exhaustion = fail-closed
     // non-participation (the leader's nobody-participates check falls back).
     let Some(lane) = payload.rt.acquire_external_lane() else {
@@ -489,6 +623,106 @@ fn helper_drive_stmt(payload: &Arc<StmtTaskShared>) {
                 payload.refused.fetch_add(1, Ordering::SeqCst);
             }
         }
+    }
+}
+
+/// GL-STMTTASK-2 change 1, worker half: the deferred-binder drive with
+/// STICKY session retention (the scan arm's ceremony-v2 shape, dop-1
+/// rendering). Sticky is allowed on gang serves unconditionally and on
+/// pool serves under the pool-sticky posture (the scan arm's rule); the
+/// bind happens PRE-DRIVE (the dop-1 participant holds the board's only
+/// ticket and always claims — deferring to first touch would only move
+/// the xmin-visible window by microseconds while complicating the error
+/// envelope), so a bind failure stays a fail-closed refusal with the RG
+/// untouched, exactly inc-1's surface. The binding ALWAYS completes before
+/// any error/panic propagates (sticky park on the clean path, full abort
+/// unbind otherwise — the scan arm's choreography).
+fn helper_drive_stmt_sticky(
+    payload: &Arc<StmtTaskShared>,
+    target: &Arc<parallel::ParallelShared>,
+    rg: &runtime::RgHandle,
+) {
+    let sticky = !parallel::standing::serving_on_pool()
+        || parallel::standing::pool_sticky_enabled();
+    let binding = match parallel::DeferredQueryTaskBinding::new(target, sticky) {
+        Ok(b) => b,
+        Err(e) => {
+            lane_trace(&format!(
+                "stmt-task: helper refused (sticky eviction failed: {})",
+                e.message()
+            ));
+            payload.refused.fetch_add(1, Ordering::SeqCst);
+            return;
+        }
+    };
+    if let Err(e) = binding.validate() {
+        lane_trace(&format!("stmt-task: helper bind refused: {}", e.message()));
+        payload.refused.fetch_add(1, Ordering::SeqCst);
+        return;
+    }
+    let Some(lane) = payload.rt.acquire_external_lane() else {
+        lane_trace("stmt-task: helper refused (no external lane)");
+        payload.refused.fetch_add(1, Ordering::SeqCst);
+        return;
+    };
+    let mut local = lane.local();
+    let mut lane = Some(lane);
+    if let Err(e) = binding.bind_now() {
+        // Fail-closed non-participation: the bind's own error path completed
+        // the unbind; the RG is untouched by this worker.
+        lane_trace(&format!("stmt-task: helper bind refused: {}", e.message()));
+        payload.refused.fetch_add(1, Ordering::SeqCst);
+        let _ = binding.finish(false);
+        return;
+    }
+    if binding.resumed_sticky() {
+        lane_trace("stmt-task: sticky resume");
+    }
+    payload.started.fetch_add(1, Ordering::SeqCst);
+    // Cancel-chase bracket (inc-1 verbatim): install the disposition, clear
+    // any stale cancel aimed at a previous occupant of this leased
+    // identity, publish the pid the leader chases; symmetric teardown.
+    procsignal::pqsignal_thread(
+        procsignal::signums::SIGINT,
+        procsignal::ThreadSignalHandler::Simple(stmt_task_cancel_disposition),
+    );
+    init_small::globals::SetQueryCancelPending(false);
+    payload.worker_pid.store(init_small::globals::MyProcPid(), Ordering::SeqCst);
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        drive_bound_stmt(payload, &mut local, rg, &mut lane)
+    }));
+    payload.worker_pid.store(0, Ordering::SeqCst);
+    init_small::globals::SetQueryCancelPending(false);
+    let commit = matches!(r, Ok(Ok(())));
+    // The binding completes HERE, before any propagation: sticky park on
+    // commit, full abort unbind otherwise (its own catch/retry choreography
+    // inside). An exit-committed unwind below rethrows AFTER this — the
+    // eager wrap ran its finish(false) on that path too.
+    let finish = binding.finish(commit);
+    match r {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            payload.fail(e);
+            // F1 liveness: an aborted PINNED RG still needs a driver to run
+            // protocol cleanup to completion (inc-1's Err arm).
+            if rg.try_outcome().is_none() {
+                rg.abort();
+                let _ = payload.rt.drive_pinned(&mut local, rg);
+            }
+        }
+        Err(unwind) => {
+            payload.fail(PgError::new(ERROR, "statement task worker panicked").into());
+            if parallel::standing::is_exit_unwind(&*unwind) {
+                std::panic::resume_unwind(unwind);
+            }
+            if rg.try_outcome().is_none() {
+                rg.abort();
+                let _ = payload.rt.drive_pinned(&mut local, rg);
+            }
+        }
+    }
+    if let Err(e) = finish {
+        payload.fail(e);
     }
 }
 
@@ -641,12 +875,71 @@ pub(super) enum StmtTaskOutcome {
     Completed(u64),
     /// No channel served; nothing was consumed — run the incumbent loop.
     Fallback,
+    /// GL-STMTTASK-2 fast path: the ceremony builder refused (interrupt
+    /// holdoff / uncommitted enums) — nothing was built; incumbent loop.
+    CeremonyRefused,
+}
+
+// ---------------------------------------------------------------------------
+// GL-STMTTASK-2 change 1 (leader half): the per-session persistent funnel.
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// The session thread's statement-task funnel (ONE ring — a dop-1
+    /// statement task has exactly one producer per engagement, always on
+    /// index 0), created with its leader-latch wake hook on the first
+    /// armed statement and RESET per statement (RowFunnel::reset_for_reuse)
+    /// — the standing-engagement reuse that deletes the per-statement ring
+    /// allocation. Session-thread TLS: dies with the thread; never
+    /// captured/restored by an envelope (a pure transport cache — carries
+    /// no session identity; rows never survive a statement).
+    static SESSION_FUNNEL: RefCell<Option<Arc<RowFunnel<MinImage>>>> =
+        const { RefCell::new(None) };
+}
+
+fn fresh_stmt_funnel() -> Arc<RowFunnel<MinImage>> {
+    let funnel: Arc<RowFunnel<MinImage>> = RowFunnel::new(1, DEFAULT_RING_CAP);
+    // Producer pushes/done wake the parked leader immediately (the funnel
+    // wake hook sets the leader latch; the wait quantum is the backstop).
+    let leader_proc = init_small::globals::MyProcNumber();
+    funnel.set_wake_hook(Box::new(move || {
+        latch::SetLatch(::types_storage::latch::LatchHandle::proc(leader_proc));
+    }));
+    funnel
+}
+
+/// The statement's funnel: the session-persistent one (reset for reuse)
+/// under change 1, a fresh one per statement when killed
+/// (PGRUST_STMT_TASK_STANDING=0 — the inc-1 allocation shape, sized to the
+/// dop-1 truth either way).
+fn stmt_funnel() -> Arc<RowFunnel<MinImage>> {
+    if !stmt_standing_enabled() {
+        return fresh_stmt_funnel();
+    }
+    SESSION_FUNNEL.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        match slot.as_ref() {
+            Some(f) => {
+                // Quiesced by contract: the previous statement's ceremony
+                // joined its board (detached == claimed) and dropped its
+                // drain before returning.
+                f.reset_for_reuse();
+                Arc::clone(f)
+            }
+            None => {
+                let f = fresh_stmt_funnel();
+                *slot = Some(Arc::clone(&f));
+                f
+            }
+        }
+    })
 }
 
 /// The statement-task engage ceremony + wait/pump loop. `emit_row` receives
 /// each drained image on the SESSION thread and forwards it to the real
 /// wire receiver; returns false to stop (client stop). On return the RG is
-/// complete, the board joined, and the parallel context destroyed.
+/// complete and the board joined (and, on the pcxt ceremony, the parallel
+/// context destroyed).
 pub(super) fn engage_stmt_task(
     rt: &'static Arc<runtime::Runtime>,
     pstmt: *const PlannedStmt<'static>,
@@ -654,40 +947,112 @@ pub(super) fn engage_stmt_task(
     eflags: i32,
     emit_row: &mut dyn FnMut(MinImage) -> PgResult<bool>,
 ) -> PgResult<StmtTaskOutcome> {
-    ensure_hooks_registered();
-    let funnel: Arc<RowFunnel<MinImage>> =
-        RowFunnel::new(rt.nthreads() + runtime::MAX_EXTERNAL_LANES, DEFAULT_RING_CAP);
-    // Producer pushes/done wake the parked leader immediately (the funnel
-    // wake hook sets the leader latch; the wait quantum is the backstop).
-    let leader_proc = init_small::globals::MyProcNumber();
-    funnel.set_wake_hook(Box::new(move || {
-        latch::SetLatch(::types_storage::latch::LatchHandle::proc(leader_proc));
-    }));
+    let funnel = stmt_funnel();
     let payload =
         StmtTaskShared::new(rt, pstmt, query_text.to_string(), eflags, Arc::clone(&funnel));
 
-    // EnterParallelMode brackets the context lifetime (CreateParallelContext
-    // asserts it); an error unwind aborts the transaction, which destroys
-    // live contexts and resets the mode (the Gather discipline).
+    // EnterParallelMode brackets the engagement (the pcxt ceremony's
+    // CreateParallelContext asserts it; the fast path keeps the leader-side
+    // semantics identical); an error unwind aborts the transaction, which
+    // resets the mode (the Gather discipline).
     ::xact::EnterParallelMode();
-    let r = engage_stmt_task_inner(rt, &funnel, &payload, emit_row);
+    let r = if stmt_ptrpass_enabled() {
+        engage_ceremony_fast(rt, &funnel, &payload, emit_row)
+    } else {
+        engage_ceremony_pcxt(rt, &funnel, &payload, emit_row)
+    };
     ::xact::ExitParallelMode();
     r
 }
 
-fn engage_stmt_task_inner(
+/// GL-STMTTASK-2 change 2: the RAII join guard that replaces the pcxt
+/// ceremony's private-shutdown hook + teardown tail on the fast path. Drop
+/// runs UNCONDITIONALLY (the hook ran at DestroyParallelContext on every
+/// inc-1 path, completion included — every action is idempotent): abort a
+/// live RG, close funnel demand, complete the standing join so the leader
+/// arena never unwinds under a claimed worker (the SendConst contract).
+struct StmtJoinGuard {
+    payload: Arc<StmtTaskShared>,
+}
+
+impl Drop for StmtJoinGuard {
+    fn drop(&mut self) {
+        let payload = &self.payload;
+        let rg = payload.rg.get().and_then(|w| w.upgrade());
+        // Happy path (RG complete, board slot already taken by the wait
+        // loop's own cleanup): do nothing — the inc-1 hook's unconditional
+        // abort() here was a gratuitous herd wake of the whole pool per
+        // statement (witnessed by the unparks counter). Abort + demand
+        // close + join only when something is actually left to reap.
+        let incomplete = rg.as_ref().is_some_and(|rg| rg.try_outcome().is_none());
+        let slot_held =
+            payload.standing.lock().unwrap_or_else(|p| p.into_inner()).is_some();
+        if !incomplete && !slot_held {
+            return;
+        }
+        if let Some(rg) = &rg {
+            rg.abort();
+        }
+        payload.funnel.close_demand();
+        super::standing_channel::shutdown_standing_join(
+            &payload.standing,
+            rg.as_ref(),
+            &|rg| drain_rg_stmt(payload.rt, &payload.funnel, rg),
+        );
+    }
+}
+
+/// The driver installed on the engagement's shared state (both
+/// ceremonies): deferred+sticky under change 1, the inc-1 eager binder
+/// when killed.
+fn stmt_driver() -> parallel::standing::StandingDriver {
+    parallel::standing::StandingDriver {
+        drive: stmt_task_standing_driver,
+        deferred_bind: stmt_standing_enabled() && parallel::lazy_bind_enabled(),
+    }
+}
+
+/// GL-STMTTASK-2 change 2: the dop-1 fast ceremony — binder target built
+/// by `parallel::statement_task_shared` (no pcxt list entry, no error
+/// mailboxes, no registry key, no Destroy walk), leader-unwind containment
+/// by the RAII join guard. The channel ladder and every wait/interrupt/
+/// error path are shared with the pcxt ceremony byte-for-byte.
+fn engage_ceremony_fast(
     rt: &'static Arc<runtime::Runtime>,
     funnel: &Arc<RowFunnel<MinImage>>,
     payload: &Arc<StmtTaskShared>,
     emit_row: &mut dyn FnMut(MinImage) -> PgResult<bool>,
 ) -> PgResult<StmtTaskOutcome> {
-    let pcxt = parallel::CreateParallelContext("postgres", "pgrust_stmt_task_main", 1)?;
-    // Every exit past submission completes the pinned RG before the leader
-    // arena can unwind; held outside the body closure so `?` errors reap too.
-    let mut submitted: Option<runtime::RgHandle> = None;
+    let Some(shared) = parallel::statement_task_shared(parallel::query_task_policy_probe())?
+    else {
+        return Ok(StmtTaskOutcome::CeremonyRefused);
+    };
+    payload
+        .pcxt_shared
+        .set(Arc::clone(&shared))
+        .unwrap_or_else(|_| unreachable!("pcxt shared set once"));
+    parallel::set_private_shared(&shared, Arc::clone(payload) as _);
+    parallel::set_standing_driver_shared(&shared, stmt_driver());
+    // Armed BEFORE the submission so every exit — `?`, panic, completion —
+    // completes the RG and joins the board before this frame (and with it
+    // the leader arena the SendConst pstmt lives in) unwinds.
+    let _join = StmtJoinGuard { payload: Arc::clone(payload) };
+    run_channel_ladder(rt, funnel, payload, emit_row)
+}
 
-    let body = (|mut_submitted: &mut Option<runtime::RgHandle>,
-                 emit_row: &mut dyn FnMut(MinImage) -> PgResult<bool>|
+/// The inc-1 parallel-context ceremony (PGRUST_STMT_TASK_PTRPASS=0): kept
+/// as the ablation baseline and the belt-and-suspenders fallback. Same
+/// channel ladder.
+fn engage_ceremony_pcxt(
+    rt: &'static Arc<runtime::Runtime>,
+    funnel: &Arc<RowFunnel<MinImage>>,
+    payload: &Arc<StmtTaskShared>,
+    emit_row: &mut dyn FnMut(MinImage) -> PgResult<bool>,
+) -> PgResult<StmtTaskOutcome> {
+    ensure_hooks_registered();
+    let pcxt = parallel::CreateParallelContext("postgres", "pgrust_stmt_task_main", 1)?;
+
+    let body = (|emit_row: &mut dyn FnMut(MinImage) -> PgResult<bool>|
      -> PgResult<StmtTaskOutcome> {
         parallel::InitializeParallelDSM(pcxt)?;
         // The REAL session policy: the leader gates refused any set flag, so
@@ -699,121 +1064,127 @@ fn engage_stmt_task_inner(
             .set(parallel::shared_for(pcxt))
             .unwrap_or_else(|_| unreachable!("pcxt shared set once"));
         parallel::set_private(pcxt, Arc::clone(payload) as _);
-        // Eager binder (the sink arms' bracket): visibility re-established
-        // up front; a parked sticky retention is evicted pre-bind.
-        parallel::set_standing_driver(pcxt, parallel::standing::StandingDriver {
-            drive: stmt_task_standing_driver,
-            deferred_bind: false,
-        });
-
-        // POOL-DB channel first (per-RG board, concurrent; the descriptor
-        // must ride the submission). None ⇒ gang channel below.
-        let pool = super::standing_channel::try_pool_channel(
-            payload.pcxt_shared.get().expect("pcxt shared set above"),
-            1,
-            /* sinks_gate */ false,
-        );
-
-        let work: Arc<dyn runtime::TaskSetWork> = Arc::clone(payload) as _;
-        let source: Arc<dyn runtime::MorselSource> =
-            Arc::new(runtime::SyntheticMorselSource::new(1));
-        static NEXT_QID: AtomicUsize = AtomicUsize::new(1);
-        let spec = runtime::QuerySpec {
-            query_id: NEXT_QID.fetch_add(1, Ordering::SeqCst) as u64,
-            tasksets: vec![runtime::TaskSetSpec { source, work, deps: vec![] }],
-        };
-        let set_rg = |rg: &runtime::RgHandle| {
-            payload.rg.set(rg.downgrade()).unwrap_or_else(|_| unreachable!("rg set once"));
-        };
-        let (rg, waiter) = match &pool {
-            Some((_, descriptor)) => rt.submit_pinned_bound(
-                spec,
-                super::router::session_affinity_token(),
-                descriptor.clone(),
-                set_rg,
-            ),
-            None => {
-                let (rg, waiter) = rt
-                    .submit_pinned_with_affinity(spec, super::router::session_affinity_token());
-                set_rg(&rg);
-                (rg, waiter)
-            }
-        };
-        *mut_submitted = Some(rg.clone());
-
-        // GL-SLEASE-1 discipline: a leased session leader is about to PARK
-        // while a pool worker executes its statement — give the permit up
-        // for the wait span (re-acquired by the guard's drop).
-        let _lease_yield = crate::execmain::serial_lease_yield_for_engagement();
-
-        let mut emitted: u64 = 0;
-        let mut stopped = false;
-
-        // Pool channel wait; its refusal closes the board and tries the gang.
-        if let Some((entry, _)) = &pool {
-            *payload.standing.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(entry));
-            match wait_pump(
-                payload, rt, funnel, entry, "pooldb", &rg, &waiter, emit_row, &mut emitted,
-                &mut stopped,
-            )? {
-                StmtWait::Done(o) => {
-                    return finish_stmt(payload, funnel, o, emit_row, &mut emitted, &mut stopped);
-                }
-                StmtWait::Fallback => {}
-            }
-        }
-
-        // Standing gang channel (one board process-wide: under concurrency
-        // a busy board refuses here and the statement stays incumbent).
-        let engaged = parallel::standing::try_engage(
-            payload.pcxt_shared.get().expect("pcxt shared set above"),
-            1,
-        );
-        if let Some(entry) = engaged {
-            *payload.standing.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&entry));
-            match wait_pump(
-                payload, rt, funnel, &entry, "standing", &rg, &waiter, emit_row, &mut emitted,
-                &mut stopped,
-            )? {
-                StmtWait::Done(o) => {
-                    return finish_stmt(payload, funnel, o, emit_row, &mut emitted, &mut stopped);
-                }
-                StmtWait::Fallback => {}
-            }
-        }
-
-        // No channel served. The RG is untouched (started == 0 on every
-        // Fallback exit) — reap it and let the incumbent loop run. A row
-        // can only have been pumped after a start, so emitted == 0 here.
-        debug_assert_eq!(emitted, 0, "fallback after rows were streamed");
-        drain_rg_stmt(rt, funnel, &rg);
-        if payload.started.load(Ordering::SeqCst) != 0 || emitted != 0 {
-            // A straggler started against the closing board: the plan may
-            // have partially streamed — never rerun. Surface the recorded
-            // error or the died shape.
-            if let Some(e) = payload.take_error() {
-                return Err(e);
-            }
-            return Err(Box::new(PgError::new(
-                ERROR,
-                "statement task worker exited before completing the statement",
-            )));
-        }
-        Ok(StmtTaskOutcome::Fallback)
-    })(&mut submitted, emit_row);
+        parallel::set_standing_driver(pcxt, stmt_driver());
+        run_channel_ladder(rt, funnel, payload, emit_row)
+    })(emit_row);
 
     // Teardown tail: a submitted RG must be COMPLETE before
     // DestroyParallelContext (the private-shutdown hook covers unwinds;
-    // this covers `?` returns).
-    if let Some(rg) = &submitted {
+    // this covers `?` returns). The ladder joins on its own exits; the
+    // rg-slot re-check here is belt-and-suspenders.
+    if let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) {
         if rg.try_outcome().is_none() {
-            drain_rg_stmt(rt, funnel, rg);
+            drain_rg_stmt(rt, funnel, &rg);
         }
     }
     let destroy = parallel::DestroyParallelContext(pcxt);
     let outcome = body?;
     destroy?;
     Ok(outcome)
+}
+
+/// The engagement body both ceremonies share: build the pool channel,
+/// submit the dop-1 pinned RG, wait/pump on the channel ladder
+/// (pooldb → gang → fallback). Byte-identical to the inc-1 body.
+fn run_channel_ladder(
+    rt: &'static Arc<runtime::Runtime>,
+    funnel: &Arc<RowFunnel<MinImage>>,
+    payload: &Arc<StmtTaskShared>,
+    emit_row: &mut dyn FnMut(MinImage) -> PgResult<bool>,
+) -> PgResult<StmtTaskOutcome> {
+    // POOL-DB channel first (per-RG board, concurrent; the descriptor
+    // must ride the submission). None ⇒ gang channel below.
+    let pool = super::standing_channel::try_pool_channel(
+        payload.pcxt_shared.get().expect("pcxt shared set above"),
+        1,
+        /* sinks_gate */ false,
+    );
+
+    let work: Arc<dyn runtime::TaskSetWork> = Arc::clone(payload) as _;
+    let source: Arc<dyn runtime::MorselSource> =
+        Arc::new(runtime::SyntheticMorselSource::new(1));
+    static NEXT_QID: AtomicUsize = AtomicUsize::new(1);
+    let spec = runtime::QuerySpec {
+        query_id: NEXT_QID.fetch_add(1, Ordering::SeqCst) as u64,
+        tasksets: vec![runtime::TaskSetSpec { source, work, deps: vec![] }],
+    };
+    let set_rg = |rg: &runtime::RgHandle| {
+        payload.rg.set(rg.downgrade()).unwrap_or_else(|_| unreachable!("rg set once"));
+    };
+    let (rg, waiter) = match &pool {
+        Some((_, descriptor)) => rt.submit_pinned_bound(
+            spec,
+            super::router::session_affinity_token(),
+            descriptor.clone(),
+            set_rg,
+        ),
+        None => {
+            let (rg, waiter) =
+                rt.submit_pinned_with_affinity(spec, super::router::session_affinity_token());
+            set_rg(&rg);
+            (rg, waiter)
+        }
+    };
+
+    // GL-SLEASE-1 discipline: a leased session leader is about to PARK
+    // while a pool worker executes its statement — give the permit up
+    // for the wait span (re-acquired by the guard's drop).
+    let _lease_yield = crate::execmain::serial_lease_yield_for_engagement();
+
+    let mut emitted: u64 = 0;
+    let mut stopped = false;
+
+    // Pool channel wait; its refusal closes the board and tries the gang.
+    if let Some((entry, _)) = &pool {
+        *payload.standing.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(entry));
+        match wait_pump(
+            payload, rt, funnel, entry, "pooldb", &rg, &waiter, emit_row, &mut emitted,
+            &mut stopped,
+        )? {
+            StmtWait::Done(o) => {
+                return finish_stmt(payload, funnel, o, emit_row, &mut emitted, &mut stopped);
+            }
+            StmtWait::Fallback => {}
+        }
+    }
+
+    // Standing gang channel (one board process-wide: under concurrency
+    // a busy board refuses here and the statement stays incumbent).
+    let engaged = parallel::standing::try_engage(
+        payload.pcxt_shared.get().expect("pcxt shared set above"),
+        1,
+    );
+    if let Some(entry) = engaged {
+        *payload.standing.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&entry));
+        match wait_pump(
+            payload, rt, funnel, &entry, "standing", &rg, &waiter, emit_row, &mut emitted,
+            &mut stopped,
+        )? {
+            StmtWait::Done(o) => {
+                return finish_stmt(payload, funnel, o, emit_row, &mut emitted, &mut stopped);
+            }
+            StmtWait::Fallback => {}
+        }
+    }
+
+    // No channel served. The RG is untouched (started == 0 on every
+    // Fallback exit) — reap it and let the incumbent loop run. A row
+    // can only have been pumped after a start, so emitted == 0 here.
+    debug_assert_eq!(emitted, 0, "fallback after rows were streamed");
+    drain_rg_stmt(rt, funnel, &rg);
+    if payload.started.load(Ordering::SeqCst) != 0 || emitted != 0 {
+        // A straggler started against the closing board: the plan may
+        // have partially streamed — never rerun. Surface the recorded
+        // error or the died shape.
+        if let Some(e) = payload.take_error() {
+            return Err(e);
+        }
+        return Err(Box::new(PgError::new(
+            ERROR,
+            "statement task worker exited before completing the statement",
+        )));
+    }
+    Ok(StmtTaskOutcome::Fallback)
 }
 
 /// Drain every currently-available row to the wire (never parks). Sets
@@ -1008,22 +1379,22 @@ fn finish_stmt(
 
 /// GL-STMTTASK-1 gated hook: when the armed simple-protocol statement's
 /// top-level run reaches execute_plan and every envelope gate admits, run
-/// the statement as a dop-1 pool task and stream its rows to `dest`.
-/// Returns true iff the whole run was handled (the caller skips the serial
-/// loop); false = refused / fell back — the serial loop runs
-/// byte-identically.
+/// the statement as a dop-1 pool task and stream its rows to `dest` — or
+/// (GL-STMTTASK-2 change 3) hand the caller an inline seat so the SESSION
+/// thread runs it itself through the incumbent loop. See
+/// [`StmtTaskVerdict`].
 pub(crate) fn try_stmt_task<'mcx, 'd>(
     estate: &mut ::executils::EStateData<'mcx>,
     planstate: &mut crate::procnode::PlanStateNode<'mcx>,
     number_tuples: u64,
     dest: &mut ::tcop_dest::DestReceiver<'d>,
-) -> PgResult<bool> {
+) -> PgResult<StmtTaskVerdict> {
     // The armed flag is the first gate AND is consumed exactly once per
     // statement: the first executor run of the statement is the top-level
     // one, so nested runs (SQL functions under a refused top level) can
     // never inherit the arm.
     if !take_armed() {
-        return Ok(false);
+        return Ok(StmtTaskVerdict::Incumbent);
     }
     if number_tuples != 0 {
         return refuse(StmtTaskRefusal::CountLimited);
@@ -1081,6 +1452,25 @@ pub(crate) fn try_stmt_task<'mcx, 'd>(
     }
     debug_assert!(::snapmgr::ActiveSnapshotSet(), "portal run without an active snapshot");
 
+    // GL-STMTTASK-2 change 3 — INLINE-EXECUTE (run-on-arrival, the survey's
+    // Cilk work-first / Go doctrine): if a pool seat is free WITHOUT a
+    // wait, the session thread executes the statement ITSELF — the caller
+    // runs its own (incumbent) per-tuple loop with the seat held. Idle
+    // case: zero submissions, zero wakes, zero binds — ceremony is this
+    // gate + the permit try-acquire. Under contention (no free seat) the
+    // enqueue path below takes over; the session thread then parks and a
+    // worker serves the statement when capacity frees.
+    if stmt_inline_enabled() {
+        if let Some(seat) = rt.try_borrow_seat() {
+            STMT_ENGAGED.fetch_add(1, Ordering::SeqCst);
+            STMT_INLINE.fetch_add(1, Ordering::SeqCst);
+            // Engagement witness (e2e grep surface) + the wakeup program's
+            // per-statement unpark metric: inline performs none.
+            lane_trace("stmt-task: engaged inline dop=1 unparks=0");
+            return Ok(StmtTaskVerdict::Inline(seat));
+        }
+    }
+
     // Wire descriptor: the JUNK-CLEAN result type — what the receiver's
     // startup (RowDescription) was primed with and what the worker's
     // junk-filtered emits carry. A raw plan descriptor here would disagree
@@ -1104,6 +1494,11 @@ pub(crate) fn try_stmt_task<'mcx, 'd>(
     );
 
     STMT_ENGAGED.fetch_add(1, Ordering::SeqCst);
+    // The wakeup program's unparks-per-statement metric (survey rule 6):
+    // delta of the pool park lot's unpark counter across this statement's
+    // whole ceremony. Process-wide (concurrent statements' wakes alias into
+    // each other's deltas) — exact in the single-stream measurement rigs.
+    let unparks0 = rt.pool_unparks();
     let outcome = engage_stmt_task(
         rt,
         pstmt,
@@ -1132,12 +1527,19 @@ pub(crate) fn try_stmt_task<'mcx, 'd>(
     match outcome {
         StmtTaskOutcome::Completed(n) => {
             STMT_COMPLETED.fetch_add(1, Ordering::SeqCst);
+            if lane_trace_enabled() {
+                lane_trace(&format!(
+                    "stmt-task: unparks={}",
+                    rt.pool_unparks().saturating_sub(unparks0)
+                ));
+            }
             // Stock accounting: es_processed counts rows the receiver
             // accepted (the plain loop's SELECT arm).
             estate.es_processed = n;
-            Ok(true)
+            Ok(StmtTaskVerdict::Handled)
         }
         StmtTaskOutcome::Fallback => refuse(StmtTaskRefusal::NoChannel),
+        StmtTaskOutcome::CeremonyRefused => refuse(StmtTaskRefusal::CeremonyRefused),
     }
 }
 
