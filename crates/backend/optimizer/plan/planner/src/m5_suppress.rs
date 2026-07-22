@@ -1705,6 +1705,37 @@ fn agg_having_enabled() -> bool {
     })
 }
 
+/// DICTKEY car knob (`PGRUST_LANE_V2_AGG_DICTKEY`, GL-DICTDRAIN-1):
+/// DEFAULT OFF, armed iff exactly `1`/`on`. SAME spelling as the executor
+/// half (`exprkey::dictkey_sink_enabled` in execmain — the sink admission
+/// of the Dict expr-key kind through the 1-Intern compact spec): both
+/// seams flip together (knob-coherence law — a probe that suppressed a
+/// dict-key shape the sink refuses would land it on the serial rerun;
+/// note the serial rerun for THIS class is the engaged serial expr-key
+/// fold feed, not the per-row world — the containment price is the
+/// serial-fold wall, measured in the GL-DICTDRAIN-1 ladder).
+fn agg_dictkey_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        tier2_car_spelling_on(std::env::var("PGRUST_LANE_V2_AGG_DICTKEY").as_deref().ok())
+    })
+}
+
+/// DICTKEY engine-kill coherence (suppress-then-refuse guard): the drain
+/// rides the serial-lane expr-key feed (`PGRUST_LANE_V2_EXPRKEY`) and the
+/// canonical text car (`PGRUST_RUNTIME_AGG_TEXT` — `mk_shape_sink_ok`'s
+/// 1-Intern gate). Either executor kill must gate the probe keying too.
+fn dictkey_engine_live() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        exprkey_engine_live()
+            && !matches!(
+                std::env::var("PGRUST_RUNTIME_AGG_TEXT").as_deref(),
+                Ok("0") | Ok("off")
+            )
+    })
+}
+
 /// The aggregates whose ONE argument slot is int4-typed — the only place
 /// the lanefold fold-arg vocabulary consults the textlen family
 /// (`classify_arg` admits `classify_len_arg` for INT4-expected args only;
@@ -2913,6 +2944,19 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     if exprkey_topn_enabled() && parse.havingQual.is_none() {
         if let Some(verdict) =
             classify_exprkey_topn(run, parse, rti, rte.relid, rel_id, rel_rows, rel_pages)?
+        {
+            return Ok(verdict);
+        }
+    }
+    // GL-DICTDRAIN-1 (DICTKEY car, default OFF): the regexp-extracted
+    // dict-key grouped class — keyed only knob-ON and BEFORE the bare-Var
+    // key discipline (which refuses expr keys). HAVING composes: only the
+    // prefilter-admitted single count(*) term ever reaches this line (the
+    // HAVING car's own carve above), and the sink's emit filter is
+    // key-kind-agnostic. A shape MISS returns None and falls through.
+    if agg_dictkey_enabled() {
+        if let Some(verdict) =
+            classify_dictkey_exprkey(run, parse, rti, rte.relid, rel_id, rel_rows, rel_pages)?
         {
             return Ok(verdict);
         }
@@ -7697,6 +7741,201 @@ fn classify_exprkey_topn<'mcx>(
     Ok(Some(suppressed))
 }
 
+// ---------------------------------------------------------------------------
+// GL-DICTDRAIN-1 (DICTKEY car): the regexp-extracted dict-key grouped class —
+// the single-computed-dictionary-key shape (`gap:agg-regexp-dict-key`).
+// ---------------------------------------------------------------------------
+
+/// pg_proc oid of 3-arg `regexp_replace(text, text, text)` —
+/// textregexreplace_noopt (the fmgr row of record, canonical.rs 2284). The
+/// flags variant (2285) and the extended family are NOT keyed in v1 — the
+/// executor hosts them (dicteval's catalog compile admits any strict
+/// IMMUTABLE internal builtin), but the probe vocabulary widens only with
+/// its own measured cell (fail-closed, probe ⊂ walk).
+const F_TEXTREGEXREPLACE_NOOPT: u32 = 2284;
+
+/// The DICTKEY car's key half: `regexp_replace(<bare text/varchar Var on
+/// the rel>, <non-null text Const>, <non-null text Const>)` under the
+/// deterministic default collation — the executor mirror: the expr-key
+/// decide requires a pgrcolumnar TEXT|VARCHAR input column and a text-typed
+/// key; dicteval's compile admits the catalog row (internal-language,
+/// IMMUTABLE, strict, concrete rettype, usable collation — the probe's
+/// default-collation gate is strictly narrower). A varchar input rides the
+/// binary-coercion relabel exactly as the walker sees it. Returns the
+/// input Var on a match.
+fn regexp_dict_key_var<'mcx>(expr: Node<'mcx>, rti: usize) -> Option<&'mcx Var<'mcx>> {
+    let f = expr.as_func_expr()?;
+    if f.funcid != F_TEXTREGEXREPLACE_NOOPT || f.funcretset || f.args.len() != 3 {
+        return None;
+    }
+    if f.inputcollid != DEFAULT_COLLATION_OID {
+        return None;
+    }
+    let arg0 = f.args.nth(0);
+    let arg0 = match arg0.as_relabel_type() {
+        Some(r) if r.resulttype == TEXTOID => r.arg,
+        Some(_) => return None,
+        None => arg0,
+    };
+    let v = key_var(arg0, rti)?;
+    if !is_text_family(v.vartype) || v.varcollid != DEFAULT_COLLATION_OID {
+        return None;
+    }
+    for i in 1..3 {
+        let c = f.args.nth(i).as_const()?;
+        if c.constisnull || c.consttype != TEXTOID {
+            return None;
+        }
+    }
+    Some(v)
+}
+
+/// PROVISIONAL floor for the DICTKEY car: the charter bar is sink-beats-
+/// serial at dop >= 4 (GL-DICTDRAIN-1); below it there is NO admitted
+/// low-dop win region (`low_dop_max_rows = 0` — fail-closed, unlike
+/// NO_GUARD's infinity which would make `min_dop` toothless). The
+/// witnessed ladder owns the re-derivation.
+fn dictkey_guard() -> FloorGuard {
+    FloorGuard { min_dop: 4, low_dop_max_rows: 0.0, ..NO_GUARD }
+}
+
+/// GL-DICTDRAIN-1 recognizer: a single-cbstore-rel grouped agg whose ONE
+/// group key is the regexp-extracted computed text key
+/// (`regexp_dict_key_var`) over a PLAN-TIME DICT-ANSWERABLE column (the v7
+/// stitch discipline — `topn_nonint_text_key_stitched`; a no-stitch column
+/// keeps Gather: the executor's dict memo would run per-row-ish raw
+/// windows and the drain's economics are unproven there). Passengers: the
+/// grouped-sink vocabulary, the LENARG widening (its knob), and
+/// min/max(text) under the strminmax car (its knob + the GL-STRMM-2
+/// group-estimate ceiling MIRRORED — the executor refuses VarlenaMinMax
+/// engagements past it, fn doc `strminmax_max_groups`). HAVING composes
+/// (only the prefilter-admitted `count(*) <cmp> Const` term ever reaches
+/// here — the HAVING car's own carve). Decorations: plain grouped emit, or
+/// ONE agg sort key (base vocabulary, or a LENARG key — the winner-
+/// selection declines to the full drain, the GL-STRAGG-2 priced degrade)
+/// with a Const LIMIT within the sink bound cap, no OFFSET.
+///
+/// groupby_high hold applies UNCHANGED (charter: the 100M census shape's
+/// ~6.6M estimate crosses it — matched-shape-but-floored keeps Gather; the
+/// hold's env override is the ladder's measurement lever, and any floor
+/// change is the flip letter's own witnessed justification). Returns
+/// `Some(verdict)` on a family match, `None` to fall through.
+#[allow(clippy::too_many_arguments)]
+fn classify_dictkey_exprkey<'mcx>(
+    run: &mut PlannerRun<'mcx>,
+    parse: &Query<'mcx>,
+    rti: usize,
+    relid: u32,
+    rel_id: types_pathnodes::RelId,
+    rel_rows: f64,
+    rel_pages: f64,
+) -> PgResult<Option<bool>> {
+    if !dictkey_engine_live() {
+        return Ok(None);
+    }
+    // ONE group key: the computed dict key (the executor's single-key Dict
+    // arm — `agg_hash_staged_probe_col` must name exactly this column).
+    if parse.groupClause.len() != 1 {
+        return Ok(None);
+    }
+    let Some(gc) = parse.groupClause.nth(0).as_sort_group_clause() else { return Ok(None) };
+    let Some(key_tle) = tle_by_sortgroupref(parse, gc.tleSortGroupRef) else {
+        return Ok(None);
+    };
+    let Some(kvar) = regexp_dict_key_var(key_tle.expr, rti) else { return Ok(None) };
+    let key_ref = gc.tleSortGroupRef;
+    // Plan-time dict answerability (the v7 stitch discipline).
+    if !topn_nonint_text_key_stitched(run, rel_id, kvar.varattno as i32) {
+        return Ok(None);
+    }
+    // Emit discipline: the key by sortgroupref; every other entry a
+    // passenger from the class vocabulary.
+    let mut n_strminmax = 0usize;
+    for tle_node in &parse.targetList {
+        let Some(tle) = tle_node.as_target_entry() else { return Ok(None) };
+        if tle.ressortgroupref != 0 && tle.ressortgroupref == key_ref {
+            continue;
+        }
+        if is_whitelisted_agg(tle.expr, rti, grouped_sink_aggs()) {
+            continue;
+        }
+        if agg_lenarg_enabled() && is_whitelisted_agg_lenarg(tle.expr, rti, grouped_sink_aggs())
+        {
+            continue;
+        }
+        // min/max(text) passengers: REFUSED in v1 (fail-closed). The drain
+        // hosts them (the sink str-mm memo collapses the dict-window
+        // tie-copies), but the 10M measurement cell tripped the sink's
+        // residual budget refusal on a deterministic ~224MiB
+        // aggcontext-subtree term (7 x 32MiB blocks; NOT the tie-copies —
+        // identical pre/post memo; NOT the table prealloc — estimate
+        // 2130) — engage-then-refuse-then-serial-rerun is strictly worse
+        // than keeping Gather, so the probe refuses until the term is
+        // attributed (GL-DICTDRAIN-1 letter, named follow-up; the
+        // executor path stays measurable through forced-serial postures).
+        // `n_strminmax` stays wired for the return: the ceiling mirror
+        // below re-arms with it.
+        return Ok(None);
+    }
+    // Sort/limit composition: none (plain grouped emit), or ONE agg sort
+    // key + Const LIMIT, no OFFSET (the sibling classifiers' block).
+    if !parse.sortClause.is_nil() || parse.limitCount.is_some() || parse.limitOffset.is_some()
+    {
+        if parse.sortClause.len() != 1
+            || parse.limitCount.is_none()
+            || parse.limitOffset.is_some()
+        {
+            return Ok(None);
+        }
+        let Some(sc) = parse.sortClause.nth(0).as_sort_group_clause() else {
+            return Ok(None);
+        };
+        let Some(tle) = tle_by_sortgroupref(parse, sc.tleSortGroupRef) else {
+            return Ok(None);
+        };
+        let lenarg_sortkey =
+            agg_lenarg_enabled() && is_whitelisted_agg_lenarg(tle.expr, rti, grouped_sink_aggs());
+        if !is_whitelisted_agg(tle.expr, rti, GROUPED_SINK_AGGS) && !lenarg_sortkey {
+            return Ok(None);
+        }
+        match const_count(parse.limitCount) {
+            Some(b) if b >= 1 && b <= SINK_TOPN_MAX_BOUND_MIRROR => {}
+            _ => return Ok(None),
+        }
+    }
+    // groupby_high hold (shared floor, UNCHANGED — fn doc): matched-shape-
+    // but-floored keeps Gather.
+    let ngroups = if run.root.processed_groupClause.is_empty() {
+        1.0
+    } else {
+        let clauses =
+            crate::relnode::pgvec_clone_shallow(run.mcx, &run.root.processed_groupClause);
+        let group_exprs =
+            types_pathnodes::run::sortgrouplist_exprs(run, &clauses, &parse.targetList);
+        let input_rows = run.root.rel(rel_id).rows.max(1.0);
+        crate::selfuncs::estimate_num_groups(run, &group_exprs, input_rows)?
+    };
+    if ngroups >= groupby_high_floor() {
+        return Ok(Some(false));
+    }
+    // GL-STRMM-2 ceiling mirror: the executor refuses VarlenaMinMax
+    // engagements past the band (runtime_agg's leader gate, same env
+    // spelling) — a keyed shape there would land suppress-then-serial.
+    if n_strminmax > 0 && ngroups >= strminmax_max_groups() {
+        return Ok(Some(false));
+    }
+    Ok(Some(finish_knob_path(
+        run,
+        "dictkey",
+        "dictkey-grouped-agg",
+        dictkey_guard(),
+        relid,
+        ngroups,
+        rel_rows,
+        rel_pages,
+    )?))
+}
+
 /// `is_whitelisted_agg` over TWO candidate range-table indexes (the join
 /// row flip): the aggregate's single Var arg may live on either joined rel.
 fn is_whitelisted_agg_2rti(expr: Node<'_>, rti_l: usize, rti_r: usize, whitelist: &[u32]) -> bool {
@@ -8941,6 +9180,25 @@ mod tests {
     fn exprkey_topn_mirrors_of_record() {
         assert_eq!(F_TIMESTAMP_TRUNC_FN, 2020);
         assert_eq!(INT_EQ_FNS_MIRROR, [63, 65, 467, 158, 159, 852, 474, 1850, 1856]);
+    }
+
+    /// GL-DICTDRAIN-1 mirrors of record: the 3-arg regexp_replace fmgr row
+    /// (textregexreplace_noopt, vendored REL 18.3 pg_proc.dat — fmgr_core
+    /// canonical.rs `(2284, "textregexreplace_noopt", 3, strict, retset
+    /// false)`; the flags variant 2285 is deliberately NOT keyed in v1)
+    /// and the provisional floor (the charter bar: sink beats serial at
+    /// dop >= 4 — the witnessed ladder owns the re-derivation). A drift
+    /// here silently moves the probe off the arm it mirrors.
+    #[test]
+    fn dictkey_mirrors_of_record() {
+        assert_eq!(F_TEXTREGEXREPLACE_NOOPT, 2284);
+        let g = dictkey_guard();
+        assert_eq!(g.min_dop, 4, "the GL-DICTDRAIN-1 provisional floor");
+        // The knob rides the still-gated tier-2 spelling (armed iff
+        // exactly 1|on — pinned by tier2_car_spelling_* above): DEFAULT
+        // OFF until the flip letter.
+        assert!(!tier2_car_spelling_on(None));
+        assert!(tier2_car_spelling_on(Some("1")) && tier2_car_spelling_on(Some("on")));
     }
 
     /// SE-T2AGG CAR B: the min/max(text) OIDs of record (vendored REL 18.3
