@@ -319,7 +319,7 @@ pub fn AlterExtensionNamespace<'mcx>(
     newschema: &str,
 ) -> PgResult<ObjectAddress> {
     let extension_oid = crate::get_extension_oid(extension_name, false)?;
-    let nsp_oid = catalog_namespace::LookupCreationNamespace(newschema)?;
+    let nsp_oid = catalog_namespace::LookupCreationNamespace(mcx, newschema)?;
 
     // Permission check: must own extension. C: "we don't bother to check
     // ownership of the individual member objects".

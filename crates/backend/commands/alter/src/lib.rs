@@ -553,7 +553,7 @@ pub fn ExecAlterObjectSchemaStmt_generic<'mcx>(
 
     let catalog_rel = table::table_open(mcx, address.classId, RowExclusiveLock)?;
     let nsp_oid =
-        catalog_namespace::LookupCreationNamespace(stmt.newschema.expect("newschema"))?;
+        catalog_namespace::LookupCreationNamespace(mcx, stmt.newschema.expect("newschema"))?;
     AlterObjectNamespace_internal(mcx, &catalog_rel, address.objectId, nsp_oid)?;
     catalog_rel.close(RowExclusiveLock)?;
     Ok(address)

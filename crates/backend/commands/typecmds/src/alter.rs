@@ -1040,7 +1040,7 @@ pub fn AlterTypeNamespace<'mcx>(
     {
         return Err(not_a_domain(type_oid)?);
     }
-    let nsp_oid = catalog_namespace::LookupCreationNamespace(newschema)?;
+    let nsp_oid = catalog_namespace::LookupCreationNamespace(mcx, newschema)?;
     let mut objs_moved: PgVec<'mcx, ObjectAddress> = PgVec::new_in(mcx);
     AlterTypeNamespace_oid(mcx, type_oid, nsp_oid, false, &mut objs_moved)?;
     Ok(())

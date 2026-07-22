@@ -1125,6 +1125,7 @@ pub fn ImportForeignSchema<'mcx>(
         )?;
     }
     catalog_namespace::LookupCreationNamespace(
+        mcx,
         stmt.local_schema.expect("ImportForeignSchemaStmt.local_schema"),
     )?;
     // The no-handler error is the live surface; a handler-bearing FDW is loud.
