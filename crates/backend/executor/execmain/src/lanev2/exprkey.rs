@@ -85,6 +85,25 @@ fn codedkey_enabled() -> bool {
     })
 }
 
+/// GL-DICTDRAIN-1 (the Dict-class parallel sink drain): the Dict key class
+/// becomes SINK-admissible through a 1-Intern compact spec — the M2 sink
+/// single-text (C2) shape with the packed component fed from the dicteval
+/// memo's output value instead of a staged scan column. The serial coded
+/// arm's measured loss (`codedkey_enabled` doc: the partial's output
+/// contract re-materialized every key through the Gather tuple queues) is
+/// exactly what the sink handoff deletes — worker tables flush
+/// canonical-byte runs and the leader merges on bytes, so the id-keyed
+/// handoff the q29coded note named as the profitability condition IS the
+/// sink. DEFAULT OFF, armed iff exactly `1`/`on`; SAME spelling as the m5
+/// probe recognizer (knob-coherence law — a probe that suppressed a
+/// dict-key shape this gate refuses would land it on the serial rerun).
+pub(super) fn dictkey_sink_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&ON, || {
+        matches!(std::env::var("PGRUST_LANE_V2_AGG_DICTKEY").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
 /// Kill switch for the redundant-key (reduced grouping) tranche —
 /// independent of the single-computed-key arms above.
 fn redkey_enabled() -> bool {
@@ -406,6 +425,14 @@ pub struct ExprKeyState {
     /// Sticky refuse-and-replay flag (arith trap): all later batches take
     /// the per-row emit path.
     refused: bool,
+    /// M2 sink build (set by the sink drain adapter, never on serial
+    /// builds): demote exits REFUSE (sticky `refused`, no C-table
+    /// migration, no per-row replay — the RG abort discards the build and
+    /// the serial whole-attempt rerun re-derives everything) and the coded
+    /// arm's classic budget peek is skipped (the sink cap + flush law
+    /// bounds the table; `agg_hash_compact_over_limits` is a classic-build
+    /// accounting).
+    sink_build: bool,
     // Reusable per-build scratch.
     rows: Vec<u32>,
     keys: Vec<::datum::Datum>,
@@ -417,6 +444,17 @@ pub struct ExprKeyState {
     /// Per-epoch code→pergroup map (dictgroup pattern).
     dg_epoch: Option<u64>,
     dg_slots: Vec<Option<core::ptr::NonNull<::execexpr::AggPerGroup>>>,
+    /// M2 sink str MIN/MAX dict-code memo (GL-DICTDRAIN-1): the serial
+    /// feed's tie-copy collapse, PER-WORKER-BUILD persistent — without it
+    /// every tied row of a dict window datumCopies the transvalue into the
+    /// bump aggcontext (text's last-tied-wins law), which measured as a
+    /// runaway context (~224MiB at a 10M/1720-group cell) tripping the
+    /// residual budget refusal. Lives inside the state (not the adapter)
+    /// so it survives batches; `take_sink_mm`/`put_sink_mm` move it around
+    /// the drain call; `invalidate_group_caches` bumps its generation on
+    /// every flush (pergroup-pointer keyed — the 830320fed law).
+    sink_mm: MmState,
+    sink_mm_armed: bool,
 }
 
 /// `LaneCols` remap for projected-scan folds: plan/fold columns are tlist
@@ -706,6 +744,13 @@ pub(super) fn decide_exprkey<'mcx>(
         prefix,
         kind,
         refused: false,
+        sink_build: false,
+        sink_mm: MmState {
+            cols: Vec::new(),
+            codes: Vec::new(),
+            scratch: ::lanefold::StrMmScratch::default(),
+        },
+        sink_mm_armed: false,
         rows: Vec::new(),
         keys: Vec::new(),
         knull: Vec::new(),
@@ -911,6 +956,13 @@ fn decide_exprkey_mk<'mcx>(
             mks: super::MkScratch::default(),
         })),
         refused: false,
+        sink_build: false,
+        sink_mm: MmState {
+            cols: Vec::new(),
+            codes: Vec::new(),
+            scratch: ::lanefold::StrMmScratch::default(),
+        },
+        sink_mm_armed: false,
         rows: Vec::new(),
         keys: Vec::new(),
         knull: Vec::new(),
@@ -1137,6 +1189,13 @@ fn decide_reduced<'mcx>(
             hi,
         },
         refused: false,
+        sink_build: false,
+        sink_mm: MmState {
+            cols: Vec::new(),
+            codes: Vec::new(),
+            scratch: ::lanefold::StrMmScratch::default(),
+        },
+        sink_mm_armed: false,
         rows: Vec::new(),
         keys: Vec::new(),
         knull: Vec::new(),
@@ -1462,6 +1521,13 @@ fn decide_exprkey_mk_case<'mcx>(
             mks: super::MkScratch::default(),
         })),
         refused: false,
+        sink_build: false,
+        sink_mm: MmState {
+            cols: Vec::new(),
+            codes: Vec::new(),
+            scratch: ::lanefold::StrMmScratch::default(),
+        },
+        sink_mm_armed: false,
         rows: Vec::new(),
         keys: Vec::new(),
         knull: Vec::new(),
@@ -2183,13 +2249,15 @@ struct MmState {
 #[allow(clippy::too_many_arguments)]
 /// M2 sink drain adapter (runtime_agg.rs): one staged page batch through
 /// the expr-key feed under SINK constraints — compact table REQUIRED, no
-/// dict/code-histogram state, empty str-mm memo; `mk_shape` = the armed
-/// packed shape for the Multi kind (ts-extract class), `None` otherwise.
-/// `Ok(false)` = the batch routed anywhere the compact table cannot host
-/// (sticky range-guard refusal, a numeric pack demote's compact disarm):
-/// the sink cannot export the C tuplehash, so the caller REFUSES (RG abort
-/// → serial whole-attempt rerun — a data-borne error then surfaces from the
-/// serial replay with C's exact error identity).
+/// dict/code-histogram state; the str-mm memo is the STATE's own
+/// (`take_sink_mm` — build-persistent tie-copy collapse; empty for every
+/// kind but Dict); `mk_shape` = the armed packed shape for the Multi kind
+/// (ts-extract class), `None` otherwise. `Ok(false)` = the batch routed
+/// anywhere the compact table cannot host (sticky range-guard refusal, a
+/// numeric pack demote's compact disarm): the sink cannot export the C
+/// tuplehash, so the caller REFUSES (RG abort → serial whole-attempt rerun
+/// — a data-borne error then surfaces from the serial replay with C's
+/// exact error identity).
 pub(super) fn exprkey_sink_batch<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
@@ -2201,19 +2269,22 @@ pub(super) fn exprkey_sink_batch<'mcx>(
     n: u32,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
-    let mut mm = MmState {
-        cols: Vec::new(),
-        codes: Vec::new(),
-        scratch: ::lanefold::StrMmScratch::default(),
-    };
+    let mut mm = xk.take_sink_mm(agg);
     let mut ch: Option<CodeHistState> = None;
-    // The coded-group arm is never sink-admissible (Dict `sink_key_kind` =
-    // None) — the flag stays false on this route.
-    let mut coded = false;
-    exprkey_batch(
-        agg, ss, xk, stage_slot, true, &mut coded, mk_shape, idxs, groups, &mut mm, &mut ch, n,
+    debug_assert!(xk.sink_build, "the sink drain adapter requires the armed sink decide");
+    // GL-DICTDRAIN-1: the Dict kind drains through the CODED arm — the
+    // dicteval memo derives once per (epoch, code) and the resolve probes
+    // the 1-Intern compact table by the output value's canonical bytes.
+    // `compact=false` keeps the single-datum compact probe (int-key
+    // vocabulary) off this kind; every other kind keeps its flags verbatim.
+    let dict = matches!(xk.kind, ExprKeyKind::Dict { .. });
+    let mut coded = dict;
+    let drove = exprkey_batch(
+        agg, ss, xk, stage_slot, !dict, &mut coded, mk_shape, idxs, groups, &mut mm, &mut ch, n,
         estate,
-    )?;
+    );
+    xk.put_sink_mm(mm);
+    drove?;
     Ok(!xk.refused && ::nodeagg::agg_hash_compact_armed(agg))
 }
 
@@ -2228,14 +2299,23 @@ pub(super) enum SinkXkKind {
     /// Multi arm packs it; `dict_input_att` names the TextRaw component's
     /// tlist attno when one exists (the intern/canonical-bytes lane).
     Multi { dict_input_att: Option<u16> },
+    /// GL-DICTDRAIN-1: the Dict key class through the 1-Intern compact
+    /// spec (the C2 single-text shape) — the dicteval memo derives the key
+    /// once per (epoch, code), the coded resolve interns the OUTPUT VALUE's
+    /// canonical bytes and probes the mk1 table (intern-armed or DIRECT).
+    /// Knob-gated (`dictkey_sink_enabled`), DEFAULT OFF.
+    DictCoded,
 }
 
 impl ExprKeyState {
     /// The sink-admissible key kind of this decide: `Single` for Arith/
     /// TsTrunc, `Reduced` for the redundant-key kind, `Multi` for the packed
     /// multi-key kind (int/numeric/one-text components — the compact mk
-    /// admission owns the component gates); `None` for Dict (its per-epoch
-    /// code→pergroup map is inherently per-worker C-table state).
+    /// admission owns the component gates); `DictCoded` for the Dict kind
+    /// UNDER THE KNOB (GL-DICTDRAIN-1 — the 1-Intern compact spec; its
+    /// per-epoch code→pergroup map stays worker-LOCAL, but the compact mk1
+    /// table it points into exports canonical bytes at flush); `None` for
+    /// the knob-off Dict kind (the historical per-worker C-table refusal).
     pub(super) fn sink_key_kind(&self) -> Option<SinkXkKind> {
         match &self.kind {
             ExprKeyKind::Arith { .. } | ExprKeyKind::TsTrunc { .. } => Some(SinkXkKind::Single),
@@ -2248,6 +2328,7 @@ impl ExprKeyState {
                 // gates (and the two-text kill switch).
                 Some(SinkXkKind::Multi { dict_input_att: m.dict_input_att })
             }
+            ExprKeyKind::Dict { .. } if dictkey_sink_enabled() => Some(SinkXkKind::DictCoded),
             ExprKeyKind::Dict { .. } => None,
         }
     }
@@ -2256,20 +2337,84 @@ impl ExprKeyState {
     /// arm's order — the `agg_hash_compact_{mk_admit,try_arm_mk}_multi`
     /// argument (mirrors `exprkey_build_fold_feed`'s own arm sequence:
     /// the bare text Var first, then the CaseDict computed key). Empty for
-    /// intern-free Multi shapes; `None` for non-Multi kinds.
+    /// intern-free Multi shapes. The Dict kind (GL-DICTDRAIN-1) carries
+    /// exactly ONE Intern att — the computed key column (`key_out`), the
+    /// serial coded arm's `try_arm_mk1` argument verbatim. `None` for the
+    /// remaining kinds.
     pub(super) fn sink_mk_intern_atts(&self) -> Option<([u16; 2], usize)> {
-        let ExprKeyKind::Multi(m) = &self.kind else { return None };
-        let mut atts = [0u16; 2];
-        let mut n = 0usize;
-        if let Some(a) = m.dict_input_att {
-            atts[n] = a;
-            n += 1;
+        match &self.kind {
+            ExprKeyKind::Multi(m) => {
+                let mut atts = [0u16; 2];
+                let mut n = 0usize;
+                if let Some(a) = m.dict_input_att {
+                    atts[n] = a;
+                    n += 1;
+                }
+                if m.case_dict.is_some() {
+                    atts[n] = self.key_out;
+                    n += 1;
+                }
+                Some((atts, n))
+            }
+            ExprKeyKind::Dict { .. } => Some(([self.key_out, 0], 1)),
+            _ => None,
         }
-        if m.case_dict.is_some() {
-            atts[n] = self.key_out;
-            n += 1;
+    }
+
+    /// M2 sink arm marker (GL-DICTDRAIN-1): the drain adapter's demote
+    /// exits refuse instead of migrating (field doc on `sink_build`). Set
+    /// once by `arm_sink_build` on the WORKER's own decide — the leader's
+    /// admission-probe state never drains batches.
+    pub(super) fn set_sink_build(&mut self) {
+        self.sink_build = true;
+    }
+
+    /// Drop the per-epoch code→pergroup cache (dictgroup pattern) AND the
+    /// sink str-mm memo generation. The M2 sink drive calls this after
+    /// EVERY flush — the flush RESET the compact table, so every cached
+    /// pointer (dg slot or mm memo key) is a dangling table row (the
+    /// 830320fed law; the intern-id caches ride the separate
+    /// `invalidate_mk_intern_cache` channel, which only intern-reset
+    /// flushes raise). No-op for kinds that never fill the caches.
+    pub(super) fn invalidate_group_caches(&mut self) {
+        self.dg_epoch = None;
+        self.dg_slots.clear();
+        self.sink_mm.scratch.invalidate();
+    }
+
+    /// Move the sink str-mm memo out for one drain call (borrow split —
+    /// `exprkey_batch` takes `&mut self` AND `&mut MmState`). First take
+    /// arms the cols for the Dict kind (the serial feed's `mm_str_cols`
+    /// over the plan's StrMin/StrMax lanes through the base-column map);
+    /// every other kind keeps an empty memo (their sink plans carry no str
+    /// transitions — the vguard belts).
+    pub(super) fn take_sink_mm(&mut self, agg: &::nodeagg::AggStateData<'_>) -> MmState {
+        if !self.sink_mm_armed {
+            self.sink_mm_armed = true;
+            if matches!(self.kind, ExprKeyKind::Dict { .. }) {
+                if let Some(plan) = ::nodeagg::agg_lanefold_plan(agg) {
+                    let map = &self.map;
+                    self.sink_mm.cols =
+                        mm_str_cols(plan, |c| map.get(c as usize).copied().flatten());
+                    if !self.sink_mm.cols.is_empty() {
+                        trace_feed("fold str min/max dict-code memo armed (dict sink)");
+                    }
+                }
+            }
         }
-        Some((atts, n))
+        core::mem::replace(
+            &mut self.sink_mm,
+            MmState {
+                cols: Vec::new(),
+                codes: Vec::new(),
+                scratch: ::lanefold::StrMmScratch::default(),
+            },
+        )
+    }
+
+    /// Return the memo after the drain call (see [`Self::take_sink_mm`]).
+    pub(super) fn put_sink_mm(&mut self, mm: MmState) {
+        self.sink_mm = mm;
     }
 
     /// Sticky per-build refusal flag (arith trap / range guard).
@@ -2326,6 +2471,18 @@ fn per_row_exit<'mcx>(
     n: u32,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
+    // M2 sink builds have NO per-row leg (no C-table export, and
+    // `compact_migrate` is a classic-build move — sink tables carry
+    // avgpack/canon state it must never touch): REFUSE, sticky. Every
+    // per-row-exit site runs BEFORE this batch's probes/transitions, and
+    // the RG abort discards the whole worker build — the serial
+    // whole-attempt rerun re-derives everything (a data-borne error then
+    // surfaces there with C's exact identity).
+    if xk.sink_build {
+        xk.refused = true;
+        trace_feed("expr-key sink demote: refusing to serial (sticky)");
+        return Ok(());
+    }
     ch_flush(agg, xk, ch, &mut mm.scratch)?;
     if *coded {
         coded_drop_caches(xk, coded);
@@ -2566,7 +2723,20 @@ fn exprkey_batch<'mcx>(
     // below, which finds every group in the C table. (b) A NULL derived
     // key cannot pack into the null-bitmap-free mk1 image — same teardown;
     // the staged leg's probe handles NULL keys natively (byte-identical).
-    if *coded
+    //
+    // M2 sink builds (GL-DICTDRAIN-1): the budget peek is SKIPPED — the
+    // sink cap + flush law bounds the table between batches, and
+    // `agg_hash_compact_over_limits` is classic-build accounting (its own
+    // doc). A NULL derived key REFUSES (no C-table leg; the strict-chain +
+    // cbstore no-NULLs admission makes this unreachable at defaults — the
+    // belt covers slot-stream windows and future widenings).
+    if *coded && xk.sink_build {
+        if xk.knull.iter().any(|&nl| nl) {
+            xk.refused = true;
+            trace_feed("expr-key sink demote: NULL derived key — refusing to serial (sticky)");
+            return Ok(());
+        }
+    } else if *coded
         && (::nodeagg::agg_hash_compact_over_limits(agg) || xk.knull.iter().any(|&nl| nl))
     {
         ch_flush(agg, xk, ch, &mut mm.scratch)?;
@@ -2662,13 +2832,21 @@ fn exprkey_batch<'mcx>(
                     // of the C tuplehash, never a spill leg (the budget
                     // peek above bounds the table). First-arrival order is
                     // the staged leg's exactly (same rows, same sequence).
+                    // M2 sink DIRECT tables (arena-strings inc-3) probe on
+                    // the canonical image instead — same bytes identity,
+                    // same seed loop; the sink drive's flush invalidation
+                    // (`invalidate_group_caches`) keeps this cache honest.
                     let key = xk.keys[k];
                     debug_assert!(!xk.knull[k], "coded batches were null-checked above");
                     // SAFETY: memo outputs are live non-null text varlenas
                     // for the staged window (dicteval arena contract).
                     let v =
                         unsafe { ::types_fmgr::datum_varlena_packed(key, estate.es_query_cxt) }?;
-                    let pg = ::nodeagg::agg_hash_compact_probe_coded(agg, v.data())?;
+                    let pg = if ::nodeagg::agg_hash_compact_text_direct(agg) {
+                        ::nodeagg::agg_hash_compact_probe_text_direct(agg, v.data())?
+                    } else {
+                        ::nodeagg::agg_hash_compact_probe_coded(agg, v.data())?
+                    };
                     xk.dg_slots[code] = Some(pg);
                     pg
                 }
@@ -2701,6 +2879,7 @@ fn exprkey_batch<'mcx>(
         // scratch already carries per-row derived values). The epoch ended —
         // flush pending histogram counts first, the staged leg's discipline.
         ch_flush(agg, xk, ch, &mut mm.scratch)?;
+        let direct = ::nodeagg::agg_hash_compact_text_direct(agg);
         for k in 0..xk.rows.len() {
             let i = xk.rows[k];
             let key = xk.keys[k];
@@ -2708,7 +2887,11 @@ fn exprkey_batch<'mcx>(
             // SAFETY: per-row derived results are live non-null text
             // varlenas (the memo's Raw-window scratch fill).
             let v = unsafe { ::types_fmgr::datum_varlena_packed(key, estate.es_query_cxt) }?;
-            let pg = ::nodeagg::agg_hash_compact_probe_coded(agg, v.data())?;
+            let pg = if direct {
+                ::nodeagg::agg_hash_compact_probe_text_direct(agg, v.data())?
+            } else {
+                ::nodeagg::agg_hash_compact_probe_coded(agg, v.data())?
+            };
             idxs.push(i);
             groups.push(pg);
         }

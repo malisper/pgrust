@@ -2649,6 +2649,27 @@ fn sink_vguard_plan_ok(
         })
 }
 
+/// GL-DICTDRAIN-1: [`sink_vguard_plan_ok`]'s PROJECTED-scan twin for the
+/// dict-class expr-key drain — vguard-bearing fold plans (min/max(text) +
+/// textlen-lane passengers) whose per-batch proof the expr-key drain runs
+/// INLINE (`exprkey_batch`'s check_guards over the MapCols remap, the
+/// serial feed's exact discipline; a demote REFUSES to the serial rerun —
+/// no per-row leg exists). Both car knobs gate (the strminmax vocabulary
+/// law + the dict-drain knob itself); the admission's kind belts keep
+/// every NON-DictCoded kind on the base plan gate.
+fn sink_exprkey_dict_vguard_ok(
+    agg: &::nodeagg::AggStateData<'_>,
+    ss: &::nodeseqscan::SeqScanState<'_>,
+) -> bool {
+    ss.ss.ps_ProjInfo.is_some()
+        && exprkey::dictkey_sink_enabled()
+        && ::nodeagg::sink::sink_strminmax_enabled()
+        && !::nodeagg::agg_lanefold_has_resid(agg)
+        && ::nodeagg::agg_lanefold_plan(agg).is_some_and(|p| {
+            !p.vguards.is_empty() && p.guards.is_empty() && p.resid.is_empty()
+        })
+}
+
 /// SE-T2AGG CAR B: ensure the armed SoA staging covers EVERY fold/vguard
 /// column at its direct index. The prewhere lane already covers the ask
 /// (arm_scan_staging widens its prefix onto vguard columns) and is left
