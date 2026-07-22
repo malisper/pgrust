@@ -26,6 +26,49 @@ pub fn init_all() {
     init_all_with_transport(Transport::Socket)
 }
 
+// ---------------------------------------------------------------------------
+// Serial-lease v2 boot posture (GL-SLEASE-2). The wait-report seam pair is
+// the single choke point every C-parity blocking site brackets its sleep
+// with; when the lease is armed (PGRUST_RUNTIME_SERIAL_LEASE=1) the seams
+// point at these wrappers — the stock reporter plus the lease's donation
+// hook — and ProcessInterrupts' admission tap is installed. Unarmed (the
+// default): waitevent::init_seams() verbatim, no tap — the stock hot path
+// is byte-identical (seams are set-once fn pointers; no extra branch
+// exists anywhere). This selector lives HERE, not in waitevent, because it
+// needs both the reporter impls and the lease engine (execmain), and boot
+// wiring is this crate's charter. Umbra-model deletability (the GL-SLEASE-2
+// letter): task-ified serial execution deletes this block and the seams
+// revert to waitevent::init_seams() unconditionally.
+// ---------------------------------------------------------------------------
+
+fn slease_wait_start(wait_event_info: u32) {
+    waitevent::pgstat_report_wait_start(wait_event_info);
+    execmain::serial_lease_wait_hook_start();
+}
+
+fn slease_wait_end() {
+    // Reacquire first (a try — never blocks), then clear the reported wait:
+    // the donation overhead is attributed to the wait span it serves.
+    execmain::serial_lease_wait_hook_end();
+    waitevent::pgstat_report_wait_end();
+}
+
+fn init_waitevent_seams_with_lease_posture() {
+    if execmain::serial_lease_armed() {
+        waitevent_seams::pgstat_report_wait_start::set(slease_wait_start);
+        waitevent_seams::pgstat_report_wait_end::set(slease_wait_end);
+        waitevent_seams::pgstat_set_wait_event_storage::set(
+            waitevent::pgstat_set_wait_event_storage,
+        );
+        waitevent_seams::pgstat_reset_wait_event_storage::set(
+            waitevent::pgstat_reset_wait_event_storage,
+        );
+        postgres_seams::tap_serial_lease_admission::install(execmain::serial_lease_admission_tap);
+    } else {
+        waitevent::init_seams();
+    }
+}
+
 pub fn init_all_with_transport(transport: Transport) {
     install_panic_hook();
     detoast::init_seams();
@@ -279,7 +322,7 @@ pub fn init_all_with_transport(transport: Transport) {
     utility::init_seams();
     backend_status::init_seams();
     backend_progress::init_seams();
-    waitevent::init_seams();
+    init_waitevent_seams_with_lease_posture();
     mcxt_stats::init_seams();
     pgstat::init_seams();
     adt_acl::init_seams();

@@ -542,6 +542,13 @@ pub fn ProcessInterrupts() -> PgResult<()> {
     // ParallelApplyMessagePending flag has no storage yet (logical-apply
     // owner unported).
 
+    // Serial-lease v2 safe-point admission (GL-SLEASE-2; pgrust extension):
+    // a sweeper-flagged floor crossing acquires its execution permit HERE —
+    // the canonical safe point (past the holdoff/crit-section gates, never
+    // on the error-raising arms above, which unwind out of the run anyway).
+    // Installed only when the lease is armed; a bounded wait inside.
+    postgres_seams::tap_serial_lease_admission::call_if(|f| f());
+
     Ok(())
 }
 
