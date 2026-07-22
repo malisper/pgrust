@@ -523,9 +523,13 @@ pub static wal_compression_options: &[config_enum_entry] = &[
     config_enum_entry { name: "0", val: WAL_COMPRESSION_NONE, hidden: true },
 ];
 
+// C compile-gates "clone" on platform support (guc_tables.c:489); pgrust has
+// no clone_file port yet, so the entry is absent — the same surface as a C
+// build without HAVE_COPYFILE/HAVE_COPY_FILE_RANGE. SET file_copy_method=clone
+// is a clean invalid-value ERROR instead of copydir's unported-arm panic at
+// CREATE DATABASE time. Restore the entry when clone_file (copydir.c) lands.
 pub static file_copy_method_options: &[config_enum_entry] = &[
     config_enum_entry { name: "copy", val: FILE_COPY_METHOD_COPY, hidden: false },
-    config_enum_entry { name: "clone", val: FILE_COPY_METHOD_CLONE, hidden: false },
 ];
 
 pub static file_extend_method_options: &[config_enum_entry] = &[
