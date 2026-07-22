@@ -230,7 +230,7 @@ pub fn init_all_with_transport(transport: Transport) {
     rewrite_handler::init_seams();
     rewrite_define::init_seams();
     opclasscmds::init_seams();
-    aio_config::init_seams();
+    aio_core::init_seams();
     aio_uring::init_seams();
     bufmgr::init_seams();
     fd::init_seams();

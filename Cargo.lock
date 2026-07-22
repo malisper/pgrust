@@ -1238,18 +1238,38 @@ dependencies = [
 ]
 
 [[package]]
-name = "aio_config"
+name = "aio_core"
 version = "0.0.0"
 dependencies = [
  "aio_seams",
+ "auxprocess",
+ "bufmgr_seams",
+ "condition_variable",
  "datum",
+ "elog",
+ "guc_seams",
  "guc_tables",
+ "init_small",
+ "interrupt",
+ "ipc",
  "ipc_seams",
+ "latch",
+ "libc",
+ "libpq_pqsignal",
  "lmgr_proc",
+ "lwlock",
  "miscinit",
+ "procsignal",
+ "resowner",
+ "shmem",
+ "smgr_seams",
  "types_core",
  "types_error",
  "types_guc",
+ "types_resowner",
+ "types_startup",
+ "types_storage",
+ "waitevent_seams",
 ]
 
 [[package]]
@@ -1267,6 +1287,7 @@ name = "aio_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+ "types_error",
 ]
 
 [[package]]
@@ -13536,7 +13557,7 @@ name = "postmaster"
 version = "0.0.0"
 dependencies = [
  "aclchk_seams",
- "aio_config",
+ "aio_core",
  "auth_seams",
  "autovacuum_seams",
  "backend_startup",
@@ -14813,6 +14834,7 @@ dependencies = [
 name = "resowner"
 version = "0.1.0"
 dependencies = [
+ "aio_seams",
  "datum",
  "elog",
  "hashfn",
@@ -15504,7 +15526,7 @@ dependencies = [
  "adt_tsquery_rewrite",
  "adt_tsvector_stat",
  "adt_xml",
- "aio_config",
+ "aio_core",
  "aio_funcs",
  "aio_uring",
  "allpaths",

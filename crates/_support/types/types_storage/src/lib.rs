@@ -5,6 +5,7 @@
 
 extern crate alloc;
 
+pub mod aio;
 pub mod buf;
 pub mod bufpage;
 pub mod file;

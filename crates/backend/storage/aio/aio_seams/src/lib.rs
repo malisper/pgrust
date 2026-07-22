@@ -7,8 +7,16 @@ seam_core::seam!(
 seam_core::seam!(
     // `pgaio_io_start_readv(ioh, fd, iovcnt, offset)` (storage/aio/aio_io.c).
     // The PgAioHandle and its iovec live on the AIO side of the seam; only the
-    // fd/iovcnt/offset triple crosses (fd.c:2241).
-    pub fn pgaio_io_start_readv(fd: i32, iovcnt: i32, offset: i64)
+    // fd/iovcnt/offset triple crosses (fd.c:2241). Staging can submit, and
+    // submission can ereport, hence PgResult.
+    pub fn pgaio_io_start_readv(fd: i32, iovcnt: i32, offset: i64) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    // `pgaio_io_release_resowner(ioh_node, on_error)` (storage/aio/aio.c) —
+    // resowner cleanup of a remembered AIO handle (`ioh_node` is the handle
+    // index resowner stored).
+    pub fn pgaio_io_release_resowner(ioh_node: usize, on_error: bool)
 );
 
 seam_core::seam!(

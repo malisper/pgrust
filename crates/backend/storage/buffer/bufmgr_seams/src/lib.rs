@@ -296,3 +296,48 @@ seam_core::seam!(
     // true = exclusive lock acquired and no other pins.
     pub fn conditional_lock_buffer_for_cleanup(buffer: Buffer) -> PgResult<bool>
 );
+
+seam_core::seam!(
+    // shared/local_buffer_readv_stage (bufmgr.c buffer_stage_common): move
+    // buffer pins to the AIO subsystem and arm io_wref before submission.
+    pub fn aio_buffer_readv_stage(ioh: u32, cb_data: u8, is_temp: bool)
+);
+
+seam_core::seam!(
+    // shared_buffer_readv_complete (bufmgr.c).
+    pub fn aio_shared_buffer_readv_complete(
+        ioh: u32,
+        prior_result: types_storage::aio::PgAioResult,
+        cb_data: u8,
+    ) -> types_storage::aio::PgAioResult
+);
+
+seam_core::seam!(
+    // shared_buffer_readv_complete_local (bufmgr.c): checksum-failure stats
+    // reporting in the issuing backend.
+    pub fn aio_shared_buffer_readv_complete_local(
+        ioh: u32,
+        prior_result: types_storage::aio::PgAioResult,
+        cb_data: u8,
+    ) -> types_storage::aio::PgAioResult
+);
+
+seam_core::seam!(
+    // local_buffer_readv_complete (bufmgr.c): temp-table readv completes in
+    // the issuer only.
+    pub fn aio_local_buffer_readv_complete(
+        ioh: u32,
+        prior_result: types_storage::aio::PgAioResult,
+        cb_data: u8,
+    ) -> types_storage::aio::PgAioResult
+);
+
+seam_core::seam!(
+    // buffer_readv_report (bufmgr.c): raise/log invalid-page outcomes at
+    // `elevel` (shared and local readv share it).
+    pub fn aio_buffer_readv_report(
+        result: types_storage::aio::PgAioResult,
+        td: types_storage::aio::PgAioTargetData,
+        elevel: i32,
+    ) -> PgResult<()>
+);
