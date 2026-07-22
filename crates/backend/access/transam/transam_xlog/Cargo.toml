@@ -13,6 +13,7 @@ injection_point = { path = "../../../utils/misc/injection_point" }
 pg_clock = { path = "../../../../port/pg_clock" }
 s_lock_seams = { path = "../../../storage/lmgr/s_lock_seams" }
 snapmgr_seams = { path = "../../../utils/time/snapmgr_seams" }
+smgr_seams = { path = "../../../storage/smgr/smgr_seams" }
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 types_storage = { path = "../../../../_support/types/types_storage" }

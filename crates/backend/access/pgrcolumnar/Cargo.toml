@@ -22,6 +22,7 @@ types_scan = { path = "../../../_support/types/types_scan" }
 types_snapshot = { path = "../../../_support/types/snapshot" }
 types_slot = { path = "../../../_support/types/types_slot" }
 types_storage = { path = "../../../_support/types/types_storage" }
+smgr_seams = { path = "../../storage/smgr/smgr_seams" }
 types_tuple = { path = "../../../_support/types/types_tuple" }
 tableam_vocab = { path = "../table/tableam_vocab" }
 exectuples = { path = "../../executor/exectuples" }

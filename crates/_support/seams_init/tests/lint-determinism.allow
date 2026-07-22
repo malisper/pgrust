@@ -184,6 +184,8 @@ fs	crates/backend/storage/ipc/waiteventset/src/epoll.rs	1
 fs	crates/backend/storage/ipc/waiteventset/src/kqueue.rs	3
 # --- crates/backend/storage/smgr/md (2 sites) ---
 fs	crates/backend/storage/smgr/md/src/lib.rs	2
+env	crates/backend/storage/smgr/md/src/lib.rs	1	DST-REVIEW(night/lseek-cache GL-LSEEK-1): PGRUST_NBLOCKS_VALIDATE — nblocks-cache validation mode (every cache hit cross-checked against the real lseek segment walk; frozen-divergence aborts); process-constant env read once, OnceLock-cached (the lane-knob idiom); knobs-registry routing (s2.5) rides the chartered DST migration
+once	crates/backend/storage/smgr/md/src/lib.rs	1	DST-REVIEW(night/lseek-cache GL-LSEEK-1): nblocks_validate OnceLock latch — P3 row-19 pure env-read init closure, no choke crossing
 # --- crates/backend/timezone/pgtz (2 sites) ---
 fs	crates/backend/timezone/pgtz/src/lib.rs	2
 # --- crates/backend/tsearch/ts_locale (1 sites) ---

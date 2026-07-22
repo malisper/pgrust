@@ -143,3 +143,30 @@ seam_core::seam!(
         nblocks: BlockNumber,
     ) -> PgResult<()>
 );
+
+// ---- process-global relation-size cache maintenance (md nblocks cache) ----
+// No C counterpart: the cache is the single-address-space replacement for
+// per-statement lseek(SEEK_END) size probes; these seams cover the file
+// mutations that happen outside md's own entry points.
+
+seam_core::seam!(
+    // DROP/move DATABASE removes the database's file tree wholesale (rmtree,
+    // not per-relation unlinks): purge every cached size keyed to it.
+    pub fn smgr_nblocks_cache_purge_db(db: types_core::Oid) -> ()
+);
+
+seam_core::seam!(
+    // The unlogged-relation reinit pass copies init forks over main forks at
+    // the file level: drop the whole cache (startup-time, rare).
+    pub fn smgr_nblocks_cache_clear() -> ()
+);
+
+seam_core::seam!(
+    // A table AM that mutates its main-fork bytes by direct file io (the
+    // columnar byte stream) declares so at writer open: the key is served by
+    // the real lseek walk from then on.
+    pub fn smgr_nblocks_cache_poison(
+        rlocator: RelFileLocatorBackend,
+        forknum: ForkNumber,
+    ) -> ()
+);

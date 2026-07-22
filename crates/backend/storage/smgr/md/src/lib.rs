@@ -25,6 +25,8 @@ use ::types_storage::smgr::{
 use ::types_storage::sync::{FileTag, FileTagOpResult, SyncRequestHandler, SyncRequestType};
 use ::types_storage::{RelFileLocator, RelFileLocatorBackend};
 
+pub mod nblocks_cache;
+
 const PG_WAIT_IO: u32 = 0x0A00_0000;
 // WaitEventIO ordinals (wait_event_names.txt, alphabetical within section).
 const WAIT_EVENT_DATA_FILE_EXTEND: u32 = PG_WAIT_IO + 17;
@@ -192,6 +194,10 @@ pub fn mdcreate(
     st.md_seg_fds[fk][0] = MdfdVec { mdfd_vfd: file, mdfd_segno: 0 };
 
     if !is_temp(rlocator) {
+        // Fresh file identity: drop any stale size-cache entry (including a
+        // columnar poison — a reused relfilenumber starts clean; the next
+        // read walks, the next columnar writer open re-poisons).
+        nblocks_cache::remove(rlocator.locator, forknum);
         let seg = st.md_seg_fds[fk][0];
         register_dirty_segment(rlocator, forknum, seg)?;
     }
@@ -232,6 +238,12 @@ fn mdunlinkfork(
     forknum: ForkNumber,
     is_redo: bool,
 ) -> PgResult<()> {
+    // Drop the size-cache entry (poison included) BEFORE touching the file:
+    // any racing reader then walks the real file and sees exactly what lseek
+    // sees at its instant of the race — the same nondeterminism C has.
+    if !is_temp(rlocator) {
+        nblocks_cache::remove(rlocator.locator, forknum);
+    }
     let path = relpath(rlocator, forknum);
     let mut ret: i32;
 
@@ -308,6 +320,26 @@ pub fn mdextend(
     buffer: &[u8],
     skip_fsync: bool,
 ) -> PgResult<()> {
+    let r = mdextend_inner(rlocator, st, forknum, blocknum, buffer, skip_fsync);
+    if !is_temp(rlocator) {
+        match &r {
+            // The file now reaches at least blocknum+1 (intermediate segments
+            // were zero-filled by _mdfd_getseg under the same call).
+            Ok(()) => nblocks_cache::extend_to(rlocator.locator, forknum, blocknum + 1),
+            Err(_) => nblocks_cache::invalidate(rlocator.locator, forknum),
+        }
+    }
+    r
+}
+
+fn mdextend_inner(
+    rlocator: RelFileLocatorBackend,
+    st: &mut MdRelnState,
+    forknum: ForkNumber,
+    blocknum: BlockNumber,
+    buffer: &[u8],
+    skip_fsync: bool,
+) -> PgResult<()> {
     if blocknum == InvalidBlockNumber {
         let path = relpath(rlocator, forknum);
         return throw(
@@ -363,6 +395,26 @@ pub fn mdextend(
 }
 
 pub fn mdzeroextend(
+    rlocator: RelFileLocatorBackend,
+    st: &mut MdRelnState,
+    forknum: ForkNumber,
+    blocknum: BlockNumber,
+    nblocks: i32,
+    skip_fsync: bool,
+) -> PgResult<()> {
+    let r = mdzeroextend_inner(rlocator, st, forknum, blocknum, nblocks, skip_fsync);
+    if !is_temp(rlocator) {
+        match &r {
+            Ok(()) => {
+                nblocks_cache::extend_to(rlocator.locator, forknum, blocknum + nblocks as BlockNumber)
+            }
+            Err(_) => nblocks_cache::invalidate(rlocator.locator, forknum),
+        }
+    }
+    r
+}
+
+fn mdzeroextend_inner(
     rlocator: RelFileLocatorBackend,
     st: &mut MdRelnState,
     forknum: ForkNumber,
@@ -803,6 +855,14 @@ pub fn mdwritev(
             register_dirty_segment(rlocator, forknum, v)?;
         }
 
+        // In recovery the CREATE_RECOVERY arm can have re-created a dropped
+        // segment and this write then grows it (replay of a rel truncated
+        // later in the WAL). The size cache must see that growth; max()
+        // semantics make this a no-op for ordinary in-bounds writes.
+        if in_recovery() && !is_temp(rlocator) {
+            nblocks_cache::extend_to(rlocator.locator, forknum, blocknum + nblocks_this_segment);
+        }
+
         nblocks -= nblocks_this_segment;
         buf_off += nblocks_this_segment as usize;
         blocknum += nblocks_this_segment;
@@ -854,6 +914,67 @@ pub fn mdnblocks(
     st: &mut MdRelnState,
     forknum: ForkNumber,
 ) -> PgResult<BlockNumber> {
+    if !is_temp(rlocator) {
+        if let Some(cached) = nblocks_cache::lookup(rlocator.locator, forknum) {
+            if nblocks_validate() {
+                validate_cached(rlocator, st, forknum, cached)?;
+            }
+            return Ok(cached);
+        }
+    }
+    mdnblocks_walk(rlocator, st, forknum, true)
+}
+
+/// Cross-check of the size cache against the real lseek walk
+/// (`PGRUST_NBLOCKS_VALIDATE=1`): a debugging tool, default off.
+fn nblocks_validate() -> bool {
+    static ON: pgsync::OnceLock<bool> = pgsync::OnceLock::new();
+    *ON.get_or_init(|| matches!(std::env::var("PGRUST_NBLOCKS_VALIDATE").as_deref(), Ok("1")))
+}
+
+/// Validation-mode arm: a concurrent extension landing between the cache
+/// read and the walk makes transient inequality EXPECTED (the same
+/// nondeterminism two racing lseeks have); the bug signature is a FROZEN
+/// cache value diverging from the real walk. Bounded spin (no sleeps), each
+/// probe pair non-publishing so a real staleness cannot self-heal out of
+/// sight.
+#[cold]
+#[inline(never)]
+fn validate_cached(
+    rlocator: RelFileLocatorBackend,
+    st: &mut MdRelnState,
+    forknum: ForkNumber,
+    cached: BlockNumber,
+) -> PgResult<()> {
+    let mut last = cached;
+    let mut walked = 0;
+    for _ in 0..2000 {
+        walked = mdnblocks_walk(rlocator, st, forknum, false)?;
+        match nblocks_cache::lookup(rlocator.locator, forknum) {
+            // Entry removed under us (drop/rewrite churn): nothing to check.
+            None => return Ok(()),
+            Some(c) if c == walked => return Ok(()),
+            Some(c) => last = c,
+        }
+        std::hint::spin_loop();
+    }
+    panic!(
+        "nblocks cache incoherent: cached {last} vs walked {walked} for rel {} fork {}",
+        rlocator.locator.relNumber, forknum as u32
+    );
+}
+
+/// The real probe: lseek(SEEK_END) per segment from the last open one. Side
+/// effect relied on by mdregistersync/mdimmedsync/mdtruncate: opens every
+/// active segment. With `publish`, the result repopulates the process-global
+/// size cache (non-temp relations); the validation arm passes false so a
+/// stale entry cannot self-heal before it is caught.
+fn mdnblocks_walk(
+    rlocator: RelFileLocatorBackend,
+    st: &mut MdRelnState,
+    forknum: ForkNumber,
+    publish: bool,
+) -> PgResult<BlockNumber> {
     let fk = fork_idx(forknum);
 
     mdopenfork(rlocator, st, forknum, EXTENSION_FAIL)?;
@@ -862,24 +983,50 @@ pub fn mdnblocks(
     let mut segno = (st.md_num_open_segs[fk] - 1) as BlockNumber;
     let mut v = st.md_seg_fds[fk][segno as usize];
 
-    loop {
+    let total = loop {
         let nblocks = _mdnblocks(&v)?;
         if nblocks > RELSEG_SIZE {
             return throw(ereport(FATAL).errmsg_internal("segment too big"), "mdnblocks");
         }
         if nblocks < RELSEG_SIZE {
-            return Ok(segno * RELSEG_SIZE + nblocks);
+            break segno * RELSEG_SIZE + nblocks;
         }
 
         segno += 1;
         match _mdfd_openseg(rlocator, st, forknum, segno, 0)? {
             Some(seg) => v = seg,
-            None => return Ok(segno * RELSEG_SIZE),
+            None => break segno * RELSEG_SIZE,
         }
+    };
+    if publish && !is_temp(rlocator) {
+        nblocks_cache::note_walked(rlocator.locator, forknum, total);
     }
+    Ok(total)
 }
 
 pub fn mdtruncate(
+    rlocator: RelFileLocatorBackend,
+    st: &mut MdRelnState,
+    forknum: ForkNumber,
+    curnblk: BlockNumber,
+    nblocks: BlockNumber,
+) -> PgResult<()> {
+    let r = mdtruncate_inner(rlocator, st, forknum, curnblk, nblocks);
+    if !is_temp(rlocator) {
+        match &r {
+            // The recovery replay no-op arm (nblocks > curnblk) changed
+            // nothing, so any cached value is still exact — leave it.
+            Ok(()) if nblocks <= curnblk => {
+                nblocks_cache::set_exact(rlocator.locator, forknum, nblocks)
+            }
+            Ok(()) => {}
+            Err(_) => nblocks_cache::invalidate(rlocator.locator, forknum),
+        }
+    }
+    r
+}
+
+fn mdtruncate_inner(
     rlocator: RelFileLocatorBackend,
     st: &mut MdRelnState,
     forknum: ForkNumber,
@@ -904,6 +1051,11 @@ pub fn mdtruncate(
     if nblocks == curnblk {
         return Ok(());
     }
+
+    // C's contract makes the CALLER's smgrnblocks open every active segment
+    // so the loop below sees them all; with the size cache that call may not
+    // walk, so reinstate the walk here (same lseek pattern, rare path).
+    mdnblocks_walk(rlocator, st, forknum, true)?;
 
     let mut curopensegs = st.md_num_open_segs[fk];
     while curopensegs > 0 {
@@ -970,8 +1122,9 @@ pub fn mdregistersync(
 ) -> PgResult<()> {
     let fk = fork_idx(forknum);
 
-    // mdnblocks opens all active segments; probe further for inactive ones.
-    mdnblocks(rlocator, st, forknum)?;
+    // The walk (not the cached read: the SIDE EFFECT is the point) opens all
+    // active segments; probe further for inactive ones.
+    mdnblocks_walk(rlocator, st, forknum, true)?;
 
     let min_inactive_seg = st.md_num_open_segs[fk];
     let mut segno = min_inactive_seg;
@@ -999,7 +1152,9 @@ pub fn mdimmedsync(
 ) -> PgResult<()> {
     let fk = fork_idx(forknum);
 
-    mdnblocks(rlocator, st, forknum)?;
+    // Walk, not the cached read: the open-all-active-segments side effect
+    // is required so the fsync loop below reaches every segment.
+    mdnblocks_walk(rlocator, st, forknum, true)?;
 
     let min_inactive_seg = st.md_num_open_segs[fk];
     let mut segno = min_inactive_seg;
@@ -1143,6 +1298,12 @@ pub fn ForgetDatabaseSyncRequests(dbid: Oid) -> PgResult<()> {
 }
 
 pub fn mdunlinkfiletag(ftag: FileTag) -> PgResult<FileTagOpResult> {
+    // The checkpointer's deferred unlink of a dropped rel's tombstone file.
+    // A size probe between the drop and this point legitimately re-cached
+    // the 0-block tombstone (C would have lseek'd it too); once the file is
+    // gone the entry must go with it or a later probe would get 0 where C
+    // gets ENOENT.
+    nblocks_cache::remove(ftag.rlocator, ForkNumber::MAIN_FORKNUM);
     let path = relpath_seams::relpathperm::call(ftag.rlocator, ForkNumber::MAIN_FORKNUM);
     let ret = unlink_raw(&path);
     Ok(FileTagOpResult { result: ret, errno: last_errno(), path })
