@@ -888,6 +888,17 @@ pub(crate) fn tick_serial_lease() {
 /// these off the stats dir instead of trace lines.
 static STMT_TASK_INLINE_N: AtomicU64 = AtomicU64::new(0);
 static STMT_TASK_ENQUEUED_N: AtomicU64 = AtomicU64::new(0);
+/// GL-STMTTASK-2 quantum-yield experiment: governor yields performed.
+static STMT_TASK_YIELDS_N: AtomicU64 = AtomicU64::new(0);
+
+#[inline]
+pub(crate) fn tick_stmt_task_yield() {
+    if !armed() {
+        return;
+    }
+    STMT_TASK_YIELDS_N.fetch_add(1, Relaxed);
+    arm_dump_on_thread_exit();
+}
 
 #[inline]
 pub(crate) fn tick_stmt_task(inline: bool) {
@@ -1304,6 +1315,10 @@ fn dump() {
     out.push_str(&format!(
         "counter\tstmt-task-enqueued\t{}\n",
         STMT_TASK_ENQUEUED_N.load(Relaxed)
+    ));
+    out.push_str(&format!(
+        "counter\tstmt-task-yields\t{}\n",
+        STMT_TASK_YIELDS_N.load(Relaxed)
     ));
     // M2 inc-3 rung-2 fallback-floor rows (engagement channels per arm;
     // zeros included — the floor reader diffs runs, absent≠zero would

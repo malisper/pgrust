@@ -1393,10 +1393,11 @@ pub(crate) fn execute_plan<'m, 'mcx>(
     // clears parallelModeNeeded, so the funnel's own in-parallel-machinery
     // gate does the worker-side refusal.
     //
-    // GL-STMTTASK-2: the inline-execute seat (change 3) — held across the
-    // serial loop below when the statement-task hook answers Inline;
-    // released at frame exit on every path (RAII).
-    let mut _stmt_inline_seat: Option<Option<runtime::InlineSeat>> = None;
+    // GL-STMTTASK-2: the inline-execute run cargo (change 3: the borrowed
+    // seat; the quantum-yield span when the experiment is armed) — held
+    // across the serial loop below when the statement-task hook answers
+    // Inline; released at frame exit on every path (RAII).
+    let mut _stmt_inline_seat: Option<crate::lanev2::StmtInlineRun> = None;
     if operation == CmdType::CMD_SELECT && send_tuples && !use_parallel_mode {
         if crate::lanev2::try_passthrough_funnel(estate, planstate, number_tuples, dest)? {
             return Ok(());
@@ -1420,8 +1421,8 @@ pub(crate) fn execute_plan<'m, 'mcx>(
         // while the session thread executes).
         match crate::lanev2::try_stmt_task(estate, planstate, number_tuples, dest)? {
             crate::lanev2::StmtTaskVerdict::Handled => return Ok(()),
-            crate::lanev2::StmtTaskVerdict::Inline(seat) => {
-                _stmt_inline_seat = Some(seat);
+            crate::lanev2::StmtTaskVerdict::Inline(run) => {
+                _stmt_inline_seat = Some(run);
             }
             crate::lanev2::StmtTaskVerdict::Incumbent => {}
         }

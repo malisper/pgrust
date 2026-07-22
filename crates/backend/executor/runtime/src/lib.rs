@@ -1155,6 +1155,14 @@ impl Runtime {
     }
 }
 
+/// GL-STMTTASK-2 quantum yield: is THIS thread inside a declared blocking
+/// section (permit donated)? The yield governor's double-release guard;
+/// one TLS load.
+#[cfg(not(loom))]
+pub fn in_blocking_section() -> bool {
+    crate::io::in_io_section()
+}
+
 fn sched_park(sched: &sched::Scheduler, seen: u64) {
     stats::RuntimeStats::tick(&sched.stats.worker_parks);
     sched.park.park(seen);
