@@ -437,14 +437,26 @@ pub(crate) fn executor_start_seam(h: QueryDescHandle, eflags: i32) -> PgResult<(
 }
 
 // ---------------------------------------------------------------------------
-// SERIAL LEASE — lease-only permit unification (GL-SLEASE-1 flip; born as
-// the M2 inc-3 rung-2 letter addendum's measurement vehicle, adopted per
-// Michael's unification steer: "unify the ledger via lease-only now").
-// DEFAULT ON: the session thread acquires ONE runtime execution permit
-// around each TOP-LEVEL ExecutorRun — the query still executes inline on
-// the session thread; the pool's permit ledger simply accounts it like a
-// worker, so the scheduler sees TOTAL machine load (sessions + pool).
-// `PGRUST_RUNTIME_SERIAL_LEASE=0` restores the unleased posture exactly.
+// SERIAL LEASE — lease-only permit unification (GL-SLEASE-1; born as the M2
+// inc-3 rung-2 letter addendum's measurement vehicle, adopted per Michael's
+// unification steer, DEFAULT-ON in t40, re-flipped DEFAULT OFF by
+// GL-RO-BISECT-2). When armed (`PGRUST_RUNTIME_SERIAL_LEASE=1`) the session
+// thread acquires ONE runtime execution permit around each TOP-LEVEL
+// ExecutorRun — the query still executes inline on the session thread; the
+// pool's permit ledger simply accounts it like a worker, so the scheduler
+// sees TOTAL machine load (sessions + pool).
+// DEFAULT OFF (GL-RO-BISECT-2, 2026-07-22): with permits =
+// available_parallelism and the permit HELD ACROSS BLOCKING I/O (session
+// threads are not registered with the §2.8 donation facade — the residual
+// below), an OLTP posture with backends >> cores convoys on the permit
+// semaphore: the t40/t41 sysbench-RO collapse (−20.9pp C-ratio @32 /
+// −20.4pp @64 on the 4-vCPU standings rig; killing the lease recovered
+// +15.3pp, witnessed pair table in
+// scratchpad/night/GL-RO-BISECT-2-letter.md). RE-OPEN CONDITION for the
+// default: register session threads with the donation facade (io_section
+// around blocking waits) so a leased query cannot sit on a permit through
+// I/O, or scale the ledger with backend count — then re-run the GL-SLEASE-1
+// unification case WITH a permits<backends OLTP pair at both thread counts.
 // Structurally inert without a runtime (`runtime::global()` None — no
 // permit ledger exists to unify; cost = one memoized bool + a TLS depth
 // bump per ExecutorRun). Depth guard: nested executor runs (SPI, triggers,
@@ -461,7 +473,7 @@ pub(crate) fn executor_start_seam(h: QueryDescHandle, eflags: i32) -> PgResult<(
 fn serial_lease_armed() -> bool {
     static ON: pgsync::OnceLock<bool> = pgsync::OnceLock::new();
     *ON.get_or_init(|| {
-        std::env::var("PGRUST_RUNTIME_SERIAL_LEASE").map_or(true, |v| v.trim() != "0")
+        std::env::var("PGRUST_RUNTIME_SERIAL_LEASE").is_ok_and(|v| v.trim() == "1")
     })
 }
 
