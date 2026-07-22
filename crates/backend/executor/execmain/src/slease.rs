@@ -15,9 +15,14 @@
 //! THE v2 MECHANISM — two composed rules, both at session altitude:
 //!
 //! 1. LAZY FLOOR ADMISSION: entering a top-level run publishes a per-thread
-//!    slot (two relaxed stores — no lock, no semaphore traffic) and nothing
-//!    else. A background sweeper (spawned on first armed enter) scans slots
-//!    at a fixed cadence; a run older than the floor
+//!    slot (a handful of relaxed stores — no lock, no semaphore traffic)
+//!    and nothing else. A background sweeper (spawned on first armed enter)
+//!    scans slots at a fixed cadence; a run whose ACTIVE age — wall age
+//!    minus its reported-wait time (GL-SLEASE-3: the wait-seam wrappers
+//!    stamp every C-parity blocking span into the slot's blocked ledger, so
+//!    an I/O-bound run is never counted "expensive" for its storage/client
+//!    waits; `PGRUST_RUNTIME_SERIAL_LEASE_WALLAGE=1` restores the v2
+//!    wall-age posture for A/B) — exceeds the floor
 //!    (`PGRUST_RUNTIME_SERIAL_LEASE_FLOOR_MS`, default 250) gets its
 //!    owner's InterruptPending raised (the timeout timer-thread pattern),
 //!    and the owner acquires its permit at the next CHECK_FOR_INTERRUPTS —
@@ -119,6 +124,18 @@ pub fn donation_enabled() -> bool {
     })
 }
 
+/// GL-SLEASE-3 fix A/B posture: `PGRUST_RUNTIME_SERIAL_LEASE_WALLAGE=1`
+/// restores the v2 wall-age floor (t35 spelling, =1 arms; default OFF =
+/// ACTIVE-age flagging — wall age minus reported-wait time, see the Slot
+/// blocked ledger). Armed-path-only read; ladder/A-B posture, the shipped
+/// armed default is active-age.
+fn wall_age_floor() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_SERIAL_LEASE_WALLAGE").is_ok_and(|v| v.trim() == "1")
+    })
+}
+
 /// Admission floor in milliseconds of run age (default 250). Runs shorter
 /// than this never touch the permit semaphore. `0` = admit at the first
 /// sweep — the closest v2 analog of v1's admit-at-enter, for A/B ladders.
@@ -147,10 +164,12 @@ fn sweep_period() -> Duration {
 // Monotonic run clock (pg_clock, the one monotonic authority — DST-routed).
 // ---------------------------------------------------------------------------
 
-fn now_ms() -> u64 {
+fn now_ns() -> u64 {
     // max(1): 0 stays reserved as the slot's "no run" sentinel even for a
-    // read in the clock's first millisecond.
-    (pg_clock::mono_ms().max(0) as u64).max(1)
+    // read in the clock's first nanosecond. Nanosecond resolution because
+    // the blocked-time ledger (GL-SLEASE-3 active-age floor) accumulates
+    // µs-scale storage-read spans — ms granularity would round them to 0.
+    pg_clock::mono_ns().max(1)
 }
 
 // ---------------------------------------------------------------------------
@@ -174,8 +193,8 @@ const S_YIELDED: u8 = 4;
 const S_DEFICIT: u8 = 5;
 
 struct Slot {
-    /// `now_ms()` at top-level run start; 0 = no active run.
-    started_ms: AtomicU64,
+    /// `now_ns()` at top-level run start; 0 = no active run.
+    started_ns: AtomicU64,
     /// Mirror of the session's TLS state (advisory; see above).
     state: AtomicU8,
     /// Sweeper -> session: acquire (or retry) at the next safe point.
@@ -184,6 +203,18 @@ struct Slot {
     /// Box::leak'd — never dangles; timer-thread precedent). Re-pointed on
     /// slot reuse before the slot is re-published.
     interrupt_flag: AtomicPtr<AtomicBool>,
+    /// GL-SLEASE-3 active-age floor: cumulative ns this run spent inside
+    /// C-parity reported wait spans (owner-written via the armed wait-seam
+    /// wrappers, sweeper-read; reset at enter). The sweeper's floor compares
+    /// ACTIVE age = wall age − blocked − the open span, so an I/O-bound run
+    /// is never flagged "expensive" for its storage/client waits — the
+    /// governed quantity is CPU demand (on-CPU + runq), the design intent.
+    /// Wall-age flagging (the v2 behavior) is the WALLAGE=1 A/B posture.
+    blocked_ns: AtomicU64,
+    /// `now_ns()` at the currently-open reported wait span's start; 0 = no
+    /// open span. The sweeper counts the open span as blocked (a session
+    /// mid-NVMe-read or mid-client-wait is not accruing active age).
+    wait_open_ns: AtomicU64,
 }
 
 /// All slots ever created (sweeper scan set) + the reuse freelist (slots
@@ -204,9 +235,11 @@ struct SlotOwner(&'static Slot);
 
 impl Drop for SlotOwner {
     fn drop(&mut self) {
-        self.0.started_ms.store(0, Ordering::Relaxed);
+        self.0.started_ns.store(0, Ordering::Relaxed);
         self.0.state.store(S_IDLE, Ordering::Relaxed);
         self.0.admit.store(false, Ordering::Relaxed);
+        self.0.blocked_ns.store(0, Ordering::Relaxed);
+        self.0.wait_open_ns.store(0, Ordering::Relaxed);
         let mut free = pgsync::lock(&registry().free);
         free.push(self.0);
     }
@@ -246,10 +279,12 @@ fn my_slot() -> &'static Slot {
                 Some(slot) => slot,
                 None => {
                     let slot: &'static Slot = Box::leak(Box::new(Slot {
-                        started_ms: AtomicU64::new(0),
+                        started_ns: AtomicU64::new(0),
                         state: AtomicU8::new(S_IDLE),
                         admit: AtomicBool::new(false),
                         interrupt_flag: AtomicPtr::new(std::ptr::null_mut()),
+                        blocked_ns: AtomicU64::new(0),
+                        wait_open_ns: AtomicU64::new(0),
                     }));
                     pgsync::lock(&registry().all).push(slot);
                     slot
@@ -257,7 +292,7 @@ fn my_slot() -> &'static Slot {
             }
         };
         // Point the slot at THIS thread's CFI flag before any state can
-        // publish it to the sweeper (started_ms is still 0 here).
+        // publish it to the sweeper (started_ns is still 0 here).
         let flag: &'static AtomicBool = init_small::globals::interrupt_pending_flag();
         slot.interrupt_flag
             .store(flag as *const AtomicBool as *mut AtomicBool, Ordering::Release);
@@ -295,23 +330,44 @@ fn ensure_sweeper() {
 
 #[cfg(not(target_family = "wasm"))]
 fn sweeper() -> ! {
-    let floor = floor_ms();
+    let floor_ns = floor_ms().saturating_mul(1_000_000);
+    let wall_age = wall_age_floor();
     loop {
         // Pure cadence park (nothing ever unparks us; a lease crossing
         // detected one sweep late is within the design bound). waiter is
         // the sanctioned park surface — a registered thread's timed park
         // drives virtual time in the DST worlds (timer-thread precedent).
         let _ = waiter::park_timeout(sweep_period());
-        let now = now_ms();
+        let now = now_ns();
         let slots = pgsync::lock(&registry().all);
         for slot in slots.iter() {
-            let started = slot.started_ms.load(Ordering::Acquire);
+            let started = slot.started_ns.load(Ordering::Acquire);
             if started == 0 {
                 continue;
             }
             let state = slot.state.load(Ordering::Relaxed);
             let flag_it = match state {
-                S_PENDING => now.saturating_sub(started) >= floor,
+                S_PENDING => {
+                    // GL-SLEASE-3 active-age floor (the fix): the governed
+                    // quantity is CPU DEMAND, so reported-wait time — the
+                    // closed spans' ledger plus the currently-open span —
+                    // never counts toward "expensive". An I/O-bound run
+                    // that spends its wall clock in storage/client waits
+                    // stays unflagged; the v1-shaped wall-age posture
+                    // remains as the WALLAGE=1 A/B arm. All reads Relaxed
+                    // and owner-raced by design: a torn read skews one
+                    // sweep, and the admission it could mis-trigger is the
+                    // bounded safe-point acquire — never correctness.
+                    let mut age = now.saturating_sub(started);
+                    if !wall_age {
+                        let blocked = slot.blocked_ns.load(Ordering::Relaxed);
+                        let open = slot.wait_open_ns.load(Ordering::Relaxed);
+                        let open_extra =
+                            if open != 0 { now.saturating_sub(open) } else { 0 };
+                        age = age.saturating_sub(blocked.saturating_add(open_extra));
+                    }
+                    age >= floor_ns
+                }
                 // Re-admission retry cadence for floor-crossed permit-less
                 // runs (see the module doc's bounded-admission story).
                 S_DEFICIT => true,
@@ -375,10 +431,14 @@ impl SerialLease {
                 let slot = my_slot();
                 debug_assert_eq!(STATE.get(), S_IDLE, "lease state leaked across runs");
                 set_state(slot, S_PENDING);
+                // Fresh blocked ledger for this run (no wait span can be
+                // open here: spans never straddle a top-level enter).
+                slot.blocked_ns.store(0, Ordering::Relaxed);
+                slot.wait_open_ns.store(0, Ordering::Relaxed);
                 // Publish the run age LAST (Release pairs with the
                 // sweeper's Acquire): a slot the sweeper can see is always
                 // fully initialized.
-                slot.started_ms.store(now_ms(), Ordering::Release);
+                slot.started_ns.store(now_ns(), Ordering::Release);
                 // The engagement-yield accounting witness (the
                 // serial-pool-overhead gate): v2 ticks at ENTER — the lease
                 // machinery engaging — not at permit acquisition, which the
@@ -404,7 +464,7 @@ impl Drop for SerialLease {
             // (an error unwind between wait-start and wait-end lands here
             // with state Donated — nothing to release, nothing leaked);
             // Pending/Deficit never held.
-            slot.started_ms.store(0, Ordering::Relaxed);
+            slot.started_ns.store(0, Ordering::Relaxed);
             slot.admit.store(false, Ordering::Relaxed);
             if STATE.get() == S_HELD {
                 if let Some(rt) = LEASE_RT.get() {
@@ -459,16 +519,39 @@ impl Drop for SerialLeaseYield {
 // ---------------------------------------------------------------------------
 // Donation hooks — called by the armed wait-report seam wrappers
 // (seams_init) on EVERY thread that reports waits; non-session threads and
-// non-holding states fall through on one TLS load + branch.
+// idle sessions fall through on one TLS load + branch. In-run threads
+// additionally stamp the span into the slot's blocked ledger (GL-SLEASE-3
+// active-age floor) — one mono clock read + a few relaxed slot ops per
+// reported span, paid only while a top-level run is live on the thread.
 // ---------------------------------------------------------------------------
 
-/// Wait span opens: a held permit is donated for the span.
+/// Wait span opens: a held permit is donated for the span, and (GL-SLEASE-3
+/// active-age floor) an in-run thread stamps the span start into its slot's
+/// blocked ledger. Idle threads (non-session, or a session between runs)
+/// still fall through on one TLS load + branch — the stamping cost lands
+/// only on in-run reported waits, which are exactly the spans the ledger
+/// must subtract from the floor.
 pub fn wait_hook_start() {
     IN_WAIT.set(true);
-    if STATE.get() == S_HELD {
+    let state = STATE.get();
+    if state == S_IDLE {
+        return;
+    }
+    let slot = my_slot();
+    let now = now_ns();
+    // Tolerate an unbalanced double-start (C-parity sites may overwrite an
+    // open report): close the stale span into the ledger first.
+    let prev_open = slot.wait_open_ns.load(Ordering::Relaxed);
+    if prev_open != 0 {
+        let span = now.saturating_sub(prev_open);
+        slot.blocked_ns
+            .store(slot.blocked_ns.load(Ordering::Relaxed).saturating_add(span), Ordering::Relaxed);
+    }
+    slot.wait_open_ns.store(now, Ordering::Relaxed);
+    if state == S_HELD {
         if let Some(rt) = LEASE_RT.get() {
             rt.execution_permits().release();
-            set_state(my_slot(), S_DONATED);
+            set_state(slot, S_DONATED);
             crate::lanev2::tick_serial_lease_donation();
         }
     }
@@ -478,9 +561,22 @@ pub fn wait_hook_start() {
 /// wait paths run under arbitrary lock state (module doc, deadlock class).
 pub fn wait_hook_end() {
     IN_WAIT.set(false);
-    if STATE.get() == S_DONATED {
+    let state = STATE.get();
+    if state == S_IDLE {
+        return;
+    }
+    let slot = my_slot();
+    // Close the span into the blocked ledger (double-end = no-op: the open
+    // stamp was consumed by the first close).
+    let open = slot.wait_open_ns.load(Ordering::Relaxed);
+    if open != 0 {
+        let span = now_ns().saturating_sub(open);
+        slot.blocked_ns
+            .store(slot.blocked_ns.load(Ordering::Relaxed).saturating_add(span), Ordering::Relaxed);
+        slot.wait_open_ns.store(0, Ordering::Relaxed);
+    }
+    if state == S_DONATED {
         if let Some(rt) = LEASE_RT.get() {
-            let slot = my_slot();
             if rt.execution_permits().try_acquire() {
                 set_state(slot, S_HELD);
             } else {
