@@ -3436,6 +3436,10 @@ fn classify_join_sides<'mcx>(
     let small = if side_rows[0] <= side_rows[1] { 0 } else { 1 };
     let small_rti = [rti_l, rti_r][small];
     let mut small_keys: Vec<Node<'mcx>> = Vec::new();
+    // R2 output-cardinality input (soak-adj §R2.4): the admitted equi
+    // clauses' (left var, right var) pairs — the eqjoinsel-style product
+    // below estimates the JOIN's output rows for the emit term.
+    let mut equi_pairs: Vec<(Node<'mcx>, Node<'mcx>)> = Vec::new();
     let quals: Vec<Node<'_>> = match join_quals {
         None => return refuse_join("no join quals"),
         Some(q) => {
@@ -3483,6 +3487,7 @@ fn classify_join_sides<'mcx>(
             } else if key_var(b, small_rti).is_some() {
                 small_keys.push(b);
             }
+            equi_pairs.push((a, b));
         }
     }
     if n_equi == 0 {
@@ -3620,7 +3625,36 @@ fn classify_join_sides<'mcx>(
             0.0,
         );
     }
-    finish(run, CoverClass::CbHashJoinPlainAgg, relids[0], 0.0, max_rows, 0.0, true)
+    // R2 OUTPUT-CARDINALITY estimate (the emit-term input; the
+    // both-geometry grid witnessed the split: the one-clause member
+    // OUT~N loses at dop4 while the two-clause selective member wins).
+    // eqjoinsel form: out = N_l * N_r / prod_k max(ndv_l, ndv_r) —
+    // per-var NDV from the same estimate_num_groups the grouped
+    // classifiers consult; estimate errors move the emit term, never a
+    // support gate (the letter's named quality caveat).
+    let out_est = {
+        let mut denom = 1.0f64;
+        for &(a, b) in &equi_pairs {
+            let ia = run.intern_expr(a);
+            let nd_a =
+                crate::selfuncs::estimate_num_groups(run, &[(ia, a)], side_rows[0].max(1.0))?;
+            let ib = run.intern_expr(b);
+            let nd_b =
+                crate::selfuncs::estimate_num_groups(run, &[(ib, b)], side_rows[1].max(1.0))?;
+            denom *= nd_a.max(nd_b).max(1.0);
+        }
+        (side_rows[0].max(1.0) * side_rows[1].max(1.0) / denom).max(1.0)
+    };
+    finish_out(
+        run,
+        CoverClass::CbHashJoinPlainAgg,
+        relids[0],
+        0.0,
+        max_rows,
+        0.0,
+        true,
+        Some(out_est),
+    )
 }
 
 /// NLIDX rel-aware suppression entry (GL-NLIDX-2), called from the Gather
@@ -5518,6 +5552,22 @@ fn finish(
     // plan-time META-band mirror (unqualed, or estimated survival ~1).
     serial_applies: bool,
 ) -> PgResult<bool> {
+    finish_out(run, class, relid, ngroups, rows, pages, serial_applies, None)
+}
+
+/// [`finish`] with the R2 output-cardinality input (None = OUT := rows,
+/// the one-clause posture — only the hashjoin classify passes Some).
+#[allow(clippy::too_many_arguments)]
+fn finish_out(
+    run: &mut PlannerRun<'_>,
+    class: CoverClass,
+    relid: u32,
+    ngroups: f64,
+    rows: f64,
+    pages: f64,
+    serial_applies: bool,
+    out_rows: Option<f64>,
+) -> PgResult<bool> {
     use costsize::runtime_model as rtm;
     let covered = class_covered(class);
     if covered {
@@ -5561,7 +5611,9 @@ fn finish(
                 // consulted even when the arm admits. PGRUST_M5_THREEWAY=
                 // 0|off restores the regime-gated two-way for one train.
                 let v = if rtm::threeway_enabled() {
-                    rtm::cost_route_verdict_threeway(curve, rows, dop, arm_admits, serial_applies)
+                    rtm::cost_route_verdict_threeway_out(
+                        curve, rows, dop, arm_admits, serial_applies, out_rows,
+                    )
                 } else {
                     rtm::cost_route_verdict_regime(curve, rows, dop, arm_admits)
                 };
