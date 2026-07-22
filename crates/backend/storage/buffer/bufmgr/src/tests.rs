@@ -197,16 +197,29 @@ fn setup_once() {
             }
             r
         });
-        // md_readv_complete stand-in: bytes -> blocks, as md does.
-        smgr_seams::aio_md_readv_complete::set(|_ioh, prior, _| {
+        // md_readv_complete stand-in, C-faithful: bytes -> blocks, zero
+        // blocks = ERROR, short = PARTIAL (ProcessReadBuffersResult's
+        // progress assert relies on the smgr completion contract).
+        smgr_seams::aio_md_readv_complete::set(|ioh, prior, _| {
             let mut r = prior;
             if prior.result < 0 {
                 r.status = types_storage::aio::PgAioResultStatus::Error;
                 r.id = types_storage::aio::PGAIO_HCB_MD_READV;
                 r.error_data = (-prior.result) as u32;
                 r.result = 0;
-            } else {
-                r.result /= BLCKSZ as i32;
+                return r;
+            }
+            r.result /= BLCKSZ as i32;
+            let nblocks = aio_core::pgaio_io_get_target_data(ioh).smgr.nblocks as i32;
+            if r.result == 0 {
+                r.status = types_storage::aio::PgAioResultStatus::Error;
+                r.id = types_storage::aio::PGAIO_HCB_MD_READV;
+                r.error_data = 0;
+            } else if r.status != types_storage::aio::PgAioResultStatus::Error
+                && r.result < nblocks
+            {
+                r.status = types_storage::aio::PgAioResultStatus::Partial;
+                r.id = types_storage::aio::PGAIO_HCB_MD_READV;
             }
             r
         });
