@@ -166,7 +166,7 @@ fn install_seams() {
     catalog_seams::is_catalog_relation::set(|_rel| false);
     origin_seams::replorigin_session_origin::set(|| 0);
     aio_seams::pgaio_closing_fd::set(|_| {});
-    aio_seams::pgaio_io_start_readv::set(|_, _, _| {});
+    aio_seams::pgaio_io_start_readv::set(|_, _, _| Ok(()));
 }
 
 fn install_proc_boot_seams() {

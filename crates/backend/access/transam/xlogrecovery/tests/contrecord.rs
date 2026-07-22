@@ -81,7 +81,7 @@ fn install_stub_seams() {
     lock_seams::lock_release::set(|_, _, _| Ok(true));
     timeout_seams::disable_timeouts::set(|_| {});
     aio_seams::pgaio_closing_fd::set(|_| {});
-    aio_seams::pgaio_io_start_readv::set(|_, _, _| {});
+    aio_seams::pgaio_io_start_readv::set(|_, _, _| Ok(()));
     aio_seams::at_eoxact_aio::set(|_| {});
     aio_seams::pgaio_error_cleanup::set(|| {});
     lock_seams::lock_acquire_extended::set(|_, _, _, _, _, _| {

@@ -287,7 +287,7 @@ fn install_proc_boot_seams() {
     sync_seams::register_sync_request::set(|_, _, _| Ok(true));
     sinval_seams::receive_shared_invalid_messages::set(|_, _| Ok(()));
     sinval_seams::send_shared_invalid_messages::set(|_| Ok(()));
-    aio_seams::pgaio_io_start_readv::set(|_, _, _| {});
+    aio_seams::pgaio_io_start_readv::set(|_, _, _| Ok(()));
     aio_seams::at_eoxact_aio::set(|_| {});
     aio_seams::pgaio_error_cleanup::set(|| {});
     logical_worker_seams::at_eoxact_logical_rep_workers::set(|_| {});

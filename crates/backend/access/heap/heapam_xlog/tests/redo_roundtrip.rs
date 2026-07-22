@@ -198,7 +198,7 @@ fn install_fake_bufmgr() {
     catalog_seams::is_toast_relation::set(|_rel| false);
     origin_seams::replorigin_session_origin::set(|| 0);
     aio_seams::pgaio_closing_fd::set(|_| {});
-    aio_seams::pgaio_io_start_readv::set(|_, _, _| {});
+    aio_seams::pgaio_io_start_readv::set(|_, _, _| Ok(()));
 
     xloginsert_seams::xlog_insert::set(|rmid, info, fragments| {
         xloginsert::insert_record(rmid, info, 0, fragments, &[])
