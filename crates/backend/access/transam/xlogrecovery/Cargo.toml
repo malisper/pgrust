@@ -52,6 +52,7 @@ libc = "0.2"
 bufmgr = { path = "../../../storage/buffer/bufmgr" }
 
 [dev-dependencies]
+aio_core = { path = "../../../storage/aio/aio_core" }
 vfs = { path = "../../../storage/file/vfs" }
 standby_seams = { path = "../../../storage/ipc/standby_seams" }
 timeline = { path = "../timeline" }

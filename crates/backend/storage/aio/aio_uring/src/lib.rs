@@ -799,6 +799,42 @@ mod tests {
 
     static DIO_ENGAGED: AtomicBool = AtomicBool::new(false);
 
+    // Plain-blkno pages for the pgaio sync path (rel.dat carries +100 so
+    // uring-DMA'd pages stay distinguishable from sync arrivals).
+    static URING_SYNC_FILE: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
+
+    fn sync_file_fd() -> i32 {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        URING_SYNC_FILE
+            .get_or_init(|| {
+                let base = if std::path::Path::new("/work").is_dir() {
+                    std::path::PathBuf::from("/work")
+                } else {
+                    std::env::temp_dir()
+                };
+                let dir = base.join(format!("aio-uring-pool-{}", std::process::id()));
+                std::fs::create_dir_all(&dir).unwrap();
+                let path = dir.join("rel-sync.dat");
+                let mut f = std::fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(true)
+                    .read(true)
+                    .write(true)
+                    .open(&path)
+                    .unwrap();
+                let mut page = vec![0u8; BLCKSZ];
+                for blk in 0..FILE_PAGES {
+                    valid_page_into(&mut page, blk);
+                    f.write_all(&page).unwrap();
+                }
+                f.flush().unwrap();
+                f.sync_all().unwrap();
+                f
+            })
+            .as_raw_fd()
+    }
+
     fn uring_file_fd() -> i32 {
         use std::io::Write;
         use std::os::fd::AsRawFd;
@@ -861,6 +897,10 @@ mod tests {
             resowner::ResourceOwnerCreate(types_resowner::ResourceOwner::NULL, "uring-tests")
                 .unwrap();
         resowner::SetCurrentResourceOwner(owner);
+        // The read pipeline issues IO through pgaio: attach this thread's
+        // aio backend slot (MyProc is the bind_task_proc TLS here).
+        lmgr_proc::bind_task_proc(procno);
+        aio_core::pgaio_init_backend();
     }
 
     // §2.8 permit-seam stand-ins (the runtime crate is not linked here, so
@@ -910,6 +950,56 @@ mod tests {
                 valid_page_into(buffer, blocknum);
                 Ok(())
             });
+            // mdstartreadv stand-in: the sync arrival path runs the REAL
+            // pgaio pipeline against rel-sync.dat (plain-blkno markers, so
+            // sync-vs-uring content assertions keep their meaning).
+            smgr_seams::smgr_startreadv::set(|rlb, _f, blocknum, pages| {
+                SYNC_READS.fetch_add(1, Ordering::Relaxed);
+                let fd = sync_file_fd();
+                globals::HoldInterrupts();
+                let iovcnt = aio_core::pgaio_io_set_iovec_pages(pages, BLCKSZ);
+                let ioh = aio_core::pgaio_io_current();
+                aio_core::pgaio_io_set_target_smgr(
+                    ioh,
+                    rlb.locator,
+                    ForkNumber::MAIN_FORKNUM,
+                    blocknum,
+                    pages.len() as u32,
+                    false,
+                    false,
+                );
+                aio_core::pgaio_io_register_callbacks(
+                    ioh,
+                    types_storage::aio::PGAIO_HCB_MD_READV,
+                    0,
+                );
+                let r = aio_core::pgaio_io_start_readv_current(
+                    fd,
+                    iovcnt,
+                    blocknum as i64 * BLCKSZ as i64,
+                );
+                if r.is_ok() {
+                    globals::ResumeInterrupts();
+                }
+                r
+            });
+            smgr_seams::aio_md_readv_complete::set(|_ioh, prior, _| {
+                let mut r = prior;
+                if prior.result < 0 {
+                    r.status = types_storage::aio::PgAioResultStatus::Error;
+                    r.id = types_storage::aio::PGAIO_HCB_MD_READV;
+                    r.error_data = (-prior.result) as u32;
+                    r.result = 0;
+                } else {
+                    r.result /= BLCKSZ as i32;
+                }
+                r
+            });
+            smgr_seams::aio_md_readv_report::set(|result, _td, elevel| {
+                elog::ereport(elevel)
+                    .errmsg(format!("test md readv failed: {:?}", result.status))
+                    .finish(types_error::ErrorLocation::new("tests", 0, "md_readv_report"))
+            });
             smgr_seams::smgr_start_buffer_read::set(|rlb, _f, blocknum, buffer| {
                 // URING_REL is the M0 suite's shared relation; the M1
                 // tests take fresh relnumbers above it (same file bytes,
@@ -928,6 +1018,7 @@ mod tests {
             s_lock_seams::perform_spin_delay::set(|_| std::thread::yield_now());
             s_lock_seams::finish_spin_delay::set(|_| {});
             ipc_seams::on_shmem_exit::set(|_, _| {});
+            ipc_seams::before_shmem_exit::set(|_, _| Ok(()));
             waitevent_seams::pgstat_report_wait_start::set(|_| {});
             waitevent_seams::pgstat_report_wait_end::set(|| {});
             postgres_seams::check_for_interrupts::set(|| Ok(()));
@@ -956,6 +1047,12 @@ mod tests {
             lwlock::CreateLWLocks(false).unwrap();
             bufmgr::BufferManagerShmemInit().unwrap();
             bufmgr::init_seams();
+            aio_core::init_seams();
+            guc_tables::vars::io_max_combine_limit.install_if_absent(
+                guc_tables::GucVarAccessors { get: || 16, set: |_| {} },
+            );
+            aio_core::AioShmemSize().unwrap();
+            aio_core::AioShmemInit().unwrap();
             crate::init_seams();
         });
         become_backend();
