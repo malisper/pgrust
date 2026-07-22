@@ -1211,15 +1211,14 @@ mod tests {
                 // owned by serial_model::SerialTopnIntBounded (two
                 // witnessed k-planes), and any decide-listing of this
                 // class rides THAT vocabulary, never this curve.
-                // (Set re-derived at the ser-term RE-EMIT — the topn ser
-                // pair refit against the L6 legacy denominator; the
-                // 2.5M@2 cell left the set: sr 1.059 > 1 keeps Gather.)
-                (RuntimeClass::CbTopnBoundedIntKeys, 1_000_000, 1),
-                (RuntimeClass::CbTopnBoundedIntKeys, 2_500_000, 1),
-                (RuntimeClass::CbTopnBoundedIntKeys, 5_000_000, 1),
-                (RuntimeClass::CbTopnBoundedIntKeys, 5_000_000, 2),
-                (RuntimeClass::CbTopnBoundedIntKeys, 10_000_000, 1),
-                (RuntimeClass::CbTopnBoundedIntKeys, 10_000_000, 2),
+                // (Set re-derived TWICE: at the ser-term RE-EMIT the
+                // 2.5M@2 cell left — sr 1.059 > 1 keeps Gather; at the
+                // GL-TOPNHEAP-1 k-banded refit (t43 composition) the six
+                // remaining low-dop topn cells left — the refit engaged
+                // curve (c_engage 305844.2, w_row 0.8711) already
+                // suppresses them TWO-WAY, so the serial term no longer
+                // changes any topn verdict. The shadow set is now exactly
+                // the four decide-listed fold cells.)
             ],
             "the three-way witnessed change set"
         );
