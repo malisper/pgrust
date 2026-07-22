@@ -2043,6 +2043,24 @@ fn agg_arm<'mcx>(
         // GM-hybrid leader drives were DELETED at Phase-5 D1 — agg over
         // GatherMerge always runs the per-tuple exec_agg over
         // exec_gather_merge path below (which stays until Phase-5 D5).
+        PlanStateNode::MergeJoin(mj) => {
+            // GL-MJSORT-FOLD dispatch hook (the merge-join duplicate-band
+            // fold lever, PGRUST_RUNTIME_MJSORT_FOLD, default OFF, layered
+            // under the car's kill): AGG-level ownership exactly like the
+            // hashjoin arm — the car's phases 1-3 run verbatim, then the
+            // joined pairs fold into partial-agg states on the pool. Falls
+            // through to the UNCHANGED per-tuple agg over exec_merge_join
+            // on refuse, and a fold-gate refusal leaves the MJ node's own
+            // dispatch hook (the plain car) fully armed. Lane logic +
+            // refuse-set in `lanev2::runtime_mergejoin`.
+            if crate::lanev2::enabled() {
+                if let Some(r) =
+                    crate::lanev2::try_own_agg_over_merge_join(agg, &mut **mj, estate)?
+                {
+                    return Ok(r);
+                }
+            }
+        }
         PlanStateNode::HashJoin(hj) => {
             // Lane-executor-v2 dispatch hook (Phase-2 breaker-to-breaker
             // composition: hash-agg breaker over the hash-join breaker over

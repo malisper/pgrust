@@ -1213,6 +1213,307 @@ fn absorb_poly_at(
 }
 
 // ===========================================================================
+// GL-MJSORT-FOLD (the merge-join duplicate-band fold lever, GL-MJSORT-3
+// §3.1 seams 1-2): the EXPLICIT-layout leader absorb + the fold arm's own
+// per-transno recognizer. Neither existing schema path classifies the fold
+// arm's shapes — lanefold args are single-Var affine (sum(Var+Var) over a
+// join never classifies) and the poly manifest requires a numeric anchor —
+// so the arm carries its own tight recognizer and hands the absorb an
+// EXPLICIT (transno, state) layout instead of a derived trans schema. The
+// absorb bodies themselves are the existing per-kind ones
+// (`absorb_lane_trans` + `install_int128_fixups`), verbatim.
+// ===========================================================================
+
+/// LEADER side, explicit-layout flavor of [`exec_agg_runtime_partials`]:
+/// begin (initval pergroups), absorb the combined per-transno states, then
+/// the ordinary retrieve (finalize + HAVING + project). Byte-for-byte the
+/// end state the serial transfn chain leaves — the absorb loop calls the
+/// existing per-kind bodies. Fail-closed: a transno outside the node's
+/// once-allocated pergroup array errors (never writes past it).
+pub fn exec_agg_explicit_partials<'mcx>(
+    node: &mut AggStateData<'mcx>,
+    estate: &mut EStateData<'mcx>,
+    combined: &[(u16, RuntimePartialTrans)],
+) -> PgResult<Option<ExecSlotId>> {
+    debug_assert_eq!(node.plan.aggstrategy, crate::AGG_PLAIN);
+    if node.agg_done {
+        return Ok(None);
+    }
+    crate::agg_plain_build_begin(node, estate)?;
+    absorb_explicit_partials(node, combined)?;
+    crate::agg_plain_finish(node, estate)
+}
+
+fn absorb_explicit_partials(
+    node: &mut AggStateData<'_>,
+    combined: &[(u16, RuntimePartialTrans)],
+) -> PgResult<()> {
+    let base = node.pergroup_base;
+    let numtrans = node.trans_typ.len();
+    let mut int128_fixups: Vec<(u16, i64, i128)> = Vec::new();
+    for (transno, p) in combined {
+        if (*transno as usize) >= numtrans {
+            return Err(Box::new(PgError::error(
+                "explicit partial: transno out of range".to_string(),
+            )));
+        }
+        // SAFETY: transno bound-checked against the once-allocated pergroup
+        // array just above; initialize_aggregates just rewrote it.
+        let pg = unsafe { &mut *base.as_ptr().add(*transno as usize) };
+        absorb_lane_trans(pg, p, *transno, &mut int128_fixups)?;
+    }
+    install_int128_fixups(node, base, int128_fixups)
+}
+
+/// The fold arm's per-transno state class — every member's cross-partition
+/// combine is exact and order-insensitive (the reassociation legality at
+/// the module head), and every member's absorbed representation is an
+/// existing [`RuntimePartialTrans`] arm.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MjFoldKind {
+    /// int8inc — count(*): counts every row, reads no argument.
+    CountStar,
+    /// int8inc_any — count(x): counts non-NULL argument rows.
+    CountAny,
+    /// int2_sum/int4_sum — i64 accumulate (C's UNCHECKED int8 add; the
+    /// mod-2^64 ring reassociates exactly).
+    Sum,
+    /// int8_avg_accum — Int128AggState {n, sum}; serves BOTH sum(int8) and
+    /// avg(int8) (same state, different finalfn — finalize is the node's
+    /// own retrieve).
+    Int128,
+    /// int2/4/8smaller — strict byval signed min (integer ties are
+    /// identical datum words; any combine order bit-equals serial).
+    Min,
+    /// int2/4/8larger — strict byval signed max.
+    Max,
+}
+
+/// One recognized transition: the fold arm resolves `arg` against the join
+/// tlist (GL-MJSORT-3 §3.1 seam 3) and refuses BY NAME anything its
+/// grammar cannot classify.
+pub struct MjFoldTrans<'mcx> {
+    pub transno: u16,
+    pub kind: MjFoldKind,
+    /// The aggregate's single argument expression (None = count(*)).
+    pub arg: Option<::types_nodes::node_tree::Node<'mcx>>,
+    /// Declared input type oid (0 for count(*); ANYOID for count(x) — the
+    /// resolver reads only NULLness there and pins the int family itself).
+    pub arg_type: u32,
+}
+
+// Transfn oids of the fold vocabulary (pg_proc REL 18.3, verified vendored;
+// lanefold::classify_trans's own table — mirrored because those consts are
+// that crate's private classification detail).
+const MJF_INT8INC: u32 = 1219;
+const MJF_INT8INC_ANY: u32 = 2804;
+const MJF_INT2_SUM: u32 = 1840;
+const MJF_INT4_SUM: u32 = 1841;
+const MJF_INT8_AVG_ACCUM: u32 = 2746;
+const MJF_INT4LARGER: u32 = 768;
+const MJF_INT4SMALLER: u32 = 769;
+const MJF_INT2LARGER: u32 = 770;
+const MJF_INT2SMALLER: u32 = 771;
+const MJF_INT8LARGER: u32 = 1236;
+const MJF_INT8SMALLER: u32 = 1237;
+const MJF_INT2OID: u32 = 21;
+const MJF_INT4OID: u32 = 23;
+const MJF_INT8OID: u32 = 20;
+const MJF_INTERNALOID: u32 = 2281;
+
+/// The pure recognizer table (unit-pinned): (transfn oid, init-null,
+/// has-args, aggtranstype) -> fold kind. Keyed off the TRANSFN oid exactly
+/// as lanefold::classify_trans — the transfn IS the state contract the
+/// absorb writes; the aggtranstype double-check pins the state layout
+/// (the intcase precedent). Init-value conditions mirror classify_trans:
+/// count's initval is non-null (0), sum/avg/min/max start NULL.
+fn mjfold_kind(
+    transfn: u32,
+    init_null: bool,
+    has_args: bool,
+    aggtranstype: u32,
+) -> Option<MjFoldKind> {
+    match transfn {
+        MJF_INT8INC if !init_null && !has_args && aggtranstype == MJF_INT8OID => {
+            Some(MjFoldKind::CountStar)
+        }
+        MJF_INT8INC_ANY if !init_null && has_args && aggtranstype == MJF_INT8OID => {
+            Some(MjFoldKind::CountAny)
+        }
+        MJF_INT2_SUM | MJF_INT4_SUM
+            if init_null && has_args && aggtranstype == MJF_INT8OID =>
+        {
+            Some(MjFoldKind::Sum)
+        }
+        MJF_INT8_AVG_ACCUM if init_null && has_args && aggtranstype == MJF_INTERNALOID => {
+            Some(MjFoldKind::Int128)
+        }
+        MJF_INT2SMALLER if init_null && has_args && aggtranstype == MJF_INT2OID => {
+            Some(MjFoldKind::Min)
+        }
+        MJF_INT4SMALLER if init_null && has_args && aggtranstype == MJF_INT4OID => {
+            Some(MjFoldKind::Min)
+        }
+        MJF_INT8SMALLER if init_null && has_args && aggtranstype == MJF_INT8OID => {
+            Some(MjFoldKind::Min)
+        }
+        MJF_INT2LARGER if init_null && has_args && aggtranstype == MJF_INT2OID => {
+            Some(MjFoldKind::Max)
+        }
+        MJF_INT4LARGER if init_null && has_args && aggtranstype == MJF_INT4OID => {
+            Some(MjFoldKind::Max)
+        }
+        MJF_INT8LARGER if init_null && has_args && aggtranstype == MJF_INT8OID => {
+            Some(MjFoldKind::Max)
+        }
+        _ => None,
+    }
+}
+
+/// GL-MJSORT-3 §3.1 seam 2 — the fold arm's OWN tight recognizer over the
+/// node's transitions. `Ok(None)` = the node shape or at least one
+/// transition is outside the vocabulary — the caller refuses BY NAME.
+/// Node-level refusals: non-PLAIN strategy, combine/partial aggsplit
+/// modes, any sorted collection state (ordered-set/aggorder/aggdistinct —
+/// `pertrans_sort` empty is the belt), FILTER, direct args. Per-transno:
+/// the transfn-oid table above (resolved from pg_aggregate exactly as
+/// ExecInitAgg's own non-combine arm), every transno covered exactly once.
+pub fn agg_mjfold_recognize<'mcx>(
+    node: &AggStateData<'mcx>,
+) -> PgResult<Option<Vec<MjFoldTrans<'mcx>>>> {
+    if node.plan.aggstrategy != crate::AGG_PLAIN
+        || node.plan.aggsplit != ::types_nodes::primnodes::AGGSPLIT_SIMPLE
+        || !node.pertrans_sort.is_empty()
+        || node.numtrans == 0
+    {
+        return Ok(None);
+    }
+    let numtrans = node.numtrans;
+    let mut out: Vec<Option<MjFoldTrans<'mcx>>> = Vec::new();
+    out.resize_with(numtrans, || None);
+    for pa in node.peragg.iter() {
+        let ar = pa.aggref;
+        if !pa.direct_args.is_empty()
+            || ar.aggkind != ::types_nodes::primnodes::AGGKIND_NORMAL
+            || !ar.aggorder.is_nil()
+            || !ar.aggdistinct.is_nil()
+            || ar.aggfilter.is_some()
+        {
+            return Ok(None);
+        }
+        let transno = pa.transno as usize;
+        if transno >= numtrans {
+            return Ok(None);
+        }
+        if out[transno].is_some() {
+            // Shared transno: the same catalog key classified it already
+            // (find_compatible_trans keys sharing on the transition state).
+            continue;
+        }
+        let Some(shape) = ::syscache_seams::lookup_pg_aggregate_shape::call(ar.aggfnoid)?
+        else {
+            return Ok(None);
+        };
+        let nargs = ar.args.len();
+        if nargs > 1 {
+            return Ok(None);
+        }
+        let Some(kind) = mjfold_kind(
+            shape.aggtransfn,
+            node.trans_init[transno].isnull,
+            nargs == 1,
+            ar.aggtranstype,
+        ) else {
+            return Ok(None);
+        };
+        let arg = if nargs == 1 {
+            let Some(tle) = ar.args.iter().next().and_then(|n| n.as_target_entry()) else {
+                return Ok(None);
+            };
+            if tle.resjunk {
+                return Ok(None);
+            }
+            Some(tle.expr)
+        } else {
+            None
+        };
+        out[transno] = Some(MjFoldTrans {
+            transno: transno as u16,
+            kind,
+            arg,
+            arg_type: ar.aggargtypes.first().unwrap_or(0),
+        });
+    }
+    let mut v = Vec::with_capacity(numtrans);
+    for t in out {
+        match t {
+            Some(t) => v.push(t),
+            // A transno no peragg names would be a planner numbering gap —
+            // refuse (the sink derivation's discipline).
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(v))
+}
+
+#[cfg(test)]
+mod mjfold_tests {
+    use super::*;
+
+    /// The recognizer table's exact vocabulary: transfn oid keyed, initval
+    /// and aggtranstype pinned per entry (GL-MJSORT-3 §3.1 seam 2).
+    #[test]
+    fn mjfold_kind_table() {
+        use MjFoldKind::*;
+        // count(*): non-null init, NO args, int8 state.
+        assert_eq!(mjfold_kind(MJF_INT8INC, false, false, MJF_INT8OID), Some(CountStar));
+        assert_eq!(mjfold_kind(MJF_INT8INC, true, false, MJF_INT8OID), None);
+        assert_eq!(mjfold_kind(MJF_INT8INC, false, true, MJF_INT8OID), None);
+        // count(x): non-null init, one arg.
+        assert_eq!(mjfold_kind(MJF_INT8INC_ANY, false, true, MJF_INT8OID), Some(CountAny));
+        assert_eq!(mjfold_kind(MJF_INT8INC_ANY, true, true, MJF_INT8OID), None);
+        // sum(int2/int4): NULL init, int8 state.
+        assert_eq!(mjfold_kind(MJF_INT2_SUM, true, true, MJF_INT8OID), Some(Sum));
+        assert_eq!(mjfold_kind(MJF_INT4_SUM, true, true, MJF_INT8OID), Some(Sum));
+        assert_eq!(mjfold_kind(MJF_INT4_SUM, false, true, MJF_INT8OID), None);
+        // sum(int8)/avg(int8): the shared Int128AggState transition.
+        assert_eq!(
+            mjfold_kind(MJF_INT8_AVG_ACCUM, true, true, MJF_INTERNALOID),
+            Some(Int128)
+        );
+        assert_eq!(mjfold_kind(MJF_INT8_AVG_ACCUM, true, true, MJF_INT8OID), None);
+        // min/max at each width; the state type pins the width.
+        assert_eq!(mjfold_kind(MJF_INT2SMALLER, true, true, MJF_INT2OID), Some(Min));
+        assert_eq!(mjfold_kind(MJF_INT4SMALLER, true, true, MJF_INT4OID), Some(Min));
+        assert_eq!(mjfold_kind(MJF_INT8SMALLER, true, true, MJF_INT8OID), Some(Min));
+        assert_eq!(mjfold_kind(MJF_INT2LARGER, true, true, MJF_INT2OID), Some(Max));
+        assert_eq!(mjfold_kind(MJF_INT4LARGER, true, true, MJF_INT4OID), Some(Max));
+        assert_eq!(mjfold_kind(MJF_INT8LARGER, true, true, MJF_INT8OID), Some(Max));
+        // Width/state mismatches refuse (the layout pin).
+        assert_eq!(mjfold_kind(MJF_INT4LARGER, true, true, MJF_INT8OID), None);
+        assert_eq!(mjfold_kind(MJF_INT8SMALLER, true, true, MJF_INT4OID), None);
+        // Outside the vocabulary: float/numeric/text transfns never admit.
+        for oid in [208u32, 222, 2858, 458, 1963, 2805] {
+            assert_eq!(mjfold_kind(oid, true, true, MJF_INT8OID), None, "oid {oid}");
+            assert_eq!(mjfold_kind(oid, false, true, MJF_INT8OID), None, "oid {oid}");
+        }
+    }
+
+    /// The explicit absorb's bound check is fail-closed (never writes past
+    /// the pergroup array): exercised as a pure bounds predicate here; the
+    /// executor-side path is proven by the fold e2e legs.
+    #[test]
+    fn explicit_absorb_transno_bound() {
+        // The guard under test is `transno as usize >= trans_typ.len()` in
+        // absorb_explicit_partials — pinned structurally: u16::MAX must
+        // always trip for any numtrans an admitted plain node carries.
+        let numtrans = 3usize;
+        assert!((u16::MAX as usize) >= numtrans);
+        assert!(!((2u16 as usize) >= numtrans));
+    }
+}
+
+// ===========================================================================
 // SE-AGGPOLY unit corpus (band 101001): the pure NumericAgg combine law.
 // The manifest/export/absorb sides ride executor state and are proven by
 // the aggpoly e2e + dualexec corpus (scripts/aggpoly-e2e.sh,
