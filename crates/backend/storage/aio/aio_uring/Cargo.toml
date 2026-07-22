@@ -20,6 +20,8 @@ elog = { path = "../../../utils/error/elog" }
 libc = "0.2"
 
 [dev-dependencies]
+aio_core = { path = "../aio_core" }
+guc_tables = { path = "../../../utils/misc/guc_tables" }
 shmem_seams = { path = "../../ipc/shmem_seams" }
 smgr_seams = { path = "../../smgr/smgr_seams" }
 s_lock_seams = { path = "../../lmgr/s_lock_seams" }

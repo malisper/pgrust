@@ -174,15 +174,9 @@ fn launch_backend_thread_runs_child_init_in_order() {
     assert!(!snap.sigquit_in_blocksig);
 }
 
-#[test]
-#[should_panic(expected = "IoWorkerMain (backend-storage-aio-method-worker) unported")]
-fn unported_child_kind_panics_loudly() {
-    install();
-    init_small::globals::SetIsPostmasterEnvironment(true);
-    init_small::globals::SetIsUnderPostmaster(false);
-    postmaster_child_launch(BackendType::IoWorker, 1, StartupData::None, None);
-}
-
+// The Main::Unported class is empty since GL-AIO-1 ported IoWorkerMain (its
+// loud-panic arms stay for future kinds); the None-kind test below keeps the
+// loud-refusal class pinned.
 #[test]
 #[should_panic(expected = "no main_fn")]
 fn null_main_fn_kind_panics_loudly() {

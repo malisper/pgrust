@@ -113,10 +113,15 @@ fn install_stub_seams() {
     lock_seams::lock_release_all::set(|_, _| lock::VirtualXactLockTableCleanup());
     lock_seams::lock_release::set(|_, _, _| Ok(true));
     timeout_seams::disable_timeouts::set(|_| {});
-    aio_seams::pgaio_closing_fd::set(|_| {});
-    aio_seams::pgaio_io_start_readv::set(|_, _, _| Ok(()));
-    aio_seams::at_eoxact_aio::set(|_| {});
-    aio_seams::pgaio_error_cleanup::set(|| {});
+    // Real aio: recovery's cold reads run the pgaio pipeline (stubbing
+    // pgaio_io_start_readv leaves handles handed-out and the read wait
+    // errors out).
+    ipc_seams::before_shmem_exit::set(|_, _| Ok(()));
+    aio_core::init_seams();
+    guc_tables::vars::io_max_combine_limit.install_if_absent(guc_tables::GucVarAccessors {
+        get: || 16,
+        set: |_| {},
+    });
     lock_seams::lock_acquire_extended::set(|_, _, _, _, _, _| {
         Ok(types_storage::lock::LOCKACQUIRE_OK)
     });
@@ -270,8 +275,11 @@ fn install_real() {
     subtrans::SUBTRANSShmemInit().unwrap();
     bufmgr::BufferManagerShmemInit().unwrap();
     bufmgr::init_seams();
+    aio_core::AioShmemSize().unwrap();
+    aio_core::AioShmemInit().unwrap();
     sync::InitSync().unwrap();
     lmgr_proc::InitProcess(BackendType::Backend).unwrap();
+    aio_core::pgaio_init_backend();
     procarray::ProcArrayAdd(lmgr_proc::MyProc().unwrap()).unwrap();
 
     // Buffer pins register with CurrentResourceOwner; recovery runs under the

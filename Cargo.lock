@@ -1289,10 +1289,12 @@ dependencies = [
 name = "aio_uring"
 version = "0.0.0"
 dependencies = [
+ "aio_core",
  "aio_seams",
  "bufmgr",
  "datum",
  "elog",
+ "guc_tables",
  "init_small",
  "ipc_seams",
  "latch",
@@ -20322,6 +20324,7 @@ dependencies = [
  "adt_float",
  "adt_pg_lsn",
  "adt_timestamp",
+ "aio_core",
  "aio_seams",
  "arrayfuncs",
  "async_seams",
