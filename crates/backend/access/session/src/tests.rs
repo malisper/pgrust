@@ -647,7 +647,19 @@ fn tls_source_census_and_session_surface_are_pinned() {
     // removed the PdWorkerSink worker-fragment thread_local with the
     // executor paths it served (lanev2.rs pardistinct region) — a
     // deletion-explained movement, not an unclassified source.
-    assert_eq!(count_tree(crates), 527, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // GL-MEMWATCH-1 delta (529 = 527 + 2), both deliberately NON-SESSION TLS:
+    //   68. tcop/postgres/src/simple_query.rs — HOG_CTX: the memory
+    //      watchdog e2e's per-thread cache of the "WatchdogTestHog"
+    //      session_root pointer (developer GUC, default-off). The context
+    //      estate itself is owned by the session-teardown Roots phase
+    //      (session_root registration); the TLS is a lookup cache on the
+    //      backend thread that dies with the thread — no session identity,
+    //      never captured/restored by an envelope.
+    //   69. utils/mmgr/mcxt_stats/src/lib.rs — IN_OOM_DUMP: reentry guard
+    //      flag for the allocation-failure context dump (C parity for
+    //      aset.c's MemoryContextStats-on-OOM). Pure per-thread scratch;
+    //      no session identity.
+    assert_eq!(count_tree(crates), 529, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
