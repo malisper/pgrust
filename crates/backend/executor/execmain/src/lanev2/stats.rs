@@ -885,6 +885,33 @@ pub(crate) fn tick_serial_lease() {
     arm_dump_on_thread_exit();
 }
 
+/// GL-SLEASE-2 mechanism witnesses: safe-point ADMISSIONS (a floor-crossed
+/// run actually took a permit at the ProcessInterrupts tap) and DONATIONS
+/// (a held permit released across a C-parity wait span). Zero-dumped like
+/// the tracked row — an armed protective cell asserting admitted>0 is the
+/// positive witness that the sweeper->interrupt->tap chain is alive, not
+/// just the enter bookkeeping.
+static SERIAL_LEASE_ADMITTED: AtomicU64 = AtomicU64::new(0);
+static SERIAL_LEASE_DONATIONS: AtomicU64 = AtomicU64::new(0);
+
+#[inline]
+pub(crate) fn tick_serial_lease_admitted() {
+    if !armed() {
+        return;
+    }
+    SERIAL_LEASE_ADMITTED.fetch_add(1, Relaxed);
+    arm_dump_on_thread_exit();
+}
+
+#[inline]
+pub(crate) fn tick_serial_lease_donation() {
+    if !armed() {
+        return;
+    }
+    SERIAL_LEASE_DONATIONS.fetch_add(1, Relaxed);
+    arm_dump_on_thread_exit();
+}
+
 #[allow(clippy::declare_interior_mutable_const)]
 static REFUSED: [[AtomicU64; N_REASONS]; N_CLASSES] =
     [const { [const { AtomicU64::new(0) }; N_REASONS] }; N_CLASSES];
@@ -1279,6 +1306,14 @@ fn dump() {
     out.push_str(&format!(
         "counter\tserial-lease-tracked\t{}\n",
         SERIAL_LEASES.load(Relaxed)
+    ));
+    out.push_str(&format!(
+        "counter\tserial-lease-admitted\t{}\n",
+        SERIAL_LEASE_ADMITTED.load(Relaxed)
+    ));
+    out.push_str(&format!(
+        "counter\tserial-lease-donations\t{}\n",
+        SERIAL_LEASE_DONATIONS.load(Relaxed)
     ));
     // M2 inc-3 rung-2 fallback-floor rows (engagement channels per arm;
     // zeros included — the floor reader diffs runs, absent≠zero would
