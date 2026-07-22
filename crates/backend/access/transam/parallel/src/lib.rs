@@ -495,9 +495,138 @@ pub fn shared_for(id: ParallelContextId) -> Arc<ParallelShared> {
     with_pcxt(id, |p| p.shared.clone().expect("InitializeParallelDSM not run"))
 }
 
+/// GL-STMTTASK-2 change 2 (pointer-passing, not DSM ritual): build the
+/// query-task binder target for ONE dop-1 statement task WITHOUT the
+/// parallel-context ceremony — no pcxt-list entry, no error mailboxes, no
+/// worker bookkeeping, no SHARED_REGISTRY key, no DestroyParallelContext
+/// walk. Everything the worker-side binder actually consumes is captured
+/// exactly as `InitializeParallelDSM` captures it (same sources, same
+/// per-statement re-arm set: transaction state, snapshots, timestamps,
+/// combocid, pending syncs, reindex, relmap, invalidation posture) — the
+/// re-arm resets exactly what C resets between statements. Session-stable
+/// state travels by POINTER (Arc): the GUC query pin (statement-window
+/// cached — its Arc identity is the sticky-resume key), the record
+/// registry, the combocid share. The DSM-shaped path stays untouched for
+/// REAL parallel engagements.
+///
+/// `Ok(None)` = refuse-by-name (interrupt-holdoff / critical section, or
+/// uncommitted enum values — the launched path's C-parity error gate,
+/// rendered fail-closed): the caller keeps the incumbent serial loop.
+/// The binding policy is installed at construction (the
+/// InstallQueryTaskBinding fold); the CALLER owns the standing-board join
+/// (`standing::close_and_await`) before its arena unwinds — with no pcxt
+/// there is no private-shutdown hook, so the caller must bracket the
+/// engagement in its own RAII guard.
+pub fn statement_task_shared(
+    policy: QueryTaskBindingPolicy,
+) -> PgResult<Option<Arc<ParallelShared>>> {
+    if g::InterruptHoldoffCount() != 0 || g::CritSectionCount() != 0 {
+        return Ok(None);
+    }
+    // Unported C arm (SerializeUncommittedEnums): the launched path raises
+    // a clean ERROR; the statement task simply refuses — the incumbent
+    // loop serves the statement. (In practice unreachable: uncommitted
+    // enums co-occur with pending invalidations, which the arm's binder
+    // policy gate already refused.)
+    if pg_enum::HasUncommittedEnums() {
+        return Ok(None);
+    }
+
+    let (current_user_id, sec_context) = miscinit::GetUserIdAndSecContext();
+    let (temp_ns, temp_toast_ns) = catalog_namespace::GetTempNamespaceState();
+
+    let tstate = {
+        let mut buf = vec![0u8; xact::EstimateTransactionStateSpace()];
+        let n = xact::SerializeTransactionState(&mut buf)?;
+        buf.truncate(n);
+        buf
+    };
+    let clientconninfo = {
+        let mut buf = vec![0u8; miscinit::EstimateClientConnectionInfoSpace()];
+        miscinit::SerializeClientConnectionInfo(&mut buf);
+        buf
+    };
+    let active_snapshot = snapmgr::SerializeSnapshot(&snapmgr::GetActiveSnapshot());
+    let transaction_snapshot = if xact::IsolationUsesXactSnapshot() {
+        Some(snapmgr::SerializeSnapshot(&xact_get_transaction_snapshot()?))
+    } else {
+        None
+    };
+
+    let encoded = QUERY_TASK_INSTALLED
+        | u8::from(policy.has_params) * QUERY_TASK_PARAMS
+        | u8::from(policy.temp_state) * QUERY_TASK_TEMP
+        | u8::from(policy.serializable) * QUERY_TASK_SERIALIZABLE
+        | u8::from(policy.pending_invalidations) * QUERY_TASK_PENDING_INVALS
+        | u8::from(policy.invals_flush) * QUERY_TASK_INVALS_FLUSH;
+
+    Ok(Some(Arc::new(ParallelShared {
+        database_id: g::MyDatabaseId(),
+        authenticated_user_id: miscinit::GetAuthenticatedUserId(),
+        session_user_id: miscinit::GetSessionUserId(),
+        outer_user_id: miscinit::GetCurrentRoleId(),
+        current_user_id,
+        sec_context,
+        session_user_is_superuser: miscinit::GetSessionUserIsSuperuser(),
+        role_is_superuser: guc_tables::vars::current_role_is_superuser.read(),
+        parallel_leader_pid: g::MyProcPid(),
+        parallel_leader_proc_number: g::MyProcNumber(),
+        xact_ts: xact::GetCurrentTransactionStartTimestamp(),
+        stmt_ts: xact::GetCurrentStatementStartTimestamp(),
+        temp_namespace_id: temp_ns,
+        temp_toast_namespace_id: temp_toast_ns,
+        last_xlog_end: AtomicU64::new(0),
+        serializable_xact_handle: predicate_seams::share_serializable_xact::call(),
+        leader_pending_invals: inval::TransactionHasPendingInvalidationMessages(),
+        guc_state: if guc::store::session_guc_bind_enabled() {
+            Vec::new()
+        } else {
+            guc::store::capture_nondefault_variables()
+        },
+        guc_pin: if guc::store::session_guc_bind_enabled() {
+            Some(guc::layers::current_query_pin())
+        } else {
+            None
+        },
+        tstate,
+        combocid: combocid::SerializeComboCIDState(),
+        pending_syncs: catalog_storage::SerializePendingSyncs(),
+        reindex: types_rel::reindex::serialize_reindex_state(),
+        active_snapshot,
+        transaction_snapshot,
+        clientconninfo,
+        relmap: relmapper::SerializeRelationMap(),
+        record_registry: if typcache_seams::record_registry_handle::is_installed() {
+            typcache_seams::record_registry_handle::call()
+        } else {
+            Default::default()
+        },
+        library_name: String::new(),
+        function_name: String::new(),
+        error_senders: Vec::new(),
+        worker_attached: Vec::new(),
+        private: Mutex::new(None),
+        standing_driver: Mutex::new(None),
+        query_task_binding: AtomicU8::new(encoded),
+    })))
+}
+
 pub fn set_private(id: ParallelContextId, private: Arc<dyn Any + Send + Sync>) {
     let shared = shared_for(id);
     *shared.private.lock().unwrap_or_else(|e| e.into_inner()) = Some(private);
+}
+
+/// [`set_private`] for a pcxt-less shared ([`statement_task_shared`]).
+pub fn set_private_shared(shared: &Arc<ParallelShared>, private: Arc<dyn Any + Send + Sync>) {
+    *shared.private.lock().unwrap_or_else(|e| e.into_inner()) = Some(private);
+}
+
+/// [`set_standing_driver`] for a pcxt-less shared ([`statement_task_shared`]).
+pub fn set_standing_driver_shared(shared: &Arc<ParallelShared>, driver: standing::StandingDriver) {
+    *shared
+        .standing_driver
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(driver);
 }
 
 /// Install the standing-gang driver for this context's engagement (M2

@@ -198,11 +198,16 @@ pub(crate) fn get_current_timestamp() -> types_core::TimestampTz {
 
 // Per-tuple hot: TLS pointer + Relaxed load + one predictable branch (C's
 // CHECK_FOR_INTERRUPTS; the shared flag is how async senders reach us).
+// GL-STMTTASK-2 quantum-yield tick: one MORE thread-local bool load +
+// predictable branch (armed only inside statement-task spans under the
+// DEFAULT-OFF PGRUST_STMT_TASK_YIELD knob; the governor is the executor's
+// registered hook).
 #[inline(always)]
 pub fn check_for_interrupts() -> PgResult<()> {
     if init_small::globals::InterruptPending() {
         return ProcessInterrupts();
     }
+    postgres_seams::stmt_yield::tick();
     Ok(())
 }
 

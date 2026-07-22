@@ -719,7 +719,45 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      (the read-path e2e witness). Pure thread-local diagnostics.
     //   (-1: aio_config's MY_BACKEND_ATTACHED site left with the crate,
     //      absorbed into row 76's real slot binding.)
-    assert_eq!(count_tree(crates), 537, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // GL-STMTTASK-1 delta (538 = 537 + 1, composed at t44), deliberately NON-SESSION TLS:
+    //   79. tcop/postgres_seams/src/lib.rs — stmt_task_arm ARMED: the
+    //      statement-scoped protocol arm flag (exec_simple_query arms one
+    //      statement's top-level portal run; the executor's statement-task
+    //      hook consumes it on first entry; RAII-disarmed at statement
+    //      end). Pure per-statement routing advisory on the SESSION thread
+    //      — carries no session identity, never set on workers, never
+    //      captured/restored by an envelope (an engagement rebuilds
+    //      nothing from it; consume-once semantics make leakage across
+    //      statements structurally impossible).
+    // GL-STMTTASK-2 delta (539 = 538 + 1), deliberately NON-SESSION TLS:
+    //   80. executor/execmain/src/lanev2/stmt_task.rs — SESSION_FUNNEL: the
+    //      session thread's persistent statement-task row funnel (change 1,
+    //      standing-engagement reuse — one ring + wake hook created on the
+    //      first armed statement, reset per statement). A pure TRANSPORT
+    //      cache on the session thread: rows never survive a statement, the
+    //      wake hook keys the thread's own proc latch, and the funnel
+    //      carries no session identity — never captured/restored by an
+    //      envelope (a fresh thread simply rebuilds one on first use); dies
+    //      with the thread (Arc drop, heap only).
+    // GL-STMTTASK-2 quantum-yield delta (541 = 539 + 2), deliberately
+    // NON-SESSION TLS:
+    //   81. tcop/postgres_seams/src/lib.rs — stmt_yield ARMED: the
+    //      CHECK_FOR_INTERRUPTS-side span flag (set only for one
+    //      statement-task execution span, RAII-restored by the executor's
+    //      span guard). Pure per-span routing advisory; carries no session
+    //      identity; never captured/restored by an envelope.
+    //   82. executor/execmain/src/lanev2/stmt_task.rs — YIELD_GOV: the
+    //      armed span's governor state (runtime handle + quantum stamp) —
+    //      scheduling bookkeeping unwound with the executor frames by the
+    //      span guard; no session identity, dies with the thread.
+    //   83. lanev2/stmt_task.rs — the yield machinery's thread_local
+    //      blocks: MY_YIELD_SLOT + YIELD_RT (one block, replacing the
+    //      clock-read governor's YIELD_GOV block in the same census slot)
+    //      and the debug-enforcement TICKS counter block
+    //      (cfg(debug_assertions) throttle scratch) — pure scheduling
+    //      bookkeeping, no session identity, die with the thread
+    //      (541 -> 542 net).
+    assert_eq!(count_tree(crates), 542, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
