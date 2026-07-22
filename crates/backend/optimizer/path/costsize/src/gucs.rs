@@ -121,6 +121,35 @@ pub fn gm_leader_min_tuple_cost() -> f64 {
     })
 }
 
+// GL-Q2829-FIX-1: the PLAIN-Gather leader-consumption floor (per-tuple),
+// the GL-GMLEADER-1 floor's raw-row-Gather sibling — STAGED, DEFAULT OFF
+// (0.0 disables; arm by setting a rate, 0.1 = C's parallel_tuple_cost
+// default, the GM floor's own value). The GM floor displaced the
+// raw-row-GM-into-serial-leader catastrophe; at fresh-stats estimate
+// regimes the election slides into the PLAIN-Gather variant of the same
+// class — ship-every-raw-row-to-the-leader into a serial leader
+// aggregation that also evaluates the grouping expression per row (the
+// exact family gather_tuple_cost's armed-pool carve already dodges for
+// `pgrust.lane_parallel_pool` sessions; this floor is the stock-defaults
+// guard). Scope: raw-row Gathers only — partial-agg-fed Gathers hand
+// tables by pointer (the §4.4 exchange pricing) and their leader
+// consumption is per-group, not per-row. Same self-scoping as the GM
+// floor: the delta vanishes at SET parallel_tuple_cost >= the floor
+// (C-parity sessions) and at explicitly zeroed transport (forced-plan
+// bench seams). `PGRUST_GATHER_LEADER_MIN_TUPLE_COST` arms.
+pub const DEFAULT_GATHER_LEADER_MIN_TUPLE_COST: f64 = 0.0; // staged OFF
+
+pub fn gather_leader_min_tuple_cost() -> f64 {
+    static V: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("PGRUST_GATHER_LEADER_MIN_TUPLE_COST")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| *v >= 0.0)
+            .unwrap_or(DEFAULT_GATHER_LEADER_MIN_TUPLE_COST)
+    })
+}
+
 pub fn pgrcolumnar_parallel_setup_cost() -> f64 {
     PGRCOLUMNAR_PARALLEL_SETUP_MULTIPLIER * parallel_setup_cost()
 }
