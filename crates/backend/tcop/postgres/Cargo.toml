@@ -27,6 +27,7 @@ snapmgr = { path = "../../utils/time/snapmgr" }
 xact = { path = "../../access/transam/xact" }
 slot = { path = "../../replication/slot" }
 pqcomm = { path = "../../libpq/pqcomm" }
+pqcomm_seams = { path = "../../libpq/pqcomm_seams" }
 pqformat = { path = "../../libpq/pqformat" }
 fastpath = { path = "../fastpath" }
 init_small = { path = "../../utils/init/init_small" }

@@ -477,9 +477,20 @@ pub fn start_xact_command() -> PgResult<()> {
 
     enable_statement_timeout()?;
 
-    // CLIENT_CONNECTION_CHECK_TIMEOUT arming reads the
-    // client_connection_check_interval GUC (boot default 0: disabled; the GUC
-    // backing var lands with the guc lane).
+    // C postgres.c: start the dead-client check when configured. One-shot;
+    // ProcessInterrupts re-arms it after every live check, so a parked
+    // parallel leader keeps polling for the disconnect that would otherwise
+    // have no cancel vector at all (GL-DISCONNECT-WEDGE-1).
+    let interval = crate::client_connection_check_interval_ms();
+    if interval > 0
+        && init_small::globals::IsUnderPostmaster()
+        && !timeout_seams::get_timeout_active::call(timeout_seams::CLIENT_CONNECTION_CHECK_TIMEOUT)
+    {
+        timeout_seams::enable_timeout_after::call(
+            timeout_seams::CLIENT_CONNECTION_CHECK_TIMEOUT,
+            interval,
+        )?;
+    }
 
     Ok(())
 }

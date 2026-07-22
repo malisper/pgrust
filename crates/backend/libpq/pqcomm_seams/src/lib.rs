@@ -44,3 +44,13 @@ seam_core::seam!(
     // Err is C's STATUS_ERROR arm.
     pub fn accept_connection(server_fd: i32) -> PgResult<types_startup::ClientSocket>
 );
+
+seam_core::seam!(
+    // pq_check_connection (pqcomm.c): true = client still connected. The
+    // ProcessInterrupts CLIENT_CONNECTION_CHECK arm dispatches through this
+    // seam because it is TRANSPORT-owned: only the real socket transport
+    // installs it (init_socket_seams — its FeBeWaitSet + WL_SOCKET_CLOSED
+    // are what the poll rides); sim-net/wasm leave it vacant and the caller
+    // treats the connection as alive.
+    pub fn pq_check_connection() -> PgResult<bool>
+);

@@ -372,6 +372,9 @@ pub fn PostmasterStateMachine() -> PgResult<()> {
             pm.startup = startup;
             pm.startup_status = StartupStatusEnum::Running;
             pm.abort_start_time = 0;
+            // Crash-cycle children all drained (PM_NO_CHILDREN): disarm the
+            // forced-exit floor before the reinitialized cluster comes up.
+            pm.lethal_time = 0;
         });
 
         ConfigurePostmasterWaitSet(true)?;

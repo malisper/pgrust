@@ -168,6 +168,16 @@ pub(crate) fn ignore_till_sync() -> bool {
 pub(crate) fn set_ignore_till_sync(v: bool) {
     IGNORE_TILL_SYNC.with(|c| c.set(v));
 }
+/// client_connection_check_interval (ms), 0 when the owning transport never
+/// installed the backing var (sim-net/wasm) — the check is then inert.
+pub(crate) fn client_connection_check_interval_ms() -> i32 {
+    if guc_tables::vars::client_connection_check_interval.installed() {
+        guc_tables::vars::client_connection_check_interval.read()
+    } else {
+        0
+    }
+}
+
 pub fn DoingCommandRead() -> bool {
     DOING_COMMAND_READ.with(Cell::get)
 }
@@ -404,9 +414,26 @@ pub fn ProcessInterrupts() -> PgResult<()> {
     }
 
     if g::CheckClientConnectionPending() {
-        // pq_check_connection() polling is pqcomm-owner work; reachable only
-        // with client_connection_check_interval > 0 (boot default 0).
-        panic!("ProcessInterrupts: CheckClientConnectionPending set but pq_check_connection not ported");
+        g::SetCheckClientConnectionPending(false);
+        // C: check for a lost connection and re-arm, if still configured,
+        // but not once back at DoingCommandRead — idle sessions already
+        // detect lost connections at the read. A vacant seam (sim-net/wasm
+        // transports) or a reset interval leaves the connection presumed
+        // alive and the timeout unarmed.
+        let interval = client_connection_check_interval_ms();
+        if !DoingCommandRead()
+            && interval > 0
+            && pqcomm_seams::pq_check_connection::is_installed()
+        {
+            if !pqcomm_seams::pq_check_connection::call()? {
+                g::SetClientConnectionLost(true);
+            } else {
+                timeout_seams::enable_timeout_after::call(
+                    timeout_seams::CLIENT_CONNECTION_CHECK_TIMEOUT,
+                    interval,
+                )?;
+            }
+        }
     }
     if g::ClientConnectionLost() {
         g::SetQueryCancelPending(false); /* lost connection trumps QueryCancel */
