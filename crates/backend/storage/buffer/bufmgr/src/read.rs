@@ -138,9 +138,14 @@ pub fn ReadBuffer_common(
         return Ok((buffer, true));
     }
     if persistence == RELPERSISTENCE_TEMP {
-        let zero_on_error =
-            mode == ReadBufferMode::ZeroOnError || crate::gucs::zero_damaged_pages();
-        let hit = complete_read_local(smgr, forknum, blkno, buffer, zero_on_error)?;
+        let mut local_flags = 0;
+        if mode == ReadBufferMode::ZeroOnError || crate::gucs::zero_damaged_pages() {
+            local_flags |= READ_BUFFERS_ZERO_ON_ERROR;
+        }
+        if crate::gucs::ignore_checksum_failure() {
+            local_flags |= READ_BUFFERS_IGNORE_CHECKSUM_FAILURES;
+        }
+        let hit = complete_read_local(smgr, forknum, blkno, buffer, local_flags)?;
         return Ok((buffer, hit));
     }
 
@@ -486,7 +491,7 @@ fn complete_read_local(
     forknum: ForkNumber,
     blkno: BlockNumber,
     buffer: Buffer,
-    zero_on_error: bool,
+    flags: u32,
 ) -> PgResult<bool> {
     if !crate::localbuf::StartLocalBufferIO(buffer, true) {
         counters::local_hit();
@@ -513,27 +518,54 @@ fn complete_read_local(
         BLCKSZ as u64,
     );
     counters::local_read();
-    if !page_is_verified(blk) {
-        if zero_on_error {
-            let _ = elog::elog(
-                WARNING,
-                format!(
-                    "invalid page in block {blkno} of relation {}; zeroing out page",
-                    relpath_desc(smgr.locator, forknum)
-                ),
-            );
-            // SAFETY: as above; zeroed page is the C zero_damaged_pages result.
-            unsafe { core::ptr::write_bytes(blk, 0, BLCKSZ) };
+
+    // C 18 routes temp reads through the shared completion path
+    // (buffer_readv_complete_one, is_temp); this direct path renders the same
+    // observable ladder: server-log LOG for the checksum detail + per-buffer
+    // line, definer-level ERROR/WARNING, checksum-failure stats.
+    let mut piv_flags = PIV_LOG_LOG;
+    if flags & READ_BUFFERS_IGNORE_CHECKSUM_FAILURES != 0 {
+        piv_flags |= PIV_IGNORE_CHECKSUM_FAILURE;
+    }
+    let mut failed_checksum = false;
+    let verified = page_is_verified(blk, blkno, piv_flags, Some(&mut failed_checksum));
+    let mut zeroed = false;
+    if !verified && flags & READ_BUFFERS_ZERO_ON_ERROR != 0 {
+        // SAFETY: as above; zeroed page is the C zero_damaged_pages result.
+        unsafe { core::ptr::write_bytes(blk, 0, BLCKSZ) };
+        zeroed = true;
+    }
+    if !verified || failed_checksum {
+        let rpath = relpath_backend_desc(smgr.locator, smgr.backend, forknum);
+        let msg = if zeroed {
+            format!("invalid page in block {blkno} of relation \"{rpath}\"; zeroing out page")
+        } else if !verified {
+            format!("invalid page in block {blkno} of relation \"{rpath}\"")
         } else {
+            format!("ignoring checksum failure in block {blkno} of relation \"{rpath}\"")
+        };
+        // The per-buffer server-log line (C emits it from the completion
+        // callback via buffer_readv_report at LOG_SERVER_ONLY).
+        let _ = ereport(types_error::LOG_SERVER_ONLY)
+            .errcode(ERRCODE_DATA_CORRUPTED)
+            .errmsg(msg.clone())
+            .finish(loc("WaitReadBuffers"));
+        if failed_checksum {
+            // C buffer_readv_complete's is_temp arm.
+            pgstat::pgstat_report_checksum_failures_in_db(smgr.locator.dbOid, 1);
+        }
+        // The definer-level surface (C ProcessReadBuffersResult).
+        if !verified && !zeroed {
             ereport(ERROR)
                 .errcode(ERRCODE_DATA_CORRUPTED)
-                .errmsg(format!(
-                    "invalid page in block {blkno} of relation {}",
-                    relpath_desc(smgr.locator, forknum)
-                ))
+                .errmsg(msg)
                 .finish(loc("WaitReadBuffers"))?;
             unreachable!("ERROR reported");
         }
+        let _ = ereport(WARNING)
+            .errcode(ERRCODE_DATA_CORRUPTED)
+            .errmsg(msg)
+            .finish(loc("WaitReadBuffers"));
     }
     crate::localbuf::TerminateLocalBufferIO(buffer, false, BM_VALID);
     Ok(false)
@@ -542,6 +574,7 @@ fn complete_read_local(
 const MAX_READ_BATCH: usize = 64;
 
 pub(crate) const READ_BUFFERS_ZERO_ON_ERROR: u32 = 1 << 0;
+pub(crate) const READ_BUFFERS_IGNORE_CHECKSUM_FAILURES: u32 = 1 << 2;
 pub(crate) const READ_BUFFERS_SYNCHRONOUSLY: u32 = 1 << 3;
 
 /// ReadBuffersOperation (bufmgr.h). Must not move in memory between
@@ -760,9 +793,19 @@ fn AsyncReadBuffers(
         ioh_flags |= types_storage::aio::PGAIO_HF_SYNCHRONOUS;
     }
 
+    // The completion callback may run under another backend's (or an IO
+    // worker's) GUC state: bake this backend's zero_damaged_pages /
+    // ignore_checksum_failure into the callback data.
     if crate::gucs::zero_damaged_pages() {
         flags |= READ_BUFFERS_ZERO_ON_ERROR;
     }
+    if crate::gucs::ignore_checksum_failure() {
+        flags |= READ_BUFFERS_IGNORE_CHECKSUM_FAILURES;
+    }
+
+    // To be allowed to report stats in the local completion callback we need
+    // to prepare to report stats now (C: even in a critical section).
+    pgstat::pgstat_prepare_report_checksum_failure(operation.smgr.locator.dbOid);
 
     let ret_ptr: *mut types_storage::aio::PgAioReturn = &mut operation.io_return;
     let ioh = match aio_core::pgaio_io_acquire_nb(Some(resowner::CurrentResourceOwner()), ret_ptr)?
@@ -894,36 +937,125 @@ pub(crate) fn ReadBuffer_batched(
     Ok((operation.buffers[0], hit))
 }
 
-/// PageIsVerified (bufpage.c) header-sanity core; the checksum arm pends
-/// ControlFile (tracked divergence: checksum-enabled clusters unverified).
-pub fn page_is_verified(page: *const u8) -> bool {
+// Flags for page_is_verified (bufpage.h PIV_*).
+pub const PIV_LOG_WARNING: u32 = 1 << 0;
+pub const PIV_LOG_LOG: u32 = 1 << 1;
+pub const PIV_IGNORE_CHECKSUM_FAILURE: u32 = 1 << 2;
+
+/// PageIsVerified (bufpage.c, C 18): header sanity + checksum verification
+/// when the cluster has data checksums. `checksum_failure_p` reports checksum
+/// failures even when the page is accepted (PIV_IGNORE_CHECKSUM_FAILURE), so
+/// callers can count them.
+pub fn page_is_verified(
+    page: *const u8,
+    blkno: BlockNumber,
+    flags: u32,
+    mut checksum_failure_p: Option<&mut bool>,
+) -> bool {
+    let mut checksum_failure = false;
+    let mut header_sane = false;
+    let mut checksum: u16 = 0;
+
+    if let Some(p) = checksum_failure_p.as_deref_mut() {
+        *p = false;
+    }
+
     // SAFETY: caller owns a pinned BLCKSZ page image; u16 fields are 2-aligned
     // (page images are MAXALIGNed).
-    unsafe {
-        let pd_flags = page.add(10).cast::<u16>().read();
-        let pd_lower = page.add(12).cast::<u16>().read();
-        let pd_upper = page.add(14).cast::<u16>().read();
-        let pd_special = page.add(16).cast::<u16>().read();
-        let pagesize_version = page.add(18).cast::<u16>().read();
-        let header_sane = pd_flags & !types_storage::bufpage::PD_VALID_FLAG_BITS == 0
-            && (pd_lower as usize) >= types_storage::bufpage::SizeOfPageHeaderData
+    let (pd_checksum, pd_flags, pd_lower, pd_upper, pd_special) = unsafe {
+        (
+            page.add(8).cast::<u16>().read(),
+            page.add(10).cast::<u16>().read(),
+            page.add(12).cast::<u16>().read(),
+            page.add(14).cast::<u16>().read(),
+            page.add(16).cast::<u16>().read(),
+        )
+    };
+
+    // Don't verify page data unless the page passes basic non-zero test
+    // (PageIsNew: pd_upper == 0).
+    if pd_upper != 0 {
+        if transam_xlog_seams::data_checksums_enabled::is_installed()
+            && transam_xlog_seams::data_checksums_enabled::call()
+        {
+            // SAFETY: as above; page images are 4-aligned.
+            checksum = unsafe { crate::write::checksum::page_checksum_raw(page, blkno) };
+            if checksum != pd_checksum {
+                checksum_failure = true;
+                if let Some(p) = checksum_failure_p.as_deref_mut() {
+                    *p = true;
+                }
+            }
+        }
+
+        // These checks don't prove the header correct, only sane enough to
+        // allow into the buffer pool (C's exact conjunct set).
+        if pd_flags & !types_storage::bufpage::PD_VALID_FLAG_BITS == 0
             && pd_lower <= pd_upper
-            && (pd_upper as usize) <= (pd_special as usize)
+            && pd_upper <= pd_special
             && (pd_special as usize) <= BLCKSZ
-            && pagesize_version
-                == (BLCKSZ as u16) | types_storage::bufpage::PG_PAGE_LAYOUT_VERSION as u16;
-        if header_sane {
+            && pd_special & 7 == 0
+        {
+            header_sane = true;
+        }
+
+        if header_sane && !checksum_failure {
             return true;
         }
-        let s = core::slice::from_raw_parts(page, BLCKSZ);
-        s.iter().all(|&b| b == 0)
     }
+
+    // Check all-zeroes case.
+    // SAFETY: caller contract, BLCKSZ readable.
+    let s = unsafe { core::slice::from_raw_parts(page, BLCKSZ) };
+    if s.iter().all(|&b| b == 0) {
+        return true;
+    }
+
+    // Throw a WARNING/LOG, as instructed by PIV_LOG_*, if the checksum fails,
+    // but only after we've checked for the all-zeroes case.
+    if checksum_failure {
+        if flags & (PIV_LOG_WARNING | PIV_LOG_LOG) != 0 {
+            let level = if flags & PIV_LOG_WARNING != 0 { WARNING } else { types_error::LOG };
+            let _ = ereport(level)
+                .errcode(ERRCODE_DATA_CORRUPTED)
+                .errmsg(format!(
+                    "page verification failed, calculated checksum {checksum} but expected {pd_checksum}"
+                ))
+                .finish(loc("PageIsVerified"));
+        }
+
+        if header_sane && flags & PIV_IGNORE_CHECKSUM_FAILURE != 0 {
+            return true;
+        }
+    }
+
+    false
 }
 
 pub fn relpath_desc(locator: RelFileLocator, forknum: ForkNumber) -> String {
+    relpath_backend_desc(locator, INVALID_PROC_NUMBER, forknum)
+}
+
+/// relpathbackend (relpath.h) for error texts; falls back to a hand-rolled
+/// default-tablespace rendering when the relpath seam isn't installed (unit
+/// suites).
+pub fn relpath_backend_desc(
+    locator: RelFileLocator,
+    backend: types_core::ProcNumber,
+    forknum: ForkNumber,
+) -> String {
+    if relpath_seams::relpathbackend::is_installed() {
+        return relpath_seams::relpathbackend::call(locator, backend, forknum);
+    }
+    let t = if backend != INVALID_PROC_NUMBER {
+        format!("t{backend}_")
+    } else {
+        String::new()
+    };
     format!(
-        "base/{}/{}{}",
+        "base/{}/{}{}{}",
         locator.dbOid,
+        t,
         locator.relNumber,
         match forknum {
             ForkNumber::MAIN_FORKNUM => String::new(),

@@ -221,8 +221,7 @@ fn log_smgrtruncate(
 }
 
 // RelationCopyStorage (storage.c): requires no dirty src data in shared
-// buffers (callers flush first). Checksum verification pends ControlFile as
-// in bufmgr's read path (tracked divergence).
+// buffers (callers flush first).
 pub fn RelationCopyStorage(
     src: RelFileLocatorBackend,
     dst: RelFileLocatorBackend,
@@ -242,10 +241,25 @@ pub fn RelationCopyStorage(
         }
         let mut buf = bulkwrite::smgr_bulk_get_buf(&bulkstate);
         smgr::smgrread(src, fork_num, blkno, buf.page_mut())?;
-        if !bufmgr::page_is_verified(buf.page_mut().as_ptr()) {
+        let mut piv_flags = bufmgr::PIV_LOG_WARNING;
+        if bufmgr::ignore_checksum_failure() {
+            piv_flags |= bufmgr::PIV_IGNORE_CHECKSUM_FAILURE;
+        }
+        let mut checksum_failure = false;
+        let verified = bufmgr::page_is_verified(
+            buf.page_mut().as_ptr(),
+            blkno,
+            piv_flags,
+            Some(&mut checksum_failure),
+        );
+        if checksum_failure {
+            pgstat::pgstat_prepare_report_checksum_failure(src.locator.dbOid);
+            pgstat::pgstat_report_checksum_failures_in_db(src.locator.dbOid, 1);
+        }
+        if !verified {
             return Err(types_error::PgError::error(format!(
                 "invalid page in block {blkno} of relation \"{}\"",
-                bufmgr::relpath_desc(src.locator, fork_num)
+                bufmgr::relpath_backend_desc(src.locator, src.backend, fork_num)
             ))
             .with_sqlstate(types_error::ERRCODE_DATA_CORRUPTED)
             .into());

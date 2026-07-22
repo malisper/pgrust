@@ -36,6 +36,11 @@ fn valid_page_into(buffer: &mut [u8], blkno: u32) {
     set_u16(buffer, 16, BLCKSZ as u16);
     set_u16(buffer, 18, (BLCKSZ as u16) | 4);
     buffer[24..28].copy_from_slice(&blkno.to_ne_bytes());
+    // The harness declares data_checksums_enabled, so every synthesized page
+    // must carry a valid checksum: reads verify it (PageIsVerified).
+    // SAFETY: BLCKSZ image, 4-aligned (page fixtures are buffer-pool blocks).
+    let sum = unsafe { crate::write::checksum::page_checksum_raw(buffer.as_ptr(), blkno) };
+    set_u16(buffer, 8, sum);
 }
 
 static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

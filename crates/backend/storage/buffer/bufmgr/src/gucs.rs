@@ -3,7 +3,9 @@ use core::cell::Cell;
 use guc_tables::GucVarAccessors;
 
 // bufmgr.c's GUC variable homes: effective_io_concurrency, io_combine_limit,
-// io_combine_limit_guc, backend_flush_after, zero_damaged_pages.
+// io_combine_limit_guc, backend_flush_after, zero_damaged_pages; plus
+// bufpage.c's ignore_checksum_failure (its reader page_is_verified lives in
+// this crate).
 const DEFAULT_EFFECTIVE_IO_CONCURRENCY: i32 = 16;
 const DEFAULT_IO_COMBINE_LIMIT: i32 = 16;
 const DEFAULT_BACKEND_FLUSH_AFTER: i32 = 0;
@@ -14,6 +16,7 @@ thread_local! {
     static IO_COMBINE_LIMIT_GUC: Cell<i32> = const { Cell::new(DEFAULT_IO_COMBINE_LIMIT) };
     static BACKEND_FLUSH_AFTER: Cell<i32> = const { Cell::new(DEFAULT_BACKEND_FLUSH_AFTER) };
     static ZERO_DAMAGED_PAGES: Cell<bool> = const { Cell::new(false) };
+    static IGNORE_CHECKSUM_FAILURE: Cell<bool> = const { Cell::new(false) };
     static TRACK_IO_TIMING: Cell<bool> = const { Cell::new(false) };
     static CHECKPOINT_FLUSH_AFTER: Cell<i32> =
         const { Cell::new(guc_tables::consts::DEFAULT_CHECKPOINT_FLUSH_AFTER) };
@@ -45,6 +48,12 @@ pub fn io_combine_limit() -> i32 {
 
 pub fn zero_damaged_pages() -> bool {
     ZERO_DAMAGED_PAGES.with(|c| c.get())
+}
+
+// C home bufpage.c (the PageIsVerified knob); the variable lives with its
+// reader.
+pub fn ignore_checksum_failure() -> bool {
+    IGNORE_CHECKSUM_FAILURE.with(|c| c.get())
 }
 
 pub fn track_io_timing() -> bool {
@@ -101,6 +110,10 @@ pub(crate) fn install_guc_backing() {
     guc_tables::vars::zero_damaged_pages.install(GucVarAccessors {
         get: zero_damaged_pages,
         set: |v| ZERO_DAMAGED_PAGES.with(|c| c.set(v)),
+    });
+    guc_tables::vars::ignore_checksum_failure.install(GucVarAccessors {
+        get: ignore_checksum_failure,
+        set: |v| IGNORE_CHECKSUM_FAILURE.with(|c| c.set(v)),
     });
     guc_tables::vars::track_io_timing.install(GucVarAccessors {
         get: track_io_timing,
