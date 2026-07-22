@@ -1868,6 +1868,164 @@ pub fn sink_strminmax_enabled() -> bool {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Post-aggregate emit filter (HAVING; stragg-coverage inc-1).
+// ---------------------------------------------------------------------------
+
+/// stragg-coverage HAVING car knob (`PGRUST_LANE_V2_AGG_HAVING`): DEFAULT
+/// OFF, armed iff exactly `1`/`on` (the still-gated tier-2 spelling — a
+/// typo'd arm fails safe to OFF). SAME spelling as the m5 probe half
+/// (`agg_having_enabled` in m5_suppress.rs): both read sites flip together
+/// (knob-coherence law — a probe that suppressed a post-aggregate-filtered
+/// shape this gate refuses would land it on the serial rerun).
+pub fn sink_having_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_LANE_V2_AGG_HAVING").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
+/// `count(*)` — the ONE aggregate whose transvalue the emit filter reads
+/// (finalfn-free byval int8 word; the transvalue IS the final value, and a
+/// count trans initializes to non-null 0, so a group can never carry a
+/// NULL count). pg_proc OID of record (vendored REL 18.3 pg_proc.dat).
+const F_COUNT_STAR_SINK: Oid = 2803;
+
+/// int8-family comparison semantics, widened to exact i64 operands. The
+/// admitted operator FUNCTIONS are the int8/int84/int48 comparison rows of
+/// the canonical fmgr table (fmgr_core canonical.rs: 467-472 int8×int8,
+/// 474-479 int8×int4, 852-857 int4×int8) — all six compare exact signed
+/// values, so one widened i64 comparison is each C core verbatim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HavingCmp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+impl HavingCmp {
+    /// `a <cmp> b == b <mirror> a` — the argument-swap identity for quals
+    /// spelled `Const <op> count(*)`.
+    fn mirror(self) -> Self {
+        match self {
+            HavingCmp::Lt => HavingCmp::Gt,
+            HavingCmp::Gt => HavingCmp::Lt,
+            HavingCmp::Le => HavingCmp::Ge,
+            HavingCmp::Ge => HavingCmp::Le,
+            HavingCmp::Eq => HavingCmp::Eq,
+            HavingCmp::Ne => HavingCmp::Ne,
+        }
+    }
+
+    fn eval(self, a: i64, b: i64) -> bool {
+        match self {
+            HavingCmp::Eq => a == b,
+            HavingCmp::Ne => a != b,
+            HavingCmp::Lt => a < b,
+            HavingCmp::Le => a <= b,
+            HavingCmp::Gt => a > b,
+            HavingCmp::Ge => a >= b,
+        }
+    }
+}
+
+/// The comparison an operator FUNCTION oid names (the int8-family rows
+/// above); `None` = outside the vocabulary, refuse.
+fn having_cmp_of(funcid: Oid) -> Option<HavingCmp> {
+    match funcid {
+        467 | 474 | 852 => Some(HavingCmp::Eq),
+        468 | 475 | 853 => Some(HavingCmp::Ne),
+        469 | 476 | 854 => Some(HavingCmp::Lt),
+        470 | 477 | 855 => Some(HavingCmp::Gt),
+        471 | 478 | 856 => Some(HavingCmp::Le),
+        472 | 479 | 857 => Some(HavingCmp::Ge),
+        _ => None,
+    }
+}
+
+/// The emit-time post-aggregate filter: exactly ONE `count(*) <cmp> Const`
+/// qual term, evaluated natively on the group's int8 transvalue at emit —
+/// groups failing it never leave the sink. C-parity: the serial path runs
+/// the HAVING qual per group after finalize and before projection, and a
+/// non-TRUE verdict drops the group; for this class the count transvalue
+/// equals the finalized value, so the filtered emit is byte-identical.
+#[derive(Clone, Copy)]
+pub struct SinkHavingFilter {
+    transno: u32,
+    cmp: HavingCmp,
+    rhs: i64,
+}
+
+/// Compile the node's qual into the ONE admitted emit filter.
+/// `Ok(None)` = no qual at all; `Err(())` = a qual outside the vocabulary
+/// (or the knob disarmed) — the caller refuses the sink exactly as the
+/// historical `node.qual.is_some()` gate did. Fail-closed gates, in order:
+/// the knob; a single implicitly-ANDed term; an OpExpr whose function is an
+/// int8-family comparison; one side a bare undecorated `count(*)` Aggref
+/// resolving to a finalfn-free byval INT8 peragg outside any avgpack slot;
+/// the other side a non-null int-family Const.
+fn having_emit_filter(node: &AggStateData<'_>) -> Result<Option<SinkHavingFilter>, ()> {
+    if node.qual.is_none() && node.plan.plan.qual.is_nil() {
+        return Ok(None);
+    }
+    if !sink_having_enabled() {
+        return Err(());
+    }
+    if node.plan.plan.qual.len() != 1 {
+        return Err(());
+    }
+    let Some(op) = node.plan.plan.qual.nth(0).as_op_expr() else { return Err(()) };
+    if op.opretset || op.args.len() != 2 {
+        return Err(());
+    }
+    let Some(base) = having_cmp_of(op.opfuncid) else { return Err(()) };
+    let (a, b) = (op.args.nth(0), op.args.nth(1));
+    let (aggside, constside, cmp) =
+        if a.as_aggref().is_some() { (a, b, base) } else { (b, a, base.mirror()) };
+    let Some(ar) = aggside.as_aggref() else { return Err(()) };
+    if ar.aggfnoid != F_COUNT_STAR_SINK
+        || !ar.args.is_nil()
+        || ar.aggfilter.is_some()
+        || !ar.aggorder.is_nil()
+        || !ar.aggdistinct.is_nil()
+        || !ar.aggdirectargs.is_nil()
+        || ar.agglevelsup != 0
+        || ar.aggno < 0
+        || ar.aggno as usize >= node.peragg.len()
+    {
+        return Err(());
+    }
+    let pa = &node.peragg[ar.aggno as usize];
+    if pa.finalfn.is_some()
+        || !pa.direct_args.is_empty()
+        || pa.aggref.aggtranstype != HAVING_INT8OID
+        || !node.trans_typ[pa.transno as usize].byval
+        // Belt: an avgpack'd slot is a {count,sum} image, not an
+        // AggPerGroup (count states never pack — avg-only machinery).
+        || avgpack_of(node.avgpack_shape_mask, pa.transno)
+    {
+        return Err(());
+    }
+    let Some(c) = constside.as_const() else { return Err(()) };
+    if c.constisnull {
+        return Err(());
+    }
+    let rhs = match c.consttype {
+        HAVING_INT8OID => c.constvalue.as_i64(),
+        HAVING_INT4OID => i64::from(c.constvalue.as_i32()),
+        HAVING_INT2OID => i64::from(c.constvalue.as_i16()),
+        _ => return Err(()),
+    };
+    Ok(Some(SinkHavingFilter { transno: pa.transno, cmp, rhs }))
+}
+
+const HAVING_INT8OID: Oid = 20;
+const HAVING_INT2OID: Oid = 21;
+const HAVING_INT4OID: Oid = 23;
+
 /// One transno's resolved combine: the kind + (byval only) a bare whitelist
 /// fn pointer (the thread-native `combine_one_par` byval discipline — the
 /// whitelist fns read only their args; no flinfo, no fcinfo.context, byval
@@ -2759,6 +2917,34 @@ pub struct SinkEmitPlan {
     /// historical image; 2+ = length-prefixed tails, canon-sink car 1).
     /// 0 = word-keyed tables.
     pub ntails: u8,
+    /// Post-aggregate emit filter (the HAVING car): rows failing it never
+    /// emit — EVERY emit driver consults [`SinkEmitPlan::row_admits`]
+    /// before projecting a row. `None` = the historical unfiltered emit.
+    pub filter: Option<SinkHavingFilter>,
+}
+
+impl SinkEmitPlan {
+    /// Whether the plan carries a post-aggregate filter (the engagement
+    /// vacates topn/freeze/adopt compositions on filtered plans — they all
+    /// reason over UNFILTERED group sets).
+    pub fn has_filter(&self) -> bool {
+        self.filter.is_some()
+    }
+
+    /// The post-aggregate filter verdict for one table row. A count
+    /// transvalue is never SQL-NULL (non-null 0 init), but a NULL fails
+    /// closed exactly as SQL HAVING drops non-TRUE verdicts.
+    #[inline]
+    pub fn row_admits(&self, t: &LaneAggTable, row: usize) -> bool {
+        let Some(f) = self.filter else { return true };
+        // SAFETY: as emit_row's Agg arm — the row's state block holds
+        // numtrans pergroups (bucket-table config = the sink's
+        // state_bytes) and f.transno < numtrans by filter compile.
+        let pg = unsafe {
+            &*t.row_states(row).cast_const().cast::<AggPerGroup>().add(f.transno as usize)
+        };
+        !pg.trans_value_is_null && f.cmp.eval(pg.trans_value.as_i64(), f.rhs)
+    }
 }
 
 /// The emit qualification (leader side, donor `build_emit_plan` extended
@@ -2770,9 +2956,17 @@ pub fn sink_build_emit_plan(
     node: &AggStateData<'_>,
     key: &SinkKeySpec,
 ) -> Option<SinkEmitPlan> {
-    if node.skip_final || node.qual.is_some() {
+    if node.skip_final {
         return None;
     }
+    // Post-aggregate filtered grouped shapes (stragg-coverage inc-1): the
+    // ONE admitted HAVING class compiles to an emit-row filter; every other
+    // qual refuses exactly as the historical `node.qual.is_some()` gate
+    // (the general finalize/project interpreter case).
+    let filter = match having_emit_filter(node) {
+        Ok(f) => f,
+        Err(()) => return None,
+    };
     for pa in node.peragg.iter() {
         if !pa.direct_args.is_empty() {
             return None;
@@ -2908,7 +3102,7 @@ pub fn sink_build_emit_plan(
         }
         _ => (None, 0),
     };
-    Some(SinkEmitPlan { width: key.width(), cols, fixed, ntails })
+    Some(SinkEmitPlan { width: key.width(), cols, fixed, ntails, filter })
 }
 
 /// One bucket's fully-projected output rows: row-major, stride `cols.len()`.
@@ -2960,15 +3154,19 @@ impl SinkEmitAcc {
     }
 
     /// Finalize+project EVERY row of `t` (insertion order — the merge's
-    /// first-seen order), appending to the accumulator.
+    /// first-seen order) that passes the plan's post-aggregate filter,
+    /// appending to the accumulator.
     pub fn emit_table(&mut self, plan: &SinkEmitPlan, t: &LaneAggTable) -> PgResult<()> {
         let n = t.nrows();
         self.values.reserve(n * plan.cols.len());
         self.nulls.reserve(n * plan.cols.len());
         for row in 0..n {
+            if !plan.row_admits(t, row) {
+                continue;
+            }
             emit_row(plan, t, row, &mut self.values, &mut self.nulls, &mut self.arena, &mut self.fixups)?;
+            self.nrows += 1;
         }
-        self.nrows += n;
         Ok(())
     }
 
@@ -2978,12 +3176,19 @@ impl SinkEmitAcc {
     /// `base + i` where `base` was `self.nrows()` before the call.
     pub fn emit_rows(&mut self, plan: &SinkEmitPlan, t: &LaneAggTable, rows: &[u32]) -> PgResult<()> {
         debug_assert!(rows.windows(2).all(|w| w[0] < w[1]), "rows sorted+unique");
+        // Winners-only emission never composes with a post-aggregate filter
+        // (the engagement vacates topn on filtered plans); the row gate
+        // below is belt-and-suspenders.
+        debug_assert!(plan.filter.is_none(), "winners emit on a filtered plan");
         self.values.reserve(rows.len() * plan.cols.len());
         self.nulls.reserve(rows.len() * plan.cols.len());
         for &row in rows {
+            if !plan.row_admits(t, row as usize) {
+                continue;
+            }
             emit_row(plan, t, row as usize, &mut self.values, &mut self.nulls, &mut self.arena, &mut self.fixups)?;
+            self.nrows += 1;
         }
-        self.nrows += rows.len();
         Ok(())
     }
 
@@ -3339,15 +3544,23 @@ pub fn sink_emit_bucket_passthrough(
     let mut nulls: Vec<bool> = Vec::with_capacity(n * natts);
     let mut arena: Vec<u8> = Vec::new();
     let mut fixups: Vec<(usize, usize)> = Vec::new();
+    let mut emitted = 0usize;
     for &row in &part.idx[lo..hi] {
+        if !plan.row_admits(t, row as usize) {
+            continue;
+        }
         emit_row(plan, t, row as usize, &mut values, &mut nulls, &mut arena, &mut fixups)?;
+        emitted += 1;
     }
     if with_null {
         // The out-of-band NULL group emits LAST in its bucket (the merge
         // arm's order: runs/remainder rows first, then the NULL absorb).
         for row in 0..t.nrows() {
             if t.row_key_int(row).is_none() {
-                emit_row(plan, t, row, &mut values, &mut nulls, &mut arena, &mut fixups)?;
+                if plan.row_admits(t, row) {
+                    emit_row(plan, t, row, &mut values, &mut nulls, &mut arena, &mut fixups)?;
+                    emitted += 1;
+                }
                 break;
             }
         }
@@ -3356,7 +3569,7 @@ pub fn sink_emit_bucket_passthrough(
     for (i, off) in fixups {
         values[i] = Datum::from_usize(arena[off..].as_ptr() as usize);
     }
-    Ok(SinkEmitBuf { values, nulls, nrows: n, arena })
+    Ok(SinkEmitBuf { values, nulls, nrows: emitted, arena })
 }
 
 /// Sanity error for engagement paths that must never see a non-single-word
@@ -5693,6 +5906,7 @@ mod tests {
             width: 4,
             fixed: None,
             ntails: 0,
+            filter: None,
             cols: vec![
                 SinkEmitCol::Key,
                 SinkEmitCol::Derived(RedDerived {
@@ -5716,6 +5930,52 @@ mod tests {
         assert!(buf.nulls[4] && buf.nulls[5]);
         assert_eq!(buf.values[6].as_i64(), 2);
         assert_eq!(buf.values[7].as_i64(), 1);
+    }
+
+    /// The HAVING emit filter (stragg-coverage inc-1): rows failing the
+    /// `count <cmp> rhs` transvalue read never emit, on the whole-table,
+    /// winners, and passthrough drivers alike; the NULL group is filtered
+    /// by the same gate (its states are ordinary).
+    #[test]
+    fn emit_filter_drops_failing_groups() {
+        let mut t = mk_table(8);
+        bump(&mut t, Some(41), 5, 9); // count 5 -> passes  > 3
+        bump(&mut t, Some(7), 2, 4); //  count 2 -> filtered
+        bump(&mut t, None, 4, 1); //     NULL group, count 4 -> passes
+        let mk_plan = |filter| SinkEmitPlan {
+            width: 4,
+            fixed: None,
+            ntails: 0,
+            filter,
+            cols: vec![
+                SinkEmitCol::Key,
+                SinkEmitCol::Agg { transno: 0 },
+                SinkEmitCol::Agg { transno: 1 },
+            ],
+        };
+        let unfiltered = sink_emit_bucket(&mk_plan(None), &t).unwrap();
+        assert_eq!(unfiltered.nrows, 3);
+        let plan = mk_plan(Some(SinkHavingFilter {
+            transno: 0,
+            cmp: HavingCmp::Gt,
+            rhs: 3,
+        }));
+        let buf = sink_emit_bucket(&plan, &t).unwrap();
+        assert_eq!(buf.nrows, 2);
+        // Row 0 = key 41 (count 5); row 1 = NULL group (count 4); the
+        // count-2 group never emitted.
+        assert_eq!(buf.values[0].as_i32(), 41);
+        assert_eq!(buf.values[1].as_i64(), 5);
+        assert!(buf.nulls[3]); // NULL group key
+        assert_eq!(buf.values[4].as_i64(), 4);
+        // The mirrored spelling (`Const < count`) evaluates identically.
+        assert_eq!(HavingCmp::Lt.mirror(), HavingCmp::Gt);
+        assert!(HavingCmp::Gt.eval(5, 3) && !HavingCmp::Gt.eval(2, 3));
+        // Operator-fn table: int8gt / int84gt / int48gt all name Gt.
+        assert!(matches!(having_cmp_of(470), Some(HavingCmp::Gt)));
+        assert!(matches!(having_cmp_of(477), Some(HavingCmp::Gt)));
+        assert!(matches!(having_cmp_of(855), Some(HavingCmp::Gt)));
+        assert!(having_cmp_of(0).is_none());
     }
 
     // A minimal MAXALIGNed int8[2] {count,sum} transarray image (4B-U,
@@ -5822,6 +6082,7 @@ mod tests {
             width: 8,
             fixed: None,
             ntails: 0,
+            filter: None,
             cols: vec![
                 SinkEmitCol::Key,
                 SinkEmitCol::AvgInt128 { transno: 0 },
@@ -5899,6 +6160,7 @@ mod tests {
             width: 8,
             fixed: None,
             ntails: 0,
+            filter: None,
             cols: vec![SinkEmitCol::Key, SinkEmitCol::VarlenaTrans { transno: 0 }],
         };
         assert!(!sink_emit_plan_all_byval(&plan), "text survivors never table-adopt");
@@ -6157,6 +6419,7 @@ mod tests {
             width: 8,
             fixed: None,
             ntails: 0,
+            filter: None,
             cols: vec![
                 SinkEmitCol::Key,
                 SinkEmitCol::Agg { transno: 0 },
@@ -6208,6 +6471,7 @@ mod tests {
             width: 8,
             fixed: None,
             ntails: 0,
+            filter: None,
             cols: vec![
                 SinkEmitCol::MultiComp { off: 0, width: 4 },
                 SinkEmitCol::MultiComp { off: 4, width: 2 },
@@ -6250,6 +6514,7 @@ mod tests {
             width: 8,
             fixed: None,
             ntails: 0,
+            filter: None,
             cols: vec![
                 SinkEmitCol::MultiComp { off: 0, width: 8 },
                 SinkEmitCol::MultiComp { off: 8, width: 4 },
@@ -6278,6 +6543,7 @@ mod tests {
         let plan = SinkEmitPlan {
             fixed: None,
             ntails: 0,
+            filter: None,
             width: 8,
             cols: vec![
                 SinkEmitCol::Key,
@@ -6325,6 +6591,7 @@ mod tests {
         let plan = SinkEmitPlan {
             fixed: None,
             ntails: 0,
+            filter: None,
             width: 8,
             cols: vec![
                 SinkEmitCol::Key,
@@ -6832,6 +7099,7 @@ mod tests {
             width: 8,
             fixed: Some(12),
             ntails: 1,
+            filter: None,
             cols: vec![
                 SinkEmitCol::MultiComp { off: 0, width: 8 },
                 SinkEmitCol::MultiText { nth: 0 },
@@ -7072,6 +7340,7 @@ mod tests {
             width: 8,
             fixed: Some(4),
             ntails: 1,
+            filter: None,
             cols: vec![SinkEmitCol::MultiText { nth: 0 }, SinkEmitCol::Agg { transno: 0 }],
         };
         let mut seen: std::collections::HashMap<Vec<u8>, i64> = std::collections::HashMap::new();
@@ -7687,6 +7956,7 @@ mod tests {
             width: 8,
             fixed: None,
             ntails: 0,
+            filter: None,
             cols: vec![
                 SinkEmitCol::Key,
                 SinkEmitCol::Agg { transno: 0 },
@@ -7723,6 +7993,7 @@ mod tests {
             width: 8,
             fixed: Some(0),
             ntails: 1,
+            filter: None,
             cols: vec![SinkEmitCol::MultiText { nth: 0 }, SinkEmitCol::Agg { transno: 0 }],
         };
         let full = sink_emit_bucket(&plan, &t).unwrap();
@@ -7753,6 +8024,7 @@ mod tests {
             width: 8,
             fixed: None,
             ntails: 0,
+            filter: None,
             cols: vec![
                 SinkEmitCol::Key,
                 SinkEmitCol::Agg { transno: 0 },
@@ -7768,6 +8040,7 @@ mod tests {
             width: 8,
             fixed: Some(0),
             ntails: 1,
+            filter: None,
             cols: vec![SinkEmitCol::MultiText { nth: 0 }, SinkEmitCol::Agg { transno: 0 }],
         };
         for (t, plan) in [(&tw, &plan_w), (&tb, &plan_b)] {
@@ -7807,6 +8080,7 @@ mod tests {
             width: 8,
             fixed: Some(0),
             ntails: 1,
+            filter: None,
             cols: vec![SinkEmitCol::MultiText { nth: 0 }, SinkEmitCol::Agg { transno: 0 }],
         };
         let corpus = bytes_corpus();
@@ -7899,6 +8173,7 @@ mod tests {
             width: 8,
             fixed: None,
             ntails: 0,
+            filter: None,
             cols: vec![
                 SinkEmitCol::Key,
                 SinkEmitCol::Agg { transno: 0 },
@@ -8017,6 +8292,7 @@ mod tests {
             width: 8,
             fixed: Some(12),
             ntails: 1,
+            filter: None,
             cols: vec![
                 SinkEmitCol::MultiComp { off: 0, width: 8 },
                 SinkEmitCol::MultiText { nth: 0 },
@@ -8179,6 +8455,7 @@ mod tests {
             width: 8,
             fixed: Some(10),
             ntails: 2,
+            filter: None,
             cols: vec![
                 SinkEmitCol::MultiComp { off: 0, width: 2 },
                 SinkEmitCol::MultiText { nth: 0 },
@@ -8413,6 +8690,7 @@ mod tests {
             width: 8,
             fixed: Some(12),
             ntails: 1,
+            filter: None,
             cols: vec![
                 SinkEmitCol::MultiComp { off: 0, width: 8 },
                 SinkEmitCol::MultiText { nth: 0 },
