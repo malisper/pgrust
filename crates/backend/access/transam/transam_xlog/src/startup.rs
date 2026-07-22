@@ -337,6 +337,9 @@ pub fn StartupXLOG() -> PgResult<()> {
         // Unlogged relations may be trashed: drop their non-init forks
         // before anything can read them (reinit.c).
         fd::reinit::ResetUnloggedRelations(fd::reinit::UNLOGGED_RELATION_CLEANUP)?;
+        // reinit rewrites forks at the file level, outside md: its size
+        // cache must forget everything it thought it knew.
+        smgr_seams::smgr_nblocks_cache_clear::call();
 
         snapmgr_seams::delete_all_exported_snapshot_files::call();
 
@@ -429,6 +432,8 @@ pub fn StartupXLOG() -> PgResult<()> {
     // (to include ones created during it), before it is marked complete.
     if xlogutils::in_recovery() {
         fd::reinit::ResetUnloggedRelations(fd::reinit::UNLOGGED_RELATION_INIT)?;
+        // File-level fork copies happened outside md: drop its size cache.
+        smgr_seams::smgr_nblocks_cache_clear::call();
     }
 
     let oldest_active_xid: TransactionId =
