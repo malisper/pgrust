@@ -654,6 +654,14 @@ pub fn init_seams() {
     // gang at PM_STOP_BACKENDS and gates PM_WAIT_BACKENDS on quiescence.
     postmaster_seams::rtgang_retire::set(rtgang::retire_for_shutdown);
     postmaster_seams::rtgang_live::set(runtime_shm_busy_threads);
+    // The pool busy guard's crash/shutdown state-machine poke (parallel
+    // cannot name pmsignal in production — the POOL_GATE fn-pointer
+    // precedent).
+    parallel::standing::install_pool_busy_poke(|| {
+        pmsignal::SendPostmasterSignal(
+            pmsignal::PMSignalReason::PMSIGNAL_ADVANCE_STATE_MACHINE,
+        )
+    });
 }
 
 /// The PM_WAIT_BACKENDS quiescence term for registry-invisible runtime
@@ -668,7 +676,7 @@ pub fn init_seams() {
 /// Same class as the mode-W shutdown fix that installed these seams:
 /// a thread population the postmaster state machine cannot see.
 fn runtime_shm_busy_threads() -> i32 {
-    rtgang::live_gang_threads() + rtpool::shm_busy()
+    rtgang::live_gang_threads() + parallel::standing::pool_shm_busy()
 }
 
 /// rtpool_start seam impl: start the pool if `PGRUST_RUNTIME` enables it;
@@ -1363,67 +1371,12 @@ pub mod rtpool {
             const { std::cell::Cell::new(PoolIdent::None) };
     }
 
-    // Pool-db threads inside a shared-memory-touching span the crash reset
-    // must wait out: deferred identity bring-up (InitProcess/BaseInit) and
-    // the exit-callback drains. Summed into the postmaster's
-    // PM_WAIT_BACKENDS quiescence gate through the rtgang_live seam (see
-    // super::runtime_shm_busy_threads). PARKED threads never charge it —
-    // they are procarray-invisible and touch nothing shared, and waiting on
-    // them would deadlock the reset (they only retire at a serve).
-    static SHM_BUSY: AtomicI32 = AtomicI32::new(0);
-
-    /// See SHM_BUSY; consumed by the rtgang_live seam sum.
-    pub(super) fn shm_busy() -> i32 {
-        // The gate-side store-buffering fence (pairs with shm_busy_guard's;
-        // the caller's POOL_FENCE bump precedes this read on the postmaster
-        // thread): guarantees this read sees every charge whose fence check
-        // could still read the PRE-bump epoch.
-        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
-        SHM_BUSY.load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    /// RAII charge on SHM_BUSY. Acquire BEFORE the span's fence check: the
-    /// postmaster bumps the fence (flush_for_crash) before its quiescence
-    /// gate ever reads the count, so either the span sees the bump (and
-    /// exits raw) or the gate sees the charge and the reset waits the span
-    /// out against live shared memory.
-    struct ShmBusyGuard {
-        fence_at_entry: usize,
-    }
-
-    fn shm_busy_guard() -> ShmBusyGuard {
-        SHM_BUSY.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        // Store-buffering fence (loom model pooldb_crash_drain_never_races_
-        // reset): the charge above and the postmaster's POOL_FENCE bump are
-        // cross-thread store/load pairs — without SC fences each side could
-        // read the other's OLD value (charge invisible to the gate AND the
-        // bump invisible to this thread's fence check = drain vs reset
-        // race). The matching fence sits before the gate's busy read.
-        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
-        ShmBusyGuard {
-            fence_at_entry: parallel::standing::pool_fence_epoch(),
-        }
-    }
-
-    impl Drop for ShmBusyGuard {
-        fn drop(&mut self) {
-            SHM_BUSY.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-            // Wake the postmaster's quiescence gate ONLY when a crash cycle
-            // or shutdown plausibly waits on this span (this charge can be
-            // the LAST thing PM_WAIT_BACKENDS waits for; the state machine
-            // has no other reason to re-run then). Fence-stable drops (every
-            // healthy bring-up/drain) stay poke-free — the gang LiveGuard's
-            // unconditional poke is per thread DEATH, this guard is not.
-            if (parallel::standing::pool_fence_epoch() != self.fence_at_entry
-                || parallel::standing::shutting_down())
-                && init_small::globals::IsUnderPostmaster()
-            {
-                pmsignal::SendPostmasterSignal(
-                    pmsignal::PMSignalReason::PMSIGNAL_ADVANCE_STATE_MACHINE,
-                );
-            }
-        }
-    }
+    // The pool's shared-memory busy term + crash-window flag live in
+    // parallel::standing (POOL_SHM_BUSY / POOL_CRASH_PENDING — the
+    // warm-connect span charges the same counter and only that crate can
+    // see it); this glue charges it around identity bring-up and the exit
+    // drains, and super::runtime_shm_busy_threads feeds the sum to the
+    // postmaster's PM_WAIT_BACKENDS gate through the rtgang_live seam.
 
     /// The per-serve gate installed into parallel::standing: verify — or
     /// COMPLETE — this thread's leased identity, and check the crash fence.
@@ -1455,7 +1408,14 @@ pub mod rtpool {
         // Busy charge spans the whole claim: a ticketless completing thread
         // is not awaited by any leader's close_and_await, so the leader's
         // exit (and a crash reset behind it) can race the claim without it.
-        let _busy = shm_busy_guard();
+        let _busy = parallel::standing::pool_shm_busy_guard();
+        // Crash-window re-check under the charge (retire_all/clear-at-
+        // engage pattern): the window may have opened after the engaging
+        // leader published — never MINT identity against memory the reset
+        // is about to reclaim; a later, post-recovery serve completes it.
+        if parallel::standing::pool_crash_pending() {
+            return false;
+        }
         let epoch0 = parallel::standing::pool_fence_epoch();
         if let Err(e) = lmgr_proc::InitProcess(types_core::init::BackendType::BgWorker) {
             let _ = elog::elog(
@@ -1566,11 +1526,11 @@ pub mod rtpool {
                     // Crash fence: NO shared-memory interaction — the
                     // PGPROC was reset wholesale with shared memory.
                 } else {
-                    // Busy charge BEFORE the fence check (see ShmBusyGuard):
-                    // either this drain sees a fence bump and exits raw, or
-                    // the postmaster's quiescence gate sees the charge and
-                    // the crash reset waits the drain out.
-                    let _busy = shm_busy_guard();
+                    // Busy charge BEFORE the fence check (PoolShmBusyGuard
+                    // doc): either this drain sees a fence bump and exits
+                    // raw, or the postmaster's quiescence gate sees the
+                    // charge and the crash reset waits the drain out.
+                    let _busy = parallel::standing::pool_shm_busy_guard();
                     let stale = matches!(
                         POOL_IDENT.with(std::cell::Cell::get),
                         PoolIdent::Ready(epoch)
