@@ -1378,6 +1378,11 @@ pub(crate) fn execute_plan<'m, 'mcx>(
     // covers only the leader of a parallel plan; a parallel WORKER's fragment
     // clears parallelModeNeeded, so the funnel's own in-parallel-machinery
     // gate does the worker-side refusal.
+    //
+    // GL-STMTTASK-2: the inline-execute seat (change 3) — held across the
+    // serial loop below when the statement-task hook answers Inline;
+    // released at frame exit on every path (RAII).
+    let mut _stmt_inline_seat: Option<runtime::InlineSeat> = None;
     if operation == CmdType::CMD_SELECT && send_tuples && !use_parallel_mode {
         if crate::lanev2::try_passthrough_funnel(estate, planstate, number_tuples, dest)? {
             return Ok(());
@@ -1387,13 +1392,24 @@ pub(crate) fn execute_plan<'m, 'mcx>(
         // statement's top-level run executes on a pool worker and streams
         // its rows back through the row funnel; this thread drains to
         // `dest` (startup/shutdown stay the caller's). Fail-closed: any
-        // ineligibility (or no serving channel) returns false and the
+        // ineligibility (or no serving channel) returns Incumbent and the
         // serial per-tuple loop below runs byte-identically. Placed AFTER
         // the passthrough funnel deliberately: shapes inside the funnel's
         // proven band keep the stronger engine. Knob-OFF cost here is one
         // thread-local read (the armed flag OFF can never set).
-        if crate::lanev2::try_stmt_task(estate, planstate, number_tuples, dest)? {
-            return Ok(());
+        //
+        // GL-STMTTASK-2 change 3 (inline-execute): the Inline verdict
+        // hands back a borrowed pool seat — THIS thread runs the ordinary
+        // serial loop below (literally the incumbent code, so parity and
+        // cancel identity are structural), holding the seat for the span
+        // of the run (governed accounting: one fewer pool step can run
+        // while the session thread executes).
+        match crate::lanev2::try_stmt_task(estate, planstate, number_tuples, dest)? {
+            crate::lanev2::StmtTaskVerdict::Handled => return Ok(()),
+            crate::lanev2::StmtTaskVerdict::Inline(seat) => {
+                _stmt_inline_seat = Some(seat);
+            }
+            crate::lanev2::StmtTaskVerdict::Incumbent => {}
         }
     }
     let mut cursor_capture_sidecar: Option<::types_portal::TuplestoreHandle> = None;

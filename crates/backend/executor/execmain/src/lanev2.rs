@@ -62,8 +62,8 @@ mod write_blockrun; // W2a inc-2 worker-direct block-run writes
 mod write_funnel; // W0 funnel-into-writer admission (parallel-writes design §4)
 pub(crate) use runtime_passthrough::try_passthrough_funnel;
 pub use runtime_passthrough::funnel_engagements;
-pub(crate) use stmt_task::try_stmt_task;
-pub use stmt_task::stmt_task_engagements;
+pub(crate) use stmt_task::{try_stmt_task, StmtTaskVerdict};
+pub use stmt_task::{stmt_task_engagements, stmt_task_inline_count};
 pub use write_funnel::ctas_funnel_engagements;
 mod rowmode;
 mod rowmode_tail;
