@@ -175,7 +175,7 @@ pub fn class_model(class: RuntimeClass) -> ClassModel {
         RuntimeClass::CbHashJoinGroupedAgg => ClassModel { c_engage: 5695.0, w_row: 1.3218, l_setup: 64597.1, l_cap: 16.00, n_min_fit: 1000000.0, ser_setup: 0.0, ser_row: 0.0, wout_rt: 0.0, wout_leg: 0.0 },
         RuntimeClass::CbHashJoinPlainAgg => ClassModel { c_engage: 35092.4, w_row: 0.9898, l_setup: 48931.8, l_cap: 11.79, n_min_fit: 1000000.0, ser_setup: 0.0, ser_row: 0.9928, wout_rt: 0.0254, wout_leg: 0.0 },
         RuntimeClass::CbPlainAggFold => ClassModel { c_engage: 0.0, w_row: 1.2712, l_setup: 18206.0, l_cap: 12.66, n_min_fit: 1000000.0, ser_setup: 29327.6, ser_row: 0.0120, wout_rt: 0.0, wout_leg: 0.0 },
-        RuntimeClass::CbTopnBoundedIntKeys => ClassModel { c_engage: 3523905.4, w_row: 2.6581, l_setup: 322122.7, l_cap: 16.00, n_min_fit: 1000000.0, ser_setup: 592578.0, ser_row: 0.4290, wout_rt: 0.0, wout_leg: 0.0 },
+        RuntimeClass::CbTopnBoundedIntKeys => ClassModel { c_engage: 305844.2, w_row: 0.8711, l_setup: 322122.7, l_cap: 16.00, n_min_fit: 1000000.0, ser_setup: 592578.0, ser_row: 0.4290, wout_rt: 0.0, wout_leg: 0.0 },
         RuntimeClass::HeapCmpFoldPrefix => ClassModel { c_engage: 199319.8, w_row: 1.1983, l_setup: 164041.4, l_cap: 7.32, n_min_fit: 100000.0, ser_setup: 228223.5, ser_row: 1.3933, wout_rt: 0.0, wout_leg: 0.0 },
         RuntimeClass::HeapPlainCountStar => ClassModel { c_engage: 257515.3, w_row: 0.3037, l_setup: 552913.9, l_cap: 6.88, n_min_fit: 2500000.0, ser_setup: 454725.6, ser_row: 0.4871, wout_rt: 0.0, wout_leg: 0.0 },
     }
@@ -186,6 +186,26 @@ pub fn class_model(class: RuntimeClass) -> ClassModel {
 /// (the n_min_fit posture applied to the serial curve). The R1 small-N
 /// wave (30k..600k cells) extends this floor downward when it lands.
 pub const N_MIN_SERIAL: f64 = 100_000.0;
+
+/// GL-TOPNHEAP-1: the bounded top-N car's routed-admission k band (the
+/// LIMIT bound axis the (N, dop) vocabulary never carried — the fit
+/// vehicle's K_BAND block, scripts/runtime-cost-fit.py). The class's curve
+/// is fit on the k=1000 SKIP-DEAD plane, which upper-bounds the car for
+/// every smaller in-band k (zone skips only help), so the verdict is valid
+/// for k in [K_MIN, K_MAX] and the router keeps Gather outside it: below
+/// K_MIN the serial zone walk owns the shape (five-posture record:
+/// car/serial 1.00-1.16 at k=10; legacy elects serial under the guard-off
+/// posture); above K_MAX is unmeasured (fail toward the incumbent).
+/// Provenance: SORTECON5 grid @ 8c11541a17, k in {10, 100, 1000}; the
+/// k=100 cells beat serial 1.4-3.1x everywhere measured.
+pub const TOPN_CAR_K_MIN: f64 = 100.0;
+pub const TOPN_CAR_K_MAX: f64 = 1000.0;
+
+/// Is the plan's LIMIT bound inside the car's routed-admission band?
+/// (`k <= 0` = unknown/non-const — out of band, keep Gather.)
+pub fn topn_car_k_band(k: f64) -> bool {
+    (TOPN_CAR_K_MIN..=TOPN_CAR_K_MAX).contains(&k)
+}
 
 /// Classes whose serial fit FAILED the quality bar (rms > 40% on the
 /// witnessed grid — a linear-in-N serial curve cannot follow the class's
@@ -395,8 +415,18 @@ pub enum CostRouteMode {
 /// wiring un-curves the class when either knob is killed, so the decide
 /// entry is inert in any kill posture). Kept as a named constant so the
 /// default and the letters stay reviewably tied.
-const DEFAULT_DECIDE_CLASSES: [&str; 4] =
-    ["CbPlainAggFold", "CbGroupedAggTextKey", "CbHashJoinPlainAgg", "CbHashJoinGroupedAgg"];
+/// GL-TOPNHEAP-1 (2026-07-21): CbTopnBoundedIntKeys joins on the car's
+/// five-posture record — the planner wiring gates its decide entry on the
+/// PGRUST_RUNTIME_TOPN_HEAP spelling AND the TOPN_CAR_K_* band, so the
+/// entry is inert when the car is killed or the shape is out of band
+/// (keep Gather = the GL-COST-TOPN-1 guard-off posture, byte-exactly).
+const DEFAULT_DECIDE_CLASSES: [&str; 5] = [
+    "CbPlainAggFold",
+    "CbGroupedAggTextKey",
+    "CbHashJoinPlainAgg",
+    "CbHashJoinGroupedAgg",
+    "CbTopnBoundedIntKeys",
+];
 
 pub fn cost_route_mode() -> &'static CostRouteMode {
     static MODE: std::sync::OnceLock<CostRouteMode> = std::sync::OnceLock::new();
@@ -486,34 +516,35 @@ mod tests {
         (RuntimeClass::CbDistinctIntKeys, 5e6, 8, 1.056),
         (RuntimeClass::CbDistinctIntKeys, 5e6, 16, 0.805),
         (RuntimeClass::CbDistinctIntKeys, 2.5e6, 16, 0.769),
-        // L6 refit (GL-SORTECON-3 follow-through): the POST-COLSTAGE sort
-        // arm vs a forced GATHER MERGE leg — four-posture vehicle
-        // scripts/sortecon-topn-ladder.sh @ 27db94812, fleet fast-profile,
-        // k=1000 axis (the GM-viable regime). The k=10 axis is NOT fit:
-        // there the arm beats GM at scale (0.20-0.87) but the SERIAL zone
-        // walk beats both engines (rt/serial 1.33-1.75) — the L4
-        // serial-term gap a 2-engine ratio cannot price. 250k cells
-        // excluded (arm granule-floor refusals; coverage, not economics).
-        (RuntimeClass::CbTopnBoundedIntKeys, 1e6, 1, 5.273),
-        (RuntimeClass::CbTopnBoundedIntKeys, 1e6, 2, 5.595),
-        (RuntimeClass::CbTopnBoundedIntKeys, 1e6, 4, 6.800),
-        (RuntimeClass::CbTopnBoundedIntKeys, 1e6, 8, 7.581),
-        (RuntimeClass::CbTopnBoundedIntKeys, 1e6, 16, 9.774),
-        (RuntimeClass::CbTopnBoundedIntKeys, 2.5e6, 1, 4.243),
-        (RuntimeClass::CbTopnBoundedIntKeys, 2.5e6, 2, 4.259),
-        (RuntimeClass::CbTopnBoundedIntKeys, 2.5e6, 4, 5.068),
-        (RuntimeClass::CbTopnBoundedIntKeys, 2.5e6, 8, 6.583),
-        (RuntimeClass::CbTopnBoundedIntKeys, 2.5e6, 16, 9.000),
-        (RuntimeClass::CbTopnBoundedIntKeys, 5e6, 1, 3.591),
-        (RuntimeClass::CbTopnBoundedIntKeys, 5e6, 2, 3.415),
-        (RuntimeClass::CbTopnBoundedIntKeys, 5e6, 4, 3.821),
-        (RuntimeClass::CbTopnBoundedIntKeys, 5e6, 8, 5.250),
-        (RuntimeClass::CbTopnBoundedIntKeys, 5e6, 16, 8.225),
-        (RuntimeClass::CbTopnBoundedIntKeys, 1e7, 1, 2.974),
-        (RuntimeClass::CbTopnBoundedIntKeys, 1e7, 2, 2.893),
-        (RuntimeClass::CbTopnBoundedIntKeys, 1e7, 4, 3.075),
-        (RuntimeClass::CbTopnBoundedIntKeys, 1e7, 8, 4.257),
-        (RuntimeClass::CbTopnBoundedIntKeys, 1e7, 16, 6.509),
+        // GL-TOPNHEAP-1 re-refit (supersedes the L6/GL-SORTECON-3 cells):
+        // under the flipped PGRUST_RUNTIME_TOPN_HEAP the routed arm is the
+        // direct morsel-native CAR — five-posture vehicle
+        // scripts/sortecon-topn-ladder.sh (SORTECON5 heap legs) @
+        // 8c11541a17, fleet fast-profile jobs -214f/-6a7c/-7ea6/-3383
+        // (dist confirms -17ce/-7912; dup band -743c/-0282). Ratios are
+        // car / forced-Gather-Merge on the k=1000 SKIP-DEAD plane (gcut
+        // zone-skips witnessed 0 at every cell), which upper-bounds the
+        // car for smaller in-band k — the k axis is the TOPN_CAR_K_*
+        // routed-admission band, not a curve term. k=10 is OUT OF BAND
+        // (the serial zone walk owns it; L4). Legacy params FROZEN at the
+        // L6 values (the GM legs are the same posture; the ser_* rows
+        // were fit against them).
+        (RuntimeClass::CbTopnBoundedIntKeys, 1e6, 2, 0.889),
+        (RuntimeClass::CbTopnBoundedIntKeys, 1e6, 4, 0.935),
+        (RuntimeClass::CbTopnBoundedIntKeys, 1e6, 8, 0.871),
+        (RuntimeClass::CbTopnBoundedIntKeys, 1e6, 16, 0.903),
+        (RuntimeClass::CbTopnBoundedIntKeys, 2.5e6, 2, 0.893),
+        (RuntimeClass::CbTopnBoundedIntKeys, 2.5e6, 4, 0.884),
+        (RuntimeClass::CbTopnBoundedIntKeys, 2.5e6, 8, 0.971),
+        (RuntimeClass::CbTopnBoundedIntKeys, 2.5e6, 16, 0.939),
+        (RuntimeClass::CbTopnBoundedIntKeys, 5e6, 2, 0.879),
+        (RuntimeClass::CbTopnBoundedIntKeys, 5e6, 4, 0.879),
+        (RuntimeClass::CbTopnBoundedIntKeys, 5e6, 8, 0.917),
+        (RuntimeClass::CbTopnBoundedIntKeys, 5e6, 16, 0.947),
+        (RuntimeClass::CbTopnBoundedIntKeys, 1e7, 2, 0.854),
+        (RuntimeClass::CbTopnBoundedIntKeys, 1e7, 4, 0.857),
+        (RuntimeClass::CbTopnBoundedIntKeys, 1e7, 8, 0.884),
+        (RuntimeClass::CbTopnBoundedIntKeys, 1e7, 16, 0.922),
         // GL-MBSEAT-1 seated grid (jobs pgrust-fast-tests-39d74f1439-*,
         // @ night/mbseat 39d74f143; every leg dop-pinned CLEAN; the arm
         // of record is MBSHARED+MBSEAT — see the class's enum doc).
@@ -643,11 +674,30 @@ mod tests {
                 (RuntimeClass::CbPlainAggFold, 1_000_000, 4),
                 (RuntimeClass::CbGroupedAggTextKey, 1_000_000, 4),
                 (RuntimeClass::CbGroupedAggTextKey, 2_500_000, 4),
-                // The L6 refit's twelve topn disagreement cells (min_dop=4
-                // rectangle vs the GM-legged refit curve) were RETIRED by
-                // the GL-COST-TOPN-1 guard-off in this same stack: the
-                // rectangle now never suppresses, matching the curve's
-                // keep-Gather verdict at every witnessed cell.
+                // GL-TOPNHEAP-1: the CAR's witnessed win cells (the
+                // re-refit curve suppresses at every out-of-parity k=1000
+                // cell; the 2.5M@8 cell at 0.971 is band-exempt) vs the
+                // GL-COST-TOPN-1 guard-off rectangle (never suppresses).
+                // RESOLVED BY THE DECIDE LIST: the class decides by curve
+                // at default, gated in the planner on the
+                // PGRUST_RUNTIME_TOPN_HEAP spelling + TOPN_CAR_K_* band —
+                // killed or out-of-band, the rectangle's keep-Gather
+                // stands and these cells are inert.
+                (RuntimeClass::CbTopnBoundedIntKeys, 1_000_000, 2),
+                (RuntimeClass::CbTopnBoundedIntKeys, 1_000_000, 4),
+                (RuntimeClass::CbTopnBoundedIntKeys, 1_000_000, 8),
+                (RuntimeClass::CbTopnBoundedIntKeys, 1_000_000, 16),
+                (RuntimeClass::CbTopnBoundedIntKeys, 2_500_000, 2),
+                (RuntimeClass::CbTopnBoundedIntKeys, 2_500_000, 4),
+                (RuntimeClass::CbTopnBoundedIntKeys, 2_500_000, 16),
+                (RuntimeClass::CbTopnBoundedIntKeys, 5_000_000, 2),
+                (RuntimeClass::CbTopnBoundedIntKeys, 5_000_000, 4),
+                (RuntimeClass::CbTopnBoundedIntKeys, 5_000_000, 8),
+                (RuntimeClass::CbTopnBoundedIntKeys, 5_000_000, 16),
+                (RuntimeClass::CbTopnBoundedIntKeys, 10_000_000, 2),
+                (RuntimeClass::CbTopnBoundedIntKeys, 10_000_000, 4),
+                (RuntimeClass::CbTopnBoundedIntKeys, 10_000_000, 8),
+                (RuntimeClass::CbTopnBoundedIntKeys, 10_000_000, 16),
                 // GL-MBSEAT-1: the lift's clear-win cells (outside the
                 // ±5% parity band; the 2.5M@16 win at 0.972 is band-exempt)
                 // — the rider's shipped floor is max_rows=0 (never
@@ -707,15 +757,18 @@ mod tests {
                 );
             }
         }
-        // topn: the L6 REFIT curve never suppresses anywhere in its
-        // measured range (min predicted rt/GM 2.92 at 10M@dop1) — the
-        // post-COLSTAGE arm loses to the forced Gather Merge posture at
-        // every witnessed k=1000 cell, so keep-Gather is the WITNESSED
-        // direction, and since the GL-COST-TOPN-1 guard-off the shipped
-        // rectangle agrees at every cell.
+        // topn (GL-TOPNHEAP-1): the CAR's re-refit curve SUPPRESSES at
+        // every witnessed k=1000 cell (measured car/GM 0.854-0.971, all
+        // 16 cells; predicted 0.876-0.937) — suppression IS the witnessed
+        // direction under the flipped arm. The k band and the kill are the
+        // planner's gates (out-of-band/killed = the guard-off keep-Gather,
+        // asserted by the suppression e2e's topn legs).
         for &(class, rows, dop, _) in CELLS {
             if class == RuntimeClass::CbTopnBoundedIntKeys {
-                assert!(!cost_route_verdict(class, rows, dop).suppress);
+                assert!(
+                    cost_route_verdict(class, rows, dop).suppress,
+                    "car curve must suppress at witnessed cell rows={rows} dop={dop}"
+                );
             }
         }
     }
