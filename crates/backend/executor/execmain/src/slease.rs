@@ -516,6 +516,17 @@ impl Drop for SerialLeaseYield {
     }
 }
 
+/// GL-STMTTASK-2 composition bridge (t44): true ⇔ THIS thread's lease state
+/// machine currently HOLDS a permit (S_HELD). The stmt-task inline-execute
+/// path consults this so a lease-admitted session never borrows a SECOND
+/// pool seat. Floor-pending / donated / yielded spans read false — during a
+/// donation or yield the permit is exactly NOT held, and a sub-floor run is
+/// deliberately un-accounted under the v2 floor economics (the v1 TLS this
+/// replaces answered the same question for the always-held v1 lease).
+pub(crate) fn serial_lease_currently_held() -> bool {
+    STATE.get() == S_HELD
+}
+
 // ---------------------------------------------------------------------------
 // Donation hooks — called by the armed wait-report seam wrappers
 // (seams_init) on EVERY thread that reports waits; non-session threads and

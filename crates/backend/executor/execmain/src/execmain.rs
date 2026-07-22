@@ -444,19 +444,17 @@ pub(crate) fn executor_start_seam(h: QueryDescHandle, eflags: i32) -> PgResult<(
 // ---------------------------------------------------------------------------
 pub(crate) use crate::slease::{serial_lease_yield_for_engagement, SerialLease};
 
-/// GL-STMTTASK-2 change 3 × GL-SLEASE-1: true ⇔ THIS top-level run already
-/// holds a serial-lease permit — the session is already seat-accounted, so
-/// the inline-execute path must not borrow a SECOND seat (double-count; a
-/// saturated pool would refuse inline for exactly the sessions the lease
-/// already admitted). The inline verdict then carries no extra seat: the
-/// lease IS the governed accounting for the span.
-pub(crate) fn serial_lease_currently_held() -> bool {
-    SERIAL_LEASE_HELD.with(|c| {
-        let v = c.get();
-        c.set(v);
-        v.is_some()
-    })
-}
+/// GL-STMTTASK-2 change 3 × GL-SLEASE-2 (t44 composition bridge): true ⇔
+/// THIS top-level run currently HOLDS a serial-lease permit — the session
+/// is already seat-accounted, so the inline-execute path must not borrow a
+/// SECOND seat (double-count; a saturated pool would refuse inline for
+/// exactly the sessions the lease already admitted). Under the v2 floor
+/// semantics a sub-floor run is deliberately permit-less (S_PENDING) and
+/// returns false — the inline borrow IS its seat accounting until the
+/// floor crosses. Implemented on the v2 state authority in crate::slease
+/// (stmt-task-2 was written against the v1 execmain TLS the v2 module
+/// replaced).
+pub(crate) use crate::slease::serial_lease_currently_held;
 
 pub(crate) fn executor_run_seam(
     h: QueryDescHandle,
