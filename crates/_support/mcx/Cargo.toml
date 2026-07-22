@@ -9,6 +9,12 @@ name = "mcx"
 path = "src/lib.rs"
 
 [features]
+# std: per-thread context pools (acct blocks / child vecs / aset keepers)
+# instead of the global spin-locked ones — removes the shared-line CAS at
+# context create/destroy (global pool mutex contention at high backend
+# counts). Enabled by the server graph (init_small); no_std consumers keep
+# the global pools. Kill switch at runtime: PGRUST_MCX_POOL_STRIPE=0.
+std = []
 # aset-guard: back each chunk with an mmap'd region abutting a PROT_NONE guard
 # page so overruns fault at the offending write. Debugging only.
 aset-guard = ["dep:libc"]

@@ -11,7 +11,9 @@ path = "src/lib.rs"
 [dependencies]
 types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
-mcx = { path = "../../../../_support/mcx" }
+# std: per-thread context pools for the whole server graph (init_small is the
+# bottom of the backend dep graph — every backend build inherits the feature).
+mcx = { path = "../../../../_support/mcx", features = ["std"] }
 guc_tables = { path = "../../misc/guc_tables" }
 init_small_seams = { path = "../init_small_seams" }
 miscinit_seams = { path = "../miscinit_seams" }
