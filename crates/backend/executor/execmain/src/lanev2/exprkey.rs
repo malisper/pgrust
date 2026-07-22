@@ -444,6 +444,17 @@ pub struct ExprKeyState {
     /// Per-epoch code→pergroup map (dictgroup pattern).
     dg_epoch: Option<u64>,
     dg_slots: Vec<Option<core::ptr::NonNull<::execexpr::AggPerGroup>>>,
+    /// M2 sink str MIN/MAX dict-code memo (GL-DICTDRAIN-1): the serial
+    /// feed's tie-copy collapse, PER-WORKER-BUILD persistent — without it
+    /// every tied row of a dict window datumCopies the transvalue into the
+    /// bump aggcontext (text's last-tied-wins law), which measured as a
+    /// runaway context (~224MiB at a 10M/1720-group cell) tripping the
+    /// residual budget refusal. Lives inside the state (not the adapter)
+    /// so it survives batches; `take_sink_mm`/`put_sink_mm` move it around
+    /// the drain call; `invalidate_group_caches` bumps its generation on
+    /// every flush (pergroup-pointer keyed — the 830320fed law).
+    sink_mm: MmState,
+    sink_mm_armed: bool,
 }
 
 /// `LaneCols` remap for projected-scan folds: plan/fold columns are tlist
@@ -734,6 +745,12 @@ pub(super) fn decide_exprkey<'mcx>(
         kind,
         refused: false,
         sink_build: false,
+        sink_mm: MmState {
+            cols: Vec::new(),
+            codes: Vec::new(),
+            scratch: ::lanefold::StrMmScratch::default(),
+        },
+        sink_mm_armed: false,
         rows: Vec::new(),
         keys: Vec::new(),
         knull: Vec::new(),
@@ -940,6 +957,12 @@ fn decide_exprkey_mk<'mcx>(
         })),
         refused: false,
         sink_build: false,
+        sink_mm: MmState {
+            cols: Vec::new(),
+            codes: Vec::new(),
+            scratch: ::lanefold::StrMmScratch::default(),
+        },
+        sink_mm_armed: false,
         rows: Vec::new(),
         keys: Vec::new(),
         knull: Vec::new(),
@@ -1167,6 +1190,12 @@ fn decide_reduced<'mcx>(
         },
         refused: false,
         sink_build: false,
+        sink_mm: MmState {
+            cols: Vec::new(),
+            codes: Vec::new(),
+            scratch: ::lanefold::StrMmScratch::default(),
+        },
+        sink_mm_armed: false,
         rows: Vec::new(),
         keys: Vec::new(),
         knull: Vec::new(),
@@ -1493,6 +1522,12 @@ fn decide_exprkey_mk_case<'mcx>(
         })),
         refused: false,
         sink_build: false,
+        sink_mm: MmState {
+            cols: Vec::new(),
+            codes: Vec::new(),
+            scratch: ::lanefold::StrMmScratch::default(),
+        },
+        sink_mm_armed: false,
         rows: Vec::new(),
         keys: Vec::new(),
         knull: Vec::new(),
@@ -2214,13 +2249,15 @@ struct MmState {
 #[allow(clippy::too_many_arguments)]
 /// M2 sink drain adapter (runtime_agg.rs): one staged page batch through
 /// the expr-key feed under SINK constraints — compact table REQUIRED, no
-/// dict/code-histogram state, empty str-mm memo; `mk_shape` = the armed
-/// packed shape for the Multi kind (ts-extract class), `None` otherwise.
-/// `Ok(false)` = the batch routed anywhere the compact table cannot host
-/// (sticky range-guard refusal, a numeric pack demote's compact disarm):
-/// the sink cannot export the C tuplehash, so the caller REFUSES (RG abort
-/// → serial whole-attempt rerun — a data-borne error then surfaces from the
-/// serial replay with C's exact error identity).
+/// dict/code-histogram state; the str-mm memo is the STATE's own
+/// (`take_sink_mm` — build-persistent tie-copy collapse; empty for every
+/// kind but Dict); `mk_shape` = the armed packed shape for the Multi kind
+/// (ts-extract class), `None` otherwise. `Ok(false)` = the batch routed
+/// anywhere the compact table cannot host (sticky range-guard refusal, a
+/// numeric pack demote's compact disarm): the sink cannot export the C
+/// tuplehash, so the caller REFUSES (RG abort → serial whole-attempt rerun
+/// — a data-borne error then surfaces from the serial replay with C's
+/// exact error identity).
 pub(super) fn exprkey_sink_batch<'mcx>(
     agg: &mut ::nodeagg::AggStateData<'mcx>,
     ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
@@ -2232,11 +2269,7 @@ pub(super) fn exprkey_sink_batch<'mcx>(
     n: u32,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
-    let mut mm = MmState {
-        cols: Vec::new(),
-        codes: Vec::new(),
-        scratch: ::lanefold::StrMmScratch::default(),
-    };
+    let mut mm = xk.take_sink_mm(agg);
     let mut ch: Option<CodeHistState> = None;
     debug_assert!(xk.sink_build, "the sink drain adapter requires the armed sink decide");
     // GL-DICTDRAIN-1: the Dict kind drains through the CODED arm — the
@@ -2246,10 +2279,12 @@ pub(super) fn exprkey_sink_batch<'mcx>(
     // vocabulary) off this kind; every other kind keeps its flags verbatim.
     let dict = matches!(xk.kind, ExprKeyKind::Dict { .. });
     let mut coded = dict;
-    exprkey_batch(
+    let drove = exprkey_batch(
         agg, ss, xk, stage_slot, !dict, &mut coded, mk_shape, idxs, groups, &mut mm, &mut ch, n,
         estate,
-    )?;
+    );
+    xk.put_sink_mm(mm);
+    drove?;
     Ok(!xk.refused && ::nodeagg::agg_hash_compact_armed(agg))
 }
 
@@ -2334,15 +2369,52 @@ impl ExprKeyState {
         self.sink_build = true;
     }
 
-    /// Drop the per-epoch code→pergroup cache (dictgroup pattern). The M2
-    /// sink drive calls this after EVERY flush — the flush RESET the
-    /// compact table, so every cached pointer is a dangling table row (the
+    /// Drop the per-epoch code→pergroup cache (dictgroup pattern) AND the
+    /// sink str-mm memo generation. The M2 sink drive calls this after
+    /// EVERY flush — the flush RESET the compact table, so every cached
+    /// pointer (dg slot or mm memo key) is a dangling table row (the
     /// 830320fed law; the intern-id caches ride the separate
     /// `invalidate_mk_intern_cache` channel, which only intern-reset
-    /// flushes raise). No-op for kinds that never fill the cache.
+    /// flushes raise). No-op for kinds that never fill the caches.
     pub(super) fn invalidate_group_caches(&mut self) {
         self.dg_epoch = None;
         self.dg_slots.clear();
+        self.sink_mm.scratch.invalidate();
+    }
+
+    /// Move the sink str-mm memo out for one drain call (borrow split —
+    /// `exprkey_batch` takes `&mut self` AND `&mut MmState`). First take
+    /// arms the cols for the Dict kind (the serial feed's `mm_str_cols`
+    /// over the plan's StrMin/StrMax lanes through the base-column map);
+    /// every other kind keeps an empty memo (their sink plans carry no str
+    /// transitions — the vguard belts).
+    pub(super) fn take_sink_mm(&mut self, agg: &::nodeagg::AggStateData<'_>) -> MmState {
+        if !self.sink_mm_armed {
+            self.sink_mm_armed = true;
+            if matches!(self.kind, ExprKeyKind::Dict { .. }) {
+                if let Some(plan) = ::nodeagg::agg_lanefold_plan(agg) {
+                    let map = &self.map;
+                    self.sink_mm.cols =
+                        mm_str_cols(plan, |c| map.get(c as usize).copied().flatten());
+                    if !self.sink_mm.cols.is_empty() {
+                        trace_feed("fold str min/max dict-code memo armed (dict sink)");
+                    }
+                }
+            }
+        }
+        core::mem::replace(
+            &mut self.sink_mm,
+            MmState {
+                cols: Vec::new(),
+                codes: Vec::new(),
+                scratch: ::lanefold::StrMmScratch::default(),
+            },
+        )
+    }
+
+    /// Return the memo after the drain call (see [`Self::take_sink_mm`]).
+    pub(super) fn put_sink_mm(&mut self, mm: MmState) {
+        self.sink_mm = mm;
     }
 
     /// Sticky per-build refusal flag (arith trap / range guard).

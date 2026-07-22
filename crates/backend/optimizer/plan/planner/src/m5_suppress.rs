@@ -7223,10 +7223,12 @@ fn regexp_dict_key_var<'mcx>(expr: Node<'mcx>, rti: usize) -> Option<&'mcx Var<'
 }
 
 /// PROVISIONAL floor for the DICTKEY car: the charter bar is sink-beats-
-/// serial at dop >= 4 (GL-DICTDRAIN-1); the witnessed ladder owns the
-/// re-derivation.
+/// serial at dop >= 4 (GL-DICTDRAIN-1); below it there is NO admitted
+/// low-dop win region (`low_dop_max_rows = 0` — fail-closed, unlike
+/// NO_GUARD's infinity which would make `min_dop` toothless). The
+/// witnessed ladder owns the re-derivation.
 fn dictkey_guard() -> FloorGuard {
-    FloorGuard { min_dop: 4, ..NO_GUARD }
+    FloorGuard { min_dop: 4, low_dop_max_rows: 0.0, ..NO_GUARD }
 }
 
 /// GL-DICTDRAIN-1 recognizer: a single-cbstore-rel grouped agg whose ONE
@@ -7293,17 +7295,18 @@ fn classify_dictkey_exprkey<'mcx>(
         {
             continue;
         }
-        if agg_strminmax_enabled() {
-            if let Some(arg) = grouped_str_minmax_arg(tle.expr, rti) {
-                // The computed key is not a Var, so a min/max(text) always
-                // reads a BASE column — the key-input column included (the
-                // Dict feed gathers it to Raw after derivation, the serial
-                // arm's own law; the drain proves the vguard per batch).
-                let _ = arg;
-                n_strminmax += 1;
-                continue;
-            }
-        }
+        // min/max(text) passengers: REFUSED in v1 (fail-closed). The drain
+        // hosts them (the sink str-mm memo collapses the dict-window
+        // tie-copies), but the 10M measurement cell tripped the sink's
+        // residual budget refusal on a deterministic ~224MiB
+        // aggcontext-subtree term (7 x 32MiB blocks; NOT the tie-copies —
+        // identical pre/post memo; NOT the table prealloc — estimate
+        // 2130) — engage-then-refuse-then-serial-rerun is strictly worse
+        // than keeping Gather, so the probe refuses until the term is
+        // attributed (GL-DICTDRAIN-1 letter, named follow-up; the
+        // executor path stays measurable through forced-serial postures).
+        // `n_strminmax` stays wired for the return: the ceiling mirror
+        // below re-arms with it.
         return Ok(None);
     }
     // Sort/limit composition: none (plain grouped emit), or ONE agg sort
