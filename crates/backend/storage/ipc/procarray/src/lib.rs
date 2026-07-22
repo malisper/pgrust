@@ -1610,6 +1610,56 @@ pub fn GetCurrentVirtualXIDs<'mcx>(
     Ok(vxids)
 }
 
+// MinimumActiveBackends (procarray.c): count backends (other than myself)
+// that are in active transactions; true once the count reaches `min`. Used
+// as the heuristic gate for the pre-flush group-commit delay (XLogFlush's
+// commit_delay/commit_siblings arm).
+//
+// C deliberately reads WITHOUT ProcArrayLock: only zero/nonzero tests, and
+// the result is heuristic. A concurrent ProcArrayAdd may have bumped
+// numProcs before publishing the slot (pgprocnos entry still -1) and a
+// concurrent remove leaves a recycled PGPROC whose fields are nonsense;
+// both are acceptable here, exactly as in C. Every pgprocnos write is a
+// valid proc number or -1, and the i32 loads don't tear, so the -1 check
+// is the only garbage filter needed.
+pub fn MinimumActiveBackends(min: i32) -> bool {
+    // Quick short-circuit if no minimum is specified.
+    if min == 0 {
+        return true;
+    }
+
+    let arrayP = procArray();
+    let hdr = ProcGlobal();
+    let my_procno = MyProc();
+    let mut count = 0;
+
+    for index in 0..arrayP.numProcs.get() as usize {
+        let pgprocno = arrayP.pgprocnos[index].get();
+        if pgprocno == -1 {
+            continue; // do not count deleted entries
+        }
+        if Some(pgprocno) == my_procno {
+            continue; // do not count myself
+        }
+        let proc = &hdr.allProcs[pgprocno as usize];
+        if proc.xid.read() == InvalidTransactionId {
+            continue; // do not count if no XID assigned
+        }
+        if proc.pid.load(Relaxed) == 0 {
+            continue; // do not count prepared xacts
+        }
+        if !proc.waitLock.get().is_null() {
+            continue; // do not count if blocked on a lock
+        }
+        count += 1;
+        if count >= min {
+            break;
+        }
+    }
+
+    count >= min
+}
+
 pub fn CountDBConnections(databaseid: types_core::Oid) -> PgResult<i32> {
     let arrayP = procArray();
     let hdr = ProcGlobal();
@@ -1819,6 +1869,7 @@ pub fn init_seams() {
     procarray_seams::xid_cache_remove_running_xids::set(XidCacheRemoveRunningXids);
     procarray_seams::count_db_connections::set(CountDBConnections);
     procarray_seams::count_user_backends::set(CountUserBackends);
+    procarray_seams::minimum_active_backends::set(MinimumActiveBackends);
     procarray_seams::get_oldest_active_transaction_id::set(|| {
         GetOldestActiveTransactionId().expect("GetOldestActiveTransactionId")
     });

@@ -33,7 +33,6 @@ sync_rep_update_sync_standbys_defined	SKIP	syncrep unported; checkpointer guard 
 sync_rep_cleanup_at_proc_exit	SKIP	syncrep unported; ProcKill guard; no waiter can exist while the wait seam is uninstalled
 
 # --- F4 ---------------------------------------------------------------------
-minimum_active_backends	SKIP	commit_delay group-commit gate; default 0 = identical behavior; perf-only divergence when set
 
 # --- F5: replication origins (consistently latched; origins unported) -------
 startup_replication_origin	INTENTIONAL	origins unported; StartupXLOG guard, C-default fallback
@@ -51,7 +50,6 @@ expire_tree_known_assigned_transaction_ids	INTENTIONAL	behind standby_state() !=
 proc_array_apply_xid_assignment	INTENTIONAL	behind standby_state() >= STANDBY_INITIALIZED
 
 # --- F7 ---------------------------------------------------------------------
-at_eoxact_logical_rep_workers	INTENTIONAL	logical-rep workers unported; guarded ×3 with no-writer-invariant comment
 
 # --- F8 ---------------------------------------------------------------------
 pg_shared_memory_is_in_use	INTENTIONAL	reached only via a foreign lockfile line-7 shmem key pgrust never writes; panic backstop
