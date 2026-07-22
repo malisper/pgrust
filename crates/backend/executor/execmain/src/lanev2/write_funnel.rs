@@ -171,3 +171,128 @@ mod tests {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// W2a increment 1 — pop-K batched write drain (PGRUST_W2A_DRAIN_BATCH,
+// default OFF; GL-W2A-1 measures it standalone).
+//
+// GL-W0-2 isolated the funnel's write-drain deficit to the per-row drain
+// loop: image pop -> wire-slot store -> DestReceiver dispatch -> seam hop ->
+// receiver body -> W1 buffer copy -> slot clear -> image FREE, every row,
+// on the single writer thread. This increment batches K images per flush:
+// one receiver dispatch per batch, a monomorphic store->buffer-feed loop
+// (the seam hop and receiver body are skipped when the W1 buffer is live),
+// one slot clear, and K image frees together at batch clear. The W1 buffer
+// itself still flushes on ITS thresholds inside write_buffer_receive — page
+// packing and WAL shape are unchanged. Fallback (knob off / W1 killed /
+// receiver without a live buffer): the per-element receive_slot path,
+// byte-identical to the unbatched drain.
+// ---------------------------------------------------------------------------
+
+/// W2a inc-1 knob (default OFF): `PGRUST_W2A_DRAIN_BATCH=1|on` arms the
+/// batched write drain. Measurement lever — flips ride GL-W2A-1 + a train.
+pub(super) fn w2a_drain_batch_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(std::env::var("PGRUST_W2A_DRAIN_BATCH").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
+/// Batch capacity: bounded leader-side buffering on top of W1's pool
+/// (K images + the pool's 1000 slots — the same order as Gather's tuple
+/// queues).
+pub(super) const DRAIN_BATCH_CAP: usize = 256;
+
+/// Flush `batch` into the write dest. Buffered fast path when the receiver
+/// carries a live W1 buffer; per-element `receive_slot` otherwise. The
+/// wire slot only BORROWS each image (cleared before the batch drops).
+/// Receivers on this path never stop early (intorel/transientrel always
+/// continue), so the fast path has no `cont` plumbing.
+pub(super) fn flush_write_batch<'d>(
+    batch: &mut Vec<super::row_emit::MinImage>,
+    dest: &mut ::tcop_dest::DestReceiver<'d>,
+    wire_slot: &mut ::types_slot::SlotData<'d>,
+    slot_mcx: ::mcx::Mcx<'d>,
+) -> ::types_error::PgResult<()> {
+    use ::tcop_dest::DestReceiver;
+    if batch.is_empty() {
+        return Ok(());
+    }
+    match dest {
+        DestReceiver::IntoRel(st) if st.mibuf.is_some() => {
+            let mcx = st.mcx; // receiver ctx: buffer copies (intorel parity)
+            let rel = st.rel.as_ref().expect("intorel_startup ran");
+            let mibuf = st.mibuf.as_mut().expect("checked");
+            let (cid, opts) = (st.output_cid, st.ti_options);
+            let mut bistate = st.bistate.as_mut();
+            for img in batch.iter() {
+                // SAFETY: Minimal wire slot (hook contract); the image
+                // outlives the buffer's copy (W1 copies into its pool slot
+                // inside write_buffer_receive) and the clear below.
+                unsafe {
+                    ::exectuples::exec_store_minimal_tuple_ptr(
+                        wire_slot,
+                        slot_mcx,
+                        img.as_mtup_ptr(),
+                    );
+                }
+                ::tableam::write_buffer::write_buffer_receive(
+                    mcx,
+                    rel,
+                    mibuf,
+                    wire_slot,
+                    cid,
+                    opts,
+                    bistate.as_deref_mut(),
+                )?;
+            }
+            ::exectuples::exec_clear_tuple(wire_slot, slot_mcx);
+        }
+        DestReceiver::TransientRel(st) if st.mibuf.is_some() => {
+            let mcx = st.mcx;
+            let rel = st.rel.as_ref().expect("transientrel_startup ran");
+            let mibuf = st.mibuf.as_mut().expect("checked");
+            let (cid, opts) = (st.output_cid, st.ti_options);
+            let mut bistate = st.bistate.as_mut();
+            for img in batch.iter() {
+                // SAFETY: as the IntoRel arm.
+                unsafe {
+                    ::exectuples::exec_store_minimal_tuple_ptr(
+                        wire_slot,
+                        slot_mcx,
+                        img.as_mtup_ptr(),
+                    );
+                }
+                ::tableam::write_buffer::write_buffer_receive(
+                    mcx,
+                    rel,
+                    mibuf,
+                    wire_slot,
+                    cid,
+                    opts,
+                    bistate.as_deref_mut(),
+                )?;
+            }
+            ::exectuples::exec_clear_tuple(wire_slot, slot_mcx);
+        }
+        _ => {
+            // W1 killed or an unexpected dest: per-element receive_slot,
+            // byte-identical to the unbatched drain.
+            for img in batch.iter() {
+                // SAFETY: as above.
+                unsafe {
+                    ::exectuples::exec_store_minimal_tuple_ptr(
+                        wire_slot,
+                        slot_mcx,
+                        img.as_mtup_ptr(),
+                    );
+                }
+                dest.receive_slot(wire_slot)?;
+                ::exectuples::exec_clear_tuple(wire_slot, slot_mcx);
+            }
+        }
+    }
+    // K image frees together (the batched-dealloc half of the increment).
+    batch.clear();
+    Ok(())
+}
