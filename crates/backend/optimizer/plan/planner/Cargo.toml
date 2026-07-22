@@ -106,6 +106,15 @@ varlena = { path = "../../../utils/adt/varlena" }
 
 gin = { path = "../../../access/gin/gin" }
 clauses_seams = { path = "../../util/clauses_seams" }
+pg_prng = { path = "../../../../common/pg_prng" }
+
+[features]
+# The non-default GEQO recombination operators (PMX/CX/PX/OX1/OX2 + mutation +
+# the City table) are `#if defined(...)` in C, compiled out of the default
+# build (C ships `#define ERX`). This feature renders that ifdef discipline:
+# the faithful ports compile only when it is set; the default build carries ERX
+# alone, exactly as C does.
+geqo_nondefault_operators = []
 
 [dev-dependencies]
 indexcmds_seams = { path = "../../../commands/indexcmds_seams" }
