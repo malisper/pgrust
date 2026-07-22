@@ -1907,6 +1907,41 @@ fn ensure_all_updated_cols<'mcx>(
     Ok(())
 }
 
+// ExecGetAllUpdatedCols for a ROUTED leaf (execUtils.c ExecGetUpdatedCols'
+// ri_RootResultRelInfo arm): the target's updated columns renumbered through
+// the root->leaf attrmap. C recomputes per call; so does this. Same
+// simplification as on_conflict_update_lock_mode: leaf-local generated-column
+// extras aren't recomputed — the root's, mapped, stand in (partitions share
+// the parent's generation expressions).
+fn leaf_all_updated_cols<'mcx>(
+    mt: &mut ModifyTableState<'mcx>,
+    estate: &EStateData<'mcx>,
+    idx: usize,
+) -> PgResult<types_nodes::Bitmapset<'mcx>> {
+    let mcx = estate.es_query_cxt;
+    ensure_all_updated_cols(mt, estate, false)?;
+    let rti = mt.rel().rti;
+    let root_rel = estate.es_relations[(rti - 1) as usize]
+        .as_ref()
+        .expect("result relation opened");
+    let mut cols = mt
+        .rel()
+        .all_updated_cols
+        .as_ref()
+        .expect("resolved above")
+        .clone_in(mcx)?;
+    let leaf_rel = mt.router.as_ref().expect("routed").leaf_rel(idx);
+    if let Some(map) = tupdesc::build_attrmap_by_name_if_req(
+        mcx,
+        &root_rel.rd_att,
+        &leaf_rel.rd_att,
+        !leaf_rel.rd_rel.relispartition,
+    )? {
+        cols = execute_attr_map_cols(mcx, &map, &cols)?;
+    }
+    Ok(cols)
+}
+
 // bms_union(ExecGetInsertedCols, ExecGetUpdatedCols) through the result
 // RTE's perminfo (execUtils.c GetResultRTEPermissionInfo): pass the root's
 // rti for a routed child so the numbering matches the description relation.
@@ -4903,10 +4938,20 @@ fn row_triggers_common<'mcx>(
     let tg_event = event_op | TRIGGER_EVENT_ROW | event_timing;
     let is_delete = event_op == TRIGGER_EVENT_DELETE;
     // C ExecBR/IR UpdateTriggers hand ExecGetAllUpdatedCols to every row
-    // trigger via tg_updatedcols, not just WHEN-column filters.
-    if event_op == types_trigger::TRIGGER_EVENT_UPDATE {
-        ensure_all_updated_cols(mt, estate, false)?;
-    }
+    // trigger via tg_updatedcols, not just WHEN-column filters. A routed
+    // leaf (the upsert BR-UPDATE leg) gets the root's columns renumbered
+    // through the root->leaf attrmap (execUtils.c ExecGetUpdatedCols).
+    let leaf_updated_cols = if event_op == types_trigger::TRIGGER_EVENT_UPDATE {
+        match leaf {
+            Some(ix) => Some(leaf_all_updated_cols(mt, estate, ix)?),
+            None => {
+                ensure_all_updated_cols(mt, estate, false)?;
+                None
+            }
+        }
+    } else {
+        None
+    };
     for (i, trigger) in trigdesc.triggers.iter().enumerate() {
         if trigger.tgtype & (TRIGGER_TYPE_LEVEL_MASK | TRIGGER_TYPE_TIMING_MASK | tgtype_event)
             != TRIGGER_TYPE_ROW | type_timing | tgtype_event
@@ -4942,7 +4987,8 @@ fn row_triggers_common<'mcx>(
             let mut when = ::trigger::TriggerWhenEval {
                 mcx,
                 cache,
-                modified_cols: r.all_updated_cols.as_ref(),
+                // Routed leaf: the leaf-numbered copy; else the target's own.
+                modified_cols: leaf_updated_cols.as_ref().or(r.all_updated_cols.as_ref()),
             };
             if !when.check_tuples(i, trigger, rel, tg_event, old_t.as_ref(), new_t.as_ref())? {
                 continue;
@@ -4956,9 +5002,17 @@ fn row_triggers_common<'mcx>(
             if old_nn.is_some() { (old_nn, new_nn) } else { (new_nn, None) };
         let expected = if newtup_nn.is_some() { newtup_nn } else { trig_nn };
         // Stable across the call: nothing reassigns all_updated_cols after
-        // ensure_all_updated_cols above.
+        // ensure_all_updated_cols above, and leaf_updated_cols is a local
+        // that outlives the loop.
         let updatedcols_ptr = if event_op == types_trigger::TRIGGER_EVENT_UPDATE {
-            mt.rel().all_updated_cols.as_ref().map_or(0usize, |b| b as *const _ as usize)
+            match &leaf_updated_cols {
+                Some(b) => b as *const _ as usize,
+                None => mt
+                    .rel()
+                    .all_updated_cols
+                    .as_ref()
+                    .map_or(0usize, |b| b as *const _ as usize),
+            }
         } else {
             0
         };
@@ -7289,11 +7343,11 @@ fn exec_leaf_conflict_update<'mcx>(
         .as_ref()
         .is_some_and(|tc| tc.tcs_update_old_table || tc.tcs_update_new_table);
     if td.is_some() || has_capture {
-        if td.as_ref().is_some_and(|t| t.triggers.iter().any(|t| t.tgnattr > 0)) {
-            // C computes ExecGetAllUpdatedCols against the leaf's attmap;
-            // UPDATE OF column triggers on routed leaves stay loud.
-            panic!("ExecOnConflictUpdate leaf update: UPDATE OF column triggers not ported");
-        }
+        // C ExecARUpdateTriggers hands ExecGetAllUpdatedCols to every queued
+        // UPDATE event; the leaf's copy is the root's mapped through the
+        // root->leaf attrmap, feeding both the UPDATE OF/WHEN gate and the
+        // event's tg_updatedcols.
+        let leaf_cols = leaf_all_updated_cols(mt, estate, idx)?;
         let ar_new_tid = estate.es_tupleTable[proj_id.0 as usize].base().tts_tid;
         // Captured rows convert to the root layout through the leaf's
         // child->root map (C ri_ChildToRootMap in AfterTriggerSaveEvent).
@@ -7310,7 +7364,7 @@ fn exec_leaf_conflict_update<'mcx>(
         let mut when = ::trigger::TriggerWhenEval {
             mcx,
             cache: &mut leaf_trig_when[idx],
-            modified_cols: None,
+            modified_cols: Some(&leaf_cols),
         };
         ::trigger::ExecARUpdateTriggers(
             mcx,
@@ -7326,9 +7380,7 @@ fn exec_leaf_conflict_update<'mcx>(
             false,
             conv.as_ref(),
             conv.as_ref(),
-            // ON CONFLICT DO UPDATE on a routed leaf: tg_updatedcols follows
-            // this path's WHEN (None) — pre-existing limitation.
-            None,
+            Some(&leaf_cols),
         )?;
     }
 
