@@ -1029,6 +1029,62 @@ impl Runtime {
         &self.sched.permits
     }
 
+    /// GL-STMTTASK-2 change 3 (inline-execute, the Cilk work-first / Go
+    /// run-on-arrival doctrine): borrow one execution seat WITHOUT waiting
+    /// — the session thread is about to execute an admitted statement
+    /// ITSELF instead of enqueuing it to the pool. None = no seat free
+    /// right now (pool under load) — the caller takes the enqueue+park
+    /// path; never blocks, so no lease/seat ordering deadlock exists. The
+    /// seat is a REAL execution permit: while held, one fewer pool step
+    /// can run — governed accounting, not a bypass.
+    pub fn try_borrow_seat(self: &Arc<Self>) -> Option<InlineSeat> {
+        if self.sched.permits.try_acquire() {
+            Some(InlineSeat { rt: Arc::clone(self) })
+        } else {
+            None
+        }
+    }
+
+    /// GL-STMTTASK-2 (wake elision): true ⇔ PGRUST_POOL_WAKE_SPINNER armed
+    /// (and the step-v2 loop is live).
+    pub fn wake_spinner_armed(&self) -> bool {
+        sched::wake_spinner_enabled()
+    }
+
+    /// Total actual thread unparks the pool park lot performed (the wakeup
+    /// program's unparks-per-statement counter; monotonic, process-wide).
+    pub fn pool_unparks(&self) -> u64 {
+        self.sched.park.unparks()
+    }
+
+    /// GL-STMTTASK-2 (wake elision): mark this pool worker as a SEARCHER
+    /// (spin_enter). The pool loop arms it at loop start and re-arms after
+    /// each Ran step; worker_step's claim points and the directed park
+    /// consume it.
+    pub fn spin_enter_worker(&self, local: &mut WorkerLocal) {
+        debug_assert!(!local.spinning, "double spin_enter");
+        self.sched.park.spin_enter();
+        local.spinning = true;
+    }
+
+    /// GL-STMTTASK-2 (wake elision): directed park for the step-v2 pool
+    /// loop — registers on the LIFO idle stack and consumes the worker's
+    /// search-phase mark; on return the worker re-enters the search phase
+    /// (mark re-armed here so the elision window never gaps).
+    pub fn park_worker_directed(
+        &self,
+        seen: u64,
+        parker: &Arc<pgsync::WorkerParker>,
+        local: &mut WorkerLocal,
+    ) {
+        stats::RuntimeStats::tick(&self.sched.stats.worker_parks);
+        let was_spinning = local.spinning;
+        local.spinning = false;
+        self.sched.park.park_worker(seen, parker, was_spinning);
+        self.sched.park.spin_enter();
+        local.spinning = true;
+    }
+
     /// POOL-QOS observability: live interactive demand (unmet width of
     /// fresh bound engagements). Tests + diagnostics.
     pub fn qos_demand_live(&self) -> bool {
@@ -1217,6 +1273,20 @@ impl Drop for ParallelWidthLease {
 
 /// RAII lease of one external pin-board lane (see
 /// [`Runtime::acquire_external_lane`]).
+/// GL-STMTTASK-2 change 3: an inline-execute seat — one execution permit
+/// borrowed by a SESSION thread for the span of a statement it runs itself
+/// (see [`Runtime::try_borrow_seat`]). RAII: the permit returns on drop,
+/// on every exit path (completion, error, cancel unwind).
+pub struct InlineSeat {
+    rt: Arc<Runtime>,
+}
+
+impl Drop for InlineSeat {
+    fn drop(&mut self) {
+        self.rt.sched.permits.release();
+    }
+}
+
 pub struct ExternalLane {
     rt: Arc<Runtime>,
     ordinal: usize,
