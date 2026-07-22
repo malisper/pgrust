@@ -27,9 +27,8 @@ use crate::read::{
 const READV_COUNT_BITS: u32 = 7;
 const READV_COUNT_MASK: u32 = (1 << READV_COUNT_BITS) - 1;
 
-/// buffer_stage_common (bufmgr.c), read/shared arm: give the AIO subsystem
-/// its own pin on every targeted buffer and arm io_wref (tagged, so WaitIO
-/// can route between this engine and the uring prefetch lane).
+/// Pin handover: the AIO subsystem takes its own pin and arms a TAGGED
+/// io_wref (WaitIO routes tagged wrefs to pgaio, untagged to the uring lane).
 fn buffer_readv_stage(ioh: u32, _cb_data: u8, is_temp: bool) {
     assert!(!is_temp, "local-buffer AIO stage: temp relations keep the pre-AIO path");
 
@@ -52,15 +51,13 @@ fn buffer_readv_stage(ioh: u32, _cb_data: u8, is_temp: bool) {
         debug_assert!(buf_state & BM_IO_IN_PROGRESS != 0);
         debug_assert!(buffer_refcount(buf_state) >= 1);
 
-        // The AIO subsystem's own pin: an error in this backend releasing its
-        // pins must not let the buffer be replaced while IO is ongoing.
-        // Released again in TerminateBufferIO(release_aio).
+        // AIO's own pin: issuer-side error cleanup releasing its pins must
+        // not let the buffer be replaced while IO is ongoing.
         buf_state += BUF_REFCOUNT_ONE;
         // SAFETY: header lock held.
         unsafe { desc.set_io_wref(tagged) };
         UnlockBufHdr(desc, buf_state);
 
-        // Stop tracking via the resowner — the AIO system now keeps track.
         forget_buffer_io_resowner(buffer);
     }
 }
@@ -131,9 +128,6 @@ fn buffer_readv_encode_error(
     };
 }
 
-/// buffer_readv_complete_one (bufmgr.c): verify one buffer of the readv,
-/// zero it if requested, and terminate its IO. Runs in the COMPLETING
-/// thread, which may not be the issuer.
 fn buffer_readv_complete_one(
     td: &PgAioTargetData,
     buf_off: u8,
@@ -167,9 +161,8 @@ fn buffer_readv_complete_one(
                 failed = true;
             }
         }
-        // Log invalid/zeroed pages immediately, server-log only: the definer
-        // may never process the result (cancelled, another IO failed), and
-        // this may be running in a different backend.
+        // Log immediately, server-only: the definer may never process the
+        // result (cancelled, or another IO failed first).
         if buffer_invalid || zeroed_buffer {
             let mut result_one = PgAioResult::default();
             buffer_readv_encode_error(
@@ -194,8 +187,6 @@ fn buffer_readv_complete_one(
     (buffer_invalid, zeroed_buffer)
 }
 
-/// buffer_readv_complete (bufmgr.c), shared arm: per-buffer completion for
-/// the whole readv, then fold verification failures into the IO's result.
 fn shared_buffer_readv_complete(ioh: u32, prior_result: PgAioResult, cb_data: u8) -> PgAioResult {
     let mut result = prior_result;
     let td = aio_core::pgaio_io_get_target_data(ioh);
@@ -210,8 +201,6 @@ fn shared_buffer_readv_complete(ioh: u32, prior_result: PgAioResult, cb_data: u8
     for buf_off in 0..len {
         let buf = io_data[buf_off] as Buffer;
 
-        // A lower-level failure fails every buffer at/after the boundary; a
-        // partial read leaves the leading buffers OK.
         let failed = prior_result.status == PgAioResultStatus::Error
             || prior_result.result <= buf_off as i32;
 
@@ -251,9 +240,6 @@ fn shared_buffer_readv_complete(ioh: u32, prior_result: PgAioResult, cb_data: u8
     result
 }
 
-/// shared_buffer_readv_complete_local (bufmgr.c): checksum-failure stats
-/// reporting in the issuing backend. The checksum arm pends the page-checksum
-/// port, so checkfail_count is structurally 0 here; the shape is kept.
 fn shared_buffer_readv_complete_local(
     _ioh: u32,
     prior_result: PgAioResult,
@@ -271,7 +257,6 @@ fn local_buffer_readv_complete(_ioh: u32, _prior: PgAioResult, _cb_data: u8) -> 
     panic!("local-buffer AIO completion: temp relations keep the pre-AIO path");
 }
 
-/// buffer_readv_report (bufmgr.c): raise/log the folded verification outcome.
 /// Single-block texts match the pre-AIO sync path's exactly (mode-invariant
 /// error surface); multi-block texts are the C 18 plural shapes.
 fn buffer_readv_report(

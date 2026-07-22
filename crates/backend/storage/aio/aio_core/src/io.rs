@@ -12,11 +12,8 @@ const PG_WAIT_IO: u32 = 0x0A00_0000;
 const WAIT_EVENT_DATA_FILE_READ: u32 = PG_WAIT_IO + 21;
 const WAIT_EVENT_DATA_FILE_WRITE: u32 = PG_WAIT_IO + 24;
 
-/// Fill the current handed-out handle's iovec region from page pointers,
 /// merging adjacent pages (C buffers_to_iovec). Returns iovcnt.
-///
 /// SAFETY contract (caller): each pointer addresses `page_len` writable bytes
-/// that stay valid until the IO completes (pinned pool pages).
 pub fn pgaio_io_set_iovec_pages(pages: &[*mut u8], page_len: usize) -> i32 {
     let index = current_handed_out("pgaio_io_set_iovec_pages");
     let h = ioh(index);
@@ -44,10 +41,6 @@ pub fn pgaio_io_set_iovec_pages(pages: &[*mut u8], page_len: usize) -> i32 {
     }
 }
 
-/// pgaio_io_start_readv on the current handed-out handle (the aio_seams
-/// shape: fd.c's FileStartReadV resolved the vfd and passes the raw triple;
-/// the handle is implicit because C's before-start assertions pin it to
-/// pgaio_my_backend->handed_out_io anyway).
 pub fn pgaio_io_start_readv_current(fd: i32, iovcnt: i32, offset: i64) -> types_error::PgResult<()> {
     let index = current_handed_out("pgaio_io_start_readv");
     pgaio_io_before_start(index);
@@ -80,8 +73,6 @@ fn pgaio_io_before_start(index: u32) {
     debug_assert!(!g::InterruptsCanBeProcessed());
 }
 
-/// pgaio_io_perform_synchronously: execute the IO with plain preadv/pwritev.
-/// Runs in the issuer (sync method / worker sync-fallback) or an IO worker.
 pub(crate) fn pgaio_io_perform_synchronously(index: u32) {
     let h = ioh(index);
 
@@ -97,7 +88,6 @@ pub(crate) fn pgaio_io_perform_synchronously(index: u32) {
         PGAIO_OP_READV => {
             waitevent_seams::pgstat_report_wait_start::call(WAIT_EVENT_DATA_FILE_READ);
             // SAFETY: the iovec region was filled by the definer and the pages
-            // it addresses are pinned until completion.
             let r = unsafe {
                 pg_preadv_raw(op_data.fd, crate::iovec_region(h.iovec_off), op_data.iov_length as i32, op_data.offset as i64)
             };
@@ -128,8 +118,6 @@ pub(crate) fn pgaio_io_perform_synchronously(index: u32) {
     g::EndCriticalSection();
 }
 
-// pg_preadv shape: EINTR restarts belong to the caller in C's pg_preadv; keep
-// the retry here so worker-side reads match FileReadV's behavior.
 unsafe fn pg_preadv_raw(fd: i32, iov: *const libc::iovec, iovcnt: i32, offset: i64) -> isize {
     loop {
         let r = libc::preadv(fd, iov, iovcnt, offset);
@@ -151,8 +139,6 @@ unsafe fn pg_pwritev_raw(fd: i32, iov: *const libc::iovec, iovcnt: i32, offset: 
 }
 
 // Current-handle conveniences for the smgr/md chain (C threads the PgAioHandle
-// pointer down; here the handle is pinned to handed_out_io by the before-start
-// assertions, so lower layers address it implicitly).
 pub fn pgaio_io_current() -> u32 {
     current_handed_out("pgaio_io_current")
 }

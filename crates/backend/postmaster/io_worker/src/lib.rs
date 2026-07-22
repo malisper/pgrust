@@ -1,8 +1,5 @@
-//! IoWorkerMain (storage/aio/method_worker.c): the aux-thread scaffolding for
-//! an IO worker. The worker registry, submission ring, and the execute loop
-//! body live in aio_core::method_worker; this crate exists because the
-//! aux-process bring-up (auxprocess -> postinit -> bufmgr) sits ABOVE aio_core
-//! in the crate DAG — the same layering as checkpointer/walwriter.
+//! IoWorkerMain (method_worker.c): aux-thread scaffolding only; the ring and
+//! loop body live in aio_core (auxprocess sits above aio_core in the DAG).
 
 #![allow(non_snake_case)]
 
@@ -29,14 +26,11 @@ pub fn IoWorkerMain(startup_data: &StartupData) -> ! {
             procsignal::signums::SIGHUP,
             Simple(interrupt::SignalHandlerForConfigReload),
         );
-        // C: SIGINT = die (manual worker restart). The thread rendering exits
-        // at the next drain point instead of longjmping mid-IO.
+        // C: SIGINT = die; SIGUSR2 = late explicit shutdown (checkpointer-like).
         procsignal::pqsignal_thread(
             procsignal::signums::SIGINT,
             Simple(interrupt::SignalHandlerForShutdownRequest),
         );
-        // Explicit shutdown comes via SIGUSR2 late in the sequence, like
-        // checkpointer; SIGTERM is ignored.
         procsignal::pqsignal_thread(procsignal::signums::SIGTERM, Ignore);
         procsignal::pqsignal_thread(procsignal::signums::SIGALRM, Ignore);
         procsignal::pqsignal_thread(procsignal::signums::SIGPIPE, Ignore);
@@ -54,20 +48,11 @@ pub fn IoWorkerMain(startup_data: &StartupData) -> ! {
 
     while !interrupt::ShutdownRequestPending() {
         if let Err(e) = aio_core::pgaio_worker_cycle() {
-            // Reopen/execution failures are already downgraded to a failed IO
-            // inside the cycle; anything surfacing here is unexpected —
-            // exit(1), the postmaster relaunches a fresh worker (C's
-            // sigsetjmp + proc_exit(1) arm).
+            // C's sigsetjmp arm: reopen/IO failures already completed the IO
+            // inside the cycle; exit(1) relaunches a fresh worker.
             fatal_exit(&e);
         }
     }
-
-    // On exit, the executed-IO count goes to the server log at DEBUG1: the
-    // deterministic flowed-through-workers witness for the read-path e2e.
-    let _ = elog::elog(
-        types_error::DEBUG1,
-        format!("io worker executed {} IOs", aio_core::pgaio_worker_executed_count()),
-    );
 
     ipc::proc_exit(0, g::MyProcPid())
 }

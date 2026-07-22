@@ -31,7 +31,6 @@ pub(crate) fn loc(funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new("aio.c", 0, funcname)
 }
 
-/// pgaio_io_acquire: blocking form.
 pub fn pgaio_io_acquire(
     resowner: Option<types_resowner::ResourceOwner>,
     ret: *mut PgAioReturn,
@@ -44,7 +43,6 @@ pub fn pgaio_io_acquire(
     }
 }
 
-/// pgaio_io_acquire_nb: returns None when no handle is idle.
 pub fn pgaio_io_acquire_nb(
     resowner: Option<types_resowner::ResourceOwner>,
     ret: *mut PgAioReturn,
@@ -120,7 +118,6 @@ pub fn pgaio_io_release(index: u32) -> PgResult<()> {
 }
 
 /// pgaio_io_release_resowner: resowner cleanup callback (installed into
-/// aio_seams; resowner passes the handle index it remembered).
 pub fn pgaio_io_release_resowner(index: u32, on_error: bool) {
     let h = ioh(index);
     // SAFETY: resowner cleanup runs on the owner thread.
@@ -154,11 +151,9 @@ pub fn pgaio_io_release_resowner(index: u32, on_error: bool) {
             pgaio_submit_staged().expect("pgaio_io_release_resowner: submit staged");
         }
         _ => {
-            // SUBMITTED/COMPLETED_*: expected to happen.
         }
     }
 
-    // Unregister result reporting; the memory it references may go away.
     // SAFETY: owner thread; reclaim above may have re-entered d, re-borrow.
     unsafe { h.data() }.report_return = std::ptr::null_mut();
 
@@ -205,7 +200,6 @@ fn pgaio_io_resowner_register(index: u32, owner: types_resowner::ResourceOwner) 
     Ok(())
 }
 
-/// pgaio_io_stage: stage and, unless batching, submit immediately.
 pub(crate) fn pgaio_io_stage(index: u32, op: u8) -> PgResult<()> {
     let h = ioh(index);
 
@@ -222,7 +216,6 @@ pub(crate) fn pgaio_io_stage(index: u32, op: u8) -> PgResult<()> {
 
     h.set_state(PGAIO_HS_DEFINED);
 
-    // Allow a new IO to be staged.
     // SAFETY: owner-thread slot access.
     unsafe { my_backend() }.handed_out_io = NO_HANDLE;
 
@@ -260,7 +253,6 @@ pub(crate) fn pgaio_io_needs_synchronous_execution(index: u32) -> bool {
         return true;
     }
     match crate::pgaio_method_kind() {
-        // pgaio_sync_needs_synchronous_execution: always true.
         IoMethodKind::Sync => true,
         IoMethodKind::Worker => crate::method_worker::pgaio_worker_needs_synchronous_execution(index),
     }
@@ -276,7 +268,6 @@ pub(crate) fn pgaio_io_prepare_submit(index: u32) {
     }
 }
 
-/// pgaio_io_process_completion: called by the executing side (worker thread or
 /// synchronous execution) with the raw IO result, inside a critical section.
 pub(crate) fn pgaio_io_process_completion(index: u32, result: i32) {
     let h = ioh(index);
@@ -290,7 +281,6 @@ pub(crate) fn pgaio_io_process_completion(index: u32, result: i32) {
 
     h.set_state(PGAIO_HS_COMPLETED_SHARED);
 
-    // CV broadcast ensures state is visible before wakeup.
     ConditionVariableBroadcast(&h.cv);
 
     if h.owner_procno == my_backend_procno_or_invalid() {
@@ -299,7 +289,6 @@ pub(crate) fn pgaio_io_process_completion(index: u32, result: i32) {
 }
 
 // IO workers complete other backends' IOs; their thread has no aio backend
-// slot (pgaio_init_backend skips B_IO_WORKER), so MyProcNumber comparison
 // must not panic there.
 fn my_backend_procno_or_invalid() -> i32 {
     MY_BACKEND.get().unwrap_or(types_core::INVALID_PROC_NUMBER)
@@ -307,7 +296,6 @@ fn my_backend_procno_or_invalid() -> i32 {
 
 pub(crate) fn pgaio_io_was_recycled(h: &PgAioHandle, ref_generation: u64) -> (bool, u8) {
     let state = h.state();
-    // The Acquire load of state orders the generation load (C pg_read_barrier).
     let generation = h.generation.load(Ordering::Relaxed);
     (generation != ref_generation, state)
 }
@@ -348,15 +336,12 @@ fn pgaio_io_wait(index: u32, ref_generation: u64) -> PgResult<()> {
             }
             PGAIO_HS_SUBMITTED => {
                 // Neither ported method has a wait_one callback (sync executes
-                // in-issuer; worker completes via the pool + this CV), so the
-                // SUBMITTED arm always sleeps on the handle CV (C fallthrough).
                 wait_via_cv(h, ref_generation)?;
             }
             PGAIO_HS_DEFINED | PGAIO_HS_STAGED | PGAIO_HS_COMPLETED_IO => {
                 wait_via_cv(h, ref_generation)?;
             }
             _ => {
-                // COMPLETED_SHARED | COMPLETED_LOCAL.
                 if am_owner {
                     pgaio_io_reclaim(index);
                 }
@@ -382,8 +367,6 @@ fn wait_via_cv(h: &'static PgAioHandle, ref_generation: u64) -> PgResult<()> {
     Ok(())
 }
 
-/// pgaio_io_reclaim: run local callbacks (if pending) and make the handle
-/// reusable. Owner thread only.
 fn pgaio_io_reclaim(index: u32) {
     let h = ioh(index);
     debug_assert!(h.owner_procno == my_backend_procno());
@@ -399,7 +382,6 @@ fn pgaio_io_reclaim(index: u32) {
         let d = unsafe { h.data() };
         if !d.report_return.is_null() {
             // SAFETY: report_return points into the issuer's live operation
-            // (resowner cleanup clears it before that storage dies).
             unsafe {
                 (*d.report_return).result = local_result;
                 (*d.report_return).target_data = d.target_data;
@@ -407,7 +389,6 @@ fn pgaio_io_reclaim(index: u32) {
         }
     }
 
-    // If the IO was defined, it's on the in-flight list; remove.
     if h.state() != PGAIO_HS_HANDED_OUT {
         // SAFETY: owner-thread slot access.
         unsafe {
@@ -436,7 +417,6 @@ fn pgaio_io_reclaim(index: u32) {
     h.flags.store(0, Ordering::Relaxed);
     h.result.store(0, Ordering::Relaxed);
 
-    // Push to the idle-list head (cache efficiency, as in C).
     // SAFETY: owner-thread slot access.
     unsafe {
         let mb = my_backend();
@@ -455,8 +435,6 @@ fn pgaio_io_wait_for_free() -> PgResult<()> {
     };
     let imc = crate::io_max_concurrency() as u32;
 
-    // First reclaim any of our own IOs that already completed (common under
-    // the worker method).
     for i in 0..imc {
         let index = io_handle_off + i;
         if ioh(index).state() == PGAIO_HS_COMPLETED_SHARED {
@@ -495,7 +473,6 @@ fn pgaio_io_wait_for_free() -> PgResult<()> {
             .finish(loc("pgaio_io_wait_for_free"))?;
     }
 
-    // Wait for the oldest in-flight IO to complete.
     {
         let index = in_flight_head;
         let h = ioh(index);
@@ -514,11 +491,9 @@ fn pgaio_io_wait_for_free() -> PgResult<()> {
             }
             PGAIO_HS_COMPLETED_IO | PGAIO_HS_SUBMITTED => {
                 // Racy in general, but we only look at our own backend's IOs
-                // and only this backend recycles them (C comment).
                 pgaio_io_wait(index, generation)?;
             }
             _ => {
-                // COMPLETED_SHARED: another backend finished it.
                 pgaio_io_reclaim(index);
             }
         }
@@ -545,9 +520,6 @@ fn state_name(s: u8) -> &'static str {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Wait references
-// ---------------------------------------------------------------------------
 
 fn pgaio_io_from_wref(iow: &PgAioWaitRef) -> (u32, u64) {
     debug_assert!((iow.aio_index as usize) < handle_count());
@@ -589,9 +561,6 @@ pub fn pgaio_wref_check_done(iow: &PgAioWaitRef) -> bool {
     false
 }
 
-// ---------------------------------------------------------------------------
-// Batch mode + submission
-// ---------------------------------------------------------------------------
 
 pub fn pgaio_enter_batchmode() -> PgResult<()> {
     // SAFETY: owner-thread slot access.
@@ -622,8 +591,6 @@ pub fn pgaio_have_staged() -> bool {
 }
 
 pub fn pgaio_submit_staged() -> PgResult<()> {
-    // Snapshot the staged list; the method submit path re-enters the backend
-    // slot (prepare_submit) and may stage nothing further.
     let staged: ([u32; PGAIO_SUBMIT_BATCH_SIZE], usize) = {
         // SAFETY: owner-thread slot access.
         let mb = unsafe { my_backend() };
@@ -637,8 +604,6 @@ pub fn pgaio_submit_staged() -> PgResult<()> {
     g::StartCriticalSection();
     let submit_result = match crate::pgaio_method_kind() {
         IoMethodKind::Sync => {
-            // pgaio_sync_submit is unreachable: sync IOs are executed at stage
-            // time (needs_synchronous_execution = true).
             g::EndCriticalSection();
             ereport(ERROR)
                 .errmsg_internal("IO should have been executed synchronously")
@@ -657,9 +622,6 @@ pub fn pgaio_submit_staged() -> PgResult<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Error / transaction-boundary cleanup, fd close, shutdown
-// ---------------------------------------------------------------------------
 
 pub fn pgaio_error_cleanup() {
     if MY_BACKEND.get().is_none() {
@@ -692,9 +654,7 @@ pub fn AtEOXact_Aio(_is_commit: bool) {
     debug_assert!(unsafe { my_backend() }.num_staged_ios == 0);
 }
 
-/// pgaio_closing_fd: submit staged IOs that could reference the to-be-closed
 /// fd. Neither ported method sets wait_on_fd_before_close (that's io_uring's),
-/// so no in-flight wait loop yet.
 pub fn pgaio_closing_fd(_fd: i32) {
     if MY_BACKEND.get().is_none() {
         return;
@@ -705,8 +665,6 @@ pub fn pgaio_closing_fd(_fd: i32) {
     }
 }
 
-/// pgaio_shutdown: before_shmem_exit callback registered by
-/// pgaio_init_backend.
 pub(crate) fn pgaio_shutdown(code: i32, _arg: datum::Datum) -> PgResult<()> {
     debug_assert!(MY_BACKEND.get().is_some());
     // SAFETY: owner-thread slot access.
@@ -714,7 +672,6 @@ pub(crate) fn pgaio_shutdown(code: i32, _arg: datum::Datum) -> PgResult<()> {
 
     AtEOXact_Aio(code == 0);
 
-    // Wait out every in-flight IO before the identity goes away.
     loop {
         // SAFETY: owner-thread slot access (copied out).
         let candidate = unsafe {

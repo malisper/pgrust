@@ -55,13 +55,11 @@ pub use target::{pgaio_io_get_target_data, pgaio_io_set_target_smgr};
 
 pub const IO_METHOD_OPTIONS: &[config_enum_entry] = &[
     // io_uring stays unlisted until inc-2 (C compile-gates it the same way on
-    // non-liburing builds).
     config_enum_entry { name: "sync", val: IOMETHOD_SYNC, hidden: false },
     config_enum_entry { name: "worker", val: IOMETHOD_WORKER, hidden: false },
 ];
 
 // Boot default diverges from C (DEFAULT_IO_METHOD = worker) until the worker
-// flip letter; worker is selectable (check_io_method accepts both).
 static IO_METHOD: AtomicI32 = AtomicI32::new(IOMETHOD_SYNC);
 static IO_WORKERS: AtomicI32 = AtomicI32::new(3);
 static IO_MAX_CONCURRENCY: AtomicI32 = AtomicI32::new(-1);
@@ -92,9 +90,6 @@ pub fn pgaio_method_kind() -> IoMethodKind {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Shared handle table (aio_internal.h structs)
-// ---------------------------------------------------------------------------
 
 pub const PGAIO_HS_IDLE: u8 = 0;
 pub const PGAIO_HS_HANDED_OUT: u8 = 1;
@@ -107,13 +102,9 @@ pub const PGAIO_HS_COMPLETED_LOCAL: u8 = 7;
 
 pub(crate) const NO_HANDLE: u32 = u32::MAX;
 
-// UnsafeCell with raw access; cross-thread soundness comes from the aio.c
-// state-machine protocol documented per field (types_storage::SyncCell is
-// by-value-Copy-only, too narrow for the intrusive lists here).
 pub(crate) struct AioCell<T>(std::cell::UnsafeCell<T>);
 
 // SAFETY: access serialized by the documented handle/backend ownership
-// protocol (state-machine edges + owner-thread-only fields).
 unsafe impl<T> Sync for AioCell<T> {}
 
 impl<T> AioCell<T> {
@@ -126,12 +117,6 @@ impl<T> AioCell<T> {
     }
 }
 
-// Owner-written while the handle is HANDED_OUT/DEFINED (single thread), read
-// by the executing/completing thread strictly after the Release state store
-// that publishes SUBMITTED (and, for the worker method, the submission-queue
-// LWLock). distilled_result is written by the completer inside a critical
-// section before the Release store of COMPLETED_SHARED and read by the owner
-// after an Acquire load of that state.
 pub(crate) struct HandleData {
     pub target: u8,
     pub op: u8,
@@ -141,8 +126,8 @@ pub(crate) struct HandleData {
     pub handle_data_len: u8,
     pub resowner: Option<types_resowner::ResourceOwner>,
     // Raw pointer into the issuer's ReadBuffersOperation (C report_return).
-    // Only the OWNER thread dereferences it; resowner cleanup clears it
-    // before the referenced storage can go away (C contract).
+    // C contract: only the OWNER dereferences report_return; resowner
+    // cleanup clears it before the referenced storage can go away.
     pub report_return: *mut PgAioReturn,
     pub distilled_result: PgAioResult,
     pub op_data: PgAioOpDataRw,
@@ -151,8 +136,7 @@ pub(crate) struct HandleData {
 
 pub(crate) struct PgAioHandle {
     pub state: AtomicU8,
-    // Read by cross-thread waiters (pgaio_io_wait SUBMITTED arm), hence
-    // atomic where C reads a plain byte.
+    // Read by cross-thread waiters: atomic where C reads a plain byte.
     pub flags: AtomicU8,
     pub owner_procno: i32,
     pub iovec_off: u32,
@@ -160,7 +144,6 @@ pub(crate) struct PgAioHandle {
     pub result: AtomicI32,
     pub cv: condition_variable::ConditionVariable,
     pub d: AioCell<HandleData>,
-    // Owner-only intrusive dclist links (idle / in-flight membership).
     pub node: AioCell<ListNode>,
 }
 
@@ -169,7 +152,6 @@ impl PgAioHandle {
         self.state.load(Ordering::Acquire)
     }
 
-    // pgaio_io_update_state: pg_write_barrier(); ioh->state = new_state.
     pub(crate) fn set_state(&self, s: u8) {
         self.state.store(s, Ordering::Release);
     }
@@ -183,7 +165,6 @@ impl PgAioHandle {
 }
 
 // SAFETY: field access follows the aio.c ownership protocol documented on
-// HandleData/ListNode; everything cross-thread is atomic or CV.
 unsafe impl Sync for PgAioHandle {}
 
 #[derive(Clone, Copy)]
@@ -192,7 +173,6 @@ pub(crate) struct ListNode {
     pub next: u32,
 }
 
-// dclist_head over handle indices; owner-thread-only.
 #[derive(Clone, Copy)]
 pub(crate) struct Dclist {
     pub head: u32,
@@ -221,10 +201,8 @@ pub(crate) struct PgAioBackend {
 }
 
 // SAFETY: BackendData is accessed only by the thread whose MyProcNumber owns
-// the slot (asserted in my_backend); io_handle_off is written once at boot.
 unsafe impl Sync for PgAioBackend {}
 
-// Table bases, set once by AioShmemInit (bufmgr pool-base publication shape).
 static HANDLES: AtomicPtr<PgAioHandle> = AtomicPtr::new(std::ptr::null_mut());
 static HANDLE_COUNT: AtomicI64 = AtomicI64::new(0);
 static BACKENDS: AtomicPtr<PgAioBackend> = AtomicPtr::new(std::ptr::null_mut());
@@ -239,7 +217,6 @@ pub(crate) fn handle_count() -> usize {
 pub(crate) fn ioh(index: u32) -> &'static PgAioHandle {
     debug_assert!((index as usize) < handle_count());
     // SAFETY: AioShmemInit published a table of handle_count() initialized
-    // handles; the allocation lives until process exit.
     unsafe { &*HANDLES.load(Ordering::Relaxed).add(index as usize) }
 }
 
@@ -249,10 +226,7 @@ pub(crate) fn backend_slot(procno: i32) -> &'static PgAioBackend {
     unsafe { &*BACKENDS.load(Ordering::Relaxed).add(procno as usize) }
 }
 
-/// The iovec region of one handle (io_max_combine_limit entries).
-///
 /// SAFETY contract: written by the owner while defining the IO, read by the
-/// executing thread after submission (same publication as HandleData).
 pub(crate) unsafe fn iovec_region(iovec_off: u32) -> *mut libc::iovec {
     IOVECS.load(Ordering::Relaxed).add(iovec_off as usize)
 }
@@ -270,10 +244,7 @@ pub(crate) fn my_backend_procno() -> i32 {
     MY_BACKEND.get().expect("pgaio_my_backend is NULL (pgaio_init_backend not called)")
 }
 
-/// This thread's PgAioBackend slot data.
-///
 /// SAFETY: owner-thread-only by the pgaio_init_backend contract; callers must
-/// not hold the reference across calls that re-enter the backend slot (the
 /// aio.c reentrancy shape: stage -> submit -> prepare_submit).
 #[allow(clippy::mut_from_ref)]
 pub(crate) unsafe fn my_backend() -> &'static mut BackendData {
@@ -281,9 +252,6 @@ pub(crate) unsafe fn my_backend() -> &'static mut BackendData {
     &mut *slot.b.get()
 }
 
-// ---------------------------------------------------------------------------
-// Owner-only dclist ops over handle nodes (ilist.h dclist_* subset)
-// ---------------------------------------------------------------------------
 
 pub(crate) fn dclist_push_head(list: &mut Dclist, index: u32) {
     // SAFETY: owner-only node access (list membership is owner-driven).
@@ -345,9 +313,7 @@ pub(crate) fn dclist_delete_from(list: &mut Dclist, index: u32) {
     list.count -= 1;
 }
 
-// ---------------------------------------------------------------------------
 // GUC hooks (aio.c)
-// ---------------------------------------------------------------------------
 
 fn assign_io_method(newval: i32, _extra: Option<&GucHookExtra>) {
     IO_METHOD.store(newval, Ordering::Relaxed);
@@ -355,7 +321,6 @@ fn assign_io_method(newval: i32, _extra: Option<&GucHookExtra>) {
 
 // pgrust-only: C compile-gates unavailable methods out of io_method_options;
 // here unported methods are refused at the GUC gate instead (inert-fixes
-// shape, relaxed to admit worker now that IoWorkerMain is ported).
 fn check_io_method(
     newval: &mut i32,
     _extra: &mut Option<GucHookExtra>,
@@ -382,7 +347,6 @@ fn check_io_max_concurrency(
     _source: types_guc::GucSource,
 ) -> PgResult<bool> {
     if *newval == -1 {
-        // Auto-tuning is applied later during startup (AioShmemSize).
         return Ok(true);
     }
     if *newval == 0 {

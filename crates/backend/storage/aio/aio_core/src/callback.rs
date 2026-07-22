@@ -47,7 +47,6 @@ pub fn pgaio_io_set_handle_data_32(index: u32, data: &[u32]) {
     d.handle_data_len = data.len() as u8;
 }
 
-/// The buffer list a readv covers, for completion callbacks.
 pub fn pgaio_io_get_handle_data(index: u32) -> ([u64; 128], usize) {
     let h = ioh(index);
     // SAFETY: completion edges; the definer is done writing.
@@ -70,7 +69,6 @@ pub(crate) fn pgaio_io_call_stage(index: u32) {
         let d = ioh(index).data();
         (d.num_callbacks as usize, d.callbacks, d.callbacks_data)
     };
-    // Last registered (innermost) first.
     for i in (0..num).rev() {
         match callbacks[i] {
             PGAIO_HCB_SHARED_BUFFER_READV => {
@@ -115,7 +113,6 @@ pub(crate) fn pgaio_io_call_complete_shared(index: u32) {
                     callbacks_data[i],
                 )
             }
-            // Local-buffer readv completes locally only.
             PGAIO_HCB_LOCAL_BUFFER_READV => result,
             id => panic!("aio callback {id} has no complete_shared"),
         };
@@ -123,7 +120,6 @@ pub(crate) fn pgaio_io_call_complete_shared(index: u32) {
     }
 
     // SAFETY: completer owns d until the COMPLETED_SHARED Release store that
-    // the owner Acquires before reading distilled_result.
     unsafe { h.data() }.distilled_result = result;
 }
 
@@ -152,18 +148,14 @@ pub(crate) fn pgaio_io_call_complete_local(index: u32) -> PgAioResult {
                     callbacks_data[i],
                 )
             }
-            // md readv has no complete_local.
             _ => result,
         };
         debug_assert!(result.status != PgAioResultStatus::Unknown);
     }
 
-    // Not saved into distilled_result: local results matter only to the owner.
     result
 }
 
-/// pgaio_result_report: route a completed-IO error/warning to the callback's
-/// report function at the caller's chosen level.
 pub fn pgaio_result_report(
     result: PgAioResult,
     target_data: &PgAioTargetData,
