@@ -89,6 +89,38 @@ pub const DEFAULT_PGRCOLUMNAR_GROUP_NDISTINCT_RATIO: f64 = 0.05;
 // plans (denies workers the fused bounded-sort feed).
 pub const DEFAULT_PGRCOLUMNAR_GATHER_SORT_TUPLE_COST: f64 = 30.0;
 
+// GL-GMLEADER-1: the Gather-Merge LEADER-CONSUMPTION floor (per-tuple).
+// pgrust's cheap-exchange defaults (parallel_tuple_cost 0.01, pgrcolumnar
+// 0.005 — thread workers, shared-memory queues) are legitimate for the
+// TRANSPORT, but C's 0.1 empirically also covered the LEADER-SERIAL
+// consumption of a Gather Merge stream (the binary-heap merge + a serial
+// parent ingesting every row) — work whose throughput does not improve
+// with workers. Discounting it 10-20x removes C's guard against the
+// raw-row-GM-into-serial-leader-aggregate catastrophe (GL-STRAGG-2
+// increment 2: elected even at true NDV; GUC bisection witnessed
+// parallel_tuple_cost=0.1 ALONE restores C's election, setup/mpwg do
+// not; the elected family runs 1.37-1.43s where the displaced hashagg
+// family runs 1.07-1.11s). The floor prices GM rows at no less than C's
+// per-row rate; the delta term vanishes at SET parallel_tuple_cost>=0.1
+// (session C-parity, the bisection control) and at EXPLICITLY ZEROED
+// transport costs (the forced-plan bench seams' zeroed-cost sessions
+// keep free parallelism). Plain Gather is untouched — its consumers
+// keep the cheap-exchange discount everywhere.
+// `PGRUST_GM_LEADER_MIN_TUPLE_COST` overrides (A/B vehicles; 0 disables).
+pub const DEFAULT_GM_LEADER_MIN_TUPLE_COST: f64 =
+    guc_tables::consts::DEFAULT_PARALLEL_TUPLE_COST * 10.0; // == C's 0.1 default
+
+pub fn gm_leader_min_tuple_cost() -> f64 {
+    static V: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("PGRUST_GM_LEADER_MIN_TUPLE_COST")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| *v >= 0.0)
+            .unwrap_or(DEFAULT_GM_LEADER_MIN_TUPLE_COST)
+    })
+}
+
 pub fn pgrcolumnar_parallel_setup_cost() -> f64 {
     PGRCOLUMNAR_PARALLEL_SETUP_MULTIPLIER * parallel_setup_cost()
 }

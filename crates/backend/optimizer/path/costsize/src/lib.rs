@@ -607,10 +607,36 @@ pub fn cost_gather_merge(
     run_cost += gucs::cpu_operator_cost() * p.rows;
     startup_cost += setup_cost;
     run_cost += tuple_cost * p.rows * 1.05;
+    // GL-GMLEADER-1 leader-consumption floor (doc at
+    // gucs::DEFAULT_GM_LEADER_MIN_TUPLE_COST): GM rows are consumed
+    // LEADER-SERIALLY (heap merge + the serial parent) — that work does
+    // not ride the cheap-exchange transport discount. Self-scoping: the
+    // uplift is per-row, so partial-agg-fed GMs (few rows) and
+    // LIMIT-prorated consumers barely feel it; the raw-row catastrophe
+    // family pays its real freight and loses its election on arithmetic.
+    run_cost += gm_leader_uplift(tuple_cost, p.rows);
 
     p.disabled_nodes = input_disabled_nodes + if gucs::enable_gathermerge() { 0 } else { 1 };
     p.startup_cost = startup_cost + input_startup_cost;
     p.total_cost = startup_cost + run_cost + input_total_cost;
+}
+
+/// The GL-GMLEADER-1 uplift, factored pure for exhaustive pins: the
+/// per-row delta that floors a Gather Merge's transport rate at the
+/// leader-consumption minimum. Zero when the session's rate already
+/// meets the floor (SET parallel_tuple_cost >= 0.1 — C-parity sessions,
+/// the GL-STRAGG-2 bisection control) and when transport is EXPLICITLY
+/// zeroed (the forced-plan bench seams: zeroed-cost sessions keep free
+/// parallelism). The 1.05 factor mirrors the transport term's own
+/// small-queue-wait fudge so the floored total equals what the same
+/// session would pay at parallel_tuple_cost == the floor.
+fn gm_leader_uplift(tuple_cost: f64, rows: f64) -> f64 {
+    let floor = gucs::gm_leader_min_tuple_cost();
+    if tuple_cost > 0.0 && tuple_cost < floor {
+        (floor - tuple_cost) * rows * 1.05
+    } else {
+        0.0
+    }
 }
 
 // pgrcolumnar column-fraction disk costing (pgrust-only, AMFLAG_PGRCOLUMNAR-gated;
@@ -4288,6 +4314,45 @@ fn calc_joinrel_size_estimate<'mcx>(
 
 #[cfg(test)]
 mod tests {
+    /// GL-GMLEADER-1 pins (the leader-consumption floor, exhaustive over
+    /// the uplift's regions): the product defaults uplift GM rows to C's
+    /// per-row rate; C-parity sessions (rate >= the floor) and
+    /// explicitly-zeroed transport (the forced-plan bench seams) pay
+    /// ZERO delta; the floored total equals the same session at
+    /// parallel_tuple_cost == the floor (the GL-STRAGG-2 bisection
+    /// equivalence — ptc=0.1 ALONE restored C's election, and this term
+    /// reproduces exactly that arithmetic at the default rates).
+    #[test]
+    fn gm_leader_floor_prices_leader_consumption() {
+        if std::env::var("PGRUST_GM_LEADER_MIN_TUPLE_COST").is_ok() {
+            return; // env-swept run; the pin targets the default posture
+        }
+        let floor = gucs::gm_leader_min_tuple_cost();
+        assert_eq!(floor, 0.1, "the floor IS C's parallel_tuple_cost default");
+        assert_eq!(floor, gucs::DEFAULT_GM_LEADER_MIN_TUPLE_COST);
+        let rows = 6_680_000.0; // the witnessed catastrophe stream
+        // Product default (heap 0.01): uplift = (0.1-0.01)*rows*1.05 —
+        // the exact delta the witnessed ptc=0.1 bisection added.
+        let up = super::gm_leader_uplift(0.01, rows);
+        assert!((up - 0.09 * rows * 1.05).abs() < 1e-6);
+        let bisection_total = 0.1 * rows * 1.05;
+        assert!((0.01 * rows * 1.05 + up - bisection_total).abs() < 1e-6);
+        // pgrcolumnar default (0.005): floored the same way.
+        let up_cb = super::gm_leader_uplift(0.005, rows);
+        assert!((up_cb - 0.095 * rows * 1.05).abs() < 1e-6);
+        // C-parity sessions: at or above the floor, zero delta.
+        assert_eq!(super::gm_leader_uplift(0.1, rows), 0.0);
+        assert_eq!(super::gm_leader_uplift(0.5, rows), 0.0);
+        // Zeroed-transport bench seams: exempt.
+        assert_eq!(super::gm_leader_uplift(0.0, rows), 0.0);
+        // Small streams barely feel it (self-scoping): a partial-agg-fed
+        // GM of 63k groups x 5 participants pays ~30k units — noise
+        // against the plans it rides in; the 6.68M raw-row stream pays
+        // ~631k — the witnessed election-flipping magnitude.
+        assert!(super::gm_leader_uplift(0.01, 315_000.0) < 31_000.0);
+        assert!(super::gm_leader_uplift(0.01, rows) > 600_000.0);
+    }
+
     use super::*;
 
     // -- Step-0a: pgrcolumnar Gather pricing is GUC-anchored -----------------
