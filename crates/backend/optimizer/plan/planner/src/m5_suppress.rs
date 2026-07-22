@@ -6639,15 +6639,43 @@ fn reduced_affine_of_var(expr: Node<'_>, rti: usize, base_attno: i16) -> bool {
 /// (28x, tsv row gap:agg-expr-keys) — the refusal is an estimation
 /// artifact of the riders, not a measured hold economics. Knob-ON
 /// estimates on the base key alone (the pgset form, riders skipped); the
-/// §10 hold then judges the HONEST cardinality — no bypass is added, so a
-/// shape whose base-Var NDV genuinely crosses the hold keeps Gather
-/// (fail closed; the forced census bound 0.197/0.193 hot is the ladder's
-/// re-open evidence if the deduped estimate still refuses at full scale).
-/// Knob-off keeps today's full-list estimate byte-for-byte.
+/// §10 hold then judges the HONEST cardinality.
+///
+/// LADDER FINDING (GL-ELECT22-1 100M pair, job -4b6f): the dedup ALONE is
+/// insufficient at full scale — the single-key estimate still crosses the
+/// 4e6 hold on the 100M bank (the shape stayed refused, 6.7s unforced,
+/// fail-closed as designed), while the forced series proves the engaged
+/// arm wins the exact shape at 0.197/0.193 hot (31x). So the SAME knob
+/// also transplants the TOPN-HIGHGROUPS exemption to this path (the
+/// charter letter's named expectation — "the topnhigh bypass would clear
+/// it once keyed"): the bounded winner-selection composition (sort key in
+/// the finalfn-free int8-transvalue set, Const bound within the shared
+/// sink cap) clears the hold under its OWN fail-closed ceiling below.
+/// Like the extractkey twin (fix 4b), the suppressed plan is
+/// full-drain-into-bounded-sort economics — witnessed-band only, never
+/// unbounded. Knob-off keeps today's full-list estimate AND the plain
+/// hold byte-for-byte.
 fn redkey_affine_dedup_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
         knob_spelling_armed(std::env::var("PGRUST_M5_REDKEY_AFFINE_DEDUP").as_deref().ok())
+    })
+}
+
+/// Fix-3 exemption ceiling (env-overridable
+/// `PGRUST_M5_REDKEY_TOPN_MAX_GROUPS`, the ladder's sweep vehicle):
+/// PROVISIONAL 16M — covers both estimate bases of the census cell (the
+/// full-list 9.69M and the deduped single-key band) with headroom, below
+/// the untested radix-exchange territory the §10 hold protects.
+/// GL-ELECT22-1's ladder owns the bound.
+fn redkey_topn_max_groups() -> f64 {
+    static CEIL: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *CEIL.get_or_init(|| {
+        std::env::var("PGRUST_M5_REDKEY_TOPN_MAX_GROUPS")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| *v > 0.0)
+            .unwrap_or(16_000_000.0)
     })
 }
 
@@ -6711,6 +6739,10 @@ fn classify_reduced_exprkey<'mcx>(
     }
     // Optional top-N: ORDER BY <fold-whitelisted agg> LIMIT, no OFFSET — or a
     // plain grouped emit (no sort/limit). Anything else is not this shape.
+    // GL-ELECT22-1 fix 3 (fn doc on the knob): the winner-selection
+    // composition (bounded, int8-raw sort key, bound within the sink cap)
+    // is captured here for the hold exemption below.
+    let mut topn_hold_exempt_shape = false;
     if !parse.sortClause.is_nil() || parse.limitCount.is_some() {
         if parse.sortClause.len() != 1
             || parse.limitCount.is_none()
@@ -6727,6 +6759,9 @@ fn classify_reduced_exprkey<'mcx>(
         if !is_whitelisted_agg(tle.expr, rti, PLAIN_FOLD_AGGS) {
             return Ok(None);
         }
+        topn_hold_exempt_shape = is_whitelisted_agg(tle.expr, rti, TOPN_INT8_RAW_SORT_AGGS)
+            && const_count(parse.limitCount)
+                .is_some_and(|b| b > 0 && b <= SINK_TOPN_MAX_BOUND_MIRROR);
     }
     // groupby_high hold (shared floor): matched-shape-but-floored keeps
     // Gather (Ok(Some(false))), same as the bare-Var grouped path.
@@ -6762,6 +6797,24 @@ fn classify_reduced_exprkey<'mcx>(
         }
     };
     if ngroups >= groupby_high_floor() {
+        // GL-ELECT22-1 fix 3 (fn doc on the knob): the bounded
+        // winner-selection composition clears the hold knob-ON, inside
+        // the witnessed band only; everything else keeps the fail-closed
+        // refusal byte-for-byte. Own trace label for the ladder.
+        if redkey_affine_dedup_enabled()
+            && topn_hold_exempt_shape
+            && ngroups < redkey_topn_max_groups()
+        {
+            return Ok(Some(finish_textdistinct(
+                run,
+                "reduced-exprkey-grouped-topn-highgroups",
+                textdistinct_guard(),
+                relid,
+                ngroups,
+                rel_rows,
+                rel_pages,
+            )?));
+        }
         return Ok(Some(false));
     }
     Ok(Some(finish_textdistinct(
