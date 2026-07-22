@@ -1065,8 +1065,132 @@ pub fn ImportSnapshot(idstr: &str) -> PgResult<()> {
             .with_error_location(loc("ImportSnapshot"))
             .into());
     }
+    // Read the whole file, then parse ExportSnapshot's line format.
+    let mut filebuf = Vec::new();
+    let mut off: i64 = 0;
+    loop {
+        let mut chunk = [0u8; 4096];
+        let n = fd::pg_pread(snapfd, &mut chunk, off);
+        if n < 0 {
+            fd::CloseTransientFile(snapfd);
+            return Err(ereport(ERROR)
+                .with_saved_errno(fd::get_errno())
+                .errcode_for_file_access()
+                .errmsg(format!("could not read file \"{path}\": %m"))
+                .into_error()
+                .with_error_location(loc("ImportSnapshot"))
+                .into());
+        }
+        if n == 0 {
+            break;
+        }
+        filebuf.extend_from_slice(&chunk[..n as usize]);
+        off += n as i64;
+    }
     fd::CloseTransientFile(snapfd);
-    unported("ImportSnapshot parse/install (ExportSnapshot phase 2)")
+
+    let invalid = || -> Box<types_error::PgError> {
+        ereport(ERROR)
+            .errcode(types_error::ERRCODE_INVALID_TEXT_REPRESENTATION)
+            .errmsg(format!("invalid snapshot data in file \"{path}\""))
+            .into_error()
+            .with_error_location(loc("ImportSnapshot"))
+            .into()
+    };
+    let text = core::str::from_utf8(&filebuf).map_err(|_| invalid())?;
+    let mut lines = text.lines();
+    // parse{Int,Xid,Vxid}FromText: each field is mandatory and ordered.
+    let mut field = |prefix: &str| -> PgResult<&str> {
+        let line = lines.next().ok_or_else(invalid)?;
+        line.strip_prefix(prefix).ok_or_else(|| invalid().into())
+    };
+
+    let vxid_raw = field("vxid:")?;
+    let (src_procno_s, src_lxid_s) = vxid_raw.split_once('/').ok_or_else(invalid)?;
+    let src_procno: i32 = src_procno_s.parse().map_err(|_| invalid())?;
+    let src_lxid: u64 = src_lxid_s.parse().map_err(|_| invalid())?;
+    let _src_pid: i64 = field("pid:")?.parse().map_err(|_| invalid())?;
+    let src_dbid: types_core::Oid = field("dbid:")?.parse().map_err(|_| invalid())?;
+    let src_isolevel: i32 = field("iso:")?.parse().map_err(|_| invalid())?;
+    let src_readonly: i32 = field("ro:")?.parse().map_err(|_| invalid())?;
+
+    let xmin: TransactionId = field("xmin:")?.parse().map_err(|_| invalid())?;
+    let xmax: TransactionId = field("xmax:")?.parse().map_err(|_| invalid())?;
+    let xcnt: usize = field("xcnt:")?.parse().map_err(|_| invalid())?;
+    if xcnt > procarray::GetMaxSnapshotXidCount() {
+        return Err(invalid());
+    }
+    let mut xip = Vec::with_capacity(xcnt);
+    for _ in 0..xcnt {
+        xip.push(field("xip:")?.parse().map_err(|_| invalid())?);
+    }
+    let suboverflowed = field("sof:")?.parse::<i32>().map_err(|_| invalid())? != 0;
+    let mut subxip = Vec::new();
+    if !suboverflowed {
+        let sxcnt: usize = field("sxcnt:")?.parse().map_err(|_| invalid())?;
+        if sxcnt > procarray::GetMaxSnapshotSubxidCount() {
+            return Err(invalid());
+        }
+        subxip.reserve(sxcnt);
+        for _ in 0..sxcnt {
+            subxip.push(field("sxp:")?.parse().map_err(|_| invalid())?);
+        }
+    }
+    let taken_during_recovery = field("rec:")?.parse::<i32>().map_err(|_| invalid())? != 0;
+
+    // Sanity checks on the critical fields (snapmgr.c:1487).
+    if src_lxid == 0
+        || src_procno < 0
+        || src_dbid == types_core::InvalidOid
+        || !types_core::TransactionIdIsNormal(xmin)
+        || !types_core::TransactionIdIsNormal(xmax)
+    {
+        return Err(invalid());
+    }
+
+    // A serializable importer needs a serializable read-compatible source
+    // (predicate.c constraints, snapmgr.c:1497).
+    if xact_seams::isolation_is_serializable::call() {
+        if src_isolevel != types_core::xact::XACT_SERIALIZABLE {
+            return Err(ereport(ERROR)
+                .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg("a serializable transaction cannot import a snapshot from a non-serializable transaction")
+                .into_error()
+                .with_error_location(loc("ImportSnapshot"))
+                .into());
+        }
+        if src_readonly != 0 && !xact_seams::xact_read_only::call() {
+            return Err(ereport(ERROR)
+                .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errmsg("a non-read-only serializable transaction cannot import a snapshot from a read-only transaction")
+                .into_error()
+                .with_error_location(loc("ImportSnapshot"))
+                .into());
+        }
+    }
+
+    // Cross-database imports would not be protected by the source's xmin
+    // (snapmgr.c:1512).
+    if src_dbid != init_small::globals::MyDatabaseId() {
+        return Err(ereport(ERROR)
+            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errmsg("cannot import a snapshot from a different database")
+            .into_error()
+            .with_error_location(loc("ImportSnapshot"))
+            .into());
+    }
+
+    let snapshot = SerializedSnapshot {
+        xmin,
+        xmax,
+        xip,
+        subxip,
+        suboverflowed,
+        takenDuringRecovery: taken_during_recovery,
+        curcid: types_core::FirstCommandId,
+        vistest: GlobalVisStateHandle::new(0),
+    };
+    SetTransactionSnapshot(&snapshot, src_procno)
 }
 
 pub fn ThereAreNoPriorRegisteredSnapshots() -> bool {

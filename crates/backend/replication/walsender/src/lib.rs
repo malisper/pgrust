@@ -963,13 +963,9 @@ fn CreateReplicationSlot(mcx: mcx::Mcx<'_>, cmd: CreateReplicationSlotCmd) -> Pg
                         .finish(loc(1286, "CreateReplicationSlot"));
                 }
             }
-            CrsSnapshotAction::ExportSnapshot => {
-                panic!(
-                    "walsender: CREATE_REPLICATION_SLOT ... LOGICAL EXPORT_SNAPSHOT unported \
-                     (SnapBuildExportSnapshot; use SNAPSHOT 'nothing')"
-                );
-            }
-            CrsSnapshotAction::NoExportSnapshot => {}
+            // EXPORT_SNAPSHOT (the default) exports after the start point is
+            // found, below.
+            CrsSnapshotAction::ExportSnapshot | CrsSnapshotAction::NoExportSnapshot => {}
         }
 
         slot::ReplicationSlotCreate(
@@ -987,7 +983,10 @@ fn CreateReplicationSlot(mcx: mcx::Mcx<'_>, cmd: CreateReplicationSlotCmd) -> Pg
         // WalSndPrepareWrite/WriteData, but FindStartpoint runs fast_forward
         // -- the SQL path (slotfuncs.c) passes NULLs the same way here).
         // USE_SNAPSHOT (and EXPORT) build a full snapshot (walsender.c:1310).
-        let need_full_snapshot = opts.snapshot_action == CrsSnapshotAction::UseSnapshot;
+        let need_full_snapshot = matches!(
+            opts.snapshot_action,
+            CrsSnapshotAction::UseSnapshot | CrsSnapshotAction::ExportSnapshot
+        );
         let mut ctx = logical::CreateInitDecodingContext(
             cmd.plugin.as_deref().unwrap_or(""),
             Vec::new(),
@@ -1000,7 +999,12 @@ fn CreateReplicationSlot(mcx: mcx::Mcx<'_>, cmd: CreateReplicationSlotCmd) -> Pg
 
         logical_decode::DecodingContextFindStartpoint(&mut ctx)?;
 
-        if opts.snapshot_action == CrsSnapshotAction::UseSnapshot {
+        if opts.snapshot_action == CrsSnapshotAction::ExportSnapshot {
+            // Export the snapshot so it can be imported by SET TRANSACTION
+            // SNAPSHOT in other sessions (walsender.c:1320); the name rides
+            // the result row.
+            snapshot_name = Some(ctx.snapshot_builder.export_snapshot()?);
+        } else if opts.snapshot_action == CrsSnapshotAction::UseSnapshot {
             // Make the initial snapshot the surrounding transaction's
             // snapshot (walsender.c:1326: SnapBuildInitialSnapshot +
             // RestoreTransactionSnapshot against our own proc).
@@ -1015,7 +1019,6 @@ fn CreateReplicationSlot(mcx: mcx::Mcx<'_>, cmd: CreateReplicationSlotCmd) -> Pg
         if !cmd.temporary {
             slot::ReplicationSlotPersist()?;
         }
-        let _ = &mut snapshot_name; // stays None for SNAPSHOT 'nothing'
     }
 
     let slot_ref = slot::MyReplicationSlot().expect("CreateReplicationSlot: no slot acquired");
