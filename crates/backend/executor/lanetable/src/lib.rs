@@ -1228,6 +1228,254 @@ impl LaneAggTable {
         }
     }
 
+    /// Batched-install probe (`probe_int_batch` output semantics, installs
+    /// deferred — the all-new-keys-regime accept shape): pass 1 probes the
+    /// WHOLE pre-hashed batch with ZERO inserts (the table is structurally
+    /// frozen, so the hoisted raw parts live for the entire pass and a miss
+    /// costs no loop restart), recording misses as pending in row order;
+    /// pass 2 installs the pending rows in row order with a write-intent
+    /// slot prefetch ahead (the touched lines are cache-hot from pass 1).
+    ///
+    /// Output contract (parity): `out[i]` / `new_out` are byte-identical to
+    /// [`Self::probe_int_batch`]'s — same hash bytes, same create ORDER
+    /// (row order; an in-batch duplicate of a pending key resolves to the
+    /// first install's group at install time), same linear-probe walk
+    /// family. Only the WHEN of the entry/row stores moves, and nothing
+    /// downstream reads mid-batch state.
+    pub fn probe_int_batch_install(
+        &mut self,
+        keys: &[i64],
+        hashes: &mut Vec<u64>,
+        out: &mut Vec<*mut u8>,
+        new_out: &mut Vec<u32>,
+    ) {
+        debug_assert_eq!(self.repr, KeyRepr::Int);
+        out.clear();
+        out.reserve(keys.len());
+        new_out.clear();
+        hashes.clear();
+        hashes.reserve(keys.len());
+        // Hash-kind branch hoisted (same bytes as probe_int_batch).
+        match self.hash {
+            HashKind::Fmix => {
+                for &k in keys {
+                    hashes.push(hash_int(k as u64));
+                }
+            }
+            HashKind::Crc => {
+                for &k in keys {
+                    hashes.push(hash_int_crc(k as u64));
+                }
+            }
+        }
+        if self.slot_words == 2 {
+            self.probe_pass_frozen::<true>(keys, hashes, out, new_out);
+            self.install_pending::<true>(keys, hashes, out, new_out);
+        } else {
+            self.probe_pass_frozen::<false>(keys, hashes, out, new_out);
+            self.install_pending::<false>(keys, hashes, out, new_out);
+        }
+    }
+
+    /// Pass 1 of [`Self::probe_int_batch_install`]: probe-only (no insert
+    /// ever — the hoist lives for the whole batch). Hits push their states
+    /// pointer; misses push null and their ordinal onto `new_out`.
+    fn probe_pass_frozen<const INLINE: bool>(
+        &mut self,
+        keys: &[i64],
+        hashes: &[u64],
+        out: &mut Vec<*mut u8>,
+        new_out: &mut Vec<u32>,
+    ) {
+        debug_assert_eq!(keys.len(), hashes.len());
+        let kw = self.key_words;
+        let sw = if INLINE { 2 } else { 1 };
+        let la = probe_lookahead(if INLINE {
+            PREFETCH_LOOKAHEAD_INLINE
+        } else {
+            PREFETCH_LOOKAHEAD
+        })
+        .min(keys.len() / 4);
+        // Hoisted raw parts — valid for the WHOLE pass (no inserts).
+        let bp: *mut EntrySet = match &mut self.buckets {
+            Some(bs) => bs.as_mut_ptr(),
+            None => core::ptr::null_mut(),
+        };
+        let (sp_entries, sp_mask) = {
+            let s = &mut self.single;
+            (s.entries.as_mut_ptr(), s.mask)
+        };
+        let rows_chunks = self.rows.bases.as_ptr();
+        let rows_shift = self.rows.chunk_shift;
+        let rows_cmask = self.rows.chunk_mask;
+        let rows_stride = self.rows.stride_words;
+        let salt_on = !INLINE && self.total_members > SALT_DISABLE_MAX_ENTRIES;
+        for i in 0..keys.len() {
+            let j = i + la;
+            if la != 0 && j < keys.len() {
+                // SAFETY: j < keys.len() == hashes.len().
+                let h = unsafe { *hashes.get_unchecked(j) };
+                let (e_ptr_j, mask_j) = if bp.is_null() {
+                    (sp_entries, sp_mask)
+                } else {
+                    // SAFETY: two-level tables have exactly 256 buckets.
+                    let set = unsafe { &mut *bp.add(bucket_of(h)) };
+                    (set.entries.as_mut_ptr(), set.mask)
+                };
+                // SAFETY: masked slot index × slot words (hint only).
+                prefetch(unsafe { e_ptr_j.add(((h as usize) & mask_j) * sw) });
+            }
+            // SAFETY: i < keys.len() == hashes.len().
+            let key = unsafe { *keys.get_unchecked(i) };
+            let hash = unsafe { *hashes.get_unchecked(i) };
+            let (e_ptr, mask) = if bp.is_null() {
+                (sp_entries, sp_mask)
+            } else {
+                // SAFETY: two-level tables have exactly 256 buckets.
+                let set = unsafe { &mut *bp.add(bucket_of(hash)) };
+                (set.entries.as_mut_ptr(), set.mask)
+            };
+            let salted = if salt_on { salt_of(hash) } else { 0 };
+            let mut pos = (hash as usize) & mask;
+            let hit: Option<*mut u64> = loop {
+                if INLINE {
+                    // SAFETY: masked slot index, 2 words per slot.
+                    let sp = unsafe { e_ptr.add(pos * 2) };
+                    // SAFETY: in-bounds slot words.
+                    let (k, r) = unsafe { (*sp, *sp.add(1)) };
+                    if r == 0 {
+                        break None;
+                    }
+                    if k as i64 == key {
+                        let row = (r - 1) as usize;
+                        // SAFETY: live row (parts stable — no inserts).
+                        let p = unsafe {
+                            row_ptr_raw(rows_chunks, rows_shift, rows_cmask, rows_stride, row)
+                        };
+                        prefetch(p);
+                        break Some(p);
+                    }
+                } else {
+                    // SAFETY: masked entry index.
+                    let e = unsafe { *e_ptr.add(pos) };
+                    if e == 0 {
+                        break None;
+                    }
+                    if salted == 0 || (e & !REF_MASK) == salted {
+                        let row = ((e & REF_MASK) - 1) as usize;
+                        // SAFETY: live row.
+                        let p = unsafe {
+                            row_ptr_raw(rows_chunks, rows_shift, rows_cmask, rows_stride, row)
+                        };
+                        // SAFETY: word 0 is the key word.
+                        if unsafe { *p } as i64 == key {
+                            break Some(p);
+                        }
+                    }
+                }
+                pos = (pos + 1) & mask;
+            };
+            match hit {
+                // SAFETY: states follow the key words.
+                Some(p) => out.push(unsafe { p.add(kw).cast() }),
+                None => {
+                    out.push(core::ptr::null_mut());
+                    new_out.push(i as u32);
+                }
+            }
+        }
+    }
+
+    /// Pass 2 of [`Self::probe_int_batch_install`]: install the pending
+    /// misses in row order. Each pending row re-walks from its home slot
+    /// (entries added by EARLIER pending installs are visible — an in-batch
+    /// duplicate resolves to a hit here and is dropped from `new_out`),
+    /// then installs through the incumbent [`Self::insert_int`] (grow /
+    /// convert / chunk-alloc laws verbatim). A write-intent prefetch runs
+    /// [`PREFETCH_LOOKAHEAD`] pendings ahead.
+    fn install_pending<const INLINE: bool>(
+        &mut self,
+        keys: &[i64],
+        hashes: &[u64],
+        out: &mut Vec<*mut u8>,
+        new_out: &mut Vec<u32>,
+    ) {
+        let kw = self.key_words;
+        let la = probe_lookahead(PREFETCH_LOOKAHEAD).min(new_out.len() / 4);
+        let mut w = 0usize;
+        for j in 0..new_out.len() {
+            if la != 0 && j + la < new_out.len() {
+                // SAFETY: pending ordinals index keys/hashes.
+                let h = unsafe {
+                    *hashes.get_unchecked(*new_out.get_unchecked(j + la) as usize)
+                };
+                let set = self.set_for(h);
+                let sw = set.slot_words;
+                // SAFETY: masked slot index × slot words (hint only).
+                prefetch_w(unsafe {
+                    set.entries.as_ptr().add(((h as usize) & set.mask) * sw)
+                });
+            }
+            let r = new_out[j];
+            let key = keys[r as usize];
+            let hash = hashes[r as usize];
+            // Re-walk from the home slot (installs since pass 1 are
+            // visible; the walk family is the incumbent probe's).
+            let salted = if !INLINE && self.salt_enabled() { salt_of(hash) } else { 0 };
+            let set = self.set_for(hash);
+            let mask = set.mask;
+            let e_ptr = set.entries.as_ptr();
+            let mut pos = (hash as usize) & mask;
+            let mut dup: Option<*mut u64> = None;
+            loop {
+                if INLINE {
+                    // SAFETY: masked slot index, 2 words per slot.
+                    let sp = unsafe { e_ptr.add(pos * 2) };
+                    // SAFETY: in-bounds slot words.
+                    let (k, rw) = unsafe { (*sp, *sp.add(1)) };
+                    if rw == 0 {
+                        break;
+                    }
+                    if k as i64 == key {
+                        dup = Some(self.rows.row_ptr(((rw - 1)) as usize));
+                        break;
+                    }
+                } else {
+                    // SAFETY: masked entry index.
+                    let e = unsafe { *e_ptr.add(pos) };
+                    if e == 0 {
+                        break;
+                    }
+                    if salted == 0 || (e & !REF_MASK) == salted {
+                        let row = ((e & REF_MASK) - 1) as usize;
+                        let p = self.rows.row_ptr(row);
+                        // SAFETY: word 0 is the key word.
+                        if unsafe { *p } as i64 == key {
+                            dup = Some(p);
+                            break;
+                        }
+                    }
+                }
+                pos = (pos + 1) & mask;
+            }
+            match dup {
+                Some(p) => {
+                    // In-batch duplicate: resolves to the earlier install.
+                    // SAFETY: states follow the key words.
+                    out[r as usize] = unsafe { p.add(kw).cast() };
+                }
+                None => {
+                    let pr = self.insert_int(key, hash, pos);
+                    out[r as usize] = pr.states;
+                    debug_assert!(pr.is_new);
+                    new_out[w] = r;
+                    w += 1;
+                }
+            }
+        }
+        new_out.truncate(w);
+    }
+
     // -- Int128 keys (packed multi-key composites) ---------------------------
 
     /// Probe/insert one 2-word packed key with its [`Self::hash_key_i128`]
@@ -2016,6 +2264,25 @@ fn prefetch(p: *const u64) {
     // SAFETY: prfm is a hint; any address is allowed.
     unsafe {
         core::arch::asm!("prfm pldl1keep, [{0}]", in(reg) p, options(nostack, preserves_flags));
+    }
+    #[cfg(all(target_arch = "x86_64", not(miri)))]
+    // SAFETY: prefetch is a hint; any address is allowed.
+    unsafe {
+        core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T0 }>(p as *const i8);
+    }
+    #[cfg(any(miri, not(any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    let _ = p;
+}
+
+/// Best-effort WRITE-intent prefetch (L1) — the batched-install pass 2
+/// hint (the target line takes a store). Same no-op contract as
+/// [`prefetch`].
+#[inline(always)]
+fn prefetch_w(p: *const u64) {
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
+    // SAFETY: prfm is a hint; any address is allowed.
+    unsafe {
+        core::arch::asm!("prfm pstl1keep, [{0}]", in(reg) p, options(nostack, preserves_flags));
     }
     #[cfg(all(target_arch = "x86_64", not(miri)))]
     // SAFETY: prefetch is a hint; any address is allowed.
