@@ -2144,6 +2144,23 @@ fn agg_arm<'mcx>(
                 }
             }
         }
+        PlanStateNode::Agg(child) => {
+            // GL-ALPHA1-EMIT-1 dispatch hook (PGRUST_LANE_AGG_EMIT_BATCH,
+            // default OFF): plain Agg over a hashed-Agg child — drain the
+            // child's runtime-sink ADOPTED EMIT in per-bucket blocks instead
+            // of the per-emitted-row pull chain. Falls through to the
+            // UNCHANGED per-tuple agg over the child's own dispatch on
+            // refuse, byte-identically.
+            if crate::lanev2::enabled() {
+                if let Some(r) = crate::lanev2::try_own_plain_agg_over_agg_emit(
+                    agg,
+                    &mut **child,
+                    estate,
+                )? {
+                    return Ok(r);
+                }
+            }
+        }
         _ => {}
     }
     ::nodeagg::exec_agg(agg, estate, |e| exec_proc_node(outer, e))

@@ -62,6 +62,7 @@ pub mod spankey;
 
 pub use compact::{
     agg_hash_compact_armed, agg_hash_compact_backstop, agg_hash_compact_batch,
+    compact_batch_install_enabled,
     agg_emit_mark_drained, batch_emit_row, batch_emit_scan_block, batch_emit_set_block,
     topk_finalize_select, BATCH_EMIT_BLOCK,
     agg_hash_compact_batch_mk1, agg_hash_compact_batch_mk2, agg_hash_compact_disarm,

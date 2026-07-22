@@ -4559,6 +4559,30 @@ pub fn agg_sink_emit_take_winners(node: &mut AggStateData<'_>) -> Option<Vec<(u1
     node.sink_emit.as_mut().and_then(|st| st.winners.take())
 }
 
+/// True when the adopted emit carries a composed top-N winner list — the
+/// winner list IS the drain in that mode, so block consumers that walk the
+/// buckets must stand down (the cursor and winner-directed drains own it).
+pub fn agg_sink_emit_has_winners(node: &AggStateData<'_>) -> bool {
+    node.sink_emit.as_ref().is_some_and(|st| st.winners.is_some())
+}
+
+/// Spend the adopted emit exactly as the cursor drain's EOF does: cursor
+/// parked past the last bucket, `agg_done` set, STATE KEPT (its bufs'
+/// arenas back byref datums handed out during the drain — the aggcontext
+/// lifetime analog `agg_sink_emit_next`'s EOF documents; it drops at
+/// rescan/teardown through `agg_sink_reset_emit`). For batch drains whose
+/// consumer read the rows without advancing the cursor: a stray later pull
+/// must serve EOF, never re-emit row 0. Winner-composed drains never come
+/// here (block consumers refuse them at admission).
+pub fn agg_sink_emit_consume_all(node: &mut AggStateData<'_>) {
+    if let Some(st) = node.sink_emit.as_mut() {
+        debug_assert!(st.winners.is_none(), "block drain over a winner-composed emit");
+        st.bucket = SINK_NBUCKETS;
+        st.pos = 0;
+    }
+    node.agg_done = true;
+}
+
 /// Store row `row` of bucket `b` into the node's result slot (the
 /// agg_sink_emit_next body, cursor-free). Caller drives bucket/row order.
 pub fn agg_sink_emit_block_row<'mcx>(
