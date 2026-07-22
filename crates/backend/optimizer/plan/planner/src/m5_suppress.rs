@@ -1103,8 +1103,8 @@ fn extract_exprkey_guard() -> FloorGuard {
 }
 
 /// GL-ELECT22-1 fix 4b — extract-exprkey winner-selection hold exemption
-/// (`PGRUST_M5_EXTRACTKEY_TOPN_HIGHGROUPS`, DEFAULT OFF; ON iff exactly
-/// `1|on`). `classify_extract_exprkey` applies the §10 hold with NO
+/// (`PGRUST_M5_EXTRACTKEY_TOPN_HIGHGROUPS`).
+/// `classify_extract_exprkey` applies the §10 hold with NO
 /// top-N exemption (fail-closed by design when the path landed): at the
 /// pinned 100M census the ts-extract family estimates 17,614,259 groups
 /// (== the two-key base shape's — the extract key adds nothing to the
@@ -1118,10 +1118,16 @@ fn extract_exprkey_guard() -> FloorGuard {
 /// suppressed serial plan drains every group into the bounded sort
 /// (full-drain economics, NOT the winners-only grouped-sink bypass), so
 /// the exemption stays witnessed-band only.
+///
+/// DEFAULT ON (GL-ELECT22-1 flip; `=0|off` kills): 100M witnessed pair
+/// @ c9eb09e803/240b738c9 (jobs -4b6f/-5f1a vs OFF baseline -5ca6) —
+/// knob-ON suppresses at ngroups=17,614,259 (under the 24M ceiling;
+/// label extract-exprkey-grouped-topn-highgroups), hot 1.052-1.139 vs
+/// the 1.076 forced recovery bound, byte parity across arms.
 fn extractkey_topn_highgroups_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        knob_spelling_armed(
+        tier2_car_kill_spelling_on(
             std::env::var("PGRUST_M5_EXTRACTKEY_TOPN_HIGHGROUPS").as_deref().ok(),
         )
     })
@@ -1455,8 +1461,7 @@ fn cbkeys_guard() -> FloorGuard {
 /// (canonical shapes spill through the C2 bytes record, canon-sink car 3).
 /// GL-MKTEXT-1 owns the measured bound.
 ///
-/// GL-ELECT22-1 fix 1 — CEILING REFIT (`PGRUST_M5_MKTEXT_CEIL_V2`, DEFAULT
-/// OFF; ON iff exactly `1|on`, the knob_spelling_armed idiom): the 16M
+/// GL-ELECT22-1 fix 1 — CEILING REFIT (`PGRUST_M5_MKTEXT_CEIL_V2`): the 16M
 /// provisional was derived at the mid-scale fixture and never witnessed at
 /// the full-scale bank, where the two-key int+text census family's own
 /// plan-time estimate is 17,614,259 (census pgrust-cb-standard-1784678138
@@ -1467,12 +1472,19 @@ fn cbkeys_guard() -> FloorGuard {
 /// tens of seconds). v2 lifts the DEFAULT ceiling to the refit band bound
 /// (24M: the census family estimate + estimate-wobble headroom, below the
 /// unladdered 32M-class rung); the explicit env override still wins over
-/// both defaults (the ladder's sweep vehicle). GL-ELECT22-1's witnessed
-/// ladder at the 17-20M..32M-class band owns the final bound and the flip.
+/// both defaults (the ladder's sweep vehicle).
+///
+/// DEFAULT ON (GL-ELECT22-1 flip; `=0|off` kills — the flipped-kill
+/// idiom): 100M witnessed pair @ c9eb09e803/240b738c9 (jobs -4b6f/-5f1a
+/// vs OFF baseline -5ca6): the bank reproduces the census family
+/// estimate EXACTLY (17,614,259); knob-ON suppresses BOTH compositions
+/// with hot 0.638-0.676 (topn; forced bound 0.632) and 0.144-0.147
+/// (freeze; bound 0.134), byte parity across arms, engine pinned. The
+/// >24M band stays unladdered — the ceiling holds there (fail closed).
 fn mktext_ceil_v2_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        knob_spelling_armed(std::env::var("PGRUST_M5_MKTEXT_CEIL_V2").as_deref().ok())
+        tier2_car_kill_spelling_on(std::env::var("PGRUST_M5_MKTEXT_CEIL_V2").as_deref().ok())
     })
 }
 
@@ -1731,19 +1743,26 @@ fn topn_highgroups_enabled() -> bool {
 /// bypass condition (int8-raw sort key, bound cap, no count(DISTINCT)/
 /// strminmax/mk-family riders) holds unchanged. Composes with
 /// SE-CONSTKEY: with EITHER knob off the shape keeps today's refusal
-/// byte-for-byte. GL-ELECT22-1's witnessed ladder cell (const+text
-/// winner-selection at the census band, const-less sibling as control)
-/// owns the flip.
+/// byte-for-byte.
+///
+/// DEFAULT ON (GL-ELECT22-1 flip; `=0|off` kills): 100M witnessed pair
+/// @ c9eb09e803/240b738c9 (jobs -4b6f/-5f1a vs OFF baseline -5ca6) —
+/// knob-ON suppresses at ngroups=18,436,094 (label
+/// constkey-grouped-topn-highgroups), hot 1.700-1.847 BEATING the
+/// forced recovery bound (1.900); the const-less control cell keeps
+/// routing through the base bypass unchanged; byte parity across arms.
 fn topn_highgroups_constkey_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        knob_spelling_armed(std::env::var("PGRUST_M5_TOPN_HIGHGROUPS_CONSTKEY").as_deref().ok())
+        tier2_car_kill_spelling_on(
+            std::env::var("PGRUST_M5_TOPN_HIGHGROUPS_CONSTKEY").as_deref().ok(),
+        )
     })
 }
 
 /// GL-ELECT22-1 fix 4a — DISTINCT-sink winner-selection hold exemption
-/// (`PGRUST_M5_TOPN_HIGHGROUPS_DISTINCT`, DEFAULT OFF; ON iff exactly
-/// `1|on`). The TOPN-HIGHGROUPS exemption structurally excludes
+/// (`PGRUST_M5_TOPN_HIGHGROUPS_DISTINCT`). The TOPN-HIGHGROUPS
+/// exemption structurally excludes
 /// `n_count_distinct > 0`, so the text-key grouped count(DISTINCT int)
 /// top-N census shape refuses at the §10 hold (est 5,441,263 groups at
 /// the pinned 100M census; forced recovery bound 0.800/0.752 hot) even
@@ -1762,10 +1781,19 @@ fn topn_highgroups_constkey_enabled() -> bool {
 /// paremit kills are mirrored (`distinct_topn_arm_live`) — with either
 /// kill thrown the paremit is a FULL drain at census group counts,
 /// exactly what the hold prices, so the exemption disarms with them.
+///
+/// DEFAULT ON (GL-ELECT22-1 flip; `=0|off` kills): 100M witnessed pair
+/// @ c9eb09e803/240b738c9 (jobs -4b6f/-5f1a vs OFF baseline -5ca6) —
+/// knob-ON suppresses at ngroups=5,428,026 (under the 8M ceiling; label
+/// text-grouped-count-distinct-topn-highgroups), hot 0.910-1.034 vs the
+/// 0.800 forced recovery bound, byte parity across arms, memsample
+/// envelope clean (no OOM, no session deaths at the 27Gi pod class).
 fn topn_highgroups_distinct_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        knob_spelling_armed(std::env::var("PGRUST_M5_TOPN_HIGHGROUPS_DISTINCT").as_deref().ok())
+        tier2_car_kill_spelling_on(
+            std::env::var("PGRUST_M5_TOPN_HIGHGROUPS_DISTINCT").as_deref().ok(),
+        )
     })
 }
 
@@ -6626,7 +6654,7 @@ fn reduced_affine_of_var(expr: Node<'_>, rti: usize, base_attno: i16) -> bool {
 /// confirmation is fleet work; the arm's admission-time canonical-domain
 /// check (empty => refuse) is non-empty for int4 ±int4 by construction.
 /// GL-ELECT22-1 fix 3 — affine-derived-key DEDUP for the group estimate
-/// (`PGRUST_M5_REDKEY_AFFINE_DEDUP`, DEFAULT OFF; ON iff exactly `1|on`).
+/// (`PGRUST_M5_REDKEY_AFFINE_DEDUP`).
 /// Every non-representative key this recognizer admits is `base ± Const`
 /// — a pure function of the ONE representative Var — so the composite key
 /// set partitions the input EXACTLY as the base Var alone does: the true
@@ -6653,12 +6681,24 @@ fn reduced_affine_of_var(expr: Node<'_>, rti: usize, base_attno: i16) -> bool {
 /// sink cap) clears the hold under its OWN fail-closed ceiling below.
 /// Like the extractkey twin (fix 4b), the suppressed plan is
 /// full-drain-into-bounded-sort economics — witnessed-band only, never
-/// unbounded. Knob-off keeps today's full-list estimate AND the plain
+/// unbounded. Kill-off keeps today's full-list estimate AND the plain
 /// hold byte-for-byte.
+///
+/// DEFAULT ON (GL-ELECT22-1 flip; `=0|off` kills): 100M take-2 @
+/// 240b738c9 (job -5f1a vs OFF baseline -5ca6) — the exemption
+/// suppresses at ngroups=9,692,856 (the single-key estimate EQUALS the
+/// full-list one on this bank — the multi-key estimator already clamps
+/// here, so the exemption, not the dedup, is the binding fix; the dedup
+/// stays for banks where the riders genuinely multiply), label
+/// reduced-exprkey-grouped-topn-highgroups, hot 0.277 vs the 0.197
+/// forced recovery bound (take-1 refused posture: 6.7s), byte parity
+/// across arms AND vs the legacy plan's output.
 fn redkey_affine_dedup_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        knob_spelling_armed(std::env::var("PGRUST_M5_REDKEY_AFFINE_DEDUP").as_deref().ok())
+        tier2_car_kill_spelling_on(
+            std::env::var("PGRUST_M5_REDKEY_AFFINE_DEDUP").as_deref().ok(),
+        )
     })
 }
 
