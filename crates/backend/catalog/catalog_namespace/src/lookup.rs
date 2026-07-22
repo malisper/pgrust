@@ -109,9 +109,12 @@ pub fn LookupExplicitNamespace(nspname: &str, missing_ok: bool) -> PgResult<Oid>
     Ok(namespaceId)
 }
 
-pub fn LookupCreationNamespace(nspname: &str) -> PgResult<Oid> {
+pub fn LookupCreationNamespace(mcx: mcx::Mcx<'_>, nspname: &str) -> PgResult<Oid> {
+    // pg_temp alias (namespace.c): initialize-if-needed and return the
+    // session's temp namespace; no ACL check (it's ours by construction).
+    // SET SCHEMA callers then fail C's CheckSetNamespace temp-schema arm.
     if nspname == "pg_temp" {
-        panic!("LookupCreationNamespace: pg_temp alias (AccessTempTableNamespace) unported");
+        return crate::temp::GetTempTableNamespace(mcx);
     }
     let namespaceId = get_namespace_oid(nspname, false)?;
     const ACL_CREATE: u64 = 1 << 9;
