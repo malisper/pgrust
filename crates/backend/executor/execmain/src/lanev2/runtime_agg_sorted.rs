@@ -980,25 +980,28 @@ fn split_claims() -> bool {
     })
 }
 
-/// GL-Q2829-FIX-1 auto-arm (`PGRUST_RUNTIME_AGG_SORTED_AUTO`, DEFAULT OFF,
-/// armed iff exactly `1`/`on`): the ordered-grouped arm resolves its DOP
-/// through the router's agg-class resolution (bench GUC verbatim when set;
-/// else engine=runtime arms at `pgrust.runtime_dop`) — the hashed sink's
-/// exact arming — instead of the bench-GUC-only read. Closes the stock-
-/// defaults engagement hole on the suppressed presorted grouped class: the
-/// m5 carve deletes the exchange frame expecting the runtime engine to own
-/// the serial-shaped plan, but the ordered face never armed without an
-/// explicit `SET pgrust.runtime_agg_pool`, so the plan ran the SERIAL
-/// sorted-fold drive (measured 6x off the engaged arm on the class's
-/// composed shape). OFF = the historical bench-only read, byte-identical.
-/// The arm's own kill (`PGRUST_RUNTIME_AGG_SORTED`) and every admission
-/// gate below are unchanged — auto-arm only widens the DOP source.
+/// GL-Q2829-FIX-1 auto-arm (`PGRUST_RUNTIME_AGG_SORTED_AUTO`, DEFAULT ON
+/// since the string-agg-with-HAVING-class flip — Michael, 2026-07-22:
+/// "4 sounds good" to the auto-arm default; `=0|off` disarms, restoring
+/// the bench-GUC-only read byte-exactly): the ordered-grouped arm
+/// resolves its DOP through the router's agg-class resolution (bench GUC
+/// verbatim when set; else engine=runtime arms at `pgrust.runtime_dop`)
+/// — the hashed sink's exact arming — instead of the bench-GUC-only read.
+/// Closes the stock-defaults engagement hole on the suppressed presorted
+/// grouped class: the m5 carve deletes the exchange frame expecting the
+/// runtime engine to own the serial-shaped plan, but the ordered face
+/// never armed without an explicit `SET pgrust.runtime_agg_pool`, so the
+/// plan ran the SERIAL sorted-fold drive (measured 6-13x off the engaged
+/// arm on the class's composed shape, laptop 10M + fleet 100M born-RED
+/// legs). The arm's own kill (`PGRUST_RUNTIME_AGG_SORTED`) and every
+/// admission gate below are unchanged — auto-arm only widens the DOP
+/// source, and every refusal still lands the serial arm byte-identically.
 fn sorted_auto_enabled() -> bool {
     static B: OnceLock<bool> = OnceLock::new();
     crate::once_val(&B, || {
-        matches!(
+        !matches!(
             std::env::var("PGRUST_RUNTIME_AGG_SORTED_AUTO").as_deref(),
-            Ok("1") | Ok("on")
+            Ok("0") | Ok("off")
         )
     })
 }
