@@ -51,7 +51,7 @@ fn setup() {
             set: |v| WAL_SYNC_METHOD.store(v, Ordering::Relaxed),
         });
         aio_seams::pgaio_closing_fd::set(|_| {});
-        aio_seams::pgaio_io_start_readv::set(|_, _, _| {});
+        aio_seams::pgaio_io_start_readv::set(|_, _, _| Ok(()));
         waitevent_seams::pgstat_report_wait_start::set(|_| {});
         waitevent_seams::pgstat_report_wait_end::set(|| {});
         xact_seams::get_current_transaction_nest_level::set(|| NEST_LEVEL.with(|c| c.get()));

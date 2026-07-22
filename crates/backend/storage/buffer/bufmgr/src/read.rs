@@ -56,6 +56,16 @@ fn ResOwnerReleaseBufferIO(res: Datum) {
     AbortBufferIO(res.as_i32());
 }
 
+// ResourceOwnerForgetBufferIO for the AIO stage callback (pin handover).
+pub(crate) fn forget_buffer_io_resowner(buffer: Buffer) {
+    resowner::ResourceOwnerForget(
+        resowner::CurrentResourceOwner(),
+        Datum::from_i32(buffer),
+        &BUFFER_IO_DESC,
+    )
+    .expect("ResourceOwnerForgetBufferIO");
+}
+
 fn ResOwnerPrintBufferIO<'a>(mcx: mcx::Mcx<'a>, res: Datum) -> PgResult<mcx::PgString<'a>> {
     mcx::PgString::from_str_in(
         &format!("lost track of buffer IO on buffer {}", res.as_i32()),
@@ -64,7 +74,7 @@ fn ResOwnerPrintBufferIO<'a>(mcx: mcx::Mcx<'a>, res: Datum) -> PgResult<mcx::PgS
 }
 
 #[cold]
-fn loc(funcname: &'static str) -> ErrorLocation {
+pub(crate) fn loc(funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new("bufmgr.c", 0, funcname)
 }
 
@@ -98,8 +108,12 @@ pub fn ReadBufferWithoutRelcache(
     ReadBuffer_common(smgr, persistence, forknum, blkno, mode, strategy).map(|(b, _)| b)
 }
 
-/// Single-block synchronous core: PG18's StartReadBuffer/WaitReadBuffers pgaio
-/// pipeline collapsed to its io_method=sync behavior (aio unit owns async).
+/// ReadBuffer_common (bufmgr.c, C 18 shape): warm hits short-circuit at
+/// PinBufferForBlock; misses run the StartReadBuffer/WaitReadBuffers pgaio
+/// pipeline (temp relations keep the direct pre-AIO path — C routes them
+/// through pgaio with REFERENCES_LOCAL + forced-synchronous execution, which
+/// is behaviorally the same preadv in the same backend; tracked divergence
+/// until the local-buffer AIO arms land with io_uring).
 pub fn ReadBuffer_common(
     smgr: RelFileLocatorBackend,
     persistence: u8,
@@ -120,20 +134,34 @@ pub fn ReadBuffer_common(
         return Ok((buffer, found));
     }
     let (buffer, found) = PinBufferForBlock(smgr, persistence, forknum, blkno, &strategy)?;
-    let mut hit = found;
-    if !found {
-        // C consults zero_damaged_pages only on the miss/completion side.
+    if found {
+        return Ok((buffer, true));
+    }
+    if persistence == RELPERSISTENCE_TEMP {
         let zero_on_error =
             mode == ReadBufferMode::ZeroOnError || crate::gucs::zero_damaged_pages();
-        hit = complete_read_sync(
-            smgr,
-            forknum,
-            blkno,
-            buffer,
-            zero_on_error,
-            IOContextForStrategy(&strategy),
-        )?;
+        let hit = complete_read_local(smgr, forknum, blkno, buffer, zero_on_error)?;
+        return Ok((buffer, hit));
     }
+
+    // Signal that we are going to immediately wait: no benefit in executing
+    // Immediate wait follows: READ_BUFFERS_SYNCHRONOUSLY (C's hint).
+    let mut flags = READ_BUFFERS_SYNCHRONOUSLY;
+    if mode == ReadBufferMode::ZeroOnError {
+        flags |= READ_BUFFERS_ZERO_ON_ERROR;
+    }
+    let mut operation = ReadBuffersOperation::new(smgr, persistence, forknum, strategy, flags);
+    operation.buffers[0] = buffer;
+    operation.blocknum = blkno;
+    operation.nblocks = 1;
+    let mut nblocks = 1;
+    let hit = if start_read_buffers_impl(&mut operation, &mut nblocks)? {
+        WaitReadBuffers(&mut operation)?;
+        false
+    } else {
+        // Another backend completed it between the pin and StartBufferIO.
+        true
+    };
     Ok((buffer, hit))
 }
 
@@ -325,6 +353,20 @@ pub(crate) fn WaitIO(desc: &BufferDesc) -> PgResult<()> {
             break;
         }
         if wref.aio_index != 0 || wref.generation_upper != 0 || wref.generation_lower != 0 {
+            if wref.aio_index & types_storage::aio::PGAIO_WREF_TAG != 0 {
+                // pgaio-armed wref (buffer_stage_common tags it so this arm
+                // Tagged = pgaio-armed wref (untagged = uring prefetch lane).
+                let untagged = types_storage::buf::PgAioWaitRef {
+                    aio_index: wref.aio_index & !types_storage::aio::PGAIO_WREF_TAG,
+                    generation_upper: wref.generation_upper,
+                    generation_lower: wref.generation_lower,
+                };
+                aio_core::pgaio_wref_wait(&untagged)?;
+                // pgaio may have removed us from this CV; re-arm before the
+                // recheck (C 18 WaitIO does the same).
+                ConditionVariablePrepareToSleep(cv);
+                continue;
+            }
             if !aio_seams::uring_buf_read_wait::is_installed() {
                 panic!("unported callee reached from bufmgr.c WaitIO: pgaio_wref_wait (io_wref armed with no uring backend)");
             }
@@ -383,18 +425,26 @@ pub(crate) fn StartBufferIO(
     Ok(true)
 }
 
-/// TerminateBufferIO (bufmgr.c), sans the release_aio arm (aio unit).
+/// TerminateBufferIO (bufmgr.c); release_aio drops the AIO subsystem's own
+/// pin (taken in buffer_stage_common) and clears the wref.
 pub(crate) fn TerminateBufferIO(
     desc: &BufferDesc,
     clear_dirty: bool,
     set_flag_bits: u32,
     forget_owner: bool,
+    release_aio: bool,
 ) {
     let mut buf_state = LockBufHdr(desc);
     debug_assert!(buf_state & BM_IO_IN_PROGRESS != 0);
     buf_state &= !(BM_IO_IN_PROGRESS | BM_IO_ERROR);
     if clear_dirty && buf_state & types_storage::buf::BM_JUST_DIRTIED == 0 {
         buf_state &= !(BM_DIRTY | types_storage::buf::BM_CHECKPOINT_NEEDED);
+    }
+    if release_aio {
+        debug_assert!(buffer_refcount(buf_state) > 0);
+        buf_state -= types_storage::buf::BUF_REFCOUNT_ONE;
+        // SAFETY: header lock held.
+        unsafe { desc.set_io_wref(types_storage::buf::PgAioWaitRef::default()) };
     }
     buf_state |= set_flag_bits;
     UnlockBufHdr(desc, buf_state);
@@ -407,6 +457,12 @@ pub(crate) fn TerminateBufferIO(
         .expect("ResourceOwnerForgetBufferIO");
     }
     ConditionVariableBroadcast(BufferDescriptorGetIOCV(desc));
+
+    // Support LockBufferForCleanup: completing another backend's IO may drop
+    // LockBufferForCleanup support: this may drop the last competing pin.
+    if release_aio && buf_state & types_storage::buf::BM_PIN_COUNT_WAITER != 0 {
+        crate::pin::WakePinCountWaiter(desc);
+    }
 }
 
 /// AbortBufferIO (bufmgr.c): resowner release callback only; buffer still
@@ -422,7 +478,7 @@ fn AbortBufferIO(buffer: Buffer) {
         UnlockBufHdr(desc, buf_state);
         panic!("unported arm reached from bufmgr.c AbortBufferIO: dirty-write abort (every FlushBuffer error terminates inline; no write path leaks BM_IO_IN_PROGRESS)");
     }
-    TerminateBufferIO(desc, false, BM_IO_ERROR, false);
+    TerminateBufferIO(desc, false, BM_IO_ERROR, false, false);
 }
 
 fn complete_read_local(
@@ -483,80 +539,305 @@ fn complete_read_local(
     Ok(false)
 }
 
-fn complete_read_sync(
+const MAX_READ_BATCH: usize = 64;
+
+pub(crate) const READ_BUFFERS_ZERO_ON_ERROR: u32 = 1 << 0;
+pub(crate) const READ_BUFFERS_SYNCHRONOUSLY: u32 = 1 << 3;
+
+/// ReadBuffersOperation (bufmgr.h). Must not move in memory between
+/// start_read_buffers_impl and the end of WaitReadBuffers: the AIO handle
+/// holds a raw report_return pointer to io_return (C contract).
+pub(crate) struct ReadBuffersOperation {
     smgr: RelFileLocatorBackend,
+    persistence: u8,
     forknum: ForkNumber,
-    blkno: BlockNumber,
-    buffer: Buffer,
-    zero_on_error: bool,
-    io_context: IOContext,
-) -> PgResult<bool> {
-    if buffer < 0 {
-        return complete_read_local(smgr, forknum, blkno, buffer, zero_on_error);
+    strategy: BufferAccessStrategy,
+    flags: u32,
+    blocknum: BlockNumber,
+    nblocks: i16,
+    nblocks_done: i16,
+    buffers: [Buffer; MAX_READ_BATCH],
+    io_wref: types_storage::buf::PgAioWaitRef,
+    io_return: types_storage::aio::PgAioReturn,
+}
+
+impl ReadBuffersOperation {
+    fn new(
+        smgr: RelFileLocatorBackend,
+        persistence: u8,
+        forknum: ForkNumber,
+        strategy: BufferAccessStrategy,
+        flags: u32,
+    ) -> Self {
+        let mut op = ReadBuffersOperation {
+            smgr,
+            persistence,
+            forknum,
+            strategy,
+            flags,
+            blocknum: 0,
+            nblocks: 0,
+            nblocks_done: 0,
+            buffers: [InvalidBuffer; MAX_READ_BATCH],
+            io_wref: types_storage::buf::PgAioWaitRef::default(),
+            io_return: types_storage::aio::PgAioReturn::default(),
+        };
+        aio_core::pgaio_wref_clear(&mut op.io_wref);
+        op
     }
+}
+
+/// StartReadBuffersImpl (bufmgr.c): pin the run, split at hits, and (except
+/// under io_method=sync) issue the IO. On return `*nblocks` is the accepted
+/// count; slots beyond it may hold still-pinned "forwarded" buffers the
+/// caller must release (our callers never continue a split operation).
+fn start_read_buffers_impl(
+    operation: &mut ReadBuffersOperation,
+    nblocks: &mut i32,
+) -> PgResult<bool> {
+    let mut actual_nblocks = *nblocks;
+    debug_assert!(*nblocks > 0 && *nblocks <= MAX_READ_BATCH as i32);
+
+    let blocknum = operation.blocknum;
+    let mut i = 0;
+    while i < actual_nblocks {
+        let idx = i as usize;
+        let found;
+        if operation.buffers[idx] != InvalidBuffer {
+            let desc = GetBufferDescriptor(operation.buffers[idx] - 1);
+            found = desc.state.load(Ordering::Relaxed) & BM_VALID != 0;
+        } else {
+            let (buffer, f) = PinBufferForBlock(
+                operation.smgr,
+                operation.persistence,
+                operation.forknum,
+                blocknum + i as BlockNumber,
+                &operation.strategy,
+            )?;
+            operation.buffers[idx] = buffer;
+            found = f;
+        }
+
+        if found {
+            if i == 0 {
+                *nblocks = 1;
+                return Ok(false);
+            }
+            // Split: this valid buffer stays pinned as a forwarded buffer in
+            actual_nblocks = i;
+            break;
+        }
+        if i == 0 && actual_nblocks > 1 {
+            // smgrmaxcombine: md refuses IOs crossing a segment boundary.
+            let maxcombine = (types_storage::smgr::RELSEG_SIZE
+                - (blocknum % types_storage::smgr::RELSEG_SIZE))
+                as i32;
+            if maxcombine < actual_nblocks {
+                actual_nblocks = maxcombine;
+            }
+        }
+        i += 1;
+    }
+    *nblocks = actual_nblocks;
+
+    operation.nblocks = actual_nblocks as i16;
+    operation.nblocks_done = 0;
+    aio_core::pgaio_wref_clear(&mut operation.io_wref);
+
+    let did_start_io;
+    if aio_core::io_method() != guc_tables::consts::IOMETHOD_SYNC {
+        did_start_io = AsyncReadBuffers(operation, nblocks)?;
+        operation.nblocks = *nblocks as i16;
+    } else {
+        // The dedicated IOMETHOD_SYNC path (C keeps it to de-risk AIO): the
+        // IO is issued from within WaitReadBuffers.
+        operation.flags |= READ_BUFFERS_SYNCHRONOUSLY;
+        did_start_io = true;
+    }
+
+    Ok(did_start_io)
+}
+
+/// ReadBuffersCanStartIO (bufmgr.c): submit staged IO before a blocking
+/// StartBufferIO wait (deadlock avoidance under batchmode).
+fn ReadBuffersCanStartIO(buffer: Buffer, nowait: bool) -> PgResult<bool> {
+    debug_assert!(buffer > 0, "temp relations keep the pre-AIO path");
     let desc = GetBufferDescriptor(buffer - 1);
-    if !StartBufferIO(desc, true, false, true)? {
-        // Another backend completed the read: our miss became a hit
-        // (C WaitReadBuffers' already-valid arm).
+    if !nowait && aio_core::pgaio_have_staged() {
+        if StartBufferIO(desc, true, true, true)? {
+            return Ok(true);
+        }
+        aio_core::pgaio_submit_staged()?;
+    }
+    StartBufferIO(desc, true, nowait, true)
+}
+
+/// ProcessReadBuffersResult (bufmgr.c): consume one IO's distilled result,
+/// reporting errors/warnings at the appropriate level.
+fn ProcessReadBuffersResult(operation: &mut ReadBuffersOperation) -> PgResult<()> {
+    use types_storage::aio::PgAioResultStatus as Rs;
+
+    let rs = operation.io_return.result.status;
+    debug_assert!(aio_core::pgaio_wref_valid(&operation.io_wref));
+    debug_assert!(rs != Rs::Unknown);
+
+    let newly_read_blocks = if rs != Rs::Error { operation.io_return.result.result } else { 0 };
+
+    if rs == Rs::Error || rs == Rs::Warning {
+        aio_core::pgaio_result_report(
+            operation.io_return.result,
+            &operation.io_return.target_data,
+            if rs == Rs::Error { ERROR } else { WARNING },
+        )?;
+    } else if rs == Rs::Partial {
+        aio_core::pgaio_result_report(
+            operation.io_return.result,
+            &operation.io_return.target_data,
+            types_error::DEBUG1,
+        )?;
+    }
+
+    debug_assert!(newly_read_blocks > 0 && newly_read_blocks <= MAX_READ_BATCH as i32);
+    operation.nblocks_done += newly_read_blocks as i16;
+    debug_assert!(operation.nblocks_done <= operation.nblocks);
+    Ok(())
+}
+
+/// WaitReadBuffers (bufmgr.c): wait out (and, for partial reads and
+/// io_method=sync, re-issue) the operation's IO until every block is done.
+pub(crate) fn WaitReadBuffers(operation: &mut ReadBuffersOperation) -> PgResult<()> {
+    let io_context = IOContextForStrategy(&operation.strategy);
+
+    if !aio_core::pgaio_wref_valid(&operation.io_wref)
+        && aio_core::io_method() != guc_tables::consts::IOMETHOD_SYNC
+    {
+        ereport(ERROR)
+            .errmsg_internal("waiting for read operation that didn't read")
+            .finish(loc("WaitReadBuffers"))?;
+    }
+
+    loop {
+        if aio_core::pgaio_wref_valid(&operation.io_wref) {
+            use types_storage::aio::PgAioResultStatus as Rs;
+            // Only pay the timestamping when we may actually wait.
+            if operation.io_return.result.status == Rs::Unknown
+                && !aio_core::pgaio_wref_check_done(&operation.io_wref)
+            {
+                let io_start = pgstat_prepare_io_time(crate::gucs::track_io_timing());
+                aio_core::pgaio_wref_wait(&operation.io_wref)?;
+                // The IO itself was counted at issue; this is the wait time.
+                pgstat_count_io_op_time(IOObject::Relation, io_context, IOOp::Read, io_start, 0, 0);
+            }
+            ProcessReadBuffersResult(operation)?;
+        }
+
+        if operation.nblocks_done == operation.nblocks {
+            break;
+        }
+
+        postgres_seams::check_for_interrupts::call()?;
+
+        let mut ignored_nblocks_progress = 0;
+        AsyncReadBuffers(operation, &mut ignored_nblocks_progress)?;
+    }
+    Ok(())
+}
+
+/// AsyncReadBuffers (bufmgr.c): issue ONE IO for the operation's next
+/// contiguous run of not-yet-valid buffers. Returns true if IO was initiated.
+fn AsyncReadBuffers(
+    operation: &mut ReadBuffersOperation,
+    nblocks_progress: &mut i32,
+) -> PgResult<bool> {
+    let nblocks_done = operation.nblocks_done as usize;
+    let blocknum = operation.blocknum;
+    let forknum = operation.forknum;
+    let mut flags = operation.flags;
+    let io_context = IOContextForStrategy(&operation.strategy);
+
+    let mut ioh_flags: u8 = 0;
+    if flags & READ_BUFFERS_SYNCHRONOUSLY != 0 {
+        ioh_flags |= types_storage::aio::PGAIO_HF_SYNCHRONOUS;
+    }
+
+    if crate::gucs::zero_damaged_pages() {
+        flags |= READ_BUFFERS_ZERO_ON_ERROR;
+    }
+
+    let ret_ptr: *mut types_storage::aio::PgAioReturn = &mut operation.io_return;
+    let ioh = match aio_core::pgaio_io_acquire_nb(Some(resowner::CurrentResourceOwner()), ret_ptr)?
+    {
+        Some(ioh) => ioh,
+        None => {
+            aio_core::pgaio_submit_staged()?;
+            aio_core::pgaio_io_acquire(Some(resowner::CurrentResourceOwner()), ret_ptr)?
+        }
+    };
+
+    if !ReadBuffersCanStartIO(operation.buffers[nblocks_done], false)? {
+        operation.nblocks_done += 1;
+        *nblocks_progress = 1;
+        aio_core::pgaio_io_release(ioh)?;
+        aio_core::pgaio_wref_clear(&mut operation.io_wref);
+        // A hit for this backend, even though it began as a miss at pin time;
         counters::hit();
         pgstat_count_io_op(IOObject::Relation, io_context, IOOp::Hit, 1, 0);
-        return Ok(true);
+        return Ok(false);
     }
-    let blk = BufferGetBlockPtr(buffer);
-    // SAFETY: pinned + BM_IO_IN_PROGRESS: we own the (not yet valid) page image.
-    let page = unsafe { core::slice::from_raw_parts_mut(blk, BLCKSZ) };
+
+    let mut io_pages: [*mut u8; MAX_READ_BATCH] = [core::ptr::null_mut(); MAX_READ_BATCH];
+    let mut io_buffer_ids: [u32; MAX_READ_BATCH] = [0; MAX_READ_BATCH];
+    io_pages[0] = BufferGetBlockPtr(operation.buffers[nblocks_done]);
+    io_buffer_ids[0] = operation.buffers[nblocks_done] as u32;
+    let mut io_buffers_len = 1usize;
+
+    for i in (nblocks_done + 1)..operation.nblocks as usize {
+        if !ReadBuffersCanStartIO(operation.buffers[i], true)? {
+            break;
+        }
+        debug_assert!(operation.buffers[i] != InvalidBuffer);
+        io_pages[io_buffers_len] = BufferGetBlockPtr(operation.buffers[i]);
+        io_buffer_ids[io_buffers_len] = operation.buffers[i] as u32;
+        io_buffers_len += 1;
+    }
+
+    operation.io_wref = aio_core::pgaio_io_get_wref(ioh);
+
+    aio_core::pgaio_io_set_handle_data_32(ioh, &io_buffer_ids[..io_buffers_len]);
+
+    aio_core::pgaio_io_register_callbacks(
+        ioh,
+        types_storage::aio::PGAIO_HCB_SHARED_BUFFER_READV,
+        flags as u8,
+    );
+    aio_core::pgaio_io_set_flag(ioh, ioh_flags);
+
+    // Track the IO at issue time even for async execution: under
     let io_start = pgstat_prepare_io_time(crate::gucs::track_io_timing());
-    if let Err(e) = smgr_seams::smgr_read::call(smgr, forknum, blkno, page) {
-        TerminateBufferIO(desc, false, BM_IO_ERROR, true);
-        return Err(e);
-    }
+    smgr_seams::smgr_startreadv::call(
+        operation.smgr,
+        forknum,
+        blocknum + nblocks_done as BlockNumber,
+        &io_pages[..io_buffers_len],
+    )?;
     pgstat_count_io_op_time(
         IOObject::Relation,
         io_context,
         IOOp::Read,
         io_start,
         1,
-        BLCKSZ as u64,
+        (io_buffers_len * BLCKSZ) as u64,
     );
-    counters::read();
-    if !page_is_verified(blk) {
-        if zero_on_error {
-            let _ = elog::elog(
-                WARNING,
-                format!(
-                    "invalid page in block {blkno} of relation {}; zeroing out page",
-                    relpath_desc(smgr.locator, forknum)
-                ),
-            );
-            // SAFETY: as above; zeroed page is the C zero_damaged_pages result.
-            unsafe { core::ptr::write_bytes(blk, 0, BLCKSZ) };
-        } else {
-            TerminateBufferIO(desc, false, BM_IO_ERROR, true);
-            ereport(ERROR)
-                .errcode(ERRCODE_DATA_CORRUPTED)
-                .errmsg(format!(
-                    "invalid page in block {blkno} of relation {}",
-                    relpath_desc(smgr.locator, forknum)
-                ))
-                .finish(loc("WaitReadBuffers"))?;
-            unreachable!("ERROR reported");
-        }
-    }
-    TerminateBufferIO(desc, false, BM_VALID, true);
-    Ok(false)
+    counters::read_n(io_buffers_len as u64);
+
+    *nblocks_progress = io_buffers_len as i32;
+    Ok(true)
 }
 
-// Stack-array bound for one batched read; io_combine_limit is clamped into it
-// (C's MAX_IO_COMBINE_LIMIT analog; must stay <= PG_IOV_MAX = 128).
-const MAX_READ_BATCH: usize = 64;
-
-/// StartReadBuffers + WaitReadBuffers (bufmgr.c) collapsed to the synchronous
-/// sequential-batch case: read `blkno`, and while the following blocks also
-/// miss, complete up to min(nblocks_hint, io_combine_limit) blocks of the MAIN
-/// fork in ONE smgrreadv. Extras end valid-and-unpinned, so the scan's next
-/// fetches take the hit path. Callers guarantee blkno + nblocks_hint <=
-/// relation end; the md segment boundary is capped here (mdreadv refuses to
-/// cross RELSEG_SIZE).
+/// Sequential-batch read used by the scan-side callers: read `blkno` and,
+/// while the following blocks also miss, cover up to min(nblocks_hint,
+/// io_combine_limit) blocks of the MAIN fork in one operation. Extras end
+/// valid-and-unpinned, so the scan's next fetches take the hit path.
 pub(crate) fn ReadBuffer_batched(
     smgr: RelFileLocatorBackend,
     persistence: u8,
@@ -566,7 +847,6 @@ pub(crate) fn ReadBuffer_batched(
 ) -> PgResult<(Buffer, bool)> {
     let forknum = ForkNumber::MAIN_FORKNUM;
     if persistence == RELPERSISTENCE_TEMP {
-        // Local buffers keep the single-block path.
         return ReadBuffer_common(
             smgr,
             persistence,
@@ -576,131 +856,42 @@ pub(crate) fn ReadBuffer_batched(
             strategy,
         );
     }
-    let io_context = IOContextForStrategy(&strategy);
-    let (buffer, found) = PinBufferForBlock(smgr, persistence, forknum, blkno, &strategy)?;
-    if found {
-        return Ok((buffer, true));
-    }
-    if !StartBufferIO(GetBufferDescriptor(buffer - 1), true, false, true)? {
-        // Another backend completed the read (C WaitReadBuffers' already-valid arm).
-        counters::hit();
-        pgstat_count_io_op(IOObject::Relation, io_context, IOOp::Hit, 1, 0);
-        return Ok((buffer, true));
-    }
-    let seg_left = (types_storage::smgr::RELSEG_SIZE - (blkno % types_storage::smgr::RELSEG_SIZE))
-        as usize;
-    // The extra blocks each hold a pin until the readv completes: cap the run
-    // by the backend's remaining fair share (read_stream.c:316 caps its
+    // The extra blocks each hold a pin until the read completes: cap the run
     // pinned-buffer budget with GetAdditionalPinLimit(), which may be zero).
     // Without this, a seqscan on a tiny pool pins it whole and any concurrent
-    // (or own) allocation dies with "no unpinned buffers available" (016's
-    // shared_buffers=128kB primary).
+    // (or own) allocation dies with "no unpinned buffers available".
     let pin_room = 1 + crate::extend::GetAdditionalPinLimit() as usize;
     let cap = (crate::gucs::io_combine_limit().clamp(1, MAX_READ_BATCH as i32) as usize)
         .min(nblocks_hint.max(1) as usize)
-        .min(seg_left)
         .min(pin_room);
-    let mut bufs: [Buffer; MAX_READ_BATCH] = [InvalidBuffer; MAX_READ_BATCH];
-    bufs[0] = buffer;
-    let mut n = 1usize;
-    while n < cap {
-        let (buf_i, found_i) = BufferAlloc(
-            smgr,
-            persistence,
-            forknum,
-            blkno + n as BlockNumber,
-            &strategy,
-            io_context,
-        )?;
-        if found_i {
-            // Contiguous miss run ends at a resident block.
-            UnpinBuffer(GetBufferDescriptor(buf_i - 1));
-            break;
+
+    // worker mode the IO is queued to the pool and the issuer waits on the
+    let mut operation = ReadBuffersOperation::new(smgr, persistence, forknum, strategy, 0);
+    operation.blocknum = blkno;
+    let mut nblocks = cap as i32;
+    let did_start_io = start_read_buffers_impl(&mut operation, &mut nblocks)?;
+
+    // Forwarded buffers (pinned beyond the accepted range at a hit/racing-IO
+    // split): this caller never continues a split operation — release them.
+    for i in (nblocks as usize)..cap {
+        if operation.buffers[i] != InvalidBuffer {
+            UnpinBuffer(GetBufferDescriptor(operation.buffers[i] - 1));
+            operation.buffers[i] = InvalidBuffer;
         }
-        // nowait: a concurrent reader owning this block ends the run.
-        if !StartBufferIO(GetBufferDescriptor(buf_i - 1), true, true, true)? {
-            UnpinBuffer(GetBufferDescriptor(buf_i - 1));
-            break;
-        }
-        bufs[n] = buf_i;
-        n += 1;
     }
 
-    let fail_batch = |from: usize| {
-        // Blocks before `from` were already terminated; the rest carry our
-        // BM_IO_IN_PROGRESS and (for extras) our pin. The first buffer stays
-        // pinned, as in the single-block error path (resowner reclaims it).
-        for j in from..n {
-            TerminateBufferIO(GetBufferDescriptor(bufs[j] - 1), false, BM_IO_ERROR, true);
-        }
-        for j in 1..n {
-            UnpinBuffer(GetBufferDescriptor(bufs[j] - 1));
-        }
+    let hit = if did_start_io {
+        WaitReadBuffers(&mut operation)?;
+        false
+    } else {
+        true
     };
 
-    let io_start = pgstat_prepare_io_time(crate::gucs::track_io_timing());
-    {
-        // SAFETY: each buffer is pinned with BM_IO_IN_PROGRESS held by us: we
-        // own the (not yet valid) page images for the duration of the read.
-        let mut pages: [core::mem::MaybeUninit<&mut [u8]>; MAX_READ_BATCH] =
-            [const { core::mem::MaybeUninit::uninit() }; MAX_READ_BATCH];
-        for (i, page) in pages.iter_mut().enumerate().take(n) {
-            *page = core::mem::MaybeUninit::new(unsafe {
-                core::slice::from_raw_parts_mut(BufferGetBlockPtr(bufs[i]), BLCKSZ)
-            });
-        }
-        // SAFETY: the first n entries were just initialized; &mut [u8] has no Drop.
-        let pages_init = unsafe {
-            core::slice::from_raw_parts_mut(pages.as_mut_ptr().cast::<&mut [u8]>(), n)
-        };
-        if let Err(e) = smgr_seams::smgr_readv::call(smgr, forknum, blkno, pages_init) {
-            fail_batch(0);
-            return Err(e);
-        }
+    // Extras end valid-and-unpinned (the batched-read contract).
+    for i in 1..(nblocks as usize) {
+        UnpinBuffer(GetBufferDescriptor(operation.buffers[i] - 1));
     }
-    pgstat_count_io_op_time(
-        IOObject::Relation,
-        io_context,
-        IOOp::Read,
-        io_start,
-        1,
-        (n * BLCKSZ) as u64,
-    );
-    counters::read_n(n as u64);
-
-    let zero_on_error = crate::gucs::zero_damaged_pages();
-    for i in 0..n {
-        let blk = BufferGetBlockPtr(bufs[i]);
-        if !page_is_verified(blk) {
-            let b = blkno + i as BlockNumber;
-            if zero_on_error {
-                let _ = elog::elog(
-                    WARNING,
-                    format!(
-                        "invalid page in block {b} of relation {}; zeroing out page",
-                        relpath_desc(smgr.locator, forknum)
-                    ),
-                );
-                // SAFETY: as above; zeroed page is the C zero_damaged_pages result.
-                unsafe { core::ptr::write_bytes(blk, 0, BLCKSZ) };
-            } else {
-                fail_batch(i);
-                ereport(ERROR)
-                    .errcode(ERRCODE_DATA_CORRUPTED)
-                    .errmsg(format!(
-                        "invalid page in block {b} of relation {}",
-                        relpath_desc(smgr.locator, forknum)
-                    ))
-                    .finish(loc("WaitReadBuffers"))?;
-                unreachable!("ERROR reported");
-            }
-        }
-        TerminateBufferIO(GetBufferDescriptor(bufs[i] - 1), false, BM_VALID, true);
-    }
-    for i in 1..n {
-        UnpinBuffer(GetBufferDescriptor(bufs[i] - 1));
-    }
-    Ok((buffer, false))
+    Ok((operation.buffers[0], hit))
 }
 
 /// PageIsVerified (bufpage.c) header-sanity core; the checksum arm pends
@@ -765,7 +956,7 @@ fn ZeroAndLockBuffer(buffer: Buffer, mode: ReadBufferMode, already_valid: bool) 
             LW_EXCLUSIVE,
             init_small::globals::MyProcNumber(),
         )?;
-        TerminateBufferIO(desc, false, BM_VALID, true);
+        TerminateBufferIO(desc, false, BM_VALID, true, false);
     } else if mode == ReadBufferMode::ZeroAndLock {
         LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE)?;
     } else {

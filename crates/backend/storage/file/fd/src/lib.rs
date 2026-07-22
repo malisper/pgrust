@@ -30,7 +30,8 @@ pub use desc::{
 pub use io::{
     pg_file_size_raw, pg_pread, pg_pwrite, FileClose, FileFallocate, FileGetRawDesc, FileGetRawFlags,
     FileGetRawMode, FilePathName, FilePrefetch, FileRead, FileReadV, FileSize,
-    FileStartBufferRead, FileStartReadV, FileSync, FileTruncate, FileWrite, FileWriteV,
+    FileRawDescForAio, FileStartBufferRead, FileStartReadV, FileSync, FileTruncate, FileWrite,
+    FileWriteV,
     FileWriteback, FileZero, PathNameOpenFile, PathNameOpenFilePerm,
 };
 pub use sync::{

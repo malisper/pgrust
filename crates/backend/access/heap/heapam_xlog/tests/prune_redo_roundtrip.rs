@@ -286,7 +286,7 @@ fn install_fake_bufmgr() {
     origin_seams::replorigin_session_origin::set(|| 0);
     aio_seams::pgaio_closing_fd::set(|_| {});
     aio_seams::at_eoxact_aio::set(|_| {});
-    aio_seams::pgaio_io_start_readv::set(|_, _, _| {});
+    aio_seams::pgaio_io_start_readv::set(|_, _, _| Ok(()));
     xlogrecovery_seams::reached_consistency::set(|| false);
 
     xloginsert_seams::xlog_reset_insertion::set(xloginsert::XLogResetInsertion);

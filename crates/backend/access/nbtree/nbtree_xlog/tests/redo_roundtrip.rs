@@ -245,7 +245,7 @@ fn install_proc_boot_seams() {
     timeout_seams::disable_timeouts::set(|_| {});
     origin_seams::replorigin_session_origin::set(|| 0);
     aio_seams::pgaio_closing_fd::set(|_| {});
-    aio_seams::pgaio_io_start_readv::set(|_, _, _| {});
+    aio_seams::pgaio_io_start_readv::set(|_, _, _| Ok(()));
     xact_seams::mark_current_transaction_id_logged_if_any::set(|| {});
     xact_seams::get_current_sub_transaction_id::set(|| 1);
 }

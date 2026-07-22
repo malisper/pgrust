@@ -51,6 +51,12 @@ fn bringup() {
         xact_seams::is_in_parallel_mode::set(|| false);
         xact_seams::get_current_transaction_nest_level::set(|| 1);
         guc_tables::init_seams();
+        // commands_variable owns this accessor in production seams_init;
+        // AioShmemSize reads it (this harness inits GUCs piecemeal).
+        guc_tables::vars::io_max_combine_limit.install_if_absent(guc_tables::GucVarAccessors {
+            get: || 16,
+            set: |_| {},
+        });
         pgstat::init_seams();
         init_small::init_seams();
         scalar_seams::parse_bool::set(|value| match value {

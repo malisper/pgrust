@@ -9,6 +9,7 @@ name = "bufmgr"
 path = "src/lib.rs"
 
 [dependencies]
+aio_core = { path = "../../aio/aio_core" }
 bufmgr_seams = { path = "../bufmgr_seams" }
 datum = { path = "../../../../_support/types/datum" }
 dynahash = { path = "../../../utils/hash/dynahash" }
