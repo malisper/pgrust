@@ -13,7 +13,9 @@ use types_core::{pgsocket, PGINVALID_SOCKET, STATUS_ERROR, STATUS_OK};
 use types_error::{ErrorLocation, PgResult, FATAL, LOG};
 use types_startup::{ClientSocket, Port};
 use types_storage::latch::LatchHandle;
-use types_storage::waiteventset::{WaitEventSetHandle, WL_LATCH_SET, WL_SOCKET_WRITEABLE};
+use types_storage::waiteventset::{
+    WaitEventSetHandle, WL_LATCH_SET, WL_SOCKET_CLOSED, WL_SOCKET_WRITEABLE,
+};
 
 use init_small::globals as g;
 
@@ -71,6 +73,12 @@ mod cfg {
         pub static TCP_USER_TIMEOUT: Cell<i32> = const { Cell::new(0) };
         pub static UNIX_SOCKET_PERMISSIONS: Cell<i32> = const { Cell::new(0o777) };
         pub static UNIX_SOCKET_GROUP: RefCell<String> = const { RefCell::new(String::new()) };
+        // client_connection_check_interval (ms, 0 = disabled): the in-query
+        // dead-client poll (GL-DISCONNECT-WEDGE-1). A killed client's parked
+        // parallel leader has no other cancel vector: it never touches the
+        // socket from a blocking tuple-queue receive, and the disconnect
+        // took the only session that could cancel it.
+        pub static CLIENT_CONNECTION_CHECK_INTERVAL: Cell<i32> = const { Cell::new(0) };
     }
 }
 
@@ -252,6 +260,32 @@ pub fn pq_wait_event_set_wait_fe_be(timeout: i64, wait_event_info: u32) -> PgRes
     let set = FE_BE_WAIT_SET.get().expect("FeBeWaitSet not created");
     let event = waiteventset_seams::wait_event_set_wait_one::call(set, timeout, wait_event_info)?;
     Ok(event.map_or(0, |e| e.events))
+}
+
+/// `pq_check_connection` (pqcomm.c): true = the client connection still
+/// looks alive; false = the peer closed/reset it. Zero-timeout poll of
+/// FeBeWaitSet with the socket filter switched to WL_SOCKET_CLOSED
+/// (EPOLLRDHUP / kqueue EV_EOF — fires on orderly EOF and on RST, even
+/// with unread data pending). Leaving the filter modified is fine: every
+/// FeBeWaitSet socket wait site (secure_read/secure_write, walsender)
+/// re-modifies before waiting, exactly C's contract.
+pub fn pq_check_connection() -> PgResult<bool> {
+    pq_modify_fe_be_wait_set_socket(WL_SOCKET_CLOSED)?;
+    loop {
+        let events = pq_wait_event_set_wait_fe_be(0, 0)?;
+        if events & WL_SOCKET_CLOSED != 0 {
+            return Ok(false);
+        }
+        if events & WL_LATCH_SET != 0 {
+            // C: consume the latch and re-poll so a set latch cannot mask a
+            // closed socket (the one-event wait reports the latch first).
+            // Eating a set here is C-sanctioned: every blocking wait site is
+            // a recheck loop.
+            latch_seams::reset_latch_my_latch::call();
+            continue;
+        }
+        return Ok(true);
+    }
 }
 
 fn sun_path_buflen() -> usize {
@@ -983,6 +1017,7 @@ fn show_tcp_user_timeout() -> String {
 pub fn init_socket_seams() {
     pqcomm_seams::pq_init::set(pq_init);
     pqcomm_seams::modify_fe_be_wait_set_latch::set(pq_modify_fe_be_wait_set_latch);
+    pqcomm_seams::pq_check_connection::set(pq_check_connection);
     be_secure_seams::set_port_noblock::set(set_port_noblock);
 
     pqcomm_seams::accept_connection::set(|server_fd| {
@@ -1066,4 +1101,15 @@ pub fn init_socket_gucs() {
     hooks::show_tcp_keepalives_interval.install(show_tcp_keepalives_interval);
     hooks::show_tcp_keepalives_count.install(show_tcp_keepalives_count);
     hooks::show_tcp_user_timeout.install(show_tcp_user_timeout);
+
+    vars::client_connection_check_interval.install(GucVarAccessors {
+        get: || cfg::CLIENT_CONNECTION_CHECK_INTERVAL.get(),
+        set: |v| cfg::CLIENT_CONNECTION_CHECK_INTERVAL.set(v),
+    });
+    // C's check hook rejects a nonzero interval when the wait-event backend
+    // cannot report socket closure (WaitEventSetCanReportClosed). Both
+    // native backends here can (epoll EPOLLRDHUP / kqueue EV_EOF), and this
+    // hook only installs with the real socket transport — other transports
+    // leave the pq_check_connection seam vacant and the interval inert.
+    hooks::check_client_connection_check_interval.install(|_newval, _extra, _source| Ok(true));
 }

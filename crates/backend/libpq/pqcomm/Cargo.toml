@@ -22,6 +22,7 @@ guc_tables = { path = "../../utils/misc/guc_tables" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
 ipc_seams = { path = "../../storage/ipc/ipc_seams" }
 waiteventset_seams = { path = "../../storage/ipc/waiteventset_seams" }
+latch_seams = { path = "../../storage/ipc/latch_seams" }
 pqcomm_seams = { path = "../pqcomm_seams" }
 be_secure_seams = { path = "../be_secure_seams" }
 libc = "0.2"
