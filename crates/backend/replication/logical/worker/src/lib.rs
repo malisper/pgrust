@@ -430,15 +430,20 @@ fn start_logical_streaming_opts(
         )
     });
 
-    // set_stream_options (worker.c:4429): streaming=on requests the serial
-    // streamed-apply path; parallel apply (applyparallelworker.c) is not
-    // ported and refuses loudly rather than degrading. two_phase is requested
-    // only by run_apply_worker's PENDING->ENABLED transition.
+    // set_stream_options (worker.c:4429): streaming!=off requests the serial
+    // streamed-apply path. streaming=parallel — CREATE SUBSCRIPTION's DEFAULT
+    // (subscriptioncmds.c:154) — applies serially: applyparallelworker.c is
+    // not ported, and C's own leader serializes a parallel-mode transaction
+    // whenever no parallel worker is available, so the serial path is inside
+    // C's behavior space. Logged per worker start so the divergence is
+    // visible. two_phase is requested only by run_apply_worker's
+    // PENDING->ENABLED transition.
     if stream_mode == pg_subscription::LOGICALREP_STREAM_PARALLEL {
-        ereport(ERROR)
-            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
-            .errmsg("streaming = parallel is not supported yet (use streaming = on)")
-            .finish(loc("start_logical_streaming"))?;
+        let _ = elog::elog(
+            LOG,
+            "parallel streaming apply is not implemented; applying streamed transactions serially"
+                .to_string(),
+        );
     }
     let pubnames = publications
         .iter()
