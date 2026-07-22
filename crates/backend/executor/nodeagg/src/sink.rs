@@ -1872,16 +1872,20 @@ pub fn sink_strminmax_enabled() -> bool {
 // Post-aggregate emit filter (HAVING; stragg-coverage inc-1).
 // ---------------------------------------------------------------------------
 
-/// stragg-coverage HAVING car knob (`PGRUST_LANE_V2_AGG_HAVING`): DEFAULT
-/// OFF, armed iff exactly `1`/`on` (the still-gated tier-2 spelling — a
-/// typo'd arm fails safe to OFF). SAME spelling as the m5 probe half
-/// (`agg_having_enabled` in m5_suppress.rs): both read sites flip together
-/// (knob-coherence law — a probe that suppressed a post-aggregate-filtered
-/// shape this gate refuses would land it on the serial rerun).
+/// stragg-coverage HAVING car knob (`PGRUST_LANE_V2_AGG_HAVING`):
+/// **DEFAULT ON** since the GL-STRAGG-2 flip (t43; both cars together per
+/// the letter). Kill spellings exactly `0|off` (the t35 flipped-kill
+/// idiom). SAME spelling as the m5 probe half (`agg_having_enabled` in
+/// m5_suppress.rs): both read sites flip together (knob-coherence law — a
+/// probe that suppressed a post-aggregate-filtered shape this gate
+/// refuses would land it on the serial rerun).
 pub fn sink_having_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        matches!(std::env::var("PGRUST_LANE_V2_AGG_HAVING").as_deref(), Ok("1") | Ok("on"))
+        !matches!(
+            std::env::var("PGRUST_LANE_V2_AGG_HAVING").as_deref(),
+            Ok("0") | Ok("off")
+        )
     })
 }
 
