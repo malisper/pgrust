@@ -599,6 +599,41 @@ fn topn_rect_enabled() -> bool {
     })
 }
 
+/// GL-TOPNHEAP-1 routing twin of the executor's PGRUST_RUNTIME_TOPN_HEAP
+/// (runtime_sort.rs `runtime_topn_heap_enabled` — the SAME env string, the
+/// intcase knob-coherence pattern): DEFAULT ON since the flip, kill
+/// spellings exactly `0|off`. Killed = the class's curve decide entry goes
+/// dark and the GL-COST-TOPN-1 guard-off keep-Gather posture stands
+/// byte-exactly (routing-coherent kill: the executor's direct feed reverts
+/// on the same spelling, so no posture can suppress onto a car that will
+/// not run).
+fn topn_heap_route_live() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| topn_heap_spelling_on(std::env::var("PGRUST_RUNTIME_TOPN_HEAP").ok().as_deref()))
+}
+
+/// Pure spelling law for PGRUST_RUNTIME_TOPN_HEAP (unit-pinned): unset or
+/// anything but the kill spellings = ON.
+fn topn_heap_spelling_on(v: Option<&str>) -> bool {
+    !matches!(v, Some("0") | Some("off"))
+}
+
+/// GL-TOPNHEAP-1 car-mirror payload vocabulary (plan-time UNDER-
+/// approximation of the executor's `attbyval && attlen 1..=8` census —
+/// the direct feed captures output cells as raw datum words): the
+/// int family + the i32/i64-backed datetime pair the sort keys already
+/// ride, bool, floats, oid. A miss keeps Gather (never suppresses onto
+/// the incumbent arm).
+fn topn_car_payload_type(typ: u32) -> bool {
+    use ::types_core::catalog::{BOOLOID, FLOAT4OID, FLOAT8OID, OIDOID};
+    is_int_family(typ)
+        || matches!(typ, DATEOID | TIMESTAMPOID)
+        || matches!(typ, x if x == BOOLOID || x == FLOAT4OID || x == FLOAT8OID || x == OIDOID)
+}
+
+/// Executor capture envelope mirror (runtime_sort.rs TOPN_PAY_MAX).
+const TOPN_CAR_PAY_MAX: usize = 6;
+
 /// M5-5 floors kill switch: PGRUST_M5_SIZE_FLOORS=0 disables every guard.
 /// The rowflip measure vehicle runs floors-off so engagement economics
 /// stay measurable at any (size, dop); production default ON.
@@ -2075,14 +2110,50 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
                     _ => return Ok(false),
                 }
             }
+            let mut tlist_natts = 0usize;
+            let mut tlist_all_car_payload = true;
             for tle_node in &parse.targetList {
                 let Some(tle) = tle_node.as_target_entry() else { return Ok(false) };
-                if key_var(tle.expr, rti).is_none() {
+                let Some(v) = key_var(tle.expr, rti) else {
                     return Ok(false);
+                };
+                tlist_natts += 1;
+                if !topn_car_payload_type(v.vartype) {
+                    tlist_all_car_payload = false;
                 }
             }
             if n_nonint == 0 {
-                return finish(run, CoverClass::CbTopnBoundedIntKeys, rte.relid, 0.0, rel_rows, rel_pages, true);
+                // GL-TOPNHEAP-1 car mirror (plan-computable UNDER-
+                // approximation of the direct feed's admission — a mirror
+                // miss keeps Gather; over-approximating would suppress
+                // onto the INCUMBENT arm, the measured 2.9-9.8x k=1000
+                // loss the guard-off exists to prevent): single int key,
+                // qual-free, all-byval tlist within the capture envelope,
+                // and a CONST LIMIT bound (the k axis — the curve's
+                // routed-admission band, rtm::topn_car_k_band, checked at
+                // the verdict). Out-of-mirror shapes pass k=0 = out of
+                // band: the guard-off keep-Gather posture stands and the
+                // legacy planner elects GM/serial (both measured better
+                // than the incumbent arm on this class).
+                let car_k = if topn_heap_route_live()
+                    && parse.sortClause.iter().count() == 1
+                    && !has_quals
+                    && tlist_all_car_payload
+                    && tlist_natts <= TOPN_CAR_PAY_MAX
+                {
+                    const_count(parse.limitCount).map_or(0.0, |k| k as f64)
+                } else {
+                    0.0
+                };
+                return finish(
+                    run,
+                    CoverClass::CbTopnBoundedIntKeys,
+                    rte.relid,
+                    car_k,
+                    rel_rows,
+                    rel_pages,
+                    true,
+                );
             }
             // Knob-path guards mirroring the SINK's own admission (a keyed
             // shape the sink refuses lands on serial — the suppress-then-
@@ -5621,9 +5692,18 @@ fn finish_out(
                 // with the rowdrive block-floor ADMISSION MIRROR, which
                 // rides every mode (m5-5 reading #3; TSV
                 // admission_min_pages row).
+                // GL-TOPNHEAP-1: the bounded top-N car's curve is valid
+                // only inside its routed-admission k band (the classifier
+                // threads the CONST LIMIT bound through the ngroups slot
+                // when the plan-time car mirror admits, 0.0 otherwise —
+                // killed knob / out-of-mirror / non-const LIMIT all land
+                // 0.0 = out of band). Out of band the curve KEEPS Gather:
+                // the GL-COST-TOPN-1 guard-off posture, byte-exactly.
                 let cost_suppress = v.suppress
                     && (class != CoverClass::HeapPlainCountStar
-                        || pages >= rtm::HEAP_COUNT_ADMISSION_MIN_PAGES);
+                        || pages >= rtm::HEAP_COUNT_ADMISSION_MIN_PAGES)
+                    && (class != CoverClass::CbTopnBoundedIntKeys
+                        || rtm::topn_car_k_band(ngroups));
                 if rtm::cost_route_decides(curve) && size_floors_enabled() {
                     suppress = cost_suppress;
                     decided_by = "cost";
@@ -8076,9 +8156,43 @@ mod tests {
         assert_eq!(g.low_dop_max_rows, 0.0);
         // The int-key class itself: guarded OFF at every size at default
         // (GL-COST-TOPN-1; PGRUST_M5_TOPN_RECT=1 is the A/B restore).
+        // Since GL-TOPNHEAP-1 the class's WIN region rides the CURVE
+        // decide entry on top (k-band-gated) — the rectangle stays the
+        // keep-Gather floor posture.
         let i = class_guard(CoverClass::CbTopnBoundedIntKeys);
         assert_eq!(i.max_rows, 0.0, "int-key topn must be guarded off");
         assert_eq!(i.min_dop, 0);
+    }
+
+    /// GL-TOPNHEAP-1 knob coherence: the planner routing twin reads the
+    /// SAME PGRUST_RUNTIME_TOPN_HEAP spelling as the executor's direct
+    /// feed (runtime_sort.rs) — DEFAULT ON, kill spellings exactly
+    /// `0|off`. Killing restores the guard-off keep-Gather routing AND
+    /// the incumbent accept path together (no posture can suppress onto
+    /// a car that will not run).
+    #[test]
+    fn topn_heap_spelling_law() {
+        assert!(topn_heap_spelling_on(None), "unset = ON (flipped-kill)");
+        assert!(topn_heap_spelling_on(Some("1")));
+        assert!(topn_heap_spelling_on(Some("on")));
+        assert!(!topn_heap_spelling_on(Some("0")));
+        assert!(!topn_heap_spelling_on(Some("off")));
+        // Anything else is not a kill (the exact-spelling arm).
+        assert!(topn_heap_spelling_on(Some("false")));
+    }
+
+    /// GL-TOPNHEAP-1 car-mirror payload vocabulary: an UNDER-approximation
+    /// of the executor's byval census — text/varlena must miss (a mirror
+    /// over-approximation would suppress onto the INCUMBENT arm, the
+    /// measured k=1000 loss the guard-off exists to prevent).
+    #[test]
+    fn topn_car_payload_vocabulary_fails_closed() {
+        for t in [INT2OID, INT4OID, INT8OID, DATEOID, TIMESTAMPOID] {
+            assert!(topn_car_payload_type(t));
+        }
+        for t in [TEXTOID, VARCHAROID, 1700 /* numeric */, 2950 /* uuid */] {
+            assert!(!topn_car_payload_type(t), "type {t} must miss the mirror");
+        }
     }
 
     /// SE-T2AGG CAR A engine-kill coherence: the runtime plain-distinct sink

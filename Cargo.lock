@@ -8647,6 +8647,7 @@ dependencies = [
 name = "lsyscache"
 version = "0.1.0"
 dependencies = [
+ "aclchk_seams",
  "adt_scalar",
  "datum",
  "fmgr_seams",

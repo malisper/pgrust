@@ -2047,18 +2047,26 @@ fn runtime_sort_gcut_enabled() -> bool {
     })
 }
 
-/// GL-TOPNHEAP-1 build knob (default OFF, t35 law; `1|on` arms): the
-/// direct morsel-native bounded top-N feed — payload-carrying heap entries
-/// (adopt = pure copy, no per-winner gather) + whole-granule key-lane
-/// accept (no window staging / SoA deform / per-row emit closures), with
-/// a leader-parity dop+1 bump (the GL-LOWDIST-1 participant-parity law).
-/// OFF = the incumbent staged accept + rowref late-mat arm, byte-identical.
+/// GL-TOPNHEAP-1 arm knob — DEFAULT ON since the flip (t35 flipped-kill
+/// idiom; kill spellings exactly `0|off`): the direct morsel-native
+/// bounded top-N feed — payload-carrying heap entries (adopt = pure copy,
+/// no per-winner gather) + whole-granule key-lane accept (no window
+/// staging / SoA deform / per-row emit closures), with a leader-parity
+/// dop+1 bump (the GL-LOWDIST-1 participant-parity law). Killed = the
+/// incumbent staged accept + rowref late-mat arm, byte-identical. The
+/// planner's routing twin reads the SAME spelling (m5_suppress
+/// `topn_heap_route_live` — knob coherence: killing restores BOTH the
+/// executor feed and the pre-flip keep-Gather routing together).
+/// Five-posture record: GL-TOPNHEAP-1 (scratchpad/night, jobs @
+/// 8c11541a17/48b0e56c0d) — the car beats forced Gather Merge at every
+/// measured k=1000 cell on both bands and displaces the incumbent arm
+/// 5-10x there.
 pub(super) fn runtime_topn_heap_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        matches!(
+        !matches!(
             std::env::var("PGRUST_RUNTIME_TOPN_HEAP").as_deref(),
-            Ok("1") | Ok("on")
+            Ok("0") | Ok("off")
         )
     })
 }
