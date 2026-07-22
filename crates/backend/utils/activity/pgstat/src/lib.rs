@@ -26,7 +26,10 @@ pub mod subscription;
 pub mod wal;
 pub mod xact;
 
-pub use database::{pgstat_fetch_stat_dbentry, pgstat_report_autovac};
+pub use database::{
+    pgstat_fetch_stat_dbentry, pgstat_prepare_report_checksum_failure, pgstat_report_autovac,
+    pgstat_report_checksum_failures_in_db,
+};
 pub use function::{find_funcstat_entry, pgstat_fetch_stat_funcentry};
 pub use pending::pgstat_clear_snapshot;
 pub use relation::{

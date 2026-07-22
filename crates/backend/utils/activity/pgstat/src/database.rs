@@ -170,6 +170,37 @@ pub fn pgstat_report_deadlock() {
     });
 }
 
+/// pgstat_prepare_report_checksum_failure (pgstat_database.c): pre-create the
+/// database's shared entry so the later report — which may run in a critical
+/// section — is a plain lookup-and-bump.
+pub fn pgstat_prepare_report_checksum_failure(dboid: Oid) {
+    let key = PgStat_HashKey {
+        kind: PGSTAT_KIND_DATABASE,
+        dboid,
+        objid: 0,
+    };
+    crate::shmem::update_database_entry(key, |_| {});
+}
+
+/// pgstat_report_checksum_failures_in_db (pgstat_database.c): checksum
+/// failures update the shared entry directly (C bypasses pending so the
+/// report works in critical sections; they're also never common enough for
+/// pending to matter).
+pub fn pgstat_report_checksum_failures_in_db(dboid: Oid, failurecount: i64) {
+    if !crate::pgstat_track_counts() {
+        return;
+    }
+    let key = PgStat_HashKey {
+        kind: PGSTAT_KIND_DATABASE,
+        dboid,
+        objid: 0,
+    };
+    crate::shmem::update_database_entry(key, |dbentry| {
+        dbentry.checksum_failures += failurecount;
+        dbentry.last_checksum_failure = timestamp_seams::get_current_timestamp::call();
+    });
+}
+
 pub fn pgstat_report_tempfile(filesize: u64) {
     if !crate::pgstat_track_counts() {
         return;

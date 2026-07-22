@@ -157,7 +157,7 @@ pub fn IssuePendingWritebacks(wb: &mut WritebackContext, io_context: IOContext) 
     Ok(())
 }
 
-mod checksum {
+pub(crate) mod checksum {
     use types_core::BLCKSZ;
 
     const N_SUMS: usize = 32;
@@ -184,6 +184,39 @@ mod checksum {
             for (lane, sum) in sums.iter_mut().enumerate() {
                 let off = (row * N_SUMS + lane) * 4;
                 let v = u32::from_ne_bytes(page[off..off + 4].try_into().unwrap());
+                comp(sum, v);
+            }
+        }
+        for _ in 0..2 {
+            for sum in sums.iter_mut() {
+                comp(sum, 0);
+            }
+        }
+        let mut checksum: u32 = sums.into_iter().fold(0, |a, s| a ^ s);
+        checksum ^= blkno;
+        (checksum % 65535 + 1) as u16
+    }
+
+    // pg_checksum_page (checksum_impl.h) over a raw, possibly shared page
+    // image: pd_checksum (bytes 8..10) is computed as zero so the stored
+    // value doesn't feed itself. C temporarily zeroes the field in place;
+    // the verify side here may not own the image exclusively (uring lane),
+    // so mask the word instead of mutating.
+    //
+    // # Safety
+    // `page` must be readable for BLCKSZ bytes.
+    pub(crate) unsafe fn page_checksum_raw(page: *const u8, blkno: u32) -> u16 {
+        let mut sums = CHECKSUM_BASE_OFFSETS;
+        let rows = BLCKSZ / (4 * N_SUMS);
+        for row in 0..rows {
+            for (lane, sum) in sums.iter_mut().enumerate() {
+                let off = (row * N_SUMS + lane) * 4;
+                // SAFETY: off < BLCKSZ, caller contract (unaligned read:
+                // page images are aligned in practice, fixtures may not be).
+                let mut v = unsafe { page.add(off).cast::<u32>().read_unaligned() };
+                if off == 8 {
+                    v &= u32::from_ne_bytes([0, 0, 0xff, 0xff]);
+                }
                 comp(sum, v);
             }
         }
