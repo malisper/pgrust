@@ -175,7 +175,7 @@ pub fn class_model(class: RuntimeClass) -> ClassModel {
         RuntimeClass::CbHashJoinGroupedAgg => ClassModel { c_engage: 5695.0, w_row: 1.3218, l_setup: 64597.1, l_cap: 16.00, n_min_fit: 1000000.0, ser_setup: 0.0, ser_row: 0.0, wout_rt: 0.0, wout_leg: 0.0 },
         RuntimeClass::CbHashJoinPlainAgg => ClassModel { c_engage: 35092.4, w_row: 0.9898, l_setup: 48931.8, l_cap: 11.79, n_min_fit: 1000000.0, ser_setup: 0.0, ser_row: 0.9928, wout_rt: 0.0254, wout_leg: 0.0 },
         RuntimeClass::CbPlainAggFold => ClassModel { c_engage: 0.0, w_row: 1.2712, l_setup: 18206.0, l_cap: 12.66, n_min_fit: 1000000.0, ser_setup: 29327.6, ser_row: 0.0120, wout_rt: 0.0, wout_leg: 0.0 },
-        RuntimeClass::CbTopnBoundedIntKeys => ClassModel { c_engage: 3523905.4, w_row: 2.6581, l_setup: 322122.7, l_cap: 16.00, n_min_fit: 1000000.0, ser_setup: 417592.9, ser_row: 0.4527, wout_rt: 0.0, wout_leg: 0.0 },
+        RuntimeClass::CbTopnBoundedIntKeys => ClassModel { c_engage: 3523905.4, w_row: 2.6581, l_setup: 322122.7, l_cap: 16.00, n_min_fit: 1000000.0, ser_setup: 592578.0, ser_row: 0.4290, wout_rt: 0.0, wout_leg: 0.0 },
         RuntimeClass::HeapCmpFoldPrefix => ClassModel { c_engage: 199319.8, w_row: 1.1983, l_setup: 164041.4, l_cap: 7.32, n_min_fit: 100000.0, ser_setup: 228223.5, ser_row: 1.3933, wout_rt: 0.0, wout_leg: 0.0 },
         RuntimeClass::HeapPlainCountStar => ClassModel { c_engage: 257515.3, w_row: 0.3037, l_setup: 552913.9, l_cap: 6.88, n_min_fit: 2500000.0, ser_setup: 454725.6, ser_row: 0.4871, wout_rt: 0.0, wout_leg: 0.0 },
     }
@@ -1158,9 +1158,11 @@ mod tests {
                 // owned by serial_model::SerialTopnIntBounded (two
                 // witnessed k-planes), and any decide-listing of this
                 // class rides THAT vocabulary, never this curve.
+                // (Set re-derived at the ser-term RE-EMIT — the topn ser
+                // pair refit against the L6 legacy denominator; the
+                // 2.5M@2 cell left the set: sr 1.059 > 1 keeps Gather.)
                 (RuntimeClass::CbTopnBoundedIntKeys, 1_000_000, 1),
                 (RuntimeClass::CbTopnBoundedIntKeys, 2_500_000, 1),
-                (RuntimeClass::CbTopnBoundedIntKeys, 2_500_000, 2),
                 (RuntimeClass::CbTopnBoundedIntKeys, 5_000_000, 1),
                 (RuntimeClass::CbTopnBoundedIntKeys, 5_000_000, 2),
                 (RuntimeClass::CbTopnBoundedIntKeys, 10_000_000, 1),
