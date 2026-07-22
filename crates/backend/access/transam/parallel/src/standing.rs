@@ -1082,8 +1082,10 @@ fn serve_ticket(entry: &Arc<StandingEngagement>, ticket: usize) {
 // leader's close_and_await join, the exit-unwind discipline.
 //
 // Thread identity is the rtpool spawn glue's (launch_backend::rtpool under
-// PGRUST_RUNTIME_POOLDB=1): rtgang-shaped bring-up at spawn (InitProcess
-// from the boot-reserved segment, BaseInit), verified per serve through the
+// PGRUST_RUNTIME_POOLDB=1): rtgang-shaped bring-up (InitProcess from the
+// boot-reserved segment, BaseInit) COMPLETED at the first serve gate — an
+// engaging leader proves live shared memory, so identity is never minted
+// inside a crash-restart window — and verified per serve through the
 // installed POOL_GATE; the crash fence (POOL_FENCE) and the DROP DATABASE
 // rider are self-checked at serve entry — a parked pool-db thread is
 // procarray-invisible and holds no ProcSignal slot, so it never blocks
