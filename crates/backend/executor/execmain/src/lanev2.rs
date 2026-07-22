@@ -2289,6 +2289,151 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
     Ok(Some(pull_step(agg, &mut HashAggSource, &mut HashAggEmit, &mut root, estate)?))
 }
 
+/// GL-ALPHA1-EMIT-1 (knob `PGRUST_LANE_AGG_EMIT_BATCH`, default OFF — doc
+/// at `agg_emit_batch_enabled`): let a plain (ungrouped) Agg consume its
+/// hashed-Agg child's ADOPTED SINK EMIT in per-bucket blocks. The child's
+/// build runs through the ONE shared build seam every consumer uses
+/// (`agg_seq_scan_build_if_needed` — bare hook / Limit-over-agg / sort
+/// feed), so engagement, refusal, and every side effect land exactly where
+/// the child's own first pull would land them; ownership then covers ONLY
+/// the adopted-emit outcome, from row 0. Anything else (serial/compact
+/// build, mid-drain resume, winner-composed emit) refuses, and the caller
+/// falls through to the unchanged per-tuple drive byte-identically — which
+/// serves those shapes through the child's own dispatch as before.
+///
+/// Row identity: the drain walks buckets 0..SINK_NBUCKETS in order, rows in
+/// insertion order within each bucket — the IDENTICAL sequence the per-pull
+/// cursor (`agg_sink_emit_next`) produces — and each row runs the same
+/// per-row transition program against the same child result slot
+/// (`exec_agg_batched` = exec_agg minus the node recursion), so the
+/// transition ORDER, not merely the row set, matches the incumbent and the
+/// single output row is byte-identical by construction.
+#[inline]
+pub fn try_own_plain_agg_over_agg_emit<'mcx>(
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    child: &mut crate::procnode::AggPlanState<'mcx>,
+    estate: &mut EStateData<'mcx>,
+) -> PgResult<Option<Option<ExecSlotId>>> {
+    if !agg_emit_batch_enabled() {
+        return Ok(None);
+    }
+    // Dynamic gates (the fused arms' posture): EPQ, backward pulls, and
+    // instrumented trees keep the per-tuple drive C-exact. (Instrumented
+    // children can't reach this concrete Agg match anyway — defensive.)
+    if estate.es_epq_active
+        || estate.es_instrument != 0
+        || !::types_scan::sdir::ScanDirectionIsForward(estate.es_direction)
+    {
+        return Ok(None);
+    }
+    // Outer-node admission: the per-row batched drive's own agg-side gate
+    // (AGG_PLAIN, batch-drainable, initplan-param-free).
+    if !::nodeagg::agg_plain_perrow_admissible(agg) {
+        return Ok(None);
+    }
+    // exec_agg's top-of-call guard: a drained plain agg stays drained.
+    if ::nodeagg::agg_is_done(agg) {
+        return Ok(Some(None));
+    }
+    // Child admission: the bare agg hook's gates (breaker-admissible hashed
+    // child over a fusible SeqScan feed, memoized lane choice not Refuse) —
+    // `agg_child_fusible`'s SeqScan branch, inlined so the build reuses the
+    // child's own memo slots.
+    if !::nodeagg::agg_hash_breaker_admissible(&child.agg) {
+        return Ok(None);
+    }
+    let crate::procnode::PlanStateNode::SeqScan(ss) = &mut child.outer else {
+        return Ok(None);
+    };
+    if !seq_scan_fusible(ss, estate)? {
+        return Ok(None);
+    }
+    let c = match child.lane_choice {
+        Some(c) => c,
+        None => {
+            let c = decide_agg_lane(&child.agg, ss, &mut child.lane_exprkey, estate)?;
+            child.lane_choice = Some(c);
+            c
+        }
+    };
+    if c == AggLaneChoice::Refuse {
+        return Ok(None);
+    }
+    agg_seq_scan_build_if_needed(
+        &mut child.agg,
+        ss,
+        c,
+        &mut child.lane_stage_slot,
+        &mut child.lane_exprkey,
+        None,
+        None,
+        estate,
+    )?;
+    if !::nodeagg::sink::agg_sink_emitting(&child.agg)
+        || !::nodeagg::sink::agg_sink_emit_unstarted(&child.agg)
+        || ::nodeagg::sink::agg_sink_emit_has_winners(&child.agg)
+    {
+        return Ok(None);
+    }
+    lane_trace("runtime-agg: emit-batch armed");
+    let r = ::nodeagg::exec_agg_batched(
+        agg,
+        estate,
+        SinkEmitBatchSource { child: &mut child.agg, next_bucket: 0, cur_bucket: 0 },
+    )?;
+    // Spend the child's emit exactly as the cursor drain's EOF spends it
+    // (cursor parked, agg_done set, state and its arenas KEPT until
+    // rescan/teardown) — a stray later pull serves EOF, never a re-emit.
+    ::nodeagg::sink::agg_sink_emit_consume_all(&mut child.agg);
+    Ok(Some(r))
+}
+
+/// `BatchSource` face of a hashed child Agg's adopted sink emit: one batch
+/// per non-empty emit bucket (buckets 0..SINK_NBUCKETS in order; row order
+/// within a bucket = insertion order) — the identical row sequence the
+/// per-pull cursor drain produces. `fetch_tuple` is the cursor drain's own
+/// slot-store body (`agg_sink_emit_block_row`), so slot contents match
+/// per-row exactly.
+struct SinkEmitBatchSource<'a, 'mcx> {
+    child: &'a mut ::nodeagg::AggStateData<'mcx>,
+    /// Next bucket to probe; `cur_bucket` is the staged one.
+    next_bucket: usize,
+    cur_bucket: usize,
+}
+
+impl<'mcx> ::nodeagg::AggBatchSource<'mcx> for SinkEmitBatchSource<'_, 'mcx> {
+    fn next_batch(&mut self, _estate: &mut EStateData<'mcx>) -> PgResult<u32> {
+        while self.next_bucket < ::nodeagg::sink::SINK_NBUCKETS {
+            let b = self.next_bucket;
+            self.next_bucket += 1;
+            let n = ::nodeagg::sink::agg_sink_emit_bucket_len(self.child, b)
+                .expect("sink emit state adopted");
+            if n == 0 {
+                continue;
+            }
+            // The batched sink drains' interrupt cadence (one CFI per
+            // bucket — `sort_feed_sink_batched`'s).
+            ::postgres_seams::check_for_interrupts::call()?;
+            self.cur_bucket = b;
+            return Ok(n as u32);
+        }
+        Ok(0)
+    }
+
+    fn fetch_tuple(&mut self, i: u32, estate: &mut EStateData<'mcx>) -> PgResult<bool> {
+        ::nodeagg::sink::agg_sink_emit_block_row(self.child, estate, self.cur_bucket, i as usize);
+        Ok(true)
+    }
+
+    fn outer_slot(&self) -> ExecSlotId {
+        self.child.ps_ResultTupleSlot
+    }
+
+    fn has_qual(&self) -> bool {
+        false
+    }
+}
+
 /// EXPLAIN (ENGINE) capture for the hashed Agg-over-SeqScan route: record
 /// the PRODUCTION verdict for the AggBuild class (E4 — the same mirror walk
 /// the runtime-EA path runs under instrumentation, ending in the memoized
@@ -9459,6 +9604,30 @@ pub(crate) fn agg_route_latch_enabled() -> bool {
     crate::once_val(&ON, || {
         matches!(
             std::env::var("PGRUST_LANE_AGG_ROUTE_LATCH").as_deref(),
+            Ok("1") | Ok("on")
+        )
+    })
+}
+
+/// `PGRUST_LANE_AGG_EMIT_BATCH` (GL-ALPHA1-EMIT-1, default OFF; `1`/`on`
+/// arms): a plain (ungrouped) Agg over a hashed-Agg child whose build the
+/// runtime sink served drains the child's ADOPTED EMIT (the 256 per-bucket
+/// EmitBufs, already pre-materialized IN PARALLEL by the combine claims)
+/// through the `BatchSource` seam in per-bucket blocks —
+/// `try_own_plain_agg_over_agg_emit` — instead of the per-EMITTED-row pull
+/// chain (procnode dispatch → ownership walk / route latch → pull_step
+/// driver → emit cursor → per-row slot ceremony), which dominates the
+/// leader's serial tail where output cardinality approaches input (the
+/// all-distinct-keys grouped-agg cell). Same rows, same (bucket 0..255,
+/// insertion) order, same slot contents, same per-row transition program
+/// (`exec_agg_batched` = exec_agg minus the node recursion) — result bytes
+/// identical by construction. OFF keeps the incumbent per-pull chain
+/// branch-for-branch.
+pub(crate) fn agg_emit_batch_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&ON, || {
+        matches!(
+            std::env::var("PGRUST_LANE_AGG_EMIT_BATCH").as_deref(),
             Ok("1") | Ok("on")
         )
     })
