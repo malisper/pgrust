@@ -980,6 +980,29 @@ fn split_claims() -> bool {
     })
 }
 
+/// GL-Q2829-FIX-1 auto-arm (`PGRUST_RUNTIME_AGG_SORTED_AUTO`, DEFAULT OFF,
+/// armed iff exactly `1`/`on`): the ordered-grouped arm resolves its DOP
+/// through the router's agg-class resolution (bench GUC verbatim when set;
+/// else engine=runtime arms at `pgrust.runtime_dop`) — the hashed sink's
+/// exact arming — instead of the bench-GUC-only read. Closes the stock-
+/// defaults engagement hole on the suppressed presorted grouped class: the
+/// m5 carve deletes the exchange frame expecting the runtime engine to own
+/// the serial-shaped plan, but the ordered face never armed without an
+/// explicit `SET pgrust.runtime_agg_pool`, so the plan ran the SERIAL
+/// sorted-fold drive (measured 6x off the engaged arm on the class's
+/// composed shape). OFF = the historical bench-only read, byte-identical.
+/// The arm's own kill (`PGRUST_RUNTIME_AGG_SORTED`) and every admission
+/// gate below are unchanged — auto-arm only widens the DOP source.
+fn sorted_auto_enabled() -> bool {
+    static B: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&B, || {
+        matches!(
+            std::env::var("PGRUST_RUNTIME_AGG_SORTED_AUTO").as_deref(),
+            Ok("1") | Ok("on")
+        )
+    })
+}
+
 /// Non-group Var reference census over the Agg's plan targetlist + qual:
 /// `true` when every OUTER Var outside an Aggref subtree is a grouping
 /// column (the boundary-group representative is then exactly reconstructible
@@ -1045,7 +1068,13 @@ pub(super) fn try_engage_sortedagg_runtime<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     // --- Arming + kill-switch layering (all cheap; absent = today's path).
-    let dop = ::guc_tables::runtime_pool::runtime_agg_pool_dop();
+    // Auto-arm (fn doc at sorted_auto_enabled): knob-ON resolves DOP through
+    // the router's agg-class arming; knob-OFF keeps the bench-GUC-only read.
+    let dop = if sorted_auto_enabled() {
+        super::router::arm_dop(super::router::ArmClass::Agg)
+    } else {
+        ::guc_tables::runtime_pool::runtime_agg_pool_dop()
+    };
     if dop <= 0
         || !::guc_tables::runtime_pool::runtime_agg_sorted_env_ok()
         || !runtime::runtime_enabled()
