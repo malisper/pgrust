@@ -113,7 +113,7 @@ fn crash_fans_out_sigquit_and_reinit_completes() {
     aio_config::init_seams();
 
     guc::store::initialize_guc_options().unwrap();
-    guc_tables::vars::io_method.write(0); // boot value is worker; IoWorkerMain unported
+    guc_tables::vars::io_method.write(0); // sync; redundant since the boot default flipped to sync, kept as an explicit pin
     pg_prng::global_prng(|prng| prng.seed(42));
 
     init_small::globals::SetIsPostmasterEnvironment(true);

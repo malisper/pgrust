@@ -1243,6 +1243,7 @@ version = "0.0.0"
 dependencies = [
  "aio_seams",
  "datum",
+ "guc_seams",
  "guc_tables",
  "ipc_seams",
  "lmgr_proc",

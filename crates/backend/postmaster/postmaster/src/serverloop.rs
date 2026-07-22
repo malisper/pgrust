@@ -314,8 +314,9 @@ fn report_fork_failure_to_client(client_sock: &ClientSocket) {
     }
 }
 
-/// maybe_adjust_io_workers. io_method defaults to "worker": the first launch
-/// reaches launch_backend's named IoWorkerMain-unported panic.
+/// maybe_adjust_io_workers. Unreachable while IoWorkerMain is unported:
+/// io_method boots "sync" (divergence from C's "worker" default, aio_config)
+/// and check_io_method refuses "worker", so the launch loop below never runs.
 pub fn maybe_adjust_io_workers() {
     // io_method enum: 0 = sync, 1 = worker, 2 = io_uring (guc_tables).
     if guc_tables::vars::io_method.read() != 1 {
