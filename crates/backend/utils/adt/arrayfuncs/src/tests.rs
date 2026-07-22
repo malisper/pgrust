@@ -1227,3 +1227,18 @@ pub(crate) mod detoast_construct {
         assert_eq!(&got[..], &want[..], "toasted md build must equal all-flat md build");
     }
 }
+
+#[test]
+fn array_nulls_guc_governs_unquoted_null() {
+    let ctx = MemoryContext::new_bump("t");
+    let mcx = ctx.mcx();
+    // Default (on): unquoted NULL is a null element; quoted stays literal.
+    assert_eq!(rt_text(mcx, r#"{NULL,"NULL"}"#), r#"{NULL,"NULL"}"#);
+    // array_nulls=off (pre-8.2 compat): unquoted NULL is the literal string
+    // (ReadArrayToken's Array_nulls arm, arrayfuncs.c) — array_out then
+    // quotes it like any other NULL-spelled value.
+    crate::set_array_nulls(false);
+    let out = rt_text(mcx, r#"{NULL,"NULL"}"#);
+    crate::set_array_nulls(true);
+    assert_eq!(out, r#"{"NULL","NULL"}"#);
+}

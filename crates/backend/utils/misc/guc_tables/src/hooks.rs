@@ -70,6 +70,8 @@ pub static check_default_text_search_config: GucStringCheckHook = GucSlot::new("
 pub static check_default_with_oids: GucBoolCheckHook = GucSlot::new("check_default_with_oids");
 pub static check_huge_page_size: GucIntCheckHook = GucSlot::new("check_huge_page_size");
 pub static check_io_max_concurrency: GucIntCheckHook = GucSlot::new("check_io_max_concurrency");
+// pgrust-only (no C counterpart): refuses unported io methods; owner aio_config.
+pub static check_io_method: GucEnumCheckHook = GucSlot::new("check_io_method");
 pub static check_locale_messages: GucStringCheckHook = GucSlot::new("check_locale_messages");
 pub static check_locale_monetary: GucStringCheckHook = GucSlot::new("check_locale_monetary");
 pub static check_locale_numeric: GucStringCheckHook = GucSlot::new("check_locale_numeric");
