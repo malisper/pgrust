@@ -5401,6 +5401,11 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         if ::nodeagg::compact_batch_install_enabled() {
             lane_trace("runtime-agg: batch-install armed");
         }
+        // GL-ALPHA1 inc-2 route-latch arm witness (same per-engagement
+        // channel; the mechanism proof rides the counter/profile legs).
+        if super::agg_route_latch_enabled() {
+            lane_trace("runtime-agg: route-latch armed");
+        }
     }
     let sink = Arc::new(AggSink {
         drain,

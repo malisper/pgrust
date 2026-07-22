@@ -2132,6 +2132,17 @@ pub fn try_own_agg_over_seq_scan<'mcx>(
     xk: &mut Option<Box<ExprKeyState>>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<Option<ExecSlotId>>> {
+    // Route latch (GL-ALPHA1 inc-2, knob default OFF — doc at
+    // `agg_route_latch_enabled`): a mid-emit sink has committed the hashed
+    // route; dispatch straight to the drain (the SE-T2AGG emitting branch's
+    // exact pair) instead of re-deriving the identical walk per pull.
+    if agg_route_latch_enabled() && ::nodeagg::sink::agg_sink_emitting(agg) {
+        if ::nodeagg::agg_is_done(agg) {
+            return Ok(Some(None));
+        }
+        let mut root = RootAdapter::new(None);
+        return Ok(Some(pull_step(agg, &mut HashAggSource, &mut HashAggEmit, &mut root, estate)?));
+    }
     // AGG_PLAIN (ungrouped) routes to the plain drive: no breaker needed (a
     // single group has no per-group read-back — feed + finalize is the whole
     // node inside one call), but the same staged-batch fold applies, with
@@ -9424,6 +9435,31 @@ pub(crate) fn agg_poly_enabled() -> bool {
         !matches!(
             std::env::var("PGRUST_LANE_V2_AGG_POLY").as_deref(),
             Ok("0") | Ok("off")
+        )
+    })
+}
+
+/// `PGRUST_LANE_AGG_ROUTE_LATCH` (GL-ALPHA1-COUNTERS-1 Phase B inc-2,
+/// default OFF; `1`/`on` arms): a hashed-agg node whose SINK EMIT is in
+/// progress (`sink_emit.is_some()` — one Option load) has already committed
+/// its route for this execution, yet the ownership walk re-runs its whole
+/// admissibility ladder (plain/sorted/distinct-set predicates, scan
+/// fusibility, build_if_needed) on EVERY emitted row — per-pull ceremony
+/// measured at ~13% of process CPU on the all-distinct-keys grouped-agg
+/// cell, where output cardinality equals input. The latch dispatches those
+/// pulls straight to the drain. Decision parity is structural: the walk's
+/// verdict is a pure function of state the emit marker already witnesses,
+/// and a rescan drops `sink_emit` (exec_rescan_agg) so the latch
+/// self-invalidates and the full walk re-runs. EXPLAIN(ENGINE) capture
+/// cadence during an armed emit moves from per-pull to none (diagnostic
+/// channel; documented, never measured). OFF keeps the incumbent walk
+/// branch-for-branch.
+pub(crate) fn agg_route_latch_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&ON, || {
+        matches!(
+            std::env::var("PGRUST_LANE_AGG_ROUTE_LATCH").as_deref(),
+            Ok("1") | Ok("on")
         )
     })
 }
