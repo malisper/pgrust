@@ -2820,130 +2820,13 @@ fn engage_ceremony(
             super::standing_channel::StandingWait::Fallback => {}
         }
 
-        let launched = super::standing_channel::launch_fallback_workers(&STANDING_ARM, pcxt)?;
-        if launched <= 0 {
-            lane_trace("runtime-sort: zero workers launched");
-            drain_rg(rt, &rg);
-            return Ok(EngageOutcome::Fallback);
-        }
-        super::stats::tick_engaged(STANDING_ARM.label, super::stats::EngageChannel::Launched);
-        // The launched-DOP census line (the m1-heap-source harness trap:
-        // max_worker_processes silently caps DOP probes — every probe
-        // config must be able to see the LAUNCHED number, not the asked
-        // one).
-        match spec {
-            ArmSpec::Topn(s) => lane_trace(&format!(
-                "runtime-sort: engaged dop={launched}/{dop} granules={total_granules} bound={}",
-                s.bound
-            )),
-            ArmSpec::Full(..) => lane_trace(&format!(
-                "runtime-sort: engaged dop={launched}/{dop} granules={total_granules} full"
-            )),
-        }
-
-        // Submit-and-park (the WaitForParallelWorkersToFinish shape).
-        let mut all_exited_seen = false;
-        let outcome = loop {
-            if let Some(o) = waiter.try_wait() {
-                break o;
-            }
-            if let Err(e) = ::postgres_seams::check_for_interrupts::call()
-                .and_then(|()| parallel::ProcessParallelMessages())
-            {
-                rg.abort();
-                drain_rg(rt, &rg);
-                return Err(e);
-            }
-            let refused = payload.refused.load(Ordering::SeqCst);
-            let started = payload.started.load(Ordering::SeqCst);
-            if started == 0 && refused >= launched as usize {
-                lane_trace(&format!("runtime-sort: all {refused} helpers refused the bind"));
-                rg.abort();
-                drain_rg(rt, &rg);
-                return Ok(EngageOutcome::Fallback);
-            }
-            // LIVENESS backstop (m1 helper-death fix 5cf96f83d, ported from
-            // runtime_scan.rs — F1 defect layer 2a; this arm lacked it until
-            // the M5-2 consolidation): every launched helper's task has
-            // ENDED (normal hook exit keeps BGWH_STARTED until after the
-            // drive, so this cannot trip mid-drive) yet the RG is incomplete
-            // — helpers died or returned without a channel message and
-            // without driving. Nothing claimed => clean serial fallback;
-            // claimed => reap if possible and surface a real error (with the
-            // arm's budget/contract fallbacks honored first).
-            if parallel::parallel_workers_all_stopped(pcxt) {
-                if let Some(o) = waiter.try_wait() {
-                    break o;
-                }
-                let claimed = rg.stats().tasks_claimed;
-                lane_trace(&format!(
-                    "runtime-sort: helpers all stopped, rg incomplete (claimed={claimed})"
-                ));
-                rg.abort();
-                let drained = drain_rg(rt, &rg);
-                if let Some(e) = payload.take_error() {
-                    return Err(e);
-                }
-                if payload
-                    .full
-                    .as_ref()
-                    .is_some_and(|f| f.budget_refused.load(Ordering::SeqCst))
-                {
-                    // (`self::` — the loop-local `refused` count shadows
-                    // the module-level trace fn in the value namespace.)
-                    self::refused("per-participant sort budget crossed at accept");
-                    return Ok(EngageOutcome::Fallback);
-                }
-                if payload.broke.load(Ordering::SeqCst) {
-                    lane_trace("runtime-sort: sink contract break; serial fallback");
-                    return Ok(EngageOutcome::Fallback);
-                }
-                if claimed == 0 && drained {
-                    return Ok(EngageOutcome::Fallback);
-                }
-                return Err(Box::new(PgError::new(
-                    ERROR,
-                    "runtime sort helpers exited before completing the sort",
-                )));
-            }
-            // LIVENESS REAP (m35-spill inc-2c port — the FLAG named this
-            // arm class; the agg leg-4d wedge): a pinned RG is invisible to
-            // pool workers, so once every launched helper has exited
-            // without the RG completing, NOBODY will ever step it and the
-            // leader parks forever (the all-stopped probe above cannot see
-            // helpers that exited their drive but parked back to the pool).
-            // Reap: abort + drain the closed generation ourselves; the next
-            // try_wait surfaces Aborted and the existing error/budget/broke/
-            // fallback handling below decides. Two consecutive sightings
-            // before reaping let a mid-settlement completion land first —
-            // belt only: a helper's exit bump happens-after its drive's
-            // completion, and abort + drive_pinned on a completed RG are
-            // benign no-ops.
-            if payload.exited.load(Ordering::SeqCst) >= launched as usize {
-                if all_exited_seen && waiter.try_wait().is_none() {
-                    lane_trace(
-                        "runtime-sort: all helpers exited without completing the RG — reaping",
-                    );
-                    rg.abort();
-                    drain_rg(rt, &rg);
-                    continue;
-                }
-                all_exited_seen = true;
-            }
-            // A raised cancel disposition (statement_timeout /
-            // pg_cancel_backend) surfaces from the latch quantum as an Err
-            // (F1 defect layer 2b): abort + drain the RG, then propagate —
-            // exactly the CFI branch above. Discarding it made this park
-            // loop uncancellable (the F1 chaos finding the quantum's
-            // contract documents; fixed at the M5-2 consolidation).
-            if let Err(e) = parallel::wait_parallel_finish_quantum() {
-                rg.abort();
-                drain_rg(rt, &rg);
-                return Err(e);
-            }
-        };
-
-        finish_outcome(payload, outcome)
+        // M2 inc-3 rung 4: the launched-bgworker fallback is DELETED — a
+        // board decline goes straight to the serial arm (pool → gang →
+        // serial; the NOLAUNCH posture made permanent). Cause attribution
+        // ticks the nolaunch-serial floor row inside the shared helper.
+        super::standing_channel::launched_fallback_retired(&STANDING_ARM);
+        drain_rg(rt, &rg);
+        Ok(EngageOutcome::Fallback)
     })(&mut submitted);
 
     // Teardown tail (every path): a submitted RG must be COMPLETE before the
