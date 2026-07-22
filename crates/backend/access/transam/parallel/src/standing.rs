@@ -448,6 +448,9 @@ pub fn try_engage(shared: &Arc<ParallelShared>, dop: usize) -> Option<Arc<Standi
     // worker would raw-exit on the stale retire_all and leak its freshly
     // claimed PGPROC against LIVE shmem, draining the bgworker freelist.
     g.retire_all = false;
+    // The pool channel's rendering of the same proof (see the static's
+    // doc): minting spans may run again.
+    POOL_CRASH_PENDING.store(false, SeqCst);
     // The engaging leader IS connected to this database — it exists again;
     // any retire entry for its oid is stale (recreated oid). Prune so
     // freshly-pinned workers don't spuriously exit at their next wake.
@@ -537,6 +540,10 @@ pub fn retire_db(dboid: Oid) {
 /// there (PoolRetireRaw) and its slot respawns cold.
 pub fn flush_for_crash() {
     POOL_FENCE.fetch_add(1, SeqCst);
+    // Crash window opens: minting spans (identity bring-up, warm-connect)
+    // refuse until a leader engages again (the clear below / in the
+    // engage paths — an engagement proves reinit completed).
+    POOL_CRASH_PENDING.store(true, SeqCst);
     if GANG.get().is_none() {
         return;
     }
@@ -745,6 +752,18 @@ fn warm_connect(entry: &Arc<StandingEngagement>) {
         // checkpoint the state machine is sequencing.
         || shutting_down()
     {
+        return;
+    }
+    // Ticketless shared-memory span: no leader's close_and_await covers a
+    // claim-race loser, so the crash reset must wait this connect out
+    // through the busy term (a redundant charge on gang threads — they are
+    // LIVE-counted for their whole lifetime — but harmless there).
+    let _busy = pool_shm_busy_guard();
+    // Crash-window re-check under the charge (the retire_all/clear-at-
+    // engage pattern): a bump may have landed after this thread's
+    // serve-entry gate — never START a cold InitPostgres against memory
+    // the reset is about to reclaim.
+    if pool_crash_pending() {
         return;
     }
     super::gtrace("g.warmconn.begin");
@@ -1101,6 +1120,97 @@ pub fn pool_fence_epoch() -> usize {
     POOL_FENCE.load(SeqCst)
 }
 
+/// GL-POOLDB-HELPERDEATH-1: pool-db threads inside a shared-memory-touching
+/// span the crash reset must wait out — deferred identity bring-up
+/// (InitProcess/BaseInit at the serve gate), exit-callback drains, and the
+/// ticketless warm-connect. The postmaster's PM_WAIT_BACKENDS quiescence
+/// gate reads this through the rtgang_live seam sum (launch_backend's
+/// runtime_shm_busy_threads): pool threads carry no pmchild slot, no exit
+/// announce, and no gang LIVE charge, so without this term the crash reset
+/// ran underneath an in-flight exit drain (the round-32 helperdeath wedge:
+/// the drain's re-find assert fired holding a lock-table partition LWLock
+/// and the swallowed panic leaked the partition forever). PARKED threads
+/// never charge it — they are procarray-invisible and touch nothing
+/// shared; waiting on them would deadlock the reset (identity retires
+/// lazily at serves, by design).
+static POOL_SHM_BUSY: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// Crash window open: set by `flush_for_crash` (shared memory is dead or
+/// about to be reset), cleared when a leader ENGAGES the pool again —
+/// backends only run against live shared memory, so an engagement is the
+/// proof reinit completed (the gang board's `retire_all` clear-at-engage
+/// pattern, rendered for the pool channel). Consulted by every span that
+/// would MINT new shared-memory state without a covering leader join:
+/// the deferred identity bring-up (rtpool pool_identity_complete) and the
+/// ticketless warm-connect. Spans that only RELEASE state (exit drains)
+/// use the identity's own fence epoch instead.
+static POOL_CRASH_PENDING: AtomicBool = AtomicBool::new(false);
+
+pub fn pool_crash_pending() -> bool {
+    POOL_CRASH_PENDING.load(SeqCst)
+}
+
+/// See POOL_SHM_BUSY; consumed by the rtgang_live seam sum.
+pub fn pool_shm_busy() -> i32 {
+    // The gate-side store-buffering fence (pairs with the guard's; the
+    // caller's POOL_FENCE bump precedes this read on the postmaster
+    // thread): guarantees this read sees every charge whose own fence
+    // check could still have read the PRE-bump epoch.
+    std::sync::atomic::fence(SeqCst);
+    POOL_SHM_BUSY.load(SeqCst)
+}
+
+/// RAII charge on POOL_SHM_BUSY. Acquire BEFORE the span's fence check:
+/// the postmaster bumps POOL_FENCE (flush_for_crash) before its quiescence
+/// gate ever reads the count, so either the span sees the bump (and exits
+/// raw / refuses) or the gate sees the charge and the reset waits the span
+/// out against live shared memory. The loom model
+/// `pooldb_crash_drain_never_races_reset` (runtime/tests/loom.rs) pins
+/// this protocol; its exploration is why both sides carry explicit SeqCst
+/// fences (the charge/bump pair is a cross-thread store/load exchange —
+/// without the fences each side can read the other's OLD value).
+pub struct PoolShmBusyGuard {
+    fence_at_entry: usize,
+}
+
+pub fn pool_shm_busy_guard() -> PoolShmBusyGuard {
+    POOL_SHM_BUSY.fetch_add(1, SeqCst);
+    std::sync::atomic::fence(SeqCst);
+    PoolShmBusyGuard {
+        fence_at_entry: POOL_FENCE.load(SeqCst),
+    }
+}
+
+/// The state-machine poke the busy guard fires (PMSIGNAL_ADVANCE_STATE_
+/// MACHINE) — installed by the rtpool glue (launch_backend), which owns the
+/// pmsignal dependency; this crate reaches pmsignal only through seams
+/// (the POOL_GATE fn-pointer precedent).
+static POOL_BUSY_POKE: OnceLock<fn()> = OnceLock::new();
+
+pub fn install_pool_busy_poke(f: fn()) {
+    let _ = POOL_BUSY_POKE.set(f);
+}
+
+impl Drop for PoolShmBusyGuard {
+    fn drop(&mut self) {
+        POOL_SHM_BUSY.fetch_sub(1, SeqCst);
+        // Wake the postmaster's quiescence gate ONLY when a crash cycle or
+        // shutdown plausibly waits on this span (this charge can be the
+        // LAST thing PM_WAIT_BACKENDS waits for; the state machine has no
+        // other reason to re-run then). Fence-stable drops (every healthy
+        // bring-up/drain/warm-connect) stay poke-free — the gang
+        // LiveGuard's unconditional poke is per thread DEATH; this guard
+        // is not.
+        if (POOL_FENCE.load(SeqCst) != self.fence_at_entry || shutting_down())
+            && init_small::globals::IsUnderPostmaster()
+        {
+            if let Some(poke) = POOL_BUSY_POKE.get() {
+                poke();
+            }
+        }
+    }
+}
+
 /// Panic payload: a pool-db thread must exit RAW — the rtpool spawn glue
 /// catches it, skips the exit-callback drain (shared memory may have been
 /// reset under its identity), and respawns the slot cold.
@@ -1210,6 +1320,11 @@ pub fn try_engage_pool(
     shared.standing_driver()?;
     // No pool identity wiring ⇒ no pool thread can ever serve.
     POOL_GATE.get()?;
+    // A leader engaging proves reinit completed (this leader IS a backend
+    // running against live shared memory): close the crash window so the
+    // pool's minting spans (identity bring-up, warm-connect) run again —
+    // the gang board's try_engage retire_all clear, pool rendering.
+    POOL_CRASH_PENDING.store(false, SeqCst);
     // Workers join the leader's lock group the moment they claim a ticket.
     if lmgr_proc::BecomeLockGroupLeader().is_err() {
         return None;
