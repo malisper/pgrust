@@ -294,6 +294,57 @@ fn batch_modes_agree() {
     assert_eq!(results[0], results[2]);
 }
 
+/// GL-ALPHA1 batched-install parity pin: `probe_int_batch_install` must be
+/// byte-identical to the incumbent `probe_int_batch` — same `new_out`
+/// sequence PER CHUNK (create order), same row insertion order (unsorted
+/// key walk), same fold results — across layouts, hash kinds, dup-heavy
+/// and all-distinct streams, growth, and two-level conversion (small hint),
+/// including trailing partial chunks.
+#[test]
+fn batch_install_matches_incumbent() {
+    for (card, n) in [(50_000u64, 200_000usize), (150_000, 150_000), (777, 10_001)] {
+        let keys: Vec<i64> = (0..n)
+            .map(|i| ((i as u64 * 48271 % card).wrapping_mul(0x9E37_79B9_7F4A_7C15)) as i64)
+            .collect();
+        for layout in [EntryLayout::Salt8, EntryLayout::Inline16] {
+            for hash in [HashKind::Fmix, HashKind::Crc] {
+                let mut a = LaneAggTable::with_config(KeyRepr::Int, 16, 64, hash, layout);
+                let mut b = LaneAggTable::with_config(KeyRepr::Int, 16, 64, hash, layout);
+                let (mut ha, mut oa, mut na) = (Vec::new(), Vec::new(), Vec::new());
+                let (mut hb, mut ob, mut nb) = (Vec::new(), Vec::new(), Vec::new());
+                for chunk in keys.chunks(1024) {
+                    oa.clear();
+                    na.clear();
+                    a.probe_int_batch(chunk, PrefetchMode::Adaptive, &mut ha, &mut oa, &mut na);
+                    b.probe_int_batch_install(chunk, &mut hb, &mut ob, &mut nb);
+                    assert_eq!(na, nb, "create order (new_out) diverged");
+                    assert_eq!(oa.len(), ob.len());
+                    for (j, (&sa, &sb)) in oa.iter().zip(ob.iter()).enumerate() {
+                        assert!(!sb.is_null(), "install left a null state");
+                        // SAFETY: state pointers live for the tables' lives.
+                        unsafe {
+                            *states_i64(sa) = (*states_i64(sa)).wrapping_add(chunk[j]);
+                            *states_i64(sa).add(1) += 1;
+                            *states_i64(sb) = (*states_i64(sb)).wrapping_add(chunk[j]);
+                            *states_i64(sb).add(1) += 1;
+                        }
+                    }
+                }
+                assert_eq!(a.nrows(), b.nrows(), "row count diverged");
+                for i in 0..a.nrows() {
+                    // Row INSERTION ORDER must match exactly (unsorted).
+                    assert_eq!(a.row_key_int(i), b.row_key_int(i), "row order diverged at {i}");
+                    let (sa, sb) = (states_i64(a.row_states(i)), states_i64(b.row_states(i)));
+                    // SAFETY: live rows.
+                    unsafe {
+                        assert_eq!((*sa, *sa.add(1)), (*sb, *sb.add(1)), "fold state diverged");
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn bytes_short_and_long() {
     let mut t = LaneAggTable::new(KeyRepr::Bytes, 8, 16);
