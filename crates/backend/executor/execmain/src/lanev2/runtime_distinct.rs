@@ -1648,13 +1648,9 @@ fn ensure_hooks_registered() {
 /// same kernels in the same row order — set bytes identical by
 /// construction, unit-pinned).
 fn runtime_agg_vecaccept_enabled() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    crate::once_val(&ON, || {
-        !matches!(
-            std::env::var("PGRUST_RUNTIME_AGG_VECACCEPT").as_deref(),
-            Ok("0") | Ok("off")
-        )
-    })
+    // Knob unification (GL-VECACCEPT-2 flip prep): the lane posture is
+    // shared with the K2 agg drain — one default, one kill.
+    super::vecaccept_lane_enabled()
 }
 
 /// GL-VECACCEPT-1 admission (fail-closed; `None` = the incumbent per-row
