@@ -110,7 +110,7 @@ fn crash_fans_out_sigquit_and_reinit_completes() {
             set: |v| MAX_LOCKS.store(v, Relaxed),
         });
     }
-    aio_config::init_seams();
+    aio_core::init_seams();
 
     guc::store::initialize_guc_options().unwrap();
     guc_tables::vars::io_method.write(0); // boot value is worker; IoWorkerMain unported

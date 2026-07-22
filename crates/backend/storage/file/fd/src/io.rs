@@ -330,7 +330,7 @@ pub fn FileStartReadV(file: File, iovcnt: i32, offset: i64, _wait_event_info: u3
         return Ok(rc);
     }
 
-    aio_seams::pgaio_io_start_readv::call(raw, iovcnt, offset);
+    aio_seams::pgaio_io_start_readv::call(raw, iovcnt, offset)?;
     Ok(0)
 }
 

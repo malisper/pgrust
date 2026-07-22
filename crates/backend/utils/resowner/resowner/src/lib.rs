@@ -714,7 +714,18 @@ fn resource_owner_release_internal(
                     resource_owner_release_all(owner, phase, is_commit);
                 }
                 if prep.aio_nonempty {
-                    unported("pgaio_io_release_resowner (storage/aio/aio.c)");
+                    // C walks owner->aio_handles head-first; each release
+                    // forgets itself (ResourceOwnerForgetAioHandle) or
+                    // submits+completes, so re-probe the head each round.
+                    loop {
+                        let node = with_arena(|a| a.data(owner).aio_handles.first().copied());
+                        match node {
+                            None => break,
+                            Some(node) => {
+                                aio_seams::pgaio_io_release_resowner::call(node, !is_commit);
+                            }
+                        }
+                    }
                 }
             }
             RESOURCE_RELEASE_LOCKS => {
