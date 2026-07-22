@@ -28,6 +28,9 @@ typcache_seams = { path = "../../utils/cache/typcache_seams" }
 detoast_seams = { path = "../../access/common/detoast_seams" }
 tuplestore = { path = "../../utils/sort/tuplestore" }
 exectuples = { path = "../exectuples" }
+# The ValuePerCall fill loop's CHECK_FOR_INTERRUPTS (C execSRF.c parity —
+# an SRF materialize fill must observe cancel/die per produced row).
+postgres_seams = { path = "../../tcop/postgres_seams" }
 
 aclchk_seams = { path = "../../catalog/aclchk_seams" }
 miscinit_seams = { path = "../../utils/init/miscinit_seams" }
