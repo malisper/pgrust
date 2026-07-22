@@ -317,6 +317,23 @@ fn compact_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("PGRUST_LANE_V2_COMPACT").map_or(true, |v| v != "0"))
 }
 
+/// `PGRUST_LANETABLE_BATCH_INSTALL` (GL-ALPHA1-COUNTERS-1 Phase B, default
+/// OFF; `1`/`on` arms): batched-install accept for the single-int-key
+/// datum-lane batch — deferred-install probe (frozen pass + row-order
+/// install pass with write-intent prefetch) + transno-outer group seeding.
+/// Output-byte-identical by construction (same hash bytes, same create
+/// order, same probe-walk family; only the WHEN of the installs moves).
+/// OFF keeps every incumbent path branch-for-branch.
+pub fn compact_batch_install_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("PGRUST_LANETABLE_BATCH_INSTALL").as_deref(),
+            Ok("1") | Ok("on")
+        )
+    })
+}
+
 /// arena-strings inc-3 arm switch (`PGRUST_LANE_V2_TEXT_DIRECT`, **default
 /// ON** since letter GL-ARENASTR-1; `=0`/`off` is the exact-spelling kill):
 /// DIRECT single-text worker accept tables. The M2 sink's SINGLE-TEXT class
@@ -1325,17 +1342,29 @@ pub fn agg_hash_compact_batch<'mcx>(
         // card 1e6/1e8 adaptive beat DuckDB pre-touch by 6–10% (191/170 vs
         // 204/189 Mns/pass) and no-prefetch by 17–24%; below the L2 gate all
         // three are equal by construction (both idioms disable there).
-        table.probe_int_batch(
-            ckeys,
-            ::lanetable::PrefetchMode::Adaptive,
-            hashes,
-            states,
-            new_rows,
-        );
+        if compact_batch_install_enabled() {
+            table.probe_int_batch_install(ckeys, hashes, states, new_rows);
+        } else {
+            table.probe_int_batch(
+                ckeys,
+                ::lanetable::PrefetchMode::Adaptive,
+                hashes,
+                states,
+                new_rows,
+            );
+        }
     }
     // Seed the new groups' states — initialize_hash_entry's datumCopy loop
     // verbatim, writing into the compact row's zeroed state bytes.
-    seed_new_groups(aggctx, trans_init, trans_typ, states, new_rows, avgpack_mask)?;
+    if compact_batch_install_enabled() {
+        // Batched-install arm: same writes, transno-outer loop order (the
+        // per-transno avgpack/byval decisions hoist out of the row loop;
+        // state slots are disjoint, so write order across transnos is
+        // unobservable).
+        seed_new_groups_inverted(aggctx, trans_init, trans_typ, states, new_rows, avgpack_mask)?;
+    } else {
+        seed_new_groups(aggctx, trans_init, trans_typ, states, new_rows, avgpack_mask)?;
+    }
     groups.extend(states.iter().map(|&s| {
         // SAFETY: probe never returns null state pointers.
         unsafe { NonNull::new_unchecked(s.cast::<AggPerGroup>()) }
@@ -1443,6 +1472,65 @@ fn seed_new_groups(
                     trans_value_is_null: init.isnull,
                     no_trans_value: init.isnull,
                 });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// [`seed_new_groups`] with the loops inverted (batched-install arm): the
+/// per-transno decisions — avgpack membership, byval/byref, init nullness —
+/// are resolved ONCE per transno, then a tight row loop writes that
+/// transno's slot across every new group. Writes and values are identical
+/// to [`seed_new_groups`]'s (disjoint state slots; cross-transno write
+/// order is unobservable). The byref datumCopy leg keeps its per-row copy
+/// (each group owns its datum) — it is structurally absent on the sink's
+/// byval-POD admission.
+fn seed_new_groups_inverted(
+    aggctx: ::mcx::Mcx<'_>,
+    trans_init: &[::datum::NullableDatum],
+    trans_typ: &[crate::TransTyp],
+    states: &[*mut u8],
+    new_rows: &[u32],
+    avgpack_mask: u64,
+) -> PgResult<()> {
+    for (transno, init) in trans_init.iter().enumerate() {
+        if transno < 64 && (avgpack_mask >> transno) & 1 == 1 {
+            for &i in new_rows.iter() {
+                let pergroup = states[i as usize].cast::<AggPerGroup>();
+                // SAFETY: the row's state block holds numtrans 16-byte
+                // slots, 8-aligned (lanetable contract).
+                unsafe { pergroup.add(transno).cast::<[i64; 2]>().write([0, 0]) };
+            }
+            continue;
+        }
+        let typ = trans_typ[transno];
+        if !init.isnull && !typ.byval {
+            for &i in new_rows.iter() {
+                let pergroup = states[i as usize].cast::<AggPerGroup>();
+                // SAFETY: node-lifetime initval datum copied into the
+                // aggcontext (C initialize_aggregate's datumCopy).
+                let value = unsafe { ::execexpr::agg_datum_copy(aggctx, init.value, typ.len)? };
+                // SAFETY: the row's state block holds numtrans AggPerGroup
+                // slots, zeroed at creation (lanetable contract).
+                unsafe {
+                    pergroup.add(transno).write(AggPerGroup {
+                        trans_value: value,
+                        trans_value_is_null: init.isnull,
+                        no_trans_value: init.isnull,
+                    });
+                }
+            }
+        } else {
+            let image = AggPerGroup {
+                trans_value: init.value,
+                trans_value_is_null: init.isnull,
+                no_trans_value: init.isnull,
+            };
+            for &i in new_rows.iter() {
+                let pergroup = states[i as usize].cast::<AggPerGroup>();
+                // SAFETY: as above — zeroed numtrans-slot state block.
+                unsafe { pergroup.add(transno).write(image) };
             }
         }
     }

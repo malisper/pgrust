@@ -5395,6 +5395,12 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         lane_trace(&format!(
             "runtime-agg: vecaccept-k2 armed (est_groups={est_groups} est_rows={est_rows})"
         ));
+        // GL-ALPHA1 batched-install arm witness (the knob lives in the
+        // compact batch kernel; witnessed here once per engagement so
+        // ladder legs can prove the arm — and its absence — per query).
+        if ::nodeagg::compact_batch_install_enabled() {
+            lane_trace("runtime-agg: batch-install armed");
+        }
     }
     let sink = Arc::new(AggSink {
         drain,
