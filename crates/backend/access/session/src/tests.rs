@@ -647,7 +647,14 @@ fn tls_source_census_and_session_surface_are_pinned() {
     // removed the PdWorkerSink worker-fragment thread_local with the
     // executor paths it served (lanev2.rs pardistinct region) — a
     // deletion-explained movement, not an unclassified source.
-    assert_eq!(count_tree(crates), 527, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // GL-INERT-FIXES-1 delta (528 = 527 + 1), GUC-backed non-envelope TLS:
+    //   utils/adt/arrayfuncs/src/lib.rs — ARRAY_NULLS: C's Array_nulls
+    //      backing cell behind the GUC var slot (default true). Session
+    //      identity is owned by the GUC store (snapshot/restore writes
+    //      through the installed accessors, incl. replace_exact_guc_state
+    //      above) — the parse_expr TRANSFORM_NULL_EQUALS classification
+    //      exactly; no envelope row.
+    assert_eq!(count_tree(crates), 528, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
