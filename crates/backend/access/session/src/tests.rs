@@ -643,7 +643,11 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      the executor THREAD (pool_serve installs/clears); no session
     //      identity, never captured/restored by an envelope — the
     //      ON_POOL_SERVE classification exactly.
-    assert_eq!(count_tree(crates), 528, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // 528 -> 527 (Phase-5 D1, t42): the pardistinct GM-hybrid deletion
+    // removed the PdWorkerSink worker-fragment thread_local with the
+    // executor paths it served (lanev2.rs pardistinct region) — a
+    // deletion-explained movement, not an unclassified source.
+    assert_eq!(count_tree(crates), 527, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
