@@ -12,7 +12,12 @@ pub const IO_METHOD_OPTIONS: &[config_enum_entry] = &[
     config_enum_entry { name: "worker", val: IOMETHOD_WORKER, hidden: false },
 ];
 
-static IO_METHOD: AtomicI32 = AtomicI32::new(IOMETHOD_WORKER);
+// Deliberate divergence from C (aio.h DEFAULT_IO_METHOD = IOMETHOD_WORKER):
+// only the sync method is ported, so pgrust boots with io_method=sync until
+// worker/io_uring land. `worker` stays in IO_METHOD_OPTIONS for name parity
+// with C's enum surface; check_io_method refuses it with a clean GUC error
+// (a boot-time FATAL / SET-time ERROR, never the old backend panic).
+static IO_METHOD: AtomicI32 = AtomicI32::new(IOMETHOD_SYNC);
 static IO_WORKERS: AtomicI32 = AtomicI32::new(3);
 
 pub fn io_method() -> i32 {
@@ -37,6 +42,30 @@ pub fn pgaio_method_ops() -> IoMethodOps {
 
 fn assign_io_method(newval: i32, _extra: Option<&GucHookExtra>) {
     IO_METHOD.store(newval, Ordering::Relaxed);
+}
+
+// No C counterpart: C compiles out unavailable methods from io_method_options
+// instead (aio.c:64), but `worker` exists in every C build, so pgrust keeps it
+// listed and refuses engagement here until IoWorkerMain ports. PGC_POSTMASTER
+// context means a config-file/argv `worker` is a clean boot FATAL.
+fn check_io_method(
+    newval: &mut i32,
+    _extra: &mut Option<GucHookExtra>,
+    _source: types_guc::GucSource,
+) -> types_error::PgResult<bool> {
+    if *newval != IOMETHOD_SYNC {
+        if guc_seams::guc_check_errdetail::is_installed() {
+            let name = IO_METHOD_OPTIONS
+                .iter()
+                .find(|e| e.val == *newval)
+                .map_or("?", |e| e.name);
+            guc_seams::guc_check_errdetail::call(format!(
+                "io_method=\"{name}\" is not yet supported by pgrust; use \"sync\"."
+            ));
+        }
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 thread_local! {
@@ -81,12 +110,35 @@ pub fn pgaio_closing_fd(_fd: i32) {
     debug_assert!(!MY_BACKEND_ATTACHED.get() || matches!(pgaio_method_ops(), IoMethodOps::Sync));
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The unported-method refusal (boot FATAL / SET ERROR shape lives in the
+    // guc registry; this pins the hook verdicts).
+    #[test]
+    fn check_io_method_accepts_sync_refuses_worker() {
+        let mut extra = None;
+        let mut v = IOMETHOD_SYNC;
+        assert_eq!(
+            check_io_method(&mut v, &mut extra, types_guc::GucSource::PGC_S_TEST).unwrap(),
+            true
+        );
+        let mut v = IOMETHOD_WORKER;
+        assert_eq!(
+            check_io_method(&mut v, &mut extra, types_guc::GucSource::PGC_S_TEST).unwrap(),
+            false
+        );
+    }
+}
+
 pub fn init_seams() {
     aio_seams::pgaio_init_backend::set(pgaio_init_backend);
     aio_seams::at_eoxact_aio::set(AtEOXact_Aio);
     aio_seams::pgaio_error_cleanup::set(pgaio_error_cleanup);
     aio_seams::pgaio_closing_fd::set(pgaio_closing_fd);
     option_sets::io_method_options.install(IO_METHOD_OPTIONS);
+    guc_tables::hooks::check_io_method.install(check_io_method);
     guc_tables::hooks::assign_io_method.install(assign_io_method);
     vars::io_method.install(GucVarAccessors {
         get: io_method,

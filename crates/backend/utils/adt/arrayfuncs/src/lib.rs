@@ -34,3 +34,24 @@ pub use expanded::{
 };
 pub use io::{array_in, array_out, array_recv, array_send, ArrayIoMeta};
 pub use ops::{array_cmp, array_eq_internal};
+
+std::thread_local! {
+    // C's Array_nulls backing (bool Array_nulls = true, arrayfuncs.c);
+    // session-scoped, so TLS under the thread-per-backend model.
+    static ARRAY_NULLS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+pub(crate) fn array_nulls() -> bool {
+    ARRAY_NULLS.with(|c| c.get())
+}
+
+fn set_array_nulls(v: bool) {
+    ARRAY_NULLS.with(|c| c.set(v));
+}
+
+pub fn init_seams() {
+    guc_tables::vars::Array_nulls.install(guc_tables::GucVarAccessors {
+        get: array_nulls,
+        set: set_array_nulls,
+    });
+}

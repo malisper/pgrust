@@ -34,6 +34,9 @@ pub fn copydir(fromdir: &str, todir: &str, recurse: bool) -> PgResult<()> {
             .unwrap_err());
     }
 
+    // Invariant, not a live arm: "clone" is absent from file_copy_method's
+    // GUC options until clone_file (copydir.c) ports, so no accepted setting
+    // reaches here non-copy.
     if crate::vfd::file_copy_method() != FILE_COPY_METHOD_COPY {
         panic!("file_copy_method=clone not ported: land clone_file (copydir.c)");
     }

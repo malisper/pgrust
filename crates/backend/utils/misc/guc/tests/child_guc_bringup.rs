@@ -2,7 +2,11 @@
 // never publish a boot default over process-shared backing storage for a
 // variable its snapshot restore is about to overwrite (postmaster read
 // io_method=worker mid-window and launched io workers despite -c
-// io_method=sync).
+// io_method=sync). The boot default has since flipped to sync (worker is
+// unported), so this poisons the opposite direction: pin worker over a sync
+// boot and assert bring-up never publishes sync. The registry treats the
+// uninstalled check_io_method slot as C's NULL hook, so the pin is accepted
+// here even though the full server refuses worker.
 
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Mutex;
@@ -11,7 +15,7 @@ use guc_tables::consts::{IOMETHOD_SYNC, IOMETHOD_WORKER};
 use guc_tables::GucVarAccessors;
 use types_guc::{config_enum_entry, GucContext, GucSource};
 
-static IO_METHOD: AtomicI32 = AtomicI32::new(IOMETHOD_WORKER);
+static IO_METHOD: AtomicI32 = AtomicI32::new(IOMETHOD_SYNC);
 static WRITES: Mutex<Vec<i32>> = Mutex::new(Vec::new());
 
 fn io_method_get() -> i32 {
@@ -53,12 +57,12 @@ fn child_bringup_never_publishes_boot_value_over_snapshot() {
     guc::store::initialize_guc_options().unwrap();
     guc::SetConfigOption(
         "io_method",
-        Some("sync"),
+        Some("worker"),
         GucContext::PGC_POSTMASTER,
         GucSource::PGC_S_ARGV,
     )
     .unwrap();
-    assert_eq!(io_method_get(), IOMETHOD_SYNC);
+    assert_eq!(io_method_get(), IOMETHOD_WORKER);
 
     let snapshot = guc::store::capture_nondefault_variables();
     assert!(snapshot.iter().any(|v| v.name == "io_method"));
@@ -73,8 +77,8 @@ fn child_bringup_never_publishes_boot_value_over_snapshot() {
 
     let writes = WRITES.lock().unwrap().clone();
     assert!(
-        !writes.contains(&IOMETHOD_WORKER),
-        "child GUC bring-up published boot io_method=worker to shared storage: {writes:?}"
+        !writes.contains(&IOMETHOD_SYNC),
+        "child GUC bring-up published boot io_method=sync to shared storage: {writes:?}"
     );
-    assert_eq!(io_method_get(), IOMETHOD_SYNC);
+    assert_eq!(io_method_get(), IOMETHOD_WORKER);
 }

@@ -14,6 +14,7 @@ types_core = { path = "../../../../_support/types/types_core" }
 types_error = { path = "../../../../_support/types/types_error" }
 datum = { path = "../../../../_support/types/datum" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
+guc_seams = { path = "../../../utils/misc/guc_seams" }
 aio_seams = { path = "../aio_seams" }
 ipc_seams = { path = "../../ipc/ipc_seams" }
 miscinit = { path = "../../../utils/init/miscinit" }
