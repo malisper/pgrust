@@ -1381,6 +1381,23 @@ pub fn pool_serve(payload: &Arc<dyn std::any::Any + Send + Sync>) -> PoolServe {
     let Ok(entry) = Arc::clone(payload).downcast::<StandingEngagement>() else {
         return PoolServe::Refused;
     };
+    // SERVE-SPAN busy charge (GL-POOLDB-HELPERDEATH-1 v3 — the load-bearing
+    // term): the whole serve (gate, identity completion, claim, drive,
+    // teardown) is a shared-memory-touching span the crash reset must wait
+    // out. The leader's close_and_await does NOT cover it on every path —
+    // a kill9'd leader dies with NO exit callbacks (KilledBySignal skips
+    // the drain), so AtEOXact_Parallel/DestroyParallelContext never run,
+    // the board is orphaned OPEN, and mid-serve workers keep driving. In C
+    // those workers are separate processes the postmaster reaps before the
+    // reset; the gang covers them with its lifetime LIVE charge. Without
+    // this term the reset ran under a live drive and the drive's own lock
+    // teardown asserted against reinitialized tables while holding a
+    // lock-table partition LWLock — the leaked partition wedged recovery
+    // (round-32 red at both v1 and v2). The charge drops on normal serve
+    // exit; a DYING serve's unwind drops it mid-unwind and the glue's
+    // fence-checked drain bracket re-charges (the gap touches nothing
+    // shared).
+    let _busy = pool_shm_busy_guard();
     if entry.closed.load(SeqCst) {
         return PoolServe::Closed;
     }
