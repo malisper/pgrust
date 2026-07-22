@@ -691,7 +691,17 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      captured/restored by an envelope (an engagement rebuilds
     //      nothing from it; consume-once semantics make leakage across
     //      statements structurally impossible).
-    assert_eq!(count_tree(crates), 533, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // GL-STMTTASK-2 delta (534 = 533 + 1), deliberately NON-SESSION TLS:
+    //   74. executor/execmain/src/lanev2/stmt_task.rs — SESSION_FUNNEL: the
+    //      session thread's persistent statement-task row funnel (change 1,
+    //      standing-engagement reuse — one ring + wake hook created on the
+    //      first armed statement, reset per statement). A pure TRANSPORT
+    //      cache on the session thread: rows never survive a statement, the
+    //      wake hook keys the thread's own proc latch, and the funnel
+    //      carries no session identity — never captured/restored by an
+    //      envelope (a fresh thread simply rebuilds one on first use); dies
+    //      with the thread (Arc drop, heap only).
+    assert_eq!(count_tree(crates), 534, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
