@@ -340,6 +340,20 @@ struct AggSink {
     /// unchanged (a scatter run is a run with α = 1). Resolved at
     /// construction; false = the incumbent drain exactly.
     scatter: bool,
+    /// VEC ACCEPT arm (GL-VECACCEPT-2, the K2 substrate port of the
+    /// vecaccept lane): the accept claims run the whole-granule direct-lane
+    /// drive ([`sink_drain_range_vec`]) — no window staging, no SoA deform,
+    /// no survivor collection, no per-row key gather; the probe
+    /// (`agg_hash_compact_batch`, prefetched) and the fold
+    /// (`agg_fold_staged`) are the incumbent kernels fed 1024-row chunks
+    /// from per-granule lane copies. Resolved at admission (kill switch
+    /// [`agg_vecaccept_k2_enabled`] DEFAULT OFF; fail-closed shape gate at
+    /// the construction site). Off = the incumbent staged drain,
+    /// branch-for-branch.
+    vec_accept: bool,
+    /// Vec-accept census (rows through the direct-lane drive — the
+    /// engagement witness; equals the scan's accepted rows when armed).
+    vec_rows: AtomicU64,
     /// Scatter engagement witness: rows handed through scatter-built runs
     /// (non-NULL; summed across Locals). Read by the AGGSEAL marker lines —
     /// the sealflush_rows discipline exactly.
@@ -1087,11 +1101,12 @@ impl runtime::ParallelSink for AggSink {
             let flush_bytes: u64 = locals.iter().map(|l| l.probe_flush_bytes).sum();
             let (ad, ar, ap) = alpha_sums(locals);
             eprintln!(
-                "MORSEL|AGGSEAL|arm=2set|locals={}|rows={rows}|flushes={flushes}|flush_bytes={flush_bytes}|alpha_demotes={ad}|alpha_restores={ar}|alpha_reprobes={ap}|dur_us={}|sealflush_rows={}|scatter_rows={}",
+                "MORSEL|AGGSEAL|arm=2set|locals={}|rows={rows}|flushes={flushes}|flush_bytes={flush_bytes}|alpha_demotes={ad}|alpha_restores={ar}|alpha_reprobes={ap}|dur_us={}|sealflush_rows={}|scatter_rows={}|vec_rows={}",
                 locals.len(),
                 t0.elapsed().as_micros(),
                 self.sealflush_rows.load(Ordering::Relaxed),
                 self.scatter_rows.load(Ordering::Relaxed),
+                self.vec_rows.load(Ordering::Relaxed),
             );
         }
     }
@@ -1823,10 +1838,11 @@ impl runtime::SealedParallelSink for AggSink {
             let flush_bytes: u64 = sealed.iter().map(|l| l.probe_flush_bytes).sum();
             let (ad, ar, ap) = alpha_sums(sealed);
             eprintln!(
-                "MORSEL|AGGSEAL|arm=3set|locals={}|rows={rows}|flushes={flushes}|flush_bytes={flush_bytes}|alpha_demotes={ad}|alpha_restores={ar}|alpha_reprobes={ap}|dur_us=0|sealflush_rows={}|scatter_rows={}",
+                "MORSEL|AGGSEAL|arm=3set|locals={}|rows={rows}|flushes={flushes}|flush_bytes={flush_bytes}|alpha_demotes={ad}|alpha_restores={ar}|alpha_reprobes={ap}|dur_us=0|sealflush_rows={}|scatter_rows={}|vec_rows={}",
                 sealed.len(),
                 self.sealflush_rows.load(Ordering::Relaxed),
                 self.scatter_rows.load(Ordering::Relaxed),
+                self.vec_rows.load(Ordering::Relaxed),
             );
         }
         if self.try_adopt_census(sealed) {
@@ -1931,6 +1947,8 @@ struct WorkerExec {
     /// the reusable pack scratch.
     mk: Option<super::ScanMk>,
     mks: super::MkScratch,
+    /// GL-VECACCEPT-2 direct-lane scratch (vec-accept engagements only).
+    vs: SinkVecScratch,
 }
 
 thread_local! {
@@ -1966,10 +1984,11 @@ fn accept_morsel_body(
                 "runtime agg morsel without a bound executor",
             ))));
         };
-        let WorkerExec { qd, k2s, dgs, idxs, groups, xk, stage_slot, mk, mks, .. } = ex;
+        let WorkerExec { qd, k2s, dgs, idxs, groups, xk, stage_slot, mk, mks, vs, .. } = ex;
         let (k2s, dgs, idxs, groups) = (&mut *k2s, &mut *dgs, &mut *idxs, &mut *groups);
         let (xk, stage_slot) = (&mut *xk, &mut *stage_slot);
         let (mk, mks) = (&mut *mk, &mut *mks);
+        let vs = &mut *vs;
         crate::querydesc::with_qd(*qd, |q| {
             let x = q.exec.as_mut().expect("runtime agg worker executor state");
             x.with_mut(|d| -> Result<(), AcceptFail> {
@@ -2008,11 +2027,20 @@ fn accept_morsel_body(
                 // (idempotent; the first morsel's table arms during the
                 // drain below, so mark again before reclaiming it).
                 ::nodeagg::sink::agg_sink_mark_sink_mode(&mut aps.agg);
-                let drained = sink_drain_range(
-                    sink, local, worker, &mut aps.agg, ss, k2s, dgs, idxs, groups, xk,
-                    stage_slot, mk, mks,
-                    estate,
-                );
+                // GL-VECACCEPT-2: the whole-granule direct-lane drive owns
+                // the claim when armed; the staged drain is the default,
+                // branch-for-branch.
+                let drained = if sink.vec_accept {
+                    sink_drain_range_vec(
+                        sink, local, worker, &mut aps.agg, ss, vs, idxs, groups, estate,
+                    )
+                } else {
+                    sink_drain_range(
+                        sink, local, worker, &mut aps.agg, ss, k2s, dgs, idxs, groups, xk,
+                        stage_slot, mk, mks,
+                        estate,
+                    )
+                };
                 // EA-on-morsels claim fold (EXACT — accumulate in the Local,
                 // never sampled; the dop1-tax contract).
                 if sink.ea_scan_node.is_some() && drained.is_ok() {
@@ -2682,6 +2710,243 @@ fn sink_dict_batch<'mcx>(
     // each state is a live compact-table row installed by a probe since the
     // last flush (flushes invalidate this cache before the next batch).
     unsafe { super::agg_fold_staged(agg, soa, idxs, groups)? };
+    Ok(())
+}
+
+/// GL-VECACCEPT-2 per-worker lane scratch (reused across granules; the vec
+/// drive's only steady-state allocations): one Datum lane per referenced
+/// scan column, copied whole-granule from the direct feed (the lanes
+/// borrow `&mut ss` one at a time — the topn-heap two-phase borrow law),
+/// plus the shared all-false null lane. Unmetered scratch, the
+/// ScanK2Scratch class (≤ (1+ncols) × 8192 × 8B ≈ tens of KB).
+#[derive(Default)]
+struct SinkVecScratch {
+    /// (scan col, granule lane) pairs — `cols[0]` is always the key column.
+    cols: Vec<(u16, Vec<::datum::Datum>)>,
+    /// All-false isnull lane (columnar parts store no NULLs — the direct
+    /// feed contract), sized to the largest granule seen.
+    knull: Vec<bool>,
+    /// Chunk row indices 0..VEC_CHUNK (agg_fold_staged's idx vocabulary).
+    idxv: Vec<u32>,
+}
+
+/// One chunk's [`::lanefold::LaneCols`] view over the scratch lanes: the
+/// fold kernels read `col_values(c)` in scan-column space, exactly the
+/// SoA's vocabulary — here answered from the granule lane copies, sliced
+/// to the chunk. No dict/len side channels (admission refuses those
+/// compositions), no NULLs (part-lane law).
+struct VecChunkCols<'a> {
+    vs: &'a SinkVecScratch,
+    lo: usize,
+    n: usize,
+}
+
+impl ::lanefold::LaneCols for VecChunkCols<'_> {
+    fn col_values(&self, c: usize) -> &[::datum::Datum] {
+        let lane = &self
+            .vs
+            .cols
+            .iter()
+            .find(|(col, _)| *col as usize == c)
+            .expect("vec drive staged every fold-plan column")
+            .1;
+        &lane[self.lo..self.lo + self.n]
+    }
+    fn col_isnull(&self, _c: usize) -> &[bool] {
+        &self.vs.knull[..self.n]
+    }
+}
+
+/// GL-VECACCEPT-2: the whole-granule direct-lane K2 drain — the vecaccept
+/// schedule ported to the agg sink. Per granule (the topn-heap direct
+/// feed; no window staging, no SoA deform, no survivor collection, no
+/// per-row key gather): copy the key + fold-plan lanes into scratch, then
+/// per 1024-row chunk run the incumbent laws and kernels — the loop-head
+/// cap-flush/pressure/spill block (verbatim minus the mk/xk/dict caches
+/// this drain structurally lacks), `agg_hash_compact_batch` (the
+/// prefetched batch probe), and `agg_fold_staged` over a chunk LaneCols
+/// view. Same probe order, same group-creation order, same fold order as
+/// the staged drain — byte-identical downstream by construction; only the
+/// flush-check grain moves (window 256 → chunk 1024, the documented
+/// one-chunk overshoot).
+fn sink_drain_range_vec<'mcx>(
+    sink: &AggSink,
+    local: &mut AggSinkLocal,
+    worker: usize,
+    agg: &mut ::nodeagg::AggStateData<'mcx>,
+    ss: &mut ::nodeseqscan::SeqScanState<'mcx>,
+    vs: &mut SinkVecScratch,
+    idxs: &mut Vec<u32>,
+    groups: &mut Vec<core::ptr::NonNull<::execexpr::AggPerGroup>>,
+    estate: &mut EStateData<'mcx>,
+) -> Result<(), AcceptFail> {
+    let key_col = ::nodeagg::agg_hash_staged_probe_col(agg).ok_or_else(|| {
+        AcceptFail::Error(::nodeagg::sink::sink_shape_error(
+            "worker build lost its staged key column",
+        ))
+    })? as usize;
+    // Column census: key first, then the fold plan's lanes (deduped —
+    // admission proved the plan unguarded/vguard-free/filter-free).
+    {
+        let plan = ::nodeagg::agg_lanefold_plan(agg).ok_or_else(|| {
+            AcceptFail::Error(::nodeagg::sink::sink_shape_error(
+                "vec drain without a fold plan",
+            ))
+        })?;
+        vs.cols.clear();
+        vs.cols.push((key_col as u16, Vec::new()));
+        for &c in plan.cols.iter() {
+            if !vs.cols.iter().any(|(col, _)| *col == c) {
+                vs.cols.push((c, Vec::new()));
+            }
+        }
+    }
+    let mut rows_total = 0u64;
+    loop {
+        ::postgres_seams::check_for_interrupts::call()?;
+        let Some((nrows, _base)) = ::nodeseqscan::seq_scan_topn_direct_next_granule(ss)?
+        else {
+            break;
+        };
+        let n = nrows as usize;
+        // Lane copies (one `&mut ss` borrow at a time). A lane the part
+        // cannot serve directly is a contract breach for the admitted
+        // int-family shape — fail closed, nothing half-consumed (the RG
+        // aborts; the serial rerun consumes nothing).
+        for i in 0..vs.cols.len() {
+            let col = vs.cols[i].0 as usize;
+            let Some(lane) = ::nodeseqscan::seq_scan_topn_direct_lane(ss, col) else {
+                return Err(AcceptFail::Error(::nodeagg::sink::sink_shape_error(
+                    "vec drain lane not directly servable",
+                )));
+            };
+            vs.cols[i].1.clear();
+            vs.cols[i].1.extend_from_slice(&lane[..n]);
+        }
+        if vs.knull.len() < n {
+            vs.knull.resize(n, false);
+        }
+        // Chunked probe + fold under the incumbent flush/pressure laws.
+        let mut lo = 0usize;
+        while lo < n {
+            let len = (n - lo).min(VEC_CHUNK);
+            // --- Loop-head flush block: the staged drain's law, verbatim
+            // minus the dict/mk/intern caches this drain structurally
+            // lacks (K2 int keys never intern; an intern_reset here is a
+            // contract breach, fail-closed).
+            if let Some((run, intern_reset)) =
+                ::nodeagg::sink::agg_sink_flush_if_due(agg, local.alpha.cap(sink))
+            {
+                if intern_reset {
+                    return Err(AcceptFail::Error(::nodeagg::sink::sink_shape_error(
+                        "intern reset on a vec K2 drain",
+                    )));
+                }
+                local.alpha.on_cap_flush(run.nrows(), sink);
+                local.probe_flushes += 1;
+                local.probe_flush_bytes += run.bytes() as u64;
+                if !sink.shared.as_ref().is_some_and(|sh| sh.absorb(&run)) {
+                    local.run_bytes += run.bytes();
+                    local.runs.push(run);
+                }
+                // byval-POD admission: the byref aggctx term is
+                // structurally 0 (sink.byref_states refused).
+                if local.run_bytes + ::nodeagg::sink::agg_sink_table_mem(agg) > sink.budget
+                {
+                    match &sink.spill_set {
+                        Some(set) => spill_epoch(sink, local, set, worker)
+                            .map_err(AcceptFail::Error)?,
+                        None => return Err(AcceptFail::Budget),
+                    }
+                }
+            }
+            if ::nodeagg::sink::agg_sink_budget_pressure(agg) {
+                match &sink.spill_set {
+                    Some(set) => {
+                        if let Some((run, intern_reset)) =
+                            ::nodeagg::sink::agg_sink_flush_now(agg)
+                        {
+                            if intern_reset {
+                                return Err(AcceptFail::Error(
+                                    ::nodeagg::sink::sink_shape_error(
+                                        "intern reset on a vec K2 drain",
+                                    ),
+                                ));
+                            }
+                            local.alpha.on_pressure_flush();
+                            local.probe_flushes += 1;
+                            local.probe_flush_bytes += run.bytes() as u64;
+                            if !sink.shared.as_ref().is_some_and(|sh| sh.absorb(&run)) {
+                                local.run_bytes += run.bytes();
+                                local.runs.push(run);
+                            }
+                        }
+                        if !local.runs.is_empty()
+                            && (agg_spill_eager()
+                                || local.run_bytes
+                                    + ::nodeagg::sink::agg_sink_table_mem(agg)
+                                    > sink.budget)
+                        {
+                            spill_epoch(sink, local, set, worker)
+                                .map_err(AcceptFail::Error)?;
+                        }
+                        if ::nodeagg::sink::agg_sink_budget_pressure(agg) {
+                            if lane_trace_enabled() {
+                                lane_trace(&format!(
+                                    "runtime-agg: budget-refused (residual, vec) worker={worker} run_bytes={} table_mem={} budget={}",
+                                    local.run_bytes,
+                                    ::nodeagg::sink::agg_sink_table_mem(agg),
+                                    sink.budget,
+                                ));
+                            }
+                            return Err(AcceptFail::Budget);
+                        }
+                    }
+                    None => {
+                        if lane_trace_enabled() {
+                            lane_trace(&format!(
+                                "runtime-agg: budget-refused (spill disarmed, vec) worker={worker} run_bytes={} table_mem={} budget={}",
+                                local.run_bytes,
+                                ::nodeagg::sink::agg_sink_table_mem(agg),
+                                sink.budget,
+                            ));
+                        }
+                        return Err(AcceptFail::Budget);
+                    }
+                }
+            }
+            // --- Probe (the incumbent prefetched batch kernel) + fold.
+            let keys = &vs.cols[0].1[lo..lo + len];
+            if !::nodeagg::agg_hash_compact_batch(
+                agg,
+                estate,
+                keys,
+                &vs.knull[..len],
+                groups,
+            )? {
+                return Err(AcceptFail::Error(::nodeagg::sink::sink_shape_error(
+                    "worker compact table disarmed mid-build",
+                )));
+            }
+            local.alpha.absorbed(len);
+            if vs.idxv.len() < len {
+                vs.idxv = (0..VEC_CHUNK as u32).collect();
+            }
+            idxs.clear();
+            idxs.extend_from_slice(&vs.idxv[..len]);
+            let cols = VecChunkCols { vs, lo, n: len };
+            // SAFETY: every chunk row carries live decoded lane values for
+            // every fold-plan column (the granule lane copies above cover
+            // rows lo..lo+len, and idxs ⊆ 0..len index the chunk view);
+            // the plan is unguarded (vec admission); each pergroup was
+            // installed by the compact probe within this chunk
+            // (agg_fold_staged contract).
+            unsafe { super::agg_fold_staged(agg, &cols, idxs, groups)? };
+            lo += len;
+        }
+        rows_total += n as u64;
+    }
+    sink.vec_rows.fetch_add(rows_total, Ordering::Relaxed);
     Ok(())
 }
 
@@ -3370,6 +3635,7 @@ fn build_worker_exec(payload: &Arc<RuntimeAggShared>) -> PgResult<()> {
                     stage_slot: None,
                     mk,
                     mks: super::MkScratch::default(),
+                    vs: SinkVecScratch::default(),
                 });
                 Ok(())
             }
@@ -3921,6 +4187,27 @@ fn agg_scatter_floor() -> u64 {
             .unwrap_or(4_000_000)
     })
 }
+
+/// GL-VECACCEPT-2 build knob (default OFF, t35 law; `1|on` arms): the
+/// whole-granule direct-lane K2 accept ([`AggSink::vec_accept`]). OFF =
+/// the incumbent staged drain, branch-for-branch.
+fn agg_vecaccept_k2_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&ON, || {
+        matches!(
+            std::env::var("PGRUST_RUNTIME_AGG_VECACCEPT_K2").as_deref(),
+            Ok("1") | Ok("on")
+        )
+    })
+}
+
+/// GL-VECACCEPT-2 chunk width: probe/fold batch length over the granule
+/// lanes. 4x the staged window (256 rows) — fewer per-batch overheads —
+/// while the loop-head flush/pressure laws run per chunk, so the cap
+/// overshoot is bounded at one chunk of entries (the staged law's own
+/// one-batch-overshoot family, coarser by 4x; the cap is a locality bound
+/// in the tens-of-thousands, so ≤1024 extra entries is inside its noise).
+const VEC_CHUNK: usize = 1024;
 
 /// Wave-1 r2 ladder verdict (reduced-key/dict-key @100M, notes/q36-radix-lane.md):
 /// monotone improvement control→64K (reduced-key 0.378→0.234 = 2.30x→1.40x ref-mt16;
@@ -5069,6 +5356,40 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
             "runtime-agg: scatter accept armed (est_groups={est_groups} est_rows={est_rows})"
         ));
     }
+    // VEC ACCEPT admission (GL-VECACCEPT-2 — the K2 substrate port of the
+    // vecaccept lane; kill switch DEFAULT OFF): the K2 single-int-key
+    // unprojected drain only, dict-code feed excluded (the direct lanes
+    // serve no dict gather; int chunks never dict-encode, so this is
+    // belt-and-braces); QUAL-FREE scan only (the direct granule walk
+    // applies no filters — PREWHERE shapes keep the staged windows);
+    // UNGUARDED, vguard-free, filter-free, residual-free fold plan (the
+    // vguard proof and FILTER masks are window machinery); BYVAL-POD
+    // states (the seal-flush/scatter byref exclusion's exact argument —
+    // runs copy state blocks verbatim); DOP>1 (the DOP1 adopt/pass-through
+    // fast paths key on zero flushed runs and the vec drive's coarser
+    // flush grain could differ at the boundary); freeze/topn/shared/
+    // scatter compositions excluded in v1 (each reads accept-side
+    // censuses this drive does not produce); non-EA (the EA row funnel is
+    // per-window machinery — named residual, not a law).
+    let vec_accept = agg_vecaccept_k2_enabled()
+        && drain == SinkDrain::K2
+        && !k2_dict_code
+        && dop > 1
+        && !byref_states
+        && topn.is_none()
+        && freeze.is_none()
+        && shared.is_none()
+        && !scatter
+        && !ea
+        && ss.ss.qual.is_none()
+        && ::nodeagg::agg_lanefold_plan(agg).is_some_and(|p| {
+            !p.guarded && p.vguards.is_empty() && p.resid.is_empty() && p.filters.is_empty()
+        });
+    if vec_accept {
+        lane_trace(&format!(
+            "runtime-agg: vecaccept-k2 armed (est_groups={est_groups} est_rows={est_rows})"
+        ));
+    }
     let sink = Arc::new(AggSink {
         drain,
         red,
@@ -5112,6 +5433,8 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         seal_flush,
         sealflush_rows: AtomicU64::new(0),
         scatter,
+        vec_accept,
+        vec_rows: AtomicU64::new(0),
         scatter_rows: AtomicU64::new(0),
         out_emit: (0..SINK_NBUCKETS).map(|_| UnsafeCell::new(SinkEmitBuf::default())).collect(),
         published: Mutex::new(None),
