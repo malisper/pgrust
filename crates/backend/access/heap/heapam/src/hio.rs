@@ -55,6 +55,7 @@ pub fn GetBulkInsertState() -> BulkInsertStateData {
         next_free: InvalidBlockNumber,
         last_free: InvalidBlockNumber,
         already_extended_by: 0,
+        block_run: None,
     }
 }
 
@@ -246,6 +247,16 @@ pub fn RelationGetBufferForTuple<'mcx>(
 
     debug_assert!(other_pin.is_none() || bistate.is_none());
 
+    // W2a BLOCK-RUN MODE (tableam_vocab::block_run): every page this bistate
+    // fills comes from its privately claimed runs — no FSM search, no shared
+    // smgr-targblock probe/set (cross-participant state), no heavyweight
+    // extension (the allocator extends under its own mutex with
+    // EB_SKIP_EXTENSION_LOCK; the target is transaction-private by the
+    // engage seam's admission). Page read/init/lock/fill below is the
+    // UNCHANGED serial protocol.
+    let run_mode = bistate.as_deref().is_some_and(|bi| bi.block_run.is_some());
+    debug_assert!(!run_mode || !use_fsm, "block-run mode requires HEAP_INSERT_SKIP_FSM");
+
     if len > MaxHeapTupleSize {
         return Err(row_too_big(len));
     }
@@ -267,12 +278,28 @@ pub fn RelationGetBufferForTuple<'mcx>(
 
     let mut target_block = match bistate.as_deref().and_then(|bi| bi.current_buf.as_ref()) {
         Some(cur) => cur.block_number(),
+        None if run_mode => InvalidBlockNumber,
         None => relation_get_target_block(relation),
     };
+    if run_mode && target_block == InvalidBlockNumber {
+        // Pin was released mid-run (ReleaseBulkInsertStatePin): resume the
+        // claimed run before claiming a new one (no page is ever orphaned).
+        let bi = bistate.as_deref_mut().expect("run_mode has a bistate");
+        if bi.next_free != InvalidBlockNumber {
+            debug_assert!(bi.next_free <= bi.last_free);
+            target_block = bi.next_free;
+            if bi.next_free >= bi.last_free {
+                bi.next_free = InvalidBlockNumber;
+                bi.last_free = InvalidBlockNumber;
+            } else {
+                bi.next_free += 1;
+            }
+        }
+    }
     if target_block == InvalidBlockNumber && use_fsm {
         target_block = freespace_seams::get_page_with_free_space::call(relation, target_free_space)?;
     }
-    if target_block == InvalidBlockNumber {
+    if target_block == InvalidBlockNumber && !run_mode {
         let nblocks = bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
             relation,
             ForkNumber::MAIN_FORKNUM,
@@ -321,15 +348,31 @@ pub fn RelationGetBufferForTuple<'mcx>(
             // SAFETY: pinned + exclusively locked just above.
             let mut page =
                 unsafe { PageMut::from_raw(bufmgr_seams::buffer_get_page::call(pin.buffer())) };
-            if page.as_ref().is_new() {
+            let was_new = page.as_ref().is_new();
+            if was_new {
                 page.init(0);
                 bufmgr_seams::mark_buffer_dirty::call(pin.buffer())?;
             }
 
             let page_free_space = page.as_ref().heap_free_space();
-            if target_free_space <= page_free_space {
-                relation_set_target_block(relation, target_block);
+            // Run-mode fresh pages take C's EXTEND-TAIL acceptance (`len >
+            // page_free_space` is fatal, fillfactor slack is only a
+            // preference): every run page is brand new, and the stricter
+            // `target_free_space` test alone would claim runs forever for a
+            // tuple that fits a page but not the fillfactor residue.
+            if target_free_space <= page_free_space
+                || (run_mode && was_new && len <= page_free_space)
+            {
+                if !run_mode {
+                    // Run mode never touches the shared smgr targblock cache:
+                    // the run cursor owns page supply, and other participants'
+                    // caches must not be steered into this writer's run.
+                    relation_set_target_block(relation, target_block);
+                }
                 return Ok(pin);
+            }
+            if run_mode && was_new {
+                panic!("tuple is too big: size {len}");
             }
 
             bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
@@ -373,6 +416,25 @@ pub fn RelationGetBufferForTuple<'mcx>(
                     target_free_space,
                 )?;
             }
+        }
+
+        if run_mode {
+            // Run exhausted (or first call): claim the next private run and
+            // loop — the read/init/lock arm above services run pages exactly
+            // as it services `next_free` bulk-extend pages (zeroed -> init).
+            let bi = bistate.as_deref_mut().expect("run_mode has a bistate");
+            bi.current_buf = None;
+            let alloc = std::sync::Arc::clone(bi.block_run.as_ref().expect("run_mode"));
+            let run = alloc.claim(relation, &bi.strategy)?;
+            target_block = run.start;
+            if run.len > 1 {
+                bi.next_free = run.start + 1;
+                bi.last_free = run.start + run.len - 1;
+            } else {
+                bi.next_free = InvalidBlockNumber;
+                bi.last_free = InvalidBlockNumber;
+            }
+            continue;
         }
 
         let (pin, mut unlocked_target) =

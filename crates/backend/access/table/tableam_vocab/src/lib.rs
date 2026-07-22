@@ -5,6 +5,9 @@
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
 
+/// W2a block-run allocator (parallel writes increment 2).
+pub mod block_run;
+
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::cell::Cell;
@@ -169,6 +172,11 @@ pub struct BulkInsertStateData {
     pub next_free: BlockNumber,
     pub last_free: BlockNumber,
     pub already_extended_by: u32,
+    /// W2a block-run mode (parallel write engagement): when set, hio's
+    /// buffer supply comes exclusively from runs claimed here — no FSM, no
+    /// shared-targblock probe, no heavyweight extension (`block_run.rs`).
+    /// None = the serial protocol, byte-identical to before the field.
+    pub block_run: Option<std::sync::Arc<block_run::BlockRunAllocator>>,
 }
 
 /// W1 receiver-level multi-insert buffer (parallel-writes ladder): row copies

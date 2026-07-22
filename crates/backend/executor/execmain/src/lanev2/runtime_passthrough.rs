@@ -82,6 +82,10 @@ pub(super) struct PassthroughShared {
     /// boundary once the stash is non-empty). Leader-thread-only in practice;
     /// the Mutex is uncontended shape (Send/Sync for the work body).
     leader_stash: Mutex<Vec<MinImage>>,
+    /// W2a inc-2: when set, workers write the target THEMSELVES over private
+    /// block runs (write_blockrun.rs) instead of ring-emitting; the rings
+    /// stay empty and the leader only joins + sums counts.
+    blockrun: Option<Arc<super::write_blockrun::BlockRunShared>>,
 }
 
 impl PassthroughShared {
@@ -91,6 +95,7 @@ impl PassthroughShared {
         query_text: String,
         eflags: i32,
         funnel: Arc<RowFunnel<MinImage>>,
+        blockrun: Option<Arc<super::write_blockrun::BlockRunShared>>,
     ) -> Arc<PassthroughShared> {
         Arc::new(PassthroughShared {
             rt,
@@ -107,6 +112,7 @@ impl PassthroughShared {
             failed: AtomicBool::new(false),
             leader_lane: OnceLock::new(),
             leader_stash: Mutex::new(Vec::new()),
+            blockrun,
         })
     }
 
@@ -158,10 +164,13 @@ impl PassthroughShared {
 }
 
 /// Per-worker (thread-local) executor state: a fresh `QueryDesc` over the
-/// leader-arena pstmt plus this worker's `RowEmitSink` (bound to its ring).
+/// leader-arena pstmt plus this worker's `RowEmitSink` (bound to its ring)
+/// and, in block-run mode, its direct-write half (target handle + W1 buffer
+/// + run-fed bistate).
 struct WorkerExecPt {
     qd: ::types_portal::QueryDescHandle,
     sink: RowEmitSink,
+    write: Option<super::write_blockrun::WorkerWriteState>,
 }
 
 thread_local! {
@@ -238,8 +247,23 @@ impl PassthroughShared {
                 crate::querydesc::release_query_desc_seam(qd);
                 return Err(e);
             }
+            // Block-run mode: build the direct-write half BEFORE the first
+            // row is produced; a refusal here (target open / needs_wal
+            // disagreement) errors the worker, which fails the statement —
+            // shape-level fallback happened at the leader's admission, so a
+            // mid-flight surprise must never silently change the write path.
+            let write = match self.blockrun.as_ref() {
+                Some(shared) => match super::write_blockrun::WorkerWriteState::begin(shared) {
+                    Ok(ws) => Some(ws),
+                    Err(e) => {
+                        crate::querydesc::release_query_desc_seam(qd);
+                        return Err(e);
+                    }
+                },
+                None => None,
+            };
             let sink = RowEmitSink::new(self.funnel.producer(worker));
-            *cell.borrow_mut() = Some(WorkerExecPt { qd, sink });
+            *cell.borrow_mut() = Some(WorkerExecPt { qd, sink, write });
             Ok(())
         })
     }
@@ -251,6 +275,7 @@ impl PassthroughShared {
             let ex = b.as_mut().expect("passthrough morsel without a bound executor");
             let qd = ex.qd;
             let sink = &mut ex.sink;
+            let write = &mut ex.write;
             crate::querydesc::with_qd(qd, |q| {
                 let x = q.exec.as_mut().expect("passthrough worker executor state");
                 x.with_mut(|d| -> PgResult<()> {
@@ -273,7 +298,13 @@ impl PassthroughShared {
                     let mut segs = runtime::Segments::whole(range.start..range.end);
                     while let Some(seg) = segs.next() {
                         src.position(estate, seg)?;
-                        if !emit_drain(sink, &mut src, estate, stash)? {
+                        let cont = match write.as_mut() {
+                            // W2a inc-2: rows land in THIS worker's run-fed
+                            // write buffer; nothing rides the ring.
+                            Some(ws) => emit_drain_write(ws, &mut src, estate)?,
+                            None => emit_drain(sink, &mut src, estate, stash)?,
+                        };
+                        if !cont {
                             // Demand closed (LIMIT): stop this claim.
                             break;
                         }
@@ -296,6 +327,35 @@ impl PassthroughShared {
 /// append) for the leader-producer (`stash` = Some). Returns `false` iff
 /// demand closed (LIMIT) — the caller stops. Mirrors the fold drain's batch
 /// loop with the sink swapped for the funnel producer.
+/// W2a inc-2 twin of `emit_drain`: each surviving row goes to the worker's
+/// OWN write state (run-fed W1 multi-insert) instead of the funnel ring.
+/// Write engagements never close demand, so this only returns `false` on the
+/// abort path (`close_demand` from a failing sibling — checked by the caller
+/// via `failed` at segment boundaries; the emit itself cannot observe it).
+fn emit_drain_write<'a, 'mcx>(
+    ws: &mut super::write_blockrun::WorkerWriteState,
+    src: &mut SeqScanSource<'a, 'mcx>,
+    estate: &mut ::executils::EStateData<'mcx>,
+) -> PgResult<bool> {
+    loop {
+        let n = src.next_batch(estate)?;
+        if n == 0 {
+            // End of claim: drop the scan slot's pin (fold-drain parity).
+            if let Some(b) = src.seq_scan_bridge() {
+                let mcx = estate.es_query_cxt;
+                ::exectuples::exec_clear_tuple(estate.slot_mut(b.ss.ss_ScanTupleSlot), mcx);
+            }
+            return Ok(true);
+        }
+        ::postgres_seams::check_for_interrupts::call()?;
+        for i in 0..n {
+            if let Some(slot) = src.emit(estate, i)? {
+                ws.receive(estate, slot)?;
+            }
+        }
+    }
+}
+
 fn emit_drain<'a, 'mcx>(
     sink: &mut RowEmitSink,
     src: &mut SeqScanSource<'a, 'mcx>,
@@ -336,8 +396,22 @@ fn emit_drain<'a, 'mcx>(
 /// the agg arm's `teardown_worker_exec` discipline.
 fn teardown_worker_exec_pt(clean: bool) -> PgResult<()> {
     WORKER_EXEC_PT.with(|cell| -> PgResult<()> {
-        let Some(ex) = cell.borrow_mut().take() else { return Ok(()) };
-        if clean {
+        let Some(mut ex) = cell.borrow_mut().take() else { return Ok(()) };
+        // Block-run SEAL half (W2a inc-2): the clean path flushes the W1
+        // tail into this worker's run and publishes the count — a seal error
+        // is a worker error (the leader re-checks after the gang join, so a
+        // post-RG-completion failure still fails the statement). The error
+        // path abandons: unflushed copies drop, the aborted transaction
+        // kills the flushed pages with the relfilenode.
+        let seal = match ex.write.take() {
+            Some(ws) if clean => ws.seal(),
+            Some(ws) => {
+                ws.abandon();
+                Ok(())
+            }
+            None => Ok(()),
+        };
+        if clean && seal.is_ok() {
             let r = crate::execmain::executor_finish_seam(ex.qd)
                 .and_then(|()| crate::execmain::executor_end_seam(ex.qd));
             match r {
@@ -352,7 +426,7 @@ fn teardown_worker_exec_pt(clean: bool) -> PgResult<()> {
             }
         } else {
             crate::querydesc::release_query_desc_seam(ex.qd);
-            Ok(())
+            seal
         }
     })
 }
@@ -486,8 +560,13 @@ pub(super) fn engage_passthrough(
     ring_cap: usize,
     limit: Option<u64>,
     pure_drain: bool,
+    blockrun: Option<Arc<super::write_blockrun::BlockRunShared>>,
     emit_row: impl FnMut(MinImage) -> PgResult<bool>,
 ) -> PgResult<PassthroughEngageOutcome> {
+    // Block-run engagements are pure-drain by construction (the leader owns
+    // finalize only; a producing leader would need its own write state and
+    // the who-finalizes analysis — explicitly W2b).
+    debug_assert!(blockrun.is_none() || pure_drain);
     ensure_passthrough_hooks_registered();
     let funnel: Arc<RowFunnel<MinImage>> =
         RowFunnel::new(rt.nthreads() + runtime::MAX_EXTERNAL_LANES, ring_cap);
@@ -503,8 +582,14 @@ pub(super) fn engage_passthrough(
     funnel.set_wake_hook(Box::new(move || {
         latch::SetLatch(::types_storage::latch::LatchHandle::proc(leader_proc));
     }));
-    let payload =
-        PassthroughShared::new(rt, pstmt, query_text.to_string(), eflags, Arc::clone(&funnel));
+    let payload = PassthroughShared::new(
+        rt,
+        pstmt,
+        query_text.to_string(),
+        eflags,
+        Arc::clone(&funnel),
+        blockrun,
+    );
 
     // EnterParallelMode brackets the parallel-context lifetime
     // (CreateParallelContext asserts it; the agg arm's engage discipline,
@@ -840,6 +925,15 @@ fn engage_passthrough_inner(
     let destroy = parallel::DestroyParallelContext(pcxt);
     let outcome = body?;
     destroy?;
+    // SEAL BARRIER error recheck (W2a inc-2, general for every mode): a
+    // worker's post-RG-completion teardown (block-run tail flush, executor
+    // finish) can record an error AFTER the leader's drain loop took the
+    // completed outcome. DestroyParallelContext joined every worker above,
+    // so any late error is visible now — a Completed with a failed seal must
+    // fail the statement, never under-write silently.
+    if let Some(e) = payload.take_error() {
+        return Err(e);
+    }
     Ok(outcome)
 }
 
@@ -1156,12 +1250,22 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
     if write_dest {
         super::write_funnel::note_engaged(total_granules);
     }
+    // W2a inc-2 (worker-direct block-run writes; PGRUST_W2A_BLOCKRUN default
+    // OFF — write_blockrun.rs): STRUCTURAL admission against the started-up
+    // receiver. Armed => workers write their own private runs and the drain
+    // below sees zero rows; refused => increments 0/1 exactly as before.
+    let blockrun = if write_dest {
+        super::write_blockrun::try_arm(dest)
+    } else {
+        None
+    };
     // W2a inc-1 (pop-K batched write drain; PGRUST_W2A_DRAIN_BATCH default
     // OFF — write_funnel.rs): write-dest rows collect into a K-image batch
     // and flush through `flush_write_batch` (one receiver dispatch + one
     // slot clear + K image frees per batch, W1 buffer fed directly). Write
     // receivers never stop early, so the batched arm returns Ok(true)
     // unconditionally; the tail remainder flushes after the engage returns.
+    // Inert when inc-2 owns the run (no rows reach the drain).
     let batch_writes = write_dest && super::write_funnel::w2a_drain_batch_enabled();
     let mut batch: Vec<MinImage> = if batch_writes {
         Vec::with_capacity(super::write_funnel::DRAIN_BATCH_CAP)
@@ -1177,8 +1281,10 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
         source,
         super::row_emit::DEFAULT_RING_CAP,
         limit,
-        // W0.1: write dests drain PURE — the leader is the writer.
+        // W0.1: write dests drain PURE — the leader is the writer (inc-2:
+        // the leader is only the finalizer; workers write).
         write_dest,
+        blockrun.clone(),
         |img: MinImage| -> PgResult<bool> {
             if batch_writes {
                 batch.push(img);
@@ -1233,6 +1339,30 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
     match outcome {
         PassthroughEngageOutcome::Completed(n) => {
             PT_COMPLETED.fetch_add(1, Ordering::SeqCst);
+            // Block-run completion: the drain saw zero rows by design; the
+            // statement's row count is the workers' sealed sum (read after
+            // the gang join inside engage). The zero-drain invariant is a
+            // release-reachable witness: any ring leakage double-counts and
+            // fails the e2e ground-truth/parity legs.
+            let n = match blockrun.as_ref() {
+                Some(br) => {
+                    debug_assert_eq!(n, 0, "block-run engagement drained rows");
+                    let rows = br.rows.load(Ordering::SeqCst);
+                    super::lane_trace(&format!(
+                        "blockrun: completed rows={rows} writers={} pages={} drained={n}",
+                        br.writers.load(Ordering::SeqCst),
+                        br.allocator.claimed_pages(),
+                    ));
+                    for run in br.allocator.run_map() {
+                        super::lane_trace(&format!(
+                            "blockrun: run start={} len={}",
+                            run.start, run.len
+                        ));
+                    }
+                    n + rows
+                }
+                None => n,
+            };
             if write_dest {
                 super::write_funnel::note_completed(n);
             }
