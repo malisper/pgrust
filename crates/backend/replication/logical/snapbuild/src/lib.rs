@@ -315,8 +315,43 @@ impl SnapBuild {
         })
     }
 
+    // SnapBuildExportSnapshot (snapbuild.c:539): export the initial slot
+    // snapshot through the regular SET TRANSACTION SNAPSHOT machinery. The
+    // transaction started here stays open until the walsender's next
+    // replication command (snap_build_clear_exported_snapshot) so the
+    // importing side sees the source transaction still running and the xmin
+    // horizon held.
     pub fn export_snapshot(&mut self) -> PgResult<String> {
-        unported("SnapBuildExportSnapshot (walsender CREATE_REPLICATION_SLOT EXPORT_SNAPSHOT)")
+        if xact::IsTransactionOrTransactionBlock() {
+            elog(ERROR, "cannot export a snapshot from within a transaction")?;
+        }
+        if EXPORT_IN_PROGRESS.get() {
+            elog(ERROR, "can only export one snapshot at a time")?;
+        }
+        // C additionally saves CurrentResourceOwner across the export
+        // transaction; the port's transaction machinery owns that save and
+        // restore internally.
+        EXPORT_IN_PROGRESS.set(true);
+
+        xact::StartTransactionCommand()?;
+        // There doesn't seem to be a nicer API to set these (snapbuild.c:555).
+        xact::SetXactIsoLevel(types_core::xact::XACT_REPEATABLE_READ);
+        xact::SetXactReadOnly(true);
+
+        let serialized = self.initial_snapshot()?;
+        let xcnt = serialized.xip.len();
+        let snap = snapmgr::RestoreSnapshot(&serialized);
+
+        // Now that we've built a plain snapshot, export it the normal way.
+        let snapname = snapmgr::ExportSnapshot(&snap)?;
+
+        ereport(types_error::LOG)
+            .errmsg(format!(
+                "exported logical decoding snapshot: \"{snapname}\" with {xcnt} transaction ID{}",
+                if xcnt == 1 { "" } else { "s" }
+            ))
+            .finish(loc("SnapBuildExportSnapshot"))?;
+        Ok(snapname)
     }
 
     pub fn get_or_build_snapshot(&mut self) -> Snapshot {
@@ -993,11 +1028,21 @@ impl SnapBuild {
     }
 }
 
+// SnapBuildClearExportedSnapshot (snapbuild.c:600): abort the transaction
+// that kept the exported snapshot's xmin pinned; runs at the start of every
+// replication command.
 pub fn snap_build_clear_exported_snapshot() -> PgResult<()> {
     if !EXPORT_IN_PROGRESS.get() {
         return Ok(());
     }
-    unported("SnapBuildClearExportedSnapshot with an export in progress (snapshot export)")
+    if !xact::IsTransactionState() {
+        elog(ERROR, "clearing exported snapshot in wrong transaction state")?;
+    }
+    // AbortCurrentTransaction takes care of resetting the snapshot state
+    // (and, in this port, the resource owner C restores by hand).
+    xact::AbortCurrentTransaction()?;
+    EXPORT_IN_PROGRESS.set(false);
+    Ok(())
 }
 
 pub fn snap_build_reset_exported_snapshot_state() {
