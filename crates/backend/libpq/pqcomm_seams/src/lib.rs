@@ -47,9 +47,10 @@ seam_core::seam!(
 
 seam_core::seam!(
     // pq_check_connection (pqcomm.c): true = client still connected. The
-    // ProcessInterrupts CLIENT_CONNECTION_CHECK arm calls through this seam
-    // (tcop cannot depend on pqcomm directly); installed by the real socket
-    // transport only — sim-net/wasm leave it vacant and the caller treats
-    // the connection as alive.
+    // ProcessInterrupts CLIENT_CONNECTION_CHECK arm dispatches through this
+    // seam because it is TRANSPORT-owned: only the real socket transport
+    // installs it (init_socket_seams — its FeBeWaitSet + WL_SOCKET_CLOSED
+    // are what the poll rides); sim-net/wasm leave it vacant and the caller
+    // treats the connection as alive.
     pub fn pq_check_connection() -> PgResult<bool>
 );
