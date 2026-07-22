@@ -1674,6 +1674,16 @@ fn vec_cols(
     if !runtime_agg_vecaccept_enabled() || ea || !::nodeagg::pd_batch_insert_enabled() {
         return None;
     }
+    // The direct granule feed serves pgrcolumnar parts only (the tableam
+    // drive ERRORS on heap scans — "the arm admits pgrcolumnar only"). On
+    // the member's base this was structural: the distinct arm itself only
+    // engaged columnar granule starts. The t43 stack generalized the arm's
+    // task source to heap morsels, so the vec rider must now refuse heap
+    // itself — None = the incumbent per-row accept, the member's original
+    // heap semantics (caught by the cbstore-lane off-arm heap corpus).
+    if !::nodeseqscan::seq_scan_is_pgrcolumnar(ss) {
+        return None;
+    }
     if scan_plan.scan.plan.qual.iter().next().is_some() {
         return None;
     }
