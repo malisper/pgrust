@@ -672,7 +672,16 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      keeper-block lists (C context_freelists parity — C's freelist is
     //      per-process = per-backend, so per-thread IS the C shape). Same
     //      classification and teardown story as row 70.
-    assert_eq!(count_tree(crates), 531, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // W2a inc-2 delta (532 = 531 + 1, composed at t43), deliberately NON-SESSION TLS:
+    //   72. access/heap/heapam/src/dml.rs — PARALLEL_WRITE_PERMITS: the
+    //      RAII depth counter behind ParallelWriteGuard — the block-run
+    //      write sink's carve through heap_prepare_insert's real
+    //      is_parallel_worker refusal (the CTAS-dop4 postmortem's
+    //      release-reachable tripwire). Armed strictly around the sink's
+    //      own write calls on the worker THREAD and zero on every
+    //      statement boundary by RAII; no session identity, never
+    //      captured/restored by an envelope.
+    assert_eq!(count_tree(crates), 532, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
