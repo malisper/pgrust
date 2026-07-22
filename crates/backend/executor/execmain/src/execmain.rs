@@ -1382,6 +1382,19 @@ pub(crate) fn execute_plan<'m, 'mcx>(
         if crate::lanev2::try_passthrough_funnel(estate, planstate, number_tuples, dest)? {
             return Ok(());
         }
+        // GL-STMTTASK-1 (serial statement as a dop-1 pool task; kill knob
+        // PGRUST_STMT_TASK, default OFF): the armed simple-protocol
+        // statement's top-level run executes on a pool worker and streams
+        // its rows back through the row funnel; this thread drains to
+        // `dest` (startup/shutdown stay the caller's). Fail-closed: any
+        // ineligibility (or no serving channel) returns false and the
+        // serial per-tuple loop below runs byte-identically. Placed AFTER
+        // the passthrough funnel deliberately: shapes inside the funnel's
+        // proven band keep the stronger engine. Knob-OFF cost here is one
+        // thread-local read (the armed flag OFF can never set).
+        if crate::lanev2::try_stmt_task(estate, planstate, number_tuples, dest)? {
+            return Ok(());
+        }
     }
     let mut cursor_capture_sidecar: Option<::types_portal::TuplestoreHandle> = None;
     let cursor_fill_engaged = if estate.es_cursor_run_budget.is_some()

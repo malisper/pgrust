@@ -9449,6 +9449,7 @@ dependencies = [
  "mcx",
  "miscinit_seams",
  "pgstat",
+ "postgres_seams",
  "tupdesc",
  "tuplestore",
  "typcache_seams",

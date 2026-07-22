@@ -398,6 +398,21 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
             tcop_dest::SetRemoteDestReceiverParams(&mut receiver, portal.clone());
         }
 
+        // GL-STMTTASK-1 (kill knob PGRUST_STMT_TASK, default OFF): arm the
+        // statement-as-task executor hook for exactly THIS statement's
+        // top-level portal run — the protocol-level half of the admission
+        // envelope (simple protocol, single statement, wire dest, a raw
+        // SELECT, normal non-subtransaction session state). The executor
+        // hook owns the plan-shape gates and consumes the arm; the guard
+        // disarms on every exit path so the arm can never leak past the
+        // statement. Knob-OFF cost: one memoized bool read per statement.
+        let _stmt_task_arm = postgres_seams::stmt_task_arm::arm_statement(
+            n == 1
+                && dest == CommandDest::Remote
+                && stmt.node_tag() == NodeTag::T_SelectStmt
+                && !xact::IsSubTransaction(),
+        );
+
         let mut qc = QueryCompletion::default();
         let _ = pquery::PortalRun(
             &portal,

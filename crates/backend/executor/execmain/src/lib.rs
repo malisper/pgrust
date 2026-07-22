@@ -63,6 +63,9 @@ pub use lanev2::{
     ctas_funnel_engagements, cursor_store_armed_note, cursor_store_fill_enabled,
     cursor_store_fill_set_for_tests, funnel_engagements,
 };
+// GL-STMTTASK-1: the engagement counters (tests/diagnostics; the arming
+// face lives in postgres_seams::stmt_task_arm — the seam-boundary crate).
+pub use lanev2::stmt_task_engagements;
 pub use nodegather::GatherState;
 pub use nodegathermerge::GatherMergeState;
 pub use noderesult::ResultState;
