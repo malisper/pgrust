@@ -424,6 +424,10 @@ pub struct CbScanDescData<'mcx> {
     // RG (the range is the claim; morsel contract: a claim never crosses a
     // row-group/dict-epoch boundary) and returns 0 at the range end.
     range_end: Option<usize>,
+    // Direct bounded top-N granule drive (`topn_direct_next_granule`): the
+    // current granule was already handed out whole — the next call advances
+    // first. Reset by every (re)position (`set_granule_range`).
+    direct_handed: bool,
     // Per-1024-row block admission mask for the decoded granule (bit b =
     // block b may contain qual matches); windows in cleared blocks are
     // skipped without staging.
@@ -632,6 +636,7 @@ impl<'mcx> CbScanDescData<'mcx> {
             decoded: false,
             granule_rows: 0,
             range_end: None,
+            direct_handed: false,
             block_mask: !0,
             block_zm_enabled: !env_off("CBSTORE_DISABLE_BLOCK_ZM"),
             bloom_enabled: !env_off("CBSTORE_DISABLE_BLOOM"),
@@ -788,7 +793,79 @@ impl<'mcx> CbScanDescData<'mcx> {
         self.staged_rows = 0;
         self.row_cursor = 0;
         self.range_end = Some(g_in_rg + len);
+        self.direct_handed = false;
         Ok(())
+    }
+
+    /// Direct bounded top-N granule drive (the runtime sort arm's
+    /// PGRUST_RUNTIME_TOPN_HEAP feed): hand out the claim's next granule
+    /// WHOLE — (nrows, rowref_base) — without arming any window/SoA staging.
+    /// Requires a `set_granule_range` claim (the runtime morsel contract);
+    /// columns decode lazily per `topn_direct_lane`. The per-RG visibility
+    /// gate and prune accounting mirror `next_window`'s ranged loop head
+    /// verbatim (an invisible RG ends the claim — its granules belong to no
+    /// snapshot-visible row). `None` = claim exhausted. `rowref_base` is
+    /// `(rg << 32) | first_row_in_rg`, the winner-gather rowref law.
+    pub fn topn_direct_next_granule(&mut self) -> PgResult<Option<(u32, u64)>> {
+        debug_assert!(self.adaptive.is_none(), "direct top-N drive vs adaptive drive");
+        let (Some(end), true) = (self.range_end, self.rg_claimed) else {
+            return Err(Box::new(PgError::error(
+                "cbstore: direct top-N granule outside a granule-range claim".to_string(),
+            )));
+        };
+        let Some(part) = self.part.clone() else { return Ok(None) };
+        if self.rg >= part.rgs.len() {
+            // Beyond the footer horizon: snapshot-invisible (see next_window).
+            return Ok(None);
+        }
+        let rg_rows = part.rgs[self.rg].nrows as usize;
+        let ngranules = rg_rows.div_ceil(GRANULE_ROWS);
+        if !self.rg_checked {
+            // Zone quals are empty for the admitted shape, but keep the
+            // whole-RG gate exact (visibility AND zone — next_window
+            // verbatim; ranged: charge only the claim's granules).
+            if !self.rg_visible(self.rg)? || !self.rg_zone_ok(self.rg) {
+                self.granules_pruned += (end - self.granule) as u64;
+                self.granule = end;
+                return Ok(None);
+            }
+            self.rg_checked = true;
+        }
+        if self.direct_handed {
+            self.granule += 1;
+            self.decoded = false;
+            self.direct_handed = false;
+        }
+        if self.granule >= end.min(ngranules) {
+            return Ok(None);
+        }
+        let grows = (rg_rows - self.granule * GRANULE_ROWS).min(GRANULE_ROWS);
+        self.granule_rows = grows;
+        self.granules_scanned += 1;
+        self.direct_handed = true;
+        let base = ((self.rg as u64) << 32) | (self.granule * GRANULE_ROWS) as u64;
+        Ok(Some((grows as u32, base)))
+    }
+
+    /// The decoded datum lane of column `c` for the granule
+    /// `topn_direct_next_granule` just handed out. Decode-on-demand at
+    /// granule altitude (`ensure_col`, gkey-memoized — one decode per
+    /// (granule, column) however often the lane is re-borrowed). Dict
+    /// columns answer `None` (their datums gather through the dict table —
+    /// the direct feed's admission excludes them; fail closed here).
+    /// pgrcolumnar parts store no NULLs (null rows stay row-store
+    /// resident), so the lane carries no null mask by construction.
+    pub fn topn_direct_lane(&mut self, c: usize) -> Option<&[Datum]> {
+        debug_assert!(self.direct_handed, "lane read without a handed granule");
+        if c >= self.cols.len() {
+            return None;
+        }
+        self.ensure_col(c);
+        let cd = &self.cols[c];
+        if cd.is_dict {
+            return None;
+        }
+        cd.datums.get(..self.granule_rows)
     }
 
     /// Arm zone-ordered adaptive traversal on column `col` (0-based).
