@@ -33,3 +33,6 @@ mcx = { path = "../../../_support/mcx" }
 xact = { path = "../../access/transam/xact" }
 pg_subscription = { path = "../../catalog/pg_subscription" }
 libc = "0.2"
+
+[dev-dependencies]
+lmgr_proc_seams = { path = "../../storage/lmgr/lmgr_proc_seams" }

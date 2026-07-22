@@ -32,6 +32,8 @@ use walreceiver::client::{CopyData, PgConn};
 
 mod apply;
 mod tablesync;
+#[cfg(test)]
+mod tests;
 
 pub(crate) fn request_apply_worker_exit() {
     APPLY_WORKER_EXIT.set(true);
@@ -459,6 +461,23 @@ fn start_logical_streaming_opts(
     Ok(())
 }
 
+// replorigin_reset (worker.c): reset the session-origin advance state.
+// Registered before_shmem_exit so that when a dying worker's exit drain
+// reaches ShutdownPostgres -> AbortOutOfAnyTransaction, the abort record of
+// a half-applied remote transaction does NOT advance the replication origin
+// (RecordTransactionAbort's replorigin arm, xact engine): an advanced origin
+// for an incomplete transaction loses it — the publisher never resends.
+// LIFO order guarantees this runs before ShutdownPostgres, which InitPostgres
+// registered earlier (postinit). The shared-memory session registration
+// itself is released separately by ReplicationOriginExitCleanup (origin.c
+// port), registered on_shmem_exit inside replorigin_session_setup.
+fn replorigin_reset(_code: i32, _arg: datum::Datum) -> PgResult<()> {
+    origin::set_replorigin_session_origin(types_core::InvalidRepOriginId);
+    origin::set_replorigin_session_origin_lsn(InvalidXLogRecPtr);
+    origin::set_replorigin_session_origin_timestamp(0);
+    Ok(())
+}
+
 // ApplyWorkerMain (worker.c:4818) + InitializeLogRepWorker + run_apply_worker,
 // non-tablesync subset. main_arg = launcher worker-slot index.
 pub fn ApplyWorkerMain(main_arg: u64) -> PgResult<()> {
@@ -519,6 +538,16 @@ fn apply_worker_body(slot: usize) -> PgResult<()> {
     let subname = sub.name.clone();
     MY_SUBSCRIPTION.with(|s| *s.borrow_mut() = Some(sub));
     xact::CommitTransactionCommand()?;
+
+    // InitializeLogRepWorker tail (worker.c:4761): register the origin-state
+    // reset before any remote transaction can be applied — even a LOG line
+    // after the origin state is set may process a shutdown signal before the
+    // current apply operation commits. Registered here so both apply and
+    // tablesync workers are protected (C's comment). The checkpointer-class
+    // precedent for worker exit hooks: launcher's logicalrep_worker_onexit
+    // (on_shmem_exit at attach) and checkpointer's
+    // pgstat_before_server_shutdown_cb (before_shmem_exit).
+    ipc::before_shmem_exit(replorigin_reset, datum::Datum::null())?;
 
     if w.is_tablesync() {
         let _ = elog::elog(

@@ -6,7 +6,9 @@ use types_core::BackendType;
 // One backend slot per test thread that calls my_backend(); keep headroom
 // over the my_backend() call-site count or InitProcess FATALs mid-suite.
 const MAX_CONNECTIONS: i32 = 16;
-const MAX_WORKER_PROCESSES: i32 = 2;
+// Bump when claim_other() call sites grow: the claimable simulated-backend
+// range is MAX_BACKENDS - MAX_CONNECTIONS (12 today for 12 claim_other()s).
+const MAX_WORKER_PROCESSES: i32 = 5;
 const NUM_SPECIAL: i32 = types_storage::storage::NUM_SPECIAL_WORKER_PROCS;
 const MAX_BACKENDS: i32 = MAX_CONNECTIONS + 3 + MAX_WORKER_PROCESSES + 2 + NUM_SPECIAL;
 
@@ -900,4 +902,68 @@ fn horizons_in_recovery_fold_in_known_assigned_oldest() {
     let _r = RecoveryOn::new();
     let running = GetOldestTransactionIdConsideredRunning().unwrap();
     assert_eq!(running, 3900);
+}
+
+// MinimumActiveBackends (procarray.c): the commit_delay/commit_siblings
+// group-commit gate. Counts OTHER backends with an assigned XID that hold a
+// pid (not prepared-xact dummies) and are not blocked on a lock.
+#[test]
+fn minimum_active_backends_counts_other_active_backends() {
+    let _g = test_lock();
+    let me = my_backend();
+    let my_pgproc = GetPGProcByNumber(me);
+
+    // The installer must publish the gate (the group-commit delay consumer in
+    // the WAL flush path only calls through the seam; an uninstalled seam is
+    // a silent always-skip — the exact inert-GUC class this port closes).
+    assert!(procarray_seams::minimum_active_backends::is_installed());
+
+    // min == 0: always true (C's quick short-circuit).
+    assert!(MinimumActiveBackends(0));
+
+    // Myself never counts, even with an assigned XID and a live pid.
+    my_pgproc.xid.value.store(4000, Relaxed);
+    assert!(my_pgproc.pid.load(Relaxed) != 0);
+    assert!(!MinimumActiveBackends(1));
+
+    // One other backend in an active transaction reaches min = 1 only.
+    let other = claim_other();
+    let op = GetPGProcByNumber(other);
+    op.pid.store(9001, Relaxed);
+    other_proc_running(other, 4001);
+    assert!(MinimumActiveBackends(1));
+    assert!(!MinimumActiveBackends(2));
+
+    // pid == 0 marks a prepared-xact dummy: not counted.
+    op.pid.store(0, Relaxed);
+    assert!(!MinimumActiveBackends(1));
+    op.pid.store(9001, Relaxed);
+    assert!(MinimumActiveBackends(1));
+
+    // Blocked waiting for a lock: not counted (it cannot run until someone
+    // else commits). The pointer is only null-tested, never dereferenced.
+    op.waitLock.set(core::ptr::NonNull::dangling().as_ptr());
+    assert!(!MinimumActiveBackends(1));
+    op.waitLock.set(core::ptr::null_mut());
+    assert!(MinimumActiveBackends(1));
+
+    // No XID assigned: not counted.
+    op.xid.value.store(InvalidTransactionId, Relaxed);
+    assert!(!MinimumActiveBackends(1));
+    op.xid.value.store(4001, Relaxed);
+
+    // A second active sibling reaches min = 2.
+    let other2 = claim_other();
+    let op2 = GetPGProcByNumber(other2);
+    op2.pid.store(9002, Relaxed);
+    other_proc_running(other2, 4002);
+    assert!(MinimumActiveBackends(2));
+    assert!(!MinimumActiveBackends(3));
+
+    // Cleanup: release the fabricated backends and restore my own proc.
+    op2.pid.store(0, Relaxed);
+    other_proc_end(other2, 4002);
+    op.pid.store(0, Relaxed);
+    other_proc_end(other, 4001);
+    my_pgproc.xid.value.store(InvalidTransactionId, Relaxed);
 }

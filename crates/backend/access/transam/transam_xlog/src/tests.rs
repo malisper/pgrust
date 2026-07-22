@@ -345,6 +345,72 @@ fn insert_flush_smoke() {
         );
         guc_tables::vars::wal_sync_method.write(saved_method);
     }
+
+    // commit_delay/commit_siblings group-commit gate (xlog.c XLogFlush):
+    // the flush sleeps commit_delay before writing ONLY when commit_delay > 0
+    // AND fsync is enabled AND MinimumActiveBackends(commit_siblings) — the
+    // procarray seam. Legs: gate not consulted with commit_delay=0; not
+    // consulted with fsync off; consulted-no-sleep without siblings;
+    // consulted-and-slept with siblings.
+    {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        static GATE_CALLS: AtomicUsize = AtomicUsize::new(0);
+        static GATE_ANSWER: AtomicBool = AtomicBool::new(false);
+        procarray_seams::minimum_active_backends::set(|min| {
+            assert_eq!(min, guc_tables::vars::CommitSiblings.read());
+            GATE_CALLS.fetch_add(1, Ordering::Relaxed);
+            GATE_ANSWER.load(Ordering::Relaxed)
+        });
+        let mut insert_noop = |fill: u8| {
+            let body: Vec<u8> = vec![fill; 48];
+            let tot_len = SizeOfXLogRecord + body.len();
+            let mut h = [0u8; 24];
+            h[0..4].copy_from_slice(&(tot_len as u32).to_ne_bytes());
+            h[16] = XLOG_NOOP;
+            h[17] = RM_XLOG_ID;
+            let crc = crc32c::pg_comp_crc32c(crc32c::CRC32C_INIT, &body);
+            h[20..24].copy_from_slice(&crc.to_ne_bytes());
+            XLogInsertRecord(&mut h, &[&body], 0, 0, 0, false).unwrap()
+        };
+
+        // commit_delay = 0 (shipped default): gate never consulted.
+        assert_eq!(guc_tables::vars::CommitDelay.read(), 0);
+        let end = insert_noop(0x01);
+        XLogFlush(end).unwrap();
+        assert_eq!(GATE_CALLS.load(Ordering::Relaxed), 0);
+
+        // commit_delay > 0 but fsync disabled: still not consulted (C's
+        // conjunct order: CommitDelay > 0 && enableFsync && gate).
+        guc_tables::vars::CommitDelay.write(100_000);
+        assert!(!init_small::globals::enableFsync());
+        let end = insert_noop(0x02);
+        XLogFlush(end).unwrap();
+        assert_eq!(GATE_CALLS.load(Ordering::Relaxed), 0);
+
+        // fsync on, gate says too few siblings: consulted, no delay taken.
+        init_small::globals::set_enableFsync(true);
+        let end = insert_noop(0x03);
+        XLogFlush(end).unwrap();
+        assert_eq!(GATE_CALLS.load(Ordering::Relaxed), 1);
+
+        // Siblings present: the flush must sleep >= commit_delay (100ms)
+        // before writing. thread::sleep guarantees the lower bound.
+        GATE_ANSWER.store(true, Ordering::Relaxed);
+        let end = insert_noop(0x04);
+        let t0 = std::time::Instant::now();
+        XLogFlush(end).unwrap();
+        assert_eq!(GATE_CALLS.load(Ordering::Relaxed), 2);
+        assert!(
+            t0.elapsed() >= std::time::Duration::from_micros(100_000),
+            "commit_delay sleep did not happen: {:?}",
+            t0.elapsed()
+        );
+
+        // Restore the substrate posture (delay off, fsync off).
+        GATE_ANSWER.store(false, Ordering::Relaxed);
+        guc_tables::vars::CommitDelay.write(0);
+        init_small::globals::set_enableFsync(false);
+    }
     let segpath = dir.join(format!("pg_wal/{}", XLogFileName(1, XLByteToSeg(end_of_log, seg), seg)));
     let file = std::fs::read(&segpath).unwrap_or_else(|e| {
         let names: Vec<_> = std::fs::read_dir(dir.join("pg_wal")).unwrap().map(|x| x.unwrap().file_name()).collect();
