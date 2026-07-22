@@ -5753,13 +5753,15 @@ pub fn pd_derive_spec(
 /// snapshot, and the leader-side parallel-merge drivers — was DELETED at
 /// Phase-5 D1.)
 pub use pardistinct::{
-    pd_bucket_precount, pd_concat_buckets, pd_emit_bucket, pd_empty_grouped_table,
-    pd_merge_bucket, pd_merge_bucket_refs, pd_paremit_recipe, pd_paremit_state,
-    pd_route_value_records, pd_spill_bytes_mode, pd_spill_min_record_width,
-    pd_spill_record_width, pd_table_from_spill, PdBucketMerger, PdBuilder, PdEmitBucket,
-    PdEmitRecipe, PdFeed, PdHandedTable, PdKeyKind, PdMerged, PdParemitCol,
-    PdParemitState, PdSinkLocal, PdSinkMerged, PdSpec, PdTopnCand, PdTopnKey, PdTopnSpec,
-    PD_SINK_GROUP_PARTS,
+    pd_adopt_registry, pd_batch_insert_enabled, pd_bucket_precount, pd_clear_thread_registry,
+    pd_concat_buckets, pd_emit_bucket, pd_empty_grouped_table, pd_export_registry, pd_merge_bucket,
+    pd_merge_bucket_refs, pd_parallel_merge_grouped, pd_parallel_merge_plain, pd_paremit_recipe,
+    pd_paremit_state, pd_registry_get, pd_registry_insert, pd_registry_nonempty,
+    pd_registry_remove, pd_route_value_records, pd_spill_bytes_mode, pd_spill_min_record_width,
+    pd_spill_record_width, pd_table_from_spill, pd_vec_plan, PdBucketMerger, PdBuilder,
+    PdEmitBucket, PdEmitRecipe, PdExport, PdFeed, PdHandedTable, PdHandoff, PdInt, PdKeyKind,
+    PdMerged, PdParemitCol, PdParemitState, PdSinkLocal, PdSinkMerged, PdSpec, PdTopnCand,
+    PdTopnKey, PdTopnSpec, PdVecPlan, PdVecScratch, PD_SINK_GROUP_PARTS,
 };
 
 /// PAREMIT shape probe (runtime distinct sink, emission-in-combine fast

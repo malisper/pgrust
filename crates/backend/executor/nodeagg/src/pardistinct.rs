@@ -69,8 +69,11 @@ pub enum PdInt {
 }
 
 impl PdInt {
+    /// Canonicalize a slot/lane datum of this int kind to the sign-extended
+    /// key word. `pub`: the vecaccept lane canonicalizes decoded columnar
+    /// lanes with the exact per-row read.
     #[inline]
-    pub(crate) fn read(self, d: Datum) -> i64 {
+    pub fn read(self, d: Datum) -> i64 {
         match self {
             PdInt::I16 => d.as_i16() as i64,
             PdInt::I32 => d.as_i32() as i64,
@@ -185,6 +188,70 @@ pub struct PdSpec {
     pub expected_worker_rows: u64,
 }
 
+/// GL-VECACCEPT-1 lane plan: the slot attnos + canonicalization kinds the
+/// vectorized whole-granule accept reads directly from decoded columnar
+/// lanes (no slot, no per-row deform). Derived from the spec fail-closed
+/// (`pd_vec_plan`): exactly one int-family group key, exactly one
+/// int-family distinct set (the staged batch-insert shape), and every
+/// vocab rider int-family by construction. `None` anywhere = the caller
+/// keeps the incumbent per-row accept byte-for-byte.
+pub struct PdVecPlan {
+    /// The group key's 0-based slot attno + read kind.
+    pub key_att: u16,
+    pub key_kind: PdInt,
+    /// The distinct set's 0-based slot attno + read kind.
+    pub set_att: u16,
+    pub set_kind: PdInt,
+    /// Aligned with `spec.vocab`: `Some((att, kind))` = a value lane to
+    /// fold (SumInt/AvgInt); `None` = count-only (no lane read — the
+    /// columnar-part no-NULL law makes CountAny a plain row count).
+    pub riders: Vec<Option<(u16, PdInt)>>,
+}
+
+/// GL-VECACCEPT-1 per-worker scratch (reused across granules — the vec
+/// accept's only allocations after warm-up): the batch-hash lane and the
+/// resolved group-id lane.
+#[derive(Default)]
+pub struct PdVecScratch {
+    /// Phase-2 output: one resolved group id per lane row.
+    pub gids: Vec<u32>,
+    /// Phase-1 output (parallel to the key lane).
+    hashes: Vec<u64>,
+}
+
+/// Derive the vectorized-accept lane plan from a spec (fail-closed; the
+/// admission twin of [`PdBuilder::set_batch_insert`]'s shape gate plus the
+/// single-int-key gate the batched group resolve requires).
+pub fn pd_vec_plan(spec: &PdSpec) -> Option<PdVecPlan> {
+    if spec.nkeys() != 1 || spec.sets.len() != 1 {
+        return None;
+    }
+    let PdKeyKind::Int(key_kind) = spec.key_kinds[0] else { return None };
+    let set_kind = match spec.sets[0].kind {
+        DistinctKeyKind::Int16 => PdInt::I16,
+        DistinctKeyKind::Int32 => PdInt::I32,
+        DistinctKeyKind::Int64 => PdInt::I64,
+        DistinctKeyKind::Bytes => return None,
+    };
+    let riders = spec
+        .vocab
+        .iter()
+        .map(|v| match v.kind {
+            PdVocabKind::CountStar | PdVocabKind::CountAny { .. } => None,
+            PdVocabKind::SumInt { att, kind } | PdVocabKind::AvgInt { att, kind } => {
+                Some((att, kind))
+            }
+        })
+        .collect();
+    Some(PdVecPlan {
+        key_att: spec.key_atts[0],
+        key_kind,
+        set_att: spec.sets[0].att,
+        set_kind,
+        riders,
+    })
+}
+
 impl PdSpec {
     #[inline]
     pub fn nkeys(&self) -> usize {
@@ -273,6 +340,21 @@ fn pd_run_memo_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
         std::env::var("PGRUST_RUNTIME_DISTINCT_RUN_MEMO").map_or(true, |v| v != "0")
+    })
+}
+
+/// GL-VECACCEPT-1 probe-pass look-ahead distance: while resolving lane row
+/// i the pass prefetches the open-addressing slot word row i+K will probe.
+/// `PGRUST_RUNTIME_AGG_VECACCEPT_PREFETCH` (default 8; 0 disables) — a
+/// ladder axis, never a semantic input (the hint changes no byte).
+fn pd_vec_prefetch_k() -> usize {
+    static K: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *K.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_AGG_VECACCEPT_PREFETCH")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(8)
+            .min(256)
     })
 }
 
@@ -644,6 +726,138 @@ impl<'mcx> PdBuilder<'mcx> {
         }
         self.stage_g.clear();
         self.stage_v.clear();
+    }
+
+    /// GL-VECACCEPT-1 admission (the builder-side gate): the vectorized
+    /// whole-granule accept requires the staged set-insert shape
+    /// ([`set_batch_insert`] armed: grouped, one int-kind set) AND the
+    /// batched group resolve's own gate (exactly one int key — the batch
+    /// hash pass is the single-word `key_hash` chain). Callers derive the
+    /// lane geometry via [`pd_vec_plan`]; this predicate is the runtime
+    /// twin ensuring THIS Local can run the vec schedule.
+    pub fn vec_admissible(&self) -> bool {
+        self.stage_on
+            && self.spec.nkeys() == 1
+            && matches!(self.spec.key_kinds[0], PdKeyKind::Int(_))
+    }
+
+    /// GL-VECACCEPT-1 phases 1-3 over one granule's canonicalized lanes:
+    ///
+    ///   1. BATCH HASH — one tight mix64 pass over the key lane (the
+    ///      single-word [`key_hash`] chain verbatim, nulls = 0: columnar
+    ///      part lanes carry no NULLs by construction).
+    ///   2. BATCH PROBE/RESOLVE — row-order group resolution against the
+    ///      open-addressing table with a K-ahead slot-word prefetch
+    ///      ([`pd_vec_prefetch_k`]) and the run memo (a row whose key
+    ///      equals the previous row's takes the previous gid — the
+    ///      [`resolve_group_int`] memo law, batch-local). Misses create
+    ///      groups exactly as the per-row path ([`create_group`]).
+    ///   3. RIDER FOLDS — one scalar pass per vocab entry over the
+    ///      resolved gid lane: count riders bump `acc` per row (no NULLs =
+    ///      CountAny ≡ CountStar here); Sum/Avg riders fold their value
+    ///      lane into `(acc, count)`.
+    ///
+    /// `riders` aligns with `spec.vocab` ([`PdVecPlan::riders`]); every
+    /// `Some` lane and the key lane are `n` rows. The observable group
+    /// table, states, and hash bytes are identical to `n` per-row accepts
+    /// of the same rows — only the schedule (and the memory-accounting
+    /// grain, unchanged from the staged law) differs. The distinct-set
+    /// feed is phase 4 ([`vec_stage_sets`], resumable for the spill law).
+    pub fn vec_resolve_fold(
+        &mut self,
+        keys: &[i64],
+        riders: &[Option<&[i64]>],
+        vs: &mut PdVecScratch,
+    ) {
+        debug_assert!(self.vec_admissible());
+        debug_assert_eq!(riders.len(), self.spec.vocab.len());
+        let n = keys.len();
+        // Phase 1: the batch hash pass (single-word key_hash verbatim).
+        vs.hashes.clear();
+        vs.hashes.reserve(n);
+        const SEED: u64 = 0x9e37_79b9_7f4a_7c15;
+        vs.hashes.extend(keys.iter().map(|&k| mix64(SEED ^ (k as u64))));
+        debug_assert!(n == 0 || vs.hashes[0] == key_hash(&keys[..1], 0));
+        // Phase 2: probe/resolve with K-ahead slot-word prefetch. A grow
+        // mid-pass re-bases the table — the hints are stale but harmless
+        // (prefetches are advisory; the resolve re-reads live state).
+        let k_ahead = pd_vec_prefetch_k();
+        vs.gids.clear();
+        vs.gids.reserve(n);
+        let mut prev_key = 0i64;
+        let mut prev_g = u32::MAX;
+        for i in 0..n {
+            if k_ahead > 0 && i + k_ahead < n {
+                let mask = self.table.len() - 1;
+                let slot = (vs.hashes[i + k_ahead] as usize) & mask;
+                // SAFETY: in-bounds pointer; prefetch is a hint.
+                pd_prefetch(unsafe { self.table.as_ptr().add(slot) } as *const u8);
+            }
+            let k = keys[i];
+            let g = if prev_g != u32::MAX && prev_key == k {
+                prev_g
+            } else {
+                let h = vs.hashes[i];
+                let (found, slot_idx) = self.probe(&[k], 0, h, &KeySrc::None);
+                match found {
+                    Some(g) => g,
+                    None => self.create_group(&[k], 0, h, slot_idx, &KeySrc::None),
+                }
+            };
+            prev_key = k;
+            prev_g = g;
+            vs.gids.push(g);
+        }
+        // Phase 3: rider folds, one pass per vocab entry (spec/states are
+        // disjoint fields — the per-row accept's own borrow shape).
+        let nvocab = self.spec.vocab.len();
+        let stride = 2 * nvocab;
+        for (vi, v) in self.spec.vocab.iter().enumerate() {
+            let (acc, cnt) = (2 * vi, 2 * vi + 1);
+            match v.kind {
+                // No NULLs in part lanes: count(x) counts every row, as
+                // the per-row isnull check (always false here) would.
+                PdVocabKind::CountStar | PdVocabKind::CountAny { .. } => {
+                    for &g in vs.gids.iter() {
+                        self.states[g as usize * stride + acc] += 1;
+                    }
+                }
+                PdVocabKind::SumInt { .. } | PdVocabKind::AvgInt { .. } => {
+                    let lane = riders[vi].expect("Sum/Avg rider carries a value lane");
+                    debug_assert_eq!(lane.len(), n);
+                    for (i, &g) in vs.gids.iter().enumerate() {
+                        let st = g as usize * stride;
+                        self.states[st + acc] += lane[i];
+                        self.states[st + cnt] += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    /// GL-VECACCEPT-1 phase 4: the staged distinct-set feed over the
+    /// resolved (gid, value) lanes, starting at row `from` — each pair
+    /// rides [`stage_push`] (dup-skip, window flush, window-grain budget
+    /// crossing: the exact per-row staged schedule, so set contents and
+    /// value-append order are byte-identical). Returns the feed verdict
+    /// and the count of rows CONSUMED: on `Crossed` the caller runs the
+    /// spill law and, if the epoch drained, RESUMES from the returned
+    /// index — phases 1-3 already folded this granule (group table and
+    /// rider states never spill), so the resume touches sets only.
+    pub fn vec_stage_sets(
+        &mut self,
+        gids: &[u32],
+        vals: &[i64],
+        from: usize,
+    ) -> PgResult<(PdFeed, usize)> {
+        debug_assert_eq!(gids.len(), vals.len());
+        for i in from..gids.len() {
+            // No NULLs in part lanes (the direct-feed contract).
+            if self.stage_push(gids[i] as usize, Some(vals[i]))? == PdFeed::Crossed {
+                return Ok((PdFeed::Crossed, i + 1));
+            }
+        }
+        Ok((PdFeed::Ok, gids.len()))
     }
 
     #[inline]
@@ -1953,6 +2167,37 @@ impl PdSinkLocal {
                 &mut self.builder,
             ) };
         b.accept(estate, id, tmp)
+    }
+
+    /// GL-VECACCEPT-1: can THIS Local run the vectorized whole-granule
+    /// accept schedule ([`PdBuilder::vec_admissible`])? The engagement's
+    /// lane plan ([`pd_vec_plan`]) is the geometry half; this is the
+    /// builder half (staged set-insert armed — incl. its kill switch).
+    pub fn vec_admissible(&self) -> bool {
+        self.builder.vec_admissible()
+    }
+
+    /// GL-VECACCEPT-1 phases 1-3 (batch hash → prefetched probe/resolve →
+    /// rider folds) over one granule's canonicalized lanes. See
+    /// [`PdBuilder::vec_resolve_fold`].
+    pub fn vec_resolve_fold(
+        &mut self,
+        keys: &[i64],
+        riders: &[Option<&[i64]>],
+        vs: &mut PdVecScratch,
+    ) {
+        self.builder.vec_resolve_fold(keys, riders, vs)
+    }
+
+    /// GL-VECACCEPT-1 phase 4 (the staged distinct-set feed, resumable
+    /// after a spill epoch). See [`PdBuilder::vec_stage_sets`].
+    pub fn vec_stage_sets(
+        &mut self,
+        gids: &[u32],
+        vals: &[i64],
+        from: usize,
+    ) -> PgResult<(PdFeed, usize)> {
+        self.builder.vec_stage_sets(gids, vals, from)
     }
 
     /// Seal: freeze into the partitioned wire form.
@@ -3407,6 +3652,152 @@ mod tests {
 
     /// dedupsub I3: with the projection reserve LIVE (expected_worker_rows
     /// set, a dominant group crossing PD_PROJECT_MIN inside the staged
+    /// GL-VECACCEPT-1 shape gate: the lane plan derives exactly the
+    /// staged-set + single-int-key vocabulary and refuses everything else
+    /// fail-closed.
+    #[test]
+    fn vec_plan_admission() {
+        let good = Arc::new(PdSpec {
+            key_atts: vec![3],
+            key_kinds: vec![PdKeyKind::Int(PdInt::I32)],
+            vocab: vec![
+                PdVocab { transno: 0, kind: PdVocabKind::CountStar },
+                PdVocab { transno: 1, kind: PdVocabKind::SumInt { att: 2, kind: PdInt::I16 } },
+                PdVocab { transno: 2, kind: PdVocabKind::CountAny { att: 1 } },
+            ],
+            sets: vec![PdSetSpec { att: 1, kind: DistinctKeyKind::Int32 }],
+            max_att: 4,
+            worker_budget: usize::MAX,
+            expected_worker_rows: 0,
+        });
+        let p = pd_vec_plan(&good).expect("the grouped count-distinct-int shape class derives");
+        assert_eq!((p.key_att, p.key_kind), (3, PdInt::I32));
+        assert_eq!((p.set_att, p.set_kind), (1, PdInt::I32));
+        assert_eq!(p.riders.len(), 3);
+        assert!(p.riders[0].is_none() && p.riders[2].is_none());
+        assert_eq!(p.riders[1], Some((2, PdInt::I16)));
+        // Refusals: bytes set, bytes key, multi-key, multi-set.
+        let mut s = PdSpec { sets: vec![PdSetSpec { att: 1, kind: DistinctKeyKind::Bytes }], ..clone_spec(&good) };
+        assert!(pd_vec_plan(&s).is_none(), "bytes set refuses");
+        s = PdSpec { key_kinds: vec![PdKeyKind::Bytes], ..clone_spec(&good) };
+        assert!(pd_vec_plan(&s).is_none(), "bytes key refuses");
+        s = clone_spec(&good);
+        s.key_atts.push(0);
+        s.key_kinds.push(PdKeyKind::Int(PdInt::I64));
+        assert!(pd_vec_plan(&s).is_none(), "multi-key refuses");
+        s = clone_spec(&good);
+        s.sets.push(PdSetSpec { att: 2, kind: DistinctKeyKind::Int64 });
+        assert!(pd_vec_plan(&s).is_none(), "multi-set refuses");
+    }
+
+    fn clone_spec(s: &PdSpec) -> PdSpec {
+        PdSpec {
+            key_atts: s.key_atts.clone(),
+            key_kinds: s.key_kinds.clone(),
+            vocab: s.vocab.clone(),
+            sets: s.sets.iter().map(|x| PdSetSpec { att: x.att, kind: x.kind }).collect(),
+            max_att: s.max_att,
+            worker_budget: s.worker_budget,
+            expected_worker_rows: s.expected_worker_rows,
+        }
+    }
+
+    /// GL-VECACCEPT-1 identity law: the vectorized whole-granule schedule
+    /// (batch hash → prefetched probe/resolve with the batch-local run
+    /// memo → columnar rider folds → bulk staged set feed) freezes
+    /// BYTE-IDENTICALLY to the per-row accept schedule over the same row
+    /// stream — group creation order, key/hash bytes, rider states, set
+    /// value-append order — including key runs (memo face), planted
+    /// duplicate (g, v) pairs (dup-skip face), > INIT_TABLE groups (grow
+    /// face), partial trailing granules, and the Crossed/resume contract
+    /// (a crossing consumes exactly through the flush row; the resume
+    /// completes the granule with nothing lost or doubled).
+    #[test]
+    fn vec_accept_freeze_identity() {
+        let spec = Arc::new(PdSpec {
+            key_atts: vec![0],
+            key_kinds: vec![PdKeyKind::Int(PdInt::I32)],
+            vocab: vec![
+                PdVocab { transno: 0, kind: PdVocabKind::CountStar },
+                PdVocab { transno: 1, kind: PdVocabKind::SumInt { att: 2, kind: PdInt::I32 } },
+                PdVocab { transno: 2, kind: PdVocabKind::CountAny { att: 1 } },
+            ],
+            sets: vec![PdSetSpec { att: 1, kind: DistinctKeyKind::Int64 }],
+            max_att: 3,
+            worker_budget: usize::MAX,
+            expected_worker_rows: 0,
+        });
+        let n: i64 = 3 * 8192 + 517; // partial trailing granule
+        let key = |i: i64| -> i64 { if i % 5 < 2 { (i / 7) % 300 } else { i % 300 } };
+        let val = |i: i64| -> i64 { if i % 11 == 0 { 42 } else { (i * 104_729) % 5000 } };
+        let rid = |i: i64| -> i64 { i % 1000 - 500 };
+
+        // Per-row oracle: the accept kernel minus the slot plumbing
+        // (resolve_group_int + the accept vocab arms + stage_push — the
+        // spill-surface tests' `feed` precedent).
+        let per_row = |budget: usize| -> PdHandedTable {
+            let mut a = PdBuilder::new(Arc::clone(&spec), budget, None);
+            a.set_batch_insert(true);
+            assert!(a.vec_admissible());
+            let nvocab = a.spec.vocab.len();
+            for i in 0..n {
+                let g = a.resolve_group_int(&[key(i)], 0) as usize;
+                let st = &mut a.states[g * 2 * nvocab..];
+                st[0] += 1; // CountStar
+                st[2] += rid(i); // SumInt acc
+                st[3] += 1; // SumInt count
+                st[4] += 1; // CountAny (no NULLs in part lanes)
+                // Crossed verdicts are ignored: no spill in this harness,
+                // so the state trajectory is verdict-independent.
+                let _ = a.stage_push(g, Some(val(i))).unwrap();
+            }
+            a.freeze().unwrap()
+        };
+        // Vec schedule: granule-sized lanes + the resume-on-Crossed loop.
+        let vec_drive = |budget: usize| -> PdHandedTable {
+            let mut b = PdBuilder::new(Arc::clone(&spec), budget, None);
+            b.set_batch_insert(true);
+            assert!(b.vec_admissible());
+            let mut vs = PdVecScratch::default();
+            let mut i: i64 = 0;
+            while i < n {
+                let g_n = (n - i).min(8192);
+                let keys: Vec<i64> = (i..i + g_n).map(key).collect();
+                let vals: Vec<i64> = (i..i + g_n).map(val).collect();
+                let rids: Vec<i64> = (i..i + g_n).map(rid).collect();
+                let riders: Vec<Option<&[i64]>> = vec![None, Some(rids.as_slice()), None];
+                b.vec_resolve_fold(&keys, &riders, &mut vs);
+                assert_eq!(vs.gids.len(), keys.len());
+                let mut at = 0usize;
+                loop {
+                    let (feed, consumed) = b.vec_stage_sets(&vs.gids, &vals, at).unwrap();
+                    assert!(consumed > at || consumed == keys.len());
+                    at = consumed;
+                    if matches!(feed, PdFeed::Ok) {
+                        assert_eq!(at, keys.len());
+                        break;
+                    }
+                    // Crossed: the harness "absorbs the epoch" (no reset —
+                    // matching the per-row oracle's ignored verdicts) and
+                    // resumes from the consumed index.
+                }
+                i += g_n;
+            }
+            b.freeze().unwrap()
+        };
+        for budget in [usize::MAX, 16 * 1024] {
+            let a = per_row(budget);
+            let s = vec_drive(budget);
+            assert_eq!(a.ngroups, s.ngroups);
+            assert_eq!(a.keys, s.keys);
+            assert_eq!(a.keynulls, s.keynulls);
+            assert_eq!(a.states, s.states, "rider states identical");
+            assert_eq!(a.set_ints, s.set_ints, "value arrays byte-identical incl. order");
+            assert_eq!(a.set_int_offs, s.set_int_offs);
+            assert_eq!(a.set_null, s.set_null);
+        }
+    }
+
     /// windows), the frozen table is byte-identical to the per-row oracle
     /// (projection never fires there — the geometry-is-non-surface pin).
     /// Also pins the epoch-stamp accounting totals against the builder's
