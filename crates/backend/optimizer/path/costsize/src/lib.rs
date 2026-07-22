@@ -569,7 +569,8 @@ pub fn cost_gather(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, r
     startup_cost += setup_cost;
     run_cost += tuple_cost * p.rows;
     // GL-Q2829-FIX-1 plain-Gather leader-consumption floor (doc at
-    // gucs::DEFAULT_GATHER_LEADER_MIN_TUPLE_COST; STAGED, default OFF):
+    // gucs::DEFAULT_GATHER_LEADER_MIN_TUPLE_COST; DEFAULT ON since the
+    // regexp-keyed-grouping-class flip — 0 via the env restores):
     // raw-row Gather rows are consumed LEADER-SERIALLY by the parent —
     // that work does not ride the cheap-exchange transport discount, and
     // discounting it is what elects the ship-every-row-to-the-leader
@@ -588,10 +589,11 @@ pub fn cost_gather(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, r
 /// The plain-Gather leader-consumption uplift (GL-Q2829-FIX-1), the
 /// [`gm_leader_uplift`] sibling without the Gather Merge 5% IPC factor:
 /// the per-row delta that floors a raw-row Gather's transport rate at the
-/// leader-consumption minimum. Zero when the floor is unarmed (the staged
-/// default), when the session's rate already meets it (SET
-/// parallel_tuple_cost >= floor — C-parity sessions), and when transport
-/// is EXPLICITLY zeroed (forced-plan bench seams keep free parallelism).
+/// leader-consumption minimum. Zero when the floor is disarmed (env
+/// override 0 — restores the pre-flip election), when the session's rate
+/// already meets it (SET parallel_tuple_cost >= floor — C-parity
+/// sessions), and when transport is EXPLICITLY zeroed (forced-plan bench
+/// seams keep free parallelism).
 fn gather_leader_uplift(tuple_cost: f64, rows: f64) -> f64 {
     let floor = gucs::gather_leader_min_tuple_cost();
     if floor > 0.0 && tuple_cost > 0.0 && tuple_cost < floor {
@@ -4382,39 +4384,40 @@ mod tests {
         assert!(super::gm_leader_uplift(0.01, rows) > 600_000.0);
     }
 
-    /// GL-Q2829-FIX-1 pins (the plain-Gather leader-consumption floor):
-    /// STAGED default OFF — the uplift is EXACTLY ZERO at the shipped
-    /// defaults (byte-identical plans and EXPLAIN costs knob-off); armed at
-    /// the GM floor's rate it reproduces the same flooring arithmetic
-    /// (minus the Gather Merge 5% IPC factor), with the identical
-    /// C-parity-session and zeroed-transport exemptions.
+    /// GL-Q2829-FIX-1 pins (the plain-Gather leader-consumption floor,
+    /// DEFAULT ON since the regexp-keyed-grouping-class flip): the shipped
+    /// default IS the GM floor's C-parity rate, and the uplift reproduces
+    /// the same flooring arithmetic (minus the Gather Merge 5% IPC
+    /// factor) with the identical C-parity-session and zeroed-transport
+    /// exemptions — the floored total equals the same session at
+    /// parallel_tuple_cost == the floor.
     #[test]
-    fn gather_leader_floor_staged_off_and_armed_arithmetic() {
+    fn gather_leader_floor_default_on_prices_leader_consumption() {
         if std::env::var("PGRUST_GATHER_LEADER_MIN_TUPLE_COST").is_ok() {
             return; // env-swept run; the pin targets the default posture
         }
-        // Staged OFF: zero uplift at every rate (default-plan byte identity).
-        assert_eq!(gucs::DEFAULT_GATHER_LEADER_MIN_TUPLE_COST, 0.0);
-        assert_eq!(gucs::gather_leader_min_tuple_cost(), 0.0);
+        let floor = gucs::gather_leader_min_tuple_cost();
+        assert_eq!(floor, 0.1, "the floor IS C's parallel_tuple_cost default");
+        assert_eq!(floor, gucs::DEFAULT_GATHER_LEADER_MIN_TUPLE_COST);
+        assert_eq!(floor, gucs::DEFAULT_GM_LEADER_MIN_TUPLE_COST, "GM-floor derivation parity");
         let rows = 8_713_000.0; // the witnessed ship-to-leader stream
-        assert_eq!(super::gather_leader_uplift(0.005, rows), 0.0);
-        assert_eq!(super::gather_leader_uplift(0.01, rows), 0.0);
-        // Armed arithmetic (the uplift function against an explicit floor
-        // is what the env override arms; pinned via a local closure to
-        // keep the process-constant cache untouched).
-        let armed = |tc: f64, rows: f64, floor: f64| -> f64 {
-            if floor > 0.0 && tc > 0.0 && tc < floor {
-                (floor - tc) * rows
-            } else {
-                0.0
-            }
-        };
-        let up_cb = armed(0.005, rows, 0.1);
+        // pgrcolumnar default (0.005): floored to the C rate.
+        let up_cb = super::gather_leader_uplift(0.005, rows);
         assert!((up_cb - 0.095 * rows).abs() < 1e-6);
+        assert!((0.005 * rows + up_cb - 0.1 * rows).abs() < 1e-6, "floored == C-rate total");
+        // Heap default (0.01): floored the same way.
+        let up = super::gather_leader_uplift(0.01, rows);
+        assert!((up - 0.09 * rows).abs() < 1e-6);
         // C-parity sessions at/above the floor: zero delta.
-        assert_eq!(armed(0.1, rows, 0.1), 0.0);
-        // Zeroed-transport bench seams: exempt.
-        assert_eq!(armed(0.0, rows, 0.1), 0.0);
+        assert_eq!(super::gather_leader_uplift(0.1, rows), 0.0);
+        assert_eq!(super::gather_leader_uplift(0.5, rows), 0.0);
+        // Zeroed-transport bench seams (incl. the cost-route gate's
+        // zeroed conf): exempt.
+        assert_eq!(super::gather_leader_uplift(0.0, rows), 0.0);
+        // Self-scoping: partial-agg-output-scale streams barely feel it;
+        // the raw-row stream pays the election-flipping magnitude.
+        assert!(super::gather_leader_uplift(0.005, 315_000.0) < 31_000.0);
+        assert!(super::gather_leader_uplift(0.005, rows) > 800_000.0);
     }
 
     use super::*;

@@ -122,12 +122,15 @@ pub fn gm_leader_min_tuple_cost() -> f64 {
 }
 
 // GL-Q2829-FIX-1: the PLAIN-Gather leader-consumption floor (per-tuple),
-// the GL-GMLEADER-1 floor's raw-row-Gather sibling — STAGED, DEFAULT OFF
-// (0.0 disables; arm by setting a rate, 0.1 = C's parallel_tuple_cost
-// default, the GM floor's own value). The GM floor displaced the
-// raw-row-GM-into-serial-leader catastrophe; at fresh-stats estimate
-// regimes the election slides into the PLAIN-Gather variant of the same
-// class — ship-every-raw-row-to-the-leader into a serial leader
+// the GL-GMLEADER-1 floor's raw-row-Gather sibling — DEFAULT ON since the
+// regexp-keyed-grouping-class flip (Michael, 2026-07-22: "the flip for
+// the clickhouse query q29 sounds good to me"; staged 0.0 before that).
+// Derivation: identical to the GM floor — 10x the shipped
+// parallel_tuple_cost default == C's 0.1, the rate whose economics C's
+// elections empirically rely on for leader-serial consumers. The GM floor
+// displaced the raw-row-GM-into-serial-leader catastrophe; at fresh-stats
+// estimate regimes the election slides into the PLAIN-Gather variant of
+// the same class — ship-every-raw-row-to-the-leader into a serial leader
 // aggregation that also evaluates the grouping expression per row (the
 // exact family gather_tuple_cost's armed-pool carve already dodges for
 // `pgrust.lane_parallel_pool` sessions; this floor is the stock-defaults
@@ -136,8 +139,11 @@ pub fn gm_leader_min_tuple_cost() -> f64 {
 // consumption is per-group, not per-row. Same self-scoping as the GM
 // floor: the delta vanishes at SET parallel_tuple_cost >= the floor
 // (C-parity sessions) and at explicitly zeroed transport (forced-plan
-// bench seams). `PGRUST_GATHER_LEADER_MIN_TUPLE_COST` arms.
-pub const DEFAULT_GATHER_LEADER_MIN_TUPLE_COST: f64 = 0.0; // staged OFF
+// bench seams — incl. the cost-route gate's zeroed conf).
+// `PGRUST_GATHER_LEADER_MIN_TUPLE_COST` overrides (A/B vehicles; 0
+// disables, restoring the pre-flip election byte-exactly).
+pub const DEFAULT_GATHER_LEADER_MIN_TUPLE_COST: f64 =
+    guc_tables::consts::DEFAULT_PARALLEL_TUPLE_COST * 10.0; // == C's 0.1 default
 
 pub fn gather_leader_min_tuple_cost() -> f64 {
     static V: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
