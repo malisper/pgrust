@@ -286,3 +286,38 @@ fn gid_helpers() {
     assert!(!crate::IsTwoPhaseTransactionGidForSubid(3, "pg_gid_3_77x"));
     assert!(!crate::IsTwoPhaseTransactionGidForSubid(3, "somegid"));
 }
+
+// AtProcExit_Twophase (twophase.c): the before_shmem_exit hook registered by
+// MarkAsPreparing/LockGXact must release MyLockedGxact when a backend dies
+// abnormally between MarkAsPreparing and EndPrepare — without it the
+// never-valid entry wedges its slot and the GID forever (plain-ERROR paths
+// are covered by AtAbort_Twophase; this witnesses the exit-drain arm).
+#[test]
+fn exit_hook_releases_gxact_locked_mid_prepare() {
+    let _l = test_lock();
+    setup();
+    if lmgr_proc::MyProc().is_none() {
+        init_small::globals::SetMyProcPid(4242);
+        lmgr_proc::InitProcess(types_core::BackendType::Backend).expect("InitProcess");
+        procarray::ProcArrayAdd(lmgr_proc::MyProc().unwrap()).expect("ProcArrayAdd");
+    }
+
+    // Die between MarkAsPreparing and EndPrepare: entry reserved + locked,
+    // never marked valid. (MarkAsPreparing registered the exit hook through
+    // the real ipc crate; the seam-stubbed ProcKill-class registrations of
+    // this substrate stay out of the drain.)
+    let n0 = TwoPhaseState().num_prep_xacts.get();
+    let _slot = crate::MarkAsPreparing(901, "gid_exit_hook", 111, 10, 5).expect("reserve");
+    assert_eq!(TwoPhaseState().num_prep_xacts.get(), n0 + 1);
+
+    // Abnormal thread death: proc_exit's drain runs the before_shmem_exit
+    // stack (at_proc_exit_twophase -> AtAbort_Twophase).
+    ipc::shmem_exit(1).unwrap();
+
+    // The never-valid gxact was removed outright and the GID is reusable.
+    assert_eq!(TwoPhaseState().num_prep_xacts.get(), n0);
+    let _slot2 = crate::MarkAsPreparing(902, "gid_exit_hook", 112, 10, 5)
+        .expect("GID reusable after the exit-hook release");
+    crate::AtAbort_Twophase();
+    assert_eq!(TwoPhaseState().num_prep_xacts.get(), n0);
+}
