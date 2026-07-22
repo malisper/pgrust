@@ -1102,6 +1102,48 @@ fn extract_exprkey_guard() -> FloorGuard {
     FloorGuard { min_dop: 12, low_dop_max_rows: 3_000_000.0, ..NO_GUARD }
 }
 
+/// GL-ELECT22-1 fix 4b — extract-exprkey winner-selection hold exemption
+/// (`PGRUST_M5_EXTRACTKEY_TOPN_HIGHGROUPS`, DEFAULT OFF; ON iff exactly
+/// `1|on`). `classify_extract_exprkey` applies the §10 hold with NO
+/// top-N exemption (fail-closed by design when the path landed): at the
+/// pinned 100M census the ts-extract family estimates 17,614,259 groups
+/// (== the two-key base shape's — the extract key adds nothing to the
+/// estimate) and refuses, while the forced series proves the engaged arm
+/// wins the exact shape (1.076/1.025 hot, 26x; the GL-EXTRACTKEY-1
+/// mid-scale record banked 16x with the hold bypassed). Knob-ON
+/// transplants the TOPN-HIGHGROUPS conditions the arm's composition
+/// supports — bounded agg-sort top-N, sort key in the finalfn-free
+/// int8-transvalue set (count(*) at the census shape), Const bound
+/// within the shared sink cap — under its OWN fail-closed ceiling: the
+/// suppressed serial plan drains every group into the bounded sort
+/// (full-drain economics, NOT the winners-only grouped-sink bypass), so
+/// the exemption stays witnessed-band only.
+fn extractkey_topn_highgroups_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        knob_spelling_armed(
+            std::env::var("PGRUST_M5_EXTRACTKEY_TOPN_HIGHGROUPS").as_deref().ok(),
+        )
+    })
+}
+
+/// Fix-4b group-estimate ceiling (env-overridable
+/// `PGRUST_M5_EXTRACTKEY_TOPN_MAX_GROUPS`, the ladder's sweep vehicle):
+/// PROVISIONAL 24M — the census family estimate (17.61M) +
+/// estimate-wobble headroom, aligned with the mk-text ceiling-refit band
+/// (both families share the same base-key estimate); below the
+/// unladdered 32M-class rung. GL-ELECT22-1's ladder owns the bound.
+fn extractkey_topn_max_groups() -> f64 {
+    static CEIL: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *CEIL.get_or_init(|| {
+        std::env::var("PGRUST_M5_EXTRACTKEY_TOPN_MAX_GROUPS")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| *v > 0.0)
+            .unwrap_or(24_000_000.0)
+    })
+}
+
 /// The shared default-OFF arming rule (the SE-SCANPASS / K1-latemat idiom,
 /// factored pure for the conversion-car lanes): ON iff the value is exactly `1`
 /// or `on`; every other spelling — unset, `0`, `off`, typos — fails safe to
@@ -1630,8 +1672,22 @@ const TOPN_INT8_RAW_SORT_AGGS: &[u32] = &[F_COUNT_STAR, F_COUNT_ANY, F_SUM_INT4,
 
 /// Mirror of the runtime sink's combine-phase top-N bound cap
 /// (`nodeagg::sink::SINK_TOPN_MAX_BOUND`): a bound past the cap declines
-/// the winner selection, so the exemption fails closed past it too.
+/// the winner selection, so the exemption fails closed past it too. The
+/// DISTINCT sink's kernel-2 admission (runtime_distinct.rs
+/// `distinct_topn_arm`) enforces the SAME cap, so the distinct-flavored
+/// exemption below mirrors this constant too.
 const SINK_TOPN_MAX_BOUND_MIRROR: i64 = 1 << 16;
+
+/// GL-ELECT22-1 fix 4a — DISTINCT-sink winner-selection sort-key
+/// vocabulary (the kernel-2 admission mirror, runtime_distinct.rs
+/// `distinct_topn_arm`): beside the count(DISTINCT) column itself
+/// (`is_count_distinct_int` — the merged set's value count, SetCount),
+/// the paremit selection resolves ONLY count(*)/count(x) (the never-NULL
+/// vocab sidecar word). sum(int2/4) is NULLABLE — the sink degrades it to
+/// the FULL drain (no decline face, but exactly the every-group emit the
+/// §10 hold prices), so the exemption never admits it as the order
+/// column.
+const DISTINCT_TOPN_SORT_AGGS: &[u32] = &[F_COUNT_STAR, F_COUNT_ANY];
 
 /// TOPN-HIGHGROUPS knob (`PGRUST_M5_TOPN_HIGHGROUPS`): DEFAULT OFF, only
 /// `1`/`on` arm (the K1-latemat idiom). Exempts the bounded
@@ -1682,6 +1738,70 @@ fn topn_highgroups_constkey_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
         knob_spelling_armed(std::env::var("PGRUST_M5_TOPN_HIGHGROUPS_CONSTKEY").as_deref().ok())
+    })
+}
+
+/// GL-ELECT22-1 fix 4a — DISTINCT-sink winner-selection hold exemption
+/// (`PGRUST_M5_TOPN_HIGHGROUPS_DISTINCT`, DEFAULT OFF; ON iff exactly
+/// `1|on`). The TOPN-HIGHGROUPS exemption structurally excludes
+/// `n_count_distinct > 0`, so the text-key grouped count(DISTINCT int)
+/// top-N census shape refuses at the §10 hold (est 5,441,263 groups at
+/// the pinned 100M census; forced recovery bound 0.800/0.752 hot) even
+/// though the DISTINCT sink's OWN combine-phase top-N (pardistinct
+/// kernel 2, `distinct_topn_arm`) materializes winners only — the same
+/// economics argument the grouped-sink bypass banked. This knob admits
+/// the composition into the textdistinct finish when the sink's
+/// selection provably arms: sort key = the count(DISTINCT) itself or a
+/// never-NULL count (DISTINCT_TOPN_SORT_AGGS mirror), Const bound within
+/// the shared sink cap, exactly the witnessed one-text-key /
+/// one-count-distinct shape, no sibling knob riders. Fail-closed ceiling
+/// below (own headroom past the hold — the merged distinct SETS still
+/// price memory before the selection truncates; the GL-DISTALPHA
+/// flush-epoch finding is the named hazard, so the ladder cell carries a
+/// spill-pressure witness). Executor-kill coherence: the kernel-2 /
+/// paremit kills are mirrored (`distinct_topn_arm_live`) — with either
+/// kill thrown the paremit is a FULL drain at census group counts,
+/// exactly what the hold prices, so the exemption disarms with them.
+fn topn_highgroups_distinct_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        knob_spelling_armed(std::env::var("PGRUST_M5_TOPN_HIGHGROUPS_DISTINCT").as_deref().ok())
+    })
+}
+
+/// Fix-4a group-estimate ceiling (env-overridable
+/// `PGRUST_M5_TOPN_HIGHGROUPS_DISTINCT_MAX_GROUPS`, the ladder's sweep
+/// vehicle): PROVISIONAL 8M — the census cell (5.44M text groups) +
+/// estimate-wobble headroom, below unladdered territory. Unlike the
+/// grouped-sink bypass (winners-only all the way down), the distinct
+/// sink holds every group's merged SET until the combine truncates —
+/// the ceiling bounds that exposure until GL-ELECT22-1's ladder (with
+/// the spill-pressure witness) derives the real bound.
+fn topn_highgroups_distinct_max_groups() -> f64 {
+    static CEIL: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *CEIL.get_or_init(|| {
+        std::env::var("PGRUST_M5_TOPN_HIGHGROUPS_DISTINCT_MAX_GROUPS")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| *v > 0.0)
+            .unwrap_or(8_000_000.0)
+    })
+}
+
+/// Fix-4a executor-kill coherence (the suppress-then-full-drain guard):
+/// the distinct sink's bounded selection needs BOTH the paremit drive
+/// (`PGRUST_RUNTIME_DISTINCT_PAREMIT`, default ON, `0` kills) and the
+/// kernel-2 selection (`PGRUST_RUNTIME_DISTINCT_TOPN`, default ON,
+/// `0|off` kills) live — same spellings as runtime_distinct.rs; with
+/// either thrown the suppressed plan drains EVERY group.
+fn distinct_topn_arm_live() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_DISTINCT_PAREMIT").as_deref() != Ok("0")
+            && !matches!(
+                std::env::var("PGRUST_RUNTIME_DISTINCT_TOPN").as_deref(),
+                Ok("0") | Ok("off")
+            )
     })
 }
 
@@ -2786,6 +2906,10 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     // TOPN-HIGHGROUPS: does the top-N sort key sit in the finalfn-free
     // int8-transvalue set the sink's winner selection can resolve?
     let mut topn_int8_raw_sort = false;
+    // GL-ELECT22-1 fix 4a: does the top-N sort key resolve in the
+    // DISTINCT sink's paremit selection (the count(DISTINCT) column
+    // itself, or a never-NULL count — DISTINCT_TOPN_SORT_AGGS doc)?
+    let mut topn_distinct_sort = false;
     let topn = if parse.sortClause.is_nil() && parse.limitCount.is_none() {
         false
     } else if parse.sortClause.is_nil()
@@ -2857,6 +2981,9 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             // sorts are full-drain forms — the hold exemption never fires
             // for them, `topn` stays false there).
             topn_int8_raw_sort = is_whitelisted_agg(tle.expr, rti, TOPN_INT8_RAW_SORT_AGGS);
+            // GL-ELECT22-1 fix 4a capture (same site, distinct flavor).
+            topn_distinct_sort = is_count_distinct_int(tle.expr, rti)
+                || is_whitelisted_agg(tle.expr, rti, DISTINCT_TOPN_SORT_AGGS);
             true
         }
     } else if parse.sortClause.len() == 1
@@ -3012,8 +3139,29 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         && !mk_text_family
         && const_count(parse.limitCount)
             .is_some_and(|b| b > 0 && b <= SINK_TOPN_MAX_BOUND_MIRROR);
+    // GL-ELECT22-1 fix 4a — the DISTINCT-sink flavored exemption (fn doc
+    // on the knob): exactly the witnessed one-text-key one-count-distinct
+    // winner-selection shape, the sink's kernel-2 admission mirrored
+    // (order column + bound cap + executor kills), under its own
+    // fail-closed ceiling. n_const/n_strminmax/mk-riders are refused
+    // beside count(DISTINCT) at admission above, and re-required here so
+    // a future widening cannot silently ride in.
+    let topn_highgroups_distinct_bypass = over_groupby_high
+        && topn_highgroups_distinct_enabled()
+        && distinct_topn_arm_live()
+        && topn
+        && topn_distinct_sort
+        && n_count_distinct == 1
+        && n_text == 1
+        && n_strminmax == 0
+        && n_const == 0
+        && !mk_text_family
+        && ngroups < topn_highgroups_distinct_max_groups()
+        && const_count(parse.limitCount)
+            .is_some_and(|b| b > 0 && b <= SINK_TOPN_MAX_BOUND_MIRROR);
     if over_groupby_high
         && !topn_highgroups_bypass
+        && !topn_highgroups_distinct_bypass
         && !(mk_text_family
             && n_count_distinct == 0
             && ngroups < multikey_text_max_groups())
@@ -3107,7 +3255,13 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         // provisional floor.
         return finish_textdistinct(
             run,
-            "text-grouped-count-distinct",
+            // GL-ELECT22-1 fix 4a: name the hold-exempt composition apart
+            // (the ladder's grep vocabulary) — reachable only knob-ON.
+            if topn_highgroups_distinct_bypass {
+                "text-grouped-count-distinct-topn-highgroups"
+            } else {
+                "text-grouped-count-distinct"
+            },
             distinct_lowwidth_guard(textdistinct_guard()),
             rte.relid,
             ngroups,
@@ -6745,6 +6899,10 @@ fn classify_extract_exprkey<'mcx>(
     }
     // Optional top-N: ORDER BY <fold-whitelisted agg> LIMIT, no OFFSET — or
     // a plain grouped emit (classify_reduced_exprkey's block verbatim).
+    // GL-ELECT22-1 fix 4b: the winner-selection composition (bounded, sort
+    // key in the int8-raw set, bound within the sink cap) is captured
+    // here for the hold exemption below.
+    let mut topn_hold_exempt_shape = false;
     if !parse.sortClause.is_nil() || parse.limitCount.is_some() {
         if parse.sortClause.len() != 1
             || parse.limitCount.is_none()
@@ -6761,6 +6919,9 @@ fn classify_extract_exprkey<'mcx>(
         if !is_whitelisted_agg(tle.expr, rti, PLAIN_FOLD_AGGS) {
             return Ok(None);
         }
+        topn_hold_exempt_shape = is_whitelisted_agg(tle.expr, rti, TOPN_INT8_RAW_SORT_AGGS)
+            && const_count(parse.limitCount)
+                .is_some_and(|b| b > 0 && b <= SINK_TOPN_MAX_BOUND_MIRROR);
     }
     // groupby_high hold (shared floor; the floor recalibration lane owns
     // raising it): matched-shape-but-floored keeps Gather.
@@ -6775,6 +6936,25 @@ fn classify_extract_exprkey<'mcx>(
         crate::selfuncs::estimate_num_groups(run, &group_exprs, input_rows)?
     };
     if ngroups >= groupby_high_floor() {
+        // GL-ELECT22-1 fix 4b (fn doc on the knob): the bounded
+        // winner-selection composition clears the hold knob-ON, inside
+        // the witnessed band only; everything else keeps the fail-closed
+        // refusal byte-for-byte. Own trace label for the ladder.
+        if extractkey_topn_highgroups_enabled()
+            && topn_hold_exempt_shape
+            && ngroups < extractkey_topn_max_groups()
+        {
+            return Ok(Some(finish_knob_path(
+                run,
+                "extractkey",
+                "extract-exprkey-grouped-topn-highgroups",
+                extract_exprkey_guard(),
+                relid,
+                ngroups,
+                rel_rows,
+                rel_pages,
+            )?));
+        }
         return Ok(Some(false));
     }
     Ok(Some(finish_knob_path(
@@ -8368,6 +8548,27 @@ mod tests {
         let census_family_est = 17_614_259.0;
         assert!(census_family_est >= mktext_family_ceiling_default(false));
         assert!(census_family_est < mktext_family_ceiling_default(true));
+    }
+
+    /// GL-ELECT22-1 fix 4a: the distinct-flavored exemption's sort-key
+    /// vocabulary is exactly the never-NULL order columns the distinct
+    /// sink's kernel-2 admission resolves (runtime_distinct.rs
+    /// `distinct_topn_arm`): the count(DISTINCT) column itself (checked
+    /// via `is_count_distinct_int` at the capture site) plus bare
+    /// count(*)/count(x). sum(int2/4) is NULLABLE — the sink silently
+    /// degrades it to the full drain (exactly the emit the §10 hold
+    /// prices), so it must NEVER enter this set.
+    #[test]
+    fn distinct_topn_sort_vocabulary_is_never_null_counts() {
+        assert_eq!(DISTINCT_TOPN_SORT_AGGS, &[F_COUNT_STAR, F_COUNT_ANY]);
+        for oid in DISTINCT_TOPN_SORT_AGGS {
+            assert!(
+                TOPN_INT8_RAW_SORT_AGGS.contains(oid),
+                "subset of the grouped-sink exemption vocabulary"
+            );
+        }
+        assert!(!DISTINCT_TOPN_SORT_AGGS.contains(&F_SUM_INT4), "nullable sum stays out");
+        assert!(!DISTINCT_TOPN_SORT_AGGS.contains(&F_SUM_INT2), "nullable sum stays out");
     }
 
     /// EXPRKEY-TOPN mirrors of record: the truncation funcid (the tz-less
