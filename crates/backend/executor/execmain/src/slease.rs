@@ -198,6 +198,13 @@ thread_local! {
         const { Cell::new(None) };
     /// This thread's claimed slot (owner guard lives here for the Drop).
     static SLOT: std::cell::RefCell<Option<SlotOwner>> = const { std::cell::RefCell::new(None) };
+    /// True between the armed wait-seam wrappers' start and end calls: the
+    /// thread is inside a C-parity reported wait span. The admission tap
+    /// DEFERS while set — some ported wait loops run ProcessInterrupts
+    /// mid-wait, and taking a permit there would hold it across the
+    /// remainder of the block (the v1 disease in miniature). Invariant
+    /// bought: a permit is never TAKEN inside a reported wait span.
+    static IN_WAIT: Cell<bool> = const { Cell::new(false) };
 }
 
 fn my_slot() -> &'static Slot {
@@ -278,7 +285,12 @@ fn sweeper() -> ! {
                 S_DEFICIT => true,
                 _ => false,
             };
-            if flag_it && !slot.admit.swap(true, Ordering::SeqCst) {
+            if flag_it {
+                // Re-flag AND re-raise every sweep until the session
+                // transitions (the tap defers inside wait spans and the
+                // interrupt flag is consumed by every ProcessInterrupts —
+                // a one-shot raise could strand an un-actioned admit).
+                slot.admit.store(true, Ordering::SeqCst);
                 // Raise the owner's CFI flag (timer-thread posting parity).
                 // No latch wake on purpose: a BLOCKED session needs no
                 // permit; it processes the flag at its first safe point
@@ -411,6 +423,7 @@ impl Drop for SerialLeaseYield {
 
 /// Wait span opens: a held permit is donated for the span.
 pub fn wait_hook_start() {
+    IN_WAIT.set(true);
     if STATE.get() == S_HELD {
         if let Some(rt) = LEASE_RT.get() {
             rt.execution_permits().release();
@@ -423,6 +436,7 @@ pub fn wait_hook_start() {
 /// Wait span closes: TRY to take the permit back; never block here — the
 /// wait paths run under arbitrary lock state (module doc, deadlock class).
 pub fn wait_hook_end() {
+    IN_WAIT.set(false);
     if STATE.get() == S_DONATED {
         if let Some(rt) = LEASE_RT.get() {
             let slot = my_slot();
@@ -448,6 +462,11 @@ pub fn admission_tap() {
         // sweeper flag that raced the run's end is cleared lazily by the
         // next enter's slot reset — nothing to do here (this thread may
         // not even own a slot).
+        return;
+    }
+    if IN_WAIT.get() {
+        // Mid-wait-span ProcessInterrupts: DEFER (see IN_WAIT). The admit
+        // flag stays set and the sweeper re-raises next pass.
         return;
     }
     let slot = my_slot();
