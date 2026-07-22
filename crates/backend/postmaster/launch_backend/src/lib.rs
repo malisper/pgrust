@@ -15,6 +15,10 @@ use types_startup::{ClientSocket, StartupData};
 #[cfg(test)]
 mod tests;
 
+// CPU affinity for pool threads (cpuaff increment A; default OFF). Hosted
+// here because this crate owns every pool spawn site the policy binds.
+pub mod cpuaff;
+
 fn is_external_connection_backend(backend_type: BackendType) -> bool {
     backend_type == BackendType::Backend || backend_type == BackendType::WalSender
 }
@@ -909,6 +913,9 @@ pub mod wpool {
                     waiteventset::WaitEventSetReleaseGuard::new();
                 inherited.apply();
                 let _ = stack_depth::set_stack_base();
+                // cpuaff increment A (default OFF): standbys ride the full
+                // pool-set mask (no dedicated core). Fail-open, loud-once.
+                super::cpuaff::apply_wpool_standby();
                 if guc::layers::base_share_enabled() {
                     guc::store::initialize_guc_options_for_child_base(&guc_base)
                         .and_then(|()| guc::layers::bind_base(&guc_base))
@@ -1643,7 +1650,17 @@ pub mod rtpool {
                     parallel::standing::sticky_evict_for_unbound_work,
                 );
             }
-            let rt = runtime::Runtime::new(runtime::RuntimeConfig::from_env());
+            let cfg = runtime::RuntimeConfig::from_env();
+            // cpuaff increment A (default OFF): compute the affinity policy
+            // + boards once, BEFORE any pool thread spawns — the worker
+            // closures below read it, and the standing gang (installed
+            // after this boot point, spawning lazily) mirrors the map.
+            super::cpuaff::install_from_env(
+                cfg.workers,
+                cfg.standbys,
+                super::rtgang::gang_procs_wanted().max(0) as usize,
+            );
+            let rt = runtime::Runtime::new(cfg);
             let pool = runtime::WorkerPool::spawn_with(Arc::clone(&rt), spawn_worker)
                 .expect("runtime worker pool spawn failed");
             // Process-lifetime pool: the handles are never joined; leak the
@@ -1710,6 +1727,10 @@ pub mod rtpool {
                 let _charge = PopulationCharge;
                 inherited.apply();
                 let _ = stack_depth::set_stack_base();
+                // cpuaff increment A (default OFF): bind this executor to
+                // its core (standby ordinals take the set mask) before any
+                // work runs. Fail-open — a refused set degrades loud-once.
+                super::cpuaff::apply_rtworker(ordinal);
                 // M2 inc-2: PGPROC-leasing identity + exit/respawn
                 // discipline around the loop (armed only; OFF = the plain
                 // executor body, byte-identical).
@@ -2035,6 +2056,9 @@ pub mod rtgang {
                 // scan reads all go through vfs.
                 #[cfg(pgrust_sim)]
                 super::sim_universe_adopt(sim_universe);
+                // cpuaff increment A (default OFF): the gang mirrors the
+                // rtworker ordinal->core map. Fail-open, loud-once.
+                super::cpuaff::apply_rtgang(ordinal);
                 gang_thread(ordinal, child_pid, boot)
             });
         match spawned {
