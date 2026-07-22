@@ -2082,7 +2082,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
                 }
             }
             if n_nonint == 0 {
-                return finish(run, CoverClass::CbTopnBoundedIntKeys, rte.relid, 0.0, rel_rows, rel_pages);
+                return finish(run, CoverClass::CbTopnBoundedIntKeys, rte.relid, 0.0, rel_rows, rel_pages, true);
             }
             // Knob-path guards mirroring the SINK's own admission (a keyed
             // shape the sink refuses lands on serial — the suppress-then-
@@ -2237,8 +2237,27 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
                 {
                     return Ok(false);
                 }
-                let suppressed =
-                    finish(run, CoverClass::CbPlainAggFold, rte.relid, 1.0, rel_rows, rel_pages)?;
+                // Plan-time META-band mirror (the executor hands provable
+                // folds to the serial footer answer; the serial curve was
+                // fit on exactly that posture): unqualed, or estimated
+                // survival ~1 (zone-provable-true class). Mixed-selective
+                // quals must not ride the META-priced serial curve.
+                let survival = if has_quals {
+                    let tuples = run.root.rel(rel_id).tuples.max(rel_rows).max(1.0);
+                    (rel_rows / tuples).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+                let meta_posture = !has_quals || survival >= 0.999;
+                let suppressed = finish(
+                    run,
+                    CoverClass::CbPlainAggFold,
+                    rte.relid,
+                    1.0,
+                    rel_rows,
+                    rel_pages,
+                    meta_posture,
+                )?;
                 // SERIAL-SIDE shadow, qualed-fold family: when the qual's
                 // estimated survival is ~1 the serial lane answers per
                 // granule from footer META (the zone-provable posture the
@@ -2270,7 +2289,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
                 && parse.sortClause.is_nil()
                 && tlist_all_meta_footer_aggs(parse, rti)
             {
-                return finish(run, CoverClass::CbMetaFooterAgg, rte.relid, 1.0, rel_rows, rel_pages);
+                return finish(run, CoverClass::CbMetaFooterAgg, rte.relid, 1.0, rel_rows, rel_pages, true);
             }
             // SE-TEXTDISTINCT (C1, band 86001): ungrouped count(DISTINCT
             // <int|default-collation text Var>) — the census's "plain distinct
@@ -2352,7 +2371,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             // is scan-shaped. Using rel_rows here floored a 1.5M-row scan
             // out at 23% selectivity (live finding, worklog §3).
             let scan_tuples = run.root.rel(rel_id).tuples.max(rel_rows);
-            return finish(run, CoverClass::AggPolyHeapPlain, rte.relid, 1.0, scan_tuples, rel_pages);
+            return finish(run, CoverClass::AggPolyHeapPlain, rte.relid, 1.0, scan_tuples, rel_pages, true);
         }
         // GL-LOWDIST-4 B1 (knob-gated): plain count(DISTINCT) over one HEAP
         // rel — the cb plain-count-distinct gates verbatim (the plain sink's
@@ -2388,10 +2407,10 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             return Ok(false);
         }
         if is_bare_count_star(parse) {
-            return finish(run, CoverClass::HeapPlainCountStar, rte.relid, 1.0, rel_rows, rel_pages);
+            return finish(run, CoverClass::HeapPlainCountStar, rte.relid, 1.0, rel_rows, rel_pages, true);
         }
         if tlist_all_whitelisted_aggs(parse, rti, HEAP_CMP_AGGS) {
-            return finish(run, CoverClass::HeapCmpFoldPrefix, rte.relid, 1.0, rel_rows, rel_pages);
+            return finish(run, CoverClass::HeapCmpFoldPrefix, rte.relid, 1.0, rel_rows, rel_pages, true);
         }
         return Ok(false);
     }
@@ -3099,7 +3118,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             rel_pages,
         );
     }
-    finish(run, class, rte.relid, ngroups, rel_rows, rel_pages)
+    finish(run, class, rte.relid, ngroups, rel_rows, rel_pages, true)
 }
 
 /// Row flip 2 (CbHashJoinPlainAgg): plain whitelisted aggregation over one
@@ -3601,7 +3620,7 @@ fn classify_join_sides<'mcx>(
             0.0,
         );
     }
-    finish(run, CoverClass::CbHashJoinPlainAgg, relids[0], 0.0, max_rows, 0.0)
+    finish(run, CoverClass::CbHashJoinPlainAgg, relids[0], 0.0, max_rows, 0.0, true)
 }
 
 /// NLIDX rel-aware suppression entry (GL-NLIDX-2), called from the Gather
@@ -3954,13 +3973,27 @@ fn finish_seat_lifted(run: &mut PlannerRun<'_>, relid: u32, rows: f64) -> PgResu
     {
         let dop = guc_tables::runtime_pool::runtime_dop();
         // R1 regime split mirrored here too (the seat path never sees
-        // pages; the hashjoin admission mirror is rows-only).
-        let v = rtm::cost_route_verdict_regime(
-            rtm::RuntimeClass::CbHashJoinPlainAgg,
-            rows,
-            dop,
-            rows >= HJ_ARM_MIN_ROWS,
-        );
+        // pages; the hashjoin admission mirror is rows-only). Three-way
+        // since the GL-ELECTION-22 gating fix (serial competes even when
+        // the arm admits; the hashjoin serial curve never wins in its
+        // measured range, so the seat census is verdict-identical —
+        // coherence, not behavior).
+        let v = if rtm::threeway_enabled() {
+            rtm::cost_route_verdict_threeway(
+                rtm::RuntimeClass::CbHashJoinPlainAgg,
+                rows,
+                dop,
+                rows >= HJ_ARM_MIN_ROWS,
+                true,
+            )
+        } else {
+            rtm::cost_route_verdict_regime(
+                rtm::RuntimeClass::CbHashJoinPlainAgg,
+                rows,
+                dop,
+                rows >= HJ_ARM_MIN_ROWS,
+            )
+        };
         let (n_ws_mg, n_wg_ms) = cost_shadow::note(class, true, v.suppress);
         if trace_armed() && !v.suppress {
             eprintln!(
@@ -4239,7 +4272,7 @@ fn classify_multibuild<'mcx>(
             0.0,
         );
     }
-    finish(run, CoverClass::CbHashJoinMultiBuild, relids[0], 0.0, max_rows, 0.0)
+    finish(run, CoverClass::CbHashJoinMultiBuild, relids[0], 0.0, max_rows, 0.0, true)
 }
 
 /// The multibuild per-relation guards, shared by the plain and grouped rows
@@ -5058,7 +5091,7 @@ fn classify_aggjoin_grouped<'mcx>(
     {
         return refuse_join("grouped ngroups above the seated win region (curve path)");
     }
-    finish(run, CoverClass::CbHashJoinGroupedAgg, relids[0], ngroups, max_rows, 0.0)
+    finish(run, CoverClass::CbHashJoinGroupedAgg, relids[0], ngroups, max_rows, 0.0, true)
 }
 
 /// Step-1 cost-route map: which fitted crossover curve
@@ -5478,6 +5511,12 @@ fn finish(
     ngroups: f64,
     rows: f64,
     pages: f64,
+    // Three-way SERIAL-SIDE posture gate (GL-ELECTION-22 finding 2): does
+    // the class's fitted serial curve describe THIS shape's serial
+    // delivery? True for every class except the plain-fold family, whose
+    // serial fit is the footer-META wall — its classify site passes the
+    // plan-time META-band mirror (unqualed, or estimated survival ~1).
+    serial_applies: bool,
 ) -> PgResult<bool> {
     use costsize::runtime_model as rtm;
     let covered = class_covered(class);
@@ -5515,7 +5554,17 @@ fn finish(
                 // the engaged curve. arm_admits=true is byte-identical
                 // to the pre-R1 verdict (pinned in runtime_model).
                 let arm_admits = arm_admission_mirror(class, rows, pages);
-                let v = rtm::cost_route_verdict_regime(curve, rows, dop, arm_admits);
+                // GL-ELECTION-22 finding-2 fix: the THREE-WAY argmin —
+                // suppression priced as the better of the engines the
+                // suppressed plan can land on (arm where admitted, serial
+                // where its curve applies) — so the serial term is
+                // consulted even when the arm admits. PGRUST_M5_THREEWAY=
+                // 0|off restores the regime-gated two-way for one train.
+                let v = if rtm::threeway_enabled() {
+                    rtm::cost_route_verdict_threeway(curve, rows, dop, arm_admits, serial_applies)
+                } else {
+                    rtm::cost_route_verdict_regime(curve, rows, dop, arm_admits)
+                };
                 // What the model WOULD do: the regime verdict composed
                 // with the rowdrive block-floor ADMISSION MIRROR, which
                 // rides every mode (m5-5 reading #3; TSV

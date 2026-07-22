@@ -234,6 +234,70 @@ pub fn cost_route_verdict_regime(
     }
 }
 
+/// `PGRUST_M5_THREEWAY` — the GL-ELECTION-22 finding-2 gating fix's kill
+/// (t35 flipped-kill idiom): DEFAULT ON = the decide-list consults the
+/// THREE-WAY argmin (`cost_route_verdict_threeway`); `0|off` restores
+/// the regime-gated two-way (`cost_route_verdict_regime`) for one train.
+pub fn threeway_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("PGRUST_M5_THREEWAY").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
+/// THE GL-ELECTION-22 FINDING-2 FIX: the three-way verdict. The regime
+/// split only consulted the serial curve when the arm did NOT admit — so
+/// at the unqualed plain-fold census cells (1e8 x dop16) the two-way
+/// priced Gather at rt/legacy ~1.004 while the SAME model's serial fit
+/// knew serial/legacy ~0.16, and nobody asked it. Here suppression is
+/// priced as WHAT SUPPRESSION DELIVERS — the better of the two engines
+/// the suppressed plan can land on (the runtime arm where it admits, the
+/// serial lane always; at exec the arm's own bands pick between them,
+/// e.g. the META band hands provable folds to the serial answer):
+///
+///   suppress iff min(t_ser*, t_rt*) <= t_leg
+///
+/// each side inside its own measured support (t_rt needs arm admission
+/// AND rows >= n_min_fit; t_ser needs a usable serial fit AND rows >=
+/// N_MIN_SERIAL AND `serial_applies` — the caller's POSTURE gate: the
+/// class's serial cells must describe this shape's serial delivery.
+/// CbPlainAggFold's serial fit IS the footer-META wall (fit from
+/// provable-qual cells, ~flat 0.6-1.0ms), so its caller passes the
+/// plan-time mirror of the executor META band: unqualed, or estimated
+/// survival ~1 — a Mixed-qual fold must NOT ride the META-priced curve.
+/// Other classes' serial cells are ordinary serial walls
+/// (serial_applies=true). A side without support does not compete; with
+/// NO side in support the verdict fails toward Gather, exactly as
+/// before.
+pub fn cost_route_verdict_threeway(
+    class: RuntimeClass,
+    rows: f64,
+    dop: i32,
+    arm_admits: bool,
+    serial_applies: bool,
+) -> CostVerdict {
+    let m = class_model(class);
+    let mut best: Option<f64> = None;
+    if arm_admits && rows >= m.n_min_fit {
+        best = Some(predicted_ratio(class, rows, dop));
+    }
+    if serial_applies && rows >= N_MIN_SERIAL {
+        if let Some(sr) = predicted_serial_ratio(class, rows, dop) {
+            best = Some(match best {
+                Some(r) => r.min(sr),
+                None => sr,
+            });
+        }
+    }
+    match best {
+        Some(ratio) => CostVerdict { ratio, suppress: ratio <= 1.0 },
+        None => CostVerdict { ratio: f64::NAN, suppress: false },
+    }
+}
+
 /// HeapPlainCountStar's rowdrive 64MB block-floor ADMISSION MIRROR
 /// (m5-5 reading #3): applied by the caller in EVERY cost-route mode —
 /// suppressing below the block geometry lands on a refusing arm and a
@@ -914,6 +978,108 @@ mod tests {
                 let t = |n: f64| m.ser_setup + m.ser_row * n;
                 assert!(t(w[1]) >= t(w[0]), "{class:?} t_ser decreasing in N");
             }
+        }
+    }
+
+    /// GL-ELECTION-22 FINDING-2 PINS: the three-way argmin consults the
+    /// serial curve even when the arm admits.
+    /// (1) THE MOTIVATING CENSUS CELL — the unqualed plain-fold family at
+    ///     1e8 x dop16 (six census queries, one mechanism): the two-way
+    ///     prices the arm at rt/legacy ~1.004 and keeps Gather; the
+    ///     three-way sees the serial/META curve at ~0.16 and suppresses.
+    ///     Witnessed anchors: the L4 cell (serial/legacy 1.1/8.1 = 0.136
+    ///     at 10M) and the META-2 both-ways ladder (band-delivered 1.1ms
+    ///     vs Gather 20.9/8.1 at 10M) — the executor META band (flipped
+    ///     on this lineage) is what suppression DELIVERS on this posture.
+    /// (2) The change set at WITNESSED cells is exactly the plain-fold
+    ///     family: textkey/hashjoin serial curves lose everywhere in
+    ///     measured range, so their three-way verdicts equal the two-way
+    ///     cell for cell.
+    /// (3) The posture gate: serial_applies=false (a Mixed-selective
+    ///     fold, whose delivery is the ARM, not the META answer) restores
+    ///     the two-way verdict exactly.
+    /// (4) With neither side in support the verdict still fails toward
+    ///     Gather.
+    #[test]
+    fn threeway_consults_the_serial_curve_when_the_arm_admits() {
+        // (1) the census cell.
+        let two = cost_route_verdict_regime(RuntimeClass::CbPlainAggFold, 1e8, 16, true);
+        let three =
+            cost_route_verdict_threeway(RuntimeClass::CbPlainAggFold, 1e8, 16, true, true);
+        assert!(!two.suppress && two.ratio > 1.0, "two-way keeps Gather: {two:?}");
+        assert!(
+            three.suppress && three.ratio < 0.2,
+            "three-way must price the serial META answer: {three:?}"
+        );
+        // (2) witnessed change set = plain-fold only.
+        let mut changed = Vec::new();
+        for &(class, rows, dop, _) in CELLS {
+            if superseded(class) {
+                continue;
+            }
+            let two = cost_route_verdict_regime(class, rows, dop, true);
+            let three = cost_route_verdict_threeway(class, rows, dop, true, true);
+            if two.suppress != three.suppress {
+                changed.push((class, rows as i64, dop));
+            }
+        }
+        assert_eq!(
+            changed,
+            vec![
+                // The LIVE set (decide-listed): the four dop4/8 fold cells
+                // (dop16 already suppressed by the arm curve). Each flipped
+                // cell's WITNESSED serial leg beats legacy 4-11x (the v2
+                // grid serial walls, 0.09-0.23 serial/legacy) — the flip is
+                // toward the measured-best engine everywhere it fires.
+                (RuntimeClass::CbPlainAggFold, 1_000_000, 4),
+                (RuntimeClass::CbPlainAggFold, 2_500_000, 4),
+                (RuntimeClass::CbPlainAggFold, 5_000_000, 4),
+                (RuntimeClass::CbPlainAggFold, 5_000_000, 8),
+                // SHADOW-ONLY (the class is guarded off and NOT in the
+                // decide list — nothing routes off these): the low-dop
+                // bounded-topn cells, where the R1 serial curve (fit on the
+                // dup-heavy k=100 fixture) beats the GM-legged legacy
+                // curve. That serial curve is K-BLIND; the k-dependence is
+                // owned by serial_model::SerialTopnIntBounded (two
+                // witnessed k-planes), and any decide-listing of this
+                // class rides THAT vocabulary, never this curve.
+                (RuntimeClass::CbTopnBoundedIntKeys, 1_000_000, 1),
+                (RuntimeClass::CbTopnBoundedIntKeys, 2_500_000, 1),
+                (RuntimeClass::CbTopnBoundedIntKeys, 2_500_000, 2),
+                (RuntimeClass::CbTopnBoundedIntKeys, 5_000_000, 1),
+                (RuntimeClass::CbTopnBoundedIntKeys, 5_000_000, 2),
+                (RuntimeClass::CbTopnBoundedIntKeys, 10_000_000, 1),
+                (RuntimeClass::CbTopnBoundedIntKeys, 10_000_000, 2),
+            ],
+            "the three-way witnessed change set"
+        );
+        for (class, _, _) in &changed {
+            if *class != RuntimeClass::CbPlainAggFold {
+                assert!(
+                    !DEFAULT_DECIDE_CLASSES.contains(&class.name()),
+                    "{class:?}: only decide-listed flips are live; the rest must be shadow"
+                );
+            }
+        }
+        // Each flipped cell's WITNESSED serial leg beats legacy (the v2
+        // grid's serial walls: 0.09-0.23 serial/legacy) — the flip is
+        // toward the measured-best engine at every changed cell.
+        // (3) posture gate restores the two-way.
+        for &(class, rows, dop, _) in CELLS {
+            if superseded(class) {
+                continue;
+            }
+            let two = cost_route_verdict_regime(class, rows, dop, true);
+            let gated = cost_route_verdict_threeway(class, rows, dop, true, false);
+            assert_eq!(two.suppress, gated.suppress, "{class:?} N={rows} D={dop}");
+        }
+        // (4) no side in support -> Gather stands.
+        let v = cost_route_verdict_threeway(RuntimeClass::CbPlainAggFold, 5e4, 4, false, false);
+        assert!(!v.suppress);
+        // Kill spelling: default ON unless 0|off (read once; only assert
+        // when the runner env leaves it unset).
+        if std::env::var("PGRUST_M5_THREEWAY").is_err() {
+            assert!(threeway_enabled());
         }
     }
 
