@@ -1637,18 +1637,22 @@ fn ensure_hooks_registered() {
     });
 }
 
-/// GL-VECACCEPT-1 build knob (default OFF, t35 law; `1|on` arms): the
-/// vectorized whole-granule accept — direct decoded lanes (no window
-/// staging / SoA deform / per-row emit closures / per-row slot deform),
-/// batch key hash, K-ahead prefetched batch probe/resolve, columnar rider
-/// folds, and the staged distinct-set feed in bulk. OFF = the incumbent
-/// per-row accept pipeline, byte-identical.
+/// GL-VECACCEPT-1 knob — DEFAULT ON (flip staged off the 100M verdict:
+/// vec/base 0.64-0.72 at every measured (dop, shape) cell on fast-profile
+/// AND the shipped dist binary; flip-preview at unpinned defaults −6..−10%;
+/// parity byte-equal on every arm of every job; census exact; the
+/// symbolized profile moved the accept-substrate samples exactly as
+/// chartered — letter GL-VECACCEPT-1 §5). t35 flipped-kill spelling:
+/// `PGRUST_RUNTIME_AGG_VECACCEPT=0|off` restores the incumbent per-row
+/// accept pipeline byte-identically (the vectorized schedule feeds the
+/// same kernels in the same row order — set bytes identical by
+/// construction, unit-pinned).
 fn runtime_agg_vecaccept_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        matches!(
+        !matches!(
             std::env::var("PGRUST_RUNTIME_AGG_VECACCEPT").as_deref(),
-            Ok("1") | Ok("on")
+            Ok("0") | Ok("off")
         )
     })
 }
