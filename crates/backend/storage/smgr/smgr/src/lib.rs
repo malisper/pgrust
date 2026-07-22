@@ -878,6 +878,15 @@ pub fn init_seams() {
     smgr_seams::smgr_cached_nblocks::set(smgr_cached_nblocks_raw);
     smgr_seams::smgr_nblocks_cached::set(smgrnblocks_cached);
     smgr_seams::smgr_set_cached_nblocks::set(smgr_set_cached_nblocks);
+    smgr_seams::smgr_nblocks_cache_purge_db::set(md::nblocks_cache::purge_db);
+    smgr_seams::smgr_nblocks_cache_clear::set(md::nblocks_cache::clear);
+    smgr_seams::smgr_nblocks_cache_poison::set(|rlocator, forknum| {
+        // Temp relations never enter the process-global cache; nothing to
+        // poison for them.
+        if rlocator.backend == INVALID_PROC_NUMBER {
+            md::nblocks_cache::poison(rlocator.locator, forknum);
+        }
+    });
     smgr_seams::smgr_create::set(|rlocator, forknum, is_redo| {
         // smgrcreate(smgropen(rlocator), forknum, isRedo); open is idempotent.
         smgropen(rlocator.locator, rlocator.backend)?;

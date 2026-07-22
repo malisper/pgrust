@@ -205,6 +205,10 @@ fn FindAndDropRelationBuffers(
 /// DropDatabaseBuffers (bufmgr.c): whole-pool sweep; no relation-count
 /// optimization is possible, as in C.
 pub fn DropDatabaseBuffers(dbid: types_core::Oid) -> PgResult<()> {
+    // The callers (drop/move database) are about to rmtree the database's
+    // file tree — sizes change behind md's back, so its process-global size
+    // cache must forget the whole database.
+    smgr_seams::smgr_nblocks_cache_purge_db::call(dbid);
     for i in 0..NBuffersInited() {
         let desc = GetBufferDescriptor(i);
         // Unlocked precheck, safe as in DropRelationBuffers (C comment).
