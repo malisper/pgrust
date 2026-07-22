@@ -4188,16 +4188,22 @@ fn agg_scatter_floor() -> u64 {
     })
 }
 
-/// GL-VECACCEPT-2 build knob (default OFF, t35 law; `1|on` arms): the
-/// whole-granule direct-lane K2 accept ([`AggSink::vec_accept`]). OFF =
-/// the incumbent staged drain, branch-for-branch.
+/// GL-VECACCEPT-2 K2 arm — DEFAULT rides the unified lane posture
+/// ([`super::vecaccept_lane_enabled`], default ON; flip basis: the 100M
+/// grid never loses a cell, −4..−11% vs the incumbent drain everywhere,
+/// and flips the 1e6-group parity band to runtime-won — letter §4;
+/// α≈1 is NEUTRAL vs the incumbent, the carve stands). t35 flipped-kill
+/// granularity: `PGRUST_RUNTIME_AGG_VECACCEPT=0|off` kills the whole
+/// lane; `PGRUST_RUNTIME_AGG_VECACCEPT_K2=0|off` kills the K2 side alone
+/// (adjudication). Killed = the incumbent staged drain, branch-for-branch.
 fn agg_vecaccept_k2_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        matches!(
-            std::env::var("PGRUST_RUNTIME_AGG_VECACCEPT_K2").as_deref(),
-            Ok("1") | Ok("on")
-        )
+        super::vecaccept_lane_enabled()
+            && !matches!(
+                std::env::var("PGRUST_RUNTIME_AGG_VECACCEPT_K2").as_deref(),
+                Ok("0") | Ok("off")
+            )
     })
 }
 
