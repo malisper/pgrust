@@ -217,6 +217,335 @@ fn stmt_inline_enabled() -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// GL-STMTTASK-2 QUANTUM-YIELD EXPERIMENT (Michael-chartered via the
+// coordinator, DEFAULT OFF): statements learn to yield. Mechanism choice —
+// QUANTUM-EXPIRY PERMIT DONATION at CHECK_FOR_INTERRUPTS sites (the
+// cheapest flavor: reuse the permit-donation shape; no stack switching,
+// the thread stays put). On each CFI inside an armed statement-task span
+// (inline seat on the session thread, or the dop-1 drive on a worker —
+// both hold exactly one execution permit): if the quantum expired AND
+// someone is actually waiting (a priority-lane waiter or live interactive
+// QoS demand), release the permit and reacquire it through the ORDINARY
+// lane — interactive acquirers overtake (Semaphore::acquire defers to the
+// priority lane), so a serial flood stops head-of-line-blocking sub-floor
+// needles. Skips inside declared blocking sections (the permit is already
+// donated there — double-release guard). Rationale vs stackful
+// suspension: donation restores capacity without any continuation
+// machinery; only if the fleet scenario says donation cannot restore the
+// needle p95 does the bigger hammer get argued.
+//
+// Knobs: PGRUST_STMT_TASK_YIELD (arm, exact 1|on, DEFAULT OFF — an
+// experiment posture, not a flip) and PGRUST_STMT_TASK_YIELD_US (quantum,
+// default 1000µs — a placeholder pending the coordinator's calibration
+// sweep; the ladder sweeps it).
+//
+// Known edge (documented): the reacquire is a plain semaphore wait —
+// cancel delivered mid-yield is observed only after the permit returns
+// (bounded by the pool's morsel/statement cadence; the SerialLeaseYield
+// re-acquire has the same shape). CFI-cadence starvation edge: a
+// statement body that never passes a CFI site never yields — the known
+// class is the same one cancel already cannot reach (the inc-1 SRF-fill
+// hole was exactly this and was fixed by adding the C-parity CFI); no
+// other unbounded CFI-less stretch is known.
+// ---------------------------------------------------------------------------
+
+fn stmt_yield_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&ON, || {
+        matches!(
+            std::env::var("PGRUST_STMT_TASK_YIELD").ok().as_deref().map(str::trim),
+            Some("1") | Some("on")
+        )
+    })
+}
+
+fn stmt_yield_quantum() -> std::time::Duration {
+    static US: OnceLock<u64> = OnceLock::new();
+    std::time::Duration::from_micros(crate::once_val(&US, || {
+        std::env::var("PGRUST_STMT_TASK_YIELD_US")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(1000)
+    }))
+}
+
+/// One thread's quantum slot (leaked once per thread, registered with the
+/// sweeper forever — the slease-v2 sweeper's slot shape). The CFI-side
+/// governor reads ONE Relaxed flag; every clock read lives on the timer
+/// thread (Concord/Seastar mechanism per the yield-preemption survey:
+/// flag read, never a clock read, on the hot path).
+struct YieldSlot {
+    /// A span is live on the owning thread.
+    active: AtomicBool,
+    /// Quantum start (sweep-clock ms; owner-written at arm/yield).
+    since_ms: AtomicU64,
+    /// Sweeper-raised: the quantum expired — yield at the next CFI.
+    pending: AtomicBool,
+    /// When `pending` was raised (stall detection: a pending flag
+    /// unserviced past the stall threshold means the statement is not
+    /// passing CFI safe points — the no-CFI census instrument).
+    pending_since_ms: AtomicU64,
+    /// Rate limit: one stall report per span.
+    stall_reported: AtomicBool,
+}
+
+pgsync::process_global! {
+    static YIELD_SLOTS: pgsync::Mutex<Vec<&'static YieldSlot>> = pgsync::Mutex::new(Vec::new());
+}
+
+/// Sweep-clock: ms since first use (one process-lifetime MonoStamp).
+fn yield_now_ms() -> u64 {
+    static T0: OnceLock<pg_clock::MonoStamp> = OnceLock::new();
+    T0.get_or_init(pg_clock::MonoStamp::now).elapsed_ns() / 1_000_000
+}
+
+thread_local! {
+    /// This thread's slot (leaked; registered once). Non-session TLS —
+    /// scheduling bookkeeping only.
+    static MY_YIELD_SLOT: std::cell::Cell<Option<&'static YieldSlot>> =
+        const { std::cell::Cell::new(None) };
+    /// The armed span's runtime handle (None outside statement-task spans;
+    /// unwound with the executor frames by the span guard).
+    static YIELD_RT: std::cell::Cell<Option<&'static Arc<runtime::Runtime>>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn my_yield_slot() -> &'static YieldSlot {
+    MY_YIELD_SLOT.with(|c| match c.get() {
+        Some(s) => s,
+        None => {
+            let s: &'static YieldSlot = Box::leak(Box::new(YieldSlot {
+                active: AtomicBool::new(false),
+                since_ms: AtomicU64::new(0),
+                pending: AtomicBool::new(false),
+                pending_since_ms: AtomicU64::new(0),
+                stall_reported: AtomicBool::new(false),
+            }));
+            pgsync::lock(&YIELD_SLOTS).push(s);
+            c.set(Some(s));
+            s
+        }
+    })
+}
+
+/// The sweeper (spawned once, on the first armed span; parks on the
+/// waiter's timed park — the sanctioned DST-clock surface, the slease-v2
+/// sweeper precedent). Cadence = quantum/2. Duties: raise `pending` on
+/// quantum expiry (the ONLY steady-state clock reads live here) and emit
+/// the rate-limited stall report when a pending flag goes unserviced past
+/// the threshold (report-only; the no-CFI-tail census instrument).
+fn ensure_yield_sweeper() {
+    static ONCE: OnceLock<()> = OnceLock::new();
+    ONCE.get_or_init(|| {
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let _ = pgsync::thread::Builder::new()
+                .name("pg-stmt-yield-sweeper".into())
+                .spawn(yield_sweeper);
+        }
+    });
+}
+
+/// Stall threshold (report-only): 500 ms — ScyllaDB's starting number per
+/// the survey; ratchets with evidence.
+const YIELD_STALL_MS: u64 = 500;
+
+#[cfg(not(target_family = "wasm"))]
+fn yield_sweeper() {
+    let quantum_ms = (stmt_yield_quantum().as_millis() as u64).max(1);
+    loop {
+        let _ = waiter::park_timeout(std::time::Duration::from_millis(
+            (quantum_ms / 2).max(1),
+        ));
+        let now = yield_now_ms();
+        let slots = pgsync::lock(&YIELD_SLOTS);
+        for slot in slots.iter() {
+            if !slot.active.load(Ordering::Acquire) {
+                continue;
+            }
+            if slot.pending.load(Ordering::Acquire) {
+                // Unserviced flag: the span is not passing CFI safe points.
+                if now.saturating_sub(slot.pending_since_ms.load(Ordering::Acquire))
+                    >= YIELD_STALL_MS
+                    && !slot.stall_reported.swap(true, Ordering::SeqCst)
+                {
+                    // Report-only census instrument (server stderr; elog is
+                    // dev-only in this crate and the sweeper is not a
+                    // backend thread).
+                    eprintln!(
+                        "WARNING:  statement-task yield flag unserviced for \
+                         >={YIELD_STALL_MS}ms (statement body without a CFI \
+                         safe point?)"
+                    );
+                }
+                continue;
+            }
+            if now.saturating_sub(slot.since_ms.load(Ordering::Acquire)) >= quantum_ms {
+                slot.pending_since_ms.store(now, Ordering::Release);
+                slot.pending.store(true, Ordering::Release);
+            }
+        }
+    }
+}
+
+static STMT_YIELDS: AtomicU64 = AtomicU64::new(0);
+
+/// Yields performed by the quantum governor (diagnostics/witnesses).
+pub fn stmt_task_yield_count() -> u64 {
+    STMT_YIELDS.load(Ordering::SeqCst)
+}
+
+/// The registered CFI-side governor. Steady-state cost inside an armed
+/// span: ONE Relaxed flag load (the survey's Concord shape). The clock is
+/// read only on the yield/reset path.
+fn stmt_yield_tick() {
+    let Some(slot) = MY_YIELD_SLOT.with(|c| c.get()) else { return };
+    // Debug-profile enforcement (Seastar precedent, throttled): every
+    // 1024th tick forces the yield path so the batteries exercise
+    // donate/reacquire at every CFI-bearing shape — resume bugs cannot
+    // hide behind quantum timing. Throttle keeps the 500M-iteration
+    // interrupt-battery vehicles inside their budgets.
+    #[cfg(debug_assertions)]
+    {
+        thread_local! {
+            static TICKS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        }
+        let n = TICKS.with(|c| {
+            let n = c.get().wrapping_add(1);
+            c.set(n);
+            n
+        });
+        if n % 1024 == 0 {
+            slot.pending.store(true, Ordering::Release);
+        }
+    }
+    if !slot.pending.load(Ordering::Relaxed) {
+        return;
+    }
+    slot.pending.store(false, Ordering::Release);
+    slot.stall_reported.store(false, Ordering::Release);
+    let Some(rt) = YIELD_RT.with(|c| c.get()) else { return };
+    if runtime::in_blocking_section() {
+        slot.since_ms.store(yield_now_ms(), Ordering::Release);
+        return; // permit already donated (spill section) — never double
+    }
+    let sem = rt.execution_permits();
+    if sem.priority_waiting() == 0 && !rt.qos_demand_live() {
+        // Empty-waiter yield = quantum reset, no switch (the SQLOS
+        // empty-runnable precedent).
+        slot.since_ms.store(yield_now_ms(), Ordering::Release);
+        return;
+    }
+    sem.release();
+    STMT_YIELDS.fetch_add(1, Ordering::SeqCst);
+    super::stats::tick_stmt_task_yield();
+    // Ordinary-lane reacquire: priority waiters (interactive drives) and
+    // the demand they represent overtake this statement for the donated
+    // span (tail placement — the over-runner re-enters behind the class
+    // it yielded to).
+    sem.acquire();
+    slot.since_ms.store(yield_now_ms(), Ordering::Release);
+}
+
+// ---------------------------------------------------------------------------
+// ACTIVE-STATEMENT SLOT BOUND (Michael/coordinator requirement for the yield
+// experiment; survey precedents: Umbra's 128 active slots, SQL Server's
+// bounded worker pool with healthy schedulers): concurrent ACTIVE inline
+// statement spans must not scale with CONNECTION COUNT. Without the yield,
+// inline seats are permit-bounded (= cores) structurally; WITH the yield a
+// suspended inline session releases its permit and a new session can borrow
+// it — suspensions would chain without bound. The bound caps active inline
+// spans (running + suspended) at `cores × PGRUST_STMT_TASK_ACTIVE_XCORES`
+// (default 4 — the small-multiple posture; Umbra's 128 ≈ 4-8× typical core
+// counts); excess statements take the ENQUEUE path, which IS the unstarted
+// admission queue (the pool serves them as capacity frees; enqueued
+// concurrency is pool-thread-bounded by construction). Composes with (does
+// not replace) K−1, which guards the non-yielding class specifically.
+// ---------------------------------------------------------------------------
+
+static STMT_INLINE_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+fn stmt_active_xcores() -> usize {
+    static N: OnceLock<usize> = OnceLock::new();
+    crate::once_val(&N, || {
+        std::env::var("PGRUST_STMT_TASK_ACTIVE_XCORES")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(4)
+            .max(1)
+    })
+}
+
+/// RAII slot on the active-inline bound. None = bound reached (the caller
+/// takes the enqueue path). Without the yield experiment the permit cap
+/// makes this unreachable-by-construction (seats ≤ cores < bound); it is
+/// accounted unconditionally so the invariant is structural, not modal.
+pub(crate) struct StmtActiveSlot(());
+
+fn try_take_inline_slot(rt: &Arc<runtime::Runtime>) -> Option<StmtActiveSlot> {
+    let bound = rt.nthreads().max(1).saturating_mul(stmt_active_xcores());
+    let mut cur = STMT_INLINE_ACTIVE.load(Ordering::SeqCst);
+    loop {
+        if cur >= bound {
+            return None;
+        }
+        match STMT_INLINE_ACTIVE.compare_exchange(
+            cur,
+            cur + 1,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => return Some(StmtActiveSlot(())),
+            Err(now) => cur = now,
+        }
+    }
+}
+
+impl Drop for StmtActiveSlot {
+    fn drop(&mut self) {
+        STMT_INLINE_ACTIVE.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// RAII span: arms the CFI tick for one statement-task execution span on
+/// this thread. `None` when the experiment knob is off.
+pub(crate) struct StmtYieldSpan {
+    prev: Option<&'static Arc<runtime::Runtime>>,
+}
+
+pub(crate) fn stmt_yield_span(rt: &'static Arc<runtime::Runtime>) -> Option<StmtYieldSpan> {
+    if !stmt_yield_enabled() {
+        return None;
+    }
+    static HOOK: OnceLock<()> = OnceLock::new();
+    HOOK.get_or_init(|| ::postgres_seams::stmt_yield::set_hook(stmt_yield_tick));
+    ensure_yield_sweeper();
+    let slot = my_yield_slot();
+    let prev = YIELD_RT.with(|c| c.replace(Some(rt)));
+    if prev.is_none() {
+        slot.pending.store(false, Ordering::Release);
+        slot.stall_reported.store(false, Ordering::Release);
+        slot.since_ms.store(yield_now_ms(), Ordering::Release);
+        slot.active.store(true, Ordering::Release);
+    }
+    ::postgres_seams::stmt_yield::arm();
+    Some(StmtYieldSpan { prev })
+}
+
+impl Drop for StmtYieldSpan {
+    fn drop(&mut self) {
+        YIELD_RT.with(|c| c.set(self.prev));
+        if self.prev.is_none() {
+            if let Some(slot) = MY_YIELD_SLOT.with(|c| c.get()) {
+                slot.active.store(false, Ordering::Release);
+                slot.pending.store(false, Ordering::Release);
+            }
+            ::postgres_seams::stmt_yield::disarm();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Refusal taxonomy + engagement counters (diagnostics; e2e witnesses).
 // ---------------------------------------------------------------------------
 
@@ -293,6 +622,15 @@ pub fn stmt_task_inline_count() -> u64 {
     STMT_INLINE.load(Ordering::SeqCst)
 }
 
+/// The inline verdict's RAII cargo: the borrowed seat (or the lease
+/// standing in for it) + the quantum-yield span (experiment; None when
+/// disarmed). Held by execute_plan across its incumbent loop.
+pub(crate) struct InlineRun {
+    _seat: Option<runtime::InlineSeat>,
+    _yield_span: Option<StmtYieldSpan>,
+    _slot: Option<StmtActiveSlot>,
+}
+
 fn refuse(reason: StmtTaskRefusal) -> PgResult<StmtTaskVerdict> {
     STMT_REFUSED.fetch_add(1, Ordering::SeqCst);
     if lane_trace_enabled() {
@@ -308,12 +646,11 @@ pub(crate) enum StmtTaskVerdict {
     Incumbent,
     /// Change 3 (inline-execute): admitted, and a pool seat was free
     /// without waiting — the CALLER runs its own serial loop (literally
-    /// the incumbent code) with this seat held for governed accounting.
-    /// Cancel/timeout identity on this path IS the incumbent path's.
-    /// `None` seat = the session's serial lease already accounts this run
-    /// (GL-SLEASE-1 armed posture — borrowing a second seat would
-    /// double-count).
-    Inline(Option<runtime::InlineSeat>),
+    /// the incumbent code) with the carried span held for governed
+    /// accounting (seat + optional quantum-yield arming). A `None` seat =
+    /// the session's serial lease already accounts this run (GL-SLEASE-1
+    /// armed posture — borrowing a second seat would double-count).
+    Inline(InlineRun),
     /// Engaged on the pool; every row was streamed and es_processed set —
     /// the caller skips the serial loop.
     Handled,
@@ -444,6 +781,10 @@ impl StmtTaskShared {
     /// the query-task binding (session transaction + active snapshot + GUC
     /// view bound) and inside the serve's parallel-worker impersonation.
     fn statement_body(&self, worker: usize) -> PgResult<()> {
+        // Quantum-yield span (experiment, default OFF): the dop-1 drive
+        // holds one execution permit across this body — the governor may
+        // donate it at CFI cadence toward waiting interactive demand.
+        let _yield_span = stmt_yield_span(self.rt);
         // SAFETY: leader-arena pstmt, alive until the ceremony joins this
         // worker (SendConst contract above).
         let pstmt: &PlannedStmt<'_> = unsafe { &*self.pstmt.0 };
@@ -561,6 +902,17 @@ fn stmt_task_standing_driver(shared: &parallel::ParallelShared) {
 }
 
 fn helper_drive_stmt(payload: &Arc<StmtTaskShared>) {
+    // Pre-BIND stale-cancel hygiene (fleet-caught race, armed take 1 job
+    // -3341 gang/client-kill leg): a chase signal aimed at a PREVIOUS
+    // occupant of this leased identity can land between that serve's
+    // bracket-exit clear and THIS serve's bind — the bind's own CFIs
+    // (invals drain, snapshot restore) then raise it and the statement
+    // refuses spuriously. Any cancel pending HERE is stale by definition
+    // (no live statement on this identity; the CURRENT leader's chase
+    // cannot target us — our pid is unpublished until after the bind, and
+    // its re-delivery loop covers any window). The bracket's post-bind
+    // clears stay (inc-1 hygiene).
+    init_small::globals::SetQueryCancelPending(false);
     let Some(rg) = payload.rg.get().and_then(|w| w.upgrade()) else {
         payload.refused.fetch_add(1, Ordering::SeqCst);
         return;
@@ -1170,15 +1522,22 @@ fn run_channel_ladder(
         }
     }
 
-    // No channel served. The RG is untouched (started == 0 on every
-    // Fallback exit) — reap it and let the incumbent loop run. A row
-    // can only have been pumped after a start, so emitted == 0 here.
-    debug_assert_eq!(emitted, 0, "fallback after rows were streamed");
-    drain_rg_stmt(rt, funnel, &rg);
-    if payload.started.load(Ordering::SeqCst) != 0 || emitted != 0 {
-        // A straggler started against the closing board: the plan may
-        // have partially streamed — never rerun. Surface the recorded
-        // error or the died shape.
+    // No channel served — but a STRAGGLER may have claimed against the
+    // closing board (a spurious refusal on a 1-ticket board lets a second
+    // worker claim before the close; witnessed on the fleet armed take-1
+    // gang/client-kill leg, job -3341: a stale-cancel-poisoned bind
+    // refused, worker B started, and this branch ERRORed a statement B had
+    // COMPLETED). The Fallback exits ran close_and_await, so detached ==
+    // claimed and `started` is FINAL here: a started straggler's drive has
+    // ENDED (detach is Drop-guaranteed after the serve), so the RG either
+    // has an outcome or a recorded error — finish it like any completion
+    // (never rerun, never error a healthy run).
+    if payload.started.load(Ordering::SeqCst) != 0 {
+        if let Some(o) = waiter.try_wait() {
+            lane_trace("stmt-task: engaged straggler dop=1");
+            return finish_stmt(payload, funnel, o, emit_row, &mut emitted, &mut stopped);
+        }
+        drain_rg_stmt(rt, funnel, &rg);
         if let Some(e) = payload.take_error() {
             return Err(e);
         }
@@ -1187,6 +1546,11 @@ fn run_channel_ladder(
             "statement task worker exited before completing the statement",
         )));
     }
+    // The RG is untouched (started == 0, boards closed) — reap it and let
+    // the incumbent loop run. A row can only have been pumped after a
+    // start, so emitted == 0 here.
+    debug_assert_eq!(emitted, 0, "fallback after rows were streamed");
+    drain_rg_stmt(rt, funnel, &rg);
     Ok(StmtTaskOutcome::Fallback)
 }
 
@@ -1467,21 +1831,36 @@ pub(crate) fn try_stmt_task<'mcx, 'd>(
         // A serial-lease-armed session ALREADY holds a seat for this run
         // (GL-SLEASE-1): inline rides the lease — borrowing a second seat
         // would double-count exactly the sessions the lease admitted.
-        if crate::execmain::serial_lease_currently_held() {
-            STMT_ENGAGED.fetch_add(1, Ordering::SeqCst);
-            STMT_INLINE.fetch_add(1, Ordering::SeqCst);
-            super::stats::tick_stmt_task(true);
-            lane_trace("stmt-task: engaged inline dop=1 unparks=0 seat=lease");
-            return Ok(StmtTaskVerdict::Inline(None));
-        }
-        if let Some(seat) = rt.try_borrow_seat() {
-            STMT_ENGAGED.fetch_add(1, Ordering::SeqCst);
-            STMT_INLINE.fetch_add(1, Ordering::SeqCst);
-            super::stats::tick_stmt_task(true);
-            // Engagement witness (e2e grep surface) + the wakeup program's
-            // per-statement unpark metric: inline performs none.
-            lane_trace("stmt-task: engaged inline dop=1 unparks=0");
-            return Ok(StmtTaskVerdict::Inline(seat.into()));
+        // Active-slot bound FIRST (the yield-suspension chain guard): a
+        // refused slot sends the statement to the enqueue path — the
+        // unstarted admission queue.
+        if let Some(slot) = try_take_inline_slot(rt) {
+            if crate::execmain::serial_lease_currently_held() {
+                STMT_ENGAGED.fetch_add(1, Ordering::SeqCst);
+                STMT_INLINE.fetch_add(1, Ordering::SeqCst);
+                super::stats::tick_stmt_task(true);
+                lane_trace("stmt-task: engaged inline dop=1 unparks=0 seat=lease");
+                return Ok(StmtTaskVerdict::Inline(InlineRun {
+                    _seat: None,
+                    _yield_span: stmt_yield_span(rt),
+                    _slot: Some(slot),
+                }));
+            }
+            if let Some(seat) = rt.try_borrow_seat() {
+                STMT_ENGAGED.fetch_add(1, Ordering::SeqCst);
+                STMT_INLINE.fetch_add(1, Ordering::SeqCst);
+                super::stats::tick_stmt_task(true);
+                // Engagement witness (e2e grep surface) + the wakeup
+                // program's per-statement unpark metric: inline performs
+                // none.
+                lane_trace("stmt-task: engaged inline dop=1 unparks=0");
+                return Ok(StmtTaskVerdict::Inline(InlineRun {
+                    _seat: Some(seat),
+                    _yield_span: stmt_yield_span(rt),
+                    _slot: Some(slot),
+                }));
+            }
+            drop(slot);
         }
     }
 

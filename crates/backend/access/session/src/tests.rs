@@ -701,7 +701,25 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      carries no session identity — never captured/restored by an
     //      envelope (a fresh thread simply rebuilds one on first use); dies
     //      with the thread (Arc drop, heap only).
-    assert_eq!(count_tree(crates), 534, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // GL-STMTTASK-2 quantum-yield delta (536 = 534 + 2), deliberately
+    // NON-SESSION TLS:
+    //   75. tcop/postgres_seams/src/lib.rs — stmt_yield ARMED: the
+    //      CHECK_FOR_INTERRUPTS-side span flag (set only for one
+    //      statement-task execution span, RAII-restored by the executor's
+    //      span guard). Pure per-span routing advisory; carries no session
+    //      identity; never captured/restored by an envelope.
+    //   76. executor/execmain/src/lanev2/stmt_task.rs — YIELD_GOV: the
+    //      armed span's governor state (runtime handle + quantum stamp) —
+    //      scheduling bookkeeping unwound with the executor frames by the
+    //      span guard; no session identity, dies with the thread.
+    //   77. lanev2/stmt_task.rs — the yield machinery's thread_local
+    //      blocks: MY_YIELD_SLOT + YIELD_RT (one block, replacing the
+    //      clock-read governor's YIELD_GOV block in the same census slot)
+    //      and the debug-enforcement TICKS counter block
+    //      (cfg(debug_assertions) throttle scratch) — pure scheduling
+    //      bookkeeping, no session identity, die with the thread
+    //      (536 -> 537 net).
+    assert_eq!(count_tree(crates), 537, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

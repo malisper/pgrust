@@ -10,6 +10,9 @@ path = "src/lib.rs"
 [dependencies]
 pgsync = { path = "../../../_support/pgsync" }
 pg_clock = { path = "../../../port/pg_clock" }
+# GL-STMTTASK-2 quantum-yield sweeper: waiter is the sanctioned timed-park
+# surface (DST clock hook; the slease-v2 sweeper precedent).
+waiter = { path = "../../storage/ipc/waiter" }
 parallel = { path = "../../access/transam/parallel" }
 runtime = { path = "../runtime" }
 spillset = { path = "../spillset" }

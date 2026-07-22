@@ -118,6 +118,48 @@ seam_core::seam!(
 // sides production-link (tcop reaches the executor only through seam
 // crates; the executor cannot name tcop).
 // ---------------------------------------------------------------------------
+/// GL-STMTTASK-2 quantum-yield experiment (coordinator/Michael-chartered,
+/// DEFAULT OFF): the CHECK_FOR_INTERRUPTS hot path calls [`stmt_yield::tick`]
+/// — one thread-local bool load + predictable branch when disarmed (armed
+/// only inside a statement-task span with `PGRUST_STMT_TASK_YIELD` on).
+/// The actual governor (quantum clock + permit donation) is a registered
+/// fn-pointer owned by the executor crate — this seam crate stays
+/// runtime-type-free (the stmt_task_arm one-authority pattern).
+pub mod stmt_yield {
+    thread_local! {
+        /// True only for the span of an armed statement-task execution on
+        /// this thread (inline session span or dop-1 worker drive span).
+        static ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    static HOOK: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
+
+    /// Install the governor (executor side; once, first arm).
+    pub fn set_hook(f: fn()) {
+        let _ = HOOK.set(f);
+    }
+
+    /// Arm/disarm the span (RAII discipline is the caller's — the executor
+    /// span guard owns nesting/restore).
+    pub fn arm() {
+        ARMED.with(|c| c.set(true));
+    }
+    pub fn disarm() {
+        ARMED.with(|c| c.set(false));
+    }
+
+    /// The CHECK_FOR_INTERRUPTS-side tick. Disarmed cost: one TLS load +
+    /// branch (the statement-task spans are the only setters).
+    #[inline(always)]
+    pub fn tick() {
+        if ARMED.with(|c| c.get()) {
+            if let Some(f) = HOOK.get() {
+                f();
+            }
+        }
+    }
+}
+
 pub mod stmt_task_arm {
     /// The unloaded posture's pure parse (unit-pinned below): DEFAULT OFF;
     /// ON iff exactly `1`/`on` (t35 exact-spelling arming law).
