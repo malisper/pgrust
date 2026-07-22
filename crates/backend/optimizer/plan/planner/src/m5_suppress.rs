@@ -1412,6 +1412,34 @@ fn cbkeys_guard() -> FloorGuard {
 /// The runtime backstop is the sink's own cap/budget/spill machinery
 /// (canonical shapes spill through the C2 bytes record, canon-sink car 3).
 /// GL-MKTEXT-1 owns the measured bound.
+///
+/// GL-ELECT22-1 fix 1 — CEILING REFIT (`PGRUST_M5_MKTEXT_CEIL_V2`, DEFAULT
+/// OFF; ON iff exactly `1|on`, the knob_spelling_armed idiom): the 16M
+/// provisional was derived at the mid-scale fixture and never witnessed at
+/// the full-scale bank, where the two-key int+text census family's own
+/// plan-time estimate is 17,614,259 (census pgrust-cb-standard-1784678138
+/// -1176 @ 307329686) — a 10% miss that refuses BOTH family compositions
+/// (agg-sort top-N and the bare-LIMIT freeze) on exactly the population the
+/// family exists for. The forced series at the same sha proves the arm wins
+/// there (top-N 0.632/0.594 hot, freeze 0.134/0.132 — vs legacy-parallel
+/// tens of seconds). v2 lifts the DEFAULT ceiling to the refit band bound
+/// (24M: the census family estimate + estimate-wobble headroom, below the
+/// unladdered 32M-class rung); the explicit env override still wins over
+/// both defaults (the ladder's sweep vehicle). GL-ELECT22-1's witnessed
+/// ladder at the 17-20M..32M-class band owns the final bound and the flip.
+fn mktext_ceil_v2_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        knob_spelling_armed(std::env::var("PGRUST_M5_MKTEXT_CEIL_V2").as_deref().ok())
+    })
+}
+
+/// The mk-text family ceiling DEFAULT, pure for unit tests: the 16M
+/// provisional, or the GL-ELECT22-1 refit bound with the v2 knob armed.
+fn mktext_family_ceiling_default(ceil_v2: bool) -> f64 {
+    if ceil_v2 { 24_000_000.0 } else { 16_000_000.0 }
+}
+
 fn multikey_text_max_groups() -> f64 {
     static CEIL: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
     *CEIL.get_or_init(|| {
@@ -1419,7 +1447,7 @@ fn multikey_text_max_groups() -> f64 {
             .ok()
             .and_then(|v| v.trim().parse::<f64>().ok())
             .filter(|v| *v > 0.0)
-            .unwrap_or(16_000_000.0)
+            .unwrap_or_else(|| mktext_family_ceiling_default(mktext_ceil_v2_enabled()))
     })
 }
 
@@ -8242,6 +8270,20 @@ mod tests {
         assert!(!TOPN_INT8_RAW_SORT_AGGS.contains(&F_AVG_INT4), "finalfn-bearing stays out");
         assert!(!TOPN_INT8_RAW_SORT_AGGS.contains(&F_MAX_INT8), "unwitnessed order column");
         assert_eq!(SINK_TOPN_MAX_BOUND_MIRROR, 1 << 16, "mirror of the sink bound cap");
+    }
+
+    /// GL-ELECT22-1 fix 1: the mk-text family ceiling defaults — the 16M
+    /// provisional (knob off: byte-identical pre-fix posture) vs the 24M
+    /// refit-band bound v2-armed. The pinned census family estimate
+    /// (17,614,259) must sit exactly in the gap: refused by the
+    /// provisional, admitted by the refit — the fix's whole point.
+    #[test]
+    fn mktext_family_ceiling_defaults() {
+        assert_eq!(mktext_family_ceiling_default(false), 16_000_000.0);
+        assert_eq!(mktext_family_ceiling_default(true), 24_000_000.0);
+        let census_family_est = 17_614_259.0;
+        assert!(census_family_est >= mktext_family_ceiling_default(false));
+        assert!(census_family_est < mktext_family_ceiling_default(true));
     }
 
     /// EXPRKEY-TOPN mirrors of record: the truncation funcid (the tz-less
