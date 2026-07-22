@@ -58,11 +58,19 @@ pub fn install() {
             set: set_regex_pattern_program,
         },
     );
+    guc_tables::vars::pgrust_regex_re2_linked.install_if_absent(guc_tables::GucVarAccessors {
+        get: re2_available,
+        set: set_re2_linked_noop,
+    });
 }
 
 pub fn re2_available() -> bool {
     cfg!(have_re2)
 }
+
+// pgrust.regex_re2_linked is a build property (PGC_INTERNAL preset): the
+// getter is the cfg constant and writes have nothing to store.
+fn set_re2_linked_noop(_: bool) {}
 
 #[cold]
 #[inline(never)]

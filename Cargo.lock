@@ -13583,6 +13583,7 @@ dependencies = [
  "postmaster_seams",
  "pqcomm_seams",
  "procsignal",
+ "regexp_alt",
  "s_lock_seams",
  "scalar_seams",
  "seam_core",

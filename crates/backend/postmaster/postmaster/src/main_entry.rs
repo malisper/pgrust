@@ -452,6 +452,30 @@ pub fn PostmasterMain(argv: &[String]) -> PgResult<()> {
 
     report(LOG, format!("starting {PG_VERSION_STR}"), 1105, "PostmasterMain");
 
+    // pgrust extension (GL-STRDEFECTS-1 witness): the regexp engine tiers
+    // are a build property (RE2 links only where libre2 existed at build) —
+    // name them once at startup so a Spencer-only binary can never run
+    // silently. pg_settings twin: pgrust.regex_re2_linked.
+    if regexp_alt::re2_available() {
+        report(
+            LOG,
+            "regexp engines: re2+spencer (regex_engine=auto dispatches compatible \
+             patterns to re2)"
+                .into(),
+            0,
+            "PostmasterMain",
+        );
+    } else {
+        report(
+            WARNING,
+            "regexp engines: spencer only — RE2 was not linked into this build \
+             (regex_engine=auto has no re2 tier; SET regex_engine=re2 will error)"
+                .into(),
+            0,
+            "PostmasterMain",
+        );
+    }
+
     ipc_seams::on_proc_exit::call(close_server_ports_cb, 0);
 
     let listen_addresses = guc_tables::vars::ListenAddresses.read();
