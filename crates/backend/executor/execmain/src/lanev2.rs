@@ -6635,7 +6635,10 @@ unsafe fn agg_fold_staged_mm<'mcx>(
         return Ok(());
     }
     let plan = ::nodeagg::agg_lanefold_plan(agg).expect("fold feed without a plan");
-    let aggcx = ::nodeagg::agg_aggcontext(agg);
+    // Byref transvalue copies: the FREEING sink child when armed (the str
+    // byref-floor fix — dict-coded sink drains), else the bump aggcontext
+    // (classic builds byte-identical; agg_str_trans_mcx doc).
+    let aggcx = ::nodeagg::sink::agg_str_trans_mcx(agg);
     // avgpack: packed inline AvgAccum slots — nonzero only on sink worker
     // builds (the armed table's creation-time mask; representation state
     // travels WITH the table that holds the states).

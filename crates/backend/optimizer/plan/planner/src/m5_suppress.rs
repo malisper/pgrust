@@ -7863,18 +7863,22 @@ fn classify_dictkey_exprkey<'mcx>(
         {
             continue;
         }
-        // min/max(text) passengers: REFUSED in v1 (fail-closed). The drain
-        // hosts them (the sink str-mm memo collapses the dict-window
-        // tie-copies), but the 10M measurement cell tripped the sink's
-        // residual budget refusal on a deterministic ~224MiB
-        // aggcontext-subtree term (7 x 32MiB blocks; NOT the tie-copies —
-        // identical pre/post memo; NOT the table prealloc — estimate
-        // 2130) — engage-then-refuse-then-serial-rerun is strictly worse
-        // than keeping Gather, so the probe refuses until the term is
-        // attributed (GL-DICTDRAIN-1 letter, named follow-up; the
-        // executor path stays measurable through forced-serial postures).
-        // `n_strminmax` stays wired for the return: the ceiling mirror
-        // below re-arms with it.
+        // min/max(text) passengers: the v1 fail-closed refusal LIFTED
+        // (GL-Q2829-FIX-1 / the GL-DICTDRAIN-2 term attributed): the
+        // ~224MiB aggcontext-subtree term was the superseded str
+        // transvalue copies accumulating in the never-reset bump
+        // aggcontext (once per (epoch, code) advance — the str sibling of
+        // the avgpack byref-floor finding); the dict-coded sink drain now
+        // hosts its by-ref str states in a FREEING child with C's
+        // pfree-on-replace discipline (`agg_sink_arm_str_ctx`), so the
+        // engage-then-budget-refuse hazard the v1 probe priced is closed.
+        // Admission mirrors the sibling grouped classifiers (strminmax car
+        // knob + default collation + bare text Var); the GL-STRMM-2
+        // group-estimate ceiling mirror below still holds (fail-closed).
+        if agg_strminmax_enabled() && grouped_str_minmax_arg(tle.expr, rti).is_some() {
+            n_strminmax += 1;
+            continue;
+        }
         return Ok(None);
     }
     // Sort/limit composition: none (plain grouped emit), or ONE agg sort
