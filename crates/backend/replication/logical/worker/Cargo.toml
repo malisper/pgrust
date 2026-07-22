@@ -27,7 +27,11 @@ execindexing = { path = "../../../executor/execindexing" }
 execreplication = { path = "../../../executor/execreplication" }
 exectuples = { path = "../../../executor/exectuples" }
 fmgr_seams = { path = "../../../utils/fmgr/fmgr_seams" }
+guc_file = { path = "../../../utils/misc/guc_file" }
 guc_tables = { path = "../../../utils/misc/guc_tables" }
+interrupt = { path = "../../../postmaster/interrupt" }
+procsignal = { path = "../../../storage/ipc/procsignal" }
+types_guc = { path = "../../../../_support/types/types_guc" }
 indexam = { path = "../../../access/index/indexam" }
 inval = { path = "../../../utils/cache/inval" }
 ipc = { path = "../../../storage/ipc/ipc" }

@@ -56,6 +56,11 @@ thread_local! {
     static ON_COMMIT_WAKEUP_WORKERS_SUBIDS: RefCell<Vec<Oid>> = const { RefCell::new(Vec::new()) };
     // MyLogicalRepWorker: this worker thread's slot index.
     static MY_WORKER_SLOT: Cell<Option<usize>> = const { Cell::new(None) };
+    // on_commit_wakeup_workers_subids (C: worker.c:106, a TopTransactionContext
+    // list; hosted in this crate because the worker pool and its latches live
+    // here). Cleared at every top-level EOXact, as xact cleanup reclaims C's.
+    static ON_COMMIT_WAKEUP_WORKERS_SUBIDS: std::cell::RefCell<Vec<Oid>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 pub fn max_logical_replication_workers() -> i32 {
@@ -746,6 +751,39 @@ fn ApplyLauncherWakeup() {
     }
 }
 
+// LogicalRepWorkersWakeupAtCommit (worker.c:5138): remember subid; its
+// workers' latches are set if the current transaction commits. DDL that
+// changes pg_subscription rows (ALTER SUBSCRIPTION, owner changes) requests
+// this so a worker idling against a quiet publisher re-reads the committed
+// tuple promptly instead of at its next natural wakeup.
+pub fn LogicalRepWorkersWakeupAtCommit(subid: Oid) {
+    ON_COMMIT_WAKEUP_WORKERS_SUBIDS.with(|s| {
+        let mut subids = s.borrow_mut();
+        if !subids.contains(&subid) {
+            subids.push(subid);
+        }
+    });
+}
+
+// AtEOXact_LogicalRepWorkers (worker.c:5152): wake the stored subscriptions'
+// workers at commit; forget the list on either outcome.
+pub fn AtEOXact_LogicalRepWorkers(is_commit: bool) {
+    let subids = ON_COMMIT_WAKEUP_WORKERS_SUBIDS.with(|s| std::mem::take(&mut *s.borrow_mut()));
+    if !is_commit || subids.is_empty() {
+        return;
+    }
+    let procs: Vec<ProcNumber> = with_ctx_opt(Vec::new(), |ctx| {
+        ctx.workers
+            .iter()
+            .filter(|w| w.in_use && w.proc_pid != 0 && subids.contains(&w.subid))
+            .filter_map(|w| w.proc_no)
+            .collect()
+    });
+    for p in procs {
+        latch::SetLatch(LatchHandle::proc(p));
+    }
+}
+
 // ApplyLauncherGetWorkerStartTime / SetWorkerStartTime (launcher.c:1043/1059);
 // the dsa/dshash collapses into the ctx HashMap.
 fn ApplyLauncherGetWorkerStartTime(subid: Oid) -> TimestampTz {
@@ -907,4 +945,5 @@ pub fn init_seams() {
     launcher_seams::at_eoxact_apply_launcher::set(AtEOXact_ApplyLauncher);
     logical_worker_seams::at_eoxact_logical_rep_workers::set(AtEOXact_LogicalRepWorkers);
     launcher_seams::get_leader_apply_worker_pid::set(GetLeaderApplyWorkerPid);
+    logical_worker_seams::at_eoxact_logical_rep_workers::set(AtEOXact_LogicalRepWorkers);
 }

@@ -294,6 +294,12 @@ pub(crate) fn send_feedback(
     Ok(())
 }
 
+// NAPTIME_PER_CYCLE (worker.c:189): max sleep between apply-loop cycles, ms.
+// The idle wait must time out on this cadence — the housekeeping arm
+// (AcceptInvalidationMessages + maybe_reread_subscription) is how a worker
+// against a quiet publisher ever notices subscription DDL.
+const NAPTIME_PER_CYCLE: i64 = 1000;
+
 // LogicalRepApplyLoop (worker.c:3574), non-streaming subset. The copy-both
 // read is the client's get_copy_data; Block means "nothing available now" and
 // maps to C's len==0 wait arm.
@@ -302,6 +308,10 @@ pub(crate) fn apply_loop(conn: &mut PgConn, mut last_received: XLogRecPtr) -> Pg
     // SAFETY: `top` outlives the loop; per-message allocations are reset by
     // the arena when the context drops at function exit.
     let mcx: Mcx<'static> = unsafe { std::mem::transmute(top.mcx()) };
+
+    // wal_receiver_timeout bookkeeping (LogicalRepApplyLoop locals).
+    let mut last_recv_timestamp: TimestampTz = get_ts();
+    let mut ping_sent = false;
 
     loop {
         postgres_seams::check_for_interrupts::call()?;
@@ -339,7 +349,45 @@ pub(crate) fn apply_loop(conn: &mut PgConn, mut last_received: XLogRecPtr) -> Pg
                     }
                 }
 
-                conn.wait_readable()?;
+                // Wait for more data or latch (worker.c:3736): bounded by
+                // WalWriterDelay while local commits await flush (feedback
+                // urgency), else NAPTIME_PER_CYCLE, so the idle housekeeping
+                // above reruns on C's cadence.
+                let wait_time = if LSN_MAPPING.with(|m| !m.borrow().is_empty()) {
+                    guc_tables::vars::WalWriterDelay.read() as i64
+                } else {
+                    NAPTIME_PER_CYCLE
+                };
+                let readable = conn.wait_readable_timeout(wait_time)?;
+
+                if interrupt::ConfigReloadPending() {
+                    interrupt::SetConfigReloadPending(false);
+                    guc_file::ProcessConfigFile(types_guc::GucContext::PGC_SIGHUP)?;
+                }
+
+                if !readable {
+                    // WL_TIMEOUT arm (worker.c:3764): nothing new received.
+                    // Error out once the publisher has been silent for
+                    // wal_receiver_timeout; ping it at the halfway point.
+                    let mut request_reply = false;
+                    let wrt = guc_tables::vars::wal_receiver_timeout.read();
+                    if wrt > 0 {
+                        let now = get_ts();
+                        // TimestampTzPlusMilliseconds: timestamps are µs.
+                        if now >= last_recv_timestamp + wrt as i64 * 1000 {
+                            ereport(ERROR)
+                                .errcode(ERRCODE_CONNECTION_FAILURE)
+                                .errmsg("terminating logical replication worker due to timeout")
+                                .finish(loc("LogicalRepApplyLoop"))?;
+                        }
+                        if !ping_sent && now >= last_recv_timestamp + (wrt / 2) as i64 * 1000 {
+                            request_reply = true;
+                            ping_sent = true;
+                        }
+                    }
+                    send_feedback(conn, last_received, request_reply, request_reply)?;
+                }
+
                 if !conn.consume_input() {
                     return elog::elog(
                         ERROR,
@@ -351,6 +399,9 @@ pub(crate) fn apply_loop(conn: &mut PgConn, mut last_received: XLogRecPtr) -> Pg
                 }
             }
             CopyData::Msg(buf) => {
+                // Reset the publisher-silence clock (worker.c:3655).
+                last_recv_timestamp = get_ts();
+                ping_sent = false;
                 if buf.is_empty() {
                     continue;
                 }
@@ -504,6 +555,14 @@ pub fn ApplyWorkerMain(main_arg: u64) -> PgResult<()> {
     let slot = main_arg as usize;
     launcher::logicalrep_worker_attach(slot)?;
 
+    // SetupApplyOrSyncWorker (worker.c:4784): SIGHUP reloads config; the
+    // apply loop's idle arm consumes ConfigReloadPending. SIGTERM keeps the
+    // bgworker default (bgworker_die; C installs die — same FATAL exit).
+    procsignal::pqsignal_thread(
+        procsignal::signums::SIGHUP,
+        procsignal::ThreadSignalHandler::Simple(interrupt::SignalHandlerForConfigReload),
+    );
+
     let result = apply_worker_body(slot);
 
     // Detach on every exit path; the launcher notices and relaunches.
@@ -533,6 +592,18 @@ fn apply_worker_body(slot: usize) -> PgResult<()> {
     )?;
 
     xact::StartTransactionCommand()?;
+    // InitializeLogRepWorker (worker.c:4688): lock the subscription to
+    // prevent it from being concurrently dropped, then re-verify its
+    // existence. Without this, a worker relaunched while a DROP/ALTER
+    // SUBSCRIPTION transaction is still in flight reads the pre-commit
+    // catalog image and can acquire the replication origin mid-DROP — the
+    // origin drop then waits forever on a worker that never wakes.
+    lmgr::LockSharedObject(
+        pg_subscription::SubscriptionRelationId,
+        w.subid,
+        0,
+        types_rel::AccessShareLock,
+    )?;
     let Some(sub) = load_subscription(mcx, w.subid)? else {
         let _ = elog::elog(
             LOG,
@@ -541,6 +612,12 @@ fn apply_worker_body(slot: usize) -> PgResult<()> {
                 w.subid
             ),
         );
+        // Ensure we remove the no-longer-useful entry for the worker's start
+        // time (worker.c:4700), so a successor for a recreated subscription
+        // isn't throttled by this incarnation's timestamp.
+        if !w.is_tablesync() {
+            launcher::ApplyLauncherForgetWorkerStartTime(w.subid);
+        }
         xact::CommitTransactionCommand()?;
         return Ok(());
     };
