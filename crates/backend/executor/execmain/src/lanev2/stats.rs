@@ -893,6 +893,11 @@ pub(crate) fn tick_serial_lease() {
 /// just the enter bookkeeping.
 static SERIAL_LEASE_ADMITTED: AtomicU64 = AtomicU64::new(0);
 static SERIAL_LEASE_DONATIONS: AtomicU64 = AtomicU64::new(0);
+/// GL-SLEASE-3 admission census: runs the sweeper NEWLY flagged as
+/// floor-crossed (Pending, first flag raise — Deficit re-flags don't
+/// re-count; ticked by the sweeper thread). crossings vs admitted vs
+/// donations is the attribution triple for the residual-tax ladder.
+static SERIAL_LEASE_FLOOR_CROSSED: AtomicU64 = AtomicU64::new(0);
 
 #[inline]
 pub(crate) fn tick_serial_lease_admitted() {
@@ -909,6 +914,15 @@ pub(crate) fn tick_serial_lease_donation() {
         return;
     }
     SERIAL_LEASE_DONATIONS.fetch_add(1, Relaxed);
+    arm_dump_on_thread_exit();
+}
+
+#[inline]
+pub(crate) fn tick_serial_lease_floor_crossing() {
+    if !armed() {
+        return;
+    }
+    SERIAL_LEASE_FLOOR_CROSSED.fetch_add(1, Relaxed);
     arm_dump_on_thread_exit();
 }
 
@@ -1314,6 +1328,10 @@ fn dump() {
     out.push_str(&format!(
         "counter\tserial-lease-donations\t{}\n",
         SERIAL_LEASE_DONATIONS.load(Relaxed)
+    ));
+    out.push_str(&format!(
+        "counter\tserial-lease-floor-crossings\t{}\n",
+        SERIAL_LEASE_FLOOR_CROSSED.load(Relaxed)
     ));
     // M2 inc-3 rung-2 fallback-floor rows (engagement channels per arm;
     // zeros included — the floor reader diffs runs, absent≠zero would

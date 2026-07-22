@@ -70,7 +70,10 @@ mod windows;
 pub use exprkey::ExprKeyState;
 /// GL-SLEASE-1 accounting-witness tick, re-exported for the execmain seam
 /// (the serial-lease acquire lives outside the lane module tree).
-pub(crate) use stats::{tick_serial_lease, tick_serial_lease_admitted, tick_serial_lease_donation};
+pub(crate) use stats::{
+    tick_serial_lease, tick_serial_lease_admitted, tick_serial_lease_donation,
+    tick_serial_lease_floor_crossing,
+};
 pub(crate) use census::{census_armed, record_execution as census_record};
 pub(crate) use dml::try_own_modify_table;
 pub(crate) use indexsource::try_own_agg_over_index_only_source;
