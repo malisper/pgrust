@@ -1156,6 +1156,18 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
     if write_dest {
         super::write_funnel::note_engaged(total_granules);
     }
+    // W2a inc-1 (pop-K batched write drain; PGRUST_W2A_DRAIN_BATCH default
+    // OFF — write_funnel.rs): write-dest rows collect into a K-image batch
+    // and flush through `flush_write_batch` (one receiver dispatch + one
+    // slot clear + K image frees per batch, W1 buffer fed directly). Write
+    // receivers never stop early, so the batched arm returns Ok(true)
+    // unconditionally; the tail remainder flushes after the engage returns.
+    let batch_writes = write_dest && super::write_funnel::w2a_drain_batch_enabled();
+    let mut batch: Vec<MinImage> = if batch_writes {
+        Vec::with_capacity(super::write_funnel::DRAIN_BATCH_CAP)
+    } else {
+        Vec::new()
+    };
     let outcome = engage_passthrough(
         rt,
         pstmt,
@@ -1168,6 +1180,21 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
         // W0.1: write dests drain PURE — the leader is the writer.
         write_dest,
         |img: MinImage| -> PgResult<bool> {
+            if batch_writes {
+                batch.push(img);
+                if batch.len() >= super::write_funnel::DRAIN_BATCH_CAP {
+                    // Lifetime bridge as the per-row path below: the batch
+                    // flush only borrows the slot during the call.
+                    let slot: &mut ::types_slot::SlotData<'d> = unsafe {
+                        &mut *(&mut wire_slot as *mut ::types_slot::SlotData<'mcx>)
+                            .cast::<::types_slot::SlotData<'d>>()
+                    };
+                    let slot_mcx: ::mcx::Mcx<'d> =
+                        unsafe { std::mem::transmute::<::mcx::Mcx<'mcx>, ::mcx::Mcx<'d>>(wire_mcx) };
+                    super::write_funnel::flush_write_batch(&mut batch, dest, slot, slot_mcx)?;
+                }
+                return Ok(true);
+            }
             // SAFETY: `wire_slot` is a Minimal slot; `img` owns the bytes and
             // outlives this store+receive (dropped at the end of the call).
             unsafe {
@@ -1188,6 +1215,20 @@ pub(crate) fn try_passthrough_funnel<'mcx, 'd>(
             Ok(cont)
         },
     )?;
+
+    // W2a inc-1 tail: engage returns only after the drain reached EOF, so
+    // the remainder (< one batch) flushes here; an engage Err dropped the
+    // batch with the closure (images freed, statement aborts — nothing
+    // half-buffered survives).
+    if batch_writes && !batch.is_empty() {
+        let slot: &mut ::types_slot::SlotData<'d> = unsafe {
+            &mut *(&mut wire_slot as *mut ::types_slot::SlotData<'mcx>)
+                .cast::<::types_slot::SlotData<'d>>()
+        };
+        let slot_mcx: ::mcx::Mcx<'d> =
+            unsafe { std::mem::transmute::<::mcx::Mcx<'mcx>, ::mcx::Mcx<'d>>(wire_mcx) };
+        super::write_funnel::flush_write_batch(&mut batch, dest, slot, slot_mcx)?;
+    }
 
     match outcome {
         PassthroughEngageOutcome::Completed(n) => {
