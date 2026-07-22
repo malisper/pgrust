@@ -1677,29 +1677,31 @@ fn grouped_sink_aggs() -> &'static [u32] {
 // stragg-coverage inc-1 (GL-STRAGG-2): the LENARG + HAVING cars.
 // ---------------------------------------------------------------------------
 
-/// LENARG car knob (`PGRUST_LANE_V2_AGG_LENARG`): DEFAULT OFF, armed iff
-/// exactly `1`/`on` (the still-gated tier-2 spelling). Probe-side only —
-/// the executor already evaluates the textlen-family agg arguments through
-/// the staged per-column length lanes (lanefold `classify_len_arg`; the
-/// engaged plans carry vguard proofs), so the widening changes WHERE the
-/// shape routes, not what the walk can host. Flip letter owed after the
-/// witnessed ladder (GL-STRAGG-2).
+/// LENARG car knob (`PGRUST_LANE_V2_AGG_LENARG`): **DEFAULT ON** since the
+/// GL-STRAGG-2 flip (t43; letter FLIP-RECOMMENDED both cars together —
+/// zero structural tax, byte parity everywhere measured; the q28
+/// forced-serial residual belongs to the presorted serial-agg program,
+/// not these cars). Kill spellings exactly `0|off` (the t35 flipped-kill
+/// idiom). Probe-side only — the executor already evaluates the
+/// textlen-family agg arguments through the staged per-column length
+/// lanes (lanefold `classify_len_arg`).
 fn agg_lenarg_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        tier2_car_spelling_on(std::env::var("PGRUST_LANE_V2_AGG_LENARG").as_deref().ok())
+        tier2_car_kill_spelling_on(std::env::var("PGRUST_LANE_V2_AGG_LENARG").as_deref().ok())
     })
 }
 
-/// HAVING car knob (`PGRUST_LANE_V2_AGG_HAVING`): DEFAULT OFF, armed iff
-/// exactly `1`/`on`. SAME spelling as the runtime grouped sink's emit
-/// filter (`nodeagg::sink::sink_having_enabled`) — both seams flip
+/// HAVING car knob (`PGRUST_LANE_V2_AGG_HAVING`): **DEFAULT ON** since the
+/// GL-STRAGG-2 flip (t43; both cars flip together per the letter). Kill
+/// spellings exactly `0|off`. SAME spelling as the runtime grouped sink's
+/// emit filter (`nodeagg::sink::sink_having_enabled`) — both seams flip
 /// together (knob-coherence law: a probe that suppressed a HAVING shape
 /// the sink's filter compile refuses would land it on the serial rerun).
 fn agg_having_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        tier2_car_spelling_on(std::env::var("PGRUST_LANE_V2_AGG_HAVING").as_deref().ok())
+        tier2_car_kill_spelling_on(std::env::var("PGRUST_LANE_V2_AGG_HAVING").as_deref().ok())
     })
 }
 
