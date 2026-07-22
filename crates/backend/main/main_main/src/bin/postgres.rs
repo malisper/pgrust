@@ -232,7 +232,15 @@ fn main() {
     }
     let argv: Vec<String> = std::env::args().collect();
     if let Err(e) = main_main::pg_main(&argv) {
+        // C's boot-failure log shape: DETAIL/HINT lines follow the FATAL
+        // (a bad postgresql.conf/argv GUC's errdetail names the fix).
         elog::write_stderr(&format!("FATAL:  {}\n", e.message));
+        if let Some(d) = &e.detail {
+            elog::write_stderr(&format!("DETAIL:  {d}\n"));
+        }
+        if let Some(h) = &e.hint {
+            elog::write_stderr(&format!("HINT:  {h}\n"));
+        }
         std::process::exit(1);
     }
 }
