@@ -194,6 +194,42 @@ impl Semaphore {
         true
     }
 
+    /// Bounded [`Semaphore::acquire`]: same priority-lane deference, but
+    /// gives up (returns false) once a wait span times out instead of
+    /// parking forever. `true` ⟺ one permit was taken — the caller owns
+    /// exactly the release obligation `acquire` would confer, and no path
+    /// leaks a permit (the count is only touched under the mutex).
+    ///
+    /// Timing slack, by design: every non-timeout wake restarts the full
+    /// `timeout` budget (no deadline arithmetic — this compiles and models
+    /// identically in all three pgsync worlds, where loom/sim time is not
+    /// wall time). Callers use it as a deadlock-escape bound, not a timer:
+    /// the serial-lease safe-point admission (GL-SLEASE-2) re-tries on its
+    /// sweeper cadence.
+    pub fn acquire_timeout(&self, timeout: core::time::Duration) -> bool {
+        let mut g = lock(&self.permits);
+        loop {
+            if *g > 0 && self.prio_waiting.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+                *g -= 1;
+                return true;
+            }
+            let (ng, res) =
+                self.cv.wait_timeout(g, timeout).unwrap_or_else(|e| e.into_inner());
+            g = ng;
+            if res.timed_out() {
+                // One last under-lock look (a release may have landed with
+                // the timeout): take it or report failure.
+                if *g > 0
+                    && self.prio_waiting.load(core::sync::atomic::Ordering::Relaxed) == 0
+                {
+                    *g -= 1;
+                    return true;
+                }
+                return false;
+            }
+        }
+    }
+
     pub fn release(&self) {
         let mut g = lock(&self.permits);
         *g += 1;

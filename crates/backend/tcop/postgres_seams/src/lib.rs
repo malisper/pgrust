@@ -108,3 +108,12 @@ seam_core::seam!(
     // fallback identity. Exits the process; never returns.
     pub fn postgres_sim_net_main(argv: &[String], username: &str) -> !
 );
+
+seam_core::tap!(
+    // Serial-lease v2 safe-point admission (GL-SLEASE-2; pgrust extension —
+    // no C counterpart). ProcessInterrupts calls it after the holdoff /
+    // crit-section gates on every drain; installed by seams_init ONLY when
+    // the lease is armed (PGRUST_RUNTIME_SERIAL_LEASE=1), so the unarmed
+    // posture pays one null-tap check on the already-cold interrupt path.
+    pub fn tap_serial_lease_admission()
+);
