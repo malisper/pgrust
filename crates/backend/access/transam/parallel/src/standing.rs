@@ -352,17 +352,17 @@ pub fn pool_binding_enabled() -> bool {
 /// through the runtime's bound-descriptor claim gate
 /// (scratchpad/night/m2-pool-binding-scope.md §3 inc-2).
 ///
-/// **DEFAULT ON since the GL-POOLDB-1 acceptance re-run**
-/// (scratchpad/night/gl-pooldb-1-letter-spec.md §9: dop1 needle p50
-/// −0.18% vs the ≤1% bar; needle-under-saturated-mixed-load 0.64× vs the
-/// ≤2× bar — the letter's 4.4× small-stream tax INVERTED by the pool-qos
-/// interactive tier; heavy-stream p99 123.5s → 10.3s; gang-churn witness
-/// + units ALL green at the flip base). `PGRUST_RUNTIME_POOLDB=0|off`
-/// restores the standing-gang-first posture byte-identically (the t35
-/// flipped-kill law). Layered UNDER PGRUST_RUNTIME_POOLBIND (=0 kills
-/// this module wholesale, pool channel included); the sticky
-/// (PGRUST_RUNTIME_POOL_STICKY) and QoS (PGRUST_RUNTIME_POOL_QOS) tiers
-/// layer under THIS switch and flip with it.
+/// **DEFAULT OFF — the GL-POOLDB-1 flip UNLOADED at the t42 gate**
+/// (GL-POOLDB-HELPERDEATH-1: deterministic round-32 helperdeath wedge at
+/// the flipped default — second-crashkill respawn never recovers
+/// (pooldb_thread_main / spawn_worker), victim drives hang >180s; the
+/// PGRUST_RUNTIME_POOLDB=0 control at the same seed/sha is clean. The
+/// flip re-arms in t43 CARRYING the fix, on the acceptance evidence
+/// already banked (gl-pooldb-1-letter-spec.md §9). `=1|on` arms the pool
+/// channel for the fix lane's validation; unset/other = the standing-
+/// gang-first posture (the pre-flip law, byte-identical). Layered UNDER
+/// PGRUST_RUNTIME_POOLBIND; the sticky (PGRUST_RUNTIME_POOL_STICKY) and
+/// QoS (PGRUST_RUNTIME_POOL_QOS) tiers layer under THIS switch.
 pub fn pooldb_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
@@ -370,10 +370,10 @@ pub fn pooldb_enabled() -> bool {
     })
 }
 
-/// The flip's pure parse (unit-pinned): default ON; `0`/`off` kill; any
-/// other value (including the historical arming spelling `1`) is ON.
+/// The unloaded posture's pure parse (unit-pinned): default OFF; ON iff
+/// exactly `1`/`on` (the pre-flip arming spellings).
 fn pooldb_posture(v: Option<&str>) -> bool {
-    !matches!(v.map(str::trim), Some("0") | Some("off"))
+    matches!(v.map(str::trim), Some("1") | Some("on"))
 }
 
 /// Boot wiring (launch_backend rtgang): the thread spawner and the gang
@@ -1343,12 +1343,13 @@ mod pooldb_flip_tests {
     /// `=1` stays ON; whitespace trimmed.
     #[test]
     fn pooldb_default_on_kill_spellings() {
-        assert!(super::pooldb_posture(None), "unset = flipped default ON");
-        assert!(super::pooldb_posture(Some("1")), "historical arming spelling stays ON");
+        // GL-POOLDB-HELPERDEATH-1 unload: default OFF; =1|on arms.
+        assert!(!super::pooldb_posture(None), "unset = unloaded default OFF");
+        assert!(super::pooldb_posture(Some("1")), "arming spelling ON");
         assert!(super::pooldb_posture(Some("on")), "affirmative spelling ON");
-        assert!(!super::pooldb_posture(Some("0")), "=0 kills");
-        assert!(!super::pooldb_posture(Some("off")), "=off kills");
-        assert!(!super::pooldb_posture(Some(" 0 ")), "kill spelling trimmed");
+        assert!(!super::pooldb_posture(Some("0")), "=0 stays off");
+        assert!(!super::pooldb_posture(Some("off")), "=off stays off");
+        assert!(super::pooldb_posture(Some(" 1 ")), "arming spelling trimmed");
     }
 
     /// Armed-witness companion (the add-a-row law's env-gated cargo leg):
