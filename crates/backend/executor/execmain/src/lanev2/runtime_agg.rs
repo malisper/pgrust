@@ -2771,8 +2771,14 @@ fn sink_drain_range<'mcx>(
                 local.runs.push(run);
             }
             // The flush RESET the compact table: every cached code -> state
-            // pointer is a dangling table row — drop the dict-code cache.
+            // pointer is a dangling table row — drop the dict-code cache
+            // (K2 feed) AND the expr-key drain's code→pergroup cache
+            // (GL-DICTDRAIN-1 — the dict-coded resolve caches live table
+            // pointers per (epoch, code); the 830320fed law).
             dgs.invalidate();
+            if let Some(xk) = xk.as_deref_mut() {
+                xk.invalidate_group_caches();
+            }
             if intern_reset {
                 // The flush RESET the intern table (wide-vocabulary
                 // bounding): every code→intern-id cache is now stale — a
@@ -2851,6 +2857,12 @@ fn sink_drain_range<'mcx>(
                         if !sink.shared.as_ref().is_some_and(|sh| sh.absorb(&run)) {
                             local.run_bytes += run.bytes();
                             local.runs.push(run);
+                        }
+                        // The flush RESET the compact table — drop the
+                        // expr-key drain's code→pergroup cache (as at the
+                        // cap flush above; GL-DICTDRAIN-1).
+                        if let Some(xk) = xk.as_deref_mut() {
+                            xk.invalidate_group_caches();
                         }
                         if intern_reset {
                             mks.epoch = None;
@@ -3424,21 +3436,34 @@ fn arm_sink_build<'mcx>(
     let shape_err = ::nodeagg::sink::sink_shape_error;
     // SE-T2AGG CAR B: the vguard-only widening mirrors the leader's gate
     // exactly (F1 leader/worker-verdict law; the knob is process-constant).
-    let plan_ok = ::nodeagg::agg_lanefold_plan(agg)
+    // GL-DICTDRAIN-1: the dict-class expr-key drain additionally admits
+    // vguard-bearing PROJECTED plans (`sink_exprkey_dict_vguard_ok`) — the
+    // DictCoded kind arm below is the ONLY consumer (belted per kind).
+    let base_plan_ok = ::nodeagg::agg_lanefold_plan(agg)
         .is_some_and(|p| !p.guarded && p.vguards.is_empty() && p.resid.is_empty())
         || super::sink_vguard_plan_ok(agg, ss);
+    let plan_ok = base_plan_ok || super::sink_exprkey_dict_vguard_ok(agg, ss);
     if !plan_ok || ::nodeagg::agg_lanefold_has_resid(agg) {
         return Err(shape_err("worker fold plan diverged from the leader's"));
     }
     if sink.drain == SinkDrain::ExprKey {
         // The worker's own decide (same plan tree — same census result).
-        let Some(xk) = super::exprkey::decide_exprkey(agg, ss, estate) else {
+        let Some(mut xk) = super::exprkey::decide_exprkey(agg, ss, estate) else {
             return Err(shape_err("worker expr-key decide diverged from the leader's"));
         };
+        // Sink-build marker: the drain adapter's demote exits REFUSE
+        // instead of migrating (`ExprKeyState::sink_build` doc).
+        xk.set_sink_build();
         if xk.sink_refused() {
             return Err(shape_err("worker expr-key decide starts refused"));
         }
         let kind = xk.sink_key_kind();
+        // Belt (GL-DICTDRAIN-1): the widened vguard plan admission serves
+        // the DictCoded kind ONLY — every other kind requires the base
+        // plan gate it always had (F1 both-sides law).
+        if !base_plan_ok && !matches!(kind, Some(super::exprkey::SinkXkKind::DictCoded)) {
+            return Err(shape_err("worker fold plan diverged from the leader's"));
+        }
         // Spill-armed admission flag mirrors the leader's exactly
         // (spill_set exists only on word-keyed spill-armed engagements).
         ::nodeagg::sink::agg_sink_set_cap_spill(agg, sink.cap, sink.spill_set.is_some());
@@ -3482,6 +3507,29 @@ fn arm_sink_build<'mcx>(
                 if &wshape != lshape {
                     return Err(shape_err("worker mk shape diverged from the leader's"));
                 }
+            }
+            (None, Some(lshape), Some(super::exprkey::SinkXkKind::DictCoded)) => {
+                // GL-DICTDRAIN-1: the Dict key class through the 1-Intern
+                // compact spec — the serial coded arm's exact mk1 arm
+                // (`try_arm_mk1(key_out)`), under the sink cap (the arm
+                // elects intern-armed or DIRECT per `text_direct_enabled`;
+                // both flush identical canonical-bytes runs, so the
+                // leader's shape-only snapshot is arm-agnostic — the C2
+                // single-text law verbatim). Divergence = error.
+                let (atts, n_atts) =
+                    xk.sink_mk_intern_atts().expect("Dict kind carries the key-out att");
+                debug_assert_eq!(n_atts, 1, "the dict drain is the 1-Intern spec");
+                if ::nodeagg::agg_hash_compact_try_arm_mk1(agg, Some(atts[0]))
+                    != ::nodeagg::CompactArm::Armed
+                {
+                    return Err(shape_err("worker dict-coded arm refused under the sink cap"));
+                }
+                let wshape = ::nodeagg::agg_hash_compact_mk_shape(agg)
+                    .ok_or_else(|| shape_err("armed dict-coded table lost its shape"))?;
+                if &wshape != lshape {
+                    return Err(shape_err("worker dict-coded shape diverged from the leader's"));
+                }
+                lane_trace("runtime-agg: dict-coded sink drain armed (worker)");
             }
             _ => return Err(shape_err("worker expr-key kind diverged from the leader's")),
         }
@@ -4512,9 +4560,13 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     // SE-T2AGG CAR B: vguard-only guarded plans (min/max(text) passengers)
     // admit knob-ON through `sink_vguard_plan_ok` — the drain proves each
     // batch inline (check_guards) and a demote REFUSES to the serial rerun.
-    let plan_ok = ::nodeagg::agg_lanefold_plan(agg)
+    // GL-DICTDRAIN-1: the dict-class expr-key drain admits vguard-bearing
+    // PROJECTED plans the same way (`sink_exprkey_dict_vguard_ok`); the
+    // DictCoded kind arm below is the only consumer (belted per kind).
+    let base_plan_ok = ::nodeagg::agg_lanefold_plan(agg)
         .is_some_and(|p| !p.guarded && p.vguards.is_empty() && p.resid.is_empty())
         || super::sink_vguard_plan_ok(agg, ss);
+    let plan_ok = base_plan_ok || super::sink_exprkey_dict_vguard_ok(agg, ss);
     if !plan_ok || ::nodeagg::agg_lanefold_has_resid(agg) {
         refuse(estate, ea, node_id, "fold plan guarded/varlena/residual");
         return Ok(false);
@@ -4556,6 +4608,12 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
             refuse(estate, ea, node_id, "expr-key kind (dict/multi cars)");
             return Ok(false);
         };
+        // Belt (GL-DICTDRAIN-1): the widened vguard plan admission serves
+        // the DictCoded kind ONLY.
+        if !base_plan_ok && !matches!(kind, super::exprkey::SinkXkKind::DictCoded) {
+            refuse(estate, ea, node_id, "fold plan guarded/varlena/residual");
+            return Ok(false);
+        }
         drain = SinkDrain::ExprKey;
         match kind {
             super::exprkey::SinkXkKind::Single => {
@@ -4601,6 +4659,36 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
                     refuse(estate, ea, node_id, "mk component kind (text car gate)");
                     return Ok(false);
                 }
+                red = None;
+                mk = Some(shape);
+                width = 8;
+            }
+            super::exprkey::SinkXkKind::DictCoded => {
+                // GL-DICTDRAIN-1: the Dict key class through the 1-Intern
+                // compact spec (the C2 single-text shape, computed-key
+                // fed). Cap-aware admission probe — no table armed on the
+                // leader (the Mk comment above); the worker arm elects
+                // intern-armed or DIRECT, both flushing identical
+                // canonical-bytes runs (shape-only snapshot).
+                let (atts, n_atts) =
+                    xk.sink_mk_intern_atts().expect("Dict kind carries the key-out att");
+                debug_assert_eq!(n_atts, 1, "the dict drain is the 1-Intern spec");
+                ::nodeagg::sink::agg_sink_set_cap_spill(
+                    agg,
+                    sink_cap_for(state_bytes, budget, ngroups_limit),
+                    agg_spill_enabled(),
+                );
+                let admitted = ::nodeagg::agg_hash_compact_mk_admit1(agg, Some(atts[0]));
+                ::nodeagg::sink::agg_sink_clear_cap(agg);
+                let Ok((shape, _numgroups)) = admitted else {
+                    refuse(estate, ea, node_id, "expr-key dict-coded admission");
+                    return Ok(false);
+                };
+                if !mk_shape_sink_ok(&shape) {
+                    refuse(estate, ea, node_id, "mk component kind (text car gate)");
+                    return Ok(false);
+                }
+                lane_trace("runtime-agg: dict-coded sink drain admitted (leader)");
                 red = None;
                 mk = Some(shape);
                 width = 8;
