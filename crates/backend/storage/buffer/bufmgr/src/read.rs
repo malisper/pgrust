@@ -145,7 +145,7 @@ pub fn ReadBuffer_common(
     }
 
     // Signal that we are going to immediately wait: no benefit in executing
-    // the IO asynchronously (C READ_BUFFERS_SYNCHRONOUSLY).
+    // Immediate wait follows: READ_BUFFERS_SYNCHRONOUSLY (C's hint).
     let mut flags = READ_BUFFERS_SYNCHRONOUSLY;
     if mode == ReadBufferMode::ZeroOnError {
         flags |= READ_BUFFERS_ZERO_ON_ERROR;
@@ -355,7 +355,7 @@ pub(crate) fn WaitIO(desc: &BufferDesc) -> PgResult<()> {
         if wref.aio_index != 0 || wref.generation_upper != 0 || wref.generation_lower != 0 {
             if wref.aio_index & types_storage::aio::PGAIO_WREF_TAG != 0 {
                 // pgaio-armed wref (buffer_stage_common tags it so this arm
-                // and the uring prefetch lane can share the field).
+                // Tagged = pgaio-armed wref (untagged = uring prefetch lane).
                 let untagged = types_storage::buf::PgAioWaitRef {
                     aio_index: wref.aio_index & !types_storage::aio::PGAIO_WREF_TAG,
                     generation_upper: wref.generation_upper,
@@ -459,7 +459,7 @@ pub(crate) fn TerminateBufferIO(
     ConditionVariableBroadcast(BufferDescriptorGetIOCV(desc));
 
     // Support LockBufferForCleanup: completing another backend's IO may drop
-    // the last pin other than the waiter's.
+    // LockBufferForCleanup support: this may drop the last competing pin.
     if release_aio && buf_state & types_storage::buf::BM_PIN_COUNT_WAITER != 0 {
         crate::pin::WakePinCountWaiter(desc);
     }
@@ -539,11 +539,8 @@ fn complete_read_local(
     Ok(false)
 }
 
-// Stack-array bound for one batched read; io_combine_limit is clamped into it
-// (C's MAX_IO_COMBINE_LIMIT analog; must stay <= PG_IOV_MAX = 128).
 const MAX_READ_BATCH: usize = 64;
 
-// READ_BUFFERS_* (bufmgr.h).
 pub(crate) const READ_BUFFERS_ZERO_ON_ERROR: u32 = 1 << 0;
 pub(crate) const READ_BUFFERS_SYNCHRONOUSLY: u32 = 1 << 3;
 
@@ -607,7 +604,6 @@ fn start_read_buffers_impl(
         let idx = i as usize;
         let found;
         if operation.buffers[idx] != InvalidBuffer {
-            // Pinned by the caller (ReadBuffer_common's single block).
             let desc = GetBufferDescriptor(operation.buffers[idx] - 1);
             found = desc.state.load(Ordering::Relaxed) & BM_VALID != 0;
         } else {
@@ -628,7 +624,6 @@ fn start_read_buffers_impl(
                 return Ok(false);
             }
             // Split: this valid buffer stays pinned as a forwarded buffer in
-            // buffers[i]; the operation covers [0, i).
             actual_nblocks = i;
             break;
         }
@@ -695,7 +690,6 @@ fn ProcessReadBuffersResult(operation: &mut ReadBuffersOperation) -> PgResult<()
             if rs == Rs::Error { ERROR } else { WARNING },
         )?;
     } else if rs == Rs::Partial {
-        // Retried below; log at debug level only.
         aio_core::pgaio_result_report(
             operation.io_return.result,
             &operation.io_return.target_data,
@@ -766,15 +760,10 @@ fn AsyncReadBuffers(
         ioh_flags |= types_storage::aio::PGAIO_HF_SYNCHRONOUS;
     }
 
-    // The completion callback may run in another backend/worker with a
-    // different zero_damaged_pages: capture the definer's value in cb_data.
-    // (The ignore_checksum_failure arm pends the checksum-verification port.)
     if crate::gucs::zero_damaged_pages() {
         flags |= READ_BUFFERS_ZERO_ON_ERROR;
     }
 
-    // Acquire the handle before StartBufferIO: acquisition may block, which
-    // must not happen after setting BM_IO_IN_PROGRESS.
     let ret_ptr: *mut types_storage::aio::PgAioReturn = &mut operation.io_return;
     let ioh = match aio_core::pgaio_io_acquire_nb(Some(resowner::CurrentResourceOwner()), ret_ptr)?
     {
@@ -786,13 +775,11 @@ fn AsyncReadBuffers(
     };
 
     if !ReadBuffersCanStartIO(operation.buffers[nblocks_done], false)? {
-        // Someone else already completed this block.
         operation.nblocks_done += 1;
         *nblocks_progress = 1;
         aio_core::pgaio_io_release(ioh)?;
         aio_core::pgaio_wref_clear(&mut operation.io_wref);
         // A hit for this backend, even though it began as a miss at pin time;
-        // the other backend counts the read.
         counters::hit();
         pgstat_count_io_op(IOObject::Relation, io_context, IOOp::Hit, 1, 0);
         return Ok(false);
@@ -804,8 +791,6 @@ fn AsyncReadBuffers(
     io_buffer_ids[0] = operation.buffers[nblocks_done] as u32;
     let mut io_buffers_len = 1usize;
 
-    // Scatter-read as many neighboring blocks as possible without waiting;
-    // the head block already carries our BM_IO_IN_PROGRESS.
     for i in (nblocks_done + 1)..operation.nblocks as usize {
         if !ReadBuffersCanStartIO(operation.buffers[i], true)? {
             break;
@@ -816,10 +801,8 @@ fn AsyncReadBuffers(
         io_buffers_len += 1;
     }
 
-    // The wref to wait on in WaitReadBuffers.
     operation.io_wref = aio_core::pgaio_io_get_wref(ioh);
 
-    // Buffer list for the completion callbacks.
     aio_core::pgaio_io_set_handle_data_32(ioh, &io_buffer_ids[..io_buffers_len]);
 
     aio_core::pgaio_io_register_callbacks(
@@ -830,7 +813,6 @@ fn AsyncReadBuffers(
     aio_core::pgaio_io_set_flag(ioh, ioh_flags);
 
     // Track the IO at issue time even for async execution: under
-    // io_method=sync or a worker sync-fallback it runs right here.
     let io_start = pgstat_prepare_io_time(crate::gucs::track_io_timing());
     smgr_seams::smgr_startreadv::call(
         operation.smgr,
@@ -865,7 +847,6 @@ pub(crate) fn ReadBuffer_batched(
 ) -> PgResult<(Buffer, bool)> {
     let forknum = ForkNumber::MAIN_FORKNUM;
     if persistence == RELPERSISTENCE_TEMP {
-        // Local buffers keep the single-block path.
         return ReadBuffer_common(
             smgr,
             persistence,
@@ -876,7 +857,6 @@ pub(crate) fn ReadBuffer_batched(
         );
     }
     // The extra blocks each hold a pin until the read completes: cap the run
-    // by the backend's remaining fair share (read_stream.c caps its
     // pinned-buffer budget with GetAdditionalPinLimit(), which may be zero).
     // Without this, a seqscan on a tiny pool pins it whole and any concurrent
     // (or own) allocation dies with "no unpinned buffers available".
@@ -885,8 +865,8 @@ pub(crate) fn ReadBuffer_batched(
         .min(nblocks_hint.max(1) as usize)
         .min(pin_room);
 
-    let mut operation =
-        ReadBuffersOperation::new(smgr, persistence, forknum, strategy, READ_BUFFERS_SYNCHRONOUSLY);
+    // worker mode the IO is queued to the pool and the issuer waits on the
+    let mut operation = ReadBuffersOperation::new(smgr, persistence, forknum, strategy, 0);
     operation.blocknum = blkno;
     let mut nblocks = cap as i32;
     let did_start_io = start_read_buffers_impl(&mut operation, &mut nblocks)?;

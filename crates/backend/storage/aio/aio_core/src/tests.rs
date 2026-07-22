@@ -30,8 +30,6 @@ fn worker_submission_queue_lock_offset_is_pinned() {
     );
 }
 
-// The states a wref crossing threads can observe are the C enum values;
-// pinned because wref encode/decode packs them with generation halves.
 #[test]
 fn wref_roundtrip() {
     let w = types_storage::buf::PgAioWaitRef {

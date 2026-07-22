@@ -14,7 +14,6 @@ pub(crate) fn pgaio_io_has_target(index: u32) -> bool {
     unsafe { ioh(index).data() }.target != PGAIO_TID_INVALID
 }
 
-/// pgaio_io_set_target + pgaio_io_set_target_smgr fused (single target kind).
 pub fn pgaio_io_set_target_smgr(
     index: u32,
     rlocator: RelFileLocator,
@@ -44,14 +43,12 @@ pub fn pgaio_io_get_target_data(index: u32) -> PgAioTargetData {
 }
 
 pub(crate) fn pgaio_io_can_reopen(index: u32) -> bool {
-    // SMGR target always has a reopen callback (aio_smgr_target_info).
     // SAFETY: as pgaio_io_has_target.
     unsafe { ioh(index).data() }.target == PGAIO_TID_SMGR
 }
 
-/// pgaio_io_reopen: reopen the target in the executing thread (worker); the
-/// smgr side re-resolves through its own per-thread vfd cache and stores the
-/// new raw fd into op_data (C parity for cross-process fd invalidity).
+/// Reopen in the EXECUTING thread via its own vfd cache; the new raw fd
+/// lands in op_data (C parity for cross-process fd invalidity).
 pub(crate) fn pgaio_io_reopen(index: u32) -> PgResult<()> {
     // SAFETY: the worker owns d between queue consume and completion.
     let d = unsafe { ioh(index).data() };

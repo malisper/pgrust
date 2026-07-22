@@ -33,8 +33,8 @@ const WAIT_EVENT_IO_WORKER_MAIN: u32 = PG_WAIT_ACTIVITY + 6;
 const INVALID_PROC: ProcNumber = types_core::INVALID_PROC_NUMBER;
 
 // Ring of staged handle ids + worker registry; all fields below are
-// serialized by AioWorkerSubmissionQueueLock (C keeps them in two
-// ShmemInitStructs; the payload is identical).
+// Ring + registry fields are serialized by AioWorkerSubmissionQueueLock
+// (C keeps them in two
 struct WorkerSlot {
     // C stores Latch*; the procno addresses the same shared procLatch.
     procno: ProcNumber,
@@ -70,7 +70,6 @@ fn queue_lock() -> &'static lwlock::LWLock {
 }
 
 pub(crate) fn pgaio_worker_shmem_size() -> usize {
-    // The registry is a process static (single process); no shmem reserve.
     0
 }
 
@@ -164,8 +163,6 @@ fn pgaio_worker_submit_internal(staged: &[u32]) -> PgResult<()> {
     for &index in staged {
         debug_assert!(!pgaio_worker_needs_synchronous_execution(index));
         if !queue_insert(q, index) {
-            // Queue full: run it synchronously after sending what we can to
-            // workers (maximizes concurrency, as in C).
             synchronous_ios[nsync] = index;
             nsync += 1;
             continue;
@@ -188,8 +185,14 @@ fn pgaio_worker_submit_internal(staged: &[u32]) -> PgResult<()> {
     Ok(())
 }
 
-// on_shmem_exit callback: release this worker's registry slot.
+// Registry-slot release (on_shmem_exit); the executed-IOs witness logs
+// here because worker exit goes through proc_exit
+// (ProcessMainLoopInterrupts), never past the IoWorkerMain loop tail.
 fn pgaio_worker_die(_code: i32, _arg: usize) {
+    let _ = elog::elog(
+        types_error::DEBUG1,
+        format!("io worker executed {} IOs", EXECUTED_IOS.get()),
+    );
     let id = MY_IO_WORKER_ID.get();
     debug_assert!(id >= 0);
     LWLockAcquire(queue_lock(), LW_EXCLUSIVE, g::MyProcNumber()).expect("pgaio_worker_die");
@@ -203,8 +206,7 @@ fn pgaio_worker_die(_code: i32, _arg: usize) {
     LWLockRelease(queue_lock()).expect("pgaio_worker_die");
 }
 
-// Per-worker executed-IO count: the read-path e2e's deterministic
-// flowed-through-workers witness (logged by IoWorkerMain at exit).
+// Per-worker executed-IOs count: the e2e's flowed-through-workers witness.
 thread_local! {
     static EXECUTED_IOS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
@@ -213,7 +215,6 @@ pub fn pgaio_worker_executed_count() -> u64 {
     EXECUTED_IOS.get()
 }
 
-/// Register this thread in the worker registry (IoWorkerMain bring-up).
 pub fn pgaio_worker_register() -> PgResult<()> {
     MY_IO_WORKER_ID.set(-1);
 
@@ -244,14 +245,12 @@ pub fn pgaio_worker_register() -> PgResult<()> {
     Ok(())
 }
 
-/// One IoWorkerMain loop iteration: consume + execute one IO, or sleep on
-/// the latch; then the main-loop interrupt drain.
 pub fn pgaio_worker_cycle() -> PgResult<()> {
     let mut latches: [ProcNumber; IO_WORKER_WAKEUP_FANOUT] = [INVALID_PROC; 2];
     let mut nlatches = 0usize;
 
-    // The lwlock acquisition also provides the memory barrier that makes the
-    // consumed handle's fields visible (C comment).
+    // C: the lwlock acquire is the barrier making the consumed handle's
+    // fields visible.
     LWLockAcquire(queue_lock(), LW_EXCLUSIVE, g::MyProcNumber())?;
     let io_index;
     {
@@ -261,12 +260,10 @@ pub fn pgaio_worker_cycle() -> PgResult<()> {
         io_index = queue_consume(q);
         match io_index {
             None => {
-                // Nothing to do: mark self idle.
                 q.idle_worker_mask |= 1u64 << my_id;
             }
             Some(_) => {
                 q.idle_worker_mask &= !(1u64 << my_id);
-                // Wake up to FANOUT peers if the queue still has depth.
                 let nwakeups = queue_depth(q).min(IO_WORKER_WAKEUP_FANOUT);
                 for _ in 0..nwakeups {
                     match choose_idle(q) {
@@ -288,13 +285,11 @@ pub fn pgaio_worker_cycle() -> PgResult<()> {
 
     match io_index {
         Some(index) => {
-            // Prevent interrupt processing between reopen and execution: the
-            // reopened fd must not be closed in that window (C comment).
+            // C: interrupts held so the reopened fd cannot be closed before
+            // execution consumes it.
             g::HoldInterrupts();
 
             if let Err(reopen_err) = crate::target::pgaio_io_reopen(index) {
-                // Very unlikely (permissions changed, alloc failure...): fail
-                // the IO with a marker errno; the issuer raises the error.
                 elog::emit_error_report_for(&reopen_err);
                 let _ = elog::elog(
                     LOG,

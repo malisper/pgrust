@@ -14,13 +14,12 @@ use crate::{
 };
 
 fn AioProcs() -> usize {
-    // IO workers don't issue AIO themselves but a ProcNumber can land on one,
-    // so the table covers every PGPROC-owning slot (C comment).
+    // C: a ProcNumber can land on an IO worker, so the table covers
+    // every PGPROC-owning slot.
     (g::MaxBackends() + NUM_AUXILIARY_PROCS) as usize
 }
 
 fn AioChooseMaxConcurrency() -> i32 {
-    // LimitAdditionalPins-shaped: NBuffers split across every backend, capped.
     let max_backends = g::MaxBackends() + NUM_AUXILIARY_PROCS;
     let max_proportional_pins = g::NBuffers() / max_backends;
     max_proportional_pins.clamp(1, 64)
@@ -28,8 +27,8 @@ fn AioChooseMaxConcurrency() -> i32 {
 
 pub fn AioShmemSize() -> PgResult<usize> {
     // C resolves io_max_concurrency=-1 via SetConfigOption(PGC_S_DYNAMIC_DEFAULT)
-    // here; the accessor store keeps SHOW correct, the pg_settings source
-    // column stays "default" either way (divergence: no guc-engine round trip).
+    // Divergence: auto-tune stores via the var accessor, no guc-engine
+    // round trip (pg_settings source shows "default" either way, as C).
     if crate::io_max_concurrency() == -1 {
         crate::IO_MAX_CONCURRENCY.store(AioChooseMaxConcurrency(), Ordering::Relaxed);
     }
@@ -137,8 +136,6 @@ pub fn AioShmemInit() -> PgResult<()> {
         IOVECS.store(iovecs, Ordering::Relaxed);
         HANDLE_DATA.store(handle_data, Ordering::Relaxed);
 
-        // Thread each backend's handles onto its idle list (owner lists, but
-        // boot is single-threaded here).
         for procno in 0..procs {
             let slot = backend_slot(procno as i32);
             // SAFETY: single-threaded boot.
@@ -154,7 +151,6 @@ pub fn AioShmemInit() -> PgResult<()> {
 }
 
 /// Crash-cycle in-place reset (ipci ResetShmemAfterCrash walk arm): all
-/// children are dead; reinitialize every backend slot and handle.
 pub fn AioShmemResetAfterCrash() -> PgResult<()> {
     if HANDLES.load(Ordering::Relaxed).is_null() {
         return Ok(());
@@ -176,7 +172,6 @@ pub fn AioShmemResetAfterCrash() -> PgResult<()> {
             let index = slot.io_handle_off + i as u32;
             let h = ioh(index);
             // Wakeup lists live in PGPROC cvWaitLinks which ProcGlobalReset
-            // zeroes; reinit the CV side too (ipci audit-sweep lesson).
             condition_variable::cv_reset_after_crash(&h.cv);
             h.flags.store(0, Ordering::Relaxed);
             h.result.store(0, Ordering::Relaxed);
@@ -200,11 +195,9 @@ pub fn AioShmemResetAfterCrash() -> PgResult<()> {
     Ok(())
 }
 
-/// pgaio_init_backend: attach this thread to its PgAioBackend slot.
 pub fn pgaio_init_backend() {
     debug_assert!(MY_BACKEND.get().is_none());
 
-    // IO workers don't have their own AIO context (they only execute others').
     if miscinit::GetMyBackendType() == types_core::BackendType::IoWorker {
         return;
     }
