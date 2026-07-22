@@ -175,7 +175,7 @@ fn install_stub_seams() {
     ));
     stub!(timeout_seams::disable_timeouts, |_| {});
     stub!(aio_seams::pgaio_closing_fd, |_| {});
-    stub!(aio_seams::pgaio_io_start_readv, |_, _, _| {});
+    stub!(aio_seams::pgaio_io_start_readv, |_, _, _| Ok(()));
     stub!(aio_seams::at_eoxact_aio, |_| {});
     stub!(aio_seams::pgaio_error_cleanup, || {});
     stub!(sync_seams::register_sync_request, |_, _, _| Ok(true));

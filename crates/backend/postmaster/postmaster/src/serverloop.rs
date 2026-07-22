@@ -314,23 +314,49 @@ fn report_fork_failure_to_client(client_sock: &ClientSocket) {
     }
 }
 
-/// maybe_adjust_io_workers. io_method defaults to "worker": the first launch
-/// reaches launch_backend's named IoWorkerMain-unported panic.
+/// maybe_adjust_io_workers: close the gap between running and configured IO
+/// workers (io_workers GUC changes and worker deaths both land here).
 pub fn maybe_adjust_io_workers() {
-    // io_method enum: 0 = sync, 1 = worker, 2 = io_uring (guc_tables).
-    if guc_tables::vars::io_method.read() != 1 {
+    if !aio_core::pgaio_workers_enabled() {
         return;
     }
+
+    // Final shutdown: just waiting for processes to exit.
+    if with_pm(|pm| pm.pm_state >= PMState::PM_WAIT_IO_WORKERS) {
+        return;
+    }
+    // No new workers during an immediate shutdown either.
+    if with_pm(|pm| pm.shutdown >= crate::ImmediateShutdown) {
+        return;
+    }
+    // Nor in the shutdown phase of a crash restart (but do restart once the
+    // cycle is starting up again).
+    if with_pm(|pm| pm.fatal_error && pm.pm_state >= PMState::PM_STOP_BACKENDS) {
+        return;
+    }
+
     let target = guc_tables::vars::io_workers.read();
+
+    // Not enough running?
     while with_pm(|pm| pm.io_worker_count) < target {
-        if !with_pm(|pm| {
-            pm.pm_state >= PMState::PM_STARTUP && pm.pm_state < PMState::PM_WAIT_IO_WORKERS
-        }) {
-            break;
-        }
+        let free = with_pm(|pm| pm.io_worker_children.iter().position(|c| c.is_none()));
+        let Some(i) = free else {
+            panic!("could not find a free IO worker slot");
+        };
         match StartChildProcess(BackendType::IoWorker) {
-            Some(_) => with_pm(|pm| pm.io_worker_count += 1),
-            None => break,
+            Some(child) => with_pm(|pm| {
+                pm.io_worker_children[i] = Some(child);
+                pm.io_worker_count += 1;
+            }),
+            None => break, // try again next time
+        }
+    }
+
+    // Too many running? Ask the worker in the highest slot to exit.
+    if with_pm(|pm| pm.io_worker_count) > target {
+        let victim = with_pm(|pm| pm.io_worker_children.iter().rev().flatten().next().copied());
+        if let Some(child) = victim {
+            crate::statemachine::signal_child(&child, procsignal::signums::SIGUSR2);
         }
     }
 }

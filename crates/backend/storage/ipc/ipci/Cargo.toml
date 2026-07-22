@@ -36,6 +36,7 @@ twophase = { path = "../../../access/transam/twophase" }
 sinval = { path = "../sinval" }
 pmsignal = { path = "../pmsignal" }
 procsignal = { path = "../procsignal" }
+aio_core = { path = "../../aio/aio_core" }
 checkpointer = { path = "../../../postmaster/checkpointer" }
 slot = { path = "../../../replication/slot" }
 origin = { path = "../../../replication/origin" }

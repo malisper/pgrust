@@ -128,6 +128,8 @@ pub fn btmask_contains(mask: BackendTypeMask, t: BackendType) -> bool {
     mask & btmask(t) != 0
 }
 
+pub const MAX_IO_WORKERS_USIZE: usize = types_storage::storage::MAX_IO_WORKERS as usize;
+
 #[derive(Clone, Copy, Debug)]
 pub struct PmChild {
     pub child_slot: pmchild_seams::PmChildSlot,
@@ -149,6 +151,7 @@ pub struct PostmasterState {
     pub have_crashed_worker: bool,
     pub wal_receiver_requested: bool,
     pub io_worker_count: i32,
+    pub io_worker_children: [Option<PmChild>; MAX_IO_WORKERS_USIZE],
     pub listen_sockets: Vec<i32>,
     pub pm_wait_set: Option<WaitEventSetHandle>,
     pub checkpointer: Option<PmChild>,
@@ -179,6 +182,7 @@ impl PostmasterState {
             have_crashed_worker: false,
             wal_receiver_requested: false,
             io_worker_count: 0,
+            io_worker_children: [None; MAX_IO_WORKERS_USIZE],
             listen_sockets: Vec::new(),
             pm_wait_set: None,
             checkpointer: None,
@@ -781,6 +785,30 @@ pub fn process_pm_child_exit() -> PgResult<()> {
                         with_pm(|pm| pm.have_crashed_worker = true);
                     }
                 }
+            }
+            // C's "Was it an IO worker?" arm (maybe_reap_io_worker): exit 0/1
+            // is normal; the liveness term (pm.io_worker_count) decrements
+            // here and the pool is re-leveled, mirroring C's
+            // maybe_adjust_io_workers-after-reap.
+            Some((child_slot, BackendType::IoWorker)) => {
+                pmchild_seams::release_postmaster_child_slot::call(child_slot);
+                // maybe_reap_io_worker: free the pm slot + drop the count.
+                with_pm(|pm| {
+                    if let Some(i) = pm
+                        .io_worker_children
+                        .iter()
+                        .position(|c| c.map(|c| c.pid) == Some(pid))
+                    {
+                        pm.io_worker_children[i] = None;
+                    }
+                    pm.io_worker_count -= 1;
+                });
+                if !(status0 || status1) {
+                    handle_child_crash("io worker", pid, exitstatus)?;
+                } else {
+                    log_child_exit_at(DEBUG2, "io worker", pid, exitstatus);
+                }
+                serverloop::maybe_adjust_io_workers();
             }
             Some((_slot, btype)) => panic!(
                 "process_pm_child_exit: reaper arm for {} unported (its owner extends the reaper when its main lands)",
