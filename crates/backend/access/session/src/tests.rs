@@ -658,7 +658,20 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //   69. utils/mmgr/mcxt_stats/src/lib.rs — IN_OOM_DUMP: reentry guard
     //      flag for the allocation-failure context dump (C parity for
     //      aset.c's MemoryContextStats-on-OOM). Pure per-thread scratch;
-    //      no session identity.
+    //      no session identity    // night/mcx-pool-stripe delta (531 = 529 + 2, composed at t43 over the memwatch pair), deliberately NON-SESSION TLS:
+    //   70. _support/mcx/src/lib.rs — tls_pools ACCT/CHILD_VECS: the
+    //      per-thread context-pool free lists (recycled AcctInner blocks +
+    //      children-Vec capacities) replacing the global spin-locked pools
+    //      on the context create/destroy path (the @high-backend-count
+    //      contention riser). Pure allocator-block caches on the owning
+    //      thread — entries are raw memory, no session identity, never
+    //      captured/restored by an envelope; TLS Drop hands blocks back to
+    //      Global at thread exit (the FPBUDGET leak law), kill switch
+    //      PGRUST_MCX_POOL_STRIPE=0 restores the globals.
+    //   71. _support/mcx/src/aset.rs — KEEPER_TLS: the per-thread parked
+    //      keeper-block lists (C context_freelists parity — C's freelist is
+    //      per-process = per-backend, so per-thread IS the C shape). Same
+    //      classification and teardown story as row 68    assert_eq!(count_tree(crates), 531, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     assert_eq!(count_tree(crates), 529, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
