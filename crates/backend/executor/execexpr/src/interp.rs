@@ -3028,6 +3028,52 @@ pub unsafe fn agg_datum_copy(
     Ok(Datum::from_usize(dst.as_ptr() as usize))
 }
 
+/// [`agg_datum_copy`] of `new` REPLACING a stored by-ref transvalue: C's
+/// ExecAggCopyTransValue discipline copies the new value and pfrees the
+/// prior one (nodeAgg.c). The deallocate is allocator-exact for the flat
+/// varlena copies this module's agg copy paths produce (size =
+/// VARSIZE_ANY at align 8 — the same layout `agg_datum_copy` allocated);
+/// non-flat forms skip the free, and bump contexts no-op the deallocate
+/// either way (bump.c has no BumpFree), so classic-build behavior — bytes
+/// AND allocation sequence — is unchanged. On a FREEING context (the sink
+/// drains' byref-state child) the pfree bounds the replace churn the way
+/// C's aset does: without it every superseded copy accumulates in the
+/// never-reset agg context for the build's whole life — the unspillable
+/// byref-floor class (the str sibling of the avgpack finding).
+///
+/// # Safety
+/// As [`agg_datum_copy`]; `old` (when non-null-pointer) is a live by-ref
+/// datum previously stored by this module's copy paths INTO `mcx`, with no
+/// other live reference to it (flushed runs snapshot superseded values
+/// never — the whole-table flush law).
+pub unsafe fn agg_datum_replace(
+    mcx: ::mcx::Mcx<'_>,
+    old: Datum,
+    new: Datum,
+    typlen: i16,
+) -> PgResult<Datum> {
+    // Copy FIRST (an OOM must leave the stored value intact).
+    // SAFETY: forwarded caller contract.
+    let copied = unsafe { agg_datum_copy(mcx, new, typlen) }?;
+    let op = old.as_usize() as *const u8;
+    if !op.is_null() && typlen == -1 {
+        // SAFETY: `old` is a live varlena per the caller contract.
+        unsafe {
+            if !::types_tuple::varatt::varatt_is_1b_e(op) {
+                let size = ::types_tuple::varatt::varsize_any(op);
+                let layout =
+                    core::alloc::Layout::from_size_align(size, 8).expect("datumCopy layout");
+                ::mcx::Allocator::deallocate(
+                    &mcx,
+                    core::ptr::NonNull::new_unchecked(op as *mut u8),
+                    layout,
+                );
+            }
+        }
+    }
+    Ok(copied)
+}
+
 // CheckVarSlotCompatibility (execExprInterp.c): C-exact messages.
 #[cold]
 #[inline(never)]

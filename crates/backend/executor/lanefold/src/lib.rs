@@ -3191,7 +3191,11 @@ unsafe fn str_advance(
             pg.trans_value_is_null = false;
             pg.no_trans_value = false;
         } else if !pg.trans_value_is_null && !str_keep(t.kind, pg.trans_value, d) {
-            pg.trans_value = ::execexpr::agg_datum_copy(aggcxt, d, -1)?;
+            // Replace = copy + pfree of the superseded copy (C's
+            // ExecAggCopyTransValue discipline; no-op on bump contexts, so
+            // classic builds keep the exact allocation sequence — the free
+            // only bites on the sink drains' FREEING byref-state child).
+            pg.trans_value = ::execexpr::agg_datum_replace(aggcxt, pg.trans_value, d, -1)?;
         }
     }
     Ok(())
@@ -3355,13 +3359,15 @@ unsafe fn str_advance_coded(
                     // Tie against the code-valued transvalue: text's
                     // last-tied-wins replaces (and copies) per tied row.
                     // SAFETY: forwarded caller contract.
-                    pg.trans_value = unsafe { ::execexpr::agg_datum_copy(aggcxt, d, -1)? };
+                    pg.trans_value =
+                        unsafe { ::execexpr::agg_datum_replace(aggcxt, pg.trans_value, d, -1)? };
                 }
                 return Ok(());
             }
             if m.tv_code {
                 // SAFETY: forwarded caller contract.
-                pg.trans_value = unsafe { ::execexpr::agg_datum_copy(aggcxt, d, -1)? };
+                pg.trans_value =
+                    unsafe { ::execexpr::agg_datum_replace(aggcxt, pg.trans_value, d, -1)? };
                 m.code = code;
                 return Ok(());
             }
@@ -3372,7 +3378,8 @@ unsafe fn str_advance_coded(
                 m.code = code;
             } else {
                 // SAFETY: forwarded caller contract.
-                pg.trans_value = unsafe { ::execexpr::agg_datum_copy(aggcxt, d, -1)? };
+                pg.trans_value =
+                    unsafe { ::execexpr::agg_datum_replace(aggcxt, pg.trans_value, d, -1)? };
                 m.code = code;
                 m.tv_code = true;
             }
@@ -3393,7 +3400,8 @@ unsafe fn str_advance_coded(
             if str_keep(t.kind, pg.trans_value, d) {
                 tv_code = false;
             } else {
-                pg.trans_value = ::execexpr::agg_datum_copy(aggcxt, d, -1)?;
+                // Replace discipline: see str_advance.
+                pg.trans_value = ::execexpr::agg_datum_replace(aggcxt, pg.trans_value, d, -1)?;
                 tv_code = true;
             }
         } else {

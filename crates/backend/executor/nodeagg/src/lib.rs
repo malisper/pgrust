@@ -732,6 +732,21 @@ struct PerHashData<'mcx> {
     // shapes never see it set (their runs are not spillable — the C2
     // record-format gap keeps their phase-1 refusal).
     sink_spill_ok: bool,
+    // GL-Q2829-FIX-1 / the str byref-floor fix (the avgpack finding's str
+    // sibling): a FREEING (aset) aggcontext child hosting the by-ref str
+    // transvalue copies of an armed sink drain, so the replace discipline
+    // (`agg_datum_replace` — C's ExecAggCopyTransValue pfree) actually
+    // reclaims superseded copies instead of accumulating them in the bump
+    // aggcontext for the build's whole life (the unspillable byref floor
+    // that refused every min/max(text)-bearing dict-key engagement).
+    // Armed per WORKER build by `agg_sink_arm_str_ctx` (the dict-coded
+    // sink arm only, v1 — its per-row exits refuse, so every str advance
+    // provably flows through the mm fold and the free is allocator-exact);
+    // `None` everywhere else keeps the bump aggcontext, byte-identically.
+    // Flushed runs snapshot state POINTERS, so this child is never reset
+    // mid-build — the pfree-on-replace alone bounds the churn (replaced
+    // values are never referenced by any run: whole-table flush law).
+    sink_str_ctx: Option<MemoryContext>,
 }
 
 // The AggState spill slice (nodeAgg.c), single set: `spill` doubles as C's
@@ -2119,6 +2134,7 @@ fn init_perhash<'mcx>(
         exchange: merge::ExchangeState::Unresolved,
         sink_cap: None,
         sink_spill_ok: false,
+        sink_str_ctx: None,
         hashiter: 0,
         table_ctx,
         spill: HashSpillState {
@@ -7368,7 +7384,7 @@ mcx::forget_safe_struct!(
         outer_natts, pergroup_cell, hash_ngroups_limit, hash_ngroups_current,
         hash_mem_limit, table_filled, hashiter, spill, sink_cap, sink_spill_ok;
         hashtable, hashslot, retrieve_slot, first_slot, table_ctx, compact,
-        exchange },
+        exchange, sink_str_ctx },
     AggStateData<'_> { plan, ps_ExprContext, tmpcontext, agg_node,
         ps_ResultTupleSlot, peragg, trans_init, trans_typ, _pergroup,
         pergroup_base, agg_values_base, agg_nulls_base, agg_done, skip_final, numtrans,

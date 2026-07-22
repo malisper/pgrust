@@ -4048,6 +4048,47 @@ pub fn agg_sink_aggctx_mem(node: &AggStateData<'_>) -> usize {
     unsafe { node.agg_node.as_ref() }.aggcontext().context().subtree_used()
 }
 
+/// `PGRUST_RUNTIME_AGG_STRCTX` kill switch (default ON): the FREEING
+/// byref-state child for armed sink drains (the str byref-floor fix —
+/// PerHashData::sink_str_ctx doc). `=0|off` restores the bump-aggcontext
+/// allocation everywhere, bit-exactly. Reachable only through the
+/// dict-coded sink arm (itself DEFAULT OFF), so the shipped default is
+/// structurally inert.
+fn sink_strctx_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(std::env::var("PGRUST_RUNTIME_AGG_STRCTX").as_deref(), Ok("0") | Ok("off"))
+    })
+}
+
+/// Arm the FREEING byref-state child on a sink WORKER build (idempotent;
+/// see PerHashData::sink_str_ctx). Callers: the dict-coded sink arm (v1 —
+/// the one drain whose per-row exits refuse, making every str advance flow
+/// through the mm fold where the replace-free is allocator-exact).
+pub fn agg_sink_arm_str_ctx(node: &mut AggStateData<'_>) {
+    if !sink_strctx_enabled() {
+        return;
+    }
+    // SAFETY: read of the once-allocated node; no &mut to it is live.
+    let aggctx = unsafe { node.agg_node.as_ref() }.aggcontext().context().new_child(
+        "HashAgg sink byref states",
+    );
+    let Some(ph) = node.perhash.as_mut() else { return };
+    if ph.sink_cap.is_some() && ph.sink_str_ctx.is_none() {
+        ph.sink_str_ctx = Some(aggctx);
+    }
+}
+
+/// The context for by-ref transvalue copies on this build: the FREEING
+/// sink child when armed, else the node's (bump) aggcontext — classic
+/// builds byte-identical.
+pub fn agg_str_trans_mcx<'a>(node: &'a AggStateData<'_>) -> ::mcx::Mcx<'a> {
+    if let Some(ctx) = node.perhash.as_ref().and_then(|ph| ph.sink_str_ctx.as_ref()) {
+        return ctx.mcx();
+    }
+    crate::agg_aggcontext(node)
+}
+
 // ---------------------------------------------------------------------------
 // Combine-phase top-N composition (m3-sort-b car 1: agg sink → ORDER BY/
 // LIMIT). When the sink's consumer is a bounded single-column Sort whose
