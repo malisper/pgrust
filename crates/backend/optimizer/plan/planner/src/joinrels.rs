@@ -37,6 +37,12 @@ pub fn make_rel_from_joinlist<'mcx>(
         return Ok(initial_rels[0]);
     }
     run.root.initial_rels = crate::relnode::pgvec_clone_shallow(run.mcx, &initial_rels);
+    // Route to the genetic optimizer when enabled and the join is large enough
+    // (allpaths.c make_rel_from_joinlist). geqo_threshold's min is 2 so the
+    // cast is safe; the join_search_hook lane is not implemented.
+    if crate::geqo::enable_geqo() && levels_needed >= crate::geqo::geqo_threshold() as usize {
+        return crate::geqo::geqo(run, levels_needed, &initial_rels);
+    }
     standard_join_search(run, levels_needed, initial_rels)
 }
 
@@ -208,7 +214,7 @@ fn has_join_restriction(run: &PlannerRun<'_>, rel: RelId) -> bool {
 }
 
 // have_join_order_restriction (joinrels.c).
-fn have_join_order_restriction(
+pub(crate) fn have_join_order_restriction(
     run: &mut PlannerRun<'_>,
     rel1: RelId,
     rel2: RelId,
@@ -276,7 +282,7 @@ fn has_legal_joinclause(run: &mut PlannerRun<'_>, rel: RelId) -> PgResult<bool> 
     Ok(false)
 }
 
-fn have_relevant_joinclause(run: &PlannerRun<'_>, rel1: RelId, rel2: RelId) -> bool {
+pub(crate) fn have_relevant_joinclause(run: &PlannerRun<'_>, rel1: RelId, rel2: RelId) -> bool {
     let (probe, other) = if run.root.rel(rel1).joininfo.len() <= run.root.rel(rel2).joininfo.len()
     {
         (rel1, rel2)

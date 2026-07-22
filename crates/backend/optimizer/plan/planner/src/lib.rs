@@ -11,6 +11,7 @@ pub mod costsize;
 pub mod createplan;
 pub mod equivclass;
 pub mod fdwplan;
+pub mod geqo;
 pub mod flatten_group;
 pub mod grouping;
 pub mod groupingsets;
@@ -249,6 +250,10 @@ pub fn init_seams() {
         get: gucs::enable_self_join_elimination,
         set: gucs::set_enable_self_join_elimination,
     });
+    // The 7 GEQO GUCs (enable_geqo, geqo_threshold, geqo_effort,
+    // geqo_pool_size, geqo_generations, geqo_selection_bias, geqo_seed) — read
+    // for real by the genetic optimizer; inert until this install ran.
+    geqo::install_gucs();
 }
 
 // planner_hook (hook-surface.md section 2): enter/leave pair so a consumer
