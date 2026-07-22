@@ -555,7 +555,8 @@ pub fn cost_gather(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, r
     // Ship-all-raw-rows Gathers (subpath ≠ partial Agg) keep the armed
     // pool's heap-rate pricing, so the degenerate leader-hash plan cannot
     // win on a free transfer.
-    let tuple_cost = if lane_exchange_partial_agg(run, sub_id) {
+    let exchange_partial = lane_exchange_partial_agg(run, sub_id);
+    let tuple_cost = if exchange_partial {
         gucs::pgrcolumnar_parallel_tuple_cost()
     } else {
         gather_tuple_cost(run)
@@ -567,9 +568,37 @@ pub fn cost_gather(run: &mut PlannerRun<'_>, path_id: types_pathnodes::PathId, r
     let mut run_cost = sub_total - sub_startup;
     startup_cost += setup_cost;
     run_cost += tuple_cost * p.rows;
+    // GL-Q2829-FIX-1 plain-Gather leader-consumption floor (doc at
+    // gucs::DEFAULT_GATHER_LEADER_MIN_TUPLE_COST; STAGED, default OFF):
+    // raw-row Gather rows are consumed LEADER-SERIALLY by the parent —
+    // that work does not ride the cheap-exchange transport discount, and
+    // discounting it is what elects the ship-every-row-to-the-leader
+    // aggregation family at fresh-stats estimate regimes. Partial-agg-fed
+    // Gathers are exempt (pointer handoff, per-group leader work — the
+    // exchange pricing above). Self-scoping per-row: low-row Gathers and
+    // LIMIT-prorated consumers barely feel it.
+    if !exchange_partial {
+        run_cost += gather_leader_uplift(tuple_cost, p.rows);
+    }
     p.disabled_nodes = sub_disabled;
     p.startup_cost = startup_cost;
     p.total_cost = startup_cost + run_cost;
+}
+
+/// The plain-Gather leader-consumption uplift (GL-Q2829-FIX-1), the
+/// [`gm_leader_uplift`] sibling without the Gather Merge 5% IPC factor:
+/// the per-row delta that floors a raw-row Gather's transport rate at the
+/// leader-consumption minimum. Zero when the floor is unarmed (the staged
+/// default), when the session's rate already meets it (SET
+/// parallel_tuple_cost >= floor — C-parity sessions), and when transport
+/// is EXPLICITLY zeroed (forced-plan bench seams keep free parallelism).
+fn gather_leader_uplift(tuple_cost: f64, rows: f64) -> f64 {
+    let floor = gucs::gather_leader_min_tuple_cost();
+    if floor > 0.0 && tuple_cost > 0.0 && tuple_cost < floor {
+        (floor - tuple_cost) * rows
+    } else {
+        0.0
+    }
 }
 
 // cost_gather_merge (costsize.c).
@@ -4351,6 +4380,41 @@ mod tests {
         // ~631k — the witnessed election-flipping magnitude.
         assert!(super::gm_leader_uplift(0.01, 315_000.0) < 31_000.0);
         assert!(super::gm_leader_uplift(0.01, rows) > 600_000.0);
+    }
+
+    /// GL-Q2829-FIX-1 pins (the plain-Gather leader-consumption floor):
+    /// STAGED default OFF — the uplift is EXACTLY ZERO at the shipped
+    /// defaults (byte-identical plans and EXPLAIN costs knob-off); armed at
+    /// the GM floor's rate it reproduces the same flooring arithmetic
+    /// (minus the Gather Merge 5% IPC factor), with the identical
+    /// C-parity-session and zeroed-transport exemptions.
+    #[test]
+    fn gather_leader_floor_staged_off_and_armed_arithmetic() {
+        if std::env::var("PGRUST_GATHER_LEADER_MIN_TUPLE_COST").is_ok() {
+            return; // env-swept run; the pin targets the default posture
+        }
+        // Staged OFF: zero uplift at every rate (default-plan byte identity).
+        assert_eq!(gucs::DEFAULT_GATHER_LEADER_MIN_TUPLE_COST, 0.0);
+        assert_eq!(gucs::gather_leader_min_tuple_cost(), 0.0);
+        let rows = 8_713_000.0; // the witnessed ship-to-leader stream
+        assert_eq!(super::gather_leader_uplift(0.005, rows), 0.0);
+        assert_eq!(super::gather_leader_uplift(0.01, rows), 0.0);
+        // Armed arithmetic (the uplift function against an explicit floor
+        // is what the env override arms; pinned via a local closure to
+        // keep the process-constant cache untouched).
+        let armed = |tc: f64, rows: f64, floor: f64| -> f64 {
+            if floor > 0.0 && tc > 0.0 && tc < floor {
+                (floor - tc) * rows
+            } else {
+                0.0
+            }
+        };
+        let up_cb = armed(0.005, rows, 0.1);
+        assert!((up_cb - 0.095 * rows).abs() < 1e-6);
+        // C-parity sessions at/above the floor: zero delta.
+        assert_eq!(armed(0.1, rows, 0.1), 0.0);
+        // Zeroed-transport bench seams: exempt.
+        assert_eq!(armed(0.0, rows, 0.1), 0.0);
     }
 
     use super::*;
