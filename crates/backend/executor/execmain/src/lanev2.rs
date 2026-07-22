@@ -57,10 +57,13 @@ mod standing_channel;
 mod push;
 mod row_emit;
 mod runtime_passthrough;
+mod stmt_task; // GL-STMTTASK-1: serial statement as a dop-1 pool task
 mod write_blockrun; // W2a inc-2 worker-direct block-run writes
 mod write_funnel; // W0 funnel-into-writer admission (parallel-writes design §4)
 pub(crate) use runtime_passthrough::try_passthrough_funnel;
 pub use runtime_passthrough::funnel_engagements;
+pub(crate) use stmt_task::{try_stmt_task, InlineRun as StmtInlineRun, StmtTaskVerdict};
+pub use stmt_task::{stmt_task_engagements, stmt_task_inline_count};
 pub use write_funnel::ctas_funnel_engagements;
 mod rowmode;
 mod rowmode_tail;

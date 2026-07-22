@@ -622,6 +622,17 @@ fn run_value_per_call<'mcx, const N: usize>(
     let mut set_desc: Option<TupleDescData<'mcx>> = None;
     let mut first_time = true;
     loop {
+        // C parity (execSRF.c ExecMakeTableFunctionResult loop top): an SRF
+        // materialize fill produces its WHOLE result set here — without this
+        // the fill is cancel/die-deaf for its entire duration (the incumbent
+        // path wedges on user cancel, and a statement-task chase can never
+        // land — GL-STMTTASK-1 found it via a wedged gang board). The
+        // pending-flag pre-test is the tuplestore cfi() shape: one TLS read
+        // per row; the seam dispatch only on a pending interrupt (also keeps
+        // seam-less unit-test processes runnable).
+        if init_small::globals::InterruptPending() {
+            ::postgres_seams::check_for_interrupts::call()?;
+        }
         estate.ecxt_mut(ecxt).reset();
         // C: pgstat_init_function_usage's `pgstat_track_functions <= fn_stats`
         // early-out, hoisted to the caller as the crate's API requires.

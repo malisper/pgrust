@@ -80,6 +80,13 @@ pub(crate) fn worker_exit() {
 /// (false) its execution permit. A task that entered a declared blocking
 /// section through the seams restores the flag on reacquire, so the flag is
 /// always accurate at the loop's own release point.
+/// GL-STMTTASK-2 quantum yield: true while THIS thread is inside a
+/// declared blocking section (permit already donated) — the governor's
+/// double-release guard. One TLS load.
+pub(crate) fn in_io_section() -> bool {
+    IN_IO_SECTION.get()
+}
+
 pub(crate) fn note_permit(held: bool) {
     debug_assert!(
         !IN_IO_SECTION.get(),

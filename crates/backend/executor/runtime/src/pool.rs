@@ -53,6 +53,16 @@ pub fn worker_loop(rt: &Arc<Runtime>, worker: usize) {
         // `PGRUST_RUNTIME_STEP_V2=0` restores the loop below.
         let mut held = false;
         let mut retries = 0u32;
+        // GL-STMTTASK-2 change 4 (PGRUST_POOL_WAKE_SPINNER, default OFF):
+        // this worker's directed-wake slot + search-phase accounting. The
+        // spinner mark spans wake→claim (cleared at worker_step's claim
+        // points, consumed by the directed park); submissions elide their
+        // notify while any worker is in that window (ParkLot::wake_work).
+        let spinner_mode = rt.wake_spinner_armed();
+        let parker = std::sync::Arc::new(pgsync::WorkerParker::new());
+        if spinner_mode {
+            rt.spin_enter_worker(&mut local);
+        }
         loop {
             let epoch = rt.park_epoch();
             if !held {
@@ -64,7 +74,15 @@ pub fn worker_loop(rt: &Arc<Runtime>, worker: usize) {
             // Task boundary (§2.9): drain this worker's CQEs non-blockingly.
             crate::io::boundary_reap();
             match step {
-                Step::Ran => retries = 0,
+                Step::Ran => {
+                    retries = 0;
+                    // Post-task: the worker is searching again (its next
+                    // step re-scans) — re-arm the spinner mark so the
+                    // between-tasks window elides submission wakes too.
+                    if spinner_mode && !local.spinning() {
+                        rt.spin_enter_worker(&mut local);
+                    }
+                }
                 Step::Retry => {
                     local.drive.steps_retry += 1;
                     retries += 1;
@@ -73,7 +91,11 @@ pub fn worker_loop(rt: &Arc<Runtime>, worker: usize) {
                         crate::io::note_permit(false);
                         rt.execution_permits().release();
                         held = false;
-                        rt.park(epoch);
+                        if spinner_mode {
+                            rt.park_worker_directed(epoch, &parker, &mut local);
+                        } else {
+                            rt.park(epoch);
+                        }
                     } else {
                         std::thread::yield_now();
                     }
@@ -83,7 +105,11 @@ pub fn worker_loop(rt: &Arc<Runtime>, worker: usize) {
                     crate::io::note_permit(false);
                     rt.execution_permits().release();
                     held = false;
-                    rt.park(epoch);
+                    if spinner_mode {
+                        rt.park_worker_directed(epoch, &parker, &mut local);
+                    } else {
+                        rt.park(epoch);
+                    }
                 }
                 Step::Stop => break,
             }

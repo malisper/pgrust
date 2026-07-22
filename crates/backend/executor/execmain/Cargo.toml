@@ -10,8 +10,9 @@ path = "src/lib.rs"
 [dependencies]
 pgsync = { path = "../../../_support/pgsync" }
 pg_clock = { path = "../../../port/pg_clock" }
-# slease v2 sweeper (GL-SLEASE-2): waiter is the sanctioned timed-park
-# surface (timeout timer-thread precedent).
+# slease v2 sweeper (GL-SLEASE-2) + GL-STMTTASK-2 quantum-yield sweeper:
+# waiter is the sanctioned timed-park surface (timeout timer-thread
+# precedent; DST clock hook).
 waiter = { path = "../../storage/ipc/waiter" }
 parallel = { path = "../../access/transam/parallel" }
 runtime = { path = "../runtime" }
@@ -109,6 +110,10 @@ types_rel = { path = "../../../_support/types/rel" }
 # WS-K heap batch-source readahead: execmain sees bufmgr ONLY through the
 # seam crate (prefetch_buffer, advisory).
 bufmgr_seams = { path = "../../storage/buffer/bufmgr_seams" }
+# GL-STMTTASK-1: the statement task's cancel-chase vector (SendThreadSignal
+# to the serving worker's leased identity) + the drive bracket's cancel
+# disposition install. Already an indirect dep through parallel.
+procsignal = { path = "../../storage/ipc/procsignal" }
 nodelockrows = { path = "../nodelockrows" }
 types_snapshot = { path = "../../../_support/types/snapshot" }
 pgstat = { path = "../../utils/activity/pgstat" }
