@@ -653,7 +653,22 @@ pub fn init_seams() {
     // Shutdown sequencing (mode-W class fix): the state machine fences the
     // gang at PM_STOP_BACKENDS and gates PM_WAIT_BACKENDS on quiescence.
     postmaster_seams::rtgang_retire::set(rtgang::retire_for_shutdown);
-    postmaster_seams::rtgang_live::set(rtgang::live_gang_threads);
+    postmaster_seams::rtgang_live::set(runtime_shm_busy_threads);
+}
+
+/// The PM_WAIT_BACKENDS quiescence term for registry-invisible runtime
+/// threads (rtgang_live seam): live gang threads PLUS pool-db threads
+/// inside a shared-memory-touching span (deferred identity bring-up /
+/// exit-callback drains). Pool threads carry no pmchild slot, no exit
+/// announce, and no gang LIVE charge, so without the second term the
+/// crash-restart arm reset shared memory UNDERNEATH an in-flight pool
+/// exit drain — the drain's re-find assert then fired while holding a
+/// lock-table partition LWLock, and the swallowed panic leaked the
+/// partition forever (no recovery, every later acquisition wedged).
+/// Same class as the mode-W shutdown fix that installed these seams:
+/// a thread population the postmaster state machine cannot see.
+fn runtime_shm_busy_threads() -> i32 {
+    rtgang::live_gang_threads() + rtpool::shm_busy()
 }
 
 /// rtpool_start seam impl: start the pool if `PGRUST_RUNTIME` enables it;
@@ -1278,15 +1293,23 @@ pub mod rtpool {
 
     // ---- M2 inc-2: PGPROC-LEASING POOL WORKERS (PGRUST_RUNTIME_POOLDB) ----
     //
-    // With the kill switch armed, every rtpool thread takes the rtgang
-    // bring-up at spawn (GUC child prelude, InitPostmasterChild, synthetic
-    // bgworker entry, InitProcess from the boot-reserved segment, BaseInit)
-    // and the rtgang exit discipline (ProcExitThread → deferred-callback
-    // drain so ProcKill releases the PGPROC; PoolRetireRaw → raw exit, no
-    // shmem touch) PLUS slot respawn — the pool must never shrink. The
-    // per-serve identity/fence gate is installed into parallel::standing
-    // (POOL_GATE); serve dispatch itself rides the runtime's bound
-    // descriptor. OFF (the default): byte-identical rtpool.
+    // With the kill switch armed, every rtpool thread takes the PROCESS-
+    // LOCAL rtgang prelude at spawn (GUC child prelude, InitPostmasterChild,
+    // synthetic bgworker entry, timeouts); the SHARED-MEMORY identity
+    // (InitProcess from the boot-reserved segment, BaseInit) is deferred to
+    // the first serve gate — an engaging leader proves live shared memory,
+    // so a respawn can never bring up identity inside a crash-restart
+    // window (the round-32 helperdeath wedge class). Exits keep the rtgang
+    // discipline (ProcExitThread → deferred-callback drain so ProcKill
+    // releases the PGPROC; PoolRetireRaw OR a stale crash-fence epoch →
+    // raw exit, no shmem touch) PLUS slot respawn — the pool must never
+    // shrink. Identity-touching spans charge SHM_BUSY, which the
+    // postmaster's PM_WAIT_BACKENDS gate reads through the rtgang_live
+    // seam sum (the crash reset waits out in-flight drains/bring-ups).
+    // The per-serve identity/fence gate is installed into
+    // parallel::standing (POOL_GATE); serve dispatch itself rides the
+    // runtime's bound descriptor. OFF (the default posture of this
+    // module's inc-2 layer): byte-identical rtpool.
 
     struct PoolBoot {
         guc_base: Option<std::sync::Arc<guc::layers::GucBaseSnapshot>>,
@@ -1322,9 +1345,13 @@ pub mod rtpool {
 
     #[derive(Clone, Copy, PartialEq)]
     enum PoolIdent {
-        /// No identity on this thread (pooldb off / bring-up not run).
+        /// No identity on this thread yet: bring-up is DEFERRED to the
+        /// first serve gate (pool_gate completes it — a serve entry proves
+        /// an engaging leader, which proves live shared memory).
         None,
-        /// Identity live; the captured crash-fence epoch.
+        /// Identity live; the crash-fence epoch captured BEFORE the
+        /// PGPROC claim (a bump landing anywhere after the capture retires
+        /// this identity at the next gate).
         Ready(usize),
         /// Bring-up failed: this thread never serves (fail-open to inc-1 —
         /// it keeps executing ordinary runtime work).
@@ -1336,10 +1363,72 @@ pub mod rtpool {
             const { std::cell::Cell::new(PoolIdent::None) };
     }
 
-    /// The per-serve gate installed into parallel::standing: verify this
-    /// thread's leased identity + crash fence. Unwinds PoolRetireRaw when
-    /// the fence moved (shared memory was reset under our identity — the
-    /// thread must die RAW and respawn cold).
+    // Pool-db threads inside a shared-memory-touching span the crash reset
+    // must wait out: deferred identity bring-up (InitProcess/BaseInit) and
+    // the exit-callback drains. Summed into the postmaster's
+    // PM_WAIT_BACKENDS quiescence gate through the rtgang_live seam (see
+    // super::runtime_shm_busy_threads). PARKED threads never charge it —
+    // they are procarray-invisible and touch nothing shared, and waiting on
+    // them would deadlock the reset (they only retire at a serve).
+    static SHM_BUSY: AtomicI32 = AtomicI32::new(0);
+
+    /// See SHM_BUSY; consumed by the rtgang_live seam sum.
+    pub(super) fn shm_busy() -> i32 {
+        // The gate-side store-buffering fence (pairs with shm_busy_guard's;
+        // the caller's POOL_FENCE bump precedes this read on the postmaster
+        // thread): guarantees this read sees every charge whose fence check
+        // could still read the PRE-bump epoch.
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+        SHM_BUSY.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// RAII charge on SHM_BUSY. Acquire BEFORE the span's fence check: the
+    /// postmaster bumps the fence (flush_for_crash) before its quiescence
+    /// gate ever reads the count, so either the span sees the bump (and
+    /// exits raw) or the gate sees the charge and the reset waits the span
+    /// out against live shared memory.
+    struct ShmBusyGuard {
+        fence_at_entry: usize,
+    }
+
+    fn shm_busy_guard() -> ShmBusyGuard {
+        SHM_BUSY.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // Store-buffering fence (loom model pooldb_crash_drain_never_races_
+        // reset): the charge above and the postmaster's POOL_FENCE bump are
+        // cross-thread store/load pairs — without SC fences each side could
+        // read the other's OLD value (charge invisible to the gate AND the
+        // bump invisible to this thread's fence check = drain vs reset
+        // race). The matching fence sits before the gate's busy read.
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+        ShmBusyGuard {
+            fence_at_entry: parallel::standing::pool_fence_epoch(),
+        }
+    }
+
+    impl Drop for ShmBusyGuard {
+        fn drop(&mut self) {
+            SHM_BUSY.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            // Wake the postmaster's quiescence gate ONLY when a crash cycle
+            // or shutdown plausibly waits on this span (this charge can be
+            // the LAST thing PM_WAIT_BACKENDS waits for; the state machine
+            // has no other reason to re-run then). Fence-stable drops (every
+            // healthy bring-up/drain) stay poke-free — the gang LiveGuard's
+            // unconditional poke is per thread DEATH, this guard is not.
+            if (parallel::standing::pool_fence_epoch() != self.fence_at_entry
+                || parallel::standing::shutting_down())
+                && init_small::globals::IsUnderPostmaster()
+            {
+                pmsignal::SendPostmasterSignal(
+                    pmsignal::PMSignalReason::PMSIGNAL_ADVANCE_STATE_MACHINE,
+                );
+            }
+        }
+    }
+
+    /// The per-serve gate installed into parallel::standing: verify — or
+    /// COMPLETE — this thread's leased identity, and check the crash fence.
+    /// Unwinds PoolRetireRaw when the fence moved (shared memory was reset
+    /// under our identity — the thread must die RAW and respawn cold).
     fn pool_gate() -> bool {
         match POOL_IDENT.with(std::cell::Cell::get) {
             PoolIdent::Ready(epoch) => {
@@ -1348,16 +1437,60 @@ pub mod rtpool {
                 }
                 true
             }
-            PoolIdent::None | PoolIdent::Poisoned => false,
+            PoolIdent::None => pool_identity_complete(),
+            PoolIdent::Poisoned => false,
         }
     }
 
-    /// Pool-db thread body: rtgang-shaped identity bring-up, then the
-    /// ordinary worker loop under the rtgang exit discipline + respawn.
-    /// Bring-up failures before InitProcess poison the thread and fall
+    /// Deferred identity bring-up (the crash-window fix): runs at the FIRST
+    /// serve gate on this thread — a serve entry proves an engaging leader,
+    /// which proves reinit completed (the gang's try_engage respawn
+    /// discipline: backends only run against live shared memory). Spawn-time
+    /// bring-up ran InitProcess inside crash-restart windows on the respawn
+    /// path (against pre/mid-reset shared memory, an unthrottled
+    /// panic/respawn storm) and captured the fence epoch AFTER the claim,
+    /// so a bump landing mid-bring-up minted a dangling identity the fence
+    /// could never retire. Capturing BEFORE InitProcess closes that race.
+    fn pool_identity_complete() -> bool {
+        // Busy charge spans the whole claim: a ticketless completing thread
+        // is not awaited by any leader's close_and_await, so the leader's
+        // exit (and a crash reset behind it) can race the claim without it.
+        let _busy = shm_busy_guard();
+        let epoch0 = parallel::standing::pool_fence_epoch();
+        if let Err(e) = lmgr_proc::InitProcess(types_core::init::BackendType::BgWorker) {
+            let _ = elog::elog(
+                types_error::WARNING,
+                format!("pool executor: InitProcess failed: {}", e.message()),
+            );
+            POOL_IDENT.with(|c| c.set(PoolIdent::Poisoned));
+            return false;
+        }
+        // Identity exists from here: the exit discipline (fence-checked
+        // drain in pooldb_thread_main) owns its release on every path.
+        POOL_IDENT.with(|c| c.set(PoolIdent::Ready(epoch0)));
+        if let Err(e) = postinit::BaseInit() {
+            let _ = elog::elog(
+                types_error::WARNING,
+                format!("pool executor: BaseInit failed: {}", e.message()),
+            );
+            // PGPROC is claimed: release identity via the exit path (the
+            // glue drains against live shared memory and respawns cold).
+            ipc::proc_exit(1, init_small::globals::MyProcPid());
+        }
+        true
+    }
+
+    /// Pool-db thread body: the process-local prelude (GUC bring-up,
+    /// InitPostmasterChild, signal dispositions, synthetic bgworker entry,
+    /// timeout machinery), then the ordinary worker loop under the rtgang
+    /// exit discipline + respawn. The SHARED-MEMORY identity (InitProcess +
+    /// BaseInit) is NOT taken here — it is deferred to the first serve gate
+    /// (pool_identity_complete), where an engaging leader proves live
+    /// shared memory; spawn-time bring-up ran during crash-restart windows
+    /// on the respawn path. Prelude failures poison the thread and fall
     /// open to the plain executor loop (inc-1 behavior; the gate refuses
-    /// serves); failures after InitProcess release identity through the
-    /// exit path and respawn.
+    /// serves); identity-holding exits release through the fence-checked
+    /// drain below and respawn.
     fn pooldb_thread_main(ordinal: usize, child_pid: pid_t, body: Box<dyn FnOnce() + Send>) {
         // Thread-scoped local latch slot (returned on thread exit).
         let _local_latch_release = miscinit::LocalLatchReleaseGuard::new();
@@ -1416,30 +1549,9 @@ pub mod rtpool {
         // timeouts, which debug_assert InitializeTimeouts ran here).
         timeout_seams::initialize_timeouts::call();
 
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            if let Err(e) = lmgr_proc::InitProcess(types_core::init::BackendType::BgWorker) {
-                let _ = elog::elog(
-                    types_error::WARNING,
-                    format!("pool executor {ordinal}: InitProcess failed: {}", e.message()),
-                );
-                POOL_IDENT.with(|c| c.set(PoolIdent::Poisoned));
-                body();
-                return;
-            }
-            if let Err(e) = postinit::BaseInit() {
-                let _ = elog::elog(
-                    types_error::WARNING,
-                    format!("pool executor {ordinal}: BaseInit failed: {}", e.message()),
-                );
-                // PGPROC is claimed: release identity via the exit path.
-                ipc::proc_exit(1, init_small::globals::MyProcPid());
-            }
-            // Identity live; capture the crash fence it was minted under.
-            POOL_IDENT.with(|c| {
-                c.set(PoolIdent::Ready(parallel::standing::pool_fence_epoch()))
-            });
-            body();
-        }));
+        // Shared-memory identity is deferred to the first serve gate
+        // (pool_identity_complete) — see the fn doc.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
         match outcome {
             // Clean loop exit (request_stop — tests/shutdown only): the
             // thread ends without respawn; identity dies with the process.
@@ -1453,43 +1565,70 @@ pub mod rtpool {
                 if payload.is::<parallel::standing::PoolRetireRaw>() {
                     // Crash fence: NO shared-memory interaction — the
                     // PGPROC was reset wholesale with shared memory.
-                } else if let Some(p) = payload.downcast_ref::<ipc::ProcExitThread>() {
-                    // FATAL / retired-db / connect-failure exit: the
-                    // deferred drain (ProcKill, RemoveProcFromArray,
-                    // sinval cleanup) releases identity against LIVE
-                    // shared memory.
-                    let code = p.code;
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        ipc::run_deferred_exit_callbacks(code)
-                    }));
                 } else {
-                    // Generic panic with identity possibly held: best-
-                    // effort drain (the rtgang leak argument — a leaked
-                    // procarray/sinval entry blocks DROP DATABASE forever
-                    // and a leaked PGPROC drains the freelist).
-                    let _ = elog::elog(
-                        types_error::WARNING,
-                        format!("pool executor {ordinal} died on a panic; releasing identity"),
+                    // Busy charge BEFORE the fence check (see ShmBusyGuard):
+                    // either this drain sees a fence bump and exits raw, or
+                    // the postmaster's quiescence gate sees the charge and
+                    // the crash reset waits the drain out.
+                    let _busy = shm_busy_guard();
+                    let stale = matches!(
+                        POOL_IDENT.with(std::cell::Cell::get),
+                        PoolIdent::Ready(epoch)
+                            if epoch != parallel::standing::pool_fence_epoch()
                     );
-                    // A PARKED pool thread is procarray-invisible (the
-                    // serve bracket), but the exit callbacks expect
-                    // membership (RemoveProcFromArray) — re-add first, the
-                    // gang's Wake::Retire discipline (best-effort; a
-                    // mid-serve panic dies VISIBLE and the double-add's
-                    // own failure is swallowed so the drain still runs).
-                    parallel::standing::pool_exit_rejoin_procarray();
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        ipc::proc_exit(2, init_small::globals::MyProcPid())
-                    }));
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        ipc::run_deferred_exit_callbacks(2)
-                    }));
+                    if stale {
+                        // The crash fence moved since this identity's
+                        // bring-up: shared memory was (or is being) reset
+                        // wholesale and the identity died with it. Draining
+                        // now would run ProcKill/LockReleaseAll against
+                        // REINITIALIZED structures — the drain's re-find
+                        // assert fires while holding a lock-table partition
+                        // LWLock, the guarded-callback drain swallows the
+                        // panic, and the leaked partition wedges recovery
+                        // forever. Exit RAW, exactly the PoolRetireRaw
+                        // discipline; the reset already reclaimed the PGPROC.
+                        let _ = elog::elog(
+                            types_error::WARNING,
+                            format!(
+                                "pool executor {ordinal} died across a crash fence; exiting raw"
+                            ),
+                        );
+                    } else if let Some(p) = payload.downcast_ref::<ipc::ProcExitThread>() {
+                        // FATAL / retired-db / connect-failure exit: the
+                        // deferred drain (ProcKill, RemoveProcFromArray,
+                        // sinval cleanup) releases identity against LIVE
+                        // shared memory.
+                        let code = p.code;
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            ipc::run_deferred_exit_callbacks(code)
+                        }));
+                    } else {
+                        // Generic panic with identity possibly held: best-
+                        // effort drain (the rtgang leak argument — a leaked
+                        // procarray/sinval entry blocks DROP DATABASE forever
+                        // and a leaked PGPROC drains the freelist).
+                        let _ = elog::elog(
+                            types_error::WARNING,
+                            format!("pool executor {ordinal} died on a panic; releasing identity"),
+                        );
+                        // A PARKED pool thread is procarray-invisible (the
+                        // serve bracket), but the exit callbacks expect
+                        // membership (RemoveProcFromArray) — re-add first, the
+                        // gang's Wake::Retire discipline (best-effort; a
+                        // mid-serve panic dies VISIBLE and the double-add's
+                        // own failure is swallowed so the drain still runs).
+                        parallel::standing::pool_exit_rejoin_procarray();
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            ipc::proc_exit(2, init_small::globals::MyProcPid())
+                        }));
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            ipc::run_deferred_exit_callbacks(2)
+                        }));
+                    }
                 }
                 // The pool must never shrink: respawn the slot cold (fresh
-                // pid, fresh identity at its bring-up — post-crash that
-                // happens against reinitialized shared memory, because the
-                // fence only trips at a serve, which requires an engaging
-                // leader, which requires live shared memory).
+                // pid; identity bring-up happens at its first serve gate,
+                // under an engaging leader — never inside a crash window).
                 respawn_pool_slot(ordinal);
             }
         }

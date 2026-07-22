@@ -1215,6 +1215,84 @@ fn wpool_repool_fence_no_stale_entry() {
 }
 
 // ===========================================================================
+// POOL-DB CRASH-DRAIN FENCE — GL-POOLDB-HELPERDEATH-1: a dying pool-db
+// thread's exit-callback drain must never run against RESET shared memory.
+// Production shape (launch_backend::rtpool): the postmaster's crash arm
+// bumps POOL_FENCE (flush_for_crash) BEFORE its PM_WAIT_BACKENDS quiescence
+// gate reads the pool SHM_BUSY term (rtgang_live seam sum); the reset runs
+// only after the gate observes zero. A dying worker charges SHM_BUSY FIRST,
+// then checks its identity epoch against the fence: stale ⇒ raw exit (no
+// drain, no shared-memory touch); fresh ⇒ the drain is gate-protected. The
+// pre-fix hole (round-32 helperdeath wedge): no busy term in the gate AND
+// no fence check in the drain — the drain ran after the reset, its re-find
+// assert fired holding a lock-table partition LWLock, and the swallowed
+// panic leaked the partition forever (recovery wedged).
+// Mirror-dialect: launch_backend is not loom-buildable (PGPROC/latch
+// globals) — the model drives loom atomics directly. The gate's poll loop
+// is modeled as ONE sample (loom explores every placement); the reset fires
+// only in the branch where the sample sees zero, which is exactly the
+// production pass condition.
+// ===========================================================================
+
+/// Invariant: in EVERY interleaving, a drain that saw a FRESH fence
+/// completes before the reset (the gate held it off); a drain that would
+/// race the reset instead sees the bumped fence and exits raw.
+///
+/// RED (verified by transient weakening, not shipped):
+///   * gate ignores the busy term (the pre-fix shape) ⇒ the schedule
+///     [worker charges + sees fresh fence] → [bump, reset] → [drain]
+///     fires the assert;
+///   * worker checks the fence BEFORE charging busy ⇒ the schedule
+///     [fresh check] → [bump, gate sees 0, reset] → [charge, drain]
+///     fires the assert.
+#[test]
+fn pooldb_crash_drain_never_races_reset() {
+    loom::model(|| {
+        let fence = Arc::new(AtomicUsize::new(0));
+        let busy = Arc::new(AtomicUsize::new(0));
+        let reset_done = Arc::new(AtomicUsize::new(0));
+
+        // Dying pool worker (identity minted under epoch 0): busy charge
+        // FIRST, then the fence check decides drain vs raw.
+        let worker = {
+            let (fence, busy, reset_done) =
+                (Arc::clone(&fence), Arc::clone(&busy), Arc::clone(&reset_done));
+            thread::spawn(move || {
+                busy.fetch_add(1, Ordering::SeqCst);
+                // Store-buffering fence (production: shm_busy_guard) — the
+                // charge/bump pair is a cross-thread store/load exchange;
+                // without both SC fences each side can read the other's OLD
+                // value and the drain races the reset.
+                loom::sync::atomic::fence(Ordering::SeqCst);
+                if fence.load(Ordering::SeqCst) == 0 {
+                    // Fresh fence: the drain runs — it must be against LIVE
+                    // shared memory (the reset gate saw our charge).
+                    assert_eq!(
+                        reset_done.load(Ordering::SeqCst),
+                        0,
+                        "exit drain raced the crash reset (reinitialized lock tables)"
+                    );
+                }
+                // Stale fence: raw exit — nothing shared is touched.
+                busy.fetch_sub(1, Ordering::SeqCst);
+            })
+        };
+
+        // Postmaster crash arm: bump the fence FIRST (flush_for_crash runs
+        // in HandleFatalError, strictly before any PM_WAIT_BACKENDS gate
+        // evaluation), then ONE gate sample; reset only on a zero read.
+        fence.fetch_add(1, Ordering::SeqCst);
+        // The gate-side store-buffering fence (production: shm_busy()).
+        loom::sync::atomic::fence(Ordering::SeqCst);
+        if busy.load(Ordering::SeqCst) == 0 {
+            reset_done.store(1, Ordering::SeqCst);
+        }
+
+        worker.join().unwrap();
+    });
+}
+
+// ===========================================================================
 // PERMIT-S4 — the step-4 PROTOCOL-conversion models (notes/dst-permit-s4.md).
 // Three converted sites, three models. Dialect per model, disclosed:
 //
