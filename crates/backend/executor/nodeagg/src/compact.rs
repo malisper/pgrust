@@ -1213,14 +1213,18 @@ pub fn agg_hash_compact_over_limits(node: &AggStateData<'_>) -> bool {
     (ch.table.len() as u64) >= ph.hash_ngroups_limit / 2 || mem >= ph.hash_mem_limit / 2
 }
 
-/// Coded-group single resolve (q29coded lane): intern `bytes` — the Dict
-/// expr-key memo's OUTPUT VALUE payload — and probe the armed mk1
-/// single-Intern table by the id (one group per distinct output value; the
-/// packed one-word image is the zero-extended id, exactly the mk pack
-/// convention), seeding a NEW group with the same `trans_init` datumCopy
-/// loop as every other arrival. The caller checked
-/// [`agg_hash_compact_over_limits`] this batch — this path never migrates,
-/// so the returned pointer is stable until the caller-driven teardown.
+/// Coded-group single resolve (q29coded lane + the GL-DICTDRAIN-1 sink
+/// drain): intern `bytes` — the Dict expr-key memo's OUTPUT VALUE payload —
+/// and probe the armed mk1 single-Intern table by the id (one group per
+/// distinct output value; the packed one-word image is the zero-extended
+/// id, exactly the mk pack convention), seeding a NEW group with the same
+/// `trans_init` datumCopy loop as every other arrival. This path never
+/// migrates, so the returned pointer is stable until the caller-driven
+/// invalidation: classic builds check [`agg_hash_compact_over_limits`] per
+/// batch and tear down; SINK builds ride the cap/pressure flush law — the
+/// drive drops the code→pergroup cache on every flush, and flushed rows
+/// export as canonical bytes (the intern reverse map materializes them at
+/// flush entry — `compact_extend_canon_hashes`' defensive leg).
 pub fn agg_hash_compact_probe_coded<'mcx>(
     node: &mut AggStateData<'mcx>,
     bytes: &[u8],
@@ -1237,7 +1241,7 @@ pub fn agg_hash_compact_probe_coded<'mcx>(
             && s.comps[0].kind == MkCompKind::Intern),
         "coded probe requires the mk1 single-Intern shape"
     );
-    debug_assert!(!ch.sink_mode, "coded-group builds are never sink builds");
+    debug_assert!(!ch.text_direct, "DIRECT tables probe agg_hash_compact_probe_text_direct");
     let avgpack_mask = ch.avgpack_mask;
     let k = id as u64 as i64;
     let pr = ch.table.probe_int(k, ch.table.hash_key_int(k as u64));
