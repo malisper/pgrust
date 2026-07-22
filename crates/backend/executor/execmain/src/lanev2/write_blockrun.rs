@@ -65,12 +65,16 @@ use ::tableam::block_run::BlockRunAllocator;
 use ::types_core::{CommandId, Oid};
 use ::types_error::{PgError, PgResult, ERROR};
 
-/// W2a inc-2 knob (default OFF): `PGRUST_W2A_BLOCKRUN=1|on` arms worker-
-/// direct block-run writes for admissible write dests.
+/// W2a inc-2 knob — **DEFAULT ON** since the GL-W2A-2 flip (t43; the
+/// ladder's bar cleared, CONFIRM take-2 PASS). Kill spellings exactly
+/// `0|off` (t35 flipped-kill idiom). The flip is guarded by the
+/// STRUCTURAL min-dop-4 floor in `try_arm` (the letter's flip shape:
+/// below dop 4 the run-claim contention eats the win — the floor is
+/// structural, not a tuning knob).
 pub(super) fn w2a_blockrun_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        matches!(std::env::var("PGRUST_W2A_BLOCKRUN").as_deref(), Ok("1") | Ok("on"))
+        !matches!(std::env::var("PGRUST_W2A_BLOCKRUN").as_deref(), Ok("0") | Ok("off"))
     })
 }
 
@@ -104,6 +108,12 @@ pub(super) struct BlockRunShared {
 /// fall back to the increment-1 leader drain (fail-closed).
 pub(super) fn try_arm(dest: &::tcop_dest::DestReceiver<'_>) -> Option<Arc<BlockRunShared>> {
     if !w2a_blockrun_enabled() {
+        return None;
+    }
+    // GL-W2A-2 flip floor (STRUCTURAL, rides the default-ON posture):
+    // below dop 4 the block-run claim path loses to the increment-1
+    // leader drain (the ladder's low-dop cells) — fall back closed.
+    if ::guc_tables::runtime_pool::runtime_dop() < 4 {
         return None;
     }
     // Both rewrite receivers carry the same field set; destructure per arm.
@@ -297,12 +307,11 @@ impl WorkerWriteState {
 mod tests {
     use super::*;
 
-    /// Default-OFF pin (the W2A family convention: measurement knobs arm
-    /// with =1|on and default to the incumbent).
+    /// Flipped-kill pin (GL-W2A-2 flip, t43): default ON; `0|off` kills.
     #[test]
-    fn blockrun_default_off() {
+    fn blockrun_default_on_flipped_kill() {
         if std::env::var("PGRUST_W2A_BLOCKRUN").is_err() {
-            assert!(!w2a_blockrun_enabled(), "blockrun must default OFF");
+            assert!(w2a_blockrun_enabled(), "blockrun defaults ON since the GL-W2A-2 flip");
         }
     }
 }
