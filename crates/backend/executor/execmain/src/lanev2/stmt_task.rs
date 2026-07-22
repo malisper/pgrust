@@ -310,7 +310,10 @@ pub(crate) enum StmtTaskVerdict {
     /// without waiting — the CALLER runs its own serial loop (literally
     /// the incumbent code) with this seat held for governed accounting.
     /// Cancel/timeout identity on this path IS the incumbent path's.
-    Inline(runtime::InlineSeat),
+    /// `None` seat = the session's serial lease already accounts this run
+    /// (GL-SLEASE-1 armed posture — borrowing a second seat would
+    /// double-count).
+    Inline(Option<runtime::InlineSeat>),
     /// Engaged on the pool; every row was streamed and es_processed set —
     /// the caller skips the serial loop.
     Handled,
@@ -1461,13 +1464,24 @@ pub(crate) fn try_stmt_task<'mcx, 'd>(
     // enqueue path below takes over; the session thread then parks and a
     // worker serves the statement when capacity frees.
     if stmt_inline_enabled() {
+        // A serial-lease-armed session ALREADY holds a seat for this run
+        // (GL-SLEASE-1): inline rides the lease — borrowing a second seat
+        // would double-count exactly the sessions the lease admitted.
+        if crate::execmain::serial_lease_currently_held() {
+            STMT_ENGAGED.fetch_add(1, Ordering::SeqCst);
+            STMT_INLINE.fetch_add(1, Ordering::SeqCst);
+            super::stats::tick_stmt_task(true);
+            lane_trace("stmt-task: engaged inline dop=1 unparks=0 seat=lease");
+            return Ok(StmtTaskVerdict::Inline(None));
+        }
         if let Some(seat) = rt.try_borrow_seat() {
             STMT_ENGAGED.fetch_add(1, Ordering::SeqCst);
             STMT_INLINE.fetch_add(1, Ordering::SeqCst);
+            super::stats::tick_stmt_task(true);
             // Engagement witness (e2e grep surface) + the wakeup program's
             // per-statement unpark metric: inline performs none.
             lane_trace("stmt-task: engaged inline dop=1 unparks=0");
-            return Ok(StmtTaskVerdict::Inline(seat));
+            return Ok(StmtTaskVerdict::Inline(seat.into()));
         }
     }
 
@@ -1527,6 +1541,7 @@ pub(crate) fn try_stmt_task<'mcx, 'd>(
     match outcome {
         StmtTaskOutcome::Completed(n) => {
             STMT_COMPLETED.fetch_add(1, Ordering::SeqCst);
+            super::stats::tick_stmt_task(false);
             if lane_trace_enabled() {
                 lane_trace(&format!(
                     "stmt-task: unparks={}",
