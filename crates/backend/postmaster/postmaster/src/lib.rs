@@ -48,6 +48,17 @@ pub const FastShutdown: i32 = 2;
 pub const ImmediateShutdown: i32 = 3;
 
 pub const SIGKILL_CHILDREN_AFTER_SECS: i64 = 5;
+/// GL-DISCONNECT-WEDGE-1: grace after the SIGKILL broadcast before the
+/// postmaster forces its own exit. C's SIGKILL is unconditional, so C's
+/// PM_WAIT_BACKENDS always drains; the thread rendering (SendThreadKill)
+/// lands at a drain point, and a thread wedged off its drain points (deep
+/// non-latch wait, latch-deaf sleep) never takes it — without a floor an
+/// IMMEDIATE shutdown hangs forever, a full outage whose only remediation
+/// is kill -9 from outside. Process exit is the one unconditional kill a
+/// single-process cluster has; immediate shutdown is already
+/// crash-equivalent, so the next start runs crash recovery exactly as if
+/// the OS had killed us.
+pub const FORCED_EXIT_AFTER_LETHAL_SECS: i64 = 8;
 pub const MAXLISTEN: usize = 64;
 
 // miscadmin.h lock-file line numbers + pg_ctl status strings.
@@ -141,6 +152,10 @@ pub struct PostmasterState {
     pub conns_allowed: bool,
     pub fatal_error: bool,
     pub abort_start_time: i64,
+    /// Time of the SIGKILL/SIGABRT broadcast to recalcitrant children; the
+    /// forced-exit floor (serverloop) fires FORCED_EXIT_AFTER_LETHAL_SECS
+    /// after it if children still have not drained. 0 = not sent.
+    pub lethal_time: i64,
     pub reached_consistency: bool,
     pub startup_status: StartupStatusEnum,
     pub start_autovac_launcher: bool,
@@ -171,6 +186,7 @@ impl PostmasterState {
             conns_allowed: false,
             fatal_error: false,
             abort_start_time: 0,
+            lethal_time: 0,
             reached_consistency: false,
             startup_status: StartupStatusEnum::NotRunning,
             start_autovac_launcher: false,
@@ -372,6 +388,7 @@ pub fn process_pm_pmsignal() -> PgResult<()> {
         with_pm(|pm| {
             pm.fatal_error = false;
             pm.abort_start_time = 0;
+            pm.lethal_time = 0;
             pm.reached_consistency = false;
         });
 
@@ -604,6 +621,7 @@ pub fn process_pm_child_exit() -> PgResult<()> {
                 pm.startup_status = StartupStatusEnum::NotRunning;
                 pm.fatal_error = false;
                 pm.abort_start_time = 0;
+                pm.lethal_time = 0;
             });
             statemachine::UpdatePMState(PMState::PM_RUN);
             with_pm(|pm| pm.conns_allowed = true);
