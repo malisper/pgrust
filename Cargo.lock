@@ -5563,6 +5563,7 @@ dependencies = [
  "types_tuple",
  "varlena",
  "varsup",
+ "waiter",
  "waitevent_seams",
  "waiteventset",
  "xact",
