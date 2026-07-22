@@ -439,12 +439,32 @@ fn stmt_yield_tick() {
     sem.release();
     STMT_YIELDS.fetch_add(1, Ordering::SeqCst);
     super::stats::tick_stmt_task_yield();
-    // Ordinary-lane reacquire: priority waiters (interactive drives) and
-    // the demand they represent overtake this statement for the donated
-    // span (tail placement — the over-runner re-enters behind the class
-    // it yielded to).
-    sem.acquire();
+    // FREED-PERMIT PRIORITY ROUTING (chartered): the ordinary lane already
+    // defers to PRIORITY waiters, but unserved interactive DEMAND (a
+    // needle RG published, no worker has picked it yet) is met by a pool
+    // worker's PICK step, whose acquire is ordinary too — a plain
+    // reacquire here races it ~evenly and, with many suspended statements,
+    // usually wins. Defer BOUNDEDLY while live demand persists (cap 4 —
+    // never starvation: after the cap the statement takes its permit
+    // regardless; the SQLOS-LDF shape at the small end).
+    let mut defers = 0u32;
+    loop {
+        sem.acquire();
+        if defers >= 4 || (sem.priority_waiting() == 0 && !g_demand(&slot, rt)) {
+            break;
+        }
+        sem.release();
+        defers += 1;
+        std::thread::yield_now();
+    }
     slot.since_ms.store(yield_now_ms(), Ordering::Release);
+}
+
+/// Live-demand read for the reacquire defer (one Relaxed load; the slot
+/// arg keeps the signature honest if per-slot demand ever lands).
+#[inline]
+fn g_demand(_slot: &&'static YieldSlot, rt: &'static Arc<runtime::Runtime>) -> bool {
+    rt.qos_demand_live()
 }
 
 // ---------------------------------------------------------------------------
