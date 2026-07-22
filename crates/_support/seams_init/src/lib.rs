@@ -287,6 +287,7 @@ pub fn init_all_with_transport(transport: Transport) {
     pgtz::init_seams();
     adt_bool::init_seams();
     adt_float::init_seams();
+    arrayfuncs::init_seams();
     pg_locale::init_seams();
     varlena::init_seams();
     adt_xml::init_seams();
