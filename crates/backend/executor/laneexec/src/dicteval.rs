@@ -32,9 +32,18 @@ const INTERNAL_LANGUAGE_ID: Oid = 12;
 const PROVOLATILE_IMMUTABLE: i8 = b'i' as i8;
 const TYPTYPE_PSEUDO: i8 = b'p' as i8;
 
-const F_TEXTLEN: Oid = 1257;
-const F_CHAR_LENGTH: Oid = 1381;
-const F_TEXTOCTETLEN: Oid = 1258;
+// The proof-carrying length kernel's pg_proc vocabulary: the prosrc-textlen
+// char-count family (every length/char_length spelling, incl. the varchar
+// aliases the parser resolves through relabel — same set lanefold admits)
+// and prosrc-textoctetlen. NEVER hand-retype these: pinned by name against
+// fmgr_core's generated pg_proc mirror in `kernel_oids_pin_catalog` (a
+// transposed octet oid once compiled this kernel for a 2-arg concat builtin
+// — an eager int4 fill under a by-ref rettype, i.e. wrong results/crash,
+// while real octet_length calls fell to the fmgr chain).
+const F_TEXTLEN: [Oid; 4] = [1257, 1317, 1369, 1381];
+const F_TEXTOCTETLEN: Oid = 1374;
+// pg_type oid of int4 — the only rettype the length kernel may produce.
+const INT4OID: Oid = 23;
 
 /// One call of the admitted composition, walker-extracted (node-free so the
 /// surface owns the Node context and this module owns catalog authority).
@@ -364,16 +373,19 @@ fn compile_kernel(
     validate_calls(&spec.calls)?;
     let rettype = spec.calls.last().unwrap().rettype;
     // Proof-carrying fast kernel: a lone length()/octet_length() call.
+    // The int4 rettype gate is defense in depth on top of the oid set: the
+    // kernel writes int4 datums, so any future oid-set mistake must land on
+    // the fmgr chain (a perf miss), never pair the kernel with a by-ref
+    // rettype whose consumers would deref the count as a pointer.
     if spec.calls.len() == 1 {
         let c = &spec.calls[0];
-        match c.fn_oid {
-            F_TEXTLEN | F_CHAR_LENGTH => {
-                return Ok((DictKernel::TextLen { octet: false }, true, false, rettype))
+        if c.rettype == INT4OID {
+            if F_TEXTLEN.contains(&c.fn_oid) {
+                return Ok((DictKernel::TextLen { octet: false }, true, false, rettype));
             }
-            F_TEXTOCTETLEN => {
-                return Ok((DictKernel::TextLen { octet: true }, true, false, rettype))
+            if c.fn_oid == F_TEXTOCTETLEN {
+                return Ok((DictKernel::TextLen { octet: true }, true, false, rettype));
             }
-            _ => {}
         }
     }
     Ok((DictKernel::Fmgr(build_fmgr_calls(&spec.calls)?), false, true, rettype))
@@ -717,6 +729,34 @@ mod tests {
     use super::*;
     use std::cell::Cell;
     use std::rc::Rc;
+
+    /// The kernel's oid constants derived by NAME from the generated pg_proc
+    /// mirror — both directions: every constant resolves to the right prosrc,
+    /// and every catalog spelling of the two prosrcs is in the kernel's set
+    /// (a new alias must not silently miss the kernel).
+    #[test]
+    fn kernel_oids_pin_catalog() {
+        let by_prosrc = |name: &str| -> Vec<Oid> {
+            fmgr_core::CANONICAL
+                .iter()
+                .filter(|(_, n, nargs, _, _)| *n == name && *nargs == 1)
+                .map(|&(oid, ..)| oid)
+                .collect()
+        };
+        let mut catalog_textlen = by_prosrc("textlen");
+        catalog_textlen.sort_unstable();
+        let mut ours = F_TEXTLEN.to_vec();
+        ours.sort_unstable();
+        assert_eq!(
+            ours, catalog_textlen,
+            "char-count kernel oid set != the catalog's textlen family"
+        );
+        assert_eq!(
+            by_prosrc("textoctetlen"),
+            vec![F_TEXTOCTETLEN],
+            "octet kernel oid != the catalog's textoctetlen"
+        );
+    }
 
     fn text_image(s: &[u8]) -> Vec<u8> {
         let mut v = Vec::with_capacity(s.len() + 4);
