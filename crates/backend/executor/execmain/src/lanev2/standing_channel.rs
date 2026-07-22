@@ -8,17 +8,19 @@
 //! then poll completion + interrupts + participation counters. Every exit
 //! path closes the board entry and waits for claimed participants to
 //! detach (the arena-lifetime join — detach is Drop-guaranteed on the
-//! workers). `Fallback` returns with the RG UNTOUCHED so the caller's
-//! launched-gang path takes over (fail-closed layering: standing →
-//! launched → serial).
+//! workers). `Fallback` returns with the RG UNTOUCHED and the caller goes
+//! straight to its serial arm (M2 inc-3 rung 4: the launched-bgworker
+//! fallback is DELETED — the engagement ladder is pool → gang → serial,
+//! the `PGRUST_RUNTIME_NOLAUNCH` posture made permanent per Michael's
+//! rung-4 rulings, notes/m2-inc3-rung4.md §4a).
 //!
 //! Kill-switch layering: PGRUST_RUNTIME_POOLBIND=0 kills the standing
 //! module wholesale (`parallel::standing::try_engage` refuses — scan arm
 //! included); PGRUST_RUNTIME_POOLBIND_SINKS=0 retires ONLY the sink arms'
 //! standing engagement (agg / agg_sorted / sort / hashjoin / distinct /
-//! plaindistinct — `StandingArm::sinks_gate`), restoring their
-//! launched-gang ceremony exactly. The scan arm ships ungated here (its
-//! inc-3 semantics unchanged).
+//! plaindistinct — `StandingArm::sinks_gate`). Post rung-4 both restore
+//! the SERIAL arm, never a bgworker launch (the kill's restore target
+//! shrank exactly like the D1 precedent: correct, slower, never an error).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -31,7 +33,8 @@ pub(super) enum StandingWait {
     /// The RG reached an outcome under standing participation.
     Done(runtime::RgOutcome),
     /// Standing path unavailable or refused with the RG UNTOUCHED —
-    /// take the launched path.
+    /// the caller drains the RG and falls back to its serial arm
+    /// (rung 4: there is no launched path to take).
     Fallback,
 }
 
@@ -46,9 +49,10 @@ pub(super) struct StandingArm {
     /// incomplete and no recorded error (a worker died outside every catch
     /// layer).
     pub died: &'static str,
-    /// inc-1 sink gate: PGRUST_RUNTIME_POOLBIND_SINKS=0 restores this
-    /// arm's launched-gang engagement (false on the scan arm — its
-    /// standing channel predates this increment and keeps its own gates).
+    /// inc-1 sink gate: PGRUST_RUNTIME_POOLBIND_SINKS=0 retires this
+    /// arm's board engagement — post rung-4 that means the serial arm
+    /// (false on the scan arm — its standing channel predates this
+    /// increment and keeps its own gates).
     pub sinks_gate: bool,
 }
 
@@ -65,8 +69,7 @@ pub(super) struct StandingLeader<'a> {
     /// The payload's board-entry slot: held across the wait so the arm's
     /// PRIVATE_SHUTDOWN hook can complete the standing join (abort + drain
     /// + await detach) on leader unwind paths that never reach this loop's
-    /// own cleanup — the launched path gets the same guarantee from
-    /// DestroyParallelContext's worker-exit wait.
+    /// own cleanup.
     pub slot: &'a Mutex<Option<Arc<parallel::standing::StandingEngagement>>>,
     /// Participants that bound and entered the drive.
     pub started: &'a AtomicUsize,
@@ -80,7 +83,7 @@ pub(super) struct StandingLeader<'a> {
     /// workers parked in their drives.
     pub drain: &'a dyn Fn(&runtime::RgHandle) -> bool,
     /// Arm-specific engagement census appended to the "engaged standing"
-    /// trace line (the launched line's shape witnesses — "nbatch=8
+    /// trace line (shape witnesses — "nbatch=8
     /// (spill)", "full", "bound=10" — so the tranche legs' grep surfaces
     /// hold on both channels). Empty = no suffix (the scan arm's line
     /// stays byte-identical to inc-3).
@@ -89,7 +92,7 @@ pub(super) struct StandingLeader<'a> {
 
 /// First-claim deadline: parked standing workers wake in microseconds, so
 /// an unclaimed engagement after this long means the gang is dead/busy —
-/// fall back to the launched path (correctness never depends on this).
+/// fall back to the serial arm (correctness never depends on this).
 fn standing_claim_deadline() -> std::time::Duration {
     // DST P2 (contract §1.3, census erratum (a)): this deadline is
     // BEHAVIORAL (changes execution path) — its clock is pg_clock, below.
@@ -111,48 +114,27 @@ fn standing_sinks_enabled() -> bool {
     })
 }
 
-/// M2 inc-3 rung 4 posture (m2-inc3-scope.md §5 rung 4):
-/// `PGRUST_RUNTIME_NOLAUNCH=1` retires the launched-bgworker FALLBACK on
-/// the pool-channel arms — when the board channels decline
-/// (`StandingWait::Fallback`), the arm goes straight to its serial arm
-/// instead of `LaunchParallelWorkers`. This is the post-deletion
-/// engagement ladder (pool → gang → serial) run as a REVERSIBLE posture:
-/// the floors read the serialization rate the physical deletion would
-/// buy into (`engage-<arm>-nolaunch-serial`), and the deletion itself
-/// stays HELD until the pool is the default elastic absorber (the
-/// GL-POOLDB-1 flip — its NO-FLIP-YET verdict is exactly the launched
-/// path's remaining job). DEFAULT OFF: unset/0 keeps today's ladder
-/// byte-exactly. Launched-ONLY vehicles (funnel passthrough, nlindex)
-/// are NOT governed — they have no board channel to fall back from and
-/// migrate in their own increments.
-fn nolaunch_enabled() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    crate::once_val(&ON, || {
-        std::env::var("PGRUST_RUNTIME_NOLAUNCH").is_ok_and(|v| v.trim() == "1")
-    })
-}
-
-/// The pool-channel arms' launched-fallback gate: exactly
-/// `parallel::LaunchParallelWorkers` until the rung-4 posture arms, then
-/// a constant zero-launch — the arms' existing `launched <= 0` branch
-/// (drain the pinned RG, `EngageOutcome::Fallback`) is the serial
-/// fallback, byte-shared with the zero-workers-available case it has
-/// always handled. Board state on entry is identical either way: every
-/// `StandingWait::Fallback` exit closed its entry (`close_and_await`),
-/// so no straggler serve outlives this decision.
-pub(super) fn launch_fallback_workers(
-    arm: &StandingArm,
-    pcxt: parallel::ParallelContextId,
-) -> PgResult<i32> {
-    if nolaunch_enabled() {
-        lane_trace(&format!(
-            "{}: launched fallback retired (nolaunch) — serial fallback",
-            arm.label
-        ));
-        super::stats::tick_engaged(arm.label, super::stats::EngageChannel::NolaunchSerial);
-        return Ok(0);
-    }
-    parallel::LaunchParallelWorkers(pcxt)
+/// M2 inc-3 rung 4 (m2-inc3-scope.md §5 rung 4, DELETION LANDED): the
+/// launched-bgworker fallback is gone from the pool-channel arms — when
+/// the board channels decline (`StandingWait::Fallback`), the arm goes
+/// straight to its serial arm. This helper is the arms' shared
+/// fallthrough: the trace line keeps the rung-4 posture grep surface
+/// ("launched fallback retired") and the `engage-<arm>-nolaunch-serial`
+/// floor row keeps the cause attribution (one tick = one engagement the
+/// deletion serialized — the R2-cliff watch; the arm-tail `serial` tick
+/// still fires, outcome census unchanged). The floors' witness machinery
+/// (stats rows + scripts/nolaunch-floors-witness.sh) retires at Phase-5
+/// D5, not here. `PGRUST_RUNTIME_NOLAUNCH` is now INERT — accepted, read
+/// by nothing; the posture it armed is the only behavior. Launched-ONLY
+/// vehicles (funnel passthrough, nlindex) keep their own ceremonies and
+/// migrate in their own increments; caller modes C1/C2 retired WITH this
+/// path (Michael ruling D-1), the C3 seam stays board-shaped.
+pub(super) fn launched_fallback_retired(arm: &StandingArm) {
+    lane_trace(&format!(
+        "{}: launched fallback retired — serial fallback",
+        arm.label
+    ));
+    super::stats::tick_engaged(arm.label, super::stats::EngageChannel::NolaunchSerial);
 }
 
 /// The standing channel's submit-and-park (the scan arm's standing_wait,
@@ -204,7 +186,7 @@ pub(super) fn standing_wait(
     // the standing join if this frame never reaches one of its own cleanup
     // paths (each of which takes the slot back first).
     *leader.slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&entry));
-    wait_engaged(arm, &leader, &entry, "standing", "launched", dop, granules, rg, waiter)
+    wait_engaged(arm, &leader, &entry, "standing", "serial", dop, granules, rg, waiter)
 }
 
 /// The engaged wait loop (both channels): poll completion + interrupts +
@@ -238,7 +220,8 @@ fn wait_engaged(
     };
     // M2 inc-3 rung-2 fallback-floor accounting: one tick per engagement
     // OUTCOME on this channel (the two Done exits below). Fallback and
-    // error exits tick nothing here — launched/serial tick at the arm.
+    // error exits tick nothing here — nolaunch-serial/serial tick at the
+    // arm.
     let floor_channel = if channel == "pooldb" {
         super::stats::EngageChannel::PoolDb
     } else {
@@ -309,7 +292,8 @@ fn wait_engaged(
         // dead/busy (claimed==0) OR a smaller-than-tickets gang whose every
         // claimant exited pre-drive without reaching the refusal counters'
         // tickets floor above (started==0, detached>=claimed>0). Either
-        // way no granule was consumed; the launched path takes over. A
+        // way no granule was consumed; the next channel (gang after pool;
+        // serial after gang) takes over. A
         // straggler that claims right as we close simply drives the same
         // RG (morsel claims are atomic; its partial combines like any
         // participant's) — close_and_await bounds on its drive.
@@ -362,8 +346,8 @@ fn wait_engaged(
         }
         // F1 PgResult propagation (train-12 composition seam): a raised
         // cancel disposition (statement_timeout / pg_cancel_backend)
-        // surfaces from the latch quantum — the standing-loop mirror of
-        // the launched path's F1 defect layer 2b branch and the CFI
+        // surfaces from the latch quantum — the F1 defect layer 2b
+        // branch's standing-loop mirror, same protocol as the CFI
         // branch above (abort THEN drain THEN close-and-await).
         if let Err(e) = parallel::wait_parallel_finish_quantum() {
             rg.abort();
@@ -471,8 +455,8 @@ pub(super) fn try_pool_channel(
 /// None on a yield — the arm's teardown runs exactly as on completion:
 /// the participant simply stops participating; its partials live in the
 /// leader-arena per-worker slots and seal cross-worker per the elastic
-/// protocol (the loom-modeled accepter≠sealer invariant). Gang serves and
-/// launched helpers keep the plain drive byte-identically (pooldb0 is the
+/// protocol (the loom-modeled accepter≠sealer invariant). Gang serves
+/// keep the plain drive byte-identically (pooldb0 is the
 /// letter's control arm).
 pub(super) fn drive_pool_serve(
     rt: &runtime::Runtime,

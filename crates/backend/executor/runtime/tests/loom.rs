@@ -3324,10 +3324,10 @@ fn pool_blocking_inside_bound_serve() {
 /// the leader — with no launched-bgworker fallback to absorb the RG — runs
 /// the arms' cleanup verbatim: `abort()` then the pinned drain (CallerWorker
 /// as the loom-usable face of `try_drain_pinned`, the rung-1 dialect),
-/// CONCURRENT with the still-running pool thread. Today this shape is
-/// reachable only through the rare zero-workers-launched branch; under
-/// PGRUST_RUNTIME_NOLAUNCH it is the posture's every fallback, so it gets
-/// its own pin. Oracles: the drain terminates with a settled outcome
+/// CONCURRENT with the still-running pool thread. Since the rung-4
+/// launched-path DELETION this is the ladder's every board-decline exit
+/// (pool → gang → serial, permanently — formerly the PGRUST_RUNTIME_NOLAUNCH
+/// posture), so it keeps its own pin. Oracles: the drain terminates with a settled outcome
 /// (Aborted, or Completed when the drain's claim outruns the abort — the
 /// B3 disjunction; an Aborted settle may still carry one finalize when
 /// every granule completed before the abort was observed — abort owns the

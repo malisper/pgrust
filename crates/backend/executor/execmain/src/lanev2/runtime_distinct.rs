@@ -2681,114 +2681,13 @@ fn engage_ceremony<'mcx>(
             super::standing_channel::StandingWait::Fallback => {}
         }
 
-        let launched = super::standing_channel::launch_fallback_workers(&STANDING_ARM, pcxt)?;
-        if launched <= 0 {
-            lane_trace("runtime-distinct: zero workers launched");
-            drain_rg(rt, &rg);
-            return Ok(EngageOutcome::Fallback);
-        }
-        stats::tick_engaged(STANDING_ARM.label, stats::EngageChannel::Launched);
-        lane_trace(&format!(
-            "runtime-distinct: engaged dop={launched} granules={total_granules} vocab={} sets={}",
-            spec.vocab.len(),
-            spec.sets.len()
-        ));
-
-        // Submit-and-park (the WaitForParallelWorkersToFinish shape).
-        let mut all_exited_seen = false;
-        let outcome = loop {
-            if let Some(o) = waiter.try_wait() {
-                break o;
-            }
-            if let Err(e) = ::postgres_seams::check_for_interrupts::call()
-                .and_then(|()| parallel::ProcessParallelMessages())
-            {
-                rg.abort();
-                drain_rg(rt, &rg);
-                return Err(e);
-            }
-            let refused = payload.refused.load(Ordering::SeqCst);
-            let started = payload.started.load(Ordering::SeqCst);
-            if started == 0 && refused >= launched as usize {
-                lane_trace(&format!(
-                    "runtime-distinct: all {refused} helpers refused the bind"
-                ));
-                rg.abort();
-                drain_rg(rt, &rg);
-                return Ok(EngageOutcome::Fallback);
-            }
-            // LIVENESS backstop (m1 helper-death fix 5cf96f83d, ported from
-            // runtime_scan.rs — F1 defect layer 2a): every launched helper's
-            // task has ENDED (normal hook exit keeps BGWH_STARTED until
-            // after the drive, so this cannot trip mid-drive) yet the RG is
-            // incomplete — helpers died or returned without a channel
-            // message and without driving. Nothing claimed => clean serial
-            // fallback; claimed => reap if possible and surface a real
-            // error.
-            if parallel::parallel_workers_all_stopped(pcxt) {
-                if let Some(o) = waiter.try_wait() {
-                    break o;
-                }
-                let claimed = rg.stats().tasks_claimed;
-                lane_trace(&format!(
-                    "runtime-distinct: helpers all stopped, rg incomplete (claimed={claimed})"
-                ));
-                rg.abort();
-                let drained = drain_rg(rt, &rg);
-                if let Some(e) = payload.take_error() {
-                    return Err(e);
-                }
-                if payload.crossed.load(Ordering::SeqCst) {
-                    lane_trace("runtime-distinct: worker budget crossed; serial fallback");
-                    stats::tick_refused(
-                        ShapeClass::AggBuild,
-                        RefuseReason::AdmissionEconomicsFusedDrive,
-                    );
-                    return Ok(EngageOutcome::Fallback);
-                }
-                if claimed == 0 && drained {
-                    return Ok(EngageOutcome::Fallback);
-                }
-                return Err(Box::new(PgError::new(
-                    ERROR,
-                    "runtime distinct helpers exited before completing the build",
-                )));
-            }
-            // LIVENESS REAP (inc-2c; the runtime_agg leg-4d wedge class): a
-            // pinned RG is invisible to pool workers, so once every launched
-            // helper has exited without the RG completing (e.g. every
-            // build_worker_exec errored before its drive), nobody will ever
-            // step it. Reap: abort + drain the closed generation ourselves;
-            // the next try_wait surfaces Aborted and the existing error/
-            // crossed/fallback handling below decides. Two consecutive
-            // sightings before reaping let a mid-settlement completion land
-            // first — belt only: a helper's exit bump happens-after its
-            // drive's completion, and abort + drive_pinned on a completed RG
-            // are benign no-ops.
-            if payload.exited.load(Ordering::SeqCst) >= launched as usize {
-                if all_exited_seen && waiter.try_wait().is_none() {
-                    lane_trace(
-                        "runtime-distinct: all helpers exited without completing the RG — reaping",
-                    );
-                    rg.abort();
-                    drain_rg(rt, &rg);
-                    continue;
-                }
-                all_exited_seen = true;
-            }
-            // A raised cancel disposition (statement_timeout /
-            // pg_cancel_backend) surfaces from the latch quantum (F1 defect
-            // layer 2b): abort + drain the RG, then propagate — exactly the
-            // CFI branch above.
-            if let Err(e) = parallel::wait_parallel_finish_quantum() {
-                rg.abort();
-                drain_rg(rt, &rg);
-                return Err(e);
-            }
-
-        };
-
-        finish_outcome(payload, outcome)
+        // M2 inc-3 rung 4: the launched-bgworker fallback is DELETED — a
+        // board decline goes straight to the serial arm (pool → gang →
+        // serial; the NOLAUNCH posture made permanent). Cause attribution
+        // ticks the nolaunch-serial floor row inside the shared helper.
+        super::standing_channel::launched_fallback_retired(&STANDING_ARM);
+        drain_rg(rt, &rg);
+        Ok(EngageOutcome::Fallback)
     })(&mut submitted);
 
     // Teardown tail (every path): a submitted RG must be COMPLETE before the

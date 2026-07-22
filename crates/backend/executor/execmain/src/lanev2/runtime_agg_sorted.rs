@@ -1391,86 +1391,13 @@ fn engage_ceremony<'mcx>(
             super::standing_channel::StandingWait::Fallback => {}
         }
 
-        let launched = super::standing_channel::launch_fallback_workers(&STANDING_ARM, pcxt)?;
-        if launched <= 0 {
-            lane_trace("runtime-agg-sorted: zero workers launched");
-            drain_rg(rt, &rg);
-            return Ok(EngageOutcome::Fallback);
-        }
-        stats::tick_engaged(STANDING_ARM.label, stats::EngageChannel::Launched);
-        lane_trace(&format!(
-            "runtime-agg-sorted: engaged dop={launched} granules={total_granules}"
-        ));
-
-        let mut all_exited_seen = false;
-        let outcome = loop {
-            if let Some(o) = waiter.try_wait() {
-                break o;
-            }
-            if let Err(e) = ::postgres_seams::check_for_interrupts::call()
-                .and_then(|()| parallel::ProcessParallelMessages())
-            {
-                rg.abort();
-                drain_rg(rt, &rg);
-                return Err(e);
-            }
-            let refused = payload.refused.load(Ordering::SeqCst);
-            let started = payload.started.load(Ordering::SeqCst);
-            if started == 0 && refused >= launched as usize {
-                lane_trace(&format!(
-                    "runtime-agg-sorted: all {refused} helpers refused the bind"
-                ));
-                rg.abort();
-                drain_rg(rt, &rg);
-                return Ok(EngageOutcome::Fallback);
-            }
-            if parallel::parallel_workers_all_stopped(pcxt) {
-                if let Some(o) = waiter.try_wait() {
-                    break o;
-                }
-                let claimed = rg.stats().tasks_claimed;
-                lane_trace(&format!(
-                    "runtime-agg-sorted: helpers all stopped, rg incomplete (claimed={claimed})"
-                ));
-                rg.abort();
-                let drained = drain_rg(rt, &rg);
-                if let Some(e) = sink.take_error() {
-                    return Err(e);
-                }
-                if sink.budget_refused.load(Ordering::SeqCst) {
-                    lane_trace(
-                        "runtime-agg-sorted: budget refusal — falling back to the serial arm",
-                    );
-                    stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
-                    return Ok(EngageOutcome::Fallback);
-                }
-                if claimed == 0 && drained {
-                    return Ok(EngageOutcome::Fallback);
-                }
-                return Err(Box::new(PgError::new(
-                    ERROR,
-                    "runtime sorted-agg helpers exited before completing the aggregation",
-                )));
-            }
-            if payload.exited.load(Ordering::SeqCst) >= launched as usize {
-                if all_exited_seen && waiter.try_wait().is_none() {
-                    lane_trace(
-                        "runtime-agg-sorted: all helpers exited without completing the RG — reaping",
-                    );
-                    rg.abort();
-                    drain_rg(rt, &rg);
-                    continue;
-                }
-                all_exited_seen = true;
-            }
-            if let Err(e) = parallel::wait_parallel_finish_quantum() {
-                rg.abort();
-                drain_rg(rt, &rg);
-                return Err(e);
-            }
-        };
-
-        finish_outcome(payload, sink, outcome)
+        // M2 inc-3 rung 4: the launched-bgworker fallback is DELETED — a
+        // board decline goes straight to the serial arm (pool → gang →
+        // serial; the NOLAUNCH posture made permanent). Cause attribution
+        // ticks the nolaunch-serial floor row inside the shared helper.
+        super::standing_channel::launched_fallback_retired(&STANDING_ARM);
+        drain_rg(rt, &rg);
+        Ok(EngageOutcome::Fallback)
     })(&mut submitted);
 
     if let Some(rg) = &submitted {

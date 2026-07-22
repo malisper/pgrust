@@ -1284,89 +1284,13 @@ fn engage_ceremony<'mcx>(
             super::standing_channel::StandingWait::Fallback => {}
         }
 
-        let launched = super::standing_channel::launch_fallback_workers(&STANDING_ARM, pcxt)?;
-        if launched <= 0 {
-            lane_trace("runtime-plaindistinct: zero workers launched");
-            drain_rg(rt, &rg);
-            return Ok(EngageOutcome::Fallback);
-        }
-        stats::tick_engaged(STANDING_ARM.label, stats::EngageChannel::Launched);
-        lane_trace(&format!(
-            "runtime-plaindistinct: engaged dop={launched} granules={total_granules} kind={}",
-            if payload.spec.is_bytes() { "bytes" } else { "int" }
-        ));
-
-        // Submit-and-park (the WaitForParallelWorkersToFinish shape).
-        let mut all_exited_seen = false;
-        let outcome = loop {
-            if let Some(o) = waiter.try_wait() {
-                break o;
-            }
-            if let Err(e) = ::postgres_seams::check_for_interrupts::call()
-                .and_then(|()| parallel::ProcessParallelMessages())
-            {
-                rg.abort();
-                drain_rg(rt, &rg);
-                return Err(e);
-            }
-            let refused_n = payload.refused.load(Ordering::SeqCst);
-            let started = payload.started.load(Ordering::SeqCst);
-            if started == 0 && refused_n >= launched as usize {
-                lane_trace(&format!(
-                    "runtime-plaindistinct: all {refused_n} helpers refused the bind"
-                ));
-                rg.abort();
-                drain_rg(rt, &rg);
-                return Ok(EngageOutcome::Fallback);
-            }
-            if parallel::parallel_workers_all_stopped(pcxt) {
-                if let Some(o) = waiter.try_wait() {
-                    break o;
-                }
-                let claimed = rg.stats().tasks_claimed;
-                lane_trace(&format!(
-                    "runtime-plaindistinct: helpers all stopped, rg incomplete (claimed={claimed})"
-                ));
-                rg.abort();
-                let drained = drain_rg(rt, &rg);
-                if let Some(e) = payload.take_error() {
-                    return Err(e);
-                }
-                if payload.crossed.load(Ordering::SeqCst) {
-                    lane_trace("runtime-plaindistinct: crossed; serial fallback");
-                    stats::tick_refused(
-                        ShapeClass::AggBuild,
-                        RefuseReason::AdmissionEconomicsFusedDrive,
-                    );
-                    return Ok(EngageOutcome::Fallback);
-                }
-                if claimed == 0 && drained {
-                    return Ok(EngageOutcome::Fallback);
-                }
-                return Err(Box::new(PgError::new(
-                    ERROR,
-                    "runtime plain-distinct helpers exited before completing the build",
-                )));
-            }
-            if payload.exited.load(Ordering::SeqCst) >= launched as usize {
-                if all_exited_seen && waiter.try_wait().is_none() {
-                    lane_trace(
-                        "runtime-plaindistinct: all helpers exited without completing the RG — reaping",
-                    );
-                    rg.abort();
-                    drain_rg(rt, &rg);
-                    continue;
-                }
-                all_exited_seen = true;
-            }
-            if let Err(e) = parallel::wait_parallel_finish_quantum() {
-                rg.abort();
-                drain_rg(rt, &rg);
-                return Err(e);
-            }
-        };
-
-        finish_outcome(payload, outcome)
+        // M2 inc-3 rung 4: the launched-bgworker fallback is DELETED — a
+        // board decline goes straight to the serial arm (pool → gang →
+        // serial; the NOLAUNCH posture made permanent). Cause attribution
+        // ticks the nolaunch-serial floor row inside the shared helper.
+        super::standing_channel::launched_fallback_retired(&STANDING_ARM);
+        drain_rg(rt, &rg);
+        Ok(EngageOutcome::Fallback)
     })(&mut submitted);
 
     // Teardown tail (every path): a submitted RG must be COMPLETE before the
