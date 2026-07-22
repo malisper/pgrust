@@ -10,6 +10,9 @@ path = "src/lib.rs"
 [dependencies]
 pgsync = { path = "../../../_support/pgsync" }
 pg_clock = { path = "../../../port/pg_clock" }
+# slease v2 sweeper (GL-SLEASE-2): waiter is the sanctioned timed-park
+# surface (timeout timer-thread precedent).
+waiter = { path = "../../storage/ipc/waiter" }
 parallel = { path = "../../access/transam/parallel" }
 runtime = { path = "../runtime" }
 spillset = { path = "../spillset" }

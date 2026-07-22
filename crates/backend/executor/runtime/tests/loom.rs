@@ -37,6 +37,11 @@
 //!      handshake (parallel COPY): starved claims never finalize an open
 //!      stream, publish/close wakes are lost-wakeup-free through the
 //!      epoch-guarded park, exhaustion requires the close.
+//!  11. slease_acquire_timeout_no_leak / slease_donate_reacquire_reconciles
+//!      (GL-SLEASE-2) — the serial-lease v2 bounded-admission + donation
+//!      permit protocol over pgsync::Semaphore: no interleaving leaks a
+//!      permit; `true` from acquire_timeout always confers exactly one
+//!      release obligation.
 //!
 //! Determinism note: models use a never-advanced VirtualClock so every
 //! morsel measures a constant dt (loom requires branch determinism along an
@@ -4054,5 +4059,80 @@ fn lockgroup_pool_park_reattach_group_clean() {
             "parked worker's retained PGPROC reached the freelist"
         );
         lg_leader_return_account(&w, 0);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// GL-SLEASE-2 — the serial-lease v2 permit protocol over pgsync::Semaphore.
+// The session-side state machine (execmain/src/slease.rs) is thread-local;
+// the loom-explorable surface is its SEMAPHORE OP SEQUENCE racing other
+// holders, including the new bounded acquire. Invariant of the class:
+// `true` from acquire_timeout ⟺ exactly one permit taken; every lifecycle
+// path releases exactly what it took (permit-leak-on-unwind is the risk
+// class the slease RAII guards fence — modeled here as the release-iff-held
+// reconciliation).
+// ---------------------------------------------------------------------------
+
+/// `acquire_timeout` vs a racing holder: whichever outcome loom explores
+/// (grant, wake-then-grant, or timeout — loom's wait_timeout branches all
+/// three), the final count balances and `true` always confers exactly one
+/// release obligation.
+#[test]
+fn slease_acquire_timeout_no_leak() {
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(3);
+    b.check(|| {
+        let sem = Arc::new(pgsync::Semaphore::new(1));
+        let s2 = Arc::clone(&sem);
+        let holder = thread::spawn(move || {
+            s2.acquire();
+            thread::yield_now();
+            s2.release();
+        });
+        let took = sem.acquire_timeout(core::time::Duration::from_millis(1));
+        if took {
+            sem.release();
+        }
+        holder.join().unwrap();
+        assert_eq!(sem.available(), 1, "permit leaked (took={took})");
+    });
+}
+
+/// The v2 session lifecycle — safe-point admission, wait-span donation,
+/// try-reacquire, deficit re-admission, run-end reconciliation — against a
+/// bounded contender on a 1-permit ledger: every interleaving reconciles
+/// the ledger to full, from every mixture of Held/Deficit outcomes.
+#[test]
+fn slease_donate_reacquire_reconciles() {
+    let mut b = loom::model::Builder::new();
+    b.preemption_bound = Some(3);
+    b.check(|| {
+        let sem = Arc::new(pgsync::Semaphore::new(1));
+        let sa = Arc::clone(&sem);
+        let a = thread::spawn(move || {
+            // Safe-point admission (bounded): Pending -> Held | Deficit.
+            let mut held = sa.acquire_timeout(core::time::Duration::from_millis(1));
+            if held {
+                // Wait span opens: donate (Held -> Donated).
+                sa.release();
+                thread::yield_now();
+                // Wait span closes: TRY only (Donated -> Held | Deficit).
+                held = sa.try_acquire();
+                if !held {
+                    // Sweeper re-flag -> next safe point (Deficit retry).
+                    held = sa.acquire_timeout(core::time::Duration::from_millis(1));
+                }
+            }
+            // Run end: release iff held (the RAII guard's reconciliation).
+            if held {
+                sa.release();
+            }
+        });
+        let took = sem.acquire_timeout(core::time::Duration::from_millis(1));
+        if took {
+            sem.release();
+        }
+        a.join().unwrap();
+        assert_eq!(sem.available(), 1, "ledger failed to reconcile");
     });
 }

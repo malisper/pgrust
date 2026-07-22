@@ -42,6 +42,7 @@ mod nodeprojectset;
 mod nodesubplan;
 mod procnode;
 mod querydesc;
+mod slease;
 mod typefromtl;
 
 #[cfg(test)]
@@ -54,6 +55,12 @@ pub use execmain::{
     tap_executor_finish_leave, tap_executor_run, tap_executor_run_leave, tap_executor_start,
 };
 pub use execparallel::{parallel_query_main, register_parallel_query_main};
+// Serial-lease v2 boot surface (GL-SLEASE-2): seams_init installs the armed
+// wait-seam wrappers + the ProcessInterrupts admission tap through these.
+pub use slease::{
+    admission_tap as serial_lease_admission_tap, armed as serial_lease_armed,
+    wait_hook_end as serial_lease_wait_hook_end, wait_hook_start as serial_lease_wait_hook_start,
+};
 pub use lanev2::coverage::{coverage_snapshot, LANEV2_BUILTINS, PGRUST_FOID_RANGE};
 // WS-CB wave-10 (cursors inc-2 contract §8; worklog notes/se-wave10-cb.md
 // EX-CB-1): the CA-facing portal seam — pquery must not link lanev2

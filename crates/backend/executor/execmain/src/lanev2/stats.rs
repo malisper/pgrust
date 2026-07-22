@@ -864,21 +864,51 @@ pub(super) fn tick_engaged(label: &str, channel: EngageChannel) {
         arm_dump_on_thread_exit();
     }
 }
-/// GL-SLEASE-1 accounting witness: top-level serial ExecutorRuns that took a
-/// pool execution permit (the serial-lease unification, execmain.rs
-/// SerialLease). One tick per leased run — the letter's "the scheduler sees
-/// serial load" witness row; the unarmed default (GL-RO-BISECT-2 re-flip),
-/// `PGRUST_RUNTIME_SERIAL_LEASE=0`, or no runtime must dump 0.
+/// Serial-lease accounting witness (GL-SLEASE-1 origin, GL-SLEASE-2
+/// semantics): top-level serial ExecutorRuns the lease machinery TRACKED —
+/// v2 ticks at enter (slot published to the sweeper), not at permit
+/// acquisition, which the admission floor makes workload-dependent (a
+/// sub-floor run never touches the semaphore by design). Still the "the
+/// scheduler sees serial load" witness row; the unarmed default
+/// (GL-RO-BISECT-2 re-flip), `PGRUST_RUNTIME_SERIAL_LEASE=0`, or no runtime
+/// must dump 0.
 static SERIAL_LEASES: AtomicU64 = AtomicU64::new(0);
 
-/// Record one taken serial lease (armed-gated like every counter here).
-/// pub(crate): re-exported at the lanev2 root for the execmain seam.
+/// Record one tracked serial lease (armed-gated like every counter here).
+/// pub(crate): re-exported at the lanev2 root for the slease engine.
 #[inline]
 pub(crate) fn tick_serial_lease() {
     if !armed() {
         return;
     }
     SERIAL_LEASES.fetch_add(1, Relaxed);
+    arm_dump_on_thread_exit();
+}
+
+/// GL-SLEASE-2 mechanism witnesses: safe-point ADMISSIONS (a floor-crossed
+/// run actually took a permit at the ProcessInterrupts tap) and DONATIONS
+/// (a held permit released across a C-parity wait span). Zero-dumped like
+/// the tracked row — an armed protective cell asserting admitted>0 is the
+/// positive witness that the sweeper->interrupt->tap chain is alive, not
+/// just the enter bookkeeping.
+static SERIAL_LEASE_ADMITTED: AtomicU64 = AtomicU64::new(0);
+static SERIAL_LEASE_DONATIONS: AtomicU64 = AtomicU64::new(0);
+
+#[inline]
+pub(crate) fn tick_serial_lease_admitted() {
+    if !armed() {
+        return;
+    }
+    SERIAL_LEASE_ADMITTED.fetch_add(1, Relaxed);
+    arm_dump_on_thread_exit();
+}
+
+#[inline]
+pub(crate) fn tick_serial_lease_donation() {
+    if !armed() {
+        return;
+    }
+    SERIAL_LEASE_DONATIONS.fetch_add(1, Relaxed);
     arm_dump_on_thread_exit();
 }
 
@@ -1270,11 +1300,20 @@ fn dump() {
         "counter\tfused-hash-build-pertuple-other\t{}\n",
         FUSED_HASH_BUILD_PERTUPLE_OTHER.load(Relaxed)
     ));
-    // GL-SLEASE-1 witness row (zero included — the letter's OFF arms
-    // assert 0, so absent≠zero would ambiguate).
+    // Serial-lease witness row (zero included — the OFF arms assert 0, so
+    // absent≠zero would ambiguate). Renamed acquires->tracked at GL-SLEASE-2
+    // with the tick's move to enter (see tick_serial_lease).
     out.push_str(&format!(
-        "counter\tserial-lease-acquires\t{}\n",
+        "counter\tserial-lease-tracked\t{}\n",
         SERIAL_LEASES.load(Relaxed)
+    ));
+    out.push_str(&format!(
+        "counter\tserial-lease-admitted\t{}\n",
+        SERIAL_LEASE_ADMITTED.load(Relaxed)
+    ));
+    out.push_str(&format!(
+        "counter\tserial-lease-donations\t{}\n",
+        SERIAL_LEASE_DONATIONS.load(Relaxed)
     ));
     // M2 inc-3 rung-2 fallback-floor rows (engagement channels per arm;
     // zeros included — the floor reader diffs runs, absent≠zero would
