@@ -1235,7 +1235,9 @@ pub fn AlterSubscription<'mcx>(
 
     rel.close(RowExclusiveLock)?;
 
-    // Wake up related replication workers to handle this change quickly.
+    // Wake up related replication workers to handle this change quickly
+    // (subscriptioncmds.c:1617): a worker idling against a quiet publisher
+    // otherwise keeps the pre-ALTER parameters until its next wakeup.
     launcher::LogicalRepWorkersWakeupAtCommit(subid);
 
     Ok(ObjectAddress::set(SubscriptionRelationId, subid))
@@ -1422,7 +1424,8 @@ fn AlterSubscriptionOwner_internal<'mcx>(
 
     pg_shdepend::changeDependencyOnOwner(mcx, SubscriptionRelationId, subid, new_owner_id)?;
 
-    // Wake up related background processes to handle this change quickly.
+    // Wake up related background processes to handle this change quickly
+    // (subscriptioncmds.c:2022-2023).
     launcher::ApplyLauncherWakeupAtCommit();
     launcher::LogicalRepWorkersWakeupAtCommit(subid);
 
