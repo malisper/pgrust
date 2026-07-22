@@ -677,6 +677,17 @@ pub static ConfigureNamesBool: &[GucBoolSetting] = &[
     // identity glue it composes with is spawn-time), default ON since the
     // train-40 flip. Off restores the launched bgworker gang exactly.
     GucBoolSetting { name: "pgrust.runtime_vacuum_pool", context: PGC_POSTMASTER, group: CUSTOM_OPTIONS, short_desc: Some("Runs parallel VACUUM's workers on the pgrust runtime worker pool."), long_desc: Some("Off restores the launched background-worker vacuum gang exactly. The PGRUST_RUNTIME_VACUUM_POOL environment variable seeds the startup default (0 or off disables)."), flags: 0, variable: &vars::pgrust_runtime_vacuum_pool, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust.memory_watchdog (pgrust-only, GL-MEMWATCH-1): master switch for
+    // the postmaster memory-watchdog sampler. PGC_SIGHUP: the watchdog thread
+    // re-reads the cell each tick, so ops can arm/disarm on a running server.
+    // Default ON — the sampler is off every query path (a 1s tick reading
+    // /proc and two atomics); under an unbounded cgroup with no configured
+    // limit it idles after one boot log line.
+    GucBoolSetting { name: "pgrust.memory_watchdog", context: PGC_SIGHUP, group: CUSTOM_OPTIONS, short_desc: Some("Enables the process memory watchdog (logs memory ledgers and context dumps at escalating thresholds below the memory limit)."), long_desc: Some("The limit is pgrust.memory_watchdog_limit, or the cgroup v2 memory.max when the limit is 0."), flags: 0, variable: &vars::pgrust_memory_watchdog, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust.memory_watchdog_dump (pgrust-only, GL-MEMWATCH-1): on a threshold
+    // breach, additionally signal every live backend to log its memory-context
+    // tree (the pg_log_backend_memory_contexts machinery, fanned out).
+    GucBoolSetting { name: "pgrust.memory_watchdog_dump", context: PGC_SIGHUP, group: CUSTOM_OPTIONS, short_desc: Some("Requests memory-context dumps from all backends when the memory watchdog fires."), long_desc: None, flags: 0, variable: &vars::pgrust_memory_watchdog_dump, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
     // pgrust.mem_autotune (pgrust-only, env-to-guc train): gates the boot-time
     // machine-scaled memory/parallel default auto-tune (autotune.rs, assembled
     // from night/mem-defaults). PGC_POSTMASTER, default OFF (stock boot values,
@@ -881,6 +892,14 @@ pub static ConfigureNamesInt: &[GucIntSetting] = &[
     // pgrust.condition_cache_size: the condition cache's LRU byte budget
     // (default 100MB — ClickHouse's query_condition_cache_size default).
     GucIntSetting { name: "pgrust.condition_cache_size", context: PGC_USERSET, group: CUSTOM_OPTIONS, short_desc: Some("Sets the memory budget of the cbstore condition cache."), long_desc: None, flags: GUC_UNIT_KB, variable: &vars::pgrust_condition_cache_size, boot_val: GucDefaultValue::Int(102400), min: 0, max: MAX_KILOBYTES, check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust.memory_watchdog family ints (pgrust-only, GL-MEMWATCH-1).
+    GucIntSetting { name: "pgrust.memory_watchdog_interval", context: PGC_SIGHUP, group: CUSTOM_OPTIONS, short_desc: Some("Sets the memory watchdog sampling interval."), long_desc: None, flags: GUC_UNIT_MS, variable: &vars::pgrust_memory_watchdog_interval, boot_val: GucDefaultValue::Int(1000), min: 100, max: 60 * 1000, check_hook: None, assign_hook: None, show_hook: None },
+    GucIntSetting { name: "pgrust.memory_watchdog_threshold", context: PGC_SIGHUP, group: CUSTOM_OPTIONS, short_desc: Some("Sets the memory watchdog's base warning threshold as a percent of the memory limit."), long_desc: Some("Escalation tiers derive from the base T as T, T + (100-T)/2 and T + 3*(100-T)/4 (80 -> 80/90/95); each tier logs once per excursion above the base."), flags: 0, variable: &vars::pgrust_memory_watchdog_threshold, boot_val: GucDefaultValue::Int(80), min: 1, max: 100, check_hook: None, assign_hook: None, show_hook: None },
+    GucIntSetting { name: "pgrust.memory_watchdog_limit", context: PGC_SIGHUP, group: CUSTOM_OPTIONS, short_desc: Some("Sets the absolute memory limit the watchdog thresholds apply to (0 = use the cgroup v2 memory limit)."), long_desc: None, flags: GUC_UNIT_MB, variable: &vars::pgrust_memory_watchdog_limit, boot_val: GucDefaultValue::Int(0), min: 0, max: i32::MAX, check_hook: None, assign_hook: None, show_hook: None },
+    // Developer knob for the watchdog's standing e2e: each simple query leaks
+    // this many MB into a session-lifetime "WatchdogTestHog" context. Hidden
+    // (NOT_IN_SAMPLE + NO_SHOW_ALL): a deliberate leak is never a product knob.
+    GucIntSetting { name: "pgrust.memory_watchdog_test_hog", context: PGC_USERSET, group: DEVELOPER_OPTIONS, short_desc: Some("Leaks this many MB per query into a named memory context (memory watchdog test instrumentation)."), long_desc: None, flags: GUC_UNIT_MB | GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL, variable: &vars::pgrust_memory_watchdog_test_hog, boot_val: GucDefaultValue::Int(0), min: 0, max: 1024 * 1024, check_hook: None, assign_hook: None, show_hook: None },
     // pgrust.runtime_dop (M5-0, docs/design/m5-planner.md §2.2): the product
     // DOP cap for runtime-engine engagements, consulted ONLY under
     // pgrust.parallel_engine=runtime (the M5-1 router reads it; the per-arm

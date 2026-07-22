@@ -10,10 +10,11 @@ use types_error::{PgResult, DEBUG2, LOG};
 use types_startup::{BackendStartupData, CacState, ClientSocket, StartupData};
 use types_storage::waiteventset::{WaitEvent, WL_LATCH_SET, WL_SOCKET_ACCEPT};
 
-use crate::statemachine::{signal_child, StartChildProcess, TerminateChildren};
+use crate::statemachine::{signal_child, ExitPostmaster, StartChildProcess, TerminateChildren};
 use crate::{
-    loc, report, report_internal, with_pm, PMState, FastShutdown, ImmediateShutdown, NoShutdown,
-    MAXLISTEN, SIGKILL_CHILDREN_AFTER_SECS,
+    btmask_all_except, loc, report, report_internal, with_pm, PMState, FastShutdown,
+    ImmediateShutdown, NoShutdown, FORCED_EXIT_AFTER_LETHAL_SECS, MAXLISTEN,
+    SIGKILL_CHILDREN_AFTER_SECS,
 };
 
 const SECS_PER_MINUTE: i64 = 60;
@@ -51,6 +52,12 @@ pub fn DetermineSleepTime() -> i64 {
     if shutdown > NoShutdown || (!start_worker_needed && !have_crashed_worker) {
         if abort_start_time != 0 {
             let seconds = SIGKILL_CHILDREN_AFTER_SECS - (now_secs() - abort_start_time);
+            return (seconds * 1000).max(0);
+        }
+        let lethal_time = with_pm(|pm| pm.lethal_time);
+        if lethal_time != 0 {
+            // Forced-exit floor armed: wake in time to fire it.
+            let seconds = FORCED_EXIT_AFTER_LETHAL_SECS - (now_secs() - lethal_time);
             return (seconds * 1000).max(0);
         }
         return 60 * 1000;
@@ -102,6 +109,10 @@ pub fn ServerLoop() -> PgResult<i32> {
     // what makes the analytics fast path engage at DOP=cores out of the box
     // for router-covered shapes — no SET, no env var required.
     let _ = launch_backend::rtpool::start_if_enabled();
+    // GL-MEMWATCH-1: the process memory watchdog sampler thread. Near-free
+    // (a 1s tick off every query path); pgrust.memory_watchdog gates the
+    // work per tick, so SIGHUP can arm/disarm without a restart.
+    memwatchdog::start();
     // M2 pool-binding: wire the STANDING runtime executor gang (boot
     // captures + spawner install; threads spawn lazily at first
     // engagement). No-op unless PGRUST_RUNTIME=1, with PGRUST_RUNTIME_
@@ -180,7 +191,54 @@ pub fn ServerLoop() -> PgResult<i32> {
                 "ServerLoop",
             );
             TerminateChildren(if send_abort { procsignal::signums::SIGABRT } else { procsignal::signums::SIGKILL });
-            with_pm(|pm| pm.abort_start_time = 0);
+            with_pm(|pm| {
+                pm.abort_start_time = 0;
+                // Arm the forced-exit floor: the thread rendering of SIGKILL
+                // (SendThreadKill) lands only at a drain point, so unlike
+                // C's, this broadcast can LOSE (GL-DISCONNECT-WEDGE-1).
+                pm.lethal_time = now;
+            });
+        }
+
+        // Forced-exit floor (see FORCED_EXIT_AFTER_LETHAL_SECS): if children
+        // survive the kill broadcast past the grace period, the quiescence
+        // gates can never pass — a thread wedged off its drain points is
+        // unkillable in the thread model. C's immediate shutdown/crash cycle
+        // never waits on an unkillable child (process SIGKILL is
+        // unconditional); render that guarantee the only way a single
+        // process can — exit it. Crash-equivalent by design: immediate
+        // shutdown skips the shutdown checkpoint anyway, and the next start
+        // runs crash recovery.
+        if with_pm(|pm| {
+            (pm.shutdown >= ImmediateShutdown || pm.fatal_error)
+                && pm.lethal_time != 0
+                && (now - pm.lethal_time) >= FORCED_EXIT_AFTER_LETHAL_SECS
+        }) {
+            let remaining =
+                pmchild_seams::count_children::call(btmask_all_except(&[BackendType::Logger]));
+            let gang = if postmaster_seams::rtgang_live::is_installed() {
+                postmaster_seams::rtgang_live::call()
+            } else {
+                0
+            };
+            if remaining == 0 && gang == 0 {
+                // Everyone drained after all; let the state machine finish
+                // the ceremony normally.
+                with_pm(|pm| pm.lethal_time = 0);
+            } else {
+                report(
+                    LOG,
+                    format!(
+                        "issuing forced postmaster exit: {remaining} child thread(s) \
+                         (+{gang} standing runtime executor(s)) survived the kill \
+                         broadcast {FORCED_EXIT_AFTER_LETHAL_SECS}s; threads wedged off \
+                         their drain points cannot be killed in-process"
+                    ),
+                    1758,
+                    "ServerLoop",
+                );
+                ExitPostmaster(1);
+            }
         }
 
         if now - last_lockfile_recheck_time >= SECS_PER_MINUTE {
