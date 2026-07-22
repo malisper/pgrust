@@ -343,6 +343,7 @@ fn StartupDecodingContext(
     }));
 
     reorder.private_data = opc as usize;
+    reorder.update_stats = Some(update_decoding_stats_hook);
     reorder.callbacks = ReorderBufferCallbacks {
         begin: begin_cb_wrapper,
         apply_change: change_cb_wrapper,
@@ -1074,7 +1075,19 @@ pub fn ResetLogicalStreamingState() {
 }
 
 pub fn UpdateDecodingStats(ctx: &mut LogicalDecodingContext) {
-    let rb = &mut ctx.reorder;
+    let slot = ctx.slot;
+    update_decoding_stats_rb(&mut ctx.reorder, slot);
+}
+
+// The reorderbuffer's in-serialize stats flush (C reaches UpdateDecodingStats
+// through rb->private_data, reorderbuffer.c:4042; the crate boundary makes
+// that a hook installed by StartupDecodingContext).
+fn update_decoding_stats_hook(rb: &mut ReorderBuffer) {
+    let slot = opc_from_rb(rb).slot;
+    update_decoding_stats_rb(rb, slot);
+}
+
+fn update_decoding_stats_rb(rb: &mut ReorderBuffer, slot: &'static ReplicationSlot) {
     if rb.spillBytes <= 0 && rb.streamBytes <= 0 && rb.totalBytes <= 0 {
         return;
     }
@@ -1089,7 +1102,7 @@ pub fn UpdateDecodingStats(ctx: &mut LogicalDecodingContext) {
         total_bytes: rb.totalBytes,
         stat_reset_timestamp: 0,
     };
-    pgstat::replslot::pgstat_report_replslot(slot::ReplicationSlotIndex(ctx.slot), &rep);
+    pgstat::replslot::pgstat_report_replslot(slot::ReplicationSlotIndex(slot), &rep);
     rb.spillTxns = 0;
     rb.spillCount = 0;
     rb.spillBytes = 0;
