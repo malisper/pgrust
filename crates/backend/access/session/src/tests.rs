@@ -681,7 +681,17 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      own write calls on the worker THREAD and zero on every
     //      statement boundary by RAII; no session identity, never
     //      captured/restored by an envelope.
-    assert_eq!(count_tree(crates), 532, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // GL-STMTTASK-1 delta (533 = 532 + 1, composed at t43 over the memwatch/stripe/w2a rows), deliberately NON-SESSION TLS:
+    //   73. tcop/postgres_seams/src/lib.rs — stmt_task_arm ARMED: the
+    //      statement-scoped protocol arm flag (exec_simple_query arms one
+    //      statement's top-level portal run; the executor's statement-task
+    //      hook consumes it on first entry; RAII-disarmed at statement
+    //      end). Pure per-statement routing advisory on the SESSION thread
+    //      — carries no session identity, never set on workers, never
+    //      captured/restored by an envelope (an engagement rebuilds
+    //      nothing from it; consume-once semantics make leakage across
+    //      statements structurally impossible).
+    assert_eq!(count_tree(crates), 533, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
