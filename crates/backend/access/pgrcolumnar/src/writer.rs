@@ -736,6 +736,16 @@ fn open_writer(rel: &::types_rel::Relation<'_>) -> PgResult<CbWriter> {
     let coltypes = coltypes_of(rel)?;
     let opts = writer_opts_of(rel, &coltypes)?;
     let path = crate::rel_main_path(rel);
+    // This writer grows the main fork by direct pwrites, invisible to md's
+    // process-global size cache: poison the key so every size probe of this
+    // fork takes the real lseek walk (exactness preserved by construction).
+    smgr_seams::smgr_nblocks_cache_poison::call(
+        ::types_storage::RelFileLocatorBackend {
+            locator: rel.rd_locator.get(),
+            backend: rel.rd_backend,
+        },
+        ::types_core::ForkNumber::MAIN_FORKNUM,
+    );
     let file = SegFile::open_rw(&path)?;
     let xid = xact_seams::get_current_transaction_id::call()?;
     // RG_FLAG_FROZEN bypasses the per-RG xmin visibility gate entirely, so
