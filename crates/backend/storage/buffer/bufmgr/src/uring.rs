@@ -124,10 +124,12 @@ pub fn uring_clear_io_wref(buffer: Buffer) {
 
 /// Completion body — may run on any thread (foreign drain): shared state only.
 /// Verification failures degrade to BM_IO_ERROR; the arriving backend's sync
-/// re-read raises the user-facing error with its own context.
+/// re-read raises the user-facing error (and counts the checksum failure)
+/// with its own context — hence no PIV logging or stats here.
 pub fn uring_read_complete(buffer: Buffer, res: i32) {
     uring_clear_io_wref(buffer);
     let desc = GetBufferDescriptor(buffer - 1);
-    let ok = res == BLCKSZ as i32 && page_is_verified(BufferGetBlockPtr(buffer));
+    let blkno = desc.tag().blockNum;
+    let ok = res == BLCKSZ as i32 && page_is_verified(BufferGetBlockPtr(buffer), blkno, 0, None);
     TerminateBufferIO(desc, false, if ok { BM_VALID } else { BM_IO_ERROR }, false, false);
 }

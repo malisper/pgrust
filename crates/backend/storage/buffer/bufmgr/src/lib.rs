@@ -79,7 +79,11 @@ pub use localbuf::{
     n_loc_buffer, AtEOXact_LocalBuffers, AtProcExit_LocalBuffers, DropRelationAllLocalBuffers,
     DropRelationLocalBuffers,
 };
-pub use read::{page_is_verified, relpath_desc, ReadBufferWithoutRelcache, ReadBuffer_common, ReadRecentBuffer};
+pub use gucs::ignore_checksum_failure;
+pub use read::{
+    page_is_verified, relpath_backend_desc, relpath_desc, ReadBufferWithoutRelcache,
+    ReadBuffer_common, ReadRecentBuffer, PIV_IGNORE_CHECKSUM_FAILURE, PIV_LOG_LOG, PIV_LOG_WARNING,
+};
 pub use extend::{ExtendBufferedRelBy, ExtendBufferedRelTo, ExtendBufferedRelToSmgr};
 
 const DEFAULTTABLESPACE_OID: Oid = 1663;
