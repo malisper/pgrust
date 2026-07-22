@@ -16,7 +16,7 @@ use types_tuple::HeapTupleData;
 use crate::iter::IterState;
 use crate::visibility::{ReorderBufferTupleCidEnt, ReorderBufferTupleCidKey, TupleCidHash};
 use crate::{
-    dl_delete, dl_iter, rb_error, unported, ChangeId, ListHead, ReorderBuffer,
+    dl_delete, dl_iter, rb_error, ChangeId, ListHead, ReorderBuffer,
     ReorderBufferChangeData, ReorderBufferChangeType::*, TxnId, RBTXN_IS_SERIALIZED,
     RBTXN_IS_SERIALIZED_CLEAR, RBTXN_IS_STREAMED, RBTXN_SENT_PREPARE,
 };
@@ -379,8 +379,11 @@ impl ReorderBuffer {
             t.origin_lsn = origin_lsn;
         }
 
+        // A (partially) streamed transaction commits in the streamed way:
+        // stream the remaining part, then send stream_commit/stream_prepare
+        // (reorderbuffer.c:2833).
         if self.txn(txn).is_streamed() {
-            unported("ReorderBufferStreamCommit (streaming): phase-2");
+            return self.stream_commit(txn);
         }
 
         if self.txn(txn).base_snapshot.is_none() {
@@ -403,8 +406,6 @@ impl ReorderBuffer {
         command_id: CommandId,
         streaming: bool,
     ) -> PgResult<()> {
-        debug_assert!(!streaming, "ReorderBufferStreamTXN (streaming): phase-2");
-
         self.build_tuplecid_hash(txn);
         snapmgr::SetupHistoricSnapshot(snapshot_now.clone(), self.tuplecid_hash_any(txn));
 
@@ -415,6 +416,8 @@ impl ReorderBuffer {
         let mut snapshot_now = snapshot_now;
         let mut command_id = command_id;
         let mut curtxn: Option<TxnId> = None;
+        let mut stream_started = false;
+        let mut prev_lsn = InvalidXLogRecPtr;
 
         // Reset CheckXidAlive/bsysscan even if a panic unwinds out of the
         // replay (see the guard's comment). Both normal exits already leave
@@ -432,6 +435,9 @@ impl ReorderBuffer {
             &mut iterstate,
             &mut specinsert,
             &mut curtxn,
+            streaming,
+            &mut stream_started,
+            &mut prev_lsn,
         );
 
         match result {
@@ -456,29 +462,46 @@ impl ReorderBuffer {
                 }
 
                 // ERRCODE_TRANSACTION_ROLLBACK signals a concurrent abort of
-                // the transaction being prepared; clean up and return
-                // gracefully so the caller (ReorderBufferPrepare) can still
-                // send the prepare (reorderbuffer.c:2777). The streaming leg
-                // of this arm is phase-2. The error reaches us either from a
-                // catalog scan that tripped on CheckXidAlive (genam
-                // handle_concurrent_abort) or from the plugin itself, exactly
-                // C's two sources. By this point AbortCurrentTransaction has
-                // already reset CheckXidAlive (ResetLogicalStreamingState),
-                // matching C's PG_CATCH ordering.
+                // the (sub)transaction being streamed or prepared; clean up
+                // and return gracefully so streaming can continue with the
+                // remaining data / the caller (ReorderBufferPrepare) can
+                // still send the prepare (reorderbuffer.c:2777). The error
+                // reaches us either from a catalog scan that tripped on
+                // CheckXidAlive (genam handle_concurrent_abort) or from the
+                // plugin itself, exactly C's two sources. By this point
+                // AbortCurrentTransaction has already reset CheckXidAlive
+                // (ResetLogicalStreamingState), matching C's PG_CATCH
+                // ordering.
                 if e.sqlstate == types_error::ERRCODE_TRANSACTION_ROLLBACK
-                    && self.txn(txn).is_prepared()
+                    && (stream_started || self.txn(txn).is_prepared())
                 {
-                    // curtxn must be set for prepared transactions.
-                    let cur = curtxn.expect("current txn tracked for prepared replay");
+                    // curtxn must be set for streamed or prepared replay.
+                    let cur = curtxn.expect("current txn tracked for streamed/prepared replay");
                     debug_assert!(!self.txn(cur).is_committed());
                     self.txn_mut(cur).txn_flags |= crate::RBTXN_IS_ABORTED;
 
+                    if stream_started {
+                        self.maybe_mark_txn_streamed(txn);
+                    }
+
                     // ReorderBufferResetTXN: discard the decoded changes so
-                    // the txn can carry its prepared identity to the finish.
-                    self.truncate_txn(txn, true)?;
+                    // the txn can stream its remaining data / carry its
+                    // prepared identity to the finish.
+                    let prepared = self.txn(txn).is_prepared();
+                    self.truncate_txn(txn, prepared)?;
                     self.toast_reset(txn);
                     if let Some(si) = specinsert.take() {
                         self.free_change(si, true);
+                    }
+                    // For the streaming case, stop the stream and remember
+                    // the command ID and snapshot for the next run.
+                    if self.txn(txn).is_streamed() {
+                        let cb = self
+                            .callbacks
+                            .stream_stop
+                            .expect("streamed replay requires the stream_stop callback");
+                        cb(self, txn, prev_lsn)?;
+                        self.save_txn_snapshot(txn, &snapshot_now, command_id);
                     }
                     debug_assert_eq!(self.txn(txn).size, 0);
                     return Ok(());
@@ -501,20 +524,25 @@ impl ReorderBuffer {
         iterstate: &mut Option<IterState>,
         specinsert: &mut Option<ChangeId>,
         curtxn: &mut Option<TxnId>,
+        streaming: bool,
+        stream_started: &mut bool,
+        prev_lsn: &mut XLogRecPtr,
     ) -> PgResult<()> {
-        let mut prev_lsn = InvalidXLogRecPtr;
         let mut changes_count = 0u32;
 
         if using_subtxn {
-            xact::BeginInternalSubTransaction(Some("replay"))?;
+            xact::BeginInternalSubTransaction(Some(if streaming { "stream" } else { "replay" }))?;
         } else {
             xact::StartTransactionCommand()?;
         }
 
-        if self.txn(txn).is_prepared() {
-            { let cb = self.callbacks.begin_prepare; cb(self, txn)?; }
-        } else {
-            { let cb = self.callbacks.begin; cb(self, txn)?; }
+        // Only send begin/begin-prepare for non-streamed transactions.
+        if !streaming {
+            if self.txn(txn).is_prepared() {
+                { let cb = self.callbacks.begin_prepare; cb(self, txn)?; }
+            } else {
+                { let cb = self.callbacks.begin; cb(self, txn)?; }
+            }
         }
 
         self.iter_txn_init(txn, iterstate)?;
@@ -527,16 +555,30 @@ impl ReorderBuffer {
                 break;
             };
 
-            debug_assert!(prev_lsn == InvalidXLogRecPtr || prev_lsn <= self.change(cur).lsn);
-            prev_lsn = self.change(cur).lsn;
+            // The start-stream callback can only fire once the first change
+            // is at hand (reorderbuffer.c:2273).
+            if *prev_lsn == InvalidXLogRecPtr && streaming {
+                let (origin_id, first_lsn) = {
+                    let c = self.change(cur);
+                    (c.origin_id, c.lsn)
+                };
+                self.txn_mut(txn).origin_id = origin_id;
+                let cb = self
+                    .callbacks
+                    .stream_start
+                    .expect("streamed replay requires the stream_start callback");
+                cb(self, txn, first_lsn)?;
+                *stream_started = true;
+            }
+
+            debug_assert!(*prev_lsn == InvalidXLogRecPtr || *prev_lsn <= self.change(cur).lsn);
+            *prev_lsn = self.change(cur).lsn;
 
             // Set the current xid to detect concurrent aborts, required when
             // changes are decoded before the COMMIT record is processed
-            // (reorderbuffer.c:2300). C's condition is
-            // `streaming || rbtxn_is_prepared(change->txn)`; streaming is
-            // phase-2 (asserted off in process_txn), leaving the prepared arm.
+            // (reorderbuffer.c:2300).
             let change_txn = self.change(cur).txn;
-            if self.txn(change_txn).is_prepared() {
+            if streaming || self.txn(change_txn).is_prepared() {
                 *curtxn = Some(change_txn);
                 setup_check_xid_live(self.txn(change_txn).xid)?;
             }
@@ -554,7 +596,7 @@ impl ReorderBuffer {
                         self.change_mut(si).action = Insert;
                         work = si;
                     }
-                    self.apply_tuple_change(txn, work, specinsert, iterstate)?;
+                    self.apply_tuple_change(txn, work, specinsert, iterstate, streaming)?;
                 }
                 InternalSpecInsert => {
                     if let Some(prev) = specinsert.take() {
@@ -592,13 +634,20 @@ impl ReorderBuffer {
                         relations.push(rel);
                     }
                     let mut change = self.changes[cur as usize].take().expect("live change");
-                    let cb = self.callbacks.apply_truncate;
+                    // ReorderBufferApplyTruncate (reorderbuffer.c:2085).
+                    let cb = if streaming {
+                        self.callbacks
+                            .stream_truncate
+                            .expect("streamed replay requires the stream_truncate callback")
+                    } else {
+                        self.callbacks.apply_truncate
+                    };
                     let r = cb(self, txn, &relations, &mut change);
                     self.changes[cur as usize] = Some(change);
                     r?;
                 }
                 Message => {
-                    self.apply_message(txn, cur)?;
+                    self.apply_message(txn, cur, streaming)?;
                 }
                 Invalidation => {
                     let change = self.changes[cur as usize].take().expect("live change");
@@ -654,7 +703,7 @@ impl ReorderBuffer {
             changes_count += 1;
             if changes_count >= 100 {
                 let cb = self.callbacks.update_progress_txn;
-                cb(self, txn, prev_lsn)?;
+                cb(self, txn, *prev_lsn)?;
                 changes_count = 0;
             }
         }
@@ -669,7 +718,18 @@ impl ReorderBuffer {
         }
         self.totalBytes += self.txn(txn).total_size as i64;
 
-        if self.txn(txn).is_prepared() {
+        // Done with the current changes: send the closing message for this
+        // set depending on the mode (stream_stop vs prepare/commit).
+        if streaming {
+            if *stream_started {
+                let cb = self
+                    .callbacks
+                    .stream_stop
+                    .expect("streamed replay requires the stream_stop callback");
+                cb(self, txn, *prev_lsn)?;
+                *stream_started = false;
+            }
+        } else if self.txn(txn).is_prepared() {
             debug_assert!(!self.txn(txn).sent_prepare());
             let cb = self.callbacks.prepare;
             cb(self, txn, commit_lsn)?;
@@ -684,6 +744,12 @@ impl ReorderBuffer {
                 "output plugin used XID {}",
                 xact::GetCurrentTransactionIdIfAny()
             )));
+        }
+
+        // Remember the command ID and snapshot for the next set of changes
+        // in streaming mode.
+        if streaming {
+            self.save_txn_snapshot(txn, snapshot_now, *command_id);
         }
 
         snapmgr::TeardownHistoricSnapshot(false);
@@ -701,8 +767,15 @@ impl ReorderBuffer {
             xact::RollbackAndReleaseCurrentSubTransaction()?;
         }
 
-        if self.txn(txn).is_prepared() {
-            self.truncate_txn(txn, true)?;
+        // In-progress (streamed) and prepared transactions keep their
+        // identity — truncate the decoded changes; a fully decoded committed
+        // transaction cleans up entirely (reorderbuffer.c:2700).
+        if streaming || self.txn(txn).is_prepared() {
+            if streaming {
+                self.maybe_mark_txn_streamed(txn);
+            }
+            let prepared = self.txn(txn).is_prepared();
+            self.truncate_txn(txn, prepared)?;
             // Reset the CheckXidAlive (reorderbuffer.c:2718).
             xact::SetCheckXidAlive(InvalidTransactionId);
         } else {
@@ -717,6 +790,7 @@ impl ReorderBuffer {
         work: ChangeId,
         specinsert: &mut Option<ChangeId>,
         iterstate: &mut Option<IterState>,
+        streaming: bool,
     ) -> PgResult<()> {
         let (rlocator, has_old, has_new, clear_toast) = match &self.change(work).data {
             ReorderBufferChangeData::Tp {
@@ -761,7 +835,14 @@ impl ReorderBuffer {
                 if !catalog::IsToastRelation(relation) {
                     self.toast_replace(txn, relation, work)?;
                     let mut change = self.changes[work as usize].take().expect("live change");
-                    let cb = self.callbacks.apply_change;
+                    // ReorderBufferApplyChange (reorderbuffer.c:2072).
+                    let cb = if streaming {
+                        self.callbacks
+                            .stream_change
+                            .expect("streamed replay requires the stream_change callback")
+                    } else {
+                        self.callbacks.apply_change
+                    };
                     let r = cb(self, txn, relation, &mut change);
                     self.changes[work as usize] = Some(change);
                     r?;
@@ -784,12 +865,20 @@ impl ReorderBuffer {
         Ok(())
     }
 
-    fn apply_message(&mut self, txn: TxnId, cur: ChangeId) -> PgResult<()> {
-        let mut change = self.changes[cur as usize].take().expect("live change");
+    fn apply_message(&mut self, txn: TxnId, cur: ChangeId, streaming: bool) -> PgResult<()> {
+        let change = self.changes[cur as usize].take().expect("live change");
         let lsn = change.lsn;
+        // ReorderBufferApplyMessage (reorderbuffer.c:2098).
+        let cb = if streaming {
+            self.callbacks
+                .stream_message
+                .expect("streamed replay requires the stream_message callback")
+        } else {
+            self.callbacks.message
+        };
         let r = match &change.data {
             ReorderBufferChangeData::Msg { prefix, message } => {
-                { let cb = self.callbacks.message; cb(self, Some(txn), lsn, true, prefix.as_str(), message) }
+                cb(self, Some(txn), lsn, true, prefix.as_str(), message)
             }
             _ => unreachable!("message change carries Msg data"),
         };
@@ -808,8 +897,22 @@ impl ReorderBuffer {
         };
         self.txn_mut(txn).xact_time = abort_time;
 
+        // For streamed transactions notify the remote node about the abort,
+        // and run this txn's own invalidations so future decoding doesn't
+        // reuse cache entries loaded under its (DDL) view
+        // (reorderbuffer.c:2874).
         if self.txn(txn).is_streamed() {
-            unported("rb->stream_abort (streaming): phase-2");
+            let cb = self
+                .callbacks
+                .stream_abort
+                .expect("streamed abort requires the stream_abort callback");
+            cb(self, txn, lsn)?;
+
+            if !self.txn(txn).invalidations.is_empty() {
+                let invals = std::mem::take(&mut self.txn_mut(txn).invalidations);
+                self.immediate_invalidation(&invals)?;
+                self.txn_mut(txn).invalidations = invals;
+            }
         }
 
         self.txn_mut(txn).final_lsn = lsn;
@@ -825,8 +928,13 @@ impl ReorderBuffer {
             }
             let txn = head;
             if TransactionIdPrecedes(self.txn(txn).xid, oldest_running_xid) {
+                // Notify the remote node about the crash/immediate restart.
                 if self.txn(txn).is_streamed() {
-                    unported("rb->stream_abort (streaming): phase-2");
+                    let cb = self
+                        .callbacks
+                        .stream_abort
+                        .expect("streamed abort requires the stream_abort callback");
+                    cb(self, txn, InvalidXLogRecPtr)?;
                 }
                 self.cleanup_txn(txn)?;
             } else {

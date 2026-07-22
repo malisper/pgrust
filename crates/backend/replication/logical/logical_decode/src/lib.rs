@@ -114,6 +114,14 @@ pub fn LogicalDecodingProcessRecord(ctx: &mut LogicalDecodingContext) -> PgResul
         endptr: ctx.reader.v.EndRecPtr,
     };
 
+    // Mirror ReorderBufferCanStartStreaming's decoding-context half into the
+    // buffer before dispatch (reorderbuffer.c:4285): a consistent snapshot
+    // that does not skip the record being decoded. Eviction mid-record reads
+    // this instead of reaching the builder across the crate boundary.
+    ctx.reorder.streaming_ready = ctx.snapshot_builder.current_state()
+        == snapbuild::SnapBuildState::Consistent
+        && !ctx.snapshot_builder.xact_needs_skip(buf.origptr);
+
     let txid = ctx.reader.XLogRecGetTopXid();
     if TransactionIdIsValid(txid) {
         let xid = ctx.reader.XLogRecGetXid();

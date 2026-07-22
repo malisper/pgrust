@@ -8,7 +8,7 @@ use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 use ::types_error::{PgResult, ERROR};
 use ::types_storage::File;
 
-use crate::io::{file_path_name_lossy, FileClose, FileRead, FileSize, FileWrite};
+use crate::io::{file_path_name_lossy, FileClose, FileRead, FileSize, FileTruncate, FileWrite};
 use crate::temp::OpenTemporaryFile;
 use crate::vfd::{get_errno, loc};
 
@@ -160,7 +160,124 @@ pub fn BufFileOpenFileSet<'mcx>(
     })
 }
 
+/// `BufFileOpenFileSet` with C's missing_ok=true arm: None when no segment
+/// exists.
+pub fn BufFileOpenFileSetMaybe<'mcx>(
+    mcx: Mcx<'mcx>,
+    fileset: &crate::fileset::FileSet,
+    name: &str,
+    read_only: bool,
+) -> PgResult<Option<BufFile<'mcx>>> {
+    let base = fileset.name_path(name);
+    let mode = if read_only { libc::O_RDONLY } else { libc::O_RDWR };
+    let probe = fileset.open_seg(&seg_name(base.as_bytes(), 0), mode)?;
+    if probe.0 <= 0 {
+        return Ok(None);
+    }
+    // Hand the probed segment back and reopen the whole chain uniformly.
+    FileClose(probe)?;
+    Ok(Some(BufFileOpenFileSet(mcx, fileset, name, read_only)?))
+}
+
+/// `BufFileDeleteFileSet` (buffile.c:379): unlink every segment of a named
+/// fileset file.
+pub fn BufFileDeleteFileSet(
+    fileset: &crate::fileset::FileSet,
+    name: &str,
+    missing_ok: bool,
+) -> PgResult<()> {
+    let base = fileset.name_path(name);
+    let mut found = false;
+    let mut segment = 0usize;
+    loop {
+        let seg = seg_name(base.as_bytes(), segment);
+        if !crate::temp::PathNameDeleteTemporaryFile(&seg, false)? {
+            break;
+        }
+        found = true;
+        segment += 1;
+    }
+    if !found && !missing_ok {
+        ereport(ERROR)
+            .errcode_for_file_access()
+            .errmsg(format!("could not delete unknown temporary file \"{base}\""))
+            .finish(loc("BufFileDeleteFileSet"))?;
+    }
+    Ok(())
+}
+
 impl<'mcx> BufFile<'mcx> {
+    /// `BufFileTruncateFileSet` (buffile.c:911): truncate at (fileno,
+    /// offset), removing whole segments past the point.
+    pub fn truncate_fileset(&mut self, fileno: i32, offset: i64) -> PgResult<()> {
+        let base = self
+            .seg_base
+            .as_ref()
+            .map(|b| b.to_vec())
+            .expect("truncate_fileset on a fileset BufFile");
+        let mut num_files = self.files.len() as i32;
+        let mut new_file = fileno;
+        let mut new_offset = self.cur_offset;
+
+        // Remove segments past the target; truncate the target in place.
+        // A segment truncated to offset 0 is removed too, unless it is the
+        // first one.
+        let mut i = self.files.len() as i32 - 1;
+        while i >= fileno {
+            if (i != fileno || offset == 0) && i != 0 {
+                let seg = seg_name(&base, i as usize);
+                FileClose(self.files[i as usize])?;
+                if !crate::temp::PathNameDeleteTemporaryFile(&seg, false)? {
+                    ereport(ERROR)
+                        .errcode_for_file_access()
+                        .errmsg(format!("could not delete fileset \"{seg}\""))
+                        .finish(loc("BufFileTruncateFileSet"))?;
+                }
+                num_files -= 1;
+                new_offset = MAX_PHYSICAL_FILESIZE;
+                if i == fileno {
+                    new_file -= 1;
+                }
+            } else {
+                if FileTruncate(self.files[i as usize], offset, 0)? < 0 {
+                    ereport(ERROR)
+                        .with_saved_errno(get_errno())
+                        .errcode_for_file_access()
+                        .errmsg(format!(
+                            "could not truncate file \"{}\": %m",
+                            file_path_name_lossy(self.files[i as usize])
+                        ))
+                        .finish(loc("BufFileTruncateFileSet"))?;
+                }
+                num_files = i + 1;
+                new_offset = offset;
+            }
+            i -= 1;
+        }
+        self.files.truncate(num_files as usize);
+
+        // Adjust the buffered position to the new end where it overlaps.
+        if new_file == self.cur_file
+            && new_offset >= self.cur_offset
+            && new_offset <= self.cur_offset + self.nbytes as i64
+        {
+            if new_offset <= self.cur_offset + self.pos as i64 {
+                self.pos = (new_offset - self.cur_offset) as i32;
+            }
+            self.nbytes = (new_offset - self.cur_offset) as i32;
+        } else if new_file == self.cur_file && new_offset < self.cur_offset {
+            self.cur_offset = new_offset;
+            self.pos = 0;
+            self.nbytes = 0;
+        } else if new_file < self.cur_file {
+            self.cur_file = new_file;
+            self.cur_offset = new_offset;
+            self.pos = 0;
+            self.nbytes = 0;
+        }
+        Ok(())
+    }
+
     fn extend(&mut self) -> PgResult<()> {
         let pfile = match &self.seg_base {
             None => OpenTemporaryFile(self.is_inter_xact)?,

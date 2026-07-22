@@ -85,7 +85,7 @@ impl InFuncs {
 }
 
 // begin_replication_step (worker.c:501).
-fn begin_replication_step(mcx: Mcx<'_>) -> PgResult<()> {
+pub(crate) fn begin_replication_step(mcx: Mcx<'_>) -> PgResult<()> {
     if !xact::IsTransactionState() {
         xact::StartTransactionCommand()?;
         crate::maybe_reread_subscription(mcx)?;
@@ -96,7 +96,7 @@ fn begin_replication_step(mcx: Mcx<'_>) -> PgResult<()> {
 }
 
 // end_replication_step (worker.c:524).
-fn end_replication_step() -> PgResult<()> {
+pub(crate) fn end_replication_step() -> PgResult<()> {
     snapmgr::PopActiveSnapshot()?;
     xact::CommandCounterIncrement()
 }
@@ -123,12 +123,22 @@ fn should_apply_changes_for_rel(entry: &LogicalRepRelMapEntry) -> bool {
     }
 }
 
-// apply_dispatch (worker.c:3368).
+// apply_dispatch (worker.c:3368). C intercepts streamed chunks inside each
+// data-message handler (handle_streamed_transaction at their entry); doing it
+// once here is equivalent — inside a streamed chunk every data message spools
+// to the transaction's file instead of applying.
 pub(crate) fn apply_dispatch(mcx: Mcx<'static>, conn: &mut PgConn, buf: &[u8]) -> PgResult<()> {
     if buf.is_empty() {
         return Ok(());
     }
     let action = buf[0];
+    if matches!(
+        action,
+        MSG_RELATION | MSG_TYPE | MSG_INSERT | MSG_UPDATE | MSG_DELETE | MSG_TRUNCATE | MSG_MESSAGE
+    ) && crate::stream_apply::handle_streamed_transaction(action, buf)?
+    {
+        return Ok(());
+    }
     let mut r = Reader::new(&buf[1..]);
     match action {
         MSG_BEGIN => apply_handle_begin(&mut r),
@@ -148,9 +158,14 @@ pub(crate) fn apply_dispatch(mcx: Mcx<'static>, conn: &mut PgConn, buf: &[u8]) -
         MSG_DELETE => apply_handle_delete(mcx, &mut r),
         MSG_TRUNCATE => apply_handle_truncate(mcx, &mut r),
         MSG_MESSAGE => Ok(()), // transactional messages are ignored by apply
-        MSG_STREAM_START | MSG_STREAM_STOP | MSG_STREAM_COMMIT | MSG_STREAM_ABORT
-        | MSG_STREAM_PREPARE => {
-            panic!("unported: streamed transaction apply (phase-2); message '{}'", action as char)
+        MSG_STREAM_START => crate::stream_apply::apply_handle_stream_start(mcx, &mut r),
+        MSG_STREAM_STOP => crate::stream_apply::apply_handle_stream_stop(mcx),
+        MSG_STREAM_COMMIT => crate::stream_apply::apply_handle_stream_commit(mcx, conn, &mut r),
+        MSG_STREAM_ABORT => crate::stream_apply::apply_handle_stream_abort(mcx, &mut r),
+        MSG_STREAM_PREPARE => {
+            // Streamed two-phase is a named follow-up (GL-LOGDEC-1 ASK-1);
+            // the publisher side refuses it before this can arrive.
+            panic!("unported: streamed two-phase apply (stream_prepare); message '{}'", action as char)
         }
         MSG_BEGIN_PREPARE => apply_handle_begin_prepare(&mut r),
         MSG_PREPARE => apply_handle_prepare(mcx, conn, &mut r),
@@ -174,7 +189,7 @@ fn apply_handle_begin(r: &mut Reader<'_>) -> PgResult<()> {
     Ok(())
 }
 
-// apply_handle_commit (worker.c:1010) + apply_handle_commit_internal (:2258).
+// apply_handle_commit (worker.c:1010).
 fn apply_handle_commit(mcx: Mcx<'static>, conn: &mut PgConn, r: &mut Reader<'_>) -> PgResult<()> {
     let commit = logicalproto::logicalrep_read_commit(r)?;
 
@@ -191,6 +206,17 @@ fn apply_handle_commit(mcx: Mcx<'static>, conn: &mut PgConn, r: &mut Reader<'_>)
             .finish(loc("apply_handle_commit"))?;
     }
 
+    apply_handle_commit_internal(mcx, &commit)?;
+    crate::tablesync::process_syncing_tables(mcx, conn, commit.end_lsn)?;
+    Ok(())
+}
+
+// apply_handle_commit_internal (worker.c:2258), shared by the live COMMIT and
+// the streamed STREAM COMMIT replay.
+pub(crate) fn apply_handle_commit_internal(
+    mcx: Mcx<'static>,
+    commit: &logicalproto::LogicalRepCommitData,
+) -> PgResult<()> {
     if xact::IsTransactionState() {
         // Update origin state so streaming restarts from the right position
         // after a crash: the session origin lsn/timestamp ride the local
@@ -209,7 +235,6 @@ fn apply_handle_commit(mcx: Mcx<'static>, conn: &mut PgConn, r: &mut Reader<'_>)
     }
 
     IN_REMOTE_TRANSACTION.set(false);
-    crate::tablesync::process_syncing_tables(mcx, conn, commit.end_lsn)?;
     Ok(())
 }
 
