@@ -3046,7 +3046,8 @@ fn merge_join_arm<'mcx>(
 ) -> ProcResult {
     let mj = &mut **mj;
     // MJSORT dispatch hook (the "merge join after sort" runtime car,
-    // PGRUST_RUNTIME_MJSORT, default OFF — lanev2/runtime_mergejoin.rs):
+    // PGRUST_RUNTIME_MJSORT, DEFAULT ON since the GL-MJSORT-1 flip, kill
+    // iff exactly 0|off — lanev2/runtime_mergejoin.rs):
     // whole-node ownership (both sorts + the merge run on the morsel
     // runtime; the adopted face serves the joined pairs). One relaxed
     // cached-bool load + compare on the default path; on refuse this
