@@ -313,6 +313,10 @@ pub fn InitProcGlobal(cfg: &ProcGlobalConfig) {
         .map(|_| SyncCell::new(InvalidOid))
         .collect::<Vec<_>>()
         .leak();
+    let fp_use_counts: &'static [SyncCell<i32>] = (0..total as usize * groups as usize)
+        .map(|_| SyncCell::new(0i32))
+        .collect::<Vec<_>>()
+        .leak();
 
     let mut procs = Vec::with_capacity(total as usize);
     for i in 0..total {
@@ -320,6 +324,8 @@ pub fn InitProcGlobal(cfg: &ProcGlobalConfig) {
         proc.fpLockBits.set(fp_bits[(i * groups) as usize..].as_ptr());
         proc.fpRelId
             .set(fp_relids[(i * slots_per_backend) as usize..].as_ptr());
+        proc.fpUseCounts
+            .set(fp_use_counts[(i * groups) as usize..].as_ptr());
 
         // Prepared-xact dummy PGPROCs never run: no sema/latch/fpInfoLock.
         if i < max_backends + NUM_AUXILIARY_PROCS {
@@ -471,6 +477,9 @@ pub fn ProcGlobalResetAfterCrash() {
                 }
                 for cell in proc.fp_rel_id(groups) {
                     cell.set(InvalidOid);
+                }
+                for cell in proc.fp_use_counts(groups) {
+                    cell.set(0);
                 }
             }
         }

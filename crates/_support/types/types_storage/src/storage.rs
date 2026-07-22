@@ -672,6 +672,12 @@ pub struct PGPROC {
     // [FPL] views into the leaked fast-path arena set by InitProcGlobal.
     pub fpLockBits: SyncCell<*const SyncCell<uint64>>,
     pub fpRelId: SyncCell<*const SyncCell<Oid>>,
+    // Per-group used-slot counts (C's process-local FastPathLocalUseCounts).
+    // Written only by the proc's owning thread, and only while it holds
+    // fpInfoLock exclusive; the owner may read them unlocked (C-exact —
+    // "never lower than the true count"). Keyed by PROC rather than thread
+    // so a proc identity leased across pool workers keeps its counts.
+    pub fpUseCounts: SyncCell<*const SyncCell<i32>>,
     pub fpVXIDLock: AtomicBool,        // [FPL]
     pub fpLocalTransactionId: AtomicU32, // [FPL]
     pub lockGroupLeader: AtomicI32,    // ProcNumber [LEAD]
@@ -776,6 +782,7 @@ impl PGPROC {
             fpInfoLock: LWLock::default(),
             fpLockBits: SyncCell::new(core::ptr::null()),
             fpRelId: SyncCell::new(core::ptr::null()),
+            fpUseCounts: SyncCell::new(core::ptr::null()),
             fpVXIDLock: AtomicBool::new(false),
             fpLocalTransactionId: AtomicU32::new(0),
             lockGroupLeader: AtomicI32::new(INVALID_PROC_NUMBER),
@@ -797,6 +804,13 @@ impl PGPROC {
                 groups * FP_LOCK_SLOTS_PER_GROUP as usize,
             )
         }
+    }
+
+    /// SAFETY contract: caller is the proc's owning thread (unlocked reads,
+    /// C-exact), or holds fpInfoLock (remote diagnostics); writes require
+    /// owning thread + fpInfoLock exclusive. groups == fpLockGroupsPerBackend.
+    pub unsafe fn fp_use_counts(&self, groups: usize) -> &[SyncCell<i32>] {
+        unsafe { core::slice::from_raw_parts(self.fpUseCounts.get(), groups) }
     }
 }
 

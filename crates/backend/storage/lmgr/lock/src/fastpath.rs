@@ -1,4 +1,3 @@
-use std::cell::Cell;
 use std::sync::atomic::Ordering::Relaxed;
 
 use types_core::{
@@ -22,8 +21,6 @@ pub(crate) const FAST_PATH_MASK: u64 = (1 << FAST_PATH_BITS_PER_SLOT) - 1;
 pub(crate) const FAST_PATH_STRONG_LOCK_HASH_BITS: u32 = 10;
 pub(crate) const FAST_PATH_STRONG_LOCK_HASH_PARTITIONS: usize =
     1 << FAST_PATH_STRONG_LOCK_HASH_BITS;
-
-const FP_LOCK_GROUPS_PER_BACKEND_MAX: usize = 1024;
 
 pub(crate) fn FastPathStrongLockHashPartition(hashcode: u32) -> u32 {
     hashcode % FAST_PATH_STRONG_LOCK_HASH_PARTITIONS as u32
@@ -90,14 +87,6 @@ pub(crate) fn reset_strong_locks_after_crash() {
     }
 }
 
-const ZERO_USE: Cell<i32> = Cell::new(0);
-
-thread_local! {
-    // Never lower than the true count; only we add locks on our own behalf.
-    static FAST_PATH_LOCAL_USE_COUNTS: [Cell<i32>; FP_LOCK_GROUPS_PER_BACKEND_MAX] =
-        const { [ZERO_USE; FP_LOCK_GROUPS_PER_BACKEND_MAX] };
-}
-
 pub(crate) fn fp_groups_per_backend() -> u32 {
     lmgr_proc::ProcGlobal().fpLockGroupsPerBackend
 }
@@ -112,19 +101,15 @@ pub(crate) fn fast_path_rel_group(relid: Oid) -> u32 {
     ((relid as u64).wrapping_mul(49157) & (fp_groups_per_backend() as u64 - 1)) as u32
 }
 
+// Per-proc used-slot counts (C's process-local FastPathLocalUseCounts, kept
+// on the PGPROC so a proc identity leased across pool workers keeps them).
+// Owner-only unlocked read, C-exact: never lower than the true count — only
+// we add locks on our own behalf; a remote transfer can leave it high until
+// our next ungrant recomputes it.
 fn local_use_count(group: u32) -> i32 {
-    FAST_PATH_LOCAL_USE_COUNTS.with(|c| c[group as usize].get())
-}
-
-fn bump_local_use_count(group: u32) {
-    FAST_PATH_LOCAL_USE_COUNTS.with(|c| {
-        let cell = &c[group as usize];
-        cell.set(cell.get() + 1);
-    });
-}
-
-fn set_local_use_count(group: u32, v: i32) {
-    FAST_PATH_LOCAL_USE_COUNTS.with(|c| c[group as usize].set(v));
+    let proc = lmgr_proc::GetPGProcByNumber(crate::my_procno());
+    // SAFETY: own proc; counts are written only by us (under our fpInfoLock).
+    unsafe { proc.fp_use_counts(fp_groups_per_backend() as usize)[group as usize].get() }
 }
 
 pub(crate) fn eligible_for_relation_fast_path(locktag: &LOCKTAG, mode: LOCKMODE) -> bool {
@@ -207,6 +192,7 @@ pub(crate) fn fp_info_lock(proc: &PGPROC) -> &lwlock::LWLock {
 pub(crate) struct FpView<'a> {
     bits: &'a [SyncCell<u64>],
     relids: &'a [SyncCell<Oid>],
+    use_counts: &'a [SyncCell<i32>],
 }
 
 /// SAFETY contract: proc's fpInfoLock held.
@@ -215,6 +201,7 @@ pub(crate) unsafe fn fp_view(proc: &PGPROC) -> FpView<'_> {
     FpView {
         bits: proc.fp_lock_bits(groups),
         relids: proc.fp_rel_id(groups),
+        use_counts: proc.fp_use_counts(groups),
     }
 }
 
@@ -258,6 +245,16 @@ impl FpView<'_> {
     fn set_relid(&self, f: u32, relid: Oid) {
         self.relids[f as usize].set(relid);
     }
+
+    // Owner-only (writes require the owner holding fpInfoLock exclusive).
+    fn bump_use_count(&self, group: u32) {
+        let cell = &self.use_counts[group as usize];
+        cell.set(cell.get() + 1);
+    }
+
+    fn set_use_count(&self, group: u32, v: i32) {
+        self.use_counts[group as usize].set(v);
+    }
 }
 
 /// SAFETY contract: MyProc's fpInfoLock held exclusive.
@@ -281,7 +278,7 @@ pub(crate) unsafe fn FastPathGrantRelationLock(relid: Oid, lockmode: LOCKMODE) -
     if unused_slot < FastPathLockSlotsPerBackend() {
         view.set_relid(unused_slot, relid);
         view.set_lockmode(unused_slot, lockmode);
-        bump_local_use_count(group);
+        view.bump_use_count(group);
         return true;
     }
     false
@@ -306,7 +303,7 @@ pub(crate) unsafe fn FastPathUnGrantRelationLock(relid: Oid, lockmode: LOCKMODE)
             use_count += 1;
         }
     }
-    set_local_use_count(group, use_count);
+    view.set_use_count(group, use_count);
     result
 }
 
