@@ -7,7 +7,7 @@ use crate::rb_error;
 
 const PG_REPLSLOT_DIR: &str = "pg_replslot";
 
-fn replslot_dir() -> Option<PathBuf> {
+pub(crate) fn replslot_dir() -> Option<PathBuf> {
     init_small::globals::DataDir().map(|d| PathBuf::from(d).join(PG_REPLSLOT_DIR))
 }
 
@@ -70,9 +70,12 @@ pub fn StartupReorderBuffer() -> PgResult<()> {
 }
 
 // reorderbuffer.c owns the logical_decoding_work_mem global (guc_tables.c
-// points at it); one per-backend cell, boot value 65536 kB.
+// points at it); one per-backend cell, boot value 65536 kB. Same for the
+// debug_logical_replication_streaming enum (boot value buffered).
 thread_local! {
     static LOGICAL_DECODING_WORK_MEM: std::cell::Cell<i32> = const { std::cell::Cell::new(65536) };
+    static DEBUG_LOGICAL_REPLICATION_STREAMING: std::cell::Cell<i32> =
+        const { std::cell::Cell::new(guc_tables::consts::DEBUG_LOGICAL_REP_STREAMING_BUFFERED) };
 }
 
 pub(crate) fn install_gucs() {
@@ -80,6 +83,12 @@ pub(crate) fn install_gucs() {
         get: || LOGICAL_DECODING_WORK_MEM.get(),
         set: |v| LOGICAL_DECODING_WORK_MEM.set(v),
     });
+    guc_tables::vars::debug_logical_replication_streaming.install_if_absent(
+        guc_tables::GucVarAccessors {
+            get: || DEBUG_LOGICAL_REPLICATION_STREAMING.get(),
+            set: |v| DEBUG_LOGICAL_REPLICATION_STREAMING.set(v),
+        },
+    );
 }
 
 pub fn init_seams() {

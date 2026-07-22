@@ -156,7 +156,9 @@ fs	crates/backend/storage/file/vfs/src/sim_boot.rs	8	DST-REVIEW(provider-seam): 
 env	crates/backend/storage/file/vfs/src/sim_boot.rs	2	DST-REVIEW(provider-seam): PGRUST_PGSHAREDIR/PGRUST_TZDIR are sim-harness asset locators consumed once at boot ingest (§9.3); sim cfg only, dead in product builds
 # --- crates/backend/postmaster/syslogger (32 sites) ---
 fs	crates/backend/postmaster/syslogger/src/lib.rs	32
-# --- crates/backend/replication/logical/reorderbuffer (5 sites) ---
+# --- crates/backend/replication/logical/reorderbuffer (11 sites) ---
+fs	crates/backend/replication/logical/reorderbuffer/src/iter.rs	2	DST-REVIEW(logdec-port): spill-restore file handles riding the iterator state (C TXNEntryFile) — same surface as spill.rs below; vfd/Vfs routing chartered to the DST program
+fs	crates/backend/replication/logical/reorderbuffer/src/spill.rs	4	DST-REVIEW(logdec-port): reorderbuffer spill files under pg_replslot/<slot>/ — direct file IO exactly as C reorderbuffer.c does via fd.c transient files/vfds (single-run scratch data, deleted at startup); vfd/Vfs routing chartered to the DST program
 fs	crates/backend/replication/logical/reorderbuffer/src/startup.rs	4
 fs	crates/backend/replication/logical/reorderbuffer/src/visibility.rs	2	DST-REVIEW(t30-train): standby-logical car — logical-rewrite mapping / catalog-cleanup WAL paths do direct durable file IO exactly as C rewriteheap.c/heapam do; vfd/Vfs routing chartered to the DST program (these are crash-consistency-bearing writes the sim will want to fault)
 # --- crates/backend/replication/logical/snapbuild (7 sites) ---

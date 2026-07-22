@@ -29,7 +29,9 @@ use logicalproto::{
     logicalrep_should_publish_column, logicalrep_write_begin, logicalrep_write_begin_prepare,
     logicalrep_write_commit, logicalrep_write_commit_prepared, logicalrep_write_delete,
     logicalrep_write_insert, logicalrep_write_message, logicalrep_write_prepare,
-    logicalrep_write_rel, logicalrep_write_rollback_prepared, logicalrep_write_truncate,
+    logicalrep_write_rel, logicalrep_write_rollback_prepared, logicalrep_write_stream_abort,
+    logicalrep_write_stream_commit, logicalrep_write_stream_start, logicalrep_write_stream_stop,
+    logicalrep_write_truncate,
     logicalrep_write_typ, logicalrep_write_update, LOGICALREP_PROTO_MAX_VERSION_NUM,
     LOGICALREP_PROTO_MIN_VERSION_NUM, LOGICALREP_PROTO_STREAM_PARALLEL_VERSION_NUM,
     LOGICALREP_PROTO_STREAM_VERSION_NUM, LOGICALREP_PROTO_TWOPHASE_VERSION_NUM,
@@ -39,7 +41,8 @@ use mcx::MemoryContext;
 use reorderbuffer::{ReorderBuffer, ReorderBufferChange, ReorderBufferChangeData, TxnId};
 use types_core::catalog::FirstGenbkiObjectId;
 use types_core::{
-    InvalidOid, InvalidRepOriginId, InvalidTransactionId, Oid, RepOriginId, XLogRecPtr,
+    InvalidOid, InvalidRepOriginId, InvalidTransactionId, InvalidXLogRecPtr, Oid, RepOriginId,
+    TransactionId, XLogRecPtr,
 };
 use types_error::{
     ErrorLocation, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_NAME,
@@ -86,6 +89,9 @@ struct PGOutputData {
     streaming: u8,
     two_phase: bool,
     publish_no_origin: bool,
+    // True between stream_start and stream_stop: data messages carry the
+    // xid prefix and schema tracking keys off the streamed toplevel xid.
+    in_streaming: bool,
     // Loaded Publication copies (C keeps List *publications in pubctx).
     publications: Vec<OwnedPublication>,
 }
@@ -112,6 +118,10 @@ struct PGOutputTxnData {
 struct RelationSyncEntry {
     replicate_valid: bool,
     schema_sent: bool,
+    // Streamed (in-progress) toplevel xids this schema was already sent to;
+    // committed streams fold into schema_sent, aborted ones just drop
+    // (pgoutput.c:120).
+    streamed_txns: Vec<TransactionId>,
     include_gencols_type: u8,
     pubactions: PublicationActions,
     publish_as_relid: Oid,
@@ -124,6 +134,7 @@ impl RelationSyncEntry {
         RelationSyncEntry {
             replicate_valid: false,
             schema_sent: false,
+            streamed_txns: Vec::new(),
             include_gencols_type: PUBLISH_GENCOLS_NONE,
             pubactions: PublicationActions {
                 pubinsert: false,
@@ -180,9 +191,17 @@ fn fc__pg_output_plugin_init(
     cb.rollback_prepared_cb = Some(pgoutput_rollback_prepared_txn);
     cb.filter_by_origin_cb = Some(pgoutput_origin_filter);
     cb.shutdown_cb = Some(pgoutput_shutdown);
-    // C also registers the stream_* callbacks; the decode stack refuses
-    // streaming loudly, and a subscriber that asks for it is rejected in
-    // pgoutput_startup with C's own error.
+    cb.stream_start_cb = Some(pgoutput_stream_start);
+    cb.stream_stop_cb = Some(pgoutput_stream_stop);
+    cb.stream_abort_cb = Some(pgoutput_stream_abort);
+    cb.stream_commit_cb = Some(pgoutput_stream_commit);
+    cb.stream_change_cb = Some(pgoutput_change);
+    cb.stream_message_cb = Some(pgoutput_message);
+    cb.stream_truncate_cb = Some(pgoutput_truncate);
+    // C also registers stream_prepare_cb (streamed two-phase); deliberately
+    // NOT registered: a streamed transaction reaching PREPARE errors with the
+    // wrapper's own "logical streaming requires a stream_prepare_cb callback"
+    // (GL-LOGDEC-1 ASK-1 — named follow-up increment).
     Ok(Datum::from_usize(0))
 }
 
@@ -375,6 +394,7 @@ fn pgoutput_startup(opc: &mut OutputPluginContext, is_init: bool) -> PgResult<()
         streaming: LOGICALREP_STREAM_OFF,
         two_phase: false,
         publish_no_origin: false,
+        in_streaming: false,
         publications: Vec::new(),
     });
 
@@ -405,9 +425,7 @@ fn pgoutput_startup(opc: &mut OutputPluginContext, is_init: bool) -> PgResult<()
                 .finish(loc("pgoutput_startup"))?;
         }
 
-        // Streaming: disabled by default; this plugin build doesn't stream
-        // (the callbacks aren't registered), so requesting it gets C's
-        // "not supported by output plugin" error.
+        // Check if we support the requested streaming mode (pgoutput.c:487).
         if data.streaming == LOGICALREP_STREAM_OFF {
             opc.streaming = false;
         } else if data.streaming == LOGICALREP_STREAM_ON
@@ -666,13 +684,160 @@ fn pgoutput_rollback_prepared_txn(
     OutputPluginWrite(opc, true)
 }
 
-// maybe_send_schema (pgoutput.c:724), non-streaming arm.
+// pgoutput_stream_start (pgoutput.c:1838).
+fn pgoutput_stream_start(
+    opc: &mut OutputPluginContext,
+    rb: &mut ReorderBuffer,
+    txn: TxnId,
+) -> PgResult<()> {
+    let data = data_from(opc);
+    let t = rb.txn(txn);
+    // Send the origin id only in the first stream for this xid.
+    let send_replication_origin =
+        t.origin_id != InvalidRepOriginId && !t.is_streamed();
+    let first_segment = !t.is_streamed();
+    let (xid, origin_id) = (t.xid, t.origin_id);
+
+    // We can't nest streaming of transactions.
+    debug_assert!(!data.in_streaming);
+
+    OutputPluginPrepareWrite(opc, !send_replication_origin)?;
+    logicalrep_write_stream_start(opc.out.as_mut_vec(), xid, first_segment);
+
+    send_repl_origin(opc, origin_id, InvalidXLogRecPtr, send_replication_origin)?;
+
+    OutputPluginWrite(opc, true)?;
+
+    // We're streaming a chunk of transaction now.
+    data.in_streaming = true;
+    Ok(())
+}
+
+// pgoutput_stream_stop (pgoutput.c:1870).
+fn pgoutput_stream_stop(
+    opc: &mut OutputPluginContext,
+    _rb: &mut ReorderBuffer,
+    _txn: TxnId,
+) -> PgResult<()> {
+    let data = data_from(opc);
+    // We should be streaming a transaction.
+    debug_assert!(data.in_streaming);
+
+    OutputPluginPrepareWrite(opc, true)?;
+    logicalrep_write_stream_stop(opc.out.as_mut_vec());
+    OutputPluginWrite(opc, true)?;
+
+    data.in_streaming = false;
+    Ok(())
+}
+
+// pgoutput_stream_abort (pgoutput.c:1891): discard the streamed (sub)txn
+// downstream. xid == subxid for a toplevel abort.
+fn pgoutput_stream_abort(
+    opc: &mut OutputPluginContext,
+    rb: &mut ReorderBuffer,
+    txn: TxnId,
+    abort_lsn: XLogRecPtr,
+) -> PgResult<()> {
+    let data = data_from(opc);
+    // Aborts happen outside a streaming block.
+    debug_assert!(!data.in_streaming);
+    // Abort info rides only for parallel apply (protocol >= 4).
+    let write_abort_info = data.streaming == LOGICALREP_STREAM_PARALLEL;
+
+    let t = rb.txn(txn);
+    let subxid = t.xid;
+    let abort_time = t.xact_time;
+    let topxid = if t.is_known_subxact() { t.toplevel_xid } else { t.xid };
+
+    OutputPluginPrepareWrite(opc, true)?;
+    logicalrep_write_stream_abort(
+        opc.out.as_mut_vec(),
+        topxid,
+        subxid,
+        abort_lsn,
+        abort_time,
+        write_abort_info,
+    );
+    OutputPluginWrite(opc, true)?;
+
+    cleanup_rel_sync_cache(topxid, false);
+    Ok(())
+}
+
+// pgoutput_stream_commit (pgoutput.c:1924): apply the streamed transaction
+// downstream.
+fn pgoutput_stream_commit(
+    opc: &mut OutputPluginContext,
+    rb: &mut ReorderBuffer,
+    txn: TxnId,
+    commit_lsn: XLogRecPtr,
+) -> PgResult<()> {
+    let data = data_from(opc);
+    // The commit happens outside a streaming block.
+    debug_assert!(!data.in_streaming);
+    debug_assert!(rb.txn(txn).is_streamed());
+
+    OutputPluginUpdateProgress(opc, false)?;
+
+    let t = rb.txn(txn);
+    let (xid, end_lsn, commit_time) = (t.xid, t.end_lsn, t.xact_time);
+
+    OutputPluginPrepareWrite(opc, true)?;
+    logicalrep_write_stream_commit(opc.out.as_mut_vec(), xid, commit_lsn, end_lsn, commit_time);
+    OutputPluginWrite(opc, true)?;
+
+    cleanup_rel_sync_cache(xid, true);
+    Ok(())
+}
+
+// cleanup_rel_sync_cache (pgoutput.c:2352): drop the finished streamed xid
+// from every entry's list; a committed stream folds into schema_sent (the
+// subscriber keeps the schema), an aborted one just forgets it.
+fn cleanup_rel_sync_cache(xid: TransactionId, is_commit: bool) {
+    REL_SYNC_CACHE.with(|c| {
+        let mut borrow = c.borrow_mut();
+        let Some(cache) = borrow.as_mut() else {
+            return;
+        };
+        for entry in cache.values() {
+            let mut e = entry.borrow_mut();
+            if let Some(pos) = e.streamed_txns.iter().position(|&x| x == xid) {
+                if is_commit {
+                    e.schema_sent = true;
+                }
+                e.streamed_txns.swap_remove(pos);
+            }
+        }
+    });
+}
+
+// maybe_send_schema (pgoutput.c:724). In a streamed run the schema rides
+// with the streamed toplevel xid and is tracked per-xid (the stream may
+// abort, in which case the subscriber forgot it); the change's own (sub)txn
+// xid prefixes the messages.
 fn maybe_send_schema(
     opc: &mut OutputPluginContext,
+    rb: &ReorderBuffer,
+    change_txn: TxnId,
     relation: &RelationData<'static>,
     relentry: &Rc<RefCell<RelationSyncEntry>>,
 ) -> PgResult<()> {
-    if relentry.borrow().schema_sent {
+    let data = data_from(opc);
+    let (xid, topxid) = if data.in_streaming {
+        let ct = rb.txn(change_txn);
+        let topxid = if ct.is_known_subxact() { ct.toplevel_xid } else { ct.xid };
+        (ct.xid, topxid)
+    } else {
+        (InvalidTransactionId, InvalidTransactionId)
+    };
+
+    let schema_sent = if data.in_streaming {
+        relentry.borrow().streamed_txns.contains(&topxid)
+    } else {
+        relentry.borrow().schema_sent
+    };
+    if schema_sent {
         return Ok(());
     }
 
@@ -681,18 +846,24 @@ fn maybe_send_schema(
     if publish_as_relid != relation.rd_id {
         let ancestor = relcache::store::RelationIdGetRelation(publish_as_relid)?
             .unwrap_or_else(|| panic!("could not open relation {publish_as_relid}"));
-        send_relation_and_attrs(opc, &ancestor, relentry)?;
+        send_relation_and_attrs(opc, xid, &ancestor, relentry)?;
     }
 
-    send_relation_and_attrs(opc, relation, relentry)?;
+    send_relation_and_attrs(opc, xid, relation, relentry)?;
 
-    relentry.borrow_mut().schema_sent = true;
+    if data.in_streaming {
+        // set_schema_sent_in_streamed_txn (pgoutput.c:2031).
+        relentry.borrow_mut().streamed_txns.push(topxid);
+    } else {
+        relentry.borrow_mut().schema_sent = true;
+    }
     Ok(())
 }
 
 // send_relation_and_attrs (pgoutput.c:795).
 fn send_relation_and_attrs(
     opc: &mut OutputPluginContext,
+    xid: TransactionId,
     relation: &RelationData<'static>,
     relentry: &Rc<RefCell<RelationSyncEntry>>,
 ) -> PgResult<()> {
@@ -701,7 +872,6 @@ fn send_relation_and_attrs(
         (e.columns.clone(), e.include_gencols_type)
     };
     let columns = columns.as_deref();
-    let xid = InvalidTransactionId; // not streaming
 
     // Send type info for user-created column types (hand-assigned OIDs are
     // "built in" and skipped).
@@ -798,14 +968,15 @@ fn pgoutput_change(
 
     // Row filters were refused at entry-validation time; no transformation.
 
-    // Send BEGIN if this is the first published change of the transaction.
+    // Send BEGIN if this is the first published change of the transaction
+    // (streamed txns have no txndata; stream_start already went out).
     if let Some(txndata) = txndata_from(rb, txn) {
         if !txndata.sent_begin_txn {
             pgoutput_send_begin(opc, rb, txn)?;
         }
     }
 
-    maybe_send_schema(opc, relation, &relentry)?;
+    maybe_send_schema(opc, rb, change.txn(), relation, &relentry)?;
 
     let (columns, include_gencols_type) = {
         let e = relentry.borrow();
@@ -813,7 +984,13 @@ fn pgoutput_change(
     };
     let columns = columns.as_deref();
     let binary = data.binary;
-    let xid = InvalidTransactionId; // not streaming
+    // In a streamed block every data message carries the change's own
+    // (sub)transaction xid (pgoutput.c:1505).
+    let xid = if data.in_streaming {
+        rb.txn(change.txn()).xid
+    } else {
+        InvalidTransactionId
+    };
 
     OutputPluginPrepareWrite(opc, true)?;
 
@@ -899,7 +1076,7 @@ fn pgoutput_truncate(
             }
         }
         for (relation, relentry) in &queued {
-            maybe_send_schema(opc, relation, relentry)?;
+            maybe_send_schema(opc, rb, change.txn(), relation, relentry)?;
         }
 
         let (cascade, restart_seqs) = match &change.data {
@@ -910,11 +1087,16 @@ fn pgoutput_truncate(
             } => (*cascade, *restart_seqs),
             _ => unreachable!("truncate callback with non-truncate payload"),
         };
+        let xid = if data.in_streaming {
+            rb.txn(change.txn()).xid
+        } else {
+            InvalidTransactionId
+        };
 
         OutputPluginPrepareWrite(opc, true)?;
         logicalrep_write_truncate(
             opc.out.as_mut_vec(),
-            InvalidTransactionId,
+            xid,
             &relids,
             cascade,
             restart_seqs,
@@ -939,8 +1121,13 @@ fn pgoutput_message(
         return Ok(());
     }
 
+    let mut xid = InvalidTransactionId;
     if transactional {
         let txn = txn.expect("transactional message has a txn");
+        // Remember the xid for the message in streaming case (pgoutput.c:1736).
+        if data.in_streaming {
+            xid = rb.txn(txn).xid;
+        }
         if let Some(txndata) = txndata_from(rb, txn) {
             if !txndata.sent_begin_txn {
                 pgoutput_send_begin(opc, rb, txn)?;
@@ -951,7 +1138,7 @@ fn pgoutput_message(
     OutputPluginPrepareWrite(opc, true)?;
     logicalrep_write_message(
         opc.out.as_mut_vec(),
-        InvalidTransactionId,
+        xid,
         message_lsn,
         transactional,
         prefix,
@@ -1295,6 +1482,7 @@ fn get_rel_sync_entry(
     {
         let mut e = entry.borrow_mut();
         e.schema_sent = false;
+        e.streamed_txns.clear();
         e.include_gencols_type = PUBLISH_GENCOLS_NONE;
         e.columns = None;
         e.pubactions = PublicationActions {
