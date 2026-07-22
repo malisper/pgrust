@@ -372,7 +372,10 @@ impl<'a, 'mcx> ElemReader<'a, 'mcx> {
                 _ => {
                     if c == self.typdelim || c == b'}' {
                         self.elembuf.truncate(dstlen);
-                        if !has_escapes && eq_null_ci(&self.elembuf) {
+                        // C: `Array_nulls && !has_escapes && pg_strcasecmp
+                        // (.., "NULL") == 0` — with array_nulls=off an
+                        // unquoted NULL is the literal string (arrayfuncs.c).
+                        if crate::array_nulls() && !has_escapes && eq_null_ci(&self.elembuf) {
                             return Ok(Some(ArrayTok::ElemNull));
                         }
                         return Ok(Some(ArrayTok::Elem));
