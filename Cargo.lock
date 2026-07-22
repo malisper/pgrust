@@ -8595,6 +8595,7 @@ dependencies = [
  "indexam",
  "init_small",
  "inval",
+ "ipc",
  "latch",
  "launcher",
  "lmgr",
