@@ -375,6 +375,47 @@ fn wait_engaged(
     }
 }
 
+/// GL-SEATLIFT-1 arming switch: PGRUST_RUNTIME_POOL_SEATLIFT, armed iff
+/// exactly `1`/`on` (DEFAULT OFF — the measured-increment posture; the
+/// scatter-accept knob's spelling convention).
+fn seatlift_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    crate::once_val(&ON, || {
+        matches!(
+            std::env::var("PGRUST_RUNTIME_POOL_SEATLIFT").ok().as_deref().map(str::trim),
+            Some("1") | Some("on")
+        )
+    })
+}
+
+/// GL-SEATLIFT-1 band ceiling (exclusive): PGRUST_RUNTIME_POOL_SEATLIFT_MAXDOP,
+/// default 12 — the GL-RADIX-2 v2p1 diagnostic's derived boundary (the +1
+/// seat wins d4/d8, HURTS at d16; the ladder probes the boundary through
+/// this override).
+fn seatlift_maxdop() -> usize {
+    static N: OnceLock<usize> = OnceLock::new();
+    crate::once_val(&N, || {
+        std::env::var("PGRUST_RUNTIME_POOL_SEATLIFT_MAXDOP")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(12)
+    })
+}
+
+/// GL-SEATLIFT-1 ticket count (pure; the unit-pinned law): sink admissions
+/// in the band `2 <= dop < maxdop` publish dop+1 tickets when armed;
+/// everything else — scan-gate channels, dop==1, at/over the ceiling,
+/// disarmed — publishes dop exactly (knob-OFF byte-identity is structural).
+/// dop==1 is EXCLUDED by design: the sink arms' single-Local pass-through
+/// contract keys off dop==1 ⇒ exactly one partial.
+fn seatlift_tickets(dop: usize, sinks_gate: bool, armed: bool, maxdop: usize) -> usize {
+    if armed && sinks_gate && (2..maxdop).contains(&dop) {
+        dop + 1
+    } else {
+        dop
+    }
+}
+
 /// M2 inc-2: build the POOL-DB channel for one engagement — the per-RG
 /// board plus the runtime bound descriptor. The descriptor MUST ride the
 /// submission (`Runtime::submit_pinned_bound` — the pool-visible active
@@ -384,6 +425,18 @@ fn wait_engaged(
 /// sinks gate, no driver, no pool identity wiring, lock-group failure) —
 /// submit plain-pinned and the layering is inc-1 exactly. Call AFTER
 /// set_standing_driver (the serve dispatches through it).
+///
+/// GL-SEATLIFT-1 (dop-banded +1 pool seat on sink admissions, DEFAULT
+/// OFF): the pool channel PARKS its leader, so an engagement fields one
+/// fewer accept thread than the hybrid's participating-leader plan — the
+/// measured d4/d8 residual on grouped sinks (~6% of the α≈1 gap is the
+/// seat; GL-RADIX-2 v2p1 diagnostic). Armed sink admissions in the band
+/// publish ONE extra ticket: the extra pool worker claims it and drives an
+/// ordinary external lane (sink Locals are sized nthreads +
+/// MAX_EXTERNAL_LANES, and the combine consumes claimed() partials by
+/// construction — an extra participant is inside every existing
+/// invariant). Composes with rung-3 sticky: the extra seat is a normal
+/// serve, so retention/eviction see nothing new.
 pub(super) fn try_pool_channel(
     shared: &Arc<parallel::ParallelShared>,
     dop: i32,
@@ -392,7 +445,14 @@ pub(super) fn try_pool_channel(
     if sinks_gate && !standing_sinks_enabled() {
         return None;
     }
-    let entry = parallel::standing::try_engage_pool(shared, dop.max(0) as usize)?;
+    let dop = dop.max(0) as usize;
+    let tickets = seatlift_tickets(dop, sinks_gate, seatlift_enabled(), seatlift_maxdop());
+    let entry = parallel::standing::try_engage_pool(shared, tickets)?;
+    if tickets != dop {
+        // The ladder's arming witness (grep surface): one line per lifted
+        // admission, emitted only after the channel actually engaged.
+        lane_trace(&format!("lanev2: pool seatlift +1 seat (dop={dop} tickets={tickets})"));
+    }
     let payload: Arc<dyn std::any::Any + Send + Sync> = Arc::clone(&entry) as _;
     Some((entry, runtime::BoundDescriptor {
         serve: pooldb_serve,
@@ -436,6 +496,34 @@ pub(super) fn drive_pool_serve(
         end
     } else {
         Some(rt.drive_pinned(local, rg))
+    }
+}
+
+#[cfg(test)]
+mod seatlift_tests {
+    use super::seatlift_tickets;
+
+    /// GL-SEATLIFT-1 band law: +1 iff armed ∧ sink ∧ 2 <= dop < maxdop.
+    #[test]
+    fn seatlift_band_law() {
+        // Armed, sink, default ceiling 12: the band.
+        assert_eq!(seatlift_tickets(1, true, true, 12), 1, "dop1 pass-through excluded");
+        assert_eq!(seatlift_tickets(2, true, true, 12), 3);
+        assert_eq!(seatlift_tickets(4, true, true, 12), 5, "d4 win cell lifts");
+        assert_eq!(seatlift_tickets(8, true, true, 12), 9, "d8 win cell lifts");
+        assert_eq!(seatlift_tickets(11, true, true, 12), 12, "band edge inclusive");
+        assert_eq!(seatlift_tickets(12, true, true, 12), 12, "ceiling exclusive");
+        assert_eq!(seatlift_tickets(16, true, true, 12), 16, "d16 no-harm: never lifted");
+        // Scan-gate channels never lift.
+        assert_eq!(seatlift_tickets(4, false, true, 12), 4);
+        // Disarmed (the default): byte-identity — dop exactly, every cell.
+        for d in 0..20 {
+            assert_eq!(seatlift_tickets(d, true, false, 12), d);
+            assert_eq!(seatlift_tickets(d, false, false, 12), d);
+        }
+        // Ceiling override probes the boundary.
+        assert_eq!(seatlift_tickets(12, true, true, 16), 13);
+        assert_eq!(seatlift_tickets(0, true, true, 12), 0, "dop0 refused upstream, untouched");
     }
 }
 
