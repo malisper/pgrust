@@ -92,6 +92,33 @@ pub fn armed() -> bool {
     })
 }
 
+/// GL-SLEASE-3 attribution arm: `PGRUST_RUNTIME_SERIAL_LEASE_SWEEPER=0`
+/// keeps the armed posture but never spawns the sweeper (t35 kill spelling,
+/// default ON). Armed-but-unswept = slot stores + seam wrappers only: no
+/// run is ever flagged, so no admission and no permit is ever held — the
+/// piece-wise separation the residual-tax ladder needs. Consulted only on
+/// the armed path (unarmed boots never read it). NOT a shipping posture:
+/// it silently disables the protective function.
+pub fn sweeper_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_SERIAL_LEASE_SWEEPER").map_or(true, |v| v.trim() != "0")
+    })
+}
+
+/// GL-SLEASE-3 attribution arm: `PGRUST_RUNTIME_SERIAL_LEASE_DONATION=0`
+/// keeps the armed posture (slots + sweeper + safe-point admission) but
+/// leaves the wait-report seams STOCK — no donation wrappers, no IN_WAIT
+/// bracketing (seams_init consults this). An admitted run then HOLDS its
+/// permit across blocking waits (the v1 disease, deliberately): ladder arm
+/// only, never a shipping posture. Consulted only on the armed path.
+pub fn donation_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_RUNTIME_SERIAL_LEASE_DONATION").map_or(true, |v| v.trim() != "0")
+    })
+}
+
 /// Admission floor in milliseconds of run age (default 250). Runs shorter
 /// than this never touch the permit semaphore. `0` = admit at the first
 /// sweep — the closest v2 analog of v1's admit-at-enter, for A/B ladders.
@@ -252,6 +279,10 @@ fn set_state(slot: &Slot, s: u8) {
 // ---------------------------------------------------------------------------
 
 fn ensure_sweeper() {
+    // GL-SLEASE-3 ladder arm: armed-but-unswept (see sweeper_enabled).
+    if !sweeper_enabled() {
+        return;
+    }
     static ONCE: OnceLock<()> = OnceLock::new();
     ONCE.get_or_init(|| {
         #[cfg(not(target_family = "wasm"))]
@@ -278,7 +309,8 @@ fn sweeper() -> ! {
             if started == 0 {
                 continue;
             }
-            let flag_it = match slot.state.load(Ordering::Relaxed) {
+            let state = slot.state.load(Ordering::Relaxed);
+            let flag_it = match state {
                 S_PENDING => now.saturating_sub(started) >= floor,
                 // Re-admission retry cadence for floor-crossed permit-less
                 // runs (see the module doc's bounded-admission story).
@@ -290,7 +322,16 @@ fn sweeper() -> ! {
                 // transitions (the tap defers inside wait spans and the
                 // interrupt flag is consumed by every ProcessInterrupts —
                 // a one-shot raise could strand an un-actioned admit).
-                slot.admit.store(true, Ordering::SeqCst);
+                // swap (not store) feeds the floor-crossing census: a
+                // Pending slot flagged from false = exactly one run newly
+                // crossing the floor (Pending leaves the state exactly once
+                // per run; Deficit re-flags don't re-count). GL-SLEASE-3's
+                // admission-census witness — zero-cost when the lanev2
+                // stats arm is off (the tick is armed-gated).
+                let newly = !slot.admit.swap(true, Ordering::SeqCst);
+                if newly && state == S_PENDING {
+                    crate::lanev2::tick_serial_lease_floor_crossing();
+                }
                 // Raise the owner's CFI flag (timer-thread posting parity).
                 // No latch wake on purpose: a BLOCKED session needs no
                 // permit; it processes the flag at its first safe point
