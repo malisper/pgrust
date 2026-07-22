@@ -545,7 +545,8 @@ fn CommitTransaction(xp: XsPtr) -> PgResult<()> {
     if launcher_seams::at_eoxact_apply_launcher::is_installed() {
         launcher_seams::at_eoxact_apply_launcher::call(true);
     }
-    // on_commit_launcher_wakeup/workers list has no writer while logical rep is unported; guarded.
+    // AtEOXact_LogicalRepWorkers (worker.c, hosted by the launcher crate):
+    // wake the workers of subscriptions this transaction altered.
     if logical_worker_seams::at_eoxact_logical_rep_workers::is_installed() {
         logical_worker_seams::at_eoxact_logical_rep_workers::call(true);
     }

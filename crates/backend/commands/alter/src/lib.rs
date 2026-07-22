@@ -226,8 +226,9 @@ fn check_duplicate_name<'mcx>(
             )? {
                 return Err(report_name_conflict(class_id, name));
             }
-            // C: LogicalRepWorkersWakeupAtCommit(objectId) — fire-and-forget
-            // worker wakeup; no logical replication workers exist here.
+            // Wake up related replication workers to handle this change
+            // quickly (alter.c AlterObjectRename_internal).
+            launcher::LogicalRepWorkersWakeupAtCommit(object_id);
         }
         _ => {
             let name_cache = catalog_objectaddress::get_object_catcache_name(class_id);
