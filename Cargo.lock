@@ -7914,6 +7914,7 @@ name = "ipci"
 version = "0.0.0"
 dependencies = [
  "aclchk_seams",
+ "aio_core",
  "backend_status_seams",
  "bufmgr",
  "checkpointer",
@@ -8144,6 +8145,7 @@ dependencies = [
 name = "launch_backend"
 version = "0.0.0"
 dependencies = [
+ "aio_core",
  "autovacuum",
  "backend_startup",
  "bgjobs",
