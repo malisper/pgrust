@@ -7,7 +7,7 @@
 // releases/reacquires per iteration — mirrored here.
 #![allow(non_snake_case)]
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI32, Ordering};
 use pgsync::Mutex;
@@ -23,6 +23,9 @@ use types_error::{
 };
 use types_storage::latch::LatchHandle;
 use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
+
+#[cfg(test)]
+mod tests;
 
 const SRC: &str = "src/backend/replication/logical/launcher.c";
 const InvalidPid: pid_t = -1;
@@ -46,6 +49,11 @@ static MAX_PARALLEL_APPLY_WORKERS_PER_SUBSCRIPTION: AtomicI32 = AtomicI32::new(2
 
 thread_local! {
     static ON_COMMIT_LAUNCHER_WAKEUP: Cell<bool> = const { Cell::new(false) };
+    // on_commit_wakeup_workers_subids (worker.c): subscriptions whose workers
+    // want a wakeup at commit. C allocates the list in TopTransactionContext;
+    // a plain TLS Vec here — AtEOXact_LogicalRepWorkers clears it on every
+    // transaction-end path, matching C's unconditional list reset.
+    static ON_COMMIT_WAKEUP_WORKERS_SUBIDS: RefCell<Vec<Oid>> = const { RefCell::new(Vec::new()) };
     // MyLogicalRepWorker: this worker thread's slot index.
     static MY_WORKER_SLOT: Cell<Option<usize>> = const { Cell::new(None) };
 }
@@ -690,6 +698,42 @@ pub fn AtEOXact_ApplyLauncher(is_commit: bool) {
     ON_COMMIT_LAUNCHER_WAKEUP.with(|c| c.set(false));
 }
 
+// LogicalRepWorkersWakeupAtCommit / AtEOXact_LogicalRepWorkers (worker.c):
+// request wakeup of a subscription's workers at commit of the transaction
+// that changed it (ALTER SUBSCRIPTION, RENAME, OWNER TO), so the workers
+// process the change quickly. C hosts the pair in worker.c; the slot pool
+// and latch plumbing live here, so it sits with its ApplyLauncher siblings.
+pub fn LogicalRepWorkersWakeupAtCommit(subid: Oid) {
+    ON_COMMIT_WAKEUP_WORKERS_SUBIDS.with(|l| {
+        let mut subids = l.borrow_mut();
+        // list_append_unique_oid.
+        if !subids.contains(&subid) {
+            subids.push(subid);
+        }
+    });
+}
+
+pub fn AtEOXact_LogicalRepWorkers(is_commit: bool) {
+    // Take-and-clear on every path (C resets the list unconditionally).
+    let subids = ON_COMMIT_WAKEUP_WORKERS_SUBIDS.with(|l| std::mem::take(&mut *l.borrow_mut()));
+    if !is_commit || subids.is_empty() {
+        return;
+    }
+    // One ctx pass = C's LogicalRepWorkerLock LW_SHARED span over
+    // logicalrep_workers_find(subid, only_running) per queued subid; the
+    // latch pokes run outside the lock (logicalrep_worker_wakeup's pattern).
+    let proc_nos: Vec<ProcNumber> = with_ctx_opt(Vec::new(), |ctx| {
+        ctx.workers
+            .iter()
+            .filter(|w| w.in_use && w.proc_pid != 0 && subids.contains(&w.subid))
+            .filter_map(|w| w.proc_no)
+            .collect()
+    });
+    for p in proc_nos {
+        latch::SetLatch(LatchHandle::proc(p));
+    }
+}
+
 fn ApplyLauncherWakeup() {
     // C signals SIGUSR1; the latch is what the launcher sleeps on.
     let proc_no = CTX
@@ -861,5 +905,6 @@ pub fn init_seams() {
     launcher_seams::apply_launcher_register::set(ApplyLauncherRegister);
     launcher_seams::apply_launcher_shmem_init::set(ApplyLauncherShmemInit);
     launcher_seams::at_eoxact_apply_launcher::set(AtEOXact_ApplyLauncher);
+    logical_worker_seams::at_eoxact_logical_rep_workers::set(AtEOXact_LogicalRepWorkers);
     launcher_seams::get_leader_apply_worker_pid::set(GetLeaderApplyWorkerPid);
 }

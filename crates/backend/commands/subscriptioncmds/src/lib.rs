@@ -1235,6 +1235,9 @@ pub fn AlterSubscription<'mcx>(
 
     rel.close(RowExclusiveLock)?;
 
+    // Wake up related replication workers to handle this change quickly.
+    launcher::LogicalRepWorkersWakeupAtCommit(subid);
+
     Ok(ObjectAddress::set(SubscriptionRelationId, subid))
 }
 
@@ -1418,6 +1421,10 @@ fn AlterSubscriptionOwner_internal<'mcx>(
     catalog_indexing::CatalogTupleUpdate(mcx, rel, &otid, &mut new_tup)?;
 
     pg_shdepend::changeDependencyOnOwner(mcx, SubscriptionRelationId, subid, new_owner_id)?;
+
+    // Wake up related background processes to handle this change quickly.
+    launcher::ApplyLauncherWakeupAtCommit();
+    launcher::LogicalRepWorkersWakeupAtCommit(subid);
 
     Ok(())
 }
