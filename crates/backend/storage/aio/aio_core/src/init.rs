@@ -156,7 +156,10 @@ pub fn AioShmemResetAfterCrash() -> PgResult<()> {
         return Ok(());
     }
     let procs = BACKEND_COUNT.load(Ordering::Relaxed) as usize;
-    let imc = crate::io_max_concurrency() as usize;
+    // Table geometry from the STORED counts, never the live GUC: per-child
+    // base-snapshot stamping can rewrite io_max_concurrency (=-1) after the
+    // boot-time auto-tune (fleet crash-smoke finding, job -47a8).
+    let imc = crate::handle_count() / procs;
 
     for procno in 0..procs {
         let slot = backend_slot(procno as i32);

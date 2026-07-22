@@ -140,6 +140,12 @@ fn crash_fans_out_sigquit_and_reinit_completes() {
 
     ipci_seams::create_shared_memory_and_semaphores::call(1).unwrap();
 
+    // Regression pin (fleet crash-smoke job -47a8): per-child GUC stamping can
+    // rewrite io_max_concurrency to its -1 boot value after the boot auto-tune;
+    // the AIO crash-reset arm must derive geometry from stored counts, not the
+    // live GUC.
+    guc_tables::vars::io_max_concurrency.write(-1);
+
     guc_tables::vars::remove_temp_files_after_crash.write(false);
 
     waiteventset::InitializeWaitEventSupport().unwrap();
