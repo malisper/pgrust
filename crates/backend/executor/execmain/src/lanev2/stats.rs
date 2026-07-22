@@ -801,20 +801,25 @@ static FUSED_HASH_BUILD_PERTUPLE_OTHER: AtomicU64 = AtomicU64::new(0);
 //   * `gang`     — outcome under the STANDING GANG channel (Done, gang
 //                  phase) — i.e. the pool phase refused/was off and the
 //                  gang absorbed it: THE gang-fallback rate per arm;
-//   * `launched` — the launched-bgworker ceremony engaged (launch returned
-//                  workers and the submit-and-park loop took over);
+//   * `launched` — RETIRED at M2 inc-3 rung 4 (the launched-bgworker
+//                  ceremony is deleted from the runtime arms): never
+//                  constructed anymore, ALWAYS 0. The row stays dumped
+//                  until Phase-5 D5 — zeros-included is the witness
+//                  contract (scripts/nolaunch-floors-witness.sh reads it
+//                  as the "nothing launches" proof; absent≠zero would
+//                  ambiguate a dropped row against the deletion).
 //   * `serial`   — the whole parallel engagement fell back to the serial
 //                  arm (EngageOutcome::Fallback at the arm's dispatch);
-//   * `nolaunch-serial` — the rung-4 posture knob (PGRUST_RUNTIME_NOLAUNCH)
-//                  retired this engagement's launched fallback: the board
-//                  channels declined and the arm went STRAIGHT to serial.
-//                  THE rung-4 deletion evidence row — each tick is one
-//                  engagement the post-deletion ladder would serialize
-//                  (the R2 cliff, measured not vibed). Doubles with the
-//                  arm-tail `serial` tick by design (serial stays the
+//   * `nolaunch-serial` — the board channels declined and the arm went
+//                  STRAIGHT to serial (the rung-4 deletion's permanent
+//                  ladder; formerly the PGRUST_RUNTIME_NOLAUNCH posture
+//                  knob's row — the knob is inert since the deletion).
+//                  Each tick is one engagement the deletion serialized
+//                  (the R2-cliff watch, measured not vibed). Doubles with
+//                  the arm-tail `serial` tick by design (serial stays the
 //                  outcome census; this row is the cause attribution).
 // Tick cadence: one per engagement OUTCOME (completions for the two board
-// channels; path-taken for launched/serial) — engagement-grain, never
+// channels; path-taken for the serial rows) — engagement-grain, never
 // per-row. Error exits tick nothing (they surface, they don't fall back).
 // Informational `counter` dump lines (`engage-<arm>-<channel>`); the gate's
 // floor/allowlist machinery ignores them until rung 3 pins gang≈0 floors.
@@ -825,6 +830,9 @@ static FUSED_HASH_BUILD_PERTUPLE_OTHER: AtomicU64 = AtomicU64::new(0);
 pub(super) enum EngageChannel {
     PoolDb = 0,
     Gang = 1,
+    /// Never constructed since the rung-4 launched-path deletion; the
+    /// dump row stays (zeros-included witness contract) until Phase-5 D5.
+    #[allow(dead_code)]
     Launched = 2,
     Serial = 3,
     NolaunchSerial = 4,
