@@ -332,6 +332,10 @@ pub static pgrust_gather_fair_stride: GucIntVar = GucSlot::new("pgrust_gather_fa
 // pattern-program fast tier under the auto RE2 dispatch — regexp_alt owns
 // the backing and installs the accessors).
 pub static pgrust_regex_pattern_program: GucBoolVar = GucSlot::new("pgrust_regex_pattern_program");
+// pgrust-only: pgrust.regex_re2_linked (preset, read-only) — whether the RE2
+// engine was linked into this build. regexp_alt installs the accessor (a
+// build-cfg constant); the table row's boot_val is never what SHOW reports.
+pub static pgrust_regex_re2_linked: GucBoolVar = GucSlot::new("pgrust_regex_re2_linked");
 // auto_explain custom GUCs (auto_explain.c _PG_init), statically defined:
 // this port has no DefineCustomXxxVariable machinery.
 pub static aex_log_min_duration: GucIntVar = GucSlot::new("auto_explain_log_min_duration");

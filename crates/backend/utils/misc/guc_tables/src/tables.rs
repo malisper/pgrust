@@ -684,6 +684,11 @@ pub static ConfigureNamesBool: &[GucBoolSetting] = &[
     // regex_engine; OFF restores the exact pre-tier RE2 arm — the toggle is
     // the four-engine differential's fourth arm and the escape hatch.
     GucBoolSetting { name: "pgrust.regex_pattern_program", context: PGC_USERSET, group: DEVELOPER_OPTIONS, short_desc: Some("Enables the anchored pattern-program fast tier for RE2-dispatched regexps."), long_desc: None, flags: GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL, variable: &vars::pgrust_regex_pattern_program, boot_val: GucDefaultValue::Bool(true), check_hook: None, assign_hook: None, show_hook: None },
+    // pgrust.regex_re2_linked: build-property preset (debug_assertions
+    // shape) — the runtime witness that this binary carries the RE2 tier.
+    // regexp_alt installs the accessor; SHOW reports the build cfg, not the
+    // boot_val below.
+    GucBoolSetting { name: "pgrust.regex_re2_linked", context: PGC_INTERNAL, group: PRESET_OPTIONS, short_desc: Some("Shows whether the RE2 regexp engine was linked into this build."), long_desc: Some("Off means regex_engine=auto has only the Spencer tier and SET regex_engine=re2 errors at run time."), flags: GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE, variable: &vars::pgrust_regex_re2_linked, boot_val: GucDefaultValue::Bool(false), check_hook: None, assign_hook: None, show_hook: None },
     // auto_explain custom GUCs (statically defined; see vars.rs note).
     GucBoolSetting { name: "auto_explain.log_analyze", context: PGC_SUSET, group: CUSTOM_OPTIONS, short_desc: Some("Use EXPLAIN ANALYZE for plan logging."), long_desc: None, flags: 0, variable: &vars::aex_log_analyze, boot_val: GucDefaultValue::Bool(false), check_hook: None, assign_hook: None, show_hook: None },
     GucBoolSetting { name: "auto_explain.log_settings", context: PGC_SUSET, group: CUSTOM_OPTIONS, short_desc: Some("Log modified configuration parameters affecting query planning."), long_desc: None, flags: 0, variable: &vars::aex_log_settings, boot_val: GucDefaultValue::Bool(false), check_hook: None, assign_hook: None, show_hook: None },

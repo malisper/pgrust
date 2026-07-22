@@ -23,6 +23,7 @@ pg_path = { path = "../../../port/pg_path" }
 miscinit = { path = "../../utils/init/miscinit" }
 postinit = { path = "../../utils/init/postinit" }
 pg_locale = { path = "../../utils/adt/pg_locale" }
+regexp_alt = { path = "../../utils/adt/regexp_alt" }
 guc = { path = "../../utils/misc/guc" }
 guc_tables = { path = "../../utils/misc/guc_tables" }
 guc_file = { path = "../../utils/misc/guc_file" }
