@@ -391,6 +391,9 @@ fn check_wal_buffers_hook(
 
 // wal_consistency_checking[] stays all-false until the FPW cross-check
 // machinery ports: a non-empty setting is a loud stop, never a silent skip.
+// The loud stop is a clean GUC rejection (Ok(false) -> ereport ERROR, the
+// tree's unported-value posture: bonjour, WITH OIDS, lz4 toast, io_method) —
+// the old panic here took the whole process down on a SUSET SET.
 fn check_wal_consistency_checking_hook(
     newval: &mut Option<String>,
     _extra: &mut Option<guc_tables::GucHookExtra>,
@@ -398,7 +401,16 @@ fn check_wal_consistency_checking_hook(
 ) -> PgResult<bool> {
     match newval.as_deref() {
         None | Some("") => Ok(true),
-        Some(v) => panic!("wal_consistency_checking not ported (xlog.c): \"{v}\""),
+        Some(_) => {
+            if guc_seams::guc_check_errdetail::is_installed() {
+                guc_seams::guc_check_errdetail::call(
+                    "wal_consistency_checking is not yet supported by pgrust; \
+                     only the empty (disabled) setting is accepted."
+                        .to_string(),
+                );
+            }
+            Ok(false)
+        }
     }
 }
 fn assign_wal_consistency_checking_hook(
