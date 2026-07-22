@@ -255,6 +255,7 @@ fn ensure_sweeper() {
     });
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn sweeper() -> ! {
     let floor = floor_ms();
     loop {
@@ -414,6 +415,7 @@ pub fn wait_hook_start() {
         if let Some(rt) = LEASE_RT.get() {
             rt.execution_permits().release();
             set_state(my_slot(), S_DONATED);
+            crate::lanev2::tick_serial_lease_donation();
         }
     }
 }
@@ -457,6 +459,7 @@ pub fn admission_tap() {
             if let Some(rt) = LEASE_RT.get() {
                 if rt.execution_permits().acquire_timeout(ADMIT_TIMEOUT) {
                     set_state(slot, S_HELD);
+                    crate::lanev2::tick_serial_lease_admitted();
                 } else {
                     set_state(slot, S_DEFICIT);
                 }
