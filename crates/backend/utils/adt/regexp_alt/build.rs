@@ -3,11 +3,19 @@
 // multi-x regression on regexp-heavy shapes and shipped once with zero
 // warnings. Loudness contract:
 //   * release-family profiles (PROFILE=release: release/fast-profile/dist/
-//     dist-prof/dist-pgo/profiling) FAIL the build when RE2 is absent;
-//   * dev/debug builds emit a cargo:warning and proceed Spencer-only;
-//   * PGRUST_FORCE_NO_RE2=1 is the explicit escape for deliberate
-//     Spencer-only arms (engine-differential experiments) — allowed in every
-//     profile, always with a cargo:warning, never silent.
+//     dist-prof/dist-pgo/profiling) FAIL the build when RE2 is absent —
+//     including under PGRUST_FORCE_NO_RE2, which is a DEV-ONLY hatch: the
+//     W2a lane's laptop (night/w2a-parallel-writer @ 351687a38) hit the
+//     second failure mode of the old script — pkg-config absent + static
+//     libre2.a chosen -> undefined absl symbols at link — and the only
+//     escape was FORCE_NO_RE2, i.e. a silently Spencer-only binary; a
+//     release-family binary must never be born that way;
+//   * dev/debug builds emit a cargo:warning and proceed Spencer-only
+//     (FORCE_NO_RE2 or genuinely absent libre2 alike).
+// The broken-link mode itself stays loud by nature (the linker fails); the
+// artifact-level assertion (scripts/check-re2-linkage.sh) covers BOTH modes
+// post-link: a binary without RE2 evidence fails the re2 expectation no
+// matter which path dropped it.
 // Runtime witnesses ride separately: the postmaster startup line and the
 // pgrust.regex_re2_linked preset GUC; scripts/check-re2-linkage.sh greps a
 // built (stripped) binary for RE2 string evidence.
@@ -77,7 +85,16 @@ fn main() {
     println!("cargo:rerun-if-changed=src/re2_shim.cc");
     println!("cargo:rerun-if-env-changed=PGRUST_FORCE_NO_RE2");
     if std::env::var_os("PGRUST_FORCE_NO_RE2").is_some() {
-        // Explicit is not silent, but still say it where build logs land.
+        // Dev-only hatch. A release-family Spencer-only binary must never
+        // exist, deliberate or not (coordinator ruling on the W2a evidence).
+        if release_family() {
+            panic!(
+                "regexp_alt: PGRUST_FORCE_NO_RE2 is a dev-only hatch — release-family \
+                 profiles (release/fast-profile/dist/dist-pgo/profiling) must carry RE2. \
+                 Unset it and install libre2 (and pkg-config, so the static link can \
+                 resolve re2's abseil closure), or build a dev profile."
+            );
+        }
         println!(
             "cargo:warning=regexp_alt: RE2 disabled by PGRUST_FORCE_NO_RE2 — \
              this binary is Spencer-only"
