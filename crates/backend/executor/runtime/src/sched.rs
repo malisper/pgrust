@@ -508,6 +508,13 @@ pub struct WorkerLocal {
     /// the equal-pass pick tiebreak; set by the driving thread via
     /// [`WorkerLocal::set_session_token`].
     session_token: u64,
+    /// GL-STMTTASK-2 (wake elision): true while this pool worker carries a
+    /// live spin_enter mark on the park lot — woken (or fresh) and
+    /// searching for work. Cleared at the claim points inside
+    /// [`Scheduler::worker_step`] (a long task body must never count as a
+    /// spinner) and consumed by [`ParkLot::park_worker`]. Only the step-v2
+    /// pool loop under `wake_spinner_enabled` ever sets it.
+    pub(crate) spinning: bool,
 }
 
 impl WorkerLocal {
@@ -517,6 +524,11 @@ impl WorkerLocal {
     /// session bind machinery revalidates its own keys).
     pub fn set_session_token(&mut self, token: u64) {
         self.session_token = token;
+    }
+
+    /// GL-STMTTASK-2: live search-phase mark (see the field doc).
+    pub fn spinning(&self) -> bool {
+        self.spinning
     }
 
     /// Pin-board lane / worker index (CPROBE line identity).
@@ -544,6 +556,24 @@ fn markers_enabled() -> bool {
 pub(crate) fn step_v2() -> bool {
     static ON: crate::sync::OnceLock<bool> = crate::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("PGRUST_RUNTIME_STEP_V2").map_or(true, |v| v.trim() != "0"))
+}
+
+/// GL-STMTTASK-2 change-4 arming switch: `PGRUST_POOL_WAKE_SPINNER`, armed
+/// iff exactly `1`/`on` (t35 exact-spelling law; DEFAULT OFF — the
+/// measured-increment posture). ON ⇒ the new-work submission wake becomes
+/// spinner-elided + LIFO-directed ([`pgsync::ParkLot::wake_work`]) and the
+/// step-v2 pool loop parks on the directed stack with search-phase
+/// accounting. OFF ⇒ `wake_all` + plain parks, byte-identical to the
+/// pre-lane world. Requires the step-v2 loop (the legacy loop never marks
+/// spinners; with STEP_V2=0 this switch is inert by construction).
+pub(crate) fn wake_spinner_enabled() -> bool {
+    static ON: crate::sync::OnceLock<bool> = crate::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("PGRUST_POOL_WAKE_SPINNER").ok().as_deref().map(str::trim),
+            Some("1") | Some("on")
+        ) && step_v2()
+    })
 }
 
 /// `PGRUST_RUNTIME_CPROBE=1` arms the contention-probe marker channel: one
@@ -876,6 +906,7 @@ impl Scheduler {
             local_pass: 0,
             global_pass: 0,
             session_token: 0,
+            spinning: false,
         }
     }
 
@@ -898,6 +929,7 @@ impl Scheduler {
             local_pass: 0,
             global_pass: 0,
             session_token: 0,
+            spinning: false,
         }
     }
 
@@ -1366,8 +1398,19 @@ impl Scheduler {
         RuntimeStats::tick(&self.stats.tasksets_published);
         // Wake parked workers: new work exists (external pinned drivers
         // park on the same epoch eventcount).
+        //
+        // GL-STMTTASK-2 (wake elision, PGRUST_POOL_WAKE_SPINNER=1|on,
+        // DEFAULT OFF): the publish becomes epoch-bump + spinner check —
+        // notify only when no searcher covers the work, and then exactly
+        // ONE idle worker (LIFO; see ParkLot::wake_work). RG-specific
+        // legacy parkers keep their own publish/completion/abort wake_all
+        // sites; this is the NEW-WORK inbox wake only.
         if advert {
-            self.park.wake_all();
+            if wake_spinner_enabled() {
+                self.park.wake_work();
+            } else {
+                self.park.wake_all();
+            }
         }
     }
 
@@ -1563,10 +1606,23 @@ impl Scheduler {
     /// One scheduling decision + at most one task execution. The pool loop
     /// (and the loom models) drive this in a loop; on `Idle` the caller
     /// parks on an epoch captured BEFORE the call.
+    /// GL-STMTTASK-2: clear this worker's search-phase (spinner) mark at a
+    /// CLAIM point — work was found; a task/serve body must never count as
+    /// a spinner or submissions would elide wakes while every other worker
+    /// is parked. The park itself consumes the mark on the park path
+    /// (ParkLot::park_worker); Retry keeps it (still searching).
+    fn note_spin_claimed(&self, local: &mut WorkerLocal) {
+        if local.spinning {
+            local.spinning = false;
+            self.park.spin_found_work();
+        }
+    }
+
     pub(crate) fn worker_step(&self, local: &mut WorkerLocal) -> Step {
         if self.stop.load(Ordering::SeqCst) {
             // Stop = a flush boundary (StatAcc contract): the loop exits.
             self.stat_flush_all(local);
+            self.note_spin_claimed(local);
             return Step::Stop;
         }
         let Some(slot) = self.pick_slot(local) else {
@@ -1597,8 +1653,12 @@ impl Scheduler {
             // serve's drive completes this very RG, and finalization waits
             // on every marked pin — holding our pool-lane pin across the
             // serve would deadlock the drive against our own settle).
-            Some(ts) if ts.rg.bound.is_some() => self.serve_bound(local, &ts),
+            Some(ts) if ts.rg.bound.is_some() => {
+                self.note_spin_claimed(local);
+                self.serve_bound(local, &ts)
+            }
             Some(ts) => {
+                self.note_spin_claimed(local);
                 // M2 inc-3 rung 3: ordinary (non-bound) work is about to run
                 // on this thread — evict any parked session retention first
                 // (a pool worker's sticky-parked session view must never be
@@ -2610,7 +2670,17 @@ impl Scheduler {
         // Parked pinned drivers observe completion by re-testing
         // try_outcome after a wake; the completion word itself only
         // unparks registered leader waiters.
-        self.park.wake_all();
+        //
+        // GL-STMTTASK-2 (wake elision, same knob as the submission wake):
+        // completion is NOT new work for pool workers — only legacy
+        // (external-driver) parkers need the notify; a parked pool worker
+        // stays parked (slot release re-admission publishes through
+        // publish_taskset_locked, which carries its own wake).
+        if wake_spinner_enabled() {
+            self.park.wake_legacy();
+        } else {
+            self.park.wake_all();
+        }
         if self.trace {
             self.trace(&format!("rg {} complete (aborted={aborted})", rg.rg_id));
         }

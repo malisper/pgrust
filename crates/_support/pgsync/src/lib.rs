@@ -250,11 +250,71 @@ pub struct ParkLot {
     epoch: atomic::AtomicU64,
     m: Mutex<()>,
     cv: Condvar,
+    /// GL-STMTTASK-2 wake elision (the Go nmspinning/wakep protocol): count
+    /// of workers in the SEARCH phase — woken (or between tasks) and about
+    /// to re-scan for work, not yet parked. A publisher that observes a
+    /// spinner may skip its notify entirely: the spinner's re-scan (or its
+    /// pre-wait epoch recheck under the idle lock) discovers the new work.
+    /// SeqCst throughout; the lost-wake argument is the classic
+    /// StoreLoad-fence-then-recheck pair — publisher: bump epoch (SeqCst
+    /// RMW) THEN read spinners; parker: decrement spinners (under the idle
+    /// lock) THEN recheck epoch. In the SC total order either the publisher
+    /// sees the decrement (and wakes an idle worker), or the parker's epoch
+    /// recheck sees the bump (and never waits).
+    spinners: atomic::AtomicUsize,
+    /// LIFO idle-worker stack for DIRECTED wakes ([`ParkLot::park_worker`] /
+    /// [`ParkLot::wake_work`]): the most-recently-parked worker is warmest
+    /// (Dice EuroSys'17: FIFO handoff is inimical to parking; the Tokio
+    /// LIFO-slot precedent), with the 3-poll starvation cap — every 4th
+    /// directed wake takes the OLDEST parker instead.
+    idle: Mutex<IdleStack>,
+    /// Actual thread unparks performed (directed pops + wake_all wakes of
+    /// registered/legacy parkers) — the wakeup program's
+    /// unparks-per-statement counter substrate.
+    unparks: atomic::AtomicU64,
+    /// Parkers currently inside [`ParkLot::park`]'s wait (the legacy,
+    /// non-registered population), maintained under `m`. wake_all counts
+    /// them into `unparks`.
+    legacy_parked: atomic::AtomicUsize,
+}
+
+/// One pool worker's directed-wake slot (GL-STMTTASK-2). Owned by the worker
+/// loop for the thread's lifetime; registered in the lot's LIFO idle stack
+/// for the duration of each park.
+pub struct WorkerParker {
+    woken: atomic::AtomicBool,
+    cv: Condvar,
+}
+
+impl WorkerParker {
+    pub fn new() -> Self {
+        WorkerParker { woken: atomic::AtomicBool::new(false), cv: Condvar::new() }
+    }
+}
+
+impl Default for WorkerParker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+struct IdleStack {
+    stack: Vec<std::sync::Arc<WorkerParker>>,
+    /// Directed-wake round counter for the 3-poll starvation cap.
+    wakes: u32,
 }
 
 impl ParkLot {
     pub fn new() -> Self {
-        ParkLot { epoch: atomic::AtomicU64::new(0), m: Mutex::new(()), cv: Condvar::new() }
+        ParkLot {
+            epoch: atomic::AtomicU64::new(0),
+            m: Mutex::new(()),
+            cv: Condvar::new(),
+            spinners: atomic::AtomicUsize::new(0),
+            idle: Mutex::new(IdleStack { stack: Vec::new(), wakes: 0 }),
+            unparks: atomic::AtomicU64::new(0),
+            legacy_parked: atomic::AtomicUsize::new(0),
+        }
     }
 
     pub fn epoch(&self) -> u64 {
@@ -264,7 +324,10 @@ impl ParkLot {
     pub fn park(&self, seen: u64) {
         let mut g = lock(&self.m);
         while self.epoch.load(atomic::Ordering::SeqCst) == seen {
-            g = self.cv.wait(g).unwrap_or_else(|e| e.into_inner());
+            self.legacy_parked.fetch_add(1, atomic::Ordering::SeqCst);
+            let r = self.cv.wait(g);
+            self.legacy_parked.fetch_sub(1, atomic::Ordering::SeqCst);
+            g = r.unwrap_or_else(|e| e.into_inner());
         }
     }
 
@@ -272,8 +335,156 @@ impl ParkLot {
         // Bump BEFORE the mutex (see the struct doc's lost-wakeup argument).
         self.epoch.fetch_add(1, atomic::Ordering::SeqCst);
         let g = lock(&self.m);
+        let legacy = self.legacy_parked.load(atomic::Ordering::SeqCst) as u64;
         drop(g);
         self.cv.notify_all();
+        // Registered (directed-slot) parkers wake too — wake_all keeps its
+        // everyone-wakes semantics no matter which park entry was used.
+        let woken = {
+            let mut idle = lock(&self.idle);
+            let n = idle.stack.len() as u64;
+            for p in idle.stack.drain(..) {
+                p.woken.store(true, atomic::Ordering::SeqCst);
+                p.cv.notify_all();
+            }
+            n
+        };
+        if legacy + woken > 0 {
+            self.unparks.fetch_add(legacy + woken, atomic::Ordering::SeqCst);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // GL-STMTTASK-2 — spinner-elided submission wakes + LIFO directed parks.
+    // Only the pool worker loop uses park_worker/spin_*; publishers that
+    // OPT IN to elision use wake_work. Every other caller keeps
+    // park/wake_all byte-identically.
+    // -----------------------------------------------------------------------
+
+    /// Enter the SEARCH phase (about to re-scan for work). Pairs with
+    /// [`ParkLot::spin_found_work`] or the consuming decrement inside
+    /// [`ParkLot::park_worker`].
+    pub fn spin_enter(&self) {
+        self.spinners.fetch_add(1, atomic::Ordering::SeqCst);
+    }
+
+    /// Leave the SEARCH phase because work was found. Go's wakep chain: if
+    /// this was the last spinner and idle workers remain, wake one — the
+    /// next queued item (if any) gets a searcher without the publisher
+    /// having to know.
+    pub fn spin_found_work(&self) {
+        self.spinners.fetch_sub(1, atomic::Ordering::SeqCst);
+        if self.spinners.load(atomic::Ordering::SeqCst) == 0 {
+            self.wake_one_idle();
+        }
+    }
+
+    /// Park on the directed LIFO stack (pool worker loop). `spinning` =
+    /// caller holds a spin_enter mark; it is consumed here (decremented
+    /// UNDER the idle lock, before the epoch recheck — the elision
+    /// protocol's ordering hinge). Returns on any wake; the caller
+    /// re-enters the search phase itself.
+    pub fn park_worker(&self, seen: u64, parker: &std::sync::Arc<WorkerParker>, spinning: bool) {
+        let mut g = lock(&self.idle);
+        if spinning {
+            self.spinners.fetch_sub(1, atomic::Ordering::SeqCst);
+        }
+        if self.epoch.load(atomic::Ordering::SeqCst) != seen {
+            return;
+        }
+        parker.woken.store(false, atomic::Ordering::SeqCst);
+        g.stack.push(std::sync::Arc::clone(parker));
+        while !parker.woken.load(atomic::Ordering::SeqCst)
+            && self.epoch.load(atomic::Ordering::SeqCst) == seen
+        {
+            g = parker.cv.wait(g).unwrap_or_else(|e| e.into_inner());
+        }
+        // Epoch-change (or spurious) exit without a directed wake: the slot
+        // may still be registered — deregister so a later wake_work cannot
+        // pop a slot nobody waits on and count it as a wake.
+        if !parker.woken.load(atomic::Ordering::SeqCst) {
+            if let Some(i) = g.stack.iter().position(|p| std::sync::Arc::ptr_eq(p, parker)) {
+                g.stack.remove(i);
+            }
+        }
+    }
+
+    /// The ELIDED submission wake (publishers of NEW pool-visible work that
+    /// opt in): always bump the epoch (a store+RMW — the fence half of the
+    /// protocol), then notify only who actually needs it. LEGACY parkers
+    /// (external pinned drivers waiting on this same eventcount for their
+    /// RG's next publish) are NEVER elided — their protocol is notify-all
+    /// based; the under-`m` count read makes the skip race-free (a parker
+    /// increments under `m` before waiting, so either its pre-wait epoch
+    /// recheck sees our bump or we see its count). POOL workers get the
+    /// spinner elision: a live searcher covers the work by its own re-scan;
+    /// otherwise wake exactly ONE idle worker (LIFO; 3-poll starvation
+    /// cap).
+    pub fn wake_work(&self) {
+        self.epoch.fetch_add(1, atomic::Ordering::SeqCst);
+        let legacy = {
+            let g = lock(&self.m);
+            let n = self.legacy_parked.load(atomic::Ordering::SeqCst);
+            drop(g);
+            n
+        };
+        if legacy > 0 {
+            self.cv.notify_all();
+            self.unparks.fetch_add(legacy as u64, atomic::Ordering::SeqCst);
+        }
+        if self.spinners.load(atomic::Ordering::SeqCst) > 0 {
+            return; // store+fence submission: the spinner's re-scan owns it
+        }
+        self.wake_one_idle();
+    }
+
+    /// Wake ONLY the legacy (non-registered) parkers — events that are not
+    /// NEW WORK for pool workers (RG completion: external pinned drivers
+    /// re-test their outcome on it; an idle pool worker has nothing to do
+    /// with it). The epoch still bumps (any registered parker between its
+    /// capture and wait re-checks and re-scans — the safe direction);
+    /// directed slots stay parked.
+    pub fn wake_legacy(&self) {
+        self.epoch.fetch_add(1, atomic::Ordering::SeqCst);
+        let legacy = {
+            let g = lock(&self.m);
+            let n = self.legacy_parked.load(atomic::Ordering::SeqCst);
+            drop(g);
+            n
+        };
+        if legacy > 0 {
+            self.cv.notify_all();
+            self.unparks.fetch_add(legacy as u64, atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn wake_one_idle(&self) {
+        let mut g = lock(&self.idle);
+        if g.stack.is_empty() {
+            return;
+        }
+        g.wakes = g.wakes.wrapping_add(1);
+        // 3-poll starvation cap: every 4th directed wake takes the OLDEST.
+        let p = if g.wakes % 4 == 0 { g.stack.remove(0) } else { g.stack.pop().unwrap() };
+        p.woken.store(true, atomic::Ordering::SeqCst);
+        p.cv.notify_all();
+        self.unparks.fetch_add(1, atomic::Ordering::SeqCst);
+    }
+
+    /// Live spinner count (diagnostics / tests).
+    pub fn spinners(&self) -> usize {
+        self.spinners.load(atomic::Ordering::SeqCst)
+    }
+
+    /// Total actual thread unparks this lot performed (the wakeup program's
+    /// unparks counter; monotonic).
+    pub fn unparks(&self) -> u64 {
+        self.unparks.load(atomic::Ordering::SeqCst)
+    }
+
+    /// Registered idle (directed-slot) parkers right now (diagnostics).
+    pub fn idle_workers(&self) -> usize {
+        lock(&self.idle).stack.len()
     }
 }
 
