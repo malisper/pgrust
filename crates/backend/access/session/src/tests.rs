@@ -701,7 +701,25 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      the apply bgworker thread for the life of the worker; no session
     //      identity, never captured/restored by an envelope (one backend
     //      worker = one thread, rule 10).
-    assert_eq!(count_tree(crates), 535, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    // GL-AIO-1 delta (537 = 535 + 3 - 1, composed at t44), all NON-SESSION TLS
+    // (+3 sites, -1 deleted with the aio_config crate):
+    //   76. storage/aio/aio_core/src/lib.rs — MY_BACKEND (C
+    //      pgaio_my_backend): this THREAD's aio backend-slot binding,
+    //      armed by pgaio_init_backend (BaseInit/BaseInitRetained; pool
+    //      and gang executors attach at bring-up with their own BgWorker
+    //      procnos), torn down by pgaio_shutdown via before_shmem_exit
+    //      (park teardown consumes it, so retained threads re-arm clean).
+    //      IOs issued during a pool serve are owned by the WORKER's slot,
+    //      as in C where the issuing process owns the IO regardless of
+    //      session; never captured/restored by an envelope.
+    //   77. storage/aio/aio_core/src/method_worker.rs — MY_IO_WORKER_ID:
+    //      the io-worker thread's registry slot ordinal (B_IO_WORKER
+    //      kind only); released by pgaio_worker_die at proc_exit.
+    //   78. same file — EXECUTED_IOS: per-worker executed-IO counter
+    //      (the read-path e2e witness). Pure thread-local diagnostics.
+    //   (-1: aio_config's MY_BACKEND_ATTACHED site left with the crate,
+    //      absorbed into row 76's real slot binding.)
+    assert_eq!(count_tree(crates), 537, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),

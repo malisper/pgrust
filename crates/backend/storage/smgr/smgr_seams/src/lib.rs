@@ -170,3 +170,48 @@ seam_core::seam!(
         forknum: ForkNumber,
     ) -> ()
 );
+
+seam_core::seam!(
+    // smgr_aio_reopen (smgr.c): re-resolve the IO's target through THIS
+    // thread's smgr/md/vfd stack (worker execution; C's cross-process fd
+    // invalidity applies to cross-thread vfd caches identically) and return
+    // the raw fd for op_data. `offset` is asserted against the segment
+    // resolution (C: Assert(off == od->read.offset)).
+    pub fn aio_smgr_reopen(
+        td: types_storage::aio::PgAioTargetData,
+        op: u8,
+        temp_procno: i32,
+        offset: u64,
+    ) -> PgResult<i32>
+);
+
+seam_core::seam!(
+    // md_readv_complete (md.c): shared completion for PGAIO_HCB_MD_READV.
+    pub fn aio_md_readv_complete(
+        ioh: u32,
+        prior_result: types_storage::aio::PgAioResult,
+        cb_data: u8,
+    ) -> types_storage::aio::PgAioResult
+);
+
+seam_core::seam!(
+    // md_readv_report (md.c): raise/log a failed md readv at `elevel`.
+    pub fn aio_md_readv_report(
+        result: types_storage::aio::PgAioResult,
+        td: types_storage::aio::PgAioTargetData,
+        elevel: types_error::ErrorLevel,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    // smgrstartreadv (smgr.c): start an asynchronous readv of `pages.len()`
+    // consecutive blocks into the given pool pages, on the CURRENT handed-out
+    // AIO handle (the fd.c FileStartReadV shape). Completion callbacks see
+    // the result in blocks.
+    pub fn smgr_startreadv(
+        rlocator: RelFileLocatorBackend,
+        forknum: ForkNumber,
+        blocknum: BlockNumber,
+        pages: &[*mut u8],
+    ) -> PgResult<()>
+);

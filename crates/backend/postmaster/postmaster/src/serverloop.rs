@@ -10,11 +10,10 @@ use types_error::{PgResult, DEBUG2, LOG};
 use types_startup::{BackendStartupData, CacState, ClientSocket, StartupData};
 use types_storage::waiteventset::{WaitEvent, WL_LATCH_SET, WL_SOCKET_ACCEPT};
 
-use crate::statemachine::{signal_child, ExitPostmaster, StartChildProcess, TerminateChildren};
+use crate::statemachine::{signal_child, StartChildProcess, TerminateChildren};
 use crate::{
-    btmask_all_except, loc, report, report_internal, with_pm, PMState, FastShutdown,
-    ImmediateShutdown, NoShutdown, FORCED_EXIT_AFTER_LETHAL_SECS, MAXLISTEN,
-    SIGKILL_CHILDREN_AFTER_SECS,
+    loc, report, report_internal, with_pm, PMState, FastShutdown, ImmediateShutdown, NoShutdown,
+    MAXLISTEN, SIGKILL_CHILDREN_AFTER_SECS,
 };
 
 const SECS_PER_MINUTE: i64 = 60;
@@ -52,12 +51,6 @@ pub fn DetermineSleepTime() -> i64 {
     if shutdown > NoShutdown || (!start_worker_needed && !have_crashed_worker) {
         if abort_start_time != 0 {
             let seconds = SIGKILL_CHILDREN_AFTER_SECS - (now_secs() - abort_start_time);
-            return (seconds * 1000).max(0);
-        }
-        let lethal_time = with_pm(|pm| pm.lethal_time);
-        if lethal_time != 0 {
-            // Forced-exit floor armed: wake in time to fire it.
-            let seconds = FORCED_EXIT_AFTER_LETHAL_SECS - (now_secs() - lethal_time);
             return (seconds * 1000).max(0);
         }
         return 60 * 1000;
@@ -109,10 +102,6 @@ pub fn ServerLoop() -> PgResult<i32> {
     // what makes the analytics fast path engage at DOP=cores out of the box
     // for router-covered shapes — no SET, no env var required.
     let _ = launch_backend::rtpool::start_if_enabled();
-    // GL-MEMWATCH-1: the process memory watchdog sampler thread. Near-free
-    // (a 1s tick off every query path); pgrust.memory_watchdog gates the
-    // work per tick, so SIGHUP can arm/disarm without a restart.
-    memwatchdog::start();
     // M2 pool-binding: wire the STANDING runtime executor gang (boot
     // captures + spawner install; threads spawn lazily at first
     // engagement). No-op unless PGRUST_RUNTIME=1, with PGRUST_RUNTIME_
@@ -191,54 +180,7 @@ pub fn ServerLoop() -> PgResult<i32> {
                 "ServerLoop",
             );
             TerminateChildren(if send_abort { procsignal::signums::SIGABRT } else { procsignal::signums::SIGKILL });
-            with_pm(|pm| {
-                pm.abort_start_time = 0;
-                // Arm the forced-exit floor: the thread rendering of SIGKILL
-                // (SendThreadKill) lands only at a drain point, so unlike
-                // C's, this broadcast can LOSE (GL-DISCONNECT-WEDGE-1).
-                pm.lethal_time = now;
-            });
-        }
-
-        // Forced-exit floor (see FORCED_EXIT_AFTER_LETHAL_SECS): if children
-        // survive the kill broadcast past the grace period, the quiescence
-        // gates can never pass — a thread wedged off its drain points is
-        // unkillable in the thread model. C's immediate shutdown/crash cycle
-        // never waits on an unkillable child (process SIGKILL is
-        // unconditional); render that guarantee the only way a single
-        // process can — exit it. Crash-equivalent by design: immediate
-        // shutdown skips the shutdown checkpoint anyway, and the next start
-        // runs crash recovery.
-        if with_pm(|pm| {
-            (pm.shutdown >= ImmediateShutdown || pm.fatal_error)
-                && pm.lethal_time != 0
-                && (now - pm.lethal_time) >= FORCED_EXIT_AFTER_LETHAL_SECS
-        }) {
-            let remaining =
-                pmchild_seams::count_children::call(btmask_all_except(&[BackendType::Logger]));
-            let gang = if postmaster_seams::rtgang_live::is_installed() {
-                postmaster_seams::rtgang_live::call()
-            } else {
-                0
-            };
-            if remaining == 0 && gang == 0 {
-                // Everyone drained after all; let the state machine finish
-                // the ceremony normally.
-                with_pm(|pm| pm.lethal_time = 0);
-            } else {
-                report(
-                    LOG,
-                    format!(
-                        "issuing forced postmaster exit: {remaining} child thread(s) \
-                         (+{gang} standing runtime executor(s)) survived the kill \
-                         broadcast {FORCED_EXIT_AFTER_LETHAL_SECS}s; threads wedged off \
-                         their drain points cannot be killed in-process"
-                    ),
-                    1758,
-                    "ServerLoop",
-                );
-                ExitPostmaster(1);
-            }
+            with_pm(|pm| pm.abort_start_time = 0);
         }
 
         if now - last_lockfile_recheck_time >= SECS_PER_MINUTE {
@@ -372,24 +314,49 @@ fn report_fork_failure_to_client(client_sock: &ClientSocket) {
     }
 }
 
-/// maybe_adjust_io_workers. Unreachable while IoWorkerMain is unported:
-/// io_method boots "sync" (divergence from C's "worker" default, aio_config)
-/// and check_io_method refuses "worker", so the launch loop below never runs.
+/// maybe_adjust_io_workers: close the gap between running and configured IO
+/// workers (io_workers GUC changes and worker deaths both land here).
 pub fn maybe_adjust_io_workers() {
-    // io_method enum: 0 = sync, 1 = worker, 2 = io_uring (guc_tables).
-    if guc_tables::vars::io_method.read() != 1 {
+    if !aio_core::pgaio_workers_enabled() {
         return;
     }
+
+    // Final shutdown: just waiting for processes to exit.
+    if with_pm(|pm| pm.pm_state >= PMState::PM_WAIT_IO_WORKERS) {
+        return;
+    }
+    // No new workers during an immediate shutdown either.
+    if with_pm(|pm| pm.shutdown >= crate::ImmediateShutdown) {
+        return;
+    }
+    // Nor in the shutdown phase of a crash restart (but do restart once the
+    // cycle is starting up again).
+    if with_pm(|pm| pm.fatal_error && pm.pm_state >= PMState::PM_STOP_BACKENDS) {
+        return;
+    }
+
     let target = guc_tables::vars::io_workers.read();
+
+    // Not enough running?
     while with_pm(|pm| pm.io_worker_count) < target {
-        if !with_pm(|pm| {
-            pm.pm_state >= PMState::PM_STARTUP && pm.pm_state < PMState::PM_WAIT_IO_WORKERS
-        }) {
-            break;
-        }
+        let free = with_pm(|pm| pm.io_worker_children.iter().position(|c| c.is_none()));
+        let Some(i) = free else {
+            panic!("could not find a free IO worker slot");
+        };
         match StartChildProcess(BackendType::IoWorker) {
-            Some(_) => with_pm(|pm| pm.io_worker_count += 1),
-            None => break,
+            Some(child) => with_pm(|pm| {
+                pm.io_worker_children[i] = Some(child);
+                pm.io_worker_count += 1;
+            }),
+            None => break, // try again next time
+        }
+    }
+
+    // Too many running? Ask the worker in the highest slot to exit.
+    if with_pm(|pm| pm.io_worker_count) > target {
+        let victim = with_pm(|pm| pm.io_worker_children.iter().rev().flatten().next().copied());
+        if let Some(child) = victim {
+            crate::statemachine::signal_child(&child, procsignal::signums::SIGUSR2);
         }
     }
 }

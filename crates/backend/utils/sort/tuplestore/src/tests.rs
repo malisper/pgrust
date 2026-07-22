@@ -467,7 +467,7 @@ mod spill {
             fd::init_seams();
             xact_seams::get_current_sub_transaction_id::set(|| 1);
             aio_seams::pgaio_closing_fd::set(|_| {});
-            aio_seams::pgaio_io_start_readv::set(|_, _, _| {});
+            aio_seams::pgaio_io_start_readv::set(|_, _, _| Ok(()));
             waitevent_seams::pgstat_report_wait_start::set(|_| {});
             waitevent_seams::pgstat_report_wait_end::set(|| {});
             pgstat_seams::pgstat_report_tempfile::set(|_| {});

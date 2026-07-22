@@ -30,6 +30,7 @@ timeout_seams = { path = "../../utils/misc/timeout_seams" }
 autovacuum = { path = "../autovacuum" }
 bgworker = { path = "../bgworker" }
 bgwriter = { path = "../bgwriter" }
+io_worker = { path = "../io_worker" }
 checkpointer = { path = "../checkpointer" }
 pgarch = { path = "../pgarch" }
 walsummarizer = { path = "../walsummarizer" }

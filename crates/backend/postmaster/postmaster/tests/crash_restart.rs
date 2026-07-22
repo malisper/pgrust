@@ -110,10 +110,15 @@ fn crash_fans_out_sigquit_and_reinit_completes() {
             set: |v| MAX_LOCKS.store(v, Relaxed),
         });
     }
-    aio_config::init_seams();
+    aio_core::init_seams();
+    // commands_variable owns this accessor in production seams_init; this
+    // harness inits GUCs piecemeal (AioShmemSize reads it).
+    guc_tables::vars::io_max_combine_limit.install_if_absent(guc_tables::GucVarAccessors {
+        get: || 16,
+        set: |_| {},
+    });
 
     guc::store::initialize_guc_options().unwrap();
-    guc_tables::vars::io_method.write(0); // sync; redundant since the boot default flipped to sync, kept as an explicit pin
     pg_prng::global_prng(|prng| prng.seed(42));
 
     init_small::globals::SetIsPostmasterEnvironment(true);
@@ -134,6 +139,12 @@ fn crash_fans_out_sigquit_and_reinit_completes() {
     init_small::globals::SetDataDir(dir);
 
     ipci_seams::create_shared_memory_and_semaphores::call(1).unwrap();
+
+    // Regression pin (fleet crash-smoke job -47a8): per-child GUC stamping can
+    // rewrite io_max_concurrency to its -1 boot value after the boot auto-tune;
+    // the AIO crash-reset arm must derive geometry from stored counts, not the
+    // live GUC.
+    guc_tables::vars::io_max_concurrency.write(-1);
 
     guc_tables::vars::remove_temp_files_after_crash.write(false);
 

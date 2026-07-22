@@ -276,7 +276,7 @@ pub(crate) fn FlushBuffer(
     // WAL-before-data; unlogged pages can carry fake LSNs past insert.
     if buf_state & BM_PERMANENT != 0 {
         if let Err(e) = transam_xlog_seams::xlog_flush::call(recptr) {
-            TerminateBufferIO(desc, false, BM_IO_ERROR, true);
+            TerminateBufferIO(desc, false, BM_IO_ERROR, true, false);
             return Err(e);
         }
     }
@@ -286,7 +286,7 @@ pub(crate) fn FlushBuffer(
         smgr_seams::smgr_write::call(tag_locator(&tag), tag.forkNum, tag.blockNum, page, false)
     });
     if let Err(e) = write_result {
-        TerminateBufferIO(desc, false, BM_IO_ERROR, true);
+        TerminateBufferIO(desc, false, BM_IO_ERROR, true, false);
         return Err(e);
     }
 
@@ -299,7 +299,7 @@ pub(crate) fn FlushBuffer(
         BLCKSZ as u64,
     );
     counters::written();
-    TerminateBufferIO(desc, true, 0, true);
+    TerminateBufferIO(desc, true, 0, true, false);
     Ok(())
 }
 

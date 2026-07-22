@@ -1238,19 +1238,33 @@ dependencies = [
 ]
 
 [[package]]
-name = "aio_config"
+name = "aio_core"
 version = "0.0.0"
 dependencies = [
  "aio_seams",
+ "bufmgr_seams",
+ "condition_variable",
  "datum",
+ "elog",
  "guc_seams",
  "guc_tables",
+ "init_small",
+ "interrupt",
  "ipc_seams",
+ "latch",
+ "libc",
  "lmgr_proc",
+ "lwlock",
  "miscinit",
+ "resowner",
+ "shmem",
+ "smgr_seams",
  "types_core",
  "types_error",
  "types_guc",
+ "types_resowner",
+ "types_storage",
+ "waitevent_seams",
 ]
 
 [[package]]
@@ -1268,16 +1282,19 @@ name = "aio_seams"
 version = "0.0.0"
 dependencies = [
  "seam_core",
+ "types_error",
 ]
 
 [[package]]
 name = "aio_uring"
 version = "0.0.0"
 dependencies = [
+ "aio_core",
  "aio_seams",
  "bufmgr",
  "datum",
  "elog",
+ "guc_tables",
  "init_small",
  "ipc_seams",
  "latch",
@@ -2552,6 +2569,7 @@ dependencies = [
 name = "bufmgr"
 version = "0.0.0"
 dependencies = [
+ "aio_core",
  "aio_seams",
  "bufmgr_seams",
  "catalog_storage_seams",
@@ -7858,6 +7876,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "io_worker"
+version = "0.0.0"
+dependencies = [
+ "aio_core",
+ "auxprocess",
+ "elog",
+ "init_small",
+ "interrupt",
+ "ipc",
+ "libpq_pqsignal",
+ "miscinit",
+ "procsignal",
+ "types_core",
+ "types_error",
+ "types_startup",
+]
+
+[[package]]
 name = "ip"
 version = "0.0.0"
 dependencies = [
@@ -7900,6 +7936,7 @@ name = "ipci"
 version = "0.0.0"
 dependencies = [
  "aclchk_seams",
+ "aio_core",
  "backend_status_seams",
  "bufmgr",
  "checkpointer",
@@ -8142,6 +8179,7 @@ dependencies = [
  "guc_tables",
  "init_small",
  "interrupt",
+ "io_worker",
  "ip",
  "ipc",
  "libc",
@@ -8856,6 +8894,7 @@ dependencies = [
 name = "md"
 version = "0.0.0"
 dependencies = [
+ "aio_core",
  "elog",
  "fd",
  "guc_tables",
@@ -13565,7 +13604,7 @@ name = "postmaster"
 version = "0.0.0"
 dependencies = [
  "aclchk_seams",
- "aio_config",
+ "aio_core",
  "auth_seams",
  "autovacuum_seams",
  "backend_startup",
@@ -14848,6 +14887,7 @@ dependencies = [
 name = "resowner"
 version = "0.1.0"
 dependencies = [
+ "aio_seams",
  "datum",
  "elog",
  "hashfn",
@@ -15539,7 +15579,7 @@ dependencies = [
  "adt_tsquery_rewrite",
  "adt_tsvector_stat",
  "adt_xml",
- "aio_config",
+ "aio_core",
  "aio_funcs",
  "aio_uring",
  "allpaths",
@@ -20322,6 +20362,7 @@ dependencies = [
  "adt_float",
  "adt_pg_lsn",
  "adt_timestamp",
+ "aio_core",
  "aio_seams",
  "arrayfuncs",
  "async_seams",

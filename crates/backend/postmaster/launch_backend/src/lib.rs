@@ -91,9 +91,13 @@ static CHILD_PROCESS_KINDS: [ChildProcessKind; BACKEND_NUM_TYPES] = [
         main_fn: Main::Ported(checkpointer::CheckpointerMain),
         shmem_attach: true,
     },
+    // Thread-population liveness (GL-POOLDB-HELPERDEATH-1 class law): io
+    // workers are pmchild-tracked announced children; the postmaster carries
+    // their term as pm.io_worker_count (reaper arm) + PM_WAIT_IO_WORKERS
+    // (statemachine), sequenced AFTER the pool/gang quiescence gates.
     ChildProcessKind {
         name: "io_worker",
-        main_fn: Main::Unported("IoWorkerMain (backend-storage-aio-method-worker)"),
+        main_fn: Main::Ported(io_worker::IoWorkerMain),
         shmem_attach: true,
     },
     ChildProcessKind {
