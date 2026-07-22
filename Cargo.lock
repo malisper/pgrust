@@ -12941,6 +12941,7 @@ dependencies = [
  "pg_depend",
  "pg_inherits",
  "pg_locale",
+ "pg_prng",
  "pgvector_hnsw",
  "planner_seams",
  "postgres_seams",
