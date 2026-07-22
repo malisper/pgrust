@@ -266,6 +266,7 @@ impl AllocSet {
     pub(crate) fn new() -> AllocSet {
         let blocks = take_recycled_blocks();
         let mem_allocated = blocks.first().map_or(0, |b| b.size);
+        crate::global_footprint::add(mem_allocated);
         debug_assert!(blocks.is_empty() || (blocks.len() == 1 && blocks[0].used == 0));
         let (cur_ptr, cur_end) = match blocks.first() {
             Some(b) => {
@@ -348,6 +349,7 @@ impl AllocSet {
         let out = Global.allocate(layout)?;
         self.dedicated.push((out.cast::<u8>(), layout));
         self.mem_allocated += layout.size();
+        crate::global_footprint::add(layout.size());
         Ok(out)
     }
 
@@ -361,6 +363,7 @@ impl AllocSet {
             .expect("dedicated dealloc of an untracked chunk");
         self.dedicated.swap_remove(idx);
         self.mem_allocated -= layout.size();
+        crate::global_footprint::sub(layout.size());
         // SAFETY: tracked live dedicated allocation; caller guarantees layout.
         unsafe { Global.deallocate(ptr, layout) };
     }
@@ -368,6 +371,7 @@ impl AllocSet {
     fn free_all_dedicated(&mut self) {
         for (ptr, layout) in self.dedicated.drain(..) {
             self.mem_allocated -= layout.size();
+            crate::global_footprint::sub(layout.size());
             // SAFETY: reset/Drop's &mut proves no dedicated chunk is in use.
             unsafe { Global.deallocate(ptr, layout) };
         }
@@ -385,6 +389,7 @@ impl AllocSet {
         };
         let mut block = Block::alloc(blksize)?;
         self.mem_allocated += blksize;
+        crate::global_footprint::add(blksize);
         if !is_keeper {
             self.next_block_size = (self.next_block_size * 2).min(MAX_BLOCK_SIZE);
         }
@@ -444,6 +449,7 @@ impl AllocSet {
         let drained: alloc::vec::Vec<Block> = self.blocks.drain(1..).collect();
         for b in drained {
             self.mem_allocated -= b.size;
+            crate::global_footprint::sub(b.size);
             // SAFETY: reset's &mut proves no chunk in these blocks is in use.
             unsafe { b.free() };
         }
@@ -462,6 +468,10 @@ impl AllocSet {
 impl Drop for AllocSet {
     fn drop(&mut self) {
         self.free_all_dedicated();
+        // Remaining block bytes (keeper included) leave this context now,
+        // whether freed or parked in the recycle pool.
+        crate::global_footprint::sub(self.mem_allocated);
+        self.mem_allocated = 0;
         if self.blocks.is_empty() {
             return;
         }

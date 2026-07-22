@@ -492,6 +492,44 @@ fn notify_root_observer(acct: &AcctRc) {
     }
 }
 
+/// Process-wide Σ of block bytes held by LIVE memory contexts (GL-MEMWATCH-1).
+///
+/// Maintained at BLOCK transitions only (arena block alloc/free, dedicated/
+/// oversize chunks, recycled-keeper adoption/parking) — one relaxed atomic
+/// add/sub beside a system (de)allocation, never on the per-chunk hot path.
+/// The per-context accounting stays single-threaded (Cell-based, thread-
+/// owned); this is the one cross-thread number: what all live contexts
+/// together have committed from the heap. A sampler on any thread (the
+/// memory watchdog) reads it against process RSS — the difference is the
+/// untracked-allocation detector (heap estates outside mcx, allocator
+/// retention, thread stacks) and, when the per-context ledgers drift from
+/// reality, the accounting-drift detector.
+///
+/// Blocks parked in the keeper recycle pool are NOT counted (owned by the
+/// pool, not by a live context); they surface in the RSS delta like any
+/// other allocator retention.
+pub mod global_footprint {
+    use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+
+    static BYTES: AtomicUsize = AtomicUsize::new(0);
+
+    #[inline]
+    pub(crate) fn add(n: usize) {
+        BYTES.fetch_add(n, Relaxed);
+    }
+
+    #[inline]
+    pub(crate) fn sub(n: usize) {
+        let prev = BYTES.fetch_sub(n, Relaxed);
+        debug_assert!(prev >= n, "global footprint underflow: {prev} - {n}");
+    }
+
+    /// Block bytes currently committed to live contexts, process-wide.
+    pub fn bytes() -> usize {
+        BYTES.load(Relaxed)
+    }
+}
+
 /// Debug census of LIVE context nodes by name (FPBUDGET-1 instrumentation):
 /// process-global and thread-safe (atomics only), so a sampler on any thread
 /// sees contexts created — and never dropped — by dead session threads. OFF
@@ -1112,8 +1150,25 @@ impl MemoryContext {
     }
 }
 
+// GL-MEMWATCH-1: C parity for aset.c's MemoryContextStats(TopMemoryContext)
+// on allocation failure — the installed observer (mcxt_stats) dumps the
+// failing thread's context forest before the error propagates. Set-once at
+// boot, fn-pointer seam (root-observer pattern above).
+static OOM_OBSERVER: core::sync::atomic::AtomicPtr<()> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+pub fn set_oom_observer(f: fn(context_name: &str, request: usize)) {
+    OOM_OBSERVER.store(f as *mut (), core::sync::atomic::Ordering::Release);
+}
+
 #[cold]
 pub fn oom_named(context_name: &str, request: usize) -> PgError {
+    let p = OOM_OBSERVER.load(core::sync::atomic::Ordering::Acquire);
+    if !p.is_null() {
+        // SAFETY: only set_oom_observer stores here, always from the fn type.
+        let f: fn(&str, usize) = unsafe { core::mem::transmute(p) };
+        f(context_name, request);
+    }
     PgError::error("out of memory")
         .with_sqlstate(ERRCODE_OUT_OF_MEMORY)
         .with_detail(alloc::format!(

@@ -38,6 +38,7 @@ impl BumpArena {
         let blocks = take_recycled_blocks();
         debug_assert!(blocks.is_empty() || (blocks.len() == 1 && blocks[0].used == 0));
         let mem_allocated = blocks.first().map_or(0, |b| b.size);
+        crate::global_footprint::add(mem_allocated);
         BumpArena {
             blocks,
             oversize: alloc::vec::Vec::new(),
@@ -125,6 +126,7 @@ impl BumpArena {
         self.blocks.try_reserve(1).map_err(|_| AllocError)?;
         let block = Block::alloc(blksize)?;
         self.mem_allocated += blksize;
+        crate::global_footprint::add(blksize);
         acct.commit_block(blksize, self.mem_allocated, self.nblocks() + 1);
         let p = block.ptr;
         // SAFETY: csize <= blksize; both offsets stay within the new block.
@@ -168,6 +170,7 @@ impl BumpArena {
         acct.check_limit(size)?;
         let p = Global.allocate(layout)?;
         self.mem_allocated += size;
+        crate::global_footprint::add(size);
         self.oversize.push((p.cast(), layout));
         acct.commit_block(size, self.mem_allocated, self.nblocks());
         acct.window_tail.set(self.window_tail());
@@ -231,12 +234,14 @@ impl BumpArena {
     fn free_extra_blocks(&mut self) {
         for (p, layout) in self.oversize.drain(..) {
             self.mem_allocated -= layout.size();
+            crate::global_footprint::sub(layout.size());
             // SAFETY: reset's &mut proves no oversize chunk is still in use.
             unsafe { Global.deallocate(p, layout) };
         }
         if self.blocks.len() > 1 {
             for b in self.blocks.drain(1..) {
                 self.mem_allocated -= b.size;
+                crate::global_footprint::sub(b.size);
                 // SAFETY: reset's &mut proves no chunk in these blocks is in use.
                 unsafe { b.free() };
             }
@@ -247,6 +252,10 @@ impl BumpArena {
 impl Drop for BumpArena {
     fn drop(&mut self) {
         self.reset();
+        // The keeper's bytes leave this context now, whether freed or parked
+        // in the recycle pool.
+        crate::global_footprint::sub(self.mem_allocated);
+        self.mem_allocated = 0;
         if self.blocks.is_empty() {
             return;
         }

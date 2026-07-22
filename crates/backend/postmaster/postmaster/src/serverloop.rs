@@ -102,6 +102,10 @@ pub fn ServerLoop() -> PgResult<i32> {
     // what makes the analytics fast path engage at DOP=cores out of the box
     // for router-covered shapes — no SET, no env var required.
     let _ = launch_backend::rtpool::start_if_enabled();
+    // GL-MEMWATCH-1: the process memory watchdog sampler thread. Near-free
+    // (a 1s tick off every query path); pgrust.memory_watchdog gates the
+    // work per tick, so SIGHUP can arm/disarm without a restart.
+    memwatchdog::start();
     // M2 pool-binding: wire the STANDING runtime executor gang (boot
     // captures + spawner install; threads spawn lazily at first
     // engagement). No-op unless PGRUST_RUNTIME=1, with PGRUST_RUNTIME_

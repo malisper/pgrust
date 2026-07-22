@@ -42,6 +42,7 @@ ipci = { path = "../../storage/ipc/ipci" }
 varsup = { path = "../../access/transam/varsup" }
 transam_xlog = { path = "../../access/transam/transam_xlog" }
 launch_backend = { path = "../launch_backend" }
+memwatchdog = { path = "../memwatchdog" }
 slotsync = { path = "../../replication/slotsync" }
 backend_startup = { path = "../../tcop/backend_startup" }
 be_secure = { path = "../../libpq/be_secure" }

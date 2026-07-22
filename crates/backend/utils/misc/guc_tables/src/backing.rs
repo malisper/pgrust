@@ -72,6 +72,11 @@ crate::session_guc_cluster!(BackingSessionGucs, BACKING_SESSION_GUCS:
     (pgrust_runtime_bitmap_pool_cell, i32, pgrust_runtime_bitmap_pool, set_pgrust_runtime_bitmap_pool, 0),
     (pgrust_lane_parallel_pool_cell, i32, pgrust_lane_parallel_pool, set_pgrust_lane_parallel_pool, 0),
     (pgrust_gather_fair_stride_cell, i32, pgrust_gather_fair_stride, set_pgrust_gather_fair_stride, 0),
+    // pgrust.memory_watchdog_test_hog (pgrust-only, GL-MEMWATCH-1, developer):
+    // per-query deliberate leak in MB into a named session-lifetime context
+    // ("WatchdogTestHog") — the watchdog e2e's context hog. Session-scoped so
+    // one test session cannot hog another. 0 = off (the only production value).
+    (pgrust_memory_watchdog_test_hog_cell, i32, pgrust_memory_watchdog_test_hog, set_pgrust_memory_watchdog_test_hog, 0),
     (check_function_bodies_cell, bool, check_function_bodies, set_check_function_bodies, true),
     (default_with_oids_cell, bool, default_with_oids, set_default_with_oids, false),
     (current_role_is_superuser_cell, bool, current_role_is_superuser, set_current_role_is_superuser, false),
@@ -175,6 +180,54 @@ bool_var!(
     pgrust_runtime_vacuum_pool,
     set_pgrust_runtime_vacuum_pool,
     true
+);
+// pgrust.memory_watchdog family (pgrust-only, GL-MEMWATCH-1): the process
+// memory watchdog — a postmaster-lifetime sampler thread comparing process
+// RSS (and cgroup v2 memory.current/memory.max when present) against a
+// limit, and logging the accounted-vs-real ledger plus per-backend context
+// dumps at escalating thresholds BEFORE the container OOM killer arrives
+// (which arrives with no diagnostics at all — the GL-HASHAGG-SPILL-1 /
+// GL-TSACCT-1 incident class). Process-global cells: the watchdog thread
+// reads them each tick, so PGC_SIGHUP edits apply without a restart.
+bool_var!(
+    B_pgrust_memory_watchdog,
+    pgrust_memory_watchdog,
+    set_pgrust_memory_watchdog,
+    true
+);
+// On breach, also signal every live backend to dump its memory-context tree
+// to the log (the pg_log_backend_memory_contexts machinery, fanned out).
+bool_var!(
+    B_pgrust_memory_watchdog_dump,
+    pgrust_memory_watchdog_dump,
+    set_pgrust_memory_watchdog_dump,
+    true
+);
+// Sampler cadence in ms. The tick reads /proc + two atomics — off every
+// query path entirely; 1s keeps worst-case detection latency far under the
+// growth rates that killed us (GiB/minute class).
+int_var!(
+    I_pgrust_memory_watchdog_interval,
+    pgrust_memory_watchdog_interval,
+    set_pgrust_memory_watchdog_interval,
+    1000
+);
+// Base warn threshold as a percent of the limit; escalation tiers derive
+// from it (T, T + (100-T)/2, T + 3(100-T)/4 — 80 -> 80/90/95).
+int_var!(
+    I_pgrust_memory_watchdog_threshold,
+    pgrust_memory_watchdog_threshold,
+    set_pgrust_memory_watchdog_threshold,
+    80
+);
+// Absolute memory limit in MB the thresholds apply to. 0 = auto: the cgroup
+// v2 memory.max when bounded (the container case IS the incident case);
+// with neither signal the watchdog idles with one boot log line.
+int_var!(
+    I_pgrust_memory_watchdog_limit,
+    pgrust_memory_watchdog_limit,
+    set_pgrust_memory_watchdog_limit,
+    0
 );
 bool_var!(
     B_integer_datetimes,
