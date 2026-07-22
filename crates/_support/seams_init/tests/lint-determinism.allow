@@ -293,6 +293,7 @@ spawn	crates/backend/postmaster/launch_backend/src/lib.rs	5	SANCTIONED: the spaw
 spawn	crates/backend/utils/misc/timeout/src/lib.rs	1	DST-REVIEW(permit-s5): row 16 CONVERTED — timer thread door-routed via the pgsync::thread wrapper (scanner sees the textual thread::Builder, not the pgsync routing); registered timer = deadline parks drive virtual time, fire-wakes are scheduled ops
 
 # ==== env ====
+env	crates/_support/mcx/src/lib.rs	1	DST-REVIEW(mcxstripe): t35-law kill switch (PGRUST_MCX_POOL_STRIPE=0 restores the global spin-locked context pools) — pure env-read once-cache, the m41/m42 kill-switch rows' exact class; knobs-registry routing (s2.5) chartered to the DST program
 env	crates/_support/jit_deform/src/lib.rs	1
 env	crates/_support/pgrust/trace/src/lib.rs	1
 env	crates/_support/types/datum/src/array_build.rs	1	DST-REVIEW(night/replan-arrayfetch): PGRUST_ARRAY_FETCH_INLINE kill knob (inline byval element fetch in deconstruct_array_image; =0|off restores the incumbent runtime-length copy arm) — process-constant env read once, OnceLock-cached, checked once per deconstruct call (the jit_deform idiom); knobs-registry routing (s2.5) chartered to the DST program
@@ -479,6 +480,7 @@ barrier	crates/backend/executor/nodehash/src/parallel.rs	4	pg_barrier::Barrier c
 # classify each init closure (a) pure/env-read or (b) choke-crossing.
 # Unannotated rows carry no per-row claim yet — the ledger is the Wave-1
 # deliverable, this section is the ratchet that fences NEW sites.
+once	crates/_support/mcx/src/lib.rs	1	DST-REVIEW(mcxstripe): P3 row-19 pure env-read closure — the pool kill-switch OnceLock latch (local_pool_on); knobs-registry routing (s2.5) chartered to the DST program
 once	crates/_support/jit_deform/src/lib.rs	1
 once	crates/_support/pgrust/trace/src/lib.rs	1
 once	crates/_support/seams_init/src/lib.rs	1
@@ -610,6 +612,7 @@ once	crates/_support/pgsync/src/sim_world.rs	3	DST-REVIEW(ws-sync): OnceLock/Onc
 spawn	crates/_support/pgsync/src/sim_world.rs	2	DST-REVIEW(ws-sync): sim thread::Builder wrapper over std Builder — registers children via hooks (synthetic vpid range); the spawn door stays the sanctioned product path
 # ---- rawsync census seed (generated from --regen at the migration tip; ----
 # ---- runtime + waiter carry NO rows = the ratchet's first tightening  ----
+rawsync	crates/_support/mcx/src/lib.rs	1	DST-REVIEW(mcxstripe): the kill-switch OnceLock lives in no_std mcx under its `std` feature — pgsync cannot be a dep there (layering: mcx sits under the lock library's consumers); pure once-cache latch, never a lock-wait surface
 rawsync	crates/_support/jit_deform/src/lib.rs	1
 rawsync	crates/_support/pgrust/trace/src/lib.rs	1
 rawsync	crates/_support/seams_init/src/lib.rs	1
