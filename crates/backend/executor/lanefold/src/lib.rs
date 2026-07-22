@@ -290,6 +290,34 @@ const F_TEXTOCTETLEN: Oid = 1374;
 // char-count kernel admits — see classify_len_arg).
 const PG_UTF8: i32 = 6;
 
+/// Planner-probe mirror of [`classify_len_arg`]'s FUNCID + ENCODING half
+/// (stragg-coverage LENARG car): does this funcid belong to the
+/// textlen-family fold-arg vocabulary under the CURRENT server encoding?
+/// The Var/shape half (bare text/varchar Var on the scanned rel) lives at
+/// parse altitude in the m5 probe; keeping the funcid table + encoding
+/// gates HERE, next to the classifier that consumes them, is the
+/// knob-coherence law — a funcid admitted here MUST classify in
+/// `classify_len_arg` over a staged text lane, or the probe suppresses a
+/// shape the fold refuses (suppress-then-serial). octet_length reads the
+/// payload byte count (encoding-free); the char-length aliases need the
+/// vectorizable count kernels (1-byte-max encodings or UTF-8) and refuse
+/// on a missing encoding seam exactly as the classifier does.
+pub fn len_arg_funcid_admits(funcid: Oid) -> bool {
+    if funcid == F_TEXTOCTETLEN {
+        return true;
+    }
+    if !F_TEXTLEN.contains(&funcid) {
+        return false;
+    }
+    if !::mbutils_seams::pg_database_encoding_max_length::is_installed()
+        || !::mbutils_seams::get_database_encoding::is_installed()
+    {
+        return false;
+    }
+    ::mbutils_seams::pg_database_encoding_max_length::call() == 1
+        || ::mbutils_seams::get_database_encoding::call() == PG_UTF8
+}
+
 const F_INT4MUL: Oid = 141;
 const F_INT24MUL: Oid = 170;
 const F_INT42MUL: Oid = 171;

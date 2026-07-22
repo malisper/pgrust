@@ -4718,6 +4718,21 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         stats::tick_refused(ShapeClass::AggBuild, RefuseReason::ParallelGate);
         return Ok(false);
     };
+    // Post-aggregate filtered grouped shapes (stragg-coverage inc-1): a
+    // filtered emit plan composes with the plain FULL drain only — winner
+    // selection, the admission freeze, and table adopt all reason over
+    // UNFILTERED group sets (a frozen/truncated admission could starve
+    // groups that pass the filter; an adopted table's retrieve bypasses the
+    // emit-buf row gate). Vacate them here; the serial Sort/Limit above the
+    // engaged frame still consume the filtered grouped output.
+    let (topn, freeze_bound) = if emit.has_filter() {
+        if topn.is_some() || freeze_bound.is_some() {
+            lane_trace("runtime-agg: topn/freeze vacated (post-aggregate emit filter)");
+        }
+        (None, None)
+    } else {
+        (topn, freeze_bound)
+    };
     // F1 root cause (chaos-battery): the WORKER arm re-runs the compact
     // spill-eligibility gate under the sink cap with the leader's restored
     // work_mem — at small work_mem (<=256kB on 16k-group shapes) EVERY
@@ -4909,9 +4924,10 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     };
     // TABLE-ADOPT shape gate: byval emit columns AND byval combine states —
     // the adopted table's rows must be self-contained past helper teardown
-    // (a byref transvalue points into a worker aggcontext).
+    // (a byref transvalue points into a worker aggcontext). Filtered emit
+    // plans never adopt (the vacate comment at the emit-plan build).
     let adopt_shape =
-        ::nodeagg::sink::sink_emit_plan_all_byval(&emit) && !byref_states;
+        ::nodeagg::sink::sink_emit_plan_all_byval(&emit) && !byref_states && !emit.has_filter();
     // M3.5 spill arm: ON by default when the sink engages (this is the
     // refusal→engagement charter); PGRUST_RUNTIME_AGG_SPILL=0 restores the
     // phase-1 refusal exactly. SpillSet creation is leader-side (fd
@@ -4994,6 +5010,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
     // the table cannot be SLC-resident and the incumbent partitioned path
     // is the right answer (and remains the runtime fallback either way).
     let shared = if agg_shared_table_enabled()
+        && !emit.has_filter()
         && drain == SinkDrain::K2
         && key_words == 1
         // ONE count transition: the state block is a single AggPerGroup
@@ -5026,6 +5043,9 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         && topn.is_none()
         && freeze.is_none()
         && shared.is_none()
+        // Post-aggregate emit filters keep the plain full-drain composition
+        // only in v1 (the vacate comment at the emit-plan build).
+        && !emit.has_filter()
         // BYREF-STATE EXCLUSION (t40 composition red, assembler unload):
         // the flush bodies' caller contract is byval-POD state blocks
         // (sink_flush_table doc) — a byref transvalue (VarlenaMinMax /
@@ -5063,6 +5083,7 @@ pub(super) fn try_engage_hashagg_runtime<'mcx>(
         && topn.is_none()
         && freeze.is_none()
         && shared.is_none()
+        && !emit.has_filter()
         && est_groups >= agg_scatter_floor()
         && est_rows / est_groups.max(1) <= agg_scatter_alpha()
         && ::nodeagg::sink::sink_scatter_admits(agg);
