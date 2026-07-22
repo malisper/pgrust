@@ -1209,47 +1209,6 @@ fn slab_child_context_reports_in_parent_subtree() {
     drop(child);
 }
 
-// GL-MEMWATCH-1: the process-wide block-bytes counter balances across a
-// context lifecycle. Other tests allocate concurrently, so the assertions
-// are delta-based with a large dedicated allocation and a noise allowance.
-#[test]
-fn global_footprint_tracks_context_block_bytes() {
-    const BIG: usize = 32 * 1024 * 1024;
-    const NOISE: usize = 8 * 1024 * 1024;
-    let base = global_footprint::bytes();
-    {
-        let ctx = MemoryContext::new("footprint-probe");
-        // Dedicated (over chunk limit) allocation: counted at exact size.
-        let v: PgVec<'_, u8> = vec_with_capacity_in(ctx.mcx(), BIG).unwrap();
-        let held = global_footprint::bytes();
-        drop(v);
-        assert!(
-            held >= base + BIG,
-            "global footprint {held} did not grow by the dedicated {BIG} over base {base}"
-        );
-        drop(ctx);
-        let after = global_footprint::bytes();
-        assert!(
-            after + NOISE >= base && after <= held.saturating_sub(BIG) + NOISE,
-            "global footprint {after} did not return toward base {base} (held {held})"
-        );
-    }
-    // Bump family balances too: create, spill past the keeper, drop.
-    let base2 = global_footprint::bytes();
-    {
-        let mut ctx = MemoryContext::new_bump("footprint-bump-probe");
-        for _ in 0..4000 {
-            let _ = box_new_in(ctx.mcx(), [0u8; 4096]);
-        }
-        assert!(global_footprint::bytes() + NOISE >= base2 + 4000 * 4096);
-        ctx.reset();
-    }
-    let after2 = global_footprint::bytes();
-    assert!(
-        after2 <= base2 + NOISE,
-        "bump-family bytes not released: after {after2} base {base2}"
-    );
-
 // LocalStack (the per-thread pool container; the TLS statics themselves are
 // cfg(not(test)) — the integration tests in tests/ exercise those).
 #[cfg(feature = "std")]
@@ -1300,4 +1259,46 @@ mod local_stack {
         drop(s);
         assert_eq!(DISPOSED.load(Ordering::Relaxed), before + 2);
     }
+
+// GL-MEMWATCH-1: the process-wide block-bytes counter balances across a
+// context lifecycle. Other tests allocate concurrently, so the assertions
+// are delta-based with a large dedicated allocation and a noise allowance.
+#[test]
+fn global_footprint_tracks_context_block_bytes() {
+    const BIG: usize = 32 * 1024 * 1024;
+    const NOISE: usize = 8 * 1024 * 1024;
+    let base = global_footprint::bytes();
+    {
+        let ctx = MemoryContext::new("footprint-probe");
+        // Dedicated (over chunk limit) allocation: counted at exact size.
+        let v: PgVec<'_, u8> = vec_with_capacity_in(ctx.mcx(), BIG).unwrap();
+        let held = global_footprint::bytes();
+        drop(v);
+        assert!(
+            held >= base + BIG,
+            "global footprint {held} did not grow by the dedicated {BIG} over base {base}"
+        );
+        drop(ctx);
+        let after = global_footprint::bytes();
+        assert!(
+            after + NOISE >= base && after <= held.saturating_sub(BIG) + NOISE,
+            "global footprint {after} did not return toward base {base} (held {held})"
+        );
+    }
+    // Bump family balances too: create, spill past the keeper, drop.
+    let base2 = global_footprint::bytes();
+    {
+        let mut ctx = MemoryContext::new_bump("footprint-bump-probe");
+        for _ in 0..4000 {
+            let _ = box_new_in(ctx.mcx(), [0u8; 4096]);
+        }
+        assert!(global_footprint::bytes() + NOISE >= base2 + 4000 * 4096);
+        ctx.reset();
+    }
+    let after2 = global_footprint::bytes();
+    assert!(
+        after2 <= base2 + NOISE,
+        "bump-family bytes not released: after {after2} base {base2}"
+    );
+}
 }

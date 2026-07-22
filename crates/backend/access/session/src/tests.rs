@@ -671,8 +671,8 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //   71. _support/mcx/src/aset.rs — KEEPER_TLS: the per-thread parked
     //      keeper-block lists (C context_freelists parity — C's freelist is
     //      per-process = per-backend, so per-thread IS the C shape). Same
-    //      classification and teardown story as row 68    assert_eq!(count_tree(crates), 531, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
-    assert_eq!(count_tree(crates), 529, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
+    //      classification and teardown story as row 70.
+    assert_eq!(count_tree(crates), 531, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
         ("backend/utils/init/init_small/src/globals.rs", 4),
