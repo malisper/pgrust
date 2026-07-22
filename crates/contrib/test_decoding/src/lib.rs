@@ -44,6 +44,8 @@ struct TestDecodingData {
 
 struct TestDecodingTxnData {
     xact_wrote_changes: bool,
+    // Whether the current streamed block wrote anything (per-chunk reset).
+    stream_wrote_changes: bool,
 }
 
 fn data_from(opc: &OutputPluginContext) -> &'static mut TestDecodingData {
@@ -78,8 +80,15 @@ fn fc__pg_output_plugin_init(
     cb.filter_by_origin_cb = Some(pg_decode_filter);
     cb.shutdown_cb = Some(pg_decode_shutdown);
     cb.message_cb = Some(pg_decode_message);
-    // C also registers the stream_* callbacks; streaming is unported and
-    // panics loudly if requested.
+    cb.stream_start_cb = Some(pg_decode_stream_start);
+    cb.stream_stop_cb = Some(pg_decode_stream_stop);
+    cb.stream_abort_cb = Some(pg_decode_stream_abort);
+    cb.stream_commit_cb = Some(pg_decode_stream_commit);
+    cb.stream_change_cb = Some(pg_decode_stream_change);
+    cb.stream_message_cb = Some(pg_decode_stream_message);
+    cb.stream_truncate_cb = Some(pg_decode_stream_truncate);
+    // C also registers stream_prepare_cb; streamed two-phase is deferred
+    // (GL-LOGDEC-1 ASK-1) — reaching it errors in the wrapper.
     Ok(Datum::from_usize(0))
 }
 
@@ -162,9 +171,6 @@ fn pg_decode_startup(opc: &mut OutputPluginContext, _is_init: bool) -> PgResult<
     opc.output_plugin_options = options;
 
     opc.streaming &= enable_streaming;
-    if opc.streaming {
-        unported("stream-changes");
-    }
 
     opc.output_plugin_private = Box::into_raw(data) as usize;
     Ok(())
@@ -188,6 +194,7 @@ fn pg_decode_begin_txn(
     let data = data_from(opc);
     let txndata = Box::new(TestDecodingTxnData {
         xact_wrote_changes: false,
+        stream_wrote_changes: false,
     });
     rb.txn_mut(txn).output_plugin_private = Box::into_raw(txndata) as usize;
 
@@ -286,6 +293,7 @@ fn pg_decode_begin_prepare_txn(
     let data = data_from(opc);
     let txndata = Box::new(TestDecodingTxnData {
         xact_wrote_changes: false,
+        stream_wrote_changes: false,
     });
     rb.txn_mut(txn).output_plugin_private = Box::into_raw(txndata) as usize;
 
@@ -661,6 +669,238 @@ fn pg_decode_message(
         message.len()
     );
     opc.out.push_str(&String::from_utf8_lossy(message));
+    OutputPluginWrite(opc, true)
+}
+
+// pg_output_stream_start (test_decoding.c:672).
+fn pg_output_stream_start(
+    opc: &mut OutputPluginContext,
+    rb: &ReorderBuffer,
+    txn: TxnId,
+    last_write: bool,
+) -> PgResult<()> {
+    let include_xids = data_from(opc).include_xids;
+    OutputPluginPrepareWrite(opc, last_write)?;
+    if include_xids {
+        let _ = write!(
+            opc.out,
+            "opening a streamed block for transaction TXN {}",
+            rb.txn(txn).xid
+        );
+    } else {
+        opc.out.push_str("opening a streamed block for transaction");
+    }
+    OutputPluginWrite(opc, last_write)
+}
+
+// pg_decode_stream_start (test_decoding.c:648): streamed txns skip begin_cb,
+// so the txn plugin data allocates lazily on the first stream.
+fn pg_decode_stream_start(
+    opc: &mut OutputPluginContext,
+    rb: &mut ReorderBuffer,
+    txn: TxnId,
+) -> PgResult<()> {
+    let data = data_from(opc);
+    if rb.txn(txn).output_plugin_private == 0 {
+        let txndata = Box::new(TestDecodingTxnData {
+            xact_wrote_changes: false,
+            stream_wrote_changes: false,
+        });
+        rb.txn_mut(txn).output_plugin_private = Box::into_raw(txndata) as usize;
+    }
+    txndata_from(rb, txn).stream_wrote_changes = false;
+    if data.skip_empty_xacts {
+        return Ok(());
+    }
+    pg_output_stream_start(opc, rb, txn, true)
+}
+
+// pg_decode_stream_stop (test_decoding.c:684).
+fn pg_decode_stream_stop(
+    opc: &mut OutputPluginContext,
+    rb: &mut ReorderBuffer,
+    txn: TxnId,
+) -> PgResult<()> {
+    let data = data_from(opc);
+    if data.skip_empty_xacts && !txndata_from(rb, txn).stream_wrote_changes {
+        return Ok(());
+    }
+    OutputPluginPrepareWrite(opc, true)?;
+    if data.include_xids {
+        let _ = write!(
+            opc.out,
+            "closing a streamed block for transaction TXN {}",
+            rb.txn(txn).xid
+        );
+    } else {
+        opc.out.push_str("closing a streamed block for transaction");
+    }
+    OutputPluginWrite(opc, true)
+}
+
+// pg_decode_stream_abort (test_decoding.c:702): the abort may name a
+// subtransaction, but the plugin data lives on the toplevel txn.
+fn pg_decode_stream_abort(
+    opc: &mut OutputPluginContext,
+    rb: &mut ReorderBuffer,
+    txn: TxnId,
+    _abort_lsn: XLogRecPtr,
+) -> PgResult<()> {
+    let data = data_from(opc);
+    let toptxn = rb.toptxn_id(txn);
+    let xact_wrote_changes = txndata_from(rb, toptxn).xact_wrote_changes;
+
+    if toptxn == txn {
+        let p = rb.txn(txn).output_plugin_private;
+        rb.txn_mut(txn).output_plugin_private = 0;
+        debug_assert!(p != 0);
+        // SAFETY: exclusive owner of the stream-start allocation.
+        unsafe { drop(Box::from_raw(p as *mut TestDecodingTxnData)) };
+    }
+
+    if data.skip_empty_xacts && !xact_wrote_changes {
+        return Ok(());
+    }
+    OutputPluginPrepareWrite(opc, true)?;
+    if data.include_xids {
+        let _ = write!(
+            opc.out,
+            "aborting streamed (sub)transaction TXN {}",
+            rb.txn(txn).xid
+        );
+    } else {
+        opc.out.push_str("aborting streamed (sub)transaction");
+    }
+    OutputPluginWrite(opc, true)
+}
+
+// pg_decode_stream_commit (test_decoding.c:740).
+fn pg_decode_stream_commit(
+    opc: &mut OutputPluginContext,
+    rb: &mut ReorderBuffer,
+    txn: TxnId,
+    _commit_lsn: XLogRecPtr,
+) -> PgResult<()> {
+    let data = data_from(opc);
+    let p = rb.txn(txn).output_plugin_private;
+    rb.txn_mut(txn).output_plugin_private = 0;
+    debug_assert!(p != 0);
+    // SAFETY: exclusive owner of the stream-start allocation.
+    let txndata = unsafe { Box::from_raw(p as *mut TestDecodingTxnData) };
+    let xact_wrote_changes = txndata.xact_wrote_changes;
+    drop(txndata);
+
+    if data.skip_empty_xacts && !xact_wrote_changes {
+        return Ok(());
+    }
+    OutputPluginPrepareWrite(opc, true)?;
+    if data.include_xids {
+        let _ = write!(opc.out, "committing streamed transaction TXN {}", rb.txn(txn).xid);
+    } else {
+        opc.out.push_str("committing streamed transaction");
+    }
+    if data.include_timestamp {
+        let ts = timestamptz_str(rb.txn(txn).xact_time)?;
+        let _ = write!(opc.out, " (at {ts})");
+    }
+    OutputPluginWrite(opc, true)
+}
+
+// pg_decode_stream_change (test_decoding.c:771). In a streamed block the
+// change data may already be gone (spilled and consumed); only the fact of
+// the change is printed.
+fn pg_decode_stream_change(
+    opc: &mut OutputPluginContext,
+    rb: &mut ReorderBuffer,
+    txn: TxnId,
+    _relation: &RelationData<'static>,
+    _change: &mut ReorderBufferChange,
+) -> PgResult<()> {
+    let data = data_from(opc);
+    if data.skip_empty_xacts && !txndata_from(rb, txn).stream_wrote_changes {
+        pg_output_stream_start(opc, rb, txn, false)?;
+    }
+    {
+        let txndata = txndata_from(rb, txn);
+        txndata.xact_wrote_changes = true;
+        txndata.stream_wrote_changes = true;
+    }
+    OutputPluginPrepareWrite(opc, true)?;
+    if data.include_xids {
+        let _ = write!(opc.out, "streaming change for TXN {}", rb.txn(txn).xid);
+    } else {
+        opc.out.push_str("streaming change for transaction");
+    }
+    OutputPluginWrite(opc, true)
+}
+
+// pg_decode_stream_message (test_decoding.c:797).
+fn pg_decode_stream_message(
+    opc: &mut OutputPluginContext,
+    rb: &mut ReorderBuffer,
+    txn: Option<TxnId>,
+    _lsn: XLogRecPtr,
+    transactional: bool,
+    prefix: &str,
+    message: &[u8],
+) -> PgResult<()> {
+    let data = data_from(opc);
+    if transactional {
+        let txn = txn.expect("transactional message has a txn");
+        if data.skip_empty_xacts && !txndata_from(rb, txn).stream_wrote_changes {
+            pg_output_stream_start(opc, rb, txn, false)?;
+        }
+        let txndata = txndata_from(rb, txn);
+        txndata.xact_wrote_changes = true;
+        txndata.stream_wrote_changes = true;
+    }
+
+    OutputPluginPrepareWrite(opc, true)?;
+    if transactional {
+        // The message content is not output: it may already be gone.
+        let _ = write!(
+            opc.out,
+            "streaming message: transactional: {} prefix: {}, sz: {}",
+            transactional as i32,
+            prefix,
+            message.len()
+        );
+    } else {
+        let _ = write!(
+            opc.out,
+            "streaming message: transactional: {} prefix: {}, sz: {} content:",
+            transactional as i32,
+            prefix,
+            message.len()
+        );
+        opc.out.push_str(&String::from_utf8_lossy(message));
+    }
+    OutputPluginWrite(opc, true)
+}
+
+// pg_decode_stream_truncate (test_decoding.c:835).
+fn pg_decode_stream_truncate(
+    opc: &mut OutputPluginContext,
+    rb: &mut ReorderBuffer,
+    txn: TxnId,
+    _relations: &[Rc<RelationData<'static>>],
+    _change: &mut ReorderBufferChange,
+) -> PgResult<()> {
+    let data = data_from(opc);
+    if data.skip_empty_xacts && !txndata_from(rb, txn).stream_wrote_changes {
+        pg_output_stream_start(opc, rb, txn, false)?;
+    }
+    {
+        let txndata = txndata_from(rb, txn);
+        txndata.xact_wrote_changes = true;
+        txndata.stream_wrote_changes = true;
+    }
+    OutputPluginPrepareWrite(opc, true)?;
+    if data.include_xids {
+        let _ = write!(opc.out, "streaming truncate for TXN {}", rb.txn(txn).xid);
+    } else {
+        opc.out.push_str("streaming truncate for transaction");
+    }
     OutputPluginWrite(opc, true)
 }
 

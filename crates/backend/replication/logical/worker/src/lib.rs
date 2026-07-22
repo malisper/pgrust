@@ -31,6 +31,7 @@ use types_error::{
 use walreceiver::client::{CopyData, PgConn};
 
 mod apply;
+mod stream_apply;
 mod tablesync;
 #[cfg(test)]
 mod tests;
@@ -43,7 +44,7 @@ pub(crate) fn apply_worker_exit_requested() -> bool {
     APPLY_WORKER_EXIT.get()
 }
 
-fn loc(func: &'static str) -> ErrorLocation {
+pub(crate) fn loc(func: &'static str) -> ErrorLocation {
     ErrorLocation::new("src/backend/replication/logical/worker.c", 0, func)
 }
 
@@ -322,7 +323,10 @@ pub(crate) fn apply_loop(conn: &mut PgConn, mut last_received: XLogRecPtr) -> Pg
                 // writes; process invals when idle; wait for the socket.
                 send_feedback(conn, last_received, false, false)?;
 
-                if !IN_REMOTE_TRANSACTION.get() {
+                // C gates this idle work on being outside BOTH a remote
+                // transaction and a streamed chunk (worker.c:3720): a chunk's
+                // spool transaction stays open until STREAM STOP.
+                if !IN_REMOTE_TRANSACTION.get() && !stream_apply::in_streamed_transaction() {
                     inval::local::AcceptInvalidationMessages()?;
                     maybe_reread_subscription(mcx)?;
                     if APPLY_WORKER_EXIT.get() {
@@ -419,17 +423,30 @@ fn start_logical_streaming_opts(
     two_phase: bool,
 ) -> PgResult<()> {
     let slot = slotname.to_string();
-    let (publications, binary, origin_opt) = my_sub(|s| {
+    let (publications, binary, origin_opt, stream_mode) = my_sub(|s| {
         (
             s.publications.clone(),
             s.binary,
             s.origin.clone(),
+            s.stream,
         )
     });
 
-    // Streaming (in-progress transactions) is never requested: the pgrust
-    // subscriber does not handle it yet. two_phase is requested only by
-    // run_apply_worker's PENDING->ENABLED transition.
+    // set_stream_options (worker.c:4429): streaming!=off requests the serial
+    // streamed-apply path. streaming=parallel — CREATE SUBSCRIPTION's DEFAULT
+    // (subscriptioncmds.c:154) — applies serially: applyparallelworker.c is
+    // not ported, and C's own leader serializes a parallel-mode transaction
+    // whenever no parallel worker is available, so the serial path is inside
+    // C's behavior space. Logged per worker start so the divergence is
+    // visible. two_phase is requested only by run_apply_worker's
+    // PENDING->ENABLED transition.
+    if stream_mode == pg_subscription::LOGICALREP_STREAM_PARALLEL {
+        let _ = elog::elog(
+            LOG,
+            "parallel streaming apply is not implemented; applying streamed transactions serially"
+                .to_string(),
+        );
+    }
     let pubnames = publications
         .iter()
         .map(|p| format!("\"{}\"", p.replace('"', "\"\"")))
@@ -448,6 +465,9 @@ fn start_logical_streaming_opts(
     cmd.push_str(&format!(", publication_names {pubnames_literal}"));
     if binary {
         cmd.push_str(", binary 'true'");
+    }
+    if stream_mode != pg_subscription::LOGICALREP_STREAM_OFF {
+        cmd.push_str(", streaming 'on'");
     }
     if two_phase {
         cmd.push_str(", two_phase 'on'");

@@ -46,6 +46,7 @@ heapam = { path = "../../../access/heap/heapam" }
 nodemodifytable = { path = "../../../executor/nodemodifytable" }
 origin = { path = "../../origin" }
 pg_subscription = { path = "../../../catalog/pg_subscription" }
+fd = { path = "../../../storage/file/fd" }
 postgres_seams = { path = "../../../tcop/postgres_seams" }
 snapmgr = { path = "../../../utils/time/snapmgr" }
 tableam_real = { path = "../../../access/table/tableam", package = "tableam" }
