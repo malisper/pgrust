@@ -11,8 +11,7 @@ use init_small::globals as g;
 use latch::{ResetLatch, SetLatch, WaitLatch};
 use lwlock::{LWLockAcquire, LWLockRelease, LW_EXCLUSIVE};
 use types_core::ProcNumber;
-use types_error::{PgError, PgResult, ERROR, LOG};
-use types_startup::StartupData;
+use types_error::{PgResult, ERROR, LOG};
 use types_storage::aio::{PGAIO_HF_REFERENCES_LOCAL, PGAIO_SUBMIT_BATCH_SIZE};
 use types_storage::latch::LatchHandle;
 use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET};
@@ -204,7 +203,18 @@ fn pgaio_worker_die(_code: i32, _arg: usize) {
     LWLockRelease(queue_lock()).expect("pgaio_worker_die");
 }
 
-fn pgaio_worker_register() -> PgResult<()> {
+// Per-worker executed-IO count: the read-path e2e's deterministic
+// flowed-through-workers witness (logged by IoWorkerMain at exit).
+thread_local! {
+    static EXECUTED_IOS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+pub fn pgaio_worker_executed_count() -> u64 {
+    EXECUTED_IOS.get()
+}
+
+/// Register this thread in the worker registry (IoWorkerMain bring-up).
+pub fn pgaio_worker_register() -> PgResult<()> {
     MY_IO_WORKER_ID.set(-1);
 
     LWLockAcquire(queue_lock(), LW_EXCLUSIVE, g::MyProcNumber())?;
@@ -234,65 +244,9 @@ fn pgaio_worker_register() -> PgResult<()> {
     Ok(())
 }
 
-fn fatal_exit(e: &PgError) -> ! {
-    elog::emit_error_report_for(e);
-    ipc::proc_exit(1, g::MyProcPid())
-}
-
-pub fn IoWorkerMain(startup_data: &StartupData) -> ! {
-    debug_assert!(matches!(startup_data, StartupData::None));
-
-    miscinit::SetMyBackendType(types_core::BackendType::IoWorker);
-    if let Err(e) = auxprocess::AuxiliaryProcessMainCommon() {
-        fatal_exit(&e);
-    }
-
-    {
-        use procsignal::ThreadSignalHandler::{Ignore, Simple};
-        procsignal::pqsignal_thread(
-            procsignal::signums::SIGHUP,
-            Simple(interrupt::SignalHandlerForConfigReload),
-        );
-        // C: SIGINT = die (manual worker restart). The thread rendering exits
-        // at the next drain point instead of longjmping mid-IO.
-        procsignal::pqsignal_thread(
-            procsignal::signums::SIGINT,
-            Simple(interrupt::SignalHandlerForShutdownRequest),
-        );
-        // Explicit shutdown comes via SIGUSR2 late in the sequence, like
-        // checkpointer; SIGTERM is ignored.
-        procsignal::pqsignal_thread(procsignal::signums::SIGTERM, Ignore);
-        procsignal::pqsignal_thread(procsignal::signums::SIGALRM, Ignore);
-        procsignal::pqsignal_thread(procsignal::signums::SIGPIPE, Ignore);
-        procsignal::pqsignal_thread(
-            procsignal::signums::SIGUSR2,
-            Simple(interrupt::SignalHandlerForShutdownRequest),
-        );
-    }
-
-    libpq_pqsignal::unblock_signals();
-
-    if let Err(e) = pgaio_worker_register() {
-        fatal_exit(&e);
-    }
-
-    while !interrupt::ShutdownRequestPending() {
-        match worker_cycle() {
-            Ok(()) => {}
-            Err(e) => {
-                // C reaches its sigsetjmp arm only from reopen/execution
-                // errors, which worker_cycle already downgrades to a failed
-                // IO; anything else is unexpected — exit(1), postmaster
-                // relaunches a fresh worker.
-                fatal_exit(&e);
-            }
-        }
-    }
-
-    ipc::proc_exit(0, g::MyProcPid())
-}
-
-fn worker_cycle() -> PgResult<()> {
+/// One IoWorkerMain loop iteration: consume + execute one IO, or sleep on
+/// the latch; then the main-loop interrupt drain.
+pub fn pgaio_worker_cycle() -> PgResult<()> {
     let mut latches: [ProcNumber; IO_WORKER_WAKEUP_FANOUT] = [INVALID_PROC; 2];
     let mut nlatches = 0usize;
 
@@ -352,6 +306,7 @@ fn worker_cycle() -> PgResult<()> {
             } else {
                 crate::io::pgaio_io_perform_synchronously(index);
             }
+            EXECUTED_IOS.set(EXECUTED_IOS.get() + 1);
             g::ResumeInterrupts();
         }
         None => {

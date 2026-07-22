@@ -93,7 +93,7 @@ static CHILD_PROCESS_KINDS: [ChildProcessKind; BACKEND_NUM_TYPES] = [
     // (statemachine), sequenced AFTER the pool/gang quiescence gates.
     ChildProcessKind {
         name: "io_worker",
-        main_fn: Main::Ported(aio_core::IoWorkerMain),
+        main_fn: Main::Ported(io_worker::IoWorkerMain),
         shmem_attach: true,
     },
     ChildProcessKind {

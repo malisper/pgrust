@@ -172,6 +172,19 @@ seam_core::seam!(
     pub fn aio_md_readv_report(
         result: types_storage::aio::PgAioResult,
         td: types_storage::aio::PgAioTargetData,
-        elevel: i32,
+        elevel: types_error::ErrorLevel,
+    ) -> PgResult<()>
+);
+
+seam_core::seam!(
+    // smgrstartreadv (smgr.c): start an asynchronous readv of `pages.len()`
+    // consecutive blocks into the given pool pages, on the CURRENT handed-out
+    // AIO handle (the fd.c FileStartReadV shape). Completion callbacks see
+    // the result in blocks.
+    pub fn smgr_startreadv(
+        rlocator: RelFileLocatorBackend,
+        forknum: ForkNumber,
+        blocknum: BlockNumber,
+        pages: &[*mut u8],
     ) -> PgResult<()>
 );

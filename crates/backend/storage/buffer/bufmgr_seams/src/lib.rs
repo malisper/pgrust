@@ -338,6 +338,6 @@ seam_core::seam!(
     pub fn aio_buffer_readv_report(
         result: types_storage::aio::PgAioResult,
         td: types_storage::aio::PgAioTargetData,
-        elevel: i32,
+        elevel: types_error::ErrorLevel,
     ) -> PgResult<()>
 );

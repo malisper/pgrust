@@ -198,7 +198,7 @@ pub(crate) fn UnpinBufferNoOwner(desc: &BufferDesc) {
 // WakePinCountWaiter (bufmgr.c): re-check under the header lock — another
 // backend may have unpinned and woken the waiter already. Runs on every
 // unpin, including abort-path resowner release, so it must never panic.
-fn WakePinCountWaiter(desc: &BufferDesc) {
+pub(crate) fn WakePinCountWaiter(desc: &BufferDesc) {
     let mut buf_state = LockBufHdr(desc);
     if buf_state & BM_PIN_COUNT_WAITER != 0 && buffer_refcount(buf_state) == 1 {
         let wait_procno = desc.wait_backend_pgprocno();

@@ -694,3 +694,19 @@ pub fn FileInvalidate(file: File) -> PgResult<()> {
         Ok(())
     })
 }
+
+/// FileAccess + raw-fd read for the AIO reopen path (smgr_aio_reopen resolves
+/// the segment through THIS thread's vfd cache and stores the raw fd into the
+/// handle's op data). rc<0 surfaces as Ok(rc) like FileStartReadV.
+pub fn FileRawDescForAio(file: File) -> PgResult<RawFd> {
+    let file = file.0;
+    debug_assert!(with_fd(|fd| vfd::FileIsValid(fd, file)));
+    let (rc, raw) = with_fd(|fd| -> PgResult<(i32, RawFd)> {
+        let rc = vfd::FileAccess(fd, file)?;
+        Ok((rc, if rc < 0 { -1 } else { vfd_raw(fd, file) }))
+    })?;
+    if rc < 0 {
+        return Ok(-1);
+    }
+    Ok(raw)
+}

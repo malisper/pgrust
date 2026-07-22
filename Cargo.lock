@@ -1242,7 +1242,6 @@ name = "aio_core"
 version = "0.0.0"
 dependencies = [
  "aio_seams",
- "auxprocess",
  "bufmgr_seams",
  "condition_variable",
  "datum",
@@ -1251,15 +1250,12 @@ dependencies = [
  "guc_tables",
  "init_small",
  "interrupt",
- "ipc",
  "ipc_seams",
  "latch",
  "libc",
- "libpq_pqsignal",
  "lmgr_proc",
  "lwlock",
  "miscinit",
- "procsignal",
  "resowner",
  "shmem",
  "smgr_seams",
@@ -1267,7 +1263,6 @@ dependencies = [
  "types_error",
  "types_guc",
  "types_resowner",
- "types_startup",
  "types_storage",
  "waitevent_seams",
 ]
@@ -2571,6 +2566,7 @@ dependencies = [
 name = "bufmgr"
 version = "0.0.0"
 dependencies = [
+ "aio_core",
  "aio_seams",
  "bufmgr_seams",
  "catalog_storage_seams",
@@ -7872,6 +7868,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "io_worker"
+version = "0.0.0"
+dependencies = [
+ "aio_core",
+ "auxprocess",
+ "elog",
+ "init_small",
+ "interrupt",
+ "ipc",
+ "libpq_pqsignal",
+ "miscinit",
+ "procsignal",
+ "types_core",
+ "types_error",
+ "types_startup",
+]
+
+[[package]]
 name = "ip"
 version = "0.0.0"
 dependencies = [
@@ -8145,7 +8159,6 @@ dependencies = [
 name = "launch_backend"
 version = "0.0.0"
 dependencies = [
- "aio_core",
  "autovacuum",
  "backend_startup",
  "bgjobs",
@@ -8158,6 +8171,7 @@ dependencies = [
  "guc_tables",
  "init_small",
  "interrupt",
+ "io_worker",
  "ip",
  "ipc",
  "libc",
@@ -8867,6 +8881,7 @@ dependencies = [
 name = "md"
 version = "0.0.0"
 dependencies = [
+ "aio_core",
  "elog",
  "fd",
  "guc_tables",

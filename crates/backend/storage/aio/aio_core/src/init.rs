@@ -22,7 +22,7 @@ fn AioProcs() -> usize {
 fn AioChooseMaxConcurrency() -> i32 {
     // LimitAdditionalPins-shaped: NBuffers split across every backend, capped.
     let max_backends = g::MaxBackends() + NUM_AUXILIARY_PROCS;
-    let max_proportional_pins = guc_tables::vars::NBuffers.read() / max_backends;
+    let max_proportional_pins = g::NBuffers() / max_backends;
     max_proportional_pins.clamp(1, 64)
 }
 

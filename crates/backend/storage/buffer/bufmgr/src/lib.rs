@@ -8,6 +8,7 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+mod aio_read;
 mod bgwriter_sync;
 mod buf_hdr;
 mod buf_table;
@@ -413,6 +414,7 @@ pub fn MarkBufferDirtyHint(buffer: Buffer, buffer_std: bool) -> PgResult<()> {
 pub fn InitBufferManagerAccess() {}
 
 pub fn init_seams() {
+    aio_read::init_seams();
     gucs::install_guc_backing();
     localbuf::install_check_temp_buffers_hook();
 

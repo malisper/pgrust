@@ -149,6 +149,7 @@ members = [
     "crates/backend/tcop/fastpath",
     "crates/backend/storage/aio/aio_seams",
     "crates/backend/storage/aio/aio_core",
+    "crates/backend/postmaster/io_worker",
     "crates/backend/storage/aio/aio_uring",
     "crates/backend/storage/aio/aio_funcs",
     "crates/backend/postmaster/startup_seams",

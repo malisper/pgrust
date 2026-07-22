@@ -68,6 +68,49 @@ fn become_backend() {
     latch::OwnLatch(h).unwrap();
     globals::SetMyLatch(Some(h));
     latch::InitializeLatchWaitSet().unwrap();
+    // The read pipeline issues IO through pgaio: attach this thread's aio
+    // backend slot (MyProc is the bind_task_proc TLS in this harness).
+    lmgr_proc::bind_task_proc(procno);
+    aio_core::pgaio_init_backend();
+}
+
+// Per-relation backing file for the smgr_startreadv fake; grown on demand
+// with valid pages so the real preadv returns real bytes.
+fn fake_rel_fd(rel: u32, blocknum: u32, nblocks: u32) -> i32 {
+    use std::io::{Seek, SeekFrom, Write};
+    use std::os::fd::AsRawFd;
+    static FILES: std::sync::Mutex<Vec<(u32, std::fs::File)>> = std::sync::Mutex::new(Vec::new());
+    let mut files = FILES.lock().unwrap();
+    if !files.iter().any(|(r, _)| *r == rel) {
+        let path = std::env::temp_dir().join(format!(
+            "bufmgr-aio-test-{}-{}.rel",
+            std::process::id(),
+            rel
+        ));
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        files.push((rel, f));
+    }
+    let f = &mut files.iter_mut().find(|(r, _)| *r == rel).unwrap().1;
+    let needed_end = (blocknum + nblocks) as u64 * BLCKSZ as u64;
+    let cur = f.metadata().unwrap().len();
+    if cur < needed_end {
+        let first = (cur / BLCKSZ as u64) as u32;
+        let last = blocknum + nblocks;
+        f.seek(SeekFrom::Start(first as u64 * BLCKSZ as u64)).unwrap();
+        let mut page = vec![0u8; BLCKSZ];
+        for b in first..last {
+            valid_page_into(&mut page, b);
+            f.write_all(&page).unwrap();
+        }
+        f.flush().unwrap();
+    }
+    f.as_raw_fd()
 }
 
 fn setup_once() {
@@ -116,11 +159,69 @@ fn setup_once() {
             Ok(())
         });
 
+        // mdstartreadv stand-in: serve the readv from a real per-relation temp
+        // file through the FULL pgaio pipeline (set iovec -> start_readv ->
+        // preadv -> completion callbacks), so these suites exercise the same
+        // machinery every io_method uses.
+        smgr_seams::smgr_startreadv::set(|rlb, _, blocknum, pages| {
+            SMGR_READS.fetch_add(1, Ordering::Relaxed);
+            REL_READS.lock().unwrap().push(rlb.locator.relNumber);
+            READV_SIZES.lock().unwrap().push(pages.len());
+            if rlb.locator.relNumber == SLOW_READ_REL {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            let fd = fake_rel_fd(rlb.locator.relNumber, blocknum, pages.len() as u32);
+            // The real smgrstartreadv holds interrupts across the fd resolve
+            // + start (see smgr's seam impl); mirror it here.
+            globals::HoldInterrupts();
+            let iovcnt = aio_core::pgaio_io_set_iovec_pages(pages, BLCKSZ);
+            let ioh = aio_core::pgaio_io_current();
+            aio_core::pgaio_io_set_target_smgr(
+                ioh,
+                rlb.locator,
+                ForkNumber::MAIN_FORKNUM,
+                blocknum,
+                pages.len() as u32,
+                false,
+                false,
+            );
+            aio_core::pgaio_io_register_callbacks(
+                ioh,
+                types_storage::aio::PGAIO_HCB_MD_READV,
+                0,
+            );
+            let r =
+                aio_core::pgaio_io_start_readv_current(fd, iovcnt, blocknum as i64 * BLCKSZ as i64);
+            if r.is_ok() {
+                globals::ResumeInterrupts();
+            }
+            r
+        });
+        // md_readv_complete stand-in: bytes -> blocks, as md does.
+        smgr_seams::aio_md_readv_complete::set(|_ioh, prior, _| {
+            let mut r = prior;
+            if prior.result < 0 {
+                r.status = types_storage::aio::PgAioResultStatus::Error;
+                r.id = types_storage::aio::PGAIO_HCB_MD_READV;
+                r.error_data = (-prior.result) as u32;
+                r.result = 0;
+            } else {
+                r.result /= BLCKSZ as i32;
+            }
+            r
+        });
+        smgr_seams::aio_md_readv_report::set(|result, _td, elevel| {
+            elog::ereport(elevel)
+                .errmsg(format!("fake md readv failed: {:?}", result.status))
+                .finish(types_error::ErrorLocation::new("tests", 0, "md_readv_report"))
+        });
+
         setup_write_seams();
 
         s_lock_seams::perform_spin_delay::set(|_| std::thread::yield_now());
         s_lock_seams::finish_spin_delay::set(|_| {});
         ipc_seams::on_shmem_exit::set(|_, _| {});
+        ipc_seams::before_shmem_exit::set(|_, _| Ok(()));
         waitevent_seams::pgstat_report_wait_start::set(|_| {});
         waitevent_seams::pgstat_report_wait_end::set(|| {});
         postgres_seams::check_for_interrupts::set(|| Ok(()));
@@ -144,6 +245,12 @@ fn setup_once() {
         lwlock::CreateLWLocks(false).unwrap();
         BufferManagerShmemInit().unwrap();
         init_seams();
+        aio_core::init_seams();
+        guc_tables::vars::io_max_combine_limit.install_if_absent(
+            guc_tables::GucVarAccessors { get: || 16, set: |_| {} },
+        );
+        aio_core::AioShmemSize().unwrap();
+        aio_core::AioShmemInit().unwrap();
     });
     globals::SetNBuffers(TEST_NBUFFERS);
     globals::SetMaxBackends(test_max_backends());
