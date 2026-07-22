@@ -59,6 +59,7 @@ pub use execparallel::{parallel_query_main, register_parallel_query_main};
 // wait-seam wrappers + the ProcessInterrupts admission tap through these.
 pub use slease::{
     admission_tap as serial_lease_admission_tap, armed as serial_lease_armed,
+    donation_enabled as serial_lease_donation_enabled,
     wait_hook_end as serial_lease_wait_hook_end, wait_hook_start as serial_lease_wait_hook_start,
 };
 pub use lanev2::coverage::{coverage_snapshot, LANEV2_BUILTINS, PGRUST_FOID_RANGE};
