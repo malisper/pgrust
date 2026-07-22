@@ -1660,6 +1660,31 @@ fn topn_highgroups_enabled() -> bool {
     })
 }
 
+/// GL-ELECT22-1 fix 2 — const keys into the TOPN-HIGHGROUPS exemption
+/// (`PGRUST_M5_TOPN_HIGHGROUPS_CONSTKEY`, DEFAULT OFF; ON iff exactly
+/// `1|on`). The bypass fails closed on `n_const == 0`, which splits the
+/// const+text-key winner-selection census shape (held: est 18,436,094
+/// groups, forced 1.900/1.712 hot at the pinned census) from its
+/// const-less sibling that ROUTES through the bypass today. A const group
+/// key partitions NOTHING — every row carries the identical value, so the
+/// composite (const, k…) has exactly the group count of (k…): the
+/// SE-CONSTKEY law already classifies, estimates, and floors on the REAL
+/// keys, and the sink's winner selection tolerates the const tlist entry
+/// (the constkey-grouped-topn engagement of record, GL-CONSTKEY-1). This
+/// knob only extends the SAME argument past the §10 hold; every other
+/// bypass condition (int8-raw sort key, bound cap, no count(DISTINCT)/
+/// strminmax/mk-family riders) holds unchanged. Composes with
+/// SE-CONSTKEY: with EITHER knob off the shape keeps today's refusal
+/// byte-for-byte. GL-ELECT22-1's witnessed ladder cell (const+text
+/// winner-selection at the census band, const-less sibling as control)
+/// owns the flip.
+fn topn_highgroups_constkey_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        knob_spelling_armed(std::env::var("PGRUST_M5_TOPN_HIGHGROUPS_CONSTKEY").as_deref().ok())
+    })
+}
+
 /// A plan-time-constant LIMIT/OFFSET count: `Some(v)` for a non-null
 /// int8/int4 Const with `v >= 0`; `None` (fail closed) for params,
 /// expressions, nulls, and every other type.
@@ -2973,14 +2998,17 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     // bound within the sink's cap, and no sibling knob composition riding
     // along (fail closed). The avg-passenger widening (its own knob)
     // COMPOSES: the three-int-agg winner-selection census shape carries
-    // avg and needs both knobs armed.
+    // avg and needs both knobs armed. GL-ELECT22-1 fix 2: const keys also
+    // COMPOSE knob-ON (fn doc — a const key partitions nothing, the REAL
+    // keys already drive ngroups and the floors; the composed shape routes
+    // through the constkey finish under its own trace label below).
     let topn_highgroups_bypass = over_groupby_high
         && topn_highgroups_enabled()
         && topn
         && topn_int8_raw_sort
         && n_count_distinct == 0
         && n_strminmax == 0
-        && n_const == 0
+        && (n_const == 0 || topn_highgroups_constkey_enabled())
         && !mk_text_family
         && const_count(parse.limitCount)
             .is_some_and(|b| b > 0 && b <= SINK_TOPN_MAX_BOUND_MIRROR);
@@ -3158,7 +3186,16 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         return finish_knob_path(
             run,
             "constkey",
-            if topn { "constkey-grouped-topn" } else { "constkey-grouped-agg" },
+            // GL-ELECT22-1 fix 2: name the hold-exempt composition apart
+            // (the letters' grep vocabulary) — reachable only with BOTH
+            // the constkey knob and the highgroups-constkey knob armed.
+            if topn_highgroups_bypass {
+                "constkey-grouped-topn-highgroups"
+            } else if topn {
+                "constkey-grouped-topn"
+            } else {
+                "constkey-grouped-agg"
+            },
             class_guard(class),
             rte.relid,
             ngroups,
