@@ -14,6 +14,7 @@ types_storage = { path = "../../../_support/types/types_storage" }
 smgr = { path = "../../storage/smgr/smgr" }
 bulkwrite = { path = "../../storage/smgr/bulkwrite" }
 bufmgr = { path = "../../storage/buffer/bufmgr" }
+pgstat = { path = "../../utils/activity/pgstat" }
 init_small = { path = "../../utils/init/init_small" }
 types_rel = { path = "../../../_support/types/rel" }
 xact = { path = "../../access/transam/xact" }

@@ -30,6 +30,7 @@ parallel_seams = { path = "../../../access/transam/parallel_seams" }
 guc_seams = { path = "../../../utils/misc/guc_seams" }
 types_guc = { path = "../../../../_support/types/types_guc" }
 relmapper_seams = { path = "../../../utils/cache/relmapper_seams" }
+relpath_seams = { path = "../../../../common/relpath_seams" }
 seam_core = { path = "../../../../_support/seam_core" }
 aio_seams = { path = "../../aio/aio_seams" }
 smgr_seams = { path = "../../smgr/smgr_seams" }
