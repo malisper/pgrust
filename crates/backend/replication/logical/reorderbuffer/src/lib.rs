@@ -4,6 +4,7 @@
 
 mod iter;
 mod replay;
+mod spill;
 mod startup;
 mod toast;
 mod visibility;
@@ -469,6 +470,12 @@ pub struct ReorderBuffer {
     pub(crate) by_txn_last_txn: TxnId,
     pub callbacks: ReorderBufferCallbacks,
     pub private_data: usize,
+    // C flushes spill/stream statistics straight to pgstat from inside the
+    // serialize path via rb->private_data's decoding context
+    // (reorderbuffer.c:4042); the owning context installs this hook at
+    // startup. None (no context yet) flushes nothing, like C before
+    // private_data is set.
+    pub update_stats: Option<fn(&mut ReorderBuffer)>,
     pub output_rewrites: bool,
     pub(crate) current_restart_decoding_lsn: XLogRecPtr,
     pub size: usize,
@@ -501,6 +508,7 @@ impl ReorderBuffer {
             by_txn_last_txn: INVALID_ID,
             callbacks: ReorderBufferCallbacks::unset(),
             private_data: 0,
+            update_stats: None,
             output_rewrites: false,
             current_restart_decoding_lsn: InvalidXLogRecPtr,
             size: 0,
@@ -885,7 +893,7 @@ impl ReorderBuffer {
         let sz = self.change_size(cid);
         self.change_memory_update(Some(cid), None, true, sz);
         self.process_partial_change(txn, cid, toast_insert);
-        self.check_memory_limit();
+        self.check_memory_limit()?;
         Ok(())
     }
 
@@ -1295,7 +1303,7 @@ impl ReorderBuffer {
         let invals = std::mem::take(&mut self.txn_mut(txn).invalidations);
         replay::execute_invalidations(&invals)?;
         self.txn_mut(txn).invalidations = invals;
-        self.cleanup_txn(txn);
+        self.cleanup_txn(txn)?;
         Ok(())
     }
 

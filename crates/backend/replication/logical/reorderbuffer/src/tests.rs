@@ -192,7 +192,7 @@ fn queue_change_updates_memory_accounting() {
         + 2 * std::mem::size_of::<usize>();
     assert_eq!(rb.change_size(cid), expected);
 
-    rb.cleanup_txn(txn);
+    rb.cleanup_txn(txn).unwrap();
     assert_eq!(rb.size, 0);
     assert!(rb.txn_by_xid(7, false, 0, false).0.is_none());
     assert!(rb.get_oldest_txn().is_none());
@@ -219,7 +219,7 @@ fn subtxn_changes_roll_up_into_top_total_size() {
     assert_eq!(rb.txn(sub).total_size, s_b);
     assert_eq!(rb.txn(top).size + rb.txn(sub).size, rb.size);
 
-    rb.cleanup_txn(top);
+    rb.cleanup_txn(top).unwrap();
     assert_eq!(rb.size, 0);
     assert!(rb.txn_by_xid(2, false, 0, false).0.is_none());
 }
@@ -265,13 +265,13 @@ fn truncate_txn_discards_changes_keeps_txn() {
     let top = rb.txn_by_xid(1, false, 0, false).0.unwrap();
     assert_eq!(rb.txn(top).nentries, 2);
 
-    rb.truncate_txn(top, false);
+    rb.truncate_txn(top, false).unwrap();
     assert_eq!(rb.txn(top).nentries, 0);
     assert_eq!(rb.txn(top).nentries_mem, 0);
     assert_eq!(rb.txn(top).size, 0);
     assert_eq!(rb.size, 0);
     assert!(rb.txn_by_xid(1, false, 0, false).0.is_some());
-    rb.cleanup_txn(top);
+    rb.cleanup_txn(top).unwrap();
 }
 
 #[test]
@@ -596,7 +596,7 @@ fn toast_chunks_reassemble_into_inline_varlena() {
 
     rb.toast_reset(txn);
     assert!(rb.txn(txn).toast_hash.is_none());
-    rb.cleanup_txn(txn);
+    rb.cleanup_txn(txn).unwrap();
     assert_eq!(rb.size, 0);
 }
 
@@ -956,4 +956,577 @@ fn check_xid_guard_is_idempotent_when_clean() {
     }
     assert_eq!(xact::CheckXidAlive(), types_core::InvalidTransactionId);
     assert!(!xact::bsysscan());
+}
+
+// ---- spill-to-disk ---------------------------------------------------------
+
+const TEST_SEG_SIZE: u64 = 16 * 1024 * 1024;
+
+// Per-test spill environment: seams once per process, a private DataDir per
+// test thread (DataDir is thread-local), and a slot dir for the files.
+fn spill_rb(slot: &str) -> ReorderBuffer {
+    static SEAMS: std::sync::Once = std::sync::Once::new();
+    SEAMS.call_once(|| {
+        transam_xlog_seams::wal_segment_size::set(|| TEST_SEG_SIZE as i32);
+        postgres_seams::check_for_interrupts::set(|| Ok(()));
+        // Eviction candidates read as in-progress: no truncation, plain spill.
+        procarray_seams::transaction_id_is_in_progress::set(|_| Ok(true));
+    });
+    let base = std::env::temp_dir().join(format!("pgrust-rb-spill-{}-{slot}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("pg_replslot").join(slot)).unwrap();
+    init_small::globals::SetDataDir(base.to_str().unwrap());
+    crate::startup::install_gucs();
+    ReorderBuffer::allocate(slot).expect("allocate")
+}
+
+fn slot_dir(slot: &str) -> std::path::PathBuf {
+    crate::startup::replslot_dir().unwrap().join(slot)
+}
+
+fn spill_files(slot: &str) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(slot_dir(slot))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("xid"))
+        .collect();
+    names.sort();
+    names
+}
+
+fn snap_change(xmin: TransactionId, xips: &[TransactionId]) -> ReorderBufferChange {
+    let mut s = SnapshotData::sentinel(rb_mcx(), SnapshotType::SNAPSHOT_HISTORIC_MVCC);
+    s.xmin = xmin;
+    s.xmax = xmin + 10;
+    let mut xip = PgVec::new_in(rb_mcx());
+    xip.extend_from_slice(xips);
+    s.xcnt = xip.len() as u32;
+    s.xip = xip;
+    s.suboverflowed = true;
+    s.curcid.set(7);
+    s.copied = true;
+    ReorderBufferChange::new(InternalSnapshot, ReorderBufferChangeData::Snapshot(Rc::new(s)))
+}
+
+fn drain_lsns(rb: &mut ReorderBuffer, txn: TxnId) -> Vec<XLogRecPtr> {
+    let mut state = None;
+    rb.iter_txn_init(txn, &mut state).unwrap();
+    let mut state = state.unwrap();
+    let mut lsns = Vec::new();
+    while let Some(cid) = rb.iter_txn_next(&mut state).unwrap() {
+        lsns.push(rb.change(cid).lsn);
+    }
+    rb.iter_txn_finish(state);
+    lsns
+}
+
+#[test]
+fn spill_roundtrip_preserves_every_change_type() {
+    let slot = "spill_roundtrip";
+    let mut rb = spill_rb(slot);
+    let xid: TransactionId = 60;
+    let (main_desc, _) = toast_descs();
+
+    // One change of every payload-carrying kind, ascending LSNs.
+    rb.queue_change(xid, 100, msg_change("alpha"), false).unwrap();
+    let payload = inline_varlena(b"spilled tuple payload");
+    let values = [Datum::from_usize(payload.as_ptr() as usize)];
+    rb.queue_change(xid, 110, tuple_change(&rb, &main_desc, &values, &[false]), false)
+        .unwrap();
+    rb.queue_change(
+        xid,
+        120,
+        ReorderBufferChange::new(
+            Invalidation,
+            ReorderBufferChangeData::Inval {
+                invalidations: {
+                    let mut v = PgVec::new_in(rb_mcx());
+                    v.extend_from_slice(&[inval_msg(11), inval_msg(22)]);
+                    v
+                },
+            },
+        ),
+        false,
+    )
+    .unwrap();
+    rb.queue_change(xid, 130, snap_change(500, &[501, 502, 503]), false).unwrap();
+    rb.queue_change(
+        xid,
+        140,
+        ReorderBufferChange::new(InternalCommandId, ReorderBufferChangeData::CommandId(42)),
+        false,
+    )
+    .unwrap();
+    rb.queue_change(
+        xid,
+        150,
+        ReorderBufferChange::new(
+            Truncate,
+            ReorderBufferChangeData::Truncate {
+                cascade: true,
+                restart_seqs: false,
+                relids: {
+                    let mut v: PgVec<'static, Oid> = PgVec::new_in(rb_mcx());
+                    v.extend_from_slice(&[16384, 16400]);
+                    v
+                },
+            },
+        ),
+        false,
+    )
+    .unwrap();
+
+    let txn = rb.txn_by_xid(xid, false, 0, false).0.unwrap();
+    let size_before = rb.txn(txn).size;
+    assert!(size_before > 0);
+
+    rb.serialize_txn(txn).unwrap();
+
+    assert!(rb.txn(txn).is_serialized());
+    assert_eq!(rb.txn(txn).nentries_mem, 0);
+    assert_eq!(rb.txn(txn).nentries, 6);
+    assert_eq!(rb.txn(txn).size, 0);
+    assert_eq!(rb.size, 0);
+    assert_eq!(rb.spillTxns, 1);
+    assert_eq!(rb.spillCount, 1);
+    assert_eq!(rb.spillBytes, size_before as i64);
+    // All LSNs below one segment: exactly one file, named for segment 0.
+    assert_eq!(spill_files(slot), vec![format!("xid-{xid}-lsn-0-0.spill")]);
+
+    // Restore through the iterator and deep-verify each payload.
+    let mut state = None;
+    rb.iter_txn_init(txn, &mut state).unwrap();
+    let mut state = state.unwrap();
+    let mut seen = Vec::new();
+    while let Some(cid) = rb.iter_txn_next(&mut state).unwrap() {
+        let change = rb.change(cid);
+        seen.push((change.lsn, change.action));
+        match (change.lsn, &change.data) {
+            (100, ReorderBufferChangeData::Msg { prefix, message }) => {
+                assert_eq!(prefix.as_str(), "test");
+                assert_eq!(&message[..], b"alpha");
+            }
+            (110, ReorderBufferChangeData::Tp { rlocator, clear_toast_afterwards, oldtuple, newtuple }) => {
+                assert_eq!(*rlocator, types_storage::RelFileLocator::new(1663, 5, 55555));
+                assert!(*clear_toast_afterwards);
+                assert!(oldtuple.is_none());
+                let t = newtuple.as_ref().unwrap();
+                let mut values = [Datum::from_usize(0)];
+                let mut isnull = [true];
+                types_tuple::heap_deform_tuple(t.as_tuple(), &main_desc, &mut values, &mut isnull);
+                assert!(!isnull[0]);
+                let img = unsafe { crate::toast::varlena_image(values[0].as_usize() as *const u8) };
+                assert_eq!(&img[4..], b"spilled tuple payload");
+            }
+            (120, ReorderBufferChangeData::Inval { invalidations }) => {
+                assert_eq!(&invalidations[..], &[inval_msg(11), inval_msg(22)]);
+            }
+            (130, ReorderBufferChangeData::Snapshot(s)) => {
+                assert_eq!(s.snapshot_type, SnapshotType::SNAPSHOT_HISTORIC_MVCC);
+                assert_eq!(s.xmin, 500);
+                assert_eq!(s.xmax, 510);
+                assert_eq!(s.xcnt, 3);
+                assert_eq!(&s.xip[..3], &[501, 502, 503]);
+                assert_eq!(s.subxcnt, 0);
+                assert!(s.suboverflowed);
+                assert_eq!(s.curcid.get(), 7);
+                assert!(s.copied);
+            }
+            (140, ReorderBufferChangeData::CommandId(c)) => assert_eq!(*c, 42),
+            (150, ReorderBufferChangeData::Truncate { cascade, restart_seqs, relids }) => {
+                assert!(*cascade);
+                assert!(!*restart_seqs);
+                assert_eq!(&relids[..], &[16384, 16400]);
+            }
+            (lsn, _) => panic!("unexpected restored change at lsn {lsn}"),
+        }
+    }
+    rb.iter_txn_finish(state);
+    assert_eq!(
+        seen.iter().map(|(l, _)| *l).collect::<Vec<_>>(),
+        vec![100, 110, 120, 130, 140, 150]
+    );
+
+    // Cleanup removes the on-disk files.
+    rb.cleanup_txn(txn).unwrap();
+    assert!(spill_files(slot).is_empty());
+    assert_eq!(rb.size, 0);
+}
+
+#[test]
+fn spill_eviction_fires_from_queue_change_and_reports_stats() {
+    let slot = "spill_evict";
+    let mut rb = spill_rb(slot);
+    // 8 kB limit; each message is ~1 kB.
+    (guc_tables::vars::logical_decoding_work_mem.get().set)(8);
+
+    thread_local! {
+        static STATS_FLUSHES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+    fn bump(_rb: &mut ReorderBuffer) {
+        STATS_FLUSHES.with(|c| c.set(c.get() + 1));
+    }
+    rb.update_stats = Some(bump);
+
+    let body = "x".repeat(1024);
+    for i in 0..64u64 {
+        rb.queue_change(70, 1000 + i, msg_change(&body), false).unwrap();
+    }
+
+    let limit = 8 * 1024;
+    assert!(rb.size < limit, "eviction must keep rb under the limit");
+    assert_eq!(rb.spillTxns, 1);
+    assert!(rb.spillCount >= 2, "several eviction passes expected");
+    assert!(rb.spillBytes > 0);
+    assert!(STATS_FLUSHES.with(|c| c.get()) >= 2);
+    assert!(!spill_files(slot).is_empty());
+
+    let txn = rb.txn_by_xid(70, false, 0, false).0.unwrap();
+    assert!(rb.txn(txn).is_serialized());
+    assert_eq!(rb.txn(txn).nentries, 64);
+    // In-memory tail = the changes queued after the last eviction.
+    assert_eq!(
+        rb.txn(txn).nentries - rb.txn(txn).nentries_mem,
+        64 - rb.txn(txn).nentries_mem
+    );
+
+    // A partially-serialized txn iterates spilled-then-live in LSN order.
+    let lsns = drain_lsns(&mut rb, txn);
+    assert_eq!(lsns, (0..64u64).map(|i| 1000 + i).collect::<Vec<_>>());
+
+    rb.cleanup_txn(txn).unwrap();
+    assert!(spill_files(slot).is_empty());
+}
+
+#[test]
+fn spill_restore_runs_in_bounded_batches() {
+    let slot = "spill_batches";
+    let mut rb = spill_rb(slot);
+    let xid: TransactionId = 80;
+    let n: u64 = 5000; // crosses the 4096-change restore batch bound
+
+    for i in 0..n {
+        rb.queue_change(xid, 10_000 + i, msg_change(&format!("m{i}")), false).unwrap();
+    }
+    let txn = rb.txn_by_xid(xid, false, 0, false).0.unwrap();
+    rb.serialize_txn(txn).unwrap();
+    assert_eq!(rb.txn(txn).nentries, n);
+    assert_eq!(rb.txn(txn).nentries_mem, 0);
+
+    let mut state = None;
+    rb.iter_txn_init(txn, &mut state).unwrap();
+    let mut state = state.unwrap();
+    let mut count = 0u64;
+    let mut prev = 0;
+    while let Some(cid) = rb.iter_txn_next(&mut state).unwrap() {
+        let change = rb.change(cid);
+        assert!(change.lsn > prev);
+        prev = change.lsn;
+        match &change.data {
+            ReorderBufferChangeData::Msg { message, .. } => {
+                assert_eq!(&message[..], format!("m{count}").as_bytes());
+            }
+            _ => panic!("expected Msg data"),
+        }
+        count += 1;
+        // Never more than one restore batch in memory.
+        assert!(rb.txn(txn).nentries_mem <= 4096);
+    }
+    rb.iter_txn_finish(state);
+    assert_eq!(count, n);
+
+    rb.cleanup_txn(txn).unwrap();
+    assert!(spill_files(slot).is_empty());
+    assert_eq!(rb.size, 0);
+}
+
+#[test]
+fn spill_splits_files_per_wal_segment() {
+    let slot = "spill_segs";
+    let mut rb = spill_rb(slot);
+    let xid: TransactionId = 90;
+
+    rb.queue_change(xid, 100, msg_change("seg0"), false).unwrap();
+    rb.queue_change(xid, TEST_SEG_SIZE + 200, msg_change("seg1"), false).unwrap();
+    let txn = rb.txn_by_xid(xid, false, 0, false).0.unwrap();
+    rb.serialize_txn(txn).unwrap();
+
+    assert_eq!(
+        spill_files(slot),
+        vec![
+            format!("xid-{xid}-lsn-0-0.spill"),
+            format!("xid-{xid}-lsn-0-{:X}.spill", TEST_SEG_SIZE),
+        ]
+    );
+
+    let lsns = drain_lsns(&mut rb, txn);
+    assert_eq!(lsns, vec![100, TEST_SEG_SIZE + 200]);
+
+    rb.cleanup_txn(txn).unwrap();
+    assert!(spill_files(slot).is_empty());
+}
+
+#[test]
+fn spill_iterates_subtxns_merged_by_lsn() {
+    let slot = "spill_subtxn";
+    let mut rb = spill_rb(slot);
+    let (top_xid, sub_xid): (TransactionId, TransactionId) = (100, 101);
+
+    rb.queue_change(top_xid, 10, msg_change("t10"), false).unwrap();
+    rb.queue_change(sub_xid, 20, msg_change("s20"), false).unwrap();
+    rb.queue_change(top_xid, 30, msg_change("t30"), false).unwrap();
+    rb.queue_change(sub_xid, 40, msg_change("s40"), false).unwrap();
+    rb.assign_child(top_xid, sub_xid, 20);
+
+    let top = rb.txn_by_xid(top_xid, false, 0, false).0.unwrap();
+    let sub = rb.txn_by_xid(sub_xid, false, 0, false).0.unwrap();
+
+    // Serializing the toplevel recurses into the subtransaction; each spills
+    // into its own xid file and counts separately in the spill stats.
+    rb.serialize_txn(top).unwrap();
+    assert!(rb.txn(top).is_serialized());
+    assert!(rb.txn(sub).is_serialized());
+    assert_eq!(rb.spillTxns, 2);
+    assert_eq!(rb.spillCount, 2);
+    assert_eq!(spill_files(slot).len(), 2);
+
+    let lsns = drain_lsns(&mut rb, top);
+    assert_eq!(lsns, vec![10, 20, 30, 40]);
+
+    rb.cleanup_txn(top).unwrap();
+    assert!(spill_files(slot).is_empty());
+}
+
+#[test]
+fn spill_stats_count_a_txn_once_across_repeat_spills() {
+    let slot = "spill_stats_once";
+    let mut rb = spill_rb(slot);
+    let xid: TransactionId = 110;
+
+    rb.queue_change(xid, 100, msg_change("first"), false).unwrap();
+    let txn = rb.txn_by_xid(xid, false, 0, false).0.unwrap();
+    rb.serialize_txn(txn).unwrap();
+    rb.queue_change(xid, 200, msg_change("second"), false).unwrap();
+    rb.serialize_txn(txn).unwrap();
+
+    assert_eq!(rb.spillTxns, 1, "same txn spilled twice counts once");
+    assert_eq!(rb.spillCount, 2);
+
+    let lsns = drain_lsns(&mut rb, txn);
+    assert_eq!(lsns, vec![100, 200]);
+    rb.cleanup_txn(txn).unwrap();
+}
+
+#[test]
+fn spill_immediate_debug_mode_serializes_every_change() {
+    let slot = "spill_immediate";
+    let mut rb = spill_rb(slot);
+    (guc_tables::vars::debug_logical_replication_streaming.get().set)(
+        guc_tables::consts::DEBUG_LOGICAL_REP_STREAMING_IMMEDIATE,
+    );
+    let xid: TransactionId = 120;
+
+    rb.queue_change(xid, 100, msg_change("a"), false).unwrap();
+    assert_eq!(rb.size, 0, "immediate mode evicts on every queue");
+    rb.queue_change(xid, 110, msg_change("b"), false).unwrap();
+    assert_eq!(rb.size, 0);
+
+    let txn = rb.txn_by_xid(xid, false, 0, false).0.unwrap();
+    assert!(rb.txn(txn).is_serialized());
+    assert_eq!(rb.txn(txn).nentries, 2);
+    assert_eq!(rb.txn(txn).nentries_mem, 0);
+
+    (guc_tables::vars::debug_logical_replication_streaming.get().set)(
+        guc_tables::consts::DEBUG_LOGICAL_REP_STREAMING_BUFFERED,
+    );
+
+    let lsns = drain_lsns(&mut rb, txn);
+    assert_eq!(lsns, vec![100, 110]);
+    rb.cleanup_txn(txn).unwrap();
+    assert!(spill_files(slot).is_empty());
+}
+
+#[test]
+fn spill_toast_chunks_reassemble_after_restore() {
+    let slot = "spill_toast";
+    let mut rb = spill_rb(slot);
+    let (main_desc, toast_desc) = toast_descs();
+    let xid: TransactionId = 130;
+    let valueid: u32 = 9100;
+
+    let chunk1 = inline_varlena(b"spill ");
+    let chunk2 = inline_varlena(b"survives toast");
+    let raw_len = 6 + 14;
+    for (seq, chunk) in [(0u64, &chunk1), (1u64, &chunk2)] {
+        let values = [
+            Datum::from_usize(valueid as usize),
+            Datum::from_usize(seq as usize),
+            Datum::from_usize(chunk.as_ptr() as usize),
+        ];
+        let change = tuple_change(&rb, &toast_desc, &values, &[false, false, false]);
+        rb.queue_change(xid, 100 + seq, change, true).unwrap();
+    }
+    let pointer = ondisk_toast_pointer(valueid, raw_len as i32 + 4, raw_len as u32);
+    let values = [Datum::from_usize(pointer.as_ptr() as usize)];
+    rb.queue_change(xid, 110, tuple_change(&rb, &main_desc, &values, &[false]), false)
+        .unwrap();
+
+    let txn = rb.txn_by_xid(xid, false, 0, false).0.unwrap();
+    rb.serialize_txn(txn).unwrap();
+    assert_eq!(rb.txn(txn).nentries_mem, 0);
+
+    // Replay-shaped consumption of the restored stream: chunk inserts are
+    // extracted into the toast hash, the main tuple is then rewritten.
+    let mut state = None;
+    rb.iter_txn_init(txn, &mut state).unwrap();
+    let mut state = state.unwrap();
+    let mut main_cid = None;
+    while let Some(cid) = rb.iter_txn_next(&mut state).unwrap() {
+        if rb.change(cid).lsn < 110 {
+            rb.iter_extract_change(&mut state, cid);
+            rb.toast_append_chunk_with_desc(txn, &toast_desc, cid).unwrap();
+        } else {
+            main_cid = Some(cid);
+            rb.toast_replace_with_descs(txn, &main_desc, &toast_desc, cid).unwrap();
+        }
+    }
+    let main_cid = main_cid.unwrap();
+    match &rb.change(main_cid).data {
+        ReorderBufferChangeData::Tp { newtuple: Some(t), .. } => {
+            let mut values = [Datum::from_usize(0)];
+            let mut isnull = [true];
+            types_tuple::heap_deform_tuple(t.as_tuple(), &main_desc, &mut values, &mut isnull);
+            assert!(!isnull[0]);
+            let img = unsafe { crate::toast::varlena_image(values[0].as_usize() as *const u8) };
+            assert_eq!(&img[4..], b"spill survives toast");
+        }
+        _ => panic!("expected Tp data"),
+    }
+    rb.iter_txn_finish(state);
+    rb.toast_reset(txn);
+    rb.cleanup_txn(txn).unwrap();
+    assert!(spill_files(slot).is_empty());
+}
+
+#[test]
+fn spill_old_and_new_tuples_roundtrip_identity_fields() {
+    let slot = "spill_tuples";
+    let mut rb = spill_rb(slot);
+    let (main_desc, _) = toast_descs();
+    let xid: TransactionId = 140;
+
+    let oldv = inline_varlena(b"old row");
+    let newv = inline_varlena(b"new row");
+    let old_tup = {
+        let values = [Datum::from_usize(oldv.as_ptr() as usize)];
+        let mut t = heaptuple::heap_form_tuple(rb.mcx, &main_desc, &values, &[false]).unwrap();
+        t.t_self = types_tuple::ItemPointerData {
+            ip_blkid: types_tuple::BlockIdData { bi_hi: 1, bi_lo: 2 },
+            ip_posid: 3,
+        };
+        t.t_tableOid = 4242;
+        t
+    };
+    let new_tup = {
+        let values = [Datum::from_usize(newv.as_ptr() as usize)];
+        let mut t = heaptuple::heap_form_tuple(rb.mcx, &main_desc, &values, &[false]).unwrap();
+        t.t_self = types_tuple::ItemPointerData {
+            ip_blkid: types_tuple::BlockIdData { bi_hi: 5, bi_lo: 6 },
+            ip_posid: 7,
+        };
+        t.t_tableOid = 4242;
+        t
+    };
+    let old_image: Vec<u8> = old_tup.image().to_vec();
+    let new_image: Vec<u8> = new_tup.image().to_vec();
+
+    let change = ReorderBufferChange::new(
+        Update,
+        ReorderBufferChangeData::Tp {
+            rlocator: types_storage::RelFileLocator::new(1663, 5, 77777),
+            clear_toast_afterwards: false,
+            oldtuple: Some(old_tup),
+            newtuple: Some(new_tup),
+        },
+    );
+    rb.queue_change(xid, 100, change, false).unwrap();
+    let txn = rb.txn_by_xid(xid, false, 0, false).0.unwrap();
+    rb.serialize_txn(txn).unwrap();
+
+    let mut state = None;
+    rb.iter_txn_init(txn, &mut state).unwrap();
+    let mut state = state.unwrap();
+    let cid = rb.iter_txn_next(&mut state).unwrap().unwrap();
+    match &rb.change(cid).data {
+        ReorderBufferChangeData::Tp { clear_toast_afterwards, oldtuple, newtuple, .. } => {
+            assert!(!*clear_toast_afterwards);
+            let o = oldtuple.as_ref().unwrap();
+            assert_eq!(o.image(), &old_image[..], "old tuple image byte-exact");
+            assert_eq!(o.t_self.ip_blkid.bi_hi, 1);
+            assert_eq!(o.t_self.ip_blkid.bi_lo, 2);
+            assert_eq!(o.t_self.ip_posid, 3);
+            assert_eq!(o.t_tableOid, 4242);
+            let nt = newtuple.as_ref().unwrap();
+            assert_eq!(nt.image(), &new_image[..], "new tuple image byte-exact");
+            assert_eq!(nt.t_self.ip_posid, 7);
+        }
+        _ => panic!("expected Tp data"),
+    }
+    assert!(rb.iter_txn_next(&mut state).unwrap().is_none());
+    rb.iter_txn_finish(state);
+    rb.cleanup_txn(txn).unwrap();
+}
+
+#[test]
+fn spill_tuplecid_and_speculative_forms_roundtrip() {
+    let slot = "spill_misc_forms";
+    let mut rb = spill_rb(slot);
+    let xid: TransactionId = 150;
+
+    // Spec-confirm keeps its locator and clear-toast flag through disk (C
+    // memcpy's the base struct; the port encodes the Tp payload for it too).
+    let change = ReorderBufferChange::new(
+        InternalSpecConfirm,
+        ReorderBufferChangeData::Tp {
+            rlocator: types_storage::RelFileLocator::new(1663, 5, 88888),
+            clear_toast_afterwards: true,
+            oldtuple: None,
+            newtuple: None,
+        },
+    );
+    rb.queue_change(xid, 100, change, false).unwrap();
+    let txn = rb.txn_by_xid(xid, false, 0, false).0.unwrap();
+
+    // TupleCid changes live on the separate tuplecids list and are never
+    // spilled with the change stream; queue one to prove spill leaves it be.
+    rb.add_new_tuple_cids(
+        xid,
+        105,
+        types_storage::RelFileLocator::new(1663, 5, 88888),
+        types_tuple::ItemPointerData::default(),
+        1,
+        2,
+        3,
+    );
+
+    rb.serialize_txn(txn).unwrap();
+    assert_eq!(rb.txn(txn).ntuplecids, 1);
+    assert!(!rb.txn(txn).tuplecids.is_empty());
+
+    let mut state = None;
+    rb.iter_txn_init(txn, &mut state).unwrap();
+    let mut state = state.unwrap();
+    let cid = rb.iter_txn_next(&mut state).unwrap().unwrap();
+    assert_eq!(rb.change(cid).action, InternalSpecConfirm);
+    match &rb.change(cid).data {
+        ReorderBufferChangeData::Tp { rlocator, clear_toast_afterwards, oldtuple, newtuple } => {
+            assert_eq!(rlocator.relNumber, 88888);
+            assert!(*clear_toast_afterwards);
+            assert!(oldtuple.is_none() && newtuple.is_none());
+        }
+        _ => panic!("expected Tp data"),
+    }
+    assert!(rb.iter_txn_next(&mut state).unwrap().is_none());
+    rb.iter_txn_finish(state);
+    rb.cleanup_txn(txn).unwrap();
 }

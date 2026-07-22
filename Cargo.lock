@@ -14784,6 +14784,8 @@ dependencies = [
  "init_small",
  "inval",
  "mcx",
+ "postgres_seams",
+ "procarray_seams",
  "relcache",
  "relfilenumbermap_seams",
  "reorderbuffer_seams",

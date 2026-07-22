@@ -139,11 +139,16 @@ impl ReorderBuffer {
         let toptxn = self.toptxn_id(txn);
 
         // C additionally maintains rb->txn_heap here; the max-heap only feeds
-        // eviction (spill/stream), which is phase-2.
+        // eviction, which this port selects by scan at limit-check time
+        // (spill.rs largest_txn).
         if addition {
             self.txn_mut(txn).size += sz;
             self.size += sz;
-            self.txn_mut(toptxn).total_size += sz;
+            // wrapping_add: total_size can sit wrapped-negative after the
+            // subtraction arm below (see its comment); C's unsigned Size adds
+            // straight through.
+            let t = self.txn_mut(toptxn);
+            t.total_size = t.total_size.wrapping_add(sz);
         } else {
             debug_assert!(self.size >= sz && self.txn(txn).size >= sz);
             self.txn_mut(txn).size -= sz;
@@ -154,14 +159,6 @@ impl ReorderBuffer {
             t.total_size = t.total_size.wrapping_sub(sz);
         }
         debug_assert!(self.txn(txn).size <= self.size);
-    }
-
-    pub(crate) fn check_memory_limit(&self) {
-        let limit = guc_tables::vars::logical_decoding_work_mem.read() as usize * 1024;
-        if self.size < limit {
-            return;
-        }
-        unported("ReorderBufferSerializeTXN (spill-to-disk): phase-2");
     }
 
     pub(crate) fn copy_snap(&self, orig: &Snapshot, txn: TxnId, cid: CommandId) -> Snapshot {
@@ -227,12 +224,12 @@ impl ReorderBuffer {
             Some(Rc::new(std::cell::RefCell::new(hash)));
     }
 
-    pub(crate) fn cleanup_txn(&mut self, txn: TxnId) {
+    pub(crate) fn cleanup_txn(&mut self, txn: TxnId) -> PgResult<()> {
         let subs: Vec<TxnId> = dl_iter(&self.txns, self.txn(txn).subtxns, |t| t.node).collect();
         for sub in subs {
             debug_assert!(self.txn(sub).is_known_subxact());
             debug_assert_eq!(self.txn(sub).nsubtxns, 0);
-            self.cleanup_txn(sub);
+            self.cleanup_txn(sub)?;
         }
 
         let mut mem_freed = 0usize;
@@ -288,17 +285,21 @@ impl ReorderBuffer {
         let removed = self.by_txn.remove(&xid);
         debug_assert!(removed.is_some());
 
-        debug_assert!(!self.txn(txn).is_serialized(), "spill files: phase-2");
+        // Remove entries spilled to disk.
+        if self.txn(txn).is_serialized() {
+            self.restore_cleanup(txn)?;
+        }
         self.free_txn(txn);
+        Ok(())
     }
 
-    pub(crate) fn truncate_txn(&mut self, txn: TxnId, txn_prepared: bool) {
+    pub(crate) fn truncate_txn(&mut self, txn: TxnId, txn_prepared: bool) -> PgResult<()> {
         let subs: Vec<TxnId> = dl_iter(&self.txns, self.txn(txn).subtxns, |t| t.node).collect();
         for sub in subs {
             debug_assert!(self.txn(sub).is_known_subxact());
             debug_assert_eq!(self.txn(sub).nsubtxns, 0);
             self.maybe_mark_txn_streamed(sub);
-            self.truncate_txn(sub, txn_prepared);
+            self.truncate_txn(sub, txn_prepared)?;
         }
 
         let mut mem_freed = 0usize;
@@ -325,13 +326,18 @@ impl ReorderBuffer {
 
         self.txn_mut(txn).tuplecid_hash = None;
 
+        // If this txn is serialized then clean the disk space.
         if self.txn(txn).is_serialized() {
+            self.restore_cleanup(txn)?;
             self.txn_mut(txn).txn_flags &= !RBTXN_IS_SERIALIZED;
+            // Remember the transaction was ever serialized so the spill
+            // statistics don't count it twice.
             self.txn_mut(txn).txn_flags |= RBTXN_IS_SERIALIZED_CLEAR;
         }
 
         self.txn_mut(txn).nentries_mem = 0;
         self.txn_mut(txn).nentries = 0;
+        Ok(())
     }
 
     pub(crate) fn maybe_mark_txn_streamed(&mut self, txn: TxnId) {
@@ -380,7 +386,7 @@ impl ReorderBuffer {
         if self.txn(txn).base_snapshot.is_none() {
             debug_assert!(self.txn(txn).invalidations.is_empty());
             if !self.txn(txn).is_prepared() {
-                self.cleanup_txn(txn);
+                self.cleanup_txn(txn)?;
             }
             return Ok(());
         }
@@ -469,7 +475,7 @@ impl ReorderBuffer {
 
                     // ReorderBufferResetTXN: discard the decoded changes so
                     // the txn can carry its prepared identity to the finish.
-                    self.truncate_txn(txn, true);
+                    self.truncate_txn(txn, true)?;
                     self.toast_reset(txn);
                     if let Some(si) = specinsert.take() {
                         self.free_change(si, true);
@@ -478,7 +484,7 @@ impl ReorderBuffer {
                     return Ok(());
                 }
 
-                self.cleanup_txn(txn);
+                self.cleanup_txn(txn)?;
                 Err(e)
             }
         }
@@ -511,11 +517,11 @@ impl ReorderBuffer {
             { let cb = self.callbacks.begin; cb(self, txn)?; }
         }
 
-        *iterstate = Some(self.iter_txn_init(txn));
+        self.iter_txn_init(txn, iterstate)?;
         loop {
             let cur = {
                 let state = iterstate.as_mut().expect("iterator initialized");
-                self.iter_txn_next(state)
+                self.iter_txn_next(state)?
             };
             let Some(cur) = cur else {
                 break;
@@ -548,16 +554,14 @@ impl ReorderBuffer {
                         self.change_mut(si).action = Insert;
                         work = si;
                     }
-                    self.apply_tuple_change(txn, work, specinsert)?;
+                    self.apply_tuple_change(txn, work, specinsert, iterstate)?;
                 }
                 InternalSpecInsert => {
                     if let Some(prev) = specinsert.take() {
                         self.free_change(prev, true);
                     }
-                    let owner = self.change(cur).txn;
-                    let mut list = self.txn(owner).changes;
-                    dl_delete(&mut self.changes, &mut list, cur, |c| &mut c.node);
-                    self.txn_mut(owner).changes = list;
+                    let state = iterstate.as_mut().expect("iterator initialized");
+                    self.iter_extract_change(state, cur);
                     *specinsert = Some(cur);
                 }
                 InternalSpecAbort => {
@@ -698,11 +702,11 @@ impl ReorderBuffer {
         }
 
         if self.txn(txn).is_prepared() {
-            self.truncate_txn(txn, true);
+            self.truncate_txn(txn, true)?;
             // Reset the CheckXidAlive (reorderbuffer.c:2718).
             xact::SetCheckXidAlive(InvalidTransactionId);
         } else {
-            self.cleanup_txn(txn);
+            self.cleanup_txn(txn)?;
         }
         Ok(())
     }
@@ -712,6 +716,7 @@ impl ReorderBuffer {
         txn: TxnId,
         work: ChangeId,
         specinsert: &mut Option<ChangeId>,
+        iterstate: &mut Option<IterState>,
     ) -> PgResult<()> {
         let (rlocator, has_old, has_new, clear_toast) = match &self.change(work).data {
             ReorderBufferChangeData::Tp {
@@ -766,10 +771,8 @@ impl ReorderBuffer {
                 } else if self.change(work).action == Insert {
                     debug_assert!(has_new);
                     debug_assert!(specinsert.is_none(), "spec-insert into a toast relation");
-                    let owner = self.change(work).txn;
-                    let mut list = self.txn(owner).changes;
-                    dl_delete(&mut self.changes, &mut list, work, |c| &mut c.node);
-                    self.txn_mut(owner).changes = list;
+                    let state = iterstate.as_mut().expect("iterator initialized");
+                    self.iter_extract_change(state, work);
                     self.toast_append_chunk(txn, relation, work)?;
                 }
             }
@@ -810,7 +813,7 @@ impl ReorderBuffer {
         }
 
         self.txn_mut(txn).final_lsn = lsn;
-        self.cleanup_txn(txn);
+        self.cleanup_txn(txn)?;
         Ok(())
     }
 
@@ -825,7 +828,7 @@ impl ReorderBuffer {
                 if self.txn(txn).is_streamed() {
                     unported("rb->stream_abort (streaming): phase-2");
                 }
-                self.cleanup_txn(txn);
+                self.cleanup_txn(txn)?;
             } else {
                 return Ok(());
             }
@@ -847,7 +850,7 @@ impl ReorderBuffer {
             debug_assert!(self.txn(txn).invalidations.is_empty());
         }
 
-        self.cleanup_txn(txn);
+        self.cleanup_txn(txn)?;
         Ok(())
     }
 
