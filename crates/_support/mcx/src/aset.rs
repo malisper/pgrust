@@ -190,6 +190,23 @@ impl KeeperPool {
     }
 }
 
+// Per-thread keeper list (see lib.rs `local_pool_on`): C-parity residency —
+// context_freelists is per-process = per-backend, so per-thread cap
+// MAX_FREE_CONTEXTS matches C's per-backend footprint exactly.
+#[cfg(all(feature = "std", not(test)))]
+fn dispose_keepers(blocks: alloc::vec::Vec<Block>) {
+    for b in blocks {
+        // SAFETY: parked keepers own their blocks; this is the sole free.
+        unsafe { b.free() };
+    }
+}
+
+#[cfg(all(feature = "std", not(test)))]
+std::thread_local! {
+    static KEEPER_TLS: crate::LocalStack<alloc::vec::Vec<Block>> =
+        const { crate::LocalStack::new(MAX_FREE_CONTEXTS, dispose_keepers) };
+}
+
 #[inline]
 pub(crate) fn take_recycled_blocks() -> alloc::vec::Vec<Block> {
     #[cfg(test)]
@@ -198,6 +215,16 @@ pub(crate) fn take_recycled_blocks() -> alloc::vec::Vec<Block> {
     }
     #[cfg(not(test))]
     {
+        #[cfg(feature = "std")]
+        if crate::local_pool_on() {
+            if let Ok(Some(blocks)) = KEEPER_TLS.try_with(|s| s.take()) {
+                #[cfg(feature = "aset-stats")]
+                stats::KEEPER_REUSES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                return blocks;
+            }
+            // TLS empty or gone (thread exiting): fresh blocks.
+            return alloc::vec::Vec::new();
+        }
         KEEPER_POOL.take()
     }
 }
@@ -213,6 +240,20 @@ pub(crate) fn recycle_blocks(blocks: alloc::vec::Vec<Block>) {
     }
     #[cfg(not(test))]
     {
+        #[cfg(feature = "std")]
+        if crate::local_pool_on() {
+            // Ownership parks OUTSIDE the closure: on TLS-gone the closure
+            // never runs (Err) and the blocks are freed here — `Block` has no
+            // Drop, so letting the Vec fall out of a dead closure would leak
+            // the raw allocations.
+            let mut give = Some(blocks);
+            let done = KEEPER_TLS
+                .try_with(|s| s.give_wholesale(give.take().expect("closure runs at most once")));
+            if done.is_err() {
+                dispose_keepers(give.take().expect("closure did not run"));
+            }
+            return;
+        }
         KEEPER_POOL.recycle(blocks);
     }
 }

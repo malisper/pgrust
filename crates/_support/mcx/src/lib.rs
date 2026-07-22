@@ -4,6 +4,10 @@
 
 extern crate alloc;
 
+// Per-thread pool arm only (see `local_pool_on`); everything else stays no_std.
+#[cfg(feature = "std")]
+extern crate std;
+
 use core::alloc::Layout;
 use core::cell::{Cell, RefCell};
 use core::fmt;
@@ -254,6 +258,127 @@ impl<T> PoolMutex<T> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Per-thread pool arm (std builds only; the no_std/global arm below is the
+// fallback and the kill-switch target).
+//
+// The spin-locked global pools serialize every backend's context
+// create/destroy on a handful of shared cache lines, and the acquire-CAS line
+// itself becomes the dominant cost at high backend counts (global pool mutex
+// contention; the try_with comment's no-spin rule bounds the damage but the
+// line stays hot). One backend = one thread (AGENTS rule 10), and
+// `AcctRc`/`MemoryContext` are `!Send`, so a context is created and destroyed
+// on the same thread — pooling by the freeing thread needs no atomics at all.
+// Entries are raw blocks / bare `Vec` capacity, so even an unsafely-moved
+// handle would only change WHICH pool caches a block, never correctness.
+//
+// The TLS payloads carry Drop deliberately (a considered deviation from the
+// rule-10 `!needs_drop` guidance): a rotating backend thread must hand its
+// cached blocks back to the allocator at exit or every session leaks its pool
+// residue into the shared process (the session-roots lesson, further down
+// this file). Residency
+// is bounded per thread and matches C, whose freelists are per-process =
+// per-backend (aset.c context_freelists, MAX_FREE_CONTEXTS).
+//
+// Kill switch (t35 law): PGRUST_MCX_POOL_STRIPE=0 restores the global
+// spin-locked pools, byte-identical semantics either way.
+// ---------------------------------------------------------------------------
+
+// not(test): mcx's own unit tests bypass pooling entirely (see acct_take).
+#[cfg(all(feature = "std", not(test)))]
+#[inline]
+pub(crate) fn local_pool_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !std::env::var("PGRUST_MCX_POOL_STRIPE").is_ok_and(|v| v.trim() == "0")
+    })
+}
+
+/// Bounded per-thread free list. `Cell<Vec>` take/put keeps every access
+/// panic-free: a (hypothetical) re-entrant access sees an empty list and
+/// falls through to `Global`, never a borrow error. `dispose` runs on
+/// overflow and at thread exit (the TLS Drop).
+#[cfg(feature = "std")]
+pub(crate) struct LocalStack<T> {
+    items: Cell<alloc::vec::Vec<T>>,
+    cap: usize,
+    dispose: fn(T),
+}
+
+#[cfg(feature = "std")]
+impl<T> LocalStack<T> {
+    pub(crate) const fn new(cap: usize, dispose: fn(T)) -> Self {
+        LocalStack { items: Cell::new(alloc::vec::Vec::new()), cap, dispose }
+    }
+
+    pub(crate) fn take(&self) -> Option<T> {
+        let mut v = self.items.take();
+        let r = v.pop();
+        self.items.set(v);
+        r
+    }
+
+    /// Full list: the incoming item is disposed (the ACCT/CHILD_VEC arm).
+    pub(crate) fn give(&self, item: T) {
+        let mut v = self.items.take();
+        if v.len() >= self.cap {
+            self.items.set(v);
+            (self.dispose)(item);
+            return;
+        }
+        v.push(item);
+        self.items.set(v);
+    }
+
+    /// Full list: drain EVERYTHING, then keep the incoming item (the keeper
+    /// arm; C's context_freelists overflow discipline).
+    pub(crate) fn give_wholesale(&self, item: T) {
+        let mut v = self.items.take();
+        if v.len() >= self.cap {
+            for it in v.drain(..) {
+                (self.dispose)(it);
+            }
+        }
+        v.push(item);
+        self.items.set(v);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        let v = self.items.take();
+        let n = v.len();
+        self.items.set(v);
+        n
+    }
+}
+
+#[cfg(feature = "std")]
+impl<T> Drop for LocalStack<T> {
+    fn drop(&mut self) {
+        for it in self.items.take() {
+            (self.dispose)(it);
+        }
+    }
+}
+
+#[cfg(all(feature = "std", not(test)))]
+mod tls_pools {
+    use super::*;
+
+    fn dispose_acct(p: NonNull<AcctInner>) {
+        // SAFETY: pool entries come from acct_alloc_global with `val` already
+        // dropped; the list is the sole owner.
+        unsafe { Global.deallocate(p.cast(), Layout::new::<AcctInner>()) };
+    }
+
+    std::thread_local! {
+        pub(crate) static ACCT: LocalStack<NonNull<AcctInner>> =
+            const { LocalStack::new(ACCT_POOL_MAX, dispose_acct) };
+        pub(crate) static CHILD_VECS: LocalStack<alloc::vec::Vec<AcctWeak>> =
+            const { LocalStack::new(CHILD_VEC_POOL_MAX, core::mem::drop) };
+    }
+}
+
 type AcctPool = PoolMutex<alloc::vec::Vec<NonNull<AcctInner>>>;
 static ACCT_POOL: AcctPool = AcctPool::new(alloc::vec::Vec::new());
 
@@ -265,6 +390,15 @@ const CHILD_VEC_POOL_MAX: usize = 64;
 
 #[inline]
 fn child_vec_take() -> alloc::vec::Vec<AcctWeak> {
+    #[cfg(all(feature = "std", not(test)))]
+    if local_pool_on() {
+        // TLS gone (thread exiting) or empty either way: fresh Vec.
+        return tls_pools::CHILD_VECS
+            .try_with(|s| s.take())
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+    }
     CHILD_VEC_POOL.try_with(|s| s.pop()).flatten().unwrap_or_default()
 }
 
@@ -272,6 +406,12 @@ fn child_vec_take() -> alloc::vec::Vec<AcctWeak> {
 fn child_vec_give(v: alloc::vec::Vec<AcctWeak>) {
     debug_assert!(v.is_empty());
     if v.capacity() == 0 {
+        return;
+    }
+    #[cfg(all(feature = "std", not(test)))]
+    if local_pool_on() {
+        // TLS gone: the unrun closure drops `v` — a plain empty Vec free.
+        let _ = tls_pools::CHILD_VECS.try_with(move |s| s.give(v));
         return;
     }
     let _ = CHILD_VEC_POOL.try_with(move |s| {
@@ -285,6 +425,14 @@ fn child_vec_give(v: alloc::vec::Vec<AcctWeak>) {
 fn acct_take() -> NonNull<AcctInner> {
     #[cfg(not(test))]
     {
+        #[cfg(feature = "std")]
+        if local_pool_on() {
+            if let Ok(Some(p)) = tls_pools::ACCT.try_with(|s| s.take()) {
+                return p;
+            }
+            // TLS empty or gone (thread exiting): fresh block.
+            return acct_alloc_global();
+        }
         return acct_take_from(&ACCT_POOL);
     }
     #[cfg(test)]
@@ -295,6 +443,16 @@ fn acct_take() -> NonNull<AcctInner> {
 fn acct_give(p: NonNull<AcctInner>) {
     #[cfg(not(test))]
     {
+        #[cfg(feature = "std")]
+        if local_pool_on() {
+            if tls_pools::ACCT.try_with(|s| s.give(p)).is_err() {
+                // TLS gone (thread exiting; Err = closure never ran).
+                // SAFETY: from acct_alloc_global; `val` already dropped,
+                // nothing else owns it.
+                unsafe { Global.deallocate(p.cast(), Layout::new::<AcctInner>()) };
+            }
+            return;
+        }
         acct_give_to(&ACCT_POOL, p);
     }
     #[cfg(test)]

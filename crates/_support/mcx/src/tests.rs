@@ -1249,4 +1249,55 @@ fn global_footprint_tracks_context_block_bytes() {
         after2 <= base2 + NOISE,
         "bump-family bytes not released: after {after2} base {base2}"
     );
+
+// LocalStack (the per-thread pool container; the TLS statics themselves are
+// cfg(not(test)) — the integration tests in tests/ exercise those).
+#[cfg(feature = "std")]
+mod local_stack {
+    use crate::LocalStack;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    static DISPOSED: AtomicUsize = AtomicUsize::new(0);
+    fn dispose(_v: u32) {
+        DISPOSED.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // One test fn: the dispose counter is shared, so the scenarios run
+    // sequentially here rather than as parallel #[test]s.
+    #[test]
+    fn bounded_lifo_with_dispose() {
+        // LIFO take/give.
+        let s: LocalStack<u32> = LocalStack::new(3, dispose);
+        assert_eq!(s.take(), None);
+        s.give(1);
+        s.give(2);
+        assert_eq!(s.take(), Some(2));
+        assert_eq!(s.take(), Some(1));
+        assert_eq!(s.take(), None);
+
+        // give: full list disposes the INCOMING item, keeps the cached ones.
+        let before = DISPOSED.load(Ordering::Relaxed);
+        s.give(1);
+        s.give(2);
+        s.give(3);
+        s.give(4);
+        assert_eq!(DISPOSED.load(Ordering::Relaxed), before + 1);
+        assert_eq!(s.len(), 3);
+        assert_eq!(s.take(), Some(3));
+
+        // give_wholesale: full list drains EVERYTHING, keeps the incoming.
+        s.give(3); // back to full: [1, 2, 3]
+        let before = DISPOSED.load(Ordering::Relaxed);
+        s.give_wholesale(9);
+        assert_eq!(DISPOSED.load(Ordering::Relaxed), before + 3);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s.take(), Some(9));
+
+        // Drop drains the residue.
+        s.give(7);
+        s.give(8);
+        let before = DISPOSED.load(Ordering::Relaxed);
+        drop(s);
+        assert_eq!(DISPOSED.load(Ordering::Relaxed), before + 2);
+    }
 }
