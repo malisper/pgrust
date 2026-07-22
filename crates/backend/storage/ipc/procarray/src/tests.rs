@@ -6,7 +6,9 @@ use types_core::BackendType;
 // One backend slot per test thread that calls my_backend(); keep headroom
 // over the my_backend() call-site count or InitProcess FATALs mid-suite.
 const MAX_CONNECTIONS: i32 = 16;
-const MAX_WORKER_PROCESSES: i32 = 2;
+// Bump when claim_other() call sites grow: the claimable simulated-backend
+// range is MAX_BACKENDS - MAX_CONNECTIONS (12 today for 12 claim_other()s).
+const MAX_WORKER_PROCESSES: i32 = 5;
 const NUM_SPECIAL: i32 = types_storage::storage::NUM_SPECIAL_WORKER_PROCS;
 const MAX_BACKENDS: i32 = MAX_CONNECTIONS + 3 + MAX_WORKER_PROCESSES + 2 + NUM_SPECIAL;
 
