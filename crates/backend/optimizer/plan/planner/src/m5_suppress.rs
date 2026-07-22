@@ -6471,6 +6471,32 @@ fn reduced_affine_of_var(expr: Node<'_>, rti: usize, base_attno: i16) -> bool {
 /// fold via lanefold (the CbPlainAggFold avg path), but the at-scale
 /// confirmation is fleet work; the arm's admission-time canonical-domain
 /// check (empty => refuse) is non-empty for int4 ±int4 by construction.
+/// GL-ELECT22-1 fix 3 — affine-derived-key DEDUP for the group estimate
+/// (`PGRUST_M5_REDKEY_AFFINE_DEDUP`, DEFAULT OFF; ON iff exactly `1|on`).
+/// Every non-representative key this recognizer admits is `base ± Const`
+/// — a pure function of the ONE representative Var — so the composite key
+/// set partitions the input EXACTLY as the base Var alone does: the true
+/// group count IS ndv(base), by functional dependence (not a heuristic).
+/// `estimate_num_groups` over the full expr list cannot see the
+/// dependence and multiplies per-expr NDVs: at the full-scale census the
+/// affine-rider shape estimated 9,692,856 groups (census -1176 @
+/// 307329686) and crossed the §10 hold, while the same shape's mid-scale
+/// estimate (1,018,628, job -75c3) sat under it and ENGAGED at 0.022 hot
+/// (28x, tsv row gap:agg-expr-keys) — the refusal is an estimation
+/// artifact of the riders, not a measured hold economics. Knob-ON
+/// estimates on the base key alone (the pgset form, riders skipped); the
+/// §10 hold then judges the HONEST cardinality — no bypass is added, so a
+/// shape whose base-Var NDV genuinely crosses the hold keeps Gather
+/// (fail closed; the forced census bound 0.197/0.193 hot is the ladder's
+/// re-open evidence if the deduped estimate still refuses at full scale).
+/// Knob-off keeps today's full-list estimate byte-for-byte.
+fn redkey_affine_dedup_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        knob_spelling_armed(std::env::var("PGRUST_M5_REDKEY_AFFINE_DEDUP").as_deref().ok())
+    })
+}
+
 fn classify_reduced_exprkey<'mcx>(
     run: &mut PlannerRun<'mcx>,
     parse: &Query<'mcx>,
@@ -6558,7 +6584,28 @@ fn classify_reduced_exprkey<'mcx>(
         let group_exprs =
             types_pathnodes::run::sortgrouplist_exprs(run, &clauses, &parse.targetList);
         let input_rows = run.root.rel(rel_id).rows.max(1.0);
-        crate::selfuncs::estimate_num_groups(run, &group_exprs, input_rows)?
+        // GL-ELECT22-1 fix 3 (fn doc on the knob): the affine riders are
+        // pure functions of the representative Var — estimate on the base
+        // key ALONE (pgset form). If the processed clause no longer
+        // carries a bare base-Var entry (never observed; the processed
+        // list preserves the parse keys here), fail closed to the
+        // full-list estimate — today's behavior.
+        let base_idx = redkey_affine_dedup_enabled()
+            .then(|| {
+                group_exprs.iter().position(|(_, e)| {
+                    key_var(*e, rti).is_some_and(|v| v.varattno == base_attno)
+                })
+            })
+            .flatten();
+        match base_idx {
+            Some(i) => crate::selfuncs::estimate_num_groups_pgset(
+                run,
+                &group_exprs,
+                input_rows,
+                Some(&[i as i32]),
+            )?,
+            None => crate::selfuncs::estimate_num_groups(run, &group_exprs, input_rows)?,
+        }
     };
     if ngroups >= groupby_high_floor() {
         return Ok(Some(false));
