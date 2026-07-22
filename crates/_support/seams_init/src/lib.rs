@@ -55,14 +55,23 @@ fn slease_wait_end() {
 
 fn init_waitevent_seams_with_lease_posture() {
     if execmain::serial_lease_armed() {
-        waitevent_seams::pgstat_report_wait_start::set(slease_wait_start);
-        waitevent_seams::pgstat_report_wait_end::set(slease_wait_end);
-        waitevent_seams::pgstat_set_wait_event_storage::set(
-            waitevent::pgstat_set_wait_event_storage,
-        );
-        waitevent_seams::pgstat_reset_wait_event_storage::set(
-            waitevent::pgstat_reset_wait_event_storage,
-        );
+        if execmain::serial_lease_donation_enabled() {
+            waitevent_seams::pgstat_report_wait_start::set(slease_wait_start);
+            waitevent_seams::pgstat_report_wait_end::set(slease_wait_end);
+            waitevent_seams::pgstat_set_wait_event_storage::set(
+                waitevent::pgstat_set_wait_event_storage,
+            );
+            waitevent_seams::pgstat_reset_wait_event_storage::set(
+                waitevent::pgstat_reset_wait_event_storage,
+            );
+        } else {
+            // GL-SLEASE-3 ladder arm (PGRUST_RUNTIME_SERIAL_LEASE_DONATION=0):
+            // armed WITHOUT donation — stock wait seams, admission tap only.
+            // Admitted runs hold their permit across blocking waits (the v1
+            // semantics, deliberately): attribution arm, never a shipping
+            // posture.
+            waitevent::init_seams();
+        }
         postgres_seams::tap_serial_lease_admission::install(execmain::serial_lease_admission_tap);
     } else {
         waitevent::init_seams();
