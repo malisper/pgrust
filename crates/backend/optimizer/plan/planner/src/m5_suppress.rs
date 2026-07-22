@@ -1673,6 +1673,149 @@ fn grouped_sink_aggs() -> &'static [u32] {
     if grouped_avg_enabled() { GROUPED_SINK_AGGS_AVG } else { GROUPED_SINK_AGGS }
 }
 
+// ---------------------------------------------------------------------------
+// stragg-coverage inc-1 (GL-STRAGG-2): the LENARG + HAVING cars.
+// ---------------------------------------------------------------------------
+
+/// LENARG car knob (`PGRUST_LANE_V2_AGG_LENARG`): DEFAULT OFF, armed iff
+/// exactly `1`/`on` (the still-gated tier-2 spelling). Probe-side only —
+/// the executor already evaluates the textlen-family agg arguments through
+/// the staged per-column length lanes (lanefold `classify_len_arg`; the
+/// engaged plans carry vguard proofs), so the widening changes WHERE the
+/// shape routes, not what the walk can host. Flip letter owed after the
+/// witnessed ladder (GL-STRAGG-2).
+fn agg_lenarg_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        tier2_car_spelling_on(std::env::var("PGRUST_LANE_V2_AGG_LENARG").as_deref().ok())
+    })
+}
+
+/// HAVING car knob (`PGRUST_LANE_V2_AGG_HAVING`): DEFAULT OFF, armed iff
+/// exactly `1`/`on`. SAME spelling as the runtime grouped sink's emit
+/// filter (`nodeagg::sink::sink_having_enabled`) — both seams flip
+/// together (knob-coherence law: a probe that suppressed a HAVING shape
+/// the sink's filter compile refuses would land it on the serial rerun).
+fn agg_having_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        tier2_car_spelling_on(std::env::var("PGRUST_LANE_V2_AGG_HAVING").as_deref().ok())
+    })
+}
+
+/// The aggregates whose ONE argument slot is int4-typed — the only place
+/// the lanefold fold-arg vocabulary consults the textlen family
+/// (`classify_arg` admits `classify_len_arg` for INT4-expected args only;
+/// count's arg reads the isnull lane, and the strict len funcs make the
+/// result's NULL-ness the Var's). Function resolution guarantees the arg
+/// type matches the fnoid, so fnoid membership IS the arg-slot type check.
+const LEN_ARG_HOST_AGGS: &[u32] =
+    &[F_COUNT_ANY, F_SUM_INT4, F_AVG_INT4, F_MIN_INT4, F_MAX_INT4];
+
+/// A textlen-family agg ARGUMENT the lane fold vocabulary proves
+/// (`length(v)`/`char_length(v)`/`octet_length(v)` over a bare
+/// text/varchar Var on the scanned rel, varchar riding the binary-coercion
+/// relabel — `classify_str_var`'s shape at parse altitude). The funcid +
+/// encoding half lives in lanefold (`len_arg_funcid_admits`) so the two
+/// seams share one table; collation is irrelevant to length semantics.
+fn is_lanefold_len_arg(expr: Node<'_>, rti: usize) -> bool {
+    let Some(f) = expr.as_func_expr() else { return false };
+    if f.funcretset || f.args.len() != 1 || !::lanefold::len_arg_funcid_admits(f.funcid) {
+        return false;
+    }
+    let arg = f.args.nth(0);
+    let arg = match arg.as_relabel_type() {
+        Some(r) if r.resulttype == TEXTOID => r.arg,
+        Some(_) => return false,
+        None => arg,
+    };
+    is_covered_key_var(arg, rti, |t| t == TEXTOID || t == VARCHAROID)
+}
+
+/// [`is_whitelisted_agg`] with the LENARG widening: the single argument may
+/// be a lanefold-proven textlen-family expression instead of a bare Var,
+/// for whitelist members whose arg slot is int4-typed. Decoration law is
+/// `aggref_plain_typed`'s verbatim; zero-arg forms stay bare-whitelist
+/// territory (this fn admits ONLY the widened 1-arg shape — callers try
+/// the bare-Var whitelist first).
+fn is_whitelisted_agg_lenarg(expr: Node<'_>, rti: usize, whitelist: &[u32]) -> bool {
+    let Some(agg) = expr.as_aggref() else { return false };
+    if !whitelist.contains(&agg.aggfnoid) || !LEN_ARG_HOST_AGGS.contains(&agg.aggfnoid) {
+        return false;
+    }
+    if agg.agglevelsup != 0
+        || agg.aggkind != AGGKIND_NORMAL
+        || agg.aggvariadic
+        || !agg.aggorder.is_nil()
+        || !agg.aggdistinct.is_nil()
+        || agg.aggfilter.is_some()
+        || !agg.aggdirectargs.is_nil()
+    {
+        return false;
+    }
+    if agg.args.len() != 1 {
+        return false;
+    }
+    let Some(arg_tle) = agg.args.nth(0).as_target_entry() else { return false };
+    is_lanefold_len_arg(arg_tle.expr, rti)
+}
+
+/// The int8-family comparison operator FUNCTIONS the HAVING car admits —
+/// MIRROR of the runtime sink's `having_cmp_of` (nodeagg sink.rs; the
+/// canonical fmgr rows: 467-472 int8×int8, 474-479 int8×int4, 852-857
+/// int4×int8). Every fn compares exact signed values, which is what the
+/// emit filter's widened-i64 comparison computes.
+const HAVING_CMP_FNS: &[u32] = &[
+    467, 468, 469, 470, 471, 472, // int8 eq/ne/lt/gt/le/ge
+    474, 475, 476, 477, 478, 479, // int84
+    852, 853, 854, 855, 856, 857, // int48
+];
+
+/// The ONE havingQual form the HAVING car admits — MIRROR of the runtime
+/// sink's emit-filter compile (`nodeagg::sink::having_emit_filter`,
+/// fail-closed both sides): a single OpExpr comparison between a bare
+/// undecorated `count(*)` and a non-null int-family Const. count(*) is
+/// rel-independent (no Var), so no rti is consulted; a count trans
+/// initializes non-null 0 and carries no finalfn, so the filter's
+/// transvalue read IS the finalized value.
+///
+/// By probe time subquery preprocessing has rewritten havingQual into the
+/// implicit-AND List form (grouping.rs reads it as a list wholesale), so
+/// the term is unwrapped from a ONE-element list; the pre-preprocess
+/// expression form is accepted too (belt — the probe runs post-preprocess).
+fn having_term_admissible(hq: Node<'_>) -> bool {
+    let hq = match hq.as_list() {
+        Some(l) => {
+            if l.len() != 1 {
+                return false;
+            }
+            l.nth(0)
+        }
+        None => hq,
+    };
+    let Some(op) = hq.as_op_expr() else { return false };
+    if op.opretset || op.args.len() != 2 || !HAVING_CMP_FNS.contains(&op.opfuncid) {
+        return false;
+    }
+    let (a, b) = (op.args.nth(0), op.args.nth(1));
+    let (aggside, constside) = if a.as_aggref().is_some() { (a, b) } else { (b, a) };
+    let Some(agg) = aggside.as_aggref() else { return false };
+    if agg.aggfnoid != F_COUNT_STAR
+        || !agg.args.is_nil()
+        || agg.agglevelsup != 0
+        || agg.aggkind != AGGKIND_NORMAL
+        || agg.aggvariadic
+        || !agg.aggorder.is_nil()
+        || !agg.aggdistinct.is_nil()
+        || agg.aggfilter.is_some()
+        || !agg.aggdirectargs.is_nil()
+    {
+        return false;
+    }
+    let Some(c) = constside.as_const() else { return false };
+    !c.constisnull && matches!(c.consttype, INT2OID | INT4OID | INT8OID)
+}
+
 /// TOPN-HIGHGROUPS sort-key vocabulary: the finalfn-free int8-transvalue
 /// aggregates — exactly the order columns the runtime sink's combine-phase
 /// top-N can resolve (the sink's order-column resolve wants a bare
@@ -2116,7 +2259,6 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         || parse.hasRowSecurity
         || !parse.cteList.is_nil()
         || !parse.groupingSets.is_nil()
-        || parse.havingQual.is_some()
         || !parse.windowClause.is_nil()
         || parse.setOperations.is_some()
         || !parse.rowMarks.is_nil()
@@ -2125,6 +2267,32 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         || parse.limitOption == LimitOption::LIMIT_OPTION_WITH_TIES
     {
         return Ok(false);
+    }
+
+    // HAVING (stragg-coverage inc-1, GL-STRAGG-2): historically a hard
+    // structural refusal in the prefilter above. The ONE admitted
+    // composition is the knob-gated post-aggregate filtered grouped shape —
+    // a single `count(*) <cmp> Const` term over a single-plain-rel grouped
+    // aggregation, exactly the emit-row filter the runtime grouped sink
+    // compiles (nodeagg::sink::having_emit_filter — the probe mirror
+    // `having_term_admissible`; suppress-then-refuse excluded by
+    // construction). Multi-rel forms are excluded structurally RIGHT HERE;
+    // the surviving single-rel branches that never proved the composition
+    // (DISTINCT decoration, partwise, the expr-key classifiers, the
+    // sibling knob cars) re-refuse at their entries below. Knob OFF takes
+    // the identical refusal as before, byte-for-byte.
+    if parse.havingQual.is_some() {
+        let single_plain_rel = parse.jointree.is_some_and(|jt| {
+            jt.fromlist.len() == 1 && jt.fromlist.nth(0).as_range_tbl_ref().is_some()
+        });
+        if !(agg_having_enabled()
+            && parse.hasAggs
+            && !parse.groupClause.is_nil()
+            && single_plain_rel
+            && parse.havingQual.is_some_and(having_term_admissible))
+        {
+            return Ok(false);
+        }
     }
 
     // FROM shapes the probe keys (everything else classifies uncovered by
@@ -2215,6 +2383,9 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         && rte.relkind == types_rel::RELKIND_PARTITIONED_TABLE
         && rte.inh
         && rte.tablesample.is_none()
+        // stragg HAVING carve: the partwise classifier never proved the
+        // post-aggregate filter composition — re-refuse (fail-closed).
+        && parse.havingQual.is_none()
         && crate::m5_partwise::partwise_probe_enabled()
     {
         return crate::m5_partwise::classify_partitionwise(run, parse, rti);
@@ -2240,6 +2411,12 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     // the sink refuses — suppressing it was a measured serial-instead-of-
     // legacy false positive (rowflip measure, 2.66x at dop4). Keep Gather.
     if !parse.distinctClause.is_nil() {
+        // stragg HAVING carve: never composes with DISTINCT decoration
+        // (fail-closed re-refusal — the prefilter carve above admits the
+        // grouped-agg family wholesale).
+        if parse.havingQual.is_some() {
+            return Ok(false);
+        }
         // SE-T2AGG CAR A (knob-gated, default OFF — block doc below): the
         // plain single-column shape keys the runtime plain-distinct sink's
         // SELECT-DISTINCT sub-arm; every miss keeps the refusal verbatim.
@@ -2703,11 +2880,14 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         }
         return Ok(false);
     }
+    // stragg HAVING carve: the expr-key classifiers below never proved the
+    // post-aggregate filter composition — re-refuse it here (fail-closed;
+    // the bare-Var grouped path further down owns the admitted class).
     // SE-TEXTDISTINCT (C1, band 86001): reduced-expr-key grouped agg —
     // keyed only knob-ON and BEFORE the bare-Var key discipline (which
     // refuses expr keys). A shape MISS returns None and falls through
     // unchanged.
-    if textdistinct_enabled() {
+    if textdistinct_enabled() && parse.havingQual.is_none() {
         if let Some(verdict) =
             classify_reduced_exprkey(run, parse, rti, rte.relid, rel_id, rel_rows, rel_pages)?
         {
@@ -2717,7 +2897,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     // SE-EXTRACTKEY (ts-extract class): extract()-keyed grouped agg — keyed
     // only knob-ON and BEFORE the bare-Var key discipline (which refuses
     // expr keys). A shape MISS returns None and falls through unchanged.
-    if extract_exprkey_enabled() {
+    if extract_exprkey_enabled() && parse.havingQual.is_none() {
         if let Some(verdict) =
             classify_extract_exprkey(run, parse, rti, rte.relid, rel_id, rel_rows, rel_pages)?
         {
@@ -2728,7 +2908,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     // computed keys + OFFSET-into-bound composition — keyed only knob-ON
     // and BEFORE the bare-Var key discipline (which refuses expr keys). A
     // shape MISS returns None and falls through unchanged.
-    if exprkey_topn_enabled() {
+    if exprkey_topn_enabled() && parse.havingQual.is_none() {
         if let Some(verdict) =
             classify_exprkey_topn(run, parse, rti, rte.relid, rel_id, rel_rows, rel_pages)?
         {
@@ -2861,6 +3041,7 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         if n_count_distinct > 0 { distinct_passenger_aggs() } else { grouped_sink_aggs() };
     let mut n_strminmax = 0usize;
     let mut n_avg_widened = 0usize;
+    let mut n_lenarg = 0usize;
     for e in &passengers {
         if is_whitelisted_agg(*e, rti, passenger_list) {
             // GROUPED-AVG bookkeeping: a passenger only the widened list
@@ -2869,6 +3050,21 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             if n_count_distinct == 0 && !is_whitelisted_agg(*e, rti, GROUPED_SINK_AGGS) {
                 n_avg_widened += 1;
             }
+            continue;
+        }
+        // stragg LENARG car (knob-gated, default OFF): agg arguments the
+        // lanefold vocabulary proves — textlen-family expressions over a
+        // bare text/varchar Var, served by the staged per-column length
+        // lanes the engaged plans already run (H2 of the attribution
+        // letter: zero per-row fmgr at defaults). Never beside the
+        // distinct sink (its vocabulary stays exact — the se-aggpoly
+        // suppress-then-refuse lesson); the sibling knob compositions are
+        // excluded below with the HAVING car's list.
+        if n_count_distinct == 0
+            && agg_lenarg_enabled()
+            && is_whitelisted_agg_lenarg(*e, rti, passenger_list)
+        {
+            n_lenarg += 1;
             continue;
         }
         // SE-T2AGG CAR B (knob-gated, default OFF — block doc below):
@@ -2985,8 +3181,20 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         // The sort key rides the same class-dependent vocabulary as the
         // passengers (se-aggpoly): a distinct-class sort key outside the
         // sink vocab would key a shape the sink refuses.
+        //
+        // stragg LENARG car: a lanefold-proven len-arg aggregate sort key
+        // (avg/sum over textlen-family args) is admitted knob-ON. The base
+        // vocabulary's fail-closed note above (an avg sort key degrades
+        // the sink's winner selection to the full drain) is priced by the
+        // GL-STRAGG-2 witnessed ladder — the degrade lands on the full
+        // drain + serial Sort/Limit, and `topn_int8_raw_sort` stays false
+        // for these keys so the §10 hold exemption never fires on them.
+        let lenarg_sortkey = n_count_distinct == 0
+            && agg_lenarg_enabled()
+            && is_whitelisted_agg_lenarg(tle.expr, rti, grouped_sink_aggs());
         if !is_whitelisted_agg(tle.expr, rti, sortkey_list)
             && !is_count_distinct_int(tle.expr, rti)
+            && !lenarg_sortkey
         {
             // SE-DECOROOT: the single-sort-key+LIMIT shape whose key is a
             // GROUP key (not an agg) is a decorated-root form too.
@@ -3097,6 +3305,26 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         return Ok(false);
     }
 
+    // stragg-coverage inc-1 fail-closed compositions: the LENARG and
+    // HAVING cars are proven for the plain grouped emit and the agg-sort
+    // top-N shapes only (full drain + serial Sort/Limit; the engagement
+    // vacates the sink's winner selection under a filter). Every sibling
+    // knob composition and the distinct sink keep today's refusal — none
+    // of them carried the widened vocabulary or the emit filter.
+    let having = parse.havingQual.is_some();
+    if (n_lenarg > 0 || having)
+        && (mk_freeze
+            || bare_limit
+            || full_sort
+            || decorated
+            || n_strminmax > 0
+            || n_const > 0
+            || mk_text_family
+            || n_count_distinct > 0)
+    {
+        return Ok(false);
+    }
+
     // groupby_high hold (§10): estimate the group cardinality off the
     // processed group clause; at or above the floor the class routes
     // legacy (the radix-exchange arm still wins).
@@ -3146,6 +3374,8 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             && n_text == 0
             && n_count_distinct == 0
             && n_strminmax == 0
+            && n_lenarg == 0
+            && !having
             && n_const == 0);
     // TOPN-HIGHGROUPS exemption: the bounded winner-selection composition
     // only, admitted iff the sink's combine-phase top-N provably arms —
@@ -3183,6 +3413,12 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
         && n_text == 1
         && n_strminmax == 0
         && n_const == 0
+        // stragg-coverage fail-closed: a filtered emit vacates the sink's
+        // winner selection (full drain), so the exemption's economics
+        // never apply; lenarg shapes never carry an int8-raw sort key but
+        // the belt costs nothing.
+        && n_lenarg == 0
+        && !having
         && !mk_text_family
         && ngroups < topn_highgroups_distinct_max_groups()
         && const_count(parse.limitCount)
@@ -3328,6 +3564,36 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
     } else {
         CoverClass::CbGroupedAggIntKeys
     };
+    // stragg-coverage inc-1 knob-path finish: shapes admitted ONLY by the
+    // LENARG/HAVING cars route through the dedicated finish (own trace
+    // tag; NOT a BOOTSTRAP_MATRIX re-class — tsv/route_to, the drift
+    // guards, and the DEFAULT census untouched), carrying the guard of
+    // the class the shape otherwise classifies as (the cars widen the
+    // vocabulary and compose a post-aggregate emit filter; the shape's
+    // scan/group economics are unchanged). Reached only on the plain
+    // grouped / agg-sort top-N compositions — every sibling combination
+    // refused above.
+    if n_lenarg > 0 || having {
+        let label = match (having, n_lenarg > 0, topn) {
+            (true, true, true) => "having-lenarg-grouped-topn",
+            (true, true, false) => "having-lenarg-grouped-agg",
+            (true, false, true) => "having-grouped-topn",
+            (true, false, false) => "having-grouped-agg",
+            (false, true, true) => "lenarg-grouped-topn",
+            (false, true, false) => "lenarg-grouped-agg",
+            (false, false, _) => unreachable!("stragg finish without a car"),
+        };
+        return finish_knob_path(
+            run,
+            "stragg",
+            label,
+            class_guard(class),
+            rte.relid,
+            ngroups,
+            rel_rows,
+            rel_pages,
+        );
+    }
     // SE-DECOROOT (CAR 1) knob-path finish: decorated-root shapes route
     // through the dedicated finish (own trace tag; NOT a BOOTSTRAP_MATRIX
     // class — tsv/route_to, drift guards, and the DEFAULT census untouched),
