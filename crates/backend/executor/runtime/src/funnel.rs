@@ -417,6 +417,29 @@ impl<T: Send + 'static> RowFunnel<T> {
         FunnelProducer { funnel: Arc::clone(self), ring: Arc::clone(&self.rings[w]), w }
     }
 
+    /// GL-STMTTASK-2 change 1 (standing-engagement reuse): reset a QUIESCED
+    /// funnel for the next statement — the per-session persistent funnel
+    /// replaces the per-statement ring allocation. CALLER CONTRACT: no live
+    /// producer and no live drain exist (the leader joined its board —
+    /// detached == claimed — and dropped its FunnelDrain), so this thread
+    /// is momentarily the sole owner of every ring on both ends. Leftover
+    /// buffered rows (error/chase exits never pump the remainder) are
+    /// popped and dropped consumer-side, then the per-statement flags
+    /// (done, demand_closed, drain_waiting) re-open. The wake hook and the
+    /// rings persist across statements.
+    pub fn reset_for_reuse(&self) {
+        for r in &self.rings {
+            while let Some(v) = r.try_pop() {
+                drop(v);
+            }
+        }
+        for d in &self.done {
+            d.store(false, Ordering::SeqCst);
+        }
+        self.demand_closed.store(false, Ordering::SeqCst);
+        self.drain_waiting.store(false, Ordering::SeqCst);
+    }
+
     /// The leader's pure-consumer drain over all rings. At most ONE may exist
     /// (SPSC consumer discipline across every ring).
     pub fn drain(self: &Arc<Self>) -> FunnelDrain<T> {
