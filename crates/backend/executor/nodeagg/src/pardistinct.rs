@@ -4005,7 +4005,7 @@ mod tests {
             worker_budget: usize::MAX,
             expected_worker_rows: 0,
         });
-        let p = pd_vec_plan(&good).expect("the q9/q10 shape class derives");
+        let p = pd_vec_plan(&good).expect("the grouped count-distinct-int shape class derives");
         assert_eq!((p.key_att, p.key_kind), (3, PdInt::I32));
         assert_eq!((p.set_att, p.set_kind), (1, PdInt::I32));
         assert_eq!(p.riders.len(), 3);
