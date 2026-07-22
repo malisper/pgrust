@@ -15112,5 +15112,7 @@ pub(crate) use agg_bitmap::{agg_bitmap_set_for_tests, AGG_BITMAP_OWNED_FOR_TESTS
 // precedent). NOT a BOOTSTRAP_MATRIX class — the coverage row keeps
 // route_to=legacy until the GL-MJSORT fleet letter flips it.
 mod runtime_mergejoin;
-pub(crate) use runtime_mergejoin::{try_own_merge_join_mjsort, MjSortAdopted};
+pub(crate) use runtime_mergejoin::{
+    try_own_agg_over_merge_join, try_own_merge_join_mjsort, MjSortAdopted,
+};
 // --- end MJSORT -------------------------------------------------------------------
