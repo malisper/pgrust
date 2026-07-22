@@ -554,3 +554,34 @@ fn xlog_fileslop_clamps_to_wal_size_bounds() {
         assert_eq!(crate::removal::XLOGfileslop(lastredo), 100 + 64 - 1);
     });
 }
+
+#[test]
+fn wal_consistency_checking_hook_rejects_cleanly() {
+    // Any non-empty value refuses via the GUC protocol (Ok(false) -> clean
+    // ERROR at SET / FATAL at boot), never a panic: the FPW cross-check is
+    // unported and a silent accept would be a silent skip.
+    let mut extra = None;
+    for v in ["all", "heap", "nonsense"] {
+        let mut newval = Some(v.to_string());
+        assert_eq!(
+            crate::check_wal_consistency_checking_hook(
+                &mut newval,
+                &mut extra,
+                types_guc::GucSource::PGC_S_TEST,
+            )
+            .unwrap(),
+            false,
+            "non-empty \"{v}\" must refuse"
+        );
+    }
+    // The disabled settings stay accepted.
+    for newval in [None, Some(String::new())] {
+        let mut newval = newval;
+        assert!(crate::check_wal_consistency_checking_hook(
+            &mut newval,
+            &mut extra,
+            types_guc::GucSource::PGC_S_TEST,
+        )
+        .unwrap());
+    }
+}
