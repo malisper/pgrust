@@ -192,6 +192,7 @@ impl GenArena {
             });
         }
         self.mem_allocated += blksize;
+        crate::global_footprint::add(blksize);
         self.blocks.push(addr);
         acct.commit_block(blksize, self.mem_allocated, self.blocks.len());
         Ok(addr)
@@ -288,6 +289,7 @@ impl GenArena {
         let b = block_mut(addr);
         let (blksize, align) = (b.blksize, b.align as usize);
         self.mem_allocated -= blksize;
+        crate::global_footprint::sub(blksize);
         // SAFETY: block empty (or arena reset/teardown); size/align from its own header.
         unsafe {
             Global.deallocate(

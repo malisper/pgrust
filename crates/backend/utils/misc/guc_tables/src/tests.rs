@@ -42,12 +42,17 @@ fn table_counts_match_compiled_backend_shape() {
     //   GL-M41-3 flip: + pgrust.runtime_vacuum_pool (Bool 131 -> 132) = 446.
     // GL-STRDEFECTS-1: + pgrust.regex_re2_linked (pgrust-only preset, the
     //   RE2-linkage runtime witness; Bool 132 -> 133) = 447.
-    assert_eq!(ConfigureNamesBool.len(), 133);
-    assert_eq!(ConfigureNamesInt.len(), 162);
+    // GL-MEMWATCH-1 (pgrust-only, composed at t43): the memory-watchdog
+    //   family — Bool +2 (pgrust.memory_watchdog, pgrust.memory_watchdog_dump
+    //   -> 135), Int +4 (pgrust.memory_watchdog_interval / _threshold /
+    //   _limit, plus the hidden developer hog pgrust.memory_watchdog_test_hog
+    //   -> 166) = 453.
+    assert_eq!(ConfigureNamesBool.len(), 135);
+    assert_eq!(ConfigureNamesInt.len(), 166);
     assert_eq!(ConfigureNamesReal.len(), 28);
     assert_eq!(ConfigureNamesString.len(), 77);
     assert_eq!(ConfigureNamesEnum.len(), 47);
-    assert_eq!(all_settings().count(), 447);
+    assert_eq!(all_settings().count(), 453);
     assert_eq!(GucContext_Names.len(), PGC_USERSET as usize + 1);
     assert_eq!(GucSource_Names.len(), PGC_S_SESSION as usize + 1);
     assert_eq!(config_group_names.len(), DEVELOPER_OPTIONS as usize + 1);

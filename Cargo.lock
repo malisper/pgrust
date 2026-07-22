@@ -8733,6 +8733,7 @@ dependencies = [
  "libc",
  "libmimalloc-sys",
  "mcx",
+ "memwatchdog",
  "mimalloc",
  "pg_locale",
  "postgres_seams",
@@ -8876,6 +8877,19 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "memwatchdog"
+version = "0.0.0"
+dependencies = [
+ "elog",
+ "guc_tables",
+ "lmgr_proc",
+ "mcx",
+ "procsignal",
+ "types_core",
+ "types_storage",
+]
 
 [[package]]
 name = "mimalloc"
@@ -13567,6 +13581,7 @@ dependencies = [
  "lwlock",
  "mbutils_seams",
  "mcx",
+ "memwatchdog",
  "miscinit",
  "miscinit_seams",
  "pg_clock",

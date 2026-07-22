@@ -315,6 +315,16 @@ pub static pgrust_runtime_dop: GucIntVar = GucSlot::new("pgrust_runtime_dop");
 pub static pgrust_runtime: GucBoolVar = GucSlot::new("pgrust_runtime");
 pub static pgrust_mem_autotune: GucBoolVar = GucSlot::new("pgrust_mem_autotune");
 pub static pgrust_runtime_vacuum_pool: GucBoolVar = GucSlot::new("pgrust_runtime_vacuum_pool");
+// pgrust-only (GL-MEMWATCH-1, no C symbol): the memory watchdog family —
+// master switch, breach context-dump fan-out, sampler cadence (ms), base
+// warn threshold (percent of limit), absolute limit (MB, 0 = cgroup auto),
+// and the developer per-query context hog for the standing e2e.
+pub static pgrust_memory_watchdog: GucBoolVar = GucSlot::new("pgrust_memory_watchdog");
+pub static pgrust_memory_watchdog_dump: GucBoolVar = GucSlot::new("pgrust_memory_watchdog_dump");
+pub static pgrust_memory_watchdog_interval: GucIntVar = GucSlot::new("pgrust_memory_watchdog_interval");
+pub static pgrust_memory_watchdog_threshold: GucIntVar = GucSlot::new("pgrust_memory_watchdog_threshold");
+pub static pgrust_memory_watchdog_limit: GucIntVar = GucSlot::new("pgrust_memory_watchdog_limit");
+pub static pgrust_memory_watchdog_test_hog: GucIntVar = GucSlot::new("pgrust_memory_watchdog_test_hog");
 // pgrust-only (env-to-guc train, no C symbol): the per-arm runtime pool DOP
 // force-overrides + the Gather read-fairness stride. Registered from the
 // deferred pool-GUC recipe (docs/design/jit-parallel-defaults.md §3). Each is

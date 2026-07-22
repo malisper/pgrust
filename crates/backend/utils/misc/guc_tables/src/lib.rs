@@ -224,6 +224,30 @@ fn install_guc_tables_owned_vars() {
         get: backing::pgrust_runtime_vacuum_pool,
         set: backing::set_pgrust_runtime_vacuum_pool,
     });
+    vars::pgrust_memory_watchdog.install(GucVarAccessors {
+        get: backing::pgrust_memory_watchdog,
+        set: backing::set_pgrust_memory_watchdog,
+    });
+    vars::pgrust_memory_watchdog_dump.install(GucVarAccessors {
+        get: backing::pgrust_memory_watchdog_dump,
+        set: backing::set_pgrust_memory_watchdog_dump,
+    });
+    vars::pgrust_memory_watchdog_interval.install(GucVarAccessors {
+        get: backing::pgrust_memory_watchdog_interval,
+        set: backing::set_pgrust_memory_watchdog_interval,
+    });
+    vars::pgrust_memory_watchdog_threshold.install(GucVarAccessors {
+        get: backing::pgrust_memory_watchdog_threshold,
+        set: backing::set_pgrust_memory_watchdog_threshold,
+    });
+    vars::pgrust_memory_watchdog_limit.install(GucVarAccessors {
+        get: backing::pgrust_memory_watchdog_limit,
+        set: backing::set_pgrust_memory_watchdog_limit,
+    });
+    vars::pgrust_memory_watchdog_test_hog.install(GucVarAccessors {
+        get: backing::pgrust_memory_watchdog_test_hog,
+        set: backing::set_pgrust_memory_watchdog_test_hog,
+    });
     vars::pgrust_runtime_scan_pool.install(GucVarAccessors {
         get: backing::pgrust_runtime_scan_pool,
         set: backing::set_pgrust_runtime_scan_pool,

@@ -577,6 +577,7 @@ members = [
     "crates/common/string_seams",
     "crates/backend/tcop/backend_startup",
     "crates/backend/postmaster/launch_backend",
+    "crates/backend/postmaster/memwatchdog",
     "crates/backend/storage/buffer/bufmgr",
     "crates/backend/utils/activity/pgstat",
     "crates/backend/utils/cache/relcache_build_seams",

@@ -76,7 +76,10 @@ fn log_tree(
     grand_total: &mut usize,
     grand_used: &mut usize,
 ) -> PgResult<()> {
-    let total = t.arena_footprint;
+    // Aset/Malloc backends do not publish block bytes into Acct (exact
+    // per-chunk charge instead); floor total at used so an aset context
+    // never dumps as "0 total" with megabytes used (mcxtfuncs convention).
+    let total = t.arena_footprint.max(t.used);
     let used = t.used;
     let free = total.saturating_sub(used);
     *grand_total += total;
@@ -88,7 +91,9 @@ fn log_tree(
     ereport(LOG_SERVER_ONLY)
         .errmsg(format!(
             "level: {level}; {}{ident}: {total} total in {} blocks; {free} free; {used} used [{}]",
-            t.name, t.nblocks, t.kind
+            t.name,
+            t.nblocks.max(1),
+            t.kind
         ))
         .finish(loc("MemoryContextStatsInternal"))?;
     for child in t.children.iter().take(max_children) {
@@ -179,9 +184,75 @@ pub fn session_cleanup_count() -> usize {
     SESSION_CLEANUPS.with(|c| c.iter().map(|v| v.borrow().len()).sum())
 }
 
+// ---------------------------------------------------------------------------
+// GL-MEMWATCH-1: C parity for aset.c's MemoryContextStats(TopMemoryContext)
+// on allocation failure — dump the FAILING thread's context forest before the
+// "out of memory" error propagates. Raw stderr (C's fprintf choice: the
+// ereport path may itself allocate mid-OOM); the log collector captures it.
+// Reentry-guarded: the dump's own formatting failing must not recurse.
+// ---------------------------------------------------------------------------
+
+fn fmt_tree(out: &mut String, t: &TreeStats, level: usize, max_children: usize, gt: &mut usize, gu: &mut usize) {
+    use std::fmt::Write as _;
+    let total = t.arena_footprint.max(t.used);
+    let used = t.used;
+    let free = total - used;
+    *gt += total;
+    *gu += used;
+    let ident = match &t.ident {
+        Some(id) => format!(": {id}"),
+        None => String::new(),
+    };
+    let _ = writeln!(
+        out,
+        "level: {level}; {}{ident}: {total} total in {} blocks; {free} free; {used} used [{}]",
+        t.name,
+        t.nblocks.max(1),
+        t.kind
+    );
+    for child in t.children.iter().take(max_children) {
+        fmt_tree(out, child, level + 1, max_children, gt, gu);
+    }
+    if t.children.len() > max_children {
+        let _ = writeln!(
+            out,
+            "level: {}; {} more child contexts not shown",
+            level + 1,
+            t.children.len() - max_children
+        );
+    }
+}
+
+fn oom_observer(context_name: &str, request: usize) {
+    thread_local! {
+        static IN_OOM_DUMP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    if IN_OOM_DUMP.with(|c| c.replace(true)) {
+        return;
+    }
+    let mut out = format!(
+        "LOG:  memory context dump on allocation failure (request of size {request} in context \"{context_name}\", pid {})\n",
+        init_small::globals::MyProcPid()
+    );
+    let mut grand_total = 0usize;
+    let mut grand_used = 0usize;
+    for root in backend_context_forest() {
+        fmt_tree(&mut out, &root, 1, 100, &mut grand_total, &mut grand_used);
+    }
+    use std::fmt::Write as _;
+    let _ = writeln!(
+        out,
+        "Grand total: {grand_total} bytes; {grand_used} used; process-wide context blocks: {} bytes",
+        mcx::global_footprint::bytes()
+    );
+    elog::write_stderr(&out);
+    IN_OOM_DUMP.with(|c| c.set(false));
+}
+
 pub fn init_seams() {
     mcx::set_root_observer(observe_root);
     mcx::set_session_cleanup_sink(session_cleanup_push);
+    mcx::set_oom_observer(oom_observer);
     mcxt_seams::handle_log_memory_context_interrupt::set(handle_log_memory_context_interrupt);
     mcxt_seams::log_memory_context_pending::set(log_memory_context_pending);
     mcxt_seams::process_log_memory_context_interrupt::set(process_log_memory_context_interrupt);

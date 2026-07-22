@@ -206,6 +206,7 @@ impl SlabArena {
                 });
             }
             self.mem_allocated += self.block_size;
+            crate::global_footprint::add(self.block_size);
             self.nblocks += 1;
             acct.commit_block(self.block_size, self.mem_allocated, self.nblocks);
         }
@@ -263,6 +264,7 @@ impl SlabArena {
 
     fn release_block_bytes(&mut self, addr: usize) {
         self.mem_allocated -= self.block_size;
+        crate::global_footprint::sub(self.block_size);
         self.nblocks -= 1;
         // SAFETY: block is empty (or arena reset/teardown); layout matches its allocation.
         unsafe {

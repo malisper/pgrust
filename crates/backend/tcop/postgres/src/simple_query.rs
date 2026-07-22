@@ -203,6 +203,33 @@ fn crash_backend_injection(args: &str) -> PgResult<()> {
     tcop_dest::NullCommand(elog::config::where_to_send_output())
 }
 
+// GL-MEMWATCH-1: the deliberate context hog behind the developer GUC
+// pgrust.memory_watchdog_test_hog. Allocates (and touches — RSS must grow)
+// `mb` one-MB slabs into a session-lifetime "WatchdogTestHog" context and
+// leaks them there: ACCOUNTED growth, the incident shape. Freed only at
+// session teardown (the session_root Roots phase). Never reachable at the
+// default 0.
+#[cold]
+#[inline(never)]
+fn watchdog_test_hog(mb: usize) {
+    use std::cell::Cell;
+    thread_local! {
+        static HOG_CTX: Cell<Option<&'static ::mcx::MemoryContext>> = const { Cell::new(None) };
+    }
+    let ctx = HOG_CTX.with(|c| match c.get() {
+        Some(ctx) => ctx,
+        None => {
+            let ctx: &'static ::mcx::MemoryContext = ::mcx::session_root("WatchdogTestHog");
+            c.set(Some(ctx));
+            ctx
+        }
+    });
+    for _ in 0..mb {
+        let v: PgVec<'_, u8> = ::mcx::vec_from_elem_in(ctx.mcx(), 0xA5u8, 1 << 20);
+        let _ = v.leak();
+    }
+}
+
 pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgResult<()> {
     // Crash-restart test injection: PANIC-class fault on demand, env-gated so
     // the surface is inert in production (notes/crash-restart-design.md).
@@ -222,6 +249,13 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
         if std::env::var_os("PGRUST_CRASH_TEST").is_some() {
             return crash_backend_injection(args);
         }
+    }
+
+    // GL-MEMWATCH-1 test instrumentation (developer GUC, default 0 = one
+    // TLS load + branch): each simple query leaks N MB into a named
+    // session-lifetime context — the memory watchdog e2e's deliberate hog.
+    if guc_tables::backing::pgrust_memory_watchdog_test_hog() > 0 {
+        watchdog_test_hog(guc_tables::backing::pgrust_memory_watchdog_test_hog() as usize);
     }
 
     // C: `debug_query_string = query_string;` (exec_simple_query top); the

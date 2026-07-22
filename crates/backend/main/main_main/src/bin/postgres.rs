@@ -216,6 +216,29 @@ fn main() {
     // spill pass.
     #[cfg(not(target_family = "wasm"))]
     mcx::set_allocator_release(|| unsafe { libmimalloc_sys::mi_collect(true) });
+    // GL-MEMWATCH-1: allocator statistics for the memory watchdog's ledger —
+    // mi_process_info is a cheap stats read (no heap walk). current_commit is
+    // the r/w memory mimalloc has committed; the watchdog logs it beside RSS
+    // and the accounted context bytes so allocator retention is separable
+    // from truly untracked growth.
+    #[cfg(not(target_family = "wasm"))]
+    memwatchdog::set_allocator_stats(|| {
+        let (mut rss, mut commit) = (0usize, 0usize);
+        // SAFETY: nullable out-params per the mi_process_info contract.
+        unsafe {
+            libmimalloc_sys::mi_process_info(
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut rss,
+                std::ptr::null_mut(),
+                &mut commit,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+        }
+        memwatchdog::AllocatorStats { current_rss: rss, current_commit: commit }
+    });
     // FPBUDGET-1 debug instrument: process-global live-context census
     // (name -> count), dumped at each backend exit. Diagnostic only.
     if std::env::var_os("PGRUST_MCXT_CENSUS").is_some() {
