@@ -1714,10 +1714,15 @@ fn agg_having_enabled() -> bool {
 /// note the serial rerun for THIS class is the engaged serial expr-key
 /// fold feed, not the per-row world — the containment price is the
 /// serial-fold wall, measured in the GL-DICTDRAIN-1 ladder).
+/// DEFAULT ON since the A-on-top-of-B ruling (Michael, 2026-07-22:
+/// "unless A is good on top of B — then let's do both a and b"; the
+/// flipped-kill idiom — `=0|off` kills). The census-scale holds
+/// (groupby_high floor, strminmax ceiling) are UNCHANGED — at defaults
+/// the car keys only the sub-hold estimate band.
 fn agg_dictkey_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        tier2_car_spelling_on(std::env::var("PGRUST_LANE_V2_AGG_DICTKEY").as_deref().ok())
+        tier2_car_kill_spelling_on(std::env::var("PGRUST_LANE_V2_AGG_DICTKEY").as_deref().ok())
     })
 }
 

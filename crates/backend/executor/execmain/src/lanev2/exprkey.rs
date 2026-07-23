@@ -94,13 +94,16 @@ fn codedkey_enabled() -> bool {
 /// exactly what the sink handoff deletes — worker tables flush
 /// canonical-byte runs and the leader merges on bytes, so the id-keyed
 /// handoff the q29coded note named as the profitability condition IS the
-/// sink. DEFAULT OFF, armed iff exactly `1`/`on`; SAME spelling as the m5
-/// probe recognizer (knob-coherence law — a probe that suppressed a
+/// sink. DEFAULT ON since the A-on-top-of-B ruling (`=0|off` kills); SAME
+/// spelling as the m5 probe recognizer (knob-coherence law — a probe that suppressed a
 /// dict-key shape this gate refuses would land it on the serial rerun).
 pub(super) fn dictkey_sink_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     crate::once_val(&ON, || {
-        matches!(std::env::var("PGRUST_LANE_V2_AGG_DICTKEY").as_deref(), Ok("1") | Ok("on"))
+        // DEFAULT ON since the A-on-top-of-B ruling (Michael, 2026-07-22;
+        // flipped-kill idiom, same spelling as the m5 half — knob-coherence
+        // law): OFF iff exactly `0`/`off`.
+        !matches!(std::env::var("PGRUST_LANE_V2_AGG_DICTKEY").as_deref(), Ok("0") | Ok("off"))
     })
 }
 
