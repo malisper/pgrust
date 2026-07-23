@@ -457,10 +457,18 @@ impl RowStore {
     }
 
     /// Allocate one zeroed row; returns its index (stable forever).
+    /// One chunk's bytes (the ledger charge grain — GL-CONCMEM-1).
+    fn chunk_bytes(&self) -> usize {
+        self.rows_per_chunk() * self.stride_words * 8
+    }
+
     #[inline]
     fn alloc(&mut self) -> usize {
         let row = self.nrows;
         if row == self.chunks.len() * self.rows_per_chunk() {
+            // Ledger charge INSIDE the cold new-chunk branch (block grain;
+            // the hot path pays nothing). Uncharged at clear()/Drop.
+            mcx::global_footprint::charge_engine_estate(self.chunk_bytes());
             self.chunks
                 .push(vec![0u64; self.rows_per_chunk() * self.stride_words].into_boxed_slice());
             // Capture the write-provenance base AFTER the Box settles in the
@@ -476,10 +484,24 @@ impl RowStore {
     fn mem_used(&self) -> usize {
         self.chunks.len() * self.rows_per_chunk() * self.stride_words * 8
     }
+}
 
+impl Drop for RowStore {
+    fn drop(&mut self) {
+        // Ledger balance for the charge in `alloc` (GL-CONCMEM-1).
+        mcx::global_footprint::uncharge_engine_estate(self.chunks.len() * self.chunk_bytes());
+    }
+}
+
+impl RowStore {
     fn clear(&mut self) {
         // Keep one chunk's allocation (rescan warmth), zero it for the
-        // zero-initialized state contract.
+        // zero-initialized state contract. Uncharge the freed chunks.
+        if self.chunks.len() > 1 {
+            mcx::global_footprint::uncharge_engine_estate(
+                (self.chunks.len() - 1) * self.chunk_bytes(),
+            );
+        }
         self.chunks.truncate(1);
         self.bases.truncate(1);
         if let Some(c) = self.chunks.first_mut() {
@@ -562,6 +584,10 @@ pub struct LaneAggTable {
     grows: u32,
     /// Two-level conversion count (same channel).
     converts: u32,
+    /// Entry-array + arena bytes currently charged to the process ledger
+    /// (GL-CONCMEM-1; the chunked row store charges itself — RowStore).
+    /// Settled at growth events / reset / Drop, never per row.
+    ledger_charged: usize,
 }
 
 /// Probe outcome: pointer to the row's state bytes + whether the group is
@@ -625,7 +651,7 @@ impl LaneAggTable {
         } else {
             (EntrySet::with_capacity_pow2(capacity_hint.saturating_mul(2), slot_words), None)
         };
-        LaneAggTable {
+        let mut t = LaneAggTable {
             repr,
             hash,
             slot_words,
@@ -641,7 +667,10 @@ impl LaneAggTable {
             convert_enabled: true,
             grows: 0,
             converts: 0,
-        }
+            ledger_charged: 0,
+        };
+        t.settle_ledger();
+        t
     }
 
     /// FLAT presized constructor (combine16): one single-level entry set
@@ -672,6 +701,7 @@ impl LaneAggTable {
         debug_assert!(t.buckets.is_none(), "hint 0 builds single-level");
         t.single = EntrySet::with_capacity_pow2(members_hint.saturating_mul(2), t.slot_words);
         t.convert_enabled = false;
+        t.settle_ledger();
         t
     }
 
@@ -682,6 +712,7 @@ impl LaneAggTable {
     /// bytes) are reservation-independent.
     pub fn reserve_arena(&mut self, bytes: usize) {
         self.arena.reserve(bytes);
+        self.settle_ledger();
     }
 
     /// Entry-set grows since birth (combine16 evidence channel).
@@ -752,6 +783,38 @@ impl LaneAggTable {
         entries + self.rows.mem_used() + self.arena.capacity()
     }
 
+    /// Entry arrays + key arena bytes (the row chunks charge themselves —
+    /// [`RowStore`]).
+    fn entries_arena_bytes(&self) -> usize {
+        let entries = match &self.buckets {
+            Some(bs) => bs.iter().map(EntrySet::mem_used).sum::<usize>(),
+            None => self.single.mem_used(),
+        };
+        entries + self.arena.capacity()
+    }
+
+    /// Settle the process-ledger charge for the entry arrays + arena
+    /// (GL-CONCMEM-1): called at growth events / reset — cold paths only.
+    fn settle_ledger(&mut self) {
+        let now = self.entries_arena_bytes();
+        if now > self.ledger_charged {
+            mcx::global_footprint::charge_engine_estate(now - self.ledger_charged);
+        } else if now < self.ledger_charged {
+            mcx::global_footprint::uncharge_engine_estate(self.ledger_charged - now);
+        }
+        self.ledger_charged = now;
+    }
+}
+
+impl Drop for LaneAggTable {
+    fn drop(&mut self) {
+        // Ledger balance for settle_ledger's charges (the row chunks
+        // uncharge themselves — RowStore::drop).
+        mcx::global_footprint::uncharge_engine_estate(self.ledger_charged);
+    }
+}
+
+impl LaneAggTable {
     /// DuckDB salt-disable gate, resolved per probe call (cheap load).
     #[inline(always)]
     fn salt_enabled(&self) -> bool {
@@ -1913,6 +1976,7 @@ impl LaneAggTable {
             .max(self.arena.capacity().saturating_mul(2))
             .max(len + add);
         self.arena.reserve(target - len);
+        self.settle_ledger();
     }
     // -- NULL group ---------------------------------------------------------
 
@@ -1964,6 +2028,9 @@ impl LaneAggTable {
         if set.needs_grow() {
             self.grow_set(hash);
             changed = true;
+        }
+        if changed {
+            self.settle_ledger();
         }
         changed
     }
@@ -2134,6 +2201,7 @@ impl LaneAggTable {
         }
         self.null_row = None;
         self.total_members = 0;
+        self.settle_ledger();
     }
 }
 

@@ -758,3 +758,55 @@ fn i128_reset_reuses() {
     assert!(pr.is_new);
     assert_eq!(t.len(), 1);
 }
+
+// GL-CONCMEM-1: the process-ledger charge balances across the table's
+// whole lifecycle — growth (entry rehashes), two-level conversion, long-key
+// arena growth, reset, Drop. Delta-based (other tests run concurrently on
+// the same process-global counter) with a generous concurrent-noise
+// allowance on the intermediate bound; the FINAL bound is the load-bearing
+// one — a leaked charge is permanent and survives noise.
+#[test]
+fn ledger_charge_balances_across_lifecycle() {
+    const NOISE: usize = 16 << 20;
+    let base = mcx::global_footprint::bytes();
+    {
+        let mut t = LaneAggTable::new(KeyRepr::Int, 16, 0);
+        for i in 0..200_000i64 {
+            let pr = t.probe_int(i, t.hash_key_int(i as u64));
+            // SAFETY: zeroed states.
+            unsafe { *states_i64(pr.states) += 1 };
+        }
+        let held = mcx::global_footprint::bytes();
+        assert!(
+            held + NOISE >= base + t.mem_used() / 2,
+            "growth did not charge the ledger (held {held}, base {base}, table {})",
+            t.mem_used()
+        );
+        t.reset();
+        // Bytes-key table: arena + projection path.
+        let mut tb = LaneAggTable::new(KeyRepr::Bytes, 8, 1024);
+        for i in 0..50_000u64 {
+            let key = format!("a-rather-long-grouping-key-{i}-padded-well-past-eight");
+            let b = key.as_bytes();
+            let pr = tb.probe_bytes(b, tb.hash_key_bytes(b));
+            // SAFETY: zeroed states.
+            unsafe { *states_i64(pr.states) += 1 };
+        }
+        assert!(tb.mem_used() > 1 << 20, "bytes table premise");
+    }
+    // Both tables dropped: every charge must have unwound. Concurrent
+    // tests hold their own live charges — retry until their windows pass
+    // (a LEAKED charge is permanent and never converges, so the retry
+    // cannot mask the failure class this test exists for).
+    let mut ok = false;
+    for _ in 0..50 {
+        let after = mcx::global_footprint::bytes();
+        if after <= base + NOISE && base <= after + NOISE {
+            ok = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let after = mcx::global_footprint::bytes();
+    assert!(ok, "ledger did not balance after Drop: base {base}, after {after}");
+}
