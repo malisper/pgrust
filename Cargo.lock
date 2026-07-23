@@ -8305,6 +8305,7 @@ dependencies = [
  "lock",
  "lock_seams",
  "mcx",
+ "postgres_seams",
  "procarray_seams",
  "subtrans_seams",
  "types_core",
