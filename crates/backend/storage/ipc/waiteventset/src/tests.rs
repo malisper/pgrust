@@ -155,6 +155,44 @@ fn cross_backend_set_latch_wakes_blocked_wait() {
 }
 
 #[test]
+fn fd_parked_wait_recovers_lost_latch_wake_within_cadence() {
+    // GL-RECWAKE-1: the lost-wake shape at the fd-park boundary — is_set
+    // lands but the unpark (and so the wake-pipe byte) is never delivered.
+    // An UNTIMED WaitEventSetWait must still observe the set latch within
+    // one recheck-cadence period (1s default), not block in epoll/kqueue
+    // forever.
+    setup_backend();
+    let (send, recv) = std::sync::mpsc::channel();
+    let waiter_thread = std::thread::spawn(move || {
+        setup_backend();
+        let latch = owned_latch();
+        let set = CreateWaitEventSet(1).unwrap();
+        AddWaitEventToSet(set, WL_LATCH_SET, PGINVALID_SOCKET, Some(latch), None).unwrap();
+        send.send(latch).unwrap();
+        let start = std::time::Instant::now();
+        let mut occurred = [WaitEvent::default(); 1];
+        let n = WaitEventSetWait(set, -1, &mut occurred, 0).unwrap();
+        FreeWaitEventSet(set);
+        (n, occurred[0].events, start.elapsed())
+    });
+
+    let latch = recv.recv().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    // SetLatch minus the unpark: exactly what PGRUST_TEST_DROP_WAKE_1IN
+    // renders at the waiter boundary (no pipe byte is written).
+    latch::latch_ref(latch).is_set.store(1, SeqCst);
+
+    let (n, events, elapsed) = waiter_thread.join().unwrap();
+    assert_eq!(n, 1);
+    assert_eq!(events, WL_LATCH_SET);
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "lost wake must cost one cadence period, not an unbounded kernel \
+         block (took {elapsed:?})"
+    );
+}
+
+#[test]
 fn seam_wait_one_roundtrip() {
     setup_backend();
     let latch = owned_latch();

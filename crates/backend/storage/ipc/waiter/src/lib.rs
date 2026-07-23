@@ -15,11 +15,14 @@
 //!
 //! Park modes:
 //!   * `park` / `park_timeout` — block on the slot's Mutex+Condvar pair (the
-//!     OS futex under std's hood). Untimed parks are bounded by the optional
-//!     built-in recheck cadence (subsumes PGRUST_MQ_RECHECK_MS as a debug
-//!     backstop, NOT a correctness crutch): the park returns
-//!     `ParkResult::Recheck` and the caller re-tests its predicate, so even
-//!     an injected lost wake costs one cadence period.
+//!     OS futex under std's hood). BOTH are bounded by the optional built-in
+//!     recheck cadence (subsumes PGRUST_MQ_RECHECK_MS as a debug backstop,
+//!     NOT a correctness crutch): the park returns `ParkResult::Recheck` and
+//!     the caller re-tests its predicate, so even an injected lost wake
+//!     costs one cadence period. Timed parks sleep min(timeout, cadence) per
+//!     lap (GL-RECWAKE-1: a minutes-class caller timeout — the checkpointer
+//!     main lap — is no lost-wake backstop; recovery boot and shutdown both
+//!     wedged on it). `sleep` alone is exempt: time is its own predicate.
 //!   * fd-park (`begin_fd_park` / `end_fd_park`) — for waits that must block
 //!     in epoll/kqueue on sockets: the waiter exposes a self-pipe read fd the
 //!     WaitEventSet registers; `unpark` of an fd-parked waiter writes one
@@ -101,9 +104,10 @@ pub enum ParkResult {
     Notified,
     /// The caller's timeout elapsed (only for `park_timeout`).
     TimedOut,
-    /// The built-in recheck cadence elapsed on an untimed park: the caller
-    /// must re-test its wait predicate and re-park (debug backstop for lost
-    /// wakes; never returned when the cadence is disabled).
+    /// The built-in recheck cadence elapsed before the park's own deadline
+    /// (or on an untimed park): the caller must re-test its wait predicate
+    /// and re-park (the lost-wake backstop; never returned when the cadence
+    /// is disabled).
     Recheck,
 }
 
@@ -271,8 +275,17 @@ impl Slot {
     }
 
     /// Owner-side park. `timeout_ms` = the caller's own deadline (returns
-    /// TimedOut); `cadence_ms` = the recheck backstop for untimed parks
-    /// (returns Recheck). Both None = park until a real unpark.
+    /// TimedOut); `cadence_ms` = the lost-wake recheck backstop (returns
+    /// Recheck). Both None = park until a real unpark.
+    ///
+    /// The cadence bounds TIMED parks too (GL-RECWAKE-1): a dropped
+    /// cross-thread unpark leaves the caller's predicate flagged but this
+    /// slot un-notified, and a caller deadline of minutes-class (checkpointer
+    /// main lap = checkpoint_timeout) is no backstop inside a 90s boot window
+    /// or a 20s shutdown grace. The park sleeps at most
+    /// min(timeout, cadence); a cadence expiry returns Recheck so the caller
+    /// re-tests its predicate and re-parks — a lost wake costs one cadence
+    /// period on every park mode, not just untimed ones.
     pub fn park_core(
         &self,
         timeout_ms: Option<i64>,
@@ -290,7 +303,8 @@ impl Slot {
         }
         g.mode = Mode::Parked;
         let bound_ms = match (timeout_ms, cadence_ms) {
-            (Some(t), _) => Some(t),
+            (Some(t), Some(c)) => Some(t.min(c)),
+            (Some(t), None) => Some(t),
             (None, c) => c,
         };
         let start = if bound_ms.is_some() { clk.now_ms() } else { 0 };
@@ -299,10 +313,11 @@ impl Slot {
             if let Some(r) = remaining {
                 if r <= 0 {
                     g.mode = Mode::Idle;
-                    return if timeout_ms.is_some() {
-                        ParkResult::TimedOut
-                    } else {
-                        ParkResult::Recheck
+                    // The caller's own deadline expired => TimedOut; a
+                    // shorter cadence lap => Recheck (re-test + re-park).
+                    return match timeout_ms {
+                        Some(t) if clk.now_ms() - start >= t => ParkResult::TimedOut,
+                        _ => ParkResult::Recheck,
                     };
                 }
             }
@@ -512,13 +527,18 @@ mod global {
         slot(idx).park_core(None, (cadence > 0).then_some(cadence), clock::provider())
     }
 
-    /// Park until unparked or `timeout` elapses. The caller's timeout is
-    /// honored exactly (no cadence: a timed park is already bounded).
+    /// Park until unparked or `timeout` elapses. The sleep is additionally
+    /// bounded by the recheck cadence (GL-RECWAKE-1): when the cadence is
+    /// shorter than the remaining timeout the park returns `Recheck` and the
+    /// caller re-tests its predicate — a lost wake costs one cadence period,
+    /// never the full caller timeout (the recovery-boot wedge shape: a
+    /// checkpoint_timeout-long lap deaf to an already-set latch).
     pub fn park_timeout(timeout: Duration) -> ParkResult {
+        let cadence = recheck_cadence_ms();
         let idx = current_slot();
         slot(idx).park_core(
             Some(timeout.as_millis().min(i64::MAX as u128) as i64),
-            None,
+            (cadence > 0).then_some(cadence),
             clock::provider(),
         )
     }
@@ -526,9 +546,15 @@ mod global {
     /// Timed sleep through the waiter (s_lock backoff etc.): rides the DST
     /// clock hook. A pending unpark aimed at this thread ends the sleep
     /// early — callers are backoff loops for which an early return is
-    /// harmless.
+    /// harmless. NO cadence lap: a sleep's predicate is time itself, so a
+    /// lost wake cannot extend it and there is nothing to re-test.
     pub fn sleep(timeout: Duration) {
-        let _ = park_timeout(timeout);
+        let idx = current_slot();
+        let _ = slot(idx).park_core(
+            Some(timeout.as_millis().min(i64::MAX as u128) as i64),
+            None,
+            clock::provider(),
+        );
     }
 
     /// Monotonic milliseconds from the installed clock provider — wait-site
@@ -785,6 +811,13 @@ mod model_global {
         pgsync::thread::yield_now();
     }
 
+    /// Cadence is DISABLED under loom (models prove the wake protocol, never
+    /// the recheck backstop) — loom-buildable consumers (waiteventset's
+    /// fd-park lap) read 0 = off.
+    pub fn recheck_cadence_ms() -> i64 {
+        0
+    }
+
     /// Monotonic ms of the model clock (constant 0 — deadline math is inert
     /// under loom; see the module comment).
     pub fn now_ms() -> i64 {
@@ -881,7 +914,8 @@ mod model_global {
 #[cfg(loom)]
 pub use model_global::{
     begin_fd_park, current_handle, describe_word, drain_wake_fd, end_fd_park, ensure_wake_pipe,
-    now_ms, park, park_timeout, reissue_current_token, sleep, unpark, unpark_word, wake_read_fd,
+    now_ms, park, park_timeout, recheck_cadence_ms, reissue_current_token, sleep, unpark,
+    unpark_word, wake_read_fd,
 };
 
 #[cfg(all(test, not(loom)))]

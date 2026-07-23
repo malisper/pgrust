@@ -6,8 +6,10 @@ use super::*;
 
 // NOTE: PGRUST_TEST_DROP_WAKE_1IN / recheck-cadence env vars are read once
 // per process; these tests assume the default environment (no injection).
-// The cadence default (1000ms) only affects untimed park(), which every test
-// bounds by delivering a real unpark.
+// The cadence default (1000ms) bounds park() AND park_timeout laps
+// (GL-RECWAKE-1); every sub-second timed park below is unaffected
+// (min(timeout, cadence) picks the timeout), and untimed parks are bounded
+// by delivering a real unpark.
 
 #[test]
 fn unpark_then_park_is_wake_before_park() {
@@ -54,6 +56,41 @@ fn park_timeout_expires() {
         ParkResult::TimedOut
     );
     assert!(start.elapsed() >= Duration::from_millis(25));
+}
+
+// GL-RECWAKE-1: timed parks are ALSO bounded by the recheck cadence. A
+// dropped cross-thread unpark leaves the caller's predicate flagged but the
+// slot un-notified; a minutes-class caller timeout (the checkpointer main
+// lap) must not be the only backstop. Driven through Slot::park_core with a
+// virtual clock: deterministic, no wall-time sleeps.
+#[test]
+fn timed_park_lapped_by_cadence_returns_recheck() {
+    static CLK: clock::virtual_time::VirtualClock = clock::virtual_time::VirtualClock::new();
+    let slot: &'static Slot = Box::leak(Box::new(Slot::new()));
+    slot.issue_token();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop2 = Arc::clone(&stop);
+    let ticker = std::thread::spawn(move || {
+        while !stop2.load(Ordering::SeqCst) {
+            CLK.advance(100);
+            std::thread::yield_now();
+        }
+    });
+    // Caller deadline 5000ms, cadence 250ms: the cadence lap fires FIRST and
+    // reports Recheck (re-test + re-park), never sleeping out the deadline.
+    assert_eq!(
+        slot.park_core(Some(5_000), Some(250), &CLK),
+        ParkResult::Recheck
+    );
+    // Caller deadline shorter than the cadence: TimedOut, exactly as before.
+    assert_eq!(
+        slot.park_core(Some(200), Some(250), &CLK),
+        ParkResult::TimedOut
+    );
+    // Untimed park with a cadence: Recheck (the pre-existing contract).
+    assert_eq!(slot.park_core(None, Some(250), &CLK), ParkResult::Recheck);
+    stop.store(true, Ordering::SeqCst);
+    ticker.join().unwrap();
 }
 
 #[test]
@@ -200,7 +237,20 @@ fn virtual_time_drives_timeouts() {
     let done = Arc::new(AtomicU64::new(0));
     let done2 = Arc::clone(&done);
     let t = std::thread::spawn(move || {
-        let r = park_timeout(Duration::from_millis(5_000));
+        // Timed parks lap at the recheck cadence (GL-RECWAKE-1): re-park for
+        // the remainder as real callers do, judging the deadline on the
+        // installed (virtual) clock.
+        let deadline = now_ms() + 5_000;
+        let r = loop {
+            let rem = deadline - now_ms();
+            if rem <= 0 {
+                break ParkResult::TimedOut;
+            }
+            match park_timeout(Duration::from_millis(rem as u64)) {
+                ParkResult::Recheck => continue,
+                other => break other,
+            }
+        };
         done2.store(1 + (r == ParkResult::TimedOut) as u64, Ordering::SeqCst);
     });
     // Real time passing does nothing; virtual time expires the park.

@@ -266,6 +266,41 @@ fn wait_latch_parks_until_cross_thread_set_latch() {
 }
 
 #[test]
+fn wait_latch_timed_recovers_lost_wake_within_cadence() {
+    // GL-RECWAKE-1 (the recovery-boot wedge, chaos seed 45101 round 14): the
+    // lost-wake shape is "flag stored, wake dropped" — is_set lands but no
+    // unpark is ever delivered. A timed WaitLatch whose caller deadline is
+    // long (checkpointer main lap = checkpoint_timeout ~300s) must still
+    // observe the set latch within one recheck-cadence period (1s default),
+    // not sleep out the caller timeout.
+    let _g = TEST_LOCK.lock().unwrap();
+    install_mock();
+    SetMyProcPid(42);
+    SetIsUnderPostmaster(false);
+
+    let h = fresh_latch();
+    InitLatch(h);
+
+    let setter = std::thread::spawn(move || {
+        std::thread::sleep(core::time::Duration::from_millis(30));
+        // set_latch minus the unpark: exactly what PGRUST_TEST_DROP_WAKE_1IN
+        // renders at the waiter boundary.
+        latch_ref(h).is_set.store(1, SeqCst);
+    });
+    let start = std::time::Instant::now();
+    let rc = WaitLatch(Some(h), WL_LATCH_SET | WL_TIMEOUT, 60_000, 0).unwrap();
+    setter.join().unwrap();
+    assert_eq!(rc, WL_LATCH_SET);
+    assert!(
+        start.elapsed() < core::time::Duration::from_secs(10),
+        "lost wake must cost one cadence period, not the 60s caller timeout \
+         (took {:?})",
+        start.elapsed()
+    );
+    ResetLatch(h);
+}
+
+#[test]
 fn reset_latch_clears_is_set() {
     let _g = TEST_LOCK.lock().unwrap();
     install_mock();
