@@ -1979,6 +1979,59 @@ struct WorkerExec {
     mks: super::MkScratch,
     /// GL-VECACCEPT-2 direct-lane scratch (vec-accept engagements only).
     vs: SinkVecScratch,
+    /// Process-ledger mirror of the drive-scratch estate (GL-CONCMEM-1):
+    /// the k2s/dgs/groups/xk/mk/mks/vs families' backing stores, settled
+    /// once per claim in `accept_morsel_body` — block grain, never per
+    /// row. Drop balances (the field's own Drop).
+    scratch_ledger: ScratchLedger,
+}
+
+/// Delta-settled process-ledger mirror for a plain-Rust engine estate
+/// (GL-CONCMEM-1): `settle(now)` charges/uncharges the movement against
+/// `mcx::global_footprint`; Drop unwinds the residue — a leaked charge is
+/// impossible by construction.
+#[derive(Default)]
+struct ScratchLedger(usize);
+
+impl ScratchLedger {
+    fn settle(&mut self, now: usize) {
+        if now > self.0 {
+            ::mcx::global_footprint::charge_engine_estate(now - self.0);
+        } else if now < self.0 {
+            ::mcx::global_footprint::uncharge_engine_estate(self.0 - now);
+        }
+        self.0 = now;
+    }
+}
+
+impl Drop for ScratchLedger {
+    fn drop(&mut self) {
+        ::mcx::global_footprint::uncharge_engine_estate(self.0);
+    }
+}
+
+impl WorkerExec {
+    /// The per-worker drive-scratch estate (heap backing stores only; the
+    /// estate-map families of the GL-CONCMEM-1 letter). Capacity-based.
+    fn scratch_estate_bytes(&self) -> usize {
+        self.k2s.estate_bytes()
+            + self.dgs.estate_bytes()
+            + super::vec_estate_bytes(&self.idxs)
+            + super::vec_estate_bytes(&self.groups)
+            + self.xk.as_ref().map_or(0, |xk| {
+                core::mem::size_of::<super::ExprKeyState>() + xk.estate_bytes()
+            })
+            + self.mk.as_ref().map_or(0, super::ScanMk::estate_bytes)
+            + self.mks.estate_bytes()
+            + self.vs.estate_bytes()
+    }
+
+    /// Settle the process-ledger mirror to the current scratch estate
+    /// (called once per claim — the block-grain boundary).
+    fn settle_scratch_ledger(&mut self) {
+        let now = self.scratch_estate_bytes();
+        self.scratch_ledger.settle(now);
+    }
 }
 
 thread_local! {
@@ -2019,7 +2072,7 @@ fn accept_morsel_body(
         let (xk, stage_slot) = (&mut *xk, &mut *stage_slot);
         let (mk, mks) = (&mut *mk, &mut *mks);
         let vs = &mut *vs;
-        crate::querydesc::with_qd(*qd, |q| {
+        let r = crate::querydesc::with_qd(*qd, |q| {
             let x = q.exec.as_mut().expect("runtime agg worker executor state");
             x.with_mut(|d| -> Result<(), AcceptFail> {
                 let estate = &mut d.estate;
@@ -2094,7 +2147,16 @@ fn accept_morsel_body(
                 }
                 drained
             })
-        })
+        });
+        // GL-CONCMEM-1: settle the drive-scratch estate into the process
+        // ledger once per claim (block grain — a claim is thousands of
+        // rows; the whale lanes are the gndv-sized per-epoch code caches).
+        // Error paths converge at teardown: the ledger field's Drop
+        // balances whatever the last settle left charged.
+        if let Some(ex) = b.as_mut() {
+            ex.settle_scratch_ledger();
+        }
+        r
     })
 }
 
@@ -2648,6 +2710,13 @@ impl SinkDictScratch {
         self.ident = None;
         self.slots.clear();
     }
+
+    /// Heap backing-store bytes for the process estate ledger
+    /// (GL-CONCMEM-1): `slots` is gndv-sized under a v7 stitch — the
+    /// family's whale lane at high-NDV dict shapes.
+    fn estate_bytes(&self) -> usize {
+        super::vec_estate_bytes(&self.slots) + super::vec_estate_bytes(&self.miss_codes)
+    }
 }
 
 /// One dict-answered staged batch through the CODE sink feed: pass 1 marks
@@ -2763,6 +2832,18 @@ struct SinkVecScratch {
     knull: Vec<bool>,
     /// Chunk row indices 0..VEC_CHUNK (agg_fold_staged's idx vocabulary).
     idxv: Vec<u32>,
+}
+
+impl SinkVecScratch {
+    /// Heap backing-store bytes for the process estate ledger
+    /// (GL-CONCMEM-1): the granule lane copies (one Datum lane per
+    /// referenced scan column) plus the null/idx lanes.
+    fn estate_bytes(&self) -> usize {
+        super::vec_estate_bytes(&self.cols)
+            + self.cols.iter().map(|(_, l)| super::vec_estate_bytes(l)).sum::<usize>()
+            + super::vec_estate_bytes(&self.knull)
+            + super::vec_estate_bytes(&self.idxv)
+    }
 }
 
 /// One chunk's [`::lanefold::LaneCols`] view over the scratch lanes: the
@@ -3685,6 +3766,7 @@ fn build_worker_exec(payload: &Arc<RuntimeAggShared>) -> PgResult<()> {
                     mk,
                     mks: super::MkScratch::default(),
                     vs: SinkVecScratch::default(),
+                    scratch_ledger: ScratchLedger::default(),
                 });
                 Ok(())
             }
@@ -6113,6 +6195,71 @@ impl runtime::MorselSource for PgrcolumnarGranuleSource {
 
     fn startup_c0(&self) -> u64 {
         2
+    }
+}
+
+#[cfg(test)]
+mod scratch_estate_tests {
+    use super::{ScratchLedger, SinkDictScratch, SinkVecScratch};
+
+    /// GL-CONCMEM-1: the delta-settled scratch ledger charges growth,
+    /// uncharges shrink, and Drop unwinds the residue exactly. Delta-based
+    /// against the process-global counter (other tests hold their own live
+    /// charges) with the lanetable balance-test law: noise allowance on
+    /// the held bound, retry on the final bound — a leaked charge is
+    /// permanent and never converges.
+    #[test]
+    fn scratch_ledger_balances() {
+        const NOISE: usize = 16 << 20;
+        let base = ::mcx::global_footprint::bytes();
+        {
+            let mut l = ScratchLedger::default();
+            l.settle(48 << 20);
+            let held = ::mcx::global_footprint::bytes();
+            assert!(
+                held + NOISE >= base + (48 << 20),
+                "settle did not charge the ledger (held {held}, base {base})"
+            );
+            // Shrink uncharges; regrow leaves a residue for Drop.
+            l.settle(8 << 20);
+            l.settle(24 << 20);
+        }
+        let mut ok = false;
+        for _ in 0..50 {
+            let after = ::mcx::global_footprint::bytes();
+            if after <= base + NOISE && base <= after + NOISE {
+                ok = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let after = ::mcx::global_footprint::bytes();
+        assert!(ok, "ledger did not balance after Drop: base {base}, after {after}");
+    }
+
+    /// The estate faces count backing-store CAPACITY — the whale lanes
+    /// (gndv-sized per-epoch code caches / granule lane copies) dominate
+    /// and must be visible to the ledger.
+    #[test]
+    fn scratch_estate_counts_capacity() {
+        let mut dgs = SinkDictScratch::default();
+        assert_eq!(dgs.estate_bytes(), 0);
+        dgs.slots.resize(1 << 20, None);
+        assert!(dgs.estate_bytes() >= (1 << 20) * 8, "dict slots lane uncounted");
+        dgs.invalidate();
+        // clear() keeps capacity — the allocator still holds the store and
+        // the estate face must keep reporting it.
+        assert!(dgs.estate_bytes() >= (1 << 20) * 8, "cleared capacity uncounted");
+
+        let mut mks = super::super::MkScratch::default();
+        mks.code_ids.resize(1 << 20, 0);
+        mks.code_states.resize(1 << 20, core::ptr::null_mut());
+        assert!(mks.estate_bytes() >= (1 << 20) * 12, "mk code caches uncounted");
+
+        let mut vs = SinkVecScratch::default();
+        vs.knull.resize(8192, false);
+        vs.idxv.resize(8192, 0);
+        assert!(vs.estate_bytes() >= 8192 * 5, "vec lanes uncounted");
     }
 }
 
