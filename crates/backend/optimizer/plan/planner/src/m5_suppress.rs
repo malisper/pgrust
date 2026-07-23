@@ -901,13 +901,35 @@ fn topn_nonint_guard() -> FloorGuard {
 /// SE-TOPNNI selective-qual carve threshold (GL-TOPNNI-1 selective-qual x
 /// datetime-lead diagnosis):
 /// estimated qual-survivor fraction below which a QUALED shape with a
-/// DATETIME (band-eligible) leading key keeps Gather. Measured anchors on
-/// the real 10M sorted bank (jobs 1784633628/-632/-634272 @ 34b23fdf2):
-/// LOSES at survival ~0.001 (2.9x — the band refuses to a serial walk the
-/// qual starves), WINS at ~0.75 (0.71x). 0.10 sits between the estimate
-/// classes with wide margin on both sides; the cost-route lane owns any
-/// refit into a curve.
+/// DATETIME (band-eligible) leading key enters the carve. Minting-era
+/// anchors on the real 10M sorted bank (jobs 1784633628/-632/-634272 @
+/// 34b23fdf2): the suppressed serial walk LOST at survival ~0.001 (2.9x)
+/// and WON at ~0.75 — the carve kept Gather unconditionally below 0.10.
+/// GL-RESIDUAL-2 re-adjudication: the losing cell is INVERTED at the
+/// current tree at BOTH scales (the serial lane's scan+topn improved past
+/// the starved zone walk while the kept plan's width-blind wide
+/// projection got worse), so below the threshold the verdict is now
+/// PRICED (`topnni_selqual_priced_enabled`) instead of unconditional.
 const TOPN_NONINT_MIN_QUAL_SURVIVAL: f64 = 0.10;
+
+/// GL-RESIDUAL-2 carve flip (DEFAULT ON): below the survival threshold
+/// the star-wide class takes the fitted two-way verdict
+/// (costsize::serial_model::topn_selqual_starwide_two_way — witnessed at
+/// both scales: the serial walk wins 1.18x at the mid-scale bank,
+/// 6-9x-and-growing at the census bank where the kept plan's cold cell is
+/// the pathology); every OTHER shape in the carve region, and everything
+/// below the model's support, keeps Gather exactly as before (abstain =
+/// incumbent). `PGRUST_LANE_V2_TOPNNI_SELQUAL_PRICED=0|off` is the kill,
+/// restoring the unconditional keep-Gather carve byte-for-byte (the
+/// flipped-kill idiom).
+fn topnni_selqual_priced_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        tier2_car_kill_spelling_on(
+            std::env::var("PGRUST_LANE_V2_TOPNNI_SELQUAL_PRICED").as_deref().ok(),
+        )
+    })
+}
 
 /// SE-TOPNNI text sort-key answerability (the zerocnt-answerability
 /// precedent, per column): the DictCode key class serves order ONLY via
@@ -2638,39 +2660,57 @@ fn classify_covered(run: &mut PlannerRun<'_>) -> PgResult<bool> {
             // SELECTIVE-QUAL x BAND-ELIGIBLE-LEAD carve (GL-TOPNNI-1 flip
             // sanity diagnosis 2026-07-21 @ 34b23fdf2): on the real
             // sorted bank a datetime LEADING key classifies ZONE-FRIENDLY
-            // (1191/1221 granules serial-skippable) and the arm band-
-            // refuses to the serial zone walk — but a SELECTIVE qual
-            // starves the walk's early exit (most best-first rows fail the
-            // qual), so the displaced Gather was the real winner (measured
-            // hot 0.062s Gather vs 0.199s suppressed-serial, 2.9x). The
-            // non-selective siblings WIN under the identical band refusal
-            // (survival ~0.75: 0.021->0.012, 0.022->0.014), and dict-text
-            // LEADS skip the band entirely and win engaged at any
-            // selectivity. So: quals + datetime lead + estimated survival
-            // below the threshold => keep Gather (fail toward the
-            // incumbent; a zone-HOSTILE selective shape forgoes a measured
-            // win here — the conservative direction, named in the letter).
-            // Under the same economics gate as the floors so the rowflip
-            // measure vehicle (PGRUST_M5_SIZE_FLOORS=0) can see through.
+            // and the arm band-refuses to the serial zone walk — the
+            // minting-era cell had a SELECTIVE qual starving the walk's
+            // early exit, so the carve kept Gather unconditionally below
+            // the threshold. GL-RESIDUAL-2 re-adjudication (doc at
+            // `topnni_selqual_priced_enabled`): that cell is INVERTED at
+            // the current tree at both scales, so the star-wide class now
+            // takes the fitted two-way verdict; other shapes and
+            // below-support keep Gather (abstain = incumbent), and the
+            // kill spelling restores the unconditional carve. Under the
+            // same economics gate as the floors so the rowflip measure
+            // vehicle (PGRUST_M5_SIZE_FLOORS=0) can see through.
             if has_quals
                 && !lead_is_text
                 && size_floors_enabled()
                 && survival < TOPN_NONINT_MIN_QUAL_SURVIVAL
             {
+                let star_wide = parse.sortClause.len() == 1 && parse.targetList.len() >= 3;
+                let priced_suppress = topnni_selqual_priced_enabled()
+                    && star_wide
+                    && costsize::serial_model::topn_selqual_starwide_two_way(
+                        run.root.rel(rel_id).tuples.max(rel_rows).max(1.0),
+                    )
+                    .is_some_and(|v| {
+                        v.pick == costsize::serial_model::EnginePick::Serial && !v.parity
+                    });
+                if !priced_suppress {
+                    if trace_armed() {
+                        eprintln!(
+                            "m5-suppress-floor: topnnonint label=selective-qual-datetime-lead \
+                             relid={} survival={survival:.4} => gather stands",
+                            rte.relid
+                        );
+                    }
+                    serial_shadow_tail(
+                        serial_shadow::TOPN_NONINT,
+                        "selective-qual-datetime-lead",
+                        topn_shadow,
+                        false,
+                    );
+                    return Ok(false);
+                }
                 if trace_armed() {
                     eprintln!(
-                        "m5-suppress-floor: topnnonint label=selective-qual-datetime-lead \
-                         relid={} survival={survival:.4} => gather stands",
+                        "m5-suppress-topnnonint: label=selqual-priced relid={} \
+                         survival={survival:.4} => gather suppressed (priced serial walk)",
                         rte.relid
                     );
                 }
-                serial_shadow_tail(
-                    serial_shadow::TOPN_NONINT,
-                    "selective-qual-datetime-lead",
-                    topn_shadow,
-                    false,
-                );
-                return Ok(false);
+                // Fall through to the knob-path finish: the suppressed
+                // plan band-refuses to the serial zone walk at exec (the
+                // priced engine).
             }
             let label = if n_text > 0 { "topn-text-keys" } else { "topn-datetime-keys" };
             let suppressed = finish_knob_path(
