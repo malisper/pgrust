@@ -1456,8 +1456,19 @@ pub fn pool_serve(payload: &Arc<dyn std::any::Any + Send + Sync>) -> PoolServe {
     // unconnected ones adopt the engagement's inside serve_ticket. Counted
     // as a refusal (once per publication per worker — skip-cache dedup)
     // for the leader's started==0 && refused>=tickets fallback.
+    //
+    // Count-then-wake (DetachGuard's discipline): this is the one refusal
+    // that ticks BEFORE any claim exists, so no DetachGuard will ever fire
+    // for it — without its own wake the leader's "nobody will participate"
+    // check only ran when its latch quantum expired, and every
+    // cross-database engagement against a fully-mismatched pool slept the
+    // whole MQ-recheck quantum (~1 s additive per execution, GL-ZSTALL-1)
+    // before falling back to the gang.
     if mine != InvalidOid && mine != entry.shared.database_id {
         entry.refused.fetch_add(1, SeqCst);
+        latch::SetLatch(types_storage::latch::LatchHandle::proc(
+            entry.shared.parallel_leader_proc_number,
+        ));
         return PoolServe::Refused;
     }
     let Some(ticket) = entry.try_claim() else {
