@@ -10784,6 +10784,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "parquet_read"
+version = "0.0.0"
+dependencies = [
+ "lz4_flex",
+ "simdutf8",
+ "snap",
+ "types_error",
+ "zstd",
+]
+
+[[package]]
 name = "parse_agg"
 version = "0.0.0"
 dependencies = [
@@ -16212,6 +16223,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "simdutf8"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
 name = "sink"
 version = "0.0.0"
 dependencies = [
@@ -16474,6 +16491,12 @@ dependencies = [
  "types_rel",
  "types_storage",
 ]
+
+[[package]]
+name = "snap"
+version = "1.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "199905e6153d6405f9728fe44daace35f8f837bbf830bb6e85fbd5828709a886"
 
 [[package]]
 name = "snapbuild"

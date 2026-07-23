@@ -1,0 +1,22 @@
+[package]
+name = "parquet_read"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+types_error = { path = "../../../_support/types/types_error" }
+# Codecs are borrowed, kernels are owned (build-vs-borrow ruling in the
+# lane letter): snap = pure-Rust snappy, lz4_flex = the raw-block lz4 arm
+# (already in-tree for the columnar store), zstd = the C binding already
+# in-tree for the columnar store's frame codec.
+snap = "1"
+lz4_flex = "0.11"
+# Batched UTF-8 validation for string pages (dictionary values validated
+# once per chunk; fallback pages validated per batch).
+simdutf8 = "0.1"
+
+# zstd links C (zstd-sys); no wasm32 build — the wasm arm refuses the codec
+# at the decompress call site, mirroring pgrcolumnar's arrangement.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+zstd = "0.13"

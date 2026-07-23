@@ -301,6 +301,7 @@ members = [
     "crates/backend/access/table/tableam_vocab",
     "crates/backend/access/table/tableam",
     "crates/backend/access/pgrcolumnar",
+    "crates/backend/access/parquet_read",
     "crates/backend/access/tablesample/tablesample",
     "crates/backend/executor/nodesamplescan",
     "crates/backend/storage/lmgr/predicate",
