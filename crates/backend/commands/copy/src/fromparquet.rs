@@ -1,0 +1,491 @@
+// COPY ... FROM 'file' WITH (FORMAT 'parquet') — the generic row-producing
+// path: parquet column batches -> datums -> the existing COPY insert path,
+// so it loads into ANY table AM. pg_parquet (the behavioral spec of record
+// for this surface) drives the option names (match_by position|name), the
+// schema-matching error classes and the type-mapping table; this increment
+// implements the flat-column read side and errors cleanly on the rest.
+//
+// The columnar-store fast path (dictionary remap into part builders, sorted
+// runs into the parallel-load merge) is a later increment; parquet_read's
+// batch API already separates page decode from batch fill for it.
+
+use datum::Datum;
+use mcx::Mcx;
+use parquet_read::{BatchData, ColumnBatch, FileReader, Logical, Phys, RowGroupReader, TimeUnit};
+use types_core::Oid;
+use types_error::{
+    PgError, PgResult, ERRCODE_BAD_COPY_FILE_FORMAT, ERRCODE_DATATYPE_MISMATCH,
+    ERRCODE_DATETIME_VALUE_OUT_OF_RANGE, ERRCODE_FEATURE_NOT_SUPPORTED,
+    ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_STRING_DATA_RIGHT_TRUNCATION,
+    ERRCODE_UNDEFINED_COLUMN,
+};
+use types_tuple::TupleDescData;
+
+use crate::from::CopyFromState;
+
+// Microseconds from the Unix epoch to the engine timestamp epoch (2000-01-01).
+const EPOCH_SHIFT_US: i64 = 946_684_800_000_000;
+// Days from the Unix epoch to the engine date epoch.
+const EPOCH_SHIFT_DAYS: i32 = 10_957;
+// Engine timestamp validity window (timestamp.h IS_VALID_TIMESTAMP).
+const MIN_TIMESTAMP_US: i64 = -211_813_488_000_000_000;
+const END_TIMESTAMP_US: i64 = 9_223_371_331_200_000_000;
+const MAX_TIME_US: i64 = 86_400_000_000;
+
+const VARHDRSZ_I32: i32 = 4;
+
+/// How one bound column's decoded values become datums.
+#[derive(Clone, Copy)]
+enum Conv {
+    Bool,
+    I16FromI32,
+    I32,
+    I64FromI32,
+    I16FromI64,
+    I32FromI64,
+    I64,
+    F32,
+    F64FromF32,
+    F64,
+    DateFromDays,
+    /// Timestamp/timestamptz target; value scaled to microseconds.
+    Timestamp(TimeUnit),
+    Time(TimeUnit),
+    /// text / unconstrained varchar (UTF-8 validated at page decode).
+    Text,
+    /// varchar(n): char-length check with the blank-trim rule.
+    VarcharN(i32),
+    Bytea,
+}
+
+struct Binding {
+    /// 0-based physical attribute index in the target tuple descriptor.
+    attidx: usize,
+    conv: Conv,
+    /// Dense index into the per-binding batch array.
+    batch: usize,
+}
+
+pub(crate) struct ParquetSrc {
+    reader: FileReader,
+    bindings: Vec<Binding>,
+    /// Parquet ordinals + validation flags, in binding order (feed for
+    /// FileReader::row_group).
+    cols: Vec<usize>,
+    vutf8: Vec<bool>,
+    batches: Vec<ColumnBatch>,
+    batch_len: usize,
+    batch_pos: usize,
+    rg_idx: usize,
+    rg: Option<RowGroupReader>,
+}
+
+const BATCH_ROWS: usize = 1024;
+
+#[cold]
+#[inline(never)]
+fn type_mismatch(attname: &str, pg_type: &str, pq_type: &str) -> Box<PgError> {
+    // pg_parquet's error class for an uncoercible column.
+    Box::new(
+        PgError::error(format!(
+            "type mismatch for column \"{attname}\" between table and parquet file"
+        ))
+        .with_sqlstate(ERRCODE_DATATYPE_MISMATCH)
+        .with_detail(format!("table has \"{pg_type}\", parquet file has \"{pq_type}\"")),
+    )
+}
+
+/// Resolve the conversion for one (parquet column, table attribute) pair.
+/// The mapped set is pg_parquet's read-side table restricted to flat
+/// columns; anything else is a clean type-mismatch error.
+fn resolve_conv(
+    schema: &parquet_read::ColumnSchema,
+    atttypid: Oid,
+    atttypmod: i32,
+    attname: &str,
+) -> PgResult<Conv> {
+    use types_core::catalog::*;
+    let phys = schema.phys;
+    let logical = schema.logical;
+    let plain_int = |l: Logical, bits: u8| -> bool {
+        match l {
+            Logical::None => true,
+            Logical::Int { bits: b, signed: true } => b <= bits,
+            _ => false,
+        }
+    };
+    let textual = |l: Logical| {
+        matches!(l, Logical::None | Logical::String | Logical::Enum | Logical::Json)
+    };
+    let conv = match (phys, atttypid) {
+        (Phys::Boolean, BOOLOID) if logical == Logical::None => Some(Conv::Bool),
+        (Phys::Int32, INT2OID) if plain_int(logical, 16) => Some(Conv::I16FromI32),
+        (Phys::Int32, INT4OID) if plain_int(logical, 32) => Some(Conv::I32),
+        (Phys::Int32, INT8OID) if plain_int(logical, 32) => Some(Conv::I64FromI32),
+        (Phys::Int64, INT2OID) if plain_int(logical, 64) => Some(Conv::I16FromI64),
+        (Phys::Int64, INT4OID) if plain_int(logical, 64) => Some(Conv::I32FromI64),
+        (Phys::Int64, INT8OID) if plain_int(logical, 64) => Some(Conv::I64),
+        (Phys::Float, FLOAT4OID) if logical == Logical::None => Some(Conv::F32),
+        (Phys::Float, FLOAT8OID) if logical == Logical::None => Some(Conv::F64FromF32),
+        (Phys::Double, FLOAT8OID) if logical == Logical::None => Some(Conv::F64),
+        (Phys::Int32, DATEOID) if logical == Logical::Date => Some(Conv::DateFromDays),
+        (Phys::Int64, TIMESTAMPOID | TIMESTAMPTZOID) => match logical {
+            // Instant vs wall-clock annotation maps to timestamptz vs
+            // timestamp on the write side; reads accept either target (the
+            // datum representation is the same microsecond count).
+            Logical::Timestamp { unit, .. } => Some(Conv::Timestamp(unit)),
+            _ => None,
+        },
+        (Phys::Int64, TIMEOID) => match logical {
+            Logical::Time { unit } => Some(Conv::Time(unit)),
+            _ => None,
+        },
+        (Phys::ByteArray, TEXTOID) if textual(logical) => Some(Conv::Text),
+        (Phys::ByteArray, VARCHAROID) if textual(logical) => {
+            if atttypmod >= VARHDRSZ_I32 {
+                Some(Conv::VarcharN(atttypmod - VARHDRSZ_I32))
+            } else {
+                Some(Conv::Text)
+            }
+        }
+        (Phys::ByteArray, BYTEAOID) => Some(Conv::Bytea),
+        _ => None,
+    };
+    match conv {
+        Some(c) => Ok(c),
+        None => {
+            let pg_type = format_type::format_type_with_typemod(atttypid, atttypmod)
+                .unwrap_or_else(|_| format!("type {atttypid}"));
+            Err(type_mismatch(attname, &pg_type, &schema.type_desc()))
+        }
+    }
+}
+
+/// Whether the conversion consumes string bytes (drives page-batched UTF-8
+/// validation; bytea reads raw bytes unvalidated).
+fn wants_utf8(conv: Conv) -> bool {
+    matches!(conv, Conv::Text | Conv::VarcharN(_))
+}
+
+#[cold]
+#[inline(never)]
+fn stdin_unsupported() -> Box<PgError> {
+    Box::new(
+        PgError::error("COPY FROM STDIN with parquet format is not supported")
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED)
+            .with_hint("Use a server-side file path."),
+    )
+}
+
+/// Build the source at BeginCopyFrom time: open + footer parse + schema
+/// match (pg_parquet match_by semantics) + conversion resolution. All
+/// schema-level errors surface here, before any row is read.
+pub(crate) fn open_source(
+    filename: Option<&str>,
+    tup_desc: &TupleDescData<'_>,
+    attnumlist: &[i16],
+    match_by_name: bool,
+) -> PgResult<(Box<ParquetSrc>, u64)> {
+    let Some(filename) = filename else {
+        return Err(stdin_unsupported());
+    };
+    let reader = FileReader::open(filename)?;
+    let ncols = reader.meta.columns.len();
+
+    if !match_by_name && ncols != attnumlist.len() {
+        // pg_parquet position-matching contract.
+        return Err(Box::new(
+            PgError::error(format!(
+                "column count mismatch between table and parquet file. parquet file has \
+                 {ncols} columns, but table has {} columns",
+                attnumlist.len()
+            ))
+            .with_sqlstate(ERRCODE_BAD_COPY_FILE_FORMAT),
+        ));
+    }
+
+    let mut bindings = Vec::with_capacity(attnumlist.len());
+    let mut cols = Vec::with_capacity(attnumlist.len());
+    let mut vutf8 = Vec::with_capacity(attnumlist.len());
+    let mut batches = Vec::with_capacity(attnumlist.len());
+    let mut any_text = false;
+    for (i, &attnum) in attnumlist.iter().enumerate() {
+        let attidx = attnum as usize - 1;
+        let att = tup_desc.attr(attidx);
+        let attname = String::from_utf8_lossy(att.attname.name_str()).into_owned();
+        let col = if match_by_name {
+            match reader.meta.columns.iter().position(|c| c.name == attname) {
+                Some(c) => c,
+                None => {
+                    return Err(Box::new(
+                        PgError::error(format!(
+                            "column \"{attname}\" is not found in parquet file"
+                        ))
+                        .with_sqlstate(ERRCODE_UNDEFINED_COLUMN),
+                    ))
+                }
+            }
+        } else {
+            i
+        };
+        let schema = &reader.meta.columns[col];
+        let conv = resolve_conv(schema, att.atttypid, att.atttypmod, &attname)?;
+        any_text |= wants_utf8(conv);
+        cols.push(col);
+        vutf8.push(wants_utf8(conv));
+        batches.push(ColumnBatch::new_for(schema.phys));
+        bindings.push(Binding { attidx, conv, batch: bindings.len() });
+    }
+
+    if any_text && mbutils::GetDatabaseEncoding() != wchar::PG_UTF8 {
+        // Parquet strings are UTF-8 by definition; transcoding into other
+        // database encodings is a later increment.
+        return Err(Box::new(
+            PgError::error(
+                "COPY FROM parquet with text columns requires a UTF8 database encoding",
+            )
+            .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    }
+
+    let file_len = reader.file_len();
+    Ok((
+        Box::new(ParquetSrc {
+            reader,
+            bindings,
+            cols,
+            vutf8,
+            batches,
+            batch_len: 0,
+            batch_pos: 0,
+            rg_idx: 0,
+            rg: None,
+        }),
+        file_len,
+    ))
+}
+
+#[cold]
+#[inline(never)]
+fn out_of_range(what: &'static str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("{what} out of range"))
+            .with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn dt_out_of_range(what: &'static str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("{what} out of range"))
+            .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+    )
+}
+
+#[inline]
+fn ts_from_unix_us(us: i64) -> PgResult<Datum> {
+    let t = us.checked_sub(EPOCH_SHIFT_US).ok_or_else(|| dt_out_of_range("timestamp"))?;
+    if !(MIN_TIMESTAMP_US..END_TIMESTAMP_US).contains(&t) {
+        return Err(dt_out_of_range("timestamp"));
+    }
+    Ok(Datum::from_i64(t))
+}
+
+fn varlena_datum(mcx: Mcx<'_>, bytes: &[u8]) -> PgResult<Datum> {
+    Ok(types_fmgr::varlena_result(varlena::cstring_to_text(mcx, bytes)?))
+}
+
+/// varchar(n) length rule: values longer than n characters are accepted only
+/// when the excess is all spaces, which is trimmed (varchar input parity).
+fn varchar_datum<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8], maxlen: i32) -> PgResult<Datum> {
+    let maxlen = maxlen.max(0) as usize;
+    if bytes.len() <= maxlen {
+        // chars <= bytes: within limit for sure.
+        return varlena_datum(mcx, bytes);
+    }
+    // Locate the byte end of the first `maxlen` characters (UTF-8 validated
+    // at decode: continuation bytes are 0b10xxxxxx).
+    let mut chars = 0usize;
+    let mut cut = bytes.len();
+    for (i, &b) in bytes.iter().enumerate() {
+        if (b & 0xc0) != 0x80 {
+            if chars == maxlen {
+                cut = i;
+                break;
+            }
+            chars += 1;
+        }
+    }
+    if cut == bytes.len() {
+        // Fewer than maxlen characters despite more bytes.
+        return varlena_datum(mcx, bytes);
+    }
+    if bytes[cut..].iter().any(|&b| b != b' ') {
+        return Err(Box::new(
+            PgError::error(format!(
+                "value too long for type character varying({maxlen})"
+            ))
+            .with_sqlstate(ERRCODE_STRING_DATA_RIGHT_TRUNCATION),
+        ));
+    }
+    varlena_datum(mcx, &bytes[..cut])
+}
+
+impl ParquetSrc {
+    /// Advance to the next non-empty batch. Returns false at file end.
+    fn refill(&mut self, bytes_progress: &mut u64) -> PgResult<bool> {
+        loop {
+            if let Some(rg) = self.rg.as_mut() {
+                if rg.rows_remaining() > 0 {
+                    let n = rg.rows_remaining().min(BATCH_ROWS as u64) as usize;
+                    rg.read_batches(&mut self.batches, n)?;
+                    self.batch_len = n;
+                    self.batch_pos = 0;
+                    return Ok(true);
+                }
+            }
+            if self.rg_idx >= self.reader.meta.row_groups.len() {
+                return Ok(false);
+            }
+            let rg = self.reader.row_group(self.rg_idx, &self.cols, &self.vutf8)?;
+            *bytes_progress += rg.compressed_bytes;
+            self.rg_idx += 1;
+            self.rg = Some(rg);
+        }
+    }
+}
+
+impl<'mcx> CopyFromState<'mcx, '_> {
+    /// One parquet row into values/nulls; false at end of file. Mirrors the
+    /// binary arm's contract (defaults for unlisted columns evaluated by the
+    /// caller-shared defmap loop in next_copy_from).
+    pub(crate) fn copy_from_parquet_one_row(
+        &mut self,
+        row_mcx: Mcx<'mcx>,
+        values: &mut [Datum],
+        nulls: &mut [bool],
+    ) -> PgResult<bool> {
+        self.cur_lineno += 1;
+        let crate::from::CopySrc::Parquet(src) = &mut self.src else {
+            unreachable!("parquet row read on a non-parquet source");
+        };
+        if src.batch_pos == src.batch_len {
+            let mut progressed = self.bytes_processed;
+            let more = src.refill(&mut progressed)?;
+            if progressed != self.bytes_processed {
+                self.bytes_processed = progressed;
+                backend_progress::pgstat_progress_update_param(
+                    backend_progress::progress::PROGRESS_COPY_BYTES_PROCESSED,
+                    self.bytes_processed as i64,
+                );
+            }
+            if !more {
+                return Ok(false);
+            }
+        }
+        let k = src.batch_pos;
+        src.batch_pos += 1;
+
+        // Split borrows: bindings/batches are read, cur_attidx written for
+        // error context.
+        let ParquetSrc { bindings, batches, .. } = src.as_mut();
+        for b in bindings.iter() {
+            let batch = &batches[b.batch];
+            let m = b.attidx;
+            if batch.is_null(k) {
+                nulls[m] = true;
+                continue;
+            }
+            self.cur_attidx = Some(m);
+            let d = convert_cell(row_mcx, b.conv, batch, k)?;
+            values[m] = d;
+            nulls[m] = false;
+        }
+        self.cur_attidx = None;
+        Ok(true)
+    }
+}
+
+/// Decoded cell -> datum. Cheap by-value conversions inline; the checked
+/// arms error with input-function-parity messages.
+fn convert_cell<'mcx>(
+    mcx: Mcx<'mcx>,
+    conv: Conv,
+    batch: &ColumnBatch,
+    k: usize,
+) -> PgResult<Datum> {
+    #[cold]
+    #[inline(never)]
+    fn batch_shape() -> Box<PgError> {
+        Box::new(
+            PgError::error("parquet batch type does not match resolved conversion")
+                .with_sqlstate(ERRCODE_BAD_COPY_FILE_FORMAT),
+        )
+    }
+    macro_rules! lane {
+        ($variant:ident) => {
+            match &batch.data {
+                BatchData::$variant(v) => v[k],
+                _ => return Err(batch_shape()),
+            }
+        };
+    }
+    Ok(match conv {
+        Conv::Bool => Datum::from_bool(lane!(Bool)),
+        Conv::I32 => Datum::from_i32(lane!(I32)),
+        Conv::I64 => Datum::from_i64(lane!(I64)),
+        Conv::I64FromI32 => Datum::from_i64(i64::from(lane!(I32))),
+        Conv::I16FromI32 => {
+            let v = lane!(I32);
+            let v = i16::try_from(v).map_err(|_| out_of_range("smallint"))?;
+            Datum::from_i16(v)
+        }
+        Conv::I16FromI64 => {
+            let v = lane!(I64);
+            let v = i16::try_from(v).map_err(|_| out_of_range("smallint"))?;
+            Datum::from_i16(v)
+        }
+        Conv::I32FromI64 => {
+            let v = lane!(I64);
+            let v = i32::try_from(v).map_err(|_| out_of_range("integer"))?;
+            Datum::from_i32(v)
+        }
+        Conv::F32 => Datum::from_f32(lane!(F32)),
+        Conv::F64 => Datum::from_f64(lane!(F64)),
+        Conv::F64FromF32 => Datum::from_f64(f64::from(lane!(F32))),
+        Conv::DateFromDays => {
+            let v = lane!(I32);
+            let d = v.checked_sub(EPOCH_SHIFT_DAYS).ok_or_else(|| dt_out_of_range("date"))?;
+            Datum::from_i32(d)
+        }
+        Conv::Timestamp(unit) => {
+            let v = lane!(I64);
+            let us = match unit {
+                TimeUnit::Micros => v,
+                TimeUnit::Millis => {
+                    v.checked_mul(1000).ok_or_else(|| dt_out_of_range("timestamp"))?
+                }
+                // Floor division: pre-epoch nanos round down, matching the
+                // timestamp number line rather than truncation toward zero.
+                TimeUnit::Nanos => v.div_euclid(1000),
+            };
+            ts_from_unix_us(us)?
+        }
+        Conv::Time(unit) => {
+            let v = lane!(I64);
+            let us = match unit {
+                TimeUnit::Micros => v,
+                TimeUnit::Millis => v.checked_mul(1000).ok_or_else(|| dt_out_of_range("time"))?,
+                TimeUnit::Nanos => v.div_euclid(1000),
+            };
+            if !(0..=MAX_TIME_US).contains(&us) {
+                return Err(dt_out_of_range("time"));
+            }
+            Datum::from_i64(us)
+        }
+        Conv::Text => varlena_datum(mcx, batch.bytes_at(k))?,
+        Conv::VarcharN(maxlen) => varchar_datum(mcx, batch.bytes_at(k), maxlen)?,
+        Conv::Bytea => varlena_datum(mcx, batch.bytes_at(k))?,
+    })
+}

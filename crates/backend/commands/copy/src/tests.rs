@@ -71,6 +71,8 @@ fn mk_state<'mcx>(
             file_encoding: wchar::PG_UTF8,
             binary: false,
             csv_mode: false,
+            parquet: false,
+            parquet_match_by_name: false,
             freeze: false,
             delim,
             quote: b'"',
