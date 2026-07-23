@@ -156,6 +156,10 @@ fn install_guc_tables_owned_vars() {
         get: backing::log_duration,
         set: backing::set_log_duration,
     });
+    vars::Log_disconnections.install(GucVarAccessors {
+        get: backing::Log_disconnections,
+        set: backing::set_Log_disconnections,
+    });
     vars::Debug_print_plan.install(GucVarAccessors {
         get: backing::Debug_print_plan,
         set: backing::set_Debug_print_plan,

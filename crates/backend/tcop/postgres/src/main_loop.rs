@@ -664,6 +664,36 @@ fn leak_str_in<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgResult<&'mcx str> {
         .map_err(|_| Box::new(PgError::new(ERROR, "invalid byte sequence in query string".to_string())))
 }
 
+// on_proc_exit handler to log end of session (postgres.c log_disconnections).
+// Runs on every backend exit once registered: clean Terminate/EOF, FATAL
+// teardown, and admin termination all pass through proc_exit's callback walk.
+fn log_disconnections(_code: i32, _arg: usize) {
+    let now = crate::get_current_timestamp();
+    let start = init_small::globals::MyStartTimestamp();
+    let diff_us = (now - start).max(0);
+    let mut secs = diff_us / 1_000_000;
+    let usecs = diff_us % 1_000_000;
+    let msecs = usecs / 1000;
+
+    let hours = secs / 3600;
+    secs %= 3600;
+    let minutes = secs / 60;
+    let seconds = secs % 60;
+
+    let msg = init_small::globals::WithMyProcPort(|port| {
+        format!(
+            "disconnection: session time: {hours}:{minutes:02}:{seconds:02}.{msecs:03} \
+             user={} database={} host={}{}{}",
+            port.user_name.as_deref().unwrap_or(""),
+            port.database_name.as_deref().unwrap_or(""),
+            port.remote_host,
+            if port.remote_port.is_empty() { "" } else { " port=" },
+            port.remote_port,
+        )
+    });
+    let _ = ereport(LOG).errmsg(msg).finish(loc(5168, "log_disconnections"));
+}
+
 pub fn PostgresMain(dbname: &str, username: &str) -> ! {
     let outcome = postgres_main_inner(dbname, username);
     if let Err(err) = outcome {
@@ -719,6 +749,12 @@ fn postgres_main_inner(dbname: &str, username: &str) -> PgResult<()> {
 
     guc::report::begin_reporting_guc_options();
 
+    // C postgres.c:4313: set up the session-end logger only now — we have to
+    // wait till here to be sure Log_disconnections has its final value
+    // (PGC_SU_BACKEND: startup-packet options are applied by InitPostgres).
+    if init_small::globals::IsUnderPostmaster() && guc_tables::vars::Log_disconnections.read() {
+        ipc::on_proc_exit(log_disconnections, 0);
+    }
 
     pgstat::database::pgstat_report_connect(init_small::globals::MyDatabaseId());
 

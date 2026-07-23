@@ -21,6 +21,10 @@ crate::session_guc_int!(
 // log flags) share a single TLS base per function.
 crate::session_guc_cluster!(BackingSessionGucs, BACKING_SESSION_GUCS:
     (log_duration_cell, bool, log_duration, set_log_duration, false),
+    // C: bool Log_disconnections (postgres.c). PGC_SU_BACKEND: fixed at
+    // backend start; the tcop main loop registers the on_proc_exit logger
+    // when this is set (GL-GUCBATCH-1 wire).
+    (Log_disconnections_cell, bool, Log_disconnections, set_Log_disconnections, false),
     (Debug_print_plan_cell, bool, Debug_print_plan, set_Debug_print_plan, false),
     (Debug_print_parse_cell, bool, Debug_print_parse, set_Debug_print_parse, false),
     (Debug_print_rewritten_cell, bool, Debug_print_rewritten, set_Debug_print_rewritten, false),
