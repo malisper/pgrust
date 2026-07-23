@@ -31,6 +31,7 @@ enum Ev {
     Inval,
     InProgress(TransactionId),
     Topmost(TransactionId),
+    Cfi,
 }
 
 thread_local! {
@@ -40,6 +41,7 @@ thread_local! {
     static HELD: Cell<bool> = const { Cell::new(false) };
     static IN_PROGRESS: RefCell<VecDeque<bool>> = const { RefCell::new(VecDeque::new()) };
     static TOPMOST: RefCell<VecDeque<TransactionId>> = const { RefCell::new(VecDeque::new()) };
+    static CFI_RESULTS: RefCell<VecDeque<PgResult<()>>> = const { RefCell::new(VecDeque::new()) };
 }
 
 fn log(ev: Ev) {
@@ -85,14 +87,20 @@ fn install() {
             log(Ev::Topmost(xid));
             Ok(TOPMOST.with_borrow_mut(|q| q.pop_front()).unwrap_or(xid))
         });
+        postgres_seams::check_for_interrupts::set(|| {
+            log(Ev::Cfi);
+            CFI_RESULTS.with_borrow_mut(|q| q.pop_front()).unwrap_or(Ok(()))
+        });
         crate::init_seams();
     });
     init_small::globals::SetMyDatabaseId(DB);
+    init_small::globals::SetInterruptPending(false);
     HELD.set(false);
     take_events();
     ACQUIRE_RESULTS.with_borrow_mut(VecDeque::clear);
     IN_PROGRESS.with_borrow_mut(VecDeque::clear);
     TOPMOST.with_borrow_mut(VecDeque::clear);
+    CFI_RESULTS.with_borrow_mut(VecDeque::clear);
 }
 
 fn make_rel(mcx: mcx::Mcx<'_>, oid: Oid) -> RelationData<'_> {
@@ -358,6 +366,99 @@ fn xact_lock_table_wait_attaches_c_context_on_error() {
         err.context.as_deref(),
         Some("while updating tuple (3,7) in relation \"reltest\"")
     );
+}
+
+// Born-RED for the retry-arm CFI (lmgr.c XactLockTableWait: the !first arm
+// runs CHECK_FOR_INTERRUPTS() and keeps waiting). Same-xid topmost answers
+// model the ProcArray-before-locktable race; an interrupt is pending but
+// ProcessInterrupts raises nothing (already-serviced/holdoff class), so the
+// waiter must wake, service it, and RE-CHECK — not abort.
+#[test]
+fn xact_wait_retry_arm_services_interrupt_and_retries() {
+    install();
+    init_small::globals::SetInterruptPending(true);
+    IN_PROGRESS.with_borrow_mut(|q| q.extend([true, true, false]));
+    XactLockTableWait(724, None, None, XLTW_Oper::None).unwrap();
+    init_small::globals::SetInterruptPending(false);
+    let evs = take_events();
+    // Iteration 1 is the first=true pass (no CFI, C-exact); iteration 2's
+    // retry arm consults ProcessInterrupts exactly once; iteration 3 exits
+    // on the not-in-progress recheck before reaching the retry arm.
+    assert_eq!(evs.iter().filter(|e| **e == Ev::Cfi).count(), 1, "{evs:?}");
+    assert_eq!(*evs.last().unwrap(), Ev::InProgress(724), "{evs:?}");
+}
+
+// A raised cancel/die in the retry arm must come back as the ERROR channel
+// (C: ereport ERROR unwinds the wait), never a panic/abort.
+#[test]
+fn xact_wait_retry_arm_propagates_cancel_as_error() {
+    install();
+    init_small::globals::SetInterruptPending(true);
+    IN_PROGRESS.with_borrow_mut(|q| q.extend([true, true]));
+    CFI_RESULTS.with_borrow_mut(|q| {
+        q.push_back(Err(PgError::error("canceling statement due to user request").into()))
+    });
+    let err = XactLockTableWait(724, None, None, XLTW_Oper::None).unwrap_err();
+    init_small::globals::SetInterruptPending(false);
+    assert_eq!(err.message(), "canceling statement due to user request");
+}
+
+// C's error context callback wraps the whole wait, so a cancel raised from
+// the retry arm's CHECK_FOR_INTERRUPTS carries the tuple context line too.
+#[test]
+fn xact_wait_cancel_during_retry_attaches_wait_context() {
+    install();
+    init_small::globals::SetInterruptPending(true);
+    IN_PROGRESS.with_borrow_mut(|q| q.extend([true, true]));
+    CFI_RESULTS.with_borrow_mut(|q| {
+        q.push_back(Err(PgError::error("canceling statement due to user request").into()))
+    });
+    let ctid = ItemPointerData::new(3, 7);
+    let ctx = mcx::MemoryContext::new("t");
+    let rel = make_rel(ctx.mcx(), PLAIN_REL);
+    let err = XactLockTableWait(724, Some(&rel), Some(&ctid), XLTW_Oper::Update).unwrap_err();
+    init_small::globals::SetInterruptPending(false);
+    assert_eq!(
+        err.context.as_deref(),
+        Some("while updating tuple (3,7) in relation \"reltest\"")
+    );
+}
+
+// CHECK_FOR_INTERRUPTS is a macro gated on InterruptPending: with no pending
+// interrupt the retry arm must not reach ProcessInterrupts at all.
+#[test]
+fn xact_wait_retry_arm_skips_process_interrupts_when_none_pending() {
+    install();
+    IN_PROGRESS.with_borrow_mut(|q| q.extend([true, true, false]));
+    XactLockTableWait(724, None, None, XLTW_Oper::None).unwrap();
+    let evs = take_events();
+    assert!(!evs.contains(&Ev::Cfi), "{evs:?}");
+}
+
+// Same retry arm in ConditionalXactLockTableWait (lmgr.c "See
+// XactLockTableWait about this case").
+#[test]
+fn conditional_xact_wait_retry_arm_services_interrupt_and_retries() {
+    install();
+    init_small::globals::SetInterruptPending(true);
+    IN_PROGRESS.with_borrow_mut(|q| q.extend([true, true, false]));
+    assert!(ConditionalXactLockTableWait(724, false).unwrap());
+    init_small::globals::SetInterruptPending(false);
+    let evs = take_events();
+    assert_eq!(evs.iter().filter(|e| **e == Ev::Cfi).count(), 1, "{evs:?}");
+}
+
+#[test]
+fn conditional_xact_wait_retry_arm_propagates_cancel_as_error() {
+    install();
+    init_small::globals::SetInterruptPending(true);
+    IN_PROGRESS.with_borrow_mut(|q| q.extend([true, true]));
+    CFI_RESULTS.with_borrow_mut(|q| {
+        q.push_back(Err(PgError::error("canceling statement due to user request").into()))
+    });
+    let err = ConditionalXactLockTableWait(724, false).unwrap_err();
+    init_small::globals::SetInterruptPending(false);
+    assert_eq!(err.message(), "canceling statement due to user request");
 }
 
 #[test]
