@@ -23,6 +23,6 @@ mcx = { path = "../../../../_support/mcx" }
 lock_seams = { path = "../lock_seams" }
 procarray_seams = { path = "../../ipc/procarray_seams" }
 subtrans_seams = { path = "../../../access/transam/subtrans_seams" }
+postgres_seams = { path = "../../../tcop/postgres_seams" }
 
 [dev-dependencies]
-postgres_seams = { path = "../../../tcop/postgres_seams" }

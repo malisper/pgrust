@@ -361,7 +361,7 @@ fn xact_lock_table_wait_loop(mut xid: TransactionId) -> PgResult<()> {
         // parent instead. Same-xid answer = ProcArray-before-locktable race
         // (logical decoding); retry after a short sleep, never the first time.
         if !first {
-            check_for_interrupts();
+            check_for_interrupts()?;
             std::thread::sleep(core::time::Duration::from_micros(1000));
         }
         first = false;
@@ -389,7 +389,7 @@ pub fn ConditionalXactLockTableWait(
         }
 
         if !first {
-            check_for_interrupts();
+            check_for_interrupts()?;
             std::thread::sleep(core::time::Duration::from_micros(1000));
         }
         first = false;
@@ -530,14 +530,12 @@ fn xact_wait_context(
     )
 }
 
-fn check_for_interrupts() {
+// C's CHECK_FOR_INTERRUPTS() (miscadmin.h): the inline InterruptPending gate,
+// then ProcessInterrupts via the tcop seam; a raised cancel/die comes back as
+// the Err and unwinds the wait loop (same pattern as nbtree/hash/heapam).
+fn check_for_interrupts() -> PgResult<()> {
     if init_small::globals::InterruptPending() {
-        interrupts_unported();
+        return postgres_seams::check_for_interrupts::call();
     }
-}
-
-#[cold]
-#[inline(never)]
-fn interrupts_unported() -> ! {
-    panic!("unported callee reached from lmgr.c: ProcessInterrupts (tcop/postgres.c)")
+    Ok(())
 }
