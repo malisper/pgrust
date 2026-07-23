@@ -35,6 +35,12 @@ use types_error::{PgError, PgResult, ERRCODE_BAD_COPY_FILE_FORMAT};
 pub use column::{BatchData, ColumnBatch, ColumnCursor};
 pub use meta::{ColumnSchema, FileMeta, Logical, Phys, TimeUnit};
 
+/// Parse a bare FileMetaData footer (the bytes between the leading magic and
+/// the trailing length+magic) — footer-inspection tooling.
+pub fn parse_footer_bytes(buf: &[u8]) -> PgResult<FileMeta> {
+    meta::parse_file_meta(buf)
+}
+
 const MAGIC: &[u8; 4] = b"PAR1";
 const MAGIC_ENCRYPTED: &[u8; 4] = b"PARE";
 

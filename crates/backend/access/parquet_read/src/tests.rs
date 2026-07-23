@@ -468,3 +468,37 @@ fn corpus_never_panics() {
     }
     println!("corpus: {full} decoded, {open_err} open-errors, {decode_err} decode-errors");
 }
+
+/// Footer-inspection harness: PQ_FOOTER points at a raw footer byte file
+/// (optionally with the 8 trailing length+magic bytes); prints the schema.
+#[test]
+#[ignore = "needs PQ_FOOTER pointing at raw footer bytes"]
+fn dump_footer_schema() {
+    let path = std::env::var("PQ_FOOTER").expect("set PQ_FOOTER");
+    let mut b = std::fs::read(&path).unwrap();
+    if b.len() > 8 && &b[b.len() - 4..] == b"PAR1" {
+        let fl = u32::from_le_bytes(b[b.len() - 8..b.len() - 4].try_into().unwrap()) as usize;
+        assert!(fl <= b.len() - 8);
+        let start = b.len() - 8 - fl;
+        b.drain(..start);
+        b.truncate(fl);
+    }
+    let meta = crate::parse_footer_bytes(&b).expect("parse");
+    println!(
+        "rows={} rgs={} cols={} created_by={:?}",
+        meta.num_rows,
+        meta.row_groups.len(),
+        meta.columns.len(),
+        meta.created_by
+    );
+    for (i, c) in meta.columns.iter().enumerate() {
+        println!("{i:3} {} {} maxdef={} {:?}", c.name, c.phys.name(), c.max_def, c.logical);
+    }
+    let mut codecs = std::collections::BTreeMap::new();
+    for rg in &meta.row_groups {
+        for ch in &rg.chunks {
+            *codecs.entry(ch.codec.name()).or_insert(0u64) += 1;
+        }
+    }
+    println!("codecs: {codecs:?}");
+}

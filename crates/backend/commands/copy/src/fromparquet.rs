@@ -51,6 +51,10 @@ pub(crate) enum Conv {
     /// Timestamp/timestamptz target; value scaled to microseconds.
     Timestamp(TimeUnit),
     Time(TimeUnit),
+    /// Unsigned annotations: zero-extend / reinterpret with range checks.
+    U32AsI32,
+    U32AsI64,
+    U64AsI64,
     /// text / unconstrained varchar (UTF-8 validated at page decode).
     Text,
     /// varchar(n): char-length check with the blank-trim rule.
@@ -126,6 +130,12 @@ fn resolve_conv(
             _ => false,
         }
     };
+    // Unsigned annotations up to `bits` wide: values are zero-extended into
+    // the physical int, so a signed read of a STRICTLY NARROWER unsigned
+    // width is always non-negative and in range.
+    let small_uint = |l: Logical, bits: u8| -> bool {
+        matches!(l, Logical::Int { bits: b, signed: false } if b < bits)
+    };
     let textual = |l: Logical| {
         matches!(l, Logical::None | Logical::String | Logical::Enum | Logical::Json)
     };
@@ -137,6 +147,23 @@ fn resolve_conv(
         (Phys::Int64, INT2OID) if plain_int(logical, 64) => Some(Conv::I16FromI64),
         (Phys::Int64, INT4OID) if plain_int(logical, 64) => Some(Conv::I32FromI64),
         (Phys::Int64, INT8OID) if plain_int(logical, 64) => Some(Conv::I64),
+        // Unsigned annotations (range-checked; UINT_16 day-number columns
+        // are the workload-class instance).
+        (Phys::Int32, INT2OID) if small_uint(logical, 32) => Some(Conv::I16FromI32),
+        (Phys::Int32, INT4OID) if small_uint(logical, 32) => Some(Conv::I32),
+        (Phys::Int32, INT8OID) if small_uint(logical, 32) => Some(Conv::I64FromI32),
+        (Phys::Int32, INT4OID) if logical == (Logical::Int { bits: 32, signed: false }) => {
+            Some(Conv::U32AsI32)
+        }
+        (Phys::Int32, INT8OID) if logical == (Logical::Int { bits: 32, signed: false }) => {
+            Some(Conv::U32AsI64)
+        }
+        (Phys::Int64, INT2OID) if small_uint(logical, 64) => Some(Conv::I16FromI64),
+        (Phys::Int64, INT4OID) if small_uint(logical, 64) => Some(Conv::I32FromI64),
+        (Phys::Int64, INT8OID) if small_uint(logical, 64) => Some(Conv::I64),
+        (Phys::Int64, INT8OID) if logical == (Logical::Int { bits: 64, signed: false }) => {
+            Some(Conv::U64AsI64)
+        }
         (Phys::Float, FLOAT4OID) if logical == Logical::None => Some(Conv::F32),
         (Phys::Float, FLOAT8OID) if logical == Logical::None => Some(Conv::F64FromF32),
         (Phys::Double, FLOAT8OID) if logical == Logical::None => Some(Conv::F64),
@@ -479,6 +506,19 @@ pub(crate) fn convert_cell<'mcx>(
             let v = lane!(I64);
             let v = i32::try_from(v).map_err(|_| out_of_range("integer"))?;
             Datum::from_i32(v)
+        }
+        Conv::U32AsI32 => {
+            let v = lane!(I32) as u32;
+            let v = i32::try_from(v).map_err(|_| out_of_range("integer"))?;
+            Datum::from_i32(v)
+        }
+        Conv::U32AsI64 => Datum::from_i64(i64::from(lane!(I32) as u32)),
+        Conv::U64AsI64 => {
+            let v = lane!(I64);
+            if v < 0 {
+                return Err(out_of_range("bigint"));
+            }
+            Datum::from_i64(v)
         }
         Conv::F32 => Datum::from_f32(lane!(F32)),
         Conv::F64 => Datum::from_f64(lane!(F64)),
