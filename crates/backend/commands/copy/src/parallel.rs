@@ -323,6 +323,34 @@ fn memrun_budget(k: i32) -> u64 {
     }
 }
 
+/// GL-PARQUET-1 inc-2: PGRUST_PARQUET_PARALLEL=1 lets a FORMAT 'parquet'
+/// COPY engage row-group-major parallel decode INSIDE the parallel sort
+/// pipeline (workers decode whole parquet row groups and spill sorted runs;
+/// the merge/fill/stitch back half is the byte-proven text-path machinery).
+/// Default OFF: parquet loads refuse to the serial reader verbatim.
+/// Requires the sort mode (a presort key + PGRUST_PARALLEL_COPY_SORT=1) —
+/// order-preserving parquet parallelism would move cbstore RG seams off the
+/// serial writer's and is refused by design.
+fn parquet_parallel_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PGRUST_PARQUET_PARALLEL").is_ok_and(|v| v.trim() == "1"))
+}
+
+/// In-flight decode budget, compressed bytes (PGRUST_PARQUET_BUDGET_MB,
+/// default 2048): each worker holds at most one row group's compressed
+/// chunks, so the launched gang is clamped to budget / max-RG-bytes.
+fn parquet_budget_bytes() -> u64 {
+    static N: OnceLock<u64> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("PGRUST_PARQUET_BUDGET_MB")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(2048)
+            .max(64)
+            * (1 << 20)
+    })
+}
+
 /// Segmentator read-block bytes.
 const READ_BLOCK: usize = 4 << 20;
 
@@ -763,6 +791,26 @@ pub(crate) struct ParCopyShared {
     /// free on drop); leader takes them for the merge.
     sort_runs: Mutex<Vec<RunLoc>>,
     sort_run_seq: AtomicU64,
+    /// GL-PARQUET-1 inc-2: Some = the morsels are parquet ROW GROUPS
+    /// (workers decode columns and feed the sort pipeline); the text
+    /// segmentator/chunk plumbing is bypassed entirely.
+    parquet: Option<ParquetPar>,
+}
+
+/// Parquet parallel-decode plan: the shared file handle (positioned reads
+/// only), the parsed footer, and the schema-match/conversion plan.
+struct ParquetPar {
+    file: std::fs::File,
+    meta: std::sync::Arc<parquet_read::FileMeta>,
+    path: String,
+    plan: std::sync::Arc<crate::fromparquet::ParquetPlan>,
+    /// Non-empty row groups in file order; morsel g decodes rg_order[g].
+    rg_order: Vec<usize>,
+    /// Global first row (0-based) of each task (error contexts report
+    /// 1-based file row numbers, serial-identical).
+    row_base: Vec<u64>,
+    /// Compressed chunk bytes read so far (leader publishes progress).
+    bytes_read: AtomicU64,
 }
 
 /// copyfast lever 1: where a registered run lives.
@@ -861,6 +909,8 @@ struct ParCopyWorkerCx<'a, 'mcx> {
     row_cx: MemoryContext,
     /// load-r2 L3-1 sort mode: this worker's (key,row) batch + codec.
     sort_state: Option<WorkerSortState>,
+    /// GL-PARQUET-1 inc-2: reusable per-column decode batches.
+    pq_batches: Option<Vec<parquet_read::ColumnBatch>>,
 }
 
 struct WorkerSortState {
@@ -905,6 +955,23 @@ impl ParCopyShared {
     }
 
     fn run_chunk(&self, wcx: &mut ParCopyWorkerCx<'_, '_>, g: u64) -> PgResult<()> {
+        if self.parquet.is_some() {
+            // Parquet mode: g indexes rg_order (no chunk registry). Drain
+            // claims past the lowest erroring task, exactly like text.
+            if g > self.error_floor.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            match self.parquet_decode_rg(wcx, g) {
+                Ok(()) => {
+                    self.done.lock().unwrap_or_else(|p| p.into_inner()).insert(g, None);
+                    self.wake_leader();
+                }
+                Err(e) => {
+                    self.record_error(g, copy_from_error_context(&wcx.st, e));
+                }
+            }
+            return Ok(());
+        }
         let chunk = {
             let mut m = self.chunks.lock().unwrap_or_else(|p| p.into_inner());
             m.remove(&g)
@@ -1137,6 +1204,110 @@ impl ParCopyShared {
             .push(RunLoc::File(path.clone()));
         Ok((seq, path))
     }
+
+    /// GL-PARQUET-1 inc-2: decode ONE parquet row group (coalesced range
+    /// read + per-page kernel dispatch) and feed every row through the
+    /// sort-mode body — constraints, NULL refusal, memcmp-key encode, run
+    /// spill — identical to the text arm from the slot onward.
+    fn parquet_decode_rg(&self, wcx: &mut ParCopyWorkerCx<'_, '_>, g: u64) -> PgResult<()> {
+        let pq = self.parquet.as_ref().expect("parquet task without parquet mode");
+        let sort = self.sort.as_ref().expect("parquet parallel is sort-mode only");
+        let rg_idx = pq.rg_order[g as usize];
+        let mut rgr = parquet_read::RowGroupReader::open(
+            &pq.file,
+            &pq.path,
+            &pq.meta,
+            rg_idx,
+            &pq.plan.cols,
+            &pq.plan.vutf8,
+        )?;
+        pq.bytes_read.fetch_add(rgr.compressed_bytes, Ordering::Relaxed);
+        if wcx.pq_batches.is_none() {
+            wcx.pq_batches = Some(pq.plan.make_batches(&pq.meta));
+        }
+        let trace = ptrace_enabled();
+        let ncols = self.plan.coltypes.len();
+        let mut row_global = pq.row_base[g as usize];
+        const BATCH_ROWS: u64 = 1024;
+        while rgr.rows_remaining() > 0 {
+            postgres_seams::check_for_interrupts::call()?;
+            let n = rgr.rows_remaining().min(BATCH_ROWS) as usize;
+            let t0 = if trace { Some(std::time::Instant::now()) } else { None };
+            rgr.read_batches(wcx.pq_batches.as_mut().expect("built above"), n)?;
+            if let (Some(t0), Some(st)) = (t0, wcx.sort_state.as_mut()) {
+                st.t_parse += t0.elapsed();
+            }
+            for k in 0..n {
+                wcx.row_cx.reset();
+                // 1-based file row number for error contexts (serial parity).
+                wcx.st.cur_lineno = row_global + k as u64 + 1;
+                exectuples::exec_clear_tuple(&mut wcx.slot, wcx.mcx);
+                // SAFETY (lifetime erasure): per-row datums land in row_cx
+                // and are consumed into the sort batch before the next
+                // reset — the text arm's exact contract.
+                let row_mcx: Mcx<'_> = unsafe { core::mem::transmute(wcx.row_cx.mcx()) };
+                {
+                    let batches = wcx.pq_batches.as_ref().expect("built above");
+                    let base = wcx.slot.base_mut();
+                    for b in pq.plan.bindings.iter() {
+                        let batch = &batches[b.batch];
+                        let m = b.attidx;
+                        if batch.is_null(k) {
+                            base.tts_values[m] = datum::Datum::null();
+                            base.tts_isnull[m] = true;
+                        } else {
+                            wcx.st.cur_attidx = Some(m);
+                            base.tts_values[m] =
+                                crate::fromparquet::convert_cell(row_mcx, b.conv, batch, k)?;
+                            base.tts_isnull[m] = false;
+                        }
+                    }
+                    wcx.st.cur_attidx = None;
+                }
+                exectuples::exec_store_virtual_tuple(&mut wcx.slot);
+                wcx.slot.base_mut().tts_tableOid = self.relid;
+                nodemodifytable::exec_constraints(
+                    wcx.mcx,
+                    &mut wcx.check_exprs,
+                    &mut wcx.virtual_nn,
+                    wcx.rel,
+                    &mut wcx.slot,
+                    None,
+                    Some(&wcx.inserted_cols),
+                )?;
+                let base = wcx.slot.base();
+                let st = wcx
+                    .sort_state
+                    .as_mut()
+                    .expect("parquet parallel without a worker sort state");
+                if base.tts_isnull[..ncols].iter().any(|&x| x) {
+                    return Err(Box::new(
+                        PgError::error("cbstore does not support NULL values".to_string())
+                            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                    ));
+                }
+                let t1 = if trace { Some(std::time::Instant::now()) } else { None };
+                st.keybuf.clear();
+                pgrcolumnar::sortkey::encode_sort_key(
+                    &sort.keys,
+                    &base.tts_values,
+                    &mut st.keybuf,
+                );
+                st.rowbuf.clear();
+                st.codec.serialize_row(&base.tts_values, &mut st.rowbuf)?;
+                st.batch.push(&st.keybuf, &st.rowbuf);
+                st.rows += 1;
+                if let Some(t1) = t1 {
+                    st.t_key += t1.elapsed();
+                }
+                if st.batch.bytes() >= sort.budget {
+                    self.spill_worker_batch(st)?;
+                }
+            }
+            row_global += n as u64;
+        }
+        Ok(())
+    }
 }
 
 /// The launched entry task (vacuum-morsels ceremony: the substrate already
@@ -1230,7 +1401,7 @@ fn worker_drive(shared: &Arc<ParCopyShared>) -> PgResult<()> {
                 file_encoding: shared.file_encoding,
                 binary: false,
                 csv_mode: false,
-                parquet: false,
+                parquet: shared.parquet.is_some(),
                 parquet_match_by_name: false,
                 freeze: shared.freeze,
                 delim: shared.delim,
@@ -1318,6 +1489,7 @@ fn worker_drive(shared: &Arc<ParCopyShared>) -> PgResult<()> {
             inserted_cols,
             row_cx: MemoryContext::new_bump("ParallelCopyRowEval"),
             sort_state,
+            pq_batches: None,
         })
     })();
     let mut wcx = match build {
@@ -1797,11 +1969,14 @@ fn drain_rg(rt: &'static Arc<runtime::Runtime>, rg: &runtime::RgHandle) -> bool 
 
 /// Fail-closed admission. `Ok(None)` = serial COPY, byte-identically. All
 /// checks are metadata-only: NO input is consumed before this passes.
+/// Engagement decision: (runtime, gang size, sort mode, parquet mode).
+type Admission = Option<(&'static Arc<runtime::Runtime>, i32, Option<ParCopySort>, Option<ParquetPar>)>;
+
 fn admit<'mcx>(
     cstate: &CopyFromState<'mcx, '_>,
     rel: &Relation<'mcx>,
     has_triggers: bool,
-) -> PgResult<Option<(&'static Arc<runtime::Runtime>, i32, Option<ParCopySort>)>> {
+) -> PgResult<Admission> {
     // Macro-compatible shim: refuse! returns Ok(None) from THIS fn.
     if !flag_enabled() || !runtime::runtime_enabled() {
         return Ok(None);
@@ -1834,8 +2009,8 @@ fn admit<'mcx>(
     if o.csv_mode {
         refuse!("csv format (phase-1 is text-only)");
     }
-    if o.parquet {
-        refuse!("parquet format (row-group parallel decode is its own lane)");
+    if o.parquet && !parquet_parallel_enabled() {
+        refuse!("parquet format (PGRUST_PARQUET_PARALLEL=0; serial reader)");
     }
     if o.header_line != CopyHeaderChoice::False {
         refuse!("HEADER");
@@ -1908,10 +2083,76 @@ fn admit<'mcx>(
             refuse!(format!("file smaller than the {}B floor", file_floor()));
         }
     }
-    let k = dop(rt);
+    let mut k = dop(rt);
     if k < 1 {
         refuse!("dop < 1");
     }
+
+    // GL-PARQUET-1 inc-2: parquet row-group morsels. Sort mode is REQUIRED —
+    // in the sort pipeline the columnar-store RG seams are decided at the
+    // merge fill, so worker task shape cannot move them; order-preserving
+    // parquet parallelism would cut RGs at parquet row-group boundaries
+    // instead of the serial writer's and is refused by design.
+    let parquet = if o.parquet {
+        if sort.is_none() {
+            refuse!(
+                "parquet parallel requires the parallel sort pipeline \
+                 (PGRUST_COPY_PRESORT + PGRUST_PARALLEL_COPY_SORT=1)"
+            );
+        }
+        let CopySrc::Parquet(psrc) = &cstate.src else {
+            refuse!("parquet source not initialized");
+        };
+        let reader = psrc.reader();
+        if reader.file_len() < file_floor() {
+            refuse!(format!("parquet file smaller than the {}B floor", file_floor()));
+        }
+        let meta = reader.meta_arc();
+        let plan = psrc.plan_arc();
+        let mut rg_order = Vec::new();
+        let mut row_base = Vec::new();
+        let mut rows = 0u64;
+        let mut max_rg_bytes = 0u64;
+        for (i, rg) in meta.row_groups.iter().enumerate() {
+            if rg.num_rows == 0 {
+                continue;
+            }
+            rg_order.push(i);
+            row_base.push(rows);
+            rows += rg.num_rows as u64;
+            max_rg_bytes =
+                max_rg_bytes.max(parquet_read::rg_compressed_bytes(&meta, i, &plan.cols));
+        }
+        if rg_order.len() < 2 {
+            refuse!("parquet file with fewer than 2 row groups (serial reader)");
+        }
+        // In-flight decode memory is one row group's compressed chunks per
+        // worker: clamp the gang to the compressed-bytes budget (and to the
+        // task count).
+        let by_budget = (parquet_budget_bytes() / max_rg_bytes.max(1)).max(1);
+        k = (k as u64).min(by_budget).min(rg_order.len() as u64) as i32;
+        let file = match reader.try_clone_file() {
+            Ok(f) => f,
+            Err(_) => refuse!("could not duplicate the parquet file handle"),
+        };
+        ptrace(&format!(
+            "parquet parallel admitted rgs={} max_rg_mb={} k={k}",
+            rg_order.len(),
+            max_rg_bytes >> 20,
+        ));
+        Some(ParquetPar {
+            file,
+            meta,
+            path: reader.path().to_string(),
+            plan,
+            rg_order,
+            row_base,
+            bytes_read: AtomicU64::new(0),
+        })
+    } else {
+        None
+    };
+
     let mut sort = sort;
     if let Some(sort) = sort.as_mut() {
         // copyfast lever 1 admission: budget sized against live headroom
@@ -1931,7 +2172,7 @@ fn admit<'mcx>(
             }
         }
     }
-    Ok(Some((rt, k, sort)))
+    Ok(Some((rt, k, sort, parquet)))
 }
 
 enum Ceremony {
@@ -1951,7 +2192,7 @@ pub(crate) fn copy_from_parallel<'mcx>(
     rel: &Relation<'mcx>,
     has_triggers: bool,
 ) -> PgResult<Option<u64>> {
-    let Some((rt, k, sort)) = admit(cstate, rel, has_triggers)? else {
+    let Some((rt, k, sort, parquet)) = admit(cstate, rel, has_triggers)? else {
         return Ok(None);
     };
 
@@ -2001,6 +2242,7 @@ pub(crate) fn copy_from_parallel<'mcx>(
         sort,
         sort_runs: Mutex::new(Vec::new()),
         sort_run_seq: AtomicU64::new(0),
+        parquet,
     });
     ensure_hooks_registered();
 
@@ -2095,6 +2337,18 @@ fn ceremony(
         let mut input_done = false;
         let mut closed = false;
         let mut bytes_read = 0u64;
+        // GL-PARQUET-1 inc-2: parquet morsels are row-group indexes known
+        // from the footer — publish the whole task list up front and close
+        // the source; the read pump below never runs (input_done).
+        if let Some(pq) = &shared.parquet {
+            published = pq.rg_order.len() as u64;
+            shared.source.publish(published);
+            shared.source.close();
+            rt.notify_source_progress();
+            input_done = true;
+            closed = true;
+            ptrace(&format!("parquet parallel engaged rgs={published}"));
+        }
         // load-r3 M0: leader read-pump walls (block granularity — free).
         let t_loop = std::time::Instant::now();
         let mut t_read = std::time::Duration::ZERO;
@@ -2119,6 +2373,13 @@ fn ceremony(
             }
             if committed_any {
                 pgstat_progress_update_param(PROGRESS_COPY_TUPLES_PROCESSED, processed as i64);
+            }
+            if let Some(pq) = &shared.parquet {
+                let b = pq.bytes_read.load(Ordering::Relaxed);
+                if b != bytes_read {
+                    bytes_read = b;
+                    pgstat_progress_update_param(PROGRESS_COPY_BYTES_PROCESSED, b as i64);
+                }
             }
 
             // 2. Read + segment + publish under the window (stop on error).
