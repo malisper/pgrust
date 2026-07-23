@@ -7855,7 +7855,7 @@ fn classify_dictkey_exprkey<'mcx>(
     }
     // Emit discipline: the key by sortgroupref; every other entry a
     // passenger from the class vocabulary.
-    let mut n_strminmax = 0usize;
+    let n_strminmax = 0usize;
     for tle_node in &parse.targetList {
         let Some(tle) = tle_node.as_target_entry() else { return Ok(None) };
         if tle.ressortgroupref != 0 && tle.ressortgroupref == key_ref {
@@ -7868,22 +7868,21 @@ fn classify_dictkey_exprkey<'mcx>(
         {
             continue;
         }
-        // min/max(text) passengers: the v1 fail-closed refusal LIFTED
-        // (GL-Q2829-FIX-1 / the GL-DICTDRAIN-2 term attributed): the
-        // ~224MiB aggcontext-subtree term was the superseded str
-        // transvalue copies accumulating in the never-reset bump
-        // aggcontext (once per (epoch, code) advance — the str sibling of
-        // the avgpack byref-floor finding); the dict-coded sink drain now
-        // hosts its by-ref str states in a FREEING child with C's
-        // pfree-on-replace discipline (`agg_sink_arm_str_ctx`), so the
-        // engage-then-budget-refuse hazard the v1 probe priced is closed.
-        // Admission mirrors the sibling grouped classifiers (strminmax car
-        // knob + default collation + bare text Var); the GL-STRMM-2
-        // group-estimate ceiling mirror below still holds (fail-closed).
-        if agg_strminmax_enabled() && grouped_str_minmax_arg(tle.expr, rti).is_some() {
-            n_strminmax += 1;
-            continue;
-        }
+        // min/max(text) passengers: REFUSED — the v1 FAIL-CLOSED posture
+        // RESTORED (t45 coordinator ruling, GL-Q2829-FIX-1 letter §t45
+        // revert). The GL-DICTDRAIN-2 lift admitted this face after the
+        // aggcontext-term attribution, but the lifted face is WRONG under
+        // some engagement geometries: a non-plain (compressed/packed-class)
+        // text transvalue reaches sink combine/emit and trips the
+        // 'aggregation sink shape violation' guard (dictdrain-e2e legs
+        // B/D, in-pod + local 1M — the 7th incident of the
+        // byref/representation class). The byref-floor fix itself
+        // (agg_datum_replace + sink_str_ctx) STAYS — it is a leak fix
+        // with standalone value; only the ADMISSION is re-closed.
+        // `n_strminmax` stays wired for the return: the face re-admits
+        // via its own lane with the representation handling fixed and
+        // this exact e2e face as its born-RED (letter follow-up row);
+        // the GL-STRMM-2 ceiling mirror below re-arms with it.
         return Ok(None);
     }
     // Sort/limit composition: none (plain grouped emit), or ONE agg sort
