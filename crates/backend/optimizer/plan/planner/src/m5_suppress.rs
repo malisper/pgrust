@@ -7855,7 +7855,7 @@ fn classify_dictkey_exprkey<'mcx>(
     }
     // Emit discipline: the key by sortgroupref; every other entry a
     // passenger from the class vocabulary.
-    let n_strminmax = 0usize;
+    let mut n_strminmax = 0usize;
     for tle_node in &parse.targetList {
         let Some(tle) = tle_node.as_target_entry() else { return Ok(None) };
         if tle.ressortgroupref != 0 && tle.ressortgroupref == key_ref {
@@ -7868,21 +7868,24 @@ fn classify_dictkey_exprkey<'mcx>(
         {
             continue;
         }
-        // min/max(text) passengers: REFUSED — the v1 FAIL-CLOSED posture
-        // RESTORED (t45 coordinator ruling, GL-Q2829-FIX-1 letter §t45
-        // revert). The GL-DICTDRAIN-2 lift admitted this face after the
-        // aggcontext-term attribution, but the lifted face is WRONG under
-        // some engagement geometries: a non-plain (compressed/packed-class)
-        // text transvalue reaches sink combine/emit and trips the
-        // 'aggregation sink shape violation' guard (dictdrain-e2e legs
-        // B/D, in-pod + local 1M — the 7th incident of the
-        // byref/representation class). The byref-floor fix itself
-        // (agg_datum_replace + sink_str_ctx) STAYS — it is a leak fix
-        // with standalone value; only the ADMISSION is re-closed.
-        // `n_strminmax` stays wired for the return: the face re-admits
-        // via its own lane with the representation handling fixed and
-        // this exact e2e face as its born-RED (letter follow-up row);
-        // the GL-STRMM-2 ceiling mirror below re-arms with it.
+        // min/max(text) passengers: RE-ADMITTED (GL-DICTDRAIN-3 — the t45
+        // revert's follow-up row discharged). The t45-reverted lift was
+        // wrong not in the ADMISSION but in the state's memory home: the
+        // drain's Local-owned table migrates across pool threads while the
+        // per-thread FREEING byref-state child made the replace-free
+        // allocator-INEXACT — a live pergroup could be left holding a
+        // freed pointer, tripping the sink shape guard at combine/emit.
+        // The transvalue store now travels WITH the table
+        // (`lanefold::StrStateArena`, armed by `agg_sink_arm_str_state`),
+        // restoring allocator-exactness across migration; the sink shape
+        // check stays armed as the permanent detector. Admission mirrors
+        // the sibling grouped classifiers (strminmax car knob + default
+        // collation + bare text Var); the GL-STRMM-2 group-estimate
+        // ceiling mirror below still holds (fail-closed).
+        if agg_strminmax_enabled() && grouped_str_minmax_arg(tle.expr, rti).is_some() {
+            n_strminmax += 1;
+            continue;
+        }
         return Ok(None);
     }
     // Sort/limit composition: none (plain grouped emit), or ONE agg sort

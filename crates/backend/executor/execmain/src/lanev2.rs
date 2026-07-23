@@ -6686,16 +6686,30 @@ unsafe fn agg_fold_staged_mm<'mcx>(
         return Ok(());
     }
     let plan = ::nodeagg::agg_lanefold_plan(agg).expect("fold feed without a plan");
-    // Byref transvalue copies: the FREEING sink child when armed (the str
-    // byref-floor fix — dict-coded sink drains), else the bump aggcontext
-    // (classic builds byte-identical; agg_str_trans_mcx doc).
-    let aggcx = ::nodeagg::sink::agg_str_trans_mcx(agg);
+    let aggcx = ::nodeagg::agg_aggcontext(agg);
     // avgpack: packed inline AvgAccum slots — nonzero only on sink worker
     // builds (the armed table's creation-time mask; representation state
     // travels WITH the table that holds the states).
     let avgpack_mask = ::nodeagg::sink::agg_sink_avgpack_mask(agg);
+    // Byref str transvalue copies: the TABLE-OWNED state store when armed
+    // (the dict-coded sink drain's migrating tables — GL-DICTDRAIN-3;
+    // `StrStateArena` doc), else the bump aggcontext (classic builds
+    // byte-identical). Borrowed for exactly this fold call — mutation is
+    // morsel-serialized and the combine phase never reaches here.
+    let mut sa = ::nodeagg::sink::agg_sink_str_arena(agg).map(|c| c.borrow_mut());
     // SAFETY: caller contract (above) is exactly fold_rows_grouped_mm's.
-    unsafe { ::lanefold::fold_rows_grouped_mm(plan, cols, idxs, groups, aggcx, mm, avgpack_mask) }
+    unsafe {
+        ::lanefold::fold_rows_grouped_mm(
+            plan,
+            cols,
+            idxs,
+            groups,
+            aggcx,
+            mm,
+            avgpack_mask,
+            sa.as_deref_mut(),
+        )
+    }
 }
 
 /// Refuse-set for the lane-v2 hash-agg pipeline. Two halves:

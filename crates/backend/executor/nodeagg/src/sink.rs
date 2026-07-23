@@ -3762,13 +3762,20 @@ pub struct SinkTableHandle(pub(crate) crate::compact::CompactHash);
 // cleared at the start of every batch probe and read only within that batch
 // on the probing thread; between morsels (the only time the handle crosses
 // threads) it is stale garbage that nothing dereferences. The table itself
-// is plain owned Vec storage, and under the sink's phase-1 admission every
-// state block is byval-POD (no interior pointers).
+// is plain owned Vec storage. State blocks are byval-POD (the sink's
+// phase-1 admission) EXCEPT the byref classes the drains explicitly admit:
+// PolyInt128/AvgInt8 pointers into the worker aggcontext (drive-pinned
+// through combine) and — GL-DICTDRAIN-3 — str min/max transvalue pointers
+// into the handle's OWN `str_arena` (they travel together; the arena is
+// Send with &mut-serialized mutation, its struct doc).
 unsafe impl Send for SinkTableHandle {}
 // SAFETY: combine tasks read `&SinkTableHandle` (the table's rows) from many
-// threads; the table is plain owned Vec storage with byval-POD state blocks
-// under the sink admission, and the batch scratch is never dereferenced
-// outside the owning worker's own morsel (see the Send justification).
+// threads; the table is plain owned Vec storage, byref state pointers
+// target drive-pinned worker aggcontexts or the handle's own str arena
+// (whose RefCell is never borrowed outside morsel drains — combine reads
+// value BYTES through the state pointers only), and the batch scratch is
+// never dereferenced outside the owning worker's own morsel (see the Send
+// justification).
 unsafe impl Sync for SinkTableHandle {}
 
 impl SinkTableHandle {
@@ -4068,50 +4075,50 @@ pub fn agg_sink_table_mem(node: &AggStateData<'_>) -> usize {
 /// The node's aggcontext footprint — the byref state classes (PolyInt128 /
 /// AvgInt8) live THERE, not in the table rows, so byref-bearing sink drains
 /// add this to their budget accounting (the backstop's own mem formula).
+/// Plus the table-owned str state store when armed (GL-DICTDRAIN-3 —
+/// min/max(text) transvalues live THERE, not in the aggcontext).
 pub fn agg_sink_aggctx_mem(node: &AggStateData<'_>) -> usize {
+    let arena = agg_sink_str_arena(node).map_or(0, |a| a.borrow().bytes());
     // SAFETY: read of the once-allocated node; no &mut to it is live.
-    unsafe { node.agg_node.as_ref() }.aggcontext().context().subtree_used()
+    unsafe { node.agg_node.as_ref() }.aggcontext().context().subtree_used() + arena
 }
 
-/// `PGRUST_RUNTIME_AGG_STRCTX` kill switch (default ON): the FREEING
-/// byref-state child for armed sink drains (the str byref-floor fix —
-/// PerHashData::sink_str_ctx doc). `=0|off` restores the bump-aggcontext
-/// allocation everywhere, bit-exactly. LIVE at shipped defaults since the
-/// A-on-top-of-B ruling flipped the dict-coded sink arm ON (Michael,
-/// 2026-07-22) — the leak fix ships with the car it protects.
-fn sink_strctx_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        !matches!(std::env::var("PGRUST_RUNTIME_AGG_STRCTX").as_deref(), Ok("0") | Ok("off"))
-    })
-}
-
-/// Arm the FREEING byref-state child on a sink WORKER build (idempotent;
-/// see PerHashData::sink_str_ctx). Callers: the dict-coded sink arm (v1 —
-/// the one drain whose per-row exits refuse, making every str advance flow
-/// through the mm fold where the replace-free is allocator-exact).
-pub fn agg_sink_arm_str_ctx(node: &mut AggStateData<'_>) {
-    if !sink_strctx_enabled() {
-        return;
-    }
-    // SAFETY: read of the once-allocated node; no &mut to it is live.
-    let aggctx = unsafe { node.agg_node.as_ref() }.aggcontext().context().new_child(
-        "HashAgg sink byref states",
-    );
+/// Arm the TABLE-OWNED by-ref str transvalue store on a sink WORKER build
+/// (idempotent; `CompactHash::str_arena` doc). Callers: the dict-coded
+/// sink arm — the one drain whose per-row exits refuse, making every str
+/// advance flow through the mm fold where the store is threaded.
+///
+/// GL-DICTDRAIN-3 (supersedes the t45-reverted per-thread FREEING context,
+/// `PGRUST_RUNTIME_AGG_STRCTX` retired with it): the drain's Local-owned
+/// table is LENT to whichever pool thread serves each morsel, so a
+/// per-(thread, query) context home for these transvalues broke the
+/// replace-free's allocator-exactness — thread A's copy replace-freed on
+/// thread B entered B's freelist while A's context still owned the chunk,
+/// double-allocating it and leaving a LIVE pergroup with a freed pointer
+/// (the 'aggregation sink shape violation' class). The store travels WITH
+/// the table, restoring C's one-allocator-per-worker-table invariant, and
+/// keeps the GL-DICTDRAIN-2 churn bound (free-on-replace) with whole-store
+/// release on Drop — no leak on any path. No kill switch: reverting to a
+/// context home reintroduces the unsoundness.
+pub fn agg_sink_arm_str_state(node: &mut AggStateData<'_>) {
     let Some(ph) = node.perhash.as_mut() else { return };
-    if ph.sink_cap.is_some() && ph.sink_str_ctx.is_none() {
-        ph.sink_str_ctx = Some(aggctx);
+    let Some(ch) = ph.compact.as_mut() else { return };
+    if ph.sink_cap.is_some() && ch.str_arena.is_none() {
+        ch.str_arena =
+            Some(Box::new(core::cell::RefCell::new(::lanefold::StrStateArena::default())));
     }
 }
 
-/// The context for by-ref transvalue copies on this build: the FREEING
-/// sink child when armed, else the node's (bump) aggcontext — classic
-/// builds byte-identical.
-pub fn agg_str_trans_mcx<'a>(node: &'a AggStateData<'_>) -> ::mcx::Mcx<'a> {
-    if let Some(ctx) = node.perhash.as_ref().and_then(|ph| ph.sink_str_ctx.as_ref()) {
-        return ctx.mcx();
-    }
-    crate::agg_aggcontext(node)
+/// The armed table-owned str state store, when present (the mm fold
+/// threads it into the str advances; `None` = the context discipline,
+/// classic builds byte-identical).
+pub fn agg_sink_str_arena<'a>(
+    node: &'a AggStateData<'_>,
+) -> Option<&'a core::cell::RefCell<::lanefold::StrStateArena>> {
+    node.perhash
+        .as_ref()
+        .and_then(|ph| ph.compact.as_ref())
+        .and_then(|ch| ch.str_arena.as_deref())
 }
 
 // ---------------------------------------------------------------------------

@@ -3932,11 +3932,13 @@ fn arm_sink_build<'mcx>(
                 if &wshape != lshape {
                     return Err(shape_err("worker dict-coded shape diverged from the leader's"));
                 }
-                // Arm the FREEING byref-state child (the str byref-floor
-                // fix) — every str advance on this drain flows through the
-                // mm fold (per-row exits refuse under sink builds), so the
-                // replace-free is allocator-exact. Kill switch inside.
-                ::nodeagg::sink::agg_sink_arm_str_ctx(agg);
+                // Arm the TABLE-OWNED byref str state store (GL-DICTDRAIN-3
+                // — travels with the table through the morsel lend/reclaim,
+                // so the replace-free stays allocator-exact across thread
+                // migration) — every str advance on this drain flows
+                // through the mm fold (per-row exits refuse under sink
+                // builds).
+                ::nodeagg::sink::agg_sink_arm_str_state(agg);
                 lane_trace("runtime-agg: dict-coded sink drain armed (worker)");
             }
             _ => return Err(shape_err("worker expr-key kind diverged from the leader's")),

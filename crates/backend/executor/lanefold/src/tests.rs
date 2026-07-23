@@ -1078,7 +1078,7 @@ fn fold_rows_grouped_avgpack_parity() {
         .collect();
     // SAFETY: as above; the mask names exactly the packed transno.
     unsafe {
-        fold_rows_grouped_mm(&plan, &cols, &idxs, &pk_groups, mcx, None, 1u64 << avg_transno)
+        fold_rows_grouped_mm(&plan, &cols, &idxs, &pk_groups, mcx, None, 1u64 << avg_transno, None)
             .expect("packed fold");
     }
 
@@ -3079,7 +3079,7 @@ fn fold_rows_grouped_dictcode_memo_parity() {
         // SAFETY: per-group arrays cover every transno and are not moved
         // while the pointers live; the lane holds live inline varlenas;
         // codes satisfy the col_codes contract by construction.
-        unsafe { fold_rows_grouped_mm(&plan, &cols, &idxs, &groups, mcx, mm, 0).expect("fold") };
+        unsafe { fold_rows_grouped_mm(&plan, &cols, &idxs, &groups, mcx, mm, 0, None).expect("fold") };
     };
     for (bi, (ep, rows)) in batches.iter().enumerate() {
         run_batch(ep, rows, &mut mm_pgs, Some(&mut mm));
@@ -3092,8 +3092,8 @@ fn fold_rows_grouped_dictcode_memo_parity() {
                 for tn in 0..ntrans {
                     // SAFETY: live pergroup cells + inline varlena + arena.
                     unsafe {
-                        str_advance(&plan.trans[tn], &mut mm_pgs[g][tn], d, mcx).expect("adv");
-                        str_advance(&plan.trans[tn], &mut ref_pgs[g][tn], d, mcx).expect("adv");
+                        str_advance(&plan.trans[tn], &mut mm_pgs[g][tn], d, mcx, None).expect("adv");
+                        str_advance(&plan.trans[tn], &mut ref_pgs[g][tn], d, mcx, None).expect("adv");
                     }
                 }
             }
@@ -3124,6 +3124,107 @@ fn fold_rows_grouped_dictcode_memo_parity() {
                 );
             }
         }
+    }
+}
+
+// Table-owned str state store (GL-DICTDRAIN-3): arena-backed advances must
+// be byte-identical to the context-backed reference across install /
+// tie-replace / better-code / cross-epoch arms (memo on AND off), and the
+// store must recycle replaced chunks (LIFO within a size class) with exact
+// big-value frees — the allocator-exactness a thread-migrating table needs.
+#[test]
+fn str_state_arena_fold_parity_and_recycle() {
+    let mcx = leaked_mcx();
+    let a_min = arg_list(mcx, mk_var(mcx, 1, TEXTV));
+    let a_max = arg_list(mcx, mk_var(mcx, 1, TEXTV));
+    let specs = [mk_spec_coll(459, &a_min, COLL_C), mk_spec_coll(458, &a_max, COLL_C)];
+    let plan = classify(mcx, &specs).expect("admits");
+    let ep1 = DictEpoch::new(1, &dict_payload_pool());
+    let pool2: Vec<&[u8]> = vec![b"a", b"ab", b"m", b"mm", b"zz", b"\x01"];
+    let ep2 = DictEpoch::new(2, &pool2);
+    let ngroups = 4usize;
+    let ntrans = specs.len();
+    let mut sa_pgs: Vec<Vec<AggPerGroup>> =
+        (0..ngroups).map(|_| pergroups_for(mcx, &plan, ntrans)).collect();
+    let mut ref_pgs: Vec<Vec<AggPerGroup>> =
+        (0..ngroups).map(|_| pergroups_for(mcx, &plan, ntrans)).collect();
+    let mut mm = StrMmScratch::default();
+    let mut arena = StrStateArena::default();
+    let batches: Vec<(&DictEpoch, Vec<Option<u32>>)> = vec![
+        (&ep1, (0..60).map(|i| Some(((i * 7) % ep1.dict.len()) as u32)).collect()),
+        // Repeats: the tie-replace arm (per-row replace churn = recycling).
+        (&ep1, vec![Some(2); 40]),
+        (&ep2, (0..50).rev().map(|i| Some((i % ep2.dict.len()) as u32)).collect()),
+    ];
+    for (memo, (ep, rows)) in [(true, &batches[0]), (false, &batches[1]), (true, &batches[2])]
+    {
+        let cols = DictTestCols::new(ep, rows, true);
+        let idxs: Vec<u32> = (0..rows.len() as u32).collect();
+        let sa_groups: Vec<NonNull<AggPerGroup>> = (0..rows.len())
+            .map(|i| NonNull::new(sa_pgs[i % ngroups].as_mut_ptr()).unwrap())
+            .collect();
+        let ref_groups: Vec<NonNull<AggPerGroup>> = (0..rows.len())
+            .map(|i| NonNull::new(ref_pgs[i % ngroups].as_mut_ptr()).unwrap())
+            .collect();
+        if !memo {
+            mm.invalidate();
+        }
+        // SAFETY: per-group arrays cover every transno and are not moved
+        // while the pointers live; the lane holds live inline varlenas;
+        // codes satisfy the col_codes contract by construction; the arena
+        // owns every prior arena-side copy.
+        unsafe {
+            fold_rows_grouped_mm(
+                &plan,
+                &cols,
+                &idxs,
+                &sa_groups,
+                mcx,
+                memo.then_some(&mut mm),
+                0,
+                Some(&mut arena),
+            )
+            .expect("arena fold");
+            fold_rows_grouped_mm(&plan, &cols, &idxs, &ref_groups, mcx, None, 0, None)
+                .expect("ref fold");
+        }
+    }
+    for g in 0..ngroups {
+        for tn in 0..ntrans {
+            let (a, b) = (&sa_pgs[g][tn], &ref_pgs[g][tn]);
+            assert_eq!(a.no_trans_value, b.no_trans_value, "group {g} transno {tn}");
+            assert_eq!(a.trans_value_is_null, b.trans_value_is_null, "group {g} transno {tn}");
+            if !a.trans_value_is_null && !a.no_trans_value {
+                assert_eq!(
+                    vl_image(a.trans_value),
+                    vl_image(b.trans_value),
+                    "group {g} transno {tn}"
+                );
+            }
+        }
+    }
+    assert!(arena.bytes() > 0, "the arena hosted the copies");
+    // Recycle law: a replace parks the superseded chunk and the next
+    // same-class copy reuses it (LIFO) — the churn-bounding half of the
+    // GL-DICTDRAIN-2 fix, now allocator-exact by construction.
+    let mut a2 = StrStateArena::default();
+    // SAFETY: vl_short/vl_4b produce live inline varlenas.
+    unsafe {
+        let d1 = a2.copy(vl_short(b"aaaa"));
+        let addr1 = d1.as_usize();
+        let d2 = a2.replace(d1, vl_short(b"bbbb"));
+        assert_ne!(d2.as_usize(), addr1, "copy-first: new copy precedes the free");
+        let d3 = a2.copy(vl_short(b"cccc"));
+        assert_eq!(d3.as_usize(), addr1, "parked chunk reused LIFO within its class");
+        assert_eq!(vl_image(d3), vl_image(vl_short(b"cccc")));
+        // Big values (> 1024 B): exact boxes, freed exactly on replace.
+        let big_payload = vec![0x61u8; 4000];
+        let before = a2.bytes();
+        let db = a2.copy(vl_4b(&big_payload));
+        assert!(a2.bytes() > before, "big value charged");
+        let d4 = a2.replace(db, vl_short(b"tail"));
+        assert_eq!(a2.bytes(), before, "big value released exactly on replace");
+        assert_eq!(vl_image(d4), vl_image(vl_short(b"tail")));
     }
 }
 

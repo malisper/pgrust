@@ -263,6 +263,17 @@ pub(crate) struct CompactHash {
     /// Direct-arm probe scratch: the canonical image under construction
     /// (prefix + text), reused across probes.
     pub(crate) direct_img: Vec<u8>,
+    /// GL-DICTDRAIN-3: the table-owned by-ref str transvalue store for
+    /// MIGRATING sink tables (armed by `sink::agg_sink_arm_str_state` on
+    /// the dict-coded sink drain). It TRAVELS WITH the table through the
+    /// morsel lend/reclaim, so every copy and replace-free hits the same
+    /// allocator regardless of which pool thread runs the morsel — the
+    /// allocator-exactness the per-thread freeing context could not give a
+    /// thread-hopping table (the t45 sink-shape-violation revert).
+    /// RefCell: the fold reads the node immutably; mutation is morsel-
+    /// serialized (&mut Local per claim) and the combine/emit phase never
+    /// borrows it (reads value BYTES through state pointers only).
+    pub(crate) str_arena: Option<Box<core::cell::RefCell<::lanefold::StrStateArena>>>,
     // Batch scratch (canonical keys + probe outputs), reused across batches.
     keys: Vec<i64>,
     states: Vec<*mut u8>,
@@ -290,6 +301,7 @@ pub(crate) fn compact_hash_for_tests(
         avgpack_mask: 0,
         text_direct: false,
         direct_img: Vec::new(),
+        str_arena: None,
         keys: Vec::new(),
         states: Vec::new(),
         hashes: Vec::new(),
@@ -650,6 +662,7 @@ pub fn agg_hash_compact_try_arm(node: &mut AggStateData<'_>) -> CompactArm {
         avgpack_mask,
         text_direct: false,
         direct_img: Vec::new(),
+        str_arena: None,
         keys: Vec::new(),
         states: Vec::new(),
         hashes: Vec::new(),
@@ -777,6 +790,7 @@ fn try_arm_mk_n(
             avgpack_mask,
             text_direct: true,
             direct_img: Vec::new(),
+            str_arena: None,
             keys: Vec::new(),
             states: Vec::new(),
             hashes: Vec::new(),
@@ -818,6 +832,7 @@ fn try_arm_mk_n(
         avgpack_mask,
         text_direct: false,
         direct_img: Vec::new(),
+        str_arena: None,
         keys: Vec::new(),
         states: Vec::new(),
         hashes: Vec::new(),
@@ -1094,6 +1109,7 @@ pub fn agg_hash_compact_try_arm_reduced(
         avgpack_mask,
         text_direct: false,
         direct_img: Vec::new(),
+        str_arena: None,
         keys: Vec::new(),
         states: Vec::new(),
         hashes: Vec::new(),

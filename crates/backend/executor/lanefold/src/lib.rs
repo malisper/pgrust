@@ -2687,7 +2687,7 @@ pub unsafe fn fold_batch(
                     if let Some((_, i)) = best {
                         // SAFETY: col_codes contract — values[i] is the
                         // inline varlena dict datum; live pergroup + aggcxt.
-                        unsafe { str_advance(t, pg, values[i], aggcxt)? };
+                        unsafe { str_advance(t, pg, values[i], aggcxt, None)? };
                     }
                     continue;
                 }
@@ -2711,7 +2711,7 @@ pub unsafe fn fold_batch(
                 if let Some(d) = m {
                     // SAFETY: vguard-passed batch (inline varlenas), live
                     // pergroup + aggcxt (caller contract).
-                    unsafe { str_advance(t, pg, d, aggcxt)? };
+                    unsafe { str_advance(t, pg, d, aggcxt, None)? };
                 }
             }
             // Fold-trans tier: ORDER-PRESERVING sequential float folds. No
@@ -3163,6 +3163,166 @@ unsafe fn str_keep(kind: LaneKind, cur: Datum, v: Datum) -> bool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Table-owned by-ref str transvalue store (GL-DICTDRAIN-3).
+// ---------------------------------------------------------------------------
+
+/// Table-owned store for the by-ref str MIN/MAX transvalues of a MIGRATING
+/// sink table (GL-DICTDRAIN-3). The dict-coded sink drain's Local-owned
+/// table is LENT to whichever pool thread serves each morsel, so a memory-
+/// CONTEXT home for its text transvalues — per (thread, query) by
+/// construction — breaks the replace-free's allocator-exactness: a copy
+/// allocated by thread A's context and replace-freed on thread B enters
+/// B's freelist while A's context still owns the chunk, so ONE chunk gets
+/// handed out twice and a LIVE pergroup is left holding a freed pointer
+/// (the t45 'aggregation sink shape violation' revert — the 7th
+/// byref/representation incident; the violated invariant was
+/// SinkTableHandle's own Send proof: "every state block is byval-POD").
+///
+/// This store travels WITH the table (inside `CompactHash`, moved by the
+/// existing lend/reclaim), so every alloc AND free hits the same allocator
+/// no matter which thread runs the morsel — C's one-context-per-worker-
+/// table invariant, restored for a migrating table. The free-on-replace
+/// keeps the GL-DICTDRAIN-2 churn bound (superseded copies are reclaimed,
+/// never accumulated), and Drop releases every slab on every path — abort
+/// included — so nothing leaks.
+///
+/// Concurrency: `Send` by declaration; soundness rides the drive's
+/// discipline — mutation only inside a morsel drain (the Local is `&mut`
+/// per claim, one thread at a time), and the combine/emit phase only READS
+/// value bytes through state-block pointers (never touching the store's
+/// own structure).
+pub struct StrStateArena {
+    /// pow2 size-class freelists (16..=1024 bytes, classes 0..=6): parked
+    /// chunk addresses, LIFO. The chunk's bytes are dead while parked.
+    free: [Vec<usize>; 7],
+    /// Slabs backing the classed chunks (u64-backed for varlena alignment).
+    slabs: Vec<Box<[u64]>>,
+    /// Bump cursor into the LAST slab, in u64 words.
+    cursor: usize,
+    /// Oversize (> 1024 B) values: exact per-value boxes, keyed by address,
+    /// dropped exactly on replace.
+    big: std::collections::HashMap<usize, Box<[u64]>>,
+    /// Retained bytes (slabs + big) — the drain's byref budget term.
+    bytes: usize,
+}
+
+// SAFETY: owned heap storage only; see the struct doc's concurrency
+// contract (mutation is &mut-serialized by the lend/reclaim discipline,
+// cross-phase access is read-only through state-block pointers).
+unsafe impl Send for StrStateArena {}
+
+const STR_ARENA_SLAB_WORDS: usize = 8192; // 64 KB slabs.
+
+impl Default for StrStateArena {
+    fn default() -> Self {
+        StrStateArena {
+            free: Default::default(),
+            slabs: Vec::new(),
+            cursor: 0,
+            big: Default::default(),
+            bytes: 0,
+        }
+    }
+}
+
+impl StrStateArena {
+    /// Size class for `size` bytes: pow2 16..=1024 → 0..=6; None = big.
+    #[inline]
+    fn class_of(size: usize) -> Option<usize> {
+        if size > 1024 {
+            return None;
+        }
+        let c = size.max(1).next_power_of_two().max(16);
+        Some(c.trailing_zeros() as usize - 4)
+    }
+
+    /// Allocate one chunk of `size` bytes (8-aligned).
+    fn alloc(&mut self, size: usize) -> *mut u8 {
+        match Self::class_of(size) {
+            Some(cl) => {
+                if let Some(p) = self.free[cl].pop() {
+                    return p as *mut u8;
+                }
+                let words = (16usize << cl) / 8;
+                if self.slabs.is_empty()
+                    || self.cursor + words > self.slabs.last().expect("checked").len()
+                {
+                    self.slabs.push(vec![0u64; STR_ARENA_SLAB_WORDS].into_boxed_slice());
+                    self.cursor = 0;
+                    self.bytes += STR_ARENA_SLAB_WORDS * 8;
+                }
+                let slab = self.slabs.last_mut().expect("just ensured");
+                let p = slab[self.cursor..].as_mut_ptr() as *mut u8;
+                self.cursor += words;
+                p
+            }
+            None => {
+                let words = size.div_ceil(8);
+                let b = vec![0u64; words].into_boxed_slice();
+                let p = b.as_ptr() as usize;
+                self.bytes += words * 8;
+                self.big.insert(p, b);
+                p as *mut u8
+            }
+        }
+    }
+
+    /// Park one chunk (the replace-free). `size` MUST be the value's
+    /// VARSIZE_ANY — the same number `copy` allocated by (allocator-exact
+    /// by construction: same store, same class function).
+    fn dealloc(&mut self, p: usize, size: usize) {
+        match Self::class_of(size) {
+            Some(cl) => self.free[cl].push(p),
+            None => {
+                let b = self.big.remove(&p);
+                debug_assert!(b.is_some(), "big-value free of an unowned pointer");
+                if let Some(b) = b {
+                    self.bytes -= b.len() * 8;
+                }
+            }
+        }
+    }
+
+    /// datumCopy of a plain varlena image into the store (VARSIZE_ANY
+    /// bytes, 8-aligned — `agg_datum_copy`'s exact copy semantics).
+    ///
+    /// # Safety
+    /// `d` is a non-null plain varlena datum readable for its full size.
+    pub unsafe fn copy(&mut self, d: Datum) -> Datum {
+        let p = d.as_usize() as *const u8;
+        // SAFETY: caller contract.
+        let size = unsafe { ::types_tuple::varatt::varsize_any(p) };
+        let dst = self.alloc(size);
+        // SAFETY: fresh chunk of >= size bytes; source readable.
+        unsafe { core::ptr::copy_nonoverlapping(p, dst, size) };
+        Datum::from_usize(dst as usize)
+    }
+
+    /// [`Self::copy`] of `d` REPLACING a stored transvalue: copy first,
+    /// then park the superseded copy (C's ExecAggCopyTransValue pfree).
+    ///
+    /// # Safety
+    /// As `copy`; `old` is a live value THIS store allocated.
+    pub unsafe fn replace(&mut self, old: Datum, d: Datum) -> Datum {
+        let new = unsafe { self.copy(d) };
+        let op = old.as_usize();
+        if op != 0 {
+            // SAFETY: `old` is a live plain varlena this store allocated.
+            let size = unsafe { ::types_tuple::varatt::varsize_any(op as *const u8) };
+            self.dealloc(op, size);
+        }
+        new
+    }
+
+    /// Retained bytes (the drain's byref budget accounting term).
+    pub fn bytes(&self) -> usize {
+        self.bytes
+            + self.free.iter().map(|f| f.capacity() * 8).sum::<usize>()
+            + self.slabs.capacity() * core::mem::size_of::<Box<[u64]>>()
+    }
+}
+
 // Strict str larger/smaller advance: C returns one of the two argument
 // datums, and advance_transition_function datumCopies the result into the
 // agg context whenever it is not the stored transvalue (ExecAggCopyTransValue
@@ -3174,28 +3334,41 @@ unsafe fn str_keep(kind: LaneKind, cur: Datum, v: Datum) -> bool {
 // SEQUENCE, which feeds hash-agg memory accounting and therefore spill
 // decisions — match the per-row path exactly.
 //
+// The `sa` store, when armed (the dict-coded sink drain's migrating
+// tables), REPLACES the context as the copy destination — same bytes, same
+// copy/replace points, allocator-exact frees that survive thread migration
+// (StrStateArena doc). `None` = the context discipline verbatim (classic
+// builds byte-identical, allocation sequence included).
+//
 // # Safety
 // As `str_keep`; `aggcxt` is the live agg context; `pg` is the transition's
-// live pergroup cell.
+// live pergroup cell; a `Some(sa)` owns every prior copy stored in `pg`.
 #[inline(always)]
 unsafe fn str_advance(
     t: &LaneTrans,
     pg: &mut AggPerGroup,
     d: Datum,
     aggcxt: Mcx<'_>,
+    sa: Option<&mut StrStateArena>,
 ) -> PgResult<()> {
     // SAFETY: forwarded caller contract (inline varlena datum, live aggcxt).
     unsafe {
         if pg.no_trans_value {
-            pg.trans_value = ::execexpr::agg_datum_copy(aggcxt, d, -1)?;
+            pg.trans_value = match sa {
+                Some(a) => a.copy(d),
+                None => ::execexpr::agg_datum_copy(aggcxt, d, -1)?,
+            };
             pg.trans_value_is_null = false;
             pg.no_trans_value = false;
         } else if !pg.trans_value_is_null && !str_keep(t.kind, pg.trans_value, d) {
-            // Replace = copy + pfree of the superseded copy (C's
-            // ExecAggCopyTransValue discipline; no-op on bump contexts, so
-            // classic builds keep the exact allocation sequence — the free
-            // only bites on the sink drains' FREEING byref-state child).
-            pg.trans_value = ::execexpr::agg_datum_replace(aggcxt, pg.trans_value, d, -1)?;
+            // Replace = copy + free of the superseded copy (C's
+            // ExecAggCopyTransValue discipline; the context arm's free is a
+            // no-op on bump contexts, so classic builds keep the exact
+            // allocation sequence).
+            pg.trans_value = match sa {
+                Some(a) => a.replace(pg.trans_value, d),
+                None => ::execexpr::agg_datum_replace(aggcxt, pg.trans_value, d, -1)?,
+            };
         }
     }
     Ok(())
@@ -3348,7 +3521,22 @@ unsafe fn str_advance_coded(
     key: usize,
     mm: &mut StrMmScratch,
     aggcxt: Mcx<'_>,
+    mut sa: Option<&mut StrStateArena>,
 ) -> PgResult<()> {
+    // Copy/replace through the table-owned store when armed (str_advance's
+    // dispatch, hoisted so every arm below shares it).
+    macro_rules! sa_replace {
+        () => {
+            match sa.as_deref_mut() {
+                // SAFETY: forwarded caller contract.
+                Some(a) => unsafe { a.replace(pg.trans_value, d) },
+                // SAFETY: forwarded caller contract.
+                None => unsafe {
+                    ::execexpr::agg_datum_replace(aggcxt, pg.trans_value, d, -1)?
+                },
+            }
+        };
+    }
     let want_max = t.kind == LaneKind::StrMax;
     let gen = mm.gen;
     if let Some(m) = mm.map.get_mut(&key) {
@@ -3358,16 +3546,12 @@ unsafe fn str_advance_coded(
                 if code == m.code && m.tv_code {
                     // Tie against the code-valued transvalue: text's
                     // last-tied-wins replaces (and copies) per tied row.
-                    // SAFETY: forwarded caller contract.
-                    pg.trans_value =
-                        unsafe { ::execexpr::agg_datum_replace(aggcxt, pg.trans_value, d, -1)? };
+                    pg.trans_value = sa_replace!();
                 }
                 return Ok(());
             }
             if m.tv_code {
-                // SAFETY: forwarded caller contract.
-                pg.trans_value =
-                    unsafe { ::execexpr::agg_datum_replace(aggcxt, pg.trans_value, d, -1)? };
+                pg.trans_value = sa_replace!();
                 m.code = code;
                 return Ok(());
             }
@@ -3377,9 +3561,7 @@ unsafe fn str_advance_coded(
             if unsafe { str_keep(t.kind, pg.trans_value, d) } {
                 m.code = code;
             } else {
-                // SAFETY: forwarded caller contract.
-                pg.trans_value =
-                    unsafe { ::execexpr::agg_datum_replace(aggcxt, pg.trans_value, d, -1)? };
+                pg.trans_value = sa_replace!();
                 m.code = code;
                 m.tv_code = true;
             }
@@ -3392,7 +3574,10 @@ unsafe fn str_advance_coded(
     // SAFETY: forwarded caller contract.
     unsafe {
         if pg.no_trans_value {
-            pg.trans_value = ::execexpr::agg_datum_copy(aggcxt, d, -1)?;
+            pg.trans_value = match sa.as_deref_mut() {
+                Some(a) => a.copy(d),
+                None => ::execexpr::agg_datum_copy(aggcxt, d, -1)?,
+            };
             pg.trans_value_is_null = false;
             pg.no_trans_value = false;
             tv_code = true;
@@ -3401,7 +3586,7 @@ unsafe fn str_advance_coded(
                 tv_code = false;
             } else {
                 // Replace discipline: see str_advance.
-                pg.trans_value = ::execexpr::agg_datum_replace(aggcxt, pg.trans_value, d, -1)?;
+                pg.trans_value = sa_replace!();
                 tv_code = true;
             }
         } else {
@@ -3441,7 +3626,7 @@ pub unsafe fn fold_rows_grouped(
     aggcxt: Mcx<'_>,
 ) -> PgResult<()> {
     // SAFETY: forwarded caller contract.
-    unsafe { fold_rows_grouped_mm(plan, cols, idxs, groups, aggcxt, None, 0) }
+    unsafe { fold_rows_grouped_mm(plan, cols, idxs, groups, aggcxt, None, 0, None) }
 }
 
 /// `fold_rows_grouped` with the str MIN/MAX dict-code memo (lane-v2-
@@ -3460,7 +3645,10 @@ pub unsafe fn fold_rows_grouped(
 /// `avgpack_mask` bits name AvgAccum transnos whose pergroup slot holds the
 /// PACKED inline `[count, sum]` state ([`avg_apply_packed`]) instead of a
 /// transarray pointer — nodeagg sink builds only; every other caller passes
-/// 0. A mask bit on a non-AvgAccum transno is a caller bug.
+/// 0. A mask bit on a non-AvgAccum transno is a caller bug. A `Some(sa)`
+/// routes every str copy/replace through the TABLE-OWNED state store
+/// instead of `aggcxt` (migrating sink tables — [`StrStateArena`] doc);
+/// the store must own every prior str transvalue of these pergroups.
 pub unsafe fn fold_rows_grouped_mm(
     plan: &LanePlan<'_>,
     cols: &impl LaneCols,
@@ -3469,6 +3657,7 @@ pub unsafe fn fold_rows_grouped_mm(
     aggcxt: Mcx<'_>,
     mut mm: Option<&mut StrMmScratch>,
     avgpack_mask: u64,
+    mut sa: Option<&mut StrStateArena>,
 ) -> PgResult<()> {
     debug_assert_eq!(idxs.len(), groups.len());
     for t in plan.trans.iter() {
@@ -3633,7 +3822,8 @@ pub unsafe fn fold_rows_grouped_mm(
                             let cell = unsafe { g.as_ptr().add(transno) } as usize;
                             // SAFETY: col_codes contract (values[i] ==
                             // dict[code], inline varlena) + live pergroup and
-                            // aggcxt (caller contract).
+                            // aggcxt (caller contract); sa owns prior copies
+                            // (fn contract).
                             unsafe {
                                 str_advance_coded(
                                     t,
@@ -3644,12 +3834,15 @@ pub unsafe fn fold_rows_grouped_mm(
                                     cell,
                                     scratch,
                                     aggcxt,
+                                    sa.as_deref_mut(),
                                 )?
                             };
                         }
                         // SAFETY: vguard-passed batch + live aggcxt (caller
-                        // contract).
-                        _ => unsafe { str_advance(t, pg, values[i], aggcxt)? },
+                        // contract); sa owns prior copies (fn contract).
+                        _ => unsafe {
+                            str_advance(t, pg, values[i], aggcxt, sa.as_deref_mut())?
+                        },
                     }
                 }
                 // Fold-trans tier: per-row ORDER-PRESERVING float advances.
@@ -3845,7 +4038,7 @@ pub unsafe fn fold_code_group(
             LaneKind::StrMin | LaneKind::StrMax => {
                 // SAFETY: live inline varlena scratch image + live pergroup
                 // and aggcxt (caller contract).
-                unsafe { str_advance(t, pg, strd, aggcxt)? };
+                unsafe { str_advance(t, pg, strd, aggcxt, None)? };
             }
             _ => unreachable!("plan_code_hostable admitted an unhostable kind"),
         }
