@@ -45,6 +45,9 @@ pub(crate) enum CopySrc<'mcx, 's> {
     /// Parallel COPY worker: one segmentator-cut input chunk (whole rows,
     /// in-memory). EOF at the chunk's end.
     Chunk(crate::parallel::ChunkCursor),
+    /// FORMAT 'parquet': typed column batches from a server-side file (the
+    /// reader owns the file handle; drop closes it on every exit path).
+    Parquet(Box<crate::fromparquet::ParquetSrc>),
 }
 
 pub struct CopyFromState<'mcx, 's> {
@@ -281,7 +284,27 @@ fn begin_copy_from_guts<'mcx, 's>(
     pgstat_progress_start_command(PROGRESS_COMMAND_COPY, rel.rd_id);
     let mut progress_type = PROGRESS_COPY_TYPE_PIPE;
     let mut progress_bytes_total: i64 = 0;
-    let src = if let Some(cb) = data_source_cb.take() {
+    let src = if opts.parquet {
+        // Server-side file only in this increment (STDIN and callback
+        // sources error cleanly inside open_source / here).
+        if data_source_cb.is_some() {
+            return Err(Box::new(
+                PgError::error(
+                    "COPY FROM with parquet format only supports reading from a file",
+                )
+                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
+        let (psrc, file_len) = crate::fromparquet::open_source(
+            filename,
+            tup_desc,
+            &attnumlist,
+            opts.parquet_match_by_name,
+        )?;
+        progress_type = PROGRESS_COPY_TYPE_FILE;
+        progress_bytes_total = file_len as i64;
+        CopySrc::Parquet(psrc)
+    } else if let Some(cb) = data_source_cb.take() {
         progress_type = PROGRESS_COPY_TYPE_CALLBACK;
         // SAFETY (dropck erasure only): CopyFromState<'mcx, 's> still carries
         // 's, so the state (and this box) cannot outlive the closure's
@@ -1364,6 +1387,17 @@ pub fn copy_from_error_context(
 ) -> Box<PgError> {
     let relname = &cstate.relname;
     let lineno = cstate.cur_lineno;
+    if cstate.opts.parquet {
+        // Parquet rows are not lines and carry no displayable raw text.
+        let ctx = match cstate.cur_attidx {
+            Some(m) => {
+                let attname = cstate.attname(m);
+                format!("COPY {relname}, row {lineno}, column {attname}")
+            }
+            None => format!("COPY {relname}, row {lineno}"),
+        };
+        return Box::new(e.add_context(ctx));
+    }
     if cstate.opts.binary {
         // C's binary arm: the raw data is not usefully displayable.
         let ctx = match cstate.cur_attidx {

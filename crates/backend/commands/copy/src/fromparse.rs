@@ -101,6 +101,9 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
                 }
                 Ok(n)
             }
+            CopySrc::Parquet(_) => {
+                unreachable!("parquet sources produce rows, not raw bytes")
+            }
         }
     }
 
@@ -149,6 +152,9 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
                 unreachable!("callback sources are refused at parallel admission")
             }
             CopySrc::Chunk(_) => unreachable!("chunk sources never feed the segmentator"),
+            CopySrc::Parquet(_) => {
+                unreachable!("parquet format is refused at parallel admission")
+            }
         }
     }
 
@@ -860,6 +866,21 @@ impl<'mcx, 's> CopyFromState<'mcx, 's> {
             return Ok(true);
         }
 
+        if self.opts.parquet {
+            if !self.copy_from_parquet_one_row(row_mcx, values, nulls)? {
+                return Ok(false);
+            }
+            for k in 0..self.defmap.len() {
+                let m = self.defmap[k];
+                let state = self.defexprs[m].as_mut().expect("defmap entry sans defexpr");
+                let mut slots = execexpr::EvalSlots { scan: None, inner: None, outer: None };
+                let r = execexpr::exec_eval_expr(state, &mut slots)?;
+                values[m] = r.value;
+                nulls[m] = r.isnull;
+            }
+            return Ok(true);
+        }
+
         // NextCopyFromRawFields header arm: consume the header line, and for
         // COPY_HEADER_MATCH verify it against the column list.
         if self.cur_lineno == 0 && self.opts.header_line != crate::CopyHeaderChoice::False {
@@ -1319,6 +1340,8 @@ pub mod bench_internals {
                 file_encoding: -1,
                 binary: false,
                 csv_mode: false,
+                parquet: false,
+                parquet_match_by_name: false,
                 freeze: false,
                 delim,
                 quote: b'"',

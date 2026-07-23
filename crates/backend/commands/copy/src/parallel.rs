@@ -1068,6 +1068,8 @@ fn worker_drive(shared: &Arc<ParCopyShared>) -> PgResult<()> {
                 file_encoding: shared.file_encoding,
                 binary: false,
                 csv_mode: false,
+                parquet: false,
+                parquet_match_by_name: false,
                 freeze: shared.freeze,
                 delim: shared.delim,
                 quote: b'"',
@@ -1628,6 +1630,9 @@ fn admit<'mcx>(
     }
     if o.csv_mode {
         refuse!("csv format (phase-1 is text-only)");
+    }
+    if o.parquet {
+        refuse!("parquet format (row-group parallel decode is its own lane)");
     }
     if o.header_line != CopyHeaderChoice::False {
         refuse!("HEADER");

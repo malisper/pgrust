@@ -18,6 +18,7 @@ use types_rel::Relation;
 use types_tuple::TupleDescData;
 
 mod from;
+mod fromparquet;
 mod fromparse;
 mod parallel;
 mod to;
@@ -73,6 +74,11 @@ pub struct CopyFormatOptions<'s> {
     pub file_encoding: i32,
     pub binary: bool,
     pub csv_mode: bool,
+    /// COPY FROM ... WITH (FORMAT 'parquet') — read-only surface, matching
+    /// pg_parquet's spelling. COPY TO is refused.
+    pub parquet: bool,
+    /// MATCH_BY 'name' (parquet only; default is positional matching).
+    pub parquet_match_by_name: bool,
     pub freeze: bool,
     pub delim: u8,
     pub quote: u8,
@@ -589,6 +595,15 @@ fn cannot_in_binary(name: &str) -> Box<PgError> {
     )
 }
 
+#[cold]
+#[inline(never)]
+fn cannot_in_parquet(name: &str) -> Box<PgError> {
+    Box::new(
+        PgError::error(format!("cannot specify {name} with parquet format"))
+            .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+    )
+}
+
 /// `ProcessCopyOptions` (copy.c). `src` is the statement source text for
 /// error cursors (C's pstate->p_sourcetext).
 pub fn ProcessCopyOptions<'s>(
@@ -600,6 +615,8 @@ pub fn ProcessCopyOptions<'s>(
         file_encoding: -1,
         binary: false,
         csv_mode: false,
+        parquet: false,
+        parquet_match_by_name: false,
         freeze: false,
         delim: 0,
         quote: 0,
@@ -620,6 +637,7 @@ pub fn ProcessCopyOptions<'s>(
         reject_limit: 0,
     };
     let mut format_specified = false;
+    let mut match_by_specified = false;
     let mut freeze_specified = false;
     let mut header_specified = false;
     let mut on_error_specified = false;
@@ -643,6 +661,7 @@ pub fn ProcessCopyOptions<'s>(
                     "text" => {}
                     "csv" => opts.csv_mode = true,
                     "binary" => opts.binary = true,
+                    "parquet" => opts.parquet = true,
                     fmt => {
                         return Err(Box::new(
                             PgError::error(format!("COPY format \"{fmt}\" not recognized"))
@@ -766,6 +785,26 @@ pub fn ProcessCopyOptions<'s>(
                 reject_limit_specified = true;
                 opts.reject_limit = def_reject_limit(d)?;
             }
+            // pg_parquet's FROM-side column-matching option.
+            "match_by" => {
+                if match_by_specified {
+                    return Err(conflicting_option(src, d.location));
+                }
+                match_by_specified = true;
+                match def_string(d)? {
+                    "position" => opts.parquet_match_by_name = false,
+                    "name" => opts.parquet_match_by_name = true,
+                    sval => {
+                        return Err(Box::new(
+                            PgError::error(format!(
+                                "COPY MATCH_BY \"{sval}\" not recognized"
+                            ))
+                            .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE)
+                            .with_cursor_position(errpos(src, d.location)),
+                        ))
+                    }
+                }
+            }
             other => {
                 return Err(Box::new(
                     PgError::error(format!("option \"{other}\" not recognized"))
@@ -784,6 +823,61 @@ pub fn ProcessCopyOptions<'s>(
     }
     if opts.binary && opts.default_print.is_some() {
         return Err(cannot_in_binary("DEFAULT"));
+    }
+
+    if opts.parquet {
+        // Read-only surface (product ruling): the writer is not planned.
+        if !is_from {
+            return Err(Box::new(
+                PgError::error("COPY TO with parquet format is not supported")
+                    .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+            ));
+        }
+        // Typed self-describing input: none of the text-shape options apply.
+        if delim.is_some() {
+            return Err(cannot_in_parquet("DELIMITER"));
+        }
+        if null_print.is_some() {
+            return Err(cannot_in_parquet("NULL"));
+        }
+        if opts.default_print.is_some() {
+            return Err(cannot_in_parquet("DEFAULT"));
+        }
+        if opts.header_line != CopyHeaderChoice::False {
+            return Err(cannot_in_parquet("HEADER"));
+        }
+        if quote.is_some() {
+            return Err(cannot_in_parquet("QUOTE"));
+        }
+        if escape.is_some() {
+            return Err(cannot_in_parquet("ESCAPE"));
+        }
+        if opts.force_quote.is_some() || opts.force_quote_all {
+            return Err(cannot_in_parquet("FORCE_QUOTE"));
+        }
+        if opts.force_notnull.is_some() || opts.force_notnull_all {
+            return Err(cannot_in_parquet("FORCE_NOT_NULL"));
+        }
+        if opts.force_null.is_some() || opts.force_null_all {
+            return Err(cannot_in_parquet("FORCE_NULL"));
+        }
+        if opts.convert_selectively {
+            return Err(cannot_in_parquet("convert_selectively"));
+        }
+        if opts.file_encoding >= 0 {
+            return Err(cannot_in_parquet("ENCODING"));
+        }
+        if opts.on_error != CopyOnErrorChoice::Stop {
+            return Err(Box::new(
+                PgError::error("only ON_ERROR STOP is allowed with parquet format")
+                    .with_sqlstate(ERRCODE_SYNTAX_ERROR),
+            ));
+        }
+    } else if match_by_specified {
+        return Err(Box::new(
+            PgError::error("COPY MATCH_BY requires parquet format")
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
     }
 
     let delim = delim.unwrap_or(if opts.csv_mode { "," } else { "\t" });
