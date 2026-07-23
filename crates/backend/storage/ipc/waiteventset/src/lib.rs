@@ -428,10 +428,26 @@ fn wait_loop(
             }
         }
 
+        // GL-RECWAKE-1: while fd-parked the ONLY route for a latch wake is a
+        // waiter unpark writing the wake pipe — a lost one leaves the kernel
+        // block deaf to an already-set latch for the caller's whole timeout
+        // (forever at -1). Bound each kernel lap by the waiter recheck
+        // cadence: the loop head re-tests latch.is_set every lap, so a lost
+        // wake costs at most one cadence period — the untimed-park law,
+        // extended to the fd-park mode. Latch-free waits are exempt (their
+        // events are kernel-delivered; no wake can be lost).
+        let mut block_timeout = cur_timeout;
+        if fd_parked {
+            let cadence = waiter::recheck_cadence_ms();
+            if cadence > 0 && (block_timeout < 0 || block_timeout > cadence) {
+                block_timeout = cadence;
+            }
+        }
+
         let rc = backend::wait_block(
             set,
             latch,
-            cur_timeout,
+            block_timeout,
             &mut occurred_events[returned_events as usize..],
         )?;
 
@@ -445,7 +461,21 @@ fn wait_loop(
         }
 
         if rc == -1 {
-            break; // timeout occurred
+            // Events already gathered: the zero-timeout extra poll is done.
+            if returned_events > 0 {
+                break;
+            }
+            // The kernel block expired: only the CALLER's deadline ends the
+            // wait; a shorter cadence lap re-arms and re-tests (lost-wake
+            // backstop above).
+            if timeout < 0 {
+                continue;
+            }
+            cur_timeout = timeout - (now_millis() - start_time.expect("timeout without start"));
+            if cur_timeout <= 0 {
+                break;
+            }
+            continue;
         }
         returned_events += rc;
 
