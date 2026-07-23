@@ -257,6 +257,99 @@ fn memory_headroom_bytes() -> Option<u64> {
     crate::memheadroom::memory_headroom_bytes()
 }
 
+/// copyfast lever 3: PGRUST_COPY_ANALYZE_INLINE=1 — analyze-during-load.
+/// The merge pump reservoir-samples the sorted row stream (the data is
+/// already transiting RAM) and, after the part publishes, the standard
+/// ANALYZE compute/write half runs on that sample — same pg_statistic /
+/// relstats content a post-load ANALYZE would produce, without re-reading
+/// the table (the post-load step drops to plain VACUUM). Requires the
+/// parallel sort pipeline (the merge pump is the sampling site); default
+/// OFF, fail-closed: refused postures leave statistics to a later ANALYZE
+/// exactly as today. Part bytes are untouched by construction — sampling
+/// only copies row images out of the stream.
+fn analyze_inline_flag() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("PGRUST_COPY_ANALYZE_INLINE").is_ok_and(|v| v.trim() == "1")
+    })
+}
+
+/// Lever-3 per-statement plan: targrows resolved via the ANALYZE examine
+/// pass at admission (catalog access, pre-parallel-mode) and the reservoir
+/// seed drawn from the backend PRNG on the leader (the pump thread never
+/// touches backend state).
+#[derive(Clone, Copy)]
+struct InlineAnalyzePlan {
+    targrows: i32,
+    seed: u64,
+}
+
+/// copyfast lever 3: Vitter reservoir over the merge pump's row stream —
+/// C acquire_sample_rows' per-row loop verbatim (keep-below-target, then
+/// skip-S / replace-random-slot), carrying (ord, row image) so the final
+/// sort restores stream order (C sorts its sample by TID for the same
+/// reason: the correlation stat reads rows order). Cost per non-sampled
+/// row: one float compare + decrement.
+struct StreamSampler {
+    targrows: usize,
+    rstate: commands_analyze::sampling::ReservoirStateData,
+    sample: Vec<(u64, Vec<u8>)>,
+    samplerows: f64,
+    rowstoskip: f64,
+    ord: u64,
+}
+
+impl StreamSampler {
+    fn new(targrows: i32, seed: u64) -> StreamSampler {
+        StreamSampler {
+            targrows: targrows.max(1) as usize,
+            rstate: commands_analyze::sampling::reservoir_init_selection_state(
+                seed,
+                targrows.max(1) as u32,
+            ),
+            sample: Vec::new(),
+            samplerows: 0.0,
+            rowstoskip: -1.0,
+            ord: 0,
+        }
+    }
+
+    #[inline]
+    fn offer(&mut self, row: &[u8]) {
+        if self.sample.len() < self.targrows {
+            self.sample.push((self.ord, row.to_vec()));
+        } else {
+            if self.rowstoskip < 0.0 {
+                self.rowstoskip = commands_analyze::sampling::reservoir_get_next_s(
+                    &mut self.rstate,
+                    self.samplerows,
+                    self.targrows as u32,
+                );
+            }
+            if self.rowstoskip <= 0.0 {
+                let k = (self.targrows as f64
+                    * commands_analyze::sampling::sampler_random_fract(
+                        &mut self.rstate.randstate,
+                    )) as usize;
+                debug_assert!(k < self.targrows);
+                let slot = &mut self.sample[k];
+                slot.0 = self.ord;
+                slot.1.clear();
+                slot.1.extend_from_slice(row);
+            }
+            self.rowstoskip -= 1.0;
+        }
+        self.ord += 1;
+        self.samplerows += 1.0;
+    }
+
+    /// Stream order restored (replacements land at random slots).
+    fn finish(mut self) -> Vec<Vec<u8>> {
+        self.sample.sort_unstable_by_key(|&(o, _)| o);
+        self.sample.into_iter().map(|(_, img)| img).collect()
+    }
+}
+
 /// Resolve the mem-run budget in bytes at admission (0 = not engageable).
 fn memrun_budget(k: i32) -> u64 {
     match memruns_knob() {
@@ -754,6 +847,9 @@ pub(crate) struct ParCopyShared {
     /// (workers decode columns and feed the sort pipeline); the text
     /// segmentator/chunk plumbing is bypassed entirely.
     parquet: Option<ParquetPar>,
+    /// copyfast lever 3: analyze-during-load (Some = the merge pump samples
+    /// the stream and the leader writes the stats after publish).
+    inline_analyze: Option<InlineAnalyzePlan>,
 }
 
 /// Parquet parallel-decode plan: the shared file handle (positioned reads
@@ -1536,11 +1632,12 @@ fn worker_drive(shared: &Arc<ParCopyShared>) -> PgResult<()> {
 ///     worker-encode machinery, byte-proven by its seam oracle).
 ///   LEADER (this thread): drains the done channel, commits EncodedRgs in
 ///     batch order via commit_encoded_rg, CFIs per message.
-/// Returns the merged row count.
+/// Returns the merged row count plus, when lever 3 is armed, the pump's
+/// stream-order reservoir sample (row images).
 fn merge_sorted_runs(
     writer: &mut pgrcolumnar::CbWriter,
     shared: &Arc<ParCopyShared>,
-) -> PgResult<u64> {
+) -> PgResult<(u64, Option<Vec<Vec<u8>>>)> {
     let sort = shared.sort.as_ref().expect("merge without sort mode");
     let runs =
         std::mem::take(&mut *shared.sort_runs.lock().unwrap_or_else(|p| p.into_inner()));
@@ -1659,7 +1756,7 @@ fn merge_sorted_runs(
     let mut committed = 0u64;
     let mut t_commit = std::time::Duration::ZERO;
 
-    let (n_rows, batches) = std::thread::scope(|scope| {
+    let (n_rows, batches, sample) = std::thread::scope(|scope| {
         for _ in 0..nenc {
             let rx = work_rx.clone();
             let tx = done_tx.clone();
@@ -1717,7 +1814,8 @@ fn merge_sorted_runs(
         // PUMP: owns the RunMerge and the work sender; exits (dropping the
         // sender) at end of input, on error, or on the leader's abort flag.
         let abort_ref = &abort;
-        let pump = scope.spawn(move || -> (PgResult<()>, u64, u64) {
+        let sampler_plan = shared.inline_analyze;
+        let pump = scope.spawn(move || -> (PgResult<()>, u64, u64, Option<Vec<Vec<u8>>>) {
             let mut key: Vec<u8> = Vec::with_capacity(key_w);
             let mut row: Vec<u8> = Vec::new();
             let mut cur = Batch { idx: 0, arena: Vec::new(), lens: Vec::new() };
@@ -1725,6 +1823,9 @@ fn merge_sorted_runs(
             let mut n_rows = 0u64;
             let mut t_fill = std::time::Duration::ZERO;
             let mut t_send = std::time::Duration::ZERO;
+            // copyfast lever 3: the pump sees every row of the final stream
+            // in physical order — the sampling site.
+            let mut sampler = sampler_plan.map(|p| StreamSampler::new(p.targrows, p.seed));
             let r = (|| -> PgResult<()> {
                 loop {
                     if abort_ref.load(Ordering::SeqCst) {
@@ -1740,6 +1841,9 @@ fn merge_sorted_runs(
                                         cur.arena.extend_from_slice(&row);
                                         cur.lens.push(row.len() as u32);
                                         n_rows += 1;
+                                        if let Some(s) = sampler.as_mut() {
+                                            s.offer(&row);
+                                        }
                                     }
                                     Ok(false) => {
                                         merge_done = true;
@@ -1757,6 +1861,10 @@ fn merge_sorted_runs(
                                     Ok(Some(l)) => {
                                         cur.lens.push(l);
                                         n_rows += 1;
+                                        if let Some(s) = sampler.as_mut() {
+                                            let start = cur.arena.len() - l as usize;
+                                            s.offer(&cur.arena[start..]);
+                                        }
                                     }
                                     Ok(None) => {
                                         merge_done = true;
@@ -1801,7 +1909,12 @@ fn merge_sorted_runs(
                 t_fill.as_secs_f64(),
                 t_send.as_secs_f64(),
             ));
-            (r, n_rows, sent)
+            // Sample only meaningful on a clean, complete pump pass.
+            let sample = match (&r, sampler) {
+                (Ok(()), Some(s)) => Some(s.finish()),
+                _ => None,
+            };
+            (r, n_rows, sent, sample)
         });
         // work_tx moved into the pump; when it finishes, the channel closes
         // and the encoders drain out, closing done_rx.
@@ -1851,11 +1964,12 @@ fn merge_sorted_runs(
             }
             t_commit += t2.elapsed();
         }
-        let (pr, n_rows, sent) = pump.join().unwrap_or_else(|_| {
+        let (pr, n_rows, sent, sample) = pump.join().unwrap_or_else(|_| {
             (
                 Err(Box::new(PgError::new(ERROR, "parallel load-sort pump panicked"))),
                 0,
                 0,
+                None,
             )
         });
         if let Err(e) = pr {
@@ -1863,7 +1977,7 @@ fn merge_sorted_runs(
                 first_err = Some(e);
             }
         }
-        (n_rows, sent)
+        (n_rows, sent, sample)
     });
 
     if let Some(e) = first_err {
@@ -1883,7 +1997,7 @@ fn merge_sorted_runs(
         t_commit.as_secs_f64(),
     ));
     pgstat_progress_update_param(PROGRESS_COPY_TUPLES_PROCESSED, n_rows as i64);
-    Ok(n_rows)
+    Ok((n_rows, sample))
 }
 
 fn vacuum_style_shutdown(private: &(dyn std::any::Any + Send + Sync)) {
@@ -2138,7 +2252,9 @@ enum Ceremony {
     /// Pre-consumption refusal (zero workers launched/participating):
     /// nothing read; serial takes over.
     Refused,
-    Done(u64),
+    /// Rows loaded + (lever 3) the pump's stream-order sample when
+    /// analyze-during-load is armed.
+    Done(u64, Option<Vec<Vec<u8>>>),
 }
 
 /// Morsel-parallel COPY FROM. `Ok(None)` = refused, run the serial path
@@ -2146,13 +2262,32 @@ enum Ceremony {
 /// Errors are FULLY CONTEXTED (worker line contexts attached) — the caller
 /// must NOT wrap them in copy_from_error_context again.
 pub(crate) fn copy_from_parallel<'mcx>(
-    _mcx: Mcx<'mcx>,
+    mcx: Mcx<'mcx>,
     cstate: &mut CopyFromState<'mcx, '_>,
     rel: &Relation<'mcx>,
     has_triggers: bool,
 ) -> PgResult<Option<u64>> {
     let Some((rt, k, sort, parquet)) = admit(cstate, rel, has_triggers)? else {
         return Ok(None);
+    };
+
+    // copyfast lever 3 admission: resolve the ANALYZE-equivalent sample
+    // size while catalog access is open (pre-parallel-mode) and draw the
+    // reservoir seed on the leader (the merge pump thread never touches
+    // backend PRNG state). Fail-closed: refused = stats come from a later
+    // ANALYZE, exactly as today.
+    let inline_analyze = if analyze_inline_flag() {
+        if sort.is_some() {
+            let targrows = commands_analyze::inline_analyze_targrows(rel)?;
+            let seed = pg_prng::global_prng(|p| p.next_u64());
+            ptrace(&format!("analyze inline engaged targrows={targrows}"));
+            Some(InlineAnalyzePlan { targrows, seed })
+        } else {
+            ptrace("analyze inline refused: requires the parallel sort pipeline");
+            None
+        }
+    } else {
+        None
     };
 
     // Writer open BEFORE EnterParallelMode (xid/cid assignment); identical
@@ -2202,6 +2337,7 @@ pub(crate) fn copy_from_parallel<'mcx>(
         sort_runs: Mutex::new(Vec::new()),
         sort_run_seq: AtomicU64::new(0),
         parquet,
+        inline_analyze,
     });
     ensure_hooks_registered();
 
@@ -2233,7 +2369,7 @@ pub(crate) fn copy_from_parallel<'mcx>(
 
     match r? {
         Ceremony::Refused => Ok(None),
-        Ceremony::Done(processed) => {
+        Ceremony::Done(processed, inline_sample) => {
             // Publish (footer + header, durable) — the serial finish.
             let tf = std::time::Instant::now();
             writer.finish_parallel_ingest()?;
@@ -2243,11 +2379,60 @@ pub(crate) fn copy_from_parallel<'mcx>(
                  sync {f_sync:.2}s blob_bytes={f_blob_bytes}",
                 tf.elapsed().as_secs_f64(),
             ));
+            // copyfast lever 3: the stats write, AFTER publish (the footer
+            // NDV override reads the just-published part footer — same
+            // source a post-load ANALYZE would read).
+            if let Some(sample) = inline_sample {
+                let t0 = std::time::Instant::now();
+                let n = sample.len();
+                inline_analyze_apply(mcx, rel, &shared.plan, &sample, processed)?;
+                ptrace(&format!(
+                    "analyze inline stats written sample={n} totalrows={processed} wall={:.2}s",
+                    t0.elapsed().as_secs_f64(),
+                ));
+            }
             pgstat_progress_update_param(PROGRESS_COPY_TUPLES_PROCESSED, processed as i64);
             ptrace(&format!("done rows={processed}"));
             Ok(Some(processed))
         }
     }
+}
+
+/// copyfast lever 3: decode the sampled run-row images back into datums,
+/// form heap tuples in the statement context, and hand ANALYZE the sample
+/// (commands_analyze runs its standard compute/write half on it).
+fn inline_analyze_apply<'mcx>(
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    plan: &pgrcolumnar::ParallelIngestPlan,
+    sample: &[Vec<u8>],
+    totalrows: u64,
+) -> PgResult<()> {
+    let codec = pgrcolumnar::loadsort::RowCodec::new(plan.coltypes.clone());
+    let tupdesc = rel.descr();
+    let ncols = plan.coltypes.len();
+    debug_assert_eq!(ncols, tupdesc.natts as usize, "parallel COPY admits full column lists only");
+    let mut values = vec![::datum::Datum::null(); ncols];
+    let isnull = vec![false; ncols];
+    let mut arena: Vec<u8> = Vec::new();
+    let mut rows: Vec<types_tuple::HeapTupleData<'mcx>> = Vec::with_capacity(sample.len());
+    for img in sample {
+        arena.clear();
+        codec.deserialize_row(img, &mut arena, &mut values)?;
+        let owned = heaptuple::heap_form_tuple(mcx, tupdesc, &values, &isnull)?;
+        let (ptr, len, tid, oid) = (
+            owned.image().as_ptr(),
+            owned.as_tuple().t_len,
+            owned.as_tuple().t_self,
+            owned.as_tuple().t_tableOid,
+        );
+        core::mem::forget(owned);
+        // SAFETY: the image was just formed in `mcx` (statement scope) and,
+        // forgotten, lives until that context's teardown; the analyze call
+        // below only reads it (pgrcolumnar_acquire_sample_rows' pattern).
+        rows.push(unsafe { types_tuple::HeapTupleData::from_raw_parts(ptr, len, tid, oid) });
+    }
+    commands_analyze::analyze_rel_inline_sample(mcx, rel.rd_id, &rows, totalrows as f64)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2293,6 +2478,8 @@ fn ceremony(
         let mut published = 0u64;
         let mut next_commit = 0u64;
         let mut processed = 0u64;
+        // copyfast lever 3: filled by the sort merge when armed.
+        let mut inline_sample: Option<Vec<Vec<u8>>> = None;
         let mut input_done = false;
         let mut closed = false;
         let mut bytes_read = 0u64;
@@ -2512,9 +2699,11 @@ fn ceremony(
                 return Err(e);
             }
             ptrace(&format!("sort phase: worker drain {:.2}s", t_parse.elapsed().as_secs_f64()));
-            processed = merge_sorted_runs(writer, shared)?;
+            let (n, sample) = merge_sorted_runs(writer, shared)?;
+            processed = n;
+            inline_sample = sample;
         }
-        Ok(Ceremony::Done(processed))
+        Ok(Ceremony::Done(processed, inline_sample))
     })(&mut submitted);
 
     // Teardown tail (every path): the RG must be COMPLETE before the

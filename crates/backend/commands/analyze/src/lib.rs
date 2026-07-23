@@ -350,15 +350,112 @@ pub fn analyze_rel(
     pgstat_progress_start_command(PROGRESS_COMMAND_ANALYZE, onerel.rd_id);
 
     if relkind != RELKIND_PARTITIONED_TABLE {
-        do_analyze_rel(mcx, &onerel, va_cols, params, acquirefunc, relpages, false, in_outer_xact)?;
+        do_analyze_rel(
+            mcx, &onerel, va_cols, params, acquirefunc, relpages, false, in_outer_xact, None,
+        )?;
     }
     if onerel.rd_rel.relhassubclass {
-        do_analyze_rel(mcx, &onerel, va_cols, params, acquirefunc, relpages, true, in_outer_xact)?;
+        do_analyze_rel(
+            mcx, &onerel, va_cols, params, acquirefunc, relpages, true, in_outer_xact, None,
+        )?;
     }
 
     onerel.close(NO_LOCK)?;
 
     pgstat_progress_end_command();
+    Ok(())
+}
+
+/// GL-COPYFAST-1 lever 3 (analyze-during-load): the sample size the standard
+/// ANALYZE would use for this relation — the per-column examine pass
+/// (attstattarget-driven minrows, 300x target) maxed with the
+/// extended-statistics floor, exactly do_analyze_rel's targrows arithmetic.
+/// Index-expression stats could only raise it via indexes, and the caller's
+/// pipeline refuses indexed relations (debug-asserted).
+pub fn inline_analyze_targrows(onerel: &Relation<'_>) -> PgResult<i32> {
+    debug_assert!(
+        !onerel.rd_rel.relhasindex,
+        "inline analyze targrows on an indexed relation"
+    );
+    let anl = MemoryContext::new("InlineAnalyzeTargrows");
+    let anl_mcx = anl.mcx();
+    let tupdesc = onerel.descr();
+    let mut targrows: i32 = 100;
+    let mut colstats: PgVec<'_, statistics::ColStats> = PgVec::new_in(anl_mcx);
+    for i in 1..=tupdesc.natts {
+        if let Some(s) = examine_attribute(anl_mcx, onerel, i, None)? {
+            targrows = targrows.max(s.minrows);
+            colstats.push(statistics::ColStats {
+                tupattnum: s.tupattnum,
+                attstattarget: s.attstattarget,
+                attrtypid: s.attrtypid,
+                attrcollid: s.attrcollid,
+                typlen: s.typlen,
+                typbyval: s.typbyval,
+            });
+        }
+    }
+    targrows = targrows.max(statistics::ComputeExtStatisticsRows(
+        anl_mcx,
+        onerel.rd_id,
+        &colstats,
+    )?);
+    Ok(targrows)
+}
+
+/// GL-COPYFAST-1 lever 3: the ANALYZE write half driven from a pre-acquired
+/// in-stream sample (rows in physical/stream order, formed against the
+/// relation's descriptor; totalrows = the exact loaded row count). Runs the
+/// standard do_analyze_rel body minus acquisition, so pg_statistic,
+/// extended statistics, and pg_class relstats land exactly as a post-load
+/// ANALYZE would compute them from the same sample — without re-reading the
+/// table. Permission/relkind refusals skip silently-with-warning exactly
+/// like ANALYZE's (vacuum_is_permitted_for_relation emits C's WARNING).
+///
+/// Locking: ANALYZE's own ShareUpdateExclusive (self-conflicting: two
+/// inline writers serialize like two ANALYZEs), held to end of transaction
+/// like analyze_rel's. in_outer_xact=true: the caller's (COPY's)
+/// transaction is an outer transaction relative to this stats write — the
+/// pg_class flag-clearing C gates on !in_outer_xact stays off, matching an
+/// in-transaction-block ANALYZE. The inheritance (inh) pass is not run: the
+/// sample covers exactly this relation's stream.
+pub fn analyze_rel_inline_sample<'mcx>(
+    mcx: Mcx<'mcx>,
+    relid: Oid,
+    rows: &[HeapTupleData<'_>],
+    totalrows: f64,
+) -> PgResult<()> {
+    let onerel = table::table_open(mcx, relid, SHARE_UPDATE_EXCLUSIVE_LOCK)?;
+    if onerel.rd_id == STATISTIC_RELATION_ID
+        || onerel.rd_rel.relkind != RELKIND_RELATION
+        || !commands_vacuum::vacuum_is_permitted_for_relation(
+            onerel.rd_id,
+            onerel.name(),
+            onerel.rd_rel.relisshared,
+            VACOPT_ANALYZE as u32,
+        )?
+    {
+        onerel.close(SHARE_UPDATE_EXCLUSIVE_LOCK)?;
+        return Ok(());
+    }
+    let relpages = bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
+        &onerel,
+        ForkNumber::MAIN_FORKNUM,
+    )?;
+    let params = VacuumParams { options: VACOPT_ANALYZE };
+    let nil = types_nodes::NodeList::nil();
+    do_analyze_rel(
+        mcx,
+        &onerel,
+        &nil,
+        &params,
+        None,
+        relpages,
+        false,
+        true,
+        Some((rows, totalrows)),
+    )?;
+    onerel.close(NO_LOCK)?;
     Ok(())
 }
 
@@ -372,6 +469,15 @@ fn do_analyze_rel<'mcx>(
     relpages: BlockNumber,
     inh: bool,
     in_outer_xact: bool,
+    // GL-COPYFAST-1 lever 3 (analyze-during-load): Some((rows, totalrows)) =
+    // the sample was already acquired in-stream by the load pipeline (rows in
+    // physical/stream order, formed against onerel's descriptor, alive for
+    // the whole call); the acquisition phase is skipped and totaldeadrows is
+    // 0 (a fresh load has none). Everything downstream — compute, footer-NDV
+    // override, pg_statistic write, relstats — is the standard body, so the
+    // catalog rows written are the ones ANALYZE itself would write from the
+    // same sample. Progress reporting stays with the caller's command.
+    inline_sample: Option<(&[HeapTupleData<'_>], f64)>,
 ) -> PgResult<()> {
     let anl = MemoryContext::new("Analyze");
     let anl_mcx = anl.mcx();
@@ -494,17 +600,38 @@ fn do_analyze_rel<'mcx>(
     let mut totalrows = 0.0f64;
     let mut totaldeadrows = 0.0f64;
     let mut rows: PgVec<'_, HeapTupleData<'_>> = PgVec::new_in(anl_mcx);
-    pgstat_progress_update_param(
-        PROGRESS_ANALYZE_PHASE,
-        if inh {
-            PROGRESS_ANALYZE_PHASE_ACQUIRE_SAMPLE_ROWS_INH
-        } else {
-            PROGRESS_ANALYZE_PHASE_ACQUIRE_SAMPLE_ROWS
-        },
-    );
+    if inline_sample.is_none() {
+        pgstat_progress_update_param(
+            PROGRESS_ANALYZE_PHASE,
+            if inh {
+                PROGRESS_ANALYZE_PHASE_ACQUIRE_SAMPLE_ROWS_INH
+            } else {
+                PROGRESS_ANALYZE_PHASE_ACQUIRE_SAMPLE_ROWS
+            },
+        );
+    }
     let anl_trace = analyze_trace();
     let t_acquire = std::time::Instant::now();
-    let numrows = if inh {
+    let numrows = if let Some((prows, ptotal)) = inline_sample {
+        debug_assert!(!inh, "inline sample is a single-relation (non-inh) pass");
+        for t in prows {
+            // SAFETY: the caller's sample images outlive this call (they
+            // live in the load statement's context); the reborrow mirrors
+            // compute_index_stats' shouldFree=false pattern.
+            let tup = unsafe {
+                HeapTupleData::from_raw_parts(
+                    core::ptr::from_ref(t.t_data()).cast::<u8>(),
+                    t.t_len,
+                    t.t_self,
+                    t.t_tableOid,
+                )
+            };
+            rows.push(tup);
+        }
+        totalrows = ptotal;
+        totaldeadrows = 0.0;
+        prows.len() as i32
+    } else if inh {
         acquire_inherited_sample_rows(
             anl_mcx,
             onerel,
@@ -535,7 +662,12 @@ fn do_analyze_rel<'mcx>(
     let t_compute = std::time::Instant::now();
     let mut maxcol: (i32, f64) = (0, 0.0);
     if numrows > 0 {
-        pgstat_progress_update_param(PROGRESS_ANALYZE_PHASE, PROGRESS_ANALYZE_PHASE_COMPUTE_STATS);
+        if inline_sample.is_none() {
+            pgstat_progress_update_param(
+                PROGRESS_ANALYZE_PHASE,
+                PROGRESS_ANALYZE_PHASE_COMPUTE_STATS,
+            );
+        }
 
         // Bump: armed cmp frames detoast packed by-ref args here per comparison,
         // freed wholesale at the per-column reset (C pfrees per call).
@@ -654,7 +786,12 @@ fn do_analyze_rel<'mcx>(
         );
     }
 
-    pgstat_progress_update_param(PROGRESS_ANALYZE_PHASE, PROGRESS_ANALYZE_PHASE_FINALIZE_ANALYZE);
+    if inline_sample.is_none() {
+        pgstat_progress_update_param(
+            PROGRESS_ANALYZE_PHASE,
+            PROGRESS_ANALYZE_PHASE_FINALIZE_ANALYZE,
+        );
+    }
 
     if !inh {
         // Storage-less relkinds (foreign tables) have no visibility map.
