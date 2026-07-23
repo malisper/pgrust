@@ -22,6 +22,38 @@ use ::types_error::{PgError, PgResult};
 pub const SEG_BYTES: u64 = 1 << 30;
 pub const BLCKSZ: u64 = 8192;
 
+/// Effective segment size. Production builds const-fold the 1 GiB law; test
+/// and sim builds admit a process-global override so multi-segment parts
+/// (and their crash trajectories) are cheap to mint.
+#[cfg(not(any(test, pgrust_sim)))]
+#[inline(always)]
+pub fn seg_bytes() -> u64 {
+    SEG_BYTES
+}
+
+#[cfg(any(test, pgrust_sim))]
+pub fn seg_bytes() -> u64 {
+    *seg_bytes_cell().get_or_init(|| SEG_BYTES)
+}
+
+/// TEST SUPPORT (crash batteries): shrink the segment size for this process.
+/// First initialization wins (OnceLock) — call before the battery's first
+/// SegFile op; a repeat call with the same value is a no-op, a conflicting
+/// value asserts. Multiples of BLCKSZ only (pad_and_sync's md contract).
+#[cfg(any(test, pgrust_sim))]
+#[doc(hidden)]
+pub fn set_seg_bytes_for_tests(v: u64) {
+    assert!(v > 0 && v.is_multiple_of(BLCKSZ), "test segment size must be a BLCKSZ multiple");
+    let installed = *seg_bytes_cell().get_or_init(|| v);
+    assert!(installed == v, "seg_bytes already initialized to {installed}");
+}
+
+#[cfg(any(test, pgrust_sim))]
+fn seg_bytes_cell() -> &'static std::sync::OnceLock<u64> {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    &V
+}
+
 fn io_err(path: &str, e: std::io::Error) -> Box<PgError> {
     Box::new(PgError::error(format!("cbstore io error on \"{path}\": {e}")))
 }
@@ -105,12 +137,20 @@ fn sync_fd(fd: libc::c_int, path: &str) -> PgResult<()> {
 pub struct SegFile {
     base: String,
     segs: Vec<SegFd>,
+    /// A segment file may have been CREATED since the last parent-directory
+    /// fsync (any create-armed open of a previously-unopened segno —
+    /// conservative: O_CREAT does not report whether the name existed). Its
+    /// directory entry is volatile until [`SegFile::sync_dir_if_minted`]
+    /// runs: fdatasync of the segment persists the file's DATA, not the
+    /// dirent that names it, so a crash can keep the bytes and the published
+    /// footer pointer while dropping the file itself (GH issue #2).
+    minted: bool,
 }
 
 impl SegFile {
     pub fn open_rw(base: &str) -> PgResult<SegFile> {
         let f = open_fd(base, libc::O_RDWR)?;
-        let mut sf = SegFile { base: base.to_string(), segs: vec![f] };
+        let mut sf = SegFile { base: base.to_string(), segs: vec![f], minted: false };
         loop {
             let p = seg_path(&sf.base, sf.segs.len());
             match open_fd(&p, libc::O_RDWR) {
@@ -126,15 +166,63 @@ impl SegFile {
             let p = seg_path(&self.base, self.segs.len());
             let flags = if create { libc::O_RDWR | libc::O_CREAT } else { libc::O_RDWR };
             self.segs.push(open_fd(&p, flags)?);
+            if create {
+                self.minted = true;
+            }
         }
         Ok(self.segs[segno].raw())
     }
 
+    /// Directory-entry durability for minted segments — the parent-dir half
+    /// of the create recipe (fsync the file, then fsync its directory; the
+    /// SLRU segment-create convention, fd.c fsync_fname(dir, true)). Callers
+    /// MUST run this after the segments' own syncs and BEFORE publishing any
+    /// pointer that reaches into a minted segment (writer.rs finish: the
+    /// header's footer_off). Synchronous on the commit path by design:
+    /// segment creates are not WAL-logged and sit in no checkpointer fsync
+    /// set, so nothing else ever persists the dirent. No-op unless a segment
+    /// was minted since the last call (once per 1 GiB spill, not per
+    /// commit).
+    pub fn sync_dir_if_minted(&mut self) -> PgResult<()> {
+        if !self.minted {
+            return Ok(());
+        }
+        let dir = match self.base.rfind('/') {
+            Some(0) => "/",
+            Some(i) => &self.base[..i],
+            None => ".",
+        };
+        // fd.c fsync_fname_ext dir posture: open O_RDONLY (directories
+        // refuse writable opens); an fsync that the platform refuses for
+        // directories (EBADF/EINVAL) is ignorable — the open+retry loop
+        // matches the segment arms above otherwise.
+        let f = open_fd(dir, libc::O_RDONLY)?;
+        while vfs::fsync(f.raw()) < 0 {
+            let en = vfs::get_errno();
+            if en == libc::EINTR {
+                continue;
+            }
+            if en == libc::EBADF || en == libc::EINVAL {
+                break;
+            }
+            return Err(io_err_errno(dir));
+        }
+        self.minted = false;
+        Ok(())
+    }
+
+    /// Is a minted segment's dirent still awaiting its parent-dir fsync?
+    /// (Test observability for the mint→publish ordering contract.)
+    #[doc(hidden)]
+    pub fn dirents_pending(&self) -> bool {
+        self.minted
+    }
+
     pub fn write_all_at(&mut self, mut buf: &[u8], mut off: u64) -> PgResult<()> {
         while !buf.is_empty() {
-            let segno = (off / SEG_BYTES) as usize;
-            let seg_off = off % SEG_BYTES;
-            let take = ((SEG_BYTES - seg_off) as usize).min(buf.len());
+            let segno = (off / seg_bytes()) as usize;
+            let seg_off = off % seg_bytes();
+            let take = ((seg_bytes() - seg_off) as usize).min(buf.len());
             let fd = self.seg_for(segno, true)?;
             // FileExt::write_all_at parity: pwrite loop, EINTR retried,
             // zero-progress write => WriteZero with std's message text.
@@ -167,9 +255,9 @@ impl SegFile {
 
     pub fn read_exact_at(&mut self, mut buf: &mut [u8], mut off: u64) -> PgResult<()> {
         while !buf.is_empty() {
-            let segno = (off / SEG_BYTES) as usize;
-            let seg_off = off % SEG_BYTES;
-            let take = ((SEG_BYTES - seg_off) as usize).min(buf.len());
+            let segno = (off / seg_bytes()) as usize;
+            let seg_off = off % seg_bytes();
+            let take = ((seg_bytes() - seg_off) as usize).min(buf.len());
             let fd = self.seg_for(segno, false)?;
             // FileExt::read_exact_at parity: pread loop, EINTR retried, EOF
             // before the span fills => UnexpectedEof with std's message text.
@@ -226,9 +314,9 @@ impl SegFile {
         {
             let (mut off, mut len) = (off, len);
             while len > 0 {
-                let segno = (off / SEG_BYTES) as usize;
-                let seg_off = off % SEG_BYTES;
-                let take = (SEG_BYTES - seg_off).min(len);
+                let segno = (off / seg_bytes()) as usize;
+                let seg_off = off % seg_bytes();
+                let take = (seg_bytes() - seg_off).min(len);
                 let Ok(fd) = self.seg_for(segno, false) else { return };
                 // Hint via the Vfs boundary; same spans, same order (the
                 // binding no-reorder/no-coalesce rule), errors ignored.
@@ -246,12 +334,12 @@ impl SegFile {
     /// md contract: every non-last segment is exactly SEG_BYTES; pad every
     /// segment's tail to a BLCKSZ multiple so mdnblocks' division is exact.
     pub fn pad_and_sync(&mut self, logical_end: u64) -> PgResult<()> {
-        let nsegs = (logical_end.div_ceil(SEG_BYTES) as usize).max(1);
+        let nsegs = (logical_end.div_ceil(seg_bytes()) as usize).max(1);
         for segno in 0..nsegs {
             let want = if segno + 1 < nsegs {
-                SEG_BYTES
+                seg_bytes()
             } else {
-                (logical_end - segno as u64 * SEG_BYTES).div_ceil(BLCKSZ) * BLCKSZ
+                (logical_end - segno as u64 * seg_bytes()).div_ceil(BLCKSZ) * BLCKSZ
             };
             let fd = self.seg_for(segno, true)?;
             let mut fi = vfs::FileInfo::zeroed();
@@ -366,7 +454,7 @@ impl SegMap {
         if total == 0 {
             return Ok(None);
         }
-        let maplen = ((files.len() - 1) as u64 * SEG_BYTES + *lens.last().unwrap()) as usize;
+        let maplen = ((files.len() - 1) as u64 * seg_bytes() + *lens.last().unwrap()) as usize;
         Ok(Some((files, lens, maplen)))
     }
 
@@ -416,7 +504,7 @@ impl SegMap {
             if lens[i] == 0 {
                 continue;
             }
-            let at = i * SEG_BYTES as usize;
+            let at = i * seg_bytes() as usize;
             let dst = &mut buf[at..at + lens[i] as usize];
             let mut done = 0usize;
             while done < dst.len() {
@@ -466,7 +554,7 @@ impl SegMap {
                 if lens[i] == 0 {
                     continue;
                 }
-                let at = (reserve as *mut u8).add(i * SEG_BYTES as usize);
+                let at = (reserve as *mut u8).add(i * seg_bytes() as usize);
                 let p = libc::mmap(
                     at as *mut libc::c_void,
                     lens[i] as usize,
@@ -506,5 +594,65 @@ impl Drop for SegMap {
         unsafe {
             libc::munmap(self.ptr as *mut libc::c_void, self.maplen);
         }
+    }
+}
+
+// Mint→publish dirent-durability contract (GH issue #2). The crash-cut
+// batteries live in tests/sim_dirsync.rs (SimVfs models dirent loss); these
+// native tests pin the flag semantics the writer's publish ordering rides.
+#[cfg(test)]
+mod dirsync_tests {
+    use super::*;
+
+    fn tmp(name: &str) -> String {
+        let p = std::env::temp_dir()
+            .join(format!("cbstore-dirsync-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_file(&p);
+        let _ = std::fs::remove_file(format!("{}.1", p.display()));
+        std::fs::write(&p, []).unwrap();
+        p.to_str().unwrap().to_string()
+    }
+
+    // A write spanning the segment boundary mints `base.1` (sparse file —
+    // nothing materializes the 1 GiB) and raises the pending-dirent flag;
+    // sync_dir_if_minted clears it, and a second call is a no-op.
+    #[test]
+    fn mint_sets_flag_and_dir_sync_clears_it() {
+        let base = tmp("mint");
+        let mut f = SegFile::open_rw(&base).unwrap();
+        assert!(!f.dirents_pending(), "no mint yet");
+        f.write_all_at(b"abc", seg_bytes() - 1).unwrap();
+        assert!(f.dirents_pending(), "boundary-crossing write minted base.1");
+        f.sync_dir_if_minted().unwrap();
+        assert!(!f.dirents_pending(), "dir fsync retires the pending mint");
+        f.sync_dir_if_minted().unwrap(); // idempotent no-op
+        assert!(!f.dirents_pending());
+
+        // The bytes really do span the seam.
+        let mut buf = [0u8; 3];
+        f.read_exact_at(&mut buf, seg_bytes() - 1).unwrap();
+        assert_eq!(&buf, b"abc");
+        drop(f);
+
+        // Reopening an existing multi-segment part mints nothing.
+        let f2 = SegFile::open_rw(&base).unwrap();
+        assert!(!f2.dirents_pending(), "open_rw of existing segments is not a mint");
+        drop(f2);
+        std::fs::remove_file(&base).unwrap();
+        std::fs::remove_file(format!("{base}.1")).unwrap();
+    }
+
+    // Single-segment traffic never raises the flag: the commit path owes no
+    // dir fsync unless a segment file was actually created.
+    #[test]
+    fn no_mint_no_pending_dirents() {
+        let base = tmp("nomint");
+        let mut f = SegFile::open_rw(&base).unwrap();
+        f.write_all_at(b"hello", 0).unwrap();
+        f.pad_and_sync(5).unwrap();
+        assert!(!f.dirents_pending(), "seg 0 existed already; nothing minted");
+        f.sync_dir_if_minted().unwrap(); // no-op, must not error
+        drop(f);
+        std::fs::remove_file(&base).unwrap();
     }
 }
