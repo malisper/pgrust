@@ -25,6 +25,7 @@ pquery = { path = "../pquery" }
 portalmem = { path = "../../utils/mmgr/portalmem" }
 snapmgr = { path = "../../utils/time/snapmgr" }
 xact = { path = "../../access/transam/xact" }
+pg_prng = { path = "../../../common/pg_prng" }
 slot = { path = "../../replication/slot" }
 pqcomm = { path = "../../libpq/pqcomm" }
 pqcomm_seams = { path = "../../libpq/pqcomm_seams" }
