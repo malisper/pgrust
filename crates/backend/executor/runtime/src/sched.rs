@@ -277,19 +277,31 @@ pub(crate) fn pool_qos_enabled() -> bool {
 // memory excluded) when available, else the installed accounted-bytes probe
 // (mcx global block bytes — boot glue installs it; this crate stays
 // mcx-free). Bar: `PGRUST_RUNTIME_QOS_MEM_BAR_KB` (>0 arms at that many KB;
-// `0`/`off` DISARMS the governor — the t35 kill spelling), else 80% of the
-// cgroup v2 memory.max when bounded, else disarmed (an unbounded host never
-// pays a read). The verdict is cached and refreshed at most every
-// GOVERNOR_REFRESH_MS — the yield gate costs one Relaxed load between
-// refreshes.
+// `0`/`off` DISARMS the governor — the t35 kill spelling), else the
+// BOOT-DERIVED MEMORY MODEL bar (the bar-derivation law, GL-MEMCEIL-1
+// amendment): memory.max − page_cache_reserve − kernel_slack, on this
+// governor's ANON basis; unbounded hosts stay disarmed (never pay a
+// read). The model terms mirror memwatchdog::derived_memory_bar (the dep
+// direction keeps this crate postmaster-free — keep the constants in
+// lockstep; derivation + death-ledger table live there). The verdict is
+// cached and refreshed at most every GOVERNOR_REFRESH_MS — the yield gate
+// costs one Relaxed load between refreshes.
 // ---------------------------------------------------------------------------
 
 const GOVERNOR_REFRESH_MS: u64 = 64;
-const GOVERNOR_AUTO_BAR_PCT: u64 = 80;
+/// Model term (lockstep with memwatchdog::MEM_MODEL_PAGE_CACHE_RESERVE_PCT):
+/// the reclaim-resistant file-backed share of memory.max at the kill
+/// profile of record.
+const MEM_MODEL_PAGE_CACHE_RESERVE_PCT: u64 = 31;
+/// Model term (lockstep with memwatchdog::MEM_MODEL_KERNEL_SLACK_PCT):
+/// kernel slab/sock overhead + the shed/error defense margin.
+const MEM_MODEL_KERNEL_SLACK_PCT: u64 = 4;
 
 #[cfg(not(loom))]
 mod qos_governor {
-    use super::{GOVERNOR_AUTO_BAR_PCT, GOVERNOR_REFRESH_MS};
+    use super::{
+        GOVERNOR_REFRESH_MS, MEM_MODEL_KERNEL_SLACK_PCT, MEM_MODEL_PAGE_CACHE_RESERVE_PCT,
+    };
     use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 
     /// Accounted-bytes fallback probe (installed by the pool boot glue).
@@ -329,12 +341,29 @@ mod qos_governor {
         read(&dir).or_else(|| read(std::path::Path::new("/sys/fs/cgroup")))
     }
 
+    /// The boot-derived model bar (bar-derivation law):
+    /// memory.max − page_cache_reserve − kernel_slack.
+    fn model_bar(memory_max: u64) -> u64 {
+        memory_max
+            .saturating_sub(memory_max / 100 * MEM_MODEL_PAGE_CACHE_RESERVE_PCT)
+            .saturating_sub(memory_max / 100 * MEM_MODEL_KERNEL_SLACK_PCT)
+    }
+
     fn resolve_bar() -> u64 {
-        if let Some(b) = bar_from_env(std::env::var("PGRUST_RUNTIME_QOS_MEM_BAR_KB").ok().as_deref())
-        {
-            return b;
+        let bar = match bar_from_env(
+            std::env::var("PGRUST_RUNTIME_QOS_MEM_BAR_KB").ok().as_deref(),
+        ) {
+            Some(b) => b,
+            None => cgroup_mem_max().map_or(0, model_bar),
+        };
+        if bar > 0 {
+            // Posture witness (harvested-log law): the armed bar, once.
+            eprintln!(
+                "LOG:  pool-qos memory governor bar {} kB (PGRUST_RUNTIME_QOS_MEM_BAR_KB; model: memory.max - page_cache_reserve {MEM_MODEL_PAGE_CACHE_RESERVE_PCT}% - kernel_slack {MEM_MODEL_KERNEL_SLACK_PCT}%)",
+                bar / 1024
+            );
         }
-        cgroup_mem_max().map_or(0, |m| m / 100 * GOVERNOR_AUTO_BAR_PCT)
+        bar
     }
 
     /// Anonymous RSS (kB) from /proc/self/status; None off-Linux.
