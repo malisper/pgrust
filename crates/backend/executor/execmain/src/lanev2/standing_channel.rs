@@ -344,12 +344,31 @@ fn wait_engaged(
             parallel::standing::close_and_await(&entry);
             return Err(Box::new(PgError::new(ERROR, arm.died)));
         }
+        // PRE-CLAIM phase (GL-ZSTALL-1): before anything has claimed, the
+        // only wakes the leader can rely on are pre-claim refusals — and a
+        // worker set that never visits the board (all parked blocked on a
+        // database mismatch, or busy elsewhere) sends none. Bound the park
+        // by the claim deadline so the fallback branch above fires ON the
+        // deadline instead of at the next MQ-recheck quantum (~1 s). Once
+        // any claim exists, claim-holder progress (DetachGuard's
+        // count-then-wake) drives the loop and the plain quantum is right.
+        let preclaim_bound_ms = (started == 0 && claimed_now == 0).then(|| {
+            let deadline = standing_claim_deadline();
+            let elapsed = std::time::Duration::from_nanos(t0.elapsed_ns());
+            i64::try_from(deadline.saturating_sub(elapsed).as_millis())
+                .unwrap_or(i64::MAX)
+                .max(1)
+        });
         // F1 PgResult propagation (train-12 composition seam): a raised
         // cancel disposition (statement_timeout / pg_cancel_backend)
         // surfaces from the latch quantum — the F1 defect layer 2b
         // branch's standing-loop mirror, same protocol as the CFI
         // branch above (abort THEN drain THEN close-and-await).
-        if let Err(e) = parallel::wait_parallel_finish_quantum() {
+        let quantum = match preclaim_bound_ms {
+            Some(ms) => parallel::wait_parallel_finish_quantum_bounded(ms),
+            None => parallel::wait_parallel_finish_quantum(),
+        };
+        if let Err(e) = quantum {
             rg.abort();
             (leader.drain)(rg);
             take_slot();

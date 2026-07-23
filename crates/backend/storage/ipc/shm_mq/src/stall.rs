@@ -99,6 +99,19 @@ impl StallDetector {
         StallDetector { threshold_ms, recheck_ms, start_ms: None, reported: false }
     }
 
+    /// `new()` with the recheck cadence additionally capped at `cap_ms`
+    /// (floored at 1 ms): wait sites whose ONLY guaranteed progress source
+    /// is their own deadline — a wake may legitimately never come — bound
+    /// every sleep to that deadline instead of the process-wide cadence.
+    /// With the cadence knob disabled (<= 0) the cap alone bounds the
+    /// sleep: such a site cannot afford an infinite park.
+    pub fn new_capped(cap_ms: i64) -> Self {
+        let cap = cap_ms.max(1);
+        let recheck = recheck_ms();
+        let capped = if recheck > 0 { recheck.min(cap) } else { cap };
+        Self::with_thresholds(threshold_ms(), capped)
+    }
+
     fn active(&self) -> bool {
         self.threshold_ms > 0 && !self.reported
     }
@@ -351,5 +364,21 @@ mod stall_tests {
         let mut d = StallDetector::with_thresholds(0, 1_000);
         assert_eq!(d.next_timeout_ms(0), Some(1_000));
         assert_eq!(d.note_timeout(100_000), None);
+    }
+
+    /// new_capped: the cap wins under the cadence, the cadence wins under
+    /// the cap, and a degenerate cap floors at 1 ms — a deadline-owning
+    /// wait site can never sleep past its deadline OR forever. (Env-default
+    /// cadence assumed: the test binary runs without the MQ knobs set.)
+    #[test]
+    fn capped_bounds_every_sleep_to_the_deadline() {
+        let mut d = StallDetector::new_capped(100);
+        assert_eq!(d.next_timeout_ms(0), Some(100));
+        let mut d = StallDetector::new_capped(5_000_000);
+        assert_eq!(d.next_timeout_ms(0), Some(1_000));
+        let mut d = StallDetector::new_capped(0);
+        assert_eq!(d.next_timeout_ms(0), Some(1));
+        let mut d = StallDetector::new_capped(-7);
+        assert_eq!(d.next_timeout_ms(0), Some(1));
     }
 }

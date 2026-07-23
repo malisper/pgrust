@@ -703,6 +703,22 @@ pub fn wait_parallel_finish_quantum() -> PgResult<()> {
     wait_on_my_latch(WAIT_EVENT_PARALLEL_FINISH)
 }
 
+/// `wait_parallel_finish_quantum` with the sleep additionally bounded by
+/// `max_ms`: the standing channels' PRE-CLAIM phase has no guaranteed wake
+/// source (an absent or fully-mismatched worker set may never touch the
+/// board), so the leader's park must not outlive the claim deadline its
+/// loop enforces — an unbounded quantum turned the deadline into "one full
+/// MQ-recheck period" (GL-ZSTALL-1). Same Err propagation contract as the
+/// unbounded quantum (a raised cancel disposition surfaces from the latch
+/// sleep and must abort the ceremony).
+pub fn wait_parallel_finish_quantum_bounded(max_ms: i64) -> PgResult<()> {
+    let latch = g::MyLatch().expect("parallel leader without MyLatch");
+    let mut d = shm_mq::stall::StallDetector::new_capped(max_ms);
+    shm_mq::stall::wait_latch_reporting(latch, WAIT_EVENT_PARALLEL_FINISH, &mut d, &mut |_| {})?;
+    latch::ResetLatch(latch);
+    Ok(())
+}
+
 /// True when every launched worker's underlying bgworker task has ENDED
 /// (thread exited, died, or parked back to the pool). The M1 runtime-scan
 /// leader's liveness probe: all stopped while the pinned RG is incomplete
