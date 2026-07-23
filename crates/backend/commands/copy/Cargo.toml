@@ -80,6 +80,13 @@ parallel = { path = "../../access/transam/parallel" }
 latch = { path = "../../storage/ipc/latch" }
 types_storage = { path = "../../../_support/types/types_storage" }
 pgrcolumnar = { path = "../../access/pgrcolumnar" }
+# copyfast lever 3 (analyze-during-load): the merge pump reservoir-samples
+# via commands_analyze's Vitter kernels and hands the sample to its
+# standard ANALYZE compute/write half; heaptuple/pg_prng for sample-tuple
+# forming and the leader-drawn reservoir seed.
+commands_analyze = { path = "../analyze" }
+heaptuple = { path = "../../access/common/heaptuple" }
+pg_prng = { path = "../../../common/pg_prng" }
 memchr = "2"
 # FORMAT 'parquet' (fromparquet.rs): the general parquet reader + text-datum
 # construction + type names for schema-mismatch errors.
