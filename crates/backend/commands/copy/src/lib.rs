@@ -20,6 +20,7 @@ use types_tuple::TupleDescData;
 mod from;
 mod fromparquet;
 mod fromparse;
+mod memheadroom;
 mod parallel;
 mod to;
 #[cfg(test)]

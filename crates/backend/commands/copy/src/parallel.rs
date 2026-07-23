@@ -247,55 +247,14 @@ fn memruns_knob() -> MemRuns {
     })
 }
 
-/// Memory headroom for the auto-sized mem-run budget: cgroup v2
-/// limit−usage plus reclaimable file cache (the pod/container case),
-/// cgroup v1 fallback, then /proc/meminfo MemAvailable. None = no reliable
-/// signal (auto stays off; the explicit-MB knob still works).
+/// Memory headroom for the auto-sized mem-run budget: the container-aware
+/// cgroup-hierarchy walk in memheadroom.rs (GL-COPYFAST-1 §3 defect fix —
+/// a leaf reading "max" no longer falls through to node meminfo when an
+/// ancestor slice carries the limit or the hierarchy is namespaced-hidden).
+/// None = no trustworthy signal (auto stays off; the explicit-MB knob is
+/// the trump and still works).
 fn memory_headroom_bytes() -> Option<u64> {
-    #[cfg(target_os = "linux")]
-    {
-        fn read_num(p: &str) -> Option<u64> {
-            std::fs::read_to_string(p).ok()?.trim().parse().ok()
-        }
-        // cgroup v2: memory.max is numeric when limited ("max" = unlimited
-        // -> parse fails -> fall through).
-        if let Some(lim) = read_num("/sys/fs/cgroup/memory.max") {
-            let cur = read_num("/sys/fs/cgroup/memory.current")?;
-            let inactive_file = std::fs::read_to_string("/sys/fs/cgroup/memory.stat")
-                .ok()
-                .and_then(|s| {
-                    s.lines().find_map(|l| {
-                        l.strip_prefix("inactive_file ")?.trim().parse::<u64>().ok()
-                    })
-                })
-                .unwrap_or(0);
-            return Some(lim.saturating_sub(cur).saturating_add(inactive_file));
-        }
-        // cgroup v1 (bogus huge value = unlimited -> fall through).
-        if let (Some(lim), Some(cur)) = (
-            read_num("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
-            read_num("/sys/fs/cgroup/memory/memory.usage_in_bytes"),
-        ) {
-            if lim < (1u64 << 60) {
-                return Some(lim.saturating_sub(cur));
-            }
-        }
-        // No container limit: the kernel's own availability estimate.
-        let mi = std::fs::read_to_string("/proc/meminfo").ok()?;
-        let kb = mi.lines().find_map(|l| {
-            l.strip_prefix("MemAvailable:")?
-                .trim()
-                .strip_suffix("kB")?
-                .trim()
-                .parse::<u64>()
-                .ok()
-        })?;
-        Some(kb * 1024)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
-    }
+    crate::memheadroom::memory_headroom_bytes()
 }
 
 /// Resolve the mem-run budget in bytes at admission (0 = not engageable).
