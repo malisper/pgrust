@@ -130,9 +130,27 @@ struct PageState {
     val: ValState,
 }
 
+/// Chunk byte storage: owned (per-chunk pread) or a slice of one shared
+/// whole-row-group read (the coalesced-read lane — sequential range read +
+/// in-memory demux).
+pub(crate) enum ChunkBytes {
+    Owned(Vec<u8>),
+    Shared { buf: std::sync::Arc<Vec<u8>>, start: usize, len: usize },
+}
+
+impl ChunkBytes {
+    #[inline]
+    fn bytes(&self) -> &[u8] {
+        match self {
+            ChunkBytes::Owned(v) => v,
+            ChunkBytes::Shared { buf, start, len } => &buf[*start..*start + *len],
+        }
+    }
+}
+
 pub struct ColumnCursor {
     /// Whole chunk bytes (dictionary page + data pages), 64-byte padded.
-    chunk: Vec<u8>,
+    chunk: ChunkBytes,
     chunk_len: usize,
     codec: CodecId,
     phys: Phys,
@@ -154,7 +172,7 @@ fn oom() -> Box<PgError> {
 
 impl ColumnCursor {
     pub(crate) fn new(
-        mut chunk: Vec<u8>,
+        chunk: ChunkBytes,
         codec: CodecId,
         phys: Phys,
         max_def: u16,
@@ -162,10 +180,19 @@ impl ColumnCursor {
         name: String,
         num_values: i64,
     ) -> PgResult<ColumnCursor> {
-        let chunk_len = chunk.len();
-        chunk.try_reserve(PAD).map_err(|_| oom())?;
-        chunk.resize(chunk_len + PAD, 0);
-        chunk.truncate(chunk_len);
+        // Owned chunks get their 64-byte pad here; shared buffers were
+        // padded once at the whole-row-group read.
+        let chunk = match chunk {
+            ChunkBytes::Owned(mut v) => {
+                let n = v.len();
+                v.try_reserve(PAD).map_err(|_| oom())?;
+                v.resize(n + PAD, 0);
+                v.truncate(n);
+                ChunkBytes::Owned(v)
+            }
+            shared => shared,
+        };
+        let chunk_len = chunk.bytes().len();
         Ok(ColumnCursor {
             chunk,
             chunk_len,
@@ -207,7 +234,7 @@ impl ColumnCursor {
         let ColumnCursor { chunk, page, scratch, dict, validate_utf8, name, values_left, .. } =
             self;
         let page_st = page.as_mut().expect("fill_from_page with a page");
-        let buf: &[u8] = if page_st.in_chunk { chunk } else { scratch };
+        let buf: &[u8] = if page_st.in_chunk { chunk.bytes() } else { scratch };
         let k = want.min(page_st.values_left);
         debug_assert!(k > 0);
 
@@ -373,7 +400,8 @@ impl ColumnCursor {
             if self.walk >= self.chunk_len {
                 return Err(corrupt_page("column chunk ends before the declared value count"));
             }
-            let head = parse_page_header(&self.chunk[..self.chunk_len], self.walk, &self.name)?;
+            let head =
+                parse_page_header(&self.chunk.bytes()[..self.chunk_len], self.walk, &self.name)?;
             let payload_start = head.payload_at;
             let payload_end = payload_start + head.compressed_size;
             self.walk = payload_end;
@@ -395,7 +423,7 @@ impl ColumnCursor {
                         head.compressed_size,
                         head.uncompressed_size,
                     )?;
-                    let buf: &[u8] = if in_chunk { &self.chunk } else { &self.scratch };
+                    let buf: &[u8] = if in_chunk { self.chunk.bytes() } else { &self.scratch };
                     self.dict = Some(decode_dict(
                         buf,
                         start,
@@ -413,7 +441,7 @@ impl ColumnCursor {
                         head.compressed_size,
                         head.uncompressed_size,
                     )?;
-                    let buf: &[u8] = if in_chunk { &self.chunk } else { &self.scratch };
+                    let buf: &[u8] = if in_chunk { self.chunk.bytes() } else { &self.scratch };
                     // v1 page layout: [rep levels: absent at max_rep=0]
                     // [def levels: 4-byte len + RLE at max_def=1] [values].
                     let mut vpos = start;
@@ -518,6 +546,7 @@ impl ColumnCursor {
         }
         let src = self
             .chunk
+            .bytes()
             .get(start..start + compressed)
             .ok_or_else(|| corrupt_page("page payload overruns chunk"))?;
         decompress_page(self.codec, src, &mut self.scratch, uncompressed)?;

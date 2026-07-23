@@ -36,7 +36,7 @@ const VARHDRSZ_I32: i32 = 4;
 
 /// How one bound column's decoded values become datums.
 #[derive(Clone, Copy)]
-enum Conv {
+pub(crate) enum Conv {
     Bool,
     I16FromI32,
     I32,
@@ -58,21 +58,33 @@ enum Conv {
     Bytea,
 }
 
-struct Binding {
+pub(crate) struct Binding {
     /// 0-based physical attribute index in the target tuple descriptor.
-    attidx: usize,
-    conv: Conv,
+    pub(crate) attidx: usize,
+    pub(crate) conv: Conv,
     /// Dense index into the per-binding batch array.
-    batch: usize,
+    pub(crate) batch: usize,
+}
+
+/// The resolved schema-match + conversion plan: shareable across parallel
+/// decode workers (plain data).
+pub(crate) struct ParquetPlan {
+    pub(crate) bindings: Vec<Binding>,
+    /// Parquet schema ordinals + validation flags, in binding order (the
+    /// row-group open feed).
+    pub(crate) cols: Vec<usize>,
+    pub(crate) vutf8: Vec<bool>,
+}
+
+impl ParquetPlan {
+    pub(crate) fn make_batches(&self, meta: &parquet_read::FileMeta) -> Vec<ColumnBatch> {
+        self.cols.iter().map(|&c| ColumnBatch::new_for(meta.columns[c].phys)).collect()
+    }
 }
 
 pub(crate) struct ParquetSrc {
     reader: FileReader,
-    bindings: Vec<Binding>,
-    /// Parquet ordinals + validation flags, in binding order (feed for
-    /// FileReader::row_group).
-    cols: Vec<usize>,
-    vutf8: Vec<bool>,
+    plan: std::sync::Arc<ParquetPlan>,
     batches: Vec<ColumnBatch>,
     batch_len: usize,
     batch_pos: usize,
@@ -190,8 +202,32 @@ pub(crate) fn open_source(
         return Err(stdin_unsupported());
     };
     let reader = FileReader::open(filename)?;
-    let ncols = reader.meta.columns.len();
+    let plan = resolve_plan(&reader.meta, tup_desc, attnumlist, match_by_name)?;
+    let batches = plan.make_batches(&reader.meta);
+    let file_len = reader.file_len();
+    Ok((
+        Box::new(ParquetSrc {
+            reader,
+            plan: std::sync::Arc::new(plan),
+            batches,
+            batch_len: 0,
+            batch_pos: 0,
+            rg_idx: 0,
+            rg: None,
+        }),
+        file_len,
+    ))
+}
 
+/// Schema match (pg_parquet match_by semantics) + conversion resolution.
+/// All schema-level errors surface here, before any row is read.
+pub(crate) fn resolve_plan(
+    meta: &parquet_read::FileMeta,
+    tup_desc: &TupleDescData<'_>,
+    attnumlist: &[i16],
+    match_by_name: bool,
+) -> PgResult<ParquetPlan> {
+    let ncols = meta.columns.len();
     if !match_by_name && ncols != attnumlist.len() {
         // pg_parquet position-matching contract.
         return Err(Box::new(
@@ -207,14 +243,13 @@ pub(crate) fn open_source(
     let mut bindings = Vec::with_capacity(attnumlist.len());
     let mut cols = Vec::with_capacity(attnumlist.len());
     let mut vutf8 = Vec::with_capacity(attnumlist.len());
-    let mut batches = Vec::with_capacity(attnumlist.len());
     let mut any_text = false;
     for (i, &attnum) in attnumlist.iter().enumerate() {
         let attidx = attnum as usize - 1;
         let att = tup_desc.attr(attidx);
         let attname = String::from_utf8_lossy(att.attname.name_str()).into_owned();
         let col = if match_by_name {
-            match reader.meta.columns.iter().position(|c| c.name == attname) {
+            match meta.columns.iter().position(|c| c.name == attname) {
                 Some(c) => c,
                 None => {
                     return Err(Box::new(
@@ -228,12 +263,11 @@ pub(crate) fn open_source(
         } else {
             i
         };
-        let schema = &reader.meta.columns[col];
+        let schema = &meta.columns[col];
         let conv = resolve_conv(schema, att.atttypid, att.atttypmod, &attname)?;
         any_text |= wants_utf8(conv);
         cols.push(col);
         vutf8.push(wants_utf8(conv));
-        batches.push(ColumnBatch::new_for(schema.phys));
         bindings.push(Binding { attidx, conv, batch: bindings.len() });
     }
 
@@ -247,22 +281,17 @@ pub(crate) fn open_source(
             .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
         ));
     }
+    Ok(ParquetPlan { bindings, cols, vutf8 })
+}
 
-    let file_len = reader.file_len();
-    Ok((
-        Box::new(ParquetSrc {
-            reader,
-            bindings,
-            cols,
-            vutf8,
-            batches,
-            batch_len: 0,
-            batch_pos: 0,
-            rg_idx: 0,
-            rg: None,
-        }),
-        file_len,
-    ))
+impl ParquetSrc {
+    pub(crate) fn reader(&self) -> &FileReader {
+        &self.reader
+    }
+
+    pub(crate) fn plan_arc(&self) -> std::sync::Arc<ParquetPlan> {
+        std::sync::Arc::clone(&self.plan)
+    }
 }
 
 #[cold]
@@ -348,7 +377,7 @@ impl ParquetSrc {
             if self.rg_idx >= self.reader.meta.row_groups.len() {
                 return Ok(false);
             }
-            let rg = self.reader.row_group(self.rg_idx, &self.cols, &self.vutf8)?;
+            let rg = self.reader.row_group(self.rg_idx, &self.plan.cols, &self.plan.vutf8)?;
             *bytes_progress += rg.compressed_bytes;
             self.rg_idx += 1;
             self.rg = Some(rg);
@@ -389,8 +418,8 @@ impl<'mcx> CopyFromState<'mcx, '_> {
 
         // Split borrows: bindings/batches are read, cur_attidx written for
         // error context.
-        let ParquetSrc { bindings, batches, .. } = src.as_mut();
-        for b in bindings.iter() {
+        let ParquetSrc { plan, batches, .. } = src.as_mut();
+        for b in plan.bindings.iter() {
             let batch = &batches[b.batch];
             let m = b.attidx;
             if batch.is_null(k) {
@@ -409,7 +438,7 @@ impl<'mcx> CopyFromState<'mcx, '_> {
 
 /// Decoded cell -> datum. Cheap by-value conversions inline; the checked
 /// arms error with input-function-parity messages.
-fn convert_cell<'mcx>(
+pub(crate) fn convert_cell<'mcx>(
     mcx: Mcx<'mcx>,
     conv: Conv,
     batch: &ColumnBatch,

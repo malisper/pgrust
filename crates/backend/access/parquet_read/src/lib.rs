@@ -77,7 +77,9 @@ pub struct FileReader {
     file: File,
     path: String,
     file_len: u64,
-    pub meta: FileMeta,
+    /// Arc so a parallel driver can share the parsed footer across worker
+    /// threads without reparsing (FileMeta is plain data: Send + Sync).
+    pub meta: std::sync::Arc<FileMeta>,
 }
 
 impl FileReader {
@@ -136,7 +138,12 @@ impl FileReader {
                 }
             }
         }
-        Ok(FileReader { file, path: path.to_string(), file_len, meta })
+        Ok(FileReader {
+            file,
+            path: path.to_string(),
+            file_len,
+            meta: std::sync::Arc::new(meta),
+        })
     }
 
     pub fn path(&self) -> &str {
@@ -147,6 +154,16 @@ impl FileReader {
         self.file_len
     }
 
+    pub fn meta_arc(&self) -> std::sync::Arc<FileMeta> {
+        std::sync::Arc::clone(&self.meta)
+    }
+
+    /// Duplicate the underlying file handle (positioned reads only) for a
+    /// parallel driver's worker threads.
+    pub fn try_clone_file(&self) -> PgResult<File> {
+        self.file.try_clone().map_err(|e| io_error(&self.path, "dup", e))
+    }
+
     /// Open one row group, building cursors for the requested columns.
     /// `validate_utf8[i]` pairs with `columns[i]` (schema ordinals).
     pub fn row_group(
@@ -155,36 +172,117 @@ impl FileReader {
         columns: &[usize],
         validate_utf8: &[bool],
     ) -> PgResult<RowGroupReader> {
-        let rg = self
-            .meta
+        RowGroupReader::open(&self.file, &self.path, &self.meta, rg_idx, columns, validate_utf8)
+    }
+}
+
+/// Compressed bytes this row group's requested chunks occupy (the
+/// parallel driver's memory-budget input).
+pub fn rg_compressed_bytes(meta: &FileMeta, rg_idx: usize, columns: &[usize]) -> u64 {
+    let Some(rg) = meta.row_groups.get(rg_idx) else { return 0 };
+    columns
+        .iter()
+        .filter_map(|&col| rg.chunks.iter().find(|c| c.column == col))
+        .map(|c| c.total_compressed_size.max(0) as u64)
+        .sum()
+}
+
+/// Cursors over one row group's requested columns; all columns advance in
+/// lock-step through `read_batch` calls made by the driver.
+pub struct RowGroupReader {
+    cursors: Vec<ColumnCursor>,
+    num_rows: u64,
+    rows_read: u64,
+    /// Total compressed chunk bytes read for this group (progress metering).
+    pub compressed_bytes: u64,
+}
+
+impl RowGroupReader {
+    /// Shareable open (parallel drivers pass a duplicated handle + the Arc'd
+    /// meta). When the requested chunks are DENSE in the file — the layout
+    /// every columnar writer produces — the whole row-group span is read in
+    /// ONE sequential request and demuxed in memory (per-chunk preads are
+    /// wrong at the small median chunk sizes of wide tables); scattered
+    /// layouts fall back to per-chunk reads.
+    pub fn open(
+        file: &File,
+        path: &str,
+        meta: &FileMeta,
+        rg_idx: usize,
+        columns: &[usize],
+        validate_utf8: &[bool],
+    ) -> PgResult<RowGroupReader> {
+        let rg = meta
             .row_groups
             .get(rg_idx)
-            .ok_or_else(|| not_parquet(&self.path, "row group index out of range"))?;
+            .ok_or_else(|| not_parquet(path, "row group index out of range"))?;
         let mut cursors = Vec::new();
         cursors
             .try_reserve(columns.len())
             .map_err(|_| Box::new(PgError::error("out of memory opening row group")))?;
-        let mut compressed_bytes: u64 = 0;
-        for (&col, &vutf8) in columns.iter().zip(validate_utf8.iter()) {
+
+        // Resolve the chunk set once; compute the span for the dense test.
+        let mut chunks = Vec::with_capacity(columns.len());
+        let (mut lo, mut hi, mut sum) = (u64::MAX, 0u64, 0u64);
+        for &col in columns.iter() {
             let ch = rg
                 .chunks
                 .iter()
                 .find(|c| c.column == col)
-                .ok_or_else(|| not_parquet(&self.path, "column chunk missing from row group"))?;
-            let schema = &self.meta.columns[col];
-            let mut buf = Vec::new();
+                .ok_or_else(|| not_parquet(path, "column chunk missing from row group"))?;
             if ch.num_values > 0 {
                 let start = ch.start_offset() as u64;
+                let end = start + ch.total_compressed_size as u64;
+                lo = lo.min(start);
+                hi = hi.max(end);
+                sum += ch.total_compressed_size as u64;
+            }
+            chunks.push(ch);
+        }
+        // Dense: the span wastes at most 25% + a page of slack over the sum.
+        let span = hi.saturating_sub(if lo == u64::MAX { 0 } else { lo });
+        let dense = sum > 0 && span <= sum + sum / 4 + 8192;
+        let shared: Option<std::sync::Arc<Vec<u8>>> = if dense {
+            let mut buf = Vec::new();
+            buf.try_reserve(span as usize + codec::PAD)
+                .map_err(|_| Box::new(PgError::error("out of memory reading row group")))?;
+            buf.resize(span as usize, 0);
+            read_exact_at(file, path, &mut buf, lo)?;
+            // One pad for the whole shared buffer (initialized capacity).
+            buf.resize(span as usize + codec::PAD, 0);
+            buf.truncate(span as usize);
+            Some(std::sync::Arc::new(buf))
+        } else {
+            None
+        };
+
+        let mut compressed_bytes: u64 = 0;
+        for (ch, &vutf8) in chunks.iter().zip(validate_utf8.iter()) {
+            let schema = &meta.columns[ch.column];
+            let bytes = if ch.num_values == 0 {
+                column::ChunkBytes::Owned(Vec::new())
+            } else if let Some(buf) = &shared {
+                let start = (ch.start_offset() as u64 - lo) as usize;
+                compressed_bytes += ch.total_compressed_size as u64;
+                column::ChunkBytes::Shared {
+                    buf: std::sync::Arc::clone(buf),
+                    start,
+                    len: ch.total_compressed_size as usize,
+                }
+            } else {
+                let start = ch.start_offset() as u64;
                 let size = ch.total_compressed_size as usize;
+                let mut buf = Vec::new();
                 buf.try_reserve(size + codec::PAD).map_err(|_| {
                     Box::new(PgError::error("out of memory reading column chunk"))
                 })?;
                 buf.resize(size, 0);
-                read_exact_at(&self.file, &self.path, &mut buf, start)?;
+                read_exact_at(file, path, &mut buf, start)?;
                 compressed_bytes += size as u64;
-            }
+                column::ChunkBytes::Owned(buf)
+            };
             cursors.push(ColumnCursor::new(
-                buf,
+                bytes,
                 ch.codec,
                 schema.phys,
                 schema.max_def,
@@ -200,19 +298,7 @@ impl FileReader {
             compressed_bytes,
         })
     }
-}
 
-/// Cursors over one row group's requested columns; all columns advance in
-/// lock-step through `read_batch` calls made by the driver.
-pub struct RowGroupReader {
-    cursors: Vec<ColumnCursor>,
-    num_rows: u64,
-    rows_read: u64,
-    /// Total compressed chunk bytes read for this group (progress metering).
-    pub compressed_bytes: u64,
-}
-
-impl RowGroupReader {
     pub fn num_rows(&self) -> u64 {
         self.num_rows
     }
