@@ -1251,8 +1251,14 @@ impl CbWriter {
         self.finish_footer += ft2 - ft1;
 
         // Data + footer durable before the publish (impl doc §5); segment
-        // tails padded to BLCKSZ multiples for md's block accounting.
+        // tails padded to BLCKSZ multiples for md's block accounting. Any
+        // segment file this statement minted (each 1 GiB spill) then needs
+        // its DIRECTORY ENTRY made durable too — fdatasync persists file
+        // data, not the dirent — strictly before footer_off publishes a
+        // pointer into it, or a crash after commit can drop the segment
+        // while the header still points past it (GH issue #2).
         self.file.pad_and_sync(self.write_off)?;
+        self.file.sync_dir_if_minted()?;
         self.write_header(footer_off)?;
         self.file.sync_data()?;
         self.finish_sync += ft2.elapsed();
