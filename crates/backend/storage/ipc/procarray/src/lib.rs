@@ -1155,7 +1155,6 @@ fn transaction_id_is_in_progress_scan(xid: TransactionId) -> PgResult<bool> {
     let arrayP = procArray();
     let hdr = ProcGlobal();
     let myprocno = MyProc().expect("TransactionIdIsInProgress requires MyProc");
-    let mypgxactoff = GetPGProcByNumber(myprocno).pgxactoff.load(Relaxed);
 
     IN_PROGRESS_XIDS.with(|cell| {
         let mut xids = cell.borrow_mut();
@@ -1169,6 +1168,20 @@ fn transaction_id_is_in_progress_scan(xid: TransactionId) -> PgResult<bool> {
         }
 
         LWLockAcquire(ProcArrayLock(), LW_SHARED, myprocno)?;
+
+        // pgxactoff is ProcArrayLock-domain state ([PAL]) and MUST be read
+        // under the lock (C procarray.c reads MyProc->pgxactoff after the
+        // acquire): dense-array compaction (ProcArrayAdd/Remove under the
+        // exclusive lock) MOVES entries, so a pre-lock sample can alias
+        // ANOTHER backend's current slot — the self-skip below then skips a
+        // RUNNING transaction and the scan answers a false not-in-progress
+        // (found under GL-ELR-XIDWAIT's connection-churn hot-row repro:
+        // the wrong answer resurrected updated versions via the
+        // xmax-aborted visibility arms and forked the version chain; the
+        // stale answer was then pinned by CACHED_XID_NOT_IN_PROGRESS).
+        // Stock-latent: reachable with connection churn concurrent to any
+        // in-progress consult, independent of ELR.
+        let mypgxactoff = GetPGProcByNumber(myprocno).pgxactoff.load(Relaxed);
 
         let latest_completed = latest_completed_xid().xid();
         if TransactionIdPrecedes(latest_completed, xid) {
