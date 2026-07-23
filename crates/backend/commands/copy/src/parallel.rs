@@ -1457,7 +1457,10 @@ fn worker_drive(shared: &Arc<ParCopyShared>) -> PgResult<()> {
                 binary: false,
                 csv_mode: false,
                 parquet: shared.parquet.is_some(),
+                // Worker-side placeholders: the conversion plan (which is
+                // what coercion resolves into) is shared from the leader.
                 parquet_match_by_name: false,
+                parquet_coerce_epoch: false,
                 freeze: shared.freeze,
                 delim: shared.delim,
                 quote: b'"',

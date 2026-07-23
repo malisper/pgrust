@@ -80,6 +80,10 @@ pub struct CopyFormatOptions<'s> {
     pub parquet: bool,
     /// MATCH_BY 'name' (parquet only; default is positional matching).
     pub parquet_match_by_name: bool,
+    /// COERCE_EPOCH (parquet only, default off): plain-integer columns
+    /// bound to timestamp/timestamptz (or date) targets are read as Unix
+    /// epoch seconds (respectively epoch days).
+    pub parquet_coerce_epoch: bool,
     pub freeze: bool,
     pub delim: u8,
     pub quote: u8,
@@ -618,6 +622,7 @@ pub fn ProcessCopyOptions<'s>(
         csv_mode: false,
         parquet: false,
         parquet_match_by_name: false,
+        parquet_coerce_epoch: false,
         freeze: false,
         delim: 0,
         quote: 0,
@@ -639,6 +644,7 @@ pub fn ProcessCopyOptions<'s>(
     };
     let mut format_specified = false;
     let mut match_by_specified = false;
+    let mut coerce_epoch_specified = false;
     let mut freeze_specified = false;
     let mut header_specified = false;
     let mut on_error_specified = false;
@@ -806,6 +812,14 @@ pub fn ProcessCopyOptions<'s>(
                     }
                 }
             }
+            // Opt-in epoch coercion for the parquet reader (FROM side).
+            "coerce_epoch" => {
+                if coerce_epoch_specified {
+                    return Err(conflicting_option(src, d.location));
+                }
+                coerce_epoch_specified = true;
+                opts.parquet_coerce_epoch = def_boolean(d)?;
+            }
             other => {
                 return Err(Box::new(
                     PgError::error(format!("option \"{other}\" not recognized"))
@@ -877,6 +891,11 @@ pub fn ProcessCopyOptions<'s>(
     } else if match_by_specified {
         return Err(Box::new(
             PgError::error("COPY MATCH_BY requires parquet format")
+                .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
+        ));
+    } else if coerce_epoch_specified {
+        return Err(Box::new(
+            PgError::error("COPY COERCE_EPOCH requires parquet format")
                 .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED),
         ));
     }

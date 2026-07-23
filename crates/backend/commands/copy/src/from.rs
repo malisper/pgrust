@@ -300,6 +300,7 @@ fn begin_copy_from_guts<'mcx, 's>(
             tup_desc,
             &attnumlist,
             opts.parquet_match_by_name,
+            opts.parquet_coerce_epoch,
         )?;
         progress_type = PROGRESS_COPY_TYPE_FILE;
         progress_bytes_total = file_len as i64;
