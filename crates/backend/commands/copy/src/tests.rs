@@ -73,6 +73,7 @@ fn mk_state<'mcx>(
             csv_mode: false,
             parquet: false,
             parquet_match_by_name: false,
+            parquet_coerce_epoch: false,
             freeze: false,
             delim,
             quote: b'"',
