@@ -4076,9 +4076,9 @@ pub fn agg_sink_aggctx_mem(node: &AggStateData<'_>) -> usize {
 /// `PGRUST_RUNTIME_AGG_STRCTX` kill switch (default ON): the FREEING
 /// byref-state child for armed sink drains (the str byref-floor fix —
 /// PerHashData::sink_str_ctx doc). `=0|off` restores the bump-aggcontext
-/// allocation everywhere, bit-exactly. Reachable only through the
-/// dict-coded sink arm (itself DEFAULT OFF), so the shipped default is
-/// structurally inert.
+/// allocation everywhere, bit-exactly. LIVE at shipped defaults since the
+/// A-on-top-of-B ruling flipped the dict-coded sink arm ON (Michael,
+/// 2026-07-22) — the leak fix ships with the car it protects.
 fn sink_strctx_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
