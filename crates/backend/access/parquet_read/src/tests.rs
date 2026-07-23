@@ -397,3 +397,74 @@ fn page_byte_flips_never_panic() {
     }
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Corpus sweep (apache/parquet-testing): every file must either decode or
+/// yield a typed error — never a panic. Run explicitly:
+///   PQ_CORPUS=/path/to/parquet-testing cargo test -p parquet_read \
+///       --release -- --ignored corpus_never_panics --nocapture
+#[test]
+#[ignore = "needs PQ_CORPUS pointing at an apache/parquet-testing clone"]
+fn corpus_never_panics() {
+    let Ok(root) = std::env::var("PQ_CORPUS") else {
+        panic!("set PQ_CORPUS to an apache/parquet-testing checkout");
+    };
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    for sub in ["data", "bad_data"] {
+        let dir = std::path::Path::new(&root).join(sub);
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "parquet") {
+                files.push(p);
+            }
+        }
+    }
+    assert!(!files.is_empty(), "no corpus files under {root}");
+    files.sort();
+    let (mut full, mut open_err, mut decode_err) = (0usize, 0usize, 0usize);
+    for p in &files {
+        let ps = p.to_str().unwrap();
+        let name = p.file_name().unwrap().to_string_lossy();
+        match FileReader::open(ps) {
+            Err(e) => {
+                open_err += 1;
+                println!("OPEN-ERR  {name}: {}", e.message);
+            }
+            Ok(mut fr) => {
+                let ncols = fr.meta.columns.len();
+                let cols: Vec<usize> = (0..ncols).collect();
+                let vutf8 = vec![false; ncols];
+                let mut batches: Vec<ColumnBatch> =
+                    fr.meta.columns.iter().map(|c| ColumnBatch::new_for(c.phys)).collect();
+                let mut failed = None;
+                'rgs: for rg in 0..fr.meta.row_groups.len() {
+                    let mut rgr = match fr.row_group(rg, &cols, &vutf8) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            failed = Some(e);
+                            break;
+                        }
+                    };
+                    while rgr.rows_remaining() > 0 {
+                        let n = rgr.rows_remaining().min(1024) as usize;
+                        if let Err(e) = rgr.read_batches(&mut batches, n) {
+                            failed = Some(e);
+                            break 'rgs;
+                        }
+                    }
+                }
+                match failed {
+                    None => {
+                        full += 1;
+                        println!("DECODED   {name} ({} rows)", fr.meta.num_rows);
+                    }
+                    Some(e) => {
+                        decode_err += 1;
+                        println!("DEC-ERR   {name}: {}", e.message);
+                    }
+                }
+            }
+        }
+    }
+    println!("corpus: {full} decoded, {open_err} open-errors, {decode_err} decode-errors");
+}
