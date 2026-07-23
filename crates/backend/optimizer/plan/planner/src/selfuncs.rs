@@ -2704,12 +2704,20 @@ fn btcostestimate(
                 .iter()
                 .find(|sl| sl.kind == STATISTIC_KIND_CORRELATION && sl.staop == sortop);
             if let (true, Some(slot)) = (sortop != 0, slot) {
-                debug_assert!(slot.numbers()?.len() == 1);
-                let mut corr = slot.numbers()?[0] as f64;
-                if reverse0 {
-                    corr = -corr;
+                // C btcostestimate guards nnumbers > 0 before reading the
+                // correlation value — a degenerate/torn stats slot with an
+                // empty numbers array is tolerated, not asserted (the
+                // unguarded [0] panicked backends under high auto-analyze
+                // churn; found by the GL-ELR-XIDWAIT win-table rig, where
+                // the armed arm's ~10x update throughput made analyze
+                // rewrites of the stats row constant).
+                if let Some(&corr0) = slot.numbers()?.first() {
+                    let mut corr = corr0 as f64;
+                    if reverse0 {
+                        corr = -corr;
+                    }
+                    costs.index_correlation = if nkeycols > 1 { corr * 0.75 } else { corr };
                 }
-                costs.index_correlation = if nkeycols > 1 { corr * 0.75 } else { corr };
             }
         }
     }
