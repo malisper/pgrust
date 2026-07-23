@@ -59,6 +59,9 @@ pub(crate) enum Conv {
     Text,
     /// varchar(n): char-length check with the blank-trim rule.
     VarcharN(i32),
+    /// bpchar: the varchar rule + space padding to exactly n chars
+    /// (-1 = unconstrained, stored as-is).
+    Bpchar(i32),
     Bytea,
 }
 
@@ -187,6 +190,13 @@ fn resolve_conv(
                 Some(Conv::Text)
             }
         }
+        (Phys::ByteArray, BPCHAROID) if textual(logical) => {
+            if atttypmod >= VARHDRSZ_I32 {
+                Some(Conv::Bpchar(atttypmod - VARHDRSZ_I32))
+            } else {
+                Some(Conv::Bpchar(-1))
+            }
+        }
         (Phys::ByteArray, BYTEAOID) => Some(Conv::Bytea),
         _ => None,
     };
@@ -203,7 +213,7 @@ fn resolve_conv(
 /// Whether the conversion consumes string bytes (drives page-batched UTF-8
 /// validation; bytea reads raw bytes unvalidated).
 fn wants_utf8(conv: Conv) -> bool {
-    matches!(conv, Conv::Text | Conv::VarcharN(_))
+    matches!(conv, Conv::Text | Conv::VarcharN(_) | Conv::Bpchar(_))
 }
 
 #[cold]
@@ -309,6 +319,48 @@ pub(crate) fn resolve_plan(
         ));
     }
     Ok(ParquetPlan { bindings, cols, vutf8 })
+}
+
+/// bpchar(n): over-length values take the varchar blank-trim rule; shorter
+/// values are space-padded to exactly n characters (input-function parity).
+fn bpchar_datum<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8], maxlen: i32) -> PgResult<Datum> {
+    if maxlen < 0 {
+        return varlena_datum(mcx, bytes);
+    }
+    let maxlen = maxlen as usize;
+    // Char count + byte cut at maxlen chars (UTF-8 validated at decode).
+    let mut chars = 0usize;
+    let mut cut = bytes.len();
+    for (i, &b) in bytes.iter().enumerate() {
+        if (b & 0xc0) != 0x80 {
+            if chars == maxlen {
+                cut = i;
+                break;
+            }
+            chars += 1;
+        }
+    }
+    if cut < bytes.len() {
+        if bytes[cut..].iter().any(|&b| b != b' ') {
+            return Err(Box::new(
+                PgError::error(format!("value too long for type character({maxlen})"))
+                    .with_sqlstate(ERRCODE_STRING_DATA_RIGHT_TRUNCATION),
+            ));
+        }
+        return varlena_datum(mcx, &bytes[..cut]);
+    }
+    if chars >= maxlen {
+        return varlena_datum(mcx, bytes);
+    }
+    // Pad with spaces to exactly maxlen characters.
+    let pad = maxlen - chars;
+    let mut image = varlena::image_with_header(mcx, bytes.len() + pad)?;
+    mcx::vec_append_bytes(&mut image, bytes)
+        .map_err(|_| Box::new(PgError::error("out of memory building bpchar datum")))?;
+    for _ in 0..pad {
+        image.push(b' ');
+    }
+    Ok(types_fmgr::varlena_result(datum::Varlena::from_image(image)))
 }
 
 impl ParquetSrc {
@@ -555,6 +607,7 @@ pub(crate) fn convert_cell<'mcx>(
         }
         Conv::Text => varlena_datum(mcx, batch.bytes_at(k))?,
         Conv::VarcharN(maxlen) => varchar_datum(mcx, batch.bytes_at(k), maxlen)?,
+        Conv::Bpchar(maxlen) => bpchar_datum(mcx, batch.bytes_at(k), maxlen)?,
         Conv::Bytea => varlena_datum(mcx, batch.bytes_at(k))?,
     })
 }
