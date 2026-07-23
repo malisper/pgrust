@@ -682,9 +682,27 @@ pub mod global_footprint {
         debug_assert!(prev >= n, "global footprint underflow: {prev} - {n}");
     }
 
-    /// Block bytes currently committed to live contexts, process-wide.
+    /// Block bytes currently committed to live contexts, process-wide,
+    /// PLUS registered engine estates (below).
     pub fn bytes() -> usize {
         BYTES.load(Relaxed)
+    }
+
+    /// Registered ENGINE-ESTATE bytes (GL-CONCMEM-1): plain-Rust executor
+    /// estates — the lane aggregation tables' chunked row stores, entry
+    /// arrays and key arenas — charge their block bytes into the SAME
+    /// process ledger, so the memory watchdog's accounted line and the
+    /// GL-MEMCEIL-1 ceiling see engine memory, not only context blocks
+    /// (the concurrent-window autopsy's 6.3GiB unaccounted delta was
+    /// exactly this estate). Charge/uncharge at BLOCK grain only (growth
+    /// events, clear, Drop) — never per row; an uncharge must never exceed
+    /// its charge (the shared underflow debug-assert).
+    pub fn charge_engine_estate(n: usize) {
+        add(n);
+    }
+
+    pub fn uncharge_engine_estate(n: usize) {
+        sub(n);
     }
 }
 

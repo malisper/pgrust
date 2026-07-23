@@ -8106,6 +8106,9 @@ dependencies = [
 [[package]]
 name = "lanetable"
 version = "0.0.0"
+dependencies = [
+ "mcx",
+]
 
 [[package]]
 name = "large_object"

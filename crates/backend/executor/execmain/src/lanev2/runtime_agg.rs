@@ -81,6 +81,11 @@ use super::{lane_trace, lane_trace_enabled, seq_scan_fusible, ScanFeedShape, Sca
 pub(super) struct AggSinkLocal {
     runs: Vec<SinkRun>,
     run_bytes: usize,
+    /// Process-ledger mirror of `run_bytes` (GL-CONCMEM-1: the flushed-run
+    /// backlog + SEAL partition are per-Local plain-Rust estates that live
+    /// through the combine phase — charge them like the tables). Settled at
+    /// the same block-grain boundaries `run_bytes` moves at; Drop balances.
+    ledger_runs: usize,
     table: Option<SinkTableHandle>,
     part: Option<SinkPart>,
     spill: Option<AggSpillState>,
@@ -111,6 +116,28 @@ pub(super) struct AggSinkLocal {
     /// a scatter-armed engagement; its buffered rows flush as ordinary runs
     /// at the sink cap and at SEAL ([`AggSink::seal_partition_local`]).
     scatter: Option<Box<::nodeagg::sink::SinkScatter>>,
+}
+
+impl AggSinkLocal {
+    /// Settle the process-ledger mirror to the current `run_bytes`
+    /// (GL-CONCMEM-1; block-grain call sites only — flush pushes, the
+    /// SEAL-partition charge, the spill-epoch drain).
+    fn settle_run_ledger(&mut self) {
+        if self.run_bytes > self.ledger_runs {
+            ::mcx::global_footprint::charge_engine_estate(self.run_bytes - self.ledger_runs);
+        } else if self.run_bytes < self.ledger_runs {
+            ::mcx::global_footprint::uncharge_engine_estate(self.ledger_runs - self.run_bytes);
+        }
+        self.ledger_runs = self.run_bytes;
+    }
+}
+
+impl Drop for AggSinkLocal {
+    fn drop(&mut self) {
+        // Ledger balance for `settle_run_ledger` (the combine phase reads
+        // the runs in place; they die with the Local).
+        ::mcx::global_footprint::uncharge_engine_estate(self.ledger_runs);
+    }
 }
 
 /// Per-Local α-gate state (Müller ADAPTIVE): a pure function of this
@@ -933,6 +960,7 @@ impl AggSink {
                 self.scatter_rows.fetch_add(run.nrows() as u64, Ordering::Relaxed);
                 l.run_bytes += run.bytes();
                 l.runs.push(run);
+                l.settle_run_ledger();
             }
         }
         if self.seal_flush {
@@ -950,6 +978,7 @@ impl AggSink {
                     self.sealflush_rows.fetch_add(run.nrows() as u64, Ordering::Relaxed);
                     l.run_bytes += run.bytes();
                     l.runs.push(run);
+                    l.settle_run_ledger();
                 }
             }
             l.part = None;
@@ -968,6 +997,7 @@ impl AggSink {
         // shapes) — it lives through combine too.
         if let Some(p) = &l.part {
             l.run_bytes += p.bytes();
+            l.settle_run_ledger();
             let table_mem = l.table.as_ref().map_or(0, |t| t.mem_used());
             if l.run_bytes + table_mem > self.budget {
                 self.refuse_budget();
@@ -2105,6 +2135,11 @@ fn spill_epoch(
         }
     }
     local.run_bytes = 0;
+    // GL-CONCMEM-1 ledger settle, inlined: `sp` still borrows local.spill,
+    // so the &mut-self helper can't run here — the drained runs' charge
+    // unwinds directly (field-only access is disjoint-borrow legal).
+    ::mcx::global_footprint::uncharge_engine_estate(local.ledger_runs);
+    local.ledger_runs = 0;
     sink.spill_epochs.fetch_add(1, Ordering::Relaxed);
     sink.spilled_bytes
         .fetch_add(sp.file.spilled_bytes() - before, Ordering::Relaxed);
