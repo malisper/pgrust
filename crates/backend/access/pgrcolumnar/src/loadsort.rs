@@ -339,9 +339,11 @@ const RUN_CHUNK: usize = 512 << 10;
 const RUN_FRAME_CAP: usize = 1 << 30;
 
 /// Compress + write `chunk` as one frame, clearing it; returns file bytes.
-/// Empty chunk = no frame (0 bytes).
+/// Empty chunk = no frame (0 bytes). Generic over the sink so the same
+/// framing serves run FILES (BufWriter) and in-memory runs (frame Vecs) —
+/// one encoder, byte-identical frames on both destinations.
 fn write_lz4_frame(
-    w: &mut BufWriter<RunFile>,
+    w: &mut impl Write,
     chunk: &mut Vec<u8>,
     comp: &mut Vec<u8>,
 ) -> PgResult<u64> {
@@ -359,6 +361,150 @@ fn write_lz4_frame(
     w.write_all(&comp[..n]).map_err(|e| io_err("run write", e))?;
     chunk.clear();
     Ok(8 + n as u64)
+}
+
+// ---- copyfast lever 1: in-memory runs ---------------------------------------
+//
+// The single-pass-sort lever: a run kept as lz4 frames IN MEMORY instead of
+// a spill file. Frame bytes are produced by the same `write_lz4_frame`
+// encoder, so an overflow run flushed to disk is byte-identical to a
+// directly-spilled file, and the merge consumes the identical entry stream
+// from either home. Budgeted by `MemRunStore` (sized from ACTUAL headroom by
+// the copy driver, never a blind constant); every refusal is today's file
+// spill.
+
+/// Global (per-statement) budget for in-memory runs. Reserve on keep,
+/// release per frame as the merge consumes it (memory returns to the store
+/// progressively during the fill, exactly when the writer's dict/stitch
+/// memory grows).
+///
+/// Accounting seam: when engine-estate charging (mcx global-footprint
+/// accounting, in flight on a sibling lane) lands, `try_reserve`/`release`
+/// are the two lines that charge/uncharge it — keep all bookkeeping here.
+pub struct MemRunStore {
+    cap: std::sync::atomic::AtomicU64,
+    used: std::sync::atomic::AtomicU64,
+}
+
+impl MemRunStore {
+    pub fn new(cap: u64) -> std::sync::Arc<MemRunStore> {
+        std::sync::Arc::new(MemRunStore {
+            cap: std::sync::atomic::AtomicU64::new(cap),
+            used: std::sync::atomic::AtomicU64::new(0),
+        })
+    }
+
+    /// Reserve `n` bytes against the cap; false = caller must spill to disk.
+    pub fn try_reserve(&self, n: u64) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        let cap = self.cap.load(Relaxed);
+        let mut cur = self.used.load(Relaxed);
+        loop {
+            if cur.saturating_add(n) > cap {
+                return false;
+            }
+            match self.used.compare_exchange_weak(cur, cur + n, Relaxed, Relaxed) {
+                Ok(_) => return true,
+                Err(c) => cur = c,
+            }
+        }
+    }
+
+    pub fn release(&self, n: u64) {
+        self.used.fetch_sub(n, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn used(&self) -> u64 {
+        self.used.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn cap(&self) -> u64 {
+        self.cap.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// One sorted run held in memory: the run's lz4 frames (each frame = its
+/// exact file encoding `[raw u32 le][comp u32 le][block]`; no magic — the
+/// home is self-describing). `store`-attached runs release their remaining
+/// bytes on drop; the merge reader releases per frame as it consumes.
+pub struct MemRun {
+    frames: std::collections::VecDeque<Vec<u8>>,
+    bytes: u64,
+    store: Option<std::sync::Arc<MemRunStore>>,
+}
+
+impl MemRun {
+    /// Total frame bytes currently held (the accounting unit).
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    /// Attach the store whose reservation covers this run (caller reserved).
+    pub fn attach(mut self, store: std::sync::Arc<MemRunStore>) -> MemRun {
+        self.store = Some(store);
+        self
+    }
+
+    /// Overflow path: write the run to `path` as a spill file — magic +
+    /// frames verbatim, byte-identical to `spill_run_opts(path, true)` of
+    /// the same batch by construction. Returns file bytes written.
+    pub fn write_to_file(&self, path: &std::path::Path) -> PgResult<u64> {
+        let f =
+            vfs_open_file(path, libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC, "run create")?;
+        let mut w = BufWriter::with_capacity(1 << 20, f);
+        w.write_all(&RUN_LZ4_MAGIC).map_err(|e| io_err("run write", e))?;
+        let mut written = 4u64;
+        for fr in &self.frames {
+            w.write_all(fr).map_err(|e| io_err("run write", e))?;
+            written += fr.len() as u64;
+        }
+        w.flush().map_err(|e| io_err("run flush", e))?;
+        Ok(written)
+    }
+}
+
+impl Drop for MemRun {
+    fn drop(&mut self) {
+        if let Some(store) = &self.store {
+            store.release(self.bytes);
+        }
+    }
+}
+
+impl SortBatch {
+    /// Compress the (sorted) batch into an in-memory run and clear the
+    /// batch for reuse — the same entry stream and lz4 framing as
+    /// `spill_run_opts(_, true)`, one frame Vec per ~RUN_CHUNK of raw bytes.
+    pub fn spill_run_mem(&mut self) -> PgResult<MemRun> {
+        let mut frames = std::collections::VecDeque::new();
+        let mut bytes = 0u64;
+        let mut chunk: Vec<u8> = Vec::with_capacity(RUN_CHUNK + 4096);
+        let mut comp: Vec<u8> = Vec::new();
+        let mut emit =
+            |chunk: &mut Vec<u8>, comp: &mut Vec<u8>| -> PgResult<()> {
+                if chunk.is_empty() {
+                    return Ok(());
+                }
+                let mut fb: Vec<u8> = Vec::new();
+                bytes += write_lz4_frame(&mut fb, chunk, comp)?;
+                frames.push_back(fb);
+                Ok(())
+            };
+        for &(off, len) in &self.index {
+            let e = &self.arena[off as usize..off as usize + len as usize];
+            let rowlen = (len as usize - self.key_w) as u32;
+            chunk.extend_from_slice(&e[..self.key_w]);
+            chunk.extend_from_slice(&rowlen.to_le_bytes());
+            chunk.extend_from_slice(&e[self.key_w..]);
+            if chunk.len() >= RUN_CHUNK {
+                emit(&mut chunk, &mut comp)?;
+            }
+        }
+        emit(&mut chunk, &mut comp)?;
+        self.arena.clear();
+        self.index.clear();
+        Ok(MemRun { frames, bytes, store: None })
+    }
 }
 
 /// Read one lz4 frame from `r` into `raw` (resized to the frame's raw
@@ -483,6 +629,52 @@ impl std::io::Read for Lz4Source {
                     self.eof = true;
                     return Err(e);
                 }
+            }
+        }
+        let n = buf.len().min(self.raw.len() - self.pos);
+        buf[..n].copy_from_slice(&self.raw[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
+/// copyfast lever 1: byte source over an in-memory run — decodes the same
+/// lz4 frames `Lz4Source` reads from disk (shared `read_lz4_frame` decode,
+/// each frame fed back through it as a byte slice), freeing each frame and
+/// releasing its store reservation the moment it is consumed.
+struct MemLz4Source {
+    run: MemRun,
+    raw: Vec<u8>,
+    pos: usize,
+    comp: Vec<u8>,
+}
+
+impl std::io::Read for MemLz4Source {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        while self.pos >= self.raw.len() {
+            let Some(frame) = self.run.frames.pop_front() else { return Ok(0) };
+            let mut r: &[u8] = &frame;
+            let mut d = 0u64;
+            match read_lz4_frame(&mut r, &mut self.comp, &mut self.raw, &mut d)? {
+                true => {
+                    if !r.is_empty() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "in-memory run frame carries trailing bytes",
+                        ));
+                    }
+                    self.pos = 0;
+                }
+                false => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "empty in-memory run frame",
+                    ))
+                }
+            }
+            self.run.bytes -= frame.len() as u64;
+            if let Some(store) = &self.run.store {
+                store.release(frame.len() as u64);
             }
         }
         let n = buf.len().min(self.raw.len() - self.pos);
@@ -673,6 +865,7 @@ enum RunSrc {
     Buf(BufReader<RunFile>),
     Lz4(Lz4Source),
     Pre(PrefetchSource),
+    Mem(MemLz4Source),
 }
 
 impl std::io::Read for RunSrc {
@@ -682,8 +875,16 @@ impl std::io::Read for RunSrc {
             RunSrc::Buf(r) => r.read(buf),
             RunSrc::Lz4(z) => z.read(buf),
             RunSrc::Pre(p) => p.read(buf),
+            RunSrc::Mem(m) => m.read(buf),
         }
     }
+}
+
+/// copyfast lever 1: where a sorted run lives. The merge consumes the
+/// identical entry stream from either home.
+pub enum RunInput {
+    File(std::path::PathBuf),
+    Mem(MemRun),
 }
 
 struct RunReader {
@@ -947,27 +1148,7 @@ impl RunMergeV2 {
         key_w: usize,
         lz4: bool,
     ) -> PgResult<RunMergeV2> {
-        let disk = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let mut readers = Vec::with_capacity(paths.len());
-        for p in paths {
-            if lz4 {
-                let f = vfs_open_file(p, libc::O_RDONLY, "run open")?;
-                let mut r = BufReader::with_capacity(1 << 20, f);
-                check_run_magic(&mut r).map_err(|e| io_err("run magic", e))?;
-                let src = RunSrc::Lz4(Lz4Source {
-                    r,
-                    raw: Vec::new(),
-                    pos: 0,
-                    comp: Vec::new(),
-                    eof: false,
-                    disk: std::sync::Arc::clone(&disk),
-                });
-                readers.push(RunReader::from_src(src, key_w)?);
-            } else {
-                readers.push(RunReader::open(p, key_w)?);
-            }
-        }
-        Self::from_readers(readers, None, disk)
+        Self::open_mixed(paths.iter().cloned().map(RunInput::File).collect(), key_w, 0, lz4)
     }
 
     /// loadcommit C2b (PGRUST_PARALLEL_COPY_FILL_PREFETCH=<n>): prefetch-fed
@@ -981,6 +1162,25 @@ impl RunMergeV2 {
         threads: usize,
         lz4: bool,
     ) -> PgResult<RunMergeV2> {
+        Self::open_mixed(
+            paths.iter().cloned().map(RunInput::File).collect(),
+            key_w,
+            threads.clamp(1, 16),
+            lz4,
+        )
+    }
+
+    /// copyfast lever 1: mixed-home merge. In-memory runs decode inline
+    /// with per-frame free; file runs keep the direct/lz4/prefetch paths
+    /// (`lz4` describes FILE runs only — memory runs are self-describing).
+    /// Reader order = `inputs` order (the merge tiebreak index) = the spill
+    /// sites' registration order, exactly as the all-file constructors.
+    pub fn open_mixed(
+        inputs: Vec<RunInput>,
+        key_w: usize,
+        prefetch_threads: usize,
+        lz4: bool,
+    ) -> PgResult<RunMergeV2> {
         // Sim arm (SIMVFS-SHARED — the old compile fence, now a RUNTIME
         // branch): prefetch under sim requires the pump to be bound to a
         // SHARED SimVfs universe (feeders adopt it below; the fd table and
@@ -990,38 +1190,78 @@ impl RunMergeV2 {
         // is identical by the C2b construction (only WHO issues the read
         // changes; `v2_matches_heap_reference` is the standing oracle).
         #[cfg(pgrust_sim)]
-        if !vfs::sim::SimVfs::shared_universe_active() {
-            return Self::open_opts(paths, key_w, lz4);
-        }
+        let prefetch_threads = if vfs::sim::SimVfs::shared_universe_active() {
+            prefetch_threads
+        } else {
+            0
+        };
         // Parent-side universe capture (the spawn-door inheritance shape:
         // process identity flows down the spawn tree like an inherited fd
         // table); each feeder adopts it as its first act below.
         #[cfg(pgrust_sim)]
         let sim_universe = vfs::sim::SimVfs::current_universe_id();
-        let threads = threads.clamp(1, 16);
+        let threads = prefetch_threads.min(16);
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let disk = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let mut buckets: Vec<Vec<FeedRun>> = (0..threads).map(|_| Vec::new()).collect();
-        let mut sources = Vec::with_capacity(paths.len());
-        for (i, p) in paths.iter().enumerate() {
-            let f = vfs_open_file(p, libc::O_RDONLY, "run open")?;
-            let mut f = BufReader::with_capacity(if lz4 { 64 << 10 } else { 8 << 10 }, f);
-            if lz4 {
-                check_run_magic(&mut f).map_err(|e| io_err("run magic", e))?;
+        // Per-input source, realized into readers IN INPUT ORDER below
+        // (prefetch feeders must all be spawned before the first blocking
+        // recv a reader's first advance() performs).
+        let mut pend: Vec<RunSrc> = Vec::with_capacity(inputs.len());
+        let mut nfile = 0usize;
+        for input in inputs {
+            match input {
+                RunInput::Mem(run) => pend.push(RunSrc::Mem(MemLz4Source {
+                    run,
+                    raw: Vec::new(),
+                    pos: 0,
+                    comp: Vec::new(),
+                })),
+                RunInput::File(p) if threads > 0 => {
+                    let f = vfs_open_file(&p, libc::O_RDONLY, "run open")?;
+                    let mut f =
+                        BufReader::with_capacity(if lz4 { 64 << 10 } else { 8 << 10 }, f);
+                    if lz4 {
+                        check_run_magic(&mut f).map_err(|e| io_err("run magic", e))?;
+                    }
+                    // Row 8 (SIMVFS-SHARED): pgsync mailbox, sync_channel(2)
+                    // semantics — hooked parks under the permit scheduler.
+                    let (tx, rx) = pgsync::mailbox::<std::io::Result<Vec<u8>>>(Some(2));
+                    buckets[nfile % threads].push(FeedRun {
+                        f,
+                        tx: Some(tx),
+                        pending: None,
+                        eof: false,
+                        lz4,
+                        comp: Vec::new(),
+                        disk: std::sync::Arc::clone(&disk),
+                    });
+                    pend.push(RunSrc::Pre(PrefetchSource {
+                        rx,
+                        cur: Vec::new(),
+                        pos: 0,
+                        eof: false,
+                    }));
+                    nfile += 1;
+                }
+                RunInput::File(p) if lz4 => {
+                    let f = vfs_open_file(&p, libc::O_RDONLY, "run open")?;
+                    let mut r = BufReader::with_capacity(1 << 20, f);
+                    check_run_magic(&mut r).map_err(|e| io_err("run magic", e))?;
+                    pend.push(RunSrc::Lz4(Lz4Source {
+                        r,
+                        raw: Vec::new(),
+                        pos: 0,
+                        comp: Vec::new(),
+                        eof: false,
+                        disk: std::sync::Arc::clone(&disk),
+                    }));
+                }
+                RunInput::File(p) => {
+                    let f = vfs_open_file(&p, libc::O_RDONLY, "run open")?;
+                    pend.push(RunSrc::Buf(BufReader::with_capacity(1 << 20, f)));
+                }
             }
-            // Row 8 (SIMVFS-SHARED): pgsync mailbox, sync_channel(2)
-            // semantics — hooked parks under the permit scheduler.
-            let (tx, rx) = pgsync::mailbox::<std::io::Result<Vec<u8>>>(Some(2));
-            buckets[i % threads].push(FeedRun {
-                f,
-                tx: Some(tx),
-                pending: None,
-                eof: false,
-                lz4,
-                comp: Vec::new(),
-                disk: std::sync::Arc::clone(&disk),
-            });
-            sources.push(PrefetchSource { rx, cur: Vec::new(), pos: 0, eof: false });
         }
         let mut handles = Vec::with_capacity(threads);
         for runs in buckets {
@@ -1044,12 +1284,16 @@ impl RunMergeV2 {
                 .map_err(|e| io_err("prefetch spawn", e))?;
             handles.push(h);
         }
-        let pool = PrefetchPool { stop, threads: handles };
-        let mut readers = Vec::with_capacity(sources.len());
-        for src in sources {
-            readers.push(RunReader::from_src(RunSrc::Pre(src), key_w)?);
+        let pool = if handles.is_empty() {
+            None
+        } else {
+            Some(PrefetchPool { stop, threads: handles })
+        };
+        let mut readers = Vec::with_capacity(pend.len());
+        for src in pend {
+            readers.push(RunReader::from_src(src, key_w)?);
         }
-        Self::from_readers(readers, Some(pool), disk)
+        Self::from_readers(readers, pool, disk)
     }
 
     /// Is this merge actually prefetch-fed (feeder pool live)? Harness
@@ -1644,14 +1888,15 @@ mod tests {
         spill_random_runs_opts(dir, runs, rows_per_run, dup_keys, seed, false)
     }
 
-    fn spill_random_runs_opts(
-        dir: &std::path::Path,
+    /// Deterministic sorted batches (same LCG stream for a given seed) —
+    /// the shared row source for file runs AND in-memory runs, so the two
+    /// homes are provably fed identical entries.
+    fn random_sorted_batches(
         runs: usize,
         rows_per_run: usize,
         dup_keys: bool,
         seed: u64,
-        lz4: bool,
-    ) -> (Vec<std::path::PathBuf>, usize) {
+    ) -> (Vec<SortBatch>, usize) {
         let codec = RowCodec::new(vec![ColType::I32, ColType::I64, ColType::Text]);
         let keys = [(0u16, CbSortKeyKind::Int32), (1, CbSortKeyKind::Int64)];
         let kw = fixed_key_width(&keys).unwrap();
@@ -1661,7 +1906,7 @@ mod tests {
             x
         };
         let mut keep = Vec::new();
-        let mut paths = Vec::new();
+        let mut batches = Vec::new();
         for r in 0..runs {
             let mut batch = SortBatch::new(kw);
             for i in 0..rows_per_run {
@@ -1684,6 +1929,22 @@ mod tests {
                 batch.push(&key, &img);
             }
             batch.sort();
+            batches.push(batch);
+        }
+        (batches, kw)
+    }
+
+    fn spill_random_runs_opts(
+        dir: &std::path::Path,
+        runs: usize,
+        rows_per_run: usize,
+        dup_keys: bool,
+        seed: u64,
+        lz4: bool,
+    ) -> (Vec<std::path::PathBuf>, usize) {
+        let (batches, kw) = random_sorted_batches(runs, rows_per_run, dup_keys, seed);
+        let mut paths = Vec::new();
+        for (r, mut batch) in batches.into_iter().enumerate() {
             let p = dir.join(format!("run-{r}"));
             batch.spill_run_opts(&p, lz4).unwrap();
             paths.push(p);
@@ -1847,6 +2108,132 @@ mod tests {
         let (rawp, _) = spill_random_runs_opts(&d.join("."), 1, 10, false, 9, false);
         assert!(consume(&rawp, 0).is_err(), "raw file accepted as lz4");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ---- copyfast lever 1: in-memory run oracles ----------------------------
+
+    /// The three homes must emit the identical row stream: all-file lz4
+    /// (reference), all-memory, and MIXED alternating file/memory — with
+    /// and without prefetch feeders on the file subset. Also proves the
+    /// store accounting drains to zero as the merge consumes.
+    #[test]
+    fn mem_runs_match_file_reference() {
+        for (dup, seed) in [(false, 42u64), (true, 7u64)] {
+            let dir = tmpdir(&format!("memref{seed}"));
+            let (paths, kw) = spill_random_runs_opts(&dir, 8, 500, dup, seed, true);
+            let mut r = RunMergeV2::open_opts(&paths, kw, true).unwrap();
+            let mut ref_arena = Vec::new();
+            let mut ref_lens = Vec::new();
+            while let Some(l) = r.next_row_into(&mut ref_arena).unwrap() {
+                ref_lens.push(l);
+            }
+            // Same batches (same seed) as memory runs, store-attached.
+            let make_mem = |store: &std::sync::Arc<MemRunStore>| -> Vec<MemRun> {
+                let (batches, kw2) = random_sorted_batches(8, 500, dup, seed);
+                assert_eq!(kw, kw2);
+                batches
+                    .into_iter()
+                    .map(|mut b| {
+                        let m = b.spill_run_mem().unwrap();
+                        assert!(store.try_reserve(m.bytes()), "test store sized to fit");
+                        m.attach(std::sync::Arc::clone(store))
+                    })
+                    .collect()
+            };
+            // (a) all-memory.
+            let store = MemRunStore::new(1 << 30);
+            let inputs: Vec<RunInput> =
+                make_mem(&store).into_iter().map(RunInput::Mem).collect();
+            let held = store.used();
+            assert!(held > 0, "mem runs reserved nothing");
+            let mut m = RunMergeV2::open_mixed(inputs, kw, 0, true).unwrap();
+            let mut arena = Vec::new();
+            let mut lens = Vec::new();
+            while let Some(l) = m.next_row_into(&mut arena).unwrap() {
+                lens.push(l);
+            }
+            assert_eq!(lens, ref_lens, "all-mem lens diverge (dup={dup})");
+            assert_eq!(arena, ref_arena, "all-mem bytes diverge (dup={dup})");
+            // Logical run-bytes accounting matches the file merge.
+            assert_eq!(m.fill_stats().1, r.fill_stats().1);
+            drop(m);
+            assert_eq!(store.used(), 0, "store not drained after merge+drop");
+            // (b) mixed homes, alternating, with and without prefetch.
+            for prefetch in [0usize, 2] {
+                let store = MemRunStore::new(1 << 30);
+                let mems = make_mem(&store);
+                let inputs: Vec<RunInput> = mems
+                    .into_iter()
+                    .zip(paths.iter())
+                    .enumerate()
+                    .map(|(i, (m, p))| {
+                        if i % 2 == 0 {
+                            RunInput::Mem(m)
+                        } else {
+                            RunInput::File(p.clone())
+                        }
+                    })
+                    .collect();
+                let mut m =
+                    RunMergeV2::open_mixed(inputs, kw, prefetch, true).unwrap();
+                let mut arena = Vec::new();
+                let mut lens = Vec::new();
+                while let Some(l) = m.next_row_into(&mut arena).unwrap() {
+                    lens.push(l);
+                }
+                assert_eq!(lens, ref_lens, "mixed lens diverge (prefetch={prefetch})");
+                assert_eq!(arena, ref_arena, "mixed bytes diverge (prefetch={prefetch})");
+                drop(m);
+                assert_eq!(store.used(), 0, "mixed store not drained");
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// An overflow run flushed via `MemRun::write_to_file` must be
+    /// byte-identical to the direct `spill_run_opts(_, true)` file of the
+    /// same batch — the graceful-degradation contract.
+    #[test]
+    fn mem_run_overflow_file_is_byte_identical() {
+        let dir = tmpdir("memflush");
+        let (paths, _kw) = spill_random_runs_opts(&dir, 3, 400, false, 11, true);
+        let (batches, _) = random_sorted_batches(3, 400, false, 11);
+        for (i, mut b) in batches.into_iter().enumerate() {
+            let m = b.spill_run_mem().unwrap();
+            let p = dir.join(format!("flush-{i}"));
+            let written = m.write_to_file(&p).unwrap();
+            let direct = read_file(&paths[i]);
+            let flushed = read_file(&p);
+            assert_eq!(written, flushed.len() as u64);
+            assert_eq!(flushed, direct, "flushed run {i} diverges from direct spill");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Store cap arithmetic: reserve up to the cap, refuse past it,
+    /// release restores capacity; drop of an attached run releases the rest.
+    #[test]
+    fn mem_run_store_budget() {
+        let store = MemRunStore::new(1000);
+        assert!(store.try_reserve(600));
+        assert!(!store.try_reserve(500), "over-cap reserve admitted");
+        assert!(store.try_reserve(400));
+        assert_eq!(store.used(), 1000);
+        assert!(!store.try_reserve(1), "full store admitted more");
+        store.release(250);
+        assert_eq!(store.used(), 750);
+        assert!(store.try_reserve(250));
+        // Attached-run drop releases exactly its remaining bytes.
+        let (batches, _kw) = random_sorted_batches(1, 50, false, 3);
+        let mut batches = batches;
+        let m = batches[0].spill_run_mem().unwrap();
+        let store2 = MemRunStore::new(1 << 20);
+        assert!(store2.try_reserve(m.bytes()));
+        let held = store2.used();
+        assert_eq!(held, m.bytes());
+        let m = m.attach(std::sync::Arc::clone(&store2));
+        drop(m);
+        assert_eq!(store2.used(), 0);
     }
 
     #[test]

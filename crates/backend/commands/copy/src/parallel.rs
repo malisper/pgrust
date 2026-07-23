@@ -218,6 +218,111 @@ fn run_lz4_effective() -> bool {
     run_lz4() && fill_v2()
 }
 
+/// copyfast lever 1: PGRUST_PARALLEL_COPY_SORT_MEMRUNS — keep sorted runs
+/// in MEMORY (same lz4 frames as the run files) instead of spilling, so a
+/// fitting load sorts in one pass: no run write, no merge re-read. Budgeted
+/// against ACTUAL headroom, never a blind constant; a budget-refused run
+/// falls to the file spill (bytes identical by construction), so degradation
+/// is graceful mid-load. Requires FILL_V2+RUNLZ4 (the composed load stack);
+/// default OFF — the load vehicle arms it explicitly.
+///   unset | "0"        off
+///   "1" | "auto"       auto-size from headroom (cgroup v2/v1, meminfo)
+///   "<N>" (MB)         explicit cap
+#[derive(Clone, Copy)]
+enum MemRuns {
+    Off,
+    Auto,
+    CapMb(u64),
+}
+
+fn memruns_knob() -> MemRuns {
+    static M: OnceLock<MemRuns> = OnceLock::new();
+    *M.get_or_init(|| match std::env::var("PGRUST_PARALLEL_COPY_SORT_MEMRUNS") {
+        Ok(v) => match v.trim() {
+            "" | "0" => MemRuns::Off,
+            "1" | "auto" => MemRuns::Auto,
+            v => v.parse::<u64>().map(MemRuns::CapMb).unwrap_or(MemRuns::Off),
+        },
+        Err(_) => MemRuns::Off,
+    })
+}
+
+/// Memory headroom for the auto-sized mem-run budget: cgroup v2
+/// limit−usage plus reclaimable file cache (the pod/container case),
+/// cgroup v1 fallback, then /proc/meminfo MemAvailable. None = no reliable
+/// signal (auto stays off; the explicit-MB knob still works).
+fn memory_headroom_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        fn read_num(p: &str) -> Option<u64> {
+            std::fs::read_to_string(p).ok()?.trim().parse().ok()
+        }
+        // cgroup v2: memory.max is numeric when limited ("max" = unlimited
+        // -> parse fails -> fall through).
+        if let Some(lim) = read_num("/sys/fs/cgroup/memory.max") {
+            let cur = read_num("/sys/fs/cgroup/memory.current")?;
+            let inactive_file = std::fs::read_to_string("/sys/fs/cgroup/memory.stat")
+                .ok()
+                .and_then(|s| {
+                    s.lines().find_map(|l| {
+                        l.strip_prefix("inactive_file ")?.trim().parse::<u64>().ok()
+                    })
+                })
+                .unwrap_or(0);
+            return Some(lim.saturating_sub(cur).saturating_add(inactive_file));
+        }
+        // cgroup v1 (bogus huge value = unlimited -> fall through).
+        if let (Some(lim), Some(cur)) = (
+            read_num("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+            read_num("/sys/fs/cgroup/memory/memory.usage_in_bytes"),
+        ) {
+            if lim < (1u64 << 60) {
+                return Some(lim.saturating_sub(cur));
+            }
+        }
+        // No container limit: the kernel's own availability estimate.
+        let mi = std::fs::read_to_string("/proc/meminfo").ok()?;
+        let kb = mi.lines().find_map(|l| {
+            l.strip_prefix("MemAvailable:")?
+                .trim()
+                .strip_suffix("kB")?
+                .trim()
+                .parse::<u64>()
+                .ok()
+        })?;
+        Some(kb * 1024)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// Resolve the mem-run budget in bytes at admission (0 = not engageable).
+fn memrun_budget(k: i32) -> u64 {
+    match memruns_knob() {
+        MemRuns::Off => 0,
+        MemRuns::CapMb(n) => n << 20,
+        MemRuns::Auto => {
+            let Some(headroom) = memory_headroom_bytes() else {
+                ptrace("memruns auto refused: no memory headroom signal");
+                return 0;
+            };
+            // Reserve what the rest of the pipeline provably holds: the
+            // worker batch arenas (k x SORT_MEM raw, capacity retained
+            // across spills), x1.5 for the transient compression frames,
+            // plus a fixed floor for the writer/encoder/stitch estate.
+            let reserve = (k as u64) * (sort_budget() as u64) * 3 / 2 + (2u64 << 30);
+            let budget = headroom.saturating_sub(reserve) * 4 / 5;
+            if budget < (1 << 30) {
+                ptrace(&format!("memruns auto refused: headroom {headroom} reserve {reserve}"));
+                return 0;
+            }
+            budget
+        }
+    }
+}
+
 /// Segmentator read-block bytes.
 const READ_BLOCK: usize = 4 << 20;
 
@@ -653,10 +758,17 @@ pub(crate) struct ParCopyShared {
     /// sorted (key,row) runs instead of encoding RGs; the leader merges
     /// after the RG completes. None = the landed encode pipeline verbatim.
     sort: Option<ParCopySort>,
-    /// Registered run files (paths pushed BEFORE their spill starts so
-    /// every file is cleanup-tracked); leader takes them for the merge.
-    sort_runs: Mutex<Vec<std::path::PathBuf>>,
+    /// Registered runs, in merge-index order (file paths pushed BEFORE
+    /// their spill starts so every file is cleanup-tracked; memory runs
+    /// free on drop); leader takes them for the merge.
+    sort_runs: Mutex<Vec<RunLoc>>,
     sort_run_seq: AtomicU64,
+}
+
+/// copyfast lever 1: where a registered run lives.
+enum RunLoc {
+    File(std::path::PathBuf),
+    Mem(pgrcolumnar::loadsort::MemRun),
 }
 
 /// Sort-mode plan: the presort key spec in memcmp-key terms.
@@ -666,6 +778,8 @@ struct ParCopySort {
     budget: usize,
     /// Statement-unique run-file name component.
     nonce: u64,
+    /// copyfast lever 1: in-memory run budget (None = every run spills).
+    memstore: Option<Arc<pgrcolumnar::loadsort::MemRunStore>>,
 }
 
 #[derive(Clone, Copy)]
@@ -763,6 +877,10 @@ struct WorkerSortState {
     spill_bytes: u64,
     rows: u64,
     runs: u32,
+    /// copyfast lever 1: runs kept in memory (subset of `runs`) + their
+    /// frame bytes at keep time.
+    mem_runs: u32,
+    mem_bytes: u64,
 }
 
 thread_local! {
@@ -934,13 +1052,60 @@ impl ParCopyShared {
         Ok(Some(enc.seal()))
     }
 
-    /// Sort + spill the worker's current batch as one run file. The path is
-    /// registered BEFORE the write so teardown can always unlink it.
+    /// Sort + spill the worker's current batch as one run. Lever 1: when a
+    /// mem-run store is armed, the compressed run stays in memory if the
+    /// budget admits it; otherwise (and in every non-armed posture) it
+    /// lands in a run file whose path is registered BEFORE the write so
+    /// teardown can always unlink it.
     fn spill_worker_batch(&self, st: &mut WorkerSortState) -> PgResult<()> {
         if st.batch.is_empty() {
             return Ok(());
         }
         let sort = self.sort.as_ref().expect("spill without sort mode");
+        // copyfast lever 1: the in-memory home. Compress first (identical
+        // frames either way), reserve the ACTUAL byte count; a refusal
+        // flushes the already-built frames to the run file verbatim.
+        if let Some(store) = &sort.memstore {
+            let t0 = std::time::Instant::now();
+            st.batch.sort();
+            let mem = st.batch.spill_run_mem()?;
+            let bytes = mem.bytes();
+            if store.try_reserve(bytes) {
+                let mem = mem.attach(Arc::clone(store));
+                let seq = self.sort_run_seq.fetch_add(1, Ordering::SeqCst);
+                self.sort_runs.lock().unwrap_or_else(|p| p.into_inner()).push(RunLoc::Mem(mem));
+                st.t_spill += t0.elapsed();
+                st.runs += 1;
+                st.mem_runs += 1;
+                st.mem_bytes += bytes;
+                st.spill_bytes += bytes;
+                ptrace(&format!("sort run kept in memory seq={seq} bytes={bytes}"));
+                return Ok(());
+            }
+            let (seq, path) = self.register_run_file(sort)?;
+            let written = mem.write_to_file(&path)?;
+            st.spill_bytes += written;
+            st.t_spill += t0.elapsed();
+            st.runs += 1;
+            ptrace(&format!("sort run spilled seq={seq} (mem budget exhausted)"));
+            return Ok(());
+        }
+        let (seq, path) = self.register_run_file(sort)?;
+        let t0 = std::time::Instant::now();
+        st.batch.sort();
+        st.spill_bytes += st.batch.spill_run_opts(&path, run_lz4_effective())?;
+        st.t_spill += t0.elapsed();
+        st.runs += 1;
+        ptrace(&format!("sort run spilled seq={seq}"));
+        Ok(())
+    }
+
+    /// Mint + REGISTER the next run file path (cleanup-tracked before any
+    /// write), creating the temp dir on first use.
+    fn register_run_file(
+        &self,
+        sort: &ParCopySort,
+    ) -> PgResult<(u64, std::path::PathBuf)> {
         // MakePGDirectory, EEXIST-tolerant: "base" always exists, so the one
         // missing component is pgsql_tmp itself (DST P1 inc-4 fence). EEXIST
         // is only usable when the existing path really is a directory
@@ -966,14 +1131,11 @@ impl ParCopyShared {
             sort.nonce,
             seq
         ));
-        self.sort_runs.lock().unwrap_or_else(|p| p.into_inner()).push(path.clone());
-        let t0 = std::time::Instant::now();
-        st.batch.sort();
-        st.spill_bytes += st.batch.spill_run_opts(&path, run_lz4_effective())?;
-        st.t_spill += t0.elapsed();
-        st.runs += 1;
-        ptrace(&format!("sort run spilled seq={seq}"));
-        Ok(())
+        self.sort_runs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(RunLoc::File(path.clone()));
+        Ok((seq, path))
     }
 }
 
@@ -1143,6 +1305,8 @@ fn worker_drive(shared: &Arc<ParCopyShared>) -> PgResult<()> {
             spill_bytes: 0,
             rows: 0,
             runs: 0,
+            mem_runs: 0,
+            mem_bytes: 0,
         });
         Ok(ParCopyWorkerCx {
             mcx,
@@ -1197,13 +1361,15 @@ fn worker_drive(shared: &Arc<ParCopyShared>) -> PgResult<()> {
         // load-r3 M0: the per-worker phase decomposition of the parse+spill
         // pole (trace-gated; accumulators are zero when tracing is off).
         ptrace(&format!(
-            "sort worker phases: parse {:.2}s key {:.2}s spill {:.2}s rows={} runs={} spillbytes={}",
+            "sort worker phases: parse {:.2}s key {:.2}s spill {:.2}s rows={} runs={} spillbytes={} memruns={} membytes={}",
             st.t_parse.as_secs_f64(),
             st.t_key.as_secs_f64(),
             st.t_spill.as_secs_f64(),
             st.rows,
             st.runs,
             st.spill_bytes,
+            st.mem_runs,
+            st.mem_bytes,
         ));
     }
 
@@ -1245,8 +1411,25 @@ fn merge_sorted_runs(
     shared: &Arc<ParCopyShared>,
 ) -> PgResult<u64> {
     let sort = shared.sort.as_ref().expect("merge without sort mode");
-    let paths =
+    let runs =
         std::mem::take(&mut *shared.sort_runs.lock().unwrap_or_else(|p| p.into_inner()));
+    let n_runs = runs.len();
+    let n_mem = runs.iter().filter(|r| matches!(r, RunLoc::Mem(_))).count();
+    let mem_bytes: u64 = runs
+        .iter()
+        .map(|r| match r {
+            RunLoc::Mem(m) => m.bytes(),
+            RunLoc::File(_) => 0,
+        })
+        .sum();
+    // File paths cloned for the post-open eager unlink below.
+    let file_paths: Vec<std::path::PathBuf> = runs
+        .iter()
+        .filter_map(|r| match r {
+            RunLoc::File(p) => Some(p.clone()),
+            RunLoc::Mem(_) => None,
+        })
+        .collect();
     // loadcommit C1: the merge kernel — BinaryHeap (default, byte-proven)
     // or the loser tree (opt-in, byte-identical order by construction).
     enum MergeKind {
@@ -1258,16 +1441,37 @@ fn merge_sorted_runs(
     if run_lz4() && !fill_v2() {
         ptrace("runlz4 refused: requires PGRUST_PARALLEL_COPY_FILL_V2=1 (raw runs used)");
     }
-    let mut merge = if prefetch > 0 {
-        MergeKind::V2(pgrcolumnar::loadsort::RunMergeV2::open_prefetch(
-            &paths,
+    let mut merge = if fill_v2() {
+        // Lever 1: the V2 constructor takes runs from EITHER home, in
+        // registration order; prefetch feeders serve the file subset only.
+        let inputs: Vec<pgrcolumnar::loadsort::RunInput> = runs
+            .into_iter()
+            .map(|r| match r {
+                RunLoc::File(p) => pgrcolumnar::loadsort::RunInput::File(p),
+                RunLoc::Mem(m) => pgrcolumnar::loadsort::RunInput::Mem(m),
+            })
+            .collect();
+        MergeKind::V2(pgrcolumnar::loadsort::RunMergeV2::open_mixed(
+            inputs,
             sort.key_w,
             prefetch,
             lz4,
         )?)
-    } else if fill_v2() {
-        MergeKind::V2(pgrcolumnar::loadsort::RunMergeV2::open_opts(&paths, sort.key_w, lz4)?)
     } else {
+        // Mem runs exist only under FILL_V2 (memstore admission requires
+        // it), so the V1 heap merge sees file runs by construction.
+        let mut paths = Vec::with_capacity(runs.len());
+        for r in runs {
+            match r {
+                RunLoc::File(p) => paths.push(p),
+                RunLoc::Mem(_) => {
+                    return Err(Box::new(PgError::new(
+                        ERROR,
+                        "parallel load-sort: in-memory run reached the v1 merge",
+                    )))
+                }
+            }
+        }
         MergeKind::V1(pgrcolumnar::loadsort::RunMerge::open(&paths, sort.key_w)?)
     };
     if fill_split() {
@@ -1285,13 +1489,12 @@ fn merge_sorted_runs(
     }
     // Eager unlink: the open fds keep the data; a crash from here leaves
     // no orphan files.
-    for p in &paths {
+    for p in &file_paths {
         let _ = fd::pg_unlink(&p.to_string_lossy());
     }
     let nenc = sort_encoders(shared.rt);
     ptrace(&format!(
-        "sort merge over {} runs encoders={nenc} fill={} fadv_mb={} prefetch={prefetch} runlz4={}",
-        paths.len(),
+        "sort merge over {n_runs} runs encoders={nenc} fill={} fadv_mb={} prefetch={prefetch} runlz4={} memruns={n_mem} membytes={mem_bytes}",
         match &merge {
             MergeKind::V1(_) => "v1",
             MergeKind::V2(_) => "v2",
@@ -1688,6 +1891,7 @@ fn admit<'mcx>(
                 key_w,
                 budget: sort_budget(),
                 nonce: SORT_NONCE.fetch_add(1, Ordering::SeqCst),
+                memstore: None, // resolved after dop, below
             })
         }
         Err(_) => refuse!("cbstore reloption error (serial raises it)"),
@@ -1707,6 +1911,25 @@ fn admit<'mcx>(
     let k = dop(rt);
     if k < 1 {
         refuse!("dop < 1");
+    }
+    let mut sort = sort;
+    if let Some(sort) = sort.as_mut() {
+        // copyfast lever 1 admission: budget sized against live headroom
+        // AT THIS STATEMENT (dop-dependent reserve), fail-closed to the
+        // file spill in every refusal posture.
+        if !matches!(memruns_knob(), MemRuns::Off) {
+            if !run_lz4_effective() {
+                ptrace(
+                    "memruns refused: requires PGRUST_PARALLEL_COPY_FILL_V2=1 + PGRUST_COPY_RUNLZ4=1",
+                );
+            } else {
+                let budget = memrun_budget(k);
+                if budget > 0 {
+                    ptrace(&format!("memruns engaged budget={budget}"));
+                    sort.memstore = Some(pgrcolumnar::loadsort::MemRunStore::new(budget));
+                }
+            }
+        }
     }
     Ok(Some((rt, k, sort)))
 }
@@ -1783,15 +2006,21 @@ pub(crate) fn copy_from_parallel<'mcx>(
 
     // Sort-run cleanup on EVERY exit path (error unwind included): any
     // registered, not-yet-consumed run file is unlinked (missing = fine —
-    // the merge eagerly unlinks after open).
+    // the merge eagerly unlinks after open); in-memory runs free (and
+    // release their store reservation) on drop.
     struct RunCleanup(Arc<ParCopyShared>);
     impl Drop for RunCleanup {
         fn drop(&mut self) {
-            let paths = std::mem::take(
+            let runs = std::mem::take(
                 &mut *self.0.sort_runs.lock().unwrap_or_else(|p| p.into_inner()),
             );
-            for p in paths {
-                let _ = fd::pg_unlink(&p.to_string_lossy());
+            for r in runs {
+                match r {
+                    RunLoc::File(p) => {
+                        let _ = fd::pg_unlink(&p.to_string_lossy());
+                    }
+                    RunLoc::Mem(m) => drop(m),
+                }
             }
         }
     }
