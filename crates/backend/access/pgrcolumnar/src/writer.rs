@@ -2549,6 +2549,24 @@ pub fn finish_bulk_insert(rel: &::types_rel::Relation<'_>) -> PgResult<()> {
     })
 }
 
+/// Top-level transaction end (commit AND abort): drop every buffered ingest
+/// writer without publishing. Any writer still present here is abandoned —
+/// `finish_bulk_insert` already removed (and published) the successful
+/// statement's writer at statement end, and the stale checks above never
+/// publish a leftover. C parity: copyfrom.c's COPY state lives in
+/// statement-lifetime memory contexts, so an error unwind frees it during
+/// abort processing — never at backend exit. Without this purge an errored
+/// presort COPY leaves its writer in backend TLS until thread teardown,
+/// where dropping the sorter's lifetime-erased relcache tupdesc runs after
+/// the backend's context arenas are gone (server abort in the arena
+/// dealloc). Called from the AM dispatch layer's xact callback; at the
+/// XACT_EVENT_ABORT/COMMIT call point the relcache entry and all arenas are
+/// still live, so the drops here are the in-lifetime mirror of C's
+/// context reset.
+pub fn at_eoxact() {
+    WRITERS.with(|w| w.borrow_mut().clear());
+}
+
 #[cfg(test)]
 mod abortsafe_tests {
     use super::*;
