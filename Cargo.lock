@@ -2584,7 +2584,6 @@ dependencies = [
  "init_small",
  "ipc_seams",
  "latch",
- "libc",
  "lmgr",
  "lmgr_proc",
  "lmgr_proc_seams",
