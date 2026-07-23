@@ -757,6 +757,28 @@ fn tls_source_census_and_session_surface_are_pinned() {
     //      (cfg(debug_assertions) throttle scratch) — pure scheduling
     //      bookkeeping, no session identity, die with the thread
     //      (541 -> 542 net).
+    // RC/t44-fixes NET-ZERO delta (542 -> 542): two offsetting movements,
+    // both classified here rather than netted silently.
+    //   -1  storage/lmgr/lock/src/fastpath.rs — the GL-LOCKCACHE-1 fix
+    //      (per-group fast-path use counts keyed by PGPROC, not thread)
+    //      DELETES that file's thread_local block by construction: the
+    //      counts were the defect, because proc identity is leased across
+    //      pool threads and a migrated statement read stale/zero counts.
+    //   +1  access/table/tableam/src/lib.rs, slot 84 below.
+    // copyerr-teardown delta, deliberately NON-SESSION TLS:
+    //   84. access/table/tableam/src/lib.rs — CB_EOXACT_REGISTERED: one-shot
+    //      Cell<bool> recording that this backend thread registered the
+    //      cbstore ingest-writer purge as a xact callback (the errored-COPY
+    //      teardown fix: abandoned TLS writers must drop at transaction end,
+    //      inside the arena lifetime, never in the thread's TLS destructor).
+    //      Pure per-thread registration bookkeeping, the slot-20
+    //      SIMPLE_EXIT_RELEASE class exactly: no session identity, no state
+    //      movement, never reset — the registration (and the flag's meaning)
+    //      live as long as the backend thread. The purge it registers is
+    //      thread-correct wherever it fires: it clears the EXECUTING
+    //      thread's writer map, and any writer present there at a
+    //      transaction end is abandoned by construction (statement-end
+    //      flush removed every published one).
     assert_eq!(count_tree(crates), 542, "TLS census changed; classify the delta in SESSION_ENVELOPE_MANIFEST or document it as non-session TLS");
     let session_sources = [
         ("backend/access/session/src/lib.rs", 1),
