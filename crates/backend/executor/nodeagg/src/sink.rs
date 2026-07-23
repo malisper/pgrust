@@ -4681,12 +4681,23 @@ pub struct SharedCountTable {
 }
 
 impl SharedCountTable {
+    /// The two slot arrays' heap bytes (GL-CONCMEM-1 estate grain: the
+    /// shared absorb face is an est-groups-sized plain-Rust estate).
+    fn slot_estate_bytes(slots: usize) -> usize {
+        slots * 2 * core::mem::size_of::<u64>()
+    }
+
     /// `cap_members` live groups, slots ≥ 2× that (power of two) — probe
     /// termination is structural: reservations bound distinct keys to
     /// cap_members ≤ slots/2, so an empty slot always exists.
     pub fn new(cap_members: usize) -> SharedCountTable {
         let cap_members = cap_members.max(64);
         let slots = (cap_members * 2).next_power_of_two();
+        // GL-CONCMEM-1: charge the process ledger at construction (one
+        // fixed-size allocation event — block grain by nature); Drop
+        // balances. The cross-worker run handoff otherwise rides entirely
+        // outside every context ledger.
+        ::mcx::global_footprint::charge_engine_estate(Self::slot_estate_bytes(slots));
         SharedCountTable {
             keys: (0..slots).map(|_| ShAtomicU64::new(0)).collect(),
             counts: (0..slots).map(|_| ShAtomicU64::new(0)).collect(),
@@ -4878,6 +4889,16 @@ impl SharedCountTable {
             hashes: Vec::new(),
             gid_gen: 0,
         })
+    }
+}
+
+impl Drop for SharedCountTable {
+    fn drop(&mut self) {
+        // Ledger balance for the construction charge (GL-CONCMEM-1); the
+        // slot count is fixed for the table's lifetime.
+        ::mcx::global_footprint::uncharge_engine_estate(Self::slot_estate_bytes(
+            self.keys.len(),
+        ));
     }
 }
 
@@ -5436,6 +5457,51 @@ mod tests {
     #[test]
     fn shared_count_empty_drain() {
         assert!(SharedCountTable::new(64).drain_to_run().is_none());
+    }
+
+    /// GL-CONCMEM-1: the shared absorb face's process-ledger charge
+    /// balances across construction and Drop. Delta-based (other tests run
+    /// concurrently on the process-global counter) with a noise allowance
+    /// on the held bound; the FINAL bound retries — a leaked charge is
+    /// permanent and never converges (the lanetable balance-test law).
+    #[test]
+    fn shared_count_ledger_balances() {
+        const NOISE: usize = 16 << 20;
+        let expect = SharedCountTable::slot_estate_bytes(1 << 21);
+        let base = ::mcx::global_footprint::bytes();
+        // Concurrent tests move the process-global counter in BOTH
+        // directions; the held bound retries over fresh construction
+        // windows (a missing charge fails every window), and the final
+        // bound retries after Drop against the pre-loop base (a leaked
+        // charge is permanent — it accumulates across the windows and
+        // never converges back).
+        let mut charged = false;
+        for _ in 0..8 {
+            let pre = ::mcx::global_footprint::bytes();
+            // 1M members → slots = 2^21 → two 16MB word arrays charged.
+            let t = SharedCountTable::new(1 << 20);
+            let held = ::mcx::global_footprint::bytes();
+            drop(t);
+            if held + NOISE >= pre + expect {
+                charged = true;
+                break;
+            }
+        }
+        assert!(charged, "construction did not charge the ledger (expect {expect})");
+        // Upper bound only: a leak leaves the counter permanently HIGH;
+        // concurrent tests whose holdings were inside `base` can leave it
+        // legitimately lower (one-sided — the leak direction).
+        let mut ok = false;
+        for _ in 0..50 {
+            let after = ::mcx::global_footprint::bytes();
+            if after <= base + NOISE {
+                ok = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let after = ::mcx::global_footprint::bytes();
+        assert!(ok, "ledger did not balance after Drop: base {base}, after {after}");
     }
 
     /// FAIL-CLOSED flags pre-pass: a null-marked (or padding-dirty) state

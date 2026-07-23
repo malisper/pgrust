@@ -457,6 +457,26 @@ pub struct ExprKeyState {
     sink_mm_armed: bool,
 }
 
+impl ExprKeyState {
+    /// Heap backing-store bytes for the process estate ledger
+    /// (GL-CONCMEM-1): the batch scratch lanes plus the per-epoch
+    /// code→pergroup map (`dg_slots` — gndv-sized at dict shapes, the
+    /// family's whale lane). Capacity-based; settled by the drive at claim
+    /// boundaries, never per row.
+    pub(super) fn estate_bytes(&self) -> usize {
+        use super::vec_estate_bytes as vb;
+        vb(&self.map)
+            + vb(&self.rows)
+            + vb(&self.keys)
+            + vb(&self.knull)
+            + vb(&self.hashes)
+            + vb(&self.hash1)
+            + vb(&self.key_vals)
+            + vb(&self.key_null)
+            + vb(&self.dg_slots)
+    }
+}
+
 /// `LaneCols` remap for projected-scan folds: plan/fold columns are tlist
 /// attnos; each admitted one maps to a base scan lane. The computed key
 /// column is never in `plan.cols` (admission: it has no base lane).

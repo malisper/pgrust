@@ -4861,6 +4861,24 @@ struct ScanK2Scratch {
     hashes: Vec<u32>,
 }
 
+/// One Vec's backing-store bytes (CAPACITY, not len) — the estate-ledger
+/// grain for the drive-scratch charges (GL-CONCMEM-1): the process ledger
+/// mirrors what the allocator actually holds for the store, settled at
+/// claim boundaries, never per row.
+pub(crate) fn vec_estate_bytes<T>(v: &Vec<T>) -> usize {
+    v.capacity() * core::mem::size_of::<T>()
+}
+
+impl ScanK2Scratch {
+    /// Backing-store bytes for the process estate ledger (GL-CONCMEM-1).
+    fn estate_bytes(&self) -> usize {
+        vec_estate_bytes(&self.rows)
+            + vec_estate_bytes(&self.keys)
+            + vec_estate_bytes(&self.knull)
+            + vec_estate_bytes(&self.hashes)
+    }
+}
+
 /// The scan feed's K2 admission (mirrors the joined-row feed's K2 arm in
 /// `staged_feed_shape`): unguarded, no residual transitions, a single
 /// kernel-hostable (int4/int8/text) grouping key — plus the scan-side
@@ -5582,6 +5600,14 @@ struct ScanMk {
     dict_att: Option<u16>,
 }
 
+impl ScanMk {
+    /// Heap backing-store bytes for the process estate ledger
+    /// (GL-CONCMEM-1; the inline struct rides its owner's storage).
+    fn estate_bytes(&self) -> usize {
+        vec_estate_bytes(&self.shape.comps)
+    }
+}
+
 /// Reusable per-build scratch for the multi-key batch loop: survivors, the
 /// u128 pack accumulator, the packed key lanes, and the per-epoch
 /// code → intern-id cache (dictgroup's `slots` pattern, retargeted).
@@ -5616,6 +5642,35 @@ struct MkScratch {
     fz: Option<MkFreezeSnap>,
     /// Per-survivor candidate-mask scratch (reused across batches).
     fz_mask: Vec<u64>,
+}
+
+impl MkScratch {
+    /// Backing-store bytes for the process estate ledger (GL-CONCMEM-1).
+    /// The per-epoch code caches (`code_ids`/`code_states`, and the freeze
+    /// snapshot's `code_mask`) are gndv-sized — the family's whale lanes at
+    /// high-NDV dict shapes; everything else is batch-bounded.
+    fn estate_bytes(&self) -> usize {
+        let fz = self.fz.as_ref().map_or(0, |s| {
+            core::mem::size_of::<MkFreezeSnap>()
+                + vec_estate_bytes(&s.comp_vals)
+                + s.comp_vals
+                    .iter()
+                    .flatten()
+                    .map(vec_estate_bytes)
+                    .sum::<usize>()
+                + vec_estate_bytes(&s.texts)
+                + s.texts.iter().map(vec_estate_bytes).sum::<usize>()
+                + vec_estate_bytes(&s.code_mask)
+        });
+        vec_estate_bytes(&self.rows)
+            + vec_estate_bytes(&self.packbuf)
+            + vec_estate_bytes(&self.keys1)
+            + vec_estate_bytes(&self.keys2)
+            + vec_estate_bytes(&self.code_ids)
+            + vec_estate_bytes(&self.code_states)
+            + vec_estate_bytes(&self.fz_mask)
+            + fz
+    }
 }
 
 /// One worker's parsed view of the frozen canonical set ([`MkScratch::fz`]).
