@@ -33,8 +33,8 @@ pub use scan::{
     ZoneCmp, ZoneQual,
 };
 pub use writer::{
-    begin_parallel_ingest, coltypes_of, finish_bulk_insert, multi_insert, tuple_insert, CbWriter,
-    ColOrderProbe, EncodedRg, ParallelIngestPlan, RgChunkEncoder,
+    at_eoxact, begin_parallel_ingest, coltypes_of, finish_bulk_insert, multi_insert, tuple_insert,
+    CbWriter, ColOrderProbe, EncodedRg, ParallelIngestPlan, RgChunkEncoder,
 };
 
 pub fn rel_main_path(rel: &::types_rel::Relation<'_>) -> String {
