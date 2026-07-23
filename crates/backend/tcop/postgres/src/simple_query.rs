@@ -556,30 +556,68 @@ fn check_log_statement(stmt_list: &PgVec<'_, RawStmt<'_>>) -> bool {
     false
 }
 
-// check_log_duration (postgres.c:2427). The log_min_duration_sample /
-// log_statement_sample_rate refinement rides in_sample state the guc lane
-// owns; with those GUCs at boot defaults (-1 / 1.0) this matches C.
+// check_log_duration (postgres.c:2427), full C shape: log_min_duration_sample
+// / log_statement_sample_rate decide an in_sample draw at the same decision
+// point as C, and xact_is_sampled (drawn once per transaction from
+// log_transaction_sample_rate at StartTransaction) forces logging for sampled
+// transactions. (GL-GUCBATCH-1: the sampling refinement was a silent PARTIAL —
+// SET accepted, never honored.)
 pub(crate) fn check_log_duration(was_logged: bool) -> (i32, String) {
-    let log_duration = guc_tables::backing::log_duration();
-    let log_min = guc_tables::backing::log_min_duration_statement();
-    if !log_duration && log_min < 0 {
+    let gucs = LogDurationGucs {
+        log_duration: guc_tables::backing::log_duration(),
+        log_min: guc_tables::backing::log_min_duration_statement(),
+        log_min_sample: guc_tables::backing::log_min_duration_sample(),
+        sample_rate: guc_tables::backing::log_statement_sample_rate(),
+        xact_is_sampled: xact::xact_is_sampled(),
+    };
+    let diff_us =
+        crate::get_current_timestamp() - xact::GetCurrentStatementStartTimestamp();
+    check_log_duration_impl(was_logged, diff_us, &gucs, || {
+        pg_prng::global_prng(pg_prng::PgPrng::next_f64)
+    })
+}
+
+pub(crate) struct LogDurationGucs {
+    pub(crate) log_duration: bool,
+    pub(crate) log_min: i32,
+    pub(crate) log_min_sample: i32,
+    pub(crate) sample_rate: f64,
+    pub(crate) xact_is_sampled: bool,
+}
+
+// The C decision body, GUC/clock/PRNG-free for the deterministic units.
+pub(crate) fn check_log_duration_impl(
+    was_logged: bool,
+    diff_us: i64,
+    g: &LogDurationGucs,
+    draw: impl FnOnce() -> f64,
+) -> (i32, String) {
+    if !g.log_duration && g.log_min_sample < 0 && g.log_min < 0 && !g.xact_is_sampled {
         return (0, String::new());
     }
 
-    let start = xact::GetCurrentStatementStartTimestamp();
-    let now = crate::get_current_timestamp();
-    let diff_us = now - start;
     let secs = diff_us / 1_000_000;
     let usecs = (diff_us % 1_000_000) as i64;
     let msecs = usecs / 1000;
 
-    let exceeded_duration = log_min == 0
-        || (log_min > 0 && (secs > i64::from(log_min) / 1000
-            || secs * 1000 + msecs >= i64::from(log_min)));
+    let exceeded_duration = g.log_min == 0
+        || (g.log_min > 0 && (secs > i64::from(g.log_min) / 1000
+            || secs * 1000 + msecs >= i64::from(g.log_min)));
 
-    if exceeded_duration || log_duration {
+    let exceeded_sample_duration = g.log_min_sample == 0
+        || (g.log_min_sample > 0
+            && (secs > i64::from(g.log_min_sample) / 1000
+                || secs * 1000 + msecs >= i64::from(g.log_min_sample)));
+
+    // C: no PRNG draw at rate 0 (never log) or rate 1 (always log).
+    let mut in_sample = false;
+    if exceeded_sample_duration {
+        in_sample = g.sample_rate != 0.0 && (g.sample_rate == 1.0 || draw() <= g.sample_rate);
+    }
+
+    if exceeded_duration || in_sample || g.log_duration || g.xact_is_sampled {
         let msec_str = format!("{}.{:03}", secs * 1000 + msecs, usecs % 1000);
-        if exceeded_duration && !was_logged {
+        if (exceeded_duration || in_sample || g.xact_is_sampled) && !was_logged {
             return (2, msec_str);
         }
         return (1, msec_str);

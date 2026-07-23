@@ -271,3 +271,107 @@ fn thread_signal_sigint_cancels_and_sigterm_terminates() {
     assert_eq!(err.sqlstate, types_error::ERRCODE_ADMIN_SHUTDOWN); /* 57P01 */
     backend.join().unwrap();
 }
+
+// ---- check_log_duration sampling (GL-GUCBATCH-1; postgres.c:2427 parity) ----
+
+fn sampling_gucs() -> simple_query::LogDurationGucs {
+    simple_query::LogDurationGucs {
+        log_duration: false,
+        log_min: -1,
+        log_min_sample: -1,
+        sample_rate: 1.0,
+        xact_is_sampled: false,
+    }
+}
+
+#[test]
+fn log_sampling_boot_defaults_return_zero_without_a_draw() {
+    let g = sampling_gucs();
+    let (code, msec) =
+        simple_query::check_log_duration_impl(false, 5_000_000, &g, || panic!("no draw"));
+    assert_eq!(code, 0);
+    assert!(msec.is_empty());
+}
+
+#[test]
+fn log_sampling_rate_zero_never_logs_and_never_draws() {
+    let mut g = sampling_gucs();
+    g.log_min_sample = 0; // every statement exceeds the sample threshold
+    g.sample_rate = 0.0;
+    let (code, _) =
+        simple_query::check_log_duration_impl(false, 5_000, &g, || panic!("no draw at rate 0"));
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn log_sampling_rate_one_always_logs_and_never_draws() {
+    let mut g = sampling_gucs();
+    g.log_min_sample = 0;
+    g.sample_rate = 1.0;
+    let (code, msec) =
+        simple_query::check_log_duration_impl(false, 1_234_567, &g, || panic!("no draw at rate 1"));
+    assert_eq!(code, 2);
+    // C: snprintf "%ld.%03d" of (secs*1000 + msecs, usecs % 1000).
+    assert_eq!(msec, "1234.567");
+    // Already-logged statements report 1 (log duration only), C's return 1 arm.
+    let (code, _) =
+        simple_query::check_log_duration_impl(true, 1_234_567, &g, || panic!("no draw at rate 1"));
+    assert_eq!(code, 1);
+}
+
+#[test]
+fn log_sampling_min_duration_sample_gates_the_draw() {
+    let mut g = sampling_gucs();
+    g.log_min_sample = 100; // ms
+    g.sample_rate = 1.0;
+    // 50ms: under the sample threshold — no draw, no log.
+    let (code, _) =
+        simple_query::check_log_duration_impl(false, 50_000, &g, || panic!("under threshold"));
+    assert_eq!(code, 0);
+    // 150ms: over — rate 1 logs.
+    let (code, _) =
+        simple_query::check_log_duration_impl(false, 150_000, &g, || panic!("no draw at rate 1"));
+    assert_eq!(code, 2);
+}
+
+#[test]
+fn log_sampling_fractional_rate_statistical_n1000() {
+    let mut g = sampling_gucs();
+    g.log_min_sample = 0;
+    g.sample_rate = 0.25;
+    let prng = std::cell::RefCell::new(pg_prng::PgPrng::seeded(0x6763_6261_7463_6831));
+    let mut hits = 0;
+    for _ in 0..1000 {
+        let (code, _) = simple_query::check_log_duration_impl(false, 5_000, &g, || {
+            prng.borrow_mut().next_f64()
+        });
+        if code == 2 {
+            hits += 1;
+        }
+    }
+    // Seeded, hence deterministic; the band guards the decision inequality
+    // (<= rate) rather than the generator's exact stream.
+    assert!((200..=300).contains(&hits), "hits={hits} outside 200..=300 for rate 0.25");
+}
+
+#[test]
+fn log_sampling_xact_sampled_forces_logging() {
+    let mut g = sampling_gucs();
+    g.xact_is_sampled = true;
+    let (code, msec) =
+        simple_query::check_log_duration_impl(false, 2_000, &g, || panic!("no draw"));
+    assert_eq!(code, 2);
+    assert_eq!(msec, "2.000");
+    let (code, _) =
+        simple_query::check_log_duration_impl(true, 2_000, &g, || panic!("no draw"));
+    assert_eq!(code, 1);
+}
+
+#[test]
+fn log_sampling_leaves_log_min_duration_statement_intact() {
+    let mut g = sampling_gucs();
+    g.log_min = 0; // log_min_duration_statement=0: log everything, no sampling
+    g.sample_rate = 0.0;
+    let (code, _) = simple_query::check_log_duration_impl(false, 10, &g, || panic!("no draw"));
+    assert_eq!(code, 2);
+}
