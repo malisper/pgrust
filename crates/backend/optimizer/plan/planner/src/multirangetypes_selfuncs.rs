@@ -217,7 +217,11 @@ fn calc_multirangesel<'mcx>(
             Some(sslot) => {
                 let numbers = sslot.numbers()?;
                 if numbers.len() != 1 {
-                    panic!("invalid empty fraction statistic");
+                    // C: elog(ERROR) — a degenerate/torn slot aborts the
+                    // statement, never the backend.
+                    return Err(Box::new(types_error::PgError::error(
+                        "invalid empty fraction statistic".to_string(),
+                    )));
                 }
                 numbers[0]
             }
@@ -302,7 +306,11 @@ fn calc_hist_selectivity<'mcx>(
         let (lo, up, empty) =
             adt_rangetypes::range_deserialize(&rng.ri.elem, varlena_image(v));
         if empty {
-            panic!("bounds histogram contains an empty range");
+            // C: elog(ERROR) — degenerate stats content aborts the
+            // statement, never the backend.
+            return Err(Box::new(types_error::PgError::error(
+                "bounds histogram contains an empty range".to_string(),
+            )));
         }
         hist_lower.push(lo);
         hist_upper.push(up);

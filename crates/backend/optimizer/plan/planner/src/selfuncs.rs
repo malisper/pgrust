@@ -397,11 +397,17 @@ pub(crate) fn mcv_selectivity<'mcx>(
     let mut sumcommon = 0.0;
     if vardata.stats.is_some() && statistic_proc_security_check(vardata, opproc.fn_oid)? {
         if let Some(sslot) = vardata.slot(STATISTIC_KIND_MCV, 0) {
-            for (i, &v) in sslot.values()?.iter().enumerate() {
+            // A torn slot (bundle-time kind, arrays re-probed from a
+            // rewritten pg_statistic row) can pair values with a shorter or
+            // empty numbers array; only the paired prefix carries MCV
+            // entries. On any well-formed slot the lengths agree and this is
+            // exactly C's nvalues-bounded loop (C reads a pinned tuple copy
+            // and can never see the tear).
+            for (&v, &n) in sslot.values()?.iter().zip(sslot.numbers()?.iter()) {
                 if op_test(run.mcx, opproc, collation, v, constval, varonleft)? {
-                    mcv_selec += sslot.numbers()?[i] as f64;
+                    mcv_selec += n as f64;
                 }
-                sumcommon += sslot.numbers()?[i] as f64;
+                sumcommon += n as f64;
             }
         }
     }
@@ -1812,15 +1818,20 @@ pub(crate) fn var_eq_const<'mcx>(
         match vardata.slot(STATISTIC_KIND_MCV, 0) {
             Some(sslot) => {
                 let mut eqproc = opproc_for_run(run, oproid)?;
+                // Torn slot: only values paired with a frequency are MCV
+                // entries — an unpaired match has no frequency to return, so
+                // the const falls through to the not-an-MCV arm (whose
+                // sumcommon is already nnumbers-bounded, as C). Well-formed
+                // slots have equal lengths: exactly C's nvalues loop.
                 let mut matched = None;
-                for (i, &v) in sslot.values()?.iter().enumerate() {
+                for (&v, &n) in sslot.values()?.iter().zip(sslot.numbers()?.iter()) {
                     if op_test(run.mcx, &mut eqproc, collation, v, constval, varonleft)? {
-                        matched = Some(i);
+                        matched = Some(n);
                         break;
                     }
                 }
                 match matched {
-                    Some(i) => sslot.numbers()?[i] as f64,
+                    Some(n) => n as f64,
                     None => {
                         let sumcommon: f64 =
                             sslot.numbers()?.iter().map(|&n| n as f64).sum();
@@ -3078,10 +3089,15 @@ fn eqjoinsel_inner(
     if have_mcvs1 && have_mcvs2 {
         let sslot1 = vardata1.slot(STATISTIC_KIND_MCV, 0).expect("have_mcvs1");
         let sslot2 = vardata2.slot(STATISTIC_KIND_MCV, 0).expect("have_mcvs2");
-        let values1 = sslot1.values()?;
-        let numbers1 = sslot1.numbers()?;
-        let values2 = sslot2.values()?;
-        let numbers2 = sslot2.numbers()?;
+        // Torn slots can pair values with a shorter numbers array; only the
+        // paired prefix carries MCV entries. Well-formed slots have equal
+        // lengths, making these exactly C's nvalues-bounded arrays.
+        let n1 = sslot1.values()?.len().min(sslot1.numbers()?.len());
+        let n2 = sslot2.values()?.len().min(sslot2.numbers()?.len());
+        let values1 = &sslot1.values()?[..n1];
+        let numbers1 = &sslot1.numbers()?[..n1];
+        let values2 = &sslot2.values()?[..n2];
+        let numbers2 = &sslot2.numbers()?[..n2];
         let nullfrac1 = vardata1.nullfrac();
         let nullfrac2 = vardata2.nullfrac();
 
@@ -3247,8 +3263,11 @@ fn eqjoinsel_semi(
     if have_mcvs1 && have_mcvs2 && opfuncoid != 0 {
         let sslot1 = vardata1.slot(STATISTIC_KIND_MCV, 0).expect("have_mcvs1");
         let sslot2 = vardata2.slot(STATISTIC_KIND_MCV, 0).expect("have_mcvs2");
-        let values1 = sslot1.values()?;
-        let numbers1 = sslot1.numbers()?;
+        // Same torn-slot pairing rule as eqjoinsel_inner; values2 has no
+        // frequency reads, so it keeps its full length (C's nvalues2).
+        let n1 = sslot1.values()?.len().min(sslot1.numbers()?.len());
+        let values1 = &sslot1.values()?[..n1];
+        let numbers1 = &sslot1.numbers()?[..n1];
         let values2 = sslot2.values()?;
         let nullfrac1 = vardata1.nullfrac();
 
@@ -4169,9 +4188,11 @@ fn generic_restriction_selectivity<'mcx>(
             vardata.stats.is_some() && statistic_proc_security_check(&vardata, opcode)?;
         let (mut mcvsel, mut mcvsum) = (0.0f64, 0.0f64);
         if let Some(sslot) = vardata.slot(STATISTIC_KIND_MCV, 0).filter(|_| stats_usable) {
-            for (i, &v) in sslot.values()?.iter().enumerate() {
+            // Torn-slot pairing rule (see mcv_selectivity): only values
+            // paired with a frequency count.
+            for (&v, &n) in sslot.values()?.iter().zip(sslot.numbers()?.iter()) {
                 if armed_test(&mut opproc, v)? {
-                    mcvsel += sslot.numbers()?[i] as f64;
+                    mcvsel += n as f64;
                 }
             }
         }
