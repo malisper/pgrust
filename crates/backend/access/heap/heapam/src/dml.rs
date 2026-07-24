@@ -2664,7 +2664,7 @@ pub fn heap_update(
             || newtup.t_len as usize > TOAST_TUPLE_THRESHOLD
     };
 
-    let pagefree = pin.page().heap_free_space();
+    let mut pagefree = pin.page().heap_free_space();
     let mut newtupsize = (newtup.t_len as usize + 7) & !7;
 
     let toast_ctx;
@@ -2764,20 +2764,62 @@ pub fn heap_update(
         };
         newtupsize = (ht_len as usize + 7) & !7;
 
-        // C re-checks free space in a loop; single-backend recheck reduces to
-        // one pass (no concurrent inserters can consume the page meanwhile).
-        if newtupsize > pagefree {
-            newpin = Some(RelationGetBufferForTuple(
-                relation,
-                ht_len as usize,
-                Some(&pin),
-                0,
-                None,
-                0,
-            )?);
-        } else {
+        // Now, do we need a new page for the tuple, or not?  This is a bit
+        // tricky since someone else could have added tuples to the page while
+        // we weren't looking (backends are threads of one process here, so the
+        // page is live shared state for the whole unlocked toast window).  We
+        // have to recheck the available space after reacquiring the buffer
+        // lock.  But don't bother to do that if the former amount of free
+        // space is still not enough; it's unlikely there's more free now than
+        // before.
+        //
+        // What's more, if we need to get a new page, we will need to acquire
+        // buffer locks on both old and new pages.  To avoid deadlock against
+        // some other backend trying to get the same two locks in the other
+        // order, we must be consistent about the order we get the locks in.
+        // We use the rule "lock the lower-numbered page of the relation
+        // first".  To implement this, we must do RelationGetBufferForTuple
+        // while not holding the lock on the old page, and we must rely on it
+        // to get the locks on both pages in the correct order.  Hence we need
+        // a loop.
+        //
+        // C additionally disjoins `vmbuffer == InvalidBuffer &&
+        // PageIsAllVisible(page)` into the retry test, because its
+        // all-visible clear at the end of heap_update consumes a *caller*-
+        // supplied vmbuffer that must have been pinned before the content
+        // lock was taken.  We have no such variable to be missing: our
+        // clear_page_all_visible() pins the visibility-map page itself, at
+        // clear time, under the content lock we already hold (the standing
+        // pin-at-clear divergence, also used by the ALL_FROZEN clear above).
+        // The clause is therefore vacuous here, not omitted.
+        loop {
+            if newtupsize > pagefree {
+                // It doesn't fit, must use RelationGetBufferForTuple.
+                newpin = Some(RelationGetBufferForTuple(
+                    relation,
+                    ht_len as usize,
+                    Some(&pin),
+                    0,
+                    None,
+                    0,
+                )?);
+                // We're all done.
+                break;
+            }
+            // Re-acquire the lock on the old tuple's page.
             bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_EXCLUSIVE)?;
-            newpin = None;
+            // Re-check using the up-to-date free space.
+            pagefree = pin.page().heap_free_space();
+            if newtupsize > pagefree {
+                // Rats, it doesn't fit anymore.  We must now unlock and loop
+                // to avoid deadlock.  Fortunately, this path should seldom be
+                // taken.
+                bufmgr_seams::lock_buffer::call(pin.buffer(), BUFFER_LOCK_UNLOCK)?;
+            } else {
+                // We're all done.
+                newpin = None;
+                break;
+            }
         }
     } else {
         newpin = None;
