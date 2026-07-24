@@ -118,10 +118,19 @@ pub(crate) fn pgaio_io_perform_synchronously(index: u32) {
     g::EndCriticalSection();
 }
 
+// Vector IO routes through the vfs provider, NEVER raw libc: the op fd came
+// from FileRawDescForAio (the provider's descriptor domain). Product builds
+// monomorphize to the identical single preadv/pwritev syscall (vfs contract
+// §1.2 zero-cost law); under `--cfg pgrust_sim` the fd is a SimVfs handle
+// foreign to the kernel — raw libc here EBADF'd every AIO read and killed
+// the whole-server sim boot (GL-TESTFIX-1 F-R2-2). EINTR retry stays here:
+// ops are single-shot below the trait (contract §1.1), and SimVfs never
+// emits EINTR.
 unsafe fn pg_preadv_raw(fd: i32, iov: *const libc::iovec, iovcnt: i32, offset: i64) -> isize {
+    let iov = std::slice::from_raw_parts(iov, iovcnt as usize);
     loop {
-        let r = libc::preadv(fd, iov, iovcnt, offset);
-        if r < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+        let r = vfs::preadv(fd, iov, offset as libc::off_t);
+        if r < 0 && vfs::get_errno() == libc::EINTR {
             continue;
         }
         return r;
@@ -129,9 +138,10 @@ unsafe fn pg_preadv_raw(fd: i32, iov: *const libc::iovec, iovcnt: i32, offset: i
 }
 
 unsafe fn pg_pwritev_raw(fd: i32, iov: *const libc::iovec, iovcnt: i32, offset: i64) -> isize {
+    let iov = std::slice::from_raw_parts(iov, iovcnt as usize);
     loop {
-        let r = libc::pwritev(fd, iov, iovcnt, offset);
-        if r < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+        let r = vfs::pwritev(fd, iov, offset as libc::off_t);
+        if r < 0 && vfs::get_errno() == libc::EINTR {
             continue;
         }
         return r;
