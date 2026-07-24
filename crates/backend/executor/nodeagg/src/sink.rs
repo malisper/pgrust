@@ -3520,6 +3520,29 @@ pub fn sink_emit_bucket_rows(
     Ok(acc.finish())
 }
 
+/// SINGLE-LOCAL PASS-THROUGH admission (GL-SINKSHAPE-1): whether
+/// [`sink_emit_bucket_passthrough`] may emit straight from this Local table
+/// under `plan`. [`emit_row`] keys its canonical-tail columns
+/// ([`SinkEmitCol::MultiText`]) off the table's OWN representation, so the
+/// pass-through admits exactly the tables whose keying class matches the
+/// plan's: a canonical (tail-carrying, `fixed`-prefixed) plan needs the
+/// canonical image AS the table key (`KeyRepr::Bytes` — the DIRECT
+/// single-text arm), a word plan needs a word-keyed table. An INTERN-ARMED
+/// canonical table keys on per-worker intern-id WORDS — its canonical bytes
+/// exist only through the intern chase, which is the merge arm's remainder
+/// face (`SinkRemainder::canon`) — so it REFUSES here and the combine falls
+/// back to the merge arm (the sink law: admit the emit class it will
+/// receive, or refuse to the fallback). Reachability of the mismatch is an
+/// ENGAGEMENT COLLAPSE, not a plan property: Locals fork on first morsel
+/// touch, so a pool saturated by concurrent sessions (the QPS window) can
+/// hand every morsel of a dop-N engagement to ONE worker — exactly one
+/// sealed Local, zero flushed runs. The `emit_row` tripwire ("MultiText
+/// emit on a word-keyed table") stays the fail-closed defense behind this
+/// admission.
+pub fn sink_passthrough_admits(plan: &SinkEmitPlan, t: &LaneAggTable) -> bool {
+    plan.fixed.is_some() == (t.repr() == KeyRepr::Bytes)
+}
+
 /// SINGLE-LOCAL PASS-THROUGH emit (dop1-tax fix 3, class b): when the
 /// combine sees exactly one sealed Local with zero flushed runs, bucket `b`'s
 /// merged table would be a verbatim re-insert of the Local's own rows — so
@@ -3531,7 +3554,9 @@ pub fn sink_emit_bucket_rows(
 /// no-runs source, the NULL row last in [`SINK_NULL_BUCKET`] (the merge
 /// arm's absorb order), and a new-key absorb copies state blocks verbatim.
 /// The decision is LIVE STATE (Local count + run count at combine time) —
-/// a widened engagement (≥2 Locals) or a flushed Local takes the merge arm.
+/// a widened engagement (≥2 Locals) or a flushed Local takes the merge arm,
+/// and so does a Local whose table representation cannot serve the emit
+/// plan ([`sink_passthrough_admits`] — the GL-SINKSHAPE-1 admission).
 pub fn sink_emit_bucket_passthrough(
     plan: &SinkEmitPlan,
     t: &LaneAggTable,
@@ -7436,6 +7461,156 @@ mod tests {
             "constant-top-byte inserts must grow the incumbent's single live sub-set"
         );
         assert_merged_identical(&incumbent, &flat, 0);
+    }
+
+    /// GL-SINKSHAPE-1 born-RED twin: a canonical (tail-carrying) emit plan
+    /// over the INTERN-ARMED canonical worker's WORD-keyed table. The
+    /// admission verdict refuses (the combine falls to the merge arm), the
+    /// `emit_row` tripwire behind it stays the fail-closed defense, and the
+    /// merge arm over the SAME single Local (the fallback the combine
+    /// takes) emits the groups the pass-through could not. This is the
+    /// QPS-window collapse shape: fork-on-first-touch under a saturated
+    /// pool seals exactly ONE Local with zero flushed runs.
+    #[test]
+    fn passthrough_admission_refuses_intern_armed_canonical() {
+        let mut w = canon_worker(canon_shape_int8_text());
+        bump_canon(&mut w, Some(1), b"apple", 1);
+        bump_canon(&mut w, Some(2), b"a-rather-long-canonical-key-way-past-eight", 2);
+        bump_canon(&mut w, Some(1), b"apple", 3);
+        let mut h = SinkTableHandle(w);
+        let part = h.partition_remainder();
+        let plan = SinkEmitPlan {
+            width: 8,
+            fixed: Some(12),
+            ntails: 1,
+            filter: None,
+            cols: vec![
+                SinkEmitCol::MultiComp { off: 0, width: 8 },
+                SinkEmitCol::MultiText { nth: 0 },
+                SinkEmitCol::Agg { transno: 0 },
+            ],
+        };
+        assert!(
+            !sink_passthrough_admits(&plan, h.table()),
+            "canonical plan over an intern-armed word table must refuse the pass-through"
+        );
+        // The tripwire is the defense BEHIND the admission: the raw
+        // pass-through over the mismatched pair keeps failing closed.
+        let mut tripped = false;
+        for b in 0..SINK_NBUCKETS {
+            if part.starts[b + 1] > part.starts[b] {
+                let Err(err) = sink_emit_bucket_passthrough(&plan, h.table(), &part, b)
+                else {
+                    panic!("word-keyed table cannot serve a MultiText emit")
+                };
+                assert!(
+                    err.message().contains("MultiText emit on a word-keyed table"),
+                    "unexpected error: {}",
+                    err.message()
+                );
+                tripped = true;
+                break;
+            }
+        }
+        assert!(tripped, "fixture populates at least one bucket");
+        // The FALLBACK: the merge arm over the same single Local runs the
+        // intern chase and emits every group.
+        let locals = [SinkLocalView {
+            spilled: &[],
+            runs: &[],
+            remainder: Some(h.remainder_view(&part)),
+        }];
+        let combines = test_combines();
+        let mut seen: std::collections::HashMap<(i64, Vec<u8>), i64> =
+            std::collections::HashMap::new();
+        for b in 0..SINK_NBUCKETS {
+            let t = sink_combine_bucket(b, 0, STATE_BYTES, &locals, &combines).unwrap();
+            assert_eq!(t.repr(), KeyRepr::Bytes);
+            let buf = sink_emit_bucket(&plan, &t).unwrap();
+            for row in 0..buf.nrows {
+                let k = buf.values[row * 3].as_i64();
+                let text = emit_text(&buf, buf.values[row * 3 + 1]);
+                let c = buf.values[row * 3 + 2].as_i64();
+                assert!(seen.insert((k, text), c).is_none(), "group in two buckets");
+            }
+        }
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[&(1, b"apple".to_vec())], 4);
+        assert_eq!(
+            seen[&(2, b"a-rather-long-canonical-key-way-past-eight".to_vec())],
+            2
+        );
+    }
+
+    /// GL-SINKSHAPE-1 admission positives + the fail-closed inverse: the
+    /// DIRECT (Bytes-keyed) single-text arm keeps its pass-through under
+    /// the canonical plan — verdict ADMIT and output equal to the merge
+    /// arm over the same Local (values byte-for-byte; MultiText payloads
+    /// compared through each buf's own arena) — while word plans keep word
+    /// tables and every cross pairing refuses.
+    #[test]
+    fn passthrough_admits_matching_keying_classes() {
+        let mut d = direct_worker();
+        for (text, c) in DIRECT_CORPUS {
+            bump_direct(&mut d, text, c);
+        }
+        let mut h = SinkTableHandle(d);
+        let part = h.partition_remainder();
+        let plan = SinkEmitPlan {
+            width: 8,
+            fixed: Some(4),
+            ntails: 1,
+            filter: None,
+            cols: vec![
+                SinkEmitCol::MultiText { nth: 0 },
+                SinkEmitCol::Agg { transno: 0 },
+            ],
+        };
+        assert!(
+            sink_passthrough_admits(&plan, h.table()),
+            "the DIRECT arm's Bytes table serves the canonical plan"
+        );
+        let locals = [SinkLocalView {
+            spilled: &[],
+            runs: &[],
+            remainder: Some(h.remainder_view(&part)),
+        }];
+        let combines = test_combines();
+        let mut rows = 0usize;
+        for b in 0..SINK_NBUCKETS {
+            let merged = sink_combine_bucket(b, 0, STATE_BYTES, &locals, &combines).unwrap();
+            let want = sink_emit_bucket(&plan, &merged).unwrap();
+            let got = sink_emit_bucket_passthrough(&plan, h.table(), &part, b).unwrap();
+            assert_eq!(got.nrows, want.nrows, "bucket {b} row count");
+            assert_eq!(got.nulls, want.nulls, "bucket {b} null bitmap");
+            for row in 0..got.nrows {
+                assert_eq!(
+                    emit_text(&got, got.values[row * 2]),
+                    emit_text(&want, want.values[row * 2]),
+                    "bucket {b} row {row} text"
+                );
+                assert_eq!(
+                    got.values[row * 2 + 1].as_i64(),
+                    want.values[row * 2 + 1].as_i64(),
+                    "bucket {b} row {row} agg"
+                );
+            }
+            rows += got.nrows;
+        }
+        assert_eq!(rows, 6, "DIRECT_CORPUS distinct texts");
+        // Word plan × word table = the incumbent pass-through shape.
+        let word_plan = SinkEmitPlan {
+            width: 8,
+            fixed: None,
+            ntails: 0,
+            filter: None,
+            cols: vec![SinkEmitCol::Key, SinkEmitCol::Agg { transno: 0 }],
+        };
+        let wt = mk_table(16);
+        assert!(sink_passthrough_admits(&word_plan, &wt));
+        // Cross pairings refuse fail-closed (the word-plan × Bytes-table
+        // direction is unreachable by construction today — belt).
+        assert!(!sink_passthrough_admits(&word_plan, h.table()));
     }
 
     #[test]
