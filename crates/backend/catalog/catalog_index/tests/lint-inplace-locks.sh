@@ -51,8 +51,15 @@ set -u
 
 REPO="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 cd "$REPO" || exit 2
-RG=${RG:-rg}
-command -v "$RG" >/dev/null || { echo "lint-inplace-locks: rg not found"; exit 2; }
+# POSIX grep + find only, no ripgrep: the fleet test pods do not ship rg, and a
+# lint that cannot run is a lint that silently stops guarding. (Learned the
+# expensive way -- CONFIRM take-1 red on "rg not found".) Skipping when a tool
+# is missing would be worse still: that is the vacuous pass this repo's
+# gate-blindness ledger is about, so a missing tool must FAIL, never skip.
+command -v grep >/dev/null || { echo "lint-inplace-locks: grep not found"; exit 2; }
+
+# Count matching lines in a file; always numeric, 0 when none (grep -c exits 1).
+count_in() { grep -c -- "$1" "$2" 2>/dev/null || true; }
 
 fail=0
 say() { printf '%s\n' "$*"; }
@@ -150,6 +157,7 @@ while IFS='|' read -r verdict file fn anchor note; do
     fi
     has_lock=$(printf '%s\n' "$body" | grep -c 'LockTuple(.*InplaceUpdateTupleLock' || true)
     has_unlock=$(printf '%s\n' "$body" | grep -c 'UnlockTuple(.*InplaceUpdateTupleLock' || true)
+    has_lock=${has_lock:-0}; has_unlock=${has_unlock:-0}
     case "$verdict" in
       DIVERGENT-FIXED)
         n_div=$((n_div+1))
@@ -172,8 +180,8 @@ while IFS='|' read -r want file; do
     [ -n "${want:-}" ] || continue
     censused+=("$file")
     if [ ! -f "$file" ]; then bad "CHECK3 censused file vanished: $file"; continue; fi
-    got=$("$RG" -c 'catalog_indexing::CatalogTupleUpdate' "$file" 2>/dev/null || echo 0)
-    if [ "${got:-0}" != "$want" ]; then
+    got=$(count_in 'catalog_indexing::CatalogTupleUpdate' "$file"); got=${got:-0}
+    if [ "$got" != "$want" ]; then
         bad "CHECK3 $file has ${got:-0} CatalogTupleUpdate sites, census says $want. A pg_class writer may have been added or removed: classify the delta against the C original and update the census in this script."
     fi
 done <<<"$FILECOUNTS"
@@ -182,12 +190,13 @@ done <<<"$FILECOUNTS"
 while IFS= read -r f; do
     [ -n "$f" ] || continue
     case "$f" in *tests/*|*/benches/*|*test*.rs) continue;; esac
-    "$RG" -q 'catalog_indexing::CatalogTupleUpdate' "$f" 2>/dev/null || continue
+    grep -q 'catalog_indexing::CatalogTupleUpdate' "$f" 2>/dev/null || continue
     known=0
     for c in "${censused[@]}"; do [ "$c" = "$f" ] && { known=1; break; }; done
     [ "$known" = 1 ] && continue
     bad "CHECK3 unclassified pg_class-adjacent updater: $f names pg_class and calls CatalogTupleUpdate but is not in the census. If it writes a pg_class row, check whether C's counterpart takes InplaceUpdateTupleLock and add a row; if it does not, add it with the count only."
-done < <("$RG" -l --glob '*.rs' 'RELATION_RELATION_ID|RelationRelationId' crates/ 2>/dev/null | sort)
+done < <(find crates -name '*.rs' -type f -print0 2>/dev/null \
+         | xargs -0 grep -lE 'RELATION_RELATION_ID|RelationRelationId' 2>/dev/null | sort)
 
 if [ "$fail" = 0 ]; then
     say "lint-inplace-locks: PASS ($n_div locked pg_class updaters, $n_exact C-exact-unlocked, ${#censused[@]} files counted)"
