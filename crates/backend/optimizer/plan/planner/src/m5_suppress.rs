@@ -1528,12 +1528,18 @@ fn strminmax_max_groups() -> f64 {
 /// D1, coordinator-approved): the dict-key expr-key classifier carries its
 /// OWN ceiling instead of the shared groupby_high floor — the class's
 /// engaged sink is the witnessed winner far above 4e6 (same-pod cell on the
-/// production-scale sorted bank: engaged 0.44-0.50 s vs 6.7-6.8 s at est
-/// 6.63M groups, byte parity; the class letter carries the ladder).
-/// PROVISIONAL default 12e6 = the banked cell's estimate + wobble headroom,
-/// below unladdered territory (the fix-4a ceiling precedent). Every OTHER
-/// classifier keeps the shared floor byte-for-byte. Env-overridable for
-/// recalibration ladders (`PGRUST_M5_DICTKEY_MAX_GROUPS`, > 0).
+/// production-scale sorted bank: engaged 0.44-0.50 s vs 6.7-6.8 s, byte
+/// parity; the class letter carries the ladder).
+/// PROVISIONAL default 30e6: the ceiling compares against THIS
+/// classifier's `estimate_num_groups` over the RAW computed-key clause —
+/// 19,897,461 at the banked production-scale cell (suppress-trace figure
+/// of record; the raw text key keeps passthrough NDV, so this is ~3x the
+/// plan-displayed grouped-path estimate — the two estimators do NOT
+/// agree, calibrate against the trace, not the plan). 30e6 = the trace
+/// figure + wobble headroom, below unladdered territory (the fix-4a
+/// ceiling precedent). Every OTHER classifier keeps the shared floor
+/// byte-for-byte. Env-overridable for recalibration ladders
+/// (`PGRUST_M5_DICTKEY_MAX_GROUPS`, > 0).
 fn dictkey_max_groups() -> f64 {
     static CEIL: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
     *CEIL.get_or_init(|| {
@@ -1541,7 +1547,7 @@ fn dictkey_max_groups() -> f64 {
             .ok()
             .and_then(|v| v.trim().parse::<f64>().ok())
             .filter(|v| *v > 0.0)
-            .unwrap_or(12_000_000.0)
+            .unwrap_or(30_000_000.0)
     })
 }
 
