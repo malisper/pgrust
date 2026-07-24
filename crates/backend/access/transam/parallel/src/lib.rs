@@ -621,6 +621,21 @@ pub fn set_private_shared(shared: &Arc<ParallelShared>, private: Arc<dyn Any + S
     *shared.private.lock().unwrap_or_else(|e| e.into_inner()) = Some(private);
 }
 
+/// GL-SIMPLEWEDGE-1: sever the engagement's back-edges at teardown. The
+/// arm payload (`set_private*`) holds the shared by Arc and the shared's
+/// `private` holds the payload back — a strong cycle that outlives the
+/// engagement (C has no analog: the DSM segment dies at
+/// DestroyParallelContext). Callers: DestroyParallelContext (after the
+/// workers exited — C-exact lifetime) and the pcxt-less fast ceremony's
+/// RAII join guard (its Destroy-equivalent). Idempotent.
+pub fn clear_engagement_refs(shared: &Arc<ParallelShared>) {
+    *shared.private.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *shared
+        .standing_driver
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = None;
+}
+
 /// [`set_standing_driver`] for a pcxt-less shared ([`statement_task_shared`]).
 pub fn set_standing_driver_shared(shared: &Arc<ParallelShared>, driver: standing::StandingDriver) {
     *shared
@@ -1078,6 +1093,13 @@ pub fn DestroyParallelContext(id: ParallelContextId) -> PgResult<()> {
     g::HoldInterrupts();
     let result = wait_for_workers_to_exit(handles);
     g::ResumeInterrupts();
+    // GL-SIMPLEWEDGE-1: the arm payload stored by set_private holds this
+    // shared by Arc while `private` holds the payload back — sever the
+    // cycle now that every worker has exited (C-exact lifetime: the DSM
+    // segment dies at DestroyParallelContext).
+    if let Some(shared) = pcxt.shared.as_ref() {
+        clear_engagement_refs(shared);
+    }
     result
 }
 
