@@ -515,3 +515,58 @@ fn subxact_cleanup_drops_only_deeper_scans() {
     }
     hash_destroy(table);
 }
+
+// GL-VACGUARD-1 row 5: the freeList spinlock's contended path must go through
+// C's perform_spin_delay backoff (s_lock.c:97), not an unbounded busy-spin.
+//
+// The seam IS the observation point, which is what makes this deterministic: the
+// stub below is the only thing that ever releases the lock word, so a build that
+// backs off completes and a build that pure-spins never does. Before the fix the
+// counter reads 0 and the acquire never returns; the bounded join turns that
+// hang into a reported failure instead of a stuck test binary.
+//
+// The stuck-spinlock valve itself (NUM_DELAYS, C's `PANIC: stuck spinlock
+// detected`) is deliberately NOT exercised here: with MIN_DELAY_USEC=1000 growing
+// to a 1s cap, 1000 delays is several minutes of wall time. It is covered by
+// construction -- the fix routes through the same perform_spin_delay that owns
+// the valve, which is exactly what this test proves.
+#[test]
+fn freelist_spin_uses_perform_spin_delay_backoff() {
+    use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+
+    static DELAY_CALLS: AtomicU32 = AtomicU32::new(0);
+    static LOCKWORD: AtomicI32 = AtomicI32::new(0);
+
+    // Seams are set-once per process; this is the only test that sets it.
+    s_lock_seams::perform_spin_delay::set(|_status| {
+        DELAY_CALLS.fetch_add(1, Ordering::Relaxed);
+        // Stand in for the real holder releasing: the ONLY release in this test.
+        LOCKWORD.store(0, Ordering::Release);
+    });
+    s_lock_seams::finish_spin_delay::set(|_status| {});
+
+    // Hold the lock, then have a waiter contend for it.
+    LOCKWORD.store(1, Ordering::Release);
+    let handle = std::thread::spawn(|| {
+        // SAFETY: LOCKWORD is a 'static AtomicI32; nothing else writes it once
+        // the waiter starts except the delay stub above.
+        unsafe { super::SpinLockAcquire(&LOCKWORD as *const AtomicI32 as *mut AtomicI32) };
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !handle.is_finished() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        handle.is_finished(),
+        "contended acquire never returned: the spin path is not calling \
+         perform_spin_delay (delay calls: {})",
+        DELAY_CALLS.load(Ordering::Relaxed)
+    );
+    handle.join().expect("waiter panicked");
+    assert!(
+        DELAY_CALLS.load(Ordering::Relaxed) >= 1,
+        "contended acquire completed without any backoff call — it busy-spun"
+    );
+    assert_eq!(LOCKWORD.load(Ordering::Relaxed), 1, "acquire must leave the lock held");
+}
