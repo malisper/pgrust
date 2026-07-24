@@ -141,11 +141,16 @@ fn side_stats<'a, 'mcx>(vardata: &'a VariableStatData<'mcx>) -> PgResult<SideSta
     if vardata.stats.is_some() {
         s.nullfrac = vardata.nullfrac();
         if let Some(mslot) = vardata.slot(STATISTIC_KIND_MCV, 0) {
+            // Torn slot: only the paired (value, frequency) prefix is usable
+            // (C's nvalues bound assumes never-torn arrays from the pinned
+            // statsTuple). Equal lengths on well-formed slots make this C's
+            // Min(nvalues, MAX_CONSIDERED_ELEMS) exactly.
             let values = mslot.values()?;
             let numbers = mslot.numbers()?;
-            s.mcv_length = (values.len() as i32).min(MAX_CONSIDERED_ELEMS);
+            let paired = values.len().min(numbers.len());
+            s.mcv_length = (paired as i32).min(MAX_CONSIDERED_ELEMS);
             s.sumcommon = mcv_population(&numbers[..s.mcv_length as usize]);
-            s.mcv = Some((values, numbers));
+            s.mcv = Some((&values[..paired], &numbers[..paired]));
         }
         if let Some(hslot) = vardata.slot(STATISTIC_KIND_HISTOGRAM, 0) {
             s.hist = Some(hslot.values()?);
@@ -311,10 +316,13 @@ fn inet_mcv_join_sel(
 ) -> PgResult<f64> {
     let mut selec = 0.0f64;
     let mut proc = opproc_for(operator)?;
-    for (i, &v1) in mcv1_values.iter().enumerate() {
-        for (j, &v2) in mcv2_values.iter().enumerate() {
+    // Paired iteration keeps the helper total on torn inputs (values without
+    // a frequency contribute nothing); identical to the C index loops when
+    // the arrays agree.
+    for (&v1, &n1) in mcv1_values.iter().zip(mcv1_numbers.iter()) {
+        for (&v2, &n2) in mcv2_values.iter().zip(mcv2_numbers.iter()) {
             if types_fmgr::function_call2_coll(&mut proc, 0, v1, v2)?.as_bool() {
-                selec += mcv1_numbers[i] as f64 * mcv2_numbers[j] as f64;
+                selec += n1 as f64 * n2 as f64;
             }
         }
     }
@@ -329,8 +337,9 @@ fn inet_mcv_hist_sel(
 ) -> f64 {
     let opr_codenum = -opr_codenum;
     let mut selec = 0.0f64;
-    for (i, &v) in mcv_values.iter().enumerate() {
-        selec += mcv_numbers[i] as f64 * inet_hist_value_sel(hist_values, v, opr_codenum);
+    // Paired iteration: torn-slot rule, see inet_mcv_join_sel.
+    for (&v, &n) in mcv_values.iter().zip(mcv_numbers.iter()) {
+        selec += n as f64 * inet_hist_value_sel(hist_values, v, opr_codenum);
     }
     selec
 }
