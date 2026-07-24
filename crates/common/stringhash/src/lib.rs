@@ -14,12 +14,15 @@
 //! * The empty string and strings with a trailing NUL byte are not
 //!   representable as padded integers (no way to encode the length), so they
 //!   route to a dedicated slot / the long-tail table — exactly CH's rule.
-//! * Packing shifts trailing garbage out of an 8-byte load; for the ≤8-byte
-//!   bucket the load may extend past the key, guarded by CH's half-page
-//!   trick (forward 8-byte reads only when `ptr & 2048 == 0`, i.e. never
-//!   within 7 bytes of a 4 KiB/16 KiB page end; otherwise read the 8 bytes
-//!   ENDING at the key's last byte, which stays in-page because the key
-//!   starts in the page's second half).
+//! * Packing assembles the padded integer from loads that stay INSIDE the
+//!   key's bytes. CH's half-page trick (an 8-byte load past the key, argued
+//!   safe by page arithmetic) is deliberately NOT used: reading outside the
+//!   referent is UB in Rust however page-safe the address is, and the
+//!   over-read lands in adjacent live data (ASan global-buffer-overflow,
+//!   GL-TESTRIGS-1 F-R1-3). The ≤8-byte bucket instead uses the two
+//!   overlapped in-bounds halves idiom (wyhash's tail shape): two u32 loads
+//!   for 4..=8 bytes, three byte loads for 1..=3 — same padded value, no
+//!   bytes outside the key ever touched.
 //! * Hash: hardware CRC32C chains for the inline buckets (CH's
 //!   `StringHashTableHash`), a 64-bit folded-multiply hash (wyhash-style)
 //!   for the long tail (CH uses CityHash64 there).
@@ -320,19 +323,27 @@ fn alloc_uninit_bytes(n: usize) -> Box<[u8]> {
 }
 
 /// Pack a 1..=8-byte key (no trailing NUL) into a u64, zero-padded high.
-/// The forward load may read up to 7 bytes past the key; CH's half-page
-/// guard makes that never cross a page boundary (see module docs).
+/// Every load stays inside the key: two overlapped u32 halves for 4..=8
+/// bytes, three byte loads for 1..=3 (wyhash's tail shape). The overlapped
+/// bits agree by construction (same memory), so OR reassembles the exact
+/// little-endian zero-padded value the old 8-byte load produced — without
+/// the load-past-the-key UB it carried (GL-TESTRIGS-1 F-R1-3; the "safe by
+/// page arithmetic" over-read is still a read of adjacent live objects).
 #[inline(always)]
 fn pack8(s: &[u8]) -> u64 {
     let sz = s.len();
     debug_assert!((1..=8).contains(&sz) && s[sz - 1] != 0);
-    let shift = ((8 - sz) * 8) as u32;
     let p = s.as_ptr();
     unsafe {
-        if (p as usize) & 2048 == 0 {
-            load8(p) & (!0u64 >> shift)
+        if sz >= 4 {
+            let lo = u32::from_le((p as *const u32).read_unaligned()) as u64;
+            let hi = u32::from_le((p.add(sz - 4) as *const u32).read_unaligned()) as u64;
+            lo | (hi << ((sz - 4) * 8))
         } else {
-            load8(p.add(sz).sub(8)) >> shift
+            let b0 = *p as u64;
+            let mid = *p.add(sz >> 1) as u64;
+            let last = *p.add(sz - 1) as u64;
+            b0 | (mid << ((sz >> 1) * 8)) | (last << ((sz - 1) * 8))
         }
     }
 }
@@ -1452,6 +1463,21 @@ impl BytesDedup {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    /// F-R1-3 pin: pack8 == the little-endian zero-padded key value, for
+    /// every length, with the key at the END of its own heap allocation —
+    /// any load past the key is a heap-buffer-overflow under the sanitizer
+    /// rig (the disease shape: the old 8-byte load read past short keys).
+    #[test]
+    fn pack8_matches_zero_padded_le_for_all_lengths() {
+        for sz in 1..=8usize {
+            let v: Vec<u8> = (1..=sz as u8).collect();
+            let boxed: Box<[u8]> = v.clone().into_boxed_slice();
+            let mut want = [0u8; 8];
+            want[..sz].copy_from_slice(&v);
+            assert_eq!(pack8(&boxed), u64::from_le_bytes(want), "sz={sz}");
+        }
+    }
 
     /// dedupsub I3: a projection reserve mid-stream must lose nothing (a
     /// duplicate re-insert of every held key returns false), keep dedup
