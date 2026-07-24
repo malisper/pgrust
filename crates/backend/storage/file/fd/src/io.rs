@@ -1,4 +1,4 @@
-use std::io::{IoSlice, IoSliceMut};
+use std::io::IoSliceMut;
 use std::os::fd::RawFd;
 
 use ::vfs::VfsFd;
@@ -7,7 +7,7 @@ use ::elog::ereport;
 use ::types_core::BLCKSZ;
 use ::types_error::{PgResult, ERRCODE_CONFIGURATION_LIMIT_EXCEEDED, ERROR, LOG};
 use ::types_resowner::ResourceOwner;
-use ::types_storage::File;
+use ::types_storage::{File, WriteChunk};
 
 use crate::vfd::{
     self, cpath, get_errno, loc, set_errno, with_fd, FdState, RawOf, FD_DELETE_AT_CLOSE,
@@ -31,8 +31,18 @@ fn pg_preadv(fd: RawFd, iov: &mut [IoSliceMut<'_>], offset: i64) -> isize {
     vfs::preadv(fd, iov_c, offset as libc::off_t)
 }
 
-fn pg_pwritev(fd: RawFd, iov: &[IoSlice<'_>], offset: i64) -> isize {
-    // SAFETY: IoSlice is ABI-compatible with iovec; fd is live.
+// WriteChunk is #[repr(C)] { base, len }, i.e. iovec's layout — the same
+// reinterpretation pg_preadv does on IoSliceMut. Unlike IoSlice it makes no
+// immutability claim about the bytes, which is what the buffer pool's
+// SHARE-locked flush path needs (types_storage::writechunk).
+const _: () = assert!(
+    core::mem::size_of::<WriteChunk<'_>>() == core::mem::size_of::<libc::iovec>()
+        && core::mem::align_of::<WriteChunk<'_>>() == core::mem::align_of::<libc::iovec>()
+);
+
+fn pg_pwritev(fd: RawFd, iov: &[WriteChunk<'_>], offset: i64) -> isize {
+    // SAFETY: WriteChunk is ABI-compatible with iovec (asserted above); fd is
+    // live. The kernel, not Rust, reads the bytes.
     let iov_c = unsafe {
         std::slice::from_raw_parts(iov.as_ptr().cast::<libc::iovec>(), iov.len())
     };
@@ -336,7 +346,7 @@ pub fn FileStartReadV(file: File, iovcnt: i32, offset: i64, _wait_event_info: u3
 
 pub fn FileWriteV(
     file: File,
-    iov: &[IoSlice<'_>],
+    iov: &[WriteChunk<'_>],
     offset: i64,
     wait_event_info: u32,
 ) -> PgResult<isize> {
@@ -405,7 +415,7 @@ pub fn FileWriteV(
 }
 
 pub fn FileWrite(file: File, buf: &[u8], offset: i64, wait_event_info: u32) -> PgResult<isize> {
-    let iov = [IoSlice::new(buf)];
+    let iov = [WriteChunk::from_slice(buf)];
     FileWriteV(file, &iov, offset, wait_event_info)
 }
 
@@ -475,13 +485,13 @@ pub fn pg_pwrite_zeros(fd: RawFd, size: usize, mut offset: i64) -> isize {
     let zbuffer = &ZBUFFER.0;
     let mut remaining = size;
     let mut total_written: isize = 0;
-    let mut iov: Vec<IoSlice<'_>> = Vec::with_capacity(PG_IOV_MAX);
+    let mut iov: Vec<WriteChunk<'_>> = Vec::with_capacity(PG_IOV_MAX);
 
     while remaining > 0 {
         iov.clear();
         while iov.len() < PG_IOV_MAX && remaining > 0 {
             let this_len = remaining.min(BLCKSZ);
-            iov.push(IoSlice::new(&zbuffer[..this_len]));
+            iov.push(WriteChunk::from_slice(&zbuffer[..this_len]));
             remaining -= this_len;
         }
 
@@ -496,14 +506,14 @@ pub fn pg_pwrite_zeros(fd: RawFd, size: usize, mut offset: i64) -> isize {
     total_written
 }
 
-fn pg_pwritev_with_retry(fd: RawFd, iov: &[IoSlice<'_>], mut offset: i64) -> isize {
+fn pg_pwritev_with_retry(fd: RawFd, iov: &[WriteChunk<'_>], mut offset: i64) -> isize {
     if iov.len() > PG_IOV_MAX {
         set_errno(libc::EINVAL);
         return -1;
     }
 
-    let mut iov_copy: Vec<IoSlice<'_>> = iov.to_vec();
-    let mut cur: &mut [IoSlice<'_>] = &mut iov_copy;
+    let mut iov_copy: Vec<WriteChunk<'_>> = iov.to_vec();
+    let mut cur: &mut [WriteChunk<'_>] = &mut iov_copy;
     let mut sum: isize = 0;
 
     loop {
@@ -523,9 +533,9 @@ fn pg_pwritev_with_retry(fd: RawFd, iov: &[IoSlice<'_>], mut offset: i64) -> isi
 }
 
 fn compute_remaining_iovec<'a, 'b>(
-    iov: &'a mut [IoSlice<'b>],
+    iov: &'a mut [WriteChunk<'b>],
     mut written: usize,
-) -> &'a mut [IoSlice<'b>] {
+) -> &'a mut [WriteChunk<'b>] {
     let total = iov.len();
     let mut start = 0usize;
     while start < total {
@@ -542,11 +552,9 @@ fn compute_remaining_iovec<'a, 'b>(
     }
     let tail = &mut iov[start..];
     if written > 0 {
-        let rest = tail[0].len() - written;
-        // SAFETY: shrinking forward within the same backing buffer, which
-        // outlives this call.
-        let ptr = unsafe { tail[0].as_ptr().add(written) };
-        tail[0] = IoSlice::new(unsafe { std::slice::from_raw_parts(ptr, rest) });
+        // Shrinking forward within the same backing image, which outlives
+        // this call.
+        tail[0] = tail[0].advance(written);
     }
     tail
 }

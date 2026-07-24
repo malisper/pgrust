@@ -1,6 +1,6 @@
 use types_core::{BlockNumber, ForkNumber};
 use types_error::PgResult;
-use types_storage::RelFileLocatorBackend;
+use types_storage::{RelFileLocatorBackend, WriteChunk};
 
 seam_core::seam!(
     pub fn smgr_release_rel_locator(rlocator: RelFileLocatorBackend) -> PgResult<()>
@@ -112,12 +112,15 @@ seam_core::seam!(
 
 seam_core::seam!(
     // smgrwrite(smgropen(rlocator), forknum, blocknum, buffer, skipFsync)
-    // (smgr.c); buffer is exactly BLCKSZ.
-    pub fn smgr_write(
+    // (smgr.c); buffer is exactly BLCKSZ. WriteChunk, not &[u8]: the buffer
+    // pool's flush path holds only a SHARE content lock and hint-bit setters
+    // mutate the same shared image under it, so an immutable slice would be
+    // a false promise to the optimizer (types_storage::writechunk).
+    pub fn smgr_write<'a>(
         rlocator: RelFileLocatorBackend,
         forknum: ForkNumber,
         blocknum: BlockNumber,
-        buffer: &[u8],
+        buffer: WriteChunk<'a>,
         skip_fsync: bool,
     ) -> PgResult<()>
 );

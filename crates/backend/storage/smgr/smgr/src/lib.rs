@@ -16,7 +16,7 @@ use ::types_rel::RelationData;
 use ::types_storage::file::File;
 use ::types_storage::smgr::{MdRelnState, SmgrHandle, SMGR_NFORKS};
 use ::types_storage::sync::{FileTag, FileTagOpResult};
-use ::types_storage::{RelFileLocator, RelFileLocatorBackend};
+use ::types_storage::{RelFileLocator, RelFileLocatorBackend, WriteChunk};
 
 // smgrsw[]: closed set; a new manager is a new variant (rule 4).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -405,7 +405,7 @@ pub fn smgrwrite(
     buffer: &[u8],
     skip_fsync: bool,
 ) -> PgResult<()> {
-    smgrwritev(key, forknum, blocknum, &[buffer], skip_fsync)
+    smgrwritev(key, forknum, blocknum, &[WriteChunk::from_slice(buffer)], skip_fsync)
 }
 
 pub fn smgrreadv(
@@ -423,7 +423,7 @@ pub fn smgrwritev(
     key: RelFileLocatorBackend,
     forknum: ForkNumber,
     blocknum: BlockNumber,
-    buffers: &[&[u8]],
+    buffers: &[WriteChunk<'_>],
     skip_fsync: bool,
 ) -> PgResult<()> {
     reln(key, |r| match r.which {

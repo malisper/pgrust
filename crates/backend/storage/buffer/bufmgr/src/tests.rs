@@ -610,6 +610,9 @@ fn setup_write_seams() {
     ONCE.call_once(|| {
         smgr_seams::smgr_write::set(|rlocator, forknum, blocknum, buffer, _skip_fsync| {
             assert_eq!(buffer.len(), BLCKSZ);
+            // SAFETY: single-threaded unit test — no other backend exists to
+            // write the image (the excluding mechanism WriteChunk asks for).
+            let buffer = unsafe { buffer.as_slice_unchecked() };
             let checksum = u16::from_ne_bytes([buffer[8], buffer[9]]);
             WRITES.lock().unwrap().push((
                 rlocator.locator.spcOid,
@@ -751,6 +754,9 @@ fn checksum_copy_leaves_shared_page_untouched() {
     let orig = *page;
     crate::write::with_checksummed_page(page.as_ptr(), 7, |out| {
         assert_ne!(out.as_ptr(), page.as_ptr(), "checksummed image must be a private copy");
+        assert_eq!(out.len(), BLCKSZ);
+        // SAFETY: single-threaded unit test; the image is this test's Box.
+        let out = unsafe { out.as_slice_unchecked() };
         let mut want = orig;
         want[8..10].fill(0);
         let sum = crate::write::page_checksum_for_tests(&want, 7);
@@ -763,6 +769,52 @@ fn checksum_copy_leaves_shared_page_untouched() {
     let newpage = Box::new([0u8; BLCKSZ]);
     crate::write::with_checksummed_page(newpage.as_ptr(), 7, |out| {
         assert_eq!(out.as_ptr(), newpage.as_ptr());
+    });
+}
+
+// The aliasing witness for the write path's no-copy arm. FlushBuffer runs with
+// only a SHARE content lock, and SetHintBits -> MarkBufferDirtyHint mutates
+// t_infomask in the same shared image under that same SHARE lock, so the image
+// handed to smgr_write must travel in a type that admits a concurrent writer.
+//
+// This test is the gate: under `cargo miri test` the pre-fix shape (an &[u8]
+// minted over the page) is reported as "Data race detected between (1) retag
+// read ... and (2) non-atomic write" — a retag counts as an access to the race
+// detector precisely because it licenses speculative reads — even though
+// nothing in Rust ever loads the bytes (the kernel does, via pwritev). With
+// WriteChunk no reference is minted and Miri is clean. Natively the test is a
+// cheap functional assertion that the arm stays copy-free.
+#[test]
+fn shared_page_write_admits_a_concurrent_hint_bit_writer() {
+    struct SharedBase(*mut u8);
+    // The page is a real shared buffer-pool image in production; here the
+    // pointer is just carried to the writer thread.
+    unsafe impl Send for SharedBase {}
+
+    // pd_upper == 0, so PageIsNew selects the no-copy arm without needing the
+    // data_checksums seam (`||` short-circuits before the seam call).
+    let mut page = Box::new([0u8; BLCKSZ]);
+    let base = page.as_mut_ptr();
+    let writing = std::sync::atomic::AtomicBool::new(false);
+
+    std::thread::scope(|s| {
+        let handoff = SharedBase(base);
+        s.spawn(|| {
+            let handoff = handoff;
+            writing.store(true, Ordering::Relaxed);
+            // SetHintBits' `t_infomask |= infomask`, at tuple-ish strides.
+            for i in 0..64usize {
+                // SAFETY: within the BLCKSZ image, which outlives the scope.
+                unsafe { *handoff.0.add(24 + i * 8) |= 0x40 };
+            }
+        });
+        while !writing.load(Ordering::Relaxed) {
+            std::hint::spin_loop();
+        }
+        let (ptr, len) =
+            crate::write::with_checksummed_page(base, 0, |chunk| (chunk.as_ptr(), chunk.len()));
+        assert_eq!(ptr, base as *const u8, "the no-copy arm must write the live image");
+        assert_eq!(len, BLCKSZ);
     });
 }
 

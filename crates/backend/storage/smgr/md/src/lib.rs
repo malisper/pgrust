@@ -5,7 +5,7 @@
 //! (`RELSEG_SIZE`) segment fan-out per fork over fd.c VFDs. State (`MdRelnState`)
 //! lives in smgr's handle cache and is threaded in by the dispatch layer.
 
-use std::io::{IoSlice, IoSliceMut};
+use std::io::IoSliceMut;
 use std::mem::MaybeUninit;
 
 use ::elog::{ereport, ErrorBuilder};
@@ -23,7 +23,7 @@ use ::types_storage::smgr::{
     EXTENSION_FAIL, EXTENSION_RETURN_NULL, PG_IOV_MAX, RELSEG_SIZE, SMGR_NFORKS,
 };
 use ::types_storage::sync::{FileTag, FileTagOpResult, SyncRequestHandler, SyncRequestType};
-use ::types_storage::{RelFileLocator, RelFileLocatorBackend};
+use ::types_storage::{RelFileLocator, RelFileLocatorBackend, WriteChunk};
 
 pub mod nblocks_cache;
 
@@ -356,7 +356,7 @@ fn mdextend_inner(
     let seekpos = BLCKSZ_I64 * (blocknum % RELSEG_SIZE) as i64;
     debug_assert!(seekpos < BLCKSZ_I64 * RELSEG_SIZE as i64);
 
-    let iov = [IoSlice::new(buffer)];
+    let iov = [WriteChunk::from_slice(buffer)];
     let nbytes = fd::FileWriteV(v.mdfd_vfd, &iov, seekpos, WAIT_EVENT_DATA_FILE_EXTEND)?;
     if nbytes != BLCKSZ as isize {
         if nbytes < 0 {
@@ -649,10 +649,10 @@ fn with_iov_mut<R>(
     Some(f(iov_init))
 }
 
-fn with_iov<R>(
-    seg_bufs: &[&[u8]],
+fn with_iov<'a, R>(
+    seg_bufs: &[WriteChunk<'a>],
     skip: usize,
-    f: impl FnOnce(&[IoSlice<'_>]) -> R,
+    f: impl FnOnce(&[WriteChunk<'a>]) -> R,
 ) -> Option<R> {
     let mut skip = skip;
     let mut start = 0usize;
@@ -664,17 +664,16 @@ fn with_iov<R>(
         return None;
     }
     debug_assert!(seg_bufs.len() - start <= PG_IOV_MAX);
-    let mut iov: [MaybeUninit<IoSlice<'_>>; PG_IOV_MAX] =
+    let mut iov: [MaybeUninit<WriteChunk<'a>>; PG_IOV_MAX] =
         [const { MaybeUninit::uninit() }; PG_IOV_MAX];
     let mut n = 0usize;
     for (i, b) in seg_bufs[start..].iter().enumerate() {
-        let s: &[u8] = if i == 0 { &b[skip..] } else { *b };
-        iov[n] = MaybeUninit::new(IoSlice::new(s));
+        iov[n] = MaybeUninit::new(if i == 0 { b.advance(skip) } else { *b });
         n += 1;
     }
-    // SAFETY: the first n entries were just initialized; IoSlice has no Drop.
+    // SAFETY: the first n entries were just initialized; WriteChunk has no Drop.
     let iov_init =
-        unsafe { core::slice::from_raw_parts(iov.as_ptr().cast::<IoSlice<'_>>(), n) };
+        unsafe { core::slice::from_raw_parts(iov.as_ptr().cast::<WriteChunk<'a>>(), n) };
     Some(f(iov_init))
 }
 
@@ -783,7 +782,7 @@ pub fn mdwritev(
     st: &mut MdRelnState,
     forknum: ForkNumber,
     blocknum: BlockNumber,
-    buffers: &[&[u8]],
+    buffers: &[WriteChunk<'_>],
     skip_fsync: bool,
 ) -> PgResult<()> {
     let mut blocknum = blocknum;
@@ -1635,7 +1634,8 @@ mod tests {
 
         let ra = [1u8; 4];
         let rb = [2u8; 4];
-        let rbufs: [&[u8]; 2] = [&ra, &rb];
+        let rbufs: [WriteChunk<'_>; 2] =
+            [WriteChunk::from_slice(&ra), WriteChunk::from_slice(&rb)];
         let n = with_iov(&rbufs, 3, |iov| {
             assert_eq!(iov.len(), 2);
             assert_eq!(iov[0].len(), 1);

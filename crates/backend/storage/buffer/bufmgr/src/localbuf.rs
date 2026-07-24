@@ -255,7 +255,15 @@ pub(crate) fn FlushLocalBuffer(buffer: Buffer) -> PgResult<()> {
         backend: init_small::globals::MyProcNumber(),
     };
     let io_start = pgstat_prepare_io_time(crate::gucs::track_io_timing());
-    smgr_seams::smgr_write::call(reln, tag.forkNum, tag.blockNum, &page[..], false)?;
+    // Local buffers are this thread's private blocks (the debug_assert above
+    // is the pin), so an exclusive-image chunk is exactly right here.
+    smgr_seams::smgr_write::call(
+        reln,
+        tag.forkNum,
+        tag.blockNum,
+        types_storage::WriteChunk::from_slice(&page[..]),
+        false,
+    )?;
     pgstat_count_io_op_time(
         IOObject::TempRelation,
         IOContext::IOCONTEXT_NORMAL,

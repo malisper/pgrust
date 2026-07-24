@@ -22,6 +22,7 @@ pub mod smgr;
 pub mod storage;
 pub mod sync;
 pub mod waiteventset;
+pub mod writechunk;
 
 pub use file::*;
 pub use inval::*;
@@ -29,3 +30,4 @@ pub use lock::*;
 pub use relfilelocator::*;
 pub use sinval::*;
 pub use storage::*;
+pub use writechunk::WriteChunk;
