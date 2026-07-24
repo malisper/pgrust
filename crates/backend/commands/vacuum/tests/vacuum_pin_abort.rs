@@ -100,6 +100,9 @@ fn install_smgr_disk() {
         Ok(())
     });
     smgr_seams::smgr_write::set(|_loc, fork, blocknum, buffer, _skip_fsync| {
+        // SAFETY: single-threaded unit test — no other backend exists to write
+        // the image (the excluding mechanism WriteChunk asks for).
+        let buffer = unsafe { buffer.as_slice_unchecked() };
         with_disk(|d| {
             let f = d.fork(fork).as_mut().expect("smgr_write on missing fork");
             f[blocknum as usize].copy_from_slice(buffer);

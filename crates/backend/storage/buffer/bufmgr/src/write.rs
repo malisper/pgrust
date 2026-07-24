@@ -251,37 +251,54 @@ thread_local! {
     static PAGE_COPY: RefCell<PageCopy> = const { RefCell::new(PageCopy([0; BLCKSZ])) };
 }
 
+// PageSetChecksumCopy / the no-checksum straight write (bufpage.c), over a
+// page image that is LIVE SHARED MEMORY: the flush path holds only a SHARE
+// content lock (every FlushBuffer caller here takes LW_SHARED), and
+// SetHintBits mutates t_infomask in this same image under that same SHARE
+// lock, then calls MarkBufferDirtyHint. So the image must be handled through
+// a type that permits a concurrent writer: WriteChunk, whose bytes are read
+// only by the kernel via the iovec it lowers to (types_storage::writechunk
+// carries the full argument). C's contract is identical and its `char *`
+// says nothing, which is why the two arms differ from C only in typing.
 pub(crate) fn with_checksummed_page<R>(
     src: *const u8,
     blkno: BlockNumber,
-    f: impl FnOnce(&[u8]) -> R,
+    f: impl FnOnce(types_storage::WriteChunk<'_>) -> R,
 ) -> R {
-    // PageIsNew: pd_upper (offset 14) == 0.
+    // PageIsNew: pd_upper (offset 14) == 0. This read is NOT part of the
+    // concurrent-write problem: the two writers that run under a SHARE
+    // content lock touch t_infomask (SetHintBits) and pd_lsn bytes 0..8
+    // (MarkBufferDirtyHint, under the buffer header lock), never pd_upper,
+    // and every writer of pd_upper holds the content lock EXCLUSIVE, which
+    // our SHARE lock excludes.
     // SAFETY: caller holds a pin; the page image is BLCKSZ bytes.
     let is_new = unsafe {
         u16::from_ne_bytes([*src.add(14), *src.add(15)]) == 0
     };
     if is_new || !transam_xlog_seams::data_checksums_enabled::call() {
-        // SAFETY: as above; the slice lives for the closure only. The &[u8]
-        // additionally requires NO concurrent writer, true today only
-        // because hint-bit writes don't exist (MarkBufferDirtyHint is a
-        // panic stub). C writes the live shared page here and tolerates
-        // torn hint bits (harmless without checksums); Rust cannot express
-        // that as a slice — the hint-bit lane MUST flip this arm to a
-        // raw-ptr copy into PAGE_COPY when it lands.
-        return f(unsafe { core::slice::from_raw_parts(src, BLCKSZ) });
+        // Straight write of the live shared image, as C does: no copy, no
+        // checksum to invalidate, and a hint bit landing mid-write is
+        // tolerated by design (the page carries no checksum to tear).
+        // SAFETY: src is readable for BLCKSZ under the caller's pin and the
+        // chunk does not outlive the closure. A concurrent hint-bit writer
+        // is permitted: nothing reads these bytes through Rust.
+        return f(unsafe { types_storage::WriteChunk::from_shared(src, BLCKSZ) });
     }
     PAGE_COPY.with(|c| {
         let mut copy = c.borrow_mut();
-        // SAFETY: distinct buffers; src stays valid under the caller's pin;
-        // no concurrent writer while MarkBufferDirtyHint stays a panic stub
-        // (once hint-bit writers mutate under share lock, this must become
-        // a race-tolerant copy — C's memcpy accepts the race by design).
+        // SAFETY: distinct buffers; src stays valid under the caller's pin.
+        // This copy IS C's memcpy in PageSetChecksumCopy, including its
+        // tolerance of a hint bit changing mid-copy: the checksum is computed
+        // over whatever snapshot lands, and the shared page is left alone so
+        // no torn value is ever published. (This one racing read is the
+        // residual the type cannot remove — a formally race-free copy needs
+        // the hint-bit *writer* to be atomic too, which is a page-memory
+        // typing change well outside this seam.)
         unsafe { core::ptr::copy_nonoverlapping(src, copy.0.as_mut_ptr(), BLCKSZ) };
         copy.0[8..10].copy_from_slice(&0u16.to_ne_bytes());
         let sum = checksum::page_checksum(&copy.0, blkno);
         copy.0[8..10].copy_from_slice(&sum.to_ne_bytes());
-        f(&copy.0)
+        f(types_storage::WriteChunk::from_slice(&copy.0))
     })
 }
 

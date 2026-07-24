@@ -60,9 +60,17 @@ fn RelationCopyStorageUsingBuffer(
 
         init_small::globals::StartCriticalSection();
 
-        // SAFETY: both pages are pinned buffer-pool slots; dst is exclusively
-        // locked (RBM_ZERO_AND_LOCK), src share-locked, so the images are
-        // stable BLCKSZ blocks for the copy.
+        // SAFETY: both pages are pinned buffer-pool slots, BLCKSZ each; dst is
+        // exclusively locked (RBM_ZERO_AND_LOCK) so nothing else writes it.
+        // src is only SHARE-locked, which does NOT make it stable: hint-bit
+        // setters mutate t_infomask under a share lock, and MarkBufferDirtyHint
+        // can set pd_lsn. That is C's contract too — RelationCopyStorageUsingBuffer
+        // memcpys a share-locked page, and a hint bit landing mid-copy is
+        // dropped rather than torn, because the copy is WAL-logged (or the
+        // relation is not WAL-logged) and hint bits are recoverable by
+        // definition. Raw pointers, not slices: an &[u8] here would additionally
+        // promise the optimizer that the source cannot change, which is false
+        // (see types_storage::writechunk for the same argument on the write path).
         unsafe {
             core::ptr::copy_nonoverlapping(
                 BufferGetPagePtr(src_buf).as_ptr(),
